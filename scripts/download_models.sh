@@ -7,8 +7,8 @@ set +e
 
 # Default model list (model_id:filename format)
 DEFAULT_MODELS=(
-    "williamljz/test2-gguf:mmproj_BF16.gguf"
-    "williamljz/test2-gguf:V5_Q4_0.gguf"
+    "xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    "xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:MiMo-VL-Miloco-7B_Q4_0.gguf"
     "Qwen/Qwen3-8B-GGUF:Qwen3-8B-Q4_K_M.gguf"
 )
 
@@ -458,7 +458,7 @@ Options:
 
 Model Entries:
   Each model entry must be in format: model_id:filename
-  Example: williamljz/test2-gguf:mmproj_BF16.gguf
+  Example: xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:MiMo-VL-Miloco-7B_Q4_0.gguf
 
   If no model entries are provided, default models will be used.
 
@@ -470,16 +470,17 @@ Examples:
   $0 --source huggingface
   
   # Download specific model
-  $0 williamljz/test2-gguf:mmproj_BF16.gguf
+  $0 xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:MiMo-VL-Miloco-7B_Q4_0.gguf
   
   # Download multiple models
-  $0 williamljz/test2-gguf:mmproj_BF16.gguf williamljz/test2-gguf:V5_Q4_0.gguf
+  $0 xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:mmproj-MiMo-VL-Miloco-7B_BF16.gguf \
+  xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:MiMo-VL-Miloco-7B_Q4_0.gguf
   
   # Specify download directory
-  $0 --target /path/to/models williamljz/test2-gguf:mmproj_BF16.gguf
+  $0 --target /path/to/models xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:MiMo-VL-Miloco-7B_Q4_0.gguf
   
   # Disable auto-install dependencies
-  $0 --auto-install false williamljz/test2-gguf:mmproj_BF16.gguf
+  $0 --auto-install false xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF:MiMo-VL-Miloco-7B_Q4_0.gguf
 
 EOF
 }
