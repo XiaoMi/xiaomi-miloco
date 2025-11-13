@@ -1018,7 +1018,7 @@ install_service(){
         sed -i "s/^AI_ENGINE_PORT=.*/AI_ENGINE_PORT=${AI_ENGINE_PORT}/" "${INSTALL_FULL_DIR}/.env"
     fi
     if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
-        sed -i 's/^DOCKER_REPO=ghcr\.io\//#DOCKER_REPO=ghcr.io\//' "$FILE"
+        sed -i 's/^DOCKER_REPO=ghcr\.io\//#DOCKER_REPO=ghcr.io\//' "${INSTALL_FULL_DIR}/.env"
     fi
     
     if [ "${INSTALL_MODE}" == "full" ]; then
