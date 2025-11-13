@@ -23,8 +23,8 @@ app:
 models:
   MiMo-VL-7B-SFT:Q4_0:
     # Basic settings
-    model_path: "/models/MiMo-VL-7B/MiMo-VL-7B-SFT.gguf" # Model path
-    mmproj_path: "/models/MiMo-VL-7B/mmproj-MiMo-VL-7B-SFT.gguf" # VIT model path
+    model_path: "/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" # Model path
+    mmproj_path: "/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" # VIT model path
 
     # Cache settings
     cache_seq_num: 5 # Maximum number of sequences to dynamic prompt cache [Recommended rule cameras num + 1]
@@ -47,7 +47,7 @@ models:
       task_priorities: [5, 10]
 
   Qwen3-8b:Q4_0:
-    model_path: "/models/Qwen3-8B/Qwen3-8B.gguf"
+    model_path: "/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
 
     parallel_seq_num: 2
     total_context_num: 12288

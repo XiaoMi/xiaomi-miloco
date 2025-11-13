@@ -8,7 +8,7 @@ set -euo pipefail
 # Script variables
 PROJECT_NAME="Xiaomi Miloco"
 PROJECT_CODE="miloco"
-SCRIPT_VERSION="v0.0.4"
+SCRIPT_VERSION="v0.0.5"
 BACKEND_PORT=8000
 AI_ENGINE_PORT=8001
 MIRROR_GET_DOCKER="Aliyun" # Aliyun|AzureChinaCloud
@@ -35,6 +35,7 @@ INSTALL_DIR="${HOME}"
 INSTALL_FULL_DIR="${INSTALL_DIR}/${PROJECT_CODE}"
 DOCKER_COMPOSE_FILE="docker-compose.yaml"
 INSTALL_MODE="UnKnown"  # full, lite
+INSTALL_FROM="Unknown"  # github, xiaomi-fds
 
 # NVIDIA Configuration
 # https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
@@ -603,6 +604,30 @@ get_valid_port(){
     echo "${in_port}"
 }
 
+get_install_from() {
+    print_info "Install Service from:"
+    print_info "1. GitHub Packages"
+    print_info "2. Xiaomi FDS"
+    while true; do
+        read -rp "[✳️ INPUT] Please select the installation source (1/2): " in_source
+        case $in_source in
+            1)
+                print_log "Selected: GitHub Packages"
+                INSTALL_FROM="github"
+                return
+            ;;
+            2)
+                print_log "Selected: Xiaomi FDS"
+                INSTALL_FROM="xiaomi-fds"
+                return
+            ;;
+            *)
+                print_error "Invalid option, please select again"
+            ;;
+        esac
+    done
+}
+
 get_service_config() {
     local key="$1"
     local file="$2"
@@ -643,8 +668,9 @@ is_service_installed() {
     # Get service config and check.
     INSTALL_DIR=$(get_service_config "INSTALL_DIR" "${PROJECT_CONFIG_FILE}")
     INSTALL_MODE=$(get_service_config "INSTALL_MODE" "${PROJECT_CONFIG_FILE}")
+    INSTALL_FROM=$(get_service_config "INSTALL_FROM" "${PROJECT_CONFIG_FILE}")
     # print_log "INSTALL_DIR: ${INSTALL_DIR}, INSTALL_MODE: ${INSTALL_MODE}"
-    if [[ "${INSTALL_DIR}" == "Unknown" || "${INSTALL_MODE}" == "Unknown" ]]; then
+    if [[ "${INSTALL_DIR}" == "Unknown" || "${INSTALL_MODE}" == "Unknown" || "${INSTALL_FROM}" == "Unknown" ]]; then
         return 1
     fi
     INSTALL_FULL_DIR="${INSTALL_DIR}/${PROJECT_CODE}"
@@ -677,16 +703,18 @@ download_models() {
     if [ ! -d "${INSTALL_FULL_DIR}/models" ]; then
         mkdir -p "${INSTALL_FULL_DIR}/models"
     fi
-    mkdir -p "${INSTALL_FULL_DIR}/models/MiMo-VL-7B"
+    mkdir -p "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B"
     mkdir -p "${INSTALL_FULL_DIR}/models/Qwen3-8B"
     
     print_log "Downloading models..."
-    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-7B/MiMo-VL-7B-SFT.gguf" "https://modelscope.cn/models/williamljz/test2-gguf/resolve/master/V5_Q4_0.gguf"
-    print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-7B/MiMo-VL-7B-SFT.gguf"
-    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-7B/mmproj-MiMo-VL-7B-SFT.gguf" "https://modelscope.cn/models/williamljz/test2-gguf/resolve/master/mmproj_BF16.gguf"
-    print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-7B/mmproj-MiMo-VL-7B-SFT.gguf"
-    wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B.gguf" "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
-    print_dl "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B.gguf"
+    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+    print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf"
+    
+    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    
+    wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+    print_dl "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
 }
 
 download_models_fds() {
@@ -699,13 +727,13 @@ download_models_fds() {
     if [ ! -d "${INSTALL_FULL_DIR}/models" ]; then
         need_dl="yes"
     fi
-    if [ ! -f "${INSTALL_FULL_DIR}/models/MiMo-VL-7B/MiMo-VL-7B-SFT.gguf" ]; then
+    if [ ! -f "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" ]; then
         need_dl="yes"
     fi
-    if [ ! -f "${INSTALL_FULL_DIR}/models/MiMo-VL-7B/mmproj-MiMo-VL-7B-SFT.gguf" ]; then
+    if [ ! -f "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" ]; then
         need_dl="yes"
     fi
-    if [ ! -f "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B.gguf" ]; then
+    if [ ! -f "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" ]; then
         need_dl="yes"
     fi
     
@@ -742,7 +770,6 @@ download_docker_images() {
     local cloud_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version_cloud")
     if [ -f "${INSTALL_FULL_DIR}/.latest_version" ]; then
         latest_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version")
-        result=$(version_compare "${latest_version}" "${cloud_version}")
         if [ $(version_compare "${latest_version}" "${cloud_version}") -le 1 ]; then
             print_info "No latest version available, skip downloading updates: ${latest_version} <= ${cloud_version}"
             rm -rf "${INSTALL_FULL_DIR}/.latest_version_cloud"
@@ -756,7 +783,7 @@ download_docker_images() {
     fi
     
     wget -c -O "${INSTALL_FULL_DIR}/${latest_version}.zip" "${CDN_BASE_URL}/images/${latest_version}.zip"
-    wget -O "${INSTALL_FULL_DIR}/${latest_version}.md5" "${FDS_BASE_URL}/images/${latest_version}.md5"
+    wget -O "${INSTALL_FULL_DIR}/${latest_version}.md5" "${CDN_BASE_URL}/images/${latest_version}.md5"
     print_log "Checking md5..."
     local md5_calc=$(md5sum "${INSTALL_FULL_DIR}/${latest_version}.zip" | awk '{print $1}')
     local md5_cloud=$(tr -d ' \n\r\t' < "${INSTALL_FULL_DIR}/${latest_version}.md5")
@@ -856,6 +883,7 @@ quick_install() {
     # Check AI Engine port
     AI_ENGINE_PORT=$(get_valid_port "${AI_ENGINE_PORT}")
     
+    get_install_from
     
     config_install_env
     
@@ -864,6 +892,7 @@ quick_install() {
     mkdir -p "${PROJECT_HOME_DIR}"
     set_service_config "INSTALL_DIR" "${INSTALL_DIR}" "${PROJECT_CONFIG_FILE}"
     set_service_config "INSTALL_MODE" "${INSTALL_MODE}" "${PROJECT_CONFIG_FILE}"
+    set_service_config "INSTALL_FROM" "${INSTALL_FROM}" "${PROJECT_CONFIG_FILE}"
     
     if ! install_runtime_environment; then
         print_error "Failed to install runtime environment"
@@ -942,6 +971,8 @@ quick_install_lite() {
     # Check backend port
     BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}")
     
+    get_install_from
+    
     config_install_env
     
     # Create configuration directory
@@ -949,6 +980,7 @@ quick_install_lite() {
     mkdir -p "${PROJECT_HOME_DIR}"
     set_service_config "INSTALL_DIR" "${INSTALL_DIR}" "${PROJECT_CONFIG_FILE}"
     set_service_config "INSTALL_MODE" "${INSTALL_MODE}" "${PROJECT_CONFIG_FILE}"
+    set_service_config "INSTALL_FROM" "${INSTALL_FROM}" "${PROJECT_CONFIG_FILE}"
     
     if ! install_runtime_environment; then
         print_error "Failed to install runtime environment"
@@ -980,12 +1012,22 @@ install_service(){
     print_log "Get docker-compose.yaml completed: ${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}"
     wget -O "${INSTALL_FULL_DIR}/.env" "${FDS_BASE_URL}/.env.example"
     print_log "Get .env completed: ${INSTALL_FULL_DIR}/.env"
+    # Replace .env variables
+    sed -i "s/^BACKEND_PORT=.*/BACKEND_PORT=${BACKEND_PORT}/" "${INSTALL_FULL_DIR}/.env"
+    if [ "${INSTALL_MODE}" == "full" ]; then
+        sed -i "s/^AI_ENGINE_PORT=.*/AI_ENGINE_PORT=${AI_ENGINE_PORT}/" "${INSTALL_FULL_DIR}/.env"
+    fi
+    if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
+        sed -i 's/^DOCKER_REPO=ghcr\.io\//#DOCKER_REPO=ghcr.io\//' "$FILE"
+    fi
     
-    read -rp "[✳️ OPTION]  Please enter the Models download method? Modelscope(Default)or Xiaomi FDS (Ms/fds): "
-    if [ "${REPLY}" == "fds" ]; then
-        download_models_fds
-    else
-        download_models
+    if [ "${INSTALL_MODE}" == "full" ]; then
+        read -rp "[✳️ OPTION]  Please enter the Models download method? Modelscope(Default)or Xiaomi FDS (Ms/fds): "
+        if [ "${REPLY}" == "fds" ]; then
+            download_models_fds
+        else
+            download_models
+        fi
     fi
     
     print_success "${PROJECT_NAME} installation completed successfully!"
@@ -1003,9 +1045,11 @@ start_service() {
         return 0
     fi
     print_log "Starting service..."
-    # TODO: Use docker compose to update service
-    download_docker_images
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" up -d
+    if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
+        download_docker_images
+    else
+        ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" up -d
+    fi
     ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ps
     print_success "Service started successfully, You can try access the service by clicking on the link below: "
     local ips=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
@@ -1027,9 +1071,11 @@ update_service() {
         return 0
     fi
     print_log "Updating service..."
-    # TODO: Use docker compose to update service
-    download_docker_images
-    # ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" pull
+    if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
+        download_docker_images
+    else
+        ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" pull
+    fi
     ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" down || true
     ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" up -d
     ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ps

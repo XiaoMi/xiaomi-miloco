@@ -140,11 +140,15 @@ All steps below are to be performed in the `models` folder.
 ### Xiaomi MiMo-VL-Miloco-7B
 Xiaomi’s self-developed multimodal model for local image inference.  
 Download links:
-- `huggingface`: https://huggingface.co/williamljz/test2_gguf/tree/main
-- `modelscope`: https://modelscope.cn/models/williamljz/test2-gguf/files
-Create a folder `MiMo-VL-Miloco-7B` under `models`, then open the download link for the quantized model:
-- Download `mmproj-MiMo-VL-Miloco-7B.gguf` into the `MiMo-VL-Miloco-7B` folder
-- Download `MiMo-VL-Miloco-7B-Q4_0.gguf` into the `MiMo-VL-Miloco-7B` folder
+- `huggingface`:
+- - Quantized: https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF
+- - Non-quantized: https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B
+- `modelscope`:
+- - Quantized: https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF
+- - Non-quantized: https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B
+In the `models` folder, create a new directory named `MiMo-VL-Miloco-7B`, then open the `modelspace` quantized model download link:
+- Download `MiMo-VL-Miloco-7B_Q4_0.gguf` and place it into the `MiMo-VL-Miloco-7B` directory
+- Download `mmproj-MiMo-VL-Miloco-7B_BF16.gguf` and place it into the `MiMo-VL-Miloco-7B` directory
 ### Qwen3-8B
 If your GPU memory is sufficient, you can also download a local planning model, such as `Qwen-8B`. You can modify the config file to use other models as well.  
 Download links:

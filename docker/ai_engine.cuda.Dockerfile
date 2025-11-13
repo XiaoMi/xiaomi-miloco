@@ -91,6 +91,6 @@ RUN pip install --no-build-isolation --break-system-packages -e /app/miloco_ai_e
 EXPOSE 8001
 
 # Override by docker-compose, this is the default command.
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD curl -f "http://127.0.0.1:8001" || exit 1
+# HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD curl -f "http://127.0.0.1:8001" || exit 1
 
 CMD ["python3", "start_ai_engine.py"]

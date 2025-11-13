@@ -1,7 +1,7 @@
 services:
   ai_engine:
     container_name: miloco-ai_engine
-    image: xiaomi/miloco-ai_engine:latest
+    image: ${DOCKER_REPO}xiaomi/miloco-ai_engine:latest
     ports:
       - ${AI_ENGINE_PORT:-8001}:${AI_ENGINE_PORT:-8001}
     environment:
@@ -29,7 +29,7 @@ services:
 
   backend:
     container_name: miloco-backend
-    image: xiaomi/miloco-backend:latest
+    image: ${DOCKER_REPO}xiaomi/miloco-backend:latest
     # NOTICE: MUST be host for miot device discovery.
     network_mode: host
     expose:

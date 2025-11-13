@@ -177,13 +177,18 @@ sudo usermod -aG docker $USER
 
 模型下载地址：
 
-- `huggingface`:  https://huggingface.co/williamljz/test2_gguf/tree/main
-- `modelscope`: https://modelscope.cn/models/williamljz/test2-gguf/files
+- `huggingface`:
+- - 量化: https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF
+- - 未量化: https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B
+
+- `modelscope`:
+- - 量化: https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF
+- - 未量化: https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B
 
 在`models`文件夹下，新建目录`MiMo-VL-Miloco-7B`，然后打开`modelspace`量化模型下载链接：
 
-- 下载`mmproj-MiMo-VL-Miloco-7B.gguf`放到`MiMo-VL-Miloco-7B`目录下
-- 下载`MiMo-VL-Miloco-7B-Q4_0.gguf`放到`MiMo-VL-Miloco-7B`目录下
+- 下载`MiMo-VL-Miloco-7B_Q4_0.gguf`放到`MiMo-VL-Miloco-7B`目录下
+- 下载`mmproj-MiMo-VL-Miloco-7B_BF16.gguf`放到`MiMo-VL-Miloco-7B`目录下
 
 ### Qwen3-8B
 

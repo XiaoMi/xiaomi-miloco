@@ -35,6 +35,12 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Set lowercase repository owner
+        id: lowercase
+        run: |
+          LOWERCASE_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "LOWERCASE_OWNER=$LOWERCASE_OWNER" >> $GITHUB_OUTPUT
+
       - name: Build and push ai_engine
         uses: docker/build-push-action@v4
         with:
@@ -42,7 +48,7 @@ jobs:
           file: docker/ai_engine.cuda.Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner | lower }}/miloco-ai_engine:${{ steps.vars.outputs.VERSION }}
+            ghcr.io/${{ steps.lowercase.outputs.LOWERCASE_OWNER }}/miloco-ai_engine:${{ steps.vars.outputs.VERSION }}
 
       - name: Build and push backend
         uses: docker/build-push-action@v4
@@ -51,4 +57,4 @@ jobs:
           file: docker/backend.Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner | lower }}/miloco-backend:${{ steps.vars.outputs.VERSION }}
+            ghcr.io/${{ steps.lowercase.outputs.LOWERCASE_OWNER }}/miloco-backend:${{ steps.vars.outputs.VERSION }}
