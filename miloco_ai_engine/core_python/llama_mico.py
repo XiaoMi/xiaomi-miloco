@@ -145,7 +145,8 @@ class LlamaMico:
             ctypes.byref(content_ptr))
 
         content = self._parse_content(content_ptr, current_id)
-        if ret != 0:
+        # todo: Process the ret code uniformly
+        if ret == -1:
             err = f"Prompt request failed: {content}"
             logger.error(err)
             with self._counter_lock:
@@ -153,8 +154,11 @@ class LlamaMico:
             raise CoreNormalException(err)
 
         is_finished = is_finished_ptr.value
-
         finish_reason = FinishReason.STOP if is_finished else None
+        finish_reason = FinishReason.LENGTH if (is_finished and ret == -2) else finish_reason
+        if finish_reason == FinishReason.LENGTH:
+            logger.error("Generate token too long")
+
         response = ChatCompletionResponse(
             id=request_data.get("id", "local-chatcmpl-0"),
             created=int(time.time()),
@@ -194,7 +198,8 @@ class LlamaMico:
 
         current_id = int(request_data["id"].split("-")[-1])
         content = self._parse_content(content_ptr, current_id)
-        if ret != 0:
+        # todo: Process the ret code uniformly
+        if ret == -1:
             err = f"Generate request failed: {content}"
             logger.error(err)
             raise CoreNormalException(err)
@@ -203,6 +208,10 @@ class LlamaMico:
 
         # Construct response
         finish_reason = FinishReason.STOP if is_finished else None
+        finish_reason = FinishReason.LENGTH if is_finished and ret == -2 else finish_reason
+        if finish_reason == FinishReason.LENGTH:
+            logger.error("Generate tokens too long")
+
         response = ChatCompletionResponse(
             id=request_data.get("id", "local-chatcmpl-0"),
             created=int(time.time()),
@@ -223,7 +232,6 @@ class LlamaMico:
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
         priority: int = 0,
-        max_tokens: int = 2048,
         temperature: float = -1.0,
         stream: bool = False
     ) -> Iterator[ChatCompletionResponse] | ChatCompletionResponse:
@@ -289,7 +297,6 @@ class LlamaMico:
             "stop": False,
             "modal_prts": address_list,
             "priority": priority,
-            "max_tokens": max_tokens,
             "temperature": temperature
         }
         # ======================= request_data ======================= #
@@ -317,7 +324,6 @@ class LlamaMico:
         """
         Streaming chat completion
         """
-        max_tokens = request_data["max_tokens"]
         request_generate_data = {
             "id": request_data["id"],
             "stop": request_data["stop"]
@@ -326,10 +332,12 @@ class LlamaMico:
         accumulated_content = ""
         tool_use_detected = False
         tool_wait = False
+        first = True
 
-        for i in range(max_tokens):
-            if i == 0:
+        while True:
+            if first:
                 response = self._request_prompt(handle, request_data)
+                first = False
             else:
                 response = self._request_generate(handle,
                                                   request_generate_data)
@@ -356,15 +364,14 @@ class LlamaMico:
             time.sleep(0.001)
 
         # Exceeded generation length
-        if response.choices[0].finish_reason is None:
+        if response.choices[0].finish_reason is None or response.choices[0].finish_reason is FinishReason.LENGTH:
             if tool_use_detected:
                 logger.warning("Tool call incomplete, request too long, returning empty response")
 
-            response.choices[0].finish_reason = FinishReason.LENGTH
             yield response
 
         # Add stop signal for non-stop endings
-        if response.choices[0].finish_reason is not FinishReason.STOP:
+        if response.choices[0].finish_reason is FinishReason.TOOL_CALL:
             logger.debug("Actively stopping seq %s", request_data["id"])
             with contextlib.suppress(Exception):
                 self._request_generate(handle, {
@@ -383,7 +390,6 @@ class LlamaMico:
         response.choices[0].message = response.choices[0].delta
         response.choices[0].delta = None
 
-        max_tokens = request_data["max_tokens"]
         request_generate_data = {
             "id": request_data["id"],
             "stop": request_data["stop"]
@@ -392,10 +398,9 @@ class LlamaMico:
         tool_use_detected = False
         tool_wait = False
 
-        for _ in range(max_tokens):
+        while True:
             if response.choices[0].finish_reason is not None:
                 break
-
             generate_response = self._request_generate(handle,
                                                        request_generate_data)
             response.choices[0].finish_reason = generate_response.choices[
@@ -422,14 +427,12 @@ class LlamaMico:
         response.created = int(time.time())
 
         # Exceeded generation length
-        if response.choices[0].finish_reason is None:
+        if response.choices[0].finish_reason is None or response.choices[0].finish_reason is FinishReason.LENGTH:
             if tool_use_detected:
                 logger.warning("Tool call incomplete, request too long, returning empty response")
 
-            response.choices[0].finish_reason = FinishReason.LENGTH
-
         # Add stop signal for non-stop endings
-        if response.choices[0].finish_reason is not FinishReason.STOP:
+        if response.choices[0].finish_reason is FinishReason.TOOL_CALL:
             logger.debug("Actively stopping seq %s", request_data["id"])
             with contextlib.suppress(Exception):
                 self._request_generate(handle, {

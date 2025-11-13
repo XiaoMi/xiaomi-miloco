@@ -45,7 +45,6 @@ class ModelConfig(BaseModel):
     n_gpu_layers: int = Field(default=MAX_CUDA_LAYERS, description="GPU layers, 0 for CPU only")
 
     # Inference parameter defaults
-    max_tokens: int = Field(default=512, description="Maximum tokens to generate")
     context_per_seq: int = Field(
         default=4096, description="Maximum available context")
     temperature: float = Field(default=-1, description="Temperature parameter")
@@ -85,6 +84,7 @@ class ModelConfig(BaseModel):
         """
         Convert to dictionary for C++ library initialization input
         """
+        
         r = self.model_dump()
         r.pop("task_classification")
         # Remove keys with None values from config dictionary

@@ -12,7 +12,6 @@ using json = nlohmann::ordered_json;
 struct MicoRequest {
     int32_t id{0};
     int32_t priority{0};
-    int32_t max_tokens{1024};
     json messages;
     json tools;
     std::vector<std::map<const unsigned char*, int32_t>> modal_prts;
@@ -22,7 +21,8 @@ struct MicoRequest {
 bool from_json_to_request(const json& j, MicoRequest& r);
 
 int32_t stop_process(bool sucess, std::string& respone, const char** content, int32_t& is_finished,
-                     LlamaSeqState& state, LlamaMicoContext* context, int32_t seq_id, bool stop_infer = true);
+                     LlamaSeqState& state, LlamaMicoContext* context, int32_t seq_id, bool stop_infer = true,
+                     bool too_lang = false);
 
 void apply_chat_templates(common_chat_params& formatted_chat, common_chat_templates_inputs& tmpl_inputs,
                           LlamaMicoContext* context, json messages, json tools);

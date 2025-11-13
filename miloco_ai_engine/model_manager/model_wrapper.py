@@ -164,7 +164,7 @@ class ModelWrapper(Actor):
         self.use_count += 1
 
         request_id = str(uuid.uuid4())
-        data.max_tokens = self.model_config.max_tokens
+        data.max_tokens = self.model_config.context_per_seq
 
         self.request_task[request_id] = asyncio.Queue(maxsize=1)
         self.request_loop[request_id] = asyncio.get_running_loop()
@@ -217,7 +217,7 @@ class ModelWrapper(Actor):
         self.use_count += 1
 
         request_id = str(uuid.uuid4())
-        data.max_tokens = self.model_config.max_tokens
+        data.max_tokens = self.model_config.context_per_seq
 
         self.request_task[request_id] = asyncio.Queue(maxsize=data.max_tokens)
         self.request_loop[request_id] = asyncio.get_running_loop()

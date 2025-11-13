@@ -5,6 +5,11 @@
 
 #include "mico-dialog-util.h"
 
+/** return code **/
+#define MICO_SUCCESS 0
+#define MICO_ERROR -1
+#define MICO_ERROR_EXCEED_MAX_CONTEXT -2
+
 #define CHAT_CMP_ID_PREFIX "local-chatcmpl-"
 #define PROMPT_PROPORTION_LIMIT 0.8
 
@@ -15,7 +20,6 @@ bool from_json_to_request(const json& j, MicoRequest& r) {
         r.id = std::stoi(chat_cmpl_id.substr(prefix.size()));
     }
 
-    r.max_tokens = j.value("max_tokens", r.max_tokens);
     r.priority = j.value("priority", r.priority);
     if (j.contains("messages")) r.messages = j.at("messages");
     if (j.contains("tools")) r.tools = j.at("tools");
@@ -40,8 +44,8 @@ bool from_json_to_request(const json& j, MicoRequest& r) {
 }
 
 int32_t stop_process(bool sucess, std::string& respone, const char** content, int32_t& is_finished,
-                     LlamaSeqState& state, LlamaMicoContext* context, int32_t seq_id,
-                     bool stop_infer) {  // End seq_id
+                     LlamaSeqState& state, LlamaMicoContext* context, int32_t seq_id, bool stop_infer,
+                     bool too_long) {  // End seq_id
     state.respone = respone;
     *content = state.respone.c_str();
 
@@ -60,9 +64,12 @@ int32_t stop_process(bool sucess, std::string& respone, const char** content, in
 
     if (!sucess) {
         LOG_ERR("ERR: %s", respone.c_str());
-        return -1;
+        return MICO_ERROR;  // ERR
     }
-    return 0;
+
+    if (too_long) return MICO_ERROR_EXCEED_MAX_CONTEXT;  // too long
+
+    return MICO_SUCCESS;  // success
 }
 
 void apply_chat_templates(common_chat_params& formatted_chat, common_chat_templates_inputs& tmpl_inputs,
@@ -320,5 +327,4 @@ void limit_prompt_tokens(std::shared_ptr<mtmd::input_chunks> chunks, int32_t n_u
     if (crop_by_query(chunks, current_tokens, prompt_limit, context)) return;
 
     crop_by_tokens(chunks, current_tokens, prompt_limit, context);
-    LOG_INF("After crop, prompt tokens num %d\n", current_tokens);
 }

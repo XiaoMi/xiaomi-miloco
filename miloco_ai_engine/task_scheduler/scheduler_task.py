@@ -172,11 +172,6 @@ class Task(Actor):
         else:
             res["tools"] = []
 
-        if self.task_info.request.max_tokens:
-            res["max_tokens"] = self.task_info.request.max_tokens
-        else:
-            res["max_tokens"] = 2048
-
         if self.task_info.request.temperature:
             res["temperature"] = self.task_info.request.temperature
         else:

@@ -145,13 +145,19 @@ LLAMA_MICO_API int32_t llama_mico_request_generate(void* handle, const char* req
         auto& err_state = ctx->get_seq_state(DEFAULT_ERROR_SEQ_ID);
         std::string err = "chat-cmpl-" + std::to_string(seq_id) + " is not in infering, please request prompt\n";
         return stop_process(false /* success */, err, content, *is_finished, err_state, ctx, DEFAULT_ERROR_SEQ_ID,
-                            false /* stop */);
+                            true /* stop */);
     }
 
     auto& state = ctx->get_seq_state(seq_id);
     if (request.stop) {
         std::string res = "";
         return stop_process(true /* success */, res, content, *is_finished, state, ctx, seq_id, true /* stop */);
+    }
+    // exceed max context
+    if (state.n_past.load() >= ctx->n_usage_context) {
+        std::string res = "";
+        return stop_process(true /* success */, res, content, *is_finished, state, ctx, seq_id, true /* stop */,
+                            true /* too long */);
     }
 
     llama_token last_token = state.last_token;
