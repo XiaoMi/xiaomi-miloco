@@ -26,7 +26,6 @@ function App() {
     <ThemeProvider>
       <GlobalSocketProvider>
         <Routes>
-          {/* 重定向到/home/instant */}
           <Route path="/" element={<Navigate to="/home/instant" replace />} />
           <Route path="/setup" element={<Setup />} />
           <Route path="/login" element={<Login />} />

@@ -150,6 +150,8 @@ export default {
     loginUrl: 'Authorization URL: ',
     loginUrlTip: 'If automatic redirect fails, please copy the link below and open it in your browser',
     execute: 'Execute',
+    serverError: 'Sorry, the server is error.',
+    reload: 'Reload',
   },
   error: {
     authFailed: 'Authentication failed',

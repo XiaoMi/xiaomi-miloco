@@ -151,6 +151,8 @@ export default {
     loginUrl: '授权链接：',
     loginUrlTip: '如果自动跳转不成功，请复制下方链接并在浏览器中打开',
     execute: '执行',
+    serverError: '抱歉，服务器出错了。',
+    reload: '重新加载',
   },
   error: {
     authFailed: '身份验证失败',

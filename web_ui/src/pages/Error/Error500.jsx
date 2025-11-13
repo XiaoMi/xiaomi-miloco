@@ -6,6 +6,7 @@
 import React from 'react';
 import { Button, Result } from 'antd';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 
 /**
  * Error500 Component - 500 server error page with reload functionality
@@ -15,6 +16,7 @@ import { useNavigate } from 'react-router-dom';
  */
 const Error500 = () => {
   const navigate = useNavigate();
+  const { t } = useTranslation();
 
   const handleReload = () => {
     navigate('/');
@@ -25,8 +27,8 @@ const Error500 = () => {
       <Result
         status="500"
         title="500"
-        subTitle="抱歉，服务器出错了。"
-        extra={<Button type="primary" onClick={handleReload}>重新加载</Button>}
+        subTitle={t('common.serverError')}
+        extra={<Button type="primary" onClick={handleReload}>{t('common.retry')}</Button>}
       />
     </div>
   );
