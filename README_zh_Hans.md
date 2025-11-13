@@ -10,7 +10,7 @@
 
 ## 最新动态
 
-- [2025-11] [ Xiaomi Miloco 整体框架开源](https://github.com/XiaoMi/xiaomi-miloco)
+- [2025-11] Xiaomi Miloco 整体框架开源
 
 ## 关键特性
 

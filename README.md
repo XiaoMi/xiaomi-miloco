@@ -8,9 +8,9 @@ English | [简体中文](README_zh_Hans.md)
 
 </div>
 
-## Latest Updates
+## News
 
-- [2025-11] [Xiaomi Miloco Framework Open Source](https://github.com/XiaoMi/xiaomi-miloco)
+- [2025-11] Xiaomi Miloco Framework Open Source
 
 ## Key Features
 
