@@ -1047,9 +1047,8 @@ start_service() {
     print_log "Starting service..."
     if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
         download_docker_images
-    else
-        ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" up -d
     fi
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" up -d
     ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ps
     print_success "Service started successfully, You can try access the service by clicking on the link below: "
     local ips=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
