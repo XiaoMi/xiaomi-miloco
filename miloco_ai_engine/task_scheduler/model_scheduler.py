@@ -16,6 +16,7 @@ from miloco_ai_engine.task_scheduler.scheduler_task import Task
 from miloco_ai_engine.utils.prompt_matcher import PromptMatcher
 from miloco_ai_engine.middleware.exceptions import ModelSchedulerException
 import time
+from concurrent.futures import Future
 
 import logging
 logger = logging.getLogger(__name__)
@@ -82,7 +83,6 @@ class TaskScheduler(Actor):
 
         self.running = True
         self.handle = handle
-        
         self.max_workers = self.model_config.n_seq_max - \
             self.model_config.cache_seq_num  # seq parallel
         self.default_worker_count = self.max_workers  # Default number of queues
@@ -122,12 +122,12 @@ class TaskScheduler(Actor):
         asyncio.set_event_loop(loop)
         self.worker_loops[worker_name] = loop
         try:
-            self._work_loop(worker_name)
+            loop.run_until_complete(self._work_loop(worker_name))
         finally:
             loop.close()
             self._cleanup_worker(worker_name)
 
-    def _work_loop(self, worker_name: str):
+    async def _work_loop(self, worker_name: str):
         """
         Worker thread loop
         """
@@ -136,9 +136,9 @@ class TaskScheduler(Actor):
         while self.running:
             try:
                 # Get task from central queue (500ms polling to detect stop)
-                priority, task_id = self.task_queue.get(timeout=0.5)
+                priority, task_id = await asyncio.to_thread(self.task_queue.get, timeout=0.5)
                 priority = -priority
-            except Exception: # pylint: disable=broad-exception-caught
+            except Exception:  # pylint: disable=broad-exception-caught
                 # Check if idle time exceeded
                 current_time = time.time()
                 if current_time - last_task_time > self._MAX_IDLE_TIME:
@@ -154,17 +154,18 @@ class TaskScheduler(Actor):
             if not task:
                 continue
 
-            task_working: asyncio.Task = actor_system.ask(
+            future: Future = actor_system.ask(
                 task,
                 RequestMessage(action=TaskAction.START, data=loop))
             try:
-                loop.run_until_complete(task_working)
-                result = task_working.result()
+                # Convert concurrent.futures.Future to asyncio.Future to avoid blocking
+                asyncio_future = asyncio.wrap_future(future)
+                result: bool = await asyncio_future
                 if result:
                     logger.debug("Worker thread %s task completed: %s", worker_name, task_id)
                 else:
                     raise ModelSchedulerException("Execution failed return")
-            except Exception as e: # pylint: disable=broad-except
+            except Exception as e:  # pylint: disable=broad-except
                 logger.error(
                     "Worker thread %s failed to get task response: %s %s", worker_name, task_id, e)
             finally:

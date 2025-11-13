@@ -1,6 +1,3 @@
-# Copyright (C) 2025 Xiaomi Corporation
-# This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
-
 """Model manager module for managing AI models lifecycle and requests."""
 from enum import Enum
 from thespian.actors import ActorAddress
@@ -146,11 +143,12 @@ class ModelManager():
         future: asyncio.Future = actor_system.ask(
             self.models[model_name],
             RequestMessage(action=ModelAction.CHAT, data=request))
+        current_loop = asyncio.get_running_loop()
+        future = self._mirror_future_to_loop(future, current_loop)
 
         try:
             # Different asyncio loop may cause issues with future
-            result_message: ResultMessage = await asyncio.wait_for(future,
-                                                                   timeout=self.MODEL_REQUER_TIMEOUT)
+            result_message: ResultMessage = await asyncio.wait_for(future, timeout=self.MODEL_REQUER_TIMEOUT)
             if result_message.result:
                 return result_message.data
             else:
@@ -175,6 +173,8 @@ class ModelManager():
         future: asyncio.Future = actor_system.ask(
             self.models[model_name],
             RequestMessage(action=ModelAction.STREAM_CHAT, data=request))
+        current_loop = asyncio.get_running_loop()
+        future = self._mirror_future_to_loop(future, current_loop)
 
         try:
             # Different asyncio loop may cause issues with future
@@ -196,6 +196,40 @@ class ModelManager():
         Preload all models
         """
         pass
+
+    def _mirror_future_to_loop(self, source_future: asyncio.Future,
+                               target_loop: asyncio.AbstractEventLoop) -> asyncio.Future:
+        """
+        Ensure awaiting future belongs to the target event loop.
+        """
+
+        try:
+            source_loop = source_future.get_loop()
+        except RuntimeError:
+            source_loop = None
+
+        if source_loop is None or source_loop is target_loop:
+            return source_future
+
+        proxy_future: asyncio.Future = target_loop.create_future()
+
+        def _transfer_result(done_future: asyncio.Future):
+            if done_future.cancelled():
+                target_loop.call_soon_threadsafe(proxy_future.cancel)
+                return
+            try:
+                result = done_future.result()
+            except Exception as exc:  # pylint: disable=broad-except
+                target_loop.call_soon_threadsafe(
+                    proxy_future.set_exception, exc)
+            else:
+                target_loop.call_soon_threadsafe(
+                    proxy_future.set_result, result)
+
+        source_loop.call_soon_threadsafe(
+            source_future.add_done_callback, _transfer_result)
+
+        return proxy_future
 
     async def _start_cleanup_task(self):
         """
@@ -235,10 +269,11 @@ class ModelManager():
             raise InvalidArgException(f"Model {model_name} not configured")
 
         logger.info("Loading model %s", model_name)
-        self.model_loadable.wait() # Wait for anther model to be loaded
+        self.model_loadable.wait()  # Wait for anther model to be loaded
         try:
             model_config = self.model_configs[model_name]
-            adjust_config_by_memory(model_config) # Adjust config by free memory
+            # Adjust config by free memory
+            adjust_config_by_memory(model_config)
             self.model_loadable.clear()
             result_message: ResultMessage = actor_system.ask(
                 self.models[model_name],

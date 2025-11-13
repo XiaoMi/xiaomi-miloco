@@ -12,8 +12,8 @@ from miloco_ai_engine.schema.actor_message import actor_system, RequestMessage, 
 from miloco_ai_engine.config.config import SERVER_CONCURRENCY
 from miloco_ai_engine.core_python.llama_mico import llama_mico
 from miloco_ai_engine.middleware.exceptions import CoreNormalException, InvalidArgException
-from asyncio import AbstractEventLoop
-from asyncio import Task as AsyncTask
+import asyncio
+from concurrent.futures import Future
 
 import logging
 logger = logging.getLogger(__name__)
@@ -69,9 +69,9 @@ class Task(Actor):
         logger.debug("scheduler_task ReceiveMessage:  %s", action)
 
         if action == TaskAction.START:
-            event_loop: AbstractEventLoop = msg.data
-            task: AsyncTask = event_loop.create_task(self._handle_start_task())
-            self.send(sender, task)
+            event_loop: asyncio.AbstractEventLoop = msg.data
+            future: Future = asyncio.run_coroutine_threadsafe(self._handle_start_task(), event_loop)
+            self.send(sender, future)
 
         elif action == TaskAction.CANCEL:
             self.task_info.status = TaskStatus.CANCELLED
@@ -171,11 +171,6 @@ class Task(Actor):
             ]
         else:
             res["tools"] = []
-
-        if self.task_info.request.max_tokens:
-            res["max_tokens"] = self.task_info.request.max_tokens
-        else:
-            res["max_tokens"] = 2048
 
         if self.task_info.request.temperature:
             res["temperature"] = self.task_info.request.temperature
