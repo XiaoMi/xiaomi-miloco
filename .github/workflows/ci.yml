@@ -1,0 +1,119 @@
+name: Code Quality Check
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  code_quality:
+    name: Code Quality Check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web_ui/package-lock.json
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang-format
+          pip3 install pylint
+          pylint --version
+          clang-format --version
+
+      - name: Install frontend dependencies
+        working-directory: web_ui
+        run: |
+          npm ci --quiet
+          npx eslint --version
+
+      - name: Check C++ code format (exclude non-business files)
+        run: |
+          echo "start checking C++ code format..."
+          set -euo pipefail
+
+          failed_files=$(find miloco_ai_engine/core -type f \( -name "*.cpp" -o -name "*.h" \) \
+            -not -path "*/build/*" -not -path "*/third_party/*" -not -path "*/test/*" \
+            -exec sh -c 'clang-format -style=file -n "$1" || echo "$1"' _ {} \;)
+
+          if [ -n "$failed_files" ]; then
+            echo -e "\n C++ code format check failed, the following files need to be repaired:"
+            echo "$failed_files"
+            echo -e "\n detailed differences (execute the following command to view and automatically repair):"
+            echo "$failed_files" | xargs -I {} echo "clang-format -style=file -i {}"
+            first_file=$(echo "$failed_files" | head -n 1)
+            echo -e "\n the difference details of the first file:"
+            clang-format -style=file "$first_file" | diff -u "$first_file" -
+            exit 1
+          fi
+          echo "miloco_ai_engine/core C++ code format check passed!"
+
+
+      - name: Check Python code quality - Server
+        run: |
+          echo -e "\n start checking miloco_server/ Python code quality..."
+          if ! pylint --rcfile=.pylintrc miloco_server/ --output-format=text --errors-only --disable=import-error,no-member,no-name-in-module; then
+            echo -e "\n miloco_server/ code quality check failed"
+            exit 1
+          fi
+        env:
+          PYLINT_CACHE_DIR: .pylint_cache
+
+      
+      - name: Check Python code quality - AI Engine
+        run: |
+          echo -e "\n start checking miloco_ai_engine/ Python code quality..."
+          if ! pylint --rcfile=.pylintrc miloco_ai_engine/ --output-format=text --errors-only --disable=import-error,no-member,no-name-in-module; then
+            echo -e "\n miloco_ai_engine/ code quality check failed"
+            exit 1
+          fi
+        env:
+          PYLINT_CACHE_DIR: .pylint_cache
+
+      - name: Check Python code quality - Miot Kit
+        run: |
+          echo -e "\n start checking miot_kit/ Python code quality..."
+          if ! pylint --rcfile=.pylintrc miot_kit/ --output-format=text --errors-only --disable=import-error,no-member,no-name-in-module; then
+            echo -e "\n miot_kit/ code quality check failed"
+            exit 1
+          fi
+          echo -e "\n miloco_ai_engine/、miloco_server/、miot_kit/ Python code quality check passed!"
+        env:
+          PYLINT_CACHE_DIR: .pylint_cache
+
+      - name: Check frontend code quality
+        working-directory: web_ui
+        run: |
+          echo -e "\n start checking frontend code quality..."
+          if ! npm run lint:check; then
+            echo -e "\n web_ui/ frontend code quality check failed, see the log above"
+            exit 1
+          fi
+          echo -e "\n web_ui/ frontend code quality check passed!"
+
+      - name: Summary
+        run: |
+          echo -e "\n======================================"
+          echo "all code quality checks executed and passed!"
+          echo "======================================"

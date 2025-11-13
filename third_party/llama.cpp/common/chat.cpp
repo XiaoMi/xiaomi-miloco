@@ -510,6 +510,21 @@ std::string common_chat_format_example(const struct common_chat_templates* tmpls
     return common_chat_templates_apply(tmpls, inputs).prompt;
 }
 
+std::string common_chat_format_example(const struct common_chat_templates* tmpls, std::string role, std::string content,
+                                       bool use_jinja) {
+    common_chat_templates_inputs inputs;
+    inputs.use_jinja = use_jinja;
+    auto add_simple_msg = [&](auto role, auto content) {
+        common_chat_msg msg;
+        msg.role = role;
+        msg.content = content;
+        inputs.messages.push_back(msg);
+    };
+
+    add_simple_msg(role, content);
+    return common_chat_templates_apply(tmpls, inputs).prompt;
+}
+
 #define CHATML_TEMPLATE_SRC                                                               \
     "{%- for message in messages -%}\n"                                                   \
     "  {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' -}}\n" \
@@ -866,7 +881,7 @@ static common_chat_params common_chat_params_init_generic(const common_chat_temp
     data.prompt =
         apply(tmpl, tweaked_messages, inputs.tools.empty() ? json() : inputs.tools, inputs.add_generation_prompt);
     data.format = COMMON_CHAT_FORMAT_GENERIC;
-    
+
     return data;
 }
 static void common_chat_parse_generic(common_chat_msg_parser& builder) {

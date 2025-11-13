@@ -249,7 +249,10 @@ class RuleCreateTool(Actor):
         if rule.execute_info.notify:
             action_introductions.append(f"notify: {rule.execute_info.notify.content}")
 
-        return f"""User modified rule created successfully, finally rule name: {rule.name}, condition: {rule.condition}, action_introductions: {action_introductions}"""
+        return (
+            f"User modified rule created successfully, finally rule name: {rule.name}, "
+            f"condition: {rule.condition}, action_introductions: {action_introductions}"
+        )
 
     def _send_instruction(self, instruction_payload: InstructionPayload):
         actor_system.tell(self._out_actor_address, instruction_payload)

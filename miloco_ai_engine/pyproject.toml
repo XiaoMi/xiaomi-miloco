@@ -19,7 +19,7 @@ dependencies = [
     "python-multipart>=0.0.18",
     "numpy>=1.24.0",
     "typing-extensions==4.8.0",
-    "psutil==5.9.6",
+    "psutil>=7.0.0",
     "aiohttp>=3.12.14",
     "requests>=2.32.4",
     "thespian>=3.10.0",

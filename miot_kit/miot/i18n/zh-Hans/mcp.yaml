@@ -42,8 +42,7 @@ miot_devices:
       params:
         did: "米家设备DID"
     send_ctrl_rpc:
-      description:
-        "你是一个用于米家设备控制的工具，请按照下述步骤操作。\n
+      description: "你是一个用于米家设备控制的工具，请按照下述步骤操作。\n
         ### 控制步骤：\n
         1. 调用 `{{tool_name_get_devices}}`\n
         - 获取可控设备列表\n
@@ -60,18 +59,13 @@ miot_devices:
         \n
         4. 调用 `{{tool_name_send_ctrl_rpc}}`\n
         - 传入的参数为`did`, `iid`和`value`\n
-        - 发送控制命令以控制设备\n
-        \n
-        ### 输出要求：\n
-        - 直接调用工具执行上述步骤\n
-        - 除执行结果外，不输出任何其他文字"
+        - 发送控制命令以控制设备"
       params:
         did: "米家设备DID"
         iid: "SPEC实例ID"
         value: "控制值，格式需符合SPEC定义"
     send_get_rpc:
-      description:
-        "你是一个用于米家设备属性查询的工具，请按照下述步骤操作。\n
+      description: "你是一个用于米家设备属性查询的工具，请按照下述步骤操作。\n
         ### 查询步骤：\n
         1. 调用 `{{tool_name_get_devices}}`\n
         - 获取可控设备列表\n
@@ -84,11 +78,7 @@ miot_devices:
         \n
         3. 调用 `{{tool_name_send_get_rpc}}`\n
         - 传入的参数为`did`, `iid`\n
-        - 发送命令获取设备状态\n
-        \n
-        ### 输出要求：\n
-        - 直接调用工具执行上述步骤\n
-        - 除执行结果外，不输出任何其他文字"
+        - 发送命令获取设备状态"
       params:
         did: "米家设备DID"
         iid: "SPEC实例ID"
@@ -119,8 +109,7 @@ miot_devices:
         - 除执行结果外，不输出任何其他文字"
     prompt_send_get_rpc:
       description: "获取米家设备状态模板。"
-      content:
-        "你是一个用于米家设备属性查询的工具，请按照下述步骤操作。\n
+      content: "你是一个用于米家设备属性查询的工具，请按照下述步骤操作。\n
         ### 查询步骤：\n
         1. 调用 `{{tool_name_get_devices}}`\n
         - 获取可控设备列表\n

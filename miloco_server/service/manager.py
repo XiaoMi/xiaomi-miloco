@@ -108,12 +108,12 @@ class Manager:
             get_language=self.get_language,
             tool_executor=self._tool_executor,
             trigger_rule_log_dao=self._trigger_rule_log_dao,
-            
-            )
+        )
 
         # Initialize all services
         self._auth_service = AuthService(self._kv_dao)
-        self._miot_service = MiotService(self._miot_proxy, self._mcp_client_manager, self._default_preset_action_manager)
+        self._miot_service = MiotService(
+            self._miot_proxy, self._mcp_client_manager, self._default_preset_action_manager)
         self._ha_service = HaService(self._ha_proxy, self._mcp_client_manager, self._default_preset_action_manager)
         self._model_service = ModelService(self._kv_dao, self._third_party_model_dao)
         self._mcp_service = McpService(self._mcp_config_dao, self._mcp_client_manager)

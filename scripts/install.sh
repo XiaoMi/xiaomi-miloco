@@ -13,7 +13,8 @@ BACKEND_PORT=8000
 AI_ENGINE_PORT=8001
 MIRROR_GET_DOCKER="Aliyun" # Aliyun|AzureChinaCloud
 # https://cdn.cnbj1.fds.api.mi-img.com/xiaomi-miloco
-FDS_BASE_URL="${FDS_BASE_URL:-https://cdn.cnbj1.fds.api.mi-img.com/xiaomi-miloco}"
+FDS_BASE_URL="${FDS_BASE_URL:-https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco}"
+CDN_BASE_URL="${CDN_BASE_URL:-https://cdn.cnbj1.fds.api.mi-img.com/xiaomi-miloco}"
 DOCKER_CMD="docker"
 DOCKER_IMAGES=("xiaomi/${PROJECT_CODE}-backend" "xiaomi/${PROJECT_CODE}-ai_engine")
 DOCKER_CONTAINERS=("${PROJECT_CODE}-backend" "${PROJECT_CODE}-ai_engine")
@@ -710,7 +711,7 @@ download_models_fds() {
     
     if [ "${need_dl}" == "yes" ] ; then
         print_log "Downloading models..."
-        wget -c -O "${INSTALL_FULL_DIR}/models.zip" "${FDS_BASE_URL}/models.zip"
+        wget -c -O "${INSTALL_FULL_DIR}/models.zip" "${CDN_BASE_URL}/models.zip"
         wget -O "${INSTALL_FULL_DIR}/models.md5" "${FDS_BASE_URL}/models.md5"
         # Checking md5
         print_log "Checking md5..."
@@ -741,6 +742,7 @@ download_docker_images() {
     local cloud_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version_cloud")
     if [ -f "${INSTALL_FULL_DIR}/.latest_version" ]; then
         latest_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version")
+        result=$(version_compare "${latest_version}" "${cloud_version}")
         if [ $(version_compare "${latest_version}" "${cloud_version}") -le 1 ]; then
             print_info "No latest version available, skip downloading updates: ${latest_version} <= ${cloud_version}"
             rm -rf "${INSTALL_FULL_DIR}/.latest_version_cloud"
@@ -753,7 +755,7 @@ download_docker_images() {
         latest_version="${cloud_version}"
     fi
     
-    wget -c -O "${INSTALL_FULL_DIR}/${latest_version}.zip" "${FDS_BASE_URL}/images/${latest_version}.zip"
+    wget -c -O "${INSTALL_FULL_DIR}/${latest_version}.zip" "${CDN_BASE_URL}/images/${latest_version}.zip"
     wget -O "${INSTALL_FULL_DIR}/${latest_version}.md5" "${FDS_BASE_URL}/images/${latest_version}.md5"
     print_log "Checking md5..."
     local md5_calc=$(md5sum "${INSTALL_FULL_DIR}/${latest_version}.zip" | awk '{print $1}')

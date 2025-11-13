@@ -59,11 +59,7 @@ miot_devices:
         \n
         4. Rufe `{{tool_name_send_ctrl_rpc}}` auf\n
         - Übergib die Parameter `did`, `iid` und `value`\n
-        - Sende den Steuerbefehl zur Steuerung des Geräts\n
-        \n
-        ### Ausgabebedingungen:\n
-        - Rufe direkt das Tool gemäß den Schritten auf\n
-        - Gib außer dem Ausführungsergebnis keine weiteren Texte aus"
+        - Sende den Steuerbefehl zur Steuerung des Geräts"
       params:
         did: "Geräte-DID in Xiaomi Home"
         iid: "SPEC-Instanz-ID"
@@ -83,11 +79,7 @@ miot_devices:
         \n
         3. Rufe `{{tool_name_send_get_rpc}}` auf\n
         - Übergib die Parameter `did`, `iid`\n
-        - Sende den Befehl zum Abrufen des Gerätestatus\n
-        \n
-        ### Ausgabebedingungen:\n
-        - Rufe direkt das Tool gemäß den Schritten auf\n
-        - Gib außer dem Ausführungsergebnis keine weiteren Texte aus"
+        - Sende den Befehl zum Abrufen des Gerätestatus"
       params:
         did: "Geräte-DID in Xiaomi Home"
         iid: "SPEC-Instanz-ID"

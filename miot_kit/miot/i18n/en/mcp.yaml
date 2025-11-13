@@ -59,11 +59,7 @@ miot_devices:
         \n
         4. Call `{{tool_name_send_ctrl_rpc}}`\n
         - Pass parameters `did`, `iid`, and `value`\n
-        - Send control command to operate the device\n
-        \n
-        ### Output Requirements:\n
-        - Directly call the tool to execute the above steps\n
-        - Output nothing except the execution result"
+        - Send control command to operate the device"
       params:
         did: "Xiaomi Home device DID"
         iid: "SPEC instance ID"
@@ -83,11 +79,7 @@ miot_devices:
         \n
         3. Call `{{tool_name_send_get_rpc}}`\n
         - Pass parameters `did`, `iid`\n
-        - Send command to get the device status\n
-        \n
-        ### Output Requirements:\n
-        - Directly call the tool to execute the above steps\n
-        - Output nothing except the execution result"
+        - Send command to get the device status"
       params:
         did: "Xiaomi Home device DID"
         iid: "SPEC instance ID"

@@ -15,7 +15,7 @@ from thespian.actors import Actor, ActorAddress, ActorExitRequest
 from miloco_server import actor_system
 from miloco_server.config import PromptConfig, CHAT_CONFIG
 from miloco_server.config.prompt_config import PromptType, UserLanguage
-from miloco_server.middleware.exceptions import ResourceNotFoundException
+from miloco_server.middleware.exceptions import LLMServiceException, ResourceNotFoundException
 from miloco_server.schema.chat_history_schema import ChatHistoryMessages
 from miloco_server.schema.chat_schema import Dialog, Event, InstructionPayload, Template
 from miloco_server.schema.mcp_schema import CallToolResult, LocalMcpClientId
@@ -181,7 +181,7 @@ class ChatAgent(Actor):
                 "[%s] Unexpected error occurred during agent execution: %s",
                 self._request_id, str(e), exc_info=True)
             success = False
-            error_message = f"Unexpected error occurred during execution: {str(e)}"
+            error_message = f"Unexpected error: {str(e)}"
 
         finally:
             logger.info(
@@ -267,7 +267,7 @@ class ChatAgent(Actor):
         except Exception as e:
             logger.error("[%s] Error occurred while executing agent step: %s",
                          self._request_id, str(e))
-            raise
+            raise LLMServiceException(f"Error occurred while calling LLM: {str(e)}") from e
 
     async def _call_llm_stream(self) -> AsyncGenerator[dict, None]:
         """Call large language model."""

@@ -111,7 +111,7 @@ int32_t llama_mico_request_prompt(void* handle, const char* request_json_str, in
         return stop_process(false /* success */, err, content, *is_finished, state, ctx, seq_id, true /* stop */);
     }
 
-    limit_prompt_tokens(chunks, ctx->n_usage_context, state);
+    limit_prompt_tokens(chunks, ctx->n_usage_context, state, ctx);
 
     /*================infer=====================*/
     BatchScheduler* bs = static_cast<BatchScheduler*>(ctx->batch_scheduler);

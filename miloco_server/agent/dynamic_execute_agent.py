@@ -25,7 +25,6 @@ class ActionDescriptionDynamicExecuteAgent(ChatAgent):
         request_id: str,
         out_actor_address: ActorAddress,
         chat_history_messages: Optional[ChatHistoryMessages] = None,
-        
     ):
         super().__init__(request_id, out_actor_address, chat_history_messages)
         self._actions: list[Action] = []

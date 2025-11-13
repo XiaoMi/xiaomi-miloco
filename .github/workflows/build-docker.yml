@@ -1,0 +1,54 @@
+name: Build Docker Images
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set version tag
+        id: vars
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION=${GITHUB_REF_NAME}
+          else
+            VERSION=latest
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build and push ai_engine
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: docker/ai_engine.cuda.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/miloco-ai_engine:${{ steps.vars.outputs.VERSION }}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: docker/backend.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/miloco-backend:${{ steps.vars.outputs.VERSION }}

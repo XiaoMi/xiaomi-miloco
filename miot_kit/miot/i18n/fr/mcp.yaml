@@ -60,11 +60,7 @@ miot_devices:
         \n
         4. Appeler `{{tool_name_send_ctrl_rpc}}`\n
         - Paramètres d'entrée : `did`, `iid` et `value`\n
-        - Envoyer la commande pour contrôler l'appareil\n
-        \n
-        ### Exigences de sortie :\n
-        - Appeler directement l'outil pour exécuter les étapes ci-dessus\n
-        - Ne pas produire d'autre texte que le résultat de l'exécution"
+        - Envoyer la commande pour contrôler l'appareil"
       params:
         did: "DID de l'appareil Xiaomi Home"
         iid: "ID de l'instance SPEC"
@@ -84,11 +80,7 @@ miot_devices:
         \n
         3. Appeler `{{tool_name_send_get_rpc}}`\n
         - Paramètres d'entrée : `did`, `iid`\n
-        - Envoyer la commande pour obtenir l'état de l'appareil\n
-        \n
-        ### Exigences de sortie :\n
-        - Appeler directement l'outil pour exécuter les étapes ci-dessus\n
-        - Ne pas produire d'autre texte que le résultat de l'exécution"
+        - Envoyer la commande pour obtenir l'état de l'appareil"
       params:
         did: "DID de l'appareil Xiaomi Home"
         iid: "ID de l'instance SPEC"

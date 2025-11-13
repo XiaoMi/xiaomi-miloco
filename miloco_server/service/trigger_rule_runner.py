@@ -186,9 +186,11 @@ class TriggerRuleRunner:
                     condition_result.result)
                 for condition_result in condition_result_list
             ])
-            
+
             is_dynamic_action_running = self._check_dynamic_action_is_running(rule_id)
-            logger.info("Rule %s is execable: %s, dynamic action is running: %s", rule_id, execable, is_dynamic_action_running)
+            logger.info(
+                "Rule %s is execable: %s, dynamic action is running: %s",
+                rule_id, execable, is_dynamic_action_running)
 
             if execable and not is_dynamic_action_running:
                 execute_id = str(uuid.uuid4())

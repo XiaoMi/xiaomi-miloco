@@ -197,18 +197,7 @@ int32_t llm_chat_apply_template(llm_chat_template tmpl, const std::vector<const 
         for (auto message : chat) {
             std::string tool_role = "tool";
             if (tool_role.compare(message->role) == 0) {
-                // todo only support mimo/qwen2.5 tool
                 std::string content = message->content;
-                // 暂不解析
-                // try {
-                //     nlohmann::ordered_json jsons = nlohmann::ordered_json::parse(message->content);
-                //     for (auto& json : jsons.items()) {
-                //         std::string type = json.value("type", "text");
-                //         content += json.value(type, message->content);
-                //     }
-                // } catch (const std::exception& e) {
-                //     // printf("parse tool response error: %s\n", e.what());
-                // }
                 ss << "<|im_start|>user\n" << "<tool_response>\n" << content << "</tool_response><|im_end|>\n";
             } else {
                 ss << "<|im_start|>" << message->role << "\n" << message->content << "<|im_end|>\n";

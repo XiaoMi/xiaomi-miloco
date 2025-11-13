@@ -30,7 +30,7 @@ class VisionUnderstander(BaseLLMUtil):
         self._camera_img_seqs = camera_img_seqs
         self._language = language
         self._init_conversation()
-        logger.info("[%s] VisionUnderstander initialized", self._request_id)
+        logger.info("[%s] VisionUnderstander initialized, llm_proxy: %s", self._request_id, self._llm_proxy)
 
 
     def _init_conversation(self) -> None:

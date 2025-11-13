@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ZIP Component Dir
+        run: |
+          cd ${{ github.workspace }}
+          zip -r xiaomi_miloco.zip ./
+
+      - name: Upload zip to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ github.workspace }}/xiaomi_miloco.zip
+          asset_name: xiaomi_miloco.zip
+          tag: ${{ github.ref }}
+          overwrite: true

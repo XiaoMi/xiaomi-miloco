@@ -58,11 +58,7 @@ miot_devices:
         \n
         4. 調用 `{{tool_name_send_ctrl_rpc}}`\n
         - 傳入的參數為`did`, `iid`和`value`\n
-        - 發送控制命令以控制設備\n
-        \n
-        ### 輸出要求：\n
-        - 直接調用工具執行上述步驟\n
-        - 除執行結果外，不輸出任何其他文字"
+        - 發送控制命令以控制設備"
       params:
         did: "米家設備DID"
         iid: "SPEC實例ID"
@@ -81,11 +77,7 @@ miot_devices:
         \n
         3. 調用 `{{tool_name_send_get_rpc}}`\n
         - 傳入的參數為`did`, `iid`\n
-        - 發送命令獲取設備狀態\n
-        \n
-        ### 輸出要求：\n
-        - 直接調用工具執行上述步驟\n
-        - 除執行結果外，不輸出任何其他文字"
+        - 發送命令獲取設備狀態"
       params:
         did: "米家設備DID"
         iid: "SPEC實例ID"

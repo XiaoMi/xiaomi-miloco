@@ -176,6 +176,8 @@ std::string common_chat_format_single(const struct common_chat_templates* tmpls,
 
 // Returns an example of formatted chat
 std::string common_chat_format_example(const struct common_chat_templates* tmpls, bool use_jinja);
+std::string common_chat_format_example(const struct common_chat_templates* tmpls, std::string role, std::string content,
+                                       bool use_jinja);
 
 const char* common_chat_format_name(common_chat_format format);
 const char* common_reasoning_format_name(common_reasoning_format format);
