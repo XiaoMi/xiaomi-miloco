@@ -43,25 +43,25 @@ NVIDIA Driver: NVIDIA driver with CUDA support
 NVIDIA Container Toolkit: For Docker GPU support
 ```
 
-### Installation Steps
+### Install
 
 > **Note**: Please ensure your system meets the above hardware and software requirements. Windows systems need to enter the WSL environment.
 
-Use the one-click installation script to complete environment configuration and service startup.
-
+**Install with Docker**  
+One-click installation via command line
 ```bash
 bash -c "$(wget -qO- https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco/install.sh)"
 ```
-
-Or clone the repository and install with one click:
-
+Or download the source code first, then execute the one-click installation script:
 ```bash
 git clone https://github.com/XiaoMi/xiaomi-miloco.git
 
 bash script/install.sh
 ```
-
 For detailed installation steps, please refer to the [Docker Deployment Documentation](docs/environment-setup.md).
+
+**Install with source code**  
+For source code installation steps, please refer to the [Development Guide](docs/development/developer-setup.md).
 
 ## Usage Documentation
 

@@ -47,22 +47,21 @@ NVIDIA Container Toolkit: 用于Docker GPU支持
 
 > **注意**: 请确保您的系统满足上述硬件和软件要求。windows 系统需要进入 wsl 环境。
 
-使用一键安装脚本完成环境配置，服务启动。
-
+**Docker安装**  
+命令行一键安装
 ```bash
 bash -c "$(wget -qO- https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco/install.sh)"
 ```
-
-或者可拉取仓库后一键安装
-
+或下载源码后，执行一键安装脚本
 ```bash
 git clone https://github.com/XiaoMi/xiaomi-miloco.git
 
 bash script/install.sh
 ```
-
-
 详细的安装步骤请参考 [Docker部署文档](docs/environment-setup_zh-Hans.md)。
+
+**源码安装**  
+源码安装步骤请参考 [开发指南](docs/development/developer-setup_zh_Hans.md)。
 
 ## 使用教程文档
 
