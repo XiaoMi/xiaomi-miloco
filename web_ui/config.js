@@ -8,7 +8,7 @@ export const config = {
     target: 'https://192.168.31.97:8000/',
   },
   app: {
-    name: 'Micolo',
+    name: 'Miloco',
     version: '1.0.0'
   }
 }
