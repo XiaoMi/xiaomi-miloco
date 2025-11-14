@@ -2,7 +2,7 @@
 
 ## Regarding Xiaomi Miloco
 
-**Xiaomi Local Copilot** is a future exploration solution for smart homes. Using Xiaomi Home cameras as the source of visual information and a self-developed LLM as its core, it connects all IoT devices throughout the house. Based on the development paradigm of LLM, it enables users to define various family needs and rules in natural language, achieving broader and more creative smart device integration.
+**Xiaomi Miloco**(Xiaomi Local Copilot) is a future exploration solution for smart homes. Using Xiaomi Home cameras as the source of visual information and a self-developed LLM as its core, it connects all IoT devices throughout the house. Based on the development paradigm of LLM, it enables users to define various family needs and rules in natural language, achieving broader and more creative smart device integration.
 
 - Ask questions anytime. For example: "[Check what's in the frame](https://www.bilibili.com/video/BV1fwCsBgEih/?share_source=copy_web&vd_source=a325cb1aeca5ec6a025e5978183ab07c)", "Find where my cat is"
 
