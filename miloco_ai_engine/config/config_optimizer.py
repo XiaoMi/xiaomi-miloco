@@ -52,14 +52,14 @@ DEFAULT_NO_GPU_QWEN3_CONFIG_UPDATE = ModelConfigUpdate(
     device=ModelDevice.CPU,
     cache_seq_num=0,
     parallel_seq_num=2,
-    total_context_num=12288,
+    total_context_num=16384,
     chunk_size=1024
 )
 LOW_MODE_QWEN3_CONFIG_UPDATE = ModelConfigUpdate(
     device=ModelDevice.CUDA,
     cache_seq_num=0,
     parallel_seq_num=2,
-    total_context_num=12288,
+    total_context_num=16384,
     chunk_size=1024
 )
 SMALL_MODE_QWEN3_CONFIG_UPDATE = LOW_MODE_QWEN3_CONFIG_UPDATE
@@ -68,7 +68,7 @@ FULL_MODE_QWEN3_CONFIG_UPDATE = ModelConfigUpdate(
     device=ModelDevice.CUDA,
     cache_seq_num=0,
     parallel_seq_num=3,
-    total_context_num=18432,
+    total_context_num=24576,
     chunk_size=1024
 )
 

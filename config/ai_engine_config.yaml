@@ -50,8 +50,8 @@ models:
     model_path: "/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
 
     parallel_seq_num: 2
-    total_context_num: 12288
-    context_per_seq: 6144
+    total_context_num: 16384
+    context_per_seq: 8192
     chunk_size: 1024
 
     device: "cuda"
