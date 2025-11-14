@@ -93,7 +93,7 @@ export default {
           title: 'Complex Control',
           content: {
             item0: 'Play the appropriate song based on the mood of the person in the image through the speaker',
-            item1: 'Adjust the light color based on the person\'s mood in the image'
+            item1: 'Adjust the light color based on the color of the person\'s clothes in the image'
           }
         },
         message4: {
