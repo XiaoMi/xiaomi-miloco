@@ -2,7 +2,7 @@
 
 ## Regarding Xiaomi Miloco
 
-**Xiaomi Local Copilot** is a future exploration solution for smart homes. Using Xiaomi Home cameras as the source of visual information and a self-developed large model as its core, it connects all IoT devices throughout the house. Based on the development paradigm of large models, it enables users to define various family needs and rules in natural language, achieving broader and more creative smart device integration.
+**Xiaomi Local Copilot** is a future exploration solution for smart homes. Using Xiaomi Home cameras as the source of visual information and a self-developed LLM as its core, it connects all IoT devices throughout the house. Based on the development paradigm of LLMs, it enables users to define various family needs and rules in natural language, achieving broader and more creative smart device integration.
 
 - Ask questions anytime. For example: "[Check what's in the frame](https://www.bilibili.com/video/BV1fwCsBgEih/?share_source=copy_web&vd_source=a325cb1aeca5ec6a025e5978183ab07c)", "Find where my cat is"
 
@@ -24,8 +24,8 @@ Before you begin, follow the tutorial below to complete the basic setup.
 
 ### Model Settings
 - Configure and manage models in the Model Management section:
-  - The planning large model is used for Query intent analysis, task planning, and tool invocation. Cloud-based models are recommended.
-  - The visual understanding large model is used for processing and interpreting camera visual data. The local Xiaomi MiMo-VL-Miloco 7B model is recommended.
+  - The planning LLM is used for Query intent analysis, task planning, and tool invocation. Cloud-based models are recommended.
+  - The visual understanding LLM is used for processing and interpreting camera visual data. The local Xiaomi MiMo-VL-Miloco 7B model is recommended.
 
     <img src="../../assets/images/model_management.jpg" width="60%" />
 
@@ -63,9 +63,9 @@ Set the minimum time interval required between rule triggers.
 On the Rules Management page, click "Add Rule" and fill in the required rule details as needed. [Reference video](https://www.bilibili.com/video/BV1BACsBzEUZ/?share_source=copy_web&vd_source=a325cb1aeca5ec6a025e5978183ab07c) 
 
 #### Method 2: Automatically Create Rules
-Implementation: In the AI Hub, describe rule-based requirements using natural language in the dialog box. The large model will invoke the rule creation Agent to automatically generate the rule.
-1. Select the camera(s) for which the rule should be active. If no selection is made, the large model will automatically choose by default. Then, select the MCP service(s) required for the rule. After configuration, describe your rule-based requirement in natural language and click "Send".
-2. The large model will analyze the user's Query, invoke the rule creation Agent, and automatically populate the rule card. Users can modify the content of the auto-generated rule card if needed. After verifying the card content, click "Save Rule" to successfully create the rule.
+Implementation: In the AI Hub, describe rule-based requirements using natural language in the dialog box. The LLM will invoke the rule creation Agent to automatically generate the rule.
+1. Select the camera(s) for which the rule should be active. If no selection is made, the LLM will automatically choose by default. Then, select the MCP service(s) required for the rule. After configuration, describe your rule-based requirement in natural language and click "Send".
+2. The LLM will analyze the user's Query, invoke the rule creation Agent, and automatically populate the rule card. Users can modify the content of the auto-generated rule card if needed. After verifying the card content, click "Save Rule" to successfully create the rule.
 3. [Reference video](https://www.bilibili.com/video/BV1zwCsBgEMc/?share_source=copy_web&vd_source=a325cb1aeca5ec6a025e5978183ab07c)
 
 ### How to Configure Models
@@ -78,8 +78,8 @@ The startup script will automatically download and configure the default model. 
 1. Modify the models configuration in the config/ai_engine_config.yaml file by adding/editing custom model names and configuration items. The model_path (mmproj_path) should point to the absolute address of the local model file.
 2. Restart the inference engine service.
 #### Advanced Settings
-- The planning large model is used for Query intent analysis, task planning, and tool invocation. Using cloud-based models will deliver better performance.
-- The visual understanding large model is used for processing and interpreting camera visual data. Xiaomi's self-developed on-device model is recommended.
+- The planning LLM is used for Query intent analysis, task planning, and tool invocation. Using cloud-based models will deliver better performance.
+- The visual understanding LLM is used for processing and interpreting camera visual data. Xiaomi's self-developed on-device model is recommended.
 ### How to Configure MCP Services
 1. After completing authorization, you can use three pre-packaged MCP capabilities: MIoT Automation, MIoT Device Control, and HA Automation. Other third-party MCP services require users to develop and configure them independently.
 2. On the MCP services page, you can use the "Add Service" function to integrate three types of MCP services: SSE, HTTP, and Stdio. Once configured, these MCP services can be selected and used in AI Center conversations.
