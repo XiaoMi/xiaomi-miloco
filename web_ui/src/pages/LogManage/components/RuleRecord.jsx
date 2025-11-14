@@ -89,20 +89,22 @@ const RuleRecord = () => {
       const { aiRecommendActionDescriptions = [] } = item;
 
       const buttonText = aiRecommendActionDescriptions.length > 0
-        ? `点击查看（${aiRecommendActionDescriptions.join('; ')}）执行日志`
-        : t('logManage.viewDynamicExecutionLog');
+        ? `${t('logManage.viewDynamicExecutionLogButtonText')} (${aiRecommendActionDescriptions.join('; ')}) ${t('logManage.viewDynamicExecutionLogButtonText2')}`
+        : '';
 
       executionContent = (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap'}}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           {actionElements}
-          <Button
-            type="link"
-            size="small"
-            onClick={() => handleViewDynamicLog(item)}
-            style={{ padding: 0, height: 'auto', color: 'blue' }}
-          >
-            {buttonText}
-          </Button>
+          {buttonText && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => handleViewDynamicLog(item)}
+              style={{ padding: 0, height: 'auto', color: 'blue' }}
+            >
+              {buttonText}
+            </Button>
+          )}
         </div>
       );
     } else {

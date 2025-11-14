@@ -373,6 +373,8 @@ export default {
     imagesPackagedFailed: '图片打包下载失败',
     imageRecord: '图片记录',
     viewDynamicExecutionLog: '点击查看动态执行日志',
+    viewDynamicExecutionLogButtonText: '点击查看',
+    viewDynamicExecutionLogButtonText2: '执行日志',
 
     executionLogViewer: '执行日志查看器',
     noMessage: '暂无消息',

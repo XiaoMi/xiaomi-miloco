@@ -371,7 +371,8 @@ export default {
     imagesPackagedFailed: 'Images packaged download failed',
     imageRecord: 'Image Record',
     viewDynamicExecutionLog: 'Click to view dynamic execution log',
-
+    viewDynamicExecutionLogButtonText: 'Click to view',
+    viewDynamicExecutionLogButtonText2: 'Execution log',
     executionLogViewer: 'Execution Log Viewer',
     noMessage: 'No message',
   },
