@@ -56,7 +56,7 @@ bash -c "$(wget -qO- https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco/instal
 ```bash
 git clone https://github.com/XiaoMi/xiaomi-miloco.git
 
-bash script/install.sh
+bash scripts/install.sh
 ```
 详细的安装步骤请参考 [Docker部署文档](docs/environment-setup_zh-Hans.md)。
 

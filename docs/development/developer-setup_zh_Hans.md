@@ -120,7 +120,7 @@ miloco_server
 #### 4. 启动
 ```bash
 # 项目根目录下
-python script/start_server.py
+python scripts/start_server.py
 ```
 
 服务启动后，可以通过地址访问API文档：`https://<your-ip>:8000/docs`
@@ -133,13 +133,13 @@ python script/start_server.py
 pip install -e miloco_ai_engine
 
 # 编译 core
-bash script/ai_engine_cuda_build.sh
+bash scripts/ai_engine_cuda_build.sh
 
 # 配置动态库路径
 export LD_LIBRARY_PATH=project_root/output/lib:$LD_LIBRARY_PATH
 
 # 运行服务
-python script/start_ai_engine.py
+python scripts/start_ai_engine.py
 
 ```
   

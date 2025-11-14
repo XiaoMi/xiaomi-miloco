@@ -56,7 +56,7 @@ Or download the source code first, then execute the one-click installation scrip
 ```bash
 git clone https://github.com/XiaoMi/xiaomi-miloco.git
 
-bash script/install.sh
+bash scripts/install.sh
 ```
 For detailed installation steps, please refer to the [Docker Deployment Documentation](docs/environment-setup.md).
 
