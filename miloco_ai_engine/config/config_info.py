@@ -25,6 +25,7 @@ class ModelConfigUpdate(BaseModel):
     cache_seq_num: int = Field(description="Cache sequence count")
     parallel_seq_num: int = Field(description="Parallel sequence count")
     total_context_num: int = Field(description="Context window size")
+    context_per_seq: int = Field(default=-1, description="Maximum available context")
     chunk_size: int = Field(description="Batch size")
 
 class ModelConfig(BaseModel):
@@ -78,13 +79,14 @@ class ModelConfig(BaseModel):
         self.n_seq_max = self.cache_seq_num + config_update.parallel_seq_num
 
         self.total_context_num = config_update.total_context_num
+        self.context_per_seq = config_update.context_per_seq \
+            if config_update.context_per_seq > 0 else self.context_per_seq
         self.chunk_size = config_update.chunk_size
 
     def to_dict(self) -> dict:
         """
         Convert to dictionary for C++ library initialization input
         """
-        
         r = self.model_dump()
         r.pop("task_classification")
         # Remove keys with None values from config dictionary
