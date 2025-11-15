@@ -20,7 +20,8 @@
 > NOTICE:
 >
 > - 采用 Docker 方法运行，请按照下述步骤安装环境，如果环境已安装且验证无问题，可跳过环境配置步骤，否则可能导致程序无法运行
-> - 摄像头只允许局域网拉流，Windows 下需要将 WSL2 的网络模式设置为 Mirrored
+> - 摄像头只允许局域网拉流，Windows 下需要将 WSL2 的网络模式设置为 **Mirrored**
+> - WSL2网络设置为 **Mirrored** 模式后，注意配置Hyper-V防火墙允许入站连接；重新刷新摄像头列表，如果还是离线状态，可以尝试关闭Windows防火墙
 
 ### Linux
 下述教程以 Ubuntu 24.04 LTS 为例，其它 Linux 发行版请自行修改命令。
@@ -134,7 +135,27 @@ docker rmi nvidia/cuda:12.4.0-base-ubuntu22.04
 
 ##### 网络模式配置
 
-在系统中搜索 WSL Setting ，点击网络，然后将网络模式修改为 Mirrored ，修改完成后，需要使用`wsl --shutdown`停止子系统，然后重新运行`wsl -d Ubuntu-24.04`进入子系统，输入`ip a`查看子系统网络配置是否和宿主机器一致。
+在系统中搜索 WSL Setting ，点击网络，然后将网络模式修改为 **Mirrored** ，修改完成后，需要使用`wsl --shutdown`停止子系统，然后重新运行`wsl -d Ubuntu-24.04`进入子系统，输入`ip a`查看子系统网络配置是否和宿主机器一致。
+
+设置为 **Mirrored** 模式后，需要配置 Hyper-V 防火墙，允许入站连接。
+
+在 PowerShell 窗口中以管理员权限运行以下命令，以配置 Hyper-V 防火墙设置，使其允许入站连接：
+```powershell
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+# 使用下述命令获取WSL防火墙策略
+Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+# DefaultInboundAction和DefaultOutboundAction为Allow即可:
+# Name                  : {40E0AC32-46A5-438A-A0B2-2B479E8F2E90}
+# Enabled               : True
+# DefaultInboundAction  : Allow
+# DefaultOutboundAction : Allow
+# LoopbackEnabled       : True
+# AllowHostPolicyMerge  : True
+```
+
+相关资料：
+- [使用 WSL 访问网络应用程序](https://learn.microsoft.com/zh-cn/windows/wsl/networking)
+- [配置防火墙](https://learn.microsoft.com/zh-cn/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall)
 
 ##### 安装 Docker
 

@@ -33,8 +33,8 @@ class MIoTSpecTypeLevel(int, Enum):
 
 class MIoTSpecValueRange(BaseModel):
     """MIoT SPEC value range class."""
-    min_: int = Field(alias="min", serialization_alias="min", description="Property value min")
-    max_: int = Field(alias="max", serialization_alias="max", description="Property value max")
+    min_: float = Field(alias="min", serialization_alias="min", description="Property value min")
+    max_: float = Field(alias="max", serialization_alias="max", description="Property value max")
     step: float = Field(description="Property value step")
 
     model_config = ConfigDict(populate_by_name=True)

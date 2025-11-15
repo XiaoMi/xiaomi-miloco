@@ -21,6 +21,7 @@ Runtime Environment Requirements:
 >
 > - If running via Docker, follow the steps below to install the environment. If the environment is already installed and passes verification, you may skip the setup steps; otherwise, the program may fail to run.
 > - The camera only allows streaming within the local area network. On Windows, you need to set the WSL2 network mode to **Mirrored**.
+> - After setting the WSL2 network to **Mirrored** mode, make sure to configure the Hyper-V firewall to allow inbound connections. Refresh the camera list; if it still shows as offline, you can try disabling the Windows firewall.
 
 ### Linux
 The following instructions use **Ubuntu 24.04 LTS** as an example. For other Linux distributions, change the commands accordingly.
@@ -113,6 +114,26 @@ Refer to Microsoft’s official guide: [English](https://learn.microsoft.com/zh-
 ##### Network Mode Configuration
 Search for **WSL Setting**, open **Network**, change network mode to **Mirrored**. After changing, run `wsl --shutdown` to stop WSL, then restart with `wsl -d Ubuntu-24.04`.  
 Run `ip a` to check whether the subnet matches the host machine.
+
+After setting to **Mirrored** mode, you need to configure the Hyper-V firewall to allow inbound connections.  
+
+In a PowerShell window run the following commands with administrator privileges to configure the Hyper-V firewall settings so that inbound connections are allowed:  
+```powershell
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+# Use the following command to get the WSL firewall policy
+Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+# DefaultInboundAction and DefaultOutboundAction should both be set to Allow:
+# Name                  : {40E0AC32-46A5-438A-A0B2-2B479E8F2E90}
+# Enabled               : True
+# DefaultInboundAction  : Allow
+# DefaultOutboundAction : Allow
+# LoopbackEnabled       : True
+# AllowHostPolicyMerge  : True
+```
+References:  
+- [Accessing network applications with WSL](https://learn.microsoft.com/en-us/windows/wsl/networking)
+- [Configure the firewall](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall)
+
 ##### Install Docker
 Use the official script (WSL official recommendation is Docker Desktop, but you can ignore the prompt and install directly):
 ```shell

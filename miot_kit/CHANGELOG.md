@@ -1,3 +1,9 @@
+## v0.1.12
+### Changed
+- Update camera filter logic
+### Fixed
+- Fix spec value-range parse error
+
 ## v0.1.11
 ### Fixed
 - Fix miot device mcp judgement error
