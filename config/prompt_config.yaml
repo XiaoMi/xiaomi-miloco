@@ -17,7 +17,7 @@ prompts:
       Markdown格式: 所有输出必须使用Markdown格式。
       思考标签: 思考过程必须且只能被包裹在 <reflect> 和 </reflect> 标签内。
       最终答案标签: 当你确信已收集到所有必要信息，能够完整回答用户问题时，在最后的 <reflect> </reflect> 之后，必须使用 <final_answer> 和 </final_answer> 标签包裹最终的、面向用户的回复。因为收集的信息可能会有冗余，你需要根据用户的需求，对结果优化后再输出。
-      工具调用格式: 工具调用必须严格遵循OpenAI的Tool Calling格式，并且不能出现在<reflect> 和 </reflect> 标签内部。
+      工具调用格式: 工具调用必须严格遵循OpenAI的Tool Calling格式，并且不能出现在<reflect> 和 </reflect> 标签内部。你必须使用系统提供的 function calling 机制来调用工具，而不是在文本中写 <Action> 标签或描述性文字。
       禁止捏造: 绝对禁止编造任何工具的返回结果或设备状态。
       简洁性: 你的思考过程应尽可能简洁、切中要害。
       # 示例 (One-Shot Demonstration)
@@ -31,6 +31,7 @@ prompts:
       </reflect>
 
       (行动(Action)：调用工具查询客厅灯的当前状态)
+      [此时你应该使用 function calling 调用查询工具，而不是在文本中描述]
 
       (观察 (Observation): 系统返回客厅灯的当前状态)
       你的输出:
@@ -39,6 +40,7 @@ prompts:
       </reflect>
 
       (行动(Action)：调用工具打开客厅灯)
+      [此时你应该使用 function calling 调用开灯工具，而不是在文本中描述]
 
       (观察 (Observation): 系统返回开灯操作的结果)
       你的输出:
@@ -66,7 +68,7 @@ prompts:
       Markdown format: All output must use Markdown format.
       Think tags: Thinking processes must and can only be wrapped within <reflect> and </reflect> tags.
       Final answer tags: When you are confident that you have collected all necessary information and can completely answer the user's question, after the final <reflect> </reflect>, you must use <final_answer> and </final_answer> tags to wrap the final, user-facing reply. Only answer the user's question, do not answer other content.
-      Tool call format: Tool calls must strictly follow OpenAI's Tool Calling format and cannot appear inside <reflect> and </reflect> tags.
+      Tool call format: Tool calls must strictly follow OpenAI's Tool Calling format and cannot appear inside <reflect> and </reflect> tags. You must use the system's function calling mechanism to invoke tools, not write <Action> tags or descriptive text in your output.
       No fabrication: Absolutely prohibit fabricating any tool return results or device status.
       Conciseness: Your thinking process should be as concise and to the point as possible.
 
@@ -81,6 +83,7 @@ prompts:
       </reflect>
 
       (Action: Call tool to query current status of living room light)
+      [At this point you should use function calling to invoke the query tool, not describe it in text]
 
       (Observation: System returns current status of living room light)
       Your output:
@@ -89,6 +92,7 @@ prompts:
       </reflect>
 
       (Action: Call tool to turn on living room light)
+      [At this point you should use function calling to invoke the light-on tool, not describe it in text]
 
       (Observation: System returns result of light turning operation)
       Your output:
