@@ -229,6 +229,11 @@ class ChatAgent(Actor):
             async for chunk in llm_response:
                 current_finish_reason, current_tool_calls, content_stream = await self._process_llm_chunk(
                     chunk)
+                
+                # Skip empty chunks (all values are None)
+                if (current_finish_reason, current_tool_calls, content_stream) == (None, None, None):
+                    continue
+                    
                 logger.debug(
                     "[%s] LLM response: %s, current_finish_reason: %s, current_tool_calls: %s, content_stream: %s",
                     self._request_id, chunk, current_finish_reason,
@@ -295,7 +300,10 @@ class ChatAgent(Actor):
 
         chat_chunk: ChatCompletionChunk = chunk["chunk"]
         if not chat_chunk.choices:
-            raise RuntimeError("No choices in LLM response")
+            # Some LLM providers (e.g., GPT-4.1) may send empty chunks at the start or end of stream
+            # Skip these chunks instead of raising an error
+            logger.debug("[%s] Skipping chunk with empty choices", self._request_id)
+            return None, None, None
 
         choice = chat_chunk.choices[0]
         delta = choice.delta
