@@ -24,6 +24,14 @@ add_subdirectory(${LLAMA_THIRD_PARTY_PATH}/src  ${CMAKE_CURRENT_BINARY_DIR}/llam
 
 target_link_libraries(llama-mico PRIVATE llama ggml)
 
+# Set RPATH for macOS to find dependencies in the same directory
+if(APPLE)
+    set_target_properties(llama-mico PROPERTIES
+        INSTALL_RPATH "@loader_path"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+endif()
+
 add_subdirectory(utils)
 add_subdirectory(cache_manager)
 add_subdirectory(batch_scheduling)
