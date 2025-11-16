@@ -22,6 +22,7 @@ from .error import MIoTCameraError
 from .const import CAMERA_RECONNECT_TIME_MIN, CAMERA_RECONNECT_TIME_MAX, OAUTH2_API_HOST_DEFAULT, OAUTH2_CLIENT_ID
 from .types import (
     MIoTCameraCodec,
+    MIoTCameraExtraInfo,
     MIoTCameraFrameData,
     MIoTCameraFrameType,
     MIoTCameraStatus,
@@ -894,16 +895,16 @@ class MIoTCamera:
 
 
 @cached(ttl=600, cache=Cache.MEMORY)
-async def get_support_cameras() -> Dict[str, Dict]:
-    """Get support cameras."""
+async def get_camera_extra_info() -> MIoTCameraExtraInfo:
+    """Get cameras extra info."""
     # TODO: Get from cloud.
-    file_path = Path(__file__).parent / "configs" / "support_cameras.yaml"
+    file_path = Path(__file__).parent / "configs" / "camera_extra_info.yaml"
     if not file_path.exists():
-        raise MIoTCameraError(f"support_cameras.yaml file not exists, {file_path}")
-    result: Optional[Dict[str, Dict]] = None
+        raise MIoTCameraError(f"camera_extra_info.yaml file not exists, {file_path}")
+    result: Optional[MIoTCameraExtraInfo] = None
     async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-        _LOGGER.info("load support_cameras.yaml file: %s", file_path)
-        result = yaml.safe_load(await f.read())
+        _LOGGER.info("load camera_extra_info.yaml file: %s", file_path)
+        result = MIoTCameraExtraInfo.model_validate(yaml.safe_load(await f.read()))
     if not result:
-        raise MIoTCameraError(f"support_cameras.yaml file is empty, {file_path}")
+        raise MIoTCameraError(f"camera_extra_info.yaml file is empty, {file_path}")
     return result

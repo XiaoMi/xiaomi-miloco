@@ -18,6 +18,7 @@ from miot.storage import MIoTStorage
 from .const import CLOUD_SERVER_DEFAULT, SYSTEM_LANGUAGE_DEFAULT
 from .types import (
     MIoTAppNotify,
+    MIoTCameraExtraInfo,
     MIoTCameraInfo,
     MIoTCameraStatus,
     MIoTDeviceInfo,
@@ -31,7 +32,7 @@ from .i18n import MIoTI18n
 from .cloud import MIoTOAuth2Client, MIoTHttpClient
 from .lan import MIoTLan
 from .network import MIoTNetwork
-from .camera import MIoTCamera, MIoTCameraInstance, get_support_cameras
+from .camera import MIoTCamera, MIoTCameraInstance, get_camera_extra_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -384,15 +385,20 @@ class MIoTClient:
         Returns:
             Dict[str, MIoTDeviceInfo]: Camera info.
         """
-        support_cameras = await get_support_cameras()
+        camera_extra_info: MIoTCameraExtraInfo = await get_camera_extra_info()
         cameras: Dict[str, MIoTCameraInfo] = {}
         devices = await self.get_devices_async(home_list=home_list, fetch_share_home=fetch_share_home)
         for did, device_info in devices.items():
-            if device_info.model not in support_cameras:
+            if device_info.model in camera_extra_info.blacklist:
+                continue
+            if device_info.model.split('.')[1] not in camera_extra_info.support_classes:
                 continue
             cameras[did] = MIoTCameraInfo(
                 **device_info.model_dump(),
-                channel_count=support_cameras[device_info.model].get("channel_count", 1),
+                channel_count=(
+                    camera_extra_info.extra_info[device_info.model].channel_count
+                    if device_info.model in camera_extra_info.extra_info else 1
+                ),
                 camera_status=MIoTCameraStatus.DISCONNECTED
             )
             cameras[did].online = False

@@ -282,3 +282,17 @@ class MIoTCameraFrameData(BaseModel):
     frame_type: MIoTCameraFrameType = Field(description="Frame type")
     channel: int = Field(description="Frame channel")
     data: bytes = Field(description="Frame data")
+
+
+class MIoTCameraExtraItem(BaseModel):
+    """MIoT Camera Extra Item."""
+    channel_count: int = Field(description="Channel count")
+    name: Optional[str] = Field(description="Extra item name")
+    vendor: Optional[str] = Field(description="Vendor")
+
+
+class MIoTCameraExtraInfo(BaseModel):
+    """MIoT Camera Extra Info."""
+    support_classes: List[str] = Field(description="Support classes")
+    extra_info: Dict[str, MIoTCameraExtraItem] = Field(description="Extra info")
+    blacklist: List[str] = Field(description="Blacklist")

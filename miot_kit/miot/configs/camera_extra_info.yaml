@@ -1,0 +1,43 @@
+support_class:
+  - camera
+extra_info:
+  chuangmi.camera.068ac1:
+    channel_count: 2
+    name: 小白智能户外摄像机Q2 双摄照明版
+    vendor: 上海创米科技
+  chuangmi.camera.111ac1:
+    channel_count: 2
+    name: 小白智能摄像机 A2双摄版
+    vendor: 上海创米科技
+  chuangmi.camera.72ac1:
+    channel_count: 2
+    name: 小米智能摄像机C300双摄版
+    vendor: 上海创米科技
+  isa.camera.cw501d:
+    channel_count: 2
+    name: 小米室外摄像机 4 双摄版
+    vendor: 天津华来科技有限公司
+  isa.camera.hlmax:
+    channel_count: 2
+    name: 小米室外摄像机CW500双摄版
+    vendor: 天津华来科技有限公司
+  mxiang.camera.c500ch:
+    channel_count: 2
+    name: 小米智能摄像机C500双摄版
+    vendor: 上海摩象网络科技有限公司
+blacklist:
+  - chuangmi.camera.ipc004b
+  - miir.camera.ir01
+  - mxiang.camera.mwc11
+  - isa.camera.hl5
+  - xiaovv.camera.xva3
+  - xzh.camera.camera
+  - cgzn.camera.camera
+  - isa.camera.virtual
+  - lumi.camera.aq1
+  - fimi.camera.c1b
+  - yunyi.camera.v1
+  - fimi.camera.c1
+  - chuangmi.camera.v4
+  - chuangmi.camera.ipc007b
+  - chuangmi.camera.ipc010

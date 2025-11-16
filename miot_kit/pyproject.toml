@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "miot_kit"
-version = "0.1.11"
+version = "0.1.12"
 description = "MIoT Kit"
 authors = [{ name = "MIoT Development Team" }]
 readme = "README.md"
