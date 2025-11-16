@@ -92,7 +92,7 @@ bash scripts/install.sh
 - GitHub 的[讨论区](https://github.com/XiaoMi/xiaomi-miloco/discussions/)
 - 项目讨论群（微信）：
 
-  <img src="assets/images/wechat_11.jpg" width="30%" />  <img src="assets/images/wechat_8.jpg" width="30%" />  <img src="assets/images/wechat_4.jpg" width="30%" />
+  <img src="assets/images/wechat_3.jpeg" width="30%" />  <img src="assets/images/wechat_5.jpeg" width="30%" />  <img src="assets/images/wechat_8.jpg" width="30%" />
 
 
 ### 加入我们
