@@ -6,7 +6,7 @@ Runtime Environment Requirements:
 - System Requirements:
   - **Linux**: x64 architecture, Ubuntu 22.04 LTS or higher is recommended
   - **Windows**: x64 architecture, Windows 11 22H2 or higher is recommended; WSL2 support is required
-  - **macOS**: ARM architecture, currently not supported
+  - **macOS**: ARM architecture, only support deploy AI backend(./deployment/deployment-macos.md)
 - GPU Requirements (The project's AI Engine requires GPU support)
   - **NVIDIA**: GeForce RTX 30 series or newer recommended, with at least 8 GB VRAM
   - **AMD**: Currently not supported

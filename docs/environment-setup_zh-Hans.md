@@ -6,7 +6,7 @@
 - 系统要求：
 - - **Linux**: x64 架构，建议 Ubuntu 22.04 及以上 LTS 版本
 - - **Windows**: x64 架构，建议 Windows11 22H2 及以上版本，要求支持WSL2
-- - **macOS**:  Arm 架构，暂不支持
+- - **macOS**:  Arm架构, 仅支持AI后端(./deployment/deployment-macos.md)
 - 显卡要求（项目AI Engine需要显卡支持）
 - - **NVIDIA**：建议**30系及以上显卡，显存8G及以上**
 - - **AMD**：暂不支持
