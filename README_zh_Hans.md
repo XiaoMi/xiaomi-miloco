@@ -46,7 +46,7 @@ NVIDIA Container Toolkit: 用于Docker GPU支持
 ### 安装步骤
 
 > **注意**: 请确保您的系统满足上述硬件和软件要求。windows 系统需要进入 wsl 环境。
-
+> 如果您使用的是Windows WSL环境，请同时参考 [WSL部署注意事项](docs/deploy_for_wsl/wsl_deploy.md)。
 **Docker安装**  
 命令行一键安装
 ```bash
