@@ -809,7 +809,7 @@ config_install_env(){
     case "${OS_DISTRO}" in
         ubuntu|debian)
             sudo apt-get update
-            sudo apt-get install -y wget unzip gcc
+            sudo apt-get install -y wget unzip gcc bc
         ;;
         amzn|fedora|kylin|rhel)
         ;;
