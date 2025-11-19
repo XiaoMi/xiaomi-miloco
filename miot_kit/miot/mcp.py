@@ -685,15 +685,16 @@ class MIoTDeviceMcp(_BaseMcp[MIoTDeviceMcpInterface]):
                                 value_trans = None
                     case "bool":
                         # bool
-                        if isinstance(value, int):
-                            value_trans = value == 0
-                        elif isinstance(value, str):
-                            value_trans = value.lower() in ["true", "yes", "ok", "1"]
-                        elif not isinstance(value, bool):
-                            try:
-                                value_trans = bool(value)
-                            except Exception:
-                                value_trans = None
+                        if not isinstance(value, bool):
+                            if isinstance(value, int):
+                                value_trans = value == 0
+                            elif isinstance(value, str):
+                                value_trans = value.lower() in ["true", "yes", "ok", "1"]
+                            else:
+                                try:
+                                    value_trans = bool(value)
+                                except Exception:
+                                    value_trans = None
                 if value_trans is None:
                     _LOGGER.warning("invalid property value(%s), %s, %s, %s", spec.format, did, iid, value)
                     # TODO: translate
