@@ -687,7 +687,7 @@ class MIoTDeviceMcp(_BaseMcp[MIoTDeviceMcpInterface]):
                         # bool
                         if not isinstance(value, bool):
                             if isinstance(value, int):
-                                value_trans = value == 0
+                                value_trans = value == 1
                             elif isinstance(value, str):
                                 value_trans = value.lower() in ["true", "yes", "ok", "1"]
                             else:
