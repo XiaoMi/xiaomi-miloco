@@ -150,11 +150,11 @@ python scripts/start_ai_engine.py
 通过修改配置文件在启动前配置服务的行为，可以自定义。
   
 ## 后端服务配置:
-- [前端服务代理配置](./web_ui/config.js)
-- [后端服务配置](./config/server_config.yaml)
-- [prompt配置](./config/prompt_config.yaml)
+- [前端服务代理配置](../../web_ui/config.js)
+- [后端服务配置](../../config/server_config.yaml)
+- [prompt配置](../../config/prompt_config.yaml)
 
 ## AI引擎配置:
-- [AI引擎服务配置](./config/ai_engine_config.yaml)
+- [AI引擎服务配置](../../config/ai_engine_config.yaml)
 
   

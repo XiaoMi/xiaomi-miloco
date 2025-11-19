@@ -153,9 +153,9 @@ After the service starts, you can access the API documentation at: `https://<you
 Configure service behavior before startup by modifying configuration files, which can be customized.
   
 ## Backend Service Configuration:
-- [Frontend Service Proxy Configuration](./web_ui/config.js)
-- [Backend Service Configuration](./config/server_config.yaml)
-- [Prompt Configuration](./config/prompt_config.yaml)
+- [Frontend Service Proxy Configuration](../../web_ui/config.js)
+- [Backend Service Configuration](../../config/server_config.yaml)
+- [Prompt Configuration](../../config/prompt_config.yaml)
 
 ## AI Engine Configuration:
-- [AI Engine Service Configuration](./config/ai_engine_config.yaml)
+- [AI Engine Service Configuration](../../config/ai_engine_config.yaml)

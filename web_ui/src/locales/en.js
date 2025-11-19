@@ -86,14 +86,14 @@ export default {
           title: 'Create Rules',
           content: {
             item0: 'When someone is reading, turn on the desk lamp',
-            item1: 'When someone is playing with their phone, send a Xiaomi Home notification reminder'
+            item1: 'When the pet is biting the sofa, send a Xiaomi Home notification reminder'
           }
         },
         message3: {
           title: 'Complex Control',
           content: {
-            item0: 'Look at the child to see if he is playing with his phone? If he is playing with his phone, play "Time to do homework" on the speaker',
-            item1: 'Adjust the light color based on the person\'s mood in the image'
+            item0: 'Play the appropriate song based on the mood of the person in the image through the speaker',
+            item1: 'Adjust the light color based on the color of the person\'s clothes in the image'
           }
         },
         message4: {

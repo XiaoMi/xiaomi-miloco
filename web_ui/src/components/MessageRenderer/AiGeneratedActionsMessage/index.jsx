@@ -47,7 +47,7 @@ const AiGeneratedActionsMessage = ({ data }) => {
       <Tag color="blue">{t('smartCenter.executionResult')}</Tag>
       <div
         style={{
-          backgroundColor: '#fff',
+          backgroundColor: 'var(--bg-color-card)',
           borderRadius: '6px',
           padding: '12px 16px',
           marginTop: '8px',

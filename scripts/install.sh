@@ -2,13 +2,13 @@
 # Xiaomi Miloco Script
 set -euo pipefail
 # English
-# bash -c "$(wget -qO- --no-check-certificate https://cdn.cnbj1.fds.api.mi-img.com/xiaomi-miloco/install.sh)"
-# wget -qO- --no-check-certificate https://cdn.cnbj1.fds.api.mi-img.com/xiaomi-miloco/install.sh | bash
+# bash -c "$(wget -qO- https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco/install.sh)"
+# wget -qO- https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco/install.sh | bash
 
 # Script variables
 PROJECT_NAME="Xiaomi Miloco"
 PROJECT_CODE="miloco"
-SCRIPT_VERSION="v0.0.5"
+SCRIPT_VERSION="v0.0.6"
 BACKEND_PORT=8000
 AI_ENGINE_PORT=8001
 MIRROR_GET_DOCKER="Aliyun" # Aliyun|AzureChinaCloud
@@ -22,7 +22,6 @@ DOCKER_CONTAINERS=("${PROJECT_CODE}-backend" "${PROJECT_CODE}-ai_engine")
 # Config path
 PROJECT_HOME_DIR="${HOME}/.${PROJECT_CODE}"
 PROJECT_CONFIG_FILE="${PROJECT_HOME_DIR}/${PROJECT_CODE}.conf"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SUPPORT_OS=("Linux")            # Linux, macOS
 SUPPORT_OS_DISTRO=("ubuntu" "debian" "amzn" "fedora" "kylin" "rhel" "azl" "opensuse" "sles")
