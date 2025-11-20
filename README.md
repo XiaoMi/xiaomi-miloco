@@ -93,7 +93,7 @@ For issue reporting, please participate through the following methods:
 - GitHub [Discussions](https://github.com/XiaoMi/xiaomi-miloco/discussions/)
 - Project Discussion Group (WeChat):
 
-  <img src="assets/images/miloco_wechat_6.jpg" width="30%" />  <img src="assets/images/wechat_5.jpeg" width="30%" />
+  <img src="assets/images/miloco_wechat_6.jpg" width="30%" />  <img src="assets/images/miloco_wechat_group_12.jpeg" width="30%" />
 
 
 ### Join Us
