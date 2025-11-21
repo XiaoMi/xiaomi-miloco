@@ -769,8 +769,8 @@ download_docker_images() {
     local cloud_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version_cloud")
     if [ -f "${INSTALL_FULL_DIR}/.latest_version" ]; then
         latest_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version")
-        if [ $(version_compare "${latest_version}" "${cloud_version}") -le 1 ]; then
-            print_info "No latest version available, skip downloading updates: ${latest_version} <= ${cloud_version}"
+        if [ $(version_compare "${latest_version}" "${cloud_version}") -gt 0 ]; then
+            print_info "No latest version available, skip downloading updates: ${latest_version} > ${cloud_version}"
             rm -rf "${INSTALL_FULL_DIR}/.latest_version_cloud"
             return 0
         else
