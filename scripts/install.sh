@@ -37,6 +37,7 @@ INSTALL_FULL_DIR="${INSTALL_DIR}/${PROJECT_CODE}"
 DOCKER_COMPOSE_FILE="docker-compose.yaml"
 INSTALL_MODE="UnKnown"  # full, lite
 INSTALL_FROM="Unknown"  # github, xiaomi-fds
+MODELS_DL_FROM="Unknown" # modelscope, huggingface, xiaomi-fds
 
 # NVIDIA Configuration
 # https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
@@ -53,6 +54,14 @@ SUPPORT_OS_DISTRO_NVIDIA=(
 
 # AMD Configure
 SUPPORT_OS_DISTRO_AMD=()
+
+# Models Download Config
+MS_MIMO_VL_MILOCO_7B_Q4_0_URL="https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+MS_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL="https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+MS_QWEN3_8B_Q4_K_M_URL="https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+HF_MIMO_VL_MILOCO_7B_Q4_0_URL="https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/main/MiMo-VL-Miloco-7B_Q4_0.gguf"
+HF_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL="https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/main/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+HF_QWEN3_8B_Q4_K_M_URL="https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
 
 # System variables
 OS="Unknown"
@@ -606,21 +615,51 @@ get_valid_port(){
     echo "${in_port}"
 }
 
-get_install_from() {
-    print_info "Install Service from:"
+install_service_from() {
+    print_info "Install Service from: "
     print_info "1. GitHub Packages"
     print_info "2. Xiaomi FDS"
     while true; do
         read -rp "[✳️ INPUT] Please select the installation source (1/2): " in_source
         case $in_source in
             1)
-                print_log "Selected: GitHub Packages"
+                print_log_e "Selected: ${GREEN}1. GitHub Packages${NC}"
                 INSTALL_FROM="github"
                 return
             ;;
             2)
-                print_log "Selected: Xiaomi FDS"
+                print_log_e "Selected: ${GREEN}2. Xiaomi FDS${NC}"
                 INSTALL_FROM="xiaomi-fds"
+                return
+            ;;
+            *)
+                print_error "Invalid option, please select again"
+            ;;
+        esac
+    done
+}
+
+download_models_from() {
+    print_info "Download Models from: "
+    print_info "1. Model Scope"
+    print_info "2. Hugging Face"
+    print_info "3. Xiaomi FDS"
+    while true; do
+        read -rp "[✳️ INPUT] Please select the installation source (1/2/3): " in_source
+        case $in_source in
+            1)
+                print_log_e "Selected: ${GREEN}1. Model Scope${NC}"
+                MODELS_DL_FROM="modelscope"
+                return
+            ;;
+            2)
+                print_log_e "Selected: ${GREEN}2. Hugging Face${NC}"
+                MODELS_DL_FROM="huggingface"
+                return
+            ;;
+            3)
+                print_log_e "Selected: ${GREEN}3. Xiaomi FDS${NC}"
+                MODELS_DL_FROM="xiaomi-fds"
                 return
             ;;
             *)
@@ -709,13 +748,25 @@ download_models() {
     mkdir -p "${INSTALL_FULL_DIR}/models/Qwen3-8B"
     
     print_log "Downloading models..."
-    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+    if [ "${MODELS_DL_FROM}" == "modelscope" ]; then
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" "${MS_MIMO_VL_MILOCO_7B_Q4_0_URL}"
+    else
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" "${HF_MIMO_VL_MILOCO_7B_Q4_0_URL}"
+    fi
     print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf"
     
-    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    if [ "${MODELS_DL_FROM}" == "modelscope" ]; then
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" "${MS_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL}"
+    else
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" "${HF_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL}"
+    fi
     print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
     
-    wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+    if [ "${MODELS_DL_FROM}" == "modelscope" ]; then
+        wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" "${MS_QWEN3_8B_Q4_K_M_URL}"
+    else
+        wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" "${HF_QWEN3_8B_Q4_K_M_URL}"
+    fi
     print_dl "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
 }
 
@@ -904,7 +955,7 @@ quick_install() {
         return 1
     fi
     
-    get_install_from
+    install_service_from
     
     config_install_env
     
@@ -992,7 +1043,7 @@ quick_install_lite() {
     # Check backend port
     BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}" "Miloco Back-end")
     
-    get_install_from
+    install_service_from
     
     config_install_env
     
@@ -1043,8 +1094,8 @@ install_service(){
     fi
     
     if [ "${INSTALL_MODE}" == "full" ]; then
-        read -rp "[✳️ OPTION]  Please enter the Models download method? Modelscope(Default)or Xiaomi FDS (Ms/fds): "
-        if [ "${REPLY}" == "fds" ]; then
+        download_models_from
+        if [ "${MODELS_DL_FROM}" == "xiaomi-fds" ]; then
             download_models_fds
         else
             download_models
