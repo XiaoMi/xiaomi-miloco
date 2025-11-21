@@ -8,7 +8,7 @@ set -euo pipefail
 # Script variables
 PROJECT_NAME="Xiaomi Miloco"
 PROJECT_CODE="miloco"
-SCRIPT_VERSION="v0.0.6"
+SCRIPT_VERSION="v0.0.7"
 BACKEND_PORT=8000
 AI_ENGINE_PORT=8001
 MIRROR_GET_DOCKER="Aliyun" # Aliyun|AzureChinaCloud
@@ -16,7 +16,9 @@ MIRROR_GET_DOCKER="Aliyun" # Aliyun|AzureChinaCloud
 FDS_BASE_URL="${FDS_BASE_URL:-https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco}"
 CDN_BASE_URL="${CDN_BASE_URL:-https://cdn.cnbj1.fds.api.mi-img.com/xiaomi-miloco}"
 DOCKER_CMD="docker"
-DOCKER_IMAGES=("xiaomi/${PROJECT_CODE}-backend" "xiaomi/${PROJECT_CODE}-ai_engine")
+DOCKER_IMAGE_BACKEND_NAME="xiaomi/${PROJECT_CODE}-backend"
+DOCKER_IMAGE_AI_ENGINE_NAME="xiaomi/${PROJECT_CODE}-ai_engine"
+DOCKER_IMAGES=("${DOCKER_IMAGE_BACKEND_NAME}" "${DOCKER_IMAGE_AI_ENGINE_NAME}")
 DOCKER_CONTAINERS=("${PROJECT_CODE}-backend" "${PROJECT_CODE}-ai_engine")
 
 # Config path
@@ -35,6 +37,7 @@ INSTALL_FULL_DIR="${INSTALL_DIR}/${PROJECT_CODE}"
 DOCKER_COMPOSE_FILE="docker-compose.yaml"
 INSTALL_MODE="UnKnown"  # full, lite
 INSTALL_FROM="Unknown"  # github, xiaomi-fds
+MODELS_DL_FROM="Unknown" # modelscope, huggingface, xiaomi-fds
 
 # NVIDIA Configuration
 # https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
@@ -51,6 +54,14 @@ SUPPORT_OS_DISTRO_NVIDIA=(
 
 # AMD Configure
 SUPPORT_OS_DISTRO_AMD=()
+
+# Models Download Config
+MS_MIMO_VL_MILOCO_7B_Q4_0_URL="https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+MS_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL="https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+MS_QWEN3_8B_Q4_K_M_URL="https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+HF_MIMO_VL_MILOCO_7B_Q4_0_URL="https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/main/MiMo-VL-Miloco-7B_Q4_0.gguf"
+HF_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL="https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/main/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+HF_QWEN3_8B_Q4_K_M_URL="https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
 
 # System variables
 OS="Unknown"
@@ -578,9 +589,10 @@ print_service_status(){
 
 get_valid_port(){
     local default_port="$1"
+    local service_name="$2"
     local in_port="Unknown"
     while true; do
-        read -rp "[✳️ INPUT] Please enter the back-end service port (Default: $1): " in_port
+        read -rp "[✳️ INPUT] Please enter the ${service_name} service port (Default: $1): " in_port
         if [ -z "${in_port}" ]; then
             in_port="$1"
         fi
@@ -599,25 +611,55 @@ get_valid_port(){
             continue;
         fi
     done
-    print_log_e "Using port: ${GREEN}${in_port}${NC}"
+    print_log_e "Using port ${GREEN}${in_port}${NC} for ${service_name}"
     echo "${in_port}"
 }
 
-get_install_from() {
-    print_info "Install Service from:"
+install_service_from() {
+    print_info "Install Service from: "
     print_info "1. GitHub Packages"
     print_info "2. Xiaomi FDS"
     while true; do
         read -rp "[✳️ INPUT] Please select the installation source (1/2): " in_source
         case $in_source in
             1)
-                print_log "Selected: GitHub Packages"
+                print_log_e "Selected: ${GREEN}1. GitHub Packages${NC}"
                 INSTALL_FROM="github"
                 return
             ;;
             2)
-                print_log "Selected: Xiaomi FDS"
+                print_log_e "Selected: ${GREEN}2. Xiaomi FDS${NC}"
                 INSTALL_FROM="xiaomi-fds"
+                return
+            ;;
+            *)
+                print_error "Invalid option, please select again"
+            ;;
+        esac
+    done
+}
+
+download_models_from() {
+    print_info "Download Models from: "
+    print_info "1. Model Scope"
+    print_info "2. Hugging Face"
+    print_info "3. Xiaomi FDS"
+    while true; do
+        read -rp "[✳️ INPUT] Please select the installation source (1/2/3): " in_source
+        case $in_source in
+            1)
+                print_log_e "Selected: ${GREEN}1. Model Scope${NC}"
+                MODELS_DL_FROM="modelscope"
+                return
+            ;;
+            2)
+                print_log_e "Selected: ${GREEN}2. Hugging Face${NC}"
+                MODELS_DL_FROM="huggingface"
+                return
+            ;;
+            3)
+                print_log_e "Selected: ${GREEN}3. Xiaomi FDS${NC}"
+                MODELS_DL_FROM="xiaomi-fds"
                 return
             ;;
             *)
@@ -706,13 +748,25 @@ download_models() {
     mkdir -p "${INSTALL_FULL_DIR}/models/Qwen3-8B"
     
     print_log "Downloading models..."
-    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+    if [ "${MODELS_DL_FROM}" == "modelscope" ]; then
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" "${MS_MIMO_VL_MILOCO_7B_Q4_0_URL}"
+    else
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" "${HF_MIMO_VL_MILOCO_7B_Q4_0_URL}"
+    fi
     print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf"
     
-    wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    if [ "${MODELS_DL_FROM}" == "modelscope" ]; then
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" "${MS_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL}"
+    else
+        wget -c -O "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" "${HF_MIMO_VL_MILOCO_7B_Q4_0_MMPROJ_URL}"
+    fi
     print_dl "${INSTALL_FULL_DIR}/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
     
-    wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+    if [ "${MODELS_DL_FROM}" == "modelscope" ]; then
+        wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" "${MS_QWEN3_8B_Q4_K_M_URL}"
+    else
+        wget -c -O "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf" "${HF_QWEN3_8B_Q4_K_M_URL}"
+    fi
     print_dl "${INSTALL_FULL_DIR}/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
 }
 
@@ -769,12 +823,13 @@ download_docker_images() {
     local cloud_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version_cloud")
     if [ -f "${INSTALL_FULL_DIR}/.latest_version" ]; then
         latest_version=$(xargs < "${INSTALL_FULL_DIR}/.latest_version")
-        if [ $(version_compare "${latest_version}" "${cloud_version}") -le 1 ]; then
-            print_info "No latest version available, skip downloading updates: ${latest_version} <= ${cloud_version}"
+        if [ $(version_compare "${latest_version}" "${cloud_version}") -gt 0 ]; then
+            print_info "No latest version available, skip downloading updates: ${latest_version} > ${cloud_version}"
             rm -rf "${INSTALL_FULL_DIR}/.latest_version_cloud"
             return 0
         else
             mv "${INSTALL_FULL_DIR}/.latest_version_cloud" "${INSTALL_FULL_DIR}/.latest_version"
+            latest_version="${cloud_version}"
         fi
     else
         mv "${INSTALL_FULL_DIR}/.latest_version_cloud" "${INSTALL_FULL_DIR}/.latest_version"
@@ -787,7 +842,8 @@ download_docker_images() {
     local md5_calc=$(md5sum "${INSTALL_FULL_DIR}/${latest_version}.zip" | awk '{print $1}')
     local md5_cloud=$(tr -d ' \n\r\t' < "${INSTALL_FULL_DIR}/${latest_version}.md5")
     if [ "$md5_calc" != "$md5_cloud" ]; then
-        print_error "${latest_version}.zip MD5 mismatch: ${md5_calc} != ${md5_cloud}"
+        print_error "${latest_version}.zip MD5 mismatch: ${md5_calc} != ${md5_cloud}, please retry"
+        rm -rf "${INSTALL_FULL_DIR}/${latest_version}.zip"
         exit 1
     else
         print_success "${latest_version}.zip MD5 match: ${md5_calc} == ${md5_cloud}"
@@ -796,10 +852,22 @@ download_docker_images() {
     unzip "${INSTALL_FULL_DIR}/${latest_version}.zip" -d "${INSTALL_FULL_DIR}/${latest_version}"
     print_log "Loading ${latest_version} docker images..."
     ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" down || true
-    ${DOCKER_CMD} rmi xiaomi/miloco-backend:latest 2>/dev/null || true
-    ${DOCKER_CMD} rmi xiaomi/miloco-ai_engine:latest 2>/dev/null || true
+    ${DOCKER_CMD} rmi "${DOCKER_IMAGE_BACKEND_NAME}:${latest_version}" 2>/dev/null || true
+    ${DOCKER_CMD} rmi "${DOCKER_IMAGE_BACKEND_NAME}:latest" 2>/dev/null || true
     ${DOCKER_CMD} load -i "${INSTALL_FULL_DIR}/${latest_version}/backend.tar"
-    ${DOCKER_CMD} load -i "${INSTALL_FULL_DIR}/${latest_version}/ai_engine.tar"
+    if ${DOCKER_CMD} image inspect "${DOCKER_IMAGE_BACKEND_NAME}:${latest_version}" >/dev/null 2>&1; then
+        ${DOCKER_CMD} tag "${DOCKER_IMAGE_BACKEND_NAME}:${latest_version}" "${DOCKER_IMAGE_BACKEND_NAME}:latest"
+    fi
+    
+    if [ "${INSTALL_MODE}" == "full" ]; then
+        ${DOCKER_CMD} rmi "${DOCKER_IMAGE_AI_ENGINE_NAME}:${latest_version}" 2>/dev/null || true
+        ${DOCKER_CMD} rmi "${DOCKER_IMAGE_AI_ENGINE_NAME}:latest" 2>/dev/null || true
+        ${DOCKER_CMD} load -i "${INSTALL_FULL_DIR}/${latest_version}/ai_engine.tar"
+        if ${DOCKER_CMD} image inspect "${DOCKER_IMAGE_AI_ENGINE_NAME}:${latest_version}" >/dev/null 2>&1; then
+            ${DOCKER_CMD} tag "${DOCKER_IMAGE_AI_ENGINE_NAME}:${latest_version}" "${DOCKER_IMAGE_AI_ENGINE_NAME}:latest"
+        fi
+    fi
+    
     rm -rf "${INSTALL_FULL_DIR}/${latest_version}"
     print_success "Docker images loaded successfully"
 }
@@ -878,11 +946,16 @@ quick_install() {
     mkdir -p "${INSTALL_FULL_DIR}"
     
     # Check backend port
-    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}")
+    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}" "Miloco Back-end")
     # Check AI Engine port
-    AI_ENGINE_PORT=$(get_valid_port "${AI_ENGINE_PORT}")
+    AI_ENGINE_PORT=$(get_valid_port "${AI_ENGINE_PORT}" "Miloco AI Engine")
     
-    get_install_from
+    if [ "${BACKEND_PORT}" == "${AI_ENGINE_PORT}" ]; then
+        print_error "The AI Engine and Backend service are using the same port ${RED}${BACKEND_PORT}${NC}, please try again."
+        return 1
+    fi
+    
+    install_service_from
     
     config_install_env
     
@@ -968,9 +1041,9 @@ quick_install_lite() {
     mkdir -p "${INSTALL_FULL_DIR}"
     
     # Check backend port
-    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}")
+    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}" "Miloco Back-end")
     
-    get_install_from
+    install_service_from
     
     config_install_env
     
@@ -1021,8 +1094,8 @@ install_service(){
     fi
     
     if [ "${INSTALL_MODE}" == "full" ]; then
-        read -rp "[✳️ OPTION]  Please enter the Models download method? Modelscope(Default)or Xiaomi FDS (Ms/fds): "
-        if [ "${REPLY}" == "fds" ]; then
+        download_models_from
+        if [ "${MODELS_DL_FROM}" == "xiaomi-fds" ]; then
             download_models_fds
         else
             download_models
