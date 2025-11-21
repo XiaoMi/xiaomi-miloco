@@ -25,6 +25,8 @@ class ChatHistoryMessages:
 
     def __init__(self, messages: Optional[list[ChatCompletionMessageParam]] = None):
         self._messages: list[ChatCompletionMessageParam] = messages if messages is not None else []
+        # Track up to which length the history has been checked for incomplete tool calls.
+        self._last_sanitized_len: int = 0
 
     def _extract_tool_call_ids(self, tool_calls: Optional[list]) -> set[str]:
         """Extract tool_call ids from assistant tool_calls field (supports dict or pydantic models)."""
@@ -53,9 +55,14 @@ class ChatHistoryMessages:
         if not self._messages:
             return
 
-        cleaned: list[ChatCompletionMessageParam] = []
+        if len(self._messages) <= self._last_sanitized_len:
+            return
+
+        # Process only the new tail (plus one lookback to bridge sequences).
+        start_idx = max(0, self._last_sanitized_len - 1)
+        cleaned: list[ChatCompletionMessageParam] = self._messages[:start_idx]
         removed = False
-        i = 0
+        i = start_idx
         while i < len(self._messages):
             msg = self._messages[i]
             role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
@@ -65,7 +72,6 @@ class ChatHistoryMessages:
                 tool_call_ids = self._extract_tool_call_ids(tool_calls)
 
                 if tool_call_ids:
-                    # Collect consecutive tool messages following this assistant message
                     tool_msgs: list[ChatCompletionMessageParam] = []
                     j = i + 1
                     while j < len(self._messages):
@@ -84,12 +90,16 @@ class ChatHistoryMessages:
                             matched_ids.add(tc_id)
 
                     if not tool_call_ids.issubset(matched_ids):
-                        # Incomplete tool call, drop assistant message (and any collected tool messages)
+                        # Also drop the triggering user message if it is immediately before this assistant.
+                        if cleaned:
+                            prev_msg = cleaned[-1]
+                            prev_role = prev_msg.get("role") if isinstance(prev_msg, dict) else getattr(prev_msg, "role", None)
+                            if prev_role == "user":
+                                cleaned.pop()
                         removed = True
                         i = j
                         continue
 
-                    # Complete tool call sequence, keep assistant and tool messages together
                     cleaned.append(msg)
                     cleaned.extend(tool_msgs)
                     i = j
@@ -99,8 +109,11 @@ class ChatHistoryMessages:
             i += 1
 
         if removed:
-            logger.info("Removed %d incomplete tool call messages from history", len(self._messages) - len(cleaned))
+            logger.info("Removed %d incomplete tail tool call messages from history", len(self._messages) - len(cleaned))
             self._messages = cleaned
+
+        # Mark sanitized up to current length
+        self._last_sanitized_len = len(self._messages)
 
     def add_content(self, role: str, content: str):
         """
