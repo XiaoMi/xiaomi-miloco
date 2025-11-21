@@ -2,6 +2,8 @@
 
 语言选择：[English](./environment-setup.md) | [简体中文](./environment-setup_zh-Hans.md)
 
+------
+
 服务分主服务和 AI 引擎两部分，运行环境要求如下：
 
 - 系统要求：
@@ -100,5 +102,5 @@ docker compose up -d
 > 📄NOTICE:
 >
 > - 请使用 **https** 访问，而不是 **http**
-> - Windows + WSL2 下，在 Windows 中可以尝试直接访问 WSL 的 IP 地址，如 `https://<wsl ip>:8000`
-> - macOS + Docker 下，如果网络模式配置为桥接模式，请使用 Docker 所在虚拟机的 IP。
+> - Windows 下，在 Windows 中可以尝试直接访问 WSL 的 IP 地址，如 `https://<wsl ip>:8000`
+> - macOS 环境下，如果网络模式配置为桥接模式，访问时请使用 Docker 所在虚拟机的 IP。
