@@ -8,7 +8,7 @@ set -euo pipefail
 # Script variables
 PROJECT_NAME="Xiaomi Miloco"
 PROJECT_CODE="miloco"
-SCRIPT_VERSION="v0.0.6"
+SCRIPT_VERSION="v0.0.7"
 BACKEND_PORT=8000
 AI_ENGINE_PORT=8001
 MIRROR_GET_DOCKER="Aliyun" # Aliyun|AzureChinaCloud
