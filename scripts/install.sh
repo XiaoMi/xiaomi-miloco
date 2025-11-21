@@ -16,7 +16,9 @@ MIRROR_GET_DOCKER="Aliyun" # Aliyun|AzureChinaCloud
 FDS_BASE_URL="${FDS_BASE_URL:-https://xiaomi-miloco.cnbj1.mi-fds.com/xiaomi-miloco}"
 CDN_BASE_URL="${CDN_BASE_URL:-https://cdn.cnbj1.fds.api.mi-img.com/xiaomi-miloco}"
 DOCKER_CMD="docker"
-DOCKER_IMAGES=("xiaomi/${PROJECT_CODE}-backend" "xiaomi/${PROJECT_CODE}-ai_engine")
+DOCKER_IMAGE_BACKEND_NAME="xiaomi/${PROJECT_CODE}-backend"
+DOCKER_IMAGE_AI_ENGINE_NAME="xiaomi/${PROJECT_CODE}-ai_engine"
+DOCKER_IMAGES=("${DOCKER_IMAGE_BACKEND_NAME}" "${DOCKER_IMAGE_AI_ENGINE_NAME}")
 DOCKER_CONTAINERS=("${PROJECT_CODE}-backend" "${PROJECT_CODE}-ai_engine")
 
 # Config path
@@ -578,9 +580,10 @@ print_service_status(){
 
 get_valid_port(){
     local default_port="$1"
+    local service_name="$2"
     local in_port="Unknown"
     while true; do
-        read -rp "[✳️ INPUT] Please enter the back-end service port (Default: $1): " in_port
+        read -rp "[✳️ INPUT] Please enter the ${service_name} service port (Default: $1): " in_port
         if [ -z "${in_port}" ]; then
             in_port="$1"
         fi
@@ -599,7 +602,7 @@ get_valid_port(){
             continue;
         fi
     done
-    print_log_e "Using port: ${GREEN}${in_port}${NC}"
+    print_log_e "Using port ${GREEN}${in_port}${NC} for ${service_name}"
     echo "${in_port}"
 }
 
@@ -775,6 +778,7 @@ download_docker_images() {
             return 0
         else
             mv "${INSTALL_FULL_DIR}/.latest_version_cloud" "${INSTALL_FULL_DIR}/.latest_version"
+            latest_version="${cloud_version}"
         fi
     else
         mv "${INSTALL_FULL_DIR}/.latest_version_cloud" "${INSTALL_FULL_DIR}/.latest_version"
@@ -787,7 +791,8 @@ download_docker_images() {
     local md5_calc=$(md5sum "${INSTALL_FULL_DIR}/${latest_version}.zip" | awk '{print $1}')
     local md5_cloud=$(tr -d ' \n\r\t' < "${INSTALL_FULL_DIR}/${latest_version}.md5")
     if [ "$md5_calc" != "$md5_cloud" ]; then
-        print_error "${latest_version}.zip MD5 mismatch: ${md5_calc} != ${md5_cloud}"
+        print_error "${latest_version}.zip MD5 mismatch: ${md5_calc} != ${md5_cloud}, please retry"
+        rm -rf "${INSTALL_FULL_DIR}/${latest_version}.zip"
         exit 1
     else
         print_success "${latest_version}.zip MD5 match: ${md5_calc} == ${md5_cloud}"
@@ -796,10 +801,22 @@ download_docker_images() {
     unzip "${INSTALL_FULL_DIR}/${latest_version}.zip" -d "${INSTALL_FULL_DIR}/${latest_version}"
     print_log "Loading ${latest_version} docker images..."
     ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" down || true
-    ${DOCKER_CMD} rmi xiaomi/miloco-backend:latest 2>/dev/null || true
-    ${DOCKER_CMD} rmi xiaomi/miloco-ai_engine:latest 2>/dev/null || true
+    ${DOCKER_CMD} rmi "${DOCKER_IMAGE_BACKEND_NAME}:${latest_version}" 2>/dev/null || true
+    ${DOCKER_CMD} rmi "${DOCKER_IMAGE_BACKEND_NAME}:latest" 2>/dev/null || true
     ${DOCKER_CMD} load -i "${INSTALL_FULL_DIR}/${latest_version}/backend.tar"
-    ${DOCKER_CMD} load -i "${INSTALL_FULL_DIR}/${latest_version}/ai_engine.tar"
+    if ${DOCKER_CMD} image inspect "${DOCKER_IMAGE_BACKEND_NAME}:${latest_version}" >/dev/null 2>&1; then
+        ${DOCKER_CMD} tag "${DOCKER_IMAGE_BACKEND_NAME}:${latest_version}" "${DOCKER_IMAGE_BACKEND_NAME}:latest"
+    fi
+    
+    if [ "${INSTALL_MODE}" == "full" ]; then
+        ${DOCKER_CMD} rmi "${DOCKER_IMAGE_AI_ENGINE_NAME}:${latest_version}" 2>/dev/null || true
+        ${DOCKER_CMD} rmi "${DOCKER_IMAGE_AI_ENGINE_NAME}:latest" 2>/dev/null || true
+        ${DOCKER_CMD} load -i "${INSTALL_FULL_DIR}/${latest_version}/ai_engine.tar"
+        if ${DOCKER_CMD} image inspect "${DOCKER_IMAGE_AI_ENGINE_NAME}:${latest_version}" >/dev/null 2>&1; then
+            ${DOCKER_CMD} tag "${DOCKER_IMAGE_AI_ENGINE_NAME}:${latest_version}" "${DOCKER_IMAGE_AI_ENGINE_NAME}:latest"
+        fi
+    fi
+    
     rm -rf "${INSTALL_FULL_DIR}/${latest_version}"
     print_success "Docker images loaded successfully"
 }
@@ -878,9 +895,14 @@ quick_install() {
     mkdir -p "${INSTALL_FULL_DIR}"
     
     # Check backend port
-    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}")
+    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}" "Miloco Back-end")
     # Check AI Engine port
-    AI_ENGINE_PORT=$(get_valid_port "${AI_ENGINE_PORT}")
+    AI_ENGINE_PORT=$(get_valid_port "${AI_ENGINE_PORT}" "Miloco AI Engine")
+    
+    if [ "${BACKEND_PORT}" == "${AI_ENGINE_PORT}" ]; then
+        print_error "The AI Engine and Backend service are using the same port ${RED}${BACKEND_PORT}${NC}, please try again."
+        return 1
+    fi
     
     get_install_from
     
@@ -968,7 +990,7 @@ quick_install_lite() {
     mkdir -p "${INSTALL_FULL_DIR}"
     
     # Check backend port
-    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}")
+    BACKEND_PORT=$(get_valid_port "${BACKEND_PORT}" "Miloco Back-end")
     
     get_install_from
     
