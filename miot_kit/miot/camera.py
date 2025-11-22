@@ -548,7 +548,8 @@ def _load_dynamic_lib():
         raise RuntimeError(f"unsupported system: {system}")
 
     if not lib_path.exists():
-        raise FileNotFoundError(f"library not found: {lib_path}")
+        _LOGGER.warning("library not found: %s", lib_path)
+        return None
     _LOGGER.info("load dynamic lib: %s", lib_path)
     lib_miot_camera = CDLL(str(lib_path))
     # set log handler
@@ -634,13 +635,16 @@ class MIoTCamera:
 
         # lib init
         self._lib_miot_camera = _load_dynamic_lib()
-        # MUST add to refs, otherwise it will be freed.
-        self._log_handler = _MIOT_CAMERA_LOG_HANDLER(self._on_miot_camera_log)
-        self._lib_miot_camera.miot_camera_set_log_handler(self._log_handler)
+        if self._lib_miot_camera:
+            # MUST add to refs, otherwise it will be freed.
+            self._log_handler = _MIOT_CAMERA_LOG_HANDLER(self._on_miot_camera_log)
+            self._lib_miot_camera.miot_camera_set_log_handler(self._log_handler)
 
-        self._lib_miot_camera.miot_camera_init(
-            self._host.encode("utf-8"), OAUTH2_CLIENT_ID.encode("utf-8"), self._access_token.encode("utf-8")
-        )
+            self._lib_miot_camera.miot_camera_init(
+                self._host.encode("utf-8"), OAUTH2_CLIENT_ID.encode("utf-8"), self._access_token.encode("utf-8")
+            )
+        else:
+            _LOGGER.warning("MIoT Camera lib not loaded, camera features will be disabled")
 
     def __del__(self):
         """Del."""
@@ -661,20 +665,25 @@ class MIoTCamera:
         """Init."""
         self._frame_interval = frame_interval
         self._enable_hw_accel = enable_hw_accel
-        _LOGGER.info("miot camera lib version: %s", await self.get_camera_version_async())
+        if self._lib_miot_camera:
+            _LOGGER.info("miot camera lib version: %s", await self.get_camera_version_async())
+        else:
+            _LOGGER.warning("miot camera lib not loaded, skip version check")
 
     async def deinit_async(self) -> None:
         """Deinit."""
         for did in list(self._camera_map.keys()):
             await self.destroy_camera_async(did=did)
         self._camera_map.clear()
-        self._lib_miot_camera.miot_camera_deinit()
+        if self._lib_miot_camera:
+            self._lib_miot_camera.miot_camera_deinit()
         self._lib_miot_camera = None  # type: ignore
 
     async def update_access_token_async(self, access_token: str) -> None:
         """Update access token."""
         self._access_token = access_token
-        self._lib_miot_camera.miot_camera_update_access_token(self._access_token.encode("utf-8"))
+        if self._lib_miot_camera:
+            self._lib_miot_camera.miot_camera_update_access_token(self._access_token.encode("utf-8"))
 
     async def create_camera_async(
         self,
