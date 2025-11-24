@@ -1,6 +1,6 @@
 # Runtime and Development Environment Setup (macOS Edition)
 
-[Back to Previous Level](./environment-setup_zh-Hans.md)  
+[Back to Previous Level](./environment-setup.md)  
 
 Language selection: [English](./environment-setup-macos.md) | [Simplified Chinese](./environment-setup-macos_zh-Hans.md)
 
