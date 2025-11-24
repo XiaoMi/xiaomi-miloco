@@ -31,8 +31,10 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION=${GITHUB_REF_NAME}
-          else
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
             VERSION=latest
+          else
+            VERSION=dev
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
