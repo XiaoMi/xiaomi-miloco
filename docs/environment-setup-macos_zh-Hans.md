@@ -9,8 +9,8 @@
 
 macOS （M 系列和 Intel 系列）下服务支持两种方式运行：
 
-- GitHub 克隆代码运行
-- Docker 运行
+- GitHub 克隆代码直接运行
+- 虚拟机下 Docker 运行
 
 下述教程以 macOS Tahoe 26.1 为例，介绍如何在 Docker 下运行本服务。
 
@@ -22,8 +22,14 @@ macOS （M 系列和 Intel 系列）下服务支持两种方式运行：
 > - macOS 内核是 **XNU**，而且不支持 Linux 内核 API，也不支持直接运行 ELF 格式的 Linux 二进制文件。
 >
 > 因此在 macOS 上，必须先启动一个 **Linux 虚拟机**（VM），然后在 VM 里运行 Docker 容器。
+> 
+> 本教程提供两条思路在 Docker 下运行服务：
+> - 命令行下，采用 **Multipass + Docker** 的方式运行服务，下述教程有介绍运行步骤
+> - 安装 VMware Fusion 免费版，配置网络模式为桥接（Bridge）。
+> 
+> 虚拟机环境配置完成后，可参考 [Linux 篇](./environment-setup-linux_zh-Hans.md) 的教程在 VMware Fusion 中运行服务。
 
-在本教程中，采用 **Multipass + Docker** 的方式运行服务，如果觉得比较复杂，可以尝试直接通过代码运行服务。（也可尝试VMware Fusion 免费版）
+在本教程中，介绍 **Multipass + Docker** 的方式运行服务。
 
 ### 基础配置
 
@@ -110,4 +116,9 @@ multipass list
 multipass shell bridge-docker
 ```
 
-Docker 的安装和配置可参考Linux部分，这里不再赘述。
+至此，macOS下桥接网络模式的虚拟机已配置完成，后续步骤就是在 Linux(ARM64) 下配置服务运行环境，具体步骤可参考[Linux 篇](./environment-setup-linux_zh-Hans.md), 这里不再赘述。
+
+## 环境验证
+
+1. 进入macOS虚拟机后，确保和宿主主机处于同一网段，否则摄像头无法正常拉流。
+2. 由于暂时没有 Linux(ARM64) + NVIDIA GPU 的环境，所以无法验证显卡直通和一键安装脚本是否能够正常配置运行环境，欢迎开发者提供这方面的技术支持。

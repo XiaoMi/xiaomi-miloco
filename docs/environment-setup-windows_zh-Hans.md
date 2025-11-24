@@ -72,9 +72,8 @@ sudo usermod -aG docker $USER
 
 ### 安装 NVIDIA Container Toolkit
 
-参考上述Linux环境配置流程
+参考 [Linux 篇](./environment-setup-linux_zh-Hans.md) 配置流程
 
 ## 环境验证
 
-参考上述 Linux 环境验证流程
-
+参考 [Linux 篇](./environment-setup-linux_zh-Hans.md) 配置流程

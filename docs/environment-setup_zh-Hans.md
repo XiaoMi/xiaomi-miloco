@@ -6,17 +6,26 @@
 
 服务分主服务和 AI 引擎两部分，运行环境要求如下：
 
+主服务：
+- 系统要求：
+- - **Linux**: x64 + ARM64 架构，建议 Ubuntu 22.04 及以上 LTS 版本
+- - **Windows**: **WSL2** 下 x64 + ARM64 架构，建议 Windows11 22H2 及以上版本
+- - **macOS**: 暂不支持
+
+AI 引擎：
 - 系统要求：
 - - **Linux**: x64 架构，建议 Ubuntu 22.04 及以上 LTS 版本
-- - **Windows**: x64 架构，建议 Windows11 22H2 及以上版本，要求支持WSL2
-- - **macOS**:  Arm 架构，暂不支持
-- 显卡要求（项目AI Engine需要显卡支持）
-- - **NVIDIA**：建议**30系及以上显卡，显存8G及以上**
+- - **Windows**: **WSL2** 下 x64 架构，建议 Windows11 22H2 及以上版本
+- - **macOS**: 暂不支持
+- 显卡要求：
+- - **NVIDIA**：建议30系及以上显卡，显存8G及以上；显卡驱动版本527.41及以上；CUDA版本12.5.1及以上
 - - **AMD**：暂不支持
 - - **Intel**：暂不支持
 - - **MThreads**：暂不支持
-- 软件要求
-- - **Docker**: 20.10 及以上版本，要求支持 `docker compose`
+
+软件要求
+- **Python**: Python 3.10及以上
+- **Docker**: 20.10 及以上版本，要求支持 `docker compose`
 
 ## 环境配置
 
