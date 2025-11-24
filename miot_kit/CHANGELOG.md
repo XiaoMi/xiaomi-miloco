@@ -1,3 +1,9 @@
+## v0.1.13
+### Added
+- libmiot_camera support linux arm64
+### Changed
+- Update libmiot_camera to 0.1.6
+
 ## v0.1.12
 ### Changed
 - Update camera filter logic
