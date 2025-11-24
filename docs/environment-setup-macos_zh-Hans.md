@@ -27,7 +27,7 @@ macOS （M 系列和 Intel 系列）下服务支持两种方式运行：
 > - 命令行下，采用 **Multipass + Docker** 的方式运行服务，下述教程有介绍运行步骤
 > - 安装 VMware Fusion 免费版，配置网络模式为桥接（Bridge）。
 > 
-> 虚拟机环境配置完成后，可参考 [Linux 篇](./environment-setup-linux_zh-Hans.md) 的教程在 VMware Fusion 中运行服务。
+> 虚拟机环境配置完成后，可参考 [Linux 篇](./environment-setup-linux_zh-Hans.md) 的教程在 VM 中运行服务。
 
 在本教程中，介绍 **Multipass + Docker** 的方式运行服务。
 

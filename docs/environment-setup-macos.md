@@ -26,7 +26,7 @@ The following tutorial takes macOS Tahoe 26.1 as an example and demonstrates how
 > - From the command line: using **Multipass + Docker** (steps detailed below)
 > - Install VMware Fusion (Free Edition) and configure the network mode to **Bridged**
 > 
-> Once the VM environment is set up, you can refer to the [Linux Edition](./environment-setup-linux_zh-Hans.md) tutorial to run the service inside VMware Fusion.
+> Once the VM environment is set up, you can refer to the [Linux Edition](./environment-setup-linux_zh-Hans.md) tutorial to run the service inside VM.
 
 In this tutorial, we will introduce how to run the service using **Multipass + Docker**.
 
