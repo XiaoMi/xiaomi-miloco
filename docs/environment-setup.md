@@ -8,14 +8,14 @@ The service consists of two parts: the main service and the AI engine. The runti
 
 Main Service:
 - System Requirements:
-- - **Linux**: x64 + ARM64 architecture; Ubuntu 22.04 LTS or later is recommended
-- - **Windows**: x64 + ARM64 architecture under **WSL2**; Windows 11 22H2 or later is recommended
-- - **macOS**: Not supported
+- - **Linux**: x86_64 + ARM64 architecture; Ubuntu 22.04 LTS or later is recommended
+- - **Windows**: x86_64 + ARM64 architecture under **WSL2**; Windows 11 22H2 or later is recommended
+- - **macOS**: x86_64 + ARM64 architecture
 
 AI Engine:
 - System Requirements:
-- - **Linux**: x64 architecture; Ubuntu 22.04 LTS or later is recommended
-- - **Windows**: x64 architecture under **WSL2**; Windows 11 22H2 or later is recommended
+- - **Linux**: x86_64 architecture; Ubuntu 22.04 LTS or later is recommended
+- - **Windows**: x86_64 architecture under **WSL2**; Windows 11 22H2 or later is recommended
 - - **macOS**: Not supported
 - GPU Requirements:
 - - **NVIDIA**: 30-series or above is recommended; 8GB or more VRAM; driver version 527.41 or above; CUDA version 12.5.1 or above
