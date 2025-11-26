@@ -1,3 +1,9 @@
+## v0.1.14
+### Added
+- libmiot_camera support macOS arm64 and x86_64
+### Changed
+- Update libmiot_camera to 0.1.7
+
 ## v0.1.13
 ### Added
 - libmiot_camera support linux arm64
