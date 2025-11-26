@@ -17,7 +17,6 @@ import pytest
 from miot.camera import MIoTCamera, MIoTCameraInstance
 from miot.storage import MIoTStorage
 from miot.types import MIoTCameraInfo, MIoTCameraStatus, MIoTCameraVideoQuality
-from open_ai import MIoTOpenAI
 
 # pylint: disable=import-outside-toplevel, unused-argument, missing-function-docstring
 _LOGGER = logging.getLogger(__name__)
