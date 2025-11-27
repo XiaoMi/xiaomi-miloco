@@ -9,7 +9,7 @@ BUILD_TYPE=Release
 
 # Build CUDA architectures. Please modify it according to your own needs if necessary. 
 # For reference https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#gpu-feature-list
-CUDA_ARCS="86;89;90" # default 30xx/40xx/50xx
+CUDA_ARCS="75;80;86;89;90" # default 20xx/30xx/40xx/50xx
 
 # Build support native cpu architecture (ON)/ all cpu architectures (OFF)
 NATIVE_ARCS=OFF
