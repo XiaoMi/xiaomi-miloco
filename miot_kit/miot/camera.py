@@ -471,7 +471,6 @@ class MIoTCameraInstance:
             # raw audio
             if self._callbacks.get(f"decode_pcm.{channel}", None):
                 self._decoders[channel].push_audio_frame(frame_data)
-            self._decoders[channel].push_audio_frame(frame_data)
             a_callbacks = self._callbacks.get(f"raw_audio.{channel}", {})
             for a_callback in list(a_callbacks.values()):
                 asyncio.run_coroutine_threadsafe(
