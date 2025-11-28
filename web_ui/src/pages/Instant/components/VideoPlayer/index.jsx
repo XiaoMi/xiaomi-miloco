@@ -205,13 +205,16 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
         onPlay && onPlay()
       }
       // connection closed handling
-      wsRef.current.onclose = () => {
+      wsRef.current.onclose = (event) => {
         console.log('video player: WebSocket connection closed')
         if (!error) {
           setError(t('instant.deviceList.deviceConnectClosed'))
           // message.error(t('instant.deviceList.deviceConnectClosed'))
         }
-        onPlay && onPlay()
+        const { reason = '' } = event;
+        if (reason !== 'close_by_user') {
+          onPlay && onPlay()
+        }
       }
 
       decoderRef.current = new window.VideoDecoder({
@@ -280,7 +283,7 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
     return () => {
       if (wsRef.current) {
         try {
-          wsRef.current.close && wsRef.current.close();
+          wsRef.current.close && wsRef.current.close(1000, 'close_by_user');
         } catch (e) {
           console.error('Close WebSocket exception:', e);
         }
