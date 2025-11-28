@@ -2,7 +2,7 @@
 
 <div align="center">
 
-English | [简体中文](CONTRIBUTING_zh_Hans.md)
+English | [简体中文](CONTRIBUTING.zh_Hans.md)
 
 </div>
 

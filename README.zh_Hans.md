@@ -69,7 +69,7 @@ bash scripts/install.sh
 
 ## 贡献指南
 
-请参考 [贡献指南](CONTRIBUTING_zh_Hans.md)。
+请参考 [贡献指南](CONTRIBUTING.zh_Hans.md)。
 
 ## 许可证
 
