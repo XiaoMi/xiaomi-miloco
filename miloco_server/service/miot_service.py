@@ -89,7 +89,8 @@ class MiotService:
         """
         try:
             result = await self._miot_proxy.refresh_scenes()
-            if not result:
+            # None means call failed; an empty dict just means no scenes available and should not be treated as an error
+            if result is None:
                 raise MiotServiceException("Failed to refresh MiOT scenes")
             return True
         except Exception as e:
