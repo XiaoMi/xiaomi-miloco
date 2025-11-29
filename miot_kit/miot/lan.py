@@ -5,12 +5,15 @@
 MIoT lan device detector.
 """
 import asyncio
+import errno
+import ipaddress
 from dataclasses import dataclass
 import logging
 import random
 import secrets
 import socket
 import struct
+import sys
 import threading
 import time
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
@@ -344,8 +347,7 @@ class MIoTLan:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # Set SO_BINDTODEVICE
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, if_name.encode())
+            self.__bind_socket_to_interface(sock=sock, if_name=if_name)
             sock.bind(("", self._local_port or 0))
             self._internal_loop.add_reader(sock.fileno(), self.__socket_read_handler, (if_name, sock))
             self._broadcast_socks[if_name] = sock
@@ -366,6 +368,21 @@ class MIoTLan:
         self._internal_loop.remove_reader(sock.fileno())
         sock.close()
         _LOGGER.info("destroyed socket, %s", if_name)
+
+    def __bind_socket_to_interface(self, sock: socket.socket, if_name: str) -> None:
+        """Bind the socket to a specific interface when the platform supports it."""
+        try:
+            if hasattr(socket, "SO_BINDTODEVICE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, if_name.encode())
+                return
+            # macOS lacks SO_BINDTODEVICE, but supports binding via IP_BOUND_IF (opt value 25).
+            if sys.platform.startswith("darwin") and hasattr(socket, "if_nametoindex"):
+                opt_name = getattr(socket, "IP_BOUND_IF", 25)
+                sock.setsockopt(socket.IPPROTO_IP, opt_name, socket.if_nametoindex(if_name))
+                return
+            _LOGGER.debug("skip binding socket to interface, unsupported platform, %s", if_name)
+        except Exception as err:  # pylint: disable=broad-exception-caught
+            _LOGGER.warning("bind socket to interface failed, %s, %s", if_name, err)
 
     def __socket_read_handler(self, ctx: tuple[str, socket.socket]) -> None:
         try:
@@ -402,18 +419,41 @@ class MIoTLan:
     def __sendto(
         self, if_name: Optional[str], data: bytes, address: str, port: int
     ) -> None:
+        def _broadcast_addr(if_n: str) -> str:
+            """Calculate interface broadcast address; fall back to original address on error."""
+            try:
+                info = self._network.network_info.get(if_n)
+                if not info:
+                    return address
+                net = ipaddress.IPv4Network(f"{info.ip}/{info.netmask}", strict=False)
+                return str(net.broadcast_address)
+            except Exception:  # pylint: disable=broad-exception-caught
+                return address
+
+        def _safe_send(sock: socket.socket, if_n: str, dest_addr: str) -> None:
+            try:
+                sock.sendto(data, socket.MSG_DONTWAIT, (dest_addr, port))
+            except OSError as err:
+                # Ignore common unreachable errors to avoid spamming logs on hosts without routes.
+                if err.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+                    _LOGGER.debug("skip send on %s, %s", if_n, err)
+                    return
+                _LOGGER.error("sendto error, %s, %s", if_n, err)
+
         if if_name is None:
             # Broadcast
             for if_n, sock in self._broadcast_socks.items():
                 _LOGGER.debug("send broadcast, %s", if_n)
-                sock.sendto(data, socket.MSG_DONTWAIT, (address, port))
+                dest_addr = _broadcast_addr(if_n) if address == "255.255.255.255" else address
+                _safe_send(sock, if_n, dest_addr)
         else:
             # Unicast
             sock = self._broadcast_socks.get(if_name, None)
             if not sock:
                 _LOGGER.error("invalid socket, %s", if_name)
                 return
-            sock.sendto(data, socket.MSG_DONTWAIT, (address, port))
+            dest_addr = _broadcast_addr(if_name) if address == "255.255.255.255" else address
+            _safe_send(sock, if_name, dest_addr)
 
     def __scan_devices(self) -> None:
         if self._scan_timer:
