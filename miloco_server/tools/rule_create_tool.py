@@ -111,8 +111,8 @@ class RuleCreateTool(Actor):
             if not chosen_camera_infos:
                 chosen_camera_infos = all_camera_infos
 
-            miot_scene_actions = await self._default_preset_action_manager.get_miot_scene_actions()
-            ha_automation_actions = await self._default_preset_action_manager.get_ha_automation_actions()
+            miot_scene_actions = await self._default_preset_action_manager.get_miot_scene_actions(self._mcp_ids)
+            ha_automation_actions = await self._default_preset_action_manager.get_ha_automation_actions(self._mcp_ids)
 
             no_matched_action_descriptions, matched_actions = (
                 await self._action_descriptions_to_preset_actions(
@@ -313,4 +313,3 @@ class RuleCreateTool(Actor):
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("[%s] Error in action mapping: %s", self._request_id, str(e))
             return generated_action
-

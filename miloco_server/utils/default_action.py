@@ -7,6 +7,7 @@ Provides default actions including Mi Home scene list and Home Assistant automat
 """
 
 import logging
+from typing import Optional
 
 from miloco_server.schema.trigger_schema import Action
 from miloco_server.mcp.tool_executor import ToolExecutor
@@ -27,7 +28,12 @@ class DefaultPresetActionManager:
         self._tool_executor = tool_executor
         self._mcp_client_manager = tool_executor.mcp_client_manager
 
-    async def get_miot_scene_actions(self) -> dict[str, Action]:
+    async def get_miot_scene_actions(self, mcp_ids: Optional[list[str]] = None) -> dict[str, Action]:
+        # Skip if user has not selected the MIoT manual scenes MCP
+        if mcp_ids is not None and "miot_manual_scenes" not in mcp_ids:
+            logger.info("Mi Home scene actions skipped: miot_manual_scenes not selected")
+            return {}
+
         # Dynamically get miot client
         miot_client = self._mcp_client_manager.get_client("miot_manual_scenes")
         if miot_client is None:
@@ -37,7 +43,11 @@ class DefaultPresetActionManager:
         if tool is None:
             logger.error("Mi Home scene tool not found")
             return {}
-        result = await miot_client.call_tool("get_manual_scenes", {})
+        try:
+            result = await miot_client.call_tool("get_manual_scenes", {})
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to fetch Mi Home scenes: %s", e)
+            return {}
         logger.info("get_miot_scene_actions: %s", result)
         scenes = result.get("result", [])
 
@@ -59,7 +69,12 @@ class DefaultPresetActionManager:
 
         return actions_dict
 
-    async def get_ha_automation_actions(self) -> dict[str, Action]:
+    async def get_ha_automation_actions(self, mcp_ids: Optional[list[str]] = None) -> dict[str, Action]:
+        # Skip if user has not selected the HA automations MCP
+        if mcp_ids is not None and "ha_automations" not in mcp_ids:
+            logger.info("Home Assistant automation actions skipped: ha_automations not selected")
+            return {}
+
         # Dynamically get ha client
         ha_client = self._mcp_client_manager.get_client("ha_automations")
         if ha_client is None:
@@ -70,7 +85,11 @@ class DefaultPresetActionManager:
         if tool is None:
             logger.error("Home Assistant automation tool not found")
             return {}
-        result = await ha_client.call_tool("get_automations", {})
+        try:
+            result = await ha_client.call_tool("get_automations", {})
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to fetch Home Assistant automations: %s", e)
+            return {}
         logger.info("get_ha_automation_actions: %s", result)
 
         actions_dict = {}
@@ -92,4 +111,3 @@ class DefaultPresetActionManager:
         logger.info("get_ha_automation_actions: %s", actions_dict)
 
         return actions_dict
-
