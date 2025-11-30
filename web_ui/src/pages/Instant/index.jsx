@@ -3,11 +3,14 @@
  * This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
  */
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { useTranslation } from 'react-i18next';
 import { Popconfirm } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useChatStore } from '@/stores/chatStore';
+import { getHistoryDetail } from '@/api';
+import { processHistorySocketMessages } from '@/utils/instruction';
 import { Icon } from '@/components';
 import DeviceList from './components/DeviceList'
 import ChatDialog from './components/ChatDialog'
@@ -21,6 +24,9 @@ import styles from './index.module.less'
  */
 const Instant = () => {
   const { t } = useTranslation();
+  const { sessionId: urlSessionId } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
 
   const [currentPlayingId, setCurrentPlayingId] = useState([])
   const [leftDrawerVisible, setLeftDrawerVisible] = useState(true)
@@ -30,6 +36,7 @@ const Instant = () => {
     cameraList,
     historyList,
     historyLoading,
+    sessionId,
     fetchCameraList,
     fetchMcpServices,
     refreshMiotInfo,
@@ -38,11 +45,71 @@ const Instant = () => {
     deleteHistoryRecord
   } = useChatStore();
 
+  const loadingSessionIdRef = useRef(null);
+  const isClickingHistoryRef = useRef(false);
   useEffect(() => {
     fetchCameraList()
     fetchMcpServices()
   }, [])
 
+  useEffect(() => {
+    if (sessionId && sessionId !== urlSessionId && !loadingSessionIdRef.current && !isClickingHistoryRef.current) {
+      const searchParams = new URLSearchParams(location.search);
+      const newPath = `/home/instant/${sessionId}${searchParams.toString() ? `?${searchParams.toString()}` : ''}`;
+      navigate(newPath, { replace: true });
+    }
+  }, [sessionId, urlSessionId, navigate, location.search]);
+
+  // get session
+  useEffect(() => {
+    const loadHistoryFromSessionId = async () => {
+      if (urlSessionId && urlSessionId !== sessionId && urlSessionId !== loadingSessionIdRef.current && !isClickingHistoryRef.current) {
+        loadingSessionIdRef.current = urlSessionId;
+        
+        try {
+          const response = await getHistoryDetail(urlSessionId);
+          const { code, data } = response || {};
+
+          if (code !== 0) {
+            console.warn('Failed to fetch history from sessionId:', urlSessionId);
+            loadingSessionIdRef.current = null;
+            return;
+          }
+
+          const { session = {} } = data || {};
+          const { data: sessionData } = session;
+
+          if (!sessionData) {
+            console.warn('History data is empty for sessionId:', urlSessionId);
+            loadingSessionIdRef.current = null;
+            return;
+          }
+
+          if (sessionData && Array.isArray(sessionData)) {
+            const { messages, sessionId: historySessionId, latestConfig } = processHistorySocketMessages(sessionData);
+
+            useChatStore.setState({
+              messages: messages || [],
+              currentAnswer: null,
+              answerMessages: [],
+              sessionId: historySessionId || urlSessionId,
+              isHistoryMode: false,
+              isAnswering: false,
+              isScrollToBottom: true,
+              selectedCameraIds: latestConfig?.cameraIds || [],
+              mcpList: latestConfig?.mcpList || [],
+            });
+          }
+        } catch (error) {
+          console.error('Failed to load history from sessionId:', error);
+        } finally {
+          loadingSessionIdRef.current = null;
+        }
+      }
+    };
+
+    loadHistoryFromSessionId();
+  }, [urlSessionId, sessionId]);
 
 
   // play/close video
@@ -59,7 +126,27 @@ const Instant = () => {
   }
 
   const handleClickHistory = async (id) => {
-    await handleHistoryClick(id);
+    if (id === sessionId && id === urlSessionId) {
+      setRightDrawerVisible(false);
+      return;
+    }
+    
+    isClickingHistoryRef.current = true;
+    
+    const searchParams = new URLSearchParams(location.search);
+    const newPath = `/home/instant/${id}${searchParams.toString() ? `?${searchParams.toString()}` : ''}`;
+    navigate(newPath, { replace: true });
+    
+    try {
+      await handleHistoryClick(id);
+    } catch (error) {
+      console.error('Failed to load history:', error);
+    } finally {
+      setTimeout(() => {
+        isClickingHistoryRef.current = false;
+      }, 200);
+    }
+    
     setRightDrawerVisible(false);
   }
 
