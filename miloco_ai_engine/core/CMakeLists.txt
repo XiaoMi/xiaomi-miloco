@@ -1,22 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(llama_mico LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
 set(LIB_SOURCE_FILES "llama-mico.cpp")
 
 add_library(llama-mico SHARED ${LIB_SOURCE_FILES})
 
 set(THIRD_PARTY_PATH ${PROJECT_SOURCE_DIR}/../../third_party)
 set(LLAMA_THIRD_PARTY_PATH ${THIRD_PARTY_PATH}/llama.cpp)
-
-# Ensure runtime output directory is set for subprojects (ggml relies on it for Metal assets)
-if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-endif()
-file(MAKE_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
 
 include_directories(${PROJECT_SOURCE_DIR}
                     ${PROJECT_SOURCE_DIR}/utils

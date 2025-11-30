@@ -30,11 +30,6 @@ struct SycChunkTask {
     SycChunkTask(std::shared_ptr<mtmd_input_chunk> chunk, size_t cmpl_id, std::string chunk_hash, int32_t priority)
         : input_chunk(chunk), cmpl_id(cmpl_id), chunk_hash(chunk_hash), priority(priority) {}
 
-    SycChunkTask(const SycChunkTask&) = delete;
-    SycChunkTask& operator=(const SycChunkTask&) = delete;
-    SycChunkTask(SycChunkTask&&) = delete;
-    SycChunkTask& operator=(SycChunkTask&&) = delete;
-
     // sort
     bool operator<(const SycChunkTask& other) const {
         if (priority != other.priority) return priority < other.priority;
