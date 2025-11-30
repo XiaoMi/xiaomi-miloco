@@ -37,7 +37,7 @@ Storage: Recommended 16GB or more available space (for local model storage)
 Operating System:
   - Linux: x64 architecture, recommended Ubuntu 22.04 and above LTS versions
   - Windows: x64 architecture, recommended Windows 10 and above, requires WSL2 support
-  - macOS: Not currently supported
+  - macOS: Apple Silicon/Intel supported via MPS/CPU (performance best on Apple Silicon)
 Docker: Version 20.10 and above, requires docker compose support
 NVIDIA Driver: NVIDIA driver with CUDA support
 NVIDIA Container Toolkit: For Docker GPU support

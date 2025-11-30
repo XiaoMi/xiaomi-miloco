@@ -16,7 +16,7 @@ AI Engine:
 - System Requirements:
 - - **Linux**: x86_64 architecture; Ubuntu 22.04 LTS or later is recommended
 - - **Windows**: x86_64 architecture under **WSL2**; Windows 11 22H2 or later is recommended
-- - **macOS**: Not supported
+- - **macOS**: Apple Silicon & Intel supported via Metal/CPU
 - GPU Requirements:
 - - **NVIDIA**: 30-series or above is recommended; 8GB or more VRAM; driver version 527.41 or above; CUDA version 12.5.1 or above
 - - **AMD**: Not supported
