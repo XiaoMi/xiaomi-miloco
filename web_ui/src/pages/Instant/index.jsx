@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { Popconfirm } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
 import { useChatStore } from '@/stores/chatStore';
+import { useGlobalSocket } from '@/hooks/useGlobalSocket';
 import { Icon } from '@/components';
 import DeviceList from './components/DeviceList'
 import ChatDialog from './components/ChatDialog'
@@ -30,6 +31,7 @@ const Instant = () => {
     cameraList,
     historyList,
     historyLoading,
+    isAnswering,
     fetchCameraList,
     fetchMcpServices,
     refreshMiotInfo,
@@ -37,6 +39,8 @@ const Instant = () => {
     handleHistoryClick,
     deleteHistoryRecord
   } = useChatStore();
+
+  const { globalCloseMessage } = useGlobalSocket();
 
   useEffect(() => {
     fetchCameraList()
@@ -59,6 +63,10 @@ const Instant = () => {
   }
 
   const handleClickHistory = async (id) => {
+    // Stop current query if there is one in progress
+    if (isAnswering) {
+      globalCloseMessage();
+    }
     await handleHistoryClick(id);
     setRightDrawerVisible(false);
   }
