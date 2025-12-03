@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import List, Optional
 
-from miloco_server.schema.mcp_schema import MCPClientStatus, choose_mcp_list
+from miloco_server.schema.mcp_schema import MCPClientStatus, LocalMcpClientId, choose_mcp_list
 
 from miloco_server.utils.llm_utils.action_converter import ActionDescriptionConverter, ConverterResult
 from miloco_server.utils.llm_utils.device_chooser import DeviceChooser
@@ -111,8 +111,9 @@ class RuleCreateTool(Actor):
             if not chosen_camera_infos:
                 chosen_camera_infos = all_camera_infos
 
-            miot_scene_actions = await self._default_preset_action_manager.get_miot_scene_actions(self._mcp_ids)
-            ha_automation_actions = await self._default_preset_action_manager.get_ha_automation_actions(self._mcp_ids)
+            default_actions = await self._default_preset_action_manager.get_all_default_actions(self._mcp_ids)
+            miot_scene_actions = default_actions.get(LocalMcpClientId.MIOT_MANUAL_SCENES, {})
+            ha_automation_actions = default_actions.get(LocalMcpClientId.HA_AUTOMATIONS, {})
 
             no_matched_action_descriptions, matched_actions = (
                 await self._action_descriptions_to_preset_actions(
@@ -138,9 +139,11 @@ class RuleCreateTool(Actor):
             save_rule_confirm = Confirmation.SaveRuleConfirm(
                 rule=trigger_rule_detail,
                 camera_options=all_camera_infos,
-                action_options=(
-                    list(miot_scene_actions.values()) +
-                    list(ha_automation_actions.values()))
+                action_options=[
+                    action
+                    for actions in default_actions.values()
+                    for action in actions.values()
+                ]
             )
 
             dispatcher_message = Internal.Dispatcher(next_event_handler=self.myAddress)
@@ -279,7 +282,7 @@ class RuleCreateTool(Actor):
         """
         try:
             # Match MIoT scene actions
-            if (generated_action.mcp_client_id == "miot_manual_scenes" and
+            if (generated_action.mcp_client_id == LocalMcpClientId.MIOT_MANUAL_SCENES and
                 generated_action.mcp_tool_name == "trigger_manual_scene" and
                 generated_action.mcp_tool_input and
                     generated_action.mcp_tool_input.get("scene_id")):
@@ -294,7 +297,7 @@ class RuleCreateTool(Actor):
                     return preset_action
 
             # Match Home Assistant automation actions
-            elif (generated_action.mcp_client_id == "ha_automations" and
+            elif (generated_action.mcp_client_id == LocalMcpClientId.HA_AUTOMATIONS and
                   generated_action.mcp_tool_name == "trigger_automation" and
                   generated_action.mcp_tool_input and
                   generated_action.mcp_tool_input.get("automation_id")):
