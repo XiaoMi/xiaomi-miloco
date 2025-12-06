@@ -64,7 +64,7 @@ rtsp_cameras:
     name: "ip_camera_1"
     rtsp_url: "rtsp://192.168.3.121:8554/live/0"
     enable_audio: false
-    transport: "udp"  # tcp/udp, defaults to udp
+    transport: "udp"  # tcp/udp
     home_name: "家"
     room_name: "客厅"
 
