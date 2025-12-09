@@ -8,7 +8,7 @@ import { message } from "antd";
 
 const instace = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || '',
-  timeout: 5000,
+  timeout: 30000,
 });
 
 instace.interceptors.request.use(
