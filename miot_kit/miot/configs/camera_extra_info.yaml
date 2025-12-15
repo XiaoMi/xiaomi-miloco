@@ -30,18 +30,268 @@ extra_info:
     name: 小米智能摄像机 4 双摄版
     vendor: 小米
 blacklist:
-  - chuangmi.camera.ipc004b
-  - miir.camera.ir01
-  - mxiang.camera.mwc11
-  - isa.camera.hl5
-  - xiaovv.camera.xva3
-  - xzh.camera.camera
-  - cgzn.camera.camera
-  - isa.camera.virtual
-  - lumi.camera.aq1
-  - fimi.camera.c1b
-  - yunyi.camera.v1
-  - fimi.camera.c1
-  - chuangmi.camera.v4
-  - chuangmi.camera.ipc007b
-  - chuangmi.camera.ipc010
+  cgzn.camera.camera:
+    name: 摄像头
+    reason: 不支持2020年设备
+    vendor: 郑州初冠智能科技有限公司
+    year: 2020
+  chuangmi.camera.019e04:
+    name: 小白智能摄像机A1母婴版
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.021a04:
+    name: 小米智能摄像机  云台版Pro
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.021e02:
+    name: 小白智能摄像机A2
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.025b02:
+    name: 小白智能摄像机 户外云台版 N系列
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.026c02:
+    name: 小米智能摄像机云台版SE+
+    reason: 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2021
+  chuangmi.camera.029a02:
+    name: 小米智能摄像机 云台版2K
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.036a02:
+    name: 小白智能摄像机 云台版Y2
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.27a02:
+    name: 小白智能摄像机大众版C1
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.ip026c:
+    name: 小米智能摄像机 云台版SE
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.ip029a:
+    name: 小米智能摄像机 云台版2K
+    reason: 不支持2020年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.ipc004b:
+    name: 小白智能摄像机720P青春版
+    reason: 不支持2018年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.ipc007b:
+    name: 小白智能摄像机旗舰版
+    reason: 不支持2018年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.ipc009:
+    name: 小米智能摄像机云台版
+    reason: 不支持2018年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.ipc010:
+    name: 小白智能摄像机大众版1080P
+    reason: 不支持2018年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.ipc013:
+    name: 小白智能摄像机青春版
+    reason: 不支持2018年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.ipc013d:
+    name: 小白智能摄像机增强版
+    reason: 不支持2018年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.ipc016:
+    name: 小白智能摄像机云台版
+    reason: 不支持2018年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.ipc017:
+    name: 小白智能摄像机大众版1080P
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2019
+  chuangmi.camera.ipc019:
+    name: 小米智能摄像机 云台版
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2019
+  chuangmi.camera.ipc019b:
+    name: 小白智能摄像机青春版
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2019
+  chuangmi.camera.ipc019e:
+    name: 小白智能摄像机A1
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2019
+  chuangmi.camera.ipc020:
+    name: 小白智能摄像机 户外云台版 N系列
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2019
+  chuangmi.camera.ipc021:
+    name: 小米智能摄像机  云台版Pro
+    reason: 不支持2020年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2020
+  chuangmi.camera.v2:
+    name: 米家智能摄像机云台版
+    reason: 不支持2017年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2017
+  chuangmi.camera.v3:
+    name: 小白智能摄像机1080P云台版
+    reason: 不支持2018年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.v4:
+    name: 小白智能摄像机mini
+    reason: 不支持2018年设备
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.v5:
+    name: 小白智能摄像机大众版
+    reason: 不支持2017年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2017
+  chuangmi.camera.v6:
+    name: 小米小白智能摄像机增强版
+    reason: 不支持2018年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2018
+  chuangmi.camera.xiaobai:
+    name: 米家小白智能摄像机
+    reason: 不支持2017年设备 | 不支持的vendor
+    vendor: 上海创米数联智能科技发展股份有限公司
+    year: 2017
+  fimi.camera.c1:
+    name: 米家小相机
+    reason: 不支持2017年设备
+    vendor: 北京飞米科技有限公司
+    year: 2017
+  fimi.camera.c1b:
+    name: 米家小相机
+    reason: 不支持2017年设备
+    vendor: 北京飞米科技有限公司
+    year: 2017
+  isa.camera.df3:
+    name: 大方智能摄像机(1080P云台版)
+    reason: 不支持2017年设备 | 不支持的vendor
+    vendor: 天津华来科技有限公司
+    year: 2017
+  isa.camera.hl5:
+    name: 小圆智能摄像机
+    reason: 不支持2018年设备
+    vendor: 天津华来科技有限公司
+    year: 2018
+  isa.camera.hlc6:
+    name: 小米智能摄像机 标准版
+    reason: 不支持2020年设备
+    vendor: 天津华来科技有限公司
+    year: 2020
+  isa.camera.isc5:
+    name: 小方智能摄像机
+    reason: 不支持2017年设备 | 不支持的vendor
+    vendor: 天津华来科技有限公司
+    year: 2017
+  isa.camera.isc5c1:
+    name: 小方智能摄像机
+    reason: 不支持2018年设备 | 不支持的vendor
+    vendor: 天津华来科技有限公司
+    year: 2018
+  isa.camera.qf3:
+    name: 华来小方智能摄像机（双摄版）
+    reason: 不支持2018年设备 | 不支持的vendor
+    vendor: 天津华来科技有限公司
+    year: 2018
+  isa.camera.virtual:
+    name: 小方智能摄像机组
+    reason: 不支持2017年设备
+    vendor: 天津华来科技有限公司
+    year: 2017
+  lumi.camera.aq1:
+    name: 智能摄像机（网关版）
+    reason: 不支持2017年设备
+    vendor: 深圳绿米联创科技有限公司
+    year: 2017
+  lumi.camera.gwagl01:
+    name: 智能摄像机G2（网关版）
+    reason: 不支持2019年设备
+    vendor: 深圳绿米联创科技有限公司
+    year: 2019
+  mijia.camera.v1:
+    name: 米家智能摄像机1080P
+    reason: 不支持2017年设备 | 不支持的vendor
+    vendor: 米家
+    year: 2017
+  mijia.camera.v3:
+    name: 小米米家智能摄像机
+    reason: 不支持2018年设备 | 不支持的vendor
+    vendor: 米家
+    year: 2018
+  xiaovv.camera.c1:
+    name: xiaovv智能婴儿监视器
+    reason: 不支持2020年设备
+    vendor: 广东省宏视智能科技有限公司
+    year: 2020
+  xiaovv.camera.lamp:
+    name: 壁灯摄像机
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 广东省宏视智能科技有限公司
+    year: 2019
+  xiaovv.camera.ptz:
+    name: 户外云台摄像机
+    reason: 不支持2020年设备 | 不支持的vendor
+    vendor: 广东省宏视智能科技有限公司
+    year: 2020
+  xiaovv.camera.xva3:
+    name: xiaovv智能全景摄像机
+    reason: 不支持2018年设备
+    vendor: 广东省宏视智能科技有限公司
+    year: 2018
+  xiaovv.camera.xvb4:
+    name: xiaovv 户外摄像机
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 广东省宏视智能科技有限公司
+    year: 2019
+  xiaovv.camera.xvcb2:
+    name: 户外摄像机 Pro
+    reason: 不支持2020年设备
+    vendor: 广东省宏视智能科技有限公司
+    year: 2020
+  xiaovv.camera.xvd5:
+    name: xiaovv智能全景摄像机（云存储版）
+    reason: 不支持2019年设备 | 不支持的vendor
+    vendor: 广东省宏视智能科技有限公司
+    year: 2019
+  xiaovv.camera.xvsnowman:
+    name: 智能云台摄像机
+    reason: 不支持2020年设备 | 不支持的vendor
+    vendor: 广东省宏视智能科技有限公司
+    year: 2020
+  xzh.camera.camera:
+    name: 摄像头
+    reason: 不支持2020年设备
+    vendor: 郑州赛特尔电子技术有限公司
+    year: 2020
+  yunyi.camera.v1:
+    name: 小蚁智能摄像机
+    reason: 不支持2017年设备
+    vendor: 上海小蚁科技有限公司
+    year: 2017
