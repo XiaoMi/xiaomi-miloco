@@ -89,7 +89,7 @@ const RuleRecord = () => {
       const { aiRecommendActionDescriptions = [] } = item;
 
       const buttonText = aiRecommendActionDescriptions.length > 0
-        ? `${t('logManage.viewDynamicExecutionLogButtonText')} (${aiRecommendActionDescriptions.join('; ')}) ${t('logManage.viewDynamicExecutionLogButtonText2')}`
+        ? `${t('logManage.viewDynamicExecutionLogButtonText')}`
         : '';
 
       executionContent = (
