@@ -34,7 +34,7 @@ class JWTConfig:
     Uses singleton pattern to ensure configuration is initialized only once,
     preventing duplicate key generation
     """
-    _instance: Optional['JWTConfig'] = None
+    _instance: Optional["JWTConfig"] = None
     _initialized: bool = False
 
     def __new__(cls):
