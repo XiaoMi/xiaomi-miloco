@@ -27,7 +27,7 @@ from miloco_server.controller import (
     trigger_router,
     web_router,
 )
-from miloco_server.middleware.auth_middleware import AuthStaticFiles
+from miloco_server.middleware import AuthStaticFiles
 from miloco_server.middleware.exception_handler import handle_exception
 from miloco_server.service.manager import get_manager
 from miloco_server.utils.database import init_database

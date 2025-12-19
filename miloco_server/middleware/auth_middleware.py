@@ -23,16 +23,12 @@ logger = logging.getLogger(__name__)
 
 # Global token invalidation timestamp
 token_invalidation_time = int(time.time())
-logger.info("Authentication middleware initialized - All old JWT tokens invalidated, "
-            "invalidation timestamp: %s", token_invalidation_time)
 
 ADMIN_USERNAME = "admin"
 
 class JWTConfig:
     """
     JWT configuration management class
-    Uses singleton pattern to ensure configuration is initialized only once,
-    preventing duplicate key generation
     """
     _instance: Optional["JWTConfig"] = None
     _initialized: bool = False
@@ -43,6 +39,7 @@ class JWTConfig:
         return cls._instance
 
     def __init__(self):
+        # Prevent re-initialization if already initialized
         if self.__class__._initialized:
             return
 
@@ -56,11 +53,12 @@ class JWTConfig:
         self._algorithm = JWT_CONFIG["algorithm"]
         self._access_token_expire_minutes = JWT_CONFIG["access_token_expire_minutes"]
 
-        # Log configuration information
-        logger.info("JWT configuration initialized - secret_key: %s, algorithm: %s, expire_minutes: %s",
-                    self._secret_key, self._algorithm, self._access_token_expire_minutes)
-
+        # Mark as initialized
         self.__class__._initialized = True
+
+        # Log initialization (logging system should be ready at this point)
+        logger.info("JWT configuration initialized - secret_key: %s, algorithm: %s, expire_minutes: %s",
+                   self._secret_key, self._algorithm, self._access_token_expire_minutes)
 
     @property
     def secret_key(self) -> str:
@@ -78,8 +76,20 @@ class JWTConfig:
         return self._access_token_expire_minutes
 
 
-# Create global JWT configuration instance (singleton)
-_jwt_config = JWTConfig()
+# Global JWT configuration instance (lazy-initialized)
+_jwt_config: Optional[JWTConfig] = None
+
+def get_jwt_config() -> JWTConfig:
+    """
+    Get JWT configuration instance (lazy-initialized singleton)
+    
+    Returns:
+        JWTConfig: JWT configuration instance
+    """
+    global _jwt_config
+    if _jwt_config is None:
+        _jwt_config = JWTConfig()
+    return _jwt_config
 
 def invalidate_all_tokens():
     """
@@ -112,13 +122,14 @@ def is_token_valid(token_issued_at: int) -> bool:
 
 def create_access_token(username: str) -> str:
     """Create JWT access token"""
-    expire = datetime.utcnow() + timedelta(minutes=_jwt_config.access_token_expire_minutes)
+    jwt_config = get_jwt_config()
+    expire = datetime.utcnow() + timedelta(minutes=jwt_config.access_token_expire_minutes)
     to_encode = {
         "sub": username,
         "exp": expire,
         "iat": int(time.time()),
     }
-    encoded_jwt = jwt.encode(to_encode, _jwt_config.secret_key, algorithm=_jwt_config.algorithm)
+    encoded_jwt = jwt.encode(to_encode, jwt_config.secret_key, algorithm=jwt_config.algorithm)
     return encoded_jwt
 
 def _verify_jwt_token_internal(token: Optional[str]) -> str:
@@ -138,7 +149,8 @@ def _verify_jwt_token_internal(token: Optional[str]) -> str:
         raise AuthenticationException("Authentication token not found, please login first")
 
     try:
-        payload = jwt.decode(token, _jwt_config.secret_key, algorithms=[_jwt_config.algorithm])
+        jwt_config = get_jwt_config()
+        payload = jwt.decode(token, jwt_config.secret_key, algorithms=[jwt_config.algorithm])
         username: str = payload.get("sub")
         # Get token issued time
         token_issued_at: int = payload.get("iat")
@@ -199,10 +211,11 @@ def set_auth_cookie(response: Response, access_token: str) -> None:
         response: FastAPI Response object
         access_token: JWT access token
     """
+    jwt_config = get_jwt_config()
     response.set_cookie(
         key="access_token",
         value=access_token,
-        max_age=_jwt_config.access_token_expire_minutes * 60,  # Convert to seconds
+        max_age=jwt_config.access_token_expire_minutes * 60,  # Convert to seconds
         httponly=True,  # Prevent XSS attacks
         secure=False,   # Set to False for development, True for production
         samesite="lax"  # CSRF protection

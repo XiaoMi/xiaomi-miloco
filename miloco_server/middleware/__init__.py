@@ -29,7 +29,8 @@ from .auth_middleware import (
     clear_auth_cookie,
     invalidate_all_tokens,
     is_token_valid,
-    ADMIN_USERNAME
+    ADMIN_USERNAME,
+    AuthStaticFiles
 )
 
 __all__ = [
@@ -55,5 +56,6 @@ __all__ = [
     "clear_auth_cookie",
     "invalidate_all_tokens",
     "is_token_valid",
-    "ADMIN_USERNAME"
+    "ADMIN_USERNAME",
+    "AuthStaticFiles"
 ]
