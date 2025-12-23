@@ -389,9 +389,14 @@ class MIoTClient:
         cameras: Dict[str, MIoTCameraInfo] = {}
         devices = await self.get_devices_async(home_list=home_list, fetch_share_home=fetch_share_home)
         for did, device_info in devices.items():
-            if device_info.model in list(camera_extra_info.blacklist.keys()):
-                continue
-            if device_info.model.split('.')[1] not in camera_extra_info.support_classes:
+            device_class = device_info.model.split('.')[1]
+            if device_class in camera_extra_info.denylist:
+                if device_info.model in camera_extra_info.denylist[device_class]:
+                    continue
+            elif device_class in camera_extra_info.allowlist:
+                if device_info.model not in camera_extra_info.allowlist[device_class]:
+                    continue
+            else:
                 continue
             cameras[did] = MIoTCameraInfo(
                 **device_info.model_dump(),
