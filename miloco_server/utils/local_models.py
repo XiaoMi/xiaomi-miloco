@@ -62,9 +62,13 @@ class LocalModels:
 
     async def local_cuda_info(self):
         """Get local CUDA info."""
-        url = self._get_service_url(LocalModelApi.CUDA_INFO)
-        json_resp = await self._forward_local_models_services(url, method_get=True)
-        return json_resp
+        try:
+            url = self._get_service_url(LocalModelApi.CUDA_INFO)
+            json_resp = await self._forward_local_models_services(url, method_get=True)
+            return json_resp
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Get local cuda info failed: %s", e)
+            return None
 
     async def get_local_models(self) -> List[LLMModelInfo]:
         """Get cached local model list."""
