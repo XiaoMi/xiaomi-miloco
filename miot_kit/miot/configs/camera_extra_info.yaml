@@ -1,3 +1,9 @@
+# NOTICE: Device class can only exist in either the allowlist or the denylist, not both lists simultaneously.
+allow_classes:
+  - camera
+  - wifispeaker
+  - controller
+
 extra_info:
   chuangmi.camera.068ac1:
     channel_count: 2

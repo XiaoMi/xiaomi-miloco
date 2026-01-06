@@ -390,6 +390,8 @@ class MIoTClient:
         devices = await self.get_devices_async(home_list=home_list, fetch_share_home=fetch_share_home)
         for did, device_info in devices.items():
             device_class = device_info.model.split('.')[1]
+            if device_class not in camera_extra_info.allow_classes:
+                continue
             if device_class in camera_extra_info.denylist:
                 if device_info.model in camera_extra_info.denylist[device_class]:
                     continue
