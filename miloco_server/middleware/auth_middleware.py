@@ -6,6 +6,7 @@ Authentication middleware
 Provides JWT token creation, verification and management functionality
 """
 import logging
+import secrets
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -22,10 +23,73 @@ logger = logging.getLogger(__name__)
 
 # Global token invalidation timestamp
 token_invalidation_time = int(time.time())
-logger.info("Authentication middleware initialized - All old JWT tokens invalidated, "
-            "invalidation timestamp: %s", token_invalidation_time)
 
 ADMIN_USERNAME = "admin"
+
+class JWTConfig:
+    """
+    JWT configuration management class
+    """
+    _instance: Optional["JWTConfig"] = None
+    _initialized: bool = False
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        # Prevent re-initialization if already initialized
+        if self.__class__._initialized:
+            return
+
+        # Initialize secret key
+        config_secret_key = JWT_CONFIG["secret_key"]
+        if config_secret_key == "your-super-secret-key-change-this":
+            self._secret_key = secrets.token_urlsafe(32)
+        else:
+            self._secret_key = config_secret_key
+
+        self._algorithm = JWT_CONFIG["algorithm"]
+        self._access_token_expire_minutes = JWT_CONFIG["access_token_expire_minutes"]
+
+        # Mark as initialized
+        self.__class__._initialized = True
+
+        # Log initialization (logging system should be ready at this point)
+        logger.info("JWT configuration initialized - algorithm: %s, expire_minutes: %s",
+                   self._algorithm, self._access_token_expire_minutes)
+
+    @property
+    def secret_key(self) -> str:
+        """Get JWT secret key"""
+        return self._secret_key
+
+    @property
+    def algorithm(self) -> str:
+        """Get JWT algorithm"""
+        return self._algorithm
+
+    @property
+    def access_token_expire_minutes(self) -> int:
+        """Get access token expiration time in minutes"""
+        return self._access_token_expire_minutes
+
+
+# Global JWT configuration instance (lazy-initialized)
+_jwt_config: Optional[JWTConfig] = None
+
+def get_jwt_config() -> JWTConfig:
+    """
+    Get JWT configuration instance (lazy-initialized singleton)
+    
+    Returns:
+        JWTConfig: JWT configuration instance
+    """
+    global _jwt_config
+    if _jwt_config is None:
+        _jwt_config = JWTConfig()
+    return _jwt_config
 
 def invalidate_all_tokens():
     """
@@ -58,13 +122,14 @@ def is_token_valid(token_issued_at: int) -> bool:
 
 def create_access_token(username: str) -> str:
     """Create JWT access token"""
-    expire = datetime.utcnow() + timedelta(minutes=JWT_CONFIG["access_token_expire_minutes"])
+    jwt_config = get_jwt_config()
+    expire = datetime.utcnow() + timedelta(minutes=jwt_config.access_token_expire_minutes)
     to_encode = {
         "sub": username,
         "exp": expire,
         "iat": int(time.time()),
     }
-    encoded_jwt = jwt.encode(to_encode, JWT_CONFIG["secret_key"], algorithm=JWT_CONFIG["algorithm"])
+    encoded_jwt = jwt.encode(to_encode, jwt_config.secret_key, algorithm=jwt_config.algorithm)
     return encoded_jwt
 
 def _verify_jwt_token_internal(token: Optional[str]) -> str:
@@ -84,7 +149,8 @@ def _verify_jwt_token_internal(token: Optional[str]) -> str:
         raise AuthenticationException("Authentication token not found, please login first")
 
     try:
-        payload = jwt.decode(token, JWT_CONFIG["secret_key"], algorithms=[JWT_CONFIG["algorithm"]])
+        jwt_config = get_jwt_config()
+        payload = jwt.decode(token, jwt_config.secret_key, algorithms=[jwt_config.algorithm])
         username: str = payload.get("sub")
         # Get token issued time
         token_issued_at: int = payload.get("iat")
@@ -145,10 +211,11 @@ def set_auth_cookie(response: Response, access_token: str) -> None:
         response: FastAPI Response object
         access_token: JWT access token
     """
+    jwt_config = get_jwt_config()
     response.set_cookie(
         key="access_token",
         value=access_token,
-        max_age=JWT_CONFIG["access_token_expire_minutes"] * 60,  # Convert to seconds
+        max_age=jwt_config.access_token_expire_minutes * 60,  # Convert to seconds
         httponly=True,  # Prevent XSS attacks
         secure=False,   # Set to False for development, True for production
         samesite="lax"  # CSRF protection
