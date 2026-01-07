@@ -1,3 +1,7 @@
+## v0.1.15
+### Changed
+- Update camera extra info file structure, update unsupported camera model list
+
 ## v0.1.14
 ### Added
 - libmiot_camera support macOS arm64 and x86_64

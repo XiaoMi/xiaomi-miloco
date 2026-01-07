@@ -293,6 +293,7 @@ class MIoTCameraExtraItem(BaseModel):
 
 class MIoTCameraExtraInfo(BaseModel):
     """MIoT Camera Extra Info."""
-    support_classes: List[str] = Field(description="Support classes")
+    allow_classes: List[str] = Field(description="Allow classes")
     extra_info: Dict[str, MIoTCameraExtraItem] = Field(description="Extra info")
-    blacklist: List[str] = Field(description="Blacklist")
+    allowlist: Dict[str, Dict[str, Dict]] = Field(description="Allowlist")
+    denylist: Dict[str, Dict[str, Dict]] = Field(description="Denylist")
