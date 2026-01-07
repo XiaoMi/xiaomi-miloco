@@ -33,7 +33,7 @@ from miloco_server.service.trigger_rule_service import TriggerRuleService
 from miloco_server.service.model_service import ModelService
 from miloco_server.service.mcp_service import McpService
 from miloco_server.service.chat_history_service import ChatHistoryService
-from miloco_server.config.normal_config import MIOT_CONFIG
+from miloco_server.config.normal_config import MIOT_CONFIG, RTSP_CAMERA_CONFIG
 from miloco_server.utils.chat_companion import ChatCompanion
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,8 @@ class Manager:
             uuid=self.device_uuid,
             redirect_uri="https://mico.api.mijia.tech/login_redirect",
             kv_dao=self._kv_dao,
-            cloud_server=MIOT_CONFIG["cloud_server"])
+            cloud_server=MIOT_CONFIG["cloud_server"],
+            rtsp_cameras=RTSP_CAMERA_CONFIG)
 
         self._ha_proxy = HAProxy(kv_dao=self._kv_dao)
 

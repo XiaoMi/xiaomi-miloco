@@ -57,6 +57,20 @@ trigger_rule_runner:
 # Camera configuration
 camera:
   frame_interval: 500 # Unit: Millisecond (ms)
+  rtsp_server:
+    enabled: true  # Enable/disable RTSP server
+    port: 8554     # RTSP server port
+    # RTSP URL format: rtsp://<server_ip>:{port}/<camera_did>
+
+rtsp_cameras:
+  # Example RTSP camera configuration. Remove or duplicate entries as needed.
+  - did: "ip_camera_1"
+    name: "ip_camera_1"
+    rtsp_url: "rtsp://192.168.3.122:8554/live/0"
+    enable_audio: false
+    transport: "udp"  # tcp/udp
+    home_name: "家"
+    room_name: "客厅"
 
 
 # MIoT configuration, default to 'cn', use your MiHome cloud server
