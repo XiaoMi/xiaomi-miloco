@@ -11,6 +11,8 @@ On macOS (both M series and Intel series), the service can be run in two ways:
 - Clone the code from GitHub and run directly
 - Run via Docker inside a virtual machine
 
+> AI Engine now supports Apple Silicon/Intel through ggml MPS/CPU. For best performance, build the core with `scripts/ai_engine_metal_build.sh` on Apple Silicon, set `device: "mps"` in config, and export `DYLD_LIBRARY_PATH=project_root/output/lib`.
+
 The following tutorial takes macOS Tahoe 26.1 as an example and demonstrates how to run this service with Docker. Cloning the code and running the service directly has already been introduced in the development guide, so it will not be elaborated here.
 
 ## Environment Setup

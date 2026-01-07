@@ -132,11 +132,15 @@ python scripts/start_server.py
 # 安装依赖
 pip install -e miloco_ai_engine
 
-# 编译 core
+# 编译 core（按环境选择）
+# - Linux/WSL2 + NVIDIA GPU: 使用 CUDA 构建
+# - macOS（Apple Silicon）: 使用 MPS 构建（配置里 device: "mps"）
 bash scripts/ai_engine_cuda_build.sh
+# bash scripts/ai_engine_metal_build.sh
 
 # 配置动态库路径
 export LD_LIBRARY_PATH=project_root/output/lib:$LD_LIBRARY_PATH
+# macOS: export DYLD_LIBRARY_PATH=project_root/output/lib:$DYLD_LIBRARY_PATH
 
 # 运行服务
 python scripts/start_ai_engine.py
