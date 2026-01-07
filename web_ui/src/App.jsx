@@ -32,7 +32,7 @@ function App() {
           <Route path="/500" element={<Error500 />} />
           <Route path="/home" element={<Home />} >
             <Route index element={<Navigate to="instant" replace />} />
-            <Route path="instant" element={<Instant />} />
+            <Route path="instant/:sessionId?" element={<Instant />} />
             <Route path="deviceManage" element={<DeviceManage />} />
             <Route path="smartCenter" element={<SmartCenter />} />
             <Route path="executionManage" element={<ExecutionManage />} />
