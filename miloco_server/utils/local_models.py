@@ -128,6 +128,20 @@ class LocalModels:
         try:
             response.raise_for_status()
         except Exception as e:  # pylint: disable=broad-exception-caught
+            # Check if not response
+            if not response:
+                logger.error("No response received from %s", target_url)
+                raise LLMServiceException("No response received from local model service")
+            # Check if response content is empty
+            if not response.content:
+                logger.error("Empty response received from %s", target_url)
+                raise LLMServiceException("Received empty response from local model service")
+            # Check if response content is not JSON
+            if not response.is_json():
+                logger.error("Response content is not JSON from %s", target_url)
+                raise LLMServiceException("Received non-JSON response from local model service")
+
+            # Handle HTTP errors
             error_data = response.json()
             if error_data and error_data.get("code", None) and error_data.get("message", None):
                 logger.error("Forward local model service failed: errCode[%s]: %s",
@@ -136,4 +150,5 @@ class LocalModels:
             else:
                 logger.error("Forward local model service failed: %s", e)
                 raise LLMServiceException(f"Forward local model service failed: {str(e)}") from e
+        
         return response.json()
