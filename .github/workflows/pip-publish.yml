@@ -1,0 +1,74 @@
+name: Build and Publish
+
+on:
+  # push:
+  #   tags:
+  #     - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install build tools
+        run: pip install build twine
+      
+      # 1. 构建 Web UI
+      - name: Build Web UI
+        run: |
+          cd web_ui
+          npm ci
+          npm run build
+          cp -r dist/* ../miloco_server/static/
+      
+      # 2. 构建 miot-kit
+      - name: Build miot-kit
+        run: |
+          cd miot_kit
+          python -m build
+      
+      # 3. 构建 miloco-server
+      - name: Build miloco-server
+        run: |
+          cd miloco_server
+          python -m build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-packages
+          path: |
+            miot_kit/dist/*
+            miloco_server/dist/*
+          retention-days: 7  # 保留7天
+      
+    #   # 4. 构建主包 miloco
+    #   - name: Build miloco
+    #     run: python -m build
+      
+    #   # 5. 发布所有包（按顺序，因为有依赖关系）
+    #   - name: Publish to PyPI
+    #     env:
+    #       TWINE_USERNAME: __token__
+    #       TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+    #     run: |
+    #       # 先发布被依赖的包
+    #       twine upload miot_kit/dist/*
+    #       twine upload miloco_server/dist/*
+    #       # 等待 PyPI 索引更新
+    #       sleep 30
+    #       # 最后发布主包
+    #       twine upload dist/*
