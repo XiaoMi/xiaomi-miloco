@@ -227,3 +227,14 @@ $RECYCLE.BIN/
 
 # web ui build static files in miloco_server
 miloco_server/static/
+
+# AI relates
+AGENTS.md
+openspec/
+.amazonq/
+.gemini/
+
+
+
+
+
