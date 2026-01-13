@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from fastapi import WebSocket
 from miot.types import MIoTCameraInfo
-from schema.mcp_schema import MCPClientStatus, choose_mcp_list
+from miloco_server.schema.mcp_schema import MCPClientStatus, choose_mcp_list
 
 from miloco_server import actor_system
 from miloco_server.dao.trigger_dao import TriggerRuleDAO
@@ -29,8 +29,8 @@ from miloco_server.schema.trigger_schema import (
     Action, ExecuteInfoDetail, Notify, TriggerRule, TriggerRuleDetail)
 from miloco_server.service.trigger_rule_runner import TriggerRuleRunner
 
-from service import trigger_rule_dynamic_executor_cache
-from service.trigger_rule_dynamic_executor import RegisterWebSocket
+from miloco_server.service import trigger_rule_dynamic_executor_cache
+from miloco_server.service.trigger_rule_dynamic_executor import RegisterWebSocket
 
 logger = logging.getLogger(__name__)
 

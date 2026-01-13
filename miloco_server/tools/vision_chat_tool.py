@@ -8,7 +8,7 @@ import logging
 from typing import Optional
 
 from pydantic.dataclasses import dataclass
-from schema.miot_schema import CameraImgSeq
+from miloco_server.schema.miot_schema import CameraImgSeq
 from thespian.actors import Actor, ActorAddress, ActorExitRequest
 
 from miloco_server import actor_system

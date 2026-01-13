@@ -1,0 +1,12 @@
+include miloco_server/pyproject.toml
+include miot_kit/pyproject.toml
+
+recursive-include miloco_server/static *
+recursive-include miloco_server/templates *
+recursive-include miot_kit/miot/configs *
+recursive-include miot_kit/miot/i18n *
+recursive-include miot_kit/miot/libs *
+recursive-include miot_kit/miot/res *
+recursive-include miot_kit/miot/specs *
+recursive-include config *
+recursive-include scripts *.sh *.md *.py

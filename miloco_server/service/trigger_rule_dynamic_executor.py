@@ -9,11 +9,11 @@ import asyncio
 from typing import Optional
 
 from fastapi import WebSocket
-from schema.miot_schema import CameraImgSeq
+from miloco_server.schema.miot_schema import CameraImgSeq
 from thespian.actors import Actor, ActorAddress, ActorExitRequest
 
-from dao.trigger_rule_log_dao import TriggerRuleLogDAO
-from utils.chat_companion import ChatCachedData
+from miloco_server.dao.trigger_rule_log_dao import TriggerRuleLogDAO
+from miloco_server.utils.chat_companion import ChatCachedData
 from miloco_server import actor_system
 from miloco_server.agent.dynamic_execute_agent import ActionDescriptionDynamicExecuteAgent
 from miloco_server.schema.chat_schema import Event, Instruction, InstructionPayload, Internal, Nlp, Confirmation

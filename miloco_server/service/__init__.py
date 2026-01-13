@@ -5,7 +5,7 @@
 service package
 """
 from cachetools import TTLCache
-from service.trigger_rule_dynamic_executor import TriggerRuleDynamicExecutor
+from miloco_server.service.trigger_rule_dynamic_executor import TriggerRuleDynamicExecutor
 
 
 trigger_rule_dynamic_executor_cache: TTLCache[str, TriggerRuleDynamicExecutor] = TTLCache(maxsize=100, ttl=600)
