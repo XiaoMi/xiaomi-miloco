@@ -40,8 +40,8 @@ miot_packages = find_packages(
     where="miot_kit",
     include=["miot", "miot.*"],
 )
-# 重命名为 miot_kit
-miot_packages = ["miot_kit" if p == "miot" else p.replace("miot.", "miot_kit.") for p in miot_packages]
+# # 重命名为 miot_kit
+# miot_packages = ["miot_kit" if p == "miot" else p.replace("miot.", "miot_kit.") for p in miot_packages]
 
 all_packages = packages + miot_packages
 
@@ -51,7 +51,7 @@ setup(
     version="0.1.2",
     python_requires='>=3.11',
     packages=all_packages,
-    package_dir={"miot_kit": "miot_kit/miot"},
+    package_dir={"miot": "miot_kit/miot"},
     install_requires= defaults,
     extras_require= extras,
     entry_points={
