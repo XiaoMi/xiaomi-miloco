@@ -1,9 +1,9 @@
 name: Build and Publish
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # push:
+  #   tags:
+  #     - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -45,6 +45,15 @@ jobs:
         run: |
           cd miloco_server
           python -m build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-packages
+          path: |
+            miot_kit/dist/*
+            miloco_server/dist/*
+          retention-days: 7  # 保留7天
       
     #   # 4. 构建主包 miloco
     #   - name: Build miloco
