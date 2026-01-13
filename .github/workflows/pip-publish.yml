@@ -1,0 +1,41 @@
+name: Build and Publish
+
+on:
+  # push:
+  #   tags:
+  #     - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install build tools
+        run: pip install build twine
+      
+      - name: Build Web UI
+        run: |
+          cd web_ui
+          npm ci
+          npm run build
+          mkdir ../miloco_server/static/
+          cp -r dist/* ../miloco_server/static/
+
+      - name: Build miot-kit
+        run: |
+          cd miot_kit
+          python -m build
+      
