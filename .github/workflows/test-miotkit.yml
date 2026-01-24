@@ -1,0 +1,39 @@
+name: Test Miocokit
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-miotkit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          cd miot_kit
+          python -m pip install --upgrade pip]
+          pip install pytest
+          pip install -e .
+
+      - name: Run tests
+        run: |
+          pytest --junitxml=miot-test-results.xml ./tests
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()  # 即使测试失败也上传
+        with:
+            name: miot-test-results
+            path: miot-test-results.xml
