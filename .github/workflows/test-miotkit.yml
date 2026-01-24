@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd miot_kit
-          python -m pip install --upgrade pip]
+          python -m pip install --upgrade pip
           pip install pytest
           pip install -e .
 
