@@ -210,17 +210,16 @@ class TaskScheduler(Actor):
 
         request: ChatCompletionRequest = message.data
         task_priority = request.priority or 0
-        task_label = self.default_worker_prefix
         # Do not distinguish different task queues for now
         task = actor_system.createActor(
-            lambda: Task(task_id, task_label, self.handle, self.myAddress, request, message
+            lambda: Task(task_id, self.handle, self.myAddress, request, message
                          .call_back_message, task_priority))
         self.tasks[task_id] = task
 
         try:
             self.task_queue.put_nowait((-task_priority, task_id))
         except Exception as exc: # pylint: disable=broad-exception-caught
-            logger.error("Task %s-%s queue full, submit failed: %s", task_id, task_label, exc)
+            logger.error("Task %s queue full, submit failed: %s", task_id, exc)
             raise ModelSchedulerException(f"Task queue full, submit failed: {str(exc)}") from exc
 
     def _create_dynamic_worker(self, worker_name: str):

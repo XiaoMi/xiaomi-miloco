@@ -133,7 +133,6 @@ def test_task_timeout_handling(MockCallModelWrapper, MockLlama):
     # Create task instance
     task_id = str(uuid.uuid4())
     task = Task(task_id=task_id,
-                table="test_table",
                 handle=MagicMock(),
                 task_scheduler=MagicMock(),
                 request=ChatCompletionRequest(
@@ -163,8 +162,7 @@ def test_task_successful_execution(MockCallModelWrapper, MockLlama):
     """Test the process of successful task execution"""
     # Create task instance
     task_id = str(uuid.uuid4())
-    task = Task(task_id=task_id,
-                table="test_table",
+    task = Task(task_id=task_id,    
                 handle=MagicMock(),
                 task_scheduler=MagicMock(),
                 request=ChatCompletionRequest(
@@ -197,9 +195,8 @@ def test_task_successful_execution(MockCallModelWrapper, MockLlama):
 def test_streaming_response_handling(MockCallModelWrapper, MockLlama):
     """Test the handling of streaming responses"""
     # Create task instance (streaming request)
-    task_id = str(uuid.uuid4())
-    task = Task(task_id=task_id,
-                table="test_table",
+    task_id = str(uuid.uuid4()) 
+    task = Task(task_id=task_id,    
                 handle=MagicMock(),
                 task_scheduler=MagicMock(),
                 request=ChatCompletionRequest(
