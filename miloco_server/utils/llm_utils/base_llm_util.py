@@ -19,6 +19,7 @@ class BaseLLMUtil:
     def __init__(
         self,
         request_id: str,
+        priority: Optional[int] = None,
         query: Optional[str] = None,
         tools_meta: Optional[List[ChatCompletionToolParam]] = None,
     ):
@@ -31,6 +32,7 @@ class BaseLLMUtil:
         self._chat_history = ChatHistoryMessages()
         self._query = query
         self._tools_meta = tools_meta
+        self._priority = priority
 
 
     def _get_system_prompt(self) -> str:
@@ -54,7 +56,7 @@ class BaseLLMUtil:
                     "LLM proxy not exit, Please configure on the Model Settings Page.")
             chat_messages = self._chat_history.get_messages()
             llm_result = await self._llm_proxy.async_call_llm(
-                chat_messages, self._tools_meta)
+                chat_messages, self._tools_meta, self._priority)
 
             logger.info("[%s] LLM response: %s", self._request_id, llm_result)
 

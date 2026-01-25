@@ -12,6 +12,8 @@ from miloco_server.schema.auth_schema import UserLanguage
 
 from miloco_server.utils.llm_utils.base_llm_util import BaseLLMUtil
 
+from miloco_server.utils.prompt_helper import PromptConfig, PromptType
+
 logger = logging.getLogger(__name__)
 
 class VisionUnderstander(BaseLLMUtil):
@@ -25,7 +27,7 @@ class VisionUnderstander(BaseLLMUtil):
         language: UserLanguage,
     ):
         """Initialize VisionUnderstander"""
-        super().__init__(request_id=request_id, query=query, tools_meta=None)
+        super().__init__(request_id=request_id, priority=PromptConfig.get_priority(PromptType.VISION_UNDERSTANDING), query=query, tools_meta=None)
         self._llm_proxy = self._manager.get_llm_proxy_by_purpose(ModelPurpose.VISION_UNDERSTANDING)
         self._camera_img_seqs = camera_img_seqs
         self._language = language
