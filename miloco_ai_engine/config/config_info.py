@@ -3,7 +3,7 @@
 
 """Model configuration"""
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 from enum import Enum
 
 MAX_CUDA_LAYERS = 50
@@ -50,9 +50,6 @@ class ModelConfig(BaseModel):
         default=4096, description="Maximum available context")
     temperature: float = Field(default=-1, description="Temperature parameter")
 
-    # Business hardcoded configuration
-    task_classification: Dict[str, int] = Field(default={}, description="Task classification")
-
 
     def __init__(self, model_name: str, **data: Any):
         super().__init__(**data)
@@ -61,14 +58,6 @@ class ModelConfig(BaseModel):
         self.n_seq_max = data.get("cache_seq_num", 0) + data.get("parallel_seq_num", 6)
         device = data.get("device", "cpu")
         self.n_gpu_layers = MAX_CUDA_LAYERS if ModelDevice(device) == ModelDevice.CUDA else 0
-
-        business = data.get("business", {})
-        task_labels = business.get("task_labels", [])
-        task_priorities = business.get("task_priorities", [])
-        self.task_classification = {
-            label: priority
-            for label, priority in zip(task_labels, task_priorities)
-        }
 
     def update(self, config_update: ModelConfigUpdate) -> None:
         """
@@ -88,7 +77,6 @@ class ModelConfig(BaseModel):
         Convert to dictionary for C++ library initialization input
         """
         r = self.model_dump()
-        r.pop("task_classification")
         # Remove keys with None values from config dictionary
         dels = []
         for key, value in r.items():

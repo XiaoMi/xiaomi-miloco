@@ -4,16 +4,15 @@
 """Task scheduler module for managing task scheduling and execution."""
 from thespian.actors import Actor, ActorAddress
 from miloco_ai_engine.config.config_info import ModelConfig
-from miloco_ai_engine.config.config import SERVER_CONCURRENCY, BUSSINESS_PROMPT_MATCHER
-from typing import List, Dict, Tuple
+from miloco_ai_engine.config.config import SERVER_CONCURRENCY
+from typing import List, Dict
 import threading
 import queue
 from miloco_ai_engine.schema.actor_message import RequestMessage, TaskSchedulerAction, TaskAction, actor_system
 import uuid
-from miloco_ai_engine.schema.models_schema import ChatCompletionRequest, ContentType, ChatMessage
+from miloco_ai_engine.schema.models_schema import ChatCompletionRequest
 import asyncio
 from miloco_ai_engine.task_scheduler.scheduler_task import Task
-from miloco_ai_engine.utils.prompt_matcher import PromptMatcher
 from miloco_ai_engine.middleware.exceptions import ModelSchedulerException
 import time
 from concurrent.futures import Future
@@ -43,8 +42,6 @@ class TaskScheduler(Actor):
             "abandon_low_priority", True)
 
         self.max_priority = 0
-        self.prompt_matcher = PromptMatcher(BUSSINESS_PROMPT_MATCHER)
-        self.task_classification = self.model_config.task_classification
 
         self.workers: List[threading.Thread] = []
         # Mapping from thread name to thread object
@@ -212,7 +209,8 @@ class TaskScheduler(Actor):
         task_id = str(uuid.uuid4())
 
         request: ChatCompletionRequest = message.data
-        task_label, task_priority = self._task_classification(request.messages)
+        task_priority = request.priority or 0
+        task_label = self.default_worker_prefix
         # Do not distinguish different task queues for now
         task = actor_system.createActor(
             lambda: Task(task_id, task_label, self.handle, self.myAddress, request, message
@@ -224,44 +222,6 @@ class TaskScheduler(Actor):
         except Exception as exc: # pylint: disable=broad-exception-caught
             logger.error("Task %s-%s queue full, submit failed: %s", task_id, task_label, exc)
             raise ModelSchedulerException(f"Task queue full, submit failed: {str(exc)}") from exc
-
-    def _task_classification(self, messages: List[ChatMessage]) -> Tuple[str, int]:
-        """
-        Use prompt matcher to get task classification
-        """
-        content_str = ""
-        for message in messages:
-            contents = message.content
-
-            if isinstance(contents, str):
-                content_str += contents
-                continue
-
-            for content in contents:
-                if content.type == ContentType.TEXT:
-                    content_str += content.text
-
-        match_result = self.prompt_matcher.match(content_str)
-        if match_result.matched:
-            prompt_key = match_result.key
-            placeholders = match_result.placeholders
-
-            if placeholders:
-                first_placeholder_value = list(placeholders.values())[0]
-                worker_name = f"{prompt_key}_{first_placeholder_value}"
-            else:
-                worker_name = f"{prompt_key}_default"
-
-            # NOTE: Not creating dynamically for now
-            # if worker_name not in self.worker_threads:
-            #     if not self._create_dynamic_worker(worker_name):
-            #         return self.default_worker_prefix, 0
-
-            priority = self.task_classification.get(
-                prompt_key, 1)  # Default priority is 1
-            return worker_name, priority
-
-        return self.default_worker_prefix, 0
 
     def _create_dynamic_worker(self, worker_name: str):
         """

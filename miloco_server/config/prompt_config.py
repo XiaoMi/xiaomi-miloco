@@ -41,6 +41,20 @@ CHAT_VISION_USE_IMG_COUNT = _server_config["chat"]["vision_use_img_count"]
 PROMPT_CONFIG_FILE = PROJECT_ROOT.parent / "config" / "prompt_config.yaml"
 _config = load_yaml_config(PROMPT_CONFIG_FILE)
 
+# Priority range constants
+PRIORITY_MIN = 0
+PRIORITY_MAX = 100
+
+
+def _validate_priority(value: int, prompt_type: str) -> int:
+    """Validate priority value is within valid range"""
+    if not PRIORITY_MIN <= value <= PRIORITY_MAX:
+        raise ValueError(
+            f"Priority for '{prompt_type}' must be between {PRIORITY_MIN} and {PRIORITY_MAX}, got {value}"
+        )
+    return value
+
+
 def _format_vision_system_prompt(prompt_text: str) -> str:
     """Format prompt text, replace template variables"""
     return prompt_text.format(
@@ -50,6 +64,23 @@ def _format_vision_system_prompt(prompt_text: str) -> str:
 
 class PromptConfig:
     """Prompt configuration class - supports multiple types of prompts"""
+    # Task priorities (validated on load)
+    PRIORITIES = {
+        PromptType.CHAT: _validate_priority(
+            _config["prompts"]["chat"].get("priority", 0), "chat"
+        ),
+        PromptType.TRIGGER_RULE_CONDITION: _validate_priority(
+            _config["prompts"]["trigger_rule_condition"].get("priority", 0), "trigger_rule_condition"
+        ),
+        PromptType.VISION_UNDERSTANDING: _validate_priority(
+            _config["prompts"]["vision_understanding"].get("priority", 0), "vision_understanding"
+        ),
+        PromptType.ACTION_DESCRIPTION_DYNAMIC_EXECUTE: _validate_priority(
+            _config["prompts"]["action_description_dynamic_execute"].get("priority", 0),
+            "action_description_dynamic_execute"
+        ),
+    }
+
     # Chat conversation prompts
     CHAT_PROMPTS = {
         UserLanguage.CHINESE: _format_vision_system_prompt(_config["prompts"]["chat"]["chinese"]),
@@ -95,14 +126,27 @@ class PromptConfig:
     }
 
     @classmethod
+    def get_priority(cls, prompt_type: PromptType) -> int:
+        """
+        Get task priority for a prompt type
+
+        Args:
+            prompt_type: Prompt type
+
+        Returns:
+            Priority value (0-100)
+        """
+        return cls.PRIORITIES.get(prompt_type, 0)
+
+    @classmethod
     def get_prompt(cls, prompt_type: PromptType, language: UserLanguage) -> str:
         """
         Get prompt based on type and language
-        
+
         Args:
             prompt_type: Prompt type
             language: User language, defaults to Chinese
-            
+
         Returns:
             Prompt corresponding to the type and language
         """

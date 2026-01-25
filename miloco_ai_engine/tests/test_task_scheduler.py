@@ -26,7 +26,6 @@ def test_task_scheduler_start_stop(MockThread):
     mock_config = MagicMock()
     mock_config.n_seq_max = 4
     mock_config.cache_seq_num = 1
-    mock_config.task_classification = {"high_priority": 10}
 
     # Create scheduler instance
     scheduler = TaskScheduler("test_model", mock_config)
@@ -54,16 +53,13 @@ def test_task_scheduler_start_stop(MockThread):
 
 
 @patch("miloco_ai_engine.task_scheduler.model_scheduler.actor_system.createActor")
-@patch("miloco_ai_engine.task_scheduler.model_scheduler.PromptMatcher")
-def test_task_submission_and_classification(MockMatcher, MockCreateActor):
-    """Test task submission and classification logic"""
-    mock_task_key = "weather"
+def test_task_submission_with_priority(MockCreateActor):
+    """Test task submission with priority from request"""
     mock_task_priority = 5
     # Create mock configuration
     mock_config = MagicMock()
     mock_config.n_seq_max = 2
     mock_config.cache_seq_num = 0
-    mock_config.task_classification = {mock_task_key: mock_task_priority}
 
     # Create scheduler instance and start
     scheduler = TaskScheduler("test_model", mock_config)
@@ -71,18 +67,12 @@ def test_task_submission_and_classification(MockMatcher, MockCreateActor):
         RequestMessage(action=TaskSchedulerAction.START, data=MagicMock()),
         None)
 
-    # Set mock matching result
-    mock_match = MagicMock()
-    mock_match.matched = True
-    mock_match.key = mock_task_key
-    mock_match.placeholders = {"city": "beijing"}
-    MockMatcher.return_value.match.return_value = mock_match
-
-    # Create test request
+    # Create test request with priority
     request = ChatCompletionRequest(
         model="test_model",
         messages=[ChatMessage(role="user", content="Query Beijing weather")],
-        stream=False)
+        stream=False,
+        priority=mock_task_priority)
 
     # Submit task
     submit_msg = RequestMessage(action=TaskSchedulerAction.SUBMIT_TASK,
@@ -94,7 +84,7 @@ def test_task_submission_and_classification(MockMatcher, MockCreateActor):
     task_id = list(scheduler.tasks.keys())[0]
     MockCreateActor.assert_called_once()
 
-    # Verify task classification
+    # Verify task priority from request
     assert scheduler.task_queue.qsize() == 1
     priority, queued_task_id = scheduler.task_queue.get()
     assert queued_task_id == task_id

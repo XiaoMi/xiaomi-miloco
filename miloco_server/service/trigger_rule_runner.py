@@ -18,7 +18,7 @@ from thespian.actors import ActorExitRequest
 
 from miloco_server import actor_system
 from miloco_server.config.normal_config import TRIGGER_RULE_RUNNER_CONFIG
-from miloco_server.config.prompt_config import UserLanguage
+from miloco_server.config.prompt_config import UserLanguage, PromptConfig, PromptType
 from miloco_server.dao.trigger_rule_log_dao import TriggerRuleLogDAO
 from miloco_server.mcp.tool_executor import ToolExecutor
 from miloco_server.proxy.llm_proxy import LLMProxy
@@ -284,8 +284,8 @@ class TriggerRuleRunner:
         Returns:
             LLM response result
         """
-
-        return await llm_proxy.async_call_llm(messages)
+        priority = PromptConfig.get_priority(PromptType.TRIGGER_RULE_CONDITION)
+        return await llm_proxy.async_call_llm(messages, priority=priority)
 
     async def _check_trigger_condition(
         self, rule: TriggerRule, llm_proxy: LLMProxy,
