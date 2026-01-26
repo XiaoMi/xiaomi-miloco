@@ -38,6 +38,7 @@ from miloco_server.utils.prompt_helper import TriggerRuleConditionPromptBuilder
 from miloco_server.utils.trigger_filter import trigger_filter
 from service import trigger_rule_dynamic_executor_cache
 from service.trigger_rule_dynamic_executor import START, TriggerRuleDynamicExecutor
+from miloco_server.config.prompt_config import PromptConfig
 
 logger = logging.getLogger(name=__name__)
 
@@ -67,6 +68,7 @@ class TriggerRuleRunner:
         logger.info(
             "TriggerRuleRunner init success, trigger_rules: %s", self.trigger_rules
         )
+        self._priority = PromptConfig.get_priority(PromptType.TRIGGER_RULE_CONDITION)
 
     def _get_vision_understaning_llm_proxy(self) -> LLMProxy:
         return self._get_llm_proxy_by_purpose(
@@ -284,8 +286,7 @@ class TriggerRuleRunner:
         Returns:
             LLM response result
         """
-        priority = PromptConfig.get_priority(PromptType.TRIGGER_RULE_CONDITION)
-        return await llm_proxy.async_call_llm(messages, priority=priority)
+        return await llm_proxy.async_call_llm(messages, priority=self._priority)
 
     async def _check_trigger_condition(
         self, rule: TriggerRule, llm_proxy: LLMProxy,

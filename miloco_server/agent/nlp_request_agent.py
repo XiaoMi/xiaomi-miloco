@@ -9,11 +9,20 @@ import logging
 from miloco_server.schema.chat_schema import Event, Internal, Nlp
 from miloco_server.utils.chat_companion import ChatCachedData
 from miloco_server.agent.chat_agent import ChatAgent
+from miloco_server.config.prompt_config import PromptConfig
 
 logger = logging.getLogger(__name__)
 
 class NlpRequestAgent(ChatAgent):
     """Nlp Request Agent"""
+    def __init__(
+        self,
+        request_id: str,
+        out_actor_address: ActorAddress,
+        chat_history_messages: Optional[ChatHistoryMessages] = None,
+    ):
+        super().__init__(request_id, out_actor_address, priority=PromptConfig.get_priority(PromptType.CHAT), chat_history_messages)
+
 
     def _parse_and_handle_event(self, event: Event) -> None:
         """Parse and handle event."""

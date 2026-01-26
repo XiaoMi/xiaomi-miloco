@@ -42,6 +42,7 @@ class ChatAgent(Actor):
         self,
         request_id: str,
         out_actor_address: ActorAddress,
+        priority: Optional[int] = None,
         chat_history_messages: Optional[ChatHistoryMessages] = None,
     ):
         """Initialize ReAct agent Actor.
@@ -277,7 +278,7 @@ class ChatAgent(Actor):
                     "Planning model not exit, Please configure on the Model Settings Page")
             chat_messages = self._chat_history_messages.get_messages()
             logger.info("Start to calling LLM: %s. chat_messages: %s", self._request_id, chat_messages)
-            return self._llm_proxy.async_call_llm_stream(chat_messages, self._all_mcp_tools_meta)
+            return self._llm_proxy.async_call_llm_stream(chat_messages, self._all_mcp_tools_meta, priority=self._priority)
         except Exception as e:
             logger.error("[%s] Error occurred while calling LLM: %s",
                          self._request_id, str(e))
