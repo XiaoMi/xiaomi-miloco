@@ -94,7 +94,7 @@ For issue reporting, please participate through the following methods:
 - Project Discussion Group (WeChat、Lark):
 
   <img src="assets/images/miloco_feishu.jpeg" width="45%" />
-  <img src="assets/images/miloco_wechat_18.jpeg" width="45%" />
+  <img src="assets/images/miloco_wechat_latest.png" width="45%" />
 
 
 

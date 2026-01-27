@@ -228,8 +228,10 @@ $RECYCLE.BIN/
 # web ui build static files in miloco_server
 miloco_server/static/
 
-# AI
-.claude/
+#AI related
 openspec/
 AGENTS.md
+PROJECT.md
 CLAUDE.md
+.claude/
+
