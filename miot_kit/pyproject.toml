@@ -33,3 +33,9 @@ include = ["miot*"]
 [tool.setuptools.package-data]
 miot_kit = ["libs/**/*.*", "specs/*", "i18n/**/*.*", "configs/*"]
 ha = []
+
+[project.optional-dependencies]
+dev = [
+    "anyio",
+    "pytest-asyncio",
+]
