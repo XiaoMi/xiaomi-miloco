@@ -145,6 +145,11 @@ def adjust_config_by_memory(model_config: ModelConfig) -> ModelConfig:
     """
     Adjust default model configuration based on CUDA VRAM status
     """
+    device = ModelDevice(model_config.model_dump().get("device", ModelDevice.CPU.value))
+    if device == ModelDevice.MPS:
+        logger.info("MPS device configured; skip CUDA-based VRAM auto optimization")
+        return model_config
+
     _, free_memory, cuda_available = get_cuda_memory_info()
 
     memory_mode = FreeMemoryLevel.detect_memory_mode(free_memory, cuda_available)
