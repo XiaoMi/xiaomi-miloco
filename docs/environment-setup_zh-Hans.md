@@ -91,7 +91,7 @@ macOS 环境配置可参考：[English](./environment-setup-macos.md) | [简体�
 
 ## 运行
 
-##下述所有操作都在克隆后的存储库下的`docker`文件夹进行。##
+## 下述所有操作都在克隆后的存储库下的`docker`文件夹进行。##
 
 使用`docker compose`运行程序，复制`.env.example`，命名为`.env`，端口根据实际环境修改。
 
