@@ -119,7 +119,7 @@ class OpenAIProxy(LLMProxy):
                 "Async calling model: %s, stream: False, messages: %s, tools: %s, priority: %s",
                 self.model_name, messages, tools, priority
             )
-            extra_body = {"priority": priority} if priority is not None else None
+            extra_body = {"priority": priority} if priority is not None and priority > 0 else None
             completion = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
@@ -161,7 +161,7 @@ class OpenAIProxy(LLMProxy):
                 "Async calling model: %s, stream: True, messages: %s, tools: %s, priority: %s",
                 self.model_name, messages, tools, priority
             )
-            extra_body = {"priority": priority} if priority is not None else None
+            extra_body = {"priority": priority} if priority is not None and priority > 0 else None
             completion: AsyncStream = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,

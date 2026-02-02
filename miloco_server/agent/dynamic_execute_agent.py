@@ -12,7 +12,7 @@ from miloco_server.schema.chat_schema import Dialog, Event, Confirmation, Nlp
 from miloco_server.schema.mcp_schema import CallToolResult, LocalMcpClientId
 from miloco_server.schema.trigger_schema import Action
 from miloco_server.agent.chat_agent import ChatAgent
-from miloco_server.config.prompt_config import PromptConfig, UserLanguage, PromptType
+from miloco_server.config.prompt_config import UserLanguage
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -26,9 +26,7 @@ class ActionDescriptionDynamicExecuteAgent(ChatAgent):
         out_actor_address: ActorAddress,
         chat_history_messages: Optional[ChatHistoryMessages] = None,
     ):
-        
-        super().__init__(request_id=request_id, out_actor_address=out_actor_address, 
-                        priority=PromptConfig.get_priority(PromptType.ACTION_DESCRIPTION_DYNAMIC_EXECUTE), 
+        super().__init__(request_id=request_id, out_actor_address=out_actor_address,
                         chat_history_messages=chat_history_messages)
         self._actions: list[Action] = []
 

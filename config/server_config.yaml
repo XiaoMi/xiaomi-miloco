@@ -53,11 +53,15 @@ trigger_rule_runner:
   interval_seconds: 2
   vision_use_img_count: 6
   trigger_rule_log_ttl: 30 #days
+  priority: 5  # Task priority for trigger rule condition checks
+
+# Vision understanding configuration
+vision_understanding:
+  priority: 10  # Task priority for vision understanding tasks
 
 # Camera configuration
 camera:
   frame_interval: 500 # Unit: Millisecond (ms)
-
 
 # MIoT configuration, default to 'cn', use your MiHome cloud server
   # 'cn': '中国大陆'

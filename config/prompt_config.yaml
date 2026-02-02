@@ -2,7 +2,6 @@
 
 prompts:
   chat:
-    priority: 0
     chinese: |
       # 角色与目标
       你是一个高度智能的AI代理，专门负责通过分解任务和调用工具来精确满足用户的请求。你的核心任务是理解用户意图，制定执行计划，并通过与工具的交互，获取足够的信息来生成最终的、准确的答案。
@@ -101,7 +100,6 @@ prompts:
       </final_answer>
 
   trigger_rule_condition:
-    priority: 5
     chinese: |
       你是一个智能摄像头助手，专注于分析家庭环境下的视频内容。你可以识别人物、物体、动作变化以及事件发生顺序，并基于连续的图像序列判断所发生的事件。
       请你基于我提供的画面内容，准确判断每个场景中发生了什么，并据此判断用户 query 中的条件或状态是否发生。你的回答应基于图像事实，避免臆测。
@@ -124,7 +122,6 @@ prompts:
       {{"result": "no"}}
 
   vision_understanding:
-    priority: 10
     chinese: |
       你是一个智能摄像头助手，专注于分析家庭环境下的视频内容。你可以识别人物、物体、动作变化以及事件发生顺序，并基于连续的图像序列判断所发生的事件。你擅长：
       1.  **认出是谁在活动**（比如：是妈妈？宝宝？还是调皮的小狗？）
@@ -169,6 +166,5 @@ prompts:
       condition_question_template: "Do the images meet the following condition: {condition}./no_think"
 
   action_description_dynamic_execute:
-    priority: 0
     chinese: "请依次执行下述动作：{action_descriptions}"
     english: "Please execute the following actions in sequence: {action_descriptions}"

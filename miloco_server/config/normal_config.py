@@ -95,6 +95,12 @@ TRIGGER_RULE_RUNNER_CONFIG = {
     "interval_seconds": _config["trigger_rule_runner"]["interval_seconds"],
     "vision_use_img_count": _config["trigger_rule_runner"]["vision_use_img_count"],
     "trigger_rule_log_ttl": _config["trigger_rule_runner"]["trigger_rule_log_ttl"],
+    "priority": _config["trigger_rule_runner"]["priority"],
+}
+
+# Vision understanding configuration
+VISION_UNDERSTANDING_CONFIG = {
+    "priority": _config["vision_understanding"]["priority"],
 }
 
 # Camera configuration
