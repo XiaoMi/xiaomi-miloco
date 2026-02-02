@@ -12,7 +12,7 @@ from miloco_server.schema.chat_schema import Dialog, Event, Confirmation, Nlp
 from miloco_server.schema.mcp_schema import CallToolResult, LocalMcpClientId
 from miloco_server.schema.trigger_schema import Action
 from miloco_server.agent.chat_agent import ChatAgent
-from miloco_server.config.prompt_config import PromptConfig, UserLanguage
+from miloco_server.config.prompt_config import PromptConfig, UserLanguage, PromptType
 import asyncio
 
 logger = logging.getLogger(__name__)
