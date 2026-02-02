@@ -38,6 +38,8 @@ export default defineConfig(({ command }) => {
       extensions: [".mjs", ".js", ".ts", ".jsx", ".tsx", ".json", ".vue"],
     },
     build: {
+      outDir: '../miloco_server/static',
+      emptyOutDir: true,
       assetsDir: 'assets',
       rollupOptions: {
         output: {
@@ -62,6 +64,7 @@ export default defineConfig(({ command }) => {
       }
     },
     server: {
+      port: 1995,
       host: "0.0.0.0",
       // only enable HTTPS in development mode
       ...(isDev && {
@@ -72,7 +75,7 @@ export default defineConfig(({ command }) => {
       }),
       proxy: {
         '/api': {
-          target: config.api.target,
+          target: 'https://localhost:8000/', //config.api.target,
           changeOrigin: true,
           ws: true,
           secure: false,

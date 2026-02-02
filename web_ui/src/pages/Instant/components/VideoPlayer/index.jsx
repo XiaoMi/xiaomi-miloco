@@ -14,9 +14,14 @@ import DefaultCameraBg from '@/assets/images/default-camera-bg.png'
  * 从二进制数据中检测视频编码格式
  *
  * @param {Uint8Array} data - Binary video data
- * @returns {string} Detected codec type ('h264', 'h265', or 'unknown')
+ * @returns {string} Detected codec type ('h264', 'h265', 'mjpeg', or 'unknown')
  */
 const detectCodec = (data) => {
+  // 检测JPEG图像头 (FFD8)
+  if (data.length >= 2 && data[0] === 0xFF && data[1] === 0xD8) {
+    return 'mjpeg';
+  }
+  
   let i = 0;
   while (i < data.length - 6) {
     if (
@@ -44,10 +49,11 @@ const detectCodec = (data) => {
  * @param {Object} [props.style] - Custom style object
  * @param {string} props.cameraId - Camera device ID
  * @param {number} [props.channel=0] - Camera channel number
+ * @param {string} [props.cameraType='miot'] - Camera type ('miot' or 'rtsp')
  * @param {Function} [props.onCanvasRef] - Canvas ref callback function
  * @returns {JSX.Element} Video player component
  */
-const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, onCanvasRef, onPlay }) => {
+const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, cameraType = 'miot', onCanvasRef, onPlay }) => {
   const { t } = useTranslation();
   const canvasRef = useRef(null)
   const wsRef = useRef(null)
@@ -57,6 +63,8 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
   const [show, setShow] = useState(false)
   const [isSupported, setIsSupported] = useState(null)
   const [autoCodec, setAutoCodec] = useState(null);
+  const [isMjpegMode, setIsMjpegMode] = useState(false);
+  const imgRef = useRef(null);
 
   // detect WebCodecs support
   useEffect(() => {
@@ -183,7 +191,9 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
         decoderRef.current = null;
       }
       const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const wsUrl = `${wsProtocol}://${window.location.host}${import.meta.env.VITE_API_BASE || ''}/api/miot/ws/video_stream?camera_id=${encodeURIComponent(cameraId)}&channel=${encodeURIComponent(channel)}`
+      // 根据摄像头类型选择不同的WebSocket端点
+      const wsEndpoint = cameraType === 'rtsp' ? '/api/rtsp_camera/ws/video_stream' : '/api/miot/ws/video_stream';
+      const wsUrl = `${wsProtocol}://${window.location.host}${import.meta.env.VITE_API_BASE || ''}${wsEndpoint}?camera_id=${encodeURIComponent(cameraId)}&channel=${encodeURIComponent(channel)}`
       setLoading(true)
       setError(null)
       setShow(false)
@@ -248,12 +258,47 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
       wsRef.current.onmessage = e => {
         if (e.data instanceof ArrayBuffer) {
           const uint8 = new Uint8Array(e.data);
+          
+          // 检测编码格式
           if (!autoCodec) {
             const detected = detectCodec(uint8);
             if (detected !== 'unknown') {
-              setAutoCodec(detected === 'h264' ? 'avc1.42E01E' : 'hvc1.1.6.L93.B0');
+              if (detected === 'mjpeg') {
+                setIsMjpegMode(true);
+                setAutoCodec('mjpeg');
+              } else {
+                setAutoCodec(detected === 'h264' ? 'avc1.42E01E' : 'hvc1.1.6.L93.B0');
+              }
             }
           }
+          
+          // MJPEG模式：直接显示JPEG图像
+          if (autoCodec === 'mjpeg' || (uint8.length >= 2 && uint8[0] === 0xFF && uint8[1] === 0xD8)) {
+            setIsMjpegMode(true);
+            const blob = new Blob([uint8], { type: 'image/jpeg' });
+            const url = URL.createObjectURL(blob);
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext('2d');
+            const img = new Image();
+            img.onload = () => {
+              canvas.width = img.width;
+              canvas.height = img.height;
+              ctx.drawImage(img, 0, 0);
+              URL.revokeObjectURL(url);
+              if (!ready) {
+                setLoading(false);
+                setShow(true);
+                if (onCanvasRef && canvasRef.current) {
+                  onCanvasRef(canvasRef);
+                }
+                ready = true;
+              }
+            };
+            img.src = url;
+            return;
+          }
+          
+          // H264/H265模式：使用WebCodecs解码
           const useCodec = autoCodec || codec;
           if (decoderRef.current._waitForKeyFrame === undefined) {
             decoderRef.current._waitForKeyFrame = true;
@@ -300,7 +345,7 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
         decoderRef.current = null;
       }
     }
-  }, [codec, isSupported, cameraId, channel])
+  }, [codec, isSupported, cameraId, channel, cameraType])
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', ...style }}>

@@ -14,6 +14,7 @@ from miloco_server.controller.chat_controller import router as chat_router
 from miloco_server.controller.trigger_controller import router as trigger_router
 from miloco_server.controller.model_controller import router as model_router
 from miloco_server.controller.mcp_controller import router as mcp_router
+from miloco_server.controller.rtsp_camera_controller import router as rtsp_camera_router
 
 __all__ = [
     "web_router",
@@ -24,4 +25,5 @@ __all__ = [
     "trigger_router",
     "model_router",
     "mcp_router",
+    "rtsp_camera_router",
 ]

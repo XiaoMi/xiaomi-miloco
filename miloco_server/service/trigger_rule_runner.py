@@ -114,11 +114,30 @@ class TriggerRuleRunner:
             return
 
         # Calculate all camera motion changes
+        # 获取米家摄像头
         miot_camera_info_dict = await self.miot_proxy.get_cameras()
         camera_info_dict = {
             camera_id: CameraInfo.model_validate(miot_camera_info.model_dump())
-            for camera_id, miot_camera_info in miot_camera_info_dict.items()
+            for camera_id, miot_camera_info in (miot_camera_info_dict or {}).items()
         }
+        
+        # 获取RTSP摄像头
+        try:
+            from miloco_server.service.manager import get_manager
+            rtsp_cameras = get_manager().rtsp_camera_service.get_all_cameras(enabled_only=True)
+            for rtsp_camera in rtsp_cameras:
+                camera_info_dict[rtsp_camera.id] = CameraInfo(
+                    did=rtsp_camera.id,
+                    name=rtsp_camera.name,
+                    model="rtsp.camera.custom",
+                    online=rtsp_camera.online,
+                    channel_count=rtsp_camera.channel_count,
+                    camera_type="rtsp",
+                    home_name=rtsp_camera.location,
+                    room_name=rtsp_camera.location,
+                )
+        except Exception as e:
+            logger.warning("Failed to get RTSP cameras for trigger: %s", e)
         camera_motion_dict: dict[str,
                                  dict[int,
                                       tuple[bool,
@@ -131,8 +150,18 @@ class TriggerRuleRunner:
                 logger.info(
                     "camera %s channel %s get recent camera img", camera_id, channel
                 )
-                camera_img_seq = self.miot_proxy.get_recent_camera_img(
-                    camera_id, channel, self._vision_use_img_count)
+                # 根据摄像头类型获取图像
+                camera_img_seq = None
+                if getattr(camera_info, 'camera_type', 'miot') == 'rtsp':
+                    try:
+                        from miloco_server.service.manager import get_manager
+                        camera_img_seq = get_manager().rtsp_camera_service.get_recent_camera_img(
+                            camera_id, channel, self._vision_use_img_count)
+                    except Exception as e:
+                        logger.error("Failed to get RTSP camera img: %s", e)
+                else:
+                    camera_img_seq = self.miot_proxy.get_recent_camera_img(
+                        camera_id, channel, self._vision_use_img_count)
                 if camera_img_seq and self._check_camera_motion(
                         camera_img_seq):
                     logger.info(

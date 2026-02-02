@@ -166,9 +166,12 @@ class MiotService:
             logger.error("Failed to get MiOT user info: %s", e)
             raise MiotServiceException(f"Failed to get MiOT user info: {str(e)}") from e
 
-    async def get_miot_camera_list(self) -> List[CameraInfo]:
+    async def get_miot_camera_list(self, include_rtsp: bool = True) -> List[CameraInfo]:
         """
-        Get MiOT camera list
+        Get MiOT camera list (including RTSP cameras)
+
+        Args:
+            include_rtsp: Whether to include RTSP cameras, default True
 
         Returns:
             List[CameraInfo]: Camera information list
@@ -177,16 +180,43 @@ class MiotService:
             MiotServiceException: When getting camera list fails
         """
         try:
+            camera_list = []
+            
+            # 获取米家摄像头
             camera_dict: dict[
                 str,
                 MIoTCameraInfo] | None = await self._miot_proxy.get_cameras()
-            if not camera_dict:
-                raise MiotServiceException("Failed to get MiOT camera list")
+            if camera_dict:
+                for camera_info in camera_dict.values():
+                    camera = CameraInfo.model_validate(camera_info.model_dump())
+                    camera.camera_type = "miot"  # 标记为米家摄像头
+                    camera_list.append(camera)
 
-            camera_list = [
-                CameraInfo.model_validate(camera_info.model_dump())
-                for camera_info in camera_dict.values()
-            ]
+            # 获取RTSP摄像头
+            if include_rtsp:
+                try:
+                    from miloco_server.service.manager import get_manager
+                    rtsp_cameras = get_manager().rtsp_camera_service.get_all_cameras(enabled_only=True)
+                    for rtsp_camera in rtsp_cameras:
+                        # 将RTSP摄像头转换为CameraInfo格式
+                        camera = CameraInfo(
+                            did=rtsp_camera.id,
+                            name=rtsp_camera.name,
+                            model="rtsp.camera.custom",
+                            online=rtsp_camera.online,
+                            channel_count=rtsp_camera.channel_count,
+                            camera_type="rtsp",
+                            home_name=rtsp_camera.location,
+                            room_name=rtsp_camera.location,
+                        )
+                        camera_list.append(camera)
+                    logger.info("Added %d RTSP cameras to camera list", len(rtsp_cameras))
+                except Exception as e:
+                    logger.warning("Failed to get RTSP cameras: %s", e)
+
+            if not camera_list:
+                logger.warning("No cameras found (MiOT or RTSP)")
+                return []
 
             return camera_list
         except MiotServiceException:
@@ -214,39 +244,80 @@ class MiotService:
 
     async def get_miot_cameras_img(
             self, camera_dids: list[str], vision_use_img_count: int) -> list[CameraImgSeq]:
+        """
+        获取摄像头图像（支持米家摄像头和RTSP摄像头）
+        
+        Args:
+            camera_dids: 摄像头ID列表
+            vision_use_img_count: 每个摄像头获取的图像数量
+            
+        Returns:
+            摄像头图像序列列表
+        """
         logger.info(
             "get_miot_cameras_img, camera_dids: %s", ", ".join(camera_dids))
         try:
-            all_camera_info: dict[str, MIoTCameraInfo] = await self._miot_proxy.get_cameras()
-            if not all_camera_info:
-                return []
-
-            selected_camera_info: list[MIoTCameraInfo] = [
-                info for info in all_camera_info.values() if (info.did in camera_dids)
-            ]
-
-            camera_channels: list[CameraChannel] = []
-            for camera_info in selected_camera_info:
-                for channel in range(camera_info.channel_count or 1):
-                    camera_channels.append(
-                        CameraChannel(did=camera_info.did, channel=channel))
-
             camera_img_seqs = []
-            for camera_channel in camera_channels:
-                camera_img_seq = self._miot_proxy.get_recent_camera_img(
-                    camera_channel.did, camera_channel.channel, vision_use_img_count)
-                if not camera_img_seq:
-                    logger.error(
-                        "get_miot_cameras_img, get recent camera img failed, did: %s, channel: %s",
-                        camera_channel.did, camera_channel.channel
+            
+            # 获取米家摄像头信息
+            miot_camera_info: dict[str, MIoTCameraInfo] = await self._miot_proxy.get_cameras() or {}
+            
+            # 获取RTSP摄像头信息
+            rtsp_camera_dict = {}
+            try:
+                from miloco_server.service.manager import get_manager
+                rtsp_cameras = get_manager().rtsp_camera_service.get_all_cameras(enabled_only=True)
+                rtsp_camera_dict = {camera.id: camera for camera in rtsp_cameras}
+            except Exception as e:
+                logger.warning("Failed to get RTSP cameras for image retrieval: %s", e)
+            
+            # 处理每个请求的摄像头
+            for camera_did in camera_dids:
+                # 检查是否是米家摄像头
+                if camera_did in miot_camera_info:
+                    camera_info = miot_camera_info[camera_did]
+                    for channel in range(camera_info.channel_count or 1):
+                        camera_img_seq = self._miot_proxy.get_recent_camera_img(
+                            camera_did, channel, vision_use_img_count)
+                        if camera_img_seq:
+                            camera_img_seqs.append(camera_img_seq)
+                        else:
+                            logger.warning(
+                                "get_miot_cameras_img: MiOT camera image failed, did: %s, channel: %s",
+                                camera_did, channel
+                            )
+                # 检查是否是RTSP摄像头
+                elif camera_did in rtsp_camera_dict:
+                    rtsp_camera = rtsp_camera_dict[camera_did]
+                    try:
+                        from miloco_server.service.manager import get_manager
+                        rtsp_service = get_manager().rtsp_camera_service
+                        # 获取RTSP摄像头的图像（优先使用子码流channel=1，如果没有则使用主码流channel=0）
+                        for channel in range(rtsp_camera.channel_count):
+                            camera_img_seq = rtsp_service.get_recent_camera_img(
+                                camera_did, channel, vision_use_img_count)
+                            if camera_img_seq:
+                                camera_img_seqs.append(camera_img_seq)
+                                logger.info(
+                                    "get_miot_cameras_img: Got RTSP camera images, did: %s, channel: %s, count: %d",
+                                    camera_did, channel, len(camera_img_seq.img_list) if camera_img_seq.img_list else 0
+                                )
+                            else:
+                                logger.warning(
+                                    "get_miot_cameras_img: RTSP camera image failed, did: %s, channel: %s",
+                                    camera_did, channel
+                                )
+                    except Exception as e:
+                        logger.error("Failed to get RTSP camera images for %s: %s", camera_did, e)
+                else:
+                    logger.warning(
+                        "get_miot_cameras_img: Camera not found in any source, did: %s", camera_did
                     )
-                    continue
-
-                camera_img_seqs.append(camera_img_seq)
+            
             return camera_img_seqs
         except Exception as e:
-            logger.error("Failed to get MiOT camera images: %s", e)
-            raise MiotServiceException(f"Failed to get MiOT camera images: {str(e)}") from e
+            logger.error("Failed to get camera images: %s", e)
+            raise MiotServiceException(f"Failed to get camera images: {str(e)}") from e
 
     async def get_miot_scene_list(self) -> List[SceneInfo]:
         """

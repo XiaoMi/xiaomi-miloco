@@ -66,3 +66,12 @@ export const reconnectMCPService = (id) => postApi(`/api/mcp/reconnect/${id}`);
 export const getHistoryList = () => getApi('/api/chat/historys');
 export const getHistoryDetail = (id) => getApi(`/api/chat/history/${id}`);
 export const deleteChatHistory = (id) => deleteApi(`/api/chat/history/${id}`);
+
+// RTSP摄像头 API
+export const getRtspCameraList = (enabledOnly = false) => getApi(`/api/rtsp_camera?enabled_only=${enabledOnly}`);
+export const createRtspCamera = (data) => postApi('/api/rtsp_camera', data);
+export const getRtspCamera = (cameraId) => getApi(`/api/rtsp_camera/${cameraId}`);
+export const updateRtspCamera = (cameraId, data) => putApi(`/api/rtsp_camera/${cameraId}`, data);
+export const deleteRtspCamera = (cameraId) => deleteApi(`/api/rtsp_camera/${cameraId}`);
+export const checkRtspCameraStatus = (cameraId) => getApi(`/api/rtsp_camera/${cameraId}/status`);
+export const refreshRtspCameraStatus = () => postApi('/api/rtsp_camera/refresh_status');
