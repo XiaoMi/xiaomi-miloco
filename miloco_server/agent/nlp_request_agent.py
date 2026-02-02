@@ -5,12 +5,16 @@
 import asyncio
 import json
 import logging
+from typing import Optional
 
+from thespian.actors import ActorAddress
+
+from miloco_server.schema.chat_history_schema import ChatHistoryMessages
 from miloco_server.schema.chat_schema import Event, Internal, Nlp
 from miloco_server.utils.chat_companion import ChatCachedData
 from miloco_server.agent.chat_agent import ChatAgent
-from miloco_server.config.prompt_config import PromptConfig
-
+from miloco_server.config.prompt_config import PromptConfig, PromptType
+    
 logger = logging.getLogger(__name__)
 
 class NlpRequestAgent(ChatAgent):
@@ -21,7 +25,10 @@ class NlpRequestAgent(ChatAgent):
         out_actor_address: ActorAddress,
         chat_history_messages: Optional[ChatHistoryMessages] = None,
     ):
-        super().__init__(request_id, out_actor_address, priority=PromptConfig.get_priority(PromptType.CHAT), chat_history_messages)
+        priority = PromptConfig.get_priority(PromptType.CHAT)
+        super().__init__(request_id=request_id, out_actor_address=out_actor_address, 
+                        priority=priority,
+                        chat_history_messages=chat_history_messages)
 
 
     def _parse_and_handle_event(self, event: Event) -> None:

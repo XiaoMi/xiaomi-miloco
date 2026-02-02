@@ -26,7 +26,10 @@ class ActionDescriptionDynamicExecuteAgent(ChatAgent):
         out_actor_address: ActorAddress,
         chat_history_messages: Optional[ChatHistoryMessages] = None,
     ):
-        super().__init__(request_id, out_actor_address, priority=PromptConfig.get_priority(PromptType.ACTION_DESCRIPTION_DYNAMIC_EXECUTE) ,chat_history_messages)
+        
+        super().__init__(request_id=request_id, out_actor_address=out_actor_address, 
+                        priority=PromptConfig.get_priority(PromptType.ACTION_DESCRIPTION_DYNAMIC_EXECUTE), 
+                        chat_history_messages=chat_history_messages)
         self._actions: list[Action] = []
 
     def _parse_and_handle_event(self, event: Event) -> None:

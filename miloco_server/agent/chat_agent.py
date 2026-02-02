@@ -70,6 +70,7 @@ class ChatAgent(Actor):
 
         self._out_actor_address = out_actor_address
         self._max_steps = CHAT_CONFIG["agent_max_steps"]
+        self._priority = priority
 
         self._init_conversation(chat_history_messages)
 
