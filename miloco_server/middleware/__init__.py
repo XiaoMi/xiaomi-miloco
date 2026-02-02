@@ -4,7 +4,7 @@
 """
 Middleware module
 """
-from .exceptions import (
+from miloco_server.middleware.exceptions import (
     BaseAPIException,
     BusinessException,
     ConflictException,
@@ -20,7 +20,7 @@ from .exceptions import (
     BadRequestException
 )
 
-from .auth_middleware import (
+from miloco_server.middleware.auth_middleware import (
     create_access_token,
     verify_jwt_token,
     verify_token,

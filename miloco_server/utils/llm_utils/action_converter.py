@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Optional
 
-from utils.normal_util import extract_json_from_content
+from miloco_server.utils.normal_util import extract_json_from_content
 
 from miloco_server.utils.llm_utils.base_llm_util import BaseLLMUtil
 from miloco_server.schema.trigger_schema import Action

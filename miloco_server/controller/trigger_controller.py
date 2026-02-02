@@ -10,7 +10,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Query, WebSocket
 from fastapi.websockets import WebSocketDisconnect
-from middleware.exceptions import BusinessException
+from miloco_server.middleware.exceptions import BusinessException
 
 from miloco_server.middleware import verify_token, verify_websocket_token
 from miloco_server.schema.common_schema import NormalResponse

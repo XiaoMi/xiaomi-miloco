@@ -7,5 +7,5 @@ Contains global configuration settings and prompt configurations.
 Unified configuration management from server_config.yaml
 """
 
-from .normal_config import *
-from .prompt_config import *
+from miloco_server.config.normal_config import *
+from miloco_server.config.prompt_config import *

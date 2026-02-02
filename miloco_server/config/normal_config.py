@@ -9,7 +9,7 @@ Load configuration from server_config.yaml
 
 import os
 from pathlib import Path
-from .config_loader import load_yaml_config, get_project_root
+from miloco_server.config.config_loader import load_yaml_config, get_project_root
 
 # Get project root directory
 PROJECT_ROOT = get_project_root()

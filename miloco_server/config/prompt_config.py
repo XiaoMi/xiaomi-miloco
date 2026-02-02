@@ -9,7 +9,7 @@ Load configuration from prompt_config.yaml
 
 from enum import Enum
 from typing import List
-from .config_loader import load_yaml_config, get_project_root
+from miloco_server.config.config_loader import load_yaml_config, get_project_root
 
 
 class UserLanguage(str, Enum):

@@ -13,7 +13,7 @@ import asyncio
 import logging
 import uuid
 
-from schema.mcp_schema import CallToolResult
+from miloco_server.schema.mcp_schema import CallToolResult
 from thespian.actors import ActorExitRequest
 
 from miloco_server import actor_system
@@ -36,8 +36,8 @@ from miloco_server.utils.local_models import ModelPurpose
 from miloco_server.utils.normal_util import extract_json_from_content
 from miloco_server.utils.prompt_helper import TriggerRuleConditionPromptBuilder
 from miloco_server.utils.trigger_filter import trigger_filter
-from service import trigger_rule_dynamic_executor_cache
-from service.trigger_rule_dynamic_executor import START, TriggerRuleDynamicExecutor
+from miloco_server.service import trigger_rule_dynamic_executor_cache
+from miloco_server.service.trigger_rule_dynamic_executor import START, TriggerRuleDynamicExecutor
 from miloco_server.config.prompt_config import PromptConfig
 
 logger = logging.getLogger(name=__name__)
