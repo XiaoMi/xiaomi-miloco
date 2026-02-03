@@ -5,14 +5,12 @@
 import asyncio
 import json
 import logging
-from typing import Optional
 
 from miloco_server.schema.chat_schema import Event, Internal, Nlp
 from miloco_server.utils.chat_companion import ChatCachedData
 from miloco_server.agent.chat_agent import ChatAgent
     
 logger = logging.getLogger(__name__)
-
 class NlpRequestAgent(ChatAgent):
     """Nlp Request Agent"""
 
