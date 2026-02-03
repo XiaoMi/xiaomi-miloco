@@ -96,7 +96,7 @@ class TriggerRuleRunner:
 
     async def _execute_scheduled_task(self):
         """Specific execution logic for scheduled tasks"""
-        logger.info("Executing scheduled task - checking trigger rules")
+        #logger.info("Executing scheduled task - checking trigger rules")
         llm_proxy = self._get_vision_understaning_llm_proxy()
         if not llm_proxy:
             logger.warning(
@@ -110,7 +110,7 @@ class TriggerRuleRunner:
                          if trigger_filter.pre_filter(rule)]
 
         if not enabled_rules:
-            logger.info("No enabled trigger rules to check")
+            #logger.info("No enabled trigger rules to check")
             return
 
         # Calculate all camera motion changes

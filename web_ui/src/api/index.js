@@ -82,3 +82,17 @@ export const updateRtspCamera = (cameraId, data) => putApi(`/api/rtsp_camera/${c
 export const deleteRtspCamera = (cameraId) => deleteApi(`/api/rtsp_camera/${cameraId}`);
 export const checkRtspCameraStatus = (cameraId) => getApi(`/api/rtsp_camera/${cameraId}/status`);
 export const refreshRtspCameraStatus = () => postApi('/api/rtsp_camera/refresh_status');
+
+// Memory API 记忆管理
+export const getMemoryList = (params = {}) => {
+  const { userId = 'default', includeInactive = false, page = 1, pageSize = 20 } = params;
+  return getApi(`/api/memory/list?user_id=${userId}&include_inactive=${includeInactive}&page=${page}&page_size=${pageSize}`);
+};
+export const addMemory = (data, userId = 'default') => postApi(`/api/memory/add?user_id=${userId}`, data);
+export const updateMemory = (memoryId, data) => putApi(`/api/memory/${memoryId}`, data);
+export const deleteMemory = (memoryId, softDelete = true) => deleteApi(`/api/memory/${memoryId}?soft_delete=${softDelete}`);
+export const searchMemory = (data, userId = 'default') => postApi(`/api/memory/search?user_id=${userId}`, data);
+export const handleMemoryCommand = (data, userId = 'default') => postApi(`/api/memory/command?user_id=${userId}`, data);
+export const getMemoryStats = (userId = 'default') => getApi(`/api/memory/stats?user_id=${userId}`);
+export const getMemoryContext = (query, userId = 'default', limit = 5) => getApi(`/api/memory/context?query=${encodeURIComponent(query)}&user_id=${userId}&limit=${limit}`);
+export const getMemoryTypes = () => getApi('/api/memory/types');

@@ -14,6 +14,7 @@ export default {
       deviceManage: '设备管理',
       cameraManage: '摄像头管理',
       logManage: '日志管理',
+      memoryManage: '记忆管理',
       setting: '设置',
     },
     sidebar: {
@@ -486,6 +487,62 @@ export default {
     confirmPinPlaceholder: '请再次输入6位登录码',
     cancelButton: '取消',
     confirmSetButton: '确认设置',
+  },
+
+  memory: {
+    title: '记忆管理',
+    loadFailed: '加载记忆失败',
+    addSuccess: '记忆添加成功',
+    addFailed: '添加记忆失败',
+    updateSuccess: '记忆更新成功',
+    updateFailed: '更新记忆失败',
+    deleteSuccess: '记忆删除成功',
+    deleteFailed: '删除记忆失败',
+    searchFailed: '搜索失败',
+    commandSuccess: '指令执行成功',
+    commandFailed: '指令执行失败',
+    confirmDelete: '确定要删除这条记忆吗？',
+    
+    totalMemories: '总记忆数',
+    activeMemories: '有效记忆',
+    autoExtracted: '自动提取',
+    manualAdded: '手动添加',
+    
+    naturalLanguageControl: '自然语言记忆管理',
+    commandTip: '使用自然语言添加、修改或删除记忆',
+    commandPlaceholder: '输入指令，如：记住，我的猫叫咪咪',
+    execute: '执行',
+    examples: '示例',
+    
+    search: '搜索记忆',
+    searchPlaceholder: '输入关键词搜索相关记忆',
+    clearSearch: '清除搜索',
+    noSearchResults: '没有找到相关记忆',
+    relevance: '相关度',
+    
+    memoryList: '记忆列表',
+    addMemory: '添加记忆',
+    editMemory: '编辑记忆',
+    noMemories: '暂无记忆',
+    
+    content: '记忆内容',
+    contentRequired: '请输入记忆内容',
+    contentPlaceholder: '输入要记住的内容，如：用户喜欢26度空调温度',
+    type: '记忆类型',
+    selectType: '选择类型',
+    
+    source: '来源',
+    autoExtract: '自动提取',
+    manualAdd: '手动添加',
+    
+    // 记忆类型
+    typePreference: '用户偏好',
+    typeFact: '事实信息',
+    typeHabit: '生活习惯',
+    typeDeviceSetting: '设备偏好',
+    typeSchedule: '时间安排',
+    typeRelationship: '关系信息',
+    typeCustom: '自定义',
   },
 
 };

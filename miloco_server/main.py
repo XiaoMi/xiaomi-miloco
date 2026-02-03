@@ -27,6 +27,7 @@ from miloco_server.controller import (
     trigger_router,
     web_router,
     rtsp_camera_router,
+    memory_router,
 )
 from miloco_server.middleware.auth_middleware import AuthStaticFiles
 from miloco_server.middleware.exception_handler import handle_exception
@@ -63,6 +64,7 @@ app.include_router(trigger_router, prefix="/api")
 app.include_router(model_router, prefix="/api")
 app.include_router(mcp_router, prefix="/api")
 app.include_router(rtsp_camera_router, prefix="/api")
+app.include_router(memory_router, prefix="/api")
 
 
 @app.get("/{full_path:path}")

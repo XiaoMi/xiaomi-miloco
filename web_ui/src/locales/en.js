@@ -14,6 +14,7 @@ export default {
       deviceManage: 'Device Management',
       cameraManage: 'Camera Management',
       logManage: 'Log Management',
+      memoryManage: 'Memory',
       setting: 'Settings',
     },
     sidebar: {
@@ -482,6 +483,62 @@ export default {
     confirmPinPlaceholder: 'Please enter 6-digit login code again',
     cancelButton: 'Cancel',
     confirmSetButton: 'Confirm Set',
+  },
+
+  memory: {
+    title: 'Memory Management',
+    loadFailed: 'Failed to load memories',
+    addSuccess: 'Memory added successfully',
+    addFailed: 'Failed to add memory',
+    updateSuccess: 'Memory updated successfully',
+    updateFailed: 'Failed to update memory',
+    deleteSuccess: 'Memory deleted successfully',
+    deleteFailed: 'Failed to delete memory',
+    searchFailed: 'Search failed',
+    commandSuccess: 'Command executed successfully',
+    commandFailed: 'Command execution failed',
+    confirmDelete: 'Are you sure you want to delete this memory?',
+    
+    totalMemories: 'Total Memories',
+    activeMemories: 'Active Memories',
+    autoExtracted: 'Auto Extracted',
+    manualAdded: 'Manually Added',
+    
+    naturalLanguageControl: 'Natural Language Memory Control',
+    commandTip: 'Use natural language to add, modify or delete memories',
+    commandPlaceholder: 'Enter command, e.g., Remember, my cat is named Mimi',
+    execute: 'Execute',
+    examples: 'Examples',
+    
+    search: 'Search Memories',
+    searchPlaceholder: 'Enter keywords to search related memories',
+    clearSearch: 'Clear Search',
+    noSearchResults: 'No related memories found',
+    relevance: 'Relevance',
+    
+    memoryList: 'Memory List',
+    addMemory: 'Add Memory',
+    editMemory: 'Edit Memory',
+    noMemories: 'No memories yet',
+    
+    content: 'Memory Content',
+    contentRequired: 'Please enter memory content',
+    contentPlaceholder: 'Enter content to remember, e.g., User prefers 26°C AC temperature',
+    type: 'Memory Type',
+    selectType: 'Select type',
+    
+    source: 'Source',
+    autoExtract: 'Auto Extracted',
+    manualAdd: 'Manually Added',
+    
+    // Memory types
+    typePreference: 'User Preference',
+    typeFact: 'Fact',
+    typeHabit: 'Habit',
+    typeDeviceSetting: 'Device Setting',
+    typeSchedule: 'Schedule',
+    typeRelationship: 'Relationship',
+    typeCustom: 'Custom',
   },
 
 };
