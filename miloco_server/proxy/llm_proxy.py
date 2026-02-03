@@ -109,7 +109,7 @@ class OpenAIProxy(LLMProxy):
         Args:
             messages: Message list
             tools: Tool list
-            priority: Task priority (0-100), passed to AI engine for scheduling
+            priority: Task priority (0-10), passed to AI engine for scheduling
 
         Returns:
             Raw OpenAI format model response
