@@ -106,3 +106,4 @@ class LocalMcpClientId:
     MIOT_MANUAL_SCENES = "miot_manual_scenes"
     MIOT_DEVICES = "miot_devices"
     HA_AUTOMATIONS = "ha_automations"
+    HA_DEVICES = "ha_devices"

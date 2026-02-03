@@ -133,6 +133,9 @@ class Manager:
         self._rtsp_camera_service = RTSPCameraService(self._rtsp_camera_dao)
         await self._rtsp_camera_service.initialize()
 
+        # 启动 HA WebSocket 客户端（如果已配置）
+        await self._ha_service.start_ws_client()
+
         self._trigger_rule_runner.start_periodic_task()
 
         if callback:

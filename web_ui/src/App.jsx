@@ -20,7 +20,6 @@ import Setting from './pages/Setting'
 import ExecutionManage from './pages/ExecutionManage'
 import ModelManage from './pages/ModelManage'
 import DeviceManage from './pages/DeviceManage'
-import CameraManage from './pages/CameraManage'
 
 function App() {
   return (
@@ -40,7 +39,6 @@ function App() {
             <Route path="mcpService" element={<McpService />} />
             <Route path="modelManage" element={<ModelManage />} />
             <Route path="deviceManage" element={<DeviceManage />} />
-            <Route path="cameraManage" element={<CameraManage />} />
             <Route path="logManage" element={<LogManage />} />
             <Route path="setting" element={<Setting />} />
           </Route>

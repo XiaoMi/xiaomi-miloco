@@ -5,3 +5,6 @@
 
 export { default as DeviceCard } from './DeviceCard';
 export { default as DeviceList } from './DeviceList';
+export { default as MijiaDeviceTab } from './MijiaDeviceTab';
+export { default as RTSPCameraTab } from './RTSPCameraTab';
+export { default as HADeviceTab } from './HADeviceTab';

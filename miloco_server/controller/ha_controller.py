@@ -103,3 +103,94 @@ async def refresh_ha_automations(current_user: str = Depends(verify_token)):
         data=None
     )
 
+
+# --- WebSocket API 接口 ---
+
+@router.get(path="/ws_status", summary="获取 HA WebSocket 连接状态", response_model=NormalResponse)
+async def get_ha_ws_status(current_user: str = Depends(verify_token)):
+    """获取 Home Assistant WebSocket 连接状态"""
+    logger.info("Get HA WebSocket status API called, user: %s", current_user)
+    
+    status = manager.ha_service.get_ws_status()
+    
+    return NormalResponse(
+        code=0,
+        message="获取 HA WebSocket 状态成功",
+        data=status
+    )
+
+
+@router.get(path="/devices", summary="获取 HA 设备列表", response_model=NormalResponse)
+async def get_ha_devices(current_user: str = Depends(verify_token)):
+    """获取 Home Assistant 设备列表（通过 WebSocket）"""
+    logger.info("Get HA devices API called, user: %s", current_user)
+    
+    devices = await manager.ha_service.get_ha_devices()
+    
+    logger.info("成功获取 HA 设备列表，数量: %d", len(devices))
+    return NormalResponse(
+        code=0,
+        message="获取 HA 设备列表成功",
+        data=devices
+    )
+
+
+@router.get(path="/areas", summary="获取 HA 区域列表", response_model=NormalResponse)
+async def get_ha_areas(current_user: str = Depends(verify_token)):
+    """获取 Home Assistant 区域列表（通过 WebSocket）"""
+    logger.info("Get HA areas API called, user: %s", current_user)
+    
+    areas = await manager.ha_service.get_ha_areas()
+    
+    logger.info("成功获取 HA 区域列表，数量: %d", len(areas))
+    return NormalResponse(
+        code=0,
+        message="获取 HA 区域列表成功",
+        data=areas
+    )
+
+
+@router.get(path="/device/{device_id}/entities", summary="获取 HA 设备实体列表", response_model=NormalResponse)
+async def get_ha_device_entities(device_id: str, current_user: str = Depends(verify_token)):
+    """获取 Home Assistant 指定设备的实体列表（通过 WebSocket）"""
+    logger.info("Get HA device entities API called, user: %s, device_id: %s", current_user, device_id)
+    
+    entities = await manager.ha_service.get_ha_device_entities(device_id)
+    
+    logger.info("成功获取设备实体，device_id: %s", device_id)
+    return NormalResponse(
+        code=0,
+        message="获取设备实体成功",
+        data=entities
+    )
+
+
+@router.get(path="/states", summary="获取 HA 所有实体状态", response_model=NormalResponse)
+async def get_ha_states(current_user: str = Depends(verify_token)):
+    """获取 Home Assistant 所有实体状态（通过 WebSocket）"""
+    logger.info("Get HA states API called, user: %s", current_user)
+    
+    states = await manager.ha_service.get_ha_states()
+    
+    logger.info("成功获取 HA 实体状态，数量: %d", len(states))
+    return NormalResponse(
+        code=0,
+        message="获取 HA 实体状态成功",
+        data=states
+    )
+
+
+@router.get(path="/entity_registry", summary="获取 HA 实体注册表", response_model=NormalResponse)
+async def get_ha_entity_registry(current_user: str = Depends(verify_token)):
+    """获取 Home Assistant 实体注册表（通过 WebSocket）"""
+    logger.info("Get HA entity registry API called, user: %s", current_user)
+    
+    entities = await manager.ha_service.get_ha_entity_registry()
+    
+    logger.info("成功获取 HA 实体注册表，数量: %d", len(entities))
+    return NormalResponse(
+        code=0,
+        message="获取 HA 实体注册表成功",
+        data=entities
+    )
+

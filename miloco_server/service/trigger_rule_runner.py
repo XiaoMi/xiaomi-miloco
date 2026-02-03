@@ -224,7 +224,7 @@ class TriggerRuleRunner:
             if execable and not is_dynamic_action_running:
                 execute_id = str(uuid.uuid4())
                 execute_result = await self._execute_trigger_action(
-                    execute_id, rule, camera_motion_dict)
+                    execute_id, rule, camera_motion_dict, condition_result_list)
                 await self._log_rule_execution(execute_id, start_time, rule,
                                                camera_motion_dict,
                                                condition_result_list,
@@ -413,7 +413,8 @@ class TriggerRuleRunner:
         self, execute_id: str, rule: TriggerRule,
         camera_motion_dict: dict[str, dict[int,
                                            tuple[bool,
-                                                 Optional[CameraImgSeq]]]]
+                                                 Optional[CameraImgSeq]]]],
+        condition_result_list: List[TriggerConditionResult] = None
     ) -> Optional[ExecuteResult]:
         """Execute trigger action"""
         logger.info("[%s] Executing trigger action: %s", execute_id, rule.name)
@@ -458,7 +459,11 @@ class TriggerRuleRunner:
 
         # Send MiOT notification
         if rule.execute_info.notify:
-            notify_res = await self.miot_proxy.send_app_notify(rule.execute_info.notify.id)
+            notify_res = await self._send_notification(
+                rule, 
+                camera_motion_dict, 
+                condition_result_list or []
+            )
             logger.info("Send miot notify result: %s, notify: %s", notify_res, rule.execute_info.notify)
             notify_result = NotifyResult(notify=rule.execute_info.notify, result=notify_res)
 
@@ -519,3 +524,69 @@ class TriggerRuleRunner:
     def _check_dynamic_action_is_running(self, rule_id: str) -> bool:
         """Check if dynamic action is running"""
         return rule_id in trigger_rule_dynamic_executor_cache
+
+    async def _send_notification(
+        self,
+        rule: TriggerRule,
+        camera_motion_dict: dict[str, dict[int, tuple[bool, Optional[CameraImgSeq]]]],
+        condition_result_list: list[TriggerConditionResult]
+    ) -> bool:
+        """
+        发送通知，支持动态模板变量替换
+        
+        支持的模板变量:
+        - {camera_name}: 触发摄像头名称
+        - {camera_location}: 触发摄像头位置
+        - {condition}: 触发条件描述
+        - {trigger_time}: 触发时间
+        - {rule_name}: 规则名称
+        - {ai_result}: AI识别结果描述
+        """
+        notify = rule.execute_info.notify
+        if not notify:
+            return False
+        
+        # 如果不使用模板，直接使用预创建的ID发送
+        if not notify.use_template:
+            if notify.id:
+                return await self.miot_proxy.send_app_notify(notify.id)
+            else:
+                # 如果没有ID但有内容，直接发送内容
+                return await self.miot_proxy.send_app_notify_content(notify.content)
+        
+        # 使用模板，进行变量替换
+        content = notify.content
+        
+        # 获取触发的摄像头信息
+        camera_names = []
+        camera_locations = []
+        ai_results = []
+        
+        for condition_result in condition_result_list:
+            if condition_result.result:
+                camera_info = condition_result.camera_info
+                camera_names.append(camera_info.name)
+                if camera_info.room_name:
+                    camera_locations.append(f"{camera_info.home_name}-{camera_info.room_name}")
+                elif camera_info.home_name:
+                    camera_locations.append(camera_info.home_name)
+        
+        # 构建模板变量
+        from datetime import datetime
+        template_vars = {
+            "camera_name": "、".join(camera_names) if camera_names else "未知摄像头",
+            "camera_location": "、".join(camera_locations) if camera_locations else "未知位置",
+            "condition": rule.condition or "未设置条件",
+            "trigger_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "rule_name": rule.name or "未命名规则",
+            "ai_result": "、".join(ai_results) if ai_results else "检测到异常",
+        }
+        
+        # 替换模板变量
+        for var_name, var_value in template_vars.items():
+            content = content.replace("{" + var_name + "}", str(var_value))
+        
+        logger.info("Send dynamic notify content: %s", content)
+        
+        # 发送动态生成的通知内容
+        return await self.miot_proxy.send_app_notify_content(content)

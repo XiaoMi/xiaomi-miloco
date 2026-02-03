@@ -53,6 +53,13 @@ export const getHAAuth = () => getApi('/api/ha/get_config');
 export const getHaList = () => getApi('/api/ha/automations');
 export const getHaAutomationActions = () => getApi('/api/ha/automation_actions');
 export const refreshHaAutomation = () => getApi('/api/ha/refresh_ha_automations');
+// Home Assistant WebSocket API
+export const getHAWsStatus = () => getApi('/api/ha/ws_status');
+export const getHADevices = () => getApi('/api/ha/devices');
+export const getHAAreas = () => getApi('/api/ha/areas');
+export const getHADeviceEntities = (deviceId) => getApi(`/api/ha/device/${deviceId}/entities`);
+export const getHAStates = () => getApi('/api/ha/states');
+export const getHAEntityRegistry = () => getApi('/api/ha/entity_registry');
 
 // mcp
 export const getMCPService = () => getApi('/api/mcp');

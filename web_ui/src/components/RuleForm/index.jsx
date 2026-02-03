@@ -73,6 +73,7 @@ const RuleForm = ({
   const [selectedActions, setSelectedActions] = useState([]);
   const [sendNotification, setSendNotification] = useState(false);
   const [notificationText, setNotificationText] = useState('');
+  const [useTemplateNotification, setUseTemplateNotification] = useState(false);
 
   const [checkedMcpServices, setCheckedMcpServices] = useState([]);
   const [aiRecommendExecuteType, setAiRecommendExecuteType] = useState('dynamic');
@@ -120,6 +121,7 @@ const RuleForm = ({
       if (formData.notify?.content) {
         setSendNotification(true);
         setNotificationText(formData.notify.content);
+        setUseTemplateNotification(formData.notify.use_template || false);
       }
 
       setCheckedMcpServices(formData.mcp_list?.map(mcp => `${mcp?.server_name}#${mcp?.client_id}`) || []);
@@ -250,6 +252,7 @@ const RuleForm = ({
       notify: hasNotification ? {
         id: initialRule?.execute_info?.notify?.id || null,
         content: notificationText.trim(),
+        use_template: useTemplateNotification,
       } : null,
       filter: {
         triggerPeriod,
@@ -511,13 +514,40 @@ const RuleForm = ({
               </Checkbox>
             </div>
             {sendNotification && (
-              <Input.TextArea
-                placeholder={t('smartCenter.pleaseEnterNotification')}
-                value={notificationText}
-                onChange={(e) => setNotificationText(e.target.value)}
-                disabled={isSubmitDisabled}
-                rows={3}
-              />
+              <>
+                <div className={styles.notificationOptions}>
+                  <span className={styles.templateLabel}>
+                    {t('smartCenter.useTemplateNotification')}
+                    <Tooltip
+                      placement="right"
+                      title={t('smartCenter.useTemplateNotificationTip')}
+                    >
+                      <QuestionCircleOutlined style={{ marginLeft: 4, color: '#999' }} />
+                    </Tooltip>
+                  </span>
+                  <Switch
+                    checked={useTemplateNotification}
+                    onChange={(checked) => setUseTemplateNotification(checked)}
+                    disabled={isSubmitDisabled}
+                    size="small"
+                  />
+                </div>
+                {useTemplateNotification && (
+                  <div className={styles.templateHint}>
+                    <span className={styles.templateVariables}>{t('smartCenter.templateVariables')}: </span>
+                    <code>{'{camera_name}'}</code>, <code>{'{camera_location}'}</code>, <code>{'{condition}'}</code>, <code>{'{trigger_time}'}</code>, <code>{'{rule_name}'}</code>
+                  </div>
+                )}
+                <Input.TextArea
+                  placeholder={useTemplateNotification 
+                    ? t('smartCenter.templateExample')
+                    : t('smartCenter.pleaseEnterNotification')}
+                  value={notificationText}
+                  onChange={(e) => setNotificationText(e.target.value)}
+                  disabled={isSubmitDisabled}
+                  rows={3}
+                />
+              </>
             )}
           </div>
         </div>

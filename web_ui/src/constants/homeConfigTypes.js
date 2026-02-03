@@ -96,13 +96,6 @@ export const MENU_ITEMS = [
     path: '/home/deviceManage',
   },
   {
-    key: '9',
-    label: 'home.menu.cameraManage',
-    icon: 'menuDevice',
-    selectedIcon: 'menuDeviceSelected',
-    path: '/home/cameraManage',
-  },
-  {
     key: '7',
     label: 'home.menu.logManage',
     icon: 'menuLog',

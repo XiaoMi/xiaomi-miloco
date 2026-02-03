@@ -17,10 +17,12 @@ from miloco_server.utils.mcp_util import MCPConfigConverter
 from miot.mcp import (
     MIoTManualSceneMcp,
     HomeAssistantAutomationMcp,
+    HomeAssistantDeviceMcp,
     MIoTDeviceMcp,
     MIoTManualSceneMcpInterface,
     MIoTDeviceMcpInterface,
-    HomeAssistantAutomationMcpInterface
+    HomeAssistantAutomationMcpInterface,
+    HomeAssistantDeviceMcpInterface
 )
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,7 @@ class MCPClientManager:
             await self._init_local_mcp_servers()
             await self.init_miot_mcp_clients()
             await self.init_ha_automations()
+            await self.init_ha_devices()
             logger.info("init default mcp clients done")
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Failed to initialize default MCP clients: %s", e, exc_info=True)
@@ -197,6 +200,39 @@ class MCPClientManager:
                 logger.error("Failed to initialize Home Assistant MCP client: %s", e)
         else:
             logger.warning("Home Assistant client not initialized")
+
+    async def init_ha_devices(self) -> bool:
+        """Initialize Home Assistant Device Control MCP Client"""
+        miot_client = self.miot_proxy.miot_client
+        ha_ws_client = self.ha_proxy.ha_ws_client
+
+        # 只有当 WebSocket 客户端已配置时才初始化
+        if ha_ws_client.is_configured:
+            try:
+                ha_devices_mcp = HomeAssistantDeviceMcp(
+                    interface=HomeAssistantDeviceMcpInterface(
+                        translate_async=miot_client.i18n.translate_async,
+                        get_devices_async=self.ha_proxy.get_ha_devices,
+                        get_areas_async=self.ha_proxy.get_ha_areas,
+                        get_device_entities_async=self.ha_proxy.get_ha_device_entities,
+                        get_states_async=self.ha_proxy.get_ha_states,
+                        call_service_async=ha_ws_client.call_service,
+                    ))
+                await ha_devices_mcp.init_async()
+                await self._add_client(
+                    transport_type=TransportType.LOCAL,
+                    config=LocalMCPConfig(
+                        client_id=LocalMcpClientId.HA_DEVICES,
+                        server_name="HA设备控制 (HA Device Control)",
+                        mcp_server=ha_devices_mcp.mcp_instance))
+                logger.info("Successfully initialized Home Assistant Device MCP client")
+                return True
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to initialize Home Assistant Device MCP client: %s", e)
+                return False
+        else:
+            logger.warning("Home Assistant WebSocket client not configured, skipping HA Device MCP")
+            return False
 
     async def _init_local_mcp_servers(self):
         """Initialize local MCP servers"""

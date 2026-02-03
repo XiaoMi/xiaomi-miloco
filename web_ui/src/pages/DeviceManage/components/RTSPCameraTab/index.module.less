@@ -1,0 +1,154 @@
+/**
+ * Copyright (C) 2025 Xiaomi Corporation
+ * This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
+ */
+
+.rtspCameraTab {
+  width: 100%;
+}
+
+.toolbar {
+  margin-bottom: 16px;
+}
+
+.loadingContainer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+}
+
+.emptyContainer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+}
+
+.cameraGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 16px;
+
+  @media (max-width: 900px) {
+    grid-template-columns: 1fr;
+  }
+
+  @media (min-width: 901px) and (max-width: 1400px) {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  @media (min-width: 1401px) {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.cameraCard {
+  border-radius: 8px;
+  
+  :global(.ant-card-body) {
+    padding: 12px 16px;
+  }
+}
+
+.cardContent {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.cameraInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.cameraHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.cameraIcon {
+  font-size: 18px;
+  color: var(--ant-color-primary);
+}
+
+.cameraName {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ant-color-text);
+}
+
+.cameraDetails {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detailItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.label {
+  color: var(--ant-color-text-secondary);
+  flex-shrink: 0;
+}
+
+.value {
+  color: var(--ant-color-text);
+}
+
+.urlValue {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--ant-color-text-tertiary);
+}
+
+.cameraActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.cameraForm {
+  padding-top: 16px;
+
+  :global(.ant-form-item) {
+    margin-bottom: 16px;
+  }
+
+  :global(.ant-form-item-extra) {
+    font-size: 12px;
+    color: var(--ant-color-text-tertiary);
+    margin-top: 4px;
+  }
+}
+
+.videoModal {
+  :global(.ant-modal-body) {
+    padding: 16px;
+  }
+}
+
+.videoContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.channelSwitch {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
