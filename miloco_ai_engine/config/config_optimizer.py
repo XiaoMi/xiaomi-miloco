@@ -145,7 +145,11 @@ def adjust_config_by_memory(model_config: ModelConfig) -> ModelConfig:
     """
     Adjust default model configuration based on CUDA VRAM status
     """
-    _, free_memory, cuda_available = get_cuda_memory_info()
+    _, free_memory, cuda_available, best_gpu_index = get_cuda_memory_info()
+
+    if cuda_available:
+        model_config.main_gpu = best_gpu_index
+        logger.info("Selected GPU %d with %.2f GB free memory", best_gpu_index, free_memory)
 
     memory_mode = FreeMemoryLevel.detect_memory_mode(free_memory, cuda_available)
     return apply_memory_optimization_to_default_model(model_config, memory_mode)
