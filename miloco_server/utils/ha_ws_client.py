@@ -76,13 +76,13 @@ class HAWebSocketClient:
     async def start(self):
         """启动连接（如果已配置）"""
         if not self.is_configured:
-            logger.warning("HA WebSocket 未配置，跳过启动")
+            logger.info("HA WebSocket 未配置，跳过启动（这是正常的，如需使用请先配置 Home Assistant）")
             return
         
         if self._connection_task is None or self._connection_task.done():
             self._should_reconnect = True
             self._connection_task = asyncio.create_task(self._connection_loop())
-            logger.info("HA WebSocket 连接任务已启动")
+            logger.info("HA WebSocket 连接任务已启动（后台运行，不阻塞主服务）")
 
     async def stop(self):
         """停止连接"""

@@ -134,8 +134,11 @@ class Manager:
         self._rtsp_camera_service = RTSPCameraService(self._rtsp_camera_dao)
         await self._rtsp_camera_service.initialize()
 
-        # 启动 HA WebSocket 客户端（如果已配置）
-        await self._ha_service.start_ws_client()
+        # 启动 HA WebSocket 客户端（如果已配置，异步后台启动，不阻塞主流程）
+        try:
+            await self._ha_service.start_ws_client()
+        except Exception as e:
+            logger.warning("HA WebSocket 客户端启动失败（不影响主服务）: %s", e)
 
         # 初始化记忆服务（可选功能，失败不影响主服务）
         try:

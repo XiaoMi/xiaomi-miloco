@@ -118,15 +118,31 @@ class MCPClientManager:
     async def _init_default_clients(self):
         """Initialize default MCP Clients"""
         logger.info("init default mcp clients")
+        
+        # Initialize local MCP servers
         try:
-            # Initialize local MCP servers
             await self._init_local_mcp_servers()
+        except Exception as e:
+            logger.error("Failed to initialize local MCP servers: %s", e)
+        
+        # Initialize MIoT MCP clients
+        try:
             await self.init_miot_mcp_clients()
+        except Exception as e:
+            logger.error("Failed to initialize MIoT MCP clients: %s", e)
+        
+        # Initialize HA MCP clients (optional, failure won't block startup)
+        try:
             await self.init_ha_automations()
+        except Exception as e:
+            logger.warning("Failed to initialize HA automations MCP (non-blocking): %s", e)
+        
+        try:
             await self.init_ha_devices()
-            logger.info("init default mcp clients done")
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Failed to initialize default MCP clients: %s", e, exc_info=True)
+        except Exception as e:
+            logger.warning("Failed to initialize HA devices MCP (non-blocking): %s", e)
+        
+        logger.info("init default mcp clients done")
 
     async def init_miot_mcp_clients(self):
         """Initialize MIoT MCP Clients"""
