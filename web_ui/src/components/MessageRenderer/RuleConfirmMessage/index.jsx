@@ -26,6 +26,8 @@ const RuleConfirmMessage = React.memo(({ data, mode = 'queryEdit' }) => {
   const {
     sessionId,
     currentRequestId,
+    availableMcpServices,
+    fetchMcpServices,
   } = useChatStore();
   const [loading, setLoading] = useState(false);
 
@@ -36,6 +38,13 @@ const RuleConfirmMessage = React.memo(({ data, mode = 'queryEdit' }) => {
     camera_options = [],
     action_options = []
   } = data;
+
+  // 加载 MCP 服务列表
+  useEffect(() => {
+    if (mode !== 'readonly' && (!availableMcpServices || availableMcpServices.length === 0)) {
+      fetchMcpServices();
+    }
+  }, [mode, availableMcpServices, fetchMcpServices]);
 
   const actualMode = useMemo(() => {
     if (mode === 'readonly' || confirmed !== undefined) {

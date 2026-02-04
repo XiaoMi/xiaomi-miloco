@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from miloco_server.utils.media import image_manager
 from miloco_server.utils.normal_util import bytes_to_base64
+from miloco_server.utils.image_process import process_images_for_vision_model
 from miot.types import MIoTCameraInfo
 
 class DeviceInfo(BaseModel):
@@ -71,15 +72,39 @@ class CameraImgSeq(BaseModel):
     channel: int = Field(..., description="Channel number", ge=0)
     img_list: list[CameraImgInfo] = Field(..., description="Image list")
 
-    def to_base64(self) -> "CameraImgBase64Seq":
-        return CameraImgBase64Seq(
-            camera_info=self.camera_info,
-            channel=self.channel,
-            img_list=[CameraImgInfoBase64(
-                data=bytes_to_base64(img.data),
-                timestamp=img.timestamp
-            ) for img in self.img_list]
-        )
+    def to_base64(self, compress: bool = True) -> "CameraImgBase64Seq":
+        """
+        Convert image sequence to base64 format.
+        
+        Args:
+            compress: If True, compress images for vision model optimization.
+                     Images will be center-cropped to 448x448, with middle frames
+                     of video sequences compressed to 224x224.
+                     Default is True for external LLM services (e.g., llama-server).
+        """
+        if compress:
+            # Process images for vision model (compress to 448x448 / 224x224)
+            processed_images = process_images_for_vision_model(
+                [img.data for img in self.img_list]
+            )
+            return CameraImgBase64Seq(
+                camera_info=self.camera_info,
+                channel=self.channel,
+                img_list=[CameraImgInfoBase64(
+                    data=bytes_to_base64(processed_img),
+                    timestamp=img.timestamp
+                ) for processed_img, img in zip(processed_images, self.img_list)]
+            )
+        else:
+            # Original behavior: no compression
+            return CameraImgBase64Seq(
+                camera_info=self.camera_info,
+                channel=self.channel,
+                img_list=[CameraImgInfoBase64(
+                    data=bytes_to_base64(img.data),
+                    timestamp=img.timestamp
+                ) for img in self.img_list]
+            )
 
     async def store_to_path(self) -> "CameraImgPathSeq":
         """Store images to file paths"""

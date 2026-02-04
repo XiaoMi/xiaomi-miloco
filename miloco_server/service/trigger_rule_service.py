@@ -68,8 +68,8 @@ class TriggerRuleService:
         if self._trigger_rule_dao.exists_by_name(trigger_rule.name):
             raise ConflictException(f"Trigger rule name '{trigger_rule.name}' already exists")
 
-        # Validate if camera device IDs are valid
-        valid_cameras = await self._miot_proxy.get_camera_dids()
+        # Validate if camera device IDs are valid (including RTSP cameras)
+        valid_cameras = await self._get_all_valid_camera_ids()
         invalid_dids = [
             did for did in trigger_rule.cameras if did not in valid_cameras
         ]
@@ -169,8 +169,8 @@ class TriggerRuleService:
         if self._trigger_rule_dao.exists_by_name(trigger_rule.name, trigger_rule.id):
             raise ConflictException(f"Trigger rule name '{trigger_rule.name}' already exists")
 
-        # Validate if camera device IDs are valid
-        valid_cameras = await self._miot_proxy.get_camera_dids()
+        # Validate if camera device IDs are valid (including RTSP cameras)
+        valid_cameras = await self._get_all_valid_camera_ids()
         invalid_dids = [
             did for did in trigger_rule.cameras if did not in valid_cameras
         ]
@@ -314,3 +314,28 @@ class TriggerRuleService:
             result: bool = await self._trigger_rule_runner.execute_action(action)
             results.append(result)
         return results
+
+    async def _get_all_valid_camera_ids(self) -> list[str]:
+        """
+        Get all valid camera IDs (including MIoT cameras and RTSP cameras)
+        
+        Returns:
+            list[str]: List of valid camera device IDs
+        """
+        from miloco_server.service.manager import get_manager
+        
+        valid_ids = []
+        
+        # Get MIoT camera IDs
+        miot_camera_ids = await self._miot_proxy.get_camera_dids()
+        valid_ids.extend(miot_camera_ids)
+        
+        # Get RTSP camera IDs
+        try:
+            rtsp_cameras = get_manager().rtsp_camera_service.get_all_cameras(enabled_only=False)
+            rtsp_camera_ids = [camera.id for camera in rtsp_cameras]
+            valid_ids.extend(rtsp_camera_ids)
+        except Exception as e:
+            logger.warning("Failed to get RTSP camera IDs: %s", e)
+        
+        return valid_ids

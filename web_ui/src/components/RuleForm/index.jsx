@@ -384,7 +384,7 @@ const RuleForm = ({
         })()}
       >
         <div className={styles.actionGroup}>
-          {mode !== 'readonly' && mode !== 'queryEdit' && (
+          {mode !== 'readonly' && (
             <div className={styles.actionItem}>
               <div className={styles.actionLabel}>MCP</div>
               <Select
