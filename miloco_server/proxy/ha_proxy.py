@@ -5,13 +5,14 @@
 
 import json
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic_core import to_jsonable_python
 from miot.ha_api import HAAutomationInfo, HAHttpClient
 
 from miloco_server.dao.kv_dao import AuthConfigKeys, KVDao, DeviceInfoKeys
 from miloco_server.schema.miot_schema import HAConfig
+from miloco_server.utils.ha_ws_client import HAWebSocketClient
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class HAProxy:
     def __init__(self, kv_dao: KVDao):
         self._kv_dao = kv_dao
         self._ha_rest_api: Optional[HAHttpClient] = None
+        self._ha_ws_client: HAWebSocketClient = HAWebSocketClient()
         self._automations: dict[str, HAAutomationInfo] = {}
         self.init_ha_info_dict()
 
@@ -28,12 +30,18 @@ class HAProxy:
     def ha_client(self) -> Optional[HAHttpClient]:
         return self._ha_rest_api
 
+    @property
+    def ha_ws_client(self) -> HAWebSocketClient:
+        return self._ha_ws_client
+
     def init_ha_info_dict(self):
         """Initialize HA related information dictionary"""
         miot_ha_base_url = self._kv_dao.get(AuthConfigKeys.MIOT_HA_BASE_URL_KEY)
         miot_ha_token = self._kv_dao.get(AuthConfigKeys.MIOT_HA_TOKEN_KEY)
         if miot_ha_base_url and miot_ha_token:
             self._ha_rest_api = HAHttpClient(miot_ha_base_url, miot_ha_token)
+            # 配置 WebSocket 客户端
+            self._ha_ws_client.configure(miot_ha_base_url, miot_ha_token)
         else:
             self._ha_rest_api = None
 
@@ -45,6 +53,21 @@ class HAProxy:
         else:
             self._automations = {}
 
+    async def start_ws_client(self):
+        """启动 WebSocket 客户端（如果已配置）"""
+        if self._ha_ws_client.is_configured:
+            await self._ha_ws_client.start()
+            logger.info("HA WebSocket 客户端启动完成")
+
+    async def stop_ws_client(self):
+        """停止 WebSocket 客户端"""
+        await self._ha_ws_client.stop()
+        logger.info("HA WebSocket 客户端已停止")
+
+    def get_ws_status(self) -> Dict[str, Any]:
+        """获取 WebSocket 连接状态"""
+        return self._ha_ws_client.get_status()
+
     async def set_ha_config(self, miot_ha_base_url: str, miot_ha_token: str):
         """Set Home Assistant configuration"""
         if not await HAHttpClient.validate_async(miot_ha_base_url, miot_ha_token):
@@ -53,6 +76,11 @@ class HAProxy:
         self._kv_dao.set(AuthConfigKeys.MIOT_HA_BASE_URL_KEY, miot_ha_base_url)
         self._kv_dao.set(AuthConfigKeys.MIOT_HA_TOKEN_KEY, miot_ha_token)
         self._ha_rest_api = HAHttpClient(miot_ha_base_url, miot_ha_token)
+        
+        # 配置并重启 WebSocket 客户端
+        self._ha_ws_client.configure(miot_ha_base_url, miot_ha_token)
+        await self._ha_ws_client.reconnect()
+        
         await self.refresh_ha_automations()
 
     def get_ha_config(self) -> HAConfig | None:
@@ -109,3 +137,93 @@ class HAProxy:
         else:
             logger.warning("Miot ha rest api is not initialized")
             return None
+
+    # --- WebSocket API 方法 ---
+
+    async def get_ha_devices(self) -> List[Dict[str, Any]]:
+        """
+        通过 WebSocket 获取 HA 设备列表
+        
+        Returns:
+            设备列表
+        """
+        if not self._ha_ws_client.is_connected:
+            raise ConnectionError("HA WebSocket 未连接")
+        
+        try:
+            devices = await self._ha_ws_client.get_devices()
+            return devices if devices else []
+        except Exception as e:
+            logger.error("获取 HA 设备列表失败: %s", e)
+            raise
+
+    async def get_ha_areas(self) -> List[Dict[str, Any]]:
+        """
+        通过 WebSocket 获取 HA 区域列表
+        
+        Returns:
+            区域列表
+        """
+        if not self._ha_ws_client.is_connected:
+            raise ConnectionError("HA WebSocket 未连接")
+        
+        try:
+            areas = await self._ha_ws_client.get_areas()
+            return areas if areas else []
+        except Exception as e:
+            logger.error("获取 HA 区域列表失败: %s", e)
+            raise
+
+    async def get_ha_device_entities(self, device_id: str) -> Dict[str, Any]:
+        """
+        通过 WebSocket 获取指定设备的实体列表
+        
+        Args:
+            device_id: 设备ID
+            
+        Returns:
+            设备实体信息
+        """
+        if not self._ha_ws_client.is_connected:
+            raise ConnectionError("HA WebSocket 未连接")
+        
+        try:
+            result = await self._ha_ws_client.get_device_entities(device_id)
+            return result if result else {}
+        except Exception as e:
+            logger.error("获取 HA 设备实体失败: %s", e)
+            raise
+
+    async def get_ha_states(self) -> List[Dict[str, Any]]:
+        """
+        通过 WebSocket 获取所有实体状态
+        
+        Returns:
+            实体状态列表
+        """
+        if not self._ha_ws_client.is_connected:
+            raise ConnectionError("HA WebSocket 未连接")
+        
+        try:
+            states = await self._ha_ws_client.get_states()
+            return states if states else []
+        except Exception as e:
+            logger.error("获取 HA 实体状态失败: %s", e)
+            raise
+
+    async def get_ha_entity_registry(self) -> List[Dict[str, Any]]:
+        """
+        通过 WebSocket 获取实体注册表
+        
+        Returns:
+            实体注册表列表
+        """
+        if not self._ha_ws_client.is_connected:
+            raise ConnectionError("HA WebSocket 未连接")
+        
+        try:
+            entities = await self._ha_ws_client.get_entity_registry()
+            return entities if entities else []
+        except Exception as e:
+            logger.error("获取 HA 实体注册表失败: %s", e)
+            raise

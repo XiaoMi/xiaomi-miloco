@@ -12,7 +12,9 @@ export default {
       mcpService: 'MCP 服务',
       modalManage: '模型管理',
       deviceManage: '设备管理',
+      cameraManage: '摄像头管理',
       logManage: '日志管理',
+      memoryManage: '记忆管理',
       setting: '设置',
     },
     sidebar: {
@@ -191,6 +193,10 @@ export default {
     pleaseEnterTriggerPlaceholder: '请描述触发条件',
     sendMiHomeNotification: '发送米家通知',
     pleaseEnterNotification: '请输入要发送的通知文案',
+    useTemplateNotification: '使用动态模板',
+    useTemplateNotificationTip: '开启后可在通知内容中使用变量，支持的变量：{camera_name} 摄像头名称、{camera_location} 摄像头位置、{condition} 触发条件、{trigger_time} 触发时间、{rule_name} 规则名称',
+    templateVariables: '可用变量',
+    templateExample: '示例：{camera_name}在{trigger_time}检测到{condition}',
     moreAdvancedOptions: '更多高级选项 (非必选)',
     triggerPeriod: '触发时间段',
     nonRequired: '非必选',
@@ -353,6 +359,30 @@ export default {
     fetchDeviceListFailed: '获取设备列表失败',
     refreshDeviceListFailed: '刷新设备列表失败',
     noDevice: '暂无设备',
+    // Tab标签
+    mijiaDevices: '米家设备',
+    rtspCameras: 'RTSP摄像头',
+    haDevices: 'HA设备',
+    // RTSP摄像头
+    playVideo: '播放视频',
+    // HA设备
+    haNotConfigured: 'Home Assistant 未配置',
+    haNotConfiguredDesc: '请先在设置页面配置 Home Assistant 授权信息',
+    haNotConnected: 'Home Assistant 连接中',
+    haNotConnectedDesc: '正在连接 Home Assistant WebSocket...',
+    haConnected: 'Home Assistant 已连接',
+    fetchHADevicesFailed: '获取 HA 设备列表失败',
+    noHADevices: '暂无 HA 设备',
+    deviceCount: '共 {{count}} 个设备',
+    unknownArea: '未知区域',
+    manufacturer: '制造商',
+    model: '型号',
+    deviceId: '设备ID',
+    area: '区域',
+    entityList: '实体列表',
+    deviceEntities: '设备实体',
+    fetchEntitiesFailed: '获取设备实体失败',
+    noEntities: '该设备暂无实体',
   },
   logManage: {
     triggerRules: '触发规则',
@@ -403,8 +433,39 @@ export default {
     pleaseEnterHomeAssistantUrl: '请输入Home Assistant的URL',
     pleaseEnterToken: '请输入Token',
     pleaseEnterHomeAssistantToken: '请输入Home Assistant的Token',
+    wsConnected: 'WebSocket 已连接',
+    wsDisconnected: 'WebSocket 未连接',
   },
 
+  cameraManage: {
+    title: '摄像头管理',
+    addCamera: '添加摄像头',
+    editCamera: '编辑摄像头',
+    noCameras: '暂无RTSP摄像头',
+    cameraName: '摄像头名称',
+    pleaseEnterCameraName: '请输入摄像头名称',
+    cameraNamePlaceholder: '例如：客厅摄像头',
+    location: '位置',
+    locationPlaceholder: '例如：客厅、卧室等',
+    mainStreamUrl: '主码流地址',
+    pleaseEnterMainStreamUrl: '请输入主码流RTSP地址',
+    subStreamUrl: '子码流地址（可选）',
+    subStreamHint: '子码流用于AI分析，主码流用于高清播放',
+    rtspUrlHint: '格式：rtsp://[用户名:密码@]IP:端口/路径',
+    enabled: '启用',
+    mainStreamOnline: '主码流在线',
+    subStreamOnline: '子码流在线',
+    mainStream: '主码流',
+    subStream: '子码流',
+    offline: '离线',
+    refreshStatus: '刷新状态',
+    fetchCamerasFailed: '获取摄像头列表失败',
+    cameraEnabled: '摄像头已启用',
+    cameraDisabled: '摄像头已禁用',
+    updateFailed: '更新失败',
+    statusRefreshed: '状态已刷新',
+    statusRefreshFailed: '状态刷新失败',
+  },
   login: {
     loginSuccess: '登录成功',
     loginFail: '密码错误，请重试',
@@ -426,6 +487,195 @@ export default {
     confirmPinPlaceholder: '请再次输入6位登录码',
     cancelButton: '取消',
     confirmSetButton: '确认设置',
+  },
+
+  memory: {
+    title: '记忆管理',
+    loadFailed: '加载记忆失败',
+    addSuccess: '记忆添加成功',
+    addFailed: '添加记忆失败',
+    updateSuccess: '记忆更新成功',
+    updateFailed: '更新记忆失败',
+    deleteSuccess: '记忆删除成功',
+    deleteFailed: '删除记忆失败',
+    searchFailed: '搜索失败',
+    commandSuccess: '指令执行成功',
+    commandFailed: '指令执行失败',
+    confirmDelete: '确定要删除这条记忆吗？',
+    
+    totalMemories: '总记忆数',
+    activeMemories: '有效记忆',
+    autoExtracted: '自动提取',
+    manualAdded: '手动添加',
+    
+    naturalLanguageControl: '自然语言记忆管理',
+    commandTip: '使用自然语言添加、修改或删除记忆',
+    commandPlaceholder: '输入指令，如：记住，我的猫叫咪咪',
+    execute: '执行',
+    examples: '示例',
+    
+    search: '搜索记忆',
+    searchPlaceholder: '输入关键词搜索相关记忆',
+    clearSearch: '清除搜索',
+    noSearchResults: '没有找到相关记忆',
+    relevance: '相关度',
+    
+    memoryList: '记忆列表',
+    addMemory: '添加记忆',
+    editMemory: '编辑记忆',
+    noMemories: '暂无记忆',
+    
+    content: '记忆内容',
+    contentRequired: '请输入记忆内容',
+    contentPlaceholder: '输入要记住的内容，如：用户喜欢26度空调温度',
+    type: '记忆类型',
+    selectType: '选择类型',
+    
+    source: '来源',
+    autoExtract: '自动提取',
+    manualAdd: '手动添加',
+    
+    // 记忆类型
+    typePreference: '用户偏好',
+    typeFact: '事实信息',
+    typeHabit: '生活习惯',
+    typeDeviceSetting: '设备偏好',
+    typeSchedule: '时间安排',
+    typeRelationship: '关系信息',
+    typeCustom: '自定义',
+  },
+
+  xiaoai: {
+    title: '小爱音箱',
+    description: '通过开放小爱音箱接入Miloco AI对话能力',
+    
+    // 服务状态
+    serviceStatus: '服务状态',
+    running: '运行中',
+    stopped: '已停止',
+    enabled: '启用服务',
+    enabledTip: '启用后服务将在启动时自动运行',
+    
+    // 服务控制
+    startService: '启动服务',
+    stopService: '停止服务',
+    restartService: '重启服务',
+    startSuccess: '服务启动成功',
+    stopSuccess: '服务已停止',
+    restartSuccess: '服务重启成功',
+    operationFailed: '操作失败',
+    
+    // 已连接音箱
+    connectedSpeakers: '已连接音箱',
+    noSpeakers: '暂无音箱连接',
+    speakerId: '设备ID',
+    speakerModel: '型号',
+    speakerStatus: '状态',
+    playing: '播放中',
+    paused: '已暂停',
+    idle: '空闲',
+    
+    // 服务配置
+    serverConfig: '服务配置',
+    host: '监听地址',
+    port: '监听端口',
+    portTip: '小爱音箱客户端连接的端口，默认4399',
+    
+    // AI配置
+    aiConfig: 'AI 配置',
+    mcpServices: 'MCP 服务',
+    mcpServicesTip: '选择可用的MCP服务（如设备控制、场景等）',
+    builtinMcp: '内置服务',
+    customMcp: '自定义服务',
+    builtin: '内置',
+    miotManualScenes: '米家自动化',
+    miotDevices: '米家设备控制',
+    haAutomations: 'HA自动化',
+    haDevices: 'HA设备控制',
+    cameras: '摄像头',
+    camerasTip: '选择对话时可访问的摄像头',
+    systemPrompt: '系统提示词',
+    systemPromptPlaceholder: '自定义系统提示词（留空使用默认）',
+    historyLength: '历史记录长度',
+    historyLengthTip: '保留最近的对话轮数',
+    
+    // 语音控制
+    voiceConfig: '语音控制',
+    
+    // 全部接管模式
+    takeoverEnabled: '启用全部接管模式',
+    takeoverEnabledTip: '开启后可通过语音指令进入/退出接管状态，接管状态下所有对话都由AI回复',
+    takeoverEnterKeywords: '进入接管触发词',
+    takeoverEnterKeywordsTip: '说这些词会进入全部接管状态，之后所有对话都由AI回复',
+    takeoverEnterKeywordsPlaceholder: '每行一个触发词，如：接管小爱、AI接管',
+    takeoverExitKeywords: '退出接管触发词',
+    takeoverExitKeywordsTip: '说这些词会退出接管状态，恢复小爱自身回复',
+    takeoverExitKeywordsPlaceholder: '每行一个触发词，如：退出接管、恢复小爱',
+    
+    // 关键词触发模式
+    aiKeywords: 'AI 触发关键词',
+    aiKeywordsTip: '包含这些关键词的语音会触发AI接管该轮对话（留空表示完全不接管，需配合全部接管模式使用）',
+    aiKeywordsPlaceholder: '每行一个关键词，如：请问、帮我',
+    
+    // TTS配置
+    ttsConfig: 'TTS 配置',
+    ttsMaxLength: '单次播报最大长度',
+    ttsMaxLengthTip: '超过长度会自动分段播报',
+    playbackTimeout: '播放超时 (秒)',
+    enableInterruption: '允许打断播放',
+    enableInterruptionTip: '说话时自动暂停当前播放',
+    connectionAnnouncement: '连接提示语',
+    connectionAnnouncementPlaceholder: '音箱连接时播报的提示语',
+    
+    // 会话管理
+    sessionConfig: '会话管理',
+    clearCommands: '清空会话指令',
+    clearCommandsTip: '说这些话会清空当前对话历史',
+    clearCommandsPlaceholder: '每行一个指令，如：清空对话、重新开始',
+    saveAndNewCommands: '保存并新建指令',
+    saveAndNewCommandsTip: '说这些话会保存当前对话并开始新对话',
+    saveAndNewCommandsPlaceholder: '每行一个指令，如：新建对话、开始新对话',
+    shareSessionWithWeb: '与网页共享会话',
+    shareSessionWithWebTip: '开启后音箱对话和网页对话共享历史记录',
+    
+    // 上下文压缩
+    contextCompression: '上下文压缩',
+    compressionEnabled: '启用压缩',
+    compressionEnabledTip: '对话过长时自动压缩历史记录',
+    maxMessages: '最大消息数',
+    maxMessagesTip: '超过此数量触发压缩',
+    maxTokens: '最大Token数',
+    maxTokensTip: '超过此数量触发压缩（估算值）',
+    compressionStrategy: '压缩策略',
+    strategyAuto: '自动选择',
+    strategySummary: 'AI总结',
+    strategyTruncate: '直接截断',
+    strategySliding: '滑动窗口',
+    keepRecent: '保留最近轮数',
+    keepRecentTip: '压缩后保留的最近对话轮数',
+    
+    // TTS播报控制
+    ttsPlaybackConfig: 'TTS播报控制',
+    playThinking: '播报思考过程',
+    playThinkingTip: '是否在语音播报中包含AI的思考推理过程',
+    playToolCalls: '播报工具调用',
+    playToolCallsTip: '是否播报工具调用和执行结果的简短描述（如"正在查询设备"）',
+    
+    // 即时保存
+    autoSaveSession: '即时保存对话',
+    autoSaveSessionTip: '每次用户提问和AI回复后自动保存到会话记录，关闭则等待语音指令保存',
+    
+    // 配置操作
+    saveConfig: '保存配置',
+    saveSuccess: '配置已保存',
+    saveFailed: '保存失败',
+    needsRestart: '部分配置需要重启服务生效',
+    loadConfigFailed: '加载配置失败',
+    
+    // 对话页面
+    speakerSession: '音箱会话',
+    selectSpeaker: '选择音箱播放回复',
+    speakerPlayback: '使用音箱播放',
   },
 
 };

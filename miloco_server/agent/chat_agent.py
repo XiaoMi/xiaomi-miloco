@@ -21,6 +21,8 @@ from miloco_server.schema.chat_schema import Dialog, Event, InstructionPayload, 
 from miloco_server.schema.mcp_schema import CallToolResult, LocalMcpClientId
 from miloco_server.utils.chat_companion import ChatCachedData
 from miloco_server.utils.local_models import ModelPurpose
+from miloco_server.service.memory_service import get_memory_service
+from miloco_server.memory.memory_extractor import SmartMemoryFilter
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,11 @@ class ChatAgent(Actor):
             ChatCachedData(
                 out_actor_address=self._out_actor_address,
             ))
+
+        # 记忆服务
+        self._memory_service = get_memory_service()
+        self._current_query: Optional[str] = None  # 用于记忆处理
+        self._assistant_response: Optional[str] = None  # 用于记忆处理
 
         logger.info("[%s] ChatAgent initialized", self._request_id)
 
@@ -170,7 +177,12 @@ class ChatAgent(Actor):
             "[%s] Starting to process user query: %s", self._request_id, query)
         success = False
         error_message = None
+        self._current_query = query  # 保存查询用于记忆处理
+        
         try:
+            # 检索相关记忆并注入上下文
+            await self._inject_memory_context(query)
+            
             self._chat_history_messages.add_content(
                 "user", f"request_id: {self._request_id}, query: {query}")
 
@@ -211,9 +223,94 @@ class ChatAgent(Actor):
 
     async def _run_finally_do(self, success: bool, error_message: str | None) -> None:
         """Run finally do."""
+        # 处理自动记忆提取
+        if success and self._current_query:
+            await self._process_auto_memory()
+        
         if not success:
             self._send_instruction(Dialog.Exception(message=error_message))
         self._send_dialog_finish(success)
+
+    async def _inject_memory_context(self, query: str) -> None:
+        """检索相关记忆并注入到系统提示中"""
+        try:
+            if not self._memory_service or not self._memory_service.is_initialized:
+                logger.debug("[%s] Memory service not initialized, skipping memory injection", self._request_id)
+                return
+            
+            # 获取记忆上下文
+            context = await self._memory_service.get_full_context(
+                query=query,
+                user_id="default"
+            )
+            
+            if context.context_text and context.memories:
+                # 将记忆上下文合并到第一个系统消息中
+                messages = self._chat_history_messages.get_messages()
+                if messages and messages[0].get("role") == "system":
+                    # 将记忆附加到现有的系统提示
+                    original_system = messages[0].get("content", "")
+                    enhanced_system = f"{original_system}\n\n{context.context_text}"
+                    messages[0]["content"] = enhanced_system
+                    logger.info("[%s] Injected %d memories into system prompt", 
+                               self._request_id, len(context.memories))
+                    logger.debug("[%s] Memory context: %s", self._request_id, context.context_text)
+                else:
+                    # 如果没有系统消息，直接添加
+                    self._chat_history_messages.add_content(
+                        "system", 
+                        context.context_text
+                    )
+                    logger.info("[%s] Added %d memories as new system message", 
+                               self._request_id, len(context.memories))
+        except Exception as e:
+            logger.warning("[%s] Failed to inject memory context: %s", self._request_id, e, exc_info=True)
+
+    async def _process_auto_memory(self) -> None:
+        """处理自动记忆提取"""
+        try:
+            if not self._memory_service or not self._memory_service.is_initialized:
+                logger.debug("[%s] Memory service not available for auto extraction", self._request_id)
+                return
+            
+            if not self._current_query:
+                return
+            
+            logger.info("[%s] Processing auto memory for: %s", self._request_id, self._current_query[:50])
+            
+            # 使用快速过滤器检查是否需要处理
+            if SmartMemoryFilter.should_skip(self._current_query):
+                logger.debug("[%s] Message skipped by filter", self._request_id)
+                return
+            
+            # 检查是否是记忆管理指令
+            if SmartMemoryFilter.is_memory_management_command(self._current_query):
+                # 处理手动记忆管理指令
+                result = await self._memory_service.handle_manual_command(
+                    command=self._current_query,
+                    user_id="default"
+                )
+                logger.info("[%s] Manual memory command result: %s", 
+                           self._request_id, result)
+                return
+            
+            # 自动提取记忆
+            logger.info("[%s] Attempting auto memory extraction", self._request_id)
+            result = await self._memory_service.process_conversation(
+                user_message=self._current_query,
+                assistant_response=self._assistant_response,
+                user_id="default"
+            )
+            
+            if result and result.should_save:
+                logger.info("[%s] Auto-extracted %d memories: %s", 
+                           self._request_id, len(result.memories),
+                           [m.content for m in result.memories])
+            else:
+                logger.debug("[%s] No memories extracted from conversation", self._request_id)
+                
+        except Exception as e:
+            logger.warning("[%s] Failed to process auto memory: %s", self._request_id, e, exc_info=True)
 
 
     async def _execute_step(self, step_number: int) -> Optional[str]:
@@ -258,6 +355,10 @@ class ChatAgent(Actor):
 
             self._chat_history_messages.add_assistant_message(
                 finalized_content, finalized_tool_calls)
+
+            # 保存助手响应用于记忆处理
+            if finalized_content:
+                self._assistant_response = finalized_content
 
             if self._has_tool_calls(finalized_tool_calls):
                 await self._execute_tools(finalized_tool_calls)

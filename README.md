@@ -9,6 +9,7 @@ English | [简体中文](README.zh_Hans.md)
 </div>
 
 ## News
+- [2026-*] Expanding new features based on the original version  👉[readme](docs/update.md)
 
 - [2025-11] Xiaomi Miloco Framework Open Source
 

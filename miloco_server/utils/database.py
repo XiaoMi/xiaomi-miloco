@@ -86,6 +86,12 @@ class SQLiteConnector:
                         self._create_mcp_config_table(conn)
                         tables_created.append("mcp_config")
 
+                    if "rtsp_camera" not in existing_tables:
+                        logger.info(
+                            "RTSP camera table not found, creating...")
+                        self._create_rtsp_camera_table(conn)
+                        tables_created.append("rtsp_camera")
+
                     # If new tables were created, commit transaction
                     if tables_created:
                         conn.commit()
@@ -119,6 +125,7 @@ class SQLiteConnector:
         self._create_model_vendor_table(conn)
         self._create_mcp_config_table(conn)
         self._create_chat_history_table(conn)
+        self._create_rtsp_camera_table(conn)
         conn.commit()
         logger.info("Database table structure created successfully")
 
@@ -288,6 +295,35 @@ class SQLiteConnector:
             "CREATE INDEX IF NOT EXISTS idx_trigger_rule_log_created_at ON trigger_rule_log(created_at)"
         )
         logger.info("Trigger rule log table created successfully")
+
+    def _create_rtsp_camera_table(self, conn: sqlite3.Connection) -> None:
+        """Create RTSP camera table - 创建RTSP摄像头表"""
+        cursor = conn.cursor()
+
+        # 创建RTSP摄像头表，用于存储用户手动添加的RTSP摄像头信息
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS rtsp_camera (
+                id TEXT PRIMARY KEY,  -- 使用UUID作为主键
+                name TEXT NOT NULL,  -- 摄像头名称
+                location TEXT DEFAULT '',  -- 摄像头位置
+                rtsp_url_main TEXT NOT NULL,  -- 主码流RTSP地址
+                rtsp_url_sub TEXT DEFAULT '',  -- 子码流RTSP地址（可选）
+                enabled BOOLEAN DEFAULT 1,  -- 是否启用: 1=启用, 0=禁用
+                online_main BOOLEAN DEFAULT 0,  -- 主码流在线状态
+                online_sub BOOLEAN DEFAULT 0,  -- 子码流在线状态
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # 为RTSP摄像头表创建索引以提高查询性能
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rtsp_camera_name ON rtsp_camera(name)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rtsp_camera_enabled ON rtsp_camera(enabled)"
+        )
+        logger.info("RTSP camera table created successfully")
 
     @contextmanager
     def get_connection(self):

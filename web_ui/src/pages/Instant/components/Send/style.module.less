@@ -143,3 +143,31 @@
   justify-content: center;
   gap: 8px;
 }
+
+.speakerSelectContainer {
+  display: flex;
+  align-items: center;
+}
+
+.speakerSelect {
+  :global(.ant-select-selector) {
+    border-radius: 20px !important;
+    border-color: var(--border-color) !important;
+    font-size: 12px !important;
+    height: 30px !important;
+    padding: 0 10px !important;
+  }
+  
+  :global(.ant-select-selection-placeholder) {
+    font-size: 12px;
+  }
+  
+  :global(.ant-select-selection-item) {
+    font-size: 12px;
+    line-height: 28px !important;
+  }
+  
+  :global(.ant-select-arrow) {
+    color: var(--primary-color);
+  }
+}

@@ -32,6 +32,10 @@ class Notify(BaseModel):
     """Notification data model"""
     id: Optional[str] = Field(None, description="Notification ID")
     content: str = Field(..., description="Notification content")
+    use_template: bool = Field(
+        default=False, 
+        description="是否使用动态模板。支持的变量: {camera_name}, {camera_location}, {condition}, {trigger_time}, {rule_name}, {ai_result}"
+    )
 
 
 class ExecuteInfo(BaseModel):

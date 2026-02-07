@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 from miloco_server.dao.chat_history_dao import ChatHistoryDAO
 from miloco_server.dao.trigger_rule_log_dao import TriggerRuleLogDAO
+from miloco_server.dao.rtsp_camera_dao import RTSPCameraDAO
 from miloco_server.schema.auth_schema import UserLanguage
 from miloco_server.utils.local_models import ModelPurpose
 from miloco_server.utils.default_action import DefaultPresetActionManager
@@ -33,6 +34,8 @@ from miloco_server.service.trigger_rule_service import TriggerRuleService
 from miloco_server.service.model_service import ModelService
 from miloco_server.service.mcp_service import McpService
 from miloco_server.service.chat_history_service import ChatHistoryService
+from miloco_server.service.rtsp_camera_service import RTSPCameraService
+from miloco_server.service.memory_service import MemoryService, get_memory_service
 from miloco_server.config.normal_config import MIOT_CONFIG
 from miloco_server.utils.chat_companion import ChatCompanion
 
@@ -74,6 +77,7 @@ class Manager:
         self._mcp_config_dao = MCPConfigDAO()
         self._chat_history_dao = ChatHistoryDAO()
         self._trigger_rule_log_dao = TriggerRuleLogDAO()
+        self._rtsp_camera_dao = RTSPCameraDAO()
         self._cleaner = Cleaner(self._chat_history_dao, self._trigger_rule_log_dao)
         self._chat_companion = ChatCompanion(self._chat_history_dao)
 
@@ -126,6 +130,30 @@ class Manager:
             self._mcp_client_manager
         )
 
+        # 初始化RTSP摄像头服务
+        self._rtsp_camera_service = RTSPCameraService(self._rtsp_camera_dao)
+        await self._rtsp_camera_service.initialize()
+
+        # 启动 HA WebSocket 客户端（如果已配置，异步后台启动，不阻塞主流程）
+        try:
+            await self._ha_service.start_ws_client()
+        except Exception as e:
+            logger.warning("HA WebSocket 客户端启动失败（不影响主服务）: %s", e)
+
+        # 初始化记忆服务（可选功能，失败不影响主服务）
+        try:
+            self._memory_service = get_memory_service()
+            init_success = await self._memory_service.initialize()
+            if init_success:
+                # 设置 LLM 调用函数（用于记忆提取）
+                self._setup_memory_llm()
+                logger.info("Memory service initialized successfully")
+            else:
+                logger.warning("Memory service initialization returned False, memory features disabled")
+        except Exception as e:
+            logger.error("Failed to initialize memory service (non-critical): %s", e)
+            self._memory_service = None
+
         self._trigger_rule_runner.start_periodic_task()
 
         if callback:
@@ -168,6 +196,38 @@ class Manager:
     @property
     def chat_service(self) -> ChatHistoryService:
         return self._chat_service
+
+    @property
+    def rtsp_camera_service(self) -> RTSPCameraService:
+        return self._rtsp_camera_service
+
+    @property
+    def memory_service(self) -> Optional[MemoryService]:
+        return getattr(self, '_memory_service', None)
+
+    def _setup_memory_llm(self):
+        """设置记忆服务的 LLM 调用函数"""
+        try:
+            llm_proxy = self.get_llm_proxy_by_purpose(ModelPurpose.PLANNING)
+            
+            if llm_proxy:
+                async def llm_call_func(messages):
+                    logger.info("Memory LLM calling with %d messages", len(messages))
+                    try:
+                        result = await llm_proxy.async_call_llm(messages)
+                        logger.info("Memory LLM response: success=%s, has_content=%s", 
+                                   result.get("success"), bool(result.get("content")))
+                        return result
+                    except Exception as e:
+                        logger.error("Memory LLM call failed: %s", e)
+                        return {"success": False, "error": str(e), "content": ""}
+                        
+                self._memory_service.set_llm_call_func(llm_call_func)
+                logger.info("Memory service LLM configured with: %s", llm_proxy)
+            else:
+                logger.warning("No PLANNING LLM available for memory service, using rule-based extraction only")
+        except Exception as e:
+            logger.error("Failed to setup memory LLM: %s", e, exc_info=True)
 
     @property
     def chat_companion(self) -> ChatCompanion:
@@ -216,6 +276,10 @@ class Manager:
     @property
     def trigger_rule_log_dao(self) -> TriggerRuleLogDAO:
         return self._trigger_rule_log_dao
+
+    @property
+    def rtsp_camera_dao(self) -> RTSPCameraDAO:
+        return self._rtsp_camera_dao
 
     @property
     def cleaner(self) -> Cleaner:

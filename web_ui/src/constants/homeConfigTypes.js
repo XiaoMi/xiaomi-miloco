@@ -104,6 +104,13 @@ export const MENU_ITEMS = [
   },
   {
     key: '8',
+    label: 'home.menu.memoryManage',
+    icon: 'menuModal',
+    selectedIcon: 'menuModalSelected',
+    path: '/home/memoryManage',
+  },
+  {
+    key: '9',
     label: 'home.menu.setting',
     icon: 'menuSetting',
     selectedIcon: 'menuSettingSelected',

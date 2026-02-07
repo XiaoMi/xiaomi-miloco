@@ -289,6 +289,14 @@ class MiotProxy:
             logger.error("Failed to send app notify: %s", e)
             return False
 
+    async def send_app_notify_content(self, content: str) -> bool:
+        """直接发送通知内容（一次性通知，无需预先创建ID）"""
+        try:
+            return await self._miot_client.send_app_notify_once_async(content)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Failed to send app notify content: %s", e)
+            return False
+
     async def check_token_valid(self) -> bool:
         try:
             return await self._miot_client.check_token_async()

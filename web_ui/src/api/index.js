@@ -53,6 +53,13 @@ export const getHAAuth = () => getApi('/api/ha/get_config');
 export const getHaList = () => getApi('/api/ha/automations');
 export const getHaAutomationActions = () => getApi('/api/ha/automation_actions');
 export const refreshHaAutomation = () => getApi('/api/ha/refresh_ha_automations');
+// Home Assistant WebSocket API
+export const getHAWsStatus = () => getApi('/api/ha/ws_status');
+export const getHADevices = () => getApi('/api/ha/devices');
+export const getHAAreas = () => getApi('/api/ha/areas');
+export const getHADeviceEntities = (deviceId) => getApi(`/api/ha/device/${deviceId}/entities`);
+export const getHAStates = () => getApi('/api/ha/states');
+export const getHAEntityRegistry = () => getApi('/api/ha/entity_registry');
 
 // mcp
 export const getMCPService = () => getApi('/api/mcp');
@@ -66,3 +73,41 @@ export const reconnectMCPService = (id) => postApi(`/api/mcp/reconnect/${id}`);
 export const getHistoryList = () => getApi('/api/chat/historys');
 export const getHistoryDetail = (id) => getApi(`/api/chat/history/${id}`);
 export const deleteChatHistory = (id) => deleteApi(`/api/chat/history/${id}`);
+
+// RTSP摄像头 API
+export const getRtspCameraList = (enabledOnly = false) => getApi(`/api/rtsp_camera?enabled_only=${enabledOnly}`);
+export const createRtspCamera = (data) => postApi('/api/rtsp_camera', data);
+export const getRtspCamera = (cameraId) => getApi(`/api/rtsp_camera/${cameraId}`);
+export const updateRtspCamera = (cameraId, data) => putApi(`/api/rtsp_camera/${cameraId}`, data);
+export const deleteRtspCamera = (cameraId) => deleteApi(`/api/rtsp_camera/${cameraId}`);
+export const checkRtspCameraStatus = (cameraId) => getApi(`/api/rtsp_camera/${cameraId}/status`);
+export const refreshRtspCameraStatus = () => postApi('/api/rtsp_camera/refresh_status');
+
+// Memory API 记忆管理
+export const getMemoryList = (params = {}) => {
+  const { userId = 'default', includeInactive = false, page = 1, pageSize = 20 } = params;
+  return getApi(`/api/memory/list?user_id=${userId}&include_inactive=${includeInactive}&page=${page}&page_size=${pageSize}`);
+};
+export const addMemory = (data, userId = 'default') => postApi(`/api/memory/add?user_id=${userId}`, data);
+export const updateMemory = (memoryId, data) => putApi(`/api/memory/${memoryId}`, data);
+export const deleteMemory = (memoryId, softDelete = true) => deleteApi(`/api/memory/${memoryId}?soft_delete=${softDelete}`);
+export const searchMemory = (data, userId = 'default') => postApi(`/api/memory/search?user_id=${userId}`, data);
+export const handleMemoryCommand = (data, userId = 'default') => postApi(`/api/memory/command?user_id=${userId}`, data);
+export const getMemoryStats = (userId = 'default') => getApi(`/api/memory/stats?user_id=${userId}`);
+export const getMemoryContext = (query, userId = 'default', limit = 5) => getApi(`/api/memory/context?query=${encodeURIComponent(query)}&user_id=${userId}&limit=${limit}`);
+export const getMemoryTypes = () => getApi('/api/memory/types');
+
+// XiaoAI Speaker API 小爱音箱
+export const getXiaoAIStatus = () => getApi('/api/xiaoai/status');
+export const getXiaoAIConfig = () => getApi('/api/xiaoai/config');
+export const updateXiaoAIConfig = (data) => putApi('/api/xiaoai/config', data);
+export const startXiaoAIService = () => postApi('/api/xiaoai/start');
+export const stopXiaoAIService = () => postApi('/api/xiaoai/stop');
+export const restartXiaoAIService = () => postApi('/api/xiaoai/restart');
+export const getXiaoAISpeakers = () => getApi('/api/xiaoai/speakers');
+export const speakToXiaoAI = (data) => postApi('/api/xiaoai/speak', data);
+export const broadcastXiaoAI = (data) => postApi('/api/xiaoai/broadcast', data);
+export const askXiaoAI = (data) => postApi('/api/xiaoai/ask', data);
+export const getXiaoAISessions = () => getApi('/api/xiaoai/sessions');
+export const clearXiaoAISession = (speakerId) => postApi(`/api/xiaoai/session/${speakerId}/clear`);
+export const saveXiaoAISession = (speakerId) => postApi(`/api/xiaoai/session/${speakerId}/save`);

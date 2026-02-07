@@ -952,3 +952,253 @@ class HomeAssistantAutomationMcp(_BaseMcp[HomeAssistantAutomationMcpInterface]):
                 )
             ))
         return await self._interface.trigger_automation_async(automation_id)
+
+
+# ========== Home Assistant Device Control MCP ==========
+
+class McpHADevice(BaseModel):
+    """Home Assistant device info for MCP."""
+    device_id: str = Field(description="Device ID")
+    name: str = Field(description="Device name")
+    manufacturer: Optional[str] = Field(default=None, description="Device manufacturer")
+    model: Optional[str] = Field(default=None, description="Device model")
+    area_name: Optional[str] = Field(default=None, description="Device area/room name")
+
+
+class McpHAArea(BaseModel):
+    """Home Assistant area info for MCP."""
+    area_id: str = Field(description="Area ID")
+    name: str = Field(description="Area name")
+
+
+class McpHAEntity(BaseModel):
+    """Home Assistant entity info for MCP."""
+    entity_id: str = Field(description="Entity ID (e.g., light.living_room)")
+    state: str = Field(description="Current state")
+    friendly_name: Optional[str] = Field(default=None, description="Friendly name")
+    attributes: Optional[Dict[str, Any]] = Field(default=None, description="Entity attributes")
+
+
+class HomeAssistantDeviceMcpInterface(_BaseMcpInterface):
+    """Home Assistant device control interface."""
+    
+    get_devices_async: Callable[[], Coroutine[Any, Any, List[Dict[str, Any]]]]
+    """获取设备列表"""
+    
+    get_areas_async: Callable[[], Coroutine[Any, Any, List[Dict[str, Any]]]]
+    """获取区域列表"""
+    
+    get_device_entities_async: Callable[[str], Coroutine[Any, Any, Dict[str, Any]]]
+    """获取设备的实体列表"""
+    
+    get_states_async: Callable[[], Coroutine[Any, Any, List[Dict[str, Any]]]]
+    """获取所有实体状态"""
+    
+    call_service_async: Callable[[str, str, Optional[Dict], Optional[Dict]], Coroutine[Any, Any, Any]]
+    """调用服务"""
+
+
+class HomeAssistantDeviceMcp(_BaseMcp[HomeAssistantDeviceMcpInterface]):
+    """Home Assistant Device Control MCP server."""
+    _MCP_PATH: str = "/mcp"
+    _MCP_TAG: str = "ha_devices"
+    _TOOL_NAME_GET_AREAS: str = "get_ha_areas"
+    _TOOL_NAME_GET_DEVICES: str = "get_ha_devices"
+    _TOOL_NAME_GET_DEVICE_ENTITIES: str = "get_ha_device_entities"
+    _TOOL_NAME_GET_ENTITY_STATE: str = "get_ha_entity_state"
+    _TOOL_NAME_CALL_SERVICE: str = "call_ha_service"
+    _mcp: FastMCP
+
+    # 缓存
+    _devices: Dict[str, Dict[str, Any]]
+    _areas: Dict[str, Dict[str, Any]]
+    _states: Dict[str, Dict[str, Any]]
+
+    def __init__(
+        self, interface: HomeAssistantDeviceMcpInterface
+    ) -> None:
+        super().__init__(
+            interface=interface,
+            name="Home Assistant Device Control MCP Server",
+            instructions="Support querying Home Assistant devices, entities and calling services to control devices."
+        )
+        self._devices = {}
+        self._areas = {}
+        self._states = {}
+
+    async def init_async(self) -> None:
+        """Init."""
+        await super().init_async()
+        
+        # 获取区域列表
+        self.add_tool(
+            fn=self.get_ha_areas_async,
+            name=self._TOOL_NAME_GET_AREAS,
+            description_default="Get Home Assistant area(room) list."
+        )
+        
+        # 获取设备列表
+        self.add_tool(
+            fn=self.get_ha_devices_async,
+            name=self._TOOL_NAME_GET_DEVICES,
+            description_default="Get Home Assistant device list. You can filter by area_id."
+        )
+        
+        # 获取设备实体
+        self.add_tool(
+            fn=self.get_ha_device_entities_async,
+            name=self._TOOL_NAME_GET_DEVICE_ENTITIES,
+            description_default="Get all entities of a specific Home Assistant device."
+        )
+        
+        # 获取实体状态
+        self.add_tool(
+            fn=self.get_ha_entity_state_async,
+            name=self._TOOL_NAME_GET_ENTITY_STATE,
+            description_default="Get the current state of a specific Home Assistant entity."
+        )
+        
+        # 调用服务
+        self.add_tool(
+            fn=self.call_ha_service_async,
+            name=self._TOOL_NAME_CALL_SERVICE,
+            description_default=(
+                "Call a Home Assistant service to control devices. "
+                "Common services: light.turn_on, light.turn_off, switch.turn_on, switch.turn_off, "
+                "climate.set_temperature, cover.open_cover, cover.close_cover, media_player.play_media, etc."
+            )
+        )
+
+    async def get_ha_areas_async(self) -> List[McpHAArea]:
+        """Get Home Assistant area list."""
+        try:
+            areas = await self._interface.get_areas_async()
+            self._areas = {area.get("area_id", ""): area for area in areas}
+            return [
+                McpHAArea(
+                    area_id=area.get("area_id", ""),
+                    name=area.get("name", "Unknown")
+                ) for area in areas
+            ]
+        except Exception as e:
+            _LOGGER.error("Failed to get HA areas: %s", e)
+            raise ToolError(f"Failed to get Home Assistant areas: {str(e)}")
+
+    async def get_ha_devices_async(
+        self,
+        area_id: Annotated[Optional[str], Field(description="Filter devices by area ID, optional")] = None
+    ) -> List[McpHADevice]:
+        """Get Home Assistant device list."""
+        try:
+            devices = await self._interface.get_devices_async()
+            
+            # 获取区域信息用于显示区域名称
+            if not self._areas:
+                areas = await self._interface.get_areas_async()
+                self._areas = {area.get("area_id", ""): area for area in areas}
+            
+            result = []
+            for device in devices:
+                device_area_id = device.get("area_id")
+                if area_id and device_area_id != area_id:
+                    continue
+                
+                area_name = None
+                if device_area_id and device_area_id in self._areas:
+                    area_name = self._areas[device_area_id].get("name")
+                
+                self._devices[device.get("id", "")] = device
+                result.append(McpHADevice(
+                    device_id=device.get("id", ""),
+                    name=device.get("name_by_user") or device.get("name") or "Unknown",
+                    manufacturer=device.get("manufacturer"),
+                    model=device.get("model"),
+                    area_name=area_name
+                ))
+            
+            return result
+        except Exception as e:
+            _LOGGER.error("Failed to get HA devices: %s", e)
+            raise ToolError(f"Failed to get Home Assistant devices: {str(e)}")
+
+    async def get_ha_device_entities_async(
+        self,
+        device_id: Annotated[str, "Device ID to get entities for"]
+    ) -> List[McpHAEntity]:
+        """Get all entities of a specific device."""
+        try:
+            # 获取设备关联的实体
+            related = await self._interface.get_device_entities_async(device_id)
+            entity_ids = related.get("entity", [])
+            
+            if not entity_ids:
+                return []
+            
+            # 获取实体状态
+            states = await self._interface.get_states_async()
+            self._states = {s.get("entity_id", ""): s for s in states}
+            
+            result = []
+            for entity_id in entity_ids:
+                state_info = self._states.get(entity_id, {})
+                result.append(McpHAEntity(
+                    entity_id=entity_id,
+                    state=state_info.get("state", "unknown"),
+                    friendly_name=state_info.get("attributes", {}).get("friendly_name"),
+                    attributes=state_info.get("attributes")
+                ))
+            
+            return result
+        except Exception as e:
+            _LOGGER.error("Failed to get device entities: %s", e)
+            raise ToolError(f"Failed to get device entities: {str(e)}")
+
+    async def get_ha_entity_state_async(
+        self,
+        entity_id: Annotated[str, "Entity ID (e.g., light.living_room, switch.bedroom)"]
+    ) -> McpHAEntity:
+        """Get the current state of an entity."""
+        try:
+            states = await self._interface.get_states_async()
+            self._states = {s.get("entity_id", ""): s for s in states}
+            
+            if entity_id not in self._states:
+                raise ToolError(f"Entity '{entity_id}' not found. Please use get_ha_devices and get_ha_device_entities to find valid entity IDs.")
+            
+            state_info = self._states[entity_id]
+            return McpHAEntity(
+                entity_id=entity_id,
+                state=state_info.get("state", "unknown"),
+                friendly_name=state_info.get("attributes", {}).get("friendly_name"),
+                attributes=state_info.get("attributes")
+            )
+        except ToolError:
+            raise
+        except Exception as e:
+            _LOGGER.error("Failed to get entity state: %s", e)
+            raise ToolError(f"Failed to get entity state: {str(e)}")
+
+    async def call_ha_service_async(
+        self,
+        domain: Annotated[str, "Service domain (e.g., light, switch, climate, cover, media_player)"],
+        service: Annotated[str, "Service name (e.g., turn_on, turn_off, set_temperature)"],
+        entity_id: Annotated[str, "Target entity ID (e.g., light.living_room)"],
+        service_data: Annotated[Optional[Dict[str, Any]], Field(
+            description="Optional service data (e.g., {\"brightness\": 255, \"color_temp\": 400} for lights)"
+        )] = None
+    ) -> Dict[str, Any]:
+        """Call a Home Assistant service."""
+        try:
+            target = {"entity_id": entity_id}
+            result = await self._interface.call_service_async(domain, service, service_data, target)
+            
+            return {
+                "success": True,
+                "domain": domain,
+                "service": service,
+                "entity_id": entity_id,
+                "result": result
+            }
+        except Exception as e:
+            _LOGGER.error("Failed to call HA service: %s", e)
+            raise ToolError(f"Failed to call Home Assistant service {domain}.{service}: {str(e)}")

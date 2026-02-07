@@ -153,3 +153,40 @@
     width: auto;
   }
 }
+
+.notificationOptions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  background: var(--bg-color-f5);
+  border-radius: 4px;
+  
+  .templateLabel {
+    font-size: 13px;
+    color: var(--text-color-85);
+  }
+}
+
+.templateHint {
+  font-size: 12px;
+  color: var(--text-color-6);
+  margin-bottom: 8px;
+  padding: 8px;
+  background: var(--bg-color-f5);
+  border-radius: 4px;
+  
+  .templateVariables {
+    color: var(--text-color-85);
+    font-weight: 500;
+  }
+  
+  code {
+    background: var(--bg-color-e8);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--primary-color);
+  }
+}

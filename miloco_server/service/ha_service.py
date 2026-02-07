@@ -6,7 +6,7 @@ Home Assistant service module
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from miloco_server.mcp.mcp_client_manager import MCPClientManager
 from miloco_server.middleware.exceptions import (
@@ -117,3 +117,130 @@ class HaService:
         except Exception as e:
             logger.error("Failed to get Home Assistant automation action list: %s", e)
             raise HaServiceException(f"Failed to get Home Assistant automation action list: {str(e)}") from e
+
+    # --- WebSocket API 方法 ---
+
+    async def start_ws_client(self):
+        """启动 WebSocket 客户端"""
+        await self._ha_proxy.start_ws_client()
+
+    async def stop_ws_client(self):
+        """停止 WebSocket 客户端"""
+        await self._ha_proxy.stop_ws_client()
+
+    def get_ws_status(self) -> dict:
+        """
+        获取 WebSocket 连接状态
+        
+        Returns:
+            dict: 包含 configured, connected, ws_url 的状态字典
+        """
+        return self._ha_proxy.get_ws_status()
+
+    async def get_ha_devices(self) -> list:
+        """
+        获取 HA 设备列表
+        
+        Returns:
+            list: 设备列表
+            
+        Raises:
+            HaServiceException: 获取设备列表失败时
+        """
+        try:
+            devices = await self._ha_proxy.get_ha_devices()
+            logger.info("成功获取 HA 设备列表，数量: %d", len(devices))
+            return devices
+        except ConnectionError as e:
+            logger.error("获取 HA 设备列表失败（未连接）: %s", e)
+            raise HaServiceException("HA WebSocket 未连接，请先配置并等待连接") from e
+        except Exception as e:
+            logger.error("获取 HA 设备列表失败: %s", e)
+            raise HaServiceException(f"获取 HA 设备列表失败: {str(e)}") from e
+
+    async def get_ha_areas(self) -> list:
+        """
+        获取 HA 区域列表
+        
+        Returns:
+            list: 区域列表
+            
+        Raises:
+            HaServiceException: 获取区域列表失败时
+        """
+        try:
+            areas = await self._ha_proxy.get_ha_areas()
+            logger.info("成功获取 HA 区域列表，数量: %d", len(areas))
+            return areas
+        except ConnectionError as e:
+            logger.error("获取 HA 区域列表失败（未连接）: %s", e)
+            raise HaServiceException("HA WebSocket 未连接，请先配置并等待连接") from e
+        except Exception as e:
+            logger.error("获取 HA 区域列表失败: %s", e)
+            raise HaServiceException(f"获取 HA 区域列表失败: {str(e)}") from e
+
+    async def get_ha_device_entities(self, device_id: str) -> dict:
+        """
+        获取指定设备的实体列表
+        
+        Args:
+            device_id: 设备ID
+            
+        Returns:
+            dict: 设备实体信息
+            
+        Raises:
+            HaServiceException: 获取设备实体失败时
+        """
+        try:
+            entities = await self._ha_proxy.get_ha_device_entities(device_id)
+            logger.info("成功获取设备实体，device_id: %s", device_id)
+            return entities
+        except ConnectionError as e:
+            logger.error("获取设备实体失败（未连接）: %s", e)
+            raise HaServiceException("HA WebSocket 未连接，请先配置并等待连接") from e
+        except Exception as e:
+            logger.error("获取设备实体失败: %s", e)
+            raise HaServiceException(f"获取设备实体失败: {str(e)}") from e
+
+    async def get_ha_states(self) -> list:
+        """
+        获取所有实体状态
+        
+        Returns:
+            list: 实体状态列表
+            
+        Raises:
+            HaServiceException: 获取实体状态失败时
+        """
+        try:
+            states = await self._ha_proxy.get_ha_states()
+            logger.info("成功获取 HA 实体状态，数量: %d", len(states))
+            return states
+        except ConnectionError as e:
+            logger.error("获取 HA 实体状态失败（未连接）: %s", e)
+            raise HaServiceException("HA WebSocket 未连接，请先配置并等待连接") from e
+        except Exception as e:
+            logger.error("获取 HA 实体状态失败: %s", e)
+            raise HaServiceException(f"获取 HA 实体状态失败: {str(e)}") from e
+
+    async def get_ha_entity_registry(self) -> list:
+        """
+        获取实体注册表
+        
+        Returns:
+            list: 实体注册表列表
+            
+        Raises:
+            HaServiceException: 获取实体注册表失败时
+        """
+        try:
+            entities = await self._ha_proxy.get_ha_entity_registry()
+            logger.info("成功获取 HA 实体注册表，数量: %d", len(entities))
+            return entities
+        except ConnectionError as e:
+            logger.error("获取 HA 实体注册表失败（未连接）: %s", e)
+            raise HaServiceException("HA WebSocket 未连接，请先配置并等待连接") from e
+        except Exception as e:
+            logger.error("获取 HA 实体注册表失败: %s", e)
+            raise HaServiceException(f"获取 HA 实体注册表失败: {str(e)}") from e

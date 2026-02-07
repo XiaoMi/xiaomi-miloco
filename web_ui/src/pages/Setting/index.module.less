@@ -146,3 +146,43 @@
 .segmentedIcon {
   font-size: 14px;
 }
+
+.wsConnected {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background-color: rgba(82, 196, 26, 0.1);
+  color: #52c41a;
+  
+  &::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: #52c41a;
+    margin-right: 6px;
+  }
+}
+
+.wsDisconnected {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background-color: rgba(255, 77, 79, 0.1);
+  color: #ff4d4f;
+  
+  &::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: #ff4d4f;
+    margin-right: 6px;
+  }
+}

@@ -7,10 +7,11 @@ import React, { useState, useEffect } from 'react';
 import {Select, Switch, Button, Form, Input, Modal, message, Divider, Space, Typography, Segmented} from 'antd';
 import { useTranslation } from 'react-i18next';
 import { SettingOutlined, GlobalOutlined, BulbOutlined, KeyOutlined, ToolOutlined } from '@ant-design/icons';
-import { setHAAuth, getHAAuth, getLanguage, setLanguage } from '@/api';
+import { setHAAuth, getHAAuth, getLanguage, setLanguage, getHAWsStatus } from '@/api';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useSettingStore } from '@/stores/settingStore';
 import { Card, Header } from '@/components';
+import XiaoAISetting from './components/XiaoAISetting';
 import styles from './index.module.less';
 
 const { Title, Text } = Typography;
@@ -37,6 +38,7 @@ const Setting = () => {
     base_url: '',
     token: ''
   });
+  const [haWsStatus, setHaWsStatus] = useState({ configured: false, connected: false });
 
 
   // language options
@@ -80,7 +82,7 @@ const Setting = () => {
     }
   }, [storeLanguage, i18n]);
 
-  // get Home Assistant authorization information
+  // get Home Assistant authorization information and WebSocket status
   useEffect(() => {
     const fetchHAAuth = async () => {
       try {
@@ -92,7 +94,24 @@ const Setting = () => {
         console.error(t('setting.getHAAuthFailed'), error);
       }
     };
+    
+    const fetchHAWsStatus = async () => {
+      try {
+        const res = await getHAWsStatus();
+        if (res && res?.code === 0) {
+          setHaWsStatus(res?.data || { configured: false, connected: false });
+        }
+      } catch (error) {
+        console.error('Failed to get HA WebSocket status:', error);
+      }
+    };
+    
     fetchHAAuth();
+    fetchHAWsStatus();
+    
+    // 定期刷新 WebSocket 状态
+    const interval = setInterval(fetchHAWsStatus, 5000);
+    return () => clearInterval(interval);
   }, []);
 
 
@@ -218,10 +237,22 @@ const Setting = () => {
             <div className={styles.settingLabel}>
               <KeyOutlined /> {t('setting.homeAssistantAuthorization')}
             </div>
-              <Button onClick={handleHaAuthConfig}>{haFormValues?.base_url ? t('setting.configured') : t('setting.configure')}</Button>
+            <Space>
+              {haFormValues?.base_url && (
+                <span className={haWsStatus.connected ? styles.wsConnected : styles.wsDisconnected}>
+                  {haWsStatus.connected ? t('setting.wsConnected') : t('setting.wsDisconnected')}
+                </span>
+              )}
+              <Button onClick={handleHaAuthConfig}>
+                {haFormValues?.base_url ? t('setting.configured') : t('setting.configure')}
+              </Button>
+            </Space>
             </div>
           </div>
         </Card>
+
+        {/* XiaoAI Speaker Settings */}
+        <XiaoAISetting />
 
       </div>
 

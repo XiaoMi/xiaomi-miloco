@@ -135,6 +135,7 @@ const DeviceItem = ({ item, onPlay, playing }) => {
             cameraId={item.did}
             channel={channel}
             codec={'hev1.1.6.L93.B0'}
+            cameraType={item.camera_type || 'miot'}
             poster={item.cover}
             onCanvasRef={handleCanvasRef}
             // onReady={handleVideoReady}

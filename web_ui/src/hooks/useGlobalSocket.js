@@ -238,6 +238,28 @@ export const useGlobalSocket = () => {
             currentAnswer: null,
             answerMessages: []
           });
+
+          // 如果选择了音箱播报，提取AI回复文本并发送到音箱
+          if (currentState.selectedSpeakerId) {
+            try {
+              let fullText = '';
+              finalAnswerMessages.forEach(msg => {
+                try {
+                  const { type: mType, namespace: mNs, name: mName } = msg.header || {};
+                  if (getMessageIsToastStream(mType, mNs, mName)) {
+                    const msgPayload = JSON.parse(msg.payload);
+                    fullText += (msgPayload.stream || '');
+                  }
+                } catch (e) { /* ignore */ }
+              });
+              if (fullText.trim()) {
+                console.log('📢 发送AI回复到音箱:', currentState.selectedSpeakerId, fullText.substring(0, 50));
+                useChatStore.getState().speakToSelectedSpeaker(fullText.trim());
+              }
+            } catch (speakerError) {
+              console.error('音箱播报失败:', speakerError);
+            }
+          }
         }
 
         setIsAnswering(false);
