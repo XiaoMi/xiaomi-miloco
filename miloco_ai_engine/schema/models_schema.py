@@ -120,7 +120,7 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     seed: Optional[int] = None
-    priority: Optional[int] = Field(default=0, ge=0, le=10, description="Task priority (0-10)")
+    priority: Optional[int] = Field(default=0, ge=0, le=10, description="Task priority (0-10), 0 is highest priority, 10 is lowest priority")
 
 class ModelInfo(BaseModel):
     """Model information model"""

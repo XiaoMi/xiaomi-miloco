@@ -119,6 +119,9 @@ class OpenAIProxy(LLMProxy):
                 "Async calling model: %s, stream: False, messages: %s, tools: %s, priority: %s",
                 self.model_name, messages, tools, priority
             )
+            # priority must be None or 0-10
+            if priority is not None and not (0 <= priority <= 10):
+                raise ValueError("Priority must be None or 0-10")
             extra_body = {"priority": priority}
             completion = await self.async_client.chat.completions.create(
                 model=self.model_name,
@@ -150,8 +153,8 @@ class OpenAIProxy(LLMProxy):
 
         Args:
             messages: Message list
-            tools: Tool list
-            priority: Task priority (0-100), passed to AI engine for scheduling
+            tools: Tool lis
+            priority: Task priority (0-10), passed to AI engine for scheduling
 
         Returns:
             Async streaming iterator for model response
@@ -161,6 +164,8 @@ class OpenAIProxy(LLMProxy):
                 "Async calling model: %s, stream: True, messages: %s, tools: %s, priority: %s",
                 self.model_name, messages, tools, priority
             )
+            if priority is not None and not (0 <= priority <= 10):
+                raise ValueError("Priority must be None or 0-10")
             extra_body = {"priority": priority}
             completion: AsyncStream = await self.async_client.chat.completions.create(
                 model=self.model_name,
