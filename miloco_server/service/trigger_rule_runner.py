@@ -6,7 +6,6 @@ Trigger business logic service
 Handles trigger-related business logic and data validation
 """
 
-import json
 import time
 from typing import Callable, List, Dict, Optional
 import asyncio
@@ -33,7 +32,6 @@ from miloco_server.schema.trigger_schema import (
 )
 from miloco_server.utils.check_img_motion import check_camera_motion
 from miloco_server.utils.local_models import ModelPurpose
-from miloco_server.utils.normal_util import extract_json_from_content
 from miloco_server.utils.prompt_helper import TriggerRuleConditionPromptBuilder
 from miloco_server.utils.trigger_filter import trigger_filter
 from miloco_server.service import trigger_rule_dynamic_executor_cache
@@ -64,6 +62,8 @@ class TriggerRuleRunner:
         self._is_running: bool = False
         self._interval_seconds = TRIGGER_RULE_RUNNER_CONFIG["interval_seconds"]
         self._vision_use_img_count = TRIGGER_RULE_RUNNER_CONFIG["vision_use_img_count"]
+        # Per-camera last happened cache: key=(rule_id, camera_did, channel), value=CameraImgSeq
+        self._last_happened_cache: Dict[tuple, CameraImgSeq] = {}
         logger.info(
             "TriggerRuleRunner init success, trigger_rules: %s", self.trigger_rules
         )
@@ -80,6 +80,10 @@ class TriggerRuleRunner:
         """Remove trigger rule"""
         if rule_id in self.trigger_rules:
             del self.trigger_rules[rule_id]
+        # Clean up cache entries for this rule
+        keys_to_remove = [k for k in self._last_happened_cache if k[0] == rule_id]
+        for key in keys_to_remove:
+            del self._last_happened_cache[key]
 
     async def _periodic_task(self):
         """Scheduled task execution method, runs at configured interval"""
@@ -187,6 +191,9 @@ class TriggerRuleRunner:
                 for condition_result in condition_result_list
             ])
 
+            if execable:
+                logger.info("Rule %s is execable: %s", rule_id, execable)
+
             is_dynamic_action_running = self._check_dynamic_action_is_running(rule_id)
             logger.info(
                 "Rule %s is execable: %s, dynamic action is running: %s",
@@ -287,6 +294,29 @@ class TriggerRuleRunner:
 
         return await llm_proxy.async_call_llm(messages)
 
+    def _load_last_happened_img_seq(
+        self, rule: TriggerRule, camera_id: str, channel: int
+    ) -> Optional[CameraImgSeq]:
+        """Get last happened image sequence from in-memory cache.
+        Returns None if no previous event."""
+        return self._last_happened_cache.get((rule.id, camera_id, channel))
+
+    @staticmethod
+    def _parse_llm_output(content) -> Optional[tuple[bool, bool]]:
+        """Parse LLM numeric output (0/1/2) into (is_happened, is_same_action).
+        Returns None if output is invalid."""
+        try:
+            stripped = str(content).strip()
+        except Exception:  # pylint: disable=broad-except
+            return None
+        if stripped == "0":
+            return (False, False)
+        if stripped == "1":
+            return (True, False)
+        if stripped == "2":
+            return (True, True)
+        return None
+
     async def _check_trigger_condition(
         self, rule: TriggerRule, llm_proxy: LLMProxy,
         camera_motion_dict: dict[str, dict[int,
@@ -316,8 +346,12 @@ class TriggerRuleRunner:
         # Concurrently execute LLM calls for all cameras
         tasks = []
         for (camera_id, channel), camera_img_seq in cameras_video.items():
+            # Load last happened frames for this camera/channel
+            last_happened_img_seq = self._load_last_happened_img_seq(
+                rule, camera_id, channel)
             messages = TriggerRuleConditionPromptBuilder.build_trigger_rule_prompt(
-                camera_img_seq, rule.condition, self._get_language())
+                camera_img_seq, rule.condition, self._get_language(),
+                last_happened_img_seq=last_happened_img_seq)
             task = self._call_vision_understaning(llm_proxy, messages.get_messages())
             tasks.append(task)
 
@@ -343,6 +377,7 @@ class TriggerRuleRunner:
                 continue
 
             content = response["content"]
+            logger.info("LLM Response: %s", content)
             logger.info(
                 "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, content: %s",
                 rule.name, rule.condition, camera_id, channel, content
@@ -351,26 +386,47 @@ class TriggerRuleRunner:
             if not content:
                 continue
 
-            try:
-                # Use optimized helper method to extract JSON content
-                json_content = extract_json_from_content(content)
-                content_dict = json.loads(json_content)
-            except json.JSONDecodeError as e:
+            parsed = self._parse_llm_output(content)
+            if parsed is None:
                 logger.error(
-                    "Failed to parse JSON content. Original: %s, Extracted: %s, Error: %s",
-                    content, json_content if "json_content" in locals() else "N/A", e)
-                continue
-            except Exception as e:  # pylint: disable=broad-except
-                logger.error(
-                    "Unexpected error while processing content: %s, Error: %s", content, e)
+                    "Invalid LLM output for rule %s camera %s channel %s: "
+                    "expected 0/1/2, got: %s",
+                    rule.name, camera_id, channel, content)
                 continue
 
-            condition_result: TriggerConditionResult = TriggerConditionResult(
-                camera_info=camera_info_dict[camera_id],
-                channel=channel,
-                result=content_dict["result"] == "yes")
+            is_happened, is_same_action = parsed
 
-            condition_result_list.append(condition_result)
+            # Output 0: no action detected
+            if not is_happened:
+                logger.info(
+                    "Rule %s camera %s channel %s: no action detected (output 0)",
+                    rule.name, camera_id, channel)
+                continue
+
+            # Output 1: new action — update cache, result=True (execution needed)
+            if is_happened and not is_same_action:
+                logger.info(
+                    "Rule %s camera %s channel %s: new action detected (output 1), updating cache and returning True",
+                    rule.name, camera_id, channel)
+                self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
+                condition_result_list.append(TriggerConditionResult(
+                    camera_info=camera_info_dict[camera_id],
+                    channel=channel,
+                    result=True))
+                continue
+
+            # Output 2 : new action — update cache, result=True (No execution needed)
+            if is_happened:
+                logger.info(
+                    "Rule %s camera %s channel %s: new action (output 2)",
+                    rule.name, camera_id, channel)
+                self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
+                condition_result_list.append(TriggerConditionResult(
+                    camera_info=camera_info_dict[camera_id],
+                    channel=channel,
+                    result=False))
+                continue
+
         return condition_result_list
 
     def _check_camera_motion(self, camera_img_seq: CameraImgSeq) -> bool:

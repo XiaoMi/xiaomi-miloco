@@ -6,19 +6,29 @@ Prompt helper utilities for building chat messages and prompts.
 Provides builders for trigger rule conditions and vision understanding prompts.
 """
 
+from datetime import datetime
+from typing import Optional
+import logging
 from miloco_server.config.prompt_config import PromptConfig, PromptType, UserLanguage
 from miloco_server.schema.chat_history_schema import ChatHistoryMessages
 from miloco_server.schema.miot_schema import CameraImgSeq
 
+logger = logging.getLogger(name=__name__)
 
 class TriggerRuleConditionPromptBuilder:
     """Trigger rule prompt builder"""
 
     @staticmethod
+    def _s_to_time_str(timestamp: int) -> str:
+        """Convert millisecond timestamp to YYYY-MM-DD HH:MM:SS format"""
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
     def build_trigger_rule_prompt(
         img_seq: CameraImgSeq,
         condition: str,
-        language: UserLanguage = UserLanguage.CHINESE
+        language: UserLanguage = UserLanguage.CHINESE,
+        last_happened_img_seq: Optional[CameraImgSeq] = None,
     ) -> ChatHistoryMessages:
         chat_history_messages = ChatHistoryMessages()
 
@@ -33,11 +43,19 @@ class TriggerRuleConditionPromptBuilder:
 
         user_content = []
 
+        # current_time
+        current_time_str = TriggerRuleConditionPromptBuilder._s_to_time_str(
+            img_seq.img_list[0].timestamp)
         user_content.append({
             "type": "text",
-            "text": prefixes["image_sequence_prefix"]
+            "text": prefixes["current_time_prefix"].format(time=current_time_str)
         })
 
+        # current_frames
+        user_content.append({
+            "type": "text",
+            "text": prefixes["current_frames_prefix"]
+        })
         for image_data in img_seq_base64.img_list:
             user_content.append({
                 "type": "image_url",
@@ -45,6 +63,34 @@ class TriggerRuleConditionPromptBuilder:
                     "url": image_data.data
                 }
             })
+
+        # last_happened_frames and last_happened_time
+        if last_happened_img_seq is not None and last_happened_img_seq.img_list:
+            logger.info("Last Image Detected")
+            last_happened_base64 = last_happened_img_seq.to_base64()
+            last_time_str = TriggerRuleConditionPromptBuilder._s_to_time_str(
+                last_happened_img_seq.img_list[0].timestamp)
+            user_content.append({
+                "type": "text",
+                "text": prefixes["last_happened_time_prefix"].format(time=last_time_str)
+            })
+            user_content.append({
+                "type": "text",
+                "text": prefixes["last_happened_frames_prefix"]
+            })
+            for image_data in last_happened_base64.img_list:
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_data.data
+                    }
+                })
+            
+            logger.info("Current Time: %s", current_time_str)
+            logger.info("Last Trigger Time: %s", last_time_str)
+
+
+        # user_rule_content
         user_content.append({
             "type": "text",
             "text": prefixes["condition_question_template"].format(condition=condition)
