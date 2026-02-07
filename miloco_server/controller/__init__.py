@@ -16,6 +16,7 @@ from miloco_server.controller.model_controller import router as model_router
 from miloco_server.controller.mcp_controller import router as mcp_router
 from miloco_server.controller.rtsp_camera_controller import router as rtsp_camera_router
 from miloco_server.controller.memory_controller import router as memory_router
+from miloco_server.controller.xiaoai_controller import router as xiaoai_router
 
 __all__ = [
     "web_router",
@@ -28,4 +29,5 @@ __all__ = [
     "mcp_router",
     "rtsp_camera_router",
     "memory_router",
+    "xiaoai_router",
 ]

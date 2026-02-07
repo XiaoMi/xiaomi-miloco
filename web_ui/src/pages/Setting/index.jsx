@@ -11,6 +11,7 @@ import { setHAAuth, getHAAuth, getLanguage, setLanguage, getHAWsStatus } from '@
 import { useTheme } from '@/contexts/ThemeContext';
 import { useSettingStore } from '@/stores/settingStore';
 import { Card, Header } from '@/components';
+import XiaoAISetting from './components/XiaoAISetting';
 import styles from './index.module.less';
 
 const { Title, Text } = Typography;
@@ -249,6 +250,9 @@ const Setting = () => {
             </div>
           </div>
         </Card>
+
+        {/* XiaoAI Speaker Settings */}
+        <XiaoAISetting />
 
       </div>
 

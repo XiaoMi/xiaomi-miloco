@@ -96,3 +96,18 @@ export const handleMemoryCommand = (data, userId = 'default') => postApi(`/api/m
 export const getMemoryStats = (userId = 'default') => getApi(`/api/memory/stats?user_id=${userId}`);
 export const getMemoryContext = (query, userId = 'default', limit = 5) => getApi(`/api/memory/context?query=${encodeURIComponent(query)}&user_id=${userId}&limit=${limit}`);
 export const getMemoryTypes = () => getApi('/api/memory/types');
+
+// XiaoAI Speaker API 小爱音箱
+export const getXiaoAIStatus = () => getApi('/api/xiaoai/status');
+export const getXiaoAIConfig = () => getApi('/api/xiaoai/config');
+export const updateXiaoAIConfig = (data) => putApi('/api/xiaoai/config', data);
+export const startXiaoAIService = () => postApi('/api/xiaoai/start');
+export const stopXiaoAIService = () => postApi('/api/xiaoai/stop');
+export const restartXiaoAIService = () => postApi('/api/xiaoai/restart');
+export const getXiaoAISpeakers = () => getApi('/api/xiaoai/speakers');
+export const speakToXiaoAI = (data) => postApi('/api/xiaoai/speak', data);
+export const broadcastXiaoAI = (data) => postApi('/api/xiaoai/broadcast', data);
+export const askXiaoAI = (data) => postApi('/api/xiaoai/ask', data);
+export const getXiaoAISessions = () => getApi('/api/xiaoai/sessions');
+export const clearXiaoAISession = (speakerId) => postApi(`/api/xiaoai/session/${speakerId}/clear`);
+export const saveXiaoAISession = (speakerId) => postApi(`/api/xiaoai/session/${speakerId}/save`);

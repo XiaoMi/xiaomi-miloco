@@ -28,6 +28,7 @@ from miloco_server.controller import (
     web_router,
     rtsp_camera_router,
     memory_router,
+    xiaoai_router,
 )
 from miloco_server.middleware.auth_middleware import AuthStaticFiles
 from miloco_server.middleware.exception_handler import handle_exception
@@ -65,6 +66,7 @@ app.include_router(model_router, prefix="/api")
 app.include_router(mcp_router, prefix="/api")
 app.include_router(rtsp_camera_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
+app.include_router(xiaoai_router, prefix="/api")
 
 
 @app.get("/{full_path:path}")
@@ -101,11 +103,35 @@ async def startup_event():
         logger.error("Manager initialization failed: %s", e)
         raise
 
+    # Start XiaoAI service if enabled in config (runs on port 4399 by default)
+    try:
+        from miloco_server.xiaoai import start_xiaoai_service_if_enabled
+        
+        xiaoai_service = await start_xiaoai_service_if_enabled()
+        if xiaoai_service:
+            logger.info("XiaoAI service started on %s:%d",
+                       xiaoai_service.config.host, xiaoai_service.config.port)
+        else:
+            logger.info("XiaoAI service disabled in configuration")
+    except Exception as e:
+        logger.warning("XiaoAI service startup failed (non-critical): %s", e)
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup operations when application shuts down"""
     logger.info("Application is shutting down...")
+    
+    # Stop XiaoAI service
+    try:
+        from miloco_server.xiaoai import get_xiaoai_service
+        xiaoai_service = get_xiaoai_service()
+        if xiaoai_service.is_running:
+            await xiaoai_service.stop()
+            logger.info("XiaoAI service stopped")
+    except Exception as e:
+        logger.warning("Error stopping XiaoAI service: %s", e)
+    
     logger.info("Application has been shut down")
 
 

@@ -5,7 +5,7 @@
 
 import { create } from 'zustand'
 import { persist, subscribeWithSelector } from 'zustand/middleware'
-import { getMCPStatus, getCameraList, refreshMiotCamera, getHistoryList, getHistoryDetail, reconnectMCPService, deleteChatHistory } from '@/api'
+import { getMCPStatus, getCameraList, refreshMiotCamera, getHistoryList, getHistoryDetail, reconnectMCPService, deleteChatHistory, getXiaoAISpeakers, speakToXiaoAI } from '@/api'
 import { message } from 'antd'
 import { processHistorySocketMessages } from '@/utils/instruction'
 
@@ -47,6 +47,11 @@ export const useChatStore = create(
         historyLoading: false,
         // refresh state
         isRefreshing: false,
+        // XiaoAI speaker state
+        speakerVisible: false,
+        speakerList: [],
+        speakerLoading: false,
+        selectedSpeakerId: null, // selected speaker ID for playback
 
         // === Socket related state ===
         socketStatus: 'DISCONNECTED',
@@ -172,6 +177,53 @@ export const useChatStore = create(
         // camera UI state management
         setCameraVisible: (visible) => set({ cameraVisible: visible }),
         toggleCameraVisible: () => set((state) => ({ cameraVisible: !state.cameraVisible })),
+
+        // XiaoAI speaker UI state management
+        setSpeakerVisible: (visible) => set({ speakerVisible: visible }),
+        toggleSpeakerVisible: () => set((state) => ({ speakerVisible: !state.speakerVisible })),
+        setSpeakerList: (list) => set({ speakerList: Array.isArray(list) ? list : [] }),
+        setSpeakerLoading: (loading) => set({ speakerLoading: loading }),
+        setSelectedSpeakerId: (speakerId) => set({ selectedSpeakerId: speakerId }),
+
+        // XiaoAI speaker fetch
+        fetchSpeakerList: async () => {
+          try {
+            set({ speakerLoading: true });
+            const response = await getXiaoAISpeakers();
+            if (response && response.code === 0) {
+              const speakers = response?.data || [];
+              set({ speakerList: Array.isArray(speakers) ? speakers : [] });
+            } else {
+              set({ speakerList: [] });
+            }
+          } catch (error) {
+            console.error('fetch speaker list failed:', error);
+            set({ speakerList: [] });
+          } finally {
+            set({ speakerLoading: false });
+          }
+        },
+
+        // speak text to selected speaker
+        // filter_for_tts: 根据音箱TTS配置过滤内容（思考过程、工具调用等）
+        speakToSelectedSpeaker: async (text, filterForTts = true) => {
+          const { selectedSpeakerId } = get();
+          if (!selectedSpeakerId || !text) {
+            return false;
+          }
+          try {
+            const response = await speakToXiaoAI({
+              speaker_id: selectedSpeakerId,
+              text: text,
+              blocking: false,
+              filter_for_tts: filterForTts,
+            });
+            return response?.code === 0;
+          } catch (error) {
+            console.error('speak to speaker failed:', error);
+            return false;
+          }
+        },
 
         // history related state management
         setHistoryList: (list) => set({ historyList: Array.isArray(list) ? list : [] }),

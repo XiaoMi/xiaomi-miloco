@@ -541,4 +541,137 @@ export default {
     typeCustom: 'Custom',
   },
 
+  xiaoai: {
+    title: 'XiaoAI Speaker',
+    description: 'Integrate Miloco AI capabilities with XiaoAI speakers',
+    
+    // Service status
+    serviceStatus: 'Service Status',
+    running: 'Running',
+    stopped: 'Stopped',
+    enabled: 'Enable Service',
+    enabledTip: 'Service will start automatically when enabled',
+    
+    // Service control
+    startService: 'Start Service',
+    stopService: 'Stop Service',
+    restartService: 'Restart Service',
+    startSuccess: 'Service started successfully',
+    stopSuccess: 'Service stopped',
+    restartSuccess: 'Service restarted successfully',
+    operationFailed: 'Operation failed',
+    
+    // Connected speakers
+    connectedSpeakers: 'Connected Speakers',
+    noSpeakers: 'No speakers connected',
+    speakerId: 'Device ID',
+    speakerModel: 'Model',
+    speakerStatus: 'Status',
+    playing: 'Playing',
+    paused: 'Paused',
+    idle: 'Idle',
+    
+    // Server config
+    serverConfig: 'Server Config',
+    host: 'Listen Address',
+    port: 'Listen Port',
+    portTip: 'Port for XiaoAI speaker client connection, default 4399',
+    
+    // AI config
+    aiConfig: 'AI Config',
+    mcpServices: 'MCP Services',
+    mcpServicesTip: 'Select available MCP services (device control, scenes, etc.)',
+    builtinMcp: 'Built-in Services',
+    customMcp: 'Custom Services',
+    builtin: 'Built-in',
+    miotManualScenes: 'Mijia Automation',
+    miotDevices: 'Mijia Device Control',
+    haAutomations: 'HA Automation',
+    haDevices: 'HA Device Control',
+    cameras: 'Cameras',
+    camerasTip: 'Select cameras accessible during conversation',
+    systemPrompt: 'System Prompt',
+    systemPromptPlaceholder: 'Custom system prompt (leave empty for default)',
+    historyLength: 'History Length',
+    historyLengthTip: 'Number of recent conversation rounds to keep',
+    
+    // Voice control
+    voiceConfig: 'Voice Control',
+    
+    // Takeover mode
+    takeoverEnabled: 'Enable Full Takeover Mode',
+    takeoverEnabledTip: 'When enabled, you can use voice commands to enter/exit takeover state. In takeover state, all responses are handled by AI',
+    takeoverEnterKeywords: 'Enter Takeover Keywords',
+    takeoverEnterKeywordsTip: 'Saying these words enters full takeover state, where AI handles all responses',
+    takeoverEnterKeywordsPlaceholder: 'One keyword per line, e.g., takeover, AI mode',
+    takeoverExitKeywords: 'Exit Takeover Keywords',
+    takeoverExitKeywordsTip: 'Saying these words exits takeover state, restoring normal XiaoAI responses',
+    takeoverExitKeywordsPlaceholder: 'One keyword per line, e.g., exit takeover, normal mode',
+    
+    // Keyword trigger mode
+    aiKeywords: 'AI Trigger Keywords',
+    aiKeywordsTip: 'Voice containing these keywords triggers AI for that turn (empty = no takeover, use with Full Takeover Mode)',
+    aiKeywordsPlaceholder: 'One keyword per line, e.g., please, help me',
+    
+    // TTS config
+    ttsConfig: 'TTS Config',
+    ttsMaxLength: 'Max TTS Length',
+    ttsMaxLengthTip: 'Long text will be split into segments',
+    playbackTimeout: 'Playback Timeout (sec)',
+    enableInterruption: 'Allow Interruption',
+    enableInterruptionTip: 'Pause playback when user speaks',
+    connectionAnnouncement: 'Connection Announcement',
+    connectionAnnouncementPlaceholder: 'Text spoken when speaker connects',
+    
+    // Session management
+    sessionConfig: 'Session Management',
+    clearCommands: 'Clear Session Commands',
+    clearCommandsTip: 'Saying these clears conversation history',
+    clearCommandsPlaceholder: 'One command per line, e.g., Clear chat, Start over',
+    saveAndNewCommands: 'Save & New Commands',
+    saveAndNewCommandsTip: 'Saying these saves current and starts new conversation',
+    saveAndNewCommandsPlaceholder: 'One command per line, e.g., New chat, Start new',
+    shareSessionWithWeb: 'Share Session with Web',
+    shareSessionWithWebTip: 'Speaker and web chat share conversation history',
+    
+    // Context compression
+    contextCompression: 'Context Compression',
+    compressionEnabled: 'Enable Compression',
+    compressionEnabledTip: 'Auto-compress history when conversation gets long',
+    maxMessages: 'Max Messages',
+    maxMessagesTip: 'Trigger compression when exceeded',
+    maxTokens: 'Max Tokens',
+    maxTokensTip: 'Trigger compression when exceeded (estimated)',
+    compressionStrategy: 'Compression Strategy',
+    strategyAuto: 'Auto Select',
+    strategySummary: 'AI Summary',
+    strategyTruncate: 'Truncate',
+    strategySliding: 'Sliding Window',
+    keepRecent: 'Keep Recent Rounds',
+    keepRecentTip: 'Recent conversation rounds to keep after compression',
+    
+    // TTS playback control
+    ttsPlaybackConfig: 'TTS Playback Control',
+    playThinking: 'Play Thinking Process',
+    playThinkingTip: 'Include AI reasoning process in voice playback',
+    playToolCalls: 'Play Tool Calls',
+    playToolCallsTip: 'Play brief descriptions of tool calls and results (e.g., "Querying device...")',
+    
+    // Auto save
+    autoSaveSession: 'Auto Save Session',
+    autoSaveSessionTip: 'Auto-save after each Q&A round. Disable to only save via voice command',
+    
+    // Config operations
+    saveConfig: 'Save Config',
+    saveSuccess: 'Configuration saved',
+    saveFailed: 'Failed to save',
+    needsRestart: 'Some settings require service restart',
+    loadConfigFailed: 'Failed to load configuration',
+    
+    // Chat page
+    speakerSession: 'Speaker Session',
+    selectSpeaker: 'Select speaker for voice reply',
+    speakerPlayback: 'Use Speaker Playback',
+  },
+
 };

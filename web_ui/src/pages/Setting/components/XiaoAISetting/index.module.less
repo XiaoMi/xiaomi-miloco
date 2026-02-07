@@ -1,0 +1,188 @@
+/**
+ * Copyright (C) 2025 willianfu
+ * XiaoAI Speaker Settings Styles
+ */
+
+.settingCard {
+  margin-bottom: 24px;
+  border-radius: 12px;
+  
+  .settingCardContent {
+    padding: 0;
+  }
+  
+  .settingCardTitle {
+    font-size: 16px;
+    font-weight: 500;
+    padding: 16px 22px;
+    color: var(--text-color-31);
+    border-bottom: 1px solid var(--border-color-240);
+    display: flex;
+    align-items: center;
+  }
+}
+
+.settingCardItemList {
+  padding: 0 24px;
+}
+
+.settingItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-color-240);
+  
+  &:last-child {
+    border-bottom: none;
+  }
+  
+  .settingLabel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text-color-149);
+    font-weight: 500;
+    
+    .anticon {
+      font-size: 16px;
+      color: var(--primary-color);
+    }
+  }
+}
+
+.settingItemVertical {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-color-240);
+  
+  .settingLabel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text-color-149);
+    font-weight: 500;
+    margin-bottom: 12px;
+  }
+}
+
+.speakerCount {
+  font-size: 12px;
+  color: var(--text-color-secondary);
+  margin-left: 4px;
+}
+
+.noSpeakers {
+  color: var(--text-color-secondary);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.speakerTable {
+  width: 100%;
+  
+  :global(.ant-table) {
+    background: transparent;
+  }
+  
+  :global(.ant-table-thead > tr > th) {
+    background: var(--bg-color-245);
+    font-size: 13px;
+  }
+  
+  :global(.ant-table-tbody > tr > td) {
+    font-size: 13px;
+  }
+}
+
+.wsConnected {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background-color: rgba(82, 196, 26, 0.1);
+  color: #52c41a;
+  
+  &::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: #52c41a;
+    margin-right: 6px;
+  }
+}
+
+.wsDisconnected {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background-color: rgba(255, 77, 79, 0.1);
+  color: #ff4d4f;
+  
+  &::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: #ff4d4f;
+    margin-right: 6px;
+  }
+}
+
+.configForm {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 8px;
+  
+  :global(.ant-collapse) {
+    background: transparent;
+  }
+  
+  :global(.ant-collapse-header) {
+    font-weight: 500;
+    padding: 12px 0 !important;
+  }
+  
+  :global(.ant-collapse-content-box) {
+    padding: 0 0 16px !important;
+  }
+  
+  :global(.ant-form-item) {
+    margin-bottom: 16px;
+  }
+  
+  :global(.ant-form-item-label > label) {
+    font-size: 13px;
+  }
+}
+
+.cameraSelectContainer {
+  display: flex;
+  flex-direction: column;
+  
+  :global(.ant-checkbox-wrapper) {
+    font-size: 13px;
+    color: var(--text-color-secondary);
+  }
+  
+  :global(.ant-select) {
+    width: 100%;
+  }
+}
+
+.takeoverSection {
+  padding: 12px;
+  margin-bottom: 16px;
+  background: rgba(22, 119, 255, 0.04);
+  border: 1px solid rgba(22, 119, 255, 0.15);
+  border-radius: 8px;
+}

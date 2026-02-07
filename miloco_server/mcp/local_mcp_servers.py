@@ -107,10 +107,10 @@ class LocalDefaultMcp(LocalMCPBase):
         """Create rule"""
         chat_data: ChatCachedData | None = self._manager.chat_companion.get_chat_data(request_id)
         if chat_data is None:
-            return "error: request_id not found"
+            return {"error": "request_id not found"}
 
         if chat_data.out_actor_address is None:
-            return "error: transver_actor_address not found"
+            return {"error": "out_actor_address not found, unable to create rule in this context"}
 
         rule_create_tool = actor_system.createActor(
             lambda: RuleCreateTool(
@@ -145,17 +145,14 @@ class LocalDefaultMcp(LocalMCPBase):
         """Understand image"""
         chat_data: ChatCachedData | None = self._manager.chat_companion.get_chat_data(request_id)
         if chat_data is None:
-            return "error: request_id not found"
+            return {"error": "request_id not found"}
 
-        if chat_data.out_actor_address is None:
-            return "error: transver_actor_address not found"
-
-        camera_ids = chat_data.camera_ids
+        camera_ids = chat_data.camera_ids or []
 
         vision_chat_tool = actor_system.createActor(lambda: VisionChatTool(
             request_id=request_id,
             query=query,
-            out_actor_address=chat_data.out_actor_address,
+            out_actor_address=chat_data.out_actor_address,  # 可以为 None，VisionChatTool 会处理
             location_info=location,
             user_choosed_camera_dids=camera_ids,
             camera_images=chat_data.camera_images,

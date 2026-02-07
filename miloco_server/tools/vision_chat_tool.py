@@ -144,6 +144,13 @@ class VisionChatTool(Actor):
 
 
     def _send_instruction(self, instruction_payload: InstructionPayload):
-        """Send instruction to transceiver actor"""
-        actor_system.tell(self._out_actor_address, instruction_payload)
+        """Send instruction to transceiver actor (如果有的话)
+        
+        当通过音箱调用时，out_actor_address 可能为 None，
+        此时跳过发送指令（因为没有前端界面需要接收）。
+        """
+        if self._out_actor_address is not None:
+            actor_system.tell(self._out_actor_address, instruction_payload)
+        else:
+            logger.debug("[%s] 跳过发送指令，out_actor_address 为 None", self._request_id)
 

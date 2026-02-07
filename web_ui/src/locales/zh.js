@@ -545,4 +545,137 @@ export default {
     typeCustom: '自定义',
   },
 
+  xiaoai: {
+    title: '小爱音箱',
+    description: '通过开放小爱音箱接入Miloco AI对话能力',
+    
+    // 服务状态
+    serviceStatus: '服务状态',
+    running: '运行中',
+    stopped: '已停止',
+    enabled: '启用服务',
+    enabledTip: '启用后服务将在启动时自动运行',
+    
+    // 服务控制
+    startService: '启动服务',
+    stopService: '停止服务',
+    restartService: '重启服务',
+    startSuccess: '服务启动成功',
+    stopSuccess: '服务已停止',
+    restartSuccess: '服务重启成功',
+    operationFailed: '操作失败',
+    
+    // 已连接音箱
+    connectedSpeakers: '已连接音箱',
+    noSpeakers: '暂无音箱连接',
+    speakerId: '设备ID',
+    speakerModel: '型号',
+    speakerStatus: '状态',
+    playing: '播放中',
+    paused: '已暂停',
+    idle: '空闲',
+    
+    // 服务配置
+    serverConfig: '服务配置',
+    host: '监听地址',
+    port: '监听端口',
+    portTip: '小爱音箱客户端连接的端口，默认4399',
+    
+    // AI配置
+    aiConfig: 'AI 配置',
+    mcpServices: 'MCP 服务',
+    mcpServicesTip: '选择可用的MCP服务（如设备控制、场景等）',
+    builtinMcp: '内置服务',
+    customMcp: '自定义服务',
+    builtin: '内置',
+    miotManualScenes: '米家自动化',
+    miotDevices: '米家设备控制',
+    haAutomations: 'HA自动化',
+    haDevices: 'HA设备控制',
+    cameras: '摄像头',
+    camerasTip: '选择对话时可访问的摄像头',
+    systemPrompt: '系统提示词',
+    systemPromptPlaceholder: '自定义系统提示词（留空使用默认）',
+    historyLength: '历史记录长度',
+    historyLengthTip: '保留最近的对话轮数',
+    
+    // 语音控制
+    voiceConfig: '语音控制',
+    
+    // 全部接管模式
+    takeoverEnabled: '启用全部接管模式',
+    takeoverEnabledTip: '开启后可通过语音指令进入/退出接管状态，接管状态下所有对话都由AI回复',
+    takeoverEnterKeywords: '进入接管触发词',
+    takeoverEnterKeywordsTip: '说这些词会进入全部接管状态，之后所有对话都由AI回复',
+    takeoverEnterKeywordsPlaceholder: '每行一个触发词，如：接管小爱、AI接管',
+    takeoverExitKeywords: '退出接管触发词',
+    takeoverExitKeywordsTip: '说这些词会退出接管状态，恢复小爱自身回复',
+    takeoverExitKeywordsPlaceholder: '每行一个触发词，如：退出接管、恢复小爱',
+    
+    // 关键词触发模式
+    aiKeywords: 'AI 触发关键词',
+    aiKeywordsTip: '包含这些关键词的语音会触发AI接管该轮对话（留空表示完全不接管，需配合全部接管模式使用）',
+    aiKeywordsPlaceholder: '每行一个关键词，如：请问、帮我',
+    
+    // TTS配置
+    ttsConfig: 'TTS 配置',
+    ttsMaxLength: '单次播报最大长度',
+    ttsMaxLengthTip: '超过长度会自动分段播报',
+    playbackTimeout: '播放超时 (秒)',
+    enableInterruption: '允许打断播放',
+    enableInterruptionTip: '说话时自动暂停当前播放',
+    connectionAnnouncement: '连接提示语',
+    connectionAnnouncementPlaceholder: '音箱连接时播报的提示语',
+    
+    // 会话管理
+    sessionConfig: '会话管理',
+    clearCommands: '清空会话指令',
+    clearCommandsTip: '说这些话会清空当前对话历史',
+    clearCommandsPlaceholder: '每行一个指令，如：清空对话、重新开始',
+    saveAndNewCommands: '保存并新建指令',
+    saveAndNewCommandsTip: '说这些话会保存当前对话并开始新对话',
+    saveAndNewCommandsPlaceholder: '每行一个指令，如：新建对话、开始新对话',
+    shareSessionWithWeb: '与网页共享会话',
+    shareSessionWithWebTip: '开启后音箱对话和网页对话共享历史记录',
+    
+    // 上下文压缩
+    contextCompression: '上下文压缩',
+    compressionEnabled: '启用压缩',
+    compressionEnabledTip: '对话过长时自动压缩历史记录',
+    maxMessages: '最大消息数',
+    maxMessagesTip: '超过此数量触发压缩',
+    maxTokens: '最大Token数',
+    maxTokensTip: '超过此数量触发压缩（估算值）',
+    compressionStrategy: '压缩策略',
+    strategyAuto: '自动选择',
+    strategySummary: 'AI总结',
+    strategyTruncate: '直接截断',
+    strategySliding: '滑动窗口',
+    keepRecent: '保留最近轮数',
+    keepRecentTip: '压缩后保留的最近对话轮数',
+    
+    // TTS播报控制
+    ttsPlaybackConfig: 'TTS播报控制',
+    playThinking: '播报思考过程',
+    playThinkingTip: '是否在语音播报中包含AI的思考推理过程',
+    playToolCalls: '播报工具调用',
+    playToolCallsTip: '是否播报工具调用和执行结果的简短描述（如"正在查询设备"）',
+    
+    // 即时保存
+    autoSaveSession: '即时保存对话',
+    autoSaveSessionTip: '每次用户提问和AI回复后自动保存到会话记录，关闭则等待语音指令保存',
+    
+    // 配置操作
+    saveConfig: '保存配置',
+    saveSuccess: '配置已保存',
+    saveFailed: '保存失败',
+    needsRestart: '部分配置需要重启服务生效',
+    loadConfigFailed: '加载配置失败',
+    
+    // 对话页面
+    speakerSession: '音箱会话',
+    selectSpeaker: '选择音箱播放回复',
+    speakerPlayback: '使用音箱播放',
+  },
+
 };

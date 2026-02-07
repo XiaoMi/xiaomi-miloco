@@ -3,14 +3,16 @@
  * This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
  */
 
-import React, { useCallback } from 'react';
-import { Button, Flex, Tooltip } from 'antd';
+import React, { useCallback, useEffect } from 'react';
+import { Button, Flex, Tooltip, Select } from 'antd';
 import { useTranslation } from 'react-i18next';
+import { SoundOutlined } from '@ant-design/icons';
 import Icon from '@/components/Icon';
 import { useChatStore } from '@/stores/chatStore';
 import { UnifiedSelector } from '../';
 import styles from '../../style.module.less';
 
+const { Option } = Select;
 
 /**
  * BottomControlButtons Component - Bottom control buttons for camera selection, MCP services, and mode switching
@@ -39,7 +41,21 @@ const BottomControlButtons = () => {
     handleCameraSelectAll,
     handleMcpSelectAll,
     handleMcpReconnect,
+    // Speaker related
+    speakerList,
+    speakerLoading,
+    selectedSpeakerId,
+    fetchSpeakerList,
+    setSelectedSpeakerId,
   } = useChatStore();
+
+  // Fetch speaker list on mount
+  useEffect(() => {
+    fetchSpeakerList();
+    // Refresh speaker list every 10 seconds
+    const interval = setInterval(fetchSpeakerList, 10000);
+    return () => clearInterval(interval);
+  }, [fetchSpeakerList]);
 
 
   const availableMcpList = availableMcpServices.filter(service => mcpList.includes(service.client_id))
@@ -117,6 +133,31 @@ const BottomControlButtons = () => {
             }}
           />
         </div>
+
+        {/* Speaker selection */}
+        {speakerList.length > 0 && (
+          <div className={styles.speakerSelectContainer}>
+            <Tooltip title={t('xiaoai.selectSpeaker')}>
+              <Select
+                value={selectedSpeakerId}
+                onChange={setSelectedSpeakerId}
+                placeholder={t('xiaoai.speakerPlayback')}
+                allowClear
+                size="small"
+                className={styles.speakerSelect}
+                style={{ width: 140 }}
+                suffixIcon={<SoundOutlined />}
+                loading={speakerLoading}
+              >
+                {speakerList.map(speaker => (
+                  <Option key={speaker.speaker_id} value={speaker.speaker_id}>
+                    <span>{speaker.model || speaker.speaker_id}</span>
+                  </Option>
+                ))}
+              </Select>
+            </Tooltip>
+          </div>
+        )}
       </Flex>
     </Flex>
   );
