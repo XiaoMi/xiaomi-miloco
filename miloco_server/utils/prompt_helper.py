@@ -95,8 +95,6 @@ class TriggerRuleConditionPromptBuilder:
             "text": prefixes["condition_question_template"].format(condition=condition)
         })
 
-        logger.debug("User Content: %s", user_content)
-
         chat_history_messages.add_content("user", user_content)
 
         return chat_history_messages
