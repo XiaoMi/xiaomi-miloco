@@ -51,12 +51,12 @@ chat:
 # Trigger rule runner configuration
 trigger_rule_runner:
   interval_seconds: 2
-  vision_use_img_count: 6
+  vision_use_img_count: 3
   trigger_rule_log_ttl: 30 #days
 
 # Camera configuration
 camera:
-  frame_interval: 500 # Unit: Millisecond (ms)
+  frame_interval: 1000 # Unit: Millisecond (ms)
 
 
 # MIoT configuration, default to 'cn', use your MiHome cloud server
