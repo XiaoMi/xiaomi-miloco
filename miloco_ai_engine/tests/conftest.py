@@ -36,11 +36,7 @@ MOCK_MODEL_CONFIG = {
             "parallel_seq_num": 2,
             "total_context_num": 4096,
             "context_per_seq": 4096,
-            "chunk_size": 512,
-            "business": {
-                "task_labels": [],
-                "task_priorities": []
-            }
+            "chunk_size": 512
         }
     },
     "server_concurrency": {

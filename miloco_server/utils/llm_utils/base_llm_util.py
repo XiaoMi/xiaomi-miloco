@@ -31,6 +31,7 @@ class BaseLLMUtil:
         self._chat_history = ChatHistoryMessages()
         self._query = query
         self._tools_meta = tools_meta
+        self._priority: Optional[int] = None  # Subclasses can override if they need priority
 
 
     def _get_system_prompt(self) -> str:
@@ -53,8 +54,10 @@ class BaseLLMUtil:
                 raise RuntimeError(
                     "LLM proxy not exit, Please configure on the Model Settings Page.")
             chat_messages = self._chat_history.get_messages()
+            # Only pass priority if it's set and non-zero
+            priority = self._priority if self._priority and self._priority > 0 else None
             llm_result = await self._llm_proxy.async_call_llm(
-                chat_messages, self._tools_meta)
+                chat_messages, self._tools_meta, priority)
 
             logger.info("[%s] LLM response: %s", self._request_id, llm_result)
 

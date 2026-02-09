@@ -24,13 +24,15 @@ class LLMProxy(ABC):
 
     @abstractmethod
     async def async_call_llm(self, messages: list[ChatCompletionMessageParam],
-                           tools: Optional[list[ChatCompletionToolParam]] = None) -> dict[str, any]:
+                           tools: Optional[list[ChatCompletionToolParam]] = None,
+                           priority: Optional[int] = None) -> dict[str, any]:
         """Async call LLM (non-streaming)."""
         pass
 
     @abstractmethod
     async def async_call_llm_stream(self, messages: list[ChatCompletionMessageParam],
-                                  tools: Optional[list[ChatCompletionToolParam]] = None) -> AsyncGenerator[dict[str, any], None]:
+                                  tools: Optional[list[ChatCompletionToolParam]] = None,
+                                  priority: Optional[int] = None) -> AsyncGenerator[dict[str, any], None]:
         """Async call LLM (streaming)."""
         pass
 
@@ -99,28 +101,35 @@ class OpenAIProxy(LLMProxy):
         return self.__str__()
 
     async def async_call_llm(self, messages: list[ChatCompletionMessageParam],
-                           tools: Optional[list[ChatCompletionToolParam]] = None) -> dict[str, any]:
+                           tools: Optional[list[ChatCompletionToolParam]] = None,
+                           priority: Optional[int] = 0) -> dict[str, any]:
         """
         Call vision language model (async version, non-streaming)
-        
+
         Args:
             messages: Message list
             tools: Tool list
-            
+            priority: Task priority (0-10), passed to AI engine for scheduling
+
         Returns:
             Raw OpenAI format model response
         """
         try:
             logger.debug(
-                "Async calling model: %s, stream: False, messages: %s, tools: %s",
-                self.model_name, messages, tools
+                "Async calling model: %s, stream: False, messages: %s, tools: %s, priority: %s",
+                self.model_name, messages, tools, priority
             )
+            # priority must be None or 0-10
+            if priority is not None and not (0 <= priority <= 10):
+                raise ValueError("Priority must be None or 0-10")
+            extra_body = {"priority": priority}
             completion = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 stream=False,
                 tools=tools,
                 temperature=0,
+                extra_body=extra_body,
             )
             logger.info("Async model call completed successfully")
             return {
@@ -137,28 +146,34 @@ class OpenAIProxy(LLMProxy):
             }
 
     async def async_call_llm_stream(self, messages: list[ChatCompletionMessageParam],
-                                  tools: Optional[list[ChatCompletionToolParam]] = None) -> AsyncGenerator[dict[str, any], None]:
+                                  tools: Optional[list[ChatCompletionToolParam]] = None,
+                                  priority: Optional[int] = 0 ) -> AsyncGenerator[dict[str, any], None]:
         """
         Call vision language model (async version, streaming)
-        
+
         Args:
             messages: Message list
-            tools: Tool list
-            
+            tools: Tool lis
+            priority: Task priority (0-10), passed to AI engine for scheduling
+
         Returns:
             Async streaming iterator for model response
         """
         try:
             logger.debug(
-                "Async calling model: %s, stream: True, messages: %s, tools: %s",
-                self.model_name, messages, tools
+                "Async calling model: %s, stream: True, messages: %s, tools: %s, priority: %s",
+                self.model_name, messages, tools, priority
             )
+            if priority is not None and not (0 <= priority <= 10):
+                raise ValueError("Priority must be None or 0-10")
+            extra_body = {"priority": priority}
             completion: AsyncStream = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 stream=True,
                 tools=tools,
                 temperature=0,
+                extra_body=extra_body,
             )
             logger.info("Async model stream call completed successfully, completion: %s", completion)
             async for chunk in self._handle_async_stream_response(completion):

@@ -14,11 +14,9 @@ PROJECT_ROOT = get_project_root()
 
 # Configuration file path
 CONFIG_FILE = PROJECT_ROOT.parent / "config" / "ai_engine_config.yaml"
-PROMPT_CONFIG_FILE = PROJECT_ROOT.parent / "config" / "prompt_config.yaml"
 
 # Load configuration
 _config = load_yaml_config(CONFIG_FILE)
-_prompt_config = load_yaml_config(PROMPT_CONFIG_FILE)
 
 # Log directory path
 LOG_PATH = PROJECT_ROOT.parent / ".log" / "ai_engine"
@@ -58,6 +56,3 @@ SERVER_CONCURRENCY = {
 
 # Automatic optimization model configuration by vram in loading
 AUTO_OPT_VRAM = _config["auto_opt_vram"]
-
-# Business request prompts for matching specific request keys and critical information
-BUSSINESS_PROMPT_MATCHER = _prompt_config.get("prompts", {})

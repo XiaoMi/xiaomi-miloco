@@ -3,6 +3,7 @@
 
 import logging
 
+from miloco_server.config.normal_config import VISION_UNDERSTANDING_CONFIG
 from miloco_server.utils.local_models import ModelPurpose
 from miloco_server.utils.prompt_helper import VisionUnderstandToolPromptBuilder
 
@@ -26,6 +27,7 @@ class VisionUnderstander(BaseLLMUtil):
     ):
         """Initialize VisionUnderstander"""
         super().__init__(request_id=request_id, query=query, tools_meta=None)
+        self._priority = VISION_UNDERSTANDING_CONFIG["priority"]
         self._llm_proxy = self._manager.get_llm_proxy_by_purpose(ModelPurpose.VISION_UNDERSTANDING)
         self._camera_img_seqs = camera_img_seqs
         self._language = language

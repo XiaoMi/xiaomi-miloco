@@ -40,12 +40,6 @@ models:
     max_tokens: 512 # Maximum tokens to generate
     temperature: -1 # sampling temperature [-1 Greedy sampling]
 
-    # Business hardcoded configuration
-    business:
-      # Task labels(prompt config key) and corresponding priorities
-      task_labels: ["trigger_rule_condition", "vision_understanding"]
-      task_priorities: [5, 10]
-
   Qwen3-8b:Q4_0:
     model_path: "/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
 
@@ -57,8 +51,6 @@ models:
     device: "cuda"
     max_tokens: 512
     temperature: -1
-
-    business: {}
 
 # Server concurrency control
 server_concurrency:

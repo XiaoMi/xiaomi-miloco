@@ -33,7 +33,6 @@ class TaskStatus(Enum):
 class TaskInfo:
     """Task information"""
     task_id: str
-    table: str
     status: TaskStatus
     error: str
     retry_count: int
@@ -46,12 +45,11 @@ class TaskInfo:
 class Task(Actor):
     """Task state holder"""
 
-    def __init__(self, task_id: str, table: str, handle, task_scheduler: ActorAddress,
+    def __init__(self, task_id: str, handle, task_scheduler: ActorAddress,
                  request: ChatCompletionRequest,
                  respone_message: CallbackMessage, priority: int):
         super().__init__()
         self.task_info = TaskInfo(task_id=task_id,
-                                  table=table,
                                   status=TaskStatus.PENDING,
                                   error=None,
                                   retry_count=0,
@@ -84,10 +82,10 @@ class Task(Actor):
         Handle task start
         """
         logger.debug(
-            "Task %s starting execution %s", self.task_info.table, self.task_info.task_id)
+            "Task %s starting execution", self.task_info.task_id)
         if self.task_info.status != TaskStatus.PENDING:
             logger.error(
-                "Task %s status error %s", self.task_info.table, self.task_info.status)
+                "Task %s status error %s", self.task_info.task_id, self.task_info.status)
             return False
 
         # Retry not supported yet
@@ -98,7 +96,7 @@ class Task(Actor):
         now = time.time()
         if now - self.task_info.created_at > wait_timeout:
             self.task_info.status = TaskStatus.CANCELLED
-            self.task_info.error = f"Task {self.task_info.table} wait timeout"
+            self.task_info.error = f"Task {self.task_info.task_id} wait timeout"
             logger.error("%s", self.task_info.error)
             self._call_model_wrapper(
                 self._generate_chat_fail_response(self.task_info.error))
@@ -119,7 +117,7 @@ class Task(Actor):
             self.task_info.error = str(ex)
             self._call_model_wrapper(self._generate_chat_fail_response(str(ex)))
             logger.error(
-                "Task %s execution failed %s", self.task_info.table, self.task_info.error)
+                "Task %s execution failed %s", self.task_info.task_id, self.task_info.error)
             return False
 
         self.task_info.status = TaskStatus.COMPLETED

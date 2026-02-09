@@ -67,6 +67,7 @@ class TriggerRuleRunner:
         logger.info(
             "TriggerRuleRunner init success, trigger_rules: %s", self.trigger_rules
         )
+        self._priority = TRIGGER_RULE_RUNNER_CONFIG["priority"]
 
     def _get_vision_understaning_llm_proxy(self) -> LLMProxy:
         return self._get_llm_proxy_by_purpose(
@@ -284,8 +285,7 @@ class TriggerRuleRunner:
         Returns:
             LLM response result
         """
-
-        return await llm_proxy.async_call_llm(messages)
+        return await llm_proxy.async_call_llm(messages, priority=self._priority)
 
     async def _check_trigger_condition(
         self, rule: TriggerRule, llm_proxy: LLMProxy,

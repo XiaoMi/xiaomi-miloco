@@ -41,6 +41,7 @@ CHAT_VISION_USE_IMG_COUNT = _server_config["chat"]["vision_use_img_count"]
 PROMPT_CONFIG_FILE = PROJECT_ROOT.parent / "config" / "prompt_config.yaml"
 _config = load_yaml_config(PROMPT_CONFIG_FILE)
 
+
 def _format_vision_system_prompt(prompt_text: str) -> str:
     """Format prompt text, replace template variables"""
     return prompt_text.format(
@@ -98,11 +99,11 @@ class PromptConfig:
     def get_prompt(cls, prompt_type: PromptType, language: UserLanguage) -> str:
         """
         Get prompt based on type and language
-        
+
         Args:
             prompt_type: Prompt type
             language: User language, defaults to Chinese
-            
+
         Returns:
             Prompt corresponding to the type and language
         """
