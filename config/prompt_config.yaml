@@ -263,13 +263,13 @@ prompts:
 
   trigger_rule_condition_prefixes:
     chinese:
-      current_frames_prefix: "current_frames - 图像序列如下："
+      current_frames_prefix: "current_frames - 当前图像序列如下："
       current_time_prefix: "current_time: {time}"
       last_happened_frames_prefix: "last_happened_frames - 上次满足条件时的图像序列如下："
       last_happened_time_prefix: "last_happened_time: {time}"
       condition_question_template: "condition_question: 图片是否满足以下条件：{condition}。/no_think"
     english:
-      current_frames_prefix: "current_frames - Image sequence is as follows:"
+      current_frames_prefix: "current_frames - Now image sequence is as follows:"
       current_time_prefix: "current_time: {time}"
       last_happened_frames_prefix: "last_happened_frames - Image sequence from last satisfied event:"
       last_happened_time_prefix: "last_happened_time: {time}"

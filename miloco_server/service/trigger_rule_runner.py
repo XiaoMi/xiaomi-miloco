@@ -191,9 +191,6 @@ class TriggerRuleRunner:
                 for condition_result in condition_result_list
             ])
 
-            if execable:
-                logger.info("Rule %s is execable: %s", rule_id, execable)
-
             is_dynamic_action_running = self._check_dynamic_action_is_running(rule_id)
             logger.info(
                 "Rule %s is execable: %s, dynamic action is running: %s",
@@ -294,13 +291,6 @@ class TriggerRuleRunner:
 
         return await llm_proxy.async_call_llm(messages)
 
-    def _load_last_happened_img_seq(
-        self, rule: TriggerRule, camera_id: str, channel: int
-    ) -> Optional[CameraImgSeq]:
-        """Get last happened image sequence from in-memory cache.
-        Returns None if no previous event."""
-        return self._last_happened_cache.get((rule.id, camera_id, channel))
-
     @staticmethod
     def _parse_llm_output(content) -> Optional[tuple[bool, bool]]:
         """Parse LLM numeric output (0/1/2) into (is_happened, is_same_action).
@@ -308,6 +298,7 @@ class TriggerRuleRunner:
         try:
             stripped = str(content).strip()
         except Exception:  # pylint: disable=broad-except
+            logger.error("Invalid LLM output: %s", content)
             return None
         if stripped == "0":
             return (False, False)
@@ -347,8 +338,7 @@ class TriggerRuleRunner:
         tasks = []
         for (camera_id, channel), camera_img_seq in cameras_video.items():
             # Load last happened frames for this camera/channel
-            last_happened_img_seq = self._load_last_happened_img_seq(
-                rule, camera_id, channel)
+            last_happened_img_seq = self._last_happened_cache.get((rule.id, camera_id, channel))
             messages = TriggerRuleConditionPromptBuilder.build_trigger_rule_prompt(
                 camera_img_seq, rule.condition, self._get_language(),
                 last_happened_img_seq=last_happened_img_seq)
@@ -403,10 +393,10 @@ class TriggerRuleRunner:
                     rule.name, camera_id, channel)
                 continue
 
-            # Output 1: new action — update cache, result=True (execution needed)
+            # Output 1: action triggered, and is a new action(execution needed)
             if is_happened and not is_same_action:
                 logger.info(
-                    "Rule %s camera %s channel %s: new action detected (output 1), updating cache and returning True",
+                    "Rule %s camera %s channel %s: action triggered, and is a new action(execution needed) (output 1), updating cache and returning True",
                     rule.name, camera_id, channel)
                 self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
                 condition_result_list.append(TriggerConditionResult(
@@ -415,10 +405,10 @@ class TriggerRuleRunner:
                     result=True))
                 continue
 
-            # Output 2 : new action — update cache, result=True (No execution needed)
+            # Output 2 : action triggered, but is not a new action (No execution needed)
             if is_happened:
                 logger.info(
-                    "Rule %s camera %s channel %s: new action (output 2)",
+                    "Rule %s camera %s channel %s: action triggered, but is not a new action (No execution needed) (output 2), only update cache",
                     rule.name, camera_id, channel)
                 self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
                 condition_result_list.append(TriggerConditionResult(

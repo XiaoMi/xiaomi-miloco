@@ -89,12 +89,13 @@ class TriggerRuleConditionPromptBuilder:
             logger.info("Current Time: %s", current_time_str)
             logger.info("Last Trigger Time: %s", last_time_str)
 
-
         # user_rule_content
         user_content.append({
             "type": "text",
             "text": prefixes["condition_question_template"].format(condition=condition)
         })
+
+        logger.debug("User Content: %s", user_content)
 
         chat_history_messages.add_content("user", user_content)
 
