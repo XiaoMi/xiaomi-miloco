@@ -367,7 +367,7 @@ class TriggerRuleRunner:
                 continue
 
             content = response["content"]
-            logger.info("LLM Response: %s", content)
+            
             logger.info(
                 "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, content: %s",
                 rule.name, rule.condition, camera_id, channel, content
