@@ -8,6 +8,14 @@ English | [简体中文](README.zh_Hans.md)
 
 </div>
 
+
+<div align="center">
+<h1><img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /> <font color="red">🎉 Happy New Year! 新年快乐！🎉</font> <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /></h1>
+
+<img src="assets/images/Happy_New_Year.gif" width="50%" />
+
+</div>
+
 ## News
 
 - [2025-11] Xiaomi Miloco Framework Open Source
