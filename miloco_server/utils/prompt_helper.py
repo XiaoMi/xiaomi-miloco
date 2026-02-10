@@ -9,7 +9,7 @@ Provides builders for trigger rule conditions and vision understanding prompts.
 from datetime import datetime
 from typing import Optional
 import logging
-from miloco_server.config.prompt_config import PromptConfig, PromptType, UserLanguage
+from miloco_server.config.prompt_config import PromptConfig, PromptType, UserLanguage, CAMERA_IMG_FRAME_INTERVAL
 from miloco_server.config.normal_config import TRIGGER_RULE_RUNNER_CONFIG
 from miloco_server.schema.chat_history_schema import ChatHistoryMessages
 from miloco_server.schema.miot_schema import CameraImgSeq
@@ -57,7 +57,7 @@ class TriggerRuleConditionPromptBuilder:
             "type": "text",
             "text": prefixes["current_frames_prefix"].format(
                 vision_use_img_count=TRIGGER_RULE_RUNNER_CONFIG["vision_use_img_count"],
-                frame_interval=TRIGGER_RULE_RUNNER_CONFIG["frame_interval"]
+                frame_interval=CAMERA_IMG_FRAME_INTERVAL
             )
         })
         for image_data in img_seq_base64.img_list:
@@ -82,7 +82,7 @@ class TriggerRuleConditionPromptBuilder:
                 "type": "text",
                 "text": prefixes["last_happened_frames_prefix"].format(
                     vision_use_img_count=TRIGGER_RULE_RUNNER_CONFIG["vision_use_img_count"],
-                    frame_interval=TRIGGER_RULE_RUNNER_CONFIG["frame_interval"]
+                    frame_interval=CAMERA_IMG_FRAME_INTERVAL
                 )
             })
             for image_data in last_happened_base64.img_list:
@@ -105,7 +105,7 @@ class TriggerRuleConditionPromptBuilder:
         for item in user_content:
             if item["type"] == "text":
                 temp_log_output.append(item["text"])
-        logger.info(f"TriggerRuleConditionPromptBuilder: {temp_log_output}")
+        logger.error(f"TriggerRuleConditionPromptBuilder: {temp_log_output}")
 
         return chat_history_messages
 
