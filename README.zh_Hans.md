@@ -11,8 +11,6 @@
 <div align="center">
 <h2><img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /> <font color="red">🎉 祝各位米粉朋友们新年快乐！🎉</font> <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /></h2>
 
-<img src="assets/images/Happy_New_Year.gif" width="30%" />
-
 </div>
 
 ## 最新动态
