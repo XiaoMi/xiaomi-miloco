@@ -1,15 +1,15 @@
 # Xiaomi Miloco
 
+<div align="center">
+<h2><img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /> <font color="red">🎉 祝各位米粉朋友们新年快乐！🎉</font> <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /></h2>
+
+</div>
+
 智能家居未来探索方案 **Xiaomi Local Copilot** ，以米家摄像机为视觉信息来源，以自研大模型为核心，打通全屋 IoT 设备。基于大模型的开发范式，让用户能够以自然语言定义家庭的各种需求和规则，实现更广泛、更具创意的智能联动。
 
 <div align="center">
 
 简体中文 | [English](README.md)
-
-</div>
-
-<div align="center">
-<h2><img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /> <font color="red">🎉 祝各位米粉朋友们新年快乐！🎉</font> <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /></h2>
 
 </div>
 
