@@ -85,9 +85,6 @@ class TriggerRuleConditionPromptBuilder:
                         "url": image_data.data
                     }
                 })
-            
-            logger.info("Current Time: %s", current_time_str)
-            logger.info("Last Trigger Time: %s", last_time_str)
 
         # user_rule_content
         user_content.append({

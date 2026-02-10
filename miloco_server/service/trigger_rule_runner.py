@@ -39,7 +39,7 @@ from miloco_server.service.trigger_rule_dynamic_executor import START, TriggerRu
 
 logger = logging.getLogger(name=__name__)
 
-TIMEOUT_SECONDS = 10
+TIMEOUT_SECONDS = 30
 
 class TriggerRuleRunner:
     """Trigger service class"""
@@ -151,10 +151,10 @@ class TriggerRuleRunner:
         return rule_info_list, condition_results, camera_motion_dict
 
     async def _execute_scheduled_task(self):
-        start_time = time.time() * 1000
+        start_time = int(time.time() * 1000)
         """Specific execution logic for scheduled tasks"""
         if self._sending_flag:
-            logger.error("Previous trigger check still running, now: %s", start_time)
+            logger.warning("Previous trigger check still running, now: %s", start_time)
             return
         self._sending_flag = True
         
@@ -172,32 +172,27 @@ class TriggerRuleRunner:
                         if trigger_filter.pre_filter(rule)]
 
         if not enabled_rules:
-            logger.info("No enabled trigger rules to check")
+            logger.warning("No enabled trigger rules to check")
             self._sending_flag = False
             return
 
         try:
-            logger.error("run async check scheduled task")
             rule_info_list, condition_results, camera_motion_dict = await asyncio.wait_for(
                 self._check_scheduled_task(llm_proxy, enabled_rules),
                 timeout=TIMEOUT_SECONDS
             )
             if condition_results is None:
-                logger.error("Check scheduled task failed")
-                self._sending_flag = False
+                logger.warning("Check scheduled task failed, Jump to next scheduled task")
                 return
         except asyncio.TimeoutError:
             logger.error("Check scheduled task timeout")
             condition_results = None
-            self._sending_flag = False
             return
         except Exception as e:
             logger.error("Error in condition check: %s", e)
             condition_results = None
-            self._sending_flag = False
             return
         finally:
-            logger.error("remove flag")
             self._sending_flag = False
 
         # Process results
@@ -206,19 +201,18 @@ class TriggerRuleRunner:
                                                 condition_results):
             # Check for exceptions
             if isinstance(condition_result_list, Exception):
-                logger.error(
+                logger.info(
                     "Rule check failed for %s %s: %s", rule_id, rule.name, condition_result_list
                 )
                 continue
 
             # Ensure return type is list
             if not isinstance(condition_result_list, list):
-                logger.error(
+                logger.info(
                     "Invalid condition result type for rule %s: %s", rule_id, type(condition_result_list)
                 )
                 continue
                 
-
             execable = any([
                 trigger_filter.post_filter(
                     rule_id,
@@ -404,7 +398,7 @@ class TriggerRuleRunner:
 
             content = response["content"]
             
-            logger.info(
+            logger.error(
                 "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, content: %s",
                 rule.name, rule.condition, camera_id, channel, content
             )
