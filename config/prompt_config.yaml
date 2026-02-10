@@ -105,9 +105,9 @@ prompts:
 
       ## 输入
       - condition_question：主人设定的检测规则
-      - current_frames：当前图像序列, 一共有6张从监控摄像头中截取的帧, 按照0.5秒间隔截取了三秒.
+      - current_frames：当前图像序列
       - current_time: 当前时间戳，格式为 "YYYY-MM-DD HH:MM:SS"
-      - last_happened_frames：上次is_happened为ture时的图像序列（可能为空）， 一共有6张从监控摄像头中截取的帧, 按照0.5秒间隔截取了三秒. 
+      - last_happened_frames：上次is_happened为ture时的图像序列（可能为空）
       - last_happened_time: 上次is_happened为ture时的时间戳，格式为 "YYYY-MM-DD HH:MM:SS"
 
       ## 任务
@@ -260,18 +260,18 @@ prompts:
       camera_prefix: "Camera: "
       channel_prefix: ", Channel: "
       sequence_prefix: ", Image sequence: "
-
+      
   trigger_rule_condition_prefixes:
     chinese:
-      current_frames_prefix: "current_frames - 当前图像序列如下："
+      current_frames_prefix: "current_frames - 当前图像序列如下, 一共有{{vision_use_img_count}}张从监控摄像头中截取的帧, 按照{{frame_interval}}秒间隔截取了.："
       current_time_prefix: "current_time: {time}"
-      last_happened_frames_prefix: "last_happened_frames - 上次满足条件时的图像序列如下："
+      last_happened_frames_prefix: "last_happened_frames - 上次满足条件时的图像序列如下, 一共有{{vision_use_img_count}}张从监控摄像头中截取的帧, 按照{{frame_interval}}秒间隔截取了.："
       last_happened_time_prefix: "last_happened_time: {time}"
       condition_question_template: "condition_question: 图片是否满足以下条件：{condition}。/no_think"
     english:
-      current_frames_prefix: "current_frames - Now image sequence is as follows:"
+      current_frames_prefix: "current_frames - Now image sequence is as follows, a total of {{vision_use_img_count}} frames captured from the monitoring camera, with an interval of {{frame_interval}} seconds between frames.:"
       current_time_prefix: "current_time: {time}"
-      last_happened_frames_prefix: "last_happened_frames - Image sequence from last satisfied event:"
+      last_happened_frames_prefix: "last_happened_frames - Image sequence from last satisfied event, a total of {{vision_use_img_count}} frames captured from the monitoring camera, with an interval of {{frame_interval}} seconds between frames.:"
       last_happened_time_prefix: "last_happened_time: {time}"
       condition_question_template: "condition_question: Do the images meet the following condition: {condition}./no_think"
 

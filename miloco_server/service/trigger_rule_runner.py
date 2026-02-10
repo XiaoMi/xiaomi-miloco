@@ -154,13 +154,13 @@ class TriggerRuleRunner:
         start_time = int(time.time() * 1000)
         """Specific execution logic for scheduled tasks"""
         if self._sending_flag:
-            logger.warning("Previous trigger check still running, now: %s", start_time)
+            logger.info("Previous trigger check still running, now: %s", start_time)
             return
         self._sending_flag = True
         
         llm_proxy = self._get_vision_understaning_llm_proxy()
         if not llm_proxy:
-            logger.warning(
+            logger.info(
                 "Vision understaning LLM proxy not available, skipping rules trigger")
             self._sending_flag = False
             return
@@ -172,7 +172,7 @@ class TriggerRuleRunner:
                         if trigger_filter.pre_filter(rule)]
 
         if not enabled_rules:
-            logger.warning("No enabled trigger rules to check")
+            logger.info("No enabled trigger rules to check")
             self._sending_flag = False
             return
 
@@ -182,7 +182,7 @@ class TriggerRuleRunner:
                 timeout=TIMEOUT_SECONDS
             )
             if condition_results is None:
-                logger.warning("Check scheduled task failed, Jump to next scheduled task")
+                logger.info("Check scheduled task failed, Jump to next scheduled task")
                 return
         except asyncio.TimeoutError:
             logger.error("Check scheduled task timeout")
@@ -398,7 +398,7 @@ class TriggerRuleRunner:
 
             content = response["content"]
             
-            logger.error(
+            logger.info(
                 "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, content: %s",
                 rule.name, rule.condition, camera_id, channel, content
             )
