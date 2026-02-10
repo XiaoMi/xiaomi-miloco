@@ -177,10 +177,15 @@ class TriggerRuleRunner:
             return
 
         try:
+            logger.error("run async check scheduled task")
             rule_info_list, condition_results, camera_motion_dict = await asyncio.wait_for(
                 self._check_scheduled_task(llm_proxy, enabled_rules),
                 timeout=TIMEOUT_SECONDS
             )
+            if condition_results is None:
+                logger.error("Check scheduled task failed")
+                self._sending_flag = False
+                return
         except asyncio.TimeoutError:
             logger.error("Check scheduled task timeout")
             condition_results = None
@@ -192,6 +197,7 @@ class TriggerRuleRunner:
             self._sending_flag = False
             return
         finally:
+            logger.error("remove flag")
             self._sending_flag = False
 
         # Process results
