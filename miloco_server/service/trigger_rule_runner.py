@@ -39,6 +39,7 @@ from miloco_server.service.trigger_rule_dynamic_executor import START, TriggerRu
 
 logger = logging.getLogger(name=__name__)
 
+TIMEOUT_SECONDS = 10
 
 class TriggerRuleRunner:
     """Trigger service class"""
@@ -64,6 +65,7 @@ class TriggerRuleRunner:
         self._vision_use_img_count = TRIGGER_RULE_RUNNER_CONFIG["vision_use_img_count"]
         # Per-camera last happened cache: key=(rule_id, camera_did, channel), value=CameraImgSeq
         self._last_happened_cache: Dict[tuple, CameraImgSeq] = {}
+        self._sending_flag: bool = False
         logger.info(
             "TriggerRuleRunner init success, trigger_rules: %s", self.trigger_rules
         )
@@ -98,25 +100,7 @@ class TriggerRuleRunner:
                     "Error occurred while executing scheduled task: %s", e)
                 await asyncio.sleep(self._interval_seconds)
 
-    async def _execute_scheduled_task(self):
-        """Specific execution logic for scheduled tasks"""
-        logger.info("Executing scheduled task - checking trigger rules")
-        llm_proxy = self._get_vision_understaning_llm_proxy()
-        if not llm_proxy:
-            logger.warning(
-                "Vision understaning LLM proxy not available, skipping rules trigger")
-            return
-        start_time = int(time.time() * 1000)
-
-        # Filter triggerable rules
-        enabled_rules = [(rule_id, rule)
-                         for rule_id, rule in self.trigger_rules.items()
-                         if trigger_filter.pre_filter(rule)]
-
-        if not enabled_rules:
-            logger.info("No enabled trigger rules to check")
-            return
-
+    async def _check_scheduled_task(self, llm_proxy, enabled_rules):
         # Calculate all camera motion changes
         miot_camera_info_dict = await self.miot_proxy.get_cameras()
         camera_info_dict = {
@@ -124,8 +108,8 @@ class TriggerRuleRunner:
             for camera_id, miot_camera_info in miot_camera_info_dict.items()
         }
         camera_motion_dict: dict[str,
-                                 dict[int,
-                                      tuple[bool,
+                                dict[int,
+                                    tuple[bool,
                                             Optional[CameraImgSeq]]]] = {}
 
         for camera_id, camera_info in camera_info_dict.items():
@@ -142,12 +126,12 @@ class TriggerRuleRunner:
                     logger.info(
                         "camera %s channel %s motion: true", camera_id, channel)
                     camera_motion_dict[camera_id][channel] = (True,
-                                                              camera_img_seq)
+                                                            camera_img_seq)
                 else:
                     logger.info(
                         "camera %s channel %s motion: false", camera_id, channel)
                     camera_motion_dict[camera_id][channel] = (False,
-                                                              camera_img_seq)
+                                                            camera_img_seq)
 
         # Create concurrent task list
         tasks = []
@@ -156,19 +140,64 @@ class TriggerRuleRunner:
             logger.info(
                 "Preparing to check trigger rule: %s %s", rule_id, rule.name)
             task = self._check_trigger_condition(rule, llm_proxy,
-                                                 camera_motion_dict,
-                                                 camera_info_dict)
+                                                camera_motion_dict,
+                                                camera_info_dict)
             tasks.append(task)
             rule_info_list.append((rule_id, rule))
 
         # Concurrently execute all trigger rule checks
-        condition_results = await asyncio.gather(*tasks,
-                                                 return_exceptions=True)
+        condition_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        return rule_info_list, condition_results, camera_motion_dict
+
+    async def _execute_scheduled_task(self):
+        start_time = time.time() * 1000
+        """Specific execution logic for scheduled tasks"""
+        if self._sending_flag:
+            logger.error("Previous trigger check still running, now: %s", start_time)
+            return
+        self._sending_flag = True
+        
+        llm_proxy = self._get_vision_understaning_llm_proxy()
+        if not llm_proxy:
+            logger.warning(
+                "Vision understaning LLM proxy not available, skipping rules trigger")
+            self._sending_flag = False
+            return
+
+
+        # Filter triggerable rules
+        enabled_rules = [(rule_id, rule)
+                        for rule_id, rule in self.trigger_rules.items()
+                        if trigger_filter.pre_filter(rule)]
+
+        if not enabled_rules:
+            logger.info("No enabled trigger rules to check")
+            self._sending_flag = False
+            return
+
+        try:
+            rule_info_list, condition_results, camera_motion_dict = await asyncio.wait_for(
+                self._check_scheduled_task(llm_proxy, enabled_rules),
+                timeout=TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.error("Check scheduled task timeout")
+            condition_results = None
+            self._sending_flag = False
+            return
+        except Exception as e:
+            logger.error("Error in condition check: %s", e)
+            condition_results = None
+            self._sending_flag = False
+            return
+        finally:
+            self._sending_flag = False
 
         # Process results
         for (rule_id,
-             rule), condition_result_list in zip(rule_info_list,
-                                                 condition_results):
+            rule), condition_result_list in zip(rule_info_list,
+                                                condition_results):
             # Check for exceptions
             if isinstance(condition_result_list, Exception):
                 logger.error(
@@ -182,6 +211,7 @@ class TriggerRuleRunner:
                     "Invalid condition result type for rule %s: %s", rule_id, type(condition_result_list)
                 )
                 continue
+                
 
             execable = any([
                 trigger_filter.post_filter(
@@ -201,13 +231,13 @@ class TriggerRuleRunner:
                 execute_result = await self._execute_trigger_action(
                     execute_id, rule, camera_motion_dict)
                 await self._log_rule_execution(execute_id, start_time, rule,
-                                               camera_motion_dict,
-                                               condition_result_list,
-                                               execute_result)
+                                            camera_motion_dict,
+                                            condition_result_list,
+                                            execute_result)
 
-        logger.info(
-            "Scheduled task completed, checked %d trigger rules", len(enabled_rules)
-        )
+            logger.info(
+                "Scheduled task completed, checked %d trigger rules", len(enabled_rules)
+            )
 
     async def _log_rule_execution(
             self,
