@@ -81,7 +81,7 @@ class TriggerRuleRunner:
         """Remove trigger rule"""
         if rule_id in self.trigger_rules:
             del self.trigger_rules[rule_id]
-            del self._sending_states[rule_id]
+            self._sending_states.pop(rule_id, None)
         # Clean up cache entries for this rule
         keys_to_remove = [k for k in self._last_happened_cache if k[0] == rule_id]
         for key in keys_to_remove:
@@ -306,8 +306,10 @@ class TriggerRuleRunner:
         Returns:
             LLM response result
         """
-
-        return await llm_proxy.async_call_llm(messages)
+        try:
+            return await asyncio.wait_for(llm_proxy.async_call_llm(messages), timeout=TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"])
+        except asyncio.TimeoutError:
+            return TimeoutError("LLM call timed out")
 
     @staticmethod
     def _parse_llm_output(content) -> Optional[tuple[bool, bool]]:
@@ -318,20 +320,16 @@ class TriggerRuleRunner:
         except Exception:  # pylint: disable=broad-except
             logger.error("Invalid LLM output: %s", content)
             return None
+        
         if stripped == "0":
             return (False, False)
         if stripped == "1":
             return (True, False)
         if stripped == "2":
             return (True, True)
-        return None
-
-    @staticmethod
-    async def _with_timeout(coro, timeout):
-        try:
-            return await asyncio.wait_for(coro, timeout=timeout)
-        except asyncio.TimeoutError:
-            return TimeoutError("LLM call timed out")  # 返回异常对象，不是raise
+        else:
+            logger.error("Invalid LLM output: %s", content)
+            return None
 
     async def _check_trigger_condition(
         self, rule: TriggerRule, llm_proxy: LLMProxy,
@@ -377,7 +375,7 @@ class TriggerRuleRunner:
             messages = TriggerRuleConditionPromptBuilder.build_trigger_rule_prompt(
                 camera_img_seq, rule.condition, self._get_language(),
                 last_happened_img_seq=last_happened_img_seq)
-            task = self._with_timeout(self._call_vision_understaning(llm_proxy, messages.get_messages()), TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"])
+            task = self._call_vision_understaning(llm_proxy, messages.get_messages())
             tasks.append(task)
 
         # Concurrently execute all tasks
@@ -386,7 +384,7 @@ class TriggerRuleRunner:
         for ((camera_id, channel),
              camera_img_seq), response in zip(cameras_video.items(),
                                               responses):
-                                              
+
             if isinstance(response, TimeoutError):
                 logger.error(
                     "LLM call timeout for camera %s channel %s", camera_id, channel
