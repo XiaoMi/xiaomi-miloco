@@ -28,7 +28,7 @@ from miloco_server.schema.trigger_log_schema import (
     TriggerRuleLog, NotifyResult, ExecuteResult
 )
 from miloco_server.schema.trigger_schema import (
-    Action, TriggerRule, ExecuteType
+    Action, TriggerRule, ExecuteType, SendingState
 )
 from miloco_server.utils.check_img_motion import check_camera_motion
 from miloco_server.utils.local_models import ModelPurpose
@@ -65,7 +65,7 @@ class TriggerRuleRunner:
         self._vision_use_img_count = TRIGGER_RULE_RUNNER_CONFIG["vision_use_img_count"]
         # Per-camera last happened cache: key=(rule_id, camera_did, channel), value=CameraImgSeq
         self._last_happened_cache: Dict[tuple, CameraImgSeq] = {}
-        self._sending_flag: bool = False
+        self._sending_states: Dict[tuple, SendingState] = {}
         logger.info(
             "TriggerRuleRunner init success, trigger_rules: %s", self.trigger_rules
         )
@@ -86,6 +86,9 @@ class TriggerRuleRunner:
         keys_to_remove = [k for k in self._last_happened_cache if k[0] == rule_id]
         for key in keys_to_remove:
             del self._last_happened_cache[key]
+        keys_to_remove = [k for k in self._sending_states if k[0] == rule_id]
+        for key in keys_to_remove:
+            del self._sending_states[key]
 
     async def _periodic_task(self):
         """Scheduled task execution method, runs at configured interval"""
@@ -107,12 +110,20 @@ class TriggerRuleRunner:
             camera_id: CameraInfo.model_validate(miot_camera_info.model_dump())
             for camera_id, miot_camera_info in miot_camera_info_dict.items()
         }
+
+        # only load used camera in rules
+        needed_camera_ids = set()
+        for _, rule in enabled_rules:
+            needed_camera_ids.update(rule.cameras)
+
         camera_motion_dict: dict[str,
-                                dict[int,
-                                    tuple[bool,
+                                 dict[int,
+                                      tuple[bool,
                                             Optional[CameraImgSeq]]]] = {}
 
         for camera_id, camera_info in camera_info_dict.items():
+            if camera_id not in needed_camera_ids:
+                continue
             if camera_id not in camera_motion_dict:
                 camera_motion_dict[camera_id] = {}
             for channel in range(camera_info.channel_count or 1):
@@ -126,12 +137,12 @@ class TriggerRuleRunner:
                     logger.info(
                         "camera %s channel %s motion: true", camera_id, channel)
                     camera_motion_dict[camera_id][channel] = (True,
-                                                            camera_img_seq)
+                                                              camera_img_seq)
                 else:
                     logger.info(
                         "camera %s channel %s motion: false", camera_id, channel)
                     camera_motion_dict[camera_id][channel] = (False,
-                                                            camera_img_seq)
+                                                              camera_img_seq)
 
         # Create concurrent task list
         tasks = []
@@ -152,17 +163,12 @@ class TriggerRuleRunner:
 
     async def _execute_scheduled_task(self):
         start_time = int(time.time() * 1000)
-        """Specific execution logic for scheduled tasks"""
-        if self._sending_flag:
-            logger.info("Previous trigger check still running, now: %s", start_time)
-            return
-        self._sending_flag = True
+
         
         llm_proxy = self._get_vision_understaning_llm_proxy()
         if not llm_proxy:
             logger.info(
                 "Vision understaning LLM proxy not available, skipping rules trigger")
-            self._sending_flag = False
             return
 
 
@@ -173,27 +179,12 @@ class TriggerRuleRunner:
 
         if not enabled_rules:
             logger.info("No enabled trigger rules to check")
-            self._sending_flag = False
             return
 
-        try:
-            rule_info_list, condition_results, camera_motion_dict = await asyncio.wait_for(
-                self._check_scheduled_task(llm_proxy, enabled_rules),
-                timeout=TIMEOUT_SECONDS
-            )
-            if condition_results is None:
-                logger.info("Check scheduled task failed, Jump to next scheduled task")
-                return
-        except asyncio.TimeoutError:
-            logger.error("Check scheduled task timeout")
-            condition_results = None
+        rule_info_list, condition_results, camera_motion_dict = await self._check_scheduled_task(llm_proxy, enabled_rules)
+        if condition_results is None:
+            logger.info("Check scheduled task empty, Jump to next scheduled task")
             return
-        except Exception as e:
-            logger.error("Error in condition check: %s", e)
-            condition_results = None
-            return
-        finally:
-            self._sending_flag = False
 
         # Process results
         for (rule_id,
@@ -201,14 +192,14 @@ class TriggerRuleRunner:
                                                 condition_results):
             # Check for exceptions
             if isinstance(condition_result_list, Exception):
-                logger.info(
+                logger.error(
                     "Rule check failed for %s %s: %s", rule_id, rule.name, condition_result_list
                 )
                 continue
 
             # Ensure return type is list
             if not isinstance(condition_result_list, list):
-                logger.info(
+                logger.error(
                     "Invalid condition result type for rule %s: %s", rule_id, type(condition_result_list)
                 )
                 continue
@@ -348,12 +339,21 @@ class TriggerRuleRunner:
 
         cameras_video: dict[tuple[str, int], CameraImgSeq] = {}
         condition_result_list: List[TriggerConditionResult] = []
+        start_time = time.time()
 
         for camera_id in rule.cameras:
             camera_info = camera_info_dict[camera_id]
             channel_motion_dict = camera_motion_dict[camera_id]
             for channel, (if_motion,
                           camera_img_seq) in channel_motion_dict.items():
+                # check sending state flag:
+                sending_state = self._sending_states.get((rule.id, camera_id, channel))
+                if sending_state and sending_state.flag and start_time - sending_state.time < TIMEOUT_SECONDS:
+                    logger.warning("%s Rule %s, camera %s, channel %s is sending, skip", start_time, rule.id, camera_id, channel)
+                    continue
+                logger.warning("%s Rule %s, camera %s, channel %s start check", start_time, rule.id, camera_id, channel)
+                self._sending_states[(rule.id, camera_id, channel)] = SendingState(flag=True, time=start_time)
+
                 if not if_motion or not camera_img_seq:
                     condition_result_list.append(
                         TriggerConditionResult(camera_info=camera_info,
@@ -382,6 +382,9 @@ class TriggerRuleRunner:
         for ((camera_id, channel),
              camera_img_seq), response in zip(cameras_video.items(),
                                               responses):
+            # remove flag
+            self._sending_states[(rule.id, camera_id, channel)] = SendingState(flag=False, time=start_time)
+
             # Check for exceptions
             if isinstance(response, Exception):
                 logger.error(
