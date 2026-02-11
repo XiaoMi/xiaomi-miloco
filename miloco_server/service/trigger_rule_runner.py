@@ -164,7 +164,7 @@ class TriggerRuleRunner:
         
         llm_proxy = self._get_vision_understaning_llm_proxy()
         if not llm_proxy:
-            logger.info(
+            logger.warning(
                 "Vision understaning LLM proxy not available, skipping rules trigger")
             return
 
@@ -219,13 +219,13 @@ class TriggerRuleRunner:
                 execute_result = await self._execute_trigger_action(
                     execute_id, rule, camera_motion_dict)
                 await self._log_rule_execution(execute_id, start_time, rule,
-                                            camera_motion_dict,
-                                            condition_result_list,
-                                            execute_result)
+                                                camera_motion_dict,
+                                                condition_result_list,
+                                                execute_result)
 
-            logger.info(
-                "Scheduled task completed, checked %d trigger rules", len(enabled_rules)
-            )
+                logger.info(
+                    "Scheduled task completed, checked %d trigger rules", len(enabled_rules)
+                )
 
     async def _log_rule_execution(
             self,
@@ -376,6 +376,10 @@ class TriggerRuleRunner:
         # Concurrently execute all tasks
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # if over timeout, return None
+        if time.time() - start_time > TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"]:
+            return []
+        
         # Process results
         for ((camera_id, channel),
              camera_img_seq), response in zip(cameras_video.items(),
