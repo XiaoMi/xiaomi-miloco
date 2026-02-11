@@ -204,7 +204,6 @@ class TriggerRuleRunner:
             execable = any([
                 trigger_filter.post_filter(
                     rule_id,
-                    f"{condition_result.camera_info.did},{condition_result.channel}",
                     condition_result.result)
                 for condition_result in condition_result_list
             ])
@@ -358,13 +357,7 @@ class TriggerRuleRunner:
                           camera_img_seq) in channel_motion_dict.items():
                 # check sending state flag:
                 if not if_motion or not camera_img_seq:
-                    condition_result_list.append(
-                        TriggerConditionResult(camera_info=camera_info,
-                                               channel=channel,
-                                               result=False,
-                                               images=None))
                     continue
-
                 cameras_video[camera_id, channel] = camera_img_seq
 
         # Concurrently execute LLM calls for all cameras  
@@ -430,10 +423,6 @@ class TriggerRuleRunner:
                 logger.info(
                     "Rule %s camera %s channel %s: no action detected (output 0)",
                     rule.name, camera_id, channel)
-                condition_result_list.append(TriggerConditionResult(camera_info=camera_info,
-                                               channel=channel,
-                                               result=False,
-                                               images=None))
                 continue
 
             # Output 1: action triggered, and is a new action(execution needed)
@@ -454,10 +443,6 @@ class TriggerRuleRunner:
                     "Rule %s camera %s channel %s: action triggered, but is not a new action (No execution needed) (output 2), only update cache",
                     rule.name, camera_id, channel)
                 self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
-                condition_result_list.append(TriggerConditionResult(camera_info=camera_info,
-                                               channel=channel,
-                                               result=False,
-                                               images=None))
                 continue
         
         self._sending_states[rule.id] = SendingState(flag=False, time=start_time)

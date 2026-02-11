@@ -23,22 +23,14 @@ class RuleTriggerFilter:
     _CONTINUOUS_CHECK_INTERVAL: int = 1000 * 10    # Post-processing continuous non-trigger detection interval ms
     _TRIGGER_INTERVAL_MIN: int = 1000 * 10  # Post-processing trigger interval minimum value ms
 
-    # Record rule condition changes for specified camera
-    _condition_history: Dict[str, Dict[str, OrderedDict[int, bool]]]
     # Record trigger time queue for specified rule
     _trigger_history: Dict[str, deque]
 
     def __init__(self):
-        self._condition_history = {}
         self._trigger_history = {}
 
-    def _default_rule_state(self, rule_id: str, camera_tag: str = None, filter_frequency: int = 1):
+    def _default_rule_state(self, rule_id: str, filter_frequency: int = 1):
         """Default rule state."""
-        self._condition_history.setdefault(rule_id, {})
-
-        if camera_tag:
-            self._condition_history[rule_id].setdefault(camera_tag, OrderedDict())
-
         self._trigger_history.setdefault(rule_id, deque(maxlen=filter_frequency))
 
     def pre_filter(self, rule: TriggerRule) -> bool:
@@ -78,34 +70,19 @@ class RuleTriggerFilter:
 
         return True
 
-    def post_filter(self, rule_id: str, camera_tag: str, result: bool) -> bool:
+    def post_filter(self, rule_id: str, result: bool) -> bool:
         """Post Trigger filter."""
         ts_now = int(datetime.datetime.now().timestamp() * 1000)
-        self._default_rule_state(rule_id, camera_tag=camera_tag)
-
-        # FIFO, remove oldest
-        conditions: OrderedDict[int, bool] = self._condition_history[rule_id][camera_tag]
-        while len(conditions) > 0 and list(conditions.keys())[0] < ts_now - self._CONTINUOUS_CHECK_INTERVAL:
-            conditions.popitem(last=False)
-
-        last_status = any(list(conditions.values()))
-        conditions[ts_now] = result
-
-        # Check if continuous status(total) same as current, exec only status changed
-        if last_status == result:
-            logger.info(
-                "trigger_post_filter rule-%s_camera-%s: last_status-%s same to current_status-%s, Not Exec",
-                rule_id, camera_tag, last_status, result)
-            return False
+        self._default_rule_state(rule_id)
 
         # Check if the last trigger time is too close
         if (len(self._trigger_history[rule_id]) > 0 and
                 ts_now - self._trigger_history[rule_id][-1] <
                 self._TRIGGER_INTERVAL_MIN):
             logger.info(
-                "trigger_post_filter rule-%s_camera-%s: last_trigger_time-%d "
+                "trigger_post_filter rule-%s: last_trigger_time-%d "
                 "too close to current_trigger_time-%d, Not Exec",
-                rule_id, camera_tag, self._trigger_history[rule_id][-1], ts_now)
+                rule_id, self._trigger_history[rule_id][-1], ts_now)
             return False
 
         # Same rule different condition has been filtered by TRIGGER_INTERVAL_MIN
