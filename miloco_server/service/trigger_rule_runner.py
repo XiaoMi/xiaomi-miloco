@@ -64,7 +64,7 @@ class TriggerRuleRunner:
         self._vision_use_img_count = TRIGGER_RULE_RUNNER_CONFIG["vision_use_img_count"]
         # Per-camera last happened cache: key=(rule_id, camera_did, channel), value=CameraImgSeq
         self._last_happened_cache: Dict[tuple, CameraImgSeq] = {}
-        self._sending_states: Dict[tuple, SendingState] = {}
+        self._sending_states: Dict[str, SendingState] = {}
         logger.info(
             "TriggerRuleRunner init success, trigger_rules: %s", self.trigger_rules
         )
@@ -81,13 +81,11 @@ class TriggerRuleRunner:
         """Remove trigger rule"""
         if rule_id in self.trigger_rules:
             del self.trigger_rules[rule_id]
+            del self._sending_states[key]
         # Clean up cache entries for this rule
         keys_to_remove = [k for k in self._last_happened_cache if k[0] == rule_id]
         for key in keys_to_remove:
             del self._last_happened_cache[key]
-        keys_to_remove = [k for k in self._sending_states if k[0] == rule_id]
-        for key in keys_to_remove:
-            del self._sending_states[key]
 
     async def _periodic_task(self):
         """Scheduled task execution method, runs at configured interval"""
