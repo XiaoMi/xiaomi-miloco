@@ -53,6 +53,7 @@ trigger_rule_runner:
   interval_seconds: 2
   vision_use_img_count: 3
   trigger_rule_log_ttl: 30 #days
+  timeout_seconds: 30
 
 # Camera configuration
 camera:

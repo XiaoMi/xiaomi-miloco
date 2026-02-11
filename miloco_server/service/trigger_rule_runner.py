@@ -39,7 +39,6 @@ from miloco_server.service.trigger_rule_dynamic_executor import START, TriggerRu
 
 logger = logging.getLogger(name=__name__)
 
-TIMEOUT_SECONDS = 30
 
 class TriggerRuleRunner:
     """Trigger service class"""
@@ -341,19 +340,20 @@ class TriggerRuleRunner:
         condition_result_list: List[TriggerConditionResult] = []
         start_time = time.time()
 
+        sending_state = self._sending_states.get(rule.id)
+        if sending_state and sending_state.flag and start_time - sending_state.time < TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"]:
+            logger.warning("%s Rule %s is sending, skip", start_time, rule.id)
+            return []
+        logger.warning("%s Rule %s start check", start_time, rule.id)
+        self._sending_states[rule.id] = SendingState(flag=True, time=start_time)
+
+
         for camera_id in rule.cameras:
             camera_info = camera_info_dict[camera_id]
             channel_motion_dict = camera_motion_dict[camera_id]
             for channel, (if_motion,
                           camera_img_seq) in channel_motion_dict.items():
                 # check sending state flag:
-                sending_state = self._sending_states.get((rule.id, camera_id, channel))
-                if sending_state and sending_state.flag and start_time - sending_state.time < TIMEOUT_SECONDS:
-                    logger.warning("%s Rule %s, camera %s, channel %s is sending, skip", start_time, rule.id, camera_id, channel)
-                    continue
-                logger.warning("%s Rule %s, camera %s, channel %s start check", start_time, rule.id, camera_id, channel)
-                self._sending_states[(rule.id, camera_id, channel)] = SendingState(flag=True, time=start_time)
-
                 if not if_motion or not camera_img_seq:
                     condition_result_list.append(
                         TriggerConditionResult(camera_info=camera_info,
@@ -383,7 +383,7 @@ class TriggerRuleRunner:
              camera_img_seq), response in zip(cameras_video.items(),
                                               responses):
             # remove flag
-            self._sending_states[(rule.id, camera_id, channel)] = SendingState(flag=False, time=start_time)
+            
 
             # Check for exceptions
             if isinstance(response, Exception):
@@ -449,7 +449,8 @@ class TriggerRuleRunner:
                     channel=channel,
                     result=False))
                 continue
-
+        
+        self._sending_states[rule.id] = SendingState(flag=False, time=start_time)
         return condition_result_list
 
     def _check_camera_motion(self, camera_img_seq: CameraImgSeq) -> bool:
