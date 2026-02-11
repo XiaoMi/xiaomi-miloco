@@ -81,7 +81,7 @@ class TriggerRuleRunner:
         """Remove trigger rule"""
         if rule_id in self.trigger_rules:
             del self.trigger_rules[rule_id]
-            del self._sending_states[key]
+            del self._sending_states[rule_id]
         # Clean up cache entries for this rule
         keys_to_remove = [k for k in self._last_happened_cache if k[0] == rule_id]
         for key in keys_to_remove:
@@ -101,26 +101,26 @@ class TriggerRuleRunner:
                 await asyncio.sleep(self._interval_seconds)
 
     async def _check_scheduled_task(self, llm_proxy, enabled_rules):
-        # Calculate all camera motion changes
-        miot_camera_info_dict = await self.miot_proxy.get_cameras()
-        camera_info_dict = {
-            camera_id: CameraInfo.model_validate(miot_camera_info.model_dump())
-            for camera_id, miot_camera_info in miot_camera_info_dict.items()
-        }
-
         # only load used camera in rules
         needed_camera_ids = set()
         for _, rule in enabled_rules:
             needed_camera_ids.update(rule.cameras)
+
+        # Load used camera info
+        miot_camera_info_dict = await self.miot_proxy.get_cameras()
+        camera_info_dict = {
+            camera_id: CameraInfo.model_validate(miot_camera_info.model_dump())
+            for camera_id, miot_camera_info in miot_camera_info_dict.items()
+            if camera_id in needed_camera_ids
+        }
 
         camera_motion_dict: dict[str,
                                  dict[int,
                                       tuple[bool,
                                             Optional[CameraImgSeq]]]] = {}
 
+        # Calculate motion changes
         for camera_id, camera_info in camera_info_dict.items():
-            if camera_id not in needed_camera_ids:
-                continue
             if camera_id not in camera_motion_dict:
                 camera_motion_dict[camera_id] = {}
             for channel in range(camera_info.channel_count or 1):
@@ -326,6 +326,13 @@ class TriggerRuleRunner:
             return (True, True)
         return None
 
+    @staticmethod
+    async def _with_timeout(coro, timeout):
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            return TimeoutError("LLM call timed out")  # 返回异常对象，不是raise
+
     async def _check_trigger_condition(
         self, rule: TriggerRule, llm_proxy: LLMProxy,
         camera_motion_dict: dict[str, dict[int,
@@ -362,7 +369,7 @@ class TriggerRuleRunner:
 
                 cameras_video[camera_id, channel] = camera_img_seq
 
-        # Concurrently execute LLM calls for all cameras
+        # Concurrently execute LLM calls for all cameras  
         tasks = []
         for (camera_id, channel), camera_img_seq in cameras_video.items():
             # Load last happened frames for this camera/channel
@@ -370,22 +377,21 @@ class TriggerRuleRunner:
             messages = TriggerRuleConditionPromptBuilder.build_trigger_rule_prompt(
                 camera_img_seq, rule.condition, self._get_language(),
                 last_happened_img_seq=last_happened_img_seq)
-            task = self._call_vision_understaning(llm_proxy, messages.get_messages())
+            task = self._with_timeout(self._call_vision_understaning(llm_proxy, messages.get_messages()), TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"])
             tasks.append(task)
 
         # Concurrently execute all tasks
         responses = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # if over timeout, return None
-        if time.time() - start_time > TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"]:
-            return []
         
-        # Process results
         for ((camera_id, channel),
              camera_img_seq), response in zip(cameras_video.items(),
                                               responses):
-            # remove flag
-            
+                                              
+            if isinstance(response, TimeoutError):
+                logger.error(
+                    "LLM call timeout for camera %s channel %s", camera_id, channel
+                )
+                continue
 
             # Check for exceptions
             if isinstance(response, Exception):
@@ -426,6 +432,10 @@ class TriggerRuleRunner:
                 logger.info(
                     "Rule %s camera %s channel %s: no action detected (output 0)",
                     rule.name, camera_id, channel)
+                condition_result_list.append(TriggerConditionResult(camera_info=camera_info,
+                                               channel=channel,
+                                               result=False,
+                                               images=None))
                 continue
 
             # Output 1: action triggered, and is a new action(execution needed)
@@ -434,10 +444,10 @@ class TriggerRuleRunner:
                     "Rule %s camera %s channel %s: action triggered, and is a new action(execution needed) (output 1), updating cache and returning True",
                     rule.name, camera_id, channel)
                 self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
-                condition_result_list.append(TriggerConditionResult(
-                    camera_info=camera_info_dict[camera_id],
-                    channel=channel,
-                    result=True))
+                condition_result_list.append(TriggerConditionResult(camera_info=camera_info,
+                                               channel=channel,
+                                               result=True,
+                                               images=camera_img_seq))
                 continue
 
             # Output 2 : action triggered, but is not a new action (No execution needed)
@@ -446,10 +456,10 @@ class TriggerRuleRunner:
                     "Rule %s camera %s channel %s: action triggered, but is not a new action (No execution needed) (output 2), only update cache",
                     rule.name, camera_id, channel)
                 self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
-                condition_result_list.append(TriggerConditionResult(
-                    camera_info=camera_info_dict[camera_id],
-                    channel=channel,
-                    result=False))
+                condition_result_list.append(TriggerConditionResult(camera_info=camera_info,
+                                               channel=channel,
+                                               result=False,
+                                               images=None))
                 continue
         
         self._sending_states[rule.id] = SendingState(flag=False, time=start_time)
