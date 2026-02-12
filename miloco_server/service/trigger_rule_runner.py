@@ -305,10 +305,7 @@ class TriggerRuleRunner:
         Returns:
             LLM response result
         """
-        try:
-            return await asyncio.wait_for(llm_proxy.async_call_llm(messages), timeout=TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"])
-        except asyncio.TimeoutError:
-            return TimeoutError("LLM call timed out")
+        return await asyncio.wait_for(llm_proxy.async_call_llm(messages), timeout=TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"])
 
     @staticmethod
     def _parse_llm_output(content) -> Optional[tuple[bool, bool]]:
@@ -377,6 +374,7 @@ class TriggerRuleRunner:
         for ((camera_id, channel),
              camera_img_seq), response in zip(cameras_video.items(),
                                               responses):
+            logger.warning("Camera %s channel %s LLM response: %s", camera_id, channel, response)
 
             if isinstance(response, TimeoutError):
                 logger.error(
@@ -431,10 +429,9 @@ class TriggerRuleRunner:
                     "Rule %s camera %s channel %s: action triggered, and is a new action(execution needed) (output 1), updating cache and returning True",
                     rule.name, camera_id, channel)
                 self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
-                condition_result_list.append(TriggerConditionResult(camera_info=camera_info,
+                condition_result_list.append(TriggerConditionResult(camera_info=camera_info_dict[camera_id],
                                                channel=channel,
-                                               result=True,
-                                               images=camera_img_seq))
+                                               result=True))
                 continue
 
             # Output 2 : action triggered, but is not a new action (No execution needed)
@@ -445,7 +442,8 @@ class TriggerRuleRunner:
                 self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
                 continue
         
-        self._sending_states[rule.id] = SendingState(flag=False, time=start_time)
+        end_time = time.time()
+        self._sending_states[rule.id] = SendingState(flag=False, time=end_time)
         return condition_result_list
 
     def _check_camera_motion(self, camera_img_seq: CameraImgSeq) -> bool:
