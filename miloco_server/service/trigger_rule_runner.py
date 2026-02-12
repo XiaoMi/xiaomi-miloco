@@ -341,9 +341,9 @@ class TriggerRuleRunner:
 
         sending_state = self._sending_states.get(rule.id)
         if sending_state and sending_state.flag and start_time - sending_state.time < TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"]:
-            logger.warning("%s Rule %s is sending, skip", start_time, rule.id)
+            logger.warning("%s %s Rule %s is sending, skip", start_time, rule.name, rule.id)
             return []
-        logger.warning("%s Rule %s start check", start_time, rule.id)
+        logger.warning("%s %s Rule %s start check", start_time, rule.name, rule.id)
         self._sending_states[rule.id] = SendingState(flag=True, time=start_time)
 
 
@@ -374,7 +374,7 @@ class TriggerRuleRunner:
         for ((camera_id, channel),
              camera_img_seq), response in zip(cameras_video.items(),
                                               responses):
-            logger.warning("Camera %s channel %s LLM response: %s", camera_id, channel, response)
+            logger.warning("Rule %s %s Camera %s channel %s LLM response: %s", rule.id, rule.name, camera_id, channel, response)
 
             if isinstance(response, TimeoutError):
                 logger.error(
