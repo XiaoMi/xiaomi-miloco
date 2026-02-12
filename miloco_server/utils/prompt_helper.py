@@ -105,7 +105,7 @@ class TriggerRuleConditionPromptBuilder:
         for item in user_content:
             if item["type"] == "text":
                 temp_log_output.append(item["text"])
-        logger.warning(f"TriggerRuleConditionPromptBuilder: {temp_log_output}")
+        logger.debug(f"TriggerRuleConditionPromptBuilder: {temp_log_output}")
 
         return chat_history_messages
 

@@ -148,13 +148,14 @@ class TriggerRuleRunner:
             logger.info(
                 "Preparing to check trigger rule: %s %s", rule_id, rule.name)
             task = self._check_trigger_condition(rule, llm_proxy,
-                                                camera_motion_dict,
-                                                camera_info_dict)
+                                                 camera_motion_dict,
+                                                 camera_info_dict)
             tasks.append(task)
             rule_info_list.append((rule_id, rule))
 
         # Concurrently execute all trigger rule checks
-        condition_results = await asyncio.gather(*tasks, return_exceptions=True)
+        condition_results = await asyncio.gather(*tasks, 
+                                                 return_exceptions=True)
 
         return rule_info_list, condition_results, camera_motion_dict
 
@@ -179,14 +180,11 @@ class TriggerRuleRunner:
             return
 
         rule_info_list, condition_results, camera_motion_dict = await self._check_scheduled_task(llm_proxy, enabled_rules)
-        if condition_results is None:
-            logger.info("Check scheduled task empty, Jump to next scheduled task")
-            return
 
         # Process results
         for (rule_id,
-            rule), condition_result_list in zip(rule_info_list,
-                                                condition_results):
+             rule), condition_result_list in zip(rule_info_list,
+                                                 condition_results):
             # Check for exceptions
             if isinstance(condition_result_list, Exception):
                 logger.error(
@@ -218,13 +216,13 @@ class TriggerRuleRunner:
                 execute_result = await self._execute_trigger_action(
                     execute_id, rule, camera_motion_dict)
                 await self._log_rule_execution(execute_id, start_time, rule,
-                                                camera_motion_dict,
-                                                condition_result_list,
-                                                execute_result)
+                                               camera_motion_dict,
+                                               condition_result_list,
+                                               execute_result)
 
-                logger.info(
-                    "Scheduled task completed, checked %d trigger rules", len(enabled_rules)
-                )
+        logger.info(
+            "Scheduled task completed, checked %d trigger rules", len(enabled_rules)
+        )
 
     async def _log_rule_execution(
             self,
@@ -341,9 +339,9 @@ class TriggerRuleRunner:
 
         sending_state = self._sending_states.get(rule.id)
         if sending_state and sending_state.flag and start_time - sending_state.time < TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"]:
-            logger.warning("%s %s Rule %s is sending, skip", start_time, rule.name, rule.id)
+            logger.info("%s %s Rule %s is sending, skip", start_time, rule.name, rule.id)
             return []
-        logger.warning("%s %s Rule %s start check", start_time, rule.name, rule.id)
+        logger.info("%s %s Rule %s start check", start_time, rule.name, rule.id)
         self._sending_states[rule.id] = SendingState(flag=True, time=start_time)
 
 
@@ -374,7 +372,7 @@ class TriggerRuleRunner:
         for ((camera_id, channel),
              camera_img_seq), response in zip(cameras_video.items(),
                                               responses):
-            logger.warning("Rule %s %s Camera %s channel %s LLM response: %s", rule.id, rule.name, camera_id, channel, response)
+            logger.info("Rule %s %s Camera %s channel %s LLM response: %s", rule.id, rule.name, camera_id, channel, response)
 
             if isinstance(response, TimeoutError):
                 logger.error(
