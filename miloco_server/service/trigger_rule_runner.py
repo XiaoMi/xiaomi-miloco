@@ -303,7 +303,7 @@ class TriggerRuleRunner:
         Returns:
             LLM response result
         """
-        return await asyncio.wait_for(llm_proxy.async_call_llm(messages), timeout=TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"])
+        return await asyncio.wait_for(llm_proxy.async_call_llm(messages), timeout=TRIGGER_RULE_RUNNER_CONFIG["request_timeout_seconds"])
 
     @staticmethod
     def _parse_llm_output(content) -> Optional[tuple[bool, bool]]:
@@ -338,110 +338,112 @@ class TriggerRuleRunner:
         start_time = time.time()
 
         sending_state = self._sending_states.get(rule.id)
-        if sending_state and sending_state.flag and start_time - sending_state.time < TRIGGER_RULE_RUNNER_CONFIG["timeout_seconds"]:
+        if sending_state and sending_state.flag and start_time - sending_state.time < TRIGGER_RULE_RUNNER_CONFIG["request_timeout_seconds"]:
             logger.info("%s %s Rule %s is sending, skip", start_time, rule.name, rule.id)
             return []
         logger.info("%s %s Rule %s start check", start_time, rule.name, rule.id)
         self._sending_states[rule.id] = SendingState(flag=True, time=start_time)
 
+        try:
+            for camera_id in rule.cameras:
+                camera_info = camera_info_dict[camera_id]
+                channel_motion_dict = camera_motion_dict[camera_id]
+                for channel, (if_motion,
+                            camera_img_seq) in channel_motion_dict.items():
+                    # check sending state flag:
+                    if not if_motion or not camera_img_seq:
+                        continue
+                    cameras_video[camera_id, channel] = camera_img_seq
 
-        for camera_id in rule.cameras:
-            camera_info = camera_info_dict[camera_id]
-            channel_motion_dict = camera_motion_dict[camera_id]
-            for channel, (if_motion,
-                          camera_img_seq) in channel_motion_dict.items():
-                # check sending state flag:
-                if not if_motion or not camera_img_seq:
-                    continue
-                cameras_video[camera_id, channel] = camera_img_seq
+            # Concurrently execute LLM calls for all cameras  
+            tasks = []
+            for (camera_id, channel), camera_img_seq in cameras_video.items():
+                # Load last happened frames for this camera/channel
+                last_happened_img_seq = self._last_happened_cache.get((rule.id, camera_id, channel))
+                messages = TriggerRuleConditionPromptBuilder.build_trigger_rule_prompt(
+                    camera_img_seq, rule.condition, self._get_language(),
+                    last_happened_img_seq=last_happened_img_seq)
+                task = self._call_vision_understaning(llm_proxy, messages.get_messages())
+                tasks.append(task)
 
-        # Concurrently execute LLM calls for all cameras  
-        tasks = []
-        for (camera_id, channel), camera_img_seq in cameras_video.items():
-            # Load last happened frames for this camera/channel
-            last_happened_img_seq = self._last_happened_cache.get((rule.id, camera_id, channel))
-            messages = TriggerRuleConditionPromptBuilder.build_trigger_rule_prompt(
-                camera_img_seq, rule.condition, self._get_language(),
-                last_happened_img_seq=last_happened_img_seq)
-            task = self._call_vision_understaning(llm_proxy, messages.get_messages())
-            tasks.append(task)
-
-        # Concurrently execute all tasks
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for ((camera_id, channel),
-             camera_img_seq), response in zip(cameras_video.items(),
-                                              responses):
-            logger.info("Rule %s %s Camera %s channel %s LLM response: %s", rule.id, rule.name, camera_id, channel, response)
-
-            if isinstance(response, TimeoutError):
-                logger.error(
-                    "LLM call timeout for camera %s channel %s", camera_id, channel
-                )
-                continue
-
-            # Check for exceptions
-            if isinstance(response, Exception):
-                logger.error(
-                    "LLM call failed for camera %s channel %s: %s", camera_id, channel, response
-                )
-                continue
-
-            # Ensure response is dict type before accessing
-            if not isinstance(response, dict):
-                logger.error(
-                    "Invalid response type for camera %s channel %s: %s", camera_id, channel, type(response)
-                )
-                continue
-
-            content = response["content"]
+            # Concurrently execute all tasks
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
             
-            logger.info(
-                "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, content: %s",
-                rule.name, rule.condition, camera_id, channel, content
-            )
+            for ((camera_id, channel),
+                camera_img_seq), response in zip(cameras_video.items(),
+                                                responses):
+                logger.info("Rule %s %s Camera %s channel %s LLM response: %s", rule.id, rule.name, camera_id, channel, response)
 
-            if not content:
-                continue
+                if isinstance(response, TimeoutError):
+                    logger.error(
+                        "LLM call timeout for camera %s channel %s", camera_id, channel
+                    )
+                    continue
 
-            parsed = self._parse_llm_output(content)
-            if parsed is None:
-                logger.error(
-                    "Invalid LLM output for rule %s camera %s channel %s: "
-                    "expected 0/1/2, got: %s",
-                    rule.name, camera_id, channel, content)
-                continue
+                # Check for exceptions
+                if isinstance(response, Exception):
+                    logger.error(
+                        "LLM call failed for camera %s channel %s: %s", camera_id, channel, response
+                    )
+                    continue
 
-            is_happened, is_same_action = parsed
+                # Ensure response is dict type before accessing
+                if not isinstance(response, dict):
+                    logger.error(
+                        "Invalid response type for camera %s channel %s: %s", camera_id, channel, type(response)
+                    )
+                    continue
 
-            # Output 0: no action detected
-            if not is_happened:
+                content = response["content"]
+                
                 logger.info(
-                    "Rule %s camera %s channel %s: no action detected (output 0)",
-                    rule.name, camera_id, channel)
-                continue
+                    "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, content: %s",
+                    rule.name, rule.condition, camera_id, channel, content
+                )
 
-            # Output 1: action triggered, and is a new action(execution needed)
-            if is_happened and not is_same_action:
-                logger.info(
-                    "Rule %s camera %s channel %s: action triggered, and is a new action(execution needed) (output 1), updating cache and returning True",
-                    rule.name, camera_id, channel)
-                self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
-                condition_result_list.append(TriggerConditionResult(camera_info=camera_info_dict[camera_id],
-                                               channel=channel,
-                                               result=True))
-                continue
+                if not content:
+                    continue
 
-            # Output 2 : action triggered, but is not a new action (No execution needed)
-            if is_happened:
-                logger.info(
-                    "Rule %s camera %s channel %s: action triggered, but is not a new action (No execution needed) (output 2), only update cache",
-                    rule.name, camera_id, channel)
-                self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
-                continue
-        
-        end_time = time.time()
-        self._sending_states[rule.id] = SendingState(flag=False, time=end_time)
+                parsed = self._parse_llm_output(content)
+                if parsed is None:
+                    logger.error(
+                        "Invalid LLM output for rule %s camera %s channel %s: "
+                        "expected 0/1/2, got: %s",
+                        rule.name, camera_id, channel, content)
+                    continue
+
+                is_happened, is_same_action = parsed
+
+                # Output 0: no action detected
+                if not is_happened:
+                    logger.info(
+                        "Rule %s camera %s channel %s: no action detected (output 0)",
+                        rule.name, camera_id, channel)
+                    continue
+
+                # Output 1: action triggered, and is a new action(execution needed)
+                if is_happened and not is_same_action:
+                    logger.info(
+                        "Rule %s camera %s channel %s: action triggered, and is a new action(execution needed) (output 1), updating cache and returning True",
+                        rule.name, camera_id, channel)
+                    self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
+                    condition_result_list.append(TriggerConditionResult(camera_info=camera_info_dict[camera_id],
+                                                channel=channel,
+                                                result=True))
+                    continue
+
+                # Output 2 : action triggered, but is not a new action (No execution needed)
+                if is_happened:
+                    logger.info(
+                        "Rule %s camera %s channel %s: action triggered, but is not a new action (No execution needed) (output 2), only update cache",
+                        rule.name, camera_id, channel)
+                    self._last_happened_cache[(rule.id, camera_id, channel)] = camera_img_seq
+                    continue
+
+        finally:
+            end_time = time.time()
+            self._sending_states[rule.id] = SendingState(flag=False, time=end_time)
+            
         return condition_result_list
 
     def _check_camera_motion(self, camera_img_seq: CameraImgSeq) -> bool:

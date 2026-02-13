@@ -95,7 +95,7 @@ TRIGGER_RULE_RUNNER_CONFIG = {
     "interval_seconds": _config["trigger_rule_runner"]["interval_seconds"],
     "vision_use_img_count": _config["trigger_rule_runner"]["vision_use_img_count"],
     "trigger_rule_log_ttl": _config["trigger_rule_runner"]["trigger_rule_log_ttl"],
-    "timeout_seconds": _config["trigger_rule_runner"]["timeout_seconds"],
+    "request_timeout_seconds": _config["trigger_rule_runner"]["request_timeout_seconds"],
 }
 
 # Camera configuration

@@ -53,7 +53,9 @@ trigger_rule_runner:
   interval_seconds: 2
   vision_use_img_count: 3
   trigger_rule_log_ttl: 30 #days
-  timeout_seconds: 30
+  # Deside the model request timeout seconds in trigger rule decition making
+  # If it always ERROR as timeout, please change your model API provider to a faster one
+  request_timeout_seconds: 30 
 
 # Camera configuration
 camera:
