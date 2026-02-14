@@ -37,7 +37,7 @@ CPU: x64 架构
 操作系统:
   - Linux: x64 架构，建议 Ubuntu 22.04 及以上 LTS 版本
   - Windows: x64 架构，建议 Windows 10 及以上版本，要求支持 WSL2
-  - macOS: 暂不支持
+  - macOS: 支持 Apple Silicon/Intel（MPS 或 CPU 模式，性能以 Apple Silicon 为佳）
 Docker: 20.10 及以上版本，需要支持 docker compose
 NVIDIA 驱动: 支持 CUDA 的 NVIDIA 驱动
 NVIDIA Container Toolkit: 用于Docker GPU支持

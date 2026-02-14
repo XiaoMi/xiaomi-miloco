@@ -16,7 +16,7 @@ AI 引擎：
 - 系统要求：
 - - **Linux**: x86_64 架构，建议 Ubuntu 22.04 及以上 LTS 版本
 - - **Windows**: **WSL2** 下 x86_64 架构，建议 Windows11 22H2 及以上版本
-- - **macOS**: 暂不支持
+- - **macOS**: 支持 Apple Silicon / Intel（Metal/CPU）
 - 显卡要求：
 - - **NVIDIA**：建议30系及以上显卡，显存8G及以上；显卡驱动版本527.41及以上；CUDA版本12.5.1及以上
 - - **AMD**：暂不支持

@@ -34,7 +34,7 @@ models:
     total_context_num: 16384 # Maximum context tokens for all seq sums, Affects the size of VRAM [Recommended rule num * 1000 + 3000]
     context_per_seq: 4096 # Maximum effective context tokens for each seq, multi-turn could use
     chunk_size: 256 # Model seqlen, Affects the size of VRAM [Recommended ≥ 256]
-    device: "cuda" # Model device [cuda/cpu]
+    device: "cuda" # Model device [cuda/mps/cpu]
 
     # Inference parameters
     max_tokens: 512 # Maximum tokens to generate
