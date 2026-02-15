@@ -1,5 +1,13 @@
 # Xiaomi Miloco
 
+
+
+<div align="center">
+<h2><img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /> <font color="red">🎉 Happy New Year! 🎉</font> <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Firecracker.png" alt="🧨" width="30" /></h2>
+
+</div>
+
+
 **Xiaomi Local Copilot** is a future exploration solution for smart homes. Using Xiaomi Home cameras as the source of visual information and a self-developed LLM as its core, it connects all IoT devices throughout the house. Based on the development paradigm of LLM, it enables users to define various family needs and rules in natural language, achieving broader and more creative smart device integration.
 
 <div align="center">
