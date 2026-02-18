@@ -12,11 +12,17 @@
 
 #include "mutil-modal/mtmd.h"
 
-// Simple hash function for strings
-uint64_t simple_hash(const std::string& str);
+class StreamHasher {
+  public:
+    void update(const void* data, size_t size);
+    void update(const std::string& str);
+    std::string digest() const;
 
-// Convert hash to hex string
-std::string hash_to_hex(uint64_t hash);
+  private:
+    static constexpr uint64_t PRIME_ = 0x01000193;
+    static constexpr uint64_t INITIAL_HASH_ = 0x811c9dc5;
+    uint64_t hash_ = INITIAL_HASH_;
+};
 
 std::string get_chunk_description(const mtmd_input_chunk* chunk);
 
