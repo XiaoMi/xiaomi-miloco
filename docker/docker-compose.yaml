@@ -10,11 +10,11 @@ services:
       - AI_ENGINE_LOG_LEVEL=${AI_ENGINE_LOG_LEVEL:-info}
       - TZ=${TZ:-Asia/Shanghai}
     volumes:
-      - ./models:/models
-      - ./log/ai_engine:/app/.log/ai_engine
+      - ../models:/models
+      - ../log/ai_engine:/app/.log/ai_engine
     # NOTICE: If you want to use your own configuration files or models path, please mount them here.
-    #   - ./config/ai_engine_config.yaml:/app/config/ai_engine_config.yaml
-    #   - ./config/prompt_config.yaml:/app/config/prompt_config.yaml
+    #   - ../config/ai_engine_config.yaml:/app/config/ai_engine_config.yaml
+    #   - ../config/prompt_config.yaml:/app/config/prompt_config.yaml
 
     deploy:
       resources:
@@ -42,11 +42,11 @@ services:
       - BACKEND_LOG_LEVEL=${BACKEND_LOG_LEVEL:-info}
       - TZ=${TZ:-Asia/Shanghai}
     volumes:
-      - ./data:/app/miloco_server/.temp
-      - ./log/backend:/app/miloco_server/.temp/log
+      - ../data:/app/miloco_server/.temp
+      - ../log/backend:/app/miloco_server/.temp/log
     # NOTICE: Mount configuration files, if you want to use your own configuration files, please mount them here.
-    #  - ./config/server_config.yaml:/app/config/server_config.yaml
-    #  - ./config/prompt_config.yaml:/app/config/prompt_config.yaml
+    #  - ../config/server_config.yaml:/app/config/server_config.yaml
+    #  - ../config/prompt_config.yaml:/app/config/prompt_config.yaml
     restart: unless-stopped
     healthcheck:
       disable: true

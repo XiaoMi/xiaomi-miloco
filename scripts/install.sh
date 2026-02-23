@@ -715,7 +715,7 @@ is_service_installed() {
         return 1
     fi
     INSTALL_FULL_DIR="${INSTALL_DIR}/${PROJECT_CODE}"
-    if [ -d "${INSTALL_FULL_DIR}" ] && [ -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ]; then
+    if [ -d "${INSTALL_FULL_DIR}" ] && [ -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" ]; then
         # print_log "Service is installed at ${INSTALL_FULL_DIR}, mode: ${INSTALL_MODE}"
         return 0
     else
@@ -727,7 +727,7 @@ is_service_running() {
     if ! is_service_installed; then
         return 1
     fi
-    local installed_status=$(${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ps --services --filter "status=running")
+    local installed_status=$(${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" ps --services --filter "status=running")
     if [ -n "${installed_status}" ]; then
         # print_log "Service is running"
         return 0
@@ -851,7 +851,7 @@ download_docker_images() {
     rm -rf "${INSTALL_FULL_DIR}/${latest_version}"
     unzip "${INSTALL_FULL_DIR}/${latest_version}.zip" -d "${INSTALL_FULL_DIR}/${latest_version}"
     print_log "Loading ${latest_version} docker images..."
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" down || true
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" down || true
     ${DOCKER_CMD} rmi "${DOCKER_IMAGE_BACKEND_NAME}:${latest_version}" 2>/dev/null || true
     ${DOCKER_CMD} rmi "${DOCKER_IMAGE_BACKEND_NAME}:latest" 2>/dev/null || true
     ${DOCKER_CMD} load -i "${INSTALL_FULL_DIR}/${latest_version}/backend.tar"
@@ -1071,26 +1071,29 @@ install_service(){
     print_log "Start installation..."
     mkdir -p "${INSTALL_FULL_DIR}"
     
+    # Create docker directory
+    mkdir -p "${INSTALL_FULL_DIR}/docker"
+    
     print_log "Get docker compose file..."
-    if [ -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ]; then
-        mv "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}.bak"
-        print_info "Backup ${DOCKER_COMPOSE_FILE} file: ${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}.bak"
+    if [ -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" ]; then
+        mv "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}.bak"
+        print_info "Backup ${DOCKER_COMPOSE_FILE} file: ${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}.bak"
     fi
-    if [ -f "${INSTALL_FULL_DIR}/.env" ]; then
-        mv "${INSTALL_FULL_DIR}/.env" "${INSTALL_FULL_DIR}/.env.bak"
-        print_info "Backup .env file: ${INSTALL_FULL_DIR}/.env.bak"
+    if [ -f "${INSTALL_FULL_DIR}/docker/.env" ]; then
+        mv "${INSTALL_FULL_DIR}/docker/.env" "${INSTALL_FULL_DIR}/docker/.env.bak"
+        print_info "Backup .env file: ${INSTALL_FULL_DIR}/docker/.env.bak"
     fi
-    wget -O "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" "${FDS_BASE_URL}/docker-compose-${INSTALL_MODE}.yaml"
-    print_log "Get docker-compose.yaml completed: ${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}"
-    wget -O "${INSTALL_FULL_DIR}/.env" "${FDS_BASE_URL}/.env.example"
-    print_log "Get .env completed: ${INSTALL_FULL_DIR}/.env"
+    wget -O "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" "${FDS_BASE_URL}/docker-compose-${INSTALL_MODE}.yaml"
+    print_log "Get docker-compose.yaml completed: ${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}"
+    wget -O "${INSTALL_FULL_DIR}/docker/.env" "${FDS_BASE_URL}/.env.example"
+    print_log "Get .env completed: ${INSTALL_FULL_DIR}/docker/.env"
     # Replace .env variables
-    sed -i "s/^BACKEND_PORT=.*/BACKEND_PORT=${BACKEND_PORT}/" "${INSTALL_FULL_DIR}/.env"
+    sed -i "s/^BACKEND_PORT=.*/BACKEND_PORT=${BACKEND_PORT}/" "${INSTALL_FULL_DIR}/docker/.env"
     if [ "${INSTALL_MODE}" == "full" ]; then
-        sed -i "s/^AI_ENGINE_PORT=.*/AI_ENGINE_PORT=${AI_ENGINE_PORT}/" "${INSTALL_FULL_DIR}/.env"
+        sed -i "s/^AI_ENGINE_PORT=.*/AI_ENGINE_PORT=${AI_ENGINE_PORT}/" "${INSTALL_FULL_DIR}/docker/.env"
     fi
     if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
-        sed -i 's/^DOCKER_REPO=ghcr\.io\//#DOCKER_REPO=ghcr.io\//' "${INSTALL_FULL_DIR}/.env"
+        sed -i 's/^DOCKER_REPO=ghcr\.io\//#DOCKER_REPO=ghcr.io\//' "${INSTALL_FULL_DIR}/docker/.env"
     fi
     
     if [ "${INSTALL_MODE}" == "full" ]; then
@@ -1120,8 +1123,8 @@ start_service() {
     if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
         download_docker_images
     fi
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" up -d
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ps
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" up -d
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" ps
     print_success "Service started successfully, You can try access the service by clicking on the link below: "
     local ips=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     for ip in $ips; do
@@ -1145,11 +1148,11 @@ update_service() {
     if [ "${INSTALL_FROM}" == "xiaomi-fds" ]; then
         download_docker_images
     else
-        ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" pull
+        ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" pull
     fi
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" down || true
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" up -d
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" ps
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" down || true
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" up -d
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" ps
     local ips=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     for ip in $ips; do
         print_log " 🌐  https://${ip}:${BACKEND_PORT}"
@@ -1173,8 +1176,8 @@ stop_service() {
         return 0
     fi
     print_log "Stopping service..."
-    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}" down
-    print_success "Service stopped successfully: ${INSTALL_FULL_DIR}/${DOCKER_COMPOSE_FILE}"
+    ${DOCKER_CMD} compose -f "${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}" --env-file "${INSTALL_FULL_DIR}/docker/.env" down
+    print_success "Service stopped successfully: ${INSTALL_FULL_DIR}/docker/${DOCKER_COMPOSE_FILE}"
 }
 
 check_service(){
