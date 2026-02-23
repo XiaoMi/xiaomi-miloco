@@ -13,7 +13,10 @@ add_library(${TARGET} OBJECT ${OUTPUT_FILE})
 # if (BUILD_SHARED_LIBS)
     # set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # endif()
-set(LLAMA_COMMON_EXTRA_LIBS build_info)
+if (NOT MSVC)
+    # link an object library in MSVC is not feasible
+    set(LLAMA_COMMON_EXTRA_LIBS build_info)
+endif()
 
 # set(TARGET common)
 set(TARGET llama)
@@ -45,7 +48,9 @@ target_sources(${TARGET} PUBLIC
     speculative.cpp
     speculative.h
     )
-
+if (MSVC)
+    target_sources(${TARGET} PUBLIC ${OUTPUT_FILE})
+endif()
 # if (BUILD_SHARED_LIBS)
     # set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # endif()

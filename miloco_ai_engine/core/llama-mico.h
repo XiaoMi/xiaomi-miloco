@@ -8,7 +8,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef _WIN32
+#ifdef LLAMA_MICO_EXPORTS
+#define LLAMA_MICO_API __declspec(dllexport)
+#else
+#define LLAMA_MICO_API __declspec(dllimport)
+#endif
+#else
 #define LLAMA_MICO_API
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,14 +41,14 @@ extern "C" {
  *   "cache_seq_num": 8,
  * }
  */
-int32_t llama_mico_init(const char *config_json, void **handle);
+LLAMA_MICO_API int32_t llama_mico_init(const char *config_json, void **handle);
 
 /**
  * @brief Free Llama Mico context
  * @param handle Context handle
  * @return 0 on success, -1 on failure
  */
-int32_t llama_mico_free(void *handle);
+LLAMA_MICO_API int32_t llama_mico_free(void *handle);
 
 /**
  * @brief Process initial prompt request (OpenAI compatible format)
@@ -50,8 +58,8 @@ int32_t llama_mico_free(void *handle);
  * @param content Output parameter, returns generated content (error message if return is -1, otherwise normal text)
  * @return 0 on success, -1 on failure
  */
-int32_t llama_mico_request_prompt(void *handle, const char *request_json_str, int32_t *is_finished,
-                                  const char **content);
+LLAMA_MICO_API int32_t llama_mico_request_prompt(void *handle, const char *request_json_str, int32_t *is_finished,
+                                                 const char **content);
 
 /**
  * @brief Generate next token (OpenAI compatible format)
@@ -61,8 +69,8 @@ int32_t llama_mico_request_prompt(void *handle, const char *request_json_str, in
  * @param content Output parameter, returns generated content (error message if return is -1, otherwise normal text)
  * @return 0 on success, -1 on failure
  */
-int32_t llama_mico_request_generate(void *handle, const char *request_json_str, int32_t *is_finished,
-                                    const char **content);
+LLAMA_MICO_API int32_t llama_mico_request_generate(void *handle, const char *request_json_str, int32_t *is_finished,
+                                                   const char **content);
 
 #ifdef __cplusplus
 }
