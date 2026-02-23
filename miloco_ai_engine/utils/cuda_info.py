@@ -18,7 +18,8 @@ PROCESS_SUCESS_CODE = 0
 def get_cuda_memory_info():
     """
     get CUDA memory information
-    return: (total_memory_gb, free_memory_gb, available) or (None, None, False)
+    return: (total_memory_gb, free_memory_gb, available, best_gpu_index)
+            or (None, None, False, 0)
     """
     try:
         result = subprocess.run([
@@ -28,18 +29,38 @@ def get_cuda_memory_info():
 
         if result.returncode == PROCESS_SUCESS_CODE:
             lines = result.stdout.strip().split('\n')
-            if lines and lines[0]:
-                # get the information of the first GPU
-                total_mb, free_mb = lines[0].split(', ')
-                total_gb = float(total_mb) / 1024
-                free_gb = float(free_mb) / 1024
-                return total_gb, free_gb, True
+            best_gpu_index = 0
+            max_free_mb = -1.0
+            best_total_mb = 0.0
+
+            if lines:
+                for idx, line in enumerate(lines):
+                    if not line:
+                        continue
+                    try:
+                        total_mb_str, free_mb_str = line.split(', ')
+                        curr_total_mb = float(total_mb_str)
+                        curr_free_mb = float(free_mb_str)
+                        
+                        if curr_free_mb > max_free_mb:
+                            max_free_mb = curr_free_mb
+                            best_total_mb = curr_total_mb
+                            best_gpu_index = idx
+                    except ValueError:
+                        continue
+                
+                if max_free_mb >= 0:
+                    total_gb = best_total_mb / 1024
+                    free_gb = max_free_mb / 1024
+                    return total_gb, free_gb, True, best_gpu_index
+            
+            return None, None, False, 0
         else:
             logger.error('get CUDA memory information failed: %s', result.stderr)
-            return None, None, False
+            return None, None, False, 0
     except Exception as e: # pylint: disable=broad-exception-caught
         logger.warning('Failed to get CUDA memory info: %s', e)
-        return None, None, False
+        return None, None, False, 0
 
 
 def estimate_vram_usage(model_path: str, mmproj_path: Optional[str], n_ctx: int, n_input: int) -> float:
