@@ -43,10 +43,6 @@ export const processHistorySocketMessages = (session) => {
         if (camera_ids !== undefined) {latestCameraIds = Array.isArray(camera_ids) ? camera_ids : [];}
         if (mcp_list !== undefined) {latestMcpList = Array.isArray(mcp_list) ? mcp_list : [];}
 
-        console.log('extract history record configuration:', {
-          camera_ids: latestCameraIds,
-          mcp_list: latestMcpList,
-        });
 
         currentQuestion = {
           type: 'question',
@@ -61,7 +57,6 @@ export const processHistorySocketMessages = (session) => {
         currentAnswer = null;
         currentAnswerMessages = [];
 
-        console.log('parse user input:', currentQuestion);
       } else if (getMessageIsToastStream(type, namespace, name)) {
         if (!currentQuestion) {
           console.warn('received instruction message but no corresponding user question');
@@ -74,7 +69,6 @@ export const processHistorySocketMessages = (session) => {
           if (getMessageIsToastStream(type, namespace, name)) {
             lastToastStreamIndex = currentAnswerMessages.length - 1;
           } else {
-            console.log('the last message is not a ToastStream message, need to create a new message');
           }
         }
 
@@ -144,7 +138,6 @@ export const processHistorySocketMessages = (session) => {
           const { type, namespace, name } = msg.header;
           const shouldRemove = getMessageIsSaveRuleConfirm(type, namespace, name);
           if (shouldRemove) {
-            console.log('remove history confirm message:', msg.header?.name);
           }
           return !shouldRemove;
         });
@@ -222,10 +215,6 @@ export const processHistorySocketMessages = (session) => {
   } else if (currentQuestion && !currentAnswer) {
     messages.push(currentQuestion);
   }
-  console.log('history record final configuration:', {
-    camera_ids: latestCameraIds,
-    mcp_list: latestMcpList,
-  });
 
   return {
     messages,
