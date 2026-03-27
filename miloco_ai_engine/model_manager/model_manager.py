@@ -315,7 +315,7 @@ class ModelManager():
             raise ModelSchedulerException(result_message.error)
 
     def get_vram_usage(self) -> VramUsage:
-        total, free, available = get_cuda_memory_info()
+        total, free, available, _ = get_cuda_memory_info()
         if available:
             return VramUsage(total=total, free=free)
         return VramUsage(total=0, free=0)

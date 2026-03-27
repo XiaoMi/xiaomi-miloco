@@ -44,6 +44,7 @@ class ModelConfig(BaseModel):
     total_context_num: int = Field(default=4096, description="Context window size")
     chunk_size: int = Field(default=1024, description="Batch size")
     n_gpu_layers: int = Field(default=MAX_CUDA_LAYERS, description="GPU layers, 0 for CPU only")
+    main_gpu: int = Field(default=0, description="Main GPU index")
 
     # Inference parameter defaults
     context_per_seq: int = Field(
