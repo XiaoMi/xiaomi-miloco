@@ -200,7 +200,6 @@ export const useChatStore = create(
         },
 
         handleMcpReconnect: async (serviceId) => {
-          console.log('reconnect MCP service:', serviceId);
           const response = await reconnectMCPService(serviceId);
           if (response?.code === 0) {
             message.success(response?.message || 'reconnect MCP service success');
@@ -274,10 +273,8 @@ export const useChatStore = create(
         handleHistoryClick: async (sessionId) => {
           const { historyList } = get();
           const selectedHistory = historyList.find(item => item.session_id === sessionId);
-          console.log('click history record:', sessionId, selectedHistory);
 
           if (!selectedHistory) {
-            console.error('no corresponding history record');
             return;
           }
 
@@ -299,13 +296,8 @@ export const useChatStore = create(
               return;
             }
 
-            console.log('start loading history record:', session);
-
             if (sessionData && Array.isArray(sessionData)) {
               const { messages, sessionId: historySessionId, latestConfig } = processHistorySocketMessages(sessionData);
-
-              console.log('processed history messages:', messages);
-              console.log('history record configuration:', latestConfig);
 
               set({
                 messages: messages || [],
@@ -319,7 +311,6 @@ export const useChatStore = create(
                 selectedCameraIds: latestConfig?.cameraIds || [],
                 mcpList: latestConfig?.mcpList || [],
               });
-              console.log('✅ sessionId:', historySessionId || sessionId);
             } else {
               message.error('history record format not supported');
             }
@@ -365,13 +356,6 @@ export const useChatStore = create(
             message.warning('please input your question');
             return null;
           }
-
-          console.log('global send message:', {
-            text: inputText,
-            selectedCameraIds,
-            customMcpList,
-            currentMcpList: mcpList,
-          });
 
           startNewRound(inputText);
           setIsScrollToBottom(true);
@@ -453,7 +437,6 @@ export const useChatStore = create(
 
         // global chat operation method
         globalNewChat: () => {
-          console.log('execute global new chat operation');
           // directly use set to execute newChat logic
           set({
             messages: [],
@@ -472,7 +455,6 @@ export const useChatStore = create(
         },
 
         globalCloseMessage: () => {
-          console.log('execute global stop message receive');
           set({
             currentAnswer: null,
             answerMessages: [],

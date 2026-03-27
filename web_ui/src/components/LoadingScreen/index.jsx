@@ -28,7 +28,6 @@ const LoadingScreen = ({ title = 'common.loading', size = 'small', loginUrl = ''
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(loginUrl);
-        console.log('Copied to clipboard1:', loginUrl);
         message.success(t('common.copySuccess'));
       } else {
         const textArea = document.createElement('textarea');

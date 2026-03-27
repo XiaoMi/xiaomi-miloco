@@ -12,17 +12,16 @@ import { useGlobalSocket } from '@/hooks/useGlobalSocket';
  */
 const GlobalSocketProvider = ({ children }) => {
   const isInitialized = useRef(false);
-  // eslint-disable-next-line no-unused-vars
-  const socketActions = useGlobalSocket();
+
+  // Initialize global socket without using the result - socket persists via store subscription
+  useGlobalSocket();
 
   useEffect(() => {
     if (!isInitialized.current) {
-      console.log('GlobalSocketProvider initialized');
       isInitialized.current = true;
     }
 
     return () => {
-      console.log('GlobalSocketProvider clean up');
     };
   }, []);
 

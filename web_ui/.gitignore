@@ -25,3 +25,7 @@ dist-ssr
 
 # SSL certificates
 certs/
+
+# Test coverage
+coverage/
+*.tsbuildinfo

@@ -153,7 +153,6 @@ export const useGlobalSocket = () => {
 
         }
       } else if (getMessageIsCameraImages(type, namespace, name)) {
-        console.log('handle CameraImages message:', JSON.parse(payload));
         addAnswerMessage(messageData);
         setCurrentAnswer({
           type: 'answer'
@@ -187,7 +186,6 @@ export const useGlobalSocket = () => {
             const { type, namespace, name } = msg.header;
             const shouldRemove = getMessageIsSaveRuleConfirm(type, namespace, name);
             if (shouldRemove) {
-              console.log('remove message:', name, 'request_id:', msg?.header?.request_id);
             }
             return !shouldRemove;
           });
@@ -209,7 +207,6 @@ export const useGlobalSocket = () => {
               console.warn('merge camera options failed:', error);
             }
           } else {
-            console.log('no data to merge');
           }
 
           const finalMessages = [...filteredMessages, mergedMessageData];
@@ -278,7 +275,6 @@ export const useGlobalSocket = () => {
     const useSessionId = targetSessionId || sessionId;
     if (useSessionId) {
       params.set('session_id', useSessionId);
-      console.log('global socket connected, using session_id:', useSessionId);
     }
 
     const wsUrl = `${baseUrl}?${params.toString()}`;
@@ -286,7 +282,6 @@ export const useGlobalSocket = () => {
     const socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
-      console.log('global socket connected successfully');
       setSocketStatus(SOCKET_STATUS.CONNECTED);
       setGlobalSocketStatus(SOCKET_STATUS.CONNECTED);
       clearReconnectTimer();
@@ -330,14 +325,12 @@ export const useGlobalSocket = () => {
     };
 
     socket.onclose = (event) => {
-      console.log('global socket connection closed:', event);
       setSocketStatus(SOCKET_STATUS.DISCONNECTED);
       setGlobalSocketStatus(SOCKET_STATUS.DISCONNECTED);
       setIsStreaming(false);
       clearSocketWaitingTimer();
 
       if (event.code !== 1000 && isAnswering && !event.wasClean) {
-        console.log('detected abnormal disconnection, preparing to reconnect...');
         scheduleReconnect(requestId, targetSessionId);
       }
     };
@@ -379,7 +372,6 @@ export const useGlobalSocket = () => {
     const waitForConnection = () => {
       if (socket.readyState === WebSocket.OPEN) {
         const message = createRequestMessage(requestId, sessionId, messageData);
-        console.log('global socket send message:', message);
         socket.send(JSON.stringify(message));
         return requestId;
       } else if (socket.readyState === WebSocket.CONNECTING) {
@@ -404,7 +396,6 @@ export const useGlobalSocket = () => {
 
     try {
       socketRef.send(JSON.stringify(messageData));
-      console.log('send message directly:', messageData);
       return messageData.header?.request_id || generateRequestId();
     } catch (error) {
       console.error('send message failed:', error);
@@ -414,7 +405,6 @@ export const useGlobalSocket = () => {
 
   // disconnect
   const disconnect = useCallback(() => {
-    console.log('disconnect global socket');
     clearReconnectTimer();
 
     if (socketRef) {
@@ -430,7 +420,6 @@ export const useGlobalSocket = () => {
 
   // disconnect but keep session
   const disconnectButKeepSession = useCallback(() => {
-    console.log('disconnect global socket but keep session:', sessionId);
     clearReconnectTimer();
 
     if (socketRef) {
@@ -446,7 +435,6 @@ export const useGlobalSocket = () => {
 
   // reset session
   const resetSession = useCallback(() => {
-    console.log('reset global socket session');
     disconnect();
     setSessionId(null);
     setCurrentRequestId(null);
@@ -459,7 +447,6 @@ export const useGlobalSocket = () => {
     const currentState = useChatStore.getState();
     if (currentState.messages.length > 0 || currentState.isAnswering) {
       saveTempChatState(currentState);
-      console.log('save chat state to temporary storage');
     }
   }, []);
 
@@ -480,7 +467,6 @@ export const useGlobalSocket = () => {
 
   // global new chat
   const globalNewChat = useCallback(() => {
-    console.log('global socket: execute new chat operation');
     const { globalNewChat: storeGlobalNewChat } = useChatStore.getState();
     const result = storeGlobalNewChat();
 
@@ -492,7 +478,6 @@ export const useGlobalSocket = () => {
   }, [resetSession]);
 
   const globalCloseMessage = useCallback(() => {
-    console.log('global socket: execute stop message receive operation');
     const { globalCloseMessage: storeGlobalCloseMessage } = useChatStore.getState();
     const result = storeGlobalCloseMessage();
 
@@ -509,7 +494,6 @@ export const useGlobalSocket = () => {
     if (handleGlobalSocketMessage) {
       handleGlobalSocketMessage(messageData);
     } else {
-      console.log('global message processing logic not exist');
     }
   }, [handleGlobalSocketMessage]);
 
