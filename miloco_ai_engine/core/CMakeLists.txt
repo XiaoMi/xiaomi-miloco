@@ -8,6 +8,11 @@ add_library(llama-mico SHARED ${LIB_SOURCE_FILES})
 set(THIRD_PARTY_PATH ${PROJECT_SOURCE_DIR}/../../third_party)
 set(LLAMA_THIRD_PARTY_PATH ${THIRD_PARTY_PATH}/llama.cpp)
 
+if(MSVC)
+    target_compile_features(llama-mico PRIVATE cxx_std_17)
+    target_compile_definitions(llama-mico PRIVATE LLAMA_MICO_EXPORTS)
+endif()
+
 include_directories(${PROJECT_SOURCE_DIR}
                     ${PROJECT_SOURCE_DIR}/utils
                     ${PROJECT_SOURCE_DIR}/cache_manager

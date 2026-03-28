@@ -47,12 +47,27 @@ class LibraryManager:
             raise InvalidArgException(f"Library directory not found: {lib_dir}")
         return lib_dir
 
+    def _add_search_path(self):
+        """Add necessary search paths to load llama-mico dependencies.
+
+        On Windows, the CUDA_PATH would not search by default, we need to add it
+        explicitly.
+        """
+        if os.name != "nt":
+            return
+        cuda_path = os.environ.get("CUDA_PATH")
+        if not cuda_path or not os.path.exists(cuda_path):
+            return
+        os.add_dll_directory(os.path.join(cuda_path, "bin/x64"))
+        os.add_dll_directory(os.path.join(cuda_path, "bin"))
+
     def _load_library(self) -> Optional[ctypes.CDLL]:
         """Load library"""
         if self._library is not None:
             return self._library
 
         # Get library path
+        self._add_search_path()
         lib_dir = self._get_library_path()
         # Library name list
         library_names = [
