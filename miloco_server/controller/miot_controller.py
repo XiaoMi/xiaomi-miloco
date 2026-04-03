@@ -5,6 +5,7 @@
 Xiaomi IoT controller
 Handles Xiaomi IoT device login, authorization, and device management
 """
+import asyncio
 import logging
 import os
 from collections import OrderedDict
@@ -367,3 +368,45 @@ async def video_stream_websocket(
         if cid:
             await miot_video_stream_manager.close_connection(
                 user_name=current_user, token_hash=token_hash,camera_id=camera_id, channel=channel, cid=cid)
+
+
+@router.websocket("/ws/mjpeg_stream")
+async def mjpeg_stream_websocket(
+    websocket: WebSocket,
+    camera_id: str,
+    channel: int = 0,
+    current_user: str = Depends(verify_websocket_token)
+):
+    """MJPEG video stream WebSocket - sends decoded JPEG frames."""
+    logger.info("MJPEG WebSocket connection, %s, %s.%d", current_user, camera_id, channel)
+    await websocket.accept()
+
+    proxy = manager.miot_service._miot_proxy
+    camera_handler = proxy._camera_img_managers.get(camera_id)
+    if not camera_handler:
+        await websocket.close(code=1008, reason="Camera not found")
+        return
+
+    queue = asyncio.Queue(maxsize=5)
+
+    async def jpg_callback(did, data, ts, ch):
+        try:
+            queue.put_nowait(data)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            queue.put_nowait(data)
+
+    reg_id = await camera_handler.miot_camera_instance.register_decode_jpg_async(
+        jpg_callback, channel, multi_reg=True)
+
+    try:
+        while True:
+            data = await queue.get()
+            await websocket.send_bytes(data)
+    except (WebSocketDisconnect, Exception) as err:
+        logger.info("MJPEG WebSocket closed, %s.%d: %s", camera_id, channel, err)
+    finally:
+        await camera_handler.miot_camera_instance.unregister_decode_jpg_async(channel, reg_id)
