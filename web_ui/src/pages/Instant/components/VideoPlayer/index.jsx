@@ -11,7 +11,6 @@ import DefaultCameraBg from '@/assets/images/default-camera-bg.png'
 
 /**
  * Detect video codec from binary data
- * 从二进制数据中检测视频编码格式
  *
  * @param {Uint8Array} data - Binary video data
  * @returns {string} Detected codec type ('h264', 'h265', or 'unknown')
@@ -35,17 +34,42 @@ const detectCodec = (data) => {
 }
 
 /**
- * VideoPlayer Component - WebCodecs-based video player for camera streams
- * 视频播放器组件 - 基于WebCodecs的摄像头流视频播放器
- *
- * @param {Object} props - Component props
- * @param {string} [props.codec='avc1.42E01E'] - Video codec format
- * @param {string} [props.poster] - Poster image URL
- * @param {Object} [props.style] - Custom style object
- * @param {string} props.cameraId - Camera device ID
- * @param {number} [props.channel=0] - Camera channel number
- * @param {Function} [props.onCanvasRef] - Canvas ref callback function
- * @returns {JSX.Element} Video player component
+ * Check if the data is a key frame
+ */
+const isKeyFrame = (data, codec) => {
+  if (codec.startsWith('avc1') || codec.startsWith('h264')) {
+    let i = 0;
+    while (i < data.length - 4) {
+      if (
+        data[i] === 0x00 && data[i + 1] === 0x00 &&
+        ((data[i + 2] === 0x00 && data[i + 3] === 0x01) || data[i + 2] === 0x01)
+      ) {
+        const nalUnitType = data[i + 2] === 0x01 ? data[i + 3] & 0x1f : data[i + 4] & 0x1f;
+        return nalUnitType === 5;
+      }
+      i++;
+    }
+    return false;
+  } else if (codec.startsWith('hvc1') || codec.startsWith('hev1') || codec.startsWith('h265')) {
+    let i = 0;
+    while (i < data.length - 6) {
+      if (
+        data[i] === 0x00 && data[i + 1] === 0x00 &&
+        ((data[i + 2] === 0x00 && data[i + 3] === 0x01) || data[i + 2] === 0x01)
+      ) {
+        const nalStart = data[i + 2] === 0x01 ? i + 3 : i + 4;
+        const nalUnitType = (data[nalStart] >> 1) & 0x3f;
+        if ([16, 17, 18, 19, 20].includes(nalUnitType)) {return true;}
+      }
+      i++;
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * VideoPlayer Component - WebCodecs-based video player with MJPEG fallback
  */
 const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, onCanvasRef, onPlay }) => {
   const { t } = useTranslation();
@@ -56,89 +80,22 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
   const [error, setError] = useState(null)
   const [show, setShow] = useState(false)
   const [isSupported, setIsSupported] = useState(null)
-  const [autoCodec, setAutoCodec] = useState(null);
+  const autoCodecRef = useRef(null)
+  const mjpegModeRef = useRef(false)
 
-  // detect WebCodecs support
   useEffect(() => {
     const checkSupport = () => {
-      console.log('Current environment:', {
-        userAgent: navigator.userAgent,
-        isSecureContext: window.isSecureContext,
-        location: window.location.href,
-        hasWindow: typeof window !== 'undefined',
-        windowType: typeof window
-      })
-
       const supported = (
         typeof window !== 'undefined' &&
         'VideoDecoder' in window &&
         'VideoFrame' in window &&
         'ImageBitmap' in window
       )
-
-      console.log('WebCodecs API detection:', {
-        hasWindow: typeof window !== 'undefined',
-        hasVideoDecoder: typeof window !== 'undefined' && 'VideoDecoder' in window,
-        hasVideoFrame: typeof window !== 'undefined' && 'VideoFrame' in window,
-        hasImageBitmap: typeof window !== 'undefined' && 'ImageBitmap' in window,
-        supported
-      })
-
-      if (!supported) {
-        console.warn('⚠️ WebCodecs not supported, possible reasons:')
-        console.warn('1. WebCodecs is not supported in this browser (Chrome 94+, Edge 94+)')
-        console.warn('2. Vite hot update environment limit, please try to force refresh the page (F5)')
-        console.warn('3. WebCodecs needs to be enabled in chrome://flags')
-        console.warn('4. Needs HTTPS or localhost environment')
-      }
-
       setIsSupported(supported)
       return supported
     }
-
     checkSupport()
   }, [])
-
-  /**
-   * Check if the data is a key frame
-   * @param {Uint8Array} data - Binary video data
-   * @param {string} codec - Video codec format
-   * @returns {boolean} Whether the data is a key frame
-   */
-  const isKeyFrame = (data, codec) => {
-    if (codec.startsWith('avc1') || codec.startsWith('h264')) {
-      // H264
-      let i = 0;
-      while (i < data.length - 4) {
-        if (
-          data[i] === 0x00 && data[i + 1] === 0x00 &&
-          ((data[i + 2] === 0x00 && data[i + 3] === 0x01) || data[i + 2] === 0x01)
-        ) {
-          const nalUnitType = data[i + 2] === 0x01 ? data[i + 3] & 0x1f : data[i + 4] & 0x1f;
-          return nalUnitType === 5;
-        }
-        i++;
-      }
-      return false;
-    } else if (codec.startsWith('hvc1') || codec.startsWith('hev1') || codec.startsWith('h265')) {
-      // H265/HEVC
-      let i = 0;
-      while (i < data.length - 6) {
-        if (
-          data[i] === 0x00 && data[i + 1] === 0x00 &&
-          ((data[i + 2] === 0x00 && data[i + 3] === 0x01) || data[i + 2] === 0x01)
-        ) {
-          const nalStart = data[i + 2] === 0x01 ? i + 3 : i + 4;
-          const nalUnitType = (data[nalStart] >> 1) & 0x3f;
-          if ([16, 17, 18, 19, 20].includes(nalUnitType)) {return true;}
-        }
-        i++;
-      }
-      return false;
-    }
-    // default to handle key frame
-    return true;
-  }
 
   useEffect(() => {
     if (onCanvasRef && canvasRef.current) {
@@ -147,159 +104,215 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
   }, [onCanvasRef, show])
 
   useEffect(() => {
-    const init = async () => {
-      if (!cameraId || isSupported === null) {return} // wait for support detection to complete
-
-      if (isFirefox()) {
-        setError(t('instant.deviceList.browserNotSupport'))
-        message.error(t('instant.deviceList.browserNotSupport'))
-        onPlay && onPlay()
-        return
-      }
-
-      if (!isSupported) {
-        setError(t('instant.deviceList.deviceNotSupport'))
-        message.error(t('instant.deviceList.deviceNotSupport'))
-        onPlay && onPlay()
-        return
-      }
-
+    const cleanup = () => {
       if (wsRef.current) {
-        try {
-          wsRef.current.close && wsRef.current.close();
-        } catch (e) {
-          console.error('Close WebSocket exception:', e);
-        }
+        try { wsRef.current.close && wsRef.current.close(1000, 'close_by_user'); } catch (e) {}
         wsRef.current = null;
       }
       if (decoderRef.current) {
-        try {
-          decoderRef.current.close && decoderRef.current.close();
-        } catch (e) {
-          if (e.name !== 'InvalidStateError') {
-            console.error('Close VideoDecoder exception:', e);
-          }
-        }
+        try { decoderRef.current.close && decoderRef.current.close(); } catch (e) {}
         decoderRef.current = null;
       }
+    }
+
+    const startMjpegStream = async () => {
+      cleanup()
       const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const wsUrl = `${wsProtocol}://${window.location.host}${import.meta.env.VITE_API_BASE || ''}/api/miot/ws/video_stream?camera_id=${encodeURIComponent(cameraId)}&channel=${encodeURIComponent(channel)}`
+      const wsUrl = `${wsProtocol}://${window.location.host}${import.meta.env.VITE_API_BASE || ''}/api/miot/ws/mjpeg_stream?camera_id=${encodeURIComponent(cameraId)}&channel=${encodeURIComponent(channel)}`
+
+      console.log('Starting MJPEG stream for camera:', cameraId)
       setLoading(true)
       setError(null)
       setShow(false)
       let ready = false
       const canvas = canvasRef.current
       const ctx = canvas.getContext('2d')
-      await sleep(1000)
 
-      // here assume wsUrl pushes H264 AnnexB format
       wsRef.current = new window.WebSocket(wsUrl)
       wsRef.current.binaryType = 'arraybuffer'
 
-      // connection failed handling
-      wsRef.current.onerror = (err) => {
-        console.log('video player: WebSocket connection failed', err)
+      wsRef.current.onerror = () => {
         setError(t('instant.deviceList.deviceConnectFailed'))
         message.error(t('instant.deviceList.deviceConnectFailed'))
-        wsRef.current && wsRef.current?.close?.()
         onPlay && onPlay()
       }
-      // connection closed handling
       wsRef.current.onclose = (event) => {
-        console.log('video player: WebSocket connection closed')
-        if (!error) {
-          setError(t('instant.deviceList.deviceConnectClosed'))
-          // message.error(t('instant.deviceList.deviceConnectClosed'))
+        if (event.reason !== 'close_by_user') {
+          onPlay && onPlay()
         }
-        const { reason = '' } = event;
-        if (reason !== 'close_by_user') {
+      }
+      wsRef.current.onmessage = (e) => {
+        if (!(e.data instanceof ArrayBuffer)) return
+        const blob = new Blob([e.data], { type: 'image/jpeg' })
+        const url = URL.createObjectURL(blob)
+        const img = new Image()
+        img.onload = () => {
+          canvas.width = img.naturalWidth
+          canvas.height = img.naturalHeight
+          ctx.drawImage(img, 0, 0)
+          URL.revokeObjectURL(url)
+          if (!ready) {
+            setLoading(false)
+            setShow(true)
+            if (onCanvasRef && canvasRef.current) {
+              onCanvasRef(canvasRef)
+            }
+            ready = true
+          }
+        }
+        img.onerror = () => URL.revokeObjectURL(url)
+        img.src = url
+      }
+    }
+
+    const startWebCodecsStream = async () => {
+      cleanup()
+      autoCodecRef.current = null
+
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const wsUrl = `${wsProtocol}://${window.location.host}${import.meta.env.VITE_API_BASE || ''}/api/miot/ws/video_stream?camera_id=${encodeURIComponent(cameraId)}&channel=${encodeURIComponent(channel)}`
+
+      setLoading(true)
+      setError(null)
+      setShow(false)
+      let ready = false
+      let decoderReady = false
+      let waitForKeyFrame = true
+      let decodeFailed = false
+      const canvas = canvasRef.current
+      const ctx = canvas.getContext('2d')
+      await sleep(1000)
+
+      wsRef.current = new window.WebSocket(wsUrl)
+      wsRef.current.binaryType = 'arraybuffer'
+
+      wsRef.current.onerror = () => {
+        setError(t('instant.deviceList.deviceConnectFailed'))
+        message.error(t('instant.deviceList.deviceConnectFailed'))
+        onPlay && onPlay()
+      }
+      wsRef.current.onclose = (event) => {
+        if (!decodeFailed && event.reason !== 'close_by_user') {
           onPlay && onPlay()
         }
       }
 
-      decoderRef.current = new window.VideoDecoder({
-        output: frame => {
-          createImageBitmap(frame).then(bitmap => {
-            canvas.width = frame.codedWidth
-            canvas.height = frame.codedHeight
-            ctx.drawImage(bitmap, 0, 0)
-            frame.close()
-            bitmap.close && bitmap.close()
-            if (!ready) {
-              setLoading(false)
-              setShow(true)
-              if (onCanvasRef && canvasRef.current) {
-                onCanvasRef(canvasRef)
-              }
-              // handleReady()
-              ready = true
-            }
-          })
-        },
-        error: () => {
-          setError(t('instant.deviceList.deviceDecodeFailed'))
-          message.error(t('instant.deviceList.deviceDecodeFailed'))
-        }
-      })
-      decoderRef.current.configure({
-        codec,
-        hardwareAcceleration: 'prefer-hardware',
-      })
-      wsRef.current.onmessage = e => {
-        if (e.data instanceof ArrayBuffer) {
-          const uint8 = new Uint8Array(e.data);
-          if (!autoCodec) {
-            const detected = detectCodec(uint8);
-            if (detected !== 'unknown') {
-              setAutoCodec(detected === 'h264' ? 'avc1.42E01E' : 'hvc1.1.6.L93.B0');
-            }
-          }
-          const useCodec = autoCodec || codec;
-          if (decoderRef.current._waitForKeyFrame === undefined) {
-            decoderRef.current._waitForKeyFrame = true;
-          }
-          const isKey = isKeyFrame(uint8, useCodec);
+      wsRef.current.onmessage = async (e) => {
+        if (!(e.data instanceof ArrayBuffer) || decodeFailed) return
+        const uint8 = new Uint8Array(e.data)
 
-          if (decoderRef.current._waitForKeyFrame) {
-            if (!isKey) {
-              return;
-            } else {
-              decoderRef.current._waitForKeyFrame = false;
-            }
-          }
+        if (!autoCodecRef.current) {
+          const detected = detectCodec(uint8)
+          if (detected === 'unknown') return
+
+          const codecStr = detected === 'h264' ? 'avc1.42E01E' : 'hev1.1.6.L120.B0'
+          console.log('Detected codec:', detected, '->', codecStr)
+
+          // Check if browser supports this codec
           try {
-            decoderRef.current.decode(new EncodedVideoChunk({
-              type: isKey ? 'key' : 'delta',
-              timestamp: performance.now(),
-              data: uint8
-            }))
+            const support = await VideoDecoder.isConfigSupported({
+              codec: codecStr,
+              hardwareAcceleration: 'prefer-hardware',
+            })
+            if (!support.supported) {
+              console.warn('Codec not supported, falling back to MJPEG:', codecStr)
+              decodeFailed = true
+              mjpegModeRef.current = true
+              startMjpegStream()
+              return
+            }
           } catch (err) {
-            setError(t('instant.deviceList.deviceDecodeFailed'))
+            console.warn('isConfigSupported failed, falling back to MJPEG:', err)
+            decodeFailed = true
+            mjpegModeRef.current = true
+            startMjpegStream()
+            return
           }
+
+          autoCodecRef.current = codecStr
+          try {
+            decoderRef.current = new window.VideoDecoder({
+              output: frame => {
+                createImageBitmap(frame).then(bitmap => {
+                  canvas.width = frame.codedWidth
+                  canvas.height = frame.codedHeight
+                  ctx.drawImage(bitmap, 0, 0)
+                  frame.close()
+                  bitmap.close && bitmap.close()
+                  if (!ready) {
+                    setLoading(false)
+                    setShow(true)
+                    if (onCanvasRef && canvasRef.current) {
+                      onCanvasRef(canvasRef)
+                    }
+                    ready = true
+                  }
+                })
+              },
+              error: (err) => {
+                console.error('VideoDecoder error, falling back to MJPEG:', err)
+                decodeFailed = true
+                mjpegModeRef.current = true
+                startMjpegStream()
+              }
+            })
+            decoderRef.current.configure({
+              codec: codecStr,
+              hardwareAcceleration: 'prefer-hardware',
+            })
+            decoderReady = true
+          } catch (err) {
+            console.error('Create decoder failed, falling back to MJPEG:', err)
+            decodeFailed = true
+            mjpegModeRef.current = true
+            startMjpegStream()
+            return
+          }
+        }
+
+        if (!decoderReady || !decoderRef.current) return
+
+        const isKey = isKeyFrame(uint8, autoCodecRef.current)
+        if (waitForKeyFrame) {
+          if (!isKey) return
+          waitForKeyFrame = false
+        }
+
+        try {
+          decoderRef.current.decode(new EncodedVideoChunk({
+            type: isKey ? 'key' : 'delta',
+            timestamp: performance.now(),
+            data: uint8
+          }))
+        } catch (err) {
+          console.error('Decode error, falling back to MJPEG:', err)
+          decodeFailed = true
+          mjpegModeRef.current = true
+          startMjpegStream()
         }
       }
     }
+
+    const init = async () => {
+      if (!cameraId || isSupported === null) return
+
+      if (isFirefox()) {
+        // Firefox doesn't support WebCodecs, use MJPEG directly
+        mjpegModeRef.current = true
+        startMjpegStream()
+        return
+      }
+
+      if (!isSupported || mjpegModeRef.current) {
+        startMjpegStream()
+        return
+      }
+
+      startWebCodecsStream()
+    }
+
     init()
-    return () => {
-      if (wsRef.current) {
-        try {
-          wsRef.current.close && wsRef.current.close(1000, 'close_by_user');
-        } catch (e) {
-          console.error('Close WebSocket exception:', e);
-        }
-        wsRef.current = null;
-      }
-      if (decoderRef.current) {
-        try {
-          decoderRef.current.close && decoderRef.current.close();
-        } catch (e) {
-          if (e.name !== 'InvalidStateError') {
-            console.error('Close VideoDecoder exception:', e);
-          }
-        }
-        decoderRef.current = null;
-      }
-    }
+    return cleanup
   }, [codec, isSupported, cameraId, channel])
 
   return (
