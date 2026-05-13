@@ -91,10 +91,9 @@ For issue reporting, please participate through the following methods:
 ### Technical Discussion
 
 - GitHub [Discussions](https://github.com/XiaoMi/xiaomi-miloco/discussions/)
-- Project Discussion Group (WeChat、Lark):
+- Project Discussion Group (Lark):
 
   <img src="assets/images/miloco_feishu.jpeg" width="45%" />
-  <img src="assets/images/miloco_wechat_latest.png" width="45%" />
 
 
 
