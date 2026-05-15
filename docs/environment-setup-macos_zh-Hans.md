@@ -12,6 +12,8 @@ macOS （M 系列和 Intel 系列）下服务支持两种方式运行：
 - GitHub 克隆代码直接运行
 - 虚拟机下 Docker 运行
 
+> AI 引擎已通过 ggml 的 MPS/CPU 后端支持 Apple Silicon/Intel。建议在 Apple Silicon 上使用 `scripts/ai_engine_metal_build.sh` 编译核心，配置里设置 `device: "mps"`，并设置 `DYLD_LIBRARY_PATH=project_root/output/lib`。
+
 下述教程以 macOS Tahoe 26.1 为例，介绍如何在 Docker 下运行本服务，克隆代码直接运行服务在开发指南中已经介绍，在此不做赘述。
 
 ## 环境配置

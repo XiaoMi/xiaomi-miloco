@@ -11,6 +11,7 @@ MAX_CUDA_LAYERS = 50
 class ModelDevice(Enum):
     CPU = "cpu"
     CUDA = "cuda"
+    MPS = "mps"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -60,7 +61,9 @@ class ModelConfig(BaseModel):
 
         self.n_seq_max = data.get("cache_seq_num", 0) + data.get("parallel_seq_num", 6)
         device = data.get("device", "cpu")
-        self.n_gpu_layers = MAX_CUDA_LAYERS if ModelDevice(device) == ModelDevice.CUDA else 0
+        model_device = ModelDevice(device)
+        # MPS backend in ggml uses the same n_gpu_layers semantics as CUDA.
+        self.n_gpu_layers = MAX_CUDA_LAYERS if model_device in (ModelDevice.CUDA, ModelDevice.MPS) else 0
 
         business = data.get("business", {})
         task_labels = business.get("task_labels", [])
@@ -74,7 +77,7 @@ class ModelConfig(BaseModel):
         """
         Update model configuration
         """
-        self.n_gpu_layers = MAX_CUDA_LAYERS if config_update.device == ModelDevice.CUDA else 0
+        self.n_gpu_layers = MAX_CUDA_LAYERS if config_update.device in (ModelDevice.CUDA, ModelDevice.MPS) else 0
         self.cache_seq_num = config_update.cache_seq_num
         self.n_seq_max = self.cache_seq_num + config_update.parallel_seq_num
 

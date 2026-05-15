@@ -135,11 +135,15 @@ After the service starts, you can access the API documentation at: `https://<you
 # Install dependencies
 pip install -e miloco_ai_engine
 
-# Build core
+# Build core (choose one)
+# - Linux/WSL2 with NVIDIA GPU: use CUDA build
+# - macOS (Apple Silicon): use MPS build (device: "mps" in config)
 bash scripts/ai_engine_cuda_build.sh
+# bash scripts/ai_engine_metal_build.sh
 
 # Configure dynamic library path
 export LD_LIBRARY_PATH=project_root/output/lib:$LD_LIBRARY_PATH
+# macOS: export DYLD_LIBRARY_PATH=project_root/output/lib:$DYLD_LIBRARY_PATH
 
 # Run service
 python scripts/start_ai_engine.py
