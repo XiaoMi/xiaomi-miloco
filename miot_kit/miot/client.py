@@ -321,7 +321,7 @@ class MIoTClient:
 
         # Update lan information.
         lan_devices = await self._lan_client.get_devices_async()
-        for did in self._device_buffer.keys():
+        for did in list(self._device_buffer.keys()):
             if did not in devices:
                 self._device_buffer.pop(did, None)
                 continue
