@@ -27,8 +27,10 @@ English | [简体中文](README.zh_Hans.md)
 
 - **Hardware Requirements**
 ```Plain Text
-CPU: x64 architecture
-Graphics Card: NVIDIA 30 series and above, 8GB VRAM minimum (recommended 12GB and above)
+CPU: x64 architecture (Linux/Windows) or ARM64 (macOS Apple Silicon)
+Graphics Card:
+  - NVIDIA 30 series and above, 8GB VRAM minimum (recommended 12GB and above)
+  - Apple Silicon (M1/M2/M3/M4), 16GB+ unified memory recommended
 Storage: Recommended 16GB or more available space (for local model storage)
 ```
 
@@ -37,10 +39,10 @@ Storage: Recommended 16GB or more available space (for local model storage)
 Operating System:
   - Linux: x64 architecture, recommended Ubuntu 22.04 and above LTS versions
   - Windows: x64 architecture, recommended Windows 10 and above, requires WSL2 support
-  - macOS: Not currently supported
-Docker: Version 20.10 and above, requires docker compose support
-NVIDIA Driver: NVIDIA driver with CUDA support
-NVIDIA Container Toolkit: For Docker GPU support
+  - macOS: ARM64 (Apple Silicon), macOS 13 or later, native Metal GPU support
+Docker: Version 20.10 and above, requires docker compose support (Linux/Windows only)
+NVIDIA Driver: NVIDIA driver with CUDA support (Linux/Windows only)
+NVIDIA Container Toolkit: For Docker GPU support (Linux/Windows only)
 ```
 
 ### Install
@@ -60,7 +62,14 @@ bash scripts/install.sh
 ```
 For detailed installation steps, please refer to the [Docker Deployment Documentation](docs/environment-setup.md).
 
-**Install with source code**  
+**Install with source code (macOS Apple Silicon)**
+```bash
+git clone https://github.com/XiaoMi/xiaomi-miloco.git
+cd xiaomi-miloco
+bash scripts/install_macos.sh
+```
+
+**Install with source code (Linux / other)**
 For source code installation steps, please refer to the [Development Guide](docs/development/developer-setup.md).
 
 ## Usage Documentation

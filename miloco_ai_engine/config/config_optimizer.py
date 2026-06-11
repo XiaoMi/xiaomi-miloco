@@ -6,12 +6,20 @@ Configuration optimizer module
 Dynamically adjusts model configuration based on system resources in loading time
 """
 
+import platform
 from enum import Enum
 from miloco_ai_engine.config.config_info import ModelConfig, ModelConfigUpdate, ModelDevice
-from miloco_ai_engine.utils.cuda_info import get_cuda_memory_info
+from miloco_ai_engine.utils.cuda_info import get_gpu_memory_info
 from miloco_ai_engine.config.config import AUTO_OPT_VRAM
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _get_gpu_device() -> ModelDevice:
+    """Return the appropriate GPU ModelDevice for the current platform."""
+    if platform.system() == "Darwin":
+        return ModelDevice.METAL
+    return ModelDevice.CUDA
 
 LOW_MEMORY_THRESHOLD = 0.5  # Low VRAM threshold (GB)
 SMALL_MEMORY_THRESHOLD = 8  # Small VRAM threshold (GB)
@@ -24,6 +32,8 @@ PROCESS_SUCESS_CODE = 0
 DEFAULT_SUPPORT_MIMO_VL_NAME = "MiMo-VL-Miloco-7B:Q4_0"
 DEFAULT_SUPPORT_QWEN3_NAME = "Qwen3-8b:Q4_0"
 
+_GPU_DEVICE = _get_gpu_device()
+
 DEFAULT_NO_GPU_MIMO_CONFIG_UPDATE = ModelConfigUpdate(
     device=ModelDevice.CPU,
     cache_seq_num=3,
@@ -32,7 +42,7 @@ DEFAULT_NO_GPU_MIMO_CONFIG_UPDATE = ModelConfigUpdate(
     chunk_size=256
 )
 LOW_MODE_MIMO_CONFIG_UPDATE = ModelConfigUpdate(
-    device=ModelDevice.CUDA,
+    device=_GPU_DEVICE,
     cache_seq_num=3,
     parallel_seq_num=8,
     total_context_num=8192,
@@ -40,7 +50,7 @@ LOW_MODE_MIMO_CONFIG_UPDATE = ModelConfigUpdate(
 )
 SMALL_MODE_MIMO_CONFIG_UPDATE = LOW_MODE_MIMO_CONFIG_UPDATE
 MEDIUM_MODE_MIMO_CONFIG_UPDATE = ModelConfigUpdate(
-    device=ModelDevice.CUDA,
+    device=_GPU_DEVICE,
     cache_seq_num=5,
     parallel_seq_num=12,
     total_context_num=16384,
@@ -56,7 +66,7 @@ DEFAULT_NO_GPU_QWEN3_CONFIG_UPDATE = ModelConfigUpdate(
     chunk_size=1024
 )
 LOW_MODE_QWEN3_CONFIG_UPDATE = ModelConfigUpdate(
-    device=ModelDevice.CUDA,
+    device=_GPU_DEVICE,
     cache_seq_num=0,
     parallel_seq_num=2,
     total_context_num=12288,
@@ -65,7 +75,7 @@ LOW_MODE_QWEN3_CONFIG_UPDATE = ModelConfigUpdate(
 SMALL_MODE_QWEN3_CONFIG_UPDATE = LOW_MODE_QWEN3_CONFIG_UPDATE
 MEDIUM_MODE_QWEN3_CONFIG_UPDATE = SMALL_MODE_QWEN3_CONFIG_UPDATE
 FULL_MODE_QWEN3_CONFIG_UPDATE = ModelConfigUpdate(
-    device=ModelDevice.CUDA,
+    device=_GPU_DEVICE,
     cache_seq_num=0,
     parallel_seq_num=3,
     total_context_num=24576,
@@ -82,11 +92,11 @@ class FreeMemoryLevel(Enum):
     LEVEL_4 = "Sufficient"        # >16GB: Sufficient VRAM
 
     @classmethod
-    def detect_memory_mode(cls, free_memory: float, cuda_available: bool) -> "FreeMemoryLevel":
+    def detect_memory_mode(cls, free_memory: float, gpu_available: bool) -> "FreeMemoryLevel":
         """
-        Detect memory mode based on CUDA VRAM status
+        Detect memory mode based on GPU memory status (CUDA or Metal)
         """
-        if not cuda_available:
+        if not gpu_available:
             return cls.LEVEL_0
         elif free_memory < LOW_MEMORY_THRESHOLD:
             return cls.LEVEL_0
@@ -143,9 +153,9 @@ def apply_memory_optimization_to_default_model(config: ModelConfig, memory_mode:
 
 def adjust_config_by_memory(model_config: ModelConfig) -> ModelConfig:
     """
-    Adjust default model configuration based on CUDA VRAM status
+    Adjust default model configuration based on GPU memory status (CUDA or Metal)
     """
-    _, free_memory, cuda_available = get_cuda_memory_info()
+    _, free_memory, gpu_available = get_gpu_memory_info()
 
-    memory_mode = FreeMemoryLevel.detect_memory_mode(free_memory, cuda_available)
+    memory_mode = FreeMemoryLevel.detect_memory_mode(free_memory, gpu_available)
     return apply_memory_optimization_to_default_model(model_config, memory_mode)

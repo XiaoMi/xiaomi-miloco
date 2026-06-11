@@ -10,7 +10,7 @@ from miloco_ai_engine.schema.actor_message import RequestMessage, actor_system, 
 from miloco_ai_engine.config.config_info import ModelConfig
 from miloco_ai_engine.config.config_optimizer import adjust_config_by_memory
 from miloco_ai_engine.schema.models_schema import ChatCompletionRequest, ChatCompletionResponse, ModelInfo, ModelDescription, VramUsage
-from miloco_ai_engine.utils.cuda_info import estimate_vram_usage, get_cuda_memory_info
+from miloco_ai_engine.utils.cuda_info import estimate_vram_usage, get_gpu_memory_info
 from miloco_ai_engine.middleware.exceptions import InvalidArgException, ModelSchedulerException, CoreNormalException, ModelManagerException
 import time
 import gc
@@ -315,7 +315,7 @@ class ModelManager():
             raise ModelSchedulerException(result_message.error)
 
     def get_vram_usage(self) -> VramUsage:
-        total, free, available = get_cuda_memory_info()
+        total, free, available = get_gpu_memory_info()
         if available:
             return VramUsage(total=total, free=free)
         return VramUsage(total=0, free=0)

@@ -7,10 +7,94 @@
 ------
 
 
-macOS （M 系列和 Intel 系列）下服务支持两种方式运行：
+macOS （M 系列和 Intel 系列）下服务支持三种方式运行：
 
-- GitHub 克隆代码直接运行
+- **原生 Metal 后端**（推荐，仅限 Apple Silicon）：克隆代码，使用 Metal GPU 后端编译，直接运行。在 Apple Silicon Mac 上性能最佳。
+- GitHub 克隆代码直接运行（后端 + 前端，AI 引擎使用云端模型）
 - 虚拟机下 Docker 运行
+
+## 原生 Metal 后端（Apple Silicon）
+
+在 Apple Silicon Mac（M1/M2/M3/M4）上，AI 引擎可以使用 Apple 的 Metal GPU 框架原生运行。这是本地开发和测试的推荐方式。
+
+### 系统要求
+
+- **硬件**：Apple Silicon Mac（M1 或更新），建议 16GB 以上统一内存
+- **macOS**：13 (Ventura) 或更高版本
+- **Xcode Command Line Tools**：`xcode-select --install`
+- **Python**：3.12.x
+- **CMake**：3.20+（`brew install cmake`）
+
+### 快速开始
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/XiaoMi/xiaomi-miloco.git
+cd xiaomi-miloco
+
+# 2. 安装 Python 依赖
+pip install -e miloco_ai_engine
+
+# 3. 使用 Metal 后端编译 AI 引擎
+bash scripts/ai_engine_metal_build.sh
+
+# 4. 下载模型
+mkdir -p models/MiMo-VL-Miloco-7B models/Qwen3-8B
+
+# MiMo-VL-Miloco-7B（视觉任务必需）
+curl -L -o models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf \
+  "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+curl -L -o models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf \
+  "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+
+# Qwen3-8B（可选，纯文本任务）
+curl -L -o models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf \
+  "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+
+# 5. 在 config/ai_engine_config.yaml 中配置 device: "metal"
+
+# 6. 启动 AI 引擎
+python scripts/start_ai_engine.py
+```
+
+启动后，API 文档地址：`https://127.0.0.1:8001/docs`
+
+### 配置说明
+
+在 `config/ai_engine_config.yaml` 中，将每个模型的 `device` 设置为 `"metal"`：
+
+```yaml
+models:
+  MiMo-VL-Miloco-7B:Q4_0:
+    model_path: "models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf"
+    mmproj_path: "models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    device: "metal"
+    # ... 其他参数
+
+  Qwen3-8b:Q4_0:
+    model_path: "models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
+    device: "metal"
+    # ... 其他参数
+```
+
+### 内存建议
+
+| 统一内存 | 推荐配置 |
+|---|---|
+| 8GB | 仅 MiMo-VL，减小上下文大小 |
+| 16GB | MiMo-VL + Qwen3，默认配置 |
+| 24GB+ | 双模型，完整上下文，多并行序列 |
+
+### 注意事项
+
+- macOS 使用 CPU 和 GPU 共享的**统一内存**。Metal 后端会自动利用此架构，无需单独分配显存。
+- macOS 上的 Docker **不支持** Metal GPU 透传，AI 引擎必须原生运行。
+- `/cuda_info` API 端点在 macOS 上正常工作，返回 Apple GPU 内存信息。
+- 详细开发指南请参考[开发指南](./development/developer-setup.md)。
+
+------
+
+## 虚拟机下 Docker 运行
 
 下述教程以 macOS Tahoe 26.1 为例，介绍如何在 Docker 下运行本服务，克隆代码直接运行服务在开发指南中已经介绍，在此不做赘述。
 

@@ -6,11 +6,12 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any
 from enum import Enum
 
-MAX_CUDA_LAYERS = 50
+MAX_GPU_LAYERS = 50
 
 class ModelDevice(Enum):
     CPU = "cpu"
     CUDA = "cuda"
+    METAL = "metal"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -43,7 +44,7 @@ class ModelConfig(BaseModel):
     n_seq_max: int = Field(default=1, description="Maximum sequence count")
     total_context_num: int = Field(default=4096, description="Context window size")
     chunk_size: int = Field(default=1024, description="Batch size")
-    n_gpu_layers: int = Field(default=MAX_CUDA_LAYERS, description="GPU layers, 0 for CPU only")
+    n_gpu_layers: int = Field(default=MAX_GPU_LAYERS, description="GPU layers, 0 for CPU only")
 
     # Inference parameter defaults
     context_per_seq: int = Field(
@@ -60,7 +61,7 @@ class ModelConfig(BaseModel):
 
         self.n_seq_max = data.get("cache_seq_num", 0) + data.get("parallel_seq_num", 6)
         device = data.get("device", "cpu")
-        self.n_gpu_layers = MAX_CUDA_LAYERS if ModelDevice(device) == ModelDevice.CUDA else 0
+        self.n_gpu_layers = MAX_GPU_LAYERS if ModelDevice(device) in (ModelDevice.CUDA, ModelDevice.METAL) else 0
 
         business = data.get("business", {})
         task_labels = business.get("task_labels", [])
@@ -74,7 +75,7 @@ class ModelConfig(BaseModel):
         """
         Update model configuration
         """
-        self.n_gpu_layers = MAX_CUDA_LAYERS if config_update.device == ModelDevice.CUDA else 0
+        self.n_gpu_layers = MAX_GPU_LAYERS if config_update.device in (ModelDevice.CUDA, ModelDevice.METAL) else 0
         self.cache_seq_num = config_update.cache_seq_num
         self.n_seq_max = self.cache_seq_num + config_update.parallel_seq_num
 

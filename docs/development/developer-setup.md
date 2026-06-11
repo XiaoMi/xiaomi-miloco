@@ -130,8 +130,9 @@ After the service starts, you can access the API documentation at: `https://<you
 
 ## AI Engine Development
 
-```bash
+### Linux (CUDA)
 
+```bash
 # Install dependencies
 pip install -e miloco_ai_engine
 
@@ -143,10 +144,87 @@ export LD_LIBRARY_PATH=project_root/output/lib:$LD_LIBRARY_PATH
 
 # Run service
 python scripts/start_ai_engine.py
-
 ```
-  
+
 After the service starts, you can access the API documentation at: `https://<your-ip>:8001/docs`
+
+### macOS (Metal)
+
+On Apple Silicon Macs, the AI engine can run natively using the Metal GPU backend.
+
+#### System Requirements
+
+- **Hardware**: Apple Silicon (M1/M2/M3/M4 series), recommended 16GB+ unified memory
+- **OS**: macOS 13 (Ventura) or later
+- **Xcode Command Line Tools**: required for compilation (`xcode-select --install`)
+
+#### Build and Run
+
+```bash
+# Install Python dependencies
+pip install -e miloco_ai_engine
+
+# Build core with Metal backend
+bash scripts/ai_engine_metal_build.sh
+
+# Configure model device to "metal" in config/ai_engine_config.yaml:
+#   device: "metal"
+
+# Run service
+python scripts/start_ai_engine.py
+```
+
+#### Configuration
+
+In `config/ai_engine_config.yaml`, set `device: "metal"` for each model:
+
+```yaml
+models:
+  MiMo-VL-Miloco-7B:Q4_0:
+    model_path: "models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf"
+    mmproj_path: "models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    device: "metal"  # Use Metal GPU backend
+    # ... other parameters
+```
+
+#### Download Models
+
+```bash
+# Create model directories
+mkdir -p models/MiMo-VL-Miloco-7B models/Qwen3-8B
+
+# Download MiMo-VL-Miloco-7B (Q4_0 quantization)
+curl -L -o models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf \
+  "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+
+curl -L -o models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf \
+  "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+
+# Download Qwen3-8B (Q4_K_M quantization)
+curl -L -o models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf \
+  "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+```
+
+HuggingFace mirrors (for users outside mainland China):
+
+```bash
+# MiMo-VL-Miloco-7B
+curl -L -o models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf \
+  "https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/main/MiMo-VL-Miloco-7B_Q4_0.gguf"
+
+curl -L -o models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf \
+  "https://huggingface.co/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/main/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+
+# Qwen3-8B
+curl -L -o models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf \
+  "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
+```
+
+#### Notes
+
+- macOS uses **unified memory** shared between CPU and GPU. The Metal backend automatically utilizes this architecture.
+- Docker on macOS does **not** support Metal GPU passthrough. The AI engine must run natively (not in Docker).
+- The `/cuda_info` API endpoint works on macOS and returns Apple GPU memory information.
 
 # Project Configuration
 

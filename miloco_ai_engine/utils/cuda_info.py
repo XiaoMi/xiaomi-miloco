@@ -2,9 +2,10 @@
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
 """
-CUDA memory information utility
+GPU memory information utility (CUDA / Metal)
 """
 import subprocess
+import platform
 import logging
 from miloco_ai_engine.utils.utils import validate_model_path, get_file_size
 from typing import Optional
@@ -70,3 +71,16 @@ def estimate_vram_usage(model_path: str, mmproj_path: Optional[str], n_ctx: int,
     except Exception as e: # pylint: disable=broad-exception-caught
         logger.warning('estimate vram usage failed for %s: %s', model_path, e)
         return -1.0
+
+
+def get_gpu_memory_info():
+    """
+    Cross-platform GPU memory query.
+    Auto-detects platform and delegates to CUDA (nvidia-smi) or Metal (sysctl).
+
+    return: (total_memory_gb, free_memory_gb, available) or (None, None, False)
+    """
+    if platform.system() == "Darwin":
+        from miloco_ai_engine.utils.metal_info import get_metal_memory_info
+        return get_metal_memory_info()
+    return get_cuda_memory_info()

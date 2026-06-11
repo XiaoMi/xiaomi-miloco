@@ -73,9 +73,7 @@ class _BaseMcp(Generic[T]):
         self._mcp = FastMCP(
             name=self.translate(key="name", default=self._name_default),
             instructions=self.translate(key="instructions", default=self._instructions_default),
-            on_duplicate_tools="replace",     # Configure behavior for duplicate tool names
-            on_duplicate_prompts="replace",
-            on_duplicate_resources="replace",
+            on_duplicate="replace",
             mask_error_details=True,          # only error messages from ToolError will include details
         )
 

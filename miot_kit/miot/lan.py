@@ -11,6 +11,7 @@ import random
 import secrets
 import socket
 import struct
+import sys
 import threading
 import time
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
@@ -344,8 +345,9 @@ class MIoTLan:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # Set SO_BINDTODEVICE
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, if_name.encode())
+            if sys.platform == "linux":
+                # SO_BINDTODEVICE is Linux-only
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, if_name.encode())
             sock.bind(("", self._local_port or 0))
             self._internal_loop.add_reader(sock.fileno(), self.__socket_read_handler, (if_name, sock))
             self._broadcast_socks[if_name] = sock

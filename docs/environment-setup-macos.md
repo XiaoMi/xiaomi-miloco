@@ -1,15 +1,100 @@
 # Runtime and Development Environment Setup (macOS Edition)
 
-[Back to Previous Level](./environment-setup.md)  
+[Back to Previous Level](./environment-setup.md)
 
 Language selection: [English](./environment-setup-macos.md) | [Simplified Chinese](./environment-setup-macos_zh-Hans.md)
 
 ------
 
-On macOS (both M series and Intel series), the service can be run in two ways:
+On macOS (both M series and Intel series), the service can be run in three ways:
 
-- Clone the code from GitHub and run directly
+- **Native Metal backend** (recommended for Apple Silicon): Clone the code, build with Metal GPU support, and run directly. This provides the best performance on Apple Silicon Macs.
+- Clone the code from GitHub and run directly (backend + frontend only, AI engine via cloud models)
 - Run via Docker inside a virtual machine
+
+## Native Metal Backend (Apple Silicon)
+
+On Apple Silicon Macs (M1/M2/M3/M4), the AI engine can run natively using Apple's Metal GPU framework. This is the recommended approach for local development and testing.
+
+### System Requirements
+
+- **Hardware**: Apple Silicon Mac (M1 or later), recommended 16GB+ unified memory
+- **macOS**: 13 (Ventura) or later
+- **Xcode Command Line Tools**: `xcode-select --install`
+- **Python**: 3.12.x
+- **CMake**: 3.20+ (`brew install cmake`)
+
+### Quick Start
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/XiaoMi/xiaomi-miloco.git
+cd xiaomi-miloco
+
+# 2. Install Python dependencies
+pip install -e miloco_ai_engine
+
+# 3. Build AI engine with Metal backend
+bash scripts/ai_engine_metal_build.sh
+
+# 4. Download models
+mkdir -p models/MiMo-VL-Miloco-7B models/Qwen3-8B
+
+# MiMo-VL-Miloco-7B (required for vision tasks)
+curl -L -o models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf \
+  "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/MiMo-VL-Miloco-7B_Q4_0.gguf"
+curl -L -o models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf \
+  "https://modelscope.cn/models/xiaomi-open-source/Xiaomi-MiMo-VL-Miloco-7B-GGUF/resolve/master/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+
+# Qwen3-8B (optional, for text-only tasks)
+curl -L -o models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf \
+  "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf"
+
+# 5. Configure Metal device in config/ai_engine_config.yaml
+#    Change device: "cuda" to device: "metal" for each model
+
+# 6. Start the AI engine
+python scripts/start_ai_engine.py
+```
+
+After startup, the API documentation is available at: `https://127.0.0.1:8001/docs`
+
+### Configuration
+
+In `config/ai_engine_config.yaml`, set `device: "metal"` for each model:
+
+```yaml
+models:
+  MiMo-VL-Miloco-7B:Q4_0:
+    model_path: "models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf"
+    mmproj_path: "models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf"
+    device: "metal"
+    # ... other parameters
+
+  Qwen3-8b:Q4_0:
+    model_path: "models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
+    device: "metal"
+    # ... other parameters
+```
+
+### Memory Recommendations
+
+| Unified Memory | Recommended Configuration |
+|---|---|
+| 8GB | MiMo-VL only, reduced context size |
+| 16GB | MiMo-VL + Qwen3, default settings |
+| 24GB+ | Both models, full context, parallel sequences |
+
+### Notes
+
+- macOS uses **unified memory** shared between CPU and GPU. The Metal backend automatically utilizes this architecture — no separate VRAM allocation needed.
+- Docker on macOS does **not** support Metal GPU passthrough. The AI engine must run natively.
+- The `/cuda_info` API endpoint works on macOS and returns Apple GPU memory information.
+- For detailed development setup, see the [Development Guide](./development/developer-setup.md).
+
+------
+
+## Docker Deployment (Virtual Machine)
 
 The following tutorial takes macOS Tahoe 26.1 as an example and demonstrates how to run this service with Docker. Cloning the code and running the service directly has already been introduced in the development guide, so it will not be elaborated here.
 

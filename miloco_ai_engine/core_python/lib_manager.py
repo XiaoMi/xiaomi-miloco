@@ -54,6 +54,28 @@ class LibraryManager:
 
         # Get library path
         lib_dir = self._get_library_path()
+
+        # On macOS, dylibs use @rpath. Preload dependencies so the dynamic
+        # linker can resolve them when loading the main library.
+        import sys
+        if sys.platform == "darwin":
+            dependencies = [
+                "libggml-base.dylib",
+                "libggml-cpu.dylib",
+                "libggml-blas.dylib",
+                "libggml-metal.dylib",
+                "libggml.dylib",
+                "libllama.dylib",
+            ]
+            for dep in dependencies:
+                dep_path = os.path.join(lib_dir, dep)
+                if os.path.exists(dep_path):
+                    try:
+                        ctypes.CDLL(dep_path, mode=ctypes.RTLD_GLOBAL)
+                        logger.info("Preloaded dependency: %s", dep)
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logger.warning("Cannot preload %s: %s", dep, e)
+
         # Library name list
         library_names = [
             f"lib{LLAMA_MICO_LIB_NAME}.so",  # Linux

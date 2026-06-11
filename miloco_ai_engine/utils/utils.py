@@ -233,3 +233,7 @@ def is_wsl():
 
 def is_linux():
     return sys.platform.startswith("linux")
+
+
+def is_macos():
+    return sys.platform == "darwin"

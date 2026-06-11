@@ -40,9 +40,7 @@ class LocalMCPBase:
         self.mcp = FastMCP(
             name=self.name,
             instructions=self.instructions,
-            on_duplicate_tools="error",
-            on_duplicate_prompts="error",
-            on_duplicate_resources="error",
+            on_duplicate="error",
             mask_error_details=True,
         )
 

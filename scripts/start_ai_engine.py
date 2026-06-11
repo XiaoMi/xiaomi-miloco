@@ -9,9 +9,10 @@ import os
 
 def setup_env():
     """Setup environment variables"""
-    # Set GGML_CUDA_ENABLE_UNIFIED_MEMORY for WSL environment
-    from miloco_ai_engine.utils.utils import is_wsl, is_linux
-    if is_linux():
+    from miloco_ai_engine.utils.utils import is_wsl, is_linux, is_macos
+    if is_macos():
+        print("🍎 macOS detected, using Metal GPU backend")
+    elif is_linux():
         if not is_wsl():
             os.environ["GGML_CUDA_ENABLE_UNIFIED_MEMORY"] = "1"
         else:

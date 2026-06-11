@@ -27,8 +27,10 @@
 
 - **硬件要求**
 ```Plain Text
-CPU: x64 架构
-显卡: NVIDIA 30系及以上显卡，显存 8GB 及以上（最低），建议 12GB 及以上
+CPU: x64 架构（Linux/Windows）或 ARM64（macOS Apple Silicon）
+显卡:
+  - NVIDIA 30系及以上显卡，显存 8GB 及以上（最低），建议 12GB 及以上
+  - Apple Silicon（M1/M2/M3/M4），建议 16GB 以上统一内存
 存储: 建议 16GB 及以上可用空间（用于本地模型存储）
 ```
 
@@ -37,10 +39,10 @@ CPU: x64 架构
 操作系统:
   - Linux: x64 架构，建议 Ubuntu 22.04 及以上 LTS 版本
   - Windows: x64 架构，建议 Windows 10 及以上版本，要求支持 WSL2
-  - macOS: 暂不支持
-Docker: 20.10 及以上版本，需要支持 docker compose
-NVIDIA 驱动: 支持 CUDA 的 NVIDIA 驱动
-NVIDIA Container Toolkit: 用于Docker GPU支持
+  - macOS: ARM64（Apple Silicon），macOS 13 或更高版本，原生 Metal GPU 支持
+Docker: 20.10 及以上版本，需要支持 docker compose（仅 Linux/Windows）
+NVIDIA 驱动: 支持 CUDA 的 NVIDIA 驱动（仅 Linux/Windows）
+NVIDIA Container Toolkit: 用于Docker GPU支持（仅 Linux/Windows）
 ```
 
 ### 安装步骤
@@ -60,7 +62,14 @@ bash scripts/install.sh
 ```
 详细的安装步骤请参考 [Docker部署文档](docs/environment-setup_zh-Hans.md)。
 
-**源码安装**  
+**源码安装（macOS Apple Silicon）**
+```bash
+git clone https://github.com/XiaoMi/xiaomi-miloco.git
+cd xiaomi-miloco
+bash scripts/install_macos.sh
+```
+
+**源码安装（Linux / 其他）**
 源码安装步骤请参考 [开发指南](docs/development/developer-setup_zh_Hans.md)。
 
 ## 使用教程文档
