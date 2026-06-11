@@ -23,8 +23,8 @@ app:
 models:
   MiMo-VL-Miloco-7B:Q4_0:
     # Basic settings
-    model_path: "models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" # Model path
-    mmproj_path: "models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" # VIT model path
+    model_path: "/models/MiMo-VL-Miloco-7B/MiMo-VL-Miloco-7B_Q4_0.gguf" # Model path
+    mmproj_path: "/models/MiMo-VL-Miloco-7B/mmproj-MiMo-VL-Miloco-7B_BF16.gguf" # VIT model path
 
     # Cache settings
     cache_seq_num: 5 # Maximum number of sequences to dynamic prompt cache [Recommended rule cameras num + 1]
@@ -34,7 +34,7 @@ models:
     total_context_num: 16384 # Maximum context tokens for all seq sums, Affects the size of VRAM [Recommended rule num * 1000 + 3000]
     context_per_seq: 4096 # Maximum effective context tokens for each seq, multi-turn could use
     chunk_size: 256 # Model seqlen, Affects the size of VRAM [Recommended ≥ 256]
-    device: "metal" # Model device [cuda/metal/cpu] (metal for macOS Apple Silicon)
+    device: "cuda" # Model device [cuda/metal/cpu] (metal for macOS Apple Silicon)
 
     # Inference parameters
     max_tokens: 512 # Maximum tokens to generate
@@ -47,14 +47,14 @@ models:
       task_priorities: [5, 10]
 
   Qwen3-8b:Q4_0:
-    model_path: "models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
+    model_path: "/models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
 
     parallel_seq_num: 2
     total_context_num: 12288
     context_per_seq: 6144
     chunk_size: 1024
 
-    device: "metal" # Model device [cuda/metal/cpu] (metal for macOS Apple Silicon)
+    device: "cuda" # Model device [cuda/metal/cpu] (metal for macOS Apple Silicon)
     max_tokens: 512
     temperature: -1
 
