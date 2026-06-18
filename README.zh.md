@@ -61,18 +61,16 @@ bash scripts/install.sh --dev   # 从源码构建（scripts/build.sh）后本地
 
 ### 备选运行时：Hermes Agent（开源）
 
-上面三种安装方式都把 Miloco 接到 **OpenClaw** 运行时。如果你更想用开源的 [Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research 出品，MIT，Python）做 Agent 运行时，这个 fork 在 `plugins/hermes/` 下提供了一套并行的插件：同样 16 个 skill、同样一个入站 webhook 契约。skill 源文件和 OpenClaw 共用（`plugins/skills/miloco-*`），只是 Agent 侧插件和入站 webhook 适配层为 Hermes 重写。
-
-从 fork 安装（Miloco 2.0 官方 release 暂未包含 Hermes 路径）：
+本插件未打包进 Miloco 官方安装器（Hermes 是第三方 Agent 运行时）。从 fork 安装：
 
 ```bash
 git clone https://github.com/n0tssss/xiaomi-miloco.git
 cd xiaomi-miloco
-bash plugins/hermes/install-hermes.sh   # 一键：复制插件 + 适配层、patch miloco 配置 + .env、nohup 启 adapter
+bash plugins/hermes/install-hermes.sh
 hermes gateway restart
 ```
 
-安装脚本做了啥、adapter 后续怎么管（start/stop/restart/status/logs）见 [plugins/hermes/README.md](plugins/hermes/README.md)；想直接把安装指令贴给 Hermes / Claude 让它装，看 [plugins/hermes/INSTALL_PROMPT.md](plugins/hermes/INSTALL_PROMPT.md)。
+适配层生命周期、排错等详见 [plugins/hermes/README.md](plugins/hermes/README.md)。
 
 ---
 

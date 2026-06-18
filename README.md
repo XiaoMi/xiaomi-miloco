@@ -61,18 +61,16 @@ bash scripts/install.sh --dev   # build from source (scripts/build.sh), then ins
 
 ### Alternative runtime: Hermes Agent (open-source)
 
-The three install options above all wire Miloco into the **OpenClaw** runtime. If you'd rather use the open-source [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT, Python) as your agent runtime, this fork ships a parallel plugin under `plugins/hermes/` that exposes the same 16 skills and the same inbound webhook contract. The skill sources are shared with OpenClaw (`plugins/skills/miloco-*`); only the agent-side plugin and the inbound webhook adapter are rewritten for Hermes.
-
-Install from the fork (Miloco 2.0 official releases don't bundle the Hermes path yet):
+This plugin is not bundled with the official Miloco installer (Hermes is a third-party agent runtime). Install it from the fork:
 
 ```bash
 git clone https://github.com/n0tssss/xiaomi-miloco.git
 cd xiaomi-miloco
-bash plugins/hermes/install-hermes.sh   # one-step: copy plugin + adapter, patch miloco config + .env, nohup start
+bash plugins/hermes/install-hermes.sh
 hermes gateway restart
 ```
 
-What the install script does and how to manage the adapter afterwards (start/stop/restart/status/logs) is documented in [plugins/hermes/README.md](plugins/hermes/README.md); for an AI-agent-friendly install prompt you can paste straight into Hermes or Claude, see [plugins/hermes/INSTALL_PROMPT.md](plugins/hermes/INSTALL_PROMPT.md).
+Details, adapter lifecycle, and troubleshooting: [plugins/hermes/README.md](plugins/hermes/README.md).
 
 ---
 
