@@ -2,7 +2,7 @@
 
 <p align="center"><a href="README.md">English</a> | 简体中文</p>
 
-小米面向未来的全屋智能 AI 开源方案，以米家摄像头的画面与声音为全模态感知入口，以自研 MiMo 大模型为智能大脑，以 Agent 插件形式运行在 [OpenClaw](https://openclaw.ai) 之上，联动全屋设备带来主动智能体验。
+小米面向未来的全屋智能 AI 开源方案，以米家摄像头的画面与声音为全模态感知入口，以自研 MiMo 大模型为智能大脑，以 Agent 插件形式运行在 [OpenClaw](https://openclaw.ai) 之上（也支持开源的 [Hermes Agent](https://github.com/NousResearch/hermes-agent)——见下方[备选运行时：Hermes Agent](#备选运行时hermes-agent开源)），联动全屋设备带来主动智能体验。
 
 Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控设备，能将"模糊又长期"的目标拆解成可追踪的家庭任务，能识别家庭成员、依托家庭记忆为每位成员提供个性化服务——查询和控制设备、把家调到成员舒适的状态，或在合适的时机给出有用的提醒。
 
@@ -11,6 +11,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 ## 最新动态
 
 - **2026-06-18** — Miloco 2.0 正式发布：重构为 OpenClaw 插件，新增通用常识、身份识别、家庭记忆、家庭任务、主动智能、家庭面板。详见下方[核心特性](#核心特性)。
+- **2026-06-19** — 新增 Hermes Agent 兼容：同一套 16 个 skill、同一个入站 webhook 契约，现在也能跑在开源 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 运行时上（通过 `plugins/hermes/`）。见下方[备选运行时：Hermes Agent](#备选运行时hermes-agent开源)。
 
 ## 核心特性
 
@@ -22,14 +23,14 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 - **家庭面板** — 面向用户的 Web 面板，查看家中实时概览、米家设备、家庭成员与家庭档案、历史事件日志。
 
 > [!TIP]
-> **养成你自己的 Miloco。** 它的初始表现未必合你心意——直接通过 OpenClaw 告诉 Miloco（如"家里乱不用提醒我"），它就记住你的偏好、相应调整主动行为。你每说一句，就是在"养成"一个更懂你家的 Miloco，越用越贴心。
+> **养成你自己的 Miloco。** 它的初始表现未必合你心意——直接通过你的 Agent（OpenClaw 或 Hermes，如"家里乱不用提醒我"）告诉 Miloco，它就记住你的偏好、相应调整主动行为。你每说一句，就是在"养成"一个更懂你家的 Miloco，越用越贴心。
 
 ## 前置条件
 
 - **硬件**：建议内存 ≥ 4GB，存储 ≥ 256GB，7×24 常驻运行，推荐 Mac mini
 - **操作系统**：macOS / Linux（Windows 请在 WSL 中运行）
 - **小米账号** + 已接入米家的设备
-- **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro（在 OpenClaw 中配置）
+- **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro（在你的 Agent 运行时中配置：OpenClaw，或 Hermes 的 `~/.hermes/config.yaml`）
 
 > [!CAUTION]
 > **成本提示**：Miloco 2.0 的感知与 Agent 主要依赖云端大模型，会持续产生 API 调用费用，请关注用量。可在家庭面板「模型」页查看 token 消耗。
@@ -58,6 +59,21 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 bash scripts/install.sh --dev   # 从源码构建（scripts/build.sh）后本地安装
 ```
 
+### 备选运行时：Hermes Agent（开源）
+
+上面三种安装方式都把 Miloco 接到 **OpenClaw** 运行时。如果你更想用开源的 [Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research 出品，MIT，Python）做 Agent 运行时，这个 fork 在 `plugins/hermes/` 下提供了一套并行的插件：同样 16 个 skill、同样一个入站 webhook 契约。skill 源文件和 OpenClaw 共用（`plugins/skills/miloco-*`），只是 Agent 侧插件和入站 webhook 适配层为 Hermes 重写。
+
+从 fork 安装（Miloco 2.0 官方 release 暂未包含 Hermes 路径）：
+
+```bash
+git clone https://github.com/n0tssss/xiaomi-miloco.git
+cd xiaomi-miloco
+bash plugins/hermes/install-hermes.sh   # 一键：复制插件 + 适配层、patch miloco 配置 + .env、nohup 启 adapter
+hermes gateway restart
+```
+
+安装脚本做了啥、adapter 后续怎么管（start/stop/restart/status/logs）见 [plugins/hermes/README.md](plugins/hermes/README.md)；想直接把安装指令贴给 Hermes / Claude 让它装，看 [plugins/hermes/INSTALL_PROMPT.md](plugins/hermes/INSTALL_PROMPT.md)。
+
 ---
 
 ### Windows（WSL）
@@ -84,10 +100,14 @@ bash scripts/install.sh --dev   # 从源码构建（scripts/build.sh）后本地
 
 ## 快速开始
 
-安装完成后，先重启 OpenClaw 网关让插件生效：
+安装完成后，先重启你的 Agent 网关让插件生效：
 
 ```bash
+# OpenClaw（上方方式一二三）
 openclaw gateway restart
+
+# Hermes（备选运行时）
+hermes gateway restart
 ```
 
 随后打开家庭面板完成首次配置：
@@ -121,8 +141,9 @@ miloco-plugin/
 │   └── miot/            # MIoT SDK（独立子包）
 ├── cli/                 # miloco-cli 命令行工具
 ├── plugins/
-│   ├── openclaw/        # OpenClaw 插件（TypeScript）
-│   └── skills/          # Agent Skill 文档
+│   ├── openclaw/        # OpenClaw 插件（TypeScript，默认）
+│   ├── hermes/          # Hermes Agent 插件（Python）+ 入站适配层（备选运行时）
+│   └── skills/          # Agent Skill 文档（两套运行时共用）
 ├── web/                 # 家庭面板（React 19 + Vite）
 ├── scripts/             # build.sh / install.sh / manifest.json
 └── knowledge/           # 项目知识库
@@ -145,7 +166,8 @@ miloco-plugin/
 
 Miloco 站在以下开源项目之上：
 
-- [OpenClaw](https://openclaw.ai) — AI Agent 运行时与插件平台
+- [OpenClaw](https://openclaw.ai) — AI Agent 运行时与插件平台（默认运行时）
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent)（MIT）— 开源 Agent 运行时；`plugins/hermes/` 这套并行插件即为其适配
 - [jMuxer](https://github.com/samirkumardas/jmuxer)（MIT）— 家庭面板实时视频流封装
 - [BGE / bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5)（智源研究院，MIT）— 文本向量化模型
 - [Silero VAD](https://github.com/snakers4/silero-vad)（Silero Team，MIT）— 语音活动检测，门控感知语音字段

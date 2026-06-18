@@ -2,7 +2,7 @@
 
 <p align="center">English | <a href="README.zh.md">简体中文</a></p>
 
-Xiaomi's open-source AI solution for the future of whole-home intelligence. It uses the video and audio from Mi Home cameras as a full-modal perception gateway, the in-house MiMo large model as its intelligent brain, and runs as an Agent plugin on top of [OpenClaw](https://openclaw.ai) to orchestrate whole-home devices for a proactive, intelligent experience.
+Xiaomi's open-source AI solution for the future of whole-home intelligence. It uses the video and audio from Mi Home cameras as a full-modal perception gateway, the in-house MiMo large model as its intelligent brain, and runs as an Agent plugin on top of [OpenClaw](https://openclaw.ai) (or the open-source [Hermes Agent](https://github.com/NousResearch/hermes-agent) — see [Alternative runtime: Hermes Agent](#alternative-runtime-hermes-agent-open-source) below) to orchestrate whole-home devices for a proactive, intelligent experience.
 
 Miloco 2.0 perceives what happens at home, makes proactive decisions and controls devices based on common sense, breaks down "vague and long-term" goals into trackable household tasks, recognizes family members, and—drawing on home memory—delivers personalized service to each member: querying and controlling devices, tuning the home to each member's comfort, or offering useful reminders at the right moment.
 
@@ -11,6 +11,7 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 ## What's New
 
 - **2026-06-18** — Miloco 2.0 officially released: re-architected as an OpenClaw plugin, adding general common sense, identity recognition, home memory, household tasks, proactive intelligence, and a home dashboard. See [Core Features](#core-features) below.
+- **2026-06-19** — Hermes Agent compatibility: same 16 skills, same inbound webhook contract, now also runnable on the open-source [Hermes Agent](https://github.com/NousResearch/hermes-agent) runtime via `plugins/hermes/`. See [Alternative runtime: Hermes Agent](#alternative-runtime-hermes-agent-open-source) below.
 
 ## Core Features
 
@@ -22,14 +23,14 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 - **Home Dashboard** — A user-facing web dashboard for viewing a real-time overview of the home, Mi Home devices, family members and profiles, and the history of past events.
 
 > [!TIP]
-> **Raise your own Miloco.** Its out-of-the-box behavior won't always match your taste—just tell Miloco through OpenClaw (e.g. "don't remind me when the place is messy"), and it remembers your preference and adjusts what it does proactively. Every remark "raises" a Miloco that's tuned to your home, and it knows you better the longer you live with it.
+> **Raise your own Miloco.** Its out-of-the-box behavior won't always match your taste—just tell Miloco through your agent (OpenClaw or Hermes, e.g. "don't remind me when the place is messy"), and it remembers your preference and adjusts what it does proactively. Every remark "raises" a Miloco that's tuned to your home, and it knows you better the longer you live with it.
 
 ## Prerequisites
 
 - **Hardware**: ≥ 4GB RAM and ≥ 256GB storage recommended, running 24/7. A Mac mini is recommended.
 - **Operating System**: macOS / Linux (run under WSL on Windows).
 - **Xiaomi account** + devices already added to Mi Home.
-- **Multimodal large model API key** — [Xiaomi MiMo](https://platform.xiaomimimo.com) is recommended: MiMo-v2.5 for perception, MiMo-v2.5-pro for the Agent (configured in OpenClaw).
+- **Multimodal large model API key** — [Xiaomi MiMo](https://platform.xiaomimimo.com) is recommended: MiMo-v2.5 for perception, MiMo-v2.5-pro for the Agent (configured in your agent runtime: OpenClaw, or `~/.hermes/config.yaml` for Hermes).
 
 > [!CAUTION]
 > **Cost note**: Miloco 2.0's perception and Agent rely primarily on cloud-based large models and will incur ongoing API usage costs—keep an eye on your usage. You can review token consumption on the "Models" page of the home dashboard.
@@ -58,6 +59,21 @@ From the project root, run:
 bash scripts/install.sh --dev   # build from source (scripts/build.sh), then install locally
 ```
 
+### Alternative runtime: Hermes Agent (open-source)
+
+The three install options above all wire Miloco into the **OpenClaw** runtime. If you'd rather use the open-source [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT, Python) as your agent runtime, this fork ships a parallel plugin under `plugins/hermes/` that exposes the same 16 skills and the same inbound webhook contract. The skill sources are shared with OpenClaw (`plugins/skills/miloco-*`); only the agent-side plugin and the inbound webhook adapter are rewritten for Hermes.
+
+Install from the fork (Miloco 2.0 official releases don't bundle the Hermes path yet):
+
+```bash
+git clone https://github.com/n0tssss/xiaomi-miloco.git
+cd xiaomi-miloco
+bash plugins/hermes/install-hermes.sh   # one-step: copy plugin + adapter, patch miloco config + .env, nohup start
+hermes gateway restart
+```
+
+What the install script does and how to manage the adapter afterwards (start/stop/restart/status/logs) is documented in [plugins/hermes/README.md](plugins/hermes/README.md); for an AI-agent-friendly install prompt you can paste straight into Hermes or Claude, see [plugins/hermes/INSTALL_PROMPT.md](plugins/hermes/INSTALL_PROMPT.md).
+
 ---
 
 ### Windows (WSL)
@@ -84,10 +100,14 @@ Whichever method you choose above, native Windows is not supported—install and
 
 ## Quick Start
 
-After installation, restart the OpenClaw gateway so the plugin takes effect:
+After installation, restart your agent gateway so the plugin takes effect:
 
 ```bash
+# OpenClaw (Options 1-3 above)
 openclaw gateway restart
+
+# Hermes (Alternative runtime above)
+hermes gateway restart
 ```
 
 Then open the home dashboard to complete the initial setup:
@@ -121,8 +141,9 @@ miloco-plugin/
 │   └── miot/            # MIoT SDK (standalone subpackage)
 ├── cli/                 # miloco-cli command-line tool
 ├── plugins/
-│   ├── openclaw/        # OpenClaw plugin (TypeScript)
-│   └── skills/          # Agent Skill docs
+│   ├── openclaw/        # OpenClaw plugin (TypeScript, the default)
+│   ├── hermes/          # Hermes Agent plugin (Python) + inbound adapter (alternative runtime)
+│   └── skills/          # Agent Skill docs (shared source for both runtimes)
 ├── web/                 # home dashboard (React 19 + Vite)
 ├── scripts/             # build.sh / install.sh / manifest.json
 └── knowledge/           # project knowledge base
@@ -145,7 +166,8 @@ Run into issues, want to give feedback, or just chat about use cases? Scan the Q
 
 Miloco stands on the shoulders of the following open-source projects:
 
-- [OpenClaw](https://openclaw.ai) — AI Agent runtime and plugin platform
+- [OpenClaw](https://openclaw.ai) — AI Agent runtime and plugin platform (default runtime)
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) (MIT) — open-source Agent runtime; the parallel `plugins/hermes/` plugin targets it
 - [jMuxer](https://github.com/samirkumardas/jmuxer) (MIT) — real-time video stream muxing for the home dashboard
 - [BGE / bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5) (BAAI, MIT) — text embedding model
 - [Silero VAD](https://github.com/snakers4/silero-vad) (Silero Team, MIT) — voice activity detection, gating the perceived speech field
