@@ -5,7 +5,7 @@
 #   1. 前置检查（hermes、miloco-cli、python、$MILOCO_HOME、$MILOCO_HOME/config.json）
 #   2. 跑 scripts/sync-skills.py 生成 16 个 skill，复制到 ~/.hermes/skills/
 #   3. 复制 miloco 插件到 ~/.hermes/plugins/miloco/，复制 adapter 到同目录
-#   4. 自动 patch $MILOCO_HOME/config.json 的 agent 段（webhook_url + auth_bearer，备份原文件）
+#   4. 自动 patch ${MILOCO_HOME}/config.json 的 agent 段（webhook_url + auth_bearer，备份原文件）
 #   5. 自动给 ~/.hermes/.env 补 API_SERVER_KEY（如缺失则生成；存在则复用）
 #   6. 停掉旧 adapter（按 pid 文件），nohup 启新 adapter，PID 写到 ~/.hermes/miloco-adapter.pid
 #   7. 打印终态：PID / 日志路径 / 后续唯一要做的步骤
@@ -17,6 +17,9 @@
 # adapter 启停 / 日志请用 scripts/miloco-adapter.sh。
 
 set -euo pipefail
+
+# 强制 UTF-8 + POSIX 字符类，防止 "$VAR中文" 被 bash 误识别为变量名延续
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -89,10 +92,10 @@ if ! command -v miloco-cli >/dev/null 2>&1; then
   err "找不到 miloco-cli，请先装好 miloco 后端并确认 miloco-cli 在 PATH"; exit 1
 fi
 if [ ! -d "$HERMES_HOME" ]; then
-  err "找不到 Hermes 目录 $HERMES_HOME，请先装 Hermes Agent"; exit 1
+  err "找不到 Hermes 目录 ${HERMES_HOME}，请先装 Hermes Agent"; exit 1
 fi
 if [ ! -f "$MILOCO_HOME/config.json" ]; then
-  err "找不到 $MILOCO_HOME/config.json，请确认 MILOCO_HOME 正确（或 export MILOCO_HOME=...）"; exit 1
+  err "找不到 ${MILOCO_HOME}/config.json，请确认 MILOCO_HOME 正确（或 export MILOCO_HOME=...）"; exit 1
 fi
 
 # --- 2. 拿/复用 Bearer ---
@@ -106,26 +109,26 @@ else
 fi
 
 # --- 3. 同步 skills ---
-info "生成并复制 16 个 miloco-* skill → $HERMES_HOME/skills/"
+info "生成并复制 16 个 miloco-* skill → ${HERMES_HOME}/skills/"
 "$PYTHON" "$HERE/scripts/sync-skills.py"
 mkdir -p "$HERMES_HOME/skills"
 cp -r "$HERE/skills"/miloco-* "$HERMES_HOME/skills/"
 
 # --- 4. 复制插件 + adapter ---
 mkdir -p "$HERMES_PLUGINS_DIR"
-info "复制 Hermes 插件 → $HERMES_PLUGINS_DIR/miloco-plugin/"
+info "复制 Hermes 插件 → ${HERMES_PLUGINS_DIR}/miloco-plugin/"
 rm -rf "$HERMES_PLUGINS_DIR/miloco-plugin"
 cp -r "$HERE/miloco-plugin" "$HERMES_PLUGINS_DIR/miloco-plugin"
-info "复制 adapter → $HERMES_PLUGINS_DIR/adapter/"
+info "复制 adapter → ${HERMES_PLUGINS_DIR}/adapter/"
 rm -rf "$HERMES_PLUGINS_DIR/adapter"
 cp -r "$HERE/adapter" "$HERMES_PLUGINS_DIR/adapter"
 # 清 pycache
 find "$HERMES_PLUGINS_DIR" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
-# --- 5. patch $MILOCO_HOME/config.json ---
-info "patch $MILOCO_HOME/config.json 的 agent 段..."
+# --- 5. patch ${MILOCO_HOME}/config.json ---
+info "patch ${MILOCO_HOME}/config.json 的 agent 段..."
 TS="$(date +%Y%m%d-%H%M%S)"
-cp "$MILOCO_HOME/config.json" "$MILOCO_HOME/config.json.bak-$TS"
+cp "$MILOCO_HOME/config.json" "${MILOCO_HOME}/config.json.bak-${TS}"
 "$PYTHON" - "$MILOCO_HOME" "$ADAPTER_PORT" "$BEARER" <<'PY'
 import json, sys
 home, port, bearer = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -140,7 +143,7 @@ print(f"  auth_bearer = {bearer[:8]}...")
 PY
 
 # --- 6. patch ~/.hermes/.env（仅当缺失时追加）---
-info "确保 $HERMES_HOME/.env 有 API_SERVER_KEY..."
+info "确保 ${HERMES_HOME}/.env 有 API_SERVER_KEY..."
 touch "$HERMES_HOME/.env"
 chmod 600 "$HERMES_HOME/.env"
 if ! grep -q '^API_SERVER_KEY=' "$HERMES_HOME/.env" 2>/dev/null; then
@@ -162,7 +165,7 @@ if [ -f "$ADAPTER_PID" ]; then
 fi
 
 # 启新的
-info "启动 adapter 进程（端口 $ADAPTER_PORT）..."
+info "启动 adapter 进程（端口 ${ADAPTER_PORT}）..."
 ( cd "$HERMES_PLUGINS_DIR" \
   && PYTHONUTF8=1 \
      ADAPTER_AUTH_BEARER="$BEARER" \
@@ -178,7 +181,7 @@ sleep 2
 WIN_PID="$(get_pid_by_port "$ADAPTER_PORT" | tr -d '\r\n ' || echo '')"
 if [ -n "$WIN_PID" ]; then
   echo "$WIN_PID" > "$ADAPTER_PID"
-  info "adapter 已起，PID=$WIN_PID（按端口反查）"
+  info "adapter 已起，PID=${WIN_PID}（按端口反查）"
 else
   err "adapter 启动失败，端口 $ADAPTER_PORT 未监听，看 $ADAPTER_LOG 末尾："
   tail -20 "$ADAPTER_LOG" >&2 || true
@@ -212,7 +215,7 @@ cat <<EOF
     $ADAPTER_LOG               # adapter 日志
 
 [想还原]
-    $MILOCO_HOME/config.json.bak-$TS  是 patch 前的备份
+    ${MILOCO_HOME}/config.json.bak-${TS}  是 patch 前的备份
     $HERMES_HOME/.env 里去掉 API_SERVER_KEY 即可
     卸插件：rm -rf $HERMES_PLUGINS_DIR $HERMES_HOME/skills/miloco-*
 

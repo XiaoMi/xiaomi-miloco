@@ -15,6 +15,9 @@
 
 set -euo pipefail
 
+# 强制 UTF-8 + POSIX 字符类，防止 "$VAR中文" 被 bash 误识别为变量名延续
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -95,7 +98,7 @@ cmd_start() {
     exit 1
   fi
   if [ ! -d "$ADAPTER_DIR" ]; then
-    err "找不到 $ADAPTER_DIR，先跑 install-hermes.sh"; exit 1
+    err "找不到 ${ADAPTER_DIR}，先跑 install-hermes.sh"; exit 1
   fi
 
   # 已在跑就跳过
@@ -106,7 +109,7 @@ cmd_start() {
   # stale pid 文件（旧进程已死但 pid 文件还在），清掉
   [ -f "$ADAPTER_PID" ] && rm -f "$ADAPTER_PID"
 
-  info "启动 adapter（端口 $ADAPTER_PORT）..."
+  info "启动 adapter（端口 ${ADAPTER_PORT}）..."
   ( cd "$HERMES_PLUGINS_DIR" \
     && PYTHONUTF8=1 \
        ADAPTER_AUTH_BEARER="$bearer" \

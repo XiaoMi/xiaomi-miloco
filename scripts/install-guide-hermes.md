@@ -13,6 +13,8 @@ metadata:
 
 本 skill 指导 agent 通过 3 个阶段把 miloco 装到一个**已经装了 Hermes Agent** 的机器上。agent 自己跑所有非人介入的命令，**只在小米账号 OAuth / API key 等必须人操作的环节才停下来问用户**。命令跑完打印清晰的最终状态。
 
+**关键原则**：Hermes（以及 Claude / Cursor 等通用 AI 工具）在 chat 层面会自动 mask 敏感字符串（base64 OAuth 授权码、`sk-xxx` API key、`Bearer xxx` 等）——agent 看不到明文也代跑不了涉及这些值的命令。**所以以下 3 类操作必须让用户自己在终端跑**：① 小米账号 OAuth 授权 ② 模型 API key 填入 ③ `hermes gateway restart`（Hermes 自身的 anti-restart-loop 也会拒）。详见 [Step 2.5: 强制用户终端操作](#step-25-强制用户终端操作agent-不要自己跑)。
+
 **安装方式（3 步全自动，不打断用户）：**
 
 ```bash
@@ -41,11 +43,25 @@ test -d "$HOME/.hermes" || { echo "缺少 ~/.hermes"; exit 1; }
 
 ### 1.2 检查并装 miloco 后端
 
+⚠️ **必须用 `--agent-prepare` 模式**，否则上游 `install.sh` 在非交互终端里检测到 stdin 不是 tty 会直接退出。`--agent-prepare` 跑准备 + 探活，输出 JSON 含 `account.bind_url` 和 `model.configured` 状态。
+
 ```bash
-command -v miloco-cli || curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash
+command -v miloco-cli || curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
 command -v miloco-cli || { echo "miloco-cli 仍找不到"; exit 1; }
 test -f "${MILOCO_HOME:-$HOME/.openclaw/miloco}/config.json" || miloco-cli init
 ```
+
+`--agent-prepare` 输出 JSON 形如：
+
+```json
+{
+  "status": "ok",
+  "account": {"is_bound": false, "bind_url": "https://account.xiaomi.com/oauth2/authorize?..."},
+  "model":   {"configured": false, "model": "xiaomi/mimo-v2.5", "base_url": "https://api.xiaomimimo.com/v1"}
+}
+```
+
+记下 `account.bind_url` 和 `model.configured` 状态，下面 Step 2 之后要用。
 
 ### 1.3 检查并装 python 依赖
 
@@ -91,11 +107,69 @@ bash plugins/hermes/install-hermes.sh
 - 跑 `bash plugins/hermes/scripts/miloco-adapter.sh logs` 看 adapter 日志
 - 参考底部故障排除表，不要瞎猜
 
-**如果脚本成功**，跑下面这条重启 hermes 让插件生效：
+**如果脚本成功**，**先验证 adapter 在不在**（**不要现在就跑 `hermes gateway restart`**，见 [Step 2.5](#step-25-强制用户终端操作agent-不要自己跑)）：
 
 ```bash
-hermes gateway restart
+bash plugins/hermes/scripts/miloco-adapter.sh status
+# 期望：adapter 在跑，端口 PID=xxxxx，health OK
 ```
+
+---
+
+## Step 2.5: 强制用户终端操作（agent 不要自己跑）
+
+⚠️ **这 3 件事必须由用户在自己终端里执行，agent 不要尝试在 chat 里代收或代跑**。
+
+原因有两层：
+1. **Hermes 安全机制**会在 chat 消息里自动 mask 敏感字符串（base64 授权码、API key 等）——agent 看不到真值
+2. **某些命令**（如 `hermes gateway restart`）Hermes 自身的 anti-restart-loop 会拒绝在 gateway 进程内执行
+
+### 1. 小米账号 OAuth 授权
+
+agent 从 Step 1.2 的 `--agent-prepare` JSON 拿到 `account.bind_url`，把链接给用户：
+
+> 请在浏览器打开下面链接完成小米账号授权：
+> https://account.xiaomi.com/oauth2/authorize?...
+>
+> 授权后页面会显示一串 base64 字符串（**不要贴到 chat 里**——会被 mask）。
+> 请打开**你自己的终端**跑：
+>
+> ```bash
+> cd ~/xiaomi-miloco   # 或你 clone 的位置
+> miloco-cli account authorize --code "<从浏览器复制的 base64 码>"
+> ```
+>
+> 跑完告诉 agent「绑好了」即可。
+
+OAuth 授权码有效期只有几分钟，所以**浏览器拿到码 → 立刻粘到终端跑**一气呵成。
+
+### 2. 模型 API Key 配置（如果 Step 1.2 的 `model.configured=false`）
+
+agent 不要在 chat 里要 API key（用户贴过来你也是看到 mask 后的串）。直接告诉用户：
+
+> 请打开**你自己的终端**跑：
+>
+> ```bash
+> miloco-cli config set model.omni.api_key "<你的_MiMo_Key>"
+> ```
+>
+> 从 https://platform.xiaomimimo.com 拿 key。key 走 `miloco-cli config set` 不会被 mask，存到 `~/.openclaw/miloco/config.json` 是文件落盘。
+
+### 3. 重启 Hermes Gateway
+
+agent 内部跑 `hermes gateway restart` 会被 Hermes 自身的 anti-restart-loop 拒绝。告诉用户：
+
+> 上面 install-hermes.sh 已经把插件和 API_SERVER_KEY 装好了，**请打开你自己的终端跑**：
+>
+> ```bash
+> hermes gateway restart
+> ```
+>
+> 跑完告诉 agent「重启好了」。
+
+### 用户回执后 agent 做什么
+
+用户做完上面 3 件事，告诉你「绑好了 / 重启好了」之类，你再继续 Step 3 验证。**不要催用户、不要替用户执行、不要 echo 任何敏感值**。
 
 ---
 
@@ -136,13 +210,15 @@ cd xiaomi-miloco && bash plugins/hermes/tests/test_install_e2e.sh   # 应 PASS: 
   - 验证: 22/22 e2e 通过 / 或列出失败项
 ```
 
-### 3.3 **只在这 3 个条件下叫用户**（其它全自跑）
+### 3.3 **这 3 类只让用户自己终端操作**（其它全自跑）
 
-| 检查 | 命令 | 不通过时叫用户做什么 |
-|---|---|---|
-| 小米账号已绑？ | `miloco-cli account status` | 没绑就给出 `bind_url`，让用户在浏览器完成 OAuth，把授权码贴回来 |
-| 模型已配？ | `miloco-cli config show model` | 没配就问 API key（推荐小米 MiMo） |
-| Windows 不是 WSL？ | `uname -r \| grep -i microsoft` | 不在 WSL 就提醒用户用 WSL |
+| 触发条件 | 做什么 |
+|---|---|
+| 小米账号未绑 | 走 [Step 2.5-1](#1-小米账号-oauth-授权)：给 `bind_url`，让用户浏览器授权 + **自己终端跑** `miloco-cli account authorize` |
+| 模型未配 | 走 [Step 2.5-2](#2-模型-api-key-配置如果-step-12-的-model_configuredfalse)：让用户**自己终端跑** `miloco-cli config set model.omni.api_key` |
+| 重启 hermes | 走 [Step 2.5-3](#3-重启-hermes-gateway)：让用户**自己终端跑** `hermes gateway restart` |
+
+> **绝对不要**在 chat 里要 OAuth 授权码 / API key —— Hermes 会 mask，agent 看不到也无法替你跑。
 
 **任何其它情况（git 报错、端口冲突、依赖装不上等）都自己排查 + 看脚本错误 + 参考故障表，不要先问用户。**
 
@@ -167,12 +243,13 @@ cd xiaomi-miloco && bash plugins/hermes/tests/test_install_e2e.sh   # 应 PASS: 
 
 ## Agent 执行要点
 
-1. **严格按 3 步执行** — Step 1 → Step 2 → Step 3，不可跳步
-2. **能不问就不问** — 只有 OAuth 授权码、API key 这种必须人提供的才停下来问用户；其它（装包、装 hermes、装 miloco、跑 install-hermes.sh、重启、验证）都自己跑
-3. **出错先看错误本身** — 把命令 + returncode + stderr 贴给用户，参考故障表给建议，不要瞎猜
-4. **不要回显敏感信息** — API key / 授权码只通过参数传，不要 echo
-5. **尊重用户选择** — 用户说"先不绑账号"也行，告诉他后续怎么补
-6. **Windows 提醒用 WSL** — 原生 Windows 不支持
+1. **严格按 3 步执行** — Step 1 → Step 2 → [Step 2.5 用户终端操作] → Step 3，不可跳步
+2. **能不问就不问** — 装包、装 hermes、装 miloco、跑 install-hermes.sh、验证都自己跑
+3. **必须让用户终端跑的事绝不替** — OAuth 授权、API key 填入、hermes gateway restart，详见 Step 2.5。原因：Hermes chat 层面 mask 敏感值 + Hermes 自身 anti-restart-loop
+4. **出错先看错误本身** — 把命令 + returncode + stderr 贴给用户，参考故障表给建议，不要瞎猜
+5. **不要回显敏感信息** — API key / 授权码不要 echo
+6. **尊重用户选择** — 用户说"先不绑账号"也行，告诉他后续怎么补
+7. **Windows 提醒用 WSL** — 原生 Windows 不支持
 
 ---
 
