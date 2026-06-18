@@ -146,10 +146,10 @@ jobs:
           else
             rel_flag="--latest"
           fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" assets/* --clobber
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" $rel_flag --title "$TAG" --generate-notes assets/*
+            gh release create "$TAG" $rel_flag --title "$TAG" --generate-notes --repo "$GITHUB_REPOSITORY" assets/*
           fi
 
   # ── dry-run 专用：组装资产预览 + 汇总将发布什么（不碰 release）─────────────────
