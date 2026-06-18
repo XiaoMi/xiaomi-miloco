@@ -50,7 +50,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 **Hermes Agent**（开源，[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)）：
 
 ```text
-帮我安装 Miloco 插件：https://raw.githubusercontent.com/n0tssss/xiaomi-miloco/main/plugins/hermes/INSTALL_PROMPT.md
+帮我安装 Miloco 插件：https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/scripts/install-guide-hermes.md
 ```
 
 ### 方式二：命令行一键安装

@@ -17,7 +17,7 @@ The install script is idempotent: it copies the 16 miloco-* skills to `~/.hermes
 
 Adapter lifecycle: `bash plugins/hermes/scripts/miloco-adapter.sh {start|stop|restart|status|logs|env}`.
 
-For a step-by-step guide written for an AI agent to follow, see [INSTALL_PROMPT.md](INSTALL_PROMPT.md).
+For a step-by-step guide written for an AI agent to follow, see [scripts/install-guide-hermes.md](../../scripts/install-guide-hermes.md).
 
 ## What It Does
 

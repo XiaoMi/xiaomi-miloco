@@ -50,7 +50,7 @@ Please install the Miloco plugin for me: https://raw.githubusercontent.com/XiaoM
 **Hermes Agent** (open-source, [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)):
 
 ```text
-Please install the Miloco plugin for me: https://raw.githubusercontent.com/n0tssss/xiaomi-miloco/main/plugins/hermes/INSTALL_PROMPT.md
+Please install the Miloco plugin for me: https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/scripts/install-guide-hermes.md
 ```
 
 ### Option 2: One-line command-line install
