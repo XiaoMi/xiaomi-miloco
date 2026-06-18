@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["miot", "miloco"]
+members = ["miot", "miloco", "hermes-mcp"]
 
 [tool.uv.sources]
 miloco-miot = { workspace = true }
