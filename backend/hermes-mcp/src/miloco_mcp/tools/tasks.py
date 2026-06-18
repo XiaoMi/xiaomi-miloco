@@ -1,6 +1,6 @@
 """Miloco MCP Tools — Tasks & Rules (任务管理与自动化规则)."""
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastmcp import FastMCP
 from pydantic import Field
