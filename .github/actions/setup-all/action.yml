@@ -6,14 +6,14 @@ description: 安装 uv + pnpm + Node 并启用依赖缓存
 runs:
   using: composite
   steps:
-    - uses: astral-sh/setup-uv@v7
+    - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       with:
         enable-cache: true
         cache-dependency-glob: |
           backend/uv.lock
           cli/uv.lock
 
-    - uses: pnpm/action-setup@v6
+    - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
       with:
         version: 11
 

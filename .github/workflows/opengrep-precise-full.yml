@@ -40,7 +40,7 @@ jobs:
       - name: 上传 SARIF 到 Code Scanning
         if: always() && hashFiles('.opengrep-out/precise.sarif') != ''
         continue-on-error: true # 未开 Code Scanning 时上传会失败；扫描结论由前一步 --error 决定，上传不阻塞
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
         with:
           sarif_file: .opengrep-out/precise.sarif
           category: opengrep-full

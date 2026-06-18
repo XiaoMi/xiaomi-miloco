@@ -47,13 +47,13 @@ jobs:
           - language: actions
     steps:
       - uses: actions/checkout@v5
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
         with:
           languages: ${{ matrix.language }}
           config-file: ${{ matrix.config }}
           queries: security-extended
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/autobuild@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+      - uses: github/codeql-action/analyze@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
         continue-on-error: true # 未开 Code Scanning 时上传会失败；不阻塞（findings 不影响退出码）
         with:
           category: "/security/${{ matrix.language }}"
