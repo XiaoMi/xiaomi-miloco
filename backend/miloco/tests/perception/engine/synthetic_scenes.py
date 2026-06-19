@@ -70,6 +70,32 @@ def pet_moving(w: int = 640, h: int = 480, step: int = 0) -> NDArray[np.uint8]:
     return frame
 
 
+def pet_stationary(w: int = 640, h: int = 480) -> NDArray[np.uint8]:
+    """宠物静坐不动：固定位置橙色小块。"""
+    frame = empty_room(w, h)
+    # 宠物（橙色小块，静止在地面）
+    frame[380:420, 200:260] = [50, 120, 220]
+    return frame
+
+
+def pet_and_person(w: int = 640, h: int = 480) -> NDArray[np.uint8]:
+    """人宠同框：人坐在左侧，宠物在右侧地面。"""
+    frame = person_sitting(w, h, x_offset=180)
+    # 宠物（橙色小块在右侧）
+    frame[390:425, 420:490] = [50, 120, 220]
+    return frame
+
+
+def two_pets(w: int = 640, h: int = 480) -> NDArray[np.uint8]:
+    """两只宠物：左侧橙色（猫），右侧黄绿色（狗）。"""
+    frame = empty_room(w, h)
+    # 猫（橙色小块）
+    frame[380:415, 100:160] = [50, 120, 220]
+    # 狗（黄绿色，略大）
+    frame[370:420, 380:460] = [60, 180, 180]
+    return frame
+
+
 def two_people(w: int = 640, h: int = 480) -> NDArray[np.uint8]:
     """两人在房间里。"""
     frame = empty_room(w, h)
@@ -209,6 +235,24 @@ def scene_pet_moving() -> InputSlice:
     return create_input_slice("study-room", frames, silent_audio())
 
 
+def scene_pet_stationary() -> InputSlice:
+    """场景15：宠物静坐不动。Gate 层应判为 static（无显著变化）。"""
+    frame = pet_stationary()
+    return create_input_slice("study-room", [frame] * 6, silent_audio())
+
+
+def scene_pet_and_person() -> InputSlice:
+    """场景16：人宠同框。验证多类型目标同时存在。"""
+    frame = pet_and_person()
+    return create_input_slice("study-room", [frame] * 6, silent_audio())
+
+
+def scene_two_pets() -> InputSlice:
+    """场景17：两只宠物同时在场。验证多宠物检测。"""
+    frame = two_pets()
+    return create_input_slice("study-room", [frame] * 6, silent_audio())
+
+
 def scene_person_leaving() -> InputSlice:
     """场景14：有人坐着 → 站起离开。Omni 应描述 delta。"""
     frames = [
@@ -239,4 +283,7 @@ ALL_SCENES = {
     "11_person_reading": scene_person_reading,
     "12_person_phone": scene_person_phone,
     "14_person_leaving": scene_person_leaving,
+    "15_pet_stationary": scene_pet_stationary,
+    "16_pet_and_person": scene_pet_and_person,
+    "17_two_pets": scene_two_pets,
 }
