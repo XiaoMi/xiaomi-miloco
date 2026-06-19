@@ -19,7 +19,7 @@ Hermes Agent ──MCP(stdio)──▶ miloco-mcp-server ──REST──▶ mil
 ## Install
 
 ```bash
-cd backend/hermes-mcp
+cd plugins/hermes-mcp
 pip install -e .
 ```
 
@@ -46,7 +46,7 @@ mcp_servers:
   miloco:
     command: "python"
     args: ["-m", "miloco_mcp.server"]
-    cwd: "/path/to/xiaomi-miloco/backend/hermes-mcp"
+    cwd: "/path/to/xiaomi-miloco/plugins/hermes-mcp"
     env:
       MILOCO_BASE_URL: "http://127.0.0.1:1810"
 ```

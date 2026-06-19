@@ -24,14 +24,14 @@ Hermes Agent ──MCP(stdio)──▶ miloco-mcp-server ──REST──▶ mil
 ## 安装
 
 ```bash
-cd backend/hermes-mcp
+cd plugins/hermes-mcp
 pip install -e .
 ```
 
 或使用 venv:
 
 ```bash
-cd backend/hermes-mcp
+cd plugins/hermes-mcp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -71,7 +71,7 @@ mcp_servers:
     args:
       - "-m"
       - "miloco_mcp.server"
-    cwd: "/path/to/xiaomi-miloco/backend/hermes-mcp"
+    cwd: "/path/to/xiaomi-miloco/plugins/hermes-mcp"
     env:
       MILOCO_BASE_URL: "http://127.0.0.1:1810"
     timeout: 60
@@ -158,7 +158,7 @@ cat ~/.openclaw/miloco/config.json
 ## 文件结构
 
 ```
-backend/hermes-mcp/
+plugins/hermes-mcp/
 ├── .env.example          # 环境变量模板
 ├── pyproject.toml        # Python 项目配置
 ├── README.md             # 项目说明
