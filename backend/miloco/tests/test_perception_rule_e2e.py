@@ -302,34 +302,17 @@ async def test_e2e_pending_exit_no_cross_pollution(
     assert dids == ["enter-rule_pex"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known limitation: duration_seconds + 多 source rule 在 cycle 内同步翻 "
-        "True→False 时,update_state 入口处 effective_state 用'本帧 current_bool ⊔ "
-        "其他桶上一帧' OR 聚合;先来的 source 看到其他桶上一帧 True → append 1 + "
-        "round_id 消化,后来的 source 跳过 → deque 虚高 1 格,可能触发误 fire。"
-        "修复需重构 duration fire 时序(从 update_state 入口同步 fire 改为 cycle 末延迟 "
-        "fire),改动 N 个 duration 测试,ROI 不划算。当前 1 摄像头部署不暴露;多摄像头 + "
-        "duration rule + 同步翻转极端场景才暴露,误差 ≤ 1 个 sample。等业务真翻车再做。"
-    ),
-)
 @pytest.mark.asyncio
 async def test_e2e_duration_multi_source_sync_transition_no_overcount(
     proxy_with_runner, mock_miot_proxy, mock_log_repo
 ):
-    """xfail 锁定 bug:duration_seconds 配置 rule,多 source 同步翻 True→False 时
-    deque 虚高 1 格 → 可能触发误 fire。
+    """duration_seconds 配置 rule,多 source 同步翻 True→False 时不应过计数。
 
     场景:rule 绑 [cam_A, cam_B] duration_seconds=1, ratio=1.0, sample_interval=0.5
     (maxlen=2 → 满 ratio 即 fire)。
     - cycle 1 (round=200): A=True, B=True → 累计 [1]
     - cycle 2 (round=201): A=False, B=False → 实际应累计 [1, 0]，不 fire;
-      但当前实现下 false 广播 cam_A 先到时 effective_state 看 cam_B 上一帧=True →
-      append 1 → win=[1, 1] → sum/maxlen=1.0 ≥ ratio → **误 fire**。
-
-    本 case xfail (strict=True),修复后该 case 应自然通过 → strict 让 unexpected
-    pass 也报错,提醒移除 xfail mark。
+      false 广播 cam_A 先到时也不能把 cam_B 的上一帧 True 当成本轮 True。
     """
     from miloco.rule.runner import RuleRunner
     from miloco.rule.schema import (
