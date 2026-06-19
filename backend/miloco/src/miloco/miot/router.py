@@ -75,6 +75,31 @@ def _truncate_ws_reason(reason: str) -> str:
 _FIRST_FRAME_TIMEOUT_S = 12.0
 
 
+async def _check_camera_power(camera_id: str) -> bool | None:
+    """检查摄像头电源状态。
+
+    Returns:
+        True  — 摄像头开启
+        False — 摄像头关闭(可能摄像头关闭或开了物理遮蔽)
+        None  — 查询失败(属性不存在/网络异常)
+    """
+    try:
+        from miot.types import MIoTGetPropertyParam
+
+        miot_service = manager.miot_service
+        props = await miot_service.miot_client.get_device_properties(
+            [MIoTGetPropertyParam(did=camera_id, siid=2, piid=1)]
+        )
+        if props and isinstance(props, list) and len(props) > 0:
+            value = props[0].get("value")
+            if isinstance(value, bool):
+                return value
+        return None
+    except Exception as e:
+        logger.debug("check camera power failed, %s: %s", camera_id, e)
+        return None
+
+
 async def _first_frame_watchdog(
     websocket: WebSocket, camera_id: str, channel: int
 ) -> None:
@@ -88,19 +113,32 @@ async def _first_frame_watchdog(
     await asyncio.sleep(_FIRST_FRAME_TIMEOUT_S)
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
         return
-    logger.warning(
-        "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
-        "unreachable (cross-LAN / offline / PPCS relay not established)",
-        camera_id, channel, _FIRST_FRAME_TIMEOUT_S,
-    )
+
+    # 尝试检查摄像头电源状态,给出更精确的错误提示
+    camera_on = await _check_camera_power(camera_id)
+    if camera_on is False:
+        reason = "camera_power_off"
+        message = "摄像头已关闭或开启物理遮蔽"
+        logger.warning(
+            "First-frame watchdog fired, %s.%d — camera power is off",
+            camera_id, channel,
+        )
+    else:
+        reason = "camera_unreachable"
+        message = "连不上摄像头(可能不在同一局域网,或摄像头离线)"
+        logger.warning(
+            "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
+            "unreachable (cross-LAN / offline / PPCS relay not established)",
+            camera_id, channel, _FIRST_FRAME_TIMEOUT_S,
+        )
     try:
         # reason 是给将来按机器码分流预留的字段;前端 watch.html 当前只展示 message,
         # 不读 reason。两个都发,前端按需取。
         await websocket.send_text(
             json.dumps({
                 "type": "error",
-                "reason": "camera_unreachable",
-                "message": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
+                "reason": reason,
+                "message": message,
             })
         )
     except Exception as err:
