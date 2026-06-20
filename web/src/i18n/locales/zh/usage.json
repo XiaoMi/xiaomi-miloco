@@ -90,6 +90,9 @@
     "deleteSuccess": "已删除",
     "deleteFailed": "删除失败",
     "modelsEmptyResult": "该地址未返回模型列表",
-    "modelsFetchFailed": "拉取模型失败"
+    "modelsFetchFailed": "拉取模型失败",
+    "edit": "编辑",
+    "editSuccess": "已修改",
+    "editFormHint": "修改 Base URL / Model / API Key（留空沿用原值）"
   }
 }

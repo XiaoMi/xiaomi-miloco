@@ -90,6 +90,9 @@
     "deleteSuccess": "Deleted",
     "deleteFailed": "Couldn't delete",
     "modelsEmptyResult": "This address returned no model list",
-    "modelsFetchFailed": "Couldn't fetch models"
+    "modelsFetchFailed": "Couldn't fetch models",
+    "edit": "Edit",
+    "editSuccess": "Edited",
+    "editFormHint": "Edit Base URL / Model / API Key (leave blank to keep original)"
   }
 }

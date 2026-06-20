@@ -157,6 +157,10 @@ export function UsageOmniConfig() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<OmniTestResult | null>(null);
 
+  // 编辑状态（与 adding 互斥）
+  const [editingLabel, setEditingLabel] = useState<string | null>(null);
+  const [editingProfile, setEditingProfile] = useState<OmniProfile | null>(null);
+
   useEffect(() => {
     void load();
   }, []);
@@ -179,10 +183,24 @@ export function UsageOmniConfig() {
   );
 
   function startAdd() {
+    setEditingLabel(null); // 与编辑互斥
+    setEditingProfile(null);
     setAdding(true);
     setBaseUrl("");
     setApiKey("");
     setModel("");
+    setModels([]);
+    setModelsMsg(null);
+    setTestResult(null);
+  }
+
+  function startEdit(p: OmniProfile) {
+    setAdding(false); // 与新增互斥
+    setEditingLabel(p.label);
+    setEditingProfile(p);
+    setBaseUrl(p.base_url);
+    setApiKey(""); // API Key 不回显，用户留空=沿用原 key
+    setModel(p.model);
     setModels([]);
     setModelsMsg(null);
     setTestResult(null);
@@ -213,27 +231,34 @@ export function UsageOmniConfig() {
   async function onSave() {
     const bu = baseUrl.trim();
     const m = model.trim();
+    const isEditing = !!editingLabel;
     if (!bu || !m) {
       toast(t("usage.baseUrlModelRequired"), "warn");
       return;
     }
-    if (!apiKey.trim() && !existing?.has_key) {
+    // 编辑模式：允许不填 api_key（沿用原 key）
+    // 新增模式：检查是否已有 key（existing.has_key）
+    if (!apiKey.trim() && !editingProfile?.has_key && !existing?.has_key) {
       toast(t("usage.apiKeyRequired"), "warn");
       return;
     }
     setSaving(true);
     try {
+      // 编辑模式：label 基于新值，original_label 记录原档案名
+      // 新增模式：label = `${model} @ ${base_url}`
       const s = await updateOmniConfig({
-        label: existing ? existing.label : `${m} @ ${bu}`,
+        label: editingLabel ? `${m} @ ${bu}` : (existing ? existing.label : `${m} @ ${bu}`),
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
-        original_label: existing ? existing.label : undefined,
-        activate: false, // 只入列表;启用由模型列表的「启用」负责
+        original_label: editingLabel || (existing ? existing.label : undefined),
+        activate: false, // 只入列表；启用由模型列表的「启用」负责
       });
       setState(s);
       setAdding(false);
-      toast(t("usage.saveSuccess"), "ok");
+      setEditingLabel(null); // 清空编辑状态
+      setEditingProfile(null);
+      toast(isEditing ? t("usage.editSuccess") : t("usage.saveSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.saveFailed"), "danger");
     } finally {
@@ -248,7 +273,7 @@ export function UsageOmniConfig() {
       toast(t("usage.baseUrlModelRequired"), "warn");
       return;
     }
-    if (!apiKey.trim() && !existing?.has_key) {
+    if (!apiKey.trim() && !editingProfile?.has_key && !existing?.has_key) {
       toast(t("usage.apiKeyRequiredBeforeTest"), "warn");
       return;
     }
@@ -256,7 +281,7 @@ export function UsageOmniConfig() {
     setTestResult(null);
     try {
       const res = await testOmniConfig({
-        label: existing ? existing.label : "",
+        label: editingLabel || (existing ? existing.label : ""),
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
@@ -380,6 +405,14 @@ export function UsageOmniConfig() {
                                 {t("usage.activate")}
                               </button>
                             )}
+                            {/* 编辑按钮 */}
+                            <button
+                              type="button"
+                              onClick={() => startEdit(p)}
+                              className="text-text-tertiary hover:text-brand-primary mr-3"
+                            >
+                              {t("usage.edit")}
+                            </button>
                             <button
                               type="button"
                               onClick={() => onDelete(p)}
@@ -396,7 +429,7 @@ export function UsageOmniConfig() {
               </div>
 
               {/* 新增按钮放列表下方(新增即追加到列表末尾) */}
-              {!adding && (
+              {!adding && !editingLabel && (
                 <button
                   type="button"
                   onClick={startAdd}
@@ -406,11 +439,13 @@ export function UsageOmniConfig() {
                 </button>
               )}
 
-              {/* ── 新增表单 ── */}
-              {adding && (
+              {/* ── 新增/编辑表单 ── */}
+              {(adding || editingLabel) && (
                 <div className="mt-4 rounded-lg bg-bg-primary border border-border p-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 items-start">
                   <div className="md:col-span-2 text-caption text-text-secondary">
-                    {t("usage.addFormHint")}
+                    {editingLabel
+                      ? t("usage.editFormHint")
+                      : t("usage.addFormHint")}
                   </div>
                   <Field label={t("usage.baseUrlLabel")} className="md:col-span-2">
                     <input
@@ -434,7 +469,7 @@ export function UsageOmniConfig() {
                       }}
                       onBlur={() => fetchModels(baseUrl, apiKey)}
                       placeholder={
-                        existing?.has_key
+                        editingProfile?.has_key || existing?.has_key
                           ? t("usage.apiKeyPlaceholderExisting")
                           : t("usage.apiKeyPlaceholderNew")
                       }
@@ -488,6 +523,8 @@ export function UsageOmniConfig() {
                       type="button"
                       onClick={() => {
                         setAdding(false);
+                        setEditingLabel(null);
+                        setEditingProfile(null);
                         setTestResult(null);
                       }}
                       disabled={saving || testing}
