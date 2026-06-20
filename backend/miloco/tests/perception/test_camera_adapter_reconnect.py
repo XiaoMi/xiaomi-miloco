@@ -119,3 +119,90 @@ class TestSyncDevicesOnDemandRefresh:
         clock[0] = 116_000  # 距上次 +11s >= 10s
         asyncio.run(adapter.sync_devices())  # 再次触发
         assert proxy.refresh_cameras.await_count == 2
+
+
+class TestSyncDevicesStaleStatusRefresh:
+    """sync_devices 云端 online 状态自愈：后端重启时摄像头恰好断连的恢复。
+
+    场景：后端重启 → _camera_info_dict 缓存 online=false → sync 循环永远
+    认为摄像头不可连。当 expected 为空且无设备时，应主动刷新云端状态。
+    """
+
+    def _adapter_with_mocked_connect(self, monkeypatch, proxy):
+        adapter = CameraDeviceAdapter(miot_proxy=proxy)
+        monkeypatch.setattr(adapter, "connect_device", AsyncMock())
+        monkeypatch.setattr(adapter, "disconnect_device", AsyncMock())
+        return adapter
+
+    def test_refresh_when_expected_empty_and_no_devices(self, monkeypatch):
+        """expected=0 且无设备 → 应调 refresh_camera_online_status。"""
+        proxy = MagicMock()
+        proxy.is_authenticated = True
+        proxy.refresh_cameras = AsyncMock()
+        proxy.refresh_camera_online_status = AsyncMock()
+        adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
+        monkeypatch.setattr(
+            adapter, "discover_devices", AsyncMock(return_value={})
+        )
+
+        asyncio.run(adapter.sync_devices())
+
+        proxy.refresh_camera_online_status.assert_awaited_once()
+        proxy.refresh_cameras.assert_not_awaited()
+
+    def test_no_stale_refresh_when_expected_nonempty(self, monkeypatch):
+        """expected 非空 → 不应调 refresh_camera_online_status。"""
+        proxy = MagicMock()
+        proxy.is_authenticated = True
+        proxy.refresh_cameras = AsyncMock()
+        proxy.refresh_camera_online_status = AsyncMock()
+        adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
+        monkeypatch.setattr(
+            adapter, "discover_devices",
+            AsyncMock(return_value={"cam1": _source()}),
+        )
+
+        asyncio.run(adapter.sync_devices())
+
+        proxy.refresh_camera_online_status.assert_not_awaited()
+
+    def test_no_stale_refresh_when_has_connected_devices(self, monkeypatch):
+        """有已连设备 → 不应调 refresh_camera_online_status。"""
+        proxy = MagicMock()
+        proxy.is_authenticated = True
+        proxy.refresh_cameras = AsyncMock()
+        proxy.refresh_camera_online_status = AsyncMock()
+        proxy.get_cached_camera = MagicMock(return_value=None)
+        adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
+        adapter._devices["cam1"] = _CameraDeviceState(did="cam1")
+        monkeypatch.setattr(
+            adapter, "discover_devices", AsyncMock(return_value={})
+        )
+
+        asyncio.run(adapter.sync_devices())
+
+        proxy.refresh_camera_online_status.assert_not_awaited()
+
+    def test_throttle_stale_status_refresh(self, monkeypatch):
+        """节流：refresh_camera_online_status 最多每 30s 一次。"""
+        proxy = MagicMock()
+        proxy.is_authenticated = True
+        proxy.refresh_cameras = AsyncMock()
+        proxy.refresh_camera_online_status = AsyncMock()
+        adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
+        monkeypatch.setattr(
+            adapter, "discover_devices", AsyncMock(return_value={})
+        )
+        clock = [100_000]
+        monkeypatch.setattr(
+            "miloco.perception.collect.camera_adapter._monotonic_ms", lambda: clock[0]
+        )
+
+        asyncio.run(adapter.sync_devices())  # 首次：触发
+        assert proxy.refresh_camera_online_status.await_count == 1
+        clock[0] = 115_000  # +15s < 30s
+        asyncio.run(adapter.sync_devices())  # 节流：跳过
+        assert proxy.refresh_camera_online_status.await_count == 1
+        clock[0] = 135_000  # 距上次 +35s >= 30s
+        asyncio.run(adapter.sync_devices())  # 再次触发
+        assert proxy.refresh_camera_online_status.await_count == 2

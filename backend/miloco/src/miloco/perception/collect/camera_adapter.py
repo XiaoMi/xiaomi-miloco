@@ -57,6 +57,12 @@ _CAMERA_TRACKS = ["decoded_video", "decoded_audio"]
 # 不节流会变成每秒一次重 SDK 调用 + 建连尝试。10s 足够让相机就绪后及时恢复。
 _ONDEMAND_REFRESH_MIN_INTERVAL_MS = 10_000
 
+# 云端 online 状态自愈刷新的最小间隔：后端重启时 _camera_info_dict 缓存了
+# 重启瞬间的云端 online 状态，若此时摄像头恰好断连（online=false），sync 循环
+# 永远认为摄像头不可连。LAN 探测到摄像头上线后，需主动刷新一次云端状态。
+# 30s 足够让云端 SDK 更新状态，同时避免频繁调用。
+_STALE_STATUS_REFRESH_MIN_INTERVAL_MS = 30_000
+
 # TODO: 多通道支持
 DEFAULT_VIDEO_CHANNEL = 0
 DEFAULT_AUDIO_CHANNEL = 0
@@ -93,6 +99,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self._on_window_ready = on_window_ready
         self._devices: dict[str, _CameraDeviceState] = {}
         self._last_ondemand_refresh_ms = 0
+        self._last_stale_status_refresh_ms = 0
 
     async def discover_devices(
         self,
@@ -185,6 +192,11 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         `online_only=True, require_lan=False`：放过 lan_online 陈旧成 false 的卡死态
         相机（要救），但排除云端就离线的相机（救不活，避免它让判据永真致 refresh
         空转）。scope 内相机要么已连、要么云端离线时不触发，零额外开销。
+
+        云端 online 状态自愈：后端重启时 `_camera_info_dict` 缓存了重启瞬间的云端
+        online 状态，若此时摄像头恰好断连（online=false），sync 循环永远认为摄像头
+        不可连。当 on-demand 检查发现无相机可连且本地也无设备时，主动调一次
+        `refresh_camera_online_status()` 刷新云端状态，让 LAN 已上线的摄像头能被发现。
         """
         if all_devices is None and self._miot_proxy.is_authenticated:
             try:
@@ -198,6 +210,22 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 ):
                     self._last_ondemand_refresh_ms = now_ms
                     await self._miot_proxy.refresh_cameras()
+                elif (
+                    not expected
+                    and not self._devices
+                    and now_ms - self._last_stale_status_refresh_ms
+                    >= _STALE_STATUS_REFRESH_MIN_INTERVAL_MS
+                ):
+                    # 云端 online 缓存可能 stale（后端重启时摄像头恰好断连）。
+                    # LAN 探测到摄像头上线后 _on_lan_device_changed 只更新
+                    # lan_online，不更新 online。这里主动刷新一次云端状态，
+                    # 让下一轮 sync 能发现摄像头。
+                    self._last_stale_status_refresh_ms = now_ms
+                    await self._miot_proxy.refresh_camera_online_status()
+                    logger.info(
+                        "Stale camera online status refreshed, "
+                        "retrying discover on next sync cycle"
+                    )
             except Exception as e:  # noqa: BLE001
                 logger.warning("On-demand camera manager refresh failed: %s", e)
         await super().sync_devices(all_devices)
