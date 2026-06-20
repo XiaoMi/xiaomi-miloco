@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Pre-commit hook: sync Miloco skills before each commit.
+
+Installed via:
+    python3 scripts/hooks/install.py
+
+Or manually:
+    cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+HOOK_SCRIPT = Path(__file__).resolve()
+SYNC_SCRIPT = HOOK_SCRIPT.parent.parent.parent / "plugins" / "hermes" / "scripts" / "sync_skills.py"
+
+
+def main() -> int:
+    if not SYNC_SCRIPT.exists():
+        return 0
+
+    result = subprocess.run(
+        [sys.executable, str(SYNC_SCRIPT), "--check"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0:
+        return 0
+
+    print(result.stderr or result.stdout, file=sys.stderr)
+    print("Auto-syncing skills...", file=sys.stderr)
+
+    sync_result = subprocess.run(
+        [sys.executable, str(SYNC_SCRIPT)],
+        capture_output=True,
+        text=True,
+    )
+    print(sync_result.stdout, file=sys.stderr)
+
+    if sync_result.returncode != 0:
+        print(f"error: skill sync failed (rc={sync_result.returncode})", file=sys.stderr)
+        return 1
+
+    subprocess.run(
+        ["git", "add", str(SYNC_SCRIPT.parent.parent / "skills")],
+        check=False,
+    )
+    print("skills synced and staged. Re-commit to include skill changes.", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

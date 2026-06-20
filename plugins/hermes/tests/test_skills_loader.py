@@ -47,5 +47,5 @@ def test_register_skills_warns_when_source_missing(monkeypatch, tmp_path, caplog
 
     with caplog.at_level(logging.WARNING):
         result = skills_loader.register_skills(FakeCtx())
-    assert result is None
+    assert result == 0
     assert any("not found" in rec.message for rec in caplog.records)

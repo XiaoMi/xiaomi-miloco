@@ -42,13 +42,27 @@ graph TB
 - `miloco-cli` 已安装（与 OpenClaw 插件共用同一套 CLI/后端）
 - Python ≥ 3.10
 
-### 启用插件
+### 方式 1：CLI 安装（推荐）
+
+Hermes 支持从 Git 仓库子目录安装插件。一行命令完成：
 
 ```bash
-# 将本目录链接或复制到 ~/.hermes/plugins/miloco/
-hermes plugins enable miloco
+hermes plugins install XiaoMi/xiaomi-miloco/plugins/hermes --enable
+```
 
-# 重启 gateway 使插件生效
+这会 clone 整个仓库，提取 `plugins/hermes/` 子目录，复制到 `~/.hermes/plugins/miloco/`，并自动启用。
+
+### 方式 2：手动拷贝
+
+```bash
+# 将本目录复制到 ~/.hermes/plugins/miloco/
+cp -r plugins/hermes ~/.hermes/plugins/miloco
+hermes plugins enable miloco
+```
+
+### 重启 gateway
+
+```bash
 hermes gateway restart
 ```
 
@@ -58,6 +72,18 @@ hermes gateway restart
 
 ```bash
 miloco-cli config set agent.webhook_url http://127.0.0.1:18789/miloco/webhook
+```
+
+### 更新插件
+
+```bash
+hermes plugins update miloco
+```
+
+### 卸载插件
+
+```bash
+hermes plugins remove miloco
 ```
 
 ## 配置

@@ -1251,40 +1251,136 @@ def register_cron_sync(ctx):
 
 ## 9. Skills（16 个技能文档）
 
-### 9.1 注册方式
+### 9.1 安装机制：为什么不能像 OpenClaw 那样 gitignore
+
+**OpenClaw 的 skills 安装流程**：
+
+```mermaid
+graph LR
+    subgraph Source["源码仓库"]
+        Skills1["plugins/skills/<br/>(源，提交到仓库)"]
+        OpenClaw["plugins/openclaw/<br/>(无 skills/)"]
+    end
+
+    subgraph Build["构建过程 (npm)"]
+        Prebuild["prebuild:<br/>sync-skills.mjs"]
+        Copy1["复制 skills →<br/>plugins/openclaw/skills/"]
+        Tsdown["tsdown build"]
+    end
+
+    subgraph Published["发布包 (npm)"]
+        Package["published package<br/>(含 skills/ + dist/)"]
+    end
+
+    subgraph OCInstall["OpenClaw 安装"]
+        NpmInstall["npm install<br/>miloco-openclaw-plugin"]
+    end
+
+    Skills1 --> Prebuild
+    Prebuild --> Copy1
+    Copy1 --> Tsdown
+    Tsdown --> Package
+    Package --> NpmInstall
+```
+
+- `plugins/openclaw/skills/` 被 `.gitignore` 排除，**不提交到仓库**
+- `package.json` 的 `"prebuild": "node scripts/sync-skills.mjs"` 在**构建前**自动复制 skills
+- 发布的 npm 包**已包含** skills
+- OpenClaw 安装的是已构建的 npm 包，不是源码
+
+**Hermes 的安装流程**（无构建步骤）：
+
+```mermaid
+graph LR
+    subgraph Source2["源码仓库"]
+        Skills2["plugins/skills/<br/>(源)"]
+        Hermes["plugins/hermes/<br/>+ skills/ (已提交)"]
+    end
+
+    subgraph GitInstall["hermes plugins install"]
+        Clone["git clone --depth 1"]
+        Move["shutil.move →<br/>~/.hermes/plugins/miloco/"]
+    end
+
+    Skills2 --> Hermes
+    Hermes --> Clone
+    Clone --> Move
+```
+
+- `hermes plugins install XiaoMi/xiaomi-miloco/plugins/hermes` 只做 `git clone` + `shutil.move`
+- **没有构建步骤**，没有 pre-install/post-install 钩子可以执行脚本
+- `git clone` 获取的是仓库中已提交的文件，`.gitignore` 排除的文件**不会出现在 clone 中**
+- 因此 skills 必须在**提交时**就存在于 `plugins/hermes/skills/`
+
+**Hermes 安装流程中没有可触发脚本执行的时机**：
+
+| 安装阶段 | OpenClaw | Hermes |
+|---------|---------|--------|
+| 构建前 | `prebuild` 脚本（sync-skills） | **无**（没有构建步骤） |
+| 安装时 | npm 包已包含 skills | `git clone` + `shutil.move`（不执行脚本） |
+| 安装后 | — | `_copy_example_files`（仅复制 `*.example` 文件）<br/>`_display_after_install`（仅显示 `after-install.md`）<br/>`_prompt_plugin_env_vars`（仅提示环境变量） |
+
+### 9.2 方案：pre-commit hook 自动同步
+
+既然 Hermes 安装没有构建步骤，需要在**提交前**把 skills 复制好。使用 **pre-commit hook**（Python 脚本，跨平台）在每次提交前自动同步：
+
+```mermaid
+graph LR
+    A["开发者编辑<br/>plugins/skills/"] --> B["git commit"]
+    B --> C["pre-commit hook<br/>sync_skills.py"]
+    C --> D["自动复制<br/>plugins/skills/ →<br/>plugins/hermes/skills/"]
+    D --> E["git add 提交"]
+    E --> F["仓库含同步后的 skills"]
+
+    style C fill:#ccffcc
+    style D fill:#ccffcc
+```
+
+- `plugins/skills/` 是源（开发者编辑这里）
+- `plugins/hermes/skills/` 是生成物（**提交到仓库**，供 `git clone` 获取）
+- pre-commit hook 在每次提交前自动运行 Python 同步脚本
+- 开发者只需编辑 `plugins/skills/`，hook 自动保持 `plugins/hermes/skills/` 同步
+- 与 OpenClaw 的 `prebuild` 类比：OpenClaw 在构建前同步，Hermes 在提交前同步
+
+### 9.3 注册方式
 
 ```python
 # skills_loader.py
-from pathlib import Path
-
 _PLUGIN_DIR = Path(__file__).parent
-_SKILLS_SOURCE = _PLUGIN_DIR.parent.parent / "skills"  # plugins/skills/
+
+def _skills_source_dir():
+    """多路径搜索：优先插件内捆绑（Git install），fallback 到兄弟目录（开发环境）。"""
+    candidates = [
+        _PLUGIN_DIR / "skills",            # 插件内（Git install / pre-commit 同步生成）
+        _PLUGIN_DIR.parent / "skills",     # 兄弟目录（开发环境直接运行）
+    ]
+    for p in candidates:
+        if p.exists() and any(d.is_dir() for d in p.iterdir()):
+            return p
+    return candidates[0]
 
 def register_skills(ctx):
     """注册 16 个 skills，命名空间为 miloco:<skill-name>。"""
-    skills_dir = _SKILLS_SOURCE
-    if not skills_dir.exists():
-        logger.warning("skills source not found: %s", skills_dir)
-        return
-
-    for child in sorted(skills_dir.iterdir()):
+    src = _skills_source_dir()
+    for child in sorted(src.iterdir()):
         skill_md = child / "SKILL.md"
         if child.is_dir() and skill_md.exists():
             ctx.register_skill(child.name, skill_md)
-            logger.debug("registered skill miloco:%s", child.name)
 ```
 
 **与 OpenClaw 的差异**：
 
 | 项 | OpenClaw | Hermes |
 |----|---------|--------|
-| 打包方式 | `scripts/sync-skills.mjs` 复制到 `plugins/openclaw/skills/`，清单声明路径 | `ctx.register_skill(name, path)` 逐个注册，直接引用源目录 |
-| 访问命名空间 | `<skill-name>`（无命名空间） | `miloco:<skill-name>`（插件命名空间，避免与内置 skill 冲突） |
-| 系统提示索引 | 出现在 `<available_skills>` | **不出现**（插件 skill 不进系统提示索引，只能显式 `skill_view("miloco:xxx")` 加载） |
+| skills 复制时机 | `prebuild`（构建前） | `pre-commit`（提交前） |
+| skills 提交到仓库 | 否（`.gitignore` 排除） | **是**（`git clone` 需要文件存在） |
+| 复制脚本语言 | JavaScript (`sync-skills.mjs`) | Python (`sync_skills.py`，跨平台） |
+| 访问命名空间 | `<skill-name>`（无命名空间） | `miloco:<skill-name>`（插件命名空间） |
+| 系统提示索引 | 出现在 `<available_skills>` | **不出现**（插件 skill 只能显式 `skill_view("miloco:xxx")` 加载） |
 
-**注意事项**：cron job 的 prompt 和 `pre_llm_call` 注入的指令文本需要把 skill 名称从 `miloco-perception-digest` 改为 `miloco:miloco-perception-digest`。
+**注意事项**：cron job 的 prompt 和 `pre_llm_call` 注入的指令文本使用 `miloco:miloco-perception-digest` 命名空间格式。
 
-### 9.2 Skill Frontmatter 适配
+### 9.4 Skill Frontmatter 适配
 
 现有 skill 的 `SKILL.md` frontmatter 中 `metadata.openclaw.requires.bins` 字段对 Hermes 无意义但不影响加载。Hermes 只读 `name` 和 `description`。
 
