@@ -287,10 +287,28 @@ async def run_pipeline(
     # Downsample to target fps at pipeline entry
     input_slice = downsample_snapshot(input_slice, config.input.fps)
 
-    # Gate（本入口为无状态单次调用，无跨窗口基准可传，丢弃 last_checked / 两 ts）。
-    # 注意:prev_frame 恒为 None → 视觉 gate 每次都走 cold-start 放行,本入口不会因静止画面 skipped。
-    # 若将来把它放进循环复用,需自行在外维护 prev_frame 才能恢复静止 skip 语义。
-    gate_packet, gate_timing, _, _, _ = run_gate(input_slice, config.gate, config.input.fps)
+    # ========================================
+    # Fix: Gate layer stationary frame filtering
+    # ========================================
+    # Bug: prev_frame was always None → visual gate cold-started every cycle
+    # Impact: ~50-80% wasted MiMo calls on static scenes (e.g. cameras facing
+    #         pet areas or empty rooms)
+    # Fix: Cache benchmark frame per device ID and pass to run_gate()
+    global _GATE_PREV_FRAMES, _GATE_LAST_PASS_TS
+    did = input_slice.device.did
+    prev_frame = _GATE_PREV_FRAMES.get(did)
+    last_pass_ts = _GATE_LAST_PASS_TS.get(did)
+
+    gate_packet, gate_timing, last_checked, new_last_pass, _ = run_gate(
+        input_slice, config.gate, config.input.fps,
+        prev_frame=prev_frame, last_visual_pass_ts=last_pass_ts,
+    )
+
+    if last_checked is not None:
+        _GATE_PREV_FRAMES[did] = last_checked
+    if new_last_pass is not None:
+        _GATE_LAST_PASS_TS[did] = new_last_pass
+    
     timing["gate_ms"] = gate_timing.total_ms
     timing["gate_video_ms"] = gate_timing.video_ms
     timing["gate_audio_ms"] = gate_timing.audio_ms
