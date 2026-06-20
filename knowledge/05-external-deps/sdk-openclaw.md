@@ -30,6 +30,12 @@ Skill 源码在 `plugins/skills/`，共 16 个（`miloco-` 前缀），每个 Sk
 
 `pnpm run build` 构建时通过 `scripts/sync-skills.mjs` 把 `plugins/skills/` 整体复制到插件构建产物中。修改 Skill 后须重新 `pnpm run build` + `openclaw plugins install .` 才生效。
 
+### Skills 安装机制
+
+OpenClaw 走 `prebuild`：构建时由 `scripts/sync-skills.mjs` 把 `plugins/skills/` 复制进插件构建产物，`plugins/openclaw/skills/` 被 `.gitignore` 排除、不进仓库，随发布的 npm 包分发。这是因为 OpenClaw 安装的是已构建的 npm 包，有构建步骤可挂脚本。
+
+平行实现的 Hermes 插件没有构建步骤（`git clone` + `shutil.move` 安装），改用 **pre-commit hook** 在提交前复制 skills 并**提交到仓库**，供 `git clone` 直接获取。两者复制时机不同但目的一致——让安装方拿得到 skills。具体脚本与阈值指向 `plugins/openclaw/scripts/sync-skills.mjs` 与 `plugins/hermes/` 下的 pre-commit 脚本，对比表见 [Hermes Agent SDK 依赖 · Skills 安装机制差异](sdk-hermes.md#skills-安装机制差异)。
+
 ### 版本兼容约束
 
 - Miloco 插件依赖 `openclaw/plugin-sdk` 的 `before_prompt_build` Hook 接口

@@ -104,13 +104,17 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 
 每次 Agent turn 前装配并追加：系统上下文（技能路由表、感知记忆说明、工作方式）、设备目录（catalog）、硬约束（禁止 inline sleep / 行为跟踪必须走任务 / 通知必须走 miloco-notify Skill）、家庭记忆说明 + profile.md 内容（`helpers.ts::loadHomeProfile`）、待回应习惯建议块（`home-profile/injection.ts::buildPendingSuggestionBlock`）。
 
-**trace Hook**：监听 7 个 agent 生命周期事件，turn 结束后计算 meta（LLM 调用次数、工具调用次数、各类耗时、错误统计）；debug 模式下写 JSONL 到 `$MILOCO_HOME/trace/agent/`；在内存中保留 meta 供后端轮询后消费（幂等消费，消费后即清除）。
+**Profile 分级注入**：`before_prompt_build` 并非对所有会话一视同仁。`resolveProfile()`（`hooks/prompt.ts`）按 sessionKey / trigger 将会话分四档注入不同上下文：`full`（主会话，全量）、`suggestion`（建议会话，仅事件提醒格式 + 档案）、`rule`（规则会话，仅规则提醒格式 + 档案）、`minimal`（cron 任务，仅身份 + 通知 + 语言）。**为什么分级**：定时任务（perception-digest、home-dreaming 等）是隔离的 cron agent，给它们完整上下文会导致"误把结合感知记忆和家庭档案主动提醒/操作当成自己的职责"，职责混乱；minimal 档只给各自 skill + CLI 自取数据所需的最小指令。
+
+**trace Hook**：监听 7 个 agent 生命周期事件，turn 结束后计算 meta（LLM 调用次数、工具调用次数、各类耗时、错误统计）；debug 模式下写 JSONL 到 `$MILOCO_HOME/trace/agent/`；在内存中保留 meta 供后端轮询后消费（幂等消费，消费后即清除）。**为什么有 traceId→runId 关联**：`webhooks/agent.ts` 起 turn 时调 `registerTraceLink(runId, traceId)` 把后端传来的 traceId 种入 turns 占位条目；trace hooks 据此过滤，只对带 traceId 的 turn 落盘和计算 meta，排除 cron/setup 等无关 turn，保证后端 `get_trace` 能精确拿到"自己发起的那一轮"的元数据。
 
 ### Webhook 通信机制
 
 **agent Webhook**（后端 → plugin → Agent）
 
 后端通过 HTTP POST `/miloco/webhook` 发起，payload 包含 `action`、`message`、`sessionKey`、`traceId` 和等待超时。plugin 侧触发 Agent subagent turn，同步等待，返回 `{runId, status, error}`。
+
+**为什么是同步阻塞**：后端 dispatcher 依赖 `waitForRun()` 阻塞返回的 turn 终态来做单飞调度（同一 session_key 至多 1 个在途 turn）和状态跟踪。若 webhook 异步返回 202，后端拿不到 turn 结果，单飞 / 同类合并 / 优先级淘汰都无法成立。HTTP 超时设为略大于 turn 等待超时（缓冲值见 `utils/agent_client.py`），保证 turn 未超时前 HTTP 连接不先断。
 
 **get_trace Webhook**（backend observability 反向轮询）
 
@@ -162,6 +166,10 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 - **同类合并**：同批次内同类型回调合并为一条 message，减少 Agent turn 数
 - **优先级淘汰**：队列超长时，按类型级优先级 → 条目级优先级 → 最旧顺序淘汰
 - 四类事件（interaction / bind / rule / suggestion）分三条 session 路由：interaction 与 bind 共用主会话（同一 session_key / lane，但属不同合并类型、各自单飞不混入同一 turn），rule、suggestion 各一条；session_key 常量见 `dispatch/dispatcher.py`
+
+**上下文溢出自愈**：agent Webhook 检测到 turn 因 context overflow 失败时，删掉旧 session（`deleteSession` + `deleteTranscript`）后用同一 idempotencyKey 重试一次，返回 `recovered` 标记。**为什么只重试一次不循环**：溢出说明会话历史过长，删旧重建是确定性修复；若重建后仍溢出，多半是单轮 message 本身超限，循环重试无意义反而放大故障。后端据 `recovered` 标记打日志。
+
+**通知绑定状态机**：`miloco_im_push` 工具在通知目标未绑定或失效时返回 `needsBind: true` + `bindHintExample`，**不发送**，等 agent 补上 `bindHint` 再次调用才真正投递。**为什么这么分**：绑定引导语要按用户当前对话语言、贴合上下文语气生成，这是 agent 擅长的；而"未绑定就不发""投递目标失效就不发"这类防骚扰规则是确定性策略，不能依赖 agent 自觉，由工具自身裁定（`tools/notify.ts`）。习惯建议的防骚扰闸门（同时至多几条待回应、每日新推上限、过期与累计询问上限）同理由 `home-profile/suggestions.ts` 的状态机裁定，具体阈值见代码。
 
 ### 如果我要添加/修改 Skill
 
