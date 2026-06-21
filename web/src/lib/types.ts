@@ -200,6 +200,7 @@ export interface CameraScheduleWindow {
 
 export interface CameraSchedule {
   enabled: boolean;
+  weekdays: number[];
   windows: CameraScheduleWindow[];
 }
 

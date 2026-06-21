@@ -930,6 +930,16 @@ interface BackendScopeCamera {
   connected: boolean;
 }
 
+const ALL_CAMERA_SCHEDULE_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+
+function normalizeCameraSchedule(schedule: CameraSchedule | undefined): CameraSchedule {
+  return {
+    enabled: schedule?.enabled ?? false,
+    weekdays: schedule?.weekdays ?? ALL_CAMERA_SCHEDULE_WEEKDAYS,
+    windows: schedule?.windows ?? [],
+  };
+}
+
 export async function realListScopeCameras(): Promise<ScopeCamera[]> {
   const r = await apiFetch<Normal<BackendScopeCamera[]>>(
     "/api/miot/scope/cameras",
@@ -942,7 +952,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     inUse: c.in_use,
     effectiveInUse: c.effective_in_use ?? c.in_use,
     schedulePaused: c.schedule_paused ?? false,
-    schedule: c.schedule ?? { enabled: false, windows: [] },
+    schedule: normalizeCameraSchedule(c.schedule),
     nextScheduleChangeAt: c.next_schedule_change_at ?? undefined,
     connected: c.connected,
   }));

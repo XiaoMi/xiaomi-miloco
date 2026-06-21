@@ -7,6 +7,65 @@ from miloco_cli.output import print_result
 
 _HOMES_PATH = "/api/miot/scope/homes"
 _CAMERAS_PATH = "/api/miot/scope/cameras"
+_ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]
+_WEEKDAY_ALIASES = {
+    "1": 0,
+    "mon": 0,
+    "monday": 0,
+    "周一": 0,
+    "星期一": 0,
+    "2": 1,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "周二": 1,
+    "星期二": 1,
+    "3": 2,
+    "wed": 2,
+    "wednesday": 2,
+    "周三": 2,
+    "星期三": 2,
+    "4": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "周四": 3,
+    "星期四": 3,
+    "5": 4,
+    "fri": 4,
+    "friday": 4,
+    "周五": 4,
+    "星期五": 4,
+    "6": 5,
+    "sat": 5,
+    "saturday": 5,
+    "周六": 5,
+    "星期六": 5,
+    "7": 6,
+    "sun": 6,
+    "sunday": 6,
+    "周日": 6,
+    "星期日": 6,
+    "周天": 6,
+    "星期天": 6,
+}
+
+
+def _parse_weekdays(values) -> list[int]:
+    if not values:
+        return list(_ALL_WEEKDAYS)
+
+    weekdays: set[int] = set()
+    for value in values:
+        key = value.strip().lower()
+        if key not in _WEEKDAY_ALIASES:
+            raise click.BadParameter(
+                "weekday must be mon..sun, 1..7, or 周一..周日",
+                param_hint="--weekday",
+            )
+        weekdays.add(_WEEKDAY_ALIASES[key])
+    return sorted(weekdays)
 
 
 @click.group("scope")
@@ -99,8 +158,14 @@ def scope_camera_schedule_get(did, pretty):
     required=True,
     help="允许感知时间段，格式 HH:MM-HH:MM；可重复传入。",
 )
+@click.option(
+    "--weekday",
+    "weekdays",
+    multiple=True,
+    help="允许感知星期，可重复传入；支持 mon..sun、1..7、周一..周日。不传表示每天。",
+)
 @click.option("--pretty", is_flag=True)
-def scope_camera_schedule_set(did, windows, pretty):
+def scope_camera_schedule_set(did, windows, weekdays, pretty):
     """设置指定摄像头的每日感知时间段。"""
     parsed = []
     for value in windows:
@@ -114,7 +179,7 @@ def scope_camera_schedule_set(did, windows, pretty):
         parsed.append({"start": start, "end": end})
     result = api_put(
         f"{_CAMERAS_PATH}/{did}/schedule",
-        {"enabled": True, "windows": parsed},
+        {"enabled": True, "weekdays": _parse_weekdays(weekdays), "windows": parsed},
     )
     print_result(result, pretty)
 
@@ -125,13 +190,16 @@ def scope_camera_schedule_set(did, windows, pretty):
 def scope_camera_schedule_off(did, pretty):
     """关闭指定摄像头的定时限制。"""
     current = api_get(_CAMERAS_PATH)
+    weekdays = list(_ALL_WEEKDAYS)
     windows = []
     for camera in current.get("data") or []:
         if camera.get("did") == did:
-            windows = (camera.get("schedule") or {}).get("windows") or []
+            schedule = camera.get("schedule") or {}
+            weekdays = schedule.get("weekdays") or list(_ALL_WEEKDAYS)
+            windows = schedule.get("windows") or []
             break
     result = api_put(
         f"{_CAMERAS_PATH}/{did}/schedule",
-        {"enabled": False, "windows": windows},
+        {"enabled": False, "weekdays": weekdays, "windows": windows},
     )
     print_result(result, pretty)

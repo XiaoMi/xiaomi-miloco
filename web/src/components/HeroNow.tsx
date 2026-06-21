@@ -21,6 +21,8 @@ import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { IconClock, IconPlus, IconTrash, IconX } from "@/lib/icons";
 
+const CAMERA_SCHEDULE_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+
 interface Props {
   persons: Person[];
   /** perception 当前订阅的画面（含 channel，用于真播放）；scope 是子集映射的字典源 */
@@ -534,6 +536,11 @@ function CameraScheduleDialog({
 }) {
   const { t } = useTranslation();
   const [enabled, setEnabled] = useState(cam.schedule.enabled);
+  const [weekdays, setWeekdays] = useState(
+    cam.schedule.weekdays.length > 0
+      ? [...cam.schedule.weekdays]
+      : [...CAMERA_SCHEDULE_WEEKDAYS],
+  );
   const [windows, setWindows] = useState(
     cam.schedule.windows.length > 0
       ? cam.schedule.windows.map((w) => ({ ...w }))
@@ -553,8 +560,19 @@ function CameraScheduleDialog({
   const removeWindow = (index: number) => {
     setWindows((items) => items.filter((_, i) => i !== index));
   };
+  const toggleWeekday = (weekday: number) => {
+    setWeekdays((items) =>
+      items.includes(weekday)
+        ? items.filter((item) => item !== weekday)
+        : [...items, weekday].sort((a, b) => a - b),
+    );
+  };
   const submit = async () => {
     const nextWindows = windows;
+    if (enabled && weekdays.length === 0) {
+      setError(t("hero.scheduleNeedWeekday"));
+      return;
+    }
     if (enabled && nextWindows.length === 0) {
       setError(t("hero.scheduleNeedWindow"));
       return;
@@ -566,6 +584,7 @@ function CameraScheduleDialog({
     setError(null);
     await onSave({
       enabled: enabled && nextWindows.length > 0,
+      weekdays,
       windows: nextWindows,
     });
   };
@@ -612,6 +631,32 @@ function CameraScheduleDialog({
               />
             </button>
           </label>
+          <div className="space-y-2">
+            <div className="text-caption text-text-tertiary">
+              {t("hero.scheduleWeekdays")}
+            </div>
+            <div className="grid grid-cols-7 gap-1.5">
+              {CAMERA_SCHEDULE_WEEKDAYS.map((weekday) => {
+                const selected = weekdays.includes(weekday);
+                return (
+                  <button
+                    key={weekday}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => toggleWeekday(weekday)}
+                    disabled={!enabled}
+                    className={`min-w-0 rounded-md border px-0 py-1.5 text-caption transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 ${
+                      selected
+                        ? "border-brand-primary bg-brand-primary text-white"
+                        : "border-border bg-bg-primary text-text-secondary hover:border-border-strong hover:text-text-primary"
+                    }`}
+                  >
+                    {t(`hero.scheduleWeekdayShort.${weekday}`)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <div className="space-y-2">
             {windows.map((window, index) => (
               <div

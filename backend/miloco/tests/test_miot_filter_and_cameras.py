@@ -179,6 +179,56 @@ def test_camera_schedule_validation_and_cross_midnight():
         schedule,
         datetime(2026, 6, 21, 12, 0, tzinfo=tz),
     ) is True
+    assert schedule["weekdays"] == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_camera_schedule_weekdays_and_natural_day_cross_midnight():
+    schedule = miot_filter.normalize_camera_schedule({
+        "enabled": True,
+        "weekdays": [0, 0],
+        "windows": [{"start": "22:00", "end": "07:00"}],
+    })
+    tz = ZoneInfo("Asia/Shanghai")
+
+    assert schedule["weekdays"] == [0]
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 22, 6, 30, tzinfo=tz),  # Monday
+    ) is False
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 22, 23, 30, tzinfo=tz),  # Monday
+    ) is False
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 23, 6, 30, tzinfo=tz),  # Tuesday
+    ) is True
+
+
+def test_next_camera_schedule_change_handles_weekday_midnight():
+    tz = ZoneInfo("Asia/Shanghai")
+    schedule = miot_filter.normalize_camera_schedule({
+        "enabled": True,
+        "weekdays": [0],
+        "windows": [{"start": "22:00", "end": "07:00"}],
+    })
+
+    assert (
+        miot_filter.next_camera_schedule_change_at(
+            schedule,
+            datetime(2026, 6, 22, 23, 30, tzinfo=tz),  # Monday
+            tz,
+        ).isoformat(timespec="seconds")
+        == "2026-06-23T00:00:00+08:00"
+    )
+    assert (
+        miot_filter.next_camera_schedule_change_at(
+            schedule,
+            datetime(2026, 6, 23, 12, 0, tzinfo=tz),  # Tuesday
+            tz,
+        ).isoformat(timespec="seconds")
+        == "2026-06-29T00:00:00+08:00"
+    )
 
 
 def test_camera_schedule_rejects_bad_and_overlapping_windows():
@@ -197,6 +247,20 @@ def test_camera_schedule_rejects_bad_and_overlapping_windows():
             ],
         })
 
+    with pytest.raises(ValidationException):
+        miot_filter.normalize_camera_schedule({
+            "enabled": True,
+            "weekdays": [],
+            "windows": [{"start": "08:00", "end": "10:00"}],
+        })
+
+    with pytest.raises(ValidationException):
+        miot_filter.normalize_camera_schedule({
+            "enabled": True,
+            "weekdays": [7],
+            "windows": [{"start": "08:00", "end": "10:00"}],
+        })
+
 
 def test_set_camera_schedule_does_not_touch_manual_blacklist():
     kv = _FakeKV({
@@ -210,15 +274,20 @@ def test_set_camera_schedule_does_not_touch_manual_blacklist():
 
     assert changed is True
     assert schedule["enabled"] is True
+    assert schedule["weekdays"] == [0, 1, 2, 3, 4, 5, 6]
     assert json.loads(kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)) == ["c1"]
 
 
-def test_disable_camera_schedule_keeps_previous_windows():
+def test_disable_camera_schedule_keeps_previous_windows_and_weekdays():
     kv = _FakeKV()
     miot_filter.set_camera_schedule(
         kv,
         "c1",
-        {"enabled": True, "windows": [{"start": "08:00", "end": "20:00"}]},
+        {
+            "enabled": True,
+            "weekdays": [0, 2],
+            "windows": [{"start": "08:00", "end": "20:00"}],
+        },
     )
 
     schedule, changed = miot_filter.set_camera_schedule(
@@ -230,6 +299,7 @@ def test_disable_camera_schedule_keeps_previous_windows():
     assert changed is True
     assert schedule == {
         "enabled": False,
+        "weekdays": [0, 2],
         "windows": [{"start": "08:00", "end": "20:00"}],
     }
     assert json.loads(kv.get(ScopeConfigKeys.CAMERA_SCHEDULES_KEY)) == {

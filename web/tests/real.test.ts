@@ -160,9 +160,36 @@ describe("realListScopeCameras — schedule 字段映射", () => {
       nextScheduleChangeAt: "2026-06-22T08:00:00+08:00",
       schedule: {
         enabled: true,
+        weekdays: [0, 1, 2, 3, 4, 5, 6],
         windows: [{ start: "08:00", end: "20:00" }],
       },
     });
+  });
+
+  it("映射 schedule weekdays", async () => {
+    mockFetchByUrl({
+      "/api/miot/scope/cameras": {
+        code: 0,
+        message: "ok",
+        data: [
+          {
+            did: "cam1",
+            name: "客厅",
+            is_online: true,
+            in_use: true,
+            schedule: {
+              enabled: true,
+              weekdays: [0, 2],
+              windows: [{ start: "08:00", end: "20:00" }],
+            },
+            connected: false,
+          },
+        ],
+      },
+    });
+
+    const cameras = await realListScopeCameras();
+    expect(cameras[0].schedule.weekdays).toEqual([0, 2]);
   });
 });
 

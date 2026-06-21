@@ -204,6 +204,10 @@ class CameraSchedule(BaseModel):
     """Per-camera daily sensing schedule."""
 
     enabled: bool = Field(False, description="Whether schedule limits sensing")
+    weekdays: list[int] = Field(
+        default_factory=lambda: [0, 1, 2, 3, 4, 5, 6],
+        description="Allowed weekdays, 0=Monday ... 6=Sunday",
+    )
     windows: list[CameraScheduleWindow] = Field(
         default_factory=list,
         description="Allowed daily sensing windows",

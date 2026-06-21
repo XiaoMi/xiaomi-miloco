@@ -29,7 +29,12 @@ MAX_ENABLED_CAMERAS = 4
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
-DEFAULT_CAMERA_SCHEDULE = {"enabled": False, "windows": []}
+DEFAULT_CAMERA_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]
+DEFAULT_CAMERA_SCHEDULE = {
+    "enabled": False,
+    "weekdays": DEFAULT_CAMERA_WEEKDAYS,
+    "windows": [],
+}
 
 
 def _minute_of_day(value: str) -> int:
@@ -52,6 +57,25 @@ def _as_day_intervals(start: int, end: int) -> list[tuple[int, int]]:
     if start < end:
         return [(start, end)]
     return [(start, 24 * 60), (0, end)]
+
+
+def _normalize_weekdays(raw_weekdays: object, *, enabled: bool) -> list[int]:
+    if raw_weekdays is None:
+        return list(DEFAULT_CAMERA_WEEKDAYS)
+    if not isinstance(raw_weekdays, list):
+        raise ValidationException("Camera schedule weekdays must be a list")
+
+    weekdays: set[int] = set()
+    for raw in raw_weekdays:
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            raise ValidationException("Camera schedule weekdays must be integers")
+        if raw < 0 or raw > 6:
+            raise ValidationException("Camera schedule weekdays must be between 0 and 6")
+        weekdays.add(raw)
+
+    if enabled and not weekdays:
+        raise ValidationException("Camera schedule weekdays must not be empty")
+    return sorted(weekdays)
 
 
 def _load_schedule_map(kv_repo: KVRepo) -> dict[str, dict]:
@@ -79,12 +103,14 @@ def normalize_camera_schedule(schedule: dict | None) -> dict:
 
     ``enabled=false`` or no windows means unrestricted sensing. Windows are
     half-open daily intervals [start, end), may cross midnight, and must not
-    overlap after splitting at midnight.
+    overlap after splitting at midnight. ``weekdays`` uses Python's weekday
+    convention (0=Monday ... 6=Sunday); missing weekdays means every day.
     """
     if not schedule:
         return dict(DEFAULT_CAMERA_SCHEDULE)
 
     enabled = bool(schedule.get("enabled", False))
+    weekdays = _normalize_weekdays(schedule.get("weekdays"), enabled=enabled)
     raw_windows = schedule.get("windows") or []
     if not isinstance(raw_windows, list):
         raise ValidationException("Camera schedule windows must be a list")
@@ -110,7 +136,11 @@ def normalize_camera_schedule(schedule: dict | None) -> dict:
         if curr[0] < prev[1]:
             raise ValidationException("Camera schedule windows must not overlap")
 
-    return {"enabled": enabled and bool(windows), "windows": windows}
+    return {
+        "enabled": enabled and bool(windows),
+        "weekdays": weekdays,
+        "windows": windows,
+    }
 
 
 def camera_schedule_for(kv_repo: KVRepo, did: str) -> dict:
@@ -126,6 +156,8 @@ def set_camera_schedule(kv_repo: KVRepo, did: str, schedule: dict) -> tuple[dict
         and current["windows"]
     ):
         schedule = {**schedule, "windows": current["windows"]}
+        if schedule.get("weekdays") is None:
+            schedule = {**schedule, "weekdays": current["weekdays"]}
     normalized = normalize_camera_schedule(schedule)
     if normalized == current:
         return normalized, False
@@ -151,6 +183,8 @@ def camera_schedule_paused(schedule: dict, now: datetime) -> bool:
     normalized = normalize_camera_schedule(schedule)
     if not normalized["enabled"]:
         return False
+    if now.weekday() not in normalized["weekdays"]:
+        return True
     minute = now.hour * 60 + now.minute
     for window in normalized["windows"]:
         if _minute_in_window(
@@ -167,21 +201,29 @@ def next_camera_schedule_change_at(
     now: datetime,
     tz: tzinfo,
 ) -> datetime | None:
-    """Return the next daily schedule boundary after ``now``."""
+    """Return the next schedule boundary that changes paused state after ``now``."""
     normalized = normalize_camera_schedule(schedule)
     if not normalized["enabled"]:
         return None
 
-    today = now.astimezone(tz).date()
-    candidates: list[datetime] = []
-    for window in normalized["windows"]:
-        for key in ("start", "end"):
-            minute = _minute_of_day(window[key])
-            boundary = datetime.combine(today, _time_from_minute(minute), tzinfo=tz)
-            if boundary <= now:
-                boundary += timedelta(days=1)
-            candidates.append(boundary)
-    return min(candidates) if candidates else None
+    local_now = now.astimezone(tz)
+    current_paused = camera_schedule_paused(normalized, local_now)
+    start_day = local_now.date()
+    candidates: set[datetime] = set()
+    for offset in range(0, 9):
+        day = start_day + timedelta(days=offset)
+        candidates.add(datetime.combine(day, time.min, tzinfo=tz))
+        for window in normalized["windows"]:
+            for key in ("start", "end"):
+                minute = _minute_of_day(window[key])
+                candidates.add(
+                    datetime.combine(day, _time_from_minute(minute), tzinfo=tz)
+                )
+
+    for candidate in sorted(c for c in candidates if c > local_now):
+        if camera_schedule_paused(normalized, candidate) != current_paused:
+            return candidate
+    return None
 
 
 def _load_list(kv_repo: KVRepo, key: str) -> list[str]:
