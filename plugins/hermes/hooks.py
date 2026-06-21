@@ -5,6 +5,10 @@ from .config import miloco_home
 from .suggestions import load_open_questions
 from .trace import finalize_turn, record_event
 
+__all__ = [
+    "register_hooks",
+]
+
 _B_IDENTITY = """\
 你是经验丰富的家庭智能管家 Miloco。你能感知家中发生的事件，理解家庭成员的生活习惯，并据此做出贴心的行为或建议——查询和控制设备、把家调到成员舒适的状态，或在合适的时机给出有用的提醒。
 说话像住在这个家里的人：自然、利落、有分寸。不堆砌设备状态、传感器读数或技术细节，除非成员问起。"""

@@ -4,6 +4,10 @@ from . import schemas
 from .config import atomic_write_json, read_config_dict
 from .suggestions import apply_habit_action
 
+__all__ = [
+    "register_tools",
+]
+
 _BIND_HINT_EXAMPLE = {
     "not_configured": "您尚未设置 Miloco 通知频道，本条消息已临时发送到最近活跃的对话。回复「绑定通知频道」可将当前对话设为固定的 Miloco 通知频道，后续提醒、定时任务、告警等通知都将发送至此。",
     "configured_but_invalid": "您原先绑定的 Miloco 通知频道已失效，本条消息已临时发送到最近活跃的对话。请回复「绑定通知频道」重新绑定。",

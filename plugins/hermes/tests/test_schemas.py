@@ -3,6 +3,7 @@ from hermes import schemas
 
 # --------------------------------------------------------------- miloco_im_push
 
+
 def test_im_push_name():
     assert schemas.MILOCO_IM_PUSH["name"] == "miloco_im_push"
 
@@ -25,6 +26,7 @@ def test_im_push_has_type_function():
 
 # ----------------------------------------------------------- miloco_notify_bind
 
+
 def test_notify_bind_name():
     assert schemas.MILOCO_NOTIFY_BIND["name"] == "miloco_notify_bind"
 
@@ -45,6 +47,7 @@ def test_notify_bind_description():
 
 # --------------------------------------------------------- miloco_habit_suggest
 
+
 def test_habit_suggest_name():
     assert schemas.MILOCO_HABIT_SUGGEST["name"] == "miloco_habit_suggest"
 
@@ -60,8 +63,15 @@ def test_habit_suggest_action_required_and_enum():
 def test_habit_suggest_optional_fields():
     props = schemas.MILOCO_HABIT_SUGGEST["parameters"]["properties"]
     for field in (
-        "key", "subject", "habit", "suggestion", "title", "evidence",
-        "item_id", "task_id", "reason",
+        "key",
+        "subject",
+        "habit",
+        "suggestion",
+        "title",
+        "evidence",
+        "item_id",
+        "task_id",
+        "reason",
     ):
         assert field in props
     outcome = props["outcome"]

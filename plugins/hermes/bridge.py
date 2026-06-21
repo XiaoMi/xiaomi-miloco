@@ -9,6 +9,10 @@ from . import trace
 from .agent_runner import AgentSessionPool
 from .config import read_config_dict
 
+__all__ = [
+    "register_bridge",
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,9 +48,7 @@ def _run_turn_sync(agent, message, run_id, extra_system_prompt):
     return {"status": "ok", "error": None}
 
 
-def _agent_turn_blocking(
-    pool, session_key, message, run_id, extra_system_prompt, cfg
-):
+def _agent_turn_blocking(pool, session_key, message, run_id, extra_system_prompt, cfg):
     agent = pool.get_or_create(
         session_key=session_key,
         model=cfg.get("omni_model", ""),
@@ -106,20 +108,14 @@ def _make_handler(ctx, auth_token):
         if auth_token:
             header = request.headers.get("Authorization", "")
             if header != "Bearer {}".format(auth_token):
-                return web.json_response(
-                    _fail(1401, "unauthorized"), status=401
-                )
+                return web.json_response(_fail(1401, "unauthorized"), status=401)
         try:
             body = await request.json()
         except Exception:
-            return web.json_response(
-                _fail(1001, "Invalid JSON body"), status=400
-            )
+            return web.json_response(_fail(1001, "Invalid JSON body"), status=400)
         action = body.get("action") if isinstance(body, dict) else None
         if not action:
-            return web.json_response(
-                _fail(1001, "Missing action field"), status=400
-            )
+            return web.json_response(_fail(1001, "Missing action field"), status=400)
         payload = body.get("payload") or {}
         try:
             if action == "agent":
@@ -167,9 +163,7 @@ def _start_server_thread(app, host, port):
         finally:
             loop.close()
 
-    thread = threading.Thread(
-        target=target, name="miloco-bridge", daemon=True
-    )
+    thread = threading.Thread(target=target, name="miloco-bridge", daemon=True)
     thread.start()
     return thread
 

@@ -1,6 +1,10 @@
 import logging
 from pathlib import Path
 
+__all__ = [
+    "register_skills",
+]
+
 logger = logging.getLogger(__name__)
 
 _PLUGIN_DIR = Path(__file__).parent

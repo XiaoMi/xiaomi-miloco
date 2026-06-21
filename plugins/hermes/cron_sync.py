@@ -1,5 +1,10 @@
 import logging
 
+__all__ = [
+    "register_cron_sync",
+    "CRON_TASKS",
+]
+
 logger = logging.getLogger(__name__)
 
 MANAGED_TAG = "[miloco:hermes]"

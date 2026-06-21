@@ -12,6 +12,12 @@ except ImportError:
 
 from .config import miloco_home
 
+__all__ = [
+    "apply_habit_action",
+    "load_open_questions",
+    "habit_suggestions_path",
+]
+
 STORE_VERSION = 1
 MAX_OPEN_QUESTIONS = 1
 MAX_NEW_ASK_PER_DAY = 1

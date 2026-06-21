@@ -2,6 +2,10 @@ import concurrent.futures
 import logging
 import threading
 
+__all__ = [
+    "AgentSessionPool",
+]
+
 logger = logging.getLogger(__name__)
 
 

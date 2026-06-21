@@ -1,6 +1,10 @@
 import subprocess
 import time
 
+__all__ = [
+    "get_catalog",
+]
+
 _cached = {"text": "", "generated_at": 0.0}
 _REGEN_THROTTLE_S = 5.0
 

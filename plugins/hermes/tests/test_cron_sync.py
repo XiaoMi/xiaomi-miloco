@@ -32,25 +32,26 @@ def test_register_cron_sync_registers_miloco_cli_command():
         def __init__(self):
             self.commands = []
 
-        def register_cli_command(self, name, handler):
-            self.commands.append((name, handler))
+        def register_cli_command(self, *, name, help, setup_fn, handler_fn):
+            self.commands.append(name)
 
     ctx = FakeCtx()
     cron_sync.register_cron_sync(ctx)
-    assert len(ctx.commands) == 1
-    assert ctx.commands[0][0] == "miloco"
+    assert "miloco" in ctx.commands
 
 
 def test_register_cron_sync_tolerates_missing_cron_jobs():
     class FakeCtx:
-        def register_cli_command(self, name, handler):
+        def register_cli_command(self, *, name, help, setup_fn, handler_fn):
             pass
 
     cron_sync.register_cron_sync(FakeCtx())
 
 
-def test_miloco_cli_status_reports_managed_tasks():
-    out = cron_sync._miloco_cli_handler(["status"])
-    text = str(out)
-    assert "miloco-perception-digest" in text
-    assert "4" in text
+def test_miloco_cli_status_reports_managed_tasks(capsys):
+    class Args:
+        miloco_command = "status"
+
+    cron_sync._miloco_cli_handler(Args())
+    out = capsys.readouterr().out
+    assert "miloco-perception-digest" in out

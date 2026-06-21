@@ -15,6 +15,7 @@ Exit codes:
     1 — skills out of sync (--check mode only)
     2 — source skills not found
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,16 +42,8 @@ def _count_skills(directory: Path) -> int:
 def _dirs_equal(src: Path, dst: Path) -> bool:
     if not src.exists() or not dst.exists():
         return False
-    src_files = {
-        p.relative_to(src)
-        for p in src.rglob("*")
-        if p.is_file()
-    }
-    dst_files = {
-        p.relative_to(dst)
-        for p in dst.rglob("*")
-        if p.is_file()
-    }
+    src_files = {p.relative_to(src) for p in src.rglob("*") if p.is_file()}
+    dst_files = {p.relative_to(dst) for p in dst.rglob("*") if p.is_file()}
     if src_files != dst_files:
         return False
     for rel in src_files:
@@ -97,7 +90,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Sync Miloco skills for Hermes plugin")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="check only, do not sync")
-    mode.add_argument("--stage", action="store_true", default=True, help="git add synced files (default)")
+    mode.add_argument(
+        "--stage",
+        action="store_true",
+        default=True,
+        help="git add synced files (default)",
+    )
     args = parser.parse_args()
 
     if args.check:

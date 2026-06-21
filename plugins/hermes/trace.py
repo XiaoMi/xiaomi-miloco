@@ -6,6 +6,16 @@ from datetime import datetime
 
 from .config import miloco_home
 
+__all__ = [
+    "register_trace_link",
+    "pop_trace_link",
+    "record_event",
+    "get_turn_status",
+    "peek_turn_meta",
+    "pop_done_turn",
+    "finalize_turn",
+]
+
 BUFFER_MAX = 500
 DONE_TTL_S = 120.0
 STUCK_TTL_S = 900.0

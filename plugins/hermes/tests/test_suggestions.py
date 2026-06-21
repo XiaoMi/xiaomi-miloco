@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from hermes import suggestions as s
@@ -14,8 +12,13 @@ D14_10 = "2026-06-14T10:00:00+08:00"
 
 def record(key, habit, suggestion, now=D6_10):
     return s.apply_habit_action(
-        {"action": "record", "key": key, "subject": "shared", "habit": habit,
-         "suggestion": suggestion},
+        {
+            "action": "record",
+            "key": key,
+            "subject": "shared",
+            "habit": habit,
+            "suggestion": suggestion,
+        },
         now,
     )
 
@@ -33,8 +36,8 @@ def _isolate(monkeypatch, tmp_path):
     return home
 
 
-def _entry(l, key):
-    for e in l["entries"]:
+def _entry(data, key):
+    for e in data["entries"]:
         if e["key"] == key:
             return e
     return None
@@ -63,8 +66,8 @@ def test_record_same_key_dedupes_no_duplicate():
     record("wl_sleep_dim", "23点睡觉", "睡觉时把台灯调暗")
     r2 = record("wl_sleep_dim", "每晚23点入睡", "睡觉调暗灯")
     assert r2["deduped"] is True
-    l = list_now()
-    assert l["counts"].get("pending") == 1
+    result = list_now()
+    assert result["counts"].get("pending") == 1
 
 
 def test_record_missing_fields_fails():
@@ -88,9 +91,9 @@ def test_rejected_key_not_revived_on_record():
     again = record("wl_sleep_dim", "每晚23点睡觉习惯", "睡觉调暗灯", D7_10)
     assert again["deduped"] is True
     assert again["status"] == "rejected"
-    l = list_now(D7_10)
-    assert l["counts"].get("rejected") == 1
-    assert l["counts"].get("pending", 0) == 0
+    result = list_now(D7_10)
+    assert result["counts"].get("rejected") == 1
+    assert result["counts"].get("pending", 0) == 0
 
 
 def test_list_entries_exposes_all_including_terminal():
@@ -99,9 +102,9 @@ def test_list_entries_exposes_all_including_terminal():
     s.apply_habit_action(
         {"action": "resolve", "key": "wl_sleep_dim", "outcome": "rejected"}, D6_10
     )
-    l = list_now(D6_10)
-    assert len(l["entries"]) == 1
-    assert _entry(l, "wl_sleep_dim")["status"] == "rejected"
+    result = list_now(D6_10)
+    assert len(result["entries"]) == 1
+    assert _entry(result, "wl_sleep_dim")["status"] == "rejected"
 
 
 def test_open_slot_blocks_second_mark_asked():
@@ -114,9 +117,7 @@ def test_open_slot_blocks_second_mark_asked():
     assert ask["status"] == "asked"
 
     assert list_now()["can_ask_now"] is False
-    ask2 = s.apply_habit_action(
-        {"action": "mark_asked", "key": "zx_whitenoise"}, D6_10
-    )
+    ask2 = s.apply_habit_action({"action": "mark_asked", "key": "zx_whitenoise"}, D6_10)
     assert ask2["ok"] is False
 
 
@@ -129,24 +130,18 @@ def test_cross_day_max_one_new_per_day():
     )
 
     assert list_now(D6_23)["can_ask_now"] is False
-    ask2 = s.apply_habit_action(
-        {"action": "mark_asked", "key": "zx_whitenoise"}, D6_23
-    )
+    ask2 = s.apply_habit_action({"action": "mark_asked", "key": "zx_whitenoise"}, D6_23)
     assert ask2["ok"] is False
 
     assert list_now(D7_10)["can_ask_now"] is True
-    ask3 = s.apply_habit_action(
-        {"action": "mark_asked", "key": "zx_whitenoise"}, D7_10
-    )
+    ask3 = s.apply_habit_action({"action": "mark_asked", "key": "zx_whitenoise"}, D7_10)
     assert ask3["ok"] is True
 
 
 def test_mark_asked_only_from_pending():
     record("wl_sleep_dim", "23点睡觉", "睡觉调暗灯")
     s.apply_habit_action({"action": "mark_asked", "key": "wl_sleep_dim"}, D6_10)
-    again = s.apply_habit_action(
-        {"action": "mark_asked", "key": "wl_sleep_dim"}, D6_10
-    )
+    again = s.apply_habit_action({"action": "mark_asked", "key": "wl_sleep_dim"}, D6_10)
     assert again["ok"] is False
 
 
@@ -161,8 +156,12 @@ def test_resolve_accepted_then_created():
     assert acc["status"] == "accepted"
 
     created = s.apply_habit_action(
-        {"action": "resolve", "key": "wl_gym", "outcome": "created",
-         "task_id": "gym_music"},
+        {
+            "action": "resolve",
+            "key": "wl_gym",
+            "outcome": "created",
+            "task_id": "gym_music",
+        },
         D6_10,
     )
     assert created["ok"] is True
@@ -174,8 +173,12 @@ def test_created_cannot_be_rejected():
     record("wl_gym", "傍晚健身", "健身时放运动歌单")
     s.apply_habit_action({"action": "mark_asked", "key": "wl_gym"}, D6_10)
     s.apply_habit_action(
-        {"action": "resolve", "key": "wl_gym", "outcome": "created",
-         "task_id": "gym_music"},
+        {
+            "action": "resolve",
+            "key": "wl_gym",
+            "outcome": "created",
+            "task_id": "gym_music",
+        },
         D6_10,
     )
     bad = s.apply_habit_action(
@@ -225,10 +228,10 @@ def test_asked_expires_after_7_days_releases_slot():
     record("wl_sleep_dim", "23点睡觉", "睡觉调暗灯")
     s.apply_habit_action({"action": "mark_asked", "key": "wl_sleep_dim"}, D6_10)
 
-    l = list_now(D14_10)
-    assert l["counts"].get("expired") == 1
-    assert l["counts"].get("asked", 0) == 0
-    assert l["can_ask_now"] is True
+    result = list_now(D14_10)
+    assert result["counts"].get("expired") == 1
+    assert result["counts"].get("asked", 0) == 0
+    assert result["can_ask_now"] is True
 
 
 def test_expired_revives_on_record():
@@ -243,9 +246,7 @@ def test_expired_revives_on_record():
     assert counts.get("pending") == 1
     assert counts.get("expired", 0) == 0
 
-    ask = s.apply_habit_action(
-        {"action": "mark_asked", "key": "wl_sleep_dim"}, D14_10
-    )
+    ask = s.apply_habit_action({"action": "mark_asked", "key": "wl_sleep_dim"}, D14_10)
     assert ask["ok"] is True
     assert ask["status"] == "asked"
 
@@ -257,10 +258,10 @@ def test_accepted_expires_after_7_days():
         {"action": "resolve", "key": "wl_gym", "outcome": "accepted"}, D6_10
     )
 
-    l = list_now(D14_10)
-    assert l["counts"].get("expired") == 1
-    assert l["counts"].get("accepted", 0) == 0
-    assert l["can_ask_now"] is True
+    result = list_now(D14_10)
+    assert result["counts"].get("expired") == 1
+    assert result["counts"].get("accepted", 0) == 0
+    assert result["can_ask_now"] is True
 
     revived = record("wl_gym", "傍晚健身", "健身时放运动歌单", D14_10)
     assert revived["status"] == "pending"
@@ -326,8 +327,12 @@ def test_item_id_recorded_and_preserved_after_created():
 
     s.apply_habit_action({"action": "mark_asked", "key": "wl_fitness"}, D6_10)
     s.apply_habit_action(
-        {"action": "resolve", "key": "wl_fitness", "outcome": "created",
-         "task_id": "t1"},
+        {
+            "action": "resolve",
+            "key": "wl_fitness",
+            "outcome": "created",
+            "task_id": "t1",
+        },
         D6_10,
     )
     assert _entry(list_now(D7_10), "wl_fitness")["item_id"] == "p-abc123"

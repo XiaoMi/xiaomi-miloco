@@ -2,6 +2,18 @@ import json
 import os
 from pathlib import Path
 
+__all__ = [
+    "miloco_home",
+    "ensure_miloco_home_env",
+    "config_file",
+    "read_config_dict",
+    "atomic_write_json",
+    "deep_merge",
+    "get_plugin_config",
+    "load_shared_config",
+    "DEFAULT_CONFIG",
+]
+
 DEFAULT_CONFIG = {
     "debug": False,
     "omni_model": "",
@@ -59,11 +71,7 @@ def atomic_write_json(data: dict) -> None:
 
 def deep_merge(target: dict, source: dict) -> None:
     for key, value in source.items():
-        if (
-            key in target
-            and isinstance(target[key], dict)
-            and isinstance(value, dict)
-        ):
+        if key in target and isinstance(target[key], dict) and isinstance(value, dict):
             deep_merge(target[key], value)
         else:
             target[key] = value
@@ -72,6 +80,7 @@ def deep_merge(target: dict, source: dict) -> None:
 def get_plugin_config(ctx) -> dict:
     try:
         from hermes_cli.config import cfg_get, load_config
+
         cfg = load_config()
     except ImportError:
         return {}

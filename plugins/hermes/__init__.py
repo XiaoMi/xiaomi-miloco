@@ -4,9 +4,12 @@ import logging
 
 from . import config as _config
 
-logger = logging.getLogger(__name__)
+__all__ = ["register", "__version__"]
+
 
 __version__ = "2.0.0"
+
+logger = logging.getLogger(__name__)
 
 
 def register(ctx):

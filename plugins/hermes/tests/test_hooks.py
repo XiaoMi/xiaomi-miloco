@@ -176,7 +176,7 @@ def test_register_hooks_registers_all():
         def __init__(self):
             self.registered = []
 
-        def on(self, name, fn):
+        def register_hook(self, name, fn):
             self.registered.append(name)
 
     ctx = FakeCtx()

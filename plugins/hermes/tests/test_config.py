@@ -3,12 +3,12 @@ import os
 import sys
 import types
 
-import pytest
 
 from hermes import config
 
 
 # ---------------------------------------------------------------- miloco_home
+
 
 def test_miloco_home_env_override(tmp_miloco_home):
     assert config.miloco_home() == tmp_miloco_home
@@ -33,11 +33,13 @@ def test_miloco_home_fallback_without_hermes(monkeypatch, tmp_path):
 
 # ----------------------------------------------------------------- config_file
 
+
 def test_config_file_path(tmp_miloco_home):
     assert config.config_file() == tmp_miloco_home / "config.json"
 
 
 # ------------------------------------------------------------ read_config_dict
+
 
 def test_read_config_dict_missing_file(tmp_miloco_home):
     assert config.read_config_dict() == {}
@@ -56,6 +58,7 @@ def test_read_config_dict_invalid_json(tmp_miloco_home):
 
 # ----------------------------------------------------------- atomic_write_json
 
+
 def test_atomic_write_json(tmp_miloco_home):
     data = {"a": 1, "b": [2, 3]}
     config.atomic_write_json(data)
@@ -70,6 +73,7 @@ def test_atomic_write_json_replaces_existing(tmp_miloco_home):
 
 
 # ----------------------------------------------------------------- deep_merge
+
 
 def test_deep_merge():
     target = {"a": 1, "nested": {"x": 1, "y": 2}}
@@ -94,6 +98,7 @@ def test_deep_merge_does_not_mutate_source():
 
 # ----------------------------------------------------- ensure_miloco_home_env
 
+
 def test_ensure_miloco_home_env_sets_envvar(monkeypatch, tmp_path):
     monkeypatch.delenv("MILOCO_HOME", raising=False)
     fake = types.ModuleType("hermes_constants")
@@ -113,6 +118,7 @@ def test_ensure_miloco_home_env_respects_existing(tmp_miloco_home):
 
 # ------------------------------------------------------------- DEFAULT_CONFIG
 
+
 def test_default_config_has_bridge_defaults():
     cfg = config.DEFAULT_CONFIG
     assert cfg["bridge_host"] == "127.0.0.1"
@@ -122,26 +128,53 @@ def test_default_config_has_bridge_defaults():
 
 def test_default_config_has_omni_keys():
     cfg = config.DEFAULT_CONFIG
-    for key in ("debug", "omni_model", "omni_base_url", "omni_api_key",
-                "notify_session_key"):
+    for key in (
+        "debug",
+        "omni_model",
+        "omni_base_url",
+        "omni_api_key",
+        "notify_session_key",
+    ):
         assert key in cfg
 
 
 # ----------------------------------------------------------- get_plugin_config
 
+
+def _make_mock_cfg_get(data):
+    def cfg_get(cfg, *keys, **kw):
+        cur = cfg
+        for k in keys:
+            if isinstance(cur, dict):
+                cur = cur.get(k)
+            else:
+                return kw.get("default")
+            if cur is None:
+                return kw.get("default")
+        return cur
+
+    return cfg_get
+
+
 def test_get_plugin_config_returns_miloco_entry(monkeypatch):
+    data = {"plugins": {"entries": {"miloco": {"debug": True}}}}
     cli = types.ModuleType("hermes_cli")
-    cli.config = types.SimpleNamespace()
-    cli.config.config = {"plugins": {"entries": {"miloco": {"debug": True}}}}
+    cli.config = types.ModuleType("hermes_cli.config")
+    cli.config.load_config = lambda: data
+    cli.config.cfg_get = _make_mock_cfg_get(data)
     monkeypatch.setitem(sys.modules, "hermes_cli", cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", cli.config)
     assert config.get_plugin_config(object()) == {"debug": True}
 
 
 def test_get_plugin_config_missing_entry_returns_empty(monkeypatch):
+    data = {"plugins": {"entries": {}}}
     cli = types.ModuleType("hermes_cli")
-    cli.config = types.SimpleNamespace()
-    cli.config.config = {"plugins": {"entries": {}}}
+    cli.config = types.ModuleType("hermes_cli.config")
+    cli.config.load_config = lambda: data
+    cli.config.cfg_get = _make_mock_cfg_get(data)
     monkeypatch.setitem(sys.modules, "hermes_cli", cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", cli.config)
     assert config.get_plugin_config(object()) == {}
 
 
@@ -153,9 +186,11 @@ def test_get_plugin_config_import_error_returns_empty(monkeypatch):
 
 # -------------------------------------------------------- load_shared_config
 
+
 def test_load_shared_config_merges_and_writes(tmp_miloco_home, monkeypatch):
     monkeypatch.setattr(
-        config, "get_plugin_config",
+        config,
+        "get_plugin_config",
         lambda ctx: {"omni_model": "gpt-4o", "debug": True},
     )
     config.load_shared_config(object())
