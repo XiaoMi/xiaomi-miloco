@@ -572,6 +572,29 @@ class MiotService:
         """Get detected audio codec for a camera channel."""
         return self._miot_proxy.get_audio_codec(camera_id, channel)
 
+    async def start_decoded_audio_stream(self, camera_id: str, channel: int, callback) -> int:
+        """Start decoded audio stream (16kHz mono s16 PCM, with AGC)."""
+        try:
+            logger.info(
+                "Starting decoded audio stream: camera_id=%s, channel=%s", camera_id, channel
+            )
+            reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
+                camera_id, channel, callback
+            )
+            return reg_id
+        except Exception as e:
+            logger.error("Failed to start decoded audio stream: %s", e)
+            raise MiotServiceException(f"Failed to start decoded audio stream: {str(e)}") from e
+
+    async def stop_decoded_audio_stream(self, camera_id: str, channel: int, reg_id: int):
+        """Stop decoded audio stream."""
+        try:
+            logger.info("Stopping decoded audio stream: camera_id=%s, reg_id=%d", camera_id, reg_id)
+            await self._miot_proxy.stop_camera_decode_audio_stream(camera_id, channel, reg_id)
+        except Exception as e:
+            logger.error("Failed to stop decoded audio stream: %s", e)
+            raise MiotServiceException(f"Failed to stop decoded audio stream: {str(e)}") from e
+
     async def start_video_stream(
         self, camera_id: str, channel: int, callback
     ) -> int:

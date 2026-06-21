@@ -412,10 +412,11 @@ function MainApp() {
             status={status.data}
             allCamerasOff={
               // 未就绪时兜底 false（宁可短暂显"在看家"，不误报"待机中"）
+              // 注意：不要加 data.length > 0 守卫——[].every() 本就返回 true（空集全称量化），
+              // 无摄像头家庭（scopeCameras.data === []）应正确显示"待机中"而非"在看家"。
               !scopeCameras.loading &&
               !scopeCameras.error &&
               !!scopeCameras.data &&
-              scopeCameras.data.length > 0 &&
               scopeCameras.data.every((c) => !c.inUse)
             }
             onConnectMiot={() => setMiotBindOpen(true)}

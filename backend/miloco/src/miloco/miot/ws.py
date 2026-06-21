@@ -802,3 +802,89 @@ class MIoTAudioStreamManager:
 
 
 miot_audio_stream_manager = MIoTAudioStreamManager()
+
+
+class MIoTDecodedAudioStreamManager:
+    """Manage decoded audio stream WebSocket connections.
+
+    Serves 16kHz mono s16 PCM audio (post-decode, post-AGC).
+    """
+
+    _camera_connect_map: dict[str, dict[str, dict[str, WebSocket]]]
+    _camera_reg_ids: dict[str, int]  # camera_tag -> reg_id
+
+    def __init__(self):
+        self._camera_connect_map = {}
+        self._camera_reg_ids = {}
+
+    async def new_connection(
+        self,
+        websocket: WebSocket,
+        user_name: str,
+        token_hash: str,
+        camera_id: str,
+        channel: int,
+    ) -> str:
+        camera_tag = f"{camera_id}.{channel}"
+        if (
+            camera_tag not in self._camera_connect_map
+            or not self._camera_connect_map[camera_tag]
+        ):
+            self._camera_connect_map[camera_tag] = {}
+            reg_id = await manager.miot_service.start_decoded_audio_stream(
+                camera_id=camera_id,
+                channel=channel,
+                callback=self.__decoded_audio_callback,
+            )
+            self._camera_reg_ids[camera_tag] = reg_id
+            logger.info("Start decoded audio stream, %s.%d, reg_id=%d", camera_id, channel, reg_id)
+        user_tag = f"{user_name}.{token_hash}"
+        self._camera_connect_map[camera_tag].setdefault(user_tag, OrderedDict())
+        connection_id = str(id(websocket))
+        self._camera_connect_map[camera_tag][user_tag][connection_id] = websocket
+        return connection_id
+
+    async def close_connection(
+        self, user_name: str, token_hash: str, camera_id: str, channel: int, connection_id: str
+    ):
+        camera_tag = f"{camera_id}.{channel}"
+        user_tag = f"{user_name}.{token_hash}"
+        if camera_tag in self._camera_connect_map:
+            if user_tag in self._camera_connect_map[camera_tag]:
+                self._camera_connect_map[camera_tag][user_tag].pop(connection_id, None)
+                if not self._camera_connect_map[camera_tag][user_tag]:
+                    del self._camera_connect_map[camera_tag][user_tag]
+            if not self._camera_connect_map[camera_tag]:
+                del self._camera_connect_map[camera_tag]
+                reg_id = self._camera_reg_ids.pop(camera_tag, None)
+                if reg_id is not None:
+                    await manager.miot_service.stop_decoded_audio_stream(camera_id, channel, reg_id)
+                logger.info("Stop decoded audio stream, %s.%d", camera_id, channel)
+
+    async def __decoded_audio_callback(
+        self, did: str, pcm_ndarray, ts: int, channel: int, recv_unix_ms: int = 0, decoded_unix_ms: int = 0
+    ) -> None:
+        """Callback for decoded audio frames from decoder.py.
+
+        pcm_ndarray is already a numpy int16 array (16kHz mono, post-AGC).
+        """
+        camera_tag = f"{did}.{channel}"
+        if camera_tag not in self._camera_connect_map:
+            return
+
+        # Convert numpy array to raw PCM bytes
+        try:
+            pcm_bytes = pcm_ndarray.tobytes()
+        except Exception as err:
+            logger.error("Decoded audio convert error: %s", err)
+            return
+
+        for conn in self._camera_connect_map[camera_tag].values():
+            for ws in conn.values():
+                try:
+                    await ws.send_bytes(pcm_bytes)
+                except Exception as err:
+                    logger.error("Decoded audio WebSocket send error: %s", err)
+
+
+miot_decoded_audio_stream_manager = MIoTDecodedAudioStreamManager()

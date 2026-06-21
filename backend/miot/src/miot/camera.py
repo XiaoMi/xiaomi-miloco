@@ -229,6 +229,7 @@ class MIoTCameraInstance:
                 audio_frame_callback=self.__on_audio_frame_decode_callback,
                 enable_hw_accel=self._enable_hw_accel,
                 enable_audio=self._enable_audio,
+                enable_audio_agc=self._enable_audio,
                 main_loop=self._main_loop,
             )
             self._decoders.append(decoder)

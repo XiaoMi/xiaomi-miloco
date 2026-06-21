@@ -14,6 +14,7 @@ from collections import deque
 from io import BytesIO
 from typing import Callable, Coroutine, List, Optional
 
+import numpy as np
 from av.audio.codeccontext import AudioCodecContext
 from av.audio.frame import AudioFrame
 from av.audio.resampler import AudioResampler
@@ -35,6 +36,46 @@ _H264_IDR_NAL_TYPE = 5
 # any of these starts a new GOP, so we treat them all as "key" for the
 # purpose of buffer-overflow eviction.
 _H265_IRAP_NAL_TYPES = frozenset({16, 17, 18, 19, 20, 21})
+
+
+class AudioAGC:
+    """Automatic Gain Control for audio frames.
+
+    Adjusts gain dynamically to maintain target RMS level.
+    Smooth gain transitions to avoid audio artifacts.
+    """
+
+    def __init__(
+        self,
+        target_rms: float = 3000.0,
+        max_gain_db: float = 80.0,
+        min_gain_db: float = 0.0,
+        smooth_factor: float = 0.1,
+    ):
+        self._target_rms = target_rms
+        self._max_gain = 10 ** (max_gain_db / 20)
+        self._min_gain = 10 ** (min_gain_db / 20)
+        self._smooth_factor = smooth_factor
+        self._current_gain = 1.0
+
+    def process(self, pcm: np.ndarray) -> np.ndarray:
+        """Apply AGC to int16 PCM array."""
+        if pcm.dtype != np.int16:
+            pcm = pcm.astype(np.int16)
+
+        rms = float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
+        if rms < 1.0:
+            return pcm
+
+        desired_gain = self._target_rms / rms
+        desired_gain = max(self._min_gain, min(self._max_gain, desired_gain))
+        self._current_gain = (
+            self._smooth_factor * desired_gain
+            + (1 - self._smooth_factor) * self._current_gain
+        )
+
+        amplified = pcm.astype(np.float64) * self._current_gain
+        return np.clip(amplified, -32768, 32767).astype(np.int16)
 
 
 def _is_key_access_unit(item: MIoTCameraFrameData) -> bool:
@@ -196,6 +237,7 @@ class MIoTMediaDecoder(threading.Thread):
         ] = None,
         enable_hw_accel: bool = False,
         enable_audio: bool = False,
+        enable_audio_agc: bool = False,
         main_loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         super().__init__()
@@ -215,6 +257,9 @@ class MIoTMediaDecoder(threading.Thread):
                 )
             else:
                 self._audio_callback = audio_callback
+
+        # Audio AGC (Automatic Gain Control)
+        self._audio_agc = AudioAGC() if enable_audio_agc else None
 
         self._queue = MIoTMediaRingBuffer()
         self._video_decoder = None
@@ -350,6 +395,9 @@ class MIoTMediaDecoder(threading.Thread):
                 rs_frames = self._resampler.resample(frame)
                 for rs_frame in rs_frames:
                     nd = rs_frame.to_ndarray().flatten()
+                    # Apply AGC if enabled
+                    if self._audio_agc is not None:
+                        nd = self._audio_agc.process(nd)
                     pcm_bytes += nd.tobytes()
                     pcm_ndarrays.append(nd)
             except Exception as e:

@@ -34,6 +34,7 @@ from miloco.miot.schema import (
 from miloco.miot.ws import (
     NalClipRecorder,
     miot_audio_stream_manager,
+    miot_decoded_audio_stream_manager,
     miot_video_stream_manager,
 )
 from miloco.schema.common_schema import NormalResponse
@@ -790,6 +791,71 @@ async def audio_stream_websocket(
         )
         if cid:
             await miot_audio_stream_manager.close_connection(
+                user_name=current_user,
+                token_hash=token_hash,
+                camera_id=camera_id,
+                channel=channel,
+                cid=cid,
+            )
+
+
+@router.websocket("/ws/decoded_audio_stream")
+async def decoded_audio_stream_websocket(
+    websocket: WebSocket,
+    camera_id: str,
+    channel: int,
+    current_user: str = Depends(verify_websocket_token),
+):
+    """Decoded audio stream WebSocket.
+
+    Serves 16kHz mono s16 PCM audio, post-decode with AGC applied.
+    Unlike /ws/audio_stream which sends raw opus frames, this endpoint
+    sends decoded PCM ready for speech recognition.
+    """
+    logger.info(
+        "Decoded audio WebSocket connection request, %s, %s.%d",
+        current_user,
+        camera_id,
+        channel,
+    )
+    start_time: datetime = datetime.now()
+    token_hash: str = str(hash(websocket.cookies.get("access_token")))
+    cid: str | None = None
+    try:
+        await websocket.accept()
+        cid = await miot_decoded_audio_stream_manager.new_connection(
+            websocket=websocket,
+            user_name=current_user,
+            token_hash=token_hash,
+            camera_id=camera_id,
+            channel=channel,
+        )
+        while True:
+            try:
+                message = await websocket.receive_text()
+                logger.debug("Received message from decoded audio client, %s", message)
+            except WebSocketDisconnect:
+                logger.info("Decoded audio client closed, %s.%d", camera_id, channel)
+                break
+            except Exception as err:
+                logger.error("Decoded audio WebSocket error: %s", err)
+                break
+    except WebSocketDisconnect:
+        logger.info("Decoded audio client disconnected, %s.%d", camera_id, channel)
+    except Exception as err:
+        logger.error("Decoded audio WebSocket error, %s", err)
+        await websocket.close(
+            code=1011, reason=_truncate_ws_reason(f"Server error: {str(err)}")
+        )
+    finally:
+        logger.info(
+            "Decoded audio WebSocket connect duration[%.2fs], %s.%d",
+            (datetime.now() - start_time).total_seconds(),
+            camera_id,
+            channel,
+        )
+        if cid:
+            await miot_decoded_audio_stream_manager.close_connection(
                 user_name=current_user,
                 token_hash=token_hash,
                 camera_id=camera_id,
