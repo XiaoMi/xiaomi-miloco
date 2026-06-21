@@ -17,6 +17,7 @@ import {
   refreshCameraOnline,
   pausePerception,
   resumePerception,
+  setScopeCameraSchedule,
   toggleScopeCamera,
   switchScopeHome,
 } from "./api";
@@ -231,6 +232,19 @@ function MainApp() {
                 // channelByDid useMemo + iframe React diff 双层防 src 变化触发
                 // iframe 重 mount,reload cameras 安全。新接入 cam 时 cameras.reload
                 // 才能拿到 channel,不 reload 会让多通道 cam 永远兜底 channel=0。
+                scopeCameras.reload();
+                cameras.reload();
+                status.reload();
+              }}
+              onSetCameraSchedule={async (did, schedule) => {
+                try {
+                  await setScopeCameraSchedule(did, schedule);
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("common.switchFailed"),
+                    "warn",
+                  );
+                }
                 scopeCameras.reload();
                 cameras.reload();
                 status.reload();

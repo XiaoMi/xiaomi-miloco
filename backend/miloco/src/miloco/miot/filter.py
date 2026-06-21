@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime, time, timedelta, tzinfo
 from typing import TypeVar
 
 from miloco.database.kv_repo import KVRepo, ScopeConfigKeys
+from miloco.middleware.exceptions import ValidationException
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,162 @@ T = TypeVar("T")
 # 同时投喂给 miloco 感知的摄像头数量上限（前端展示上限也以此为唯一来源，经
 # /api/miot/status 下发）。用户主动 enable 超限直接报错（service.toggle_camera 校验）。
 MAX_ENABLED_CAMERAS = 4
+
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+DEFAULT_CAMERA_SCHEDULE = {"enabled": False, "windows": []}
+
+
+def _minute_of_day(value: str) -> int:
+    match = _TIME_RE.match(value)
+    if not match:
+        raise ValidationException(
+            f"Invalid time {value!r}; expected HH:MM in 24-hour format"
+        )
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _time_from_minute(minute: int) -> time:
+    minute %= 24 * 60
+    return time(hour=minute // 60, minute=minute % 60)
+
+
+def _as_day_intervals(start: int, end: int) -> list[tuple[int, int]]:
+    if start == end:
+        raise ValidationException("Camera schedule windows must not be zero-length")
+    if start < end:
+        return [(start, end)]
+    return [(start, 24 * 60), (0, end)]
+
+
+def _load_schedule_map(kv_repo: KVRepo) -> dict[str, dict]:
+    raw = kv_repo.get(ScopeConfigKeys.CAMERA_SCHEDULES_KEY) or "{}"
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            return {
+                str(did): schedule
+                for did, schedule in value.items()
+                if isinstance(schedule, dict)
+            }
+    except json.JSONDecodeError:
+        pass
+    logger.warning(
+        "KV %s holds non-object-JSON value, treating as empty: %r",
+        ScopeConfigKeys.CAMERA_SCHEDULES_KEY,
+        raw,
+    )
+    return {}
+
+
+def normalize_camera_schedule(schedule: dict | None) -> dict:
+    """Validate and normalize a per-camera daily schedule.
+
+    ``enabled=false`` or no windows means unrestricted sensing. Windows are
+    half-open daily intervals [start, end), may cross midnight, and must not
+    overlap after splitting at midnight.
+    """
+    if not schedule:
+        return dict(DEFAULT_CAMERA_SCHEDULE)
+
+    enabled = bool(schedule.get("enabled", False))
+    raw_windows = schedule.get("windows") or []
+    if not isinstance(raw_windows, list):
+        raise ValidationException("Camera schedule windows must be a list")
+
+    windows: list[dict[str, str]] = []
+    occupied: list[tuple[int, int]] = []
+    for raw in raw_windows:
+        if not isinstance(raw, dict):
+            raise ValidationException("Camera schedule window must be an object")
+        start_raw = raw.get("start")
+        end_raw = raw.get("end")
+        if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+            raise ValidationException("Camera schedule window requires start/end")
+
+        start = _minute_of_day(start_raw)
+        end = _minute_of_day(end_raw)
+        for interval in _as_day_intervals(start, end):
+            occupied.append(interval)
+        windows.append({"start": start_raw, "end": end_raw})
+
+    occupied.sort()
+    for prev, curr in zip(occupied, occupied[1:]):
+        if curr[0] < prev[1]:
+            raise ValidationException("Camera schedule windows must not overlap")
+
+    return {"enabled": enabled and bool(windows), "windows": windows}
+
+
+def camera_schedule_for(kv_repo: KVRepo, did: str) -> dict:
+    return normalize_camera_schedule(_load_schedule_map(kv_repo).get(did))
+
+
+def set_camera_schedule(kv_repo: KVRepo, did: str, schedule: dict) -> tuple[dict, bool]:
+    schedules = _load_schedule_map(kv_repo)
+    current = normalize_camera_schedule(schedules.get(did))
+    if (
+        schedule.get("enabled") is False
+        and not schedule.get("windows")
+        and current["windows"]
+    ):
+        schedule = {**schedule, "windows": current["windows"]}
+    normalized = normalize_camera_schedule(schedule)
+    if normalized == current:
+        return normalized, False
+
+    if normalized == DEFAULT_CAMERA_SCHEDULE:
+        schedules.pop(did, None)
+    else:
+        schedules[did] = normalized
+    kv_repo.set(
+        ScopeConfigKeys.CAMERA_SCHEDULES_KEY,
+        json.dumps(schedules, ensure_ascii=False),
+    )
+    return normalized, True
+
+
+def _minute_in_window(minute: int, start: int, end: int) -> bool:
+    if start < end:
+        return start <= minute < end
+    return minute >= start or minute < end
+
+
+def camera_schedule_paused(schedule: dict, now: datetime) -> bool:
+    normalized = normalize_camera_schedule(schedule)
+    if not normalized["enabled"]:
+        return False
+    minute = now.hour * 60 + now.minute
+    for window in normalized["windows"]:
+        if _minute_in_window(
+            minute,
+            _minute_of_day(window["start"]),
+            _minute_of_day(window["end"]),
+        ):
+            return False
+    return True
+
+
+def next_camera_schedule_change_at(
+    schedule: dict,
+    now: datetime,
+    tz: tzinfo,
+) -> datetime | None:
+    """Return the next daily schedule boundary after ``now``."""
+    normalized = normalize_camera_schedule(schedule)
+    if not normalized["enabled"]:
+        return None
+
+    today = now.astimezone(tz).date()
+    candidates: list[datetime] = []
+    for window in normalized["windows"]:
+        for key in ("start", "end"):
+            minute = _minute_of_day(window[key])
+            boundary = datetime.combine(today, _time_from_minute(minute), tzinfo=tz)
+            if boundary <= now:
+                boundary += timedelta(days=1)
+            candidates.append(boundary)
+    return min(candidates) if candidates else None
 
 
 def _load_list(kv_repo: KVRepo, key: str) -> list[str]:

@@ -69,3 +69,69 @@ def scope_camera_disable(dids, pretty):
     """关闭指定摄像头感知。"""
     result = api_put(_CAMERAS_PATH, {"items": [{"did": d, "in_use": False} for d in dids]})
     print_result(result, pretty)
+
+
+@scope_camera.group("schedule")
+def scope_camera_schedule():
+    """管理摄像头每日感知时间段。"""
+
+
+@scope_camera_schedule.command("get")
+@click.argument("did")
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_get(did, pretty):
+    """查看指定摄像头的定时感知配置。"""
+    result = api_get(_CAMERAS_PATH)
+    cameras = result.get("data") or []
+    for camera in cameras:
+        if camera.get("did") == did:
+            print_result({"code": 0, "message": "ok", "data": camera}, pretty)
+            return
+    raise click.ClickException(f"camera did not found: {did}")
+
+
+@scope_camera_schedule.command("set")
+@click.argument("did")
+@click.option(
+    "--window",
+    "windows",
+    multiple=True,
+    required=True,
+    help="允许感知时间段，格式 HH:MM-HH:MM；可重复传入。",
+)
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_set(did, windows, pretty):
+    """设置指定摄像头的每日感知时间段。"""
+    parsed = []
+    for value in windows:
+        try:
+            start, end = value.split("-", 1)
+        except ValueError as exc:
+            raise click.BadParameter(
+                "window must be HH:MM-HH:MM",
+                param_hint="--window",
+            ) from exc
+        parsed.append({"start": start, "end": end})
+    result = api_put(
+        f"{_CAMERAS_PATH}/{did}/schedule",
+        {"enabled": True, "windows": parsed},
+    )
+    print_result(result, pretty)
+
+
+@scope_camera_schedule.command("off")
+@click.argument("did")
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_off(did, pretty):
+    """关闭指定摄像头的定时限制。"""
+    current = api_get(_CAMERAS_PATH)
+    windows = []
+    for camera in current.get("data") or []:
+        if camera.get("did") == did:
+            windows = (camera.get("schedule") or {}).get("windows") or []
+            break
+    result = api_put(
+        f"{_CAMERAS_PATH}/{did}/schedule",
+        {"enabled": False, "windows": windows},
+    )
+    print_result(result, pretty)

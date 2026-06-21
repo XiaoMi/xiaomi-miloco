@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
@@ -133,18 +134,26 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         """
         from miloco.miot.filter import (
             MAX_ENABLED_CAMERAS,
+            camera_schedule_for,
+            camera_schedule_paused,
             denied_camera_dids,
             is_home_allowed,
         )
+        from miloco.utils.time_utils import deploy_timezone
 
         kv = self._miot_proxy._kv_repo
         denied = denied_camera_dids(kv)
+        tz = deploy_timezone()
+        now = datetime.now(tz)
         result: dict[str, PerceptionDevice] = {}
         for did, info in all_devices.items():
             if not isinstance(info, MIoTCameraInfo):
                 continue
 
             if did in denied:
+                continue
+
+            if camera_schedule_paused(camera_schedule_for(kv, did), now):
                 continue
 
             if not is_home_allowed(kv, getattr(info, "home_id", None)):

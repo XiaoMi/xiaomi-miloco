@@ -7,6 +7,7 @@ MiOT service module
 
 import asyncio
 import logging
+from datetime import datetime
 
 from miot.types import (
     MIoTActionParam,
@@ -31,10 +32,14 @@ from miloco.miot.client import MiotProxy, build_sub_device_names
 from miloco.miot.filter import (
     MAX_ENABLED_CAMERAS,
     allowed_home_ids,
+    camera_schedule_for,
+    camera_schedule_paused,
     denied_camera_dids,
     filter_by_home,
     is_home_allowed,
+    next_camera_schedule_change_at,
     set_cameras_in_use,
+    set_camera_schedule,
     set_homes_in_use,
 )
 from miloco.miot.lru import LRUStore
@@ -42,10 +47,12 @@ from miloco.miot.schema import (
     CameraChannel,
     CameraImgSeq,
     CameraInfo,
+    CameraSchedule,
     DeviceControlRequest,
     DeviceInfo,
     SceneInfo,
 )
+from miloco.utils.time_utils import deploy_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +148,7 @@ class MiotService:
         """Clear service-layer scope residue (called on account switch)."""
         self._kv_repo.delete(ScopeConfigKeys.HOME_WHITE_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_SCHEDULES_KEY)
         self._lru.clear()
 
     @property
@@ -932,7 +940,7 @@ class MiotService:
         return homes
 
     async def list_cameras_with_state(self) -> list[dict]:
-        """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。"""
+        """列出当前启用家庭下的相机，每项含定时后的有效感知状态。"""
         denied = denied_camera_dids(self._kv_repo)
         connected = self._connected_camera_dids()
         cameras = filter_by_home(
@@ -943,9 +951,17 @@ class MiotService:
         devices = await self._miot_proxy.get_devices()
         cameras = {did: info for did, info in cameras.items() if did in devices}
         out: list[dict] = []
+        tz = deploy_timezone()
+        now = datetime.now(tz)
         for did, info in cameras.items():
             online = bool(getattr(info, "online", False)) and bool(
                 getattr(info, "lan_online", False)
+            )
+            schedule = camera_schedule_for(self._kv_repo, did)
+            in_use = did not in denied
+            schedule_paused = in_use and camera_schedule_paused(schedule, now)
+            next_change = (
+                next_camera_schedule_change_at(schedule, now, tz) if in_use else None
             )
             out.append(
                 {
@@ -955,11 +971,39 @@ class MiotService:
                     # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
                     "room_name": getattr(info, "room_name", None),
                     "is_online": online,
-                    "in_use": did not in denied,
+                    "in_use": in_use,
+                    "effective_in_use": in_use and not schedule_paused,
+                    "schedule_paused": schedule_paused,
+                    "schedule": schedule,
+                    "next_schedule_change_at": (
+                        next_change.isoformat(timespec="seconds")
+                        if next_change
+                        else None
+                    ),
                     "connected": did in connected,
                 }
             )
         return out
+
+    async def set_camera_schedule(self, did: str, schedule: CameraSchedule) -> dict:
+        """Set a camera's daily sensing schedule and hot-sync perception."""
+        cameras = await self._miot_proxy.get_cameras() or {}
+        if did not in cameras:
+            raise ValidationException(
+                f"Unknown camera did {did!r}; valid: {sorted(cameras.keys())}"
+            )
+
+        normalized, changed = set_camera_schedule(
+            self._kv_repo, did, schedule.model_dump()
+        )
+        if changed:
+            await self._sync_camera_adapter()
+
+        all_cameras = await self.list_cameras_with_state()
+        for cam in all_cameras:
+            if cam["did"] == did:
+                return cam
+        raise ResourceNotFoundException(f"Camera '{did}' not found")
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
         """批量切换相机启用状态。每项 {"did": str, "in_use": bool}。
@@ -1009,9 +1053,15 @@ class MiotService:
             # 本批 enable。enable 最后并入 → 与写库顺序一致（disable 先写、
             # enable 后写，矛盾输入 enable 胜出）。单向 enable / 单向 disable /
             # 混合换机都按净结果校验。
-            final_enabled = (
+            manual_final_enabled = (
                 (in_scope - denied) - set(disable_dids)
             ) | (set(enable_dids) & in_scope)
+            now = datetime.now(deploy_timezone())
+            final_enabled = {
+                d
+                for d in manual_final_enabled
+                if not camera_schedule_paused(camera_schedule_for(self._kv_repo, d), now)
+            }
             if len(final_enabled) > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
                     f"最多同时启用 {MAX_ENABLED_CAMERAS} 台摄像头"

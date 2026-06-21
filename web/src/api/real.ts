@@ -21,6 +21,7 @@ import type {
   PerceptionCamera,
   Person,
   Scene,
+  CameraSchedule,
   ScopeCamera,
   ScopeHome,
   Task,
@@ -922,6 +923,10 @@ interface BackendScopeCamera {
   room_name?: string | null;
   is_online: boolean;
   in_use: boolean;
+  effective_in_use?: boolean;
+  schedule_paused?: boolean;
+  schedule?: CameraSchedule;
+  next_schedule_change_at?: string | null;
   connected: boolean;
 }
 
@@ -935,6 +940,10 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     roomName: c.room_name ?? undefined,
     isOnline: c.is_online,
     inUse: c.in_use,
+    effectiveInUse: c.effective_in_use ?? c.in_use,
+    schedulePaused: c.schedule_paused ?? false,
+    schedule: c.schedule ?? { enabled: false, windows: [] },
+    nextScheduleChangeAt: c.next_schedule_change_at ?? undefined,
     connected: c.connected,
   }));
 }
@@ -964,6 +973,20 @@ export async function realToggleScopeCamera(
     body: JSON.stringify({ items: dids.map((did) => ({ did, in_use: inUse })) }),
   });
   // 写后立即 invalidate + 主动 prefetch homeCache(同 switchScopeHome 同款消 race)。
+  invalidateMiotHomeCache();
+}
+
+export async function realSetScopeCameraSchedule(
+  did: string,
+  schedule: CameraSchedule,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/miot/scope/cameras/${encodeURIComponent(did)}/schedule`,
+    {
+      method: "PUT",
+      body: JSON.stringify(schedule),
+    },
+  );
   invalidateMiotHomeCache();
 }
 
