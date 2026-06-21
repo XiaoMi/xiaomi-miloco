@@ -204,6 +204,8 @@ export function UsageOmniConfig() {
     setModels([]);
     setModelsMsg(null);
     setTestResult(null);
+    // 自动拉取模型列表（apiKey 留空，后端沿用原 key）
+    void fetchModels(p.base_url, "");
   }
 
   async function fetchModels(bu: string, key: string) {
