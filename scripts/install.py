@@ -621,8 +621,11 @@ class Installer:
         if not build_sh.is_file():
             self.ui.fail(self.ui.i18n.t("error.dev_outside_repo"))
         self.ui.info(self.ui.i18n.t("install.dev_building"))
+        cmd = ["bash", str(build_sh)]
+        if self.agent == "hermes":
+            cmd.extend(["--packages", "miloco-miot,miloco,miloco-cli,web"])
         subprocess.run(
-            ["bash", str(build_sh)],
+            cmd,
             cwd=str(self.script_dir.parent),
             check=True,
         )
@@ -1233,6 +1236,19 @@ class Installer:
             subprocess.run(["hermes", "plugins", "enable", "miloco"],
                            capture_output=True, check=False)
             self.ui.step_ok(self.ui.i18n.t("plugin.hermes_enabled"))
+
+            bin_dir = str(Path.home() / ".local" / "bin")
+            try:
+                subprocess.run(
+                    [
+                        "hermes", "config", "set",
+                        "plugins.entries.miloco.bin_path", bin_dir,
+                    ],
+                    capture_output=True, check=True, timeout=10,
+                )
+                self.ui.step_ok(f"plugins.entries.miloco.bin_path set to {bin_dir}")
+            except Exception:
+                self.ui.step_skip("Could not set bin_path config")
         else:
             self.ui.step_skip(self.ui.i18n.t("plugin.hermes_cli_not_found"))
 
