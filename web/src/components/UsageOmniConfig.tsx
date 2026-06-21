@@ -205,15 +205,19 @@ export function UsageOmniConfig() {
     setModelsMsg(null);
     setTestResult(null);
     // 自动拉取模型列表（apiKey 留空，后端沿用原 key）
-    void fetchModels(p.base_url, "");
+    void fetchModels(p.base_url, "", p.label);
   }
 
-  async function fetchModels(bu: string, key: string) {
+  async function fetchModels(bu: string, key: string, label?: string) {
     if (!bu.trim()) return;
     setModelsLoading(true);
     setModelsMsg(null);
     try {
-      const res = await listOmniModels({ base_url: bu.trim(), api_key: key.trim() || undefined });
+      const res = await listOmniModels({
+        base_url: bu.trim(),
+        api_key: key.trim() || undefined,
+        label: label || undefined,
+      });
       if (res.ok) {
         setModels(res.models);
         if (!res.models.length) setModelsMsg(t("usage.modelsEmptyResult"));
@@ -456,7 +460,7 @@ export function UsageOmniConfig() {
                         setBaseUrl(e.target.value);
                         setTestResult(null);
                       }}
-                      onBlur={() => fetchModels(baseUrl, apiKey)}
+                      onBlur={() => fetchModels(baseUrl, apiKey, editingLabel || undefined)}
                       placeholder={t("usage.baseUrlPlaceholder")}
                       className={INPUT_CLS}
                     />
@@ -469,7 +473,7 @@ export function UsageOmniConfig() {
                         setApiKey(e.target.value);
                         setTestResult(null);
                       }}
-                      onBlur={() => fetchModels(baseUrl, apiKey)}
+                      onBlur={() => fetchModels(baseUrl, apiKey, editingLabel || undefined)}
                       placeholder={
                         editingProfile?.has_key || existing?.has_key
                           ? t("usage.apiKeyPlaceholderExisting")
