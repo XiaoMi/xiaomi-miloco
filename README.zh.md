@@ -69,18 +69,29 @@ openclaw gateway restart
 
 ### Hermes Agent 用户
 
-后端和 CLI 通过同一个 `install.sh` 安装，但需加 `--skip-openclaw` 跳过 OpenClaw 插件安装：
+#### 方式一：通过 Agent 安装（推荐）
 
-```bash
-curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --skip-openclaw
+向 Hermes Agent 发送以下指令即可自动完成安装：
+
+```text
+帮我安装 Miloco 插件：https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/plugins/hermes/install-guide.md
 ```
 
-然后通过安装脚本安装 Hermes 插件（自动完成插件复制 + 技能同步）：
+#### 方式二：命令行一键安装
 
 ```bash
-git clone https://github.com/XiaoMi/xiaomi-miloco.git /tmp/xiaomi-miloco
-python3 /tmp/xiaomi-miloco/plugins/hermes/scripts/install_plugin.py
-rm -rf /tmp/xiaomi-miloco
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent hermes
+```
+
+#### 方式三：从源码构建
+
+```bash
+bash scripts/install.sh --dev --agent hermes
+```
+
+安装完成后重启 Hermes 网关：
+
+```bash
 hermes gateway restart
 ```
 

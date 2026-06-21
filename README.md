@@ -69,22 +69,31 @@ openclaw gateway restart
 
 ### For Hermes Agent users
 
-The shared backend and CLI are installed via the same `install.sh`, but with `--skip-openclaw` to skip the OpenClaw plugin phase:
+#### Option 1: Install via the Agent (recommended)
 
-```bash
-curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --skip-openclaw
+Send the following instruction to Hermes Agent to complete the installation automatically:
+
+```text
+Please install the Miloco plugin for me: https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/plugins/hermes/install-guide.md
 ```
 
-Then install the Hermes plugin (this handles plugin copy + skill synchronization):
+#### Option 2: One-line command-line install
 
 ```bash
-git clone https://github.com/XiaoMi/xiaomi-miloco.git /tmp/xiaomi-miloco
-python3 /tmp/xiaomi-miloco/plugins/hermes/scripts/install_plugin.py
-rm -rf /tmp/xiaomi-miloco
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent hermes
+```
+
+#### Option 3: Build from source
+
+```bash
+bash scripts/install.sh --dev --agent hermes
+```
+
+After installation, restart the Hermes gateway:
+
+```bash
 hermes gateway restart
 ```
-
-See [plugins/hermes/README.md](plugins/hermes/README.md) for details.
 
 ---
 

@@ -13,7 +13,4 @@ RUN mkdir -p /opt/data/plugins/miloco \
     && cp -r /tmp/miloco-src/plugins/skills /opt/data/plugins/miloco/skills \
     && rm -rf /tmp/miloco-src
 
-COPY plugins/hermes/integration-test/scripts/01-miloco-backend.sh /etc/cont-init.d/01-miloco-backend.sh
-RUN chmod +x /etc/cont-init.d/01-miloco-backend.sh
-
 USER hermes

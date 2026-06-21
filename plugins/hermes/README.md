@@ -42,22 +42,25 @@ graph TB
 - `miloco-cli` 已安装（与 OpenClaw 插件共用同一套 CLI/后端）
 - Python ≥ 3.10
 
-### 安装脚本（推荐）
+### 一键安装脚本（推荐）
 
-安装脚本自动完成插件复制 + 技能同步 + 插件启用：
+使用统一的安装脚本，自动完成后端安装 + 插件复制 + 技能同步 + 插件启用：
 
 ```bash
-# 从仓库目录运行
-python3 plugins/hermes/scripts/install_plugin.py
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent hermes
 ```
 
-如果不在仓库目录内，脚本会自动 clone 仓库到临时目录完成安装。
+或在仓库目录内：
 
-脚本执行以下步骤：
-1. 定位仓库根目录（或自动 clone）
-2. 复制插件源码到 `~/.hermes/plugins/miloco/`
-3. 从 `plugins/skills/` 同步 16 个技能到 `~/.hermes/plugins/miloco/skills/`
-4. 执行 `hermes plugins enable miloco`
+```bash
+bash scripts/install.sh --agent hermes
+```
+
+安装完成后重启网关：
+
+```bash
+hermes gateway restart
+```
 
 ### 手动安装
 
