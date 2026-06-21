@@ -89,17 +89,17 @@ graph TB
 
 | 扩展类型          | 实现文件                | 职责                                                                                                                                |
 | ----------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| **配置**          | `config.py`             | `$MILOCO_HOME` 路径解析（基于 `get_hermes_home()` 派生）、共享 config.json 读写、插件配置 Schema；`register` 最早期设入环境变量供子进程继承 |
+| **配置**          | `config.py`             | `$MILOCO_HOME` 路径解析（基于 `get_hermes_home()` 派生）、插件配置读取；`register` 最早期设入环境变量供子进程继承 |
 | **Bridge**        | `bridge.py`             | 自建 aiohttp HTTP 服务（默认 `:18789`），接收后端 `{ action, payload }` POST，实现与 OpenClaw 一致的固定契约                       |
 | **Agent Runner**  | `agent_runner.py`       | `AgentSessionPool`：按 session_key 缓存 / 复用 `AIAgent` 实例，`ThreadPoolExecutor` 同步执行 turn                                   |
 | **Hook**         | `hooks.py`              | `pre_llm_call` 回调：Profile 分级判定 + 上下文文本组装（指令块 + 数据块），注入到 user message                                      |
 | **Trace**         | `trace.py`              | turn trace 内存 buffer、GC 策略、debug gzip 落盘、`get_trace` 查询、traceId↔runId 关联                                              |
-| **Tool**          | `tools.py`              | `miloco_im_push`（通知分发）、`miloco_notify_bind`（通知渠道绑定）                                                                  |
+| **Tool**          | `tools.py`              | `miloco_im_push`（通知推送，通过 platform adapter 投递）、`miloco_habit_suggest`（防骚扰状态机） |
 | **Tool**          | `suggestions.py`        | `miloco_habit_suggest` 防骚扰状态机（`threading.Lock` + 原子写）                                                                    |
 | **数据获取**      | `catalog.py`            | 设备目录获取（`miloco-cli device catalog`，节流防抖），由 `hooks.py` 引用                                                          |
 | **Cron**          | `cron_sync.py`          | 4 个 cron job 的一次性 reconcile + 注册 CLI 命令 `hermes miloco`                                                                     |
 | **Skills**        | `skills_loader.py`      | 逐个 `ctx.register_skill()` 注册 16 个 skill，命名空间 `miloco:<skill-name>`                                                        |
-| **Schema**        | `schemas.py`            | 3 个工具的 JSON Schema 定义（OpenAI function-calling 格式）                                                                         |
+| **Schema**        | `schemas.py`            | 2 个工具的 JSON Schema 定义（OpenAI function-calling 格式）                                                                         |
 
 注册顺序的隐含依赖：① config 先于一切（写盘副作用，后端 / bridge 需要正确的 webhook_url 和 auth_bearer）→ ② skills 先于 hooks（`pre_llm_call` 注入的指令引用 skill 名称）→ ③ hooks 先于 tools（trace hooks 需在工具执行前就位）→ ⑦ bridge 最后启动（确保 tools/hooks/skills 已注册后 bridge 才接收请求）。
 
@@ -132,11 +132,11 @@ graph TB
 
 Hermes 的安装流程是 `git clone` + `shutil.move`，**没有构建步骤**，也没有 pre-install / post-install 钩子。`git clone` 获取的是仓库中已提交的文件，`.gitignore` 排除的文件不会出现在 clone 中。
 
-方案：用 **Python 安装脚本**（`plugins/hermes/scripts/install_plugin.py`）一次性完成插件复制 + 技能同步。脚本从仓库目录运行（或自动 clone），将 `plugins/hermes/*.py` 复制到 `~/.hermes/plugins/miloco/`，同时将 `plugins/skills/` 同步到 `~/.hermes/plugins/miloco/skills/`，最后执行 `hermes plugins enable miloco`。`plugins/hermes/skills/` 被 `.gitignore` 排除，不在仓库中维护副本。
+方案：用 **统一安装脚本**（`scripts/install.sh --agent hermes`）一次性完成插件复制 + 技能同步。脚本从仓库目录运行（或自动 clone），将 `plugins/hermes/*.py` 复制到 `~/.hermes/plugins/miloco/`，同时将 `plugins/skills/` 同步到 `~/.hermes/plugins/miloco/skills/`，最后执行 `hermes plugins enable miloco`。`plugins/hermes/skills/` 被 `.gitignore` 排除，不在仓库中维护副本。
 
 ```mermaid
 graph LR
-    A["仓库目录<br/>plugins/hermes/ + plugins/skills/"] --> B["install_plugin.py"]
+    A["仓库目录<br/>plugins/hermes/ + plugins/skills/"] --> B["install.sh --agent hermes"]
     B --> C["复制插件<br/>→ ~/.hermes/plugins/miloco/"]
     B --> D["同步技能<br/>plugins/skills/ →<br/>~/.hermes/plugins/miloco/skills/"]
     C --> E["hermes plugins enable miloco"]
@@ -144,6 +144,19 @@ graph LR
 ```
 
 与 OpenClaw 的 `prebuild` 类比：OpenClaw 在**构建前**同步（skills 被 `.gitignore` 排除、不进仓库，发布到 npm 包里），Hermes 在**安装时**同步（安装脚本运行时直接从仓库读取源 skills 目录，无需维护副本）。
+
+### 通知推送机制
+
+通知通过 Hermes platform adapter 直接投递（如 Feishu、Telegram），不再依赖会话绑定。配置位于 Hermes `config.yaml` 的 `plugins.entries.miloco`：
+
+```yaml
+deliver: ""              # 推送平台，如 "feishu"、"telegram"，留空则不推送
+deliver_extra:
+  chat_id: ""            # 推送目标 chat_id，留空则使用 home channel
+  message_thread_id: ""  # 消息线程 ID（如飞书话题），按需配置
+```
+
+投递优先级：`deliver` 非空 → 从 `GatewayRunner.adapters` 取对应平台 adapter → `deliver_extra.chat_id` 非空则使用，否则回退到 home channel。`deliver` 为空时通知仅记录日志不发送。
 
 ### 与其他模块的关系
 

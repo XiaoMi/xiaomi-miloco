@@ -11,7 +11,7 @@ graph TB
     subgraph Gateway["Hermes Gateway"]
         subgraph Plugin["Miloco Plugin（Python）"]
             Hooks["pre_llm_call 注入"]
-            Tools["Tools（3个）"]
+            Tools["Tools（2个）"]
             Bridge["Bridge HTTP :18789"]
             Trace["Trace Hooks"]
             Cron["Cron reconcile"]
@@ -94,7 +94,7 @@ miloco-cli config set agent.webhook_url http://127.0.0.1:18789/miloco/webhook
 重新运行安装脚本即可（会覆盖旧版本）：
 
 ```bash
-python3 plugins/hermes/scripts/install_plugin.py
+bash scripts/install.sh --agent hermes
 ```
 
 ### 卸载插件
@@ -113,14 +113,14 @@ plugins:
     - miloco
   entries:
     miloco:
-      debug: false
-      omni_model: ""           # 留空则用 config.json 中的值
-      omni_base_url: ""
-      omni_api_key: ""
-      notify_session_key: ""   # 通知目标 session key
       bridge_host: "127.0.0.1"
       bridge_port: 18789
       bridge_auth_token: ""    # 空则不校验 Authorization 头
+      bin_path: ""             # miloco-cli/miloco-backend 所在目录，留空则自动发现
+      deliver: ""              # 通知推送平台，如 "feishu"、"telegram"，留空则不推送
+      deliver_extra:
+        chat_id: ""            # 推送目标 chat_id，留空则使用 home channel
+        message_thread_id: ""  # 消息线程 ID（如飞书话题），按需配置
 ```
 
 ### `$MILOCO_HOME` 路径
@@ -136,13 +136,13 @@ plugins:
 
 | 模块 | 职责 |
 |------|------|
-| `config.py` | `$MILOCO_HOME` 解析、config.json 读写、插件配置 |
-| `schemas.py` | 3 个工具的 JSON Schema |
+| `config.py` | `$MILOCO_HOME` 解析、插件配置读取 |
+| `schemas.py` | 2 个工具的 JSON Schema |
 | `suggestions.py` | 习惯建议防骚扰状态机 |
 | `catalog.py` | 设备目录获取（5s 节流） |
 | `trace.py` | Turn trace buffer + GC + gzip 落盘 |
 | `hooks.py` | `pre_llm_call` 上下文注入（4 级 Profile） |
-| `tools.py` | `miloco_im_push` / `miloco_notify_bind` / `miloco_habit_suggest` |
+| `tools.py` | `miloco_im_push` / `miloco_habit_suggest` |
 | `agent_runner.py` | `AgentSessionPool`（AIAgent 构造 + 复用） |
 | `bridge.py` | Webhook bridge HTTP 服务（同步 RPC） |
 | `cron_sync.py` | Cron job reconcile + `hermes miloco` CLI 命令 |
@@ -187,4 +187,3 @@ python3 -m pytest tests/ -v
 
 - [OpenClaw 插件工作机制](../../docs/superpowers/specs/2026-06-19-openclaw-plugin-mechanics.md)
 - [Hermes 插件设计文档](../../docs/superpowers/specs/2026-06-19-hermes-plugin-design.md)
-- [实施计划](../../docs/superpowers/plans/2026-06-19-hermes-plugin.md)
