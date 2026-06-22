@@ -7,10 +7,10 @@ name = "miloco-hermes-plugin"
 version = "2.0.0"
 description = "Xiaomi Miloco Hermes Agent plugin"
 requires-python = ">=3.10"
-dependencies = ["fastapi>=0.100"]
+dependencies = ["aiohttp>=3.9"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

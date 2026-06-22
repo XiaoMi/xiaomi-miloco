@@ -13,19 +13,14 @@ __version__ = "2.0.0"
 
 logger = logging.getLogger(__name__)
 
-
-def _resolve_dashboard_url(plugin_cfg: dict) -> str:
-    from hermes_cli.config import cfg_get, load_config
-
-    cfg = load_config()
-    host = cfg_get(cfg, "dashboard", "host", default="127.0.0.1")
-    port = cfg_get(cfg, "dashboard", "port", default=9119)
-    return f"http://{host}:{port}"
+_BRIDGE_HOST = "127.0.0.1"
+_BRIDGE_PORT = 18789
 
 
 def _write_webhook_url(plugin_cfg: dict, cli_path: str) -> None:
-    base_url = _resolve_dashboard_url(plugin_cfg)
-    webhook_url = f"{base_url}/api/plugins/miloco/webhook"
+    host = plugin_cfg.get("bridge_host", _BRIDGE_HOST)
+    port = plugin_cfg.get("bridge_port", _BRIDGE_PORT)
+    webhook_url = f"http://{host}:{port}/miloco/webhook"
 
     result = subprocess.run(
         [cli_path, "config", "set", "agent.webhook_url", webhook_url, "--no-restart"],
@@ -86,13 +81,15 @@ def register(ctx):
     _write_webhook_url(plugin_cfg, cli_path)
     _start_backend(cli_path)
 
-    from .skills_loader import register_skills
-    from .hooks import register_hooks
-    from .tools import register_tools
+    from .bridge import register_bridge
     from .cron_sync import register_cron_sync
+    from .hooks import register_hooks
+    from .skills_loader import register_skills
+    from .tools import register_tools
 
     register_skills(ctx)
     register_hooks(ctx)
     register_tools(ctx, plugin_cfg)
     register_cron_sync(ctx)
+    register_bridge(ctx, plugin_cfg)
     logger.info("Miloco plugin registered")

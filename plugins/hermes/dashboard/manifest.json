@@ -1,6 +1,0 @@
-{
-  "name": "miloco",
-  "label": "Miloco",
-  "description": "Xiaomi Miloco whole-home AI intelligence",
-  "api": "api.py"
-}
