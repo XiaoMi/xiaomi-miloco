@@ -123,7 +123,7 @@ def register(ctx):
     from .bridge import register_bridge
 
     register_skills(ctx)
-    register_hooks(ctx, plugin_cfg)
+    register_hooks(ctx)
     register_tools(ctx, plugin_cfg)
     register_cron_sync(ctx)
     register_bridge(ctx, plugin_cfg)
