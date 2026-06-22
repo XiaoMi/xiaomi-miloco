@@ -1,6 +1,7 @@
 """Miloco Hermes plugin."""
 
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -77,6 +78,9 @@ def register(ctx):
     plugin_cfg = get_plugin_config(ctx)
 
     cli_path = _resolve_cli(plugin_cfg)
+    cli_dir = str(Path(cli_path).parent)
+    if cli_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = cli_dir + os.pathsep + os.environ.get("PATH", "")
 
     _write_webhook_url(plugin_cfg, cli_path)
     _start_backend(cli_path)
