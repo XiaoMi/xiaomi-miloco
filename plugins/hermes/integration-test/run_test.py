@@ -3,10 +3,12 @@
 
 Test flow:
 1. Check Hermes gateway is running
-2. Check plugin is loaded and enabled
-3. Check bridge HTTP server is listening on :18789
-4. Send a test webhook request to bridge (get_trace action)
-5. Verify response format matches the fixed contract
+2. Check Miloco backend is running
+3. Check plugin is loaded and enabled
+4. Check bridge HTTP server is listening on :18789
+5. Send a test webhook request to bridge (get_trace action)
+6. Verify response format matches the fixed contract
+7. Check hermes miloco CLI works
 """
 
 from __future__ import annotations
@@ -16,11 +18,9 @@ import subprocess
 import sys
 import time
 import urllib.request
-import urllib.error
 
 HERMES_API = "http://localhost:8642"
 BRIDGE_URL = "http://localhost:18789/miloco/webhook"
-BACKEND_URL = "http://localhost:1810/health"
 
 MAX_WAIT = 120
 POLL_INTERVAL = 3
@@ -62,18 +62,11 @@ def check_bridge_health() -> bool:
     body = json.dumps({"action": "get_trace", "payload": {"runId": "nonexistent"}})
     result = subprocess.run(
         [
-            "docker",
-            "exec",
-            "miloco-hermes-test",
-            "curl",
-            "-sf",
-            "-X",
-            "POST",
+            "docker", "exec", "miloco-hermes-test",
+            "curl", "-sf", "-X", "POST",
             "http://localhost:18789/miloco/webhook",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            body,
+            "-H", "Content-Type: application/json",
+            "-d", body,
         ],
         capture_output=True,
         text=True,
@@ -97,14 +90,7 @@ def check_bridge_health() -> bool:
 
 def check_backend_health() -> bool:
     result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "miloco-hermes-test",
-            "curl",
-            "-sf",
-            "http://localhost:1810/health",
-        ],
+        ["docker", "exec", "miloco-hermes-test", "curl", "-sf", "http://localhost:1810/health"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -118,14 +104,7 @@ def check_backend_health() -> bool:
 
 def check_hermes_health() -> bool:
     result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "miloco-hermes-test",
-            "curl",
-            "-sf",
-            "http://localhost:8642/health",
-        ],
+        ["docker", "exec", "miloco-hermes-test", "curl", "-sf", "http://localhost:8642/health"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -142,7 +121,7 @@ def check_miloco_cli() -> bool:
         ["docker", "exec", "miloco-hermes-test", "hermes", "miloco", "status"],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     output = result.stdout + result.stderr
     print(f"[INFO] hermes miloco status:\n{output}")

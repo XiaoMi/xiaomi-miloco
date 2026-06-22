@@ -8,16 +8,9 @@ services:
     ports:
       - "8642:8642"
       - "1810:1810"
-    volumes:
-      - hermes-data:/opt/data
-      - ./config/hermes-config.yaml:/opt/data/config.yaml:ro
     environment:
       - HERMES_GATEWAY_NO_SUPERVISE=1
       - MILOCO_HOME=/opt/data/miloco
-      - MILOCO_SERVER__URL=http://127.0.0.1:1810
-      - MILOCO_AGENT__WEBHOOK_URL=http://127.0.0.1:18789/miloco/webhook
-      - API_SERVER_ENABLED=true
-      - API_SERVER_HOST=0.0.0.0
       - API_SERVER_KEY=integration-test-key
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8642/health"]
@@ -25,6 +18,3 @@ services:
       timeout: 3s
       retries: 30
       start_period: 15s
-
-volumes:
-  hermes-data:

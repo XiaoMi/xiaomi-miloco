@@ -3,6 +3,7 @@ FROM nousresearch/hermes-agent:latest
 USER root
 
 COPY . /tmp/miloco-src
+COPY plugins/hermes/integration-test/config/hermes-config.yaml /opt/data/config.yaml
 
 RUN VIRTUAL_ENV=/opt/hermes/.venv uv pip install --no-cache-dir /tmp/miloco-src/cli \
     && VIRTUAL_ENV=/opt/hermes/.venv uv pip install --no-cache-dir /tmp/miloco-src/backend/miloco \
@@ -13,4 +14,8 @@ RUN mkdir -p /opt/data/plugins/miloco \
     && cp -r /tmp/miloco-src/plugins/skills /opt/data/plugins/miloco/skills \
     && rm -rf /tmp/miloco-src
 
+RUN chown -R hermes:hermes /opt/data
+
+ENV MILOCO_HOME=/opt/data/miloco
 USER hermes
+RUN miloco-cli config set server.python_bin /opt/hermes/.venv/bin/python --no-restart

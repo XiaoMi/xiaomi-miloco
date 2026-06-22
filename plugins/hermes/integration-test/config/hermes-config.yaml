@@ -16,9 +16,6 @@ plugins:
   entries:
     miloco:
       debug: true
-      bridge_host: "0.0.0.0"
-      bridge_port: 18789
-      bridge_auth_token: ""
 
 terminal:
   timeout: 60
