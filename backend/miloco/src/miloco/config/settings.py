@@ -619,8 +619,9 @@ class MilocoSettings(BaseSettings):
         if host == "localhost":
             host = "127.0.0.1"
         # host 为 0.0.0.0 时，后端监听所有接口，url 可以为任意 host，仅检查 port
-        if (url_port is not None and url_port != self.server.port) or (
-            host != "0.0.0.0" and url_host != host ):
+        port_mismatch = url_port is not None and url_port != self.server.port
+        host_mismatch = host != "0.0.0.0" and url_host != host
+        if port_mismatch or host_mismatch:
             logger.warning(
                 "server.url (%s) 与 server.host (%s) / server.port (%d) 配置不一致，"
                 "CLI 使用 server.url 访问后端，后端监听 server.host:server.port，"
