@@ -5,8 +5,8 @@ import uuid
 
 from aiohttp import web
 
-from hermes import trace
-from hermes.agent_runner import AgentSessionPool
+from . import trace
+from .agent_runner import AgentSessionPool
 
 __all__ = [
     "register_bridge",

@@ -58,16 +58,16 @@ def _resolve_cli(plugin_cfg: dict) -> str:
 
 def _start_backend(cli_path: str):
     result = subprocess.run(
-        [cli_path, "service", "start", "--pretty"],
+        [cli_path, "service", "restart", "--pretty"],
         capture_output=True,
         text=True,
         timeout=30,
     )
     if result.returncode == 0:
-        logger.info("miloco-backend started via miloco-cli")
+        logger.info("miloco-backend restarted via miloco-cli")
     else:
         logger.warning(
-            "miloco-cli service start failed: %s",
+            "miloco-cli service restart failed: %s",
             (result.stdout + result.stderr).strip(),
         )
 
