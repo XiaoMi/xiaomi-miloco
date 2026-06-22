@@ -421,7 +421,7 @@ def _build_lines_for_device(
 ) -> list[SpecLine]:
     key_to_iid = {v: k for k, v in iid_to_key.items()}
     out: list[SpecLine] = []
-    for k in keys:
+    for k in sorted(keys):  # 字典序——LRU 只影响集合，不影响排列顺序
         iid = key_to_iid.get(k)
         if not iid:
             continue
@@ -532,14 +532,14 @@ def _pretty_render_group(
                 "online" if device.online else "offline",
             ])
         )
-        for line in device.spec_lines:
+        for line in sorted(device.spec_lines, key=lambda sl: sl.key):
             if line.key in sidehang_keys:
                 out_lines.append(f"  + {line.render()}")
 
     if shared_keys:
         out_lines.append("---")
         first_device_lines = {line.key: line for line in group_devices[0].spec_lines}
-        for key in shared_keys:
+        for key in sorted(shared_keys):
             out_lines.append(first_device_lines[key].render())
 
     return out_lines
