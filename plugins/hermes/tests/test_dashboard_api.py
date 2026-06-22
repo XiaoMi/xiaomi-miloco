@@ -85,12 +85,14 @@ def test_handle_agent_returns_runid_and_registers_trace(monkeypatch):
     import asyncio
 
     result = asyncio.get_event_loop().run_until_complete(
-        api._handle_agent({
-            "message": "hi",
-            "sessionKey": "main",
-            "traceId": "trace-X",
-            "idempotencyKey": "run-1",
-        })
+        api._handle_agent(
+            {
+                "message": "hi",
+                "sessionKey": "main",
+                "traceId": "trace-X",
+                "idempotencyKey": "run-1",
+            }
+        )
     )
     assert result["runId"] == "run-1"
     assert result["status"] == "ok"

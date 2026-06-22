@@ -36,7 +36,9 @@ def _resolve_platform_adapter(platform_name: str):
         if adapter is not None:
             return adapter, pconfig
 
-    logger.error("platform %s adapter not available (gateway not running?)", platform_name)
+    logger.error(
+        "platform %s adapter not available (gateway not running?)", platform_name
+    )
     return None, None
 
 

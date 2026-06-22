@@ -40,7 +40,10 @@ def test_im_push_delivers_via_adapter(monkeypatch):
     assert res["ok"] is True
     assert len(adapter.sent) == 1
     assert adapter.sent[0]["chat_id"] == "oc_xxx"
-    assert "<miloco-notification>灯已开</miloco-notification>" == adapter.sent[0]["content"]
+    assert (
+        "<miloco-notification>灯已开</miloco-notification>"
+        == adapter.sent[0]["content"]
+    )
 
 
 def test_im_push_with_thread_id(monkeypatch):
@@ -48,7 +51,10 @@ def test_im_push_with_thread_id(monkeypatch):
     monkeypatch.setattr(
         tools, "_resolve_deliver_target", lambda cfg: (adapter, "oc_xxx", "t_123")
     )
-    plugin_cfg = {"deliver": "feishu", "deliver_extra": {"chat_id": "oc_xxx", "message_thread_id": "t_123"}}
+    plugin_cfg = {
+        "deliver": "feishu",
+        "deliver_extra": {"chat_id": "oc_xxx", "message_thread_id": "t_123"},
+    }
     raw = tools._miloco_im_push_handler({"message": "hello"}, plugin_cfg=plugin_cfg)
     res = json.loads(raw)
     assert res["ok"] is True
@@ -56,7 +62,9 @@ def test_im_push_with_thread_id(monkeypatch):
 
 
 def test_im_push_no_target_returns_error(monkeypatch):
-    monkeypatch.setattr(tools, "_resolve_deliver_target", lambda cfg: (None, None, None))
+    monkeypatch.setattr(
+        tools, "_resolve_deliver_target", lambda cfg: (None, None, None)
+    )
     raw = tools._miloco_im_push_handler({"message": "灯已开"}, plugin_cfg={})
     res = json.loads(raw)
     assert res["ok"] is False
@@ -77,8 +85,13 @@ def test_im_push_adapter_send_failure(monkeypatch):
 
 def test_resolve_deliver_target_explicit_chat_id(monkeypatch):
     adapter = _FakeAdapter()
-    monkeypatch.setattr(tools, "_resolve_platform_adapter", lambda name: (adapter, None))
-    cfg = {"deliver": "feishu", "deliver_extra": {"chat_id": "oc_abc", "message_thread_id": "t_1"}}
+    monkeypatch.setattr(
+        tools, "_resolve_platform_adapter", lambda name: (adapter, None)
+    )
+    cfg = {
+        "deliver": "feishu",
+        "deliver_extra": {"chat_id": "oc_abc", "message_thread_id": "t_1"},
+    }
     a, cid, tid = tools._resolve_deliver_target(cfg)
     assert a is adapter
     assert cid == "oc_abc"
@@ -87,8 +100,12 @@ def test_resolve_deliver_target_explicit_chat_id(monkeypatch):
 
 def test_resolve_deliver_target_fallback_home_channel(monkeypatch):
     adapter = _FakeAdapter()
-    monkeypatch.setattr(tools, "_resolve_platform_adapter", lambda name: (adapter, None))
-    monkeypatch.setattr(tools, "_resolve_home_channel", lambda name: ("oc_home", "t_home"))
+    monkeypatch.setattr(
+        tools, "_resolve_platform_adapter", lambda name: (adapter, None)
+    )
+    monkeypatch.setattr(
+        tools, "_resolve_home_channel", lambda name: ("oc_home", "t_home")
+    )
     cfg = {"deliver": "feishu", "deliver_extra": {}}
     a, cid, tid = tools._resolve_deliver_target(cfg)
     assert cid == "oc_home"
@@ -112,7 +129,9 @@ def test_resolve_deliver_target_no_adapter_returns_none(monkeypatch):
 
 def test_resolve_deliver_target_no_chat_id_no_home_channel(monkeypatch):
     adapter = _FakeAdapter()
-    monkeypatch.setattr(tools, "_resolve_platform_adapter", lambda name: (adapter, None))
+    monkeypatch.setattr(
+        tools, "_resolve_platform_adapter", lambda name: (adapter, None)
+    )
     monkeypatch.setattr(tools, "_resolve_home_channel", lambda name: (None, None))
     cfg = {"deliver": "feishu", "deliver_extra": {}}
     a, cid, tid = tools._resolve_deliver_target(cfg)

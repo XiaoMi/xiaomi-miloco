@@ -71,7 +71,10 @@ def _start_backend(cli_path: str):
     if result.returncode == 0:
         logger.info("miloco-backend started via miloco-cli")
     else:
-        logger.warning("miloco-cli service start failed: %s", (result.stdout + result.stderr).strip())
+        logger.warning(
+            "miloco-cli service start failed: %s",
+            (result.stdout + result.stderr).strip(),
+        )
 
 
 def register(ctx):

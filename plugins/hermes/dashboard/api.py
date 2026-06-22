@@ -7,6 +7,8 @@ from fastapi.responses import JSONResponse
 from hermes import trace
 from hermes.agent_runner import AgentSessionPool
 
+__all__ = ["router"]
+
 router = APIRouter()
 
 
