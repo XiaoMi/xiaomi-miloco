@@ -375,7 +375,8 @@ async def test_e2e_duration_multi_source_sync_transition_no_overcount(
 
     await runner_dur.drain()
 
-    # 期望(修复后):不触发 fire。当前(bug 存在):"fire-d" 出现在 fire 列表 → xfail。
+    # 两 source 同步退出时，本轮状态应按 cycle 快照聚合为 False，不能沿用任一
+    # source 的上一帧 True 过计入 duration 窗口。
     dids = [
         call[0][0][0].did
         for call in mock_miot_proxy.set_device_properties.call_args_list
