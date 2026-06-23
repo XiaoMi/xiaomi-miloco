@@ -63,23 +63,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _video_block_type() -> tuple[str, str]:
-    """Return (type_value, key_name) for the video content block.
-
-    MiniMax uses ``"video"`` (with ``"video"`` key) while the standard
-    OpenAI-compatible format uses ``"video_url"`` (with ``"video_url"`` key).
-    """
-    try:
-        from miloco.config import get_settings
-        base = get_settings().model.omni.base_url
-        if base and "minimaxi" in base.lower():
-            return "video", "video"
-    except Exception:
-        pass
-    return "video_url", "video_url"
-
-
-
 # =============================================================================
 # Fused mode 配置
 # =============================================================================
@@ -692,11 +675,12 @@ def _build_fused_user_content(
     # base64 串, 入 payload 会让 omni 服务端 400 Multimodal data is corrupted。
     # 太短 → 跳过 video_url 块, 退化为"无视频窗口"(text + gallery 仍能识别)。
     if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
-        vtype, vkey = _video_block_type()
         content.append({
-            "type": vtype,
-            vkey: {"url": f"data:video/mp4;base64,{video_b64}"},
-            "fps": video_fps,
+            "type": "video_url",
+            "video_url": {
+                "url": f"data:video/mp4;base64,{video_b64}",
+                "fps": video_fps,
+            },
         })
     elif video_b64:
         logger.warning(

@@ -20,22 +20,6 @@ from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 
 logger = logging.getLogger(__name__)
 
-
-def _video_block_type() -> tuple[str, str]:
-    """Return (type_value, key_name) for the video content block.
-
-    MiniMax uses ``"video"`` (with ``"video"`` key) while the standard
-    OpenAI-compatible format uses ``"video_url"`` (with ``"video_url"`` key).
-    """
-    try:
-        from miloco.config import get_settings
-        base = get_settings().model.omni.base_url
-        if base and "minimaxi" in base.lower():
-            return "video", "video"
-    except Exception:
-        pass
-    return "video_url", "video_url"
-
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
 
 
@@ -219,14 +203,14 @@ def _build_messages(payload: dict) -> list[dict]:
 
     # Video (frames + audio merged into mp4)；与 audio_base64 互斥（上游 _build_payload 保证）
     if payload.get("video_base64"):
-        vtype, vkey = _video_block_type()
+        fps = payload.get("video_fps", 3)
         content.append(
             {
-                "type": vtype,
-                vkey: {
-                    "url": f"data:video/mp4;base64,{payload['video_base64']}"
+                "type": "video_url",
+                "video_url": {
+                    "url": f"data:video/mp4;base64,{payload['video_base64']}",
+                    "fps": fps,
                 },
-                "fps": payload.get("video_fps", 3),
             }
         )
     # Audio-only route：独立 input_audio 块（仅当无 video_base64 时启用）
