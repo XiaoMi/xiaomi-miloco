@@ -35,10 +35,10 @@ ensure_uv() {
     UV_CMD="uv"
 }
 
-# ── Step 2: Ensure Python >=3.10 (prefer 3.14) ───────────
+# ── Step 2: Ensure Python >=3.11 (prefer 3.14) ───────────
 ensure_python() {
     local py_path
-    for ver in 3.14 3.13 3.12 3.11 3.10; do
+    for ver in 3.14 3.13 3.12 3.11; do
         py_path=$("$UV_CMD" python find "$ver" 2>/dev/null) && {
             info "Python $ver found: $py_path"
             return

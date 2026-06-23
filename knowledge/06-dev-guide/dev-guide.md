@@ -2,7 +2,7 @@
 
 ## 环境准备
 
-- **Python** >= 3.10（推荐 3.12+），由 `uv` 管理虚拟环境
+- **Python** >= 3.11（推荐 3.12+），由 `uv` 管理虚拟环境
 - **Node.js**（LTS），由 pnpm 管理 TypeScript 包
 - **uv**：Python 包和 workspace 管理，缺失时 `install.sh` 自动安装
 - **pnpm**：TypeScript 包管理（插件 + 前端）
@@ -23,7 +23,7 @@ bash scripts/install.sh [--lang zh] [--omni-api-key <key>]
 bash scripts/install.sh --agent-prepare   # 输出 JSON，供 Agent 解析后分步调用
 ```
 
-`install.sh` 先确保 uv + Python >= 3.10 就位，再依次完成：环境检查 → 包安装 → 服务预热 → 米家账号绑定引导 → Omni 模型配置 → 感知模型下载 → OpenClaw 插件安装。
+`install.sh` 先确保 uv + Python >= 3.11 就位，再依次完成：环境检查 → 包安装 → 服务预热 → 米家账号绑定引导 → Omni 模型配置 → 感知模型下载 → OpenClaw 插件安装。
 
 ---
 
