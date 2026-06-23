@@ -596,13 +596,12 @@ class MilocoSettings(BaseSettings):
         url = self.server.url
         try:
             parsed = urlparse(url)
-        except Exception:
-            # urlparse 基本不会失败，但以防万一
+            url_host = parsed.hostname or "localhost"
+            url_port = parsed.port
+        except ValueError:
             logger.warning("无法解析 server.url: %s，跳过一致性校验", url)
             return self
 
-        url_host = parsed.hostname or "localhost"
-        url_port = parsed.port
         if url_port is None:
             # 根据协议推断默认端口
             if parsed.scheme == "http":
