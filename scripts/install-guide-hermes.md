@@ -151,27 +151,45 @@ miloco-cli account status
 
 ```bash
 miloco-cli config get model.omni.api_key
+miloco-cli config get model.omni.model
+miloco-cli config get model.omni.base_url
 ```
 
-**已配置（输出非空）：**
+**已配置（三项都非空）：**
 
 贴：
 
 > 模型已配：{model} @ {base_url}。继续用它。说"继续"我接着装。
 
-**未配置（输出 null / 报错）：**
+**未配置（任一项为 null / 报错）：**
 
 贴：
 
-> 感知引擎需要 Omni 模型 key。默认用 **小米 MiMo**，key 从 https://platform.xiaomimimo.com 拿。
+> 感知引擎需要 Omni 模型。**两个选项，挑一个跑**：
 >
-> 你自己终端跑：
+> **A. 用默认小米 MiMo**（推荐，国产多模态大模型）
+>
+> key 从 https://platform.xiaomimimo.com 拿。你自己终端跑：
 >
 > ```bash
 > miloco-cli config set model.omni.api_key <你的_MiMo_Key>
 > ```
 >
-> key 走这个命令不被 mask，落到 `~/.openclaw/miloco/config.json`。
+> （model = `xiaomi/mimo-v2.5`、base_url = `https://api.xiaomimimo.com/v1` 是默认值，不用设）
+>
+> **B. 用第三方模型**（OpenAI / Anthropic / 自建 / 任何 OpenAI 兼容 API）
+>
+> 你自己终端跑（一次写完三项）：
+>
+> ```bash
+> miloco-cli config set model.omni.model <model_name> model.omni.base_url <base_url> model.omni.api_key <api_key>
+> ```
+>
+> 例（用 OpenAI）：
+> ```bash
+> miloco-cli config set model.omni.model gpt-4o model.omni.base_url https://api.openai.com/v1 model.omni.api_key sk-xxx
+> ```
+>
 > 跑完告诉我「配好了」我接着装。
 
 ### 2.3 重启 Hermes gateway
