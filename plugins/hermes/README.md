@@ -25,7 +25,7 @@ For a step-by-step guide written for an AI agent to follow (covers pre-flight ch
 
 > **Note:** the README's 3 commands install the fork, but you still need to do **3 user-terminal actions** that the agent cannot run for you (Hermes masks sensitive values + the gateway has an anti-restart-loop):
 >
-> 1. Bind your Xiaomi account — `miloco-cli account bind` (interactive; or browser OAuth + `miloco-cli account authorize "<base64>"`)
+> 1. Bind your Xiaomi account — `miloco-cli account bind` (interactive; or browser OAuth + `miloco-cli account authorize <base64>`)
 > 2. Set the Omni model API key — `miloco-cli config set model.omni.api_key "<your-key>"`
 > 3. Restart Hermes gateway — `hermes gateway restart`
 >

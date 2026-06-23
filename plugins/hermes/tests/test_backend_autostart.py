@@ -133,6 +133,41 @@ def test_guide_step_1_6_mentions_no_start_backend():
     assert "--no-start-backend" in step16
 
 
+# ─── Step 2.1 OAuth 命令格式（防止回归） ──────────────────────────────
+
+
+def test_guide_oauth_command_no_double_dash_flag():
+    """Step 2.1 的 miloco-cli account authorize 命令不能用 --code 这种 flag（不存在）。"""
+    text = GUIDE_MD.read_text(encoding="utf-8")
+    # 找所有 account authorize 行
+    import re as _re
+    lines_with_auth = [
+        line for line in text.splitlines()
+        if "account authorize" in line and "miloco-cli" in line
+    ]
+    assert lines_with_auth, "install-guide-hermes.md 里没找到 account authorize 命令"
+    for line in lines_with_auth:
+        assert "--code" not in line, f"Step 2.1 命令错带 --code flag: {line!r}"
+
+
+def test_guide_oauth_command_uses_positional_arg():
+    """account authorize 是位置参数，命令里 base64 必须直接跟在命令后面（不放在 <...> 里也别加 flag）。"""
+    text = GUIDE_MD.read_text(encoding="utf-8")
+    # 应该匹配 `miloco-cli account authorize <...>` 形式（占位符里可以有空格/中文）
+    assert re.search(
+        r"miloco-cli\s+account\s+authorize\s+<",
+        text,
+    ), "install-guide-hermes.md 里 account authorize 没以位置参数形式给出"
+
+
+def test_readme_oauth_command_no_double_dash_flag():
+    """README.md 里的 OAuth 命令也不能带 --code。"""
+    text = (REPO_ROOT / "plugins" / "hermes" / "README.md").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "account authorize" in line and "miloco-cli" in line:
+            assert "--code" not in line, f"README.md 命令错带 --code: {line!r}"
+
+
 # ─── shell 语法 ───────────────────────────────────────────────────────
 
 

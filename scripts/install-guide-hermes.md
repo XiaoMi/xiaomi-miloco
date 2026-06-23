@@ -147,7 +147,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 > 完成后，请打开**你自己的终端**跑：
 >
 > ```bash
-> miloco-cli account authorize --code "<从浏览器复制的 base64 码>"
+> miloco-cli account authorize <粘进去的 base64 码>
 > ```
 >
 > 授权码有效期只有几分钟，浏览器拿到 → 立刻粘到终端跑一气呵成。跑完告诉 agent「绑好了」。
