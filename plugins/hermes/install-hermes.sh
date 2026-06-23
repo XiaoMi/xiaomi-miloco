@@ -230,7 +230,14 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
   fi
 
   # 10. adapter 在跑
-  if get_pid_by_port "$ADAPTER_PORT" >/dev/null 2>&1 && [ -n "$(get_pid_by_port "$ADAPTER_PORT" | tr -d ' \r\n')" ]; then
+  if [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+    # macOS launchd 路径：直接看 launchctl list
+    if launchctl list 2>/dev/null | grep -q "com.xiaomi.miloco.hermes.adapter"; then
+      diag "adapter (launchd)" 1 "已加载 com.xiaomi.miloco.hermes.adapter"
+    else
+      diag "adapter (launchd)" 0 "未加载 → bash plugins/hermes/scripts/miloco-adapter.sh start"
+    fi
+  elif get_pid_by_port "$ADAPTER_PORT" >/dev/null 2>&1 && [ -n "$(get_pid_by_port "$ADAPTER_PORT" | tr -d ' \r\n')" ]; then
     ADAPTER_PID_VAL="$(get_pid_by_port "$ADAPTER_PORT" | tr -d ' \r\n' | head -1)"
     diag "adapter 进程 (端口 $ADAPTER_PORT)" 1 "PID=$ADAPTER_PID_VAL"
   else
@@ -343,6 +350,9 @@ cp -r "$HERE/adapter" "$HERMES_PLUGINS_DIR/adapter"
 # 清 pycache + 预编译（首次启动少 ~2s）
 find "$HERMES_PLUGINS_DIR" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 "$PYTHON" -m compileall -q "$HERMES_PLUGINS_DIR/miloco-plugin" "$HERMES_PLUGINS_DIR/adapter" 2>/dev/null || true
+
+# adapter-launcher.sh 要可执行（macOS launchd plist 调它）
+chmod +x "$HERE/scripts/adapter-launcher.sh" 2>/dev/null || true
 mark_done 4
 
 # --- 4.5 自动探测 Hermes 已配置的 IM 平台，写入插件 state.json ---
@@ -522,6 +532,14 @@ step 5 "patch ${MILOCO_HOME}/config.json 的 agent 段"
 # backup 文件名加 PID + 纳秒，避免 30s 内 reinstall 撞名
 TS="$(date +%Y%m%d-%H%M%S)-pid$$-nsec$(date +%N)"
 cp "$MILOCO_HOME/config.json" "${MILOCO_HOME}/config.json.bak-${TS}"
+
+# 清理老备份：保留最新 3 份，避免 config.json.bak-* 累积（重装 N 次 → N 份）
+# 用 ls -1t 按时间倒序，tail -n +4 跳过前 3 行（即保留最新 3），其余删
+old_baks="$(ls -1t "${MILOCO_HOME}"/config.json.bak-* 2>/dev/null | tail -n +4 || true)"
+if [ -n "$old_baks" ]; then
+  rm -f $old_baks
+  info "  清理老 config.json.bak：保留最新 3 份"
+fi
 "$PYTHON" - "$MILOCO_HOME" "$ADAPTER_PORT" "$BEARER" <<'PY'
 import json, sys
 home, port, bearer = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -549,48 +567,14 @@ fi
 mark_done 6
 
 # --- 7. 重启 adapter ---
+# 委托给 scripts/miloco-adapter.sh start，由它根据平台选择路径：
+#   - macOS → launchd LaunchAgent（plist + launchctl load），adapter 完全脱离 install.sh 进程组
+#   - Linux / Git Bash / WSL → nohup + </dev/null + 60s retry loop
+# 这样 install.sh exit 1 时，adapter 不会被 SIGHUP/SIGTERM 误杀（macOS 上是关键）
 step 7 "重启 adapter (端口 ${ADAPTER_PORT})"
-# 停旧的（Git Bash $! 在 Windows 下 ≠ Windows native PID，按端口反查兜底）
-if [ -f "$ADAPTER_PID" ]; then
-  OLD_PID="$(cat "$ADAPTER_PID" 2>/dev/null || echo '')"
-  if [ -n "$OLD_PID" ] || [ -n "$ADAPTER_PORT" ]; then
-    warn "旧 adapter 进程在跑，先停掉（按 PID + 按端口双兜底）"
-    kill_adapter "$OLD_PID" "$ADAPTER_PORT"
-  fi
-  rm -f "$ADAPTER_PID"
-fi
-
-# 启新的
-info "  启动新进程..."
-( cd "$HERMES_PLUGINS_DIR" \
-  && PYTHONUTF8=1 \
-     ADAPTER_AUTH_BEARER="$BEARER" \
-     HERMES_API_URL="http://127.0.0.1:8642" \
-     HERMES_API_KEY="$BEARER" \
-     ADAPTER_HOST="${ADAPTER_HOST:-127.0.0.1}" \
-     ADAPTER_PORT="$ADAPTER_PORT" \
-     nohup "$PYTHON" -m adapter \
-       > "$ADAPTER_LOG" 2>&1 & echo $! > "$ADAPTER_PID" )
-
-# Retry loop：冷启动 adapter 可能要 import ~10s，最多等 20s，每 0.5s 查一次端口。
-# 关键：按端口反查 Windows native PID 覆盖写入 pid 文件（Git Bash $! 在 Windows 不可靠）
-WIN_PID=""
-for i in $(seq 1 40); do
-  sleep 0.5
-  WIN_PID="$(get_pid_by_port "$ADAPTER_PORT" | tr -d '\r\n ' || echo '')"
-  if [ -n "$WIN_PID" ]; then
-    break
-  fi
-  if [ $((i % 4)) -eq 0 ]; then
-    printf "  ...等待端口 (${i}/40, ${ADAPTER_PORT})\n"
-  fi
-done
-if [ -n "$WIN_PID" ]; then
-  echo "$WIN_PID" > "$ADAPTER_PID"
-  info "adapter 已起，PID=${WIN_PID}（端口 ${ADAPTER_PORT}，等了 ~$((i/2))s）"
-else
-  err "adapter 启动失败，端口 $ADAPTER_PORT 未监听（等了 20s）。看 $ADAPTER_LOG 末尾："
-  tail -20 "$ADAPTER_LOG" >&2 || true
+info "  委托给 scripts/miloco-adapter.sh（macOS 走 launchd，其他走 nohup）"
+if ! bash "$HERE/scripts/miloco-adapter.sh" start; then
+  err "adapter 启动失败"
   exit 1
 fi
 mark_done 7

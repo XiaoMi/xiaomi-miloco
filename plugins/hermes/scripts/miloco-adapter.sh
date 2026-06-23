@@ -29,6 +29,16 @@ ADAPTER_PID="$HERMES_HOME/miloco-adapter.pid"
 HERMES_PLUGINS_DIR="$HERMES_HOME/plugins/miloco"
 ADAPTER_DIR="$HERMES_PLUGINS_DIR/adapter"
 
+# 平台检测
+IS_MACOS=0
+[ "$(uname -s)" = "Darwin" ] && IS_MACOS=1
+
+# macOS launchd 路径
+LAUNCHD_LABEL="com.xiaomi.miloco.hermes.adapter"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+PLIST_TEMPLATE="$HERE/com.xiaomi.miloco.hermes.adapter.plist"
+LAUNCHER="$HERE/adapter-launcher.sh"
+
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 info() { echo -e "${G}[✓]${N} $*"; }
 warn() { echo -e "${Y}[!]${N} $*"; }
@@ -101,6 +111,13 @@ cmd_start() {
     err "找不到 ${ADAPTER_DIR}，先跑 install-hermes.sh"; exit 1
   fi
 
+  # ── macOS 路径：launchd LaunchAgent（避免 install.sh exit 时 SIGHUP/SIGTERM 杀进程）──
+  if [ "$IS_MACOS" -eq 1 ] && command -v launchctl >/dev/null 2>&1; then
+    cmd_start_launchd
+    return $?
+  fi
+
+  # ── Linux / Git Bash / WSL 路径：nohup + setsid（可选）+ </dev/null 完全脱离 ──
   # 已在跑就跳过
   if [ -f "$ADAPTER_PID" ] && kill -0 "$(cat "$ADAPTER_PID" 2>/dev/null)" 2>/dev/null; then
     warn "adapter 已在跑，PID=$(cat "$ADAPTER_PID")"
@@ -110,31 +127,104 @@ cmd_start() {
   [ -f "$ADAPTER_PID" ] && rm -f "$ADAPTER_PID"
 
   info "启动 adapter（端口 ${ADAPTER_PORT}）..."
-  ( cd "$HERMES_PLUGINS_DIR" \
-    && PYTHONUTF8=1 \
-       ADAPTER_AUTH_BEARER="$bearer" \
-       HERMES_API_URL="${HERMES_API_URL:-http://127.0.0.1:8642}" \
-       HERMES_API_KEY="${HERMES_API_KEY:-$bearer}" \
-       ADAPTER_HOST="$ADAPTER_HOST" \
-       ADAPTER_PORT="$ADAPTER_PORT" \
-       nohup "$(command -v python3 || command -v python)" -m adapter \
-         > "$ADAPTER_LOG" 2>&1 & echo $! > "$ADAPTER_PID" )
+  local py; py="$(command -v python3 || command -v python)"
+  (
+    cd "$HERMES_PLUGINS_DIR"
+    PYTHONUTF8=1 \
+    ADAPTER_AUTH_BEARER="$bearer" \
+    HERMES_API_URL="${HERMES_API_URL:-http://127.0.0.1:8642}" \
+    HERMES_API_KEY="${HERMES_API_KEY:-$bearer}" \
+    ADAPTER_HOST="$ADAPTER_HOST" \
+    ADAPTER_PORT="$ADAPTER_PORT" \
+    nohup "$py" -m adapter \
+      > "$ADAPTER_LOG" 2>&1 < /dev/null &
+    # Linux 下加 setsid 让进程脱离 shell job control（macOS 用 launchd 走另一条路）
+    if [ "$IS_MACOS" -eq 0 ] && command -v setsid >/dev/null 2>&1; then
+      # setsid -f 在子 shell 里跑；不用 -f 的话 setsid 本身要 fork
+      : # 占位：实际不需要在 bash 子 shell 里 setsid，已被 nohup + </dev/null 覆盖
+    fi
+    echo $! > "$ADAPTER_PID"
+    disown 2>/dev/null || true
+  )
 
-  sleep 2
-  # 关键：按端口反查真实 Windows native PID 覆盖写入 pid 文件（|| echo "" 兜底 set -e）
-  local pid
-  pid="$(get_pid_by_port "$ADAPTER_PORT" | tr -d '\r\n ' || echo '')"
+  # Retry loop：冷启动 adapter 可能要 import ~10s，最长等 60s
+  local pid="" i
+  for i in $(seq 1 120); do
+    sleep 0.5
+    pid="$(get_pid_by_port "$ADAPTER_PORT" | tr -d '\r\n ' || echo '')"
+    if [ -n "$pid" ]; then break; fi
+    if [ $((i % 10)) -eq 0 ]; then
+      printf "  ...等待端口 (${i}/120, ${ADAPTER_PORT})\n"
+    fi
+  done
   if [ -n "$pid" ]; then
-    echo "$pid" > "$ADAPTER_PID"
+    [ "$pid" != "$(cat "$ADAPTER_PID" 2>/dev/null)" ] && echo "$pid" > "$ADAPTER_PID"
     info "adapter 已起，PID=$pid（按端口反查），日志=$ADAPTER_LOG"
   else
-    err "adapter 启动失败，端口 $ADAPTER_PORT 未监听，看 $ADAPTER_LOG 末尾："
+    err "adapter 启动失败，端口 $ADAPTER_PORT 未监听（等了 60s）。看 $ADAPTER_LOG 末尾："
     tail -20 "$ADAPTER_LOG" >&2 || true
+    rm -f "$ADAPTER_PID"
+    exit 1
+  fi
+}
+
+# macOS launchd 路径的 start：写 plist + launchctl load
+cmd_start_launchd() {
+  if [ ! -f "$PLIST_TEMPLATE" ]; then
+    err "找不到 plist 模板 $PLIST_TEMPLATE（fork 不完整？重 git pull）"; exit 1
+  fi
+  if [ ! -x "$LAUNCHER" ]; then
+    chmod +x "$LAUNCHER" 2>/dev/null || true
+  fi
+
+  # 已加载就跳过
+  if launchctl list 2>/dev/null | grep -q "$LAUNCHD_LABEL"; then
+    warn "launchd 已加载 $LAUNCHD_LABEL，跳过（restart 会先 unload）"
+    cmd_status_launchd
+    return 0
+  fi
+
+  # 替换占位符写 plist
+  mkdir -p "$(dirname "$LAUNCHD_PLIST")"
+  sed -e "s|__LABEL__|$LAUNCHD_LABEL|g" \
+      -e "s|__ADAPTER_DIR__|$HERMES_PLUGINS_DIR|g" \
+      -e "s|__LAUNCHER__|$LAUNCHER|g" \
+      -e "s|__LOG_PATH__|$ADAPTER_LOG|g" \
+      -e "s|__ADAPTER_PORT__|$ADAPTER_PORT|g" \
+      "$PLIST_TEMPLATE" > "$LAUNCHD_PLIST"
+
+  # launchctl load -w：写入 + 立即拉起
+  if launchctl load -w "$LAUNCHD_PLIST" 2>/dev/null; then
+    info "launchd 已加载 $LAUNCHD_LABEL，plist=$LAUNCHD_PLIST"
+  else
+    err "launchctl load 失败，看 /var/log/com.apple.xpc.launchd/launchd.log"
+    cat "$LAUNCHD_PLIST" >&2
+    exit 1
+  fi
+
+  # 等端口（launchd 拉起 wrapper → wrapper exec python → 绑定端口）
+  local pid="" i
+  for i in $(seq 1 120); do
+    sleep 0.5
+    pid="$(get_pid_by_port "$ADAPTER_PORT" | tr -d '\r\n ' || echo '')"
+    if [ -n "$pid" ]; then break; fi
+  done
+  if [ -n "$pid" ]; then
+    echo "$pid" > "$ADAPTER_PID"
+    info "adapter 已起，PID=$pid（launchd 路径），日志=$ADAPTER_LOG"
+  else
+    err "launchd 加载成功但端口 $ADAPTER_PORT 60s 未监听，看 $LAUNCHD_LOG"
+    launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
     exit 1
   fi
 }
 
 cmd_stop() {
+  # ── macOS launchd 路径 ──
+  if [ "$IS_MACOS" -eq 1 ] && [ -f "$LAUNCHD_PLIST" ] && command -v launchctl >/dev/null 2>&1; then
+    cmd_stop_launchd
+    return $?
+  fi
   if [ ! -f "$ADAPTER_PID" ]; then
     warn "pid 文件不存在，adapter 可能没在跑"; return 0
   fi
@@ -153,7 +243,29 @@ cmd_stop() {
   info "已停"
 }
 
+# macOS launchd 路径的 stop
+cmd_stop_launchd() {
+  if launchctl list 2>/dev/null | grep -q "$LAUNCHD_LABEL"; then
+    info "launchctl unload $LAUNCHD_LABEL"
+    launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
+  fi
+  # 端口兜底杀
+  local port_pid
+  port_pid="$(get_pid_by_port "$ADAPTER_PORT" | tr -d '\r\n ' || echo '')"
+  if [ -n "$port_pid" ]; then
+    warn "launchd unload 后端口仍被 PID=$port_pid 占，kill -9 兜底"
+    kill_pid "$port_pid"
+  fi
+  rm -f "$ADAPTER_PID"
+  info "已停（launchd 路径）"
+}
+
 cmd_status() {
+  # ── macOS launchd 路径 ──
+  if [ "$IS_MACOS" -eq 1 ] && command -v launchctl >/dev/null 2>&1; then
+    cmd_status_launchd
+    return $?
+  fi
   local pid=""
   if [ -f "$ADAPTER_PID" ]; then pid="$(cat "$ADAPTER_PID" 2>/dev/null || echo '')"; fi
   # 优先以端口反查为准（Git Bash PID 不可靠）；用 || echo "" 兜底 set -e
@@ -180,6 +292,30 @@ cmd_status() {
   echo "  pid 文件: $ADAPTER_PID"
   echo "  日志文件: $ADAPTER_LOG"
   echo "  监听端口: $ADAPTER_PORT"
+}
+
+# macOS launchd 路径的 status
+cmd_status_launchd() {
+  local label_status
+  label_status="$(launchctl list 2>/dev/null | grep "$LAUNCHD_LABEL" || echo '')"
+  if [ -n "$label_status" ]; then
+    info "launchd 已加载: $label_status"
+  else
+    warn "launchd 未加载 $LAUNCHD_LABEL"
+  fi
+  echo "  plist:     $LAUNCHD_PLIST"
+  echo "  launcher:  $LAUNCHER"
+  echo "  日志文件: $ADAPTER_LOG"
+  echo "  监听端口: $ADAPTER_PORT"
+  # 健康检查（同非 macOS 路径）
+  local url="http://127.0.0.1:${ADAPTER_PORT}/health"
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+      info "health OK: $url"
+    else
+      warn "health 检查失败: $url"
+    fi
+  fi
 }
 
 cmd_logs() { tail -n 200 -f "$ADAPTER_LOG"; }
