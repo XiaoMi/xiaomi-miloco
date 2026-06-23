@@ -3,7 +3,7 @@ name = "miloco"
 dynamic = ["version"]
 description = "A Python backend for Xiaomi Miloco"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Miloco team", email = "xiaomi-miloco@xiaomi.com" }]
 dependencies = [
   "aiofiles>=25.1.0",
@@ -12,7 +12,7 @@ dependencies = [
   "httpx>=0.28.1",
   "numpy>=2.2.0",
   "opencv-python-headless>=4.13.0.92",
-  "onnxruntime>=1.10.0",
+  "onnxruntime>=1.27.0",
   "Pillow>=12.2.0",
   "psutil>=7.2.2",
   "pydantic>=2.13.4",
