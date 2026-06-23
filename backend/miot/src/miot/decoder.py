@@ -279,6 +279,9 @@ class MIoTMediaDecoder(threading.Thread):
                 self._video_decoder = VideoCodecContext.create("h264", "r")
             elif frame_data.codec_id == MIoTCameraCodec.VIDEO_H265:
                 self._video_decoder = VideoCodecContext.create("hevc", "r")
+            else:
+                _LOGGER.error("unsupported video codec: %s, skipping frame", frame_data.codec_id)
+                return
             _LOGGER.info("video decoder created, %s", frame_data.codec_id)
         pkt = Packet(frame_data.data)
         frames: List[VideoFrame] = self._video_decoder.decode(pkt)  # type: ignore
@@ -333,6 +336,17 @@ class MIoTMediaDecoder(threading.Thread):
             # Create audio decoder
             if frame_data.codec_id == MIoTCameraCodec.AUDIO_OPUS:
                 self._audio_decoder = AudioCodecContext.create("opus", "r")
+            elif frame_data.codec_id == MIoTCameraCodec.AUDIO_G711A:
+                self._audio_decoder = AudioCodecContext.create("pcm_alaw", "r")
+                self._audio_decoder.sample_rate = 8000
+                self._audio_decoder.layout = "mono"
+            elif frame_data.codec_id == MIoTCameraCodec.AUDIO_G711U:
+                self._audio_decoder = AudioCodecContext.create("pcm_mulaw", "r")
+                self._audio_decoder.sample_rate = 8000
+                self._audio_decoder.layout = "mono"
+            else:
+                _LOGGER.error("unsupported audio codec: %s, skipping frame", frame_data.codec_id)
+                return
             self._resampler = AudioResampler(format="s16", layout="mono", rate=16000)
             _LOGGER.info("audio decoder created, %s", frame_data.codec_id)
         pkt = Packet(frame_data.data)
