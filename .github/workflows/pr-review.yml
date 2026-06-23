@@ -1,10 +1,10 @@
-# PR AI 审查门禁：对同仓 PR 跑 /review-pr，把结果发成一条可更新的 PR 评论，
+# PR AI 审查门禁：PR 事件自动触发 /review-pr（含 fork），把结果发成一条可更新的 PR 评论，
 # 并按严重度阻断 merge。
 # 审查方法论 + 评论格式见 .agents/commands/review-pr.md；本 workflow 只负责调度与门禁。
 name: PR Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
 # 同一 PR 连续 push 时取消上一次审查，只留最新
@@ -20,10 +20,8 @@ permissions:
 
 jobs:
   pr-review:
-    # 只审同仓（非 fork）非草稿 PR：fork PR 拿不到 secrets，跳过避免无 key 空跑
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.draft == false
+    # 审所有非草稿 PR（pull_request_target 下 fork 也可用 secrets）
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -35,12 +33,17 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       PR_AGENT_MODEL: ${{ vars.PR_AGENT_MODEL }}
+      ANTHROPIC_FALLBACK_API_KEY: ${{ secrets.ANTHROPIC_FALLBACK_API_KEY }}
+      ANTHROPIC_FALLBACK_BASE_URL: ${{ secrets.ANTHROPIC_FALLBACK_BASE_URL }}
+      PR_AGENT_FALLBACK_MODEL: ${{ vars.PR_AGENT_FALLBACK_MODEL }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # pull_request 默认 checkout 的是 merge ref（= 合并后状态，正合 review-pr 要求看到合并后代码）；
+          # pull_request_target 默认 checkout 的是 base 分支最后一个 commit；
+          # 显式指定 merge ref 拿到合并后状态，正合 review-pr 要求。
           # fetch-depth: 0 保留完整历史，供命令内的 git fetch origin main + merge-base 比对
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
 
       # 容器内 GitHub 把 HOME 指到 /github/home，镜像里的 safe.directory 不生效，需在运行时 HOME 再设一次

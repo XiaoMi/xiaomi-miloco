@@ -31,21 +31,45 @@ git show "origin/main:.agents/commands/review-pr.md" \
   | sed "s#XiaoMi/xiaomi-miloco#${REPO}#g" \
   > .claude/commands/review-pr.md
 
-# 跑审查：infra 故障（API 宕机/超时/限流）直接放行，避免 infra 问题阻塞 merge。
+# 写死 Bash 子命令白名单到 .claude/settings.json。
+# dontAsk 模式下只有 permissions.allow 名单内的命令能执行，其余自拒；
+# 与 --tools "Bash,Read,Glob,Grep" 工具白名单形成纵深防御。
+cat > .claude/settings.json <<'SETEOF'
+{"permissions": {"allow": ["Bash(gh *)", "Bash(git *)", "Bash(md5sum *)", "Bash(diff *)"]}}
+SETEOF
+
+# 跑审查：主模型失败时降级到备用模型/endpoint 重试一次。
+# 主备均失败或审查结果未产出时直接阻断 merge，确保无审查覆盖的 PR 不能合入。
 # < /dev/null 必须：本脚本以 `git show ...:pr-review-gate.sh | bash` 方式（脚本走 bash stdin）调用，
 # 而审查 CLI 的 -p 模式在非 TTY 下会读 stdin 当输入，会把 bash 尚未读完的后续脚本（含下面的门禁逻辑）吞掉，
 # 导致 pr-agent 后整段门禁被静默跳过、门禁恒放行。隔到 /dev/null 杜绝它消费脚本流。
-if ! /usr/local/bin/pr-agent "/review-pr $PR_NUMBER --ci" < /dev/null; then
-  echo "[WARN] 审查执行失败，跳过严重度检查"
-  exit 0
+REVIEW_OK=0
+if /usr/local/bin/pr-agent "/review-pr $PR_NUMBER --ci" < /dev/null; then
+  REVIEW_OK=1
+elif [ -n "${ANTHROPIC_FALLBACK_API_KEY:-}" ] && [ -n "${PR_AGENT_FALLBACK_MODEL:-}" ]; then
+  echo "[WARN] 主模型不可用，尝试降级到备用模型"
+  export ANTHROPIC_API_KEY="$ANTHROPIC_FALLBACK_API_KEY"
+  [ -n "${ANTHROPIC_FALLBACK_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL="$ANTHROPIC_FALLBACK_BASE_URL"
+  export PR_AGENT_MODEL="$PR_AGENT_FALLBACK_MODEL"
+  export PR_AGENT_FALLBACK_USED=1
+  if /usr/local/bin/pr-agent "/review-pr $PR_NUMBER --ci" < /dev/null; then
+    REVIEW_OK=1
+  fi
+fi
+# 运维须知：主备模型同时不可用（或未配 ANTHROPIC_FALLBACK_* secrets）时，下面 exit 1 会让 pr-review
+# 这条 required check 变红、阻断全仓 merge。Anthropic 长时间 outage 期间若需放行，可临时在分支保护里
+# 摘掉 pr-review required check 解封，恢复后再加回。
+if [ "$REVIEW_OK" -ne 1 ]; then
+  echo "[FAIL] 审查执行失败（主备均不可用），阻断 merge"
+  exit 1
 fi
 
 # 拉刚发布的 review-pr-ci 评论；gh api 瞬断时 || 回退空串，交给下方空值分支放行
 NOTE_BODY=$(gh api "/repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
   | jq -rs 'add | .[] | select((.body // "") | startswith("<!-- review-pr-ci -->")) | .body') || NOTE_BODY=""
 if [ -z "$NOTE_BODY" ]; then
-  echo "[WARN] 未找到 review-pr-ci 评论，跳过严重度检查"
-  exit 0
+  echo "[FAIL] 未找到 review-pr-ci 评论（审查结果未产出），阻断 merge"
+  exit 1
 fi
 
 # 锚定到 Markdown 小节标题（review-pr 约定 #### 开头，留 1~4 个 # 余量），避免概述里的提法被误判
