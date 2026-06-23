@@ -1076,7 +1076,7 @@ _MIN_AUDIO_B64_LEN = 500
 
 # 总开关：False 时所有窗口都走 video route（等价于改动前的行为）。
 # 用于一键回滚 / A/B 对比 / 上游不兼容时的应急关闭。
-_AUDIO_ONLY_ENABLED = True
+_AUDIO_ONLY_ENABLED = False
 
 
 def _packet_audio_included(ep: IdentityPacket) -> bool:
