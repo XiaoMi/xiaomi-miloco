@@ -3,8 +3,7 @@ name: install-miloco-hermes
 description: Miloco Hermes Agent 兼容层安装引导，当用户说 "装 miloco for Hermes" 时激活。
 metadata:
   author: Miloco Team
-  version: "2.0"
-  date: 2026-06-24
+  last_updated: 2026-06-24
 ---
 
 # Miloco × Hermes Agent 安装指南
@@ -358,5 +357,5 @@ curl -sS -o /dev/null -w "backend /health: %{http_code}\n" http://127.0.0.1:1810
 - 不要把 OAuth 授权码 / API key / Bearer 当文本贴回 chat —— Hermes 会 mask，你也看不到，等于让用户卡住
 - 不要问"你想现在配 / 以后补 / 只绑账号"这种 4 选 1 —— 用户已经给你 `bind_url` 了，直接发
 - 不要替用户跑 `hermes gateway restart` —— Hermes anti-restart-loop 会拒
-- **不要把 Step 2 的 2.1 / 2.2 / 2.3 一次性全贴给用户** —— 必须一个子步骤发完就停下等回。这是这个 skill v2.0 的核心改动。
+- **不要把 Step 2 的 2.1 / 2.2 / 2.3 一次性全贴给用户** —— 必须一个子步骤发完就停下等回。这是这个 skill 的核心改动。
 - 不要在脚本失败时"先继续"，先排查清楚再继续
