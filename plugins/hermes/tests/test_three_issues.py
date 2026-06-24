@@ -80,23 +80,32 @@ def test_install_step_1_6_does_not_kill_supervisord_silently():
 
 
 def test_install_im_detection_checks_auth_json_providers():
-    """IM 探测必须读 auth.json::providers（原有）。"""
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    assert 'auth_cfg.get("providers")' in text
+    """IM 探测必须读 auth.json::providers。
+
+    探测逻辑挪到了外部 Python 脚本 detect_im_platforms.py（避免 bash 3.2
+    解析 heredoc 内含括号挂），但 install-hermes.sh 必须仍调用这个脚本。
+    """
+    script = Path(__file__).resolve().parent.parent / "scripts" / "detect_im_platforms.py"
+    assert script.is_file(), "detect_im_platforms.py 不存在"
+    text = script.read_text(encoding="utf-8")
+    assert 'cfg.get("providers")' in text
 
 
 def test_install_im_detection_checks_auth_json_top_level():
     """IM 探测必须读 auth.json 顶层（旧 Hermes 版本可能不用 providers）。"""
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    # 重写 IM 探测后编号 1.5 -> 2.5（现在是 hermes send --list + 4 个 fallback 段）
-    assert "auth.json 顶层" in text
+    script = Path(__file__).resolve().parent.parent / "scripts" / "detect_im_platforms.py"
+    assert script.is_file()
+    text = script.read_text(encoding="utf-8")
+    assert "auth.json 顶层" in text or "顶层 fallback" in text
     # 还要保留对顶层（非 providers 段）的实际读取逻辑
-    assert "auth_cfg.get(plat)" in text or "alt_cfg.get(plat)" in text
+    assert "cfg.get(plat)" in text
 
 
 def test_install_im_detection_checks_env_vars():
     """IM 探测必须读环境变量（FEISHU_APP_ID / TELEGRAM_BOT_TOKEN / ...）。"""
-    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = Path(__file__).resolve().parent.parent / "scripts" / "detect_im_platforms.py"
+    assert script.is_file()
+    text = script.read_text(encoding="utf-8")
     assert "ENV_VARS" in text
     assert "TELEGRAM_BOT_TOKEN" in text
     assert "FEISHU_APP_ID" in text
@@ -106,18 +115,36 @@ def test_install_im_detection_checks_env_vars():
 
 def test_install_im_detection_checks_xdg_path():
     """IM 探测必须读 XDG 备用路径 ~/.config/hermes/auth.json。"""
-    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = Path(__file__).resolve().parent.parent / "scripts" / "detect_im_platforms.py"
+    assert script.is_file()
+    text = script.read_text(encoding="utf-8")
     assert ".config" in text
     assert "hermes" in text
-    assert "alt_auth" in text or "备用" in text or "XDG" in text
+    assert "alt_auth" in text or "XDG" in text
 
 
 def test_install_im_detection_covers_all_mainstream_platforms_in_env():
     """环境变量表必须覆盖主流 10+ 平台。"""
-    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = Path(__file__).resolve().parent.parent / "scripts" / "detect_im_platforms.py"
+    assert script.is_file()
+    text = script.read_text(encoding="utf-8")
     env_block = text.split("ENV_VARS = {")[1].split("}")[0] if "ENV_VARS = {" in text else ""
     for plat in ("telegram", "discord", "slack", "feishu", "wecom", "dingtalk", "weixin", "qqbot", "whatsapp"):
         assert plat in env_block, f"ENV_VARS 缺 {plat} 平台"
+
+
+def test_install_step_4_5_invokes_detect_script():
+    """install-hermes.sh step 4.5 必须调外部 Python 脚本（不是内联 heredoc）。
+
+    防止 bash 3.2 解析内联 Python heredoc + (fallback) 括号挂。
+    """
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert "detect_im_platforms.py" in text
+    # 关键: 不再有超长内联 Python heredoc（200+ 行）包含 IM 探测逻辑
+    assert "auth.json / config.yaml / env vars (fallback)" not in text, (
+        "install-hermes.sh 不应再有 'auth.json / config.yaml / env vars (fallback)' "
+        "字符串（bash 3.2 解析括号会挂）"
+    )
 
 
 # ─── Issue 4 (macOS launchd 路径): cmd_start_launchd 60s retry 不能靠 lsof ─────
