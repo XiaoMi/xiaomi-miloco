@@ -55,7 +55,12 @@ const basename = (p) => p.split("/").pop();
 
 async function main() {
   const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, "utf8"));
-  const pr = event.pull_request;
+  const pr = event.pull_request
+    ?? await gh(`/repos/${OWNER}/${REPO}/pulls/${event.issue.number}`);
+  if (!pr) {
+    console.log("⚠ 无法获取 PR 信息，跳过。");
+    return;
+  }
 
   const files = await paginate(`/repos/${OWNER}/${REPO}/pulls/${pr.number}/files`);
   const names = files.map((f) => f.filename);

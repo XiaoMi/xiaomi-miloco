@@ -7,6 +7,8 @@ name: Dependency Guard
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created, edited]
 
 permissions:
   contents: read
@@ -14,28 +16,33 @@ permissions:
   issues: read
 
 concurrency:
-  group: dependency-guard-${{ github.event.pull_request.number }}
+  group: dependency-guard-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
   guard:
-    if: ${{ !github.event.pull_request.draft }}
+    # pull_request_target: 非草稿 PR 触发
+    # issue_comment: 仅 /allow-dependencies-change 评论触发（含编辑后匹配的场景）
+    if: >-
+      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft)
+      || (github.event_name == 'issue_comment'
+          && github.event.issue.pull_request != null
+          && startsWith(github.event.comment.body, '/allow-dependencies-change'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: 检出可信 base 上的守卫脚本
-        uses: actions/checkout@v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || 'main' }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 22
 
       - name: 执行依赖守卫
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          # 填本项目维护者的 GitHub 用户名（逗号分隔）；留空则只认 OWNER/MEMBER/COLLABORATOR
           MILOCO_SECURITY_APPROVERS: ""
         run: node .ci/dependency-guard.mjs
