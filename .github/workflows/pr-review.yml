@@ -38,7 +38,7 @@ jobs:
       PR_AGENT_FALLBACK_MODEL: ${{ vars.PR_AGENT_FALLBACK_MODEL }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           # pull_request_target 默认 checkout 的是 base 分支最后一个 commit；
           # 显式指定 merge ref 拿到合并后状态，正合 review-pr 要求。
