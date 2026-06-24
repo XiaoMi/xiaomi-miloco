@@ -33,7 +33,7 @@ backend/
 
 ## 环境要求
 
-- Python >= 3.10
+- Python >= 3.11
 - [uv](https://docs.astral.sh/uv/) 最新版
 
 ## 安装

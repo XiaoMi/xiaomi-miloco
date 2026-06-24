@@ -142,3 +142,72 @@ def test_model_defaults_align_with_schema() -> None:
 # SSL 已废弃：backend 永远 HTTP，跨网加密走反代。原 ssl_enabled / ssl_certfile /
 # ssl_keyfile computed_field 已删除，对应 5 个测试一并移除。tls_certfile / tls_keyfile
 # 字段保留仅用于触发 utils/uvicorn.py 的 deprecation warning。
+
+
+class TestServerUrlHostPortValidator:
+    """server.url 与 server.host/port 一致性校验。"""
+
+    def _make(self, **overrides) -> MilocoSettings:
+        """构造 MilocoSettings 并触发 model_validator。"""
+        base = {
+            "server": {"url": "http://127.0.0.1:1810", "host": "127.0.0.1", "port": 1810},
+        }
+        for k, v in overrides.items():
+            base["server"][k] = v
+        return MilocoSettings(**base)
+
+    def test_matching_config_no_warning(self, caplog):
+        """默认配置完全一致，不触发 warning。"""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._make()
+        assert not any("配置不一致" in r.message for r in caplog.records)
+
+    def test_port_mismatch_warns(self, caplog):
+        """url 端口与 server.port 不一致时触发 warning。"""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._make(port=1811)
+        assert any("配置不一致" in r.message for r in caplog.records)
+
+    def test_host_mismatch_warns(self, caplog):
+        """url host 与 server.host 不一致时触发 warning。"""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._make(host="192.168.1.100")
+        assert any("配置不一致" in r.message for r in caplog.records)
+
+    def test_bind_all_only_checks_port(self, caplog):
+        """host=0.0.0.0 时，url host 不同不告警，仅检查 port。"""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._make(host="0.0.0.0", url="http://192.168.1.50:1810")
+        assert not any("配置不一致" in r.message for r in caplog.records)
+
+    def test_bind_all_port_mismatch_warns(self, caplog):
+        """host=0.0.0.0 但端口不一致时仍触发 warning。"""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._make(host="0.0.0.0", port=9999)
+        assert any("配置不一致" in r.message for r in caplog.records)
+
+    def test_localhost_normalized_no_warning(self, caplog):
+        """localhost 与 127.0.0.1 视为等价，不触发 warning。"""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._make(url="http://localhost:1810", host="127.0.0.1")
+        assert not any("配置不一致" in r.message for r in caplog.records)
+
+    def test_default_port_http_no_warning(self, caplog):
+        """http://host 不带端口时推断 80，与 port=80 匹配。"""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._make(url="http://127.0.0.1", port=80)
+        assert not any("配置不一致" in r.message for r in caplog.records)

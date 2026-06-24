@@ -51,6 +51,9 @@ allowlist:
       name: Xiaomi 智能家庭屏 8 云台版
       vendor: 小米
       year: 2025
+    xiaomi.wifispeaker.x8f:
+      name: Xiaomi 智能家庭屏 Pro 8
+      vendor: 小米
   controller:
     xiaomi.controller.oh10p:
       name: 小米智能中控屏 Max
