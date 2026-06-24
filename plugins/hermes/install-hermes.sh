@@ -346,8 +346,18 @@ if [ "$NO_START_BACKEND" -eq 0 ]; then
   # 注意：miloco-cli service status 输出 JSON 形如 {"running": true/false,...}。
   # 老版本用 grep -qiE "running|active|ok|started" 会把 {"running": false} 也当成"在跑"，
   # 假阳性导致本该 start 的 backend 没起，Step 2 OAuth 必 502。改成 jq 解析 running 字段。
+  # 兼容：没装 jq（alpine / minimal Docker / 部分 Windows Git Bash）时退化用 grep。
   _ML_STATUS_JSON="$(miloco-cli service status 2>/dev/null || echo '{"running": false}')"
-  _ML_RUNNING="$(jq -r '.running // false' <<< "$_ML_STATUS_JSON" 2>/dev/null || echo false)"
+  if command -v jq >/dev/null 2>&1; then
+    _ML_RUNNING="$(jq -r '.running // false' <<< "$_ML_STATUS_JSON" 2>/dev/null || echo false)"
+  else
+    # 没 jq：用严格 grep 匹配 "running": true，排除 "running": false / "running":null
+    if echo "$_ML_STATUS_JSON" | grep -qE '"running"[[:space:]]*:[[:space:]]*true'; then
+      _ML_RUNNING="true"
+    else
+      _ML_RUNNING="false"
+    fi
+  fi
   if [ "$_ML_RUNNING" = "true" ]; then
     info "miloco backend 已在跑"
   else
