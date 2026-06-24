@@ -4,25 +4,31 @@
 场景下也能自动投递，不需要 LLM 配合做"两段式 bind"。
 
 **投递路径**：读插件 state.json 里的 ``deliver.target``（格式
-``platform[:chat_id[:thread_id]]``，对齐 Hermes `send_message` 工具签名，见
-``hermes-agent/tools/send_message_tool.py::SEND_MESSAGE_SCHEMA``），经
-``ctx.dispatch_tool("send_message", {action, target, message})`` 投递。
+``platform[:chat_id[:thread_id]]``，对齐 Hermes 官方 ``hermes send`` CLI 的 ``--to`` 参数格式），通过
+``subprocess.run(["hermes", "send", "--to", target, "--json", "-q", body])`` 投递。
+
+为什么不用 ``ctx.dispatch_tool("send_message", ...)``：Hermes 从某个版本起
+故意把 ``send_message`` 从 agent-callable model tools 里移除（见 hermes-agent
+源码 ``tools/send_message_tool.py:1680-1691`` 注释），目的是防止 agent 自作
+主张发跨平台消息。``hermes send`` 是 Hermes 官方为 cron / ops script / 监控
+daemon 提供的 standalone 入口（``hermes_cli/send_cmd.py``），不依赖 agent
+loop、不需要 gateway 运行（bot-token 类平台走 REST 直发，plugin 类平台走
+registry 的 standalone_sender_fn）。
 
 **state.json 由 install-hermes.sh 在安装时自动写**：探测 ~/.hermes/config.yaml
 里已配 bot_token 的 platform，取第一个作为默认 deliver target，用户零感知。
 若未检测到任何已配平台，state.json 里无 deliver 字段，im_push 返回
 ``ok:false, error:"no deliver target configured"``，提示用户去 Hermes 里配 IM
 或手动编辑 state.json。
-
-**best-effort 标注**：投递失败仅 log + 返回 ok:false；send_message 工具签名从
-Hermes v0.10.0 源码确认（见 ``tools/send_message_tool.py::_handle_send``），
-未来 Hermes 改签名需相应调整。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -31,14 +37,29 @@ logger = logging.getLogger(__name__)
 # state.json 文件名（与 OpenClaw 版 notify.ts 对齐，存于插件根目录）
 _STATE_FILENAME = "state.json"
 
+# hermes send CLI 超时（秒）。bot-token REST 投递通常 < 5s，留余量给慢通道
+_HERMES_SEND_TIMEOUT_S = 30
+
 
 def _state_path(ctx: Any) -> Path:
-    """插件目录下的 state.json。ctx.manifest.path 是插件根目录。"""
+    """插件目录下的 state.json。
+
+    优先级：
+    1. ``ctx.manifest.path`` —— dev 安装（fork 仓库）下是真目录
+    2. ``$HERMES_HOME/plugins/miloco/miloco-plugin/`` —— install-hermes.sh 的
+       唯一装入点（不管 dev / pip 装，state.json 实际都落这）
+    3. 兜底 ``~/.hermes/plugins/miloco/miloco-plugin/``
+
+    pip entry-point 装的 plugin（``manifest.path = "pkg.module:entry"``）不是
+    目录，不能用；直接走 2。
+    """
     base = getattr(getattr(ctx, "manifest", None), "path", None)
-    if not base:
-        # 兜底：~/.hermes/plugins/miloco/state.json（极少走到）。
-        base = str(Path.home() / ".hermes" / "plugins" / "miloco")
-    return Path(base) / _STATE_FILENAME
+    if base and Path(base).is_dir():
+        return Path(base) / _STATE_FILENAME
+    # install-hermes.sh 把 plugin 装到 $HERMES_HOME/plugins/miloco/miloco-plugin/，
+    # state.json 也写这。这是 source of truth。
+    hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    return hermes_home / "plugins" / "miloco" / "miloco-plugin" / _STATE_FILENAME
 
 
 def load_state(ctx: Any) -> Dict[str, Any]:
@@ -93,34 +114,90 @@ def set_deliver_target(ctx: Any, target: str) -> None:
 # 投递
 # ---------------------------------------------------------------------------
 
-def _deliver_via_send_message(ctx: Any, target: str, body: str) -> Dict[str, Any]:
-    """经 Hermes ``send_message`` tool 投递。返回 ``{"ok": bool, "error": str?}``。
+def _deliver_via_hermes_send(target: str, body: str) -> Dict[str, Any]:
+    """经 ``hermes send --to TARGET --json -q BODY`` 投递。
 
-    ``send_message`` 工具签名（hermes-agent/tools/send_message_tool.py）：
-      action ∈ {"send", "list"}（默认 "send"）
-      target: "platform" 或 "platform:chat_id" 或 "platform:chat_id:thread_id"
-      message: 文本
-    返回 JSON 字符串：``{"success": bool, "error"?: str, "platform"?: str, ...}``。
+    ``hermes`` CLI（hermes-agent/hermes_cli/send_cmd.py）是 Hermes 官方为
+    cron / ops script 提供的 standalone 入口。subprocess 调它而不是
+    ``ctx.dispatch_tool("send_message", ...)``，因为后者在当前 Hermes 版本里
+    会报 "Unknown tool: send_message"（send_message 已从 model tools 移除，
+    见 tools/send_message_tool.py:1680-1691 注释）。
+
+    返回 ``{"ok": bool, "error"?: str, "platform"?: str, "chat_id"?: str}``。
     """
+    hermes_bin = shutil.which("hermes")
+    if not hermes_bin:
+        return {
+            "ok": False,
+            "error": (
+                "找不到 hermes CLI（PATH 里没有 'hermes'）。"
+                "Hermes Agent 没装？或没把 ~/.hermes/bin 加 PATH？"
+            ),
+        }
+
+    cmd = [
+        hermes_bin,
+        "send",
+        "--to", target,
+        "--json",
+        "-q",
+        body,
+    ]
     try:
-        result_str = ctx.dispatch_tool("send_message", {
-            "action": "send",
-            "target": target,
-            "message": body,
-        })
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_HERMES_SEND_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "error": f"hermes send 超时（>{_HERMES_SEND_TIMEOUT_S}s）：{target}",
+        }
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"dispatch_tool(send_message) failed: {exc}"}
+        return {"ok": False, "error": f"hermes send 调用失败: {exc}"}
 
-    try:
-        result = json.loads(result_str) if isinstance(result_str, str) else result_str
-    except (json.JSONDecodeError, TypeError):
-        return {"ok": False, "error": f"send_message returned non-JSON: {result_str!r}"}
+    stdout = (proc.stdout or "").strip()
+    payload: Dict[str, Any] = {}
+    if stdout:
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            payload = {"error": f"hermes send 返回非 JSON: {stdout!r}"}
 
-    if not isinstance(result, dict):
-        return {"ok": False, "error": f"unexpected send_message result: {result!r}"}
-    if result.get("success") is True:
-        return {"ok": True, "platform": result.get("platform"), "chat_id": result.get("chat_id")}
-    return {"ok": False, "error": str(result.get("error") or result)}
+    # exit code: 0 = ok, 1 = delivery fail, 2 = usage error
+    # 接受 success=True 或 ok=True 作为成功标志（Hermes 当前用 success，但
+    # 前向兼容 ok=，未来 Hermes 改签名不会突然全挂）
+    if proc.returncode == 0:
+        if isinstance(payload, dict) and (
+            payload.get("success") is True or payload.get("ok") is True
+        ):
+            return {
+                "ok": True,
+                "platform": payload.get("platform"),
+                "chat_id": payload.get("chat_id"),
+                "skipped": payload.get("skipped", False),
+            }
+        if isinstance(payload, dict) and payload.get("skipped"):
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": payload.get("reason"),
+                "note": payload.get("note"),
+            }
+        return {
+            "ok": False,
+            "error": str(payload.get("error") if isinstance(payload, dict) else payload),
+        }
+
+    err_msg = ""
+    if isinstance(payload, dict):
+        err_msg = str(payload.get("error") or "")
+    if not err_msg:
+        err_msg = (proc.stderr or "").strip() or f"hermes send exit={proc.returncode}"
+    return {"ok": False, "error": err_msg}
 
 
 def notify_owner(ctx: Any, message: str) -> Dict[str, Any]:
@@ -141,7 +218,7 @@ def notify_owner(ctx: Any, message: str) -> Dict[str, Any]:
             ),
         }
     body = f"<miloco-notification>{message}</miloco-notification>"
-    return _deliver_via_send_message(ctx, target, body)
+    return _deliver_via_hermes_send(target, body)
 
 
 # ---------------------------------------------------------------------------

@@ -1,15 +1,16 @@
 """miloco_im_push 工具：state.json 投递 + 无 target 时的明确错误。
 
-新流程（v0.2.0）：安装时 install-hermes.sh 自动探测 Hermes IM 平台写入
-state.json::deliver.target，运行时直接调 ``ctx.dispatch_tool("send_message", ...)``。
-不再做两段式 bind——cron session 没人可对话，bind 走不通。
+新流程（v0.3.0）：不用 ``ctx.dispatch_tool("send_message", ...)``（Hermes
+故意把 send_message 从 model tools 移除），改用 ``subprocess.run(["hermes",
+"send", "--to", target, "--json", "-q", body])`` 走 Hermes 官方 CLI 入口。
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pytest
 
@@ -19,22 +20,36 @@ from miloco_plugin_pkg import tools_notify as tn
 # ---------- fake ctx ----------
 
 class _FakeCtx:
-    """最小 Hermes ctx 替身：只暴露 manifest.path + dispatch_tool。"""
+    """最小 Hermes ctx 替身：只暴露 manifest.path（用来定位 state.json）。"""
 
-    def __init__(self, plugin_dir: Path, send_message_result: Any = None):
+    def __init__(self, plugin_dir: Path) -> None:
         self.manifest = type("M", (), {"path": str(plugin_dir)})()
-        self._send_message_result = send_message_result
-        self.calls: list[Dict[str, Any]] = []
 
-    def dispatch_tool(self, name: str, args: Dict[str, Any]) -> str:
-        self.calls.append({"name": name, "args": args})
-        if name != "send_message":
-            return json.dumps({"error": f"unexpected tool {name}"})
-        if isinstance(self._send_message_result, Exception):
-            raise self._send_message_result
-        if isinstance(self._send_message_result, str):
-            return self._send_message_result
-        return json.dumps(self._send_message_result or {"success": True, "platform": "telegram"})
+
+# ---------- fake subprocess ----------
+
+class _FakeCompleted:
+    def __init__(self, *, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class _FakeProcess:
+    """模拟 subprocess.run 返回值 + 记录最近一次的 args。"""
+
+    last_call: Optional[Dict[str, Any]] = None
+
+    def __init__(self, *, returncode: int = 0, json_payload: Optional[Dict[str, Any]] = None,
+                 stderr: str = "") -> None:
+        self._returncode = returncode
+        self._payload = json_payload
+        self._stderr = stderr
+
+    def __call__(self, cmd, **kwargs):
+        type(self).last_call = {"cmd": cmd, "kwargs": kwargs}
+        stdout = json.dumps(self._payload) if self._payload is not None else ""
+        return _FakeCompleted(returncode=self._returncode, stdout=stdout, stderr=self._stderr)
 
 
 # ---------- state.json 读写 ----------
@@ -57,11 +72,11 @@ def test_state_corrupt_returns_empty(tmp_path: Path):
     state_file = tmp_path / "state.json"
     state_file.write_text("not json {", encoding="utf-8")
     ctx = _FakeCtx(tmp_path)
-    assert tn.get_deliver_target(ctx) is None  # 损坏不抛，返回 None
+    assert tn.get_deliver_target(ctx) is None
 
 
 def test_state_missing_returns_empty(tmp_path: Path):
-    ctx = _FakeCtx(tmp_path)  # state.json 不存在
+    ctx = _FakeCtx(tmp_path)
     assert tn.get_deliver_target(ctx) is None
 
 
@@ -69,63 +84,142 @@ def test_state_with_deliver_key_but_no_target(tmp_path: Path):
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"deliver": {"auto_configured": True}}), encoding="utf-8")
     ctx = _FakeCtx(tmp_path)
-    assert tn.get_deliver_target(ctx) is None  # target 缺失视同未配
+    assert tn.get_deliver_target(ctx) is None
 
 
-# ---------- notify_owner 投递 ----------
+# ---------- notify_owner 投递（mock subprocess.run） ----------
+
+@pytest.fixture
+def fake_hermes(monkeypatch):
+    """把 subprocess.run 替换成 _FakeProcess，并返回可配置函数。
+
+    Usage:
+        fake_hermes(returncode=0, payload={"success": True, "platform": "telegram"})
+        # 或：
+        fake_hermes.fail("Unknown tool")
+    """
+    def _setter(*, returncode: int = 0, payload: Optional[Dict[str, Any]] = None,
+                stderr: str = "") -> _FakeProcess:
+        proc = _FakeProcess(returncode=returncode, json_payload=payload, stderr=stderr)
+        # subprocess.run 是 tools_notify 在 module 顶层 import 时拿的引用，
+        # monkeypatch 替换它
+        monkeypatch.setattr(tn.subprocess, "run", proc)
+        # hermes CLI 在 PATH 也要找得到
+        monkeypatch.setattr(tn.shutil, "which", lambda _: "/usr/local/bin/hermes")
+        _FakeProcess.last_call = None
+        return proc
+    return _setter
+
 
 def test_notify_no_target_returns_clear_error(tmp_path: Path):
-    ctx = _FakeCtx(tmp_path)  # 无 state.json
+    ctx = _FakeCtx(tmp_path)
     result = tn.notify_owner(ctx, "hello")
     assert result["ok"] is False
     assert "no deliver target configured" in result["error"]
-    assert ctx.calls == []  # 没调 send_message
 
 
-def test_notify_success(tmp_path: Path):
+def test_notify_success(fake_hermes, tmp_path: Path):
     state_file = tmp_path / "state.json"
-    state_file.write_text(
-        json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8"
-    )
-    ctx = _FakeCtx(tmp_path, send_message_result={
-        "success": True, "platform": "telegram", "chat_id": "-100xxx"
-    })
+    state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
+    fake_hermes(returncode=0, payload={"success": True, "platform": "telegram", "chat_id": "-100xxx"})
+    ctx = _FakeCtx(tmp_path)
+
     result = tn.notify_owner(ctx, "喝水提醒")
-    assert result == {"ok": True, "platform": "telegram", "chat_id": "-100xxx"}
-    assert len(ctx.calls) == 1
-    assert ctx.calls[0]["name"] == "send_message"
-    assert ctx.calls[0]["args"]["target"] == "telegram"
-    assert "<miloco-notification>" in ctx.calls[0]["args"]["message"]
-    assert "喝水提醒" in ctx.calls[0]["args"]["message"]
+
+    assert result["ok"] is True
+    assert result["platform"] == "telegram"
+    assert result["chat_id"] == "-100xxx"
+    # 验证 hermes send 命令参数
+    call = _FakeProcess.last_call
+    assert call is not None
+    cmd = call["cmd"]
+    assert cmd[0].endswith("hermes")
+    assert cmd[1:3] == ["send", "--to"]
+    assert cmd[3] == "telegram"
+    assert cmd[4] == "--json"
+    assert cmd[5] == "-q"
+    assert "<miloco-notification>" in cmd[6]
+    assert "喝水提醒" in cmd[6]
 
 
-def test_notify_with_chat_id_target(tmp_path: Path):
+def test_notify_with_chat_id_target(fake_hermes, tmp_path: Path):
     state_file = tmp_path / "state.json"
     state_file.write_text(
         json.dumps({"deliver": {"target": "telegram:-1001234567890:17585"}}),
         encoding="utf-8",
     )
-    ctx = _FakeCtx(tmp_path, send_message_result={"success": True, "platform": "telegram"})
+    fake_hermes(returncode=0, payload={"success": True, "platform": "telegram"})
+    ctx = _FakeCtx(tmp_path)
     tn.notify_owner(ctx, "x")
-    assert ctx.calls[0]["args"]["target"] == "telegram:-1001234567890:17585"
+    assert _FakeProcess.last_call["cmd"][3] == "telegram:-1001234567890:17585"
 
 
-def test_notify_send_message_error_propagates(tmp_path: Path):
+def test_notify_hermes_send_error_propagates(fake_hermes, tmp_path: Path):
+    """hermes send exit=1 + payload.error='no route' → notify_owner 透传。"""
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
-    ctx = _FakeCtx(tmp_path, send_message_result={"success": False, "error": "no route"})
+    fake_hermes(returncode=1, payload={"success": False, "error": "no route"})
+    ctx = _FakeCtx(tmp_path)
     result = tn.notify_owner(ctx, "x")
     assert result["ok"] is False
     assert "no route" in result["error"]
 
 
-def test_notify_dispatch_tool_raises(tmp_path: Path):
+def test_notify_hermes_send_runtime_error(fake_hermes, tmp_path: Path):
+    """subprocess.run 抛 RuntimeError → notify_owner 返回明确错误，不裸抛。"""
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
-    ctx = _FakeCtx(tmp_path, send_message_result=RuntimeError("dispatch blew up"))
+    monkeypatch = fake_hermes.__self__ if hasattr(fake_hermes, "__self__") else None  # noqa
+    # 直接 set 一个抛异常的函数
+    def boom(cmd, **kwargs):
+        raise RuntimeError("dispatch blew up")
+    tn.subprocess.run = boom  # type: ignore[assignment]
+    ctx = _FakeCtx(tmp_path)
     result = tn.notify_owner(ctx, "x")
     assert result["ok"] is False
-    assert "dispatch_tool" in result["error"]
+    assert "dispatch blew up" in result["error"]
+
+
+def test_notify_hermes_binary_missing(tmp_path: Path, monkeypatch):
+    """hermes 不在 PATH → 明确错误，不抛。"""
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
+    monkeypatch.setattr(tn.shutil, "which", lambda _: None)
+    ctx = _FakeCtx(tmp_path)
+    result = tn.notify_owner(ctx, "x")
+    assert result["ok"] is False
+    assert "找不到 hermes CLI" in result["error"]
+
+
+def test_notify_hermes_send_timeout(tmp_path: Path, monkeypatch):
+    """subprocess.run 抛 TimeoutExpired → 明确超时错误。"""
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
+    monkeypatch.setattr(tn.shutil, "which", lambda _: "/usr/local/bin/hermes")
+
+    def timeout_boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+
+    monkeypatch.setattr(tn.subprocess, "run", timeout_boom)
+    ctx = _FakeCtx(tmp_path)
+    result = tn.notify_owner(ctx, "x")
+    assert result["ok"] is False
+    assert "超时" in result["error"]
+
+
+def test_notify_hermes_skipped(fake_hermes, tmp_path: Path):
+    """hermes send 返 skipped=true（cron 重复发被去重）→ ok=True + skipped=True。"""
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
+    fake_hermes(
+        returncode=0,
+        payload={"skipped": True, "reason": "cron_auto_delivery_duplicate_target"},
+    )
+    ctx = _FakeCtx(tmp_path)
+    result = tn.notify_owner(ctx, "x")
+    assert result["ok"] is True
+    assert result["skipped"] is True
+    assert result["reason"] == "cron_auto_delivery_duplicate_target"
 
 
 # ---------- handler 包装 ----------
@@ -146,10 +240,12 @@ def test_handler_no_state_json(tmp_path: Path):
     assert "no deliver target" in out["error"]
 
 
-def test_handler_delivers(tmp_path: Path):
+def test_handler_delivers(fake_hermes, tmp_path: Path):
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
-    ctx = _FakeCtx(tmp_path, send_message_result={"success": True, "platform": "telegram"})
+    fake_hermes(returncode=0, payload={"success": True, "platform": "telegram"})
+    ctx = _FakeCtx(tmp_path)
     handler = tn.make_im_push_handler(ctx)
     out = json.loads(handler({"message": "fire alarm"}))
-    assert out == {"ok": True, "platform": "telegram", "chat_id": None}
+    assert out["ok"] is True
+    assert out["platform"] == "telegram"
