@@ -120,17 +120,19 @@ def reconcile_cron_jobs() -> Dict[str, Any]:
                     schedule=task["schedule"],
                     name=target_name,
                     skills=list(task["skills"]),
-                    deliver="none",
+                    deliver="all",
                 )
                 created += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("create_job(%s) 失败: %s", target_name, exc)
         else:
-            # update：刷新 schedule / skills / prompt（name / id 不动）。
+            # update：刷新 schedule / skills / prompt / deliver（name / id 不动）。
+            # deliver 默认 "all"（全渠道推送），用户想单推可用 cronjob update 单独改。
             updates = {
                 "schedule": task["schedule"],
                 "skills": list(task["skills"]),
                 "prompt": task["prompt"],
+                "deliver": "all",
                 "enabled": True,
             }
             try:
