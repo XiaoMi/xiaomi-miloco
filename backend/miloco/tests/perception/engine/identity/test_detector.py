@@ -16,9 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-
 from miloco.perception.engine.identity.tracker.detector import Detection
-
 
 # =============================================================================
 # Detection Dataclass
