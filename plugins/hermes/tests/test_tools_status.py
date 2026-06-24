@@ -169,8 +169,11 @@ def test_versions_match(tmp_path: Path, monkeypatch):
             self.returncode = 0
 
     _FAKE_OUTPUTS = {
+        # 老式 --version flag（fallback 路径）
         ("hermes", "--version"): "Hermes Agent v0.10.0 (2026.4.16)",
         ("miloco-cli", "--version"): "miloco-cli 1.2.3",
+        # 新式 subcommand（49a9607 之后用 miloco-cli version 子命令）
+        ("miloco-cli", "version"): "miloco-cli 1.2.3",
     }
 
     def fake_run(cmd, *args, **kwargs):
