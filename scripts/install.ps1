@@ -48,9 +48,9 @@ function Ensure-Uv {
     Write-Fail "uv installation failed"
 }
 
-# ── Step 2: Ensure Python >=3.10 (prefer 3.14) ───────────
+# ── Step 2: Ensure Python >=3.11 (prefer 3.14) ───────────
 function Ensure-Python {
-    foreach ($ver in @("3.14", "3.13", "3.12", "3.11", "3.10")) {
+    foreach ($ver in @("3.14", "3.13", "3.12", "3.11")) {
         $found = & $script:UvCmd python find $ver 2>$null
         if ($LASTEXITCODE -eq 0 -and $found) {
             Write-Info "Python $ver found: $found"
