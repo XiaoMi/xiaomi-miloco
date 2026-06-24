@@ -226,7 +226,8 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
 
   # 9. plugin enabled
   if command -v hermes >/dev/null 2>&1; then
-    if hermes plugins list 2>/dev/null | grep -E "miloco.*enabled" >/dev/null 2>&1; then
+    # 同 step 8：严格匹配 status 列，避免 "not enabled" 假阳性
+    if hermes plugins list 2>/dev/null | grep -E "miloco.*│ enabled │" >/dev/null 2>&1; then
       diag "plugin enabled (hermes plugins list)" 1
     else
       diag "plugin enabled" 0 "hermes plugins enable miloco"
@@ -342,7 +343,12 @@ fi
 # 装完会停 backend；fork 集成必须自己再 service start，否则 Step 2 OAuth 会 502 假错误）
 # 用 --no-start-backend flag 可跳过（用户在外部管理 backend 时）
 if [ "$NO_START_BACKEND" -eq 0 ]; then
-  if miloco-cli service status 2>&1 | grep -qiE "running|active|ok|started"; then
+  # 注意：miloco-cli service status 输出 JSON 形如 {"running": true/false,...}。
+  # 老版本用 grep -qiE "running|active|ok|started" 会把 {"running": false} 也当成"在跑"，
+  # 假阳性导致本该 start 的 backend 没起，Step 2 OAuth 必 502。改成 jq 解析 running 字段。
+  _ML_STATUS_JSON="$(miloco-cli service status 2>/dev/null || echo '{"running": false}')"
+  _ML_RUNNING="$(jq -r '.running // false' <<< "$_ML_STATUS_JSON" 2>/dev/null || echo false)"
+  if [ "$_ML_RUNNING" = "true" ]; then
     info "miloco backend 已在跑"
   else
     info "miloco backend 未跑（upstream install 退出时 atexit 杀的），自动 service start"
@@ -539,24 +545,10 @@ step 4.5 "探测 IM 平台 → 写 plugin state.json::deliver.target"
 DETECTED_TARGETS_JSON="$("$PYTHON" "$HERE/scripts/detect_im_platforms.py" "$HERMES_HOME" 2>/dev/null || echo '{"targets": [], "source": "detection script failed"}')"
 
 # 一次性拆 DETECTED_TARGETS_JSON 为 3 个标量：target / count / source
-# 走 Python heredoc（body 简单，bash 3.2 能解析）
-DETECTED_TARGET="$("$PYTHON" - "$DETECTED_TARGETS_JSON" <<'PY'
-import json, sys
-d = json.loads(sys.argv[1])
-arr = d.get("targets") or []
-print(arr[0] if arr else "", end="")
-PY
-)"
-CANDIDATES_COUNT=$("$PYTHON" - "$DETECTED_TARGETS_JSON" <<'PY'
-import json, sys
-print(len((json.loads(sys.argv[1]).get("targets")) or []), end="")
-PY
-)"
-DETECT_SOURCE="$("$PYTHON" - "$DETECTED_TARGETS_JSON" <<'PY'
-import json, sys
-print(json.loads(sys.argv[1]).get("source") or "unknown", end="")
-PY
-)"
+# 走 jq（macOS 自带）+ python3 -c，避开 bash 3.2 heredoc 嵌套括号 bug
+DETECTED_TARGET="$(jq -r '.targets[0] // ""' <<< "$DETECTED_TARGETS_JSON")"
+CANDIDATES_COUNT="$(jq -r '.targets | length' <<< "$DETECTED_TARGETS_JSON")"
+DETECT_SOURCE="$(jq -r '.source // "unknown"' <<< "$DETECTED_TARGETS_JSON")"
 
 # state.json 必须写到 plugin 自己的目录里，因为 tools_notify.py::_state_path(ctx)
 # 用 ctx.manifest.path / "state.json" 解析（manifest.path 指向 plugin dir）。
@@ -572,46 +564,10 @@ for arg in "$@"; do
 done
 PRESERVED_TARGET=""
 if [ "$RESET_DELIVER" -eq 0 ] && [ -f "$PLUGIN_STATE" ]; then
-  PRESERVED_TARGET="$("$PYTHON" - "$PLUGIN_STATE" <<'PY'
-import json, sys
-from pathlib import Path
-try:
-    d = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    t = (d.get("deliver") or {}).get("target")
-    print(t or "", end="")
-except Exception:
-    print("", end="")
-PY
-)"
+  PRESERVED_TARGET="$(jq -r '.deliver.target // ""' "$PLUGIN_STATE" 2>/dev/null || echo "")"
 fi
 
-"$PYTHON" - "$PLUGIN_STATE" "$DETECTED_TARGETS_JSON" "$PRESERVED_TARGET" <<'PY'
-import json, sys, datetime
-from pathlib import Path
-path, candidates_json, preserved = sys.argv[1], sys.argv[2], sys.argv[3]
-candidates = json.loads(candidates_json)
-try:
-    state = json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else {}
-except Exception:
-    state = {}
-deliver = state.get("deliver") or {}
-# 优先级: candidates[0] -> preserved -> None
-target = candidates[0] if candidates else preserved or None
-auto_cfg = bool(candidates) and target == candidates[0]
-now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-deliver_block = {
-    "target": target,
-    "auto_configured": auto_cfg,
-    "configured_at": now_iso,
-    "source": "install-hermes.sh auto-detect",
-    "candidates": candidates,
-}
-state["deliver"] = deliver_block
-Path(path).parent.mkdir(parents=True, exist_ok=True)
-Path(path).write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-note = "state.json deliver.target = " + str(target) + "  candidates: " + str(len(candidates))
-print(note)
-PY
+"$PYTHON" "$HERE/scripts/write_state_json.py" "$PLUGIN_STATE" "$DETECTED_TARGETS_JSON" "$PRESERVED_TARGET"
 
 if [ -n "$DETECTED_TARGET" ]; then
   info "通知投递已自动配置 target=${DETECTED_TARGET} 候选 ${CANDIDATES_COUNT} 个 写入 state.json.candidates"
@@ -684,7 +640,10 @@ step 8 "enable Hermes 插件 miloco"
 # plugin.yaml 里的 name 字段是 'miloco'，enable 时用它
 if command -v hermes >/dev/null 2>&1; then
   # 已 enabled 跳过；未 enabled 才 enable
-  if hermes plugins list 2>/dev/null | grep -E "miloco.*enabled" >/dev/null 2>&1; then
+  # 注意：hermes plugins list 表格里 not enabled 和 enabled 都有 'enabled' 子串，
+  # 老版 grep "miloco.*enabled" 会把 not enabled 误判成 enabled 导致跳过 enable。
+  # 严格匹配 status 列：行内出现 "│ enabled │"（前后有竖线）才是真 enabled。
+  if hermes plugins list 2>/dev/null | grep -E "miloco.*│ enabled │" >/dev/null 2>&1; then
     info "  已是 enabled，跳过"
   else
     if hermes plugins enable miloco >/dev/null 2>&1; then
