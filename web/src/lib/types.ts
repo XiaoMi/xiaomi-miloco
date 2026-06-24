@@ -107,7 +107,7 @@ export interface ActivityEvent {
   has_rule_hit?: boolean;
   has_suggestion?: boolean;
   has_asr?: boolean;
-  /** 成功落 clip 的 device 数(0 ~ len(device_ids);每 device 1 个 mp4/m4a 文件);
+  /** 成功落 clip 的 device 数(0 ~ len(device_ids);每 device 1 组 mp4/m4a/frames 素材);
    *  字段名沿用历史,语义现是 device 数而非帧数.0 表示 metadata-only(磁盘满 / 落盘失败) */
   snapshot_count: number;
   /** 参与本次推理的 device_id 列表;clip URL 拼接用(eventClipUrl) */
@@ -117,8 +117,9 @@ export interface ActivityEvent {
   /** clip 容器类型,服务端 stat 落盘文件后缀计算:
    *   "mp4" = 视频路径(H264+AAC,UI 显 🎬)
    *   "m4a" = audio-only 路径(纯 AAC,UI 显 🎤 音频)
+   *   "frames" = 抽帧图片路径(关键帧序列,UI 显图片)
    *   undefined / null = 未落盘(老 event / metadata-only / 已被 cleanup 清掉) */
-  clip_kind?: "mp4" | "m4a" | null;
+  clip_kind?: "mp4" | "m4a" | "frames" | null;
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────
@@ -275,6 +276,8 @@ export interface UsageStats {
 }
 
 // ── omni 模型配置（在「模型」页内读/写，支持多档案切换） ──────────────
+export type OmniCapability = "text" | "image" | "video" | "audio";
+
 /** 一套 omni 配置；api_key 仅给打码值（前3…后4），永不回全文。 */
 export interface OmniModelConfig {
   /** 档案显示名（可选）；为空时前端回退为 model · 域名。 */
@@ -285,6 +288,10 @@ export interface OmniModelConfig {
   api_key_masked: string;
   /** 是否已配置 api_key。 */
   has_key: boolean;
+  /** 是否参与自动模型路由。 */
+  enabled: boolean;
+  /** 模型可处理的输入能力。 */
+  capabilities: OmniCapability[];
 }
 
 /** 已保存的配置档案（label 为唯一标识），active 标记是否为当前生效。 */
@@ -320,6 +327,8 @@ export interface OmniConfigUpdate {
   base_url: string;
   /** 省略 / 留空 = 沿用该档案原 key（不被打码值覆盖）。 */
   api_key?: string;
+  enabled?: boolean;
+  capabilities?: OmniCapability[];
   /** 正在编辑的档案原名（支持改名/定位）；省略=新增。 */
   original_label?: string;
   /** 是否同时设为当前生效；省略=后端默认 true。「保存」传 false（激活走列表的「启用」）。 */

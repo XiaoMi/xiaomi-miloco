@@ -175,6 +175,27 @@ class TestSaveClips:
         assert (self.root / "event-tuple" / "cam_audio" / "clip.m4a").read_bytes() == b"audio-bytes"
         assert (self.root / "event-tuple" / "cam_video" / "clip.mp4").read_bytes() == b"video-bytes"
 
+    def test_frames_payload_writes_ordered_jpeg_sequence(self):
+        """frames payload 落成 frame_000.jpg 等关键帧序列。"""
+        count = save_clips(
+            "event-frames",
+            {
+                "cam_rtsp": (
+                    [
+                        {"data": b"jpeg-a", "media_type": "image/jpeg", "frame_index": 0},
+                        {"data": b"jpeg-b", "media_type": "image/jpeg", "frame_index": 4},
+                    ],
+                    "frames",
+                ),
+            },
+        )
+
+        assert count == 1
+        device_dir = self.root / "event-frames" / "cam_rtsp"
+        assert (device_dir / "frame_000.jpg").read_bytes() == b"jpeg-a"
+        assert (device_dir / "frame_001.jpg").read_bytes() == b"jpeg-b"
+        assert not (device_dir / "clip.mp4").exists()
+
     def test_tuple_unknown_kind_skipped(self):
         """非法 kind(非 mp4/m4a)→ 该 device 跳过不落盘,避免污染目录."""
         count = save_clips(

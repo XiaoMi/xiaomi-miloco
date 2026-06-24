@@ -18,6 +18,7 @@
     "liveButton": "↻ 实时",
     "videoPlayback": "事件视频回放",
     "audioPlayback": "事件音频回放",
+    "framePlayback": "事件关键帧序列",
     "noPlaybackAria": "本次事件无回放",
     "noPlayback": "🎤 本次事件无回放",
     "clipExpiredAria": "clip 已过期",
@@ -25,6 +26,11 @@
     "audioExpiredAria": "音频已过期",
     "audioExpired": "🎤 音频已过期",
     "audioOnly": "🎤 仅音频",
+    "framesExpiredAria": "关键帧已过期",
+    "framesExpired": "关键帧已过期",
+    "framesLoading": "关键帧加载中…",
+    "openFrame": "打开第 {{index}} 张关键帧",
+    "frameAlt": "第 {{index}} 张关键帧",
     "zoomPlay": "放大播放"
   }
 }

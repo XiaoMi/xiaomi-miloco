@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -26,7 +27,7 @@ import time
 from pathlib import Path
 
 from miloco.config import get_settings
-from miloco.perception.snapshot_context import ClipKind
+from miloco.perception.snapshot_context import ClipKind, FrameClip
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
 
 def save_clips(
     event_id: str,
-    clips_by_device: dict[str, tuple[bytes, ClipKind]],
+    clips_by_device: dict[str, tuple[bytes | list[FrameClip], ClipKind]],
 ) -> int:
     """落盘 event clip(每个 device 一个字节级 = omni 看到的 mp4 / m4a).
 
@@ -128,12 +129,12 @@ def save_clips(
     for device_id, payload in clips_by_device.items():
         # 兼容两种 payload 形态:tuple[bytes, kind] 或 裸 bytes(老 caller / 单测)
         if isinstance(payload, tuple):
-            clip_bytes, kind = payload
+            clip_payload, kind = payload
         else:
-            clip_bytes, kind = payload, "mp4"
-        if not clip_bytes:
+            clip_payload, kind = payload, "mp4"
+        if not clip_payload:
             continue
-        if kind not in ("mp4", "m4a"):
+        if kind not in ("mp4", "m4a", "frames"):
             logger.error("Unknown clip kind %r for %s; skipping", kind, device_id)
             continue
         device_dir = event_dir / region_slug(device_id)
@@ -142,14 +143,58 @@ def save_clips(
         except OSError as e:
             logger.error("Failed to create device dir %s: %s", device_dir, e)
             continue
+        if kind == "frames":
+            if not _write_frame_sequence(device_dir, clip_payload):
+                continue
+            count += 1
+            continue
+        if not isinstance(clip_payload, bytes):
+            logger.error("Invalid clip payload kind %r for %s; skipping", kind, device_id)
+            continue
         path = device_dir / f"clip.{kind}"
         try:
-            path.write_bytes(clip_bytes)
+            path.write_bytes(clip_payload)
             count += 1
         except OSError as e:
             logger.error("Failed to write %s: %s", path, e)
             continue
     return count
+
+
+def _write_frame_sequence(device_dir: Path, payload: object) -> bool:
+    if not isinstance(payload, list):
+        logger.error("Invalid frames payload for %s; skipping", device_dir)
+        return False
+    written = 0
+    manifest = []
+    for pos, frame in enumerate(payload):
+        if not isinstance(frame, dict):
+            continue
+        data = frame.get("data")
+        media_type = frame.get("media_type", "image/jpeg")
+        if not isinstance(data, bytes) or not data or media_type != "image/jpeg":
+            continue
+        path = device_dir / f"frame_{pos:03d}.jpg"
+        try:
+            path.write_bytes(data)
+            manifest.append({
+                "index": pos,
+                "frame_index": frame.get("frame_index", pos),
+                "filename": path.name,
+            })
+            written += 1
+        except OSError as e:
+            logger.error("Failed to write %s: %s", path, e)
+    if written <= 0:
+        return False
+    try:
+        (device_dir / "frames.json").write_text(
+            json.dumps({"frames": manifest}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.error("Failed to write frame manifest in %s: %s", device_dir, e)
+    return True
 
 
 def cleanup_snapshots(ttl_days: int, max_disk_mb: int) -> dict:

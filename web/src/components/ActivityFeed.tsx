@@ -11,7 +11,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { eventClipUrl, listActivity, subscribeEvents } from "@/api";
+import {
+  eventClipUrl,
+  listActivity,
+  listEventFrames,
+  subscribeEvents,
+} from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
 import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
@@ -487,11 +492,12 @@ function ActivityRow({
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const hasClips = event.snapshot_count > 0;
-  // 区分音频事件 vs 视频事件 — backend stat 落盘文件后缀计算 clip_kind:
+  // 区分音频/视频/关键帧事件 — backend stat 落盘文件后缀计算 clip_kind:
   //   "mp4" → 视频路径 (H264+AAC),UI 🎬
   //   "m4a" → audio-only 路径(纯 AAC,画面静止),UI 🎤 音频
   //   null/undefined → 未落盘(磁盘满预检失败 / 老库 event),UI 🎤
   const isAudioOnly = event.clip_kind === "m4a";
+  const isFrameSequence = event.clip_kind === "frames";
 
   // humanize 后按 \n\n 分章节渲染.每章节自成一段(line-clamp-2 折叠模式).
   const humanized = useMemo(
@@ -510,8 +516,10 @@ function ActivityRow({
   // 展开状态显"收起".audio-only 跟"无 clip"用同一图标 — 都"没视频"语义一致.
   const trailing = expanded
     ? t("activity.collapse")
-    : hasClips && !isAudioOnly
+    : hasClips && !isAudioOnly && !isFrameSequence
       ? "🎬"
+      : hasClips && isFrameSequence
+        ? "▦"
       : "🎤";
 
   return (
@@ -552,7 +560,7 @@ function ActivityRow({
         </span>
       </div>
 
-      {expanded && hasClips && !isAudioOnly && (
+      {expanded && hasClips && !isAudioOnly && !isFrameSequence && (
         <div
           className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]"
           aria-label={t("activity.videoPlayback")}
@@ -578,6 +586,22 @@ function ActivityRow({
               key={did}
               event_id={event.id}
               device_id={did}
+            />
+          ))}
+        </div>
+      )}
+
+      {expanded && hasClips && isFrameSequence && (
+        <div
+          className="mt-3 flex flex-col gap-3 sm:ml-[82px]"
+          aria-label={t("activity.framePlayback")}
+        >
+          {event.device_ids.map((did) => (
+            <FrameSequencePlayer
+              key={did}
+              event_id={event.id}
+              device_id={did}
+              onOpenLightbox={onOpenLightbox}
             />
           ))}
         </div>
@@ -696,6 +720,97 @@ function AudioClipPlayer({
         className="flex-1 min-w-0 h-9"
         aria-label={`${device_id} audio clip`}
       />
+    </div>
+  );
+}
+
+function FrameSequencePlayer({
+  event_id,
+  device_id,
+  onOpenLightbox,
+}: {
+  event_id: string;
+  device_id: string;
+  onOpenLightbox: (src: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [frames, setFrames] = useState<
+    { index: number; frame_index: number; url: string }[] | null
+  >(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setFrames(null);
+    setFailed(false);
+    listEventFrames(event_id, device_id)
+      .then((items) => {
+        if (alive) setFrames(items);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [event_id, device_id]);
+
+  if (failed) {
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="px-4 py-6 rounded bg-bg-primary border border-border text-caption-mono text-text-tertiary text-center"
+        aria-label={t("activity.framesExpiredAria")}
+      >
+        {t("activity.framesExpired")}
+      </div>
+    );
+  }
+
+  if (!frames) {
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="px-4 py-6 rounded bg-bg-primary border border-border text-caption-mono text-text-tertiary text-center"
+      >
+        {t("activity.framesLoading")}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="rounded bg-bg-primary border border-border p-3"
+    >
+      <div className="mb-2 text-caption-mono text-text-secondary">
+        {device_id}
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+        {frames.map((frame, pos) => (
+          <button
+            key={`${frame.index}-${frame.frame_index}`}
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenLightbox(frame.url);
+            }}
+            className="group relative aspect-square rounded border border-border overflow-hidden bg-black"
+            aria-label={t("activity.openFrame", { index: pos + 1 })}
+          >
+            <img
+              src={frame.url}
+              loading="lazy"
+              className="w-full h-full object-contain"
+              alt={t("activity.frameAlt", { index: pos + 1 })}
+              onError={() => setFailed(true)}
+            />
+            <span className="absolute left-1 top-1 px-1.5 py-0.5 rounded bg-black/60 text-[10px] text-white">
+              {pos + 1}
+            </span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

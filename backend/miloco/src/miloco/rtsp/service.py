@@ -8,8 +8,9 @@ import socket
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 import cv2
@@ -39,6 +40,56 @@ def _now_ms() -> int:
 
 def _monotonic_ms() -> int:
     return time.monotonic_ns() // 1_000_000
+
+
+def _coerce_epoch_ms(value: Any, *, fallback: int) -> int:
+    """Accept current integer milliseconds plus legacy ISO timestamps."""
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return fallback
+        if text.isdigit():
+            return int(text)
+        try:
+            return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def _normalize_rtsp_record_item(item: Any) -> tuple[dict[str, Any] | None, bool]:
+    """Normalize legacy registry entries to the current RtspCameraRecord shape."""
+    if not isinstance(item, dict):
+        return None, False
+    data = dict(item)
+    changed = False
+    if "did" not in data and data.get("id"):
+        data["did"] = data["id"]
+        changed = True
+    now = _now_ms()
+    created_at = _coerce_epoch_ms(data.get("created_at"), fallback=now)
+    updated_at = _coerce_epoch_ms(data.get("updated_at"), fallback=created_at)
+    if data.get("created_at") != created_at:
+        data["created_at"] = created_at
+        changed = True
+    if data.get("updated_at") != updated_at:
+        data["updated_at"] = updated_at
+        changed = True
+    if "room_name" not in data:
+        data["room_name"] = "RTSP"
+        changed = True
+    if "id" in data:
+        data.pop("id", None)
+        changed = True
+    return data, changed
 
 
 class _RtspReader:
@@ -281,9 +332,18 @@ class RtspCameraService:
         if not isinstance(raw, list):
             raise ValidationException("rtsp_cameras.json must contain a list")
         out: dict[str, RtspCameraRecord] = {}
+        changed = False
         for item in raw:
-            record = RtspCameraRecord.model_validate(item)
+            normalized, item_changed = _normalize_rtsp_record_item(item)
+            if normalized is None:
+                logger.warning("Skipping invalid RTSP camera registry item: %r", item)
+                changed = True
+                continue
+            record = RtspCameraRecord.model_validate(normalized)
             out[record.did] = record
+            changed = changed or item_changed
+        if changed:
+            self._save(out)
         return out
 
     def _save(self, records: dict[str, RtspCameraRecord]) -> None:

@@ -302,11 +302,12 @@ class PipelineProcessor:
             # 跑在 inference thread executor 里(asyncio.run 起新 loop,ContextVar
             # 不跨线程),clip_sink 必须**显式作为入参透传**给 realtime_perceive,
             # 让它在 inference 线程的新 loop 入口重新 set ContextVar.
-            # sink value 是 (bytes, kind) — kind ∈ {"mp4","m4a"} 区分视频/audio-only 路径,
+            # sink value 是 (payload, kind) — kind ∈ {"mp4","m4a","frames"}
+            # 区分视频/audio-only/抽帧图片路径,
             # 持久化层据此选 clip.mp4 / clip.m4a 扩展名 + 服务端选 Content-Type.
-            from miloco.perception.snapshot_context import ClipKind
+            from miloco.perception.snapshot_context import ClipKind, FrameClip
 
-            clips_by_device: dict[str, tuple[bytes, ClipKind]] = {}
+            clips_by_device: dict[str, tuple[bytes | list[FrameClip], ClipKind]] = {}
             try:
                 result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids = await self._perception_engine_proxy.realtime_perceive(
                     batch, snapshot_sink=clips_by_device
@@ -349,7 +350,7 @@ class PipelineProcessor:
             # 视频路径 mp4 = H264+AAC;audio-only 路径 mp4 = 纯 AAC m4a 容器.
             # engine 异常 / 全 device gate skipped → sink 为空 dict,device_ids=[] →
             # _persist 仍入表(metadata-only)给 UI 显示语义提示,但不落盘.
-            clips_to_save: dict[str, tuple[bytes, ClipKind]] = {}
+            clips_to_save: dict[str, tuple[bytes | list[FrameClip], ClipKind]] = {}
             if not result.skipped:
                 clips_to_save = {
                     did: payload

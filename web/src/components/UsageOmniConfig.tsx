@@ -2,8 +2,8 @@
  * 「模型」页顶部的 omni 模型配置卡(可折叠,默认展开)。
  *
  * 两块:
- * - 上:**当前模型** —— 当前生效配置(model / Base URL / 打码 key);未配 key 给警告。
- * - 下:**模型列表** —— 每行 模型 | Base URL | API Key(打码),可「启用」/「删除」;
+ * - 上:模型配置概览;未配 key 给警告。
+ * - 下:**模型列表** —— 每行 模型 | Base URL | 能力 | API Key(打码),可「启用/停用」/「编辑」/「删除」;
  *   「＋ 新增」展开表单(Base URL → API Key → 模型组合框 + 测试连接 + 保存)。
  *
  * 档案名对用户隐藏:内部用 `model @ base_url` 作为后端 label(唯一 id)。重复添加同
@@ -16,17 +16,24 @@ import { useTranslation } from "react-i18next";
 import {
   getOmniConfig,
   updateOmniConfig,
-  activateOmniConfig,
   deleteOmniConfig,
   listOmniModels,
   testOmniConfig,
 } from "@/api";
-import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
+import type {
+  OmniCapability,
+  OmniConfigState,
+  OmniProfile,
+  OmniTestResult,
+} from "@/lib/types";
 import { toast } from "./Toast";
 
 const INPUT_CLS =
   "w-full px-3 py-2 rounded-lg bg-bg-primary border border-border " +
   "focus:border-brand-primary focus:outline-none text-text-primary num";
+
+const CAPABILITIES: OmniCapability[] = ["text", "image", "video", "audio"];
+const DEFAULT_CAPABILITIES: OmniCapability[] = ["text", "image", "video", "audio"];
 
 // omni 测试 / 模型列表的后端机器码 → i18n key;命中走前端本地化,
 // 未命中(如 http_error,含动态 HTTP 细节)回退后端 message。
@@ -147,12 +154,20 @@ export function UsageOmniConfig() {
 
   // 新增表单
   const [adding, setAdding] = useState(false);
+  const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsMsg, setModelsMsg] = useState<string | null>(null);
+  const [profileEnabled, setProfileEnabled] = useState(true);
+  const [capabilities, setCapabilities] = useState<OmniCapability[]>([
+    "text",
+    "image",
+    "video",
+    "audio",
+  ]);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<OmniTestResult | null>(null);
@@ -177,15 +192,75 @@ export function UsageOmniConfig() {
   const existing = profiles.find(
     (p) => p.base_url === baseUrl.trim() && p.model === model.trim(),
   );
+  const editingProfile = editingLabel
+    ? profiles.find((p) => p.label === editingLabel)
+    : undefined;
 
   function startAdd() {
     setAdding(true);
+    setEditingLabel(null);
     setBaseUrl("");
     setApiKey("");
     setModel("");
     setModels([]);
     setModelsMsg(null);
+    setProfileEnabled(true);
+    setCapabilities(["text", "image", "video", "audio"]);
     setTestResult(null);
+  }
+
+  function startEdit(p: OmniProfile) {
+    setAdding(true);
+    setEditingLabel(p.label);
+    setBaseUrl(p.base_url);
+    setApiKey("");
+    setModel(p.model);
+    setModels([]);
+    setModelsMsg(null);
+    setProfileEnabled(profileEnabledValue(p));
+    setCapabilities(profileCapabilities(p));
+    setTestResult(null);
+  }
+
+  function capabilityLabel(capability: OmniCapability): string {
+    return t(`usage.capability.${capability}`);
+  }
+
+  function profileEnabledValue(p: OmniProfile): boolean {
+    return p.enabled ?? true;
+  }
+
+  function profileCapabilities(p: OmniProfile): OmniCapability[] {
+    return p.capabilities?.length ? p.capabilities : DEFAULT_CAPABILITIES;
+  }
+
+  function toggleDraftCapability(capability: OmniCapability) {
+    setCapabilities((prev) => {
+      if (prev.includes(capability)) {
+        return prev.length === 1 ? prev : prev.filter((item) => item !== capability);
+      }
+      return CAPABILITIES.filter((item) => item === capability || prev.includes(item));
+    });
+  }
+
+  async function updateProfileRoute(
+    p: OmniProfile,
+    patch: { enabled?: boolean; capabilities?: OmniCapability[] },
+  ) {
+    try {
+      setState(await updateOmniConfig({
+        label: p.label,
+        model: p.model,
+        base_url: p.base_url,
+        original_label: p.label,
+        activate: false,
+        enabled: patch.enabled ?? profileEnabledValue(p),
+        capabilities: patch.capabilities ?? profileCapabilities(p),
+      }));
+      toast(t("usage.routeUpdateSuccess"), "ok");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("usage.routeUpdateFailed"), "danger");
+    }
   }
 
   async function fetchModels(bu: string, key: string) {
@@ -217,22 +292,27 @@ export function UsageOmniConfig() {
       toast(t("usage.baseUrlModelRequired"), "warn");
       return;
     }
-    if (!apiKey.trim() && !existing?.has_key) {
+    if (!apiKey.trim() && !existing?.has_key && !editingProfile?.has_key) {
       toast(t("usage.apiKeyRequired"), "warn");
       return;
     }
     setSaving(true);
     try {
+      const originalLabel = editingLabel || existing?.label;
+      const targetLabel = editingLabel ? `${m} @ ${bu}` : existing ? existing.label : `${m} @ ${bu}`;
       const s = await updateOmniConfig({
-        label: existing ? existing.label : `${m} @ ${bu}`,
+        label: targetLabel,
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
-        original_label: existing ? existing.label : undefined,
+        original_label: originalLabel || undefined,
         activate: false, // 只入列表;启用由模型列表的「启用」负责
+        enabled: profileEnabled,
+        capabilities,
       });
       setState(s);
       setAdding(false);
+      setEditingLabel(null);
       toast(t("usage.saveSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.saveFailed"), "danger");
@@ -248,7 +328,7 @@ export function UsageOmniConfig() {
       toast(t("usage.baseUrlModelRequired"), "warn");
       return;
     }
-    if (!apiKey.trim() && !existing?.has_key) {
+    if (!apiKey.trim() && !existing?.has_key && !editingProfile?.has_key) {
       toast(t("usage.apiKeyRequiredBeforeTest"), "warn");
       return;
     }
@@ -256,7 +336,7 @@ export function UsageOmniConfig() {
     setTestResult(null);
     try {
       const res = await testOmniConfig({
-        label: existing ? existing.label : "",
+        label: editingLabel || (existing ? existing.label : ""),
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
@@ -266,15 +346,6 @@ export function UsageOmniConfig() {
       setTestResult({ ok: false, message: e instanceof Error ? e.message : t("usage.testFailed") });
     } finally {
       setTesting(false);
-    }
-  }
-
-  async function onActivate(p: OmniProfile) {
-    try {
-      setState(await activateOmniConfig({ label: p.label }));
-      toast(t("usage.activateSuccess"), "ok");
-    } catch (e) {
-      toast(e instanceof Error ? e.message : t("usage.activateFailed"), "danger");
     }
   }
 
@@ -337,6 +408,7 @@ export function UsageOmniConfig() {
                     <tr className="text-text-secondary border-b border-border">
                       <th className="text-left px-5 md:px-6 py-2">{t("usage.colModel")}</th>
                       <th className="text-left px-3 py-2">{t("usage.baseUrlLabel")}</th>
+                      <th className="text-left px-3 py-2">{t("usage.colRoute")}</th>
                       <th className="text-left px-3 py-2">{t("usage.colApiKey")}</th>
                       <th className="text-right px-5 md:px-6 py-2">{t("usage.colAction")}</th>
                     </tr>
@@ -345,7 +417,7 @@ export function UsageOmniConfig() {
                     {profiles.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={4}
+                          colSpan={5}
                           className="px-5 md:px-6 py-5 text-center text-text-tertiary"
                         >
                           {t("usage.emptyProfiles")}
@@ -353,33 +425,45 @@ export function UsageOmniConfig() {
                       </tr>
                     ) : (
                       profiles.map((p) => (
-                        <tr
-                          key={p.label}
-                          className={`border-b border-border last:border-b-0 ${
-                            p.active ? "bg-brand-soft" : ""
-                          }`}
-                        >
+                        <tr key={p.label} className="border-b border-border last:border-b-0">
                           <td className="px-5 md:px-6 py-2.5 num text-text-primary">
                             {p.model}
                           </td>
                           <td className="px-3 py-2.5 num text-text-tertiary">{p.base_url}</td>
+                          <td className="px-3 py-2.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {profileCapabilities(p).map((capability) => (
+                                <span
+                                  key={capability}
+                                  className="rounded border border-border px-1.5 py-0.5 text-[11px] leading-4 text-text-secondary"
+                                >
+                                  {capabilityLabel(capability)}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
                           <td className="px-3 py-2.5 num text-text-tertiary">
                             {p.has_key ? p.api_key_masked : t("usage.notConfigured")}
                           </td>
                           <td className="px-5 md:px-6 py-2.5 text-right whitespace-nowrap">
-                            {p.active ? (
-                              <span className="inline-block rounded-md px-2.5 py-1 bg-brand-primary text-white align-middle mr-3">
-                                {t("usage.currentModel")}
-                              </span>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => onActivate(p)}
-                                className="hover:bg-brand-soft text-brand-primary border border-brand-primary rounded-md px-2.5 py-1 mr-3"
-                              >
-                                {t("usage.activate")}
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              onClick={() => updateProfileRoute(p, { enabled: !profileEnabledValue(p) })}
+                              className={`rounded-md border px-2.5 py-1 mr-3 ${
+                                profileEnabledValue(p)
+                                  ? "border-border text-text-secondary hover:text-warning"
+                                  : "border-brand-primary text-brand-primary hover:bg-brand-soft"
+                              }`}
+                            >
+                              {profileEnabledValue(p) ? t("usage.disable") : t("usage.activate")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startEdit(p)}
+                              className="text-text-secondary hover:text-brand-primary mr-3"
+                            >
+                              {t("usage.edit")}
+                            </button>
                             <button
                               type="button"
                               onClick={() => onDelete(p)}
@@ -410,7 +494,7 @@ export function UsageOmniConfig() {
               {adding && (
                 <div className="mt-4 rounded-lg bg-bg-primary border border-border p-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 items-start">
                   <div className="md:col-span-2 text-caption text-text-secondary">
-                    {t("usage.addFormHint")}
+                    {editingLabel ? t("usage.editFormHint") : t("usage.addFormHint")}
                   </div>
                   <Field label={t("usage.baseUrlLabel")} className="md:col-span-2">
                     <input
@@ -467,6 +551,38 @@ export function UsageOmniConfig() {
                             : t("usage.modelsHint")}
                     </span>
                   </Field>
+                  <Field label={t("usage.routeEnabledLabel")}>
+                    <label className="inline-flex items-center gap-2 text-caption text-text-primary">
+                      <input
+                        type="checkbox"
+                        checked={profileEnabled}
+                        onChange={(e) => setProfileEnabled(e.target.checked)}
+                        className="size-4 accent-brand-primary"
+                      />
+                      {t("usage.routeEnabledHint")}
+                    </label>
+                  </Field>
+                  <Field label={t("usage.capabilitiesLabel")}>
+                    <div className="flex flex-wrap gap-2">
+                      {CAPABILITIES.map((capability) => {
+                        const selected = capabilities.includes(capability);
+                        return (
+                          <button
+                            key={capability}
+                            type="button"
+                            onClick={() => toggleDraftCapability(capability)}
+                            className={`rounded-md border px-3 py-1.5 text-caption ${
+                              selected
+                                ? "border-brand-primary bg-brand-soft text-brand-primary"
+                                : "border-border text-text-secondary hover:border-brand-primary"
+                            }`}
+                          >
+                            {capabilityLabel(capability)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </Field>
                   <div className="md:col-span-2 pt-1 flex items-center gap-3 flex-wrap">
                     <button
                       type="button"
@@ -488,6 +604,7 @@ export function UsageOmniConfig() {
                       type="button"
                       onClick={() => {
                         setAdding(false);
+                        setEditingLabel(null);
                         setTestResult(null);
                       }}
                       disabled={saving || testing}

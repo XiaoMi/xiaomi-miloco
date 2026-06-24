@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import {
   getHomeStatus,
   createRtspCamera,
+  updateRtspCamera,
   listActivity,
   listCameras,
   listDevices,
@@ -243,6 +244,20 @@ function MainApp() {
                 } catch (e) {
                   toast(
                     e instanceof Error ? e.message : t("hero.rtspAddFailed"),
+                    "warn",
+                  );
+                }
+                scopeCameras.reload();
+                cameras.reload();
+                status.reload();
+              }}
+              onUpdateRtspCamera={async (did, input) => {
+                try {
+                  await updateRtspCamera(did, input);
+                  toast(t("hero.rtspUpdated"), "ok");
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("hero.rtspUpdateFailed"),
                     "warn",
                   );
                 }

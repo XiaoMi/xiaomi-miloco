@@ -15,6 +15,11 @@ import httpx
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
+from miloco.perception.engine.omni.model_router import (
+    get_live_profiles,
+    profile_to_omni_config,
+    select_visual_route,
+)
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
     _publish_omni_log_safe,
@@ -84,11 +89,77 @@ async def run_omni(edge_packet: IdentityPacket, context: OmniContext, config: Om
 
 async def run_omni_batch(edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig) -> OmniOutput:
     """Run Omni layer for multiple devices in the same room."""
-    payload = build_batch_prompt(edge_packets, context)
-    raw_response = await call_omni(payload, config)
-    output = parse_omni_response(raw_response, _rule_name_to_id(context))
-    output.usage = extract_usage(raw_response)
-    return output
+    route = select_visual_route(get_live_profiles())
+    if route.primary is None:
+        logger.warning("[omni] no enabled model profile can handle current perception input")
+        return OmniOutput(skipped=True, error_code="no_enabled_model")
+
+    if route.visual_mode == "audio":
+        if not _should_run_audio_model(edge_packets):
+            return OmniOutput(skipped=True, error_code="no_enabled_visual_model")
+        payload = build_batch_prompt(edge_packets, context, force_route="audio")
+        if not payload.get("audio_base64"):
+            return OmniOutput(skipped=True, error_code="no_audio_payload")
+        raw_response = await call_omni(
+            payload,
+            profile_to_omni_config(config, route.primary),
+        )
+        output = parse_omni_response(raw_response, _rule_name_to_id(context))
+        output.usage = extract_usage(raw_response)
+        return output
+
+    visual_payload = build_batch_prompt(
+        edge_packets,
+        context,
+        visual_mode="video" if route.visual_mode == "video" else "frames",
+    )
+    visual_response = await call_omni(
+        visual_payload,
+        profile_to_omni_config(config, route.primary),
+    )
+    visual_output = parse_omni_response(visual_response, _rule_name_to_id(context))
+    visual_output.usage = extract_usage(visual_response)
+
+    if route.visual_mode == "video" or route.audio is None or not _should_run_audio_model(edge_packets):
+        return visual_output
+
+    audio_payload = build_batch_prompt(edge_packets, context, force_route="audio")
+    if not audio_payload.get("audio_base64"):
+        return visual_output
+    audio_response = await call_omni(
+        audio_payload,
+        profile_to_omni_config(config, route.audio),
+    )
+    audio_output = parse_omni_response(audio_response, _rule_name_to_id(context))
+    audio_output.usage = extract_usage(audio_response)
+    return _merge_visual_audio_outputs(visual_output, audio_output)
+
+
+def _should_run_audio_model(edge_packets: list[IdentityPacket]) -> bool:
+    """Use the existing audio gate/VAD decision as the audio-model trigger."""
+
+    return any(
+        p.trigger is not None and p.trigger.audio_active
+        for p in edge_packets
+    )
+
+
+def _merge_usage(a: dict[str, int] | None, b: dict[str, int] | None) -> dict[str, int] | None:
+    if not a and not b:
+        return None
+    keys = set((a or {}).keys()) | set((b or {}).keys())
+    return {k: int((a or {}).get(k, 0)) + int((b or {}).get(k, 0)) for k in sorted(keys)}
+
+
+def _merge_visual_audio_outputs(visual: OmniOutput, audio: OmniOutput) -> OmniOutput:
+    """Merge image-model output with audio-model output without re-asking a model."""
+
+    merged = visual.model_copy(deep=True)
+    merged.speeches = list(audio.speeches)
+    merged.env_sounds = list(audio.env_sounds)
+    merged.suggestions = [*visual.suggestions, *audio.suggestions]
+    merged.usage = _merge_usage(visual.usage, audio.usage)
+    return merged
 
 
 # =============================================================================
@@ -151,6 +222,27 @@ async def run_omni_fused(
     # deliver_fused_failure，否则 mark_dispatched 已置 inflight=True 的 track
     # 永远不会被 GC（_gc_dead_tracks 跳过 inflight）也不会被重新派发
     # （needs_omni_call 返回 False）。
+    route = select_visual_route(get_live_profiles())
+    if route.primary is None:
+        if candidates:
+            await identity_engine.deliver_fused_failure("no enabled omni model")
+        return OmniOutput(skipped=True, error_code="no_enabled_model")
+    if route.visual_mode == "audio":
+        if candidates:
+            await identity_engine.deliver_fused_failure("no enabled visual model")
+        if not _should_run_audio_model(edge_packets):
+            return OmniOutput(skipped=True, error_code="no_enabled_visual_model")
+        audio_payload = build_batch_prompt(edge_packets, context, force_route="audio")
+        if not audio_payload.get("audio_base64"):
+            return OmniOutput(skipped=True, error_code="no_audio_payload")
+        audio_response = await call_omni(
+            audio_payload,
+            profile_to_omni_config(config, route.primary),
+        )
+        audio_output = parse_omni_response(audio_response, _rule_name_to_id(context))
+        audio_output.usage = extract_usage(audio_response)
+        return audio_output
+
     try:
         payload = build_fused_payload(
             packets=edge_packets,
@@ -159,8 +251,12 @@ async def run_omni_fused(
             gallery_snapshot=gallery_snapshot,
             config=fused_prompt_config,
             label_lookup=name_lookup,
+            visual_mode="video" if route.visual_mode == "video" else "frames",
         )
-        raw_response = await _call_omni_messages(payload["messages"], config)
+        raw_response = await _call_omni_messages(
+            payload["messages"],
+            profile_to_omni_config(config, route.primary),
+        )
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -213,7 +309,18 @@ async def run_omni_fused(
             )
             await identity_engine.deliver_fused_response(assignments)
         delivered = True
-        return omni_output
+        if route.visual_mode == "video" or route.audio is None or not _should_run_audio_model(edge_packets):
+            return omni_output
+        audio_payload = build_batch_prompt(edge_packets, context, force_route="audio")
+        if not audio_payload.get("audio_base64"):
+            return omni_output
+        audio_response = await call_omni(
+            audio_payload,
+            profile_to_omni_config(config, route.audio),
+        )
+        audio_output = parse_omni_response(audio_response, _rule_name_to_id(context))
+        audio_output.usage = extract_usage(audio_response)
+        return _merge_visual_audio_outputs(omni_output, audio_output)
     finally:
         # 兜底:任何未走到 deliver_fused_response 的退出(含未来新增的会抛步骤)都清 inflight。
         # deliver_fused_failure 幂等——deliver_response 成功已置 _pending=None → 此处短路 no-op;

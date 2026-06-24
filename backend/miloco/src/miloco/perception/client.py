@@ -38,7 +38,7 @@ from miloco.perception.event_text_builder import (
     caption_for_dids,
 )
 from miloco.perception.schema import PerceptionBatch
-from miloco.perception.snapshot_context import ClipKind
+from miloco.perception.snapshot_context import ClipKind, FrameClip
 from miloco.perception.types import (
     CaptionEntry,
     MatchedRule,
@@ -648,15 +648,15 @@ class PerceptionEngineProxy:
         early_sent_rule_ids: set[tuple[str, str]] | None = None,
         early_sent_sugg_ids: set[int] | None = None,
         device_ids: list[str] | None = None,
-        clips_by_device: dict[str, tuple[bytes, ClipKind]] | None = None,
+        clips_by_device: dict[str, tuple[bytes | list[FrameClip], ClipKind]] | None = None,
     ):
         """Handle realtime perception result — runs on main loop.
 
         device_ids / clips_by_device 由 processor 透传;给 _persist_meaningful_event
-        入 meaningful_events 表 + 落 mp4/m4a clip 用.clips_by_device=None 时跳过
+        入 meaningful_events 表 + 落 mp4/m4a/frames clip 用.clips_by_device=None 时跳过
         persist(单元测试早期路径 / runner 未启动 等场景).
 
-        clips_by_device value 形态为 `(bytes, ClipKind)`,kind ∈ {"mp4","m4a"} 决定
+        clips_by_device value 形态为 `(payload, ClipKind)`,kind ∈ {"mp4","m4a","frames"} 决定
         落盘扩展名 + SSE 推 kind.processor.py:300 上游已用同样标注;mypy/pyright
         会拦截非法 kind(如 "webm")— 标注收紧避免裸 bytes 拐弯绕过类型约束.
         """
@@ -769,7 +769,7 @@ async def _persist_meaningful_event(
     *,
     result: RealtimePerceptionResult,
     device_ids: list[str],
-    clips_by_device: dict[str, tuple[bytes, ClipKind]],
+    clips_by_device: dict[str, tuple[bytes | list[FrameClip], ClipKind]],
 ) -> None:
     """后台异步入 meaningful_events 表 + 落 omni mp4 clip + 推 SSE.
 
@@ -782,7 +782,7 @@ async def _persist_meaningful_event(
       5. _publish_meaningful_event(B13:metadata-only 也推 SSE)
 
     clip 字节是 omni 内部 push 出来的字节级 mp4(零重编),video 路径 H264+AAC,
-    audio-only 路径 m4a.snapshot_count 字段语义复用为"成功落盘 clip 的 device 数".
+    audio-only 路径 m4a，抽帧路径 frames.snapshot_count 字段语义复用为"成功落盘 clip 的 device 数".
 
     任何异常仅 error log,不抛(B4 / B11 非阻塞约束).
     """
@@ -866,7 +866,7 @@ async def _persist_meaningful_event(
         else:
             logger.debug("no clips for event %s, snapshot_count stays 0", event_id)
 
-        # 从 sink 取 clip_kind:同 batch 要么全 video 要么全 audio-only
+        # 从 sink 取 clip_kind:同 batch 要么全 video/audio-only/frames
         # (_is_audio_only 是 batch 级共识,见 prompt_builder._is_audio_only),
         # 取第一个 device 的 kind 即代表整批.count == 0 时 kind 留 None
         # (metadata-only / 磁盘紧张 → 没落盘).
@@ -914,7 +914,7 @@ def _publish_meaningful_event(
     payload 字段与 /api/events list 元素同形,前端 EventSource 收到后直接拼到列表顶部.
     pipeline 不可用时(测试 / 引擎未起)静默跳过.
 
-    clip_kind ∈ {"mp4","m4a",None}:UI 区分 🎬 视频 / 🎤 音频事件 / 无回放占位.
+    clip_kind ∈ {"mp4","m4a","frames",None}:UI 区分视频 / 音频 / 关键帧 / 无回放占位.
     """
     from miloco.manager import get_manager
 

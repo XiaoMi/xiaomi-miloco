@@ -17,6 +17,10 @@ from miloco.observability.context import get_device_context
 from miloco.observability.omni_log import publish_omni_log
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
+from miloco.perception.engine.omni.content_blocks import (
+    image_url_block,
+    video_url_block,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -202,17 +206,17 @@ def _build_messages(payload: dict) -> list[dict]:
     content: list[dict] = [{"type": "text", "text": payload["user_content"]}]
 
     # Video (frames + audio merged into mp4)；与 audio_base64 互斥（上游 _build_payload 保证）
-    if payload.get("video_base64"):
-        content.append(
-            {
-                "type": "video_url",
-                "video_url": {
-                    "url": f"data:video/mp4;base64,{payload['video_base64']}"
-                },
-                "fps": payload.get("video_fps", 3),
-                "media_resolution": "max",
-            }
-        )
+    if payload.get("frame_images"):
+        frame_images = payload["frame_images"]
+        total = len(frame_images)
+        for pos, frame in enumerate(frame_images, start=1):
+            content.append({
+                "type": "text",
+                "text": f"关键帧 {pos}/{total} (frame_index={frame['frame_index']})",
+            })
+            content.append(image_url_block(frame["media_type"], frame["data"]))
+    elif payload.get("video_base64"):
+        content.append(video_url_block(payload["video_base64"]))
     # Audio-only route：独立 input_audio 块（仅当无 video_base64 时启用）
     elif payload.get("audio_base64"):
         content.append(
@@ -226,14 +230,7 @@ def _build_messages(payload: dict) -> list[dict]:
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{crop['media_type']};base64,{crop['data']}"
-                },
-            }
-        )
+        content.append(image_url_block(crop["media_type"], crop["data"]))
 
     messages.append({"role": "user", "content": content})
     return messages

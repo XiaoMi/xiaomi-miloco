@@ -18,7 +18,7 @@ import { useAsync } from "@/hooks/useAsync";
 import { humanTokens } from "@/lib/formatTokens";
 import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { IconPlus, IconX } from "@/lib/icons";
+import { IconPencil, IconPlus, IconX } from "@/lib/icons";
 
 interface Props {
   persons: Person[];
@@ -38,6 +38,10 @@ interface Props {
   /** 切换摄像头启用（PUT /api/miot/scope/cameras）；批量传 dids */
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onAddRtspCamera: (input: { name: string; url: string }) => void | Promise<void>;
+  onUpdateRtspCamera: (
+    did: string,
+    input: { name: string; url: string },
+  ) => void | Promise<void>;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -58,6 +62,7 @@ export function HeroNow({
   onJumpUsage,
   onToggleCameras,
   onAddRtspCamera,
+  onUpdateRtspCamera,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -157,6 +162,7 @@ export function HeroNow({
         channelByDid={channelByDid}
         onToggleCameras={onToggleCameras}
         onAddRtspCamera={onAddRtspCamera}
+        onUpdateRtspCamera={onUpdateRtspCamera}
       />
     </section>
   );
@@ -174,6 +180,10 @@ interface CameraSectionProps {
   channelByDid: Map<string, number>;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onAddRtspCamera: (input: { name: string; url: string }) => void | Promise<void>;
+  onUpdateRtspCamera: (
+    did: string,
+    input: { name: string; url: string },
+  ) => void | Promise<void>;
 }
 
 function CameraSection({
@@ -185,9 +195,11 @@ function CameraSection({
   channelByDid,
   onToggleCameras,
   onAddRtspCamera,
+  onUpdateRtspCamera,
 }: CameraSectionProps) {
   const { t } = useTranslation();
   const [rtspOpen, setRtspOpen] = useState(false);
+  const [editingRtspCam, setEditingRtspCam] = useState<ScopeCamera | null>(null);
   const total = scopeCameras.length;
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;
@@ -287,6 +299,16 @@ function CameraSection({
           }}
         />
       )}
+      {editingRtspCam && (
+        <RtspCameraDialog
+          camera={editingRtspCam}
+          onClose={() => setEditingRtspCam(null)}
+          onSubmit={async (input) => {
+            await onUpdateRtspCamera(editingRtspCam.did, input);
+            setEditingRtspCam(null);
+          }}
+        />
+      )}
       {total === 0 ? (
         <div className="text-body rounded-lg bg-bg-primary border border-dashed border-border-strong text-text-secondary py-8 px-5 text-center">
           {miotHasCamera ? (
@@ -315,6 +337,9 @@ function CameraSection({
                   channel={channelByDid.get(c.did)}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
+                  onEdit={
+                    c.source === "rtsp" ? () => setEditingRtspCam(c) : undefined
+                  }
                 />
               ))}
             </div>
@@ -346,6 +371,9 @@ function CameraSection({
                       (!c.inUse && (!c.isOnline || atCapacity))
                     }
                     onToggle={(v) => runSingle(c.did, v)}
+                    onEdit={
+                      c.source === "rtsp" ? () => setEditingRtspCam(c) : undefined
+                    }
                   />
                 ))}
               </ul>
@@ -401,10 +429,12 @@ interface CamCardProps {
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
+  onEdit?: () => void;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
-function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
+function CamCardWithToggle({ cam, channel, bulkBusy, onToggle, onEdit }: CamCardProps) {
+  const { t } = useTranslation();
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
       <div className="relative">
@@ -416,7 +446,16 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
           source={cam.source ?? "miot"}
         />
         {cam.source === "rtsp" && <SourceTag className="absolute top-2 left-2" />}
-        <div className="absolute top-2 right-2">
+        <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          {onEdit && (
+            <IconButton
+              label={t("hero.rtspEdit")}
+              onClick={onEdit}
+              disabled={bulkBusy}
+            >
+              <IconPencil width={14} height={14} />
+            </IconButton>
+          )}
           <CamSwitch
             inUse={cam.inUse}
             name={cam.name}
@@ -434,10 +473,12 @@ function BenchCamItem({
   cam,
   disabled,
   onToggle,
+  onEdit,
 }: {
   cam: ScopeCamera;
   disabled: boolean;
   onToggle: (next: boolean) => void;
+  onEdit?: () => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -462,12 +503,24 @@ function BenchCamItem({
           </div>
         )}
       </div>
-      <CamSwitch
-        inUse={cam.inUse}
-        name={cam.name}
-        disabled={disabled}
-        onToggle={onToggle}
-      />
+      <div className="flex items-center gap-2 shrink-0">
+        {onEdit && (
+          <button
+            type="button"
+            onClick={onEdit}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-caption text-text-secondary hover:text-brand-primary hover:bg-bg-primary transition-colors"
+          >
+            <IconPencil width={14} height={14} />
+            {t("hero.rtspEdit")}
+          </button>
+        )}
+        <CamSwitch
+          inUse={cam.inUse}
+          name={cam.name}
+          disabled={disabled}
+          onToggle={onToggle}
+        />
+      </div>
     </li>
   );
 }
@@ -483,15 +536,18 @@ function SourceTag({ className = "" }: { className?: string }) {
 }
 
 function RtspCameraDialog({
+  camera,
   onClose,
   onSubmit,
 }: {
+  camera?: ScopeCamera;
   onClose: () => void;
   onSubmit: (input: { name: string; url: string }) => void | Promise<void>;
 }) {
   const { t } = useTranslation();
-  const [name, setName] = useState("");
-  const [url, setUrl] = useState("");
+  const editing = Boolean(camera);
+  const [name, setName] = useState(camera?.name ?? "");
+  const [url, setUrl] = useState(camera?.url ?? "");
   const [busy, setBusy] = useState(false);
   const canSubmit = name.trim().length > 0 && url.trim().length > 0 && !busy;
 
@@ -511,7 +567,9 @@ function RtspCameraDialog({
         }}
       >
         <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
-          <div className="text-title text-text-primary">{t("hero.rtspDialogTitle")}</div>
+          <div className="text-title text-text-primary">
+            {t(editing ? "hero.rtspEditDialogTitle" : "hero.rtspDialogTitle")}
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -558,11 +616,39 @@ function RtspCameraDialog({
             disabled={!canSubmit}
             className="px-3 py-1.5 rounded-md bg-brand-primary text-white disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {busy ? t("hero.rtspSaving") : t("hero.rtspAddSubmit")}
+            {busy
+              ? t(editing ? "hero.rtspUpdating" : "hero.rtspSaving")
+              : t(editing ? "hero.rtspUpdateSubmit" : "hero.rtspAddSubmit")}
           </button>
         </div>
       </form>
     </div>
+  );
+}
+
+function IconButton({
+  label,
+  children,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="inline-flex items-center justify-center rounded-md bg-black/60 text-white hover:bg-black/75 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+      style={{ width: 26, height: 26 }}
+    >
+      {children}
+    </button>
   );
 }
 
