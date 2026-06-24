@@ -1,5 +1,6 @@
 # 依赖变更准入守卫：PR 改动锁文件 / 依赖清单时阻塞，需维护者评论
-# `/allow-dependencies-change` 放行。逻辑见 .ci/dependency-guard.mjs。
+# `/allow-dependencies-change <head_sha>` 放行。逻辑见 .ci/dependency-guard.mjs。
+# 放行机制见 dependency-guard-reapprove.yml：授权人评论后重跑本 workflow 的 guard run，带评论重判即翻绿。
 #
 # pull_request_target 在可信的 base 上下文运行；脚本只读 PR 元数据，不 checkout PR head 代码。
 name: Dependency Guard
@@ -7,8 +8,6 @@ name: Dependency Guard
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
-  issue_comment:
-    types: [created, edited]
 
 permissions:
   contents: read
@@ -16,25 +15,19 @@ permissions:
   issues: read
 
 concurrency:
-  group: dependency-guard-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: dependency-guard-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   guard:
-    # pull_request_target: 非草稿 PR 触发
-    # issue_comment: 仅 /allow-dependencies-change 评论触发（含编辑后匹配的场景）
-    if: >-
-      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft)
-      || (github.event_name == 'issue_comment'
-          && github.event.issue.pull_request != null
-          && startsWith(github.event.comment.body, '/allow-dependencies-change'))
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: 检出可信 base 上的守卫脚本
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          ref: ${{ github.event.pull_request.base.sha || 'main' }}
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6

@@ -1,0 +1,46 @@
+# 依赖守卫放行：授权人在 PR 评论 `/allow-dependencies-change <head_sha>` 后，
+# 重跑该 PR head 上的 “Dependency Guard / guard” run——重跑带着放行评论重新判定，把红 check 刷绿。
+#
+# 单独成文件（而非与 guard 同 workflow 的第二个 job）：issue_comment 与 pull_request_target 同 workflow 时，
+# PR 上会留一条 skipped 的 reapprove check；拆开后 PR 只显示 guard，本 workflow 的 run 挂在 main 不进 PR。
+name: Dependency Guard Reapprove
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write # 重跑 workflow run
+
+concurrency:
+  group: dependency-guard-reapprove-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  reapprove:
+    if: >-
+      github.event.issue.pull_request != null
+      && startsWith(github.event.comment.body, '/allow-dependencies-change')
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 重跑 PR head 上的 dependency-guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+          # 取该 head SHA 上最近一次 pull_request_target 的 guard run
+          RUN_ID=$(gh api \
+            "repos/$REPO/actions/workflows/dependency-guard.yml/runs?event=pull_request_target&head_sha=$HEAD_SHA&per_page=1" \
+            --jq '.workflow_runs[0].id // empty')
+          if [ -z "$RUN_ID" ]; then
+            echo "::notice::未找到 head=$HEAD_SHA 的 pull_request_target run（可能尚未跑完），可重 push 触发"
+            exit 0
+          fi
+          echo "重跑 run $RUN_ID（带放行评论重新判定 head=$HEAD_SHA）"
+          gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun"
