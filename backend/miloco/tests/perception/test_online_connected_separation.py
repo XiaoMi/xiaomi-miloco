@@ -5,7 +5,8 @@ Verifies that:
 * ``CameraInfo.connected`` derives from ``camera_status == CONNECTED``.
 * ``PerceptionDevice`` carries both ``online`` and ``connected`` fields.
 * ``CameraDeviceAdapter.discover_devices`` correctly populates both fields
-  and filters only by ``online`` (cloud status).
+  and filters by cloud ``online`` by default. Callers can opt into LAN
+  reachability filtering with ``require_lan=True``.
 """
 
 from __future__ import annotations
@@ -166,29 +167,37 @@ class TestDiscoverDevicesOnlineConnected:
         assert result["cam1"].online is True
 
     @pytest.mark.asyncio
-    async def test_online_but_not_on_lan_filtered_out(self, adapter):
-        """Cloud-online but NOT LAN-reachable should be filtered."""
-        cam = _make_camera_info(did="cam1", online=True, lan_online=False)
+    async def test_online_but_not_on_lan_included_by_default(self, adapter):
+        """Cloud-online cameras are included even when LAN discovery is false."""
+        cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
+            update={"home_id": "H1"}
+        )
         adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
 
         result = await adapter.discover_devices(online_only=True)
 
-        assert "cam1" not in result
+        assert "cam1" in result
+        assert result["cam1"].online is True
 
     @pytest.mark.asyncio
-    async def test_online_lan_none_filtered_out(self, adapter):
-        """Cloud-online but lan_online=None should be filtered."""
-        cam = _make_camera_info(did="cam1", online=True, lan_online=None)
+    async def test_online_lan_none_included_by_default(self, adapter):
+        """Cloud-online cameras are included when LAN status is unknown."""
+        cam = _make_camera_info(did="cam1", online=True, lan_online=None).model_copy(
+            update={"home_id": "H1"}
+        )
         adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
 
         result = await adapter.discover_devices(online_only=True)
 
-        assert "cam1" not in result
+        assert "cam1" in result
+        assert result["cam1"].online is True
 
     @pytest.mark.asyncio
     async def test_offline_camera_filtered_out(self, adapter):
         """Cloud-offline camera should be filtered when online_only=True."""
-        cam = _make_camera_info(did="cam1", online=False, lan_online=True)
+        cam = _make_camera_info(did="cam1", online=False, lan_online=True).model_copy(
+            update={"home_id": "H1"}
+        )
         adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
 
         result = await adapter.discover_devices(online_only=True)
@@ -208,8 +217,7 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_require_lan_false_keeps_stale_lan_camera(self, adapter):
-        """A2 应连数判据(online_only=True, require_lan=False)放过 lan_online 陈旧
-        成 false 的卡死态相机(云端 online=True)——它正是要靠 refresh 救活的。"""
+        """Default/require_lan=False uses cloud online, not LAN discovery."""
         cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
             update={"home_id": "H1"}
         )
@@ -218,6 +226,18 @@ class TestDiscoverDevicesOnlineConnected:
         result = await adapter.discover_devices(online_only=True, require_lan=False)
 
         assert "cam1" in result
+
+    @pytest.mark.asyncio
+    async def test_require_lan_true_filters_stale_lan_camera(self, adapter):
+        """Explicit LAN-gated callers can still require LAN reachability."""
+        cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
+            update={"home_id": "H1"}
+        )
+        adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
+
+        result = await adapter.discover_devices(online_only=True, require_lan=True)
+
+        assert "cam1" not in result
 
     @pytest.mark.asyncio
     async def test_require_lan_false_still_excludes_offline_camera(self, adapter):
@@ -234,7 +254,7 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_filter_cameras_from_all(self, adapter):
-        """_filter_cameras_from_all requires online AND lan_online."""
+        """_filter_cameras_from_all includes cloud-online cameras by default."""
         cam = _make_camera_info(
             did="cam1",
             online=True,
@@ -250,14 +270,32 @@ class TestDiscoverDevicesOnlineConnected:
         assert result["cam1"].online is True
 
     @pytest.mark.asyncio
-    async def test_filter_cameras_from_all_no_lan(self, adapter):
-        """_filter_cameras_from_all filters when lan_online is False."""
+    async def test_filter_cameras_from_all_no_lan_default(self, adapter):
+        """_filter_cameras_from_all does not treat LAN-missing as offline."""
         cam = _make_camera_info(
-            did="cam1", online=True, lan_online=False,
-        )
+            did="cam1",
+            online=True,
+            lan_online=False,
+        ).model_copy(update={"home_id": "H1"})
         result = adapter._filter_cameras_from_all(
             {"cam1": cam},
             online_only=True,
+        )
+        assert "cam1" in result
+        assert result["cam1"].online is True
+
+    @pytest.mark.asyncio
+    async def test_filter_cameras_from_all_no_lan_when_required(self, adapter):
+        """_filter_cameras_from_all can still enforce LAN reachability."""
+        cam = _make_camera_info(
+            did="cam1",
+            online=True,
+            lan_online=False,
+        ).model_copy(update={"home_id": "H1"})
+        result = adapter._filter_cameras_from_all(
+            {"cam1": cam},
+            online_only=True,
+            require_lan=True,
         )
         assert "cam1" not in result
 
@@ -315,5 +353,4 @@ class TestCameraInfoLanStatus:
         ci = CameraInfo.model_validate(cam.model_dump())
         assert ci.lan_online is False
         assert ci.local_ip is None
-
 

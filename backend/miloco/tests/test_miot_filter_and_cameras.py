@@ -25,6 +25,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot import filter as miot_filter
 from miloco.miot.service import MiotService
+from miot.types import MIoTCameraStatus
 
 
 class _FakeKV:
@@ -48,13 +49,14 @@ def _home(home_id: str, name: str = "Home"):
     return SimpleNamespace(home_id=home_id, home_name=name)
 
 
-def _camera(did: str, home_id: str = "H1", *, online: bool = True, lan_online: bool = True):
+def _camera(did: str, home_id: str = "H1", *, online: bool = True, lan_online: bool = True, camera_status: MIoTCameraStatus = MIoTCameraStatus.CONNECTED):
     return SimpleNamespace(
         did=did,
         home_id=home_id,
         name=f"cam-{did}",
         online=online,
         lan_online=lan_online,
+        camera_status=camera_status,
     )
 
 
@@ -288,7 +290,7 @@ async def test_list_cameras_with_state_flags():
     assert by_did["c1"]["is_online"] is True
     assert by_did["c1"]["connected"] is False
     assert by_did["c2"]["in_use"] is True
-    assert by_did["c2"]["is_online"] is False  # lan_online=False
+    assert by_did["c2"]["is_online"] is True  # cloud online; LAN may be unavailable
     assert by_did["c2"]["connected"] is True
 
 
@@ -307,6 +309,62 @@ async def test_toggle_camera_writes_disabled():
     res = await svc.toggle_camera([{"did": "c1", "in_use": True}])
     assert isinstance(res, list)
     assert any(c["did"] == "c1" and c["in_use"] is True for c in res)
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_enable_allows_cloud_online_without_lan():
+    """LAN discovery false must not block enabling a cloud-online camera."""
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+            ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+        }
+    )
+    svc = _make_service(
+        devices={"c1": _camera("c1", lan_online=False)},
+        cameras={"c1": _camera("c1", lan_online=False)},
+        kv=kv,
+    )
+
+    res = await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+    assert isinstance(res, list)
+    assert any(c["did"] == "c1" and c["in_use"] is True for c in res)
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_enable_rejects_cloud_offline():
+    """Cloud-offline cameras are still rejected when enabling perception."""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1", online=False, lan_online=True)},
+        cameras={"c1": _camera("c1", online=False, lan_online=True)},
+        kv=kv,
+    )
+
+    with pytest.raises(ValidationException, match="摄像头当前离线"):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_online_independent_from_camera_status():
+    """A disconnected stream status must not make a cloud-online camera offline."""
+    camera = _camera("c1", online=True, camera_status=MIoTCameraStatus.DISCONNECTED)
+    svc = _make_service(devices={"c1": camera}, cameras={"c1": camera})
+    svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
+
+    out = await svc.list_cameras_with_state()
+
+    assert out == [
+        {
+            "did": "c1",
+            "name": "cam-c1",
+            "room_name": None,
+            "is_online": True,
+            "in_use": True,
+            "connected": False,
+        }
+    ]
 
 
 @pytest.mark.asyncio
