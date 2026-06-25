@@ -9,10 +9,12 @@ Handles Xiaomi IoT device login, authorization, and device management
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 
+import cv2
 from fastapi import APIRouter, Depends, Query, WebSocket
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.websockets import WebSocketDisconnect
 
 from miloco.config import get_settings
@@ -20,9 +22,11 @@ from miloco.manager import get_manager
 from miloco.middleware import (
     BusinessException,
     verify_token,
+    verify_token_query_fallback,
     verify_websocket_token,
 )
 from miloco.middleware.exceptions import HTTPException
+from miloco.miot.filter import denied_camera_dids
 from miloco.miot.schema import (
     AuthorizeRequest,
     CameraToggleRequest,
@@ -36,6 +40,9 @@ from miloco.miot.ws import (
     miot_audio_stream_manager,
     miot_video_stream_manager,
 )
+from miloco.rtsp import get_rtsp_service
+from miloco.rtsp.schema import RtspCameraCreate, RtspCameraUpdate
+from miloco.rtsp.service import record_rtsp_clip
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.common import escape_for_js_string
 
@@ -522,6 +529,162 @@ async def toggle_scope_camera(
         [{"did": i.did, "in_use": i.in_use} for i in request.items]
     )
     return NormalResponse(code=0, message="ok", data=data)
+
+
+async def _sync_camera_adapter_after_rtsp_change() -> None:
+    try:
+        await manager.miot_service._sync_camera_adapter()
+    except Exception as e:
+        logger.warning("RTSP camera adapter sync failed: %s", e)
+
+
+@router.get(
+    path="/rtsp_cameras",
+    summary="List user-managed RTSP cameras",
+    response_model=NormalResponse,
+)
+async def list_rtsp_cameras(current_user: str = Depends(verify_token)):
+    denied = denied_camera_dids(manager.miot_service._kv_repo)
+    connected = manager.miot_service._connected_camera_dids()
+    data = get_rtsp_service().list_state(denied=denied, connected=connected)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.post(
+    path="/rtsp_cameras",
+    summary="Add a user-managed RTSP camera",
+    response_model=NormalResponse,
+)
+async def create_rtsp_camera(
+    request: RtspCameraCreate, current_user: str = Depends(verify_token)
+):
+    record = get_rtsp_service().create(request)
+    await _sync_camera_adapter_after_rtsp_change()
+    denied = denied_camera_dids(manager.miot_service._kv_repo)
+    connected = manager.miot_service._connected_camera_dids()
+    data = next(
+        c for c in get_rtsp_service().list_state(denied=denied, connected=connected)
+        if c["did"] == record.did
+    )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.put(
+    path="/rtsp_cameras/{did}",
+    summary="Update a user-managed RTSP camera",
+    response_model=NormalResponse,
+)
+async def update_rtsp_camera(
+    did: str, request: RtspCameraUpdate, current_user: str = Depends(verify_token)
+):
+    record = get_rtsp_service().update(did, request)
+    await _sync_camera_adapter_after_rtsp_change()
+    denied = denied_camera_dids(manager.miot_service._kv_repo)
+    connected = manager.miot_service._connected_camera_dids()
+    data = next(
+        c for c in get_rtsp_service().list_state(denied=denied, connected=connected)
+        if c["did"] == record.did
+    )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.delete(
+    path="/rtsp_cameras/{did}",
+    summary="Delete a user-managed RTSP camera",
+    response_model=NormalResponse,
+)
+async def delete_rtsp_camera(did: str, current_user: str = Depends(verify_token)):
+    get_rtsp_service().delete(did)
+    await _sync_camera_adapter_after_rtsp_change()
+    return NormalResponse(code=0, message="ok", data=None)
+
+
+@router.get(
+    path="/rtsp_cameras/{did}/mjpeg",
+    summary="MJPEG preview stream for a user-managed RTSP camera",
+)
+async def rtsp_mjpeg_stream(
+    did: str,
+    current_user: str = Depends(verify_token_query_fallback),
+):
+    service = get_rtsp_service()
+    service.ensure_reader(did)
+
+    def _frames():
+        boundary = b"--frame\r\n"
+        while True:
+            frame = service.latest_frame(did)
+            if frame is None:
+                time.sleep(0.2)
+                continue
+            ok, buf = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
+            )
+            if not ok:
+                time.sleep(0.2)
+                continue
+            jpg = buf.tobytes()
+            yield (
+                boundary
+                + b"Content-Type: image/jpeg\r\n"
+                + f"Content-Length: {len(jpg)}\r\n\r\n".encode("ascii")
+                + jpg
+                + b"\r\n"
+            )
+            time.sleep(0.15)
+
+    return StreamingResponse(
+        _frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post(
+    path="/rtsp_cameras/{did}/record_clip",
+    summary="Record N seconds from a user-managed RTSP camera and return mp4",
+)
+async def record_rtsp_camera_clip(
+    did: str,
+    duration_ms: int = Query(
+        15000, ge=2000, le=60000, description="Clip duration in ms (2–60s)"
+    ),
+    current_user: str = Depends(verify_token),
+) -> Response:
+    logger.info(
+        "rtsp record_clip API called, user: %s, camera: %s, dur=%dms",
+        current_user, did, duration_ms,
+    )
+    try:
+        mp4_bytes = await record_rtsp_clip(did, duration_ms=duration_ms)
+    except asyncio.TimeoutError:
+        logger.warning("rtsp record_clip timeout, %s", did)
+        raise HTTPException(
+            message=(
+                "RTSP recording timed out — camera produced no frame. "
+                "Check that the RTSP URL is reachable."
+            ),
+            status_code=504,
+        )
+    except BusinessException as e:
+        logger.warning("rtsp record_clip failed, %s: %s", did, e)
+        raise HTTPException(message=e.message, status_code=404)
+
+    if not mp4_bytes:
+        raise HTTPException(
+            message="RTSP recording returned an empty video.",
+            status_code=504,
+        )
+
+    logger.info("rtsp record_clip OK, %s, %d bytes", did, len(mp4_bytes))
+    return Response(
+        content=mp4_bytes,
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="clip_{did}_{duration_ms}ms.mp4"',
+        },
+    )
 
 
 @router.post(

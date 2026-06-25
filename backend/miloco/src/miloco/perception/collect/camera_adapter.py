@@ -14,12 +14,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 from miot.types import MIoTCameraInfo
 
 from miloco.config import get_settings
 from miloco.miot.client import MiotProxy
+from miloco.miot.filter import MAX_ENABLED_CAMERAS, denied_camera_dids, is_home_allowed
 from miloco.miot.schema import CameraInfo
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.perception.collect.adapter_base import BaseDeviceAdapter
@@ -33,6 +34,7 @@ from miloco.perception.schema import (
     DeviceData,
 )
 from miloco.perception.types import PerceptionDevice
+from miloco.rtsp import get_rtsp_service
 
 if TYPE_CHECKING:
     import numpy as np
@@ -67,6 +69,7 @@ class _CameraDeviceState:
     """Per-camera stream state."""
 
     did: str
+    source: Literal["miot", "rtsp"] = "miot"
     sync_buffer: MultiTrackSyncBuffer = field(
         default_factory=lambda: MultiTrackSyncBuffer(_CAMERA_TRACKS)
     )
@@ -101,14 +104,20 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         require_lan: bool = True,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
-        if not self._miot_proxy.is_authenticated:
-            return {}
-        return self._filter_cameras_from_all(
-            all_devices if all_devices else await self._miot_proxy.get_cameras(),
-            online_only=online_only,
-            require_lan=require_lan,
-            cap=cap,
-        )
+        result: dict[str, PerceptionDevice] = {}
+        if self._miot_proxy.is_authenticated:
+            result.update(
+                self._filter_cameras_from_all(
+                    all_devices if all_devices else await self._miot_proxy.get_cameras(),
+                    online_only=online_only,
+                    require_lan=require_lan,
+                )
+            )
+        result.update(self._rtsp_devices(online_only=online_only))
+        if not cap or len(result) <= MAX_ENABLED_CAMERAS:
+            return result
+        kept = sorted(result)[:MAX_ENABLED_CAMERAS]
+        return {did: result[did] for did in kept}
 
     def _filter_cameras_from_all(
         self,
@@ -131,12 +140,6 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         的相机；口径与 toggle_camera 自洽（同样只数通过 home filter + 未拉黑的相机）。
         ``cap=False`` 用于「列全集」语义（如 rule target 校验），不受投喂上限影响。
         """
-        from miloco.miot.filter import (
-            MAX_ENABLED_CAMERAS,
-            denied_camera_dids,
-            is_home_allowed,
-        )
-
         kv = self._miot_proxy._kv_repo
         denied = denied_camera_dids(kv)
         result: dict[str, PerceptionDevice] = {}
@@ -168,12 +171,27 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 room_name=camera_info.room_name,
                 online=device_online,
             )
+        return result
 
-        if not cap or len(result) <= MAX_ENABLED_CAMERAS:
-            return result
-        # 超限：按 did 升序保留前 N 路，确定性截断（同一账号每轮 discover 选同一批）。
-        kept = sorted(result)[:MAX_ENABLED_CAMERAS]
-        return {did: result[did] for did in kept}
+    def _rtsp_devices(self, *, online_only: bool = True) -> dict[str, PerceptionDevice]:
+        service = get_rtsp_service()
+        denied = denied_camera_dids(self._miot_proxy._kv_repo)
+        result: dict[str, PerceptionDevice] = {}
+        for camera in service.list_records():
+            if camera.did in denied:
+                continue
+            online = service.is_online(camera.did)
+            if online_only and not online:
+                continue
+            result[camera.did] = PerceptionDevice(
+                did=camera.did,
+                name=camera.name,
+                device_type="camera",
+                room_id=camera.room_name,
+                room_name=camera.room_name,
+                online=online,
+            )
+        return result
 
     async def sync_devices(self, all_devices: dict | None = None) -> None:
         """周期 sync 入口：先做「按需补建」，再走基类热插拔同步。
@@ -218,8 +236,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         collect_cfg = get_settings().perception.collect
 
+        is_rtsp = did.startswith("rtsp:")
         state = _CameraDeviceState(
             did=did,
+            source="rtsp" if is_rtsp else "miot",
             sync_buffer=MultiTrackSyncBuffer(
                 track_names=_CAMERA_TRACKS,
                 window_ms=collect_cfg.window_size * 1000,
@@ -230,6 +250,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             ),
         )
         self._devices[did] = state
+
+        if is_rtsp:
+            get_rtsp_service().add_frame_callback(
+                did,
+                f"perception:{id(self)}",
+                self._make_rtsp_video_callback(did),
+            )
+            return
 
         # Subscribe decoded video frame stream (multi-reg)
         try:
@@ -282,6 +310,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 )
             except Exception as e:
                 logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
+
+        if state.source == "rtsp":
+            get_rtsp_service().remove_frame_callback(did, f"perception:{id(self)}")
 
         state.sync_buffer.clear()
 
@@ -348,6 +379,20 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
     def _current_source(self, did: str) -> PerceptionDevice:
         """Build source metadata from MiotProxy's in-memory camera cache."""
+        if did.startswith("rtsp:"):
+            camera = get_rtsp_service().get(did)
+            if camera is not None:
+                return PerceptionDevice(
+                    did=did,
+                    name=camera.name,
+                    device_type="camera",
+                    room_id=camera.room_name,
+                    room_name=camera.room_name,
+                    online=get_rtsp_service().is_online(did),
+                )
+            return PerceptionDevice(
+                did=did, name=did, device_type="camera", room_name="RTSP", online=False
+            )
         get_cached_camera = getattr(self._miot_proxy, "get_cached_camera", None)
         camera_info = get_cached_camera(did) if get_cached_camera is not None else None
         if camera_info is None:
@@ -519,6 +564,40 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 )
 
         return _on_decoded_video
+
+    def _make_rtsp_video_callback(self, did: str):
+        """RTSP decoded video callback: feeds decoded_video track in sync buffer."""
+
+        def _on_frame(
+            did_: str,
+            frame: NDArray[np.uint8],
+            wall_ms: int,
+            recv_unix_ms: int,
+            decoded_unix_ms: int,
+        ) -> None:
+            state = self._devices.get(did)
+            if not state:
+                return
+            unix_ms = self._wall_to_unix(state, wall_ms)
+            if unix_ms == 0:
+                state.epoch_delta = _unix_ms() - wall_ms
+                unix_ms = wall_ms + state.epoch_delta
+            decoded = DecodedVideoFrame(
+                frame=frame.copy(),
+                stream_ts=wall_ms,
+                wall_ms=wall_ms,
+                unix_ms=unix_ms,
+                recv_unix_ms=recv_unix_ms,
+                decoded_unix_ms=decoded_unix_ms,
+                decode_latency_ms=self._compute_decode_latency(
+                    recv_unix_ms, decoded_unix_ms
+                ),
+            )
+            state.sync_buffer.put(
+                "decoded_video", decoded, stream_ts=wall_ms, wall_ms=wall_ms
+            )
+
+        return _on_frame
 
     def _make_decoded_audio_callback(self, did: str):
         """Decoded audio frame callback: feeds decoded_audio track in sync buffer.

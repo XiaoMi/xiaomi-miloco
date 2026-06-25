@@ -8,6 +8,7 @@
 
 import * as realImpl from "./real";
 import { apiFetch } from "./client";
+import type { EventFrameItem } from "./real";
 import type {
   ActivityEvent,
   Device,
@@ -32,6 +33,7 @@ import type {
   PerfTraceRow,
   PerfWindow,
   Person,
+  RtspCameraInput,
   Scene,
   ScopeCamera,
   ScopeHome,
@@ -45,6 +47,7 @@ import type {
   OmniModelsResult,
 } from "@/lib/types";
 export type { ScopeHome };
+export type { EventFrameItem };
 
 const impl: typeof realImpl = realImpl;
 
@@ -250,6 +253,13 @@ export function eventClipUrl(event_id: string, device_id: string): string {
   return impl.realEventClipUrl(event_id, device_id);
 }
 
+export async function listEventFrames(
+  event_id: string,
+  device_id: string,
+): Promise<EventFrameItem[]> {
+  return impl.realListEventFrames(event_id, device_id);
+}
+
 /** 订阅 /api/events/stream SSE;返回 unsubscribe. onOpen 重连成功时触发(可选). */
 export function subscribeEvents(
   onEvent: (e: ActivityEvent) => void,
@@ -286,6 +296,21 @@ export async function toggleScopeCamera(
   inUse: boolean,
 ): Promise<void> {
   return impl.realToggleScopeCamera(dids, inUse);
+}
+
+export async function createRtspCamera(input: RtspCameraInput): Promise<ScopeCamera> {
+  return impl.realCreateRtspCamera(input);
+}
+
+export async function updateRtspCamera(
+  did: string,
+  input: Partial<RtspCameraInput>,
+): Promise<ScopeCamera> {
+  return impl.realUpdateRtspCamera(did, input);
+}
+
+export async function deleteRtspCamera(did: string): Promise<void> {
+  return impl.realDeleteRtspCamera(did);
 }
 
 export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> {

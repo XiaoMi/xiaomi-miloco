@@ -17,7 +17,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
@@ -118,6 +118,10 @@ class DispatcherSettings(BaseModel):
     )
 
 
+ModelCapability = Literal["text", "image", "video", "audio"]
+_MODEL_CAPABILITY_ORDER: tuple[ModelCapability, ...] = ("text", "image", "video", "audio")
+
+
 class OmniModelSettings(BaseModel):
     """多模态大模型（omni）配置，默认使用小米 MiMo。"""
 
@@ -137,6 +141,46 @@ class OmniModelSettings(BaseModel):
         default="",
         description="多模态模型 API Key；为空时视为未配置，插件与后端启动前校验",
     )
+    enabled: bool = Field(
+        default=True,
+        description="是否启用该模型档案参与能力自动路由",
+    )
+    capabilities: list[ModelCapability] = Field(
+        default=list(_MODEL_CAPABILITY_ORDER),
+        description="模型能力标签：text/image/video/audio。启用多个模型时按列表顺序选择首个匹配能力的模型。",
+    )
+    visual_mode: str = Field(
+        default="auto",
+        description="视觉输入模式：auto/frames/video。auto 当前等价 frames，video 保留旧 MP4 模式。",
+    )
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _default_capabilities(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return list(_MODEL_CAPABILITY_ORDER)
+        return value
+
+    @field_validator("capabilities")
+    @classmethod
+    def _validate_capabilities(cls, value: list[ModelCapability]) -> list[ModelCapability]:
+        seen = set()
+        normalized: list[ModelCapability] = []
+        for cap in _MODEL_CAPABILITY_ORDER:
+            if cap in value and cap not in seen:
+                normalized.append(cap)
+                seen.add(cap)
+        if not normalized:
+            raise ValueError("capabilities must contain at least one of: text, image, video, audio")
+        return normalized
+
+    @field_validator("visual_mode")
+    @classmethod
+    def _validate_visual_mode(cls, value: str) -> str:
+        mode = (value or "auto").strip().lower()
+        if mode not in {"auto", "frames", "video"}:
+            raise ValueError("visual_mode must be one of: auto, frames, video")
+        return mode
 
 
 class ModelSettings(BaseModel):

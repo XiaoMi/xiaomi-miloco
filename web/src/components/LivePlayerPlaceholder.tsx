@@ -11,12 +11,14 @@ import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import { IconCamera, IconX } from "@/lib/icons";
 import { useEscClose } from "@/hooks/useEscClose";
+import { resolveToken } from "@/api/client";
 
 interface Props {
   cameraName: string;
   roomName?: string;
   cameraDid: string;
   channel: number;
+  source?: "miot" | "rtsp";
   className?: string;
   disabled?: boolean;
   disabledMessage?: string;
@@ -29,6 +31,7 @@ export function LivePlayerPlaceholder({
   roomName,
   cameraDid,
   channel,
+  source = "miot",
   className,
   disabled = false,
   disabledMessage,
@@ -50,12 +53,15 @@ export function LivePlayerPlaceholder({
 
   // (did, channel) 变才重算 src,平时稳定。useMemo 比 render 阶段写 ref 更标准,
   // concurrent mode 重跑 render 时也安全(useMemo 自动跟 deps 一致)。
-  const refKey = `${cameraDid}|${channel}`;
-  const src = useMemo(
-    () =>
-      `/api/miot/watch?camera_id=${encodeURIComponent(cameraDid)}&channel=${channel}&embedded=1`,
-    [cameraDid, channel],
-  );
+  const refKey = `${source}|${cameraDid}|${channel}`;
+  const src = useMemo(() => {
+    if (source === "rtsp") {
+      const token = resolveToken();
+      const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+      return `/api/miot/rtsp_cameras/${encodeURIComponent(cameraDid)}/mjpeg${qs}`;
+    }
+    return `/api/miot/watch?camera_id=${encodeURIComponent(cameraDid)}&channel=${channel}&embedded=1`;
+  }, [cameraDid, channel, source]);
 
   // refKey 变(cam 或 channel 切换)时重置 loading mask,让"拉流中…"再显一次盖
   // 旧画面到新首帧之间的空隙。避免 React 复用 LivePlayer 实例换 cam 时 mask 不出。
@@ -108,10 +114,10 @@ export function LivePlayerPlaceholder({
   const useFixed = expanded;
   // iframe expanded 时 z-[61] 让它高于 portal modal scrim z-[60],避免同 z 时
   // DOM 顺序后绘制反而盖住 iframe(modal 占位 div 是 portal 子树后绘)。
-  const iframeClass = useFixed
+  const mediaClass = useFixed
     ? "z-[61] bg-black pointer-events-auto"
     : "absolute inset-0 w-full h-full pointer-events-none";
-  const iframeStyle: React.CSSProperties = useFixed
+  const mediaStyle: React.CSSProperties = useFixed
     ? rect
       ? {
           position: "fixed",
@@ -162,15 +168,26 @@ export function LivePlayerPlaceholder({
           </div>
         ) : (
           <>
-            <iframe
-              src={src}
-              title={t("devices.liveView", { name: cameraName })}
-              aria-hidden={useFixed ? undefined : "true"}
-              className={iframeClass}
-              style={iframeStyle}
-              allow="autoplay"
-              onLoad={() => setSmallLoaded(true)}
-            />
+            {source === "rtsp" ? (
+              <img
+                src={src}
+                alt={t("devices.liveView", { name: cameraName })}
+                aria-hidden={useFixed ? undefined : "true"}
+                className={`${mediaClass} object-cover`}
+                style={mediaStyle}
+                onLoad={() => setSmallLoaded(true)}
+              />
+            ) : (
+              <iframe
+                src={src}
+                title={t("devices.liveView", { name: cameraName })}
+                aria-hidden={useFixed ? undefined : "true"}
+                className={mediaClass}
+                style={mediaStyle}
+                allow="autoplay"
+                onLoad={() => setSmallLoaded(true)}
+              />
+            )}
             {!smallLoaded && !useFixed && (
               <div className="absolute inset-0 flex items-center justify-center text-text-tertiary text-caption pointer-events-none">
                 {t("devices.loadingStream")}

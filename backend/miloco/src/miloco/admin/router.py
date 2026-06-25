@@ -15,6 +15,7 @@ from pydantic import BaseModel, StrictBool
 
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
+from miloco.config.settings import ModelCapability
 from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
@@ -234,23 +235,25 @@ def _full_omni_payload() -> dict:
     """{active, profiles}：均 api_key 打码;profiles 标记哪套 active(按档案名 label 匹配)。"""
     m = get_settings().model
     active = m.omni
+
+    def _profile_payload(p, *, active_flag: bool | None = None) -> dict:
+        payload = {
+            "label": p.label,
+            "model": p.model,
+            "base_url": p.base_url,
+            "api_key_masked": _mask_api_key(p.api_key),
+            "has_key": bool(p.api_key),
+            "enabled": p.enabled,
+            "capabilities": list(p.capabilities),
+        }
+        if active_flag is not None:
+            payload["active"] = active_flag
+        return payload
+
     return {
-        "active": {
-            "label": active.label,
-            "model": active.model,
-            "base_url": active.base_url,
-            "api_key_masked": _mask_api_key(active.api_key),
-            "has_key": bool(active.api_key),
-        },
+        "active": _profile_payload(active),
         "profiles": [
-            {
-                "label": p.label,
-                "model": p.model,
-                "base_url": p.base_url,
-                "api_key_masked": _mask_api_key(p.api_key),
-                "has_key": bool(p.api_key),
-                "active": p.label == active.label,
-            }
+            _profile_payload(p, active_flag=p.label == active.label)
             for p in m.omni_profiles
         ],
     }
@@ -258,7 +261,14 @@ def _full_omni_payload() -> dict:
 
 def _profiles_as_dicts() -> list[dict]:
     return [
-        {"label": p.label, "model": p.model, "base_url": p.base_url, "api_key": p.api_key}
+        {
+            "label": p.label,
+            "model": p.model,
+            "base_url": p.base_url,
+            "api_key": p.api_key,
+            "enabled": p.enabled,
+            "capabilities": list(p.capabilities),
+        }
         for p in get_settings().model.omni_profiles
     ]
 
@@ -268,6 +278,8 @@ class OmniConfigBody(BaseModel):
     base_url: str
     model: str
     api_key: str | None = None  # 留空 = 沿用该档案原 key(不被打码值覆盖)
+    enabled: bool = True
+    capabilities: list[ModelCapability] | None = None
     original_label: str | None = None  # 正在编辑的档案原名(支持改名/定位);None=新增
     activate: bool = True  # True=同时设为当前生效;False=只入列表(激活由 /activate 负责)
 
@@ -316,7 +328,17 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
     if clash:
         raise HTTPException(status_code=409, detail=f"档案名「{label}」已存在")
     key = _key_by_label(orig or label, body.api_key)
-    entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
+    capabilities = body.capabilities
+    if capabilities is None and target:
+        capabilities = target.get("capabilities")
+    entry = {
+        "label": label,
+        "base_url": base_url,
+        "model": model,
+        "api_key": key,
+        "enabled": body.enabled,
+        "capabilities": capabilities or ["text", "image", "video", "audio"],
+    }
     if target:
         profiles[profiles.index(target)] = entry
     else:
@@ -345,6 +367,8 @@ def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verif
                         "model": p.model,
                         "base_url": p.base_url,
                         "api_key": p.api_key,
+                        "enabled": p.enabled,
+                        "capabilities": list(p.capabilities),
                     }
                 }
             )

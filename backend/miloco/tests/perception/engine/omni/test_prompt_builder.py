@@ -1,13 +1,17 @@
 """Tests for Omni Layer — Prompt Builder."""
 
+import base64
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 from miloco.perception.engine.omni.prompt_builder import (
     _batch_video_has_audio,
+    _encode_frame_images,
     _encode_video,
     _render_examples,
     _resolve_route,
+    _sample_frame_indices,
     build_prompt,
     build_query_prompt,
     build_stream_prompt,
@@ -80,8 +84,58 @@ class TestBuildPrompt:
         assert "wangshihao" in payload["user_content"]
         assert "位置: 书房" in payload["user_content"]  # room_name 作场景参考注入 U4
         assert "读书开灯" in payload["user_content"]  # 规则按 rule_name 渲染（# 待判断规则）
+        assert payload["visual_mode"] == "frames"
+        assert payload["frame_images"]
+        assert "video_base64" not in payload
+
+    def test_video_visual_mode_keeps_video_payload(self):
+        ep = _mock_edge_packet()
+        payload = build_prompt(ep, OmniContext(), visual_mode="video")
         assert payload["video_base64"] is not None
         assert payload["video_fps"] == ep.frame_info.fps
+        assert payload["visual_mode"] == "video"
+        assert "frame_images" not in payload
+
+    def test_frames_visual_mode_samples_up_to_five_ordered_frames(self):
+        ep = _mock_edge_packet()
+        ep.all_frames = [np.full((100, 100, 3), i, dtype=np.uint8) for i in range(9)]
+
+        payload = build_prompt(ep, OmniContext(), visual_mode="frames")
+
+        assert payload["visual_mode"] == "frames"
+        assert len(payload["frame_images"]) == 5
+        assert [img["frame_index"] for img in payload["frame_images"]] == [0, 2, 4, 6, 8]
+        assert all(img["media_type"] == "image/jpeg" for img in payload["frame_images"])
+
+    def test_frame_image_sequence_uses_high_low_precision_jpeg_sizes(self):
+        ep = _mock_edge_packet()
+        ep.all_frames = [
+            np.full((720, 1280, 3), i * 20, dtype=np.uint8)
+            for i in range(9)
+        ]
+
+        frame_images = _encode_frame_images(ep)
+
+        assert [img["frame_index"] for img in frame_images] == [0, 2, 4, 6, 8]
+        decoded_sizes = []
+        for image in frame_images:
+            raw = base64.b64decode(image["data"])
+            decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+            assert decoded is not None
+            decoded_sizes.append(decoded.shape[:2])
+        assert decoded_sizes == [
+            (512, 512),
+            (256, 256),
+            (256, 256),
+            (256, 256),
+            (512, 512),
+        ]
+
+    def test_frame_sampling_indices_are_deduplicated(self):
+        assert _sample_frame_indices(0) == []
+        assert _sample_frame_indices(1) == [0]
+        assert _sample_frame_indices(3) == [0, 1, 2]
+        assert _sample_frame_indices(9) == [0, 2, 4, 6, 8]
 
     def test_rule_rendered_by_name_without_evidence_suffix(self):
         """规则按 rule_name 渲染进「# 待判断规则」，不带已删除的 ｜允许证据= 后缀。"""
@@ -464,11 +518,12 @@ class TestAudioRoutePayload:
         assert "video_fps" not in payload
 
     def test_video_route_no_audio_field(self):
-        """video route：payload 含 video_base64 / video_fps，不含 audio_base64。"""
+        """video route 默认 frames 模式：payload 含 frame_images，不含 audio_base64。"""
         ep = _video_route_packet()
         payload = build_prompt(ep, OmniContext())
-        assert "video_base64" in payload
-        assert "video_fps" in payload
+        assert "frame_images" in payload
+        assert payload["visual_mode"] == "frames"
+        assert "video_base64" not in payload
         assert "audio_base64" not in payload
 
     def test_audio_route_drops_visual_fields(self):
@@ -511,13 +566,41 @@ class TestBuildMessagesContentBlocks:
         from miloco.perception.engine.omni.omni_client import _build_messages
 
         ep = _video_route_packet()
-        payload = build_prompt(ep, OmniContext())
+        payload = build_prompt(ep, OmniContext(), visual_mode="video")
         messages = _build_messages(payload)
         user_blocks = messages[1]["content"]
         types = [b["type"] for b in user_blocks]
 
         assert "video_url" in types
         assert "input_audio" not in types
+        video_block = next(b for b in user_blocks if b["type"] == "video_url")
+        assert video_block["video_url"]["url"].startswith("data:video/mp4;base64,")
+        assert video_block["video_url"]["detail"] == "default"
+        assert "fps" not in video_block
+        assert "media_resolution" not in video_block
+
+    def test_frames_route_emits_ordered_image_blocks(self):
+        from miloco.perception.engine.omni.omni_client import _build_messages
+
+        ep = _video_route_packet()
+        ep.all_frames = [np.full((100, 100, 3), i, dtype=np.uint8) for i in range(9)]
+        payload = build_prompt(ep, OmniContext(), visual_mode="frames")
+        messages = _build_messages(payload)
+        user_blocks = messages[1]["content"]
+        types = [b["type"] for b in user_blocks]
+
+        assert "video_url" not in types
+        image_blocks = [b for b in user_blocks if b["type"] == "image_url"]
+        assert len(image_blocks) == 5
+        assert all(b["image_url"]["url"].startswith("data:image/jpeg;base64,") for b in image_blocks)
+        labels = [b["text"] for b in user_blocks if b["type"] == "text" and b["text"].startswith("关键帧")]
+        assert labels == [
+            "关键帧 1/5 (frame_index=0)",
+            "关键帧 2/5 (frame_index=2)",
+            "关键帧 3/5 (frame_index=4)",
+            "关键帧 4/5 (frame_index=6)",
+            "关键帧 5/5 (frame_index=8)",
+        ]
 
 
 class TestFusedAudioRoute:
@@ -551,11 +634,37 @@ class TestFusedAudioRoute:
             context=OmniContext(),
             candidates=[],
             gallery_snapshot={},
+            visual_mode="video",
         )
         user_blocks = _multimodal_user_content(fused["messages"])
         types = [b["type"] for b in user_blocks]
         assert "video_url" in types
         assert "input_audio" not in types
+        video_block = next(b for b in user_blocks if b["type"] == "video_url")
+        assert video_block["video_url"]["url"].startswith("data:video/mp4;base64,")
+        assert video_block["video_url"]["detail"] == "default"
+        assert "fps" not in video_block
+        assert "media_resolution" not in video_block
+
+    def test_fused_frames_route_emits_image_blocks(self):
+        """frames 模式下 fused 主调用发关键帧 image_url，不发 video_url。"""
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        ep = _video_route_packet()
+        ep.all_frames = [np.full((100, 100, 3), i, dtype=np.uint8) for i in range(9)]
+        fused = build_fused_payload(
+            packets=[ep],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+            visual_mode="frames",
+        )
+        user_blocks = _multimodal_user_content(fused["messages"])
+        types = [b["type"] for b in user_blocks]
+        assert "video_url" not in types
+        image_blocks = [b for b in user_blocks if b["type"] == "image_url"]
+        assert len(image_blocks) == 5
+        assert all(b["image_url"]["url"].startswith("data:image/jpeg;base64,") for b in image_blocks)
 
 
 class TestMultimodalSanityCheck:

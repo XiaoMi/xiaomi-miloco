@@ -13,6 +13,7 @@ import {
   realListActivity,
   realGetUsageStats,
   realGetOmniConfig,
+  realUpdateRtspCamera,
   realUpdateOmniConfig,
   realActivateOmniConfig,
   realDeleteOmniConfig,
@@ -79,6 +80,7 @@ describe("realListActivity — /api/events 契约", () => {
         snapshot_count: 3,
         device_ids: ["cam_living_01"],
         rule_names: { r1: "[sitting_reminder] 坐姿监测" },
+        clip_kind: "frames",
       },
     ]);
 
@@ -91,6 +93,7 @@ describe("realListActivity — /api/events 契约", () => {
       device_ids: ["cam_living_01"],
       has_rule_hit: true,
       rule_names: { r1: "[sitting_reminder] 坐姿监测" },
+      clip_kind: "frames",
     });
   });
 
@@ -120,6 +123,56 @@ describe("realListActivity — /api/events 契约", () => {
     expect(calls[0]).toContain("before=1780999999999");
     expect(calls[0]).toContain("limit=100");
     expect(calls[0]).toContain("offset=50");
+  });
+});
+
+describe("RTSP 摄像头配置契约", () => {
+  it("PUT 更新 RTSP 摄像头：发送 name/url 并返回更新后的 ScopeCamera", async () => {
+    const cap: { method?: string; body: unknown; url?: string } = { body: null };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      cap.url = typeof input === "string" ? input : input.toString();
+      cap.method = init?.method;
+      cap.body = init?.body ? JSON.parse(init.body as string) : null;
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "ok",
+          data: {
+            did: "rtsp:abc",
+            name: "后门",
+            source: "rtsp",
+            url: "rtsp://127.0.0.1:8554/new",
+            room_name: "RTSP",
+            is_online: true,
+            in_use: true,
+            connected: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const camera = await realUpdateRtspCamera("rtsp:abc", {
+      name: "后门",
+      url: "rtsp://127.0.0.1:8554/new",
+    });
+
+    expect(cap.url).toContain("/api/miot/rtsp_cameras/rtsp%3Aabc");
+    expect(cap.method).toBe("PUT");
+    expect(cap.body).toEqual({
+      name: "后门",
+      url: "rtsp://127.0.0.1:8554/new",
+    });
+    expect(camera).toMatchObject({
+      did: "rtsp:abc",
+      name: "后门",
+      source: "rtsp",
+      url: "rtsp://127.0.0.1:8554/new",
+      roomName: "RTSP",
+      isOnline: true,
+      inUse: true,
+      connected: false,
+    });
   });
 });
 
@@ -286,10 +339,12 @@ describe("omni 配置契约 — 多档案", () => {
         base_url: "https://p/v1",
         api_key_masked: "sk-…cdef",
         has_key: true,
+        enabled: true,
+        capabilities: ["text", "image", "video", "audio"],
       },
       profiles: [
-        { label: "配置1", model: "m1", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, active: true },
-        { label: "配置2", model: "m2", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, active: false },
+        { label: "配置1", model: "m1", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, enabled: true, capabilities: ["text", "image", "video", "audio"], active: true },
+        { label: "配置2", model: "m2", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, enabled: false, capabilities: ["audio"], active: false },
       ],
     },
   };
@@ -316,6 +371,8 @@ describe("omni 配置契约 — 多档案", () => {
     expect(s.profiles).toHaveLength(2);
     expect(s.profiles[0].active).toBe(true);
     expect(s.profiles[1].model).toBe("m2");
+    expect(s.profiles[1].enabled).toBe(false);
+    expect(s.profiles[1].capabilities).toEqual(["audio"]);
   });
 
   it("PUT 保存：含 label、带 api_key、method=PUT、返回 state", async () => {
@@ -325,6 +382,8 @@ describe("omni 配置契约 — 多档案", () => {
       model: "m1",
       base_url: "https://p/v1",
       api_key: "sk-abcdef",
+      enabled: true,
+      capabilities: ["image", "audio"],
     });
     expect(cap.method).toBe("PUT");
     expect(cap.body).toEqual({
@@ -332,6 +391,8 @@ describe("omni 配置契约 — 多档案", () => {
       model: "m1",
       base_url: "https://p/v1",
       api_key: "sk-abcdef",
+      enabled: true,
+      capabilities: ["image", "audio"],
     });
     expect(s.active.model).toBe("m1");
   });
@@ -350,6 +411,28 @@ describe("omni 配置契约 — 多档案", () => {
       model: "m2",
       base_url: "https://p/v1",
       original_label: "配置2",
+    });
+  });
+
+  it("PUT 路由更新：可以发送 enabled=false 和能力子集", async () => {
+    const cap = captureFetch();
+    await realUpdateOmniConfig({
+      label: "配置2",
+      model: "m2",
+      base_url: "https://p/v1",
+      original_label: "配置2",
+      activate: false,
+      enabled: false,
+      capabilities: ["audio"],
+    });
+    expect(cap.body).toEqual({
+      label: "配置2",
+      model: "m2",
+      base_url: "https://p/v1",
+      original_label: "配置2",
+      activate: false,
+      enabled: false,
+      capabilities: ["audio"],
     });
   });
 

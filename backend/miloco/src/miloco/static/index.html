@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- referrer no-referrer:发起 cross-origin 资源请求(米家头像 CDN 等)时
+         不暴露住户 LAN IP+端口给三方。document-level 比逐个标签 referrerPolicy 保险。
+         robots noindex,nofollow:住户路由器穿透到公网时不被搜索引擎索引 token-injected HTML。 -->
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- 中文字体走系统通用栈（MiSans → 苹方 → 雅黑 → 系统 sans），不再硬依赖小米 CDN。
+         数字 / 英文 / IID 用 Geist Mono——自托管 woff2，见 src/styles/theme.css 的 @font-face。 -->
+    <link rel="preload" href="/fonts/GeistMono-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <title>我的家</title>
+    <script>
+      /* backend SPA handler 在返 index.html 前把下面字符串字面量
+         (MILOCO_INJECT_TOKEN_HERE) 替换成真实 token；浏览器代码 resolveToken
+         读这个全局变量。注释里的描述用变量名表述，不带下划线包裹的占位标记，
+         避免被 spa_handler 的 string replace 误伤。 */
+      window.__MILOCO_TOKEN__ = "__MILOCO_INJECT_TOKEN_HERE__";
+    </script>
+    <script type="module" crossorigin src="/assets/index-DoXMoEfl.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-BqyWff5t.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-rUH2ZtiH.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from miloco.observability.context import get_device_context
 
@@ -54,18 +54,24 @@ if TYPE_CHECKING:
 # clip 字节的容器/codec 类型,持久化层据此选 filename 与 Content-Type.
 # 主流 UI <video> 控件对两者都能渲染,但浏览器 / 一些播放器靠扩展名 sniff 容器,
 # 所以扩展名要跟实际容器一致(M4A 不能伪装成 .mp4).
-ClipKind = Literal["mp4", "m4a"]
+ClipKind = Literal["mp4", "m4a", "frames"]
+
+
+class FrameClip(TypedDict):
+    data: bytes
+    media_type: str
+    frame_index: int
 
 # device_id → (bytes, kind);None 表示当前 task 没启动收集.
 # 同 task 同 device 内多次 push 后入覆盖前者(omni 一次推理一个 device 只产一份 clip).
-_clip_sink: ContextVar[dict[str, tuple[bytes, ClipKind]] | None] = ContextVar(
+_clip_sink: ContextVar[dict[str, tuple[bytes | list[FrameClip], ClipKind]] | None] = ContextVar(
     "clip_sink", default=None
 )
 
 
 @contextmanager
 def snapshot_collector_scope(
-    sink: dict[str, tuple[bytes, ClipKind]],
+    sink: dict[str, tuple[bytes | list[FrameClip], ClipKind]],
 ) -> Iterator[None]:
     """在 with 块内开启 clip 字节收集,块结束自动 reset.
 
@@ -100,3 +106,16 @@ def push_clip_bytes(clip_bytes: bytes, kind: ClipKind) -> None:
     if ctx is None:
         return
     sink[ctx.device_id] = (clip_bytes, kind)
+
+
+def push_frame_sequence(frames: list[FrameClip]) -> None:
+    """把抽帧图片序列旁路给 meaningful_events 复用."""
+    if not frames:
+        return
+    sink = _clip_sink.get()
+    if sink is None:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    sink[ctx.device_id] = (frames, "frames")

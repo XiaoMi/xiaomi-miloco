@@ -9,6 +9,8 @@
 Endpoints:
 - `GET /api/events`                              — list_events
 - `GET /api/events/{event_id}/clip/{device_id}`  — locate_clip + FileResponse(Range/206)
+- `GET /api/events/{event_id}/frames/{device_id}` — list key frame URLs
+- `GET /api/events/{event_id}/frame/{device_id}/{index}` — get key frame JPEG
 - `GET /api/events/stream`                       — SSE
 """
 
@@ -123,6 +125,56 @@ async def get_event_clip(
         )
     if status == "gone":
         raise HTTPException(message="clip expired", status_code=410)
+    raise HTTPException(message="not found", status_code=404)
+
+
+@router.get(
+    "/{event_id}/frames/{device_id}",
+    summary="List event key frames for image-frame replay",
+    response_model=NormalResponse,
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def list_event_frames(
+    event_id: str,
+    device_id: str,
+    svc: EventsService = Depends(get_events_service),
+):
+    status, frames = await svc.list_frames(event_id, device_id)
+    if status == "found":
+        return NormalResponse(code=0, message="ok", data={"frames": frames or []})
+    if status == "gone":
+        raise HTTPException(message="frames expired", status_code=410)
+    raise HTTPException(message="not found", status_code=404)
+
+
+@router.get(
+    "/{event_id}/frame/{device_id}/{index}",
+    summary="Get one event key frame JPEG",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_event_frame(
+    event_id: str,
+    device_id: str,
+    index: int,
+    svc: EventsService = Depends(get_events_service),
+) -> FileResponse:
+    status, path, timestamp_ms = await svc.locate_frame(event_id, device_id, index)
+    if status == "found":
+        assert path is not None and timestamp_ms is not None
+        from datetime import datetime
+
+        local_dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        download_name = (
+            f"frame-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}-{index:03d}.jpg"
+        )
+        return FileResponse(
+            path=path,
+            media_type="image/jpeg",
+            filename=download_name,
+            content_disposition_type="inline",
+        )
+    if status == "gone":
+        raise HTTPException(message="frames expired", status_code=410)
     raise HTTPException(message="not found", status_code=404)
 
 

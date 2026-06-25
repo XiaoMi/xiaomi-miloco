@@ -77,4 +77,6 @@ CLAUDE.md
 openspec
 _workspace
 _local/
+.cache/
+.local/
 xaf/

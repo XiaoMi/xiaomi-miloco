@@ -66,6 +66,17 @@ def _make_clip(kind: str = "mp4") -> "tuple[bytes, str]":
     return b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100, kind
 
 
+def _make_frames() -> "tuple[list[dict], str]":
+    """造 frames payload，模拟抽帧图片识别路径旁路出的关键帧序列。"""
+    return (
+        [
+            {"data": b"jpeg-a", "media_type": "image/jpeg", "frame_index": 0},
+            {"data": b"jpeg-b", "media_type": "image/jpeg", "frame_index": 4},
+        ],
+        "frames",
+    )
+
+
 @pytest.mark.asyncio
 async def test_end_to_end_rule_hit(isolated_env, client):
     """rule_hit → _persist → /api/events 能查到 → /clip 能拉到."""
@@ -101,6 +112,40 @@ async def test_end_to_end_rule_hit(isolated_env, client):
     # 3. 非法 device_id → 404
     r = client.get(f"/api/events/{eid}/clip/cam_other")
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_frames_replay(isolated_env, client):
+    """frames 路径 → /api/events 暴露 clip_kind=frames → 可列出并读取关键帧。"""
+    from miloco.perception.client import _persist_meaningful_event
+
+    result = RealtimePerceptionResult(
+        matched_rules=[MatchedRule(rule_id="r1", reason="rtsp_motion")]
+    )
+    await _persist_meaningful_event(
+        result=result,
+        device_ids=["rtsp:cam-1"],
+        clips_by_device={"rtsp:cam-1": _make_frames()},
+    )
+
+    resp = client.get("/api/events")
+    events = resp.json()["data"]["events"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["snapshot_count"] == 1
+    assert event["clip_kind"] == "frames"
+
+    eid = event["event_id"]
+    frames_resp = client.get(f"/api/events/{eid}/frames/rtsp:cam-1")
+    assert frames_resp.status_code == 200
+    frames = frames_resp.json()["data"]["frames"]
+    assert [f["frame_index"] for f in frames] == [0, 4]
+    assert frames[0]["url"].endswith(f"/api/events/{eid}/frame/rtsp%3Acam-1/0")
+
+    frame_resp = client.get(f"/api/events/{eid}/frame/rtsp:cam-1/1")
+    assert frame_resp.status_code == 200
+    assert frame_resp.headers["content-type"] == "image/jpeg"
+    assert frame_resp.content == b"jpeg-b"
 
 
 @pytest.mark.asyncio

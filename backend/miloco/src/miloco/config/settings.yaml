@@ -29,7 +29,7 @@ model:
 
 # miloco 后端服务相关配置
 server:
-  host: "127.0.0.1"                                            # 后端监听 host(默认仅本机;开 LAN 改 0.0.0.0,详见 settings.py 注释)
+  host: "0.0.0.0"                                            # 后端监听 host(默认仅本机;开 LAN 改 0.0.0.0,详见 settings.py 注释)
   port: 1810                                                   # 后端监听端口
   log_level: "info"                                            # uvicorn 日志级别
   enable_console_logging: true                                 # 是否启用控制台日志

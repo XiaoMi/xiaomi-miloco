@@ -51,10 +51,12 @@ from .constants import (
     _USER_REF_BOUNDARY,
     _USER_REF_BOUNDARY_AUDIO,
 )
+from .content_blocks import image_url_block, video_url_block
 from .field_registry import SceneDescriptor, render_field_spec, render_schema
 from .home_profile_loader import get_home_profile_prefix
 
 RouteType = Literal["video", "audio"]
+VisualMode = Literal["auto", "frames", "video"]
 
 if TYPE_CHECKING:
     from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
@@ -99,6 +101,7 @@ def build_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_mode: VisualMode | None = None,
 ) -> dict:
     """Build the prompt payload for the omni model (single device).
 
@@ -108,34 +111,51 @@ def build_prompt(
 
     Returns dict with keys: system_prompt, user_content, video_base64, video_fps, crops.
     """
-    return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup)
+    return _build_payload(
+        [identity_packet], context, stream=False, label_lookup=label_lookup,
+        visual_mode=visual_mode,
+    )
 
 
 def build_batch_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_mode: VisualMode | None = None,
+    force_route: RouteType | None = None,
 ) -> dict:
     """Build the prompt payload for multi-device omni inference (same room)."""
-    return _build_payload(identity_packets, context, stream=False, label_lookup=label_lookup)
+    return _build_payload(
+        identity_packets, context, stream=False, label_lookup=label_lookup,
+        visual_mode=visual_mode,
+        force_route=force_route,
+    )
 
 
 def build_stream_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_mode: VisualMode | None = None,
 ) -> dict:
     """Build prompt payload for streaming omni call (single device, speeches first)."""
-    return _build_payload([identity_packet], context, stream=True, label_lookup=label_lookup)
+    return _build_payload(
+        [identity_packet], context, stream=True, label_lookup=label_lookup,
+        visual_mode=visual_mode,
+    )
 
 
 def build_batch_stream_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_mode: VisualMode | None = None,
 ) -> dict:
     """Build prompt payload for streaming omni call (multi-device, speeches first)."""
-    return _build_payload(identity_packets, context, stream=True, label_lookup=label_lookup)
+    return _build_payload(
+        identity_packets, context, stream=True, label_lookup=label_lookup,
+        visual_mode=visual_mode,
+    )
 
 
 def build_query_prompt(
@@ -143,6 +163,7 @@ def build_query_prompt(
     query: str,
     last_caption: str | None = None,
     label_lookup: "dict[str, str] | None" = None,
+    visual_mode: VisualMode | None = None,
 ) -> dict:
     """Build prompt for active user query — uses Identity results, free-text output."""
     parts = [
@@ -153,13 +174,19 @@ def build_query_prompt(
     home_profile = get_home_profile_prefix()
     if home_profile:
         parts.append(home_profile)
-    return {
+    resolved_visual_mode = _resolve_visual_mode(visual_mode)
+    payload = {
         "system_prompt": "\n\n".join(parts),
         "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
-        "video_base64": _encode_batch_video(identity_packets),
-        "video_fps": identity_packets[0].frame_info.fps if identity_packets else 1,
+        "visual_mode": resolved_visual_mode,
         "crops": [],
     }
+    if resolved_visual_mode == "video":
+        payload["video_base64"] = _encode_batch_video(identity_packets)
+        payload["video_fps"] = identity_packets[0].frame_info.fps if identity_packets else 1
+    else:
+        payload["frame_images"] = _encode_batch_frame_images(identity_packets)
+    return payload
 
 
 def build_fused_payload(
@@ -169,6 +196,7 @@ def build_fused_payload(
     gallery_snapshot: dict[str, "GallerySamples"],
     config: FusedPromptConfig | None = None,
     label_lookup: "dict[str, str] | None" = None,
+    visual_mode: VisualMode | None = None,
 ) -> dict:
     """构造 fused 主调用的 payload（身份识别和场景理解合并到同一次 omni 调用）。
 
@@ -245,7 +273,11 @@ def build_fused_payload(
         }
 
     fps = packets[0].frame_info.fps
-    video_b64 = _encode_batch_video(packets)
+    resolved_visual_mode = _resolve_visual_mode(visual_mode)
+    video_b64 = _encode_batch_video(packets) if resolved_visual_mode == "video" else None
+    frame_images = (
+        _encode_batch_frame_images(packets) if resolved_visual_mode == "frames" else []
+    )
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
@@ -263,6 +295,8 @@ def build_fused_payload(
         gallery_snapshot=gallery_snapshot,
         video_b64=video_b64,
         video_fps=fps,
+        frame_images=frame_images,
+        visual_mode=resolved_visual_mode,
         cfg=cfg,
         label_lookup=label_lookup,
     )
@@ -277,6 +311,7 @@ def build_fused_payload(
     return {
         "messages": messages,
         "video_fps": fps,
+        "visual_mode": resolved_visual_mode,
         "candidate_track_ids": [c.track_id for c in candidates],
     }
 
@@ -354,8 +389,11 @@ def _build_payload(
     stream: bool,
     label_lookup: "dict[str, str] | None" = None,
     include_home_profile: bool = True,
+    visual_mode: VisualMode | None = None,
+    force_route: RouteType | None = None,
 ) -> dict:
-    route = _resolve_route(packets)
+    route = force_route or _resolve_route(packets)
+    resolved_visual_mode = _resolve_visual_mode(visual_mode)
     # has_audio：video 路由下音频未过 gate 时为 False → schema 剥掉 speeches/env_sounds，
     # 避免模型就着画面脑补人声。audio 路由恒有音频。
     # has_speech：video 路由下 VAD 判无人声时为 False → 只剥 speeches、保留 env_sounds。
@@ -373,14 +411,18 @@ def _build_payload(
         "user_content": _build_user_content(
             packets, context, stream=stream, label_lookup=label_lookup,
         ),
+        "visual_mode": resolved_visual_mode,
         "crops": [],
     }
     if route == "audio":
         ep = packets[0]
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
     else:
-        base["video_base64"] = _encode_batch_video(packets)
-        base["video_fps"] = packets[0].frame_info.fps
+        if resolved_visual_mode == "video":
+            base["video_base64"] = _encode_batch_video(packets)
+            base["video_fps"] = packets[0].frame_info.fps
+        else:
+            base["frame_images"] = _encode_batch_frame_images(packets)
     return base
 
 
@@ -556,6 +598,8 @@ def _build_fused_user_content(
     gallery_snapshot: dict[str, "GallerySamples"],
     video_b64: str | None,
     video_fps: int,
+    frame_images: list[dict[str, str | int]],
+    visual_mode: Literal["frames", "video"],
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
 ) -> list[dict]:
@@ -671,18 +715,22 @@ def _build_fused_user_content(
     # 4. gallery（候选成员参考图，紧邻 video 便于视觉比对）
     content.extend(gallery_content)
 
-    # 5. 主 video
+    # 5. 主视觉输入
+    if visual_mode == "frames" and frame_images:
+        total = len(frame_images)
+        for pos, frame in enumerate(frame_images, start=1):
+            content.append({
+                "type": "text",
+                "text": f"关键帧 {pos}/{total} (frame_index={frame['frame_index']})",
+            })
+            content.append(image_url_block(str(frame["media_type"]), str(frame["data"])))
+
     # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短
     # base64 串, 入 payload 会让 omni 服务端 400 Multimodal data is corrupted。
     # 太短 → 跳过 video_url 块, 退化为"无视频窗口"(text + gallery 仍能识别)。
-    if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
-        content.append({
-            "type": "video_url",
-            "video_url": {"url": f"data:video/mp4;base64,{video_b64}"},
-            "fps": video_fps,
-            "media_resolution": "max",
-        })
-    elif video_b64:
+    if visual_mode == "video" and video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
+        content.append(video_url_block(video_b64))
+    elif visual_mode == "video" and video_b64:
         logger.warning(
             "event=fused_video_b64_too_short size=%d (< %d), 跳过 video_url 块, "
             "本窗口走 text-only 识别",
@@ -1061,6 +1109,11 @@ def _resolve_person_face_jpg(
 
 _VIDEO_SHORT_EDGE = 512
 _CROP_SIZE = (512, 512)
+_VISION_HIGH_PROCESS_IMAGE_SIZE = (512, 512)
+_VISION_LOW_PROCESS_IMAGE_SIZE = (256, 256)
+_VISION_CONTINUOUS_FRAMES_NUM = 5
+_VISION_HIGH_JPEG_QUALITY = 85
+_VISION_LOW_JPEG_QUALITY = 60
 
 # 多模态 payload sanity check 下限 — 防"非 None 但实际损坏"的 bytes 入 payload
 # 触发 omni 服务端 400 Multimodal data is corrupted。truthy check 只拦 None / b"",
@@ -1077,6 +1130,20 @@ _MIN_AUDIO_B64_LEN = 500
 # 总开关：False 时所有窗口都走 video route（等价于改动前的行为）。
 # 用于一键回滚 / A/B 对比 / 上游不兼容时的应急关闭。
 _AUDIO_ONLY_ENABLED = True
+
+
+def _resolve_visual_mode(visual_mode: VisualMode | None) -> Literal["frames", "video"]:
+    """Resolve configured visual mode. ``auto`` currently prefers image frames."""
+    if visual_mode is None:
+        try:
+            from miloco.config import get_settings
+
+            visual_mode = get_settings().model.omni.visual_mode
+        except Exception:
+            visual_mode = "auto"
+    if visual_mode == "video":
+        return "video"
+    return "frames"
 
 
 def _packet_audio_included(ep: IdentityPacket) -> bool:
@@ -1139,6 +1206,112 @@ def _encode_video(identity_packet: IdentityPacket) -> str | None:
         identity_packet.sample_rate,
         fps=identity_packet.frame_info.fps,
     )
+
+
+def _sample_frame_indices(frame_count: int, max_frames: int = 5) -> list[int]:
+    """Pick ordered frame indices that cover the full perception window."""
+    if frame_count <= 0 or max_frames <= 0:
+        return []
+    if frame_count <= max_frames:
+        return list(range(frame_count))
+    anchors = [0.0, 0.25, 0.5, 0.75, 1.0]
+    indices: list[int] = []
+    for ratio in anchors[:max_frames]:
+        idx = round((frame_count - 1) * ratio)
+        if idx not in indices:
+            indices.append(idx)
+    return indices
+
+
+def _center_crop_frame_to_size(
+    frame: NDArray[np.uint8],
+    target_size: tuple[int, int],
+) -> NDArray[np.uint8]:
+    target_w, target_h = target_size
+    h0, w0 = frame.shape[:2]
+    if h0 <= 0 or w0 <= 0:
+        raise ValueError("invalid frame size")
+
+    target_ratio = target_w / float(target_h)
+    src_ratio = w0 / float(h0)
+    if src_ratio > target_ratio:
+        crop_w = int(round(h0 * target_ratio))
+        crop_h = h0
+    else:
+        crop_w = w0
+        crop_h = int(round(w0 / target_ratio))
+
+    left = max(0, int(round((w0 - crop_w) / 2)))
+    top = max(0, int(round((h0 - crop_h) / 2)))
+    cropped = frame[top:top + crop_h, left:left + crop_w]
+    return cv2.resize(cropped, target_size, interpolation=cv2.INTER_AREA)
+
+
+def _is_low_precision_sequence_frame(sequence_index: int, sequence_len: int) -> bool:
+    if sequence_len <= 1:
+        return False
+    segment_pos = sequence_index % _VISION_CONTINUOUS_FRAMES_NUM
+    return segment_pos not in {0, _VISION_CONTINUOUS_FRAMES_NUM - 1}
+
+
+def _encode_frame_jpeg(
+    frame: NDArray[np.uint8],
+    *,
+    target_size: tuple[int, int] = _VISION_HIGH_PROCESS_IMAGE_SIZE,
+    quality: int = _VISION_HIGH_JPEG_QUALITY,
+) -> str | None:
+    resized = _center_crop_frame_to_size(frame, target_size)
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        resized,
+        [
+            cv2.IMWRITE_JPEG_QUALITY, max(1, min(95, quality)),
+            cv2.IMWRITE_JPEG_OPTIMIZE, 1,
+            cv2.IMWRITE_JPEG_PROGRESSIVE, 1,
+        ],
+    )
+    if not ok or encoded is None or len(encoded) < _MIN_JPEG_BYTES:
+        return None
+    return base64.b64encode(encoded.tobytes()).decode()
+
+
+def _encode_frame_images(identity_packet: IdentityPacket) -> list[dict[str, str | int]]:
+    frame_images: list[dict[str, str | int]] = []
+    frame_clip_images = []
+    frame_indices = _sample_frame_indices(len(identity_packet.all_frames))
+    for sequence_index, idx in enumerate(frame_indices):
+        low_precision = _is_low_precision_sequence_frame(sequence_index, len(frame_indices))
+        data = _encode_frame_jpeg(
+            identity_packet.all_frames[idx],
+            target_size=(
+                _VISION_LOW_PROCESS_IMAGE_SIZE
+                if low_precision
+                else _VISION_HIGH_PROCESS_IMAGE_SIZE
+            ),
+            quality=(
+                _VISION_LOW_JPEG_QUALITY
+                if low_precision
+                else _VISION_HIGH_JPEG_QUALITY
+            ),
+        )
+        if data is None:
+            logger.warning("event=frame_jpeg_encode_failed frame_index=%d", idx)
+            continue
+        frame_images.append({
+            "frame_index": idx,
+            "data": data,
+            "media_type": "image/jpeg",
+        })
+        frame_clip_images.append({
+            "frame_index": idx,
+            "data": base64.b64decode(data),
+            "media_type": "image/jpeg",
+        })
+    if frame_clip_images:
+        from miloco.perception.snapshot_context import push_frame_sequence
+
+        push_frame_sequence(frame_clip_images)
+    return frame_images
 
 
 def _encode_video_mp4(
@@ -1351,6 +1524,14 @@ def _encode_batch_video(edge_packets: list[IdentityPacket]) -> str | None:
         if encoded is not None:
             return encoded
     return None
+
+
+def _encode_batch_frame_images(edge_packets: list[IdentityPacket]) -> list[dict[str, str | int]]:
+    """Encode sampled keyframes from the first device that has frames."""
+    for ep in edge_packets:
+        if ep.all_frames:
+            return _encode_frame_images(ep)
+    return []
 
 
 def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, str]]:

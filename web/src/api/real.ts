@@ -20,6 +20,7 @@ import type {
   HomeStatus,
   PerceptionCamera,
   Person,
+  RtspCameraInput,
   Scene,
   ScopeCamera,
   ScopeHome,
@@ -919,6 +920,8 @@ export async function realSwitchScopeHome(homeId: string): Promise<void> {
 interface BackendScopeCamera {
   did: string;
   name: string | null;
+  source?: "miot" | "rtsp";
+  url?: string;
   room_name?: string | null;
   is_online: boolean;
   in_use: boolean;
@@ -932,11 +935,62 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
   return r.data.map((c) => ({
     did: c.did,
     name: c.name ?? c.did,
+    source: c.source ?? "miot",
+    url: c.url,
     roomName: c.room_name ?? undefined,
     isOnline: c.is_online,
     inUse: c.in_use,
     connected: c.connected,
   }));
+}
+
+export async function realCreateRtspCamera(
+  input: RtspCameraInput,
+): Promise<ScopeCamera> {
+  const r = await apiFetch<Normal<BackendScopeCamera>>("/api/miot/rtsp_cameras", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return {
+    did: r.data.did,
+    name: r.data.name ?? r.data.did,
+    source: r.data.source ?? "rtsp",
+    url: r.data.url,
+    roomName: r.data.room_name ?? "RTSP",
+    isOnline: r.data.is_online ?? false,
+    inUse: r.data.in_use ?? true,
+    connected: r.data.connected ?? false,
+  };
+}
+
+export async function realUpdateRtspCamera(
+  did: string,
+  input: Partial<RtspCameraInput>,
+): Promise<ScopeCamera> {
+  const r = await apiFetch<Normal<BackendScopeCamera>>(
+    `/api/miot/rtsp_cameras/${encodeURIComponent(did)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(input),
+    },
+  );
+  return {
+    did: r.data.did,
+    name: r.data.name ?? r.data.did,
+    source: r.data.source ?? "rtsp",
+    url: r.data.url,
+    roomName: r.data.room_name ?? "RTSP",
+    isOnline: r.data.is_online ?? false,
+    inUse: r.data.in_use ?? true,
+    connected: r.data.connected ?? false,
+  };
+}
+
+export async function realDeleteRtspCamera(did: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/miot/rtsp_cameras/${encodeURIComponent(did)}`,
+    { method: "DELETE" },
+  );
 }
 
 // 轻量刷新相机「云端 online」状态——list_cameras_with_state 只读内存缓存
@@ -980,8 +1034,14 @@ interface BackendMeaningfulEvent {
   snapshot_count: number;
   device_ids: string[];
   rule_names?: Record<string, string>;
-  /** 服务端根据落盘文件后缀计算:"mp4" 视频路径 / "m4a" audio-only / null 未落盘. */
-  clip_kind?: "mp4" | "m4a" | null;
+  /** 服务端根据落盘文件后缀计算:"mp4" 视频 / "m4a" 音频 / "frames" 关键帧 / null 未落盘. */
+  clip_kind?: "mp4" | "m4a" | "frames" | null;
+}
+
+export interface EventFrameItem {
+  index: number;
+  frame_index: number;
+  url: string;
 }
 
 export async function realListActivity(opts?: {
@@ -1030,6 +1090,23 @@ export function realEventClipUrl(
   const token = resolveToken();
   const base = `/api/events/${encodeURIComponent(event_id)}/clip/${encodeURIComponent(device_id)}`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+export async function realListEventFrames(
+  event_id: string,
+  device_id: string,
+): Promise<EventFrameItem[]> {
+  const token = resolveToken();
+  const base = `/api/events/${encodeURIComponent(event_id)}/frames/${encodeURIComponent(device_id)}`;
+  const url = token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  const resp = await apiFetch<Normal<{ frames: EventFrameItem[] }>>(url);
+  const frameToken = token ? `token=${encodeURIComponent(token)}` : "";
+  return resp.data.frames.map((frame) => ({
+    ...frame,
+    url: frameToken
+      ? `${frame.url}${frame.url.includes("?") ? "&" : "?"}${frameToken}`
+      : frame.url,
+  }));
 }
 
 /**
@@ -1349,12 +1426,14 @@ export async function realGetOmniConfig(): Promise<OmniConfigState> {
 export async function realUpdateOmniConfig(
   input: OmniConfigUpdate,
 ): Promise<OmniConfigState> {
-  const body: Record<string, string | boolean> = {
+  const body: Record<string, string | boolean | string[]> = {
     label: input.label,
     model: input.model,
     base_url: input.base_url,
   };
   if (input.api_key) body.api_key = input.api_key;
+  if (input.enabled !== undefined) body.enabled = input.enabled;
+  if (input.capabilities !== undefined) body.capabilities = input.capabilities;
   if (input.original_label !== undefined) body.original_label = input.original_label;
   if (input.activate !== undefined) body.activate = input.activate;
   const r = await apiFetch<Normal<OmniConfigState>>("/api/admin/omni-config", {

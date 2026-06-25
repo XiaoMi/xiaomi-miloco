@@ -1,0 +1,30 @@
+{
+  "debug": false,
+  "server": {
+    "url": "http://127.0.0.1:1810",
+    "token": "<miloco-server-token>",
+    "tls_verify": false,
+    "python_bin": "python3"
+  },
+  "agent": {
+    "webhook_url": "http://127.0.0.1:1811/miloco/webhook",
+    "auth_bearer": "<shared-webhook-token>"
+  },
+  "model": {
+    "omni": {
+      "model": "MiniMax-M3",
+      "base_url": "https://api.minimaxi.com/v1",
+      "api_key": "${MINIMAX_CN_API_KEY}"
+    }
+  },
+  "hermes": {
+    "gateway_url": "http://127.0.0.1:18789",
+    "miloco_home": "~/.openclaw/miloco",
+    "incoming_dir": "~/.hermes/messages/incoming"
+  },
+  "notify": {
+    "weixin_user_id": "",
+    "default_channel": "weixin"
+  },
+  "skills_dir": "~/.hermes/skills/smart-home/miloco"
+}

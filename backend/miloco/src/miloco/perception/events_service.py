@@ -11,10 +11,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import quote
 
 from miloco.perception.schema import MeaningfulEvent
 from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
@@ -107,6 +109,46 @@ class EventsService:
         # event metadata 在表里,但文件已被 cleanup 清掉(或写前预检跳过没落)
         return ("gone", None, None, None)
 
+    async def list_frames(
+        self, event_id: str, device_id: str
+    ) -> tuple[SnapshotStatus, list[dict] | None]:
+        row = self._dao.get_by_id(event_id)
+        if row is None or device_id not in row["device_ids"]:
+            return ("not_found", None)
+        device_dir = get_snapshot_root() / event_id / region_slug(device_id)
+        frame_entries = _load_frame_entries(device_dir)
+        frame_paths = [device_dir / entry["filename"] for entry in frame_entries]
+        if not frame_paths:
+            return ("gone", None)
+        frames = [
+            {
+                "index": idx,
+                "frame_index": int(frame_entries[idx].get("frame_index", idx)),
+                "url": (
+                    f"/api/events/{quote(event_id, safe='')}/frame/"
+                    f"{quote(device_id, safe='')}/{idx}"
+                ),
+            }
+            for idx, path in enumerate(frame_paths)
+        ]
+        return ("found", frames)
+
+    async def locate_frame(
+        self, event_id: str, device_id: str, index: int
+    ) -> tuple[SnapshotStatus, Path | None, int | None]:
+        row = self._dao.get_by_id(event_id)
+        if row is None or device_id not in row["device_ids"]:
+            return ("not_found", None, None)
+        if index < 0:
+            return ("not_found", None, None)
+        device_dir = get_snapshot_root() / event_id / region_slug(device_id)
+        frame_paths = [device_dir / entry["filename"] for entry in _load_frame_entries(device_dir)]
+        if not frame_paths:
+            return ("gone", None, None)
+        if index >= len(frame_paths):
+            return ("not_found", None, None)
+        return ("found", frame_paths[index], row["timestamp"])
+
     @staticmethod
     def _probe_clip_kind(snapshot_root: Path, event_id: str, device_ids: list[str]) -> str | None:
         """Stat 落盘文件后缀,推断 clip 容器类型.
@@ -116,7 +158,7 @@ class EventsService:
         共识 — 见 prompt_builder._is_audio_only;所以多 device 间 kind 一致,
         取第一个有效结果即可).
 
-        Returns: "mp4" / "m4a" / None(未落盘 / 已被 cleanup 清掉).
+        Returns: "mp4" / "m4a" / "frames" / None(未落盘 / 已被 cleanup 清掉).
         """
         if not device_ids:
             return None
@@ -125,6 +167,8 @@ class EventsService:
             for filename, kind in (("clip.mp4", "mp4"), ("clip.m4a", "m4a")):
                 if (device_dir / filename).exists():
                     return kind
+            if any(device_dir.glob("frame_*.jpg")):
+                return "frames"
         return None
 
     @staticmethod
@@ -148,3 +192,23 @@ class EventsService:
             rule_names=row.get("rule_names") or {},
             clip_kind=clip_kind,
         )
+
+
+def _load_frame_entries(device_dir: Path) -> list[dict]:
+    manifest = device_dir / "frames.json"
+    if manifest.exists():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            entries = data.get("frames") or []
+            return [
+                entry for entry in entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("filename"), str)
+                and (device_dir / entry["filename"]).exists()
+            ]
+        except (OSError, json.JSONDecodeError):
+            pass
+    return [
+        {"index": idx, "frame_index": idx, "filename": path.name}
+        for idx, path in enumerate(sorted(device_dir.glob("frame_*.jpg")))
+    ]

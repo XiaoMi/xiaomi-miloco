@@ -92,6 +92,26 @@
               "type": "string",
               "default": "",
               "description": "多模态模型 API Key；为空时视为未配置，插件与后端启动前校验"
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "是否启用该模型档案参与能力自动路由"
+            },
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["text", "image", "video", "audio"]
+              },
+              "default": ["text", "image", "video", "audio"],
+              "description": "模型能力标签：text/image/video/audio。启用多个模型时按列表顺序选择首个匹配能力的模型。"
+            },
+            "visual_mode": {
+              "type": "string",
+              "enum": ["auto", "frames", "video"],
+              "default": "auto",
+              "description": "视觉输入模式：auto/frames/video。auto 当前等价 frames，video 保留旧 MP4 模式。"
             }
           },
           "required": ["model", "base_url", "api_key"]

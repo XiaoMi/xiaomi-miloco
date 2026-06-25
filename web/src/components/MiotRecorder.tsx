@@ -4,9 +4,8 @@
  * 实现:
  *   1. iframe 嵌 backend 的 /api/miot/watch 仅做"取景器"。用户看到画面 →
  *      知道镜头框住了什么 → 点录制。iframe 不再参与录像本身。
- *   2. 点录制 → fetch POST /api/miot/record_clip?camera_id&channel&duration_ms,
- *      后端复用已存在的 SDK 订阅(perception 也在 fan-out)→ 拿到第一帧 BGR
- *      就开录 → N 秒后 libx264 flush + mp4 mux 完整返回。
+ *   2. 点录制 → MiOT 摄像头走 /api/miot/record_clip,RTSP 摄像头走
+ *      /api/miot/rtsp_cameras/{did}/record_clip。两条后端路径都返回 mp4 blob。
  *   3. blob 直接喂回 onDone() → EnrollFlow 走 /extract 拿候选帧。
  *
  * 相比"在浏览器侧抓 canvas + MediaRecorder"的老方案:
@@ -24,6 +23,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PerceptionCamera } from "@/lib/types";
 import { authHeaders } from "@/api/register";
+import { resolveToken } from "@/api/client";
 
 interface Props {
   cameras: PerceptionCamera[];
@@ -37,6 +37,30 @@ const RECORD_SECONDS = 15;
 // 响应序列化 + 网络回程的时间——否则前后端在同一 t 触发超时,后端 504 文案
 // 会被前端的 AbortError 静默分支吞掉,用户只看到 preview 又冒出来。
 const FETCH_TIMEOUT_MS = (RECORD_SECONDS + 8 + 5) * 1000;
+
+export function resolveRecorderEndpoints(
+  did: string,
+  channel: number,
+  durationMs: number,
+): { previewUrl: string; recordUrl: string; previewKind: "iframe" | "mjpeg" } {
+  if (did.startsWith("rtsp:")) {
+    const base = `/api/miot/rtsp_cameras/${encodeURIComponent(did)}`;
+    return {
+      previewUrl: `${base}/mjpeg`,
+      recordUrl: `${base}/record_clip?duration_ms=${durationMs}`,
+      previewKind: "mjpeg",
+    };
+  }
+  return {
+    previewUrl:
+      `/api/miot/watch?camera_id=${encodeURIComponent(did)}` +
+      `&channel=${channel}&embedded=1`,
+    recordUrl:
+      `/api/miot/record_clip?camera_id=${encodeURIComponent(did)}` +
+      `&channel=${channel}&duration_ms=${durationMs}`,
+    previewKind: "iframe",
+  };
+}
 
 export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
   const { t } = useTranslation();
@@ -54,8 +78,17 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
   const [iframeReady, setIframeReady] = useState(false);
 
   const channel = 0; // 第一版只用通道 0
-  const watchUrl = selectedDid
-    ? `/api/miot/watch?camera_id=${encodeURIComponent(selectedDid)}&channel=${channel}&embedded=1`
+  const endpoints = selectedDid
+    ? resolveRecorderEndpoints(selectedDid, channel, RECORD_SECONDS * 1000)
+    : null;
+  const previewUrl = endpoints
+    ? endpoints.previewKind === "mjpeg"
+      ? (() => {
+          const token = resolveToken();
+          const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+          return `${endpoints.previewUrl}${qs}`;
+        })()
+      : endpoints.previewUrl
     : "";
 
   // 录制中允许中止:abort 立即掐断前端 fetch、回到 preview。注意后端 record_clip
@@ -107,10 +140,7 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
       ctrl.abort();
     }, FETCH_TIMEOUT_MS);
     try {
-      const url =
-        `/api/miot/record_clip?camera_id=${encodeURIComponent(selectedDid)}` +
-        `&channel=${channel}&duration_ms=${RECORD_SECONDS * 1000}`;
-      const r = await fetch(url, {
+      const r = await fetch(endpoints?.recordUrl ?? "", {
         method: "POST",
         headers: authHeaders(),
         signal: ctrl.signal,
@@ -186,15 +216,22 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
           )}
 
           <div className="rounded-xl overflow-hidden bg-black mb-3 aspect-video relative">
-            {watchUrl && (
+            {previewUrl && endpoints?.previewKind === "mjpeg" ? (
+              <img
+                src={previewUrl}
+                alt={t("account.watchTitle")}
+                className="w-full h-full object-contain"
+                onLoad={() => setIframeReady(true)}
+              />
+            ) : previewUrl ? (
               <iframe
-                src={watchUrl}
+                src={previewUrl}
                 title={t("account.watchTitle")}
                 className="w-full h-full"
                 style={{ border: "none" }}
                 onLoad={() => setIframeReady(true)}
               />
-            )}
+            ) : null}
             {stage === "recording" && (
               <>
                 <div className="absolute bottom-5 left-3 px-3 py-1.5 rounded-lg bg-error text-white inline-flex items-center gap-2 shadow-lg">

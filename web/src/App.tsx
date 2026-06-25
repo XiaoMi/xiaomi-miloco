@@ -5,6 +5,8 @@
 import { useEffect, useState } from "react";
 import {
   getHomeStatus,
+  createRtspCamera,
+  updateRtspCamera,
   listActivity,
   listCameras,
   listDevices,
@@ -231,6 +233,34 @@ function MainApp() {
                 // channelByDid useMemo + iframe React diff 双层防 src 变化触发
                 // iframe 重 mount,reload cameras 安全。新接入 cam 时 cameras.reload
                 // 才能拿到 channel,不 reload 会让多通道 cam 永远兜底 channel=0。
+                scopeCameras.reload();
+                cameras.reload();
+                status.reload();
+              }}
+              onAddRtspCamera={async (input) => {
+                try {
+                  await createRtspCamera(input);
+                  toast(t("hero.rtspAdded"), "ok");
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("hero.rtspAddFailed"),
+                    "warn",
+                  );
+                }
+                scopeCameras.reload();
+                cameras.reload();
+                status.reload();
+              }}
+              onUpdateRtspCamera={async (did, input) => {
+                try {
+                  await updateRtspCamera(did, input);
+                  toast(t("hero.rtspUpdated"), "ok");
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("hero.rtspUpdateFailed"),
+                    "warn",
+                  );
+                }
                 scopeCameras.reload();
                 cameras.reload();
                 status.reload();

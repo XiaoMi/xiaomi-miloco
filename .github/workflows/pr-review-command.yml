@@ -26,29 +26,13 @@ jobs:
   authorize:
     if: >-
       github.event.issue.pull_request != null
-      && startsWith(github.event.comment.body, '/review')
+      && (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review '))
       && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     outputs:
       head_sha: ${{ steps.gate.outputs.head_sha }}
-      matched: ${{ steps.check.outputs.matched }}
     steps:
-      - name: 校验评论命令
-        id: check
-        env:
-          COMMENT_BODY: ${{ github.event.comment.body }}
-        run: |
-          BODY="$(printf '%s' "$COMMENT_BODY" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-          if [ "$BODY" = "/review" ] || printf '%s' "$BODY" | grep -q '^/review '; then
-            echo "matched=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "matched=false" >> "$GITHUB_OUTPUT"
-            SAFE_BODY="$(printf '%s' "$BODY" | tr '\n' ' ')"
-            echo "::notice::跳过：评论内容不匹配 /review 命令（trim 后为: ${SAFE_BODY}）"
-          fi
-
       - name: 钉死 head SHA
-        if: steps.check.outputs.matched == 'true'
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,17 +44,15 @@ jobs:
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
       - name: 回应 👀 表示已收到
-        if: success() && steps.check.outputs.matched == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
             -f content=eyes >/dev/null 2>&1 || true
 
-  # needs: authorize —— authorize 被 if 跳过（非授权人）或评论不匹配时本 job 也随之跳过
+  # needs: authorize —— authorize 被 if 跳过（非授权人）时本 job 也随之跳过，无需再设 if
   review:
     needs: authorize
-    if: needs.authorize.outputs.matched == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
