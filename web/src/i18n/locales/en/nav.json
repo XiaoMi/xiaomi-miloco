@@ -13,5 +13,5 @@
     "usageHint": "Model & token usage",
     "loginMiot": "Tap to sign in to Xiaomi Home",
     "bound": "Connected"
-  }
-}
+  ,"rules":"Rules","rulesHint":"Automation rules"}
+,"rules":"Rules","rulesHint":"Automation rules"}
