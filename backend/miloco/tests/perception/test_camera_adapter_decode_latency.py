@@ -30,13 +30,19 @@ def _make_state(
 
 class _CachedCamera:
     def __init__(
-        self, *, did: str = "cam1", name: str = "cam1", room_name: str = "r2"
+        self,
+        *,
+        did: str = "cam1",
+        name: str = "cam1",
+        room_name: str = "r2",
+        online: bool = True,
+        lan_online: bool | None = True,
     ):
         self._payload = {
             "did": did,
             "name": name,
-            "online": True,
-            "lan_online": True,
+            "online": online,
+            "lan_online": lan_online,
             "room_name": room_name,
         }
 
@@ -233,6 +239,32 @@ class TestBuildDeviceDataAggregation:
         assert dd.meta.name == "cam-new"
         assert dd.meta.room_name == "r-new"
 
+    def test_current_source_uses_cloud_online_when_lan_unavailable(self):
+        adapter = CameraDeviceAdapter(
+            miot_proxy=_Proxy(
+                _CachedCamera(
+                    name="cam-new", room_name="r-new", online=True, lan_online=False
+                )
+            )
+        )  # type: ignore[arg-type]
+        state = _make_state()
+        frame = DecodedVideoFrame(
+            frame=np.zeros((2, 2, 3), dtype=np.uint8),
+            stream_ts=100,
+            wall_ms=100,
+            unix_ms=100,
+            decode_latency_ms=10.0,
+        )
+        tracks = {
+            "decoded_video": [self._fragment(frame, frame.stream_ts, frame.wall_ms)],
+            "decoded_audio": [],
+        }
+
+        dd = adapter._build_device_data(state, tracks, 100, 200)
+
+        assert dd is not None
+        assert dd.meta.online is True
+
     def test_get_connected_devices_reads_latest_cached_metadata(self):
         proxy = _Proxy(_CachedCamera(name="cam-old", room_name="r-old"))
         adapter = CameraDeviceAdapter(miot_proxy=proxy)  # type: ignore[arg-type]
@@ -246,6 +278,15 @@ class TestBuildDeviceDataAggregation:
         assert first.room_name == "r-old"
         assert second.name == "cam-new"
         assert second.room_name == "r-new"
+
+    def test_get_connected_devices_uses_cloud_online_when_lan_unavailable(self):
+        proxy = _Proxy(_CachedCamera(online=True, lan_online=False))
+        adapter = CameraDeviceAdapter(miot_proxy=proxy)  # type: ignore[arg-type]
+        adapter._devices["cam1"] = _make_state()
+
+        source = adapter.get_connected_devices()["cam1"]
+
+        assert source.online is True
 
     def test_current_source_falls_back_to_did_without_cache(self):
         adapter = CameraDeviceAdapter(miot_proxy=object())  # type: ignore[arg-type]

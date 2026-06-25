@@ -98,7 +98,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self,
         all_devices: dict | None = None,
         online_only: bool = True,
-        require_lan: bool = True,
+        require_lan: bool = False,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         if not self._miot_proxy.is_authenticated:
@@ -115,7 +115,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         all_devices: dict,
         *,
         online_only: bool = True,
-        require_lan: bool = True,
+        require_lan: bool = False,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         """Filter camera-type devices from a full device dict.
@@ -152,11 +152,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
             camera_info = CameraInfo.model_validate(info.model_dump())
 
-            device_online = camera_info.online and camera_info.lan_online
-            # require_lan=False 时只看云端 online：放过 lan_online 陈旧成 false 的
-            # 卡死态相机（云端 online=True，refresh 能救活），但排除云端就离线
-            # （拔电/断网）的相机——给「应连数」判据用，避免离线相机致 refresh 空转。
-            connectable = device_online if require_lan else camera_info.online
+            cloud_online = bool(camera_info.online)
+            lan_reachable = bool(camera_info.lan_online)
+            # 默认只看云端 online。lan_online 仅表示 LAN 发现结果，WSL/NAT 或
+            # relay 场景下可能为 false/unknown；真正不可出帧由连接/watchdog 判定。
+            # require_lan=True 保留给需要强制 LAN 可达的内部调用。
+            connectable = (
+                cloud_online and lan_reachable if require_lan else cloud_online
+            )
             if online_only and not connectable:
                 continue
 
@@ -166,7 +169,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 device_type="camera",
                 room_id=camera_info.room_name,
                 room_name=camera_info.room_name,
-                online=device_online,
+                online=cloud_online,
             )
 
         if not cap or len(result) <= MAX_ENABLED_CAMERAS:
@@ -361,7 +364,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             device_type="camera",
             room_id=camera.room_name,
             room_name=camera.room_name,
-            online=camera.online and camera.lan_online,
+            online=bool(camera.online),
         )
 
     def _build_device_data(
