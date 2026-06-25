@@ -1,0 +1,15 @@
+{
+  "settings": {
+    "qualityTitle": "音视频质量",
+    "qualityDesc": "切换感知引擎的音视频质量预设。高质量模式可大幅提升识别精度，但会增加 Token 消耗。切换后需重启服务生效。",
+    "presetDefault": "默认模式",
+    "presetDefaultDesc": "省 Token，适合日常监控",
+    "presetHigh": "高质量模式",
+    "presetHighDesc": "高清晰度，识别更精准，Token ~4.5x",
+    "currentBadge": "当前",
+    "videoLabel": "视频: {{quality}} / 短边 {{edge}}px",
+    "audioLabel": "音频: {{rate}}kHz",
+    "loadFailed": "加载失败",
+    "setFailed": "设置失败"
+  }
+}

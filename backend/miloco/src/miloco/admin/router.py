@@ -11,6 +11,8 @@ import time
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Literal
+
 from pydantic import BaseModel, StrictBool
 
 from miloco.admin import log_pack as _log_pack_mod
@@ -520,3 +522,114 @@ async def list_omni_models(
             code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
         )
     return NormalResponse(code=0, message="ok", data=await _fetch_models(base_url, api_key))
+
+
+# ---- 音视频质量预设 ----
+
+
+class QualityPresetBody(BaseModel):
+    preset: Literal["default", "high"]
+
+
+@router.get(
+    "/perception-quality",
+    summary="获取音视频质量预设",
+    response_model=NormalResponse,
+)
+async def get_perception_quality(current_user: str = Depends(verify_token)):
+    """获取当前音视频质量预设及可用选项。"""
+    from miloco.perception.quality import get_quality_params, list_presets
+
+    settings = get_settings()
+    current_preset = settings.perception.quality.preset
+    params = get_quality_params(current_preset)
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data={
+            "current": current_preset,
+            "params": {
+                "video_short_edge": params.video_short_edge,
+                "audio_sample_rate": params.audio_sample_rate,
+                "camera_video_quality": "HIGH" if params.camera_video_quality == 3 else "LOW",
+            },
+            "presets": list_presets(),
+        },
+    )
+
+
+@router.put(
+    "/perception-quality",
+    summary="设置音视频质量预设",
+    response_model=NormalResponse,
+)
+async def set_perception_quality(
+    body: QualityPresetBody,
+    current_user: str = Depends(verify_token),
+):
+    """设置音视频质量预设，需重启服务生效。"""
+    from miloco.perception.quality import get_quality_params, list_presets
+
+    preset = body.preset.strip().lower()
+    available = list_presets()
+    if preset not in available:
+        return NormalResponse(
+            code=1001,
+            message=f"无效预设: {preset}，可用: {list(available.keys())}",
+            data=None,
+        )
+
+    # 写入 config.json（原子写 + 文件锁防并发）
+    import fcntl
+    import json
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from miloco.utils.paths import miloco_home
+
+    config_path = miloco_home() / "config.json"
+    lock_path = config_path.with_suffix(".lock")
+
+    with open(lock_path, "w") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        try:
+            config = {}
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+
+            if "perception" not in config:
+                config["perception"] = {}
+            if "quality" not in config["perception"]:
+                config["perception"]["quality"] = {}
+            config["perception"]["quality"]["preset"] = preset
+
+            # 原子写：先写临时文件再 rename
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(config_path.parent), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                os.rename(tmp_path, str(config_path))
+            except BaseException:
+                os.unlink(tmp_path)
+                raise
+        finally:
+            fcntl.flock(lock_f, fcntl.LOCK_UN)
+
+    params = get_quality_params(preset)
+    return NormalResponse(
+        code=0,
+        message=f"已设置为 {preset}，重启服务后生效",
+        data={
+            "preset": preset,
+            "params": {
+                "video_short_edge": params.video_short_edge,
+                "audio_sample_rate": params.audio_sample_rate,
+                "camera_video_quality": "HIGH" if params.camera_video_quality == 3 else "LOW",
+            },
+            "restart_required": True,
+        },
+    )
