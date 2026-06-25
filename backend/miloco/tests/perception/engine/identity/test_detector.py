@@ -348,10 +348,22 @@ class TestCalculateIou:
         assert iou == pytest.approx(2500 / 40000, abs=1e-5)
 
     def test_zero_area_box(self):
-        """零面积框 → union=0 → IoU=0。"""
+        """零面积框（无交集）→ IoU = 0.0。"""
         det = _make_detector()
         d1 = Detection(x=10, y=10, w=0, h=0, confidence=0.9, class_id=0)
         d2 = Detection(x=10, y=10, w=50, h=50, confidence=0.8, class_id=0)
+        # d1 退化为点 (10,10)，与 d2 无交集 → inter_area=0；
+        # union = 0 + 2500 - 0 = 2500（非 0），结果走正常分支返回 0/2500=0。
+        assert det._calculate_iou(d1, d2) == 0.0
+
+    def test_zero_union_returns_zero(self):
+        """两个零面积框重合 → union=0 → 命中 `else 0` 兜底分支。"""
+        det = _make_detector()
+        # 两框均为零面积且坐标相同：area1=area2=inter=0 → union=0，
+        # 专门锁定 detector.py 中 `if union_area > 0 else 0` 的防御分支，
+        # 若该兜底被误删（变为除零），本用例会变红。
+        d1 = Detection(x=10, y=10, w=0, h=0, confidence=0.9, class_id=0)
+        d2 = Detection(x=10, y=10, w=0, h=0, confidence=0.8, class_id=0)
         assert det._calculate_iou(d1, d2) == 0.0
 
 
