@@ -582,55 +582,6 @@ class MilocoSettings(BaseSettings):
             self.perception = self.perception.model_copy(update={"engine": new_engine})
         return self
 
-    # ── server.url 与 server.host/port 一致性校验 ────────────────────────
-
-    @model_validator(mode="after")
-    def _validate_server_url_host_port(self) -> "MilocoSettings":
-        """检查 server.url 与 server.host/port 的一致性。
-
-        当 server.host 为 '0.0.0.0' 时，仅检查 port 是否一致；
-        否则同时检查 host 和 port。
-        """
-        from urllib.parse import urlparse
-
-        url = self.server.url
-        try:
-            parsed = urlparse(url)
-            url_host = parsed.hostname or "localhost"
-            url_port = parsed.port
-        except ValueError:
-            logger.warning("无法解析 server.url: %s，跳过一致性校验", url)
-            return self
-
-        if url_port is None:
-            # 根据协议推断默认端口
-            if parsed.scheme == "http":
-                url_port = 80
-            elif parsed.scheme == "https":
-                url_port = 443
-            # 对于其他协议，保持 None，后续跳过端口检查
-
-        # 将 localhost 映射为 127.0.0.1
-        if url_host == "localhost":
-            url_host = "127.0.0.1"
-
-        host = self.server.host
-        if host == "localhost":
-            host = "127.0.0.1"
-        # host 为 0.0.0.0 时，后端监听所有接口，url 可以为任意 host，仅检查 port
-        port_mismatch = url_port is not None and url_port != self.server.port
-        host_mismatch = host != "0.0.0.0" and url_host != host
-        if port_mismatch or host_mismatch:
-            logger.warning(
-                "server.url (%s) 与 server.host (%s) / server.port (%d) 配置不一致，"
-                "CLI 使用 server.url 访问后端，后端监听 server.host:server.port，"
-                "不一致将导致健康检查失败。",
-                url,
-                self.server.host,
-                self.server.port,
-            )
-        return self
-
     # ── 配置源编排 ──────────────────────────────────────────────────────
 
     @classmethod
