@@ -11,6 +11,8 @@
     "activityHint": "回看发生过的事",
     "usage": "模型",
     "usageHint": "看模型和 Token 开销",
+    "settings": "设置",
+    "settingsHint": "音视频质量等配置",
     "loginMiot": "点击登录米家",
     "bound": "已绑定"
   }

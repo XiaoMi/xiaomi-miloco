@@ -11,6 +11,8 @@
     "activityHint": "Review what happened",
     "usage": "Models",
     "usageHint": "Model & token usage",
+    "settings": "Settings",
+    "settingsHint": "Audio & video quality",
     "loginMiot": "Tap to sign in to Xiaomi Home",
     "bound": "Connected"
   }

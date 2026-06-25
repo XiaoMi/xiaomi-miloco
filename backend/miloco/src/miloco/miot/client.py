@@ -20,6 +20,7 @@ from miot.spec import MIoTSpecTypeLevel
 from miot.types import (
     MIoTActionParam,
     MIoTCameraInfo,
+    MIoTCameraVideoQuality,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
     MIoTGetPropertyParam,
@@ -546,7 +547,21 @@ class MiotProxy:
         # 此时 start_async 是正常的初始化,不会干扰已有连接。
         camera_instance = await self._get_camera_instance(camera_info)
         if camera_instance is not None:
-            await camera_instance.start_async(enable_reconnect=True, enable_audio=True)
+            # 从配置读取画质预设(懒加载缓存)
+            quality = getattr(self, "_cached_camera_quality", None)
+            if quality is None:
+                try:
+                    from miloco.config import get_settings
+                    from miloco.perception.quality import get_quality_params
+
+                    settings = get_settings()
+                    preset = settings.perception.quality.preset
+                    params = get_quality_params(preset)
+                    quality = MIoTCameraVideoQuality(params.camera_video_quality)
+                except Exception:
+                    quality = MIoTCameraVideoQuality.LOW
+                self._cached_camera_quality = quality
+            await camera_instance.start_async(qualities=quality, enable_reconnect=True, enable_audio=True)
             camera_img_manager = CameraVisionHandler(
                 camera_info,
                 camera_instance,
