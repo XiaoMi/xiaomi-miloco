@@ -1,11 +1,11 @@
 """
 Camera device adapter — manages decoded video/audio frame streams from cameras.
 
-Subscribes to 2 decoded stream types per device via MiotProxy:
-  1. decoded_video — decoded PyAV VideoFrame
+Subscribes to decoded stream types per device via MiotProxy:
+  1. decoded_video_ch{N} — one track per camera channel (main lens, wide-angle, etc.)
   2. decoded_audio — decoded PyAV AudioFrame
 
-Buffers fragments in a 2-track MultiTrackSyncBuffer per device. The sync
+Buffers fragments in a MultiTrackSyncBuffer per device. The sync
 buffer handles time-windowed A/V alignment automatically.
 """
 
@@ -51,14 +51,14 @@ def _unix_ms() -> int:
     return int(time.time() * 1000)
 
 
-_CAMERA_TRACKS = ["decoded_video", "decoded_audio"]
+# Default track names for single-channel cameras (used by dataclass default_factory).
+# Multi-channel cameras build dynamic track names in connect_device().
+_CAMERA_TRACKS = ["decoded_video_ch0", "decoded_audio"]
 
 # 按需补建 refresh_cameras 的最小间隔：无设备态下 sync 循环 1s 一轮，
 # 不节流会变成每秒一次重 SDK 调用 + 建连尝试。10s 足够让相机就绪后及时恢复。
 _ONDEMAND_REFRESH_MIN_INTERVAL_MS = 10_000
 
-# TODO: 多通道支持
-DEFAULT_VIDEO_CHANNEL = 0
 DEFAULT_AUDIO_CHANNEL = 0
 
 
@@ -70,9 +70,11 @@ class _CameraDeviceState:
     sync_buffer: MultiTrackSyncBuffer = field(
         default_factory=lambda: MultiTrackSyncBuffer(_CAMERA_TRACKS)
     )
-    # Registration IDs for multi-reg decoded frame callbacks
-    decoded_video_reg_id: int = -1
+    # Registration IDs for multi-reg decoded frame callbacks (per channel)
+    decoded_video_reg_ids: dict[int, int] = field(default_factory=dict)  # channel -> reg_id
     decoded_audio_reg_id: int = -1
+    # Number of video channels subscribed (from camera_info.channel_count)
+    channel_count: int = 1
     # Clock calibration: epoch_delta = unix_ms - monotonic_ms (locked on first frame)
     # Used to convert monotonic wall_ms to unix timestamps for display.
     epoch_delta: int | None = None
@@ -218,10 +220,25 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         collect_cfg = get_settings().perception.collect
 
+        # Determine channel_count from cached camera info (falls back to 1)
+        channel_count = 1
+        get_cached_camera = getattr(self._miot_proxy, "get_cached_camera", None)
+        if get_cached_camera is not None:
+            cached = get_cached_camera(did)
+            if cached is not None:
+                channel_count = getattr(cached, "channel_count", None) or 1
+
+        # Build per-channel track names so frames from different lenses are
+        # never mixed in the same buffer track (mixing breaks gate frame-diff
+        # and confuses the perception model with interleaved angles).
+        track_names = [f"decoded_video_ch{ch}" for ch in range(channel_count)]
+        track_names.append("decoded_audio")
+
         state = _CameraDeviceState(
             did=did,
+            channel_count=channel_count,
             sync_buffer=MultiTrackSyncBuffer(
-                track_names=_CAMERA_TRACKS,
+                track_names=track_names,
                 window_ms=collect_cfg.window_size * 1000,
                 max_windows=collect_cfg.max_windows,
                 on_window_ready=self._on_window_ready,
@@ -231,14 +248,18 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         )
         self._devices[did] = state
 
-        # Subscribe decoded video frame stream (multi-reg)
-        try:
-            reg_id = await self._miot_proxy.start_camera_decode_video_stream(
-                did, DEFAULT_VIDEO_CHANNEL, self._make_decoded_video_callback(did)
-            )
-            state.decoded_video_reg_id = reg_id
-        except Exception as e:
-            logger.error("Failed to subscribe decoded video for %s: %s", did, e)
+        # Subscribe decoded video frame stream for each channel (multi-channel support)
+        # 双通道摄像头（如 C500）：channel=0 主镜头，channel=1 副镜头（广角）
+        # 每个通道的帧放入独立 track，不混在一起
+        for ch in range(channel_count):
+            try:
+                reg_id = await self._miot_proxy.start_camera_decode_video_stream(
+                    did, ch, self._make_decoded_video_callback(did, ch)
+                )
+                state.decoded_video_reg_ids[ch] = reg_id
+            except Exception as e:
+                logger.error("Failed to subscribe decoded video ch%d for %s: %s", ch, did, e)
+                state.decoded_video_reg_ids[ch] = -1
 
         # Subscribe decoded audio frame stream (multi-reg)
         try:
@@ -249,14 +270,15 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         except Exception as e:
             logger.error("Failed to subscribe decoded audio for %s: %s", did, e)
 
-        # 两路流都没订上 = camera_img_manager 缺失（典型：登录时相机 LAN 未就绪，
+        # 所有视频流都没订上 = camera_img_manager 缺失（典型：登录时相机 LAN 未就绪，
         # refresh_cameras 没建成 manager，start_*_stream 返回 -1 静默失败）。保留该
         # device 只会让 active_sources 报「已连」假象，且 did 留在 _devices 使后续
         # sync 早退、永不重试。剔除它，交给 sync_devices 的按需补建在下轮重连。
-        if state.decoded_video_reg_id < 0 and state.decoded_audio_reg_id < 0:
+        has_any_video = any(reg_id >= 0 for reg_id in state.decoded_video_reg_ids.values())
+        if not has_any_video and state.decoded_audio_reg_id < 0:
             self._devices.pop(did, None)
             logger.warning(
-                "Camera %s stream subscribe failed (manager missing?), "
+                "Camera %s all streams subscribe failed (manager missing?), "
                 "will retry on next sync",
                 did,
             )
@@ -267,13 +289,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         if not state:
             return
 
-        if state.decoded_video_reg_id >= 0:
-            try:
-                await self._miot_proxy.stop_camera_decode_video_stream(
-                    did, DEFAULT_VIDEO_CHANNEL, state.decoded_video_reg_id
-                )
-            except Exception as e:
-                logger.error("Failed to unsubscribe decoded video for %s: %s", did, e)
+        # Stop all video channel subscriptions (multi-channel support)
+        for ch, reg_id in state.decoded_video_reg_ids.items():
+            if reg_id >= 0:
+                try:
+                    await self._miot_proxy.stop_camera_decode_video_stream(did, ch, reg_id)
+                except Exception as e:
+                    logger.error("Failed to unsubscribe decoded video %s ch%d: %s", did, ch, e)
 
         if state.decoded_audio_reg_id >= 0:
             try:
@@ -326,7 +348,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         """非破坏性取该相机最近一帧解码图(numpy BGR);无缓存返 None。
 
         供 tier_c 闲时定期清的 live 检测用——gate 关停时正常 pipeline 不取帧,
-        这里直接读 collector 已填充的 ``decoded_video`` 缓存(独立于 gate)。
+        这里直接读 collector 已填充的 ``decoded_video_ch0`` 缓存(独立于 gate)。
         """
         state = self._devices.get(did)
         if state is None:
@@ -334,7 +356,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         tracks = state.sync_buffer.peek_latest(duration_ms=window_ms)
         if not tracks:
             return None
-        dv_frags = tracks.get("decoded_video", [])
+        # Prefer channel 0 (main lens); fall back to first available video track
+        dv_frags = tracks.get("decoded_video_ch0", [])
+        if not dv_frags:
+            for ch in range(state.channel_count):
+                dv_frags = tracks.get(f"decoded_video_ch{ch}", [])
+                if dv_frags:
+                    break
         if not dv_frags:
             return None
         return getattr(dv_frags[-1].data, "frame", None)
@@ -383,7 +411,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         packaging point — downstream consumers (collector, pipeline)
         read the precomputed aggregates rather than re-walking frames.
         """
-        dv_frags = tracks.get("decoded_video", [])
+        # Collect video fragments from all channel tracks (not mixed in one track)
+        dv_frags: list[StreamFragment] = []
+        for ch in range(state.channel_count):
+            dv_frags.extend(tracks.get(f"decoded_video_ch{ch}", []))
         da_frags = tracks.get("decoded_audio", [])
 
         if not dv_frags and not da_frags:
@@ -480,8 +511,11 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             decode_ms = 0.0
         return decode_ms
 
-    def _make_decoded_video_callback(self, did: str):
-        """Decoded video frame callback: feeds decoded_video track in sync buffer.
+    def _make_decoded_video_callback(self, did: str, channel: int):
+        """Decoded video frame callback: feeds decoded_video_ch{channel} track.
+
+        Each channel gets its own callback with its own track name, so frames
+        from different lenses are never interleaved in the same buffer track.
 
         Receives BGR numpy arrays (already converted from PyAV in decoder thread).
         """
@@ -513,9 +547,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     recv_unix_ms=recv_unix_ms,
                     decoded_unix_ms=decoded_unix_ms,
                     decode_latency_ms=decode_latency_ms,
+                    channel=channel,
                 )
                 state.sync_buffer.put(
-                    "decoded_video", decoded, stream_ts=ts, wall_ms=wall_ms
+                    f"decoded_video_ch{channel}", decoded, stream_ts=ts, wall_ms=wall_ms
                 )
 
         return _on_decoded_video
