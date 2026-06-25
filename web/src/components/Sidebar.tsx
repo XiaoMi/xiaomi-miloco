@@ -32,7 +32,8 @@ export type TabKey =
   | "devices"
   | "family"
   | "activity"
-  | "usage";
+  | "usage"
+  | "rules";
 
 type NavIcon = ComponentType<SVGProps<SVGSVGElement> & { active?: boolean }>;
 
@@ -78,6 +79,12 @@ export const TABS: TabDef[] = [
     hintKey: "nav.usageHint",
     Icon: IconUsage,
   },
+  {
+    key: "rules",
+    labelKey: "nav.rules",
+    hintKey: "nav.rulesHint",
+    Icon: IconRules,
+  },
   // 性能 tab 不再列入主导航 — 改为通过 URL hash "#perf" 进入独立调试视图,
   // 普通用户看不到入口。详见 App.tsx 的 PerfView。
 ];
@@ -88,6 +95,17 @@ interface Props {
   miot?: HomeStatus["miot"];
   onOpenMiotBind: () => void;
   onMiotChanged: () => void;
+}
+
+
+/** 规则图标 */
+function IconRules({ active, width = 24, height = 24, ...props }: { active?: boolean; width?: number; height?: number } & React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg width={width} height={height} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+    </svg>
+  );
 }
 
 export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged }: Props) {

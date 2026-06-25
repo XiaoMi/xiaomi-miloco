@@ -13,5 +13,5 @@
     "usageHint": "看模型和 Token 开销",
     "loginMiot": "点击登录米家",
     "bound": "已绑定"
-  }
-}
+  ,"rules":"规则","rulesHint":"自动化规则管理"}
+,"rules":"规则","rulesHint":"自动化规则管理"}
