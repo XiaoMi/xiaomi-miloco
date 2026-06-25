@@ -8,11 +8,10 @@ System status check interface
 
 import logging
 import time
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Literal
-
 from pydantic import BaseModel, StrictBool
 
 from miloco.admin import log_pack as _log_pack_mod
@@ -584,7 +583,6 @@ async def set_perception_quality(
     import json
     import os
     import tempfile
-    from pathlib import Path
 
     from miloco.utils.paths import miloco_home
 
