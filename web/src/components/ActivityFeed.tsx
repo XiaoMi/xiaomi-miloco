@@ -402,6 +402,7 @@ function TimeRangeFilter({
         type="datetime-local"
         value={fmt(since)}
         onChange={(e) => onSinceChange(parse(e.target.value))}
+        onClick={(e) => e.currentTarget.showPicker?.()}
         className={inputCls}
         aria-label={t("activity.filterSince")}
         placeholder={t("activity.filterSincePlaceholder")}
@@ -431,6 +432,7 @@ function TimeRangeFilter({
             onBeforeChange(v);
             if (v === undefined) setBeforeEditing(false); // 清空后回到"至现在"按钮
           }}
+          onClick={(e) => e.currentTarget.showPicker?.()}
           onBlur={(e) => {
             // 失焦时如果还是空值,退回按钮态(避免空 input 留在 UI 上)
             if (!e.target.value) setBeforeEditing(false);
