@@ -33,10 +33,9 @@ class _FakeMips:
     def __init__(self, *, connected: bool = True, fail: bool = False) -> None:
         self.is_connected = connected
         self._fail = fail
-        self.sub_device_meta_changed_async = AsyncMock(
-            side_effect=self._maybe_fail
-        )
+        self.sub_device_meta_changed_async = AsyncMock(side_effect=self._maybe_fail)
         self.sub_home_scene_changed_async = AsyncMock(side_effect=self._maybe_fail)
+        self.sub_device_state_async = AsyncMock(side_effect=self._maybe_fail)
 
     async def _maybe_fail(self, *args, **kwargs) -> None:
         if self._fail:
@@ -47,9 +46,11 @@ def _bare_client(mips: _FakeMips | None) -> MIoTClient:
     client = MIoTClient.__new__(MIoTClient)
     client._meta_sub_dids = set()
     client._scene_sub_home_ids = set()
+    client._state_sub_dids = set()
     client._mips_cloud = mips
     client._callback_device_meta_changed = None
     client._callback_scene_changed = None
+    client._callback_device_state_changed = None
     return client
 
 
@@ -162,14 +163,20 @@ class _SetupFakeMips:
     def __init__(self, *, fail_meta_dids: frozenset[str] = frozenset()) -> None:
         self.is_connected = True
         self._fail_meta_dids = set(fail_meta_dids)
+        self._fail_state_dids: set[str] = set()
         self.init_async = AsyncMock()
         self.sub_user_bind_async = AsyncMock()
         self.sub_user_unbind_async = AsyncMock()
         self.sub_device_meta_changed_async = AsyncMock(side_effect=self._meta)
         self.sub_home_scene_changed_async = AsyncMock()
+        self.sub_device_state_async = AsyncMock(side_effect=self._state)
 
     async def _meta(self, did: str, handler) -> None:
         if did in self._fail_meta_dids:
+            raise RuntimeError(f"SUBACK rejected for {did}")
+
+    async def _state(self, did: str, handler) -> None:
+        if did in self._fail_state_dids:
             raise RuntimeError(f"SUBACK rejected for {did}")
 
     def register_subscribe_error_handler(self, cb) -> None: ...
@@ -177,7 +184,9 @@ class _SetupFakeMips:
     def register_mips_state_handler(self, cb) -> None: ...
 
 
-def _setup_client(monkeypatch, fake, *, meta_dids, scene_home_ids) -> MIoTClient:
+def _setup_client(
+    monkeypatch, fake, *, meta_dids, scene_home_ids, state_dids=()
+) -> MIoTClient:
     monkeypatch.setattr(client_mod, "MIoTMipsCloud", lambda **kw: fake)
     client = MIoTClient.__new__(MIoTClient)
     client._oauth_info = SimpleNamespace(
@@ -190,8 +199,10 @@ def _setup_client(monkeypatch, fake, *, meta_dids, scene_home_ids) -> MIoTClient
     client._mips_user_sub_error = "stale"
     client._meta_sub_dids = set(meta_dids)
     client._scene_sub_home_ids = set(scene_home_ids)
+    client._state_sub_dids = set(state_dids)
     client._callback_device_meta_changed = None
     client._callback_scene_changed = None
+    client._callback_device_state_changed = None
     return client
 
 
@@ -205,9 +216,10 @@ async def test_setup_replays_tracked_subscriptions(monkeypatch):
     await client._setup_mips_async()
 
     # Every tracked did/home re-subscribed exactly once at the broker.
-    assert {
-        c.args[0] for c in fake.sub_device_meta_changed_async.await_args_list
-    } == {"dev-1", "dev-2"}
+    assert {c.args[0] for c in fake.sub_device_meta_changed_async.await_args_list} == {
+        "dev-1",
+        "dev-2",
+    }
     fake.sub_home_scene_changed_async.assert_awaited_once()
     assert fake.sub_home_scene_changed_async.await_args.args[0] == "home-9"
     # Records cleared then re-filled — the mirror stays accurate.
@@ -225,12 +237,115 @@ async def test_setup_replay_partial_failure_keeps_failed_untracked(monkeypatch):
     # A per-did replay failure is caught + logged; setup must not raise.
     await client._setup_mips_async()
 
-    assert {
-        c.args[0] for c in fake.sub_device_meta_changed_async.await_args_list
-    } == {"dev-ok", "dev-bad"}
+    assert {c.args[0] for c in fake.sub_device_meta_changed_async.await_args_list} == {
+        "dev-ok",
+        "dev-bad",
+    }
     # dev-bad's SUBACK failed → not re-recorded, so the next refresh sync retries
     # it; dev-ok succeeded and is tracked.
     assert client._meta_sub_dids == {"dev-ok"}
+
+
+# ------------------------------------------------------------ device cloud state
+#
+# `_state_sub_dids` mirrors what is actually subscribed at the broker, same
+# contract as _meta_sub_dids: success records, failure does not, disconnected
+# records intent only, idempotent for already-tracked dids.
+
+
+@pytest.mark.asyncio
+async def test_sub_device_state_records_on_success():
+    mips = _FakeMips(connected=True)
+    client = _bare_client(mips)
+
+    await client.sub_device_state_async("dev-1")
+
+    mips.sub_device_state_async.assert_awaited_once()
+    assert client._state_sub_dids == {"dev-1"}
+
+
+@pytest.mark.asyncio
+async def test_sub_device_state_failure_leaves_untracked_and_raises():
+    mips = _FakeMips(connected=True, fail=True)
+    client = _bare_client(mips)
+
+    with pytest.raises(RuntimeError):
+        await client.sub_device_state_async("dev-1")
+
+    assert client._state_sub_dids == set()
+
+    mips._fail = False
+    await client.sub_device_state_async("dev-1")
+    assert client._state_sub_dids == {"dev-1"}
+
+
+@pytest.mark.asyncio
+async def test_sub_device_state_disconnected_records_intent_only():
+    mips = _FakeMips(connected=False)
+    client = _bare_client(mips)
+
+    await client.sub_device_state_async("dev-1")
+
+    mips.sub_device_state_async.assert_not_awaited()
+    assert client._state_sub_dids == {"dev-1"}
+
+
+@pytest.mark.asyncio
+async def test_sub_device_state_idempotent():
+    mips = _FakeMips(connected=True)
+    client = _bare_client(mips)
+    client._state_sub_dids = {"dev-1"}
+
+    await client.sub_device_state_async("dev-1")
+
+    mips.sub_device_state_async.assert_not_awaited()
+
+
+# ------------------------------------------- _setup_mips_async state replay
+
+
+@pytest.mark.asyncio
+async def test_setup_replays_state_subscriptions(monkeypatch):
+    fake = _SetupFakeMips()
+    client = _setup_client(
+        monkeypatch,
+        fake,
+        meta_dids=set(),
+        scene_home_ids=set(),
+        state_dids={"dev-1", "dev-2"},
+    )
+
+    await client._setup_mips_async()
+
+    assert {c.args[0] for c in fake.sub_device_state_async.await_args_list} == {
+        "dev-1",
+        "dev-2",
+    }
+    assert client._state_sub_dids == {"dev-1", "dev-2"}
+
+
+@pytest.mark.asyncio
+async def test_setup_replay_state_partial_failure_keeps_failed_untracked(
+    monkeypatch,
+):
+    fake = _SetupFakeMips()
+    fake._fail_state_dids = {"dev-bad"}
+    client = _setup_client(
+        monkeypatch,
+        fake,
+        meta_dids=set(),
+        scene_home_ids=set(),
+        state_dids={"dev-ok", "dev-bad"},
+    )
+
+    await client._setup_mips_async()
+
+    assert {c.args[0] for c in fake.sub_device_state_async.await_args_list} == {
+        "dev-ok",
+        "dev-bad",
+    }
+    # dev-bad failed → not re-recorded; dev-ok succeeded and is tracked.
+    assert client._state_sub_dids == {"dev-ok"}
 
 
 # ------------------------------------ mips_user_sub_error scoping (reconnect)
@@ -279,7 +394,9 @@ def test_device_meta_subscribe_error_does_not_set_user_error():
     """Regression: a device-meta SUBACK rejection must not raise a user-bind
     health alarm (it has its own per-did retry path)."""
     client = _err_client()
-    client._on_mips_subscribe_error(("device/dev-1/g_op/hr_change", 0x87, "Not authorized"))
+    client._on_mips_subscribe_error(
+        ("device/dev-1/g_op/hr_change", 0x87, "Not authorized")
+    )
     assert client._mips_user_sub_error is None
 
 

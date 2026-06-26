@@ -37,6 +37,7 @@ from .types import (
     MIoTCameraStatus,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
+    MIoTDeviceStateEvent,
     MIoTHomeInfo,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
@@ -94,11 +95,20 @@ class MIoTClient:
     # path — the did is still present after refresh and would be misreported
     # as a new device.
     _callback_device_meta_changed: Optional[Callable[[MIoTDeviceBindEvent], Any]]
+    # Device-level cloud state-change handler (online / offline). Separate
+    # from _callback_device_meta_changed: a state push updates the cached
+    # `online` field directly (event-driven recovery), not the meta refresh
+    # path.
+    _callback_device_state_changed: Optional[Callable[[MIoTDeviceStateEvent], Any]]
     # Dids whose `device/{did}/g_op/#` meta topic is (intended to be)
     # subscribed. This client owns the per-device meta subs: it re-issues them
     # on _setup_mips_async (re-OAuth / fresh setup); plain reconnects are
     # handled by mips_cloud's own _subs replay.
     _meta_sub_dids: set
+    # Dids whose `device/{did}/state/#` cloud online/offline topic is
+    # (intended to be) subscribed. Same ownership/replay model as
+    # _meta_sub_dids.
+    _state_sub_dids: set
     # Home ids whose `home/{home_id}/scene/#` topic is (intended to be)
     # subscribed. Same ownership model as _meta_sub_dids, but per home.
     _scene_sub_home_ids: set
@@ -160,7 +170,9 @@ class MIoTClient:
         self._mips_user_sub_error = None
         self._callback_user_bind = None
         self._callback_device_meta_changed = None
+        self._callback_device_state_changed = None
         self._meta_sub_dids = set()
+        self._state_sub_dids = set()
         self._scene_sub_home_ids = set()
         self._callback_scene_changed = None
         self._callback_mips_connect: Optional[Callable[[], Any]] = None
@@ -258,7 +270,9 @@ class MIoTClient:
                 )
                 self._http_client = MIoTHttpClient(
                     cloud_server=self._cloud_server,
-                    access_token=self._oauth_info.access_token if self._oauth_info else "",
+                    access_token=self._oauth_info.access_token
+                    if self._oauth_info
+                    else "",
                     loop=self._main_loop,
                 )
                 self._network_client = MIoTNetwork(loop=self._main_loop)
@@ -274,7 +288,9 @@ class MIoTClient:
                 )
                 self._camera_client = MIoTCamera(
                     cloud_server=self._cloud_server,
-                    access_token=self._oauth_info.access_token if self._oauth_info else "",
+                    access_token=self._oauth_info.access_token
+                    if self._oauth_info
+                    else "",
                     loop=self._main_loop,
                 )
                 await self._camera_client.init_async()
@@ -349,7 +365,9 @@ class MIoTClient:
             )
             await _safe(
                 "oauth_client",
-                lambda: self._oauth_client.deinit_async() if self._oauth_client else None,
+                lambda: (
+                    self._oauth_client.deinit_async() if self._oauth_client else None
+                ),
             )
             await _safe(
                 "http_client",
@@ -357,13 +375,17 @@ class MIoTClient:
             )
             await _safe(
                 "camera_client",
-                lambda: self._camera_client.deinit_async() if self._camera_client else None,
+                lambda: (
+                    self._camera_client.deinit_async() if self._camera_client else None
+                ),
             )
             await _safe(
                 "lan_unregister",
-                lambda: self._lan_client.unregister_status_changed_async("miot_client")
-                if self._lan_client
-                else None,
+                lambda: (
+                    self._lan_client.unregister_status_changed_async("miot_client")
+                    if self._lan_client
+                    else None
+                ),
             )
             await _safe(
                 "lan_client",
@@ -371,7 +393,11 @@ class MIoTClient:
             )
             await _safe(
                 "network_client",
-                lambda: self._network_client.deinit_async() if self._network_client else None,
+                lambda: (
+                    self._network_client.deinit_async()
+                    if self._network_client
+                    else None
+                ),
             )
             await _safe(
                 "spec_parser",
@@ -400,7 +426,9 @@ class MIoTClient:
             self._mips_user_sub_error = None
             self._callback_user_bind = None
             self._callback_device_meta_changed = None
+            self._callback_device_state_changed = None
             self._meta_sub_dids = set()
+            self._state_sub_dids = set()
             self._scene_sub_home_ids = set()
             self._callback_scene_changed = None
             self._callback_mips_connect = None
@@ -879,6 +907,27 @@ class MIoTClient:
                 len(home_ids),
             )
 
+        # Same replay for per-device cloud state (online/offline) subs.
+        if self._state_sub_dids:
+            dids = sorted(self._state_sub_dids)
+            self._state_sub_dids = set()
+            ok = 0
+            for did in dids:
+                try:
+                    await self.sub_device_state_async(did)
+                    ok += 1
+                except Exception as e:
+                    _LOGGER.error(
+                        "mips_cloud re-subscribe device-state FAILED did=%s: %s",
+                        did,
+                        e,
+                    )
+            _LOGGER.info(
+                "mips_cloud re-subscribed device-state for %d/%d devices",
+                ok,
+                len(dids),
+            )
+
     def register_user_bind_callback(
         self, callback: Optional[Callable[[MIoTDeviceBindEvent], Any]]
     ) -> None:
@@ -938,9 +987,7 @@ class MIoTClient:
         if mips is None or not mips.is_connected:
             self._meta_sub_dids.add(did)
             return
-        await mips.sub_device_meta_changed_async(
-            did, self._on_device_meta_changed_msg
-        )
+        await mips.sub_device_meta_changed_async(did, self._on_device_meta_changed_msg)
         self._meta_sub_dids.add(did)
 
     async def unsub_device_meta_async(self, did: str) -> None:
@@ -950,6 +997,53 @@ class MIoTClient:
         if mips is None:
             return
         await mips.unsub_device_meta_changed_async(did)
+
+    def register_device_state_changed_callback(
+        self, callback: Optional[Callable[[MIoTDeviceStateEvent], Any]]
+    ) -> None:
+        """Register the single device cloud state-change handler.
+
+        Fires for every subscribed device's online / offline events
+        (event.event distinguishes them). Pass None to clear. The handler
+        updates the cached cloud ``online`` field directly from the event —
+        this is the event-driven recovery path for cameras that went stale
+        across a backend restart (no device-list re-fetch).
+        """
+        self._callback_device_state_changed = callback
+
+    def _on_device_state_msg(self, msg: MIoTDeviceStateEvent) -> None:
+        cb = self._callback_device_state_changed
+        if cb is None:
+            return
+        ret = cb(msg)
+        if asyncio.iscoroutine(ret):
+            asyncio.ensure_future(ret)
+
+    async def sub_device_state_async(self, did: str) -> None:
+        """Subscribe one device's `device/{did}/state/{online,offline}` cloud
+        state topics (idempotent).
+
+        Same ownership/replay contract as sub_device_meta_async: failed
+        SUBACK propagates WITHOUT recording the did (so the proxy diff
+        retries it); if mips is not connected yet only the intent is
+        recorded and the actual subscribe happens at the next setup.
+        """
+        if did in self._state_sub_dids:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._state_sub_dids.add(did)
+            return
+        await mips.sub_device_state_async(did, self._on_device_state_msg)
+        self._state_sub_dids.add(did)
+
+    async def unsub_device_state_async(self, did: str) -> None:
+        """Unsubscribe one device's cloud state topic."""
+        self._state_sub_dids.discard(did)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_state_async(did)
 
     def register_scene_changed_callback(
         self, callback: Optional[Callable[[MIoTSceneChangedEvent], Any]]
@@ -1038,9 +1132,7 @@ class MIoTClient:
                 f"topic={topic} {reason}(0x{code:02x}) (after reconnect)"
             )
         else:
-            self._mips_user_sub_error = (
-                f"topic={topic} {reason} (after reconnect)"
-            )
+            self._mips_user_sub_error = f"topic={topic} {reason} (after reconnect)"
         _LOGGER.error(
             "mips_cloud subscribe (after reconnect) REJECTED: %s. "
             "Real-time device-bind detection disabled until next setup.",

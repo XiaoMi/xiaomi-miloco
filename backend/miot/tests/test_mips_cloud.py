@@ -17,6 +17,7 @@ Coverage:
   - Token rotate calls username_pw_set with new password + reconnect
   - Reconnect resubscribes all active topics
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +28,7 @@ import pytest
 from miot.mips_cloud import MIoTMipsCloud
 from miot.types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsSubscribeRejectedError,
     MipsSubscribeTimeoutError,
@@ -75,7 +77,9 @@ class _FakeMqttClient:
 
     # ------------------------------------------------------------- paho API
 
-    def username_pw_set(self, username: str | None = None, password: str | None = None) -> None:
+    def username_pw_set(
+        self, username: str | None = None, password: str | None = None
+    ) -> None:
         self.username = username
         self.password = password
         self.username_pw_set_history.append((username, password))
@@ -315,9 +319,7 @@ async def test_user_bind_decoded_event_dispatched():
         await asyncio.gather(
             mips.sub_user_bind_async("uid-42", handler=on_bind), driver()
         )
-        fake.fire_message(
-            "user/uid-42/g_op/bind", b'{"did": "new-device-123"}'
-        )
+        fake.fire_message("user/uid-42/g_op/bind", b'{"did": "new-device-123"}')
         await asyncio.sleep(0.05)
         assert len(received) == 1
         assert received[0].uid == "uid-42"
@@ -733,6 +735,136 @@ async def test_subscribe_transient_rejection_keeps_topic_and_reconnect_retries()
         assert fake.subscribed[-1][0] == "user/uid-q/g_op/bind"
         _, _, new_mid = fake.subscribed[-1]
         fake.fire_suback(new_mid, [2])
+        await asyncio.sleep(0.01)
+    finally:
+        await mips.deinit_async()
+
+
+# ============================================================================
+# device/{did}/state/{online,offline} — cloud online/offline state subs
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_device_state_subscribes_exact_topics():
+    """sub_device_state_async subscribes the exact per-op leaf topics
+    (NOT a `state/#` wildcard — the broker ACL rejects the wildcard, same as
+    the g_op/# case)."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    try:
+        await asyncio.gather(
+            mips.sub_device_state_async("dev-1", handler=lambda _m: None),
+            _ack_subscribes(fake, 2),
+        )
+        topics = {t for t, _, _ in fake.subscribed}
+        assert "device/dev-1/state/online" in topics
+        assert "device/dev-1/state/offline" in topics
+        assert "device/dev-1/state/#" not in topics
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.parametrize("op", ["online", "offline"])
+@pytest.mark.asyncio
+async def test_device_state_decoded_event_dispatched(op):
+    """device/{did}/state/{online,offline} → MIoTDeviceStateEvent with
+    event=op and did parsed from the topic; payload kept in `raw`."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    received: list[MIoTDeviceStateEvent] = []
+
+    try:
+        await asyncio.gather(
+            mips.sub_device_state_async("dev-42", handler=received.append),
+            _ack_subscribes(fake, 2),
+        )
+        fake.fire_message(
+            f"device/dev-42/state/{op}",
+            b'{"device_id": "dev-42", "event": "' + op.encode() + b'"}',
+        )
+        await asyncio.sleep(0.05)
+        assert len(received) == 1
+        assert received[0].event == op
+        assert received[0].did == "dev-42"
+        assert received[0].raw.get("device_id") == "dev-42"
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_device_state_unsubscribes_exact_topics():
+    """unsub_device_state_async removes both online + offline leaf topics."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    try:
+        await asyncio.gather(
+            mips.sub_device_state_async("dev-7", handler=lambda _m: None),
+            _ack_subscribes(fake, 2),
+        )
+        await mips.unsub_device_state_async("dev-7")
+        unsubbed = set(fake.unsubscribed)
+        assert "device/dev-7/state/online" in unsubbed
+        assert "device/dev-7/state/offline" in unsubbed
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_device_state_reconnect_resubscribes_both_topics():
+    """After disconnect/reconnect both online + offline leaf topics are
+    re-issued by the _subs replay."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    try:
+        await asyncio.gather(
+            mips.sub_device_state_async("dev-rec", handler=lambda _m: None),
+            _ack_subscribes(fake, 2),
+        )
+        before = len(fake.subscribed)
+        fake.fire_disconnect(reason_code=1)
+        fake.fire_connect(reason_code=0)
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if len(fake.subscribed) >= before + 2:
+                break
+        resub_topics = {t for t, _, _ in fake.subscribed[before:]}
+        assert "device/dev-rec/state/online" in resub_topics
+        assert "device/dev-rec/state/offline" in resub_topics
+        for _, _, mid in fake.subscribed[before:]:
+            fake.fire_suback(mid, [2])
         await asyncio.sleep(0.01)
     finally:
         await mips.deinit_async()
