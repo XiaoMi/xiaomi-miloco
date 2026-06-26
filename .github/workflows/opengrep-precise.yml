@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0 # 需要 base commit 做 diff
 
@@ -57,7 +57,7 @@ jobs:
       - name: 上传 SARIF 到 Code Scanning
         if: always() && hashFiles('.opengrep-out/precise.sarif') != ''
         continue-on-error: true # 未开 Code Scanning 时上传会失败；扫描结论由前一步 --error 决定，上传不阻塞
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
         with:
           sarif_file: .opengrep-out/precise.sarif
           category: opengrep-pr-diff

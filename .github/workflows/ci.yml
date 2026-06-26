@@ -19,7 +19,7 @@ jobs:
   workflow-sanity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: 检查 workflow YAML 无 tab 缩进
         run: |
           if grep -Pnl '\t' .github/workflows/*.yml; then
@@ -31,8 +31,8 @@ jobs:
   backend-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -44,8 +44,8 @@ jobs:
   cli-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
         with:
           enable-cache: true
           cache-dependency-glob: cli/uv.lock
@@ -55,7 +55,7 @@ jobs:
   plugin-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: ./.github/actions/setup-all
       - name: openclaw 插件测试
         run: cd plugins/openclaw && pnpm install --frozen-lockfile && pnpm test
@@ -63,7 +63,7 @@ jobs:
   web-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: ./.github/actions/setup-all
       - name: 安装依赖
         run: cd web && pnpm install --frozen-lockfile
@@ -77,7 +77,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: ./.github/actions/setup-all
       - name: ruff（backend + cli）
         # 用 backend 环境的 ruff 一次扫两处：ruff 是纯静态分析无需装 cli 依赖，

@@ -1,5 +1,6 @@
 # 依赖变更准入守卫：PR 改动锁文件 / 依赖清单时阻塞，需维护者评论
-# `/allow-dependencies-change` 放行。逻辑见 .ci/dependency-guard.mjs。
+# `/allow-dependencies-change <head_sha>` 放行。逻辑见 .ci/dependency-guard.mjs。
+# 放行机制见 dependency-guard-reapprove.yml：授权人评论后重跑本 workflow 的 guard run，带评论重判即翻绿。
 #
 # pull_request_target 在可信的 base 上下文运行；脚本只读 PR 元数据，不 checkout PR head 代码。
 name: Dependency Guard
@@ -24,18 +25,17 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: 检出可信 base 上的守卫脚本
-        uses: actions/checkout@v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 22
 
       - name: 执行依赖守卫
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          # 填本项目维护者的 GitHub 用户名（逗号分隔）；留空则只认 OWNER/MEMBER/COLLABORATOR
           MILOCO_SECURITY_APPROVERS: ""
         run: node .ci/dependency-guard.mjs

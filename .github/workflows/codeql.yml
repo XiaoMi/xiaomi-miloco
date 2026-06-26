@@ -46,14 +46,14 @@ jobs:
             config: ./.github/codeql/codeql-ts.yml
           - language: actions
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: github/codeql-action/init@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
         with:
           languages: ${{ matrix.language }}
           config-file: ${{ matrix.config }}
           queries: security-extended
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/autobuild@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
+      - uses: github/codeql-action/analyze@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
         continue-on-error: true # 未开 Code Scanning 时上传会失败；不阻塞（findings 不影响退出码）
         with:
           category: "/security/${{ matrix.language }}"

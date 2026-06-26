@@ -28,7 +28,7 @@ jobs:
           apt-get update
           apt-get install -y curl ca-certificates git
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: install.sh 引导冒烟（装 uv + 供给 Python，校验入口可执行）
         run: bash scripts/install.sh -h

@@ -1,6 +1,6 @@
 # 维护者手动触发的 PR 审查：在 PR 评论里发 "/review" 即对该 PR 跑一次 /review-pr。
-# 用途：fork PR 拿不到 secrets，被 pr-review.yml 的同仓门控跳过；改由维护者人工过目后评论触发，
-# 在 base 仓上下文里跑（issue_comment 自带 secrets）。安全边界 = 评论者须有 write+ 权限 + 钉死触发时刻的 head SHA。
+# 用途：维护者手动对任意 PR（含 fork）跑审查；在 base 仓上下文里通过 issue_comment 触发。
+# 安全边界 = 评论者须有 write+ 权限 + 钉死触发时刻的 head SHA。
 name: PR Review (command)
 
 on:
@@ -82,9 +82,12 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       PR_AGENT_MODEL: ${{ vars.PR_AGENT_MODEL }}
+      ANTHROPIC_FALLBACK_API_KEY: ${{ secrets.ANTHROPIC_FALLBACK_API_KEY }}
+      ANTHROPIC_FALLBACK_BASE_URL: ${{ secrets.ANTHROPIC_FALLBACK_BASE_URL }}
+      PR_AGENT_FALLBACK_MODEL: ${{ vars.PR_AGENT_FALLBACK_MODEL }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           # 钉死 head SHA：refs/pull/<n>/head 在 base 仓里对 fork PR 也可拉；fetch-depth 0 供命令内 merge-base 比对
           ref: refs/pull/${{ github.event.issue.number }}/head
