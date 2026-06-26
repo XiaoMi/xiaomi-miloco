@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd 配置 — Miloco × Hermes 兼容层入站 adapter。
+
+  安装位置：~/Library/LaunchAgents/com.xiaomi.miloco.hermes.adapter.plist
+  注册命令：launchctl load -w <plist>
+  注销命令：launchctl unload <plist>
+
+  install-hermes.sh 在 macOS 上自动 sed 替换占位符后写这个文件 + load。
+  占位符：
+    __LABEL__           com.xiaomi.miloco.hermes.adapter（一般不替换）
+    __ADAPTER_DIR__     adapter 所在目录（含 adapter/ 子包）
+    __LAUNCHER__        adapter-launcher.sh 的绝对路径
+    __LOG_PATH__        stdout/stderr 落盘路径（覆盖原 miloco-adapter.log）
+    __ADAPTER_PORT__    监听端口（默认 18789）
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL__</string>
+
+    <!-- 用 wrapper 脚本启动，wrapper 写 PID 文件 + exec python -m adapter -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__LAUNCHER__</string>
+    </array>
+
+    <!-- 工作目录必须是 adapter 所在父目录，否则 -m adapter 找不到子包 -->
+    <key>WorkingDirectory</key>
+    <string>__ADAPTER_DIR__</string>
+
+    <!-- 启动时由 wrapper 写 ~/.hermes/miloco-adapter.pid，install-hermes.sh / status 用 -->
+    <!-- launchd 本身不写 PID 文件 -->
+
+    <!-- 不在崩溃时自动重启（用户可控；KeepAlive=false 让 launchctl unload 后真停） -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- launchctl load 时立即拉起 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Background 进程：低优先级、不抢前台资源 -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- 资源限制：避免 adapter 内存炸掉影响系统 -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+
+    <!-- stdout / stderr 落盘（覆盖原 miloco-adapter.log，兼容现有 status/logs 子命令） -->
+    <key>StandardOutPath</key>
+    <string>__LOG_PATH__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_PATH__</string>
+</dict>
+</plist>

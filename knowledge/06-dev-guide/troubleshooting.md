@@ -6,6 +6,7 @@
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | 端口被占用（`port already in use`）     | `miloco-cli service status`（若 `running=True, managed=False` 是别的进程占了端口）→ `ss -tlnp sport = :1810` 查进程；或 `service stop && start` |
 | `server.python_bin 未配置` / 不可执行   | 重跑 `install.sh`（自动探测）；或 `miloco-cli config set server.python_bin /path/to/.venv/bin/python`                                           |
+<<<<<<< HEAD
 | Python 版本不符                         | 要求 >= 3.11，`uv run python --version` 检查                                                                                                    |
 | `workers != 1` 报 `NotImplementedError` | Server 不支持多 worker，检查环境变量 `WEB_CONCURRENCY` 是否被容器/系统设置                                                                      |
 

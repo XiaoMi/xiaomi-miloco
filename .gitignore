@@ -31,6 +31,7 @@ target
 
 # Build-time generated skills copy
 plugins/openclaw/skills/
+plugins/hermes/skills/
 
 
 # Debug
