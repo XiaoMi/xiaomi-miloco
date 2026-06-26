@@ -11,13 +11,47 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from miot.types import MIoTCameraInfo, MIoTCameraStatus
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from miloco.utils.media import image_bytes_to_base64, image_manager
 
 
+def normalize_sub_devices(
+    raw: dict | None, parent_name: str | None
+) -> dict[str, str]:
+    """Normalize a MIoT sub-device container into {siid: user_alias}.
+
+    Accepts both value shapes:
+      - MIoTDeviceInfo objects (raw ``MIoTDeviceInfo.sub_devices``), or
+      - plain dicts (after ``model_dump()``).
+    The siid key drops its 's' prefix and must be numeric; the alias strips
+    the parent device name suffix (e.g. "三楼书房-客厅多路开关" → "三楼书房")
+    so callers consistently see the user-customized portion only.
+    """
+    if not raw:
+        return {}
+    suffix = f"-{parent_name}" if parent_name else ""
+    result: dict[str, str] = {}
+    for key, sub in raw.items():
+        siid = key.lstrip("s")
+        if not siid.isdigit():
+            continue
+        name = sub["name"] if isinstance(sub, dict) else sub.name
+        if not isinstance(name, str):
+            continue
+        if suffix and name.endswith(suffix):
+            name = name[: -len(suffix)]
+        result[siid] = name
+    return result
+
+
 class DeviceInfo(BaseModel):
     did: str = Field(..., description="Device ID")
+    # NOTE: keep ``name`` declared before ``sub_devices`` — the latter's
+    # before-validator reads ``info.data["name"]`` to strip the parent-name
+    # suffix from sub-device aliases. Pydantic only exposes already-validated
+    # fields in ``info.data``, so reordering would silently make the strip a
+    # no-op (aliases keep the redundant "-<device name>" suffix; no error).
     name: str = Field(..., description="Device name")
     online: bool = Field(False, description="Whether device is online")
     model: str | None = Field(None, description="Device model")
@@ -32,6 +66,21 @@ class DeviceInfo(BaseModel):
     sub_devices: dict[str, str] | None = Field(
         None, description="Sub-device custom names keyed by siid (e.g. {'3': '三楼书房'})"
     )
+
+    @field_validator("sub_devices", mode="before")
+    @classmethod
+    def _coerce_sub_devices(cls, v: Any, info: ValidationInfo) -> Any:
+        # None / empty → None (consistent with the `... or None` convention
+        # used by build_sub_device_names callers, e.g. service.py).
+        if not v:
+            return None
+        # Already {siid: str} (e.g. service.py pre-converts via
+        # build_sub_device_names) → pass through; don't re-strip the suffix.
+        if all(isinstance(x, str) for x in v.values()):
+            return v
+        # dict-of-dict from MIoT*.model_dump() → normalize. ``name`` is
+        # declared before ``sub_devices`` so it's already validated here.
+        return normalize_sub_devices(v, info.data.get("name")) or None
 
 
 class CameraInfo(DeviceInfo):
