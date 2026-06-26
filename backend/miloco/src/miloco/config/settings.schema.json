@@ -68,6 +68,26 @@
       },
       "required": ["webhook_url", "auth_bearer"]
     },
+    "perception": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "感知管线配置",
+      "properties": {
+        "push": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "感知事件推送时效控制",
+          "properties": {
+            "max_delay_minutes": {
+              "type": "number",
+              "minimum": 0,
+              "default": 5,
+              "description": "suggestion 推送最大允许延迟（分钟）；超过该阈值的 suggestion 在进入 agent webhook 前丢弃并打 [DROPPED] 日志，0 表示不做时效丢弃"
+            }
+          }
+        }
+      }
+    },
     "model": {
       "type": "object",
       "additionalProperties": true,
