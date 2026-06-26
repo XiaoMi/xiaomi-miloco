@@ -186,7 +186,22 @@ export interface ScopeCamera {
   roomName?: string;
   isOnline: boolean;
   inUse: boolean;
+  effectiveInUse: boolean;
+  schedulePaused: boolean;
+  schedule: CameraSchedule;
+  nextScheduleChangeAt?: string;
   connected: boolean;
+}
+
+export interface CameraScheduleWindow {
+  start: string;
+  end: string;
+}
+
+export interface CameraSchedule {
+  enabled: boolean;
+  weekdays: number[];
+  windows: CameraScheduleWindow[];
 }
 
 // ── 米家家庭接入范围(scope.homes)─────────────────────────────────

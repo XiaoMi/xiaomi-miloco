@@ -219,3 +219,4 @@ class ScopeConfigKeys:
 
     HOME_WHITE_LIST_KEY = "HOME_WHITE_LIST_KEY"       # 已启用的家庭 home_id 列表
     CAMERA_BLACK_LIST_KEY = "CAMERA_BLACK_LIST_KEY" # 已停用的摄像头 did 列表
+    CAMERA_SCHEDULES_KEY = "CAMERA_SCHEDULES_KEY"   # 摄像头每日感知时间段配置
