@@ -222,7 +222,8 @@ def _key_by_label(label: str, provided: str | None) -> str:
     if not label:
         return ""
     m = get_settings().model
-    if m.omni.label == label and m.omni.api_key:
+    # 命中当前生效配置(含 label 为空、按展示 label 合成的「当前生效行」)→ 回退其 key。
+    if m.omni.api_key and label in (m.omni.label, _active_display_label()):
         return m.omni.api_key
     for p in m.omni_profiles:
         if p.label == label and p.api_key:
@@ -230,10 +231,51 @@ def _key_by_label(label: str, provided: str | None) -> str:
     return ""
 
 
+def _active_display_label() -> str:
+    """当前生效配置用于「列表展示 / 编辑 / 删除」的稳定 label。
+
+    omni.label 可能为空(env 或手改 config.json 直填 key、未走 web 档案流程的态),此时
+    回退为 ``model @ base_url`` —— 与前端档案命名一致,保证合成的「当前生效行」label 非空,
+    可被编辑 / 测试 / 删除按 label 正确定位(否则空 label 会使 upsert 报 400、删除 was_active
+    误判为 False 而静默无效)。仅在有 key 时有展示意义。
+    """
+    m = get_settings().model.omni
+    return m.label or f"{m.model} @ {m.base_url}"
+
+
 def _full_omni_payload() -> dict:
-    """{active, profiles}：均 api_key 打码;profiles 标记哪套 active(按档案名 label 匹配)。"""
+    """{active, profiles}：均 api_key 打码;profiles 标记哪套 active(按档案名 label 匹配)。
+
+    当前生效配置(active)并不一定已存档进 omni_profiles —— 默认状态(omni_profiles 为空、
+    omni 是默认 MiMo)或历史遗留场景下,active 不在档案列表里。此时若直接返回 profiles,
+    前端列表就看不到「当前生效模型」(只有折叠态标题栏读 active 能看到),造成「配没配好」
+    的困惑。故在 active 未出现在档案列表时,把它作为一条合成档案补到列表头部(标 active)。
+    """
     m = get_settings().model
     active = m.omni
+    profiles = [
+        {
+            "label": p.label,
+            "model": p.model,
+            "base_url": p.base_url,
+            "api_key_masked": _mask_api_key(p.api_key),
+            "has_key": bool(p.api_key),
+            "active": p.label == active.label,
+        }
+        for p in m.omni_profiles
+    ]
+    # 仅当 active 真有 key(确有模型在跑)、且未出现在档案列表时才合成补入并标 active。
+    # 无 key 态(出厂未配 / 删当前生效后回到未配)不合成 —— 列表呈现为空 + 顶部「未配 key」
+    # 警告,清楚表达「没有模型在跑」,而不是显示一条诡异的无 key 行。
+    if active.api_key and not any(p["active"] for p in profiles):
+        profiles.insert(0, {
+            "label": _active_display_label(),  # 空 label 回退 model@base_url,保证可编辑/删除
+            "model": active.model,
+            "base_url": active.base_url,
+            "api_key_masked": _mask_api_key(active.api_key),
+            "has_key": True,
+            "active": True,
+        })
     return {
         "active": {
             "label": active.label,
@@ -242,17 +284,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
         },
-        "profiles": [
-            {
-                "label": p.label,
-                "model": p.model,
-                "base_url": p.base_url,
-                "api_key_masked": _mask_api_key(p.api_key),
-                "has_key": bool(p.api_key),
-                "active": p.label == active.label,
-            }
-            for p in m.omni_profiles
-        ],
+        "profiles": profiles,
     }
 
 
@@ -322,8 +354,12 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
     else:
         profiles.append(entry)
     update: dict = {"omni_profiles": profiles}
-    # activate=true 显式设为当前;或编辑的就是当前生效那套 → 同步刷新 active(改 key/model 即时生效)
-    if body.activate or get_settings().model.omni.label == (orig or label):
+    # activate=true 显式设为当前;或编辑的就是当前生效那套 → 同步刷新 active(改 key/model 即时生效)。
+    # 命中判据含展示 label:编辑空 label 的「当前生效行」(orig=合成 label)也能同步 active。
+    omni = get_settings().model.omni
+    tgt = orig or label
+    sync_active = tgt == omni.label or (bool(omni.api_key) and tgt == _active_display_label())
+    if body.activate or sync_active:
         update["omni"] = entry
     update_shared_config(model=update)
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
@@ -352,15 +388,61 @@ def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verif
     raise HTTPException(status_code=404, detail="档案不存在")
 
 
+def _label_is_active(label: str) -> bool:
+    """label 是否指向当前生效配置(含空 label 当前生效的合成展示 label)。"""
+    omni = get_settings().model.omni
+    return bool(label) and (
+        label == omni.label or (bool(omni.api_key) and label == _active_display_label())
+    )
+
+
+async def _soft_stop_best_effort(action: str) -> None:
+    """重置当前生效配置后软停感知:关引擎 + 降回 no_omni_api_key,保留 tick 自愈循环。
+    best-effort —— 配置落盘是主操作,软停失败仅告警(下次后端重启生效),不阻断整体。"""
+    try:
+        await manager.perception_service.stop_to_unconfigured()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("%s当前生效模型后软停感知失败(将于重启后生效): %s", action, e)
+
+
 @router.post(
     "/omni-config/delete",
-    summary="删除一套已存档案(不影响当前生效配置)",
+    summary="删除一套已存档案;删的是当前生效那套时,回到「未配模型」态并软停感知",
     response_model=NormalResponse,
 )
-def delete_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def delete_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+    """删除一套档案。删的若是当前生效模型,则把当前生效配置重置为「未配」(清空 key)并软停
+    感知 —— 等价于回到初始未配模型态:感知停下,等重新配置并启用模型后由 tick 自愈自动拉起。
+    """
+    from miloco.config.settings import OmniModelSettings
+
     label = body.label.strip()
+    was_active = _label_is_active(label)
     profiles = [p for p in _profiles_as_dicts() if p["label"] != label]
-    update_shared_config(model={"omni_profiles": profiles})
+    update: dict = {"omni_profiles": profiles}
+    if was_active:
+        # 删当前生效模型 → 当前生效配置重置为出厂未配态(MiMo 默认 + 空 key)。
+        update["omni"] = OmniModelSettings().model_dump()
+    update_shared_config(model=update)
+    if was_active:
+        await _soft_stop_best_effort("删除")
+    return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+
+@router.post(
+    "/omni-config/deactivate",
+    summary="停用当前生效模型:回到「未配模型」态并软停感知,但保留所有档案(可再启用)",
+    response_model=NormalResponse,
+)
+async def deactivate_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+    """停用当前生效模型:当前生效配置重置为「未配」(清空 key)+ 软停感知,但**不删除档案**。
+    与 delete 的区别:delete 会移除该档案,deactivate 仅停用、档案保留,可随后再「启用」恢复。
+    """
+    from miloco.config.settings import OmniModelSettings
+
+    if _label_is_active(body.label.strip()):
+        update_shared_config(model={"omni": OmniModelSettings().model_dump()})
+        await _soft_stop_best_effort("停用")
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 
@@ -406,47 +488,31 @@ async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
             "code": "rejected_authed",
             "status": r.status_code,
             "latency_ms": latency_ms,
-            "message": "已连上且鉴权通过，但探测请求被模型拒绝（Key 大概率有效）",
+            "message": "已连接，但拒绝了模型请求（模型名可能错误）",
         }
-    return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"HTTP {r.status_code}: {r.text[:160]}"}
+    return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
 
 
 async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
-    """轻量探测：GET {base_url}/models 验证鉴权 + 可达性（零 token、与模型无关）。
+    """验证「这套配置能否真正调用该模型」。
 
-    200→连接正常（顺带看模型在不在列表）；401/403→Key 无效；连接异常→Base URL 不可达；
-    404/405（不支持 /models）→ 回退到极简 chat 探测。
+    先 GET /models 做廉价的鉴权 + 可达性预检(快速失败、省 token):连不上→unreachable,
+    401/403→bad_key,5xx→http_error。预检通过后,用一次极简 chat(``max_tokens=1``)**真正
+    探测该模型是否可用**——不依赖「模型是否出现在 /models 列表」这种弱判据(列表常不全,
+    在不在列表都不等于能不能调通)。chat 探测结果(ok / not_found / rejected_authed / …)即最终结论。
     """
-    base_url = base_url.rstrip("/")
-    t0 = time.monotonic()
+    base = base_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(
-                f"{base_url}/models",
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
+            r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    latency_ms = round((time.monotonic() - t0) * 1000)
-    if r.status_code == 200:
-        found = False
-        try:
-            ids = {m.get("id") for m in (r.json().get("data") or [])}
-            found = model in ids
-        except Exception:  # noqa: BLE001
-            pass
-        return {
-            "ok": True,
-            "code": "ok_model_found" if found else "ok",
-            "status": 200,
-            "latency_ms": latency_ms,
-            "message": "连接正常，模型可用" if found else "连接正常",
-        }
     if r.status_code in (401, 403):
         return {"ok": False, "code": "bad_key", "status": r.status_code, "message": "API Key 无效或无权限"}
-    if r.status_code in (404, 405):
-        return await _probe_chat(model, base_url, api_key)
-    return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"HTTP {r.status_code}: {r.text[:160]}"}
+    if r.status_code >= 500:
+        return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
+    # 鉴权/可达性 OK → 用极简 chat 真正验证该模型(在不在 /models 列表都以此为准)。
+    return await _probe_chat(model, base, api_key)
 
 
 @router.post(
@@ -494,8 +560,26 @@ async def _fetch_models(base_url: str, api_key: str) -> dict:
         "ok": False,
         "code": "http_error",
         "models": [],
-        "message": f"HTTP {r.status_code}: {r.text[:160]}",
+        "message": f"服务返回异常（HTTP {r.status_code}）",
     }
+
+
+async def _probe_reachable(base_url: str) -> dict | None:
+    """无 key 时判 Base URL 是否「明显有问题」,使 URL 错优先于「缺 key」暴露(而非被短路成「未配置」)。
+
+    - 连接失败(DNS/拒连/超时/URL 非法)→ unreachable
+    - 2xx/3xx,或 401/403(地址对、只是需要 key)→ None(URL 没问题,问题在缺 key)
+    - 其余(404/405/4xx/5xx,如填错地址命中 openresty 404 页)→ http_error(地址/端点大概率不对)
+    """
+    url = base_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{url}/models")
+    except Exception as e:  # noqa: BLE001
+        return {"code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
+    if r.status_code < 400 or r.status_code in (401, 403):
+        return None
+    return {"code": "http_error", "message": f"服务返回异常（HTTP {r.status_code}）"}
 
 
 class OmniModelsBody(BaseModel):
@@ -516,6 +600,13 @@ async def list_omni_models(
     base_url = body.base_url.strip()
     api_key = _key_by_label((body.label or "").strip(), body.api_key)
     if not api_key:
+        # URL 本身错优先于「缺 key」暴露:无 key 时先探可达性,连不上→报 URL 错;能连上才报缺 key。
+        reach = await _probe_reachable(base_url)
+        if reach is not None:
+            return NormalResponse(
+                code=0, message="ok",
+                data={"ok": False, "code": reach["code"], "models": [], "message": reach["message"]},
+            )
         return NormalResponse(
             code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
         )

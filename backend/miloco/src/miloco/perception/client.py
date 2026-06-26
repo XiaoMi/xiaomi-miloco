@@ -171,6 +171,9 @@ class PerceptionEngineProxy:
         self._status_message: str = ""
         self._last_captions: dict[str, str] = {}
         self._executor: ThreadPoolExecutor | None = None
+        # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
+        # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
+        self._engine_lock = asyncio.Lock()
 
         self._init_engine()
 
@@ -335,6 +338,23 @@ class PerceptionEngineProxy:
             pass
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎 proxy 失败 | %s", e)
+
+    async def stop_to_unconfigured(self) -> None:
+        """软停引擎,回到「未配模型」态——与「启用→tick 自愈拉起」对称的反向操作。
+
+        删除当前生效模型后调:关掉正在跑的引擎实例并把状态降回 ``no_omni_api_key``,
+        但**不碰** runner 的 tick 循环。后续配好新模型并启用时,下个推理周期
+        ``try_reinit`` 会自动重建(与初始未配模型态完全一致)。``realtime_perceive``
+        入口的 ``if not self.ready`` 守卫保证降级后 tick 安全跳过、不崩。
+
+        重入安全:引擎未起(``perception_engine is None``)时跳过 close,仅按当前配置重判。
+        """
+        async with self._engine_lock:  # 与在飞 perceive 互斥,teardown 必等其完成
+            if self.perception_engine is not None:
+                await self.close()
+                self.perception_engine = None  # ready→False,tick 的 realtime_perceive 立即跳过
+            # 按当前(删后已清空 key 的)配置重判:落 no_omni_api_key;万一 key 仍在则重建为 ready。
+            self._init_engine()
 
     # ---- Internal impls (run in inference thread) ----
 
@@ -529,7 +549,8 @@ class PerceptionEngineProxy:
         后帧会按 device_id 写入此 dict.调用方负责创建空 dict 传入(ContextVar 不跨
         executor 线程,只能显式透传 reference).
         """
-        async with get_monitor().track_async(NodeName.ENGINE, "perceive") as _eng_h:
+        # _engine_lock:与 stop_to_unconfigured 互斥,持锁期间引擎不会被 teardown 拔掉。
+        async with get_monitor().track_async(NodeName.ENGINE, "perceive") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
                 return None, set(), set(), set()
@@ -611,7 +632,7 @@ class PerceptionEngineProxy:
         self, batch: PerceptionBatch, query: str
     ) -> OnDemandPerceptionResult | None:
         """Run on-demand query pipeline — offloaded to inference thread."""
-        async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h:
+        async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
                 return None
