@@ -30,7 +30,8 @@ def _make_state(
 
 class _CachedCamera:
     def __init__(
-        self, *, did: str = "cam1", name: str = "cam1", room_name: str = "r2"
+        self, *, did: str = "cam1", name: str = "cam1", room_name: str = "r2",
+        channel_count: int = 1,
     ):
         self._payload = {
             "did": did,
@@ -39,6 +40,7 @@ class _CachedCamera:
             "lan_online": True,
             "room_name": room_name,
         }
+        self.channel_count = channel_count
 
     def model_dump(self):
         return self._payload
@@ -108,7 +110,7 @@ class TestCallbackIntegration:
             lambda: 1_700_000_005_000,
         )
 
-        cb = adapter._make_decoded_video_callback("cam1")
+        cb = adapter._make_decoded_video_callback("cam1", 0)
         # recv=...090, decoded=...130 → decode=40ms
         asyncio.run(
             cb(
@@ -123,7 +125,7 @@ class TestCallbackIntegration:
 
         ready = state.sync_buffer.peek_latest(duration_ms=10_000)
         assert ready is not None
-        frag = ready["decoded_video"][0]
+        frag = ready["decoded_video_ch0"][0]
         assert isinstance(frag, StreamFragment)
         decoded = frag.data
         assert isinstance(decoded, DecodedVideoFrame)
@@ -160,7 +162,7 @@ class TestCallbackIntegration:
 
     def test_missing_device_is_noop(self, monkeypatch):
         adapter, _ = self._make_adapter_with_device()
-        cb = adapter._make_decoded_video_callback("cam_unknown")
+        cb = adapter._make_decoded_video_callback("cam_unknown", 0)
         # Should not raise and should produce nothing useful.
         asyncio.run(
             cb(
@@ -204,7 +206,7 @@ class TestBuildDeviceDataAggregation:
         state = _make_state()
         dd = adapter._build_device_data(
             state,
-            tracks={"decoded_video": [], "decoded_audio": []},
+            tracks={"decoded_video_ch0": [], "decoded_audio": []},
             window_start_ms=0,
             window_end_ms=1000,
         )
@@ -223,7 +225,7 @@ class TestBuildDeviceDataAggregation:
             decode_latency_ms=10.0,
         )
         tracks = {
-            "decoded_video": [self._fragment(frame, frame.stream_ts, frame.wall_ms)],
+            "decoded_video_ch0": [self._fragment(frame, frame.stream_ts, frame.wall_ms)],
             "decoded_audio": [],
         }
 
@@ -272,7 +274,7 @@ class TestBuildDeviceDataAggregation:
             for t, dec in specs
         ]
         tracks = {
-            "decoded_video": [self._fragment(f, f.stream_ts, f.wall_ms) for f in frames],
+            "decoded_video_ch0": [self._fragment(f, f.stream_ts, f.wall_ms) for f in frames],
             "decoded_audio": [],
         }
         dd = adapter._build_device_data(state, tracks, 100, 400)
@@ -296,7 +298,7 @@ class TestBuildDeviceDataAggregation:
             for t, dec in specs
         ]
         tracks = {
-            "decoded_video": [],
+            "decoded_video_ch0": [],
             "decoded_audio": [self._fragment(f, f.stream_ts, f.wall_ms) for f in frames],
         }
         dd = adapter._build_device_data(state, tracks, 100, 300)
@@ -331,7 +333,7 @@ class TestBuildDeviceDataAggregation:
             )
         ]
         tracks = {
-            "decoded_video": [self._fragment(f, f.stream_ts, f.wall_ms) for f in vframes],
+            "decoded_video_ch0": [self._fragment(f, f.stream_ts, f.wall_ms) for f in vframes],
             "decoded_audio": [self._fragment(f, f.stream_ts, f.wall_ms) for f in aframes],
         }
         dd = adapter._build_device_data(state, tracks, 100, 400)

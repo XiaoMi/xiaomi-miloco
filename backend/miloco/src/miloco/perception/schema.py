@@ -54,6 +54,8 @@ class DecodedVideoFrame:
     # into a VideoFrame (right after av.decode() returns).
     decoded_unix_ms: int = 0
     decode_latency_ms: float = 0.0
+    # Camera channel this frame came from (0=main lens, 1=wide-angle, etc.)
+    channel: int = 0
 
 
 @dataclass
