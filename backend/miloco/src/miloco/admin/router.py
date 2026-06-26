@@ -516,13 +516,15 @@ async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
 
 @router.post(
     "/omni-config/test",
-    summary="测试 omni 配置连通性（GET /models 探测，不写库、不计用量）",
+    summary="测试 omni 配置连通性（鉴权/可达预检 + 极简 chat 真校验，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
     response_model=NormalResponse,
 )
 async def test_omni_config(
     body: OmniTestBody, current_user: str = Depends(verify_token)
 ):
-    """用表单值（缺省回退当前已保存配置）做一次轻量探测，返回 {ok, status, latency_ms, message}。"""
+    """用表单值（缺省回退当前已保存配置）做两阶段探测：先 GET /models 验鉴权/可达，再发一次
+    max_tokens=1 的极简 chat 真正验证该模型可用（消耗极少量 token，不计入 miloco 用量统计）。
+    返回 {ok, code, status, latency_ms, message}。"""
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
     base_url = (body.base_url or omni.base_url).strip()
