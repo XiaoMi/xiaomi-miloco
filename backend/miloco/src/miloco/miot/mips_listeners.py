@@ -29,7 +29,12 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from miot.types import MIoTDeviceBindEvent, MIoTDeviceInfo, MIoTSceneChangedEvent
+from miot.types import (
+    MIoTDeviceBindEvent,
+    MIoTDeviceInfo,
+    MIoTDeviceStateEvent,
+    MIoTSceneChangedEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,13 @@ logger = logging.getLogger(__name__)
 BIND_DEBOUNCE_SEC: float = 5.0
 META_DEBOUNCE_SEC: float = 5.0
 SCENE_DEBOUNCE_SEC: float = 5.0
+# Cloud online/offline state events settle quickly under normal flapping, but
+# the trailing full reconciliation (refresh_camera_online_status) is what makes
+# the event-driven path trustworthy: each event updates the cached `online`
+# field directly, and once the burst settles we re-fetch the authoritative
+# cloud state once. 60s matches the maintainer's spec (re-set on every event
+# via _schedule).
+CAMERA_STATE_DEBOUNCE_SEC: float = 60.0
 
 # Single key used by the global (non-per-did) debouncers (meta / scene).
 _GLOBAL_KEY = "_global"
@@ -49,6 +61,9 @@ RefreshDevices = Callable[[], Awaitable[Any]]
 RefreshCameras = Callable[[], Awaitable[Any]]
 RefreshScenes = Callable[[], Awaitable[Any]]
 RefreshScenesOnly = Callable[[], Awaitable[Any]]
+# Lightweight cloud-status re-fetch (refresh_camera_online_status): updates
+# _camera_info_dict metadata only, does NOT touch stream connections.
+RefreshCameraOnlineStatus = Callable[[], Awaitable[Any]]
 GetDevice = Callable[[str], MIoTDeviceInfo | None]
 # Greets a device by did (owned by DeviceWelcomeService); returns whether a
 # welcome was sent.
@@ -170,7 +185,11 @@ class BindEventListener(_TrailingDebounce):
         logger.info(
             "mips user-bind event received: uid=%s event=%s did=%s raw=%r; "
             "scheduling %ss debounce",
-            msg.uid, msg.event, msg.did, msg.raw, BIND_DEBOUNCE_SEC,
+            msg.uid,
+            msg.event,
+            msg.did,
+            msg.raw,
+            BIND_DEBOUNCE_SEC,
         )
         self._schedule(msg.did)
 
@@ -181,7 +200,8 @@ class BindEventListener(_TrailingDebounce):
         except Exception as e:
             logger.error(
                 "bind debounce settled but refresh_devices failed: did=%s err=%s",
-                did, e,
+                did,
+                e,
             )
             return
         if self._closed:
@@ -193,7 +213,9 @@ class BindEventListener(_TrailingDebounce):
         )
         logger.info(
             "bind debounce settled: did=%s cameras_ok=%s scenes_ok=%s",
-            did, status.get("cameras", "N/A"), status.get("scenes", "N/A"),
+            did,
+            status.get("cameras", "N/A"),
+            status.get("scenes", "N/A"),
         )
 
         if self._get_device(did) is None:
@@ -243,7 +265,11 @@ class DeviceMetaEventListener(_TrailingDebounce):
         logger.info(
             "mips device-meta event received: uid=%s event=%s did=%s raw=%r; "
             "scheduling %ss debounce",
-            msg.uid, msg.event, msg.did, msg.raw, META_DEBOUNCE_SEC,
+            msg.uid,
+            msg.event,
+            msg.did,
+            msg.raw,
+            META_DEBOUNCE_SEC,
         )
         self._schedule(_GLOBAL_KEY)
 
@@ -275,7 +301,8 @@ class DeviceMetaEventListener(_TrailingDebounce):
         )
         logger.info(
             "meta debounce settled: devices refreshed cameras_ok=%s scenes_ok=%s",
-            status.get("cameras", "N/A"), status.get("scenes", "N/A"),
+            status.get("cameras", "N/A"),
+            status.get("scenes", "N/A"),
         )
 
         # Greet devices that moved INTO a managed home — the refresh above now
@@ -312,7 +339,11 @@ class SceneEventListener(_TrailingDebounce):
         logger.info(
             "mips scene event received: home=%s event=%s scene_id=%s raw=%r; "
             "scheduling %ss debounce",
-            msg.home_id, msg.event, msg.scene_id, msg.raw, SCENE_DEBOUNCE_SEC,
+            msg.home_id,
+            msg.event,
+            msg.scene_id,
+            msg.raw,
+            SCENE_DEBOUNCE_SEC,
         )
         self._schedule(_GLOBAL_KEY)
 
@@ -323,3 +354,55 @@ class SceneEventListener(_TrailingDebounce):
             logger.error("scene debounce settled but refresh_scenes failed: %s", e)
             return
         logger.info("scene debounce settled: scene list refreshed")
+
+
+class CameraStateEventListener(_TrailingDebounce):
+    """Global debounce for `device/{did}/state/{online,offline}`.
+
+    Each state event already updated the cached `online` field directly (in
+    MiotProxy._on_camera_state_changed_event) — this listener is the trailing
+    reconciliation: once the burst settles it re-fetches the authoritative
+    cloud camera status once, so a missed or stale event can't strand a
+    camera. refresh_camera_online_status is lightweight (metadata only, no
+    stream disturbance). Any state event (any did) re-arms the single global
+    timer.
+    """
+
+    def __init__(
+        self,
+        refresh_camera_online_status: RefreshCameraOnlineStatus,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        super().__init__(loop)
+        self._refresh = refresh_camera_online_status
+
+    def _window(self) -> float:
+        return CAMERA_STATE_DEBOUNCE_SEC
+
+    async def on_event(self, msg: MIoTDeviceStateEvent) -> None:
+        if self._closed:
+            logger.debug(
+                "camera-state event ignored: listener closed (did=%s)", msg.did
+            )
+            return
+        logger.info(
+            "mips device-state event received: did=%s event=%s raw=%r; "
+            "scheduling %ss reconciliation",
+            msg.did,
+            msg.event,
+            msg.raw,
+            CAMERA_STATE_DEBOUNCE_SEC,
+        )
+        self._schedule(_GLOBAL_KEY)
+
+    async def _fire(self, key: Any) -> None:
+        try:
+            await self._refresh()
+        except Exception as e:
+            logger.error(
+                "camera-state debounce settled but "
+                "refresh_camera_online_status failed: %s",
+                e,
+            )
+            return
+        logger.info("camera-state debounce settled: cloud online status reconciled")
