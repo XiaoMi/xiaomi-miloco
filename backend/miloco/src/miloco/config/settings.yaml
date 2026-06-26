@@ -69,6 +69,8 @@ rule:
 perception:
   log_ttl: 30                  # 感知日志保留天数
   tier_u_dump_enable: false    # POST /api/identity/pool/dump 调试端点开关（生产保持 false，本地调试可设 true）
+  push:
+    max_delay_minutes: 5       # suggestion 推送最大允许延迟；超过则 [DROPPED] 丢弃，0 表示禁用
   collect:
     window_size: 4           # 时间窗口大小（秒）
     max_windows: 3           # 最大待处理窗口数

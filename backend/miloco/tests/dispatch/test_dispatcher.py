@@ -18,6 +18,7 @@ Behaviors under test:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from types import SimpleNamespace
@@ -65,7 +66,16 @@ def patched(monkeypatch):
     """
     rec = SimpleNamespace(turns=[], tracks=[])
 
-    async def default_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+    async def default_turn(
+        msg,
+        *,
+        session_key,
+        lane,
+        trace_id,
+        wait_timeout_ms,
+        created_at_ms=None,
+        expires_at_ms=None,
+    ):
         rec.turns.append(
             SimpleNamespace(
                 msg=msg,
@@ -73,6 +83,8 @@ def patched(monkeypatch):
                 lane=lane,
                 trace_id=trace_id,
                 wait_timeout_ms=wait_timeout_ms,
+                created_at_ms=created_at_ms,
+                expires_at_ms=expires_at_ms,
             )
         )
         return f"run-{len(rec.turns)}", "ok", 1.0
@@ -93,7 +105,10 @@ def patched(monkeypatch):
         lambda: SimpleNamespace(
             dispatcher=SimpleNamespace(
                 turn_wait_timeout_ms=30_000, max_queue=MAX_QUEUE
-            )
+            ),
+            perception=SimpleNamespace(
+                push=SimpleNamespace(max_delay_minutes=5),
+            ),
         ),
     )
     return rec
@@ -318,6 +333,42 @@ async def test_bind_not_tracked(patched):
 
     assert len(patched.turns) == 1  # turn still sent
     assert patched.tracks == []  # but not recorded to agent_runs
+
+
+@pytest.mark.asyncio
+async def test_stale_suggestion_dropped_before_agent_webhook(patched, caplog):
+    stale = SimpleNamespace(_event_timestamp_ms=int((time.time() - 3600) * 1000))
+    d = AgentDispatcher()
+    await d.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            accepted = await d.dispatch("suggestion", [stale], _join)
+            await _settle(d)
+    finally:
+        await d.stop()
+
+    assert accepted is True
+    assert patched.turns == []
+    assert patched.tracks == []
+    assert "[DROPPED]" in caplog.text
+    assert "delay_ms=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fresh_suggestion_forwards_expiry_payload(patched):
+    event_ts = int(time.time() * 1000)
+    fresh = SimpleNamespace(_event_timestamp_ms=event_ts)
+    d = AgentDispatcher()
+    await d.start()
+    try:
+        await d.dispatch("suggestion", [fresh], _join)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert len(patched.turns) == 1
+    assert patched.turns[0].created_at_ms == event_ts
+    assert patched.turns[0].expires_at_ms == event_ts + 5 * 60 * 1000
 
 
 @pytest.mark.asyncio

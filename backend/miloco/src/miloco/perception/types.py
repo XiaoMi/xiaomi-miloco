@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 @dataclass
@@ -310,6 +310,7 @@ class Suggestion(BaseModel):
     device_name: str = Field(default="", description="Source camera display name (engine-injected, human-readable; NOT sent as raw did)")
     time_window: str = Field(default="", description="Picture capture window [HH:MM:SS-HH:MM:SS] (engine-injected)")
     caption: str = Field(default="", description="Caption from same-window CaptionEntry (attached before dispatch)")
+    _event_timestamp_ms: int | None = PrivateAttr(default=None)
 
 
 # urgency 排名（数字大 = 更紧急）；engine 事件链与调度器条目级优先级共用此单一真值。

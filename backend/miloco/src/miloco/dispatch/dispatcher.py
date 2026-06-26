@@ -58,6 +58,19 @@ class _QueuedEvent:
     priority: int  # 类型级优先级（来自 _ROUTE，数字小=优先）
     enqueued_at: float  # time.monotonic()，用于同类合并排序 + 淘汰判旧
     intra_priority: int = 0  # 条目级优先级（数字小=优先）；无内层优先级的类型恒 0，仅参与淘汰、不改渲染序
+    event_timestamp_ms: int = 0  # 业务事件发生时间；suggestion 用感知窗口时间，其它类型用入队时间兜底
+
+
+def _event_timestamp_ms(event_type: EventType, items: list[Any]) -> int:
+    if event_type == "suggestion":
+        timestamps = [
+            ts
+            for ts in (getattr(item, "_event_timestamp_ms", None) for item in items)
+            if isinstance(ts, int) and ts > 0
+        ]
+        if timestamps:
+            return min(timestamps)
+    return int(time.time() * 1000)
 
 
 class AgentDispatcher:
@@ -117,6 +130,7 @@ class AgentDispatcher:
             priority=priority,
             enqueued_at=time.monotonic(),
             intra_priority=intra_priority,
+            event_timestamp_ms=_event_timestamp_ms(event_type, items),
         )
         q = self._queues.setdefault(session_key, [])
         q.append(ev)
@@ -185,6 +199,10 @@ class AgentDispatcher:
     async def _send_batch(self, session_key: str, batch: list[_QueuedEvent]) -> None:
         event_type = batch[0].event_type
         lane = _ROUTE[event_type][1]
+        batch = self._drop_stale_suggestions(session_key, batch)
+        if not batch:
+            return
+        created_at_ms, expires_at_ms = self._suggestion_expiry_payload(batch)
         merged: list[Any] = [it for ev in batch for it in ev.items]
         try:
             msg = batch[0].builder(merged)
@@ -203,13 +221,17 @@ class AgentDispatcher:
         rtt_ms: float = 0.0
         for attempt in range(self._TRANSPORT_RETRIES + 1):
             try:
-                run_id, status, rtt_ms = await run_agent_turn(
-                    msg,
-                    session_key=session_key,
-                    lane=lane,
-                    trace_id=trace_id,
-                    wait_timeout_ms=wait_ms,
-                )
+                kwargs: dict[str, Any] = {
+                    "session_key": session_key,
+                    "lane": lane,
+                    "trace_id": trace_id,
+                    "wait_timeout_ms": wait_ms,
+                }
+                if created_at_ms is not None:
+                    kwargs["created_at_ms"] = created_at_ms
+                if expires_at_ms is not None:
+                    kwargs["expires_at_ms"] = expires_at_ms
+                run_id, status, rtt_ms = await run_agent_turn(msg, **kwargs)
                 break
             except AgentWebhookException as e:
                 # 传输失败（连接 / 5xx / HTTP 超时）→ 有限短退避重试,
@@ -240,6 +262,54 @@ class AgentDispatcher:
             track_agent_run(
                 trace_id, run_id, cast(AgentRunSource, event_type), rtt_ms
             )
+
+    def _drop_stale_suggestions(
+        self, session_key: str, batch: list[_QueuedEvent]
+    ) -> list[_QueuedEvent]:
+        if not batch or batch[0].event_type != "suggestion":
+            return batch
+
+        max_delay_minutes = get_settings().perception.push.max_delay_minutes
+        if max_delay_minutes <= 0:
+            return batch
+
+        now_ms = int(time.time() * 1000)
+        max_delay_ms = int(max_delay_minutes * 60 * 1000)
+        fresh: list[_QueuedEvent] = []
+        for ev in batch:
+            if ev.event_timestamp_ms <= 0:
+                fresh.append(ev)
+                continue
+            delay_ms = max(0, now_ms - ev.event_timestamp_ms)
+            if delay_ms <= max_delay_ms:
+                fresh.append(ev)
+                continue
+            logger.warning(
+                "[DROPPED] stale suggestion batch skipped before agent webhook "
+                "session=%s delay_ms=%d max_delay_minutes=%.2f items=%d",
+                session_key,
+                delay_ms,
+                max_delay_minutes,
+                len(ev.items),
+            )
+        return fresh
+
+    def _suggestion_expiry_payload(
+        self, batch: list[_QueuedEvent]
+    ) -> tuple[int | None, int | None]:
+        if not batch or batch[0].event_type != "suggestion":
+            return None, None
+
+        max_delay_minutes = get_settings().perception.push.max_delay_minutes
+        if max_delay_minutes <= 0:
+            return None, None
+
+        timestamps = [ev.event_timestamp_ms for ev in batch if ev.event_timestamp_ms > 0]
+        if not timestamps:
+            return None, None
+        created_at_ms = min(timestamps)
+        expires_at_ms = created_at_ms + int(max_delay_minutes * 60 * 1000)
+        return created_at_ms, expires_at_ms
 
 
 _singleton: AgentDispatcher | None = None

@@ -22,6 +22,8 @@ interface IRequestBody {
   extraSystemPrompt?: string;
   traceId?: string;
   timeoutMs?: number;
+  createdAtMs?: number;
+  expiresAtMs?: number;
 }
 
 interface WaitResult {
@@ -34,6 +36,10 @@ function isContextOverflow(text: string | null | undefined): boolean {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
 
 // 等本 run 的 trace meta 落定(done)后返回;超时仍未 done 返 undefined(按非溢出处理,安全降级)。
 async function waitTurnMeta(runId: string, timeoutMs: number) {
@@ -74,9 +80,30 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       idempotencyKey = crypto.randomUUID(),
       traceId,
       timeoutMs,
+      createdAtMs,
+      expiresAtMs,
     } = payload;
     // 自愈双 turn 串联须留在 backend HTTP 超时内，startedAt 用于给重试 turn 算剩余等待预算。
     const startedAt = Date.now();
+
+    const dropIfExpired = () => {
+      if (!isFiniteNumber(expiresAtMs) || Date.now() <= expiresAtMs) {
+        return null;
+      }
+      const delayMs = isFiniteNumber(createdAtMs) ? Date.now() - createdAtMs : null;
+      logger.warn(
+        `[DROPPED] stale agent webhook skipped before subagent.run session=${sessionKey} lane=${lane ?? ""} delay_ms=${delayMs ?? ""} expires_at_ms=${expiresAtMs}`,
+      );
+      return {
+        runId: null,
+        status: "ok",
+        dropped: true,
+        reason: "expired",
+      };
+    };
+
+    const expired = dropIfExpired();
+    if (expired) return expired;
 
     const runOnce = async (idem: string, waitMs: number) => {
       const result = await api.runtime.subagent.run({
@@ -117,6 +144,8 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
         // 之上还有 15s 缓冲吸收 deleteSession / 轮询 / HTTP 开销，故插件侧无需硬编码该缓冲。
         // 常规下首个 turn 秒级返回 → 预算充裕 → 取 RETRY_WAIT_MS 上限；首个 turn 慢时自动收窄。
         const elapsed = Date.now() - startedAt;
+        const expiredBeforeRetry = dropIfExpired();
+        if (expiredBeforeRetry) return expiredBeforeRetry;
         const retryWaitMs = Math.max(
           10_000,
           Math.min(
