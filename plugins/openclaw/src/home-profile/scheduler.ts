@@ -32,7 +32,8 @@ const kCronTasks = [
     payload: {
       kind: "agentTurn",
       lightContext: false,
-      message: "执行家庭巡检。加载 miloco-home-patrol skill 进行巡检。",
+      message:
+        "执行家庭巡检。加载 miloco-home-patrol skill 进行巡检。每次巡检都是隔离会话，务必先读巡检日志接上次进度、只处理上次处理时间之后的新事件，巡检完把处理记录追加回日志，避免重复提醒 / 重复操作。",
     },
   },
   {
