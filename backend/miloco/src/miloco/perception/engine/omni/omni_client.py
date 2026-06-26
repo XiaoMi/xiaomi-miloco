@@ -203,14 +203,14 @@ def _build_messages(payload: dict) -> list[dict]:
 
     # Video (frames + audio merged into mp4)；与 audio_base64 互斥（上游 _build_payload 保证）
     if payload.get("video_base64"):
+        fps = payload.get("video_fps", 3)
         content.append(
             {
                 "type": "video_url",
                 "video_url": {
-                    "url": f"data:video/mp4;base64,{payload['video_base64']}"
+                    "url": f"data:video/mp4;base64,{payload['video_base64']}",
+                    "fps": fps,
                 },
-                "fps": payload.get("video_fps", 3),
-                "media_resolution": "max",
             }
         )
     # Audio-only route：独立 input_audio 块（仅当无 video_base64 时启用）

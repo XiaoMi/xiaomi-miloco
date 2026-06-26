@@ -63,7 +63,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-
 # =============================================================================
 # Fused mode 配置
 # =============================================================================
@@ -678,9 +677,10 @@ def _build_fused_user_content(
     if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
         content.append({
             "type": "video_url",
-            "video_url": {"url": f"data:video/mp4;base64,{video_b64}"},
-            "fps": video_fps,
-            "media_resolution": "max",
+            "video_url": {
+                "url": f"data:video/mp4;base64,{video_b64}",
+                "fps": video_fps,
+            },
         })
     elif video_b64:
         logger.warning(
@@ -1076,7 +1076,7 @@ _MIN_AUDIO_B64_LEN = 500
 
 # 总开关：False 时所有窗口都走 video route（等价于改动前的行为）。
 # 用于一键回滚 / A/B 对比 / 上游不兼容时的应急关闭。
-_AUDIO_ONLY_ENABLED = True
+_AUDIO_ONLY_ENABLED = False
 
 
 def _packet_audio_included(ep: IdentityPacket) -> bool:
