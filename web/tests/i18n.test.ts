@@ -79,3 +79,26 @@ describe("i18n 接线 smoke", () => {
     expect(i18n.t("nav.__missing__")).toBe("nav.__missing__");
   });
 });
+
+// 守 USAGE 卡:组件里引用的 usage.* key(含 t("usage.X") 与 OMNI_CODE_KEY 的 "usage.X" 值)
+// 必须在 zh/en 都存在。这正是「删除弹窗渲染裸 key」事故的根因门——缺 key 时 i18next 回退为
+// key 字符串本身,界面显示 "usage.deleteDialogTitle" 这种,既有对齐测试查不出(两边都缺)。
+describe("UsageOmniConfig 引用的 usage.* key 均存在", () => {
+  const componentPath = fileURLToPath(
+    new URL("../src/components/UsageOmniConfig.tsx", import.meta.url),
+  );
+  const src = readFileSync(componentPath, "utf8");
+  const referenced = [...new Set([...src.matchAll(/usage\.([a-zA-Z0-9_]+)/g)].map((m) => m[1]))];
+  // loadDomain 把 {usage:{...}} 展平为 "usage.X" 键,故用全名做集合成员判断。
+  const zhKeys = new Set(Object.keys(loadDomain("zh", "usage.json")));
+  const enKeys = new Set(Object.keys(loadDomain("en", "usage.json")));
+
+  it("至少扫到一批 key(防正则失效后静默放行)", () => {
+    expect(referenced.length).toBeGreaterThan(10);
+  });
+
+  it.each(referenced)("usage.%s 在 zh 与 en 均有定义", (key) => {
+    expect(zhKeys.has(`usage.${key}`), `zh 缺 usage.${key}`).toBe(true);
+    expect(enKeys.has(`usage.${key}`), `en 缺 usage.${key}`).toBe(true);
+  });
+});

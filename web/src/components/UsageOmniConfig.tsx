@@ -17,11 +17,13 @@ import {
   getOmniConfig,
   updateOmniConfig,
   activateOmniConfig,
+  deactivateOmniConfig,
   deleteOmniConfig,
   listOmniModels,
   testOmniConfig,
 } from "@/api";
 import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
+import { IconX, IconEye, IconEyeOff } from "@/lib/icons";
 import { toast } from "./Toast";
 
 const INPUT_CLS =
@@ -32,13 +34,35 @@ const INPUT_CLS =
 // 未命中(如 http_error,含动态 HTTP 细节)回退后端 message。
 const OMNI_CODE_KEY: Record<string, string> = {
   ok: "usage.testOk",
-  ok_model_found: "usage.testOkModelFound",
   bad_key: "usage.testBadKey",
   not_found: "usage.testNotFound",
   rejected_authed: "usage.testRejectedAuthed",
   unreachable: "usage.testUnreachable",
   no_key: "usage.testNoKey",
+  http_error: "usage.testHttpError",
 };
+
+// 测试结果三档语义:连接正常(✓ 绿,chat 调通)/ 鉴权过但探测被拒(⚠ 黄,rejected_authed)/ 失败(✗ 红)。
+const TEST_WARN_CODES = new Set(["rejected_authed"]);
+type Severity = "ok" | "warn" | "error";
+function severityOf(res: OmniTestResult): Severity {
+  if (res.code && TEST_WARN_CODES.has(res.code)) return "warn";
+  return res.ok ? "ok" : "error";
+}
+const SEV_GLYPH: Record<Severity, string> = { ok: "✓", warn: "⚠", error: "✗" };
+const SEV_CLASS: Record<Severity, string> = {
+  ok: "text-success",
+  warn: "text-warning",
+  error: "text-error",
+};
+
+// 拉模型/测试失败的机器码 → 该错误属于哪个表单字段(就近显示,而非全堆模型框下)。
+// key 类(鉴权)→ API Key;可达性/地址类 → Base URL;其余(空结果/未知)→ 模型框。
+function errFieldOf(code: string | null): "url" | "key" | "model" {
+  if (code === "bad_key" || code === "no_key") return "key";
+  if (code === "unreachable" || code === "http_error" || code === "not_found") return "url";
+  return "model";
+}
 
 function hostOf(url: string): string {
   try {
@@ -145,21 +169,30 @@ export function UsageOmniConfig() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false); // 默认展开
 
-  // 新增表单
+  // 新增 / 编辑表单(共用):editing 非空表示在编辑该 label 对应的已有配置
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [showKey, setShowKey] = useState(false); // API Key 明文/密文切换(末端眼睛图标)
   const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsMsg, setModelsMsg] = useState<string | null>(null);
+  const [modelsErr, setModelsErr] = useState(false); // modelsMsg 是否为错误(决定红色突出)
+  const [modelsErrCode, setModelsErrCode] = useState<string | null>(null); // 错误机器码(决定就近显示在哪个字段)
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<OmniTestResult | null>(null);
-
-  // 编辑状态（与 adding 互斥）
-  const [editingLabel, setEditingLabel] = useState<string | null>(null);
-  const [editingProfile, setEditingProfile] = useState<OmniProfile | null>(null);
+  // 列表行内「测试」:正在测的 label + 各行结果
+  const [rowTesting, setRowTesting] = useState<string | null>(null);
+  const [rowTestResults, setRowTestResults] = useState<Record<string, OmniTestResult>>({});
+  const [activating, setActivating] = useState<string | null>(null); // 正在「启用前测试+启用」的 label
+  // 连接状态列被截断时,跟随光标的全文浮层(fixed 定位,免原生 title 延迟、不被表格 overflow 裁剪)
+  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  // 删除确认弹窗(web 风格,代替 window.confirm):待删项 + 删除中
+  const [deleteTarget, setDeleteTarget] = useState<OmniProfile | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     void load();
@@ -183,35 +216,43 @@ export function UsageOmniConfig() {
   );
 
   function startAdd() {
-    setEditingLabel(null); // 与编辑互斥
-    setEditingProfile(null);
     setAdding(true);
+    setEditing(null);
     setBaseUrl("");
     setApiKey("");
+    setShowKey(false);
     setModel("");
     setModels([]);
     setModelsMsg(null);
+    setModelsErr(false);
+    setModelsErrCode(null);
     setTestResult(null);
   }
 
+  // 编辑已有配置:预填 base_url / model,key 留空(占位提示「留空则不修改」),复用同一表单与 onSave 的 upsert。
   function startEdit(p: OmniProfile) {
-    setAdding(false); // 与新增互斥
-    setEditingLabel(p.label);
-    setEditingProfile(p);
+    setAdding(true);
+    setEditing(p.label);
     setBaseUrl(p.base_url);
-    setApiKey(""); // API Key 不回显，用户留空=沿用原 key
+    setApiKey("");
+    setShowKey(false);
     setModel(p.model);
     setModels([]);
     setModelsMsg(null);
+    setModelsErr(false);
+    setModelsErrCode(null);
     setTestResult(null);
-    // 自动拉取模型列表（apiKey 留空，后端沿用原 key）
     void fetchModels(p.base_url, "", p.label);
   }
 
-  async function fetchModels(bu: string, key: string, label?: string) {
+  // label 非空时:编辑态下未填新 key 也能让后端用该档案存档 key 拉模型(否则需 key 的厂商
+  // 会回 bad_key,一打开编辑就误报红错)。
+  async function fetchModels(bu: string, key: string, label?: string | null) {
     if (!bu.trim()) return;
     setModelsLoading(true);
     setModelsMsg(null);
+    setModelsErr(false);
+    setModelsErrCode(null);
     try {
       const res = await listOmniModels({
         base_url: bu.trim(),
@@ -225,10 +266,14 @@ export function UsageOmniConfig() {
         setModels([]);
         const k = res.code ? OMNI_CODE_KEY[res.code] : undefined;
         setModelsMsg(k ? t(k) : res.message || t("usage.modelsFetchFailed"));
+        setModelsErr(true);
+        setModelsErrCode(res.code ?? null);
       }
     } catch (e) {
       setModels([]);
       setModelsMsg(e instanceof Error ? e.message : t("usage.modelsFetchFailed"));
+      setModelsErr(true);
+      setModelsErrCode("unreachable"); // 网络/解析异常归为 Base URL 不可达
     } finally {
       setModelsLoading(false);
     }
@@ -237,39 +282,48 @@ export function UsageOmniConfig() {
   async function onSave() {
     const bu = baseUrl.trim();
     const m = model.trim();
-    const isEditing = !!editingLabel;
     if (!bu || !m) {
       toast(t("usage.baseUrlModelRequired"), "warn");
       return;
     }
-    // 编辑模式：允许不填 api_key（沿用原 key）
-    // 新增模式：检查是否已有 key（existing.has_key）
-    if (!apiKey.trim() && !editingProfile?.has_key && !existing?.has_key) {
+    // 目标条目:编辑态用被编辑的 label;否则按 (model, base_url) 命中已有(隐式 upsert)。
+    // 用 ||(非 ??)让空串落空 → 当作新增并生成 label,绝不把空 original_label 发给后端。
+    const target = editing || existing?.label || undefined;
+    if (!apiKey.trim() && !editTarget(target)?.has_key) {
       toast(t("usage.apiKeyRequired"), "warn");
       return;
     }
     setSaving(true);
     try {
-      // 编辑模式：label 基于新值，original_label 记录原档案名
-      // 新增模式：label = `${model} @ ${base_url}`
       const s = await updateOmniConfig({
-        label: editingLabel ? `${m} @ ${bu}` : (existing ? existing.label : `${m} @ ${bu}`),
+        label: target ?? `${m} @ ${bu}`,
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
-        original_label: editingLabel || (existing ? existing.label : undefined),
-        activate: false, // 只入列表；启用由模型列表的「启用」负责
+        original_label: target,
+        activate: false, // 只入列表;启用由模型列表的「启用」负责
       });
       setState(s);
       setAdding(false);
-      setEditingLabel(null); // 清空编辑状态
-      setEditingProfile(null);
-      toast(isEditing ? t("usage.editSuccess") : t("usage.saveSuccess"), "ok");
+      setEditing(null);
+      // 保存后清掉该条旧的行内测试结果(key/model 可能已变,旧 ✓ 会误导)。
+      if (target)
+        setRowTestResults((m2) => {
+          const next = { ...m2 };
+          delete next[target];
+          return next;
+        });
+      toast(t("usage.saveSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.saveFailed"), "danger");
     } finally {
       setSaving(false);
     }
+  }
+
+  // 按 label 找列表里的条目(用于「留空不改 key」的 has_key 判断)
+  function editTarget(label: string | null | undefined): OmniProfile | undefined {
+    return label ? profiles.find((p) => p.label === label) : undefined;
   }
 
   async function onTest() {
@@ -279,7 +333,8 @@ export function UsageOmniConfig() {
       toast(t("usage.baseUrlModelRequired"), "warn");
       return;
     }
-    if (!apiKey.trim() && !editingProfile?.has_key && !existing?.has_key) {
+    const target = editing || existing?.label || undefined;
+    if (!apiKey.trim() && !editTarget(target)?.has_key) {
       toast(t("usage.apiKeyRequiredBeforeTest"), "warn");
       return;
     }
@@ -287,7 +342,7 @@ export function UsageOmniConfig() {
     setTestResult(null);
     try {
       const res = await testOmniConfig({
-        label: editingLabel || (existing ? existing.label : ""),
+        label: target ?? "",
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
@@ -300,24 +355,108 @@ export function UsageOmniConfig() {
     }
   }
 
-  async function onActivate(p: OmniProfile) {
+  // 列表行内「测试」:对已存档的该条按 label 测(用存档 key,无需带 key),结果就地显示。
+  async function onTestRow(p: OmniProfile) {
+    setRowTesting(p.label);
+    setRowTestResults((m) => {
+      const next = { ...m };
+      delete next[p.label];
+      return next;
+    });
     try {
+      const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
+      setRowTestResults((m) => ({ ...m, [p.label]: res }));
+    } catch (e) {
+      setRowTestResults((m) => ({
+        ...m,
+        [p.label]: { ok: false, message: e instanceof Error ? e.message : t("usage.testFailed") },
+      }));
+    } finally {
+      setRowTesting(null);
+    }
+  }
+
+  // 启用前先跑一次测试(用存档 key 真正探测模型):仅「连接正常」(✓绿)才放行启用;否则不启用,
+  // 顶部 toast 给出原因,并把结果写进该行「连接状态」列(原因文案与状态列一致)。
+  async function onActivate(p: OmniProfile) {
+    setActivating(p.label);
+    try {
+      const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
+      setRowTestResults((m) => ({ ...m, [p.label]: res }));
+      if (severityOf(res) !== "ok") {
+        toast(`${t("usage.cannotEnable")}：${testReason(res)}`, severityOf(res) === "warn" ? "warn" : "danger");
+        return;
+      }
       setState(await activateOmniConfig({ label: p.label }));
       toast(t("usage.activateSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.activateFailed"), "danger");
+    } finally {
+      setActivating(null);
     }
   }
 
-  async function onDelete(p: OmniProfile) {
-    if (!window.confirm(t("usage.deleteConfirm", { model: p.model, host: hostOf(p.base_url) }))) return;
+  // 停用当前生效模型:回未配态 + 软停感知,保留档案(可再启用)。与「启用」对称的反向操作。
+  async function onDeactivate(p: OmniProfile) {
     try {
-      setState(await deleteOmniConfig({ label: p.label }));
-      toast(t("usage.deleteSuccess"), "ok");
+      setState(await deactivateOmniConfig({ label: p.label }));
+      toast(t("usage.deactivateSuccess"), "ok");
     } catch (e) {
-      toast(e instanceof Error ? e.message : t("usage.deleteFailed"), "danger");
+      toast(e instanceof Error ? e.message : t("usage.deactivateFailed"), "danger");
     }
   }
+
+  // 实际删除(由弹窗「删除」按钮触发);删的若是当前生效项,后端会软停感知并回到未配态。
+  async function confirmDelete() {
+    const p = deleteTarget;
+    if (!p) return;
+    setDeleting(true);
+    try {
+      setState(await deleteOmniConfig({ label: p.label }));
+      setRowTestResults((m) => {
+        const next = { ...m };
+        delete next[p.label];
+        return next;
+      });
+      toast(t("usage.deleteSuccess"), "ok");
+      setDeleteTarget(null);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("usage.deleteFailed"), "danger");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  // 连接状态列被截断时的悬浮全文:跟随光标的 fixed 浮层(避开表格 overflow 裁剪、无原生 title 延迟)。
+  function showTip(e: React.MouseEvent<HTMLElement>) {
+    const el = e.currentTarget;
+    if (el.scrollWidth > el.clientWidth) {
+      const r = el.getBoundingClientRect();
+      setTip({ text: el.textContent ?? "", x: r.left, y: r.bottom + 4 });
+    }
+  }
+  function hideTip() {
+    setTip(null);
+  }
+
+  // 测试结果的本地化文案(无图标/延迟);供「不可启用」toast 与状态列共用。
+  function testReason(res: OmniTestResult): string {
+    const k = res.code ? OMNI_CODE_KEY[res.code] : undefined;
+    return k ? t(k) : res.message;
+  }
+
+  // 测试结果统一展示文案(✓/⚠/✗ + 本地化 + 延迟);行内状态列与表单底部共用,避免两处渲染漂移。
+  function testResultText(res: OmniTestResult): string {
+    const lat = res.latency_ms != null ? ` · ${res.latency_ms}ms` : "";
+    return `${SEV_GLYPH[severityOf(res)]} ${testReason(res)}${lat}`;
+  }
+
+  // 表单内拉模型/测试错误的就近显示:解析当前编辑/命中条目 + 错误归属字段。
+  const keyProfile = editTarget(editing) ?? existing;
+  const errField = modelsErr ? errFieldOf(modelsErrCode) : null;
+  const urlErrHere = errField === "url";
+  const keyErrHere = errField === "key";
+  const modelErrHere = errField === "model";
 
   return (
     <section
@@ -369,14 +508,15 @@ export function UsageOmniConfig() {
                       <th className="text-left px-5 md:px-6 py-2">{t("usage.colModel")}</th>
                       <th className="text-left px-3 py-2">{t("usage.baseUrlLabel")}</th>
                       <th className="text-left px-3 py-2">{t("usage.colApiKey")}</th>
-                      <th className="text-right px-5 md:px-6 py-2">{t("usage.colAction")}</th>
+                      <th className="text-left px-3 py-2 w-44">{t("usage.colStatus")}</th>
+                      <th className="text-left px-5 md:px-6 py-2">{t("usage.colAction")}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {profiles.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={4}
+                          colSpan={5}
                           className="px-5 md:px-6 py-5 text-center text-text-tertiary"
                         >
                           {t("usage.emptyProfiles")}
@@ -392,40 +532,77 @@ export function UsageOmniConfig() {
                         >
                           <td className="px-5 md:px-6 py-2.5 num text-text-primary">
                             {p.model}
+                            {p.active && (
+                              <span className="ml-2 align-middle inline-block rounded px-1.5 py-0.5 bg-brand-primary text-white text-caption">
+                                {t("usage.activeTag")}
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-2.5 num text-text-tertiary">{p.base_url}</td>
                           <td className="px-3 py-2.5 num text-text-tertiary">
                             {p.has_key ? p.api_key_masked : t("usage.notConfigured")}
                           </td>
-                          <td className="px-5 md:px-6 py-2.5 text-right whitespace-nowrap">
-                            {p.active ? (
-                              <span className="inline-block rounded-md px-2.5 py-1 bg-brand-primary text-white align-middle mr-3">
-                                {t("usage.currentModel")}
+                          {/* 连接状态列:默认「未测试」;点行内「测试」就地刷新;定宽截断,溢出 hover 看全文 */}
+                          {/* 固定宽 w-44 单行截断(列宽恒定不横向挤压);文字被截断时鼠标悬浮即时弹出
+                              跟随光标的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
+                          <td className="px-3 py-2.5">
+                            {rowTesting === p.label ? (
+                              <span className="block w-44 truncate text-text-tertiary">{t("usage.testing")}</span>
+                            ) : rowTestResults[p.label] ? (
+                              <span
+                                className={`block w-44 truncate ${SEV_CLASS[severityOf(rowTestResults[p.label])]}`}
+                                onMouseEnter={showTip}
+                                onMouseLeave={hideTip}
+                              >
+                                {testResultText(rowTestResults[p.label])}
                               </span>
                             ) : (
+                              <span className="block w-44 truncate text-text-tertiary">{t("usage.statusUntested")}</span>
+                            )}
+                          </td>
+                          <td className="px-5 md:px-6 py-2.5 text-left whitespace-nowrap">
+                            <div className="inline-flex items-center gap-3 align-middle">
+                              {p.active ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onDeactivate(p)}
+                                  className="hover:bg-error-bg text-error border border-error rounded-md px-2.5 py-1"
+                                >
+                                  {t("usage.deactivate")}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => onActivate(p)}
+                                  disabled={activating === p.label}
+                                  className="hover:bg-brand-soft text-brand-primary border border-brand-primary rounded-md px-2.5 py-1 disabled:opacity-60"
+                                >
+                                  {activating === p.label ? t("usage.testing") : t("usage.activate")}
+                                </button>
+                              )}
                               <button
                                 type="button"
-                                onClick={() => onActivate(p)}
-                                className="hover:bg-brand-soft text-brand-primary border border-brand-primary rounded-md px-2.5 py-1 mr-3"
+                                onClick={() => onTestRow(p)}
+                                disabled={rowTesting === p.label}
+                                className="text-text-secondary hover:text-brand-primary disabled:opacity-60"
                               >
-                                {t("usage.activate")}
+                                {rowTesting === p.label ? t("usage.testing") : t("usage.test")}
                               </button>
-                            )}
-                            {/* 编辑按钮 */}
-                            <button
-                              type="button"
-                              onClick={() => startEdit(p)}
-                              className="text-text-tertiary hover:text-brand-primary mr-3"
-                            >
-                              {t("usage.edit")}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onDelete(p)}
-                              className="text-text-tertiary hover:text-error"
-                            >
-                              {t("usage.delete")}
-                            </button>
+                              <button
+                                type="button"
+                                onClick={() => startEdit(p)}
+                                className="text-text-secondary hover:text-brand-primary"
+                              >
+                                {t("usage.edit")}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeleteTarget(p)}
+                                className="text-text-tertiary hover:text-error"
+                              >
+                                {t("usage.delete")}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -435,7 +612,7 @@ export function UsageOmniConfig() {
               </div>
 
               {/* 新增按钮放列表下方(新增即追加到列表末尾) */}
-              {!adding && !editingLabel && (
+              {!adding && (
                 <button
                   type="button"
                   onClick={startAdd}
@@ -445,13 +622,11 @@ export function UsageOmniConfig() {
                 </button>
               )}
 
-              {/* ── 新增/编辑表单 ── */}
-              {(adding || editingLabel) && (
+              {/* ── 新增表单 ── */}
+              {adding && (
                 <div className="mt-4 rounded-lg bg-bg-primary border border-border p-4 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 items-start">
                   <div className="md:col-span-2 text-caption text-text-secondary">
-                    {editingLabel
-                      ? t("usage.editFormHint")
-                      : t("usage.addFormHint")}
+                    {editing ? t("usage.editFormHint") : t("usage.addFormHint")}
                   </div>
                   <Field label={t("usage.baseUrlLabel")} className="md:col-span-2">
                     <input
@@ -460,28 +635,49 @@ export function UsageOmniConfig() {
                         setBaseUrl(e.target.value);
                         setTestResult(null);
                       }}
-                      onBlur={() => fetchModels(baseUrl, apiKey, editingLabel || undefined)}
+                      onBlur={() => fetchModels(baseUrl, apiKey, editing)}
                       placeholder={t("usage.baseUrlPlaceholder")}
                       className={INPUT_CLS}
                     />
+                    {urlErrHere && (
+                      <span className="text-caption mt-1 block text-error">✗ {modelsMsg}</span>
+                    )}
                   </Field>
                   <Field label={t("usage.apiKeyLabel")}>
-                    <input
-                      type="password"
-                      value={apiKey}
-                      onChange={(e) => {
-                        setApiKey(e.target.value);
-                        setTestResult(null);
-                      }}
-                      onBlur={() => fetchModels(baseUrl, apiKey, editingLabel || undefined)}
-                      placeholder={
-                        editingProfile?.has_key || existing?.has_key
-                          ? t("usage.apiKeyPlaceholderExisting")
-                          : t("usage.apiKeyPlaceholderNew")
-                      }
-                      autoComplete="off"
-                      className={INPUT_CLS}
-                    />
+                    <div className="relative">
+                      <input
+                        type={showKey ? "text" : "password"}
+                        value={apiKey}
+                        onChange={(e) => {
+                          setApiKey(e.target.value);
+                          setTestResult(null);
+                        }}
+                        onBlur={() => fetchModels(baseUrl, apiKey, editing)}
+                        placeholder={
+                          keyProfile?.has_key
+                            ? t("usage.apiKeyPlaceholderExisting")
+                            : t("usage.apiKeyPlaceholderNew")
+                        }
+                        autoComplete="off"
+                        className={INPUT_CLS + " pr-10"}
+                      />
+                      {/* 明文/密文切换:密文态睁眼(点击显示),明文态闭眼(点击隐藏) */}
+                      <button
+                        type="button"
+                        onClick={() => setShowKey((s) => !s)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-text-tertiary hover:text-text-secondary"
+                        aria-label={showKey ? t("usage.hideKey") : t("usage.revealKey")}
+                      >
+                        {showKey ? <IconEyeOff /> : <IconEye />}
+                      </button>
+                    </div>
+                    {keyErrHere ? (
+                      <span className="text-caption mt-1 block text-error">✗ {modelsMsg}</span>
+                    ) : keyProfile?.has_key ? (
+                      <span className="text-caption mt-1 block text-text-tertiary num">
+                        {t("usage.apiKeyCurrentHint", { masked: keyProfile.api_key_masked })}
+                      </span>
+                    ) : null}
                   </Field>
                   <Field label={t("usage.modelLabel")}>
                     <ComboBox
@@ -498,14 +694,20 @@ export function UsageOmniConfig() {
                       }
                       ariaLabel={t("usage.modelLabel")}
                     />
-                    <span className="text-caption text-text-tertiary mt-1 block">
+                    <span
+                      className={`text-caption mt-1 block ${
+                        modelErrHere ? "text-error" : "text-text-tertiary"
+                      }`}
+                    >
                       {modelsLoading
                         ? t("usage.modelsFetching")
-                        : modelsMsg
-                          ? modelsMsg
-                          : models.length
-                            ? t("usage.modelsCount", { n: models.length })
-                            : t("usage.modelsHint")}
+                        : modelErrHere
+                          ? `✗ ${modelsMsg}`
+                          : !modelsErr && modelsMsg
+                            ? modelsMsg
+                            : models.length
+                              ? t("usage.modelsCount", { n: models.length })
+                              : t("usage.modelsHint")}
                     </span>
                   </Field>
                   <div className="md:col-span-2 pt-1 flex items-center gap-3 flex-wrap">
@@ -513,7 +715,7 @@ export function UsageOmniConfig() {
                       type="button"
                       onClick={onSave}
                       disabled={saving || testing}
-                      className="px-5 py-2 rounded-lg bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
+                      className="text-caption px-3 py-1.5 rounded-lg bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
                     >
                       {saving ? t("usage.saving") : t("usage.save")}
                     </button>
@@ -521,7 +723,7 @@ export function UsageOmniConfig() {
                       type="button"
                       onClick={onTest}
                       disabled={saving || testing}
-                      className="px-5 py-2 rounded-lg bg-bg-secondary border border-border text-text-primary hover:border-brand-primary disabled:opacity-60"
+                      className="text-caption px-3 py-1.5 rounded-lg bg-bg-secondary border border-border text-text-primary hover:border-brand-primary disabled:opacity-60"
                     >
                       {testing ? t("usage.testing") : t("usage.testConnection")}
                     </button>
@@ -529,24 +731,17 @@ export function UsageOmniConfig() {
                       type="button"
                       onClick={() => {
                         setAdding(false);
-                        setEditingLabel(null);
-                        setEditingProfile(null);
+                        setEditing(null);
                         setTestResult(null);
                       }}
                       disabled={saving || testing}
-                      className="px-3 py-2 rounded-lg text-caption text-text-tertiary hover:text-text-primary"
+                      className="text-caption px-3 py-1.5 rounded-lg text-text-tertiary hover:text-text-primary"
                     >
                       {t("usage.cancel")}
                     </button>
                     {testResult && (
-                      <span
-                        className={`text-caption ${testResult.ok ? "text-success" : "text-error"}`}
-                      >
-                        {testResult.ok ? "✓" : "✗"}{" "}
-                        {testResult.code && OMNI_CODE_KEY[testResult.code]
-                          ? t(OMNI_CODE_KEY[testResult.code])
-                          : testResult.message}
-                        {testResult.latency_ms != null ? ` · ${testResult.latency_ms}ms` : ""}
+                      <span className={`text-caption ${SEV_CLASS[severityOf(testResult)]}`}>
+                        {testResultText(testResult)}
                       </span>
                     )}
                   </div>
@@ -554,6 +749,77 @@ export function UsageOmniConfig() {
               )}
             </>
           )}
+        </div>
+      )}
+
+      {/* 连接状态列截断时的全文浮层:fixed 跟随光标,瞬时出现、不被表格 overflow 裁剪 */}
+      {tip && (
+        <div
+          className="fixed z-[70] max-w-xs rounded-md bg-bg-secondary border border-border shadow-md px-2.5 py-1.5 text-caption text-text-primary pointer-events-none"
+          style={{ left: tip.x, top: tip.y }}
+        >
+          {tip.text}
+        </div>
+      )}
+
+      {/* 删除确认弹窗(web 风格,代替浏览器原生 confirm)。删当前生效项时追加红色警告:会停感知。 */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+          onClick={() => {
+            if (!deleting) setDeleteTarget(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="w-[90%] max-w-md bg-bg-secondary border border-border rounded-2xl shadow-lg p-6 anim-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between mb-3">
+              <h2 className="text-title font-semibold text-text-primary">
+                {t("usage.deleteDialogTitle")}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                aria-label={t("usage.cancel")}
+                className="rounded-full p-1 text-text-secondary hover:text-text-primary disabled:opacity-50"
+              >
+                <IconX />
+              </button>
+            </div>
+            <p className="text-body text-text-secondary">
+              {t("usage.deleteConfirm", {
+                model: deleteTarget.model,
+                host: hostOf(deleteTarget.base_url),
+              })}
+            </p>
+            {deleteTarget.active && (
+              <p className="text-caption text-error bg-error-bg rounded-lg px-3 py-2 mt-3">
+                {t("usage.deleteActiveWarning")}
+              </p>
+            )}
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                className="text-body px-4 py-2 rounded-lg bg-bg-primary border border-border text-text-primary hover:border-border-strong disabled:opacity-60"
+              >
+                {t("usage.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                disabled={deleting}
+                className="text-body px-4 py-2 rounded-lg bg-error text-white hover:bg-error/90 disabled:opacity-60"
+              >
+                {deleting ? t("usage.deleting") : t("usage.delete")}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </section>
