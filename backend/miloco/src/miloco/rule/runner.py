@@ -31,7 +31,7 @@ import logging
 import time
 import uuid
 from collections import deque
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Mapping
 
 if TYPE_CHECKING:
     from miloco.task_record.service import TaskRecordService
@@ -282,6 +282,7 @@ class RuleRunner:
         trigger_dids: list[str] | None = None,
         caption: str = "",
         device_name: str = "",
+        cycle_source_states: Mapping[str, bool] | None = None,
     ) -> None:
         """Per-frame, per-source state report from the perception engine.
 
@@ -307,15 +308,19 @@ class RuleRunner:
             prev = self._last_source_state.get(key, False)
 
             # duration 窗口必须每 sample 都参与（每帧采样累加），不能被下方帧级抗抖
-            # 丢帧。先按本帧 current_bool 临时替换本 source 旧值算 OR 聚合，传给
-            # _evaluate_duration——既反映本帧真实读数，又不污染状态机（不更新
-            # _last_source_state）。
+            # 丢帧。感知 client 会在同一 cycle 内传入已观测 source 的快照，避免
+            # 多 source 同步翻 False 时先来的 source 仍读到后来的 source 上一帧 True。
+            # 未在本 cycle 观测到的 source 继续沿用 _last_source_state。
             if rule.duration_seconds:
-                effective_state = current_bool or any(
+                observed_states = dict(cycle_source_states or {})
+                observed_states.setdefault(source_did, current_bool)
+                effective_state = any(observed_states.values()) or any(
                     v for k, v in self._last_source_state.items()
-                    if k[0] == rule_id and k != key
+                    if k[0] == rule_id and k[1] not in observed_states
                 )
-                self._evaluate_duration(rule, effective_state, source_did, context, caption, device_name)
+                self._evaluate_duration(
+                    rule, effective_state, source_did, context, caption, device_name
+                )
 
             # 帧级抗抖：source 上次 True 时，单帧 False 不立即翻转 — 视为 LLM 漏识，
             # 留一帧观察窗。下一帧仍 False 才确认 EXIT；翻回 True 则吸收为抖动。

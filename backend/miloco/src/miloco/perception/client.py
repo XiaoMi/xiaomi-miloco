@@ -685,6 +685,21 @@ class PerceptionEngineProxy:
         # 去重粒度从 rule_id 改为 (rule_id, did):同 rule 在 cam_A early 命中后,cam_B
         # 终态又命中应当照常打 True(不同桶),不能被 early 误吃。
         svc = get_manager().rule_service
+        cycle_source_states_by_rule: dict[str, dict[str, bool]] = {}
+        for did, rule_ids in result.device_rule_map.items():
+            for rule_id in rule_ids:
+                cycle_source_states_by_rule.setdefault(rule_id, {})[did] = False
+        for matched_rule in result.matched_rules:
+            did = (
+                matched_rule.source_device_ids[0]
+                if matched_rule.source_device_ids
+                else "perception"
+            )
+            cycle_source_states_by_rule.setdefault(matched_rule.rule_id, {})[did] = True
+        if early_sent_rule_ids:
+            for rule_id, did in early_sent_rule_ids:
+                cycle_source_states_by_rule.setdefault(rule_id, {})[did] = True
+
         for matched_rule in result.matched_rules:
             did = matched_rule.source_device_ids[0] if matched_rule.source_device_ids else "perception"
             if early_sent_rule_ids and (matched_rule.rule_id, did) in early_sent_rule_ids:
@@ -698,6 +713,9 @@ class PerceptionEngineProxy:
                 trigger_dids=matched_rule.source_device_ids,
                 caption=caption_for_dids(result.caption, matched_rule.source_device_ids),
                 device_name=matched_rule.device_name,
+                cycle_source_states=cycle_source_states_by_rule.get(
+                    matched_rule.rule_id
+                ),
             )
 
         # 对本 batch 实际下发过、但未命中的 (rule_id, did) 喂 update_state(False)。
@@ -723,7 +741,12 @@ class PerceptionEngineProxy:
                 # 防 race:下发后 rule 在 cycle 内被 disable
                 if rule_id not in enabled_set:
                     continue
-                await svc.update_state(rule_id, did, False)
+                await svc.update_state(
+                    rule_id,
+                    did,
+                    False,
+                    cycle_source_states=cycle_source_states_by_rule.get(rule_id),
+                )
 
         # result.suggestions 含本窗全部「新链」（dump/上下文已完整）。per-omni 下这些新链
         # 已在 _on_early_suggestions 逐相机早送过（id 记入 early_sent_sugg_ids）——此处据此
