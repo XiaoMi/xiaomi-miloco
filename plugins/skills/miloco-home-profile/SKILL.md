@@ -94,6 +94,8 @@ entry 字段：
 - 宠物视为一个非人成员主体：相关信息按维度归入对应 `member_*` 类型，`subject_name` = 宠物名（如"旺财"），`subject_id` 留空（宠物不在身份库）。
   - "养了一只小狗旺财" → `member_persona`，subject_name="旺财"
   - "旺财每天傍晚要遛" → `member_routine`，subject_name="旺财"
+- **宠物外貌特征**：录入宠物时鼓励记录外貌特征（颜色/品种/体型/独特标记），感知系统依赖这些描述在画面中区分和称呼宠物。
+  - 示例：`content: "黑色短毛英短猫，体型中等，尾巴尖有一撮白毛"`
 - 家庭构成/成员关系（家里几口人、谁是谁的什么人）→ `member_persona`，subject_name 为对应成员；全家整体构成事实可用 subject_name="shared"。
 
 ## 写入原则
