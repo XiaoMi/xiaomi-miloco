@@ -188,6 +188,7 @@ export function UsageOmniConfig() {
   const [rowTesting, setRowTesting] = useState<string | null>(null);
   const [rowTestResults, setRowTestResults] = useState<Record<string, OmniTestResult>>({});
   const [activating, setActivating] = useState<string | null>(null); // 正在「启用前测试+启用」的 label
+  const [deactivating, setDeactivating] = useState<string | null>(null); // 正在「停用」的 label
   // 连接状态列被截断时,跟随光标的全文浮层(fixed 定位,免原生 title 延迟、不被表格 overflow 裁剪)
   const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
   // 删除确认弹窗(web 风格,代替 window.confirm):待删项 + 删除中
@@ -398,11 +399,14 @@ export function UsageOmniConfig() {
 
   // 停用当前生效模型:回未配态 + 软停感知,保留档案(可再启用)。与「启用」对称的反向操作。
   async function onDeactivate(p: OmniProfile) {
+    setDeactivating(p.label);
     try {
       setState(await deactivateOmniConfig({ label: p.label }));
       toast(t("usage.deactivateSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.deactivateFailed"), "danger");
+    } finally {
+      setDeactivating(null);
     }
   }
 
@@ -566,9 +570,10 @@ export function UsageOmniConfig() {
                                 <button
                                   type="button"
                                   onClick={() => onDeactivate(p)}
-                                  className="hover:bg-error-bg text-error border border-error rounded-md px-2.5 py-1"
+                                  disabled={deactivating === p.label}
+                                  className="hover:bg-error-bg text-error border border-error rounded-md px-2.5 py-1 disabled:opacity-60"
                                 >
-                                  {t("usage.deactivate")}
+                                  {deactivating === p.label ? t("usage.deactivating") : t("usage.deactivate")}
                                 </button>
                               ) : (
                                 <button

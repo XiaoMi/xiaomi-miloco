@@ -56,6 +56,7 @@
     "activeTag": "Active",
     "activate": "Enable",
     "deactivate": "Disable",
+    "deactivating": "Disabling…",
     "edit": "Edit",
     "test": "Test",
     "delete": "Delete",

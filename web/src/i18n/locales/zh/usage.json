@@ -56,6 +56,7 @@
     "activeTag": "生效中",
     "activate": "启用",
     "deactivate": "停用",
+    "deactivating": "停用中…",
     "edit": "编辑",
     "test": "测试",
     "delete": "删除",

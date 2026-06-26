@@ -354,12 +354,11 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
     else:
         profiles.append(entry)
     update: dict = {"omni_profiles": profiles}
-    # activate=true 显式设为当前;或编辑的就是当前生效那套 → 同步刷新 active(改 key/model 即时生效)。
-    # 命中判据含展示 label:编辑空 label 的「当前生效行」(orig=合成 label)也能同步 active。
-    omni = get_settings().model.omni
+    # activate=true 显式设为当前;或编辑的就是当前生效那套(含空 label 当前生效的合成展示 label)→
+    # 同步刷新 active(改 key/model 即时生效)。复用 _label_is_active,与删除/停用同一处判定。
+    # tgt 由非空 label 或 orig 组成,恒非空,故 _label_is_active 的 bool 守卫不影响语义。
     tgt = orig or label
-    sync_active = tgt == omni.label or (bool(omni.api_key) and tgt == _active_display_label())
-    if body.activate or sync_active:
+    if body.activate or _label_is_active(tgt):
         update["omni"] = entry
     update_shared_config(model=update)
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
