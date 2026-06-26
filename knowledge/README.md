@@ -152,6 +152,7 @@ knowledge/
   - [任务管理](03-features/task-management.md)
   - [家庭记忆](03-features/home-profile.md)
   - [Agent 集成](03-features/openclaw-integration.md)
+  - [Hermes Agent 集成](03-features/hermes-plugin-integration.md)
   - [实时摄像头观看](03-features/live-camera-view.md)
   - [设备欢迎](03-features/device-welcome.md)
 - **04-testing** — [评测框架](04-testing/README.md)（内容待测试团队补充）
@@ -159,6 +160,7 @@ knowledge/
   - [MiOT SDK](05-external-deps/sdk-miot.md)
   - [ONNX Runtime](05-external-deps/sdk-onnxruntime.md)
   - [OpenClaw SDK](05-external-deps/sdk-openclaw.md)
+  - [Hermes Agent SDK](05-external-deps/sdk-hermes.md)
 - **06-dev-guide**
   - [开发指南](06-dev-guide/dev-guide.md)
   - [故障排查](06-dev-guide/troubleshooting.md)
@@ -183,6 +185,10 @@ knowledge/
 | VLM                                 | 视觉语言模型，能同时理解图像与文本的多模态大模型；配置入口在 `model.omni`（见 [开发指南「配置分段与用途」表](06-dev-guide/dev-guide.md#配置分段与用途)）       |
 | Agent                               | OpenClaw 上运行的智能体，通过 Skill 调用 Miloco 能力                                                                                                           |
 | OpenClaw                            | Miloco 所基于的 Agent 框架与插件平台                                                                                                                           |
+| Hermes Agent                       | 小米内部维护的 AI Agent 运行时框架，定位与 OpenClaw 平行；Miloco 在其上注册平行插件（`plugins/hermes/`），复用同一套后端与 CLI，设计见 [Hermes Agent 集成](03-features/hermes-plugin-integration.md) |
+| Bridge                             | Hermes 插件自建的 aiohttp HTTP 服务（默认 `:18789`），接收后端 `{ action, payload }` POST 并同步执行 agent turn；与 Hermes 的 `WebhookAdapter` 无关，是后端→插件的自定义同步 RPC 通道             |
+| AIAgent                            | Hermes 框架的同步 turn 执行入口（`run_conversation()`），是 CLI / gateway / cron / delegate_task 共用的稳定 API；Hermes 插件 bridge 直接 import 调用                                       |
+| 安装脚本同步 skills               | Hermes 插件 skills 安装机制：安装脚本（`scripts/install.sh --agent hermes`）运行时从仓库 `plugins/skills/` 复制到 `~/.hermes/plugins/miloco/skills/`，`plugins/hermes/skills/` 被 `.gitignore` 排除，不维护副本；对比 OpenClaw 用 `prebuild`（构建时复制、`.gitignore` 排除、随 npm 包分发） |
 | MiOT                                | 小米 IoT SDK，用于发现与控制米家设备                                                                                                                           |
 | tier_a / tier_c / tier_u            | 身份样本三层：用户登记样本 / 系统沉淀样本 / 陌生人未确认池（即陌生人池，见下行）                                                                               |
 | 陌生人池                            | 未识别身形的暂存与聚类区，供主动注册抽样（对应 tier_u）                                                                                                        |

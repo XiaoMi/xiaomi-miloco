@@ -1,0 +1,20 @@
+services:
+  hermes:
+    build:
+      context: ../../..
+      dockerfile: plugins/hermes/integration-test/Dockerfile.hermes
+    container_name: miloco-hermes-test
+    command: gateway run --no-supervise
+    ports:
+      - "8642:8642"
+      - "1810:1810"
+    environment:
+      - HERMES_GATEWAY_NO_SUPERVISE=1
+      - MILOCO_HOME=/opt/data/miloco
+      - API_SERVER_KEY=integration-test-key
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8642/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s

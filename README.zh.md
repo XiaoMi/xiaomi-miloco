@@ -2,7 +2,7 @@
 
 <p align="center"><a href="README.md">English</a> | 简体中文</p>
 
-小米面向未来的全屋智能 AI 开源方案，以米家摄像头的画面与声音为全模态感知入口，以自研 MiMo 大模型为智能大脑，以 Agent 插件形式运行在 [OpenClaw](https://openclaw.ai) 之上，联动全屋设备带来主动智能体验。
+小米面向未来的全屋智能 AI 开源方案，以米家摄像头的画面与声音为全模态感知入口，以自研 MiMo 大模型为智能大脑，以 Agent 插件形式运行在 [OpenClaw](https://openclaw.ai) 或 [Hermes Agent](https://hermes-agent.nousresearch.com) 之上，联动全屋设备带来主动智能体验。
 
 Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控设备，能将"模糊又长期"的目标拆解成可追踪的家庭任务，能识别家庭成员、依托家庭记忆为每位成员提供个性化服务——查询和控制设备、把家调到成员舒适的状态，或在合适的时机给出有用的提醒。
 
@@ -11,6 +11,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 ## 最新动态
 
 - **2026-06-18** — Miloco 2.0 正式发布：重构为 OpenClaw 插件，新增通用常识、身份识别、家庭记忆、家庭任务、主动智能、家庭面板。详见下方[核心特性](#核心特性)。
+- **2026-06-20** — 新增 Hermes Agent 插件支持（`plugins/hermes/`），作为 OpenClaw 插件的 Python 平行实现，使 Miloco 可运行在 [Hermes Agent](https://hermes-agent.nousresearch.com) 上。
 
 ## 核心特性
 
@@ -22,21 +23,25 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 - **家庭面板** — 面向用户的 Web 面板，查看家中实时概览、米家设备、家庭成员与家庭档案、历史事件日志。
 
 > [!TIP]
-> **养成你自己的 Miloco。** 它的初始表现未必合你心意——直接通过 OpenClaw 告诉 Miloco（如"家里乱不用提醒我"），它就记住你的偏好、相应调整主动行为。你每说一句，就是在"养成"一个更懂你家的 Miloco，越用越贴心。
+> **养成你自己的 Miloco。** 它的初始表现未必合你心意——直接告诉你的 Agent 你想要什么（如"家里乱不用提醒我"），它就记住你的偏好、相应调整主动行为。你每说一句，就是在"养成"一个更懂你家的 Miloco，越用越贴心。
 
 ## 前置条件
 
 - **硬件**：建议内存 ≥ 4GB，存储 ≥ 256GB，7×24 常驻运行，推荐 Mac mini
 - **操作系统**：macOS / Linux（Windows 请在 WSL 中运行）
 - **小米账号** + 已接入米家的设备
-- **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro（在 OpenClaw 中配置）
+- **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro
 
 > [!CAUTION]
 > **成本提示**：Miloco 2.0 的感知与 Agent 主要依赖云端大模型，会持续产生 API 调用费用，请关注用量。可在家庭面板「模型」页查看 token 消耗。
 
 ## 安装
 
-### 方式一：通过 Agent 安装（推荐）
+Miloco 支持两种 Agent 运行时，安装路径不同，请按你使用的运行时选择。
+
+### OpenClaw 用户
+
+#### 方式一：通过 Agent 安装（推荐）
 
 向 OpenClaw 发送以下指令即可自动完成安装：
 
@@ -44,19 +49,53 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 帮我安装 Miloco 插件：https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/scripts/install-guide.md
 ```
 
-### 方式二：命令行一键安装
+#### 方式二：命令行一键安装
 
 ```bash
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash
 ```
 
-### 方式三：从源码构建
-
-在项目根目录执行：
+#### 方式三：从源码构建
 
 ```bash
 bash scripts/install.sh --dev   # 从源码构建（scripts/build.sh）后本地安装
 ```
+
+安装完成后重启 OpenClaw 网关：
+
+```bash
+openclaw gateway restart
+```
+
+### Hermes Agent 用户
+
+#### 方式一：通过 Agent 安装（推荐）
+
+向 Hermes Agent 发送以下指令即可自动完成安装：
+
+```text
+帮我安装 Miloco 插件：https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/plugins/hermes/install-guide.md
+```
+
+#### 方式二：命令行一键安装
+
+```bash
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent hermes
+```
+
+#### 方式三：从源码构建
+
+```bash
+bash scripts/install.sh --dev --agent hermes
+```
+
+安装完成后重启 Hermes 网关：
+
+```bash
+hermes gateway restart
+```
+
+详见 [plugins/hermes/README.md](plugins/hermes/README.md)。
 
 ---
 
@@ -84,10 +123,14 @@ bash scripts/install.sh --dev   # 从源码构建（scripts/build.sh）后本地
 
 ## 快速开始
 
-安装完成后，先重启 OpenClaw 网关让插件生效：
+安装完成后，先重启 Agent 网关让插件生效：
 
 ```bash
+# OpenClaw
 openclaw gateway restart
+
+# Hermes Agent
+hermes gateway restart
 ```
 
 随后打开家庭面板完成首次配置：
@@ -122,7 +165,8 @@ miloco-plugin/
 ├── cli/                 # miloco-cli 命令行工具
 ├── plugins/
 │   ├── openclaw/        # OpenClaw 插件（TypeScript）
-│   └── skills/          # Agent Skill 文档
+│   ├── hermes/          # Hermes Agent 插件（Python）
+│   └── skills/          # Agent Skill 文档（两个插件共享）
 ├── web/                 # 家庭面板（React 19 + Vite）
 ├── scripts/             # build.sh / install.sh / manifest.json
 └── knowledge/           # 项目知识库
@@ -146,6 +190,7 @@ miloco-plugin/
 Miloco 站在以下开源项目之上：
 
 - [OpenClaw](https://openclaw.ai) — AI Agent 运行时与插件平台
+- [Hermes Agent](https://hermes-agent.nousresearch.com) — AI Agent 运行时与插件平台
 - [jMuxer](https://github.com/samirkumardas/jmuxer)（MIT）— 家庭面板实时视频流封装
 - [BGE / bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5)（智源研究院，MIT）— 文本向量化模型
 - [Silero VAD](https://github.com/snakers4/silero-vad)（Silero Team，MIT）— 语音活动检测，门控感知语音字段
