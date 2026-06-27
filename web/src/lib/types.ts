@@ -322,7 +322,7 @@ export interface OmniConfigUpdate {
 /** 测试连接结果：ok=true 即连通；否则 message 给出原因（Key 无效 / 不可达 / 模型不存在等）。 */
 export interface OmniTestResult {
   ok: boolean;
-  /** 机器码,前端按它本地化(ok/ok_model_found/bad_key/not_found/rejected_authed/unreachable/no_key/http_error);缺省回退 message。 */
+  /** 机器码,前端按它本地化(ok/bad_key/not_found/rejected_authed/unreachable/no_key/http_error);缺省回退 message。 */
   code?: string;
   status?: number;
   latency_ms?: number;

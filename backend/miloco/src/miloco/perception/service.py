@@ -50,6 +50,14 @@ class PerceptionService:
     async def stop_engine(self) -> None:
         await self._engine.stop()
 
+    async def stop_to_unconfigured(self) -> None:
+        """软停引擎回到「未配模型」态(删当前生效模型用),保留 tick 自愈循环。
+
+        与 stop_engine 的区别:stop_engine 停整个 realtime 循环(含采集/设备同步);
+        本方法只关引擎实例 + 降级状态,采集与 tick 继续,后续配好新模型自动自愈拉起。
+        """
+        await self._pipeline.stop_to_unconfigured()
+
     def engine_status(self) -> PerceptionEngineStatus:
         return self._engine.status()
 

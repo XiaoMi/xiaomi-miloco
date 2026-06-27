@@ -351,6 +351,12 @@ export async function deleteOmniConfig(
   return impl.realDeleteOmniConfig(ref);
 }
 
+export async function deactivateOmniConfig(
+  ref: OmniProfileRef,
+): Promise<OmniConfigState> {
+  return impl.realDeactivateOmniConfig(ref);
+}
+
 export async function listOmniModels(input: {
   base_url: string;
   api_key?: string;

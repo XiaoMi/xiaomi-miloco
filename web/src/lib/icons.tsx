@@ -117,6 +117,15 @@ export const IconEye = (p: Props) => (
   </svg>
 );
 
+// 闭眼（眼睛 + 斜杠）—— API Key 明文态切换图标
+export const IconEyeOff = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M9.9 4.24A9.1 9.1 0 0 1 12 5c6.5 0 8 7 8 7a13.2 13.2 0 0 1-1.67 2.68M6.06 7.06A13.3 13.3 0 0 0 4 12s1.5 7 8 7a9 9 0 0 0 3.94-.94" />
+    <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    <path d="M3 3l18 18" />
+  </svg>
+);
+
 export const IconMoon = (p: Props) => (
   <svg {...base(p)}>
     <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
