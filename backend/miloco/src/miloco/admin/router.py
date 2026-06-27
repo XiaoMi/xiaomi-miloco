@@ -388,7 +388,11 @@ def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verif
 
 
 def _label_is_active(label: str) -> bool:
-    """label 是否指向当前生效配置(含空 label 当前生效的合成展示 label)。"""
+    """label 是否指向当前生效配置(含空 label 当前生效的合成展示 label)。
+
+    刻意返回 bool:PUT/DELETE/DEACTIVATE 三处调用只需「是不是当前生效」,不区分命中的是真
+    label 还是合成展示 label;暂不为该区分(如审计)引入更复杂的身份判定,避免过早抽象。
+    """
     omni = get_settings().model.omni
     return bool(label) and (
         label == omni.label or (bool(omni.api_key) and label == _active_display_label())
