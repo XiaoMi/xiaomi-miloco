@@ -189,7 +189,7 @@ export function UsageOmniConfig() {
   const [rowTestResults, setRowTestResults] = useState<Record<string, OmniTestResult>>({});
   const [activating, setActivating] = useState<string | null>(null); // 正在「启用前测试+启用」的 label
   const [deactivating, setDeactivating] = useState<string | null>(null); // 正在「停用」的 label
-  // 连接状态列被截断时,跟随光标的全文浮层(fixed 定位,免原生 title 延迟、不被表格 overflow 裁剪)
+  // 连接状态列被截断时,锚定元素底部的全文浮层(fixed 定位,免原生 title 延迟、不被表格 overflow 裁剪)
   const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
   // 删除确认弹窗(web 风格,代替 window.confirm):待删项 + 删除中
   const [deleteTarget, setDeleteTarget] = useState<OmniProfile | null>(null);
@@ -431,7 +431,7 @@ export function UsageOmniConfig() {
     }
   }
 
-  // 连接状态列被截断时的悬浮全文:跟随光标的 fixed 浮层(避开表格 overflow 裁剪、无原生 title 延迟)。
+  // 连接状态列被截断时的悬浮全文:锚定元素底部的 fixed 浮层(避开表格 overflow 裁剪、无原生 title 延迟)。
   function showTip(e: React.MouseEvent<HTMLElement>) {
     const el = e.currentTarget;
     if (el.scrollWidth > el.clientWidth) {
@@ -548,7 +548,7 @@ export function UsageOmniConfig() {
                           </td>
                           {/* 连接状态列:默认「未测试」;点行内「测试」就地刷新;定宽截断,溢出 hover 看全文 */}
                           {/* 固定宽 w-44 单行截断(列宽恒定不横向挤压);文字被截断时鼠标悬浮即时弹出
-                              跟随光标的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
+                              锚定元素底部的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
                           <td className="px-3 py-2.5">
                             {rowTesting === p.label ? (
                               <span className="block w-44 truncate text-text-tertiary">{t("usage.testing")}</span>
@@ -757,7 +757,7 @@ export function UsageOmniConfig() {
         </div>
       )}
 
-      {/* 连接状态列截断时的全文浮层:fixed 跟随光标,瞬时出现、不被表格 overflow 裁剪 */}
+      {/* 连接状态列截断时的全文浮层:fixed 锚定元素底部,瞬时出现、不被表格 overflow 裁剪 */}
       {tip && (
         <div
           className="fixed z-[70] max-w-xs rounded-md bg-bg-secondary border border-border shadow-md px-2.5 py-1.5 text-caption text-text-primary pointer-events-none"
