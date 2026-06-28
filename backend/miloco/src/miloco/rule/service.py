@@ -38,6 +38,7 @@ from miloco.rule.schema import (
     RuleLog,
     RuleLogKind,
     RuleMode,
+    RuleTriggerType,
     RuleUpdate,
 )
 
@@ -87,6 +88,20 @@ def _validate_rule_consistency(rule: Rule) -> None:
     """
     # ---- 1. condition.query 措辞 ----
     _validate_query_phrasing(rule.condition.query)
+
+    if rule.trigger_type == RuleTriggerType.PERCEPTION and not rule.condition.perceive_device_ids:
+        raise ValidationException(
+            "perception trigger requires condition.perceive_device_ids"
+        )
+    if rule.trigger_type == RuleTriggerType.MIOT_EVENT:
+        if not rule.condition.source_ids:
+            raise ValidationException(
+                "miot_event trigger requires condition.source_ids"
+            )
+        if not rule.condition.event_kinds:
+            raise ValidationException(
+                "miot_event trigger requires condition.event_kinds"
+            )
 
     # ---- 2. mode matrix（执行路径由 actions / action_descriptions 哪个非空决定）----
     if rule.mode == RuleMode.EVENT:
@@ -282,7 +297,8 @@ class RuleService:
 
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
+        if rule.trigger_type == RuleTriggerType.PERCEPTION:
+            await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
         _validate_rule_consistency(rule)
         self._validate_on_target_desc_compat(rule)
 
@@ -335,7 +351,8 @@ class RuleService:
 
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
+        if rule.trigger_type == RuleTriggerType.PERCEPTION:
+            await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
         _validate_rule_consistency(rule)
         self._validate_on_target_desc_compat(rule)
 
@@ -374,6 +391,9 @@ class RuleService:
         if "task_id" in fields and update.task_id is not None:
             existing.task_id = update.task_id
 
+        if "trigger_type" in fields and update.trigger_type is not None:
+            existing.trigger_type = update.trigger_type
+
         if "mode" in fields and update.mode is not None:
             existing.mode = update.mode
 
@@ -398,14 +418,33 @@ class RuleService:
                 "perceive_device_ids" in cond_fields
                 and cond_update.perceive_device_ids is not None
             ):
-                await self._validate_perceive_device_ids(
-                    cond_update.perceive_device_ids
-                )
+                if existing.trigger_type == RuleTriggerType.PERCEPTION:
+                    await self._validate_perceive_device_ids(
+                        cond_update.perceive_device_ids
+                    )
                 existing.condition.perceive_device_ids = (
                     cond_update.perceive_device_ids
                 )
             if "query" in cond_fields and cond_update.query is not None:
                 existing.condition.query = cond_update.query
+            if "source_ids" in cond_fields and cond_update.source_ids is not None:
+                existing.condition.source_ids = cond_update.source_ids
+            if "event_kinds" in cond_fields and cond_update.event_kinds is not None:
+                existing.condition.event_kinds = cond_update.event_kinds
+            if (
+                "property_filters" in cond_fields
+                and cond_update.property_filters is not None
+            ):
+                existing.condition.property_filters = cond_update.property_filters
+            if "mapping_ids" in cond_fields and cond_update.mapping_ids is not None:
+                existing.condition.mapping_ids = cond_update.mapping_ids
+            if (
+                "use_global_mapping" in cond_fields
+                and cond_update.use_global_mapping is not None
+            ):
+                existing.condition.use_global_mapping = (
+                    cond_update.use_global_mapping
+                )
 
         # list 字段：CLI 用 [] 表达"清空"；不传 → 不动。
         if "actions" in fields and update.actions is not None:

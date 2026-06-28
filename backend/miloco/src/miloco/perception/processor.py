@@ -635,7 +635,10 @@ class PipelineProcessor:
         )
 
     async def process_on_demand(
-        self, dids: list[str] | None, query: str
+        self,
+        dids: list[str] | None,
+        query: str,
+        snapshot_sink: dict | None = None,
     ) -> OnDemandPerceptionResult | None:
         """Active perception pipeline — multi-device batch query.
 
@@ -656,7 +659,11 @@ class PipelineProcessor:
                 _proc_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
 
             try:
-                return await self._perception_engine_proxy.on_demand_perceive(batch, query)
+                return await self._perception_engine_proxy.on_demand_perceive(
+                    batch,
+                    query,
+                    snapshot_sink=snapshot_sink,
+                )
             except Exception as e:
                 logger.error("[processor] 主动查询感知失败 | %s", e, exc_info=True)
                 return None

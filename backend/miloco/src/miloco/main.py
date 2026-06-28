@@ -28,6 +28,7 @@ from fastapi.responses import (
 )
 
 from miloco.admin.router import router as admin_router
+from miloco.automation.router import router as automation_router
 from miloco.config import get_settings, register_reset_hook
 from miloco.database.connector import init_database
 from miloco.dispatch import AgentDispatcher, set_agent_dispatcher
@@ -465,6 +466,7 @@ app.include_router(miot_router, prefix="/api")
 app.include_router(person_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")
 app.include_router(rule_router, prefix="/api")
+app.include_router(automation_router, prefix="/api")
 app.include_router(task_router, prefix="/api")
 app.include_router(task_record_router, prefix="/api")
 app.include_router(perception_router, prefix="/api")

@@ -8,6 +8,7 @@ Service manager module
 import logging
 import uuid
 
+from miloco.automation.service import AutomationService
 from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo, SystemConfigKeys
 from miloco.database.person_repo import PersonRepo
@@ -88,6 +89,7 @@ class Manager:
         )
         self._person_service = PersonService(self._person_repo)
         self._home_profile_service = HomeProfileService(self._person_service)
+        self._automation_service = AutomationService(self._kv_repo)
 
         # Initialize rule module
         async with mon.track_async(NodeName.RULE_SERVICE, "init"):
@@ -137,6 +139,10 @@ class Manager:
     @property
     def task_service(self) -> TaskService:
         return self._task_service
+
+    @property
+    def automation_service(self) -> AutomationService:
+        return self._automation_service
 
     # Repo layer access properties
     @property

@@ -406,6 +406,21 @@ class MIoTSceneChangedEvent(BaseModel):
     timestamp_ms: int = Field(default=0)
 
 
+class MIoTDevicePropertyChangedEvent(BaseModel):
+    """Decoded `device/{did}/up/properties_changed/#` payload."""
+
+    did: str = Field(description="Device id")
+    changed_properties: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Flattened property map keyed by prop.{siid}.{piid} / raw key",
+    )
+    raw: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Raw decoded payload",
+    )
+    timestamp_ms: int = Field(default=0)
+
+
 class MipsConnectionError(Exception):
     """MIPS cloud client failed to connect."""
 

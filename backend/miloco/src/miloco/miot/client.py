@@ -22,6 +22,7 @@ from miot.types import (
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropertyChangedEvent,
     MIoTGetPropertyParam,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
@@ -32,6 +33,7 @@ from miot.types import (
 )
 from pydantic_core import to_jsonable_python
 
+from miloco.automation.schema import MiotEventTrigger
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
@@ -221,6 +223,7 @@ class MiotProxy:
             welcome=self._welcome_service.welcome,
         )
         self._subscribed_meta_dids = set()
+        self._subscribed_property_dids = set()
         self._scene_listener = SceneEventListener(
             refresh_scenes=self.refresh_scenes
         )
@@ -230,6 +233,9 @@ class MiotProxy:
         # name/room/home propagates. Kept off the bind welcome path.
         self._miot_client.register_device_meta_changed_callback(
             self._on_device_meta_changed_event
+        )
+        self._miot_client.register_device_property_changed_callback(
+            self._on_device_property_changed_event
         )
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(
@@ -693,6 +699,7 @@ class MiotProxy:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
+                await self._sync_property_subscriptions()
                 await self._sync_scene_subscriptions()
                 return devices
             except Exception as e:
@@ -837,6 +844,75 @@ class MiotProxy:
             len(self._subscribed_meta_dids),
         )
 
+    async def _on_device_property_changed_event(
+        self, msg: MIoTDevicePropertyChangedEvent
+    ) -> None:
+        try:
+            from miloco.manager import get_manager
+
+            mgr = get_manager()
+            if not getattr(mgr, "_initialized", False):
+                return
+            device = self._device_info_dict.get(msg.did)
+            if device is None:
+                device = (await self.get_devices()).get(msg.did)
+            if device is None:
+                logger.debug("Property change ignored for unknown did=%s", msg.did)
+                return
+            await mgr.automation_service.handle_trigger(
+                trigger=MiotEventTrigger(
+                    source_type="device",
+                    source_id=msg.did,
+                    source_name=device.name,
+                    home_id=device.home_id,
+                    room_name=device.room_name,
+                    event_name="device_prop",
+                    changed_properties=msg.changed_properties,
+                    occurred_at=msg.timestamp_ms,
+                    raw=msg.raw,
+                ),
+                perception_service=mgr.perception_service,
+                rule_service=mgr.rule_service,
+                miot_service=mgr.miot_service,
+                meaningful_events_dao=mgr.meaningful_events_dao,
+                pipeline=mgr.perception_service._pipeline,
+            )
+        except Exception as e:
+            logger.error("Failed to dispatch device-property automation trigger: %s", e)
+
+    async def _sync_property_subscriptions(self) -> None:
+        target = {did for did in self._device_info_dict if "/" not in did}
+        to_add = target - self._subscribed_property_dids
+        to_remove = self._subscribed_property_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            try:
+                await self._miot_client.sub_device_property_changed_async(did)
+                return did
+            except Exception as e:
+                logger.error("subscribe device-property failed did=%s: %s", did, e)
+                return None
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_property_changed_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-property failed did=%s: %s", did, e)
+            return did
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        self._subscribed_property_dids |= {d for d in added if d}
+        self._subscribed_property_dids -= {d for d in removed if d}
+        logger.info(
+            "device-property subscriptions synced: +%d -%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            len(self._subscribed_property_dids),
+        )
+
     async def _on_scene_changed_event(self, msg: MIoTSceneChangedEvent) -> None:
         """Forward home scene-change push events to the dedicated listener.
 
@@ -845,6 +921,24 @@ class MiotProxy:
         thin shim, mirroring ``_on_user_bind_event``.
         """
         await self._scene_listener.on_event(msg)
+        try:
+            from miloco.manager import get_manager
+
+            mgr = get_manager()
+            if getattr(mgr, "_initialized", False):
+                await mgr.automation_service.emit_scene_trigger(
+                    home_id=msg.home_id,
+                    scene_id=msg.scene_id,
+                    event_name=msg.event,
+                    raw=msg.raw,
+                    miot_service=mgr.miot_service,
+                    perception_service=mgr.perception_service,
+                    rule_service=mgr.rule_service,
+                    meaningful_events_dao=mgr.meaningful_events_dao,
+                    pipeline=mgr.perception_service._pipeline,
+                )
+        except Exception as e:
+            logger.error("Failed to dispatch scene automation trigger: %s", e)
 
     def _collect_home_ids(self) -> set[str]:
         """Union of home_ids across cached devices / cameras / scenes.

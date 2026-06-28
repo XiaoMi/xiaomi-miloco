@@ -27,6 +27,27 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 logger = logging.getLogger(__name__)
 
 
+def _augment_query_with_trigger_context(query: str, trigger_context: dict | None) -> str:
+    if not trigger_context:
+        return query
+    lines = ["以下是本次主动感知的触发上下文，请结合画面回答："]
+    for key in (
+        "trigger_kind",
+        "trigger_source_id",
+        "trigger_source_name",
+        "trigger_event_name",
+        "trigger_props",
+        "trigger_time",
+    ):
+        value = trigger_context.get(key)
+        if value in (None, "", [], {}):
+            continue
+        lines.append(f"- {key}: {value}")
+    lines.append("")
+    lines.append(query)
+    return "\n".join(lines)
+
+
 class PerceptionService:
     """Service for all perception operations."""
 
@@ -102,7 +123,9 @@ class PerceptionService:
     # ---- Active perception ----
 
     async def on_demand_perceive(
-        self, request: OnDemandPerceptionRequest
+        self,
+        request: OnDemandPerceptionRequest,
+        snapshot_sink: dict | None = None,
     ) -> OnDemandPerceptionResultItem | None:
         """On-demand perception: batch-collects requested devices and runs
         a single fusion inference via pipeline.
@@ -129,7 +152,11 @@ class PerceptionService:
             )
 
         # Single batch inference call — collector assembles batch, processor infers
-        result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        result = await self._pipeline.process_on_demand(
+            valid_dids,
+            _augment_query_with_trigger_context(request.query, request.trigger_context),
+            snapshot_sink=snapshot_sink,
+        )
 
         if not result:
             raise BusinessException(

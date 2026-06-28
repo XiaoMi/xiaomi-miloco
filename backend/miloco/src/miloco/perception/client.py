@@ -608,7 +608,10 @@ class PerceptionEngineProxy:
             )
 
     async def on_demand_perceive(
-        self, batch: PerceptionBatch, query: str
+        self,
+        batch: PerceptionBatch,
+        query: str,
+        snapshot_sink: dict | None = None,
     ) -> OnDemandPerceptionResult | None:
         """Run on-demand query pipeline — offloaded to inference thread."""
         async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h:
@@ -635,9 +638,15 @@ class PerceptionEngineProxy:
                         _run_with_trace_id(
                             trace_id,
                             self._on_demand_perceive_impl(batched_snapshot, query),
+                            snapshot_sink=snapshot_sink,
                         )
                     ),
                 )
+            if snapshot_sink is not None:
+                from miloco.perception.snapshot_context import snapshot_collector_scope
+
+                with snapshot_collector_scope(snapshot_sink):
+                    return await self._on_demand_perceive_impl(batched_snapshot, query)
 
             return await self._on_demand_perceive_impl(batched_snapshot, query)
 

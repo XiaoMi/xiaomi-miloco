@@ -44,6 +44,13 @@ class RuleLifecycle(str, Enum):
     TEMPORARY = "temporary"
 
 
+class RuleTriggerType(str, Enum):
+    """Rule trigger source."""
+
+    PERCEPTION = "perception"
+    MIOT_EVENT = "miot_event"
+
+
 class RuleEvent(str, Enum):
     """Frame-diff events emitted by RuleRunner."""
 
@@ -103,9 +110,30 @@ class RuleCondition(BaseModel):
     """Rule condition: which perception devices to watch + what to look for."""
 
     perceive_device_ids: list[str] = Field(
-        ..., description="Perception device IDs (OR semantics: any match triggers)"
+        default_factory=list,
+        description="Perception device IDs (OR semantics: any match triggers)",
     )
     query: str = Field(..., description="Natural language condition description")
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="MiOT event source IDs (device did / scene id)",
+    )
+    event_kinds: list[str] = Field(
+        default_factory=list,
+        description="MiOT event kinds, e.g. device_prop / scene",
+    )
+    property_filters: dict[str, str] = Field(
+        default_factory=dict,
+        description="MiOT property filters keyed by property path/name",
+    )
+    mapping_ids: list[str] = Field(
+        default_factory=list,
+        description="Explicit mapping IDs used by miot_event trigger",
+    )
+    use_global_mapping: bool = Field(
+        default=True,
+        description="Whether the rule should use source-level global mapping",
+    )
 
 
 class Rule(BaseModel):
@@ -114,6 +142,10 @@ class Rule(BaseModel):
     id: str = Field("", description="Rule ID (UUID)")
     name: str = Field(..., description="Rule display name (free text)")
     task_id: str = Field(..., description="Task id (snake_case)")
+    trigger_type: RuleTriggerType = Field(
+        RuleTriggerType.PERCEPTION,
+        description="Trigger source: perception or miot_event",
+    )
     mode: RuleMode = Field(RuleMode.EVENT, description="event or state")
     lifecycle: RuleLifecycle = Field(
         RuleLifecycle.PERMANENT, description="permanent or temporary"
@@ -203,6 +235,11 @@ class RuleConditionUpdate(BaseModel):
 
     perceive_device_ids: list[str] | None = Field(None)
     query: str | None = Field(None)
+    source_ids: list[str] | None = Field(None)
+    event_kinds: list[str] | None = Field(None)
+    property_filters: dict[str, str] | None = Field(None)
+    mapping_ids: list[str] | None = Field(None)
+    use_global_mapping: bool | None = Field(None)
 
 
 class RuleUpdate(BaseModel):
@@ -213,6 +250,7 @@ class RuleUpdate(BaseModel):
 
     name: str | None = Field(None)
     task_id: str | None = Field(None)
+    trigger_type: RuleTriggerType | None = Field(None)
     mode: RuleMode | None = Field(None)
     lifecycle: RuleLifecycle | None = Field(None)
     enabled: bool | None = Field(None)

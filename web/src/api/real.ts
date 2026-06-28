@@ -24,6 +24,11 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
+  MiotEventMapping,
+  MiotEventRule,
+  MiotEventSource,
+  MiotEventTriggerLog,
+  DevicePropertyKey,
   TokenBreakdown,
   UsageCallType,
   UsageGroup,
@@ -856,7 +861,121 @@ export async function realListCameras(): Promise<PerceptionCamera[]> {
     }));
 }
 
+export async function realGetAutomationCatalog(): Promise<{
+  devices: MiotEventSource[];
+  scenes: MiotEventSource[];
+  cameras: ScopeCamera[];
+}> {
+  const r = await apiFetch<
+    Normal<{ devices: MiotEventSource[]; scenes: MiotEventSource[]; cameras: ScopeCamera[] }>
+  >("/api/automation/catalog");
+  return r.data;
+}
+
+export async function realListMiotEventMappings(): Promise<MiotEventMapping[]> {
+  const r = await apiFetch<Normal<MiotEventMapping[]>>("/api/automation/mappings");
+  return r.data;
+}
+
+export async function realCreateMiotEventMapping(
+  input: Omit<MiotEventMapping, "id">,
+): Promise<MiotEventMapping> {
+  const r = await apiFetch<Normal<MiotEventMapping>>("/api/automation/mappings", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return r.data;
+}
+
+export async function realUpdateMiotEventMapping(
+  id: string,
+  input: Partial<MiotEventMapping>,
+): Promise<MiotEventMapping> {
+  const r = await apiFetch<Normal<MiotEventMapping>>(`/api/automation/mappings/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  return r.data;
+}
+
+export async function realDeleteMiotEventMapping(id: string): Promise<void> {
+  await apiFetch<Normal<null>>(`/api/automation/mappings/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function realListMiotEventRules(): Promise<MiotEventRule[]> {
+  const r = await apiFetch<Normal<MiotEventRule[]>>("/api/automation/rules");
+  return r.data;
+}
+
+export async function realListMiotEventLogs(): Promise<MiotEventTriggerLog[]> {
+  const r = await apiFetch<Normal<MiotEventTriggerLog[]>>("/api/automation/logs");
+  return r.data;
+}
+
+export async function realTestMiotEventTrigger(input: {
+  source_type: "device" | "scene";
+  source_id: string;
+  source_name: string;
+  event_name?: string;
+  changed_properties?: Record<string, unknown>;
+}): Promise<MiotEventTriggerLog> {
+  const r = await apiFetch<Normal<MiotEventTriggerLog>>("/api/automation/test-trigger", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return r.data;
+}
+
 // ── 米家账号绑定 OAuth ────────────────────────────────────
+// ── Automation: create miot_event rule ─────────
+export async function realCreateMiotEventRule(input: {
+  task_id: string;
+  name: string;
+  source_ids: string[];
+  event_kinds: string[];
+  query: string;
+  property_filters: Record<string, string | import("@/lib/types").MiotPropertyFilterCondition>;
+  action_descriptions?: string[];
+}): Promise<{ rule_id: string }> {
+  const r = await apiFetch<Normal<{ rule_id: string }>>(
+    "/api/automation/rules",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return r.data;
+}
+
+// ── Automation: device spec ───────────────────────────────
+export async function realFetchDeviceSpec(
+  did: string,
+): Promise<{ model: string; name: string; properties: import("@/lib/types").DeviceSpecProperty[] }> {
+  const r = await apiFetch<Normal<{ model: string; name: string; properties: import("@/lib/types").DeviceSpecProperty[] }>>(
+    `/api/automation/device-spec/${did}`,
+  );
+  return r.data;
+}
+
+// ── Automation: device properties lookup ──────────────────
+export async function realListDeviceProperties(
+  did: string,
+): Promise<DevicePropertyKey[]> {
+  const r = await apiFetch<Normal<DevicePropertyKey[]>>(
+    `/api/automation/devices/${did}/properties`,
+  );
+  return r.data;
+}
+
+export async function realPatchRule(
+  ruleId: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  await apiFetch(`/api/rules/${ruleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 // 流程跟 cli/src/miloco_cli/commands/account.py 同源：
 //   ① POST /api/miot/bind → backend 返 oauth_url（小米授权页）
 //   ② 用户浏览器打开 oauth_url 走授权 → 回调到
