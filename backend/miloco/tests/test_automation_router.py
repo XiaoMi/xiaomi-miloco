@@ -65,6 +65,41 @@ def test_automation_snapshot_accepts_query_token(tmp_path, monkeypatch):
     from miloco.config import reset_settings
 
     reset_settings()
+
+
+def test_automation_snapshot_rejects_invalid_filename_with_http_400(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+    monkeypatch.setenv("MILOCO_SERVER__TOKEN", "secret-123")
+    from miloco.config import reset_settings
+
+    reset_settings()
+
+    client = TestClient(_build_app())
+    resp = client.get("/api/automation/snapshots/not-a-jpeg.png?token=secret-123")
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 400
+
+    reset_settings()
+
+
+def test_automation_snapshot_missing_file_uses_http_404(tmp_path, monkeypatch):
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+    monkeypatch.setenv("MILOCO_SERVER__TOKEN", "secret-123")
+    from miloco.config import reset_settings
+
+    reset_settings()
+    snap_dir = Path(tmp_path) / "static" / "clips" / "automation"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    client = TestClient(_build_app())
+    resp = client.get("/api/automation/snapshots/missing.jpg?token=secret-123")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == 404
+
+    reset_settings()
     snap_dir = Path(tmp_path) / "static" / "clips" / "automation"
     snap_dir.mkdir(parents=True, exist_ok=True)
     expected = b"jpeg-bits"

@@ -68,7 +68,7 @@ def _match_condition(actual: Any, expected: Any) -> bool:
     if cond.op == "any":
         return actual is not None
     if cond.op == "eq":
-        return str(actual) == str(cond.value)
+        return actual is not None and str(actual) == str(cond.value)
     if cond.op == "ne":
         return actual is not None and str(actual) != str(cond.value)
     actual_num = _coerce_number(actual)

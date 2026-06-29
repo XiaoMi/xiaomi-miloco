@@ -5,7 +5,7 @@ import time
 from pathlib import Path as _Path
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from miloco.automation.schema import (
     MiotEventManualTriggerRequest,
@@ -34,6 +34,13 @@ def _is_safe_snapshot_filename(filename: str) -> bool:
         return False
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
     return all(char in allowed for char in filename)
+
+
+def _error_response(status_code: int, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"code": status_code, "message": message, "data": None},
+    )
 
 
 def manager():
@@ -93,16 +100,16 @@ async def serve_snapshot(
     """Serve a saved automation snapshot JPEG."""
     _ = request, auth
     if not _is_safe_snapshot_filename(filename):
-        return NormalResponse(code=400, message="invalid filename", data=None)
+        return _error_response(400, "invalid filename")
     import os
     home = os.environ.get("MILOCO_HOME", "/root/.openclaw/miloco")
     snapshot_root = (_Path(home) / "static" / "clips" / "automation").resolve()
     if not snapshot_root.is_dir():
-        return NormalResponse(code=404, message="not found", data=None)
+        return _error_response(404, "not found")
     for candidate in snapshot_root.iterdir():
         if candidate.name == filename and candidate.is_file():
             return FileResponse(str(candidate), media_type="image/jpeg")
-    return NormalResponse(code=404, message="not found", data=None)
+    return _error_response(404, "not found")
 
 
 @router.get("/devices/{did}/properties", response_model=NormalResponse, summary="Device property keys from recent logs")

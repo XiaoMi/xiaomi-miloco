@@ -34,6 +34,7 @@ class _KVRepoStub:
         ("9", {"op": "lte", "value": "9"}, True),
         ("abc", {"op": "gt", "value": "1"}, False),
         (None, {"op": "any", "value": "*"}, False),
+        (None, {"op": "eq", "value": "None"}, False),
     ],
 )
 def test_match_condition_supports_string_and_numeric_operators(
