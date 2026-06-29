@@ -47,7 +47,7 @@ def _fake_mgr(enabled_rule_ids: list[str], capture_fn, rules=None) -> MagicMock:
     mgr = MagicMock()
     mgr.rule_service.update_state = capture_fn
     mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=enabled_rule_ids)
-    mgr.rule_service.get_all_rules = AsyncMock(return_value=rules or [Rule(id=r, enabled=True, condition={"perceive_device_ids": [], "query": "test"}) for r in enabled_rule_ids])
+    mgr.rule_service.get_all_rules = AsyncMock(return_value=rules or [Rule(id=r, name=r, task_id="test_task", enabled=True, condition={"perceive_device_ids": [], "query": "test"}) for r in enabled_rule_ids])
     return mgr
 
 
