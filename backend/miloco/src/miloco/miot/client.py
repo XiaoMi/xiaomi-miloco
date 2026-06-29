@@ -939,7 +939,22 @@ class MiotProxy:
         )
 
     async def _sync_property_subscriptions(self) -> None:
-        target = {did for did in self._device_info_dict if "/" not in did}
+        from miloco.manager import get_manager
+
+        try:
+            mappings = get_manager().automation_service.list_mappings()
+        except Exception as e:
+            logger.warning("load automation mappings failed, skip property sync: %s", e)
+            return
+
+        target = {
+            mapping.source_id
+            for mapping in mappings
+            if mapping.enabled
+            and mapping.source_type == "device"
+            and mapping.source_id in self._device_info_dict
+            and "/" not in mapping.source_id
+        }
         to_add = target - self._subscribed_property_dids
         to_remove = self._subscribed_property_dids - target
         if not to_add and not to_remove:
@@ -970,6 +985,10 @@ class MiotProxy:
             len([d for d in removed if d]),
             len(self._subscribed_property_dids),
         )
+
+    async def sync_automation_property_subscriptions(self) -> None:
+        """Hot-sync MiOT property subscriptions for automation mappings."""
+        await self._sync_property_subscriptions()
 
     async def _sync_camera_state_subscriptions(self) -> None:
         """Reconcile per-device cloud state (online/offline) subs to the

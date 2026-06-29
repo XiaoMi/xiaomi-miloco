@@ -18,10 +18,12 @@ touch, so no MIoTClient / camera / OAuth stack is required.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from miloco.automation.schema import MiotEventMapping
 from miloco.miot import client as client_module
 from miloco.miot.client import MiotProxy
 
@@ -29,6 +31,7 @@ from miloco.miot.client import MiotProxy
 def _bare_proxy() -> MiotProxy:
     proxy = MiotProxy.__new__(MiotProxy)
     proxy._subscribed_meta_dids = set()
+    proxy._subscribed_property_dids = set()
     proxy._subscribed_scene_home_ids = set()
     proxy._device_info_dict = {}
     proxy._camera_info_dict = {}
@@ -85,6 +88,61 @@ async def test_sync_noop_when_already_in_sync():
     proxy._miot_client.sub_device_meta_async.assert_not_awaited()
     proxy._miot_client.unsub_device_meta_async.assert_not_awaited()
     assert proxy._subscribed_meta_dids == {"A", "B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
+    monkeypatch,
+):
+    proxy = _bare_proxy()
+    proxy._subscribed_property_dids = {"OLD", "B"}
+    proxy._device_info_dict = {
+        "B": SimpleNamespace(did="B"),
+        "C": SimpleNamespace(did="C"),
+        "dev/skip": SimpleNamespace(did="dev/skip"),
+    }
+
+    mappings = [
+        MiotEventMapping(source_type="device", source_id="B", enabled=True),
+        MiotEventMapping(source_type="device", source_id="C", enabled=False),
+        MiotEventMapping(source_type="scene", source_id="scene-1", enabled=True),
+        MiotEventMapping(source_type="device", source_id="dev/skip", enabled=True),
+        MiotEventMapping(source_type="device", source_id="missing", enabled=True),
+    ]
+    fake_mgr = SimpleNamespace(
+        automation_service=SimpleNamespace(list_mappings=lambda: mappings)
+    )
+    fake_manager = ModuleType("miloco.manager")
+    fake_manager.get_manager = lambda: fake_mgr  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "miloco.manager", fake_manager)
+
+    await proxy._sync_property_subscriptions()
+
+    proxy._miot_client.sub_device_property_changed_async.assert_not_awaited()
+    proxy._miot_client.unsub_device_property_changed_async.assert_awaited_once_with(
+        "OLD"
+    )
+    assert proxy._subscribed_property_dids == {"B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_property_subscriptions_adds_new_enabled_mapping(monkeypatch):
+    proxy = _bare_proxy()
+    proxy._device_info_dict = {"C": SimpleNamespace(did="C")}
+
+    mappings = [MiotEventMapping(source_type="device", source_id="C", enabled=True)]
+    fake_mgr = SimpleNamespace(
+        automation_service=SimpleNamespace(list_mappings=lambda: mappings)
+    )
+    fake_manager = ModuleType("miloco.manager")
+    fake_manager.get_manager = lambda: fake_mgr  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "miloco.manager", fake_manager)
+
+    await proxy._sync_property_subscriptions()
+
+    proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
+    proxy._miot_client.unsub_device_property_changed_async.assert_not_awaited()
+    assert proxy._subscribed_property_dids == {"C"}
 
 
 @pytest.mark.asyncio

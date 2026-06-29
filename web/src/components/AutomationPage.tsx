@@ -305,6 +305,12 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
     return token ? `${base}?token=${encodeURIComponent(token)}` : base;
   }
 
+  function getSnapshotUrl(path: string): string {
+    const filename = path.split("/").pop() ?? path;
+    const base = `/api/automation/snapshots/${encodeURIComponent(filename)}`;
+    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  }
+
   return (
     <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
       <section className="space-y-1">
@@ -639,7 +645,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
               ) : log.snapshot_paths?.length > 0 ? (
                 <div className="mt-2 flex gap-2 overflow-x-auto">
                   {log.snapshot_paths.map((p: string) => (
-                    <img key={p} src={"/api/automation/snapshots/" + p.split("/").pop()} className="max-h-32 rounded-md border border-border" alt="snapshot" />
+                    <img key={p} src={getSnapshotUrl(p)} className="max-h-32 rounded-md border border-border" alt="snapshot" />
                   ))}
                 </div>
               ) : null}

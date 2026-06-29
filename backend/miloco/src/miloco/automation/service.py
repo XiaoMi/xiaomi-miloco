@@ -404,14 +404,6 @@ class AutomationService:
                 OnDemandPerceptionRequest(
                     sources=camera_ids,
                     query="\n".join(query_parts),
-                    trigger_context={
-                        "trigger_kind": trigger.trigger_kind,
-                        "trigger_source_id": trigger.source_id,
-                        "trigger_source_name": trigger.source_name,
-                        "trigger_event_name": trigger.event_name,
-                        "trigger_props": trigger.changed_properties,
-                        "trigger_time": trigger.occurred_at,
-                    },
                 ),
                 snapshot_sink=clips_by_device,
             )

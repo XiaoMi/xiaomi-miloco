@@ -5,7 +5,7 @@ import re
 import time
 from pathlib import Path as _Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
 
 from miloco.automation.schema import (
@@ -15,7 +15,7 @@ from miloco.automation.schema import (
     MiotEventTrigger,
 )
 from miloco.manager import get_manager
-from miloco.middleware import verify_token
+from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.rule.schema import RuleTriggerType
 from miloco.schema.common_schema import NormalResponse
 
@@ -46,7 +46,9 @@ async def list_mappings(current_user: str = Depends(verify_token)):
 
 @router.post("/mappings", response_model=NormalResponse, summary="Create MiOT event mapping")
 async def create_mapping(mapping: MiotEventMapping, current_user: str = Depends(verify_token)):
-    data = manager().automation_service.create_mapping(mapping)
+    mgr = manager()
+    data = mgr.automation_service.create_mapping(mapping)
+    await mgr.miot_service.sync_automation_property_subscriptions()
     return NormalResponse(code=0, message="created", data=data)
 
 
@@ -56,19 +58,28 @@ async def update_mapping(
     update: MiotEventMappingUpdate,
     current_user: str = Depends(verify_token),
 ):
-    data = manager().automation_service.update_mapping(mapping_id, update)
+    mgr = manager()
+    data = mgr.automation_service.update_mapping(mapping_id, update)
+    await mgr.miot_service.sync_automation_property_subscriptions()
     return NormalResponse(code=0, message="updated", data=data)
 
 
 @router.delete("/mappings/{mapping_id}", response_model=NormalResponse, summary="Delete MiOT event mapping")
 async def delete_mapping(mapping_id: str, current_user: str = Depends(verify_token)):
-    manager().automation_service.delete_mapping(mapping_id)
+    mgr = manager()
+    mgr.automation_service.delete_mapping(mapping_id)
+    await mgr.miot_service.sync_automation_property_subscriptions()
     return NormalResponse(code=0, message="deleted", data=None)
 
 
 @router.get("/snapshots/{filename}", summary="Serve automation snapshot image")
-async def serve_snapshot(filename: str):
+async def serve_snapshot(
+    filename: str,
+    request: Request,
+    auth: None = Depends(verify_token_query_fallback),
+):
     """Serve a saved automation snapshot JPEG."""
+    _ = request, auth
     if not re.match(r"^[A-Za-z0-9_.\-]+\.jpg$", filename):
         return NormalResponse(code=400, message="invalid filename", data=None)
     import os

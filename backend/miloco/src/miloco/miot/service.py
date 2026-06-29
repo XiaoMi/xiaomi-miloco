@@ -280,6 +280,16 @@ class MiotService:
                 f"Failed to refresh MiOT devices: {str(e)}"
             ) from e
 
+    async def sync_automation_property_subscriptions(self) -> None:
+        """Hot-sync MiOT property subscriptions used by automation mappings."""
+        try:
+            await self._miot_proxy.sync_automation_property_subscriptions()
+        except Exception as e:
+            logger.error("Failed to sync automation property subscriptions: %s", e)
+            raise MiotServiceException(
+                f"Failed to sync automation property subscriptions: {str(e)}"
+            ) from e
+
     def get_mips_status(self) -> dict:
         """Cloud MQTT (mips_cloud) subscription status snapshot.
 
