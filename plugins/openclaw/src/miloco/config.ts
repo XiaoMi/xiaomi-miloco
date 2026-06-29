@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { FromSchema } from "json-schema-to-ts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveGatewayAuth } from "openclaw/plugin-sdk/gateway-runtime";
@@ -38,7 +39,7 @@ const SHARED_CONFIG_SCHEMA = {
           type: "string",
           default: "",
           description:
-            "CLI 与插件访问后端时使用的 Bearer Token；为空时由后端首次启动自动生成",
+            "CLI 与插件访问后端时使用的 Bearer Token；为空时由插件首次加载自动生成",
         },
         tls_verify: {
           type: "boolean",
@@ -154,6 +155,7 @@ export function loadSharedConfig(api: OpenClawPluginApi): MilocoSharedConfig {
 
   mergePluginIntoRaw(raw, plugin);
   ensureAgentEssentials(raw, api);
+  ensureServerToken(raw);
 
   // 仅在合并后的内容与磁盘不同才落盘，避免每次 load 都产生冗余 IO / mtime 抖动。
   // 首次启动（文件缺失）或人工手改过格式时会执行一次归一化写入，之后稳态零写入。
@@ -184,6 +186,15 @@ function mergePluginIntoRaw(
     model.omni = omni;
     raw.model = model;
   }
+}
+
+function ensureServerToken(raw: Record<string, unknown>): void {
+  const server = isRecord(raw.server) ? { ...raw.server } : {};
+  if (typeof server.token !== "string" || server.token.length === 0) {
+    // 插件首次加载：自动生成随机 token，确保 CLI 与后端使用同一凭据
+    server.token = crypto.randomUUID();
+  }
+  raw.server = server;
 }
 
 function ensureAgentEssentials(
