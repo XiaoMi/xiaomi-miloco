@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from pathlib import Path as _Path
 
@@ -22,6 +21,19 @@ from miloco.schema.common_schema import NormalResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/automation", tags=["Automation"])
+
+
+def _is_safe_snapshot_filename(filename: str) -> bool:
+    if not filename or len(filename) > 128:
+        return False
+    if "/" in filename or "\\" in filename:
+        return False
+    if filename != _Path(filename).name:
+        return False
+    if not filename.endswith(".jpg"):
+        return False
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+    return all(char in allowed for char in filename)
 
 
 def manager():
@@ -80,20 +92,17 @@ async def serve_snapshot(
 ):
     """Serve a saved automation snapshot JPEG."""
     _ = request, auth
-    normalized_filename = _Path(filename).name
-    if normalized_filename != filename:
-        return NormalResponse(code=400, message="invalid filename", data=None)
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.jpg", normalized_filename):
+    if not _is_safe_snapshot_filename(filename):
         return NormalResponse(code=400, message="invalid filename", data=None)
     import os
     home = os.environ.get("MILOCO_HOME", "/root/.openclaw/miloco")
     snapshot_root = (_Path(home) / "static" / "clips" / "automation").resolve()
-    snap_path = (snapshot_root / normalized_filename).resolve()
-    if snap_path.parent != snapshot_root:
-        return NormalResponse(code=400, message="invalid filename", data=None)
-    if not snap_path.exists():
+    if not snapshot_root.is_dir():
         return NormalResponse(code=404, message="not found", data=None)
-    return FileResponse(str(snap_path), media_type="image/jpeg")
+    for candidate in snapshot_root.iterdir():
+        if candidate.name == filename and candidate.is_file():
+            return FileResponse(str(candidate), media_type="image/jpeg")
+    return NormalResponse(code=404, message="not found", data=None)
 
 
 @router.get("/devices/{did}/properties", response_model=NormalResponse, summary="Device property keys from recent logs")
@@ -253,10 +262,9 @@ async def device_spec(did: str, current_user: str = Depends(verify_token)):
         return NormalResponse(code=0, message="ok", data={
             "model": model, "name": device.name, "properties": props
         })
-    except Exception as e:
-        safe_did = re.sub(r"[^\w.\-]", "_", did or "")
-        logger.warning("device_spec failed for did=%s", safe_did, exc_info=True)
-        return NormalResponse(code=500, message=str(e), data=None)
+    except Exception:
+        logger.warning("device_spec failed", exc_info=True)
+        return NormalResponse(code=500, message="device spec failed", data=None)
 
 
 @router.get("/rules", response_model=NormalResponse, summary="List miot_event rules")
