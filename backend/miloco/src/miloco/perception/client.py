@@ -56,15 +56,18 @@ MAX_SUGGESTION_AGE_SEC = 300  # 5 分钟
 
 
 def _parse_time_window_end(time_window: str) -> datetime | None:
-    """解析 time_window 字符串（HH:MM:SS-HH:MM:SS），返回结束时间。
+    """解析 time_window 字符串（[HH:MM:SS-HH:MM:SS]），返回结束时间。
     
+    _fmt_time_window 产出的格式带方括号: "[14:30:25-14:30:30]"
     使用今天的日期 + 结束时间构建 datetime 对象。
     如果解析失败返回 None。
     """
     if not time_window:
         return None
     try:
-        parts = time_window.split("-")
+        # _fmt_time_window 产出的格式带方括号: "[14:30:25-14:30:30]"
+        cleaned = time_window.strip("[]")
+        parts = cleaned.split("-")
         if len(parts) != 2:
             return None
         end_time_str = parts[1].strip()
@@ -531,8 +534,8 @@ class PerceptionEngineProxy:
                 )
             # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
             await dispatch_event(
-                "suggestion", suggestions, build_suggestions_text,
-                intra_priority=suggestion_intra_priority(suggestions),
+                "suggestion", filtered_suggestions, build_suggestions_text,
+                intra_priority=suggestion_intra_priority(filtered_suggestions),
             )
 
         # --- Pipeline timing ---
