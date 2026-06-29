@@ -35,7 +35,7 @@ git show "origin/main:.agents/commands/review-pr.md" \
 # dontAsk 模式下只有 permissions.allow 名单内的命令能执行，其余自拒；
 # 与 --tools "Bash,Read,Glob,Grep" 工具白名单形成纵深防御。
 cat > .claude/settings.json <<'SETEOF'
-{"permissions": {"allow": ["Bash(gh *)", "Bash(git *)", "Bash(md5sum *)", "Bash(diff *)"]}}
+{"permissions": {"allow": ["Bash(jq *)", "Bash(gh *)", "Bash(git *)", "Bash(md5sum *)", "Bash(diff *)"]}}
 SETEOF
 
 # 跑审查：主模型失败时降级到备用模型/endpoint 重试一次。
