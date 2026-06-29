@@ -393,6 +393,14 @@ class RuleService:
 
         if "trigger_type" in fields and update.trigger_type is not None:
             existing.trigger_type = update.trigger_type
+            if update.trigger_type == RuleTriggerType.MIOT_EVENT:
+                existing.condition.perceive_device_ids = []
+            elif update.trigger_type == RuleTriggerType.PERCEPTION:
+                existing.condition.source_ids = []
+                existing.condition.event_kinds = []
+                existing.condition.property_filters = {}
+                existing.condition.mapping_ids = []
+                existing.condition.use_global_mapping = True
 
         if "mode" in fields and update.mode is not None:
             existing.mode = update.mode

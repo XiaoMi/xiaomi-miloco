@@ -310,7 +310,7 @@ class AutomationService:
                         selected[mapping.id] = mapping
             elif rule.condition.use_global_mapping:
                 for mapping in source_mappings:
-                        selected[mapping.id] = mapping
+                    selected[mapping.id] = mapping
         return list(selected.values())
 
     def _collect_direct_mappings(
