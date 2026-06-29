@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
@@ -48,6 +49,73 @@ from miloco.perception.types import (
     Suggestion,
     suggestion_intra_priority,
 )
+
+# Issue #317: suggestion 最大允许年龄（秒）
+# 超过此时长的 suggestion 被视为过期，不再推送给 agent
+MAX_SUGGESTION_AGE_SEC = 300  # 5 分钟
+
+
+def _parse_time_window_end(time_window: str) -> datetime | None:
+    """解析 time_window 字符串（HH:MM:SS-HH:MM:SS），返回结束时间。
+    
+    使用今天的日期 + 结束时间构建 datetime 对象。
+    如果解析失败返回 None。
+    """
+    if not time_window:
+        return None
+    try:
+        parts = time_window.split("-")
+        if len(parts) != 2:
+            return None
+        end_time_str = parts[1].strip()
+        end_time = datetime.strptime(end_time_str, "%H:%M:%S").time()
+        today = datetime.now().date()
+        return datetime.combine(today, end_time)
+    except (ValueError, IndexError):
+        return None
+
+
+def _filter_suggestions_by_rules(
+    suggestions: list[Suggestion],
+    enabled_device_ids: set[str],
+    has_any_rule: bool,
+    now: datetime,
+    log_prefix: str = "issue-311/317",
+) -> list[Suggestion]:
+    """过滤 disabled rule 关联 + 过期的 suggestion，返回保留列表。
+    
+    Args:
+        suggestions: 待过滤的 suggestion 列表
+        enabled_device_ids: 所有 enabled rule 监听的 device_ids 集合
+        has_any_rule: 是否存在任何 rule（区分"无 rule"和"有 rule 但全 disabled"）
+        now: 当前时间
+        log_prefix: 日志前缀
+    
+    Returns:
+        过滤后的 suggestion 列表
+    """
+    kept: list[Suggestion] = []
+    for s in suggestions:
+        # Issue #311: 过滤 disabled rule 关联的 suggestions
+        s_devices = set(s.source_device_ids)
+        if has_any_rule and s_devices and not s_devices.intersection(enabled_device_ids):
+            logger.info(
+                "[%s] filtered suggestion from disabled rule: event=%s devices=%s",
+                log_prefix, s.event, s.source_device_ids,
+            )
+            continue
+        # Issue #317: 过滤过期的 suggestions
+        end_time = _parse_time_window_end(s.time_window)
+        if end_time is not None:
+            age = (now - end_time).total_seconds()
+            if age > MAX_SUGGESTION_AGE_SEC:
+                logger.info(
+                    "[%s] filtered stale suggestion: event=%s time_window=%s age=%.0fs",
+                    log_prefix, s.event, s.time_window, age,
+                )
+                continue
+        kept.append(s)
+    return kept
 
 
 def _attach_caption(
@@ -171,6 +239,9 @@ class PerceptionEngineProxy:
         self._status_message: str = ""
         self._last_captions: dict[str, str] = {}
         self._executor: ThreadPoolExecutor | None = None
+        # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
+        # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
+        self._engine_lock = asyncio.Lock()
 
         self._init_engine()
 
@@ -336,6 +407,23 @@ class PerceptionEngineProxy:
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎 proxy 失败 | %s", e)
 
+    async def stop_to_unconfigured(self) -> None:
+        """软停引擎,回到「未配模型」态——与「启用→tick 自愈拉起」对称的反向操作。
+
+        删除当前生效模型后调:关掉正在跑的引擎实例并把状态降回 ``no_omni_api_key``,
+        但**不碰** runner 的 tick 循环。后续配好新模型并启用时,下个推理周期
+        ``try_reinit`` 会自动重建(与初始未配模型态完全一致)。``realtime_perceive``
+        入口的 ``if not self.ready`` 守卫保证降级后 tick 安全跳过、不崩。
+
+        重入安全:引擎未起(``perception_engine is None``)时跳过 close,仅按当前配置重判。
+        """
+        async with self._engine_lock:  # 与在飞 perceive 互斥,teardown 必等其完成
+            if self.perception_engine is not None:
+                await self.close()
+                self.perception_engine = None  # ready→False,tick 的 realtime_perceive 立即跳过
+            # 按当前(删后已清空 key 的)配置重判:落 no_omni_api_key;万一 key 仍在则重建为 ready。
+            self._init_engine()
+
     # ---- Internal impls (run in inference thread) ----
 
     async def _realtime_perceive_impl(
@@ -422,9 +510,22 @@ class PerceptionEngineProxy:
             # 这里收到的已是经事件链闸门过滤后的「新链」suggestion——心跳/重复在
             # pipeline 层（_wrap_suggestions_cb → assign_id_and_update_link）已抑制。
             # 剔除 engine 内部字段（id）后外发。
-            for s in suggestions:
+            # Issue #311 & #317: 过滤 disabled rule 关联 + 过期的 suggestions
+            enabled_device_ids: set[str] = set()
+            has_any_rule = bool(rules)
+            if rules:
+                for r in rules:
+                    if r.get("enabled", True):
+                        rule_device_ids = r.get("condition", {}).get("perceive_device_ids", [])
+                        enabled_device_ids.update(rule_device_ids)
+            now = datetime.now()
+            filtered_suggestions = _filter_suggestions_by_rules(
+                suggestions, enabled_device_ids, has_any_rule, now, "issue-311/317-early",
+            )
+            # 过滤后才标记为 early-sent（避免被过滤的 suggestion 在终态路径被双重吞掉）
+            for s in filtered_suggestions:
                 if s.id is not None:
-                    early_sent_sugg_ids.add(s.id)  # 终态 merge 会把同一新链保留进 result，发送侧据此跳过
+                    early_sent_sugg_ids.add(s.id)
                 _publish_perception_event(
                     "suggestion", s.event, {"action": s.action},
                 )
@@ -529,7 +630,8 @@ class PerceptionEngineProxy:
         后帧会按 device_id 写入此 dict.调用方负责创建空 dict 传入(ContextVar 不跨
         executor 线程,只能显式透传 reference).
         """
-        async with get_monitor().track_async(NodeName.ENGINE, "perceive") as _eng_h:
+        # _engine_lock:与 stop_to_unconfigured 互斥,持锁期间引擎不会被 teardown 拔掉。
+        async with get_monitor().track_async(NodeName.ENGINE, "perceive") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
                 return None, set(), set(), set()
@@ -611,7 +713,7 @@ class PerceptionEngineProxy:
         self, batch: PerceptionBatch, query: str
     ) -> OnDemandPerceptionResult | None:
         """Run on-demand query pipeline — offloaded to inference thread."""
-        async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h:
+        async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
                 return None
@@ -732,6 +834,18 @@ class PerceptionEngineProxy:
             s for s in result.suggestions
             if not (early_sent_sugg_ids and s.id in early_sent_sugg_ids)
         ]
+        # Issue #311 & #317: 过滤 disabled rule 关联 + 过期的 suggestions
+        # 从 rule_service 获取全量 rules，构建 enabled_device_ids
+        all_rules = await svc.get_all_rules(enabled_only=False)
+        enabled_device_ids: set[str] = set()
+        has_any_rule = len(all_rules) > 0
+        for r in all_rules:
+            if r.enabled:
+                enabled_device_ids.update(r.condition.perceive_device_ids)
+        now = datetime.now()
+        pending_suggestions = _filter_suggestions_by_rules(
+            pending_suggestions, enabled_device_ids, has_any_rule, now, "issue-311/317-batch",
+        )
         if pending_suggestions:
             _attach_caption(pending_suggestions, result.caption)
             for s in pending_suggestions:
