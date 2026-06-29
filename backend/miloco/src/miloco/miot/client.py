@@ -41,7 +41,7 @@ from miloco.miot.mips_listeners import (
     DeviceMetaEventListener,
     SceneEventListener,
 )
-from miloco.miot.schema import CameraImgSeq
+from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
@@ -53,19 +53,7 @@ def build_sub_device_names(device: MIoTDeviceInfo) -> dict[str, str]:
     Strips the parent device name suffix (e.g. "三楼书房-客厅多路开关" → "三楼书房")
     so callers consistently see the user-customized portion only.
     """
-    if not device.sub_devices:
-        return {}
-    dev_name_suffix = f"-{device.name}" if device.name else ""
-    result: dict[str, str] = {}
-    for key, sub_dev in device.sub_devices.items():
-        siid = key.lstrip("s")
-        if not siid.isdigit():
-            continue
-        name = sub_dev.name
-        if dev_name_suffix and name.endswith(dev_name_suffix):
-            name = name[: -len(dev_name_suffix)]
-        result[siid] = name
-    return result
+    return normalize_sub_devices(device.sub_devices, device.name)
 
 
 class MiotProxy:
