@@ -485,8 +485,8 @@ class RuleRunner:
         - Always fires regardless of prior state.
         - Cancels any pending exit debounce (same as the ENTERED path in
           ``_dispatch_event``).
-        - Writes ``_last_source_state[(rule_id, source_did)] = True`` and
-          ``_last_rule_state[rule_id] = True``.
+        - Writes ``self._state[rule_id].sources[source_did].last_bool = True``
+          and ``self._state[rule_id].last_rule_state = True``.
 
         Caveats (do NOT use from production hot paths):
         - No EXIT synthesis. The follow-up EXITED event must come from real
@@ -553,9 +553,10 @@ class RuleRunner:
           ``duration_seconds * ratio`` 就触发（如 30min * 0.8 → 24min 触发）。
         - 分母固定用 maxlen 而非 ``len(win)``：保留 ratio 间歇容忍语义，
           窗口满后允许部分漏检。
-        - STATE mode 且已 fire on_enter（在 _state_duration_fired）→ 直接 return：
-          STILL_IN 期间不重复 fire，等 _debounced_exit 真完成时清标记重新累积。
-          EVENT mode 不用本拦截，fire 后清窗口走"周期 fire" by-design。
+        - STATE mode 且已 fire on_enter（``state.state_duration_fired`` 置位）
+          → 直接 return：STILL_IN 期间不重复 fire，等 _debounced_exit 真完成时
+          清标记重新累积。EVENT mode 不用本拦截，fire 后清窗口走"周期 fire"
+          by-design。
         """
         state = self._ensure_state(rule.id)
         if rule.mode == RuleMode.STATE and state.state_duration_fired:
@@ -779,8 +780,8 @@ class RuleRunner:
             rs.state_duration_fired = False
             rs.duration_window = None
             rs.last_duration_round = None
-        # on_target timer：cancel 未触发的 timer（保留 _target_fired，同一天
-        # 不重复 fire；清 fired 由跨日 force-reset / config reset 路径做）。
+        # on_target timer：cancel 未触发的 timer（保留 ``rs.target_fired``，
+        # 同一天不重复 fire；清 fired 由跨日 force-reset / config reset 路径做）。
         # 兜底：cancel 前若 accumulated 已 ≥ target，先 fire TARGET——EXIT 60s
         # debounce 窗口内若累计跨过 target，cancel 否则会让达标信号丢失。
         self._fire_target_if_reached(rule, sources, "exit_debounce_target_check")
@@ -1029,8 +1030,8 @@ class RuleRunner:
         session-start）+ 重新按 accumulated=0 schedule on_target timer。
 
         语义上等价于"用户跨过 00:00 那一刻 EXITED → ENTERED"，但实际 condition
-        没变；_last_rule_state 保持 True（避免下一次 condition tick 再触发
-        ENTERED）。
+        没变；``state.last_rule_state`` 保持 True（避免下一次 condition tick
+        再触发 ENTERED）。
 
         pre_rollover_state 为 rollover_one 执行前 snapshot 的旧一天
         ``(target_minutes, accumulated_minutes_today)``。若旧累计已 ≥ target
@@ -1052,7 +1053,7 @@ class RuleRunner:
             )
             sources = self._sources_currently_true(rule.id)
             # 0) 跨日前若旧一天累计已达标且本 session 未 fire，先 fire on_target
-            #    （清 _target_fired 前调，让 helper 内部守卫正常工作）
+            #    （清 ``rs.target_fired`` 前调，让 helper 内部守卫正常工作）
             if pre_rollover_state is not None:
                 self._fire_target_if_reached(
                     rule, sources, "cross_day_pre_rollover_check",
