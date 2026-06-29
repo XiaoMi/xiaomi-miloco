@@ -22,6 +22,7 @@ from miot.types import (
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropertyChangedEvent,
     MIoTDeviceStateEvent,
     MIoTGetPropertyParam,
     MIoTLanDeviceInfo,
@@ -33,6 +34,7 @@ from miot.types import (
 )
 from pydantic_core import to_jsonable_python
 
+from miloco.automation.schema import MiotEventTrigger
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
@@ -129,6 +131,7 @@ class MiotProxy:
         # intends to subscribe. Drives the diff in _sync_meta_subscriptions; the
         # authoritative broker-side state lives in MIoTClient._meta_sub_dids.
         self._subscribed_meta_dids: set[str] = set()
+        self._subscribed_property_dids: set[str] = set()
 
         # Listener for home-level scene changes (rename/delete/edit). Debounces
         # then refreshes the scene list.
@@ -223,6 +226,7 @@ class MiotProxy:
             welcome=self._welcome_service.welcome,
         )
         self._subscribed_meta_dids = set()
+        self._subscribed_property_dids = set()
         self._scene_listener = SceneEventListener(refresh_scenes=self.refresh_scenes)
         self._subscribed_scene_home_ids = set()
         self._camera_state_listener = CameraStateEventListener(
@@ -234,6 +238,9 @@ class MiotProxy:
         # name/room/home propagates. Kept off the bind welcome path.
         self._miot_client.register_device_meta_changed_callback(
             self._on_device_meta_changed_event
+        )
+        self._miot_client.register_device_property_changed_callback(
+            self._on_device_property_changed_event
         )
         # Device cloud online/offline state: update the cached `online` field
         # directly (event-driven recovery for cameras that went stale across a
@@ -304,6 +311,7 @@ class MiotProxy:
         self._scene_info_dict = {}
         self._user_info = None
         self._subscribed_meta_dids = set()
+        self._subscribed_property_dids = set()
         self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
         # Welcome service survives deinit (rebuilt only in __init__), but its
@@ -730,6 +738,7 @@ class MiotProxy:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
+                await self._sync_property_subscriptions()
                 await self._sync_scene_subscriptions()
                 return devices
             except Exception as e:
@@ -815,6 +824,40 @@ class MiotProxy:
             )
         await self._camera_state_listener.on_event(msg)
 
+    async def _on_device_property_changed_event(
+        self, msg: MIoTDevicePropertyChangedEvent
+    ) -> None:
+        try:
+            from miloco.manager import get_manager
+
+            mgr = get_manager()
+            if not getattr(mgr, "_initialized", False):
+                return
+            device = self._device_info_dict.get(msg.did)
+            if device is None:
+                return
+            trigger = MiotEventTrigger(
+                source_type="device",
+                source_id=msg.did,
+                source_name=device.name,
+                home_id=device.home_id,
+                room_name=device.room_name,
+                event_name="device_prop",
+                changed_properties=msg.changed_properties,
+                occurred_at=msg.timestamp_ms,
+                raw=msg.raw,
+            )
+            await mgr.automation_service.handle_trigger(
+                trigger=trigger,
+                perception_service=mgr.perception_service,
+                rule_service=mgr.rule_service,
+                miot_service=mgr.miot_service,
+                meaningful_events_dao=mgr.meaningful_events_dao,
+                pipeline=mgr.perception_service._pipeline,
+            )
+        except Exception as e:
+            logger.error("Failed to dispatch device-property automation trigger: %s", e)
+
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an
         unmanaged one.
@@ -893,6 +936,39 @@ class MiotProxy:
             len([d for d in added if d]),
             len([d for d in removed if d]),
             len(self._subscribed_meta_dids),
+        )
+
+    async def _sync_property_subscriptions(self) -> None:
+        target = {did for did in self._device_info_dict if "/" not in did}
+        to_add = target - self._subscribed_property_dids
+        to_remove = self._subscribed_property_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            try:
+                await self._miot_client.sub_device_property_changed_async(did)
+                return did
+            except Exception as e:
+                logger.error("subscribe device-property failed did=%s: %s", did, e)
+                return None
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_property_changed_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-property failed did=%s: %s", did, e)
+            return did
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        self._subscribed_property_dids |= {d for d in added if d}
+        self._subscribed_property_dids -= {d for d in removed if d}
+        logger.info(
+            "device-property subscriptions synced: +%d -%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            len(self._subscribed_property_dids),
         )
 
     async def _sync_camera_state_subscriptions(self) -> None:

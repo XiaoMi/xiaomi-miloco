@@ -800,6 +800,7 @@ async def run_query_pipeline(
         room_name: str, snapshots: list[DeviceSnapshot]
     ) -> "tuple[str, QueryOutput] | None":
         room_identity_packets: list[IdentityPacket] = []
+        query_device_snapshot: DeviceSnapshot | None = None
 
         for snapshot in snapshots:
             # Downsample to target fps at pipeline entry
@@ -842,19 +843,34 @@ async def run_query_pipeline(
                 identity_packet, config.input.fps, config.input.omni_fps
             )
             room_identity_packets.append(identity_packet)
+            if query_device_snapshot is None and identity_packet.all_frames:
+                query_device_snapshot = snapshot
 
         if not room_identity_packets:
             return None
+        if query_device_snapshot is None:
+            query_device_snapshot = snapshots[0]
 
-        # Build query prompt from IdentityPackets and call Omni
-        payload = build_query_prompt(
-            identity_packets=room_identity_packets,
-            query=query,
-            last_caption=captions.get(room_name),
+        device_ctx_token = set_device_context(
+            DeviceContext(
+                device_trace_id=f"query_{uuid.uuid4()}",
+                device_id=query_device_snapshot.device.did,
+                room_name=room_name,
+            )
         )
-        raw_response = await call_omni(
-            payload, resolve_live_omni_config(config.omni), type="on_demand"
-        )
+        try:
+            # query 路径的 clip 字节在 build_query_prompt -> _encode_batch_video
+            # 阶段就会旁路 push，因此设备上下文需要覆盖 prompt 构建 + omni 调用整段。
+            payload = build_query_prompt(
+                identity_packets=room_identity_packets,
+                query=query,
+                last_caption=captions.get(room_name),
+            )
+            raw_response = await call_omni(
+                payload, resolve_live_omni_config(config.omni), type="on_demand"
+            )
+        finally:
+            reset_device_context(device_ctx_token)
         answer = parse_query_response(raw_response)
         if not answer:
             return None
@@ -862,8 +878,8 @@ async def run_query_pipeline(
 
     # 各 room 并发（与 run_batch_pipeline 同源：per-room omni 墙钟 Σ→max）。单房间查询
     # 无变化；多房间/全屋查询省 Σ。return_exceptions=True + _reraise_first 保持原"任一
-    # room 失败即整体失败"语义（上层 on_demand_perceive 捕获→空答案）。query 路径不走
-    # fused、无 set_device_context，并发面比主路径更窄（run_identity 池写仍是原子同步段）。
+    # room 失败即整体失败"语义（上层 on_demand_perceive 捕获→空答案）。query 路径在
+    # omni 调用前补 set_device_context，使 on-demand 的 clip/snapshot 收集也能按设备落盘。
     room_results = await asyncio.gather(
         *(_run_room_query(rn, snaps) for rn, snaps in batch.by_room().items()),
         return_exceptions=True,

@@ -47,6 +47,7 @@ from .const import (
 )
 from .types import (
     MIoTDeviceBindEvent,
+    MIoTDevicePropertyChangedEvent,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsConnectionError,
@@ -109,6 +110,11 @@ _TOPIC_DEVICE_STATE = re.compile(
     r"^device/([^/]+)/state/(" + "|".join(_DEVICE_STATE_OPS) + r")$"
 )
 
+# Device property push: `device/{did}/up/properties_changed/#`.
+_TOPIC_DEVICE_PROPERTIES_CHANGED = re.compile(
+    r"^device/([^/]+)/up/properties_changed(?:/.*)?$"
+)
+
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
 # decoded message object and may be sync or async — both are dispatched on the
@@ -116,6 +122,9 @@ _TOPIC_DEVICE_STATE = re.compile(
 BindHandler = Callable[[MIoTDeviceBindEvent], Union[None, Awaitable[None]]]
 SceneChangedHandler = Callable[[MIoTSceneChangedEvent], Union[None, Awaitable[None]]]
 DeviceStateHandler = Callable[[MIoTDeviceStateEvent], Union[None, Awaitable[None]]]
+PropertyChangedHandler = Callable[
+    [MIoTDevicePropertyChangedEvent], Union[None, Awaitable[None]]
+]
 MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe (no awaiter, e.g. the reconnect-time
 # re-issue in _on_connect) fails. Arg tuple = (topic, reason_code,
@@ -481,6 +490,18 @@ class MIoTMipsCloud:
     async def unsub_home_scene_changed_async(self, home_id: str) -> None:
         for op in _HOME_SCENE_OPS:
             await self._unsubscribe_async(f"home/{home_id}/scene/{op}")
+
+    async def sub_device_property_changed_async(
+        self, did: str, handler: PropertyChangedHandler
+    ) -> None:
+        await self._subscribe_async(
+            f"device/{did}/up/properties_changed/#",
+            handler,
+            self._make_property_changed_decoder(),
+        )
+
+    async def unsub_device_property_changed_async(self, did: str) -> None:
+        await self._unsubscribe_async(f"device/{did}/up/properties_changed/#")
 
     async def sub_device_state_async(
         self, did: str, handler: DeviceStateHandler
@@ -865,6 +886,52 @@ class MIoTMipsCloud:
             return MIoTDeviceStateEvent(
                 did=did,
                 event=op,  # type: ignore[arg-type]  # op ∈ {online,offline}
+                raw=raw if isinstance(raw, dict) else {},
+                timestamp_ms=_now_ms(),
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_property_changed_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDevicePropertyChangedEvent]
+    ]:
+        def decode(
+            topic: str, payload: bytes
+        ) -> Optional[MIoTDevicePropertyChangedEvent]:
+            m = _TOPIC_DEVICE_PROPERTIES_CHANGED.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            raw = _parse_json_payload(payload) or {}
+            changed: dict[str, Any] = {}
+            params = raw.get("params")
+            if isinstance(params, dict):
+                if all(k in params for k in ("siid", "piid")):
+                    changed[f"prop.{params['siid']}.{params['piid']}"] = params.get(
+                        "value"
+                    )
+                else:
+                    for key, value in params.items():
+                        changed[str(key)] = value
+            elif isinstance(params, list):
+                for item in params:
+                    if not isinstance(item, dict):
+                        continue
+                    if "siid" in item and "piid" in item:
+                        changed[f"prop.{item['siid']}.{item['piid']}"] = item.get(
+                            "value"
+                        )
+                    elif "key" in item:
+                        changed[str(item["key"])] = item.get("value")
+            for key, value in raw.items():
+                if key == "params":
+                    continue
+                if key not in changed and key not in {"did", "method", "tid", "ts"}:
+                    changed[str(key)] = value
+            return MIoTDevicePropertyChangedEvent(
+                did=did,
+                changed_properties=changed,
                 raw=raw if isinstance(raw, dict) else {},
                 timestamp_ms=_now_ms(),
             )
