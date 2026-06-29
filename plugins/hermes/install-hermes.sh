@@ -502,48 +502,33 @@ fi
 
 mark_done 1
 
-# --- 1.9 build & deploy 前端 (web/dist → backend static_dir) ---
+# --- 1.9 注入 web 静态目录 (cp dist → backend static_dir) ---
 # 为什么: 上游 miloco-cli wheel 自带 main 时期的 web bundle,Hermes fork 改的
-# 前端代码(per-modality perception-toggles 等)永远装不进来——后端 serve 的
-# 永远是旧 index.html / assets。修法: clone 完后 npm build → 找到 backend 的
-# static_dir → 覆盖。web bundle 改了;config / model / backend 逻辑不动。
+# 前端代码(per-modality perception-toggles 等)永远装不进来。
 #
-# 跳过条件: 无 Node.js 或 Node < 18 (web build 要求 18+)——只 warn 不 exit,
-# 走原 wheel bundle。装 Node 后重跑 install-hermes.sh 即可。
+# 设计原则（对齐上游 release model）:
+# - 上游走 GitHub Release: build.sh CI 跑一次 + release.yml 上传 prebuilt 归档
+#   + install.py _fetch_release_bundle 下载校验后解压。**用户装的时候不 build**。
+# - fork 没有 release 流水线:用 git 替代 — `web/dist/` 直接 prebuilt 入仓,
+#   install-hermes.sh 从 <fork>/web/dist/ 直接 cp 到 backend static_dir。
+# - **不需要 Node.js / npm / 任何 build 工具**。改 web/ source 的开发者本地
+#   `npm run build` 后 `git add web/dist` 跟代码一起提交即可。
+#
+# 跳过条件: 后端 miloco.config.settings 解析失败(venv 配错),只 warn 不 exit,
+# 此时后端还 serve wheel 自带 bundle(fork 改动不生效但功能不挂)。
 
-step 1.9 "build 前端 + 注入 backend 静态目录"
+step 1.9 "注入 web 静态目录 (cp prebuilt dist → backend static_dir)"
 
 WEB_SRC="$(dirname "$HERE")/../web"   # <fork>/web
 WEB_DIST="$WEB_SRC/dist"
 
-NODE_OK=0
 if [ ! -d "$WEB_SRC" ]; then
   warn "找不到 web 源码目录: $WEB_SRC"
-  warn "(clone 的 repo 结构异常? 跳过前端构建)"
-elif ! command -v node >/dev/null 2>&1; then
-  warn "Node.js 未安装,跳过 web build/deploy"
-  warn "装 Node 18+ 后重跑 install-hermes.sh 即可触发"
-elif node -p 'parseInt(process.versions.node.split(".")[0])' 2>/dev/null | grep -qE '^(1[89]|[2-9][0-9])$'; then
-  NODE_OK=1
+  warn "(clone 的 repo 结构异常? 跳过前端注入)"
+elif [ ! -d "$WEB_DIST" ]; then
+  warn "找不到 prebuilt web bundle: $WEB_DIST"
+  warn "(开发者本地需 \`npm run build\` 后重跑 install-hermes.sh)"
 else
-  warn "Node.js $(node --version 2>/dev/null) 太老(需 18+),跳过 web build/deploy"
-  warn "brew install node@20 或 nvm use 20 后重跑"
-fi
-
-if [ "$NODE_OK" -eq 1 ]; then
-  info "  → cd $WEB_SRC && npm install && npm run build"
-  (
-    cd "$WEB_SRC" || exit 1
-    if [ ! -d node_modules ]; then
-      npm install --no-audit --no-fund --silent 2>/dev/null \
-        || warn "npm install 失败,保留旧 web bundle"
-    fi
-    if [ -d node_modules ]; then
-      npm run build --silent 2>/dev/null \
-        || warn "npm run build 失败,保留旧 web bundle"
-    fi
-  ) || true
-
   # 找 backend 的 static_dir(import 懒,settings 解析需要 miloco 包已装)
   STATIC_DIR="$("$PYTHON" -c "
 try:
@@ -552,9 +537,9 @@ try:
 except Exception as e:
     pass
 " 2>/dev/null)"
-  if [ -z "$STATIC_DIR" ] || [ ! -d "$WEB_DIST" ]; then
-    warn "找不到 backend static_dir 或 web/dist 不存在,跳过注入"
-    warn "(后端 venv 配错的话 wheel 自带 bundle 仍生效)"
+  if [ -z "$STATIC_DIR" ]; then
+    warn "找不到 backend static_dir(import miloco.config.settings 失败)"
+    warn "(venv 配错的话 wheel 自带 bundle 仍生效,fork 改动暂时不挂)"
   else
     info "  STATIC_DIR=$STATIC_DIR"
     cp -r "$WEB_DIST/." "$STATIC_DIR/"

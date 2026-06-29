@@ -1,10 +1,12 @@
 node_modules
-dist
 dist-ssr
 *.local
 .vite
 .DS_Store
 _mock
+# dist 不再忽略 —— fork 走的 release model 是把 prebuilt 提交进仓库,
+# install-hermes.sh 直接 cp,不依赖用户的 node。改 web/ source 的人需
+# 本地跑 npm run build 后 git add -A web/dist 提交。
 
 # Editor
 .vscode/*
