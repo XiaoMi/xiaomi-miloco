@@ -48,3 +48,22 @@ _load_pkg("adapter_pkg", _ADAPTER_DIR)
 
 # 插件：作为包 miloco_plugin_pkg 装载（context_injection/tools_* 间有相对导入）
 _load_pkg("miloco_plugin_pkg", _PLUGIN_DIR)
+
+# ---------------------------------------------------------------------------
+# Hermes API 契约测试路径：让 ``from gateway.config import Platform`` /
+# ``from gateway.delivery import DeliveryTarget`` 在 plugins/hermes/tests/ 下可解析。
+# 优先级：
+#   1. ``$HERMES_AGENT_PATH`` 环境变量（CI / 显式注入）
+#   2. ``<xiaomi-miloco>/../hermes-agent``（本机开发约定；sibling repo）
+# 都找不到时静默跳过契约测试（不打断其他测试）。
+# ---------------------------------------------------------------------------
+import os as _os  # noqa: E402
+
+_HERMES_AGENT_CANDIDATES = [
+    _os.environ.get("HERMES_AGENT_PATH", "").strip() or None,
+    str(HERMES_DIR.parent.parent / "hermes-agent"),
+]
+for _candidate in _HERMES_AGENT_CANDIDATES:
+    if _candidate and Path(_candidate).is_dir() and (_candidate) not in sys.path:
+        sys.path.insert(0, _candidate)
+        break

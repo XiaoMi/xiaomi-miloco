@@ -227,7 +227,7 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
   # 9. plugin enabled
   if command -v hermes >/dev/null 2>&1; then
     # 同 step 8：严格匹配 status 列，避免 "not enabled" 假阳性
-    if hermes plugins list 2>/dev/null | grep -E "miloco.*│ enabled │" >/dev/null 2>&1; then
+    if hermes plugins list --plain --no-bundled 2>/dev/null | grep -E "^enabled.*miloco$" >/dev/null 2>&1; then
       diag "plugin enabled (hermes plugins list)" 1
     else
       diag "plugin enabled" 0 "hermes plugins enable miloco"
@@ -393,7 +393,8 @@ if [ -d "$MILOCO_HOME" ]; then
   if [ ! -f "$SUPERVISORD_CONF" ] && [ -f "$SUPERVISORD_SOCK" ]; then
     warn "半装残留：supervisord.sock 存在但 supervisord.conf 缺失"
     warn "  这通常是上次 --agent-prepare 异常退出留下的"
-    warn "  修复：miloco-cli service stop  或  supervisord -c /dev/null shutdown"
+    warn "  修复：miloco-cli service stop"
+    warn "        或手动：supervisorctl shutdown（shutdown 是 supervisorctl 子命令，不是 supervisord 的）"
   fi
   # 情况 2: PID 文件存在但进程已死
   if [ -f "$SUPERVISORD_PID" ]; then
@@ -704,8 +705,9 @@ if command -v hermes >/dev/null 2>&1; then
   # 已 enabled 跳过；未 enabled 才 enable
   # 注意：hermes plugins list 表格里 not enabled 和 enabled 都有 'enabled' 子串，
   # 老版 grep "miloco.*enabled" 会把 not enabled 误判成 enabled 导致跳过 enable。
-  # 严格匹配 status 列：行内出现 "│ enabled │"（前后有竖线）才是真 enabled。
-  if hermes plugins list 2>/dev/null | grep -E "miloco.*│ enabled │" >/dev/null 2>&1; then
+  # --plain --no-bundled + "^enabled.*miloco$" 是 column-agnostic 的严格匹配，
+  # 不依赖终端 Unicode 框线字符渲染。对齐 install-guide-hermes.md 的写法。
+  if hermes plugins list --plain --no-bundled 2>/dev/null | grep -E "^enabled.*miloco$" >/dev/null 2>&1; then
     info "  已是 enabled，跳过"
   else
     if hermes plugins enable miloco >/dev/null 2>&1; then

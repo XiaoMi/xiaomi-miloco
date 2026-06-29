@@ -50,10 +50,11 @@ def test_guide_has_status_report_with_local_urls():
 
 
 def test_guide_has_active_test_suggestion():
-    """Step 3.3 必须主动引导用户跑 `hermes -z "miloco_status"` 试真实动作。"""
+    """Step 3.3 必须主动引导用户跑一次真实自检（miloco_status / wrapper script）。"""
     text = GUIDE.read_text(encoding="utf-8")
     assert 'miloco_status' in text
-    assert "hermes -z" in text
+    # 直调入口：bash plugins/hermes/scripts/miloco-status.sh（不依赖 hermes -z LLM 推断）
+    assert 'miloco-status.sh' in text
 
 
 def test_guide_no_meta_instruction_block():

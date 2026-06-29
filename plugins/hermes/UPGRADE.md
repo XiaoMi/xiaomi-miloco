@@ -13,7 +13,7 @@ metadata:
 
 ## 怎么判断该不该升级
 
-跑 `hermes -z "miloco_status"` 看 `versions` 子项：
+跑 `bash scripts/miloco-status.sh versions` 看 `versions` 子项：
 
 ```json
 {
@@ -50,7 +50,7 @@ git pull --ff-only
 bash plugins/hermes/install-hermes.sh   # 幂等；会更新 state.json::versions
 
 # 5. 验证
-hermes -z "miloco_status"   # versions 应无 mismatch
+bash scripts/miloco-status.sh versions   # versions 应无 mismatch
 hermes -z "miloco_test_push"  # 实际推送一次
 ```
 
@@ -76,7 +76,7 @@ cd <fork dir>
 bash plugins/hermes/install-hermes.sh   # 幂等；不会破坏 OAuth / IM 配置
 
 # 5. 验证
-hermes -z "miloco_status"
+bash scripts/miloco-status.sh
 ```
 
 ⚠️ **miloco 升级会重写 `config.json`**：`install-hermes.sh` 之前的 `cp config.json config.json.bak-<ts>-pid<nsec>` 备份仍保留，rollback 用。
@@ -98,7 +98,7 @@ bash plugins/hermes/install-hermes.sh
 hermes gateway restart
 
 # 4. 验证
-hermes -z "miloco_status"   # plugin version 应更新
+bash scripts/miloco-status.sh   # plugin version 应更新（用 plugin_self / versions 子项对照）
 ```
 
 `install-hermes.sh` 幂等保证：
@@ -136,7 +136,7 @@ hermes gateway restart
 # 5. 重新 OAuth / 重新配 API key（按 install-guide-hermes.md Step 2）
 
 # 6. 验证
-hermes -z "miloco_status"
+bash scripts/miloco-status.sh
 hermes -z "miloco_test_push"
 ```
 
@@ -169,7 +169,7 @@ hermes -z "miloco_test_push"   # 应该发到 telegram
 
 ```bash
 # 1. 看版本对比
-hermes -z "miloco_status" | grep -A 5 versions
+bash scripts/miloco-status.sh versions | grep -A 5 versions
 
 # 2. 看 plugin enabled
 hermes plugins list | grep miloco

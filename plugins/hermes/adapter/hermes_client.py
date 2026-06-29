@@ -52,6 +52,9 @@ _OVERFLOW_MARKERS = (
     "maximum context",
     "token limit",
     "context budget",
+    # Anthropic-style（reviewer #3 补的）
+    "prompt is too long",
+    "too many tokens",
 )
 
 

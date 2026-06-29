@@ -366,9 +366,11 @@ fi
 
 > 试一个真实动作：在 Hermes 里说
 > ```
-> hermes -z "miloco_status"
+> miloco_status
 > ```
 > 应返 9 项自检 ✓（含 backend / adapter / state.json / versions）。
+>
+> （直调不依赖 LLM 推断：`bash plugins/hermes/scripts/miloco-status.sh`，传 `plugin_self` / `versions` / `adapter_health` 等子项跑单步。gather 需要 plugin ctx，命令行调会返清晰错误。）
 
 ---
 

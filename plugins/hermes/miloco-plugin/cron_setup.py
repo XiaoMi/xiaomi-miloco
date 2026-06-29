@@ -25,9 +25,14 @@ import 失败要 graceful：Hermes 不在运行环境时 ``cron.jobs`` 模块不
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# 从 state.json 读 deliver.target（install-hermes.sh 在安装时由
+# detect_im_platforms.py 自动写入）。导出为模块级符号，便于测试 monkeypatch，
+# 也便于 tools_notify 之外的 cron 路径复用同一份状态读取逻辑。
+from .tools_notify import get_deliver_target
 
 # 受管 job 标签：塞进 name 字段前缀，reconcile 据此识别。
 MANAGED_TAG = "[miloco:home-profile]"
@@ -85,8 +90,19 @@ def _managed_name(task_name: str) -> str:
     return f"{MANAGED_TAG} {task_name}"
 
 
-def reconcile_cron_jobs() -> Dict[str, Any]:
+def reconcile_cron_jobs(ctx: Optional[Any] = None) -> Dict[str, Any]:
     """对齐 4 个受管 cron job。返回 ``{created, updated, removed, skipped}``。
+
+    ``deliver`` 参数从 ``state.json::deliver.target`` 取（install-hermes.sh 探测
+    IM 平台时由 ``detect_im_platforms.py`` 写入），而不是字面量 ``"all"``——
+    ``Platform("all")`` 不是合法 enum 值，``DeliveryTarget.parse("all")`` 会
+    回退到 ``Platform.LOCAL``，让所有 cron 输出落到本地 markdown 而非 IM 推送
+    （PR #279 reviewer Zirconi 标记的 critical bug）。
+
+    没有 deliver target（state.json 缺失 / 损坏 / 还没配 IM）→ 直接跳过，
+    返回 ``{skipped: True, reason: "no deliver target"}``，并 log warning 指
+    引用户跑 ``install-hermes.sh`` 或手动编辑 ``state.json``。**绝不静默退化**
+    （旧代码 hardcoded ``"all"`` 的行为就是静默退化）。
 
     逻辑（与 TS 端 ``reconcile`` 对齐）：
     1. 列出现有 job，按 ``name.startswith(MANAGED_TAG)`` 过滤出受管集合。
@@ -96,6 +112,19 @@ def reconcile_cron_jobs() -> Dict[str, Any]:
     funcs = _import_cron_jobs()
     if funcs is None:
         return {"created": 0, "updated": 0, "removed": 0, "skipped": True}
+
+    # deliver target 必须先于 list/create 取，避免 list 成功后又因 target 缺失
+    # 留下半残留 job（已存在的 managed job 也不会被错误地 update 成 deliver="all"）。
+    deliver_target = get_deliver_target(ctx)
+    if not deliver_target:
+        logger.warning(
+            "miloco cron reconcile 跳过：state.json::deliver.target 为空。"
+            "请跑 install-hermes.sh（装好会探测 IM 平台并写入 target），"
+            "或手动编辑 ~/.hermes/plugins/miloco/miloco-plugin/state.json："
+            "{\"deliver\": {\"target\": \"telegram\"}}。"
+        )
+        return {"created": 0, "updated": 0, "removed": 0, "skipped": True,
+                "reason": "no deliver target"}
 
     create_job, list_jobs, update_job, remove_job = funcs
     created = updated = removed = 0
@@ -120,19 +149,20 @@ def reconcile_cron_jobs() -> Dict[str, Any]:
                     schedule=task["schedule"],
                     name=target_name,
                     skills=list(task["skills"]),
-                    deliver="all",
+                    deliver=deliver_target,
                 )
                 created += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("create_job(%s) 失败: %s", target_name, exc)
         else:
             # update：刷新 schedule / skills / prompt / deliver（name / id 不动）。
-            # deliver 默认 "all"（全渠道推送），用户想单推可用 cronjob update 单独改。
+            # deliver 来自 state.json::deliver.target（不是字面量 "all"）；
+            # 用户想单推可在 Hermes 里手动改 cron job 的 deliver。
             updates = {
                 "schedule": task["schedule"],
                 "skills": list(task["skills"]),
                 "prompt": task["prompt"],
-                "deliver": "all",
+                "deliver": deliver_target,
                 "enabled": True,
             }
             try:
@@ -152,8 +182,8 @@ def reconcile_cron_jobs() -> Dict[str, Any]:
                 logger.warning("remove_job(%s) 失败: %s", job.get("id"), exc)
 
     logger.info(
-        "miloco cron reconcile: created=%d updated=%d removed=%d",
-        created, updated, removed,
+        "miloco cron reconcile: created=%d updated=%d removed=%d deliver=%s",
+        created, updated, removed, deliver_target,
     )
     return {"created": created, "updated": updated, "removed": removed, "skipped": False}
 
