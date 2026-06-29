@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from miloco.perception.engine.identity.tracking_service import _build_response
-from miloco.perception.engine.types import ObjectType
+from miloco.perception.engine.types import BoxType, ObjectType
 
 
 class TestBuildResponseClassIdMapping:
@@ -20,7 +20,7 @@ class TestBuildResponseClassIdMapping:
         resp = _build_response(results, n_frames=6, fps=2)
         obj = resp.object_info[0]
         assert obj.type == ObjectType.HUMAN_BODY
-        assert "human_body" in obj.box_info[0].boxes
+        assert BoxType.HUMAN_BODY in obj.box_info[0].boxes
 
     def test_cat_class_id_maps_to_pet(self):
         """class_id=1 (cat) → PET + pet_body box。"""
@@ -28,7 +28,7 @@ class TestBuildResponseClassIdMapping:
         resp = _build_response(results, n_frames=6, fps=2)
         obj = resp.object_info[0]
         assert obj.type == ObjectType.PET
-        assert "pet_body" in obj.box_info[0].boxes
+        assert BoxType.PET_BODY in obj.box_info[0].boxes
 
     def test_dog_class_id_maps_to_pet(self):
         """class_id=2 (dog) → PET + pet_body box。"""
@@ -36,7 +36,7 @@ class TestBuildResponseClassIdMapping:
         resp = _build_response(results, n_frames=6, fps=2)
         obj = resp.object_info[0]
         assert obj.type == ObjectType.PET
-        assert "pet_body" in obj.box_info[0].boxes
+        assert BoxType.PET_BODY in obj.box_info[0].boxes
 
     def test_missing_class_id_defaults_to_human(self):
         """无 class_id 字段时回退为 HUMAN_BODY（向后兼容）。"""
@@ -44,7 +44,7 @@ class TestBuildResponseClassIdMapping:
         resp = _build_response(results, n_frames=6, fps=2)
         obj = resp.object_info[0]
         assert obj.type == ObjectType.HUMAN_BODY
-        assert "human_body" in obj.box_info[0].boxes
+        assert BoxType.HUMAN_BODY in obj.box_info[0].boxes
 
     def test_mixed_human_and_pet(self):
         """人 + 宠物混合结果正确映射。"""
@@ -63,7 +63,7 @@ class TestBuildResponseClassIdMapping:
         results = [{"id": 1, "xyxy": (100, 200, 180, 260), "class_id": 1}]
         resp = _build_response(results, n_frames=4, fps=1)
         box = resp.object_info[0].box_info[0]
-        assert box.boxes["pet_body"] == (100, 200, 80, 60)
+        assert box.boxes[BoxType.PET_BODY] == (100, 200, 80, 60)
 
     def test_pet_face_id_is_none(self):
         """宠物的 face_id 始终为 'none'。"""
@@ -116,4 +116,4 @@ class TestBuildResponseEdgeCases:
         """人类 bbox 的 xyxy → xywh 转换正确（与 pet 版对称）。"""
         results = [{"id": 0, "xyxy": (100, 200, 180, 260), "class_id": 0}]
         resp = _build_response(results, n_frames=4, fps=1)
-        assert resp.object_info[0].box_info[0].boxes["human_body"] == (100, 200, 80, 60)
+        assert resp.object_info[0].box_info[0].boxes[BoxType.HUMAN_BODY] == (100, 200, 80, 60)
