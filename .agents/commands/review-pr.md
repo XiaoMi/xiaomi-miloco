@@ -380,31 +380,19 @@ PR 上始终只保留 1 条 review-pr-ci comment——多次跑 `--ci` 不累积
 
 把 **Step 8 完整输出**（不要复制模板，直接复用上面已经生成的内容）前缀上一行 `<!-- review-pr-ci -->` 作为 body。heredoc 用 `'EOF'` 引号防止 shell 解释 review body 里的反引号 / `$`。
 
-**单次 bash 调用完成「查找 → 决策 → PATCH/POST」**——把分支判断压在同一个 shell 进程内（避免跨 Bash 工具调用时变量丢失）：
+**分两步独立 Bash 调用**——每一步都干净地以 `gh api` 或 `jq` 开头，确保权限规则精准命中：
 
+1. 查找已有 review-pr-ci comment 的 ID（无结果时输出空串）：
 ```bash
-COMMENT_ID=$(gh api \
-  "/repos/XiaoMi/xiaomi-miloco/issues/$PR_ID/comments" --paginate \
-  | jq -rs 'add | [.[] | select((.body // "") | startswith("<!-- review-pr-ci -->")) | .id] | .[0] // ""')
-
-if [ -n "$COMMENT_ID" ]; then
-    gh api -X PATCH \
-      "/repos/XiaoMi/xiaomi-miloco/issues/comments/$COMMENT_ID" \
-      -f body="$(cat <<'EOF'
-<!-- review-pr-ci -->
-<这里粘贴 Step 8 的完整输出，不要重写一遍>
-EOF
-)" | jq -r '"https://github.com/XiaoMi/xiaomi-miloco/pull/'"$PR_ID"'#issuecomment-\(.id)"'
-else
-    gh api -X POST \
-      "/repos/XiaoMi/xiaomi-miloco/issues/$PR_ID/comments" \
-      -f body="$(cat <<'EOF'
-<!-- review-pr-ci -->
-<这里粘贴 Step 8 的完整输出，不要重写一遍>
-EOF
-)" | jq -r '"https://github.com/XiaoMi/xiaomi-miloco/pull/'"$PR_ID"'#issuecomment-\(.id)"'
-fi
+gh api "/repos/XiaoMi/xiaomi-miloco/issues/$PR_ID/comments" --paginate | jq -rs 'add | [.[] | select((.body // "") | startswith("<!-- review-pr-ci -->")) | .id] | .[0] // ""'
 ```
+
+2. 根据第 1 步输出选一条执行（**只跑匹配的那条，不要两条都跑**）。heredoc 用 `'INNEREOF'` 避免与外层 `'EOF'` 冲突：
+
+| 第 1 步输出 | 执行 |
+|---|---|
+| 数字 id（如 `1234567890`） | `gh api -X PATCH "/repos/XiaoMi/xiaomi-miloco/issues/comments/<id>" -f body="$(cat <<'INNEREOF'\n<!-- review-pr-ci -->\n<这里粘贴 Step 8 的完整输出，不要重写一遍>\nINNEREOF\n)"` |
+| 空串 | `gh api -X POST "/repos/XiaoMi/xiaomi-miloco/issues/$PR_ID/comments" -f body="$(cat <<'INNEREOF'\n<!-- review-pr-ci -->\n<这里粘贴 Step 8 的完整输出，不要重写一遍>\nINNEREOF\n)"` |
 
 ### Step 10 — Cleanup（主动执行，仅默认 / `--post` 模式）
 
