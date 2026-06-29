@@ -1386,6 +1386,17 @@ export async function realDeleteOmniConfig(
   return r.data;
 }
 
+// 停用当前生效模型:回未配态 + 软停感知,但保留档案(可再启用)。
+export async function realDeactivateOmniConfig(
+  ref: OmniProfileRef,
+): Promise<OmniConfigState> {
+  const r = await apiFetch<Normal<OmniConfigState>>(
+    "/api/admin/omni-config/deactivate",
+    { method: "POST", body: JSON.stringify(ref) },
+  );
+  return r.data;
+}
+
 // 拉取某 Base URL 下可用模型列表（供模型下拉）。api_key 留空则用同 base_url 已存 key。
 export async function realListOmniModels(input: {
   base_url: string;
