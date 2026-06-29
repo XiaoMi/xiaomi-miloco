@@ -80,11 +80,17 @@ async def serve_snapshot(
 ):
     """Serve a saved automation snapshot JPEG."""
     _ = request, auth
-    if not re.match(r"^[A-Za-z0-9_.\-]+\.jpg$", filename):
+    normalized_filename = _Path(filename).name
+    if normalized_filename != filename:
+        return NormalResponse(code=400, message="invalid filename", data=None)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.jpg", normalized_filename):
         return NormalResponse(code=400, message="invalid filename", data=None)
     import os
     home = os.environ.get("MILOCO_HOME", "/root/.openclaw/miloco")
-    snap_path = _Path(home) / "static" / "clips" / "automation" / _Path(filename).name
+    snapshot_root = (_Path(home) / "static" / "clips" / "automation").resolve()
+    snap_path = (snapshot_root / normalized_filename).resolve()
+    if snap_path.parent != snapshot_root:
+        return NormalResponse(code=400, message="invalid filename", data=None)
     if not snap_path.exists():
         return NormalResponse(code=404, message="not found", data=None)
     return FileResponse(str(snap_path), media_type="image/jpeg")
@@ -249,7 +255,7 @@ async def device_spec(did: str, current_user: str = Depends(verify_token)):
         })
     except Exception as e:
         safe_did = re.sub(r"[^\w.\-]", "_", did or "")
-        logger.warning("device_spec failed for did=%s: %s", safe_did, e)
+        logger.warning("device_spec failed for did=%s", safe_did, exc_info=True)
         return NormalResponse(code=500, message=str(e), data=None)
 
 
