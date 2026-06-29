@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.types import MatchedRule, RealtimePerceptionResult
-from miloco.rule.model import Rule
+from miloco.rule.schema import Rule
 
 
 @pytest.fixture
