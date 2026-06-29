@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -11,9 +12,21 @@ from fastapi.testclient import TestClient
 def _build_app():
     fake_manager = ModuleType("miloco.manager")
     fake_manager.get_manager = lambda: None  # type: ignore[attr-defined]
-    sys.modules["miloco.manager"] = fake_manager
+    old_manager = sys.modules.get("miloco.manager")
+    old_router = sys.modules.pop("miloco.automation.router", None)
+    try:
+        sys.modules["miloco.manager"] = fake_manager
+        automation_router = importlib.import_module("miloco.automation.router").router
+    finally:
+        if old_router is not None:
+            sys.modules["miloco.automation.router"] = old_router
+        else:
+            sys.modules.pop("miloco.automation.router", None)
+        if old_manager is not None:
+            sys.modules["miloco.manager"] = old_manager
+        else:
+            sys.modules.pop("miloco.manager", None)
 
-    from miloco.automation.router import router as automation_router
     from miloco.middleware.exception_handler import handle_exception
 
     app = FastAPI()

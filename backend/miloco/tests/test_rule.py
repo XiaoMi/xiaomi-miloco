@@ -30,6 +30,7 @@ from miloco.rule.schema import (
     RuleLifecycle,
     RuleLog,
     RuleMode,
+    RuleTriggerType,
     RuleUpdate,
 )
 from miloco.rule.service import RuleService
@@ -248,6 +249,16 @@ class TestRuleSchema:
         cond = _make_condition(device_ids=["a", "b"], query="检测到有人")
         assert len(cond.perceive_device_ids) == 2
         assert cond.query == "检测到有人"
+
+    def test_rule_condition_accepts_structured_property_filters(self):
+        cond = RuleCondition(
+            perceive_device_ids=[],
+            query="门磁变化",
+            source_ids=["sensor-1"],
+            event_kinds=["device_prop"],
+            property_filters={"prop.2.1": {"op": "eq", "value": "1"}},
+        )
+        assert cond.property_filters["prop.2.1"]["op"] == "eq"
 
     def test_rule_defaults(self):
         rule = _make_static_rule()
@@ -732,6 +743,19 @@ class TestRuleServicePatch:
         cond_update = RuleConditionUpdate(perceive_device_ids=["bad-cam"])
         with pytest.raises(ValidationException, match="Invalid perception device IDs"):
             await service.patch_rule("r1", RuleUpdate(condition=cond_update))
+
+    @pytest.mark.asyncio
+    async def test_patch_trigger_type_requires_miot_event_fields(
+        self, service, mock_rule_repo
+    ):
+        existing = _make_static_rule(rule_id="r1")
+        mock_rule_repo.get_by_id.return_value = existing
+
+        with pytest.raises(ValidationException, match="source_ids"):
+            await service.patch_rule(
+                "r1",
+                RuleUpdate(trigger_type=RuleTriggerType.MIOT_EVENT),
+            )
 
     @pytest.mark.asyncio
     async def test_patch_condition_query_only_preserves_devices(

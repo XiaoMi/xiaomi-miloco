@@ -122,7 +122,7 @@ class RuleCondition(BaseModel):
         default_factory=list,
         description="MiOT event kinds, e.g. device_prop / scene",
     )
-    property_filters: dict[str, str] = Field(
+    property_filters: dict[str, Any] = Field(
         default_factory=dict,
         description="MiOT property filters keyed by property path/name",
     )
@@ -237,7 +237,7 @@ class RuleConditionUpdate(BaseModel):
     query: str | None = Field(None)
     source_ids: list[str] | None = Field(None)
     event_kinds: list[str] | None = Field(None)
-    property_filters: dict[str, str] | None = Field(None)
+    property_filters: dict[str, Any] | None = Field(None)
     mapping_ids: list[str] | None = Field(None)
     use_global_mapping: bool | None = Field(None)
 
