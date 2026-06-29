@@ -115,6 +115,55 @@ def test_filter_by_home_drops_disallowed():
     assert set(miot_filter.filter_by_home(kv, items).keys()) == {"a"}
 
 
+# ─── filter.py: select_active_camera_dids（投喂/拉流共用口径）───────────────────
+
+
+def test_select_active_filters_home_denied_offline():
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+            ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c2"]),
+        }
+    )
+    cameras = {
+        "c1": _camera("c1", home_id="H1"),  # 通过
+        "c2": _camera("c2", home_id="H1"),  # 被拉黑 → 排除
+        "c3": _camera("c3", home_id="H2"),  # 家庭未启用 → 排除
+        "c4": _camera("c4", home_id="H1", online=False, lan_online=False),  # 离线 → 排除
+    }
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1"]
+
+
+def test_select_active_require_lan_false_keeps_lan_stale():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    # 云端 online=True 但 lan_online=False（卡死态）
+    cameras = {"c1": _camera("c1", home_id="H1", online=True, lan_online=False)}
+    # require_lan=True（默认连接口径）→ 排除
+    assert miot_filter.select_active_camera_dids(kv, cameras) == []
+    # require_lan=False（应连数口径）→ 放过
+    assert miot_filter.select_active_camera_dids(
+        kv, cameras, require_lan=False
+    ) == ["c1"]
+
+
+def test_select_active_caps_by_did(monkeypatch):
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {
+        "c3": _camera("c3", home_id="H1"),
+        "c1": _camera("c1", home_id="H1"),
+        "c2": _camera("c2", home_id="H1"),
+    }
+    # 超额 → 按 did 升序保留前 2
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1", "c2"]
+    # cap=False → 全集（输入顺序，列全集语义）
+    assert set(miot_filter.select_active_camera_dids(kv, cameras, cap=False)) == {
+        "c1",
+        "c2",
+        "c3",
+    }
+
+
 # ─── filter.py: write helpers ────────────────────────────────────────────────
 
 
@@ -840,6 +889,76 @@ async def test_refresh_cameras_skips_manager_for_disallowed_home(_scope_proxy_en
 
     # c1 的 home 在白名单，尝试建 manager；c2 的 home 不在，continue 跳过
     assert miot_client.create_camera_instance_async.call_count == 1
+    assert "c2" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_caps_managers_to_max(_scope_proxy_env, monkeypatch):
+    """在线相机超过上限 → 只为前 N(按 did)建 manager，超额的不建（拉流=投喂口径）。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1"),
+            "c2": _camera("c2", home_id="H1"),
+            "c3": _camera("c3", home_id="H1"),  # 第 3 台在线 → 超额，不建
+        }
+    )
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    # 只为 c1/c2 建，c3 超额跳过
+    assert miot_client.create_camera_instance_async.call_count == 2
+    assert "c3" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_destroys_overcap_existing_manager(_scope_proxy_env, monkeypatch):
+    """已建 >MAX 个 manager（存量超额）→ refresh 收敛到 MAX，多的销毁。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    handlers = {}
+    for did in ("c1", "c2", "c3"):
+        h = MagicMock()
+        h.destroy = AsyncMock()
+        h.update_camera_info = AsyncMock()
+        handlers[did] = h
+        proxy._camera_img_managers[did] = h
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={did: _camera(did, home_id="H1") for did in ("c1", "c2", "c3")}
+    )
+
+    await proxy.refresh_cameras()
+
+    # 按 did 保留 c1/c2，c3 超额被销
+    handlers["c3"].destroy.assert_awaited_once()
+    assert "c3" not in proxy._camera_img_managers
+    assert "c1" in proxy._camera_img_managers
+    assert "c2" in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_offline_not_built(_scope_proxy_env):
+    """离线相机不在投喂/拉流集 → 不建 manager（Phase 1：拉流=投喂，离线不建）。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1"),  # 在线
+            "c2": _camera("c2", home_id="H1", online=False, lan_online=False),  # 离线
+        }
+    )
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    assert miot_client.create_camera_instance_async.call_count == 1  # 只为在线的 c1
     assert "c2" not in proxy._camera_img_managers
 
 

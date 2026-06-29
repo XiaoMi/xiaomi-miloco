@@ -74,6 +74,45 @@ def is_home_allowed(kv_repo: KVRepo, home_id: str | None) -> bool:
     return home_id is not None and home_id in allow
 
 
+def select_active_camera_dids(
+    kv_repo: KVRepo,
+    cameras: dict[str, T],
+    *,
+    online_only: bool = True,
+    require_lan: bool = True,
+    cap: bool = True,
+) -> list[str]:
+    """决定「哪些相机该投喂/拉流」的**单一口径**——感知投喂(camera_adapter)与 native
+    会话建销(refresh_cameras)共用此函数，避免两套判定漂移。
+
+    过滤：在启用家庭内 + 未拉黑 +（``online_only`` 时）在线。``require_lan=True`` 看
+    ``online and lan_online``；``False`` 只看云端 ``online``（放过 lan_online 陈旧的卡死态
+    相机）。``cap=True`` 时按 did 升序确定性截断到 ``MAX_ENABLED_CAMERAS``——投喂/拉流
+    上限的唯一兜底，与 ``service.toggle_camera`` 的主动 enable 校验互补；不写 KV、不碰
+    黑名单。``cap=False`` 用于「列全集」语义（如 rule target 校验）。
+
+    返回 did 列表：未截断为输入顺序，截断为 did 升序前 N。``cameras`` 的 value 需带
+    ``home_id`` / ``online`` / ``lan_online`` 属性。
+    """
+    denied = denied_camera_dids(kv_repo)
+    result: list[str] = []
+    for did, info in cameras.items():
+        if did in denied:
+            continue
+        if not is_home_allowed(kv_repo, getattr(info, "home_id", None)):
+            continue
+        online = bool(getattr(info, "online", False))
+        lan = bool(getattr(info, "lan_online", False))
+        connectable = (online and lan) if require_lan else online
+        if online_only and not connectable:
+            continue
+        result.append(did)
+    if not cap or len(result) <= MAX_ENABLED_CAMERAS:
+        return result
+    # 超限：按 did 升序确定性截断（同一账号每轮选同一批）。
+    return sorted(result)[:MAX_ENABLED_CAMERAS]
+
+
 def filter_by_home(kv_repo: KVRepo, items: dict[str, T]) -> dict[str, T]:
     """按 ``home_id`` 过滤 dict（value 需带 ``home_id`` 属性）。空启用集表示未选择家庭。"""
     allow = allowed_home_ids(kv_repo)

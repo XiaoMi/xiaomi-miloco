@@ -36,7 +36,7 @@ from pydantic_core import to_jsonable_python
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
-from miloco.miot.filter import denied_camera_dids, is_home_allowed
+from miloco.miot.filter import is_home_allowed, select_active_camera_dids
 from miloco.miot.mips_listeners import (
     BindEventListener,
     CameraStateEventListener,
@@ -636,17 +636,19 @@ class MiotProxy:
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
-                # manager(native PPCS 会话+解码线程)生命周期跟随 scope：home 未启用
-                # 或相机被关(in_use=false → 进黑名单)的相机不建、已建的销，关了就停拉流。
-                denied = denied_camera_dids(self._kv_repo)
+                # manager(native PPCS 会话+解码线程)的建/销与感知投喂**共用同一口径**
+                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线、按 did 截到上限。
+                # 拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/超额的相机都不在
+                # active 里 → 不建/已建则销，真正停掉 native 会话与解码（含 over-cap 收敛）。
+                active = set(select_active_camera_dids(self._kv_repo, cameras))
+                logger.debug(
+                    "Camera streaming set: active=%s managers=%s",
+                    sorted(active),
+                    sorted(self._camera_img_managers),
+                )
                 for camera_did in cameras.keys():
                     if camera_did not in self._camera_img_managers:
-                        if (
-                            not is_home_allowed(
-                                self._kv_repo, cameras[camera_did].home_id
-                            )
-                            or camera_did in denied
-                        ):
+                        if camera_did not in active:
                             continue
                         manager = await self._create_camera_img_manager(
                             cameras[camera_did]
@@ -657,26 +659,29 @@ class MiotProxy:
                             await self._miot_client.register_lan_device_changed_async(
                                 did=camera_did, callback=self._on_lan_device_changed
                             )
+                            # 起停相机 native 会话直接影响相机有限的并发流名额，
+                            # 用 WARNING 便于运维一眼追踪拉流生命周期。
+                            logger.warning(
+                                "Camera native stream started: %s", camera_did
+                            )
                     else:
                         await self._camera_img_managers[camera_did].update_camera_info(
                             cameras[camera_did]
                         )
 
                 for camera_did in list(self._camera_img_managers.keys()):
-                    cam = cameras.get(camera_did)
-                    # 三种情况销毁 manager：相机从账号消失 / 移出当前家庭 / 被关闭。
-                    # 销毁即真正 miot_camera_stop + decoder.stop()，停掉 native 会话与解码。
-                    should_destroy = (
-                        cam is None
-                        or not is_home_allowed(self._kv_repo, cam.home_id)
-                        or camera_did in denied
-                    )
+                    # 不在 active 集（账号消失 / 移出家庭 / 被关 / 离线 / 超额）→ 销毁，
+                    # 真正 miot_camera_stop + decoder.stop()，停掉 native 会话与解码。
+                    should_destroy = camera_did not in active
                     if should_destroy:
                         await self._miot_client.unregister_lan_device_changed_async(
                             did=camera_did
                         )
                         await self._camera_img_managers[camera_did].destroy()
                         del self._camera_img_managers[camera_did]
+                        logger.warning(
+                            "Camera native stream stopped: %s", camera_did
+                        )
                     else:
                         logger.debug(
                             "Manager %s kept alive (in_use & in scope)", camera_did
