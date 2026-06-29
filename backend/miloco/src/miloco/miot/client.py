@@ -22,6 +22,7 @@ from miot.types import (
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
+    MIoTDeviceStateEvent,
     MIoTGetPropertyParam,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
@@ -38,6 +39,7 @@ from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import is_home_allowed
 from miloco.miot.mips_listeners import (
     BindEventListener,
+    CameraStateEventListener,
     DeviceMetaEventListener,
     SceneEventListener,
 )
@@ -130,12 +132,24 @@ class MiotProxy:
 
         # Listener for home-level scene changes (rename/delete/edit). Debounces
         # then refreshes the scene list.
-        self._scene_listener = SceneEventListener(
-            refresh_scenes=self.refresh_scenes
-        )
+        self._scene_listener = SceneEventListener(refresh_scenes=self.refresh_scenes)
         # Home ids whose home/{home_id}/scene/{rename,delete,edit} topics this
         # proxy intends to subscribe. Mirrors _subscribed_meta_dids but per home.
         self._subscribed_scene_home_ids: set[str] = set()
+
+        # Listener for device-level cloud online/offline state. Each event
+        # updates _camera_info_dict[did].online directly (in
+        # _on_camera_state_changed_event); this listener is the trailing
+        # reconciliation that re-fetches the authoritative cloud status once
+        # the burst settles.
+        self._camera_state_listener = CameraStateEventListener(
+            refresh_camera_online_status=self.refresh_camera_online_status
+        )
+        # Dids whose device/{did}/state/{online,offline} topics this proxy
+        # intends to subscribe. Mirrors _subscribed_meta_dids but for cloud
+        # online/offline state; drives the diff in
+        # _sync_camera_state_subscriptions.
+        self._subscribed_state_dids: set[str] = set()
 
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
@@ -209,20 +223,26 @@ class MiotProxy:
             welcome=self._welcome_service.welcome,
         )
         self._subscribed_meta_dids = set()
-        self._scene_listener = SceneEventListener(
-            refresh_scenes=self.refresh_scenes
-        )
+        self._scene_listener = SceneEventListener(refresh_scenes=self.refresh_scenes)
         self._subscribed_scene_home_ids = set()
+        self._camera_state_listener = CameraStateEventListener(
+            refresh_camera_online_status=self.refresh_camera_online_status
+        )
+        self._subscribed_state_dids = set()
         self._miot_client.register_user_bind_callback(self._on_user_bind_event)
         # Device meta change (rename/hr_change): refresh the list so the new
         # name/room/home propagates. Kept off the bind welcome path.
         self._miot_client.register_device_meta_changed_callback(
             self._on_device_meta_changed_event
         )
-        # Home scene change (rename/delete/edit): refresh the scene list.
-        self._miot_client.register_scene_changed_callback(
-            self._on_scene_changed_event
+        # Device cloud online/offline state: update the cached `online` field
+        # directly (event-driven recovery for cameras that went stale across a
+        # backend restart), plus a trailing reconciliation.
+        self._miot_client.register_device_state_changed_callback(
+            self._on_camera_state_changed_event
         )
+        # Home scene change (rename/delete/edit): refresh the scene list.
+        self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
 
         await self._miot_client.init_async()
 
@@ -252,6 +272,7 @@ class MiotProxy:
         self._bind_listener.deinit()
         self._meta_listener.deinit()
         self._scene_listener.deinit()
+        self._camera_state_listener.deinit()
 
         # 2. Destroy all camera_img_managers
         for mgr in self._camera_img_managers.values():
@@ -283,6 +304,7 @@ class MiotProxy:
         self._scene_info_dict = {}
         self._user_info = None
         self._subscribed_meta_dids = set()
+        self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
@@ -321,9 +343,7 @@ class MiotProxy:
                 result["errors"].append(f"{label}: {e}")
 
         if result["errors"]:
-            logger.warning(
-                "MiOT info refresh completed with errors: %s", result
-            )
+            logger.warning("MiOT info refresh completed with errors: %s", result)
         else:
             logger.info("MiOT info refresh completed: %s", result)
         return result
@@ -527,7 +547,8 @@ class MiotProxy:
             raise
 
     async def _create_camera_img_manager(
-        self, camera_info: MIoTCameraInfo,
+        self,
+        camera_info: MIoTCameraInfo,
     ) -> CameraVisionHandler | None:
         # scope 不影响 manager 的建立——watch 视频流需要 camera instance 无论 inUse 状态。
         # toggle_scope 只改 KV,不触发 refresh_cameras,所以这里只在启动/摄像头首次发现时调用,
@@ -594,9 +615,7 @@ class MiotProxy:
             await self.refresh_devices()
         return self._device_info_dict
 
-    async def _on_lan_device_changed(
-        self, did: str, info: MIoTLanDeviceInfo
-    ) -> None:
+    async def _on_lan_device_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         # refresh_cameras deep-copies SDK state, so post-init lan_online
         # changes only reach _camera_info_dict via this hook.
         cam = self._camera_info_dict.get(did)
@@ -620,7 +639,9 @@ class MiotProxy:
                 self._camera_info_dict = cameras
                 for camera_did in cameras.keys():
                     if camera_did not in self._camera_img_managers:
-                        if not is_home_allowed(self._kv_repo, cameras[camera_did].home_id):
+                        if not is_home_allowed(
+                            self._kv_repo, cameras[camera_did].home_id
+                        ):
                             continue
                         manager = await self._create_camera_img_manager(
                             cameras[camera_did]
@@ -647,7 +668,10 @@ class MiotProxy:
                         del self._camera_img_managers[camera_did]
                     else:
                         # cam 仍在账号里,manager 保活(无论 scope 状态)。
-                        logger.debug("Manager %s kept alive for watch stream", camera_did)
+                        logger.debug(
+                            "Manager %s kept alive for watch stream", camera_did
+                        )
+                await self._sync_camera_state_subscriptions()
                 return cameras
 
             except Exception as e:
@@ -688,9 +712,7 @@ class MiotProxy:
                 return None
 
     @staticmethod
-    def _log_device_diff(
-        action: str, dev: MIoTDeviceInfo | None, did: str
-    ) -> None:
+    def _log_device_diff(action: str, dev: MIoTDeviceInfo | None, did: str) -> None:
         """Pretty-print one ADDED/REMOVED device line with all relevant
         identity fields (name, home, room, model, online, sub-devices, etc.)
         so the operator can tell *which* physical device was bound/unbound
@@ -747,6 +769,27 @@ class MiotProxy:
         welcome = msg.event == "hr_change" and self._is_move_into_scope(msg)
         await self._meta_listener.on_event(msg, welcome=welcome)
 
+    async def _on_camera_state_changed_event(self, msg: MIoTDeviceStateEvent) -> None:
+        """Handle a device cloud online/offline state push.
+
+        Updates the cached ``online`` field of the matching camera directly
+        from the event (online→True / offline→False), mirroring how
+        ``_on_lan_device_changed`` updates ``lan_online``. No cloud re-fetch
+        here — the authoritative reconciliation is deferred to the trailing
+        debounce (refresh_camera_online_status once the burst settles). Non-
+        camera devices are ignored (their state events carry no camera info).
+        """
+        cam = self._camera_info_dict.get(msg.did)
+        if cam is not None:
+            cam.online = msg.event == "online"
+            logger.info(
+                "camera cloud state updated: did=%s online=%s (event=%s)",
+                msg.did,
+                cam.online,
+                msg.event,
+            )
+        await self._camera_state_listener.on_event(msg)
+
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an
         unmanaged one.
@@ -793,7 +836,9 @@ class MiotProxy:
         target = {did for did in self._device_info_dict if "/" not in did}
         skipped = [did for did in self._device_info_dict if "/" in did]
         if skipped:
-            logger.debug("device-meta: skipping %d did(s) with '/': %s", len(skipped), skipped)
+            logger.debug(
+                "device-meta: skipping %d did(s) with '/': %s", len(skipped), skipped
+            )
         to_add = target - self._subscribed_meta_dids
         to_remove = self._subscribed_meta_dids - target
         if not to_add and not to_remove:
@@ -823,6 +868,60 @@ class MiotProxy:
             len([d for d in added if d]),
             len([d for d in removed if d]),
             len(self._subscribed_meta_dids),
+        )
+
+    async def _sync_camera_state_subscriptions(self) -> None:
+        """Reconcile per-device cloud state (online/offline) subs to the
+        camera list.
+
+        Called at the tail of refresh_cameras (under _refresh_cameras_lock, so
+        the diff against _subscribed_state_dids is race-free). New dids are
+        subscribed, removed dids unsubscribed; both run concurrently and
+        per-did failures only log — they never abort the refresh. Mirrors
+        _sync_meta_subscriptions but scoped to cameras (we only care about
+        camera cloud online state).
+
+        Dids containing '/' (Huami/Zepp-bridged sub-devices) are skipped:
+        the '/' breaks the topic path AND the decoder regex, and the broker
+        rejects them with 0x87 — same rationale as _sync_meta_subscriptions.
+        """
+        target = {did for did in self._camera_info_dict if "/" not in did}
+        skipped = [did for did in self._camera_info_dict if "/" in did]
+        if skipped:
+            logger.debug(
+                "camera-state: skipping %d did(s) with '/': %s",
+                len(skipped),
+                skipped,
+            )
+        to_add = target - self._subscribed_state_dids
+        to_remove = self._subscribed_state_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            try:
+                await self._miot_client.sub_device_state_async(did)
+                return did
+            except Exception as e:
+                logger.error("subscribe device-state failed did=%s: %s", did, e)
+                return None
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_state_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-state failed did=%s: %s", did, e)
+            return did
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        self._subscribed_state_dids |= {d for d in added if d}
+        self._subscribed_state_dids -= {d for d in removed if d}
+        logger.info(
+            "camera-state subscriptions synced: +%d -%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            len(self._subscribed_state_dids),
         )
 
     async def _on_scene_changed_event(self, msg: MIoTSceneChangedEvent) -> None:
@@ -874,8 +973,7 @@ class MiotProxy:
         unsubscribed on the next sync.
         """
         target = {
-            h for h in self._collect_home_ids()
-            if is_home_allowed(self._kv_repo, h)
+            h for h in self._collect_home_ids() if is_home_allowed(self._kv_repo, h)
         }
         to_add = target - self._subscribed_scene_home_ids
         to_remove = self._subscribed_scene_home_ids - target
@@ -1002,9 +1100,7 @@ class MiotProxy:
             oauth_info = await self._miot_client.get_access_token_async(
                 code=code, state=state
             )
-            logger.info(
-                "Retrieved MIoT auth info, code: %s, state: %s", code, state
-            )
+            logger.info("Retrieved MIoT auth info, code: %s, state: %s", code, state)
             self.reset_miot_token_info(oauth_info)
             await self.refresh_miot_info()
             return oauth_info
@@ -1282,4 +1378,6 @@ class MiotProxy:
             if result:
                 logger.info("Token refresh completed successfully")
             else:
-                logger.error("Token refresh failed, re-login required: miloco-cli account bind")
+                logger.error(
+                    "Token refresh failed, re-login required: miloco-cli account bind"
+                )

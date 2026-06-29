@@ -27,15 +27,22 @@ import pytest
 from miloco.miot import mips_listeners as ml
 from miloco.miot.mips_listeners import (
     BindEventListener,
+    CameraStateEventListener,
     DeviceMetaEventListener,
     SceneEventListener,
 )
-from miot.types import MIoTDeviceBindEvent, MIoTSceneChangedEvent
+from miot.types import (
+    MIoTDeviceBindEvent,
+    MIoTDeviceStateEvent,
+    MIoTSceneChangedEvent,
+)
 
 
 def _device(did: str, name: str = "测试设备", room: str = "卧室", home: str = "测试家"):
     """Stub that quacks like MIoTDeviceInfo for the listener."""
-    return SimpleNamespace(did=did, name=name, home_id="H1", home_name=home, room_name=room)
+    return SimpleNamespace(
+        did=did, name=name, home_id="H1", home_name=home, room_name=room
+    )
 
 
 async def _wait_did(listener, did: str, *, timeout: float = 1.0):
@@ -96,7 +103,9 @@ def bind_env(monkeypatch):
 
 
 def _bind_evt(did: str, event: str = "bind") -> MIoTDeviceBindEvent:
-    return MIoTDeviceBindEvent(uid="42", event=event, did=did, raw={"uid": "42", "did": did})
+    return MIoTDeviceBindEvent(
+        uid="42", event=event, did=did, raw={"uid": "42", "did": did}
+    )
 
 
 @pytest.mark.asyncio
@@ -215,7 +224,9 @@ async def test_bind_on_event_after_deinit_is_ignored(bind_env):
 @pytest.mark.asyncio
 async def test_bind_event_with_empty_did_is_ignored(bind_env):
     env = bind_env
-    await env.listener.on_event(MIoTDeviceBindEvent(uid="42", event="bind", did=None, raw={}))
+    await env.listener.on_event(
+        MIoTDeviceBindEvent(uid="42", event="bind", did=None, raw={})
+    )
     assert env.listener._timers == {}
     await asyncio.sleep(0.1)
     assert env.refresh_calls == 0
@@ -229,9 +240,7 @@ async def test_bind_event_with_empty_did_is_ignored(bind_env):
 def meta_env(monkeypatch):
     """DeviceMetaEventListener with devices/cameras/scenes/welcome stubbed."""
     monkeypatch.setattr(ml, "META_DEBOUNCE_SEC", 0.05)
-    state = SimpleNamespace(
-        refresh_calls=0, camera_calls=0, scene_calls=0, welcomed=[]
-    )
+    state = SimpleNamespace(refresh_calls=0, camera_calls=0, scene_calls=0, welcomed=[])
 
     async def fake_refresh():
         state.refresh_calls += 1
@@ -259,7 +268,9 @@ def meta_env(monkeypatch):
 
 
 def _meta_evt(did: str, event: str = "rename") -> MIoTDeviceBindEvent:
-    return MIoTDeviceBindEvent(uid="42", event=event, did=did, raw={"uid": "42", "did": did})
+    return MIoTDeviceBindEvent(
+        uid="42", event=event, did=did, raw={"uid": "42", "did": did}
+    )
 
 
 @pytest.mark.parametrize("event", ["rename", "hr_change"])
@@ -374,7 +385,9 @@ def scene_env(monkeypatch):
 
 
 def _scene_evt(home_id: str, event: str = "edit", scene_id: str = "sc-1"):
-    return MIoTSceneChangedEvent(home_id=home_id, event=event, scene_id=scene_id, raw={})
+    return MIoTSceneChangedEvent(
+        home_id=home_id, event=event, scene_id=scene_id, raw={}
+    )
 
 
 @pytest.mark.parametrize("event", ["rename", "delete", "edit"])
@@ -409,5 +422,89 @@ async def test_scene_deinit_cancels_pending_refresh(scene_env):
     assert env.refresh_calls == 0
     # A post-deinit event is ignored (listener fenced).
     await env.listener.on_event(_scene_evt("home-2", event="delete"))
+    await asyncio.sleep(0.1)
+    assert env.refresh_calls == 0
+
+
+# ================================================ Camera state (global debounce)
+
+
+@pytest.fixture
+def camera_state_env(monkeypatch):
+    """CameraStateEventListener with refresh_camera_online_status stubbed and
+    a tight window. Each event already updated the cached `online` field in
+    MiotProxy; this listener only does the trailing reconciliation."""
+    monkeypatch.setattr(ml, "CAMERA_STATE_DEBOUNCE_SEC", 0.05)
+    state = SimpleNamespace(refresh_calls=0)
+
+    async def fake_refresh():
+        state.refresh_calls += 1
+
+    state.listener = CameraStateEventListener(refresh_camera_online_status=fake_refresh)
+    return state
+
+
+def _state_evt(did: str, event: str = "online") -> MIoTDeviceStateEvent:
+    return MIoTDeviceStateEvent(
+        did=did, event=event, raw={"device_id": did, "event": event}
+    )
+
+
+@pytest.mark.parametrize("event", ["online", "offline"])
+@pytest.mark.asyncio
+async def test_camera_state_single_refreshes_after_debounce(camera_state_env, event):
+    env = camera_state_env
+    await env.listener.on_event(_state_evt("cam-1", event=event))
+    assert env.refresh_calls == 0  # before the window settles
+
+    await _wait_global(env.listener)
+    assert env.refresh_calls == 1  # trailing reconciliation fired
+
+
+@pytest.mark.asyncio
+async def test_camera_state_burst_collapses_to_single_refresh(camera_state_env):
+    """A flapping camera (online→offline→online) within the window triggers
+    only one reconciliation, re-armed on each event."""
+    env = camera_state_env
+    await env.listener.on_event(_state_evt("cam-1", event="online"))
+    await env.listener.on_event(_state_evt("cam-1", event="offline"))
+    await env.listener.on_event(_state_evt("cam-1", event="online"))
+
+    await _wait_global(env.listener)
+    assert env.refresh_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_camera_state_multi_did_collapses_globally(camera_state_env):
+    """State events from different dids share the single global timer — one
+    reconciliation covers the whole burst."""
+    env = camera_state_env
+    await env.listener.on_event(_state_evt("cam-1", event="online"))
+    await env.listener.on_event(_state_evt("cam-2", event="offline"))
+
+    await _wait_global(env.listener)
+    assert env.refresh_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_camera_state_deinit_cancels_pending_refresh(camera_state_env):
+    env = camera_state_env
+    await env.listener.on_event(_state_evt("cam-1"))
+    env.listener.deinit()
+
+    await asyncio.sleep(0.1)
+    assert env.refresh_calls == 0
+    # A post-deinit event is ignored (listener fenced).
+    await env.listener.on_event(_state_evt("cam-2", event="offline"))
+    await asyncio.sleep(0.1)
+    assert env.refresh_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_camera_state_event_after_deinit_is_ignored(camera_state_env):
+    env = camera_state_env
+    env.listener.deinit()
+    await env.listener.on_event(_state_evt("cam-1"))
+    assert env.listener._timers == {}
     await asyncio.sleep(0.1)
     assert env.refresh_calls == 0

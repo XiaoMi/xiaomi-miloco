@@ -17,6 +17,7 @@ Connection params:
   password   = OAuth2 access_token  (rotated via update_access_token_async)
   keepalive  = 60s
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -46,6 +47,7 @@ from .const import (
 )
 from .types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsConnectionError,
     MipsSubscribeRejectedError,
@@ -65,13 +67,15 @@ _SUBACK_SUCCESS_CODES = frozenset({0x00, 0x01, 0x02})
 
 # SUBACK rejections that retry can't fix; other failures (incl. timeout) are
 # kept in _subs so the next reconnect retries automatically.
-_PERMANENT_SUBACK_FAILURES = frozenset({
-    0x87,  # Not authorized (ACL)
-    0x8F,  # Topic filter invalid
-    0x9E,  # Shared subscriptions not supported
-    0xA1,  # Subscription identifiers not supported
-    0xA2,  # Wildcard subscriptions not supported
-})
+_PERMANENT_SUBACK_FAILURES = frozenset(
+    {
+        0x87,  # Not authorized (ACL)
+        0x8F,  # Topic filter invalid
+        0x9E,  # Shared subscriptions not supported
+        0xA1,  # Subscription identifiers not supported
+        0xA2,  # Wildcard subscriptions not supported
+    }
+)
 
 # Account-level g_op bind/unbind: `user/{uid}/g_op/{bind,unbind}`.
 _TOPIC_USER_OP = re.compile(r"^user/([^/]+)/g_op/(bind|unbind)$")
@@ -95,14 +99,23 @@ _TOPIC_HOME_SCENE = re.compile(
     r"^home/([^/]+)/scene/(" + "|".join(_HOME_SCENE_OPS) + r")$"
 )
 
+# Device-level cloud online/offline state: `device/{did}/state/{online,
+# offline}`. did = group(1), event = group(2). Subscribed as EXACT leaf
+# topics (one per op) — the broker ACL rejects the `device/{did}/state/#`
+# wildcard with 0x87 Not authorized, same as the g_op/# case above. The
+# Literal in MIoTDeviceStateEvent.event must stay in sync with these ops.
+_DEVICE_STATE_OPS = ("online", "offline")
+_TOPIC_DEVICE_STATE = re.compile(
+    r"^device/([^/]+)/state/(" + "|".join(_DEVICE_STATE_OPS) + r")$"
+)
+
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
 # decoded message object and may be sync or async — both are dispatched on the
 # main asyncio loop.
 BindHandler = Callable[[MIoTDeviceBindEvent], Union[None, Awaitable[None]]]
-SceneChangedHandler = Callable[
-    [MIoTSceneChangedEvent], Union[None, Awaitable[None]]
-]
+SceneChangedHandler = Callable[[MIoTSceneChangedEvent], Union[None, Awaitable[None]]]
+DeviceStateHandler = Callable[[MIoTDeviceStateEvent], Union[None, Awaitable[None]]]
 MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe (no awaiter, e.g. the reconnect-time
 # re-issue in _on_connect) fails. Arg tuple = (topic, reason_code,
@@ -110,9 +123,7 @@ MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # authorized); -1 if the local subscribe() call itself failed before
 # reaching the broker. First-time subscribes have an awaiter and raise
 # MipsSubscribeRejectedError directly — those don't go through this handler.
-SubscribeErrorHandler = Callable[
-    [tuple[str, int, str]], Union[None, Awaitable[None]]
-]
+SubscribeErrorHandler = Callable[[tuple[str, int, str]], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe succeeds (SUBACK with success code).
 # Arg = topic string. Symmetric with SubscribeErrorHandler — allows the
 # caller to clear a stale error flag on successful reconnect resubscribe.
@@ -282,9 +293,7 @@ class MIoTMipsCloud:
         except Exception as e:
             self._connect_future = None
             self._mqtt = None
-            raise MipsConnectionError(
-                f"mips_cloud TCP/TLS connect failed: {e}"
-            ) from e
+            raise MipsConnectionError(f"mips_cloud TCP/TLS connect failed: {e}") from e
 
         mqtt.loop_start()
 
@@ -374,9 +383,7 @@ class MIoTMipsCloud:
             except ValueError:
                 pass
 
-    def register_subscribe_error_handler(
-        self, handler: SubscribeErrorHandler
-    ) -> None:
+    def register_subscribe_error_handler(self, handler: SubscribeErrorHandler) -> None:
         """Register a callback for unattended-subscribe failures.
 
         The handler fires with (topic, reason_code, reason_string) when an
@@ -420,9 +427,7 @@ class MIoTMipsCloud:
 
     # ------------------------------------------------------- public sub APIs
 
-    async def sub_user_bind_async(
-        self, uid: str, handler: BindHandler
-    ) -> None:
+    async def sub_user_bind_async(self, uid: str, handler: BindHandler) -> None:
         """Subscribe to `user/{uid}/g_op/bind`.
 
         SUBACK rejection raises MipsSubscribeRejectedError. The caller is
@@ -431,9 +436,7 @@ class MIoTMipsCloud:
         topic = f"user/{uid}/g_op/bind"
         await self._subscribe_async(topic, handler, self._make_bind_decoder("bind"))
 
-    async def sub_user_unbind_async(
-        self, uid: str, handler: BindHandler
-    ) -> None:
+    async def sub_user_unbind_async(self, uid: str, handler: BindHandler) -> None:
         topic = f"user/{uid}/g_op/unbind"
         await self._subscribe_async(topic, handler, self._make_bind_decoder("unbind"))
 
@@ -455,9 +458,7 @@ class MIoTMipsCloud:
         """
         decoder = self._make_device_meta_decoder()
         for op in _DEVICE_META_OPS:
-            await self._subscribe_async(
-                f"device/{did}/g_op/{op}", handler, decoder
-            )
+            await self._subscribe_async(f"device/{did}/g_op/{op}", handler, decoder)
 
     async def unsub_device_meta_changed_async(self, did: str) -> None:
         for op in _DEVICE_META_OPS:
@@ -475,13 +476,30 @@ class MIoTMipsCloud:
         """
         decoder = self._make_scene_decoder()
         for op in _HOME_SCENE_OPS:
-            await self._subscribe_async(
-                f"home/{home_id}/scene/{op}", handler, decoder
-            )
+            await self._subscribe_async(f"home/{home_id}/scene/{op}", handler, decoder)
 
     async def unsub_home_scene_changed_async(self, home_id: str) -> None:
         for op in _HOME_SCENE_OPS:
             await self._unsubscribe_async(f"home/{home_id}/scene/{op}")
+
+    async def sub_device_state_async(
+        self, did: str, handler: DeviceStateHandler
+    ) -> None:
+        """Subscribe a device's state topics: `device/{did}/state/{online,
+        offline}`.
+
+        One SUBSCRIBE per exact op leaf — the broker ACL rejects the
+        `device/{did}/state/#` wildcard (same as the g_op/# case). Ops share
+        one decoder. SUBACK rejection on any op raises
+        MipsSubscribeRejectedError.
+        """
+        decoder = self._make_device_state_decoder()
+        for op in _DEVICE_STATE_OPS:
+            await self._subscribe_async(f"device/{did}/state/{op}", handler, decoder)
+
+    async def unsub_device_state_async(self, did: str) -> None:
+        for op in _DEVICE_STATE_OPS:
+            await self._unsubscribe_async(f"device/{did}/state/{op}")
 
     # ------------------------------------------------------- subscribe core
 
@@ -556,9 +574,13 @@ class MIoTMipsCloud:
                 _LOGGER.error(
                     "mips_cloud subscribe (after reconnect) REJECTED "
                     "topic=%s code=0x%02x reason=%s",
-                    exc.topic, exc.reason_code, exc.reason_string,
+                    exc.topic,
+                    exc.reason_code,
+                    exc.reason_string,
                 )
-                self._fire_subscribe_error(exc.topic, exc.reason_code, exc.reason_string)
+                self._fire_subscribe_error(
+                    exc.topic, exc.reason_code, exc.reason_string
+                )
             elif isinstance(exc, MipsSubscribeTimeoutError):
                 _LOGGER.error(
                     "mips_cloud subscribe (after reconnect) SUBACK timeout topic=%s",
@@ -569,7 +591,8 @@ class MIoTMipsCloud:
                 _LOGGER.error(
                     "mips_cloud subscribe (after reconnect) failed unexpectedly "
                     "topic=%s: %s",
-                    topic, exc,
+                    topic,
+                    exc,
                 )
                 self._fire_subscribe_error(topic, -1, f"subscribe failed: {exc}")
         else:
@@ -625,9 +648,7 @@ class MIoTMipsCloud:
         with self._subs_lock:
             active = list(self._subs.values())
         for sub in active:
-            self._main_loop.call_soon_threadsafe(
-                self._spawn_resubscribe, sub
-            )
+            self._main_loop.call_soon_threadsafe(self._spawn_resubscribe, sub)
 
         self._fire_connect_future(None)
         self._dispatch_state_handlers(True)
@@ -636,7 +657,11 @@ class MIoTMipsCloud:
         """Spawn an unattended resubscribe task. Called via call_soon_threadsafe."""
         asyncio.create_task(
             self._subscribe_async(
-                sub.topic, sub.handler, sub.decoder, sub.qos, unattended=True,
+                sub.topic,
+                sub.handler,
+                sub.decoder,
+                sub.qos,
+                unattended=True,
             )
         )
 
@@ -815,6 +840,31 @@ class MIoTMipsCloud:
                 home_id=home_id,
                 event=op,  # type: ignore[arg-type]  # op ∈ {rename,delete,edit}
                 scene_id=str(scene_id) if scene_id is not None else None,
+                raw=raw if isinstance(raw, dict) else {},
+                timestamp_ms=_now_ms(),
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_device_state_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDeviceStateEvent]
+    ]:
+        # Device-level cloud online/offline: did + event come from the topic;
+        # the payload is undocumented and kept verbatim in `raw`. Only the
+        # exact op leaves are subscribed (no `#` wildcard), so a non-matching
+        # topic should never arrive — the `if not m` guard is purely
+        # defensive.
+        def decode(topic: str, payload: bytes) -> Optional[MIoTDeviceStateEvent]:
+            m = _TOPIC_DEVICE_STATE.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            op = m.group(2)  # online | offline
+            raw = _parse_json_payload(payload) or {}
+            return MIoTDeviceStateEvent(
+                did=did,
+                event=op,  # type: ignore[arg-type]  # op ∈ {online,offline}
                 raw=raw if isinstance(raw, dict) else {},
                 timestamp_ms=_now_ms(),
             )
