@@ -837,7 +837,7 @@ class PerceptionEngine(BasePerceptionEngine):
                 contexts[did] = OmniContext(
                     rule_conditions=device_rules,
                     pending_speech=self._pending_speech.get(did),
-                    current_time=datetime.now().strftime("%H:%M:%S"),
+                    current_time=datetime.fromtimestamp(snapshot.start_timestamp / 1000).strftime("%H:%M:%S"),
                     room_name=room_name,
                 )
 

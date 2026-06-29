@@ -95,7 +95,7 @@ class TestBuildSpeechesText:
         )
         text = build_speeches_text([i])
         assert "来源：客厅的小米C700" in text
-        assert "时间：20:42:28" in text
+        assert "时间：20:42:25" in text
 
 
 class TestBuildSuggestionsText:

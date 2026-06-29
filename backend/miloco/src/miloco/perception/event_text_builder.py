@@ -31,11 +31,11 @@ HEADER_MATCHED_RULE = "[感知引擎]规则提醒："
 
 
 def _fmt_time_field(time_window: str) -> str:
-    """竖排 key:value 用的纯时间字符串：去掉 [] 包裹，范围取结束时刻。"""
+    """竖排 key:value 用的纯时间字符串：去掉 [] 包裹，取窗口开始时刻（与注入 agent 的 current_time 对齐）。"""
     if not time_window:
         return ""
     tw = time_window.strip("[]")
-    return tw.split("-")[-1] if "-" in tw else tw
+    return tw.split("-")[0] if "-" in tw else tw
 
 
 def _fmt_source_field(
