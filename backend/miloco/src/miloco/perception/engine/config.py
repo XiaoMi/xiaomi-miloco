@@ -36,7 +36,10 @@ class GateConfig:
     speech_vad_min_speech_chunks: int = 3  # 需 >= 此数的 512 样本帧过阈才判有人声(抗单次咔哒尖峰)
     # visual 滞回时长(秒)。visual 最近通过过、距今 <= 此值时,本窗 visual
     # 不通过也强制生成 packet 并打 hold 标志。0 = 关闭。
-    hold_duration_sec: float = 360.0
+    # 默认 90s:过长(如 6min)在画面间歇有变化的场景会持续刷新 last_visual_pass_ts、
+    # hold 窗反复续命,期间纯静默窗也被拉起跑下游,浪费 omni 调用。运维侧可在
+    # settings.yaml 的 perception.engine.gate.hold_duration_sec 覆盖。
+    hold_duration_sec: float = 90.0
 
 
 @dataclass
