@@ -372,38 +372,18 @@ EOF
   | jq -r '"https://github.com/XiaoMi/xiaomi-miloco/pull/'"$PR_ID"'#issuecomment-\(.id)"'
 ```
 
-#### `--ci` 模式：edit 现有 review-pr-ci comment，没有则 create
+#### `--ci` 模式：写审查结果到文件，由 gate.sh 代发 PR comment
 
-无需用户确认，直接执行。通过 body 起首的标记行 `<!-- review-pr-ci -->` 识别 review-pr-ci comment。
+沙箱禁止网络写操作（`gh api -X POST/PATCH` 被拒），改为写文件 `/tmp/review-body.md`，
+由调用方 `pr-review-gate.sh` 读取后代发 PR comment。审查内容与发布解耦。
 
-PR 上始终只保留 1 条 review-pr-ci comment——多次跑 `--ci` 不累积；他人对该 comment 的回复保留在原 thread 下，与最新 review 内容自然衔接。
-
-把 **Step 8 完整输出**（不要复制模板，直接复用上面已经生成的内容）前缀上一行 `<!-- review-pr-ci -->` 作为 body。heredoc 用 `'EOF'` 引号防止 shell 解释 review body 里的反引号 / `$`。
-
-**单次 bash 调用完成「查找 → 决策 → PATCH/POST」**——把分支判断压在同一个 shell 进程内（避免跨 Bash 工具调用时变量丢失）：
+无需用户确认，直接执行。把 **Step 8 完整输出**（不要复制模板，直接复用上面已经生成的内容）前缀上一行 `<!-- review-pr-ci -->` 写入文件。heredoc 用 `'EOF'` 引号防止 shell 解释 review body 里的反引号 / `$`。
 
 ```bash
-COMMENT_ID=$(gh api \
-  "/repos/XiaoMi/xiaomi-miloco/issues/$PR_ID/comments" --paginate \
-  | jq -rs 'add | [.[] | select((.body // "") | startswith("<!-- review-pr-ci -->")) | .id] | .[0] // ""')
-
-if [ -n "$COMMENT_ID" ]; then
-    gh api -X PATCH \
-      "/repos/XiaoMi/xiaomi-miloco/issues/comments/$COMMENT_ID" \
-      -f body="$(cat <<'EOF'
+cat > /tmp/review-body.md <<'EOF'
 <!-- review-pr-ci -->
 <这里粘贴 Step 8 的完整输出，不要重写一遍>
 EOF
-)" | jq -r '"https://github.com/XiaoMi/xiaomi-miloco/pull/'"$PR_ID"'#issuecomment-\(.id)"'
-else
-    gh api -X POST \
-      "/repos/XiaoMi/xiaomi-miloco/issues/$PR_ID/comments" \
-      -f body="$(cat <<'EOF'
-<!-- review-pr-ci -->
-<这里粘贴 Step 8 的完整输出，不要重写一遍>
-EOF
-)" | jq -r '"https://github.com/XiaoMi/xiaomi-miloco/pull/'"$PR_ID"'#issuecomment-\(.id)"'
-fi
 ```
 
 ### Step 10 — Cleanup（主动执行，仅默认 / `--post` 模式）

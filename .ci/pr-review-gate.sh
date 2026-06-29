@@ -31,13 +31,6 @@ git show "origin/main:.agents/commands/review-pr.md" \
   | sed "s#XiaoMi/xiaomi-miloco#${REPO}#g" \
   > .claude/commands/review-pr.md
 
-# 写死 Bash 子命令白名单到 .claude/settings.json。
-# dontAsk 模式下只有 permissions.allow 名单内的命令能执行，其余自拒；
-# 与 --tools "Bash,Read,Glob,Grep" 工具白名单形成纵深防御。
-cat > .claude/settings.json <<'SETEOF'
-{"permissions": {"allow": ["Bash(gh *)", "Bash(git *)", "Bash(md5sum *)", "Bash(diff *)"]}}
-SETEOF
-
 # 跑审查：主模型失败时降级到备用模型/endpoint 重试一次。
 # 主备均失败或审查结果未产出时直接阻断 merge，确保无审查覆盖的 PR 不能合入。
 # < /dev/null 必须：本脚本以 `git show ...:pr-review-gate.sh | bash` 方式（脚本走 bash stdin）调用，
@@ -62,6 +55,29 @@ fi
 if [ "$REVIEW_OK" -ne 1 ]; then
   echo "[FAIL] 审查执行失败（主备均不可用），阻断 merge"
   exit 1
+fi
+
+# pr-agent 在沙箱内无法写 PR comment（gh api -X POST/PATCH 被沙箱拦截）；
+# 审查结果已写入 /tmp/review-body.md，由本脚本代发。
+if [ -f /tmp/review-body.md ]; then
+  COMMENT_ID=$(gh api "/repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+    | jq -rs 'add | [.[] | select((.body // "") | startswith("<!-- review-pr-ci -->")) | .id] | .[0] // ""')
+  if [ -n "$COMMENT_ID" ]; then
+    if jq -Rs '{body: .}' /tmp/review-body.md \
+      | gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" --input - >/dev/null 2>&1; then
+      echo "[INFO] 已更新 review-pr-ci 评论"
+    else
+      echo "[WARN] 更新 review-pr-ci 评论失败"
+    fi
+  else
+    if jq -Rs '{body: .}' /tmp/review-body.md \
+      | gh api -X POST "/repos/$REPO/issues/$PR_NUMBER/comments" --input - >/dev/null 2>&1; then
+      echo "[INFO] 已创建 review-pr-ci 评论"
+    else
+      echo "[WARN] 创建 review-pr-ci 评论失败"
+    fi
+  fi
+  rm -f /tmp/review-body.md
 fi
 
 # 拉刚发布的 review-pr-ci 评论；gh api 瞬断时 || 回退空串，交给下方空值分支放行
