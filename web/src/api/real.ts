@@ -800,8 +800,21 @@ function humanDeviceStatus(
   const cat = mapCategory(d.category);
 
   if (cat === "lock") {
+    const stateProp = Object.entries(d.spec ?? {}).find(([, spec]) => spec.type_name === "door-state");
+    if (stateProp) {
+      const [iid, spec] = stateProp;
+      const value = values.get(iid);
+      const optionName = spec.value_list?.find((item) => item.value === value)?.name;
+      if (optionName?.includes("Unlocked") || optionName?.includes("Ajar") || optionName?.includes("Not Close")) {
+        return s.unlocked;
+      }
+      if (optionName?.includes("Locked") || optionName?.includes("Closed Properly")) {
+        return s.locked;
+      }
+    }
     const v = values.get("prop.2.1");
-    return v ? s.locked : s.unlocked;
+    if (typeof v === "boolean") return v ? s.locked : s.unlocked;
+    return s.connected;
   }
   if (mainOn === undefined) return s.connected;
   if (cat === "aircond") {
