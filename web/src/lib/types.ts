@@ -80,6 +80,8 @@ export interface Device {
   online: boolean;
   // 概览状态文本（"开着" / "26°C 制冷" / "睡眠档"）
   statusText: string;
+  // 机器可读状态分类；UI 颜色/逻辑不要依赖本地化文案。
+  statusKind: "offline" | "locked" | "unlocked" | "on" | "off" | "connected";
   // 是否危险设备（门锁/燃气/烟雾），需要二次确认
   dangerous: boolean;
   // 主开关 prop（单按钮直控；为 null 时只能从 sheet 进）
