@@ -25,7 +25,6 @@ import type {
   ScopeHome,
   Task,
   MiotEventMapping,
-  MiotEventRule,
   MiotEventSource,
   MiotEventTriggerLog,
   DevicePropertyKey,
@@ -863,11 +862,10 @@ export async function realListCameras(): Promise<PerceptionCamera[]> {
 
 export async function realGetAutomationCatalog(): Promise<{
   devices: MiotEventSource[];
-  scenes: MiotEventSource[];
   cameras: ScopeCamera[];
 }> {
   const r = await apiFetch<
-    Normal<{ devices: MiotEventSource[]; scenes: MiotEventSource[]; cameras: ScopeCamera[] }>
+    Normal<{ devices: MiotEventSource[]; cameras: ScopeCamera[] }>
   >("/api/automation/catalog");
   return r.data;
 }
@@ -904,18 +902,13 @@ export async function realDeleteMiotEventMapping(id: string): Promise<void> {
   });
 }
 
-export async function realListMiotEventRules(): Promise<MiotEventRule[]> {
-  const r = await apiFetch<Normal<MiotEventRule[]>>("/api/automation/rules");
-  return r.data;
-}
-
 export async function realListMiotEventLogs(): Promise<MiotEventTriggerLog[]> {
   const r = await apiFetch<Normal<MiotEventTriggerLog[]>>("/api/automation/logs");
   return r.data;
 }
 
 export async function realTestMiotEventTrigger(input: {
-  source_type: "device" | "scene";
+  source_type: "device";
   source_id: string;
   source_name: string;
   event_name?: string;
@@ -929,23 +922,6 @@ export async function realTestMiotEventTrigger(input: {
 }
 
 // ── 米家账号绑定 OAuth ────────────────────────────────────
-// ── Automation: create miot_event rule ─────────
-export async function realCreateMiotEventRule(input: {
-  task_id: string;
-  name: string;
-  source_ids: string[];
-  event_kinds: string[];
-  query: string;
-  property_filters: Record<string, string | import("@/lib/types").MiotPropertyFilterCondition>;
-  action_descriptions?: string[];
-}): Promise<{ rule_id: string }> {
-  const r = await apiFetch<Normal<{ rule_id: string }>>(
-    "/api/automation/rules",
-    { method: "POST", body: JSON.stringify(input) },
-  );
-  return r.data;
-}
-
 // ── Automation: device spec ───────────────────────────────
 export async function realFetchDeviceSpec(
   did: string,

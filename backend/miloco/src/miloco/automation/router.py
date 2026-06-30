@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from miloco.automation.schema import (
-    CreateMiotEventRuleRequest,
     MiotEventManualTriggerRequest,
     MiotEventMapping,
     MiotEventMappingUpdate,
@@ -17,7 +16,6 @@ from miloco.automation.schema import (
 from miloco.automation.translations import translate_miot_value_label
 from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
-from miloco.rule.schema import RuleTriggerType
 from miloco.schema.common_schema import NormalResponse
 
 logger = logging.getLogger(__name__)
@@ -262,9 +260,7 @@ async def test_trigger(
             source_name=request.source_name,
             home_id=request.home_id,
             room_name=request.room_name,
-            event_name=request.event_name or (
-                "device_prop" if request.source_type == "device" else "scene"
-            ),
+            event_name=request.event_name or "device_prop",
             changed_properties=request.changed_properties,
             occurred_at=time.time_ns() // 1_000_000,
             raw=request.model_dump(mode="json"),
@@ -276,33 +272,6 @@ async def test_trigger(
         pipeline=mgr.perception_service._pipeline,
     )
     return NormalResponse(code=0, message="ok", data=log_item)
-
-
-@router.post("/rules", response_model=NormalResponse, summary="Create miot_event rule with property filters")
-async def create_miot_event_rule(
-    request: CreateMiotEventRuleRequest,
-    current_user: str = Depends(verify_token),
-):
-    """Create a miot_event rule from the automation page.
-    Accepts a simplified payload with property_filters baked in."""
-    from miloco.manager import get_manager
-
-    mgr = get_manager()
-    service = mgr.automation_service
-    from miloco.rule.schema import Rule
-
-    payload = service.build_miot_event_rule_payload(
-        task_id=request.task_id,
-        name=request.name,
-        source_ids=request.source_ids,
-        event_kinds=request.event_kinds,
-        query=request.query,
-        property_filters=request.property_filters,
-        action_descriptions=request.action_descriptions,
-    )
-    rule = Rule.model_validate(payload)
-    rule_id = await mgr.rule_service.create_rule(rule)
-    return NormalResponse(code=0, message="created", data={"rule_id": rule_id})
 
 
 @router.get("/device-spec/{did}", response_model=NormalResponse, summary="Get device spec properties for automation filtering")
@@ -347,8 +316,3 @@ async def device_spec(did: str, current_user: str = Depends(verify_token)):
         return NormalResponse(code=500, message="device spec failed", data=None)
 
 
-@router.get("/rules", response_model=NormalResponse, summary="List miot_event rules")
-async def list_miot_event_rules(current_user: str = Depends(verify_token)):
-    rules = await manager().rule_service.get_all_rules(enabled_only=False)
-    data = [rule for rule in rules if rule.trigger_type == RuleTriggerType.MIOT_EVENT]
-    return NormalResponse(code=0, message="ok", data=data)

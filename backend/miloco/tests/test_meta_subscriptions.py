@@ -117,7 +117,6 @@ async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
             event_kinds=["event.2.1"],
         ),
         MiotEventMapping(source_type="device", source_id="C", enabled=False),
-        MiotEventMapping(source_type="scene", source_id="scene-1", enabled=True),
         MiotEventMapping(source_type="device", source_id="dev/skip", enabled=True),
         MiotEventMapping(source_type="device", source_id="missing", enabled=True),
     ]
@@ -166,7 +165,6 @@ async def test_sync_event_subscriptions_only_tracks_device_event_mappings(monkey
             enabled=True,
             event_kinds=["event.2.1"],
         ),
-        MiotEventMapping(source_type="scene", source_id="scene-1", enabled=True),
     ]
     fake_mgr = SimpleNamespace(
         automation_service=SimpleNamespace(list_mappings=lambda: mappings)

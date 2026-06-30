@@ -116,10 +116,17 @@ class AutomationService:
     def _load_mappings(self) -> list[MiotEventMapping]:
         raw = self._kv_repo.get(_KV_MAPPINGS, "[]") or "[]"
         try:
-            return [MiotEventMapping.model_validate(item) for item in json.loads(raw)]
+            loaded = json.loads(raw)
         except Exception as e:  # noqa: BLE001
             logger.error("Failed to load automation mappings: %s", e)
             return []
+        mappings: list[MiotEventMapping] = []
+        for item in loaded:
+            try:
+                mappings.append(MiotEventMapping.model_validate(item))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Skip invalid automation mapping: %s", e)
+        return mappings
 
     def _save_mappings(self, mappings: list[MiotEventMapping]) -> None:
         self._kv_repo.set(
@@ -148,7 +155,6 @@ class AutomationService:
 
     async def list_catalog(self, miot_service) -> MiotEventCatalog:
         devices = await miot_service.get_miot_device_list()
-        scenes = await miot_service.get_miot_scene_list()
         cameras = await miot_service.list_cameras_with_state()
         return MiotEventCatalog(
             devices=[
@@ -160,14 +166,6 @@ class AutomationService:
                     room_name=d.room_name,
                 )
                 for d in devices
-            ],
-            scenes=[
-                MiotEventSource(
-                    source_type="scene",
-                    source_id=s.scene_id,
-                    source_name=s.scene_name,
-                )
-                for s in scenes
             ],
             cameras=cameras,
         )
@@ -197,47 +195,6 @@ class AutomationService:
             self._save_mappings(mappings)
             return mapping
         raise ResourceNotFoundException(f"Mapping '{mapping_id}' not found")
-
-    def build_miot_event_rule_payload(
-        self,
-        task_id: str,
-        name: str,
-        source_ids: list[str],
-        event_kinds: list[str],
-        query: str,
-        property_filters: dict[str, Any],
-        action_descriptions: list[str] | None = None,
-    ) -> dict:
-        return {
-            "name": name,
-            "task_id": task_id,
-            "trigger_type": "miot_event",
-            "mode": "event",
-            "lifecycle": "permanent",
-            "enabled": True,
-            "condition": {
-                "perceive_device_ids": [],
-                "query": query,
-                "source_ids": source_ids,
-                "event_kinds": event_kinds,
-                "property_filters": property_filters,
-                "mapping_ids": [],
-                "use_global_mapping": True,
-            },
-            "actions": [],
-            "action_descriptions": action_descriptions or ["米家事件触发规则命中"],
-            "on_enter_actions": [],
-            "on_enter_desc": None,
-            "on_exit_actions": [],
-            "on_exit_desc": None,
-            "on_target_desc": None,
-            "terminate_when": None,
-            "exit_debounce_seconds": 60,
-            "duration_seconds": None,
-            "duration_ratio": None,
-            "created_at": None,
-            "updated_at": None,
-        }
 
     def delete_mapping(self, mapping_id: str) -> None:
         mappings = [m for m in self._load_mappings() if m.id != mapping_id]
@@ -552,37 +509,3 @@ class AutomationService:
             )
         return log_item
 
-    async def emit_scene_trigger(
-        self,
-        *,
-        home_id: str,
-        scene_id: str | None,
-        event_name: str,
-        raw: dict[str, Any],
-        miot_service,
-        perception_service,
-        rule_service,
-        meaningful_events_dao,
-        pipeline=None,
-    ) -> None:
-        if not scene_id:
-            return
-        scenes = await miot_service.get_miot_scene_list()
-        scene = next((item for item in scenes if item.scene_id == scene_id), None)
-        trigger = MiotEventTrigger(
-            source_type="scene",
-            source_id=scene_id,
-            source_name=scene.scene_name if scene else scene_id,
-            home_id=home_id,
-            event_name="scene",
-            occurred_at=now_ms(),
-            raw={"scene_event": event_name, **raw},
-        )
-        await self.handle_trigger(
-            trigger=trigger,
-            perception_service=perception_service,
-            rule_service=rule_service,
-            miot_service=miot_service,
-            meaningful_events_dao=meaningful_events_dao,
-            pipeline=pipeline,
-        )

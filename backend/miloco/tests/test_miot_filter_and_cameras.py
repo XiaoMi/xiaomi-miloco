@@ -268,7 +268,7 @@ async def test_list_homes_auto_selects_first_when_empty():
 
 
 @pytest.mark.asyncio
-async def test_trigger_scene_emits_automation_trigger():
+async def test_trigger_scene_only_runs_manual_scene():
     scene = MIoTManualSceneInfo(
         scene_id="scene-1",
         scene_name="回家模式",
@@ -278,17 +278,10 @@ async def test_trigger_scene_emits_automation_trigger():
     )
     svc = _make_service()
     svc._miot_proxy.get_all_scenes.return_value = {"scene-1": scene}
-    emit = AsyncMock()
-    svc._emit_scene_automation_trigger = emit  # type: ignore[method-assign]
 
     assert await svc.trigger_scene("scene-1") is True
 
     svc._miot_proxy.execute_miot_scene.assert_awaited_once_with("scene-1")
-    emit.assert_awaited_once_with(
-        scene,
-        event_name="manual_trigger",
-        raw={"source": "miot_scene_trigger_api"},
-    )
 
 
 @pytest.mark.asyncio

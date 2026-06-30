@@ -38,7 +38,6 @@ import type {
   Task,
   MiotEventMapping,
   MiotPropertyFilterCondition,
-  MiotEventRule,
   MiotEventSource,
   MiotEventTriggerLog,
   DevicePropertyKey,
@@ -303,7 +302,6 @@ export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> 
 
 export async function getAutomationCatalog(): Promise<{
   devices: MiotEventSource[];
-  scenes: MiotEventSource[];
   cameras: ScopeCamera[];
 }> {
   return impl.realGetAutomationCatalog();
@@ -330,16 +328,12 @@ export async function deleteMiotEventMapping(id: string): Promise<void> {
   return impl.realDeleteMiotEventMapping(id);
 }
 
-export async function listMiotEventRules(): Promise<MiotEventRule[]> {
-  return impl.realListMiotEventRules();
-}
-
 export async function listMiotEventLogs(): Promise<MiotEventTriggerLog[]> {
   return impl.realListMiotEventLogs();
 }
 
 export async function testMiotEventTrigger(input: {
-  source_type: "device" | "scene";
+  source_type: "device";
   source_id: string;
   source_name: string;
   event_name?: string;
@@ -364,20 +358,6 @@ export async function patchRulePropertyFilters(
     condition: { property_filters: propertyFilters },
   });
 }
-
-export async function createMiotEventRule(input: {
-  task_id: string;
-  name: string;
-  source_ids: string[];
-  event_kinds: string[];
-  query: string;
-  property_filters: Record<string, string | MiotPropertyFilterCondition>;
-  action_descriptions?: string[];
-}): Promise<{ rule_id: string }> {
-  return impl.realCreateMiotEventRule(input);
-}
-
-
 
 // ── 让它休息 / 唤醒 ────────────────────────────────────────
 // backend 当前只有 stop/start 两态，永久暂停直到手动唤醒，不支持定时恢复。

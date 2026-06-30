@@ -12,7 +12,7 @@ class MiotPropertyFilterCondition(BaseModel):
 
 class MiotEventTrigger(BaseModel):
     trigger_kind: str = Field(default="miot_event")
-    source_type: Literal["device", "scene"] = Field(...)
+    source_type: Literal["device"] = Field(...)
     source_id: str = Field(...)
     source_name: str = Field(default="")
     home_id: str | None = Field(default=None)
@@ -24,7 +24,7 @@ class MiotEventTrigger(BaseModel):
 
 
 class MiotEventSource(BaseModel):
-    source_type: Literal["device", "scene"] = Field(...)
+    source_type: Literal["device"] = Field(...)
     source_id: str = Field(...)
     source_name: str = Field(...)
     home_id: str | None = Field(default=None)
@@ -33,7 +33,7 @@ class MiotEventSource(BaseModel):
 
 class MiotEventMapping(BaseModel):
     id: str = Field(default="")
-    source_type: Literal["device", "scene"] = Field(...)
+    source_type: Literal["device"] = Field(...)
     source_id: str = Field(...)
     source_name_snapshot: str = Field(default="")
     camera_dids: list[str] = Field(default_factory=list)
@@ -49,7 +49,7 @@ class MiotEventMapping(BaseModel):
 
 
 class MiotEventMappingUpdate(BaseModel):
-    source_type: Literal["device", "scene"] | None = Field(default=None)
+    source_type: Literal["device"] | None = Field(default=None)
     source_id: str | None = Field(default=None)
     source_name_snapshot: str | None = Field(default=None)
     camera_dids: list[str] | None = Field(default=None)
@@ -79,7 +79,7 @@ class MiotEventTriggerLog(BaseModel):
 
 
 class MiotEventManualTriggerRequest(BaseModel):
-    source_type: Literal["device", "scene"] = Field(...)
+    source_type: Literal["device"] = Field(...)
     source_id: str = Field(...)
     source_name: str = Field(default="")
     home_id: str | None = Field(default=None)
@@ -88,18 +88,7 @@ class MiotEventManualTriggerRequest(BaseModel):
     changed_properties: dict[str, Any] = Field(default_factory=dict)
 
 
-class CreateMiotEventRuleRequest(BaseModel):
-    task_id: str = Field(default="")
-    name: str = Field(default="")
-    source_ids: list[str] = Field(default_factory=list)
-    event_kinds: list[str] = Field(default_factory=lambda: ["device_prop"])
-    query: str = Field(default="")
-    property_filters: dict[str, Any] = Field(default_factory=dict)
-    action_descriptions: list[str] | None = Field(default=None)
-
-
 class MiotEventCatalog(BaseModel):
     devices: list[MiotEventSource] = Field(default_factory=list)
-    scenes: list[MiotEventSource] = Field(default_factory=list)
     cameras: list[dict[str, Any]] = Field(default_factory=list)
 

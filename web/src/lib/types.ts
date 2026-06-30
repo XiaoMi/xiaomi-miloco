@@ -198,7 +198,7 @@ export interface ScopeHome {
 }
 
 export interface MiotEventSource {
-  source_type: "device" | "scene";
+  source_type: "device";
   source_id: string;
   source_name: string;
   home_id?: string | null;
@@ -221,7 +221,7 @@ export interface MiotPropertyFilterCondition {
 
 export interface MiotEventMapping {
   id: string;
-  source_type: "device" | "scene";
+  source_type: "device";
   source_id: string;
   source_name_snapshot: string;
   camera_dids: string[];
@@ -233,23 +233,6 @@ export interface MiotEventMapping {
   notes: string;
   created_at?: number | null;
   updated_at?: number | null;
-}
-
-export interface MiotEventRule {
-  id: string;
-  name: string;
-  task_id: string;
-  trigger_type: "miot_event";
-  enabled: boolean;
-  mode: "event" | "state";
-  condition: {
-    query: string;
-    source_ids: string[];
-    event_kinds: string[];
-    property_filters: Record<string, string | MiotPropertyFilterCondition>;
-    mapping_ids: string[];
-    use_global_mapping: boolean;
-  };
 }
 
 export interface DeviceSpecProperty {
@@ -290,7 +273,7 @@ export interface DevicePropertyKey {
 export interface MiotEventTriggerLog {
   id: string;
   trigger: {
-    source_type: "device" | "scene";
+    source_type: "device";
     source_id: string;
     source_name: string;
     home_id?: string | null;

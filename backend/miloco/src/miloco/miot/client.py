@@ -318,6 +318,7 @@ class MiotProxy:
         self._user_info = None
         self._subscribed_meta_dids = set()
         self._subscribed_property_dids = set()
+        self._subscribed_event_dids = set()
         self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
         # Welcome service survives deinit (rebuilt only in __init__), but its

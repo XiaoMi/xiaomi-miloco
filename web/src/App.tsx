@@ -289,7 +289,6 @@ function MainApp() {
         return (
           <AutomationPage
             devices={automationCatalog.data.devices}
-            scenes={automationCatalog.data.scenes}
             cameras={automationCatalog.data.cameras}
           />
         );

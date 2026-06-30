@@ -22,7 +22,6 @@ import { toast } from "./Toast";
 
 interface Props {
   devices: MiotEventSource[];
-  scenes: MiotEventSource[];
   cameras: ScopeCamera[];
 }
 
@@ -54,12 +53,11 @@ interface MappingSpecMeta {
   values: Record<string, Record<string, string>>;
 }
 
-type SourceKind = "device_prop" | "device_event" | "scene";
+type SourceKind = "device_prop" | "device_event";
 
 const SOURCE_KIND_OPTIONS: { value: SourceKind; label: string; hint: string }[] = [
   { value: "device_prop", label: "设备属性变化", hint: "属性变为指定值时触发" },
   { value: "device_event", label: "设备事件触发", hint: "单击、接近、告警等事件触发" },
-  { value: "scene", label: "场景触发", hint: "米家场景变化时触发" },
 ];
 
 const FILTER_OP_OPTIONS: { value: MiotPropertyFilterOp; label: string }[] = [
@@ -128,7 +126,6 @@ function getPropertyValueDisplayName(
 }
 
 function getMappingKindLabel(item: MiotEventMapping): string {
-  if (item.source_type === "scene") return "场景触发";
   return item.event_kinds.some((kind) => kind.startsWith("event."))
     ? "设备事件触发"
     : "设备属性变化";
@@ -151,8 +148,8 @@ function sortEventSourcesByRoom(items: MiotEventSource[]): MiotEventSource[] {
   });
 }
 
-export function AutomationPage({ devices, scenes, cameras }: Props) {
-  const mappings = useAsync(() => listMiotEventMappings(), [devices.length, scenes.length]);
+export function AutomationPage({ devices, cameras }: Props) {
+  const mappings = useAsync(() => listMiotEventMappings(), [devices.length]);
   const logs = useAsync(() => listMiotEventLogs(), []);
 
   const [sourceKind, setSourceKind] = useState<SourceKind>("device_prop");
@@ -171,8 +168,8 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
   const [propFilters, setPropFilters] = useState<EditingPropFilter[]>([]);
 
   const sourceOptions = useMemo(
-    () => (sourceKind === "scene" ? scenes : sortEventSourcesByRoom(devices)),
-    [devices, scenes, sourceKind],
+    () => sortEventSourcesByRoom(devices),
+    [devices],
   );
 
   async function reloadAll() {
@@ -256,7 +253,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
     setSourceId(did);
     setPropFilters([]);
     setSelectedEventKey("");
-    if (sourceKind === "scene" || !did) { setDeviceSpec(null); return; }
+    if (!did) { setDeviceSpec(null); return; }
     setSpecLoading(true);
     try {
       const spec = await fetchDeviceSpec(did);
@@ -316,10 +313,9 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
       toast("请选择设备事件", "warn");
       return;
     }
-    const sourceType = sourceKind === "scene" ? "scene" : "device";
     // Create mapping
     await createMiotEventMapping({
-      source_type: sourceType,
+      source_type: "device",
       source_id: source.source_id,
       source_name_snapshot: source.source_name,
       camera_dids: cameraIds,
@@ -328,11 +324,9 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
       event_kinds: [
         sourceKind === "device_prop"
           ? "device_prop"
-          : sourceKind === "device_event"
-            ? selectedEventKey
-            : "scene",
+          : selectedEventKey,
       ],
-      property_filters: sourceKind === "scene" ? {} : getSelectedProp(),
+      property_filters: getSelectedProp(),
       cooldown_seconds: cooldownSeconds,
       notes,
       created_at: null,
@@ -355,8 +349,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
 
   async function runTest(item: MiotEventMapping) {
     const changedProperties =
-      item.source_type === "device"
-        ? Object.fromEntries(
+      Object.fromEntries(
             Object.entries(item.property_filters ?? {}).map(([key, value]) => {
               const cond = normalizeFilterCondition(value);
               let sample = cond.value;
@@ -368,12 +361,9 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
               if (cond.op === "lte") sample = String(Number(cond.value || 0));
               return [key, sample];
             }),
-          )
-        : {};
+          );
     const eventName =
-      item.source_type === "device"
-        ? (item.event_kinds.find((kind) => kind.startsWith("event.")) ?? "device_prop")
-        : "scene";
+      item.event_kinds.find((kind) => kind.startsWith("event.")) ?? "device_prop";
     await testMiotEventTrigger({
       source_type: item.source_type,
       source_id: item.source_id,
@@ -414,9 +404,9 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
   return (
     <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
       <section className="space-y-1">
-        <h1 className="text-title text-text-primary">感知触发</h1>
+          <h1 className="text-title text-text-primary">感知触发</h1>
         <p className="text-caption text-text-tertiary">
-          用米家设备事件或场景触发一次摄像头主动感知，并附带可选的属性和值筛选。
+          用米家设备属性变化或设备事件触发一次摄像头主动感知，并附带可选的属性和值筛选。
         </p>
       </section>
 
@@ -431,7 +421,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div className="md:col-span-2">
             <label className="block text-caption text-text-secondary mb-2">触发方式</label>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {SOURCE_KIND_OPTIONS.map((option) => {
                 const selected = sourceKind === option.value;
                 return (
@@ -498,7 +488,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
           </div>
 
           {/* Device Spec Property / Event Filters */}
-          {sourceKind !== "scene" && sourceId && (
+          {sourceId && (
             <div className="md:col-span-2 space-y-2">
               {sourceKind === "device_event" ? (
                 <div>
