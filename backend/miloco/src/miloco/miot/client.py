@@ -672,8 +672,15 @@ class MiotProxy:
                 for camera_did in list(self._camera_img_managers.keys()):
                     # 不在 active 集（账号消失 / 移出家庭 / 被关 / 离线 / 超额）→ 销毁，
                     # 真正 miot_camera_stop + decoder.stop()，停掉 native 会话与解码。
-                    should_destroy = camera_did not in active
-                    if should_destroy:
+                    if camera_did in active:
+                        logger.debug(
+                            "Manager %s kept alive (in_use & in scope)", camera_did
+                        )
+                        continue
+                    # 每台单独兜异常：批量销（切家庭销旧家庭 N 台 / 超额收敛 N-M 台）时，
+                    # 任一台 unregister/destroy 抛错不能拖垮其余——否则剩余 manager 留在
+                    # dict 里继续白拉流，要等下次 refresh 才重试。失败的留在 dict 待重试。
+                    try:
                         await self._miot_client.unregister_lan_device_changed_async(
                             did=camera_did
                         )
@@ -682,9 +689,12 @@ class MiotProxy:
                         logger.warning(
                             "Camera native stream stopped: %s", camera_did
                         )
-                    else:
-                        logger.debug(
-                            "Manager %s kept alive (in_use & in scope)", camera_did
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(
+                            "Failed to destroy camera manager %s, "
+                            "leaving in dict for retry: %s",
+                            camera_did,
+                            e,
                         )
                 await self._sync_camera_state_subscriptions()
                 return cameras

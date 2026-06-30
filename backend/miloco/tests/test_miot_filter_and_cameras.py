@@ -943,6 +943,44 @@ async def test_refresh_cameras_destroys_overcap_existing_manager(_scope_proxy_en
 
 
 @pytest.mark.asyncio
+async def test_refresh_cameras_destroy_failure_isolated(_scope_proxy_env):
+    """批量销时某台 destroy 抛错不拖垮其余：失败的留在 dict 待重试，其余照常销。
+
+    Phase 1 把 destroy 触发条件扩到关/移出家庭/离线/超额 → 切家庭等场景一次销 N 台。
+    防回归钉：若移除 per-iteration try/except，c1 抛错会 break 整个循环，c2 不会被销。
+    """
+    proxy, kv, miot_client = _scope_proxy_env
+    # 两台都移出 scope（白名单只含 H2，二者都在 H1）→ 都该销
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H2"]))
+
+    h1 = MagicMock()
+    h1.destroy = AsyncMock(side_effect=RuntimeError("destroy boom"))
+    h1.update_camera_info = AsyncMock()
+    h2 = MagicMock()
+    h2.destroy = AsyncMock()
+    h2.update_camera_info = AsyncMock()
+    proxy._camera_img_managers["c1"] = h1
+    proxy._camera_img_managers["c2"] = h2
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1"),
+            "c2": _camera("c2", home_id="H1"),
+        }
+    )
+
+    # 不应抛出（refresh 整体仍成功返回）
+    result = await proxy.refresh_cameras()
+    assert result is not None
+
+    # c1 destroy 抛错 → 留在 dict 待下次 refresh 重试
+    h1.destroy.assert_awaited_once()
+    assert "c1" in proxy._camera_img_managers
+    # c2 不受 c1 失败影响，照常销毁
+    h2.destroy.assert_awaited_once()
+    assert "c2" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
 async def test_refresh_cameras_offline_not_built(_scope_proxy_env):
     """离线相机不在投喂/拉流集 → 不建 manager（Phase 1：拉流=投喂，离线不建）。"""
     proxy, kv, miot_client = _scope_proxy_env
