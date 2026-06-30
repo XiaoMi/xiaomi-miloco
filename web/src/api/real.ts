@@ -949,8 +949,8 @@ export async function realCreateMiotEventRule(input: {
 // ── Automation: device spec ───────────────────────────────
 export async function realFetchDeviceSpec(
   did: string,
-): Promise<{ model: string; name: string; properties: import("@/lib/types").DeviceSpecProperty[] }> {
-  const r = await apiFetch<Normal<{ model: string; name: string; properties: import("@/lib/types").DeviceSpecProperty[] }>>(
+): Promise<import("@/lib/types").DeviceSpec> {
+  const r = await apiFetch<Normal<import("@/lib/types").DeviceSpec>>(
     `/api/automation/device-spec/${did}`,
   );
   return r.data;

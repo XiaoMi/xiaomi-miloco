@@ -348,7 +348,7 @@ export async function testMiotEventTrigger(input: {
   return impl.realTestMiotEventTrigger(input);
 }
 
-export async function fetchDeviceSpec(did: string): Promise<{ model: string; name: string; properties: import("@/lib/types").DeviceSpecProperty[] }> {
+export async function fetchDeviceSpec(did: string): Promise<import("@/lib/types").DeviceSpec> {
   return impl.realFetchDeviceSpec(did);
 }
 

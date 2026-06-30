@@ -59,6 +59,47 @@ def test_coerce_number(value, number):
     assert _coerce_number(value) == number
 
 
+def test_device_event_mapping_matches_event_and_argument_filters():
+    service = AutomationService(_KVRepoStub())
+    mapping = MiotEventMapping(
+        source_type="device",
+        source_id="dryer-1",
+        camera_dids=["cam-1"],
+        event_kinds=["event.2.1"],
+        property_filters={
+            "arg.2.3": {"op": "eq", "value": "7"},
+            "arg.2.4": {"op": "ne", "value": "off"},
+        },
+    )
+    trigger = MiotEventTrigger(
+        source_type="device",
+        source_id="dryer-1",
+        event_name="event.2.1",
+        changed_properties={"arg.2.3": 7, "arg.2.4": "on", "arg.2.5": "ignored"},
+    )
+
+    assert service._match_mapping(mapping, trigger) is True
+
+
+def test_device_event_mapping_without_argument_filters_matches_any_arguments():
+    service = AutomationService(_KVRepoStub())
+    mapping = MiotEventMapping(
+        source_type="device",
+        source_id="dryer-1",
+        camera_dids=["cam-1"],
+        event_kinds=["event.2.1"],
+        property_filters={},
+    )
+    trigger = MiotEventTrigger(
+        source_type="device",
+        source_id="dryer-1",
+        event_name="event.2.1",
+        changed_properties={"arg.2.3": "any"},
+    )
+
+    assert service._match_mapping(mapping, trigger) is True
+
+
 @pytest.mark.asyncio
 async def test_handle_trigger_keeps_query_context_in_text_only():
     service = AutomationService(_KVRepoStub())

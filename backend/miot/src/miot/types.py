@@ -444,6 +444,21 @@ class MIoTDevicePropertyChangedEvent(BaseModel):
     timestamp_ms: int = Field(default=0)
 
 
+class MIoTDeviceEventOccurredEvent(BaseModel):
+    """Decoded `device/{did}/up/event_occured/#` payload."""
+
+    did: str = Field(description="Device id")
+    siid: int = Field(description="Service iid")
+    eiid: int = Field(description="Event iid")
+    event_key: str = Field(description="Event key: event.{siid}.{eiid}")
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Flattened event argument map keyed by arg.{siid}.{piid}",
+    )
+    raw: Dict[str, Any] = Field(default_factory=dict, description="Raw decoded payload")
+    timestamp_ms: int = Field(default=0)
+
+
 class MipsConnectionError(Exception):
     """MIPS cloud client failed to connect."""
 

@@ -388,7 +388,8 @@ class AutomationService:
             f"事件类型：{trigger.event_name or trigger.source_type}。",
         ]
         if trigger.changed_properties:
-            query_parts.append(f"属性变化：{trigger.changed_properties}")
+            label = "触发参数" if trigger.event_name.startswith("event.") else "属性变化"
+            query_parts.append(f"{label}：{trigger.changed_properties}")
         if candidate_rules:
             query_parts.extend(
                 [f"- {rule.name}: {rule.condition.query}" for rule in candidate_rules]
@@ -473,7 +474,7 @@ class AutomationService:
             f"米家事件触发感知\n"
             f"来源: {trigger.source_name or trigger.source_id}\n"
             f"事件: {trigger.event_name}\n"
-            f"属性: {trigger.changed_properties}\n"
+            f"{'触发参数' if trigger.event_name.startswith('event.') else '属性'}: {trigger.changed_properties}\n"
             f"感知结果: {answer}"
         )
         for rule in candidate_rules:

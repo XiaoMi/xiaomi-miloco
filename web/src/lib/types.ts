@@ -265,10 +265,20 @@ export interface DeviceSpecProperty {
   value_range?: { min: number; max: number; step: number };
 }
 
+export interface DeviceSpecEvent {
+  siid: number;
+  eiid: number;
+  key: string;
+  name: string;
+  description: string;
+  arguments: DeviceSpecProperty[];
+}
+
 export interface DeviceSpec {
   model: string;
   name: string;
   properties: DeviceSpecProperty[];
+  events?: DeviceSpecEvent[];
 }
 
 export interface DevicePropertyKey {

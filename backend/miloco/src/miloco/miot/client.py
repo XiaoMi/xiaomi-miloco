@@ -21,6 +21,7 @@ from miot.types import (
     MIoTActionParam,
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
+    MIoTDeviceEventOccurredEvent,
     MIoTDeviceInfo,
     MIoTDevicePropertyChangedEvent,
     MIoTDeviceStateEvent,
@@ -132,6 +133,7 @@ class MiotProxy:
         # authoritative broker-side state lives in MIoTClient._meta_sub_dids.
         self._subscribed_meta_dids: set[str] = set()
         self._subscribed_property_dids: set[str] = set()
+        self._subscribed_event_dids: set[str] = set()
 
         # Listener for home-level scene changes (rename/delete/edit). Debounces
         # then refreshes the scene list.
@@ -227,6 +229,7 @@ class MiotProxy:
         )
         self._subscribed_meta_dids = set()
         self._subscribed_property_dids = set()
+        self._subscribed_event_dids = set()
         self._scene_listener = SceneEventListener(refresh_scenes=self.refresh_scenes)
         self._subscribed_scene_home_ids = set()
         self._camera_state_listener = CameraStateEventListener(
@@ -241,6 +244,9 @@ class MiotProxy:
         )
         self._miot_client.register_device_property_changed_callback(
             self._on_device_property_changed_event
+        )
+        self._miot_client.register_device_event_occurred_callback(
+            self._on_device_event_occurred
         )
         # Device cloud online/offline state: update the cached `online` field
         # directly (event-driven recovery for cameras that went stale across a
@@ -738,7 +744,7 @@ class MiotProxy:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
-                await self._sync_property_subscriptions()
+                await self.sync_automation_property_subscriptions()
                 await self._sync_scene_subscriptions()
                 return devices
             except Exception as e:
@@ -858,6 +864,40 @@ class MiotProxy:
         except Exception as e:
             logger.error("Failed to dispatch device-property automation trigger: %s", e)
 
+    async def _on_device_event_occurred(
+        self, msg: MIoTDeviceEventOccurredEvent
+    ) -> None:
+        try:
+            from miloco.manager import get_manager
+
+            mgr = get_manager()
+            if not getattr(mgr, "_initialized", False):
+                return
+            device = self._device_info_dict.get(msg.did)
+            if device is None:
+                return
+            trigger = MiotEventTrigger(
+                source_type="device",
+                source_id=msg.did,
+                source_name=device.name,
+                home_id=device.home_id,
+                room_name=device.room_name,
+                event_name=msg.event_key,
+                changed_properties=msg.arguments,
+                occurred_at=msg.timestamp_ms,
+                raw=msg.raw,
+            )
+            await mgr.automation_service.handle_trigger(
+                trigger=trigger,
+                perception_service=mgr.perception_service,
+                rule_service=mgr.rule_service,
+                miot_service=mgr.miot_service,
+                meaningful_events_dao=mgr.meaningful_events_dao,
+                pipeline=mgr.perception_service._pipeline,
+            )
+        except Exception as e:
+            logger.error("Failed to dispatch device-event automation trigger: %s", e)
+
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an
         unmanaged one.
@@ -952,6 +992,10 @@ class MiotProxy:
             for mapping in mappings
             if mapping.enabled
             and mapping.source_type == "device"
+            and (
+                not mapping.event_kinds
+                or "device_prop" in mapping.event_kinds
+            )
             and mapping.source_id in self._device_info_dict
             and "/" not in mapping.source_id
         }
@@ -987,8 +1031,58 @@ class MiotProxy:
         )
 
     async def sync_automation_property_subscriptions(self) -> None:
-        """Hot-sync MiOT property subscriptions for automation mappings."""
+        """Hot-sync MiOT property/event subscriptions for automation mappings."""
         await self._sync_property_subscriptions()
+        await self._sync_event_subscriptions()
+
+    async def _sync_event_subscriptions(self) -> None:
+        from miloco.manager import get_manager
+
+        try:
+            mappings = get_manager().automation_service.list_mappings()
+        except Exception as e:
+            logger.warning("load automation mappings failed, skip event sync: %s", e)
+            return
+
+        target = {
+            mapping.source_id
+            for mapping in mappings
+            if mapping.enabled
+            and mapping.source_type == "device"
+            and any(kind.startswith("event.") for kind in mapping.event_kinds)
+            and mapping.source_id in self._device_info_dict
+            and "/" not in mapping.source_id
+        }
+        to_add = target - self._subscribed_event_dids
+        to_remove = self._subscribed_event_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            try:
+                await self._miot_client.sub_device_event_occurred_async(did)
+                return did
+            except Exception as e:
+                logger.error("subscribe device-event failed did=%s: %s", did, e)
+                return None
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_event_occurred_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-event failed did=%s: %s", did, e)
+            return did
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        self._subscribed_event_dids |= {d for d in added if d}
+        self._subscribed_event_dids -= {d for d in removed if d}
+        logger.info(
+            "device-event subscriptions synced: +%d -%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            len(self._subscribed_event_dids),
+        )
 
     async def _sync_camera_state_subscriptions(self) -> None:
         """Reconcile per-device cloud state (online/offline) subs to the

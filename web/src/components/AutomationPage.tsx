@@ -36,6 +36,13 @@ interface SpecProperty {
   unit: string;
 }
 
+interface SpecEvent {
+  key: string;
+  name: string;
+  description: string;
+  arguments: SpecProperty[];
+}
+
 interface EditingPropFilter {
   key: string;
   op: MiotPropertyFilterOp;
@@ -46,6 +53,14 @@ interface MappingSpecMeta {
   names: Record<string, string>;
   values: Record<string, Record<string, string>>;
 }
+
+type SourceKind = "device_prop" | "device_event" | "scene";
+
+const SOURCE_KIND_OPTIONS: { value: SourceKind; label: string; hint: string }[] = [
+  { value: "device_prop", label: "设备属性变化", hint: "属性变为指定值时触发" },
+  { value: "device_event", label: "设备事件触发", hint: "单击、接近、告警等事件触发" },
+  { value: "scene", label: "场景触发", hint: "米家场景变化时触发" },
+];
 
 const FILTER_OP_OPTIONS: { value: MiotPropertyFilterOp; label: string }[] = [
   { value: "eq", label: "等于" },
@@ -112,27 +127,35 @@ function getPropertyValueDisplayName(
   return specMeta?.values[key]?.[value] || value;
 }
 
+function getMappingKindLabel(item: MiotEventMapping): string {
+  if (item.source_type === "scene") return "场景触发";
+  return item.event_kinds.some((kind) => kind.startsWith("event."))
+    ? "设备事件触发"
+    : "设备属性变化";
+}
+
 export function AutomationPage({ devices, scenes, cameras }: Props) {
   const mappings = useAsync(() => listMiotEventMappings(), [devices.length, scenes.length]);
   const logs = useAsync(() => listMiotEventLogs(), []);
 
-  const [sourceType, setSourceType] = useState<"device" | "scene">("device");
+  const [sourceKind, setSourceKind] = useState<SourceKind>("device_prop");
   const [sourceId, setSourceId] = useState("");
+  const [selectedEventKey, setSelectedEventKey] = useState("");
   const [cameraIds, setCameraIds] = useState<string[]>([]);
   const [queryTemplate, setQueryTemplate] = useState("");
   const [cooldownSeconds, setCooldownSeconds] = useState(30);
   const [notes, setNotes] = useState("");
 
   // Device spec: properties + value options
-  const [deviceSpec, setDeviceSpec] = useState<{ model: string; name: string; properties: SpecProperty[] } | null>(null);
+  const [deviceSpec, setDeviceSpec] = useState<{ model: string; name: string; properties: SpecProperty[]; events?: SpecEvent[] } | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
   const [mappingSpecMeta, setMappingSpecMeta] = useState<Record<string, MappingSpecMeta>>({});
   // Selected property filters: array of { key, value }
   const [propFilters, setPropFilters] = useState<EditingPropFilter[]>([]);
 
   const sourceOptions = useMemo(
-    () => (sourceType === "device" ? devices : scenes),
-    [devices, scenes, sourceType],
+    () => (sourceKind === "scene" ? scenes : devices),
+    [devices, scenes, sourceKind],
   );
 
   async function reloadAll() {
@@ -158,18 +181,40 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
             did,
             meta: {
               names: Object.fromEntries(
-                (spec.properties ?? []).map((prop) => [
-                  prop.key,
-                  prop.description || prop.name || prop.key,
-                ]),
+                [
+                  ...(spec.properties ?? []).map((prop) => [
+                    prop.key,
+                    prop.description || prop.name || prop.key,
+                  ]),
+                  ...((spec.events ?? []).map((event) => [
+                    event.key,
+                    event.name || event.description || event.key,
+                  ])),
+                  ...((spec.events ?? []).flatMap((event) =>
+                    (event.arguments ?? []).map((arg) => [
+                      arg.key,
+                      arg.description || arg.name || arg.key,
+                    ]),
+                  )),
+                ],
               ),
               values: Object.fromEntries(
-                (spec.properties ?? []).map((prop) => [
-                  prop.key,
-                  Object.fromEntries(
-                    (prop.value_list ?? []).map((item) => [item.value, item.description || item.value]),
-                  ),
-                ]),
+                [
+                  ...(spec.properties ?? []).map((prop) => [
+                    prop.key,
+                    Object.fromEntries(
+                      (prop.value_list ?? []).map((item) => [item.value, item.description || item.value]),
+                    ),
+                  ]),
+                  ...((spec.events ?? []).flatMap((event) =>
+                    (event.arguments ?? []).map((arg) => [
+                      arg.key,
+                      Object.fromEntries(
+                        (arg.value_list ?? []).map((item) => [item.value, item.description || item.value]),
+                      ),
+                    ]),
+                  )),
+                ],
               ),
             },
           };
@@ -193,11 +238,12 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
   async function onSourceChange(did: string) {
     setSourceId(did);
     setPropFilters([]);
-    if (sourceType !== "device" || !did) { setDeviceSpec(null); return; }
+    setSelectedEventKey("");
+    if (sourceKind === "scene" || !did) { setDeviceSpec(null); return; }
     setSpecLoading(true);
     try {
       const spec = await fetchDeviceSpec(did);
-      setDeviceSpec(spec as { model: string; name: string; properties: SpecProperty[] });
+      setDeviceSpec(spec as { model: string; name: string; properties: SpecProperty[]; events?: SpecEvent[] });
     } catch {
       setDeviceSpec(null);
     } finally {
@@ -225,10 +271,22 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
     return pf;
   }
 
+  function selectedEvent(): SpecEvent | undefined {
+    return deviceSpec?.events?.find((event) => event.key === selectedEventKey);
+  }
+
+  function eventArguments(): SpecProperty[] {
+    return selectedEvent()?.arguments ?? [];
+  }
+
   // Get value options for a selected property key
   function getValueOptions(key: string): { value: string; description: string }[] {
     if (!deviceSpec) return [];
-    const prop = deviceSpec.properties.find((p) => p.key === key);
+    const prop =
+      (sourceKind === "device_event"
+        ? eventArguments()
+        : deviceSpec.properties
+      ).find((p) => p.key === key);
     if (!prop) return [];
     if (prop.value_list && prop.value_list.length > 0) return prop.value_list;
     return [];
@@ -237,6 +295,11 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
   async function handleCreate() {
     const source = sourceOptions.find((item) => item.source_id === sourceId);
     if (!source) { toast("请选择事件源", "warn"); return; }
+    if (sourceKind === "device_event" && !selectedEventKey) {
+      toast("请选择设备事件", "warn");
+      return;
+    }
+    const sourceType = sourceKind === "scene" ? "scene" : "device";
     // Create mapping
     await createMiotEventMapping({
       source_type: sourceType,
@@ -245,8 +308,14 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
       camera_dids: cameraIds,
       enabled: true,
       query_template: queryTemplate,
-      event_kinds: [sourceType === "device" ? "device_prop" : "scene"],
-      property_filters: sourceType === "device" ? getSelectedProp() : {},
+      event_kinds: [
+        sourceKind === "device_prop"
+          ? "device_prop"
+          : sourceKind === "device_event"
+            ? selectedEventKey
+            : "scene",
+      ],
+      property_filters: sourceKind === "scene" ? {} : getSelectedProp(),
       cooldown_seconds: cooldownSeconds,
       notes,
       created_at: null,
@@ -257,6 +326,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
     setCooldownSeconds(30);
     setNotes("");
     setPropFilters([]);
+    setSelectedEventKey("");
     setDeviceSpec(null);
     await reloadAll();
   }
@@ -283,11 +353,15 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
             }),
           )
         : {};
+    const eventName =
+      item.source_type === "device"
+        ? (item.event_kinds.find((kind) => kind.startsWith("event.")) ?? "device_prop")
+        : "scene";
     await testMiotEventTrigger({
       source_type: item.source_type,
       source_id: item.source_id,
       source_name: item.source_name_snapshot,
-      event_name: item.source_type === "device" ? "device_prop" : "scene",
+      event_name: eventName,
       changed_properties: changedProperties,
     });
     await reloadAll();
@@ -325,26 +399,39 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
         <div>
           <h2 className="text-title text-text-primary">事件映射</h2>
           <p className="text-caption text-text-tertiary">
-            配置米家事件源对应触发哪些摄像头感知。创建时自动生成关联规则。
+            配置米家事件源对应触发哪些摄像头感知。创建后会按触发条件直接执行感知。
           </p>
         </div>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div>
-            <label className="block text-caption text-text-secondary mb-1">事件源类型</label>
-            <select
-              className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
-              value={sourceType}
-              onChange={(e) => {
-                const nextType = e.target.value as "device" | "scene";
-                setSourceType(nextType);
-                setSourceId("");
-                setDeviceSpec(null);
-                setPropFilters([]);
-              }}
-            >
-              <option value="device">设备属性变化</option>
-              <option value="scene">场景触发</option>
-            </select>
+          <div className="md:col-span-2">
+            <label className="block text-caption text-text-secondary mb-2">触发方式</label>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {SOURCE_KIND_OPTIONS.map((option) => {
+                const selected = sourceKind === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={
+                      "rounded-lg border px-3 py-2 text-left transition-colors " +
+                      (selected
+                        ? "border-brand-primary bg-brand-soft text-brand-primary"
+                        : "border-border bg-bg-primary text-text-secondary hover:border-border-strong hover:text-text-primary")
+                    }
+                    onClick={() => {
+                      setSourceKind(option.value);
+                      setSourceId("");
+                      setSelectedEventKey("");
+                      setDeviceSpec(null);
+                      setPropFilters([]);
+                    }}
+                  >
+                    <span className="block text-caption font-medium">{option.label}</span>
+                    <span className="mt-0.5 block text-xs text-text-tertiary">{option.hint}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
           <div>
             <label className="block text-caption text-text-secondary mb-1">事件源</label>
@@ -384,19 +471,59 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
             </div>
           </div>
 
-          {/* Device Spec Property Filters */}
-          {sourceType === "device" && sourceId && (
+          {/* Device Spec Property / Event Filters */}
+          {sourceKind !== "scene" && sourceId && (
             <div className="md:col-span-2 space-y-2">
+              {sourceKind === "device_event" ? (
+                <div>
+                  <label className="block text-caption text-text-secondary mb-1">
+                    事件筛选 {specLoading ? "(加载spec中...)" : deviceSpec ? `(${deviceSpec.events?.length ?? 0} 个事件)` : ""}
+                  </label>
+                  <select
+                    className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
+                    value={selectedEventKey}
+                    onChange={(e) => {
+                      setSelectedEventKey(e.target.value);
+                      setPropFilters([]);
+                    }}
+                  >
+                    <option value="">-- 选择事件 --</option>
+                    {(deviceSpec?.events ?? []).map((event) => (
+                      <option key={event.key} value={event.key}>
+                        {event.name || event.description || event.key}
+                      </option>
+                    ))}
+                  </select>
+                  {!specLoading && deviceSpec && (deviceSpec.events?.length ?? 0) === 0 ? (
+                    <div className="mt-2 rounded-md border border-dashed border-border bg-bg-primary px-3 py-2 text-caption text-text-tertiary">
+                      还没有取到这个设备的事件定义。这里会按设备 MIoT Spec 展示可选事件和触发参数。
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <label className="block text-caption text-text-secondary">
-                属性筛选 {specLoading ? "(加载spec中...)" : deviceSpec ? `(${deviceSpec.properties.length} 个属性)` : ""}
+                {sourceKind === "device_event" ? "触发参数（可选）" : "属性筛选"}{" "}
+                {specLoading
+                  ? "(加载spec中...)"
+                  : sourceKind === "device_prop" && deviceSpec
+                    ? `(${deviceSpec.properties.length} 个属性)`
+                    : sourceKind === "device_event" && selectedEventKey
+                      ? `(${eventArguments().length} 个参数)`
+                      : ""}
               </label>
-              {!specLoading && deviceSpec && deviceSpec.properties.length === 0 ? (
+              {!specLoading && deviceSpec && sourceKind === "device_prop" && deviceSpec.properties.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border bg-bg-primary px-3 py-2 text-caption text-text-tertiary">
                   还没有取到这个设备的属性定义。这里会按设备 MIoT Spec 展示可选属性和值。
                 </div>
               ) : null}
+              {sourceKind === "device_event" && selectedEventKey && eventArguments().length === 0 ? (
+                <div className="rounded-md border border-dashed border-border bg-bg-primary px-3 py-2 text-caption text-text-tertiary">
+                  这个事件没有可配置参数；只要该事件发生就会触发。
+                </div>
+              ) : null}
               {propFilters.map((pf, idx) => {
-                const selectedProp = deviceSpec?.properties.find((p) => p.key === pf.key);
+                const options = sourceKind === "device_event" ? eventArguments() : (deviceSpec?.properties ?? []);
+                const selectedProp = options.find((p) => p.key === pf.key);
                 const valueOptions = getValueOptions(pf.key);
                 const numericProp = isNumericProperty(selectedProp);
                 const allowedOps = numericProp
@@ -409,7 +536,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
                       value={pf.key}
                       onChange={(e) => {
                         const nextKey = e.target.value;
-                        const nextProp = deviceSpec?.properties.find((p) => p.key === nextKey);
+                        const nextProp = options.find((p) => p.key === nextKey);
                         const nextNumeric = isNumericProperty(nextProp);
                         setPropFilters((prev) =>
                           prev.map((item, i) =>
@@ -428,7 +555,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
                       }}
                     >
                       <option value="">-- 选择属性 --</option>
-                      {(deviceSpec?.properties ?? []).map((prop) => (
+                      {options.map((prop) => (
                         <option key={prop.key} value={prop.key}>
                           {getPropertyDisplayName(prop, prop.key)} {prop.unit ? "(" + prop.unit + ")" : ""}
                         </option>
@@ -479,8 +606,9 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
                 type="button"
                 className="rounded-md border border-dashed border-border px-3 py-1.5 text-xs text-text-tertiary"
                 onClick={addPropFilter}
+                disabled={sourceKind === "device_event" && (!selectedEventKey || eventArguments().length === 0)}
               >
-                + 添加属性筛选
+                {sourceKind === "device_event" ? "+ 添加触发参数" : "+ 添加属性筛选"}
               </button>
             </div>
           )}
@@ -522,7 +650,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
           type="button"
           className="rounded-md bg-brand px-4 py-2 text-caption text-white"
           onClick={handleCreate}
-          disabled={!sourceId || cameraIds.length === 0}
+          disabled={!sourceId || cameraIds.length === 0 || (sourceKind === "device_event" && !selectedEventKey)}
         >
           创建映射
         </button>
@@ -533,7 +661,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
         <div>
           <h2 className="text-title text-text-primary">已配置映射</h2>
           <p className="text-caption text-text-tertiary">
-            {mappings.data?.length ?? 0} 条映射。创建映射时会自动生成关联的 miot_event 规则。
+            {mappings.data?.length ?? 0} 条映射。命中映射后会按配置触发对应摄像头感知。
           </p>
         </div>
         <div className="space-y-3">
@@ -545,7 +673,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
                     {item.source_name_snapshot || item.source_id}
                   </div>
                   <div className="text-caption text-text-tertiary">
-                    {item.source_type === "device" ? "设备" : "场景"} . 摄像头: {item.camera_dids.length} 个 . 冷却: {item.cooldown_seconds}s
+                    {getMappingKindLabel(item)} . 摄像头: {item.camera_dids.length} 个 . 冷却: {item.cooldown_seconds}s
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -578,6 +706,11 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
               {item.query_template ? (
                 <div className="mt-3 text-caption text-text-secondary">
                   感知提示：{item.query_template}
+                </div>
+              ) : null}
+              {item.event_kinds.some((kind) => kind.startsWith("event.")) ? (
+                <div className="mt-3 text-caption text-text-secondary">
+                  事件：{mappingSpecMeta[item.source_id]?.names[item.event_kinds[0]] || item.event_kinds[0]}
                 </div>
               ) : null}
               {Object.keys(item.property_filters ?? {}).length > 0 ? (
