@@ -1045,31 +1045,13 @@ class MiotProxy:
         )
 
     async def _on_scene_changed_event(self, msg: MIoTSceneChangedEvent) -> None:
-        """Forward home scene-change push events to the dedicated listener.
+        """Forward home scene-configuration changes to the dedicated listener.
 
         The debounce + refresh logic lives in
         ``miloco.miot.mips_listeners.SceneEventListener`` — this method is a
         thin shim, mirroring ``_on_user_bind_event``.
         """
         await self._scene_listener.on_event(msg)
-        try:
-            from miloco.manager import get_manager
-
-            mgr = get_manager()
-            if getattr(mgr, "_initialized", False):
-                await mgr.automation_service.emit_scene_trigger(
-                    home_id=msg.home_id,
-                    scene_id=msg.scene_id,
-                    event_name=msg.event,
-                    raw=msg.raw,
-                    miot_service=mgr.miot_service,
-                    perception_service=mgr.perception_service,
-                    rule_service=mgr.rule_service,
-                    meaningful_events_dao=mgr.meaningful_events_dao,
-                    pipeline=mgr.perception_service._pipeline,
-                )
-        except Exception as e:
-            logger.error("Failed to dispatch scene automation trigger: %s", e)
 
     def _collect_home_ids(self) -> set[str]:
         """Union of home_ids across cached devices / cameras / scenes.

@@ -14,6 +14,7 @@ from miloco.automation.schema import (
     MiotEventMappingUpdate,
     MiotEventTrigger,
 )
+from miloco.automation.translations import translate_miot_value_label
 from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.rule.schema import RuleTriggerType
@@ -245,7 +246,11 @@ async def device_spec(did: str, current_user: str = Depends(verify_token)):
                 entry["value_list"] = [
                     {
                         "value": str(v.get("value", "")),
-                        "description": v.get("description") or v.get("name") or str(v.get("value", "")),
+                        "description": translate_miot_value_label(
+                            v.get("description")
+                            or v.get("name")
+                            or str(v.get("value", ""))
+                        ),
                     }
                     for v in value_list
                 ]
