@@ -63,14 +63,36 @@ def _coerce_number(value: Any) -> float | None:
     return None
 
 
+def _normalize_bool_like(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return str(int(value))
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "on", "yes"}:
+            return "1"
+        if text in {"0", "false", "off", "no"}:
+            return "0"
+    return None
+
+
+def _values_equal(actual: Any, expected: Any) -> bool:
+    actual_bool = _normalize_bool_like(actual)
+    expected_bool = _normalize_bool_like(expected)
+    if actual_bool is not None and expected_bool is not None:
+        return actual_bool == expected_bool
+    return str(actual) == str(expected)
+
+
 def _match_condition(actual: Any, expected: Any) -> bool:
     cond = _normalize_filter_condition(expected)
     if cond.op == "any":
         return actual is not None
     if cond.op == "eq":
-        return actual is not None and str(actual) == str(cond.value)
+        return actual is not None and _values_equal(actual, cond.value)
     if cond.op == "ne":
-        return actual is not None and str(actual) != str(cond.value)
+        return actual is not None and not _values_equal(actual, cond.value)
     actual_num = _coerce_number(actual)
     expected_num = _coerce_number(cond.value)
     if actual_num is None or expected_num is None:

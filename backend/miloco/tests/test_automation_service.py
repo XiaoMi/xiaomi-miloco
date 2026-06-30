@@ -27,6 +27,9 @@ class _KVRepoStub:
     ("actual", "expected", "matched"),
     [
         ("1", {"op": "eq", "value": "1"}, True),
+        (True, {"op": "eq", "value": "1"}, True),
+        (False, {"op": "eq", "value": "0"}, True),
+        (True, {"op": "ne", "value": "0"}, True),
         ("1", {"op": "ne", "value": "0"}, True),
         ("12", {"op": "gt", "value": "10"}, True),
         ("3", {"op": "lt", "value": "5"}, True),
@@ -95,6 +98,25 @@ def test_device_event_mapping_without_argument_filters_matches_any_arguments():
         source_id="dryer-1",
         event_name="event.2.1",
         changed_properties={"arg.2.3": "any"},
+    )
+
+    assert service._match_mapping(mapping, trigger) is True
+
+
+def test_device_property_mapping_matches_real_bool_push_value():
+    service = AutomationService(_KVRepoStub())
+    mapping = MiotEventMapping(
+        source_type="device",
+        source_id="825625892",
+        camera_dids=["rtsp_01"],
+        event_kinds=["device_prop"],
+        property_filters={"prop.2.1": {"op": "eq", "value": "1"}},
+    )
+    trigger = MiotEventTrigger(
+        source_type="device",
+        source_id="825625892",
+        event_name="device_prop",
+        changed_properties={"prop.2.1": True},
     )
 
     assert service._match_mapping(mapping, trigger) is True
