@@ -423,7 +423,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
       {/* Event Mapping Creation Form */}
       <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
         <div>
-          <h2 className="text-title text-text-primary">事件映射</h2>
+          <h2 className="text-title text-text-primary">感知触发配置</h2>
           <p className="text-caption text-text-tertiary">
             配置米家事件源对应触发哪些摄像头感知。创建后会按触发条件直接执行感知。
           </p>
@@ -683,8 +683,8 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
               className={
                 "rounded-md px-5 py-2 text-caption font-medium transition-colors " +
                 (createDisabled
-                  ? "cursor-not-allowed bg-bg-tertiary text-text-tertiary"
-                  : "bg-brand text-white hover:bg-brand-primary")
+                  ? "cursor-not-allowed border border-border bg-bg-tertiary text-text-tertiary"
+                  : "border border-brand-primary bg-brand-primary text-white shadow-sm hover:brightness-95")
               }
               onClick={handleCreate}
               disabled={createDisabled}
@@ -698,9 +698,9 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
       {/* Existing Mappings */}
       <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
         <div>
-          <h2 className="text-title text-text-primary">已配置映射</h2>
+          <h2 className="text-title text-text-primary">已配置感知触发</h2>
           <p className="text-caption text-text-tertiary">
-            {mappings.data?.length ?? 0} 条映射。命中映射后会按配置触发对应摄像头感知。
+            {mappings.data?.length ?? 0} 条配置。命中配置后会按规则触发对应摄像头感知。
           </p>
         </div>
         <div className="space-y-3">
