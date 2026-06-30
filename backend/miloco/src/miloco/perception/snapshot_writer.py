@@ -19,14 +19,17 @@
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
 import re
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
 from miloco.config import get_settings
-from miloco.perception.snapshot_context import ClipKind
+from miloco.perception.snapshot_context import ClipKind, OmniEventArtifacts
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +153,80 @@ def save_clips(
             logger.error("Failed to write %s: %s", path, e)
             continue
     return count
+
+
+def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
+    """落盘一次 omni 触发事件的所有产物(clip 字节 + omni trace).
+
+    路径:
+    - per-device clip: `{snapshot_root}/{event_id}/{region_slug(device_id)}/clip.{mp4|m4a}`
+    - 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
+
+    Args:
+        event_id: 事件 UUID
+        artifacts: 含 clips dict 和 trace dict 的容器.两者都空时返 0 不落任何文件.
+
+    Returns:
+        成功落盘的 device clip 个数(0 ~ len(artifacts.clips));trace 不计入.
+        语义跟旧 save_clips 一致,保持 MeaningfulEvent.snapshot_count 字段含义.
+
+    Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 OSError 静默跳过.
+    """
+    if not artifacts.clips and artifacts.trace is None:
+        return 0
+
+    snapshot_root = get_snapshot_root()
+    event_dir = snapshot_root / event_id
+    try:
+        event_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error("Failed to create event dir %s: %s", event_dir, e)
+        return 0
+
+    clip_count = _save_clips(event_dir, artifacts.clips)
+    if artifacts.trace is not None:
+        _save_trace(event_dir, artifacts.trace)
+    return clip_count
+
+
+def _save_clips(
+    event_dir: Path,
+    clips: dict[str, tuple[bytes, ClipKind]],
+) -> int:
+    """落 per-device clip 字节到 event_dir.kind 非法 / 空字节 → 跳过该 device."""
+    count = 0
+    for device_id, (clip_bytes, kind) in clips.items():
+        if not clip_bytes:
+            continue
+        if kind not in ("mp4", "m4a"):
+            logger.error("Unknown clip kind %r for %s; skipping", kind, device_id)
+            continue
+        device_dir = event_dir / region_slug(device_id)
+        try:
+            device_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.error("Failed to create device dir %s: %s", device_dir, e)
+            continue
+        path = device_dir / f"clip.{kind}"
+        try:
+            path.write_bytes(clip_bytes)
+            count += 1
+        except OSError as e:
+            logger.error("Failed to write %s: %s", path, e)
+            continue
+    return count
+
+
+def _save_trace(event_dir: Path, trace: dict[str, Any]) -> None:
+    """gzip 压缩 trace dict 并落盘.失败 logger.error 不抛,clip 落盘不受影响."""
+    try:
+        payload = json.dumps(trace, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        gz_bytes = gzip.compress(payload)
+        (event_dir / "omni_trace.json.gz").write_bytes(gz_bytes)
+    except (OSError, TypeError, ValueError) as e:
+        logger.error("Failed to write trace for %s: %s", event_dir.name, e)
 
 
 def cleanup_snapshots(ttl_days: int, max_disk_mb: int) -> dict:

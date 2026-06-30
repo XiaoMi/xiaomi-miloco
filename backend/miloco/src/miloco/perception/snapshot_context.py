@@ -42,14 +42,18 @@ device_id 来源:miloco.observability.context.DeviceContext.device_id — pipeli
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
 
 from miloco.observability.context import get_device_context
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+logger = logging.getLogger(__name__)
 
 # clip 字节的容器/codec 类型,持久化层据此选 filename 与 Content-Type.
 # 主流 UI <video> 控件对两者都能渲染,但浏览器 / 一些播放器靠扩展名 sniff 容器,
@@ -100,3 +104,130 @@ def push_clip_bytes(clip_bytes: bytes, kind: ClipKind) -> None:
     if ctx is None:
         return
     sink[ctx.device_id] = (clip_bytes, kind)
+
+
+@dataclass
+class OmniEventArtifacts:
+    """一次 omni 触发事件的所有产物.
+
+    每个字段是一种独立产物,互不污染:
+    - clips: per-device 视频/音频字节(omni 上传给 LLM 的原始字节,零重编)
+    - trace: prompt + response 文本结构(便于复盘 LLM 决策)
+
+    未来扩展(如 identity_snapshot / rule_context)在 dataclass 加新字段、
+    snapshot_writer.save_event_artifacts 加分支即可,其他文件零改动.
+    """
+
+    clips: dict[str, tuple[bytes, ClipKind]] = field(default_factory=dict)
+    trace: dict[str, Any] | None = None
+
+
+_artifacts: ContextVar[OmniEventArtifacts | None] = ContextVar(
+    "artifacts", default=None
+)
+
+
+@contextmanager
+def event_artifacts_scope(artifacts: OmniEventArtifacts) -> Iterator[None]:
+    """在 with 块内开启事件 artifacts 收集,块结束自动 reset.
+
+    Args:
+        artifacts: 调用方提供的 OmniEventArtifacts 实例;块内 push_clip_bytes /
+                   push_omni_trace 写入,退出后调用方读取.
+
+    asyncio-safe — ContextVar 跟当前 task 绑定,跨 await 不丢;子 task spawn 时复制
+    父 task 当前值.嵌套 scope 会覆盖外层(realtime/on_demand 路径都是单层).
+    """
+    token = _artifacts.set(artifacts)
+    try:
+        yield
+    finally:
+        _artifacts.reset(token)
+
+
+def push_omni_trace(
+    *,
+    request_messages: list[dict[str, Any]],
+    response_raw: dict[str, Any] | None,
+    latency_ms: float,
+    error: dict[str, Any] | None,
+    model: str,
+) -> None:
+    """omni HTTP 调用出口(含失败 finally 分支):累积一次调用到 artifacts.trace.
+
+    Args:
+        request_messages: omni 上送的 messages list(OpenAI 形态).非 text block
+            会被 _strip_base64 剥到只剩 type,base64 内容不进 trace.
+        response_raw: omni 返回 raw dict(含 choices/usage).HTTP 失败时传 None.
+            stream 路径调用方需自行拼伪 raw(content 拼接 chunks, usage 兜底空 dict).
+        latency_ms: 单次 omni HTTP 调用耗时.
+        error: 失败时 {"code": ..., "msg": ...},成功时 None.
+        model: omni 模型 ID.
+
+    无 active scope 时静默 no-op.内部任何异常吞掉 + logger.error,不影响 omni 主流程.
+    """
+    try:
+        artifacts = _artifacts.get()
+        if artifacts is None:
+            return
+        if artifacts.trace is None:
+            artifacts.trace = {"schema_version": 1, "calls": []}
+        artifacts.trace["calls"].append(
+            {
+                "model": model,
+                "request": _strip_base64(request_messages),
+                "response": _pick_response_fields(response_raw),
+                "latency_ms": latency_ms,
+                "error": error,
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("push_omni_trace failed: %s", e)
+
+
+def _strip_base64(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """剥掉非 text block 的 base64,重组为 {system, user_blocks}.
+
+    text block 保留原文;video_url / image_url block 只保留 type 占位 — 字节级数据
+    已经在 artifacts.clips 里独立落盘,trace 文件没必要再冗余 ~MB 级 base64.
+
+    输入是 OpenAI messages list 形态;输出展平掉 role 维度(只取 system + user),
+    reader 不用再过滤 role.
+    """
+    system = ""
+    user_blocks: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if role == "system":
+            if isinstance(content, str):
+                system = content
+        elif role == "user" and isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                t = block.get("type")
+                if t == "text":
+                    user_blocks.append({"type": "text", "text": block.get("text", "")})
+                elif t in ("video_url", "image_url"):
+                    user_blocks.append({"type": t})
+    return {"system": system, "user_blocks": user_blocks}
+
+
+def _pick_response_fields(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """从 OpenAI raw response 抽 choices[0].message.content + usage.
+
+    raw=None(HTTP 失败)或 choices 为空时返空字符串 + 空 usage,保证 schema 稳定.
+    """
+    if raw is None:
+        return {"content": "", "usage": {}}
+    choices = raw.get("choices") or []
+    content = ""
+    if choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message") or {}
+            if isinstance(message, dict):
+                content = message.get("content", "") or ""
+    usage = raw.get("usage") or {}
+    return {"content": content, "usage": usage}
