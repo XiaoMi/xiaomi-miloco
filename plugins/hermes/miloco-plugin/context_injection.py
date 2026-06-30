@@ -1,13 +1,18 @@
-"""pre_llm_call 钩子：按 session profile 注入 miloco 上下文。
+"""pre_llm_call 钩子：按 session profile 注入 miloco 上下文（**被动信息**，不是身份宣告）。
 
 移植自 openclaw TypeScript 插件 ``plugins/openclaw/src/hooks/prompt.ts`` +
 ``home-profile/helpers.ts`` + ``home-profile/injection.ts``。
 
-Hermes 设计上 ``pre_llm_call`` 只能往 **user message** 注入 ``{"context": text}``
-（保 prompt cache，不污染 system prompt）。openclaw 端原本分
-``prependSystemContext`` / ``appendSystemContext`` 两段，这里合并成单个 context
-块：先指令块（identity/capabilities/perception/memory/notify/language），再数据块
-（home-profile / pending-suggestions / device-catalog），用分隔线隔开。
+**Hermes pre_llm_call 的核心约束**（见 ``hermes_cli/plugins.py:1713-1721``）：
+只能往 ``user_message`` 注入 ``{"context": text}``，**不能改 system prompt**。
+所以本钩子输出只能放"事实陈述"——身份/能力宣告属于 user AGENTS.md 自配范畴，
+不应在 plugin 的 user-context 里硬塞（语义降级："你是 X"会污染 user message）。
+
+OpenClaw 端的 ``prependSystemContext`` 走 system prompt 通路，Hermes fork 没这层，
+所以"指令性 block"（identity/capabilities/notify/language）全部删掉，**只留
+neutral data**：tools 索引（被动清单）+ 感知数据格式（中性 schema）+ 数据源路径
+（家庭档案 / 感知记忆位置）。数据块（home-profile 内容 / 设备目录）是真 fact，
+user-context 带它们合理。
 
 profile 判定（与 TS 端 ``resolveProfile`` 对齐）：
 - ``platform == "cron"`` 或 session_id 含 ``":cron:"`` / ``"miloco:cron:"`` → minimal
@@ -63,23 +68,27 @@ def resolve_profile(
 
 
 # ---------------------------------------------------------------------------
-# 静态指令块（抄自 prompt.ts，文本保持 1:1）
+# 静态块——**只放事实陈述，不放指令**
+# 删除的身份/能力宣告原本来自 openclaw prompt.ts,但 OpenClaw 走 system prompt
+# 通路(``prependSystemContext``),Hermes fork 没该通路(plugin 只能 inject
+# user context),硬塞进 user message 会让 LLM 当 user 引用读、语义降级。
+# Identity 类的内容由用户在 Hermes AGENTS.md / agent system prompt 自配。
 # ---------------------------------------------------------------------------
 
-B_IDENTITY = (
-    "你是经验丰富的家庭智能管家 Miloco。你能感知家中发生的事件，理解家庭成员的生活习惯，"
-    "并据此做出贴心的行为或建议——查询和控制设备、把家调到成员舒适的状态，"
-    "或在合适的时机给出有用的提醒。\n"
-    "说话像住在这个家里的人：自然、利落、有分寸。不堆砌设备状态、传感器读数或技术细节，除非成员问起。"
-)
+# B_IDENTITY = ""  # 占位说明:身份宣告已彻底删,见上头 docstring。
+B_IDENTITY = ""
 
-B_CAPABILITIES = """## 能力概览
-- 设备控制：查询和控制家中设备、调节环境、触发场景，把家调到成员舒适的状态
-- 实时感知：查看家里此刻的状态——传感器读数、摄像头多模态理解
-- 主动智能：结合感知记忆、家庭档案和当下的时间 / 环境，在合适时机给成员合理的提醒或建议，并通过语音 / IM / 米家推送送达
-- 任务编排：把成员交代的事编排成提醒、周期任务、累积统计，或"满足条件就自动执行"的规则
-- 家庭记忆：感知记忆（家中每天发生的事件）+ 家庭档案（成员构成、行为作息习惯、设备使用习惯）
-- 成员识别：家庭成员的注册与识别"""
+B_CAPABILITIES = """## 工具索引(被动清单)
+本环境配套的 miloco-* skills（已同步到 ``~/.hermes/skills/miloco-*``,行为定义各自 SKILL.md）:
+
+按用途分组:
+- **设备控制**: miloco-devices / miloco-miot-scope / miloco-miot-admin
+- **身份**: miloco-miot-identity / miloco-miot-identity-register
+- **家庭**: miloco-home-observe / miloco-home-patrol / miloco-home-profile / miloco-home-promote / miloco-home-prune
+- **感知 / 通知**: miloco-perception / miloco-perception-digest / miloco-notify
+- **习惯 / 任务**: miloco-habit-suggest / miloco-create-task / miloco-terminate-task
+
+调用约定: 该用什么 skill/CLI 完成什么动作,各 skill 的 SKILL.md 里有具体纪律。本字段不做行为指令、不替代 SKILL.md 描述。"""
 
 PERCEPTION_FORMAT = {
     "voice": (
@@ -147,33 +156,35 @@ def _build_perception(profile: Profile) -> str:
     )
 
 
-B_MEMORY = """## 家庭记忆
-做任何事（控设备、给建议、写通知）之前，先查这两份记忆，让动作更精准、更合成员心意：
-- **感知记忆**——家里最近发生了什么（每天自动归档的事件），用 `memory_search` 查（读不到当天文件就跳过）。
-- **家庭档案**——成员的偏好、习惯、家庭规则、设备使用经验，见另注入的家庭档案摘要。
+B_MEMORY = """## 数据源(被动信息)
+- **感知记忆** —— 家中近期感知事件归档到 ``$MILOCO_HOME/events/``（按日期组织的 md），需要时用 ``memory_search`` 工具查询。
+- **家庭档案** —— 当前成员快照,见下方 ``## 家庭档案`` 块(空档案占位 ``(暂无内容)``)。
 
-用户实时指令 > 档案规则（除非档案明确标注为底线 / 红线）。对话中出现成员喜好 / 家人信息 / 作息规律时，即使没说"记录"，也静默写入档案（先 `home-profile list` 看全量再写）。"""
+调用详情: 涉及过往成员行为/历史事件时用相应 skill 或 CLI,具体纪律在 skill 的 SKILL.md。本字段只标数据位置、不发指令。"""
 
-# 留空占位：与 TS 端一致。
+# 留空占位:与 TS 端一致(B_RULE_EXEC / B_CONSTRAINTS)。
 B_RULE_EXEC = ""
 B_CONSTRAINTS = ""
 
-B_NOTIFY = """## 通知用户
-**要主动找人时——而不是当面回答用户此刻的提问——动手前必须先读 `miloco-notify` skill。** 典型场景：处理完感知 / 定时 / 规则等系统推送后要告知用户，以及危险预警、任务到期 / 达成、定时播报、设备反馈、关怀提醒、用户要配置通知渠道。
-为什么是硬性前置、不能跳过：
-- **处理系统推送时你的回话对用户不可见**——光把结论写进回复，没有任何人收到，等于没通知。必须经本 skill 决策并交付渠道才算送达。
-- 通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 `miloco_im_push` / `miloco-cli notify push` / TTS，否则容易选错人、选错渠道、说错话。"""
-
-B_LANGUAGE = "## 输出语言\n用用户使用的语言回复用户（设备名、人名、专有名词保持原样）。"
+# B_NOTIFY / B_LANGUAGE 已彻底删:
+# - 通知规则的"动手前先读 miloco-notify"属于 skill 行为纪律,放在
+#   ``plugins/skills/miloco-notify/SKILL.md`` 里（已存在),pre_llm_call 不重复。
+# - 输出语言遵循用户上下文即可,LLM 会自然匹配,不需要 plugin 指令。
+B_NOTIFY = ""
+B_LANGUAGE = ""
 
 
 # ---------------------------------------------------------------------------
 # 动态数据块
 # ---------------------------------------------------------------------------
 
-DEVICE_CATALOG_INTRO = """## 设备目录
-下方 `# devices catalog` 是预注入的高频设备子集（≤50 台，非全量），字段规则见下方目录头部的注释。它**只用于快速拿到已点名单台设备的 did / spec_name**，不是全屋设备的全集。凡涉及设备**集合 / 多台 / 不确定数量**（无论查询还是控制），或目录里找不到目标，**必须先 `device list` 拉全量**再逐台处理，别拿子集当全部。
-**任何 `device control / props / action` 或 `scene` 命令前（含查询），必须先读 `miloco-devices` skill**——命令选择、集合判定、安全确认、补 on、错误处理等都在其中，别只凭本目录裸发。"""
+DEVICE_CATALOG_INTRO = """## 设备目录(数据)
+下方 ``# devices catalog`` 是预注入的高频设备子集（≤50 台,非全量）。字段规则见该块头部注释。
+
+边界参考:
+- 本目录**只用于快速拿到已点名单台设备**的 ``did`` / ``spec_name``。
+- 凡涉及设备**集合 / 多台 / 不确定数量**（无论查询还是控制），或本目录查不到目标，先 ``device list`` 拉全量再处理。
+- ``device control / props / action`` 或 ``scene`` 命令的具体纪律（选择/集合判定/安全确认/补 on/错误处理）以 ``miloco-devices`` skill 的 SKILL.md 为准——本字段只是路径索引,不重复纪律。"""
 
 
 def _home_profile_path() -> Path:
@@ -242,8 +253,21 @@ def build_pending_suggestion_block() -> str:
 # ---------------------------------------------------------------------------
 
 def _build_prepend(profile: Profile) -> str:
-    """指令块，按 prompt.ts §3 序。"""
-    parts: List[str] = [B_IDENTITY]
+    """被动信息块（按 prompt.ts §3 序,但已经全去掉指令性内容）。
+
+    Hermes pre_llm_call 只能往 user message 注入,不能改 system prompt,
+    所以这里不放 identity 宣告也不放"必须先...做..."类指令。只放:
+    - 工具索引(B_CAPABILITIES):告诉 LLM 这个环境里有哪些 skill 可用
+    - 感知格式(B_PERCEPTION / PERCEPTION_FORMAT 拼装):被动数据 schema
+    - 数据源(B_MEMORY):被动信息路径
+
+    profile 决定下哪些 block:
+    - rule / minimal:不附完整工具索引和感知格式(只塞必要的)
+    - full:全量
+    """
+    parts: List[str] = []
+    if B_IDENTITY:                  # 保留兼容位（已设 "" 空串）
+        parts.append(B_IDENTITY)
     if profile == "full":
         parts.append(B_CAPABILITIES)
     if profile != "minimal":
@@ -254,8 +278,8 @@ def _build_prepend(profile: Profile) -> str:
         parts.append(B_MEMORY)
     if B_CONSTRAINTS:
         parts.append(B_CONSTRAINTS)
-    parts.append(B_NOTIFY)
-    parts.append(B_LANGUAGE)
+    # B_NOTIFY / B_LANGUAGE 都已置空,这里也跳过(if truthy 过滤):
+    parts = [p for p in parts if p]
     return "\n\n".join(parts)
 
 
