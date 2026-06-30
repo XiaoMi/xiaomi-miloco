@@ -264,12 +264,6 @@ export interface DeviceSpec {
   events?: DeviceSpecEvent[];
 }
 
-export interface DevicePropertyKey {
-  key: string;
-  count: number;
-  recent_values: string[];
-}
-
 export interface MiotEventTriggerLog {
   id: string;
   trigger: {

@@ -106,8 +106,13 @@ class Manager:
         self._task_service = TaskService()
 
         self._initialized = True
+        self._miot_proxy.register_automation_trigger_handler(
+            self._handle_miot_automation_trigger
+        )
         try:
-            await self._miot_service.sync_automation_property_subscriptions()
+            await self._miot_service.sync_automation_property_subscriptions(
+                self._automation_service.list_mappings()
+            )
         except Exception as e:
             logger.warning("Failed to sync automation MiOT subscriptions: %s", e)
 
@@ -118,6 +123,15 @@ class Manager:
             device_uuid = uuid.uuid4().hex
             self._kv_repo.set(SystemConfigKeys.DEVICE_UUID_KEY, device_uuid)
         self.device_uuid = device_uuid
+
+    async def _handle_miot_automation_trigger(self, trigger) -> None:
+        await self._automation_service.handle_trigger(
+            trigger=trigger,
+            perception_service=self._perception_service,
+            rule_service=self._rule_service,
+            miot_service=self._miot_service,
+            meaningful_events_dao=self.meaningful_events_dao,
+        )
 
     # Service access properties
     @property

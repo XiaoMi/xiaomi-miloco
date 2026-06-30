@@ -237,6 +237,9 @@ class PipelineProcessor:
     def unsubscribe_sse(self, q: asyncio.Queue) -> None:
         self._sse_subscribers = [s for s in self._sse_subscribers if s is not q]
 
+    def publish_sse(self, event_type: str, data: dict) -> None:
+        self._publish(event_type, data)
+
     def _publish(self, event_type: str, data: dict) -> None:
         """非阻塞广播给所有 SSE 订阅者;队列满时跳过该订阅(B11 非阻塞约束).
 

@@ -27,7 +27,6 @@ import type {
   MiotEventMapping,
   MiotEventSource,
   MiotEventTriggerLog,
-  DevicePropertyKey,
   TokenBreakdown,
   UsageCallType,
   UsageGroup,
@@ -930,26 +929,6 @@ export async function realFetchDeviceSpec(
     `/api/automation/device-spec/${did}`,
   );
   return r.data;
-}
-
-// ── Automation: device properties lookup ──────────────────
-export async function realListDeviceProperties(
-  did: string,
-): Promise<DevicePropertyKey[]> {
-  const r = await apiFetch<Normal<DevicePropertyKey[]>>(
-    `/api/automation/devices/${did}/properties`,
-  );
-  return r.data;
-}
-
-export async function realPatchRule(
-  ruleId: string,
-  patch: Record<string, unknown>,
-): Promise<void> {
-  await apiFetch(`/api/rules/${ruleId}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
 }
 
 // 流程跟 cli/src/miloco_cli/commands/account.py 同源：

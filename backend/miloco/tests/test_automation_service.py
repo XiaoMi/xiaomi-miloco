@@ -146,7 +146,10 @@ async def test_handle_trigger_keeps_query_context_in_text_only():
         captured["snapshot_sink"] = snapshot_sink
         return SimpleNamespace(answer="门口无人")
 
-    perception_service = SimpleNamespace(on_demand_perceive=_on_demand)
+    perception_service = SimpleNamespace(
+        on_demand_perceive=_on_demand,
+        publish_meaningful_event=lambda _: None,
+    )
     rule_service = SimpleNamespace(get_all_rules=AsyncMock(return_value=[]))
     meaningful_events_dao = SimpleNamespace(
         insert=lambda **_: None,
@@ -169,7 +172,6 @@ async def test_handle_trigger_keeps_query_context_in_text_only():
         rule_service=rule_service,
         miot_service=None,
         meaningful_events_dao=meaningful_events_dao,
-        pipeline=None,
     )
 
     request = captured["request"]

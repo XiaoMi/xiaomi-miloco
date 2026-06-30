@@ -443,6 +443,7 @@ class MIoTClient:
             self._callback_device_state_changed = None
             self._meta_sub_dids = set()
             self._property_sub_dids = set()
+            self._event_sub_dids = set()
             self._state_sub_dids = set()
             self._scene_sub_home_ids = set()
             self._callback_scene_changed = None

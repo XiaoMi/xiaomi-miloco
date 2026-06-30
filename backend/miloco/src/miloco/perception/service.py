@@ -108,6 +108,10 @@ class PerceptionService:
         """
         return self._pipeline.get_active_confirmed_track_keys()
 
+    def publish_meaningful_event(self, payload: dict) -> None:
+        """Publish an already-persisted meaningful event to live listeners."""
+        self._pipeline.publish_sse("meaningful_event", payload)
+
     def get_reid_extractor(self):
         """从任一活动的 DeepSortTracker 借 HumanReID 实例,给身份库注册时
         ``add_tier_a_samples_batch`` 做 .npy 兜底抽取用。

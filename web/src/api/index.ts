@@ -37,10 +37,8 @@ import type {
   ScopeHome,
   Task,
   MiotEventMapping,
-  MiotPropertyFilterCondition,
   MiotEventSource,
   MiotEventTriggerLog,
-  DevicePropertyKey,
   UsagePeriod,
   UsageStats,
   OmniConfigState,
@@ -344,19 +342,6 @@ export async function testMiotEventTrigger(input: {
 
 export async function fetchDeviceSpec(did: string): Promise<import("@/lib/types").DeviceSpec> {
   return impl.realFetchDeviceSpec(did);
-}
-
-export async function listDeviceProperties(did: string): Promise<DevicePropertyKey[]> {
-  return impl.realListDeviceProperties(did);
-}
-
-export async function patchRulePropertyFilters(
-  ruleId: string,
-  propertyFilters: Record<string, string | MiotPropertyFilterCondition>,
-): Promise<void> {
-  return impl.realPatchRule(ruleId, {
-    condition: { property_filters: propertyFilters },
-  });
 }
 
 // ── 让它休息 / 唤醒 ────────────────────────────────────────

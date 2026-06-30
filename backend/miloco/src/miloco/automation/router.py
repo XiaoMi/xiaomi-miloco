@@ -182,7 +182,9 @@ async def list_mappings(current_user: str = Depends(verify_token)):
 async def create_mapping(mapping: MiotEventMapping, current_user: str = Depends(verify_token)):
     mgr = manager()
     data = mgr.automation_service.create_mapping(mapping)
-    await mgr.miot_service.sync_automation_property_subscriptions()
+    await mgr.miot_service.sync_automation_property_subscriptions(
+        mgr.automation_service.list_mappings()
+    )
     return NormalResponse(code=0, message="created", data=data)
 
 
@@ -194,7 +196,9 @@ async def update_mapping(
 ):
     mgr = manager()
     data = mgr.automation_service.update_mapping(mapping_id, update)
-    await mgr.miot_service.sync_automation_property_subscriptions()
+    await mgr.miot_service.sync_automation_property_subscriptions(
+        mgr.automation_service.list_mappings()
+    )
     return NormalResponse(code=0, message="updated", data=data)
 
 
@@ -202,7 +206,9 @@ async def update_mapping(
 async def delete_mapping(mapping_id: str, current_user: str = Depends(verify_token)):
     mgr = manager()
     mgr.automation_service.delete_mapping(mapping_id)
-    await mgr.miot_service.sync_automation_property_subscriptions()
+    await mgr.miot_service.sync_automation_property_subscriptions(
+        mgr.automation_service.list_mappings()
+    )
     return NormalResponse(code=0, message="deleted", data=None)
 
 
@@ -225,14 +231,6 @@ async def serve_snapshot(
         if candidate.name == filename and candidate.is_file():
             return FileResponse(str(candidate), media_type="image/jpeg")
     return _error_response(404, "not found")
-
-
-@router.get("/devices/{did}/properties", response_model=NormalResponse, summary="Device property keys from recent logs")
-async def list_device_properties(did: str, current_user: str = Depends(verify_token)):
-    """Return known property keys for a device, sourced from recent trigger logs.
-    Used by the frontend to suggest property filter keys when editing miot_event rules."""
-    data = manager().automation_service.get_device_property_keys(did)
-    return NormalResponse(code=0, message="ok", data=data)
 
 
 @router.get("/logs", response_model=NormalResponse, summary="Recent MiOT event trigger logs")
@@ -269,7 +267,6 @@ async def test_trigger(
         rule_service=mgr.rule_service,
         miot_service=mgr.miot_service,
         meaningful_events_dao=mgr.meaningful_events_dao,
-        pipeline=mgr.perception_service._pipeline,
     )
     return NormalResponse(code=0, message="ok", data=log_item)
 
