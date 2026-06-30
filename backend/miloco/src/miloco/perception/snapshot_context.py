@@ -147,6 +147,10 @@ def push_omni_trace(
         error: 失败时 {"code": ..., "msg": ...},成功时 None.
         model: omni 模型 ID.
 
+    device_id 从 ContextVar(DeviceContext)取并写入 call 记录,让多摄像头 batch
+    的多条 call 能跟 artifacts.clips 的 device 维度对齐.fused 路径(batch 级单次
+    调用)未 set device_context → 记 null,reader 据此识别"整批共享一次推理".
+
     无 active scope 时静默 no-op.内部任何异常吞掉 + logger.error,不影响 omni 主流程.
     """
     try:
@@ -155,8 +159,10 @@ def push_omni_trace(
             return
         if artifacts.trace is None:
             artifacts.trace = {"schema_version": 1, "calls": []}
+        ctx = get_device_context()
         artifacts.trace["calls"].append(
             {
+                "device_id": ctx.device_id if ctx is not None else None,
                 "model": model,
                 "request": _strip_base64(request_messages),
                 "response": _pick_response_fields(response_raw),

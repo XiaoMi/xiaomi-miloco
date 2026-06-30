@@ -108,18 +108,23 @@ def test_push_omni_trace_accumulates():
         "choices": [{"message": {"content": "hello"}}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     }
-    with event_artifacts_scope(artifacts):
-        push_omni_trace(
-            request_messages=[{"role": "system", "content": "sys"}],
-            response_raw=raw,
-            latency_ms=12.3,
-            error=None,
-            model="mimo-vl",
-        )
+    token = set_device_context(DeviceContext(device_trace_id="t", device_id="cam_a", room_name="客厅"))
+    try:
+        with event_artifacts_scope(artifacts):
+            push_omni_trace(
+                request_messages=[{"role": "system", "content": "sys"}],
+                response_raw=raw,
+                latency_ms=12.3,
+                error=None,
+                model="mimo-vl",
+            )
+    finally:
+        reset_device_context(token)
     assert artifacts.trace is not None
     assert artifacts.trace["schema_version"] == 1
     assert len(artifacts.trace["calls"]) == 1
     call = artifacts.trace["calls"][0]
+    assert call["device_id"] == "cam_a"
     assert call["model"] == "mimo-vl"
     assert call["request"]["system"] == "sys"
     assert call["response"]["content"] == "hello"
@@ -131,17 +136,57 @@ def test_push_omni_trace_accumulates():
 def test_push_omni_trace_error_path():
     """HTTP 失败时 response_raw=None,trace 仍记录 error 行."""
     artifacts = OmniEventArtifacts()
+    token = set_device_context(DeviceContext(device_trace_id="t", device_id="cam_b", room_name="r"))
+    try:
+        with event_artifacts_scope(artifacts):
+            push_omni_trace(
+                request_messages=[],
+                response_raw=None,
+                latency_ms=1.0,
+                error={"code": "TimeoutError", "msg": "deadline exceeded"},
+                model="mimo-vl",
+            )
+    finally:
+        reset_device_context(token)
+    call = artifacts.trace["calls"][0]
+    assert call["device_id"] == "cam_b"
+    assert call["response"] == {"content": "", "usage": {}}
+    assert call["error"] == {"code": "TimeoutError", "msg": "deadline exceeded"}
+
+
+def test_push_omni_trace_fused_no_device_context():
+    """fused 路径(batch 级单次调用)未 set device_context → device_id 记 null."""
+    artifacts = OmniEventArtifacts()
     with event_artifacts_scope(artifacts):
         push_omni_trace(
             request_messages=[],
-            response_raw=None,
-            latency_ms=1.0,
-            error={"code": "TimeoutError", "msg": "deadline exceeded"},
+            response_raw={"choices": [{"message": {"content": "fused"}}], "usage": {}},
+            latency_ms=2.0,
+            error=None,
             model="mimo-vl",
         )
     call = artifacts.trace["calls"][0]
-    assert call["response"] == {"content": "", "usage": {}}
-    assert call["error"] == {"code": "TimeoutError", "msg": "deadline exceeded"}
+    assert call["device_id"] is None
+    assert call["response"]["content"] == "fused"
+
+
+def test_push_omni_trace_multi_device_keeps_per_call_attribution():
+    """多摄像头 batch:per-device scope 切换后 push,每条 call 记录各自的 device_id,
+    reader 能跟 artifacts.clips 的 device 维度对齐。"""
+    artifacts = OmniEventArtifacts()
+    raw = {"choices": [{"message": {"content": "x"}}], "usage": {}}
+    with event_artifacts_scope(artifacts):
+        for did in ("cam_a", "cam_b", "cam_c"):
+            t = set_device_context(DeviceContext(device_trace_id="t", device_id=did, room_name="r"))
+            try:
+                push_omni_trace(
+                    request_messages=[], response_raw=raw,
+                    latency_ms=1.0, error=None, model="mimo-vl",
+                )
+            finally:
+                reset_device_context(t)
+    calls = artifacts.trace["calls"]
+    assert [c["device_id"] for c in calls] == ["cam_a", "cam_b", "cam_c"]
 
 
 def test_strip_base64_keeps_text_drops_payload():
