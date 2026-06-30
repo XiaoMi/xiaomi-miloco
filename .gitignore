@@ -73,6 +73,7 @@ temp
 # IDE
 .vscode
 .claude/*
+.mimocode
 CLAUDE.md
 openspec
 _workspace
