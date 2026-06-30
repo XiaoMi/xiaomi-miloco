@@ -134,6 +134,23 @@ function getMappingKindLabel(item: MiotEventMapping): string {
     : "设备属性变化";
 }
 
+function compareText(a: string | null | undefined, b: string | null | undefined): number {
+  return (a || "\uffff").localeCompare(b || "\uffff", "zh-CN", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function sortEventSourcesByRoom(items: MiotEventSource[]): MiotEventSource[] {
+  return [...items].sort((a, b) => {
+    const roomCompare = compareText(a.room_name, b.room_name);
+    if (roomCompare !== 0) return roomCompare;
+    const nameCompare = compareText(a.source_name, b.source_name);
+    if (nameCompare !== 0) return nameCompare;
+    return compareText(a.source_id, b.source_id);
+  });
+}
+
 export function AutomationPage({ devices, scenes, cameras }: Props) {
   const mappings = useAsync(() => listMiotEventMappings(), [devices.length, scenes.length]);
   const logs = useAsync(() => listMiotEventLogs(), []);
@@ -154,7 +171,7 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
   const [propFilters, setPropFilters] = useState<EditingPropFilter[]>([]);
 
   const sourceOptions = useMemo(
-    () => (sourceKind === "scene" ? scenes : devices),
+    () => (sourceKind === "scene" ? scenes : sortEventSourcesByRoom(devices)),
     [devices, scenes, sourceKind],
   );
 
@@ -452,8 +469,8 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
               <option value="">-- 请选择 --</option>
               {sourceOptions.map((item) => (
                 <option key={item.source_id} value={item.source_id}>
+                  {item.room_name ? `${item.room_name} / ` : ""}
                   {item.source_name}
-                  {item.room_name ? `（${item.room_name}）` : ""}
                   {` (${item.source_id.slice(-6)})`}
                 </option>
               ))}
