@@ -3,9 +3,12 @@
 
 """Unit tests for snapshot_writer(D3-T4).
 
-覆盖 region_slug / get_snapshot_root / check_disk_space / save_clips / cleanup_snapshots.
+覆盖 region_slug / get_snapshot_root / check_disk_space / save_event_artifacts /
+cleanup_snapshots.
 """
 
+import gzip
+import json
 import os
 import time
 from pathlib import Path
@@ -13,12 +16,13 @@ from unittest.mock import patch
 
 import pytest
 from miloco.perception import snapshot_writer
+from miloco.perception.snapshot_context import OmniEventArtifacts
 from miloco.perception.snapshot_writer import (
     check_disk_space,
     cleanup_snapshots,
     get_snapshot_root,
     region_slug,
-    save_clips,
+    save_event_artifacts,
 )
 
 
@@ -116,73 +120,104 @@ class TestCheckDiskSpace:
             assert check_disk_space(tmp_path, min_free_mb=1) is True
 
 
-# ─── save_clips ─────────────────────────────────────────────────────────────
+# ─── save_event_artifacts ───────────────────────────────────────────────────
 
 
-class TestSaveClips:
+class TestSaveEventArtifacts:
     @pytest.fixture(autouse=True)
     def _patch_root(self, tmp_path, monkeypatch):
         """每个测试独立 snapshot_root,避免污染."""
         monkeypatch.setattr(snapshot_writer, "get_snapshot_root", lambda: tmp_path)
         self.root = tmp_path
 
-    def test_empty_dict_returns_zero(self):
-        assert save_clips("event-1", {}) == 0
+    def test_empty_artifacts_returns_zero(self):
+        """clips 和 trace 都空 → 不创建任何文件,返 0."""
+        assert save_event_artifacts("event-1", OmniEventArtifacts()) == 0
+        assert not (self.root / "event-1").exists()
 
     def test_single_device_one_clip(self):
         """喂 1 个 device 的 mp4 字节 → 落 1 个 clip.mp4 文件."""
-        clip_bytes = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100  # 类 mp4 header
-        count = save_clips("event-1", {"cam_living_01": clip_bytes})
+        clip_bytes = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100
+        artifacts = OmniEventArtifacts(clips={"cam_living_01": (clip_bytes, "mp4")})
+        count = save_event_artifacts("event-1", artifacts)
         assert count == 1
         path = self.root / "event-1" / "cam_living_01" / "clip.mp4"
         assert path.read_bytes() == clip_bytes
 
     def test_multi_device(self):
         """两个 device 各 1 个 clip.mp4."""
-        count = save_clips(
-            "event-multi",
-            {
-                "cam_living_01": b"video-bytes-A",
-                "cam_kitchen_01": b"video-bytes-B",
-            },
+        artifacts = OmniEventArtifacts(
+            clips={
+                "cam_living_01": (b"video-bytes-A", "mp4"),
+                "cam_kitchen_01": (b"video-bytes-B", "mp4"),
+            }
         )
+        count = save_event_artifacts("event-multi", artifacts)
         assert count == 2
         assert (self.root / "event-multi" / "cam_living_01" / "clip.mp4").exists()
         assert (self.root / "event-multi" / "cam_kitchen_01" / "clip.mp4").exists()
 
     def test_empty_bytes_skipped(self):
         """某 device 字节为空 → 跳过."""
-        count = save_clips("event-empty", {"cam_a": b""})
+        artifacts = OmniEventArtifacts(clips={"cam_a": (b"", "mp4")})
+        count = save_event_artifacts("event-empty", artifacts)
         assert count == 0
 
     def test_device_id_slug_applied(self):
         """device_id 含 '/' → slug 化为 '_',目录路径合法."""
-        count = save_clips("event-slug", {"cam/living/01": b"x" * 100})
+        artifacts = OmniEventArtifacts(clips={"cam/living/01": (b"x" * 100, "mp4")})
+        count = save_event_artifacts("event-slug", artifacts)
         assert count == 1
-        # 路径用 slug 化后的名字
         assert (self.root / "event-slug" / "cam_living_01" / "clip.mp4").exists()
 
-    def test_tuple_payload_kind_decides_extension(self):
-        """新生产路径 (bytes, kind) tuple:kind='m4a' 落 clip.m4a,kind='mp4' 落 clip.mp4."""
-        count = save_clips(
-            "event-tuple",
-            {
+    def test_kind_decides_extension(self):
+        """kind='m4a' 落 clip.m4a,kind='mp4' 落 clip.mp4."""
+        artifacts = OmniEventArtifacts(
+            clips={
                 "cam_audio": (b"audio-bytes", "m4a"),
                 "cam_video": (b"video-bytes", "mp4"),
-            },
+            }
         )
+        count = save_event_artifacts("event-tuple", artifacts)
         assert count == 2
         assert (self.root / "event-tuple" / "cam_audio" / "clip.m4a").read_bytes() == b"audio-bytes"
         assert (self.root / "event-tuple" / "cam_video" / "clip.mp4").read_bytes() == b"video-bytes"
 
-    def test_tuple_unknown_kind_skipped(self):
+    def test_unknown_kind_skipped(self):
         """非法 kind(非 mp4/m4a)→ 该 device 跳过不落盘,避免污染目录."""
-        count = save_clips(
-            "event-bad-kind",
-            {"cam_a": (b"x", "webm")},  # type: ignore[dict-item]
+        artifacts = OmniEventArtifacts(
+            clips={"cam_a": (b"x", "webm")},  # type: ignore[dict-item]
         )
+        count = save_event_artifacts("event-bad-kind", artifacts)
         assert count == 0
         assert not (self.root / "event-bad-kind" / "cam_a").exists()
+
+    def test_trace_only_writes_gz(self):
+        """只有 trace → 落 omni_trace.json.gz,不创建 device 子目录,返 0."""
+        trace = {"schema_version": 1, "calls": [{"model": "mimo"}]}
+        artifacts = OmniEventArtifacts(trace=trace)
+        count = save_event_artifacts("event-trace", artifacts)
+        assert count == 0
+        gz_path = self.root / "event-trace" / "omni_trace.json.gz"
+        assert gz_path.exists()
+        # device 子目录不存在
+        device_dirs = [p for p in (self.root / "event-trace").iterdir() if p.is_dir()]
+        assert device_dirs == []
+        # gzip 解压后 schema 对齐
+        decoded = json.loads(gzip.decompress(gz_path.read_bytes()))
+        assert decoded == trace
+
+    def test_clips_and_trace_both(self):
+        """同时 clips + trace → 两类文件都落,count 只计 clip."""
+        artifacts = OmniEventArtifacts(
+            clips={"cam_a": (b"v", "mp4"), "cam_b": (b"a", "m4a")},
+            trace={"schema_version": 1, "calls": []},
+        )
+        count = save_event_artifacts("event-both", artifacts)
+        assert count == 2
+        assert (self.root / "event-both" / "cam_a" / "clip.mp4").exists()
+        assert (self.root / "event-both" / "cam_b" / "clip.m4a").exists()
+        assert (self.root / "event-both" / "omni_trace.json.gz").exists()
 
 
 # ─── cleanup_snapshots ──────────────────────────────────────────────────────

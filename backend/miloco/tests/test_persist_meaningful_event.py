@@ -17,12 +17,18 @@ from unittest.mock import patch
 
 import pytest
 from miloco.perception.client import _persist_meaningful_event
+from miloco.perception.snapshot_context import OmniEventArtifacts
 from miloco.perception.types import (
     MatchedRule,
     RealtimePerceptionResult,
     Speech,
     Suggestion,
 )
+
+
+def _artifacts(clips: dict | None = None) -> OmniEventArtifacts:
+    """造 OmniEventArtifacts 实例,只填 clips,trace 留 None."""
+    return OmniEventArtifacts(clips=clips or {})
 
 
 @pytest.fixture
@@ -93,7 +99,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01", "cam_kitchen_01"],
-            clips_by_device=clips_by_device,
+            artifacts=_artifacts(clips_by_device),
         )
 
         # 验证 DB
@@ -130,7 +136,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
-            clips_by_device={"cam_living_01": _clip_payload()},
+            artifacts=_artifacts({"cam_living_01": _clip_payload()}),
         )
         assert dao.query() == []
 
@@ -149,7 +155,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
-            clips_by_device={"cam_living_01": _clip_payload()},
+            artifacts=_artifacts({"cam_living_01": _clip_payload()}),
         )
         assert dao.query() == []
 
@@ -168,7 +174,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
-            clips_by_device={"cam_living_01": _clip_payload()},
+            artifacts=_artifacts({"cam_living_01": _clip_payload()}),
         )
         rows = dao.query()
         assert len(rows) == 1
@@ -192,7 +198,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
-            clips_by_device={"cam_living_01": _clip_payload()},
+            artifacts=_artifacts({"cam_living_01": _clip_payload()}),
         )
         rows = dao.query()
         assert len(rows) == 1
@@ -216,7 +222,7 @@ class TestPersistMeaningfulEvent:
             await _persist_meaningful_event(
                 result=result,
                 device_ids=["cam_living_01"],
-                clips_by_device={"cam_living_01": _clip_payload()},
+                artifacts=_artifacts({"cam_living_01": _clip_payload()}),
             )
 
     async def test_insert_raises_does_not_propagate(self, isolated_db, dao):
@@ -236,7 +242,7 @@ class TestPersistMeaningfulEvent:
             await _persist_meaningful_event(
                 result=result,
                 device_ids=["cam_living_01"],
-                clips_by_device={"cam_living_01": _clip_payload()},
+                artifacts=_artifacts({"cam_living_01": _clip_payload()}),
             )
 
     async def test_low_disk_skips_save_but_inserts(self, isolated_db, dao):
@@ -250,7 +256,7 @@ class TestPersistMeaningfulEvent:
             await _persist_meaningful_event(
                 result=result,
                 device_ids=["cam_living_01"],
-                clips_by_device={"cam_living_01": _clip_payload()},
+                artifacts=_artifacts({"cam_living_01": _clip_payload()}),
             )
 
         rows = dao.query()
@@ -272,7 +278,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
-            clips_by_device={},
+            artifacts=_artifacts({}),
         )
         rows = dao.query()
         assert len(rows) == 1
@@ -297,7 +303,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
-            clips_by_device={},
+            artifacts=_artifacts({}),
         )
         rows = dao.query()
         assert rows[0]["text"] == build_agent_text(result)
@@ -330,7 +336,7 @@ class TestPersistMeaningfulEvent:
             await _persist_meaningful_event(
                 result=result,
                 device_ids=["cam_a"],
-                clips_by_device={},
+                artifacts=_artifacts({}),
             )
         finally:
             # 清掉 fake,避免污染后续 case
@@ -360,7 +366,7 @@ class TestPersistMeaningfulEvent:
         await _persist_meaningful_event(
             result=result,
             device_ids=list(clips.keys()),  # 对齐落盘
-            clips_by_device=clips,
+            artifacts=_artifacts(clips),
         )
 
         rows = dao.query()

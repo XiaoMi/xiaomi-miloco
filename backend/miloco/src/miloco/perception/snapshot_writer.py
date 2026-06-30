@@ -1,18 +1,20 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""有意义事件 clip 落盘 + 清理工具.
+"""有意义事件 artifacts(clip + omni trace)落盘 + 清理工具.
 
-磁盘路径:`{snapshot_root}/{event_id}/{device_id_slug}/clip.mp4`
-(一次推理 1 行 event,参与的每个摄像头各落 1 个 mp4;字节级 = omni 上传给 LLM 的内容,
-零重编;`device_id_slug` 通过 region_slug 做 URL-safe 化,避免 device_id 含 `/` 或特殊字符
-破坏路径).
+磁盘路径:
+- per-device clip: `{snapshot_root}/{event_id}/{device_id_slug}/clip.{mp4|m4a}`
+  (一次推理 1 行 event,参与的每个摄像头各落 1 个;字节级 = omni 上传给 LLM 的内容,
+   零重编;`device_id_slug` 通过 region_slug 做 URL-safe 化)
+- 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
+  (prompt + response + latency + usage + error 的 gzip JSON,用于复盘 LLM 决策)
 
 工具函数:
 - `region_slug(s)` — URL-safe 化 device_id / 区域名
 - `get_snapshot_root()` — 优先 settings.perception.snapshot_root,fallback DirectorySettings.snapshot_dir
 - `check_disk_space(root, min_free_mb)` — 写前预检(B6a)
-- `save_clips(event_id, clips_by_device)` — 落盘核心
+- `save_event_artifacts(event_id, artifacts)` — 落盘核心(clip + trace 一次完成)
 - `cleanup_snapshots(ttl_days, max_disk_mb)` — 24h cleanup loop 调用(目录结构不变,
   老 jpeg 路径下的事件也能正常按 mtime 清理)
 """
@@ -75,7 +77,7 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
 
     Returns:
         True 表示 free >= min_free_mb,允许落盘;
-        False 表示空间不足,调用方应跳过 save_clips.
+        False 表示空间不足,调用方应跳过 save_event_artifacts.
 
     检查失败(如目录不存在)按"True 可用"处理,避免误杀;真有问题在 imwrite 时 raise.
     """
@@ -88,71 +90,6 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
     except OSError as e:
         logger.error("check_disk_space failed for %s: %s", root, e)
         return True
-
-
-def save_clips(
-    event_id: str,
-    clips_by_device: dict[str, tuple[bytes, ClipKind]],
-) -> int:
-    """落盘 event clip(每个 device 一个字节级 = omni 看到的 mp4 / m4a).
-
-    路径:`{snapshot_root}/{event_id}/{region_slug(device_id)}/clip.{mp4|m4a}`.
-
-    Args:
-        event_id: 事件 UUID
-        clips_by_device: {device_id: (bytes, kind)};kind ∈ {"mp4","m4a"}.
-            - 视频路径:omni `_encode_video_mp4` push (bytes, "mp4") → 落 clip.mp4
-            - audio-only 路径:omni `_encode_audio_only_mp4` push (bytes, "m4a") → 落 clip.m4a
-            空 dict 表示无可落盘内容,返 0.
-
-    Returns:
-        成功落盘的 device 个数(0 ~ len(clips_by_device)).
-
-    Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 IOError 静默跳过.
-    扩展名跟实际容器一致(M4A 不用 .mp4 假装),events_service.locate_clip 据此区分
-    Content-Type=video/mp4 vs audio/mp4.
-
-    防御性 runtime 检查:仍接受裸 bytes 形态(回退按 mp4)用于内部直接调用 + 单测调试 —
-    标注收紧鼓励所有 caller 传 tuple,但运行时不 panic.kind 非法值(非 mp4/m4a)
-    直接跳过该 device 不落盘,避免污染目录结构.
-    """
-    if not clips_by_device:
-        return 0
-
-    snapshot_root = get_snapshot_root()
-    event_dir = snapshot_root / event_id
-    try:
-        event_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger.error("Failed to create event dir %s: %s", event_dir, e)
-        return 0
-
-    count = 0
-    for device_id, payload in clips_by_device.items():
-        # 兼容两种 payload 形态:tuple[bytes, kind] 或 裸 bytes(老 caller / 单测)
-        if isinstance(payload, tuple):
-            clip_bytes, kind = payload
-        else:
-            clip_bytes, kind = payload, "mp4"
-        if not clip_bytes:
-            continue
-        if kind not in ("mp4", "m4a"):
-            logger.error("Unknown clip kind %r for %s; skipping", kind, device_id)
-            continue
-        device_dir = event_dir / region_slug(device_id)
-        try:
-            device_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            logger.error("Failed to create device dir %s: %s", device_dir, e)
-            continue
-        path = device_dir / f"clip.{kind}"
-        try:
-            path.write_bytes(clip_bytes)
-            count += 1
-        except OSError as e:
-            logger.error("Failed to write %s: %s", path, e)
-            continue
-    return count
 
 
 def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
@@ -168,7 +105,7 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
 
     Returns:
         成功落盘的 device clip 个数(0 ~ len(artifacts.clips));trace 不计入.
-        语义跟旧 save_clips 一致,保持 MeaningfulEvent.snapshot_count 字段含义.
+        保持 MeaningfulEvent.snapshot_count 字段含义.
 
     Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 OSError 静默跳过.
     """

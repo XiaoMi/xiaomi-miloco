@@ -134,20 +134,32 @@ class TestListEvents:
 
     async def test_clip_kind_mp4_when_video_clip(self, svc, dao):
         """落 clip.mp4 → clip_kind='mp4'(UI 显 🎬)."""
-        from miloco.perception.snapshot_writer import save_clips
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         eid = _insert(dao, device_ids=["cam_a"])
-        save_clips(eid, {"cam_a": (b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200, "mp4")})
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                clips={"cam_a": (b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200, "mp4")}
+            ),
+        )
         events = await svc.list_events()
         assert events[0].event_id == eid
         assert events[0].clip_kind == "mp4"
 
     async def test_clip_kind_m4a_when_audio_only(self, svc, dao):
         """落 clip.m4a → clip_kind='m4a'(UI 显 🎤 音频).回归 18:42:05 误判 bug."""
-        from miloco.perception.snapshot_writer import save_clips
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         eid = _insert(dao, device_ids=["cam_a"])
-        save_clips(eid, {"cam_a": (b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 100, "m4a")})
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                clips={"cam_a": (b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 100, "m4a")}
+            ),
+        )
         events = await svc.list_events()
         assert events[0].event_id == eid
         assert events[0].clip_kind == "m4a"
@@ -199,7 +211,7 @@ class TestLocateClip:
     async def test_file_missing_returns_gone(self, svc, dao):
         """event 存在且 device_id 合法,但文件还没落(snapshot_count=0)→ 410 gone."""
         eid = _insert(dao, device_ids=["cam_living_01"])
-        # 未调 save_clips,文件不存在
+        # 未调 save_event_artifacts,文件不存在
         status, path, media_type, ts = await svc.locate_clip(eid, "cam_living_01")
         assert status == "gone"
         assert path is None
@@ -208,12 +220,15 @@ class TestLocateClip:
 
     async def test_found_mp4(self, svc, dao, isolated_db):
         """落了 clip.mp4 后能正常返回 path + media_type=video/mp4 + timestamp."""
-        from miloco.perception.snapshot_writer import save_clips
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         # 用显式 timestamp 验证 found 分支返出
         eid = _insert(dao, device_ids=["cam_living_01"], timestamp=1717741883000)
         clip = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200
-        save_clips(eid, {"cam_living_01": clip})
+        save_event_artifacts(
+            eid, OmniEventArtifacts(clips={"cam_living_01": (clip, "mp4")})
+        )
 
         status, path, media_type, ts = await svc.locate_clip(eid, "cam_living_01")
         assert status == "found"
@@ -224,16 +239,14 @@ class TestLocateClip:
 
     async def test_found_m4a(self, svc, dao, isolated_db, tmp_path, monkeypatch):
         """audio-only 路径落 clip.m4a → media_type=audio/mp4 + timestamp 透传."""
-        from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         eid = _insert(dao, device_ids=["cam_audio_01"], timestamp=1717741900000)
-        # 手工写一个 m4a 模拟 audio-only 路径(snapshot_writer.save_clips 目前只写 mp4,
-        # 这里直接模拟 omni audio-only 路径产物落地后 service 的读取行为).
-        root = get_snapshot_root()
-        device_dir = root / eid / region_slug("cam_audio_01")
-        device_dir.mkdir(parents=True, exist_ok=True)
         clip = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 100
-        (device_dir / "clip.m4a").write_bytes(clip)
+        save_event_artifacts(
+            eid, OmniEventArtifacts(clips={"cam_audio_01": (clip, "m4a")})
+        )
 
         status, path, media_type, ts = await svc.locate_clip(eid, "cam_audio_01")
         assert status == "found"
@@ -244,11 +257,14 @@ class TestLocateClip:
 
     async def test_device_id_with_unsafe_chars(self, svc, dao):
         """device_id 含 '/' → save 时被 slug 化,读时也用 slug,能找到."""
-        from miloco.perception.snapshot_writer import save_clips
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         eid = _insert(dao, device_ids=["cam/living/01"])
         clip = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100
-        save_clips(eid, {"cam/living/01": clip})
+        save_event_artifacts(
+            eid, OmniEventArtifacts(clips={"cam/living/01": (clip, "mp4")})
+        )
 
         status, path, _, _ = await svc.locate_clip(eid, "cam/living/01")
         assert status == "found"

@@ -62,8 +62,15 @@ def client(isolated_env):
 
 
 def _make_clip(kind: str = "mp4") -> "tuple[bytes, str]":
-    """造 (bytes, kind) 元组模拟 omni push_clip_bytes 出来的 sink payload."""
+    """造 (bytes, kind) 元组模拟 omni push_clip_bytes 出来的 artifacts.clips payload."""
     return b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100, kind
+
+
+def _artifacts(clips: dict | None = None):
+    """造 OmniEventArtifacts 实例,只填 clips."""
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+
+    return OmniEventArtifacts(clips=clips or {})
 
 
 @pytest.mark.asyncio
@@ -78,7 +85,7 @@ async def test_end_to_end_rule_hit(isolated_env, client):
     await _persist_meaningful_event(
         result=result,
         device_ids=["cam_living_01"],
-        clips_by_device={"cam_living_01": clip_payload},
+        artifacts=_artifacts({"cam_living_01": clip_payload}),
     )
 
     # 1. GET /api/events 能拿到
@@ -119,10 +126,10 @@ async def test_end_to_end_multi_camera(isolated_env, client):
     await _persist_meaningful_event(
         result=result,
         device_ids=["cam_living_01", "cam_kitchen_01"],
-        clips_by_device={
+        artifacts=_artifacts({
             "cam_living_01": _make_clip(),
             "cam_kitchen_01": _make_clip(),
-        },
+        }),
     )
 
     resp = client.get("/api/events")
@@ -156,7 +163,7 @@ async def test_end_to_end_caption_only_no_event(isolated_env, client):
     await _persist_meaningful_event(
         result=result,
         device_ids=["cam_a"],
-        clips_by_device={"cam_a": _make_clip()},
+        artifacts=_artifacts({"cam_a": _make_clip()}),
     )
     resp = client.get("/api/events")
     assert resp.json()["data"]["events"] == []
