@@ -287,7 +287,9 @@ class MiotProxy:
         # disconnect window may have caused us to miss events. Registered AFTER
         # init_async on purpose: the first connect during setup should not
         # pre-empt the initial full refresh done by refresh_miot_info below.
-        self._miot_client.register_mips_connect_callback(self.refresh_devices)
+        self._miot_client.register_mips_connect_callback(
+            self._refresh_devices_on_reconnect
+        )
         await self.refresh_miot_info()
 
         if self._token_refresh_task:
@@ -812,7 +814,21 @@ class MiotProxy:
                 return devices
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
-                return None
+                raise
+
+    async def _refresh_devices_on_reconnect(self) -> None:
+        """MIPS connect-callback shim for ``refresh_devices``.
+
+        The SDK fires the connect callback via ``asyncio.ensure_future`` and
+        never reads its result, so a re-raised ``refresh_devices`` failure on a
+        transient reconnect would surface as an unretrieved task exception.
+        Awaited API callers still see the raised cause; here we swallow and log
+        so a flaky reconnect just retries on the next connect.
+        """
+        try:
+            await self.refresh_devices()
+        except Exception as e:
+            logger.error("Device refresh after MIPS reconnect failed: %s", e)
 
     @staticmethod
     def _log_device_diff(action: str, dev: MIoTDeviceInfo | None, did: str) -> None:
