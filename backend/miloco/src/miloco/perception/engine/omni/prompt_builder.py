@@ -1118,7 +1118,7 @@ def _batch_video_has_speech(packets: list[IdentityPacket]) -> bool:
 def _encode_video(identity_packet: IdentityPacket) -> str | None:
     """Encode all frames + audio into mp4 video, return base64.
 
-    若 ContextVar `snapshot_collector_scope` 在当前 task 中激活,`_encode_video_mp4`
+    若 ContextVar `event_artifacts_scope` 在当前 task 中激活,`_encode_video_mp4`
     会在 resize 后旁路 append 帧给 meaningful_events 截图复用.snapshot 落的就是
     omni 实际看到的那份 frames.
     """
@@ -1153,8 +1153,9 @@ def _encode_video_mp4(
 
     在 read mp4 bytes 之后,调 push_clip_bytes(mp4_bytes) 把字节旁路给
     meaningful_events 复用 — 字节级 = omni 上传的 mp4(零重编).若 ContextVar
-    `snapshot_collector_scope` 在当前 task 中激活,sink 会被填上 {device_id: bytes};
-    scope 未激活时 push 静默 no-op.对齐 "clip ≡ omni 看到的字节" 设计原则.
+    `event_artifacts_scope` 在当前 task 中激活,artifacts.clips 会被填上
+    {device_id: (bytes, kind)};scope 未激活时 push 静默 no-op.
+    对齐 "clip ≡ omni 看到的字节" 设计原则.
     """
     import os
     import tempfile

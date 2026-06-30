@@ -13,10 +13,9 @@ from typing import Any
 import httpx
 
 from miloco.database.token_usage_repo import fire_record
-from miloco.observability.context import get_device_context
-from miloco.observability.omni_log import publish_omni_log
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
+from miloco.perception.snapshot_context import push_omni_trace
 
 logger = logging.getLogger(__name__)
 
@@ -187,9 +186,9 @@ async def call_omni(
             f"call_omni failed: {e.__class__.__name__}: {e}", original=e
         ) from e
     finally:
-        _publish_omni_log_safe(
-            messages=messages,
-            raw=raw,
+        push_omni_trace(
+            request_messages=messages,
+            response_raw=raw,
             latency_ms=(time.monotonic() - t0) * 1000,
             error=error,
             model=config.model,
@@ -258,46 +257,6 @@ def extract_usage(raw_response: dict) -> dict[str, int]:
         "audio_tokens": int(details.get("audio_tokens") or 0),
         "video_tokens": int(details.get("video_tokens") or 0),
     }
-
-
-def _publish_omni_log_safe(
-    *,
-    messages: list[dict[str, Any]],
-    raw: dict[str, Any] | None,
-    latency_ms: float,
-    error: dict[str, Any] | None,
-    model: str,
-    response_text: str | None = None,
-) -> None:
-    """从 ContextVar 取 device meta,调 publish_omni_log(debug off 时内部自然 no-op)。"""
-    ctx = get_device_context()
-    if ctx is None:
-        return
-    if response_text is None:
-        response_text = ""
-        if raw is not None:
-            try:
-                choices = raw.get("choices") or []
-                if choices:
-                    msg = choices[0].get("message") or {}
-                    response_text = str(msg.get("content") or "")
-            except Exception:
-                response_text = ""
-    usage = extract_usage(raw) if raw is not None else {}
-    try:
-        publish_omni_log(
-            device_trace_id=ctx.device_trace_id,
-            device_id=ctx.device_id,
-            room_name=ctx.room_name,
-            messages=messages,
-            response=response_text,
-            usage=usage,
-            latency_ms=latency_ms,
-            error=error,
-            model=model,
-        )
-    except Exception:
-        logger.exception("publish_omni_log failed")
 
 
 async def call_omni_stream(
@@ -398,12 +357,18 @@ async def call_omni_stream(
         # generator close (正常 / 异常 / 消费方提前 break) 时统一上报一次
         if raw_usage_seen is not None:
             fire_record(config.model, raw_usage_seen, type)
-        raw_for_log = {"usage": raw_usage_seen} if raw_usage_seen else None
-        _publish_omni_log_safe(
-            messages=messages,
-            raw=raw_for_log,
+        # stream 路径没有原生 raw response,只能用累积的 chunks + usage 拼一份伪 raw
+        # 让 push_omni_trace 用同一 _pick_response_fields 路径抽 content/usage.
+        # error 路径 raw_for_trace 仍传 (拼出 content="" usage={}),让 trace 行包含
+        # error 字段而不是被丢弃.
+        raw_for_trace: dict[str, Any] = {
+            "choices": [{"message": {"content": "".join(response_chunks)}}],
+            "usage": raw_usage_seen or {},
+        }
+        push_omni_trace(
+            request_messages=messages,
+            response_raw=raw_for_trace,
             latency_ms=(time.monotonic() - t0) * 1000,
             error=error,
             model=config.model,
-            response_text="".join(response_chunks),
         )

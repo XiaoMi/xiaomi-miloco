@@ -2,9 +2,11 @@
 
 打包内容(缺则跳过):
   - $WORKSPACE/observability.db  (SQLite 在线备份,保证一致性快照)
-  - $MILOCO_HOME/trace/omni/*.jsonl.gz
+  - $SNAPSHOT_ROOT/<event_id>/omni_trace.json.gz  (事件级 omni 决策 trace)
   - $MILOCO_HOME/trace/agent/**/*.jsonl.gz
   - $WORKSPACE/log/*  (backend log_dir)
+
+omni trace 只 glob trace 文件,不打 clip mp4/m4a(体量大,撞 MAX_TOTAL_BYTES)。
 
 miloco.db 不入包: 含 MiOT OAuth token、person/biometric 等敏感数据,
 排查需要时另行单独提取。
@@ -30,6 +32,7 @@ from pathlib import Path
 
 from miloco.config.settings import get_settings
 from miloco.observability import debug as debug_mod
+from miloco.perception.snapshot_writer import get_snapshot_root
 from miloco.utils.paths import miloco_home
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
@@ -68,13 +71,24 @@ def _dir_size(path: Path) -> tuple[int, int]:
     return total, files
 
 
+def _scan_omni_traces() -> list[Path]:
+    """扫 snapshot_root 下事件级 omni trace 文件(每事件 1 个 ~6 KB).
+
+    只 glob `*/omni_trace.json.gz` 一层子目录,跳过 clip mp4/m4a 等大文件,
+    避免撞 MAX_TOTAL_BYTES。snapshot_root 不存在时返空列表。
+    """
+    snapshot_root = get_snapshot_root()
+    if not snapshot_root.exists():
+        return []
+    return list(snapshot_root.glob("*/omni_trace.json.gz"))
+
+
 def _scan_components() -> dict:
     """扫描各组件存在与大小;present=False 时 size/files 仍给 0。"""
     home = miloco_home()
     ws = _workspace_dir()
 
     obs_db_path = ws / "observability.db"
-    omni_dir = home / "trace" / "omni"
     agent_dir = home / "trace" / "agent"
     log_dir = ws / "log"
 
@@ -83,9 +97,10 @@ def _scan_components() -> dict:
         "present": obs_db_path.exists(),
         "size": obs_db_path.stat().st_size if obs_db_path.exists() else 0,
     }
-    if omni_dir.exists():
-        size, files = _dir_size(omni_dir)
-        comps["trace_omni"] = {"present": True, "files": files, "size": size}
+    omni_traces = _scan_omni_traces()
+    if omni_traces:
+        size = sum(p.stat().st_size for p in omni_traces)
+        comps["trace_omni"] = {"present": True, "files": len(omni_traces), "size": size}
     else:
         comps["trace_omni"] = {"present": False, "files": 0, "size": 0}
     if agent_dir.exists():
@@ -185,7 +200,9 @@ def build_log_pack() -> dict:
             if obs_snapshot is not None:
                 tar.add(obs_snapshot, arcname="observability.db")
             if comps["trace_omni"]["present"]:
-                tar.add(home / "trace" / "omni", arcname="trace/omni")
+                # 逐个 add,arcname 保留 event_id 维度,reader 能直接定位事件
+                for p in _scan_omni_traces():
+                    tar.add(p, arcname=f"trace/omni/{p.parent.name}/omni_trace.json.gz")
             if comps["trace_agent"]["present"]:
                 tar.add(home / "trace" / "agent", arcname="trace/agent")
             if comps["backend_log"]["present"]:

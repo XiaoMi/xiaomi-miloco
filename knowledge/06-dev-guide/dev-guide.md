@@ -357,22 +357,22 @@ bash scripts/install.sh --dev
 
 ## 数据落盘约定
 
-| 路径                              | 用途                                                                                                       |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `~/.openclaw/miloco/`             | `$MILOCO_HOME` 默认根                                                                                      |
-| `config.json`                     | 三端共享配置                                                                                               |
-| `miloco.db`                       | SQLite 业务数据库                                                                                          |
-| `observability.db`                | 性能追踪数据库（`perf.enabled=true` 时建）                                                                 |
-| `data/identity_lib/persons/<id>/` | 身份库（tier_a / tier_c / meta.json）                                                                      |
-| `models/`                         | ONNX 模型（必需 det_4C / human_body_reid_v2，另有可选模型；清单见 `resource_validator.py`）                |
-| `home-profile/`                   | 家庭档案（candidates.json / profile.json / profile.md）                                                    |
-| `static/`                         | 家庭面板前端静态资源（由 `install.sh` 从 `web/dist/` 同步）                                                |
-| `log/`                            | 各组件日志（`miloco-backend.log` / `supervisord.log` 等）                                                  |
-| `supervisord.*`                   | supervisor 配置和 socket（service start 首次生成）                                                         |
-| `memory/`                         | Agent 工作区记忆（如 `_system/dynamic_failures.md`；任务行为统计已迁至 `miloco.db` 的 `task_record_*` 表） |
-| `trace/agent/`                    | DYNAMIC rule trace jsonl（`debug_observability` flag 开时写）                                              |
-| `trace/omni/`                     | Omni 推理 trace jsonl（同上）                                                                              |
-| `packs/`                          | 日志打包产物（LRU 保留最新几个）                                                                           |
+| 路径                              | 用途                                                                                                        |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `~/.openclaw/miloco/`             | `$MILOCO_HOME` 默认根                                                                                       |
+| `config.json`                     | 三端共享配置                                                                                                |
+| `miloco.db`                       | SQLite 业务数据库                                                                                           |
+| `observability.db`                | 性能追踪数据库（`perf.enabled=true` 时建）                                                                  |
+| `data/identity_lib/persons/<id>/` | 身份库（tier_a / tier_c / meta.json）                                                                       |
+| `models/`                         | ONNX 模型（必需 det_4C / human_body_reid_v2，另有可选模型；清单见 `resource_validator.py`）                 |
+| `home-profile/`                   | 家庭档案（candidates.json / profile.json / profile.md）                                                     |
+| `static/`                         | 家庭面板前端静态资源（由 `install.sh` 从 `web/dist/` 同步）                                                 |
+| `log/`                            | 各组件日志（`miloco-backend.log` / `supervisord.log` 等）                                                   |
+| `supervisord.*`                   | supervisor 配置和 socket（service start 首次生成）                                                          |
+| `memory/`                         | Agent 工作区记忆（如 `_system/dynamic_failures.md`；任务行为统计已迁至 `miloco.db` 的 `task_record_*` 表）  |
+| `trace/agent/`                    | DYNAMIC rule trace jsonl（`debug_observability` flag 开时写）                                               |
+| `snapshots/<event_id>/`           | meaningful event 产物：per-device `clip.{mp4,m4a}` + 事件级 `omni_trace.json.gz`（TTL + 磁盘 LRU 同生共死） |
+| `packs/`                          | 日志打包产物（LRU 保留最新几个）                                                                            |
 
 ---
 

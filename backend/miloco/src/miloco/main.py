@@ -48,7 +48,6 @@ from miloco.observability.agent_meta_poller import (
 from miloco.observability.cleanup import (
     cleanup_agent_runs_table,
     cleanup_events_table,
-    cleanup_omni_log,
     cleanup_trace_jsonl,
     cleanup_traces_device_table,
     cleanup_traces_table,
@@ -81,10 +80,9 @@ async def _log_cleanup_loop() -> None:
     settings = get_settings()
     mgr = get_manager()
     obs_db_path = settings.directories.workspace_dir / "observability.db"
-    # trace/agent + trace/omni 由 plugin / omni_log 写到 $MILOCO_HOME 下(不带 storage 前缀),
+    # trace/agent 由 plugin 写到 $MILOCO_HOME 下(不带 storage 前缀),
     # cleanup 必须对齐源写路径,否则 root.exists() 假返回 0 导致永不清理。
     trace_root = miloco_home() / "trace" / "agent"
-    omni_log_root = miloco_home() / "trace" / "omni"
     await asyncio.sleep(60)  # delay first cleanup to avoid cold-start I/O spike
     while True:
         try:
@@ -132,11 +130,6 @@ async def _log_cleanup_loop() -> None:
                     conn.close()
             except Exception as e:
                 logger.error("Observability DB cleanup failed: %s", e)
-            try:
-                do = cleanup_omni_log(omni_log_root, settings.perf.retention.omni_log_days)
-                logger.info("Omni log cleanup: removed %d files", do)
-            except Exception as e:
-                logger.error("Omni log cleanup failed: %s", e)
         # meaningful_events 行清理(按 event_ttl_days)
         try:
             deleted_e = mgr.meaningful_events_dao.delete_before_days(
@@ -344,12 +337,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         set_agent_meta_poller(agent_meta_poller)
         _app.state.agent_meta_poller = agent_meta_poller
 
-        # omni_log SIGTERM handler 必须主线程注册 — lifespan 一定在主线程跑,
-        # 而 publish_omni_log lazy 注册可能撞 threadpool 线程导致 signal 静默
-        # 失败。显式在这里注册,消除竞态。
-        from miloco.observability.omni_log import register_sigterm_handler
-        register_sigterm_handler()
-
     # 启动后台补齐 tier_a 缺失的 ReID .npy(历史/迁移库遗留); 幂等、零阻塞
     _backfill_task = asyncio.create_task(_backfill_tier_a_reid_embeddings())
     _BG_TASKS.add(_backfill_task)
@@ -424,15 +411,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             logger.error("Failed to stop metrics client: %s", e)
         set_metrics_client(None)
-
-    # omni_log buffer 显式 flush — atexit 兜底虽然永远会跑,lifespan shutdown
-    # 走正路更稳;若 atexit 时 event loop / signal 状态异常,正路这一次已经
-    # 把数据写完。flush 幂等,与 atexit 双调无副作用。
-    try:
-        from miloco.observability.omni_log import flush as omni_log_flush
-        omni_log_flush()
-    except Exception as e:
-        logger.error("omni_log flush on shutdown failed: %s", e)
 
     # Stop monitoring threads after engine
     watchdog.stop()

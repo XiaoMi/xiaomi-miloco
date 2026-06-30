@@ -308,7 +308,6 @@ class PerfRetentionSettings(BaseModel):
     events_days: int = Field(default=7, description="events 表保留天数")
     agent_runs_days: int = Field(default=7, description="agent_runs 表保留天数")
     trace_jsonl_days: int = Field(default=7, description="agent jsonl.gz 文件保留天数")
-    omni_log_days: int = Field(default=7, description="omni 交互 log 保留天数")
 
 
 class PerfSettings(BaseModel):
@@ -318,17 +317,13 @@ class PerfSettings(BaseModel):
         default=True,
         description=(
             "性能指标采集总开关。关闭后 MetricsClient / AgentMetaPoller 不启动,"
-            "observability.db / agent_runs / trace jsonl / omni_log cleanup 全部跳过,"
+            "observability.db / agent_runs / trace jsonl cleanup 全部跳过,"
             "track_agent_run 调用单点短路。"
         ),
     )
     retention: PerfRetentionSettings = Field(
         default_factory=PerfRetentionSettings,
         description="observability 数据保留参数",
-    )
-    omni_log_max_file_mb: int = Field(
-        default=100,
-        description="omni_log 单文件 size 上限 MB,超过则 rotate 到 YYYYMMDD.N.jsonl.gz。0 表示禁用 rotate",
     )
 
 
