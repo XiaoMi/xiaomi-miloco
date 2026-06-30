@@ -385,6 +385,15 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
     return token ? `${base}?token=${encodeURIComponent(token)}` : base;
   }
 
+  const createDisabled = !sourceId || cameraIds.length === 0 || (sourceKind === "device_event" && !selectedEventKey);
+  const createHint = !sourceId
+    ? "请选择事件源"
+    : cameraIds.length === 0
+      ? "请选择至少一个关联摄像头"
+      : sourceKind === "device_event" && !selectedEventKey
+        ? "请选择要监听的设备事件"
+        : "配置完成后点击保存，命中条件时会触发关联摄像头感知";
+
   return (
     <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
       <section className="space-y-1">
@@ -646,14 +655,24 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
             />
           </div>
         </div>
-        <button
-          type="button"
-          className="rounded-md bg-brand px-4 py-2 text-caption text-white"
-          onClick={handleCreate}
-          disabled={!sourceId || cameraIds.length === 0 || (sourceKind === "device_event" && !selectedEventKey)}
-        >
-          创建映射
-        </button>
+        <div className="sticky bottom-3 z-10 -mx-1 rounded-xl border border-border bg-bg-secondary/95 px-3 py-3 shadow-lg backdrop-blur">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <span className="text-xs text-text-tertiary">{createHint}</span>
+            <button
+              type="button"
+              className={
+                "rounded-md px-5 py-2 text-caption font-medium transition-colors " +
+                (createDisabled
+                  ? "cursor-not-allowed bg-bg-tertiary text-text-tertiary"
+                  : "bg-brand text-white hover:bg-brand-primary")
+              }
+              onClick={handleCreate}
+              disabled={createDisabled}
+            >
+              保存触发配置
+            </button>
+          </div>
+        </div>
       </section>
 
       {/* Existing Mappings */}
