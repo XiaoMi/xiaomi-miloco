@@ -653,6 +653,9 @@ export function AutomationPage({ devices, scenes, cameras }: Props) {
           </div>
           <div>
             <label className="block text-caption text-text-secondary mb-1">冷却时间（秒）</label>
+            <p className="mb-1 text-xs text-text-tertiary">
+              同一事件源命中后，在这段时间内重复触发会被忽略，避免频繁感知。
+            </p>
             <input
               className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
               type="number"
