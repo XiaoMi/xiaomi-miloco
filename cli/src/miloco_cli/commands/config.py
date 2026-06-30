@@ -42,7 +42,7 @@ def _mask(data: dict) -> dict:
 
 @click.group("config", cls=OrderedGroup)
 def config_group():
-    """配置管理（服务端 / 模型 / Agent）：查看 / 取值 / 设置。"""
+    """配置管理（服务端 / 模型 / Agent）：查看 / 取值 / 设置 / 列出路径。"""
 
 
 @config_group.command("show")
