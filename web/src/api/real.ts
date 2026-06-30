@@ -673,6 +673,7 @@ export async function realListDevices(): Promise<Device[]> {
     const allProps: DeviceProperty[] = Object.entries(d.spec ?? {})
       .filter(([iid]) => iid.startsWith("prop."))
       .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
+    const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
 
     return {
       did: d.did,
@@ -680,8 +681,8 @@ export async function realListDevices(): Promise<Device[]> {
       category: cat,
       room: cleanRoom(d.room),
       online: d.online,
-      statusText: humanDeviceStatus(d, mainSwitch?.current, valueByIid),
-      statusKind: deviceStatusKind(d, mainSwitch?.current, valueByIid),
+      statusText: humanDeviceStatus(d, valueByIid, statusKind),
+      statusKind,
       dangerous,
       mainSwitch,
       props: allProps,
@@ -825,11 +826,10 @@ function deviceStatusKind(
 
 function humanDeviceStatus(
   d: BackendDevice,
-  mainOn: boolean | undefined,
   values: Map<string, unknown>,
+  kind: Device["statusKind"],
 ): string {
   const s = STATUS_TEXT[langKey()] ?? STATUS_TEXT.zh;
-  const kind = deviceStatusKind(d, mainOn, values);
   if (kind === "offline") return s.offline;
   if (kind === "locked") return s.locked;
   if (kind === "unlocked") return s.unlocked;
