@@ -1078,13 +1078,49 @@ class MiotService:
             scenes = await self._miot_proxy.get_all_scenes()
             if not scenes or scene_id not in scenes:
                 raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
+            scene = scenes[scene_id]
+            if not is_home_allowed(self._kv_repo, getattr(scene, "home_id", None)):
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
-            return await self._miot_proxy.execute_miot_scene(scene_id)
+            success = await self._miot_proxy.execute_miot_scene(scene_id)
+            if success:
+                await self._emit_scene_automation_trigger(
+                    scene,
+                    event_name="manual_trigger",
+                    raw={"source": "miot_scene_trigger_api"},
+                )
+            return success
         except (ResourceNotFoundException, ValidationException):
             raise
         except Exception as e:
             logger.error("Failed to trigger scene %s: %s", scene_id, e)
             raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e
+
+    async def _emit_scene_automation_trigger(
+        self,
+        scene: MIoTManualSceneInfo,
+        *,
+        event_name: str,
+        raw: dict,
+    ) -> None:
+        """Best-effort bridge from scene events to automation perception."""
+        try:
+            from miloco.manager import get_manager
+
+            mgr = get_manager()
+            if not getattr(mgr, "_initialized", False):
+                return
+            await mgr.automation_service.emit_scene_trigger(
+                home_id=scene.home_id,
+                scene_id=scene.scene_id,
+                event_name=event_name,
+                raw=raw,
+                miot_service=mgr.miot_service,
+                perception_service=mgr.perception_service,
+                rule_service=mgr.rule_service,
+                meaningful_events_dao=mgr.meaningful_events_dao,
+                pipeline=mgr.perception_service._pipeline,
+            )
+        except Exception as e:
+            logger.error("Failed to dispatch scene automation trigger: %s", e)
