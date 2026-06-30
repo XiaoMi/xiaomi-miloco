@@ -103,10 +103,8 @@ dispatcher:
 # 可观测性
 perf:
   enabled: true                # SQLite traces 采集开关
-  omni_log_max_file_mb: 100    # omni_log 单文件 size 上限 MB,超过 rotate;0 = 禁用
   retention:
     traces_days: 7             # traces / traces_device 表保留天数
     events_days: 7             # events 表保留天数
     agent_runs_days: 7         # agent_runs 表保留天数
     trace_jsonl_days: 7        # agent jsonl.gz 文件保留天数
-    omni_log_days: 7           # omni 交互 log 保留天数

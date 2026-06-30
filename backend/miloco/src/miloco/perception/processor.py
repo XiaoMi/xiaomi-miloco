@@ -286,7 +286,7 @@ class PipelineProcessor:
 
         self._last_batch = batch
 
-        # 给整个 cycle 绑定 trace_id,cycle 内所有 publish_event / omni_log 自动关联
+        # 给整个 cycle 绑定 trace_id,cycle 内所有 publish_event / push_omni_trace 自动关联
         trace_id = str(uuid.uuid4())
         cycle_start_unix_ms = int(time.time() * 1000)
         trace_token = set_trace_id(trace_id)
@@ -520,9 +520,9 @@ class PipelineProcessor:
             # 记 omni error,使 omni_error_count +1。错误详情在 pipeline 的 logger.warning 里。
             per_dev_omni_err = timing.get(f"_omni_error_{did}")
 
-            # 复用 pipeline 在 set_device_context 之前生成、写入 publish_omni_log
-            # 的同一把 UUID,让 trace/omni jsonl 与 traces_device 行用同一 key 关联。
-            # gate 全失败导致 timing 整体缺失时 fallback 新 UUID 保证 PRIMARY KEY 非空。
+            # 复用 pipeline 在 set_device_context 之前生成的同一把 UUID,
+            # 让 traces_device 行有稳定 device_trace_id。gate 全失败导致 timing
+            # 整体缺失时 fallback 新 UUID 保证 PRIMARY KEY 非空。
             dt_raw = timing.get(f"_device_trace_id_{did}")
             dt_id = dt_raw if isinstance(dt_raw, str) and dt_raw else str(uuid.uuid4())
 

@@ -165,7 +165,7 @@ class DebugOverrideBody(BaseModel):
 
 @router.get("/debug", summary="Debug 开关状态", response_model=NormalResponse)
 def get_debug_state(current_user: str = Depends(verify_token)):
-    """返回 omni log debug 开关的当前状态。
+    """返回 observability debug 开关的当前状态。
 
     解析顺序: runtime override > 文件 flag > 默认 False。
     """
@@ -183,7 +183,7 @@ def set_debug_override(
     """``enabled=true`` 开启并创建 .debug_observability;
     ``enabled=false`` 关闭并删除文件。重启后从文件 flag 恢复状态。
 
-    每次调用无条件触发 ``omni_log.flush()``,保证 buffer 落盘。
+    本 flag 目前不挂任何已有行为,保留供后续 debug 选项接入。
     """
     debug_mod.set_runtime_override(body.enabled)
     return NormalResponse(code=0, message="ok", data=debug_mod.get_state())
