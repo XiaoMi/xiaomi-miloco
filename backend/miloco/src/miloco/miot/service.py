@@ -1027,9 +1027,11 @@ class MiotService:
             _, c = set_cameras_in_use(self._kv_repo, enable_dids, True)
             changed = changed or c
         if changed:
-            # KV 写入后热同步感知订阅(不触发 refresh_cameras,不重建 camera manager,
-            # 不扰动 watch 视频流)。_sync_camera_adapter → sync_devices 只影响
-            # camera_adapter 里的 perception decode 订阅,与 watch WS 完全独立。
+            # 先 refresh_cameras：按新 KV(黑名单)建/销 camera manager——关掉的相机
+            # 销毁 manager，停掉 native PPCS 会话+解码线程，不再拉流。
+            # 再 _sync_camera_adapter：perception 按新 manager 集连/断订阅。顺序不可换,
+            # 否则 sync 先连上随后 manager 被销,会留 stale reg_id。
+            await self._miot_proxy.refresh_cameras()
             await self._sync_camera_adapter()
         # 返回受影响的相机，结构与 list_cameras_with_state 一致
         all_cameras = await self.list_cameras_with_state()
