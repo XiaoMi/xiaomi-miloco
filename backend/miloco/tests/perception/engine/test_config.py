@@ -4,7 +4,7 @@ from miloco.perception.engine.config import GateConfig
 
 
 def test_gate_config_default_hold_duration_sec():
-    assert GateConfig().hold_duration_sec == 360.0
+    assert GateConfig().hold_duration_sec == 90.0
 
 
 def test_gate_config_hold_duration_sec_zero_allowed():

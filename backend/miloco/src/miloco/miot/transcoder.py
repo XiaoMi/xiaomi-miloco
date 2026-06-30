@@ -131,7 +131,12 @@ class H264LiveEncoder:
                 logger.warning("flush old encoder failed: %s", e)
             self._codec = None
             self._open_encoder(w, h)
-        assert self._codec is not None
+        # Capture codec ref locally FIRST so a single read is checked and used —
+        # close() setting self._codec = None on the main thread can't slip in
+        # between the check and the encode.
+        codec = self._codec
+        if codec is None:
+            return []
 
         frame = av.VideoFrame.from_ndarray(bgr, format="bgr24")
         frame = frame.reformat(format="yuv420p")
@@ -145,7 +150,7 @@ class H264LiveEncoder:
         self._pts_counter += 1
 
         out: list[tuple[bytes, bool]] = []
-        for packet in self._codec.encode(frame):
+        for packet in codec.encode(frame):
             out.append((bytes(packet), bool(packet.is_keyframe)))
         return out
 

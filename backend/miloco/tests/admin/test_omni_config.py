@@ -55,11 +55,52 @@ def _get(client):
 # ─── GET / PUT / 档案(label=id) ────────────────────────────────────────────
 
 
-def test_get_default_active_no_profiles(client):
+def test_get_default_active_no_key_not_synthesized(client):
+    """出厂未配态:当前生效配置无 key(没有模型在跑),不合成进列表 —— 列表为空,
+    前端据此给「未配 API Key」警告,清楚表达「没有模型在跑」。"""
     data = _get(client)
     assert data["active"]["model"] == "xiaomi/mimo-v2.5"
     assert data["active"]["has_key"] is False
     assert data["profiles"] == []
+
+
+def test_active_with_key_not_in_profiles_is_synthesized(client):
+    """当前生效配置「有 key、在跑」但未存档进 profiles 时:合成补到列表头部并标 active,
+    且不与已有档案重复 —— 修复「列表看不到正在跑的当前模型」的 BUG。无 key 态不合成(见上例)。"""
+    # 先存一套带 key 的档案「甲」并令其生效
+    client.put(
+        "/api/admin/omni-config",
+        json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k123456789"},
+    )
+    # 直接把当前生效改成一套「有 key 但未存档」的配置(模拟 active 不在 profiles)
+    from miloco.config.settings import get_settings
+
+    s = get_settings()
+    s.model.omni.label = "临时未存档"
+    s.model.omni.model = "ad-hoc-model"
+    s.model.omni.base_url = "https://adhoc/v1"
+    s.model.omni.api_key = "sk-adhoc999999"
+    data = _get(client)
+    # 列表 = 合成的 active(头部) + 原档案「甲」
+    assert data["profiles"][0]["label"] == "临时未存档"
+    assert data["profiles"][0]["model"] == "ad-hoc-model"
+    assert data["profiles"][0]["active"] is True
+    assert data["profiles"][0]["has_key"] is True
+    assert any(p["label"] == "甲" and p["active"] is False for p in data["profiles"])
+    # 「甲」未被重复注入
+    assert sum(1 for p in data["profiles"] if p["label"] == "甲") == 1
+
+
+def test_active_already_in_profiles_not_duplicated(client):
+    """active 已存档时:不重复注入,列表恰有一行 active。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k123456789"},
+    )  # 默认 activate=true,甲 已存档且生效
+    data = _get(client)
+    assert len(data["profiles"]) == 1
+    assert sum(1 for p in data["profiles"] if p["active"]) == 1
+    assert data["profiles"][0]["label"] == "甲"
 
 
 def test_put_creates_and_activates(client):
@@ -137,8 +178,8 @@ def test_put_activate_false_only_adds_to_list(client):
         json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k123456789", "activate": False},
     ).json()["data"]
     assert out["active"]["label"] != "甲"  # 未切换(active 仍是默认)
-    assert any(p["label"] == "甲" for p in out["profiles"])  # 已入列表
-    assert all(not p["active"] for p in out["profiles"])  # 列表里没有一行是当前
+    jia = next(p for p in out["profiles"] if p["label"] == "甲")  # 已入列表
+    assert jia["active"] is False  # 新加的这条不是当前生效(activate=false)
 
 
 def test_put_activate_false_editing_active_still_syncs(client):
@@ -180,11 +221,149 @@ def test_activate_missing_404(client):
     assert resp.status_code == 404
 
 
-def test_delete_by_label(client):
+def test_delete_non_active_label(client):
+    """删一套非当前生效的档案:列表只剩当前生效那套(甲是最后 PUT、默认生效)。"""
+    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1", "api_key": "sk-k222222222"})
     client.put("/api/admin/omni-config", json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"})
-    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1"})
     out = client.post("/api/admin/omni-config/delete", json={"label": "乙"}).json()["data"]
     assert [p["label"] for p in out["profiles"]] == ["甲"]
+    assert out["active"]["label"] == "甲"
+
+
+def test_delete_active_resets_to_unconfigured(client):
+    """删除「当前生效」的档案:回到未配模型态 —— 当前生效配置重置为出厂默认(无 key),
+    该档案从列表移除;因 active 无 key 不再合成,列表里没有任何「当前模型」行(感知随之软停)。
+    (软停为 best-effort:测试态无活动感知引擎,delete 仍正常返回。)"""
+    client.put("/api/admin/omni-config", json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"})
+    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1", "api_key": "sk-k222222222"})
+    # 乙是最后 PUT、默认生效;删掉当前生效的乙
+    out = client.post("/api/admin/omni-config/delete", json={"label": "乙"}).json()["data"]
+    # 当前生效重置为出厂未配态(无 key)
+    assert out["active"]["has_key"] is False
+    assert out["active"]["model"] == "xiaomi/mimo-v2.5"
+    # 乙已移除;甲 仍在档案列表但非 active;无任何 active 行(无 key 不合成)
+    assert not any(p["label"] == "乙" for p in out["profiles"])
+    assert any(p["label"] == "甲" for p in out["profiles"])
+    assert all(not p["active"] for p in out["profiles"])
+
+
+class _RecordingPerceptionService:
+    """记录 stop_to_unconfigured 被 await 的次数(软停链路的可观测替身)。"""
+
+    def __init__(self):
+        self.soft_stop_calls = 0
+
+    async def stop_to_unconfigured(self):
+        self.soft_stop_calls += 1
+
+
+def test_delete_active_awaits_soft_stop(client, monkeypatch):
+    """删当前生效:除重置配置外,必须真正 await perception_service.stop_to_unconfigured 一次。
+    (此前 delete-active 测试只验配置重置半边,软停因 manager 未初始化、AttributeError 被吞而从未执行。)"""
+    from miloco.admin import router as r
+
+    fake = _RecordingPerceptionService()
+    monkeypatch.setattr(r.manager, "_perception_service", fake, raising=False)
+
+    client.put(
+        "/api/admin/omni-config",
+        json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"},
+    )  # 默认 activate=true → 甲 当前生效
+    out = client.post("/api/admin/omni-config/delete", json={"label": "甲"}).json()["data"]
+    assert fake.soft_stop_calls == 1  # 软停被 await 恰一次
+    assert out["active"]["has_key"] is False  # 当前生效重置为未配
+
+
+def test_delete_non_active_does_not_soft_stop(client, monkeypatch):
+    """删非当前生效:不重置 active、也不触发软停(感知照常运行)。"""
+    from miloco.admin import router as r
+
+    fake = _RecordingPerceptionService()
+    monkeypatch.setattr(r.manager, "_perception_service", fake, raising=False)
+
+    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1", "api_key": "sk-k222222222"})
+    client.put("/api/admin/omni-config", json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"})  # 甲 当前生效
+    out = client.post("/api/admin/omni-config/delete", json={"label": "乙"}).json()["data"]
+    assert fake.soft_stop_calls == 0  # 非生效 → 不软停
+    assert out["active"]["label"] == "甲"  # 当前生效不变
+
+
+def test_delete_synthesized_active_empty_label_resets_and_soft_stops(client, monkeypatch):
+    """删「空 label 的当前生效合成行」(env/手改直填 key 的态):按展示 label(model @ base_url)
+    定位也判为 active → 重置为未配 + 触发软停(修复空 label 删除静默无效的 bug)。"""
+    from miloco.admin import router as r
+    from miloco.config.settings import get_settings
+
+    fake = _RecordingPerceptionService()
+    monkeypatch.setattr(r.manager, "_perception_service", fake, raising=False)
+
+    # 当前生效:有 key 但 label 为空、未存档进 profiles
+    s = get_settings()
+    s.model.omni.label = ""
+    s.model.omni.model = "ad-hoc-model"
+    s.model.omni.base_url = "https://adhoc/v1"
+    s.model.omni.api_key = "sk-adhoc999999"
+    data = _get(client)
+    synth_label = data["profiles"][0]["label"]
+    assert synth_label == "ad-hoc-model @ https://adhoc/v1"  # 合成展示 label 非空
+    assert data["profiles"][0]["active"] is True
+
+    out = client.post("/api/admin/omni-config/delete", json={"label": synth_label}).json()["data"]
+    assert fake.soft_stop_calls == 1  # 软停触发(此前 was_active 误判 False → 静默无效)
+    assert out["active"]["has_key"] is False  # 重置为未配
+    assert out["profiles"] == []  # 无 key 不再合成,列表清空
+
+
+def test_edit_synthesized_active_empty_label_syncs_active(client):
+    """编辑「空 label 的当前生效合成行」:按展示 label 命中 → 同步刷新 active 并被收编进 profiles
+    (修复空 label 当前生效行无法编辑/保存即时生效的 bug)。"""
+    from miloco.config.settings import get_settings
+
+    s = get_settings()
+    s.model.omni.label = ""
+    s.model.omni.model = "ad-hoc-model"
+    s.model.omni.base_url = "https://adhoc/v1"
+    s.model.omni.api_key = "sk-adhoc999999"
+    synth_label = _get(client)["profiles"][0]["label"]
+
+    # 用合成 label 作 original_label 编辑(改 model、key 留空沿用),activate=false
+    out = client.put(
+        "/api/admin/omni-config",
+        json={"label": synth_label, "model": "ad-hoc-v2", "base_url": "https://adhoc/v1", "original_label": synth_label, "activate": False},
+    ).json()["data"]
+    assert out["active"]["model"] == "ad-hoc-v2"  # 当前生效那套即时同步
+    assert out["active"]["has_key"] is True  # key 留空 → 沿用原 key
+    assert any(p["label"] == synth_label and p["model"] == "ad-hoc-v2" for p in out["profiles"])
+
+
+def test_deactivate_active_resets_keeps_profile_and_soft_stops(client, monkeypatch):
+    """停用当前生效:active 重置为未配 + 触发软停,但档案保留(与 delete 的区别),可再启用。"""
+    from miloco.admin import router as r
+
+    fake = _RecordingPerceptionService()
+    monkeypatch.setattr(r.manager, "_perception_service", fake, raising=False)
+    client.put(
+        "/api/admin/omni-config",
+        json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"},
+    )  # 甲 当前生效
+    out = client.post("/api/admin/omni-config/deactivate", json={"label": "甲"}).json()["data"]
+    assert fake.soft_stop_calls == 1  # 软停触发
+    assert out["active"]["has_key"] is False  # 重置为未配
+    assert any(p["label"] == "甲" for p in out["profiles"])  # 档案保留(不删)
+    assert all(not p["active"] for p in out["profiles"])  # 已无生效行
+
+
+def test_deactivate_non_active_noop(client, monkeypatch):
+    """停用非当前生效那套:no-op —— 不软停、不改 active。"""
+    from miloco.admin import router as r
+
+    fake = _RecordingPerceptionService()
+    monkeypatch.setattr(r.manager, "_perception_service", fake, raising=False)
+    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1", "api_key": "sk-k222222222"})
+    client.put("/api/admin/omni-config", json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"})  # 甲 生效
+    out = client.post("/api/admin/omni-config/deactivate", json={"label": "乙"}).json()["data"]
+    assert fake.soft_stop_calls == 0  # 非生效 → 不软停
+    assert out["active"]["label"] == "甲"  # 当前生效不变
 
 
 def test_put_hot_reload_visible_to_resolve_live(client):
@@ -244,7 +423,8 @@ def _fake_async_client(resp=None, exc=None, get_resp=None, post_resp=None):
     return _C
 
 
-def test_test_connection_ok_model_in_list(client, monkeypatch):
+def test_test_connection_ok_chat_succeeds(client, monkeypatch):
+    """GET /models 过鉴权/可达预检后,极简 chat 调通 → ok(连接正常)。不再以模型在不在列表为准。"""
     from miloco.admin import router as r
 
     monkeypatch.setattr(
@@ -256,23 +436,26 @@ def test_test_connection_ok_model_in_list(client, monkeypatch):
         json={"model": "m1", "base_url": "https://x/v1", "api_key": "sk-xxx"},
     ).json()["data"]
     assert data["ok"] is True
-    assert data["code"] == "ok_model_found"
-    assert "模型可用" in data["message"]
+    assert data["code"] == "ok"
+    assert data["message"] == "连接正常"
 
 
-def test_test_connection_ok_model_not_in_list(client, monkeypatch):
+def test_test_connection_ok_even_if_model_not_listed(client, monkeypatch):
+    """模型不在 /models 列表、但 chat 能调通 → 仍判 ok —— 直接验证模型是否可用,
+    不靠「在不在可用列表」这种弱判据(列表常不全)。"""
     from miloco.admin import router as r
 
+    # GET /models 返回不含该模型的列表,但 chat(POST)返回 200 → 模型实际可用
     monkeypatch.setattr(
         r.httpx, "AsyncClient",
-        _fake_async_client(resp=_FakeResp(200, {"data": [{"id": "other"}]})),
+        _fake_async_client(get_resp=_FakeResp(200, {"data": [{"id": "other"}]}), post_resp=_FakeResp(200)),
     )
     data = client.post(
         "/api/admin/omni-config/test",
         json={"model": "m1", "base_url": "https://x/v1", "api_key": "sk-xxx"},
     ).json()["data"]
     assert data["ok"] is True
-    assert data["code"] == "ok"  # 连通但目标模型不在列表
+    assert data["code"] == "ok"  # 不在列表照样判 ok
 
 
 def test_test_connection_not_found(client, monkeypatch):
@@ -364,10 +547,42 @@ def test_list_models_ok(client, monkeypatch):
     assert data["models"] == ["a", "b"]  # sorted
 
 
-def test_list_models_no_key(client):
+def test_list_models_no_key(client, monkeypatch):
+    """无 key 但 URL 可达(探测连得上,401 也算可达)→ 报缺 key。"""
+    from miloco.admin import router as r
+
+    monkeypatch.setattr(r.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(401)))
     data = client.post(
         "/api/admin/omni-config/models", json={"base_url": "https://x/v1"}
     ).json()["data"]
     assert data["ok"] is False
     assert data["code"] == "no_key"
     assert "未配置" in data["message"]
+
+
+def test_list_models_no_key_unreachable_url_reports_url_first(client, monkeypatch):
+    """无 key 且 URL 不可达 → 优先报 URL 错(unreachable),而非被「缺 key」短路掩盖。"""
+    import httpx
+    from miloco.admin import router as r
+
+    monkeypatch.setattr(r.httpx, "AsyncClient", _fake_async_client(exc=httpx.ConnectError("boom")))
+    data = client.post(
+        "/api/admin/omni-config/models", json={"base_url": "https://nope.invalid/v1"}
+    ).json()["data"]
+    assert data["ok"] is False
+    assert data["code"] == "unreachable"  # URL 错优先于缺 key
+
+
+def test_list_models_no_key_bad_url_404_reports_url_first(client, monkeypatch):
+    """无 key 且 URL 主机可达但地址/端点不对(返回 404,如填错地址命中 openresty 404 页)→
+    优先报 URL 错(http_error),而非「未配置 API Key」。这是「先检查 URL 错误」的核心用例。"""
+    from miloco.admin import router as r
+
+    monkeypatch.setattr(
+        r.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(404, text="<html>404 openresty</html>"))
+    )
+    data = client.post(
+        "/api/admin/omni-config/models", json={"base_url": "https://wrong.example/v1"}
+    ).json()["data"]
+    assert data["ok"] is False
+    assert data["code"] == "http_error"  # 地址错优先于缺 key,且不泄漏原始 HTML

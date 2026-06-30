@@ -116,6 +116,44 @@ async def test_exited_skips_matched_pair(proxy):
     assert len(calls) == 2
 
 
+async def test_cycle_source_states_include_matched_and_false_pairs(proxy):
+    """同一 cycle 内 True / False 调用都携带完整 source 快照。
+
+    duration_seconds 依赖这个快照避免先处理的 source 读到后处理 source 的上一帧状态。
+    """
+    result = RealtimePerceptionResult(
+        skipped=False,
+        matched_rules=[
+            MatchedRule(
+                rule_id="rule_X",
+                confidence=1.0,
+                reason="A 命中",
+                source_device_ids=["cam_A"],
+            )
+        ],
+        device_rule_map={"cam_A": ["rule_X"], "cam_B": ["rule_X"]},
+    )
+    calls: list[tuple[str, str, bool, dict[str, bool] | None]] = []
+
+    async def capture(rule_id, source_did, current_bool, context="", **kwargs):
+        calls.append(
+            (
+                rule_id,
+                source_did,
+                current_bool,
+                kwargs.get("cycle_source_states"),
+            )
+        )
+
+    with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
+        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+
+    assert calls == [
+        ("rule_X", "cam_A", True, {"cam_A": True, "cam_B": False}),
+        ("rule_X", "cam_B", False, {"cam_A": True, "cam_B": False}),
+    ]
+
+
 async def test_early_sent_dedup_per_rule_did_pair(proxy):
     """early 阶段 cam_A 已上报 → set 含 ("rule_X","cam_A");终态 result 也含
     rule_X@cam_A + rule_X@cam_B → A 不重打 True,B 照常打。"""

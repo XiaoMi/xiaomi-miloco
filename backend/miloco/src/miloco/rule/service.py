@@ -491,6 +491,7 @@ class RuleService:
         trigger_dids: list[str] | None = None,
         caption: str = "",
         device_name: str = "",
+        cycle_source_states: dict[str, bool] | None = None,
     ) -> None:
         """Per-frame, per-source state report from the perception engine.
 
@@ -499,6 +500,7 @@ class RuleService:
         await self._runner.update_state(
             rule_id, source_did, current_bool, context, trigger_room, trigger_dids,
             caption=caption, device_name=device_name,
+            cycle_source_states=cycle_source_states,
         )
 
     # ---- Logs ----

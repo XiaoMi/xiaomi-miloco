@@ -253,7 +253,7 @@ class OmniContext:
     # 幻觉已停止注入；caption 变化去重与 suggestion 事件链去重均下沉到代码（见 api.py）。
     rule_conditions: list[RuleCondition] = field(default_factory=list)
     pending_speech: list[dict] | None = None  # [{"speaker": "xx", "content": "打开"}]
-    current_time: str | None = None  # "HH:MM:SS" injected system time
+    current_time: str | None = None  # "HH:MM:SS" window start time (aligned with event text)
     room_name: str | None = None  # 设备所在房间名，作场景参考注入 U4（如"厨房""书房"）
 
 

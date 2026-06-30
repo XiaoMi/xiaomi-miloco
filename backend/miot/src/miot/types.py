@@ -122,7 +122,9 @@ class MIoTDeviceInfo(BaseModel):
     room_name: Optional[str] = Field(default=None, description="Device room name")
 
     rssi: Optional[int] = Field(default=None, description="Device rssi")
-    lan_online: Optional[bool] = Field(default=None, description="LAN device online status")
+    lan_online: Optional[bool] = Field(
+        default=None, description="LAN device online status"
+    )
     local_ip: Optional[str] = Field(default=None, description="Device local ip")
     ssid: Optional[str] = Field(default=None, description="Device ssid")
     bssid: Optional[str] = Field(default=None, description="Device bssid")
@@ -146,7 +148,7 @@ class MIoTCameraInfo(MIoTDeviceInfo):
 
     channel_count: int = Field(description="Camera channel count")
     camera_status: MIoTCameraStatus = Field(description="Camera status")
-    
+
     @property
     def connected(self) -> bool:
         """Whether the local camera stream is connected."""
@@ -399,6 +401,27 @@ class MIoTSceneChangedEvent(BaseModel):
         description="Scene op: rename / delete / edit"
     )
     scene_id: Optional[str] = Field(default=None, description="Scene id if present")
+    raw: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Raw decoded payload (broker schema is undocumented)",
+    )
+    timestamp_ms: int = Field(default=0)
+
+
+class MIoTDeviceStateEvent(BaseModel):
+    """Decoded `device/{did}/state/{online,offline}` payload.
+
+    Device-level cloud online/offline state push. `did` and `event` come from
+    the topic; the payload is undocumented and kept in `raw`. The handler
+    updates the cached cloud ``online`` field directly from ``event`` rather
+    than re-fetching the device list — this is the event-driven recovery path
+    for cameras that went stale (online=false) across a backend restart.
+    """
+
+    did: str = Field(description="Device id")
+    event: Literal["online", "offline"] = Field(
+        description="Cloud state: online / offline"
+    )
     raw: Dict[str, Any] = Field(
         default_factory=dict,
         description="Raw decoded payload (broker schema is undocumented)",
