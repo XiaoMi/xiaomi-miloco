@@ -88,6 +88,16 @@ class MiotEventManualTriggerRequest(BaseModel):
     changed_properties: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateMiotEventRuleRequest(BaseModel):
+    task_id: str = Field(default="")
+    name: str = Field(default="")
+    source_ids: list[str] = Field(default_factory=list)
+    event_kinds: list[str] = Field(default_factory=lambda: ["device_prop"])
+    query: str = Field(default="")
+    property_filters: dict[str, Any] = Field(default_factory=dict)
+    action_descriptions: list[str] | None = Field(default=None)
+
+
 class MiotEventCatalog(BaseModel):
     devices: list[MiotEventSource] = Field(default_factory=list)
     scenes: list[MiotEventSource] = Field(default_factory=list)

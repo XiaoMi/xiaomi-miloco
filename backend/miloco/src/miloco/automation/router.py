@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from miloco.automation.schema import (
+    CreateMiotEventRuleRequest,
     MiotEventManualTriggerRequest,
     MiotEventMapping,
     MiotEventMappingUpdate,
@@ -163,7 +164,7 @@ async def test_trigger(
 
 @router.post("/rules", response_model=NormalResponse, summary="Create miot_event rule with property filters")
 async def create_miot_event_rule(
-    request: dict,
+    request: CreateMiotEventRuleRequest,
     current_user: str = Depends(verify_token),
 ):
     """Create a miot_event rule from the automation page.
@@ -175,13 +176,13 @@ async def create_miot_event_rule(
     from miloco.rule.schema import Rule
 
     payload = service.build_miot_event_rule_payload(
-        task_id=request.get("task_id", ""),
-        name=request.get("name", ""),
-        source_ids=request.get("source_ids", []),
-        event_kinds=request.get("event_kinds", ["device_prop"]),
-        query=request.get("query", ""),
-        property_filters=request.get("property_filters", {}),
-        action_descriptions=request.get("action_descriptions"),
+        task_id=request.task_id,
+        name=request.name,
+        source_ids=request.source_ids,
+        event_kinds=request.event_kinds,
+        query=request.query,
+        property_filters=request.property_filters,
+        action_descriptions=request.action_descriptions,
     )
     rule = Rule.model_validate(payload)
     rule_id = await mgr.rule_service.create_rule(rule)

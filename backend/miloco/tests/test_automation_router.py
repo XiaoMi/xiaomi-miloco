@@ -65,6 +65,17 @@ def test_automation_snapshot_accepts_query_token(tmp_path, monkeypatch):
     from miloco.config import reset_settings
 
     reset_settings()
+    snap_dir = tmp_path / "static" / "clips" / "automation"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    expected = b"jpeg-data"
+    (snap_dir / "ok.jpg").write_bytes(expected)
+
+    client = TestClient(_build_app())
+    resp = client.get("/api/automation/snapshots/ok.jpg?token=secret-123")
+    assert resp.status_code == 200
+    assert resp.content == expected
+
+    reset_settings()
 
 
 def test_automation_snapshot_rejects_invalid_filename_with_http_400(
