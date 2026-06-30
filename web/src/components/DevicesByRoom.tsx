@@ -195,7 +195,7 @@ function DeviceRow({ device }: RowProps) {
   const offline = !device.online;
   const ms = device.mainSwitch;
   const isOn = !offline && (ms?.current ?? false);
-  const isUnlocked = !offline && device.category === "lock" && device.statusText === "未锁";
+  const isUnlocked = device.statusKind === "unlocked";
 
   // 状态提示同色表达：在线=绿，离线=灰，需要注意=warning。
   let dotColor = "bg-text-tertiary";
