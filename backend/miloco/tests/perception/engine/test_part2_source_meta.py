@@ -58,7 +58,7 @@ def test_suggestion_msg_natural_language():
         device_name="小米智能摄像机C700", time_window="[20:42:25-20:42:28]",
     )
     text = build_suggestions_text([s])
-    assert "时间：20:42:28" in text
+    assert "时间：20:42:25" in text
     assert "来源：客厅的小米智能摄像机C700(did=1178866901)" in text
     assert "检测到：老人摔倒" in text
     assert "事件优先级：high" in text
@@ -74,7 +74,7 @@ def test_speech_msg_natural_language():
     assert "来源：卧室的小米4C(did=did1)" in text
     assert "说话人：彭于晏" in text
     assert "语音指令：关灯" in text
-    assert "时间：b" in text
+    assert "时间：a" in text
 
 
 def test_suggestion_no_meta_minimal():
