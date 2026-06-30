@@ -371,7 +371,7 @@ bash scripts/install.sh --dev
 | `supervisord.*`                   | supervisor 配置和 socket（service start 首次生成）                                                         |
 | `memory/`                         | Agent 工作区记忆（如 `_system/dynamic_failures.md`；任务行为统计已迁至 `miloco.db` 的 `task_record_*` 表） |
 | `trace/agent/`                    | DYNAMIC rule trace jsonl（`debug_observability` flag 开时写）                                              |
-| `trace/omni/`                     | Omni 推理 trace jsonl（同上）                                                                              |
+| `snapshots/<event_id>/`           | meaningful event 产物：per-device `clip.{mp4,m4a}` + 事件级 `omni_trace.json.gz`（TTL + 磁盘 LRU 同生共死）|
 | `packs/`                          | 日志打包产物（LRU 保留最新几个）                                                                           |
 
 ---

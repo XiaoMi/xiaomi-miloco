@@ -23,10 +23,13 @@ def _isolate_settings(tmp_path, monkeypatch):
     reset_settings()
 
 
+_EVT_ID = "evt-20260529"
+
+
 def _seed_miloco_home(home: Path) -> None:
-    """造完整的 5 类源数据。workspace_dir = MILOCO_HOME 顶级(storage=".")。"""
+    """造完整的源数据。workspace_dir = MILOCO_HOME 顶级(storage=".")。"""
     (home / "log").mkdir(parents=True, exist_ok=True)
-    (home / "trace" / "omni").mkdir(parents=True, exist_ok=True)
+    (home / "snapshots" / _EVT_ID).mkdir(parents=True, exist_ok=True)
     (home / "trace" / "agent" / "20260529").mkdir(parents=True, exist_ok=True)
 
     # observability.db (workspace_dir 顶级)
@@ -37,9 +40,9 @@ def _seed_miloco_home(home: Path) -> None:
     conn.commit()
     conn.close()
 
-    # omni jsonl
-    (home / "trace" / "omni" / "20260529.jsonl.gz").write_bytes(
-        gzip.compress(b'{"ts":1}\n')
+    # omni trace (事件级,落在 snapshot_root/{event_id}/omni_trace.json.gz)
+    (home / "snapshots" / _EVT_ID / "omni_trace.json.gz").write_bytes(
+        gzip.compress(b'{"schema_version":1,"calls":[]}')
     )
     # agent jsonl
     (home / "trace" / "agent" / "20260529" / "run1__q.jsonl.gz").write_bytes(
@@ -63,7 +66,7 @@ def test_build_log_pack_full(tmp_path, monkeypatch):
     with tarfile.open(pack_path, "r:gz") as tar:
         names = tar.getnames()
     assert "observability.db" in names
-    assert "trace/omni/20260529.jsonl.gz" in names
+    assert f"trace/omni/{_EVT_ID}/omni_trace.json.gz" in names
     assert "trace/agent/20260529/run1__q.jsonl.gz" in names
     assert "log/node_events.log" in names
     assert "metadata.json" in names
@@ -75,6 +78,29 @@ def test_build_log_pack_full(tmp_path, monkeypatch):
     assert comps["backend_log"]["present"] is True
     assert "openclaw_plugin_log" not in comps
     assert result["evicted"] == []
+
+
+def test_omni_trace_glob_skips_clips(tmp_path, monkeypatch):
+    """snapshot_root 下同事件目录还会有 clip.mp4/m4a(~MB);log-pack 只 glob
+    omni_trace.json.gz,clip 不进包,避免撞 MAX_TOTAL_BYTES。"""
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+    _seed_miloco_home(tmp_path)
+    # 在同事件目录下造 clip 文件,模拟生产形态
+    event_dir = tmp_path / "snapshots" / _EVT_ID
+    (event_dir / "cam_a").mkdir(parents=True)
+    (event_dir / "cam_a" / "clip.mp4").write_bytes(b"\x00" * 1024)
+
+    result = log_pack.build_log_pack()
+
+    with tarfile.open(result["path"], "r:gz") as tar:
+        names = tar.getnames()
+    assert f"trace/omni/{_EVT_ID}/omni_trace.json.gz" in names
+    # clip 不应入包
+    assert not any("clip.mp4" in n for n in names)
+    assert not any("cam_a" in n for n in names)
+    # comps.trace_omni.size 只计 trace 字节,不含 clip
+    assert result["components"]["trace_omni"]["files"] == 1
+    assert result["components"]["trace_omni"]["size"] < 1024  # 不含 1KB 的 clip
 
 
 def test_build_log_pack_partial(tmp_path, monkeypatch):
