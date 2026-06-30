@@ -106,6 +106,10 @@ class Manager:
         self._task_service = TaskService()
 
         self._initialized = True
+        try:
+            await self._miot_service.sync_automation_property_subscriptions()
+        except Exception as e:
+            logger.warning("Failed to sync automation MiOT subscriptions: %s", e)
 
     def init_device_uuid(self):
         """Initialize device UUID"""
