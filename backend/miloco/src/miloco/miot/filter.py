@@ -107,10 +107,19 @@ def select_active_camera_dids(
         if online_only and not connectable:
             continue
         result.append(did)
-    if not cap or len(result) <= MAX_ENABLED_CAMERAS:
+    if not cap:
         return result
-    # 超限：按 did 升序确定性截断（同一账号每轮选同一批）。
-    return sorted(result)[:MAX_ENABLED_CAMERAS]
+    # 超限：按流路数（而非设备数）截断，避免双摄设备悄悄翻倍解码管线。
+    # 按 did 升序确定性截断（同一账号每轮选同一批）。
+    total_streams = 0
+    capped: list[str] = []
+    for did in sorted(result):
+        ch = getattr(cameras.get(did), "channel_count", None) or 1
+        if total_streams + ch > MAX_ENABLED_CAMERAS:
+            break
+        capped.append(did)
+        total_streams += ch
+    return capped
 
 
 def filter_by_home(kv_repo: KVRepo, items: dict[str, T]) -> dict[str, T]:

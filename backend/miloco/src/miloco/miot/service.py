@@ -932,9 +932,14 @@ class MiotService:
         return homes
 
     async def list_cameras_with_state(self) -> list[dict]:
-        """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。"""
+        """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。
+
+        对于多通道摄像头（如双摄摄像头），每个通道会作为独立的条目返回。
+        注意：did 字段保持原始格式（如 1193497463），channel 字段标识通道号。
+        """
         denied = denied_camera_dids(self._kv_repo)
-        connected = self._connected_camera_dids()
+        connected = self._connected_camera_dids()  # 多通道格式的 did
+        connected_original = self._connected_camera_dids_original()  # 原始格式的 did
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
         )
@@ -947,27 +952,55 @@ class MiotService:
             online = bool(getattr(info, "online", False)) and bool(
                 getattr(info, "lan_online", False)
             )
-            out.append(
-                {
-                    "did": did,
-                    "name": getattr(info, "name", None),
-                    # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
-                    # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
-                    "room_name": getattr(info, "room_name", None),
-                    "is_online": online,
-                    "in_use": did not in denied,
-                    "connected": did in connected,
-                }
-            )
+            # 检查是否是多通道摄像头
+            channel_count = getattr(info, "channel_count", None) or 1
+            if channel_count > 1:
+                # 多通道摄像头：为每个通道创建独立的条目
+                for ch in range(channel_count):
+                    channel_did = f"{did}:ch{ch}"
+                    channel_name = f"{getattr(info, 'name', None)} (通道{ch})"
+                    out.append(
+                        {
+                            "did": did,  # 保持原始 did，用于 SDK 请求
+                            "name": channel_name,
+                            "room_name": getattr(info, "room_name", None),
+                            "is_online": online,
+                            "in_use": did not in denied,  # 使用原始 did 判断是否启用
+                            "connected": channel_did in connected,
+                            "channel": ch,  # 通道号，用于请求视频流
+                        }
+                    )
+            else:
+                # 单通道摄像头
+                out.append(
+                    {
+                        "did": did,
+                        "name": getattr(info, "name", None),
+                        # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
+                        # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
+                        "room_name": getattr(info, "room_name", None),
+                        "is_online": online,
+                        "in_use": did not in denied,
+                        "connected": did in connected_original,  # 使用原始格式的 did 判断
+                        "channel": 0,  # 默认通道 0
+                    }
+                )
         return out
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
         """批量切换相机启用状态。每项 {"did": str, "in_use": bool}。
 
+        支持多通道格式的 did（如 1193497463:ch0），会自动转换为原始 did 进行操作。
         全部校验通过后才一起写入。双向均校验未知 did 防 typo。
         """
-        enable_dids = [i["did"] for i in items if i["in_use"]]
-        disable_dids = [i["did"] for i in items if not i["in_use"]]
+        # 将多通道格式的 did 转换为原始 did
+        def _to_original_did(did: str) -> str:
+            if ':ch' in did:
+                return did.rsplit(':ch', 1)[0]
+            return did
+
+        enable_dids = [_to_original_did(i["did"]) for i in items if i["in_use"]]
+        disable_dids = [_to_original_did(i["did"]) for i in items if not i["in_use"]]
         all_dids = enable_dids + disable_dids
 
         cameras = await self._miot_proxy.get_cameras() or {}
@@ -994,9 +1027,8 @@ class MiotService:
                     f"摄像头当前离线,无法开启投喂（{offline_enable}）;请待其上线后再启用"
                 )
 
-            # 上限检查：用户主动 enable 超限时直接报错，不做自动禁用。计数口径与
-            # list_cameras_with_state / refresh_cameras 一致——只数当前启用家庭内、
-            # 未拉黑的相机（get_cameras 返回全部家庭，须按 home 过滤）。
+            # 上限检查：用户主动 enable 超限时直接报错，不做自动禁用。计数口径按
+            # 流路数（而非设备数），避免双摄设备悄悄翻倍解码管线。
             denied = denied_camera_dids(self._kv_repo)
 
             def _in_scope(did: str) -> bool:
@@ -1012,10 +1044,15 @@ class MiotService:
             final_enabled = (
                 (in_scope - denied) - set(disable_dids)
             ) | (set(enable_dids) & in_scope)
-            if len(final_enabled) > MAX_ENABLED_CAMERAS:
+            # 按流路数计数（双摄设备算 2 条流）
+            total_streams = sum(
+                (getattr(cameras.get(did), "channel_count", None) or 1)
+                for did in final_enabled
+            )
+            if total_streams > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
-                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 台摄像头"
-                    f"（操作后将有 {len(final_enabled)} 台），"
+                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 条摄像头流"
+                    f"（操作后将有 {total_streams} 条流），"
                     f"请先禁用一台再启用新摄像头"
                 )
 
@@ -1050,7 +1087,28 @@ class MiotService:
 
     def _connected_camera_dids(self) -> set[str]:
         adapter = self._camera_adapter()
-        return set(adapter.get_connected_devices().keys()) if adapter else set()
+        if not adapter:
+            return set()
+        connected = adapter.get_connected_devices().keys()
+        # 返回多通道格式的 did（如 1193497463:ch0）
+        # 这样前端可以区分每个通道的连接状态
+        return set(connected)
+    
+    def _connected_camera_dids_original(self) -> set[str]:
+        """返回原始格式的 did（如 1193497463），用于单通道摄像头的连接状态判断。"""
+        adapter = self._camera_adapter()
+        if not adapter:
+            return set()
+        connected = adapter.get_connected_devices().keys()
+        # 将多通道 did 转换回原始 did
+        result = set()
+        for did in connected:
+            if ':ch' in did:
+                original_did = did.rsplit(':ch', 1)[0]
+                result.add(original_did)
+            else:
+                result.add(did)
+        return result
 
     async def _sync_camera_adapter(self) -> None:
         """Hot-sync camera connections after a scope change."""

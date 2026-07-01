@@ -187,6 +187,8 @@ export interface ScopeCamera {
   isOnline: boolean;
   inUse: boolean;
   connected: boolean;
+  // 通道号，用于多通道摄像头（如双摄摄像头）。默认为 0。
+  channel?: number;
 }
 
 // ── 米家家庭接入范围(scope.homes)─────────────────────────────────
