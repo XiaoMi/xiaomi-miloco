@@ -1,32 +1,79 @@
 /**
- * 宠物「自动生成外观」流程（镜像 EnrollFlow 的上传→处理→结果，但产物是文本）。
- * 上传图/视频 → 调 observePet（后端选最优 crop + omni 按维度生成描述）→ 用户编辑确认
- * → onDone 回传外观文本 + 选出的头像 crop（base64），由 PetDrawer 落库/设头像。
+ * 宠物「自动生成外观描述」流程（镜像 EnrollFlow 的上传→处理→结果，但产物是文本）。
+ * 进入即先做一次感知模型连通性预检（getOmniConfig + testOmniConfig），未配置/不可用则
+ * 直接拦下并给出原因，避免走到慢 observe 才暴露模型问题。
+ * 上传图/视频 → 调 observePet（后端选最优 crop + omni 按维度生成描述）→ 用户编辑确认 →
+ * onDone 回传外观文本 + 物种 + 选出的头像 crop（base64）+ 头部框，由 PetDrawer 落库/裁剪设头像。
  * 无副作用：本组件只观察生成，不写库。
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { observePet } from "@/api";
+import { getOmniConfig, observePet, testOmniConfig } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
-import { IconX } from "@/lib/icons";
+import { IconAlert, IconX } from "@/lib/icons";
 import { toast } from "./Toast";
 
 interface Props {
   /** 是否要头部 grounding（取 features.petHeadGrounding） */
   grounding: boolean;
   onClose: () => void;
-  onDone: (result: { appearance: string; cropB64: string }) => void;
+  onDone: (result: {
+    appearance: string;
+    species: string;
+    cropB64: string;
+    headBbox: number[] | null;
+  }) => void;
 }
+
+type CheckState = "checking" | "ok" | "unconfigured" | "unavailable";
 
 export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
   const [appearance, setAppearance] = useState("");
+  const [species, setSpecies] = useState("");
   const [cropB64, setCropB64] = useState("");
+  const [headBbox, setHeadBbox] = useState<number[] | null>(null);
   const [note, setNote] = useState("");
+  const [check, setCheck] = useState<CheckState>("checking");
+  const [checkMsg, setCheckMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   useEscClose(!busy, onClose);
+
+  // 进入即预检当前生效的感知模型：未配置 / 不可用都在上传前拦下。
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const cfg = await getOmniConfig();
+        if (!alive) return;
+        if (!cfg.active?.has_key) {
+          setCheck("unconfigured");
+          return;
+        }
+        const res = await testOmniConfig({
+          label: cfg.active.label,
+          model: cfg.active.model,
+          base_url: cfg.active.base_url,
+        });
+        if (!alive) return;
+        if (res.ok) {
+          setCheck("ok");
+        } else {
+          setCheck("unavailable");
+          setCheckMsg(res.message);
+        }
+      } catch (e) {
+        if (!alive) return;
+        setCheck("unavailable");
+        setCheckMsg(e instanceof Error ? e.message : "");
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const onPick = async (file: File | undefined) => {
     if (!file) return;
@@ -39,10 +86,11 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
         setNote(t("pet.noPetDetected"));
         return;
       }
-      const summary =
-        typeof r.description?.summary === "string" ? r.description.summary : "";
-      setAppearance(summary);
+      const desc = r.description ?? {};
+      setAppearance(typeof desc.summary === "string" ? desc.summary : "");
+      setSpecies(typeof desc.species === "string" ? desc.species : "");
       setCropB64(r.primaryCropB64);
+      setHeadBbox(r.headBbox);
       setAnalyzed(true);
       setNote(r.candidates.length > 1 ? t("pet.multiPetHint") : "");
     } catch (e) {
@@ -77,6 +125,27 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
         </div>
         <p className="text-caption text-text-tertiary mb-3">{t("pet.autoGenHint")}</p>
 
+        {/* 感知模型预检状态：检测中 / 未配置 / 不可用 时拦下上传 */}
+        {check !== "ok" && (
+          <div
+            className={`flex items-start gap-2 text-caption rounded-lg px-3 py-2 mb-3 ${
+              check === "checking"
+                ? "bg-bg-tertiary text-text-secondary"
+                : "bg-error-bg text-error"
+            }`}
+          >
+            {check !== "checking" && (
+              <IconAlert width={16} height={16} className="shrink-0 mt-0.5" />
+            )}
+            <span>
+              {check === "checking" && t("pet.modelChecking")}
+              {check === "unconfigured" && t("pet.modelUnconfigured")}
+              {check === "unavailable" &&
+                t("pet.modelUnavailable", { msg: checkMsg || "—" })}
+            </span>
+          </div>
+        )}
+
         <input
           ref={fileRef}
           type="file"
@@ -87,16 +156,20 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
-          disabled={busy}
-          className="w-full py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary disabled:opacity-60 mb-3"
+          disabled={busy || check !== "ok"}
+          className="w-full py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary disabled:opacity-60"
         >
-          {busy ? t("pet.analyzing") : t("pet.uploadMedia")}
+          {busy
+            ? t("pet.analyzing")
+            : analyzed
+              ? t("pet.reuploadMedia")
+              : t("pet.uploadMedia")}
         </button>
 
-        {note && <div className="text-caption text-text-tertiary mb-2">{note}</div>}
+        {note && <div className="text-caption text-text-tertiary mt-2">{note}</div>}
 
         {analyzed && (
-          <>
+          <div className="mt-4 pt-4 border-t border-border">
             {cropB64 && (
               <div className="flex justify-center mb-3">
                 <img
@@ -106,6 +179,15 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
                 />
               </div>
             )}
+            <div className="text-caption text-text-secondary mb-1">
+              {t("pet.drawerSpecies")}
+            </div>
+            <input
+              value={species}
+              onChange={(e) => setSpecies(e.target.value)}
+              placeholder={t("pet.drawerSpeciesPlaceholder")}
+              className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border focus:border-brand-primary focus:outline-none text-text-primary mb-3"
+            />
             <div className="text-caption text-text-secondary mb-1">
               {t("pet.drawerAppearance")}
             </div>
@@ -120,12 +202,14 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
             </div>
             <button
               type="button"
-              onClick={() => onDone({ appearance: appearance.trim(), cropB64 })}
+              onClick={() =>
+                onDone({ appearance: appearance.trim(), species, cropB64, headBbox })
+              }
               className="w-full py-2 rounded-lg bg-brand-primary text-white hover:bg-brand-accent"
             >
               {t("pet.useDescription")}
             </button>
-          </>
+          </div>
         )}
       </div>
     </div>

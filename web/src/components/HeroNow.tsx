@@ -8,10 +8,12 @@
 import type {
   PerceptionCamera,
   Person,
+  Pet,
   ScopeCamera,
   UsageStats,
 } from "@/lib/types";
 import { PersonChip } from "./PersonChip";
+import { PetAvatar } from "@/components/PetAvatar";
 import { LivePlayerPlaceholder } from "./LivePlayerPlaceholder";
 import { getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
@@ -21,6 +23,10 @@ import { useTranslation } from "react-i18next";
 
 interface Props {
   persons: Person[];
+  /** 宠物花名册；仅在 petsEnabled 为真时于「家人」后追加展示。 */
+  pets?: Pet[];
+  /** 宠物识别开关（features.petRecognition）——关闭时本页不展示宠物成员。 */
+  petsEnabled?: boolean;
   /** perception 当前订阅的画面（含 channel，用于真播放）；scope 是子集映射的字典源 */
   cameras: PerceptionCamera[];
   /** 米家全集（含被禁用 / 离线），用于渲染所有摄像头卡片 + Switch */
@@ -48,6 +54,8 @@ function sortPersons(ps: Person[]): Person[] {
 
 export function HeroNow({
   persons,
+  pets,
+  petsEnabled = false,
   cameras,
   scopeCameras,
   miotHasCamera,
@@ -142,6 +150,18 @@ export function HeroNow({
             />
           ))}
         </div>
+      )}
+
+      {/* 宠物成员——仅在宠物识别开关打开且有宠物时，于家人后追加展示（关闭即不显示）。 */}
+      {petsEnabled && (pets ?? []).length > 0 && (
+        <>
+          <SectionLabel>{t("hero.petsLabel")}</SectionLabel>
+          <div className="flex flex-wrap gap-2 mb-5">
+            {(pets ?? []).map((p) => (
+              <HeroPetChip key={p.id} pet={p} />
+            ))}
+          </div>
+        </>
       )}
 
       {/* 摄像头 */}
@@ -440,6 +460,24 @@ function BenchCamItem({
         onToggle={onToggle}
       />
     </li>
+  );
+}
+
+/** 概览「家里此刻」里的宠物 chip——与 PersonChip 同款（圆头像 + 名 + 物种副行），
+ *  不可点（概览页不跳转，管理走「家庭」tab）。 */
+function HeroPetChip({ pet }: { pet: Pet }) {
+  return (
+    <div className="inline-flex items-center gap-2 pl-2 pr-4 py-1 rounded-full bg-bg-secondary border border-border">
+      <PetAvatar pet={pet} size={28} />
+      <span className="flex flex-col items-start leading-tight">
+        <span className="text-body text-text-primary leading-[18px]">
+          {pet.name}
+        </span>
+        {pet.species && (
+          <span className="text-caption text-text-tertiary">{pet.species}</span>
+        )}
+      </span>
+    </div>
   );
 }
 

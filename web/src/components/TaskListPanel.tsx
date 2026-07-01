@@ -13,6 +13,7 @@ import { deleteTask, setTaskEnabled } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconMore, IconTrash } from "@/lib/icons";
 import type { Task, TaskRecordSummary } from "@/lib/types";
+import { Switch } from "./Switch";
 import { toast } from "./Toast";
 
 interface Props {
@@ -50,40 +51,6 @@ function recordText(record: TaskRecordSummary | null, t: TFn): string {
     parts.push(t("family.taskEventToday", { count: num("count_today") }));
   }
   return parts.join(" · ");
-}
-
-// 轻量开关——track + knob，on=品牌色 / off=中性边框色，无障碍 role="switch"。
-function Switch({
-  checked,
-  disabled,
-  onChange,
-  label,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  onChange: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onChange}
-      className={`relative shrink-0 inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:opacity-50 ${
-        checked ? "bg-brand-primary" : "bg-border-strong"
-      }`}
-    >
-      <span
-        className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-          checked ? "translate-x-[18px]" : "translate-x-0.5"
-        }`}
-      />
-    </button>
-  );
 }
 
 // 行尾「更多」菜单：kebab 图标点开下拉，当前只含删除。点外/ESC 关闭。
