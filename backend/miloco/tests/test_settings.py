@@ -120,6 +120,18 @@ def test_tier_u_dump_enable_env_override(monkeypatch) -> None:
     assert get_settings().perception.tier_u_dump_enable is True
 
 
+def test_notify_dedup_window_default() -> None:
+    """通知去重窗口默认 60s。"""
+    assert get_settings().notify.dedup_window_sec == 60.0
+
+
+def test_notify_dedup_window_env_override(monkeypatch) -> None:
+    """支持 env / config.json 覆盖去重窗口。"""
+    monkeypatch.setenv("MILOCO_NOTIFY__DEDUP_WINDOW_SEC", "30")
+    reset_settings()
+    assert get_settings().notify.dedup_window_sec == 30.0
+
+
 def test_directory_paths_derive_from_miloco_home(tmp_path: Path) -> None:
     s = get_settings()
     assert s.directories.workspace_dir == tmp_path
