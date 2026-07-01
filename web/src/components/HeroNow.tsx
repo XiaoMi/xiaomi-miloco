@@ -21,8 +21,6 @@ import { useTranslation } from "react-i18next";
 
 interface Props {
   persons: Person[];
-  /** perception 当前订阅的画面（含 channel，用于真播放）；scope 是子集映射的字典源 */
-  cameras: PerceptionCamera[];
   /** 米家全集（含被禁用 / 离线），用于渲染所有摄像头卡片 + Switch */
   scopeCameras: ScopeCamera[];
   /** miot 上是否有 camera 类设备——区分两种空态 */
@@ -48,7 +46,6 @@ function sortPersons(ps: Person[]): Person[] {
 
 export function HeroNow({
   persons,
-  cameras,
   scopeCameras,
   miotHasCamera,
   maxStreamCams,

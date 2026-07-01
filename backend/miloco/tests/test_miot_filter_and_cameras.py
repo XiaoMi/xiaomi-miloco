@@ -233,6 +233,7 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
 
     svc._sync_camera_adapter = _noop  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
+    svc._connected_camera_dids_original = lambda: set()  # type: ignore[assignment]
     return svc
 
 
@@ -327,6 +328,7 @@ async def test_list_cameras_with_state_flags():
     })
     svc = _make_service(devices=devices, cameras=cameras, kv=kv)
     svc._connected_camera_dids = lambda: {"c2"}  # type: ignore[assignment]
+    svc._connected_camera_dids_original = lambda: {"c2"}  # type: ignore[assignment]
 
     out = await svc.list_cameras_with_state()
     by_did = {c["did"]: c for c in out}
