@@ -169,7 +169,10 @@ def _save_trace(event_dir: Path, trace: dict[str, Any]) -> None:
 
 
 def _save_gallery(event_dir: Path, gallery: dict[str, dict[str, bytes]]) -> None:
-    """落盘画廊合成图到 {event_dir}/gallery/{person_id}_{kind}.jpg."""
+    """落盘画廊合成图到 {event_dir}/gallery/{person_id}_{kind}.{ext}.
+
+    通过 magic bytes 判断实际格式(PNG/JPEG),扩展名与内容一致.
+    """
     gallery_dir = event_dir / "gallery"
     try:
         gallery_dir.mkdir(parents=True, exist_ok=True)
@@ -181,7 +184,8 @@ def _save_gallery(event_dir: Path, gallery: dict[str, dict[str, bytes]]) -> None
         for kind, image_bytes in images.items():
             if not image_bytes:
                 continue
-            path = gallery_dir / f"{slug}_{kind}.jpg"
+            ext = "png" if image_bytes[:4] == b"\x89PNG" else "jpg"
+            path = gallery_dir / f"{slug}_{kind}.{ext}"
             try:
                 path.write_bytes(image_bytes)
             except OSError as e:

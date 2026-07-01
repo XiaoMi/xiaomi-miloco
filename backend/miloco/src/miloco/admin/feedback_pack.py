@@ -212,8 +212,9 @@ def build_feedback_pack(
                     tar.add(clip_path, arcname=f"clips/{clip_rel}")
 
             if include_gallery and has_gallery:
-                for jpg in gallery_dir.glob("*.jpg"):
-                    tar.add(jpg, arcname=f"gallery/{jpg.name}")
+                for img in gallery_dir.iterdir():
+                    if img.suffix in (".jpg", ".png") and img.is_file():
+                        tar.add(img, arcname=f"gallery/{img.name}")
                 components["gallery_included"] = True
 
         shutil.move(str(tar_tmp), final_path)
