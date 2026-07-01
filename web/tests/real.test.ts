@@ -21,6 +21,7 @@ import {
   realListOmniModels,
   realTestOmniConfig,
   _resetUsageStatsCache,
+  _resetMiotHomeCache,
 } from "@/api/real";
 
 // 这些用例直接覆写 globalThis.fetch(非 vi.spyOn),vi.restoreAllMocks() 只还原
@@ -33,6 +34,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   i18n.changeLanguage("zh");
   _resetUsageStatsCache(); // 清掉用量请求级缓存，保证用例间隔离
+  _resetMiotHomeCache(); // 清掉 /api/miot/home TTL 缓存，保证设备用例间隔离
 });
 
 /**
@@ -113,6 +115,89 @@ describe("realListDevices — device status contract", () => {
     expect(devices[0]).toMatchObject({
       statusText: "Unlocked",
       statusKind: "unlocked",
+    });
+  });
+
+  it("matches lock door-state enum values even when backend serializes the value as a string", async () => {
+    mockFetchByUrl({
+      "/api/miot/home": {
+        code: 0,
+        message: "ok",
+        data: {
+          devices: [
+            {
+              did: "lock-2",
+              name: "Back Door",
+              online: true,
+              model: "lock.model",
+              room: "Entry",
+              category: "lock",
+              spec: {
+                "prop.2.1": {
+                  format: "uint8",
+                  type_name: "door-state",
+                  value_list: [
+                    { name: "Locked", value: 1 },
+                    { name: "Ajar", value: 2 },
+                  ],
+                },
+              },
+            },
+          ],
+          areas: [],
+          scenes: [],
+          persons: [],
+        },
+      },
+      "/api/miot/devices/lock-2/status": {
+        code: 0,
+        message: "ok",
+        data: { properties: [{ iid: "prop.2.1", value: "2", code: 0 }] },
+      },
+    });
+
+    await i18n.changeLanguage("en");
+    const devices = await realListDevices();
+    expect(devices[0]).toMatchObject({
+      statusText: "Unlocked",
+      statusKind: "unlocked",
+    });
+  });
+
+  it("falls back to legacy lock boolean when door-state spec is unavailable", async () => {
+    mockFetchByUrl({
+      "/api/miot/home": {
+        code: 0,
+        message: "ok",
+        data: {
+          devices: [
+            {
+              did: "lock-3",
+              name: "Side Door",
+              online: true,
+              model: "lock.model",
+              room: "Entry",
+              category: "lock",
+              spec: {},
+            },
+          ],
+          areas: [],
+          scenes: [],
+          persons: [],
+        },
+      },
+      "/api/miot/devices/lock-3/status": {
+        code: 0,
+        message: "ok",
+        data: { properties: [{ iid: "prop.2.1", value: true, code: 0 }] },
+      },
+    });
+
+    await i18n.changeLanguage("en");
+    const devices = await realListDevices();
+    expect(devices[0]).toMatchObject({
+      statusText: "Locked",
+      statusKind: "locked",
     });
   });
 });

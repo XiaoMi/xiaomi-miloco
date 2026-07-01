@@ -60,7 +60,6 @@ type DeviceGroupCategory =
   | "personal_living"
   | "pet_plant"
   | "fitness_health"
-  | "mobility_vehicle"
   | "office_study"
   | "other";
 
@@ -78,7 +77,6 @@ const GROUP_ORDER: DeviceGroupCategory[] = [
   "personal_living",
   "pet_plant",
   "fitness_health",
-  "mobility_vehicle",
   "office_study",
   "other",
 ];
@@ -97,7 +95,6 @@ const GROUP_LABEL_KEY = {
   personal_living: "devices.group.personalLiving",
   pet_plant: "devices.group.petPlant",
   fitness_health: "devices.group.fitnessHealth",
-  mobility_vehicle: "devices.group.mobilityVehicle",
   office_study: "devices.group.officeStudy",
   other: "devices.group.other",
 } satisfies { [K in DeviceGroupCategory]: string };
@@ -271,7 +268,11 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
       if (!m.has(key)) m.set(key, []);
       m.get(key)!.push(d);
     }
-    return [...m.entries()].map(([room, list]) => [room, sortDevicesForDisplay(list)] as const);
+    return [...m.entries()].map(([room, list]) => {
+      const categoryGroups = groupDevicesByCategory(list);
+      const sorted = categoryGroups.flatMap(([, categoryDevices]) => categoryDevices);
+      return [room, sorted, categoryGroups] as const;
+    });
   }, [devices, unassigned]);
 
   // 默认规则:≤3 个房间全展开;>3 个房间只展第一个
@@ -304,7 +305,7 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
       )}
 
       <div className="px-2">
-        {groups.map(([room, list], idx) => {
+        {groups.map(([room, list, categoryGroups], idx) => {
           const onlineCount = list.filter((d) => d.online).length;
           const onCount = list.filter(
             (d) =>
@@ -346,7 +347,7 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
               </button>
               {open && (
                 <div className="pl-5 pb-1 pr-1">
-                  {groupDevicesByCategory(list).map(([category, categoryDevices]) => (
+                  {categoryGroups.map(([category, categoryDevices]) => (
                     <div key={category} className="py-1">
                       <div className="text-caption-mono text-text-tertiary px-2 pb-1 flex items-center gap-1.5">
                         <span>{t(GROUP_LABEL_KEY[category])}</span>

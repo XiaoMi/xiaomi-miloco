@@ -801,7 +801,7 @@ function lockStatusKind(
   if (stateProp) {
     const [iid, spec] = stateProp;
     const value = values.get(iid);
-    const optionName = spec.value_list?.find((item) => item.value === value)?.name;
+    const optionName = spec.value_list?.find((item) => String(item.value) === String(value))?.name;
     if (optionName?.includes("Unlocked") || optionName?.includes("Ajar") || optionName?.includes("Not Close")) {
       return "unlocked";
     }
@@ -1347,6 +1347,12 @@ const USAGE_TTL_MS = 5000;
 export function _resetUsageStatsCache(): void {
   usageCache.clear();
 }
+
+export function _resetMiotHomeCache(): void {
+  homeCache = null;
+  homeCacheTs = 0;
+}
+
 
 export function realGetUsageStats(
   period: UsagePeriod = "today",
