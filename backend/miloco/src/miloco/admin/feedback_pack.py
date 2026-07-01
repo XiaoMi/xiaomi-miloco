@@ -110,6 +110,8 @@ def build_feedback_pack(
 ) -> dict:
     """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{uid}-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
 
+    uid 取不到时文件名中的 {uid} 段落地为字面量 "anonymous".
+
     Args:
         event_id: meaningful_events 的 id.
         error_types: 用户选择的错误类别.
