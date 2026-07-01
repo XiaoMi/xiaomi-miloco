@@ -109,7 +109,7 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
 
     Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 OSError 静默跳过.
     """
-    if not artifacts.clips and artifacts.trace is None:
+    if not artifacts.clips and artifacts.trace is None and not artifacts.gallery:
         return 0
 
     snapshot_root = get_snapshot_root()
@@ -123,6 +123,8 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
     clip_count = _save_clips(event_dir, artifacts.clips)
     if artifacts.trace is not None:
         _save_trace(event_dir, artifacts.trace)
+    if artifacts.gallery:
+        _save_gallery(event_dir, artifacts.gallery)
     return clip_count
 
 
@@ -164,6 +166,26 @@ def _save_trace(event_dir: Path, trace: dict[str, Any]) -> None:
         (event_dir / "omni_trace.json.gz").write_bytes(gz_bytes)
     except (OSError, TypeError, ValueError) as e:
         logger.error("Failed to write trace for %s: %s", event_dir.name, e)
+
+
+def _save_gallery(event_dir: Path, gallery: dict[str, dict[str, bytes]]) -> None:
+    """落盘画廊合成图到 {event_dir}/gallery/{person_id}_{kind}.jpg."""
+    gallery_dir = event_dir / "gallery"
+    try:
+        gallery_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error("Failed to create gallery dir %s: %s", gallery_dir, e)
+        return
+    for person_id, images in gallery.items():
+        slug = region_slug(person_id)
+        for kind, image_bytes in images.items():
+            if not image_bytes:
+                continue
+            path = gallery_dir / f"{slug}_{kind}.jpg"
+            try:
+                path.write_bytes(image_bytes)
+            except OSError as e:
+                logger.error("Failed to write gallery %s: %s", path, e)
 
 
 def cleanup_snapshots(ttl_days: int, max_disk_mb: int) -> dict:

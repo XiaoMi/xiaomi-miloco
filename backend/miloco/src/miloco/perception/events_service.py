@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 from miloco.perception.schema import MeaningfulEvent
 from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+from miloco.utils.paths import miloco_home
 
 if TYPE_CHECKING:
     from miloco.database.meaningful_events_dao import MeaningfulEventDao
@@ -135,9 +136,18 @@ class EventsService:
         ms 级开销可接受;避免 schema migration).
         """
         device_ids = row["device_ids"]
-        clip_kind = EventsService._probe_clip_kind(snapshot_root, row["id"], device_ids)
+        event_id = row["id"]
+        clip_kind = EventsService._probe_clip_kind(snapshot_root, event_id, device_ids)
+        has_trace = (snapshot_root / event_id / "omni_trace.json.gz").exists()
+        feedback_packs = sorted(
+            (miloco_home() / "packs").glob(f"feedback-{event_id}-*"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        has_feedback = len(feedback_packs) > 0
+        feedback_pack_path = feedback_packs[0].as_posix() if feedback_packs else None
+        feedback_pack_size = feedback_packs[0].stat().st_size if feedback_packs else None
         return MeaningfulEvent(
-            event_id=row["id"],
+            event_id=event_id,
             timestamp=row["timestamp"],
             text=row["text"],
             has_rule_hit=row["has_rule_hit"],
@@ -146,5 +156,9 @@ class EventsService:
             snapshot_count=row["snapshot_count"],
             device_ids=device_ids,
             rule_names=row.get("rule_names") or {},
+            has_trace=has_trace,
+            has_feedback=has_feedback,
+            feedback_pack_path=feedback_pack_path,
+            feedback_pack_size=feedback_pack_size,
             clip_kind=clip_kind,
         )

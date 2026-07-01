@@ -333,6 +333,11 @@ async def _call_omni_messages(
             latency_ms=(time.monotonic() - t0) * 1000,
             error=error,
             model=config.model,
+            inference_params={
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "max_completion_tokens": config.max_completion_tokens,
+            },
         )
 
 

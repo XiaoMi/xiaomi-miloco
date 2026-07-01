@@ -981,5 +981,6 @@ def _publish_meaningful_event(
         "device_ids": device_ids,
         "rule_names": rule_names or {},
         "clip_kind": clip_kind,
+        "has_trace": True,
     }
     processor._publish("meaningful_event", payload)
