@@ -108,19 +108,20 @@ def build_feedback_pack(
     include_gallery: bool = False,
     uid: str = "",
 ) -> dict:
-    """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
+    """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{uid}-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
 
     Args:
         event_id: meaningful_events 的 id.
         error_types: 用户选择的错误类别.
         feedback_text: 用户补充说明.
         include_gallery: 是否包含画廊合成图.
+        uid: 米家用户 uid,写入 metadata.json 供反馈溯源;取不到时为空串.
 
     Returns:
         {path, size_bytes, components}
 
     Raises:
-        EventNotFoundError: event_id 对应的 snapshots 目录不存在.
+        EventNotFoundError: meaningful_events 表中不存在该 event_id 对应的记录.
     """
     from miloco.manager import get_manager
 
@@ -173,10 +174,10 @@ def build_feedback_pack(
         "event_id": event_id,
         "uid": uid,
         "timestamp": event.get("timestamp"),
-        "text": event.get("text", ""),
+        "text": _sanitize_pii(event.get("text", "")),
         "device_ids": device_ids,
         "error_types": error_types,
-        "user_feedback": feedback_text,
+        "user_feedback": _sanitize_pii(feedback_text),
         "created_at": ms_to_iso_local(now_ms()),
         "miloco_version": version,
         "git_hash": _git_hash(),
@@ -189,7 +190,8 @@ def build_feedback_pack(
     packs_dir = _packs_dir()
     packs_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    final_path = packs_dir / f"{_PACK_PREFIX}{event_id}-{stamp}{_PACK_SUFFIX}"
+    uid_slug = uid if uid else "anonymous"
+    final_path = packs_dir / f"{_PACK_PREFIX}{uid_slug}-{event_id}-{stamp}{_PACK_SUFFIX}"
 
     with tempfile.TemporaryDirectory() as tmp_root:
         tmp_root_p = Path(tmp_root)

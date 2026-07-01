@@ -273,7 +273,18 @@ class TestLocateClip:
 
 @pytest.mark.asyncio
 class TestBuildFeedbackIndex:
-    def test_parses_uuid_event_id(self, tmp_path, monkeypatch):
+    def test_parses_uuid_with_uid_prefix(self, tmp_path, monkeypatch):
+        eid = "12345678-1234-1234-1234-123456789abc"
+        packs = tmp_path / "packs"
+        packs.mkdir()
+        (packs / f"feedback-user123-{eid}-20260701-143025.tar.gz").write_bytes(b"x")
+        monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
+        from miloco.perception.events_service import EventsService
+        idx = EventsService._build_feedback_index()
+        assert eid in idx
+        assert idx[eid][0].endswith(".tar.gz")
+
+    def test_parses_uuid_without_uid_prefix(self, tmp_path, monkeypatch):
         eid = "12345678-1234-1234-1234-123456789abc"
         packs = tmp_path / "packs"
         packs.mkdir()
@@ -282,15 +293,14 @@ class TestBuildFeedbackIndex:
         from miloco.perception.events_service import EventsService
         idx = EventsService._build_feedback_index()
         assert eid in idx
-        assert idx[eid][0].endswith(".tar.gz")
 
     def test_picks_latest_by_mtime(self, tmp_path, monkeypatch):
         import os
         eid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         packs = tmp_path / "packs"
         packs.mkdir()
-        old = packs / f"feedback-{eid}-20260701-100000.tar.gz"
-        new = packs / f"feedback-{eid}-20260701-120000.tar.gz"
+        old = packs / f"feedback-uid1-{eid}-20260701-100000.tar.gz"
+        new = packs / f"feedback-uid1-{eid}-20260701-120000.tar.gz"
         old.write_bytes(b"old")
         new.write_bytes(b"newer")
         os.utime(old, (1000, 1000))

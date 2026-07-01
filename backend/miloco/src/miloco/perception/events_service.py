@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -129,11 +130,14 @@ class EventsService:
                     return kind
         return None
 
+    _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
     @staticmethod
     def _build_feedback_index() -> dict[str, tuple[str, int]]:
         """一次扫描 packs 目录,建 event_id → (path, size) 索引.
 
-        文件名格式: feedback-{event_id}-{YYYYMMDD-HHMMSS}.tar.gz
+        文件名格式: feedback-{uid}-{event_id}-{YYYYMMDD-HHMMSS}.tar.gz
+        通过 UUID 正则匹配 event_id,兼容有无 uid 前缀.
         同一 event_id 有多个 pack 时取最新(mtime 最大).
         """
         packs_dir = miloco_home() / "packs"
@@ -141,12 +145,10 @@ class EventsService:
             return {}
         index: dict[str, tuple[str, int, float]] = {}
         for p in packs_dir.glob("feedback-*.tar.gz"):
-            name = p.name
-            parts = name.removeprefix("feedback-").removesuffix(".tar.gz")
-            sep = parts.rfind("-", 0, parts.rfind("-"))
-            if sep < 0:
+            m = EventsService._UUID_RE.search(p.name)
+            if not m:
                 continue
-            eid = parts[:sep]
+            eid = m.group(0)
             try:
                 st = p.stat()
                 prev = index.get(eid)
