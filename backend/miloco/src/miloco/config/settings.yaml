@@ -55,6 +55,10 @@ app:
 miot:
   cloud_server: "cn"
 
+# 通知发送运行参数
+notify:
+  dedup_window_sec: 60   # 相同通知文案在此窗口(秒)内只发一次；<=0 关闭去重
+
 # 摄像头采集参数
 camera:
   frame_interval: 1000   # 帧采集间隔（毫秒）

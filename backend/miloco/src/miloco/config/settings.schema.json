@@ -98,6 +98,18 @@
         }
       },
       "required": ["omni"]
+    },
+    "notify": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "通知发送运行参数（去重窗口等）",
+      "properties": {
+        "dedup_window_sec": {
+          "type": "number",
+          "default": 60.0,
+          "description": "相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重"
+        }
+      }
     }
   },
   "required": ["debug", "server", "agent", "model"]

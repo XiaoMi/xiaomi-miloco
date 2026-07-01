@@ -217,6 +217,18 @@ class MiotSettings(BaseModel):
     )
 
 
+class NotifySettings(BaseModel):
+    """通知发送相关运行参数。"""
+
+    dedup_window_sec: float = Field(
+        default=60.0,
+        description="相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重。",
+    )
+    # 不加 ge=0.0：MessageDeduper 已把 window_sec<=0 当作「关闭去重」，与 TS 侧
+    # getNotifyDedupWindowMs 的归零语义一致。加了 ge 会让误配负值直接崩掉整个
+    # settings 加载（后端起不来），对一个可选兜底旋钮是过度约束。
+
+
 class CameraSettings(BaseModel):
     """摄像头采集参数。"""
 
@@ -518,6 +530,10 @@ class MilocoSettings(BaseSettings):
         default_factory=MiotSettings,
         description="MIoT 云接入参数",
     )
+    notify: NotifySettings = Field(
+        default_factory=NotifySettings,
+        description="通知发送运行参数（去重窗口等）",
+    )
     camera: CameraSettings = Field(
         default_factory=CameraSettings,
         description="摄像头采集参数",
@@ -709,6 +725,7 @@ __all__ = [
     "MilocoSettings",
     "MiotSettings",
     "ModelSettings",
+    "NotifySettings",
     "OmniModelSettings",
     "AgentSettings",
     "PerceptionCollectSettings",
