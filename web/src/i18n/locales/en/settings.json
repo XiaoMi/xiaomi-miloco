@@ -1,0 +1,15 @@
+{
+  "settings": {
+    "qualityTitle": "Audio & Video Quality",
+    "qualityDesc": "Switch perception engine quality preset. High quality mode significantly improves recognition accuracy but increases token consumption. Restart required after switching.",
+    "presetDefault": "Default",
+    "presetDefaultDesc": "Saves tokens, good for daily monitoring",
+    "presetHigh": "High Quality",
+    "presetHighDesc": "Higher clarity, more accurate recognition, ~4.5x tokens",
+    "currentBadge": "Current",
+    "videoLabel": "Video: {{quality}} / short edge {{edge}}px",
+    "audioLabel": "Audio: {{rate}}kHz",
+    "loadFailed": "Failed to load",
+    "setFailed": "Failed to save"
+  }
+}

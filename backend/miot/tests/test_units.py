@@ -143,8 +143,9 @@ async def test_storage_creates_directory(tmp_path):
 # ─── decoder RingBuffer ───────────────────────────────────────────────────────
 
 
-from miot.decoder import MIoTMediaRingBuffer
 from miot.types import MIoTCameraCodec, MIoTCameraFrameData, MIoTCameraFrameType
+
+from miot.decoder import MIoTMediaRingBuffer
 
 
 def _make_frame(frame_type: MIoTCameraFrameType, seq: int = 0) -> MIoTCameraFrameData:

@@ -26,6 +26,27 @@ _CHUNK = 512  # silero 16kHz 固定帧长
 _CONTEXT = 64  # silero 16kHz 每帧前置的上一帧尾部 context（模型实际输入 = 64+512=576）
 _SAMPLE_RATE = 16000
 
+_cached_input_rate: int | None = None
+
+
+def _get_audio_sample_rate() -> int:
+    """Get audio sample rate from config (cached at module level)."""
+    global _cached_input_rate
+    if _cached_input_rate is not None:
+        return _cached_input_rate
+    try:
+        from miloco.config import get_settings
+        from miloco.perception.quality import get_quality_params
+
+        settings = get_settings()
+        preset = settings.perception.quality.preset
+        params = get_quality_params(preset)
+        _cached_input_rate = params.audio_sample_rate
+    except Exception:
+        _cached_input_rate = 16000
+    return _cached_input_rate
+
+
 _lock = threading.Lock()
 _session = None  # ort.InferenceSession | None
 _load_failed = False
@@ -83,6 +104,14 @@ def evaluate_speech(
     if audio_clip.size < _CHUNK:
         return False, 0.0
 
+    # Resample to 16kHz if input is higher (silero expects 16kHz)
+    if audio_clip.size > 0:
+        input_rate = _get_audio_sample_rate()
+        if input_rate != _SAMPLE_RATE:
+            # 降采样:取每第 N 个样本(48kHz/16kHz=3,整除安全)
+            ratio = input_rate // _SAMPLE_RATE
+            if ratio > 1:
+                audio_clip = audio_clip[::ratio]
     pcm = audio_clip.astype(np.float32) / 32768.0
     state = np.zeros((2, 1, 128), dtype=np.float32)
     sr = np.array(_SAMPLE_RATE, dtype=np.int64)

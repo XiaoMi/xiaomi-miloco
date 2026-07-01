@@ -250,6 +250,23 @@ class PerceptionCollectSettings(BaseModel):
     )
 
 
+class QualitySettings(BaseModel):
+    """音视频质量预设。"""
+
+    preset: str = Field(
+        default="default",
+        description="音视频质量预设: default（省 token）| high（高清晰度，token ~4.5x）",
+    )
+
+    @field_validator("preset")
+    @classmethod
+    def validate_preset(cls, v: str) -> str:
+        allowed = {"default", "high"}
+        if v not in allowed:
+            raise ValueError(f"无效预设: {v}，可用: {allowed}")
+        return v
+
+
 class PerceptionSettings(BaseModel):
     """感知管线相关配置。"""
 
@@ -298,6 +315,10 @@ class PerceptionSettings(BaseModel):
             "+ cluster 拓扑）落盘到 $MILOCO_HOME/snapshots/tier_u/。"
             "本地开发/调试可开,上线环境保持默认关。"
         ),
+    )
+    quality: QualitySettings = Field(
+        default_factory=QualitySettings,
+        description="音视频质量预设",
     )
 
 

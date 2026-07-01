@@ -1059,8 +1059,29 @@ def _resolve_person_face_jpg(
 # Video encoding (frames + audio → mp4)
 # =============================================================================
 
-_VIDEO_SHORT_EDGE = 512
+_VIDEO_SHORT_EDGE = 512  # 默认值，运行时从配置读取
 _CROP_SIZE = (512, 512)
+
+
+_cached_video_short_edge: int | None = None
+
+
+def _get_video_short_edge() -> int:
+    """Get video short edge from config (cached at module level)."""
+    global _cached_video_short_edge
+    if _cached_video_short_edge is not None:
+        return _cached_video_short_edge
+    try:
+        from miloco.config import get_settings
+        from miloco.perception.quality import get_quality_params
+
+        settings = get_settings()
+        preset = settings.perception.quality.preset
+        params = get_quality_params(preset)
+        _cached_video_short_edge = params.video_short_edge
+    except Exception:
+        _cached_video_short_edge = _VIDEO_SHORT_EDGE
+    return _cached_video_short_edge
 
 # 多模态 payload sanity check 下限 — 防"非 None 但实际损坏"的 bytes 入 payload
 # 触发 omni 服务端 400 Multimodal data is corrupted。truthy check 只拦 None / b"",
@@ -1171,10 +1192,11 @@ def _encode_video_mp4(
     try:
         container = av.open(tmp_path, "w")
 
-        # Video stream — scale to short-edge = _VIDEO_SHORT_EDGE, keep aspect ratio.
+        # Video stream — scale to short-edge from config, keep aspect ratio.
         # h264 requires even dimensions, so round to nearest even number.
+        short_edge = _get_video_short_edge()
         h0, w0 = frames[0].shape[:2]
-        scale = _VIDEO_SHORT_EDGE / min(h0, w0)
+        scale = short_edge / min(h0, w0)
         target_w = int(w0 * scale) // 2 * 2
         target_h = int(h0 * scale) // 2 * 2
         v_stream = container.add_stream("h264", rate=fps)
