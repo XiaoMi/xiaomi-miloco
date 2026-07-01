@@ -14,7 +14,6 @@ import gzip
 import io
 import json
 import logging
-import os
 import re
 import shutil
 import tarfile
@@ -30,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 _PACK_PREFIX = "feedback-"
 _PACK_SUFFIX = ".tar.gz"
-LRU_KEEP = 5
 
 _PII_PATTERNS = [
     (re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"), "***"),
@@ -81,24 +79,6 @@ def _git_hash() -> str | None:
 def _packs_dir() -> Path:
     return miloco_home() / "packs"
 
-
-def _lru_cleanup() -> list[str]:
-    packs = _packs_dir()
-    if not packs.exists():
-        return []
-    files = sorted(
-        packs.glob(f"{_PACK_PREFIX}*{_PACK_SUFFIX}"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    evicted: list[str] = []
-    for old in files[LRU_KEEP:]:
-        try:
-            os.remove(old)
-            evicted.append(old.as_posix())
-        except OSError:
-            pass
-    return evicted
 
 
 def build_feedback_pack(
@@ -221,8 +201,6 @@ def build_feedback_pack(
                 components["gallery_included"] = True
 
         shutil.move(str(tar_tmp), final_path)
-
-    _lru_cleanup()
 
     return {
         "path": final_path.as_posix(),

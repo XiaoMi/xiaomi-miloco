@@ -92,6 +92,7 @@ def test_build_pack_metadata_and_trace(tmp_path, monkeypatch):
         assert meta["event_id"] == event_id
         assert meta["error_types"] == ["人物识别错误"]
         assert meta["user_feedback"] == "test feedback"
+        assert meta["miloco_version"] != "unknown"
 
         # trace 脱敏检查
         trace_raw = gzip.decompress(tar.extractfile("omni_trace.json.gz").read())
