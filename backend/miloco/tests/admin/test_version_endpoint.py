@@ -37,13 +37,16 @@ def test_version_returns_pkg_version(client):
 
 
 def test_version_git_null_when_not_git_checkout(client):
-    """git 命令都失败 → git=None, version 仍返回。"""
-    with patch("miloco.admin.router._run_git", return_value=None):
+    """git 命令失败 + version 无 hatch-vcs marker (纯 tag / fallback) → git=None。"""
+    with (
+        patch("miloco.admin.router._run_git", return_value=None),
+        patch("miloco.admin.router._pkg_version", return_value="0.1.0"),
+    ):
         resp = client.get("/api/admin/version")
     body = resp.json()
     assert body["code"] == 0
     assert body["data"]["git"] is None
-    assert body["data"]["version"]  # version 独立于 git
+    assert body["data"]["version"] == "0.1.0"
 
 
 def test_version_git_present_all_fields(client):
@@ -116,3 +119,83 @@ def test_run_git_not_installed_returns_none():
     with patch("miloco.admin.router.subprocess.run",
                side_effect=FileNotFoundError("git not found")):
         assert _run_git(["rev-parse", "HEAD"]) is None
+
+
+# ─── _parse_version_git: wheel 部署 fallback ──────────────────────────────────
+
+
+class TestParseVersionGit:
+    def test_clean_release_with_local(self):
+        """hatch-vcs 派生格式 `0.1.0.dev5+g4a2b3c1`, 无 .d 标记 → dirty=False。"""
+        from miloco.admin.router import _parse_version_git
+        r = _parse_version_git("0.1.0.dev5+g4a2b3c1")
+        assert r == {
+            "commit": None, "commit_short": "4a2b3c1",
+            "branch": None, "dirty": False, "commit_time": None,
+        }
+
+    def test_dirty_build_marker(self):
+        """`.d20260701` 存在 → dirty=True。"""
+        from miloco.admin.router import _parse_version_git
+        r = _parse_version_git("0.1.0.dev5+g4a2b3c1.d20260701")
+        assert r["commit_short"] == "4a2b3c1"
+        assert r["dirty"] is True
+
+    def test_full_40_char_sha_preserved(self):
+        from miloco.admin.router import _parse_version_git
+        full = "a" * 40
+        r = _parse_version_git(f"0.1.0+g{full}")
+        assert r["commit"] == full
+        assert r["commit_short"] == "a" * 7
+
+    def test_plain_tag_no_local_returns_none(self):
+        """打 tag 的 release 版本 `0.1.0` 无 local 段 → 无 git 信息可提。"""
+        from miloco.admin.router import _parse_version_git
+        assert _parse_version_git("0.1.0") is None
+
+    def test_fallback_version_returns_none(self):
+        """hatch-vcs fallback `0.0.0` (无 .git 且构建时未注入) → None。"""
+        from miloco.admin.router import _parse_version_git
+        assert _parse_version_git("0.0.0") is None
+
+    def test_unknown_returns_none(self):
+        from miloco.admin.router import _parse_version_git
+        assert _parse_version_git("unknown") is None
+
+
+def test_git_info_falls_back_to_version_when_subprocess_fails():
+    """subprocess 返 None (wheel 部署无 .git) + version 含 hatch-vcs marker
+    → _git_info 返 parsed dict, 而非 None。"""
+    from miloco.admin.router import _git_info
+    with patch("miloco.admin.router._run_git", return_value=None):
+        r = _git_info("0.1.0.dev3+g1234567.d20260101")
+    assert r is not None
+    assert r["commit_short"] == "1234567"
+    assert r["dirty"] is True
+
+
+def test_git_info_returns_none_when_no_source_and_no_marker():
+    """subprocess 失败 + version 无 marker → None (纯 wheel + fallback version)。"""
+    from miloco.admin.router import _git_info
+    with patch("miloco.admin.router._run_git", return_value=None):
+        assert _git_info("0.0.0") is None
+
+
+def test_endpoint_wheel_scenario_returns_git_from_version(client):
+    """端到端: subprocess 全 None + version 有 marker → data.git 非空。"""
+    def fake_pkg_version():
+        return "0.1.0.dev5+gdeadbee.d20260701"
+
+    with (
+        patch("miloco.admin.router._run_git", return_value=None),
+        patch("miloco.admin.router._pkg_version", side_effect=fake_pkg_version),
+    ):
+        resp = client.get("/api/admin/version")
+    body = resp.json()
+    assert body["data"]["version"] == "0.1.0.dev5+gdeadbee.d20260701"
+    git = body["data"]["git"]
+    assert git is not None
+    assert git["commit_short"] == "deadbee"
+    assert git["dirty"] is True
+    assert git["branch"] is None
+    assert git["commit_time"] is None
