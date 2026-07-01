@@ -106,7 +106,6 @@ def build_feedback_pack(
     error_types: list[str],
     feedback_text: str,
     include_gallery: bool = False,
-    uid: str = "",
 ) -> dict:
     """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
 
@@ -171,7 +170,6 @@ def build_feedback_pack(
 
     metadata = {
         "event_id": event_id,
-        "uid": uid,
         "timestamp": event.get("timestamp"),
         "text": event.get("text", ""),
         "device_ids": device_ids,
@@ -222,10 +220,11 @@ def build_feedback_pack(
 
         shutil.move(str(tar_tmp), final_path)
 
+    size_bytes = final_path.stat().st_size
     _cleanup_by_total_size(packs_dir)
 
     return {
         "path": final_path.as_posix(),
-        "size_bytes": final_path.stat().st_size,
+        "size_bytes": size_bytes,
         "components": components,
     }
