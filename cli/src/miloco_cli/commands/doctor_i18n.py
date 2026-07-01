@@ -561,6 +561,9 @@ def make_translator(lang: str) -> Translator:
     table = _TABLES.get(lang, _ZH) if lang in _TABLES else _ZH  # type: ignore[arg-type]
 
     def t(key: str, /, **params: object) -> str:
+        # 注意: 文案始终过 str.format, 表里任何字面花括号必须写成 {{ }} 转义
+        # (如 hyperv.block.fix 的 PowerShell GUID), 占位符仍用单花括号 {name}。
+        # 不遵守约定会在该文案被取用时抛 KeyError / ValueError。
         text = table.get(key)
         if text is None:
             text = _ZH.get(key, key)

@@ -973,7 +973,13 @@ def probe_backend() -> BackendState:
                     base_url, reachable=True,
                     error=f"HTTP {r_status.status_code}",
                 )
-            status_body = r_status.json()
+            try:
+                status_body = r_status.json()
+            except ValueError:
+                return _backend_state(
+                    base_url, reachable=True,
+                    error="non-JSON response (server.url may point to non-backend)",
+                )
             if status_body.get("code", 0) != 0:
                 return _backend_state(
                     base_url, reachable=True,
@@ -997,7 +1003,10 @@ def probe_backend() -> BackendState:
             r_homes = client.get("/api/miot/scope/homes")
             homes: list[dict] = []
             if r_homes.is_success:
-                hb = r_homes.json()
+                try:
+                    hb = r_homes.json()
+                except ValueError:
+                    hb = {}
                 if hb.get("code", 0) == 0:
                     homes = hb.get("data") or []
             enabled_home = next((h for h in homes if h.get("in_use")), None)
@@ -1013,7 +1022,10 @@ def probe_backend() -> BackendState:
             r_cams = client.get("/api/miot/camera_list")
             cameras: list[CameraSummary] = []
             if r_cams.is_success:
-                cb = r_cams.json()
+                try:
+                    cb = r_cams.json()
+                except ValueError:
+                    cb = {}
                 if cb.get("code", 0) == 0:
                     for c in cb.get("data") or []:
                         cameras.append(CameraSummary(

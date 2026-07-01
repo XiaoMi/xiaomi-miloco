@@ -700,6 +700,25 @@ class TestProbeBackend:
         assert "refused" in state.error.lower()
         assert state.cameras == []
 
+    def test_non_json_200_response_no_traceback(self):
+        """server.url 误指向别的 HTTP 服务返 200 HTML: .json() 抛 ValueError,
+        应被兜住并返回 reachable=True + 明确 error, 而不是把 traceback 冒到顶层。"""
+        class _HTMLResp:
+            status_code = 200
+            is_success = True
+            def json(self):
+                raise ValueError("Expecting value")
+
+        responses = {"/api/miot/status": _HTMLResp()}
+        with (
+            patch("miloco_cli.commands.doctor.load_config", return_value=_DEFAULT_CFG),
+            patch("miloco_cli.commands.doctor.httpx.Client", return_value=_mock_httpx(responses)),
+        ):
+            state = probe_backend()
+        assert state.reachable is True
+        assert state.error is not None
+        assert "non-JSON" in state.error
+
     def test_business_error_code_non_zero(self):
         responses = {"/api/miot/status": _HTTPXBody({"code": 3001, "message": "err", "data": None})}
         with (
