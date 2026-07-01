@@ -171,6 +171,8 @@ class SceneDescriptor:
     has_speech   —— 本轮 VAD 是否判出有真人声。音频过 gate（has_audio=True）但 VAD 判无
         人声（键鼠 / 底噪）时为 False → 只剥 speeches、保留 env_sounds。has_audio=False 时
         speeches 已被 requires_audio 剥掉，本标志无额外作用。
+    has_pets     —— 家庭档案是否含「## 宠物」段（已登记宠物、且未被软关闭隐藏）。为真且
+        video 路由时，在「# 字段说明」追加「## 宠物命名」纪律（宠物命名是视觉判断，故只 video）。
     """
 
     route: Literal["video", "audio"]
@@ -178,6 +180,7 @@ class SceneDescriptor:
     stream: bool = False
     has_audio: bool = True
     has_speech: bool = True
+    has_pets: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL
@@ -198,6 +201,22 @@ def render_schema(scene: SceneDescriptor) -> str:
     return "{" + ",".join(f.schema_literal for f in scene.selected_fields()) + "}"
 
 
+# 宠物命名纪律：不是新输出字段，而是 caption / suggestions / matched_rules 共用的内容
+# 纪律（D5，集中一处维护避免三处漂移）。仅在家庭档案含「## 宠物」段（has_pets）且 video
+# 路由时追加进「# 字段说明」。判据对齐对人的「不从 gallery / 家庭档案给没识别出的主体安名」。
+PET_NAMING_SPEC = """## 宠物命名
+- 「# 家庭档案」的「宠物」段列出了家中已登记宠物及其外貌（物种 / 毛色花纹 / 显著标记）。在 caption、suggestions、matched_rules 中提及宠物时，统一按下面纪律决定叫名还是泛称：
+- 仅当画面中宠物的可观察特征（物种＋毛色/花纹＋显著标记）与某一只登记宠物**逐项明确吻合、且家中没有另一只同样符合**时，才用其名（如"小黑在沙发上"）；下列任一情况一律用泛称、可带可辨外观但不安名（"一只黑猫" / "一只狗"）：特征对不上、看不清（遮挡 / 过远 / 模糊）、或有多只登记宠物都可能是它而无法区分。
+- 不从家庭档案给对不上或认不准的宠物安名字（与对人「不从 gallery / 家庭档案取成员名安到没被识别出的人身上」一致）。"""
+
+
 def render_field_spec(scene: SceneDescriptor) -> str:
-    """按场景拼出「# 字段说明」正文（各字段 ``## 字段名`` 块；audio 路由取 audio 变体）。"""
-    return "\n\n".join(f.spec_for(scene.route) for f in scene.selected_fields())
+    """按场景拼出「# 字段说明」正文（各字段 ``## 字段名`` 块；audio 路由取 audio 变体）。
+
+    ``has_pets`` 且 video 路由时追加「## 宠物命名」纪律（约束 caption / suggestions /
+    matched_rules 对宠物的称呼，集中一处维护，见 ``PET_NAMING_SPEC``）。
+    """
+    blocks = [f.spec_for(scene.route) for f in scene.selected_fields()]
+    if scene.has_pets and scene.route == "video":
+        blocks.append(PET_NAMING_SPEC)
+    return "\n\n".join(blocks)

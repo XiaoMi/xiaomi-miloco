@@ -347,6 +347,27 @@ _DEFAULT_PERF_FIELD_LABELS: dict[str, str] = {
 }
 
 
+class FeaturesSettings(BaseModel):
+    """产品级实验性功能开关（默认关，住户在 web 显式开启）。"""
+
+    pet_recognition: bool = Field(
+        default=False,
+        description=(
+            "宠物识别（实验性）总开关：开启后启用「宠物作为家庭成员」的注册与基于"
+            "外观描述的命名识别（注入 caption prompt）。默认关；关闭时前端隐藏宠物入口、"
+            "后端不注入宠物命名规则，已录入的宠物数据保留不删。"
+        ),
+    )
+    pet_head_grounding: bool = Field(
+        default=False,
+        description=(
+            "宠物头像头部定位（实验性）子开关：开启后注册时让 omni 输出宠物头部区域"
+            "坐标作为头像默认裁剪框；关闭时用全身 crop 作头像、不在观察 prompt 中加入"
+            "grounding 段。仅在 pet_recognition 开启时有意义。"
+        ),
+    )
+
+
 class DirectorySettings(BaseModel):
     """目录配置；派生路径均由 ``$MILOCO_HOME`` + ``storage`` 计算。"""
 
@@ -539,6 +560,10 @@ class MilocoSettings(BaseSettings):
         default_factory=PerfSettings,
         description="性能指标总开关与报告参数",
     )
+    features: FeaturesSettings = Field(
+        default_factory=FeaturesSettings,
+        description="产品级实验性功能开关（默认关）",
+    )
 
     @field_validator("timezone")
     @classmethod
@@ -711,6 +736,7 @@ __all__ = [
     "DatabaseSettings",
     "DirectorySettings",
     "DispatcherSettings",
+    "FeaturesSettings",
     "MilocoSettings",
     "MiotSettings",
     "ModelSettings",

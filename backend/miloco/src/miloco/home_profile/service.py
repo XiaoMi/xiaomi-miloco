@@ -14,6 +14,7 @@ import math
 import secrets
 from datetime import date
 
+from miloco.config import get_settings
 from miloco.home_profile import store
 from miloco.home_profile.constants import (
     DECAY,
@@ -357,8 +358,9 @@ def _light_cleanup(profile: ProfileIndex, candidates: CandidatesIndex) -> list[s
 
 
 class HomeProfileService:
-    def __init__(self, person_service=None):
+    def __init__(self, person_service=None, pet_library=None):
         self._person_service = person_service
+        self._pet_library = pet_library
 
     def _members(self) -> list[dict]:
         if not self._person_service:
@@ -369,6 +371,30 @@ class HomeProfileService:
             logger.warning("home_profile: 拉取成员列表失败", exc_info=True)
             return []
         return [{"id": p.id, "name": p.name, "role": p.role} for p in persons]
+
+    def _pets(self) -> list[dict]:
+        """宠物花名册 → ``[{id, name, species}]``；pet_library 未注入时回退进程内单例。
+
+        延迟 import pet_library，避免 home_profile 导入期连带拉起 identity 配置链。
+        """
+        lib = self._pet_library
+        if lib is None:
+            try:
+                from miloco.perception.engine.identity.pet_library import (
+                    get_pet_library,
+                )
+
+                lib = get_pet_library()
+            except Exception:  # noqa: BLE001
+                logger.warning("home_profile: 获取宠物花名册失败", exc_info=True)
+                return []
+        try:
+            return [
+                {"id": p.id, "name": p.name, "species": p.species} for p in lib.list()
+            ]
+        except Exception:  # noqa: BLE001
+            logger.warning("home_profile: 拉取宠物列表失败", exc_info=True)
+            return []
 
     # —— 读 ——
 
@@ -427,18 +453,43 @@ class HomeProfileService:
 
         members = self._members()
         members_by_id = {m["id"]: m for m in members if m.get("id")}
-        # 已绑定成员的条目：subject_name 随成员当前 name 自动纠偏（只取 name，不取 role），
-        # 确保改名后 json 候选区/正式区与 md 一并刷新；person_service 不可用时保留原值。
+        pets = self._pets()
+        pets_by_id = {p["id"]: p for p in pets if p.get("id")}
+        pet_ids = set(pets_by_id)
+        pet_id_by_name = {
+            p["name"]: p["id"] for p in pets if p.get("name") and p.get("id")
+        }
+        # 成员 / 宠物改名后 subject_name 自动纠偏（只取 name，不取 role）；宠物旧数据
+        # （#298 留空 subject_id）按名收敛到 pet_id。属数据维护，无论 pet_recognition
+        # 是否开启都执行，保证再次开启时数据一致；person_service / 花名册不可用时保留原值。
         for index in (profile.entries, candidates.entries):
             for e in index:
                 if e.subject_id and e.subject_id in members_by_id:
                     e.subject_name = members_by_id[e.subject_id].get("name") or e.subject_name
+                elif e.subject_id and e.subject_id in pets_by_id:
+                    e.subject_name = pets_by_id[e.subject_id].get("name") or e.subject_name
+                elif not e.subject_id and e.subject_name in pet_id_by_name:
+                    e.subject_id = pet_id_by_name[e.subject_name]
+
+        # pet_recognition 关闭时：宠物条目从渲染中剔除（隐藏、json 数据保留），实现 D4
+        # 「软关闭」——与下面「已建任务源条目剔除」同机制（仅过滤渲染、不动存储）。
+        pet_enabled = get_settings().features.pet_recognition
+        render_pets = pets if pet_enabled else []
+
+        def _is_pet_entry(e) -> bool:
+            return bool(e.subject_id and e.subject_id in pet_ids) or (
+                not e.subject_id and e.subject_name in pet_id_by_name
+            )
 
         # 已建成任务的源条目从渲染中剔除：习惯已被显式任务接管，不再当习惯重复展示。
         # 必须在二分查找前就排除（而非 render 内部过滤），否则前缀 token 漏算——参见
         # render.py 关于「过滤由调用方负责」的说明。条目仍完整保存在 profile.json。
         excluded = store.load_task_created_item_ids()
-        renderable = [e for e in profile.entries if e.id not in excluded]
+        renderable = [
+            e
+            for e in profile.entries
+            if e.id not in excluded and (pet_enabled or not _is_pet_entry(e))
+        ]
 
         # 按权重排序
         weighted = sorted(renderable, key=lambda e: calculate_weight(e), reverse=True)
@@ -446,11 +497,11 @@ class HomeProfileService:
         # token 截断（render-based 测量，二分查找最大前缀）
         max_tokens = LIMITS["max_profile_tokens"]
         max_active = len(weighted)
-        if estimate_tokens(render_profile_markdown(weighted, members)) > max_tokens:
+        if estimate_tokens(render_profile_markdown(weighted, members, render_pets)) > max_tokens:
             lo, hi = 0, len(weighted)
             while lo < hi:
                 mid = (lo + hi + 1) // 2
-                rendered = render_profile_markdown(weighted[:mid], members)
+                rendered = render_profile_markdown(weighted[:mid], members, render_pets)
                 if estimate_tokens(rendered) <= max_tokens:
                     lo = mid
                 else:
@@ -479,7 +530,7 @@ class HomeProfileService:
         store.save_candidates(candidates)
 
         active = [e for e in renderable if not e.archived]
-        store.save_rendered_md(render_profile_markdown(active, members))
+        store.save_rendered_md(render_profile_markdown(active, members, render_pets))
 
         return {
             "changes": changes,
