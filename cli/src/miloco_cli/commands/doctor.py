@@ -156,6 +156,8 @@ class ReachabilityState:
     neigh_mac: str | None
     udp_send_ok: bool
     udp_error: str | None
+    udp_local_ip: str | None = None
+    udp_local_iface: str | None = None
 
 
 # ─── Low-level helpers ─────────────────────────────────────────────────────────
@@ -1190,11 +1192,13 @@ def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResu
 _PING_RTT_RE = re.compile(r"time[=<]\s*([\d.]+)\s*ms", re.IGNORECASE)
 _IP_ROUTE_DEV_RE = re.compile(r"\bdev\s+(\S+)")
 _IP_ROUTE_SRC_RE = re.compile(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)")
-_MAC_RE = re.compile(r"([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})")
+_MAC_RE = re.compile(r"((?:[0-9a-fA-F]{1,2}:){5}[0-9a-fA-F]{1,2})")
 _NEIGH_STATES = ("REACHABLE", "STALE", "DELAY", "PROBE", "FAILED", "INCOMPLETE")
 
 
-def _probe_udp_send(target_ip: str, port: int = 32100) -> tuple[bool, str | None]:
+def _probe_udp_send(
+    target_ip: str, port: int = 32100,
+) -> tuple[bool, str | None, str | None]:
     """验证本机能否将 UDP 包递交给内核发出, 并捕获 connected socket 的 ICMP error。
 
     仅能验证:
@@ -1203,24 +1207,32 @@ def _probe_udp_send(target_ip: str, port: int = 32100) -> tuple[bool, str | None
       3. 短窗口内内核未收到 ICMP Destination/Port Unreachable
 
     UDP 无 delivery confirmation, 不能确认对端收到; 综合 ping/neigh 才能判达。
+
+    返回: (ok, error, local_ip); local_ip 是内核 connect() 后自动选定的 src IP,
+    可用于反查实际出接口。
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    local_ip: str | None = None
     try:
         sock.settimeout(1.0)
         sock.connect((target_ip, port))
+        try:
+            local_ip = sock.getsockname()[0] or None
+        except OSError:
+            local_ip = None
         sock.send(b"miloco-doctor-probe")
         sock.settimeout(0.3)
         try:
             sock.recv(1024)
         except socket.timeout:
-            return True, None
+            return True, None, local_ip
         except ConnectionRefusedError:
-            return True, "ICMP Port Unreachable"
+            return True, "ICMP Port Unreachable", local_ip
     except OSError as e:
-        return False, f"{e.strerror or type(e).__name__} (errno={e.errno})"
+        return False, f"{e.strerror or type(e).__name__} (errno={e.errno})", local_ip
     finally:
         sock.close()
-    return True, None
+    return True, None, local_ip
 
 
 _PING_RECV_RE = re.compile(r"(\d+)\s+(?:packets\s+)?received", re.IGNORECASE)
@@ -1297,7 +1309,10 @@ def probe_reachability(
         neigh_state, neigh_mac = _parse_neigh_linux(neigh.stdout if neigh.found else "")
 
     ping_ok, rtt = (_parse_ping(ping.stdout) if ping.found and ping.rc == 0 else (False, None))
-    udp_ok, udp_err = _probe_udp_send(target_ip)
+    udp_ok, udp_err, udp_local = _probe_udp_send(target_ip)
+    udp_local_iface = next(
+        (i.name for i in interfaces if udp_local and i.ip == udp_local), None,
+    )
 
     return ReachabilityState(
         target_ip=target_ip, target_label=target_label,
@@ -1306,7 +1321,20 @@ def probe_reachability(
         ping_ok=ping_ok, ping_rtt_ms=rtt,
         neigh_state=neigh_state, neigh_mac=neigh_mac,
         udp_send_ok=udp_ok, udp_error=udp_err,
+        udp_local_ip=udp_local, udp_local_iface=udp_local_iface,
     )
+
+
+def _udp_iface_suffix(state: ReachabilityState, t: Translator = _ZH_T) -> str:
+    """基于 UDP socket connect() 后 getsockname() 拿到的实际出接口 src, 拼输出后缀。"""
+    if state.udp_local_iface and state.udp_local_ip:
+        return t(
+            "reach.udp.iface_suffix_full",
+            iface=state.udp_local_iface, src=state.udp_local_ip,
+        )
+    if state.udp_local_ip:
+        return t("reach.udp.iface_suffix_ip_only", src=state.udp_local_ip)
+    return ""
 
 
 def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list[CheckResult]:
@@ -1391,24 +1419,26 @@ def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list
             message=t("reach.udp.blocked.message", error=state.udp_error),
             fix_hint=t("reach.udp.blocked.fix"),
         ))
-    elif state.udp_error and "ICMP Port Unreachable" in state.udp_error:
-        results.append(CheckResult(
-            name=prefix + t("reach.udp.port_unreach.name"),
-            status=Status.PASS,
-            message=t("reach.udp.port_unreach.message"),
-        ))
-    elif state.ping_ok and state.neigh_state in ("REACHABLE", "STALE", "DELAY"):
-        results.append(CheckResult(
-            name=prefix + t("reach.udp.pass.name"),
-            status=Status.PASS,
-            message=t("reach.udp.pass.message"),
-        ))
     else:
-        results.append(CheckResult(
-            name=prefix + t("reach.udp.warn.name"),
-            status=Status.WARN,
-            message=t("reach.udp.warn.message"),
-        ))
+        suffix = _udp_iface_suffix(state, t)
+        if state.udp_error and "ICMP Port Unreachable" in state.udp_error:
+            results.append(CheckResult(
+                name=prefix + t("reach.udp.port_unreach.name"),
+                status=Status.PASS,
+                message=t("reach.udp.port_unreach.message") + suffix,
+            ))
+        elif state.ping_ok and state.neigh_state in ("REACHABLE", "STALE", "DELAY"):
+            results.append(CheckResult(
+                name=prefix + t("reach.udp.pass.name"),
+                status=Status.PASS,
+                message=t("reach.udp.pass.message") + suffix,
+            ))
+        else:
+            results.append(CheckResult(
+                name=prefix + t("reach.udp.warn.name"),
+                status=Status.WARN,
+                message=t("reach.udp.warn.message") + suffix,
+            ))
     return results
 
 

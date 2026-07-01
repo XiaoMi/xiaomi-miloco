@@ -252,6 +252,8 @@ _ZH: dict[str, str] = {
     "reach.l3.fail.name": "L3 可达",
     "reach.l3.fail.message": "ping 失败, ARP 表状态: {state}",
     "reach.l3.fail.unknown": "未知",
+    "reach.udp.iface_suffix_full": " (出接口 {iface}, src {src})",
+    "reach.udp.iface_suffix_ip_only": " (src {src})",
     "reach.udp.blocked.name": "UDP 探测",
     "reach.udp.blocked.message": "UDP 无法发出: {error}",
     "reach.udp.blocked.fix": (
@@ -515,6 +517,8 @@ _EN: dict[str, str] = {
     "reach.l3.fail.name": "L3 reachability",
     "reach.l3.fail.message": "ping failed, ARP state: {state}",
     "reach.l3.fail.unknown": "unknown",
+    "reach.udp.iface_suffix_full": " (via {iface}, src {src})",
+    "reach.udp.iface_suffix_ip_only": " (src {src})",
     "reach.udp.blocked.name": "UDP probe",
     "reach.udp.blocked.message": "UDP could not be sent: {error}",
     "reach.udp.blocked.fix": (

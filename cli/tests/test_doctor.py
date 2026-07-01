@@ -957,7 +957,7 @@ class TestProbeUdpSend:
         fake_sock = MagicMock()
         fake_sock.connect.side_effect = OSError(101, "Network is unreachable")
         with patch("miloco_cli.commands.doctor.socket.socket", return_value=fake_sock):
-            ok, err = _probe_udp_send("10.99.99.99")
+            ok, err, local = _probe_udp_send("10.99.99.99")
         assert ok is False
         assert "101" in err
 
@@ -965,7 +965,7 @@ class TestProbeUdpSend:
         fake_sock = MagicMock()
         fake_sock.recv.side_effect = socket.timeout()
         with patch("miloco_cli.commands.doctor.socket.socket", return_value=fake_sock):
-            ok, err = _probe_udp_send("192.168.1.55")
+            ok, err, local = _probe_udp_send("192.168.1.55")
         assert ok is True
         assert err is None
 
@@ -973,9 +973,29 @@ class TestProbeUdpSend:
         fake_sock = MagicMock()
         fake_sock.recv.side_effect = ConnectionRefusedError()
         with patch("miloco_cli.commands.doctor.socket.socket", return_value=fake_sock):
-            ok, err = _probe_udp_send("192.168.1.55")
+            ok, err, local = _probe_udp_send("192.168.1.55")
         assert ok is True
         assert "ICMP Port Unreachable" in err
+
+    def test_getsockname_local_ip_returned(self):
+        """connect() 后 getsockname()[0] 应作为 local_ip 返回。"""
+        fake_sock = MagicMock()
+        fake_sock.getsockname.return_value = ("192.168.1.100", 54321)
+        fake_sock.recv.side_effect = socket.timeout()
+        with patch("miloco_cli.commands.doctor.socket.socket", return_value=fake_sock):
+            ok, err, local = _probe_udp_send("192.168.1.55")
+        assert ok is True
+        assert local == "192.168.1.100"
+
+    def test_getsockname_oserror_falls_back_to_none(self):
+        """getsockname() 抛 OSError (罕见, 但兜住) → local_ip=None, 不影响 ok/err。"""
+        fake_sock = MagicMock()
+        fake_sock.getsockname.side_effect = OSError("bad file descriptor")
+        fake_sock.recv.side_effect = socket.timeout()
+        with patch("miloco_cli.commands.doctor.socket.socket", return_value=fake_sock):
+            ok, err, local = _probe_udp_send("192.168.1.55")
+        assert ok is True
+        assert local is None
 
 
 # ─── assess_reachability ───────────────────────────────────────────────────────
@@ -1043,6 +1063,31 @@ class TestAssessReachability:
                                           neigh_state="FAILED", ping_rtt_ms=None))
         assert results[3].status == Status.WARN
 
+    def test_udp_iface_suffix_full(self):
+        """iface + src 都有 → message 尾部含 '(出接口 wlp3s0, src ...)'。"""
+        results = assess_reachability(_rs(
+            udp_local_ip="192.168.1.11", udp_local_iface="wlp3s0",
+        ))
+        assert "wlp3s0" in results[3].message
+        assert "192.168.1.11" in results[3].message
+
+    def test_udp_iface_suffix_ip_only(self):
+        """只有 src 无 iface 匹配 → 只显示 '(src ...)'。"""
+        results = assess_reachability(_rs(
+            udp_local_ip="192.168.1.11", udp_local_iface=None,
+        ))
+        assert "192.168.1.11" in results[3].message
+        assert "wlp3s0" not in results[3].message
+
+    def test_udp_iface_suffix_absent_when_blocked(self):
+        """UDP 发不出去 → 不追加 suffix (fail 分支无 iface 信息可讲)。"""
+        results = assess_reachability(_rs(
+            udp_send_ok=False, udp_error="Network is unreachable (errno=101)",
+            udp_local_ip=None, udp_local_iface=None,
+        ))
+        assert results[3].status == Status.FAIL
+        assert "出接口" not in results[3].message
+
 
 # ─── ping / neigh 解析 ─────────────────────────────────────────────────────────
 
@@ -1106,6 +1151,15 @@ class TestParseHelpers:
 
     def test_parse_neigh_empty(self):
         assert _parse_neigh_linux("") == (None, None)
+
+    def test_parse_arp_macos_bsd_mac_no_zero_pad(self):
+        """BSD arp 输出 MAC 段不补零 (如 `9` 而非 `09`), 正则应容忍。"""
+        from miloco_cli.commands.doctor import _parse_arp_macos
+        state, mac = _parse_arp_macos(
+            "? (192.168.1.1) at 70:e1:4c:68:9:c2 on en1 ifscope [ethernet]\n"
+        )
+        assert state == "REACHABLE"
+        assert mac == "70:e1:4c:68:9:c2"
 
 
 # ─── _to_json ──────────────────────────────────────────────────────────────────
