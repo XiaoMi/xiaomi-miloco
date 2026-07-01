@@ -62,8 +62,9 @@ export function HeroNow({
   // useMemo 让 Map 引用稳定—— Map 每次 render 重建会让传到 CameraSection 的 prop
   // 引用变更,父级状态变（如 todayUsage 异步到达）触发的 re-render 会冲掉子组件
   // memo 优化机会。
+  // 为多通道摄像头创建 channel 映射。key 使用 did|channel 格式来区分不同通道。
   const channelByDid = useMemo(
-    () => new Map(cameras.map((c) => [c.did, c.channel])),
+    () => new Map(cameras.map((c) => [`${c.did}|${c.channel ?? 0}`, c.channel])),
     [cameras],
   );
   // 上区 = miloco **当前真正在投喂视频** 的相机。判据用后端权威字段 `connected`
@@ -73,14 +74,18 @@ export function HeroNow({
   // 其余卡 key+DOM 位置不变，React 复用其 iframe，不会连带把其它路的 watch 流断开重连。
   // 其余相机(未投喂:未启用 / 启用中未连上 / 超出上限)进下区「无流」横向列表。
   const { streamingCams, benchCams } = useMemo(() => {
-    const byDid = (a: ScopeCamera, b: ScopeCamera) =>
-      a.did < b.did ? -1 : a.did > b.did ? 1 : 0;
+    const byDid = (a: ScopeCamera, b: ScopeCamera) => {
+      // 先按 did 排序，再按 channel 排序
+      if (a.did !== b.did) return a.did < b.did ? -1 : 1;
+      return (a.channel ?? 0) - (b.channel ?? 0);
+    };
     const sorted = [...scopeCameras].sort(byDid);
     // 不再前端截断:connected 集天然受后端 MAX_ENABLED_CAMERAS 约束(感知接入层按 did
     // 升序截断到上限、只连前 N 路；主动 enable 超限也被 toggle_camera 挡下)，展示集即真实投喂集。
     const streaming = sorted.filter((c) => c.connected);
-    const sset = new Set(streaming.map((c) => c.did));
-    const bench = sorted.filter((c) => !sset.has(c.did));
+    // 使用 did|channel 作为唯一标识来区分多通道摄像头
+    const sset = new Set(streaming.map((c) => `${c.did}|${c.channel ?? 0}`));
+    const bench = sorted.filter((c) => !sset.has(`${c.did}|${c.channel ?? 0}`));
     return { streamingCams: streaming, benchCams: bench };
   }, [scopeCameras]);
   // 今日 token 用量小入口（omni 计费）
@@ -284,9 +289,9 @@ function CameraSection({
             <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1">
               {streamingCams.map((c) => (
                 <CamCardWithToggle
-                  key={c.did}
+                  key={`${c.did}|${c.channel ?? 0}`}
                   cam={c}
-                  channel={channelByDid.get(c.did)}
+                  channel={c.channel ?? channelByDid.get(`${c.did}|${c.channel ?? 0}`)}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
                 />
@@ -309,7 +314,7 @@ function CameraSection({
               <ul className="rounded-xl bg-bg-secondary border border-border divide-y divide-border overflow-hidden">
                 {benchCams.map((c) => (
                   <BenchCamItem
-                    key={c.did}
+                    key={`${c.did}|${c.channel ?? 0}`}
                     cam={c}
                     // 离线 + 未投喂 → 禁用(开不了);离线 + 已投喂 → 仍可点(允许关闭)。
                     // 满额时也只挡「开启未启用的」,已启用的随时可关。即:仅当

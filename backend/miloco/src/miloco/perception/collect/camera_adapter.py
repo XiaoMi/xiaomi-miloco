@@ -7,6 +7,9 @@ Subscribes to 2 decoded stream types per device via MiotProxy:
 
 Buffers fragments in a 2-track MultiTrackSyncBuffer per device. The sync
 buffer handles time-windowed A/V alignment automatically.
+
+Multi-channel support: For dual-camera devices (e.g., Xiaomi Smart Camera 4 Dual),
+each channel (ball camera / gun camera) is treated as a separate perception unit.
 """
 
 from __future__ import annotations
@@ -57,16 +60,16 @@ _CAMERA_TRACKS = ["decoded_video", "decoded_audio"]
 # 不节流会变成每秒一次重 SDK 调用 + 建连尝试。10s 足够让相机就绪后及时恢复。
 _ONDEMAND_REFRESH_MIN_INTERVAL_MS = 10_000
 
-# TODO: 多通道支持
+# 默认通道（单摄摄像头使用）
 DEFAULT_VIDEO_CHANNEL = 0
 DEFAULT_AUDIO_CHANNEL = 0
 
 
 @dataclass
-class _CameraDeviceState:
-    """Per-camera stream state."""
+class _ChannelState:
+    """Per-channel stream state within a camera device."""
 
-    did: str
+    channel: int
     sync_buffer: MultiTrackSyncBuffer = field(
         default_factory=lambda: MultiTrackSyncBuffer(_CAMERA_TRACKS)
     )
@@ -78,8 +81,27 @@ class _CameraDeviceState:
     epoch_delta: int | None = None
 
 
+@dataclass
+class _CameraDeviceState:
+    """Per-camera device state with multi-channel support."""
+
+    did: str
+    channel_count: int = 1  # Number of channels (1 for single-camera, 2+ for dual/multi)
+    channels: dict[int, _ChannelState] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.channels:
+            # Initialize default channel for single-camera devices
+            self.channels[0] = _ChannelState(channel=0)
+
+
 class CameraDeviceAdapter(BaseDeviceAdapter):
-    """Camera device type adapter — decoded video/audio frame streams."""
+    """Camera device type adapter — decoded video/audio frame streams.
+
+    Supports multi-channel cameras (e.g., dual-camera devices).
+    Each channel is treated as a separate perception unit with its own
+    sync buffer and stream subscriptions.
+    """
 
     device_type = "camera"
     _node_name = NodeName.CAMERA
@@ -145,16 +167,37 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             kv, cams, online_only=online_only, require_lan=require_lan, cap=cap
         )
         result: dict[str, PerceptionDevice] = {}
+        # Initialize channel did map if not exists
+        if not hasattr(self, '_channel_did_map'):
+            self._channel_did_map = {}
+        
         for did in active:
             camera_info = CameraInfo.model_validate(cams[did].model_dump())
-            result[did] = PerceptionDevice(
-                did=did,
-                name=camera_info.name,
-                device_type="camera",
-                room_id=camera_info.room_name,
-                room_name=camera_info.room_name,
-                online=camera_info.online and camera_info.lan_online,
-            )
+            # For multi-channel cameras, create separate perception units for each channel
+            channel_count = camera_info.channel_count or 1
+            if channel_count > 1:
+                for ch in range(channel_count):
+                    channel_did = f"{did}:ch{ch}"
+                    channel_name = f"{camera_info.name} (通道{ch})"
+                    # Store mapping for later use
+                    self._channel_did_map[channel_did] = (did, ch)
+                    result[channel_did] = PerceptionDevice(
+                        did=channel_did,
+                        name=channel_name,
+                        device_type="camera",
+                        room_id=camera_info.room_name,
+                        room_name=camera_info.room_name,
+                        online=camera_info.online and camera_info.lan_online,
+                    )
+            else:
+                result[did] = PerceptionDevice(
+                    did=did,
+                    name=camera_info.name,
+                    device_type="camera",
+                    room_id=camera_info.room_name,
+                    room_name=camera_info.room_name,
+                    online=camera_info.online and camera_info.lan_online,
+                )
         return result
 
     async def sync_devices(self, all_devices: dict | None = None) -> None:
@@ -197,98 +240,182 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             if did not in discovered:
                 logger.warning("Camera %s not found or offline, cannot connect", did)
                 return
+            source = discovered[did]
 
         collect_cfg = get_settings().perception.collect
 
-        state = _CameraDeviceState(
-            did=did,
-            sync_buffer=MultiTrackSyncBuffer(
-                track_names=_CAMERA_TRACKS,
-                window_ms=collect_cfg.window_size * 1000,
-                max_windows=collect_cfg.max_windows,
-                on_window_ready=self._on_window_ready,
-                window_settle_ms=collect_cfg.settle_ms,
-                buffer_full_action=collect_cfg.full_action,
-            ),
+        # Check if this is a multi-channel camera
+        if not hasattr(self, '_channel_did_map'):
+            self._channel_did_map = {}
+        
+        if did in self._channel_did_map:
+            original_did, channel = self._channel_did_map[did]
+        else:
+            original_did = None
+            channel = 0
+
+        if original_did:
+            # Multi-channel camera: use original_did for stream subscription
+            actual_did = original_did
+        else:
+            # Single-channel camera
+            actual_did = did
+            channel = DEFAULT_VIDEO_CHANNEL
+
+        # Get or create device state
+        if actual_did not in self._devices:
+            # Get channel count from camera info
+            get_cached_camera = getattr(self._miot_proxy, "get_cached_camera", None)
+            camera_info = get_cached_camera(actual_did) if get_cached_camera else None
+            channel_count = 1
+            if camera_info:
+                ci = CameraInfo.model_validate(camera_info.model_dump())
+                channel_count = ci.channel_count or 1
+
+            state = _CameraDeviceState(
+                did=actual_did,
+                channel_count=channel_count,
+            )
+            self._devices[actual_did] = state
+        else:
+            state = self._devices[actual_did]
+
+        # Create channel state if not exists
+        if channel not in state.channels:
+            state.channels[channel] = _ChannelState(channel=channel)
+
+        channel_state = state.channels[channel]
+
+        # Configure sync buffer
+        channel_state.sync_buffer = MultiTrackSyncBuffer(
+            track_names=_CAMERA_TRACKS,
+            window_ms=collect_cfg.window_size * 1000,
+            max_windows=collect_cfg.max_windows,
+            on_window_ready=self._on_window_ready,
+            window_settle_ms=collect_cfg.settle_ms,
+            buffer_full_action=collect_cfg.full_action,
         )
-        self._devices[did] = state
+
+        # Store mapping for multi-channel devices
+        if original_did and did != actual_did:
+            # Store the channel did mapping
+            if not hasattr(self, '_channel_did_map'):
+                self._channel_did_map = {}
+            self._channel_did_map[did] = (actual_did, channel)
 
         # Subscribe decoded video frame stream (multi-reg)
         try:
             reg_id = await self._miot_proxy.start_camera_decode_video_stream(
-                did, DEFAULT_VIDEO_CHANNEL, self._make_decoded_video_callback(did)
+                actual_did, channel, self._make_decoded_video_callback(actual_did, channel)
             )
-            state.decoded_video_reg_id = reg_id
+            channel_state.decoded_video_reg_id = reg_id
         except Exception as e:
-            logger.error("Failed to subscribe decoded video for %s: %s", did, e)
+            logger.error("Failed to subscribe decoded video for %s channel %d: %s", actual_did, channel, e)
 
         # Subscribe decoded audio frame stream (multi-reg)
         try:
             reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
-                did, DEFAULT_AUDIO_CHANNEL, self._make_decoded_audio_callback(did)
+                actual_did, channel, self._make_decoded_audio_callback(actual_did, channel)
             )
-            state.decoded_audio_reg_id = reg_id
+            channel_state.decoded_audio_reg_id = reg_id
         except Exception as e:
-            logger.error("Failed to subscribe decoded audio for %s: %s", did, e)
+            logger.error("Failed to subscribe decoded audio for %s channel %d: %s", actual_did, channel, e)
 
         # 两路流都没订上 = camera_img_manager 缺失（典型：登录时相机 LAN 未就绪，
         # refresh_cameras 没建成 manager，start_*_stream 返回 -1 静默失败）。保留该
         # device 只会让 active_sources 报「已连」假象，且 did 留在 _devices 使后续
         # sync 早退、永不重试。剔除它，交给 sync_devices 的按需补建在下轮重连。
-        if state.decoded_video_reg_id < 0 and state.decoded_audio_reg_id < 0:
-            self._devices.pop(did, None)
+        if channel_state.decoded_video_reg_id < 0 and channel_state.decoded_audio_reg_id < 0:
+            state.channels.pop(channel, None)
+            if not state.channels:
+                self._devices.pop(actual_did, None)
             logger.warning(
-                "Camera %s stream subscribe failed (manager missing?), "
+                "Camera %s channel %d stream subscribe failed (manager missing?), "
                 "will retry on next sync",
-                did,
+                actual_did, channel,
             )
             return
 
     async def disconnect_device(self, did: str) -> None:
-        state = self._devices.pop(did, None)
+        # Check if this is a multi-channel did
+        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
+            actual_did, channel = self._channel_did_map.pop(did)
+        else:
+            actual_did = did
+            channel = None
+
+        state = self._devices.get(actual_did)
         if not state:
             return
 
-        if state.decoded_video_reg_id >= 0:
+        if channel is not None:
+            # Disconnect specific channel
+            channel_state = state.channels.pop(channel, None)
+            if channel_state:
+                await self._disconnect_channel(actual_did, channel, channel_state)
+            # If no more channels, remove the device
+            if not state.channels:
+                self._devices.pop(actual_did, None)
+        else:
+            # Disconnect all channels
+            for ch, channel_state in state.channels.items():
+                await self._disconnect_channel(actual_did, ch, channel_state)
+            self._devices.pop(actual_did, None)
+
+    async def _disconnect_channel(self, did: str, channel: int, channel_state: _ChannelState) -> None:
+        """Disconnect a specific channel."""
+        if channel_state.decoded_video_reg_id >= 0:
             try:
                 await self._miot_proxy.stop_camera_decode_video_stream(
-                    did, DEFAULT_VIDEO_CHANNEL, state.decoded_video_reg_id
+                    did, channel, channel_state.decoded_video_reg_id
                 )
             except Exception as e:
-                logger.error("Failed to unsubscribe decoded video for %s: %s", did, e)
+                logger.error("Failed to unsubscribe decoded video for %s channel %d: %s", did, channel, e)
 
-        if state.decoded_audio_reg_id >= 0:
+        if channel_state.decoded_audio_reg_id >= 0:
             try:
                 await self._miot_proxy.stop_camera_decode_audio_stream(
-                    did, DEFAULT_AUDIO_CHANNEL, state.decoded_audio_reg_id
+                    did, channel, channel_state.decoded_audio_reg_id
                 )
             except Exception as e:
-                logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
+                logger.error("Failed to unsubscribe decoded audio for %s channel %d: %s", did, channel, e)
 
-        state.sync_buffer.clear()
+        channel_state.sync_buffer.clear()
 
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
         """Collect multimodal data from the device's sync buffer.
 
         Args:
-            did: Device ID to collect from.
+            did: Device ID to collect from (may include channel suffix like "did:ch0").
             drain: If True (realtime), pop the oldest ready window.
                    If False (active query), peek all buffered data.
         """
-        state = self._devices.get(did)
+        # Check if this is a multi-channel did
+        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
+            actual_did, channel = self._channel_did_map[did]
+        else:
+            actual_did = did
+            channel = 0
+
+        state = self._devices.get(actual_did)
         if not state:
             return None
 
+        channel_state = state.channels.get(channel)
+        if not channel_state:
+            return None
+
         if drain:
-            ready = state.sync_buffer.drain_ready()
+            ready = channel_state.sync_buffer.drain_ready()
             if ready is None or not any(ready.tracks.values()):
                 return None
             # drain 后立刻拉丢包增量,clear 后给下一 cycle 重新累。
             dropped, ovf_cnt, max_depth, last_action = (
-                state.sync_buffer.consume_drop_stats()
+                channel_state.sync_buffer.consume_drop_stats()
             )
             return self._build_device_data(
                 state,
+                channel_state,
                 ready.tracks,
                 window_start_ms=ready.start_ms,
                 window_end_ms=ready.end_ms,
@@ -299,10 +426,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             )
         else:
             collect_ms = get_settings().perception.collect.window_size * 1000
-            tracks = state.sync_buffer.peek_latest(duration_ms=collect_ms)
+            tracks = channel_state.sync_buffer.peek_latest(duration_ms=collect_ms)
             if tracks is None or not any(tracks.values()):
                 return None
-            return self._build_device_data(state, tracks)
+            return self._build_device_data(state, channel_state, tracks)
 
     def peek_latest_frame(self, did: str, *, window_ms: int = 2000) -> "NDArray[np.uint8] | None":
         """非破坏性取该相机最近一帧解码图(numpy BGR);无缓存返 None。
@@ -310,10 +437,22 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         供 tier_c 闲时定期清的 live 检测用——gate 关停时正常 pipeline 不取帧,
         这里直接读 collector 已填充的 ``decoded_video`` 缓存(独立于 gate)。
         """
-        state = self._devices.get(did)
+        # Check if this is a multi-channel did
+        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
+            actual_did, channel = self._channel_did_map[did]
+        else:
+            actual_did = did
+            channel = 0
+
+        state = self._devices.get(actual_did)
         if state is None:
             return None
-        tracks = state.sync_buffer.peek_latest(duration_ms=window_ms)
+
+        channel_state = state.channels.get(channel)
+        if channel_state is None:
+            return None
+
+        tracks = channel_state.sync_buffer.peek_latest(duration_ms=window_ms)
         if not tracks:
             return None
         dv_frags = tracks.get("decoded_video", [])
@@ -322,33 +461,55 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         return getattr(dv_frags[-1].data, "frame", None)
 
     @staticmethod
-    def _wall_to_unix(state: _CameraDeviceState, wall_ms: int) -> int:
+    def _wall_to_unix(channel_state: _ChannelState, wall_ms: int) -> int:
         """Convert monotonic wall_ms to unix_ms: unix = wall + epoch_delta."""
-        if state.epoch_delta is not None:
-            return wall_ms + state.epoch_delta
+        if channel_state.epoch_delta is not None:
+            return wall_ms + channel_state.epoch_delta
         return 0
 
     def _current_source(self, did: str) -> PerceptionDevice:
         """Build source metadata from MiotProxy's in-memory camera cache."""
+        # Check if this is a multi-channel did
+        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
+            actual_did, channel = self._channel_did_map[did]
+        else:
+            actual_did = did
+            channel = None
+
         get_cached_camera = getattr(self._miot_proxy, "get_cached_camera", None)
-        camera_info = get_cached_camera(did) if get_cached_camera is not None else None
+        camera_info = get_cached_camera(actual_did) if get_cached_camera is not None else None
         if camera_info is None:
             return PerceptionDevice(
                 did=did, name=did, device_type="camera", room_name=did
             )
         camera = CameraInfo.model_validate(camera_info.model_dump())
-        return PerceptionDevice(
-            did=did,
-            name=camera.name,
-            device_type="camera",
-            room_id=camera.room_name,
-            room_name=camera.room_name,
-            online=camera.online and camera.lan_online,
-        )
+
+        if channel is not None:
+            # Multi-channel camera
+            channel_name = f"{camera.name} (通道{channel})"
+            return PerceptionDevice(
+                did=did,
+                name=channel_name,
+                device_type="camera",
+                room_id=camera.room_name,
+                room_name=camera.room_name,
+                online=camera.online and camera.lan_online,
+                extra={"original_did": actual_did, "channel": channel},
+            )
+        else:
+            return PerceptionDevice(
+                did=did,
+                name=camera.name,
+                device_type="camera",
+                room_id=camera.room_name,
+                room_name=camera.room_name,
+                online=camera.online and camera.lan_online,
+            )
 
     def _build_device_data(
         self,
         state: _CameraDeviceState,
+        channel_state: _ChannelState,
         tracks: dict[str, list[StreamFragment]],
         window_start_ms: int = 0,
         window_end_ms: int = 0,
@@ -394,8 +555,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             audio=audio,
             window_start_ms=window_start_ms,
             window_end_ms=window_end_ms,
-            window_start_unix_ms=self._wall_to_unix(state, window_start_ms),
-            window_end_unix_ms=self._wall_to_unix(state, window_end_ms),
+            window_start_unix_ms=self._wall_to_unix(channel_state, window_start_ms),
+            window_end_unix_ms=self._wall_to_unix(channel_state, window_end_ms),
             decode_avg_ms=decode_combined,
             decode_video_avg_ms=decode_video_avg,
             decode_audio_avg_ms=decode_audio_avg,
@@ -406,18 +567,29 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         )
 
     def get_connected_devices(self) -> dict[str, PerceptionDevice]:
-        return {did: self._current_source(did) for did in self._devices}
+        result = {}
+        for did, state in self._devices.items():
+            if state.channel_count > 1:
+                # Multi-channel device: return each channel as separate device
+                for ch in state.channels:
+                    channel_did = f"{did}:ch{ch}"
+                    result[channel_did] = self._current_source(channel_did)
+            else:
+                # Single-channel device
+                result[did] = self._current_source(did)
+        return result
 
     def clear_buffers(self) -> None:
         """Clear all camera sync buffers without disconnecting devices."""
         for did, state in self._devices.items():
-            state.sync_buffer.clear()
-            logger.info("Cleared sync buffer for camera %s", did)
+            for ch, channel_state in state.channels.items():
+                channel_state.sync_buffer.clear()
+                logger.info("Cleared sync buffer for camera %s channel %d", did, ch)
 
     # ---- Callback factories ----
 
     @staticmethod
-    def _calibrate(state: _CameraDeviceState, stream_ts: int) -> tuple[int, int]:
+    def _calibrate(channel_state: _ChannelState, stream_ts: int) -> tuple[int, int]:
         """Return (wall_ms, unix_ms) for a frame.
 
         wall_ms is the actual system monotonic time (immune to stream clock
@@ -425,14 +597,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         to derive unix_ms for display.
         """
         wall_ms = _monotonic_ms()
-        if state.epoch_delta is None:
-            state.epoch_delta = _unix_ms() - wall_ms
+        if channel_state.epoch_delta is None:
+            channel_state.epoch_delta = _unix_ms() - wall_ms
             logger.debug(
-                "Clock calibrated for %s: epoch_delta=%d ms",
-                state.did,
-                state.epoch_delta,
+                "Clock calibrated for channel %d: epoch_delta=%d ms",
+                channel_state.channel,
+                channel_state.epoch_delta,
             )
-        unix_ms = wall_ms + state.epoch_delta
+        unix_ms = wall_ms + channel_state.epoch_delta
         return wall_ms, unix_ms
 
     @staticmethod
@@ -462,7 +634,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             decode_ms = 0.0
         return decode_ms
 
-    def _make_decoded_video_callback(self, did: str):
+    def _make_decoded_video_callback(self, did: str, channel: int):
         """Decoded video frame callback: feeds decoded_video track in sync buffer.
 
         Receives BGR numpy arrays (already converted from PyAV in decoder thread).
@@ -483,7 +655,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     # 避免 stale 回调虚高 SOURCE 节点的处理速率指标。
                     h.skip_rolling()
                     return
-                wall_ms, unix_ms = self._calibrate(state, ts)
+
+                channel_state = state.channels.get(channel)
+                if not channel_state:
+                    h.skip_rolling()
+                    return
+
+                wall_ms, unix_ms = self._calibrate(channel_state, ts)
                 decode_latency_ms = self._compute_decode_latency(
                     recv_unix_ms, decoded_unix_ms
                 )
@@ -496,13 +674,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     decoded_unix_ms=decoded_unix_ms,
                     decode_latency_ms=decode_latency_ms,
                 )
-                state.sync_buffer.put(
+                channel_state.sync_buffer.put(
                     "decoded_video", decoded, stream_ts=ts, wall_ms=wall_ms
                 )
 
         return _on_decoded_video
 
-    def _make_decoded_audio_callback(self, did: str):
+    def _make_decoded_audio_callback(self, did: str, channel: int):
         """Decoded audio frame callback: feeds decoded_audio track in sync buffer.
 
         Receives PCM numpy arrays (already resampled from PyAV in decoder thread).
@@ -523,7 +701,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     # 避免 stale 回调虚高 SOURCE 节点的处理速率指标。
                     h.skip_rolling()
                     return
-                wall_ms, unix_ms = self._calibrate(state, ts)
+
+                channel_state = state.channels.get(channel)
+                if not channel_state:
+                    h.skip_rolling()
+                    return
+
+                wall_ms, unix_ms = self._calibrate(channel_state, ts)
                 decode_latency_ms = self._compute_decode_latency(
                     recv_unix_ms, decoded_unix_ms
                 )
@@ -536,7 +720,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     decoded_unix_ms=decoded_unix_ms,
                     decode_latency_ms=decode_latency_ms,
                 )
-                state.sync_buffer.put(
+                channel_state.sync_buffer.put(
                     "decoded_audio", decoded, stream_ts=ts, wall_ms=wall_ms
                 )
 
