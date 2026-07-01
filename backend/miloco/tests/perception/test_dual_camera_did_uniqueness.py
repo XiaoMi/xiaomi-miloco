@@ -7,7 +7,6 @@ for each channel, preventing key collision in downstream pipeline.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from miloco.perception.collect.camera_adapter import (
     CameraDeviceAdapter,
     _CameraDeviceState,
@@ -62,8 +61,9 @@ class TestDualCameraDidUniqueness:
         proxy = _Proxy(_CachedCamera(did="cam1", name="cam1", room_name="r1"))
         adapter = CameraDeviceAdapter(miot_proxy=proxy)
 
-        # Create dual-camera state
+        # Create dual-camera state with both channels
         state = _CameraDeviceState(did="cam1", channel_count=2)
+        state.channels[1] = _ChannelState(channel=1)  # Manually add channel 1
         adapter._devices["cam1"] = state
 
         # Build device data for channel 0
@@ -117,8 +117,9 @@ class TestDualCameraDidUniqueness:
         proxy = _Proxy(_CachedCamera(did="cam1", name="cam1", room_name="r1"))
         adapter = CameraDeviceAdapter(miot_proxy=proxy)
 
-        # Create dual-camera state
+        # Create dual-camera state with both channels
         state = _CameraDeviceState(did="cam1", channel_count=2)
+        state.channels[1] = _ChannelState(channel=1)  # Manually add channel 1
         adapter._devices["cam1"] = state
 
         # Get connected devices
