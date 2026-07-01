@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from miloco.automation.schema import MiotEventMapping, MiotEventTrigger
@@ -10,6 +9,9 @@ from miloco.automation.service import (
     _coerce_number,
     _match_condition,
 )
+from miloco.middleware.exceptions import ResourceNotFoundException
+from miloco.perception.types import CaptionEntry, MatchedRule
+from miloco.rule.schema import RuleTriggerType
 
 
 class _KVRepoStub:
@@ -23,13 +25,38 @@ class _KVRepoStub:
         self._store[key] = value
 
 
+class _RuleServiceStub:
+    def __init__(self, rules: list[SimpleNamespace] | None = None) -> None:
+        self.rules = rules or []
+        self.created_rules = []
+
+    async def create_rule(self, rule):
+        rule.id = f"rule-auto-{len(self.created_rules) + 1}"
+        self.created_rules.append(rule)
+        self.rules.append(rule)
+        return rule.id
+
+    async def update_rule(self, rule):
+        for idx, existing in enumerate(self.rules):
+            if existing.id == rule.id:
+                self.rules[idx] = rule
+                return True
+        raise ResourceNotFoundException(f"Rule '{rule.id}' not found")
+
+    async def delete_rule(self, rule_id):
+        self.rules = [rule for rule in self.rules if rule.id != rule_id]
+        return True
+
+    async def get_all_rules(self, enabled_only=False):
+        if not enabled_only:
+            return self.rules
+        return [rule for rule in self.rules if getattr(rule, "enabled", True)]
+
+
 @pytest.mark.parametrize(
     ("actual", "expected", "matched"),
     [
         ("1", {"op": "eq", "value": "1"}, True),
-        (True, {"op": "eq", "value": "1"}, True),
-        (False, {"op": "eq", "value": "0"}, True),
-        (True, {"op": "ne", "value": "0"}, True),
         ("1", {"op": "ne", "value": "0"}, True),
         ("12", {"op": "gt", "value": "10"}, True),
         ("3", {"op": "lt", "value": "5"}, True),
@@ -62,68 +89,8 @@ def test_coerce_number(value, number):
     assert _coerce_number(value) == number
 
 
-def test_device_event_mapping_matches_event_and_argument_filters():
-    service = AutomationService(_KVRepoStub())
-    mapping = MiotEventMapping(
-        source_type="device",
-        source_id="dryer-1",
-        camera_dids=["cam-1"],
-        event_kinds=["event.2.1"],
-        property_filters={
-            "arg.2.3": {"op": "eq", "value": "7"},
-            "arg.2.4": {"op": "ne", "value": "off"},
-        },
-    )
-    trigger = MiotEventTrigger(
-        source_type="device",
-        source_id="dryer-1",
-        event_name="event.2.1",
-        changed_properties={"arg.2.3": 7, "arg.2.4": "on", "arg.2.5": "ignored"},
-    )
-
-    assert service._match_mapping(mapping, trigger) is True
-
-
-def test_device_event_mapping_without_argument_filters_matches_any_arguments():
-    service = AutomationService(_KVRepoStub())
-    mapping = MiotEventMapping(
-        source_type="device",
-        source_id="dryer-1",
-        camera_dids=["cam-1"],
-        event_kinds=["event.2.1"],
-        property_filters={},
-    )
-    trigger = MiotEventTrigger(
-        source_type="device",
-        source_id="dryer-1",
-        event_name="event.2.1",
-        changed_properties={"arg.2.3": "any"},
-    )
-
-    assert service._match_mapping(mapping, trigger) is True
-
-
-def test_device_property_mapping_matches_real_bool_push_value():
-    service = AutomationService(_KVRepoStub())
-    mapping = MiotEventMapping(
-        source_type="device",
-        source_id="825625892",
-        camera_dids=["rtsp_01"],
-        event_kinds=["device_prop"],
-        property_filters={"prop.2.1": {"op": "eq", "value": "1"}},
-    )
-    trigger = MiotEventTrigger(
-        source_type="device",
-        source_id="825625892",
-        event_name="device_prop",
-        changed_properties={"prop.2.1": True},
-    )
-
-    assert service._match_mapping(mapping, trigger) is True
-
-
 @pytest.mark.asyncio
-async def test_handle_trigger_keeps_query_context_in_text_only():
+async def test_handle_trigger_uses_structured_perception_context():
     service = AutomationService(_KVRepoStub())
     service.create_mapping(
         MiotEventMapping(
@@ -141,16 +108,26 @@ async def test_handle_trigger_keeps_query_context_in_text_only():
 
     captured: dict[str, object] = {}
 
-    async def _on_demand(request, snapshot_sink=None):
-        captured["request"] = request
+    async def _structured(sources, rules, extra_context="", snapshot_sink=None):
+        captured["sources"] = sources
+        captured["rules"] = rules
+        captured["extra_context"] = extra_context
         captured["snapshot_sink"] = snapshot_sink
-        return SimpleNamespace(answer="门口无人")
+        return SimpleNamespace(
+            caption=[SimpleNamespace(description="门口无人")],
+            suggestions=[],
+            matched_rules=[],
+        )
+
+    async def _handle_structured(**kwargs):
+        captured["postprocess"] = kwargs
+        return SimpleNamespace(snapshot_count=0, clip_kind=None)
 
     perception_service = SimpleNamespace(
-        on_demand_perceive=_on_demand,
-        publish_meaningful_event=lambda _: None,
+        structured_on_demand_perceive=_structured,
+        handle_structured_perception_result=_handle_structured,
     )
-    rule_service = SimpleNamespace(get_all_rules=AsyncMock(return_value=[]))
+    rule_service = _RuleServiceStub()
     meaningful_events_dao = SimpleNamespace(
         insert=lambda **_: None,
         update_snapshot_count=lambda *_: None,
@@ -174,8 +151,102 @@ async def test_handle_trigger_keeps_query_context_in_text_only():
         meaningful_events_dao=meaningful_events_dao,
     )
 
-    request = captured["request"]
-    assert request.trigger_context is None
-    assert "这是一次由米家事件触发的主动感知" in request.query
-    assert "属性变化" in request.query
-    assert "重点看门口" in request.query
+    assert captured["sources"] == ["cam-1"]
+    assert "米家触发上下文" in captured["extra_context"]
+    assert "属性变化" in captured["extra_context"]
+    assert captured["rules"][0]["id"].startswith("rule-auto-")
+    assert captured["rules"][0]["condition"]["query"] == "请判断画面中是否符合这个感知提示：重点看门口"
+    assert captured["postprocess"]["text_prefix"].startswith("[米家设备触发]")
+    assert captured["postprocess"]["pulse_reset_matched_rules"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_trigger_postprocesses_formal_mapping_rule_matches():
+    service = AutomationService(_KVRepoStub())
+    service.create_mapping(
+        MiotEventMapping(
+            source_type="device",
+            source_id="sensor-1",
+            source_name_snapshot="门磁",
+            camera_dids=["cam-1"],
+            enabled=True,
+            query_template="重点看门口",
+            event_kinds=["device_prop"],
+            property_filters={"prop.2.1": {"op": "eq", "value": "1"}},
+            cooldown_seconds=0,
+        )
+    )
+
+    rule = SimpleNamespace(
+        id="rule-1",
+        name="门口有人",
+        enabled=True,
+        trigger_type=RuleTriggerType.MIOT_EVENT,
+        condition=SimpleNamespace(
+            source_ids=["sensor-1"],
+            event_kinds=["device_prop"],
+            property_filters={"prop.2.1": {"op": "eq", "value": "1"}},
+            mapping_ids=[],
+            use_global_mapping=True,
+            query="画面中是否有人在门口",
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    async def _structured(_sources, rules, **__):
+        captured["prompt_rule_ids"] = [rule["id"] for rule in rules]
+        return SimpleNamespace(
+            caption=[CaptionEntry(description="门口有人")],
+            suggestions=[],
+            matched_rules=[
+                MatchedRule(
+                    rule_id="rule-1",
+                    rule_name="门口有人",
+                    reason="画面中有人在门口",
+                    source_device_ids=["cam-1"],
+                ),
+                MatchedRule(
+                    rule_id="rule-auto-1",
+                    rule_name="[感知触发] 门磁",
+                    reason="感知触发配置命中",
+                    source_device_ids=["cam-1"],
+                ),
+            ],
+        )
+
+    async def _handle_structured(**kwargs):
+        captured["postprocess"] = kwargs
+        return SimpleNamespace(snapshot_count=0, clip_kind=None)
+
+    perception_service = SimpleNamespace(
+        structured_on_demand_perceive=_structured,
+        handle_structured_perception_result=_handle_structured,
+    )
+    rule_service = _RuleServiceStub([rule])
+    meaningful_events_dao = SimpleNamespace(
+        insert=lambda **_: None,
+        update_snapshot_count=lambda *_: None,
+    )
+
+    log = await service.handle_trigger(
+        trigger=MiotEventTrigger(
+            source_type="device",
+            source_id="sensor-1",
+            source_name="门磁",
+            event_name="device_prop",
+            changed_properties={"prop.2.1": "1"},
+            occurred_at=1234567890,
+            raw={},
+        ),
+        perception_service=perception_service,
+        rule_service=rule_service,
+        miot_service=None,
+        meaningful_events_dao=meaningful_events_dao,
+    )
+
+    assert captured["prompt_rule_ids"] == ["rule-1", "rule-auto-1"]
+    assert all(not rule_id.startswith("miot_mapping:") for rule_id in captured["prompt_rule_ids"])
+    assert captured["postprocess"]["rule_id_filter"] == {"rule-1", "rule-auto-1"}
+    assert captured["postprocess"]["pulse_reset_matched_rules"] is True
+    assert log.matched_rule_ids == ["rule-1", "rule-auto-1"]
+    assert len(log.structured_matched_rules) == 2

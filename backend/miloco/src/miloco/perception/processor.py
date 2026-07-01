@@ -677,3 +677,38 @@ class PipelineProcessor:
             except Exception as e:
                 logger.error("[processor] 主动查询感知失败 | %s", e, exc_info=True)
                 return None
+
+    async def process_structured_on_demand(
+        self,
+        dids: list[str] | None,
+        rules: list[dict],
+        extra_context: str = "",
+        snapshot_sink: dict | None = None,
+    ) -> RealtimePerceptionResult | None:
+        """Active structured perception — collect batch and reuse realtime Omni semantics."""
+        async with get_monitor().track_async(NodeName.PROCESSOR, "on_demand") as _proc_h:
+            batch = self._collector.collect_batch(dids, drain=False)
+            if batch.empty:
+                logger.warning("[collect](device=%s) 无可用数据源(skipped)", dids)
+                _proc_h.skip_rolling()
+                return None
+
+            if batch.end_timestamp and batch.start_timestamp:
+                _proc_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
+
+            try:
+                return await self._perception_engine_proxy.structured_on_demand_perceive(
+                    batch,
+                    rules,
+                    extra_context=extra_context,
+                    snapshot_sink=snapshot_sink,
+                )
+            except Exception as e:
+                logger.error("[processor] 结构化主动感知失败 | %s", e, exc_info=True)
+                return None
+
+    async def handle_structured_perception_result(self, **kwargs):
+        """Expose realtime post-processing for non-realtime structured results."""
+        return await self._perception_engine_proxy.handle_structured_perception_result(
+            **kwargs
+        )

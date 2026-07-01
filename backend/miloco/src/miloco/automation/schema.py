@@ -33,6 +33,7 @@ class MiotEventSource(BaseModel):
 
 class MiotEventMapping(BaseModel):
     id: str = Field(default="")
+    rule_id: str = Field(default="")
     source_type: Literal["device"] = Field(...)
     source_id: str = Field(...)
     source_name_snapshot: str = Field(default="")
@@ -48,6 +49,7 @@ class MiotEventMapping(BaseModel):
 
 
 class MiotEventMappingUpdate(BaseModel):
+    rule_id: str | None = Field(default=None)
     source_type: Literal["device"] | None = Field(default=None)
     source_id: str | None = Field(default=None)
     source_name_snapshot: str | None = Field(default=None)
@@ -70,6 +72,9 @@ class MiotEventTriggerLog(BaseModel):
     clip_kind: str = Field(default="")
     perception_started: bool = Field(default=False)
     perception_answer: str = Field(default="")
+    captions: list[str] = Field(default_factory=list)
+    suggestions: list[dict[str, Any]] = Field(default_factory=list)
+    structured_matched_rules: list[dict[str, Any]] = Field(default_factory=list)
     matched_rule_ids: list[str] = Field(default_factory=list)
     skipped_reason: str = Field(default="")
     error: str = Field(default="")

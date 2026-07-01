@@ -221,6 +221,7 @@ export interface MiotPropertyFilterCondition {
 
 export interface MiotEventMapping {
   id: string;
+  rule_id?: string;
   source_type: "device";
   source_id: string;
   source_name_snapshot: string;

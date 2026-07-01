@@ -160,6 +160,7 @@ async def list_mappings(current_user: str = Depends(verify_token)):
 async def create_mapping(mapping: MiotEventMapping, current_user: str = Depends(verify_token)):
     mgr = manager()
     data = mgr.automation_service.create_mapping(mapping)
+    data = await mgr.automation_service.sync_mapping_rule(data, mgr.rule_service)
     await mgr.miot_service.sync_automation_property_subscriptions(
         mgr.automation_service.list_mappings()
     )
@@ -174,6 +175,7 @@ async def update_mapping(
 ):
     mgr = manager()
     data = mgr.automation_service.update_mapping(mapping_id, update)
+    data = await mgr.automation_service.sync_mapping_rule(data, mgr.rule_service)
     await mgr.miot_service.sync_automation_property_subscriptions(
         mgr.automation_service.list_mappings()
     )
@@ -183,6 +185,8 @@ async def update_mapping(
 @router.delete("/mappings/{mapping_id}", response_model=NormalResponse, summary="Delete MiOT event mapping")
 async def delete_mapping(mapping_id: str, current_user: str = Depends(verify_token)):
     mgr = manager()
+    mapping = mgr.automation_service.get_mapping(mapping_id)
+    await mgr.automation_service.delete_mapping_rule(mapping, mgr.rule_service)
     mgr.automation_service.delete_mapping(mapping_id)
     await mgr.miot_service.sync_automation_property_subscriptions(
         mgr.automation_service.list_mappings()

@@ -182,6 +182,46 @@ class PerceptionService:
             timestamp=ms_to_iso_local(now_ms()),
         )
 
+    async def structured_on_demand_perceive(
+        self,
+        sources: list[str],
+        rules: list[dict],
+        extra_context: str = "",
+        snapshot_sink: dict | None = None,
+    ):
+        """Structured active perception: skips Gate but keeps realtime Omni output."""
+        active_sources = self._collector.get_all_active_sources()
+        valid_dids: list[str] = []
+        for did in sources:
+            if did not in active_sources:
+                logger.warning("[service](device=%s) 未激活感知(skipped)", did)
+                continue
+            valid_dids.append(did)
+
+        if not valid_dids:
+            raise BusinessException(
+                "No valid active perception sources found. "
+                "Ensure the perception engine is running and devices are online.",
+                code=2011,
+            )
+
+        result = await self._pipeline.process_structured_on_demand(
+            valid_dids,
+            rules,
+            extra_context=extra_context,
+            snapshot_sink=snapshot_sink,
+        )
+        if not result:
+            raise BusinessException(
+                "Failed to perform structured on-demand perception.",
+                code=2012,
+            )
+        return result
+
+    async def handle_structured_perception_result(self, **kwargs):
+        """Run the same post-processing path used by realtime perception."""
+        return await self._pipeline.handle_structured_perception_result(**kwargs)
+
     # ---- Perception logs ----
 
     def query_logs(
