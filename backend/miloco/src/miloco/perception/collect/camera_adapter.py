@@ -539,8 +539,15 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         decode_audio_avg = _avg(a_decode_sum, a_count)
         decode_combined = _avg(v_decode_sum + a_decode_sum, total_frames)
 
+        # Build synthetic did for multi-channel cameras to avoid key collision
+        # in downstream pipeline (device_results[r.device_id])
+        if state.channel_count > 1:
+            synthetic_did = f"{state.did}:ch{channel_state.channel}"
+        else:
+            synthetic_did = state.did
+
         return DeviceData(
-            meta=self._current_source(state.did),
+            meta=self._current_source(synthetic_did),
             video=video,
             audio=audio,
             window_start_ms=window_start_ms,
