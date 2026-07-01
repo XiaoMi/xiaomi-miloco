@@ -584,6 +584,25 @@ class TestRuleServiceCreate:
         with pytest.raises(BusinessException, match="Failed to create rule"):
             await service.create_rule(rule)
 
+    @pytest.mark.asyncio
+    async def test_create_empty_task_id_raises(self, service):
+        rule = _make_static_rule(task_id="")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id is required",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_create_nonexistent_task_id_raises(self, service, mock_task_repo):
+        mock_task_repo.task_exists.return_value = False
+        rule = _make_static_rule(task_id="ghost_task")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id='ghost_task' not found",
+        ):
+            await service.create_rule(rule)
+
 
 class TestRuleDurationRatioDefault:
     """duration_ratio 三层优先级：CLI/API 显式 > settings > 代码默认 0.6。"""

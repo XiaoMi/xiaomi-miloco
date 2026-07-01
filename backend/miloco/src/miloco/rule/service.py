@@ -275,9 +275,13 @@ class RuleService:
         if self._repo.exists_by_name(rule.name):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
-        if rule.task_id and not self._task_repo.task_exists(rule.task_id):
+        if not rule.task_id:
             raise ResourceNotFoundException(
-                f"task_not_found: rule.task_id={rule.task_id!r} 对应 task 不存在"
+                "task_not_found: rule.task_id is required"
+            )
+        if not self._task_repo.task_exists(rule.task_id):
+            raise ResourceNotFoundException(
+                f"task_not_found: rule.task_id={rule.task_id!r} not found"
             )
 
         self._fill_default_duration_ratio(rule)
