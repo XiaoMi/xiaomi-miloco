@@ -25,6 +25,32 @@
     "audioExpiredAria": "音频已过期",
     "audioExpired": "🎤 音频已过期",
     "audioOnly": "🎤 仅音频",
-    "zoomPlay": "放大播放"
+    "zoomPlay": "放大播放",
+    "feedbackButton": "反馈",
+    "feedbackTitle": "反馈感知问题",
+    "feedbackErrorType": "错误类别（可多选）",
+    "feedbackText": "补充说明（可选）",
+    "feedbackPlaceholder": "如：识别错了，是爸爸不是爷爷",
+    "feedbackGallery": "包含人员画廊（可能含人脸数据，默认不上传）",
+    "feedbackPrivacy": "提交反馈将收集相关音视频和感知数据并保存到本地",
+    "feedbackCancel": "取消",
+    "feedbackSubmit": "提交反馈",
+    "feedbackSubmitting": "正在打包感知数据...",
+    "feedbackUploaded": "反馈已提交，感谢反馈",
+    "feedbackSaved": "反馈已记录，数据已保存到本地",
+    "feedbackPath": "文件路径",
+    "feedbackSize": "数据包大小",
+    "feedbackError": "提交失败，请重试",
+    "feedbackRetry": "重试",
+    "feedbackResubmit": "再次反馈",
+    "errorType": {
+      "person": "人物识别错误",
+      "pet": "宠物识别错误",
+      "action": "动作识别错误",
+      "envDevice": "环境/设备状态识别错误",
+      "voice": "语音识别错误",
+      "ruleFalse": "规则/建议误触发",
+      "other": "其他"
+    }
   }
 }

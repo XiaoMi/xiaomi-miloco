@@ -77,13 +77,14 @@ class OmniEventArtifacts:
     每个字段是一种独立产物,互不污染:
     - clips: per-device 视频/音频字节(omni 上传给 LLM 的原始字节,零重编)
     - trace: prompt + response 文本结构(便于复盘 LLM 决策)
+    - gallery: per-person 画廊合成图(body/face JPEG,omni 推理时实际参考的样本)
 
-    未来扩展(如 identity_snapshot / rule_context)在 dataclass 加新字段、
-    snapshot_writer.save_event_artifacts 加分支即可,其他文件零改动.
+    扩展方式:在 dataclass 加新字段、snapshot_writer.save_event_artifacts 加分支即可.
     """
 
     clips: dict[str, tuple[bytes, ClipKind]] = field(default_factory=dict)
     trace: dict[str, Any] | None = None
+    gallery: dict[str, dict[str, bytes]] = field(default_factory=dict)
 
 
 _artifacts: ContextVar[OmniEventArtifacts | None] = ContextVar(
@@ -128,6 +129,24 @@ def push_clip_bytes(clip_bytes: bytes, kind: ClipKind) -> None:
     artifacts.clips[ctx.device_id] = (clip_bytes, kind)
 
 
+def push_gallery_image(person_id: str, kind: str, image_bytes: bytes) -> None:
+    """omni prompt 构建阶段:缓存当前事件使用的画廊合成图.
+
+    Args:
+        person_id: 成员 ID.
+        kind: "body" 或 "face".
+        image_bytes: JPEG 字节.
+
+    无 active scope 时静默 no-op.
+    """
+    artifacts = _artifacts.get()
+    if artifacts is None:
+        return
+    if person_id not in artifacts.gallery:
+        artifacts.gallery[person_id] = {}
+    artifacts.gallery[person_id][kind] = image_bytes
+
+
 def push_omni_trace(
     *,
     request_messages: list[dict[str, Any]],
@@ -135,6 +154,7 @@ def push_omni_trace(
     latency_ms: float,
     error: dict[str, Any] | None,
     model: str,
+    inference_params: dict[str, Any] | None = None,
 ) -> None:
     """omni HTTP 调用出口(含失败 finally 分支):累积一次调用到 artifacts.trace.
 
@@ -146,6 +166,8 @@ def push_omni_trace(
         latency_ms: 单次 omni HTTP 调用耗时.
         error: 失败时 {"code": ..., "msg": ...},成功时 None.
         model: omni 模型 ID.
+        inference_params: 推理参数(temperature, top_p, max_completion_tokens 等),
+            供复现时还原完整 API call.
 
     device_id 从 ContextVar(DeviceContext)取并写入 call 记录,让多摄像头 batch
     的多条 call 能跟 artifacts.clips 的 device 维度对齐.fused 路径(batch 级单次
@@ -160,16 +182,17 @@ def push_omni_trace(
         if artifacts.trace is None:
             artifacts.trace = {"schema_version": 1, "calls": []}
         ctx = get_device_context()
-        artifacts.trace["calls"].append(
-            {
-                "device_id": ctx.device_id if ctx is not None else None,
-                "model": model,
-                "request": _strip_base64(request_messages),
-                "response": _pick_response_fields(response_raw),
-                "latency_ms": latency_ms,
-                "error": error,
-            }
-        )
+        call_record: dict[str, Any] = {
+            "device_id": ctx.device_id if ctx is not None else None,
+            "model": model,
+            "request": _strip_base64(request_messages),
+            "response": _pick_response_fields(response_raw),
+            "latency_ms": latency_ms,
+            "error": error,
+        }
+        if inference_params:
+            call_record["inference_params"] = inference_params
+        artifacts.trace["calls"].append(call_record)
     except Exception as e:  # noqa: BLE001
         logger.error("push_omni_trace failed: %s", e)
 

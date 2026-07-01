@@ -203,6 +203,72 @@ def post_log_pack(current_user: str = Depends(verify_token)):
     return NormalResponse(code=0, message="ok", data=result)
 
 
+# ─── 事件反馈(打包 omni 复现数据) ─────────────────────────────────────────
+
+
+class EventFeedbackBody(BaseModel):
+    event_id: str
+    error_types: list[str] = []
+    feedback_text: str = ""
+    include_gallery: bool = False
+
+
+@router.post(
+    "/events/feedback",
+    summary="提交感知事件反馈(打包 omni 复现数据)",
+    response_model=NormalResponse,
+)
+async def submit_event_feedback(
+    body: EventFeedbackBody,
+    current_user: str = Depends(verify_token),
+):
+    """打包单事件的 omni_trace + clips + metadata 到本地 tar.gz.
+
+    后续上传服务就绪后,打包完成会自动上传.当前仅本地存储.
+    """
+    import asyncio
+
+    from miloco.admin import feedback_pack as _fb_mod
+
+    uid = ""
+    try:
+        miot_proxy = get_manager().miot_proxy
+        user_info = await miot_proxy.get_user_info()
+        if user_info:
+            uid = user_info.uid
+    except Exception:
+        logger.exception(
+            "Failed to fetch user info for feedback submission; continuing without uid"
+        )
+
+    try:
+        result = await asyncio.to_thread(
+            _fb_mod.build_feedback_pack,
+            event_id=body.event_id,
+            error_types=body.error_types,
+            feedback_text=body.feedback_text,
+            include_gallery=body.include_gallery,
+            uid=uid,
+        )
+    except _fb_mod.EventNotFoundError:
+        raise HTTPException(status_code=404, detail="event not found")
+    except _fb_mod.FeedbackPackError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data={
+            "event_id": body.event_id,
+            "pack_path": result["path"],
+            "pack_size_bytes": result["size_bytes"],
+            "uploaded": False,
+            "upload_key": None,
+            "components": result["components"],
+        },
+    )
+
+
 # ─── omni 模型配置(在「模型」页内读/写) ─────────────────────────────────────
 
 

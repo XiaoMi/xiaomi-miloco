@@ -12,12 +12,14 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from miloco.perception.schema import MeaningfulEvent
 from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+from miloco.utils.paths import miloco_home
 
 if TYPE_CHECKING:
     from miloco.database.meaningful_events_dao import MeaningfulEventDao
@@ -68,7 +70,8 @@ class EventsService:
             since_ms=since, before_ms=before, limit=limit, offset=offset
         )
         snapshot_root = get_snapshot_root()
-        return [self._row_to_event(row, snapshot_root) for row in rows]
+        feedback_index = self._build_feedback_index()
+        return [self._row_to_event(row, snapshot_root, feedback_index) for row in rows]
 
     async def locate_clip(
         self, event_id: str, device_id: str
@@ -127,17 +130,55 @@ class EventsService:
                     return kind
         return None
 
+    _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
     @staticmethod
-    def _row_to_event(row: dict, snapshot_root: Path) -> MeaningfulEvent:
+    def _build_feedback_index() -> dict[str, tuple[str, int]]:
+        """一次扫描 packs 目录,建 event_id → (path, size) 索引.
+
+        文件名格式: feedback-{uid}-{event_id}-{YYYYMMDD-HHMMSS}.tar.gz
+        通过 UUID 正则匹配 event_id,兼容有无 uid 前缀.
+        同一 event_id 有多个 pack 时取最新(mtime 最大).
+        """
+        packs_dir = miloco_home() / "packs"
+        if not packs_dir.exists():
+            return {}
+        index: dict[str, tuple[str, int, float]] = {}
+        for p in packs_dir.glob("feedback-*.tar.gz"):
+            m = EventsService._UUID_RE.search(p.name)
+            if not m:
+                continue
+            eid = m.group(0)
+            try:
+                st = p.stat()
+                prev = index.get(eid)
+                if prev is None or st.st_mtime > prev[2]:
+                    index[eid] = (p.as_posix(), st.st_size, st.st_mtime)
+            except OSError:
+                continue
+        return {eid: (path, size) for eid, (path, size, _) in index.items()}
+
+    @staticmethod
+    def _row_to_event(
+        row: dict,
+        snapshot_root: Path,
+        feedback_index: dict[str, tuple[str, int]],
+    ) -> MeaningfulEvent:
         """DAO 行(dict)→ Pydantic 模型;过滤掉内部字段(payload_json/schema_version/created_at).
 
         clip_kind 由 stat 落盘文件后缀动态计算(50 行列表 = 50×1 stat syscall,
         ms 级开销可接受;避免 schema migration).
         """
         device_ids = row["device_ids"]
-        clip_kind = EventsService._probe_clip_kind(snapshot_root, row["id"], device_ids)
+        event_id = row["id"]
+        clip_kind = EventsService._probe_clip_kind(snapshot_root, event_id, device_ids)
+        has_trace = (snapshot_root / event_id / "omni_trace.json.gz").exists()
+        fb = feedback_index.get(event_id)
+        has_feedback = fb is not None
+        feedback_pack_path = fb[0] if fb else None
+        feedback_pack_size = fb[1] if fb else None
         return MeaningfulEvent(
-            event_id=row["id"],
+            event_id=event_id,
             timestamp=row["timestamp"],
             text=row["text"],
             has_rule_hit=row["has_rule_hit"],
@@ -146,5 +187,9 @@ class EventsService:
             snapshot_count=row["snapshot_count"],
             device_ids=device_ids,
             rule_names=row.get("rule_names") or {},
+            has_trace=has_trace,
+            has_feedback=has_feedback,
+            feedback_pack_path=feedback_pack_path,
+            feedback_pack_size=feedback_pack_size,
             clip_kind=clip_kind,
         )

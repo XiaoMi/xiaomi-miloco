@@ -119,6 +119,12 @@ export interface ActivityEvent {
    *   "m4a" = audio-only 路径(纯 AAC,UI 显 🎤 音频)
    *   undefined / null = 未落盘(老 event / metadata-only / 已被 cleanup 清掉) */
   clip_kind?: "mp4" | "m4a" | null;
+  /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
+  has_trace?: boolean;
+  /** 该事件是否已有反馈打包 */
+  has_feedback?: boolean;
+  feedback_pack_path?: string | null;
+  feedback_pack_size?: number | null;
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────

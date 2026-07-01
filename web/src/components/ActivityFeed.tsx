@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { eventClipUrl, listActivity, subscribeEvents } from "@/api";
+import { eventClipUrl, listActivity, submitEventFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
 import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
@@ -62,6 +62,8 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
   const [appliedSince, setAppliedSince] = useState<number | undefined>(todayStartMs);
   const [appliedBefore, setAppliedBefore] = useState<number | undefined>();
   const [loading, setLoading] = useState(false);
+  const [feedbackSet, setFeedbackSet] = useState<Set<string>>(new Set());
+  const [feedbackPacks, setFeedbackPacks] = useState<Map<string, { path: string; size: number }>>(new Map());
   /** 已拉取的 offset(下次"查看更早"从这开始).事件量动态变(SSE prepend),
    *  分页用 since/before+offset 而非纯 offset 不够;约定 offset = 当前已 loaded 历史段长 */
   const [offset, setOffset] = useState(0);
@@ -270,7 +272,7 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       ) : (
         <ul className="divide-y divide-border">
           {events.map((e) => (
-            <ActivityRow key={e.id} event={e} onOpenLightbox={setLightboxSrc} />
+            <ActivityRow key={e.id} event={e} onOpenLightbox={setLightboxSrc} feedbackSet={feedbackSet} feedbackPacks={feedbackPacks} onFeedbackSubmitted={(id, path, size) => { setFeedbackSet(prev => new Set(prev).add(id)); setFeedbackPacks(prev => new Map(prev).set(id, { path, size })); }} />
           ))}
         </ul>
       )}
@@ -482,9 +484,15 @@ function TimeLabel({ timestamp }: { timestamp: number }) {
 function ActivityRow({
   event,
   onOpenLightbox,
+  feedbackSet,
+  feedbackPacks,
+  onFeedbackSubmitted,
 }: {
   event: ActivityEvent;
   onOpenLightbox: (src: string) => void;
+  feedbackSet: Set<string>;
+  feedbackPacks: Map<string, { path: string; size: number }>;
+  onFeedbackSubmitted: (eventId: string, path: string, size: number) => void;
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -593,7 +601,216 @@ function ActivityRow({
           {t("activity.noPlayback")}
         </div>
       )}
+
+      {expanded && event.has_trace && (
+        <FeedbackSection
+          eventId={event.id}
+          hasFeedback={event.has_feedback || feedbackSet.has(event.id)}
+          packPath={feedbackPacks.get(event.id)?.path ?? event.feedback_pack_path}
+          packSize={feedbackPacks.get(event.id)?.size ?? event.feedback_pack_size}
+          onSubmitted={onFeedbackSubmitted}
+        />
+      )}
     </li>
+  );
+}
+
+const ERROR_TYPE_KEYS = [
+  "person",
+  "pet",
+  "action",
+  "envDevice",
+  "voice",
+  "ruleFalse",
+  "other",
+] as const;
+
+function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted }: {
+  eventId: string;
+  hasFeedback?: boolean;
+  packPath?: string | null;
+  packSize?: number | null;
+  onSubmitted: (eventId: string, path: string, size: number) => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [confirmedResubmit, setConfirmedResubmit] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [text, setText] = useState("");
+  const [includeGallery, setIncludeGallery] = useState(false);
+  const [status, setStatus] = useState<"idle" | "submitting" | "success" | "saved" | "error">("idle");
+  const [packInfo, setPackInfo] = useState<{ path: string; size: number } | null>(null);
+
+  const handleToggle = (type: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
+
+  const handleSubmit = async () => {
+    setStatus("submitting");
+    try {
+      const result = await submitEventFeedback(eventId, [...selected], text, includeGallery);
+      setPackInfo({ path: result.pack_path, size: result.pack_size_bytes });
+      onSubmitted(eventId, result.pack_path, result.pack_size_bytes);
+      setConfirmedResubmit(false);
+      const nextStatus = result.uploaded ? "success" : "saved";
+      setStatus(nextStatus);
+      setTimeout(() => {
+        setStatus("idle");
+        setOpen(false);
+        setSelected(new Set());
+        setText("");
+        setIncludeGallery(false);
+      }, nextStatus === "success" ? 3000 : 5000);
+    } catch {
+      setStatus("error");
+    }
+  };
+
+  // idle: 反馈按钮 or 已反馈（显示路径）
+  if (!open && status === "idle") {
+    if (hasFeedback && !confirmedResubmit) {
+      return (
+        <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(37,99,235,.06)", color: "#2563EB" }} onClick={(e) => e.stopPropagation()}>
+          <div>✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}</div>
+          {packPath && (
+            <div className="mt-1.5 text-[11px] text-text-tertiary space-y-0.5">
+              <div>{t("activity.feedbackPath", "文件路径")}：<code className="bg-bg-secondary px-1.5 py-0.5 rounded text-[10px] font-mono border border-border select-all">{packPath}</code></div>
+              {packSize != null && <div>{t("activity.feedbackSize", "数据包大小")}：{(packSize / 1024).toFixed(0)} KB</div>}
+            </div>
+          )}
+          <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="mt-1.5 text-[11px] text-brand-primary hover:underline">
+            {t("activity.feedbackResubmit", "再次反馈")}
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-2 sm:ml-[82px]">
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+          className="inline-flex items-center gap-1 px-3 py-[5px] text-caption text-text-tertiary bg-transparent border border-border rounded-md hover:text-brand-primary hover:border-brand-primary hover:bg-brand-soft transition-colors"
+        >
+          <span className="text-[11px]">⚑</span> {t("activity.feedbackButton", "反馈")}
+        </button>
+      </div>
+    );
+  }
+
+  // submitting
+  if (status === "submitting") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px] flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-bg-tertiary text-caption text-text-secondary" onClick={(e) => e.stopPropagation()}>
+        <span className="inline-block w-3 h-3 border-2 border-border border-t-brand-primary rounded-full animate-spin" />
+        {t("activity.feedbackSubmitting", "正在打包感知数据...")}
+      </div>
+    );
+  }
+
+  // success (uploaded)
+  if (status === "success") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(22,163,74,.06)", color: "#16A34A" }} onClick={(e) => e.stopPropagation()}>
+        <div>✓ {t("activity.feedbackUploaded", "反馈已提交，感谢反馈")}</div>
+        {packInfo && (
+          <div className="mt-1 text-[11px] opacity-70">
+            {t("activity.feedbackSize", "数据包大小")}: {(packInfo.size / 1024).toFixed(0)} KB
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // saved (local)
+  if (status === "saved") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(37,99,235,.06)", color: "#2563EB" }} onClick={(e) => e.stopPropagation()}>
+        <div>✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}</div>
+        {packInfo && (
+          <div className="mt-1.5 text-[11px] text-text-tertiary space-y-0.5">
+            <div>{t("activity.feedbackPath", "文件路径")}：<code className="bg-bg-secondary px-1.5 py-0.5 rounded text-[10px] font-mono border border-border select-all">{packInfo.path}</code></div>
+            <div>{t("activity.feedbackSize", "数据包大小")}：{(packInfo.size / 1024).toFixed(0)} KB</div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // error
+  if (status === "error") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px]" onClick={(e) => e.stopPropagation()}>
+        <div className="px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(220,38,38,.06)", color: "#DC2626" }}>
+          ✗ {t("activity.feedbackError", "提交失败，请重试")}
+        </div>
+        <button type="button" onClick={() => setStatus("idle")} className="mt-1.5 text-caption text-text-tertiary hover:text-text-secondary">
+          {t("activity.feedbackRetry", "重试")}
+        </button>
+      </div>
+    );
+  }
+
+  // open: 反馈面板
+  return (
+    <div className="mt-2.5 sm:ml-[82px] p-3.5 rounded-[10px] bg-bg-primary border border-border" onClick={(e) => e.stopPropagation()}>
+      <div className="text-[13px] font-semibold text-text-primary mb-2.5">
+        {t("activity.feedbackTitle", "反馈感知问题")}
+      </div>
+
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackErrorType")}</div>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {ERROR_TYPE_KEYS.map((k) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => handleToggle(k)}
+            className={`px-2.5 py-1 text-caption rounded-full border transition-colors ${
+              selected.has(k)
+                ? "text-brand-primary bg-brand-soft border-brand-primary"
+                : "text-text-secondary bg-bg-secondary border-border hover:border-border-strong"
+            }`}
+          >
+            {t(`activity.errorType.${k}`)}
+          </button>
+        ))}
+      </div>
+
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackText", "补充说明（可选）")}</div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={t("activity.feedbackPlaceholder", "如：识别错了，是爸爸不是爷爷")}
+        className="w-full h-[52px] px-2.5 py-2 border border-border rounded-lg text-[13px] bg-bg-secondary text-text-primary resize-none focus:outline-none focus:border-brand-primary transition-colors"
+      />
+
+      <label className="flex items-center gap-1.5 mt-2 text-caption text-text-tertiary cursor-pointer">
+        <input type="checkbox" checked={includeGallery} onChange={(e) => setIncludeGallery(e.target.checked)} className="accent-brand-primary w-[13px] h-[13px]" />
+        {t("activity.feedbackGallery", "包含人员画廊（可能含人脸数据，默认不上传）")}
+      </label>
+
+      <div className="mt-2 px-2.5 py-1.5 rounded-md text-[11px] text-text-tertiary" style={{ background: "rgba(217,119,6,.06)" }}>
+        ⚠ {t("activity.feedbackPrivacy", "提交反馈将收集相关音视频和感知数据并保存到本地")}
+      </div>
+
+      <div className="flex justify-end items-center gap-1.5 mt-2.5">
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setConfirmedResubmit(false); setSelected(new Set()); setText(""); setIncludeGallery(false); }}
+          className="px-3.5 py-[5px] text-caption text-text-secondary rounded-md hover:bg-bg-tertiary transition-colors"
+        >
+          {t("activity.feedbackCancel", "取消")}
+        </button>
+        <button type="button" onClick={handleSubmit} className="px-4 py-[5px] text-caption font-medium text-white bg-brand-primary rounded-md hover:bg-brand-accent transition-colors">
+          {t("activity.feedbackSubmit", "提交反馈")}
+        </button>
+      </div>
+    </div>
   );
 }
 
