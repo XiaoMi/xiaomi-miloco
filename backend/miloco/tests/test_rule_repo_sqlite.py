@@ -325,6 +325,37 @@ class TestRuleRepoMutation:
         ok = rule_repo.update(rule)
         assert ok is False
 
+    def test_update_task_id_syncs_task_link(self, rule_repo, real_db):
+        """rule.task_id 变更时 task_link(kind='rule') 行必须一笔事务跟着搬家，
+        否则 `task get 旧` 仍显示挂着 rule、`task get 新` 里查不到 → SSOT 分裂。
+        """
+        from miloco.utils.time_utils import now_iso
+
+        import miloco.database.connector as connector_module
+
+        # 建第二个占位 task 作为迁移目标
+        with connector_module.get_db_connector().get_connection() as conn:
+            conn.execute(
+                "INSERT INTO task (task_id, description, status, created_at) "
+                "VALUES ('task_new', 'move target', 'active', ?)",
+                (now_iso(),),
+            )
+            conn.commit()
+
+        rid = rule_repo.create(_make_static_rule(name=_name("mover")))
+        rule = rule_repo.get_by_id(rid)
+        rule.task_id = "task_new"
+        assert rule_repo.update(rule) is True
+
+        with connector_module.get_db_connector().get_connection() as conn:
+            row = conn.execute(
+                "SELECT task_id FROM task_link "
+                "WHERE link_kind='rule' AND link_ref=?",
+                (rid,),
+            ).fetchone()
+        assert row is not None
+        assert row["task_id"] == "task_new"
+
     def test_delete_then_get_returns_none(self, rule_repo):
         rid = rule_repo.create(_make_static_rule(name=_name("del")))
         assert rule_repo.exists(rid) is True

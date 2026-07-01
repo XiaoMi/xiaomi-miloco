@@ -244,7 +244,11 @@ class RuleRepo:
         return rules
 
     def update(self, rule: Rule) -> bool:
-        """Full update of a rule"""
+        """Full update of a rule.
+
+        rule 表是 task 归属的 SSOT，task_link(kind='rule') 行是冗余索引，
+        task_id 变更时须一笔事务同步，避免 `task get` 与 `rule get` 视图分裂。
+        """
         try:
             condition_json = rule.condition.model_dump(mode="json")
             sql = """
@@ -286,7 +290,24 @@ class RuleRepo:
                 now_ms(),
                 rule.id,
             )
-            affected = self.db_connector.execute_update(sql, params)
+
+            with self.db_connector.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN")
+                try:
+                    cursor.execute(sql, params)
+                    affected = cursor.rowcount
+                    if affected > 0 and rule.task_id:
+                        cursor.execute(
+                            "UPDATE task_link SET task_id = ? "
+                            "WHERE link_kind = 'rule' AND link_ref = ?",
+                            (rule.task_id, rule.id),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+
             if affected > 0:
                 logger.info("Rule updated: id=%s", rule.id)
                 return True

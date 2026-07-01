@@ -746,6 +746,27 @@ class TestRuleServicePatch:
             await service.patch_rule("r1", RuleUpdate(name="dup"))
 
     @pytest.mark.asyncio
+    async def test_patch_empty_task_id_raises(self, service, mock_rule_repo):
+        mock_rule_repo.get_by_id.return_value = _make_static_rule(rule_id="r1")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id is required \(patch\)",
+        ):
+            await service.patch_rule("r1", RuleUpdate(task_id=""))
+
+    @pytest.mark.asyncio
+    async def test_patch_nonexistent_task_id_raises(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        mock_rule_repo.get_by_id.return_value = _make_static_rule(rule_id="r1")
+        mock_task_repo.task_exists.return_value = False
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id='ghost_task' not found \(patch\)",
+        ):
+            await service.patch_rule("r1", RuleUpdate(task_id="ghost_task"))
+
+    @pytest.mark.asyncio
     async def test_patch_condition_validates_cameras(self, service, mock_rule_repo):
         mock_rule_repo.get_by_id.return_value = _make_static_rule(rule_id="r1")
         cond_update = RuleConditionUpdate(perceive_device_ids=["bad-cam"])

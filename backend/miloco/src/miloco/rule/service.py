@@ -376,6 +376,14 @@ class RuleService:
             existing.name = update.name
 
         if "task_id" in fields and update.task_id is not None:
+            if not update.task_id:
+                raise ResourceNotFoundException(
+                    "task_not_found: rule.task_id is required (patch)"
+                )
+            if not self._task_repo.task_exists(update.task_id):
+                raise ResourceNotFoundException(
+                    f"task_not_found: rule.task_id={update.task_id!r} not found (patch)"
+                )
             existing.task_id = update.task_id
 
         if "mode" in fields and update.mode is not None:
