@@ -43,6 +43,15 @@
     "feedbackError": "提交失败，请重试",
     "feedbackRetry": "重试",
     "feedbackResubmit": "再次反馈",
-    "feedbackAlready": "已反馈过该事件"
+    "feedbackAlready": "已反馈过该事件",
+    "errorType": {
+      "person": "人物识别错误",
+      "pet": "宠物识别错误",
+      "action": "动作识别错误",
+      "envDevice": "环境/设备状态识别错误",
+      "voice": "语音识别错误",
+      "ruleFalse": "规则/建议误触发",
+      "other": "其他"
+    }
   }
 }

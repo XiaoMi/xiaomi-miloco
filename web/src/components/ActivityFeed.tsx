@@ -615,14 +615,14 @@ function ActivityRow({
   );
 }
 
-const ERROR_TYPES = [
-  "人物识别错误",
-  "宠物识别错误",
-  "动作识别错误",
-  "环境/设备状态识别错误",
-  "语音识别错误",
-  "规则/建议误触发",
-  "其他",
+const ERROR_TYPE_KEYS = [
+  "person",
+  "pet",
+  "action",
+  "envDevice",
+  "voice",
+  "ruleFalse",
+  "other",
 ] as const;
 
 function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted }: {
@@ -764,18 +764,18 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
       </div>
 
       <div className="flex flex-wrap gap-1.5 mb-3">
-        {ERROR_TYPES.map((type) => (
+        {ERROR_TYPE_KEYS.map((k) => (
           <button
-            key={type}
+            key={k}
             type="button"
-            onClick={() => handleToggle(type)}
+            onClick={() => handleToggle(k)}
             className={`px-2.5 py-1 text-caption rounded-full border transition-colors ${
-              selected.has(type)
+              selected.has(k)
                 ? "text-brand-primary bg-brand-soft border-brand-primary"
                 : "text-text-secondary bg-bg-secondary border-border hover:border-border-strong"
             }`}
           >
-            {type}
+            {t(`activity.errorType.${k}`)}
           </button>
         ))}
       </div>

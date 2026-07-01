@@ -56,6 +56,17 @@ def _cleanup_by_total_size(packs_dir: Path, max_total_mb: int = _MAX_TOTAL_MB) -
             pass
 
 
+_ERROR_TYPE_LABELS = {
+    "person": "人物识别错误",
+    "pet": "宠物识别错误",
+    "action": "动作识别错误",
+    "envDevice": "环境/设备状态识别错误",
+    "voice": "语音识别错误",
+    "ruleFalse": "规则/建议误触发",
+    "other": "其他",
+}
+
+
 class FeedbackPackError(Exception):
     pass
 
@@ -178,7 +189,7 @@ def build_feedback_pack(
         "timestamp": event.get("timestamp"),
         "text": _sanitize_pii(event.get("text", "")),
         "device_ids": device_ids,
-        "error_types": error_types,
+        "error_types": [_ERROR_TYPE_LABELS.get(k, k) for k in error_types],
         "user_feedback": _sanitize_pii(feedback_text),
         "created_at": ms_to_iso_local(now_ms()),
         "miloco_version": version,
