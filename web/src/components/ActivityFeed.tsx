@@ -794,7 +794,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
       </label>
 
       <div className="mt-2 px-2.5 py-1.5 rounded-md text-[11px] text-text-tertiary" style={{ background: "rgba(217,119,6,.06)" }}>
-        ⚠ {t("activity.feedbackPrivacy", "提交反馈将上传相关音视频和感知数据")}
+        ⚠ {t("activity.feedbackPrivacy", "提交反馈将收集相关音视频和感知数据并保存到本地")}
       </div>
 
       <div className="flex justify-end items-center gap-1.5 mt-2.5">

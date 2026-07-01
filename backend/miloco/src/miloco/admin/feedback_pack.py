@@ -33,9 +33,9 @@ _PACK_SUFFIX = ".tar.gz"
 LRU_KEEP = 5
 
 _PII_PATTERNS = [
-    (re.compile(r"\b1[3-9]\d{9}\b"), "***"),
-    (re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "***"),
-    (re.compile(r"\b\d{17}[\dXx]\b"), "***"),
+    (re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"), "***"),
+    (re.compile(r"(?<![\d.a-zA-Z])\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\d.a-zA-Z])"), "***"),
+    (re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"), "***"),
 ]
 
 
@@ -53,15 +53,16 @@ def _sanitize_pii(text: str) -> str:
     return text
 
 
-def _sanitize_trace(trace_bytes: bytes) -> bytes:
+def _sanitize_trace(trace_bytes: bytes) -> bytes | None:
+    """脱敏 trace 文本中的个人信息.失败时返回 None(宁可缺 trace 也不泄 PII)."""
     try:
         raw = gzip.decompress(trace_bytes)
         text = raw.decode("utf-8")
         sanitized = _sanitize_pii(text)
         return gzip.compress(sanitized.encode("utf-8"))
     except Exception as e:
-        logger.error("Failed to sanitize trace: %s", e)
-        return trace_bytes
+        logger.error("Failed to sanitize trace, dropping trace from pack: %s", e)
+        return None
 
 
 def _git_hash() -> str | None:
@@ -202,9 +203,10 @@ def build_feedback_pack(
 
             if trace_path.exists():
                 sanitized = _sanitize_trace(trace_path.read_bytes())
-                info = tarfile.TarInfo(name="omni_trace.json.gz")
-                info.size = len(sanitized)
-                tar.addfile(info, io.BytesIO(sanitized))
+                if sanitized is not None:
+                    info = tarfile.TarInfo(name="omni_trace.json.gz")
+                    info.size = len(sanitized)
+                    tar.addfile(info, io.BytesIO(sanitized))
 
             for clip_rel in components["clips_found"]:
                 clip_path = event_dir / clip_rel
