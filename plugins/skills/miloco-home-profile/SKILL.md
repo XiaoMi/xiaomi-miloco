@@ -91,9 +91,12 @@ entry 字段：
 ### 宠物与家庭构成归类（避免误入 family）
 
 - `family` 仅指"全家共同遵守的规则/约定"，**不是**任何家庭相关信息的兜底类。
-- 宠物视为一个非人成员主体：相关信息按维度归入对应 `member_*` 类型，`subject_name` = 宠物名（如"旺财"），`subject_id` 留空（宠物不在身份库）。
-  - "养了一只小狗旺财" → `member_persona`，subject_name="旺财"
-  - "旺财每天傍晚要遛" → `member_routine`，subject_name="旺财"
+- 宠物视为一个非人成员主体，在**宠物花名册**里有独立身份（不进人身份库、不走人脸识别）：
+  - 用户提到一只**新宠物**时，先建花名册：`miloco-cli pet add --name <宠物名> --species <猫/狗/其他>`，拿到 `pet_id`（形如 `pet_xxx`）。
+  - 该宠物各维度信息按 `member_*` 类型写入，`subject_id` 填该 `pet_id`、`subject_name` = 宠物名（不再留空；留空仅作旧数据兼容，commit 时会按名收敛回 pet_id）。
+  - "养了一只小狗旺财" → 先 `pet add --name 旺财 --species 狗`，再写 `member_persona`（subject_id=<pet_id>，subject_name="旺财"）
+  - "旺财每天傍晚要遛" → `member_routine`（subject_id=<pet_id>，subject_name="旺财"）
+- **宠物外观**写进 `member_persona`：按「物种 → 体型 → 主毛色/花纹 → 毛长 → 显著标记」维度凝成一句规范化外观句（如"中等体型的黑色短毛英短猫，尾巴尖有一撮白毛"），供感知在画面中区分与称呼；把握不大的维度（如品种）宁可不写。用户若附了照片/视频想自动生成外观，引导到 web「宠物」页的「自动生成」（走图像观察，CLI 不含）。
 - 家庭构成/成员关系（家里几口人、谁是谁的什么人）→ `member_persona`，subject_name 为对应成员；全家整体构成事实可用 subject_name="shared"。
 
 ## 写入原则
