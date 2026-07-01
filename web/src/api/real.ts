@@ -18,8 +18,11 @@ import type {
   HomeEntrySource,
   HomeEntryType,
   HomeStatus,
+  Features,
   PerceptionCamera,
   Person,
+  Pet,
+  PetObserveResult,
   Scene,
   ScopeCamera,
   ScopeHome,
@@ -305,6 +308,153 @@ export async function realEnrollPersonSample(
     const body = await resp.json().catch(() => ({}));
     throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
   }
+}
+
+// ── 宠物（非人家庭成员）──────────────────────────────────────
+interface BackendPet {
+  id: string;
+  name: string;
+  species: string;
+  avatar_ext?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+function mapBackendPet(p: BackendPet): Pet {
+  return {
+    id: p.id,
+    name: p.name,
+    species: p.species,
+    avatarExt: p.avatar_ext ?? null,
+    createdAt: p.created_at,
+    updatedAt: p.updated_at,
+  };
+}
+
+export async function realListPets(): Promise<Pet[]> {
+  const r = await apiFetch<Normal<{ pets: BackendPet[] }>>("/api/identity/pets");
+  return r.data.pets.map(mapBackendPet);
+}
+
+export async function realCreatePet(payload: {
+  name: string;
+  species?: string;
+}): Promise<Pet> {
+  const r = await apiFetch<Normal<BackendPet>>("/api/identity/pets", {
+    method: "POST",
+    body: JSON.stringify({ name: payload.name, species: payload.species ?? "" }),
+  });
+  return mapBackendPet(r.data);
+}
+
+export async function realUpdatePet(
+  petId: string,
+  payload: { name?: string; species?: string },
+): Promise<Pet> {
+  const r = await apiFetch<Normal<BackendPet>>(`/api/identity/pets/${petId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  return mapBackendPet(r.data);
+}
+
+export async function realDeletePet(petId: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(`/api/identity/pets/${petId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function realObservePet(
+  media: Blob,
+  filename: string,
+  grounding?: boolean,
+): Promise<PetObserveResult> {
+  const form = new FormData();
+  form.append("media", media, filename);
+  if (grounding !== undefined) form.append("grounding", String(grounding));
+  // 直接 fetch，避免 apiFetch 设上 Content-Type: application/json
+  const resp = await fetch("/api/identity/pets:observe", {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+  const r = (await resp.json()) as Normal<{
+    detected: boolean;
+    description: Record<string, unknown> | null;
+    head_bbox: number[] | null;
+    primary_crop_b64: string;
+    candidates: {
+      track_id: number | null;
+      species_guess: string;
+      crop_b64: string;
+    }[];
+  }>;
+  const d = r.data;
+  return {
+    detected: d.detected,
+    description: d.description,
+    headBbox: d.head_bbox,
+    primaryCropB64: d.primary_crop_b64,
+    candidates: (d.candidates ?? []).map((c) => ({
+      trackId: c.track_id,
+      speciesGuess: c.species_guess,
+      cropB64: c.crop_b64,
+    })),
+  };
+}
+
+export async function realUploadPetAvatar(
+  petId: string,
+  image: Blob,
+  filename: string,
+): Promise<Pet> {
+  const form = new FormData();
+  form.append("image", image, filename);
+  const resp = await fetch(`/api/identity/pets/${petId}/avatar`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+  const r = (await resp.json()) as Normal<BackendPet>;
+  return mapBackendPet(r.data);
+}
+
+// ── 实验性功能开关 ───────────────────────────────────────────
+interface BackendFeatures {
+  pet_recognition: boolean;
+  pet_head_grounding: boolean;
+}
+
+function mapFeatures(f: BackendFeatures): Features {
+  return {
+    petRecognition: f.pet_recognition,
+    petHeadGrounding: f.pet_head_grounding,
+  };
+}
+
+export async function realGetFeatures(): Promise<Features> {
+  const r = await apiFetch<Normal<BackendFeatures>>("/api/admin/features");
+  return mapFeatures(r.data);
+}
+
+export async function realSetFeatures(patch: Partial<Features>): Promise<Features> {
+  const body: Record<string, boolean> = {};
+  if (patch.petRecognition !== undefined) body.pet_recognition = patch.petRecognition;
+  if (patch.petHeadGrounding !== undefined)
+    body.pet_head_grounding = patch.petHeadGrounding;
+  const r = await apiFetch<Normal<BackendFeatures>>("/api/admin/features", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return mapFeatures(r.data);
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────
