@@ -272,8 +272,10 @@ class MiotService:
         try:
             result = await self._miot_proxy.refresh_devices()
             if not result:
-                raise MiotServiceException("Failed to refresh MiOT devices")
+                raise MiotServiceException("No MiOT devices found after refresh")
             return True
+        except MiotServiceException:
+            raise
         except Exception as e:
             logger.error("Failed to refresh MiOT devices: %s", e)
             raise MiotServiceException(
@@ -435,7 +437,7 @@ class MiotService:
                 str, MIoTDeviceInfo
             ] = await self._miot_proxy.get_devices()
             if not device_dict:
-                raise MiotServiceException("Failed to get MiOT device list")
+                raise MiotServiceException("No MiOT devices found")
             device_dict = filter_by_home(self._kv_repo, device_dict)
             device_list = []
             for device_info in device_dict.values():
@@ -696,21 +698,27 @@ class MiotService:
 
     async def get_device_spec(self, did: str) -> dict:
         """Get single device spec (轻量，不刷新云端数据)。"""
-        dev = (await self._miot_proxy.get_devices()).get(did)
-        if dev is None:
-            raise ValidationException(f"did '{did}' not found")
-        sub_names = build_sub_device_names(dev)
-        spec = await self._miot_proxy._fetch_device_spec(dev.urn, sub_names) or {}
-        return {
-            "did": dev.did,
-            "name": dev.name,
-            "home": dev.home_name,
-            "model": dev.model,
-            "room": dev.room_name,
-            "online": dev.online,
-            "category": dev.urn.split(":")[3] if ":" in dev.urn else None,
-            "spec": spec,
-        }
+        try:
+            dev = (await self._miot_proxy.get_devices()).get(did)
+            if dev is None:
+                raise ValidationException(f"did '{did}' not found")
+            sub_names = build_sub_device_names(dev)
+            spec = await self._miot_proxy._fetch_device_spec(dev.urn, sub_names) or {}
+            return {
+                "did": dev.did,
+                "name": dev.name,
+                "home": dev.home_name,
+                "model": dev.model,
+                "room": dev.room_name,
+                "online": dev.online,
+                "category": dev.urn.split(":")[3] if ":" in dev.urn else None,
+                "spec": spec,
+            }
+        except (MiotServiceException, ValidationException):
+            raise
+        except Exception as e:
+            logger.error("Failed to get device spec for %s: %s", did, e)
+            raise MiotServiceException(f"Failed to get device spec: {str(e)}") from e
 
     async def control_device(self, did: str, request: DeviceControlRequest) -> dict:
         """Control device: set_property / set_properties / call_action."""
@@ -933,33 +941,41 @@ class MiotService:
 
     async def list_cameras_with_state(self) -> list[dict]:
         """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。"""
-        denied = denied_camera_dids(self._kv_repo)
-        connected = self._connected_camera_dids()
-        cameras = filter_by_home(
-            self._kv_repo, await self._miot_proxy.get_cameras() or {}
-        )
-        # 过滤已从账号删除的摄像头：_camera_info_dict 是内存缓存，
-        # 设备删除后不会自动清除，需要用 _device_info_dict 做交集校验。
-        devices = await self._miot_proxy.get_devices()
-        cameras = {did: info for did, info in cameras.items() if did in devices}
-        out: list[dict] = []
-        for did, info in cameras.items():
-            online = bool(getattr(info, "online", False)) and bool(
-                getattr(info, "lan_online", False)
+        try:
+            denied = denied_camera_dids(self._kv_repo)
+            connected = self._connected_camera_dids()
+            cameras = filter_by_home(
+                self._kv_repo, await self._miot_proxy.get_cameras() or {}
             )
-            out.append(
-                {
-                    "did": did,
-                    "name": getattr(info, "name", None),
-                    # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
-                    # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
-                    "room_name": getattr(info, "room_name", None),
-                    "is_online": online,
-                    "in_use": did not in denied,
-                    "connected": did in connected,
-                }
-            )
-        return out
+            # 过滤已从账号删除的摄像头：_camera_info_dict 是内存缓存，
+            # 设备删除后不会自动清除，需要用 _device_info_dict 做交集校验。
+            devices = await self._miot_proxy.get_devices()
+            cameras = {did: info for did, info in cameras.items() if did in devices}
+            out: list[dict] = []
+            for did, info in cameras.items():
+                online = bool(getattr(info, "online", False)) and bool(
+                    getattr(info, "lan_online", False)
+                )
+                out.append(
+                    {
+                        "did": did,
+                        "name": getattr(info, "name", None),
+                        # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
+                        # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
+                        "room_name": getattr(info, "room_name", None),
+                        "is_online": online,
+                        "in_use": did not in denied,
+                        "connected": did in connected,
+                    }
+                )
+            return out
+        except MiotServiceException:
+            raise
+        except Exception as e:
+            logger.error("Failed to list cameras with state: %s", e)
+            raise MiotServiceException(
+                f"Failed to list cameras with state: {str(e)}"
+            ) from e
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
         """批量切换相机启用状态。每项 {"did": str, "in_use": bool}。
