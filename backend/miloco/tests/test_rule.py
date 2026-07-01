@@ -708,6 +708,27 @@ class TestRuleServiceUpdate:
         with pytest.raises(ConflictException):
             await service.update_rule(rule)
 
+    @pytest.mark.asyncio
+    async def test_update_rule_empty_task_id_raises(self, service):
+        rule = _make_static_rule(rule_id="r1", task_id="")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id is required \(put\)",
+        ):
+            await service.update_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_update_rule_nonexistent_task_id_raises(
+        self, service, mock_task_repo
+    ):
+        mock_task_repo.task_exists.return_value = False
+        rule = _make_static_rule(rule_id="r1", task_id="ghost_task")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id='ghost_task' not found \(put\)",
+        ):
+            await service.update_rule(rule)
+
 
 class TestRuleServicePatch:
     @pytest.mark.asyncio

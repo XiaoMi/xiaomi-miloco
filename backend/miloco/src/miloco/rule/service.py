@@ -337,6 +337,15 @@ class RuleService:
         if self._repo.exists_by_name(rule.name, rule.id):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
+        if not rule.task_id:
+            raise ResourceNotFoundException(
+                "task_not_found: rule.task_id is required (put)"
+            )
+        if not self._task_repo.task_exists(rule.task_id):
+            raise ResourceNotFoundException(
+                f"task_not_found: rule.task_id={rule.task_id!r} not found (put)"
+            )
+
         self._fill_default_duration_ratio(rule)
 
         await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
