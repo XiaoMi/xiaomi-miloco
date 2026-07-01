@@ -5,12 +5,13 @@ import sys
 
 import click
 
+from miloco_cli.commands._ordered_group import OrderedGroup
 from miloco_cli.output import print_result
 
 
-@click.group("admin")
+@click.group("admin", cls=OrderedGroup)
 def admin_group():
-    """系统管理：状态 / 缓存 / 模型管理 / 成本。"""
+    """系统管理：状态 / 家庭信息 / 成本。"""
 
 
 @admin_group.command("status")
@@ -26,7 +27,7 @@ def admin_status(pretty):
 @admin_group.command("home-info")
 @click.option("--pretty", is_flag=True)
 def admin_home_info(pretty):
-    """从后端拉取 home_info 并展示摘要。"""
+    """展示家庭信息摘要：设备 / 区域 / 场景 / 成员数量。"""
     from miloco_cli.home_info import get_home_info
 
     info = get_home_info()
