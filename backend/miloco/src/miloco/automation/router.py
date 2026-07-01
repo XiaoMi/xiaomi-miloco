@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path as _Path
 
-from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, Depends, Query
 
 from miloco.automation.schema import (
     MiotEventManualTriggerRequest,
@@ -15,32 +13,12 @@ from miloco.automation.schema import (
 )
 from miloco.automation.translations import translate_miot_value_label
 from miloco.manager import get_manager
-from miloco.middleware import verify_token, verify_token_query_fallback
+from miloco.middleware import verify_token
 from miloco.schema.common_schema import NormalResponse
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/automation", tags=["Automation"])
-
-
-def _is_safe_snapshot_filename(filename: str) -> bool:
-    if not filename or len(filename) > 128:
-        return False
-    if "/" in filename or "\\" in filename:
-        return False
-    if filename != _Path(filename).name:
-        return False
-    if not filename.endswith(".jpg"):
-        return False
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
-    return all(char in allowed for char in filename)
-
-
-def _error_response(status_code: int, message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={"code": status_code, "message": message, "data": None},
-    )
 
 
 def manager():
@@ -210,27 +188,6 @@ async def delete_mapping(mapping_id: str, current_user: str = Depends(verify_tok
         mgr.automation_service.list_mappings()
     )
     return NormalResponse(code=0, message="deleted", data=None)
-
-
-@router.get("/snapshots/{filename}", summary="Serve automation snapshot image")
-async def serve_snapshot(
-    filename: str,
-    request: Request,
-    auth: None = Depends(verify_token_query_fallback),
-):
-    """Serve a saved automation snapshot JPEG."""
-    _ = request, auth
-    if not _is_safe_snapshot_filename(filename):
-        return _error_response(400, "invalid filename")
-    import os
-    home = os.environ.get("MILOCO_HOME", "/root/.openclaw/miloco")
-    snapshot_root = (_Path(home) / "static" / "clips" / "automation").resolve()
-    if not snapshot_root.is_dir():
-        return _error_response(404, "not found")
-    for candidate in snapshot_root.iterdir():
-        if candidate.name == filename and candidate.is_file():
-            return FileResponse(str(candidate), media_type="image/jpeg")
-    return _error_response(404, "not found")
 
 
 @router.get("/logs", response_model=NormalResponse, summary="Recent MiOT event trigger logs")

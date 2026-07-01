@@ -43,7 +43,6 @@ class MiotEventMapping(BaseModel):
     property_filters: dict[str, Any] = Field(default_factory=dict)
     cooldown_seconds: int = Field(default=30, ge=0)
     notes: str = Field(default="")
-    snapshot_paths: list[str] = Field(default_factory=list)
     created_at: int | None = Field(default=None)
     updated_at: int | None = Field(default=None)
 
@@ -74,7 +73,6 @@ class MiotEventTriggerLog(BaseModel):
     matched_rule_ids: list[str] = Field(default_factory=list)
     skipped_reason: str = Field(default="")
     error: str = Field(default="")
-    snapshot_paths: list[str] = Field(default_factory=list)
     created_at: int
 
 

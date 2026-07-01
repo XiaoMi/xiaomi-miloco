@@ -286,7 +286,6 @@ export interface MiotEventTriggerLog {
   matched_rule_ids: string[];
   skipped_reason: string;
   error: string;
-  snapshot_paths: string[];
   created_at: number;
 }
 

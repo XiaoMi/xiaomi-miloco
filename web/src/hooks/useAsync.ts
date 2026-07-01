@@ -6,7 +6,7 @@
  * 这样调用方不必逐个检查 error;只在需要重试时才取 error 字段。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type SetStateAction } from "react";
 import { toast } from "@/components/Toast";
 import i18n from "@/i18n";
 
@@ -15,6 +15,7 @@ export interface AsyncState<T> {
   loading: boolean;
   error: Error | undefined;
   reload: () => void;
+  mutate: (next: SetStateAction<T | undefined>) => void;
 }
 
 export interface UseAsyncOptions {
@@ -61,5 +62,5 @@ export function useAsync<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, tick]);
 
-  return { data, loading, error, reload };
+  return { data, loading, error, reload, mutate: setData };
 }

@@ -193,7 +193,6 @@ curl -H "Authorization: Bearer $TOKEN" \
 - `mapping_ids`：命中了哪些映射
 - `perception_started`：是否发起了感知
 - `skipped_reason`：未触发时的原因
-- `snapshot_paths`：快照路径
 - `clip_device_ids` / `clip_kind`：视频回放信息
 
 ---

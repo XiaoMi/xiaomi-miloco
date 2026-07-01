@@ -313,8 +313,7 @@ export function AutomationPage({ devices, cameras }: Props) {
       toast("请选择设备事件", "warn");
       return;
     }
-    // Create mapping
-    await createMiotEventMapping({
+    const created = await createMiotEventMapping({
       source_type: "device",
       source_id: source.source_id,
       source_name_snapshot: source.source_name,
@@ -332,6 +331,7 @@ export function AutomationPage({ devices, cameras }: Props) {
       created_at: null,
       updated_at: null,
     });
+    mappings.mutate((items) => [created, ...(items ?? [])]);
     setCameraIds([]);
     setQueryTemplate("");
     setCooldownSeconds(30);
@@ -339,12 +339,15 @@ export function AutomationPage({ devices, cameras }: Props) {
     setPropFilters([]);
     setSelectedEventKey("");
     setDeviceSpec(null);
-    await reloadAll();
+    logs.reload();
   }
 
   async function toggleEnabled(item: MiotEventMapping) {
-    await updateMiotEventMapping(item.id, { enabled: !item.enabled });
-    await reloadAll();
+    const updated = await updateMiotEventMapping(item.id, { enabled: !item.enabled });
+    mappings.mutate((items) =>
+      (items ?? []).map((entry) => (entry.id === updated.id ? updated : entry)),
+    );
+    logs.reload();
   }
 
   async function runTest(item: MiotEventMapping) {
@@ -383,12 +386,6 @@ export function AutomationPage({ devices, cameras }: Props) {
 
   function getClipUrl(logId: string, deviceId: string): string {
     const base = `/api/events/${encodeURIComponent(logId)}/clip/${encodeURIComponent(deviceId)}`;
-    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
-  }
-
-  function getSnapshotUrl(path: string): string {
-    const filename = path.split("/").pop() ?? path;
-    const base = `/api/automation/snapshots/${encodeURIComponent(filename)}`;
     return token ? `${base}?token=${encodeURIComponent(token)}` : base;
   }
 
@@ -725,7 +722,10 @@ export function AutomationPage({ devices, cameras }: Props) {
                     className="rounded-md border border-border px-3 py-1.5 text-caption text-red-600"
                     onClick={async () => {
                       await deleteMiotEventMapping(item.id);
-                      await reloadAll();
+                      mappings.mutate((items) =>
+                        (items ?? []).filter((entry) => entry.id !== item.id),
+                      );
+                      logs.reload();
                     }}
                   >
                     删除
@@ -802,12 +802,6 @@ export function AutomationPage({ devices, cameras }: Props) {
                       preload="metadata"
                       className="max-h-56 w-full rounded-md border border-border bg-black"
                     />
-                  ))}
-                </div>
-              ) : log.snapshot_paths?.length > 0 ? (
-                <div className="mt-2 flex gap-2 overflow-x-auto">
-                  {log.snapshot_paths.map((p: string) => (
-                    <img key={p} src={getSnapshotUrl(p)} className="max-h-32 rounded-md border border-border" alt="snapshot" />
                   ))}
                 </div>
               ) : null}
