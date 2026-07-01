@@ -7,7 +7,12 @@ System status check interface
 """
 
 import logging
+import re
+import subprocess
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -77,6 +82,89 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     logger.info("System status retrieved: %s", data)
     return NormalResponse(
         code=0, message="System status retrieved successfully", data=data
+    )
+
+
+def _run_git(args: list[str]) -> str | None:
+    """在 backend 源码目录跑 git, 失败/超时/无 git 都返回 None (让 git 自动向上找 .git)。"""
+    try:
+        r = subprocess.run(
+            ["git"] + args,
+            capture_output=True, text=True, timeout=2,
+            cwd=Path(__file__).resolve().parent,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+_HATCH_VCS_LOCAL_RE = re.compile(r"\+g([0-9a-f]{7,40})(?:\.d(\d{8}))?")
+
+
+def _parse_version_git(v: str) -> dict | None:
+    """从 hatch-vcs local version 段提取 commit_short + dirty。
+
+    Wheel 部署无 .git 时的 fallback: pyproject 里 hatch-vcs 会把版本号写成
+    ``0.1.0.dev5+g4a2b3c1.d20260701``, 其中 ``g<sha>`` 是构建时 commit,
+    ``.d<YYYYMMDD>`` 存在表示构建时 tree 有未提交改动。
+    """
+    m = _HATCH_VCS_LOCAL_RE.search(v)
+    if m is None:
+        return None
+    sha = m.group(1)
+    return {
+        "commit": sha if len(sha) == 40 else None,
+        "commit_short": sha[:7],
+        "branch": None,
+        "dirty": m.group(2) is not None,
+        "commit_time": None,
+    }
+
+
+def _git_info(version: str | None = None) -> dict | None:
+    """优先跑 git 命令 (source checkout); 失败时从 pkg version 里解析 (wheel 部署)。"""
+    commit = _run_git(["rev-parse", "HEAD"])
+    if commit:
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        status = _run_git(["status", "--porcelain"])
+        commit_time = _run_git(["log", "-1", "--format=%cI", "HEAD"])
+        return {
+            "commit": commit,
+            "commit_short": commit[:7],
+            "branch": branch if branch and branch != "HEAD" else None,
+            "dirty": bool(status) if status is not None else None,
+            "commit_time": commit_time or None,
+        }
+    return _parse_version_git(version) if version else None
+
+
+def _pkg_version() -> str:
+    try:
+        return pkg_version("miloco")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+@router.get(
+    "/version",
+    summary="Backend version (package version + git info if available)",
+    response_model=NormalResponse,
+)
+async def get_version(current_user: str = Depends(verify_token)):
+    """Return backend package version and, if deployed from a git checkout,
+    the current commit / branch / dirty flag / commit time.
+
+    ``data.git`` is null when backend runs from a wheel / docker image without
+    the .git directory (i.e. not a git checkout).
+    """
+    version = _pkg_version()
+    return NormalResponse(
+        code=0,
+        message="Version info",
+        data={
+            "version": version,
+            "git": _git_info(version),
+        },
     )
 
 
