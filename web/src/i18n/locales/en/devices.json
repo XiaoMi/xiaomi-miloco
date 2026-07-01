@@ -12,6 +12,24 @@
     "watchCamera": "Watch {{name}}",
     "liveView": "{{name}} live view",
     "loadingStream": "Loading stream…",
-    "close": "Close"
+    "close": "Close",
+    "group": {
+      "cleaningAppliance": "Cleaning appliances",
+      "security": "Security",
+      "sensor": "Sensors",
+      "entertainment": "Entertainment",
+      "environmentAppliance": "Environment appliances",
+      "routerGateway": "Routers & gateways",
+      "lighting": "Lighting",
+      "plugSwitch": "Plugs & switches",
+      "kitchenAppliance": "Kitchen appliances",
+      "bathroom": "Bathroom",
+      "personalLiving": "Personal care & living",
+      "petPlant": "Pets & plants",
+      "fitnessHealth": "Fitness & health",
+      "mobilityVehicle": "Mobility & vehicle",
+      "officeStudy": "Office & study",
+      "other": "Other"
+    }
   }
 }

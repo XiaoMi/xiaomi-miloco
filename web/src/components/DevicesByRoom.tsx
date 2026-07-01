@@ -46,6 +46,211 @@ const CATEGORY_ICON: Record<DeviceCategory, ComponentType<SVGProps<SVGSVGElement
   other: IconPlug,
 };
 
+type DeviceGroupCategory =
+  | "cleaning_appliance"
+  | "security"
+  | "sensor"
+  | "entertainment"
+  | "environment_appliance"
+  | "router_gateway"
+  | "lighting"
+  | "plug_switch"
+  | "kitchen_appliance"
+  | "bathroom"
+  | "personal_living"
+  | "pet_plant"
+  | "fitness_health"
+  | "mobility_vehicle"
+  | "office_study"
+  | "other";
+
+const GROUP_ORDER: DeviceGroupCategory[] = [
+  "cleaning_appliance",
+  "security",
+  "sensor",
+  "entertainment",
+  "environment_appliance",
+  "router_gateway",
+  "lighting",
+  "plug_switch",
+  "kitchen_appliance",
+  "bathroom",
+  "personal_living",
+  "pet_plant",
+  "fitness_health",
+  "mobility_vehicle",
+  "office_study",
+  "other",
+];
+
+const GROUP_LABEL_KEY = {
+  cleaning_appliance: "devices.group.cleaningAppliance",
+  security: "devices.group.security",
+  sensor: "devices.group.sensor",
+  entertainment: "devices.group.entertainment",
+  environment_appliance: "devices.group.environmentAppliance",
+  router_gateway: "devices.group.routerGateway",
+  lighting: "devices.group.lighting",
+  plug_switch: "devices.group.plugSwitch",
+  kitchen_appliance: "devices.group.kitchenAppliance",
+  bathroom: "devices.group.bathroom",
+  personal_living: "devices.group.personalLiving",
+  pet_plant: "devices.group.petPlant",
+  fitness_health: "devices.group.fitnessHealth",
+  mobility_vehicle: "devices.group.mobilityVehicle",
+  office_study: "devices.group.officeStudy",
+  other: "devices.group.other",
+} satisfies { [K in DeviceGroupCategory]: string };
+
+const DEVICE_TO_GROUP: { [K in DeviceCategory]: DeviceGroupCategory } = {
+  camera: "security",
+  lock: "security",
+  purifier: "environment_appliance",
+  fan: "environment_appliance",
+  aircond: "environment_appliance",
+  light: "lighting",
+  curtain: "personal_living",
+  tv: "entertainment",
+  other: "other",
+};
+
+const RAW_CATEGORY_TO_GROUP: Record<string, DeviceGroupCategory> = {
+  "扫地机器人": "cleaning_appliance",
+  "擦地机": "cleaning_appliance",
+  "洗衣机": "cleaning_appliance",
+  "干衣机": "cleaning_appliance",
+  "烘干机": "cleaning_appliance",
+  "垃圾桶": "cleaning_appliance",
+  "camera": "security",
+  "lock": "security",
+  "smart-lock": "security",
+  "可视门铃": "security",
+  "摄像头": "security",
+  "摄像机灯": "security",
+  "sensor": "sensor",
+  "temperature-humidity-sensor": "sensor",
+  "motion-sensor": "sensor",
+  "contact-sensor": "sensor",
+  "smoke-sensor": "sensor",
+  "gas-sensor": "sensor",
+  "water-leak-sensor": "sensor",
+  "蓝牙温湿度传感器": "sensor",
+  "温控器": "sensor",
+  "tv": "entertainment",
+  "television": "entertainment",
+  "set-top-box": "entertainment",
+  "projector": "entertainment",
+  "speaker": "entertainment",
+  "电视": "entertainment",
+  "分体电视": "entertainment",
+  "电视盒子": "entertainment",
+  "机顶盒": "entertainment",
+  "投影仪": "entertainment",
+  "air-conditioner": "environment_appliance",
+  "air-purifier": "environment_appliance",
+  "fan": "environment_appliance",
+  "heater": "environment_appliance",
+  "空气净化器": "environment_appliance",
+  "新风机": "environment_appliance",
+  "加湿器": "environment_appliance",
+  "除湿机": "environment_appliance",
+  "电风扇": "environment_appliance",
+  "电暖器/暖风机/电暖风": "environment_appliance",
+  "凉霸": "environment_appliance",
+  "空调": "environment_appliance",
+  "空调伴侣": "environment_appliance",
+  "香薰机": "environment_appliance",
+  "gateway": "router_gateway",
+  "router": "router_gateway",
+  "网关": "router_gateway",
+  "路由器": "router_gateway",
+  "light": "lighting",
+  "ceiling-light": "lighting",
+  "灯": "lighting",
+  "杀菌灯": "lighting",
+  "outlet": "plug_switch",
+  "wall-switch": "plug_switch",
+  "plug": "plug_switch",
+  "单控开关": "plug_switch",
+  "带温湿度查询功能开关": "plug_switch",
+  "电机控制器": "plug_switch",
+  "养生壶": "kitchen_appliance",
+  "压力锅": "kitchen_appliance",
+  "多功能料理锅": "kitchen_appliance",
+  "微波炉": "kitchen_appliance",
+  "果汁机/破壁料理机": "kitchen_appliance",
+  "油烟机": "kitchen_appliance",
+  "电磁炉": "kitchen_appliance",
+  "电饭煲": "kitchen_appliance",
+  "空气炸锅": "kitchen_appliance",
+  "蒸烤箱": "kitchen_appliance",
+  "集成灶": "kitchen_appliance",
+  "热水壶": "kitchen_appliance",
+  "洗碗机": "kitchen_appliance",
+  "冰箱": "kitchen_appliance",
+  "净水器": "bathroom",
+  "饮水机/净饮机": "bathroom",
+  "热水器": "bathroom",
+  "浴霸": "bathroom",
+  "curtain": "personal_living",
+  "smart-curtain": "personal_living",
+  "窗帘": "personal_living",
+  "开窗器": "personal_living",
+  "晾衣架": "personal_living",
+  "智能床": "personal_living",
+  "智能枕": "personal_living",
+  "电热毯": "personal_living",
+  "按摩器": "personal_living",
+  "按摩椅": "personal_living",
+  "艾灸盒": "personal_living",
+  "足浴盆": "personal_living",
+  "灭蚊器": "personal_living",
+  "宠物喂食器": "pet_plant",
+  "宠物饮水机": "pet_plant",
+  "猫砂盆": "pet_plant",
+  "鱼缸": "pet_plant",
+  "花盆": "pet_plant",
+  "跑步机": "fitness_health",
+  "走步机": "fitness_health",
+  "控制面板": "office_study",
+};
+
+function groupRank(group: DeviceGroupCategory): number {
+  const idx = GROUP_ORDER.indexOf(group);
+  return idx === -1 ? GROUP_ORDER.length : idx;
+}
+
+function deviceGroup(device: Device): DeviceGroupCategory {
+  if (device.rawCategory && RAW_CATEGORY_TO_GROUP[device.rawCategory]) {
+    return RAW_CATEGORY_TO_GROUP[device.rawCategory];
+  }
+  return DEVICE_TO_GROUP[device.category] ?? "other";
+}
+
+export function sortDevicesForDisplay(devices: Device[]): Device[] {
+  return [...devices].sort((a, b) => {
+    if (a.online !== b.online) return a.online ? -1 : 1;
+    const groupDiff = groupRank(deviceGroup(a)) - groupRank(deviceGroup(b));
+    if (groupDiff !== 0) return groupDiff;
+    return a.name.localeCompare(b.name, "zh-Hans-CN") || a.did.localeCompare(b.did);
+  });
+}
+
+export function groupDevicesByCategory(devices: Device[]): [DeviceGroupCategory, Device[]][] {
+  const groups = new Map<DeviceGroupCategory, Device[]>();
+  for (const d of sortDevicesForDisplay(devices)) {
+    const group = deviceGroup(d);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(d);
+  }
+  return [...groups.entries()].sort(([aGroup, aList], [bGroup, bList]) => {
+    const aOnline = aList.some((d) => d.online);
+    const bOnline = bList.some((d) => d.online);
+    if (aOnline !== bOnline) return aOnline ? -1 : 1;
+    return groupRank(aGroup) - groupRank(bGroup);
+  });
+}
+
 interface Props {
   devices: Device[];
   scenes: Scene[];
@@ -58,7 +263,7 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
 
   const unassigned = t("devices.unassigned");
 
-  // 按 room 分组,保留原始顺序
+  // 按 room 分组；每个房间内排序为在线优先，并按设备类型聚类。
   const groups = useMemo(() => {
     const m = new Map<string, Device[]>();
     for (const d of devices) {
@@ -66,7 +271,7 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
       if (!m.has(key)) m.set(key, []);
       m.get(key)!.push(d);
     }
-    return [...m.entries()];
+    return [...m.entries()].map(([room, list]) => [room, sortDevicesForDisplay(list)] as const);
   }, [devices, unassigned]);
 
   // 默认规则:≤3 个房间全展开;>3 个房间只展第一个
@@ -141,8 +346,17 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
               </button>
               {open && (
                 <div className="pl-5 pb-1 pr-1">
-                  {list.map((d) => (
-                    <DeviceRow key={d.did} device={d} />
+                  {groupDevicesByCategory(list).map(([category, categoryDevices]) => (
+                    <div key={category} className="py-1">
+                      <div className="text-caption-mono text-text-tertiary px-2 pb-1 flex items-center gap-1.5">
+                        <span>{t(GROUP_LABEL_KEY[category])}</span>
+                        <span>·</span>
+                        <span>{t("devices.countUnit", { n: categoryDevices.length })}</span>
+                      </div>
+                      {categoryDevices.map((d) => (
+                        <DeviceRow key={d.did} device={d} />
+                      ))}
+                    </div>
                   ))}
                 </div>
               )}

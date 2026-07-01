@@ -679,6 +679,7 @@ export async function realListDevices(): Promise<Device[]> {
       did: d.did,
       name: cleanDeviceName(d.name),
       category: cat,
+      rawCategory: d.category,
       room: cleanRoom(d.room),
       online: d.online,
       statusText: humanDeviceStatus(d, valueByIid, statusKind),
