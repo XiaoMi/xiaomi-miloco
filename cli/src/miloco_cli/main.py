@@ -26,6 +26,7 @@ from miloco_cli.commands.monitor import monitor_group
 from miloco_cli.commands.notify import notify_group
 from miloco_cli.commands.perceive import perceive_group
 from miloco_cli.commands.person import person_group
+from miloco_cli.commands.pet import pet_group
 from miloco_cli.commands.rule import rule_group
 from miloco_cli.commands.scene import scene_group
 from miloco_cli.commands.scope import scope_group
@@ -78,6 +79,7 @@ cli.add_command(perceive_group)
 cli.add_command(rule_group)
 cli.add_command(task_group)
 cli.add_command(person_group)
+cli.add_command(pet_group)
 cli.add_command(identity_group)
 cli.add_command(home_profile_group)
 cli.add_command(admin_group)
