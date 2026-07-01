@@ -408,6 +408,8 @@ class PerceptionEngineProxy:
         convert_ms: float,
         main_loop: asyncio.AbstractEventLoop,
         skipped_task_ids: list[str],
+        force_gate_pass_dids: set[str] | None = None,
+        extra_context_by_did: dict[str, str] | None = None,
     ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
         """Actual realtime perceive logic — runs in the inference thread.
 
@@ -505,6 +507,8 @@ class PerceptionEngineProxy:
                 on_early_speeches=_on_early_speeches,
                 on_early_matched_rules=_on_early_matched_rules,
                 on_early_suggestions=_on_early_suggestions,
+                force_gate_pass_dids=force_gate_pass_dids,
+                extra_context_by_did=extra_context_by_did,
             )
         except OmniError as e:
             # 兜底分支:主路径 run_batch_pipeline 已在 _run_device 内逐相机吞掉 OmniError
@@ -581,6 +585,9 @@ class PerceptionEngineProxy:
     async def realtime_perceive(
         self, batch: PerceptionBatch,
         artifacts: OmniEventArtifacts | None = None,
+        rules: list[dict] | None = None,
+        force_gate_pass_dids: set[str] | None = None,
+        extra_context_by_did: dict[str, str] | None = None,
     ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
         """Run full engine pipeline — offloaded to inference thread.
 
@@ -600,8 +607,11 @@ class PerceptionEngineProxy:
 
             from miloco.manager import get_manager
 
-            rules = await get_manager().rule_service.get_all_rules(enabled_only=True)
-            rules = [rule.model_dump() for rule in rules]
+            if rules is None:
+                loaded_rules = await get_manager().rule_service.get_all_rules(enabled_only=True)
+                rules = [rule.model_dump() for rule in loaded_rules]
+            else:
+                rules = list(rules)
             rules, skipped_task_ids = _filter_completed_event_rules(rules)
 
             device_count = sum(1 for d in batch.devices.values() if d.has_data)
@@ -643,6 +653,8 @@ class PerceptionEngineProxy:
                                 convert_ms,
                                 main_loop,
                                 skipped_task_ids,
+                                force_gate_pass_dids=force_gate_pass_dids,
+                                extra_context_by_did=extra_context_by_did,
                             ),
                             artifacts=artifacts,
                         )
@@ -660,6 +672,8 @@ class PerceptionEngineProxy:
                         convert_ms,
                         main_loop,
                         skipped_task_ids,
+                        force_gate_pass_dids=force_gate_pass_dids,
+                        extra_context_by_did=extra_context_by_did,
                     )
             return await self._realtime_perceive_impl(
                 batched_snapshot,
@@ -668,6 +682,8 @@ class PerceptionEngineProxy:
                 convert_ms,
                 main_loop,
                 skipped_task_ids,
+                force_gate_pass_dids=force_gate_pass_dids,
+                extra_context_by_did=extra_context_by_did,
             )
 
     async def on_demand_perceive(
@@ -749,6 +765,7 @@ class PerceptionEngineProxy:
         home_id: str | None = None,
         rule_id_filter: set[str] | None = None,
         pulse_reset_matched_rules: bool = False,
+        pulse_reset_rule_ids: set[str] | None = None,
         force_persist: bool = False,
     ) -> MeaningfulEventPersistResult | None:
         """Handle realtime perception result — runs on main loop.
@@ -831,7 +848,9 @@ class PerceptionEngineProxy:
                     matched_rule.rule_id
                 ),
             )
-            if pulse_reset_matched_rules:
+            if pulse_reset_matched_rules or (
+                pulse_reset_rule_ids is not None and matched_rule.rule_id in pulse_reset_rule_ids
+            ):
                 reset_candidates.append((matched_rule.rule_id, did))
 
         for rule_id, did in reset_candidates:

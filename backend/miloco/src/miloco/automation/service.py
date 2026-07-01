@@ -112,11 +112,20 @@ def _match_condition(actual: Any, expected: Any) -> bool:
     return False
 
 
-def _rule_to_prompt_dict(rule) -> dict[str, Any]:
+def _rule_to_prompt_dict(
+    rule,
+    *,
+    camera_dids: list[str] | None = None,
+    trigger_type: str = "perception",
+) -> dict[str, Any]:
     return {
         "id": rule.id,
         "name": rule.name,
-        "condition": {"query": rule.condition.query},
+        "trigger_type": trigger_type,
+        "condition": {
+            "query": rule.condition.query,
+            "perceive_device_ids": camera_dids or [],
+        },
     }
 
 
@@ -130,7 +139,7 @@ def _mapping_rule_query(mapping: MiotEventMapping) -> str:
     query = mapping.query_template.strip()
     if not query:
         return _DEFAULT_MAPPING_QUERY
-    return f"请判断画面中是否符合这个感知提示：{query}"
+    return query
 
 
 def _mapping_to_rule(mapping: MiotEventMapping) -> Rule:
@@ -156,7 +165,10 @@ def _mapping_to_rule(mapping: MiotEventMapping) -> Rule:
     )
 
 
-def _build_trigger_context(trigger: MiotEventTrigger) -> str:
+def _build_trigger_context(
+    trigger: MiotEventTrigger,
+    mappings: list[MiotEventMapping] | None = None,
+) -> str:
     label = "触发参数" if trigger.event_name.startswith("event.") else "属性变化"
     parts = [
         "# 米家触发上下文",
@@ -168,6 +180,15 @@ def _build_trigger_context(trigger: MiotEventTrigger) -> str:
         parts.append(f"触发设备所在房间：{trigger.room_name}")
     if trigger.changed_properties:
         parts.append(f"{label}：{trigger.changed_properties}")
+    prompts = [
+        mapping.query_template.strip()
+        for mapping in (mappings or [])
+        if mapping.query_template.strip()
+    ]
+    if prompts:
+        parts.append("本轮用户配置的感知提示：")
+        for prompt in dict.fromkeys(prompts):
+            parts.append(f"- {prompt}")
     parts.append("注意：以上只是触发摄像头查看的原因，不是当前画面事实；规则是否成立必须以本轮视频画面为准。")
     return "\n".join(parts)
 
@@ -482,16 +503,40 @@ class AutomationService:
             self._append_log(log_item)
             return log_item
 
-        prompt_rules = [_rule_to_prompt_dict(rule) for rule in candidate_rules]
+        perception_rules = [
+            rule
+            for rule in all_rules
+            if getattr(
+                getattr(rule, "trigger_type", RuleTriggerType.PERCEPTION),
+                "value",
+                getattr(rule, "trigger_type", RuleTriggerType.PERCEPTION),
+            )
+            == RuleTriggerType.PERCEPTION.value
+        ]
+        prompt_rules = [
+            rule.model_dump(mode="json") if hasattr(rule, "model_dump") else _rule_to_prompt_dict(rule)
+            for rule in perception_rules
+        ]
+        prompt_rules.extend(
+            _rule_to_prompt_dict(rule, camera_dids=camera_ids)
+            for rule in candidate_rules
+        )
         real_rule_ids = {rule.id for rule in candidate_rules}
         log_item.perception_started = True
-        clips_by_device: dict[str, tuple[bytes, str]] = {}
         try:
-            result = await perception_service.structured_on_demand_perceive(
+            (
+                result,
+                early_sent_contents,
+                early_sent_rule_ids,
+                early_sent_sugg_ids,
+                artifacts,
+            ) = await perception_service.external_trigger_perceive(
                 camera_ids,
                 prompt_rules,
-                extra_context=_build_trigger_context(trigger),
-                snapshot_sink=clips_by_device,
+                extra_context_by_did={
+                    did: _build_trigger_context(trigger, active_mappings)
+                    for did in camera_ids
+                },
             )
         except Exception as e:  # noqa: BLE001
             log_item.error = str(e)
@@ -537,8 +582,11 @@ class AutomationService:
 
         persist_result = await perception_service.handle_structured_perception_result(
             result=result,
+            early_sent_contents=early_sent_contents,
+            early_sent_rule_ids=early_sent_rule_ids,
+            early_sent_sugg_ids=early_sent_sugg_ids,
             device_ids=camera_ids,
-            clips_by_device=clips_by_device,
+            artifacts=artifacts,
             event_id=log_item.id,
             timestamp_ms=trigger.occurred_at or now_ms(),
             text_prefix=(
@@ -552,14 +600,13 @@ class AutomationService:
                 "automation_log_id": log_item.id,
             },
             home_id=trigger.home_id,
-            rule_id_filter=real_rule_ids,
-            pulse_reset_matched_rules=True,
+            pulse_reset_rule_ids=real_rule_ids,
             force_persist=bool(answer),
         )
         if persist_result is not None:
             log_item.clip_kind = persist_result.clip_kind or ""
             log_item.clip_device_ids = [
-                device_id for device_id in camera_ids if device_id in clips_by_device
+                device_id for device_id in camera_ids if device_id in artifacts.clips
             ] if persist_result.snapshot_count > 0 else []
         self._append_log(log_item)
         return log_item

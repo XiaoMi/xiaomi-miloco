@@ -131,6 +131,35 @@ async def test_room_name_still_attached_to_context():
     assert captured["contexts"]["cam_x"].room_name == "厨房"
 
 
+@pytest.mark.asyncio
+async def test_external_gate_context_passed_to_batch_pipeline():
+    """米家触发等外部事件只放行 Gate，仍进入 realtime_perceive 的同一批处理入口。"""
+    cam = _make_snapshot("cam_x", "门口")
+    batch = BatchedSnapshot(snapshots=[cam])
+
+    engine = PerceptionEngine(PerceptionConfig())
+    captured: dict = {}
+
+    async def fake_run_batch_pipeline(batch_, contexts, *args, **kwargs):
+        captured["contexts"] = contexts
+        captured["force_gate_pass_dids"] = kwargs.get("force_gate_pass_dids")
+        return BatchPipelineResult()
+
+    with patch(
+        "miloco.perception.engine.pipeline.run_batch_pipeline",
+        side_effect=fake_run_batch_pipeline,
+    ):
+        await engine.realtime_perceive(
+            batch,
+            rules=[],
+            force_gate_pass_dids={"cam_x"},
+            extra_context_by_did={"cam_x": "米家门锁按铃触发"},
+        )
+
+    assert captured["force_gate_pass_dids"] == {"cam_x"}
+    assert captured["contexts"]["cam_x"].extra_context == "米家门锁按铃触发"
+
+
 # ---------- device_rule_map 构造正确性(层 1)----------
 # device_rule_map: did → 本 batch 实际下发的 rule_id 列表。
 # client.py EXITED 阶段据此精确推退状态机桶,绑 cam_A 的 rule 不会被只有 cam_B 的 batch

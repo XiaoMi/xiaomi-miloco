@@ -90,7 +90,7 @@ def test_coerce_number(value, number):
 
 
 @pytest.mark.asyncio
-async def test_handle_trigger_uses_structured_perception_context():
+async def test_handle_trigger_uses_external_gate_realtime_context():
     service = AutomationService(_KVRepoStub())
     service.create_mapping(
         MiotEventMapping(
@@ -108,15 +108,22 @@ async def test_handle_trigger_uses_structured_perception_context():
 
     captured: dict[str, object] = {}
 
-    async def _structured(sources, rules, extra_context="", snapshot_sink=None):
+    async def _external(sources, rules, extra_context_by_did=None):
         captured["sources"] = sources
         captured["rules"] = rules
-        captured["extra_context"] = extra_context
-        captured["snapshot_sink"] = snapshot_sink
-        return SimpleNamespace(
-            caption=[SimpleNamespace(description="门口无人")],
-            suggestions=[],
-            matched_rules=[],
+        captured["extra_context_by_did"] = extra_context_by_did
+        return (
+            SimpleNamespace(
+                caption=[SimpleNamespace(description="门口无人")],
+                suggestions=[],
+                matched_rules=[],
+                device_rule_map={"cam-1": [rules[0]["id"]]},
+                skipped=False,
+            ),
+            set(),
+            set(),
+            set(),
+            SimpleNamespace(clips={}),
         )
 
     async def _handle_structured(**kwargs):
@@ -124,7 +131,7 @@ async def test_handle_trigger_uses_structured_perception_context():
         return SimpleNamespace(snapshot_count=0, clip_kind=None)
 
     perception_service = SimpleNamespace(
-        structured_on_demand_perceive=_structured,
+        external_trigger_perceive=_external,
         handle_structured_perception_result=_handle_structured,
     )
     rule_service = _RuleServiceStub()
@@ -152,12 +159,13 @@ async def test_handle_trigger_uses_structured_perception_context():
     )
 
     assert captured["sources"] == ["cam-1"]
-    assert "米家触发上下文" in captured["extra_context"]
-    assert "属性变化" in captured["extra_context"]
+    assert "米家触发上下文" in captured["extra_context_by_did"]["cam-1"]
+    assert "属性变化" in captured["extra_context_by_did"]["cam-1"]
     assert captured["rules"][0]["id"].startswith("rule-auto-")
-    assert captured["rules"][0]["condition"]["query"] == "请判断画面中是否符合这个感知提示：重点看门口"
+    assert captured["rules"][0]["condition"]["query"] == "重点看门口"
+    assert captured["rules"][0]["condition"]["perceive_device_ids"] == ["cam-1"]
     assert captured["postprocess"]["text_prefix"].startswith("[米家设备触发]")
-    assert captured["postprocess"]["pulse_reset_matched_rules"] is True
+    assert captured["postprocess"]["pulse_reset_rule_ids"] == {"rule-auto-1"}
 
 
 @pytest.mark.asyncio
@@ -193,9 +201,9 @@ async def test_handle_trigger_postprocesses_formal_mapping_rule_matches():
     )
     captured: dict[str, object] = {}
 
-    async def _structured(_sources, rules, **__):
+    async def _external(_sources, rules, **__):
         captured["prompt_rule_ids"] = [rule["id"] for rule in rules]
-        return SimpleNamespace(
+        result = SimpleNamespace(
             caption=[CaptionEntry(description="门口有人")],
             suggestions=[],
             matched_rules=[
@@ -212,14 +220,17 @@ async def test_handle_trigger_postprocesses_formal_mapping_rule_matches():
                     source_device_ids=["cam-1"],
                 ),
             ],
+            device_rule_map={"cam-1": [rule["id"] for rule in rules]},
+            skipped=False,
         )
+        return result, set(), set(), set(), SimpleNamespace(clips={})
 
     async def _handle_structured(**kwargs):
         captured["postprocess"] = kwargs
         return SimpleNamespace(snapshot_count=0, clip_kind=None)
 
     perception_service = SimpleNamespace(
-        structured_on_demand_perceive=_structured,
+        external_trigger_perceive=_external,
         handle_structured_perception_result=_handle_structured,
     )
     rule_service = _RuleServiceStub([rule])
@@ -246,7 +257,6 @@ async def test_handle_trigger_postprocesses_formal_mapping_rule_matches():
 
     assert captured["prompt_rule_ids"] == ["rule-1", "rule-auto-1"]
     assert all(not rule_id.startswith("miot_mapping:") for rule_id in captured["prompt_rule_ids"])
-    assert captured["postprocess"]["rule_id_filter"] == {"rule-1", "rule-auto-1"}
-    assert captured["postprocess"]["pulse_reset_matched_rules"] is True
+    assert captured["postprocess"]["pulse_reset_rule_ids"] == {"rule-1", "rule-auto-1"}
     assert log.matched_rule_ids == ["rule-1", "rule-auto-1"]
     assert len(log.structured_matched_rules) == 2

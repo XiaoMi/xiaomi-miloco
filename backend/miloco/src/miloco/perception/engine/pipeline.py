@@ -43,6 +43,7 @@ from miloco.perception.engine.types import (
     BatchPipelineResult,
     DevicePipelineResult,
     GatePacket,
+    GateTiming,
     GateTrigger,
     IdentityPacket,
     InputSlice,
@@ -388,6 +389,7 @@ async def run_batch_pipeline(
     gate_last_audio_pass_ts: "dict[str, float] | None" = None,
     gate_hold_active: "dict[str, bool] | None" = None,
     gate_hold_started_at: "dict[str, float] | None" = None,
+    force_gate_pass_dids: set[str] | None = None,
 ) -> BatchPipelineResult:
     """Run perception pipeline for a batch of devices, grouped by room.
 
@@ -465,30 +467,61 @@ async def run_batch_pipeline(
         # processor._publish_trace 从 timing 读出复用,避免双钥匙。
         room_timing[f"_device_trace_id_{did}"] = device_trace_id
 
-        prev_frame = gate_prev_frames.get(did) if gate_prev_frames is not None else None
-        last_v = (
-            gate_last_visual_pass_ts.get(did)
-            if gate_last_visual_pass_ts is not None else None
-        )
-        last_a = (
-            gate_last_audio_pass_ts.get(did)
-            if gate_last_audio_pass_ts is not None else None
-        )
-        gate_packet, gate_timing, last_checked, new_last_v, new_last_a = run_gate(
-            snapshot, config.gate, config.input.fps,
-            prev_frame=prev_frame,
-            last_visual_pass_ts=last_v,
-            last_audio_pass_ts=last_a,
-        )
-        # 跨窗 gate 状态各 device 用 per-did key、读写均在同步段、键不相交 → 并发 gather 下安全(同 room_timing)。
-        # 无论 gate 是否通过都更新基准——始终是"最近实际比较过的画面"。
-        if gate_prev_frames is not None and last_checked is not None:
-            gate_prev_frames[did] = last_checked
-        # 两 ts 仅在 run_gate 返回新值(非 None)时写回;清理由 reset_session 负责
-        if gate_last_visual_pass_ts is not None and new_last_v is not None:
-            gate_last_visual_pass_ts[did] = new_last_v
-        if gate_last_audio_pass_ts is not None and new_last_a is not None:
-            gate_last_audio_pass_ts[did] = new_last_a
+        force_gate_pass = did in (force_gate_pass_dids or set())
+        if force_gate_pass:
+            # 米家等离散外部事件只替代本轮 Gate 放行，不更新实时 Gate 的跨窗基准。
+            has_audio = bool(snapshot.audio_clip.size)
+            gate_packet = GatePacket(
+                packet_id=str(uuid.uuid4()),
+                room_name=snapshot.room_name,
+                timestamp=snapshot.end_timestamp,
+                trigger=GateTrigger(
+                    visual_changed=True,
+                    visual_change_score=1.0,
+                    audio_active=has_audio,
+                    audio_energy_level=1.0 if has_audio else 0.0,
+                    speech_active=False,
+                    hold=False,
+                ),
+                frames=snapshot.frames,
+                audio_clip=snapshot.audio_clip,
+                sample_rate=snapshot.sample_rate,
+                fps=config.input.fps,
+            )
+            gate_timing = GateTiming(
+                video_ms=0.0,
+                audio_ms=0.0,
+                video_pass=True,
+                audio_pass=has_audio,
+                video_score=1.0,
+                audio_energy=1.0 if has_audio else 0.0,
+            )
+            room_timing[f"_gate_external_pass_{did}"] = 1
+        else:
+            prev_frame = gate_prev_frames.get(did) if gate_prev_frames is not None else None
+            last_v = (
+                gate_last_visual_pass_ts.get(did)
+                if gate_last_visual_pass_ts is not None else None
+            )
+            last_a = (
+                gate_last_audio_pass_ts.get(did)
+                if gate_last_audio_pass_ts is not None else None
+            )
+            gate_packet, gate_timing, last_checked, new_last_v, new_last_a = run_gate(
+                snapshot, config.gate, config.input.fps,
+                prev_frame=prev_frame,
+                last_visual_pass_ts=last_v,
+                last_audio_pass_ts=last_a,
+            )
+            # 跨窗 gate 状态各 device 用 per-did key、读写均在同步段、键不相交 → 并发 gather 下安全(同 room_timing)。
+            # 无论 gate 是否通过都更新基准——始终是"最近实际比较过的画面"。
+            if gate_prev_frames is not None and last_checked is not None:
+                gate_prev_frames[did] = last_checked
+            # 两 ts 仅在 run_gate 返回新值(非 None)时写回;清理由 reset_session 负责
+            if gate_last_visual_pass_ts is not None and new_last_v is not None:
+                gate_last_visual_pass_ts[did] = new_last_v
+            if gate_last_audio_pass_ts is not None and new_last_a is not None:
+                gate_last_audio_pass_ts[did] = new_last_a
 
         # gate hold 状态转换 → 日志 + events 表
         if gate_hold_active is not None and gate_hold_started_at is not None:
