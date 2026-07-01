@@ -737,6 +737,7 @@ class PerceptionEngineProxy:
         early_sent_sugg_ids: set[int] | None = None,
         device_ids: list[str] | None = None,
         artifacts: OmniEventArtifacts | None = None,
+        pulse_reset_rule_ids: set[str] | None = None,
     ):
         await self.handle_structured_perception_result(
             result=result,
@@ -745,6 +746,7 @@ class PerceptionEngineProxy:
             early_sent_sugg_ids=early_sent_sugg_ids,
             device_ids=device_ids,
             artifacts=artifacts,
+            pulse_reset_rule_ids=pulse_reset_rule_ids,
             persist_in_background=True,
         )
 
@@ -833,6 +835,13 @@ class PerceptionEngineProxy:
             if rule_id_filter is not None and matched_rule.rule_id not in rule_id_filter:
                 continue
             did = matched_rule.source_device_ids[0] if matched_rule.source_device_ids else "perception"
+            should_pulse_reset = pulse_reset_matched_rules or (
+                pulse_reset_rule_ids is not None and matched_rule.rule_id in pulse_reset_rule_ids
+            )
+            if should_pulse_reset:
+                # 流式早回调已经 update_state(True) 的规则仍需在本轮末尾复位，
+                # 否则 event 规则会停在 True，下一次同类离散触发不再产生边沿。
+                reset_candidates.append((matched_rule.rule_id, did))
             if early_sent_rule_ids and (matched_rule.rule_id, did) in early_sent_rule_ids:
                 continue
             _publish_perception_event(
@@ -848,10 +857,6 @@ class PerceptionEngineProxy:
                     matched_rule.rule_id
                 ),
             )
-            if pulse_reset_matched_rules or (
-                pulse_reset_rule_ids is not None and matched_rule.rule_id in pulse_reset_rule_ids
-            ):
-                reset_candidates.append((matched_rule.rule_id, did))
 
         for rule_id, did in reset_candidates:
             try:
