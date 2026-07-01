@@ -17,7 +17,7 @@ SUPPORTED_LANGS: tuple[Lang, ...] = ("zh", "en")
 
 _ZH: dict[str, str] = {
     # runtime tags
-    "runtime.baremetal": "裸机",
+    "runtime.native": "Native",
 
     # network empty
     "nic_empty.name": "IPv4 网卡",
@@ -290,7 +290,7 @@ _ZH: dict[str, str] = {
 
 
 _EN: dict[str, str] = {
-    "runtime.baremetal": "bare metal",
+    "runtime.native": "Native",
 
     "nic_empty.name": "IPv4 NICs",
     "nic_empty.message": "No usable IPv4 NIC detected; network not configured or offline",

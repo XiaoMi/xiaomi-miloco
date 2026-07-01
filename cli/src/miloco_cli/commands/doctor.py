@@ -361,7 +361,7 @@ def _runtime_tags(env: Environment, t: Translator = _ZH_T) -> list[str]:
     if env.is_container:
         tags.append("Docker container")
     if not tags:
-        tags.append(t("runtime.baremetal"))
+        tags.append(t("runtime.native"))
     return tags
 
 
