@@ -146,7 +146,7 @@ async def test_cycle_source_states_include_matched_and_false_pairs(proxy):
         )
 
     with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     assert calls == [
         ("rule_X", "cam_A", True, {"cam_A": True, "cam_B": False}),
