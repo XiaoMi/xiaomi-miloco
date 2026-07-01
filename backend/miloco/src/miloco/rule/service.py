@@ -275,9 +275,13 @@ class RuleService:
         if self._repo.exists_by_name(rule.name):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
-        if rule.task_id and not self._task_repo.task_exists(rule.task_id):
+        if not rule.task_id:
             raise ResourceNotFoundException(
-                f"task_not_found: rule.task_id={rule.task_id!r} 对应 task 不存在"
+                "task_not_found: rule.task_id is required"
+            )
+        if not self._task_repo.task_exists(rule.task_id):
+            raise ResourceNotFoundException(
+                f"task_not_found: rule.task_id={rule.task_id!r} not found"
             )
 
         self._fill_default_duration_ratio(rule)
@@ -333,6 +337,15 @@ class RuleService:
         if self._repo.exists_by_name(rule.name, rule.id):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
+        if not rule.task_id:
+            raise ResourceNotFoundException(
+                "task_not_found: rule.task_id is required (put)"
+            )
+        if not self._task_repo.task_exists(rule.task_id):
+            raise ResourceNotFoundException(
+                f"task_not_found: rule.task_id={rule.task_id!r} not found (put)"
+            )
+
         self._fill_default_duration_ratio(rule)
 
         await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
@@ -372,6 +385,14 @@ class RuleService:
             existing.name = update.name
 
         if "task_id" in fields and update.task_id is not None:
+            if not update.task_id:
+                raise ResourceNotFoundException(
+                    "task_not_found: rule.task_id is required (patch)"
+                )
+            if not self._task_repo.task_exists(update.task_id):
+                raise ResourceNotFoundException(
+                    f"task_not_found: rule.task_id={update.task_id!r} not found (patch)"
+                )
             existing.task_id = update.task_id
 
         if "mode" in fields and update.mode is not None:

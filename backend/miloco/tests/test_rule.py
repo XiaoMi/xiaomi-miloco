@@ -584,6 +584,25 @@ class TestRuleServiceCreate:
         with pytest.raises(BusinessException, match="Failed to create rule"):
             await service.create_rule(rule)
 
+    @pytest.mark.asyncio
+    async def test_create_empty_task_id_raises(self, service):
+        rule = _make_static_rule(task_id="")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id is required",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_create_nonexistent_task_id_raises(self, service, mock_task_repo):
+        mock_task_repo.task_exists.return_value = False
+        rule = _make_static_rule(task_id="ghost_task")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id='ghost_task' not found",
+        ):
+            await service.create_rule(rule)
+
 
 class TestRuleDurationRatioDefault:
     """duration_ratio 三层优先级：CLI/API 显式 > settings > 代码默认 0.6。"""
@@ -689,6 +708,27 @@ class TestRuleServiceUpdate:
         with pytest.raises(ConflictException):
             await service.update_rule(rule)
 
+    @pytest.mark.asyncio
+    async def test_update_rule_empty_task_id_raises(self, service):
+        rule = _make_static_rule(rule_id="r1", task_id="")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id is required \(put\)",
+        ):
+            await service.update_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_update_rule_nonexistent_task_id_raises(
+        self, service, mock_task_repo
+    ):
+        mock_task_repo.task_exists.return_value = False
+        rule = _make_static_rule(rule_id="r1", task_id="ghost_task")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id='ghost_task' not found \(put\)",
+        ):
+            await service.update_rule(rule)
+
 
 class TestRuleServicePatch:
     @pytest.mark.asyncio
@@ -725,6 +765,27 @@ class TestRuleServicePatch:
         mock_rule_repo.exists_by_name.return_value = True
         with pytest.raises(ConflictException):
             await service.patch_rule("r1", RuleUpdate(name="dup"))
+
+    @pytest.mark.asyncio
+    async def test_patch_empty_task_id_raises(self, service, mock_rule_repo):
+        mock_rule_repo.get_by_id.return_value = _make_static_rule(rule_id="r1")
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id is required \(patch\)",
+        ):
+            await service.patch_rule("r1", RuleUpdate(task_id=""))
+
+    @pytest.mark.asyncio
+    async def test_patch_nonexistent_task_id_raises(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        mock_rule_repo.get_by_id.return_value = _make_static_rule(rule_id="r1")
+        mock_task_repo.task_exists.return_value = False
+        with pytest.raises(
+            ResourceNotFoundException,
+            match=r"task_not_found: rule\.task_id='ghost_task' not found \(patch\)",
+        ):
+            await service.patch_rule("r1", RuleUpdate(task_id="ghost_task"))
 
     @pytest.mark.asyncio
     async def test_patch_condition_validates_cameras(self, service, mock_rule_repo):

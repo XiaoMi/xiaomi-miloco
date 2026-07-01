@@ -8,6 +8,7 @@ Handles CRUD operations for rule and rule_log tables
 
 import json
 import logging
+import sqlite3
 import uuid
 from datetime import datetime
 from typing import Any
@@ -244,7 +245,13 @@ class RuleRepo:
         return rules
 
     def update(self, rule: Rule) -> bool:
-        """Full update of a rule"""
+        """Full update of a rule.
+
+        rule 表是 task 归属的 SSOT，task_link(kind='rule') 行是冗余索引，
+        task_id 变更时须一笔事务同步，避免 `task get` 与 `rule get` 视图分裂。
+        task_link 用 UPSERT 兜住历史遗留孤儿（rule 存在但对应 task_link 缺失）
+        场景——迁移或补建都在同一条 SQL 里完成。
+        """
         try:
             condition_json = rule.condition.model_dump(mode="json")
             sql = """
@@ -286,13 +293,39 @@ class RuleRepo:
                 now_ms(),
                 rule.id,
             )
-            affected = self.db_connector.execute_update(sql, params)
+
+            with self.db_connector.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN")
+                try:
+                    cursor.execute(sql, params)
+                    affected = cursor.rowcount
+                    if affected > 0 and rule.task_id:
+                        cursor.execute(
+                            "INSERT INTO task_link "
+                            "(task_id, link_kind, link_ref) "
+                            "VALUES (?, 'rule', ?) "
+                            "ON CONFLICT(link_kind, link_ref) "
+                            "DO UPDATE SET task_id = excluded.task_id",
+                            (rule.task_id, rule.id),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+
             if affected > 0:
                 logger.info("Rule updated: id=%s", rule.id)
                 return True
             logger.warning("Rule not found for update: id=%s", rule.id)
             return False
-        except (ValueError, TypeError, KeyError, AttributeError) as e:
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            sqlite3.IntegrityError,
+        ) as e:
             logger.error("Error updating rule: id=%s, error=%s", rule.id, e)
             return False
 
