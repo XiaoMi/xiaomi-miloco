@@ -230,6 +230,15 @@ async def submit_event_feedback(
 
     from miloco.admin import feedback_pack as _fb_mod
 
+    uid = ""
+    try:
+        miot_proxy = get_manager().miot_proxy
+        user_info = await miot_proxy.get_user_info()
+        if user_info:
+            uid = user_info.uid
+    except Exception:
+        pass
+
     try:
         result = await asyncio.to_thread(
             _fb_mod.build_feedback_pack,
@@ -237,6 +246,7 @@ async def submit_event_feedback(
             error_types=body.error_types,
             feedback_text=body.feedback_text,
             include_gallery=body.include_gallery,
+            uid=uid,
         )
     except _fb_mod.EventNotFoundError:
         raise HTTPException(status_code=404, detail="event not found")
