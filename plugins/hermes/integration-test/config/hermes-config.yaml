@@ -1,0 +1,23 @@
+model:
+  provider: openrouter
+  model: ${MILOCO_MODEL__OMNI__MODEL:-xiaomi/mimo-v2.5}
+  base_url: ${MILOCO_MODEL__OMNI__BASE_URL:-https://api.xiaomimimo.com/v1}
+  api_key: ${MILOCO_MODEL__OMNI__API_KEY:-}
+
+api_server:
+  enabled: true
+  host: 0.0.0.0
+  port: 8642
+  key: "integration-test-key"
+
+plugins:
+  enabled:
+    - miloco
+  entries:
+    miloco:
+      debug: true
+
+terminal:
+  timeout: 60
+
+timezone: Asia/Shanghai

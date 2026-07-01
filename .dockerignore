@@ -1,0 +1,16 @@
+.git
+.github
+docs
+knowledge
+web
+assets
+plugins/openclaw/node_modules
+plugins/openclaw/dist
+plugins/openclaw/skills
+plugins/hermes/tests
+*.pyc
+__pycache__
+.venv
+.mypy_cache
+.ruff_cache
+*.egg-info
