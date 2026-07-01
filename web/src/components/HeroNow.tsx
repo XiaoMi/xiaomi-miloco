@@ -58,15 +58,6 @@ export function HeroNow({
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
-  // scope 是主列表（含禁用/离线/未接入）；cameras 仅用作 channel 字典。
-  // useMemo 让 Map 引用稳定—— Map 每次 render 重建会让传到 CameraSection 的 prop
-  // 引用变更,父级状态变（如 todayUsage 异步到达）触发的 re-render 会冲掉子组件
-  // memo 优化机会。
-  // 为多通道摄像头创建 channel 映射。key 使用 did|channel 格式来区分不同通道。
-  const channelByDid = useMemo(
-    () => new Map(cameras.map((c) => [`${c.did}|${c.channel ?? 0}`, c.channel])),
-    [cameras],
-  );
   // 上区 = miloco **当前真正在投喂视频** 的相机。判据用后端权威字段 `connected`
   // (= MiotService._connected_camera_dids() = 感知 camera_adapter.get_connected_devices()，
   // 即真正建连、在喂解码帧给感知的那几路)，而不是 `inUse`(只是 KV 里的"想启用"意图——
@@ -156,7 +147,6 @@ export function HeroNow({
         benchCams={benchCams}
         maxStreamCams={maxStreamCams}
         miotHasCamera={miotHasCamera}
-        channelByDid={channelByDid}
         onToggleCameras={onToggleCameras}
       />
     </section>
@@ -172,7 +162,6 @@ interface CameraSectionProps {
   /** 最多投喂数(后端 MAX_ENABLED_CAMERAS)，用于满额置灰下区「启用」 */
   maxStreamCams: number;
   miotHasCamera: boolean;
-  channelByDid: Map<string, number>;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
 }
 
@@ -182,7 +171,6 @@ function CameraSection({
   benchCams,
   maxStreamCams,
   miotHasCamera,
-  channelByDid,
   onToggleCameras,
 }: CameraSectionProps) {
   const { t } = useTranslation();
@@ -291,7 +279,7 @@ function CameraSection({
                 <CamCardWithToggle
                   key={`${c.did}|${c.channel ?? 0}`}
                   cam={c}
-                  channel={c.channel ?? channelByDid.get(`${c.did}|${c.channel ?? 0}`)}
+                  channel={c.channel ?? 0}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
                 />

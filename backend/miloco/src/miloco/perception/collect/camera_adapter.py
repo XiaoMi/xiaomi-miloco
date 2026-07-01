@@ -115,6 +115,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self._on_window_ready = on_window_ready
         self._devices: dict[str, _CameraDeviceState] = {}
         self._last_ondemand_refresh_ms = 0
+        self._channel_did_map: dict[str, tuple[str, int, int]] = {}  # (original_did, channel, channel_count)
 
     async def discover_devices(
         self,
@@ -167,9 +168,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             kv, cams, online_only=online_only, require_lan=require_lan, cap=cap
         )
         result: dict[str, PerceptionDevice] = {}
-        # Initialize channel did map if not exists
-        if not hasattr(self, '_channel_did_map'):
-            self._channel_did_map = {}
+        # Rebuild channel did map each cycle to avoid stale entries
+        self._channel_did_map: dict[str, tuple[str, int, int]] = {}  # (original_did, channel, channel_count)
         
         for did in active:
             camera_info = CameraInfo.model_validate(cams[did].model_dump())
@@ -179,8 +179,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 for ch in range(channel_count):
                     channel_did = f"{did}:ch{ch}"
                     channel_name = f"{camera_info.name} (通道{ch})"
-                    # Store mapping for later use
-                    self._channel_did_map[channel_did] = (did, ch)
+                    # Store mapping for later use (including channel_count)
+                    self._channel_did_map[channel_did] = (did, ch, channel_count)
                     result[channel_did] = PerceptionDevice(
                         did=channel_did,
                         name=channel_name,
@@ -245,33 +245,19 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         collect_cfg = get_settings().perception.collect
 
         # Check if this is a multi-channel camera
-        if not hasattr(self, '_channel_did_map'):
-            self._channel_did_map = {}
-        
+        # Read from _channel_did_map (populated by discover_devices)
         if did in self._channel_did_map:
-            original_did, channel = self._channel_did_map[did]
-        else:
-            original_did = None
-            channel = 0
-
-        if original_did:
-            # Multi-channel camera: use original_did for stream subscription
+            original_did, channel, channel_count = self._channel_did_map[did]
             actual_did = original_did
         else:
             # Single-channel camera
-            actual_did = did
+            original_did = None
             channel = DEFAULT_VIDEO_CHANNEL
+            channel_count = 1
+            actual_did = did
 
         # Get or create device state
         if actual_did not in self._devices:
-            # Get channel count from camera info
-            get_cached_camera = getattr(self._miot_proxy, "get_cached_camera", None)
-            camera_info = get_cached_camera(actual_did) if get_cached_camera else None
-            channel_count = 1
-            if camera_info:
-                ci = CameraInfo.model_validate(camera_info.model_dump())
-                channel_count = ci.channel_count or 1
-
             state = _CameraDeviceState(
                 did=actual_did,
                 channel_count=channel_count,
@@ -296,12 +282,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             buffer_full_action=collect_cfg.full_action,
         )
 
-        # Store mapping for multi-channel devices
-        if original_did and did != actual_did:
-            # Store the channel did mapping
-            if not hasattr(self, '_channel_did_map'):
-                self._channel_did_map = {}
-            self._channel_did_map[did] = (actual_did, channel)
+        # Store mapping for multi-channel devices (if not already in map from discover)
+        if original_did and did != actual_did and did not in self._channel_did_map:
+            self._channel_did_map[did] = (actual_did, channel, channel_count)
 
         # Subscribe decoded video frame stream (multi-reg)
         try:
@@ -338,8 +321,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
     async def disconnect_device(self, did: str) -> None:
         # Check if this is a multi-channel did
-        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
-            actual_did, channel = self._channel_did_map.pop(did)
+        if did in self._channel_did_map:
+            actual_did, channel, _ = self._channel_did_map.pop(did)
         else:
             actual_did = did
             channel = None
@@ -391,8 +374,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                    If False (active query), peek all buffered data.
         """
         # Check if this is a multi-channel did
-        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
-            actual_did, channel = self._channel_did_map[did]
+        if did in self._channel_did_map:
+            actual_did, channel, _ = self._channel_did_map[did]
         else:
             actual_did = did
             channel = 0
@@ -438,8 +421,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         这里直接读 collector 已填充的 ``decoded_video`` 缓存(独立于 gate)。
         """
         # Check if this is a multi-channel did
-        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
-            actual_did, channel = self._channel_did_map[did]
+        if did in self._channel_did_map:
+            actual_did, channel, _ = self._channel_did_map[did]
         else:
             actual_did = did
             channel = 0
@@ -470,8 +453,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
     def _current_source(self, did: str) -> PerceptionDevice:
         """Build source metadata from MiotProxy's in-memory camera cache."""
         # Check if this is a multi-channel did
-        if hasattr(self, '_channel_did_map') and did in self._channel_did_map:
-            actual_did, channel = self._channel_did_map[did]
+        if did in self._channel_did_map:
+            actual_did, channel, _ = self._channel_did_map[did]
         else:
             actual_did = did
             channel = None

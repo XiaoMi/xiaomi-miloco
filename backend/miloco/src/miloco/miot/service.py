@@ -933,10 +933,10 @@ class MiotService:
 
     async def list_cameras_with_state(self) -> list[dict]:
         """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。
-    
-    对于多通道摄像头（如双摄摄像头），每个通道会作为独立的条目返回。
-    注意：did 字段保持原始格式（如 1193497463），channel 字段标识通道号。
-    """
+
+        对于多通道摄像头（如双摄摄像头），每个通道会作为独立的条目返回。
+        注意：did 字段保持原始格式（如 1193497463），channel 字段标识通道号。
+        """
         denied = denied_camera_dids(self._kv_repo)
         connected = self._connected_camera_dids()  # 多通道格式的 did
         connected_original = self._connected_camera_dids_original()  # 原始格式的 did
@@ -1027,9 +1027,8 @@ class MiotService:
                     f"摄像头当前离线,无法开启投喂（{offline_enable}）;请待其上线后再启用"
                 )
 
-            # 上限检查：用户主动 enable 超限时直接报错，不做自动禁用。计数口径与
-            # list_cameras_with_state / refresh_cameras 一致——只数当前启用家庭内、
-            # 未拉黑的相机（get_cameras 返回全部家庭，须按 home 过滤）。
+            # 上限检查：用户主动 enable 超限时直接报错，不做自动禁用。计数口径按
+            # 流路数（而非设备数），避免双摄设备悄悄翻倍解码管线。
             denied = denied_camera_dids(self._kv_repo)
 
             def _in_scope(did: str) -> bool:
@@ -1045,10 +1044,15 @@ class MiotService:
             final_enabled = (
                 (in_scope - denied) - set(disable_dids)
             ) | (set(enable_dids) & in_scope)
-            if len(final_enabled) > MAX_ENABLED_CAMERAS:
+            # 按流路数计数（双摄设备算 2 条流）
+            total_streams = sum(
+                (getattr(cameras.get(did), "channel_count", None) or 1)
+                for did in final_enabled
+            )
+            if total_streams > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
-                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 台摄像头"
-                    f"（操作后将有 {len(final_enabled)} 台），"
+                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 条摄像头流"
+                    f"（操作后将有 {total_streams} 条流），"
                     f"请先禁用一台再启用新摄像头"
                 )
 
