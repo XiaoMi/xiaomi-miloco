@@ -379,7 +379,7 @@ class MIoTLan:
         self.__deinit_socket()
         for if_name in self._net_ifs:
             if if_name not in self._available_net_ifs:
-                return
+                continue
             self.__create_socket(if_name=if_name)
 
     def __on_network_info_change(self, data: _MIoTLanNetworkUpdateData) -> None:

@@ -272,10 +272,15 @@ class MIoTNetwork:
 
     def __get_network_info(self) -> dict[str, NetworkInfo]:
         interfaces = psutil.net_if_addrs()
+        if_stats = psutil.net_if_stats()
         results: dict[str, NetworkInfo] = {}
         for name, addresses in interfaces.items():
             # Skip hassio and docker* interface
             if name == "hassio" or name.startswith("docker"):
+                continue
+            # Skip interfaces that are administratively down or have no carrier
+            if_stat = if_stats.get(name)
+            if if_stat and not if_stat.isup:
                 continue
             for address in addresses:
                 if (
