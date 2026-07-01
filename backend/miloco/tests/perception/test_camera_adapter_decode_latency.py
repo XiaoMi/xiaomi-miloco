@@ -15,7 +15,6 @@ import pytest
 from miloco.perception.collect.camera_adapter import (
     CameraDeviceAdapter,
     _CameraDeviceState,
-    _ChannelState,
 )
 from miloco.perception.collect.stream_buffer import StreamFragment
 from miloco.perception.schema import DecodedAudioFrame, DecodedVideoFrame
@@ -207,6 +206,7 @@ class TestBuildDeviceDataAggregation:
         state = _make_state()
         dd = adapter._build_device_data(
             state,
+            state.channels[0],
             tracks={"decoded_video": [], "decoded_audio": []},
             window_start_ms=0,
             window_end_ms=1000,

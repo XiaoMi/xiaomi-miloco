@@ -6,7 +6,6 @@
  */
 
 import type {
-  PerceptionCamera,
   Person,
   ScopeCamera,
   UsageStats,
