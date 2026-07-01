@@ -7,7 +7,10 @@ System status check interface
 """
 
 import logging
+import subprocess
 import time
+from importlib.metadata import PackageNotFoundError, version as pkg_version
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -77,6 +80,65 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     logger.info("System status retrieved: %s", data)
     return NormalResponse(
         code=0, message="System status retrieved successfully", data=data
+    )
+
+
+def _run_git(args: list[str]) -> str | None:
+    """在 backend 源码目录跑 git, 失败/超时/无 git 都返回 None (让 git 自动向上找 .git)。"""
+    try:
+        r = subprocess.run(
+            ["git"] + args,
+            capture_output=True, text=True, timeout=2,
+            cwd=Path(__file__).resolve().parent,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _git_info() -> dict | None:
+    """返回 git 部署信息; 无 .git / git 不可用时返回 None。"""
+    commit = _run_git(["rev-parse", "HEAD"])
+    if not commit:
+        return None
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    status = _run_git(["status", "--porcelain"])
+    commit_time = _run_git(["log", "-1", "--format=%cI", "HEAD"])
+    return {
+        "commit": commit,
+        "commit_short": commit[:7],
+        "branch": branch if branch and branch != "HEAD" else None,
+        "dirty": bool(status) if status is not None else None,
+        "commit_time": commit_time or None,
+    }
+
+
+def _pkg_version() -> str:
+    try:
+        return pkg_version("miloco")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+@router.get(
+    "/version",
+    summary="Backend version (package version + git info if available)",
+    response_model=NormalResponse,
+)
+async def get_version(current_user: str = Depends(verify_token)):
+    """Return backend package version and, if deployed from a git checkout,
+    the current commit / branch / dirty flag / commit time.
+
+    ``data.git`` is null when backend runs from a wheel / docker image without
+    the .git directory (i.e. not a git checkout).
+    """
+    return NormalResponse(
+        code=0,
+        message="Version info",
+        data={
+            "version": _pkg_version(),
+            "git": _git_info(),
+        },
     )
 
 
