@@ -132,6 +132,14 @@ def test_notify_dedup_window_env_override(monkeypatch) -> None:
     assert get_settings().notify.dedup_window_sec == 30.0
 
 
+def test_notify_dedup_window_negative_loads_not_rejected(monkeypatch) -> None:
+    """负值不被 pydantic 拒绝（避免误配一个字段崩整个 settings 加载）；
+    <=0 交由 MessageDeduper 当作「关闭去重」，与 TS getNotifyDedupWindowMs 归零一致。"""
+    monkeypatch.setenv("MILOCO_NOTIFY__DEDUP_WINDOW_SEC", "-5")
+    reset_settings()
+    assert get_settings().notify.dedup_window_sec == -5.0
+
+
 def test_directory_paths_derive_from_miloco_home(tmp_path: Path) -> None:
     s = get_settings()
     assert s.directories.workspace_dir == tmp_path

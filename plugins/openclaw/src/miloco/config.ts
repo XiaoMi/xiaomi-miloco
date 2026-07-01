@@ -131,7 +131,7 @@ const SHARED_CONFIG_SCHEMA = {
         dedup_window_sec: {
           type: "number",
           default: 60,
-          description: "相同通知文案在此窗口（秒）内只发一次；0 = 关闭去重",
+          description: "相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重",
         },
       },
     },
