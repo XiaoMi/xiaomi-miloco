@@ -30,8 +30,11 @@ import type {
   PerfStagePercentiles,
   PerfSummary,
   PerfTraceRow,
+  Features,
   PerfWindow,
   Person,
+  Pet,
+  PetObserveResult,
   Scene,
   ScopeCamera,
   ScopeHome,
@@ -108,6 +111,55 @@ export async function enrollPersonSample(
   imageBase64: string,
 ): Promise<void> {
   return impl.realEnrollPersonSample(personId, imageBase64);
+}
+
+// ── 宠物（非人家庭成员）────────────────────────────────────
+export async function listPets(homeId?: HomeId): Promise<Pet[]> {
+  if (!isPrimary(homeId)) return [];
+  return impl.realListPets();
+}
+
+export async function createPet(payload: {
+  name: string;
+  species?: string;
+}): Promise<Pet> {
+  return impl.realCreatePet(payload);
+}
+
+export async function updatePet(
+  id: string,
+  payload: { name?: string; species?: string },
+): Promise<Pet> {
+  return impl.realUpdatePet(id, payload);
+}
+
+export async function deletePet(id: string): Promise<void> {
+  return impl.realDeletePet(id);
+}
+
+export async function observePet(
+  media: Blob,
+  filename: string,
+  grounding?: boolean,
+): Promise<PetObserveResult> {
+  return impl.realObservePet(media, filename, grounding);
+}
+
+export async function uploadPetAvatar(
+  petId: string,
+  image: Blob,
+  filename: string,
+): Promise<Pet> {
+  return impl.realUploadPetAvatar(petId, image, filename);
+}
+
+// ── 实验性功能开关 ─────────────────────────────────────────
+export async function getFeatures(): Promise<Features> {
+  return impl.realGetFeatures();
+}
+
+export async function setFeatures(patch: Partial<Features>): Promise<Features> {
+  return impl.realSetFeatures(patch);
 }
 
 // ── 家庭档案（home_profile）────────────────────────────────

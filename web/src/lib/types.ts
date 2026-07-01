@@ -47,6 +47,31 @@ export interface Person {
   avatarHue: number; // 0..5
 }
 
+// 宠物（非人家庭成员）——独立花名册，不进人身份库
+export interface Pet {
+  id: string; // pet_XXXXXXXXXXXX
+  name: string;
+  species: string;
+  avatarExt?: string | null; // 有头像时的文件后缀；null=无头像
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// 实验性功能开关（后端 /api/admin/features）
+export interface Features {
+  petRecognition: boolean;
+  petHeadGrounding: boolean;
+}
+
+// pet:observe 返回：选出的最优 crop + omni 按维度生成的外观描述（+ 可选头部框）
+export interface PetObserveResult {
+  detected: boolean;
+  description: Record<string, unknown> | null; // {species, breed, size_build, ..., summary}
+  headBbox: number[] | null; // grounding 开时头部归一化 [x,y,w,h]（相对 primary crop）
+  primaryCropB64: string;
+  candidates: { trackId: number | null; speciesGuess: string; cropB64: string }[];
+}
+
 // ── 设备 ────────────────────────────────────────────────────
 export type DeviceCategory =
   | "light"

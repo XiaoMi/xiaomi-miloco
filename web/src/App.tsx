@@ -4,12 +4,14 @@
 
 import { useEffect, useState } from "react";
 import {
+  getFeatures,
   getHomeStatus,
   listActivity,
   listCameras,
   listDevices,
   listHomeEntries,
   listPersons,
+  listPets,
   listScenes,
   listScopeCameras,
   listScopeHomes,
@@ -17,11 +19,12 @@ import {
   refreshCameraOnline,
   pausePerception,
   resumePerception,
+  setFeatures,
   toggleScopeCamera,
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
-import type { Person } from "./lib/types";
+import type { Pet, Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { HomeSwitcher } from "./components/HomeSwitcher";
 import { StatusRibbon } from "./components/StatusRibbon";
@@ -30,6 +33,7 @@ import { DevicesByRoom } from "./components/DevicesByRoom";
 import { ActivityFeed } from "./components/ActivityFeed";
 import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
+import { PetDrawer } from "./components/PetDrawer";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
 import { TaskListPanel } from "./components/TaskListPanel";
@@ -153,6 +157,13 @@ function MainApp() {
   const tasks = useAsync(() => listTasks(homeId), [homeId], {
     errorLabel: t("app.loadTasksFail"),
   });
+  // 宠物花名册（实验性，pet_recognition 开启才有意义）+ 功能开关状态。
+  const pets = useAsync(() => listPets(homeId), [homeId], {
+    errorLabel: t("app.loadPetsFail"),
+  });
+  const features = useAsync(() => getFeatures(), [], {
+    errorLabel: t("app.loadFeaturesFail"),
+  });
 
   // ── 字号 / 抽屉 / 弹层 ─────────────────────────
   // (原本有 now state + 30s setInterval 给 Sidebar 显示时间，现 Sidebar
@@ -167,6 +178,9 @@ function MainApp() {
   // 家庭 tab 当前选中的成员（chip 选择器）——存 id，从 persons.data 解析当前
   // Person；null 时回退到第一位。改名 / 删除后随 reload 自动同步。
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
+  // 宠物：选中项 + 编辑抽屉（null=新增，undefined=关闭）。
+  const [selectedPetId, setSelectedPetId] = useState<string | null>(null);
+  const [editingPet, setEditingPet] = useState<Pet | null | undefined>(undefined);
   const [miotBindOpen, setMiotBindOpen] = useState(false);
 
   // 米家家庭名直接走 backend `/api/miot/home::home_name`，米家给啥前端就显啥；
@@ -293,6 +307,23 @@ function MainApp() {
               selectedId={selectedPerson?.id ?? null}
               onSelect={(p) => setSelectedPersonId(p.id)}
               onAddPerson={() => setEditingPerson(null)}
+              pets={pets.data}
+              selectedPetId={selectedPetId}
+              petsEnabled={features.data?.petRecognition ?? false}
+              onSelectPet={(p) => setSelectedPetId(p.id)}
+              onAddPet={() => setEditingPet(null)}
+              onTogglePets={async (enabled) => {
+                try {
+                  await setFeatures({ petRecognition: enabled });
+                  features.reload();
+                  pets.reload();
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("pet.saveFail"),
+                    "warn",
+                  );
+                }
+              }}
             />
             {selectedPerson && (
               <PersonProfilePanel
@@ -498,6 +529,16 @@ function MainApp() {
         onChanged={() => {
           persons.reload();
           status.reload();
+          home.reload();
+        }}
+      />
+      <PetDrawer
+        pet={editingPet === undefined ? null : editingPet}
+        open={editingPet !== undefined}
+        grounding={features.data?.petHeadGrounding ?? false}
+        onClose={() => setEditingPet(undefined)}
+        onChanged={() => {
+          pets.reload();
           home.reload();
         }}
       />

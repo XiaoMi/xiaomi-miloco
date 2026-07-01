@@ -10,6 +10,8 @@
     "loadActivityFail": "今天的事件加载失败",
     "loadHomeEntriesFail": "家庭档案加载失败",
     "loadTasksFail": "家庭任务加载失败",
+    "loadPetsFail": "宠物列表加载失败",
+    "loadFeaturesFail": "功能开关加载失败",
     "tabHomeError": "加载首页失败：{{msg}}",
     "tabHomeLoading": "正在看家里此刻…",
     "tabDevicesError": "加载设备列表失败：{{msg}}",

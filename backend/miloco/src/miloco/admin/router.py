@@ -616,3 +616,48 @@ async def list_omni_models(
             code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
         )
     return NormalResponse(code=0, message="ok", data=await _fetch_models(base_url, api_key))
+
+
+# ── 实验性功能开关（features）─────────────────────────────────────────────────
+
+
+class FeaturesUpdateBody(BaseModel):
+    """部分更新：只改传了的字段。"""
+
+    pet_recognition: bool | None = None
+    pet_head_grounding: bool | None = None
+
+
+def _features_state() -> dict:
+    f = get_settings().features
+    return {
+        "pet_recognition": f.pet_recognition,
+        "pet_head_grounding": f.pet_head_grounding,
+    }
+
+
+@router.get("/features", summary="实验性功能开关状态", response_model=NormalResponse)
+def get_features(current_user: str = Depends(verify_token)):
+    """返回产品级实验性功能开关（宠物识别总开关 + 头部 grounding 子开关）当前状态。"""
+    return NormalResponse(code=0, message="ok", data=_features_state())
+
+
+@router.post(
+    "/features",
+    summary="设置实验性功能开关（写 config.json,热生效）",
+    response_model=NormalResponse,
+)
+def set_features(body: FeaturesUpdateBody, current_user: str = Depends(verify_token)):
+    """部分更新宠物识别 / 头部 grounding 开关：写入 config.json 并热生效。
+
+    关闭 pet_recognition = 软关闭（前端隐藏宠物、感知不注入宠物段/规则），**不删数据**。
+    注:``MILOCO_FEATURES__*`` 环境变量优先级更高,若设置了 env 则本写入不生效（同 omni-config）。
+    """
+    update: dict = {}
+    if body.pet_recognition is not None:
+        update["pet_recognition"] = body.pet_recognition
+    if body.pet_head_grounding is not None:
+        update["pet_head_grounding"] = body.pet_head_grounding
+    if update:
+        update_shared_config(features=update)
+    return NormalResponse(code=0, message="ok", data=_features_state())
