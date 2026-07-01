@@ -4,7 +4,7 @@
   - metadata.json         事件元数据 + 用户反馈 + 版本 + 数据完整性记录
   - omni_trace.json.gz    omni 调用记录(prompt + response + 推理参数)
   - clips/{device}/clip.* 视频/音频(零重编,omni 原始输入)
-  - gallery/*.jpg         画廊合成图(可选,用户勾选时包含)
+  - gallery/*.{jpg,png}   画廊合成图(可选,用户勾选时包含)
 
 个人信息脱敏: 对 omni_trace 文本做正则替换(手机号/IP/身份证号 → ***).
 """
@@ -107,7 +107,7 @@ def build_feedback_pack(
     feedback_text: str,
     include_gallery: bool = False,
 ) -> dict:
-    """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{event_id[:8]}-HHMMSS.tar.gz.
+    """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
 
     Args:
         event_id: meaningful_events 的 id.
