@@ -192,7 +192,7 @@ _VIRTUAL_PREFIXES = ("docker", "br-", "veth", "cni", "flannel", "cali", "kube", 
 
 
 def _is_virtual_iface(name: str) -> bool:
-    return name == "lo" or name.startswith(_VIRTUAL_PREFIXES)
+    return name in ("lo", "lo0") or name.startswith(_VIRTUAL_PREFIXES)
 
 
 def _in_same_subnet(

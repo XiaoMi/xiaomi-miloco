@@ -118,7 +118,7 @@ def runner():
 
 
 class TestIsVirtualIface:
-    @pytest.mark.parametrize("name", ["lo", "docker0", "br-abc123", "veth1", "cni0", "flannel1", "cali_x", "kube-ipvs0"])
+    @pytest.mark.parametrize("name", ["lo", "lo0", "docker0", "br-abc123", "veth1", "cni0", "flannel1", "cali_x", "kube-ipvs0"])
     def test_virtual(self, name):
         assert _is_virtual_iface(name) is True
 
