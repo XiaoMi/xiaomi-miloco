@@ -142,8 +142,10 @@ def build_feedback_pack(
     }
 
     trace_path = event_dir / "omni_trace.json.gz"
+    sanitized_trace: bytes | None = None
     if trace_path.exists():
-        components["omni_trace_found"] = True
+        sanitized_trace = _sanitize_trace(trace_path.read_bytes())
+    components["omni_trace_found"] = sanitized_trace is not None
 
     device_ids: list[str] = event.get("device_ids", [])
     for did in device_ids:
@@ -162,7 +164,8 @@ def build_feedback_pack(
     has_gallery = gallery_dir.is_dir() and any(gallery_dir.iterdir())
 
     try:
-        version = mgr.app_version
+        from importlib.metadata import version as get_version
+        version = get_version("miloco")
     except Exception:
         version = "unknown"
 
@@ -201,12 +204,10 @@ def build_feedback_pack(
             info.size = len(meta_bytes)
             tar.addfile(info, io.BytesIO(meta_bytes))
 
-            if trace_path.exists():
-                sanitized = _sanitize_trace(trace_path.read_bytes())
-                if sanitized is not None:
-                    info = tarfile.TarInfo(name="omni_trace.json.gz")
-                    info.size = len(sanitized)
-                    tar.addfile(info, io.BytesIO(sanitized))
+            if sanitized_trace is not None:
+                info = tarfile.TarInfo(name="omni_trace.json.gz")
+                info.size = len(sanitized_trace)
+                tar.addfile(info, io.BytesIO(sanitized_trace))
 
             for clip_rel in components["clips_found"]:
                 clip_path = event_dir / clip_rel
