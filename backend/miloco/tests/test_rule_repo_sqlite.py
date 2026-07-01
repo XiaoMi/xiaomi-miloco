@@ -329,9 +329,8 @@ class TestRuleRepoMutation:
         """rule.task_id 变更时 task_link(kind='rule') 行必须一笔事务跟着搬家，
         否则 `task get 旧` 仍显示挂着 rule、`task get 新` 里查不到 → SSOT 分裂。
         """
-        from miloco.utils.time_utils import now_iso
-
         import miloco.database.connector as connector_module
+        from miloco.utils.time_utils import now_iso
 
         # 建第二个占位 task 作为迁移目标
         with connector_module.get_db_connector().get_connection() as conn:
