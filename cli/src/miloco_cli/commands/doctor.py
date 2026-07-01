@@ -16,6 +16,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -24,7 +25,10 @@ from typing import Literal
 import click
 import httpx
 
+from miloco_cli.commands.doctor_i18n import SUPPORTED_LANGS, Translator, make_translator
 from miloco_cli.config import load_config
+
+_ZH_T: Translator = make_translator("zh")
 
 # ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -135,6 +139,7 @@ class BackendState:
     home_id: str | None
     home_name: str | None
     cameras: list[CameraSummary] = field(default_factory=list)
+    version_data: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -228,7 +233,7 @@ def _detect_platform() -> str:
     return "unknown"
 
 
-_PHYSICAL_IFACE_PREFIXES = ("enp", "wlp", "eno", "ens", "wlan", "eth", "em", "en0")
+_DOCKER_BRIDGE_NET = "172.16.0.0/12"
 
 
 def _detect_is_container() -> bool:
@@ -241,26 +246,42 @@ def _detect_is_container() -> bool:
         if any(kw in cg for kw in ("docker", "containerd", "kubepods", "libpod")):
             return True
     except (FileNotFoundError, PermissionError):
+        # /proc/1/cgroup 不存在或不可读, 视为无容器信号
         pass
     return False
 
 
 def _detect_container_net() -> Literal["host", "bridge", "other"] | None:
+    """区分 host / bridge / other 三种容器网络模式。
+
+    判据: 主 = 是否存在非 virtual 网卡 (host 模式共享宿主机物理设备);
+    辅 = 默认网关是否落在 docker 私网段 (bridge 兜底判定)。
+    不依赖网卡名前缀 —— Docker bridge 也叫 eth0, 名字启发式会误判。
+    """
+    net_dir = "/sys/class/net"
     try:
-        for name in os.listdir("/sys/class/net"):
-            if any(name.startswith(p) for p in _PHYSICAL_IFACE_PREFIXES):
-                return "host"
+        names = os.listdir(net_dir)
     except OSError:
-        pass
+        return None
+
+    for name in names:
+        if name == "lo":
+            continue
+        try:
+            target = os.readlink(f"{net_dir}/{name}")
+        except OSError:
+            continue
+        if "/virtual/" not in target:
+            return "host"
 
     gateway = _read_default_gateway()
     if gateway is None:
         return "other"
     try:
         gw_addr = ipaddress.IPv4Address(gateway)
+        docker_bridge_net = ipaddress.IPv4Network(_DOCKER_BRIDGE_NET)
     except (ipaddress.AddressValueError, ValueError):
         return "other"
-    docker_bridge_net = ipaddress.IPv4Network("172.17.0.0/12")
     if gw_addr in docker_bridge_net:
         return "bridge"
     return "other"
@@ -293,6 +314,7 @@ def _read_distro() -> str | None:
             if line.startswith("PRETTY_NAME="):
                 return line.split("=", 1)[1].strip().strip('"')
     except (FileNotFoundError, PermissionError):
+        # /etc/os-release 缺失或不可读, 降级到 /etc/issue
         pass
     try:
         first = Path("/etc/issue").read_text(errors="ignore").splitlines()[0]
@@ -330,14 +352,14 @@ def probe_environment() -> Environment:
     )
 
 
-def _runtime_tags(env: Environment) -> list[str]:
+def _runtime_tags(env: Environment, t: Translator = _ZH_T) -> list[str]:
     tags: list[str] = []
     if env.platform == "wsl":
         tags.append("WSL2")
     if env.is_container:
         tags.append("Docker container")
     if not tags:
-        tags.append("裸机")
+        tags.append(t("runtime.baremetal"))
     return tags
 
 
@@ -405,14 +427,14 @@ def _probe_network_macos() -> NetworkState:
     return NetworkState(interfaces=ifaces)
 
 
-def assess_network_empty(state: NetworkState) -> list[CheckResult]:
+def assess_network_empty(state: NetworkState, t: Translator = _ZH_T) -> list[CheckResult]:
     non_virtual = [i for i in state.interfaces if not i.is_virtual]
     if not non_virtual:
         return [CheckResult(
             section="host",
-            name="IPv4 网卡",
+            name=t("nic_empty.name"),
             status=Status.FAIL,
-            message="未检测到可用 IPv4 网卡, 网络未配置或断网",
+            message=t("nic_empty.message"),
         )]
     return []
 
@@ -420,36 +442,27 @@ def assess_network_empty(state: NetworkState) -> list[CheckResult]:
 # ─── Container ─────────────────────────────────────────────────────────────────
 
 
-def check_container(env: Environment) -> list[CheckResult]:
+def check_container(env: Environment, t: Translator = _ZH_T) -> list[CheckResult]:
     if not env.is_container:
         return []
     if env.container_net == "host":
         return [CheckResult(
-            name="容器网络",
+            name=t("container.host.name"),
             status=Status.PASS,
-            message="容器使用 host 网络, UDP 直通宿主机网卡",
+            message=t("container.host.message"),
         )]
     if env.container_net == "bridge":
         return [CheckResult(
-            name="容器网络",
+            name=t("container.bridge.name"),
             status=Status.FAIL,
-            message="容器运行在 bridge 网络, 无法接收局域网 UDP 打洞包",
-            fix_hint=(
-                "以 host 网络模式重启容器:\n"
-                "  docker run --network=host <image>\n"
-                "\n"
-                "或 docker-compose:\n"
-                "  network_mode: host"
-            ),
+            message=t("container.bridge.message"),
+            fix_hint=t("container.bridge.fix"),
         )]
     return [CheckResult(
-        name="容器网络",
+        name=t("container.other.name"),
         status=Status.WARN,
-        message="容器网络模式未知, 局域网 UDP 通路不确定",
-        fix_hint=(
-            "推荐改用 host 网络:\n"
-            "  docker run --network=host <image>"
-        ),
+        message=t("container.other.message"),
+        fix_hint=t("container.other.fix"),
     )]
 
 
@@ -501,43 +514,34 @@ def probe_ufw() -> UfwState:
     )
 
 
-def assess_ufw(state: UfwState) -> list[CheckResult]:
+def assess_ufw(state: UfwState, t: Translator = _ZH_T) -> list[CheckResult]:
     if not state.installed:
         return []
     if state.enabled_via_conf is False:
         return [CheckResult(
-            name="ufw 状态",
+            name=t("ufw.disabled.name"),
             status=Status.PASS,
-            message="ufw 未启用 (/etc/ufw/ufw.conf ENABLED=no), 不阻断流量",
+            message=t("ufw.disabled.message"),
         )]
     if state.enabled_via_conf is None:
         return []
     if not state.rules_readable:
         return [CheckResult(
-            name="ufw 状态",
+            name=t("ufw.unreadable.name"),
             status=Status.WARN,
-            message=(
-                "ufw 已启用, 但无法读取规则详情。"
-                "如需查看详情请以 sudo 运行: sudo ufw status verbose"
-            ),
+            message=t("ufw.unreadable.message"),
         )]
     if state.default_deny_incoming and not state.has_udp_allow:
         return [CheckResult(
-            name="ufw UDP 入站",
+            name=t("ufw.deny.name"),
             status=Status.FAIL,
-            message="ufw 默认拒绝入站流量, PPCS UDP 包会被丢弃",
-            fix_hint=(
-                "允许局域网 UDP 入站 (推荐, 限定子网):\n"
-                "  sudo ufw allow from 192.168.0.0/16 proto udp\n"
-                "\n"
-                "或允许所有 UDP 入站 (宽松):\n"
-                "  sudo ufw allow proto udp from any"
-            ),
+            message=t("ufw.deny.message"),
+            fix_hint=t("ufw.deny.fix"),
         )]
     return [CheckResult(
-        name="ufw UDP 入站",
+        name=t("ufw.allow.name"),
         status=Status.PASS,
-        message="ufw 已启用但允许 UDP 入站",
+        message=t("ufw.allow.message"),
     )]
 
 
@@ -596,68 +600,51 @@ def probe_firewalld() -> FirewalldState:
     )
 
 
-def _firewalld_fix_hint(zone: str) -> str:
-    return (
-        f"允许局域网 UDP:\n"
-        f"  sudo firewall-cmd --zone={zone} --add-rich-rule="
-        f"'rule family=ipv4 source address=192.168.0.0/16 protocol value=udp accept' --permanent\n"
-        f"  sudo firewall-cmd --reload"
-    )
+def _firewalld_fix_hint(zone: str, t: Translator = _ZH_T) -> str:
+    return t("firewalld.fix", zone=zone)
 
 
-def assess_firewalld(state: FirewalldState) -> list[CheckResult]:
+def assess_firewalld(state: FirewalldState, t: Translator = _ZH_T) -> list[CheckResult]:
     if not state.installed or state.running is False:
         return []
     if state.running is None:
         return [CheckResult(
-            name="firewalld 状态",
+            name=t("firewalld.state_unreadable.name"),
             status=Status.WARN,
-            message=(
-                "firewalld 已安装但无法读取状态。"
-                "如需查看请以 sudo 运行: sudo firewall-cmd --state"
-            ),
+            message=t("firewalld.state_unreadable.message"),
         )]
     if not state.listing_readable:
         return [CheckResult(
-            name="firewalld 状态",
+            name=t("firewalld.zone_unreadable.name"),
             status=Status.WARN,
-            message=(
-                "firewalld 运行中, 但无法读取 zone 规则详情。"
-                "如需查看请以 sudo 运行: sudo firewall-cmd --list-all"
-            ),
+            message=t("firewalld.zone_unreadable.message"),
         )]
     zone = state.zone or "<unknown>"
     if state.target in ("DROP", "REJECT"):
         return [CheckResult(
-            name="firewalld UDP 入站",
+            name=t("firewalld.blocked.name"),
             status=Status.FAIL,
-            message=f"firewalld zone '{zone}' 目标为 {state.target}, UDP 入站被丢弃",
-            fix_hint=_firewalld_fix_hint(zone),
+            message=t("firewalld.blocked.message", zone=zone, target=state.target),
+            fix_hint=_firewalld_fix_hint(zone, t),
         )]
     if state.target == "ACCEPT" or state.has_protocol_udp:
         return [CheckResult(
-            name="firewalld UDP 入站",
+            name=t("firewalld.accept.name"),
             status=Status.PASS,
-            message=f"firewalld zone '{zone}' 允许 UDP 流量",
+            message=t("firewalld.accept.message", zone=zone),
         )]
     if state.has_port_udp_only:
         return [CheckResult(
-            name="firewalld UDP 入站",
+            name=t("firewalld.port_udp_only.name"),
             status=Status.WARN,
-            message=(
-                f"firewalld zone '{zone}' 仅放行特定端口的 UDP, "
-                f"PPCS 使用随机高位端口可能被阻断"
-            ),
-            fix_hint=_firewalld_fix_hint(zone),
+            message=t("firewalld.port_udp_only.message", zone=zone),
+            fix_hint=_firewalld_fix_hint(zone, t),
         )]
     return [CheckResult(
-        name="firewalld UDP 入站",
+        name=t("firewalld.unclear.name"),
         status=Status.WARN,
-        message=(
-            f"firewalld zone '{zone}' target 为 default, 未找到显式 UDP 放行规则, "
-            f"可能阻断 PPCS UDP"
-        ),
-        fix_hint=_firewalld_fix_hint(zone),
+        message=t("firewalld.unclear.message", zone=zone),
+        fix_hint=_firewalld_fix_hint(zone, t),
     )]
 
 
@@ -711,93 +698,75 @@ def probe_iptables() -> IptablesState:
     )
 
 
-_IPTABLES_FIX_HINT = (
-    "允许局域网 UDP 入站:\n"
-    "  sudo iptables -I INPUT -p udp -s 192.168.0.0/16 -j ACCEPT\n"
-    "\n"
-    "持久化 (Ubuntu/Debian):\n"
-    "  sudo apt install iptables-persistent && sudo netfilter-persistent save"
-)
-
-
-def assess_iptables(state: IptablesState) -> list[CheckResult]:
+def assess_iptables(state: IptablesState, t: Translator = _ZH_T) -> list[CheckResult]:
     if not state.installed:
         return []
     if not state.readable:
         return [CheckResult(
-            name="iptables 状态",
+            name=t("iptables.unreadable.name"),
             status=Status.WARN,
-            message=(
-                "iptables 已安装但无法读取规则。"
-                "如需查看请以 sudo 运行: sudo iptables -L INPUT -n"
-            ),
+            message=t("iptables.unreadable.message"),
         )]
     if state.has_udp_block and state.has_udp_accept:
         return [CheckResult(
-            name="iptables UDP 入站",
+            name=t("iptables.conflict.name"),
             status=Status.WARN,
-            message=(
-                "iptables INPUT 链同时存在 UDP ACCEPT 与 UDP DROP/REJECT 规则, "
-                "实际行为取决于规则顺序, 请人工核对"
-            ),
-            fix_hint=(
-                "查看带行号的完整规则:\n"
-                "  sudo iptables -L INPUT -nv --line-numbers"
-            ),
+            message=t("iptables.conflict.message"),
+            fix_hint=t("iptables.conflict.fix"),
         )]
     if state.has_udp_block or (state.policy_drop and not state.has_udp_accept):
-        msg = (
-            "iptables INPUT 链默认策略为 DROP 且无 UDP ACCEPT 规则"
+        reason = (
+            t("iptables.policy_drop_reason")
             if state.policy_drop and not state.has_udp_block
-            else "iptables INPUT 链存在 DROP/REJECT UDP 规则"
+            else t("iptables.explicit_drop_reason")
         )
         return [CheckResult(
-            name="iptables UDP 入站",
+            name=t("iptables.blocked.name"),
             status=Status.FAIL,
-            message=f"{msg}, PPCS UDP 包会被丢弃",
-            fix_hint=_IPTABLES_FIX_HINT,
+            message=t("iptables.blocked.message", reason=reason),
+            fix_hint=t("iptables.blocked.fix"),
         )]
     if state.policy_drop and state.udp_accept_all_port_limited:
         return [CheckResult(
-            name="iptables UDP 入站",
+            name=t("iptables.port_limited.name"),
             status=Status.WARN,
-            message="iptables 仅放行特定端口的 UDP, PPCS 使用随机高位端口可能被阻断",
-            fix_hint=_IPTABLES_FIX_HINT,
+            message=t("iptables.port_limited.message"),
+            fix_hint=t("iptables.blocked.fix"),
         )]
     return [CheckResult(
-        name="iptables UDP 入站",
+        name=t("iptables.pass.name"),
         status=Status.PASS,
-        message="iptables INPUT 链未阻断 UDP 入站",
+        message=t("iptables.pass.message"),
     )]
 
 
-def check_firewall(env: Environment) -> list[CheckResult]:
+def check_firewall(env: Environment, t: Translator = _ZH_T) -> list[CheckResult]:
     if env.platform == "macos":
         return [CheckResult(
-            name="防火墙 (macOS)",
+            name=t("firewall.macos.name"),
             status=Status.PASS,
-            message="macOS 默认不阻断 UDP 入站回包, 通常无需配置",
+            message=t("firewall.macos.message"),
         )]
 
     ufw_state = probe_ufw()
-    ufw_results = assess_ufw(ufw_state)
+    ufw_results = assess_ufw(ufw_state, t)
     if ufw_results:
         return ufw_results
 
     fwd_state = probe_firewalld()
-    fwd_results = assess_firewalld(fwd_state)
+    fwd_results = assess_firewalld(fwd_state, t)
     if fwd_results:
         return fwd_results
 
     ipt_state = probe_iptables()
-    ipt_results = assess_iptables(ipt_state)
+    ipt_results = assess_iptables(ipt_state, t)
     if ipt_results:
         return ipt_results
 
     return [CheckResult(
-        name="防火墙",
+        name=t("firewall.none.name"),
         status=Status.PASS,
-        message="未检测到 ufw、firewalld 或 iptables, UDP 入站不受防火墙限制",
+        message=t("firewall.none.message"),
     )]
 
 
@@ -830,8 +799,10 @@ def probe_wsl(env: Environment) -> WslState:
 
     hv = _run_cmd([
         "powershell.exe", "-NoProfile", "-Command",
-        "(Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore "
-        "-Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}').DefaultInboundAction",
+        (
+            "(Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore "
+            "-Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}').DefaultInboundAction"
+        ),
     ], timeout=15)
     hv_action: Literal["allow", "block", "unknown"] | None
     if hv.found and hv.rc == 0:
@@ -851,86 +822,62 @@ def probe_wsl(env: Environment) -> WslState:
     )
 
 
-def assess_wsl(state: WslState) -> list[CheckResult]:
+def assess_wsl(state: WslState, t: Translator = _ZH_T) -> list[CheckResult]:
     if not state.is_wsl:
         return []
     results: list[CheckResult] = []
     if state.wslconfig_path is None:
         results.append(CheckResult(
-            name="WSL 网络模式",
+            name=t("wsl.no_path.name"),
             status=Status.WARN,
-            message=(
-                "无法定位 .wslconfig (Windows 用户目录检测失败)。"
-                "请手动确认 %USERPROFILE%\\.wslconfig 含 [wsl2] networkingMode=mirrored"
-            ),
+            message=t("wsl.no_path.message"),
         ))
     elif not state.wslconfig_exists:
         results.append(CheckResult(
-            name="WSL 网络模式",
+            name=t("wsl.no_config.name"),
             status=Status.FAIL,
-            message=f".wslconfig 不存在 ({state.wslconfig_path}), 默认 NAT 模式无法接收局域网 UDP",
-            fix_hint=(
-                "创建 %USERPROFILE%\\.wslconfig:\n"
-                "  [wsl2]\n"
-                "  networkingMode=mirrored\n"
-                "\n"
-                "保存后执行: wsl --shutdown && wsl"
-            ),
+            message=t("wsl.no_config.message", path=state.wslconfig_path),
+            fix_hint=t("wsl.no_config.fix"),
         ))
     elif state.mirrored_mode:
         results.append(CheckResult(
-            name="WSL 网络模式",
+            name=t("wsl.mirrored.name"),
             status=Status.PASS,
-            message="已启用镜像网络模式 (networkingMode=mirrored)",
+            message=t("wsl.mirrored.message"),
         ))
     else:
         results.append(CheckResult(
-            name="WSL 网络模式",
+            name=t("wsl.nat.name"),
             status=Status.FAIL,
-            message="未启用镜像网络模式, WSL 无法接收宿主机局域网 UDP 包",
-            fix_hint=(
-                "在 Windows 侧编辑 %USERPROFILE%\\.wslconfig:\n"
-                "  [wsl2]\n"
-                "  networkingMode=mirrored\n"
-                "\n"
-                "保存后执行: wsl --shutdown && wsl"
-            ),
+            message=t("wsl.nat.message"),
+            fix_hint=t("wsl.nat.fix"),
         ))
 
     if state.hyperv_default_inbound == "allow":
         results.append(CheckResult(
-            name="Hyper-V 防火墙",
+            name=t("hyperv.allow.name"),
             status=Status.PASS,
-            message="Hyper-V 防火墙 DefaultInboundAction=Allow, UDP 入站已放行",
+            message=t("hyperv.allow.message"),
         ))
     elif state.hyperv_default_inbound == "block":
         results.append(CheckResult(
-            name="Hyper-V 防火墙",
+            name=t("hyperv.block.name"),
             status=Status.FAIL,
-            message="Hyper-V 防火墙 DefaultInboundAction=Block, UDP 入站被阻断",
-            fix_hint=(
-                "在 Windows PowerShell (管理员) 执行:\n"
-                "  Set-NetFirewallHyperVVMSetting -Name "
-                "'{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' "
-                "-DefaultInboundAction Allow"
-            ),
+            message=t("hyperv.block.message"),
+            fix_hint=t("hyperv.block.fix"),
         ))
     else:
         results.append(CheckResult(
-            name="Hyper-V 防火墙",
+            name=t("hyperv.unknown.name"),
             status=Status.WARN,
-            message=(
-                "无法检测 Hyper-V 防火墙 (powershell.exe 不可用/无权限/超时)。"
-                "如首次运行较慢可重试; 或在 Windows PowerShell (管理员) 手动检查 "
-                "Get-NetFirewallHyperVVMSetting 的 DefaultInboundAction"
-            ),
+            message=t("hyperv.unknown.message"),
         ))
 
     return results
 
 
-def check_wsl(env: Environment) -> list[CheckResult]:
-    return assess_wsl(probe_wsl(env))
+def check_wsl(env: Environment, t: Translator = _ZH_T) -> list[CheckResult]:
+    return assess_wsl(probe_wsl(env), t)
 
 
 def _get_wslconfig_path() -> Path | None:
@@ -988,16 +935,35 @@ def _backend_state(url: str, *, reachable: bool, error: str | None) -> BackendSt
     )
 
 
+def _fetch_backend_version(client: httpx.Client) -> dict | None:
+    """拉 /api/admin/version。旧 backend 无此端点返 404, 或 token 无效返 401 → None。"""
+    try:
+        r = client.get("/api/admin/version")
+    except (httpx.HTTPError, httpx.TimeoutException):
+        return None
+    if not r.is_success:
+        return None
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    if body.get("code", 0) != 0:
+        return None
+    data = body.get("data")
+    return data if isinstance(data, dict) else None
+
+
 def probe_backend() -> BackendState:
     cfg = load_config()
     server = cfg.get("server", {})
     base_url = server.get("url", "http://127.0.0.1:1810")
     token = server.get("token", "")
+    verify = bool(server.get("tls_verify", False))
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     try:
         with httpx.Client(
-            base_url=base_url, headers=headers, timeout=3.0, verify=False,
+            base_url=base_url, headers=headers, timeout=3.0, verify=verify,
         ) as client:
             r_status = client.get("/api/miot/status")
             if not r_status.is_success:
@@ -1009,17 +975,21 @@ def probe_backend() -> BackendState:
             if status_body.get("code", 0) != 0:
                 return _backend_state(
                     base_url, reachable=True,
-                    error=f"业务错误 code={status_body.get('code')}",
+                    error=f"api code={status_body.get('code')}",
                 )
             status_data = status_body.get("data") or {}
             is_bound = bool(status_data.get("is_bound"))
             uid = (status_data.get("user_info") or {}).get("uid")
+
+            version_data = _fetch_backend_version(client)
+
             if not is_bound:
                 return BackendState(
                     url=base_url, reachable=True, error=None,
                     account_bound=False, account_uid=None,
                     home_enabled=False, home_id=None, home_name=None,
                     cameras=[],
+                    version_data=version_data,
                 )
 
             r_homes = client.get("/api/miot/scope/homes")
@@ -1035,6 +1005,7 @@ def probe_backend() -> BackendState:
                     account_bound=True, account_uid=uid,
                     home_enabled=False, home_id=None, home_name=None,
                     cameras=[],
+                    version_data=version_data,
                 )
 
             r_cams = client.get("/api/miot/camera_list")
@@ -1058,6 +1029,7 @@ def probe_backend() -> BackendState:
                 home_id=enabled_home.get("home_id"),
                 home_name=enabled_home.get("home_name"),
                 cameras=cameras,
+                version_data=version_data,
             )
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as e:
         return _backend_state(
@@ -1065,121 +1037,149 @@ def probe_backend() -> BackendState:
         )
 
 
-def assess_backend(state: BackendState) -> list[CheckResult]:
+def _build_version_result(
+    version_data: dict | None, t: Translator = _ZH_T,
+) -> CheckResult | None:
+    """把 /api/admin/version 的 payload 渲染成一条 CheckResult; 数据缺失返 None。"""
+    if not isinstance(version_data, dict):
+        return None
+    pkg = version_data.get("version")
+    if not pkg:
+        return None
+    lines = [t("version.pkg_line", version=pkg)]
+
+    git = version_data.get("git")
+    if isinstance(git, dict):
+        short = git.get("commit_short")
+        if not short:
+            commit = git.get("commit")
+            short = commit[:7] if isinstance(commit, str) and commit else None
+        if short:
+            parts = [short]
+            branch = git.get("branch")
+            if isinstance(branch, str) and branch:
+                parts.append(branch)
+            dirty = git.get("dirty")
+            if dirty is True:
+                parts.append(t("version.dirty"))
+            elif dirty is False:
+                parts.append(t("version.clean"))
+            lines.append(t("version.git_prefix") + " · ".join(parts))
+            commit_time = git.get("commit_time")
+            if isinstance(commit_time, str) and commit_time:
+                lines.append(t("version.commit_time_line", time=commit_time))
+
+    return CheckResult(
+        section="miloco",
+        name=t("version.name"),
+        status=Status.PASS,
+        message="\n".join(lines),
+    )
+
+
+def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResult]:
     results: list[CheckResult] = []
     if not state.reachable:
         results.append(CheckResult(
             section="miloco",
-            name="backend 运行状态",
+            name=t("backend.unreachable.name"),
             status=Status.WARN,
-            message=f"无法连接 backend ({state.url}): {state.error}",
-            fix_hint=(
-                "启动 backend:\n"
-                "  miloco-cli service start\n"
-                "\n"
-                "若已启动仍无法连接, 检查 server.url 配置:\n"
-                "  miloco-cli config get server.url"
-            ),
+            message=t("backend.unreachable.message", url=state.url, error=state.error),
+            fix_hint=t("backend.unreachable.fix"),
         ))
         return results
 
     if state.error:
         results.append(CheckResult(
             section="miloco",
-            name="backend 运行状态",
+            name=t("backend.error.name"),
             status=Status.WARN,
-            message=f"backend 可达但接口异常 ({state.url}): {state.error}",
+            message=t("backend.error.message", url=state.url, error=state.error),
         ))
         return results
 
     results.append(CheckResult(
         section="miloco",
-        name="backend 运行状态",
+        name=t("backend.ok.name"),
         status=Status.PASS,
-        message=f"backend HTTP 服务运行中 ({state.url})",
+        message=t("backend.ok.message", url=state.url),
     ))
+
+    version_result = _build_version_result(state.version_data, t)
+    if version_result is not None:
+        results.append(version_result)
 
     if not state.account_bound:
         results.append(CheckResult(
             section="miloco",
-            name="小米账号绑定",
+            name=t("account.unbound.name"),
             status=Status.WARN,
-            message="尚未绑定 Xiaomi 账号",
-            fix_hint="miloco-cli account login",
+            message=t("account.unbound.message"),
+            fix_hint=t("account.unbound.fix"),
         ))
         return results
 
     results.append(CheckResult(
         section="miloco",
-        name="小米账号绑定",
+        name=t("account.bound.name"),
         status=Status.PASS,
-        message=f"已绑定 Xiaomi 账号 (uid: {state.account_uid or 'unknown'})",
+        message=t("account.bound.message", uid=state.account_uid or "unknown"),
     ))
 
     if not state.home_enabled:
         results.append(CheckResult(
             section="miloco",
-            name="家庭配置",
+            name=t("home.none.name"),
             status=Status.WARN,
-            message="账号下无启用的家庭",
-            fix_hint=(
-                "列出并切换家庭:\n"
-                "  miloco-cli scope home list\n"
-                "  miloco-cli scope home switch <home_id>"
-            ),
+            message=t("home.none.message"),
+            fix_hint=t("home.none.fix"),
         ))
         return results
 
     results.append(CheckResult(
         section="miloco",
-        name="家庭配置",
+        name=t("home.ok.name"),
         status=Status.PASS,
-        message=f"已启用家庭: {state.home_name or state.home_id}",
+        message=t("home.ok.message", home=state.home_name or state.home_id),
     ))
 
     if not state.cameras:
         results.append(CheckResult(
             section="miloco",
-            name="摄像头列表",
+            name=t("cameras.none.name"),
             status=Status.WARN,
-            message="当前家庭未发现摄像头设备",
+            message=t("cameras.none.message"),
         ))
         return results
 
-    lines = [f'  - "{c.name}" (did={c.did}): {c.local_ip or "未发现 LAN IP"}'
+    no_ip_text = t("cameras.no_lan_ip")
+    lines = [f'  - "{c.name}" (did={c.did}): {c.local_ip or no_ip_text}'
              for c in state.cameras]
+    joined = "\n".join(lines)
+    count = len(state.cameras)
     all_have_ip = all(c.local_ip for c in state.cameras)
     all_missing_ip = all(not c.local_ip for c in state.cameras)
     if all_have_ip:
         results.append(CheckResult(
             section="miloco",
-            name="摄像头列表",
+            name=t("cameras.all_ip.name"),
             status=Status.PASS,
-            message=f"检测到 {len(state.cameras)} 台摄像头:\n" + "\n".join(lines),
+            message=t("cameras.all_ip.message", count=count, lines=joined),
         ))
     elif all_missing_ip:
         results.append(CheckResult(
             section="miloco",
-            name="摄像头列表",
+            name=t("cameras.all_missing.name"),
             status=Status.WARN,
-            message=(
-                f"发现 {len(state.cameras)} 台摄像头但均未获得 LAN IP:\n"
-                + "\n".join(lines)
-            ),
-            fix_hint=(
-                "确认摄像头与本机在同一局域网; "
-                "重启 backend 触发 LAN 发现: miloco-cli service restart"
-            ),
+            message=t("cameras.all_missing.message", count=count, lines=joined),
+            fix_hint=t("cameras.all_missing.fix"),
         ))
     else:
         results.append(CheckResult(
             section="miloco",
-            name="摄像头列表",
+            name=t("cameras.partial.name"),
             status=Status.WARN,
-            message=(
-                f"发现 {len(state.cameras)} 台摄像头, 部分未获得 LAN IP:\n"
-                + "\n".join(lines)
-            ),
+            message=t("cameras.partial.message", count=count, lines=joined),
         ))
     return results
 
@@ -1301,120 +1301,115 @@ def probe_reachability(
     )
 
 
-def assess_reachability(state: ReachabilityState) -> list[CheckResult]:
+def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list[CheckResult]:
     results: list[CheckResult] = []
-    prefix = f"{state.target_label} · "
+    prefix = t("reach.name_prefix", label=state.target_label)
 
     if state.same_subnet:
         results.append(CheckResult(
-            name=prefix + "网段匹配",
+            name=prefix + t("reach.subnet.match.name"),
             status=Status.PASS,
-            message=(
-                f"目标 IP {state.target_ip} 与本机 {state.same_subnet_iface} 同网段"
+            message=t(
+                "reach.subnet.match.message",
+                ip=state.target_ip, iface=state.same_subnet_iface,
             ),
         ))
     else:
         results.append(CheckResult(
-            name=prefix + "网段匹配",
+            name=prefix + t("reach.subnet.mismatch.name"),
             status=Status.WARN,
-            message=f"目标 IP {state.target_ip} 与本机任一网卡均不同网段",
-            fix_hint=(
-                "PPCS 打洞跨网段成功率低。若确需跨网段, 请确认:\n"
-                "  1. 两个网段之间存在三层可达\n"
-                "  2. 路由器/网关允许 UDP 双向转发\n"
-                "  3. 摄像头/主机均无静态 ACL 拦截"
-            ),
+            message=t("reach.subnet.mismatch.message", ip=state.target_ip),
+            fix_hint=t("reach.subnet.mismatch.fix"),
         ))
 
     if state.route_iface is None:
         results.append(CheckResult(
-            name=prefix + "路由出接口",
+            name=prefix + t("reach.route.none.name"),
             status=Status.WARN,
-            message="路由表无法给出到目标的出接口",
+            message=t("reach.route.none.message"),
         ))
     elif state.same_subnet and state.route_iface != state.same_subnet_iface:
         results.append(CheckResult(
-            name=prefix + "路由出接口",
+            name=prefix + t("reach.route.mismatch.name"),
             status=Status.WARN,
-            message=(
-                f"路由走 {state.route_iface} 但目标与 {state.same_subnet_iface} 同网段, "
-                "多网卡场景请核对"
+            message=t(
+                "reach.route.mismatch.message",
+                route_iface=state.route_iface,
+                subnet_iface=state.same_subnet_iface,
             ),
         ))
     else:
-        src = f" (src {state.route_src})" if state.route_src else ""
+        src_suffix = (
+            t("reach.route.src_suffix", src=state.route_src) if state.route_src else ""
+        )
         results.append(CheckResult(
-            name=prefix + "路由出接口",
+            name=prefix + t("reach.route.ok.name"),
             status=Status.PASS,
-            message=f"路由走接口 {state.route_iface}{src}",
+            message=t(
+                "reach.route.ok.message",
+                route_iface=state.route_iface, src_suffix=src_suffix,
+            ),
         ))
 
     if state.ping_ok:
-        rtt_str = f", RTT {state.ping_rtt_ms:.1f} ms" if state.ping_rtt_ms is not None else ""
+        rtt_suffix = (
+            t("reach.l3.ping_ok.rtt_suffix", rtt=f"{state.ping_rtt_ms:.1f}")
+            if state.ping_rtt_ms is not None
+            else ""
+        )
         results.append(CheckResult(
-            name=prefix + "L3 可达",
+            name=prefix + t("reach.l3.ping_ok.name"),
             status=Status.PASS,
-            message=f"ping 成功{rtt_str}",
+            message=t("reach.l3.ping_ok.message", rtt_suffix=rtt_suffix),
         ))
     elif state.neigh_state in ("REACHABLE", "STALE", "DELAY"):
         results.append(CheckResult(
-            name=prefix + "L3 可达",
+            name=prefix + t("reach.l3.arp_ok.name"),
             status=Status.WARN,
-            message=(
-                f"ping 未收到回包, 但 ARP 表状态为 {state.neigh_state}, "
-                "对端可能仅拦 ICMP"
-            ),
+            message=t("reach.l3.arp_ok.message", state=state.neigh_state),
         ))
     else:
-        neigh_desc = state.neigh_state or "未知"
+        neigh_desc = state.neigh_state or t("reach.l3.fail.unknown")
         results.append(CheckResult(
-            name=prefix + "L3 可达",
+            name=prefix + t("reach.l3.fail.name"),
             status=Status.FAIL,
-            message=f"ping 失败, ARP 表状态: {neigh_desc}",
+            message=t("reach.l3.fail.message", state=neigh_desc),
         ))
 
     if not state.udp_send_ok:
         results.append(CheckResult(
-            name=prefix + "UDP 探测",
+            name=prefix + t("reach.udp.blocked.name"),
             status=Status.FAIL,
-            message=f"UDP 无法发出: {state.udp_error}",
-            fix_hint=(
-                "UDP 出站被本机策略拦截, 请检查:\n"
-                "  1. iptables OUTPUT 链: sudo iptables -L OUTPUT -n\n"
-                "  2. 容器 seccomp / AppArmor 策略\n"
-                "  3. 若 errno=101 (Network unreachable), 说明无路由到目标网段"
-            ),
+            message=t("reach.udp.blocked.message", error=state.udp_error),
+            fix_hint=t("reach.udp.blocked.fix"),
         ))
     elif state.udp_error and "ICMP Port Unreachable" in state.udp_error:
         results.append(CheckResult(
-            name=prefix + "UDP 探测",
+            name=prefix + t("reach.udp.port_unreach.name"),
             status=Status.PASS,
-            message="UDP 到达目标主机 (收到 ICMP Port Unreachable, 端口无监听属正常)",
+            message=t("reach.udp.port_unreach.message"),
         ))
     elif state.ping_ok and state.neigh_state in ("REACHABLE", "STALE", "DELAY"):
         results.append(CheckResult(
-            name=prefix + "UDP 探测",
+            name=prefix + t("reach.udp.pass.name"),
             status=Status.PASS,
-            message="UDP 出站正常, L3/L2 综合可达 (UDP 无 ACK, 无法 100% 确认送达)",
+            message=t("reach.udp.pass.message"),
         ))
     else:
         results.append(CheckResult(
-            name=prefix + "UDP 探测",
+            name=prefix + t("reach.udp.warn.name"),
             status=Status.WARN,
-            message=(
-                "UDP 出站正常, 但 L3/L2 证据不足, 无法确认对端收到 "
-                "(UDP 协议限制, 无 delivery confirmation)"
-            ),
+            message=t("reach.udp.warn.message"),
         ))
     return results
 
 
 def check_reachability(
     env: Environment, target_ip: str, target_label: str,
-    interfaces: list[NetworkInterface],
+    interfaces: list[NetworkInterface], t: Translator = _ZH_T,
 ) -> list[CheckResult]:
     state = probe_reachability(env, target_ip, target_label, interfaces)
-    return assess_reachability(state)
+    return assess_reachability(state, t)
 
 
 # ─── Rendering (text) ──────────────────────────────────────────────────────────
@@ -1454,56 +1449,52 @@ def _section_header(title: str) -> str:
     return prefix + "━" * max(0, _SECTION_WIDTH - _display_width(prefix))
 
 
-def _render_host(env: Environment, network_state: NetworkState) -> None:
+_HOST_LABEL_WIDTH = 10
+
+
+def _pad_display(s: str, width: int) -> str:
+    return s + " " * max(0, width - _display_width(s))
+
+
+def _render_host(env: Environment, network_state: NetworkState, t: Translator = _ZH_T) -> None:
+    def _label(s: str) -> str:
+        return _pad_display(s, _HOST_LABEL_WIDTH)
+
     click.echo()
-    click.echo(_section_header("主机环境信息"))
-    click.echo(f"    OS:       {env.distro or 'unknown'}")
-    click.echo(f"    Kernel:   {env.kernel}")
-    click.echo(f"    运行时:   {' · '.join(_runtime_tags(env))}")
+    click.echo(_section_header(t("render.host.title")))
+    click.echo(f"    {_label('OS:')}{env.distro or 'unknown'}")
+    click.echo(f"    {_label('Kernel:')}{env.kernel}")
+    click.echo(f"    {_label(t('render.host.runtime'))}{' · '.join(_runtime_tags(env, t))}")
     non_virtual = [i for i in network_state.interfaces if not i.is_virtual]
     if not non_virtual:
-        click.echo("    网卡:     (无可用 IPv4 网卡)")
+        click.echo(f"    {_label(t('render.host.nic'))}{t('render.host.nic_empty')}")
     else:
+        nic_label = t("render.host.nic")
         for idx, iface in enumerate(non_virtual):
-            label = "网卡:" if idx == 0 else "     "
-            click.echo(f"    {label:<10}{iface.name:<8}{iface.ip}/{iface.prefix}")
+            label = nic_label if idx == 0 else ""
+            click.echo(f"    {_label(label)}{iface.name:<8}{iface.ip}/{iface.prefix}")
     click.echo()
 
 
-def _render_result(r: CheckResult) -> None:
+def _render_result(r: CheckResult, t: Translator = _ZH_T) -> None:
     icon = _STATUS_ICON[r.status]
     click.echo(f"  {icon} {r.name}")
     for line in r.message.splitlines():
         click.echo(f"     {line}")
     if r.fix_hint:
         click.echo()
-        click.echo("     \U0001f4a1 修复建议:")
+        click.echo(f"     {t('render.fix_hint')}")
         for line in r.fix_hint.split("\n"):
             click.echo(f"        {line}")
     click.echo()
 
 
-def _render_miloco(results: list[CheckResult]) -> None:
-    click.echo(_section_header("Miloco 运行状态"))
-    if not results:
-        click.echo("  (无输出)")
-        click.echo()
-        return
-    for r in results:
-        _render_result(r)
+def _render_section_empty(t: Translator = _ZH_T) -> None:
+    click.echo(f"  {t('render.section.empty')}")
+    click.echo()
 
 
-def _render_checks(results: list[CheckResult]) -> None:
-    click.echo(_section_header("检测状态"))
-    if not results:
-        click.echo("  (无输出)")
-        click.echo()
-        return
-    for r in results:
-        _render_result(r)
-
-
-def _render_summary(results: list[CheckResult]) -> None:
+def _render_summary(results: list[CheckResult], t: Translator = _ZH_T) -> None:
     click.echo("─" * _SECTION_WIDTH)
     counts = {s: 0 for s in Status}
     for r in results:
@@ -1515,7 +1506,7 @@ def _render_summary(results: list[CheckResult]) -> None:
         parts.append(f"⚠️  {counts[Status.WARN]} warn")
     if counts[Status.FAIL]:
         parts.append(f"❌ {counts[Status.FAIL]} fail")
-    click.echo(f"  {' / '.join(parts) if parts else '(无检测项)'}")
+    click.echo(f"  {' / '.join(parts) if parts else t('render.summary.empty')}")
     click.echo()
 
 
@@ -1527,6 +1518,7 @@ def _to_json(
     network_state: NetworkState,
     backend_state: BackendState,
     all_results: list[CheckResult],
+    t: Translator = _ZH_T,
 ) -> dict:
     counts = {s: 0 for s in Status}
     for r in all_results:
@@ -1537,7 +1529,7 @@ def _to_json(
             "platform": env.platform,
             "distro": env.distro,
             "kernel": env.kernel,
-            "runtime_tags": _runtime_tags(env),
+            "runtime_tags": _runtime_tags(env, t),
             "is_container": env.is_container,
             "container_net": env.container_net,
             "network_interfaces": [
@@ -1593,57 +1585,123 @@ def _to_json(
 @click.command("doctor")
 @click.option(
     "--device-ip", default=None, metavar="IPv4",
-    help="指定摄像头/设备 IP, 触发主动连通性探测。不指定时自动对已发现的摄像头逐台探测。",
+    help=(
+        "指定摄像头/设备 IP, 触发主动连通性探测。不指定时自动对已发现的摄像头逐台探测。 / "
+        "Target camera/device IP for active reachability probe; "
+        "when omitted, discovered cameras are probed one by one."
+    ),
 )
 @click.option(
     "--json", "json_output", is_flag=True, default=False,
-    help="输出结构化 JSON 到 stdout, 无文本渲染。",
+    help=(
+        "输出结构化 JSON 到 stdout, 无文本渲染。 / "
+        "Emit structured JSON to stdout instead of text output."
+    ),
 )
-def doctor_cmd(device_ip: str | None, json_output: bool):
-    """环境诊断: 判断本机能否 UDP 连上米家摄像头。"""
+@click.option(
+    "--lang", "lang", type=click.Choice(list(SUPPORTED_LANGS)), default="zh",
+    show_default=True,
+    help="输出语言。 / Output language.",
+)
+def doctor_cmd(device_ip: str | None, json_output: bool, lang: str):
+    """环境诊断: 判断本机能否 UDP 连上米家摄像头。 / Diagnose whether this host can reach Mi cameras via UDP."""
+    t = make_translator(lang)
+
     if device_ip:
         try:
             ipaddress.IPv4Address(device_ip)
         except (ipaddress.AddressValueError, ValueError):
             raise click.BadParameter(
-                f"'{device_ip}' 不是合法的 IPv4 地址", param_hint="--device-ip",
+                t("entry.invalid_ip", ip=device_ip), param_hint="--device-ip",
             )
+
+    if json_output:
+        env = probe_environment()
+        network_state = probe_network(env)
+        backend_state = probe_backend()
+
+        all_results: list[CheckResult] = []
+        all_results.extend(assess_network_empty(network_state, t))
+        all_results.extend(assess_backend(backend_state, t))
+        all_results.extend(check_firewall(env, t))
+        all_results.extend(check_container(env, t))
+        all_results.extend(check_wsl(env, t))
+
+        if device_ip:
+            all_results.extend(check_reachability(
+                env, device_ip, "--device-ip", network_state.interfaces, t,
+            ))
+        else:
+            for cam in backend_state.cameras:
+                if cam.local_ip:
+                    all_results.extend(check_reachability(
+                        env, cam.local_ip, t("camera.label", name=cam.name),
+                        network_state.interfaces, t,
+                    ))
+
+        click.echo(json.dumps(
+            _to_json(env, network_state, backend_state, all_results, t),
+            ensure_ascii=False,
+        ))
+        if any(r.status == Status.FAIL for r in all_results):
+            raise SystemExit(1)
+        return
+
+    def _flush() -> None:
+        sys.stdout.flush()
+
+    click.echo()
+    click.echo(t("render.banner"))
+    _flush()
 
     env = probe_environment()
     network_state = probe_network(env)
-    backend_state = probe_backend()
+    _render_host(env, network_state, t)
+    _flush()
 
-    all_results: list[CheckResult] = []
-    all_results.extend(assess_network_empty(network_state))
-    all_results.extend(assess_backend(backend_state))
-    all_results.extend(check_firewall(env))
-    all_results.extend(check_container(env))
-    all_results.extend(check_wsl(env))
+    click.echo(_section_header(t("render.miloco.title")))
+    _flush()
+    backend_state = probe_backend()
+    miloco_results = assess_backend(backend_state, t)
+    if miloco_results:
+        for r in miloco_results:
+            _render_result(r, t)
+            _flush()
+    else:
+        _render_section_empty(t)
+
+    click.echo(_section_header(t("render.checks.title")))
+    _flush()
+    checks_results: list[CheckResult] = []
+
+    def _emit(rs: list[CheckResult]) -> None:
+        for r in rs:
+            _render_result(r, t)
+            checks_results.append(r)
+        _flush()
+
+    _emit(assess_network_empty(network_state, t))
+    _emit(check_firewall(env, t))
+    _emit(check_container(env, t))
+    _emit(check_wsl(env, t))
 
     if device_ip:
-        all_results.extend(check_reachability(
-            env, device_ip, "--device-ip", network_state.interfaces,
+        _emit(check_reachability(
+            env, device_ip, "--device-ip", network_state.interfaces, t,
         ))
     else:
         for cam in backend_state.cameras:
             if cam.local_ip:
-                all_results.extend(check_reachability(
-                    env, cam.local_ip, f'摄像头 "{cam.name}"',
-                    network_state.interfaces,
+                _emit(check_reachability(
+                    env, cam.local_ip, t("camera.label", name=cam.name),
+                    network_state.interfaces, t,
                 ))
 
-    if json_output:
-        click.echo(json.dumps(
-            _to_json(env, network_state, backend_state, all_results),
-            ensure_ascii=False,
-        ))
-    else:
-        click.echo()
-        click.echo("\U0001fa7a Miloco 环境诊断")
-        _render_host(env, network_state)
-        _render_miloco([r for r in all_results if r.section == "miloco"])
-        _render_checks([r for r in all_results if r.section in ("host", "checks")])
-        _render_summary(all_results)
+    if not checks_results:
+        _render_section_empty(t)
+
+    all_results = miloco_results + checks_results
+    _render_summary(all_results, t)
 
     if any(r.status == Status.FAIL for r in all_results):
         raise SystemExit(1)

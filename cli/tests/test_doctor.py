@@ -26,6 +26,7 @@ from miloco_cli.commands.doctor import (
     _parse_neigh_linux,
     _parse_ping,
     _probe_udp_send,
+    _build_version_result,
     _to_json,
     assess_backend,
     assess_firewalld,
@@ -90,13 +91,16 @@ class _HTTPXBody:
 
 
 def _mock_httpx(responses: dict):
-    """构造一个可作为 httpx.Client 上下文的 MagicMock, GET 按 path 分发。"""
+    """构造一个可作为 httpx.Client 上下文的 MagicMock, GET 按 path 分发。
+
+    未显式列出的 path 默认返 404, 用于让 doctor 的容错路径 (如可选的
+    /api/admin/version 缺失) 走 None 而不是断言失败。
+    """
     client = MagicMock()
+    default_404 = _HTTPXBody({"code": 404}, status_code=404)
 
     def fake_get(path, *args, **kwargs):
-        if path not in responses:
-            raise AssertionError(f"unexpected GET {path}")
-        return responses[path]
+        return responses.get(path, default_404)
 
     client.get.side_effect = fake_get
     ctx = MagicMock()
@@ -210,6 +214,129 @@ class TestProbeEnvironment:
             env = probe_environment()
         assert env.platform == "macos"
         assert env.distro == "macOS 14.5"
+
+
+# ─── _detect_container_net ─────────────────────────────────────────────────────
+
+
+class TestDetectContainerNet:
+    """symlink 判据 (has virtual/) + 网关兜底, 覆盖 host / bridge / other / 兜底崩溃场景。"""
+
+    @staticmethod
+    def _patch_net(names, readlinks, gateway=None):
+        from miloco_cli.commands import doctor as m
+
+        def fake_readlink(path):
+            key = path.split("/")[-1]
+            if key in readlinks:
+                return readlinks[key]
+            raise OSError(2, "not a symlink")
+
+        return (
+            patch.object(m.os, "listdir", return_value=names),
+            patch.object(m.os, "readlink", side_effect=fake_readlink),
+            patch.object(m, "_read_default_gateway", return_value=gateway),
+        )
+
+    def test_host_mode_pci_iface(self):
+        from miloco_cli.commands.doctor import _detect_container_net
+        patches = self._patch_net(
+            names=["lo", "enp0s31f6"],
+            readlinks={
+                "lo": "../../devices/virtual/net/lo",
+                "enp0s31f6": "../../devices/pci0000:00/0000:00:1f.6/net/enp0s31f6",
+            },
+        )
+        with patches[0], patches[1], patches[2]:
+            assert _detect_container_net() == "host"
+
+    def test_bridge_default_docker_eth0(self):
+        """Docker 默认 bridge: 容器内 eth0 是 veth (virtual), 网关 172.17.0.1。"""
+        from miloco_cli.commands.doctor import _detect_container_net
+        patches = self._patch_net(
+            names=["lo", "eth0"],
+            readlinks={
+                "lo": "../../devices/virtual/net/lo",
+                "eth0": "../../devices/virtual/net/eth0",
+            },
+            gateway="172.17.0.1",
+        )
+        with patches[0], patches[1], patches[2]:
+            assert _detect_container_net() == "bridge"
+
+    def test_bridge_custom_subnet_172_20(self):
+        """docker custom bridge (172.20.0.0/16) 也应被识别为 bridge。"""
+        from miloco_cli.commands.doctor import _detect_container_net
+        patches = self._patch_net(
+            names=["lo", "eth0"],
+            readlinks={
+                "lo": "../../devices/virtual/net/lo",
+                "eth0": "../../devices/virtual/net/eth0",
+            },
+            gateway="172.20.0.1",
+        )
+        with patches[0], patches[1], patches[2]:
+            assert _detect_container_net() == "bridge"
+
+    def test_other_podman_slirp4netns(self):
+        """podman rootless slirp4netns: 网关 10.0.2.2 不在 docker 私网段。"""
+        from miloco_cli.commands.doctor import _detect_container_net
+        patches = self._patch_net(
+            names=["lo", "tap0"],
+            readlinks={
+                "lo": "../../devices/virtual/net/lo",
+                "tap0": "../../devices/virtual/net/tap0",
+            },
+            gateway="10.0.2.2",
+        )
+        with patches[0], patches[1], patches[2]:
+            assert _detect_container_net() == "other"
+
+    def test_other_no_gateway(self):
+        from miloco_cli.commands.doctor import _detect_container_net
+        patches = self._patch_net(
+            names=["lo", "eth0"],
+            readlinks={
+                "lo": "../../devices/virtual/net/lo",
+                "eth0": "../../devices/virtual/net/eth0",
+            },
+            gateway=None,
+        )
+        with patches[0], patches[1], patches[2]:
+            assert _detect_container_net() == "other"
+
+    def test_host_mode_with_docker_gateway_still_host(self):
+        """有物理网卡 → host 直接返回, 不会走到网关判定 (即使网关看起来像 docker 段)。"""
+        from miloco_cli.commands.doctor import _detect_container_net
+        patches = self._patch_net(
+            names=["lo", "eno1"],
+            readlinks={
+                "lo": "../../devices/virtual/net/lo",
+                "eno1": "../../devices/pci0000:00/0000:00:19.0/net/eno1",
+            },
+            gateway="172.17.0.1",
+        )
+        with patches[0], patches[1], patches[2]:
+            assert _detect_container_net() == "host"
+
+    def test_listdir_permission_error_returns_none(self):
+        from miloco_cli.commands import doctor as m
+        with patch.object(m.os, "listdir", side_effect=OSError("perm denied")):
+            assert m._detect_container_net() is None
+
+    def test_gateway_invalid_ipv4_returns_other(self):
+        """网关字符串非法 IPv4 (如 IPv6 fe80::), IPv4Address 抛错时应兜住返回 other。"""
+        from miloco_cli.commands.doctor import _detect_container_net
+        patches = self._patch_net(
+            names=["lo", "eth0"],
+            readlinks={
+                "lo": "../../devices/virtual/net/lo",
+                "eth0": "../../devices/virtual/net/eth0",
+            },
+            gateway="fe80::1",
+        )
+        with patches[0], patches[1], patches[2]:
+            assert _detect_container_net() == "other"
 
 
 # ─── probe_network ─────────────────────────────────────────────────────────────
@@ -730,6 +857,97 @@ class TestAssessBackend:
         results = assess_backend(_bs(account_uid="1234567890"))
         assert "1234567890" in results[1].message
 
+    def test_version_shown_between_backend_and_account(self):
+        version_data = {
+            "version": "0.1.0",
+            "git": {
+                "commit": "4a2b3c1d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+                "commit_short": "4a2b3c1",
+                "branch": "main",
+                "dirty": False,
+                "commit_time": "2026-07-01T10:16:07+08:00",
+            },
+        }
+        results = assess_backend(_bs(version_data=version_data))
+        assert results[0].name == "backend 运行状态"
+        assert results[1].name == "版本"
+        assert "v0.1.0" in results[1].message
+        assert "4a2b3c1" in results[1].message
+        assert "main" in results[1].message
+
+    def test_version_absent_no_extra_result(self):
+        results = assess_backend(_bs(version_data=None))
+        names = [r.name for r in results]
+        assert "版本" not in names
+
+
+# ─── _build_version_result ─────────────────────────────────────────────────────
+
+
+class TestBuildVersionResult:
+    def test_none_input(self):
+        assert _build_version_result(None) is None
+
+    def test_missing_version_key(self):
+        assert _build_version_result({"git": {"commit_short": "abc"}}) is None
+
+    def test_pkg_only(self):
+        r = _build_version_result({"version": "1.2.3", "git": None})
+        assert r is not None
+        assert r.status == Status.PASS
+        assert r.message == "v1.2.3"
+
+    def test_pkg_plus_git_dirty(self):
+        r = _build_version_result({
+            "version": "1.2.3",
+            "git": {"commit_short": "abcdef1", "branch": "main", "dirty": True,
+                    "commit_time": "2026-01-01T00:00:00+00:00"},
+        })
+        assert r is not None
+        assert "v1.2.3" in r.message
+        assert "abcdef1" in r.message
+        assert "main" in r.message
+        assert "有未提交修改" in r.message
+        assert "2026-01-01" in r.message
+
+    def test_pkg_plus_git_clean(self):
+        r = _build_version_result({
+            "version": "1.2.3",
+            "git": {"commit_short": "abcdef1", "branch": "main", "dirty": False},
+        })
+        assert r is not None
+        assert "干净" in r.message
+
+    def test_pkg_plus_git_no_branch(self):
+        r = _build_version_result({
+            "version": "1.2.3",
+            "git": {"commit_short": "abcdef1", "branch": None, "dirty": None},
+        })
+        assert r is not None
+        # 无 branch, 无 dirty 判断 → 只显示 short
+        lines = r.message.split("\n")
+        assert lines[0] == "v1.2.3"
+        assert lines[1].endswith("abcdef1")
+
+    def test_falls_back_to_commit_when_short_missing(self):
+        r = _build_version_result({
+            "version": "1.2.3",
+            "git": {"commit": "abcdef1234567890" + "0" * 24, "commit_short": None},
+        })
+        assert r is not None
+        assert "abcdef1" in r.message  # 取前 7 位
+
+    def test_en_locale(self):
+        from miloco_cli.commands.doctor_i18n import make_translator
+        r = _build_version_result(
+            {"version": "1.2.3",
+             "git": {"commit_short": "abcdef1", "branch": "main", "dirty": True}},
+            make_translator("en"),
+        )
+        assert r is not None
+        assert r.name == "Version"
+        assert "dirty" in r.message
+
 
 # ─── _probe_udp_send ───────────────────────────────────────────────────────────
 
@@ -943,7 +1161,7 @@ class TestDoctorCommand:
         patches = self._patch_all()
         called = {}
 
-        def fake_check_reachability(env, ip, label, ifaces):
+        def fake_check_reachability(env, ip, label, ifaces, t=None):
             called["ip"] = ip
             called["label"] = label
             return [CheckResult(name=f"{label} · UDP 探测",
@@ -968,7 +1186,7 @@ class TestDoctorCommand:
         patches = self._patch_all(backend=backend)
         seen = []
 
-        def fake_check_reachability(env, ip, label, ifaces):
+        def fake_check_reachability(env, ip, label, ifaces, t=None):
             seen.append((ip, label))
             return []
 
@@ -1006,3 +1224,101 @@ class TestDoctorCommand:
         payload = json.loads(result.output.strip())
         assert payload["exit_code"] == 1
         assert payload["summary"]["fail"] == 1
+
+
+# ─── i18n (--lang) ────────────────────────────────────────────────────────────
+
+
+class TestI18n:
+    def test_translator_zh_default(self):
+        from miloco_cli.commands.doctor_i18n import make_translator
+        t = make_translator("zh")
+        assert t("nic_empty.name") == "IPv4 网卡"
+        assert "网段匹配" in t("reach.subnet.match.name")
+
+    def test_translator_en(self):
+        from miloco_cli.commands.doctor_i18n import make_translator
+        t = make_translator("en")
+        assert t("nic_empty.name") == "IPv4 NICs"
+        assert t("reach.subnet.match.name") == "Subnet match"
+        assert t("cameras.no_lan_ip") == "no LAN IP"
+
+    def test_translator_unknown_lang_falls_back_to_zh(self):
+        from miloco_cli.commands.doctor_i18n import make_translator
+        t = make_translator("fr")
+        assert t("nic_empty.name") == "IPv4 网卡"
+
+    def test_translator_missing_key_returns_key(self):
+        from miloco_cli.commands.doctor_i18n import make_translator
+        t = make_translator("zh")
+        assert t("no.such.key.exists") == "no.such.key.exists"
+
+    def test_translator_format_params(self):
+        from miloco_cli.commands.doctor_i18n import make_translator
+        t_zh = make_translator("zh")
+        t_en = make_translator("en")
+        assert "192.168.1.5" in t_zh("entry.invalid_ip", ip="192.168.1.5")
+        assert "192.168.1.5" in t_en("entry.invalid_ip", ip="192.168.1.5")
+
+    def test_assess_ufw_en(self):
+        state = UfwState(installed=True, enabled_via_conf=True,
+                         rules_readable=True, default_deny_incoming=True,
+                         has_udp_allow=False)
+        from miloco_cli.commands.doctor_i18n import make_translator
+        t_en = make_translator("en")
+        results = assess_ufw(state, t_en)
+        assert len(results) == 1
+        assert "UDP" in results[0].name
+        assert "PPCS" in results[0].message
+        assert "sudo ufw allow" in results[0].fix_hint
+
+    @pytest.fixture
+    def runner(self):
+        return CliRunner()
+
+    def _patch_all(self):
+        env = Environment(platform="linux", is_container=False,
+                          container_net=None, distro="Test",
+                          kernel="Linux 6.0.0 x86_64")
+        net = NetworkState(interfaces=[
+            NetworkInterface(name="eth0", ip="192.168.1.10", prefix=24, is_virtual=False),
+        ])
+        backend = BackendState(url="http://127.0.0.1:1810", reachable=True,
+                               error=None, account_bound=True, account_uid="1",
+                               home_enabled=True, home_id="h", home_name="Home",
+                               cameras=[])
+        return (
+            patch("miloco_cli.commands.doctor.probe_environment", return_value=env),
+            patch("miloco_cli.commands.doctor.probe_network", return_value=net),
+            patch("miloco_cli.commands.doctor.probe_backend", return_value=backend),
+            patch("miloco_cli.commands.doctor.check_firewall", return_value=[]),
+            patch("miloco_cli.commands.doctor.check_container", return_value=[]),
+            patch("miloco_cli.commands.doctor.check_wsl", return_value=[]),
+        )
+
+    def test_cli_lang_en_output(self, runner):
+        patches = self._patch_all()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            result = runner.invoke(cli, ["doctor", "--lang", "en"])
+        assert result.exit_code == 0
+        assert "Miloco doctor" in result.output
+        assert "Host environment" in result.output
+        assert "Diagnostics" in result.output
+
+    def test_cli_lang_zh_default(self, runner):
+        patches = self._patch_all()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            result = runner.invoke(cli, ["doctor"])
+        assert result.exit_code == 0
+        assert "主机环境信息" in result.output
+        assert "检测状态" in result.output
+
+    def test_cli_lang_invalid(self, runner):
+        result = runner.invoke(cli, ["doctor", "--lang", "fr"])
+        assert result.exit_code != 0
+        assert "fr" in result.output.lower() or "invalid" in result.output.lower()
+
+    def test_cli_invalid_ip_en(self, runner):
+        result = runner.invoke(cli, ["doctor", "--lang", "en", "--device-ip", "not-an-ip"])
+        assert result.exit_code != 0
+        assert "not a valid IPv4" in result.output
