@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
-TrackStatus = Literal["none", "pending", "confirmed", "unknown"]
+TrackStatus = Literal["none", "pending", "confirmed", "unknown", "no_person"]
 
 
 # =============================================================================
@@ -92,6 +92,12 @@ class TrackIdentityState:
     # 退回后经过的重审窗数; 达 flip_sticky_max_recheck 仍未 commit → engine 放手(置上面 False)。
     flip_recheck_count: int = 0
 
+    # ----- no_person（非人误检抑制）-----
+    # 连续命中 omni "no_person"（框内确无人）的票数; 达 vote_threshold 落定 status=no_person。
+    no_person_vote_count: int = 0
+    # 落定 no_person 时该 track 的锚点 bbox(xyxy); 后续帧据此判"明显移动"→回 pending 重新识别。
+    no_person_anchor_bbox: tuple[int, int, int, int] | None = None
+
 
 # =============================================================================
 # 状态机操作（纯函数）
@@ -135,6 +141,77 @@ def promote_to_pending(state: TrackIdentityState, now_ts: float | None = None) -
         return
     state.status = "pending"
     state.pending_started_ts = now_ts if now_ts is not None else time.time()
+
+
+def record_no_person(
+    state: TrackIdentityState,
+    *,
+    anchor_bbox: tuple[int, int, int, int] | None,
+    vote_threshold: int,
+) -> bool:
+    """omni 判该框"无人"（no_person）时累计票数；连续达 ``vote_threshold`` 则落定 no_person 状态。
+
+    仅对**未确认成员**的 track 生效（none / pending / unknown）：confirmed 成员不因 no_person
+    票翻转（视为弃权，防把背对 / 遮挡的真本人误掉），返回 False 不计票。已是 no_person 的
+    track 不重复落定。落定时清空身份字段（candidate / committed / unknown_index）并记锚点 bbox。
+
+    Returns:
+        True 仅当本次调用使状态落定到 ``no_person``。
+    """
+    state.inflight = False  # 任务回流，清 inflight
+    if state.status in ("confirmed", "no_person"):
+        return False
+    state.no_person_vote_count += 1
+    if state.no_person_vote_count < vote_threshold:
+        return False
+    state.status = "no_person"
+    state.no_person_anchor_bbox = anchor_bbox
+    state.candidate_person_id = None
+    state.committed_person_id = None
+    state.unknown_index = None
+    state.stability_count = 0
+    state.best_conf = 0.0
+    return True
+
+
+def _bbox_moved(
+    anchor: tuple[int, int, int, int],
+    cur: tuple[int, int, int, int],
+    displacement_ratio: float,
+    min_abs_px: float,
+) -> bool:
+    """中心位移同时满足"≥ min_abs_px"且"≥ ratio×锚点对角线"才算明显移动。"""
+    ax1, ay1, ax2, ay2 = anchor
+    cx1, cy1, cx2, cy2 = cur
+    disp = (((ax1 + ax2) - (cx1 + cx2)) ** 2 + ((ay1 + ay2) - (cy1 + cy2)) ** 2) ** 0.5 / 2.0
+    diag = ((ax2 - ax1) ** 2 + (ay2 - ay1) ** 2) ** 0.5
+    return disp >= min_abs_px and disp >= displacement_ratio * diag
+
+
+def clear_no_person_on_motion(
+    state: TrackIdentityState,
+    current_bbox: tuple[int, int, int, int] | None,
+    displacement_ratio: float,
+    min_abs_px: float,
+) -> bool:
+    """no_person track 相对锚点 bbox 明显移动 → 回 pending 重新识别。
+
+    处理"误检框被路过的真人 ID-switch 带走"：静态误检框不动、维持 no_person；一旦框开始
+    随真人移动，立即解除抑制、重新走识别。返回 True 表示本次解除。
+    """
+    if (
+        state.status != "no_person"
+        or state.no_person_anchor_bbox is None
+        or current_bbox is None
+    ):
+        return False
+    if not _bbox_moved(state.no_person_anchor_bbox, current_bbox, displacement_ratio, min_abs_px):
+        return False
+    state.status = "pending"
+    state.no_person_vote_count = 0
+    state.no_person_anchor_bbox = None
+    state.pending_started_ts = time.time()
+    return True
 
 
 def update_evidence(
@@ -374,6 +451,9 @@ def needs_omni_call(
     if state.status == "none":
         # 还没 promote 到 pending；等 SortTracker 把它 confirmed 上来才会 call promote_to_pending
         return False
+    if state.status == "no_person":
+        # 已落定非人误检：不再派发 omni（停止对幻影框的重复识别）。移动解除走 engine 侧 motion check。
+        return False
     if state.inflight:
         return False
     if state.status == "pending":
@@ -445,6 +525,9 @@ def get_face_id_value(
         - "unknown"                                       unknown + distinguish=false
     """
     if state.status == "none":
+        return "none"
+    if state.status == "no_person":
+        # 非人误检：身份不导出（不进名册、不当待识别人物），等同"此处没人"。
         return "none"
     if state.status == "pending":
         # 翻转黏旧名: 由 confirmed 退回的 pending 显示保持旧成员名, 翻转期不闪 unknown。

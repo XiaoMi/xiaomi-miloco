@@ -84,6 +84,9 @@ class OmniIdentityResult:
     # 仅在 omni 明确返回了该 track 的 assignment 时才透传真值；omni 漏报该 track 或
     # 整体调用失败时保持 None（非否定，按弃权处理）。
     face_visible: Optional[bool] = None
+    # omni 在 identities 把该框判为 "no_person"（框内确无人 / 非人误检），区别于 unknown
+    # （有人但认不出）。上层 _on_result 据此累计 no_person 票、落定后停派发 + 身份不导出。
+    no_person: bool = False
 
 
 # =============================================================================
@@ -247,6 +250,7 @@ class FusedDispatcher:
                     pid = None
                 conf = float(a.get("confidence", 0.0))
                 reason = str(a.get("reason", ""))
+                is_no_person = bool(a.get("no_person", False))
             except (TypeError, ValueError) as e:
                 logger.warning("fused response 解析单条 assignment 失败 a=%s err=%s", a, e)
                 continue
@@ -273,6 +277,7 @@ class FusedDispatcher:
                     batch_size=batch_size,
                     dup_id=dup_id,
                     face_visible=face_visible_by_tid.get(tid),
+                    no_person=is_no_person,
                 ))
             except Exception:  # noqa: BLE001
                 # 单条 on_result 抛出不连累整批,也不向上传播(否则 run_omni_fused 的 finally

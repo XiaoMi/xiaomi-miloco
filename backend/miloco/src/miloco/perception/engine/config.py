@@ -237,6 +237,35 @@ class DriftCheckConfigDC:
 
 
 @dataclass
+class NoPersonConfigDC:
+    """无人误检（no_person）抑制参数。
+
+    检测模型偶尔把静态杂物 / 家具误报成人体框 → 形成 track → 注入 omni → caption 据框
+    脑补"陌生人在做某事"。omni 在 identities 里把"框内确无人"判为 ``no_person``（区别于
+    ``unknown``=有人但不认识，见 ``field_registry``），本配置控制引擎侧如何消费该判定：
+    连续 ``vote_threshold`` 次 no_person 才落定 ``no_person`` 状态（停派发 omni、身份不导出、
+    不进陌生人池）；该 track 一旦相对落定时的锚点 bbox 明显移动（疑似被路过的真人 ID-switch
+    带走）即回到 pending 重新走识别——确保不会把真人长期误压成无人。
+
+    召回保护：偏"少误判无人"——需连续多票 + 任何明显移动立即解除。
+    """
+
+    enabled: bool = True
+    # 连续命中 no_person 多少次才落定状态（防单次误判把背对 / 遮挡的真人误当无人）
+    vote_threshold: int = 2
+    # 落定后"明显移动"判据：中心位移 ≥ min_abs_px **且** ≥ ratio×bbox 对角线，两者同时满足才算移动
+    motion_clear_displacement_ratio: float = 0.15
+    motion_clear_min_abs_px: float = 30.0
+
+    # reject_region（P3，默认关）：把 no_person 的屏幕区域登记为"禁新建 track 区"，
+    # 直到真人 track 与之明显重叠或区域 TTL 到期才失效。默认关闭——需现场验证后再开
+    # （误开会挡住门口 / 座位等真人常现位置的新 track）。
+    reject_region_enabled: bool = False
+    reject_region_ttl_sec: float = 300.0      # 区域登记后多久自动过期失效
+    reject_region_clear_iou: float = 0.3      # 真人 track 与禁区 IoU ≥ 此值即解除该禁区
+
+
+@dataclass
 class IdentityEngineConfig:
     """omni 身份识别系统总配置。"""
 
@@ -258,6 +287,7 @@ class IdentityEngineConfig:
     stranger: StrangerConfigDC = field(default_factory=StrangerConfigDC)
     tierc_clear: TierCClearConfig = field(default_factory=TierCClearConfig)
     drift_check: DriftCheckConfigDC = field(default_factory=DriftCheckConfigDC)
+    no_person: NoPersonConfigDC = field(default_factory=NoPersonConfigDC)   # 无人误检抑制
 
     # crop / 累积
     body_crop_padding_ratio: float = 0.05
@@ -329,6 +359,7 @@ def identity_engine_config_from_dict(d: dict | None) -> IdentityEngineConfig:
         "stranger": StrangerConfigDC,
         "tierc_clear": TierCClearConfig,
         "drift_check": DriftCheckConfigDC,
+        "no_person": NoPersonConfigDC,
     }
     kwargs: dict = {}
 

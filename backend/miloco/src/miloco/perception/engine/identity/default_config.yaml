@@ -121,6 +121,21 @@ drift_check:
   consecutive_windows: 2       # 累计 M 个低窗才入嫌疑集(无数据窗不计不清)
   min_track_emb: 3             # track 质心要求最少 emb 数
 
+# 无人误检(no_person)抑制: 检测模型把静态杂物/家具误报成人体框 → 注入 omni → caption 脑补"陌生人"。
+# omni 在 identities 把"框内确无人"判为 no_person(区别于 unknown=有人但认不出); 引擎连续 N 票才落定
+# no_person 状态(停派发 omni / 身份不导出 / 不进陌生人池); 该 track 一旦明显移动(被路过真人 ID-switch
+# 带走)即回 pending 重新识别。偏召回: 多票 + 任何明显移动立即解除, 不把真人长期误压成无人。
+no_person:
+  enabled: true
+  vote_threshold: 2                      # 连续命中 no_person 多少次才落定(防单次误判误掉真人)
+  motion_clear_displacement_ratio: 0.15  # "明显移动": 中心位移 ≥ ratio×对角线
+  motion_clear_min_abs_px: 30.0          # 且 ≥ 此绝对像素(两者同时满足)
+  # reject_region(默认关): 把 no_person 屏幕区域登记为"禁新建 track 区", 直到真人覆盖或 TTL 到期失效。
+  # 需现场验证后再开(误开会挡门口/座位等真人常现位置的新 track)。
+  reject_region_enabled: false
+  reject_region_ttl_sec: 300.0
+  reject_region_clear_iou: 0.3
+
 body_crop_padding_ratio: 0.05  # bbox 紧贴；过多 padding 降低 omni 分辨率利用率
 tier_c_accumulate_on_commit: true
 tier_c_verify_enabled: true           # 写 tier_c 前 omni 同人校验(E7), 挡非本人误判落库; 默认开; 也是 C3 回喂的前提
