@@ -60,6 +60,7 @@ from miloco.observability.router import router as observability_router
 from miloco.perception.events_router import router as events_router
 from miloco.perception.router import router as perception_router
 from miloco.person.router import router as person_router
+from miloco.pet.router import router as pet_router
 from miloco.rule.router import router as rule_router
 from miloco.task.router import router as task_router
 from miloco.task_record.router import router as task_record_router
@@ -463,6 +464,7 @@ async def catch_all_exceptions_middleware(request: Request, call_next):
 app.include_router(admin_router, prefix="/api")
 app.include_router(miot_router, prefix="/api")
 app.include_router(person_router, prefix="/api")
+app.include_router(pet_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")
 app.include_router(rule_router, prefix="/api")
 app.include_router(task_router, prefix="/api")

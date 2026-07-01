@@ -120,6 +120,23 @@ def test_tier_u_dump_enable_env_override(monkeypatch) -> None:
     assert get_settings().perception.tier_u_dump_enable is True
 
 
+def test_features_default_off() -> None:
+    """宠物识别两个实验开关默认关（住户需在 web 显式开启）。"""
+    s = get_settings()
+    assert s.features.pet_recognition is False
+    assert s.features.pet_head_grounding is False
+
+
+def test_features_env_override(monkeypatch) -> None:
+    """支持 MILOCO_FEATURES__* 环境变量开启实验功能。"""
+    monkeypatch.setenv("MILOCO_FEATURES__PET_RECOGNITION", "true")
+    monkeypatch.setenv("MILOCO_FEATURES__PET_HEAD_GROUNDING", "true")
+    reset_settings()
+    s = get_settings()
+    assert s.features.pet_recognition is True
+    assert s.features.pet_head_grounding is True
+
+
 def test_directory_paths_derive_from_miloco_home(tmp_path: Path) -> None:
     s = get_settings()
     assert s.directories.workspace_dir == tmp_path

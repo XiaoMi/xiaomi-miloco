@@ -98,6 +98,23 @@
         }
       },
       "required": ["omni"]
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "产品级实验性功能开关（默认关，住户在 web 显式开启）",
+      "properties": {
+        "pet_recognition": {
+          "type": "boolean",
+          "default": false,
+          "description": "宠物识别（实验性）总开关：开启后启用宠物作为家庭成员的注册与基于外观描述的命名识别；默认关，关闭时前端隐藏入口、后端不注入宠物命名规则，已录数据保留"
+        },
+        "pet_head_grounding": {
+          "type": "boolean",
+          "default": false,
+          "description": "宠物头像头部定位（实验性）子开关：开启后注册时由 omni 输出头部区域坐标作头像默认裁剪框；关闭则用全身 crop。仅在 pet_recognition 开启时有意义"
+        }
+      }
     }
   },
   "required": ["debug", "server", "agent", "model"]

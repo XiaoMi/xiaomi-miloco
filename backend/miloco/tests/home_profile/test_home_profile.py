@@ -673,3 +673,136 @@ def test_render_groups_by_resolved_member_name():
 
 def test_estimate_tokens_counts_cjk_heavier():
     assert estimate_tokens("中文中文") > estimate_tokens("abcd")
+
+
+# ─── 宠物（P2：花名册接合 / 渲染 / 软关闭）──────────────────────────────────────
+
+
+def _pet_entry(eid: str, subject_id, subject_name: str, content: str) -> ProfileEntry:
+    return ProfileEntry(
+        id=eid,
+        type="member_persona",
+        subject_id=subject_id,
+        subject_name=subject_name,
+        content=content,
+        confidence=1.0,
+        evidence_count=1,
+        first_seen=_today(),
+        last_seen=_today(),
+        source="user_told",
+        evidence_log=[],
+    )
+
+
+def _stub_pet_flag(monkeypatch, enabled: bool) -> None:
+    """仅替换 service 读取的 get_settings，控制 pet_recognition 开关（不污染全局缓存）。"""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "miloco.home_profile.service.get_settings",
+        lambda: SimpleNamespace(features=SimpleNamespace(pet_recognition=enabled)),
+    )
+
+
+def test_render_pets_section_grouped_under_pets_heading():
+    pets = [{"id": "pet_a", "name": "小黑", "species": "猫"}]
+    entries = [_pet_entry("p1", "pet_a", "小黑", "中等体型黑色短毛英短猫，尾尖一撮白")]
+    md = render_profile_markdown(entries, [], pets)
+    assert "## 宠物" in md
+    assert "\n### 小黑\n" in md
+    assert "中等体型黑色短毛英短猫" in md
+    # 宠物段位于家庭成员段之后；且不混进家庭成员段
+    assert md.index("## 宠物") > md.index("## 家庭成员")
+    assert "小黑" not in md.split("## 宠物")[0]
+
+
+def test_render_pets_legacy_empty_subject_id_by_name():
+    # #298 旧数据：subject_id 留空、subject_name = 宠物名 → 仍按花名册名归入宠物段
+    pets = [{"id": "pet_a", "name": "小黑", "species": "猫"}]
+    entries = [_pet_entry("p1", None, "小黑", "黑色短毛猫")]
+    md = render_profile_markdown(entries, [], pets)
+    assert "## 宠物" in md and "黑色短毛猫" in md
+
+
+def test_render_no_pets_arg_backward_compat():
+    # 不传 pets（旧调用）：宠物样条目回退到家庭成员段，行为不变
+    entries = [_pet_entry("p1", None, "小黑", "黑色短毛猫")]
+    md = render_profile_markdown(entries, [])
+    assert "## 宠物" not in md
+    assert "\n### 小黑\n" in md and "黑色短毛猫" in md
+
+
+def test_commit_renders_pets_when_enabled(tmp_path, monkeypatch):
+    from miloco.perception.engine.identity.pet_library import PetLibrary
+
+    lib = PetLibrary(root_dir=tmp_path / "petlib")
+    pet = lib.create(name="小黑", species="猫")
+    svc = HomeProfileService(person_service=None, pet_library=lib)
+    svc.import_data(
+        ImportBody(
+            profile=[_pet_entry("p_pet", pet.id, "小黑", "黑色短毛英短猫，尾尖一撮白")],
+            candidates=[],
+        )
+    )
+    _stub_pet_flag(monkeypatch, True)
+    svc.commit()
+    md = store.read_rendered_md()
+    assert "## 宠物" in md
+    assert "\n### 小黑\n" in md
+    assert "黑色短毛英短猫" in md
+
+
+def test_commit_hides_pets_when_disabled_but_keeps_data(tmp_path, monkeypatch):
+    from miloco.perception.engine.identity.pet_library import PetLibrary
+
+    lib = PetLibrary(root_dir=tmp_path / "petlib")
+    pet = lib.create(name="小黑", species="猫")
+    svc = HomeProfileService(person_service=None, pet_library=lib)
+    svc.import_data(
+        ImportBody(
+            profile=[_pet_entry("p_pet", pet.id, "小黑", "黑色短毛英短猫")],
+            candidates=[],
+        )
+    )
+    _stub_pet_flag(monkeypatch, False)
+    svc.commit()
+    md = store.read_rendered_md()
+    # 关闭：宠物段与外观都不渲染（隐藏）
+    assert "## 宠物" not in md
+    assert "黑色短毛英短猫" not in md
+    # 但数据保留在 json
+    assert any(e.id == "p_pet" for e in store.load_profile().entries)
+
+
+def test_commit_syncs_pet_name_on_rename(tmp_path, monkeypatch):
+    from miloco.perception.engine.identity.pet_library import PetLibrary
+
+    lib = PetLibrary(root_dir=tmp_path / "petlib")
+    pet = lib.create(name="小黑", species="猫")
+    svc = HomeProfileService(person_service=None, pet_library=lib)
+    svc.import_data(
+        ImportBody(profile=[_pet_entry("p_pet", pet.id, "小黑", "黑色短毛猫")], candidates=[])
+    )
+    lib.update(pet.id, name="小白")  # 花名册改名
+    _stub_pet_flag(monkeypatch, True)
+    svc.commit()
+    e = next(x for x in store.load_profile().entries if x.id == "p_pet")
+    assert e.subject_name == "小白"
+    md = store.read_rendered_md()
+    assert "\n### 小白\n" in md and "小黑" not in md
+
+
+def test_commit_backfills_legacy_pet_subject_id(tmp_path, monkeypatch):
+    from miloco.perception.engine.identity.pet_library import PetLibrary
+
+    lib = PetLibrary(root_dir=tmp_path / "petlib")
+    pet = lib.create(name="小黑", species="猫")
+    svc = HomeProfileService(person_service=None, pet_library=lib)
+    # 旧数据：subject_id 空、subject_name 命中花名册
+    svc.import_data(
+        ImportBody(profile=[_pet_entry("p_legacy", None, "小黑", "黑色短毛猫")], candidates=[])
+    )
+    _stub_pet_flag(monkeypatch, True)
+    svc.commit()
+    e = next(x for x in store.load_profile().entries if x.id == "p_legacy")
+    assert e.subject_id == pet.id  # 已收敛回 pet_id

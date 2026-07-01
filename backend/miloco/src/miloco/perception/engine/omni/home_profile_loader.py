@@ -29,3 +29,16 @@ def get_home_profile_prefix() -> str:
     if not body:
         return ""
     return body
+
+
+_PET_SECTION_HEADING = "## 宠物"
+
+
+def home_profile_has_pets() -> bool:
+    """档案是否含「## 宠物」段（已登记宠物、且未被软关闭隐藏）。
+
+    按行精确匹配 ``## 宠物`` 标题——避免被人类成员名渲染出的 ``### 宠物`` 之类误判
+    （子串匹配会因 ``###`` 含 ``##`` 而误中）。开关关闭时 commit 不渲染该段，故自然为 False。
+    """
+    text = get_home_profile_prefix()
+    return any(line.strip() == _PET_SECTION_HEADING for line in text.splitlines())

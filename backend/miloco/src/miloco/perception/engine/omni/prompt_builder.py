@@ -52,7 +52,7 @@ from .constants import (
     _USER_REF_BOUNDARY_AUDIO,
 )
 from .field_registry import SceneDescriptor, render_field_spec, render_schema
-from .home_profile_loader import get_home_profile_prefix
+from .home_profile_loader import get_home_profile_prefix, home_profile_has_pets
 
 RouteType = Literal["video", "audio"]
 
@@ -254,6 +254,7 @@ def build_fused_payload(
         route="video", has_identity=bool(candidates), stream=False,
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
+        has_pets=home_profile_has_pets(),
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False)
     user_content = _build_fused_user_content(
@@ -367,6 +368,7 @@ def _build_payload(
     scene = SceneDescriptor(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
+        has_pets=home_profile_has_pets(),
     )
     base: dict = {
         "system_prompt": build_system_prompt(scene, include_home_profile=include_home_profile),
