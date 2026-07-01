@@ -43,7 +43,6 @@
     "feedbackError": "提交失败，请重试",
     "feedbackRetry": "重试",
     "feedbackResubmit": "再次反馈",
-    "feedbackAlready": "已反馈过该事件",
     "errorType": {
       "person": "人物识别错误",
       "pet": "宠物识别错误",

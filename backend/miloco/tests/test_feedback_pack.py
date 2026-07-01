@@ -33,6 +33,21 @@ def test_sanitize_pii_preserves_model_version():
     assert _sanitize_pii("mimo-v2.5.1.0模型") == "mimo-v2.5.1.0模型"
 
 
+# ─── _ERROR_TYPE_LABELS 映射 ──────────────────────────────────────────
+
+
+def test_error_type_labels_maps_known_keys():
+    from miloco.admin.feedback_pack import _ERROR_TYPE_LABELS
+    assert _ERROR_TYPE_LABELS["person"] == "人物识别错误"
+    assert _ERROR_TYPE_LABELS["pet"] == "宠物识别错误"
+    assert _ERROR_TYPE_LABELS["other"] == "其他"
+
+
+def test_error_type_labels_fallback_unknown_key():
+    from miloco.admin.feedback_pack import _ERROR_TYPE_LABELS
+    assert _ERROR_TYPE_LABELS.get("bogus", "bogus") == "bogus"
+
+
 # ─── build_feedback_pack 集成测试 ─────────────────────────────────────
 
 
@@ -73,7 +88,7 @@ def test_build_pack_metadata_and_trace(tmp_path, monkeypatch):
     with patch("miloco.manager.get_manager", return_value=mock_mgr):
         result = build_feedback_pack(
             event_id=event_id,
-            error_types=["人物识别错误"],
+            error_types=["person", "other"],
             feedback_text="test feedback",
         )
 
@@ -90,7 +105,7 @@ def test_build_pack_metadata_and_trace(tmp_path, monkeypatch):
         # metadata 检查
         meta = json.loads(tar.extractfile("metadata.json").read())
         assert meta["event_id"] == event_id
-        assert meta["error_types"] == ["人物识别错误"]
+        assert meta["error_types"] == ["人物识别错误", "其他"]  # key → 中文映射
         assert meta["user_feedback"] == "test feedback"
         assert meta["miloco_version"] != "unknown"
 

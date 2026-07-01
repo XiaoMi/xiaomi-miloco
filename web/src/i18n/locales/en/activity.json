@@ -43,7 +43,6 @@
     "feedbackError": "Submission failed, please retry",
     "feedbackRetry": "Retry",
     "feedbackResubmit": "Submit again",
-    "feedbackAlready": "Feedback already submitted for this event",
     "errorType": {
       "person": "Person identification error",
       "pet": "Pet identification error",

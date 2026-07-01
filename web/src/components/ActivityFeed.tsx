@@ -763,6 +763,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
         {t("activity.feedbackTitle", "反馈感知问题")}
       </div>
 
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackErrorType")}</div>
       <div className="flex flex-wrap gap-1.5 mb-3">
         {ERROR_TYPE_KEYS.map((k) => (
           <button
