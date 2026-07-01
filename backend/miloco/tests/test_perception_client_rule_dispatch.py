@@ -18,9 +18,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import miloco
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.types import MatchedRule, RealtimePerceptionResult
+
+import miloco
 
 _fake_manager_module = types.ModuleType("miloco.manager")
 _fake_manager_module.get_manager = MagicMock()
