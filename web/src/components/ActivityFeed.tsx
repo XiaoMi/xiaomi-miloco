@@ -800,7 +800,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
       <div className="flex justify-end items-center gap-1.5 mt-2.5">
         <button
           type="button"
-          onClick={() => { setOpen(false); setSelected(new Set()); setText(""); setIncludeGallery(false); }}
+          onClick={() => { setOpen(false); setConfirmedResubmit(false); setSelected(new Set()); setText(""); setIncludeGallery(false); }}
           className="px-3.5 py-[5px] text-caption text-text-secondary rounded-md hover:bg-bg-tertiary transition-colors"
         >
           {t("activity.feedbackCancel", "取消")}
