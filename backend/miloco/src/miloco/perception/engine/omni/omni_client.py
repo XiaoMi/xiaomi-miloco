@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from miloco.database.token_usage_repo import fire_record
-from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.config import OmniConfig, resolve_media_resolution
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.snapshot_context import push_omni_trace
 
@@ -144,7 +144,7 @@ async def call_omni(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    messages = _build_messages(payload, config)
 
     body: dict[str, Any] = {
         "model": config.model,
@@ -195,7 +195,7 @@ async def call_omni(
         )
 
 
-def _build_messages(payload: dict) -> list[dict]:
+def _build_messages(payload: dict, config: "OmniConfig | None" = None) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": payload["system_prompt"]}]
 
     content: list[dict] = [{"type": "text", "text": payload["user_content"]}]
@@ -209,7 +209,14 @@ def _build_messages(payload: dict) -> list[dict]:
                     "url": f"data:video/mp4;base64,{payload['video_base64']}"
                 },
                 "fps": payload.get("video_fps", 3),
-                "media_resolution": "max",
+                "media_resolution": (
+                    resolve_media_resolution(
+                        config.media_resolution,
+                        config.model_name or config.model,
+                    )
+                    if config
+                    else "max"
+                ),
             }
         )
     # Audio-only route：独立 input_audio 块（仅当无 video_base64 时启用）
@@ -278,7 +285,7 @@ async def call_omni_stream(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    messages = _build_messages(payload, config)
 
     body: dict[str, Any] = {
         "model": config.model,

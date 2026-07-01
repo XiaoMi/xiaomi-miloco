@@ -284,6 +284,7 @@ class IdentityEngineConfig:
 @dataclass
 class OmniConfig:
     model: str = "xiaomi/mimo-v2.5"
+    model_name: str = ""  # 可选短名，用于 media_resolution preset 查找；空则从 model 自动推导
     api_key: str = ""  # Set via MILOCO_MODEL__OMNI__API_KEY env var or config
     base_url: str = "https://api.xiaomimimo.com/v1"
     max_completion_tokens: int = 512
@@ -291,6 +292,58 @@ class OmniConfig:
     top_p: float = 0.95
     timeout: float = 30.0
     stream: bool = False
+    media_resolution: str = "max"  # 可选 "max" / "high" / "low"，经 resolve_media_resolution 映射到模型特定值
+
+
+# =============================================================================
+# Media resolution adapter —— 不同 LLM 支持的 video 分辨率值不同，做一层映射
+# =============================================================================
+
+# 各模型/平台支持的 media_resolution 值映射：
+#   key 是用户配置的通用值（"low" / "high" / "max"），
+#   value 是该模型实际接受的值。
+# "default" preset 是透传（fallback），用于未显式列出的模型。
+MEDIA_RESOLUTION_PRESETS: dict[str, dict[str, str]] = {
+    "mimo": {
+        "low": "default",
+        "high": "max",
+        "max": "max",
+    },
+    "default": {
+        "low": "low",
+        "high": "high",
+        "max": "max",
+    },
+}
+
+
+def resolve_media_resolution(value: str, model_name: str = "") -> str:
+    """将用户配置的通用 media_resolution 映射为模型实际支持的值。
+
+    不同 LLM 对 media_resolution 的支持不同：
+    - MiMo：仅支持 ``"default"`` 和 ``"max"``
+    - 其他模型（如 Qwen）：可能支持 ``"low"`` / ``"high"`` / ``"max"`` 等
+
+    本函数根据 ``model_name`` 选择对应的 preset 做值映射，
+    未匹配到任何 preset 时走 ``"default"`` 透传。
+
+    Args:
+        value: 用户配置的通用值（``"low"`` / ``"high"`` / ``"max"`` 等）。
+        model_name: 模型标识（如 ``"xiaomi/mimo-v2.5"``），大小写不敏感、
+                    子串匹配。为空时直接返回 value。
+
+    Returns:
+        模型实际支持的 media_resolution 值。
+    """
+    if not model_name:
+        return value
+
+    model_lower = model_name.lower()
+    for key, preset in MEDIA_RESOLUTION_PRESETS.items():
+        if key != "default" and key in model_lower:
+            return preset.get(value, value)
+
+    return MEDIA_RESOLUTION_PRESETS.get("default", {}).get(value, value)
 
 
 @dataclass
