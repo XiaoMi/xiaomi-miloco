@@ -237,7 +237,9 @@ async def submit_event_feedback(
         if user_info:
             uid = user_info.uid
     except Exception:
-        pass
+        logger.exception(
+            "Failed to fetch user info for feedback submission; continuing without uid"
+        )
 
     try:
         result = await asyncio.to_thread(
