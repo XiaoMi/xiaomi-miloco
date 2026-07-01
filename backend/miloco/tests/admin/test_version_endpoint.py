@@ -11,7 +11,6 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 from miloco.admin.router import router
 
 
@@ -104,6 +103,7 @@ def test_version_git_detached_head_branch_none(client):
 def test_run_git_timeout_returns_none():
     """_run_git 遇到 subprocess.TimeoutExpired 时返 None (不抛)。"""
     import subprocess
+
     from miloco.admin.router import _run_git
     with patch("miloco.admin.router.subprocess.run",
                side_effect=subprocess.TimeoutExpired(cmd="git", timeout=2)):

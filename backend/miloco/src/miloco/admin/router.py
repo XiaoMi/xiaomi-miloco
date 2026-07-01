@@ -9,7 +9,8 @@ System status check interface
 import logging
 import subprocess
 import time
-from importlib.metadata import PackageNotFoundError, version as pkg_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 import httpx
