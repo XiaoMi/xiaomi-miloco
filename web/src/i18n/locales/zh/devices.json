@@ -12,6 +12,24 @@
     "watchCamera": "看 {{name}}",
     "liveView": "{{name}} 实时画面",
     "loadingStream": "拉流中…",
-    "close": "关闭"
+    "close": "关闭",
+    "group": {
+      "cleaningAppliance": "清洁电器",
+      "security": "安防",
+      "sensor": "传感器",
+      "entertainment": "影音娱乐",
+      "environmentAppliance": "环境电器",
+      "routerGateway": "路由网关",
+      "lighting": "照明",
+      "plugSwitch": "插座开关",
+      "kitchenAppliance": "厨房电器",
+      "bathroom": "卫浴",
+      "personalLiving": "个护与起居",
+      "petPlant": "宠物与植物",
+      "fitnessHealth": "运动健康",
+      "mobilityVehicle": "出行车载",
+      "officeStudy": "办公学习",
+      "other": "其他"
+    }
   }
 }
