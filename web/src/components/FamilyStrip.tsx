@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import type { Person, Pet } from "@/lib/types";
 import { PersonAvatar } from "@/components/PersonAvatar";
 import { PetAvatar } from "@/components/PetAvatar";
+import { Switch } from "@/components/Switch";
 import { IconPlus } from "@/lib/icons";
 
 interface Props {
@@ -16,11 +17,11 @@ interface Props {
   selectedId: string | null;
   onSelect: (p: Person) => void;
   onAddPerson: () => void;
-  // 宠物（实验性）——onTogglePets 存在时渲染开关行；petsEnabled 为真时再渲染宠物 chip。
+  // 宠物成员（实验性）——onTogglePets 存在时渲染开关行；petsEnabled 为真时再渲染宠物 chip。
   pets?: Pet[];
-  selectedPetId?: string | null;
   petsEnabled?: boolean;
-  onSelectPet?: (p: Pet) => void;
+  selectedPetId?: string | null; // 选中的宠物（下方展开档案卡，与人类互斥）
+  onSelectPet?: (p: Pet) => void; // 点宠物 chip 选中（toggle 由上层处理）
   onAddPet?: () => void;
   onTogglePets?: (enabled: boolean) => void;
 }
@@ -31,8 +32,8 @@ export function FamilyStrip({
   onSelect,
   onAddPerson,
   pets,
-  selectedPetId,
   petsEnabled = false,
+  selectedPetId,
   onSelectPet,
   onAddPet,
   onTogglePets,
@@ -88,30 +89,21 @@ export function FamilyStrip({
           </div>
         )}
 
-        {/* 宠物（实验性）—— 开关常驻（关闭时也能再开启）；开启后展示宠物 chip */}
+        {/* 宠物成员（实验性）—— 开关常驻（关闭时也能再开启）；开启后展示宠物 chip */}
         {onTogglePets && (
           <div className="mt-5 pt-4 border-t border-border">
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div>
-                <div className="text-body text-text-primary">
-                  {t("pet.experimentalTitle")}
-                </div>
-                <div className="text-caption text-text-tertiary mt-0.5">
-                  {t("pet.experimentalHint")}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => onTogglePets(!petsEnabled)}
-                aria-pressed={petsEnabled}
-                className={`shrink-0 text-caption px-3 py-1 rounded-full border transition-colors ${
-                  petsEnabled
-                    ? "bg-brand-soft border-brand-primary text-brand-primary"
-                    : "bg-bg-primary border-border text-text-tertiary hover:text-text-primary"
-                }`}
-              >
-                {petsEnabled ? t("pet.enabled") : t("pet.disabled")}
-              </button>
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-body text-text-primary inline-flex items-center gap-2">
+                {t("pet.memberTitle")}
+                <span className="text-caption text-warning font-medium px-1.5 py-0.5 rounded bg-warning-bg">
+                  {t("pet.experimentalBadge")}
+                </span>
+              </h3>
+              <Switch
+                checked={petsEnabled}
+                onChange={() => onTogglePets(!petsEnabled)}
+                label={t("pet.experimentalHint")}
+              />
             </div>
             {petsEnabled && (
               <div className="flex flex-wrap items-center gap-2">

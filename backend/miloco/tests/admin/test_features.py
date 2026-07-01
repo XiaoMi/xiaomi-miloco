@@ -24,8 +24,9 @@ def client(tmp_path, monkeypatch):
 
 
 def test_features_default_off(client):
+    # pet_recognition 默认关（功能需住户显式开）；pet_head_grounding 默认开（头部定位子能力）。
     d = client.get("/api/admin/features").json()["data"]
-    assert d == {"pet_recognition": False, "pet_head_grounding": False}
+    assert d == {"pet_recognition": False, "pet_head_grounding": True}
 
 
 def test_features_toggle_on_persists(client):
@@ -33,7 +34,7 @@ def test_features_toggle_on_persists(client):
         "/api/admin/features", json={"pet_recognition": True}
     ).json()["data"]
     assert out["pet_recognition"] is True
-    assert out["pet_head_grounding"] is False
+    assert out["pet_head_grounding"] is True  # 保持默认开
     # 写进 config.json，再 GET 仍为 True
     assert client.get("/api/admin/features").json()["data"]["pet_recognition"] is True
 

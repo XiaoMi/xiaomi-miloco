@@ -359,9 +359,9 @@ class FeaturesSettings(BaseModel):
         ),
     )
     pet_head_grounding: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "宠物头像头部定位（实验性）子开关：开启后注册时让 omni 输出宠物头部区域"
+            "宠物头像头部定位子开关（默认开）：开启后注册时让 omni 输出宠物头部区域"
             "坐标作为头像默认裁剪框；关闭时用全身 crop 作头像、不在观察 prompt 中加入"
             "grounding 段。仅在 pet_recognition 开启时有意义。"
         ),

@@ -114,4 +114,4 @@ perf:
 # 产品级实验性功能开关（默认关，住户在 web 显式开启）
 features:
   pet_recognition: false       # 宠物识别（实验性）总开关；关闭时前端隐藏入口、后端不注入宠物命名规则，已录数据保留
-  pet_head_grounding: false    # 宠物头像头部定位子开关；关则用全身 crop，仅在 pet_recognition 开启时有意义
+  pet_head_grounding: true     # 宠物头像头部定位子开关（默认开）；关则用全身 crop，仅在 pet_recognition 开启时有意义

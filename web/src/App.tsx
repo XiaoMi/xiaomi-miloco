@@ -34,6 +34,7 @@ import { ActivityFeed } from "./components/ActivityFeed";
 import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
 import { PetDrawer } from "./components/PetDrawer";
+import { PetProfilePanel } from "./components/PetProfilePanel";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
 import { TaskListPanel } from "./components/TaskListPanel";
@@ -178,7 +179,7 @@ function MainApp() {
   // 家庭 tab 当前选中的成员（chip 选择器）——存 id，从 persons.data 解析当前
   // Person；null 时回退到第一位。改名 / 删除后随 reload 自动同步。
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
-  // 宠物：选中项 + 编辑抽屉（null=新增，undefined=关闭）。
+  // 宠物：选中项（下方展开档案卡，与人类互斥）+ 编辑抽屉（null=新增，Pet=编辑，undefined=关闭）。
   const [selectedPetId, setSelectedPetId] = useState<string | null>(null);
   const [editingPet, setEditingPet] = useState<Pet | null | undefined>(undefined);
   const [miotBindOpen, setMiotBindOpen] = useState(false);
@@ -220,6 +221,8 @@ function MainApp() {
           <div className="space-y-6">
             <HeroNow
               persons={persons.data}
+              pets={pets.data}
+              petsEnabled={features.data?.petRecognition ?? false}
               cameras={cameras.data}
               scopeCameras={scopeCameras.data}
               miotHasCamera={devices.data.some(
@@ -294,25 +297,32 @@ function MainApp() {
         if (!persons.data) {
           return <TabPanelLoading text={t("app.tabFamilyLoading")} />;
         }
-        // 单页上下布局：chip 选择器默认选中第一位成员；选中某成员 → 同卡内就地展开
-        // 其档案（至少保持一个选中，不可取消）。下方依次是家庭档案、观察中聚合卡。
+        // 单页上下布局：点 chip 选中某成员 → 下方就地展开其档案；再点同一 chip 收起（toggle）。
+        // 人类成员与宠物成员的下方展开互斥（选一个清另一个），故各自显式选中才展开、无默认选中。
         const selectedPerson =
-          persons.data.find((p) => p.id === selectedPersonId) ??
-          persons.data[0] ??
-          null;
+          persons.data.find((p) => p.id === selectedPersonId) ?? null;
+        const selectedPet =
+          (pets.data ?? []).find((p) => p.id === selectedPetId) ?? null;
         return (
           <div className="space-y-6">
             <FamilyStrip
               persons={persons.data}
               selectedId={selectedPerson?.id ?? null}
-              onSelect={(p) => setSelectedPersonId(p.id)}
+              onSelect={(p) => {
+                setSelectedPersonId((cur) => (cur === p.id ? null : p.id));
+                setSelectedPetId(null);
+              }}
               onAddPerson={() => setEditingPerson(null)}
               pets={pets.data}
-              selectedPetId={selectedPetId}
               petsEnabled={features.data?.petRecognition ?? false}
-              onSelectPet={(p) => setSelectedPetId(p.id)}
+              selectedPetId={selectedPetId}
+              onSelectPet={(p) => {
+                setSelectedPetId((cur) => (cur === p.id ? null : p.id));
+                setSelectedPersonId(null);
+              }}
               onAddPet={() => setEditingPet(null)}
               onTogglePets={async (enabled) => {
+                if (!enabled) setSelectedPetId(null); // 关闭功能即失去对宠物的聚焦，收起下方档案卡
                 try {
                   await setFeatures({ petRecognition: enabled });
                   features.reload();
@@ -342,6 +352,14 @@ function MainApp() {
                   home.reload();
                   persons.reload();
                 }}
+              />
+            )}
+            {selectedPet && (
+              <PetProfilePanel
+                pet={selectedPet}
+                entries={home.data}
+                loading={home.loading}
+                onEdit={() => setEditingPet(selectedPet)}
               />
             )}
             <HomeKnowledgePanel
@@ -536,6 +554,7 @@ function MainApp() {
         pet={editingPet === undefined ? null : editingPet}
         open={editingPet !== undefined}
         grounding={features.data?.petHeadGrounding ?? false}
+        entries={home.data}
         onClose={() => setEditingPet(undefined)}
         onChanged={() => {
           pets.reload();

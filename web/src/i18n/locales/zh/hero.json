@@ -7,6 +7,7 @@
     "usageTokens": "tokens",
     "familyLabel": "家人",
     "familyEmpty": "还没有家人，点左侧「家庭」添加家人信息",
+    "petsLabel": "宠物",
     "liveLabel": "实时画面",
     "perceivingCount": "{{n}} 个在感知",
     "allOn": "全开",
