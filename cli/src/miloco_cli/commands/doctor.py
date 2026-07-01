@@ -1545,6 +1545,7 @@ def _to_json(
                 "url": backend_state.url,
                 "reachable": backend_state.reachable,
                 "error": backend_state.error,
+                "version": backend_state.version_data,
             },
             "account": {
                 "bound": backend_state.account_bound,

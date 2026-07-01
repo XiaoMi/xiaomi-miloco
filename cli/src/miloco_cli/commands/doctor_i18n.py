@@ -164,7 +164,7 @@ _ZH: dict[str, str] = {
     "hyperv.block.fix": (
         "在 Windows PowerShell (管理员) 执行:\n"
         "  Set-NetFirewallHyperVVMSetting -Name "
-        "'{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' "
+        "'{{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}}' "
         "-DefaultInboundAction Allow"
     ),
     "hyperv.unknown.name": "Hyper-V 防火墙",
@@ -428,7 +428,7 @@ _EN: dict[str, str] = {
     "hyperv.block.fix": (
         "Run in Windows PowerShell (Administrator):\n"
         "  Set-NetFirewallHyperVVMSetting -Name "
-        "'{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' "
+        "'{{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}}' "
         "-DefaultInboundAction Allow"
     ),
     "hyperv.unknown.name": "Hyper-V firewall",
@@ -560,8 +560,6 @@ def make_translator(lang: str) -> Translator:
         text = table.get(key)
         if text is None:
             text = _ZH.get(key, key)
-        if params:
-            return text.format(**params)
-        return text
+        return text.format(**params)
 
     return t

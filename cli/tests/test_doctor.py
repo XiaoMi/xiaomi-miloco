@@ -1113,6 +1113,26 @@ class TestToJson:
         payload = _to_json(env, net, backend, results)
         assert payload["exit_code"] == 1
 
+    def test_backend_version_is_structured_not_localized(self):
+        """--json 里 backend.version 应原样透传 dict, 不依赖 --lang 文本。"""
+        env = _env()
+        net = NetworkState()
+        version_data = {
+            "version": "0.1.0",
+            "git": {"commit_short": "4a2b3c1", "branch": "main",
+                    "dirty": True, "commit_time": "2026-07-01T10:16:07+08:00"},
+        }
+        backend = _bs(version_data=version_data)
+        payload = _to_json(env, net, backend, [])
+        assert payload["miloco"]["backend"]["version"] == version_data
+
+    def test_backend_version_null_when_missing(self):
+        env = _env()
+        net = NetworkState()
+        backend = _bs(version_data=None)
+        payload = _to_json(env, net, backend, [])
+        assert payload["miloco"]["backend"]["version"] is None
+
 
 # ─── doctor_cmd 集成 ──────────────────────────────────────────────────────────
 
@@ -1259,6 +1279,14 @@ class TestI18n:
         t_en = make_translator("en")
         assert "192.168.1.5" in t_zh("entry.invalid_ip", ip="192.168.1.5")
         assert "192.168.1.5" in t_en("entry.invalid_ip", ip="192.168.1.5")
+
+    def test_translator_unescapes_literal_braces(self):
+        """含 `{{}}` 转义的文案 (如 hyperv.block.fix 的 GUID) 应输出单花括号。"""
+        from miloco_cli.commands.doctor_i18n import make_translator
+        for lang in ("zh", "en"):
+            out = make_translator(lang)("hyperv.block.fix")
+            assert "'{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'" in out
+            assert "{{" not in out and "}}" not in out
 
     def test_assess_ufw_en(self):
         state = UfwState(installed=True, enabled_via_conf=True,
