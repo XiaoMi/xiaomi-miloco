@@ -169,8 +169,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         )
         result: dict[str, PerceptionDevice] = {}
         # Rebuild channel did map each cycle to avoid stale entries
-        self._channel_did_map: dict[str, tuple[str, int, int]] = {}  # (original_did, channel, channel_count)
-        
+        self._channel_did_map = {}
+
         for did in active:
             camera_info = CameraInfo.model_validate(cams[did].model_dump())
             # For multi-channel cameras, create separate perception units for each channel
@@ -320,12 +320,16 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             return
 
     async def disconnect_device(self, did: str) -> None:
-        # Check if this is a multi-channel did
-        if did in self._channel_did_map:
-            actual_did, channel, _ = self._channel_did_map.pop(did)
+        # Parse channel from did suffix directly, don't rely on _channel_did_map——
+        # devices being disconnected have been removed from active set, so they
+        # won't be in the rebuilt map.
+        if ':ch' in did:
+            actual_did, ch_str = did.rsplit(':ch', 1)
+            channel = int(ch_str)
         else:
             actual_did = did
             channel = None
+        self._channel_did_map.pop(did, None)
 
         state = self._devices.get(actual_did)
         if not state:
@@ -373,9 +377,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             drain: If True (realtime), pop the oldest ready window.
                    If False (active query), peek all buffered data.
         """
-        # Check if this is a multi-channel did
-        if did in self._channel_did_map:
-            actual_did, channel, _ = self._channel_did_map[did]
+        # Parse channel from did suffix directly
+        if ':ch' in did:
+            actual_did, ch_str = did.rsplit(':ch', 1)
+            channel = int(ch_str)
         else:
             actual_did = did
             channel = 0
@@ -420,9 +425,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         供 tier_c 闲时定期清的 live 检测用——gate 关停时正常 pipeline 不取帧,
         这里直接读 collector 已填充的 ``decoded_video`` 缓存(独立于 gate)。
         """
-        # Check if this is a multi-channel did
-        if did in self._channel_did_map:
-            actual_did, channel, _ = self._channel_did_map[did]
+        # Parse channel from did suffix directly
+        if ':ch' in did:
+            actual_did, ch_str = did.rsplit(':ch', 1)
+            channel = int(ch_str)
         else:
             actual_did = did
             channel = 0
@@ -452,9 +458,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
     def _current_source(self, did: str) -> PerceptionDevice:
         """Build source metadata from MiotProxy's in-memory camera cache."""
-        # Check if this is a multi-channel did
-        if did in self._channel_did_map:
-            actual_did, channel, _ = self._channel_did_map[did]
+        # Parse channel from did suffix directly
+        if ':ch' in did:
+            actual_did, ch_str = did.rsplit(':ch', 1)
+            channel = int(ch_str)
         else:
             actual_did = did
             channel = None

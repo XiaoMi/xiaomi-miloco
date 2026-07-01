@@ -998,7 +998,7 @@ class MiotService:
             if ':ch' in did:
                 return did.rsplit(':ch', 1)[0]
             return did
-        
+
         enable_dids = [_to_original_did(i["did"]) for i in items if i["in_use"]]
         disable_dids = [_to_original_did(i["did"]) for i in items if not i["in_use"]]
         all_dids = enable_dids + disable_dids

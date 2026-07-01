@@ -184,9 +184,12 @@ function CameraSection({
   // 「全开」只能开「在线且未投喂」的——离线相机后端 toggle_camera 会整批拒绝
   // (offline_enable 校验),若把离线 did 也塞进批量 enable,会连带在线的一起失败。
   // 与下区单台开关「离线不可开」同口径。
-  const enableableDids = scopeCameras
-    .filter((c) => !c.inUse && c.isOnline)
-    .map((c) => c.did);
+  // 去重：双摄设备会有两条记录（通道 0/1），did 相同
+  const enableableDids = [...new Set(
+    scopeCameras
+      .filter((c) => !c.inUse && c.isOnline)
+      .map((c) => c.did)
+  )];
   // bulkBusy 锁防"全开/全关"连点;singleBusyDids 跟踪单卡 in-flight,让住户切单卡 A
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
