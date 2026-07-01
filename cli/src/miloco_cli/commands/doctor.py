@@ -1223,6 +1223,9 @@ def _probe_udp_send(target_ip: str, port: int = 32100) -> tuple[bool, str | None
     return True, None
 
 
+_PING_RECV_RE = re.compile(r"(\d+)\s+(?:packets\s+)?received", re.IGNORECASE)
+
+
 def _parse_ping(output: str) -> tuple[bool, float | None]:
     m = _PING_RTT_RE.search(output)
     if m:
@@ -1230,8 +1233,13 @@ def _parse_ping(output: str) -> tuple[bool, float | None]:
             return True, float(m.group(1))
         except ValueError:
             return True, None
-    ok = "1 received" in output or "1 packets received" in output
-    return ok, None
+    m_recv = _PING_RECV_RE.search(output)
+    if m_recv:
+        try:
+            return int(m_recv.group(1)) > 0, None
+        except ValueError:
+            return False, None
+    return False, None
 
 
 def _parse_neigh_linux(
@@ -1272,7 +1280,7 @@ def probe_reachability(
                     route_iface = stripped.split(":", 1)[1].strip()
                 elif stripped.startswith("src:") or stripped.startswith("source:"):
                     route_src = stripped.split(":", 1)[1].strip()
-        ping = _run_cmd(["ping", "-c", "1", "-W", "1000", target_ip], timeout=3)
+        ping = _run_cmd(["ping", "-c", "3", "-W", "1000", target_ip], timeout=5)
         arp = _run_cmd(["arp", "-n", target_ip])
         neigh_state, neigh_mac = _parse_arp_macos(arp.stdout if arp.found else "")
     else:
@@ -1284,7 +1292,7 @@ def probe_reachability(
             src_m = _IP_ROUTE_SRC_RE.search(route.stdout)
             route_iface = dev_m.group(1) if dev_m else None
             route_src = src_m.group(1) if src_m else None
-        ping = _run_cmd(["ping", "-c", "1", "-W", "1", target_ip], timeout=3)
+        ping = _run_cmd(["ping", "-c", "3", "-W", "1", target_ip], timeout=5)
         neigh = _run_cmd(["ip", "-o", "neigh", "show", target_ip])
         neigh_state, neigh_mac = _parse_neigh_linux(neigh.stdout if neigh.found else "")
 

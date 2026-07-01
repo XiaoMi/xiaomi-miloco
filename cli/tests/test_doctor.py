@@ -1060,6 +1060,38 @@ class TestParseHelpers:
     def test_parse_ping_fail(self):
         assert _parse_ping("PING failed\n") == (False, None)
 
+    def test_parse_ping_multi_packet_partial_loss(self):
+        """-c 3 场景: 3 包丢 2, 1 个 RTT 命中即 True (RTT 是首个 time= 匹配)。"""
+        output = (
+            "PING 192.168.1.55 56(84) bytes of data.\n"
+            "64 bytes from 192.168.1.55: icmp_seq=2 ttl=64 time=3.21 ms\n"
+            "\n"
+            "--- 192.168.1.55 ping statistics ---\n"
+            "3 packets transmitted, 1 received, 66% packet loss, time 2003ms\n"
+        )
+        ok, rtt = _parse_ping(output)
+        assert ok is True
+        assert rtt == 3.21
+
+    def test_parse_ping_multi_packet_all_lost(self):
+        """3 包全丢 (0 received) → False, 无 RTT。"""
+        output = (
+            "PING 192.168.1.55 56(84) bytes of data.\n"
+            "\n"
+            "--- 192.168.1.55 ping statistics ---\n"
+            "3 packets transmitted, 0 received, 100% packet loss, time 2039ms\n"
+        )
+        assert _parse_ping(output) == (False, None)
+
+    def test_parse_ping_bsd_style_received(self):
+        """macOS/BSD ping stats 无 'packets' 关键字, 也应识别。"""
+        output = (
+            "--- 192.168.1.55 ping statistics ---\n"
+            "3 packets transmitted, 2 received, 33.3% packet loss\n"
+        )
+        ok, _ = _parse_ping(output)
+        assert ok is True
+
     def test_parse_neigh_reachable(self):
         state, mac = _parse_neigh_linux(
             "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
