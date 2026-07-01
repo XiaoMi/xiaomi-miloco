@@ -29,12 +29,31 @@ logger = logging.getLogger(__name__)
 
 _PACK_PREFIX = "feedback-"
 _PACK_SUFFIX = ".tar.gz"
+_MAX_TOTAL_MB = 2048
 
 _PII_PATTERNS = [
     (re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"), "***"),
     (re.compile(r"(?<![\d.a-zA-Z])\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\d.a-zA-Z])"), "***"),
     (re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"), "***"),
 ]
+
+
+def _cleanup_by_total_size(packs_dir: Path, max_total_mb: int = _MAX_TOTAL_MB) -> None:
+    """feedback pack 总大小超限时按 mtime 从旧到新删."""
+    files = sorted(
+        packs_dir.glob(f"{_PACK_PREFIX}*{_PACK_SUFFIX}"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    total = sum(p.stat().st_size for p in files)
+    limit = max_total_mb * 1024 * 1024
+    for p in files:
+        if total <= limit:
+            break
+        try:
+            total -= p.stat().st_size
+            p.unlink()
+        except OSError:
+            pass
 
 
 class FeedbackPackError(Exception):
@@ -87,6 +106,7 @@ def build_feedback_pack(
     error_types: list[str],
     feedback_text: str,
     include_gallery: bool = False,
+    uid: str = "",
 ) -> dict:
     """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
 
@@ -151,7 +171,7 @@ def build_feedback_pack(
 
     metadata = {
         "event_id": event_id,
-        "uid": "",
+        "uid": uid,
         "timestamp": event.get("timestamp"),
         "text": event.get("text", ""),
         "device_ids": device_ids,
@@ -201,6 +221,8 @@ def build_feedback_pack(
                 components["gallery_included"] = True
 
         shutil.move(str(tar_tmp), final_path)
+
+    _cleanup_by_total_size(packs_dir)
 
     return {
         "path": final_path.as_posix(),
