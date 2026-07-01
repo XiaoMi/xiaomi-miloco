@@ -25,6 +25,24 @@
     "audioExpiredAria": "Audio expired",
     "audioExpired": "🎤 Audio expired",
     "audioOnly": "🎤 Audio only",
-    "zoomPlay": "Zoom in to play"
+    "zoomPlay": "Zoom in to play",
+    "feedbackButton": "Feedback",
+    "feedbackTitle": "Report perception issue",
+    "feedbackErrorType": "Error type (multiple)",
+    "feedbackText": "Additional details (optional)",
+    "feedbackPlaceholder": "e.g., wrong person identified — it's Dad, not Grandpa",
+    "feedbackGallery": "Include person gallery (may contain facial data, not uploaded by default)",
+    "feedbackPrivacy": "Submitting feedback will collect related audio/video and perception data, saved locally",
+    "feedbackCancel": "Cancel",
+    "feedbackSubmit": "Submit feedback",
+    "feedbackSubmitting": "Packaging perception data...",
+    "feedbackUploaded": "Feedback submitted, thank you",
+    "feedbackSaved": "Feedback recorded, data saved locally",
+    "feedbackPath": "File path",
+    "feedbackSize": "Package size",
+    "feedbackError": "Submission failed, please retry",
+    "feedbackRetry": "Retry",
+    "feedbackResubmit": "Submit again",
+    "feedbackAlready": "Feedback already submitted for this event"
   }
 }
