@@ -6,7 +6,7 @@
     "devices": "Devices",
     "devicesHint": "Manage Xiaomi Home devices",
     "automation": "Triggered Perception",
-    "automationHint": "Device events trigger perception",
+    "automationHint": "Device events or property changes trigger perception",
     "family": "Family",
     "familyHint": "Manage family members",
     "activity": "Activity",

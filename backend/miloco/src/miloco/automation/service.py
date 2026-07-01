@@ -18,12 +18,8 @@ from miloco.automation.schema import (
 from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo
 from miloco.middleware.exceptions import ResourceNotFoundException
+from miloco.perception import snapshot_writer
 from miloco.perception.schema import OnDemandPerceptionRequest
-from miloco.perception.snapshot_writer import (
-    check_disk_space,
-    get_snapshot_root,
-    save_clips,
-)
 from miloco.rule.schema import RuleTriggerType
 from miloco.utils.time_utils import now_ms
 
@@ -32,6 +28,33 @@ logger = logging.getLogger(__name__)
 _KV_MAPPINGS = "AUTOMATION_MIOT_EVENT_MAPPINGS"
 _KV_LOGS = "AUTOMATION_MIOT_EVENT_LOGS"
 _MAX_LOGS = 200
+
+
+def _save_clips_for_event(
+    event_id: str,
+    clips_by_device: dict[str, tuple[bytes, str]],
+) -> int:
+    """Persist on-demand clips across snapshot_writer API versions."""
+    save_event_artifacts = getattr(snapshot_writer, "save_event_artifacts", None)
+    if save_event_artifacts is not None:
+        try:
+            from miloco.perception.snapshot_context import OmniEventArtifacts
+
+            return int(
+                save_event_artifacts(
+                    event_id,
+                    OmniEventArtifacts(clips=clips_by_device, trace=None),
+                )
+            )
+        except (ImportError, TypeError, ValueError) as e:
+            logger.error("save_event_artifacts failed for %s: %s", event_id, e)
+            return 0
+
+    save_clips = getattr(snapshot_writer, "save_clips", None)
+    if save_clips is None:
+        logger.error("snapshot_writer has no clip persistence API")
+        return 0
+    return int(save_clips(event_id, clips_by_device))
 
 
 def _normalize_filter_condition(expected: Any) -> MiotPropertyFilterCondition:
@@ -384,11 +407,11 @@ class AutomationService:
         clip_device_ids: list[str] = []
         if clips_by_device:
             settings = get_settings()
-            snapshot_root = get_snapshot_root()
-            if check_disk_space(
+            snapshot_root = snapshot_writer.get_snapshot_root()
+            if snapshot_writer.check_disk_space(
                 snapshot_root, settings.perception.snapshot_min_free_disk_mb
             ):
-                clip_count = save_clips(log_item.id, clips_by_device)
+                clip_count = _save_clips_for_event(log_item.id, clips_by_device)
                 if clip_count > 0:
                     clip_kind = next(iter(clips_by_device.values()))[1]
                     clip_device_ids = [
