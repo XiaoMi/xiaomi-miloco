@@ -291,7 +291,8 @@ const DEFAULT_NOTIFY_DEDUP_SEC = 60;
 
 /**
  * 无副作用读取通知去重窗口（毫秒）。读 config.json 的 `notify.dedup_window_sec`
- * （秒，与后端 `MilocoSettings.notify` 同键），缺省 60s，负值/非数按缺省，返回毫秒。
+ * （秒，与后端 `MilocoSettings.notify` 同键）。非数（含缺失）按缺省 60；负值经
+ * `Math.max(0, …)` 归零 = 关闭去重，与后端 `MessageDeduper` 的 `window_sec<=0` 同义。返回毫秒。
  *
  * 刻意不走 {@link loadSharedConfig}：那会在每次调用时归一化落盘、解析 gateway auth，
  * 而本函数会被每条通知调用，只需读一个数值。

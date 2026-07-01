@@ -93,8 +93,9 @@ class MiotService:
         self._person_repo = person_repo
         self._lru = LRUStore(miot_proxy._kv_repo.db_connector)
         # 相同通知文案的短窗去重兜底（窗口来自 config.json / settings.yaml
-        # notify.dedup_window_sec）。agent 循环或多触发并发时，防止同一条消息
-        # 被 1:1 透传成一串重复推送。
+        # notify.dedup_window_sec）。防住 agent 顺序循环里同一条文案被反复重发、
+        # 1:1 透传成一串重复推送（真实事故：单会话内顺序调用）。check→await→record
+        # 结构不覆盖真正的并发双发，兜底不为此加锁。
         self._notify_deduper = MessageDeduper(
             window_sec=get_settings().notify.dedup_window_sec
         )

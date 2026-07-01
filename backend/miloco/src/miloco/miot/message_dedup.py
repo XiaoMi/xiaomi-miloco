@@ -3,15 +3,20 @@
 
 """Short-window message dedup — a safety net against repeated notifications.
 
-An agent stuck in a loop (or two triggers firing near-simultaneously) can ask
-to send the *same* notification many times in a few seconds. This tiny helper
-suppresses an identical message seen again within a time window, so the
-amplifier layer never forwards a 1:1 burst of duplicates to the user.
+An agent stuck in a loop can ask to send the *same* notification many times in
+a few seconds. This tiny helper suppresses an identical message seen again
+within a time window, so the amplifier layer never forwards a 1:1 burst of
+duplicates to the user.
 
 Mirrors the ``_recent`` dedup pattern in :mod:`miloco.miot.welcome_service`:
 monotonic timestamps, **recorded only on a successful send** so a failed
 attempt can still be retried immediately. Kept intentionally small and pure
 (injectable ``clock``) so it can be unit-tested without the owning service.
+
+Callers check-then-record around the actual (awaited) send, so this guards
+*serial* repeats — the real failure mode, a single session looping — not truly
+concurrent double-sends. That's an accepted trade-off for a safety net: keeping
+"record only on success" (retryable) is worth more than closing the race.
 """
 
 from __future__ import annotations
