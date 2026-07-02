@@ -18,6 +18,7 @@ from miot.types import (
     MIoTUserInfo,
 )
 
+from miloco.config import get_settings
 from miloco.database.kv_repo import ScopeConfigKeys
 from miloco.database.person_repo import PersonRepo
 from miloco.middleware.exceptions import (
@@ -38,6 +39,7 @@ from miloco.miot.filter import (
     set_homes_in_use,
 )
 from miloco.miot.lru import LRUStore
+from miloco.miot.message_dedup import MessageDeduper
 from miloco.miot.schema import (
     CameraChannel,
     CameraImgSeq,
@@ -90,6 +92,13 @@ class MiotService:
         self._miot_proxy = miot_proxy
         self._person_repo = person_repo
         self._lru = LRUStore(miot_proxy._kv_repo.db_connector)
+        # 相同通知文案的短窗去重兜底（窗口来自 config.json / settings.yaml
+        # notify.dedup_window_sec）。防住 agent 顺序循环里同一条文案被反复重发、
+        # 1:1 透传成一串重复推送（真实事故：单会话内顺序调用）。check→await→record
+        # 结构不覆盖真正的并发双发，兜底不为此加锁。
+        self._notify_deduper = MessageDeduper(
+            window_sec=get_settings().notify.dedup_window_sec
+        )
 
     async def lru_snapshot(self) -> dict:
         return self._lru.load()
@@ -532,7 +541,19 @@ class MiotService:
             ) from e
 
     async def send_notify(self, notify: str) -> None:
-        """Send notification"""
+        """Send notification.
+
+        Identical text seen again within ``notify.dedup_window_sec`` is skipped
+        (returns ok without hitting MiHome) — a safety net so an agent loop can't
+        turn into a burst of duplicate pushes. The window is recorded only on a
+        successful send, so a failed attempt stays retryable.
+        """
+        key = notify.strip()
+        if self._notify_deduper.is_duplicate(key):
+            logger.info(
+                "send_notify skipped: identical message within dedup window"
+            )
+            return
         try:
             notify_id = await self._miot_proxy.get_miot_app_notify_id(notify)
             if not notify_id:
@@ -545,6 +566,7 @@ class MiotService:
         except Exception as e:
             logger.error("Failed to send notification: %s", str(e))
             raise BusinessException(f"Failed to send notification: {str(e)}") from e
+        self._notify_deduper.record(key)
 
     async def start_audio_stream(self, camera_id: str, channel: int, callback):
         """Start audio stream."""
