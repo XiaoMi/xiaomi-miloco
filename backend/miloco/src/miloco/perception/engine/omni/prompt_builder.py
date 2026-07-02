@@ -584,7 +584,7 @@ def _build_fused_user_content(
                 gallery_items = gallery_items[: cfg.max_gallery_persons]
 
             # 两段式：先 pre-flight 每人都能拿到 body_jpg，全过才进入渲染段
-            prepared: list[tuple[str, bytes, "bytes | None"]] = []  # (label, body_jpg, face_jpg|None)
+            prepared: list[tuple[str, str, bytes, "bytes | None"]] = []  # (pid, label, body_jpg, face_jpg|None)
             give_up_reason: str | None = None
             for pid, samples in gallery_items:
                 body_jpg = _resolve_person_body_jpg(samples, cfg)
@@ -613,7 +613,7 @@ def _build_fused_user_content(
                     face_jpg = None
                 # 名册/gallery/输出统一用纯真名（角色上下文在「# 家庭档案」里）；
                 # name_to_pid 对纯名有 key，omni 输出 name 即可反查回 UUID
-                prepared.append((samples.name or pid, body_jpg, face_jpg))
+                prepared.append((pid, samples.name or pid, body_jpg, face_jpg))
 
             if give_up_reason is not None:
                 # 整 gallery 放弃 —— 不渲染 gallery 段，本窗口等价于无 gallery 主调用
@@ -624,14 +624,18 @@ def _build_fused_user_content(
                 )
             else:
                 gallery_content.append({"type": "text", "text": "下方 gallery 为候选成员参考图；图中衣着仅样本采集当时所穿、不保证与本轮一致——衣着只作辅助参考、不作决定性判据，以面部/体型/发型为主"})
+                from miloco.perception.snapshot_context import push_gallery_image
+
                 gallery_content.append({"type": "text", "text": "<gallery>"})
-                for label, body_jpg, face_jpg in prepared:
+                for pid, label, body_jpg, face_jpg in prepared:
                     gallery_content.append({"type": "text", "text": f"【{label}】"})
                     gallery_content.append({"type": "text", "text": "体型/全身参考："})
                     gallery_content.append(_png_block(body_jpg))
+                    push_gallery_image(pid, "body", body_jpg)
                     if face_jpg:
                         gallery_content.append({"type": "text", "text": "面部参考："})
                         gallery_content.append(_png_block(face_jpg))
+                        push_gallery_image(pid, "face", face_jpg)
                 gallery_content.append({"type": "text", "text": "</gallery>"})
         else:
             gallery_content.append({"type": "text", "text": "<gallery>库为空，所有 track 应输出 unknown</gallery>"})

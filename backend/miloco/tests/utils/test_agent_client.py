@@ -100,3 +100,40 @@ async def test_run_agent_turn_propagates_webhook_exception():
                 trace_id="t",
                 wait_timeout_ms=_WAIT_MS,
             )
+
+
+async def test_run_agent_turn_omits_delivery_fields_by_default():
+    # 不传 deliver/resolve_target → payload 不含对应字段，插件按原默认行为。
+    mock = AsyncMock(return_value={"runId": "r", "status": "ok"})
+    with patch("miloco.utils.agent_client.call_agent_webhook", new=mock):
+        await run_agent_turn(
+            "hi", session_key="s", lane="l", trace_id="t", wait_timeout_ms=_WAIT_MS,
+        )
+    payload = mock.await_args.args[1]
+    assert "deliver" not in payload
+    assert "resolveTarget" not in payload
+
+
+async def test_run_agent_turn_passes_delivery_fields_when_set():
+    # deliver/resolve_target 显式传入 → 原样落进 webhook payload（resolveTarget 驼峰）。
+    mock = AsyncMock(return_value={"runId": "r", "status": "ok"})
+    with patch("miloco.utils.agent_client.call_agent_webhook", new=mock):
+        await run_agent_turn(
+            "hi", session_key="s", lane="l", trace_id="t", wait_timeout_ms=_WAIT_MS,
+            deliver=True, resolve_target="owner-channel",
+        )
+    payload = mock.await_args.args[1]
+    assert payload["deliver"] is True
+    assert payload["resolveTarget"] == "owner-channel"
+
+
+async def test_run_agent_turn_passes_no_channel_status_through():
+    # 插件结构化 no-channel（code 0 正常返回）→ status 原样透传，runId None，不抛异常。
+    mock = AsyncMock(return_value={"runId": None, "status": "no-channel"})
+    with patch("miloco.utils.agent_client.call_agent_webhook", new=mock):
+        run_id, status, _ = await run_agent_turn(
+            "hi", session_key="s", lane="l", trace_id="t", wait_timeout_ms=_WAIT_MS,
+            deliver=True, resolve_target="owner-channel",
+        )
+    assert run_id is None
+    assert status == "no-channel"

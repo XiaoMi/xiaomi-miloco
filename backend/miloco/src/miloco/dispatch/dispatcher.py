@@ -29,23 +29,34 @@ from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["interaction", "bind", "rule", "suggestion"]
+EventType = Literal["interaction", "bind", "rule", "suggestion", "onboarding"]
 
 # builder：把「合并后的同类条目列表」重构成一条 message（单一头、统一编号）。
 # 返回 None/空 → drainer 跳过该批。dispatcher 不感知 items 的具体业务类型。
 Builder = Callable[[list[Any]], "str | None"]
 
 # 类型 → (sessionKey, lane, priority)。数字小 = 优先。
-# bind 与 interaction 共享会话/车道，但属不同合并类型，各自单飞、不混入同一 turn。
+# bind / onboarding 与 interaction 共享会话/车道，但属不同合并类型，各自单飞、不混入同一 turn。
 _ROUTE: dict[EventType, tuple[str, str, int]] = {
     "interaction": ("agent:main:miloco", "miloco-interactive", 0),
     "rule": ("agent:main:miloco-rule", "miloco-rule", 10),
     "suggestion": ("agent:main:miloco-suggest", "miloco-suggest", 20),
     "bind": ("agent:main:miloco", "miloco-interactive", 30),
+    "onboarding": ("agent:main:miloco", "miloco-interactive", 30),
 }
 
-# 仅这三类（== AgentRunSource）写 agent_runs；bind 不统计。
+# 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})
+
+# 类型级投递参数（run_agent_turn 额外 kwargs）。onboarding 是交互式访谈，必须整个
+# turn 直接跑在车主 IM 会话里且回复用户可见（deliver=True）——只把开场白 push 过去
+# 而 turn 留在后台会话会割裂上下文（用户的 IM 回复落在 channel 会话，访谈状态却在
+# 别处）。注意：队列仍按 _ROUTE 的 sessionKey 归并/单飞，实际 turn 会话由插件侧按
+# resolveTarget 解析（owner-channel = 配置的 notifySessionKey，否则最近活跃的已绑定
+# channel 会话）。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
+_DELIVERY: dict[EventType, dict[str, Any]] = {
+    "onboarding": {"resolve_target": "owner-channel", "deliver": True},
+}
 
 
 @dataclass(eq=False)
@@ -58,6 +69,18 @@ class _QueuedEvent:
     priority: int  # 类型级优先级（来自 _ROUTE，数字小=优先）
     enqueued_at: float  # time.monotonic()，用于同类合并排序 + 淘汰判旧
     intra_priority: int = 0  # 条目级优先级（数字小=优先）；无内层优先级的类型恒 0，仅参与淘汰、不改渲染序
+    # 可选投递结果 future：需要区分「入队被接纳」与「真正送达平台」的 producer
+    # （如 onboarding 终身一次性标记）传入；dispatcher 保证它在**每一条**丢弃/送达
+    # 路径上都被 resolve，绝不悬空。True = turn 送达平台（成功或平台侧仍在途的
+    # timeout）；False = 任何一种丢弃（淘汰 / closed / builder 失败 / 传输重试耗尽 /
+    # turn 返回 error / stop 清队）。
+    delivered: "asyncio.Future[bool] | None" = None
+
+
+def _resolve_delivered(fut: "asyncio.Future[bool] | None", ok: bool) -> None:
+    """resolve 投递结果 future；未传或已 done（如调用方守护超时后取消）则跳过。"""
+    if fut is not None and not fut.done():
+        fut.set_result(ok)
 
 
 class AgentDispatcher:
@@ -88,6 +111,12 @@ class AgentDispatcher:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._draining.clear()
+        # 队列里没排上的事件随停机丢弃：逐一 resolve False，投递 future 不悬空
+        # （在途批次由 _send_batch 的 finally 兜底，含被 cancel 的场景）。
+        for q in self._queues.values():
+            for ev in q:
+                _resolve_delivered(ev.delivered, False)
+        self._queues.clear()
 
     async def dispatch(
         self,
@@ -95,19 +124,26 @@ class AgentDispatcher:
         items: list[Any],
         builder: Builder,
         intra_priority: int = 0,
+        delivered: "asyncio.Future[bool] | None" = None,
     ) -> bool:
         """入队一条事件并触发单飞 drainer。返回该事件是否被接纳（未被超长淘汰）。
 
         intra_priority：同类型内的条目级优先级（数字小=优先），由 producer 按业务语义
         计算（如 suggestion 由 urgency 映射）；无内层优先级的类型用缺省 0。仅参与超长淘汰，
         不影响 drain / 渲染顺序（渲染恒按时序）。
+
+        delivered：可选投递结果 future（见 _QueuedEvent.delivered）。「接纳」只代表
+        入队成功，真正送达与否由 drainer 异步 resolve 该 future——需要区分二者的
+        producer 据此等待，不要把本方法返回值当"已送达"。
         """
         if self._closed:
             logger.warning("dispatcher closed; dropping %s event", event_type)
+            _resolve_delivered(delivered, False)
             return False
         route = _ROUTE.get(event_type)
         if route is None:
             logger.error("unknown event_type=%s; dropping", event_type)
+            _resolve_delivered(delivered, False)
             return False
         session_key, _lane, priority = route
         ev = _QueuedEvent(
@@ -117,6 +153,7 @@ class AgentDispatcher:
             priority=priority,
             enqueued_at=time.monotonic(),
             intra_priority=intra_priority,
+            delivered=delivered,
         )
         q = self._queues.setdefault(session_key, [])
         q.append(ev)
@@ -137,6 +174,7 @@ class AgentDispatcher:
         while len(q) > cap:
             victim = max(q, key=lambda e: (e.priority, e.intra_priority, -e.enqueued_at))
             q.remove(victim)
+            _resolve_delivered(victim.delivered, False)  # 被淘汰即未送达
             evicted += 1
         if evicted:
             logger.warning(
@@ -183,63 +221,88 @@ class AgentDispatcher:
         return batch
 
     async def _send_batch(self, session_key: str, batch: list[_QueuedEvent]) -> None:
-        event_type = batch[0].event_type
-        lane = _ROUTE[event_type][1]
-        merged: list[Any] = [it for ev in batch for it in ev.items]
+        # delivered 语义（finally 统一 resolve，任何提前 return / cancel 都不悬空）：
+        # True = turn 送达平台（status ok，或 timeout——平台侧 turn 仍在途，视作已送达）；
+        # False = builder 失败 / 无内容 / 传输重试耗尽 / turn 返回 error / 被 cancel。
+        delivered = False
         try:
-            msg = batch[0].builder(merged)
-        except Exception:
-            logger.exception("builder failed for %s batch; skipping", event_type)
-            return
-        if not msg:
-            # builder 返回 None/空 → 无内容可发，跳过该批。
-            return
-
-        # drainer 不在感知 cycle 上下文，为每批次生成独立 trace_id（批次:run 1:1）。
-        trace_id = str(uuid.uuid4())
-        wait_ms = get_settings().dispatcher.turn_wait_timeout_ms
-        run_id: str | None = None
-        status: str = "error"
-        rtt_ms: float = 0.0
-        for attempt in range(self._TRANSPORT_RETRIES + 1):
+            event_type = batch[0].event_type
+            lane = _ROUTE[event_type][1]
+            merged: list[Any] = [it for ev in batch for it in ev.items]
             try:
-                run_id, status, rtt_ms = await run_agent_turn(
-                    msg,
-                    session_key=session_key,
-                    lane=lane,
-                    trace_id=trace_id,
-                    wait_timeout_ms=wait_ms,
-                )
-                break
-            except AgentWebhookException as e:
-                # 传输失败（连接 / 5xx / HTTP 超时）→ 有限短退避重试,
-                # exhausted 后 WARN、跳过该批，继续下一批。
-                if attempt == self._TRANSPORT_RETRIES:
-                    logger.warning(
-                        "agent turn transport failed session=%s type=%s err=%s; "
-                        "skipping batch after %d attempts",
-                        session_key,
-                        event_type,
-                        e,
-                        attempt + 1,
+                msg = batch[0].builder(merged)
+            except Exception:
+                logger.exception("builder failed for %s batch; skipping", event_type)
+                return
+            if not msg:
+                # builder 返回 None/空 → 无内容可发，跳过该批。
+                return
+
+            # drainer 不在感知 cycle 上下文，为每批次生成独立 trace_id（批次:run 1:1）。
+            trace_id = str(uuid.uuid4())
+            wait_ms = get_settings().dispatcher.turn_wait_timeout_ms
+            run_id: str | None = None
+            status: str = "error"
+            rtt_ms: float = 0.0
+            delivery = _DELIVERY.get(event_type, {})
+            for attempt in range(self._TRANSPORT_RETRIES + 1):
+                try:
+                    run_id, status, rtt_ms = await run_agent_turn(
+                        msg,
+                        session_key=session_key,
+                        lane=lane,
+                        trace_id=trace_id,
+                        wait_timeout_ms=wait_ms,
+                        **delivery,
                     )
-                    return
-                await asyncio.sleep(self._TRANSPORT_BACKOFF_S * (2**attempt))
+                    break
+                except AgentWebhookException as e:
+                    # 传输失败（连接 / 5xx / HTTP 超时）→ 有限短退避重试,
+                    # exhausted 后 WARN、跳过该批，继续下一批。
+                    if attempt == self._TRANSPORT_RETRIES:
+                        logger.warning(
+                            "agent turn transport failed session=%s type=%s err=%s; "
+                            "skipping batch after %d attempts",
+                            session_key,
+                            event_type,
+                            e,
+                            attempt + 1,
+                        )
+                        return
+                    await asyncio.sleep(self._TRANSPORT_BACKOFF_S * (2**attempt))
 
-        if status == "timeout":
-            # 超时仅放行后续 turn、不终止平台在途 turn → WARN、跳过本批、继续下一批。
-            logger.warning(
-                "agent turn timed out session=%s type=%s wait_ms=%d; skip, continue",
-                session_key,
-                event_type,
-                wait_ms,
-            )
-            return
+            if status == "no-channel":
+                # 插件侧结构化失败：车主从未私聊过 bot，解析不到 IM 会话。这不是
+                # 传输故障（HTTP 200 / code 0 正常返回，不该烧重试），delivered=False
+                # 让 producer（onboarding 一次性标记）不置位——等车主绑定 channel 后
+                # 下次启动自然送达。
+                logger.warning(
+                    "agent turn undeliverable session=%s type=%s: no owner IM channel yet",
+                    session_key,
+                    event_type,
+                )
+                return
 
-        if run_id and event_type in _TRACKED:
-            track_agent_run(
-                trace_id, run_id, cast(AgentRunSource, event_type), rtt_ms
-            )
+            if status == "timeout":
+                # 超时仅放行后续 turn、不终止平台在途 turn → WARN、跳过本批、继续下一批。
+                # 平台侧 turn 已在跑 → 对投递 future 而言算"已送达"。
+                delivered = True
+                logger.warning(
+                    "agent turn timed out session=%s type=%s wait_ms=%d; skip, continue",
+                    session_key,
+                    event_type,
+                    wait_ms,
+                )
+                return
+
+            delivered = status == "ok"  # "error"：turn 执行失败，不算送达
+            if run_id and event_type in _TRACKED:
+                track_agent_run(
+                    trace_id, run_id, cast(AgentRunSource, event_type), rtt_ms
+                )
+        finally:
+            for ev in batch:
+                _resolve_delivered(ev.delivered, delivered)
 
 
 _singleton: AgentDispatcher | None = None
@@ -259,13 +322,19 @@ async def dispatch_event(
     items: list[Any],
     builder: Builder,
     intra_priority: int = 0,
+    delivered: "asyncio.Future[bool] | None" = None,
 ) -> bool:
-    """模块级投递入口：转调单例 dispatcher。dispatcher 未就绪时丢弃并 WARN。"""
+    """模块级投递入口：转调单例 dispatcher。dispatcher 未就绪时丢弃并 WARN。
+
+    delivered：可选投递结果 future（语义见 :class:`_QueuedEvent`）；本入口保证
+    它在每条丢弃路径（含 dispatcher 未就绪）上也会被 resolve。
+    """
     dispatcher = get_agent_dispatcher()
     if dispatcher is None:
         logger.warning("no dispatcher set; dropping %s event", event_type)
+        _resolve_delivered(delivered, False)
         return False
-    return await dispatcher.dispatch(event_type, items, builder, intra_priority)
+    return await dispatcher.dispatch(event_type, items, builder, intra_priority, delivered)
 
 
 def join_text_blocks(blocks: list[str]) -> str | None:

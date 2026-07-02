@@ -1054,7 +1054,7 @@ async def _persist_meaningful_event(
         # 落盘 event artifacts — 先落盘拿 count,insert 时直接传真实值,
         # 省 update_snapshot_count 二次写(原 insert(0)+update(count) 两步合并).
         count = 0
-        if artifacts.clips or artifacts.trace is not None:
+        if artifacts.clips or artifacts.trace is not None or artifacts.gallery:
             settings = get_settings()
             snapshot_root = get_snapshot_root()
             if not check_disk_space(
@@ -1103,11 +1103,14 @@ async def _persist_meaningful_event(
 
         # B13 SSE 推送:只要 row 入表了就推,不论 count==0 还是 >0.
         # 落盘完成后 publish,snapshot_count 是真实值,clip_kind 帮 UI 区分 🎬/🎤.
+        has_trace = (get_snapshot_root() / event_id / "omni_trace.json.gz").exists()
+
         try:
             _publish_meaningful_event(
                 **event_data,
                 clip_kind=clip_kind,
                 trigger_source=(payload_extra or {}).get("trigger_source"),
+                has_trace=has_trace,
             )
         except Exception as e:  # noqa: BLE001
             logger.error("SSE publish failed for event %s: %s", event_id, e)
@@ -1139,6 +1142,7 @@ def _publish_meaningful_event(
     rule_names: dict[str, str] | None = None,
     clip_kind: str | None = None,
     trigger_source: str | None = None,
+    has_trace: bool = False,
 ) -> None:
     """通过 processor._publish 推送 meaningful_event SSE 帧.
 
@@ -1165,6 +1169,7 @@ def _publish_meaningful_event(
         "device_ids": device_ids,
         "rule_names": rule_names or {},
         "clip_kind": clip_kind,
+        "has_trace": has_trace,
     }
     if trigger_source:
         payload["trigger_source"] = trigger_source

@@ -219,3 +219,13 @@ class ScopeConfigKeys:
 
     HOME_WHITE_LIST_KEY = "HOME_WHITE_LIST_KEY"       # 已启用的家庭 home_id 列表
     CAMERA_BLACK_LIST_KEY = "CAMERA_BLACK_LIST_KEY" # 已停用的摄像头 did 列表
+
+
+class OnboardingKeys:
+    """主动 onboarding 邀请的一次性标记。
+
+    值为发送成功时的 ISO 时间戳。终身一次：置位后不再自动清除，
+    也没有重发定时器（用户之后随时可说「初始化家庭」手动发起）。
+    """
+
+    ONBOARDING_PROMPTED_KEY = "ONBOARDING_PROMPTED_KEY"  # 主动邀请已成功送达

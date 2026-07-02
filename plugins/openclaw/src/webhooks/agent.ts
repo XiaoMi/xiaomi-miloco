@@ -3,6 +3,7 @@ import {
   peekTurnMeta,
   registerTraceLink,
 } from "../hooks/trace.js";
+import { resolveNotifyTarget } from "../tools/notify.js";
 import { logger } from "../utils/logger.js";
 import type { WebhookEntry } from "./index.js";
 
@@ -22,6 +23,14 @@ interface IRequestBody {
   extraSystemPrompt?: string;
   traceId?: string;
   timeoutMs?: number;
+  // 回复是否投递到会话绑定的 IM channel（默认 false：后台 turn，用户不可见）。
+  deliver?: boolean;
+  // "owner-channel"：忽略 payload sessionKey，插件侧解析车主 IM 会话（配置的
+  // notifySessionKey，否则最近活跃的已绑定 channel 会话），整个 turn 直接跑在
+  // 该 channel-peer 会话里、deliver 默认 true——用户在自己的聊天里看到回复并
+  // 可直接接话（交互式访谈的唯一合理形态：若只把开场白 push 过去而 turn 留在
+  // 后台会话，用户的回复会落在 channel 会话、访谈状态却在别处，上下文割裂）。
+  resolveTarget?: "owner-channel";
 }
 
 interface WaitResult {
@@ -74,16 +83,42 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       idempotencyKey = crypto.randomUUID(),
       traceId,
       timeoutMs,
+      deliver,
+      resolveTarget,
     } = payload;
     // 自愈双 turn 串联须留在 backend HTTP 超时内，startedAt 用于给重试 turn 算剩余等待预算。
     const startedAt = Date.now();
 
+    // owner-channel 模式：复用 miloco_im_push 的车主会话解析（notify.ts 单一事实源），
+    // turn 直接跑在解析出的 channel-peer 会话、deliver 默认 true。needsBind 的
+    // fallback 会话（最近活跃 channel）照用——对"跑 turn"而言它就是车主的聊天；
+    // 解析不到任何 channel（车主从未私聊过 bot）→ 返回结构化 no-channel（code 0，
+    // 非 500），backend 按"未送达、不重试传输"处理，等车主绑定后下次启动再送。
+    let effectiveSessionKey = sessionKey;
+    let effectiveDeliver = deliver ?? false;
+    if (resolveTarget === "owner-channel") {
+      const { target } = resolveNotifyTarget(api);
+      if (!target?.sessionKey) {
+        logger.warn(
+          "[agent-webhook] resolveTarget=owner-channel but no IM channel available; returning no-channel",
+        );
+        return {
+          runId: null,
+          status: "no-channel",
+          error: "no available IM channel — owner has never interacted via IM",
+        };
+      }
+      effectiveSessionKey = target.sessionKey;
+      effectiveDeliver = deliver ?? true;
+    }
+
     const runOnce = async (idem: string, waitMs: number) => {
       const result = await api.runtime.subagent.run({
-        sessionKey,
+        sessionKey: effectiveSessionKey,
         message,
         lane,
-        deliver: false,
+        // 不设 lightContext：owner-channel 访谈要延续该会话的完整上下文。
+        deliver: effectiveDeliver,
         idempotencyKey: idem,
         extraSystemPrompt,
       });
@@ -102,14 +137,20 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
 
     // 上下文溢出自愈: plugin 侧无法 reset/clear session,只能 deleteSession 删旧会话重建。
     // 删除后同 sessionKey 再 run 自动建空会话;重试恒一次,不死循环。
+    // ⚠️ owner-channel 模式不做自愈：deleteSession 会连用户真实 IM 会话的历史一起删,
+    // 代价远大于一次投递失败(backend 按未送达重试),故只记日志、原样返回首个结果。
     const overflowReason = await detectOverflow(first.runId, first.wait);
-    if (overflowReason) {
+    if (overflowReason && resolveTarget === "owner-channel") {
+      logger.error(
+        `[overflow-self-heal] context overflow on owner channel session=${effectiveSessionKey}; NOT deleting a user's IM session, skip self-heal`,
+      );
+    } else if (overflowReason) {
       try {
         logger.warn(
-          `[overflow-self-heal] context overflow on session=${sessionKey}; deleting session and retrying once`,
+          `[overflow-self-heal] context overflow on session=${effectiveSessionKey}; deleting session and retrying once`,
         );
         await api.runtime.subagent.deleteSession({
-          sessionKey,
+          sessionKey: effectiveSessionKey,
           deleteTranscript: true,
         });
         // 重试 turn 的等待预算：保证两段 turn 总时长落在本次 webhook 的 timeoutMs 内
@@ -129,12 +170,12 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
         const recovered = !retryOverflow;
         if (recovered) {
           logger.info(
-            `[overflow-self-heal] recovered session=${sessionKey} after reset`,
+            `[overflow-self-heal] recovered session=${effectiveSessionKey} after reset`,
           );
         } else {
           // 重建后仍溢出 = 系统提示自身超预算(配置问题),删除重建救不回 → 停手,不再循环。
           logger.error(
-            `[overflow-self-heal] still overflow after reset; session=${sessionKey} unrecoverable by delete (system prompt likely exceeds context budget)`,
+            `[overflow-self-heal] still overflow after reset; session=${effectiveSessionKey} unrecoverable by delete (system prompt likely exceeds context budget)`,
           );
         }
         return {
@@ -149,7 +190,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
         // deleteSession 被拒(如主会话保护)或重试失败 → 返回首个结果,不把 webhook 打成 500。
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(
-          `[overflow-self-heal] reset failed for session=${sessionKey}: ${msg}`,
+          `[overflow-self-heal] reset failed for session=${effectiveSessionKey}: ${msg}`,
         );
       }
     }

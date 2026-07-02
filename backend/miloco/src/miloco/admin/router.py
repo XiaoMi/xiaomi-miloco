@@ -7,7 +7,12 @@ System status check interface
 """
 
 import logging
+import re
+import subprocess
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -77,6 +82,89 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     logger.info("System status retrieved: %s", data)
     return NormalResponse(
         code=0, message="System status retrieved successfully", data=data
+    )
+
+
+def _run_git(args: list[str]) -> str | None:
+    """在 backend 源码目录跑 git, 失败/超时/无 git 都返回 None (让 git 自动向上找 .git)。"""
+    try:
+        r = subprocess.run(
+            ["git"] + args,
+            capture_output=True, text=True, timeout=2,
+            cwd=Path(__file__).resolve().parent,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+_HATCH_VCS_LOCAL_RE = re.compile(r"\+g([0-9a-f]{7,40})(?:\.d(\d{8}))?")
+
+
+def _parse_version_git(v: str) -> dict | None:
+    """从 hatch-vcs local version 段提取 commit_short + dirty。
+
+    Wheel 部署无 .git 时的 fallback: pyproject 里 hatch-vcs 会把版本号写成
+    ``0.1.0.dev5+g4a2b3c1.d20260701``, 其中 ``g<sha>`` 是构建时 commit,
+    ``.d<YYYYMMDD>`` 存在表示构建时 tree 有未提交改动。
+    """
+    m = _HATCH_VCS_LOCAL_RE.search(v)
+    if m is None:
+        return None
+    sha = m.group(1)
+    return {
+        "commit": sha if len(sha) == 40 else None,
+        "commit_short": sha[:7],
+        "branch": None,
+        "dirty": m.group(2) is not None,
+        "commit_time": None,
+    }
+
+
+def _git_info(version: str | None = None) -> dict | None:
+    """优先跑 git 命令 (source checkout); 失败时从 pkg version 里解析 (wheel 部署)。"""
+    commit = _run_git(["rev-parse", "HEAD"])
+    if commit:
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        status = _run_git(["status", "--porcelain"])
+        commit_time = _run_git(["log", "-1", "--format=%cI", "HEAD"])
+        return {
+            "commit": commit,
+            "commit_short": commit[:7],
+            "branch": branch if branch and branch != "HEAD" else None,
+            "dirty": bool(status) if status is not None else None,
+            "commit_time": commit_time or None,
+        }
+    return _parse_version_git(version) if version else None
+
+
+def _pkg_version() -> str:
+    try:
+        return pkg_version("miloco")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+@router.get(
+    "/version",
+    summary="Backend version (package version + git info if available)",
+    response_model=NormalResponse,
+)
+async def get_version(current_user: str = Depends(verify_token)):
+    """Return backend package version and, if deployed from a git checkout,
+    the current commit / branch / dirty flag / commit time.
+
+    ``data.git`` is null when backend runs from a wheel / docker image without
+    the .git directory (i.e. not a git checkout).
+    """
+    version = _pkg_version()
+    return NormalResponse(
+        code=0,
+        message="Version info",
+        data={
+            "version": version,
+            "git": _git_info(version),
+        },
     )
 
 
@@ -201,6 +289,110 @@ def post_log_pack(current_user: str = Depends(verify_token)):
     except _log_pack_mod.LogPackSizeExceeded as e:
         raise HTTPException(status_code=422, detail=e.info)
     return NormalResponse(code=0, message="ok", data=result)
+
+
+# ─── 事件反馈(打包 omni 复现数据) ─────────────────────────────────────────
+
+
+class EventFeedbackBody(BaseModel):
+    event_id: str
+    error_types: list[str] = []
+    feedback_text: str = ""
+    include_gallery: bool = False
+
+
+@router.post(
+    "/events/feedback",
+    summary="提交感知事件反馈(打包 omni 复现数据)",
+    response_model=NormalResponse,
+)
+async def submit_event_feedback(
+    body: EventFeedbackBody,
+    current_user: str = Depends(verify_token),
+):
+    """打包单事件的 omni_trace + clips + metadata 到本地 tar.gz.
+
+    后续上传服务就绪后,打包完成会自动上传.当前仅本地存储.
+    """
+    import asyncio
+
+    from miloco.admin import feedback_pack as _fb_mod
+
+    uid = ""
+    try:
+        miot_proxy = get_manager().miot_proxy
+        user_info = await miot_proxy.get_user_info()
+        if user_info:
+            uid = user_info.uid
+    except Exception:
+        logger.exception("Failed to resolve miot uid for feedback pack; falling back to anonymous")
+
+    try:
+        result = await asyncio.to_thread(
+            _fb_mod.build_feedback_pack,
+            event_id=body.event_id,
+            error_types=body.error_types,
+            feedback_text=body.feedback_text,
+            include_gallery=body.include_gallery,
+            uid=uid,
+        )
+    except _fb_mod.EventNotFoundError:
+        raise HTTPException(status_code=404, detail="event not found")
+    except _fb_mod.FeedbackPackError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data={
+            "event_id": body.event_id,
+            "pack_path": result["path"],
+            "pack_size_bytes": result["size_bytes"],
+            "uploaded": False,
+            "upload_key": None,
+            "components": result["components"],
+        },
+    )
+
+
+class RevealDirBody(BaseModel):
+    path: str
+
+
+@router.post(
+    "/reveal-dir",
+    summary="在系统文件管理器中打开指定目录",
+    response_model=NormalResponse,
+)
+async def reveal_dir(
+    body: RevealDirBody,
+    current_user: str = Depends(verify_token),
+):
+    """macOS: open <dir>, Linux: xdg-open <dir>."""
+    import asyncio
+    import platform
+    import subprocess
+    from pathlib import Path
+
+    from miloco.utils.paths import miloco_home
+    dir_path = Path(body.path).resolve()
+    allowed_root = (miloco_home() / "packs").resolve()
+    if not dir_path.is_relative_to(allowed_root):
+        raise HTTPException(status_code=403, detail="path outside allowed directory")
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=404, detail="directory not found")
+
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            cmd = ["open", str(dir_path)]
+        else:
+            cmd = ["xdg-open", str(dir_path)]
+        await asyncio.to_thread(subprocess.run, cmd, timeout=5)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return NormalResponse(code=0, message="ok", data=None)
 
 
 # ─── omni 模型配置(在「模型」页内读/写) ─────────────────────────────────────

@@ -84,6 +84,14 @@ class OmniIdentityResult:
     # 仅在 omni 明确返回了该 track 的 assignment 时才透传真值；omni 漏报该 track 或
     # 整体调用失败时保持 None（非否定，按弃权处理）。
     face_visible: Optional[bool] = None
+    # omni 在 identities 把该框判为 "no_person"（框内确无人 / 非人误检），区别于 unknown
+    # （有人但认不出）。上层 _on_result 据此累计 no_person 票、落定后停派发 + 身份不导出。
+    no_person: bool = False
+    # omni 是否对该 track 真正给出了判定。True = 本条来自 omni response 的实际 assignment
+    # （成员 / unknown / no_person 都算"答了"）；False = 合成的"非答复"——omni 漏报该 track 或
+    # 整体调用失败时兜底补投（person_id=None、no_person=False，但并非"判到人"）。上层据此避免把
+    # "没答/失败"误当"判到人"（尤其别拿它把已落定的 no_person 解除、复发 caption 陌生人幻觉）。
+    omni_answered: bool = True
 
 
 # =============================================================================
@@ -247,6 +255,7 @@ class FusedDispatcher:
                     pid = None
                 conf = float(a.get("confidence", 0.0))
                 reason = str(a.get("reason", ""))
+                is_no_person = bool(a.get("no_person", False))
             except (TypeError, ValueError) as e:
                 logger.warning("fused response 解析单条 assignment 失败 a=%s err=%s", a, e)
                 continue
@@ -273,6 +282,7 @@ class FusedDispatcher:
                     batch_size=batch_size,
                     dup_id=dup_id,
                     face_visible=face_visible_by_tid.get(tid),
+                    no_person=is_no_person,
                 ))
             except Exception:  # noqa: BLE001
                 # 单条 on_result 抛出不连累整批,也不向上传播(否则 run_omni_fused 的 finally
@@ -289,6 +299,7 @@ class FusedDispatcher:
                         confidence=0.0,
                         reason="fused_response_missing_track",
                         batch_size=batch_size,
+                        omni_answered=False,   # 漏报 = 未判定，非"判到人"
                     ))
                 except Exception:  # noqa: BLE001
                     logger.warning("fused on_result(missing) 异常 track_id=%d", cand.track_id, exc_info=True)
@@ -310,6 +321,7 @@ class FusedDispatcher:
                     confidence=0.0,
                     reason=f"fused_main_call_failed: {reason}",
                     batch_size=batch_size,
+                    omni_answered=False,   # 整体失败 = 未判定，非"判到人"
                 ))
             except Exception:  # noqa: BLE001
                 logger.warning("fused on_result(failure) 异常 track_id=%d", cand.track_id, exc_info=True)
