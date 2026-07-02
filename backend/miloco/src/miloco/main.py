@@ -262,6 +262,19 @@ async def _backfill_tier_a_reid_embeddings() -> None:
         logger.warning("启动 backfill tier_a ReID emb 失败(忽略)", exc_info=True)
 
 
+async def _maybe_trigger_onboarding() -> None:
+    """启动时检查一次是否需要主动邀请家庭信息初始化（onboarding）。
+
+    条件判定 / 一次性语义 / 重试语义全部收在
+    ``OnboardingTriggerService.maybe_trigger``；这里只是启动调用点之一
+    （另一处在授权成功回调），异常兜底不让后台 task 抛错。
+    """
+    try:
+        await get_manager().onboarding_trigger.maybe_trigger()
+    except Exception:  # noqa: BLE001
+        logger.warning("启动 onboarding 主动邀请检查失败(忽略)", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan event handler."""
@@ -341,6 +354,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _backfill_task = asyncio.create_task(_backfill_tier_a_reid_embeddings())
     _BG_TASKS.add(_backfill_task)
     _backfill_task.add_done_callback(_BG_TASKS.discard)
+
+    # 全新安装主动 onboarding 邀请：条件不满足 / 已邀请过自然静默；上次发送
+    # 失败（KV 标记未置位）在这里得到重试。fire-and-forget，不阻塞启动。
+    _onboarding_task = asyncio.create_task(_maybe_trigger_onboarding())
+    _BG_TASKS.add(_onboarding_task)
+    _onboarding_task.add_done_callback(_BG_TASKS.discard)
 
     cleanup_task = asyncio.create_task(_log_cleanup_loop())
 
