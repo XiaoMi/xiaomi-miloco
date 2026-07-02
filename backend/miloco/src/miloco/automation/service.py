@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 from miloco.database.kv_repo import KVRepo
+from miloco.dispatch import dispatch_event, join_text_blocks
 from miloco.middleware.exceptions import ResourceNotFoundException
 from miloco.miot.schema import (
     MiotEventCatalog,
@@ -260,6 +261,25 @@ def _format_suggestion_answer(item: dict[str, Any]) -> str:
     if action:
         lines.append(f"建议：{action}")
     return "\n".join(lines)
+
+
+def _format_miloco_notify_task(*, source: str, event_label: str, answer: str) -> str:
+    """构造交给 agent 的主动通知任务，实际交付由 miloco-notify skill 决策。"""
+
+    return (
+        "[主动通知任务：米家设备触发感知]\n"
+        "这是系统主动触发的通知任务，不是用户正在等待的对话回复。\n"
+        "请加载并遵循 miloco-notify skill：先判断通知级别与渠道，再交付执行。\n"
+        "- IM 通道必须使用工具 miloco_im_push(message=...)。\n"
+        "- 若 miloco-notify 判断需要米家推送，再使用 `miloco-cli notify push --text ...`。\n"
+        "- 不要绕过 miloco-notify 直接裸发米家 App 推送；不要只写日志或等待用户打开面板。\n"
+        "- 通知文案要像家人提醒，客观说明事实；未识别身份时只说“有人/画面中有人”，不要猜身份。\n\n"
+        "触发源上下文：\n"
+        f"来源：{source}\n"
+        f"事件：{event_label}\n\n"
+        "感知结论：\n"
+        f"{answer}"
+    )
 
 
 class AutomationService:
@@ -727,10 +747,20 @@ class AutomationService:
         if answer and not matched_rule_ids:
             try:
                 event_label = (spec_meta or {}).get("names", {}).get(trigger.event_name) or trigger.event_name
-                await miot_service.send_notify(
-                    f"[米家设备触发]\n来源：{trigger.source_name or trigger.source_id}\n事件：{event_label}\n{answer}"
+                sent = await dispatch_event(
+                    "notify",
+                    [
+                        _format_miloco_notify_task(
+                            source=trigger.source_name or trigger.source_id,
+                            event_label=event_label,
+                            answer=answer,
+                        )
+                    ],
+                    join_text_blocks,
                 )
+                if not sent:
+                    logger.warning("automation notify dispatch was not accepted")
             except Exception as e:  # noqa: BLE001
-                logger.warning("automation notify failed: %s", e)
+                logger.warning("automation notify dispatch failed: %s", e)
         return log_item
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import miloco.automation.service as automation_service_module
 from miloco.automation.service import (
     AutomationService,
     _coerce_number,
@@ -260,3 +261,77 @@ async def test_handle_trigger_postprocesses_formal_mapping_rule_matches():
     assert captured["postprocess"]["pulse_reset_rule_ids"] == {"rule-1", "rule-auto-1"}
     assert log.matched_rule_ids == ["rule-1", "rule-auto-1"]
     assert len(log.structured_matched_rules) == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_trigger_dispatches_miloco_notify_for_unmatched_answer(monkeypatch):
+    service = AutomationService(_KVRepoStub())
+    service.create_mapping(
+        MiotEventMapping(
+            source_type="device",
+            source_id="sensor-1",
+            source_name_snapshot="门磁",
+            camera_dids=["cam-1"],
+            enabled=True,
+            query_template="门开后看一眼",
+            event_kinds=["device_prop"],
+            property_filters={"prop.2.1": {"op": "eq", "value": "1"}},
+            cooldown_seconds=0,
+        )
+    )
+
+    async def _external(_sources, _rules, **__):
+        result = SimpleNamespace(
+            caption=[CaptionEntry(description="门口有人经过")],
+            suggestions=[],
+            matched_rules=[],
+            device_rule_map={"cam-1": []},
+            skipped=False,
+        )
+        return result, set(), set(), set(), SimpleNamespace(clips={})
+
+    async def _handle_structured(**_kwargs):
+        return SimpleNamespace(snapshot_count=0, clip_kind=None)
+
+    class _MiotServiceMustNotNotify:
+        async def send_notify(self, _text):
+            raise AssertionError("不应直接调用米家 App send_notify")
+
+    dispatched: dict[str, object] = {}
+
+    async def _dispatch_event(event_type, items, builder, **_kwargs):
+        dispatched["event_type"] = event_type
+        dispatched["message"] = builder(items)
+        return True
+
+    monkeypatch.setattr(automation_service_module, "dispatch_event", _dispatch_event)
+
+    await service.handle_trigger(
+        trigger=MiotEventTrigger(
+            source_type="device",
+            source_id="sensor-1",
+            source_name="门磁",
+            event_name="device_prop",
+            changed_properties={"prop.2.1": "1"},
+            occurred_at=1234567890,
+            raw={},
+        ),
+        perception_service=SimpleNamespace(
+            external_trigger_perceive=_external,
+            handle_structured_perception_result=_handle_structured,
+        ),
+        rule_service=_RuleServiceStub(),
+        miot_service=_MiotServiceMustNotNotify(),
+        meaningful_events_dao=SimpleNamespace(
+            insert=lambda **_: None,
+            update_snapshot_count=lambda *_: None,
+        ),
+    )
+
+    assert dispatched["event_type"] == "notify"
+    message = dispatched["message"]
+    assert "miloco-notify skill" in message
+    assert "miloco_im_push" in message
+    assert "不要绕过 miloco-notify 直接裸发米家 App 推送" in message
+    assert "来源：门磁" in message
+    assert "画面观察：门口有人经过" in message
