@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   createMiotEventMapping,
   deleteMiotEventMapping,
@@ -55,18 +56,19 @@ interface MappingSpecMeta {
 
 type SourceKind = "device_prop" | "device_event";
 
+// label/hint 存 i18n key，渲染时 t() 翻译。
 const SOURCE_KIND_OPTIONS: { value: SourceKind; label: string; hint: string }[] = [
-  { value: "device_prop", label: "设备属性变化", hint: "属性变为指定值时触发" },
-  { value: "device_event", label: "设备事件触发", hint: "单击、接近、告警等事件触发" },
+  { value: "device_prop", label: "automation.sourceKindProp", hint: "automation.sourceKindPropHint" },
+  { value: "device_event", label: "automation.sourceKindEvent", hint: "automation.sourceKindEventHint" },
 ];
 
 const FILTER_OP_OPTIONS: { value: MiotPropertyFilterOp; label: string }[] = [
-  { value: "eq", label: "等于" },
-  { value: "ne", label: "不等于" },
-  { value: "gt", label: "大于" },
-  { value: "lt", label: "小于" },
-  { value: "gte", label: "大于等于" },
-  { value: "lte", label: "小于等于" },
+  { value: "eq", label: "automation.opEq" },
+  { value: "ne", label: "automation.opNe" },
+  { value: "gt", label: "automation.opGt" },
+  { value: "lt", label: "automation.opLt" },
+  { value: "gte", label: "automation.opGte" },
+  { value: "lte", label: "automation.opLte" },
 ];
 
 function normalizeFilterCondition(
@@ -83,25 +85,32 @@ function normalizeFilterCondition(
   };
 }
 
+// 返回 i18n key，调用方 t() 翻译。
 function getFilterOpLabel(op: MiotPropertyFilterOp): string {
   switch (op) {
     case "eq":
-      return "等于";
+      return "automation.opEq";
     case "ne":
-      return "不等于";
+      return "automation.opNe";
     case "gt":
-      return "大于";
+      return "automation.opGt";
     case "lt":
-      return "小于";
+      return "automation.opLt";
     case "gte":
-      return "大于等于";
+      return "automation.opGte";
     case "lte":
-      return "小于等于";
+      return "automation.opLte";
     case "any":
-      return "任意值";
+      return "automation.opAny";
     default:
       return op;
   }
+}
+
+function getMappingKindLabel(item: MiotEventMapping): string {
+  return item.event_kinds.some((kind) => kind.startsWith("event."))
+    ? "automation.sourceKindEvent"
+    : "automation.sourceKindProp";
 }
 
 function isNumericProperty(prop?: SpecProperty | null): boolean {
@@ -125,12 +134,6 @@ function getPropertyValueDisplayName(
   return specMeta?.values[key]?.[value] || value;
 }
 
-function getMappingKindLabel(item: MiotEventMapping): string {
-  return item.event_kinds.some((kind) => kind.startsWith("event."))
-    ? "设备事件触发"
-    : "设备属性变化";
-}
-
 function compareText(a: string | null | undefined, b: string | null | undefined): number {
   return (a || "\uffff").localeCompare(b || "\uffff", "zh-CN", {
     numeric: true,
@@ -149,6 +152,7 @@ function sortEventSourcesByRoom(items: MiotEventSource[]): MiotEventSource[] {
 }
 
 export function AutomationPage({ devices, cameras }: Props) {
+  const { t } = useTranslation();
   const mappings = useAsync(() => listMiotEventMappings(), [devices.length]);
   const logs = useAsync(() => listMiotEventLogs(), []);
 
@@ -308,9 +312,9 @@ export function AutomationPage({ devices, cameras }: Props) {
 
   async function handleCreate() {
     const source = sourceOptions.find((item) => item.source_id === sourceId);
-    if (!source) { toast("请选择事件源", "warn"); return; }
+    if (!source) { toast(t("automation.toastSelectSource"), "warn"); return; }
     if (sourceKind === "device_event" && !selectedEventKey) {
-      toast("请选择设备事件", "warn");
+      toast(t("automation.toastSelectEvent"), "warn");
       return;
     }
     const created = await createMiotEventMapping({
@@ -391,33 +395,33 @@ export function AutomationPage({ devices, cameras }: Props) {
 
   const createDisabled = !sourceId || cameraIds.length === 0 || (sourceKind === "device_event" && !selectedEventKey);
   const createHint = !sourceId
-    ? "请选择事件源"
+    ? t("automation.hintSelectSource")
     : cameraIds.length === 0
-      ? "请选择至少一个关联摄像头"
+      ? t("automation.hintSelectCamera")
       : sourceKind === "device_event" && !selectedEventKey
-        ? "请选择要监听的设备事件"
-        : "配置完成后点击保存，命中条件时会触发关联摄像头感知";
+        ? t("automation.hintSelectEvent")
+        : t("automation.hintReady");
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
       <section className="space-y-1">
-          <h1 className="text-title text-text-primary">感知触发</h1>
+          <h1 className="text-title text-text-primary">{t("automation.title")}</h1>
         <p className="text-caption text-text-tertiary">
-          用米家设备属性变化或设备事件触发一次摄像头主动感知，并附带可选的属性和值筛选。
+          {t("automation.subtitle")}
         </p>
       </section>
 
       {/* Event Mapping Creation Form */}
       <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
         <div>
-          <h2 className="text-title text-text-primary">感知触发配置</h2>
+          <h2 className="text-title text-text-primary">{t("automation.configTitle")}</h2>
           <p className="text-caption text-text-tertiary">
-            配置米家事件源对应触发哪些摄像头感知。创建后会按触发条件直接执行感知。
+            {t("automation.configDesc")}
           </p>
         </div>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div className="md:col-span-2">
-            <label className="block text-caption text-text-secondary mb-2">触发方式</label>
+            <label className="block text-caption text-text-secondary mb-2">{t("automation.triggerMethod")}</label>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {SOURCE_KIND_OPTIONS.map((option) => {
                 const selected = sourceKind === option.value;
@@ -439,21 +443,21 @@ export function AutomationPage({ devices, cameras }: Props) {
                       setPropFilters([]);
                     }}
                   >
-                    <span className="block text-caption font-medium">{option.label}</span>
-                    <span className="mt-0.5 block text-xs text-text-tertiary">{option.hint}</span>
+                    <span className="block text-caption font-medium">{t(option.label)}</span>
+                    <span className="mt-0.5 block text-xs text-text-tertiary">{t(option.hint)}</span>
                   </button>
                 );
               })}
             </div>
           </div>
           <div>
-            <label className="block text-caption text-text-secondary mb-1">事件源</label>
+            <label className="block text-caption text-text-secondary mb-1">{t("automation.eventSource")}</label>
             <select
               className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
               value={sourceId}
               onChange={(e) => onSourceChange(e.target.value)}
             >
-              <option value="">-- 请选择 --</option>
+              <option value="">{t("automation.selectPlaceholder")}</option>
               {sourceOptions.map((item) => (
                 <option key={item.source_id} value={item.source_id}>
                   {item.room_name ? `${item.room_name} / ` : ""}
@@ -464,7 +468,7 @@ export function AutomationPage({ devices, cameras }: Props) {
             </select>
           </div>
           <div className="md:col-span-2">
-            <label className="block text-caption text-text-secondary mb-1">关联摄像头</label>
+            <label className="block text-caption text-text-secondary mb-1">{t("automation.relatedCameras")}</label>
             <div className="flex flex-wrap gap-1.5">
               {cameras.map((cam) => (
                 <button
@@ -490,7 +494,7 @@ export function AutomationPage({ devices, cameras }: Props) {
               {sourceKind === "device_event" ? (
                 <div>
                   <label className="block text-caption text-text-secondary mb-1">
-                    事件筛选 {specLoading ? "(加载spec中...)" : deviceSpec ? `(${deviceSpec.events?.length ?? 0} 个事件)` : ""}
+                    {t("automation.eventFilter")} {specLoading ? t("automation.loadingSpec") : deviceSpec ? t("automation.eventCount", { count: deviceSpec.events?.length ?? 0 }) : ""}
                   </label>
                   <select
                     className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
@@ -500,7 +504,7 @@ export function AutomationPage({ devices, cameras }: Props) {
                       setPropFilters([]);
                     }}
                   >
-                    <option value="">-- 选择事件 --</option>
+                    <option value="">{t("automation.selectEvent")}</option>
                     {(deviceSpec?.events ?? []).map((event) => (
                       <option key={event.key} value={event.key}>
                         {event.name || event.description || event.key}
@@ -509,29 +513,29 @@ export function AutomationPage({ devices, cameras }: Props) {
                   </select>
                   {!specLoading && deviceSpec && (deviceSpec.events?.length ?? 0) === 0 ? (
                     <div className="mt-2 rounded-md border border-dashed border-border bg-bg-primary px-3 py-2 text-caption text-text-tertiary">
-                      还没有取到这个设备的事件定义。这里会按设备 MIoT Spec 展示可选事件和触发参数。
+                      {t("automation.noEventDef")}
                     </div>
                   ) : null}
                 </div>
               ) : null}
               <label className="block text-caption text-text-secondary">
-                {sourceKind === "device_event" ? "触发参数（可选）" : "属性筛选"}{" "}
+                {sourceKind === "device_event" ? t("automation.triggerParamOptional") : t("automation.propFilter")}{" "}
                 {specLoading
-                  ? "(加载spec中...)"
+                  ? t("automation.loadingSpec")
                   : sourceKind === "device_prop" && deviceSpec
-                    ? `(${deviceSpec.properties.length} 个属性)`
+                    ? t("automation.propCount", { count: deviceSpec.properties.length })
                     : sourceKind === "device_event" && selectedEventKey
-                      ? `(${eventArguments().length} 个参数)`
+                      ? t("automation.paramCount", { count: eventArguments().length })
                       : ""}
               </label>
               {!specLoading && deviceSpec && sourceKind === "device_prop" && deviceSpec.properties.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border bg-bg-primary px-3 py-2 text-caption text-text-tertiary">
-                  还没有取到这个设备的属性定义。这里会按设备 MIoT Spec 展示可选属性和值。
+                  {t("automation.noPropDef")}
                 </div>
               ) : null}
               {sourceKind === "device_event" && selectedEventKey && eventArguments().length === 0 ? (
                 <div className="rounded-md border border-dashed border-border bg-bg-primary px-3 py-2 text-caption text-text-tertiary">
-                  这个事件没有可配置参数；只要该事件发生就会触发。
+                  {t("automation.noParamDef")}
                 </div>
               ) : null}
               {propFilters.map((pf, idx) => {
@@ -567,7 +571,7 @@ export function AutomationPage({ devices, cameras }: Props) {
                         );
                       }}
                     >
-                      <option value="">-- 选择属性 --</option>
+                      <option value="">{t("automation.selectProp")}</option>
                       {options.map((prop) => (
                         <option key={prop.key} value={prop.key}>
                           {getPropertyDisplayName(prop, prop.key)} {prop.unit ? "(" + prop.unit + ")" : ""}
@@ -581,7 +585,7 @@ export function AutomationPage({ devices, cameras }: Props) {
                     >
                       {allowedOps.map((op) => (
                         <option key={op.value} value={op.value}>
-                          {op.label}
+                          {t(op.label)}
                         </option>
                       ))}
                     </select>
@@ -600,7 +604,7 @@ export function AutomationPage({ devices, cameras }: Props) {
                     ) : (
                       <input
                         className="flex-1 rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
-                        placeholder={selectedProp?.value_range ? `${selectedProp.value_range.min} ~ ${selectedProp.value_range.max}` : numericProp ? "输入数值" : "输入属性值"}
+                        placeholder={selectedProp?.value_range ? `${selectedProp.value_range.min} ~ ${selectedProp.value_range.max}` : numericProp ? t("automation.inputNumber") : t("automation.inputValue")}
                         value={pf.value}
                         onChange={(e) => updatePropFilter(idx, "value", e.target.value)}
                       />
@@ -621,27 +625,27 @@ export function AutomationPage({ devices, cameras }: Props) {
                 onClick={addPropFilter}
                 disabled={sourceKind === "device_event" && (!selectedEventKey || eventArguments().length === 0)}
               >
-                {sourceKind === "device_event" ? "+ 添加触发参数" : "+ 添加属性筛选"}
+                {sourceKind === "device_event" ? t("automation.addTriggerParam") : t("automation.addPropFilter")}
               </button>
             </div>
           )}
 
           <div>
-            <label className="block text-caption text-text-secondary mb-1">感知提示（可选）</label>
+            <label className="block text-caption text-text-secondary mb-1">{t("automation.perceptionHint")}</label>
             <p className="mb-1 text-xs text-text-tertiary">
-              这是一段会附加到触发感知里的默认提示词，用来告诉模型重点看什么。
+              {t("automation.perceptionHintDesc")}
             </p>
             <input
               className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
-              placeholder="例如：重点看窗边是否有人、门窗是否打开、有没有异常动作"
+              placeholder={t("automation.perceptionPlaceholder")}
               value={queryTemplate}
               onChange={(e) => setQueryTemplate(e.target.value)}
             />
           </div>
           <div>
-            <label className="block text-caption text-text-secondary mb-1">冷却时间（秒）</label>
+            <label className="block text-caption text-text-secondary mb-1">{t("automation.cooldown")}</label>
             <p className="mb-1 text-xs text-text-tertiary">
-              同一事件源命中后，在这段时间内重复触发会被忽略，避免频繁感知。
+              {t("automation.cooldownDesc")}
             </p>
             <input
               className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
@@ -653,10 +657,10 @@ export function AutomationPage({ devices, cameras }: Props) {
             />
           </div>
           <div className="md:col-span-2">
-            <label className="block text-caption text-text-secondary mb-1">备注</label>
+            <label className="block text-caption text-text-secondary mb-1">{t("automation.notes")}</label>
             <input
               className="w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-caption"
-              placeholder="可选"
+              placeholder={t("automation.notesPlaceholder")}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
             />
@@ -676,7 +680,7 @@ export function AutomationPage({ devices, cameras }: Props) {
               onClick={handleCreate}
               disabled={createDisabled}
             >
-              保存触发配置
+              {t("automation.save")}
             </button>
           </div>
         </div>
@@ -685,9 +689,9 @@ export function AutomationPage({ devices, cameras }: Props) {
       {/* Existing Mappings */}
       <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
         <div>
-          <h2 className="text-title text-text-primary">已配置感知触发</h2>
+          <h2 className="text-title text-text-primary">{t("automation.existingTitle")}</h2>
           <p className="text-caption text-text-tertiary">
-            {mappings.data?.length ?? 0} 条配置。命中配置后会按规则触发对应摄像头感知。
+            {t("automation.existingDesc", { count: mappings.data?.length ?? 0 })}
           </p>
         </div>
         <div className="space-y-3">
@@ -699,7 +703,7 @@ export function AutomationPage({ devices, cameras }: Props) {
                     {item.source_name_snapshot || item.source_id}
                   </div>
                   <div className="text-caption text-text-tertiary">
-                    {getMappingKindLabel(item)} . 摄像头: {item.camera_dids.length} 个 . 冷却: {item.cooldown_seconds}s
+                    {t(getMappingKindLabel(item))} . {t("automation.camerasLabel")}: {t("automation.camerasCount", { count: item.camera_dids.length })} . {t("automation.cooldownLabel")}: {item.cooldown_seconds}s
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -708,14 +712,14 @@ export function AutomationPage({ devices, cameras }: Props) {
                     className="rounded-md border border-border px-3 py-1.5 text-caption"
                     onClick={() => runTest(item)}
                   >
-                    测试触发
+                    {t("automation.testTrigger")}
                   </button>
                   <button
                     type="button"
                     className={"rounded-md px-3 py-1.5 text-caption " + (item.enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500")}
                     onClick={() => toggleEnabled(item)}
                   >
-                    {item.enabled ? "已启用" : "已停用"}
+                    {item.enabled ? t("automation.enabled") : t("automation.disabled")}
                   </button>
                   <button
                     type="button"
@@ -728,18 +732,18 @@ export function AutomationPage({ devices, cameras }: Props) {
                       logs.reload();
                     }}
                   >
-                    删除
+                    {t("automation.delete")}
                   </button>
                 </div>
               </div>
               {item.query_template ? (
                 <div className="mt-3 text-caption text-text-secondary">
-                  感知提示：{item.query_template}
+                  {t("automation.perceptionHintLabel")}{item.query_template}
                 </div>
               ) : null}
               {item.event_kinds.some((kind) => kind.startsWith("event.")) ? (
                 <div className="mt-3 text-caption text-text-secondary">
-                  事件：{mappingSpecMeta[item.source_id]?.names[item.event_kinds[0]] || item.event_kinds[0]}
+                  {t("automation.eventLabel")}{mappingSpecMeta[item.source_id]?.names[item.event_kinds[0]] || item.event_kinds[0]}
                 </div>
               ) : null}
               {Object.keys(item.property_filters ?? {}).length > 0 ? (
@@ -755,9 +759,9 @@ export function AutomationPage({ devices, cameras }: Props) {
                         const displayName = specMeta?.names[key] || key;
                         const displayValue =
                           cond.op === "any"
-                            ? "任意值"
+                            ? t("automation.opAny")
                             : getPropertyValueDisplayName(specMeta, key, String(cond.value));
-                        return `${displayName} ${getFilterOpLabel(cond.op)} ${displayValue}`;
+                        return `${displayName} ${t(getFilterOpLabel(cond.op))} ${displayValue}`;
                       })()}
                     </span>
                   ))}
@@ -771,9 +775,9 @@ export function AutomationPage({ devices, cameras }: Props) {
       {/* Debug & Recent Triggers */}
       <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
         <div>
-          <h2 className="text-title text-text-primary">调试与最近触发</h2>
+          <h2 className="text-title text-text-primary">{t("automation.debugTitle")}</h2>
           <p className="text-caption text-text-tertiary">
-            查看是否命中映射、是否发起感知、是否进入规则执行，以及跳过原因。
+            {t("automation.debugDesc")}
           </p>
         </div>
         <div className="space-y-3">
@@ -789,7 +793,7 @@ export function AutomationPage({ devices, cameras }: Props) {
                   </div>
                 </div>
                 <div className="text-caption text-text-tertiary">
-                  {log.error || log.skipped_reason || (log.perception_started ? "已感知" : "未感知")}
+                  {log.error || log.skipped_reason || (log.perception_started ? t("automation.perceived") : t("automation.notPerceived"))}
                 </div>
               </div>
               {log.clip_kind && log.clip_device_ids?.length > 0 ? (
