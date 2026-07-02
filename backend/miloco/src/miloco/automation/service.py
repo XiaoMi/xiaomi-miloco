@@ -660,15 +660,6 @@ class AutomationService:
             log_item.error = str(e)
             return log_item
 
-        if result is not None and not result.suggestions:
-            fallback_suggestion = _fallback_suggestion_from_caption(
-                trigger,
-                active_mappings,
-                result.caption,
-            )
-            if fallback_suggestion is not None:
-                result.suggestions.append(fallback_suggestion)
-
         captions = [entry.description for entry in (result.caption if result else [])]
         suggestions = [
             suggestion.model_dump(mode="json")
