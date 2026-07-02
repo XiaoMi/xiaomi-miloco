@@ -581,7 +581,7 @@ mark_done 1.9
 
 step 1.10 "patch backend (v2 per-modality toggles)"
 
-FORK_SRC="$(dirname "$HERE")/../../backend/miloco/src/miloco"
+FORK_SRC="$(dirname "$(dirname "$HERE")")/backend/miloco/src/miloco"
 if [ ! -d "$FORK_SRC/miot" ]; then
   warn "找不到 fork backend 源码: $FORK_SRC"
   warn "(clone 的 repo 不含 backend 目录? 跳过 backend patch)"
