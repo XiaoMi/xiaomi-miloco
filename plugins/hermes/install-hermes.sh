@@ -564,6 +564,73 @@ except Exception as e:
 fi
 mark_done 1.9
 
+# --- 1.10 patch backend(v2 per-modality toggles) ---
+# 为什么: 上游 release 是 v1 schema(CameraToggleItem 只有 did+in_use),
+# 前端 v3 感知设备列表发 video_enabled/audio_enabled 被 v1 backend strip 掉,
+# 4 个场景(单独关视频/单独关音频/批量视频开/批量音频开)全部失效。
+# 修法: fork 仓库里 v2 backend 代码(perception-toggles 分支改的)直接
+# cp 到 miloco wheel 安装目录,覆盖 v1。
+#
+# 覆盖哪些:
+#   miloco/miot/{schema,router,service,filter}.py
+#   miloco/perception/collect/camera_adapter.py
+#   miloco/database/kv_repo.py
+#
+# 跳过条件: 找不到 fork 源码目录(可能 clone 了非 integration branch)
+#  或 import miloco 失败(venv 未配)
+
+step 1.10 "patch backend (v2 per-modality toggles)"
+
+FORK_SRC="$(dirname "$HERE")/../../backend/miloco/src/miloco"
+if [ ! -d "$FORK_SRC/miot" ]; then
+  warn "找不到 fork backend 源码: $FORK_SRC"
+  warn "(clone 的 repo 不含 backend 目录? 跳过 backend patch)"
+else
+  # 拿 miloco package 安装目录(static_dir 往上 1 级)
+  MILOCO_PKG="$("$MILOCO_PY" -c "
+try:
+    from pathlib import Path
+    from miloco.config.settings import get_settings
+    d = Path(get_settings().directories.static_dir).parent
+    print(d)
+except Exception:
+    pass
+" 2>/dev/null)"
+  if [ -z "$MILOCO_PKG" ] || [ ! -d "$MILOCO_PKG/miot" ]; then
+    warn "找不到 miloco package 安装目录(import miloco 失败)"
+    warn "(venv 配错,跳过 backend patch)"
+  else
+    # miot/
+    for _f in schema.py router.py service.py filter.py; do
+      _src="$FORK_SRC/miot/$_f"
+      _dst="$MILOCO_PKG/miot/$_f"
+      if [ -f "$_src" ]; then
+        cp "$_src" "$_dst"
+        info "  miot/$_f ✓"
+      fi
+    done
+    # perception/collect/camera_adapter.py
+    _src="$FORK_SRC/perception/collect/camera_adapter.py"
+    _dst="$MILOCO_PKG/perception/collect/camera_adapter.py"
+    if [ -f "$_src" ]; then
+      mkdir -p "$(dirname "$_dst")"
+      cp "$_src" "$_dst"
+      info "  perception/collect/camera_adapter.py ✓"
+    fi
+    # database/kv_repo.py
+    _src="$FORK_SRC/database/kv_repo.py"
+    _dst="$MILOCO_PKG/database/kv_repo.py"
+    if [ -f "$_src" ]; then
+      mkdir -p "$(dirname "$_dst")"
+      cp "$_src" "$_dst"
+      info "  database/kv_repo.py ✓"
+    fi
+    warn "提示: backend 文件已更新(v2 per-modality),需要重启 backend"
+    warn "      miloco-cli service restart 后单路开关才生效"
+  fi
+fi
+mark_done 1.10
+
 # --- 2. 拿/复用 Bearer ---
 step 2 "拿/复用 adapter Bearer"
 # 优先级：.env 已有的 API_SERVER_KEY > 旧 adapter pid 存在则重新生成 > 新生成
