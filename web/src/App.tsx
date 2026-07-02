@@ -14,6 +14,7 @@ import {
   listScopeCameras,
   listScopeHomes,
   listTasks,
+  listRules,
   refreshCameraOnline,
   pausePerception,
   resumePerception,
@@ -33,6 +34,7 @@ import { PersonDrawer } from "./components/PersonDrawer";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
 import { TaskListPanel } from "./components/TaskListPanel";
+import { RuleListPanel } from "./components/RuleListPanel";
 import { CandidateReviewPanel } from "./components/CandidateReviewPanel";
 import { MiotBindDialog } from "./components/MiotBindDialog";
 import { ToastHost, toast } from "./components/Toast";
@@ -152,6 +154,10 @@ function MainApp() {
   // miloco 为家庭创建的持续任务——家庭 tab 家庭档案卡下方展示。
   const tasks = useAsync(() => listTasks(homeId), [homeId], {
     errorLabel: t("app.loadTasksFail"),
+  });
+  // 规则列表
+  const rules = useAsync(() => listRules(homeId), [homeId], {
+    errorLabel: "加载规则失败",
   });
 
   // ── 字号 / 抽屉 / 弹层 ─────────────────────────
@@ -351,6 +357,14 @@ function MainApp() {
       }
       case "usage":
         return <UsagePage />;
+      case "rules":
+        return (
+          <RuleListPanel
+            rules={rules.data ?? []}
+            loading={rules.loading}
+            onChanged={() => rules.reload()}
+          />
+        );
     }
   };
 

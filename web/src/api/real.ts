@@ -11,6 +11,7 @@ import i18n from "@/i18n";
 import type {
   ActivityEvent,
   Device,
+  Rule,
   DeviceCategory,
   DeviceProperty,
   HomeEntries,
@@ -1521,3 +1522,27 @@ export async function realDeleteTask(taskId: string): Promise<void> {
     { method: "DELETE" },
   );
 }
+
+// ── 规则（rule）─────────────────────────────────────────────
+export async function realListRules(): Promise<Rule[]> {
+  const r = await apiFetch<Normal<Rule[]>>("/api/rules");
+  return r.data ?? [];
+}
+
+export async function realToggleRule(
+  ruleId: string,
+  enabled: boolean,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(`/api/rules/${encodeURIComponent(ruleId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function realTriggerRule(ruleId: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/rules/${encodeURIComponent(ruleId)}/trigger`,
+    { method: "POST", body: JSON.stringify({ context: "manual_trigger_from_dashboard" }) },
+  );
+}
+

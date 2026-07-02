@@ -554,6 +554,48 @@ export interface MemorySeries {
   points: MemoryPoint[];
 }
 
+
+// ── 规则（rule）────────────────────────────────────────────
+export type RuleMode = "event" | "state";
+export type RuleLifecycle = "permanent" | "temporary";
+
+export interface RuleAction {
+  did: string;
+  iid: string;
+  value?: unknown;
+  params?: unknown[];
+  idempotent: boolean;
+  cooldown_minutes?: number | null;
+}
+
+export interface RuleCondition {
+  perceive_device_ids: string[];
+  query: string;
+}
+
+export interface Rule {
+  id: string;
+  name: string;
+  task_id: string;
+  mode: RuleMode;
+  lifecycle: RuleLifecycle;
+  enabled: boolean;
+  condition: RuleCondition;
+  actions: RuleAction[];
+  action_descriptions: string[];
+  on_enter_actions: RuleAction[];
+  on_enter_desc: string | null;
+  on_exit_actions: RuleAction[];
+  on_exit_desc: string | null;
+  on_target_desc: string | null;
+  terminate_when: string | null;
+  exit_debounce_seconds: number;
+  duration_seconds: number | null;
+  duration_ratio: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 // === Monitor meta (/monitor/) ===
 
 export interface MonitorMeta {

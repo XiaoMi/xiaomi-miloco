@@ -514,3 +514,21 @@ export async function getMemorySeries(
     `/api/monitor/memory/series?window=${w}&bucket=${bucket}`,
   );
 }
+
+// ── 规则（rule）─────────────────────────────────────────────
+import type { Rule } from "@/lib/types";
+export type { Rule };
+
+export async function listRules(homeId?: HomeId): Promise<Rule[]> {
+  if (!isPrimary(homeId)) return [];
+  return impl.realListRules();
+}
+
+export async function toggleRule(ruleId: string, enabled: boolean): Promise<void> {
+  return impl.realToggleRule(ruleId, enabled);
+}
+
+export async function triggerRule(ruleId: string): Promise<void> {
+  return impl.realTriggerRule(ruleId);
+}
+
