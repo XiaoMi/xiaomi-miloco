@@ -678,11 +678,15 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
             <span className="text-info">
               ✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}
               {packPath && <>，<button type="button" onClick={() => { revealDir(packPath.substring(0, packPath.lastIndexOf("/"))).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
+              ，<a href="https://mi.feishu.cn/share/base/form/shrcnUmo9ez8NwkcpvpJsKSOdgd" target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink", "提交反馈")}</a>
             </span>
             <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
               {t("activity.feedbackModify", "修改反馈信息")}
             </button>
           </div>
+          {packPath && (
+            <div className="mt-1.5 text-[10px] text-text-tertiary font-mono truncate" title={packPath}>{packPath}</div>
+          )}
         </div>
       );
     }
