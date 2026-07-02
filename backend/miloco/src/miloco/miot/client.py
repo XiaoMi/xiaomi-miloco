@@ -1008,12 +1008,27 @@ class MiotProxy:
             return
 
         async def _sub(did: str) -> str | None:
-            try:
-                await self._miot_client.sub_device_property_changed_async(did)
-                return did
-            except Exception as e:
-                logger.error("subscribe device-property failed did=%s: %s", did, e)
-                return None
+            # 同 _sync_event_subscriptions：先 unsub 清理残留再 sub + Not authorized retry。
+            for attempt in range(3):
+                try:
+                    await self._miot_client.unsub_device_property_changed_async(did)
+                    await asyncio.sleep(5)
+                except Exception:
+                    pass
+                try:
+                    await self._miot_client.sub_device_property_changed_async(did)
+                    return did
+                except Exception as e:
+                    if "Not authorized" in str(e) and attempt < 2:
+                        logger.warning(
+                            "subscribe device-property Not authorized, retry %d/3 in 5s: did=%s",
+                            attempt + 1, did,
+                        )
+                        await asyncio.sleep(5)
+                        continue
+                    logger.error("subscribe device-property failed did=%s: %s", did, e)
+                    return None
+            return None
 
         async def _unsub(did: str) -> str | None:
             try:
@@ -1062,12 +1077,29 @@ class MiotProxy:
             return
 
         async def _sub(did: str) -> str | None:
-            try:
-                await self._miot_client.sub_device_event_occurred_async(did)
-                return did
-            except Exception as e:
-                logger.error("subscribe device-event failed did=%s: %s", did, e)
-                return None
+            # 重启后米家云端可能残留旧 client_id 的订阅，新 client 的 sub 虽返回
+            # 成功但推送仍绑定在已断开的旧 client。先 unsub 清理残留再 sub。
+            # 遇 Not authorized 等 5s retry（meta ACL propagate 延迟）。
+            for attempt in range(3):
+                try:
+                    await self._miot_client.unsub_device_event_occurred_async(did)
+                    await asyncio.sleep(5)
+                except Exception:
+                    pass  # unsub 失败（无残留）忽略
+                try:
+                    await self._miot_client.sub_device_event_occurred_async(did)
+                    return did
+                except Exception as e:
+                    if "Not authorized" in str(e) and attempt < 2:
+                        logger.warning(
+                            "subscribe device-event Not authorized, retry %d/3 in 5s: did=%s",
+                            attempt + 1, did,
+                        )
+                        await asyncio.sleep(5)
+                        continue
+                    logger.error("subscribe device-event failed did=%s: %s", did, e)
+                    return None
+            return None
 
         async def _unsub(did: str) -> str | None:
             try:
