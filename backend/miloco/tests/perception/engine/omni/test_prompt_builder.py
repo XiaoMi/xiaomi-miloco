@@ -778,6 +778,11 @@ class TestSceneAssembly:
         assert "本轮只有音频" in sp
         assert "不得声明 video 证据" in sp
         assert "本轮仅音频" in sp
+        # 防幻听「画面互证」条款只属于 video 版字段说明——纯音频轮若泄入，
+        # 「画面视野内看不到迹象」恒空真，会把真实的玻璃碎/婴儿哭误判成"误听"。
+        # 回归钉：env_sounds/suggestions 的 spec_md 引入画面措辞后必须走 spec_md_audio 变体。
+        for tok in ("画面互证", "画面视野内", "画面外", "房间空无一人"):
+            assert tok not in sp, f"audio 路由 prompt 泄入视觉互证措辞 {tok!r}"
         # video 路由仍完整保留 matched_rules（未被波及）
         sp_v = self._sp(route="video", has_identity=False)
         assert "## matched_rules" in sp_v
