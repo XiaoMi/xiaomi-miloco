@@ -1125,8 +1125,8 @@ export async function realSubmitEventFeedback(
   };
 }
 
-export async function realRevealFile(path: string): Promise<void> {
-  await apiFetch<Normal<null>>("/api/admin/reveal-file", {
+export async function realRevealDir(path: string): Promise<void> {
+  await apiFetch<Normal<null>>("/api/admin/reveal-dir", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),

@@ -144,11 +144,11 @@ class EventsService:
         if not packs_dir.exists():
             return {}
         index: dict[str, tuple[str, int, float]] = {}
-        for p in packs_dir.glob("feedback-*.tar.gz"):
-            m = EventsService._UUID_RE.search(p.name)
-            if not m:
+        for p in packs_dir.rglob("feedback-*.tar.gz"):
+            matches = EventsService._UUID_RE.findall(p.name)
+            if not matches:
                 continue
-            eid = m.group(0)
+            eid = matches[-1]
             try:
                 st = p.stat()
                 prev = index.get(eid)
