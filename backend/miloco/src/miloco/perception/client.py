@@ -84,6 +84,18 @@ def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
+def _stamp_suggestion_event_time(
+    suggestions: list[Suggestion],
+    event_timestamp_ms: float | int,
+) -> None:
+    if not suggestions or event_timestamp_ms <= 0:
+        return
+    event_ts = int(event_timestamp_ms)
+    for s in suggestions:
+        if s._event_timestamp_ms is None:
+            s._event_timestamp_ms = event_ts
+
+
 def _filter_completed_event_rules(
     rules: list[dict],
 ) -> tuple[list[dict], list[str]]:
@@ -443,6 +455,7 @@ class PerceptionEngineProxy:
             # 这里收到的已是经事件链闸门过滤后的「新链」suggestion——心跳/重复在
             # pipeline 层（_wrap_suggestions_cb → assign_id_and_update_link）已抑制。
             # 剔除 engine 内部字段（id）后外发。
+            _stamp_suggestion_event_time(suggestions, batched_snapshot.captured_at)
             for s in suggestions:
                 if s.id is not None:
                     early_sent_sugg_ids.add(s.id)  # 终态 merge 会把同一新链保留进 result，发送侧据此跳过
@@ -485,6 +498,7 @@ class PerceptionEngineProxy:
         pipeline_ms = _ms_since(t)
 
         if result:
+            _stamp_suggestion_event_time(result.suggestions, batched_snapshot.captured_at)
             # Inject proxy-level timing into result.timing (prefixed with _ to
             # distinguish from engine-internal keys).
             timing = result.timing or {}

@@ -94,6 +94,8 @@ async def run_agent_turn(
     lane: str,
     trace_id: str,
     wait_timeout_ms: int,
+    created_at_ms: int | None = None,
+    expires_at_ms: int | None = None,
 ) -> tuple[str | None, str, float]:
     """投递一条消息并**同步等待**该 turn 结束(或超时),返回 ``(run_id, status, rtt_ms)``。
 
@@ -106,18 +108,23 @@ async def run_agent_turn(
     抛 :class:`AgentWebhookException`,由调用方(drainer)捕获跳过,本函数不兜底。
     """
     started_at = time.monotonic()
+    payload: dict[str, Any] = {
+        "message": text,
+        "sessionKey": session_key,
+        "lane": lane,
+        "traceId": trace_id,
+        # 批次稳定幂等键:HTTP 真断(turn 已起但响应丢)后 dispatcher 重试会发新
+        # 请求,平台按此键去重,避免同会话并发起第二个 turn 击穿 "在途 turn ≤ 1"。
+        "idempotencyKey": trace_id,
+        "timeoutMs": wait_timeout_ms,
+    }
+    if created_at_ms is not None:
+        payload["createdAtMs"] = created_at_ms
+    if expires_at_ms is not None:
+        payload["expiresAtMs"] = expires_at_ms
     data = await call_agent_webhook(
         "agent",
-        {
-            "message": text,
-            "sessionKey": session_key,
-            "lane": lane,
-            "traceId": trace_id,
-            # 批次稳定幂等键:HTTP 真断(turn 已起但响应丢)后 dispatcher 重试会发新
-            # 请求,平台按此键去重,避免同会话并发起第二个 turn 击穿 "在途 turn ≤ 1"。
-            "idempotencyKey": trace_id,
-            "timeoutMs": wait_timeout_ms,
-        },
+        payload,
         timeout=wait_timeout_ms / 1000 + _HTTP_BUFFER_S,
     )
     rtt_ms = (time.monotonic() - started_at) * 1000

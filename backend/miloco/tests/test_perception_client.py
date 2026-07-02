@@ -244,6 +244,27 @@ async def test_no_executor_fallback_runs_callback_inline(proxy):
     assert seen == [(id(main_loop), main_thread)]
 
 
+async def test_realtime_impl_stamps_suggestion_event_time(proxy):
+    from miloco.perception.types import BatchedSnapshot, Suggestion
+
+    captured_at = 1_700_000_000_000
+    main_loop = asyncio.get_running_loop()
+
+    async def engine_realtime(*args, **kwargs):
+        return RealtimePerceptionResult(
+            suggestions=[Suggestion(event="婴儿哭声", action="查看", urgency="high", id=1)]
+        )
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    result, *_ = await proxy._realtime_perceive_impl(
+        BatchedSnapshot(captured_at=captured_at), [], 0, 0.0, main_loop, [],
+    )
+
+    assert result is not None
+    assert result.suggestions[0]._event_timestamp_ms == captured_at
+
+
 async def test_handle_realtime_skips_early_sent_suggestions(proxy):
     """per-omni:result.suggestions 含本窗全部新链(供 dump/上下文完整),但已早送的
     (id ∈ early_sent_sugg_ids)在发送侧跳过、不对 Agent 重发;未早送的(batch 新链)照常发。

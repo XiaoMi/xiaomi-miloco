@@ -58,6 +58,33 @@ afterEach(() => {
 });
 
 describe("kAgentWebhook 上下文溢出自愈", () => {
+  it("过期 payload 在 subagent.run 前丢弃", async () => {
+    const { api, run, waitForRun, deleteSession } = makeApi({});
+
+    const res = (await kAgentWebhook.action({
+      api,
+      payload: {
+        message: "stale",
+        sessionKey: "agent:main:miloco-suggest",
+        lane: "miloco-suggest",
+        idempotencyKey: "stale-1",
+        createdAtMs: Date.now() - 60 * 60 * 1000,
+        expiresAtMs: Date.now() - 1,
+      },
+    } as never)) as {
+      status: string;
+      dropped?: boolean;
+      reason?: string;
+    };
+
+    expect(run).not.toHaveBeenCalled();
+    expect(waitForRun).not.toHaveBeenCalled();
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(res.status).toBe("ok");
+    expect(res.dropped).toBe(true);
+    expect(res.reason).toBe("expired");
+  });
+
   it("溢出 → deleteSession 一次 → 重试成功 → recovered=true", async () => {
     peekTurnMetaMock.mockImplementation((runId: string) =>
       runId === "t1"

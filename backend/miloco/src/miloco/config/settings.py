@@ -250,6 +250,19 @@ class PerceptionCollectSettings(BaseModel):
     )
 
 
+class PerceptionPushSettings(BaseModel):
+    """感知事件推送时效控制。"""
+
+    max_delay_minutes: float = Field(
+        default=5.0,
+        ge=0.0,
+        description=(
+            "suggestion 推送最大允许延迟（分钟）。超过该阈值的 suggestion "
+            "在进入 agent webhook 前丢弃并打 [DROPPED] 日志；0 表示不做时效丢弃。"
+        ),
+    )
+
+
 class PerceptionSettings(BaseModel):
     """感知管线相关配置。"""
 
@@ -285,6 +298,10 @@ class PerceptionSettings(BaseModel):
     collect: PerceptionCollectSettings = Field(
         default_factory=PerceptionCollectSettings,
         description="采集窗口策略",
+    )
+    push: PerceptionPushSettings = Field(
+        default_factory=PerceptionPushSettings,
+        description="感知事件推送时效控制",
     )
     engine: dict[str, Any] = Field(
         default_factory=dict,
