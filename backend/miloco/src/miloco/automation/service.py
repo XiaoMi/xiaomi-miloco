@@ -730,5 +730,13 @@ class AutomationService:
             log_item.clip_device_ids = [
                 device_id for device_id in camera_ids if device_id in artifacts.clips
             ] if persist_result.snapshot_count > 0 else []
+        if answer:
+            try:
+                event_label = (spec_meta or {}).get("names", {}).get(trigger.event_name) or trigger.event_name
+                await miot_service.send_notify(
+                    f"[米家设备触发]\n来源：{trigger.source_name or trigger.source_id}\n事件：{event_label}\n{answer}"
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("automation notify failed: %s", e)
         return log_item
 

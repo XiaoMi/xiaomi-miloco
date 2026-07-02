@@ -15,6 +15,7 @@ import click
 
 from miloco_cli.commands.account import account_group
 from miloco_cli.commands.admin import admin_group
+from miloco_cli.commands.automation import automation_group
 from miloco_cli.commands.config import config_group
 from miloco_cli.commands.dashboard import dashboard_cmd
 from miloco_cli.commands.debug import debug_group
@@ -76,6 +77,7 @@ cli.add_command(account_group)
 cli.add_command(scene_group)
 cli.add_command(perceive_group)
 cli.add_command(rule_group)
+cli.add_command(automation_group)
 cli.add_command(task_group)
 cli.add_command(person_group)
 cli.add_command(identity_group)
