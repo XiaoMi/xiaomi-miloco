@@ -305,8 +305,8 @@ export async function submitEventFeedback(
   return impl.realSubmitEventFeedback(eventId, errorTypes, feedbackText, includeGallery);
 }
 
-export async function revealFile(path: string): Promise<void> {
-  return impl.realRevealFile(path);
+export async function revealDir(path: string): Promise<void> {
+  return impl.realRevealDir(path);
 }
 
 // ── 让它休息 / 唤醒 ────────────────────────────────────────

@@ -267,35 +267,39 @@ async def submit_event_feedback(
     )
 
 
-class RevealFileBody(BaseModel):
+class RevealDirBody(BaseModel):
     path: str
 
 
 @router.post(
-    "/reveal-file",
-    summary="在系统文件管理器中显示指定文件",
+    "/reveal-dir",
+    summary="在系统文件管理器中打开指定目录",
     response_model=NormalResponse,
 )
-async def reveal_file(
-    body: RevealFileBody,
+async def reveal_dir(
+    body: RevealDirBody,
     current_user: str = Depends(verify_token),
 ):
-    """macOS: open -R, Linux: xdg-open 父目录."""
+    """macOS: open <dir>, Linux: xdg-open <dir>."""
     import asyncio
     import platform
     import subprocess
     from pathlib import Path
 
-    file_path = Path(body.path)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="file not found")
+    from miloco.utils.paths import miloco_home
+    dir_path = Path(body.path).resolve()
+    allowed_root = (miloco_home() / "packs").resolve()
+    if not dir_path.is_relative_to(allowed_root):
+        raise HTTPException(status_code=403, detail="path outside allowed directory")
+    if not dir_path.is_dir():
+        raise HTTPException(status_code=404, detail="directory not found")
 
     system = platform.system()
     try:
         if system == "Darwin":
-            cmd = ["open", "-R", str(file_path)]
+            cmd = ["open", str(dir_path)]
         else:
-            cmd = ["xdg-open", str(file_path.parent)]
+            cmd = ["xdg-open", str(dir_path)]
         await asyncio.to_thread(subprocess.run, cmd, timeout=5)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

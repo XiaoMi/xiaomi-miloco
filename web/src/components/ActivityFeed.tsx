@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { eventClipUrl, listActivity, revealFile, submitEventFeedback, subscribeEvents } from "@/api";
+import { eventClipUrl, listActivity, revealDir, submitEventFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
 import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
@@ -188,6 +188,10 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
               // 或 publish 重试)时,后到的 clip_kind 应胜出 — 漏掉的话会回归 18:42:05
               // bug(行尾错显 🎬 / 展开走 <video> 黑屏).
               clip_kind: e.clip_kind ?? prev[idx].clip_kind,
+              has_trace: e.has_trace ?? prev[idx].has_trace,
+              has_feedback: e.has_feedback ?? prev[idx].has_feedback,
+              feedback_pack_path: e.feedback_pack_path ?? prev[idx].feedback_pack_path,
+              feedback_pack_size: e.feedback_pack_size ?? prev[idx].feedback_pack_size,
             };
             const next = prev.slice();
             next[idx] = merged;
@@ -608,7 +612,6 @@ function ActivityRow({
             eventId={event.id}
             hasFeedback={event.has_feedback || feedbackSet.has(event.id)}
             packPath={feedbackPacks.get(event.id)?.path ?? event.feedback_pack_path}
-            packSize={feedbackPacks.get(event.id)?.size ?? event.feedback_pack_size}
             onSubmitted={onFeedbackSubmitted}
           />
         </div>
@@ -627,11 +630,10 @@ const ERROR_TYPE_KEYS = [
   "other",
 ] as const;
 
-function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted }: {
+function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
   eventId: string;
   hasFeedback?: boolean;
   packPath?: string | null;
-  packSize?: number | null;
   onSubmitted: (eventId: string, path: string, size: number) => void;
 }) {
   const { t } = useTranslation();
@@ -640,11 +642,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [text, setText] = useState("");
   const [includeGallery, setIncludeGallery] = useState(false);
-  const [status, setStatus] = useState<"idle" | "submitting" | "success" | "saved" | "error">("idle");
-  const [packInfo, setPackInfo] = useState<{ path: string; size: number } | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+  const [status, setStatus] = useState<"idle" | "submitting" | "error">("idle");
 
   const handleToggle = (type: string) => {
     setSelected((prev) => {
@@ -659,19 +657,13 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
     setStatus("submitting");
     try {
       const result = await submitEventFeedback(eventId, [...selected], text, includeGallery);
-      setPackInfo({ path: result.pack_path, size: result.pack_size_bytes });
       onSubmitted(eventId, result.pack_path, result.pack_size_bytes);
       setConfirmedResubmit(false);
-      const nextStatus = result.uploaded ? "success" : "saved";
-      setStatus(nextStatus);
-      timerRef.current = setTimeout(() => {
-        timerRef.current = null;
-        setStatus("idle");
-        setOpen(false);
-        setSelected(new Set());
-        setText("");
-        setIncludeGallery(false);
-      }, nextStatus === "success" ? 3000 : 5000);
+      setStatus("idle");
+      setOpen(false);
+      setSelected(new Set());
+      setText("");
+      setIncludeGallery(false);
     } catch {
       setStatus("error");
     }
@@ -681,22 +673,14 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
   if (!open && status === "idle") {
     if (hasFeedback && !confirmedResubmit) {
       return (
-        <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(37,99,235,.06)", color: "#2563EB" }} onClick={(e) => e.stopPropagation()}>
-          <div>✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}</div>
-          {packPath && (
-            <div className="mt-1.5 text-[11px] text-text-tertiary space-y-0.5">
-              <div>{t("activity.feedbackPath", "文件路径")}：<code className="bg-bg-secondary px-1.5 py-0.5 rounded text-[10px] font-mono border border-border select-all">{packPath}</code></div>
-              {packSize != null && <div>{t("activity.feedbackSize", "数据包大小")}：{(packSize / 1024).toFixed(0)} KB</div>}
-            </div>
-          )}
-          <div className="mt-1.5 flex items-center gap-3">
-            {packPath && (
-              <button type="button" onClick={() => revealFile(packPath)} className="text-[11px] text-brand-primary hover:underline">
-                {t("activity.feedbackReveal", "打开所在文件夹")}
-              </button>
-            )}
-            <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="text-[11px] text-brand-primary hover:underline">
-              {t("activity.feedbackResubmit", "再次反馈")}
+        <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg bg-info-bg text-caption" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-baseline justify-between">
+            <span className="text-info">
+              ✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}
+              {packPath && <>，<button type="button" onClick={() => revealDir(packPath.substring(0, packPath.lastIndexOf("/")))} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
+            </span>
+            <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
+              {t("activity.feedbackModify", "修改反馈信息")}
             </button>
           </div>
         </div>
@@ -722,40 +706,6 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
       <div className="mt-2.5 sm:ml-[82px] flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-bg-tertiary text-caption text-text-secondary" onClick={(e) => e.stopPropagation()}>
         <span className="inline-block w-3 h-3 border-2 border-border border-t-brand-primary rounded-full animate-spin" />
         {t("activity.feedbackSubmitting", "正在打包感知数据...")}
-      </div>
-    );
-  }
-
-  // success (uploaded)
-  if (status === "success") {
-    return (
-      <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(22,163,74,.06)", color: "#16A34A" }} onClick={(e) => e.stopPropagation()}>
-        <div>✓ {t("activity.feedbackUploaded", "反馈已提交，感谢反馈")}</div>
-        {packInfo && (
-          <div className="mt-1 text-[11px] opacity-70">
-            {t("activity.feedbackSize", "数据包大小")}: {(packInfo.size / 1024).toFixed(0)} KB
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // saved (local)
-  if (status === "saved") {
-    return (
-      <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(37,99,235,.06)", color: "#2563EB" }} onClick={(e) => e.stopPropagation()}>
-        <div>✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}</div>
-        {packInfo && (
-          <div className="mt-1.5 text-[11px] text-text-tertiary space-y-0.5">
-            <div>{t("activity.feedbackPath", "文件路径")}：<code className="bg-bg-secondary px-1.5 py-0.5 rounded text-[10px] font-mono border border-border select-all">{packInfo.path}</code></div>
-            <div>{t("activity.feedbackSize", "数据包大小")}：{(packInfo.size / 1024).toFixed(0)} KB</div>
-          </div>
-        )}
-        {packInfo && (
-          <button type="button" onClick={() => revealFile(packInfo.path)} className="mt-1.5 text-[11px] text-brand-primary hover:underline">
-            {t("activity.feedbackReveal", "打开所在文件夹")}
-          </button>
-        )}
       </div>
     );
   }

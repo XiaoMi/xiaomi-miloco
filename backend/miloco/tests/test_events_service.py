@@ -324,6 +324,18 @@ class TestBuildFeedbackIndex:
         idx = EventsService._build_feedback_index()
         assert idx == {}
 
+    def test_finds_pack_in_timestamp_subdir(self, tmp_path, monkeypatch):
+        eid = "12345678-1234-1234-1234-123456789abc"
+        packs = tmp_path / "packs"
+        subdir = packs / "20260701-143025"
+        subdir.mkdir(parents=True)
+        (subdir / f"feedback-user123-{eid}-20260701-143025.tar.gz").write_bytes(b"x")
+        monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
+        from miloco.perception.events_service import EventsService
+        idx = EventsService._build_feedback_index()
+        assert eid in idx
+        assert "20260701-143025" in idx[eid][0]
+
 
 class TestManagerSingleton:
     async def test_lazy_singleton(self, isolated_db):

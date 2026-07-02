@@ -39,19 +39,24 @@ _PII_PATTERNS = [
 
 
 def _cleanup_by_total_size(packs_dir: Path, max_total_mb: int = _MAX_TOTAL_MB) -> None:
-    """feedback pack 总大小超限时按 mtime 从旧到新删."""
-    files = sorted(
-        packs_dir.glob(f"{_PACK_PREFIX}*{_PACK_SUFFIX}"),
-        key=lambda p: p.stat().st_mtime,
-    )
-    total = sum(p.stat().st_size for p in files)
+    """feedback pack 总大小超限时按目录名(时间戳序)从旧到新删."""
+    entries: list[tuple[Path, int]] = []
+    for d in packs_dir.iterdir():
+        if not d.is_dir() or not d.name[:8].isdigit():
+            continue
+        try:
+            size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            entries.append((d, size))
+        except OSError:
+            continue
+    entries.sort(key=lambda x: x[0].name)
+    total = sum(size for _, size in entries)
     limit = max_total_mb * 1024 * 1024
-    for p in files:
+    for d, size in entries:
         if total <= limit:
             break
         try:
-            size = p.stat().st_size
-            p.unlink()
+            shutil.rmtree(d)
             total -= size
         except OSError:
             pass
@@ -108,8 +113,9 @@ def build_feedback_pack(
     include_gallery: bool = False,
     uid: str = "",
 ) -> dict:
-    """打包单事件反馈数据 -> $MILOCO_HOME/packs/feedback-{uid}-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
+    """打包单事件反馈数据 -> $MILOCO_HOME/packs/{YYYYMMDD-HHMMSS-xxxxxx}/feedback-{uid}-{event_id}-YYYYMMDD-HHMMSS.tar.gz.
 
+    每次打包创建独立的时间戳子目录,用户可直接在文件管理器中打开.
     uid 取不到时文件名中的 {uid} 段落地为字面量 "anonymous".
 
     Args:
@@ -190,9 +196,13 @@ def build_feedback_pack(
 
     packs_dir = _packs_dir()
     packs_dir.mkdir(parents=True, exist_ok=True)
+    import uuid as _uuid
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    short_id = _uuid.uuid4().hex[:6]
     uid_slug = uid if uid else "anonymous"
-    final_path = packs_dir / f"{_PACK_PREFIX}{uid_slug}-{event_id}-{stamp}{_PACK_SUFFIX}"
+    pack_dir = packs_dir / f"{stamp}-{short_id}"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    final_path = pack_dir / f"{_PACK_PREFIX}{uid_slug}-{event_id}-{stamp}{_PACK_SUFFIX}"
 
     with tempfile.TemporaryDirectory() as tmp_root:
         tmp_root_p = Path(tmp_root)
