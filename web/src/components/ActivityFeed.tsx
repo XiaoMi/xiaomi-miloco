@@ -276,7 +276,17 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       ) : (
         <ul className="divide-y divide-border">
           {events.map((e) => (
-            <ActivityRow key={e.id} event={e} onOpenLightbox={setLightboxSrc} feedbackSet={feedbackSet} feedbackPacks={feedbackPacks} onFeedbackSubmitted={(id, path, size) => { setFeedbackSet(prev => new Set(prev).add(id)); setFeedbackPacks(prev => new Map(prev).set(id, { path, size })); }} />
+            <ActivityRow
+              key={e.id}
+              event={e}
+              onOpenLightbox={setLightboxSrc}
+              feedbackSet={feedbackSet}
+              feedbackPacks={feedbackPacks}
+              onFeedbackSubmitted={(id, path, size) => {
+                setFeedbackSet(prev => new Set(prev).add(id));
+                setFeedbackPacks(prev => new Map(prev).set(id, { path, size }));
+              }}
+            />
           ))}
         </ul>
       )}

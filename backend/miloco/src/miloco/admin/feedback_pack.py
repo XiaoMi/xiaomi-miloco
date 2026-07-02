@@ -18,7 +18,9 @@ import re
 import shutil
 import tarfile
 import tempfile
+import uuid as _uuid
 from datetime import datetime
+from importlib.metadata import version as _get_pkg_version
 from pathlib import Path
 
 from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
@@ -173,8 +175,7 @@ def build_feedback_pack(
     has_gallery = gallery_dir.is_dir() and any(gallery_dir.iterdir())
 
     try:
-        from importlib.metadata import version as get_version
-        version = get_version("miloco")
+        version = _get_pkg_version("miloco")
     except Exception:
         version = "unknown"
 
@@ -196,7 +197,6 @@ def build_feedback_pack(
 
     packs_dir = _packs_dir()
     packs_dir.mkdir(parents=True, exist_ok=True)
-    import uuid as _uuid
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     short_id = _uuid.uuid4().hex[:6]
     uid_slug = uid if uid else "anonymous"

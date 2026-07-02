@@ -135,7 +135,7 @@ def push_gallery_image(person_id: str, kind: str, image_bytes: bytes) -> None:
     Args:
         person_id: 成员 ID.
         kind: "body" 或 "face".
-        image_bytes: JPEG 字节.
+        image_bytes: JPEG 或 PNG 字节(落盘时按 magic bytes 自动判别扩展名).
 
     无 active scope 时静默 no-op.
     """
