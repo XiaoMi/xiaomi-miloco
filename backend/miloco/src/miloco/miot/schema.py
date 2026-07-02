@@ -243,18 +243,22 @@ class CameraToggleRequest(BaseModel):
 
 
 class CameraVoiceToggleItem(BaseModel):
-    """单个相机的语音指令启用/停用操作。"""
+    """单个相机的拾音开/关操作（mic-off 语义）。"""
 
     did: str = Field(..., min_length=1, description="相机 did")
     voice_in_use: bool = Field(
-        ..., description="true = 启用语音指令；false = 停用（该相机语音不再 dispatch）"
+        ...,
+        description=(
+            "true = 开启拾音；false = 关闭（该相机声音完全不被处理："
+            "引擎入口剥离音频，不转写、不上云、语音指令不 dispatch）"
+        ),
     )
 
 
 class CameraVoiceToggleRequest(BaseModel):
-    """批量切换相机语音指令启用状态。每项独立指定 did + voice_in_use。
+    """批量切换相机拾音状态。每项独立指定 did + voice_in_use。
 
-    语音开关从属于感知开关：仅允许对感知已启用(in_use=True)的相机设置，否则整批拒绝。
+    拾音开关从属于感知开关：仅允许对感知已启用(in_use=True)的相机设置，否则整批拒绝。
     """
 
     items: list[CameraVoiceToggleItem] = Field(..., min_length=1)

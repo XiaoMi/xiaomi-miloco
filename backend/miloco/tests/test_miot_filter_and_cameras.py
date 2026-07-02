@@ -426,7 +426,7 @@ async def test_toggle_camera_rejects_unknown():
         await svc.toggle_camera([{"did": "ghost", "in_use": False}])
 
 
-# ─── MiotService: 语音指令开关（voice_in_use）─────────────────────────────────
+# ─── MiotService: 拾音开关（voice_in_use，mic-off 语义）───────────────────────
 
 
 @pytest.mark.asyncio
@@ -468,7 +468,7 @@ async def test_toggle_camera_voice_rejects_unknown():
 
 @pytest.mark.asyncio
 async def test_toggle_camera_voice_rejected_when_camera_disabled():
-    """语音从属于感知：感知已关闭(在黑名单)的相机不允许设置语音指令。"""
+    """拾音从属于感知：感知已关闭(在黑名单)的相机不允许设置拾音。"""
     kv = _FakeKV({
         ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
         ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),  # c1 感知已关闭
@@ -476,7 +476,7 @@ async def test_toggle_camera_voice_rejected_when_camera_disabled():
     svc = _make_service(
         devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
     )
-    with pytest.raises(ValidationException, match="语音指令"):
+    with pytest.raises(ValidationException, match="拾音"):
         await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": True}])
     # 拒绝后不落库
     assert kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY) is None
