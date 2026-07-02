@@ -11,7 +11,7 @@
       "description": "是否启用调试模式：为 true 时 CLI / backend / openclaw 插件都会输出更详细的日志"
     },
     "timezone": {
-      "type": ["string", "null"],
+      "anyOf": [{ "type": "string" }, { "type": "null" }],
       "default": null,
       "description": "部署时区（IANA 名，如 Asia/Shanghai / America/Los_Angeles）；null = 跟随系统时区。影响感知推送与 omni 注入的时刻、\"今天/本周\"等业务概念、API 出口 ISO 偏移；DB 存储始终 UTC 绝对时刻，不受影响"
     },
