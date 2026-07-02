@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from miloco.database.token_usage_repo import fire_record
-from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.config import OmniConfig, resolve_media_resolution
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
@@ -119,6 +119,15 @@ async def run_omni_fused(
     else:
         candidates = []
         gallery_snapshot = {}
+
+    # 若调用方未传 fused_prompt_config，用默认值并从 OmniConfig 透传 media_resolution
+    if fused_prompt_config is None:
+        fused_prompt_config = FusedPromptConfig(
+            media_resolution=resolve_media_resolution(
+                config.media_resolution,
+                config.model,
+            )
+        )
 
     # 一次 list_persons 同时构造两张表（始终从 library 构造，不依赖 gallery_snapshot——
     # 后者在 candidates 空时为 {}，会让主调用 prompt「已识别人物：」段渲染出 UUID 而非姓名）：

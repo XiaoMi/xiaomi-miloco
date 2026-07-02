@@ -291,6 +291,67 @@ class OmniConfig:
     top_p: float = 0.95
     timeout: float = 30.0
     stream: bool = False
+    media_resolution: str = "max"  # 通用取值 "max" / "high" / "low"，经 resolve_media_resolution 映射到模型特定值
+
+
+# =============================================================================
+# Media resolution adapter —— 把通用 media_resolution 映射到各 LLM 实际接受的值
+# =============================================================================
+# 注意：这里不把 "max" / "high" / "low" 当作"分辨率档位"，它们是各模型自定义的
+# 枚举值，语义因模型而异：
+#   MiMo —— "default" 保留单帧 300 token 上限（Miloco 默认会把帧缩放到 910×512），
+#           "max" 解除该上限；本 PR 对 MiMo 默认路径产出值不变。
+#   其他模型（如 Qwen）—— 可能用 "low" / "high" / "max" 表达真正的分辨率档位。
+# adapter 的价值在于为这类多模型差异预留一层适配，而非给 MiMo 切换"更高分辨率"。
+
+# 各模型/平台支持的 media_resolution 值映射：
+#   key 是用户配置的通用值（"low" / "high" / "max"），
+#   value 是该模型实际接受的值。
+# "default" preset 是透传（fallback），用于未显式列出的模型。
+MEDIA_RESOLUTION_PRESETS: dict[str, dict[str, str]] = {
+    "mimo": {
+        "low": "default",
+        "high": "max",
+        "max": "max",
+    },
+    "default": {
+        "low": "low",
+        "high": "high",
+        "max": "max",
+    },
+}
+
+
+def resolve_media_resolution(value: str, model_name: str = "") -> str:
+    """把通用 media_resolution 映射为模型实际接受的值。
+
+    各 LLM 对 media_resolution 的取值与语义不同：
+    - MiMo：``"default"`` 保留单帧 300 token 上限（Miloco 默认将帧缩放到 910×512），
+      ``"max"`` 解除该上限。本 PR 对 MiMo 默认路径产出值不变。
+    - 其他模型（如 Qwen）：可能用 ``"low"`` / ``"high"`` / ``"max"`` 表达真正的
+      分辨率档位，语义各异。
+
+    这里的 ``"max"`` / ``"high"`` / ``"low"`` 不是统一分辨率档位，而是各模型自定义的
+    枚举值；adapter 的意义在于为多模型预留适配层，未匹配到任何 preset 时走
+    ``"default"`` 透传。
+
+    Args:
+        value: 用户配置的通用值（``"low"`` / ``"high"`` / ``"max"`` 等）。
+        model_name: 模型标识（如 ``"xiaomi/mimo-v2.5"``），大小写不敏感、
+                    子串匹配。为空时直接返回 value。
+
+    Returns:
+        模型实际接受的 media_resolution 值。
+    """
+    if not model_name:
+        return value
+
+    model_lower = model_name.lower()
+    for key, preset in MEDIA_RESOLUTION_PRESETS.items():
+        if key != "default" and key in model_lower:
+            return preset.get(value, value)
+
+    return MEDIA_RESOLUTION_PRESETS.get("default", {}).get(value, value)
 
 
 @dataclass
