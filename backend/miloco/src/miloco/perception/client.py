@@ -1051,26 +1051,8 @@ async def _persist_meaningful_event(
         elif text_prefix:
             text = text_prefix.rstrip()
 
-        insert_ok = dao.insert(
-            event_id=event_id,
-            timestamp=timestamp_ms,
-            text=text,
-            payload_json=payload_json,
-            has_rule_hit=cls["has_rule_hit"],
-            has_suggestion=cls["has_suggestion"],
-            has_asr=cls["has_asr"],
-            device_ids=device_ids,
-            snapshot_count=0,
-            rule_names=rule_names,
-            home_id=home_id,
-        )
-        if not insert_ok:
-            logger.error("meaningful_events insert failed for %s", event_id)
-            return None  # INSERT 失败不继续
-
-        # 落盘 event artifacts — 可能因 clips/trace 都缺失 / 磁盘紧张提前 return,
-        # 此时 count 保持 0;不论哪种降级,row 都已 INSERT,SSE 应该推(否则前端
-        # 实时收不到 metadata-only 事件).
+        # 落盘 event artifacts — 先落盘拿 count,insert 时直接传真实值,
+        # 省 update_snapshot_count 二次写(原 insert(0)+update(count) 两步合并).
         count = 0
         if artifacts.clips or artifacts.trace is not None:
             settings = get_settings()
@@ -1083,13 +1065,28 @@ async def _persist_meaningful_event(
                     settings.perception.snapshot_min_free_disk_mb,
                     event_id,
                 )
-                # count 留 0,继续走 publish
+                # count 留 0,继续走 insert
             else:
                 count = save_event_artifacts(event_id, artifacts)
-                if count > 0:
-                    dao.update_snapshot_count(event_id, count)
         else:
             logger.debug("no artifacts for event %s, snapshot_count stays 0", event_id)
+
+        insert_ok = dao.insert(
+            event_id=event_id,
+            timestamp=timestamp_ms,
+            text=text,
+            payload_json=payload_json,
+            has_rule_hit=cls["has_rule_hit"],
+            has_suggestion=cls["has_suggestion"],
+            has_asr=cls["has_asr"],
+            device_ids=device_ids,
+            snapshot_count=count,
+            rule_names=rule_names,
+            home_id=home_id,
+        )
+        if not insert_ok:
+            logger.error("meaningful_events insert failed for %s", event_id)
+            return None  # INSERT 失败不继续 publish(clip 已落盘但无 row,不推 SSE)
 
         # 从 artifacts.clips 取 clip_kind:同 batch 要么全 video 要么全 audio-only
         # (_is_audio_only 是 batch 级共识,见 prompt_builder._is_audio_only),
