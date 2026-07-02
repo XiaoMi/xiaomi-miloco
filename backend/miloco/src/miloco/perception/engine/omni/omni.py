@@ -125,7 +125,7 @@ async def run_omni_fused(
         fused_prompt_config = FusedPromptConfig(
             media_resolution=resolve_media_resolution(
                 config.media_resolution,
-                config.model_name or config.model,
+                config.model,
             )
         )
 

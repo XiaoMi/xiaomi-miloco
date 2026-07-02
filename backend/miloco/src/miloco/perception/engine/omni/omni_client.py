@@ -212,7 +212,7 @@ def _build_messages(payload: dict, config: "OmniConfig | None" = None) -> list[d
                 "media_resolution": (
                     resolve_media_resolution(
                         config.media_resolution,
-                        config.model_name or config.model,
+                        config.model,
                     )
                     if config
                     else "max"

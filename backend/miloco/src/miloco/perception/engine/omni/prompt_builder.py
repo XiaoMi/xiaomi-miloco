@@ -88,7 +88,7 @@ class FusedPromptConfig:
     # 单人 body+face composite 占约 20-40KB jpeg ≈ 60-120KB base64 ≈ 15-30K tokens；
     # >10 人 prompt 容易超出 omni token 预算，需在配置或上游 gallery_snapshot 处控制。
     max_gallery_persons: int = 10
-    media_resolution: str = "max"  # 可选 "max" / "high" / "low"
+    media_resolution: str = "max"  # 通用取值 "max" / "high" / "low"，语义因模型而异（见 resolve_media_resolution）
 
 
 # =============================================================================

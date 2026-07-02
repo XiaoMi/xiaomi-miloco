@@ -284,7 +284,6 @@ class IdentityEngineConfig:
 @dataclass
 class OmniConfig:
     model: str = "xiaomi/mimo-v2.5"
-    model_name: str = ""  # 可选短名，用于 media_resolution preset 查找；空则从 model 自动推导
     api_key: str = ""  # Set via MILOCO_MODEL__OMNI__API_KEY env var or config
     base_url: str = "https://api.xiaomimimo.com/v1"
     max_completion_tokens: int = 512
@@ -292,12 +291,18 @@ class OmniConfig:
     top_p: float = 0.95
     timeout: float = 30.0
     stream: bool = False
-    media_resolution: str = "max"  # 可选 "max" / "high" / "low"，经 resolve_media_resolution 映射到模型特定值
+    media_resolution: str = "max"  # 通用取值 "max" / "high" / "low"，经 resolve_media_resolution 映射到模型特定值
 
 
 # =============================================================================
-# Media resolution adapter —— 不同 LLM 支持的 video 分辨率值不同，做一层映射
+# Media resolution adapter —— 把通用 media_resolution 映射到各 LLM 实际接受的值
 # =============================================================================
+# 注意：这里不把 "max" / "high" / "low" 当作"分辨率档位"，它们是各模型自定义的
+# 枚举值，语义因模型而异：
+#   MiMo —— "default" 保留单帧 300 token 上限（Miloco 默认会把帧缩放到 910×512），
+#           "max" 解除该上限；本 PR 对 MiMo 默认路径产出值不变。
+#   其他模型（如 Qwen）—— 可能用 "low" / "high" / "max" 表达真正的分辨率档位。
+# adapter 的价值在于为这类多模型差异预留一层适配，而非给 MiMo 切换"更高分辨率"。
 
 # 各模型/平台支持的 media_resolution 值映射：
 #   key 是用户配置的通用值（"low" / "high" / "max"），
@@ -318,14 +323,17 @@ MEDIA_RESOLUTION_PRESETS: dict[str, dict[str, str]] = {
 
 
 def resolve_media_resolution(value: str, model_name: str = "") -> str:
-    """将用户配置的通用 media_resolution 映射为模型实际支持的值。
+    """把通用 media_resolution 映射为模型实际接受的值。
 
-    不同 LLM 对 media_resolution 的支持不同：
-    - MiMo：仅支持 ``"default"`` 和 ``"max"``
-    - 其他模型（如 Qwen）：可能支持 ``"low"`` / ``"high"`` / ``"max"`` 等
+    各 LLM 对 media_resolution 的取值与语义不同：
+    - MiMo：``"default"`` 保留单帧 300 token 上限（Miloco 默认将帧缩放到 910×512），
+      ``"max"`` 解除该上限。本 PR 对 MiMo 默认路径产出值不变。
+    - 其他模型（如 Qwen）：可能用 ``"low"`` / ``"high"`` / ``"max"`` 表达真正的
+      分辨率档位，语义各异。
 
-    本函数根据 ``model_name`` 选择对应的 preset 做值映射，
-    未匹配到任何 preset 时走 ``"default"`` 透传。
+    这里的 ``"max"`` / ``"high"`` / ``"low"`` 不是统一分辨率档位，而是各模型自定义的
+    枚举值；adapter 的意义在于为多模型预留适配层，未匹配到任何 preset 时走
+    ``"default"`` 透传。
 
     Args:
         value: 用户配置的通用值（``"low"`` / ``"high"`` / ``"max"`` 等）。
@@ -333,7 +341,7 @@ def resolve_media_resolution(value: str, model_name: str = "") -> str:
                     子串匹配。为空时直接返回 value。
 
     Returns:
-        模型实际支持的 media_resolution 值。
+        模型实际接受的 media_resolution 值。
     """
     if not model_name:
         return value
