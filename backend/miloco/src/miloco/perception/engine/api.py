@@ -822,7 +822,6 @@ class PerceptionEngine(BasePerceptionEngine):
                 did = snapshot.device.did
                 dispatched = [
                     r for r in rules
-                    if r.get("trigger_type", "perception") == "perception"
                     if not r.get("condition", {}).get("perceive_device_ids")
                     or did in r["condition"]["perceive_device_ids"]
                 ]
