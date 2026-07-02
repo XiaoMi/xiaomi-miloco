@@ -901,11 +901,6 @@ export async function realDeleteMiotEventMapping(id: string): Promise<void> {
   });
 }
 
-export async function realListMiotEventLogs(): Promise<MiotEventTriggerLog[]> {
-  const r = await apiFetch<Normal<MiotEventTriggerLog[]>>("/api/automation/logs");
-  return r.data;
-}
-
 export async function realTestMiotEventTrigger(input: {
   source_type: "device";
   source_id: string;

@@ -59,10 +59,6 @@
     "disabled": "Disabled",
     "delete": "Delete",
     "perceptionHintLabel": "Hint: ",
-    "eventLabel": "Event: ",
-    "debugTitle": "Debug & Recent Triggers",
-    "debugDesc": "Check mapping hits, perception initiation, rule execution, and skip reasons.",
-    "perceived": "Perceived",
-    "notPerceived": "Not perceived"
+    "eventLabel": "Event: "
   }
 }

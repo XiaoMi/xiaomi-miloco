@@ -59,10 +59,6 @@
     "disabled": "已停用",
     "delete": "删除",
     "perceptionHintLabel": "感知提示：",
-    "eventLabel": "事件：",
-    "debugTitle": "调试与最近触发",
-    "debugDesc": "查看是否命中映射、是否发起感知、是否进入规则执行，以及跳过原因。",
-    "perceived": "已感知",
-    "notPerceived": "未感知"
+    "eventLabel": "事件："
   }
 }

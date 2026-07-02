@@ -4,7 +4,6 @@ import {
   createMiotEventMapping,
   deleteMiotEventMapping,
   fetchDeviceSpec,
-  listMiotEventLogs,
   listMiotEventMappings,
   testMiotEventTrigger,
   updateMiotEventMapping,
@@ -14,11 +13,9 @@ import type {
   MiotEventSource,
   MiotPropertyFilterCondition,
   MiotPropertyFilterOp,
-  MiotEventTriggerLog,
   ScopeCamera,
 } from "@/lib/types";
 import { useAsync } from "@/hooks/useAsync";
-import { resolveToken } from "@/api/client";
 import { toast } from "./Toast";
 
 interface Props {
@@ -154,7 +151,6 @@ function sortEventSourcesByRoom(items: MiotEventSource[]): MiotEventSource[] {
 export function AutomationPage({ devices, cameras }: Props) {
   const { t } = useTranslation();
   const mappings = useAsync(() => listMiotEventMappings(), [devices.length]);
-  const logs = useAsync(() => listMiotEventLogs(), []);
 
   const [sourceKind, setSourceKind] = useState<SourceKind>("device_prop");
   const [sourceId, setSourceId] = useState("");
@@ -178,7 +174,6 @@ export function AutomationPage({ devices, cameras }: Props) {
 
   async function reloadAll() {
     mappings.reload();
-    logs.reload();
   }
 
   useEffect(() => {
@@ -343,7 +338,6 @@ export function AutomationPage({ devices, cameras }: Props) {
     setPropFilters([]);
     setSelectedEventKey("");
     setDeviceSpec(null);
-    logs.reload();
   }
 
   async function toggleEnabled(item: MiotEventMapping) {
@@ -351,7 +345,6 @@ export function AutomationPage({ devices, cameras }: Props) {
     mappings.mutate((items) =>
       (items ?? []).map((entry) => (entry.id === updated.id ? updated : entry)),
     );
-    logs.reload();
   }
 
   async function runTest(item: MiotEventMapping) {
@@ -379,18 +372,6 @@ export function AutomationPage({ devices, cameras }: Props) {
       changed_properties: changedProperties,
     });
     await reloadAll();
-  }
-
-  function fmtTs(ts: number): string {
-    if (!ts) return "-";
-    return new Date(ts).toLocaleString("zh-CN");
-  }
-
-  const token = resolveToken();
-
-  function getClipUrl(logId: string, deviceId: string): string {
-    const base = `/api/events/${encodeURIComponent(logId)}/clip/${encodeURIComponent(deviceId)}`;
-    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
   }
 
   const createDisabled = !sourceId || cameraIds.length === 0 || (sourceKind === "device_event" && !selectedEventKey);
@@ -729,7 +710,6 @@ export function AutomationPage({ devices, cameras }: Props) {
                       mappings.mutate((items) =>
                         (items ?? []).filter((entry) => entry.id !== item.id),
                       );
-                      logs.reload();
                     }}
                   >
                     {t("automation.delete")}
@@ -765,53 +745,6 @@ export function AutomationPage({ devices, cameras }: Props) {
                       })()}
                     </span>
                   ))}
-                </div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Debug & Recent Triggers */}
-      <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
-        <div>
-          <h2 className="text-title text-text-primary">{t("automation.debugTitle")}</h2>
-          <p className="text-caption text-text-tertiary">
-            {t("automation.debugDesc")}
-          </p>
-        </div>
-        <div className="space-y-3">
-          {(logs.data ?? []).map((log: MiotEventTriggerLog) => (
-            <div key={log.id} className="rounded-lg border border-border bg-bg-primary p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-title text-text-primary">
-                    {log.trigger.source_name || log.trigger.source_id}
-                  </div>
-                  <div className="text-caption text-text-tertiary">
-                    {log.trigger.event_name} . {fmtTs(log.created_at)}
-                  </div>
-                </div>
-                <div className="text-caption text-text-tertiary">
-                  {log.error || log.skipped_reason || (log.perception_started ? t("automation.perceived") : t("automation.notPerceived"))}
-                </div>
-              </div>
-              {log.clip_kind && log.clip_device_ids?.length > 0 ? (
-                <div className="mt-2 space-y-2">
-                  {log.clip_device_ids.map((deviceId: string) => (
-                    <video
-                      key={deviceId}
-                      src={getClipUrl(log.id, deviceId)}
-                      controls
-                      preload="metadata"
-                      className="max-h-56 w-full rounded-md border border-border bg-black"
-                    />
-                  ))}
-                </div>
-              ) : null}
-              {log.perception_answer ? (
-                <div className="mt-2 text-caption text-text-secondary whitespace-pre-wrap">
-                  {log.perception_answer}
                 </div>
               ) : null}
             </div>

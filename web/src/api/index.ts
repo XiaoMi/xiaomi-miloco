@@ -326,10 +326,6 @@ export async function deleteMiotEventMapping(id: string): Promise<void> {
   return impl.realDeleteMiotEventMapping(id);
 }
 
-export async function listMiotEventLogs(): Promise<MiotEventTriggerLog[]> {
-  return impl.realListMiotEventLogs();
-}
-
 export async function testMiotEventTrigger(input: {
   source_type: "device";
   source_id: string;

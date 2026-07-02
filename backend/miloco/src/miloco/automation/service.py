@@ -30,8 +30,6 @@ from miloco.utils.time_utils import now_ms
 logger = logging.getLogger(__name__)
 
 _KV_MAPPINGS = "AUTOMATION_MIOT_EVENT_MAPPINGS"
-_KV_LOGS = "AUTOMATION_MIOT_EVENT_LOGS"
-_MAX_LOGS = 200
 
 _DEFAULT_MAPPING_QUERY = "画面中是否出现需要提醒用户的人、异常动作或重要变化"
 _DEFAULT_MAPPING_ACTION = (
@@ -169,18 +167,37 @@ def _mapping_to_rule(mapping: MiotEventMapping) -> Rule:
 def _build_trigger_context(
     trigger: MiotEventTrigger,
     mappings: list[MiotEventMapping] | None = None,
+    spec_meta: dict | None = None,
 ) -> str:
+    names = (spec_meta or {}).get("names") or {}
+    values = (spec_meta or {}).get("values") or {}
+
+    def _translate_id(name: str) -> str:
+        return names.get(name) or name
+
+    def _translate_changed(props: dict) -> str:
+        items: list[str] = []
+        for key, val in props.items():
+            display_name = names.get(key) or key
+            value_map = values.get(key)
+            if value_map and val is not None:
+                display_val = value_map.get(str(val)) or str(val)
+            else:
+                display_val = str(val)
+            items.append(f"{display_name}={display_val}")
+        return "；".join(items)
+
     label = "触发参数" if trigger.event_name.startswith("event.") else "属性变化"
     parts = [
         "# 米家触发上下文",
         "本次摄像头感知由米家设备事件或属性变化触发。",
         f"触发来源：{trigger.source_name or trigger.source_id}",
-        f"触发类型：{trigger.event_name or trigger.source_type}",
+        f"触发类型：{_translate_id(trigger.event_name or trigger.source_type)}",
     ]
     if trigger.room_name:
         parts.append(f"触发设备所在房间：{trigger.room_name}")
     if trigger.changed_properties:
-        parts.append(f"{label}：{trigger.changed_properties}")
+        parts.append(f"{label}：{_translate_changed(trigger.changed_properties)}")
     prompts = [_mapping_rule_query(mapping) for mapping in (mappings or [])]
     if prompts:
         parts.append("本轮用户配置的感知提示：")
@@ -277,25 +294,6 @@ class AutomationService:
                 return
         mappings.insert(0, updated)
         self._save_mappings(mappings)
-
-    def _load_logs(self) -> list[MiotEventTriggerLog]:
-        raw = self._kv_repo.get(_KV_LOGS, "[]") or "[]"
-        try:
-            return [MiotEventTriggerLog.model_validate(item) for item in json.loads(raw)]
-        except Exception as e:  # noqa: BLE001
-            logger.error("Failed to load automation logs: %s", e)
-            return []
-
-    def _append_log(self, item: MiotEventTriggerLog) -> None:
-        logs = self._load_logs()
-        logs.insert(0, item)
-        self._kv_repo.set(
-            _KV_LOGS,
-            json.dumps(
-                [log.model_dump(mode="json") for log in logs[:_MAX_LOGS]],
-                ensure_ascii=False,
-            ),
-        )
 
     async def list_catalog(self, miot_service) -> MiotEventCatalog:
         devices = await miot_service.get_miot_device_list()
@@ -397,9 +395,6 @@ class AutomationService:
                     exc_info=True,
                 )
 
-    def list_logs(self, limit: int = 50) -> list[MiotEventTriggerLog]:
-        return self._load_logs()[:limit]
-
     def _match_rule(self, rule, trigger: MiotEventTrigger) -> bool:
         if getattr(rule, "trigger_type", RuleTriggerType.PERCEPTION) != RuleTriggerType.MIOT_EVENT:
             return False
@@ -480,6 +475,79 @@ class AutomationService:
     def _cooldown_key(self, trigger: MiotEventTrigger, mapping: MiotEventMapping) -> str:
         return f"{trigger.source_type}:{trigger.source_id}:{mapping.id}"
 
+    async def _build_spec_meta(
+        self, trigger: MiotEventTrigger, miot_service
+    ) -> dict | None:
+        """构建 spec_meta，把 event_name/changed_properties 的裸 ID 翻译成人类可读语义。
+
+        返回 {"names": {key: readable}, "values": {key: {value: desc}}}。
+        失败返回 None，调用方回退到裸 ID（不破坏功能）。
+        """
+        try:
+            proxy = miot_service._miot_proxy
+            device = proxy._device_info_dict.get(trigger.source_id)
+            if not device:
+                return None
+            urn = getattr(device, "urn", "") or ""
+            if not urn:
+                return None
+            names: dict[str, str] = {}
+            values: dict[str, dict[str, str]] = {}
+            # properties（changed_properties 的 prop.x.y）
+            spec = await proxy._fetch_device_spec(urn=urn)
+            if spec:
+                for iid, item in spec.items():
+                    if not iid.startswith("prop."):
+                        continue
+                    names[iid] = (
+                        item.get("description")
+                        or item.get("prop_description")
+                        or iid
+                    )
+                    vl = item.get("value_list") or []
+                    if vl:
+                        values[iid] = {
+                            str(v.get("value", "")): (
+                                v.get("description")
+                                or v.get("name")
+                                or str(v.get("value", ""))
+                            )
+                            for v in vl
+                        }
+                    elif item.get("format") == "bool":
+                        values[iid] = {"0": "关", "1": "开"}
+            # events（event_name 的 event.x.y + arg.x.y）
+            spec_device = await proxy.miot_client.spec_parser.parse_async(urn=urn)
+            if spec_device:
+                for service in spec_device.services:
+                    for event in service.events:
+                        event_key = f"event.{service.iid}.{event.iid}"
+                        event_name = (
+                            f"{service.description_trans} {event.description_trans}"
+                            if service.description_trans != event.description_trans
+                            else event.description_trans
+                        )
+                        names[event_key] = event_name or event.description or event_key
+                        for prop in event.arguments:
+                            arg_key = f"arg.{service.iid}.{prop.iid}"
+                            arg_name = (
+                                f"{service.description_trans} {prop.description_trans}"
+                                if service.description_trans != prop.description_trans
+                                else prop.description_trans
+                            )
+                            names[arg_key] = arg_name or prop.description or arg_key
+                            if prop.value_list:
+                                values[arg_key] = {
+                                    str(v.value): (v.name or str(v.value))
+                                    for v in prop.value_list
+                                }
+            return {"names": names, "values": values}
+        except Exception:
+            logger.debug(
+                "build_spec_meta failed for did=%s", trigger.source_id, exc_info=True
+            )
+            return None
+
     async def handle_trigger(
         self,
         *,
@@ -513,7 +581,6 @@ class AutomationService:
         )
         if not mappings:
             log_item.skipped_reason = "no_mapping"
-            self._append_log(log_item)
             return log_item
 
         now = time.monotonic()
@@ -526,7 +593,6 @@ class AutomationService:
             active_mappings.append(mapping)
         if not active_mappings:
             log_item.skipped_reason = "cooldown"
-            self._append_log(log_item)
             return log_item
 
         active_mapping_ids = {mapping.id for mapping in active_mappings}
@@ -549,7 +615,6 @@ class AutomationService:
         log_item.camera_dids = camera_ids
         if not camera_ids:
             log_item.skipped_reason = "no_camera"
-            self._append_log(log_item)
             return log_item
 
         perception_rules = [
@@ -572,6 +637,7 @@ class AutomationService:
         )
         real_rule_ids = {rule.id for rule in candidate_rules}
         log_item.perception_started = True
+        spec_meta = await self._build_spec_meta(trigger, miot_service)
         try:
             (
                 result,
@@ -583,13 +649,12 @@ class AutomationService:
                 camera_ids,
                 prompt_rules,
                 extra_context_by_did={
-                    did: _build_trigger_context(trigger, active_mappings)
+                    did: _build_trigger_context(trigger, active_mappings, spec_meta)
                     for did in camera_ids
                 },
             )
         except Exception as e:  # noqa: BLE001
             log_item.error = str(e)
-            self._append_log(log_item)
             return log_item
 
         if result is not None and not result.suggestions:
@@ -649,7 +714,7 @@ class AutomationService:
             text_prefix=(
                 "[米家设备触发]\n"
                 f"来源：{trigger.source_name or trigger.source_id}\n"
-                f"事件：{trigger.event_name}"
+                f"事件：{(spec_meta or {}).get('names', {}).get(trigger.event_name) or trigger.event_name}"
             ),
             payload_extra={
                 "trigger_source": "miot",
@@ -665,6 +730,5 @@ class AutomationService:
             log_item.clip_device_ids = [
                 device_id for device_id in camera_ids if device_id in artifacts.clips
             ] if persist_result.snapshot_count > 0 else []
-        self._append_log(log_item)
         return log_item
 

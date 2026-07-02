@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
@@ -189,18 +189,6 @@ async def delete_mapping(mapping_id: str, current_user: str = Depends(verify_tok
         mgr.automation_service.list_mappings()
     )
     return NormalResponse(code=0, message="deleted", data=None)
-
-
-@router.get("/logs", response_model=NormalResponse, summary="Recent MiOT event trigger logs")
-async def list_logs(
-    limit: int = Query(50, ge=1, le=200),
-    current_user: str = Depends(verify_token),
-):
-    return NormalResponse(
-        code=0,
-        message="ok",
-        data=manager().automation_service.list_logs(limit),
-    )
 
 
 @router.post("/test-trigger", response_model=NormalResponse, summary="Manual test trigger")
