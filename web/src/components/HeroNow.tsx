@@ -311,7 +311,13 @@ function CameraSection({
                   channel={channelByDid.get(c.did)}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
-                  voiceBusy={voiceBusyDids.has(c.did)}
+                  // 相机开关 in-flight 时语音开关也置灰:关相机的 PUT 落库后语音 PUT 会被
+                  // 后端「感知已关闭」拒掉,别让住户在窗口期点出个报错 toast。
+                  voiceBusy={
+                    voiceBusyDids.has(c.did) ||
+                    bulkBusy ||
+                    singleBusyDids.has(c.did)
+                  }
                   onToggleVoice={(v) => runSingleVoice(c.did, v)}
                 />
               ))}
@@ -344,7 +350,12 @@ function CameraSection({
                       (!c.inUse && (!c.isOnline || atCapacity))
                     }
                     onToggle={(v) => runSingle(c.did, v)}
-                    voiceBusy={voiceBusyDids.has(c.did)}
+                    // 同上区卡:相机开关 in-flight 时语音开关一并置灰,防交叠竞态。
+                    voiceBusy={
+                      voiceBusyDids.has(c.did) ||
+                      bulkBusy ||
+                      singleBusyDids.has(c.did)
+                    }
                     onToggleVoice={(v) => runSingleVoice(c.did, v)}
                   />
                 ))}
@@ -462,7 +473,7 @@ interface CamCardProps {
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
-  /** 语音开关本卡 in-flight */
+  /** 语音开关置灰条件:语音 PUT 或相机开关 PUT 本卡 in-flight（防两个 PUT 交叠竞态） */
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
 }

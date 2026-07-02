@@ -973,6 +973,7 @@ export async function realToggleScopeCamera(
 // 语音指令开关走独立端点 PUT /api/miot/scope/cameras/voice（不复用相机启用端点：
 // 语音无投喂上限/离线校验、不重启感知引擎）。后端只接受对 in_use=true 相机的设置,
 // 感知已关闭的相机会被拒（前端已把其开关置灰,这是二次兜底）。
+// 不 invalidate homeCache:语音状态只存在于 /scope/cameras,调用方 reload scopeCameras 即可。
 export async function realToggleScopeCameraVoice(
   dids: string[],
   voiceInUse: boolean,
@@ -983,7 +984,6 @@ export async function realToggleScopeCameraVoice(
       items: dids.map((did) => ({ did, voice_in_use: voiceInUse })),
     }),
   });
-  invalidateMiotHomeCache();
 }
 
 // ── 今天发生了什么(meaningful_events)───────────────────────
