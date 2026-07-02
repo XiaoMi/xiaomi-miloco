@@ -1071,17 +1071,22 @@ async def _persist_meaningful_event(
         else:
             logger.debug("no artifacts for event %s, snapshot_count stays 0", event_id)
 
+        # 共用字段：insert + publish 复用，避免手工重建 payload（DRY）
+        event_data = {
+            "event_id": event_id,
+            "timestamp": timestamp_ms,
+            "text": text,
+            "has_rule_hit": cls["has_rule_hit"],
+            "has_suggestion": cls["has_suggestion"],
+            "has_asr": cls["has_asr"],
+            "snapshot_count": count,
+            "device_ids": device_ids,
+            "rule_names": rule_names,
+        }
+
         insert_ok = dao.insert(
-            event_id=event_id,
-            timestamp=timestamp_ms,
-            text=text,
+            **event_data,
             payload_json=payload_json,
-            has_rule_hit=cls["has_rule_hit"],
-            has_suggestion=cls["has_suggestion"],
-            has_asr=cls["has_asr"],
-            device_ids=device_ids,
-            snapshot_count=count,
-            rule_names=rule_names,
             home_id=home_id,
         )
         if not insert_ok:
@@ -1100,15 +1105,7 @@ async def _persist_meaningful_event(
         # 落盘完成后 publish,snapshot_count 是真实值,clip_kind 帮 UI 区分 🎬/🎤.
         try:
             _publish_meaningful_event(
-                event_id=event_id,
-                timestamp=timestamp_ms,
-                text=text,
-                has_rule_hit=cls["has_rule_hit"],
-                has_suggestion=cls["has_suggestion"],
-                has_asr=cls["has_asr"],
-                snapshot_count=count,
-                device_ids=device_ids,
-                rule_names=rule_names,
+                **event_data,
                 clip_kind=clip_kind,
                 trigger_source=(payload_extra or {}).get("trigger_source"),
             )
