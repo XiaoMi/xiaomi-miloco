@@ -456,10 +456,6 @@ class OnDemandPerceptionRequest(BaseModel):
 
     sources: list[str] = Field(..., description="Device did list", min_length=1)
     query: str = Field(..., description="Natural language question", min_length=1)
-    trigger_context: dict | None = Field(
-        default=None,
-        description="Optional trigger metadata injected into the on-demand prompt",
-    )
 
 
 class OnDemandPerceptionResultItem(BaseModel):
