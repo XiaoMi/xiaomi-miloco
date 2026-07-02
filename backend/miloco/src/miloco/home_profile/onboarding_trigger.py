@@ -28,16 +28,37 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 
+from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo, OnboardingKeys
-from miloco.dispatch import dispatch_event, join_text_blocks
+from miloco.dispatch import AgentDispatcher, dispatch_event, join_text_blocks
+from miloco.utils.agent_client import _HTTP_BUFFER_S
 
 logger = logging.getLogger(__name__)
 
 
-# 送达 future 的守护超时：webhook waitForRun 同步等整个 agent turn，可能很慢，
-# 取宽裕值。守护超时 = 送达结果未知（turn 可能仍在途）→ 不置位 KV（下次启动重试），
-# 仅靠 _fired 防本进程内重发（避免在途 turn + 重发造成双邀请）。
-_DELIVERY_GUARD_TIMEOUT_S = 120.0
+# 守护超时的安全余量：worst case 之外再留的固定缓冲（事件循环调度、日志等杂项开销）。
+_GUARD_SAFETY_MARGIN_S = 30.0
+
+
+def _delivery_guard_timeout_s() -> float:
+    """送达 future 的守护超时（秒）——按 dispatcher 真实参数在调用时推导。
+
+    **不变量：守护超时必须 > dispatcher 从取批到 resolve future 的最坏耗时**，
+    否则一次"慢但最终成功"的送达会被误读为未送达 → KV 标记不置位 → 下次启动
+    重发 → 双邀请（正是 status=timeout 记 delivered=True 想防住的场景）。冷启动
+    webhook 慢、turn 拖长恰是本机制的主战场，不能栽在守护先到期上。
+
+    最坏耗时 = 每次尝试的 HTTP 上限 (turn_wait + _HTTP_BUFFER_S) × 尝试次数
+    (_TRANSPORT_RETRIES + 1) + 各次重试间的指数退避之和；直接引用 dispatcher /
+    agent_client 的真实常量与 settings（而非镜像数字），后续任何一方调整都不会
+    悄悄把守护挤到 worst case 之下。守护超时 = 送达结果未知（turn 可能仍在途）
+    → 不置位 KV（下次启动重试），仅靠 _fired 防本进程内重发。
+    """
+    wait_s = get_settings().dispatcher.turn_wait_timeout_ms / 1000
+    retries = AgentDispatcher._TRANSPORT_RETRIES
+    attempts = retries + 1
+    backoff_s = sum(AgentDispatcher._TRANSPORT_BACKOFF_S * (2**a) for a in range(retries))
+    return attempts * (wait_s + _HTTP_BUFFER_S) + backoff_s + _GUARD_SAFETY_MARGIN_S
 
 # 给 agent 的指令文本（口径参照 welcome_service._format_message 的祈使风格）。
 _INSTRUCTION = (
@@ -121,15 +142,18 @@ class OnboardingTriggerService:
                 logger.info("onboarding trigger: 事件未被接纳（调度器未就绪/队列淘汰）")
                 return False
 
+            guard_s = _delivery_guard_timeout_s()
             try:
-                sent = await asyncio.wait_for(delivered_fut, timeout=_DELIVERY_GUARD_TIMEOUT_S)
+                sent = await asyncio.wait_for(delivered_fut, timeout=guard_s)
             except asyncio.TimeoutError:
-                # 送达结果未知（平台 turn 可能仍在途）：不置位 KV → 下次启动重试；
-                # 置 _fired 防本进程内重发，避免"在途邀请 + 重发"打两次招呼。
+                # 守护超时按推导保证 > dispatcher 最坏 resolve 耗时，走到这里说明
+                # future 悬空（理论不该发生）或事件循环异常拥塞：送达结果未知
+                # （平台 turn 可能仍在途）→ 不置位 KV → 下次启动重试；置 _fired
+                # 防本进程内重发，避免"在途邀请 + 重发"打两次招呼。
                 self._fired = True
                 logger.warning(
                     "onboarding trigger: 等待送达结果超时(%.0fs)，KV 标记不置位（下次启动重试）",
-                    _DELIVERY_GUARD_TIMEOUT_S,
+                    guard_s,
                 )
                 return False
 

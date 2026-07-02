@@ -197,7 +197,7 @@ async def test_not_accepted_keeps_flag_unset_and_retries(monkeypatch):
 async def test_guard_timeout_no_flag_but_no_infire_repeat(monkeypatch):
     # 送达 future 一直不 resolve（结果未知）→ 守护超时：KV 不置位（下次启动重试），
     # 但 _fired 置位防本进程内重发。
-    monkeypatch.setattr(ot, "_DELIVERY_GUARD_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(ot, "_delivery_guard_timeout_s", lambda: 0.05)
 
     def _accept_never_resolve(event_type, items, builder, intra_priority=0, delivered=None):
         return True  # 接纳但不 resolve
@@ -218,6 +218,27 @@ def test_onboarding_route_registered_untracked():
     assert _ROUTE["onboarding"] == ("agent:main:miloco", "miloco-interactive", 30)
     assert _ROUTE["onboarding"] == _ROUTE["bind"]
     assert "onboarding" not in _TRACKED
+
+
+def test_guard_timeout_upper_bounds_dispatcher_worst_case():
+    """不变量：守护超时 > dispatcher 最坏 resolve 耗时（按当前 settings/常量独立计算）。
+
+    曾经的真实 bug：守护硬编码 120s < turn_wait 默认 180s —— 一次 120~180s 的
+    "慢但成功"送达会被误判未送达 → 下次启动双邀请。这里用真实常量独立复算
+    worst case，任何一侧改动导致守护跌破上界即变红。
+    """
+    from miloco.config import get_settings
+    from miloco.utils.agent_client import _HTTP_BUFFER_S
+
+    wait_s = get_settings().dispatcher.turn_wait_timeout_ms / 1000
+    retries = AgentDispatcher._TRANSPORT_RETRIES
+    worst = (retries + 1) * (wait_s + _HTTP_BUFFER_S) + sum(
+        AgentDispatcher._TRANSPORT_BACKOFF_S * (2**a) for a in range(retries)
+    )
+    guard = ot._delivery_guard_timeout_s()
+    assert guard > worst, f"守护超时 {guard}s 未覆盖 dispatcher 最坏 resolve 耗时 {worst}s"
+    # 最起码要盖过单次 turn 等待（120s < 180s 的旧 bug 形态）
+    assert guard > wait_s
 
 
 # ─── 真 dispatcher 回归组 ─────────────────────────────────────────────────────
