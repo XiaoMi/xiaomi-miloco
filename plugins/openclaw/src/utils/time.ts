@@ -1,14 +1,23 @@
 /**
- * 部署时区视角的本地时间 helper（纯函数,无 IO）。
+ * 部署时区视角的本地时间 helper。
  *
- * 时区来源优先级:
+ * 时区来源优先级（deployTimezone,与 backend deploy_timezone 单一真源对齐）:
  *   1. 显式传入的 tz 参数（IANA 名,如 "America/Los_Angeles"）
- *   2. 环境变量 MILOCO_TIMEZONE（IANA 名,跟 backend MilocoSettings.timezone 对齐）
- *   3. 系统时区（Intl.DateTimeFormat().resolvedOptions().timeZone）
- *   4. 兜底 Asia/Shanghai（开发机无系统时区时也能跑）
+ *   2. 环境变量 MILOCO_TIMEZONE（IANA 名；backend pydantic env 优先级同样最高）
+ *   3. backend config.json 的 `timezone`（用户可编辑的权威设置,== MilocoSettings.timezone）
+ *   4. 系统时区（Intl.DateTimeFormat().resolvedOptions().timeZone）
+ *   5. 兜底 Asia/Shanghai（开发机无系统时区时也能跑）
  *
- * 用 Intl.DateTimeFormat 拿 IANA tz-aware parts,正确处理 DST 时区。
+ * 加入第 3 步是为了让插件与 backend 认到同一个"部署时区"：backend settings 以
+ * env > config.json 的顺序解析 timezone,插件读同一份 config.json 保持一致,避免
+ * 只凭 env/系统时区在宿主机 TZ≠部署时区时给 agent 注入错误的时段。
+ *
+ * 除 deployTimezone 读一次 config.json 外,toLocalParts / nowLocalIso 在显式传 tz
+ * 时仍是纯函数,无 IO。用 Intl.DateTimeFormat 拿 IANA tz-aware parts,正确处理 DST。
  */
+
+import { milocoConfigFile } from "../miloco/paths.js";
+import { readJsonFileSync } from "./io.js";
 
 const FALLBACK_TZ = "Asia/Shanghai";
 
@@ -22,10 +31,19 @@ const WEEKDAY_TO_MON1: Record<string, number> = {
   Sun: 7,
 };
 
-/** 部署时区。优先 env,其次系统时区,兜底 Asia/Shanghai。 */
+/** config.json 里的 `timezone`（用户权威设置）；缺失 / 非法 / 空串 → undefined。 */
+function timezoneFromConfig(): string | undefined {
+  const cfg = readJsonFileSync<{ timezone?: unknown }>(milocoConfigFile());
+  const tz = cfg?.timezone;
+  return typeof tz === "string" && tz.length > 0 ? tz : undefined;
+}
+
+/** 部署时区。优先 env > config.json > 系统时区,兜底 Asia/Shanghai。 */
 export function deployTimezone(): string {
   const fromEnv = process.env.MILOCO_TIMEZONE;
   if (fromEnv) return fromEnv;
+  const fromConfig = timezoneFromConfig();
+  if (fromConfig) return fromConfig;
   const fromSystem = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (fromSystem) return fromSystem;
   return FALLBACK_TZ;
