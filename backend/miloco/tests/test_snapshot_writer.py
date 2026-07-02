@@ -220,6 +220,39 @@ class TestSaveEventArtifacts:
         assert (self.root / "event-both" / "omni_trace.json.gz").exists()
 
 
+# ─── _save_gallery ─────────────────────────────────────────────────────────
+
+
+class TestSaveGallery:
+    def test_png_gets_png_extension(self, tmp_path):
+        from miloco.perception.snapshot_writer import _save_gallery
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        _save_gallery(tmp_path, {"person1": {"body": png_bytes}})
+        names = [p.name for p in (tmp_path / "gallery").iterdir()]
+        assert any(n.endswith("_body.png") for n in names)
+
+    def test_jpeg_gets_jpg_extension(self, tmp_path):
+        from miloco.perception.snapshot_writer import _save_gallery
+        jpg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        _save_gallery(tmp_path, {"person1": {"face": jpg_bytes}})
+        names = [p.name for p in (tmp_path / "gallery").iterdir()]
+        assert any(n.endswith("_face.jpg") for n in names)
+
+    def test_mixed_formats(self, tmp_path):
+        from miloco.perception.snapshot_writer import _save_gallery
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        jpg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        _save_gallery(tmp_path, {"p1": {"body": png_bytes, "face": jpg_bytes}})
+        names = {p.name for p in (tmp_path / "gallery").iterdir()}
+        assert "p1_body.png" in names
+        assert "p1_face.jpg" in names
+
+    def test_empty_bytes_skipped(self, tmp_path):
+        from miloco.perception.snapshot_writer import _save_gallery
+        _save_gallery(tmp_path, {"p1": {"body": b""}})
+        assert not (tmp_path / "gallery").exists() or not any((tmp_path / "gallery").iterdir())
+
+
 # ─── cleanup_snapshots ──────────────────────────────────────────────────────
 
 
