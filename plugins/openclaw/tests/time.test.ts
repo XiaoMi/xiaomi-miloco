@@ -148,15 +148,15 @@ describe("deployTimezone: config.json 单一真源", () => {
     expect(deployTimezone()).toBe("Europe/London");
   });
 
-  it("config.json 无 timezone → 落回系统时区(非空)", () => {
+  it("config.json 无 timezone → 精确落回 Intl 系统时区", () => {
     writeFileSync(
       path.join(tmpHome, "config.json"),
       JSON.stringify({ debug: true }),
       "utf8",
     );
-    const tz = deployTimezone();
-    expect(typeof tz).toBe("string");
-    expect(tz.length).toBeGreaterThan(0);
+    expect(deployTimezone()).toBe(
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+    );
   });
 });
 
