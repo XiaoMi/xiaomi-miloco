@@ -79,7 +79,7 @@ def _build_spec_property_entry(iid: str, item: dict) -> dict | None:
 
 async def _build_device_event_entries(proxy, urn: str) -> list[dict]:
     # urn 须为 urn:miot:... 格式（防注入，CodeQL ReDoS/路径注入）
-    if not re.match(r"^urn:miot:[A-Za-z0-9:_\-\.]+$", urn):
+    if not re.match(r"^urn:miot-spec-v2:[A-Za-z0-9:_.\-]+$", urn):
         return []
     spec_device = await proxy.miot_client.spec_parser.parse_async(urn=urn)
     if spec_device and not any(service.events for service in spec_device.services):
@@ -108,7 +108,7 @@ async def _build_device_event_entries(proxy, urn: str) -> list[dict]:
                 }
                 if prop.value_list:
                     item["value_list"] = [
-                        {"name": v.name, "value": v.value} for v in prop.value_list
+                        {"name": v.name, "value": v.value, "description": v.description} for v in prop.value_list
                     ]
                 if prop.value_range:
                     item["value_range"] = [
@@ -226,7 +226,7 @@ async def device_spec(did: str, current_user: str = Depends(verify_token)):
     """Return device spec with property names, value lists and value ranges.
     Uses the miot-spec parser (same data source as ha_xiaomi_home)."""
     # 路径注入/日志注入/ReDoS 防护：did 须为字母数字下划线连字符（米家设备 did 格式）
-    if not re.match(r"^[a-zA-Z0-9_-]+$", did):
+    if not re.match(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$", did):
         return NormalResponse(code=404, message="invalid device id", data=None)
     try:
         mgr = get_manager()
@@ -242,7 +242,7 @@ async def device_spec(did: str, current_user: str = Depends(verify_token)):
             return NormalResponse(code=0, message="no_spec",
                 data={"model": model, "name": device.name, "properties": [], "events": []})
         # urn 须为 urn:miot:... 格式（防注入，CodeQL 路径注入/ReDoS）
-        if not re.match(r"^urn:miot:[A-Za-z0-9:_\-\.]+$", urn):
+        if not re.match(r"^urn:miot-spec-v2:[A-Za-z0-9:_.\-]+$", urn):
             return NormalResponse(code=0, message="invalid urn",
                 data={"model": model, "name": device.name, "properties": [], "events": []})
 

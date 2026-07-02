@@ -752,7 +752,6 @@ class MiotProxy:
             try:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
-                await self._sync_meta_subscriptions()
                 await self.sync_automation_property_subscriptions(
                     self._automation_mappings
                 )
@@ -1526,7 +1525,7 @@ class MiotProxy:
                     ]
                 if s.value_list:
                     entry["value_list"] = [
-                        {"name": v.name, "value": v.value} for v in s.value_list
+                        {"name": v.name, "value": v.value, "description": v.description} for v in s.value_list
                     ]
                 if s.type_name:
                     entry["type_name"] = s.type_name

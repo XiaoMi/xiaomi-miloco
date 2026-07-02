@@ -538,7 +538,7 @@ class AutomationService:
                             names[arg_key] = arg_name or prop.description or arg_key
                             if prop.value_list:
                                 values[arg_key] = {
-                                    str(v.value): (v.name or str(v.value))
+                                    str(v.value): (v.description or v.name or str(v.value))
                                     for v in prop.value_list
                                 }
             return {"names": names, "values": values}
@@ -730,7 +730,7 @@ class AutomationService:
             log_item.clip_device_ids = [
                 device_id for device_id in camera_ids if device_id in artifacts.clips
             ] if persist_result.snapshot_count > 0 else []
-        if answer:
+        if answer and not matched_rule_ids:
             try:
                 event_label = (spec_meta or {}).get("names", {}).get(trigger.event_name) or trigger.event_name
                 await miot_service.send_notify(
