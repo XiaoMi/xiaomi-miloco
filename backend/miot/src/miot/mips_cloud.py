@@ -926,31 +926,12 @@ class MIoTMipsCloud:
                 return None
             did = m.group(1)
             raw = _parse_json_payload(payload) or {}
+            # prod 实测形态：params = {"did","siid","piid","value"}（单属性）。
+            # 严格按 (siid,piid) 抽取；其余不塞 changed，完整 payload 已在 raw 备查。
             changed: dict[str, Any] = {}
             params = raw.get("params")
-            if isinstance(params, dict):
-                if all(k in params for k in ("siid", "piid")):
-                    changed[f"prop.{params['siid']}.{params['piid']}"] = params.get(
-                        "value"
-                    )
-                else:
-                    for key, value in params.items():
-                        changed[str(key)] = value
-            elif isinstance(params, list):
-                for item in params:
-                    if not isinstance(item, dict):
-                        continue
-                    if "siid" in item and "piid" in item:
-                        changed[f"prop.{item['siid']}.{item['piid']}"] = item.get(
-                            "value"
-                        )
-                    elif "key" in item:
-                        changed[str(item["key"])] = item.get("value")
-            for key, value in raw.items():
-                if key == "params":
-                    continue
-                if key not in changed and key not in {"did", "method", "tid", "ts"}:
-                    changed[str(key)] = value
+            if isinstance(params, dict) and "siid" in params and "piid" in params:
+                changed[f"prop.{params['siid']}.{params['piid']}"] = params.get("value")
             return MIoTDevicePropertyChangedEvent(
                 did=did,
                 changed_properties=changed,
