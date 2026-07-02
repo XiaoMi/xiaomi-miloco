@@ -186,6 +186,9 @@ export interface ScopeCamera {
   roomName?: string;
   isOnline: boolean;
   inUse: boolean;
+  // 语音指令「存储偏好」（PUT /api/miot/scope/cameras/voice）。与 inUse 正交：
+  // 生效态 = inUse && voiceInUse（关掉相机感知时语音自动失效，但偏好保留、不落库）。
+  voiceInUse: boolean;
   connected: boolean;
 }
 

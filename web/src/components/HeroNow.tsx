@@ -36,6 +36,9 @@ interface Props {
   onJumpUsage?: () => void;
   /** 切换摄像头启用（PUT /api/miot/scope/cameras）；批量传 dids */
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
+  /** 切换单台摄像头语音指令（PUT /api/miot/scope/cameras/voice）。从属于感知开关：
+   *  仅当该相机 inUse=true 时可设，感知关时前端置灰。 */
+  onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -55,6 +58,7 @@ export function HeroNow({
   onPersonClick,
   onJumpUsage,
   onToggleCameras,
+  onToggleCameraVoice,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -153,6 +157,7 @@ export function HeroNow({
         miotHasCamera={miotHasCamera}
         channelByDid={channelByDid}
         onToggleCameras={onToggleCameras}
+        onToggleCameraVoice={onToggleCameraVoice}
       />
     </section>
   );
@@ -169,6 +174,7 @@ interface CameraSectionProps {
   miotHasCamera: boolean;
   channelByDid: Map<string, number>;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
+  onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
 }
 
 function CameraSection({
@@ -179,6 +185,7 @@ function CameraSection({
   miotHasCamera,
   channelByDid,
   onToggleCameras,
+  onToggleCameraVoice,
 }: CameraSectionProps) {
   const { t } = useTranslation();
   const total = scopeCameras.length;
@@ -198,6 +205,8 @@ function CameraSection({
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
   const [singleBusyDids, setSingleBusyDids] = useState<Set<string>>(new Set());
+  // 语音开关独立 in-flight 集：语音 PUT 走独立端点,与投喂 PUT 互不阻塞,分开跟踪。
+  const [voiceBusyDids, setVoiceBusyDids] = useState<Set<string>>(new Set());
   const runBulk = async (dids: string[], inUse: boolean) => {
     if (bulkBusy) return;
     setBulkBusy(true);
@@ -214,6 +223,19 @@ function CameraSection({
       await onToggleCameras([did], inUse);
     } finally {
       setSingleBusyDids((s) => {
+        const n = new Set(s);
+        n.delete(did);
+        return n;
+      });
+    }
+  };
+  const runSingleVoice = async (did: string, voiceInUse: boolean) => {
+    if (voiceBusyDids.has(did)) return;
+    setVoiceBusyDids((s) => new Set(s).add(did));
+    try {
+      await onToggleCameraVoice(did, voiceInUse);
+    } finally {
+      setVoiceBusyDids((s) => {
         const n = new Set(s);
         n.delete(did);
         return n;
@@ -289,6 +311,8 @@ function CameraSection({
                   channel={channelByDid.get(c.did)}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
+                  voiceBusy={voiceBusyDids.has(c.did)}
+                  onToggleVoice={(v) => runSingleVoice(c.did, v)}
                 />
               ))}
             </div>
@@ -320,6 +344,8 @@ function CameraSection({
                       (!c.inUse && (!c.isOnline || atCapacity))
                     }
                     onToggle={(v) => runSingle(c.did, v)}
+                    voiceBusy={voiceBusyDids.has(c.did)}
+                    onToggleVoice={(v) => runSingleVoice(c.did, v)}
                   />
                 ))}
               </ul>
@@ -368,6 +394,67 @@ function CamSwitch({
   );
 }
 
+/** 语音指令开关。从属于感知开关：相机感知关(inUse=false)时置灰、显示为「关」
+ *  (生效态 = inUse && voiceInUse)；感知开时反映并编辑存储偏好 voiceInUse。
+ *  与投喂开关(CamSwitch)并排,靠麦克风图标 + 文字标签区分,免得两个开关混淆。 */
+function VoiceSwitch({
+  on,
+  name,
+  disabled,
+  onToggle,
+}: {
+  on: boolean;
+  name: string;
+  disabled: boolean;
+  onToggle: (next: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={t(on ? "hero.voiceAriaOn" : "hero.voiceAriaOff", { name })}
+      title={
+        disabled
+          ? t("hero.voiceTitleDisabled")
+          : on
+            ? t("hero.voiceTitleOn")
+            : t("hero.voiceTitleOff")
+      }
+      disabled={disabled}
+      onClick={() => onToggle(!on)}
+      className={`inline-flex items-center gap-1 h-[16px] pl-1 pr-1.5 rounded-full text-[10px] leading-none shadow-sm transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:opacity-40 disabled:cursor-not-allowed ${
+        on ? "bg-brand-primary text-white" : "bg-black/60 text-white/85"
+      }`}
+    >
+      <MicIcon muted={!on} />
+      <span>{t("hero.voiceLabel")}</span>
+    </button>
+  );
+}
+
+/** 小麦克风图标；muted=true 画一道斜杠,表示该相机语音指令关闭。 */
+function MicIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-3 w-3 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <path d="M12 18v3" />
+      {muted && <path d="M4 4l16 16" />}
+    </svg>
+  );
+}
+
 interface CamCardProps {
   cam: ScopeCamera;
   /** PerceptionCamera 提供的真 channel；undefined = 还没拉到 / 多家庭场景无映射 */
@@ -375,10 +462,20 @@ interface CamCardProps {
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
+  /** 语音开关本卡 in-flight */
+  voiceBusy: boolean;
+  onToggleVoice: (next: boolean) => void;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
-function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
+function CamCardWithToggle({
+  cam,
+  channel,
+  bulkBusy,
+  onToggle,
+  voiceBusy,
+  onToggleVoice,
+}: CamCardProps) {
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
       <div className="relative">
@@ -388,7 +485,14 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
           cameraDid={cam.did}
           channel={channel ?? 0}
         />
-        <div className="absolute top-2 right-2">
+        {/* 语音 + 投喂两个开关并排浮在画面右上;connected 卡必然 inUse=true,语音可编辑。 */}
+        <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          <VoiceSwitch
+            on={cam.inUse && cam.voiceInUse}
+            name={cam.name}
+            disabled={!cam.inUse || voiceBusy}
+            onToggle={onToggleVoice}
+          />
           <CamSwitch
             inUse={cam.inUse}
             name={cam.name}
@@ -401,15 +505,19 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
   );
 }
 
-/** 下区横条行（日志页风格）：摄像头信息 + 投喂开关，无小窗。开关 on → 升入上区投喂。 */
+/** 下区横条行（日志页风格）：摄像头信息 + 语音/投喂开关，无小窗。投喂 on → 升入上区。 */
 function BenchCamItem({
   cam,
   disabled,
   onToggle,
+  voiceBusy,
+  onToggleVoice,
 }: {
   cam: ScopeCamera;
   disabled: boolean;
   onToggle: (next: boolean) => void;
+  voiceBusy: boolean;
+  onToggleVoice: (next: boolean) => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -433,12 +541,21 @@ function BenchCamItem({
           </div>
         )}
       </div>
-      <CamSwitch
-        inUse={cam.inUse}
-        name={cam.name}
-        disabled={disabled}
-        onToggle={onToggle}
-      />
+      <div className="flex items-center gap-2 shrink-0">
+        {/* 语音开关从属于感知:相机未启用(inUse=false)时置灰、显示为关。 */}
+        <VoiceSwitch
+          on={cam.inUse && cam.voiceInUse}
+          name={cam.name}
+          disabled={!cam.inUse || voiceBusy}
+          onToggle={onToggleVoice}
+        />
+        <CamSwitch
+          inUse={cam.inUse}
+          name={cam.name}
+          disabled={disabled}
+          onToggle={onToggle}
+        />
+      </div>
     </li>
   );
 }
