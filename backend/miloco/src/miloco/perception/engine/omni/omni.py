@@ -336,7 +336,7 @@ async def _call_omni_messages(
             inference_params={
                 "temperature": config.temperature,
                 "top_p": config.top_p,
-                "max_completion_tokens": config.max_completion_tokens,
+                "max_tokens": config.max_completion_tokens,
             },
         )
 

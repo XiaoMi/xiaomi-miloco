@@ -195,7 +195,7 @@ async def call_omni(
             inference_params={
                 "temperature": config.temperature,
                 "top_p": config.top_p,
-                "max_completion_tokens": config.max_completion_tokens,
+                "max_tokens": config.max_completion_tokens,
             },
         )
 
@@ -379,6 +379,6 @@ async def call_omni_stream(
             inference_params={
                 "temperature": config.temperature,
                 "top_p": config.top_p,
-                "max_completion_tokens": config.max_completion_tokens,
+                "max_tokens": config.max_completion_tokens,
             },
         )
