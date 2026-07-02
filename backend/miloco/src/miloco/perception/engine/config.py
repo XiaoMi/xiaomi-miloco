@@ -244,10 +244,16 @@ class NoPersonConfigDC:
     脑补"陌生人在做某事"。omni 在 identities 里把"框内确无人"判为 ``no_person``（区别于
     ``unknown``=有人但不认识，见 ``field_registry``），本配置控制引擎侧如何消费该判定：
     连续 ``vote_threshold`` 次 no_person 才落定 ``no_person`` 状态（停派发 omni、身份不导出、
-    不进陌生人池）；该 track 一旦相对落定时的锚点 bbox 明显移动（疑似被路过的真人 ID-switch
-    带走）即回到 pending 重新走识别——确保不会把真人长期误压成无人。
+    不进陌生人池）。
 
-    召回保护：偏"少误判无人"——需连续多票 + 任何明显移动立即解除。
+    召回保护偏"少误判无人"——落定后有三重解除通道，确保任何 track 都不会被永久静音：
+      1) 落定需连续 ``vote_threshold`` 票（防单次误判掉背对 / 遮挡的真人）；
+      2) 框相对落定锚点明显移动 → 立即回 pending（会动的真人即时自愈，走
+         ``clear_no_person_on_motion``）；
+      3) 每 ``no_person_recheck_sec`` 放行一次慢重审，重审判到人即回 pending（走
+         ``clear_no_person_to_pending``）。这条是最后兜底的"不永久卡死"自愈不变式，非主恢复
+         通道：只为极少数"未注册真人一动不动、被连判两票误压、又不触发移动解除"的残留兜底。
+         注意急性摔倒 / 倒地动作由上游动作 / 事件检测捕获、不依赖本状态，故此周期可放得很长。
     """
 
     enabled: bool = True
@@ -256,6 +262,10 @@ class NoPersonConfigDC:
     # 落定后"明显移动"判据：中心位移 ≥ min_abs_px **且** ≥ ratio×bbox 对角线，两者同时满足才算移动
     motion_clear_displacement_ratio: float = 0.15
     motion_clear_min_abs_px: float = 30.0
+    # 慢重审自愈周期（秒）：落定后每此秒数放行一次 omni 重审，判到人即回 pending。这是"任何状态
+    # 都不会被永久卡死"的最后兜底（主恢复靠上面的移动解除 + 上游动作检测），故可放长；
+    # needs_omni_call 入口按 engine_fps 换算成帧。默认 1200s(20min)，现场想更懒可调 1800/3600。
+    no_person_recheck_sec: float = 1200.0
 
     # reject_region（P3，默认关）：把 no_person 的屏幕区域登记为"禁新建 track 区"，
     # 直到真人 track 与之明显重叠或区域 TTL 到期才失效。默认关闭——需现场验证后再开

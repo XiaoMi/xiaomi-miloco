@@ -139,7 +139,11 @@ def _parse_identity_assignments(
         is_unknown_n = lower.startswith("unknown_") or lower.startswith("unknown-")
         # no_person：omni 判该框内确无人（非人误检），区别于 unknown（有人但认不出）。
         # 不走 gallery 反查、不打"不在 gallery"warning；person_id 记 None，下游靠 no_person 标志分流。
-        is_no_person = lower == "no_person"
+        # 与 unknown 同口径放宽匹配：容忍附注 / 大小写 / 空格 / 连字符变体（omni 有回显完整标签的
+        # 习惯，如 "no_person（3D打印机）" / "no person"），避免格式抖动时静默退化成 unknown，
+        # 把本该抑制的误检框又当"陌生人"描述（即 no_person 要修的老 bug 回归）。
+        normalized = re.sub(r"[\s\-]+", "_", lower).strip("_")
+        is_no_person = normalized.startswith("no_person")
         if is_unknown_n and not distinguish:
             logger.info("distinguish=false 但收到 %r，规范化为 'unknown'", raw_name_str)
             raw_name_str = "unknown"

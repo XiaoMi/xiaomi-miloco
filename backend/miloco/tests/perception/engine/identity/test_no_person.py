@@ -1,22 +1,27 @@
 """no_person（非人误检抑制）单测。
 
-覆盖三层：
+覆盖：
   - 解析层：``parse_identity_assignments`` 把 omni name="no_person" 标成 no_person=True，
-    区别于 unknown（有人但认不出）。
+    区别于 unknown（有人但认不出）；且与 unknown 同口径放宽匹配（附注 / 空格 / 连字符变体）。
   - 状态机：``record_no_person`` 连续 2 票才落定、confirmed 成员不被翻；落定后
-    ``needs_omni_call``→False、``get_face_id_value``→"none"。
-  - 移动解除：``clear_no_person_on_motion`` 静止维持、明显移动回 pending。
+    ``get_face_id_value``→"none"。
+  - 三重解除通道：① 多票；② ``clear_no_person_on_motion`` 明显移动回 pending；
+    ③ ``needs_omni_call`` 慢周期重审 + ``clear_no_person_to_pending`` 判到人回 pending。
+  - 编排层：``_make_on_result`` 的投票清零 / confirmed 早退不误伤 / 慢重审回 pending。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from miloco.perception.engine.config import IdentityEngineConfig, StabilityConfigDC
+from miloco.perception.engine.identity.dispatcher import OmniIdentityResult
 from miloco.perception.engine.identity.engine import IdentityEngine, _bbox_iou
 from miloco.perception.engine.identity.state import (
     TrackIdentityState,
     clear_no_person_on_motion,
+    clear_no_person_to_pending,
     get_face_id_value,
     needs_omni_call,
     record_no_person,
@@ -56,6 +61,15 @@ class TestParseNoPerson:
         assert out[0]["no_person"] is False
         assert out[0]["person_id"] == "pid-zhang"
 
+    def test_no_person_variants_still_flagged(self):
+        """omni 回显变体（附注 / 空格 / 连字符 / 大小写）仍判 no_person，不静默退化成 unknown。"""
+        for name in ("no_person（3D打印机）", "No Person", "no-person", "NO_PERSON."):
+            out = parse_identity_assignments(
+                _resp([{"track_id": 7, "name": name, "confidence": 0.9}]),
+                prompt_track_ids={7},
+            )
+            assert out[0]["no_person"] is True, name
+
 
 class TestRecordNoPerson:
     def test_two_votes_to_commit(self):
@@ -91,12 +105,28 @@ class TestRecordNoPerson:
 
 
 class TestNoPersonGates:
-    def test_needs_omni_call_false(self):
-        state = TrackIdentityState(track_id=1, status="no_person")
+    def test_premarked_never_rechecks(self):
+        """reject_region 预标（从未派过 omni，last_omni_call_frame==0）→ 永不时间重审，
+        即便 now_frame 已很大（避免流跑久后一上来就 ≥ 周期而立即误派）。"""
+        state = TrackIdentityState(track_id=1, status="no_person")  # last_omni_call_frame=0
         assert needs_omni_call(
-            state, now_frame=100, now_ts=100.0, min_dispatch_interval_sec=5.0,
-            config=StabilityConfigDC(), engine_fps=3,
+            state, now_frame=10_000, now_ts=0.0, min_dispatch_interval_sec=5.0,
+            config=StabilityConfigDC(), engine_fps=3, no_person_recheck_sec=10.0,
         ) is False
+
+    def test_recheck_fires_after_period(self):
+        """落定 no_person（曾派发，last_omni_call_frame>0）→ 距上次派发满周期才放行慢重审。"""
+        state = TrackIdentityState(track_id=1, status="no_person", last_omni_call_frame=100)
+        # no_person_recheck_sec=10s × fps=3 → interval=30 帧
+        assert needs_omni_call(state, 100 + 29, 0.0, 5.0, StabilityConfigDC(), 3, 10.0) is False
+        assert needs_omni_call(state, 100 + 30, 0.0, 5.0, StabilityConfigDC(), 3, 10.0) is True
+
+    def test_inflight_blocks_recheck(self):
+        """重审在途（inflight）→ 即便已过周期也不重复派。"""
+        state = TrackIdentityState(
+            track_id=1, status="no_person", last_omni_call_frame=100, inflight=True,
+        )
+        assert needs_omni_call(state, 100 + 999, 0.0, 5.0, StabilityConfigDC(), 3, 10.0) is False
 
     def test_face_id_value_none(self):
         state = TrackIdentityState(track_id=1, status="no_person")
@@ -207,3 +237,84 @@ class TestRejectRegion:
         eng._no_person_regions = [((100, 100, 200, 300), 500.0)]  # 已过期(< now 1000)
         eng._apply_reject_regions(set(), now_ts=1000.0)
         assert eng._no_person_regions == []
+
+
+class TestClearNoPersonToPending:
+    def test_recheck_saw_person_back_to_pending(self):
+        """慢重审判到人 → 回 pending、清票 / 锚点、重置 pending 起始时间。"""
+        state = TrackIdentityState(
+            track_id=1, status="no_person",
+            no_person_vote_count=2, no_person_anchor_bbox=(10, 10, 50, 90),
+        )
+        clear_no_person_to_pending(state, now_ts=1234.0)
+        assert state.status == "pending"
+        assert state.no_person_vote_count == 0
+        assert state.no_person_anchor_bbox is None
+        assert state.pending_started_ts == 1234.0
+
+
+def _on_result_engine() -> IdentityEngine:
+    """构造仅含 _make_on_result 所需属性的轻量 engine（绕过 __init__）。"""
+    eng = IdentityEngine.__new__(IdentityEngine)
+    cfg = IdentityEngineConfig()
+    cfg.no_person.enabled = True
+    eng.config = cfg
+    eng.cam_id = "camA"
+    eng._states = {}
+    eng._latest_bbox = {}
+    eng.tier_u_pool = None
+    return eng
+
+
+def _run_on_result(
+    eng: IdentityEngine, result: OmniIdentityResult, *, now_ts: float = 1000.0,
+) -> None:
+    asyncio.run(eng._make_on_result(now_ts=now_ts)(result))
+
+
+class TestOnResultOrchestration:
+    """驱动 _make_on_result 闭包，回归"投票清零 / confirmed 早退 / 慢重审回 pending"的编排。"""
+
+    def test_non_no_person_result_clears_vote(self):
+        """投一票 no_person 后来一次"有人"结果 → 票清 0（连续性中断），仍 pending。"""
+        eng = _on_result_engine()
+        st = TrackIdentityState(track_id=1, status="pending", no_person_vote_count=1)
+        eng._states[1] = st
+        _run_on_result(eng, OmniIdentityResult(
+            track_id=1, person_id=None, confidence=0.6, no_person=False,
+        ))
+        assert st.no_person_vote_count == 0
+        assert st.status == "pending"
+
+    def test_confirmed_member_no_person_early_return(self):
+        """confirmed 成员连投 3 次 no_person → 仍 confirmed、committed 不变、写库连续计数清 0。"""
+        eng = _on_result_engine()
+        st = TrackIdentityState(
+            track_id=1, status="confirmed", committed_person_id="pid-x",
+            write_eligible_count=5,
+        )
+        eng._states[1] = st
+        for _ in range(3):
+            _run_on_result(eng, OmniIdentityResult(
+                track_id=1, person_id=None, confidence=0.9, no_person=True,
+            ))
+        assert st.status == "confirmed"
+        assert st.committed_person_id == "pid-x"
+        assert st.write_eligible_count == 0      # 🔵-2：弃权口径打断 tier_c 写库连续段
+        assert st.no_person_vote_count == 0      # confirmed 不计 no_person 票
+
+    def test_committed_no_person_recovers_on_person(self):
+        """落定 no_person 的 track 被慢重审判到人 → 回 pending（自愈通道 ③，端到端走 _on_result）。"""
+        eng = _on_result_engine()
+        st = TrackIdentityState(
+            track_id=1, status="no_person",
+            no_person_vote_count=2, no_person_anchor_bbox=(10, 10, 50, 90),
+            last_omni_call_frame=100,
+        )
+        eng._states[1] = st
+        _run_on_result(eng, OmniIdentityResult(
+            track_id=1, person_id=None, confidence=0.6, no_person=False,
+        ))
+        assert st.status == "pending"
+        assert st.no_person_anchor_bbox is None
+        assert st.no_person_vote_count == 0

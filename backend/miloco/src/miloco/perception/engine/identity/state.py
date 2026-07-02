@@ -214,6 +214,20 @@ def clear_no_person_on_motion(
     return True
 
 
+def clear_no_person_to_pending(state: TrackIdentityState, now_ts: float | None = None) -> None:
+    """no_person track 被慢重审判到"人"（收到非 no_person 的 omni 结果）→ 回 pending 重新识别。
+
+    与 ``clear_no_person_on_motion`` 并列的第二条解除通道：那条靠"框移动"（会动的真人），这条
+    靠"重审真看到人"（一动不动、只能靠 ``needs_omni_call`` 慢周期重审兜底的真人）。转 pending 后
+    needs_omni_call 对 pending 走"下窗即派"，几秒内即可重新 commit 出去；真静止误检物体每次重审
+    仍判 no_person、走不到这里，故不会因此复发"陌生人"幻觉。
+    """
+    state.status = "pending"
+    state.no_person_vote_count = 0
+    state.no_person_anchor_bbox = None
+    state.pending_started_ts = now_ts if now_ts is not None else time.time()
+
+
 def update_evidence(
     state: TrackIdentityState,
     candidate_person_id: str | None,
@@ -429,6 +443,7 @@ def needs_omni_call(
     min_dispatch_interval_sec: float,
     config: StabilityConfig,
     engine_fps: float,
+    no_person_recheck_sec: float = 1200.0,
 ) -> bool:
     """判断该 track 是否需要派发新的 omni 识别任务。
 
@@ -452,8 +467,19 @@ def needs_omni_call(
         # 还没 promote 到 pending；等 SortTracker 把它 confirmed 上来才会 call promote_to_pending
         return False
     if state.status == "no_person":
-        # 已落定非人误检：不再派发 omni（停止对幻影框的重复识别）。移动解除走 engine 侧 motion check。
-        return False
+        # 已落定非人误检：默认停派发（不重复问 omni 幻影框）。但每 no_person_recheck_sec 放行一次
+        # 慢重审——"任何状态都不会被永久卡死"的最后兜底，兜极少数"未注册真人一动不动被连判两票
+        # 误压、又不触发移动解除"的残留（会动的人由 engine 侧 motion check 即时解除；急性摔倒 /
+        # 倒地动作由上游事件检测捕获、不依赖此状态，故周期放得很长）。重审判到人即回 pending
+        # （见 _on_result → clear_no_person_to_pending）。
+        if state.inflight:
+            return False
+        if state.last_omni_call_frame == 0:
+            # reject_region 预标的 track（从未真正派过 omni）不参与时间重审：其解除靠移动 /
+            # 真人覆盖 / 区域 TTL；否则流跑久后 now_frame 一上来就 ≥ 周期而立即误派。
+            return False
+        interval = max(1, round(no_person_recheck_sec * engine_fps))
+        return (now_frame - state.last_omni_call_frame) >= interval
     if state.inflight:
         return False
     if state.status == "pending":

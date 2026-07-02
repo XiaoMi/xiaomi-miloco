@@ -52,6 +52,7 @@ from miloco.perception.engine.identity.state import (
     apply_recheck_result,
     check_pending_timeout,
     clear_no_person_on_motion,
+    clear_no_person_to_pending,
     get_face_id_value,
     mark_dispatched,
     needs_omni_call,
@@ -609,6 +610,7 @@ class IdentityEngine:
                 self.config.dispatch.min_interval_sec,
                 self.config.stability,
                 self._engine_fps,
+                self.config.no_person.no_person_recheck_sec,
             ):
                 continue
             # coasting（人离开/跟丢后纯 Kalman 预测残留）的 track 当窗口不进 omni
@@ -1225,6 +1227,11 @@ class IdentityEngine:
             # （停派发 / 身份不导出 / 不进陌生人池）；confirmed 成员不被翻（见 record_no_person）。
             # 非 no_person 结果到达时清票，保证"连续"语义。confirmed 成员永不被 no_person 干扰。
             if self.config.no_person.enabled and result.no_person:
+                if state.status == "confirmed":
+                    # confirmed 成员不被 no_person 翻（record_no_person 视为弃权），但这一窗仍是
+                    # "没认到本人" → 按弃权口径打断 tier_c 写库连续段（与 coasting / 看脸否定同口径），
+                    # 不放松"连续 N 次一致才写库"的不变式。
+                    state.write_eligible_count = 0
                 committed = record_no_person(
                     state,
                     anchor_bbox=self._latest_bbox.get(result.track_id),
@@ -1246,9 +1253,19 @@ class IdentityEngine:
                         if len(self._no_person_regions) > 64:
                             self._no_person_regions = self._no_person_regions[-64:]
                 return
+            # 走到这里 = 本窗 omni 判"有人"（非 no_person）。
             if state.no_person_vote_count:
-                # omni 本窗看到人了 → no_person 连续性中断，清票
+                # no_person 连续性中断，清累计票
                 state.no_person_vote_count = 0
+            if self.config.no_person.enabled and state.status == "no_person":
+                # 已落定 no_person 却被慢重审判到人 → 第二条解除通道：回 pending 重新识别（随后
+                # needs_omni_call 对 pending "下窗即派"，几秒内 commit 出去）。真静止误检物体每次
+                # 重审仍判 no_person、走不到这里，不会复发"陌生人"幻觉。兜"未注册真人一动不动被误压"。
+                logger.info(
+                    "[Identity] cam=%s track_id=%d no_person 慢重审判到人 → 回 pending 重识别",
+                    self.cam_id, result.track_id,
+                )
+                clear_no_person_to_pending(state, now_ts)
 
             # D · 跨身份冲突兜底：dispatcher 检测出"omni 把已锁定身份挂到了
             # 另一个 candidate"——同一身份只能对应一个 track，物理上不可能两个

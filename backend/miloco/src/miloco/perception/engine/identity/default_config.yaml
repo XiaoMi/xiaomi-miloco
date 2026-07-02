@@ -130,6 +130,9 @@ no_person:
   vote_threshold: 2                      # 连续命中 no_person 多少次才落定(防单次误判误掉真人)
   motion_clear_displacement_ratio: 0.15  # "明显移动": 中心位移 ≥ ratio×对角线
   motion_clear_min_abs_px: 30.0          # 且 ≥ 此绝对像素(两者同时满足)
+  # 慢重审自愈周期(秒): 落定后每此秒数放行一次 omni 重审, 判到人即回 pending。这是"任何状态都不会被
+  # 永久卡死"的最后兜底(主恢复靠上面的移动解除 + 上游动作检测), 故放得很长。默认 1200s(20min)。
+  no_person_recheck_sec: 1200.0
   # reject_region(默认关): 把 no_person 屏幕区域登记为"禁新建 track 区", 直到真人覆盖或 TTL 到期失效。
   # 需现场验证后再开(误开会挡门口/座位等真人常现位置的新 track)。
   reject_region_enabled: false
