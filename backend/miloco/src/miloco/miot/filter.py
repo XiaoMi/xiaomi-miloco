@@ -3,9 +3,9 @@
 
 """miloco scope 过滤工具：家庭接入范围 + 相机接入范围。
 
-数据落在 SQLite ``kv`` 表的 ``HOME_WHITE_LIST_KEY``（启用的家庭集合）和
-``CAMERA_BLACK_LIST_KEY``（停用的相机集合），JSON array 字符串，由
-:class:`KVRepo` 缓存。
+数据落在 SQLite ``kv`` 表的 ``HOME_WHITE_LIST_KEY``（启用的家庭集合）、
+``CAMERA_BLACK_LIST_KEY``（停用的相机集合）和 ``CAMERA_VOICE_BLACK_LIST_KEY``
+（停用语音指令的相机集合），JSON array 字符串，由 :class:`KVRepo` 缓存。
 """
 
 from __future__ import annotations
@@ -66,6 +66,15 @@ def allowed_home_ids(kv_repo: KVRepo) -> set[str]:
 def denied_camera_dids(kv_repo: KVRepo) -> set[str]:
     """已停用的相机 did 集合；空表示全部启用。"""
     return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_BLACK_LIST_KEY))
+
+
+def voice_denied_camera_dids(kv_repo: KVRepo) -> set[str]:
+    """已停用「语音指令」的相机 did 集合；空表示全部启用（默认启用）。
+
+    与 ``denied_camera_dids`` 正交：相机可照常投喂感知，此集只决定其语音指令是否
+    在 dispatch 阶段被下发给 agent。dispatch 时实时读取，不重启感知引擎。
+    """
+    return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY))
 
 
 def is_home_allowed(kv_repo: KVRepo, home_id: str | None) -> bool:
@@ -154,6 +163,24 @@ def set_cameras_in_use(
     """批量切换相机启用状态。去重后一次性写入 KV。"""
     return _toggle_members(
         kv_repo, ScopeConfigKeys.CAMERA_BLACK_LIST_KEY, dids, include=not in_use
+    )
+
+
+def set_camera_voice_in_use(
+    kv_repo: KVRepo, did: str, in_use: bool
+) -> tuple[list[str], bool]:
+    """切换单个相机的语音指令启用状态。``in_use=False`` 即加入语音停用集。"""
+    return _toggle_member(
+        kv_repo, ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY, did, include=not in_use
+    )
+
+
+def set_cameras_voice_in_use(
+    kv_repo: KVRepo, dids: list[str], in_use: bool
+) -> tuple[list[str], bool]:
+    """批量切换相机语音指令启用状态。去重后一次性写入 KV。语音无投喂上限，不设 cap。"""
+    return _toggle_members(
+        kv_repo, ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY, dids, include=not in_use
     )
 
 
