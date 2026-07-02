@@ -74,13 +74,66 @@ def ms_to_aware_dt(ms: int, tz: tzinfo | None = None) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=tz or deploy_timezone())
 
 
+# 仅作 ``datetime.now().astimezone().tzinfo`` 理论上返回 None 时的最后防线,
+# 常规路径不再猜 Asia/Shanghai(见 deploy_timezone 第 3 步)。
 _FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
 _warned_no_iana = False
+
+# 顶层非 IANA 名的杂项文件,内容反查时跳过
+_TZDB_NON_ZONE_FILES = frozenset({
+    "posixrules", "localtime", "leapseconds", "leap-seconds.list",
+    "tzdata.zi", "zone.tab", "zone1970.tab", "iso3166.tab", "SECURITY",
+})
+
+
+def _localtime_content_lookup(localtime: Path = Path("/etc/localtime")) -> ZoneInfo | None:
+    """``/etc/localtime`` 为普通文件(非 symlink)时,按字节内容反查 zoneinfo 数据库。
+
+    docker bind-mount / ``cp`` 出来的 ``/etc/localtime`` 没有 symlink 目标可读,
+    tzlocal 同款思路:与数据库逐一比对(先 size 预筛再比字节)。命中多个别名时取排序后
+    优先带 "/" 的规范名(如 Asia/Shanghai 优先于顶层别名 PRC),保证确定性。
+    只在 ``_system_iana_tz`` 内调用,结果随其 lru_cache 缓存,全库扫描仅一次。
+    """
+    import zoneinfo
+
+    try:
+        if localtime.is_symlink() or not localtime.is_file():
+            return None
+        data = localtime.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    matches: list[str] = []
+    for base in zoneinfo.TZPATH:
+        root = Path(base)
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*"):
+            try:
+                if not f.is_file() or f.stat().st_size != len(data):
+                    continue
+                rel = f.relative_to(root).as_posix()
+                # posix/ right/ 是 leap-second 变体目录,不是规范 IANA 名
+                if rel.startswith(("posix/", "right/")) or rel in _TZDB_NON_ZONE_FILES:
+                    continue
+                if f.read_bytes() == data:
+                    matches.append(rel)
+            except OSError:
+                continue
+        if matches:
+            break
+    for name in sorted(matches, key=lambda n: ("/" not in n, n)):
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            continue
+    return None
 
 
 @functools.lru_cache(maxsize=1)
 def _system_iana_tz() -> ZoneInfo | None:
-    """读 ``TZ`` env / ``/etc/timezone`` / ``/etc/localtime`` symlink → ``ZoneInfo``。
+    """读 ``TZ`` env / ``/etc/timezone`` / ``/etc/localtime`` (symlink → 内容反查) → ``ZoneInfo``。
 
     进程级缓存:系统时区运行时不会变。任何一步拿到合法 IANA 名即返回,全失败返回 ``None``。
     返回 ``ZoneInfo`` 对象意味着 DST 规则内建生效,跟固定 offset 行为完全不同。
@@ -107,7 +160,8 @@ def _system_iana_tz() -> ZoneInfo | None:
                 return ZoneInfo(target[idx + len("zoneinfo/") :])
         except (ZoneInfoNotFoundError, OSError):
             pass
-    return None
+    # symlink 路读不到(普通文件拷贝,docker 常见)→ 按内容反查兜住
+    return _localtime_content_lookup()
 
 
 def deploy_timezone() -> tzinfo:
@@ -115,12 +169,15 @@ def deploy_timezone() -> tzinfo:
 
     1. ``settings.timezone`` (显式配置,IANA 名如 ``Asia/Shanghai``;
        ``MILOCO_TIMEZONE`` env 由 pydantic 自动并入此字段)
-    2. 系统 IANA 反查 (``TZ`` env / ``/etc/timezone`` / ``/etc/localtime``)
-    3. 兜底 ``Asia/Shanghai`` + 启动期 warning
+    2. 系统 IANA 反查 (``TZ`` env / ``/etc/timezone`` / ``/etc/localtime``
+       symlink / ``/etc/localtime`` 内容反查)
+    3. 最后兜底 OS 本地偏移 (``datetime.now().astimezone().tzinfo``) + 一次性 warning
 
-    第 2 步必须拿到 IANA 名(而非固定 offset),因为 ``ZoneInfo`` 内建 DST 规则。
-    旧实现用 ``datetime.now().astimezone().tzinfo`` 拿到的是启动时刻的固定偏移,
-    跨过 DST 切换日会偏 1 小时。
+    第 2 步优先拿 IANA 名(而非固定 offset),因为 ``ZoneInfo`` 内建 DST 规则。
+    第 3 步仅在宿主完全不暴露 IANA 身份时到达(四条反查路全失败):此时 OS 本地钟
+    是机器上一切时间显示的事实来源,严格好于旧行为"猜 Asia/Shanghai"(非中国部署
+    恒偏数小时)。偏移每次调用现取(非启动期缓存的固定值),跨 DST 切换日下一次调用
+    即修正;残余误差仅限横跨切换时刻的窗口计算,且仅发生在此病态配置下。
 
     用于"今天 / 本周 / rollover"等部署侧业务概念,以及 API 出口 ISO 偏移后缀
     (``ms_to_iso_local`` 走本函数)。DB 存储始终 INTEGER ms (UTC 绝对时刻),
@@ -141,12 +198,13 @@ def deploy_timezone() -> tzinfo:
     global _warned_no_iana
     if not _warned_no_iana:
         _logger.warning(
-            "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
-            "If deploying outside China, set MILOCO_TIMEZONE or settings.timezone "
-            "to your IANA zone name (e.g. America/Los_Angeles, Europe/London)."
+            "Could not detect system IANA timezone; falling back to the OS-local "
+            "UTC offset. Set MILOCO_TIMEZONE or settings.timezone to your IANA "
+            "zone name (e.g. Asia/Shanghai, America/Los_Angeles) for DST-correct "
+            "behavior."
         )
         _warned_no_iana = True
-    return _FALLBACK_TZ
+    return datetime.now().astimezone().tzinfo or _FALLBACK_TZ
 
 
 def now_iso() -> str:

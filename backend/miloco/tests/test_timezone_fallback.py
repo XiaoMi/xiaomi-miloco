@@ -92,13 +92,14 @@ def test_system_iana_skips_invalid_tz_env(monkeypatch, tmp_path):
         assert str(tz) != "Mars/Olympus"
 
 
-def test_fallback_to_asia_shanghai_when_no_iana(monkeypatch, caplog):
-    """settings.timezone 无 + _system_iana_tz 返回 None → 兜底 Asia/Shanghai + warning。"""
-    import logging
+def test_fallback_to_os_local_when_no_iana(monkeypatch, caplog):
+    """settings.timezone 无 + _system_iana_tz 返回 None → 兜底 OS 本地偏移 + warning。
 
-    monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
-    _reset_settings()
-    _reset_iana_cache()
+    (f) 条款回归:旧兜底猜 Asia/Shanghai,把"OS 时钟正确、只是反查不出 IANA 名"的
+    非中国宿主强行掰成北京时间;展示路径上 OS 本地偏移严格好于错城市。
+    """
+    import logging
+    from datetime import datetime
 
     from miloco.utils import time_utils
 
@@ -107,17 +108,14 @@ def test_fallback_to_asia_shanghai_when_no_iana(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=time_utils._logger.name):
         tz = time_utils.deploy_timezone()
 
-    assert tz == ZoneInfo("Asia/Shanghai")
-    assert any("Asia/Shanghai" in r.message for r in caplog.records)
+    # 兜底 == 此刻的 OS 本地偏移(非 Asia/Shanghai 猜测)
+    assert datetime.now(tz).utcoffset() == datetime.now().astimezone().utcoffset()
+    assert any("OS-local" in r.message for r in caplog.records)
 
 
 def test_fallback_warning_only_once(monkeypatch, caplog):
     """兜底 warning 在进程内只打一次。"""
     import logging
-
-    monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
-    _reset_settings()
-    _reset_iana_cache()
 
     from miloco.utils import time_utils
 
@@ -128,8 +126,41 @@ def test_fallback_warning_only_once(monkeypatch, caplog):
         time_utils.deploy_timezone()
         time_utils.deploy_timezone()
 
-    warn_count = sum(1 for r in caplog.records if "Asia/Shanghai" in r.message)
+    warn_count = sum(1 for r in caplog.records if "OS-local" in r.message)
     assert warn_count == 1, f"warning 应只打 1 次,实际 {warn_count} 次"
+
+
+def test_localtime_content_lookup_regular_file(tmp_path):
+    """/etc/localtime 为普通文件(docker cp / bind-mount)时按字节反查出 IANA 名。"""
+    import zoneinfo
+    from pathlib import Path
+
+    from miloco.utils.time_utils import _localtime_content_lookup
+
+    src = None
+    for base in zoneinfo.TZPATH:
+        cand = Path(base) / "America" / "New_York"
+        if cand.is_file():
+            src = cand
+            break
+    if src is None:
+        pytest.skip("本机无 zoneinfo 数据库文件,无法构造反查样本")
+
+    fake = tmp_path / "localtime"
+    fake.write_bytes(src.read_bytes())
+    tz = _localtime_content_lookup(fake)
+    assert tz is not None
+    # 命中多个别名时优先带 "/" 的规范名 + 字典序,America/New_York 确定胜出
+    assert str(tz) == "America/New_York"
+
+
+def test_localtime_content_lookup_garbage_returns_none(tmp_path):
+    """内容不匹配数据库任何 zone → None(继续走下一级兜底,不误报)。"""
+    from miloco.utils.time_utils import _localtime_content_lookup
+
+    fake = tmp_path / "localtime"
+    fake.write_bytes(b"TZif-not-a-real-zone" * 7)
+    assert _localtime_content_lookup(fake) is None
 
 
 def test_dst_zone_correctly_handled_via_iana(monkeypatch):
