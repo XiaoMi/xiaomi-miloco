@@ -221,10 +221,10 @@ def _fallback_suggestion_from_caption(
         event=event,
         action="，".join(action_parts),
         urgency="low",
-        room_name=caption.room_name,
-        source_device_ids=list(caption.source_device_ids),
-        device_name=caption.device_name,
-        time_window=caption.time_window,
+        room_name=getattr(caption, "room_name", ""),
+        source_device_ids=list(getattr(caption, "source_device_ids", []) or []),
+        device_name=getattr(caption, "device_name", ""),
+        time_window=getattr(caption, "time_window", ""),
     )
 
 
