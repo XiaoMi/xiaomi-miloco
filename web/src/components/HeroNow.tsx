@@ -36,8 +36,9 @@ interface Props {
   onJumpUsage?: () => void;
   /** 切换摄像头启用（PUT /api/miot/scope/cameras）；批量传 dids */
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
-  /** 切换单台摄像头语音指令（PUT /api/miot/scope/cameras/voice）。从属于感知开关：
-   *  仅当该相机 inUse=true 时可设，感知关时前端置灰。 */
+  /** 切换单台摄像头拾音（PUT /api/miot/scope/cameras/voice）。关闭 = 该相机声音完全
+   *  不被处理（mic-off：不转写、不上云）。从属于感知开关：仅当该相机 inUse=true 时
+   *  可设，感知关时前端置灰。 */
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
 }
 
@@ -205,7 +206,7 @@ function CameraSection({
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
   const [singleBusyDids, setSingleBusyDids] = useState<Set<string>>(new Set());
-  // 语音开关独立 in-flight 集：语音 PUT 走独立端点,与投喂 PUT 互不阻塞,分开跟踪。
+  // 拾音开关独立 in-flight 集：拾音 PUT 走独立端点,与投喂 PUT 互不阻塞,分开跟踪。
   const [voiceBusyDids, setVoiceBusyDids] = useState<Set<string>>(new Set());
   const runBulk = async (dids: string[], inUse: boolean) => {
     if (bulkBusy) return;
@@ -311,7 +312,7 @@ function CameraSection({
                   channel={channelByDid.get(c.did)}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
-                  // 相机开关 in-flight 时语音开关也置灰:关相机的 PUT 落库后语音 PUT 会被
+                  // 相机开关 in-flight 时拾音开关也置灰:关相机的 PUT 落库后拾音 PUT 会被
                   // 后端「感知已关闭」拒掉,别让住户在窗口期点出个报错 toast。
                   voiceBusy={
                     voiceBusyDids.has(c.did) ||
@@ -350,7 +351,7 @@ function CameraSection({
                       (!c.inUse && (!c.isOnline || atCapacity))
                     }
                     onToggle={(v) => runSingle(c.did, v)}
-                    // 同上区卡:相机开关 in-flight 时语音开关一并置灰,防交叠竞态。
+                    // 同上区卡:相机开关 in-flight 时拾音开关一并置灰,防交叠竞态。
                     voiceBusy={
                       voiceBusyDids.has(c.did) ||
                       bulkBusy ||
@@ -405,7 +406,8 @@ function CamSwitch({
   );
 }
 
-/** 语音指令开关。从属于感知开关：相机感知关(inUse=false)时置灰、显示为「关」
+/** 拾音开关（mic-off：关闭后此摄像头的声音完全不被处理——不监听、不转写、不上云）。
+ *  从属于感知开关：相机感知关(inUse=false)时置灰、显示为「关」
  *  (生效态 = inUse && voiceInUse)；感知开时反映并编辑存储偏好 voiceInUse。
  *  与投喂开关(CamSwitch)并排,靠麦克风图标 + 文字标签区分,免得两个开关混淆。 */
 function VoiceSwitch({
@@ -445,7 +447,7 @@ function VoiceSwitch({
   );
 }
 
-/** 小麦克风图标；muted=true 画一道斜杠,表示该相机语音指令关闭。 */
+/** 小麦克风图标；muted=true 画一道斜杠,表示该相机拾音关闭（声音不被处理）。 */
 function MicIcon({ muted }: { muted: boolean }) {
   return (
     <svg
@@ -473,7 +475,7 @@ interface CamCardProps {
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
-  /** 语音开关置灰条件:语音 PUT 或相机开关 PUT 本卡 in-flight（防两个 PUT 交叠竞态） */
+  /** 拾音开关置灰条件:拾音 PUT 或相机开关 PUT 本卡 in-flight（防两个 PUT 交叠竞态） */
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
 }
@@ -496,7 +498,7 @@ function CamCardWithToggle({
           cameraDid={cam.did}
           channel={channel ?? 0}
         />
-        {/* 语音 + 投喂两个开关并排浮在画面右上;connected 卡必然 inUse=true,语音可编辑。 */}
+        {/* 拾音 + 投喂两个开关并排浮在画面右上;connected 卡必然 inUse=true,拾音可编辑。 */}
         <div className="absolute top-2 right-2 flex items-center gap-1.5">
           <VoiceSwitch
             on={cam.inUse && cam.voiceInUse}
@@ -516,7 +518,7 @@ function CamCardWithToggle({
   );
 }
 
-/** 下区横条行（日志页风格）：摄像头信息 + 语音/投喂开关，无小窗。投喂 on → 升入上区。 */
+/** 下区横条行（日志页风格）：摄像头信息 + 拾音/投喂开关，无小窗。投喂 on → 升入上区。 */
 function BenchCamItem({
   cam,
   disabled,
@@ -553,7 +555,7 @@ function BenchCamItem({
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {/* 语音开关从属于感知:相机未启用(inUse=false)时置灰、显示为关。 */}
+        {/* 拾音开关从属于感知:相机未启用(inUse=false)时置灰、显示为关。 */}
         <VoiceSwitch
           on={cam.inUse && cam.voiceInUse}
           name={cam.name}

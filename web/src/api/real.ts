@@ -922,7 +922,8 @@ interface BackendScopeCamera {
   room_name?: string | null;
   is_online: boolean;
   in_use: boolean;
-  // 语音指令存储偏好（不在语音黑名单即 true，默认 true）。旧后端无此字段时兜底 true。
+  // 拾音存储偏好（不在拾音黑名单即 true，默认 true）。false = mic-off：该相机声音
+  // 完全不被处理。旧后端无此字段时兜底 true。
   voice_in_use?: boolean;
   connected: boolean;
 }
@@ -970,10 +971,11 @@ export async function realToggleScopeCamera(
   invalidateMiotHomeCache();
 }
 
-// 语音指令开关走独立端点 PUT /api/miot/scope/cameras/voice（不复用相机启用端点：
-// 语音无投喂上限/离线校验、不重启感知引擎）。后端只接受对 in_use=true 相机的设置,
+// 拾音开关走独立端点 PUT /api/miot/scope/cameras/voice（不复用相机启用端点：
+// 拾音无投喂上限/离线校验、不重启感知引擎）。关闭 = mic-off：该相机声音完全不被处理
+// （引擎入口剥离音频）。后端只接受对 in_use=true 相机的设置,
 // 感知已关闭的相机会被拒（前端已把其开关置灰,这是二次兜底）。
-// 不 invalidate homeCache:语音状态只存在于 /scope/cameras,调用方 reload scopeCameras 即可。
+// 不 invalidate homeCache:拾音状态只存在于 /scope/cameras,调用方 reload scopeCameras 即可。
 export async function realToggleScopeCameraVoice(
   dids: string[],
   voiceInUse: boolean,
