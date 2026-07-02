@@ -29,22 +29,23 @@ from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["interaction", "bind", "rule", "suggestion"]
+EventType = Literal["interaction", "bind", "rule", "suggestion", "onboarding"]
 
 # builder：把「合并后的同类条目列表」重构成一条 message（单一头、统一编号）。
 # 返回 None/空 → drainer 跳过该批。dispatcher 不感知 items 的具体业务类型。
 Builder = Callable[[list[Any]], "str | None"]
 
 # 类型 → (sessionKey, lane, priority)。数字小 = 优先。
-# bind 与 interaction 共享会话/车道，但属不同合并类型，各自单飞、不混入同一 turn。
+# bind / onboarding 与 interaction 共享会话/车道，但属不同合并类型，各自单飞、不混入同一 turn。
 _ROUTE: dict[EventType, tuple[str, str, int]] = {
     "interaction": ("agent:main:miloco", "miloco-interactive", 0),
     "rule": ("agent:main:miloco-rule", "miloco-rule", 10),
     "suggestion": ("agent:main:miloco-suggest", "miloco-suggest", 20),
     "bind": ("agent:main:miloco", "miloco-interactive", 30),
+    "onboarding": ("agent:main:miloco", "miloco-interactive", 30),
 }
 
-# 仅这三类（== AgentRunSource）写 agent_runs；bind 不统计。
+# 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})
 
 

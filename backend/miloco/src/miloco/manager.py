@@ -174,6 +174,32 @@ class Manager:
     def miot_proxy(self) -> MiotProxy:
         return self._miot_proxy
 
+    @property
+    def onboarding_trigger(self):
+        """onboarding 主动邀请触发器懒加载单例。
+
+        依赖以可调用注入（同 DeviceWelcomeService 风格）：米家就绪 = 已授权
+        （token 在 KV）且家庭启用集非空；成员 / 档案空判定分别走 person_service
+        与 home_profile store（正式区）。
+        """
+        svc = getattr(self, "_onboarding_trigger", None)
+        if svc is None:
+            from miloco.database.kv_repo import AuthConfigKeys
+            from miloco.home_profile import store as hp_store
+            from miloco.home_profile.onboarding_trigger import OnboardingTriggerService
+            from miloco.miot.filter import allowed_home_ids
+
+            kv = self._kv_repo
+            svc = OnboardingTriggerService(
+                kv_repo=kv,
+                is_miot_ready=lambda: bool(kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY))
+                and bool(allowed_home_ids(kv)),
+                has_persons=lambda: bool(self._person_service.list_persons()),
+                has_profile_entries=lambda: bool(hp_store.load_profile().entries),
+            )
+            self._onboarding_trigger = svc
+        return svc
+
     # 主动注册:registration session manager lazy 单例
     # 进程内单一实例,管理 pending dict + commit / sessions / rollback。
     @property

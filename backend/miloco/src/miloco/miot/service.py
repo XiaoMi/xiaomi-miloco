@@ -174,11 +174,27 @@ class MiotService:
             # frame callbacks now that camera_img_managers exist.
             await self._restart_perception_engine()
 
+            # 授权 + list_homes 自动选家已完成 → 首次安装在这里就能触发主动
+            # onboarding 邀请，无需等下次重启。fire-and-forget：邀请失败/条件
+            # 不满足都不影响授权主流程（幂等判定收在 maybe_trigger 内）。
+            self._kick_onboarding_trigger()
+
         except Exception as e:
             logger.error("Failed to process Xiaomi MiOT authorization code: %s", e)
             raise MiotServiceException(
                 f"Failed to process Xiaomi MiOT authorization code: {str(e)}"
             ) from e
+
+    def _kick_onboarding_trigger(self) -> None:
+        """授权成功后异步触发一次 onboarding 主动邀请检查（不阻塞、不抛错）。"""
+        try:
+            from miloco.manager import get_manager
+
+            task = asyncio.create_task(get_manager().onboarding_trigger.maybe_trigger())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+        except Exception:  # noqa: BLE001
+            logger.warning("onboarding 主动邀请触发失败(忽略)", exc_info=True)
 
     async def _restart_perception_engine(self):
         """Restart perception engine after auth to pick up newly available cameras."""
