@@ -111,7 +111,8 @@ class Manager:
         )
         try:
             await self._miot_service.sync_automation_property_subscriptions(
-                self._automation_service.list_mappings()
+                self._automation_service.list_mappings(),
+                reconcile_residual=True,
             )
         except Exception as e:
             logger.warning("Failed to sync automation MiOT subscriptions: %s", e)

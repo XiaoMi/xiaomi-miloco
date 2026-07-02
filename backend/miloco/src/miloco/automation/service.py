@@ -181,15 +181,9 @@ def _build_trigger_context(
             display_name = names.get(key) or key
             value_map = values.get(key)
             if value_map and val is not None:
-                # bool 值对齐 spec value_list 的 "0"/"1" key；
-                # 米家云端推送 bool 属性值是 Python True/False，
-                # str() 后是 "True"/"False"，与 spec value_list 的 "0"/"1" key 对不上。
-                if val is True:
-                    lookup_key = "1"
-                elif val is False:
-                    lookup_key = "0"
-                else:
-                    lookup_key = str(val)
+                # bool / 整数 0-1 / 字符串 "true"/"on" 等统一折成 spec value_list 的 "0"/"1" key
+                normalized = _normalize_bool_like(val)
+                lookup_key = normalized if normalized is not None else str(val)
                 display_val = value_map.get(lookup_key) or str(val)
             else:
                 display_val = str(val)

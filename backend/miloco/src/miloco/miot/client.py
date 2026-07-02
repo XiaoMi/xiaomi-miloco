@@ -924,7 +924,47 @@ class MiotProxy:
             self._kv_repo, str(old_home)
         )
 
-    async def _sync_meta_subscriptions(self) -> None:
+    async def _subscribe_with_residual_retry(
+        self,
+        did: str,
+        *,
+        sub_fn,
+        unsub_fn,
+        label: str,
+        reconcile_residual: bool = False,
+    ) -> str | None:
+        """订阅一个 did，可选先 unsub 清云端残留 + Not authorized retry。
+
+        reconcile_residual=True（启动/全量重建）：先 unsub 清上个进程
+        client_id 的残留订阅，等 5s 让云端清理，再 sub。热加路径传 False
+        跳过此步（当前进程同一 client，无跨进程残留，5s sleep 纯属浪费）。
+        遇 Not authorized 等 5s retry（meta ACL propagate 延迟），最多 3 次。
+        """
+        for attempt in range(3):
+            if reconcile_residual:
+                try:
+                    await unsub_fn(did)
+                    await asyncio.sleep(5)
+                except Exception:
+                    pass
+            try:
+                await sub_fn(did)
+                return did
+            except Exception as e:
+                if "Not authorized" in str(e) and attempt < 2:
+                    logger.warning(
+                        "subscribe %s Not authorized, retry %d/3 in 5s: did=%s",
+                        label, attempt + 1, did,
+                    )
+                    await asyncio.sleep(5)
+                    continue
+                logger.error("subscribe %s failed did=%s: %s", label, did, e)
+                return None
+        return None
+
+    async def _sync_meta_subscriptions(
+        self, *, reconcile_residual: bool = False
+    ) -> None:
         """Reconcile per-device meta (rename/hr_change) subs to the device list.
 
         Called from two paths: (1) refresh_devices under _refresh_devices_lock
@@ -964,12 +1004,13 @@ class MiotProxy:
             return
 
         async def _sub(did: str) -> str | None:
-            try:
-                await self._miot_client.sub_device_meta_async(did)
-                return did
-            except Exception as e:
-                logger.error("subscribe device-meta failed did=%s: %s", did, e)
-                return None
+            return await self._subscribe_with_residual_retry(
+                did,
+                sub_fn=self._miot_client.sub_device_meta_async,
+                unsub_fn=self._miot_client.unsub_device_meta_async,
+                label="device-meta",
+                reconcile_residual=reconcile_residual,
+            )
 
         async def _unsub(did: str) -> str | None:
             try:
@@ -989,7 +1030,9 @@ class MiotProxy:
             len(self._subscribed_meta_dids),
         )
 
-    async def _sync_property_subscriptions(self, mappings: list) -> None:
+    async def _sync_property_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
         target = {
             mapping.source_id
             for mapping in mappings
@@ -1008,27 +1051,13 @@ class MiotProxy:
             return
 
         async def _sub(did: str) -> str | None:
-            # 同 _sync_event_subscriptions：先 unsub 清理残留再 sub + Not authorized retry。
-            for attempt in range(3):
-                try:
-                    await self._miot_client.unsub_device_property_changed_async(did)
-                    await asyncio.sleep(5)
-                except Exception:
-                    pass
-                try:
-                    await self._miot_client.sub_device_property_changed_async(did)
-                    return did
-                except Exception as e:
-                    if "Not authorized" in str(e) and attempt < 2:
-                        logger.warning(
-                            "subscribe device-property Not authorized, retry %d/3 in 5s: did=%s",
-                            attempt + 1, did,
-                        )
-                        await asyncio.sleep(5)
-                        continue
-                    logger.error("subscribe device-property failed did=%s: %s", did, e)
-                    return None
-            return None
+            return await self._subscribe_with_residual_retry(
+                did,
+                sub_fn=self._miot_client.sub_device_property_changed_async,
+                unsub_fn=self._miot_client.unsub_device_property_changed_async,
+                label="device-property",
+                reconcile_residual=reconcile_residual,
+            )
 
         async def _unsub(did: str) -> str | None:
             try:
@@ -1048,20 +1077,31 @@ class MiotProxy:
             len(self._subscribed_property_dids),
         )
 
-    async def sync_automation_property_subscriptions(self, mappings: list) -> None:
+    async def sync_automation_property_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
         """Hot-sync MiOT property/event subscriptions for automation mappings.
 
         先刷新 meta 订阅：米家云端 ACL 要求对 did 先建立 meta 订阅（meta ACL 授权），
         才能授权 event/property 订阅。create_mapping 路径若跳过此步，新 did 的
         event 订阅会 Not authorized（需重启才全量刷 meta）。在此入口补一次，
         保证新 did 先拿 meta ACL 再订阅事件/属性。
+
+        reconcile_residual=True 时每个 sub 前先 unsub 清云端残留 + sleep 5s，
+        仅用于启动/全量重建（上个进程 client_id 残留）；热加路径传 False。
         """
         self._automation_mappings = list(mappings)
-        await self._sync_meta_subscriptions()
-        await self._sync_property_subscriptions(mappings)
-        await self._sync_event_subscriptions(mappings)
+        await self._sync_meta_subscriptions(reconcile_residual=reconcile_residual)
+        await self._sync_property_subscriptions(
+            mappings, reconcile_residual=reconcile_residual
+        )
+        await self._sync_event_subscriptions(
+            mappings, reconcile_residual=reconcile_residual
+        )
 
-    async def _sync_event_subscriptions(self, mappings: list) -> None:
+    async def _sync_event_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
         target = {
             mapping.source_id
             for mapping in mappings
@@ -1077,29 +1117,13 @@ class MiotProxy:
             return
 
         async def _sub(did: str) -> str | None:
-            # 重启后米家云端可能残留旧 client_id 的订阅，新 client 的 sub 虽返回
-            # 成功但推送仍绑定在已断开的旧 client。先 unsub 清理残留再 sub。
-            # 遇 Not authorized 等 5s retry（meta ACL propagate 延迟）。
-            for attempt in range(3):
-                try:
-                    await self._miot_client.unsub_device_event_occurred_async(did)
-                    await asyncio.sleep(5)
-                except Exception:
-                    pass  # unsub 失败（无残留）忽略
-                try:
-                    await self._miot_client.sub_device_event_occurred_async(did)
-                    return did
-                except Exception as e:
-                    if "Not authorized" in str(e) and attempt < 2:
-                        logger.warning(
-                            "subscribe device-event Not authorized, retry %d/3 in 5s: did=%s",
-                            attempt + 1, did,
-                        )
-                        await asyncio.sleep(5)
-                        continue
-                    logger.error("subscribe device-event failed did=%s: %s", did, e)
-                    return None
-            return None
+            return await self._subscribe_with_residual_retry(
+                did,
+                sub_fn=self._miot_client.sub_device_event_occurred_async,
+                unsub_fn=self._miot_client.unsub_device_event_occurred_async,
+                label="device-event",
+                reconcile_residual=reconcile_residual,
+            )
 
         async def _unsub(did: str) -> str | None:
             try:
