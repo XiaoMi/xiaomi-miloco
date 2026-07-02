@@ -18,6 +18,7 @@ import {
   pausePerception,
   resumePerception,
   toggleScopeCamera,
+  toggleScopeCameraVoice,
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
@@ -234,6 +235,18 @@ function MainApp() {
                 scopeCameras.reload();
                 cameras.reload();
                 status.reload();
+              }}
+              onToggleCameraVoice={async (did, voiceInUse) => {
+                try {
+                  await toggleScopeCameraVoice([did], voiceInUse);
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("common.switchFailed"),
+                    "warn",
+                  );
+                }
+                // 语音开关只改 KV 偏好,不动投喂/流,只需 reload scopeCameras 拿新 voiceInUse。
+                scopeCameras.reload();
               }}
             />
           </div>
