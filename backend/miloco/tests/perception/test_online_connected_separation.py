@@ -291,6 +291,59 @@ class TestDiscoverDevicesOnlineConnected:
         assert "cam_in" in result
         assert "cam_out" not in result
 
+    @pytest.mark.asyncio
+    async def test_discover_devices_apply_schedule_false_keeps_paused_camera(
+        self, adapter, monkeypatch
+    ):
+        """列全集/rule 校验路径不应因当前定时暂停而丢失相机。"""
+        import json
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from miloco.database.kv_repo import ScopeConfigKeys
+
+        store: dict[str, str] = {
+            ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+            ScopeConfigKeys.CAMERA_SCHEDULES_KEY: json.dumps(
+                {
+                    "cam1": {
+                        "enabled": True,
+                        "weekdays": [0, 1, 2, 3, 4, 5, 6],
+                        "windows": [{"start": "08:00", "end": "20:00"}],
+                    }
+                }
+            ),
+        }
+        adapter._miot_proxy._kv_repo = SimpleNamespace(
+            get=lambda key, default=None: store.get(key, default),
+            set=lambda key, value: store.__setitem__(key, value) or True,
+        )
+        cam = _make_camera_info(
+            did="cam1",
+            online=True,
+            lan_online=True,
+        ).model_copy(update={"home_id": "H1"})
+        adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
+
+        tz = ZoneInfo("Asia/Shanghai")
+        fake_now = datetime(2026, 6, 29, 21, 0, tzinfo=tz)
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fake_now.astimezone(tz) if tz is not None else fake_now
+
+        monkeypatch.setattr("miloco.miot.filter.datetime", _FrozenDateTime)
+        monkeypatch.setattr("miloco.utils.time_utils.deploy_timezone", lambda: tz)
+
+        feeding = await adapter.discover_devices(online_only=False)
+        listing = await adapter.discover_devices(
+            online_only=False, apply_schedule=False
+        )
+
+        assert "cam1" not in feeding
+        assert "cam1" in listing
+
 
 # ---------------------------------------------------------------------------
 # LAN status / local_ip passthrough

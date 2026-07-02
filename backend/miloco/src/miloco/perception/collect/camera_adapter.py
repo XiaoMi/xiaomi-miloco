@@ -100,6 +100,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         online_only: bool = True,
         require_lan: bool = True,
         cap: bool = True,
+        apply_schedule: bool = True,
     ) -> dict[str, PerceptionDevice]:
         if not self._miot_proxy.is_authenticated:
             return {}
@@ -108,6 +109,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             online_only=online_only,
             require_lan=require_lan,
             cap=cap,
+            apply_schedule=apply_schedule,
         )
 
     def _filter_cameras_from_all(
@@ -117,12 +119,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         online_only: bool = True,
         require_lan: bool = True,
         cap: bool = True,
+        apply_schedule: bool = True,
     ) -> dict[str, PerceptionDevice]:
         """Filter camera-type devices from a full device dict.
 
         Drops cameras that are either:
         - 不在启用的家庭范围内（启用集为空时全部阻断——用户需先 switch_home），或
-        - did 在停用的相机集合里。
+        - did 在停用的相机集合里，或
+        - （``apply_schedule=True`` 时）当前处于定时感知暂停窗口。
 
         ``cap=True``（默认，连接/投喂路径）时最后按 did 升序确定性截断到
         ``MAX_ENABLED_CAMERAS``：被动路径（登录/绑定后黑名单为空 → 家庭内全部相机均
@@ -130,6 +134,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         主动 enable 校验互补。不写 KV、不碰黑名单——只是少返回（从而少连接）超出上限
         的相机；口径与 toggle_camera 自洽（同样只数通过 home filter + 未拉黑的相机）。
         ``cap=False`` 用于「列全集」语义（如 rule target 校验），不受投喂上限影响。
+        ``apply_schedule=False`` 时列全集不受当前定时窗口影响（rule 目标校验等）。
         """
         from miloco.miot.filter import select_active_camera_dids
 
@@ -142,7 +147,12 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             if isinstance(info, MIoTCameraInfo)
         }
         active = select_active_camera_dids(
-            kv, cams, online_only=online_only, require_lan=require_lan, cap=cap
+            kv,
+            cams,
+            online_only=online_only,
+            require_lan=require_lan,
+            cap=cap,
+            apply_schedule=apply_schedule,
         )
         result: dict[str, PerceptionDevice] = {}
         for did in active:

@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 from miloco.database.kv_repo import ScopeConfigKeys
@@ -24,6 +26,7 @@ from miloco.middleware.exceptions import (
     ValidationException,
 )
 from miloco.miot import filter as miot_filter
+from miloco.miot.schema import CameraSchedule, CameraScheduleWindow
 from miloco.miot.service import MiotService
 
 
@@ -115,7 +118,7 @@ def test_filter_by_home_drops_disallowed():
     assert set(miot_filter.filter_by_home(kv, items).keys()) == {"a"}
 
 
-# ─── filter.py: select_active_camera_dids（投喂/拉流共用口径）───────────────────
+# ─── filter.py: select_active_camera_dids（scope/投喂/native 拉流口径）──────────
 
 
 def test_select_active_filters_home_denied_offline():
@@ -164,6 +167,39 @@ def test_select_active_caps_by_did(monkeypatch):
     }
 
 
+def test_select_active_apply_schedule_filters_paused_camera(monkeypatch):
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+            ScopeConfigKeys.CAMERA_SCHEDULES_KEY: json.dumps(
+                {
+                    "c1": {
+                        "enabled": True,
+                        "weekdays": [0, 1, 2, 3, 4, 5, 6],
+                        "windows": [{"start": "08:00", "end": "20:00"}],
+                    }
+                }
+            ),
+        }
+    )
+    cameras = {"c1": _camera("c1", home_id="H1")}
+    tz = ZoneInfo("Asia/Shanghai")
+    fake_now = datetime(2026, 6, 29, 21, 0, tzinfo=tz)
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_now.astimezone(tz) if tz is not None else fake_now
+
+    monkeypatch.setattr("miloco.miot.filter.datetime", _FrozenDateTime)
+    monkeypatch.setattr("miloco.utils.time_utils.deploy_timezone", lambda: tz)
+
+    assert miot_filter.select_active_camera_dids(kv, cameras) == []
+    assert miot_filter.select_active_camera_dids(
+        kv, cameras, apply_schedule=False
+    ) == ["c1"]
+
+
 # ─── filter.py: write helpers ────────────────────────────────────────────────
 
 
@@ -206,6 +242,162 @@ def test_set_in_use_no_op_skips_kv_write():
     assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) == before
 
 
+def test_camera_schedule_validation_and_cross_midnight():
+    schedule = miot_filter.normalize_camera_schedule({
+        "enabled": True,
+        "windows": [{"start": "22:00", "end": "07:00"}],
+    })
+    tz = ZoneInfo("Asia/Shanghai")
+
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 21, 23, 30, tzinfo=tz),
+    ) is False
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 21, 6, 59, tzinfo=tz),
+    ) is False
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 21, 12, 0, tzinfo=tz),
+    ) is True
+    assert schedule["weekdays"] == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_normalize_camera_schedule_returns_independent_lists():
+    schedule = miot_filter.normalize_camera_schedule(None)
+    schedule["weekdays"].append(99)
+    schedule["windows"].append({"start": "01:00", "end": "02:00"})
+    default = miot_filter.normalize_camera_schedule(None)
+    assert 99 not in default["weekdays"]
+    assert default["windows"] == []
+
+
+def test_camera_schedule_weekdays_and_natural_day_cross_midnight():
+    schedule = miot_filter.normalize_camera_schedule({
+        "enabled": True,
+        "weekdays": [0, 0],
+        "windows": [{"start": "22:00", "end": "07:00"}],
+    })
+    tz = ZoneInfo("Asia/Shanghai")
+
+    assert schedule["weekdays"] == [0]
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 22, 6, 30, tzinfo=tz),  # Monday
+    ) is False
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 22, 23, 30, tzinfo=tz),  # Monday
+    ) is False
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 23, 6, 30, tzinfo=tz),  # Tuesday
+    ) is True
+
+
+def test_next_camera_schedule_change_handles_weekday_midnight():
+    tz = ZoneInfo("Asia/Shanghai")
+    schedule = miot_filter.normalize_camera_schedule({
+        "enabled": True,
+        "weekdays": [0],
+        "windows": [{"start": "22:00", "end": "07:00"}],
+    })
+
+    assert (
+        miot_filter.next_camera_schedule_change_at(
+            schedule,
+            datetime(2026, 6, 22, 23, 30, tzinfo=tz),  # Monday
+            tz,
+        ).isoformat(timespec="seconds")
+        == "2026-06-23T00:00:00+08:00"
+    )
+    assert (
+        miot_filter.next_camera_schedule_change_at(
+            schedule,
+            datetime(2026, 6, 23, 12, 0, tzinfo=tz),  # Tuesday
+            tz,
+        ).isoformat(timespec="seconds")
+        == "2026-06-29T00:00:00+08:00"
+    )
+
+
+def test_camera_schedule_rejects_bad_and_overlapping_windows():
+    with pytest.raises(ValidationException):
+        miot_filter.normalize_camera_schedule({
+            "enabled": True,
+            "windows": [{"start": "7:00", "end": "08:00"}],
+        })
+
+    with pytest.raises(ValidationException):
+        miot_filter.normalize_camera_schedule({
+            "enabled": True,
+            "windows": [
+                {"start": "08:00", "end": "10:00"},
+                {"start": "09:30", "end": "11:00"},
+            ],
+        })
+
+    with pytest.raises(ValidationException):
+        miot_filter.normalize_camera_schedule({
+            "enabled": True,
+            "weekdays": [],
+            "windows": [{"start": "08:00", "end": "10:00"}],
+        })
+
+    with pytest.raises(ValidationException):
+        miot_filter.normalize_camera_schedule({
+            "enabled": True,
+            "weekdays": [7],
+            "windows": [{"start": "08:00", "end": "10:00"}],
+        })
+
+
+def test_set_camera_schedule_does_not_touch_manual_blacklist():
+    kv = _FakeKV({
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+    })
+    schedule, changed = miot_filter.set_camera_schedule(
+        kv,
+        "c1",
+        {"enabled": True, "windows": [{"start": "08:00", "end": "20:00"}]},
+    )
+
+    assert changed is True
+    assert schedule["enabled"] is True
+    assert schedule["weekdays"] == [0, 1, 2, 3, 4, 5, 6]
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)) == ["c1"]
+
+
+def test_disable_camera_schedule_keeps_previous_windows_and_weekdays():
+    kv = _FakeKV()
+    miot_filter.set_camera_schedule(
+        kv,
+        "c1",
+        {
+            "enabled": True,
+            "weekdays": [0, 2],
+            "windows": [{"start": "08:00", "end": "20:00"}],
+        },
+    )
+
+    schedule, changed = miot_filter.set_camera_schedule(
+        kv,
+        "c1",
+        {"enabled": False, "windows": []},
+    )
+
+    assert changed is True
+    assert schedule == {
+        "enabled": False,
+        "weekdays": [0, 2],
+        "windows": [{"start": "08:00", "end": "20:00"}],
+    }
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_SCHEDULES_KEY)) == {
+        "c1": schedule
+    }
+
+
 # ─── MiotService.list_homes / switch_home ────────────────────────────────────
 
 
@@ -219,6 +411,7 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
             ),
             get=kv.get,
             set=kv.set,
+            delete=kv.delete,
         ),
         get_devices=AsyncMock(return_value=devices or {}),
         get_cameras=AsyncMock(return_value=cameras or {}),
@@ -339,6 +532,44 @@ async def test_list_cameras_with_state_flags():
     assert by_did["c2"]["in_use"] is True
     assert by_did["c2"]["is_online"] is False  # lan_online=False
     assert by_did["c2"]["connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_schedule_flags(monkeypatch):
+    tz = ZoneInfo("Asia/Shanghai")
+    monkeypatch.setattr(
+        "miloco.miot.service.deploy_timezone",
+        lambda: tz,
+    )
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 21, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr("miloco.miot.service.datetime", FixedDateTime)
+
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_SCHEDULES_KEY: json.dumps({
+            "c1": {
+                "enabled": True,
+                "windows": [{"start": "08:00", "end": "10:00"}],
+            }
+        }),
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1", home_id="H1")},
+        cameras={"c1": _camera("c1", home_id="H1")},
+        kv=kv,
+    )
+
+    out = await svc.list_cameras_with_state()
+    cam = out[0]
+    assert cam["in_use"] is True
+    assert cam["schedule_paused"] is True
+    assert cam["effective_in_use"] is False
+    assert cam["schedule"]["enabled"] is True
+    assert cam["next_schedule_change_at"] == "2026-06-22T08:00:00+08:00"
 
 
 @pytest.mark.asyncio
@@ -868,6 +1099,51 @@ async def test_refresh_cameras_no_destroy_when_scope_allows(_scope_proxy_env):
 
 
 @pytest.mark.asyncio
+async def test_refresh_cameras_keeps_manager_during_schedule_pause(
+    _scope_proxy_env, monkeypatch
+):
+    """定时暂停窗口内 refresh_cameras 不应拆掉 native manager（watch/live 依赖它）。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    kv.set(
+        ScopeConfigKeys.CAMERA_SCHEDULES_KEY,
+        json.dumps(
+            {
+                "c1": {
+                    "enabled": True,
+                    "weekdays": [0, 1, 2, 3, 4, 5, 6],
+                    "windows": [{"start": "08:00", "end": "20:00"}],
+                }
+            }
+        ),
+    )
+
+    cam = _camera("c1", home_id="H1")
+    handler = MagicMock()
+    handler.destroy = AsyncMock()
+    handler.update_camera_info = AsyncMock()
+    proxy._camera_img_managers["c1"] = handler
+    miot_client.get_cameras_async = AsyncMock(return_value={"c1": cam})
+
+    tz = ZoneInfo("Asia/Shanghai")
+    fake_now = datetime(2026, 6, 29, 21, 0, tzinfo=tz)
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_now.astimezone(tz) if tz is not None else fake_now
+
+    monkeypatch.setattr("miloco.miot.filter.datetime", _FrozenDateTime)
+    monkeypatch.setattr("miloco.utils.time_utils.deploy_timezone", lambda: tz)
+
+    await proxy.refresh_cameras()
+
+    handler.destroy.assert_not_awaited()
+    miot_client.unregister_lan_device_changed_async.assert_not_awaited()
+    assert "c1" in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
 async def test_refresh_cameras_skips_manager_for_disallowed_home(_scope_proxy_env):
     """refresh_cameras 新建分支：home_id 不在启用集时 continue，不建 manager。
 
@@ -1033,6 +1309,135 @@ async def test_toggle_camera_triggers_refresh_then_sync_when_changed():
     assert svc._sync_camera_adapter.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_set_camera_schedule_triggers_sync_when_changed():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")},
+        cameras={"c1": _camera("c1")},
+        kv=kv,
+    )
+    svc._sync_camera_adapter = AsyncMock()
+
+    res = await svc.set_camera_schedule(
+        "c1",
+        CameraSchedule(
+            enabled=True,
+            windows=[CameraScheduleWindow(start="08:00", end="20:00")],
+        ),
+    )
+
+    assert res["did"] == "c1"
+    assert res["schedule"]["enabled"] is True
+    assert svc._sync_camera_adapter.await_count == 1
+    assert kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_set_enabled_camera_schedule_keeps_manual_switch_off():
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")},
+        cameras={"c1": _camera("c1")},
+        kv=kv,
+    )
+    svc._sync_camera_adapter = AsyncMock()
+
+    res = await svc.set_camera_schedule(
+        "c1",
+        CameraSchedule(
+            enabled=True,
+            windows=[CameraScheduleWindow(start="08:00", end="20:00")],
+        ),
+    )
+
+    assert res["in_use"] is False
+    assert res["schedule"]["enabled"] is True
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)) == ["c1"]
+    assert svc._sync_camera_adapter.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_off_stays_off_when_schedule_allows(monkeypatch):
+    tz = ZoneInfo("Asia/Shanghai")
+    monkeypatch.setattr("miloco.miot.service.deploy_timezone", lambda: tz)
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 21, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr("miloco.miot.service.datetime", FixedDateTime)
+
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+        ScopeConfigKeys.CAMERA_SCHEDULES_KEY: json.dumps({
+            "c1": {
+                "enabled": True,
+                "windows": [{"start": "08:00", "end": "20:00"}],
+            }
+        }),
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")},
+        cameras={"c1": _camera("c1")},
+        kv=kv,
+    )
+
+    cam = (await svc.list_cameras_with_state())[0]
+    assert cam["in_use"] is False
+    assert cam["schedule_paused"] is False
+    assert cam["effective_in_use"] is False
+    assert cam["next_schedule_change_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_manual_off_hides_schedule_pause_until_master_switch_on(monkeypatch):
+    tz = ZoneInfo("Asia/Shanghai")
+    monkeypatch.setattr("miloco.miot.service.deploy_timezone", lambda: tz)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 21, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr("miloco.miot.service.datetime", FixedDateTime)
+
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+        ScopeConfigKeys.CAMERA_SCHEDULES_KEY: json.dumps({
+            "c1": {
+                "enabled": True,
+                "windows": [{"start": "08:00", "end": "10:00"}],
+            }
+        }),
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")},
+        cameras={"c1": _camera("c1")},
+        kv=kv,
+    )
+
+    cam = (await svc.list_cameras_with_state())[0]
+    assert cam["in_use"] is False
+    assert cam["schedule"]["enabled"] is True
+    assert cam["schedule_paused"] is False
+    assert cam["effective_in_use"] is False
+    assert cam["next_schedule_change_at"] is None
+
+    await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+    cam = (await svc.list_cameras_with_state())[0]
+    assert cam["in_use"] is True
+    assert cam["schedule_paused"] is True
+    assert cam["effective_in_use"] is False
+    assert cam["next_schedule_change_at"] == "2026-06-22T08:00:00+08:00"
+
+
 
 
 @pytest.mark.asyncio
@@ -1187,6 +1592,38 @@ async def test_toggle_camera_enable_rejected_at_limit():
 
     with pytest.raises(ValidationException, match="最多同时启用"):
         await svc.toggle_camera([{"did": dids[-1], "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_limit_counts_effective_enabled(monkeypatch):
+    tz = ZoneInfo("Asia/Shanghai")
+    monkeypatch.setattr("miloco.miot.service.deploy_timezone", lambda: tz)
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 21, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr("miloco.miot.service.datetime", FixedDateTime)
+
+    dids = _cam_dids(LIMIT + 1)
+    paused = dids[0]
+    to_enable = dids[-1]
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps([to_enable]),
+        ScopeConfigKeys.CAMERA_SCHEDULES_KEY: json.dumps({
+            paused: {
+                "enabled": True,
+                "windows": [{"start": "08:00", "end": "10:00"}],
+            }
+        }),
+    })
+    cameras = {d: _camera(d, home_id="H1") for d in dids}
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+
+    # 手动允许态有 LIMIT 台，但 paused 当前不在感知窗口；启用新相机后
+    # 有效投喂仍为 LIMIT 台，应通过。
+    await svc.toggle_camera([{"did": to_enable, "in_use": True}])
 
 
 @pytest.mark.asyncio

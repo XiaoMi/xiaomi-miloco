@@ -6,6 +6,7 @@
  */
 
 import type {
+  CameraSchedule,
   PerceptionCamera,
   Person,
   ScopeCamera,
@@ -18,6 +19,9 @@ import { useAsync } from "@/hooks/useAsync";
 import { humanTokens } from "@/lib/formatTokens";
 import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { IconClock, IconPlus, IconTrash, IconX } from "@/lib/icons";
+
+const CAMERA_SCHEDULE_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
 
 interface Props {
   persons: Person[];
@@ -36,6 +40,11 @@ interface Props {
   onJumpUsage?: () => void;
   /** 切换摄像头启用（PUT /api/miot/scope/cameras）；批量传 dids */
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
+  /** 设置摄像头每日感知时间段。 */
+  onSetCameraSchedule: (
+    did: string,
+    schedule: CameraSchedule,
+  ) => void | Promise<void>;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -55,6 +64,7 @@ export function HeroNow({
   onPersonClick,
   onJumpUsage,
   onToggleCameras,
+  onSetCameraSchedule,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -71,7 +81,7 @@ export function HeroNow({
   // 即真正建连、在喂解码帧给感知的那几路)，而不是 `inUse`(只是 KV 里的"想启用"意图——
   // 启用了但 LAN 拉不起来时 inUse=true 却没真投喂)。再 **按 did 稳定排序**:toggle 某路时
   // 其余卡 key+DOM 位置不变，React 复用其 iframe，不会连带把其它路的 watch 流断开重连。
-  // 其余相机(未投喂:未启用 / 启用中未连上 / 超出上限)进下区「无流」横向列表。
+  // 其余相机(未投喂:未启用 / 定时暂停 / 启用中未连上 / 超出上限)进下区「无流」横向列表。
   const { streamingCams, benchCams } = useMemo(() => {
     const byDid = (a: ScopeCamera, b: ScopeCamera) =>
       a.did < b.did ? -1 : a.did > b.did ? 1 : 0;
@@ -153,6 +163,7 @@ export function HeroNow({
         miotHasCamera={miotHasCamera}
         channelByDid={channelByDid}
         onToggleCameras={onToggleCameras}
+        onSetCameraSchedule={onSetCameraSchedule}
       />
     </section>
   );
@@ -160,15 +171,19 @@ export function HeroNow({
 
 interface CameraSectionProps {
   scopeCameras: ScopeCamera[];
-  /** 上区:带实时流的相机(inUse=true，≤4，按 did 稳定排序) */
+  /** 上区:带实时流的相机(connected=true，≤4，按 did 稳定排序) */
   streamingCams: ScopeCamera[];
-  /** 下区:无流横向列出的相机(未启用 / 超出上限) */
+  /** 下区:无流横向列出的相机(未启用 / 定时暂停 / 超出上限) */
   benchCams: ScopeCamera[];
   /** 最多投喂数(后端 MAX_ENABLED_CAMERAS)，用于满额置灰下区「启用」 */
   maxStreamCams: number;
   miotHasCamera: boolean;
   channelByDid: Map<string, number>;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
+  onSetCameraSchedule: (
+    did: string,
+    schedule: CameraSchedule,
+  ) => void | Promise<void>;
 }
 
 function CameraSection({
@@ -179,14 +194,15 @@ function CameraSection({
   miotHasCamera,
   channelByDid,
   onToggleCameras,
+  onSetCameraSchedule,
 }: CameraSectionProps) {
   const { t } = useTranslation();
   const total = scopeCameras.length;
-  const activeCount = scopeCameras.filter((c) => c.inUse).length;
-  const allOn = total > 0 && activeCount === total;
-  const allOff = activeCount === 0;
-  // 满额判断按 inUse 计数(与后端 toggle_camera 上限校验同口径):已启用的相机即便
-  // 掉线仍保留 inUse、占名额(允许态不被强制改),要腾名额得显式关掉它。
+  const manualOnCount = scopeCameras.filter((c) => c.inUse).length;
+  const activeCount = scopeCameras.filter((c) => c.effectiveInUse).length;
+  const allOn = total > 0 && manualOnCount === total;
+  const allOff = manualOnCount === 0;
+  // 满额判断按后端 effective_in_use 计数:被定时暂停的相机不占实时投喂名额。
   const atCapacity = activeCount >= maxStreamCams;
   // 「全开」只能开「在线且未投喂」的——离线相机后端 toggle_camera 会整批拒绝
   // (offline_enable 校验),若把离线 did 也塞进批量 enable,会连带在线的一起失败。
@@ -198,6 +214,8 @@ function CameraSection({
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
   const [singleBusyDids, setSingleBusyDids] = useState<Set<string>>(new Set());
+  const [scheduleCam, setScheduleCam] = useState<ScopeCamera | null>(null);
+  const [scheduleBusyDid, setScheduleBusyDid] = useState<string | null>(null);
   const runBulk = async (dids: string[], inUse: boolean) => {
     if (bulkBusy) return;
     setBulkBusy(true);
@@ -218,6 +236,16 @@ function CameraSection({
         n.delete(did);
         return n;
       });
+    }
+  };
+  const saveSchedule = async (did: string, schedule: CameraSchedule) => {
+    if (scheduleBusyDid) return;
+    setScheduleBusyDid(did);
+    try {
+      await onSetCameraSchedule(did, schedule);
+      setScheduleCam(null);
+    } finally {
+      setScheduleBusyDid(null);
     }
   };
 
@@ -289,6 +317,7 @@ function CameraSection({
                   channel={channelByDid.get(c.did)}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
+                  onSchedule={() => setScheduleCam(c)}
                 />
               ))}
             </div>
@@ -320,10 +349,19 @@ function CameraSection({
                       (!c.inUse && (!c.isOnline || atCapacity))
                     }
                     onToggle={(v) => runSingle(c.did, v)}
+                    onSchedule={() => setScheduleCam(c)}
                   />
                 ))}
               </ul>
             </div>
+          )}
+          {scheduleCam && (
+            <CameraScheduleDialog
+              cam={scheduleCam}
+              busy={scheduleBusyDid === scheduleCam.did}
+              onClose={() => setScheduleCam(null)}
+              onSave={(schedule) => saveSchedule(scheduleCam.did, schedule)}
+            />
           )}
         </>
       )}
@@ -375,10 +413,18 @@ interface CamCardProps {
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
+  onSchedule: () => void;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
-function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
+function CamCardWithToggle({
+  cam,
+  channel,
+  bulkBusy,
+  onToggle,
+  onSchedule,
+}: CamCardProps) {
+  const { t } = useTranslation();
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
       <div className="relative">
@@ -388,7 +434,18 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
           cameraDid={cam.did}
           channel={channel ?? 0}
         />
-        <div className="absolute top-2 right-2">
+        <div className="absolute top-2 right-2 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onSchedule}
+            aria-label={t("hero.scheduleAria", { name: cam.name })}
+            title={t("hero.scheduleTitle")}
+            className={`inline-flex h-[26px] w-[26px] items-center justify-center rounded-md bg-black/55 text-white hover:bg-black/70 focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+              cam.schedule.enabled ? "text-brand-primary" : ""
+            }`}
+          >
+            <IconClock className="h-4 w-4" />
+          </button>
           <CamSwitch
             inUse={cam.inUse}
             name={cam.name}
@@ -406,10 +463,12 @@ function BenchCamItem({
   cam,
   disabled,
   onToggle,
+  onSchedule,
 }: {
   cam: ScopeCamera;
   disabled: boolean;
   onToggle: (next: boolean) => void;
+  onSchedule: () => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -423,24 +482,279 @@ function BenchCamItem({
         >
           {cam.name}
         </div>
-        {(!cam.isOnline || cam.roomName) && (
+        {(!cam.isOnline || cam.roomName || cam.schedulePaused) && (
           <div className="text-caption text-text-tertiary truncate">
             {!cam.isOnline && (
               <span className="text-warning">{t("hero.benchOffline")}</span>
             )}
             {!cam.isOnline && cam.roomName ? " · " : ""}
             {cam.roomName}
+            {cam.schedulePaused && (
+              <>
+                {(cam.roomName || !cam.isOnline) ? " · " : ""}
+                <span className="text-brand-primary">
+                  {t("hero.schedulePaused")}
+                </span>
+              </>
+            )}
           </div>
         )}
       </div>
-      <CamSwitch
-        inUse={cam.inUse}
-        name={cam.name}
-        disabled={disabled}
-        onToggle={onToggle}
-      />
+      <div className="flex items-center gap-3 shrink-0">
+        <button
+          type="button"
+          onClick={onSchedule}
+          aria-label={t("hero.scheduleAria", { name: cam.name })}
+          title={t("hero.scheduleTitle")}
+          className={`inline-flex h-[28px] w-[28px] items-center justify-center rounded-md border border-border bg-bg-primary text-text-tertiary hover:border-border-strong hover:text-text-primary focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+            cam.schedule.enabled ? "text-brand-primary border-brand-primary/40" : ""
+          }`}
+        >
+          <IconClock className="h-4 w-4" />
+        </button>
+        <CamSwitch
+          inUse={cam.inUse}
+          name={cam.name}
+          disabled={disabled}
+          onToggle={onToggle}
+        />
+      </div>
     </li>
   );
+}
+
+function CameraScheduleDialog({
+  cam,
+  busy,
+  onClose,
+  onSave,
+}: {
+  cam: ScopeCamera;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (schedule: CameraSchedule) => void | Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const [enabled, setEnabled] = useState(cam.schedule.enabled);
+  const [weekdays, setWeekdays] = useState(
+    cam.schedule.weekdays.length > 0
+      ? [...cam.schedule.weekdays]
+      : [...CAMERA_SCHEDULE_WEEKDAYS],
+  );
+  const [windows, setWindows] = useState(
+    cam.schedule.windows.length > 0
+      ? cam.schedule.windows.map((w) => ({ ...w }))
+      : [{ start: "08:00", end: "20:00" }],
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const updateWindow = (
+    index: number,
+    key: "start" | "end",
+    value: string,
+  ) => {
+    setWindows((items) =>
+      items.map((item, i) => (i === index ? { ...item, [key]: value } : item)),
+    );
+  };
+  const removeWindow = (index: number) => {
+    setWindows((items) => items.filter((_, i) => i !== index));
+  };
+  const toggleWeekday = (weekday: number) => {
+    setWeekdays((items) =>
+      items.includes(weekday)
+        ? items.filter((item) => item !== weekday)
+        : [...items, weekday].sort((a, b) => a - b),
+    );
+  };
+  const submit = async () => {
+    const nextWindows = windows;
+    if (enabled && weekdays.length === 0) {
+      setError(t("hero.scheduleNeedWeekday"));
+      return;
+    }
+    if (enabled && nextWindows.length === 0) {
+      setError(t("hero.scheduleNeedWindow"));
+      return;
+    }
+    if (enabled && nextWindows.some((w) => !w.start || !w.end)) {
+      setError(t("hero.scheduleInvalid"));
+      return;
+    }
+    setError(null);
+    await onSave({
+      enabled: enabled && nextWindows.length > 0,
+      weekdays,
+      windows: nextWindows,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
+      <div className="w-full max-w-md rounded-xl border border-border bg-bg-secondary shadow-xl">
+        <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
+          <div className="min-w-0">
+            <h3 className="text-subtitle text-text-primary truncate">
+              {t("hero.scheduleDialogTitle")}
+            </h3>
+            <div className="text-caption text-text-tertiary truncate">
+              {cam.name}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("common.close")}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-text-tertiary hover:bg-bg-tertiary hover:text-text-primary focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none"
+          >
+            <IconX className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 px-5 py-4">
+          <label className="flex items-center justify-between gap-4">
+            <span className="text-body text-text-primary">
+              {t("hero.scheduleEnabled")}
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enabled}
+              onClick={() => setEnabled((v) => !v)}
+              className={`relative inline-flex h-[18px] w-[34px] shrink-0 rounded-full transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+                enabled ? "bg-brand-primary" : "bg-black/35"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                  enabled ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </label>
+          <div className="space-y-2">
+            <div className="text-caption text-text-tertiary">
+              {t("hero.scheduleWeekdays")}
+            </div>
+            <div className="grid grid-cols-7 gap-1.5">
+              {CAMERA_SCHEDULE_WEEKDAYS.map((weekday) => {
+                const selected = weekdays.includes(weekday);
+                return (
+                  <button
+                    key={weekday}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => toggleWeekday(weekday)}
+                    disabled={!enabled}
+                    className={`min-w-0 rounded-md border px-0 py-1.5 text-caption transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 ${
+                      selected
+                        ? "border-brand-primary bg-brand-primary text-white"
+                        : "border-border bg-bg-primary text-text-secondary hover:border-border-strong hover:text-text-primary"
+                    }`}
+                  >
+                    {t(`hero.scheduleWeekdayShort.${weekday}`)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="space-y-2">
+            {windows.map((window, index) => (
+              <div
+                key={`${index}-${window.start}-${window.end}`}
+                className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2"
+              >
+                <input
+                  type="time"
+                  value={window.start}
+                  disabled={!enabled}
+                  onChange={(e) =>
+                    updateWindow(index, "start", e.currentTarget.value)
+                  }
+                  className="min-w-0 rounded-md border border-border bg-bg-primary px-3 py-2 text-body text-text-primary disabled:opacity-50"
+                />
+                <span className="text-text-tertiary">-</span>
+                <input
+                  type="time"
+                  value={window.end}
+                  disabled={!enabled}
+                  onChange={(e) =>
+                    updateWindow(index, "end", e.currentTarget.value)
+                  }
+                  className="min-w-0 rounded-md border border-border bg-bg-primary px-3 py-2 text-body text-text-primary disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeWindow(index)}
+                  disabled={!enabled || windows.length <= 1}
+                  aria-label={t("hero.scheduleRemoveWindow")}
+                  title={t("hero.scheduleRemoveWindow")}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-text-tertiary hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <IconTrash className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() =>
+                setWindows((items) => [
+                  ...items,
+                  { start: "08:00", end: "20:00" },
+                ])
+              }
+              disabled={!enabled}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-caption text-text-secondary hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <IconPlus className="h-4 w-4" />
+              {t("hero.scheduleAddWindow")}
+            </button>
+          </div>
+          {cam.schedulePaused && (
+            <div className="text-caption text-brand-primary">
+              {t("hero.schedulePausedDetail", {
+                time: formatScheduleTime(cam.nextScheduleChangeAt),
+              })}
+            </div>
+          )}
+          {enabled && !cam.inUse && (
+            <div className="text-caption text-text-tertiary">
+              {t("hero.scheduleMasterOffHint")}
+            </div>
+          )}
+          {error && <div className="text-caption text-warning">{error}</div>}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-2 text-body text-text-secondary hover:border-border-strong hover:text-text-primary"
+          >
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy}
+            className="rounded-md bg-brand-primary px-3 py-2 text-body text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? t("common.saving") : t("common.save")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatScheduleTime(value: string | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /** 卡片内的小节标签——caption 字号 + tertiary 色,

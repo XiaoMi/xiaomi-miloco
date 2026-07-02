@@ -216,7 +216,7 @@ class PerceptionService:
                 # cap=False：列设备全集（含超出投喂上限的相机），用于 rule target
                 # 校验等「枚举可选设备」语义，不受 MAX_ENABLED_CAMERAS 投喂上限收窄。
                 discovered = await adapter.discover_devices(
-                    online_only=online_only, cap=False
+                    online_only=online_only, cap=False, apply_schedule=False
                 )
                 for did, source in discovered.items():
                     devices.append(source)

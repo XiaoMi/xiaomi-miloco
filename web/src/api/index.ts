@@ -43,6 +43,7 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  CameraSchedule,
 } from "@/lib/types";
 export type { ScopeHome };
 
@@ -286,6 +287,13 @@ export async function toggleScopeCamera(
   inUse: boolean,
 ): Promise<void> {
   return impl.realToggleScopeCamera(dids, inUse);
+}
+
+export async function setScopeCameraSchedule(
+  did: string,
+  schedule: CameraSchedule,
+): Promise<void> {
+  return impl.realSetScopeCameraSchedule(did, schedule);
 }
 
 export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> {

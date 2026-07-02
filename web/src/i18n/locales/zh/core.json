@@ -16,6 +16,9 @@
     "collapse": "收起",
     "notification": "通知",
     "close": "关闭",
+    "cancel": "取消",
+    "save": "保存",
+    "saving": "保存中…",
     "errorToast": "{{label}}，稍后再试"
   },
   "perfView": {

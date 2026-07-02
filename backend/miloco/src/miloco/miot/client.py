@@ -636,11 +636,16 @@ class MiotProxy:
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
-                # manager(native PPCS 会话+解码线程)的建/销与感知投喂**共用同一口径**
-                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线、按 did 截到上限。
-                # 拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/超额的相机都不在
-                # active 里 → 不建/已建则销，真正停掉 native 会话与解码（含 over-cap 收敛）。
-                active = set(select_active_camera_dids(self._kv_repo, cameras))
+                # manager(native PPCS 会话+解码线程)的建/销服务 watch/live 实时观看。
+                # native 拉流集 = 手动启用集（不受定时暂停）；感知投喂集才在
+                # camera_adapter 侧叠加 apply_schedule=True 的定时门控。
+                # 在启用家庭 + 未拉黑 + 在线、按 did 截到上限；关掉/移出家庭/离线/
+                # 超额的相机不在 active 里 → 不建/已建则销，真正停掉 native 会话与解码。
+                active = set(
+                    select_active_camera_dids(
+                        self._kv_repo, cameras, apply_schedule=False
+                    )
+                )
                 logger.debug(
                     "Camera streaming set: active=%s managers=%s",
                     sorted(active),
