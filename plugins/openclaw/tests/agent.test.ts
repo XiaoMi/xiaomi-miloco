@@ -13,6 +13,16 @@ vi.mock("../src/hooks/trace.js", () => ({
   peekTurnMeta: (runId: string) => peekTurnMetaMock(runId),
 }));
 
+// owner-channel 解析：按测试用例切换"解析到车主会话 / 无可用 channel"。
+type ResolveResultLike = { target: { sessionKey: string } | null };
+const resolveNotifyTargetMock = vi.fn<() => ResolveResultLike>(() => ({
+  target: null,
+}));
+
+vi.mock("../src/tools/notify.js", () => ({
+  resolveNotifyTarget: () => resolveNotifyTargetMock(),
+}));
+
 import { kAgentWebhook } from "../src/webhooks/agent.js";
 
 const OVERFLOW = "Context overflow: prompt too large for the model (precheck).";
@@ -182,5 +192,115 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
     expect(res.runId).toBe("t1");
     expect(res.status).toBe("ok");
     expect(res.recovered).toBeUndefined();
+  });
+});
+
+describe("kAgentWebhook owner-channel 投递", () => {
+  function invokeWith(api: unknown, extra: Record<string, unknown>) {
+    return kAgentWebhook.action({
+      api,
+      payload: {
+        message: "m",
+        sessionKey: SESSION,
+        idempotencyKey: "t1",
+        traceId: "tr",
+        timeoutMs: 1000,
+        ...extra,
+      },
+    } as never);
+  }
+
+  it("默认路径不变：deliver:false、用 payload sessionKey，且不做 channel 解析", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+    }));
+    const { api, run } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
+
+    await invoke(api);
+
+    expect(resolveNotifyTargetMock).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionKey: SESSION, deliver: false }),
+    );
+  });
+
+  it("resolveTarget=owner-channel：turn 跑在解析出的车主会话且 deliver:true", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+    }));
+    resolveNotifyTargetMock.mockReturnValue({
+      target: { sessionKey: "wechat:dm:owner-1" },
+    });
+    const { api, run } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
+
+    const res = (await invokeWith(api, {
+      resolveTarget: "owner-channel",
+    })) as { runId: string; status: string };
+
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "wechat:dm:owner-1",
+        deliver: true,
+      }),
+    );
+    expect(res.status).toBe("ok");
+    expect(res.runId).toBe("t1");
+  });
+
+  it("owner-channel 显式 deliver:false 时尊重调用方", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+    }));
+    resolveNotifyTargetMock.mockReturnValue({
+      target: { sessionKey: "wechat:dm:owner-1" },
+    });
+    const { api, run } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
+
+    await invokeWith(api, { resolveTarget: "owner-channel", deliver: false });
+
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "wechat:dm:owner-1",
+        deliver: false,
+      }),
+    );
+  });
+
+  it("无可用 IM channel → 结构化 no-channel（非抛错），不起 turn", async () => {
+    resolveNotifyTargetMock.mockReturnValue({ target: null });
+    const { api, run } = makeApi({});
+
+    const res = (await invokeWith(api, {
+      resolveTarget: "owner-channel",
+    })) as { runId: string | null; status: string; error?: string };
+
+    expect(run).not.toHaveBeenCalled();
+    expect(res.runId).toBeNull();
+    expect(res.status).toBe("no-channel");
+    expect(res.error).toContain("no available IM channel");
+  });
+
+  it("owner-channel 溢出不做 deleteSession 自愈（不删用户真实会话）", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: false,
+      errorMsg: OVERFLOW,
+    }));
+    resolveNotifyTargetMock.mockReturnValue({
+      target: { sessionKey: "wechat:dm:owner-1" },
+    });
+    const { api, run, deleteSession } = makeApi({
+      waitByRunId: { t1: { status: "ok" } },
+    });
+
+    const res = (await invokeWith(api, {
+      resolveTarget: "owner-channel",
+    })) as { runId: string };
+
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1); // 无重试 turn
+    expect(res.runId).toBe("t1");
   });
 });
