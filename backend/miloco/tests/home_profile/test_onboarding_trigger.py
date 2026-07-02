@@ -7,18 +7,26 @@
 均静默；发送失败不置位（下次重试）；发送成功置位后二次调用静默；并发汇入只发
 一次；dispatcher 路由包含 onboarding 且不入统计。约定同 test_welcome_service：
 monkeypatch 模块级 ``dispatch_event``。
+
+另含**真 dispatcher 回归组**：驱动真实 AgentDispatcher + 假 run_agent_turn，
+守住「终身标记只认真送达」——入队接纳 ≠ 送达，传输耗尽 / turn error 时标记必须
+不置位（stub dispatch_event 的测试盖不住这条链路）。
 """
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from miloco.database.kv_repo import OnboardingKeys
+from miloco.dispatch import AgentDispatcher, set_agent_dispatcher
+from miloco.dispatch import dispatcher as disp_mod
 from miloco.dispatch.dispatcher import _ROUTE, _TRACKED
 from miloco.home_profile import onboarding_trigger as ot
 from miloco.home_profile.onboarding_trigger import OnboardingTriggerService
+from miloco.middleware.exceptions import AgentWebhookException
 
 
 class _FakeKV:
@@ -49,7 +57,18 @@ def _service(
 
 
 def _patch_dispatch(monkeypatch, *, sent=True):
-    mock = AsyncMock(return_value=sent)
+    """stub dispatch_event：入队恒接纳（返 True），送达结果经 delivered future 给出。
+
+    与真实契约对齐：返回值是「接纳」，送达与否由 dispatcher resolve future——
+    stub 必须 resolve，否则 maybe_trigger 会等到守护超时。
+    """
+
+    def _side_effect(event_type, items, builder, intra_priority=0, delivered=None):
+        if delivered is not None and not delivered.done():
+            delivered.set_result(sent)
+        return True
+
+    mock = AsyncMock(side_effect=_side_effect)
     monkeypatch.setattr(ot, "dispatch_event", mock)
     return mock
 
@@ -156,8 +175,130 @@ async def test_condition_callback_error_treated_as_not_met(monkeypatch):
     assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None
 
 
+@pytest.mark.asyncio
+async def test_not_accepted_keeps_flag_unset_and_retries(monkeypatch):
+    # 入队未被接纳（调度器未就绪/淘汰）→ 不置位、可重试。
+    def _reject(event_type, items, builder, intra_priority=0, delivered=None):
+        if delivered is not None and not delivered.done():
+            delivered.set_result(False)
+        return False
+
+    mock = AsyncMock(side_effect=_reject)
+    monkeypatch.setattr(ot, "dispatch_event", mock)
+    svc, kv = _service()
+
+    assert await svc.maybe_trigger() is False
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None
+    assert await svc.maybe_trigger() is False
+    assert mock.await_count == 2  # 重试而非静默
+
+
+@pytest.mark.asyncio
+async def test_guard_timeout_no_flag_but_no_infire_repeat(monkeypatch):
+    # 送达 future 一直不 resolve（结果未知）→ 守护超时：KV 不置位（下次启动重试），
+    # 但 _fired 置位防本进程内重发。
+    monkeypatch.setattr(ot, "_DELIVERY_GUARD_TIMEOUT_S", 0.05)
+
+    def _accept_never_resolve(event_type, items, builder, intra_priority=0, delivered=None):
+        return True  # 接纳但不 resolve
+
+    mock = AsyncMock(side_effect=_accept_never_resolve)
+    monkeypatch.setattr(ot, "dispatch_event", mock)
+    svc, kv = _service()
+
+    assert await svc.maybe_trigger() is False
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None
+    # 本进程内不再重发
+    assert await svc.maybe_trigger() is False
+    assert mock.await_count == 1
+
+
 def test_onboarding_route_registered_untracked():
     """onboarding 路由与 bind 同会话/车道/优先级档，且不入 agent_runs 统计。"""
     assert _ROUTE["onboarding"] == ("agent:main:miloco", "miloco-interactive", 30)
     assert _ROUTE["onboarding"] == _ROUTE["bind"]
     assert "onboarding" not in _TRACKED
+
+
+# ─── 真 dispatcher 回归组 ─────────────────────────────────────────────────────
+# stub dispatch_event 的测试无法暴露「入队接纳 ≠ 送达」：这里驱动真实
+# AgentDispatcher（drainer / 重试 / delivered future 全真），只假 run_agent_turn。
+
+
+@pytest.fixture
+async def real_dispatcher(monkeypatch):
+    monkeypatch.setattr(
+        disp_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            dispatcher=SimpleNamespace(turn_wait_timeout_ms=1_000, max_queue=16)
+        ),
+    )
+    monkeypatch.setattr(AgentDispatcher, "_TRANSPORT_BACKOFF_S", 0.001)
+    d = AgentDispatcher()
+    await d.start()
+    set_agent_dispatcher(d)
+    yield d
+    await d.stop()
+    set_agent_dispatcher(None)
+
+
+@pytest.mark.asyncio
+async def test_real_dispatcher_transport_failure_keeps_flag_unset(real_dispatcher, monkeypatch):
+    """回归：drainer 传输重试耗尽静默丢批 → 标记必须不置位、下次可重试。"""
+
+    async def failing_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        raise AgentWebhookException("agent webhook still booting")
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", failing_turn)
+    svc, kv = _service()
+
+    assert await svc.maybe_trigger() is False
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None
+    # 未置位 + 未 _fired → 下一次调用（模拟下次启动）重新尝试
+    assert await svc.maybe_trigger() is False
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_real_dispatcher_success_sets_flag(real_dispatcher, monkeypatch):
+    """镜像：真 dispatcher 送达成功 → 标记置位、二次静默。"""
+
+    async def ok_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        assert "[系统事件]" in msg
+        return "run-1", "ok", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", ok_turn)
+    svc, kv = _service()
+
+    assert await svc.maybe_trigger() is True
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY)
+    assert await svc.maybe_trigger() is False  # 一次性
+
+
+@pytest.mark.asyncio
+async def test_real_dispatcher_timeout_status_counts_as_delivered(real_dispatcher, monkeypatch):
+    """status=timeout：平台侧 turn 仍在途 → 视作送达，置位（避免双邀请）。"""
+
+    async def timeout_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        return None, "timeout", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", timeout_turn)
+    svc, kv = _service()
+
+    assert await svc.maybe_trigger() is True
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY)
+
+
+@pytest.mark.asyncio
+async def test_real_dispatcher_error_status_keeps_flag_unset(real_dispatcher, monkeypatch):
+    """status=error：turn 执行失败 → 不算送达，不置位（下次启动重试）。"""
+
+    async def error_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        return "run-1", "error", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", error_turn)
+    svc, kv = _service()
+
+    assert await svc.maybe_trigger() is False
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None

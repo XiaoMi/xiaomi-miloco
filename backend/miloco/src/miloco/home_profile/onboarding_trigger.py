@@ -34,6 +34,11 @@ from miloco.dispatch import dispatch_event, join_text_blocks
 logger = logging.getLogger(__name__)
 
 
+# 送达 future 的守护超时：webhook waitForRun 同步等整个 agent turn，可能很慢，
+# 取宽裕值。守护超时 = 送达结果未知（turn 可能仍在途）→ 不置位 KV（下次启动重试），
+# 仅靠 _fired 防本进程内重发（避免在途 turn + 重发造成双邀请）。
+_DELIVERY_GUARD_TIMEOUT_S = 120.0
+
 # 给 agent 的指令文本（口径参照 welcome_service._format_message 的祈使风格）。
 _INSTRUCTION = (
     "[系统事件] 检测到 miloco 已完成米家授权，但家庭成员与家庭档案均为空——"
@@ -100,18 +105,46 @@ class OnboardingTriggerService:
                 logger.warning("onboarding trigger: 条件检查失败，跳过本次", exc_info=True)
                 return False
 
+            # dispatch_event 的返回值只是「入队被接纳」——drainer 随后才真正发
+            # turn，传输耗尽时会静默丢批。终身一次性标记必须以**真送达**为准，
+            # 故传入投递结果 future 并等待 dispatcher resolve（它保证每条丢弃/
+            # 送达路径都会 resolve，不悬空）。
+            delivered_fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
             try:
-                sent = await dispatch_event("onboarding", [_INSTRUCTION], join_text_blocks)
+                accepted = await dispatch_event(
+                    "onboarding", [_INSTRUCTION], join_text_blocks, delivered=delivered_fut
+                )
             except Exception:  # noqa: BLE001
                 logger.warning("onboarding trigger: dispatch_event 异常", exc_info=True)
+                return False
+            if not accepted:
+                logger.info("onboarding trigger: 事件未被接纳（调度器未就绪/队列淘汰）")
+                return False
+
+            try:
+                sent = await asyncio.wait_for(delivered_fut, timeout=_DELIVERY_GUARD_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # 送达结果未知（平台 turn 可能仍在途）：不置位 KV → 下次启动重试；
+                # 置 _fired 防本进程内重发，避免"在途邀请 + 重发"打两次招呼。
+                self._fired = True
+                logger.warning(
+                    "onboarding trigger: 等待送达结果超时(%.0fs)，KV 标记不置位（下次启动重试）",
+                    _DELIVERY_GUARD_TIMEOUT_S,
+                )
                 return False
 
             # 只在真正送达后置位（含 KV 落盘），失败留给下次启动重试。
             if sent:
                 self._fired = True
-                self._kv_repo.set(
+                flag_ok = self._kv_repo.set(
                     OnboardingKeys.ONBOARDING_PROMPTED_KEY,
                     datetime.now().isoformat(timespec="seconds"),
                 )
-            logger.info("onboarding trigger: dispatch_event %s", "OK" if sent else "FAILED")
+                if not flag_ok:
+                    # KVRepo.set 吞 sqlite 错误返 False：标记没落盘，下次启动会再邀请
+                    # 一次。留 WARN 便于排查"重复邀请"的根因。
+                    logger.warning(
+                        "onboarding trigger: KV 标记写入失败，重启后可能重复邀请一次"
+                    )
+            logger.info("onboarding trigger: dispatch %s", "DELIVERED" if sent else "FAILED")
             return sent

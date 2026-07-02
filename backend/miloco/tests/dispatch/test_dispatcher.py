@@ -526,3 +526,162 @@ async def test_dispatch_event_threads_intra_priority(patched, monkeypatch):
     finally:
         set_agent_dispatcher(None)
         await d.stop()
+
+
+# ─── delivered future：每条送达/丢弃路径都必须 resolve，绝不悬空 ────────────────
+# （onboarding 终身一次性标记依赖该契约：True=真送达，False=任何一种丢弃。）
+
+
+def _delivered_fut() -> asyncio.Future:
+    return asyncio.get_event_loop().create_future()
+
+
+@pytest.mark.asyncio
+async def test_delivered_true_on_success(patched):
+    d = AgentDispatcher()
+    await d.start()
+    fut = _delivered_fut()
+    try:
+        await d.dispatch("bind", ["x"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut.result() is True
+
+
+@pytest.mark.asyncio
+async def test_delivered_true_on_timeout_status(patched, monkeypatch):
+    """status=timeout：平台侧 turn 仍在途 → 对投递 future 视作已送达。"""
+
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        return None, "timeout", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    await d.start()
+    fut = _delivered_fut()
+    try:
+        await d.dispatch("bind", ["x"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut.result() is True
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_error_status(patched, monkeypatch):
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        return "run-x", "error", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    await d.start()
+    fut = _delivered_fut()
+    try:
+        await d.dispatch("bind", ["x"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_transport_exhaustion(patched, monkeypatch):
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        raise AgentWebhookException("boom")
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    d._TRANSPORT_BACKOFF_S = 0.0
+    await d.start()
+    fut = _delivered_fut()
+    try:
+        await d.dispatch("bind", ["x"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_builder_failure_and_empty(patched):
+    def boom(items):
+        raise RuntimeError("builder broke")
+
+    d = AgentDispatcher()
+    await d.start()
+    fut_fail = _delivered_fut()
+    fut_empty = _delivered_fut()
+    try:
+        await d.dispatch("bind", ["x"], boom, delivered=fut_fail)
+        await _settle(d)
+        await d.dispatch("interaction", [], _join, delivered=fut_empty)  # _join([]) -> None
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut_fail.result() is False
+    assert fut_empty.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_when_closed_or_unknown_type(patched):
+    d = AgentDispatcher()
+    await d.start()
+    fut_unknown = _delivered_fut()
+    assert await d.dispatch("nope", ["x"], _join, delivered=fut_unknown) is False  # type: ignore[arg-type]
+    await d.stop()
+    fut_closed = _delivered_fut()
+    assert await d.dispatch("bind", ["x"], _join, delivered=fut_closed) is False
+    assert fut_unknown.result() is False
+    assert fut_closed.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_eviction(patched):
+    d = AgentDispatcher()
+    await d.start()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    for i in range(MAX_QUEUE):  # 满队 urgent interactions
+        q.append(_QueuedEvent("interaction", [f"i{i}"], _join, 0, now + i))
+    fut = _delivered_fut()
+    try:
+        # bind 最不紧急 → 自己的超额 append 即被淘汰。
+        accepted = await d.dispatch("bind", ["late"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert accepted is False
+    assert fut.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_stop_with_inflight_and_queued(patched, monkeypatch):
+    """stop()：在途批被 cancel（finally 兜底）、排队未发的清队 resolve，均 False。"""
+
+    async def parked_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        await asyncio.sleep(3600)
+        return "run-x", "ok", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", parked_turn)
+    d = AgentDispatcher()
+    await d.start()
+    fut_inflight = _delivered_fut()
+    fut_queued = _delivered_fut()
+    await d.dispatch("interaction", ["x"], _join, delivered=fut_inflight)
+    await asyncio.sleep(0.03)  # 让 drainer 进入 parked turn
+    await d.dispatch("interaction", ["y"], _join, delivered=fut_queued)  # 排队等在途批
+
+    await d.stop()
+
+    assert fut_inflight.result() is False
+    assert fut_queued.result() is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_event_resolves_delivered_without_dispatcher():
+    set_agent_dispatcher(None)
+    fut = asyncio.get_event_loop().create_future()
+    assert await dispatch_event("bind", ["x"], _join, delivered=fut) is False
+    assert fut.result() is False
