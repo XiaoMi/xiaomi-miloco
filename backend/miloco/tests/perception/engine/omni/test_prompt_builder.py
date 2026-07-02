@@ -781,11 +781,19 @@ class TestSceneAssembly:
         # 防幻听「画面互证」条款只属于 video 版字段说明——纯音频轮若泄入，
         # 「画面视野内看不到迹象」恒空真，会把真实的玻璃碎/婴儿哭误判成"误听"。
         # 回归钉：env_sounds/suggestions 的 spec_md 引入画面措辞后必须走 spec_md_audio 变体。
-        for tok in ("画面互证", "画面视野内", "画面外", "房间空无一人"):
+        # 「房间空无一人」已统一为「画面空无一人」（正文只用后者），两个措辞都留在
+        # token 集里——任一变体在 audio 路由重现都该红（防措辞回潮的廉价保险）。
+        for tok in (
+            "画面互证", "画面视野内", "画面外", "房间空无一人", "画面空无一人",
+        ):
             assert tok not in sp, f"audio 路由 prompt 泄入视觉互证措辞 {tok!r}"
-        # video 路由仍完整保留 matched_rules（未被波及）
+        # 正向证据门槛在纯音频轮保留：env_sounds + suggestions 的 audio 变体各带一条
+        # 「具体声学证据」要求（听感质地/次数/持续说得出来才算听到）。
+        assert sp.count("具体声学证据") >= 2, "audio 路由应保留两条声学证据门槛"
+        # video 路由仍完整保留 matched_rules（未被波及）与画面互证条款
         sp_v = self._sp(route="video", has_identity=False)
         assert "## matched_rules" in sp_v
+        assert "画面互证" in sp_v
 
     def test_stream_orders_speeches_before_caption(self):
         sp = self._sp(route="video", has_identity=False, stream=True)
