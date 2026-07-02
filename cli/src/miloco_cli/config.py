@@ -35,6 +35,12 @@ def config_file() -> Path:
 # 点号路径 → (python 类型, 默认值, 中文 description)
 _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     "debug": (bool, False, "是否启用调试模式"),
+    "timezone": (
+        str,
+        "",
+        "部署时区（IANA 名，如 Asia/Shanghai / America/Los_Angeles）；空 = 跟随系统时区。"
+        "影响感知推送与 omni 注入的时刻、\"今天/本周\"等业务概念、API 出口 ISO 偏移",
+    ),
     "server.url": (str, "http://127.0.0.1:1810", "miloco 后端 HTTP Base URL"),
     "server.token": (str, "", "后端 Bearer Token（后端首次启动生成，CLI 勿覆盖）"),
     "server.tls_verify": (
@@ -201,6 +207,16 @@ def _coerce(path: str, raw: str) -> Any:
             return float(raw)
         except ValueError as exc:
             raise ValueError(f"{path} 需要浮点数，收到 {raw!r}") from exc
+    # timezone 额外做 IANA 名校验（与 backend settings 的 field_validator 对齐），
+    # 拦住 "Beijing" / "+08:00" 这类会让 backend 启动期 ValidationError 的脏值。
+    if path == "timezone" and raw:
+        from zoneinfo import available_timezones
+
+        if raw not in available_timezones():
+            raise ValueError(
+                f"timezone 需要合法 IANA 时区名（如 Asia/Shanghai、America/Los_Angeles），"
+                f"收到 {raw!r}"
+            )
     return raw  # str
 
 

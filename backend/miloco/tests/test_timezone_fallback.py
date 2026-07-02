@@ -33,6 +33,7 @@ def _reset_iana_cache():
     if cache_clear is not None:
         cache_clear()
     time_utils._warned_no_iana = False
+    time_utils._warned_utc_tz = False
 
 
 @pytest.fixture(autouse=True)
@@ -161,6 +162,42 @@ def test_localtime_content_lookup_garbage_returns_none(tmp_path):
     fake = tmp_path / "localtime"
     fake.write_bytes(b"TZif-not-a-real-zone" * 7)
     assert _localtime_content_lookup(fake) is None
+
+
+def test_utc_deploy_timezone_warns_once_with_fix_command(monkeypatch, caplog):
+    """解析出 UTC 部署时区 → 一次显眼红旗 warning,附精确修复命令。
+
+    没有家庭住在 UTC——几乎必然是云主机时区未配置,所有 agent 可见时刻会错标。
+    """
+    import logging
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "Etc/UTC")
+    _reset_settings()
+
+    from miloco.utils import time_utils
+
+    with caplog.at_level(logging.WARNING, logger=time_utils._logger.name):
+        time_utils.deploy_timezone()
+        time_utils.deploy_timezone()
+
+    utc_warns = [r for r in caplog.records if "no household lives in UTC" in r.message]
+    assert len(utc_warns) == 1, f"UTC 红旗应只打 1 次,实际 {len(utc_warns)} 次"
+    assert "miloco-cli config set timezone" in utc_warns[0].message
+
+
+def test_non_utc_deploy_timezone_no_utc_warning(monkeypatch, caplog):
+    """正常时区不触发 UTC 红旗。"""
+    import logging
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "Asia/Shanghai")
+    _reset_settings()
+
+    from miloco.utils import time_utils
+
+    with caplog.at_level(logging.WARNING, logger=time_utils._logger.name):
+        time_utils.deploy_timezone()
+
+    assert not any("no household lives in UTC" in r.message for r in caplog.records)
 
 
 def test_dst_zone_correctly_handled_via_iana(monkeypatch):

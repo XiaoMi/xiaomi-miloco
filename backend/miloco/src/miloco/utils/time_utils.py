@@ -78,6 +78,28 @@ def ms_to_aware_dt(ms: int, tz: tzinfo | None = None) -> datetime:
 # 常规路径不再猜 Asia/Shanghai(见 deploy_timezone 第 3 步)。
 _FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
 _warned_no_iana = False
+_warned_utc_tz = False
+
+# 解析出这些名字即视为"UTC 部署"红旗(没有家庭真住在 UTC)
+_UTC_TZ_NAMES = frozenset({"UTC", "Etc/UTC", "Etc/Universal", "Universal", "Zulu"})
+
+
+def _warn_if_utc(tz: tzinfo) -> tzinfo:
+    """部署时区解析结果为 UTC 时打一次显眼 warning(启动期红旗)。
+
+    没有家庭住在 UTC——解析成 UTC 几乎必然是服务器时区未配置(云主机默认 Etc/UTC),
+    此时所有 agent 可见时刻都会错标。提示精确的修复命令,只打一次。
+    """
+    global _warned_utc_tz
+    if not _warned_utc_tz and str(tz) in _UTC_TZ_NAMES:
+        _logger.warning(
+            "Resolved deploy timezone is UTC — no household lives in UTC; the server "
+            "timezone is likely unconfigured and all user-facing times may be "
+            "mislabeled. If your home is elsewhere, set it with: "
+            "miloco-cli config set timezone <IANA-name> (e.g. Asia/Shanghai)."
+        )
+        _warned_utc_tz = True
+    return tz
 
 # 顶层非 IANA 名的杂项文件,内容反查时跳过
 _TZDB_NON_ZONE_FILES = frozenset({
@@ -192,9 +214,9 @@ def deploy_timezone() -> tzinfo:
         # 仅吞"settings 尚未初始化"类异常;ValidationError 应启动期暴露。
         tz_name = None
     if tz_name:
-        return ZoneInfo(tz_name)
+        return _warn_if_utc(ZoneInfo(tz_name))
     if iana := _system_iana_tz():
-        return iana
+        return _warn_if_utc(iana)
     global _warned_no_iana
     if not _warned_no_iana:
         _logger.warning(
@@ -204,7 +226,7 @@ def deploy_timezone() -> tzinfo:
             "behavior."
         )
         _warned_no_iana = True
-    return datetime.now().astimezone().tzinfo or _FALLBACK_TZ
+    return _warn_if_utc(datetime.now().astimezone().tzinfo or _FALLBACK_TZ)
 
 
 def now_iso() -> str:

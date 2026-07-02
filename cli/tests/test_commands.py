@@ -153,6 +153,27 @@ def test_config_set_unknown_path_errors(runner):
     assert result.exit_code != 0
 
 
+def test_config_set_timezone_valid_iana(runner, isolated_config):
+    """timezone 在白名单内，合法 IANA 名可写入（用户/agent 均经此配置部署时区）。"""
+    result = runner.invoke(
+        cli, ["config", "set", "timezone", "Asia/Shanghai", "--no-restart"]
+    )
+    assert result.exit_code == 0
+    from miloco_cli.config import load_config
+
+    assert load_config()["timezone"] == "Asia/Shanghai"
+
+
+def test_config_set_timezone_rejects_non_iana(runner, isolated_config):
+    """非法时区名被拦（否则 backend 启动期才炸 ValidationError，定位困难）。"""
+    for garbage in ("Beijing", "+08:00", "CST"):
+        result = runner.invoke(
+            cli, ["config", "set", "timezone", garbage, "--no-restart"]
+        )
+        assert result.exit_code != 0, f"{garbage!r} 不该被接受"
+        assert "IANA" in result.output
+
+
 def test_config_set_triggers_restart_when_running(runner, isolated_config, monkeypatch):
     """后端运行态下，``config set`` 默认自动触发 service restart。"""
     import miloco_cli.commands.config as cfg_cmd
