@@ -61,6 +61,7 @@ from miloco.perception.types import (
     VideoFrame,
     VideoStream,
 )
+from miloco.utils.time_utils import deploy_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +118,15 @@ def _reraise_first(results: list[Any]) -> None:
 
 
 def _fmt_time_window(start_ms: float, end_ms: float) -> str:
-    """画面时间窗 ``[HH:MM:SS-HH:MM:SS]``（= 该相机本窗 snapshot 起止时刻，本地时区）。"""
-    s = datetime.fromtimestamp(start_ms / 1000).strftime("%H:%M:%S")
-    e = datetime.fromtimestamp(end_ms / 1000).strftime("%H:%M:%S")
+    """画面时间窗 ``[HH:MM:SS-HH:MM:SS]``（= 该相机本窗 snapshot 起止时刻，部署时区）。
+
+    走 ``deploy_timezone()`` 而非进程/OS 时钟：此时间窗经 ``event_text_builder``
+    的「时间」字段直达 agent，若用裸 ``fromtimestamp`` 则在 host TZ≠部署时区时错标
+    时刻（如 UTC 主机把 10:52 显示成 02:52），故与 API 出口 ISO 同源统一到部署时区。
+    """
+    tz = deploy_timezone()
+    s = datetime.fromtimestamp(start_ms / 1000, tz=tz).strftime("%H:%M:%S")
+    e = datetime.fromtimestamp(end_ms / 1000, tz=tz).strftime("%H:%M:%S")
     return f"[{s}-{e}]"
 
 

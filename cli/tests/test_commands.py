@@ -1823,6 +1823,49 @@ def test_service_stop_not_running(runner, tmp_path, monkeypatch):
     assert data["message"] == "not running"
 
 
+def test_generate_supervisor_conf_injects_timezone_from_config(runner, tmp_path, monkeypatch):
+    """config.json 有 timezone → 生成的 supervisord.conf environment 行带 TZ + MILOCO_TIMEZONE。"""
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    cfg_path = config_file()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"timezone": "Asia/Shanghai"}), encoding="utf-8")
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    conf = svc_mod._supervisor_conf().read_text()
+    assert 'TZ="Asia/Shanghai"' in conf
+    assert 'MILOCO_TIMEZONE="Asia/Shanghai"' in conf
+
+
+def test_generate_supervisor_conf_env_overrides_config_timezone(runner, tmp_path, monkeypatch):
+    """MILOCO_TIMEZONE env 优先于 config.json（对齐 backend pydantic env > file）。"""
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    cfg_path = config_file()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"timezone": "Asia/Shanghai"}), encoding="utf-8")
+    monkeypatch.setenv("MILOCO_TIMEZONE", "America/Los_Angeles")
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    conf = svc_mod._supervisor_conf().read_text()
+    assert 'TZ="America/Los_Angeles"' in conf
+    assert 'MILOCO_TIMEZONE="America/Los_Angeles"' in conf
+    assert "Asia/Shanghai" not in conf
+
+
+def test_generate_supervisor_conf_omits_timezone_when_unset(runner, tmp_path, monkeypatch):
+    """无 env 无 config.json timezone → 不注入 TZ，仅保留原有 environment 键。"""
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    conf = svc_mod._supervisor_conf().read_text()
+    assert ',TZ="' not in conf
+    assert "MILOCO_TIMEZONE" not in conf
+    assert 'MILOCO_SUPERVISED="1"' in conf
+
+
 def test_service_logs_dir_not_found(runner, tmp_path, monkeypatch):
     """日志目录不存在时，logs 以非零退出。"""
     # 切换 MILOCO_HOME 到一个不存在 log/ 子目录的临时目录
