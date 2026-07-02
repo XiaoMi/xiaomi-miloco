@@ -22,15 +22,26 @@ def _reset_settings():
 
 
 def _reset_iana_cache():
-    """lru_cache 在测试间会污染;每个用例前后清空。"""
+    """lru_cache 在测试间会污染;每个用例前后清空。
+
+    getattr 防御:fixture 依赖 monkeypatch 后 teardown 先于 monkeypatch 还原执行,
+    此刻 _system_iana_tz 可能还是测试替换的裸 lambda(无 cache_clear)。
+    """
     from miloco.utils import time_utils
 
-    time_utils._system_iana_tz.cache_clear()
+    cache_clear = getattr(time_utils._system_iana_tz, "cache_clear", None)
+    if cache_clear is not None:
+        cache_clear()
     time_utils._warned_no_iana = False
 
 
 @pytest.fixture(autouse=True)
-def reset_around_each():
+def reset_around_each(monkeypatch, tmp_path):
+    # 隔离 MILOCO_HOME + 清 MILOCO_TIMEZONE:否则会读到本机真实
+    # ~/.openclaw/miloco/config.json 里的 timezone,"未配置"分支的用例在已配置
+    # 时区的机器上必红。指向空 tmpdir 保证 hermetic。
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path / "miloco-home"))
+    monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
     _reset_settings()
     _reset_iana_cache()
     yield
