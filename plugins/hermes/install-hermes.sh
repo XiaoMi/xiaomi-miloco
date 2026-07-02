@@ -529,8 +529,21 @@ elif [ ! -d "$WEB_DIST" ]; then
   warn "找不到 prebuilt web bundle: $WEB_DIST"
   warn "(开发者本地需 \`npm run build\` 后重跑 install-hermes.sh)"
 else
-  # 找 backend 的 static_dir(import 懒,settings 解析需要 miloco 包已装)
-  STATIC_DIR="$("$PYTHON" -c "
+  # 找 backend 的 static_dir。
+  # $PYTHON = system python3(大概率不能 import miloco)—— miloco backend
+  # 实际跑在 uv tool venv(由 miloco-cli 管理),需要找到那个 venv 的 python。
+  # 优先探测 uv tool 路径(~/.local/share/uv/tools/miloco/bin/python),
+  # 找不到再用 $PYTHON 拼一把(某些非 uv 装法能用)。
+  MILOCO_PY="$PYTHON"
+  for _cand in \
+    "$HOME/.local/share/uv/tools/miloco/bin/python" \
+    "$HOME/.local/share/uv/tools/miloco/bin/python3"; do
+    if [ -x "$_cand" ]; then
+      MILOCO_PY="$_cand"
+      break
+    fi
+  done
+  STATIC_DIR="$("$MILOCO_PY" -c "
 try:
     from miloco.config.settings import get_settings
     print(get_settings().directories.static_dir)
@@ -539,6 +552,7 @@ except Exception as e:
 " 2>/dev/null)"
   if [ -z "$STATIC_DIR" ]; then
     warn "找不到 backend static_dir(import miloco.config.settings 失败)"
+    warn "(尝试的 python: $MILOCO_PY)"
     warn "(venv 配错的话 wheel 自带 bundle 仍生效,fork 改动暂时不挂)"
   else
     info "  STATIC_DIR=$STATIC_DIR"
