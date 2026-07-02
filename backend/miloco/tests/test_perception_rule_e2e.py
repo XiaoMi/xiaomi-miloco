@@ -103,6 +103,7 @@ def proxy_with_runner(mock_miot_proxy, mock_log_repo):
     fake_mgr.rule_service.get_enabled_rule_ids = lambda: [
         r.id for r in runner.get_enabled_rules()
     ]
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
 
     def mgr_ctx():
         return patch("miloco.manager.get_manager", return_value=fake_mgr)
@@ -351,6 +352,7 @@ async def test_e2e_duration_multi_source_sync_transition_no_overcount(
     fake_mgr.rule_service.get_enabled_rule_ids = lambda: [
         r.id for r in runner_dur.get_enabled_rules()
     ]
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
 
     dm = {"cam_A": ["rule_dur_or"], "cam_B": ["rule_dur_or"]}
 

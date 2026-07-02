@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from miloco.perception.client import PerceptionEngineProxy
@@ -69,6 +69,7 @@ async def test_matched_rules_callback_runs_on_main_loop(proxy):
 
     fake_mgr = MagicMock()
     fake_mgr.rule_service.update_state = capture
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-infer")
     try:
@@ -113,6 +114,7 @@ async def test_early_matched_rules_meta_passed_to_update_state(proxy):
 
     fake_mgr = MagicMock()
     fake_mgr.rule_service.update_state = capture
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-infer")
     try:
@@ -140,6 +142,7 @@ async def test_final_matched_rules_meta_passed_to_update_state(proxy):
 
     fake_mgr = MagicMock()
     fake_mgr.rule_service.update_state = capture
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
 
     result = RealtimePerceptionResult(
         matched_rules=[
@@ -190,6 +193,7 @@ async def test_spawn_in_callback_survives_temp_loop_close(proxy):
 
     fake_mgr = MagicMock()
     fake_mgr.rule_service.update_state = fake_update_state
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-infer")
     try:
@@ -235,6 +239,7 @@ async def test_no_executor_fallback_runs_callback_inline(proxy):
 
     fake_mgr = MagicMock()
     fake_mgr.rule_service.update_state = capture
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
 
     with patch("miloco.manager.get_manager", return_value=fake_mgr):
         await proxy._realtime_perceive_impl(
@@ -261,6 +266,7 @@ async def test_handle_realtime_skips_early_sent_suggestions(proxy):
         ...
 
     fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
     fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
 
     with patch("miloco.manager.get_manager", return_value=fake_mgr), \
@@ -291,6 +297,7 @@ async def test_handle_realtime_sends_all_when_no_early_sent(proxy):
         ...
 
     fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_all_rules = AsyncMock(return_value=[])
     fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
 
     with patch("miloco.manager.get_manager", return_value=fake_mgr), \

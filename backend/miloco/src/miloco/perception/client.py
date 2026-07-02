@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
@@ -52,6 +53,76 @@ from miloco.perception.types import (
     Suggestion,
     suggestion_intra_priority,
 )
+
+# Issue #317: suggestion 最大允许年龄（秒）
+# 超过此时长的 suggestion 被视为过期，不再推送给 agent
+MAX_SUGGESTION_AGE_SEC = 300  # 5 分钟
+
+
+def _parse_time_window_end(time_window: str) -> datetime | None:
+    """解析 time_window 字符串（[HH:MM:SS-HH:MM:SS]），返回结束时间。
+    
+    _fmt_time_window 产出的格式带方括号: "[14:30:25-14:30:30]"
+    使用今天的日期 + 结束时间构建 datetime 对象。
+    如果解析失败返回 None。
+    """
+    if not time_window:
+        return None
+    try:
+        # _fmt_time_window 产出的格式带方括号: "[14:30:25-14:30:30]"
+        cleaned = time_window.strip("[]")
+        parts = cleaned.split("-")
+        if len(parts) != 2:
+            return None
+        end_time_str = parts[1].strip()
+        end_time = datetime.strptime(end_time_str, "%H:%M:%S").time()
+        today = datetime.now().date()
+        return datetime.combine(today, end_time)
+    except (ValueError, IndexError):
+        return None
+
+
+def _filter_suggestions_by_rules(
+    suggestions: list[Suggestion],
+    enabled_device_ids: set[str],
+    has_any_rule: bool,
+    now: datetime,
+    log_prefix: str = "issue-311/317",
+) -> list[Suggestion]:
+    """过滤 disabled rule 关联 + 过期的 suggestion，返回保留列表。
+    
+    Args:
+        suggestions: 待过滤的 suggestion 列表
+        enabled_device_ids: 所有 enabled rule 监听的 device_ids 集合
+        has_any_rule: 是否存在任何 rule（区分"无 rule"和"有 rule 但全 disabled"）
+        now: 当前时间
+        log_prefix: 日志前缀
+    
+    Returns:
+        过滤后的 suggestion 列表
+    """
+    kept: list[Suggestion] = []
+    for s in suggestions:
+        # Issue #311: 过滤 disabled rule 关联的 suggestions
+        s_devices = set(s.source_device_ids)
+        if has_any_rule and s_devices and not s_devices.intersection(enabled_device_ids):
+            logger.info(
+                "[%s] filtered suggestion from disabled rule: event=%s devices=%s",
+                log_prefix, s.event, s.source_device_ids,
+            )
+            continue
+        # Issue #317: 过滤过期的 suggestions
+        end_time = _parse_time_window_end(s.time_window)
+        if end_time is not None:
+            age = (now - end_time).total_seconds()
+            if age > MAX_SUGGESTION_AGE_SEC:
+                logger.info(
+                    "[%s] filtered stale suggestion: event=%s time_window=%s age=%.0fs",
+                    log_prefix, s.event, s.time_window, age,
+                )
+                continue
+        kept.append(s)
+    return kept
 
 
 def _attach_caption(
@@ -443,16 +514,29 @@ class PerceptionEngineProxy:
             # 这里收到的已是经事件链闸门过滤后的「新链」suggestion——心跳/重复在
             # pipeline 层（_wrap_suggestions_cb → assign_id_and_update_link）已抑制。
             # 剔除 engine 内部字段（id）后外发。
-            for s in suggestions:
+            # Issue #311 & #317: 过滤 disabled rule 关联 + 过期的 suggestions
+            enabled_device_ids: set[str] = set()
+            has_any_rule = bool(rules)
+            if rules:
+                for r in rules:
+                    if r.get("enabled", True):
+                        rule_device_ids = r.get("condition", {}).get("perceive_device_ids", [])
+                        enabled_device_ids.update(rule_device_ids)
+            now = datetime.now()
+            filtered_suggestions = _filter_suggestions_by_rules(
+                suggestions, enabled_device_ids, has_any_rule, now, "issue-311/317-early",
+            )
+            # 过滤后才标记为 early-sent（避免被过滤的 suggestion 在终态路径被双重吞掉）
+            for s in filtered_suggestions:
                 if s.id is not None:
-                    early_sent_sugg_ids.add(s.id)  # 终态 merge 会把同一新链保留进 result，发送侧据此跳过
+                    early_sent_sugg_ids.add(s.id)
                 _publish_perception_event(
                     "suggestion", s.event, {"action": s.action},
                 )
             # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
             await dispatch_event(
-                "suggestion", suggestions, build_suggestions_text,
-                intra_priority=suggestion_intra_priority(suggestions),
+                "suggestion", filtered_suggestions, build_suggestions_text,
+                intra_priority=suggestion_intra_priority(filtered_suggestions),
             )
 
         # --- Pipeline timing ---
@@ -777,6 +861,18 @@ class PerceptionEngineProxy:
             s for s in result.suggestions
             if not (early_sent_sugg_ids and s.id in early_sent_sugg_ids)
         ]
+        # Issue #311 & #317: 过滤 disabled rule 关联 + 过期的 suggestions
+        # 从 rule_service 获取全量 rules，构建 enabled_device_ids
+        all_rules = await svc.get_all_rules(enabled_only=False)
+        enabled_device_ids: set[str] = set()
+        has_any_rule = len(all_rules) > 0
+        for r in all_rules:
+            if r.enabled:
+                enabled_device_ids.update(r.condition.perceive_device_ids)
+        now = datetime.now()
+        pending_suggestions = _filter_suggestions_by_rules(
+            pending_suggestions, enabled_device_ids, has_any_rule, now, "issue-311/317-batch",
+        )
         if pending_suggestions:
             _attach_caption(pending_suggestions, result.caption)
             for s in pending_suggestions:

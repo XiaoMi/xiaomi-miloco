@@ -12,11 +12,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.types import MatchedRule, RealtimePerceptionResult
+from miloco.rule.schema import Rule
 
 
 @pytest.fixture
@@ -41,11 +42,12 @@ def _capture_calls():
     return capture, calls
 
 
-def _fake_mgr(enabled_rule_ids: list[str], capture_fn) -> MagicMock:
+def _fake_mgr(enabled_rule_ids: list[str], capture_fn, rules=None) -> MagicMock:
     """Mock manager.rule_service:暴露 update_state + get_enabled_rule_ids。"""
     mgr = MagicMock()
     mgr.rule_service.update_state = capture_fn
     mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=enabled_rule_ids)
+    mgr.rule_service.get_all_rules = AsyncMock(return_value=rules or [Rule(id=r, name=r, task_id="test_task", enabled=True, condition={"perceive_device_ids": [], "query": "test"}) for r in enabled_rule_ids])
     return mgr
 
 
