@@ -849,6 +849,10 @@ class MiotProxy:
                 return
             device = self._device_info_dict.get(msg.did)
             if device is None:
+                # get_devices 仅整表空时刷新；单 did 缺失（整表非空）不触发
+                # 全量拉取。接受该窄窗口（设备刚加入但缓存未刷新），等下次
+                # refresh_devices 全量补上；不在事件热路径调 refresh_devices
+                # （开销大，含全量订阅 sync）。
                 device = (await self.get_devices()).get(msg.did)
             if device is None:
                 return
@@ -876,6 +880,10 @@ class MiotProxy:
                 return
             device = self._device_info_dict.get(msg.did)
             if device is None:
+                # get_devices 仅整表空时刷新；单 did 缺失（整表非空）不触发
+                # 全量拉取。接受该窄窗口（设备刚加入但缓存未刷新），等下次
+                # refresh_devices 全量补上；不在事件热路径调 refresh_devices
+                # （开销大，含全量订阅 sync）。
                 device = (await self.get_devices()).get(msg.did)
             if device is None:
                 return
@@ -919,10 +927,14 @@ class MiotProxy:
     async def _sync_meta_subscriptions(self) -> None:
         """Reconcile per-device meta (rename/hr_change) subs to the device list.
 
-        Called at the tail of refresh_devices (under _refresh_devices_lock, so
-        the diff against _subscribed_meta_dids is race-free). New dids are
-        subscribed, removed dids unsubscribed; both run concurrently and
-        per-did failures only log — they never abort the refresh.
+        Called from two paths: (1) refresh_devices under _refresh_devices_lock
+        (diff race-free); (2) sync_automation_property_subscriptions —无锁热
+        更新入口（router create/update/delete + 启动）。无锁调用时差集基于
+        快照，并发刷新可能让 diff/gather/回写交错；但 sub/unsub 幂等，最坏
+        冗余不破坏正确性，稳态差集空即 return、per-did 失败只 log、下次
+        refresh 自愈，故不加独立订阅锁。New dids are subscribed, removed dids
+        unsubscribed; both run concurrently and per-did failures only log —
+        they never abort the refresh.
 
         ACCOUNT-WIDE ON PURPOSE — do NOT scope-filter this by managed home.
         A device sitting in an out-of-scope home must already be subscribed so
