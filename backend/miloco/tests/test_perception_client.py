@@ -475,3 +475,94 @@ async def test_early_speeches_voice_enabled_dispatched(proxy):
 
     disp.assert_awaited_once()
     assert [s.content for s in disp.await_args.args[1]] == ["关灯"]
+
+
+# ─── 语音闸门在 meaningful_events 落库路径（_persist_meaningful_event）─────────
+
+
+async def test_persist_skips_asr_only_window_from_voice_disabled_cam():
+    """纯 ASR 窗口 + 相机语音已关 → 过滤后无 speech,不入 meaningful_events。
+
+    语音开关 = 不执行也不记录:被拉黑相机的定向指令转写不落库、不推 SSE。
+    """
+    from miloco.perception.client import _persist_meaningful_event
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+        ],
+    )
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr):
+        await _persist_meaningful_event(
+            result=result, device_ids=["cam-off"], artifacts=OmniEventArtifacts(),
+        )
+
+    fake_mgr.meaningful_events_dao.insert.assert_not_called()
+    # persist 用 model_copy 过滤,不原地改与主路径(规则匹配/dispatch)共享的 result
+    assert len(result.speeches) == 1
+
+
+async def test_persist_keeps_asr_window_from_voice_enabled_cam():
+    """对照组:黑名单非空但相机不在其中 → ASR 窗口照常入表,has_asr=True。"""
+    from miloco.perception.client import _persist_meaningful_event
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="妈妈", content="关灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ],
+    )
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr):
+        await _persist_meaningful_event(
+            result=result, device_ids=["cam-on"], artifacts=OmniEventArtifacts(),
+        )
+
+    fake_mgr.meaningful_events_dao.insert.assert_called_once()
+    kwargs = fake_mgr.meaningful_events_dao.insert.call_args.kwargs
+    assert kwargs["has_asr"] is True
+    assert "关灯" in kwargs["text"]
+
+
+async def test_persist_mixed_window_excludes_voice_disabled_transcript():
+    """混合窗口:视觉建议 + 语音关闭相机的 speech → 事件仍入表(视觉产物不受影响),
+    但落库内容(text / payload_json / has_asr)不含被拦截的转写。"""
+    from miloco.perception.client import _persist_meaningful_event
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+    from miloco.perception.types import (
+        RealtimePerceptionResult,
+        Speech,
+        Suggestion,
+    )
+
+    result = RealtimePerceptionResult(
+        suggestions=[Suggestion(event="水龙头没关", action="提醒", urgency="low")],
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+        ],
+    )
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr):
+        await _persist_meaningful_event(
+            result=result, device_ids=["cam-off"], artifacts=OmniEventArtifacts(),
+        )
+
+    fake_mgr.meaningful_events_dao.insert.assert_called_once()
+    kwargs = fake_mgr.meaningful_events_dao.insert.call_args.kwargs
+    assert kwargs["has_suggestion"] is True
+    assert kwargs["has_asr"] is False  # speech 已被闸门滤掉
+    assert "水龙头没关" in kwargs["text"]
+    assert "开灯" not in kwargs["text"]
+    assert "开灯" not in kwargs["payload_json"]
+    # 原 result 不被原地改
+    assert len(result.speeches) == 1

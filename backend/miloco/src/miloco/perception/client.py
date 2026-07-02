@@ -81,11 +81,13 @@ _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
-    """按摄像头「语音指令黑名单」过滤语音指令：``source_device_ids[0]``(相机 did)在
-    黑名单里的丢弃、不 dispatch,其余放行。dispatch 阶段实时读 KV(进程内缓存),改开关
-    即时生效、无需重启感知引擎。
+    """按摄像头「语音指令黑名单」过滤 speech：``source_device_ids[0]``(相机 did)在
+    黑名单里的丢弃,其余放行。实时读 KV(进程内缓存),改开关即时生效、无需重启感知引擎。
 
-    只影响语音指令 dispatch——规则匹配 / 事件日志走各自路径,不经此函数。读 KV 失败时
+    两个执法点:① 语音指令 dispatch(早出 _on_early_speeches + 终态
+    handle_realtime_perception_result);② meaningful_events 落库/SSE
+    (_persist_meaningful_event 在 classify 前过滤)——语音关闭 = 不执行也不记录转写。
+    规则匹配及 caption / suggestion 等视觉产物不经此函数,不受影响。读 KV 失败时
     fail-open(放行全部)以免吞掉语音链路。
     """
     from miloco.manager import get_manager
@@ -103,7 +105,7 @@ def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
         did = s.source_device_ids[0] if s.source_device_ids else None
         if did is not None and did in voice_denied:
             logger.info(
-                "语音指令被摄像头语音开关拦截,丢弃不 dispatch: did=%s device_name=%s content=%r",
+                "speech 被摄像头语音开关拦截丢弃(不下发/不落库): did=%s device_name=%s content=%r",
                 did, s.device_name, s.content,
             )
             continue
@@ -854,6 +856,8 @@ async def _persist_meaningful_event(
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
     流程:
+      0. 语音黑名单过滤 speech(与 dispatch 同一闸门)→ 语音关闭相机的转写既不
+         入分类判定也不落库/推 SSE;caption / suggestion / 规则命中照常
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
       3. INSERT meaningful_events(snapshot_count=0)
@@ -878,6 +882,14 @@ async def _persist_meaningful_event(
     )
 
     try:
+        # 语音关闭相机的转写不落库:与 dispatch 同一闸门先滤 speech,classify /
+        # payload / text / SSE 全部基于过滤后的视图——语音开关 = 不执行也不记录。
+        # 只滤 speech,同相机的 caption / suggestion / 规则命中照常(开关只管语音,
+        # 不管相机感知)。result 与主路径(规则匹配 / speech dispatch)共享,不可原地
+        # 改 → model_copy 浅拷贝换 speeches 列表。
+        result = result.model_copy(
+            update={"speeches": _filter_voice_enabled(result.speeches)}
+        )
         cls = classify(result)
         if not cls["is_meaningful"]:
             return
