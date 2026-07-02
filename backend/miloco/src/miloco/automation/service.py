@@ -17,6 +17,7 @@ from miloco.automation.schema import (
 )
 from miloco.database.kv_repo import KVRepo
 from miloco.middleware.exceptions import ResourceNotFoundException
+from miloco.perception.types import CaptionEntry, Suggestion
 from miloco.rule.schema import (
     Rule,
     RuleCondition,
@@ -180,17 +181,65 @@ def _build_trigger_context(
         parts.append(f"触发设备所在房间：{trigger.room_name}")
     if trigger.changed_properties:
         parts.append(f"{label}：{trigger.changed_properties}")
-    prompts = [
-        mapping.query_template.strip()
-        for mapping in (mappings or [])
-        if mapping.query_template.strip()
-    ]
+    prompts = [_mapping_rule_query(mapping) for mapping in (mappings or [])]
     if prompts:
         parts.append("本轮用户配置的感知提示：")
         for prompt in dict.fromkeys(prompts):
             parts.append(f"- {prompt}")
+        parts.append(
+            "如果本轮画面中存在符合上述感知提示、或按常规实时感知标准值得提醒用户的事项，"
+            "必须同时在 suggestions 中输出：检测到的事件、事件优先级和建议；"
+            "不要只写 caption。确实没有可提醒事项时 suggestions 才能为空。"
+        )
     parts.append("注意：以上只是触发摄像头查看的原因，不是当前画面事实；规则是否成立必须以本轮视频画面为准。")
     return "\n".join(parts)
+
+
+def _fallback_suggestion_from_caption(
+    trigger: MiotEventTrigger,
+    mappings: list[MiotEventMapping],
+    captions: list[CaptionEntry],
+) -> Suggestion | None:
+    """MiOT 触发是显式配置的主动查看；模型只给 caption 时补齐事件提醒格式。"""
+    if not captions:
+        return None
+    caption = captions[0]
+    prompts = [
+        _mapping_rule_query(mapping)
+        for mapping in mappings
+        if _mapping_rule_query(mapping)
+    ]
+    prompt_text = "；".join(dict.fromkeys(prompts))
+    event = caption.description.strip().rstrip("。.")
+    action_parts = ["请查看回放"]
+    if trigger.source_name or trigger.source_id:
+        action_parts.append(f"结合触发来源“{trigger.source_name or trigger.source_id}”")
+    if prompt_text:
+        action_parts.append(f"按感知提示“{prompt_text}”")
+    action_parts.append("确认是否需要处理")
+    return Suggestion(
+        event=event,
+        action="，".join(action_parts),
+        urgency="low",
+        room_name=caption.room_name,
+        source_device_ids=list(caption.source_device_ids),
+        device_name=caption.device_name,
+        time_window=caption.time_window,
+    )
+
+
+def _format_suggestion_answer(item: dict[str, Any]) -> str:
+    lines: list[str] = []
+    event = str(item.get("event") or "").strip().rstrip("。.")
+    urgency = str(item.get("urgency") or "").strip()
+    action = str(item.get("action") or "").strip().rstrip("。.")
+    if event:
+        lines.append(f"检测到：{event}")
+    if urgency:
+        lines.append(f"事件优先级：{urgency}")
+    if action:
+        lines.append(f"建议：{action}")
+    return "\n".join(lines)
 
 
 class AutomationService:
@@ -543,6 +592,15 @@ class AutomationService:
             self._append_log(log_item)
             return log_item
 
+        if result is not None and not result.suggestions:
+            fallback_suggestion = _fallback_suggestion_from_caption(
+                trigger,
+                active_mappings,
+                result.caption,
+            )
+            if fallback_suggestion is not None:
+                result.suggestions.append(fallback_suggestion)
+
         captions = [entry.description for entry in (result.caption if result else [])]
         suggestions = [
             suggestion.model_dump(mode="json")
@@ -566,10 +624,9 @@ class AutomationService:
             )
         if suggestions:
             answer_parts.append(
-                "建议："
-                + "；".join(
-                    f"{item.get('event', '')}，{item.get('action', '')}"
-                    for item in suggestions
+                "\n\n".join(
+                    block for item in suggestions
+                    if (block := _format_suggestion_answer(item))
                 )
             )
         answer = "\n".join(part for part in answer_parts if part)

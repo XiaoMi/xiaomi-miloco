@@ -709,6 +709,7 @@ class PipelineProcessor:
                         rules=rules,
                         force_gate_pass_dids=set(dids),
                         extra_context_by_did=extra_context_by_did,
+                        dedupe_suggestions=False,
                     )
                 )
             except Exception as e:

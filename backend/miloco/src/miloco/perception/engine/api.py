@@ -793,6 +793,7 @@ class PerceptionEngine(BasePerceptionEngine):
         on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
         force_gate_pass_dids: set[str] | None = None,
         extra_context_by_did: dict[str, str] | None = None,
+        dedupe_suggestions: bool = True,
     ) -> RealtimePerceptionResult | None:
         """Run full engine batch pipeline with rule evaluation."""
         from miloco.perception.engine.pipeline import run_batch_pipeline
@@ -882,7 +883,9 @@ class PerceptionEngine(BasePerceptionEngine):
                 on_early_suggestions=on_early_suggestions,
                 # 流式早出的 suggestion 经此闸门解析事件链（与 _merge_results 同一方法、
                 # 同一推理线程），心跳/重复抑制后才外发
-                assign_suggestion_link=self.assign_id_and_update_link,
+                assign_suggestion_link=(
+                    self.assign_id_and_update_link if dedupe_suggestions else None
+                ),
                 frame_index_offset=self._global_frame_index,
                 gate_prev_frames=self._gate_prev_frames,
                 gate_last_visual_pass_ts=self._gate_last_visual_pass_ts,
@@ -901,7 +904,12 @@ class PerceptionEngine(BasePerceptionEngine):
         self._global_frame_index += self._config.input.fps * self._config.input.period_sec
 
         # Merge all rooms into a single RealtimePerceptionResult
-        return self._merge_results(result, contexts, device_rule_map=device_rule_map)
+        return self._merge_results(
+            result,
+            contexts,
+            device_rule_map=device_rule_map,
+            dedupe_suggestions=dedupe_suggestions,
+        )
 
     async def on_demand_perceive(
         self,
@@ -964,6 +972,7 @@ class PerceptionEngine(BasePerceptionEngine):
         result: BatchPipelineResult,
         contexts: dict[str, OmniContext] | None = None,
         device_rule_map: dict[str, list[str]] | None = None,
+        dedupe_suggestions: bool = True,
     ) -> RealtimePerceptionResult:
         """把所有 room × device 的 OmniOutput 合并成一份 RealtimePerceptionResult。
 
@@ -1064,6 +1073,9 @@ class PerceptionEngine(BasePerceptionEngine):
                 # 给 suggestions 分配 id / 更新事件链表；链接到已有链的 heartbeat 不上报
                 merge_now = time.monotonic()
                 for s in out.suggestions:
+                    if not dedupe_suggestions:
+                        merged.suggestions.append(s)
+                        continue
                     if s.id is not None:
                         # per-omni 早送已打 id：_run_device 已把本设备 suggestions 裁成只剩
                         # 新链(心跳抑制)，此处直接保留进 result.suggestions 供 dump/上下文完整

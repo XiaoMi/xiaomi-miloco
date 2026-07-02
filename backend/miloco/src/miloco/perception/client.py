@@ -410,6 +410,7 @@ class PerceptionEngineProxy:
         skipped_task_ids: list[str],
         force_gate_pass_dids: set[str] | None = None,
         extra_context_by_did: dict[str, str] | None = None,
+        dedupe_suggestions: bool = True,
     ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
         """Actual realtime perceive logic — runs in the inference thread.
 
@@ -509,6 +510,7 @@ class PerceptionEngineProxy:
                 on_early_suggestions=_on_early_suggestions,
                 force_gate_pass_dids=force_gate_pass_dids,
                 extra_context_by_did=extra_context_by_did,
+                dedupe_suggestions=dedupe_suggestions,
             )
         except OmniError as e:
             # 兜底分支:主路径 run_batch_pipeline 已在 _run_device 内逐相机吞掉 OmniError
@@ -588,6 +590,7 @@ class PerceptionEngineProxy:
         rules: list[dict] | None = None,
         force_gate_pass_dids: set[str] | None = None,
         extra_context_by_did: dict[str, str] | None = None,
+        dedupe_suggestions: bool = True,
     ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
         """Run full engine pipeline — offloaded to inference thread.
 
@@ -655,6 +658,7 @@ class PerceptionEngineProxy:
                                 skipped_task_ids,
                                 force_gate_pass_dids=force_gate_pass_dids,
                                 extra_context_by_did=extra_context_by_did,
+                                dedupe_suggestions=dedupe_suggestions,
                             ),
                             artifacts=artifacts,
                         )
@@ -674,6 +678,7 @@ class PerceptionEngineProxy:
                         skipped_task_ids,
                         force_gate_pass_dids=force_gate_pass_dids,
                         extra_context_by_did=extra_context_by_did,
+                        dedupe_suggestions=dedupe_suggestions,
                     )
             return await self._realtime_perceive_impl(
                 batched_snapshot,
@@ -684,6 +689,7 @@ class PerceptionEngineProxy:
                 skipped_task_ids,
                 force_gate_pass_dids=force_gate_pass_dids,
                 extra_context_by_did=extra_context_by_did,
+                dedupe_suggestions=dedupe_suggestions,
             )
 
     async def on_demand_perceive(
