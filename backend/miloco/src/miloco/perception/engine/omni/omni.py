@@ -10,13 +10,12 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-import httpx
-
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
+    _get_http_client,
     call_omni,
     call_omni_stream,
     extract_usage,
@@ -222,37 +221,6 @@ async def run_omni_fused(
             await identity_engine.deliver_fused_failure("run_omni_fused parse/deliver incomplete")
 
 
-# fused 模式共享 httpx.AsyncClient（连接池 + keepalive），避免每窗口一次 TLS 握手
-# （省 ~50-100ms 连接延迟）。
-#
-# AsyncClient 绑定到创建时所在的 event loop；当那个 loop 被关闭（测试用例
-# asyncio.run、CLI 一次性运行、FastAPI 重启等），cached client 后续使用会抛
-# "Event loop is closed"。所以这里按 loop 缓存：每个 loop 一个 client，loop
-# 不匹配（前一个 loop 已关闭）时重建。生产长跑场景下 loop 是稳定的同一个，
-# 与单 client 等价，没有性能损失。
-# 客户端不显式关闭（进程退出由 OS 回收）。
-# omni_client.py 的 non-fused 路径暂不复用（改动面更大），后续可统一。
-_fused_http_client: "httpx.AsyncClient | None" = None
-_fused_http_client_loop: "asyncio.AbstractEventLoop | None" = None
-
-
-def _get_fused_http_client(timeout: float) -> httpx.AsyncClient:
-    global _fused_http_client, _fused_http_client_loop
-    loop = asyncio.get_running_loop()
-    if (
-        _fused_http_client is None
-        or _fused_http_client_loop is not loop
-        or _fused_http_client.is_closed
-    ):
-        # 旧 client 绑定的 loop 已不可用——丢弃（GC 自然回收），新 loop 重建。
-        _fused_http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
-        )
-        _fused_http_client_loop = loop
-    return _fused_http_client
-
-
 async def _call_omni_messages(
     messages: list[dict], config: OmniConfig, type: str = "realtime"
 ) -> dict[str, Any]:
@@ -276,7 +244,7 @@ async def _call_omni_messages(
         "thinking": {"type": "disabled"},
     }
 
-    client = _get_fused_http_client(config.timeout)
+    client = _get_http_client(config.timeout)
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None

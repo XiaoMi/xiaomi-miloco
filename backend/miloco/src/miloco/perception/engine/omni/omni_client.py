@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -20,6 +21,30 @@ from miloco.perception.snapshot_context import push_omni_trace
 logger = logging.getLogger(__name__)
 
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
+
+# ── shared httpx.AsyncClient ──────────────────────────────────────────────
+# 复用连接池 + keepalive，避免每窗口一次 TCP+TLS 握手（省 ~50-100ms 延迟）。
+# AsyncClient 绑定到创建时所在的 event loop；loop 关闭后重建（测试/重启场景）。
+# 同时被 omni_client 的 call_omni / call_omni_stream 和 omni.py 的 fused 路径共用。
+# 客户端不显式关闭（进程退出由 OS 回收）。
+_http_client: "httpx.AsyncClient | None" = None
+_http_client_loop: "asyncio.AbstractEventLoop | None" = None
+
+
+def _get_http_client(timeout: float) -> httpx.AsyncClient:
+    global _http_client, _http_client_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _http_client is None
+        or _http_client_loop is not loop
+        or _http_client.is_closed
+    ):
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+        )
+        _http_client_loop = loop
+    return _http_client
 
 
 class OmniError(Exception):
@@ -160,23 +185,23 @@ async def call_omni(
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     try:
-        async with httpx.AsyncClient(timeout=config.timeout) as client:
-            resp = await client.post(
-                f"{config.base_url}/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": MILOCO_USER_AGENT,
-                },
-                json=body,
+        client = _get_http_client(config.timeout)
+        resp = await client.post(
+            f"{config.base_url}/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": MILOCO_USER_AGENT,
+            },
+            json=body,
+        )
+        if resp.status_code != 200:
+            logger.error(
+                "Omni API error %d: %s", resp.status_code, resp.text[:500]
             )
-            if resp.status_code != 200:
-                logger.error(
-                    "Omni API error %d: %s", resp.status_code, resp.text[:500]
-                )
-            resp.raise_for_status()
-            raw = resp.json()
-            fire_record(config.model, raw.get("usage", {}), type)
+        resp.raise_for_status()
+        raw = resp.json()
+        fire_record(config.model, raw.get("usage", {}), type)
         return raw
     except OmniError:
         raise  # 不重复包装
@@ -308,49 +333,47 @@ async def call_omni_stream(
     error: dict[str, Any] | None = None
     t0 = time.monotonic()
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(config.timeout, connect=10.0)
-        ) as client:
-            async with client.stream(
-                "POST",
-                f"{config.base_url}/chat/completions",
-                headers=headers,
-                json=body,
-            ) as resp:
-                if resp.status_code != 200:
-                    await resp.aread()
-                    logger.error(
-                        "Omni stream error %d: %s", resp.status_code, resp.text[:500]
+        client = _get_http_client(config.timeout)
+        async with client.stream(
+            "POST",
+            f"{config.base_url}/chat/completions",
+            headers=headers,
+            json=body,
+        ) as resp:
+            if resp.status_code != 200:
+                await resp.aread()
+                logger.error(
+                    "Omni stream error %d: %s", resp.status_code, resp.text[:500]
+                )
+                resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                # usage 在最后一个 chunk 的顶层
+                if isinstance(chunk.get("usage"), dict):
+                    raw_usage_seen = chunk["usage"]
+                    if usage_out is not None:
+                        usage_out.update(extract_usage({"usage": raw_usage_seen}))
+
+                # content delta：choices[0].delta.content
+                try:
+                    delta = (
+                        chunk.get("choices", [{}])[0].get("delta", {}).get("content")
                     )
-                    resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # usage 在最后一个 chunk 的顶层
-                    if isinstance(chunk.get("usage"), dict):
-                        raw_usage_seen = chunk["usage"]
-                        if usage_out is not None:
-                            usage_out.update(extract_usage({"usage": raw_usage_seen}))
-
-                    # content delta：choices[0].delta.content
-                    try:
-                        delta = (
-                            chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-                        )
-                    except (IndexError, KeyError):
-                        delta = None
-                    if delta:
-                        response_chunks.append(delta)
-                        yield delta
+                except (IndexError, KeyError):
+                    delta = None
+                if delta:
+                    response_chunks.append(delta)
+                    yield delta
     except OmniError:
         raise  # 不重复包装
     except Exception as e:
