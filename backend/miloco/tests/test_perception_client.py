@@ -417,3 +417,61 @@ async def test_handle_realtime_dispatches_when_voice_enabled(proxy):
 
     disp.assert_awaited_once()
     assert [s.content for s in disp.await_args.args[1]] == ["开灯"]
+
+
+async def test_early_speeches_voice_disabled_not_dispatched(proxy):
+    """早出路径:_on_early_speeches 内的语音闸门必须拦下黑名单相机的指令。
+
+    防回归钉:早出闸门被删时,终态闸门救不回来——早出泄漏的指令已 dispatch 且进
+    early_sent_contents,终态路径按内容去重直接跳过。此测试直打
+    _realtime_perceive_impl 的 on_early_speeches 回调,钉住早出闸门本身。
+    """
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Speech
+
+    main_loop = asyncio.get_running_loop()
+
+    async def engine_realtime(*args, **kwargs):
+        await kwargs["on_early_speeches"]([
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+        ])
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, main_loop, [],
+        )
+
+    disp.assert_not_awaited()
+
+
+async def test_early_speeches_voice_enabled_dispatched(proxy):
+    """对照组:黑名单非空但相机未在其中 → 早出指令照常 dispatch（闸门有选择性）。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Speech
+
+    main_loop = asyncio.get_running_loop()
+
+    async def engine_realtime(*args, **kwargs):
+        await kwargs["on_early_speeches"]([
+            Speech(needs_response=True, speaker="妈妈", content="关灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ])
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, main_loop, [],
+        )
+
+    disp.assert_awaited_once()
+    assert [s.content for s in disp.await_args.args[1]] == ["关灯"]

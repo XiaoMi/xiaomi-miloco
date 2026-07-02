@@ -506,16 +506,19 @@ async def test_toggle_camera_off_on_preserves_voice_preference():
 
 @pytest.mark.asyncio
 async def test_toggle_camera_voice_does_not_restart_or_refresh():
-    """语音开关不 refresh_cameras / _sync_camera_adapter（dispatch 阶段实时读 KV）。"""
+    """语音开关不 refresh_cameras / _sync_camera_adapter / _restart_perception_engine
+    （dispatch 阶段实时读 KV，改开关即时生效）。"""
     kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
     svc = _make_service(
         devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
     )
     svc._miot_proxy.refresh_cameras = AsyncMock()
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
+    svc._restart_perception_engine = AsyncMock()  # type: ignore[assignment]
     await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": False}])
     svc._miot_proxy.refresh_cameras.assert_not_awaited()
     svc._sync_camera_adapter.assert_not_awaited()
+    svc._restart_perception_engine.assert_not_awaited()
 
 
 # ─── _assert_did_in_allowed_home ─────────────────────────────────────────────
