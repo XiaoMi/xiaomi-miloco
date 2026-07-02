@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { eventClipUrl, listActivity, submitEventFeedback, subscribeEvents } from "@/api";
+import { eventClipUrl, listActivity, revealFile, submitEventFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
 import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
@@ -602,14 +602,16 @@ function ActivityRow({
         </div>
       )}
 
-      {expanded && event.has_trace && (
-        <FeedbackSection
-          eventId={event.id}
-          hasFeedback={event.has_feedback || feedbackSet.has(event.id)}
-          packPath={feedbackPacks.get(event.id)?.path ?? event.feedback_pack_path}
-          packSize={feedbackPacks.get(event.id)?.size ?? event.feedback_pack_size}
-          onSubmitted={onFeedbackSubmitted}
-        />
+      {event.has_trace && (
+        <div className={expanded ? "" : "hidden"}>
+          <FeedbackSection
+            eventId={event.id}
+            hasFeedback={event.has_feedback || feedbackSet.has(event.id)}
+            packPath={feedbackPacks.get(event.id)?.path ?? event.feedback_pack_path}
+            packSize={feedbackPacks.get(event.id)?.size ?? event.feedback_pack_size}
+            onSubmitted={onFeedbackSubmitted}
+          />
+        </div>
       )}
     </li>
   );
@@ -640,6 +642,9 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
   const [includeGallery, setIncludeGallery] = useState(false);
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "saved" | "error">("idle");
   const [packInfo, setPackInfo] = useState<{ path: string; size: number } | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   const handleToggle = (type: string) => {
     setSelected((prev) => {
@@ -659,7 +664,8 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
       setConfirmedResubmit(false);
       const nextStatus = result.uploaded ? "success" : "saved";
       setStatus(nextStatus);
-      setTimeout(() => {
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
         setStatus("idle");
         setOpen(false);
         setSelected(new Set());
@@ -683,9 +689,16 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
               {packSize != null && <div>{t("activity.feedbackSize", "数据包大小")}：{(packSize / 1024).toFixed(0)} KB</div>}
             </div>
           )}
-          <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="mt-1.5 text-[11px] text-brand-primary hover:underline">
-            {t("activity.feedbackResubmit", "再次反馈")}
-          </button>
+          <div className="mt-1.5 flex items-center gap-3">
+            {packPath && (
+              <button type="button" onClick={() => revealFile(packPath)} className="text-[11px] text-brand-primary hover:underline">
+                {t("activity.feedbackReveal", "打开所在文件夹")}
+              </button>
+            )}
+            <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="text-[11px] text-brand-primary hover:underline">
+              {t("activity.feedbackResubmit", "再次反馈")}
+            </button>
+          </div>
         </div>
       );
     }
@@ -737,6 +750,11 @@ function FeedbackSection({ eventId, hasFeedback, packPath, packSize, onSubmitted
             <div>{t("activity.feedbackPath", "文件路径")}：<code className="bg-bg-secondary px-1.5 py-0.5 rounded text-[10px] font-mono border border-border select-all">{packInfo.path}</code></div>
             <div>{t("activity.feedbackSize", "数据包大小")}：{(packInfo.size / 1024).toFixed(0)} KB</div>
           </div>
+        )}
+        {packInfo && (
+          <button type="button" onClick={() => revealFile(packInfo.path)} className="mt-1.5 text-[11px] text-brand-primary hover:underline">
+            {t("activity.feedbackReveal", "打开所在文件夹")}
+          </button>
         )}
       </div>
     );

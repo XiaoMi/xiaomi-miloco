@@ -43,6 +43,7 @@
     "feedbackError": "提交失败，请重试",
     "feedbackRetry": "重试",
     "feedbackResubmit": "再次反馈",
+    "feedbackReveal": "打开所在文件夹",
     "errorType": {
       "person": "人物识别错误",
       "pet": "宠物识别错误",

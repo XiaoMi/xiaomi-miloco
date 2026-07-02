@@ -1125,6 +1125,14 @@ export async function realSubmitEventFeedback(
   };
 }
 
+export async function realRevealFile(path: string): Promise<void> {
+  await apiFetch<Normal<null>>("/api/admin/reveal-file", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+}
+
 // ── 让它休息 / 唤醒 ────────────────────────────────────────
 export async function realPausePerception(): Promise<void> {
   await apiFetch<Normal<unknown>>("/api/perception/engine/stop", {

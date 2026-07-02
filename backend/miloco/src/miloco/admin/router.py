@@ -267,6 +267,42 @@ async def submit_event_feedback(
     )
 
 
+class RevealFileBody(BaseModel):
+    path: str
+
+
+@router.post(
+    "/reveal-file",
+    summary="在系统文件管理器中显示指定文件",
+    response_model=NormalResponse,
+)
+async def reveal_file(
+    body: RevealFileBody,
+    current_user: str = Depends(verify_token),
+):
+    """macOS: open -R, Linux: xdg-open 父目录."""
+    import asyncio
+    import platform
+    import subprocess
+    from pathlib import Path
+
+    file_path = Path(body.path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            cmd = ["open", "-R", str(file_path)]
+        else:
+            cmd = ["xdg-open", str(file_path.parent)]
+        await asyncio.to_thread(subprocess.run, cmd, timeout=5)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return NormalResponse(code=0, message="ok", data=None)
+
+
 # ─── omni 模型配置(在「模型」页内读/写) ─────────────────────────────────────
 
 

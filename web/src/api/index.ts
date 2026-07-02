@@ -305,6 +305,10 @@ export async function submitEventFeedback(
   return impl.realSubmitEventFeedback(eventId, errorTypes, feedbackText, includeGallery);
 }
 
+export async function revealFile(path: string): Promise<void> {
+  return impl.realRevealFile(path);
+}
+
 // ── 让它休息 / 唤醒 ────────────────────────────────────────
 // backend 当前只有 stop/start 两态，永久暂停直到手动唤醒，不支持定时恢复。
 // 返回值 {resumesAt: null} 给 UI 留住"以后接定时恢复"的形状，但当前永远 null。

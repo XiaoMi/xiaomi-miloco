@@ -43,6 +43,7 @@
     "feedbackError": "Submission failed, please retry",
     "feedbackRetry": "Retry",
     "feedbackResubmit": "Submit again",
+    "feedbackReveal": "Open containing folder",
     "errorType": {
       "person": "Person identification error",
       "pet": "Pet identification error",

@@ -50,8 +50,9 @@ def _cleanup_by_total_size(packs_dir: Path, max_total_mb: int = _MAX_TOTAL_MB) -
         if total <= limit:
             break
         try:
-            total -= p.stat().st_size
+            size = p.stat().st_size
             p.unlink()
+            total -= size
         except OSError:
             pass
 
@@ -92,18 +93,6 @@ def _sanitize_trace(trace_bytes: bytes) -> bytes | None:
         logger.error("Failed to sanitize trace, dropping trace from pack: %s", e)
         return None
 
-
-def _git_hash() -> str | None:
-    try:
-        import subprocess
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=2,
-            cwd=Path(__file__).resolve().parent,
-        )
-        return out.stdout.strip() if out.returncode == 0 else None
-    except Exception:
-        return None
 
 
 def _packs_dir() -> Path:
@@ -193,7 +182,6 @@ def build_feedback_pack(
         "user_feedback": _sanitize_pii(feedback_text),
         "created_at": ms_to_iso_local(now_ms()),
         "miloco_version": version,
-        "git_hash": _git_hash(),
         "omni_trace_found": components["omni_trace_found"],
         "clips_found": components["clips_found"],
         "clips_missing": components["clips_missing"],
