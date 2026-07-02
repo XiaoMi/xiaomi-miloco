@@ -946,7 +946,13 @@ class MiotProxy:
                     await unsub_fn(did)
                     await asyncio.sleep(5)
                 except Exception:
-                    pass
+                    # 清理残留订阅是 best-effort：目标可能本来就未订阅，失败不应阻断后续 sub/retry。
+                    logger.debug(
+                        "unsubscribe stale %s before subscribe ignored did=%s",
+                        label,
+                        did,
+                        exc_info=True,
+                    )
             try:
                 await sub_fn(did)
                 return did

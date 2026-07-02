@@ -18,7 +18,6 @@ from miloco.miot.schema import (
     MiotEventTriggerLog,
     MiotPropertyFilterCondition,
 )
-from miloco.perception.types import CaptionEntry, Suggestion
 from miloco.rule.schema import (
     Rule,
     RuleCondition,
@@ -214,39 +213,6 @@ def _build_trigger_context(
         )
     parts.append("注意：以上只是触发摄像头查看的原因，不是当前画面事实；规则是否成立必须以本轮视频画面为准。")
     return "\n".join(parts)
-
-
-def _fallback_suggestion_from_caption(
-    trigger: MiotEventTrigger,
-    mappings: list[MiotEventMapping],
-    captions: list[CaptionEntry],
-) -> Suggestion | None:
-    """MiOT 触发是显式配置的主动查看；模型只给 caption 时补齐事件提醒格式。"""
-    if not captions:
-        return None
-    caption = captions[0]
-    prompts = [
-        _mapping_rule_query(mapping)
-        for mapping in mappings
-        if _mapping_rule_query(mapping)
-    ]
-    prompt_text = "；".join(dict.fromkeys(prompts))
-    event = caption.description.strip().rstrip("。.")
-    action_parts = ["请查看回放"]
-    if trigger.source_name or trigger.source_id:
-        action_parts.append(f"结合触发来源“{trigger.source_name or trigger.source_id}”")
-    if prompt_text:
-        action_parts.append(f"按感知提示“{prompt_text}”")
-    action_parts.append("确认是否需要处理")
-    return Suggestion(
-        event=event,
-        action="，".join(action_parts),
-        urgency="low",
-        room_name=getattr(caption, "room_name", ""),
-        source_device_ids=list(getattr(caption, "source_device_ids", []) or []),
-        device_name=getattr(caption, "device_name", ""),
-        time_window=getattr(caption, "time_window", ""),
-    )
 
 
 def _format_suggestion_answer(item: dict[str, Any]) -> str:

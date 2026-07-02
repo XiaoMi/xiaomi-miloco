@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 import miloco.automation.service as automation_service_module
+import pytest
 from miloco.automation.service import (
     AutomationService,
     _coerce_number,
