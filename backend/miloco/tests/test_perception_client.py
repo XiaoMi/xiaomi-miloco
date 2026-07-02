@@ -304,3 +304,116 @@ async def test_handle_realtime_sends_all_when_no_early_sent(proxy):
 # test_unmatched_enabled_rules_get_false_each_cycle / test_unmatched_skips_early_sent_rules
 # 已迁移到 test_perception_client_rule_dispatch.py(per-device 状态机重构后,
 # false 广播改为按 device_rule_map 精确推退,旧 case 的全集 enabled rule 模型不再适用)。
+
+
+# ─── 按摄像头语音开关闸门（_filter_voice_enabled + dispatch gate）───────────────
+
+
+def _voice_mgr(voice_denied: set[str]) -> MagicMock:
+    """构造一个 get_manager() 返回值,其 kv_repo 让 voice_denied_camera_dids 返回给定集合。"""
+    import json as _json
+
+    from miloco.database.kv_repo import ScopeConfigKeys
+
+    store = {ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY: _json.dumps(list(voice_denied))}
+    kv = MagicMock()
+    kv.get = lambda key, default=None: store.get(key, default)
+    mgr = MagicMock()
+    mgr.kv_repo = kv
+    return mgr
+
+
+def test_filter_voice_enabled_drops_blacklisted_did():
+    """source_device_ids[0] 在语音黑名单 → 丢弃；不在 → 保留。"""
+    from miloco.perception.client import _filter_voice_enabled
+    from miloco.perception.types import Speech
+
+    s_off = Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   source_device_ids=["cam-off"], device_name="客厅相机")
+    s_on = Speech(needs_response=True, speaker="妈妈", content="关灯",
+                  source_device_ids=["cam-on"], device_name="卧室相机")
+
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})):
+        kept = _filter_voice_enabled([s_off, s_on])
+
+    assert [s.content for s in kept] == ["关灯"]
+
+
+def test_filter_voice_enabled_empty_blacklist_passes_all():
+    from miloco.perception.client import _filter_voice_enabled
+    from miloco.perception.types import Speech
+
+    s = Speech(needs_response=True, speaker="x", content="c", source_device_ids=["d"])
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr(set())):
+        assert _filter_voice_enabled([s]) == [s]
+
+
+def test_filter_voice_enabled_fail_open_on_lookup_error():
+    """读 KV/manager 失败 → fail-open,放行全部（不吞掉语音链路）。"""
+    from miloco.perception.client import _filter_voice_enabled
+    from miloco.perception.types import Speech
+
+    s = Speech(needs_response=True, speaker="x", content="c", source_device_ids=["d"])
+    with patch("miloco.manager.get_manager", side_effect=RuntimeError("boom")):
+        assert _filter_voice_enabled([s]) == [s]
+
+
+async def test_handle_realtime_drops_voice_disabled_speech(proxy):
+    """终态 dispatch 路径:语音黑名单相机的 speech 指令不 dispatch,启用相机的照常发。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+            Speech(needs_response=True, speaker="妈妈", content="关灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ],
+    )
+
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    async def _noop_update(*a, **k):
+        ...
+
+    fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy.handle_realtime_perception_result(result)
+
+    # 只发启用相机(cam-on)的「关灯」；被拉黑相机(cam-off)的「开灯」丢弃
+    disp.assert_awaited_once()
+    dispatched = disp.await_args.args[1]
+    assert [s.content for s in dispatched] == ["关灯"]
+
+
+async def test_handle_realtime_dispatches_when_voice_enabled(proxy):
+    """对照组:相机未拉黑 → speech 指令照常 dispatch。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ],
+    )
+    fake_mgr = _voice_mgr(set())
+
+    async def _noop_update(*a, **k):
+        ...
+
+    fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy.handle_realtime_perception_result(result)
+
+    disp.assert_awaited_once()
+    assert [s.content for s in disp.await_args.args[1]] == ["开灯"]
