@@ -301,3 +301,31 @@ async def test_realtime_perceive_strips_before_pipeline(monkeypatch):
     assert seen["cam_on"] > 0
     assert "cam_off" not in eng._audio_tail  # 剥离后 tail 不积累
     assert "cam_on" in eng._audio_tail  # 拾音开启相机照常存 overlap tail
+
+
+@pytest.mark.asyncio
+async def test_on_demand_perceive_strips_before_pipeline(monkeypatch):
+    """主动查询同样入口即剥：query pipeline 收到的 batch 中 denied 相机音频已空。
+
+    skill 明确承诺 perceive query 对拾音关闭相机听不到现场声音——隐私关键路径，
+    钉住 on_demand_perceive 的 strip 接线（被移除即红）。
+    """
+    monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"cam_off"})
+    eng = _make_engine()
+
+    seen: dict[str, int] = {}
+
+    async def _fake_run_query_pipeline(batch, query, config, **kwargs):
+        for s in batch.snapshots:
+            seen[s.device.did] = s.audio_clip.size
+        return {}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.pipeline.run_query_pipeline",
+        _fake_run_query_pipeline,
+    )
+    batch = BatchedSnapshot(snapshots=[_snapshot("cam_off"), _snapshot("cam_on")])
+    await eng.on_demand_perceive(batch, "有没有人在说话")
+
+    assert seen["cam_off"] == 0
+    assert seen["cam_on"] > 0
