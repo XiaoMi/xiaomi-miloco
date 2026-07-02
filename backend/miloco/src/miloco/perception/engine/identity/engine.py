@@ -1253,14 +1253,26 @@ class IdentityEngine:
                         if len(self._no_person_regions) > 64:
                             self._no_person_regions = self._no_person_regions[-64:]
                 return
-            # 走到这里 = 本窗 omni 判"有人"（非 no_person）。
+            # 走到这里 = 本窗结果非 no_person（omni 判到人 / unknown，或"漏报 / 失败"的合成非答复）。
             if state.no_person_vote_count:
                 # no_person 连续性中断，清累计票
                 state.no_person_vote_count = 0
             if self.config.no_person.enabled and state.status == "no_person":
-                # 已落定 no_person 却被慢重审判到人 → 第二条解除通道：回 pending 重新识别（随后
-                # needs_omni_call 对 pending "下窗即派"，几秒内 commit 出去）。真静止误检物体每次
-                # 重审仍判 no_person、走不到这里，不会复发"陌生人"幻觉。兜"未注册真人一动不动被误压"。
+                if not result.omni_answered:
+                    # omni 本窗漏报该 track / 整体调用失败（合成的"非答复"，person_id=None 但并非
+                    # "判到人"）→ 按弃权维持 no_person：不解除抑制。否则一次 omni 漏报 / 失败就会把
+                    # 静止误检框打回 pending → caption 复发"陌生人"，整体失败更会一次掀翻全场 no_person。
+                    # 只清 inflight，让下一个周期能再慢重审（inflight 残留会永久堵死重审）。
+                    state.inflight = False
+                    return
+                # omni 确实判到"有人"（成员或 unknown）→ 第二条解除通道：回 pending 重新识别。
+                # 与上面 no_person=True 分支不同，这里**刻意不 return**：本窗这条真判定紧接着落到下面的
+                # update_evidence，作为 pending 的第一票**立即消费**——用满这条真证据加速恢复（高置信
+                # 成员本窗即可 commit-to-confirmed 单窗恢复；unknown 记第一票，后续 pending "下窗即派"
+                # 继续累积）。一票远低于 commit 阈值，即便是 omni 偶发抖动也不会误 commit 成某身份。
+                # 真静止误检物体每次重审仍判 no_person、走不到这里，不复发"陌生人"幻觉。兜"未注册真人
+                # 一动不动被误压"。（no_person=True 分支的 return 是对的：那条被 record_no_person 消费完
+                # 即无后续；这条是"有人"判定，要它既解除又顺带播种重识别，故不 return。）
                 logger.info(
                     "[Identity] cam=%s track_id=%d no_person 慢重审判到人 → 回 pending 重识别",
                     self.cam_id, result.track_id,

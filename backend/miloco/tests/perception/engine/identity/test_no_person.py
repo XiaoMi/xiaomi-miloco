@@ -16,7 +16,11 @@ import asyncio
 import json
 
 from miloco.perception.engine.config import IdentityEngineConfig, StabilityConfigDC
-from miloco.perception.engine.identity.dispatcher import OmniIdentityResult
+from miloco.perception.engine.identity.dispatcher import (
+    FusedDispatcher,
+    IdentityQueryItem,
+    OmniIdentityResult,
+)
 from miloco.perception.engine.identity.engine import IdentityEngine, _bbox_iou
 from miloco.perception.engine.identity.state import (
     TrackIdentityState,
@@ -304,7 +308,8 @@ class TestOnResultOrchestration:
         assert st.no_person_vote_count == 0      # confirmed 不计 no_person 票
 
     def test_committed_no_person_recovers_on_person(self):
-        """落定 no_person 的 track 被慢重审判到人 → 回 pending（自愈通道 ③，端到端走 _on_result）。"""
+        """落定 no_person 被慢重审"真判到人"（omni_answered=True 的 unknown）→ 回 pending
+        （自愈通道 ③，端到端走 _on_result）。person_id=None 也算——真·未注册人正是要恢复的场景。"""
         eng = _on_result_engine()
         st = TrackIdentityState(
             track_id=1, status="no_person",
@@ -313,8 +318,80 @@ class TestOnResultOrchestration:
         )
         eng._states[1] = st
         _run_on_result(eng, OmniIdentityResult(
-            track_id=1, person_id=None, confidence=0.6, no_person=False,
+            track_id=1, person_id=None, confidence=0.6, no_person=False,  # omni_answered 默认 True
         ))
         assert st.status == "pending"
         assert st.no_person_anchor_bbox is None
         assert st.no_person_vote_count == 0
+        # 本窗这条真判定被当作 pending 第一票**立即消费**（刻意不 return）——锁定该有意行为
+        assert st.stability_count == 1
+
+    def test_committed_no_person_high_conf_member_single_window_recover(self):
+        """落定 no_person 被慢重审"高置信认出成员"→ 本窗即 commit-to-confirmed（证第一票被消费、单窗恢复）。"""
+        eng = _on_result_engine()
+        st = TrackIdentityState(
+            track_id=1, status="no_person",
+            no_person_anchor_bbox=(10, 10, 50, 90), last_omni_call_frame=100,
+        )
+        eng._states[1] = st
+        _run_on_result(eng, OmniIdentityResult(
+            track_id=1, person_id="pid-x", confidence=0.95, no_person=False,
+        ))
+        assert st.status == "confirmed"
+        assert st.committed_person_id == "pid-x"
+
+    def test_committed_no_person_holds_on_omni_nonanswer(self):
+        """慢重审窗 omni 漏报 / 整体失败（omni_answered=False，合成非答复）→ 维持 no_person、
+        不被误当"判到人"解除；只清 inflight 让下周期可再重审。防"一次 omni 抖动掀翻抑制"。"""
+        eng = _on_result_engine()
+        st = TrackIdentityState(
+            track_id=1, status="no_person",
+            no_person_anchor_bbox=(10, 10, 50, 90), last_omni_call_frame=100, inflight=True,
+        )
+        eng._states[1] = st
+        _run_on_result(eng, OmniIdentityResult(
+            track_id=1, person_id=None, confidence=0.0,
+            reason="fused_response_missing_track", omni_answered=False,
+        ))
+        assert st.status == "no_person"                    # 未被误解除
+        assert st.no_person_anchor_bbox == (10, 10, 50, 90)
+        assert st.inflight is False                        # 清 inflight，下周期可再慢重审
+
+
+class TestDispatcherNonAnswerFlag:
+    """锁定契约：omni 漏报 / 整体失败合成的结果 omni_answered=False；真实 assignment 为 True。
+    no_person 慢重审恢复通道据此区分"判到人"与"没答/失败"，避免一次抖动掀翻抑制。"""
+
+    @staticmethod
+    def _drive(deliver) -> list[OmniIdentityResult]:
+        captured: list[OmniIdentityResult] = []
+
+        async def _cap(r: OmniIdentityResult) -> None:
+            captured.append(r)
+
+        async def _run() -> None:
+            disp = FusedDispatcher()
+            await disp.dispatch([IdentityQueryItem(track_id=1)], {}, _cap)
+            await deliver(disp)
+
+        asyncio.run(_run())
+        return captured
+
+    def test_missing_track_marked_not_answered(self):
+        # response 里没有 track 1 → 漏报兜底
+        out = self._drive(lambda d: d.deliver_response([]))
+        assert len(out) == 1
+        assert out[0].omni_answered is False
+        assert out[0].no_person is False
+
+    def test_failure_marked_not_answered(self):
+        out = self._drive(lambda d: d.deliver_failure("boom"))
+        assert len(out) == 1
+        assert out[0].omni_answered is False
+
+    def test_real_assignment_is_answered(self):
+        out = self._drive(lambda d: d.deliver_response(
+            [{"track_id": 1, "person_id": None, "confidence": 0.7, "reason": "x"}]
+        ))
+        assert len(out) == 1
+        assert out[0].omni_answered is True
