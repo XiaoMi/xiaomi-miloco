@@ -219,7 +219,9 @@ class ScopeConfigKeys:
 
     HOME_WHITE_LIST_KEY = "HOME_WHITE_LIST_KEY"       # 已启用的家庭 home_id 列表
     CAMERA_BLACK_LIST_KEY = "CAMERA_BLACK_LIST_KEY" # 已停用的摄像头 did 列表
-
+    # 已停用「语音指令」的摄像头 did 列表；不在此集 = 语音指令启用（默认启用）。
+    # 与 CAMERA_BLACK_LIST_KEY 正交：相机可正常投喂感知，但其语音指令不 dispatch。
+    CAMERA_VOICE_BLACK_LIST_KEY = "CAMERA_VOICE_BLACK_LIST_KEY"
 
 class OnboardingKeys:
     """主动 onboarding 邀请的一次性标记。
