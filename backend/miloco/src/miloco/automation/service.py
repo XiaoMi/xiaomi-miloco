@@ -181,7 +181,16 @@ def _build_trigger_context(
             display_name = names.get(key) or key
             value_map = values.get(key)
             if value_map and val is not None:
-                display_val = value_map.get(str(val)) or str(val)
+                # bool 值对齐 spec value_list 的 "0"/"1" key；
+                # 米家云端推送 bool 属性值是 Python True/False，
+                # str() 后是 "True"/"False"，与 spec value_list 的 "0"/"1" key 对不上。
+                if val is True:
+                    lookup_key = "1"
+                elif val is False:
+                    lookup_key = "0"
+                else:
+                    lookup_key = str(val)
+                display_val = value_map.get(lookup_key) or str(val)
             else:
                 display_val = str(val)
             items.append(f"{display_name}={display_val}")
