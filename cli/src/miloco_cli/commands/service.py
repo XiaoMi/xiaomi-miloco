@@ -236,10 +236,36 @@ def _find_latest_log_str() -> str | None:
     return str(log) if log else None
 
 
+def _resolve_timezone() -> str | None:
+    """部署时区 IANA 名,注入 supervisord ``environment=`` 让 backend 子进程继承。
+
+    单一真源,与 backend ``deploy_timezone()`` / 插件 ``deployTimezone()`` 的解析顺序对齐:
+    ``MILOCO_TIMEZONE`` env > ``config.json`` 的 ``timezone``。两者都拿不到 → 返回 None,
+    不强塞 Asia/Shanghai:让子进程继承宿主 TZ、backend 自身再走系统反查兜底,避免把
+    未配置部署错标成中国时区。
+
+    注入 ``TZ`` 是防御纵深:除 ``MILOCO_TIMEZONE`` 让 pydantic ``settings.timezone`` 生效外,
+    ``TZ`` 还统一 backend 里一切"裸" naive datetime(``datetime.now()`` / ``fromtimestamp``,
+    含尚未逐个改造到 ``deploy_timezone()`` 的调用点)的 OS 级时区。
+    """
+    if tz := os.environ.get("MILOCO_TIMEZONE"):
+        return tz
+    try:
+        from miloco_cli.config import load_config
+
+        tz = load_config().get("timezone")
+    except Exception:
+        return None
+    return tz if isinstance(tz, str) and tz else None
+
+
 def _generate_supervisor_conf(server_cmd: str) -> None:
     log_dir = _log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     sup_conf_path = _supervisor_conf()
+    tz = _resolve_timezone()
+    # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
+    tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
     conf = f"""\
 [supervisord]
 logfile={_supervisor_log()}
@@ -268,7 +294,7 @@ redirect_stderr=true
 stdout_logfile={log_dir}/miloco-backend.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=20
-environment=MILOCO_SUPERVISED="1",MILOCO_HOME="{miloco_home()}"
+environment=MILOCO_SUPERVISED="1",MILOCO_HOME="{miloco_home()}"{tz_env}
 """
     if sup_conf_path.exists() and sup_conf_path.read_text() == conf:
         return

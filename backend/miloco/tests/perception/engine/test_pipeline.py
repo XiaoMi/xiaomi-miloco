@@ -1781,3 +1781,82 @@ class TestGateHoldStateTransitionLogs:
         assert len(recovered_logs) == 0  # 必须走 EXPIRED 不是 RECOVERED
         assert "cam-1" in expired_logs[0].message
         assert "held_for_ms" in expired_logs[0].message
+
+
+# =============================================================================
+# Agent-facing 时刻锚定部署时区（_fmt_time_window / _fmt_clock）
+#
+# 回归 bug：host TZ=UTC、部署时区=Asia/Shanghai 时，感知推送的「时间」字段与注入
+# omni 的「当前时间」若用裸 fromtimestamp 会显示 UTC 时刻（把北京 10:52 标成 02:52），
+# 导致 agent / 模型编造出「凌晨」等错误时段。二者现均走 deploy_timezone()。
+# =============================================================================
+
+# 2023-11-14T22:13:20Z —— 三个时区落在不同 HH，转换正确性可判别：
+#   UTC → 22:13:20 / Asia/Shanghai(+08) → 次日 06:13:20 / America/Los_Angeles(PST -08) → 14:13:20
+_FIXED_MS = 1_700_000_000_000
+
+
+@pytest.fixture
+def _reset_settings_around():
+    """MILOCO_TIMEZONE 用例前后清 settings 缓存，避免污染其它用例。"""
+    from miloco.config import reset_settings
+
+    reset_settings()
+    yield
+    reset_settings()
+
+
+def test_fmt_time_window_uses_deploy_timezone(monkeypatch, _reset_settings_around):
+    """settings.timezone 非 host 时区时，时间窗按部署时区转换（非进程/OS 时钟）。"""
+    from miloco.config import reset_settings
+    from miloco.perception.engine.pipeline import _fmt_time_window
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "Asia/Shanghai")
+    reset_settings()
+    assert _fmt_time_window(_FIXED_MS, _FIXED_MS + 5000) == "[06:13:20-06:13:25]"
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "America/Los_Angeles")
+    reset_settings()
+    assert _fmt_time_window(_FIXED_MS, _FIXED_MS + 5000) == "[14:13:20-14:13:25]"
+
+
+def test_fmt_clock_uses_deploy_timezone(monkeypatch, _reset_settings_around):
+    """注入 omni 的「当前时间」按部署时区转换（对齐 _fmt_time_window，非 host 时钟）。"""
+    from miloco.config import reset_settings
+    from miloco.perception.engine.api import _fmt_clock
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "Asia/Shanghai")
+    reset_settings()
+    assert _fmt_clock(_FIXED_MS) == "06:13:20"
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "America/Los_Angeles")
+    reset_settings()
+    assert _fmt_clock(_FIXED_MS) == "14:13:20"
+
+
+def test_display_falls_back_to_os_local_not_shanghai(monkeypatch, tmp_path, _reset_settings_around):
+    """(f) 条款回归：settings 未配 + 系统 IANA 反查全失败 → 展示按 OS 本地钟。
+
+    旧兜底猜 Asia/Shanghai 会把"OS 时钟正确、只是反查不出 IANA 名"的非中国宿主
+    (docker 普通文件 /etc/localtime 等)恒偏成北京时间；展示路径必须退到 OS 本地。
+    """
+    import time as _time
+    from datetime import datetime
+
+    from miloco.config import reset_settings
+    from miloco.perception.engine.api import _fmt_clock
+    from miloco.perception.engine.pipeline import _fmt_time_window
+    from miloco.utils import time_utils
+
+    monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
+    # 隔离 MILOCO_HOME：不读本机真实 config.json 的 timezone
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path / "empty-home"))
+    reset_settings()
+    monkeypatch.setattr(time_utils, "_system_iana_tz", lambda: None)
+    monkeypatch.setattr(time_utils, "_warned_no_iana", False)
+
+    # 用当前时刻：OS 本地格式化(裸 fromtimestamp)与"当前偏移"必然一致,不受 DST 干扰
+    now_ms = int(_time.time() * 1000)
+    expected = datetime.fromtimestamp(now_ms / 1000).strftime("%H:%M:%S")
+    assert _fmt_clock(now_ms) == expected
+    assert _fmt_time_window(now_ms, now_ms) == f"[{expected}-{expected}]"

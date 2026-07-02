@@ -22,15 +22,27 @@ def _reset_settings():
 
 
 def _reset_iana_cache():
-    """lru_cache 在测试间会污染;每个用例前后清空。"""
+    """lru_cache 在测试间会污染;每个用例前后清空。
+
+    getattr 防御:fixture 依赖 monkeypatch 后 teardown 先于 monkeypatch 还原执行,
+    此刻 _system_iana_tz 可能还是测试替换的裸 lambda(无 cache_clear)。
+    """
     from miloco.utils import time_utils
 
-    time_utils._system_iana_tz.cache_clear()
+    cache_clear = getattr(time_utils._system_iana_tz, "cache_clear", None)
+    if cache_clear is not None:
+        cache_clear()
     time_utils._warned_no_iana = False
+    time_utils._warned_utc_tz = False
 
 
 @pytest.fixture(autouse=True)
-def reset_around_each():
+def reset_around_each(monkeypatch, tmp_path):
+    # 隔离 MILOCO_HOME + 清 MILOCO_TIMEZONE:否则会读到本机真实
+    # ~/.openclaw/miloco/config.json 里的 timezone,"未配置"分支的用例在已配置
+    # 时区的机器上必红。指向空 tmpdir 保证 hermetic。
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path / "miloco-home"))
+    monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
     _reset_settings()
     _reset_iana_cache()
     yield
@@ -81,13 +93,14 @@ def test_system_iana_skips_invalid_tz_env(monkeypatch, tmp_path):
         assert str(tz) != "Mars/Olympus"
 
 
-def test_fallback_to_asia_shanghai_when_no_iana(monkeypatch, caplog):
-    """settings.timezone 无 + _system_iana_tz 返回 None → 兜底 Asia/Shanghai + warning。"""
-    import logging
+def test_fallback_to_os_local_when_no_iana(monkeypatch, caplog):
+    """settings.timezone 无 + _system_iana_tz 返回 None → 兜底 OS 本地偏移 + warning。
 
-    monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
-    _reset_settings()
-    _reset_iana_cache()
+    (f) 条款回归:旧兜底猜 Asia/Shanghai,把"OS 时钟正确、只是反查不出 IANA 名"的
+    非中国宿主强行掰成北京时间;展示路径上 OS 本地偏移严格好于错城市。
+    """
+    import logging
+    from datetime import datetime
 
     from miloco.utils import time_utils
 
@@ -96,17 +109,14 @@ def test_fallback_to_asia_shanghai_when_no_iana(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=time_utils._logger.name):
         tz = time_utils.deploy_timezone()
 
-    assert tz == ZoneInfo("Asia/Shanghai")
-    assert any("Asia/Shanghai" in r.message for r in caplog.records)
+    # 兜底 == 此刻的 OS 本地偏移(非 Asia/Shanghai 猜测)
+    assert datetime.now(tz).utcoffset() == datetime.now().astimezone().utcoffset()
+    assert any("OS-local" in r.message for r in caplog.records)
 
 
 def test_fallback_warning_only_once(monkeypatch, caplog):
     """兜底 warning 在进程内只打一次。"""
     import logging
-
-    monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
-    _reset_settings()
-    _reset_iana_cache()
 
     from miloco.utils import time_utils
 
@@ -117,8 +127,77 @@ def test_fallback_warning_only_once(monkeypatch, caplog):
         time_utils.deploy_timezone()
         time_utils.deploy_timezone()
 
-    warn_count = sum(1 for r in caplog.records if "Asia/Shanghai" in r.message)
+    warn_count = sum(1 for r in caplog.records if "OS-local" in r.message)
     assert warn_count == 1, f"warning 应只打 1 次,实际 {warn_count} 次"
+
+
+def test_localtime_content_lookup_regular_file(tmp_path):
+    """/etc/localtime 为普通文件(docker cp / bind-mount)时按字节反查出 IANA 名。"""
+    import zoneinfo
+    from pathlib import Path
+
+    from miloco.utils.time_utils import _localtime_content_lookup
+
+    src = None
+    for base in zoneinfo.TZPATH:
+        cand = Path(base) / "America" / "New_York"
+        if cand.is_file():
+            src = cand
+            break
+    if src is None:
+        pytest.skip("本机无 zoneinfo 数据库文件,无法构造反查样本")
+
+    fake = tmp_path / "localtime"
+    fake.write_bytes(src.read_bytes())
+    tz = _localtime_content_lookup(fake)
+    assert tz is not None
+    # 命中多个别名时优先带 "/" 的规范名 + 字典序,America/New_York 确定胜出
+    assert str(tz) == "America/New_York"
+
+
+def test_localtime_content_lookup_garbage_returns_none(tmp_path):
+    """内容不匹配数据库任何 zone → None(继续走下一级兜底,不误报)。"""
+    from miloco.utils.time_utils import _localtime_content_lookup
+
+    fake = tmp_path / "localtime"
+    fake.write_bytes(b"TZif-not-a-real-zone" * 7)
+    assert _localtime_content_lookup(fake) is None
+
+
+def test_utc_deploy_timezone_warns_once_with_fix_command(monkeypatch, caplog):
+    """解析出 UTC 部署时区 → 一次显眼红旗 warning,附精确修复命令。
+
+    没有家庭住在 UTC——几乎必然是云主机时区未配置,所有 agent 可见时刻会错标。
+    """
+    import logging
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "Etc/UTC")
+    _reset_settings()
+
+    from miloco.utils import time_utils
+
+    with caplog.at_level(logging.WARNING, logger=time_utils._logger.name):
+        time_utils.deploy_timezone()
+        time_utils.deploy_timezone()
+
+    utc_warns = [r for r in caplog.records if "no household lives in UTC" in r.message]
+    assert len(utc_warns) == 1, f"UTC 红旗应只打 1 次,实际 {len(utc_warns)} 次"
+    assert "miloco-cli config set timezone" in utc_warns[0].message
+
+
+def test_non_utc_deploy_timezone_no_utc_warning(monkeypatch, caplog):
+    """正常时区不触发 UTC 红旗。"""
+    import logging
+
+    monkeypatch.setenv("MILOCO_TIMEZONE", "Asia/Shanghai")
+    _reset_settings()
+
+    from miloco.utils import time_utils
+
+    with caplog.at_level(logging.WARNING, logger=time_utils._logger.name):
+        time_utils.deploy_timezone()
+
+    assert not any("no household lives in UTC" in r.message for r in caplog.records)
 
 
 def test_dst_zone_correctly_handled_via_iana(monkeypatch):

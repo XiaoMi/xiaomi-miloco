@@ -131,6 +131,42 @@ async def test_room_name_still_attached_to_context():
     assert captured["contexts"]["cam_x"].room_name == "厨房"
 
 
+@pytest.mark.asyncio
+async def test_context_current_time_wired_to_fmt_clock(monkeypatch):
+    """OmniContext.current_time 必须走 _fmt_clock（部署时区），非裸 fromtimestamp。
+
+    双时区断言使回退接线（改回 host 时钟）在任何 CI host 上都必红：
+    snapshot.start_timestamp=1000ms = 1970-01-01T00:00:01Z。
+    """
+    from miloco.config import reset_settings
+
+    cam = _make_snapshot("cam_x", "书房")
+
+    engine = PerceptionEngine(PerceptionConfig())
+    captured: dict = {}
+
+    async def fake_run_batch_pipeline(batch_, contexts, *args, **kwargs):
+        captured["contexts"] = contexts
+        return BatchPipelineResult()
+
+    try:
+        with patch(
+            "miloco.perception.engine.pipeline.run_batch_pipeline",
+            side_effect=fake_run_batch_pipeline,
+        ):
+            monkeypatch.setenv("MILOCO_TIMEZONE", "Asia/Shanghai")
+            reset_settings()
+            await engine.realtime_perceive(BatchedSnapshot(snapshots=[cam]), rules=[])
+            assert captured["contexts"]["cam_x"].current_time == "08:00:01"
+
+            monkeypatch.setenv("MILOCO_TIMEZONE", "America/Los_Angeles")
+            reset_settings()
+            await engine.realtime_perceive(BatchedSnapshot(snapshots=[cam]), rules=[])
+            assert captured["contexts"]["cam_x"].current_time == "16:00:01"
+    finally:
+        reset_settings()
+
+
 # ---------- device_rule_map 构造正确性(层 1)----------
 # device_rule_map: did → 本 batch 实际下发的 rule_id 列表。
 # client.py EXITED 阶段据此精确推退状态机桶,绑 cam_A 的 rule 不会被只有 cam_B 的 batch
