@@ -141,6 +141,23 @@ describe("before_prompt_build 组装", () => {
     expect(r.appendSystemContext).toBeUndefined();
   });
 
+  it("所有 profile（含 minimal）都注入家庭时区块，取部署时区", async () => {
+    const prevTz = process.env.MILOCO_TIMEZONE;
+    process.env.MILOCO_TIMEZONE = "Asia/Shanghai"; // env 优先，结果确定
+    try {
+      const { api, run } = makeApi();
+      registerBeforePromptBuildHook(api, {} as any);
+      for (const key of ["agent:main:miloco", "agent:main:cron:[t1]:run:abc"]) {
+        const r = await run(key);
+        expect(r.prependSystemContext).toContain("## 时间与时区");
+        expect(r.prependSystemContext).toContain("Asia/Shanghai");
+      }
+    } finally {
+      if (prevTz === undefined) delete process.env.MILOCO_TIMEZONE;
+      else process.env.MILOCO_TIMEZONE = prevTz;
+    }
+  });
+
   it("catalog 非空时进 append 末；为空时整段不出现", async () => {
     const { api, run } = makeApi();
     registerBeforePromptBuildHook(api, {} as any);
