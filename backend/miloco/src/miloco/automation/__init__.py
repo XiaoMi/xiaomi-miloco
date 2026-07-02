@@ -1,0 +1,2 @@
+"""Automation module."""
+

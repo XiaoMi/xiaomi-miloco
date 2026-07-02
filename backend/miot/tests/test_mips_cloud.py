@@ -28,6 +28,7 @@ import pytest
 from miot.mips_cloud import MIoTMipsCloud
 from miot.types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceEventOccurredEvent,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsSubscribeRejectedError,
@@ -36,6 +37,19 @@ from miot.types import (
 from paho.mqtt.enums import MQTTErrorCode
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def test_device_event_decoder_flattens_arguments():
+    decoder = MIoTMipsCloud._make_device_event_decoder()
+    msg = decoder(
+        "device/did-1/up/event_occured/2/1",
+        b'{"params":{"siid":2,"eiid":1,"arguments":[{"piid":3,"value":7},{"piid":4,"value":"on"}]}}',
+    )
+
+    assert isinstance(msg, MIoTDeviceEventOccurredEvent)
+    assert msg.did == "did-1"
+    assert msg.event_key == "event.2.1"
+    assert msg.arguments == {"arg.2.3": 7, "arg.2.4": "on"}
 
 
 class _FakeReasonCode:

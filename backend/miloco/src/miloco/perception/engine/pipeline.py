@@ -43,6 +43,7 @@ from miloco.perception.engine.types import (
     BatchPipelineResult,
     DevicePipelineResult,
     GatePacket,
+    GateTiming,
     GateTrigger,
     IdentityPacket,
     InputSlice,
@@ -388,6 +389,7 @@ async def run_batch_pipeline(
     gate_last_audio_pass_ts: "dict[str, float] | None" = None,
     gate_hold_active: "dict[str, bool] | None" = None,
     gate_hold_started_at: "dict[str, float] | None" = None,
+    force_gate_pass_dids: set[str] | None = None,
 ) -> BatchPipelineResult:
     """Run perception pipeline for a batch of devices, grouped by room.
 
@@ -465,30 +467,61 @@ async def run_batch_pipeline(
         # processor._publish_trace 从 timing 读出复用,避免双钥匙。
         room_timing[f"_device_trace_id_{did}"] = device_trace_id
 
-        prev_frame = gate_prev_frames.get(did) if gate_prev_frames is not None else None
-        last_v = (
-            gate_last_visual_pass_ts.get(did)
-            if gate_last_visual_pass_ts is not None else None
-        )
-        last_a = (
-            gate_last_audio_pass_ts.get(did)
-            if gate_last_audio_pass_ts is not None else None
-        )
-        gate_packet, gate_timing, last_checked, new_last_v, new_last_a = run_gate(
-            snapshot, config.gate, config.input.fps,
-            prev_frame=prev_frame,
-            last_visual_pass_ts=last_v,
-            last_audio_pass_ts=last_a,
-        )
-        # 跨窗 gate 状态各 device 用 per-did key、读写均在同步段、键不相交 → 并发 gather 下安全(同 room_timing)。
-        # 无论 gate 是否通过都更新基准——始终是"最近实际比较过的画面"。
-        if gate_prev_frames is not None and last_checked is not None:
-            gate_prev_frames[did] = last_checked
-        # 两 ts 仅在 run_gate 返回新值(非 None)时写回;清理由 reset_session 负责
-        if gate_last_visual_pass_ts is not None and new_last_v is not None:
-            gate_last_visual_pass_ts[did] = new_last_v
-        if gate_last_audio_pass_ts is not None and new_last_a is not None:
-            gate_last_audio_pass_ts[did] = new_last_a
+        force_gate_pass = did in (force_gate_pass_dids or set())
+        if force_gate_pass:
+            # 米家等离散外部事件只替代本轮 Gate 放行，不更新实时 Gate 的跨窗基准。
+            has_audio = bool(snapshot.audio_clip.size)
+            gate_packet = GatePacket(
+                packet_id=str(uuid.uuid4()),
+                room_name=snapshot.room_name,
+                timestamp=snapshot.end_timestamp,
+                trigger=GateTrigger(
+                    visual_changed=True,
+                    visual_change_score=1.0,
+                    audio_active=has_audio,
+                    audio_energy_level=1.0 if has_audio else 0.0,
+                    speech_active=False,
+                    hold=False,
+                ),
+                frames=snapshot.frames,
+                audio_clip=snapshot.audio_clip,
+                sample_rate=snapshot.sample_rate,
+                fps=config.input.fps,
+            )
+            gate_timing = GateTiming(
+                video_ms=0.0,
+                audio_ms=0.0,
+                video_pass=True,
+                audio_pass=has_audio,
+                video_score=1.0,
+                audio_energy=1.0 if has_audio else 0.0,
+            )
+            room_timing[f"_gate_external_pass_{did}"] = 1
+        else:
+            prev_frame = gate_prev_frames.get(did) if gate_prev_frames is not None else None
+            last_v = (
+                gate_last_visual_pass_ts.get(did)
+                if gate_last_visual_pass_ts is not None else None
+            )
+            last_a = (
+                gate_last_audio_pass_ts.get(did)
+                if gate_last_audio_pass_ts is not None else None
+            )
+            gate_packet, gate_timing, last_checked, new_last_v, new_last_a = run_gate(
+                snapshot, config.gate, config.input.fps,
+                prev_frame=prev_frame,
+                last_visual_pass_ts=last_v,
+                last_audio_pass_ts=last_a,
+            )
+            # 跨窗 gate 状态各 device 用 per-did key、读写均在同步段、键不相交 → 并发 gather 下安全(同 room_timing)。
+            # 无论 gate 是否通过都更新基准——始终是"最近实际比较过的画面"。
+            if gate_prev_frames is not None and last_checked is not None:
+                gate_prev_frames[did] = last_checked
+            # 两 ts 仅在 run_gate 返回新值(非 None)时写回;清理由 reset_session 负责
+            if gate_last_visual_pass_ts is not None and new_last_v is not None:
+                gate_last_visual_pass_ts[did] = new_last_v
+            if gate_last_audio_pass_ts is not None and new_last_a is not None:
+                gate_last_audio_pass_ts[did] = new_last_a
 
         # gate hold 状态转换 → 日志 + events 表
         if gate_hold_active is not None and gate_hold_started_at is not None:
@@ -800,6 +833,7 @@ async def run_query_pipeline(
         room_name: str, snapshots: list[DeviceSnapshot]
     ) -> "tuple[str, QueryOutput] | None":
         room_identity_packets: list[IdentityPacket] = []
+        query_device_snapshot: DeviceSnapshot | None = None
 
         for snapshot in snapshots:
             # Downsample to target fps at pipeline entry
@@ -842,19 +876,34 @@ async def run_query_pipeline(
                 identity_packet, config.input.fps, config.input.omni_fps
             )
             room_identity_packets.append(identity_packet)
+            if query_device_snapshot is None and identity_packet.all_frames:
+                query_device_snapshot = snapshot
 
         if not room_identity_packets:
             return None
+        if query_device_snapshot is None:
+            query_device_snapshot = snapshots[0]
 
-        # Build query prompt from IdentityPackets and call Omni
-        payload = build_query_prompt(
-            identity_packets=room_identity_packets,
-            query=query,
-            last_caption=captions.get(room_name),
+        device_ctx_token = set_device_context(
+            DeviceContext(
+                device_trace_id=f"query_{uuid.uuid4()}",
+                device_id=query_device_snapshot.device.did,
+                room_name=room_name,
+            )
         )
-        raw_response = await call_omni(
-            payload, resolve_live_omni_config(config.omni), type="on_demand"
-        )
+        try:
+            # query 路径的 clip 字节在 build_query_prompt -> _encode_batch_video
+            # 阶段就会旁路 push，因此设备上下文需要覆盖 prompt 构建 + omni 调用整段。
+            payload = build_query_prompt(
+                identity_packets=room_identity_packets,
+                query=query,
+                last_caption=captions.get(room_name),
+            )
+            raw_response = await call_omni(
+                payload, resolve_live_omni_config(config.omni), type="on_demand"
+            )
+        finally:
+            reset_device_context(device_ctx_token)
         answer = parse_query_response(raw_response)
         if not answer:
             return None
@@ -862,8 +911,8 @@ async def run_query_pipeline(
 
     # 各 room 并发（与 run_batch_pipeline 同源：per-room omni 墙钟 Σ→max）。单房间查询
     # 无变化；多房间/全屋查询省 Σ。return_exceptions=True + _reraise_first 保持原"任一
-    # room 失败即整体失败"语义（上层 on_demand_perceive 捕获→空答案）。query 路径不走
-    # fused、无 set_device_context，并发面比主路径更窄（run_identity 池写仍是原子同步段）。
+    # room 失败即整体失败"语义（上层 on_demand_perceive 捕获→空答案）。query 路径在
+    # omni 调用前补 set_device_context，使 on-demand 的 clip/snapshot 收集也能按设备落盘。
     room_results = await asyncio.gather(
         *(_run_room_query(rn, snaps) for rn, snaps in batch.by_room().items()),
         return_exceptions=True,

@@ -36,6 +36,9 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
+  MiotEventMapping,
+  MiotEventSource,
+  MiotEventTriggerLog,
   UsagePeriod,
   UsageStats,
   OmniConfigState,
@@ -293,6 +296,52 @@ export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> 
     return [];
   }
   return impl.realListCameras();
+}
+
+export async function getAutomationCatalog(): Promise<{
+  devices: MiotEventSource[];
+  cameras: ScopeCamera[];
+}> {
+  return impl.realGetAutomationCatalog();
+}
+
+export async function listMiotEventMappings(): Promise<MiotEventMapping[]> {
+  return impl.realListMiotEventMappings();
+}
+
+export async function createMiotEventMapping(
+  input: Omit<MiotEventMapping, "id">,
+): Promise<MiotEventMapping> {
+  return impl.realCreateMiotEventMapping(input);
+}
+
+export async function updateMiotEventMapping(
+  id: string,
+  input: Partial<MiotEventMapping>,
+): Promise<MiotEventMapping> {
+  return impl.realUpdateMiotEventMapping(id, input);
+}
+
+export async function deleteMiotEventMapping(id: string): Promise<void> {
+  return impl.realDeleteMiotEventMapping(id);
+}
+
+export async function listMiotEventLogs(): Promise<MiotEventTriggerLog[]> {
+  return impl.realListMiotEventLogs();
+}
+
+export async function testMiotEventTrigger(input: {
+  source_type: "device";
+  source_id: string;
+  source_name: string;
+  event_name?: string;
+  changed_properties?: Record<string, unknown>;
+}): Promise<MiotEventTriggerLog> {
+  return impl.realTestMiotEventTrigger(input);
+}
+
+export async function fetchDeviceSpec(did: string): Promise<import("@/lib/types").DeviceSpec> {
+  return impl.realFetchDeviceSpec(did);
 }
 
 // ── 让它休息 / 唤醒 ────────────────────────────────────────

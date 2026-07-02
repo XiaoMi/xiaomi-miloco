@@ -5,6 +5,8 @@
     "homeHint": "看一眼家里",
     "devices": "设备",
     "devicesHint": "管理米家设备",
+    "automation": "感知触发",
+    "automationHint": "设备事件或属性变化触发感知",
     "family": "家庭",
     "familyHint": "管理家庭成员",
     "activity": "日志",
