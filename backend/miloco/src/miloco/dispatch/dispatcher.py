@@ -48,6 +48,16 @@ _ROUTE: dict[EventType, tuple[str, str, int]] = {
 # 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})
 
+# 类型级投递参数（run_agent_turn 额外 kwargs）。onboarding 是交互式访谈，必须整个
+# turn 直接跑在车主 IM 会话里且回复用户可见（deliver=True）——只把开场白 push 过去
+# 而 turn 留在后台会话会割裂上下文（用户的 IM 回复落在 channel 会话，访谈状态却在
+# 别处）。注意：队列仍按 _ROUTE 的 sessionKey 归并/单飞，实际 turn 会话由插件侧按
+# resolveTarget 解析（owner-channel = 配置的 notifySessionKey，否则最近活跃的已绑定
+# channel 会话）。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
+_DELIVERY: dict[EventType, dict[str, Any]] = {
+    "onboarding": {"resolve_target": "owner-channel", "deliver": True},
+}
+
 
 @dataclass(eq=False)
 class _QueuedEvent:
@@ -234,6 +244,7 @@ class AgentDispatcher:
             run_id: str | None = None
             status: str = "error"
             rtt_ms: float = 0.0
+            delivery = _DELIVERY.get(event_type, {})
             for attempt in range(self._TRANSPORT_RETRIES + 1):
                 try:
                     run_id, status, rtt_ms = await run_agent_turn(
@@ -242,6 +253,7 @@ class AgentDispatcher:
                         lane=lane,
                         trace_id=trace_id,
                         wait_timeout_ms=wait_ms,
+                        **delivery,
                     )
                     break
                 except AgentWebhookException as e:
@@ -258,6 +270,18 @@ class AgentDispatcher:
                         )
                         return
                     await asyncio.sleep(self._TRANSPORT_BACKOFF_S * (2**attempt))
+
+            if status == "no-channel":
+                # 插件侧结构化失败：车主从未私聊过 bot，解析不到 IM 会话。这不是
+                # 传输故障（HTTP 200 / code 0 正常返回，不该烧重试），delivered=False
+                # 让 producer（onboarding 一次性标记）不置位——等车主绑定 channel 后
+                # 下次启动自然送达。
+                logger.warning(
+                    "agent turn undeliverable session=%s type=%s: no owner IM channel yet",
+                    session_key,
+                    event_type,
+                )
+                return
 
             if status == "timeout":
                 # 超时仅放行后续 turn、不终止平台在途 turn → WARN、跳过本批、继续下一批。

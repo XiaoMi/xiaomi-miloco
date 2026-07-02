@@ -268,7 +268,7 @@ async def real_dispatcher(monkeypatch):
 async def test_real_dispatcher_transport_failure_keeps_flag_unset(real_dispatcher, monkeypatch):
     """回归：drainer 传输重试耗尽静默丢批 → 标记必须不置位、下次可重试。"""
 
-    async def failing_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+    async def failing_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
         raise AgentWebhookException("agent webhook still booting")
 
     monkeypatch.setattr(disp_mod, "run_agent_turn", failing_turn)
@@ -285,7 +285,7 @@ async def test_real_dispatcher_transport_failure_keeps_flag_unset(real_dispatche
 async def test_real_dispatcher_success_sets_flag(real_dispatcher, monkeypatch):
     """镜像：真 dispatcher 送达成功 → 标记置位、二次静默。"""
 
-    async def ok_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+    async def ok_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
         assert "[系统事件]" in msg
         return "run-1", "ok", 1.0
 
@@ -301,7 +301,7 @@ async def test_real_dispatcher_success_sets_flag(real_dispatcher, monkeypatch):
 async def test_real_dispatcher_timeout_status_counts_as_delivered(real_dispatcher, monkeypatch):
     """status=timeout：平台侧 turn 仍在途 → 视作送达，置位（避免双邀请）。"""
 
-    async def timeout_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+    async def timeout_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
         return None, "timeout", 1.0
 
     monkeypatch.setattr(disp_mod, "run_agent_turn", timeout_turn)
@@ -315,7 +315,7 @@ async def test_real_dispatcher_timeout_status_counts_as_delivered(real_dispatche
 async def test_real_dispatcher_error_status_keeps_flag_unset(real_dispatcher, monkeypatch):
     """status=error：turn 执行失败 → 不算送达，不置位（下次启动重试）。"""
 
-    async def error_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+    async def error_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
         return "run-1", "error", 1.0
 
     monkeypatch.setattr(disp_mod, "run_agent_turn", error_turn)
@@ -323,3 +323,34 @@ async def test_real_dispatcher_error_status_keeps_flag_unset(real_dispatcher, mo
 
     assert await svc.maybe_trigger() is False
     assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_real_dispatcher_no_channel_keeps_flag_unset(real_dispatcher, monkeypatch):
+    """no-channel（车主从未私聊过 bot）→ 未送达不置位；绑定 channel 后重试即送达。
+
+    全链路走真 dispatcher：断言 onboarding 批次带 owner-channel 投递参数、
+    结构化 no-channel 只调一次（不烧传输重试）、标记不置位；随后"车主绑定了
+    channel"（turn 转 ok）→ 下一次 maybe_trigger 送达并置位。
+    """
+    calls: list[dict] = []
+    channel_bound = False
+
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
+        calls.append(kw)
+        if not channel_bound:
+            return None, "no-channel", 1.0
+        return "run-1", "ok", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    svc, kv = _service()
+
+    # 未绑 channel：未送达、不置位、只调一次
+    assert await svc.maybe_trigger() is False
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY) is None
+    assert calls == [{"resolve_target": "owner-channel", "deliver": True}]
+
+    # 车主绑定 channel 后（模拟下次启动重试）：送达并置位
+    channel_bound = True
+    assert await svc.maybe_trigger() is True
+    assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY)

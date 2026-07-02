@@ -685,3 +685,66 @@ async def test_dispatch_event_resolves_delivered_without_dispatcher():
     fut = asyncio.get_event_loop().create_future()
     assert await dispatch_event("bind", ["x"], _join, delivered=fut) is False
     assert fut.result() is False
+
+
+# ─── 类型级投递参数（_DELIVERY）：仅 onboarding 走 owner-channel + deliver ───────
+
+
+@pytest.mark.asyncio
+async def test_onboarding_batch_sends_delivery_metadata(monkeypatch, patched):
+    """onboarding 批次带 resolve_target=owner-channel + deliver=True 发 turn。"""
+    seen: list[dict] = []
+
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
+        seen.append(kw)
+        return "run-x", "ok", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    await d.start()
+    try:
+        await d.dispatch("onboarding", ["invite"], _join)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert seen == [{"resolve_target": "owner-channel", "deliver": True}]
+
+
+@pytest.mark.asyncio
+async def test_other_types_send_without_delivery_metadata(patched):
+    """非 onboarding 类型不带投递参数（patched 的假 turn 签名收紧，多传即 TypeError）。"""
+    d = AgentDispatcher()
+    await d.start()
+    try:
+        await d.dispatch("interaction", ["x"], _join)
+        await d.dispatch("bind", ["y"], _join)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert len(patched.turns) == 2  # 两批都成功走完 → 没有多余 kwargs
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_no_channel_status(patched, monkeypatch):
+    """no-channel（插件解析不到车主 IM 会话）→ 结构化未送达：False 且不烧传输重试。"""
+    calls = 0
+
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
+        nonlocal calls
+        calls += 1
+        return None, "no-channel", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    await d.start()
+    fut = _delivered_fut()
+    try:
+        await d.dispatch("onboarding", ["invite"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert fut.result() is False
+    assert calls == 1  # 正常 HTTP 返回，不走传输重试
