@@ -80,6 +80,37 @@ logger = logging.getLogger(__name__)
 _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 
 
+def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
+    """按摄像头「语音指令黑名单」过滤语音指令：``source_device_ids[0]``(相机 did)在
+    黑名单里的丢弃、不 dispatch,其余放行。dispatch 阶段实时读 KV(进程内缓存),改开关
+    即时生效、无需重启感知引擎。
+
+    只影响语音指令 dispatch——规则匹配 / 事件日志走各自路径,不经此函数。读 KV 失败时
+    fail-open(放行全部)以免吞掉语音链路。
+    """
+    from miloco.manager import get_manager
+    from miloco.miot.filter import voice_denied_camera_dids
+
+    try:
+        voice_denied = voice_denied_camera_dids(get_manager().kv_repo)
+    except Exception as e:
+        logger.warning("voice blacklist lookup failed, passing all speeches: %s", e)
+        return speeches
+    if not voice_denied:
+        return speeches
+    kept: list[Speech] = []
+    for s in speeches:
+        did = s.source_device_ids[0] if s.source_device_ids else None
+        if did is not None and did in voice_denied:
+            logger.info(
+                "语音指令被摄像头语音开关拦截,丢弃不 dispatch: did=%s device_name=%s content=%r",
+                did, s.device_name, s.content,
+            )
+            continue
+        kept.append(s)
+    return kept
+
+
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
@@ -407,6 +438,8 @@ class PerceptionEngineProxy:
             commands = [
                 i for i in speeches if i.needs_response and i.is_complete
             ]
+            # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+            commands = _filter_voice_enabled(commands)
             if not commands:
                 return
             for c in commands:
@@ -796,6 +829,8 @@ class PerceptionEngineProxy:
                 if early_sent_contents and interaction.content in early_sent_contents:
                     continue
                 speeches.append(interaction)
+        # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+        speeches = _filter_voice_enabled(speeches)
         if speeches:
             _attach_caption(speeches, result.caption)
             for it in speeches:
