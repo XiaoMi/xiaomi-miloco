@@ -851,6 +851,8 @@ class MiotProxy:
                 return
             device = self._device_info_dict.get(msg.did)
             if device is None:
+                device = (await self.get_devices()).get(msg.did)
+            if device is None:
                 return
             trigger = MiotEventTrigger(
                 source_type="device",
