@@ -32,7 +32,8 @@ const kCronTasks = [
     payload: {
       kind: "agentTurn",
       lightContext: false,
-      message: "执行家庭巡检。加载 miloco-home-patrol skill 进行巡检。",
+      message:
+        "执行家庭巡检。加载 miloco-home-patrol skill 进行巡检。每次巡检都是隔离会话，务必先读巡检日志（已处理台账）知道已做过什么，回看最近约 2 小时的新情况、只做没做过的，处理完把做过的追加回台账，避免重复提醒 / 重复操作。注意：老人长时间无活动 / 成员远超回家时间未归这类缺席型安全信号不受 2 小时近窗限制，须按 skill 内规则回看历史评估。",
     },
   },
   {

@@ -22,13 +22,13 @@ AI 的每次对话默认是无记忆的。用户每次说"我爸爸有高血压"
 
 - **感知日志（Omni 观察）**：感知流水线每次推理的 caption 被周期性摘要（`miloco-perception-digest`），提取有价值的家庭观察
 - **对话主动告知**：用户或家庭成员在对话中直接告知 Agent（`source=user_told`），权重最高且不过期
-- **家庭巡检（Agent 主动提取）**：`miloco-home-patrol` 周期扫描感知/交互记忆，提取候选知识
+- **家庭记忆 Dreaming（Agent 主动提取）**：`miloco-home-observe` 每日从感知/交互记忆提取候选知识（`miloco-home-patrol` 巡检只做设备自动化与关怀提醒，不写候选区）
 
 ### 典型场景
 
 **场景 1 — 健康禁忌记忆**：用户对 Agent 说"我爸有高血压，饮食偏淡"。这条信息通过 `miloco-home-profile` Skill 写入正式档案，`HomeProfileService` 重新渲染 `profile.md`。之后 Agent 在推荐食谱、讨论外卖时，system prompt 中已含这条约束，Agent 自动就此调整建议，用户无需每次提醒。
 
-**场景 2 — 作息规律积累**：感知流水线多次在晚间识别到"客厅无人、卧室有人走动"的场景。家庭巡检提取出候选知识"家庭通常 22:00 入睡"，经候选区积累证据后晋升为正式档案。此后夜间响铃时 Agent 会主动询问是否需要静音模式。
+**场景 2 — 作息规律积累**：感知流水线多次在晚间识别到"客厅无人、卧室有人走动"的场景。家庭记忆 Dreaming 的 Observe 步骤提取出候选知识"家庭通常 22:00 入睡"，经候选区积累证据后晋升为正式档案。此后夜间响铃时 Agent 会主动询问是否需要静音模式。
 
 ### 能力边界
 
@@ -48,7 +48,6 @@ AI 的每次对话默认是无记忆的。用户每次说"我爸爸有高血压"
 ```
 感知日志（Omni caption）
   → Cron: miloco-perception-digest（高频，分钟级）→ 感知记忆摘要
-  → Cron: miloco-home-patrol（中频，数十分钟级）→ 巡检，写入候选区
   → Cron: miloco-home-dreaming（每日深夜）
       Observe（miloco-home-observe）→ 从感知/交互记忆提取知识 → 候选区
       Promote（miloco-home-promote）→ 达标候选晋升 → 正式档案
