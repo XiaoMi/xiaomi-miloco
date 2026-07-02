@@ -59,7 +59,7 @@ def _cleanup_by_total_size(packs_dir: Path, max_total_mb: int = _MAX_TOTAL_MB) -
             shutil.rmtree(d)
             total -= size
         except OSError:
-            pass
+            logger.warning("Failed to remove old feedback pack during cleanup: %s", d, exc_info=True)
 
 
 _ERROR_TYPE_LABELS = {

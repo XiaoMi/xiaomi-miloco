@@ -677,7 +677,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
           <div className="flex items-baseline justify-between">
             <span className="text-info">
               ✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}
-              {packPath && <>，<button type="button" onClick={() => revealDir(packPath.substring(0, packPath.lastIndexOf("/")))} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
+              {packPath && <>，<button type="button" onClick={() => { revealDir(packPath.substring(0, packPath.lastIndexOf("/"))).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
             </span>
             <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
               {t("activity.feedbackModify", "修改反馈信息")}

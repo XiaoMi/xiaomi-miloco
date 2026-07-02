@@ -237,7 +237,7 @@ async def submit_event_feedback(
         if user_info:
             uid = user_info.uid
     except Exception:
-        pass
+        logger.exception("Failed to resolve miot uid for feedback pack; falling back to anonymous")
 
     try:
         result = await asyncio.to_thread(
