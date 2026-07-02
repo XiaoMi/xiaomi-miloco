@@ -166,8 +166,8 @@ def push_omni_trace(
         latency_ms: 单次 omni HTTP 调用耗时.
         error: 失败时 {"code": ..., "msg": ...},成功时 None.
         model: omni 模型 ID.
-        inference_params: 推理参数(temperature, top_p, max_completion_tokens 等),
-            供复现时还原完整 API call.
+        inference_params: 推理参数(temperature / top_p / max_tokens 等，键名与 wire payload 对齐),
+            供复现时可直接铺进请求体还原完整 API call.
 
     device_id 从 ContextVar(DeviceContext)取并写入 call 记录,让多摄像头 batch
     的多条 call 能跟 artifacts.clips 的 device 维度对齐.fused 路径(batch 级单次
