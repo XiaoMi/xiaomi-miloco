@@ -76,6 +76,21 @@ miloco-cli home-profile list --target profile --pretty
 > 覆盖度标记：**★ 必须设法覆盖**（访谈的目标）；**○ 尽量拿到**，用户没说不强求；
 > **△ 用户主动提才记，绝不主动深挖**。一条消息聊一个环节，用户跨环节回答时灵活吸收。
 
+### ⓪ 时区确认（条件触发 · 仅当家庭时区显示为 UTC）
+
+注入 prompt 的「## 时间与时区」块显示家庭时区为 `UTC` / `Etc/UTC` 时——没有家庭真住在
+UTC，几乎必然是服务器未配置时区，提醒/定时任务的钟点都会偏——在开场阶段顺带确认一句
+（如"对了，你们家在哪个时区或城市？我这边还没配时区，配好后提醒才会准点"），拿到答案后
+立即写入（城市 → IANA 名由你换算，如北京 → `Asia/Shanghai`）：
+
+```bash
+miloco-cli config set timezone <IANA>   # 如 Asia/Shanghai
+```
+
+命令不可用或被拒（老版本 backend 无 `timezone` 配置项）→ 降级为给用户手工指引：编辑
+`~/.openclaw/miloco/config.json` 顶层加 `"timezone": "<IANA>"`，再 `miloco-cli service restart`。
+家庭时区非 UTC 时**跳过本环节，一个字都不提**。
+
 ### ① 成员盘点（必做）
 
 > "家里都有谁呀？把名字和身份（爸爸/妈妈/孩子/老人…）说给我就行。
