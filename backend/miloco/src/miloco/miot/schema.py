@@ -242,6 +242,24 @@ class CameraToggleRequest(BaseModel):
     items: list[CameraToggleItem] = Field(..., min_length=1)
 
 
+class CameraVoiceToggleItem(BaseModel):
+    """单个相机的语音指令启用/停用操作。"""
+
+    did: str = Field(..., min_length=1, description="相机 did")
+    voice_in_use: bool = Field(
+        ..., description="true = 启用语音指令；false = 停用（该相机语音不再 dispatch）"
+    )
+
+
+class CameraVoiceToggleRequest(BaseModel):
+    """批量切换相机语音指令启用状态。每项独立指定 did + voice_in_use。
+
+    语音开关从属于感知开关：仅允许对感知已启用(in_use=True)的相机设置，否则整批拒绝。
+    """
+
+    items: list[CameraVoiceToggleItem] = Field(..., min_length=1)
+
+
 class AuthorizeRequest(BaseModel):
     """User-pasted OAuth result from the Xiaomi redirect page."""
 

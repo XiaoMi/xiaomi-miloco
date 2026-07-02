@@ -304,3 +304,265 @@ async def test_handle_realtime_sends_all_when_no_early_sent(proxy):
 # test_unmatched_enabled_rules_get_false_each_cycle / test_unmatched_skips_early_sent_rules
 # 已迁移到 test_perception_client_rule_dispatch.py(per-device 状态机重构后,
 # false 广播改为按 device_rule_map 精确推退,旧 case 的全集 enabled rule 模型不再适用)。
+
+
+# ─── 按摄像头语音开关闸门（_filter_voice_enabled + dispatch gate）───────────────
+
+
+def _voice_mgr(voice_denied: set[str]) -> MagicMock:
+    """构造一个 get_manager() 返回值,其 kv_repo 让 voice_denied_camera_dids 返回给定集合。"""
+    import json as _json
+
+    from miloco.database.kv_repo import ScopeConfigKeys
+
+    store = {ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY: _json.dumps(list(voice_denied))}
+    kv = MagicMock()
+    kv.get = lambda key, default=None: store.get(key, default)
+    mgr = MagicMock()
+    mgr.kv_repo = kv
+    return mgr
+
+
+def test_filter_voice_enabled_drops_blacklisted_did():
+    """source_device_ids[0] 在语音黑名单 → 丢弃；不在 → 保留。"""
+    from miloco.perception.client import _filter_voice_enabled
+    from miloco.perception.types import Speech
+
+    s_off = Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   source_device_ids=["cam-off"], device_name="客厅相机")
+    s_on = Speech(needs_response=True, speaker="妈妈", content="关灯",
+                  source_device_ids=["cam-on"], device_name="卧室相机")
+
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})):
+        kept = _filter_voice_enabled([s_off, s_on])
+
+    assert [s.content for s in kept] == ["关灯"]
+
+
+def test_filter_voice_enabled_empty_blacklist_passes_all():
+    from miloco.perception.client import _filter_voice_enabled
+    from miloco.perception.types import Speech
+
+    s = Speech(needs_response=True, speaker="x", content="c", source_device_ids=["d"])
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr(set())):
+        assert _filter_voice_enabled([s]) == [s]
+
+
+def test_filter_voice_enabled_fail_open_on_lookup_error():
+    """读 KV/manager 失败 → fail-open,放行全部（不吞掉语音链路）。"""
+    from miloco.perception.client import _filter_voice_enabled
+    from miloco.perception.types import Speech
+
+    s = Speech(needs_response=True, speaker="x", content="c", source_device_ids=["d"])
+    with patch("miloco.manager.get_manager", side_effect=RuntimeError("boom")):
+        assert _filter_voice_enabled([s]) == [s]
+
+
+async def test_handle_realtime_drops_voice_disabled_speech(proxy):
+    """终态 dispatch 路径:语音黑名单相机的 speech 指令不 dispatch,启用相机的照常发。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+            Speech(needs_response=True, speaker="妈妈", content="关灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ],
+    )
+
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    async def _noop_update(*a, **k):
+        ...
+
+    fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy.handle_realtime_perception_result(result)
+
+    # 只发启用相机(cam-on)的「关灯」；被拉黑相机(cam-off)的「开灯」丢弃
+    disp.assert_awaited_once()
+    dispatched = disp.await_args.args[1]
+    assert [s.content for s in dispatched] == ["关灯"]
+
+
+async def test_handle_realtime_dispatches_when_voice_enabled(proxy):
+    """对照组:相机未拉黑 → speech 指令照常 dispatch。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ],
+    )
+    fake_mgr = _voice_mgr(set())
+
+    async def _noop_update(*a, **k):
+        ...
+
+    fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy.handle_realtime_perception_result(result)
+
+    disp.assert_awaited_once()
+    assert [s.content for s in disp.await_args.args[1]] == ["开灯"]
+
+
+async def test_early_speeches_voice_disabled_not_dispatched(proxy):
+    """早出路径:_on_early_speeches 内的语音闸门必须拦下黑名单相机的指令。
+
+    防回归钉:早出闸门被删时,终态闸门救不回来——早出泄漏的指令已 dispatch 且进
+    early_sent_contents,终态路径按内容去重直接跳过。此测试直打
+    _realtime_perceive_impl 的 on_early_speeches 回调,钉住早出闸门本身。
+    """
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Speech
+
+    main_loop = asyncio.get_running_loop()
+
+    async def engine_realtime(*args, **kwargs):
+        await kwargs["on_early_speeches"]([
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+        ])
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, main_loop, [],
+        )
+
+    disp.assert_not_awaited()
+
+
+async def test_early_speeches_voice_enabled_dispatched(proxy):
+    """对照组:黑名单非空但相机未在其中 → 早出指令照常 dispatch（闸门有选择性）。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Speech
+
+    main_loop = asyncio.get_running_loop()
+
+    async def engine_realtime(*args, **kwargs):
+        await kwargs["on_early_speeches"]([
+            Speech(needs_response=True, speaker="妈妈", content="关灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ])
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})), \
+         patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
+        await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, main_loop, [],
+        )
+
+    disp.assert_awaited_once()
+    assert [s.content for s in disp.await_args.args[1]] == ["关灯"]
+
+
+# ─── 语音闸门在 meaningful_events 落库路径（_persist_meaningful_event）─────────
+
+
+async def test_persist_skips_asr_only_window_from_voice_disabled_cam():
+    """纯 ASR 窗口 + 相机语音已关 → 过滤后无 speech,不入 meaningful_events。
+
+    语音开关 = 不执行也不记录:被拉黑相机的定向指令转写不落库、不推 SSE。
+    """
+    from miloco.perception.client import _persist_meaningful_event
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+        ],
+    )
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr):
+        await _persist_meaningful_event(
+            result=result, device_ids=["cam-off"], artifacts=OmniEventArtifacts(),
+        )
+
+    fake_mgr.meaningful_events_dao.insert.assert_not_called()
+    # persist 用 model_copy 过滤,不原地改与主路径(规则匹配/dispatch)共享的 result
+    assert len(result.speeches) == 1
+
+
+async def test_persist_keeps_asr_window_from_voice_enabled_cam():
+    """对照组:黑名单非空但相机不在其中 → ASR 窗口照常入表,has_asr=True。"""
+    from miloco.perception.client import _persist_meaningful_event
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+    from miloco.perception.types import RealtimePerceptionResult, Speech
+
+    result = RealtimePerceptionResult(
+        speeches=[
+            Speech(needs_response=True, speaker="妈妈", content="关灯",
+                   is_complete=True, source_device_ids=["cam-on"]),
+        ],
+    )
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr):
+        await _persist_meaningful_event(
+            result=result, device_ids=["cam-on"], artifacts=OmniEventArtifacts(),
+        )
+
+    fake_mgr.meaningful_events_dao.insert.assert_called_once()
+    kwargs = fake_mgr.meaningful_events_dao.insert.call_args.kwargs
+    assert kwargs["has_asr"] is True
+    assert "关灯" in kwargs["text"]
+
+
+async def test_persist_mixed_window_excludes_voice_disabled_transcript():
+    """混合窗口:视觉建议 + 语音关闭相机的 speech → 事件仍入表(视觉产物不受影响),
+    但落库内容(text / payload_json / has_asr)不含被拦截的转写。"""
+    from miloco.perception.client import _persist_meaningful_event
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+    from miloco.perception.types import (
+        RealtimePerceptionResult,
+        Speech,
+        Suggestion,
+    )
+
+    result = RealtimePerceptionResult(
+        suggestions=[Suggestion(event="水龙头没关", action="提醒", urgency="low")],
+        speeches=[
+            Speech(needs_response=True, speaker="爸爸", content="开灯",
+                   is_complete=True, source_device_ids=["cam-off"]),
+        ],
+    )
+    fake_mgr = _voice_mgr({"cam-off"})
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr):
+        await _persist_meaningful_event(
+            result=result, device_ids=["cam-off"], artifacts=OmniEventArtifacts(),
+        )
+
+    fake_mgr.meaningful_events_dao.insert.assert_called_once()
+    kwargs = fake_mgr.meaningful_events_dao.insert.call_args.kwargs
+    assert kwargs["has_suggestion"] is True
+    assert kwargs["has_asr"] is False  # speech 已被闸门滤掉
+    assert "水龙头没关" in kwargs["text"]
+    assert "开灯" not in kwargs["text"]
+    assert "开灯" not in kwargs["payload_json"]
+    # 原 result 不被原地改
+    assert len(result.speeches) == 1

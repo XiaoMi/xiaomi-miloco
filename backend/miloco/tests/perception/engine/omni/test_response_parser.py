@@ -51,8 +51,7 @@ class TestParseOmniResponse:
         assert result.matched_rules[0].rule_name == "[read] 检测到读书"
         assert result.matched_rules[0].rule_id == "[read] 检测到读书"  # 无 mapping → best-effort 用 name
         assert len(result.speeches) == 1
-        # 临时禁用语音指令链路：parser 已强制 needs_response=false，恢复后取消注释。
-        # assert result.speeches[0].needs_response is True
+        assert result.speeches[0].needs_response is True
         assert result.speeches[0].is_complete is True
         assert result.speeches[0].content == "把灯打开"
         assert result.env_sounds == ["键盘敲击声"]
@@ -122,8 +121,7 @@ class TestParseOmniResponse:
         }
         result = parse_omni_response(_wrap(json.dumps(data)))
         assert len(result.speeches) == 3
-        # 临时禁用语音指令链路：parser 已强制 needs_response=false，恢复后取消注释。
-        # assert result.speeches[0].needs_response is True
+        assert result.speeches[0].needs_response is True
         assert result.speeches[1].needs_response is False
         assert result.speeches[2].needs_response is False
 

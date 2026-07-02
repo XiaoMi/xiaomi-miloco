@@ -88,6 +88,26 @@ def test_denied_camera_dids_with_values():
     assert miot_filter.denied_camera_dids(kv) == {"c1", "c2"}
 
 
+def test_voice_denied_camera_dids_empty():
+    kv = _FakeKV()
+    assert miot_filter.voice_denied_camera_dids(kv) == set()
+
+
+def test_voice_denied_camera_dids_with_values():
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY: json.dumps(["c1", "c2"])}
+    )
+    assert miot_filter.voice_denied_camera_dids(kv) == {"c1", "c2"}
+
+
+def test_voice_deny_is_orthogonal_to_feed_deny():
+    """语音黑名单与感知黑名单互不影响：改一个不动另一个。"""
+    kv = _FakeKV({ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"])})
+    miot_filter.set_camera_voice_in_use(kv, "c2", False)
+    assert miot_filter.denied_camera_dids(kv) == {"c1"}
+    assert miot_filter.voice_denied_camera_dids(kv) == {"c2"}
+
+
 def test_is_home_allowed_no_filter():
     kv = _FakeKV()
     # 空启用集 → 什么都不允许
@@ -187,6 +207,23 @@ def test_set_camera_in_use_inverts_disabled():
     assert miot_filter.set_camera_in_use(kv, "c1", True) == (["c2"], True)
     # idempotent on re-toggling true for missing did → no change
     assert miot_filter.set_camera_in_use(kv, "ghost", True) == (["c2"], False)
+
+
+def test_set_camera_voice_in_use_inverts_disabled():
+    kv = _FakeKV()
+    # voice_in_use=False adds to voice deny list
+    assert miot_filter.set_camera_voice_in_use(kv, "c1", False) == (["c1"], True)
+    assert miot_filter.set_cameras_voice_in_use(kv, ["c2", "c3"], False) == (
+        ["c1", "c2", "c3"],
+        True,
+    )
+    # voice_in_use=True removes from voice deny list
+    assert miot_filter.set_camera_voice_in_use(kv, "c1", True) == (["c2", "c3"], True)
+    # no-op re-toggle → changed=False
+    assert miot_filter.set_camera_voice_in_use(kv, "ghost", True) == (
+        ["c2", "c3"],
+        False,
+    )
 
 
 def test_set_in_use_no_op_skips_kv_write():
@@ -389,6 +426,101 @@ async def test_toggle_camera_rejects_unknown():
         await svc.toggle_camera([{"did": "ghost", "in_use": False}])
 
 
+# ─── MiotService: 语音指令开关（voice_in_use）─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_voice_flags():
+    """voice_in_use 是存储偏好：不在语音黑名单即 True（默认 True），与 in_use 正交。"""
+    cameras = {"c1": _camera("c1", home_id="H1"), "c2": _camera("c2", home_id="H1")}
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY: json.dumps(["c1"]),
+    })
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["voice_in_use"] is False  # 在语音黑名单
+    assert by_did["c1"]["in_use"] is True          # 感知仍启用（正交）
+    assert by_did["c2"]["voice_in_use"] is True    # 默认启用
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_writes_disabled():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    res = await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": False}])
+    assert any(c["did"] == "c1" and c["voice_in_use"] is False for c in res)
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY)) == ["c1"]
+
+    res = await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": True}])
+    assert any(c["did"] == "c1" and c["voice_in_use"] is True for c in res)
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_rejects_unknown():
+    svc = _make_service(cameras={"c1": _camera("c1")})
+    with pytest.raises(ValidationException):
+        await svc.toggle_camera_voice([{"did": "ghost", "voice_in_use": False}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_rejected_when_camera_disabled():
+    """语音从属于感知：感知已关闭(在黑名单)的相机不允许设置语音指令。"""
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),  # c1 感知已关闭
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    with pytest.raises(ValidationException, match="语音指令"):
+        await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": True}])
+    # 拒绝后不落库
+    assert kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_off_on_preserves_voice_preference():
+    """关相机不改写语音黑名单：off→on 循环后语音偏好原样保留（存储偏好不落库为「自动关」）。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    # 先把 c1 语音关掉（此时感知仍开）
+    await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": False}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY)) == ["c1"]
+    # 关相机感知 → 语音黑名单不应被改写
+    await svc.toggle_camera([{"did": "c1", "in_use": False}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY)) == ["c1"]
+    # 重新开相机感知 → 旧语音偏好仍在（voice_in_use=False）
+    await svc.toggle_camera([{"did": "c1", "in_use": True}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY)) == ["c1"]
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["in_use"] is True
+    assert by_did["c1"]["voice_in_use"] is False  # 偏好保留
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_does_not_restart_or_refresh():
+    """语音开关不 refresh_cameras / _sync_camera_adapter / _restart_perception_engine
+    （dispatch 阶段实时读 KV，改开关即时生效）。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    svc._miot_proxy.refresh_cameras = AsyncMock()
+    svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
+    svc._restart_perception_engine = AsyncMock()  # type: ignore[assignment]
+    await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": False}])
+    svc._miot_proxy.refresh_cameras.assert_not_awaited()
+    svc._sync_camera_adapter.assert_not_awaited()
+    svc._restart_perception_engine.assert_not_awaited()
+
+
 # ─── _assert_did_in_allowed_home ─────────────────────────────────────────────
 
 
@@ -440,6 +572,7 @@ async def test_unbind_miot_clears_scope_config():
     kv = _FakeKV({
         ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
         ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+        ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY: json.dumps(["c1"]),
     })
     db_connector = MagicMock()
     db_connector.execute_update = MagicMock(return_value=0)
@@ -465,6 +598,7 @@ async def test_unbind_miot_clears_scope_config():
 
     assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None
     assert kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY) is None
+    assert kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY) is None
     # LRU: 必须有一次 DELETE FROM device_lru
     lru_calls = [
         c for c in db_connector.execute_update.call_args_list
