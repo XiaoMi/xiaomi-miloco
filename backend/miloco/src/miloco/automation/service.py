@@ -6,7 +6,9 @@ import time
 import uuid
 from typing import Any
 
-from miloco.automation.schema import (
+from miloco.database.kv_repo import KVRepo
+from miloco.middleware.exceptions import ResourceNotFoundException
+from miloco.miot.schema import (
     MiotEventCatalog,
     MiotEventMapping,
     MiotEventMappingUpdate,
@@ -15,8 +17,6 @@ from miloco.automation.schema import (
     MiotEventTriggerLog,
     MiotPropertyFilterCondition,
 )
-from miloco.database.kv_repo import KVRepo
-from miloco.middleware.exceptions import ResourceNotFoundException
 from miloco.perception.types import CaptionEntry, Suggestion
 from miloco.rule.schema import (
     Rule,

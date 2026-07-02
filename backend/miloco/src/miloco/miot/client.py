@@ -35,7 +35,6 @@ from miot.types import (
 )
 from pydantic_core import to_jsonable_python
 
-from miloco.automation.schema import MiotEventTrigger
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
@@ -46,7 +45,7 @@ from miloco.miot.mips_listeners import (
     DeviceMetaEventListener,
     SceneEventListener,
 )
-from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
+from miloco.miot.schema import CameraImgSeq, MiotEventTrigger, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)

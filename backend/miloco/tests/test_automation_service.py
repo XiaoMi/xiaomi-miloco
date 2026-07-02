@@ -3,13 +3,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from miloco.automation.schema import MiotEventMapping, MiotEventTrigger
 from miloco.automation.service import (
     AutomationService,
     _coerce_number,
     _match_condition,
 )
 from miloco.middleware.exceptions import ResourceNotFoundException
+from miloco.miot.schema import MiotEventMapping, MiotEventTrigger
 from miloco.perception.types import CaptionEntry, MatchedRule
 from miloco.rule.schema import RuleTriggerType
 

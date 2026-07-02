@@ -22,9 +22,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from miloco.automation.schema import MiotEventMapping
 from miloco.miot import client as client_module
 from miloco.miot.client import MiotProxy
+from miloco.miot.schema import MiotEventMapping
 
 
 def _bare_proxy() -> MiotProxy:

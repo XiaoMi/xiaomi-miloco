@@ -5,15 +5,14 @@ import time
 
 from fastapi import APIRouter, Depends, Query
 
-from miloco.automation.schema import (
+from miloco.manager import get_manager
+from miloco.middleware import verify_token
+from miloco.miot.schema import (
     MiotEventManualTriggerRequest,
     MiotEventMapping,
     MiotEventMappingUpdate,
     MiotEventTrigger,
 )
-from miloco.automation.translations import translate_miot_value_label
-from miloco.manager import get_manager
-from miloco.middleware import verify_token
 from miloco.schema.common_schema import NormalResponse
 
 logger = logging.getLogger(__name__)
@@ -55,11 +54,9 @@ def _build_spec_property_entry(iid: str, item: dict) -> dict | None:
         entry["value_list"] = [
             {
                 "value": str(v.get("value", "")),
-                "description": translate_miot_value_label(
-                    v.get("description")
-                    or v.get("name")
-                    or str(v.get("value", ""))
-                ),
+                "description": v.get("description")
+                or v.get("name")
+                or str(v.get("value", "")),
             }
             for v in value_list
         ]
