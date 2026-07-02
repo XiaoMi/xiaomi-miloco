@@ -94,11 +94,34 @@ cd backend && uv run task dev
 ### 用户最常修改的配置项
 
 - `model.omni.api_key`：感知启动前必填，通过 `miloco-cli config set model.omni.api_key <key>` 设置
+- `timezone`：部署时区（IANA 名），服务器时区 ≠ 家庭时区时必配，详见下节
 - `server.host`：默认 `127.0.0.1`，仅本机可达；开放局域网访问改为 `0.0.0.0`（需自行评估网络安全）
 - `server.port`：服务监听端口，默认 `1810`（定义在 `settings.yaml::server` / `settings.py` 的 `ServerSettings`，不进 schema.json）；与其他服务端口冲突时修改此项
 - `miot.cloud_server`：使用海外账号时改为对应区域
 - `perception.snapshot_max_disk_mb`：事件截图磁盘配额，磁盘紧张时调低
 - `perf.enabled`：关闭后不采集 observability 数据，节省磁盘
+
+### 时区
+
+Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见的时刻都锚定它：感知推送的「时间」字段、注入 omni 的「当前时间」、agent prompt 的「时间与时区」块、API 出口的 ISO 偏移后缀、"今天/本周"等业务概念、定时任务时点。DB 存储始终是 UTC 绝对时刻（INTEGER ms），不受此配置影响。
+
+解析优先级（backend `deploy_timezone()` / 插件 `deployTimezone()` / CLI 同一套顺序）：
+
+1. `MILOCO_TIMEZONE` 环境变量（IANA 名）
+2. `config.json` 的 `timezone`（用户权威设置）
+3. 系统时区反查：`TZ` env → `/etc/timezone` → `/etc/localtime`（symlink 目标；普通文件则按字节内容反查 zoneinfo 数据库）
+4. 最后兜底 OS 本地偏移 + 一次性 warning（宿主完全不暴露 IANA 身份时）
+
+配置方式：
+
+```bash
+miloco-cli config set timezone Asia/Shanghai   # IANA 名，非法名会被拦
+```
+
+注意事项：
+
+- **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应显式配置 `timezone` 或给容器设 `TZ` 环境变量。
+- `miloco-cli service start` 生成 supervisord.conf 时会把解析出的时区以 `TZ` + `MILOCO_TIMEZONE` 注入 backend 子进程环境（改配置后重启生效）。
 
 ### 配置修改后是否需要重启
 
