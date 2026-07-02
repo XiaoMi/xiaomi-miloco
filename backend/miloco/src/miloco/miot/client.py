@@ -1021,8 +1021,15 @@ class MiotProxy:
         )
 
     async def sync_automation_property_subscriptions(self, mappings: list) -> None:
-        """Hot-sync MiOT property/event subscriptions for automation mappings."""
+        """Hot-sync MiOT property/event subscriptions for automation mappings.
+
+        先刷新 meta 订阅：米家云端 ACL 要求对 did 先建立 meta 订阅（meta ACL 授权），
+        才能授权 event/property 订阅。create_mapping 路径若跳过此步，新 did 的
+        event 订阅会 Not authorized（需重启才全量刷 meta）。在此入口补一次，
+        保证新 did 先拿 meta ACL 再订阅事件/属性。
+        """
         self._automation_mappings = list(mappings)
+        await self._sync_meta_subscriptions()
         await self._sync_property_subscriptions(mappings)
         await self._sync_event_subscriptions(mappings)
 
