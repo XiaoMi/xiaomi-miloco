@@ -677,8 +677,8 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
           <div className="flex items-baseline justify-between">
             <span className="text-info">
               ✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}
-              {packPath && <>，<button type="button" onClick={() => { revealDir(packPath.substring(0, packPath.lastIndexOf("/"))).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
-              ，<a href="https://mi.feishu.cn/share/base/form/shrcnUmo9ez8NwkcpvpJsKSOdgd" target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink", "提交反馈")}</a>
+              {packPath && <>，<button type="button" onClick={() => { const i = packPath.lastIndexOf("/"); if (i > 0) revealDir(packPath.substring(0, i)).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
+              ，<a href="https://mi.feishu.cn/share/base/form/shrcnUmo9ez8NwkcpvpJsKSOdgd" target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink", "前往提交")}</a>
             </span>
             <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
               {t("activity.feedbackModify", "修改反馈信息")}
@@ -779,7 +779,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
           {t("activity.feedbackCancel", "取消")}
         </button>
         <button type="button" onClick={handleSubmit} className="px-4 py-[5px] text-caption font-medium text-white bg-brand-primary rounded-md hover:bg-brand-accent transition-colors">
-          {t("activity.feedbackSubmit", "提交反馈")}
+          {t("activity.feedbackSubmit", "打包数据")}
         </button>
       </div>
     </div>
