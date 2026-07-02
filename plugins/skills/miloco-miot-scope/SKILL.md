@@ -44,7 +44,7 @@ miloco-cli scope camera list | enable <did>... | disable <did>...
 
 - **家庭 `switch <id>`**：切换到该家庭（唯一启用），其余自动停用。只接受 1 个 id。
 - **摄像头 `enable/disable <did>...`**：批量启用/停用，可同时操作多个 did。
-- `list` 输出每项含 `in_use`（是否启用）；camera 额外带 `is_online`（设备在线）和 `connected`（流已订阅）。三者都 true = 正常采集，任一 false 即某层未就位。
+- `list` 输出每项含 `in_use`（是否启用）；camera 额外带 `is_online`（设备在线）、`connected`（流已订阅）和 `voice_in_use`（拾音开关，住户在面板控制、CLI 无此命令）。`in_use`/`is_online`/`connected` 三者都 true = 正常采集，任一 false 即某层未就位。`voice_in_use=false` = 该相机声音完全不被处理（不转写、不上云、听不到指令），视频照常感知。
 
 ## "只用 X" 模式
 
