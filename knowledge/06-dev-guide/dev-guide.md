@@ -110,7 +110,7 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 1. `MILOCO_TIMEZONE` 环境变量（IANA 名）
 2. `config.json` 的 `timezone`（用户权威设置）
 3. 系统时区反查：`TZ` env → `/etc/timezone` → `/etc/localtime`（symlink 目标；普通文件则按字节内容反查 zoneinfo 数据库）
-4. 最后兜底 OS 本地偏移 + 一次性 warning（宿主完全不暴露 IANA 身份时）
+4. 最后兜底 `Asia/Shanghai` + 一次性 warning（宿主完全不暴露 IANA 身份时；面向国内主流用户的保守选择，非国内部署请显式配置时区）
 
 配置方式：
 
