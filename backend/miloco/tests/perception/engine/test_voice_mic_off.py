@@ -1,7 +1,7 @@
 """拾音关闭 = mic-off 硬切：引擎入口剥音频 → gate 视频-only → prompt 无音频任务。
 
 第一道防线（唯一切点）在 ``PerceptionEngine._strip_voice_denied_audio``：
-- 拾音白名单外相机（默认关闭）的 snapshot.audio 置 None（不进 gate/identity/omni）
+- 拾音黑名单相机的 snapshot.audio 置 None（不进 gate/identity/omni）
 - 跨窗残留（audio_tail / pending_speech）一并清除
 下游全部自动收敛（本文件逐层钉住）：
 - gate：空 audio → audio_active=False、VAD 跳过 → audio-only 刺激不开窗
@@ -67,8 +67,8 @@ def _snapshot(did: str, *, with_audio: bool = True) -> DeviceSnapshot:
 
 class TestStripVoiceDeniedAudio:
     def test_denied_did_audio_stripped_enabled_untouched(self, monkeypatch):
-        """白名单对照：不在白名单（默认关闭）的相机音频剥空，已开启的原样保留。"""
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+        """黑名单非空对照：denied 相机音频剥空，enabled 相机原样保留。"""
+        monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"cam_off"})
         eng = _make_engine()
         s_off = _snapshot("cam_off")
         s_on = _snapshot("cam_on")
@@ -79,12 +79,12 @@ class TestStripVoiceDeniedAudio:
         assert s_off.audio is None
         assert s_off.audio_clip.size == 0
         assert s_on.audio is not None
-        assert s_on.audio_clip.size > 0  # 白名单内相机不受影响
+        assert s_on.audio_clip.size > 0  # 有黑名单存在时其余相机不受影响
 
     def test_stale_tail_and_pending_speech_cleared(self, monkeypatch):
         """关拾音前的跨窗残留必须清：audio_tail 不得拼进未来窗口，
         pending_speech 半句不得再注入 prompt（都是语音内容上云路径）。"""
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+        monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"cam_off"})
         eng = _make_engine()
         eng._audio_tail["cam_off"] = _loud_audio(800)
         eng._pending_speech["cam_off"] = [{"content": "关闭前的半句"}]
@@ -98,40 +98,35 @@ class TestStripVoiceDeniedAudio:
         assert "cam_off" not in eng._pending_speech_rounds
         assert "cam_on" in eng._audio_tail  # 只清 denied 的
 
-    def test_whitelisted_cam_noop(self, monkeypatch):
-        """显式开启（在白名单）的相机不被剥——mic-on 后音频照常进管线。"""
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+    def test_empty_blacklist_noop(self, monkeypatch):
+        monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: set())
         eng = _make_engine()
         s = _snapshot("cam_on")
         eng._strip_voice_denied_audio(BatchedSnapshot(snapshots=[s]))
         assert s.audio is not None
 
-    def test_default_empty_whitelist_strips_all(self, monkeypatch):
-        """默认关闭：白名单为空（新装态）→ 所有相机音频剥离。"""
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: set())
-        eng = _make_engine()
-        s = _snapshot("cam_new")
-        eng._strip_voice_denied_audio(BatchedSnapshot(snapshots=[s]))
-        assert s.audio is None
+    def test_kv_failure_fails_open(self, monkeypatch):
+        """KV 读失败 fail-open：不剥任何音频（第二道 dispatch/落库闸门兜底）。"""
 
-    def test_kv_failure_fails_closed(self, monkeypatch):
-        """KV 读失败按**空白名单**处理（全部剥离）——默认关闭语义下，一致且安全的
-        失败姿态是静音而非出声（不把用户没点头的声音送云端）。返回空集 = 剥全部。"""
+        def _boom():
+            raise RuntimeError("kv down")
+
+        # _voice_denied_dids 内部自兜异常；这里直接钉模块级函数的 fail-open 行为
         monkeypatch.setattr(
-            "miloco.miot.filter.voice_enabled_camera_dids",
+            "miloco.miot.filter.voice_denied_camera_dids",
             lambda kv: (_ for _ in ()).throw(RuntimeError("kv down")),
         )
-        assert engine_api._voice_enabled_dids() == set()  # 空白名单 → strip 剥所有相机
+        assert engine_api._voice_denied_dids() == set()
 
     def test_relog_after_reenable(self, monkeypatch):
-        """拾音开启后再关回默认，INFO 日志会重新打一次（_mic_off_logged 集维护）。"""
-        enabled: set[str] = set()  # 默认关闭：cam_off 不在白名单
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: set(enabled))
+        """拾音重开后再关闭，INFO 日志会重新打一次（_mic_off_logged 集维护）。"""
+        denied: set[str] = {"cam_off"}
+        monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: set(denied))
         eng = _make_engine()
         eng._strip_voice_denied_audio(BatchedSnapshot(snapshots=[_snapshot("cam_off")]))
         assert "cam_off" in eng._mic_off_logged
-        # 显式开启（进白名单）→ 从已打日志集移除
-        enabled.add("cam_off")
+        # 重新开启 → 从已打日志集移除
+        denied.clear()
         eng._strip_voice_denied_audio(BatchedSnapshot(snapshots=[_snapshot("cam_off")]))
         assert "cam_off" not in eng._mic_off_logged
 
@@ -148,7 +143,7 @@ class TestGateVideoOnlyAfterStrip:
         传 prev_frame 基准帧隔离视觉 cold-start 放行——生产流式循环里 prev_frames
         字典常驻，静止画面本就不过视觉 gate，audio-only 是这类窗口唯一的开窗路径。
         """
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+        monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"cam_off"})
         eng = _make_engine()
         s = _snapshot("cam_off")  # 静止画面 + 响亮音频
         prev = _preprocess(s.frames[0])
@@ -171,7 +166,7 @@ class TestGateVideoOnlyAfterStrip:
 
     def test_video_stimulus_still_fires_with_audio_inactive(self, monkeypatch):
         """视频刺激照常开窗，但 packet 的 audio 触发为 False、audio_clip 为空。"""
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+        monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"cam_off"})
         eng = _make_engine()
         gray = np.zeros((64, 64, 3), dtype=np.uint8)
         white = np.full((64, 64, 3), 255, dtype=np.uint8)
@@ -193,7 +188,7 @@ class TestGateVideoOnlyAfterStrip:
 
     def test_voice_on_cam_unchanged(self, monkeypatch):
         """拾音开启的相机：audio 触发行为与改动前一致（对照组）。"""
-        monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+        monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"other"})
         eng = _make_engine()
         s = _snapshot("cam_on")
         eng._strip_voice_denied_audio(BatchedSnapshot(snapshots=[s]))
@@ -283,7 +278,7 @@ class TestPromptNoAudioTasksAfterStrip:
 @pytest.mark.asyncio
 async def test_realtime_perceive_strips_before_pipeline(monkeypatch):
     """入口即剥：pipeline 收到的 batch 中 denied 相机音频已空、audio-tail 未积累。"""
-    monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+    monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"cam_off"})
     eng = _make_engine()
 
     seen: dict[str, int] = {}
@@ -315,7 +310,7 @@ async def test_on_demand_perceive_strips_before_pipeline(monkeypatch):
     skill 明确承诺 perceive query 对拾音关闭相机听不到现场声音——隐私关键路径，
     钉住 on_demand_perceive 的 strip 接线（被移除即红）。
     """
-    monkeypatch.setattr(engine_api, "_voice_enabled_dids", lambda: {"cam_on"})
+    monkeypatch.setattr(engine_api, "_voice_denied_dids", lambda: {"cam_off"})
     eng = _make_engine()
 
     seen: dict[str, int] = {}

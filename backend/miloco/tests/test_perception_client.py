@@ -309,14 +309,13 @@ async def test_handle_realtime_sends_all_when_no_early_sent(proxy):
 # ─── 按摄像头语音开关闸门（_filter_voice_enabled + dispatch gate）───────────────
 
 
-def _voice_mgr(voice_enabled: set[str]) -> MagicMock:
-    """构造一个 get_manager() 返回值,其 kv_repo 让 voice_enabled_camera_dids 返回给定
-    白名单集合（默认关闭语义：不在集内 = mic OFF）。"""
+def _voice_mgr(voice_denied: set[str]) -> MagicMock:
+    """构造一个 get_manager() 返回值,其 kv_repo 让 voice_denied_camera_dids 返回给定集合。"""
     import json as _json
 
     from miloco.database.kv_repo import ScopeConfigKeys
 
-    store = {ScopeConfigKeys.CAMERA_VOICE_WHITE_LIST_KEY: _json.dumps(list(voice_enabled))}
+    store = {ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY: _json.dumps(list(voice_denied))}
     kv = MagicMock()
     kv.get = lambda key, default=None: store.get(key, default)
     mgr = MagicMock()
@@ -324,8 +323,8 @@ def _voice_mgr(voice_enabled: set[str]) -> MagicMock:
     return mgr
 
 
-def test_filter_voice_enabled_keeps_only_whitelisted_did():
-    """仅 source_device_ids[0] 在拾音白名单 → 保留；不在（默认关闭）→ 丢弃。"""
+def test_filter_voice_enabled_drops_blacklisted_did():
+    """source_device_ids[0] 在语音黑名单 → 丢弃；不在 → 保留。"""
     from miloco.perception.client import _filter_voice_enabled
     from miloco.perception.types import Speech
 
@@ -334,39 +333,33 @@ def test_filter_voice_enabled_keeps_only_whitelisted_did():
     s_on = Speech(needs_response=True, speaker="妈妈", content="关灯",
                   source_device_ids=["cam-on"], device_name="卧室相机")
 
-    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-on"})):
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})):
         kept = _filter_voice_enabled([s_off, s_on])
 
     assert [s.content for s in kept] == ["关灯"]
 
 
-def test_filter_voice_enabled_default_empty_whitelist_drops_all():
-    """默认关闭：白名单为空（新装态）→ 全部 speech 丢弃；did 缺失的异常产物同样丢弃。"""
+def test_filter_voice_enabled_empty_blacklist_passes_all():
     from miloco.perception.client import _filter_voice_enabled
     from miloco.perception.types import Speech
 
     s = Speech(needs_response=True, speaker="x", content="c", source_device_ids=["d"])
-    s_nodid = Speech(needs_response=True, speaker="y", content="c2", source_device_ids=[])
     with patch("miloco.manager.get_manager", return_value=_voice_mgr(set())):
-        assert _filter_voice_enabled([s, s_nodid]) == []
-    # 显式开启后放行
-    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"d"})):
         assert _filter_voice_enabled([s]) == [s]
 
 
-def test_filter_voice_enabled_fail_closed_on_lookup_error():
-    """读 KV/manager 失败 → 按空白名单处理丢弃全部——默认关闭语义下，一致且安全的
-    失败姿态是静音而非出声（不把用户没点头的转写下发/落库）。"""
+def test_filter_voice_enabled_fail_open_on_lookup_error():
+    """读 KV/manager 失败 → fail-open,放行全部（不吞掉语音链路）。"""
     from miloco.perception.client import _filter_voice_enabled
     from miloco.perception.types import Speech
 
     s = Speech(needs_response=True, speaker="x", content="c", source_device_ids=["d"])
     with patch("miloco.manager.get_manager", side_effect=RuntimeError("boom")):
-        assert _filter_voice_enabled([s]) == []
+        assert _filter_voice_enabled([s]) == [s]
 
 
 async def test_handle_realtime_drops_voice_disabled_speech(proxy):
-    """终态 dispatch 路径:拾音未开启(默认关闭)相机的 speech 指令不 dispatch,白名单相机照常发。"""
+    """终态 dispatch 路径:语音黑名单相机的 speech 指令不 dispatch,启用相机的照常发。"""
     from unittest.mock import AsyncMock
 
     from miloco.perception.types import RealtimePerceptionResult, Speech
@@ -380,7 +373,7 @@ async def test_handle_realtime_drops_voice_disabled_speech(proxy):
         ],
     )
 
-    fake_mgr = _voice_mgr({"cam-on"})  # 白名单只含 cam-on:cam-off 默认关闭被丢弃
+    fake_mgr = _voice_mgr({"cam-off"})
 
     async def _noop_update(*a, **k):
         ...
@@ -399,7 +392,7 @@ async def test_handle_realtime_drops_voice_disabled_speech(proxy):
 
 
 async def test_handle_realtime_dispatches_when_voice_enabled(proxy):
-    """对照组:相机在拾音白名单 → speech 指令照常 dispatch。"""
+    """对照组:相机未拉黑 → speech 指令照常 dispatch。"""
     from unittest.mock import AsyncMock
 
     from miloco.perception.types import RealtimePerceptionResult, Speech
@@ -410,7 +403,7 @@ async def test_handle_realtime_dispatches_when_voice_enabled(proxy):
                    is_complete=True, source_device_ids=["cam-on"]),
         ],
     )
-    fake_mgr = _voice_mgr({"cam-on"})
+    fake_mgr = _voice_mgr(set())
 
     async def _noop_update(*a, **k):
         ...
@@ -448,7 +441,7 @@ async def test_early_speeches_voice_disabled_not_dispatched(proxy):
 
     proxy.perception_engine.realtime_perceive = engine_realtime
 
-    with patch("miloco.manager.get_manager", return_value=_voice_mgr(set())), \
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})), \
          patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
         await proxy._realtime_perceive_impl(
             _stub_snapshot(), [], 0, 0.0, main_loop, [],
@@ -458,7 +451,7 @@ async def test_early_speeches_voice_disabled_not_dispatched(proxy):
 
 
 async def test_early_speeches_voice_enabled_dispatched(proxy):
-    """对照组:相机在拾音白名单 → 早出指令照常 dispatch（闸门有选择性）。"""
+    """对照组:黑名单非空但相机未在其中 → 早出指令照常 dispatch（闸门有选择性）。"""
     from unittest.mock import AsyncMock
 
     from miloco.perception.types import Speech
@@ -474,7 +467,7 @@ async def test_early_speeches_voice_enabled_dispatched(proxy):
 
     proxy.perception_engine.realtime_perceive = engine_realtime
 
-    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-on"})), \
+    with patch("miloco.manager.get_manager", return_value=_voice_mgr({"cam-off"})), \
          patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as disp:
         await proxy._realtime_perceive_impl(
             _stub_snapshot(), [], 0, 0.0, main_loop, [],
@@ -502,7 +495,7 @@ async def test_persist_skips_asr_only_window_from_voice_disabled_cam():
                    is_complete=True, source_device_ids=["cam-off"]),
         ],
     )
-    fake_mgr = _voice_mgr(set())
+    fake_mgr = _voice_mgr({"cam-off"})
 
     with patch("miloco.manager.get_manager", return_value=fake_mgr):
         await _persist_meaningful_event(
@@ -515,7 +508,7 @@ async def test_persist_skips_asr_only_window_from_voice_disabled_cam():
 
 
 async def test_persist_keeps_asr_window_from_voice_enabled_cam():
-    """对照组:相机在拾音白名单 → ASR 窗口照常入表,has_asr=True。"""
+    """对照组:黑名单非空但相机不在其中 → ASR 窗口照常入表,has_asr=True。"""
     from miloco.perception.client import _persist_meaningful_event
     from miloco.perception.snapshot_context import OmniEventArtifacts
     from miloco.perception.types import RealtimePerceptionResult, Speech
@@ -526,7 +519,7 @@ async def test_persist_keeps_asr_window_from_voice_enabled_cam():
                    is_complete=True, source_device_ids=["cam-on"]),
         ],
     )
-    fake_mgr = _voice_mgr({"cam-on"})
+    fake_mgr = _voice_mgr({"cam-off"})
 
     with patch("miloco.manager.get_manager", return_value=fake_mgr):
         await _persist_meaningful_event(
@@ -557,7 +550,7 @@ async def test_persist_mixed_window_excludes_voice_disabled_transcript():
                    is_complete=True, source_device_ids=["cam-off"]),
         ],
     )
-    fake_mgr = _voice_mgr(set())
+    fake_mgr = _voice_mgr({"cam-off"})
 
     with patch("miloco.manager.get_manager", return_value=fake_mgr):
         await _persist_meaningful_event(
