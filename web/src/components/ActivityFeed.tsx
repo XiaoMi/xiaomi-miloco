@@ -540,7 +540,7 @@ function ActivityRow({
 
   return (
     <li
-      onClick={() => setExpanded((x) => !x)}
+      onClick={() => { if (!window.getSelection()?.toString()) setExpanded((x) => !x); }}
       aria-expanded={expanded}
       className="px-5 py-2.5 hover:bg-bg-tertiary transition-colors cursor-pointer"
     >
