@@ -1859,7 +1859,8 @@ def test_display_falls_back_to_asia_shanghai_when_undetectable(
     monkeypatch.setenv("MILOCO_HOME", str(tmp_path / "empty-home"))
     reset_settings()
     monkeypatch.setattr(time_utils, "_system_iana_tz", lambda: None)
-    monkeypatch.setattr(time_utils, "_warned_no_iana", False)
+    # warn-once 已改 lru_cache 无参函数,cache_clear 复位(防其它用例已触发过)
+    time_utils._warn_no_iana_once.cache_clear()
 
     now_ms = int(_time.time() * 1000)
     expected = datetime.fromtimestamp(

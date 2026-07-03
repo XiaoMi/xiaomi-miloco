@@ -25,14 +25,29 @@ import logging
 import os
 from datetime import tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# TZPATH 顶层绑定快照安全:本仓库不调 zoneinfo.reset_tzpath(),统一 from-import
+# 形式(消除函数内 import zoneinfo 的双形式导入)。
+from zoneinfo import TZPATH, ZoneInfo, ZoneInfoNotFoundError
 
 _logger = logging.getLogger(__name__)
 
 # 四条系统反查路全失败时的最后兜底（与 backend time_utils 同款、同维护者裁定）：
 # 内容反查层已把时区配置正确的宿主基本兜住，此值实际只服务"从未配置时区"的裸环境。
 _FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
-_warned_no_iana = False
+
+
+# warn-once 用 lru_cache 无参函数实现(替代模块级 bool + global 手工置位):
+# 结构上保证进程内恰好执行一次,测试用 .cache_clear() 复位,静态分析也可证。
+# (与 backend time_utils._warn_no_iana_once 同款。)
+@functools.lru_cache(maxsize=1)
+def _warn_no_iana_once() -> None:
+    _logger.warning(
+        "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
+        "If running outside China, set MILOCO_TIMEZONE or config.json "
+        "`timezone` to your IANA zone name (e.g. America/Los_Angeles, "
+        "Europe/London)."
+    )
 
 # tzdata 库目录里的非时区文件（内容反查时跳过）；与 backend time_utils 同源。
 _TZDB_NON_ZONE_FILES = frozenset({
@@ -50,8 +65,6 @@ def _localtime_content_lookup(localtime: Path = Path("/etc/localtime")) -> ZoneI
     只在 ``_system_iana_tz`` 内调用,结果随其 lru_cache 缓存,全库扫描仅一次。
     （backend time_utils 的逐字副本——CLI 不能 import backend。）
     """
-    import zoneinfo
-
     try:
         if localtime.is_symlink() or not localtime.is_file():
             return None
@@ -61,7 +74,7 @@ def _localtime_content_lookup(localtime: Path = Path("/etc/localtime")) -> ZoneI
     if not data:
         return None
     matches: list[str] = []
-    for base in zoneinfo.TZPATH:
+    for base in TZPATH:
         root = Path(base)
         if not root.is_dir():
             continue
@@ -98,13 +111,13 @@ def _system_iana_tz() -> ZoneInfo | None:
         try:
             return ZoneInfo(name)
         except ZoneInfoNotFoundError:
-            pass
+            pass  # TZ 值不是合法 IANA 名(如 "CST-8") → 落到下一级反查
     p = Path("/etc/timezone")
     if p.is_file():
         try:
             return ZoneInfo(p.read_text().strip())
         except (ZoneInfoNotFoundError, OSError):
-            pass
+            pass  # 文件读不了/内容非法 → 落到下一级反查
     p = Path("/etc/localtime")
     if p.is_symlink():
         try:
@@ -114,7 +127,7 @@ def _system_iana_tz() -> ZoneInfo | None:
             if idx >= 0:
                 return ZoneInfo(target[idx + len("zoneinfo/") :])
         except (ZoneInfoNotFoundError, OSError):
-            pass
+            pass  # symlink 读失败/目标名非法 → 落到内容反查(与 backend 同款静默降级)
     # symlink 路读不到(普通文件拷贝,docker 常见)→ 按内容反查兜住
     return _localtime_content_lookup()
 
@@ -163,13 +176,5 @@ def deploy_timezone() -> tzinfo:
         return ZoneInfo(name)
     if iana := _system_iana_tz():
         return iana
-    global _warned_no_iana
-    if not _warned_no_iana:
-        _logger.warning(
-            "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
-            "If running outside China, set MILOCO_TIMEZONE or config.json "
-            "`timezone` to your IANA zone name (e.g. America/Los_Angeles, "
-            "Europe/London)."
-        )
-        _warned_no_iana = True
+    _warn_no_iana_once()
     return _FALLBACK_TZ

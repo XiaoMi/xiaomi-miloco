@@ -18,7 +18,10 @@ import os
 import time
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# TZPATH 顶层绑定快照安全:本仓库不调 zoneinfo.reset_tzpath(),统一 from-import
+# 形式(消除函数内 import zoneinfo 的双形式导入)。
+from zoneinfo import TZPATH, ZoneInfo, ZoneInfoNotFoundError
 
 from miloco.middleware.exceptions import ValidationException
 
@@ -78,11 +81,30 @@ def ms_to_aware_dt(ms: int, tz: tzinfo | None = None) -> datetime:
 # 内容反查层已把时区配置正确的宿主基本兜住,此值实际只服务"从未配置时区"的裸环境,
 # 猜沪对 CN 主体用户群大概率正确;UTC 宿主上 OS 本地偏移 ≈ +0,不猜也无增益。
 _FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
-_warned_no_iana = False
-_warned_utc_tz = False
 
 # 解析出这些名字即视为"UTC 部署"红旗(没有家庭真住在 UTC)
 _UTC_TZ_NAMES = frozenset({"UTC", "Etc/UTC", "Etc/Universal", "Universal", "Zulu"})
+
+
+# warn-once 用 lru_cache 无参函数实现(替代模块级 bool + global 手工置位):
+# 结构上保证进程内恰好执行一次,测试用 .cache_clear() 复位,静态分析也可证。
+@functools.lru_cache(maxsize=1)
+def _warn_utc_once() -> None:
+    _logger.warning(
+        "Resolved deploy timezone is UTC — no household lives in UTC; the server "
+        "timezone is likely unconfigured and all user-facing times may be "
+        "mislabeled. If your home is elsewhere, set it with: "
+        "miloco-cli config set timezone <IANA-name> (e.g. Asia/Shanghai)."
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_no_iana_once() -> None:
+    _logger.warning(
+        "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
+        "If running outside China, set MILOCO_TIMEZONE or settings.timezone "
+        "to your IANA zone name (e.g. America/Los_Angeles, Europe/London)."
+    )
 
 
 def _warn_if_utc(tz: tzinfo) -> tzinfo:
@@ -91,15 +113,8 @@ def _warn_if_utc(tz: tzinfo) -> tzinfo:
     没有家庭住在 UTC——解析成 UTC 几乎必然是服务器时区未配置(云主机默认 Etc/UTC),
     此时所有 agent 可见时刻都会错标。提示精确的修复命令,只打一次。
     """
-    global _warned_utc_tz
-    if not _warned_utc_tz and str(tz) in _UTC_TZ_NAMES:
-        _logger.warning(
-            "Resolved deploy timezone is UTC — no household lives in UTC; the server "
-            "timezone is likely unconfigured and all user-facing times may be "
-            "mislabeled. If your home is elsewhere, set it with: "
-            "miloco-cli config set timezone <IANA-name> (e.g. Asia/Shanghai)."
-        )
-        _warned_utc_tz = True
+    if str(tz) in _UTC_TZ_NAMES:
+        _warn_utc_once()
     return tz
 
 # 顶层非 IANA 名的杂项文件,内容反查时跳过
@@ -117,8 +132,6 @@ def _localtime_content_lookup(localtime: Path = Path("/etc/localtime")) -> ZoneI
     优先带 "/" 的规范名(如 Asia/Shanghai 优先于顶层别名 PRC),保证确定性。
     只在 ``_system_iana_tz`` 内调用,结果随其 lru_cache 缓存,全库扫描仅一次。
     """
-    import zoneinfo
-
     try:
         if localtime.is_symlink() or not localtime.is_file():
             return None
@@ -128,7 +141,7 @@ def _localtime_content_lookup(localtime: Path = Path("/etc/localtime")) -> ZoneI
     if not data:
         return None
     matches: list[str] = []
-    for base in zoneinfo.TZPATH:
+    for base in TZPATH:
         root = Path(base)
         if not root.is_dir():
             continue
@@ -218,14 +231,7 @@ def deploy_timezone() -> tzinfo:
         return _warn_if_utc(ZoneInfo(tz_name))
     if iana := _system_iana_tz():
         return _warn_if_utc(iana)
-    global _warned_no_iana
-    if not _warned_no_iana:
-        _logger.warning(
-            "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
-            "If running outside China, set MILOCO_TIMEZONE or settings.timezone "
-            "to your IANA zone name (e.g. America/Los_Angeles, Europe/London)."
-        )
-        _warned_no_iana = True
+    _warn_no_iana_once()
     return _FALLBACK_TZ
 
 
