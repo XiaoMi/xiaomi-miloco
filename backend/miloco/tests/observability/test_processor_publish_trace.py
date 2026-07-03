@@ -122,7 +122,7 @@ async def test_publish_trace_writes_main_and_two_device_rows(tmp_path):
 
 async def test_publish_trace_reuses_device_trace_id_from_timing(tmp_path):
     """pipeline 写入 timing 的 _device_trace_id_{did} 应被 traces_device 行复用,
-    保证 omni_log jsonl 与 SQLite 行两侧 UUID 一致。
+    给 SQLite 行稳定的 device_trace_id。
     """
     db = tmp_path / "obs.db"
     client = MetricsClient(db_path=db)

@@ -143,17 +143,17 @@ async def test_e2e_single_cam_unchanged(proxy_with_runner, mock_miot_proxy):
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_X", ["cam_A"], "人来")],
                     device_rule_map={"cam_A": ["rule_X"]}),
-            clips_by_device=None,
+            artifacts=None,
         )
         # cycle 2: 未命中,pending_exit 1st
         await proxy.handle_realtime_perception_result(
             _result(device_rule_map={"cam_A": ["rule_X"]}),
-            clips_by_device=None,
+            artifacts=None,
         )
         # cycle 3: 未命中,确认 EXIT → schedule debounce(seconds=0 立即 fire)
         await proxy.handle_realtime_perception_result(
             _result(device_rule_map={"cam_A": ["rule_X"]}),
-            clips_by_device=None,
+            artifacts=None,
         )
 
     await asyncio.sleep(0.05)
@@ -183,13 +183,13 @@ async def test_e2e_cam_a_offline_rule_state_preserved(
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_X", ["cam_A"], "命中")],
                     device_rule_map={"cam_A": ["rule_X"]}),
-            clips_by_device=None,
+            artifacts=None,
         )
         # cycle 2-4: cam_A 离线,只有 cam_B 上线(rule 没绑 B,device_rule_map[B]=[])
         for _ in range(3):
             await proxy.handle_realtime_perception_result(
                 _result(device_rule_map={"cam_B": []}),
-                clips_by_device=None,
+                artifacts=None,
             )
 
     await runner.drain()
@@ -222,23 +222,23 @@ async def test_e2e_multi_cam_or_aggregation(proxy_with_runner, mock_miot_proxy):
         # cycle 1: cam_A 命中 → ENTERED via A
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_or", ["cam_A"], "A 命中")], device_rule_map=dm),
-            clips_by_device=None,
+            artifacts=None,
         )
         # cycle 2: cam_B 命中,cam_A 未命中 → A 桶 1st pending,B 桶 ENTER 但 rule 已 True
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_or", ["cam_B"], "B 命中")], device_rule_map=dm),
-            clips_by_device=None,
+            artifacts=None,
         )
         # cycle 3: cam_B 继续命中,cam_A 未命中 → A 桶第二帧 false 确认,B 桶继续 true → rule 仍 True
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_or", ["cam_B"], "B 持续")], device_rule_map=dm),
-            clips_by_device=None,
+            artifacts=None,
         )
         # cycle 4-5: 都不命中 → 两桶都翻 false → EXITED
         for _ in range(2):
             await proxy.handle_realtime_perception_result(
                 _result(device_rule_map=dm),
-                clips_by_device=None,
+                artifacts=None,
             )
 
     await asyncio.sleep(0.05)
@@ -274,7 +274,7 @@ async def test_e2e_pending_exit_no_cross_pollution(
                 ],
                 device_rule_map=dm,
             ),
-            clips_by_device=None,
+            artifacts=None,
         )
         assert runner._last_source_state[("rule_pex", "cam_A")] is True
         assert runner._last_source_state[("rule_pex", "cam_B")] is True
@@ -282,7 +282,7 @@ async def test_e2e_pending_exit_no_cross_pollution(
         # cycle 2: 只有 B 命中 → A 桶喂 false(false 广播路径),1st pending
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_pex", ["cam_B"], "B")], device_rule_map=dm),
-            clips_by_device=None,
+            artifacts=None,
         )
         # A 应在 pending_source_exit 里(prev=True, this=False, 1st frame)
         assert ("rule_pex", "cam_A") in runner._pending_source_exit, (
@@ -365,12 +365,12 @@ async def test_e2e_duration_multi_source_sync_transition_no_overcount(
                 ],
                 device_rule_map=dm,
             ),
-            clips_by_device=None,
+            artifacts=None,
         )
         mt.return_value = 100.5
         await proxy.handle_realtime_perception_result(
             _result(device_rule_map=dm),
-            clips_by_device=None,
+            artifacts=None,
         )
 
     await runner_dur.drain()
@@ -400,7 +400,7 @@ async def test_e2e_disabled_rule_during_cycle(proxy_with_runner, mock_miot_proxy
                 matched=[("rule_dis", ["cam_A"], "命中")],
                 device_rule_map={"cam_A": ["rule_dis"]},
             ),
-            clips_by_device=None,
+            artifacts=None,
         )
         await runner.drain()
         assert runner._last_rule_state.get("rule_dis") is True
@@ -412,7 +412,7 @@ async def test_e2e_disabled_rule_during_cycle(proxy_with_runner, mock_miot_proxy
         # → false 广播路径检查 enabled_set 跳过该 rule
         await proxy.handle_realtime_perception_result(
             _result(device_rule_map={"cam_A": ["rule_dis"]}),
-            clips_by_device=None,
+            artifacts=None,
         )
 
     await runner.drain()

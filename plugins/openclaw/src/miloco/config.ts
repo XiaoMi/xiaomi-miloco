@@ -122,6 +122,19 @@ const SHARED_CONFIG_SCHEMA = {
       },
       required: ["omni"],
     },
+    /** 通知发送运行参数（与 settings.schema.json 的 notify 对齐） */
+    notify: {
+      type: "object",
+      default: {},
+      additionalProperties: true,
+      properties: {
+        dedup_window_sec: {
+          type: "number",
+          default: 60,
+          description: "相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重",
+        },
+      },
+    },
   },
   required: ["debug", "server", "agent", "model"],
 } as const;
@@ -271,4 +284,27 @@ function safeJsonParse(text: string | undefined): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** 通知去重窗口默认值（秒），与 settings.schema.json / 后端 NotifySettings 对齐。 */
+const DEFAULT_NOTIFY_DEDUP_SEC = 60;
+
+/**
+ * 无副作用读取通知去重窗口（毫秒）。读 config.json 的 `notify.dedup_window_sec`
+ * （秒，与后端 `MilocoSettings.notify` 同键）。非数（含缺失）按缺省 60；负值经
+ * `Math.max(0, …)` 归零 = 关闭去重，与后端 `MessageDeduper` 的 `window_sec<=0` 同义。返回毫秒。
+ *
+ * 刻意不走 {@link loadSharedConfig}：那会在每次调用时归一化落盘、解析 gateway auth，
+ * 而本函数会被每条通知调用，只需读一个数值。
+ */
+export function getNotifyDedupWindowMs(): number {
+  const existing = safeJsonParse(readTextOrUndefined(sharedConfigPath()));
+  const raw = isRecord(existing) ? existing : {};
+  const notify = isRecord(raw.notify) ? raw.notify : undefined;
+  const sec =
+    typeof notify?.dedup_window_sec === "number" &&
+    Number.isFinite(notify.dedup_window_sec)
+      ? notify.dedup_window_sec
+      : DEFAULT_NOTIFY_DEDUP_SEC;
+  return Math.max(0, sec) * 1000;
 }

@@ -51,10 +51,13 @@ from miloco.perception.engine.identity.state import (
     TrackIdentityState,
     apply_recheck_result,
     check_pending_timeout,
+    clear_no_person_on_motion,
+    clear_no_person_to_pending,
     get_face_id_value,
     mark_dispatched,
     needs_omni_call,
     promote_to_pending,
+    record_no_person,
     update_evidence,
 )
 
@@ -150,6 +153,21 @@ def _max_overlap_ratio(
         if ratio > best:
             best = ratio
     return best
+
+
+def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    """两框 IoU（交集 / 并集）。退化框返 0.0。reject_region 覆盖判定用。"""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    iw = min(ax2, bx2) - max(ax1, bx1)
+    ih = min(ay2, by2) - max(ay1, by1)
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
 
 
 def _normalize_bbox_to_1000(
@@ -349,6 +367,9 @@ class IdentityEngine:
         # True ⟺ 本窗该 track 人体框被他人框遮挡 ≥ _TIER_C_MAX_BODY_OVERLAP_RATIO。
         # 消费点: _enqueue_tier_c_candidate 与 E5 人脸门同级早退 (不入库、不走 omni)。
         self._overlap_other_person: dict[int, bool] = {}
+        # reject_region（默认关）：no_person 落定时登记的屏幕区域 (bbox_xyxy, 过期墙钟 ts)，
+        # 区域内全新静止 track 直接预标 no_person、被 confirmed 真人覆盖或 TTL 到期解除。
+        self._no_person_regions: list[tuple[tuple[int, int, int, int], float]] = []
 
         # 身份库变化监听：每窗口对比 library 的 person 快照，发现差异（成员新增/删除、
         # 或某成员 tier_a 样本指纹变化）时把所有 track 的身份字段清空回 pending，
@@ -505,6 +526,16 @@ class IdentityEngine:
             ):
                 state.write_eligible_count = 0
 
+            # no_person track 相对锚点明显移动 → 回 pending 重新识别（疑似被路过真人 ID-switch 带走）。
+            # 静态误检框不动则维持 no_person（停派发、不导出），稳态下持续存活、不重注入 omni。
+            if state.status == "no_person" and self.config.no_person.enabled:
+                clear_no_person_on_motion(
+                    state,
+                    self._latest_bbox.get(tid),
+                    self.config.no_person.motion_clear_displacement_ratio,
+                    self.config.no_person.motion_clear_min_abs_px,
+                )
+
             # SortTracker 给出该 track，本帧首次见 → promote 到 pending
             promote_to_pending(state, now_ts)
 
@@ -567,6 +598,10 @@ class IdentityEngine:
         # "重置→本窗重派"语义)。mode=off 时 O(1) 早退。
         self._run_drift_check(active_track_ids, now_ts, name_lookup)
 
+        # reject_region（默认关）：区域级记忆，压同位置反复误检的 omni 重问。放在收集 candidate
+        # 之前，使预标的 no_person track 本窗即不进派发。
+        self._apply_reject_regions(active_track_ids, now_ts)
+
         candidates: list[IdentityQueryItem] = []
         for tid in active_track_ids:
             state = self._states[tid]
@@ -575,6 +610,7 @@ class IdentityEngine:
                 self.config.dispatch.min_interval_sec,
                 self.config.stability,
                 self._engine_fps,
+                self.config.no_person.no_person_recheck_sec,
             ):
                 continue
             # coasting（人离开/跟丢后纯 Kalman 预测残留）的 track 当窗口不进 omni
@@ -982,6 +1018,61 @@ class IdentityEngine:
         self._next_unknown_index += 1
         return idx
 
+    def _apply_reject_regions(self, active_track_ids: set[int], now_ts: float) -> None:
+        """reject_region（默认关）维护。
+
+        no_person 落定时登记屏幕区域（见 ``_on_result``）。本步：
+          ① TTL 过期清理；
+          ② 被 confirmed 真人覆盖（IoU ≥ clear_iou）的区域解除（真人确在那）；
+          ③ 区域内"全新（从未派发）且本帧检测到的 pending track"直接预标 no_person，
+             跳过 omni 重问——压住同位置反复误检的调用。
+        预标的 track 仍受移动解除保护（真人移动即回 pending 重识别）。
+        ``reject_region_enabled=false``（默认）时整体跳过，零行为影响。
+        """
+        np_cfg = self.config.no_person
+        if not (np_cfg.enabled and np_cfg.reject_region_enabled):
+            return
+        if not self._no_person_regions:
+            return
+        # ① TTL 过期
+        self._no_person_regions = [
+            (b, exp) for (b, exp) in self._no_person_regions if exp > now_ts
+        ]
+        # ② 被 confirmed 真人覆盖的区域解除
+        confirmed_boxes = [
+            self._latest_bbox[t] for t in active_track_ids
+            if self._states[t].status == "confirmed"
+            and self._detected_this_frame.get(t, False)
+            and t in self._latest_bbox
+        ]
+        if confirmed_boxes:
+            self._no_person_regions = [
+                (b, exp) for (b, exp) in self._no_person_regions
+                if max((_bbox_iou(b, cb) for cb in confirmed_boxes), default=0.0)
+                < np_cfg.reject_region_clear_iou
+            ]
+        # ③ 区域内全新 track 预标 no_person（跳过 omni）
+        for tid in active_track_ids:
+            st = self._states[tid]
+            if not (
+                st.status == "pending"
+                and st.last_omni_call_frame == 0      # 全新、从未派发过
+                and st.no_person_vote_count == 0
+                and self._detected_this_frame.get(tid, False)
+            ):
+                continue
+            box = self._latest_bbox.get(tid)
+            if box is not None and any(
+                _bbox_iou(box, rb) >= np_cfg.reject_region_clear_iou
+                for rb, _ in self._no_person_regions
+            ):
+                st.status = "no_person"
+                st.no_person_anchor_bbox = box
+                logger.info(
+                    "[Identity] cam=%s track_id=%d 落在 no_person reject_region → 预标 no_person（跳过 omni）",
+                    self.cam_id, tid,
+                )
+
     def _gc_dead_tracks(self, active_ids: set[int], frame_index: int) -> None:
         """清理 SortTracker 已不再返回、且超过 grace 帧未再现的 track state。
 
@@ -1078,8 +1169,9 @@ class IdentityEngine:
             state = self._states.get(tid)
             if state is None:
                 continue
-            # 已 confirmed 的 track 不进池——它们走 tier_c 累积路径
-            if state.status == "confirmed":
+            # 已 confirmed 的 track 不进池——它们走 tier_c 累积路径。
+            # no_person（非人误检）也不进池——杂物 crop 进陌生人池会污染聚类。
+            if state.status in ("confirmed", "no_person"):
                 continue
             tr = tr_by_id.get(tid)
             if tr is None:
@@ -1130,6 +1222,62 @@ class IdentityEngine:
                 logger.warning("on_result 收到 unknown track_id=%d 的结果（state 已 GC）",
                                result.track_id)
                 return
+
+            # no_person：omni 判该框内确无人（非人误检）。累计票数，连续达阈值落定 no_person
+            # （停派发 / 身份不导出 / 不进陌生人池）；confirmed 成员不被翻（见 record_no_person）。
+            # 非 no_person 结果到达时清票，保证"连续"语义。confirmed 成员永不被 no_person 干扰。
+            if self.config.no_person.enabled and result.no_person:
+                if state.status == "confirmed":
+                    # confirmed 成员不被 no_person 翻（record_no_person 视为弃权），但这一窗仍是
+                    # "没认到本人" → 按弃权口径打断 tier_c 写库连续段（与 coasting / 看脸否定同口径），
+                    # 不放松"连续 N 次一致才写库"的不变式。
+                    state.write_eligible_count = 0
+                committed = record_no_person(
+                    state,
+                    anchor_bbox=self._latest_bbox.get(result.track_id),
+                    vote_threshold=self.config.no_person.vote_threshold,
+                )
+                if committed:
+                    logger.info(
+                        "[Identity] cam=%s track_id=%d 落定 no_person（非人误检，停派发 / 身份不导出）",
+                        self.cam_id, result.track_id,
+                    )
+                    # reject_region（默认关）：登记该屏幕区域，抑制同位置反复误检的 omni 重问
+                    np_cfg = self.config.no_person
+                    anchor = self._latest_bbox.get(result.track_id)
+                    if np_cfg.reject_region_enabled and anchor is not None:
+                        self._no_person_regions.append(
+                            (anchor, now_ts + np_cfg.reject_region_ttl_sec)
+                        )
+                        # 软上限防无限增长（TTL 过期已每窗清理，此处兜底极端多误检场景）
+                        if len(self._no_person_regions) > 64:
+                            self._no_person_regions = self._no_person_regions[-64:]
+                return
+            # 走到这里 = 本窗结果非 no_person（omni 判到人 / unknown，或"漏报 / 失败"的合成非答复）。
+            if state.no_person_vote_count:
+                # no_person 连续性中断，清累计票
+                state.no_person_vote_count = 0
+            if self.config.no_person.enabled and state.status == "no_person":
+                if not result.omni_answered:
+                    # omni 本窗漏报该 track / 整体调用失败（合成的"非答复"，person_id=None 但并非
+                    # "判到人"）→ 按弃权维持 no_person：不解除抑制。否则一次 omni 漏报 / 失败就会把
+                    # 静止误检框打回 pending → caption 复发"陌生人"，整体失败更会一次掀翻全场 no_person。
+                    # 只清 inflight，让下一个周期能再慢重审（inflight 残留会永久堵死重审）。
+                    state.inflight = False
+                    return
+                # omni 确实判到"有人"（成员或 unknown）→ 第二条解除通道：回 pending 重新识别。
+                # 与上面 no_person=True 分支不同，这里**刻意不 return**：本窗这条真判定紧接着落到下面的
+                # update_evidence，作为 pending 的第一票**立即消费**——用满这条真证据加速恢复（高置信
+                # 成员本窗即可 commit-to-confirmed 单窗恢复；unknown 记第一票，后续 pending "下窗即派"
+                # 继续累积）。一票远低于 commit 阈值，即便是 omni 偶发抖动也不会误 commit 成某身份。
+                # 真静止误检物体每次重审仍判 no_person、走不到这里，不复发"陌生人"幻觉。兜"未注册真人
+                # 一动不动被误压"。（no_person=True 分支的 return 是对的：那条被 record_no_person 消费完
+                # 即无后续；这条是"有人"判定，要它既解除又顺带播种重识别，故不 return。）
+                logger.info(
+                    "[Identity] cam=%s track_id=%d no_person 慢重审判到人 → 回 pending 重识别",
+                    self.cam_id, result.track_id,
+                )
+                clear_no_person_to_pending(state, now_ts)
 
             # D · 跨身份冲突兜底：dispatcher 检测出"omni 把已锁定身份挂到了
             # 另一个 candidate"——同一身份只能对应一个 track，物理上不可能两个

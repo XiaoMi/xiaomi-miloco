@@ -217,6 +217,18 @@ class MiotSettings(BaseModel):
     )
 
 
+class NotifySettings(BaseModel):
+    """通知发送相关运行参数。"""
+
+    dedup_window_sec: float = Field(
+        default=60.0,
+        description="相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重。",
+    )
+    # 不加 ge=0.0：MessageDeduper 已把 window_sec<=0 当作「关闭去重」，与 TS 侧
+    # getNotifyDedupWindowMs 的归零语义一致。加了 ge 会让误配负值直接崩掉整个
+    # settings 加载（后端起不来），对一个可选兜底旋钮是过度约束。
+
+
 class CameraSettings(BaseModel):
     """摄像头采集参数。"""
 
@@ -308,7 +320,6 @@ class PerfRetentionSettings(BaseModel):
     events_days: int = Field(default=7, description="events 表保留天数")
     agent_runs_days: int = Field(default=7, description="agent_runs 表保留天数")
     trace_jsonl_days: int = Field(default=7, description="agent jsonl.gz 文件保留天数")
-    omni_log_days: int = Field(default=7, description="omni 交互 log 保留天数")
 
 
 class PerfSettings(BaseModel):
@@ -318,17 +329,13 @@ class PerfSettings(BaseModel):
         default=True,
         description=(
             "性能指标采集总开关。关闭后 MetricsClient / AgentMetaPoller 不启动,"
-            "observability.db / agent_runs / trace jsonl / omni_log cleanup 全部跳过,"
+            "observability.db / agent_runs / trace jsonl cleanup 全部跳过,"
             "track_agent_run 调用单点短路。"
         ),
     )
     retention: PerfRetentionSettings = Field(
         default_factory=PerfRetentionSettings,
         description="observability 数据保留参数",
-    )
-    omni_log_max_file_mb: int = Field(
-        default=100,
-        description="omni_log 单文件 size 上限 MB,超过则 rotate 到 YYYYMMDD.N.jsonl.gz。0 表示禁用 rotate",
     )
 
 
@@ -523,6 +530,10 @@ class MilocoSettings(BaseSettings):
         default_factory=MiotSettings,
         description="MIoT 云接入参数",
     )
+    notify: NotifySettings = Field(
+        default_factory=NotifySettings,
+        description="通知发送运行参数（去重窗口等）",
+    )
     camera: CameraSettings = Field(
         default_factory=CameraSettings,
         description="摄像头采集参数",
@@ -714,6 +725,7 @@ __all__ = [
     "MilocoSettings",
     "MiotSettings",
     "ModelSettings",
+    "NotifySettings",
     "OmniModelSettings",
     "AgentSettings",
     "PerceptionCollectSettings",

@@ -53,7 +53,7 @@ def parse_identity_assignments(
     """fused 主调用 response 中 ``identity_assignments`` 字段的抽取 + 校验。
 
     fused 模式下 omni 主调用 response JSON 多一个 ``identity_assignments`` 字段：
-        [{"track_id":<int>, "name":"<姓名|unknown>", "confidence":0~1, "reason":"..."}]
+        [{"track_id":<int>, "name":"<姓名|unknown|no_person>", "confidence":0~1, "reason":"..."}]
 
     Args:
         raw:               omni 完整响应（dict）或累积的 streaming text（str）
@@ -137,12 +137,19 @@ def _parse_identity_assignments(
         # （match: unknown / unknown_<digit/track_id> / unknown_xxx / unknown-<scope>-<n>）
         lower = raw_name_str.lower()
         is_unknown_n = lower.startswith("unknown_") or lower.startswith("unknown-")
+        # no_person：omni 判该框内确无人（非人误检），区别于 unknown（有人但认不出）。
+        # 不走 gallery 反查、不打"不在 gallery"warning；person_id 记 None，下游靠 no_person 标志分流。
+        # 与 unknown 同口径放宽匹配：容忍附注 / 大小写 / 空格 / 连字符变体（omni 有回显完整标签的
+        # 习惯，如 "no_person（3D打印机）" / "no person"），避免格式抖动时静默退化成 unknown，
+        # 把本该抑制的误检框又当"陌生人"描述（即 no_person 要修的老 bug 回归）。
+        normalized = re.sub(r"[\s\-]+", "_", lower).strip("_")
+        is_no_person = normalized.startswith("no_person")
         if is_unknown_n and not distinguish:
             logger.info("distinguish=false 但收到 %r，规范化为 'unknown'", raw_name_str)
             raw_name_str = "unknown"
 
-        # unknown / Unknown / UNKNOWN / unknown_<n> 等 → person_id=None
-        if raw_name_str.lower() == "unknown" or is_unknown_n:
+        # no_person / unknown / unknown_<n> 等 → person_id=None
+        if is_no_person or raw_name_str.lower() == "unknown" or is_unknown_n:
             person_id: str | None = None
         else:
             # 反查
@@ -182,6 +189,7 @@ def _parse_identity_assignments(
             "confidence": conf,
             "reason": reason,
             "raw_name": raw_name_str,
+            "no_person": is_no_person,
         })
     return out
 

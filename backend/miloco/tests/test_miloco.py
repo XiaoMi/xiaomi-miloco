@@ -31,7 +31,6 @@ def test_perf_config_structure():
     assert retention.traces_days > 0
     assert retention.events_days > 0
     assert retention.trace_jsonl_days > 0
-    assert retention.omni_log_days > 0
 
 
 def test_perception_config_defaults():

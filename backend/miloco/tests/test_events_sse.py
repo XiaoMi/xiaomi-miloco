@@ -83,11 +83,15 @@ def isolated_env(tmp_path, monkeypatch):
 
 
 def _make_clip(kind: str = "mp4") -> "tuple[bytes, str]":
-    """造 (bytes, kind) 元组模拟 omni push_clip_bytes 出来的 sink payload.
-
-    对齐生产 — `processor.clips_by_device: dict[str, tuple[bytes, ClipKind]]`.
-    """
+    """造 (bytes, kind) 元组模拟 omni push_clip_bytes 出来的 artifacts.clips payload."""
     return b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100, kind
+
+
+def _artifacts(clips: dict | None = None):
+    """造 OmniEventArtifacts 实例,只填 clips,trace 留 None."""
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+
+    return OmniEventArtifacts(clips=clips or {})
 
 
 @pytest.mark.asyncio
@@ -113,7 +117,7 @@ class TestSSEPublishFromPersist:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
-            clips_by_device={"cam_living_01": _make_clip()},
+            artifacts=_artifacts({"cam_living_01": _make_clip()}),
         )
 
         assert len(fake_pipeline.publish_calls) == 1
@@ -141,7 +145,7 @@ class TestSSEPublishFromPersist:
             caption=[CaptionEntry(description="看电视")]
         )
         await _persist_meaningful_event(
-            result=result, device_ids=["cam_a"], clips_by_device={}
+            result=result, device_ids=["cam_a"], artifacts=_artifacts()
         )
         assert fake_pipeline.publish_calls == []
 
@@ -158,7 +162,7 @@ class TestSSEPublishFromPersist:
             matched_rules=[MatchedRule(rule_id="r1", reason="x")]
         )
         await _persist_meaningful_event(
-            result=result, device_ids=["cam_a"], clips_by_device={}
+            result=result, device_ids=["cam_a"], artifacts=_artifacts()
         )
         assert len(fake_pipeline.publish_calls) == 1
         event_type, payload = fake_pipeline.publish_calls[0]
@@ -185,7 +189,7 @@ class TestSSEPublishFromPersist:
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_a"],
-            clips_by_device={"cam_a": _make_clip()},
+            artifacts=_artifacts({"cam_a": _make_clip()}),
         )
         # 入表仍发生
         rows = get_manager().meaningful_events_dao.query()

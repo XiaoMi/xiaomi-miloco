@@ -66,7 +66,7 @@ async def test_entered_uses_real_did_not_perception_string(proxy):
     )
     capture, calls = _capture_calls()
     with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     assert ("rule_X", "cam_A", True, "人来了") in calls
     assert not any(c[1] == "perception" for c in calls), (
@@ -84,7 +84,7 @@ async def test_exited_only_dispatched_pairs(proxy):
     )
     capture, calls = _capture_calls()
     with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     assert ("rule_X", "cam_A", False, "") in calls
     assert not any(c[1] == "cam_B" for c in calls), (
@@ -109,7 +109,7 @@ async def test_exited_skips_matched_pair(proxy):
     )
     capture, calls = _capture_calls()
     with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     assert ("rule_X", "cam_A", True, "r") in calls
     assert ("rule_X", "cam_B", False, "") in calls
@@ -146,7 +146,7 @@ async def test_cycle_source_states_include_matched_and_false_pairs(proxy):
         )
 
     with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     assert calls == [
         ("rule_X", "cam_A", True, {"cam_A": True, "cam_B": False}),
@@ -180,7 +180,7 @@ async def test_early_sent_dedup_per_rule_did_pair(proxy):
         await proxy.handle_realtime_perception_result(
             result,
             early_sent_rule_ids={("rule_X", "cam_A")},  # cam_A 已 early 上报
-            clips_by_device=None,
+            artifacts=None,
         )
 
     # cam_A 不重打;cam_B 应当照常打 True;无任何 False 广播(都已命中)
@@ -204,7 +204,7 @@ async def test_omni_error_empty_map_no_state_change(proxy):
         "miloco.manager.get_manager",
         return_value=_fake_mgr(["rule_X", "rule_Y"], capture),
     ):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     assert calls == [], "OmniError 兜底不应推退任何 (rule_id, did) 桶"
 
@@ -226,7 +226,7 @@ async def test_source_device_ids_empty_fallback_to_perception(proxy):
     )
     capture, calls = _capture_calls()
     with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     # 兜底 source_did = "perception";cam_A 仍走 False 广播(没在 matched_pairs)
     assert ("rule_X", "perception", True, "anomaly") in calls
@@ -246,7 +246,7 @@ async def test_disabled_rule_during_cycle_skipped(proxy):
         "miloco.manager.get_manager",
         return_value=_fake_mgr(["rule_X"], capture),
     ):
-        await proxy.handle_realtime_perception_result(result, clips_by_device=None)
+        await proxy.handle_realtime_perception_result(result, artifacts=None)
 
     assert ("rule_X", "cam_A", False, "") in calls
     assert not any(c[0] == "rule_Y" for c in calls), (
