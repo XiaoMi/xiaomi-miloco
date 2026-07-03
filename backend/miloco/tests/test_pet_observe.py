@@ -148,8 +148,29 @@ async def test_observe_pet_image_detected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_observe_pet_no_pet_detected(monkeypatch):
-    _stub_omni(monkeypatch)
+async def test_observe_pet_fallback_when_detector_misses(monkeypatch):
+    # 检测器框不到猫/狗（兔/鸟/仓鼠等其他物种，或角度/遮挡）→ 回退整幅画面交 omni，仍出描述
+    holder = {}
+    _stub_omni(monkeypatch, holder)
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
+    )
+    ok, buf = cv2.imencode(".jpg", _frame(160, 160))
+    res = await obs.observe_pet(buf.tobytes(), is_video=False, grounding=False)
+    assert res["detected"] is True
+    assert res["description"]["species"]  # omni 回填了物种
+    assert res["primary_crop_b64"]  # 整幅画面作 crop
+    assert res["candidates"] == []  # 回退无检测器候选
+    assert "整幅画面" in holder["payload"]["system_prompt"]  # 走了整幅画面 prompt 段
+
+
+@pytest.mark.asyncio
+async def test_observe_pet_no_animal_at_all(monkeypatch):
+    # 检测器空 + omni 也判定画面无动物（species/summary 皆空）→ detected=False
+    async def _empty_omni(payload, config, type="realtime"):
+        return {"choices": [{"message": {"content": '{"species":"","summary":""}'}}]}
+
+    monkeypatch.setattr(obs, "call_omni", _empty_omni)
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
     )
