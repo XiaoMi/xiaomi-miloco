@@ -23,11 +23,15 @@ logger = logging.getLogger(__name__)
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
 
 # ── shared httpx.AsyncClient ──────────────────────────────────────────────
-# 复用连接池 + keepalive，避免每窗口一次 TCP+TLS 握手（省 ~50-100ms 延迟）。
+# 统一 omni_client.py 与 omni.py 中原本独立的两套客户端实现为一个共享
+# httpx.AsyncClient（池化 + keepalive），消除三个调用路径的重复代码与行为差异。
 # AsyncClient 绑定到创建时所在的 event loop；loop 关闭后重建（测试/重启场景）。
-# 同时被 omni_client 的 call_omni / call_omni_stream 和 omni.py 的 fused 路径共用。
 # 客户端不显式关闭（进程退出由 OS 回收）。
 _http_client: "httpx.AsyncClient | None" = None
+# _http_client_loop: CodeQL "is unused" alert is a false positive.
+# This is the sole trigger for rebuilding the client when the event loop
+# changes — removing it reuses a client bound to a dead loop and causes
+# "Event loop is closed". Do not delete.
 _http_client_loop: "asyncio.AbstractEventLoop | None" = None
 
 
@@ -41,7 +45,7 @@ def _get_http_client(timeout: float) -> httpx.AsyncClient:
     ):
         _http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),  # matches max camera count: realtime makes ≤1 omni call per camera per window via room batches; on_demand runs on separate loop with own pool — don't change without re-evaluating
         )
         _http_client_loop = loop
     return _http_client
