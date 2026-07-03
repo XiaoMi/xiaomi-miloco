@@ -219,10 +219,11 @@ class ScopeConfigKeys:
 
     HOME_WHITE_LIST_KEY = "HOME_WHITE_LIST_KEY"       # 已启用的家庭 home_id 列表
     CAMERA_BLACK_LIST_KEY = "CAMERA_BLACK_LIST_KEY" # 已停用的摄像头 did 列表
-    # 已关闭「拾音」的摄像头 did 列表；不在此集 = 拾音开启（默认开启）。
-    # 与 CAMERA_BLACK_LIST_KEY 正交：相机可正常投喂**视频**感知，但其音频完全
-    # 不被处理（mic-off：引擎入口剥离，不转写、不上云；语音指令自然也不 dispatch）。
-    CAMERA_VOICE_BLACK_LIST_KEY = "CAMERA_VOICE_BLACK_LIST_KEY"
+    # 已开启「拾音」的摄像头 did 白名单；不在此集 = mic OFF（默认空 = 全部关闭）。
+    # 默认关闭的保守语义——新装用户静音起步，按机位主动开启（信噪比开关的保守面）。
+    # 与 CAMERA_BLACK_LIST_KEY 正交：相机可正常投喂**视频**感知，但白名单外相机的
+    # 音频完全不被处理（mic-off：引擎入口剥离，不转写、不上云；语音指令自然也不 dispatch）。
+    CAMERA_VOICE_WHITE_LIST_KEY = "CAMERA_VOICE_WHITE_LIST_KEY"
 
 class OnboardingKeys:
     """主动 onboarding 邀请的一次性标记。

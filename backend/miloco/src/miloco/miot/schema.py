@@ -243,14 +243,14 @@ class CameraToggleRequest(BaseModel):
 
 
 class CameraVoiceToggleItem(BaseModel):
-    """单个相机的拾音开/关操作（mic-off 语义）。"""
+    """单个相机的拾音开/关操作（mic-off 语义，**默认关闭**——新相机须显式开启）。"""
 
     did: str = Field(..., min_length=1, description="相机 did")
     voice_in_use: bool = Field(
         ...,
         description=(
-            "true = 开启拾音；false = 关闭（该相机声音完全不被处理："
-            "引擎入口剥离音频，不转写、不上云、语音指令不 dispatch）"
+            "true = 开启拾音（加入白名单）；false = 关闭（默认态：该相机声音完全不被"
+            "处理——引擎入口剥离音频，不转写、不上云、语音指令不 dispatch）"
         ),
     )
 

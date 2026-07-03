@@ -81,35 +81,41 @@ _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
-    """按摄像头「拾音黑名单」过滤 speech：``source_device_ids[0]``(相机 did)在
-    黑名单里的丢弃,其余放行。实时读 KV(进程内缓存),改开关即时生效、无需重启感知引擎。
+    """按摄像头「拾音白名单」过滤 speech：仅 ``source_device_ids[0]``(相机 did)在
+    白名单里的放行,其余丢弃——**默认关闭**,不显式开启即静音。did 缺失(异常产物)
+    同样丢弃(白名单语义下无法证明已开启)。实时读 KV(进程内缓存),改开关即时生效、
+    无需重启感知引擎。
 
     分层防线:**第一道**在引擎入口——``engine/api.py::_strip_voice_denied_audio``
-    对拾音关闭的相机整批剥离音频(不进 gate/omni,不转写、无语音派生 suggestion、
+    对拾音未开启的相机整批剥离音频(不进 gate/omni,不转写、无语音派生 suggestion、
     不烧音频 token),正常情况下 speech 根本不会产生。本函数是**第二道**(引擎入口
     剥离失效 / 旧窗口残留时兜底),两个执法点:① 语音指令 dispatch(早出
     _on_early_speeches + 终态 handle_realtime_perception_result);
     ② meaningful_events 落库/SSE(_persist_meaningful_event 在 classify 前过滤)
-    ——拾音关闭 = 不执行也不记录转写。
+    ——拾音未开启 = 不执行也不记录转写。
     规则匹配及 caption / suggestion 等视觉产物不经此函数,不受影响。读 KV 失败时
-    fail-open(放行全部)以免吞掉语音链路。
+    按**空白名单**处理(丢弃全部)——默认关闭语义下,一致且安全的失败姿态是静音而非
+    出声(与引擎入口 _voice_enabled_dids 同一取向):丢一窗 speech 只是少听一窗,
+    反向失败则是把用户没点头的转写下发/落库。
     """
     from miloco.manager import get_manager
-    from miloco.miot.filter import voice_denied_camera_dids
+    from miloco.miot.filter import voice_enabled_camera_dids
 
     try:
-        voice_denied = voice_denied_camera_dids(get_manager().kv_repo)
+        voice_enabled = voice_enabled_camera_dids(get_manager().kv_repo)
     except Exception as e:
-        logger.warning("voice blacklist lookup failed, passing all speeches: %s", e)
-        return speeches
-    if not voice_denied:
-        return speeches
+        logger.warning(
+            "voice whitelist lookup failed, dropping all speeches "
+            "(default-off orientation): %s", e
+        )
+        return []
     kept: list[Speech] = []
     for s in speeches:
         did = s.source_device_ids[0] if s.source_device_ids else None
-        if did is not None and did in voice_denied:
+        if did is None or did not in voice_enabled:
             logger.info(
-                "speech 被摄像头语音开关拦截丢弃(不下发/不落库): did=%s device_name=%s content=%r",
+                "speech 被摄像头拾音开关拦截丢弃(默认关闭,不下发/不落库): "
+                "did=%s device_name=%s content=%r",
                 did, s.device_name, s.content,
             )
             continue
@@ -860,7 +866,7 @@ async def _persist_meaningful_event(
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
     流程:
-      0. 语音黑名单过滤 speech(与 dispatch 同一闸门)→ 语音关闭相机的转写既不
+      0. 拾音白名单过滤 speech(与 dispatch 同一闸门)→ 拾音未开启相机的转写既不
          入分类判定也不落库/推 SSE;caption / suggestion / 规则命中照常
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
