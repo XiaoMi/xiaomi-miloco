@@ -510,7 +510,7 @@ miloco-cli identity register preview \
 - **入库前必须用户确认**, 不调 `register from-media`(已在约束 1 强调)
 - **重名后端自动追加同 person**, agent 不需要自己查重
 - **附件下载是 agent 框架职责**: 本 SKILL 假设附件已由宿主框架下载到本地, agent 一律使用框架在本轮消息/上下文中给出的**真实本地路径**调 `--image/--video`, **不要凭文件名自行拼目录**——文件名通常是框架生成的随机标识、无法预先推断, 落盘目录也随框架与渠道配置而异。下列各框架的实际落盘位置**仅供理解、不可作为路径来源**:
-    - OpenClaw：附件真实文件在 `~/.openclaw/media/inbound/` 下，本轮消息会给你它的完整路径（`MediaPath` 字段）和一个 `media://` 别名。调 `--image/--video` 用 `MediaPath` 的完整路径，别用 `media://`（不是真实文件，会报错）。
+    - OpenClaw: 附件真实文件在 `~/.openclaw/media/inbound/` 下, 本轮消息会给你它的完整路径(`MediaPath` 字段)和一个 `media://` 别名。调 `--image/--video` 用 `MediaPath` 的完整路径, 别用 `media://`(不是真实文件, 会报错)。
     - Hermes(NousResearch): 落 `$HERMES_HOME`(默认 `~/.hermes`)下 `cache/images/` / `cache/videos/`(旧版 `image_cache/` / `video_cache/`)
 - **CLI 非零 exit code 时用人话告知用户**, 不直接抛 stack
 
