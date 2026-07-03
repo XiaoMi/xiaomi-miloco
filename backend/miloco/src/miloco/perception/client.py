@@ -109,8 +109,8 @@ def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
         did = s.source_device_ids[0] if s.source_device_ids else None
         if did is not None and did in voice_denied:
             logger.info(
-                "speech 被摄像头语音开关拦截丢弃(不下发/不落库): did=%s device_name=%s content=%r",
-                did, s.device_name, s.content,
+                "speech 被摄像头声音开关拦截丢弃(不下发/不落库): did=%s device_name=%s content_len=%d",
+                did, s.device_name, len(s.content),
             )
             continue
         kept.append(s)

@@ -527,7 +527,7 @@ async def toggle_scope_camera(
 
 @router.put(
     path="/scope/cameras/voice",
-    summary="Batch toggle per-camera voice-command state",
+    summary="Batch toggle per-camera audio pickup (mic-off) state",
     response_model=NormalResponse,
 )
 async def toggle_scope_camera_voice(
