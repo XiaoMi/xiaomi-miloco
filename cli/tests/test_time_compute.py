@@ -325,7 +325,8 @@ class TestDeployTimezone:
         from miloco_cli import deploy_tz
 
         deploy_tz._system_iana_tz.cache_clear()
-        deploy_tz._warned_no_iana = False
+        # warn-once 已改 lru_cache 无参函数,cache_clear 复位
+        deploy_tz._warn_no_iana_once.cache_clear()
 
     def _isolate_home(self, monkeypatch, tmp_path):
         """把 MILOCO_HOME 指到空 tmp,隔离真实 config.json 的 timezone 泄入。"""

@@ -29,11 +29,13 @@ def _reset_iana_cache():
     """
     from miloco.utils import time_utils
 
-    cache_clear = getattr(time_utils._system_iana_tz, "cache_clear", None)
-    if cache_clear is not None:
-        cache_clear()
-    time_utils._warned_no_iana = False
-    time_utils._warned_utc_tz = False
+    # warn-once 已改 lru_cache 无参函数,与 _system_iana_tz 同款 cache_clear 复位。
+    for fn_name in ("_system_iana_tz", "_warn_no_iana_once", "_warn_utc_once"):
+        cache_clear = getattr(
+            getattr(time_utils, fn_name, None), "cache_clear", None
+        )
+        if cache_clear is not None:
+            cache_clear()
 
 
 @pytest.fixture(autouse=True)
