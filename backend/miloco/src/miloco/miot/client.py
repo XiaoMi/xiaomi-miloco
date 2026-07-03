@@ -1095,6 +1095,13 @@ class MiotProxy:
             if iid.startswith("prop.") and entry.get("readable", False)
         ]
 
+    async def get_device_spec(self, did: str) -> dict:
+        """Return a device's spec by DID, including camera-only entries."""
+        device = self._device_info_dict.get(did) or self._camera_info_dict.get(did)
+        if not device:
+            return {}
+        return await self._fetch_device_spec(device.urn)
+
     async def call_device_action(self, param: MIoTActionParam) -> dict:
         """Call device action via MIoT cloud API."""
         try:

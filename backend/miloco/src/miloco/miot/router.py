@@ -86,9 +86,25 @@ async def _check_camera_power(camera_id: str) -> bool | None:
     try:
         from miot.types import MIoTGetPropertyParam
 
-        miot_service = manager.miot_service
-        props = await miot_service._miot_proxy.get_device_properties(
-            [MIoTGetPropertyParam(did=camera_id, siid=2, piid=1)]
+        miot_proxy = manager.miot_proxy
+        spec = await miot_proxy.get_device_spec(camera_id)
+        power_iids = [
+            iid
+            for iid, entry in spec.items()
+            if iid.startswith("prop.")
+            and entry.get("readable", False)
+            and entry.get("service_type_name") == "camera-control"
+            and entry.get("type_name") == "on"
+        ]
+        if not power_iids:
+            return None
+        _, siid, piid = power_iids[0].split(".")
+        props = await miot_proxy.get_device_properties(
+            [
+                MIoTGetPropertyParam(
+                    did=camera_id, siid=int(siid), piid=int(piid)
+                )
+            ]
         )
         if props and isinstance(props, list) and len(props) > 0:
             value = props[0].get("value")
@@ -141,9 +157,7 @@ async def _first_frame_watchdog(
         return
     try:
         # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)
-        await websocket.close(
-            code=1011, reason=_truncate_ws_reason("camera_unreachable")
-        )
+        await websocket.close(code=1011, reason=_truncate_ws_reason(reason))
     except Exception as err:
         logger.info("watchdog close failed, %s.%d: %s", camera_id, channel, err)
 
