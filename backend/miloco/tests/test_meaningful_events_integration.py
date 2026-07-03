@@ -73,6 +73,22 @@ def _artifacts(clips: dict | None = None):
     return OmniEventArtifacts(clips=clips or {})
 
 
+def _enable_voice(*dids: str) -> None:
+    """拾音默认关闭(白名单存储):要让 speech 通过 _persist 内的 _filter_voice_enabled,
+    须把相机 did 显式加入白名单;Speech 也须带 source_device_ids(生产路径由引擎注入)。
+    写的是 isolated 环境里真 Manager 的 KVRepo——与被测函数读的同一份。
+    isolated Manager 未 initialize(_kv_repo 缺失,原本走 fail-closed 全剥),
+    这里在隔离 DB 上现建一个挂上,让读写落同一份表。"""
+    from miloco.database.kv_repo import KVRepo
+    from miloco.manager import get_manager
+    from miloco.miot.filter import set_cameras_voice_in_use
+
+    mgr = get_manager()
+    if getattr(mgr, "_kv_repo", None) is None:
+        mgr._kv_repo = KVRepo()  # fixture 已 init_database,建在隔离 DB 上
+    set_cameras_voice_in_use(mgr._kv_repo, list(dids), True)
+
+
 @pytest.mark.asyncio
 async def test_end_to_end_rule_hit(isolated_env, client):
     """rule_hit → _persist → /api/events 能查到 → /clip 能拉到."""
@@ -115,11 +131,13 @@ async def test_end_to_end_multi_camera(isolated_env, client):
     """多摄像头同窗口 → 1 行 event + N device 各自 clip."""
     from miloco.perception.client import _persist_meaningful_event
 
+    _enable_voice("cam_living_01", "cam_kitchen_01")
     result = RealtimePerceptionResult(
         matched_rules=[MatchedRule(rule_id="r1", reason="x")],
         speeches=[
             Speech(
-                needs_response=True, speaker="u", content="开灯", is_complete=True
+                needs_response=True, speaker="u", content="开灯", is_complete=True,
+                source_device_ids=["cam_living_01"],
             )
         ],
     )

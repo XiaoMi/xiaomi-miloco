@@ -31,6 +31,22 @@ def _artifacts(clips: dict | None = None) -> OmniEventArtifacts:
     return OmniEventArtifacts(clips=clips or {})
 
 
+def _enable_voice(*dids: str) -> None:
+    """拾音默认关闭(白名单存储):要让 speech 通过 _persist 内的 _filter_voice_enabled,
+    须把相机 did 显式加入白名单;Speech 也须带 source_device_ids(生产路径由引擎注入)。
+    写的是 isolated 环境里真 Manager 的 KVRepo——与被测函数读的同一份。
+    isolated Manager 未 initialize(_kv_repo 缺失,原本走 fail-closed 全剥),
+    这里在隔离 DB 上现建一个挂上,让读写落同一份表。"""
+    from miloco.database.kv_repo import KVRepo
+    from miloco.manager import get_manager
+    from miloco.miot.filter import set_cameras_voice_in_use
+
+    mgr = get_manager()
+    if getattr(mgr, "_kv_repo", None) is None:
+        mgr._kv_repo = KVRepo()  # fixture 已 init_database,建在隔离 DB 上
+    set_cameras_voice_in_use(mgr._kv_repo, list(dids), True)
+
+
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
     """每个 case 独立 DB + 独立 snapshot_root + 独立 Manager singleton."""
@@ -142,6 +158,7 @@ class TestPersistMeaningfulEvent:
 
     async def test_asr_chat_does_not_insert(self, isolated_db, dao):
         """只有家人闲聊(needs_response=False)→ 不入表."""
+        _enable_voice("cam_living_01")
         result = RealtimePerceptionResult(
             speeches=[
                 Speech(
@@ -149,9 +166,11 @@ class TestPersistMeaningfulEvent:
                     speaker="妈妈",
                     content="今天好热",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ]
         )
+        # 拾音已开、speech 能过闸门 → 不入表的原因是"闲聊不算有意义",测的才是分类逻辑
         await _persist_meaningful_event(
             result=result,
             device_ids=["cam_living_01"],
@@ -161,6 +180,7 @@ class TestPersistMeaningfulEvent:
 
     async def test_asr_complete_command_inserts(self, isolated_db, dao):
         """needs_response=True AND is_complete=True → has_asr=True,入表."""
+        _enable_voice("cam_living_01")
         result = RealtimePerceptionResult(
             speeches=[
                 Speech(
@@ -168,6 +188,7 @@ class TestPersistMeaningfulEvent:
                     speaker="用户",
                     content="打开窗户",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ]
         )
@@ -184,6 +205,7 @@ class TestPersistMeaningfulEvent:
 
     async def test_combined_rule_and_asr_single_row(self, isolated_db, dao):
         """同一推理同时含 rule + ASR → 1 行(同窗口合并)."""
+        _enable_voice("cam_living_01")
         result = RealtimePerceptionResult(
             matched_rules=[MatchedRule(rule_id="r1", reason="x")],
             speeches=[
@@ -192,6 +214,7 @@ class TestPersistMeaningfulEvent:
                     speaker="u",
                     content="开灯",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ],
         )
@@ -268,10 +291,12 @@ class TestPersistMeaningfulEvent:
 
     async def test_empty_frames_inserts_with_zero_count(self, isolated_db, dao):
         """clips_by_device 为空(早 path 或 omni 跳过)→ 入表 + snapshot_count=0."""
+        _enable_voice("cam_living_01")
         result = RealtimePerceptionResult(
             speeches=[
                 Speech(
-                    needs_response=True, speaker="u", content="c", is_complete=True
+                    needs_response=True, speaker="u", content="c", is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ]
         )
@@ -288,6 +313,7 @@ class TestPersistMeaningfulEvent:
         """B2 单源真值:DB.text == build_agent_text(result)."""
         from miloco.perception.event_text_builder import build_agent_text
 
+        _enable_voice("cam_living_01")
         result = RealtimePerceptionResult(
             matched_rules=[MatchedRule(rule_id="r1", reason="x")],
             speeches=[
@@ -296,6 +322,7 @@ class TestPersistMeaningfulEvent:
                     speaker="u",
                     content="开灯",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ],
             suggestions=[Suggestion(event="e", action="a")],
@@ -350,6 +377,28 @@ class TestPersistMeaningfulEvent:
         # row 仍正常入,text 不受影响
         assert rows[0]["has_rule_hit"] is True
         assert "rule 已被删" in rows[0]["text"]
+
+    async def test_asr_from_unwhitelisted_cam_not_persisted(self, isolated_db, dao):
+        """对照(拾音默认关闭):相机未进白名单 → speech 在 _persist 内被剥,
+        speech-only 结果不入表——闸门语义与 test_perception_client 的 option-B
+        用例同源,此处以本文件的真实 DB 路径再钉一颗。"""
+        result = RealtimePerceptionResult(
+            speeches=[
+                Speech(
+                    needs_response=True,
+                    speaker="u",
+                    content="开灯",
+                    is_complete=True,
+                    source_device_ids=["cam_living_01"],  # 未 _enable_voice
+                )
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_living_01"],
+            artifacts=_artifacts({"cam_living_01": _clip_payload()}),
+        )
+        assert dao.query() == []
 
     async def test_device_ids_from_clips_keys(self, isolated_db, dao):
         """D4 第 2 轮 F-Q7 + B2:processor.py 改造后 device_ids 应来自
