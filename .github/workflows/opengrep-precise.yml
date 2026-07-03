@@ -35,24 +35,7 @@ jobs:
           fetch-depth: 0 # 需要 base commit 做 diff
 
       - name: 安装 opengrep
-        env:
-          # 官方 install.sh 即便指定了 -v 也会调 api.github.com 校验版本，匿名 API 在共享
-          # runner 上频繁触发 60 次/时 限流 → "Failed to fetch available versions"。
-          # 改为直接从 releases/download 拉二进制（不经 api.github.com），并以 sha256 固定，
-          # 比原先"无 cosign 时跳过签名校验"更强。升级时 VERSION 与 SHA256 一起 bump。
-          OPENGREP_VERSION: v1.22.0
-          # opengrep_manylinux_x86 (ubuntu-latest x86_64) 的 sha256
-          OPENGREP_SHA256: 45bcd58440e397ed52c50e953ccf5948909ea77087c9186fc7d277216f62e319
-        run: |
-          dest="$HOME/.opengrep/cli/${OPENGREP_VERSION}"
-          mkdir -p "$dest"
-          curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
-            -o "$dest/opengrep" \
-            "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
-          echo "${OPENGREP_SHA256}  $dest/opengrep" | sha256sum -c -
-          chmod +x "$dest/opengrep"
-          ln -sfn "$dest" "$HOME/.opengrep/cli/latest"
-          echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
+        uses: ./.github/actions/install-opengrep
 
       - run: opengrep --version
 
