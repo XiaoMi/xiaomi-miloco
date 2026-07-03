@@ -23,11 +23,18 @@ jobs:
 
       - name: 安装 opengrep
         env:
+          # 见 opengrep-precise.yml 的说明：直接拉发布产物 + sha256 固定，避开 api.github.com 限流。
           OPENGREP_VERSION: v1.22.0
-          OPENGREP_INSTALL_SHA: f458d7f0d52cc58eae1ca3cf3d5caf101e637519
+          OPENGREP_SHA256: 45bcd58440e397ed52c50e953ccf5948909ea77087c9186fc7d277216f62e319
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/opengrep/opengrep/${OPENGREP_INSTALL_SHA}/install.sh" \
-            | bash -s -- -v "$OPENGREP_VERSION"
+          dest="$HOME/.opengrep/cli/${OPENGREP_VERSION}"
+          mkdir -p "$dest"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+            -o "$dest/opengrep" \
+            "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          echo "${OPENGREP_SHA256}  $dest/opengrep" | sha256sum -c -
+          chmod +x "$dest/opengrep"
+          ln -sfn "$dest" "$HOME/.opengrep/cli/latest"
           echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
 
       - run: opengrep --version
