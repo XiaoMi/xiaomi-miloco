@@ -52,7 +52,7 @@
       → 委托 welcome(did)
   → DeviceWelcomeService（miot/welcome_service.py）
       scope gate（设备在启用家庭内）+ 跨路径去重 + 构造欢迎消息
-      → dispatch_event("bind", [msg], ...)
+      → dispatch_event("bind", ...)
   → AgentDispatcher（dispatch/dispatcher.py）
       bind 事件复用主交互会话
   → run_agent_turn → OpenClaw Webhook
@@ -61,14 +61,14 @@
 
 ### 核心模块
 
-| 类                        | 文件                                  | 职责                                                                                                                                    |
-| ------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `MIoTMipsCloud`           | `backend/miot/src/miot/mips_cloud.py` | paho-mqtt 客户端，MQTT v5 + TLS，自动重连，订阅用户 bind / 设备 meta / 场景事件主题                                                     |
-| `BindEventListener`       | `miot/mips_listeners.py`              | bind 路径：trailing-edge 防抖 → 拉云端终态 → present 判断（present 委托 welcome，absent 即 unbind 丢弃）                                |
-| `DeviceMetaEventListener` | `miot/mips_listeners.py`              | home-move 路径：处理 `hr_change`，设备移入受管家庭时同样委托 welcome                                                                    |
-| `DeviceWelcomeService`    | `miot/welcome_service.py`             | 欢迎动作本体：scope gate、跨路径去重（一次到达若同时触发 bind 与 hr_change 只播报一次）、构造欢迎消息、调 `dispatch_event("bind", ...)` |
-| `MiotProxy`               | `miot/client.py`                      | 持有各 listener 与 `DeviceWelcomeService` 生命周期，把 MQTT push 转给对应 listener                                                      |
-| `AgentDispatcher`         | `dispatch/dispatcher.py`              | bind 事件复用主交互会话，经 `run_agent_turn` 投递给 OpenClaw                                                                            |
+| 类                        | 文件                                  | 职责                                                                                                                                                                         |
+| ------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MIoTMipsCloud`           | `backend/miot/src/miot/mips_cloud.py` | 小米 MQTT broker 推送入口：订阅用户 bind / 设备 meta / 场景事件主题，是 bind / hr_change push 的源头（MQTT 连接与协议细节见 [sdk-miot.md](../05-external-deps/sdk-miot.md)） |
+| `BindEventListener`       | `miot/mips_listeners.py`              | bind 路径：trailing-edge 防抖 → 拉云端终态 → present 判断（present 委托 welcome，absent 即 unbind 丢弃）                                                                     |
+| `DeviceMetaEventListener` | `miot/mips_listeners.py`              | home-move 路径：全局防抖刷新设备/摄像头/场景；仅问候被 proxy 标记为「移入受管家庭」的 did，改名 / 域内移动只刷新不问候                                                       |
+| `DeviceWelcomeService`    | `miot/welcome_service.py`             | 欢迎动作本体：scope gate、跨路径去重（一次到达若同时触发 bind 与 hr_change 只播报一次）、构造欢迎消息、调 `dispatch_event("bind", ...)`                                      |
+| `MiotProxy`               | `miot/client.py`                      | 持有各 listener 与 `DeviceWelcomeService` 生命周期，把 MQTT push 转给对应 listener；`hr_change` 的「是否移入受管家庭」判定（`_is_move_into_scope`，需家庭白名单）在此完成    |
+| `AgentDispatcher`         | `dispatch/dispatcher.py`              | bind 事件复用主交互会话（自成合并类型、单飞不混入同一 turn），经 `run_agent_turn` 投递给 OpenClaw；bind 不计入 `agent_runs` 统计                                             |
 
 ### 关键设计决策
 
@@ -77,6 +77,8 @@
 **欢迎动作独立成 Service**：欢迎被 bind 与 home-move 两条路径共享，故把动作本体抽到 `DeviceWelcomeService`，两个 listener 只管"防抖 + 刷新 + present 判断"后委托 `welcome(did)`，listener 不各自携带欢迎逻辑。`DeviceWelcomeService` 本身对刷新 / 防抖无状态，只保留一个短去重窗口——同一次到达若同时触发 bind 与 hr_change（各自在自己链路防抖），只播报一次。
 
 **摄像头绑定的级联处理**：bind 防抖落定后，listener 统一刷新设备 / 摄像头 / 场景列表（不区分设备类型）；新到达的摄像头由此被纳入摄像头列表，感知层 adapter 在后续 sync 时自动接入，无需重启服务。
+
+**meta 订阅必须账号全域**：`_sync_meta_subscriptions` 对全账号设备订阅设备 meta 主题，**不**按受管家庭裁剪——否则一台位于域外家庭的设备根本没被订阅，把它移入受管家庭的 `hr_change` 就无从听见，home-move 欢迎路径便失效。受管家庭 scope 只在欢迎那一步施加（`_is_move_into_scope` / `DeviceWelcomeService`），不施加于订阅。（场景订阅相反，是按受管家庭 scope 过滤的：场景没有「移入受管家庭」这一语义。）
 
 ### 如果我要修改设备欢迎相关功能
 

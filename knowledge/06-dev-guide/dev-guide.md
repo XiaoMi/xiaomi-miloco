@@ -66,11 +66,11 @@ cd backend && uv run task dev
 
 ### 配置来源与优先级
 
-配置统一由 `MilocoSettings`（`backend/miloco/src/miloco/config/settings.py`）管理，加载优先级从高到低：
+配置统一由 `MilocoSettings`（`config/settings.py`）管理，加载优先级从高到低：
 
 1. **环境变量**（`MILOCO_*`，嵌套用 `__` 分隔，如 `MILOCO_SERVER__PORT`）
 2. **用户配置文件**（`$MILOCO_HOME/config.json`）— 三端（backend / CLI / 插件）共享，用户日常调整的入口
-3. **后端默认 YAML**（`backend/miloco/src/miloco/config/settings.yaml`）— 后端打包时的默认值
+3. **后端默认 YAML**（`config/settings.yaml`）— 后端打包时的默认值
 4. **代码默认值**
 
 `settings.schema.json`（同目录）是 `config.json` 面向用户的 JSON Schema 契约，覆盖核心可配置段（`debug` / `server` / `agent` / `model`）的类型与语义描述。其余段（`perception` / `rule` / `camera` / `directories` 等）的完整字段定义以 `settings.yaml`（含注释）与 `settings.py` 的 pydantic 模型为准。
@@ -237,7 +237,7 @@ miloco-cli rule logs --since 1h --pretty
 miloco-cli rule trigger <rule_id>
 ```
 
-规则 schema 定义在 `backend/miloco/src/miloco/rule/schema.py`，规则执行逻辑在 `rule/runner.py`（RuleRunner），规则设计原理见 [规则自动化](../03-features/rule-automation.md)。
+规则 schema 定义在 `rule/schema.py`，规则执行逻辑在 `rule/runner.py`（RuleRunner），规则设计原理见 [规则自动化](../03-features/rule-automation.md)。
 
 **注意**：condition.query 不能以"检测到/识别到/感知到"等断言性词汇开头，否则创建时会返回 `422`。
 

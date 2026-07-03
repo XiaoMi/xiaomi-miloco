@@ -1,4 +1,4 @@
-# 08 设计
+# 设计规范（总览）
 
 > Miloco Family UI 设计系统知识库
 > 本目录是 web 子工程的设计 SSOT — Mi Console v3 视觉契约。代码侧的 src/styles/theme.css + tailwind.config.ts 与本目录互为引用。
@@ -22,12 +22,12 @@
 ## 关键事实速查
 
 - **单一事实源**: 本目录的 6 篇文档 + `web/src/styles/theme.css` + `web/tailwind.config.ts` (token 冲突时以 theme.css 为准，新增 token 必须同步到 design-tokens.md)
-- **预览页**:`web/_mock/style-preview/console-preview.html`(`_mock/` 已被 `web/.gitignore` 忽略，未入仓——本地恢复方式见 `web/README.md` §数据源；没有该目录时预览页不存在，文档以本目录 6 篇规范为准)
+- **预览页**:`web/_mock/style-preview/console-preview.html`(`_mock/` 已被 `web/.gitignore` 忽略，从未入仓、本地私有；没有该目录时预览页不存在，文档以本目录 6 篇规范为准)
 - **品牌色**: `#FF6700`（小米橙，web 实际落地值；小米 PPT/品牌体系用 `#FF6900`，1 度偏差）
 - **基底字号**:14px(标准正文),阶梯 12 / 14 / 16 / 24 / 32
 - **暗色主题自动镜像**,所有颜色走 `var(--color-*)` 或 Tailwind 语义类,**禁止 hex / rgb 内联**
 - **响应式断点只用 Tailwind 标配**:`md:` (768px) / `lg:` (1024px) / `xl:` (1280px)
-- **z-index 5 档**(详见 design-tokens.md::z-index):`z-base (1)` / `z-sidebar (10)` / `z-[60] (dialog 基线)` / `z-[70]/[80] (双层 modal 预留)` / `z-[100] (Toast)`,**禁止重新发明**
+- **z-index 7 档**(详见 design-tokens.md::z-index):`z-base (1)` / `z-sidebar (10)` / `z-50 (媒体灯箱,坐 dialog 基线下)` / `z-[60] (dialog 基线)` / `z-[70] (抽屉上的次级弹层)` / `z-[80] (双层 modal 预留)` / `z-[100] (Toast)`,**禁止重新发明**
 
 ---
 
