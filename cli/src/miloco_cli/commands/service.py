@@ -239,8 +239,10 @@ def _find_latest_log_str() -> str | None:
 def _resolve_timezone() -> str | None:
     """部署时区 IANA 名,注入 supervisord ``environment=`` 让 backend 子进程继承。
 
-    单一真源,与 backend ``deploy_timezone()`` / 插件 ``deployTimezone()`` 的解析顺序对齐:
-    ``MILOCO_TIMEZONE`` env > ``config.json`` 的 ``timezone``。两者都拿不到 → 返回 None,
+    委托共享 ``deploy_tz.explicit_timezone_name()``（CLI 侧时区解析唯一真源,与
+    time_compute / backend ``deploy_timezone()`` / 插件 ``deployTimezone()`` 同序）:
+    ``MILOCO_TIMEZONE`` env > ``config.json`` 的 ``timezone``。两者都拿不到（或名字
+    非法——比旧实现多一道 IANA 校验,非法名 warning 后不注入）→ 返回 None,
     不强塞 Asia/Shanghai:让子进程继承宿主 TZ、backend 自身再走系统反查兜底,避免把
     未配置部署错标成中国时区。
 
@@ -248,15 +250,9 @@ def _resolve_timezone() -> str | None:
     ``TZ`` 还统一 backend 里一切"裸" naive datetime(``datetime.now()`` / ``fromtimestamp``,
     含尚未逐个改造到 ``deploy_timezone()`` 的调用点)的 OS 级时区。
     """
-    if tz := os.environ.get("MILOCO_TIMEZONE"):
-        return tz
-    try:
-        from miloco_cli.config import load_config
+    from miloco_cli.deploy_tz import explicit_timezone_name
 
-        tz = load_config().get("timezone")
-    except Exception:
-        return None
-    return tz if isinstance(tz, str) and tz else None
+    return explicit_timezone_name()
 
 
 def _generate_supervisor_conf(server_cmd: str) -> None:

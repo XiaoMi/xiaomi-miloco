@@ -311,16 +311,24 @@ class TestCrossTimezone:
 
 
 class TestDeployTimezone:
-    """优先级:``MILOCO_TIMEZONE`` env > 系统 IANA 反查 > Asia/Shanghai 兜底。
+    """优先级:显式配置（``MILOCO_TIMEZONE`` env > config.json ``timezone``）> 系统 IANA
+    反查 > OS 本地偏移兜底（绝不猜 Asia/Shanghai）。实现已迁至共享 ``miloco_cli.deploy_tz``
+    （time_compute re-export）,config.json 步骤是升级新增——与 backend settings 同源:
+    agent exec 环境常无 MILOCO_TIMEZONE 而宿主系统是 Etc/UTC,不读 config 会把北京家庭的
+    at 类任务锚点解析成 UTC（#383 遗留活 bug）。
 
-    第 2 步必须拿 IANA 名(不是固定 offset),DST 区才不会跨切换日偏 1 小时。
+    系统反查必须拿 IANA 名(不是固定 offset),DST 区才不会跨切换日偏 1 小时。
     """
 
     def _reset_iana_cache(self):
-        from miloco_cli.commands import time_compute
+        from miloco_cli import deploy_tz
 
-        time_compute._system_iana_tz.cache_clear()
-        time_compute._warned_no_iana = False
+        deploy_tz._system_iana_tz.cache_clear()
+        deploy_tz._warned_no_iana = False
+
+    def _isolate_home(self, monkeypatch, tmp_path):
+        """把 MILOCO_HOME 指到空 tmp,隔离真实 config.json 的 timezone 泄入。"""
+        monkeypatch.setenv("MILOCO_HOME", str(tmp_path / "miloco-home"))
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("MILOCO_TIMEZONE", "UTC")
@@ -330,46 +338,106 @@ class TestDeployTimezone:
         monkeypatch.setenv("MILOCO_TIMEZONE", "America/Los_Angeles")
         assert deploy_timezone() == ZoneInfo("America/Los_Angeles")
 
-    def test_no_env_uses_system_iana_or_fallback(self, monkeypatch):
-        """env 未设 → 走系统 IANA 反查,失败兜底 Asia/Shanghai。两种结果都是 ZoneInfo。"""
+    def test_config_json_timezone_used_when_no_env(self, monkeypatch, tmp_path):
+        """env 未设 → 读 $MILOCO_HOME/config.json 顶层 timezone(backend 同源)。
+
+        #383 活 bug 复现面:无 MILOCO_TIMEZONE、宿主 Etc/UTC 的 agent exec 环境下,
+        config.json 的 timezone 必须生效,at 类锚点才不会解析成 UTC。
+        """
+        import json as _json
+
         monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
+        home = tmp_path / "miloco-home"
+        home.mkdir(parents=True)
+        (home / "config.json").write_text(
+            _json.dumps({"timezone": "Pacific/Marquesas"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("MILOCO_HOME", str(home))
+        self._reset_iana_cache()
+        assert deploy_timezone() == ZoneInfo("Pacific/Marquesas")
+
+    def test_env_beats_config_json(self, monkeypatch, tmp_path):
+        """MILOCO_TIMEZONE env 优先于 config.json(与 backend pydantic 优先级一致)。"""
+        import json as _json
+
+        home = tmp_path / "miloco-home"
+        home.mkdir(parents=True)
+        (home / "config.json").write_text(
+            _json.dumps({"timezone": "Pacific/Marquesas"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("MILOCO_HOME", str(home))
+        monkeypatch.setenv("MILOCO_TIMEZONE", "UTC")
+        assert deploy_timezone() == ZoneInfo("UTC")
+
+    def test_invalid_config_timezone_falls_through(self, monkeypatch, tmp_path):
+        """config.json timezone 非法 IANA 名 → warning 后按未配置继续(宽容降级),
+        绝不把非法名当时区用。"""
+        import json as _json
+
+        monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
+        home = tmp_path / "miloco-home"
+        home.mkdir(parents=True)
+        (home / "config.json").write_text(
+            _json.dumps({"timezone": "Mars/Olympus"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("MILOCO_HOME", str(home))
+        self._reset_iana_cache()
+        from miloco_cli.deploy_tz import explicit_timezone_name
+
+        assert explicit_timezone_name() is None
+        tz = deploy_timezone()  # 落到系统反查/OS 本地,不抛
+        assert tz is not None
+
+    def test_no_env_uses_system_iana_or_os_local(self, monkeypatch, tmp_path):
+        """env / config 均无 → 系统 IANA 反查,失败落 OS 本地偏移。结果总是可用 tzinfo。"""
+        monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
+        self._isolate_home(monkeypatch, tmp_path)
         self._reset_iana_cache()
         tz = deploy_timezone()
-        assert isinstance(tz, ZoneInfo)
+        assert tz is not None
 
-    def test_fallback_to_asia_shanghai_when_no_iana(self, monkeypatch, caplog):
-        """env 无 + 系统 IANA 反查返回 None → 兜底 Asia/Shanghai + warning。"""
+    def test_fallback_is_os_local_not_shanghai(self, monkeypatch, caplog, tmp_path):
+        """env/config 无 + 系统 IANA 反查返回 None → 兜底 **OS 本地偏移** + warning。
+
+        与 backend time_utils 同哲学:绝不猜 Asia/Shanghai——OS 本地钟是机器时间显示的
+        事实来源,猜中国时区会让非中国部署恒偏数小时。断言兜底结果的 utcoffset 与
+        OS 本地一致(而非无条件 +08:00)。
+        """
+        import logging
+        from datetime import datetime as _dt
+
+        monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
+        self._isolate_home(monkeypatch, tmp_path)
+        self._reset_iana_cache()
+
+        from miloco_cli import deploy_tz
+
+        monkeypatch.setattr(deploy_tz, "_system_iana_tz", lambda: None)
+
+        with caplog.at_level(logging.WARNING, logger=deploy_tz._logger.name):
+            tz = deploy_tz.deploy_timezone()
+
+        now = _dt.now()
+        assert now.astimezone(tz).utcoffset() == now.astimezone().utcoffset()
+        assert any("OS-local" in r.message for r in caplog.records)
+
+    def test_fallback_warning_only_once(self, monkeypatch, caplog, tmp_path):
         import logging
 
         monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
+        self._isolate_home(monkeypatch, tmp_path)
         self._reset_iana_cache()
 
-        from miloco_cli.commands import time_compute
+        from miloco_cli import deploy_tz
 
-        monkeypatch.setattr(time_compute, "_system_iana_tz", lambda: None)
+        monkeypatch.setattr(deploy_tz, "_system_iana_tz", lambda: None)
 
-        with caplog.at_level(logging.WARNING, logger=time_compute._logger.name):
-            tz = time_compute.deploy_timezone()
+        with caplog.at_level(logging.WARNING, logger=deploy_tz._logger.name):
+            deploy_tz.deploy_timezone()
+            deploy_tz.deploy_timezone()
+            deploy_tz.deploy_timezone()
 
-        assert tz == ZoneInfo("Asia/Shanghai")
-        assert any("Asia/Shanghai" in r.message for r in caplog.records)
-
-    def test_fallback_warning_only_once(self, monkeypatch, caplog):
-        import logging
-
-        monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
-        self._reset_iana_cache()
-
-        from miloco_cli.commands import time_compute
-
-        monkeypatch.setattr(time_compute, "_system_iana_tz", lambda: None)
-
-        with caplog.at_level(logging.WARNING, logger=time_compute._logger.name):
-            time_compute.deploy_timezone()
-            time_compute.deploy_timezone()
-            time_compute.deploy_timezone()
-
-        warn_count = sum(1 for r in caplog.records if "Asia/Shanghai" in r.message)
+        warn_count = sum(1 for r in caplog.records if "OS-local" in r.message)
         assert warn_count == 1, f"warning 应只打 1 次,实际 {warn_count} 次"
 
     def test_system_iana_reads_tz_env(self, monkeypatch):
@@ -378,9 +446,36 @@ class TestDeployTimezone:
         monkeypatch.setenv("TZ", "America/Los_Angeles")
         self._reset_iana_cache()
 
-        from miloco_cli.commands.time_compute import _system_iana_tz
+        from miloco_cli.deploy_tz import _system_iana_tz
 
         assert _system_iana_tz() == ZoneInfo("America/Los_Angeles")
+
+    def test_service_resolve_timezone_delegates(self, monkeypatch, tmp_path):
+        """service._resolve_timezone 委托 explicit_timezone_name:config 值注入,
+        未配置返回 None(不强塞),非法名不注入。"""
+        import json as _json
+
+        from miloco_cli.commands.service import _resolve_timezone
+
+        home = tmp_path / "miloco-home"
+        home.mkdir(parents=True)
+        monkeypatch.setenv("MILOCO_HOME", str(home))
+        monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
+        # 未配置 → None
+        assert _resolve_timezone() is None
+        # config 值 → 注入该名
+        (home / "config.json").write_text(
+            _json.dumps({"timezone": "Asia/Shanghai"}), encoding="utf-8"
+        )
+        assert _resolve_timezone() == "Asia/Shanghai"
+        # 非法名 → None(比旧实现多一道 IANA 校验)
+        (home / "config.json").write_text(
+            _json.dumps({"timezone": "Mars/Olympus"}), encoding="utf-8"
+        )
+        assert _resolve_timezone() is None
+        # env 优先
+        monkeypatch.setenv("MILOCO_TIMEZONE", "UTC")
+        assert _resolve_timezone() == "UTC"
 
     def test_dst_zone_correctly_handled_via_iana(self, monkeypatch):
         """关键回归:LA 在 1 月应 PST -08:00,7 月应 PDT -07:00。旧固定 offset 实现做不到。"""
