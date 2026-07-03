@@ -243,6 +243,20 @@ function CameraSection({
       });
     }
   };
+  // 关拾音是「知情 opt-out」：关闭方向先弹一次确认，讲清会漏掉哪些依赖声音的事件
+  // （婴儿哭闹 / 呼救 / 玻璃破碎…）；开启方向无害，直接执行。待确认的相机存这里。
+  const [pendingMicOff, setPendingMicOff] = useState<{
+    did: string;
+    name: string;
+  } | null>(null);
+  const requestVoiceToggle = (did: string, name: string, next: boolean) => {
+    if (voiceBusyDids.has(did)) return;
+    if (next) {
+      void runSingleVoice(did, true); // 开启拾音无需确认
+    } else {
+      setPendingMicOff({ did, name }); // 关闭 → 二次确认
+    }
+  };
 
   return (
     <>
@@ -319,7 +333,7 @@ function CameraSection({
                     bulkBusy ||
                     singleBusyDids.has(c.did)
                   }
-                  onToggleVoice={(v) => runSingleVoice(c.did, v)}
+                  onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
                 />
               ))}
             </div>
@@ -357,13 +371,65 @@ function CameraSection({
                       bulkBusy ||
                       singleBusyDids.has(c.did)
                     }
-                    onToggleVoice={(v) => runSingleVoice(c.did, v)}
+                    onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
                   />
                 ))}
               </ul>
             </div>
           )}
         </>
+      )}
+
+      {/* 关拾音二次确认：知情 opt-out。复用 TaskListPanel 的居中弹窗形态,不另造 modal。 */}
+      {pendingMicOff && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+          onClick={
+            voiceBusyDids.has(pendingMicOff.did)
+              ? undefined
+              : () => setPendingMicOff(null)
+          }
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mic-off-title"
+            className="w-[90%] max-w-sm bg-bg-secondary border border-border rounded-2xl shadow-lg p-6 anim-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2
+              id="mic-off-title"
+              className="text-title font-semibold text-text-primary mb-2"
+            >
+              {t("hero.micOffConfirmTitle", { name: pendingMicOff.name })}
+            </h2>
+            <p className="text-body text-text-secondary mb-5">
+              {t("hero.micOffConfirmMessage")}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingMicOff(null)}
+                disabled={voiceBusyDids.has(pendingMicOff.did)}
+                className="text-body px-4 py-2 rounded-lg bg-bg-primary border border-border text-text-primary hover:border-border-strong disabled:opacity-60"
+              >
+                {t("hero.micOffConfirmCancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const { did } = pendingMicOff;
+                  setPendingMicOff(null);
+                  void runSingleVoice(did, false);
+                }}
+                disabled={voiceBusyDids.has(pendingMicOff.did)}
+                className="text-body px-4 py-2 rounded-lg font-semibold bg-warning text-white hover:opacity-90 disabled:opacity-60"
+              >
+                {t("hero.micOffConfirmOk")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );
