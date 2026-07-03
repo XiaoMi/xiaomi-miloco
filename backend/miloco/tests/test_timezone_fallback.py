@@ -93,14 +93,16 @@ def test_system_iana_skips_invalid_tz_env(monkeypatch, tmp_path):
         assert str(tz) != "Mars/Olympus"
 
 
-def test_fallback_to_os_local_when_no_iana(monkeypatch, caplog):
-    """settings.timezone 无 + _system_iana_tz 返回 None → 兜底 OS 本地偏移 + warning。
+def test_fallback_to_asia_shanghai_when_no_iana(monkeypatch, caplog):
+    """settings.timezone 无 + _system_iana_tz 返回 None → 兜底 Asia/Shanghai + warning。
 
-    (f) 条款回归:旧兜底猜 Asia/Shanghai,把"OS 时钟正确、只是反查不出 IANA 名"的
-    非中国宿主强行掰成北京时间;展示路径上 OS 本地偏移严格好于错城市。
+    (f) 条款回归(维护者裁定改回猜沪):宿主完全不可检测时兜底 Asia/Shanghai——
+    「时区配置正确的宿主不被掰成错城市」这条实际保证,现由 /etc/localtime **内容
+    反查层**承担(symlink / 普通文件拷贝皆可反查出真实 IANA 名,使本兜底对这类
+    宿主基本不可达);真落到这里的多是从未配置时区的裸环境,猜沪对 CN 主体用户群
+    大概率正确,UTC 宿主上 OS 本地偏移 ≈ +0、相对猜沪也无增益。
     """
     import logging
-    from datetime import datetime
 
     from miloco.utils import time_utils
 
@@ -109,9 +111,8 @@ def test_fallback_to_os_local_when_no_iana(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=time_utils._logger.name):
         tz = time_utils.deploy_timezone()
 
-    # 兜底 == 此刻的 OS 本地偏移(非 Asia/Shanghai 猜测)
-    assert datetime.now(tz).utcoffset() == datetime.now().astimezone().utcoffset()
-    assert any("OS-local" in r.message for r in caplog.records)
+    assert tz == ZoneInfo("Asia/Shanghai")
+    assert any("Asia/Shanghai" in r.message for r in caplog.records)
 
 
 def test_fallback_warning_only_once(monkeypatch, caplog):
@@ -127,7 +128,9 @@ def test_fallback_warning_only_once(monkeypatch, caplog):
         time_utils.deploy_timezone()
         time_utils.deploy_timezone()
 
-    warn_count = sum(1 for r in caplog.records if "OS-local" in r.message)
+    warn_count = sum(
+        1 for r in caplog.records if "falling back to Asia/Shanghai" in r.message
+    )
     assert warn_count == 1, f"warning 应只打 1 次,实际 {warn_count} 次"
 
 

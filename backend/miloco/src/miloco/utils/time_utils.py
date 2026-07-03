@@ -74,8 +74,9 @@ def ms_to_aware_dt(ms: int, tz: tzinfo | None = None) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=tz or deploy_timezone())
 
 
-# 仅作 ``datetime.now().astimezone().tzinfo`` 理论上返回 None 时的最后防线,
-# 常规路径不再猜 Asia/Shanghai(见 deploy_timezone 第 3 步)。
+# 四条系统反查路全失败时的最后兜底(维护者裁定,见 deploy_timezone 第 3 步):
+# 内容反查层已把时区配置正确的宿主基本兜住,此值实际只服务"从未配置时区"的裸环境,
+# 猜沪对 CN 主体用户群大概率正确;UTC 宿主上 OS 本地偏移 ≈ +0,不猜也无增益。
 _FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
 _warned_no_iana = False
 _warned_utc_tz = False
@@ -193,13 +194,13 @@ def deploy_timezone() -> tzinfo:
        ``MILOCO_TIMEZONE`` env 由 pydantic 自动并入此字段)
     2. 系统 IANA 反查 (``TZ`` env / ``/etc/timezone`` / ``/etc/localtime``
        symlink / ``/etc/localtime`` 内容反查)
-    3. 最后兜底 OS 本地偏移 (``datetime.now().astimezone().tzinfo``) + 一次性 warning
+    3. 最后兜底 ``Asia/Shanghai`` + 一次性 warning
 
     第 2 步优先拿 IANA 名(而非固定 offset),因为 ``ZoneInfo`` 内建 DST 规则。
-    第 3 步仅在宿主完全不暴露 IANA 身份时到达(四条反查路全失败):此时 OS 本地钟
-    是机器上一切时间显示的事实来源,严格好于旧行为"猜 Asia/Shanghai"(非中国部署
-    恒偏数小时)。偏移每次调用现取(非启动期缓存的固定值),跨 DST 切换日下一次调用
-    即修正;残余误差仅限横跨切换时刻的窗口计算,且仅发生在此病态配置下。
+    第 3 步仅在宿主完全不暴露 IANA 身份时到达(四条反查路全失败)——内容反查层把
+    「时区配置正确」的宿主基本都兜住了(symlink / 普通文件拷贝皆可反查),真落到
+    这里的多是时区从未配置的裸环境。维护者裁定猜 Asia/Shanghai:UTC 宿主上 OS 本地
+    偏移 ≈ +0、相对猜沪无增益,而 CN 主体用户群里猜沪大概率就是对的。
 
     用于"今天 / 本周 / rollover"等部署侧业务概念,以及 API 出口 ISO 偏移后缀
     (``ms_to_iso_local`` 走本函数)。DB 存储始终 INTEGER ms (UTC 绝对时刻),
@@ -220,13 +221,12 @@ def deploy_timezone() -> tzinfo:
     global _warned_no_iana
     if not _warned_no_iana:
         _logger.warning(
-            "Could not detect system IANA timezone; falling back to the OS-local "
-            "UTC offset. Set MILOCO_TIMEZONE or settings.timezone to your IANA "
-            "zone name (e.g. Asia/Shanghai, America/Los_Angeles) for DST-correct "
-            "behavior."
+            "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
+            "If running outside China, set MILOCO_TIMEZONE or settings.timezone "
+            "to your IANA zone name (e.g. America/Los_Angeles, Europe/London)."
         )
         _warned_no_iana = True
-    return _warn_if_utc(datetime.now().astimezone().tzinfo or _FALLBACK_TZ)
+    return _FALLBACK_TZ
 
 
 def now_iso() -> str:

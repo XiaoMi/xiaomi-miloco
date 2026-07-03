@@ -1834,14 +1834,20 @@ def test_fmt_clock_uses_deploy_timezone(monkeypatch, _reset_settings_around):
     assert _fmt_clock(_FIXED_MS) == "14:13:20"
 
 
-def test_display_falls_back_to_os_local_not_shanghai(monkeypatch, tmp_path, _reset_settings_around):
-    """(f) 条款回归：settings 未配 + 系统 IANA 反查全失败 → 展示按 OS 本地钟。
+def test_display_falls_back_to_asia_shanghai_when_undetectable(
+    monkeypatch, tmp_path, _reset_settings_around
+):
+    """(f) 条款回归（维护者裁定改回猜沪）：settings 未配 + 系统 IANA 反查全失败 →
+    展示按 Asia/Shanghai 兜底。
 
-    旧兜底猜 Asia/Shanghai 会把"OS 时钟正确、只是反查不出 IANA 名"的非中国宿主
-    (docker 普通文件 /etc/localtime 等)恒偏成北京时间；展示路径必须退到 OS 本地。
+    「时区配置正确的宿主不被掰成错城市」这条实际保证现由 /etc/localtime **内容
+    反查层**承担（docker 普通文件拷贝也能反查出真实 IANA 名，使本兜底对这类宿主
+    基本不可达）；真落到兜底的多是从未配置时区的裸环境，猜沪对 CN 主体用户群
+    大概率正确。
     """
     import time as _time
     from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     from miloco.config import reset_settings
     from miloco.perception.engine.api import _fmt_clock
@@ -1855,8 +1861,9 @@ def test_display_falls_back_to_os_local_not_shanghai(monkeypatch, tmp_path, _res
     monkeypatch.setattr(time_utils, "_system_iana_tz", lambda: None)
     monkeypatch.setattr(time_utils, "_warned_no_iana", False)
 
-    # 用当前时刻：OS 本地格式化(裸 fromtimestamp)与"当前偏移"必然一致,不受 DST 干扰
     now_ms = int(_time.time() * 1000)
-    expected = datetime.fromtimestamp(now_ms / 1000).strftime("%H:%M:%S")
+    expected = datetime.fromtimestamp(
+        now_ms / 1000, tz=ZoneInfo("Asia/Shanghai")
+    ).strftime("%H:%M:%S")
     assert _fmt_clock(now_ms) == expected
     assert _fmt_time_window(now_ms, now_ms) == f"[{expected}-{expected}]"

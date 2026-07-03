@@ -5,18 +5,17 @@
    （backend ``settings.timezone`` 的同一落盘来源；经 ``load_config`` 合并，env 优先）
 2. 系统 IANA 反查（``TZ`` env / ``/etc/timezone`` / ``/etc/localtime`` symlink /
    ``/etc/localtime`` 内容反查——四路与 backend 对齐）
-3. 兜底 **OS 本地偏移**（``datetime.now().astimezone().tzinfo``）+ 一次性 warning——
-   **绝不猜 Asia/Shanghai**：OS 本地钟是机器上一切时间显示的事实来源，猜中国时区会让
-   非中国部署恒偏数小时（与 backend 34c1e3b 同一哲学）。
+3. 兜底 ``Asia/Shanghai`` + 一次性 warning（维护者裁定，与 backend 同款）：内容反查层
+   已把时区配置正确的宿主基本兜住，真落到这里的多是从未配置时区的裸环境——猜沪对
+   CN 主体用户群大概率正确；UTC 宿主上 OS 本地偏移 ≈ +0，不猜也无增益。
 
 CLI 不能 import backend utils，此处为对齐副本、且是 CLI 侧唯一真源：time_compute 的
 时间锚点与 service 的 supervisord 时区注入都从这里取。第 1 步的 config.json 是关键——
 openclaw 网关 spawn 的 CLI 进程 env 里常无 TZ / MILOCO_TIMEZONE 而宿主系统是 Etc/UTC，
 不读 config 会把北京家庭的 at 类任务锚点解析成 UTC（#383 遗留的活 bug）。
 
-第 2 步必须拿 IANA 名（而非固定 offset），``ZoneInfo`` 内建 DST 规则才生效；第 3 步的
-固定偏移每次调用现取，跨 DST 切换日下一次调用即修正，仅此病态配置（宿主完全不暴露
-IANA 身份）下存在切换时刻窗口的残余误差。
+第 2 步必须拿 IANA 名（而非固定 offset），``ZoneInfo`` 内建 DST 规则才生效；第 3 步
+仅在宿主完全不暴露 IANA 身份（四条反查路全失败）时到达。
 """
 
 from __future__ import annotations
@@ -24,14 +23,14 @@ from __future__ import annotations
 import functools
 import logging
 import os
-from datetime import datetime, tzinfo
+from datetime import tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _logger = logging.getLogger(__name__)
 
-# 仅作 ``datetime.now().astimezone().tzinfo`` 理论上返回 None 时的最后防线，
-# 常规路径不再猜 Asia/Shanghai（与 backend time_utils 同款注释与用法）。
+# 四条系统反查路全失败时的最后兜底（与 backend time_utils 同款、同维护者裁定）：
+# 内容反查层已把时区配置正确的宿主基本兜住，此值实际只服务"从未配置时区"的裸环境。
 _FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
 _warned_no_iana = False
 
@@ -126,7 +125,7 @@ def explicit_timezone_name() -> str | None:
     两者都没配（或非法）→ ``None``——**不做系统反查、不猜默认**：本函数给「只要显式
     配置」的调用方用（如 service 的 supervisord ``environment=`` 注入——拿不到就不塞，
     让子进程继承宿主 TZ、backend 自身再走系统反查兜底）。``deploy_timezone`` 在此之上
-    叠加系统反查与 OS 本地兜底。
+    叠加系统反查与 Asia/Shanghai 兜底。
 
     容错：config 读失败时退回裸 env；名字非法（非 IANA）warning 后按未配置处理——CLI
     侧宽容降级（backend settings 启动期会对同一字段强校验报错）。
@@ -157,8 +156,8 @@ def deploy_timezone() -> tzinfo:
 
     1. 显式配置（``MILOCO_TIMEZONE`` env > config.json ``timezone``，与 backend 同源）
     2. 系统 IANA 反查（``TZ`` / ``/etc/timezone`` / ``/etc/localtime`` symlink / 内容反查）
-    3. 兜底 OS 本地偏移（``datetime.now().astimezone().tzinfo``）+ 一次性 warning
-       ——绝不猜 Asia/Shanghai（非中国部署恒偏数小时）
+    3. 兜底 ``Asia/Shanghai`` + 一次性 warning（与 backend 同款；内容反查层使此步
+       对时区配置正确的宿主基本不可达）
     """
     if name := explicit_timezone_name():
         return ZoneInfo(name)
@@ -167,10 +166,10 @@ def deploy_timezone() -> tzinfo:
     global _warned_no_iana
     if not _warned_no_iana:
         _logger.warning(
-            "Could not detect system IANA timezone; falling back to the OS-local "
-            "UTC offset. Set MILOCO_TIMEZONE or config.json `timezone` to your "
-            "IANA zone name (e.g. Asia/Shanghai, America/Los_Angeles) for "
-            "DST-correct behavior."
+            "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
+            "If running outside China, set MILOCO_TIMEZONE or config.json "
+            "`timezone` to your IANA zone name (e.g. America/Los_Angeles, "
+            "Europe/London)."
         )
         _warned_no_iana = True
-    return datetime.now().astimezone().tzinfo or _FALLBACK_TZ
+    return _FALLBACK_TZ

@@ -312,7 +312,8 @@ class TestCrossTimezone:
 
 class TestDeployTimezone:
     """优先级:显式配置（``MILOCO_TIMEZONE`` env > config.json ``timezone``）> 系统 IANA
-    反查 > OS 本地偏移兜底（绝不猜 Asia/Shanghai）。实现已迁至共享 ``miloco_cli.deploy_tz``
+    反查 > Asia/Shanghai 兜底（维护者裁定,与 backend 同款——内容反查层使兜底对时区
+    配置正确的宿主基本不可达）。实现已迁至共享 ``miloco_cli.deploy_tz``
     （time_compute re-export）,config.json 步骤是升级新增——与 backend settings 同源:
     agent exec 环境常无 MILOCO_TIMEZONE 而宿主系统是 Etc/UTC,不读 config 会把北京家庭的
     at 类任务锚点解析成 UTC（#383 遗留活 bug）。
@@ -385,26 +386,26 @@ class TestDeployTimezone:
         from miloco_cli.deploy_tz import explicit_timezone_name
 
         assert explicit_timezone_name() is None
-        tz = deploy_timezone()  # 落到系统反查/OS 本地,不抛
+        tz = deploy_timezone()  # 落到系统反查/兜底,不抛
         assert tz is not None
 
-    def test_no_env_uses_system_iana_or_os_local(self, monkeypatch, tmp_path):
-        """env / config 均无 → 系统 IANA 反查,失败落 OS 本地偏移。结果总是可用 tzinfo。"""
+    def test_no_env_uses_system_iana_or_fallback(self, monkeypatch, tmp_path):
+        """env / config 均无 → 系统 IANA 反查,失败兜底 Asia/Shanghai。结果总是可用 tzinfo。"""
         monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
         self._isolate_home(monkeypatch, tmp_path)
         self._reset_iana_cache()
         tz = deploy_timezone()
         assert tz is not None
 
-    def test_fallback_is_os_local_not_shanghai(self, monkeypatch, caplog, tmp_path):
-        """env/config 无 + 系统 IANA 反查返回 None → 兜底 **OS 本地偏移** + warning。
+    def test_fallback_to_asia_shanghai_when_no_iana(self, monkeypatch, caplog, tmp_path):
+        """env/config 无 + 系统 IANA 反查返回 None → 兜底 Asia/Shanghai + warning。
 
-        与 backend time_utils 同哲学:绝不猜 Asia/Shanghai——OS 本地钟是机器时间显示的
-        事实来源,猜中国时区会让非中国部署恒偏数小时。断言兜底结果的 utcoffset 与
-        OS 本地一致(而非无条件 +08:00)。
+        维护者裁定(与 backend 同款):宿主完全不可检测时猜沪——「时区配置正确的宿主
+        不被掰成错城市」的实际保证由 /etc/localtime 内容反查层承担(能反查出真实
+        IANA 名,使本兜底对这类宿主基本不可达);真落到这里的多是从未配置时区的
+        裸环境,猜沪对 CN 主体用户群大概率正确。
         """
         import logging
-        from datetime import datetime as _dt
 
         monkeypatch.delenv("MILOCO_TIMEZONE", raising=False)
         self._isolate_home(monkeypatch, tmp_path)
@@ -417,9 +418,8 @@ class TestDeployTimezone:
         with caplog.at_level(logging.WARNING, logger=deploy_tz._logger.name):
             tz = deploy_tz.deploy_timezone()
 
-        now = _dt.now()
-        assert now.astimezone(tz).utcoffset() == now.astimezone().utcoffset()
-        assert any("OS-local" in r.message for r in caplog.records)
+        assert tz == ZoneInfo("Asia/Shanghai")
+        assert any("falling back to Asia/Shanghai" in r.message for r in caplog.records)
 
     def test_fallback_warning_only_once(self, monkeypatch, caplog, tmp_path):
         import logging
@@ -437,7 +437,9 @@ class TestDeployTimezone:
             deploy_tz.deploy_timezone()
             deploy_tz.deploy_timezone()
 
-        warn_count = sum(1 for r in caplog.records if "OS-local" in r.message)
+        warn_count = sum(
+            1 for r in caplog.records if "falling back to Asia/Shanghai" in r.message
+        )
         assert warn_count == 1, f"warning 应只打 1 次,实际 {warn_count} 次"
 
     def test_system_iana_reads_tz_env(self, monkeypatch):
