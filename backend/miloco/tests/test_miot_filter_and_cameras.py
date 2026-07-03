@@ -476,7 +476,7 @@ async def test_toggle_camera_voice_rejected_when_camera_disabled():
     svc = _make_service(
         devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
     )
-    with pytest.raises(ValidationException, match="拾音"):
+    with pytest.raises(ValidationException, match="声音"):
         await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": True}])
     # 拒绝后不落库
     assert kv.get(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY) is None

@@ -1115,7 +1115,7 @@ class MiotService:
         disabled = [d for d in all_dids if d in denied]
         if disabled:
             raise ValidationException(
-                f"摄像头感知已关闭，无法设置拾音（{disabled}）；请先开启该摄像头感知"
+                f"摄像头感知已关闭，无法设置声音（{disabled}）；请先开启该摄像头感知"
             )
 
         enable_dids = [i["did"] for i in items if i["voice_in_use"]]

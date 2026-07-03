@@ -19,6 +19,27 @@ import { humanTokens } from "@/lib/formatTokens";
 import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+// 「关声音」确认弹窗的「不再提醒」持久化标记（与 web:theme / web:lang 同命名空间）。
+// 复位说明：清除站点数据 / localStorage 即恢复弹窗；本分支不做设置项 UI——将来若加
+// 隐私设置面板，一句 localStorage.removeItem(VOICE_OFF_CONFIRMED_KEY) 即可重置。
+const VOICE_OFF_CONFIRMED_KEY = "web:voiceOffConfirmed";
+
+function isVoiceOffConfirmed(): boolean {
+  try {
+    return localStorage.getItem(VOICE_OFF_CONFIRMED_KEY) === "1";
+  } catch {
+    return false; // localStorage 不可用(隐私模式/测试桩)→ 每次仍确认,无害
+  }
+}
+
+function setVoiceOffConfirmed(): void {
+  try {
+    localStorage.setItem(VOICE_OFF_CONFIRMED_KEY, "1");
+  } catch {
+    /* 写不了就算了：本会话每次仍弹确认,不影响功能 */
+  }
+}
+
 interface Props {
   persons: Person[];
   /** perception 当前订阅的画面（含 channel，用于真播放）；scope 是子集映射的字典源 */
@@ -243,17 +264,22 @@ function CameraSection({
       });
     }
   };
-  // 关拾音是「知情 opt-out」：关闭方向先弹一次确认，讲清会漏掉哪些依赖声音的事件
-  // （婴儿哭闹 / 呼救 / 玻璃破碎…）；开启方向无害，直接执行。待确认的相机存这里。
+  // 关声音是「知情 opt-out」：关闭方向先弹一次确认，讲清风险与决策要点；开启方向无害，
+  // 直接执行。待确认的相机存这里。用户勾「不再提醒」并确认后，落 localStorage 标记，
+  // 之后关声音直接执行、不再弹（批量关多台嘈杂机位时不啰嗦）。
   const [pendingMicOff, setPendingMicOff] = useState<{
     did: string;
     name: string;
   } | null>(null);
+  const [dontRemind, setDontRemind] = useState(false);
   const requestVoiceToggle = (did: string, name: string, next: boolean) => {
     if (voiceBusyDids.has(did)) return;
     if (next) {
-      void runSingleVoice(did, true); // 开启拾音无需确认
+      void runSingleVoice(did, true); // 开启声音无需确认
+    } else if (isVoiceOffConfirmed()) {
+      void runSingleVoice(did, false); // 已选「不再提醒」→ 直接关
     } else {
+      setDontRemind(false); // 每次开框默认不勾
       setPendingMicOff({ did, name }); // 关闭 → 二次确认
     }
   };
@@ -403,9 +429,19 @@ function CameraSection({
             >
               {t("hero.micOffConfirmTitle", { name: pendingMicOff.name })}
             </h2>
-            <p className="text-body text-text-secondary mb-5">
+            <p className="text-body text-text-secondary mb-4">
               {t("hero.micOffConfirmMessage")}
             </p>
+            {/* 不再提醒：勾选并确认后落 localStorage,之后关声音直接执行、不再弹框。 */}
+            <label className="flex items-center gap-2 mb-5 text-body text-text-secondary cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={dontRemind}
+                onChange={(e) => setDontRemind(e.target.checked)}
+                className="h-4 w-4 rounded border-border accent-brand-primary cursor-pointer"
+              />
+              {t("hero.micOffConfirmDontRemind")}
+            </label>
             <div className="flex justify-end gap-2">
               <button
                 type="button"
@@ -419,6 +455,7 @@ function CameraSection({
                 type="button"
                 onClick={() => {
                   const { did } = pendingMicOff;
+                  if (dontRemind) setVoiceOffConfirmed();
                   setPendingMicOff(null);
                   void runSingleVoice(did, false);
                 }}

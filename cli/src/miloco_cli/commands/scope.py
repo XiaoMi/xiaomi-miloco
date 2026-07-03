@@ -83,7 +83,7 @@ def scope_camera_disable(dids, pretty):
 @click.argument("dids", nargs=-1, required=True)
 @click.option("--pretty", is_flag=True)
 def scope_camera_mic_on(dids, pretty):
-    """开启指定摄像头拾音（声音重新参与感知）。"""
+    """开启指定摄像头声音（声音重新参与感知）。"""
     result = api_put(
         _CAMERAS_VOICE_PATH,
         {"items": [{"did": d, "voice_in_use": True} for d in dids]},
@@ -95,7 +95,7 @@ def scope_camera_mic_on(dids, pretty):
 @click.argument("dids", nargs=-1, required=True)
 @click.option("--pretty", is_flag=True)
 def scope_camera_mic_off(dids, pretty):
-    """关闭指定摄像头拾音（该相机声音完全不被处理：不转写、不上云）。"""
+    """关闭指定摄像头声音（该相机声音完全不被处理：不识别、不理解、不上云）。"""
     result = api_put(
         _CAMERAS_VOICE_PATH,
         {"items": [{"did": d, "voice_in_use": False} for d in dids]},
