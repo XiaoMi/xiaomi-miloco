@@ -4,6 +4,7 @@
 """Person controller — family member CRUD + Tier A 样本登记 + 习惯（v1.2 新增）。"""
 
 import asyncio
+import functools
 import logging
 import re
 
@@ -13,7 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
-from miloco.config import get_settings
+from miloco.config import get_settings, register_reset_hook
 from miloco.database.person_repo import UNSET
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
@@ -968,13 +969,25 @@ class RegisterCommitPayload(BaseModel):
     _norm_role = field_validator("member_role")(_normalize_optional_str)
 
 
+@functools.lru_cache(maxsize=1)
 def _load_detector():
     # 走 settings.directories.models_dir($MILOCO_HOME/models/)而非 __file__ 相对路径:
     # uv tool install miloco 后 __file__ 落在 site-packages 内, 但 wheel 不打 onnx,
     # 真模型部署到 $MILOCO_HOME/models/。主流程 perception/client.py 走的也是这个口径。
+    #
+    # 单例复用:本函数原被 7+ 处注册/分析路径各调一次、每次新建一个 Detector →
+    # 每次多一个 CoreML session(各自在 cache/临时目录留一份中间模型文件)。改为
+    # 进程内复用同一实例:detect() 无共享可变状态、ORT session.run 线程安全,故并发
+    # 注册复用安全。lru_cache 在 settings reset 时由下方 hook 清空(换 workspace/
+    # 测试);生产原地热替换模型需重启进程才生效。
     from miloco.perception.engine.identity.tracker.detector import Detector
     det_path = get_settings().directories.models_dir / "det_4C.onnx"
     return Detector(model_path=str(det_path), conf_threshold=0.4, use_gpu=False)
+
+
+# settings reset(换 workspace / 测试)后让上面的单例失效,避免返回指向旧 models_dir
+# 的残留 Detector。
+register_reset_hook("person_router_detector", _load_detector.cache_clear)
 
 
 def _should_use_frontal_seed(
