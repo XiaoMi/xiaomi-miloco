@@ -284,6 +284,49 @@ async def test_switch_home_persists_through_kv():
     assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H2"]
 
 
+async def _drain_reset(mock, timeout: float = 1.0) -> None:
+    """switch_home 的 reset 走 fire-and-forget 后台任务，轮询等它跑完（或超时）。"""
+    import time as _t
+
+    deadline = _t.monotonic() + timeout
+    while _t.monotonic() < deadline:
+        if mock.await_count:
+            return
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_switch_home_resets_agent_sessions():
+    """切换家庭后后台批量 reset miloco session，传入 MILOCO_SESSION_KEYS 全集。"""
+    from unittest.mock import patch
+
+    from miloco.dispatch import MILOCO_SESSION_KEYS
+
+    svc = _make_service(devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_FakeKV())
+    reset = AsyncMock(return_value={"reset": MILOCO_SESSION_KEYS, "failed": []})
+    with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
+        res = await svc.switch_home("H2")
+        await _drain_reset(reset)
+
+    assert {h["home_id"]: h["in_use"] for h in res}["H2"] is True
+    reset.assert_awaited_once_with(MILOCO_SESSION_KEYS)
+
+
+@pytest.mark.asyncio
+async def test_switch_home_reset_failure_is_swallowed():
+    """reset 失败（openclaw 不可达）只 WARN，绝不打断切换本身。"""
+    from unittest.mock import patch
+
+    svc = _make_service(devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_FakeKV())
+    reset = AsyncMock(side_effect=RuntimeError("openclaw down"))
+    with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
+        res = await svc.switch_home("H2")  # 不抛异常
+        await _drain_reset(reset)
+
+    assert {h["home_id"]: h["in_use"] for h in res}["H2"] is True
+    reset.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_switch_home_rejects_unknown():
     svc = _make_service(devices={"d1": _home("H1")})

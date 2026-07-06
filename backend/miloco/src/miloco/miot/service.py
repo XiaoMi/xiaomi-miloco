@@ -963,6 +963,22 @@ class MiotService:
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
+        # 切换家庭后重置 openclaw 里的 miloco session，清掉旧家庭遗留的上下文
+        # （设备 / 房间 / 习惯），避免串入新家庭。best-effort 后台执行：openclaw
+        # 不可达 / 删除失败只 WARN，绝不阻塞或打断切换本身。
+        async def _reset_agent_sessions_bg():
+            from miloco.dispatch.dispatcher import MILOCO_SESSION_KEYS
+            from miloco.utils.agent_client import reset_agent_sessions
+
+            try:
+                await reset_agent_sessions(MILOCO_SESSION_KEYS)
+            except Exception as e:
+                logger.warning("switch_home reset agent sessions failed: %s", e)
+
+        reset_task = asyncio.create_task(_reset_agent_sessions_bg())
+        _background_tasks.add(reset_task)
+        reset_task.add_done_callback(_background_tasks.discard)
+
         # KV 已写入，本地更新 in_use 标记后立即返回，不等待 refresh 完成。
         allow = allowed_home_ids(self._kv_repo)
         for h in homes:
