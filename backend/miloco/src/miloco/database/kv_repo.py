@@ -205,6 +205,7 @@ class AuthConfigKeys:
 
 class SystemConfigKeys:
     DEVICE_UUID_KEY = "DEVICE_UUID_KEY"
+    PERCEPTION_ENABLED_KEY = "PERCEPTION_ENABLED_KEY"  # 用户「感知开关」意图（缺省=开）
 
 
 class DeviceInfoKeys:

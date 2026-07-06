@@ -209,12 +209,18 @@ class MiotService:
         """Restart perception engine after auth to pick up newly available cameras."""
         try:
             from miloco.manager import get_manager
+            from miloco.perception.engine_state import is_perception_enabled
 
             perception_service = get_manager().perception_service
             logger.info("Restarting perception engine after auth callback")
-            await perception_service.stop_engine()
-            await perception_service.start_engine()
-            logger.info("Perception engine restarted successfully")
+            await perception_service.stop_engine()  # 未运行时是安全 no-op
+            # 尊重用户「休息」意图：被手动暂停时重新授权不自动拉起引擎，
+            # 否则重新授权会绕开开机门控、无视暂停继续烧 token。
+            if is_perception_enabled(self._kv_repo):
+                await perception_service.start_engine()
+                logger.info("Perception engine restarted successfully")
+            else:
+                logger.info("感知被用户手动休息，重新授权后不自动拉起引擎")
         except Exception as e:
             # 有意不 re-raise：感知引擎重启失败不应导致授权本身失败，
             # token 已持久化，用户可手动重启服务恢复摄像头。
