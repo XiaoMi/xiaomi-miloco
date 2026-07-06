@@ -30,5 +30,16 @@ def is_perception_enabled(kv_repo: KVRepo) -> bool:
         return True
 
 
-def set_perception_enabled(kv_repo: KVRepo, enabled: bool) -> None:
-    kv_repo.set(SystemConfigKeys.PERCEPTION_ENABLED_KEY, json.dumps(enabled))
+def set_perception_enabled(kv_repo: KVRepo, enabled: bool) -> bool:
+    """落盘用户「感知开关」意图，返回是否写入成功。
+
+    KVRepo.set 内部吞掉 sqlite 异常、失败仅返回 False。这里透传该结果并记 error：
+    「暂停/唤醒」若没真正落盘，重启后门控会读到旧值 → 本模块要根治的静默复位在边缘
+    路径复现，故调用方（用户 endpoint）应据此 fail loud，而非假装写成功。
+    """
+    ok = kv_repo.set(SystemConfigKeys.PERCEPTION_ENABLED_KEY, json.dumps(enabled))
+    if not ok:
+        logger.error(
+            "持久化感知开关意图失败 (enabled=%s)，重启后可能复位", enabled
+        )
+    return ok

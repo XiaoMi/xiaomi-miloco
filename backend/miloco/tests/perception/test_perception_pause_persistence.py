@@ -223,3 +223,35 @@ async def test_start_endpoint_persists_enabled_intent(real_db):
 
     fm.perception_service.start_engine.assert_awaited_once()
     assert is_perception_enabled(KVRepo()) is True
+
+
+async def test_stop_endpoint_fails_loud_when_persist_fails():
+    """/engine/stop：落盘失败(KVRepo.set→False) → 抛 HTTPException、不执行 stop（不静默 200）。"""
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.perception import router as perception_router
+
+    fm = MagicMock()
+    fm.kv_repo.set.return_value = False  # 模拟 sqlite 写失败被 KVRepo 吞成 False
+    fm.perception_service.stop_engine = AsyncMock()
+
+    with patch.object(perception_router, "manager", fm):
+        with pytest.raises(HTTPException):
+            await perception_router.stop_engine()
+
+    fm.perception_service.stop_engine.assert_not_awaited()
+
+
+async def test_start_endpoint_fails_loud_when_persist_fails():
+    """/engine/start：落盘失败 → 抛 HTTPException、不执行 start。"""
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.perception import router as perception_router
+
+    fm = MagicMock()
+    fm.kv_repo.set.return_value = False
+    fm.perception_service.start_engine = AsyncMock()
+
+    with patch.object(perception_router, "manager", fm):
+        with pytest.raises(HTTPException):
+            await perception_router.start_engine()
+
+    fm.perception_service.start_engine.assert_not_awaited()
