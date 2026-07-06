@@ -78,20 +78,10 @@ test -d "$HOME/.hermes" || { echo "缺少 ~/.hermes"; exit 1; }
 
 成功标志：`hermes --version` 输出 `Hermes Agent v...`。
 
-### 1.2 装 miloco 后端（优先用仓库内代码，不从 upstream release 拉）
+### 1.2 装 miloco 后端（走 upstream release，不是 fork）
 
 ```bash
-# 若已有 miloco-cli 就跳过安装
-command -v miloco-cli && miloco-cli --version 2>/dev/null && echo "✅ 已有 miloco-cli,跳过安装" && return 0
-
-# 否则从**本仓库**装（不是 upstream release！）
-# 注意：下面命令用的是你 clone 下来的仓库路径，不是网上的 URL
-REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-if [ -f "$REPO_DIR/scripts/install.sh" ]; then
-  bash "$REPO_DIR/scripts/install.sh" --agent-prepare
-else
-  curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
-fi
+command -v miloco-cli || curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
 command -v miloco-cli || { echo "miloco-cli 仍找不到"; exit 1; }
 ```
 
