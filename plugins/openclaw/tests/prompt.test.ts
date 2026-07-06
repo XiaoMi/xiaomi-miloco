@@ -118,9 +118,11 @@ describe("before_prompt_build 组装", () => {
     expect(r.prependSystemContext).toContain("## 家庭记忆");
     expect(r.prependSystemContext).toContain("miloco-notify");
     expect(r.prependSystemContext).toContain("## 输出语言");
-    // 今日感知日志整段注入 append（H1 降级为 H2 嵌入）
+    // 今日感知日志整段注入 append
     expect(r.appendSystemContext).toContain("## 今日感知日志");
     expect(r.appendSystemContext).toContain("戴眼镜男性：在电脑前工作");
+    // 日志首行冗余 H1（`# 感知记忆`）被剥掉，不应作为与段头同级的 H2 兄弟节点出现
+    expect(r.appendSystemContext).not.toContain("## 感知记忆");
   });
 
   it("拿不到 workspaceDir → 今日感知日志段不出现", async () => {

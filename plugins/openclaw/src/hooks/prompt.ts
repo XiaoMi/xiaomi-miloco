@@ -99,7 +99,7 @@ ${formats.join("\n")}
 
 const B_MEMORY = `## 家庭记忆
 做任何事（控设备、给建议、写通知）之前，先结合这两份记忆，让动作更精准、更合成员心意：
-- **感知记忆**——家里发生了什么。**今天的已整段注入在下方「今日感知日志」，直接读它**；要看更早的日子，用 \`memory_search\` 查。
+- **感知记忆**——家里发生了什么。**若下方有「今日感知日志」段，直接读它拿今天的情况**；该段不存在或要看更早的日子，用 \`memory_search\` 查。
 - **家庭档案**——成员的偏好、习惯、家庭规则、设备使用经验，用 \`miloco-cli home-profile list\` 按需查（不再随上下文注入）。
 
 用户实时指令 > 档案规则（除非档案明确标注为底线 / 红线）。对话中出现成员喜好 / 家人信息 / 作息规律时，即使没说"记录"，也静默写入档案（先 \`home-profile list\` 看全量再写）。`;
@@ -148,9 +148,11 @@ function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
   const file = path.join(workspaceDir, "memory", `${date}-miloco-perception.md`);
   const md = readFileSafe(file).trim();
   if (!md) return "";
-  // 日志本身以 `#` 标题起头（digest 首行写 `# <date> 感知记忆`）。整体降一级，嵌进 append 的
-  // `## 今日感知日志` 章节层级下，避免裸贴出现 H1 倒挂。
-  const demoted = md.replace(/^(#{1,5}) /gm, "#$1 ");
+  // digest 首行写 `# <date> 感知记忆`（H1）；本段段头 `## 今日感知日志` 已含日期 / 时区语境，
+  // 该 H1 冗余，剥掉首行再把余下标题各降一级，真正嵌进本段 H2 之下（否则降级后的 H2 会与段头
+  // 同级，或裸贴时 H1 倒挂）。
+  const body = md.replace(/^#\s+.*(?:\r?\n)+/, "");
+  const demoted = body.replace(/^(#{1,5}) /gm, "#$1 ");
   return `## 今日感知日志\n下面是今天家里发生的事（感知引擎自动归档，按家庭时区记录）。做判断 / 给建议前先读它；更早的日子用 \`memory_search\` 查。\n\n${demoted}`;
 }
 

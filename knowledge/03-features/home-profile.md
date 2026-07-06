@@ -61,8 +61,9 @@ AI 的每次对话默认是无记忆的。用户每次说"我爸爸有高血压"
 
 ```
 profile.md（$MILOCO_HOME/home-profile/profile.md）
-  ├─ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
-  │    helpers.ts::loadHomeProfile 读取文件 → 拼档案块 → 追加到 Agent system prompt
+  ├─ 主 agent（plugins/openclaw/src/hooks/prompt.ts）
+  │    不再随 system prompt 注入；agent 按需用 `home-profile list` 自取。
+  │    （before_prompt_build 的 append 区改注入当日感知日志，见 openclaw-integration.md）
   │
   └─ home_profile_loader.py（perception/engine/omni/home_profile_loader.py）
        → 注入 Omni prompt 动态层（感知推理时用）
