@@ -1,0 +1,31 @@
+name: miloco
+version: 0.2.0
+description: "Miloco for Hermes Agent —— 家庭智能管家 miloco 的 Hermes 出站插件。注入 miloco 上下文（identity/perception/memory/notify + home-profile/device-catalog），提供 miloco_im_push 通知投递（install-hermes.sh 自动从 ~/.hermes/{auth.json,config.yaml} 探测 IM 平台写入 state.json）、miloco_habit_suggest 习惯建议状态机、miloco_notify_bind 切换 IM，并 reconcile 4 个受管 cron job。自检 / 强制推送走外部 wrapper 脚本 plugins/hermes/scripts/miloco-status.sh（确定性，不走 LLM 推断）。"
+author: miloco
+kind: backend
+provides_tools:
+  - miloco_im_push
+  - miloco_habit_suggest
+  - miloco_notify_bind
+provides_hooks:
+  - pre_llm_call
+# configSchema 仅供文档/安装向导参考；Hermes PluginManifest 当前不解析此字段，
+# 插件运行时配置（如 deliver target）由 install-hermes.sh 自动写入 <plugin-dir>/state.json。
+configSchema:
+  debug:
+    type: boolean
+    default: false
+    description: 是否启用调试模式（更详细日志）
+  omni_model:
+    type: string
+    default: ""
+    description: 多模态模型标识（provider/model），如 xiaomi/mimo-v2.5。留空则沿用 $MILOCO_HOME/config.json 里的值
+  omni_base_url:
+    type: string
+    default: ""
+    description: 多模态模型服务 Base URL（需兼容 OpenAI-compatible 协议）。留空则沿用 $MILOCO_HOME/config.json 里的值
+  omni_api_key:
+    type: string
+    default: ""
+    secret: true
+    description: 多模态模型 API Key。留空则沿用 $MILOCO_HOME/config.json 里的值

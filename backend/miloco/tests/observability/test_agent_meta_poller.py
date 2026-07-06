@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock, patch
+from contextlib import contextmanager
 
 from miloco.observability import agent_meta_poller as poller_mod
 from miloco.observability.agent_meta_poller import AgentMetaPoller
@@ -16,6 +17,28 @@ def _init_db(db_path):
     conn = connect(db_path)
     init_schema(conn)
     return conn
+
+
+# 【hermes-pr.md §五 #11 完成】test 上下文管理器:同时 patch get_adapter 返 None
+# (强制走 webhook fallback 路径) + 允许传入额外的 patch 对象。
+# 否则 _poll_once 优先调 adapter.read_trace_meta → 返 None(文件不存在) →
+# 无限 in_progress 重试,测试卡死。
+@contextmanager
+def _no_adapter(**extra_patches):
+    """Patch get_adapter 返 None + 应用其他 patches。
+
+    用法:
+        with _no_adapter():
+            poller.enqueue(...)
+        with _no_adapter(call=patch(...)):
+            poller.enqueue(...)
+    """
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        stack.enter_context(patch("miloco.observability.agent_meta_poller.get_adapter", return_value=None))
+        for ctx in extra_patches.values():
+            stack.enter_context(ctx)
+        yield
 
 
 def _publish_seed_trace(client, trace_id="t-1"):
@@ -55,10 +78,13 @@ async def test_poller_done_writes_agent_run(tmp_path):
             "toolMaxMs": 0.0, "slowestToolName": None,
             "errorCount": 0, "errorMsg": None, "jsonlPath": None,
         }
-        with patch(
+        # 【hermes-pr.md §五 #11 完成】test 必须 mock get_adapter 返 None
+        # 否则 _poll_once 优先调 adapter.read_trace_meta → 返 None → 无限 in_progress 重试。
+        # 让 poller 走 fallback call_agent_webhook(webhook_rtt_ms 也是 fallback 路径写)。
+        with _no_adapter(call=patch(
             "miloco.observability.agent_meta_poller.call_agent_webhook",
             new=AsyncMock(return_value=fake),
-        ):
+        )):
             poller.enqueue("t-done", "r-1", "interaction", webhook_rtt_ms=12.0)
             await poller._queue.join()
             await client.flush()
@@ -109,10 +135,10 @@ async def test_poller_in_progress_then_done(tmp_path, monkeypatch):
                 "errorCount": 0, "errorMsg": None, "jsonlPath": None,
             }
 
-        with patch(
+        with _no_adapter(call=patch(
             "miloco.observability.agent_meta_poller.call_agent_webhook",
             new=fake_call,
-        ):
+        )):
             poller.enqueue("t-retry", "r-retry", "rule", webhook_rtt_ms=None)
             await poller._queue.join()
             await client.flush()
@@ -141,10 +167,10 @@ async def test_poller_unknown_gives_up(tmp_path):
     await poller.start()
     try:
         _publish_seed_trace(client, "t-unknown")
-        with patch(
+        with _no_adapter(unknown=patch(
             "miloco.observability.agent_meta_poller.call_agent_webhook",
             new=AsyncMock(return_value={"status": "unknown"}),
-        ):
+        )):
             poller.enqueue("t-unknown", "r-nope", "suggestion", webhook_rtt_ms=8.0)
             await poller._queue.join()
             await client.flush()

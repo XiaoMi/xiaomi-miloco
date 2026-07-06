@@ -1,0 +1,102 @@
+[
+  {
+    "query": "[附 3 张图] 这是我爸老王, 帮我注册一下他",
+    "should_trigger": true,
+    "reason": "上传素材 + 明确人名 + '注册' 关键词"
+  },
+  {
+    "query": "[附 video.mp4] 这是张三",
+    "should_trigger": true,
+    "reason": "上传视频 + 人名, 即使没说 '注册' 也应触发"
+  },
+  {
+    "query": "[附 4 张图] 这些都是我妈, 让系统认识下她",
+    "should_trigger": true,
+    "reason": "'让系统认识下她' 是注册意图的隐式表达, 没说'注册/登记'"
+  },
+  {
+    "query": "帮我给保姆王阿姨建个档案",
+    "should_trigger": true,
+    "reason": "无附件 + '建档案' 表达, 应触发(走双入口话术)"
+  },
+  {
+    "query": "[感知引擎] 收到陌生人警报 cam=foyer track=12 [用户] 这是我爸",
+    "should_trigger": true,
+    "reason": "推送陌生人响应 + 用户回'这是 XXX', 标准触发场景"
+  },
+  {
+    "query": "玄关摄像头那个穿蓝衣服的男的就是我表哥张伟, 录入下",
+    "should_trigger": true,
+    "reason": "无附件 + 指明摄像头 + 录入意图, '录入' 是注册的口语化表达"
+  },
+  {
+    "query": "看看摄像头最近都看到了哪些陌生人, 我挑一个登记",
+    "should_trigger": true,
+    "reason": "表达'想从池子里挑'+登记意图"
+  },
+  {
+    "query": "刚才那个挑错人了, 撤销下",
+    "should_trigger": true,
+    "reason": "撤销最近注册, 属于本 SKILL 附加操作"
+  },
+  {
+    "query": "把张三现在登记的样本都给我看下",
+    "should_trigger": true,
+    "reason": "查看某人样本, 属于本 SKILL 附加操作"
+  },
+  {
+    "query": "我们家昨天来了个新阿姨, 你帮我录下她的样子吧",
+    "should_trigger": true,
+    "reason": "无附件 + 隐式注册意图('录下她的样子' = 注册样本)"
+  },
+  {
+    "query": "把张三的家庭角色改成爸爸",
+    "should_trigger": false,
+    "reason": "纯改 person 行 role, 不涉及样本, 应走 miloco-miot-identity"
+  },
+  {
+    "query": "删除李四这个家庭成员",
+    "should_trigger": false,
+    "reason": "删 person 行, 走 miloco-miot-identity"
+  },
+  {
+    "query": "客厅摄像头里现在有人吗?",
+    "should_trigger": false,
+    "reason": "查询当前感知状态, 走 miloco-perception (不是注册)"
+  },
+  {
+    "query": "张三现在在哪里, 在干嘛?",
+    "should_trigger": false,
+    "reason": "查询某人当前位置/行为, 走 miloco-perception"
+  },
+  {
+    "query": "打开客厅的摄像头",
+    "should_trigger": false,
+    "reason": "设备控制, 走 miloco-devices"
+  },
+  {
+    "query": "摄像头现在还能识别出我爸吗? 上次他换了衣服感觉认不出了",
+    "should_trigger": false,
+    "reason": "近似但 near-miss: 这是询问已注册成员的识别效果, 不是注册新人; 应该走 perception 或 admin"
+  },
+  {
+    "query": "我们家家庭成员档案管理在哪里看?",
+    "should_trigger": false,
+    "reason": "查询档案系统本身, 偏配置/UI 引导, 不是新增样本; 应该走通用问答或 identity list"
+  },
+  {
+    "query": "我女儿王小美的脸最近老识别不准, 怎么办?",
+    "should_trigger": false,
+    "reason": "排查识别准确率问题, 走 admin/perception (虽然解决方案可能是补样本, 但本意是排障)"
+  },
+  {
+    "query": "把陌生人池里的旧记录清理一下",
+    "should_trigger": false,
+    "reason": "操作池子内部管理, 不是注册新人; 属于 admin 范畴(SKILL 边界已声明不接)"
+  },
+  {
+    "query": "今天家里来了多少陌生人?",
+    "should_trigger": false,
+    "reason": "查询陌生人计数, 走 perception logs / digest, 不是注册"
+  }
+]

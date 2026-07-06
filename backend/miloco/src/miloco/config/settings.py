@@ -91,11 +91,25 @@ class ServerSettings(BaseModel):
 
 
 class AgentSettings(BaseModel):
-    """Agent webhook 出站调用配置（与具体 agent 平台无关）。"""
+    """Agent 平台出站调用配置（推荐架构见 ``hermes-pr.md``）。
 
+    三段配置:
+    - ``platform``: 选 adapter,空走 webhook fallback(临时过渡,见 doc 主线)
+    - ``webhook_url`` + ``auth_bearer``: 旧 webhook 通路(PR #279),adapter 加载失败/未配时 fallback 用
+    - Adapter 自身配置(hermes_url / hermes_api_key 等)由 plugin 自己读
+      ``$MILOCO_HOME/agent_platform/<name>/config.yaml``,不写进 backend config.json
+    """
+
+    platform: str = Field(
+        default="",
+        description=(
+            "Agent 平台名;非空时 backend 按此从 $MILOCO_HOME/agent_platform/<name>/ 加载 Adapter"
+            "(hermes / openclaw / ...)。空时走 webhook 模式(PR #279 兼容,过渡期临时)。"
+        ),
+    )
     webhook_url: str = Field(
         default="http://127.0.0.1:18789/miloco/webhook",
-        description="agent webhook 回调地址",
+        description="agent webhook 回调地址(adapter 缺失/fallback 时用)",
     )
     auth_bearer: str = Field(
         default="",
@@ -226,18 +240,6 @@ class MiotSettings(BaseModel):
     )
 
 
-class NotifySettings(BaseModel):
-    """通知发送相关运行参数。"""
-
-    dedup_window_sec: float = Field(
-        default=60.0,
-        description="相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重。",
-    )
-    # 不加 ge=0.0：MessageDeduper 已把 window_sec<=0 当作「关闭去重」，与 TS 侧
-    # getNotifyDedupWindowMs 的归零语义一致。加了 ge 会让误配负值直接崩掉整个
-    # settings 加载（后端起不来），对一个可选兜底旋钮是过度约束。
-
-
 class CameraSettings(BaseModel):
     """摄像头采集参数。"""
 
@@ -329,6 +331,7 @@ class PerfRetentionSettings(BaseModel):
     events_days: int = Field(default=7, description="events 表保留天数")
     agent_runs_days: int = Field(default=7, description="agent_runs 表保留天数")
     trace_jsonl_days: int = Field(default=7, description="agent jsonl.gz 文件保留天数")
+    omni_log_days: int = Field(default=7, description="omni 交互 log 保留天数")
 
 
 class PerfSettings(BaseModel):
@@ -338,13 +341,17 @@ class PerfSettings(BaseModel):
         default=True,
         description=(
             "性能指标采集总开关。关闭后 MetricsClient / AgentMetaPoller 不启动,"
-            "observability.db / agent_runs / trace jsonl cleanup 全部跳过,"
+            "observability.db / agent_runs / trace jsonl / omni_log cleanup 全部跳过,"
             "track_agent_run 调用单点短路。"
         ),
     )
     retention: PerfRetentionSettings = Field(
         default_factory=PerfRetentionSettings,
         description="observability 数据保留参数",
+    )
+    omni_log_max_file_mb: int = Field(
+        default=100,
+        description="omni_log 单文件 size 上限 MB,超过则 rotate 到 YYYYMMDD.N.jsonl.gz。0 表示禁用 rotate",
     )
 
 
@@ -539,10 +546,6 @@ class MilocoSettings(BaseSettings):
         default_factory=MiotSettings,
         description="MIoT 云接入参数",
     )
-    notify: NotifySettings = Field(
-        default_factory=NotifySettings,
-        description="通知发送运行参数（去重窗口等）",
-    )
     camera: CameraSettings = Field(
         default_factory=CameraSettings,
         description="摄像头采集参数",
@@ -734,7 +737,6 @@ __all__ = [
     "MilocoSettings",
     "MiotSettings",
     "ModelSettings",
-    "NotifySettings",
     "OmniModelSettings",
     "AgentSettings",
     "PerceptionCollectSettings",

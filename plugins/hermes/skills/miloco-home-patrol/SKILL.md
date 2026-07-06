@@ -4,7 +4,7 @@ description: miloco-home-patrol 定时任务的内部例程，仅由该任务调
 metadata:
   author: miloco
   version: "1.1"
-  date: 2026-06-16
+  date: "2026-06-16"
 ---
 
 # 家庭巡检

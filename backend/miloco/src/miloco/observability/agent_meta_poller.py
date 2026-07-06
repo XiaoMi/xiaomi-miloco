@@ -1,8 +1,12 @@
 """Agent turn meta 反向 poller。
 
 backend 发完 run_agent_turn 拿到 runId 后,enqueue 给 poller;
-poller 周期性调 openclaw webhook ``get_trace`` 查询,拿到 meta 后调
+poller 周期性读 trace meta,拿到 meta 后调
 ``MetricsClient.record_agent_run`` 写入 agent_runs 表。
+
+【hermes-pr.md §五 #11 迁移后】读路径优先走 ``AgentPlatformAdapter.read_trace_meta``
+(直读 ``$MILOCO_HOME/trace/agent/<run_id>.meta.json`` 文件 IPC);adapter 缺失时
+fallback 到 PR #279 时代的 ``call_agent_webhook("get_trace", ...)``。
 """
 from __future__ import annotations
 
@@ -10,8 +14,9 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
+from miloco.agent_platform import get_adapter
 from miloco.config import get_settings
 from miloco.middleware.exceptions import AgentWebhookException
 from miloco.observability.metrics_client import MetricsClient
@@ -126,62 +131,119 @@ class AgentMetaPoller:
                 self._queue.task_done()
 
     async def _poll_one(self, job: _Job) -> None:
-        # deadline 在这里起算 — 真正轮到 poll 时才计 90s 预算,
-        # 入队等待 / sem 等待时间不被吃掉。
-        deadline = time.monotonic() + _MAX_DEADLINE_S
-        while time.monotonic() < deadline and not self._stop.is_set():
-            try:
-                data = await call_agent_webhook(
-                    "get_trace", {"runId": job.run_id}, timeout=5.0,
-                )
-            except AgentWebhookException as e:
-                logger.warning(
-                    "get_trace webhook failed: trace_id=%s err=%s",
-                    job.trace_id, e,
-                )
-                await asyncio.sleep(_POLL_INTERVAL_S)
-                continue
-            except Exception:
-                logger.exception("get_trace unexpected error")
-                await asyncio.sleep(_POLL_INTERVAL_S)
-                continue
+        """【hermes-pr.md §五 #11 迁移后】用 Adapter.read_trace_meta 替代原 PR #279 webhook get_trace。
 
-            status = (data or {}).get("status")
+        链路:plugin trace.py 写 ``$MILOCO_HOME/trace/agent/<run_id>.meta.json``(平铺),
+        backend AgentPlatformAdapter.read_trace_meta() 直读盘返回 TraceMeta。
+
+        adapter 缺失(过渡期 fallback)→ 退到 webhook get_trace(PR #279 兼容路径)。
+        """
+        deadline = time.monotonic() + _MAX_DEADLINE_S
+        adapter = get_adapter()
+        while time.monotonic() < deadline and not self._stop.is_set():
+            status, meta = await self._poll_once(job, adapter)
             if status == "done":
                 record = AgentRunRecord(
-                    run_id=data.get("runId") or job.run_id,
+                    run_id=getattr(meta, "run_id", None) or job.run_id,
                     trace_id=job.trace_id,
                     timestamp=int(time.time() * 1000),
                     source=job.source,
                     webhook_rtt_ms=job.webhook_rtt_ms,
-                    query=data.get("query") or "",
-                    duration_ms=float(data.get("durationMs") or 0.0),
-                    llm_call_count=int(data.get("llmCallCount") or 0),
-                    tool_call_count=int(data.get("toolCallCount") or 0),
-                    llm_total_ms=float(data.get("llmTotalMs") or 0.0),
-                    tool_total_ms=float(data.get("toolTotalMs") or 0.0),
-                    tool_max_ms=float(data.get("toolMaxMs") or 0.0),
-                    slowest_tool_name=data.get("slowestToolName"),
-                    success=bool(data.get("success")),
-                    error_count=int(data.get("errorCount") or 0),
-                    error_msg=data.get("errorMsg"),
-                    jsonl_path=data.get("jsonlPath"),
+                    query=getattr(meta, "query", "") or "",
+                    duration_ms=float(getattr(meta, "duration_ms", 0.0) or 0.0),
+                    llm_call_count=int(getattr(meta, "llm_call_count", 0) or 0),
+                    tool_call_count=int(getattr(meta, "tool_call_count", 0) or 0),
+                    llm_total_ms=float(getattr(meta, "llm_total_ms", 0.0) or 0.0),
+                    tool_total_ms=float(getattr(meta, "tool_total_ms", 0.0) or 0.0),
+                    tool_max_ms=float(getattr(meta, "tool_max_ms", 0.0) or 0.0),
+                    slowest_tool_name=getattr(meta, "slowest_tool_name", None),
+                    success=bool(getattr(meta, "success", False)),
+                    error_count=int(getattr(meta, "error_count", 0) or 0),
+                    error_msg=getattr(meta, "error_msg", None),
+                    jsonl_path=getattr(meta, "jsonl_path", None),
                 )
                 self._client.record_agent_run(record)
                 return
             if status == "unknown":
                 logger.info(
-                    "get_trace returned unknown for run_id=%s; giving up",
-                    job.run_id,
+                    "trace returned unknown for run_id=%s; giving up", job.run_id,
                 )
                 return
-            # in_progress / error → 继续轮询
+            if status == "error":
+                logger.warning(
+                    "trace read error run_id=%s err=%s", job.run_id, meta,
+                )
+                await asyncio.sleep(_POLL_INTERVAL_S)
+                continue
+            # in_progress → 继续轮询
             await asyncio.sleep(_POLL_INTERVAL_S)
 
         logger.warning(
             "agent_meta_poller timed out: trace_id=%s run_id=%s",
             job.trace_id, job.run_id,
         )
+
+    async def _poll_once(self, job: _Job, adapter: Any) -> tuple[str, Any]:
+        """单次读 trace meta。返回 ``(status, meta_or_data)``。
+
+        status 含义:
+        - ``"done"``: meta 读到了,meta 含聚合统计
+        - ``"in_progress"``: meta 不存在(turn 还没 flush),等下次轮询
+        - ``"unknown"``: meta 不存在但超时(给个明确日志,give up)
+        - ``"error"``: 出错,meta 是错误信息
+        """
+        # 优先 adapter 路径(hermes-pr.md §五 #11)
+        if adapter is not None:
+            try:
+                meta = await adapter.read_trace_meta(job.run_id)
+                if meta is not None:
+                    return ("done", meta)
+                # meta 为 None:可能是 turn 还没 on_session_end,继续轮询
+                return ("in_progress", None)
+            except Exception as exc:
+                logger.warning(
+                    "adapter.read_trace_meta failed run_id=%s err=%s",
+                    job.run_id, exc,
+                )
+                return ("error", str(exc))
+
+        # Fallback:原 PR #279 webhook get_trace(adapter 缺失时)
+        try:
+            data = await call_agent_webhook(
+                "get_trace", {"runId": job.run_id}, timeout=5.0,
+            )
+            status = (data or {}).get("status")
+            if status == "done":
+                # 【hermes-pr.md §五 #11 完成】caller 用 getattr 读字段,把 dict
+                # 包成 SimpleNamespace,字段名跟 TraceMeta 对齐(适配两种路径返回值)。
+                # webhook 路径返 camelCase(llmTotalMs / toolCallCount / ...),需转 snake_case
+                # 否则 getattr(meta, "llm_total_ms", 0) 永远返默认值 0.0。
+                from types import SimpleNamespace
+                _C2S = {
+                    "runId": "run_id", "query": "query",
+                    "durationMs": "duration_ms", "llmCallCount": "llm_call_count",
+                    "toolCallCount": "tool_call_count",
+                    "llmTotalMs": "llm_total_ms", "toolTotalMs": "tool_total_ms",
+                    "toolMaxMs": "tool_max_ms", "slowestToolName": "slowest_tool_name",
+                    "errorCount": "error_count", "errorMsg": "error_msg",
+                    "jsonlPath": "jsonl_path",
+                }
+                translated = {_C2S.get(k, k): v for k, v in (data or {}).items()}
+                # TraceMeta 不在 observability.types(在 miloco.agent_platform.base),
+                # 但跨模块 import 会引入循环。用 SimpleNamespace 给 caller getattr 读字段。
+                meta = SimpleNamespace(**translated) if translated else SimpleNamespace()
+                return ("done", meta)
+            if status == "unknown":
+                return ("unknown", data)
+            return ("in_progress", data)
+        except AgentWebhookException as exc:
+            logger.warning(
+                "get_trace webhook failed: trace_id=%s err=%s", job.trace_id, exc,
+            )
+            return ("error", str(exc))
+        except Exception:
+            logger.exception("get_trace unexpected error")
+            return ("error", "unexpected error")
 
 
 _singleton: AgentMetaPoller | None = None
