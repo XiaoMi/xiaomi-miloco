@@ -37,6 +37,9 @@ _COREML_CACHE_DIRNAME = "coreml_cache"
 
 # 兜底:cache 目录总大小超过 models_dir 下所有 onnx 之和的这个倍数时整目录清空
 # 重建。全清是安全操作(下次 session 重编译一次而已,不会用错模型),故阈值可保守。
+# 真机实测(ort 1.27.0):单模型 CoreML 编译产物约为源 onnx 的 ~2x(det 43MB →
+# cache 89MB),稳态 det+reid 合计 total/base ≈ 1.4x;模型升级一次(旧目录暂留)
+# 约 2.8x 仍 < 3x,连续两次以上升级累积才触发全清 —— 故 3x 余量足、稳态不误触发。
 _CACHE_OVERSIZE_MULTIPLIER = 3
 
 # 总量兜底清理进程内只跑一次(首个 CoreML session 创建前),避免边清边读。
@@ -88,7 +91,6 @@ def _sweep_coreml_cache_if_oversized_once() -> None:
     with _cache_sweep_lock:
         if _cache_sweep_done:
             return
-        _cache_sweep_done = True
         try:
             from miloco.config import get_settings
 
@@ -120,6 +122,11 @@ def _sweep_coreml_cache_if_oversized_once() -> None:
             _LOGGER.warning(
                 "CoreML cache 兜底清理失败(忽略,不影响启动)", exc_info=True
             )
+        finally:
+            # 置位移到清理完成之后:并发 make_session 的其它线程在快速路径见到未置位
+            # 时会进锁阻塞,直到 rmtree 结束才放行,兑现「首个 session 创建前清完」
+            # 屏障、杜绝边清边读;用 finally 保证即便清理体抛异常也只跑一次、不重试。
+            _cache_sweep_done = True
 
 
 def make_session(
