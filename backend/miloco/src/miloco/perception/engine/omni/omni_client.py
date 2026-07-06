@@ -157,30 +157,36 @@ async def call_omni(
         stream=False,
     )
 
+    forced_stream = body.get("stream", False)
+
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": MILOCO_USER_AGENT,
+    }
     try:
         async with httpx.AsyncClient(timeout=config.timeout) as client:
-            resp = await client.post(
-                f"{config.base_url}/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": MILOCO_USER_AGENT,
-                },
-                json=body,
-            )
-            if resp.status_code != 200:
-                logger.error(
-                    "Omni API error %d: %s", resp.status_code, resp.text[:500]
+            if not forced_stream:
+                resp = await client.post(
+                    f"{config.base_url}/chat/completions",
+                    headers=headers,
+                    json=body,
                 )
-            resp.raise_for_status()
-            raw = resp.json()
+                if resp.status_code != 200:
+                    logger.error(
+                        "Omni API error %d: %s", resp.status_code, resp.text[:500]
+                    )
+                resp.raise_for_status()
+                raw = resp.json()
+            else:
+                raw = await _collect_stream_response(client, config.base_url, headers, body)
             fire_record(config.model, raw.get("usage", {}), type)
         return raw
     except OmniError:
-        raise  # 不重复包装
+        raise
     except Exception as e:
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
@@ -199,6 +205,50 @@ async def call_omni(
                 "max_tokens": config.max_completion_tokens,
             },
         )
+
+
+async def _collect_stream_response(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """读取 SSE 流并拼接为等效的非流式响应 dict。
+
+    用于 adapter 强制 stream=True（如 Qwen）但调用方期望同步返回的场景。
+    """
+    content_parts: list[str] = []
+    usage: dict[str, Any] = {}
+    async with client.stream(
+        "POST", f"{base_url}/chat/completions", headers=headers, json=body,
+    ) as resp:
+        if resp.status_code != 200:
+            await resp.aread()
+            logger.error("Omni stream error %d: %s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            line = line.strip()
+            if not line or not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk["usage"]
+            try:
+                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+            except (IndexError, KeyError):
+                delta = None
+            if delta:
+                content_parts.append(delta)
+    return {
+        "choices": [{"message": {"content": "".join(content_parts)}}],
+        "usage": usage,
+    }
 
 
 def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
