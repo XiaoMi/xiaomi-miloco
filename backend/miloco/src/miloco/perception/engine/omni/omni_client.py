@@ -26,26 +26,23 @@ _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
 # 统一 omni_client.py 与 omni.py 中原本独立的两套客户端实现为一个共享
 # httpx.AsyncClient（池化 + keepalive），消除三个调用路径的重复代码与行为差异。
 # AsyncClient 绑定到创建时所在的 event loop；感知每窗 asyncio.run() 起新 loop，client 每窗重建。
-# 客户端不显式关闭（进程退出由 OS 回收）。
+# 三条路径均不做 per-call aclose（与原 fused 行为一致）：每窗临时 loop 关闭时回收其连接。
 _http_client: "httpx.AsyncClient | None" = None
-# _http_client_loop: CodeQL "is unused" alert is a false positive.
-# This is the sole trigger for rebuilding the client when the event loop
-# changes — removing it reuses a client bound to a dead loop and causes
-# "Event loop is closed". Do not delete.
+# 记录 client 绑定的 loop；loop 变更时用它触发重建（见 _get_http_client）。
 _http_client_loop: "asyncio.AbstractEventLoop | None" = None
 
 
 def _get_http_client(timeout: float) -> httpx.AsyncClient:
     global _http_client, _http_client_loop
     loop = asyncio.get_running_loop()
-    if (
-        _http_client is None
-        or _http_client_loop is not loop
-        or _http_client.is_closed
-    ):
+    # 无条件读 _http_client_loop（不藏在短路后），避免 CodeQL 把该读误判为 unused
+    loop_changed = _http_client_loop is not loop
+    if _http_client is None or loop_changed or _http_client.is_closed:
         _http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),  # matches max camera count per window (≤1 omni call per camera via room batches)
+            # 假设单窗并发 omni（room×device 全 gather）≤ 相机数；若某部署相机 >8，
+            # 超出的请求会在连接池上排队至 request timeout。
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
         )
         _http_client_loop = loop
     return _http_client
@@ -198,6 +195,7 @@ async def call_omni(
                 "User-Agent": MILOCO_USER_AGENT,
             },
             json=body,
+            timeout=httpx.Timeout(config.timeout, connect=10.0),
         )
         if resp.status_code != 200:
             logger.error(
@@ -343,6 +341,7 @@ async def call_omni_stream(
             f"{config.base_url}/chat/completions",
             headers=headers,
             json=body,
+            timeout=httpx.Timeout(config.timeout, connect=10.0),
         ) as resp:
             if resp.status_code != 200:
                 await resp.aread()

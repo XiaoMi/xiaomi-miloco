@@ -9,6 +9,8 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
@@ -256,6 +258,7 @@ async def _call_omni_messages(
                 "User-Agent": MILOCO_USER_AGENT,
             },
             json=body,
+            timeout=httpx.Timeout(config.timeout, connect=10.0),
         )
         if resp.status_code != 200:
             logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
