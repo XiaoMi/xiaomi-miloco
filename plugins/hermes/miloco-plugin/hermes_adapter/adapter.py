@@ -330,7 +330,7 @@ class Adapter:
         trace.py 写带日期子目录+query后缀,此处 glob 搜索匹配。
         """
         candidates = sorted(
-            self._trace_dir.glob(f"*{run_id}*.meta.json"),
+            self._trace_dir.rglob(f"*{run_id}*.meta.json"),
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
         if not candidates:
