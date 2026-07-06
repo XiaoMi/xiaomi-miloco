@@ -894,8 +894,19 @@ fi
 if miloco-cli config set agent.platform hermes 2>&1 | tail -3; then
   info "  agent.platform = hermes (via miloco-cli config set)"
 else
-  err "miloco-cli config set agent.platform 失败"
-  exit 1
+  # miloco-cli 可能不认识 agent.platform(旧版 CLI,PR 未合)
+  # 降级: Python 直写 config.json
+  warn "  miloco-cli config set agent.platform 失败,降级为 Python 直写 config.json"
+  "$PYTHON" -c "
+import json
+p = r'$MILOCO_HOME/config.json'
+with open(p) as f:
+    d = json.load(f)
+d.setdefault('agent', {})['platform'] = 'hermes'
+with open(p, 'w') as f:
+    json.dump(d, f, indent=2, ensure_ascii=False)
+print('agent.platform = hermes 已写入')
+" && info "  agent.platform = hermes (via Python 直写)" || { err "agent.platform 写入失败"; exit 1; }
 fi
 mark_done 5
 
