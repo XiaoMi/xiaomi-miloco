@@ -17,6 +17,7 @@ from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
+    _collect_stream_response,
     call_omni,
     call_omni_stream,
     extract_usage,
@@ -284,33 +285,35 @@ async def _call_omni_messages(
         stream=False,
     )
 
+    forced_stream = body.get("stream", False)
+
     client = _get_fused_http_client(config.timeout)
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": MILOCO_USER_AGENT,
+    }
     try:
-        resp = await client.post(
-            f"{config.base_url}/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": MILOCO_USER_AGENT,
-            },
-            json=body,
-        )
-        if resp.status_code != 200:
-            logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
-            # 400 通常是 multimodal payload 服务端拒收 (corrupted image/video)。
-            # 静态从 traceback 无法定位是哪个块出问题, 这里输出每个多模态块的尺寸
-            # summary (不打 base64 本身, 仅尺寸) 便于事后定位。仅 400 路径打, 不影响
-            # 常态 log 量。
-            if resp.status_code == 400:
-                logger.error(
-                    "[omni] omni 400 payload 摘要 | %s",
-                    _summarize_multimodal_payload(messages),
-                )
-        resp.raise_for_status()
-        raw = resp.json()
+        if not forced_stream:
+            resp = await client.post(
+                f"{config.base_url}/chat/completions",
+                headers=headers,
+                json=body,
+            )
+            if resp.status_code != 200:
+                logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
+                if resp.status_code == 400:
+                    logger.error(
+                        "[omni] omni 400 payload 摘要 | %s",
+                        _summarize_multimodal_payload(messages),
+                    )
+            resp.raise_for_status()
+            raw = resp.json()
+        else:
+            raw = await _collect_stream_response(client, config.base_url, headers, body)
         # 服务端在 fused 大 payload 下偶发返回非 dict body (~1.5%);此处校验
         # 形态并 dump 截断后的原始响应,便于事后定位服务端返回了什么。
         if not isinstance(raw, dict):

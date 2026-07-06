@@ -93,9 +93,65 @@ class MiMoAdapter(OmniProviderAdapter):
         return body
 
 
+class QwenOmniAdapter(OmniProviderAdapter):
+    """Qwen3.5-Omni 系列 API adapter（qwen3.5-omni-plus / qwen3.5-omni-flash）。
+
+    仅支持 Qwen3.5-Omni 系列——fused 模式需要视频+图片+文本组合输入，
+    旧版 qwen3-omni-flash 只支持文本+单一模态，无法满足。
+
+    - video block: ``video_url``（无 fps / media_resolution，API 端固定 2fps 自行抽帧）
+    - audio block: ``input_audio`` + ``format``
+    - request body: 强制 ``stream: true``（Qwen-Omni 非流式会报错）、``modalities: ["text"]``
+    """
+
+    def build_video_block(self, video_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        return {
+            "type": "video_url",
+            "video_url": {"url": f"data:;base64,{video_base64}"},
+        }
+
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        return {
+            "type": "input_audio",
+            "input_audio": {
+                "data": f"data:;base64,{audio_base64}",
+                "format": "m4a",
+            },
+        }
+
+    def build_request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "modalities": ["text"],
+        }
+
+
 _DEFAULT_ADAPTER = MiMoAdapter()
+_QWEN_ADAPTER = QwenOmniAdapter()
 
 
 def get_adapter(model: str) -> OmniProviderAdapter:
-    """按 model 字符串返回对应 adapter，默认 MiMo。"""
+    """按 model 字符串返回对应 adapter，默认 MiMo。
+
+    Qwen 侧仅支持 Qwen3.5-Omni 系列（qwen3.5-omni-plus / qwen3.5-omni-flash），
+    旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
+    """
+    name = model.lower()
+    if "qwen" in name:
+        return _QWEN_ADAPTER
     return _DEFAULT_ADAPTER
