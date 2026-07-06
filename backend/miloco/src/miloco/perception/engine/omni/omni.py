@@ -22,6 +22,7 @@ from miloco.perception.engine.omni.omni_client import (
     extract_usage,
     resolve_api_key,
 )
+from miloco.perception.engine.omni.provider import get_adapter
 from miloco.perception.engine.omni.prompt_builder import (
     FusedPromptConfig,
     build_batch_prompt,
@@ -45,6 +46,7 @@ from miloco.perception.types import MatchedRule, Speech, Suggestion
 
 if TYPE_CHECKING:
     from miloco.perception.engine.identity.engine import IdentityEngine
+    from miloco.perception.engine.omni.provider import OmniProviderAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,7 @@ async def run_omni_fused(
     # deliver_fused_failure，否则 mark_dispatched 已置 inflight=True 的 track
     # 永远不会被 GC（_gc_dead_tracks 跳过 inflight）也不会被重新派发
     # （needs_omni_call 返回 False）。
+    adapter = get_adapter(config.model)
     try:
         payload = build_fused_payload(
             packets=edge_packets,
@@ -159,8 +162,9 @@ async def run_omni_fused(
             gallery_snapshot=gallery_snapshot,
             config=fused_prompt_config,
             label_lookup=name_lookup,
+            adapter=adapter,
         )
-        raw_response = await _call_omni_messages(payload["messages"], config)
+        raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -254,7 +258,10 @@ def _get_fused_http_client(timeout: float) -> httpx.AsyncClient:
 
 
 async def _call_omni_messages(
-    messages: list[dict], config: OmniConfig, type: str = "realtime"
+    messages: list[dict],
+    config: OmniConfig,
+    type: str = "realtime",
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict[str, Any]:
     """调 omni——直接传 messages（fused 模式专用）。
 
@@ -266,15 +273,16 @@ async def _call_omni_messages(
     if not api_key:
         raise ValueError("MILOCO_MODEL__OMNI__API_KEY is not set; cannot call fused omni")
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": False,
-        "thinking": {"type": "disabled"},
-    }
+    if adapter is None:
+        adapter = get_adapter(config.model)
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=False,
+    )
 
     client = _get_fused_http_client(config.timeout)
     t0 = time.monotonic()

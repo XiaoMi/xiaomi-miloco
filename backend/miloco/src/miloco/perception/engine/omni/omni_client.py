@@ -15,6 +15,7 @@ import httpx
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
+from miloco.perception.engine.omni.provider import OmniProviderAdapter, get_adapter
 from miloco.perception.snapshot_context import push_omni_trace
 
 logger = logging.getLogger(__name__)
@@ -144,17 +145,17 @@ async def call_omni(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    adapter = get_adapter(config.model)
+    messages = _build_messages(payload, adapter)
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": False,
-        "thinking": {"type": "disabled"},
-    }
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=False,
+    )
 
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
@@ -200,33 +201,17 @@ async def call_omni(
         )
 
 
-def _build_messages(payload: dict) -> list[dict]:
+def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": payload["system_prompt"]}]
 
     content: list[dict] = [{"type": "text", "text": payload["user_content"]}]
 
-    # Video (frames + audio merged into mp4)；与 audio_base64 互斥（上游 _build_payload 保证）
+    media_info = payload.get("media_info")
+
     if payload.get("video_base64"):
-        content.append(
-            {
-                "type": "video_url",
-                "video_url": {
-                    "url": f"data:video/mp4;base64,{payload['video_base64']}"
-                },
-                "fps": payload.get("video_fps", 3),
-                "media_resolution": "max",
-            }
-        )
-    # Audio-only route：独立 input_audio 块（仅当无 video_base64 时启用）
+        content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
-        content.append(
-            {
-                "type": "input_audio",
-                "input_audio": {
-                    "data": f"data:audio/m4a;base64,{payload['audio_base64']}"
-                },
-            }
-        )
+        content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):
@@ -283,18 +268,17 @@ async def call_omni_stream(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    adapter = get_adapter(config.model)
+    messages = _build_messages(payload, adapter)
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-        "thinking": {"type": "disabled"},
-    }
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=True,
+    )
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",

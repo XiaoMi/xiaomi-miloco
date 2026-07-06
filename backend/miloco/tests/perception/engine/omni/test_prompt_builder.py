@@ -495,10 +495,11 @@ class TestBuildMessagesContentBlocks:
 
     def test_audio_route_emits_input_audio_block(self):
         from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import MiMoAdapter
 
         ep = _audio_only_packet()
         payload = build_prompt(ep, OmniContext())
-        messages = _build_messages(payload)
+        messages = _build_messages(payload, MiMoAdapter())
         user_blocks = messages[1]["content"]
         types = [b["type"] for b in user_blocks]
 
@@ -509,10 +510,11 @@ class TestBuildMessagesContentBlocks:
 
     def test_video_route_emits_video_url_block(self):
         from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import MiMoAdapter
 
         ep = _video_route_packet()
         payload = build_prompt(ep, OmniContext())
-        messages = _build_messages(payload)
+        messages = _build_messages(payload, MiMoAdapter())
         user_blocks = messages[1]["content"]
         types = [b["type"] for b in user_blocks]
 
@@ -940,12 +942,12 @@ class TestEncodeVideoAudioGating:
     """video 路由按 audio gate 结果决定是否把音频轨编进 mp4（反语音幻觉）。"""
 
     def test_audio_track_included_when_audio_active(self):
-        b64 = _encode_video(_video_packet(audio_active=True))
+        b64, _info = _encode_video(_video_packet(audio_active=True))
         assert b64 is not None
         assert _mp4_has_audio_stream(b64)
 
     def test_audio_track_dropped_when_audio_inactive(self):
-        b64 = _encode_video(_video_packet(audio_active=False))
+        b64, _info = _encode_video(_video_packet(audio_active=False))
         assert b64 is not None
         assert not _mp4_has_audio_stream(b64)
 
@@ -954,7 +956,7 @@ class TestEncodeVideoAudioGating:
         ep = _mock_edge_packet()
         ep.audio_clip = np.zeros(16000, dtype=np.int16)
         assert ep.trigger is None
-        b64 = _encode_video(ep)
+        b64, _info = _encode_video(ep)
         assert b64 is not None
         assert _mp4_has_audio_stream(b64)
 
