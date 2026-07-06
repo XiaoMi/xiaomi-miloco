@@ -256,16 +256,18 @@ miloco-cli config get model.omni.api_key
 **agent 跑一下确认状态**：
 
 ```bash
+# 先检查 plugin 是否已真正加载(不止 enabled,还要有 cron job)
+hermes cron list 2>&1 | grep -c "miloco" | xargs -I{} test {} -ge 4 && echo "plugin 已加载" || echo "需要重启"
 # gateway 在跑 = 端口 8642 LISTEN
 lsof -nP -iTCP:8642 -sTCP:LISTEN 2>/dev/null | head -3
 ```
 
 **判定**：
 
-- **已 LISTEN（已重启过）** → 直接进 Step 3，或者发一句"gateway 在跑，进验证"。
-- **未 LISTEN** → 发下面这整段（**一次发完**就停下等用户回）：
+- **两次验证都 PASS**（plugin 已加载 + gateway 在跑） → 直接进 Step 3。
+- **任何一项不满足** → 发下面这整段（**一次发完**就停下等用户回）：
 
-> 最后一步，重启 Hermes gateway 让插件生效。你自己终端跑（**不要让 agent 代跑**，Hermes 有 anti-restart-loop，会拒）：
+> 最后一步，重启 Hermes gateway 让插件生效（刚装的插件需要 gateway 重启才会加载 cron/tool）。你自己终端跑（**不要让 agent 代跑**，Hermes 有 anti-restart-loop，会拒）：
 >
 > ```bash
 > hermes gateway restart
