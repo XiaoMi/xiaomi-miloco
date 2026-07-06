@@ -1,7 +1,8 @@
-import { loadHomeProfile } from "../home-profile/helpers.js";
+import path from "node:path";
+import { readFileSafe } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
 import { getCatalog } from "../services/catalog.js";
-import { deployTimezone } from "../utils/time.js";
+import { deployTimezone, toLocalParts } from "../utils/time.js";
 import type { HookRegister } from "./index.js";
 
 // 注入 profile：按 session 类型组合不同的块（方案见 _local/prompt-refactor-plan.md §3）。
@@ -97,9 +98,9 @@ ${formats.join("\n")}
 }
 
 const B_MEMORY = `## 家庭记忆
-做任何事（控设备、给建议、写通知）之前，先查这两份记忆，让动作更精准、更合成员心意：
-- **感知记忆**——家里最近发生了什么（每天自动归档的事件），用 \`memory_search\` 查（读不到当天文件就跳过）。
-- **家庭档案**——成员的偏好、习惯、家庭规则、设备使用经验，见另注入的家庭档案摘要。
+做任何事（控设备、给建议、写通知）之前，先结合这两份记忆，让动作更精准、更合成员心意：
+- **感知记忆**——家里发生了什么。**今天的已整段注入在下方「今日感知日志」，直接读它**；要看更早的日子，用 \`memory_search\` 查。
+- **家庭档案**——成员的偏好、习惯、家庭规则、设备使用经验，用 \`miloco-cli home-profile list\` 按需查（不再随上下文注入）。
 
 用户实时指令 > 档案规则（除非档案明确标注为底线 / 红线）。对话中出现成员喜好 / 家人信息 / 作息规律时，即使没说"记录"，也静默写入档案（先 \`home-profile list\` 看全量再写）。`;
 
@@ -133,17 +134,24 @@ const DEVICE_CATALOG_INTRO = `## 设备目录
 下方 \`# devices catalog\` 是预注入的高频设备子集（≤50 台，非全量），字段规则见下方目录头部的注释。它**只用于快速拿到已点名单台设备的 did / spec_name**，不是全屋设备的全集。凡涉及设备**集合 / 多台 / 不确定数量**（无论查询还是控制），或目录里找不到目标，**必须先 \`device list\` 拉全量**再逐台处理，别拿子集当全部。
 **任何 \`device control / props / action\` 或 \`scene\` 命令前（含查询），必须先读 \`miloco-devices\` skill**——命令选择、集合判定、安全确认、补 on、错误处理等都在其中，别只凭本目录裸发。`;
 
-function buildHomeProfileBlock(): string {
-  const md = loadHomeProfile().trim();
+// 今日感知日志：把当天的感知记忆整段注入 agent 全局上下文，替代过去注入的家庭档案摘要——
+// 家庭管家更需要"家里今天发生了什么"这样的活上下文；家庭档案改由 agent 用 `home-profile list`
+// 按需自取。文件由 miloco-perception-digest cron 写在工作区 `memory/<date>-miloco-perception.md`，
+// date 按部署时区（与 digest 写文件名同源），工作区路径由宿主通过 ctx.workspaceDir 提供——
+// 拿不到（如宿主未传、早期版本）或当天还没有日志时，整段不出现。
+function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
+  if (!workspaceDir) return "";
+  const now = toLocalParts(new Date().toISOString());
+  if (!now) return "";
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const date = `${now.y}-${pad2(now.m)}-${pad2(now.d)}`;
+  const file = path.join(workspaceDir, "memory", `${date}-miloco-perception.md`);
+  const md = readFileSafe(file).trim();
   if (!md) return "";
-  // profile.md 是 Python render.py 产出的独立文档（`# 家庭档案` 为根，omni 感知 prompt
-  // 也读同一份、且按 `# 家庭档案` 引用它）。注入 agent prompt 时整体降一级，嵌进 openclaw
-  // base 的 `##` 章节层级下：# 家庭档案→##、## 家庭成员→###、### 成员→####。改 render.py
-  // 会连带打掉 omni 的档案根标题，故只在注入侧降级。
+  // 日志本身以 `#` 标题起头（digest 首行写 `# <date> 感知记忆`）。整体降一级，嵌进 append 的
+  // `## 今日感知日志` 章节层级下，避免裸贴出现 H1 倒挂。
   const demoted = md.replace(/^(#{1,5}) /gm, "#$1 ");
-  // 空档案哨兵串（loadHomeProfile 的 "(暂无内容)"）无标题行，补上 ## 家庭档案 以免
-  // append 区出现无归属的孤立文本。
-  return demoted.startsWith("## 家庭档案") ? demoted : `## 家庭档案\n\n${md}`;
+  return `## 今日感知日志\n下面是今天家里发生的事（感知引擎自动归档，按家庭时区记录）。做判断 / 给建议前先读它；更早的日子用 \`memory_search\` 查。\n\n${demoted}`;
 }
 
 // ===== 组装 =====
@@ -153,7 +161,7 @@ export const registerBeforePromptBuildHook: HookRegister = (api) => {
     "before_prompt_build",
     async (
       event?: { prompt?: string },
-      ctx?: { sessionKey?: string; trigger?: string },
+      ctx?: { sessionKey?: string; trigger?: string; workspaceDir?: string },
     ) => {
     const profile = resolveProfile(ctx?.sessionKey, {
       prompt: event?.prompt,
@@ -170,11 +178,11 @@ export const registerBeforePromptBuildHook: HookRegister = (api) => {
     if (B_CONSTRAINTS) prepend.push(B_CONSTRAINTS);
     prepend.push(B_NOTIFY, B_LANGUAGE);
 
-    // ---- append：数据块（档案 → 待回应 → 目录），minimal 不带 ----
+    // ---- append：数据块（今日感知日志 → 待回应 → 目录），minimal 不带 ----
     const append: string[] = [];
     if (profile !== "minimal") {
-      const profileBlock = buildHomeProfileBlock();
-      if (profileBlock) append.push(profileBlock);
+      const perceptionBlock = buildPerceptionLogBlock(ctx?.workspaceDir);
+      if (perceptionBlock) append.push(perceptionBlock);
 
       if (profile === "full") {
         const pending = buildPendingSuggestionBlock();

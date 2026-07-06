@@ -2,8 +2,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { homeProfilePath } from "../src/home-profile/helpers.js";
 import { registerBeforePromptBuildHook, resolveProfile } from "../src/hooks/prompt.js";
+import { toLocalParts } from "../src/utils/time.js";
+
+// 感知日志文件名日期取部署时区；测试固定 tz 后按同一逻辑算出今日文件名。
+function todayPerceptionFile(workspaceDir: string, tz: string): string {
+  const p = toLocalParts(new Date().toISOString(), tz);
+  if (!p) throw new Error("todayPerceptionFile: bad parts");
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const date = `${p.y}-${pad2(p.m)}-${pad2(p.d)}`;
+  return path.join(workspaceDir, "memory", `${date}-miloco-perception.md`);
+}
 
 // catalog 走 miloco-cli，测试里 mock 掉，单独控制空/非空两条路径。
 const getCatalog = vi.fn<() => Promise<string>>();
@@ -20,7 +29,7 @@ function makeApi() {
   let handler:
     | ((
         evt: { prompt?: string } | null,
-        ctx?: { sessionKey?: string; trigger?: string },
+        ctx?: { sessionKey?: string; trigger?: string; workspaceDir?: string },
       ) => Promise<HookResult>)
     | undefined;
   const api = {
@@ -30,8 +39,14 @@ function makeApi() {
   } as any;
   return {
     api,
-    run: (sessionKey?: string, opts?: { prompt?: string; trigger?: string }) =>
-      handler!({ prompt: opts?.prompt }, { sessionKey, trigger: opts?.trigger }),
+    run: (
+      sessionKey?: string,
+      opts?: { prompt?: string; trigger?: string; workspaceDir?: string },
+    ) =>
+      handler!(
+        { prompt: opts?.prompt },
+        { sessionKey, trigger: opts?.trigger, workspaceDir: opts?.workspaceDir },
+      ),
   };
 }
 
@@ -64,28 +79,37 @@ describe("resolveProfile", () => {
 
 describe("before_prompt_build 组装", () => {
   let tmpHome: string;
-  const prevEnv = process.env.MILOCO_HOME;
+  let tmpWorkspace: string;
+  const prevHome = process.env.MILOCO_HOME;
+  const prevTz = process.env.MILOCO_TIMEZONE;
 
   beforeEach(() => {
     tmpHome = mkdtempSync(path.join(tmpdir(), "miloco-prompt-"));
     process.env.MILOCO_HOME = tmpHome;
-    const p = homeProfilePath();
-    mkdirSync(path.dirname(p), { recursive: true });
-    writeFileSync(p, "# 家庭档案\n\n### 妈妈\n- 对花粉过敏", "utf8");
+    // 固定部署时区，使今日感知日志文件名可确定复现。
+    process.env.MILOCO_TIMEZONE = "Asia/Shanghai";
+    // 工作区：写入今日感知日志，供 append 注入。
+    tmpWorkspace = mkdtempSync(path.join(tmpdir(), "miloco-ws-"));
+    const perc = todayPerceptionFile(tmpWorkspace, "Asia/Shanghai");
+    mkdirSync(path.dirname(perc), { recursive: true });
+    writeFileSync(perc, "# 感知记忆\n\n- 09:00–11:30 书房 · 戴眼镜男性：在电脑前工作", "utf8");
     getCatalog.mockReset();
     getCatalog.mockResolvedValue("");
   });
 
   afterEach(() => {
-    if (prevEnv === undefined) delete process.env.MILOCO_HOME;
-    else process.env.MILOCO_HOME = prevEnv;
+    if (prevHome === undefined) delete process.env.MILOCO_HOME;
+    else process.env.MILOCO_HOME = prevHome;
+    if (prevTz === undefined) delete process.env.MILOCO_TIMEZONE;
+    else process.env.MILOCO_TIMEZONE = prevTz;
     rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(tmpWorkspace, { recursive: true, force: true });
   });
 
-  it("full：能力概览 + 语音指令格式 + 家庭记忆 + 通知 + 语言；档案进 append", async () => {
+  it("full：能力概览 + 语音指令格式 + 家庭记忆 + 通知 + 语言；今日感知日志进 append", async () => {
     const { api, run } = makeApi();
     registerBeforePromptBuildHook(api, {} as any);
-    const r = await run("agent:main:miloco");
+    const r = await run("agent:main:miloco", { workspaceDir: tmpWorkspace });
     expect(r.prependSystemContext).toContain("## 能力概览");
     // full 列全部三种感知格式
     expect(r.prependSystemContext).toContain("语音指令");
@@ -94,7 +118,28 @@ describe("before_prompt_build 组装", () => {
     expect(r.prependSystemContext).toContain("## 家庭记忆");
     expect(r.prependSystemContext).toContain("miloco-notify");
     expect(r.prependSystemContext).toContain("## 输出语言");
-    expect(r.appendSystemContext).toContain("对花粉过敏");
+    // 今日感知日志整段注入 append（H1 降级为 H2 嵌入）
+    expect(r.appendSystemContext).toContain("## 今日感知日志");
+    expect(r.appendSystemContext).toContain("戴眼镜男性：在电脑前工作");
+  });
+
+  it("拿不到 workspaceDir → 今日感知日志段不出现", async () => {
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    const r = await run("agent:main:miloco");
+    expect(r.appendSystemContext ?? "").not.toContain("## 今日感知日志");
+  });
+
+  it("当天还没有感知日志文件 → 该段不出现", async () => {
+    const emptyWs = mkdtempSync(path.join(tmpdir(), "miloco-ws-empty-"));
+    try {
+      const { api, run } = makeApi();
+      registerBeforePromptBuildHook(api, {} as any);
+      const r = await run("agent:main:miloco", { workspaceDir: emptyWs });
+      expect(r.appendSystemContext ?? "").not.toContain("## 今日感知日志");
+    } finally {
+      rmSync(emptyWs, { recursive: true, force: true });
+    }
   });
 
   it("rule：无能力概览，感知用规则触发格式", async () => {
