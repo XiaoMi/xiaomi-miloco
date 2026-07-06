@@ -95,7 +95,10 @@ def _sweep_coreml_cache_if_oversized_once() -> None:
             from miloco.config import get_settings
 
             dirs = get_settings().directories
-            root = dirs.workspace_dir / _COREML_CACHE_DIRNAME
+            # 缓存根与 _model_cache_dir 走同一来源(_coreml_cache_root),避免两处
+            # 拼路径:将来改缓存根布局时只改一处就会让 sweep 与实际缓存目录分叉、
+            # 清错 / 清不到。
+            root = _coreml_cache_root()
             if not root.is_dir():
                 return
             models_dir = dirs.models_dir
