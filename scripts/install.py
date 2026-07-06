@@ -6,7 +6,6 @@
 #   "questionary>=2.1",
 # ]
 # [tool.uv]
-# exclude-newer = "2026-04-30"
 # ///
 """Miloco Installer — Python core logic.
 
@@ -554,7 +553,7 @@ class Installer:
         omni_api_key: str | None = None,
         account_auth: str | None = None,
         miloco_home: Path,
-        skip_openclaw: bool = False,
+        agent: str = "openclaw",
     ) -> None:
         self.platform = plat
         self.ui = ui
@@ -563,7 +562,7 @@ class Installer:
         self.omni_api_key = omni_api_key
         self.account_auth = account_auth
         self.miloco_home = miloco_home
-        self.skip_openclaw = skip_openclaw
+        self.agent = agent
         self.script_dir = Path(__file__).parent
         # dev 安装源：仓库 dist/（build.sh 产物）；release 下为下载归档解压后的缓存目录。
         self.dist_dir = self.script_dir.parent / "dist"
@@ -1192,11 +1191,65 @@ class Installer:
     def _step_plugin(self) -> None:
         self._step_header("plugin.title", "plugin.subtitle")
 
-        if self.skip_openclaw:
+        if self.agent == "none":
             self.ui.step_skip(self.ui.i18n.t("plugin.skipped"))
+        elif self.agent == "hermes":
+            self._step_plugin_hermes()
+        else:
+            self._step_plugin_openclaw()
+
+    def _step_plugin_hermes(self) -> None:
+        hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+        plugins_dir = hermes_home / "plugins" / "miloco"
+        repo_root = self.script_dir.parent
+        plugin_src = repo_root / "plugins" / "hermes"
+        skills_src = repo_root / "plugins" / "skills"
+
+        if not plugin_src.is_dir():
+            self.ui.step_fail(self.ui.i18n.t("plugin.hermes_src_not_found"))
             return
 
-        self._ensure_openclaw()
+        import shutil as _shutil
+
+        if plugins_dir.exists():
+            _shutil.rmtree(plugins_dir)
+        _shutil.copytree(
+            plugin_src, plugins_dir,
+            ignore=_shutil.ignore_patterns("tests", "__pycache__", "*.pyc",
+                                            ".pytest_cache", "integration-test", "scripts"),
+        )
+        self.ui.step_ok(self.ui.i18n.t("plugin.hermes_copied"))
+
+        skills_dst = plugins_dir / "skills"
+        if skills_src.is_dir():
+            if skills_dst.exists():
+                _shutil.rmtree(skills_dst)
+            _shutil.copytree(skills_src, skills_dst)
+            count = sum(1 for d in skills_dst.iterdir()
+                        if d.is_dir() and (d / "SKILL.md").exists())
+            self.ui.step_ok(self.ui.i18n.t("plugin.hermes_skills_synced", str(count)))
+
+        if shutil.which("hermes"):
+            subprocess.run(["hermes", "plugins", "enable", "miloco"],
+                           capture_output=True, check=False)
+            self.ui.step_ok(self.ui.i18n.t("plugin.hermes_enabled"))
+
+            bin_dir = str(Path.home() / ".local" / "bin")
+            try:
+                subprocess.run(
+                    [
+                        "hermes", "config", "set",
+                        "plugins.entries.miloco.bin_path", bin_dir,
+                    ],
+                    capture_output=True, check=True, timeout=10,
+                )
+                self.ui.step_ok(f"plugins.entries.miloco.bin_path set to {bin_dir}")
+            except Exception:
+                self.ui.step_skip("Could not set bin_path config")
+        else:
+            self.ui.step_skip(self.ui.i18n.t("plugin.hermes_cli_not_found"))
+
+    def _step_plugin_openclaw(self) -> None:
 
         # dev 与 release 都从本地 .tgz 装（release 的来自下载归档解压后的缓存目录）。
         tgz_files = _visible(self._get_src_dir().glob("*.tgz"))
@@ -1454,9 +1507,9 @@ class Installer:
         )
         self.ui.console.print()
         self.ui.console.print(f"[dim]{self.ui.i18n.t('summary.next_steps')}[/dim]")
-        if self.skip_openclaw:
+        if self.agent == "hermes":
             self.ui.console.print(
-                f"  [cyan]miloco-cli service start[/cyan]    {self.ui.i18n.t('summary.start_service_desc')}"
+                f"  [cyan]hermes gateway restart[/cyan]        {self.ui.i18n.t('summary.restart_hermes_desc')}"
             )
         else:
             self.ui.console.print(
@@ -1478,9 +1531,10 @@ class Installer:
 
 
 class Uninstaller:
-    def __init__(self, ui: UI, miloco_home: Path) -> None:
+    def __init__(self, ui: UI, miloco_home: Path, *, agent: str = "openclaw") -> None:
         self.ui = ui
         self.miloco_home = miloco_home
+        self.agent = agent
 
     def run(self) -> None:
         self.ui.info(self.ui.i18n.t("uninstall.title"))
@@ -1498,7 +1552,13 @@ class Uninstaller:
             except subprocess.CalledProcessError:
                 pass
 
-        if shutil.which("openclaw"):
+        if self.agent == "hermes":
+            hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+            plugins_dir = hermes_home / "plugins" / "miloco"
+            if plugins_dir.is_dir():
+                shutil.rmtree(plugins_dir)
+                self.ui.ok(self.ui.i18n.t("uninstall.plugin_removed"))
+        elif shutil.which("openclaw"):
             try:
                 subprocess.run(
                     ["openclaw", "plugins", "uninstall", "miloco-openclaw-plugin"],
@@ -1560,6 +1620,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-openclaw", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--agent",
+        nargs="?",
+        const="none",
+        default=None,
+        choices=["openclaw", "hermes"],
+        help="Agent plugin to install: openclaw, hermes, or omit value for none. "
+        "Without this flag, openclaw plugin is installed (default behavior).",
+    )
+    parser.add_argument(
         "--agent-prepare",
         dest="agent_prepare",
         action="store_true",
@@ -1589,6 +1658,18 @@ def _print_error_summary(ui: UI, _args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
 
+    # --agent openclaw → 安装 OpenClaw 插件
+    # --agent hermes  → 安装 Hermes 插件
+    # --agent（不带值）→ 不安装任何插件
+    # --skip-openclaw  → 不安装任何插件（兼容旧参数）
+    # 无参数           → 安装 OpenClaw 插件（默认行为）
+    if args.agent is not None:
+        agent = args.agent  # "openclaw" / "hermes" / "none"
+    elif args.skip_openclaw:
+        agent = "none"
+    else:
+        agent = "openclaw"
+
     miloco_home = Path(
         os.environ.get("MILOCO_HOME", Path.home() / ".openclaw" / "miloco")
     )
@@ -1609,7 +1690,7 @@ def main() -> None:
             omni_api_key=args.omni_api_key,
             account_auth=args.account_auth,
             miloco_home=miloco_home,
-            skip_openclaw=args.skip_openclaw,
+            agent=agent,
         )
         atexit.register(installer._stop_service)
         atexit.register(installer._cleanup_install_cache)
@@ -1645,7 +1726,7 @@ def main() -> None:
             ui.fail(ui.i18n.t("error.non_interactive"))
 
     if args.uninstall:
-        Uninstaller(ui, miloco_home).run()
+        Uninstaller(ui, miloco_home, agent=agent).run()
         return
 
     downloader = Downloader()
@@ -1657,7 +1738,7 @@ def main() -> None:
         omni_api_key=args.omni_api_key,
         account_auth=args.account_auth,
         miloco_home=miloco_home,
-        skip_openclaw=args.skip_openclaw,
+        agent=agent,
     )
 
     atexit.register(installer._stop_service)

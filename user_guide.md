@@ -1,6 +1,6 @@
 # Miloco 2.0 User Guide
 
-Miloco 2.0 is Xiaomi's open-source whole-home AI solution, built on [OpenClaw](https://openclaw.ai) — an AI housekeeper that observes, reasons, and understands your home better the longer you live with it.
+Miloco 2.0 is Xiaomi's open-source whole-home AI solution, built on [OpenClaw](https://openclaw.ai) or [Hermes Agent](https://hermes-agent.nousresearch.com) — an AI housekeeper that observes, reasons, and understands your home better the longer you live with it.
 
 This guide focuses on how to use Miloco once it's installed. For product positioning, the full feature list, and installation details, see the [README](README.md); below, we first get acquainted with Miloco, then start using it.
 
@@ -8,7 +8,7 @@ This guide focuses on how to use Miloco once it's installed. For product positio
 
 ## 1.1 What Is Miloco 2.0
 
-Miloco 2.0 uses the video and audio from Xiaomi Home cameras as its omni-modal perception input, the self-developed MiMo Large Model as its intelligent brain, and runs as an Agent plugin on top of [OpenClaw](https://openclaw.ai): it perceives what happens at home, makes proactive judgments based on common sense, and acts by orchestrating Xiaomi Home devices — providing personalized service for each member through Identity Recognition and Family Memory.
+Miloco 2.0 uses the video and audio from Xiaomi Home cameras as its omni-modal perception input, the self-developed MiMo Large Model as its intelligent brain, and runs as an Agent plugin on top of [OpenClaw](https://openclaw.ai) or [Hermes Agent](https://hermes-agent.nousresearch.com): it perceives what happens at home, makes proactive judgments based on common sense, and acts by orchestrating Xiaomi Home devices — providing personalized service for each member through Identity Recognition and Family Memory.
 
 ## 1.2 Five Key Features
 
@@ -25,10 +25,10 @@ For how to use these two core capabilities, see Chapter 2, "Getting Started," be
 
 # 2. Getting Started
 
-Daily use comes down to one guiding principle: **just tell OpenClaw what you want**. Recognizing people, remembering habits, managing tasks, proactively watching over your home with common sense — Miloco decides which of these capabilities (see Chapter 1) to invoke on its own. You don't need to memorize commands or worry about which feature is at work behind the scenes.
+Daily use comes down to one guiding principle: **just tell your Agent what you want**. Recognizing people, remembering habits, managing tasks, proactively watching over your home with common sense — Miloco decides which of these capabilities (see Chapter 1) to invoke on its own. You don't need to memorize commands or worry about which feature is at work behind the scenes.
 
 > [!TIP]
-> **Raise your own Miloco.** Its out-of-the-box behavior won't always match your taste—just tell Miloco through OpenClaw (e.g. "don't remind me when the place is messy"), and it remembers your preference and adjusts what it does proactively. Every remark "raises" a Miloco that's tuned to your home, and it knows you better the longer you live with it.
+> **Raise your own Miloco.** Its out-of-the-box behavior won't always match your taste—just tell Miloco through your Agent (e.g. "don't remind me when the place is messy"), and it remembers your preference and adjusts what it does proactively. Every remark "raises" a Miloco that's tuned to your home, and it knows you better the longer you live with it.
 
 ## 2.1 Just Say What You Want
 
@@ -163,6 +163,7 @@ This project is for non-commercial use only. Without written authorization from 
 
 - Code repository: [github.com/XiaoMi/xiaomi-miloco](https://github.com/XiaoMi/xiaomi-miloco)
 - OpenClaw website: [openclaw.ai](https://openclaw.ai)
+- Hermes Agent website: [hermes-agent.nousresearch.com](https://hermes-agent.nousresearch.com)
 - MiMo model platform: [platform.xiaomimimo.com](https://platform.xiaomimimo.com)
 
 ---
