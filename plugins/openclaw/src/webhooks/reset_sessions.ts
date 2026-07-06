@@ -20,7 +20,9 @@ export const kResetSessionsWebhook: WebhookEntry<IRequestBody> = {
   action: async ({ api, payload }) => {
     const { sessionKeys, deleteTranscript = true } = payload ?? {};
     if (!Array.isArray(sessionKeys) || sessionKeys.length === 0) {
-      return { status: "error", message: "sessionKeys must be a non-empty array" };
+      // 入参校验失败走和其它 action 一致的错误通道：抛错 → index.ts catch →
+      // fail(3000) 返 code!=0，避免被外层 ok() 包成 code:0「成功」误导调用方。
+      throw new Error("sessionKeys must be a non-empty array");
     }
 
     const result: ResetResult = { reset: [], failed: [] };

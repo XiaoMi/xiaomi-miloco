@@ -65,12 +65,15 @@ describe("kResetSessionsWebhook 批量重置 session", () => {
     ]);
   });
 
-  it("空 / 非数组 sessionKeys → 结构化错误，不触发 deleteSession", async () => {
+  it("空 / 非数组 sessionKeys → 抛错（交 index.ts 包成 code!=0），不触发 deleteSession", async () => {
     const { api, del } = makeApi();
-    const empty = await invoke(api, { sessionKeys: [] });
-    expect(empty.status).toBe("error");
-    const missing = await invoke(api, {});
-    expect(missing.status).toBe("error");
+    // 抛错而非返回结构化 error：与其它 action 校验失败的错误通道一致。
+    await expect(invoke(api, { sessionKeys: [] })).rejects.toThrow(
+      "sessionKeys must be a non-empty array",
+    );
+    await expect(invoke(api, {})).rejects.toThrow(
+      "sessionKeys must be a non-empty array",
+    );
     expect(del).not.toHaveBeenCalled();
   });
 });
