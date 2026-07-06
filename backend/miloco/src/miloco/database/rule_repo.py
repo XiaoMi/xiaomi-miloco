@@ -22,6 +22,7 @@ from miloco.rule.schema import (
     RuleLog,
     RuleLogKind,
     RuleMode,
+    RuleTriggerType,
 )
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
@@ -64,6 +65,9 @@ class RuleRepo:
             id=data["id"],
             name=data["name"],
             task_id=data["task_id"] if data.get("task_id") is not None else "",
+            trigger_type=RuleTriggerType(
+                data.get("trigger_type") or RuleTriggerType.PERCEPTION.value
+            ),
             mode=RuleMode(data.get("mode") or RuleMode.EVENT.value),
             lifecycle=RuleLifecycle(
                 data.get("lifecycle") or RuleLifecycle.PERMANENT.value
@@ -108,7 +112,7 @@ class RuleRepo:
             condition_json = rule.condition.model_dump(mode="json")
             sql = """
                 INSERT INTO rule (
-                    id, name, task_id, mode, lifecycle, enabled,
+                    id, name, task_id, trigger_type, mode, lifecycle, enabled,
                     condition, actions, action_descriptions,
                     on_enter_actions, on_enter_desc,
                     on_exit_actions, on_exit_desc,
@@ -117,12 +121,13 @@ class RuleRepo:
                     duration_seconds, duration_ratio,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             params = (
                 rule_id,
                 rule.name,
                 rule.task_id,
+                rule.trigger_type.value,
                 rule.mode.value,
                 rule.lifecycle.value,
                 rule.enabled,
@@ -249,7 +254,7 @@ class RuleRepo:
             condition_json = rule.condition.model_dump(mode="json")
             sql = """
                 UPDATE rule
-                SET name = ?, task_id = ?, mode = ?, lifecycle = ?,
+                SET name = ?, task_id = ?, trigger_type = ?, mode = ?, lifecycle = ?,
                     enabled = ?, condition = ?, actions = ?, action_descriptions = ?,
                     on_enter_actions = ?, on_enter_desc = ?,
                     on_exit_actions = ?, on_exit_desc = ?,
@@ -262,6 +267,7 @@ class RuleRepo:
             params = (
                 rule.name,
                 rule.task_id,
+                rule.trigger_type.value,
                 rule.mode.value,
                 rule.lifecycle.value,
                 rule.enabled,

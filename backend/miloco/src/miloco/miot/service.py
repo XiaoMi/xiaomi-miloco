@@ -305,6 +305,20 @@ class MiotService:
                 f"Failed to refresh MiOT devices: {str(e)}"
             ) from e
 
+    async def sync_automation_property_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
+        """Hot-sync MiOT property subscriptions used by automation mappings."""
+        try:
+            await self._miot_proxy.sync_automation_property_subscriptions(
+                mappings, reconcile_residual=reconcile_residual
+            )
+        except Exception as e:
+            logger.error("Failed to sync automation property subscriptions: %s", e)
+            raise MiotServiceException(
+                f"Failed to sync automation property subscriptions: {str(e)}"
+            ) from e
+
     def get_mips_status(self) -> dict:
         """Cloud MQTT (mips_cloud) subscription status snapshot.
 
@@ -1106,11 +1120,13 @@ class MiotService:
             scenes = await self._miot_proxy.get_all_scenes()
             if not scenes or scene_id not in scenes:
                 raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
+            scene = scenes[scene_id]
+            if not is_home_allowed(self._kv_repo, getattr(scene, "home_id", None)):
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
-            return await self._miot_proxy.execute_miot_scene(scene_id)
+            success = await self._miot_proxy.execute_miot_scene(scene_id)
+            return success
         except (ResourceNotFoundException, ValidationException):
             raise
         except Exception as e:

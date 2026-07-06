@@ -12,11 +12,21 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import sys
+import types
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.types import MatchedRule, RealtimePerceptionResult
+
+import miloco
+
+_fake_manager_module = types.ModuleType("miloco.manager")
+_fake_manager_module.get_manager = MagicMock()
+sys.modules.setdefault("miloco.manager", _fake_manager_module)
+setattr(miloco, "manager", sys.modules["miloco.manager"])
 
 
 @pytest.fixture
@@ -189,6 +199,38 @@ async def test_early_sent_dedup_per_rule_did_pair(proxy):
     assert len(a_true) == 0, "cam_A early 已上报,终态应去重不重打"
     assert len(b_true) == 1, "cam_B 终态应正常 update_state(True)"
     assert not any(c[2] is False for c in calls)
+
+
+async def test_early_sent_miot_event_rule_still_pulse_resets(proxy):
+    """流式早回调已打 True 的 miot event 规则，终态仍要复位回 False。"""
+    result = RealtimePerceptionResult(
+        skipped=False,
+        matched_rules=[
+            MatchedRule(
+                rule_id="rule_X",
+                confidence=1.0,
+                reason="A 命中",
+                source_device_ids=["cam_A"],
+            )
+        ],
+        device_rule_map={"cam_A": ["rule_X"]},
+    )
+    capture, calls = _capture_calls()
+    mgr = _fake_mgr(["rule_X"], capture)
+    mgr.rule_service.get_rule = AsyncMock(return_value=SimpleNamespace(mode="event"))
+    with patch("miloco.manager.get_manager", return_value=mgr):
+        await proxy.handle_realtime_perception_result(
+            result,
+            early_sent_rule_ids={("rule_X", "cam_A")},
+            pulse_reset_rule_ids={"rule_X"},
+            artifacts=None,
+        )
+
+    assert ("rule_X", "cam_A", True, "A 命中") not in calls
+    assert calls == [
+        ("rule_X", "cam_A", False, ""),
+        ("rule_X", "cam_A", False, ""),
+    ]
 
 
 async def test_omni_error_empty_map_no_state_change(proxy):

@@ -21,7 +21,7 @@ from miloco.config import reset_settings
 from miloco.miot import mips_listeners as bl_module
 from miloco.miot import welcome_service as ws_module
 from miloco.miot.client import MiotProxy
-from miot.types import MIoTDeviceBindEvent
+from miot.types import MIoTDeviceBindEvent, MIoTSceneChangedEvent
 
 
 @pytest.fixture(autouse=True)
@@ -207,3 +207,21 @@ async def test_push_callbacks_registered_before_init_async(proxy_env):
         "scene": True,
         "listeners_live": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_scene_config_change_only_refreshes_scene_list(proxy_env):
+    p, _client = proxy_env
+    await p.init()
+    p._scene_listener.on_event = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    event = MIoTSceneChangedEvent(
+        home_id="H1",
+        event="edit",
+        scene_id="scene-1",
+        raw={"scene_id": "scene-1"},
+    )
+
+    await p._on_scene_changed_event(event)
+
+    p._scene_listener.on_event.assert_awaited_once_with(event)

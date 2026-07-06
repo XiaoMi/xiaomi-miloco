@@ -96,6 +96,9 @@ class EventsService:
             - ("gone", None, None, None):event 存在且 device_id 合法,但文件已被 cleanup 清掉(410)
             - ("not_found", None, None, None):event 不存在 / device_id 不在 device_ids 内(404)
         """
+        # 路径注入防护：event_id 须为 UUID 格式（_persist_meaningful_event 用 uuid4 生成）
+        if not re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", event_id):
+            return ("not_found", None, None, None)
         row = self._dao.get_by_id(event_id)
         if row is None:
             return ("not_found", None, None, None)

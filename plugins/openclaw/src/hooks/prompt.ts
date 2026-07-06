@@ -5,7 +5,7 @@ import { deployTimezone } from "../utils/time.js";
 import type { HookRegister } from "./index.js";
 
 // 注入 profile：按 session 类型组合不同的块（方案见 _local/prompt-refactor-plan.md §3）。
-// 只特判 rule / suggestion / cron，其余（含 agent:main:miloco 与一切用户 IM）兜底 full。
+// 只特判 rule / suggestion / notify / cron，其余（含 agent:main:miloco 与一切用户 IM）兜底 full。
 type Profile = "full" | "suggestion" | "rule" | "minimal";
 
 // 定时任务（perception-digest / home-dreaming / habit-suggest 等）一律走 minimal：
@@ -28,6 +28,7 @@ export function resolveProfile(
   }
   if (key.includes("miloco-rule")) return "rule";
   if (key.includes("miloco-suggest")) return "suggestion";
+  if (key.includes("miloco-notify")) return "suggestion";
   return "full";
 }
 

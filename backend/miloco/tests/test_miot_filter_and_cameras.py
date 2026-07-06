@@ -25,6 +25,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot import filter as miot_filter
 from miloco.miot.service import MiotService
+from miot.types import MIoTManualSceneInfo
 
 
 class _FakeKV:
@@ -225,6 +226,8 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         refresh_devices=AsyncMock(return_value=None),
         refresh_cameras=AsyncMock(return_value=None),
         refresh_scenes=AsyncMock(return_value=None),
+        get_all_scenes=AsyncMock(return_value={}),
+        execute_miot_scene=AsyncMock(return_value=True),
     )
     svc = MiotService(miot_proxy=proxy)
 
@@ -262,6 +265,23 @@ async def test_list_homes_auto_selects_first_when_empty():
     by_id = {h["home_id"]: h for h in homes}
     assert by_id["H1"]["in_use"] is True
     assert by_id["H2"]["in_use"] is False
+
+
+@pytest.mark.asyncio
+async def test_trigger_scene_only_runs_manual_scene():
+    scene = MIoTManualSceneInfo(
+        scene_id="scene-1",
+        scene_name="回家模式",
+        uid="u1",
+        update_ts=123,
+        home_id="H1",
+    )
+    svc = _make_service()
+    svc._miot_proxy.get_all_scenes.return_value = {"scene-1": scene}
+
+    assert await svc.trigger_scene("scene-1") is True
+
+    svc._miot_proxy.execute_miot_scene.assert_awaited_once_with("scene-1")
 
 
 @pytest.mark.asyncio

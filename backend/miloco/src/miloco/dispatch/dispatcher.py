@@ -29,7 +29,14 @@ from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["interaction", "bind", "rule", "suggestion", "onboarding"]
+EventType = Literal[
+    "interaction",
+    "bind",
+    "rule",
+    "suggestion",
+    "notify",
+    "onboarding",
+]
 
 # builder：把「合并后的同类条目列表」重构成一条 message（单一头、统一编号）。
 # 返回 None/空 → drainer 跳过该批。dispatcher 不感知 items 的具体业务类型。
@@ -40,12 +47,13 @@ Builder = Callable[[list[Any]], "str | None"]
 _ROUTE: dict[EventType, tuple[str, str, int]] = {
     "interaction": ("agent:main:miloco", "miloco-interactive", 0),
     "rule": ("agent:main:miloco-rule", "miloco-rule", 10),
+    "notify": ("agent:main:miloco-notify", "miloco-notify", 15),
     "suggestion": ("agent:main:miloco-suggest", "miloco-suggest", 20),
     "bind": ("agent:main:miloco", "miloco-interactive", 30),
     "onboarding": ("agent:main:miloco", "miloco-interactive", 30),
 }
 
-# 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
+# 仅这三类（== AgentRunSource）写 agent_runs；bind / notify / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})
 
 # 类型级投递参数（run_agent_turn 额外 kwargs）。onboarding 是交互式访谈，必须整个

@@ -40,6 +40,7 @@ describe("resolveProfile", () => {
     ["agent:main:miloco", "full"],
     ["agent:main:miloco-rule", "rule"],
     ["agent:main:miloco-suggest", "suggestion"],
+    ["agent:main:miloco-notify", "suggestion"],
     ["agent:main:cron:[t1]:run:abc", "minimal"],
     ["agent:main", "full"],
     ["agent:main:telegram:dm:123", "full"],
@@ -112,6 +113,16 @@ describe("before_prompt_build 组装", () => {
     registerBeforePromptBuildHook(api, {} as any);
     const r = await run("agent:main:miloco-suggest");
     expect(r.prependSystemContext).not.toContain("## 能力概览");
+    expect(r.prependSystemContext).toContain("事件提醒");
+    expect(r.prependSystemContext).not.toContain("语音指令");
+  });
+
+  it("notify：复用 suggestion 精简 profile，不注入能力概览和 pending suggestion", async () => {
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    const r = await run("agent:main:miloco-notify");
+    expect(r.prependSystemContext).not.toContain("## 能力概览");
+    expect(r.prependSystemContext).toContain("miloco-notify");
     expect(r.prependSystemContext).toContain("事件提醒");
     expect(r.prependSystemContext).not.toContain("语音指令");
   });

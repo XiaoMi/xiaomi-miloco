@@ -8,6 +8,7 @@ Service manager module
 import logging
 import uuid
 
+from miloco.automation.service import AutomationService
 from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo, SystemConfigKeys
 from miloco.database.person_repo import PersonRepo
@@ -88,6 +89,7 @@ class Manager:
         )
         self._person_service = PersonService(self._person_repo)
         self._home_profile_service = HomeProfileService(self._person_service)
+        self._automation_service = AutomationService(self._kv_repo)
 
         # Initialize rule module
         async with mon.track_async(NodeName.RULE_SERVICE, "init"):
@@ -104,6 +106,16 @@ class Manager:
         self._task_service = TaskService()
 
         self._initialized = True
+        self._miot_proxy.register_automation_trigger_handler(
+            self._handle_miot_automation_trigger
+        )
+        try:
+            await self._miot_service.sync_automation_property_subscriptions(
+                self._automation_service.list_mappings(),
+                reconcile_residual=True,
+            )
+        except Exception as e:
+            logger.warning("Failed to sync automation MiOT subscriptions: %s", e)
 
     def init_device_uuid(self):
         """Initialize device UUID"""
@@ -112,6 +124,15 @@ class Manager:
             device_uuid = uuid.uuid4().hex
             self._kv_repo.set(SystemConfigKeys.DEVICE_UUID_KEY, device_uuid)
         self.device_uuid = device_uuid
+
+    async def _handle_miot_automation_trigger(self, trigger) -> None:
+        await self._automation_service.handle_trigger(
+            trigger=trigger,
+            perception_service=self._perception_service,
+            rule_service=self._rule_service,
+            miot_service=self._miot_service,
+            meaningful_events_dao=self.meaningful_events_dao,
+        )
 
     # Service access properties
     @property
@@ -137,6 +158,10 @@ class Manager:
     @property
     def task_service(self) -> TaskService:
         return self._task_service
+
+    @property
+    def automation_service(self) -> AutomationService:
+        return self._automation_service
 
     # Repo layer access properties
     @property
