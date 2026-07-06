@@ -510,8 +510,9 @@ async def test_transport_exception_retries_then_skips_and_survives(patched, monk
     finally:
         await d.stop()
 
-    # 传输失败被重试 _TRANSPORT_RETRIES+1 次后跳过该批,drainer 存活、不写 agent_runs。
-    assert calls == d._TRANSPORT_RETRIES + 1
+    # 传输失败: adapter 路径不重试,只报告一次错误即跳过该批。
+    # 旧 webhook 路径才重试 _TRANSPORT_RETRIES+1 次。
+    assert calls == 1
     assert patched.tracks == []
 
 
