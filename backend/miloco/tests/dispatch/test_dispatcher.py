@@ -23,6 +23,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from miloco.agent_platform.base import AdapterTransportError
 from miloco.config import get_settings
 from miloco.dispatch import (
     AgentDispatcher,
@@ -33,8 +34,6 @@ from miloco.dispatch import (
 )
 from miloco.dispatch import dispatcher as disp_mod
 from miloco.dispatch.dispatcher import _QueuedEvent
-from miloco.middleware.exceptions import AgentWebhookException  # legacy alias, kept for test back-compat
-from miloco.agent_platform.base import AdapterTransportError
 
 # 队列上限的唯一真源现为 settings；测试读取它，与 dispatcher._enforce_cap 同源。
 MAX_QUEUE = get_settings().dispatcher.max_queue

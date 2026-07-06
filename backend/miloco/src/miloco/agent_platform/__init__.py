@@ -15,9 +15,9 @@ Backend 通过 :func:`load_adapter` 动态加载。
 from __future__ import annotations
 
 from .base import (
-    AgentPlatformAdapter,
-    AdapterTransportError,
     AdapterTransientError,
+    AdapterTransportError,
+    AgentPlatformAdapter,
     AgentTurnResult,
     SystemPromptBuilder,
     TraceMeta,

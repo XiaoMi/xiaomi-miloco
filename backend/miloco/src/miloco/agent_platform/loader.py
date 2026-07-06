@@ -35,6 +35,7 @@ from typing import Any, Optional
 
 from miloco.config import get_settings
 from miloco.utils.paths import miloco_home
+from miloco.agent_platform.base import AgentPlatformAdapter
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
-from unittest.mock import AsyncMock, patch
 from contextlib import contextmanager
+from unittest.mock import AsyncMock, patch
 
 from miloco.observability import agent_meta_poller as poller_mod
 from miloco.observability.agent_meta_poller import AgentMetaPoller
