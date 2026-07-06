@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.middleware.exceptions import HTTPException
+from miloco.perception.engine_state import set_perception_enabled
 from miloco.perception.schema import OnDemandPerceptionRequest
 from miloco.schema.common_schema import NormalResponse
 
@@ -49,6 +50,14 @@ async def get_engine_status():
     dependencies=[Depends(verify_token)],
 )
 async def start_engine():
+    # 用户主动「唤醒」：先落盘意图=开再启动。持久化只挂在这条用户动作上，
+    # 系统路径(开机/重新授权)不走本端点，故不会误翻此 flag。
+    # 落盘失败则 fail loud、不继续，避免用户以为已保存而实际重启后复位。
+    if not set_perception_enabled(manager.kv_repo, True):
+        raise HTTPException(
+            message="failed to persist perception resume intent",
+            status_code=500,
+        )
     await manager.perception_service.start_engine()
     return NormalResponse(code=0, message="Perception engine started")
 
@@ -59,6 +68,13 @@ async def start_engine():
     dependencies=[Depends(verify_token)],
 )
 async def stop_engine():
+    # 用户主动「让它休息」：先落盘意图=关（重启后开机门控据此跳过自动启动）。
+    # 落盘失败则 fail loud、不继续 —— 否则用户以为已暂停，重启后引擎仍被拉起继续烧 token。
+    if not set_perception_enabled(manager.kv_repo, False):
+        raise HTTPException(
+            message="failed to persist perception pause intent",
+            status_code=500,
+        )
     await manager.perception_service.stop_engine()
     return NormalResponse(code=0, message="Perception engine stopped")
 
