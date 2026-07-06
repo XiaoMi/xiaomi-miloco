@@ -4,6 +4,9 @@
  * 多时区支持：通过 tz 显式参数测试 IANA 时区,与 MILOCO_TIMEZONE env 解耦。
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   deployTimezone,
@@ -103,6 +106,57 @@ describe("deployTimezone", () => {
     const tz = deployTimezone();
     expect(tz).toBeTruthy();
     expect(typeof tz).toBe("string");
+  });
+});
+
+describe("deployTimezone: config.json 单一真源", () => {
+  // 隔离 MILOCO_HOME 到临时目录,避免读到开发机真实 ~/.openclaw/miloco/config.json。
+  let tmpHome: string;
+  const prevEnv = process.env.MILOCO_TIMEZONE;
+  const prevHome = process.env.MILOCO_HOME;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(path.join(tmpdir(), "miloco-tz-"));
+    process.env.MILOCO_HOME = tmpHome;
+    delete process.env.MILOCO_TIMEZONE;
+  });
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env.MILOCO_TIMEZONE;
+    else process.env.MILOCO_TIMEZONE = prevEnv;
+    if (prevHome === undefined) delete process.env.MILOCO_HOME;
+    else process.env.MILOCO_HOME = prevHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("无 env 时读 config.json 的 timezone（与 backend settings 同源）", () => {
+    writeFileSync(
+      path.join(tmpHome, "config.json"),
+      JSON.stringify({ timezone: "America/Los_Angeles" }),
+      "utf8",
+    );
+    expect(deployTimezone()).toBe("America/Los_Angeles");
+  });
+
+  it("env 优先于 config.json（对齐 backend pydantic env > file）", () => {
+    writeFileSync(
+      path.join(tmpHome, "config.json"),
+      JSON.stringify({ timezone: "America/Los_Angeles" }),
+      "utf8",
+    );
+    process.env.MILOCO_TIMEZONE = "Europe/London";
+    expect(deployTimezone()).toBe("Europe/London");
+  });
+
+  it("config.json 无 timezone → 精确落回 Intl 系统时区", () => {
+    writeFileSync(
+      path.join(tmpHome, "config.json"),
+      JSON.stringify({ debug: true }),
+      "utf8",
+    );
+    expect(deployTimezone()).toBe(
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+    );
   });
 });
 

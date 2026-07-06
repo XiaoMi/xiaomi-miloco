@@ -104,14 +104,17 @@ async def get_event_clip(
     if status == "found":
         # 类型收窄
         assert path is not None and media_type is not None and timestamp_ms is not None
-        # 下载文件名按事件本地时间命名:用户保存后一眼能看出"哪天发生的什么事件"
+        # 下载文件名按事件部署时区时间命名:用户保存后一眼能看出"哪天发生的什么事件"
         # (比 event_id 前 8 位 UUID 字符串友好得多).格式 `clip-YYYY-MM-DD-HH-MM-SS.ext`:
         # - 全连字符避免 `:` 在 Windows 文件名非法
         # - 同毫秒多事件只发生在落盘冲突时(单 device 同 event 只一个文件,不冲突)
+        # - 走 deploy_timezone() 与感知推送「时间」字段同源,host TZ≠部署时区时不错标
         # content_disposition_type="inline":页面 <audio>/<video> 仍 inline 播放,
         # 浏览器"另存为"时把这个 filename 当默认下载名.
         from datetime import datetime
-        local_dt = datetime.fromtimestamp(timestamp_ms / 1000)
+
+        from miloco.utils.time_utils import deploy_timezone
+        local_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=deploy_timezone())
         download_name = (
             f"clip-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.{path.suffix[1:]}"
         )

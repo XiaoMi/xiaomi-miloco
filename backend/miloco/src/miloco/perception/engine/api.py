@@ -30,6 +30,7 @@ from miloco.perception.types import (
     Speech,
     Suggestion,
 )
+from miloco.utils.time_utils import deploy_timezone
 
 if TYPE_CHECKING:
     from miloco.perception.engine.config import PerceptionConfig
@@ -59,6 +60,16 @@ SUGG_SIM_THRESHOLD: float = 0.70
 
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
+
+
+def _fmt_clock(ms: float) -> str:
+    """Unix ms → 部署时区 ``HH:MM:SS``（注入 omni prompt 的「当前时间」）。
+
+    走 ``deploy_timezone()`` 而非裸 ``fromtimestamp``：该字符串直接进 omni prompt，
+    模型会据此把画面标注成「凌晨/早上…」。host TZ≠部署时区时裸时钟会让模型编造出错误
+    的时段标签（如 UTC 主机把北京 10:52 说成「凌晨02:52」），故与 ``_fmt_time_window``
+    / API 出口 ISO 同源统一到部署时区。"""
+    return datetime.fromtimestamp(ms / 1000, tz=deploy_timezone()).strftime("%H:%M:%S")
 
 
 class PerceptionEngine(BasePerceptionEngine):
@@ -837,7 +848,7 @@ class PerceptionEngine(BasePerceptionEngine):
                 contexts[did] = OmniContext(
                     rule_conditions=device_rules,
                     pending_speech=self._pending_speech.get(did),
-                    current_time=datetime.fromtimestamp(snapshot.start_timestamp / 1000).strftime("%H:%M:%S"),
+                    current_time=_fmt_clock(snapshot.start_timestamp),
                     room_name=room_name,
                 )
 
