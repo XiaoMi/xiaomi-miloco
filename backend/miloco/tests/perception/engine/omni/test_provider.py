@@ -1,7 +1,5 @@
 """Tests for Omni Provider Adapter."""
 
-import pytest
-
 from miloco.perception.engine.omni.provider import (
     LocalMediaInfo,
     MiMoAdapter,
