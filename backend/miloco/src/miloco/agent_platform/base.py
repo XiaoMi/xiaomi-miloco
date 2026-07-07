@@ -151,3 +151,90 @@ class AgentPlatformAdapter(ABC):
     async def aclose(self) -> None:
         """Adapter 关闭钩子(释放 httpx client 等)。dispatcher.stop 时调。子类按需 override。"""
         return None
+
+
+# ---------------------------------------------------------------------------
+# WebhookAdapter — 旧 webhook 路径包装为 Adapter 接口
+# ---------------------------------------------------------------------------
+
+
+class WebhookAdapter(AgentPlatformAdapter):
+    """内置兜底 Adapter：把旧 webhook 路径包装成与 HermesAdapter 平级的接口。
+
+    ``get_adapter()`` 永远返回非 None — 要么是 plugin 提供的平台 Adapter，
+    要么是这个内置的 WebhookAdapter。调用方不再需要 if/else 分支。
+    """
+
+    name = "webhook"
+
+    _TRANSPORT_RETRIES = 2
+    _TRANSPORT_BACKOFF_S = 0.5
+
+    async def send_turn(self, ctx: TurnContext) -> AgentTurnResult:
+        import asyncio
+
+        from miloco.middleware.exceptions import AgentWebhookException
+        from miloco.utils.agent_client import run_agent_turn
+
+        delivery = ctx.extra.get("delivery") or {}
+        for attempt in range(self._TRANSPORT_RETRIES + 1):
+            try:
+                run_id, status, rtt_ms = await run_agent_turn(
+                    ctx.text,
+                    session_key=ctx.session_key,
+                    lane=ctx.lane,
+                    trace_id=ctx.trace_id,
+                    wait_timeout_ms=ctx.wait_timeout_ms,
+                    **delivery,
+                )
+                return AgentTurnResult(run_id=run_id, status=status, rtt_ms=rtt_ms)
+            except AgentWebhookException:
+                if attempt == self._TRANSPORT_RETRIES:
+                    raise AdapterTransportError(
+                        f"agent turn transport exhausted after {attempt + 1} attempts "
+                        f"session={ctx.session_key}"
+                    )
+                await asyncio.sleep(self._TRANSPORT_BACKOFF_S * (2 ** attempt))
+
+    async def read_trace_meta(self, run_id: str) -> Optional[TraceMeta]:
+        from miloco.middleware.exceptions import AgentWebhookException
+        from miloco.utils.agent_client import call_agent_webhook
+
+        try:
+            data = await call_agent_webhook(
+                "get_trace", {"runId": run_id}, timeout=5.0,
+            )
+        except (AgentWebhookException, Exception):
+            return None
+        status = (data or {}).get("status") if isinstance(data, dict) else None
+        if status != "done":
+            return None
+        _C2S = {
+            "runId": "run_id", "query": "query",
+            "durationMs": "duration_ms", "llmCallCount": "llm_call_count",
+            "toolCallCount": "tool_call_count",
+            "llmTotalMs": "llm_total_ms", "toolTotalMs": "tool_total_ms",
+            "toolMaxMs": "tool_max_ms", "slowestToolName": "slowest_tool_name",
+            "errorCount": "error_count", "errorMsg": "error_msg",
+            "jsonlPath": "jsonl_path",
+        }
+        translated = {_C2S.get(k, k): v for k, v in (data or {}).items() if isinstance(data, dict)}
+        translated.setdefault("success", translated.get("success", True))
+        return TraceMeta(
+            run_id=translated.get("run_id", run_id),
+            query=translated.get("query", ""),
+            duration_ms=float(translated.get("duration_ms", 0.0) or 0.0),
+            llm_call_count=int(translated.get("llm_call_count", 0) or 0),
+            tool_call_count=int(translated.get("tool_call_count", 0) or 0),
+            llm_total_ms=float(translated.get("llm_total_ms", 0.0) or 0.0),
+            tool_total_ms=float(translated.get("tool_total_ms", 0.0) or 0.0),
+            tool_max_ms=float(translated.get("tool_max_ms", 0.0) or 0.0),
+            slowest_tool_name=translated.get("slowest_tool_name"),
+            success=bool(translated.get("success", True)),
+            error_count=int(translated.get("error_count", 0) or 0),
+            error_msg=translated.get("error_msg"),
+            jsonl_path=translated.get("jsonl_path"),
+        )
+
+    def build_system(self, profile: str, extra: dict[str, Any]) -> str:
+        return ""

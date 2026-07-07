@@ -18,15 +18,12 @@ metadata:
 
 1. 执行命令获取增量感知日志：`miloco-cli perceive logs --jsonl`
 2. 检查返回结果：
-   - 如果 No logs found 或命令失败 → **输出单独一行 `NO_REPLY` 作为最终响应**(hermes cron 识别为静默,跳过 IM 推送)
+   - 如果 No logs found 或命令失败 → 直接结束
    - 如果有日志 → 继续下一步
 3. 按下方「记录原则」将原始日志提取为事件摘要
 4. 将摘要追加写入今日的感知记忆文件 `memory/<今天日期>-miloco-perception.md`
    - 文件不存在则创建
    - 已有内容则追加到末尾（不覆盖）
-5. 如果本批日志确实全部为无人空镜 → **输出单独一行 `NO_REPLY` 作为最终响应**
-
-   ⚠️ **不要输出 `[SILENT` (漏右括号) / `silent` / `无内容` 之类的变体** —— hermes cron 只识别精确的 4 个 token:`[SILENT]` / `SILENT` / `NO_REPLY` / `NO REPLY`。其他形式会被当真实内容推到飞书/微信,造成噪音。
 
 ## 记录原则
 
@@ -55,4 +52,4 @@ metadata:
 
 单时刻事件用 `HH:MM` 即可。示例：
 
-如果本批日志确实全部为无人空镜，**输出单独一行 `NO_REPLY` 作为最终响应**(hermes cron 识别为静默,跳过 IM 推送)。
+如果本批日志确实全部为无人空镜，直接结束，不写入任何内容。

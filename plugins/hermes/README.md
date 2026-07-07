@@ -13,13 +13,9 @@ bash plugins/hermes/install-hermes.sh
 hermes gateway restart
 ```
 
-The install script is idempotent: it copies the 16 miloco-\* skills to `~/.hermes/skills/`, copies the plugin + inbound adapter to `~/.hermes/plugins/miloco/`, auto-detects which IM platform you have configured in `~/.hermes/{auth.json,config.yaml}` and writes `deliver.target` into the plugin's `state.json`, patches `$MILOCO_HOME/config.json::agent` (auto-backup, keep newest 3), writes `API_SERVER_KEY` to `~/.hermes/.env`, starts the adapter (PID + log at `~/.hermes/miloco-adapter.{pid,log}`), and runs `hermes plugins enable miloco` (idempotent). Re-running the script preserves the same Bearer and restarts the adapter.
+The install script is idempotent: it copies the 16 miloco-\* skills to `~/.hermes/skills/`, copies the plugin to `~/.hermes/plugins/miloco/`, deploys the AgentPlatformAdapter to `$MILOCO_HOME/agent_platform/hermes/`, patches `$MILOCO_HOME/config.json::agent` (auto-backup, keep newest 3), writes `API_SERVER_KEY` to `~/.hermes/.env`, starts the backend (`miloco-cli service start`), and runs `hermes plugins enable miloco` (idempotent).
 
-**Adapter lifecycle**:
-- **macOS** — adapter runs as a `launchd` LaunchAgent (`~/Library/LaunchAgents/com.xiaomi.miloco.hermes.adapter.plist`); survives shell exit, reboots, re-installs.
-- **Linux / WSL** — adapter runs as a daemonized background process (`nohup` + `< /dev/null`, fully detached from install.sh's process group).
-
-Lifecycle wrapper: `bash plugins/hermes/scripts/miloco-adapter.sh {start|stop|restart|status|logs|env}`.
+The backend runs under supervisord and is managed via `miloco-cli service {start,stop,restart,status,logs}`.
 
 For a step-by-step guide written for an AI agent to follow (covers pre-flight checks, OAuth + API-key user-terminal steps, and verification), see [scripts/install-guide-hermes.md](../../scripts/install-guide-hermes.md).
 
@@ -54,9 +50,9 @@ The plugin registers Miloco hooks and tools into Hermes, exposes an inbound webh
 | `miloco-home-patrol`            | Periodic home patrol (cron-driven)                               |
 | `miloco-habit-suggest`          | Generate habit suggestions (cron-driven)                         |
 
-Inbound side: the adapter process exposes `POST /miloco/webhook` (miloco's `{action, payload}` contract), translates `action:agent` into a synchronous Hermes `/v1/chat/completions` turn with `X-Hermes-Session-Id` for session continuity, and lets the agent pick the right skill (e.g. `miloco-notify`) to respond. See `knowledge/03-features/hermes-integration.md` for the architecture and differences vs. the OpenClaw version.
+Inbound side: the backend's `AgentPlatformAdapter` dispatches turns to Hermes via direct API calls, and `miloco_im_push` calls Hermes' `send_message` tool via `hermes send` CLI. See `knowledge/03-features/hermes-integration.md` for the architecture and differences vs. the OpenClaw version.
 
-**Proactive notifications** (cron / perception / task-fire → user IM) work out of the box, the same way OpenClaw's `subagent.run({deliver: true})` does: at install time, `install-hermes.sh` auto-detects which IM platform you have configured in `~/.hermes/auth.json` (connected providers) or `~/.hermes/config.yaml` (token declarations), and writes the target into the plugin's `state.json::deliver.target`. At runtime, `miloco_im_push` reads it and calls Hermes' built-in `send_message` tool — no bind protocol, no LLM cooperation required, works in cron sessions. If no IM platform is configured yet, `miloco_im_push` returns a clear `ok:false, error:"no deliver target configured"` so you know to set one up.
+**Proactive notifications** (cron / perception / task-fire → user IM): `miloco_im_push` reads the plugin's `state.json::deliver.target` and calls the Hermes `send_message` tool via `hermes send` CLI. If no IM platform is configured yet, the tool returns `ok:false, error:"no deliver target configured"`. To configure a target, edit `state.json` manually or trigger `miloco_notify_bind` at runtime.
 
 ## Configuration
 
@@ -68,26 +64,16 @@ The Miloco backend must be running for the plugin to work:
 miloco-cli service start
 ```
 
-The adapter process (port 18789 by default) must be running for inbound Miloco callbacks to reach the agent:
-
-```bash
-bash plugins/hermes/scripts/miloco-adapter.sh status   # check
-bash plugins/hermes/scripts/miloco-adapter.sh start    # start
-```
-
-Environment variables (read by the adapter, all auto-set by `install-hermes.sh`):
+Environment variables (read by the plugin, all auto-set by `install-hermes.sh`):
 
 | Variable              | Default                 | Notes                                                    |
 | --------------------- | ----------------------- | -------------------------------------------------------- |
-| `ADAPTER_PORT`        | `18789`                 | matches OpenClaw's default webhook port                  |
-| `ADAPTER_HOST`        | `127.0.0.1`             | set to `0.0.0.0` for container/remote deploy             |
-| `ADAPTER_AUTH_BEARER` | (empty)                 | must match `$MILOCO_HOME/config.json::agent.auth_bearer` |
-| `HERMES_API_URL`      | `http://127.0.0.1:8642` | Hermes api_server root                                   |
-| `HERMES_API_KEY`      | (empty)                 | must match `~/.hermes/.env::API_SERVER_KEY`              |
+| `MILOCO_HOME`         | `~/.openclaw/miloco`    | miloco 后端数据目录                                      |
 
 ### Notification delivery (proactive push)
 
-The plugin's `miloco_im_push` tool reads `~/.hermes/plugins/miloco/miloco-plugin/state.json::deliver.target` and calls Hermes' built-in `send_message` tool. `install-hermes.sh` auto-fills this at install time by scanning `~/.hermes/auth.json` (real connected providers, preferred) then `~/.hermes/config.yaml` (declared tokens) for IM platforms (weixin / feishu / wecom / telegram / discord / slack / 飞书 / 企微 / signal / mattermost / etc.). If no platform is configured, the tool returns `ok:false, error:"no deliver target configured"` — fix by connecting an IM platform in Hermes (`hermes config set telegram.bot_token ...`) then either rerun `install-hermes.sh` or manually edit `state.json` to add `{"deliver": {"target": "telegram"}}`.
+The plugin's `miloco_im_push` tool reads `~/.hermes/plugins/miloco/miloco-plugin/state.json::deliver.target` and calls `hermes send` CLI. 装好时 `deliver.target` 为空；首次调用 `miloco_im_push` 会走运行时 fallback + `needsBind` 绑定确认。也可手动编辑 `state.json` 直接写入。
+target format: `platform[:chat_id[:thread_id]]` (e.g. `telegram`, `feishu:oc_xxx`, `discord:channel_id`).
 
 ## Development
 

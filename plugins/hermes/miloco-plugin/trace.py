@@ -13,12 +13,9 @@ Hermes 没有 ``runId`` 概念——直接用 ``session_id`` 作为 turn id。tr
 ``miloco:<sessionKey>:<lane>`` 前缀的 session_id 推导（context_injection 时识别）。
 
 落盘：``$MILOCO_HOME/trace/agent/<YYYYMMDD>/<runId>__<query>.jsonl.gz`` + 同名
-``.meta.json``（adapter 的 get_trace 读这个）。
+``.meta.json``（adapter 的 read_trace_meta 读这个）。
 
 每日 cap 300（超出 warn 跳过，防撑爆磁盘）—— 与 openclaw 完全一致。
-
-debug 开关：``state.json::trace.debug = true`` 才落盘；否则只保留内存 buffer
-直到 on_session_end 然后丢弃（与 openclaw ``isDebugEnabled()`` 一致）。
 """
 
 from __future__ import annotations
@@ -237,8 +234,6 @@ def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> Optio
 
     返回 jsonl 相对路径（写进 meta 让 backend / 调试看到）；超出每日 cap 时 warn 跳过。
     """
-    if not is_debug_enabled():
-        return None
     try:
         dir_path = _today_dir()
         dir_path.mkdir(parents=True, exist_ok=True)
@@ -369,7 +364,7 @@ def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kw
             _turns.pop(run_id, None)
             _gc_expired_turns()
             return
-        # 落盘（debug 模式下）
+        # 落盘
         jsonl_path = _flush_to_disk(run_id, state, bool(completed))
         meta = _reduce_meta(state.buffer)
         meta["runId"] = run_id

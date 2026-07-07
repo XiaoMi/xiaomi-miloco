@@ -14,7 +14,7 @@
 # 还原：$MILOCO_HOME/config.json.bak-* 是 patch 前的备份，~/.hermes/.env 自行删 API_SERVER_KEY 即可。
 #
 # 高级/手动安装请用 scripts/install.sh（不做 patch、不启 backend）。
-# backend 启停 / 日志请用 scripts/miloco-adapter.sh。
+# backend 启停 / 日志请用 miloco-cli service {start,stop,restart,status,logs}。
 
 set -euo pipefail
 
@@ -24,72 +24,22 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 # --- CLI 参数解析（--diagnose / --reset-deliver / --notify-mode / --notify-primary） ---
 DIAGNOSE_ONLY=0
 NO_START_BACKEND=0
-NOTIFY_MODE=""           # "fanout" (全部发) / "single" (单发) / "" (TYY 交互问)
-NOTIFY_PRIMARY=""        # "1" / "2" / "3"...  选 candidates 的第几个
 for arg in "$@"; do
   case "$arg" in
     --diagnose) DIAGNOSE_ONLY=1 ;;
     --no-start-backend) NO_START_BACKEND=1 ;;
-    --notify-mode=*) NOTIFY_MODE="${arg#*=}" ;;
-    --notify-mode)
-      # 下一参数是值
-      shift_next=1
-      ;;
-    --notify-primary=*) NOTIFY_PRIMARY="${arg#*=}" ;;
-    --notify-primary)
-      shift_next=1
-      ;;
     --help|-h)
       cat <<EOF
 用法：bash install-hermes.sh [options]
-  （无参数）       完整安装（patch config / 写 .env / 复制 plugin / 启 adapter / enable plugin）
-  --diagnose         自检模式：跑 12 项检查输出 ✓/✗，不做任何修改
+  （无参数）       完整安装（patch config / 写 .env / 复制 plugin / 启 backend / enable plugin）
+  --diagnose         自检模式：跑 14 项检查输出 ✓/✗，不做任何修改
   --no-start-backend 跳过自动 miloco-cli service start（upstream install 退出时 atexit 杀掉的）
-  --reset-deliver    清空 state.json::deliver.target，强制重新探测 IM（搭配安装用）
-  --notify-mode MODE  非交互模式：fanout（全部 IM 都发）/ single（只发主渠道）
-  --notify-primary N  非交互模式：选第 N 个 candidate 作为 single 模式的主渠道（默认 1）
   -h, --help         显示本帮助
-
-非交互用法（CI / agent）：
-  MILOCO_NOTIFY_MODE=fanout bash install-hermes.sh
-  MILOCO_NOTIFY_MODE=single MILOCO_NOTIFY_PRIMARY=2 bash install-hermes.sh
-
-交互用法（默认 TTY）：
-  bash install-hermes.sh         # 自动 ask"fanout 还是 single / 哪个 primary"
 EOF
       exit 0
       ;;
   esac
 done
-# 解析 --notify-mode / --notify-primary 后面跟值的格式
-i=0
-for arg in "$@"; do
-  i=$((i + 1))
-  case "$arg" in
-    --notify-mode)
-      next="${ARGV[$((i+1))]:-}"
-      [ -n "$next" ] && NOTIFY_MODE="$next" && shift $((i+1)) 2>/dev/null || true
-      ;;
-    --notify-primary)
-      next="${ARGV[$((i+1))]:-}"
-      [ -n "$next" ] && NOTIFY_PRIMARY="$next" && shift $((i+1)) 2>/dev/null || true
-      ;;
-  esac
-done
-# 上面 ARGV 不可用(没用 declare -a),改用第二个 for 循环
-prev=""
-for arg in "$@"; do
-  case "$prev" in
-    --notify-mode)  [ -z "$NOTIFY_MODE" ] && NOTIFY_MODE="$arg" ;;
-    --notify-primary) [ -z "$NOTIFY_PRIMARY" ] && NOTIFY_PRIMARY="$arg" ;;
-  esac
-  prev="$arg"
-done
-unset prev
-# env 兜底 (set -u 兼容:env var 可能未设)
-NOTIFY_MODE="${NOTIFY_MODE:-${MILOCO_NOTIFY_MODE:-}}"
-NOTIFY_PRIMARY="${NOTIFY_PRIMARY:-${MILOCO_NOTIFY_PRIMARY:-}}"
-
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -673,20 +623,6 @@ done
 rm -rf "$MILOCO_HOME/agent_platform/adapter"
 info "  部署 AgentPlatformAdapter → $ADAPTER_DEST/"
 
-# adapter-launcher.sh 要可执行（macOS launchd plist 调它）
-chmod +x "$HERE/scripts/adapter-launcher.sh" 2>/dev/null || true
-
-# 把 adapter 启停脚本复制到 plugins/ 下（agent / 自检工具按固定路径找）
-# 之前只 chmod 不复制，导致 miloco_status fix 提示的 `bash plugins/hermes/scripts/miloco-adapter.sh start`
-# 在用户 cwd 不是 fork 根目录时找不到。复到 ~/.hermes/plugins/miloco/ 下后绝对路径稳定。
-info "  复制 miloco-adapter.sh（adapter 启停 wrapper）"
-mkdir -p "$HERMES_PLUGINS_DIR/scripts"
-cp -f "$HERE/scripts/miloco-adapter.sh" "$HERMES_PLUGINS_DIR/scripts/miloco-adapter.sh"
-chmod +x "$HERMES_PLUGINS_DIR/scripts/miloco-adapter.sh"
-# 复制 miloco-notify.py(IM 渠道切换的确定性 wrapper,不走 LLM,避免 oc id 被改坏)
-cp -f "$HERE/scripts/miloco-notify.py" "$HERMES_PLUGINS_DIR/scripts/miloco-notify.py"
-chmod +x "$HERMES_PLUGINS_DIR/scripts/miloco-notify.py"
-
 # 建 ~/.hermes/memory/(感知 cron skill 写感知摘要的目标目录)。首次跑 cron 时
 # skill 会 `ls /Users/wkea/memory/<date>-miloco-perception.md`,目录不存在会报
 # "No such file or directory"。这里是 cron 链路真 bug —— skill 写文件前必须
@@ -695,122 +631,12 @@ mkdir -p "$HERMES_HOME/memory"
 
 mark_done 4
 
-# --- 4.5 自动探测 Hermes 已配置的 IM 平台，写入插件 state.json ---
-step 4.5 "探测 IM 平台 → 写 plugin state.json::deliver.target"
-# 让 miloco_im_push 在 cron 场景下也能直接投递，不需要 LLM 在 cron session 里
-# 完成"两段式 bind"（cron 没人可对话，原方案不可用）。
-#
-# 实现挪到外部 Python 脚本（scripts/detect_im_platforms.py），避免在 bash
-# heredoc 内嵌大段 Python + (fallback) 等括号 → macOS bash 3.2 解析挂。
-DETECTED_TARGETS_JSON="$("$PYTHON" "$HERE/scripts/detect_im_platforms.py" "$HERMES_HOME" 2>/dev/null || echo '{"targets": [], "source": "detection script failed"}')"
-
-# 一次性拆 DETECTED_TARGETS_JSON 为 3 个标量：target / count / source
-# 走 jq（macOS 自带）+ python3 -c，避开 bash 3.2 heredoc 嵌套括号 bug
-DETECTED_TARGET="$(jq -r '.targets[0] // ""' <<< "$DETECTED_TARGETS_JSON")"
-CANDIDATES_COUNT="$(jq -r '.targets | length' <<< "$DETECTED_TARGETS_JSON")"
-DETECT_SOURCE="$(jq -r '.source // "unknown"' <<< "$DETECTED_TARGETS_JSON")"
-
-# state.json 必须写到 plugin 自己的目录里，因为 tools_notify.py::_state_path(ctx)
-# 用 ctx.manifest.path / "state.json" 解析（manifest.path 指向 plugin dir）。
-# 写到外面的话 plugin 永远读不到 → miloco_im_push 永远报 no deliver target。
 PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
-
-# --- 4.6 升级保留旧 deliver.target（除非 --reset-deliver）---
-RESET_DELIVER=0
-for arg in "$@"; do
-  case "$arg" in
-    --reset-deliver) RESET_DELIVER=1 ;;
-  esac
-done
-PRESERVED_TARGET=""
-if [ "$RESET_DELIVER" -eq 0 ] && [ -f "$PLUGIN_STATE" ]; then
-  PRESERVED_TARGET="$(jq -r '.deliver.target // ""' "$PLUGIN_STATE" 2>/dev/null || echo "")"
-fi
-
-# --- 4.5b 交互式问询通知策略（仅 TTY + 候选 ≥ 2 时）---
-# 决定 deliver.target：
-#   - "--notify-mode=fanout"  → 全部发（target="all"）
-#   - "--notify-mode=single --notify-primary=N"  → 选 candidates[N-1]
-#   - 已有 PRESERVED_TARGET（"all" 或具体 target）  → 保留
-#   - TTY + 候选 ≥ 2  → 问用户（不打断已 --notify-mode/-primary 显式传的）
-#   - 其他  → 默认 candidates[0]
-CHOSEN_TARGET=""
-if [ -n "$NOTIFY_MODE" ]; then
-  # 显式 env/CLI 覆盖：走指定
-  case "$NOTIFY_MODE" in
-    fanout|all)  CHOSEN_TARGET="all" ;;
-    single|one)
-      idx="${NOTIFY_PRIMARY:-1}"
-      # 校验 idx 合法
-      if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -lt 1 ] || [ "$idx" -gt "$CANDIDATES_COUNT" ]; then
-        warn "--notify-primary=$idx 非法（候选 ${CANDIDATES_COUNT} 个）改用默认 1"
-        idx=1
-      fi
-      CHOSEN_TARGET="$(jq -r ".targets[$((idx-1))]" <<< "$DETECTED_TARGETS_JSON")"
-      ;;
-    *)
-      warn "--notify-mode=$NOTIFY_MODE 非法（fanout/single）忽略"
-      ;;
-  esac
-elif [ "$RESET_DELIVER" -ne 1 ] && [ -n "$PRESERVED_TARGET" ]; then
-  # 保留旧 target（包括 "all"）
-  CHOSEN_TARGET="$PRESERVED_TARGET"
-elif [ "$CANDIDATES_COUNT" -ge 2 ] && [ -t 0 ]; then
-  # 交互：TTY + 多个 IM 候选才问
-  echo
-  info "检测到 ${CANDIDATES_COUNT} 个 IM 渠道:"
-  i=0
-  while [ "$i" -lt "$CANDIDATES_COUNT" ]; do
-    t="$(jq -r ".targets[$i]" <<< "$DETECTED_TARGETS_JSON")"
-    echo "  [$((i+1))] $t"
-    i=$((i + 1))
-  done
-  echo
-  echo "  [A] 全部发 (fanout, target=\"all\")"
-  echo
-  printf "选择通知策略 [1-%d/A/默认 1]: " "$CANDIDATES_COUNT"
-  read -r NOTIFY_CHOICE
-  case "$(printf '%s' "$NOTIFY_CHOICE" | tr '[:upper:]' '[:lower:]')" in
-    a|all|fanout) CHOSEN_TARGET="all" ;;
-    "")
-      CHOSEN_TARGET="$(jq -r '.targets[0]' <<< "$DETECTED_TARGETS_JSON")"
-      ;;
-    *)
-      if [[ "$NOTIFY_CHOICE" =~ ^[0-9]+$ ]] && [ "$NOTIFY_CHOICE" -ge 1 ] && [ "$NOTIFY_CHOICE" -le "$CANDIDATES_COUNT" ]; then
-        CHOSEN_TARGET="$(jq -r ".targets[$((NOTIFY_CHOICE-1))]" <<< "$DETECTED_TARGETS_JSON")"
-      else
-        warn "无效选择 '$NOTIFY_CHOICE' 改用默认 1"
-        CHOSEN_TARGET="$(jq -r '.targets[0]' <<< "$DETECTED_TARGETS_JSON")"
-      fi
-      ;;
-  esac
-fi
-# CHOSEN_TARGET 此时：空 → 用 candidates[0]（fallback）;否则用选中的
-if [ -z "$CHOSEN_TARGET" ] || [ "$CHOSEN_TARGET" = "null" ]; then
-  CHOSEN_TARGET="$(jq -r '.targets[0] // ""' <<< "$DETECTED_TARGETS_JSON")"
-fi
-
-"$PYTHON" "$HERE/scripts/write_state_json.py" "$PLUGIN_STATE" "$DETECTED_TARGETS_JSON" "$CHOSEN_TARGET"
-
-if [ "$CHOSEN_TARGET" = "all" ]; then
-  info "通知投递已配置 target=all (fanout 到 ${CANDIDATES_COUNT} 个 IM 渠道)"
-elif [ -n "$CHOSEN_TARGET" ] && [ "$CHOSEN_TARGET" != "null" ]; then
-  info "通知投递已配置 target=${CHOSEN_TARGET} (单渠道,共 ${CANDIDATES_COUNT} 个候选)"
-else
-  warn "未检测到 Hermes 已配置的 IM 平台 auth.json / config.yaml 都空"
-  warn "miloco 主动通知将无法送达 miloco_im_push 会返回 no deliver target"
-  warn "装完请二选一"
-  warn "a 在 Hermes 里连一个 IM hermes config set telegram.bot_token 后重跑 install-hermes.sh"
-  warn "b 手动编辑 ${PLUGIN_STATE} 加 deliver.target 字段 形如"
-  warn "        {\"deliver\": {\"target\": \"telegram\"}}"
-fi
-mark_done 4.5
 
 # --- 4.7 同步本地感知 ONNX 模型到 MILOCO_HOME/models/ ---
 # 对齐上游 install.sh --agent-finish 的"下载感知模型"步骤（见
 # upstream install-guide.md 第 131 行"下载感知模型"）。
 #
-# 上游 install.sh 会从自己的 release assets 下模型到 ~/.openclaw/miloco/models/，
 # hermes fork 走的是"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑，
 # 但 fork 仓库的 backend/miloco/src/miloco/perception/models/ 目录里其实打包了
 # 同一份模型 — 直接 cp 即可（避免再下 80MB+）。
@@ -924,11 +750,11 @@ mark_done 6
 
 # --- 7. 重启 backend ---
 # 架构 #1+#2 后适配器收敛到 miloco backend 的 AgentPlatformAdapter。
-# 委托给 scripts/miloco-adapter.sh start（管 supervisord / miloco-backend）。
+# 委托给 miloco-cli service start（管 supervisord / miloco-backend）。
 # 旧 launchd / nohup adapter 进程已被清理。
 step 7 "重启 backend (supervisord)"
-info "  委托给 scripts/miloco-adapter.sh（管 supervisord / miloco-backend）"
-if ! bash "$HERE/scripts/miloco-adapter.sh" start; then
+info "  委托给 miloco-cli service start（管 supervisord / miloco-backend）"
+if ! miloco-cli service start; then
   err "backend 启动失败"
   exit 1
 fi
@@ -1055,10 +881,10 @@ cat <<EOF
     hermes chat -q "把客厅灯打开" -Q
 
 [backend 状态]
-    bash ~/.hermes/plugins/miloco/scripts/miloco-adapter.sh status    # 看 supervisord / backend
-    bash ~/.hermes/plugins/miloco/scripts/miloco-adapter.sh logs      # tail 日志
-    bash ~/.hermes/plugins/miloco/scripts/miloco-adapter.sh restart   # 重启
-    bash ~/.hermes/plugins/miloco/scripts/miloco-adapter.sh stop      # 停
+    miloco-cli service status    # 看 supervisord / backend
+    miloco-cli service logs      # tail 日志
+    miloco-cli service restart   # 重启
+    miloco-cli service stop      # 停
 
 [配置文件位置]
     $MILOCO_HOME/config.json   # miloco 后端配置（已 patch）

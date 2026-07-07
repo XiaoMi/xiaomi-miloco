@@ -114,15 +114,14 @@ def _load_adapter_class(adapter_name: str) -> type:
 
 
 _cached_adapter: Optional[AgentPlatformAdapter] = None
+# 注意：load_adapter() 初次加载后设为非 None；reset_cache() 清回 None。
 
 
-def load_adapter(adapter_name: Optional[str] = None) -> Optional[Any]:
+def load_adapter(adapter_name: Optional[str] = None) -> AgentPlatformAdapter:
     """按 ``settings.agent.platform`` 加载 Adapter 单例。
 
-    失败时返回 None 并 WARN,**不抛**(允许 backend 在 adapter 缺失时降级到 webhook 模式
-    —— 当前 PR #279 → 推荐架构迁移期,这种 fallback 是临时过渡手段,见 doc §主线)。
-
-    返回类型标 ``Any``(duck-typed),调用方按 :class:`AgentPlatformAdapter` 接口用即可。
+    若 platform 未配置或加载失败，返回内置的 :class:`WebhookAdapter` 作为兜底。
+    ``get_adapter()`` 永远返回实现了同一接口的非 None 对象。
     """
     global _cached_adapter
     if _cached_adapter is not None:
@@ -132,14 +131,15 @@ def load_adapter(adapter_name: Optional[str] = None) -> Optional[Any]:
     name = adapter_name or getattr(settings.agent, "platform", None)
     if not name:
         logger.info(
-            "agent.platform 未配置,跳过 adapter 加载(backend 走 webhook 模式)"
+            "agent.platform 未配置,使用内置 WebhookAdapter 兜底"
         )
-        return None
+        from miloco.agent_platform.base import WebhookAdapter
+        _cached_adapter = WebhookAdapter()
+        return _cached_adapter
 
     try:
         cls = _load_adapter_class(name)
         inst = cls()
-        # 确保 name 与目录一致(防 plugin 写错):
         if not inst.name:
             inst.name = name
         _cached_adapter = inst
@@ -150,13 +150,15 @@ def load_adapter(adapter_name: Optional[str] = None) -> Optional[Any]:
         return _cached_adapter
     except Exception as exc:
         logger.warning(
-            "agent adapter '%s' 加载失败:%s(backend 走 webhook 模式)", name, exc,
+            "agent adapter '%s' 加载失败:%s,使用内置 WebhookAdapter 兜底", name, exc,
         )
-        return None
+        from miloco.agent_platform.base import WebhookAdapter
+        _cached_adapter = WebhookAdapter()
+        return _cached_adapter
 
 
-def get_adapter() -> Optional[Any]:
-    """获取已缓存 adapter(若未加载则尝试一次)。"""
+def get_adapter() -> AgentPlatformAdapter:
+    """获取已缓存 adapter(若未加载则尝试一次)。永远返回非 None。"""
     if _cached_adapter is None:
         return load_adapter()
     return _cached_adapter

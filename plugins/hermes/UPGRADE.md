@@ -41,8 +41,8 @@ hermes update           # 拉新版 hermes
 hermes gateway start
 hermes status           # 看 api_server.url
 
-# 3. 重启 adapter（让 gateway_watch 重新加载新 URL；或手动 restart）
-bash plugins/hermes/scripts/miloco-adapter.sh restart
+# 3. 重启 backend（让 gateway_watch 重新加载新 URL；或手动 restart）
+miloco-cli service restart
 
 # 4. 重装 plugin 触发版本记录更新
 cd <fork dir>
@@ -118,7 +118,7 @@ OAuth 授权码丢失 / IM 平台换号 / 完全推倒重来：
 ```bash
 # 1. 卸干净
 hermes plugins disable miloco
-bash plugins/hermes/scripts/miloco-adapter.sh stop
+miloco-cli service stop
 rm -rf ~/.hermes/plugins/miloco/miloco-plugin/state.json   # 清 deliver.target
 rm -rf ~/.hermes/skills/miloco-*
 
@@ -127,8 +127,7 @@ cd <fork dir>
 git pull --ff-only
 bash plugins/hermes/install-hermes.sh
 
-# 3. 让用户在 Hermes 重新连 IM（hermes config set feishu.app_id ...），
-#    install-hermes.sh 会重新探测写 deliver.target
+# 3. 让用户在 Hermes 里连好 IM 后，手动编辑 state.json 或首次调 miloco_im_push 走运行时绑定
 
 # 4. 重启 hermes gateway
 hermes gateway restart
@@ -144,37 +143,6 @@ hermes -z "miloco_test_push"
 
 ---
 
-## 升级场景 5 — 仅切 IM 平台
-
-不需要重装，仅切换主动通知的投递目标：
-
-⚠️ **不走 `hermes -z "miloco_notify_bind action=switch"`**：那个 tool 走 LLM 推断，
-实测 LLM 会自作聪明把 oc id 改坏（例 `oc_806ed7124bae73745846704be33ae2b3` 被改成
-`...be33ae33ae2b3`，多了 `33ae`）。
-
-**改用确定性 wrapper**：
-
-```bash
-# 1. 列候选
-python3 plugins/hermes/scripts/miloco-notify.py list
-# 返: {"current": "feishu:oc_xxx", "candidates": [...], "candidates_count": N}
-
-# 2. 切换（1:1 保留你传的字符串，无 LLM 干预）
-python3 plugins/hermes/scripts/miloco-notify.py switch "telegram:chat_id@im.telegram"
-# 返: {"ok": true, "target": "telegram:chat_id@im.telegram"}
-
-# 3. 重置回 install-hermes.sh 自动探测的结果
-python3 plugins/hermes/scripts/miloco-notify.py reset
-
-# 4. 验证（仍走 hermes tool 层，触达 webhook）
-hermes -z "miloco_test_push"   # 应该发到新 target
-```
-
-target 格式必须是 `platform:chat_id@provider`（含冒号），否则 wrapper 返 ok=false。
-不在 candidates 里的 target 会写入但带 warning（你可能就是想临时换一个）。
-
----
-
 ## 故障：升级后没生效
 
 按这个顺序排查：
@@ -186,9 +154,9 @@ bash plugins/hermes/scripts/miloco-status.sh versions | grep -A 5 versions
 # 2. 看 plugin enabled
 hermes plugins list | grep miloco
 
-# 3. 看 adapter 在不在 + 日志
-bash plugins/hermes/scripts/miloco-adapter.sh status
-bash plugins/hermes/scripts/miloco-adapter.sh logs | tail -30
+# 3. 看 backend 日志
+miloco-cli service status
+miloco-cli service logs | tail -30
 
 # 4. 看 miloco backend 在不在
 miloco-cli service status
@@ -203,7 +171,7 @@ bash plugins/hermes/install-hermes.sh --diagnose
 
 ```bash
 hermes plugins disable miloco
-bash plugins/hermes/scripts/miloco-adapter.sh stop
+miloco-cli service stop
 rm -rf ~/.hermes/plugins/miloco
 rm -rf ~/.hermes/skills/miloco-*
 # 删 .env 里的 API_SERVER_KEY 行（可选）

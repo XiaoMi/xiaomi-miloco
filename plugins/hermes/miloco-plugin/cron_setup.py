@@ -42,9 +42,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# 从 state.json 读 deliver.target（install-hermes.sh 在安装时由
-# detect_im_platforms.py 自动写入）。导出为模块级符号，便于测试 monkeypatch，
-# 也便于 tools_notify 之外的 cron 路径复用同一份状态读取逻辑。
+# 从 state.json 读 deliver.target（用户通过 miloco_notify_bind 或手动编辑设置）。
 from .tools_notify import get_deliver_target
 
 # 受管 job 标签：塞进 name 字段前缀，reconcile 据此识别。
@@ -171,8 +169,8 @@ def _managed_name(task_name: str) -> str:
 def reconcile_cron_jobs(ctx: Optional[Any] = None) -> Dict[str, Any]:
     """对齐 4 个受管 cron job。返回 ``{created, updated, removed, skipped}``。
 
-    ``deliver`` 参数从 ``state.json::deliver.target`` 取（install-hermes.sh 探测
-    IM 平台时由 ``detect_im_platforms.py`` 写入），而不是字面量 ``"all"``——
+    ``deliver`` 参数从 ``state.json::deliver.target`` 取（用户通过
+    miloco_notify_bind 或手动编辑设置），而不是字面量 ``"all"``——
     ``Platform("all")`` 不是合法 enum 值，``DeliveryTarget.parse("all")`` 会
     回退到 ``Platform.LOCAL``，让所有 cron 输出落到本地 markdown 而非 IM 推送
     （PR #279 reviewer Zirconi 标记的 critical bug）。

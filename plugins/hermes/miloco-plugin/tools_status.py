@@ -97,9 +97,7 @@ def _check_adapter_health() -> Dict[str, Any]:
             "ok": False,
             "url": url,
             "error": f"{type(exc).__name__}: {exc}",
-            # install-hermes.sh 会把 miloco-adapter.sh 复制到 ~/.hermes/plugins/miloco/scripts/
-            # 用绝对路径，避免依赖用户 cwd 是不是 fork 根
-            "fix": "bash ~/.hermes/plugins/miloco/scripts/miloco-adapter.sh start（看 ~/.hermes/miloco-adapter.log）",
+            "fix": "miloco-cli service start（看 miloco-cli service logs）",
         }
 
 
@@ -238,7 +236,7 @@ def _check_versions(ctx: Any) -> Dict[str, Any]:
         "fix": (
             "在 fork 仓库根目录重跑 bash plugins/hermes/install-hermes.sh 让 versions 更新到 state.json；"
             "如果只 hermes 变了，跑 hermes gateway restart + "
-            "bash ~/.hermes/plugins/miloco/scripts/miloco-adapter.sh restart"
+            "miloco-cli service restart"
         ) if mismatches else None,
     }
 

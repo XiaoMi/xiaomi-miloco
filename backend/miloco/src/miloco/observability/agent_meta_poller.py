@@ -3,10 +3,6 @@
 backend 发完 run_agent_turn 拿到 runId 后,enqueue 给 poller;
 poller 周期性读 trace meta,拿到 meta 后调
 ``MetricsClient.record_agent_run`` 写入 agent_runs 表。
-
-【hermes-pr.md §五 #11 迁移后】读路径优先走 ``AgentPlatformAdapter.read_trace_meta``
-(直读 ``$MILOCO_HOME/trace/agent/<run_id>.meta.json`` 文件 IPC);adapter 缺失时
-fallback 到 PR #279 时代的 ``call_agent_webhook("get_trace", ...)``。
 """
 from __future__ import annotations
 
@@ -18,10 +14,8 @@ from typing import Any, Literal
 
 from miloco.agent_platform import get_adapter
 from miloco.config import get_settings
-from miloco.middleware.exceptions import AgentWebhookException
 from miloco.observability.metrics_client import MetricsClient
 from miloco.observability.types import AgentRunRecord
-from miloco.utils.agent_client import call_agent_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -131,12 +125,7 @@ class AgentMetaPoller:
                 self._queue.task_done()
 
     async def _poll_one(self, job: _Job) -> None:
-        """【hermes-pr.md §五 #11 迁移后】用 Adapter.read_trace_meta 替代原 PR #279 webhook get_trace。
-
-        链路:plugin trace.py 写 ``$MILOCO_HOME/trace/agent/<run_id>.meta.json``(平铺),
-        backend AgentPlatformAdapter.read_trace_meta() 直读盘返回 TraceMeta。
-
-        adapter 缺失(过渡期 fallback)→ 退到 webhook get_trace(PR #279 兼容路径)。
+        """用 Adapter.read_trace_meta 读 trace meta（adapter 内部处理 webhook fallback）。
         """
         deadline = time.monotonic() + _MAX_DEADLINE_S
         adapter = get_adapter()
@@ -187,63 +176,22 @@ class AgentMetaPoller:
         """单次读 trace meta。返回 ``(status, meta_or_data)``。
 
         status 含义:
-        - ``"done"``: meta 读到了,meta 含聚合统计
+        - ``"done"``: meta 读到
         - ``"in_progress"``: meta 不存在(turn 还没 flush),等下次轮询
-        - ``"unknown"``: meta 不存在但超时(给个明确日志,give up)
-        - ``"error"``: 出错,meta 是错误信息
+        - ``"unknown"``: meta 不存在但超时
+        - ``"error"``: 出错
         """
-        # 优先 adapter 路径(hermes-pr.md §五 #11)
-        if adapter is not None:
-            try:
-                meta = await adapter.read_trace_meta(job.run_id)
-                if meta is not None:
-                    return ("done", meta)
-                # meta 为 None:可能是 turn 还没 on_session_end,继续轮询
-                return ("in_progress", None)
-            except Exception as exc:
-                logger.warning(
-                    "adapter.read_trace_meta failed run_id=%s err=%s",
-                    job.run_id, exc,
-                )
-                return ("error", str(exc))
-
-        # Fallback:原 PR #279 webhook get_trace(adapter 缺失时)
         try:
-            data = await call_agent_webhook(
-                "get_trace", {"runId": job.run_id}, timeout=5.0,
-            )
-            status = (data or {}).get("status")
-            if status == "done":
-                # 【hermes-pr.md §五 #11 完成】caller 用 getattr 读字段,把 dict
-                # 包成 SimpleNamespace,字段名跟 TraceMeta 对齐(适配两种路径返回值)。
-                # webhook 路径返 camelCase(llmTotalMs / toolCallCount / ...),需转 snake_case
-                # 否则 getattr(meta, "llm_total_ms", 0) 永远返默认值 0.0。
-                from types import SimpleNamespace
-                _C2S = {
-                    "runId": "run_id", "query": "query",
-                    "durationMs": "duration_ms", "llmCallCount": "llm_call_count",
-                    "toolCallCount": "tool_call_count",
-                    "llmTotalMs": "llm_total_ms", "toolTotalMs": "tool_total_ms",
-                    "toolMaxMs": "tool_max_ms", "slowestToolName": "slowest_tool_name",
-                    "errorCount": "error_count", "errorMsg": "error_msg",
-                    "jsonlPath": "jsonl_path",
-                }
-                translated = {_C2S.get(k, k): v for k, v in (data or {}).items()}
-                # TraceMeta 不在 observability.types(在 miloco.agent_platform.base),
-                # 但跨模块 import 会引入循环。用 SimpleNamespace 给 caller getattr 读字段。
-                meta = SimpleNamespace(**translated) if translated else SimpleNamespace()
+            meta = await adapter.read_trace_meta(job.run_id)
+            if meta is not None:
                 return ("done", meta)
-            if status == "unknown":
-                return ("unknown", data)
-            return ("in_progress", data)
-        except AgentWebhookException as exc:
+            return ("in_progress", None)
+        except Exception as exc:
             logger.warning(
-                "get_trace webhook failed: trace_id=%s err=%s", job.trace_id, exc,
+                "adapter.read_trace_meta failed run_id=%s err=%s",
+                job.run_id, exc,
             )
             return ("error", str(exc))
-        except Exception:
-            logger.exception("get_trace unexpected error")
-            return ("error", "unexpected error")
 
 
 _singleton: AgentMetaPoller | None = None

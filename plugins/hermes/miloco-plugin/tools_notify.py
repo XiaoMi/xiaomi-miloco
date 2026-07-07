@@ -308,7 +308,7 @@ def notify_owner(ctx: Any, message: str) -> Dict[str, Any]:
                 "(`{\"deliver\": {\"target\": \"telegram\"}}`)."
             ),
         }
-    body = f"<miloco-notification>{message}</miloco-notification>"
+    body = message
 
     # Fanout: target="all" → 逐个候选发
     if target == "all":
