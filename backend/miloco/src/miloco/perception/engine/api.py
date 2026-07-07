@@ -89,10 +89,12 @@ class PerceptionEngine(BasePerceptionEngine):
 
         self._config = config or PerceptionConfig()
 
+        from miloco.perception.engine.omni.provider import adjust_fps_for_omni
+
         fps = self._config.input.fps
         omni_fps = self._config.input.omni_fps
-        if omni_fps > 0 and fps % omni_fps != 0:
-            new_fps = omni_fps if omni_fps > fps else omni_fps * -(-fps // omni_fps)
+        new_fps = adjust_fps_for_omni(fps, omni_fps)
+        if new_fps != fps:
             logger.info(
                 "fps(%d) %% omni_fps(%d) != 0，自动调整 fps=%d → %d 保证整除",
                 fps, omni_fps, fps, new_fps,

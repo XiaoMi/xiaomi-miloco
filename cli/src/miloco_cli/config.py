@@ -243,7 +243,7 @@ def _warn_fps_divisibility(config: dict[str, Any]) -> None:
     if omni_fps <= 0 or fps % omni_fps == 0:
         return
     import logging
-    new_fps = omni_fps if omni_fps > fps else omni_fps * -(-fps // omni_fps)
+    new_fps = omni_fps if omni_fps > fps else omni_fps * -(-fps // omni_fps)  # 与 provider.adjust_fps_for_omni 同逻辑
     logging.getLogger(__name__).warning(
         "fps(%d) %% omni_fps(%d) != 0：引擎启动时会自动将 fps 调整为 %d 保证整除",
         fps, omni_fps, new_fps,

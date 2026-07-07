@@ -141,6 +141,15 @@ class QwenOmniAdapter(OmniProviderAdapter):
         }
 
 
+def adjust_fps_for_omni(fps: int, omni_fps: int) -> int:
+    """当 fps % omni_fps != 0 时，返回 omni_fps 的最小整数倍 >= fps。"""
+    if omni_fps <= 0 or fps % omni_fps == 0:
+        return fps
+    if omni_fps > fps:
+        return omni_fps
+    return omni_fps * -(-fps // omni_fps)
+
+
 _DEFAULT_ADAPTER = MiMoAdapter()
 _QWEN_ADAPTER = QwenOmniAdapter()
 

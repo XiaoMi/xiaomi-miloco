@@ -317,12 +317,12 @@ async def _call_omni_messages(
         # 服务端在 fused 大 payload 下偶发返回非 dict body (~1.5%);此处校验
         # 形态并 dump 截断后的原始响应,便于事后定位服务端返回了什么。
         if not isinstance(raw, dict):
-            detail = f"type={type(raw).__name__} body={str(raw)[:1000]}"
+            detail = f"type={raw.__class__.__name__} body={str(raw)[:1000]}"
             if not forced_stream:
                 detail = f"status={resp.status_code} {detail}"
             logger.error("[omni-fused] unexpected response shape | %s", detail)
             raise OmniError(
-                f"omni response is not a dict (got {type(raw).__name__})"
+                f"omni response is not a dict (got {raw.__class__.__name__})"
             )
         fire_record(config.model, raw.get("usage", {}), type)
         return raw
