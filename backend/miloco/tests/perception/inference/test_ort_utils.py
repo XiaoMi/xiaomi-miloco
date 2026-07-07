@@ -92,7 +92,7 @@ def test_reset_hook_invalidates_detector_singleton(iso_home, monkeypatch):
 
     # stub 掉真 Detector,避免建真实 CoreML session;每次返回不同对象便于判定
     monkeypatch.setattr(detector_mod, "Detector", lambda **kw: object())
-    router._load_detector.cache_clear()
+    router._reset_detector_singleton()
 
     d1 = router._load_detector()
     d2 = router._load_detector()
