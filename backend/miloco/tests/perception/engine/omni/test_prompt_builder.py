@@ -81,7 +81,7 @@ class TestBuildPrompt:
         assert "位置: 书房" in payload["user_content"]  # room_name 作场景参考注入 U4
         assert "读书开灯" in payload["user_content"]  # 规则按 rule_name 渲染（# 待判断规则）
         assert payload["video_base64"] is not None
-        assert payload["video_fps"] == ep.frame_info.fps
+        assert payload["media_info"] is not None
 
     def test_rule_rendered_by_name_without_evidence_suffix(self):
         """规则按 rule_name 渲染进「# 待判断规则」，不带已删除的 ｜允许证据= 后缀。"""
@@ -455,20 +455,19 @@ class TestResolveRoute:
 
 class TestAudioRoutePayload:
     def test_audio_payload_shape(self):
-        """audio route：payload 只有 audio_base64，没有 video_base64 / video_fps。"""
+        """audio route：payload 只有 audio_base64，没有 video_base64。"""
         ep = _audio_only_packet()
         payload = build_prompt(ep, OmniContext())
         assert "audio_base64" in payload
-        assert payload["audio_base64"]  # 非空 base64
+        assert payload["audio_base64"]
         assert "video_base64" not in payload
-        assert "video_fps" not in payload
 
     def test_video_route_no_audio_field(self):
-        """video route：payload 含 video_base64 / video_fps，不含 audio_base64。"""
+        """video route：payload 含 video_base64 + media_info，不含 audio_base64。"""
         ep = _video_route_packet()
         payload = build_prompt(ep, OmniContext())
         assert "video_base64" in payload
-        assert "video_fps" in payload
+        assert "media_info" in payload
         assert "audio_base64" not in payload
 
     def test_audio_route_drops_visual_fields(self):
