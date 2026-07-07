@@ -107,7 +107,7 @@ def build_prompt(
         label_lookup: person_id (UUID) → 姓名/标签 反查表，渲染 "已识别人物" 段时把
                       UUID 替换为人名。None 时直接渲染 person_id 字段值（与旧行为兼容）。
 
-    Returns dict with keys: system_prompt, user_content, video_base64, video_fps, crops.
+    Returns dict with keys: system_prompt, user_content, video_base64, media_info, crops.
     """
     return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup)
 
@@ -160,7 +160,6 @@ def build_query_prompt(
         "system_prompt": "\n\n".join(parts),
         "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
         "video_base64": video_b64,
-        "video_fps": identity_packets[0].frame_info.fps if identity_packets else 1,
         "media_info": media_info,
         "crops": [],
     }
@@ -198,7 +197,6 @@ def build_fused_payload(
     Returns:
         dict，含字段：
           - ``messages``：直接构建好的 OpenAI 兼容 messages 列表（system + user）
-          - ``video_fps``：调用 omni_client 时填进 video block
           - ``candidate_track_ids``：本次 dispatch 候选 track id 列表（debug + 校验用）
     """
     cfg = config or FusedPromptConfig()
@@ -246,11 +244,9 @@ def build_fused_payload(
                 rule_conditions=None,
                 readonly_history=_build_readonly_history(context),
             ),
-            "video_fps": packets[0].frame_info.fps,
             "candidate_track_ids": [],
         }
 
-    fps = packets[0].frame_info.fps
     short_edge = _get_video_short_edge()
     video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
 
@@ -269,7 +265,6 @@ def build_fused_payload(
         candidates=candidates,
         gallery_snapshot=gallery_snapshot,
         video_b64=video_b64,
-        video_fps=fps,
         media_info=media_info,
         adapter=adapter,
         cfg=cfg,
@@ -285,7 +280,6 @@ def build_fused_payload(
 
     return {
         "messages": messages,
-        "video_fps": fps,
         "candidate_track_ids": [c.track_id for c in candidates],
     }
 
@@ -392,7 +386,6 @@ def _build_payload(
         short_edge = _get_video_short_edge()
         video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
         base["video_base64"] = video_b64
-        base["video_fps"] = packets[0].frame_info.fps
         base["media_info"] = media_info
     return base
 
@@ -568,7 +561,6 @@ def _build_fused_user_content(
     candidates: list["IdentityQueryItem"],
     gallery_snapshot: dict[str, "GallerySamples"],
     video_b64: str | None,
-    video_fps: int,
     media_info: LocalMediaInfo | None,
     adapter: OmniProviderAdapter,
     cfg: FusedPromptConfig,
