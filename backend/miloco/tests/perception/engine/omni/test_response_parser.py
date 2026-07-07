@@ -42,7 +42,7 @@ class TestParseOmniResponse:
                 }
             ],
             "env_sounds": "键盘敲击声",
-            "suggestions": [{"prev_id": None, "event": "环境正常", "action": "无需操作", "urgency": "low"}],
+            "suggestions": [{"prev_id": None, "event": "冰箱门未关", "action": "建议关好冰箱门", "urgency": "low"}],
         }
         result = parse_omni_response(_wrap(json.dumps(data)))
         assert len(result.caption) == 1
@@ -179,7 +179,7 @@ class TestParseOmniResponse:
             "suggestions": [
                 {"event": "看手机", "action": "无", "urgency": "ignore"},
                 {"event": "触电风险", "action": "提醒", "urgency": "high"},
-                {"event": "整理桌面", "action": "无", "urgency": "bogus"},
+                {"event": "整理桌面", "action": "建议收拾桌面", "urgency": "bogus"},
             ],
         }
         result = parse_omni_response(_wrap(json.dumps(data)))
@@ -188,6 +188,47 @@ class TestParseOmniResponse:
         assert result.suggestions[0].urgency == "high"
         assert result.suggestions[1].event == "整理桌面"
         assert result.suggestions[1].urgency == "low"
+
+    def test_noop_action_low_dropped(self):
+        """low 档且 action 为"无操作"占位（无需提醒等）→ 丢弃；规范化后精确匹配。"""
+        data = {
+            "caption": [],
+            "suggestions": [
+                {"event": "当前非深夜", "action": "无需提醒", "urgency": "low"},
+                {"event": "一切正常", "action": "无需提醒。", "urgency": "low"},
+                {"event": "环境正常", "action": "无", "urgency": "low"},
+                {"event": "冰箱门未关", "action": "建议关好冰箱门", "urgency": "low"},
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert len(result.suggestions) == 1
+        assert result.suggestions[0].event == "冰箱门未关"
+
+    def test_noop_action_high_medium_kept(self):
+        """no-op action 仅在 low 档丢弃；high/medium 即便 action 自相矛盾也保留，绝不静默丢疑似危险。"""
+        data = {
+            "caption": [],
+            "suggestions": [
+                {"event": "疑似起火", "action": "无需提醒", "urgency": "high"},
+                {"event": "疑似求救声", "action": "无", "urgency": "medium"},
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert len(result.suggestions) == 2
+        assert result.suggestions[0].urgency == "high"
+        assert result.suggestions[1].urgency == "medium"
+
+    def test_noop_action_exact_match_not_substring(self):
+        """精确匹配、不做模糊/子串匹配：含"无需"但有实义内容的 action 不误杀。"""
+        data = {
+            "caption": [],
+            "suggestions": [
+                {"event": "水龙头长流", "action": "无需犹豫，尽快关水", "urgency": "low"},
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert len(result.suggestions) == 1
+        assert result.suggestions[0].event == "水龙头长流"
 
     def test_think_tags_stripped(self):
         content = "<think>let me think...</think>\n" + json.dumps(

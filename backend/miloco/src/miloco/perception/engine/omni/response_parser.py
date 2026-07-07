@@ -373,6 +373,22 @@ def _parse_env_sounds(raw: Any) -> list[str]:
     return []
 
 
+# low 档的"无操作/无需提醒"占位建议直接丢弃：模型偶尔没忍住会冒一条 low 废建议
+# （event 复述判断过程、action 写"无需提醒"），而推送侧只看 urgency 不看 action、又不
+# 丢 low → 会作为「事件提醒」推给用户，观感自相矛盾。这里在解析口剔掉。只收明确的
+# no-op 词、规范化后精确匹配，不做模糊/语义匹配，避免误杀真建议。
+_NO_OP_ACTIONS = frozenset({
+    "无需提醒", "无需处理", "无需操作", "无需干预", "无需采取行动",
+    "不需要提醒", "不需提醒", "不需要处理", "不需处理",
+    "无", "无建议", "暂无", "暂无建议", "无异常", "一切正常",
+})
+
+
+def _is_no_op_action(action: str) -> bool:
+    a = action.strip().rstrip("。.！!，,").strip()
+    return a in _NO_OP_ACTIONS
+
+
 def _parse_suggestions(raw: Any) -> list[Suggestion]:
     if not isinstance(raw, list):
         return []
@@ -386,10 +402,14 @@ def _parse_suggestions(raw: Any) -> list[Suggestion]:
                 continue
             if urgency not in ("high", "medium", "low"):
                 urgency = "low"
+            action = str(item.get("action", ""))
+            # 仅对 low 生效：high/medium 即便 action 自相矛盾也保留，绝不静默丢疑似危险。
+            if urgency == "low" and _is_no_op_action(action):
+                continue
             result.append(
                 Suggestion(
                     event=str(item.get("event", "")),
-                    action=str(item.get("action", "")),
+                    action=action,
                     urgency=urgency,
                 )
             )
