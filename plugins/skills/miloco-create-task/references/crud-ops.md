@@ -95,7 +95,7 @@ miloco-cli task enable <task_id>    # 启用
 |---|---|---|
 | rule 条件 / 动作 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 links[] 拿） |
 | 持续时长门槛 | rule | `miloco-cli rule update <rule_id> --duration-seconds <N>`（单位换算见 SKILL.md §Rule.duration_seconds）；desc 含字面分钟/小时数时同步改 |
-| 触发时间 / cron 表达式 | schedule | cron remove + cron add（cron 无 update API）；jobId 从 `task get` 的 links[] 拿；新 jobId 紧跟 `task link --kind cron --ref <new_jobId>` 重新挂 |
+| 触发时间 / cron 表达式 | schedule | cron remove + cron add（cron 无 update API）；jobId 从 `task get` 的 links[] 拿；新 jobId 紧跟 `task link --kind cron --ref <new_jobId>` 重新挂；新建 cron 同样必带独立 `tz="<家庭时区>"` 字段（见 SKILL.md §Schedule.时区） |
 | 目标值 / 单位 / window / recurring_pattern / expires_at | record | `miloco-cli task record update <task_id> --patch '{...}'`（白名单按 kind：progress=target/unit/window/recurring_pattern/expires_at；duration=target_minutes/recurring_pattern/expires_at；event=recurring_pattern/expires_at）|
 
 跨件套修改时**按 record → schedule → rule 顺序**逐一更新；任一步失败则停止后续。

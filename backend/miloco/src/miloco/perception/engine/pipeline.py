@@ -61,6 +61,7 @@ from miloco.perception.types import (
     VideoFrame,
     VideoStream,
 )
+from miloco.utils.time_utils import deploy_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +118,15 @@ def _reraise_first(results: list[Any]) -> None:
 
 
 def _fmt_time_window(start_ms: float, end_ms: float) -> str:
-    """画面时间窗 ``[HH:MM:SS-HH:MM:SS]``（= 该相机本窗 snapshot 起止时刻，本地时区）。"""
-    s = datetime.fromtimestamp(start_ms / 1000).strftime("%H:%M:%S")
-    e = datetime.fromtimestamp(end_ms / 1000).strftime("%H:%M:%S")
+    """画面时间窗 ``[HH:MM:SS-HH:MM:SS]``（= 该相机本窗 snapshot 起止时刻，部署时区）。
+
+    走 ``deploy_timezone()`` 而非进程/OS 时钟：此时间窗经 ``event_text_builder``
+    的「时间」字段直达 agent，若用裸 ``fromtimestamp`` 则在 host TZ≠部署时区时错标
+    时刻（如 UTC 主机把 10:52 显示成 02:52），故与 API 出口 ISO 同源统一到部署时区。
+    """
+    tz = deploy_timezone()
+    s = datetime.fromtimestamp(start_ms / 1000, tz=tz).strftime("%H:%M:%S")
+    e = datetime.fromtimestamp(end_ms / 1000, tz=tz).strftime("%H:%M:%S")
     return f"[{s}-{e}]"
 
 
@@ -439,7 +446,7 @@ async def run_batch_pipeline(
         """单设备 gate→identity→omni。封成 per-device 协程是 gather 并发的硬约束：
         ``set_device_context``(ContextVar) 必须在各自 Task 的 context 副本里 set/reset
         —— gather 为每个协程建独立 Task(启动时 copy_context)，DeviceContext 才不会
-        跨设备串号(否则 omni_log/trace 全记到最后一个 device 名下)。reset 在 per-Task
+        跨设备串号(否则 trace 全记到最后一个 device 名下)。reset 在 per-Task
         下已非必需(副本随 Task 丢弃)，但成对保留无害。
         """
         # Downsample to target fps at pipeline entry
@@ -461,8 +468,8 @@ async def run_batch_pipeline(
             identity_engine.device_name = snapshot.device.name
 
         device_trace_id = str(uuid.uuid4())
-        # 同一 cycle 同一 device 在 omni_log(jsonl)与 traces_device(SQLite)两处
-        # 都用这把 UUID,processor._publish_trace 从 timing 读出复用,避免双钥匙。
+        # 同一 cycle 同一 device 在 traces_device(SQLite)行用这把 UUID,
+        # processor._publish_trace 从 timing 读出复用,避免双钥匙。
         room_timing[f"_device_trace_id_{did}"] = device_trace_id
 
         prev_frame = gate_prev_frames.get(did) if gate_prev_frames is not None else None
@@ -573,7 +580,7 @@ async def run_batch_pipeline(
         )
         room_timing[f"identity_{did}_ms"] = _ms_since(t)
 
-        # omni 阶段:把 per-device 元数据塞进 ContextVar,供 call_omni 内 publish_omni_log 拿。
+        # omni 阶段:把 per-device 元数据塞进 ContextVar,供 traces_device 等观测路径读取。
         device_ctx_token = set_device_context(DeviceContext(
             device_trace_id=device_trace_id,
             device_id=did,

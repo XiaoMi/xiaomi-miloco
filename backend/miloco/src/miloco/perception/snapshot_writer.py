@@ -1,32 +1,37 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""有意义事件 clip 落盘 + 清理工具.
+"""有意义事件 artifacts(clip + omni trace)落盘 + 清理工具.
 
-磁盘路径:`{snapshot_root}/{event_id}/{device_id_slug}/clip.mp4`
-(一次推理 1 行 event,参与的每个摄像头各落 1 个 mp4;字节级 = omni 上传给 LLM 的内容,
-零重编;`device_id_slug` 通过 region_slug 做 URL-safe 化,避免 device_id 含 `/` 或特殊字符
-破坏路径).
+磁盘路径:
+- per-device clip: `{snapshot_root}/{event_id}/{device_id_slug}/clip.{mp4|m4a}`
+  (一次推理 1 行 event,参与的每个摄像头各落 1 个;字节级 = omni 上传给 LLM 的内容,
+   零重编;`device_id_slug` 通过 region_slug 做 URL-safe 化)
+- 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
+  (prompt + response + latency + usage + error 的 gzip JSON,用于复盘 LLM 决策)
 
 工具函数:
 - `region_slug(s)` — URL-safe 化 device_id / 区域名
 - `get_snapshot_root()` — 优先 settings.perception.snapshot_root,fallback DirectorySettings.snapshot_dir
 - `check_disk_space(root, min_free_mb)` — 写前预检(B6a)
-- `save_clips(event_id, clips_by_device)` — 落盘核心
+- `save_event_artifacts(event_id, artifacts)` — 落盘核心(clip + trace 一次完成)
 - `cleanup_snapshots(ttl_days, max_disk_mb)` — 24h cleanup loop 调用(目录结构不变,
   老 jpeg 路径下的事件也能正常按 mtime 清理)
 """
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
 import re
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
 from miloco.config import get_settings
-from miloco.perception.snapshot_context import ClipKind
+from miloco.perception.snapshot_context import ClipKind, OmniEventArtifacts
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +77,7 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
 
     Returns:
         True 表示 free >= min_free_mb,允许落盘;
-        False 表示空间不足,调用方应跳过 save_clips.
+        False 表示空间不足,调用方应跳过 save_event_artifacts.
 
     检查失败(如目录不存在)按"True 可用"处理,避免误杀;真有问题在 imwrite 时 raise.
     """
@@ -87,33 +92,24 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
         return True
 
 
-def save_clips(
-    event_id: str,
-    clips_by_device: dict[str, tuple[bytes, ClipKind]],
-) -> int:
-    """落盘 event clip(每个 device 一个字节级 = omni 看到的 mp4 / m4a).
+def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
+    """落盘一次 omni 触发事件的所有产物(clip 字节 + omni trace).
 
-    路径:`{snapshot_root}/{event_id}/{region_slug(device_id)}/clip.{mp4|m4a}`.
+    路径:
+    - per-device clip: `{snapshot_root}/{event_id}/{region_slug(device_id)}/clip.{mp4|m4a}`
+    - 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
 
     Args:
         event_id: 事件 UUID
-        clips_by_device: {device_id: (bytes, kind)};kind ∈ {"mp4","m4a"}.
-            - 视频路径:omni `_encode_video_mp4` push (bytes, "mp4") → 落 clip.mp4
-            - audio-only 路径:omni `_encode_audio_only_mp4` push (bytes, "m4a") → 落 clip.m4a
-            空 dict 表示无可落盘内容,返 0.
+        artifacts: 含 clips dict 和 trace dict 的容器.两者都空时返 0 不落任何文件.
 
     Returns:
-        成功落盘的 device 个数(0 ~ len(clips_by_device)).
+        成功落盘的 device clip 个数(0 ~ len(artifacts.clips));trace 不计入.
+        保持 MeaningfulEvent.snapshot_count 字段含义.
 
-    Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 IOError 静默跳过.
-    扩展名跟实际容器一致(M4A 不用 .mp4 假装),events_service.locate_clip 据此区分
-    Content-Type=video/mp4 vs audio/mp4.
-
-    防御性 runtime 检查:仍接受裸 bytes 形态(回退按 mp4)用于内部直接调用 + 单测调试 —
-    标注收紧鼓励所有 caller 传 tuple,但运行时不 panic.kind 非法值(非 mp4/m4a)
-    直接跳过该 device 不落盘,避免污染目录结构.
+    Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 OSError 静默跳过.
     """
-    if not clips_by_device:
+    if not artifacts.clips and artifacts.trace is None and not artifacts.gallery:
         return 0
 
     snapshot_root = get_snapshot_root()
@@ -124,13 +120,21 @@ def save_clips(
         logger.error("Failed to create event dir %s: %s", event_dir, e)
         return 0
 
+    clip_count = _save_clips(event_dir, artifacts.clips)
+    if artifacts.trace is not None:
+        _save_trace(event_dir, artifacts.trace)
+    if artifacts.gallery:
+        _save_gallery(event_dir, artifacts.gallery)
+    return clip_count
+
+
+def _save_clips(
+    event_dir: Path,
+    clips: dict[str, tuple[bytes, ClipKind]],
+) -> int:
+    """落 per-device clip 字节到 event_dir.kind 非法 / 空字节 → 跳过该 device."""
     count = 0
-    for device_id, payload in clips_by_device.items():
-        # 兼容两种 payload 形态:tuple[bytes, kind] 或 裸 bytes(老 caller / 单测)
-        if isinstance(payload, tuple):
-            clip_bytes, kind = payload
-        else:
-            clip_bytes, kind = payload, "mp4"
+    for device_id, (clip_bytes, kind) in clips.items():
         if not clip_bytes:
             continue
         if kind not in ("mp4", "m4a"):
@@ -150,6 +154,42 @@ def save_clips(
             logger.error("Failed to write %s: %s", path, e)
             continue
     return count
+
+
+def _save_trace(event_dir: Path, trace: dict[str, Any]) -> None:
+    """gzip 压缩 trace dict 并落盘.失败 logger.error 不抛,clip 落盘不受影响."""
+    try:
+        payload = json.dumps(trace, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        gz_bytes = gzip.compress(payload)
+        (event_dir / "omni_trace.json.gz").write_bytes(gz_bytes)
+    except (OSError, TypeError, ValueError) as e:
+        logger.error("Failed to write trace for %s: %s", event_dir.name, e)
+
+
+def _save_gallery(event_dir: Path, gallery: dict[str, dict[str, bytes]]) -> None:
+    """落盘画廊合成图到 {event_dir}/gallery/{person_id}_{kind}.{ext}.
+
+    通过 magic bytes 判断实际格式(PNG/JPEG),扩展名与内容一致.
+    """
+    gallery_dir = event_dir / "gallery"
+    try:
+        gallery_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error("Failed to create gallery dir %s: %s", gallery_dir, e)
+        return
+    for person_id, images in gallery.items():
+        slug = region_slug(person_id)
+        for kind, image_bytes in images.items():
+            if not image_bytes:
+                continue
+            ext = "png" if image_bytes[:4] == b"\x89PNG" else "jpg"
+            path = gallery_dir / f"{slug}_{kind}.{ext}"
+            try:
+                path.write_bytes(image_bytes)
+            except OSError as e:
+                logger.error("Failed to write gallery %s: %s", path, e)
 
 
 def cleanup_snapshots(ttl_days: int, max_disk_mb: int) -> dict:

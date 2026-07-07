@@ -115,6 +115,55 @@ def test_filter_by_home_drops_disallowed():
     assert set(miot_filter.filter_by_home(kv, items).keys()) == {"a"}
 
 
+# ─── filter.py: select_active_camera_dids（投喂/拉流共用口径）───────────────────
+
+
+def test_select_active_filters_home_denied_offline():
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+            ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c2"]),
+        }
+    )
+    cameras = {
+        "c1": _camera("c1", home_id="H1"),  # 通过
+        "c2": _camera("c2", home_id="H1"),  # 被拉黑 → 排除
+        "c3": _camera("c3", home_id="H2"),  # 家庭未启用 → 排除
+        "c4": _camera("c4", home_id="H1", online=False, lan_online=False),  # 离线 → 排除
+    }
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1"]
+
+
+def test_select_active_require_lan_false_keeps_lan_stale():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    # 云端 online=True 但 lan_online=False（卡死态）
+    cameras = {"c1": _camera("c1", home_id="H1", online=True, lan_online=False)}
+    # require_lan=True（默认连接口径）→ 排除
+    assert miot_filter.select_active_camera_dids(kv, cameras) == []
+    # require_lan=False（应连数口径）→ 放过
+    assert miot_filter.select_active_camera_dids(
+        kv, cameras, require_lan=False
+    ) == ["c1"]
+
+
+def test_select_active_caps_by_did(monkeypatch):
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {
+        "c3": _camera("c3", home_id="H1"),
+        "c1": _camera("c1", home_id="H1"),
+        "c2": _camera("c2", home_id="H1"),
+    }
+    # 超额 → 按 did 升序保留前 2
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1", "c2"]
+    # cap=False → 全集（输入顺序，列全集语义）
+    assert set(miot_filter.select_active_camera_dids(kv, cameras, cap=False)) == {
+        "c1",
+        "c2",
+        "c3",
+    }
+
+
 # ─── filter.py: write helpers ────────────────────────────────────────────────
 
 
@@ -611,10 +660,11 @@ def _scope_proxy_env(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_camera_img_manager_denied_by_disabled(_scope_proxy_env):
-    """命中相机停用集 → 仍然建 manager(watch 视频流需要 camera instance)。
+    """`_create_camera_img_manager` 是纯建原语,本身不含 scope gate。
 
-    设计变更:scope_denied 不再阻止 manager 建立。watch 视频流与感知 scope 解耦,
-    inUse=false 只影响感知分析订阅,camera manager 须始终存在以支持 watch WS。
+    scope gate(黑名单 / home 白名单)在调用方 refresh_cameras 层。直调 _create
+    时即使相机在停用集也会尝试建(确保 gate 没误下沉到这一层);此处 instance
+    返回 None 故 manager 不写入 dict。
     """
     proxy, kv, miot_client = _scope_proxy_env
     kv.set(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY, json.dumps(["c1"]))
@@ -631,7 +681,7 @@ async def test_create_camera_img_manager_denied_by_disabled(_scope_proxy_env):
 
 @pytest.mark.asyncio
 async def test_create_camera_img_manager_denied_by_home_filter(_scope_proxy_env):
-    """home_id 不在启用集 → 同上：仍然尝试建 manager(不 gate scope)。"""
+    """home_id 不在启用集 → 同上：_create 不 gate(gate 在 refresh 层)，仍尝试建。"""
     proxy, kv, miot_client = _scope_proxy_env
     kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
 
@@ -646,10 +696,10 @@ async def test_create_camera_img_manager_denied_by_home_filter(_scope_proxy_env)
 
 @pytest.mark.asyncio
 async def test_create_camera_img_manager_denied_but_valid_instance_builds_manager(_scope_proxy_env):
-    """scope_denied + 有效 instance → manager 仍然被建立(核心路径断言)。
+    """denied + 有效 instance → _create 仍建 manager（_create 是 gate-free 原语）。
 
-    这是新设计的防回归钉:若有人把 scope gate 恢复,create_camera_instance_async
-    不会被调用,handler 不会建立,_camera_img_managers 不会有该 did,测试立刻失败。
+    钉住分层契约:scope gate 只在 refresh_cameras,_create_camera_img_manager
+    本身不查黑名单/白名单。若有人把 gate 误下沉到 _create,该测试会失败。
     """
     proxy, kv, miot_client = _scope_proxy_env
     kv.set(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY, json.dumps(["c1"]))
@@ -674,7 +724,7 @@ async def test_create_camera_img_manager_denied_but_valid_instance_builds_manage
 
 @pytest.mark.asyncio
 async def test_create_camera_img_manager_denied_by_home_filter_valid_instance_builds_manager(_scope_proxy_env):
-    """home_id 不在启用集 + 有效 instance → manager 仍然被建立(home filter 变体防回归钉)。"""
+    """home filter 变体：home 不在启用集 + 有效 instance → _create 仍建(gate 在 refresh 层)。"""
     proxy, kv, miot_client = _scope_proxy_env
     kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
 
@@ -694,12 +744,11 @@ async def test_create_camera_img_manager_denied_by_home_filter_valid_instance_bu
 
 
 @pytest.mark.asyncio
-async def test_refresh_cameras_keeps_scope_denied_existing_manager(_scope_proxy_env):
-    """先有 manager + 后写停用集 + refresh → 历史 manager 保活(不销毁)。
+async def test_refresh_cameras_destroys_scope_denied_existing_manager(_scope_proxy_env):
+    """先有 manager + 后写停用集 + refresh → manager 被销毁（关就停）。
 
-    设计变更:scope_denied 时不再 destroy manager,只 log。watch 视频流依赖
-    camera instance 存活,销毁会让已有的 watch WS 帧停止。只有摄像头真正从
-    账号消失(cam is None)时才 destroy。
+    设计:相机被关(in_use=false → 进黑名单)时 refresh 销毁其 manager,真正停掉
+    native PPCS 会话+解码线程,不再拉流。destroy + unregister + dict 删除三件配对。
     """
     proxy, kv, miot_client = _scope_proxy_env
 
@@ -713,18 +762,70 @@ async def test_refresh_cameras_keeps_scope_denied_existing_manager(_scope_proxy_
     kv.set(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY, json.dumps(["c1"]))
     await proxy.refresh_cameras()
 
-    # scope_denied 时不销毁,manager 保活;走 else 分支 update_camera_info
-    handler.destroy.assert_not_awaited()
-    miot_client.unregister_lan_device_changed_async.assert_not_awaited()
-    assert "c1" in proxy._camera_img_managers
-    handler.update_camera_info.assert_awaited_once()
+    handler.destroy.assert_awaited_once()
+    miot_client.unregister_lan_device_changed_async.assert_awaited_once_with(did="c1")
+    assert "c1" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_destroys_scope_out_of_home_manager(_scope_proxy_env):
+    """切换家庭后旧家庭相机移出 scope → manager 被销毁；scope 内的保活。
+
+    模拟 switch_home 切到 H2：H1 的 c1 home 不在白名单 → 销毁；H2 的 c2 → 保活。
+    """
+    proxy, kv, miot_client = _scope_proxy_env
+
+    h1 = MagicMock()
+    h1.destroy = AsyncMock()
+    h1.update_camera_info = AsyncMock()
+    h2 = MagicMock()
+    h2.destroy = AsyncMock()
+    h2.update_camera_info = AsyncMock()
+    proxy._camera_img_managers["c1"] = h1
+    proxy._camera_img_managers["c2"] = h2
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={"c1": _camera("c1", home_id="H1"), "c2": _camera("c2", home_id="H2")}
+    )
+
+    # 已切到 H2：H1 相机移出 scope
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H2"]))
+    await proxy.refresh_cameras()
+
+    h1.destroy.assert_awaited_once()
+    assert "c1" not in proxy._camera_img_managers
+    h2.destroy.assert_not_awaited()
+    assert "c2" in proxy._camera_img_managers
+    h2.update_camera_info.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_skips_manager_for_denied_camera(_scope_proxy_env):
+    """refresh_cameras 新建分支：相机在停用集(黑名单)时 continue，不建 manager。
+
+    防回归钉：若有人移除黑名单 gate，create_camera_instance_async 调用次数
+    会从 1 变为 2，测试立即失败。
+    """
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    kv.set(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY, json.dumps(["c2"]))
+
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={"c1": _camera("c1", home_id="H1"), "c2": _camera("c2", home_id="H1")}
+    )
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    # c1 未拉黑 → 尝试建；c2 在黑名单 → continue 跳过
+    assert miot_client.create_camera_instance_async.call_count == 1
+    assert "c2" not in proxy._camera_img_managers
 
 
 @pytest.mark.asyncio
 async def test_refresh_cameras_destroys_when_camera_removed_from_account(_scope_proxy_env):
     """摄像头从账号消失(cam is None) → destroy + unregister + dict 删除三件配对。
 
-    这是唯一剩余的 destroy 触发路径。scope_denied 时不再 destroy,只有这条路走 destroy。
+    destroy 触发路径之一(另两条:移出当前家庭 / 被关闭,见上面两个测试)。
     """
     proxy, kv, miot_client = _scope_proxy_env
 
@@ -791,28 +892,144 @@ async def test_refresh_cameras_skips_manager_for_disallowed_home(_scope_proxy_en
     assert "c2" not in proxy._camera_img_managers
 
 
+@pytest.mark.asyncio
+async def test_refresh_cameras_caps_managers_to_max(_scope_proxy_env, monkeypatch):
+    """在线相机超过上限 → 只为前 N(按 did)建 manager，超额的不建（拉流=投喂口径）。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1"),
+            "c2": _camera("c2", home_id="H1"),
+            "c3": _camera("c3", home_id="H1"),  # 第 3 台在线 → 超额，不建
+        }
+    )
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    # 只为 c1/c2 建，c3 超额跳过
+    assert miot_client.create_camera_instance_async.call_count == 2
+    assert "c3" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_destroys_overcap_existing_manager(_scope_proxy_env, monkeypatch):
+    """已建 >MAX 个 manager（存量超额）→ refresh 收敛到 MAX，多的销毁。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    handlers = {}
+    for did in ("c1", "c2", "c3"):
+        h = MagicMock()
+        h.destroy = AsyncMock()
+        h.update_camera_info = AsyncMock()
+        handlers[did] = h
+        proxy._camera_img_managers[did] = h
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={did: _camera(did, home_id="H1") for did in ("c1", "c2", "c3")}
+    )
+
+    await proxy.refresh_cameras()
+
+    # 按 did 保留 c1/c2，c3 超额被销
+    handlers["c3"].destroy.assert_awaited_once()
+    assert "c3" not in proxy._camera_img_managers
+    assert "c1" in proxy._camera_img_managers
+    assert "c2" in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_destroy_failure_isolated(_scope_proxy_env):
+    """批量销时某台 destroy 抛错不拖垮其余：失败的留在 dict 待重试，其余照常销。
+
+    Phase 1 把 destroy 触发条件扩到关/移出家庭/离线/超额 → 切家庭等场景一次销 N 台。
+    防回归钉：若移除 per-iteration try/except，c1 抛错会 break 整个循环，c2 不会被销。
+    """
+    proxy, kv, miot_client = _scope_proxy_env
+    # 两台都移出 scope（白名单只含 H2，二者都在 H1）→ 都该销
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H2"]))
+
+    h1 = MagicMock()
+    h1.destroy = AsyncMock(side_effect=RuntimeError("destroy boom"))
+    h1.update_camera_info = AsyncMock()
+    h2 = MagicMock()
+    h2.destroy = AsyncMock()
+    h2.update_camera_info = AsyncMock()
+    proxy._camera_img_managers["c1"] = h1
+    proxy._camera_img_managers["c2"] = h2
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1"),
+            "c2": _camera("c2", home_id="H1"),
+        }
+    )
+
+    # 不应抛出（refresh 整体仍成功返回）
+    result = await proxy.refresh_cameras()
+    assert result is not None
+
+    # c1 destroy 抛错 → 留在 dict 待下次 refresh 重试
+    h1.destroy.assert_awaited_once()
+    assert "c1" in proxy._camera_img_managers
+    # c2 不受 c1 失败影响，照常销毁
+    h2.destroy.assert_awaited_once()
+    assert "c2" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_offline_not_built(_scope_proxy_env):
+    """离线相机不在投喂/拉流集 → 不建 manager（Phase 1：拉流=投喂，离线不建）。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1"),  # 在线
+            "c2": _camera("c2", home_id="H1", online=False, lan_online=False),  # 离线
+        }
+    )
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    assert miot_client.create_camera_instance_async.call_count == 1  # 只为在线的 c1
+    assert "c2" not in proxy._camera_img_managers
+
+
 # ─── service.toggle_*: 写完 KV 后驱动 MIoT manager 收敛 ──────────────────────
 
 
 @pytest.mark.asyncio
-async def test_toggle_camera_triggers_sync_camera_adapter_when_changed():
-    """toggle_camera 写完 KV 后调 _sync_camera_adapter → 感知订阅热同步。
+async def test_toggle_camera_triggers_refresh_then_sync_when_changed():
+    """toggle_camera 写完 KV(changed=True) → 先 refresh_cameras 后 _sync_camera_adapter。
 
-    设计变更:toggle_camera 不再触发 refresh_cameras(避免重建 camera manager
-    扰动 watch 视频流),改调 _sync_camera_adapter 只同步感知订阅。
-    KV 改变(changed=True)时触发;不变(同操作重复)时跳过。
+    refresh_cameras 按新黑名单建/销 camera manager(关掉的相机停 native 会话+解码),
+    _sync_camera_adapter 再让 perception 按新 manager 集连/断。顺序不可换。
+    KV 不变(同操作重复)时两者都跳过。
     """
     kv = _FakeKV()
     svc = _make_service(cameras={"c1": _camera("c1")}, kv=kv)
 
-    # 追踪 _sync_camera_adapter 调用
-    svc._sync_camera_adapter = AsyncMock()
+    call_order: list[str] = []
+    svc._miot_proxy.refresh_cameras = AsyncMock(
+        side_effect=lambda *a, **k: call_order.append("refresh")
+    )
+    svc._sync_camera_adapter = AsyncMock(
+        side_effect=lambda *a, **k: call_order.append("sync")
+    )
 
     await svc.toggle_camera([{"did": "c1", "in_use": False}])
+    assert svc._miot_proxy.refresh_cameras.await_count == 1
     assert svc._sync_camera_adapter.await_count == 1
+    assert call_order == ["refresh", "sync"]
 
-    # 第二次相同操作 → KV 已含 c1，changed=False → 不再 sync
+    # 第二次相同操作 → KV 已含 c1，changed=False → 两者都不再调
     await svc.toggle_camera([{"did": "c1", "in_use": False}])
+    assert svc._miot_proxy.refresh_cameras.await_count == 1
     assert svc._sync_camera_adapter.await_count == 1
 
 

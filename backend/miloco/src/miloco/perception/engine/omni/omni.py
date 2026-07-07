@@ -17,7 +17,6 @@ from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
-    _publish_omni_log_safe,
     call_omni,
     call_omni_stream,
     extract_usage,
@@ -41,6 +40,7 @@ from miloco.perception.engine.omni.response_parser import (
     try_extract_suggestions,
 )
 from miloco.perception.engine.types import IdentityPacket, OmniContext, OmniOutput
+from miloco.perception.snapshot_context import push_omni_trace
 from miloco.perception.types import MatchedRule, Speech, Suggestion
 
 if TYPE_CHECKING:
@@ -326,13 +326,18 @@ async def _call_omni_messages(
             original=e,
         ) from e
     finally:
-        # 跟 call_omni / call_omni_stream 口径一致:debug-on 时把 fused 请求也落盘。
-        _publish_omni_log_safe(
-            messages=messages,
-            raw=raw,
+        # 跟 call_omni / call_omni_stream 口径一致:推 omni trace 到当前 event artifacts.
+        push_omni_trace(
+            request_messages=messages,
+            response_raw=raw,
             latency_ms=(time.monotonic() - t0) * 1000,
             error=error,
             model=config.model,
+            inference_params={
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "max_tokens": config.max_completion_tokens,
+            },
         )
 
 

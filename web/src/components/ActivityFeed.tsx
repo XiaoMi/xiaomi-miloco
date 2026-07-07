@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { eventClipUrl, listActivity, subscribeEvents } from "@/api";
+import { eventClipUrl, listActivity, revealDir, submitEventFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
 import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
@@ -62,6 +62,8 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
   const [appliedSince, setAppliedSince] = useState<number | undefined>(todayStartMs);
   const [appliedBefore, setAppliedBefore] = useState<number | undefined>();
   const [loading, setLoading] = useState(false);
+  const [feedbackSet, setFeedbackSet] = useState<Set<string>>(new Set());
+  const [feedbackPacks, setFeedbackPacks] = useState<Map<string, { path: string; size: number }>>(new Map());
   /** 已拉取的 offset(下次"查看更早"从这开始).事件量动态变(SSE prepend),
    *  分页用 since/before+offset 而非纯 offset 不够;约定 offset = 当前已 loaded 历史段长 */
   const [offset, setOffset] = useState(0);
@@ -186,6 +188,10 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
               // 或 publish 重试)时,后到的 clip_kind 应胜出 — 漏掉的话会回归 18:42:05
               // bug(行尾错显 🎬 / 展开走 <video> 黑屏).
               clip_kind: e.clip_kind ?? prev[idx].clip_kind,
+              has_trace: e.has_trace ?? prev[idx].has_trace,
+              has_feedback: e.has_feedback ?? prev[idx].has_feedback,
+              feedback_pack_path: e.feedback_pack_path ?? prev[idx].feedback_pack_path,
+              feedback_pack_size: e.feedback_pack_size ?? prev[idx].feedback_pack_size,
             };
             const next = prev.slice();
             next[idx] = merged;
@@ -270,7 +276,17 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       ) : (
         <ul className="divide-y divide-border">
           {events.map((e) => (
-            <ActivityRow key={e.id} event={e} onOpenLightbox={setLightboxSrc} />
+            <ActivityRow
+              key={e.id}
+              event={e}
+              onOpenLightbox={setLightboxSrc}
+              feedbackSet={feedbackSet}
+              feedbackPacks={feedbackPacks}
+              onFeedbackSubmitted={(id, path, size) => {
+                setFeedbackSet(prev => new Set(prev).add(id));
+                setFeedbackPacks(prev => new Map(prev).set(id, { path, size }));
+              }}
+            />
           ))}
         </ul>
       )}
@@ -402,6 +418,7 @@ function TimeRangeFilter({
         type="datetime-local"
         value={fmt(since)}
         onChange={(e) => onSinceChange(parse(e.target.value))}
+        onClick={(e) => e.currentTarget.showPicker?.()}
         className={inputCls}
         aria-label={t("activity.filterSince")}
         placeholder={t("activity.filterSincePlaceholder")}
@@ -431,6 +448,7 @@ function TimeRangeFilter({
             onBeforeChange(v);
             if (v === undefined) setBeforeEditing(false); // 清空后回到"至现在"按钮
           }}
+          onClick={(e) => e.currentTarget.showPicker?.()}
           onBlur={(e) => {
             // 失焦时如果还是空值,退回按钮态(避免空 input 留在 UI 上)
             if (!e.target.value) setBeforeEditing(false);
@@ -480,9 +498,15 @@ function TimeLabel({ timestamp }: { timestamp: number }) {
 function ActivityRow({
   event,
   onOpenLightbox,
+  feedbackSet,
+  feedbackPacks,
+  onFeedbackSubmitted,
 }: {
   event: ActivityEvent;
   onOpenLightbox: (src: string) => void;
+  feedbackSet: Set<string>;
+  feedbackPacks: Map<string, { path: string; size: number }>;
+  onFeedbackSubmitted: (eventId: string, path: string, size: number) => void;
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -516,7 +540,7 @@ function ActivityRow({
 
   return (
     <li
-      onClick={() => setExpanded((x) => !x)}
+      onClick={() => { if (!window.getSelection()?.toString()) setExpanded((x) => !x); }}
       aria-expanded={expanded}
       className="px-5 py-2.5 hover:bg-bg-tertiary transition-colors cursor-pointer"
     >
@@ -591,7 +615,184 @@ function ActivityRow({
           {t("activity.noPlayback")}
         </div>
       )}
+
+      {event.has_trace && (
+        <div className={expanded ? "" : "hidden"}>
+          <FeedbackSection
+            eventId={event.id}
+            hasFeedback={event.has_feedback || feedbackSet.has(event.id)}
+            packPath={feedbackPacks.get(event.id)?.path ?? event.feedback_pack_path}
+            onSubmitted={onFeedbackSubmitted}
+          />
+        </div>
+      )}
     </li>
+  );
+}
+
+const ERROR_TYPE_KEYS = [
+  "person",
+  "pet",
+  "action",
+  "envDevice",
+  "voice",
+  "ruleFalse",
+  "other",
+] as const;
+
+function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
+  eventId: string;
+  hasFeedback?: boolean;
+  packPath?: string | null;
+  onSubmitted: (eventId: string, path: string, size: number) => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [confirmedResubmit, setConfirmedResubmit] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [text, setText] = useState("");
+  const [includeGallery, setIncludeGallery] = useState(false);
+  const [status, setStatus] = useState<"idle" | "submitting" | "error">("idle");
+
+  const handleToggle = (type: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
+
+  const handleSubmit = async () => {
+    setStatus("submitting");
+    try {
+      const result = await submitEventFeedback(eventId, [...selected], text, includeGallery);
+      onSubmitted(eventId, result.pack_path, result.pack_size_bytes);
+      setConfirmedResubmit(false);
+      setStatus("idle");
+      setOpen(false);
+      setSelected(new Set());
+      setText("");
+      setIncludeGallery(false);
+    } catch {
+      setStatus("error");
+    }
+  };
+
+  // idle: 反馈按钮 or 已反馈（显示路径）
+  if (!open && status === "idle") {
+    if (hasFeedback && !confirmedResubmit) {
+      return (
+        <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg bg-info-bg text-caption" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-baseline justify-between">
+            <span className="text-info">
+              ✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}
+              {packPath && <>，<button type="button" onClick={() => { const i = packPath.lastIndexOf("/"); if (i > 0) revealDir(packPath.substring(0, i)).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
+              ，<a href="https://mi.feishu.cn/share/base/form/shrcnUmo9ez8NwkcpvpJsKSOdgd" target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink", "前往提交")}</a>
+            </span>
+            <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
+              {t("activity.feedbackModify", "修改反馈信息")}
+            </button>
+          </div>
+          {packPath && (
+            <div className="mt-1.5 text-[10px] text-text-tertiary font-mono truncate" title={packPath}>{packPath}</div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-2 sm:ml-[82px]">
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+          className="inline-flex items-center gap-1 px-3 py-[5px] text-caption text-text-tertiary bg-transparent border border-border rounded-md hover:text-brand-primary hover:border-brand-primary hover:bg-brand-soft transition-colors"
+        >
+          <span className="text-[11px]">⚑</span> {t("activity.feedbackButton", "反馈")}
+        </button>
+      </div>
+    );
+  }
+
+  // submitting
+  if (status === "submitting") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px] flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-bg-tertiary text-caption text-text-secondary" onClick={(e) => e.stopPropagation()}>
+        <span className="inline-block w-3 h-3 border-2 border-border border-t-brand-primary rounded-full animate-spin" />
+        {t("activity.feedbackSubmitting", "正在打包感知数据...")}
+      </div>
+    );
+  }
+
+  // error
+  if (status === "error") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px]" onClick={(e) => e.stopPropagation()}>
+        <div className="px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(220,38,38,.06)", color: "#DC2626" }}>
+          ✗ {t("activity.feedbackError", "提交失败，请重试")}
+        </div>
+        <button type="button" onClick={() => setStatus("idle")} className="mt-1.5 text-caption text-text-tertiary hover:text-text-secondary">
+          {t("activity.feedbackRetry", "重试")}
+        </button>
+      </div>
+    );
+  }
+
+  // open: 反馈面板
+  return (
+    <div className="mt-2.5 sm:ml-[82px] p-3.5 rounded-[10px] bg-bg-primary border border-border" onClick={(e) => e.stopPropagation()}>
+      <div className="text-[13px] font-semibold text-text-primary mb-2.5">
+        {t("activity.feedbackTitle", "反馈感知问题")}
+      </div>
+
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackErrorType")}</div>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {ERROR_TYPE_KEYS.map((k) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => handleToggle(k)}
+            className={`px-2.5 py-1 text-caption rounded-full border transition-colors ${
+              selected.has(k)
+                ? "text-brand-primary bg-brand-soft border-brand-primary"
+                : "text-text-secondary bg-bg-secondary border-border hover:border-border-strong"
+            }`}
+          >
+            {t(`activity.errorType.${k}`)}
+          </button>
+        ))}
+      </div>
+
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackText", "补充说明（可选）")}</div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={t("activity.feedbackPlaceholder", "如：识别错了，是爸爸不是爷爷")}
+        className="w-full h-[52px] px-2.5 py-2 border border-border rounded-lg text-[13px] bg-bg-secondary text-text-primary resize-none focus:outline-none focus:border-brand-primary transition-colors"
+      />
+
+      <label className="flex items-center gap-1.5 mt-2 text-caption text-text-tertiary cursor-pointer">
+        <input type="checkbox" checked={includeGallery} onChange={(e) => setIncludeGallery(e.target.checked)} className="accent-brand-primary w-[13px] h-[13px]" />
+        {t("activity.feedbackGallery", "包含人员画廊（可能含人脸数据，默认不上传）")}
+      </label>
+
+      <div className="mt-2 px-2.5 py-1.5 rounded-md text-[11px] text-text-tertiary" style={{ background: "rgba(217,119,6,.06)" }}>
+        ⚠ {t("activity.feedbackPrivacy", "提交反馈将收集相关音视频和感知数据并保存到本地")}
+      </div>
+
+      <div className="flex justify-end items-center gap-1.5 mt-2.5">
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setConfirmedResubmit(false); setSelected(new Set()); setText(""); setIncludeGallery(false); }}
+          className="px-3.5 py-[5px] text-caption text-text-secondary rounded-md hover:bg-bg-tertiary transition-colors"
+        >
+          {t("activity.feedbackCancel", "取消")}
+        </button>
+        <button type="button" onClick={handleSubmit} className="px-4 py-[5px] text-caption font-medium text-white bg-brand-primary rounded-md hover:bg-brand-accent transition-colors">
+          {t("activity.feedbackSubmit", "打包数据")}
+        </button>
+      </div>
+    </div>
   );
 }
 

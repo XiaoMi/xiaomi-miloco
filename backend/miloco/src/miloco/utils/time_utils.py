@@ -18,7 +18,10 @@ import os
 import time
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# TZPATH 顶层绑定快照安全:本仓库不调 zoneinfo.reset_tzpath(),统一 from-import
+# 形式(消除函数内 import zoneinfo 的双形式导入)。
+from zoneinfo import TZPATH, ZoneInfo, ZoneInfoNotFoundError
 
 from miloco.middleware.exceptions import ValidationException
 
@@ -74,13 +77,99 @@ def ms_to_aware_dt(ms: int, tz: tzinfo | None = None) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=tz or deploy_timezone())
 
 
+# 四条系统反查路全失败时的最后兜底(维护者裁定,见 deploy_timezone 第 3 步):
+# 内容反查层已把时区配置正确的宿主基本兜住,此值实际只服务"从未配置时区"的裸环境,
+# 猜沪对 CN 主体用户群大概率正确;UTC 宿主上 OS 本地偏移 ≈ +0,不猜也无增益。
 _FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
-_warned_no_iana = False
+
+# 解析出这些名字即视为"UTC 部署"红旗(没有家庭真住在 UTC)
+_UTC_TZ_NAMES = frozenset({"UTC", "Etc/UTC", "Etc/Universal", "Universal", "Zulu"})
+
+
+# warn-once 用 lru_cache 无参函数实现(替代模块级 bool + global 手工置位):
+# 结构上保证进程内恰好执行一次,测试用 .cache_clear() 复位,静态分析也可证。
+@functools.lru_cache(maxsize=1)
+def _warn_utc_once() -> None:
+    _logger.warning(
+        "Resolved deploy timezone is UTC — no household lives in UTC; the server "
+        "timezone is likely unconfigured and all user-facing times may be "
+        "mislabeled. If your home is elsewhere, set it with: "
+        "miloco-cli config set timezone <IANA-name> (e.g. Asia/Shanghai)."
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_no_iana_once() -> None:
+    _logger.warning(
+        "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
+        "If running outside China, set MILOCO_TIMEZONE or settings.timezone "
+        "to your IANA zone name (e.g. America/Los_Angeles, Europe/London)."
+    )
+
+
+def _warn_if_utc(tz: tzinfo) -> tzinfo:
+    """部署时区解析结果为 UTC 时打一次显眼 warning(启动期红旗)。
+
+    没有家庭住在 UTC——解析成 UTC 几乎必然是服务器时区未配置(云主机默认 Etc/UTC),
+    此时所有 agent 可见时刻都会错标。提示精确的修复命令,只打一次。
+    """
+    if str(tz) in _UTC_TZ_NAMES:
+        _warn_utc_once()
+    return tz
+
+# 顶层非 IANA 名的杂项文件,内容反查时跳过
+_TZDB_NON_ZONE_FILES = frozenset({
+    "posixrules", "localtime", "leapseconds", "leap-seconds.list",
+    "tzdata.zi", "zone.tab", "zone1970.tab", "iso3166.tab", "SECURITY",
+})
+
+
+def _localtime_content_lookup(localtime: Path = Path("/etc/localtime")) -> ZoneInfo | None:
+    """``/etc/localtime`` 为普通文件(非 symlink)时,按字节内容反查 zoneinfo 数据库。
+
+    docker bind-mount / ``cp`` 出来的 ``/etc/localtime`` 没有 symlink 目标可读,
+    tzlocal 同款思路:与数据库逐一比对(先 size 预筛再比字节)。命中多个别名时取排序后
+    优先带 "/" 的规范名(如 Asia/Shanghai 优先于顶层别名 PRC),保证确定性。
+    只在 ``_system_iana_tz`` 内调用,结果随其 lru_cache 缓存,全库扫描仅一次。
+    """
+    try:
+        if localtime.is_symlink() or not localtime.is_file():
+            return None
+        data = localtime.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    matches: list[str] = []
+    for base in TZPATH:
+        root = Path(base)
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*"):
+            try:
+                if not f.is_file() or f.stat().st_size != len(data):
+                    continue
+                rel = f.relative_to(root).as_posix()
+                # posix/ right/ 是 leap-second 变体目录,不是规范 IANA 名
+                if rel.startswith(("posix/", "right/")) or rel in _TZDB_NON_ZONE_FILES:
+                    continue
+                if f.read_bytes() == data:
+                    matches.append(rel)
+            except OSError:
+                continue
+        if matches:
+            break
+    for name in sorted(matches, key=lambda n: ("/" not in n, n)):
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            continue
+    return None
 
 
 @functools.lru_cache(maxsize=1)
 def _system_iana_tz() -> ZoneInfo | None:
-    """读 ``TZ`` env / ``/etc/timezone`` / ``/etc/localtime`` symlink → ``ZoneInfo``。
+    """读 ``TZ`` env / ``/etc/timezone`` / ``/etc/localtime`` (symlink → 内容反查) → ``ZoneInfo``。
 
     进程级缓存:系统时区运行时不会变。任何一步拿到合法 IANA 名即返回,全失败返回 ``None``。
     返回 ``ZoneInfo`` 对象意味着 DST 规则内建生效,跟固定 offset 行为完全不同。
@@ -107,7 +196,8 @@ def _system_iana_tz() -> ZoneInfo | None:
                 return ZoneInfo(target[idx + len("zoneinfo/") :])
         except (ZoneInfoNotFoundError, OSError):
             pass
-    return None
+    # symlink 路读不到(普通文件拷贝,docker 常见)→ 按内容反查兜住
+    return _localtime_content_lookup()
 
 
 def deploy_timezone() -> tzinfo:
@@ -115,12 +205,15 @@ def deploy_timezone() -> tzinfo:
 
     1. ``settings.timezone`` (显式配置,IANA 名如 ``Asia/Shanghai``;
        ``MILOCO_TIMEZONE`` env 由 pydantic 自动并入此字段)
-    2. 系统 IANA 反查 (``TZ`` env / ``/etc/timezone`` / ``/etc/localtime``)
-    3. 兜底 ``Asia/Shanghai`` + 启动期 warning
+    2. 系统 IANA 反查 (``TZ`` env / ``/etc/timezone`` / ``/etc/localtime``
+       symlink / ``/etc/localtime`` 内容反查)
+    3. 最后兜底 ``Asia/Shanghai`` + 一次性 warning
 
-    第 2 步必须拿到 IANA 名(而非固定 offset),因为 ``ZoneInfo`` 内建 DST 规则。
-    旧实现用 ``datetime.now().astimezone().tzinfo`` 拿到的是启动时刻的固定偏移,
-    跨过 DST 切换日会偏 1 小时。
+    第 2 步优先拿 IANA 名(而非固定 offset),因为 ``ZoneInfo`` 内建 DST 规则。
+    第 3 步仅在宿主完全不暴露 IANA 身份时到达(四条反查路全失败)——内容反查层把
+    「时区配置正确」的宿主基本都兜住了(symlink / 普通文件拷贝皆可反查),真落到
+    这里的多是时区从未配置的裸环境。维护者裁定猜 Asia/Shanghai:UTC 宿主上 OS 本地
+    偏移 ≈ +0、相对猜沪无增益,而 CN 主体用户群里猜沪大概率就是对的。
 
     用于"今天 / 本周 / rollover"等部署侧业务概念,以及 API 出口 ISO 偏移后缀
     (``ms_to_iso_local`` 走本函数)。DB 存储始终 INTEGER ms (UTC 绝对时刻),
@@ -135,17 +228,10 @@ def deploy_timezone() -> tzinfo:
         # 仅吞"settings 尚未初始化"类异常;ValidationError 应启动期暴露。
         tz_name = None
     if tz_name:
-        return ZoneInfo(tz_name)
+        return _warn_if_utc(ZoneInfo(tz_name))
     if iana := _system_iana_tz():
-        return iana
-    global _warned_no_iana
-    if not _warned_no_iana:
-        _logger.warning(
-            "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
-            "If deploying outside China, set MILOCO_TIMEZONE or settings.timezone "
-            "to your IANA zone name (e.g. America/Los_Angeles, Europe/London)."
-        )
-        _warned_no_iana = True
+        return _warn_if_utc(iana)
+    _warn_no_iana_once()
     return _FALLBACK_TZ
 
 

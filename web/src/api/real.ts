@@ -1132,6 +1132,10 @@ interface BackendMeaningfulEvent {
   rule_names?: Record<string, string>;
   /** 服务端根据落盘文件后缀计算:"mp4" 视频路径 / "m4a" audio-only / null 未落盘. */
   clip_kind?: "mp4" | "m4a" | null;
+  has_trace?: boolean;
+  has_feedback?: boolean;
+  feedback_pack_path?: string | null;
+  feedback_pack_size?: number | null;
 }
 
 export async function realListActivity(opts?: {
@@ -1161,6 +1165,10 @@ export async function realListActivity(opts?: {
       device_ids: e.device_ids,
       rule_names: e.rule_names,
       clip_kind: e.clip_kind,
+      has_trace: e.has_trace,
+      has_feedback: e.has_feedback,
+      feedback_pack_path: e.feedback_pack_path,
+      feedback_pack_size: e.feedback_pack_size,
     }),
   );
 }
@@ -1228,12 +1236,51 @@ export function realSubscribeEvents(
         device_ids: payload.device_ids,
         rule_names: payload.rule_names,
         clip_kind: payload.clip_kind,
+        has_trace: payload.has_trace,
+        has_feedback: payload.has_feedback,
+        feedback_pack_path: payload.feedback_pack_path,
+        feedback_pack_size: payload.feedback_pack_size,
       });
     } catch {
       // ignore malformed payload
     }
   });
   return () => es.close();
+}
+
+// ── 事件反馈 ────────────────────────────────────────────────
+export async function realSubmitEventFeedback(
+  eventId: string,
+  errorTypes: string[],
+  feedbackText: string,
+  includeGallery: boolean,
+): Promise<{ uploaded: boolean; upload_key?: string; pack_path: string; pack_size_bytes: number }> {
+  const resp = await apiFetch<
+    Normal<{ event_id: string; pack_path: string; pack_size_bytes: number; uploaded: boolean; upload_key: string | null }>
+  >("/api/admin/events/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      event_id: eventId,
+      error_types: errorTypes,
+      feedback_text: feedbackText,
+      include_gallery: includeGallery,
+    }),
+  });
+  return {
+    uploaded: resp.data.uploaded,
+    upload_key: resp.data.upload_key ?? undefined,
+    pack_path: resp.data.pack_path,
+    pack_size_bytes: resp.data.pack_size_bytes,
+  };
+}
+
+export async function realRevealDir(path: string): Promise<void> {
+  await apiFetch<Normal<null>>("/api/admin/reveal-dir", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
 }
 
 // ── 让它休息 / 唤醒 ────────────────────────────────────────

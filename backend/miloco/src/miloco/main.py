@@ -48,7 +48,6 @@ from miloco.observability.agent_meta_poller import (
 from miloco.observability.cleanup import (
     cleanup_agent_runs_table,
     cleanup_events_table,
-    cleanup_omni_log,
     cleanup_trace_jsonl,
     cleanup_traces_device_table,
     cleanup_traces_table,
@@ -82,10 +81,9 @@ async def _log_cleanup_loop() -> None:
     settings = get_settings()
     mgr = get_manager()
     obs_db_path = settings.directories.workspace_dir / "observability.db"
-    # trace/agent + trace/omni 由 plugin / omni_log 写到 $MILOCO_HOME 下(不带 storage 前缀),
+    # trace/agent 由 plugin 写到 $MILOCO_HOME 下(不带 storage 前缀),
     # cleanup 必须对齐源写路径,否则 root.exists() 假返回 0 导致永不清理。
     trace_root = miloco_home() / "trace" / "agent"
-    omni_log_root = miloco_home() / "trace" / "omni"
     await asyncio.sleep(60)  # delay first cleanup to avoid cold-start I/O spike
     while True:
         try:
@@ -133,11 +131,6 @@ async def _log_cleanup_loop() -> None:
                     conn.close()
             except Exception as e:
                 logger.error("Observability DB cleanup failed: %s", e)
-            try:
-                do = cleanup_omni_log(omni_log_root, settings.perf.retention.omni_log_days)
-                logger.info("Omni log cleanup: removed %d files", do)
-            except Exception as e:
-                logger.error("Omni log cleanup failed: %s", e)
         # meaningful_events 行清理(按 event_ttl_days)
         try:
             deleted_e = mgr.meaningful_events_dao.delete_before_days(
@@ -270,6 +263,19 @@ async def _backfill_tier_a_reid_embeddings() -> None:
         logger.warning("启动 backfill tier_a ReID emb 失败(忽略)", exc_info=True)
 
 
+async def _maybe_trigger_onboarding() -> None:
+    """启动时检查一次是否需要主动邀请家庭信息初始化（onboarding）。
+
+    条件判定 / 一次性语义 / 重试语义全部收在
+    ``OnboardingTriggerService.maybe_trigger``；这里只是启动调用点之一
+    （另一处在授权成功回调），异常兜底不让后台 task 抛错。
+    """
+    try:
+        await get_manager().onboarding_trigger.maybe_trigger()
+    except Exception:  # noqa: BLE001
+        logger.warning("启动 onboarding 主动邀请检查失败(忽略)", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan event handler."""
@@ -345,16 +351,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         set_agent_meta_poller(agent_meta_poller)
         _app.state.agent_meta_poller = agent_meta_poller
 
-        # omni_log SIGTERM handler 必须主线程注册 — lifespan 一定在主线程跑,
-        # 而 publish_omni_log lazy 注册可能撞 threadpool 线程导致 signal 静默
-        # 失败。显式在这里注册,消除竞态。
-        from miloco.observability.omni_log import register_sigterm_handler
-        register_sigterm_handler()
-
     # 启动后台补齐 tier_a 缺失的 ReID .npy(历史/迁移库遗留); 幂等、零阻塞
     _backfill_task = asyncio.create_task(_backfill_tier_a_reid_embeddings())
     _BG_TASKS.add(_backfill_task)
     _backfill_task.add_done_callback(_BG_TASKS.discard)
+
+    # 全新安装主动 onboarding 邀请：条件不满足 / 已邀请过自然静默；上次发送
+    # 失败（KV 标记未置位）在这里得到重试。fire-and-forget，不阻塞启动。
+    _onboarding_task = asyncio.create_task(_maybe_trigger_onboarding())
+    _BG_TASKS.add(_onboarding_task)
+    _onboarding_task.add_done_callback(_BG_TASKS.discard)
 
     cleanup_task = asyncio.create_task(_log_cleanup_loop())
 
@@ -425,15 +431,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             logger.error("Failed to stop metrics client: %s", e)
         set_metrics_client(None)
-
-    # omni_log buffer 显式 flush — atexit 兜底虽然永远会跑,lifespan shutdown
-    # 走正路更稳;若 atexit 时 event loop / signal 状态异常,正路这一次已经
-    # 把数据写完。flush 幂等,与 atexit 双调无副作用。
-    try:
-        from miloco.observability.omni_log import flush as omni_log_flush
-        omni_log_flush()
-    except Exception as e:
-        logger.error("omni_log flush on shutdown failed: %s", e)
 
     # Stop monitoring threads after engine
     watchdog.stop()

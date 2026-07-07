@@ -36,7 +36,7 @@ from pydantic_core import to_jsonable_python
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
-from miloco.miot.filter import is_home_allowed
+from miloco.miot.filter import is_home_allowed, select_active_camera_dids
 from miloco.miot.mips_listeners import (
     BindEventListener,
     CameraStateEventListener,
@@ -550,9 +550,8 @@ class MiotProxy:
         self,
         camera_info: MIoTCameraInfo,
     ) -> CameraVisionHandler | None:
-        # scope 不影响 manager 的建立——watch 视频流需要 camera instance 无论 inUse 状态。
-        # toggle_scope 只改 KV,不触发 refresh_cameras,所以这里只在启动/摄像头首次发现时调用,
-        # 此时 start_async 是正常的初始化,不会干扰已有连接。
+        # 纯建原语:不含 scope gate(黑名单/home 白名单的判断在调用方 refresh_cameras)。
+        # start_async 起 native PPCS 会话+解码;只对通过 refresh gate 的相机调用。
         camera_instance = await self._get_camera_instance(camera_info)
         if camera_instance is not None:
             await camera_instance.start_async(enable_reconnect=True, enable_audio=True)
@@ -637,11 +636,19 @@ class MiotProxy:
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
+                # manager(native PPCS 会话+解码线程)的建/销与感知投喂**共用同一口径**
+                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线、按 did 截到上限。
+                # 拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/超额的相机都不在
+                # active 里 → 不建/已建则销，真正停掉 native 会话与解码（含 over-cap 收敛）。
+                active = set(select_active_camera_dids(self._kv_repo, cameras))
+                logger.debug(
+                    "Camera streaming set: active=%s managers=%s",
+                    sorted(active),
+                    sorted(self._camera_img_managers),
+                )
                 for camera_did in cameras.keys():
                     if camera_did not in self._camera_img_managers:
-                        if not is_home_allowed(
-                            self._kv_repo, cameras[camera_did].home_id
-                        ):
+                        if camera_did not in active:
                             continue
                         manager = await self._create_camera_img_manager(
                             cameras[camera_did]
@@ -652,24 +659,42 @@ class MiotProxy:
                             await self._miot_client.register_lan_device_changed_async(
                                 did=camera_did, callback=self._on_lan_device_changed
                             )
+                            # 起停相机 native 会话直接影响相机有限的并发流名额，
+                            # 用 WARNING 便于运维一眼追踪拉流生命周期。
+                            logger.warning(
+                                "Camera native stream started: %s", camera_did
+                            )
                     else:
                         await self._camera_img_managers[camera_did].update_camera_info(
                             cameras[camera_did]
                         )
 
                 for camera_did in list(self._camera_img_managers.keys()):
-                    cam = cameras.get(camera_did)
-                    # scope=false 时不 destroy,只有摄像头真正从账号消失才 destroy。
-                    if cam is None:
+                    # 不在 active 集（账号消失 / 移出家庭 / 被关 / 离线 / 超额）→ 销毁，
+                    # 真正 miot_camera_stop + decoder.stop()，停掉 native 会话与解码。
+                    if camera_did in active:
+                        logger.debug(
+                            "Manager %s kept alive (in_use & in scope)", camera_did
+                        )
+                        continue
+                    # 每台单独兜异常：批量销（切家庭销旧家庭 N 台 / 超额收敛 N-M 台）时，
+                    # 任一台 unregister/destroy 抛错不能拖垮其余——否则剩余 manager 留在
+                    # dict 里继续白拉流，要等下次 refresh 才重试。失败的留在 dict 待重试。
+                    try:
                         await self._miot_client.unregister_lan_device_changed_async(
                             did=camera_did
                         )
                         await self._camera_img_managers[camera_did].destroy()
                         del self._camera_img_managers[camera_did]
-                    else:
-                        # cam 仍在账号里,manager 保活(无论 scope 状态)。
-                        logger.debug(
-                            "Manager %s kept alive for watch stream", camera_did
+                        logger.warning(
+                            "Camera native stream stopped: %s", camera_did
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(
+                            "Failed to destroy camera manager %s, "
+                            "leaving in dict for retry: %s",
+                            camera_did,
+                            e,
                         )
                 await self._sync_camera_state_subscriptions()
                 return cameras

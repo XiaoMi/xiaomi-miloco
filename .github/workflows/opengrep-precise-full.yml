@@ -22,13 +22,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: 安装 opengrep
-        env:
-          OPENGREP_VERSION: v1.22.0
-          OPENGREP_INSTALL_SHA: f458d7f0d52cc58eae1ca3cf3d5caf101e637519
-        run: |
-          curl -fsSL "https://raw.githubusercontent.com/opengrep/opengrep/${OPENGREP_INSTALL_SHA}/install.sh" \
-            | bash -s -- -v "$OPENGREP_VERSION"
-          echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
+        uses: ./.github/actions/install-opengrep
 
       - run: opengrep --version
 

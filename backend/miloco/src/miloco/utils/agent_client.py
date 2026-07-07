@@ -94,30 +94,43 @@ async def run_agent_turn(
     lane: str,
     trace_id: str,
     wait_timeout_ms: int,
+    deliver: bool | None = None,
+    resolve_target: str | None = None,
 ) -> tuple[str | None, str, float]:
     """投递一条消息并**同步等待**该 turn 结束(或超时),返回 ``(run_id, status, rtt_ms)``。
 
-    - ``status`` ∈ ``{"ok", "error", "timeout"}``:webhook ``waitForRun`` 结果透传。
+    - ``status`` ∈ ``{"ok", "error", "timeout", "no-channel"}``:webhook 结果透传;
+      ``no-channel`` 仅 ``resolve_target="owner-channel"`` 时可能出现——插件侧解析
+      不到任何车主 IM 会话(从未私聊过 bot),结构化返回、不算传输失败。
     - ``run_id``:平台 turn id;``data`` 缺 runId 时为 None。
     - ``rtt_ms``:HTTP 往返耗时(因 webhook 同步阻塞,已含 turn 执行时长)。
+    - ``deliver`` / ``resolve_target``:可选透传给插件 webhook——deliver=True 让
+      assistant 回复投递到会话绑定的 IM channel(用户可见);resolve_target=
+      "owner-channel" 让插件忽略 sessionKey、把 turn 跑在车主 IM 会话里。
+      不传(None)时不进 payload,插件按原默认行为(后台 turn,deliver=false)。
 
     HTTP 超时 = ``wait_timeout_ms/1000 + _HTTP_BUFFER_S``,**必须 > wait_timeout_ms**,
     否则 HTTP 先超时而平台 turn 仍在跑。webhook 传输失败(连接/5xx/HTTP 超时)直接
     抛 :class:`AgentWebhookException`,由调用方(drainer)捕获跳过,本函数不兜底。
     """
     started_at = time.monotonic()
+    payload: dict[str, Any] = {
+        "message": text,
+        "sessionKey": session_key,
+        "lane": lane,
+        "traceId": trace_id,
+        # 批次稳定幂等键:HTTP 真断(turn 已起但响应丢)后 dispatcher 重试会发新
+        # 请求,平台按此键去重,避免同会话并发起第二个 turn 击穿 "在途 turn ≤ 1"。
+        "idempotencyKey": trace_id,
+        "timeoutMs": wait_timeout_ms,
+    }
+    if deliver is not None:
+        payload["deliver"] = deliver
+    if resolve_target is not None:
+        payload["resolveTarget"] = resolve_target
     data = await call_agent_webhook(
         "agent",
-        {
-            "message": text,
-            "sessionKey": session_key,
-            "lane": lane,
-            "traceId": trace_id,
-            # 批次稳定幂等键:HTTP 真断(turn 已起但响应丢)后 dispatcher 重试会发新
-            # 请求,平台按此键去重,避免同会话并发起第二个 turn 击穿 "在途 turn ≤ 1"。
-            "idempotencyKey": trace_id,
-            "timeoutMs": wait_timeout_ms,
-        },
+        payload,
         timeout=wait_timeout_ms / 1000 + _HTTP_BUFFER_S,
     )
     rtt_ms = (time.monotonic() - started_at) * 1000

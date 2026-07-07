@@ -50,9 +50,9 @@ class FieldSpec:
 
 IDENTITY = FieldSpec(
     name="identities",
-    schema_literal='"identities":[{"track_id":<int>,"name":"<姓名|unknown>","confidence":0-1,"reason":"≤20字"}]',
+    schema_literal='"identities":[{"track_id":<int>,"name":"<姓名|unknown|no_person>","confidence":0-1,"reason":"≤20字"}]',
     spec_md="""## identities
-- 覆盖"待识别 track"所有 track_id，不遗漏不新增；匹配上 <gallery> 成员填其 name，否则填 "unknown"
+- 覆盖"待识别 track"所有 track_id，不遗漏不新增。name 三选一：对上 <gallery> 成员→填其 name；确有人但认不出→填 "unknown"；框内根本不是人（非人物体被误检成人）→填 "no_person"
 - 先定 name 与 confidence，再用 reason（≤20字）简述所靠特征（面部/发型/体型）；reason 是对已定结论的事后交代，不得先编"吻合"叙事把自己说服进匹配
 
 - 待识别 track（无论首次出现还是系统重核）一律只凭 <gallery> 独立判断、不沿用任何旧结论
@@ -69,7 +69,7 @@ IDENTITY = FieldSpec(
 
 - 按「区分度」判置信，不按「有无脸」硬归类——决定 confidence 的不是「看不看得到脸」，而是「能否在 <gallery> 其他成员里把这人独一无二地认出来」：高(≥0.85)=清晰人脸明显吻合，或独特外观组合(身型+发型)吻合『且不与库中其他成员混淆』；中(0.65–0.85)=多项外观线索倾向该成员，但人脸不清晰、『无法完全排除其他相似成员』；低(<0.65)=仅泛化相似（同性别/同发色/相近体型等，库中其他成员也可能符合）→ 倾向 unknown
 - confidence = 对本次判断的把握，判成员或判 unknown 都按"有多确定"打分，与 name 取值无关
-- 退化框兜底：框内明显无人 / 严重模糊不可分辨 → unknown（宁可漏认不可错认）""",
+- no_person vs unknown：框内没有真实人体、只是家中非人物体被误框（如 3D 打印机、落地扇、衣帽架或搭挂/晾晒的衣物、落地绿植、纸箱行李堆 等外形易被误当成人的物体）→ "no_person"，纵使轮廓像人；确有人体（哪怕背影/侧身/局部/遮挡/模糊）→ "unknown"；分不清是人还是物时才倾向 unknown（别把真人误判成没人）""",
     requires_video=True,
     requires_identity=True,
 )
@@ -80,6 +80,7 @@ CAPTION = FieldSpec(
     spec_md="""## caption
 - 如实描述本轮画面所见，优先动态部分：①人、宠物的状态和正在做的事（含手持物）②物品移动（从哪移到哪）③设备运行（电视播放、风扇运转等）④环境异常（冒烟、起火、漏水、液体外溢等）
 - ≤100 字；不用规则措辞、不因规则夸大
+- 待识别 track 若 identities 判为 no_person（框内确无人）→ caption 不据该框描述任何人物或动作，当作此处没人；仅 identities 判 unknown 才写"陌生人 / 某人"；名册里的"陌生人"若本轮画面没真正看到，也别写进 caption（仅限陌生人，成员不受限）
 - 涉及人物只用本轮 identities 判出的姓名；identities 没识别出该人（判 unknown / 没给出）→ 写"陌生人 / 某人"，不写"一人"这类泛称，不要从 gallery 或家庭档案里取成员名安到没被识别出的人身上
 - 物体类别拿不准时退到上位概念（"细长物体" / "手中持有物体" / "桌面有物品"），不对不确定物体硬落具体类别（"水杯" / "手机" / "食物"）——宁可粗不可错""",
     requires_video=True,

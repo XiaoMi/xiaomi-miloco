@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from miloco.observability.cleanup import (
     cleanup_agent_runs_table,
     cleanup_events_table,
-    cleanup_omni_log,
     cleanup_trace_jsonl,
     cleanup_traces_device_table,
     cleanup_traces_table,
@@ -77,45 +76,6 @@ def test_cleanup_trace_jsonl_removes_old_dir(tmp_path):
     assert deleted == 1
     assert not old_dir.exists()
     assert new_dir.exists()
-
-
-def test_cleanup_omni_log_removes_old_files(tmp_path):
-    root = tmp_path / "trace" / "omni"
-    root.mkdir(parents=True)
-    old_file = root / (datetime.now() - timedelta(days=10)).strftime("%Y%m%d.jsonl.gz")
-    new_file = root / (datetime.now() - timedelta(days=1)).strftime("%Y%m%d.jsonl.gz")
-    old_file.write_text("x")
-    new_file.write_text("y")
-
-    deleted = cleanup_omni_log(root=root, retention_days=7)
-    assert deleted == 1
-    assert not old_file.exists()
-    assert new_file.exists()
-
-
-def test_cleanup_omni_log_no_root(tmp_path):
-    assert cleanup_omni_log(root=tmp_path / "missing", retention_days=7) == 0
-
-
-def test_cleanup_omni_log_handles_rotated_files(tmp_path):
-    """rotate 出来的 YYYYMMDD.1.jsonl.gz / YYYYMMDD.2.jsonl.gz 也要按日期清。"""
-    root = tmp_path / "trace" / "omni"
-    root.mkdir(parents=True)
-    old_day = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
-    new_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-    files = [
-        root / f"{old_day}.jsonl.gz",
-        root / f"{old_day}.1.jsonl.gz",
-        root / f"{old_day}.2.jsonl.gz",
-        root / f"{new_day}.jsonl.gz",
-        root / f"{new_day}.1.jsonl.gz",
-    ]
-    for f in files:
-        f.write_text("x")
-    deleted = cleanup_omni_log(root=root, retention_days=7)
-    assert deleted == 3
-    survivors = sorted(p.name for p in root.iterdir())
-    assert survivors == [f"{new_day}.1.jsonl.gz", f"{new_day}.jsonl.gz"]
 
 
 def test_cleanup_agent_runs_table(tmp_path):

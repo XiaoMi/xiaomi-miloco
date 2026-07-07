@@ -1,6 +1,7 @@
 import { loadHomeProfile } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
 import { getCatalog } from "../services/catalog.js";
+import { deployTimezone } from "../utils/time.js";
 import type { HookRegister } from "./index.js";
 
 // 注入 profile：按 session 类型组合不同的块（方案见 _local/prompt-refactor-plan.md §3）。
@@ -117,6 +118,15 @@ const B_NOTIFY = `## 通知用户
 const B_LANGUAGE = `## 输出语言
 用用户使用的语言回复用户（设备名、人名、专有名词保持原样）。`;
 
+// 时区锚点：感知事件 / 日志 / CLI 返回里的所有时刻都是部署时区（家庭时区）。缺了它，
+// webhook 拉起的会话（含 cron / suggestion lane）无从校正宿主机时钟标错的时段，
+// 曾把北京 10:52 当成"凌晨"误发早睡提醒。所有 profile（含 minimal）都注入。
+function buildTimezoneBlock(): string {
+  return `## 时间与时区
+家庭所在时区为 ${deployTimezone()}。感知事件、日志与 CLI 返回中的所有时刻（如 \`HH:MM:SS\`）均已按此时区表示；创建定时任务也一律以此时区为准。对话或系统消息中明确标注为 UTC / 其他时区的时刻，先换算到家庭时区再理解与表达；向用户表达时间一律用家庭时区。
+若上方家庭时区显示为 UTC，大概率是服务器未配置时区（没有家庭真住在 UTC）；应与用户确认真实时区，并通过 \`miloco-cli config set timezone <IANA>\` 写入配置。`;
+}
+
 // ===== append 数据块（动态） =====
 
 const DEVICE_CATALOG_INTRO = `## 设备目录
@@ -151,7 +161,8 @@ export const registerBeforePromptBuildHook: HookRegister = (api) => {
     });
 
     // ---- prepend：指令块，按 §3 序 ----
-    const prepend: string[] = [B_IDENTITY];
+    // 时区块紧随身份、置于所有 profile（含 minimal）——cron/suggestion lane 也须锚定家庭时区。
+    const prepend: string[] = [B_IDENTITY, buildTimezoneBlock()];
     if (profile === "full") prepend.push(B_CAPABILITIES);
     if (profile !== "minimal") prepend.push(buildPerception(profile));
     if (profile === "rule" && B_RULE_EXEC) prepend.push(B_RULE_EXEC);

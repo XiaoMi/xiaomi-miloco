@@ -1,18 +1,30 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getRuntimeConfigMock = vi.fn();
 const getPluginConfigMock = vi.fn();
+const getNotifyDedupWindowMsMock = vi.fn(() => 60_000);
 
 vi.mock("../src/config.js", () => ({
   getRuntimeConfig: (...args: unknown[]) => getRuntimeConfigMock(...args),
   getPluginConfig: (...args: unknown[]) => getPluginConfigMock(...args),
 }));
 
+vi.mock("../src/miloco/config.js", () => ({
+  getNotifyDedupWindowMs: () => getNotifyDedupWindowMsMock(),
+}));
+
 import {
+  __resetNotifyDedup,
   notifyOwner,
   resolveNotifyTarget,
   toTimestamp,
 } from "../src/tools/notify.js";
+
+// 去重是模块级状态：每个用例前清空，且默认窗口 60s（个别用例可覆盖）。
+beforeEach(() => {
+  __resetNotifyDedup();
+  getNotifyDedupWindowMsMock.mockReturnValue(60_000);
+});
 
 type SubagentMock = {
   run: ReturnType<typeof vi.fn>;
@@ -352,5 +364,125 @@ describe("notifyOwner", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("subagent delivery failed");
     expect(result.error).toContain("boom");
+  });
+});
+
+// ─── notifyOwner 去重 ─────────────────────────────────────────────────────────
+
+describe("notifyOwner dedup", () => {
+  const boundStore = {
+    "wechat:abc": { lastChannel: "wechat", lastTo: "user123" },
+  };
+
+  function boundApi(subagent: SubagentMock) {
+    const api = makeApi(boundStore, subagent);
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({ notifySessionKey: "wechat:abc" });
+    return api;
+  }
+
+  it("窗口内相同 (接收人, 文案) 第二次 → deduped:true 且不再投递", async () => {
+    const subagent = makeSubagent({ status: "ok" });
+    const api = boundApi(subagent);
+
+    const first = await notifyOwner(api, "同一条通知");
+    expect(first.ok).toBe(true);
+    expect(first.deduped).toBeUndefined();
+
+    const second = await notifyOwner(api, "同一条通知");
+    expect(second.ok).toBe(true);
+    expect(second.deduped).toBe(true);
+    expect(subagent.run).toHaveBeenCalledTimes(1); // 第二次没有再投递
+  });
+
+  it("不同文案不互相去重", async () => {
+    const subagent = makeSubagent({ status: "ok" });
+    const api = boundApi(subagent);
+
+    await notifyOwner(api, "文案 A");
+    const other = await notifyOwner(api, "文案 B");
+    expect(other.deduped).toBeUndefined();
+    expect(subagent.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("不同接收人同文案不互相去重", async () => {
+    const subagent = makeSubagent({ status: "ok" });
+    const api1 = boundApi(subagent);
+    await notifyOwner(api1, "共用文案");
+
+    const api2 = makeApi(
+      { "telegram:xyz": { lastChannel: "telegram", lastTo: "tg" } },
+      subagent,
+    );
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({ notifySessionKey: "telegram:xyz" });
+    const r = await notifyOwner(api2, "共用文案");
+    expect(r.deduped).toBeUndefined();
+    expect(subagent.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("投递失败不记录 → 可立即重发（不被去重）", async () => {
+    const subagent = makeSubagent({ status: "error", error: "boom" });
+    const api = boundApi(subagent);
+
+    const first = await notifyOwner(api, "重试文案");
+    expect(first.ok).toBe(false);
+    const second = await notifyOwner(api, "重试文案");
+    expect(second.ok).toBe(false);
+    expect(second.deduped).toBeUndefined();
+    expect(subagent.run).toHaveBeenCalledTimes(2); // 两次都真的投递了
+  });
+
+  it("超过窗口 → 可再次投递", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const subagent = makeSubagent({ status: "ok" });
+      const api = boundApi(subagent);
+
+      await notifyOwner(api, "定时播报");
+      vi.setSystemTime(60_001); // 超过 60s 窗口
+      const later = await notifyOwner(api, "定时播报");
+      expect(later.deduped).toBeUndefined();
+      expect(subagent.run).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("needsBind → 补 bindHint 往返不被去重（首次未发送不计入）", async () => {
+    const subagent = makeSubagent({ status: "ok" });
+    const api = makeApi(
+      {
+        "telegram:xyz": {
+          lastChannel: "telegram",
+          lastTo: "tg_user",
+          lastInteractionAt: 1000,
+        },
+      },
+      subagent,
+    );
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({});
+
+    const r1 = await notifyOwner(api, "该吃药了");
+    expect(r1.needsBind).toBe(true);
+    expect(subagent.run).not.toHaveBeenCalled(); // 未发送 → 不计入去重
+
+    const r2 = await notifyOwner(api, "该吃药了", { bindHint: "绑定引导" });
+    expect(r2.ok).toBe(true);
+    expect(r2.deduped).toBeUndefined();
+    expect(subagent.run).toHaveBeenCalledTimes(1); // 真正投递
+  });
+
+  it("window=0 关闭去重 → 每次都投递", async () => {
+    getNotifyDedupWindowMsMock.mockReturnValue(0);
+    const subagent = makeSubagent({ status: "ok" });
+    const api = boundApi(subagent);
+
+    await notifyOwner(api, "重复也发");
+    const second = await notifyOwner(api, "重复也发");
+    expect(second.deduped).toBeUndefined();
+    expect(subagent.run).toHaveBeenCalledTimes(2);
   });
 });

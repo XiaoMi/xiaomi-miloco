@@ -131,49 +131,31 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         的相机；口径与 toggle_camera 自洽（同样只数通过 home filter + 未拉黑的相机）。
         ``cap=False`` 用于「列全集」语义（如 rule target 校验），不受投喂上限影响。
         """
-        from miloco.miot.filter import (
-            MAX_ENABLED_CAMERAS,
-            denied_camera_dids,
-            is_home_allowed,
-        )
+        from miloco.miot.filter import select_active_camera_dids
 
         kv = self._miot_proxy._kv_repo
-        denied = denied_camera_dids(kv)
+        # 选择口径与 refresh_cameras 的 manager 建销共用同一函数，避免投喂集与拉流集
+        # 漂移：在启用家庭 + 未拉黑 + 在线、按 did 截到 MAX_ENABLED_CAMERAS。
+        cams = {
+            did: info
+            for did, info in all_devices.items()
+            if isinstance(info, MIoTCameraInfo)
+        }
+        active = select_active_camera_dids(
+            kv, cams, online_only=online_only, require_lan=require_lan, cap=cap
+        )
         result: dict[str, PerceptionDevice] = {}
-        for did, info in all_devices.items():
-            if not isinstance(info, MIoTCameraInfo):
-                continue
-
-            if did in denied:
-                continue
-
-            if not is_home_allowed(kv, getattr(info, "home_id", None)):
-                continue
-
-            camera_info = CameraInfo.model_validate(info.model_dump())
-
-            device_online = camera_info.online and camera_info.lan_online
-            # require_lan=False 时只看云端 online：放过 lan_online 陈旧成 false 的
-            # 卡死态相机（云端 online=True，refresh 能救活），但排除云端就离线
-            # （拔电/断网）的相机——给「应连数」判据用，避免离线相机致 refresh 空转。
-            connectable = device_online if require_lan else camera_info.online
-            if online_only and not connectable:
-                continue
-
+        for did in active:
+            camera_info = CameraInfo.model_validate(cams[did].model_dump())
             result[did] = PerceptionDevice(
                 did=did,
                 name=camera_info.name,
                 device_type="camera",
                 room_id=camera_info.room_name,
                 room_name=camera_info.room_name,
-                online=device_online,
+                online=camera_info.online and camera_info.lan_online,
             )
-
-        if not cap or len(result) <= MAX_ENABLED_CAMERAS:
-            return result
-        # 超限：按 did 升序保留前 N 路，确定性截断（同一账号每轮 discover 选同一批）。
-        kept = sorted(result)[:MAX_ENABLED_CAMERAS]
-        return {did: result[did] for did in kept}
+        return result
 
     async def sync_devices(self, all_devices: dict | None = None) -> None:
         """周期 sync 入口：先做「按需补建」，再走基类热插拔同步。
