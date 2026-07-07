@@ -235,21 +235,6 @@ def _coerce(path: str, raw: str) -> Any:
     return raw  # str
 
 
-def _warn_fps_divisibility(config: dict[str, Any]) -> None:
-    """omni_fps 设置后校验 fps 整除关系，不整除时 warning。"""
-    inp = config.get("perception", {}).get("engine", {}).get("input", {})
-    fps = inp.get("fps", 3)
-    omni_fps = inp.get("omni_fps", 1)
-    if omni_fps <= 0 or fps % omni_fps == 0:
-        return
-    import logging
-    new_fps = omni_fps if omni_fps > fps else omni_fps * -(-fps // omni_fps)  # 与 provider.adjust_fps_for_omni 同逻辑
-    logging.getLogger(__name__).warning(
-        "fps(%d) %% omni_fps(%d) != 0：引擎启动时会自动将 fps 调整为 %d 保证整除",
-        fps, omni_fps, new_fps,
-    )
-
-
 # ─── 环境变量覆盖 ────────────────────────────────────────────────────────────
 
 _ENV_PREFIX = "MILOCO_"
@@ -331,8 +316,6 @@ def set_values(pairs: list[tuple[str, str]]) -> dict[str, Any]:
     for path, value in resolved.items():
         _set_nested(raw_file, path, value)
     atomic_write(config_file(), raw_file)
-    if any(p.startswith("perception.engine.input.") for p in resolved):
-        _warn_fps_divisibility(raw_file)
     return resolved
 
 
