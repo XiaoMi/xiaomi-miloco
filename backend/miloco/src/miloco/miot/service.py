@@ -922,10 +922,34 @@ class MiotService:
             logger.info("启用集与可见家庭无交集，自动启用首个家庭 %s（兜底）", first)
             for h in seen.values():
                 h["in_use"] = h["home_id"] in allow
+            # 兜底自动切换同样换掉了启用家庭 → 重置会话，消除旧家庭上下文泄漏
+            # （与显式 switch_home 同一 bug class）。
+            self._schedule_agent_session_reset()
 
         # 按 home_id 字典序排序——米家 SDK 返回顺序受设备活跃度等影响不稳定，
         # 不排 HomeSwitcher 列表会在两次 reload 之间跳。
         return sorted(seen.values(), key=lambda h: h["home_id"])
+
+    def _schedule_agent_session_reset(self) -> None:
+        """切换家庭后后台 best-effort 重置 openclaw 里的 miloco session，清掉旧家庭
+        遗留的上下文（设备 / 房间 / 习惯），避免串入新家庭。
+
+        显式 `switch_home` 与 `list_homes` 兜底自动切换共用此入口。fire-and-forget：
+        openclaw 不可达 / 删除失败只 WARN、不上抛，绝不阻塞或打断切换本身。
+        """
+        async def _bg():
+            from miloco.dispatch.dispatcher import MILOCO_SESSION_KEYS
+            from miloco.utils.agent_client import reset_agent_sessions
+
+            try:
+                await reset_agent_sessions(MILOCO_SESSION_KEYS)
+            except Exception as e:
+                logger.warning("reset agent sessions failed: %s", e)
+
+        reset_task = asyncio.create_task(_bg())
+        # 防御性持有引用，避免 task 在 await 挂起期间被 GC 回收。
+        _background_tasks.add(reset_task)
+        reset_task.add_done_callback(_background_tasks.discard)
 
     async def switch_home(self, home_id: str) -> list[dict]:
         """切换到指定家庭（唯一启用），其余自动停用。
@@ -940,6 +964,9 @@ class MiotService:
             raise ValidationException(
                 f"Unknown home_id {home_id!r}; valid: {sorted(known)}"
             )
+        # 切换前后的启用集：只有真的变了才 reset——切到"已是当前唯一启用"的家庭
+        # （重复点选 / 重复提交同一 home_id）不该白删仍然有效的热上下文。
+        prev_allow = allowed_home_ids(self._kv_repo)
         # 先把目标加进在用集合,再把其余移出。
         target_list, _ = set_homes_in_use(self._kv_repo, [home_id], True)
         others = [h for h in target_list if h != home_id]
@@ -971,6 +998,9 @@ class MiotService:
 
         # KV 已写入，本地更新 in_use 标记后立即返回，不等待 refresh 完成。
         allow = allowed_home_ids(self._kv_repo)
+        # 启用集真的变化了才重置会话（避免切到当前家庭白丢热上下文）。
+        if allow != prev_allow:
+            self._schedule_agent_session_reset()
         for h in homes:
             h["in_use"] = h["home_id"] in allow
         return homes
