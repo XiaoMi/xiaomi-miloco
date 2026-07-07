@@ -112,15 +112,25 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 3. 系统时区反查：`TZ` env → `/etc/timezone` → `/etc/localtime`（symlink 目标；普通文件则按字节内容反查 zoneinfo 数据库）
 4. 最后兜底 `Asia/Shanghai` + 一次性 warning（宿主完全不暴露 IANA 身份时；面向国内主流用户的保守选择，非国内部署请显式配置时区）
 
-配置方式：
+配置方式（按推荐顺序）：
 
-```bash
-miloco-cli config set timezone Asia/Shanghai   # IANA 名，非法名会被拦
-```
+1. **首选：设置宿主系统时区**——一次对齐所有组件（miloco backend / 插件、openclaw、日志时间戳、系统 cron 以及未来任何依赖）：
+
+   ```bash
+   sudo timedatectl set-timezone Asia/Shanghai   # 裸机 / 云主机
+   docker run -e TZ=Asia/Shanghai ...            # 容器
+   ```
+
+2. **Fallback：miloco 侧配置**（无法修改宿主时区、或临时测试时）：
+
+   ```bash
+   miloco-cli config set timezone Asia/Shanghai   # IANA 名，非法名会被拦
+   ```
 
 注意事项：
 
-- **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应显式配置 `timezone` 或给容器设 `TZ` 环境变量。
+- **openclaw 是独立进程，只读宿主系统时区**（Node `Intl`），不读 `MILOCO_TIMEZONE` / miloco `config.json`——它会在 agent prompt 底部注入自己解析的 `Current time`。只配 miloco 侧而宿主仍是 UTC 时，prompt 内会同时出现两个矛盾时间源（此时只能靠 miloco 时区块的换算指引软性调解）。**这是"首选改宿主"的核心原因**：宿主时区是唯一能同时对齐 miloco 与 openclaw 的信道。
+- **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应优先给宿主 / 容器设置正确时区；确实无法修改宿主时再用 miloco 侧 `timezone` 配置（注意 openclaw 不受其影响）。
 - `miloco-cli service start` 生成 supervisord.conf 时会把解析出的时区以 `TZ` + `MILOCO_TIMEZONE` 注入 backend 子进程环境（改配置后重启生效）。
 
 ### 配置修改后是否需要重启
