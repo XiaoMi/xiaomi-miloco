@@ -134,6 +134,19 @@ const DEVICE_CATALOG_INTRO = `## 设备目录
 下方 \`# devices catalog\` 是预注入的高频设备子集（≤50 台，非全量），字段规则见下方目录头部的注释。它**只用于快速拿到已点名单台设备的 did / spec_name**，不是全屋设备的全集。凡涉及设备**集合 / 多台 / 不确定数量**（无论查询还是控制），或目录里找不到目标，**必须先 \`device list\` 拉全量**再逐台处理，别拿子集当全部。
 **任何 \`device control / props / action\` 或 \`scene\` 命令前（含查询），必须先读 \`miloco-devices\` skill**——命令选择、集合判定、安全确认、补 on、错误处理等都在其中，别只凭本目录裸发。`;
 
+// 感知日志逐轮全量注入、随一天增长会挤占上下文（它替换掉的家庭档案块原本按 token 截断），
+// 故设一个字符上限；超限时保留末尾（日志按时间追加，尾部即最近），并提示用 memory_search 查全量。
+const PERCEPTION_LOG_MAX_CHARS = 8000;
+
+/** 超出上限时保留末尾（最近），从行首切齐，并加省略提示。 */
+function capPerceptionLog(text: string): string {
+  if (text.length <= PERCEPTION_LOG_MAX_CHARS) return text;
+  const tail = text.slice(text.length - PERCEPTION_LOG_MAX_CHARS);
+  const nl = tail.indexOf("\n");
+  const trimmed = nl >= 0 ? tail.slice(nl + 1) : tail;
+  return `…（更早的记录已省略，需要时用 \`memory_search\` 查全量）\n${trimmed}`;
+}
+
 // 今日感知日志：把当天的感知记忆整段注入 agent 全局上下文，替代过去注入的家庭档案摘要——
 // 家庭管家更需要"家里今天发生了什么"这样的活上下文；家庭档案改由 agent 用 `home-profile list`
 // 按需自取。文件由 miloco-perception-digest cron 写在工作区 `memory/<date>-miloco-perception.md`，
@@ -153,7 +166,7 @@ function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
   // 同级，或裸贴时 H1 倒挂）。
   // 用字面空格 `^# +` 而非 `^#\s+`：`\s` 含换行且贪婪，遇到畸形首行 `#\n` 会一路吃进真正的 H1 + 正文。
   const body = md.replace(/^# +.*(?:\r?\n)+/, "");
-  const demoted = body.replace(/^(#{1,5}) /gm, "#$1 ");
+  const demoted = capPerceptionLog(body.replace(/^(#{1,5}) /gm, "#$1 "));
   return `## 今日感知日志\n下面是今天家里发生的事（感知引擎自动归档，按家庭时区记录）。做判断 / 给建议前先读它；更早的日子用 \`memory_search\` 查。\n\n${demoted}`;
 }
 
