@@ -151,7 +151,8 @@ function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
   // digest 首行写 `# <date> 感知记忆`（H1）；本段段头 `## 今日感知日志` 已含日期 / 时区语境，
   // 该 H1 冗余，剥掉首行再把余下标题各降一级，真正嵌进本段 H2 之下（否则降级后的 H2 会与段头
   // 同级，或裸贴时 H1 倒挂）。
-  const body = md.replace(/^#\s+.*(?:\r?\n)+/, "");
+  // 用字面空格 `^# +` 而非 `^#\s+`：`\s` 含换行且贪婪，遇到畸形首行 `#\n` 会一路吃进真正的 H1 + 正文。
+  const body = md.replace(/^# +.*(?:\r?\n)+/, "");
   const demoted = body.replace(/^(#{1,5}) /gm, "#$1 ");
   return `## 今日感知日志\n下面是今天家里发生的事（感知引擎自动归档，按家庭时区记录）。做判断 / 给建议前先读它；更早的日子用 \`memory_search\` 查。\n\n${demoted}`;
 }
