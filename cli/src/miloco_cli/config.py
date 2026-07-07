@@ -72,6 +72,21 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "多模态模型服务 Base URL",
     ),
     "model.omni.api_key": (str, "", "多模态模型 API Key"),
+    "perception.engine.input.video_short_edge": (
+        int,
+        512,
+        "视频编码短边像素（保持宽高比缩放），重启生效",
+    ),
+    "perception.engine.input.omni_fps": (
+        int,
+        1,
+        "送给 omni 的视频帧率（应为 fps 的因数），重启生效",
+    ),
+    "perception.collect.window_size": (
+        int,
+        4,
+        "感知窗口时长（秒），重启生效",
+    ),
 }
 
 # ─── 基础读写 ────────────────────────────────────────────────────────────────
@@ -216,6 +231,31 @@ def _coerce(path: str, raw: str) -> Any:
             raise ValueError(
                 f"timezone 需要合法 IANA 时区名（如 Asia/Shanghai、America/Los_Angeles），"
                 f"收到 {raw!r}"
+            )
+    if path == "perception.engine.input.omni_fps":
+        omni_fps = int(raw)
+        current = _read_raw()
+        fps = (
+            current.get("perception", {})
+            .get("engine", {})
+            .get("input", {})
+            .get("fps", 3)
+        )
+        if fps % omni_fps != 0:
+            import logging
+            step = max(1, round(fps / omni_fps))
+            window = current.get("perception", {}).get("collect", {}).get("window_size", 4)
+            actual_frames = len(range(fps * window - 1, -1, -step))
+            eff_fps = max(1, round(fps / step))
+            actual_duration = actual_frames / eff_fps if eff_fps else 0
+            logging.getLogger(__name__).warning(
+                "fps(%d) %% omni_fps(%d) != 0：实际 %d 帧 / %dfps = %.1fs"
+                "（期望 %ds * %dfps = %d 帧）。"
+                "建议 omni_fps 为 fps 的因数（fps=%d 可选 %s）",
+                fps, omni_fps,
+                actual_frames, eff_fps, actual_duration,
+                window, omni_fps, window * omni_fps,
+                fps, ", ".join(str(d) for d in range(1, fps + 1) if fps % d == 0),
             )
     return raw  # str
 
