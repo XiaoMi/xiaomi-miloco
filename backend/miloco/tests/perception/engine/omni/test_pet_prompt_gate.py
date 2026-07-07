@@ -19,7 +19,8 @@ from miloco.perception.engine.omni.field_registry import (
 def test_pet_rule_appended_when_has_pets_video():
     spec = render_field_spec(SceneDescriptor(route="video", has_pets=True))
     assert "## 宠物命名" in spec
-    assert "逐项明确吻合" in spec  # §2.3(1) 收紧措辞
+    # 软化后的门槛：主特征吻合且名单内唯一即可叫名（不再要求逐项显著标记）
+    assert "主要可观察特征" in spec
 
 
 def test_pet_rule_absent_when_no_pets():
