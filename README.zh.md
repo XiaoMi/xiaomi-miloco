@@ -29,6 +29,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 - **硬件**：建议内存 ≥ 4GB，存储 ≥ 256GB，7×24 常驻运行，推荐 Mac mini
 - **操作系统**：macOS / Linux（Windows 请在 WSL 中运行）
+- **OpenClaw** — Miloco 以插件形式运行其上，需先[安装](https://openclaw.ai)且版本 ≥ 2026.5.2
 - **小米账号** + 已接入米家的设备
 - **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro（在 OpenClaw 中配置）
 

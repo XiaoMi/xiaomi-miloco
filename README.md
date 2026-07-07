@@ -29,6 +29,7 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 
 - **Hardware**: ≥ 4GB RAM and ≥ 256GB storage recommended, running 24/7. A Mac mini is recommended.
 - **Operating System**: macOS / Linux (run under WSL on Windows).
+- **OpenClaw** — Miloco runs as a plugin on top of it, so [install it](https://openclaw.ai) first with version ≥ 2026.5.2.
 - **Xiaomi account** + devices already added to Mi Home.
 - **Multimodal large model API key** — [Xiaomi MiMo](https://platform.xiaomimimo.com) is recommended: MiMo-v2.5 for perception, MiMo-v2.5-pro for the Agent (configured in OpenClaw).
 
