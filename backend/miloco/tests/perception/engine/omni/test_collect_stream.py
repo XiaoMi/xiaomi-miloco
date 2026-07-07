@@ -1,11 +1,10 @@
 """Tests for _collect_stream_response SSE parsing."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
-
 from miloco.perception.engine.omni.omni_client import _collect_stream_response
 
 

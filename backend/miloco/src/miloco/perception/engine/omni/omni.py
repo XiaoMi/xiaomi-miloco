@@ -23,7 +23,6 @@ from miloco.perception.engine.omni.omni_client import (
     extract_usage,
     resolve_api_key,
 )
-from miloco.perception.engine.omni.provider import get_adapter
 from miloco.perception.engine.omni.prompt_builder import (
     FusedPromptConfig,
     build_batch_prompt,
@@ -33,6 +32,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_stream_prompt,
     format_person_label,
 )
+from miloco.perception.engine.omni.provider import get_adapter
 from miloco.perception.engine.omni.response_parser import (
     parse_identity_assignments,
     parse_omni_response,

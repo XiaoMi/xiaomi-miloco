@@ -204,6 +204,7 @@ def build_fused_payload(
     cfg = config or FusedPromptConfig()
     if adapter is None:
         from miloco.config import get_settings
+
         from .provider import get_adapter as _get_adapter
         adapter = _get_adapter(get_settings().model.omni.model)
     if not packets:

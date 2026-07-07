@@ -207,6 +207,21 @@ async def call_omni(
         )
 
 
+async def _iter_sse_chunks(resp) -> AsyncGenerator[dict, None]:
+    """从 SSE 响应逐行解析 JSON chunks，跳过空行、非 data 行和畸形 JSON。"""
+    async for line in resp.aiter_lines():
+        line = line.strip()
+        if not line or not line.startswith("data: "):
+            continue
+        data = line[6:]
+        if data == "[DONE]":
+            break
+        try:
+            yield json.loads(data)
+        except json.JSONDecodeError:
+            continue
+
+
 async def _collect_stream_response(
     client: httpx.AsyncClient,
     base_url: str,
@@ -226,23 +241,15 @@ async def _collect_stream_response(
             await resp.aread()
             logger.error("Omni stream error %d: %s", resp.status_code, resp.text[:500])
             if resp.status_code == 400:
-                from miloco.perception.engine.omni.omni import _summarize_multimodal_payload
+                from miloco.perception.engine.omni.omni import (
+                    _summarize_multimodal_payload,
+                )
                 logger.error(
                     "[omni] stream 400 payload 摘要 | %s",
                     _summarize_multimodal_payload(body.get("messages", [])),
                 )
             resp.raise_for_status()
-        async for line in resp.aiter_lines():
-            line = line.strip()
-            if not line or not line.startswith("data: "):
-                continue
-            data = line[6:]
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
+        async for chunk in _iter_sse_chunks(resp):
             if isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
             try:
@@ -363,25 +370,12 @@ async def call_omni_stream(
                         "Omni stream error %d: %s", resp.status_code, resp.text[:500]
                     )
                     resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # usage 在最后一个 chunk 的顶层
+                async for chunk in _iter_sse_chunks(resp):
                     if isinstance(chunk.get("usage"), dict):
                         raw_usage_seen = chunk["usage"]
                         if usage_out is not None:
                             usage_out.update(extract_usage({"usage": raw_usage_seen}))
 
-                    # content delta：choices[0].delta.content
                     try:
                         delta = (
                             chunk.get("choices", [{}])[0].get("delta", {}).get("content")
