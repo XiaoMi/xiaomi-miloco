@@ -1,4 +1,4 @@
-"""omni log debug 开关。
+"""observability debug 开关。
 
 解析顺序:
   1. _runtime_override ∈ {True, False} -> 直接返回
@@ -7,6 +7,9 @@
 
 set_runtime_override(True/False) 同步创建/删除 .debug_observability,
 所以 on/off 是持久的:重启后 override 回到 None,从文件 flag 恢复状态。
+
+当前是一个占位 toggle:omni trace 已默认走 artifacts 落盘,本 flag 不再控
+任何已有行为,但保留供后续 debug 选项接入(避免每次新功能都重造一套开关)。
 """
 from __future__ import annotations
 
@@ -45,8 +48,7 @@ def set_runtime_override(value: bool) -> None:
 
     True  -> override=True  + 创建 .debug_observability
     False -> override=False + 删除 .debug_observability
-
-    无条件触发 omni_log.flush(),保证状态切换时 buffer 落盘。flush 幂等。"""
+    """
     global _runtime_override, _cached
     with _override_lock:
         _runtime_override = value
@@ -56,9 +58,6 @@ def set_runtime_override(value: bool) -> None:
         else:
             _flag_path().unlink(missing_ok=True)
             _cached = False
-    # lazy import 避开 omni_log -> debug 的循环依赖
-    from miloco.observability import omni_log
-    omni_log.flush()
 
 
 def get_state() -> dict:

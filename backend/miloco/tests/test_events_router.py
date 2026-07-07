@@ -167,11 +167,14 @@ class TestGetClipEndpoint:
         assert resp.status_code == 410
 
     def test_found_returns_mp4(self, client, dao):
-        from miloco.perception.snapshot_writer import save_clips
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         eid = _insert(dao, device_ids=["cam_living_01"])
         clip = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200  # 类 mp4 bytes
-        save_clips(eid, {"cam_living_01": clip})
+        save_event_artifacts(
+            eid, OmniEventArtifacts(clips={"cam_living_01": (clip, "mp4")})
+        )
 
         resp = client.get(f"/api/events/{eid}/clip/cam_living_01")
         assert resp.status_code == 200
@@ -181,11 +184,14 @@ class TestGetClipEndpoint:
     def test_found_supports_range_206(self, client, dao):
         """FileResponse 应支持 Range 请求,返 206 Partial Content
         (<video> scrubber seek 依赖这个)."""
-        from miloco.perception.snapshot_writer import save_clips
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         eid = _insert(dao, device_ids=["cam_living_01"])
         clip = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 500  # ≥ 区分前后段
-        save_clips(eid, {"cam_living_01": clip})
+        save_event_artifacts(
+            eid, OmniEventArtifacts(clips={"cam_living_01": (clip, "mp4")})
+        )
 
         # 拉取后半段
         resp = client.get(
@@ -256,12 +262,16 @@ class TestGetClipEndpoint:
         + 按 event timestamp 命名."""
         from datetime import datetime
 
-        from miloco.perception.snapshot_writer import save_clips
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
 
         ts_ms = 1717741900000
         eid = _insert(dao, device_ids=["cam_living_01"], timestamp=ts_ms)
-        save_clips(
-            eid, {"cam_living_01": b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200}
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                clips={"cam_living_01": (b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200, "mp4")}
+            ),
         )
 
         resp = client.get(f"/api/events/{eid}/clip/cam_living_01")

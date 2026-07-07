@@ -331,8 +331,8 @@ class TestRuleRunnerManagement:
         assert len(runner.get_all_rules()) == 1
 
     def test_remove_rule_cleans_cooldown(self, runner):
-        runner._action_cooldown_state[("rule-1", "d1", "prop.2.1")] = time.time()
-        runner._action_cooldown_state[("rule-d1", "d1", "prop.2.1")] = time.time()
+        runner._ensure_state("rule-1").action_cooldown[("d1", "prop.2.1")] = time.time()
+        runner._ensure_state("rule-d1").action_cooldown[("d1", "prop.2.1")] = time.time()
         runner.remove_rule("rule-1")
         assert ("rule-1", "d1", "prop.2.1") not in runner._action_cooldown_state
         assert ("rule-d1", "d1", "prop.2.1") in runner._action_cooldown_state
@@ -481,8 +481,9 @@ class TestRuleRunnerActionExecution:
         runner.add_rule(rule)
 
         await runner.trigger_rule("rule-cd2", TRIGGER_CONTEXT)
-        key = ("rule-cd2", "device-001", "prop.2.1")
-        runner._action_cooldown_state[key] = time.time() - 120
+        runner._ensure_state("rule-cd2").action_cooldown[
+            ("device-001", "prop.2.1")
+        ] = time.time() - 120
 
         result = await runner.trigger_rule("rule-cd2", TRIGGER_CONTEXT)
         assert result.action_results[0].skipped is False
@@ -3036,7 +3037,9 @@ class TestRuleRunnerOnTargetDesc:
         # 这个 case 通过直接调 _await_and_fire_target 验达标 fire 即可
         assert "rule-tgt-sched" in r._target_timers
         # 取消长 timer，模拟到点：直接调 _await_and_fire_target with 0 delay
-        r._target_timers.pop("rule-tgt-sched").cancel()
+        _sched_timer = r._state["rule-tgt-sched"].target_timer
+        r._state["rule-tgt-sched"].target_timer = None
+        _sched_timer.cancel()
         # 直接调达标 fire
         await r._await_and_fire_target(
             rule, ["cam-001"], "ctx", 0.0, target_minutes=60,
@@ -3063,9 +3066,11 @@ class TestRuleRunnerOnTargetDesc:
         rule = _make_state_rule_with_target(rule_id="rule-tgt-drop")
         r.add_rule(rule)
         await r.update_state("rule-tgt-drop", "cam-001", True, "")
-        r._target_timers.pop("rule-tgt-drop").cancel()
-        # 模拟 condition 已 false（_last_rule_state[rule.id]=False）
-        r._last_rule_state[rule.id] = False
+        _drop_timer = r._state["rule-tgt-drop"].target_timer
+        r._state["rule-tgt-drop"].target_timer = None
+        _drop_timer.cancel()
+        # 模拟 condition 已 false
+        r._state[rule.id].last_rule_state = False
         await r._await_and_fire_target(
             rule, ["cam-001"], "ctx", 0.0, target_minutes=60,
         )
@@ -3096,7 +3101,7 @@ class TestRuleRunnerOnTargetDesc:
         await r.update_state("rule-tgt-exit", "cam-001", True, "")
         assert "rule-tgt-exit" in r._target_timers
         # 模拟 timer 已 fire（手动设 fired 标记）
-        r._target_fired.add(rule.id)
+        r._state[rule.id].target_fired = True
         # EXITED
         await r.update_state("rule-tgt-exit", "cam-001", False, "")
         await r.update_state("rule-tgt-exit", "cam-001", False, "")
@@ -3240,7 +3245,7 @@ class TestRuleRunnerOnTargetDesc:
         await r.update_state("rule-tgt-xday-fired", "cam-001", True, "")
         await asyncio.sleep(0.05)
         # 模拟已 fire 过 on_target
-        r._target_fired.add(rule.id)
+        r._state[rule.id].target_fired = True
         # 跨日 reset
         r.force_cross_day_reset(rule.task_id)
         await asyncio.sleep(0.05)
@@ -3365,7 +3370,9 @@ class TestRuleOnTargetMetadata:
         rule = _make_state_rule_with_target(rule_id="rule-tgt-meta-timer")
         r.add_rule(rule)
         await r.update_state("rule-tgt-meta-timer", "cam-001", True, "")
-        r._target_timers.pop("rule-tgt-meta-timer").cancel()
+        _meta_timer = r._state["rule-tgt-meta-timer"].target_timer
+        r._state["rule-tgt-meta-timer"].target_timer = None
+        _meta_timer.cancel()
         # 改 mock，模拟 timer 到点时 accumulated 已涨到 60
         r._task_record_service.read_duration_target_state = MagicMock(
             return_value=(60, 60)

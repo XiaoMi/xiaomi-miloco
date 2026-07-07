@@ -38,7 +38,11 @@ from miloco.perception.event_text_builder import (
     caption_for_dids,
 )
 from miloco.perception.schema import PerceptionBatch
-from miloco.perception.snapshot_context import ClipKind
+from miloco.perception.snapshot_context import (
+    ClipKind,
+    OmniEventArtifacts,
+    event_artifacts_scope,
+)
 from miloco.perception.types import (
     CaptionEntry,
     MatchedRule,
@@ -128,19 +132,16 @@ def _filter_completed_event_rules(
 async def _run_with_trace_id(
     trace_id: str | None,
     coro,
-    snapshot_sink: dict | None = None,
+    artifacts: OmniEventArtifacts | None = None,
 ):
-    """新 event loop 入口:把主线程的 trace_id / snapshot_sink set 回当前 Context.
+    """新 event loop 入口:把主线程的 trace_id / artifacts set 回当前 Context.
 
     ContextVar 不跨线程边界 — run_in_executor 在新线程里 asyncio.run() 起新 loop,
     主线程的 ContextVar 值全部 reset 成 default.必须显式抓主线程值,在新 loop 入口
     重新 set,omni 内部才能拿到.
     """
-    from miloco.perception.snapshot_context import snapshot_collector_scope
-
-    # snapshot_sink 优先(嵌套 with,内层先生效).任一为 None 时跳过对应 set.
-    if snapshot_sink is not None:
-        cm = snapshot_collector_scope(snapshot_sink)
+    if artifacts is not None:
+        cm = event_artifacts_scope(artifacts)
     else:
         from contextlib import nullcontext
         cm = nullcontext()
@@ -538,15 +539,16 @@ class PerceptionEngineProxy:
 
     async def realtime_perceive(
         self, batch: PerceptionBatch,
-        snapshot_sink: dict | None = None,
+        artifacts: OmniEventArtifacts | None = None,
     ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
         """Run full engine pipeline — offloaded to inference thread.
 
         Returns (result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids)
         for dedup in post-processing.
 
-        snapshot_sink: 可选;若非 None,inference 线程 omni 内部产出的 resize
-        后帧会按 device_id 写入此 dict.调用方负责创建空 dict 传入(ContextVar 不跨
+        artifacts: 可选;若非 None,inference 线程 omni 内部产出的 clip 字节
+        会按 device_id 写入 artifacts.clips,omni HTTP 调用 trace 会累积到
+        artifacts.trace.调用方负责创建 OmniEventArtifacts() 传入(ContextVar 不跨
         executor 线程,只能显式透传 reference).
         """
         # _engine_lock:与 stop_to_unconfigured 互斥,持锁期间引擎不会被 teardown 拔掉。
@@ -584,8 +586,8 @@ class PerceptionEngineProxy:
             if self.perception_engine is not None:
                 self.perception_engine.set_main_loop(main_loop)
             # inference 线程通过 asyncio.run() 起新 loop,ContextVar 不跨 loop。
-            # 显式抓主线程的 trace_id / snapshot_sink,在新 loop 入口 set 回去,
-            # 保证 omni / publish_event / push_clip_bytes 能拿到。
+            # 显式抓主线程的 trace_id / artifacts,在新 loop 入口 set 回去,
+            # 保证 omni / publish_event / push_clip_bytes / push_omni_trace 能拿到。
             trace_id = get_trace_id()
             if self._executor is not None:
                 return await main_loop.run_in_executor(
@@ -601,16 +603,15 @@ class PerceptionEngineProxy:
                                 main_loop,
                                 skipped_task_ids,
                             ),
-                            snapshot_sink=snapshot_sink,
+                            artifacts=artifacts,
                         )
                     ),
                 )
             # 单线程路径(无 executor,测试 / runner 启动前的短窗口):processor 只传
-            # snapshot_sink dict 不开 scope,这里手动开,保证 omni 内部 push_clip_bytes
-            # 能命中.executor 路径由上面 _run_with_trace_id 开,两条路径都覆盖.
-            if snapshot_sink is not None:
-                from miloco.perception.snapshot_context import snapshot_collector_scope
-                with snapshot_collector_scope(snapshot_sink):
+            # artifacts 不开 scope,这里手动开,保证 omni 内部 push_clip_bytes /
+            # push_omni_trace 能命中.executor 路径由上面 _run_with_trace_id 开,两条路径都覆盖.
+            if artifacts is not None:
+                with event_artifacts_scope(artifacts):
                     return await self._realtime_perceive_impl(
                         batched_snapshot,
                         rules,
@@ -669,32 +670,32 @@ class PerceptionEngineProxy:
         early_sent_rule_ids: set[tuple[str, str]] | None = None,
         early_sent_sugg_ids: set[int] | None = None,
         device_ids: list[str] | None = None,
-        clips_by_device: dict[str, tuple[bytes, ClipKind]] | None = None,
+        artifacts: OmniEventArtifacts | None = None,
     ):
         """Handle realtime perception result — runs on main loop.
 
-        device_ids / clips_by_device 由 processor 透传;给 _persist_meaningful_event
-        入 meaningful_events 表 + 落 mp4/m4a clip 用.clips_by_device=None 时跳过
+        device_ids / artifacts 由 processor 透传;给 _persist_meaningful_event
+        入 meaningful_events 表 + 落 clip + omni_trace 用.artifacts=None 时跳过
         persist(单元测试早期路径 / runner 未启动 等场景).
 
-        clips_by_device value 形态为 `(bytes, ClipKind)`,kind ∈ {"mp4","m4a"} 决定
-        落盘扩展名 + SSE 推 kind.processor.py:300 上游已用同样标注;mypy/pyright
-        会拦截非法 kind(如 "webm")— 标注收紧避免裸 bytes 拐弯绕过类型约束.
+        artifacts.clips value 形态为 `(bytes, ClipKind)`,kind ∈ {"mp4","m4a"} 决定
+        落盘扩展名 + SSE 推 kind.artifacts.trace 由 omni HTTP 调用 finally 填入,
+        随 clip 一起落到 event_dir.
         """
         if result.skipped:
             return
 
         # T6: meaningful_events 后台异步持久化 — 不阻塞下面 webhook 主路径(B4 / B11).
-        # 失败仅 log,不抛.classify / device_ids 空 / clips_by_device 空等所有
+        # 失败仅 log,不抛.classify / device_ids 空 / artifacts 空等所有
         # 降级路径都在 _persist 内自处理.
         # 任务必须挂 _PERSIST_BG_TASKS 强引用,否则 asyncio 弱引用模型下 GC 可能在
         # 任务完成前回收 → 偶发"INSERT 没落库 / SSE 不推" 难复现.
-        if clips_by_device is not None:
+        if artifacts is not None:
             task = asyncio.create_task(
                 _persist_meaningful_event(
                     result=result,
                     device_ids=device_ids or [],
-                    clips_by_device=clips_by_device,
+                    artifacts=artifacts,
                 )
             )
             _PERSIST_BG_TASKS.add(task)
@@ -706,6 +707,21 @@ class PerceptionEngineProxy:
         # 去重粒度从 rule_id 改为 (rule_id, did):同 rule 在 cam_A early 命中后,cam_B
         # 终态又命中应当照常打 True(不同桶),不能被 early 误吃。
         svc = get_manager().rule_service
+        cycle_source_states_by_rule: dict[str, dict[str, bool]] = {}
+        for did, rule_ids in result.device_rule_map.items():
+            for rule_id in rule_ids:
+                cycle_source_states_by_rule.setdefault(rule_id, {})[did] = False
+        for matched_rule in result.matched_rules:
+            did = (
+                matched_rule.source_device_ids[0]
+                if matched_rule.source_device_ids
+                else "perception"
+            )
+            cycle_source_states_by_rule.setdefault(matched_rule.rule_id, {})[did] = True
+        if early_sent_rule_ids:
+            for rule_id, did in early_sent_rule_ids:
+                cycle_source_states_by_rule.setdefault(rule_id, {})[did] = True
+
         for matched_rule in result.matched_rules:
             did = matched_rule.source_device_ids[0] if matched_rule.source_device_ids else "perception"
             if early_sent_rule_ids and (matched_rule.rule_id, did) in early_sent_rule_ids:
@@ -719,6 +735,9 @@ class PerceptionEngineProxy:
                 trigger_dids=matched_rule.source_device_ids,
                 caption=caption_for_dids(result.caption, matched_rule.source_device_ids),
                 device_name=matched_rule.device_name,
+                cycle_source_states=cycle_source_states_by_rule.get(
+                    matched_rule.rule_id
+                ),
             )
 
         # 对本 batch 实际下发过、但未命中的 (rule_id, did) 喂 update_state(False)。
@@ -744,7 +763,12 @@ class PerceptionEngineProxy:
                 # 防 race:下发后 rule 在 cycle 内被 disable
                 if rule_id not in enabled_set:
                     continue
-                await svc.update_state(rule_id, did, False)
+                await svc.update_state(
+                    rule_id,
+                    did,
+                    False,
+                    cycle_source_states=cycle_source_states_by_rule.get(rule_id),
+                )
 
         # result.suggestions 含本窗全部「新链」（dump/上下文已完整）。per-omni 下这些新链
         # 已在 _on_early_suggestions 逐相机早送过（id 记入 early_sent_sugg_ids）——此处据此
@@ -790,20 +814,21 @@ async def _persist_meaningful_event(
     *,
     result: RealtimePerceptionResult,
     device_ids: list[str],
-    clips_by_device: dict[str, tuple[bytes, ClipKind]],
+    artifacts: OmniEventArtifacts,
 ) -> None:
-    """后台异步入 meaningful_events 表 + 落 omni mp4 clip + 推 SSE.
+    """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
     流程:
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
       3. INSERT meaningful_events(snapshot_count=0)
-      4. 落盘 clip mp4(写前预检磁盘 < snapshot_min_free_disk_mb 跳过)→
-         update_snapshot_count(成功 device 数)
+      4. 落盘 artifacts(clip + omni_trace,写前预检磁盘 < snapshot_min_free_disk_mb 跳过)→
+         update_snapshot_count(成功 device 数,trace 不计入)
       5. _publish_meaningful_event(B13:metadata-only 也推 SSE)
 
     clip 字节是 omni 内部 push 出来的字节级 mp4(零重编),video 路径 H264+AAC,
-    audio-only 路径 m4a.snapshot_count 字段语义复用为"成功落盘 clip 的 device 数".
+    audio-only 路径 m4a.omni trace 含 prompt / response / latency / usage / error,
+    用于复盘 LLM 决策.snapshot_count 字段语义复用为"成功落盘 clip 的 device 数".
 
     任何异常仅 error log,不抛(B4 / B11 非阻塞约束).
     """
@@ -814,7 +839,7 @@ async def _persist_meaningful_event(
     from miloco.perception.snapshot_writer import (
         check_disk_space,
         get_snapshot_root,
-        save_clips,
+        save_event_artifacts,
     )
 
     try:
@@ -865,10 +890,11 @@ async def _persist_meaningful_event(
             logger.error("meaningful_events insert failed for %s", event_id)
             return  # INSERT 失败不继续
 
-        # 落盘 clip — 可能因 clips 缺失 / 磁盘紧张提前 return,此时 count 保持 0;
-        # 不论哪种降级,row 都已 INSERT,SSE 应该推(否则前端实时收不到 metadata-only 事件).
+        # 落盘 event artifacts — 可能因 clips/trace 都缺失 / 磁盘紧张提前 return,
+        # 此时 count 保持 0;不论哪种降级,row 都已 INSERT,SSE 应该推(否则前端
+        # 实时收不到 metadata-only 事件).
         count = 0
-        if clips_by_device:
+        if artifacts.clips or artifacts.trace is not None or artifacts.gallery:
             settings = get_settings()
             snapshot_root = get_snapshot_root()
             if not check_disk_space(
@@ -881,22 +907,24 @@ async def _persist_meaningful_event(
                 )
                 # count 留 0,继续走 publish
             else:
-                count = save_clips(event_id, clips_by_device)
+                count = save_event_artifacts(event_id, artifacts)
                 if count > 0:
                     dao.update_snapshot_count(event_id, count)
         else:
-            logger.debug("no clips for event %s, snapshot_count stays 0", event_id)
+            logger.debug("no artifacts for event %s, snapshot_count stays 0", event_id)
 
-        # 从 sink 取 clip_kind:同 batch 要么全 video 要么全 audio-only
+        # 从 artifacts.clips 取 clip_kind:同 batch 要么全 video 要么全 audio-only
         # (_is_audio_only 是 batch 级共识,见 prompt_builder._is_audio_only),
         # 取第一个 device 的 kind 即代表整批.count == 0 时 kind 留 None
         # (metadata-only / 磁盘紧张 → 没落盘).
         clip_kind: ClipKind | None = None
-        if count > 0 and clips_by_device:
-            clip_kind = next(iter(clips_by_device.values()))[1]
+        if count > 0 and artifacts.clips:
+            clip_kind = next(iter(artifacts.clips.values()))[1]
 
         # B13 SSE 推送:只要 row 入表了就推,不论 count==0 还是 >0.
         # 落盘完成后 publish,snapshot_count 是真实值,clip_kind 帮 UI 区分 🎬/🎤.
+        has_trace = (get_snapshot_root() / event_id / "omni_trace.json.gz").exists()
+
         try:
             _publish_meaningful_event(
                 event_id=event_id,
@@ -909,6 +937,7 @@ async def _persist_meaningful_event(
                 device_ids=device_ids,
                 rule_names=rule_names,
                 clip_kind=clip_kind,
+                has_trace=has_trace,
             )
         except Exception as e:  # noqa: BLE001
             logger.error("SSE publish failed for event %s: %s", event_id, e)
@@ -929,6 +958,7 @@ def _publish_meaningful_event(
     device_ids: list[str],
     rule_names: dict[str, str] | None = None,
     clip_kind: str | None = None,
+    has_trace: bool = False,
 ) -> None:
     """通过 processor._publish 推送 meaningful_event SSE 帧.
 
@@ -955,5 +985,6 @@ def _publish_meaningful_event(
         "device_ids": device_ids,
         "rule_names": rule_names or {},
         "clip_kind": clip_kind,
+        "has_trace": has_trace,
     }
     processor._publish("meaningful_event", payload)

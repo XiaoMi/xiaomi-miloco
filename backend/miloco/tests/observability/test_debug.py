@@ -100,16 +100,3 @@ def test_debug_off_survives_process_restart(tmp_path, monkeypatch):
     assert debug_mod.is_debug_enabled() is False
 
 
-def test_set_runtime_override_triggers_flush(tmp_path, monkeypatch):
-    """set_runtime_override 无条件调 omni_log.flush()。"""
-    from miloco.observability import omni_log as ol
-    (tmp_path / ".debug_observability").write_text("")
-    _reset(monkeypatch, tmp_path)
-    ol.reset_buffer_for_tests()
-    ol.publish_omni_log(
-        device_trace_id="d-1", device_id="dev-1", room_name="客厅",
-        messages=[], response="ok", usage={}, latency_ms=1.0,
-    )
-    assert ol._buffer_size() == 1
-    debug_mod.set_runtime_override(False)  # 触发 flush
-    assert ol._buffer_size() == 0

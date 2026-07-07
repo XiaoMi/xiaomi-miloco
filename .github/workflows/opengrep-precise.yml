@@ -35,15 +35,7 @@ jobs:
           fetch-depth: 0 # 需要 base commit 做 diff
 
       - name: 安装 opengrep
-        env:
-          # install 脚本按 commit SHA 固定，须与 v1.22.0 release tag 一致，避免被劫持。
-          # 升级时两者一起 bump。
-          OPENGREP_VERSION: v1.22.0
-          OPENGREP_INSTALL_SHA: f458d7f0d52cc58eae1ca3cf3d5caf101e637519
-        run: |
-          curl -fsSL "https://raw.githubusercontent.com/opengrep/opengrep/${OPENGREP_INSTALL_SHA}/install.sh" \
-            | bash -s -- -v "$OPENGREP_VERSION"
-          echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
+        uses: ./.github/actions/install-opengrep
 
       - run: opengrep --version
 

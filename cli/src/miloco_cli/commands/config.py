@@ -1,8 +1,9 @@
-"""``miloco-cli config`` 子命令：show / get / set。
+"""``miloco-cli config`` 子命令：show / get / set / list-paths。
 
 - ``config show`` 输出合并后（默认 + ``$MILOCO_HOME/config.json`` + env）的完整配置。
 - ``config get <path>`` 按点号路径取值。
 - ``config set <path> <value>`` schema 校验后原子写入 ``config.json``。
+- ``config list-paths`` 列出全部合法配置路径与说明。
 
 ``config set`` 默认行为：写入后若后端正在运行则调用 ``service restart`` 使新配置
 生效；传 ``--no-restart`` 显式跳过。
@@ -15,6 +16,7 @@ import sys
 
 import click
 
+from miloco_cli.commands._ordered_group import OrderedGroup
 from miloco_cli.config import (
     describe,
     get_value,
@@ -38,9 +40,9 @@ def _mask(data: dict) -> dict:
     return masked
 
 
-@click.group("config")
+@click.group("config", cls=OrderedGroup)
 def config_group():
-    """配置管理：show / get / set。"""
+    """配置管理（服务端 / 模型 / Agent）：查看 / 取值 / 设置 / 列出路径。"""
 
 
 @config_group.command("show")
@@ -73,14 +75,6 @@ def config_get(path: str, pretty: bool, value_only: bool):
         print("" if value is None else value)
         return
     print_result({"path": path, "value": value}, pretty)
-
-
-@config_group.command("list-paths")
-@click.option("--pretty", is_flag=True)
-def config_list_paths(pretty: bool):
-    """列出全部合法的配置路径与中文说明。"""
-    items = [{"path": p, "description": describe(p)} for p in known_paths()]
-    print_result(items, pretty)
 
 
 @config_group.command("set")
@@ -173,3 +167,11 @@ def _restart_if_running(pretty: bool) -> dict | None:
         return {"triggered": True, "failed": True, "exit_code": exc.code}
     except Exception as exc:  # pragma: no cover - defensive
         return {"triggered": True, "failed": True, "error": str(exc)}
+
+
+@config_group.command("list-paths")
+@click.option("--pretty", is_flag=True)
+def config_list_paths(pretty: bool):
+    """列出全部合法的配置路径与中文说明。"""
+    items = [{"path": p, "description": describe(p)} for p in known_paths()]
+    print_result(items, pretty)

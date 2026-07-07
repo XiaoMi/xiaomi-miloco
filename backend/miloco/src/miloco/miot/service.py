@@ -18,6 +18,7 @@ from miot.types import (
     MIoTUserInfo,
 )
 
+from miloco.config import get_settings
 from miloco.database.kv_repo import ScopeConfigKeys
 from miloco.database.person_repo import PersonRepo
 from miloco.middleware.exceptions import (
@@ -38,6 +39,7 @@ from miloco.miot.filter import (
     set_homes_in_use,
 )
 from miloco.miot.lru import LRUStore
+from miloco.miot.message_dedup import MessageDeduper
 from miloco.miot.schema import (
     CameraChannel,
     CameraImgSeq,
@@ -90,6 +92,13 @@ class MiotService:
         self._miot_proxy = miot_proxy
         self._person_repo = person_repo
         self._lru = LRUStore(miot_proxy._kv_repo.db_connector)
+        # 相同通知文案的短窗去重兜底（窗口来自 config.json / settings.yaml
+        # notify.dedup_window_sec）。防住 agent 顺序循环里同一条文案被反复重发、
+        # 1:1 透传成一串重复推送（真实事故：单会话内顺序调用）。check→await→record
+        # 结构不覆盖真正的并发双发，兜底不为此加锁。
+        self._notify_deduper = MessageDeduper(
+            window_sec=get_settings().notify.dedup_window_sec
+        )
 
     async def lru_snapshot(self) -> dict:
         return self._lru.load()
@@ -174,22 +183,44 @@ class MiotService:
             # frame callbacks now that camera_img_managers exist.
             await self._restart_perception_engine()
 
+            # 授权 + list_homes 自动选家已完成 → 首次安装在这里就能触发主动
+            # onboarding 邀请，无需等下次重启。fire-and-forget：邀请失败/条件
+            # 不满足都不影响授权主流程（幂等判定收在 maybe_trigger 内）。
+            self._kick_onboarding_trigger()
+
         except Exception as e:
             logger.error("Failed to process Xiaomi MiOT authorization code: %s", e)
             raise MiotServiceException(
                 f"Failed to process Xiaomi MiOT authorization code: {str(e)}"
             ) from e
 
+    def _kick_onboarding_trigger(self) -> None:
+        """授权成功后异步触发一次 onboarding 主动邀请检查（不阻塞、不抛错）。"""
+        try:
+            from miloco.manager import get_manager
+
+            task = asyncio.create_task(get_manager().onboarding_trigger.maybe_trigger())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+        except Exception:  # noqa: BLE001
+            logger.warning("onboarding 主动邀请触发失败(忽略)", exc_info=True)
+
     async def _restart_perception_engine(self):
         """Restart perception engine after auth to pick up newly available cameras."""
         try:
             from miloco.manager import get_manager
+            from miloco.perception.engine_state import is_perception_enabled
 
             perception_service = get_manager().perception_service
             logger.info("Restarting perception engine after auth callback")
-            await perception_service.stop_engine()
-            await perception_service.start_engine()
-            logger.info("Perception engine restarted successfully")
+            await perception_service.stop_engine()  # 未运行时是安全 no-op
+            # 尊重用户「休息」意图：被手动暂停时重新授权不自动拉起引擎，
+            # 否则重新授权会绕开开机门控、无视暂停继续烧 token。
+            if is_perception_enabled(self._kv_repo):
+                await perception_service.start_engine()
+                logger.info("Perception engine restarted successfully")
+            else:
+                logger.info("感知被用户手动休息，重新授权后不自动拉起引擎")
         except Exception as e:
             # 有意不 re-raise：感知引擎重启失败不应导致授权本身失败，
             # token 已持久化，用户可手动重启服务恢复摄像头。
@@ -532,7 +563,19 @@ class MiotService:
             ) from e
 
     async def send_notify(self, notify: str) -> None:
-        """Send notification"""
+        """Send notification.
+
+        Identical text seen again within ``notify.dedup_window_sec`` is skipped
+        (returns ok without hitting MiHome) — a safety net so an agent loop can't
+        turn into a burst of duplicate pushes. The window is recorded only on a
+        successful send, so a failed attempt stays retryable.
+        """
+        key = notify.strip()
+        if self._notify_deduper.is_duplicate(key):
+            logger.info(
+                "send_notify skipped: identical message within dedup window"
+            )
+            return
         try:
             notify_id = await self._miot_proxy.get_miot_app_notify_id(notify)
             if not notify_id:
@@ -545,6 +588,7 @@ class MiotService:
         except Exception as e:
             logger.error("Failed to send notification: %s", str(e))
             raise BusinessException(f"Failed to send notification: {str(e)}") from e
+        self._notify_deduper.record(key)
 
     async def start_audio_stream(self, camera_id: str, channel: int, callback):
         """Start audio stream."""
@@ -1027,9 +1071,11 @@ class MiotService:
             _, c = set_cameras_in_use(self._kv_repo, enable_dids, True)
             changed = changed or c
         if changed:
-            # KV 写入后热同步感知订阅(不触发 refresh_cameras,不重建 camera manager,
-            # 不扰动 watch 视频流)。_sync_camera_adapter → sync_devices 只影响
-            # camera_adapter 里的 perception decode 订阅,与 watch WS 完全独立。
+            # 先 refresh_cameras：按新 KV(黑名单)建/销 camera manager——关掉的相机
+            # 销毁 manager，停掉 native PPCS 会话+解码线程，不再拉流。
+            # 再 _sync_camera_adapter：perception 按新 manager 集连/断订阅。顺序不可换,
+            # 否则 sync 先连上随后 manager 被销,会留 stale reg_id。
+            await self._miot_proxy.refresh_cameras()
             await self._sync_camera_adapter()
         # 返回受影响的相机，结构与 list_cameras_with_state 一致
         all_cameras = await self.list_cameras_with_state()

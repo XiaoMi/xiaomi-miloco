@@ -501,6 +501,22 @@ class MeaningfulEvent(BaseModel):
         default_factory=dict,
         description="rule_id → rule_name 映射;UI 渲染规则提醒文本时把 [rule_id] 替换成 rule_name",
     )
+    has_trace: bool = Field(
+        default=False,
+        description="snapshots/{event_id}/omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮",
+    )
+    has_feedback: bool = Field(
+        default=False,
+        description="该事件是否已有反馈打包",
+    )
+    feedback_pack_path: str | None = Field(
+        default=None,
+        description="最近一次反馈包的本地路径",
+    )
+    feedback_pack_size: int | None = Field(
+        default=None,
+        description="最近一次反馈包的大小(bytes)",
+    )
     clip_kind: Literal["mp4", "m4a"] | None = Field(
         default=None,
         description=(

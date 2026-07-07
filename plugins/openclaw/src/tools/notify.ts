@@ -9,6 +9,7 @@ import {
   getRuntimeConfig,
   setPluginConfig,
 } from "../config.js";
+import { getNotifyDedupWindowMs } from "../miloco/config.js";
 
 export function registerNotifyTool(api: OpenClawPluginApi) {
   const factory: OpenClawPluginToolFactory = (_ctx) => ({
@@ -16,8 +17,10 @@ export function registerNotifyTool(api: OpenClawPluginApi) {
     label: "Send notification",
     description:
       "给主人推送一条 IM 通知。通常只传 message 调用即可。\n" +
-      "本工具配合 miloco-notify skill 使用（分级、选人、文案规范都在其中）。\n" +
-      "重要：若返回 ok=false 且 needsBind=true，表示本条【尚未发出】——这是要你继续操作的信号，绝不能把它当作结果回复/转述给用户。你必须立刻再次调用本工具：message 保持不变，并补上 bindHint（把返回里的 bindHintExample 翻译成主人当前使用的语言）。补上 bindHint 后通知才会真正发送。",
+      "本工具需配合 miloco-notify skill 使用（分级、选人、文案规范都在其中）。\n" +
+      "本工具是 agent 内置工具（function call），直接调用即可——不是 miloco-cli 命令，切勿用 shell / miloco-cli 去执行。\n" +
+      "重要：若返回 ok=false 且 needsBind=true，表示本条【尚未发出】——这是要你继续操作的信号，绝不能把它当作结果回复/转述给用户。你必须立刻再次调用本工具：message 保持不变，并补上 bindHint（把返回里的 bindHintExample 翻译成主人当前使用的语言）。补上 bindHint 后通知才会真正发送。\n" +
+      "失败（ok=false 且非 needsBind）时不要用同一条 message 反复重推，会造成死循环；按 miloco-notify skill 规则降级或结束本轮。",
     parameters: Type.Object({
       message: Type.String({ description: "要发给主人的通知正文" }),
       bindHint: Type.Optional(
@@ -107,7 +110,29 @@ export type NotifyResult = {
   fallback?: boolean;
   nextAction?: string;
   bindHintExample?: string;
+  /** true 表示相同通知在去重窗口内已发过一次，本次被静默去重（未再次投递）。 */
+  deduped?: boolean;
 };
+
+// 相同 (接收人, 文案) 的短窗去重兜底：agent 循环重发时不把同一条通知 1:1 透传给
+// 用户。窗口来自 config.json 的 notify.dedup_window_sec（见 getNotifyDedupWindowMs），
+// 记录仅在成功投递后 → 失败可立即重试。进程内存即可：通知都在单个 agent 进程里发。
+const recentSends = new Map<string, number>();
+
+function dedupKeyFor(sessionKey: string, message: string): string {
+  return `${sessionKey}\n${message}`;
+}
+
+function pruneRecentSends(now: number, windowMs: number): void {
+  for (const [k, ts] of recentSends) {
+    if (now - ts >= windowMs) recentSends.delete(k);
+  }
+}
+
+/** 测试专用：清空去重表，避免模块级状态跨用例串扰。生产代码不调用。 */
+export function __resetNotifyDedup(): void {
+  recentSends.clear();
+}
 
 // 与 miloco-notify skill references/channel-config.md 的「bindHint 模板」表保持一致；修改任一处需同步另一处。
 // 返回给 agent 作为可直接翻译成主人语言的 bindHint 范例（兜底：agent 未加载 skill 时仍能照做）。
@@ -249,6 +274,19 @@ export async function notifyOwner(
     };
   }
 
+  // 到这里即将真正投递（needsBind 且缺 bindHint 的分支已在上面返回、未发送、不计入
+  // 去重）。同一 (接收人, 文案) 在窗口内重复调用 → 静默去重、返回 ok，让 agent 停止重试。
+  const windowMs = getNotifyDedupWindowMs();
+  const dedupKey = dedupKeyFor(target.sessionKey, message);
+  if (windowMs > 0) {
+    const now = Date.now();
+    pruneRecentSends(now, windowMs);
+    const last = recentSends.get(dedupKey);
+    if (last !== undefined && now - last < windowMs) {
+      return { ok: true, channel: target.channel, deduped: true };
+    }
+  }
+
   // 已绑定时忽略 bindHint；fallback 投递时把 bindHint 拼到正文之后。
   const body = needsBind && bindHint ? `${message}\n---\n${bindHint}` : message;
   const deliverMessage = `<miloco-notification>${body}</miloco-notification>`;
@@ -291,6 +329,8 @@ export async function notifyOwner(
     });
 
     if (result.status === "ok") {
+      // 仅在成功投递后记录 → 失败不写、可立即重试。
+      if (windowMs > 0) recentSends.set(dedupKey, Date.now());
       return {
         ok: true,
         channel: target.channel,

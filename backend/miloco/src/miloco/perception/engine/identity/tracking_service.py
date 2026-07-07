@@ -22,6 +22,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from miloco.perception.engine.types import (
+    BoxType,
     FrameInfo,
     ObjectType,
     TrackedObject,
@@ -32,17 +33,29 @@ from miloco.perception.engine.types import (
 
 def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingResponse:
     """将 tracker.get_tracking_results() 转为 TrackingResponse。"""
+    from miloco.perception.engine.identity.tracker.detector import Detection
+
     now_ms = int(time.time() * 1000)
     last_idx = max(0, n_frames - 1)
     object_info: list[TrackedObject] = []
     for r in results:
         x1, y1, x2, y2 = r["xyxy"]
+        class_id = r.get("class_id", Detection.CLASS_HUMAN)
+
+        # 根据 class_id 映射 ObjectType 和 box_type
+        if class_id in (Detection.CLASS_CAT, Detection.CLASS_DOG):
+            obj_type = ObjectType.PET
+            box_type = BoxType.PET_BODY
+        else:
+            obj_type = ObjectType.HUMAN_BODY
+            box_type = BoxType.HUMAN_BODY
+
         box_info = [TrackingBoxInfo(
             frame_index=last_idx,
-            boxes={"human_body": (x1, y1, x2 - x1, y2 - y1)},
+            boxes={box_type: (x1, y1, x2 - x1, y2 - y1)},
         )]
         object_info.append(TrackedObject(
-            type=ObjectType.HUMAN_BODY,
+            type=obj_type,
             face_id="none",
             track_id=r["id"],
             box_info=box_info,
@@ -259,8 +272,8 @@ def create_default_mock_response() -> TrackingResponse:
                     TrackingBoxInfo(
                         frame_index=i,
                         boxes={
-                            "human_body": (100 + i, 200 + i, 300, 400),
-                            "human_face": (150 + i, 210 + i, 80, 80),
+                            BoxType.HUMAN_BODY: (100 + i, 200 + i, 300, 400),
+                            BoxType.HUMAN_FACE: (150 + i, 210 + i, 80, 80),
                         },
                     )
                     for i in range(6)
@@ -282,7 +295,7 @@ def create_mock_response_with_movement() -> TrackingResponse:
                 box_info=[
                     TrackingBoxInfo(
                         frame_index=i,
-                        boxes={"human_body": (100 + i * 50, 200, 300, 400)},
+                        boxes={BoxType.HUMAN_BODY: (100 + i * 50, 200, 300, 400)},
                     )
                     for i in range(6)
                 ],

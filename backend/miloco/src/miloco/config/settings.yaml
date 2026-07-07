@@ -55,6 +55,10 @@ app:
 miot:
   cloud_server: "cn"
 
+# 通知发送运行参数
+notify:
+  dedup_window_sec: 60   # 相同通知文案在此窗口(秒)内只发一次；<=0 关闭去重
+
 # 摄像头采集参数
 camera:
   frame_interval: 1000   # 帧采集间隔（毫秒）
@@ -81,6 +85,12 @@ perception:
       #   omni_fps —— 送 omni 的视频帧率, 与 fps 解耦; omni 已是瓶颈, 不随 tracker 提频涨
       fps: 3
       omni_fps: 1
+    gate:
+      # visual 滞回时长(秒)。visual 最近通过过、距今 <= 此值时,本窗 visual 不通过
+      # 也强制生成 packet 并打 hold 标志,保住 video 路由不被纯音频短路。
+      # 0 = 关闭 hold。过长在画面间歇有变化的场景会持续续命窗口、期间静默窗也被
+      # 拉起跑下游 omni,浪费调用;过短则人短暂静止时 video 路由会切走。
+      hold_duration_sec: 90
     identity:
       # mock | real | deep_sort —— v1.2 主动注册默认 deep_sort,DeepSORT 内置
       # ReID 关联,跟踪更稳;额外暴露 Track.features deque 给陌生人池零额外推理
@@ -103,13 +113,11 @@ dispatcher:
 # 可观测性
 perf:
   enabled: true                # SQLite traces 采集开关
-  omni_log_max_file_mb: 100    # omni_log 单文件 size 上限 MB,超过 rotate;0 = 禁用
   retention:
     traces_days: 7             # traces / traces_device 表保留天数
     events_days: 7             # events 表保留天数
     agent_runs_days: 7         # agent_runs 表保留天数
     trace_jsonl_days: 7        # agent jsonl.gz 文件保留天数
-    omni_log_days: 7           # omni 交互 log 保留天数
 
 # 产品级实验性功能开关（默认关，住户在 web 显式开启）
 features:

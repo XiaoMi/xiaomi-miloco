@@ -150,7 +150,15 @@ async def test_final_matched_rules_meta_passed_to_update_state(proxy):
     with patch("miloco.manager.get_manager", return_value=fake_mgr):
         await proxy.handle_realtime_perception_result(result)
 
-    assert seen == [{"trigger_room": "卧室", "trigger_dids": ["cam-002"], "caption": "", "device_name": ""}]
+    assert seen == [
+        {
+            "trigger_room": "卧室",
+            "trigger_dids": ["cam-002"],
+            "caption": "",
+            "device_name": "",
+            "cycle_source_states": {"cam-002": True},
+        }
+    ]
 
 
 async def test_spawn_in_callback_survives_temp_loop_close(proxy):
