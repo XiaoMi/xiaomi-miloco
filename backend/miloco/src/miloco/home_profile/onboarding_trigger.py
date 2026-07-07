@@ -36,7 +36,7 @@ from datetime import datetime
 
 from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo, OnboardingKeys
-from miloco.dispatch import AgentDispatcher, dispatch_event, join_text_blocks
+from miloco.dispatch import dispatch_event, join_text_blocks
 from miloco.utils.agent_client import _HTTP_BUFFER_S
 
 logger = logging.getLogger(__name__)

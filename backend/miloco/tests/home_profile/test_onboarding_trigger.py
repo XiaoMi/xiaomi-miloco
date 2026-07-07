@@ -20,14 +20,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from miloco.database.kv_repo import OnboardingKeys
 from miloco.agent_platform.base import WebhookAdapter
+from miloco.database.kv_repo import OnboardingKeys
 from miloco.dispatch import AgentDispatcher, set_agent_dispatcher
 from miloco.dispatch import dispatcher as disp_mod
 from miloco.dispatch.dispatcher import _ROUTE, _TRACKED
 from miloco.home_profile import onboarding_trigger as ot
 from miloco.home_profile.onboarding_trigger import OnboardingTriggerService
-from miloco.middleware.exceptions import AgentWebhookException
 
 
 class _FakeKV:
@@ -228,10 +227,9 @@ def test_guard_timeout_upper_bounds_dispatcher_worst_case():
     "慢但成功"送达会被误判未送达 → 下次启动双邀请。这里用真实常量独立复算
     worst case，任何一侧改动导致守护跌破上界即变红。
     """
+    from miloco.agent_platform.base import WebhookAdapter
     from miloco.config import get_settings
     from miloco.utils.agent_client import _HTTP_BUFFER_S
-
-    from miloco.agent_platform.base import WebhookAdapter
 
     wait_s = get_settings().dispatcher.turn_wait_timeout_ms / 1000
     retries = WebhookAdapter._TRANSPORT_RETRIES

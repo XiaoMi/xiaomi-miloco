@@ -238,8 +238,9 @@ def test_load_adapter_valid_duck_typed(tmp_path: Path, monkeypatch, adapter_dir:
 
 def test_load_adapter_missing_dir(tmp_path: Path, monkeypatch):
     """agent_platform/<name>/ 不存在 → load_adapter 返回 WebhookAdapter 兜底。"""
-    from miloco import agent_platform as ap_mod
     from miloco.agent_platform.base import WebhookAdapter
+
+    from miloco import agent_platform as ap_mod
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     _patch_miloco_home(monkeypatch, tmp_path)
@@ -250,8 +251,9 @@ def test_load_adapter_missing_dir(tmp_path: Path, monkeypatch):
 
 def test_load_adapter_missing_adapter_py(tmp_path: Path, monkeypatch):
     """目录存在但 adapter.py 缺 → load_adapter 返回 WebhookAdapter 兜底。"""
-    from miloco import agent_platform as ap_mod
     from miloco.agent_platform.base import WebhookAdapter
+
+    from miloco import agent_platform as ap_mod
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     d = tmp_path / "agent_platform" / "no_py"
@@ -264,8 +266,9 @@ def test_load_adapter_missing_adapter_py(tmp_path: Path, monkeypatch):
 
 def test_load_adapter_contract_violation(tmp_path: Path, monkeypatch, bad_adapter_dir: Path):
     """adapter.py 缺 send_turn → load_adapter 返回 WebhookAdapter 兜底。"""
-    from miloco import agent_platform as ap_mod
     from miloco.agent_platform.base import WebhookAdapter
+
+    from miloco import agent_platform as ap_mod
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     _patch_miloco_home(monkeypatch, tmp_path)
@@ -276,8 +279,9 @@ def test_load_adapter_contract_violation(tmp_path: Path, monkeypatch, bad_adapte
 
 def test_load_adapter_module_exception_caught(tmp_path: Path, monkeypatch):
     """adapter.py 顶层 import 抛错 → load_adapter 返回 WebhookAdapter 兜底。"""
-    from miloco import agent_platform as ap_mod
     from miloco.agent_platform.base import WebhookAdapter
+
+    from miloco import agent_platform as ap_mod
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     d = tmp_path / "agent_platform" / "broken"
@@ -333,8 +337,9 @@ def test_get_adapter_loads_when_none(tmp_path: Path, monkeypatch, adapter_dir: P
 
 def test_get_adapter_no_platform_configured(tmp_path: Path, monkeypatch):
     """settings.agent.platform 空时 get_adapter 返 WebhookAdapter 兜底。"""
-    from miloco import agent_platform as ap_mod
     from miloco.agent_platform.base import WebhookAdapter
+
+    from miloco import agent_platform as ap_mod
 
     # stub settings.agent.platform = ""
     @dataclass
