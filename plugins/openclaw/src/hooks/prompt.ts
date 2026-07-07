@@ -160,11 +160,20 @@ function capPerceptionLog(text: string): string {
   return `…（更早的记录已省略，需要时用 \`memory_search\` 查全量）\n${trimmed}`;
 }
 
+/** 读工作区某日感知日志文件；不存在 / 空则返回空串。 */
+function readPerceptionLog(workspaceDir: string, date: string): string {
+  const file = path.join(workspaceDir, "memory", `${date}-miloco-perception.md`);
+  return readFileSafe(file).trim();
+}
+
 // 今日感知日志：把当天的感知记忆整段注入 agent 全局上下文，替代过去注入的家庭档案摘要——
 // 家庭管家更需要"家里今天发生了什么"这样的活上下文；家庭档案改由 agent 用 `home-profile list`
 // 按需自取。文件由 miloco-perception-digest cron 写在工作区 `memory/<date>-miloco-perception.md`，
-// date 按部署时区（与 digest 写文件名同源），工作区路径由宿主通过 ctx.workspaceDir 提供——
-// 拿不到（如宿主未传、早期版本）或当天还没有日志时，整段不出现。
+// 文件名日期按部署时区。工作区路径由宿主经 ctx.workspaceDir 提供，拿不到时整段不出现并 warn。
+//
+// 日期匹配：消费端按部署时区确定性拼文件名，生产端由 LLM 按家庭时区命名，两者只是**约定对齐**、
+// 并非严格同源——午夜窗口 / 清晨当天首个 digest 未落盘 / LLM 偶发命名偏差都可能让当天文件缺失。
+// 故当天缺失时回退到昨天的日志，且如实标注为「最近感知日志（<date>）」而非谎称今日。
 function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
   if (!workspaceDir) {
     warnMissingWorkspaceOnce();
@@ -173,9 +182,23 @@ function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
   const now = toLocalParts(new Date().toISOString());
   if (!now) return "";
   const pad2 = (n: number) => String(n).padStart(2, "0");
-  const date = `${now.y}-${pad2(now.m)}-${pad2(now.d)}`;
-  const file = path.join(workspaceDir, "memory", `${date}-miloco-perception.md`);
-  const md = readFileSafe(file).trim();
+  const today = `${now.y}-${pad2(now.m)}-${pad2(now.d)}`;
+
+  let md = readPerceptionLog(workspaceDir, today);
+  let heading = "今日感知日志";
+  let lead = "下面是今天家里发生的事";
+  if (!md) {
+    const y = toLocalParts(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+    if (y) {
+      const yDate = `${y.y}-${pad2(y.m)}-${pad2(y.d)}`;
+      const yMd = readPerceptionLog(workspaceDir, yDate);
+      if (yMd) {
+        md = yMd;
+        heading = "最近感知日志";
+        lead = `今天还没有感知记录，下面是最近一次（${yDate}）家里发生的事`;
+      }
+    }
+  }
   if (!md) return "";
   // digest 首行写 `# <date> 感知记忆`（H1）；本段段头 `## 今日感知日志` 已含日期 / 时区语境，
   // 该 H1 冗余，剥掉首行再把余下标题各降一级，真正嵌进本段 H2 之下（否则降级后的 H2 会与段头
@@ -183,7 +206,7 @@ function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
   // 用字面空格 `^# +` 而非 `^#\s+`：`\s` 含换行且贪婪，遇到畸形首行 `#\n` 会一路吃进真正的 H1 + 正文。
   const body = md.replace(/^# +.*(?:\r?\n)+/, "");
   const demoted = capPerceptionLog(body.replace(/^(#{1,5}) /gm, "#$1 "));
-  return `## 今日感知日志\n下面是今天家里发生的事（感知引擎自动归档，按家庭时区记录）。做判断 / 给建议前先读它；更早的日子用 \`memory_search\` 查。\n\n${demoted}`;
+  return `## ${heading}\n${lead}（感知引擎自动归档，按家庭时区记录）。做判断 / 给建议前先读它；更早的日子用 \`memory_search\` 查。\n\n${demoted}`;
 }
 
 // ===== 组装 =====

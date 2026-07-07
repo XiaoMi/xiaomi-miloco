@@ -5,13 +5,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerBeforePromptBuildHook, resolveProfile } from "../src/hooks/prompt.js";
 import { toLocalParts } from "../src/utils/time.js";
 
-// 感知日志文件名日期取部署时区；测试固定 tz 后按同一逻辑算出今日文件名。
-function todayPerceptionFile(workspaceDir: string, tz: string): string {
-  const p = toLocalParts(new Date().toISOString(), tz);
-  if (!p) throw new Error("todayPerceptionFile: bad parts");
+// 感知日志文件名日期取部署时区；测试固定 tz 后按同一逻辑算出某个偏移日的文件名。
+function perceptionFile(workspaceDir: string, tz: string, dayOffset = 0): string {
+  const iso = new Date(Date.now() + dayOffset * 24 * 60 * 60 * 1000).toISOString();
+  const p = toLocalParts(iso, tz);
+  if (!p) throw new Error("perceptionFile: bad parts");
   const pad2 = (n: number) => String(n).padStart(2, "0");
   const date = `${p.y}-${pad2(p.m)}-${pad2(p.d)}`;
   return path.join(workspaceDir, "memory", `${date}-miloco-perception.md`);
+}
+
+function writePerception(file: string, body: string): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, body, "utf8");
 }
 
 // catalog 走 miloco-cli，测试里 mock 掉，单独控制空/非空两条路径。
@@ -90,9 +96,10 @@ describe("before_prompt_build 组装", () => {
     process.env.MILOCO_TIMEZONE = "Asia/Shanghai";
     // 工作区：写入今日感知日志，供 append 注入。
     tmpWorkspace = mkdtempSync(path.join(tmpdir(), "miloco-ws-"));
-    const perc = todayPerceptionFile(tmpWorkspace, "Asia/Shanghai");
-    mkdirSync(path.dirname(perc), { recursive: true });
-    writeFileSync(perc, "# 感知记忆\n\n- 09:00–11:30 书房 · 戴眼镜男性：在电脑前工作", "utf8");
+    writePerception(
+      perceptionFile(tmpWorkspace, "Asia/Shanghai"),
+      "# 2026-01-01 感知记忆\n\n- 09:00–11:30 书房 · 戴眼镜男性：在电脑前工作",
+    );
     getCatalog.mockReset();
     getCatalog.mockResolvedValue("");
   });
@@ -132,15 +139,33 @@ describe("before_prompt_build 组装", () => {
     expect(r.appendSystemContext ?? "").not.toContain("## 今日感知日志");
   });
 
-  it("当天还没有感知日志文件 → 该段不出现", async () => {
+  it("当天和昨天都没有感知日志文件 → 该段不出现", async () => {
     const emptyWs = mkdtempSync(path.join(tmpdir(), "miloco-ws-empty-"));
     try {
       const { api, run } = makeApi();
       registerBeforePromptBuildHook(api, {} as any);
       const r = await run("agent:main:miloco", { workspaceDir: emptyWs });
-      expect(r.appendSystemContext ?? "").not.toContain("## 今日感知日志");
+      expect(r.appendSystemContext ?? "").not.toContain("感知日志");
     } finally {
       rmSync(emptyWs, { recursive: true, force: true });
+    }
+  });
+
+  it("当天无日志但昨天有 → 回退为「最近感知日志」，不谎称今日", async () => {
+    const ws = mkdtempSync(path.join(tmpdir(), "miloco-ws-y-"));
+    try {
+      writePerception(
+        perceptionFile(ws, "Asia/Shanghai", -1),
+        "# 2025-12-31 感知记忆\n\n- 20:00–21:00 客厅 · 全家：一起看电视",
+      );
+      const { api, run } = makeApi();
+      registerBeforePromptBuildHook(api, {} as any);
+      const r = await run("agent:main:miloco", { workspaceDir: ws });
+      expect(r.appendSystemContext).toContain("## 最近感知日志");
+      expect(r.appendSystemContext).not.toContain("## 今日感知日志");
+      expect(r.appendSystemContext).toContain("一起看电视");
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
     }
   });
 
