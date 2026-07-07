@@ -232,32 +232,27 @@ def _coerce(path: str, raw: str) -> Any:
                 f"timezone 需要合法 IANA 时区名（如 Asia/Shanghai、America/Los_Angeles），"
                 f"收到 {raw!r}"
             )
-    if path == "perception.engine.input.omni_fps":
-        omni_fps = int(raw)
-        current = _read_raw()
-        fps = (
-            current.get("perception", {})
-            .get("engine", {})
-            .get("input", {})
-            .get("fps", 3)
-        )
-        if fps % omni_fps != 0:
-            import logging
-            step = max(1, round(fps / omni_fps))
-            window = current.get("perception", {}).get("collect", {}).get("window_size", 4)
-            actual_frames = len(range(fps * window - 1, -1, -step))
-            eff_fps = max(1, round(fps / step))
-            actual_duration = actual_frames / eff_fps if eff_fps else 0
-            logging.getLogger(__name__).warning(
-                "fps(%d) %% omni_fps(%d) != 0：实际 %d 帧 / %dfps = %.1fs"
-                "（期望 %ds * %dfps = %d 帧）。"
-                "建议 omni_fps 为 fps 的因数（fps=%d 可选 %s）",
-                fps, omni_fps,
-                actual_frames, eff_fps, actual_duration,
-                window, omni_fps, window * omni_fps,
-                fps, ", ".join(str(d) for d in range(1, fps + 1) if fps % d == 0),
-            )
     return raw  # str
+
+
+def _warn_fps_divisibility(config: dict[str, Any]) -> None:
+    """omni_fps 设置后校验 fps 整除关系，不整除时 warning。"""
+    inp = config.get("perception", {}).get("engine", {}).get("input", {})
+    fps = inp.get("fps", 3)
+    omni_fps = inp.get("omni_fps", 1)
+    if omni_fps <= 0 or fps % omni_fps == 0:
+        return
+    import logging
+    step = max(1, round(fps / omni_fps))
+    window = config.get("perception", {}).get("collect", {}).get("window_size", 4)
+    actual_frames = len(range(fps * window - 1, -1, -step))
+    eff_fps = max(1, round(fps / step))
+    logging.getLogger(__name__).warning(
+        "fps(%d) %% omni_fps(%d) != 0：引擎启动时会自动调整 fps 保证整除。"
+        "建议 omni_fps 为 fps 的因数（fps=%d 可选 %s）",
+        fps, omni_fps,
+        fps, ", ".join(str(d) for d in range(1, fps + 1) if fps % d == 0),
+    )
 
 
 # ─── 环境变量覆盖 ────────────────────────────────────────────────────────────
@@ -341,6 +336,8 @@ def set_values(pairs: list[tuple[str, str]]) -> dict[str, Any]:
     for path, value in resolved.items():
         _set_nested(raw_file, path, value)
     atomic_write(config_file(), raw_file)
+    if any(p.startswith("perception.engine.input.") for p in resolved):
+        _warn_fps_divisibility(raw_file)
     return resolved
 
 

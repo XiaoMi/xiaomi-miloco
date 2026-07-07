@@ -203,8 +203,9 @@ def build_fused_payload(
     """
     cfg = config or FusedPromptConfig()
     if adapter is None:
+        from miloco.config import get_settings
         from .provider import get_adapter as _get_adapter
-        adapter = _get_adapter("")
+        adapter = _get_adapter(get_settings().model.omni.model)
     if not packets:
         raise ValueError("build_fused_payload: packets 不能为空")
 
@@ -229,11 +230,7 @@ def build_fused_payload(
         if context.room_name:
             user_content.append({"type": "text", "text": f"位置: {context.room_name}"})
         if audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
-            audio_media = LocalMediaInfo(
-                video_width=0, video_height=0, fps=0, frame_count=0,
-                has_audio=True, audio_sample_rate=ep.sample_rate,
-            )
-            user_content.append(adapter.build_audio_block(audio_b64, audio_media))
+            user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate)))
         elif audio_b64:
             logger.warning(
                 "event=fused_audio_b64_too_short size=%d (< %d), 跳过 input_audio 块, "
@@ -389,10 +386,7 @@ def _build_payload(
     if route == "audio":
         ep = packets[0]
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
-        base["media_info"] = LocalMediaInfo(
-            video_width=0, video_height=0, fps=0, frame_count=0,
-            has_audio=True, audio_sample_rate=ep.sample_rate,
-        )
+        base["media_info"] = _audio_only_media_info(ep.sample_rate)
     else:
         short_edge = _get_video_short_edge()
         video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
@@ -1079,6 +1073,13 @@ def _resolve_person_face_jpg(
 # =============================================================================
 
 _VIDEO_SHORT_EDGE = 512  # fallback; prefer InputConfig.video_short_edge
+
+
+def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
+    return LocalMediaInfo(
+        video_width=0, video_height=0, fps=0, frame_count=0,
+        has_audio=True, audio_sample_rate=sample_rate,
+    )
 
 
 def _get_video_short_edge() -> int:
