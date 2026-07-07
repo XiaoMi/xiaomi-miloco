@@ -55,15 +55,17 @@ def _delivery_guard_timeout_s() -> float:
     webhook 慢、turn 拖长恰是本机制的主战场，不能栽在守护先到期上。
 
     最坏耗时 = 每次尝试的 HTTP 上限 (turn_wait + _HTTP_BUFFER_S) × 尝试次数
-    (_TRANSPORT_RETRIES + 1) + 各次重试间的指数退避之和；直接引用 dispatcher /
+    (_TRANSPORT_RETRIES + 1) + 各次重试间的指数退避之和；直接引用 WebhookAdapter /
     agent_client 的真实常量与 settings（而非镜像数字），后续任何一方调整都不会
     悄悄把守护挤到 worst case 之下。守护超时 = 送达结果未知（turn 可能仍在途）
     → 不置位 KV（下次启动重试），仅靠 _fired 防本进程内重发。
     """
+    from miloco.agent_platform.base import WebhookAdapter
+
     wait_s = get_settings().dispatcher.turn_wait_timeout_ms / 1000
-    retries = AgentDispatcher._TRANSPORT_RETRIES
+    retries = WebhookAdapter._TRANSPORT_RETRIES
     attempts = retries + 1
-    backoff_s = sum(AgentDispatcher._TRANSPORT_BACKOFF_S * (2**a) for a in range(retries))
+    backoff_s = sum(WebhookAdapter._TRANSPORT_BACKOFF_S * (2**a) for a in range(retries))
     return attempts * (wait_s + _HTTP_BUFFER_S) + backoff_s + _GUARD_SAFETY_MARGIN_S
 
 # 给 agent 的指令文本（口径参照 welcome_service._format_message 的祈使风格）。

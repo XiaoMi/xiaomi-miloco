@@ -237,19 +237,21 @@ def test_load_adapter_valid_duck_typed(tmp_path: Path, monkeypatch, adapter_dir:
 
 
 def test_load_adapter_missing_dir(tmp_path: Path, monkeypatch):
-    """agent_platform/<name>/ 不存在 → load_adapter 返回 None。"""
+    """agent_platform/<name>/ 不存在 → load_adapter 返回 WebhookAdapter 兜底。"""
     from miloco import agent_platform as ap_mod
+    from miloco.agent_platform.base import WebhookAdapter
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     _patch_miloco_home(monkeypatch, tmp_path)
 
     inst = ap_mod.loader.load_adapter("nonexistent")
-    assert inst is None
+    assert isinstance(inst, WebhookAdapter)
 
 
 def test_load_adapter_missing_adapter_py(tmp_path: Path, monkeypatch):
-    """目录存在但 adapter.py 缺 → load_adapter 返回 None。"""
+    """目录存在但 adapter.py 缺 → load_adapter 返回 WebhookAdapter 兜底。"""
     from miloco import agent_platform as ap_mod
+    from miloco.agent_platform.base import WebhookAdapter
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     d = tmp_path / "agent_platform" / "no_py"
@@ -257,23 +259,25 @@ def test_load_adapter_missing_adapter_py(tmp_path: Path, monkeypatch):
     _patch_miloco_home(monkeypatch, tmp_path)
 
     inst = ap_mod.loader.load_adapter("no_py")
-    assert inst is None
+    assert isinstance(inst, WebhookAdapter)
 
 
 def test_load_adapter_contract_violation(tmp_path: Path, monkeypatch, bad_adapter_dir: Path):
-    """adapter.py 缺 send_turn → load_adapter 返回 None(don't raise)。"""
+    """adapter.py 缺 send_turn → load_adapter 返回 WebhookAdapter 兜底。"""
     from miloco import agent_platform as ap_mod
+    from miloco.agent_platform.base import WebhookAdapter
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     _patch_miloco_home(monkeypatch, tmp_path)
 
     inst = ap_mod.loader.load_adapter("bad")
-    assert inst is None  # 缺契约方法 → 拒绝, 不抛
+    assert isinstance(inst, WebhookAdapter)
 
 
 def test_load_adapter_module_exception_caught(tmp_path: Path, monkeypatch):
-    """adapter.py 顶层 import 抛错 → load_adapter 返回 None,不崩 backend。"""
+    """adapter.py 顶层 import 抛错 → load_adapter 返回 WebhookAdapter 兜底。"""
     from miloco import agent_platform as ap_mod
+    from miloco.agent_platform.base import WebhookAdapter
 
     monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     d = tmp_path / "agent_platform" / "broken"
@@ -285,7 +289,7 @@ def test_load_adapter_module_exception_caught(tmp_path: Path, monkeypatch):
     _patch_miloco_home(monkeypatch, tmp_path)
 
     inst = ap_mod.loader.load_adapter("broken")
-    assert inst is None  # 不抛,降级 None
+    assert isinstance(inst, WebhookAdapter)
 
 
 def test_load_adapter_caches_singleton(tmp_path: Path, monkeypatch, adapter_dir: Path):
@@ -328,8 +332,9 @@ def test_get_adapter_loads_when_none(tmp_path: Path, monkeypatch, adapter_dir: P
 
 
 def test_get_adapter_no_platform_configured(tmp_path: Path, monkeypatch):
-    """settings.agent.platform 空时 get_adapter 返 None(不加载)。"""
+    """settings.agent.platform 空时 get_adapter 返 WebhookAdapter 兜底。"""
     from miloco import agent_platform as ap_mod
+    from miloco.agent_platform.base import WebhookAdapter
 
     # stub settings.agent.platform = ""
     @dataclass
@@ -345,7 +350,7 @@ def test_get_adapter_no_platform_configured(tmp_path: Path, monkeypatch):
     _patch_miloco_home(monkeypatch, tmp_path)
 
     inst = ap_mod.get_adapter()
-    assert inst is None
+    assert isinstance(inst, WebhookAdapter)
 
 
 def test_reset_cache_clears_singleton():

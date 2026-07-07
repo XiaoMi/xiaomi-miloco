@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from miloco.database.kv_repo import OnboardingKeys
+from miloco.agent_platform.base import WebhookAdapter
 from miloco.dispatch import AgentDispatcher, set_agent_dispatcher
 from miloco.dispatch import dispatcher as disp_mod
 from miloco.dispatch.dispatcher import _ROUTE, _TRACKED
@@ -230,10 +231,12 @@ def test_guard_timeout_upper_bounds_dispatcher_worst_case():
     from miloco.config import get_settings
     from miloco.utils.agent_client import _HTTP_BUFFER_S
 
+    from miloco.agent_platform.base import WebhookAdapter
+
     wait_s = get_settings().dispatcher.turn_wait_timeout_ms / 1000
-    retries = AgentDispatcher._TRANSPORT_RETRIES
+    retries = WebhookAdapter._TRANSPORT_RETRIES
     worst = (retries + 1) * (wait_s + _HTTP_BUFFER_S) + sum(
-        AgentDispatcher._TRANSPORT_BACKOFF_S * (2**a) for a in range(retries)
+        WebhookAdapter._TRANSPORT_BACKOFF_S * (2**a) for a in range(retries)
     )
     guard = ot._delivery_guard_timeout_s()
     assert guard > worst, f"守护超时 {guard}s 未覆盖 dispatcher 最坏 resolve 耗时 {worst}s"
@@ -257,7 +260,7 @@ async def real_dispatcher(monkeypatch):
             )
         ),
     )
-    monkeypatch.setattr(AgentDispatcher, "_TRANSPORT_BACKOFF_S", 0.001)
+    monkeypatch.setattr(WebhookAdapter, "_TRANSPORT_BACKOFF_S", 0.001)
     d = AgentDispatcher()
     await d.start()
     set_agent_dispatcher(d)
@@ -270,10 +273,13 @@ async def real_dispatcher(monkeypatch):
 async def test_real_dispatcher_transport_failure_keeps_flag_unset(real_dispatcher, monkeypatch):
     """回归：drainer 传输重试耗尽静默丢批 → 标记必须不置位、下次可重试。"""
 
-    async def failing_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
-        raise AgentWebhookException("agent webhook still booting")
+    from miloco.agent_platform.base import AdapterTransportError
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", failing_turn)
+    async def failing_turn(ctx):
+        raise AdapterTransportError("agent webhook still booting")
+
+    adapter = disp_mod.get_adapter()
+    monkeypatch.setattr(adapter, "send_turn", failing_turn)
     svc, kv = _service()
 
     assert await svc.maybe_trigger() is False
@@ -286,12 +292,14 @@ async def test_real_dispatcher_transport_failure_keeps_flag_unset(real_dispatche
 @pytest.mark.asyncio
 async def test_real_dispatcher_success_sets_flag(real_dispatcher, monkeypatch):
     """镜像：真 dispatcher 送达成功 → 标记置位、二次静默。"""
+    from miloco.agent_platform.base import AgentTurnResult
 
-    async def ok_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
-        assert "[系统事件]" in msg
-        return "run-1", "ok", 1.0
+    async def ok_turn(ctx):
+        assert "[系统事件]" in ctx.text
+        return AgentTurnResult(run_id="run-1", status="ok", rtt_ms=1.0)
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", ok_turn)
+    adapter = disp_mod.get_adapter()
+    monkeypatch.setattr(adapter, "send_turn", ok_turn)
     svc, kv = _service()
 
     assert await svc.maybe_trigger() is True
@@ -302,11 +310,13 @@ async def test_real_dispatcher_success_sets_flag(real_dispatcher, monkeypatch):
 @pytest.mark.asyncio
 async def test_real_dispatcher_timeout_status_counts_as_delivered(real_dispatcher, monkeypatch):
     """status=timeout：平台侧 turn 仍在途 → 视作送达，置位（避免双邀请）。"""
+    from miloco.agent_platform.base import AgentTurnResult
 
-    async def timeout_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
-        return None, "timeout", 1.0
+    async def timeout_turn(ctx):
+        return AgentTurnResult(run_id=None, status="timeout", rtt_ms=1.0)
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", timeout_turn)
+    adapter = disp_mod.get_adapter()
+    monkeypatch.setattr(adapter, "send_turn", timeout_turn)
     svc, kv = _service()
 
     assert await svc.maybe_trigger() is True
@@ -316,11 +326,13 @@ async def test_real_dispatcher_timeout_status_counts_as_delivered(real_dispatche
 @pytest.mark.asyncio
 async def test_real_dispatcher_error_status_keeps_flag_unset(real_dispatcher, monkeypatch):
     """status=error：turn 执行失败 → 不算送达，不置位（下次启动重试）。"""
+    from miloco.agent_platform.base import AgentTurnResult
 
-    async def error_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
-        return "run-1", "error", 1.0
+    async def error_turn(ctx):
+        return AgentTurnResult(run_id="run-1", status="error", rtt_ms=1.0)
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", error_turn)
+    adapter = disp_mod.get_adapter()
+    monkeypatch.setattr(adapter, "send_turn", error_turn)
     svc, kv = _service()
 
     assert await svc.maybe_trigger() is False
@@ -329,22 +341,20 @@ async def test_real_dispatcher_error_status_keeps_flag_unset(real_dispatcher, mo
 
 @pytest.mark.asyncio
 async def test_real_dispatcher_no_channel_keeps_flag_unset(real_dispatcher, monkeypatch):
-    """no-channel（车主从未私聊过 bot）→ 未送达不置位；绑定 channel 后重试即送达。
+    """no-channel（车主从未私聊过 bot）→ 未送达不置位；绑定 channel 后重试即送达。"""
+    from miloco.agent_platform.base import AgentTurnResult
 
-    全链路走真 dispatcher：断言 onboarding 批次带 owner-channel 投递参数、
-    结构化 no-channel 只调一次（不烧传输重试）、标记不置位；随后"车主绑定了
-    channel"（turn 转 ok）→ 下一次 maybe_trigger 送达并置位。
-    """
     calls: list[dict] = []
     channel_bound = False
 
-    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
-        calls.append(kw)
+    async def turn(ctx):
+        calls.append(ctx.extra.get("delivery") or {})
         if not channel_bound:
-            return None, "no-channel", 1.0
-        return "run-1", "ok", 1.0
+            return AgentTurnResult(run_id=None, status="no-channel", rtt_ms=1.0)
+        return AgentTurnResult(run_id="run-1", status="ok", rtt_ms=1.0)
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    adapter = disp_mod.get_adapter()
+    monkeypatch.setattr(adapter, "send_turn", turn)
     svc, kv = _service()
 
     # 未绑 channel：未送达、不置位、只调一次
