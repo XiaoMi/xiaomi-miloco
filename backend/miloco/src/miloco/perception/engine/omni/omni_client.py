@@ -225,6 +225,12 @@ async def _collect_stream_response(
         if resp.status_code != 200:
             await resp.aread()
             logger.error("Omni stream error %d: %s", resp.status_code, resp.text[:500])
+            if resp.status_code == 400:
+                from miloco.perception.engine.omni.omni import _summarize_multimodal_payload
+                logger.error(
+                    "[omni] stream 400 payload 摘要 | %s",
+                    _summarize_multimodal_payload(body.get("messages", [])),
+                )
             resp.raise_for_status()
         async for line in resp.aiter_lines():
             line = line.strip()

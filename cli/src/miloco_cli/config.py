@@ -243,15 +243,10 @@ def _warn_fps_divisibility(config: dict[str, Any]) -> None:
     if omni_fps <= 0 or fps % omni_fps == 0:
         return
     import logging
-    step = max(1, round(fps / omni_fps))
-    window = config.get("perception", {}).get("collect", {}).get("window_size", 4)
-    actual_frames = len(range(fps * window - 1, -1, -step))
-    eff_fps = max(1, round(fps / step))
+    new_fps = omni_fps if omni_fps > fps else omni_fps * -(-fps // omni_fps)
     logging.getLogger(__name__).warning(
-        "fps(%d) %% omni_fps(%d) != 0：引擎启动时会自动调整 fps 保证整除。"
-        "建议 omni_fps 为 fps 的因数（fps=%d 可选 %s）",
-        fps, omni_fps,
-        fps, ", ".join(str(d) for d in range(1, fps + 1) if fps % d == 0),
+        "fps(%d) %% omni_fps(%d) != 0：引擎启动时会自动将 fps 调整为 %d 保证整除",
+        fps, omni_fps, new_fps,
     )
 
 

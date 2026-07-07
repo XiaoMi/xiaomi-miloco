@@ -1072,7 +1072,7 @@ def _resolve_person_face_jpg(
 # Video encoding (frames + audio → mp4)
 # =============================================================================
 
-_VIDEO_SHORT_EDGE = 512  # fallback; prefer InputConfig.video_short_edge
+_VIDEO_SHORT_EDGE = 512  # fallback; runtime value from settings.yaml / config.json via _get_video_short_edge()
 
 
 def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
