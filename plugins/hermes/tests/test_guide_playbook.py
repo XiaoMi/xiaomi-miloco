@@ -36,7 +36,7 @@ def test_guide_has_5_step_verification():
     assert "hermes plugins list" in text
     assert "miloco-*" in text
     assert "state.json" in text
-    assert "miloco-adapter.sh status" in text
+    assert "miloco-cli service status" in text
     assert "18789/health" in text
     assert "1810/health" in text
 

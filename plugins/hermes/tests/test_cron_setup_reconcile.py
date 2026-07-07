@@ -7,7 +7,7 @@
   ``ValueError`` 然后回落到 ``Platform.LOCAL``，导致所有 cron job 输出去本地
   markdown 而不是 IM 推送。
 - ``deliver`` 应该读 ``state.json::deliver.target``（install-hermes.sh 在安装
-  时由 detect_im_platforms.py 自动写入），不是字面量 ``"all"``。
+  时由 miloco_notify_bind 或手动编辑设置），不是字面量 ``"all"``。
 
 这些测试只覆盖 ``reconcile_cron_jobs`` 的 deliver 取值行为；具体的 4 个
 cron job 调度（``*/15`` / ``*/30`` / ``0 0`` / ``0 10``）属于 schedule 正确性

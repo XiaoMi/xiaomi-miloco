@@ -145,8 +145,8 @@ def test_notify_success(fake_hermes, tmp_path: Path):
     assert cmd[3] == "telegram"
     assert cmd[4] == "--json"
     assert cmd[5] == "-q"
-    assert "<miloco-notification>" in cmd[6]
     assert "喝水提醒" in cmd[6]
+    assert "<miloco-notification>" not in cmd[6]
 
 
 def test_notify_with_chat_id_target(fake_hermes, tmp_path: Path):

@@ -288,24 +288,34 @@ def _deliver_via_hermes_send(target: str, body: str) -> Dict[str, Any]:
 
 
 def notify_owner(ctx: Any, message: str) -> Dict[str, Any]:
-    """投递入口。与 OpenClaw 版 ``notifyOwner`` 行为对齐：装好就能用。
+    """投递入口。与 OpenClaw 版 ``notifyOwner`` 行为对齐。
 
-    没有 deliver target → 返回 ok:false + 明确错误，指引用户去装 IM 或手动
-    编辑 state.json。不再做"两段式 bind"——cron session 没人可对话，bind 走
-    不通。
+    target 解析顺序：
+    1. state.json::deliver.target（显式配置，优先）
+    2. runtime fallback：``resolve_notify_target`` 扫 ~/.hermes/auth.json + config.yaml
+    3. 没有 → needsBind=true，返回让 agent 调 miloco_notify_bind
 
     ``target == "all"`` → fanout：遍历 state.json::deliver.candidates 逐个
     投递。Hermes 原生 cron 的 ``Deliver: all`` 是这语义，但 hermes send CLI
     不支持 "all" target（会返 "Unknown platform: all"），所以 fanout 在 plugin 端做。
     """
-    target = get_deliver_target(ctx)
+    resolved = resolve_notify_target(ctx)
+    if resolved.get("needsBind"):
+        return {
+            "ok": False,
+            "needsBind": True,
+            "hint": resolved.get("hint", ""),
+            "error": "no deliver target and no IM platform detected",
+            "candidates": [],
+        }
+    target = resolved.get("target")
     if not target:
         return {
             "ok": False,
+            "needsBind": True,
             "error": (
-                "no deliver target configured. Run install-hermes.sh after connecting "
-                "an IM platform in Hermes, or manually edit state.json "
-                "(`{\"deliver\": {\"target\": \"telegram\"}}`)."
+                "no deliver target configured. Connect an IM platform in Hermes, "
+                "or call miloco_notify_bind(action='switch', target='<platform>')."
             ),
         }
     body = message

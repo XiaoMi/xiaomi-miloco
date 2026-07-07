@@ -509,4 +509,4 @@ def test_adapter_health_connection_refused_returns_clear_error(monkeypatch):
     assert "AttributeError" not in out.get("error", ""), (
         f"adapter /health 失败不应是 AttributeError（之前 .status_code bug 会导致这个）: {out}"
     )
-    assert "miloco-adapter.sh start" in out.get("fix", "")
+    assert "miloco-cli service start" in out.get("fix", "")
