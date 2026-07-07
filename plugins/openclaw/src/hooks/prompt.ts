@@ -2,6 +2,7 @@ import path from "node:path";
 import { readFileSafe } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
 import { getCatalog } from "../services/catalog.js";
+import { logger } from "../utils/logger.js";
 import { deployTimezone, toLocalParts } from "../utils/time.js";
 import type { HookRegister } from "./index.js";
 
@@ -138,6 +139,18 @@ const DEVICE_CATALOG_INTRO = `## 设备目录
 // 故设一个字符上限；超限时保留末尾（日志按时间追加，尾部即最近），并提示用 memory_search 查全量。
 const PERCEPTION_LOG_MAX_CHARS = 8000;
 
+let warnedMissingWorkspace = false;
+// workspaceDir 是让整个 feature 生效的唯一外部耦合点，缺失时会静默走「不出现」分支、
+// agent 同时失去感知日志与家庭档案两份上下文。打一条 warn（一次即可）让失败可观测。
+function warnMissingWorkspaceOnce(): void {
+  if (warnedMissingWorkspace) return;
+  warnedMissingWorkspace = true;
+  logger.warn(
+    "before_prompt_build 未拿到 workspaceDir：今日感知日志无法注入，" +
+      "agent 将同时缺少感知日志与家庭档案上下文。",
+  );
+}
+
 /** 超出上限时保留末尾（最近），从行首切齐，并加省略提示。 */
 function capPerceptionLog(text: string): string {
   if (text.length <= PERCEPTION_LOG_MAX_CHARS) return text;
@@ -153,7 +166,10 @@ function capPerceptionLog(text: string): string {
 // date 按部署时区（与 digest 写文件名同源），工作区路径由宿主通过 ctx.workspaceDir 提供——
 // 拿不到（如宿主未传、早期版本）或当天还没有日志时，整段不出现。
 function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
-  if (!workspaceDir) return "";
+  if (!workspaceDir) {
+    warnMissingWorkspaceOnce();
+    return "";
+  }
   const now = toLocalParts(new Date().toISOString());
   if (!now) return "";
   const pad2 = (n: number) => String(n).padStart(2, "0");
