@@ -1,0 +1,227 @@
+"""action_ledger v1:control_device / trigger_scene 落审计行 + fail-open。
+
+MetricsClient 打真 SQLite(temp observability db,不 mock);MiotProxy 用最小 stub
+(同 test_miot_service_lru 的 SimpleNamespace 手法),避免拉起整套客户端栈。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from miloco.miot.schema import DeviceControlRequest
+from miloco.miot.service import MiotService
+from miloco.observability import metrics_client as mc
+from miloco.observability.metrics_client import MetricsClient
+
+
+class _DBConnector:
+    """control_device 成功路径会写 LRU(SQLite),给个最小 device_lru 表。"""
+
+    def __init__(self, path: Path):
+        self._path = str(path)
+        with sqlite3.connect(self._path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE device_lru (
+                    did TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    touched_at INTEGER NOT NULL,
+                    PRIMARY KEY (did, key)
+                )
+                """
+            )
+
+    def execute_update(self, sql, params=None):
+        with sqlite3.connect(self._path) as conn:
+            cur = conn.cursor()
+            cur.execute(sql, params or ())
+            conn.commit()
+            return cur.rowcount
+
+    def execute_query(self, sql, params=None):
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(sql, params or ())
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _make_service(tmp_path: Path) -> MiotService:
+    from miloco.database.kv_repo import ScopeConfigKeys
+
+    db = _DBConnector(tmp_path / "lru.sqlite")
+    store: dict[str, str] = {
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+    }
+    dev = SimpleNamespace(home_id="H1", name="台灯", room_name="客厅")
+    proxy = SimpleNamespace(
+        _kv_repo=SimpleNamespace(
+            db_connector=db,
+            get=lambda key, default=None: store.get(key, default),
+            set=lambda key, value: store.__setitem__(key, value) or True,
+        ),
+        set_device_properties=AsyncMock(
+            return_value=[{"code": 0, "siid": 2, "piid": 1}]
+        ),
+        call_device_action=AsyncMock(return_value={"code": 0}),
+        get_devices=AsyncMock(return_value={"dev1": dev}),
+        get_all_scenes=AsyncMock(
+            return_value={"scene1": SimpleNamespace(home_id="H1", scene_name="回家")}
+        ),
+        execute_miot_scene=AsyncMock(return_value=True),
+    )
+    return MiotService(miot_proxy=proxy)
+
+
+@pytest.fixture
+async def bound_client(tmp_path):
+    """启动真 MetricsClient 并绑到 module-level singleton;测后解绑。"""
+    obs_db = tmp_path / "observability.db"
+    client = MetricsClient(db_path=obs_db)
+    await client.start()
+    mc.set_metrics_client(client)
+    try:
+        yield client, obs_db
+    finally:
+        mc.set_metrics_client(None)
+        await client.stop()
+
+
+def _rows(obs_db: Path) -> list[dict]:
+    conn = sqlite3.connect(str(obs_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM action_ledger ORDER BY timestamp"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_set_property_writes_ledger_row(bound_client, tmp_path):
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    req = DeviceControlRequest(type="set_property", iid="prop.2.1", value=True)
+    await svc.control_device("dev1", req)
+    await client.flush()
+
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["action_type"] == "set_property"
+    assert r["did"] == "dev1"
+    assert r["iid"] == "prop.2.1"
+    assert r["device_name"] == "台灯"
+    assert r["room"] == "客厅"
+    assert r["success"] == 1
+    assert r["result_code"] is None  # 成功无 worst_code
+    assert json.loads(r["value_json"]) is True
+
+
+@pytest.mark.asyncio
+async def test_call_action_writes_ledger_with_tts_text(bound_client, tmp_path):
+    """speaker play-text 也是 call_action:in_params(TTS 全文)进 value_json。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    req = DeviceControlRequest(
+        type="call_action", iid="action.5.1", params=["你好,回家啦"]
+    )
+    await svc.control_device("dev1", req)
+    await client.flush()
+
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["action_type"] == "call_action"
+    assert r["success"] == 1
+    assert json.loads(r["value_json"]) == ["你好,回家啦"]
+
+
+@pytest.mark.asyncio
+async def test_failure_code_decoded_in_ledger(bound_client, tmp_path):
+    """设备侧负码 → success=0 + 中文 result_msg。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.set_device_properties.return_value = [
+        {"code": -704042011, "siid": 2, "piid": 1}
+    ]
+    req = DeviceControlRequest(type="set_property", iid="prop.2.1", value=True)
+    await svc.control_device("dev1", req)
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert r["result_code"] == -704042011
+    assert r["result_msg"] == "设备离线"
+
+
+@pytest.mark.asyncio
+async def test_exception_path_writes_failure_row(bound_client, tmp_path):
+    """proxy 抛异常 → 落 success=0 + error 行,control_device 仍向上抛。"""
+    from miloco.middleware.exceptions import MiotServiceException
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.call_device_action = AsyncMock(side_effect=RuntimeError("boom"))
+    req = DeviceControlRequest(type="call_action", iid="action.5.1", params=[])
+    with pytest.raises(MiotServiceException):
+        await svc.control_device("dev1", req)
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert r["action_type"] == "call_action"
+    assert "boom" in (r["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_writes_ledger_row(bound_client, tmp_path):
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    ok = await svc.trigger_scene("scene1")
+    await client.flush()
+
+    assert ok is True
+    r = _rows(obs_db)[0]
+    assert r["action_type"] == "scene_trigger"
+    assert r["did"] == "scene1"
+    assert r["iid"] == "scene1"
+    assert r["success"] == 1
+    assert json.loads(r["value_json"]) == {"scene_name": "回家"}
+
+
+@pytest.mark.asyncio
+async def test_ledger_write_failure_does_not_break_control(tmp_path, monkeypatch):
+    """ledger 写挂掉(record_action 抛)时,control_device 仍正常返回。"""
+    obs_db = tmp_path / "observability.db"
+    client = MetricsClient(db_path=obs_db)
+    await client.start()
+    mc.set_metrics_client(client)
+    try:
+        def _boom(_record):
+            raise RuntimeError("ledger down")
+
+        monkeypatch.setattr(client, "record_action", _boom)
+        svc = _make_service(tmp_path)
+        req = DeviceControlRequest(type="set_property", iid="prop.2.1", value=True)
+        result = await svc.control_device("dev1", req)
+        assert "results" in result  # 控制结果不受影响
+    finally:
+        mc.set_metrics_client(None)
+        await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_no_client_bound_control_still_works(tmp_path):
+    """singleton 未绑定(get_metrics_client() 返回 None)时 control_device 照常。"""
+    mc.set_metrics_client(None)
+    svc = _make_service(tmp_path)
+    req = DeviceControlRequest(type="set_property", iid="prop.2.1", value=True)
+    result = await svc.control_device("dev1", req)
+    assert "results" in result

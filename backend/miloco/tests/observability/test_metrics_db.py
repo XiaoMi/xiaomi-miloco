@@ -195,3 +195,71 @@ def test_init_schema_idempotent_repeat_init(tmp_path):
     init_schema(conn)
     init_schema(conn)
     assert _has_column(conn, "traces_device", "gate_hold_pass")
+
+
+# =============================================================================
+# action_ledger 表 (v2) schema + v1 → v2 migration
+# =============================================================================
+
+
+def test_fresh_db_has_action_ledger_table(tmp_path):
+    conn = connect(tmp_path / "obs.db")
+    init_schema(conn)
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert "action_ledger" in tables
+
+
+def test_action_ledger_columns(tmp_path):
+    conn = connect(tmp_path / "obs.db")
+    init_schema(conn)
+    cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(action_ledger)").fetchall()}
+    assert cols == {
+        "id", "timestamp", "action_type", "did", "device_name", "room",
+        "iid", "value_json", "result_code", "result_msg", "success",
+        "error", "trace_id",
+    }
+
+
+def test_action_ledger_has_timestamp_index(tmp_path):
+    conn = connect(tmp_path / "obs.db")
+    init_schema(conn)
+    idx = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    ).fetchall()}
+    assert "idx_action_ledger_ts" in idx
+
+
+def test_user_version_is_2(tmp_path):
+    conn = connect(tmp_path / "obs.db")
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_v1_to_v2_migration_adds_action_ledger(tmp_path):
+    """模拟一个 v1 库(有全部旧表 + user_version=1,无 action_ledger),
+    init_schema 应 additive 补表并把 user_version 推到 2,不删库。"""
+    db = tmp_path / "obs.db"
+    conn = connect(db)
+    # 先建一个真 v1 库:临时把 SCHEMA_VERSION 回退没法直接做,故手工搭 v1 骨架。
+    conn.execute("CREATE TABLE traces (trace_id TEXT PRIMARY KEY, timestamp INTEGER)")
+    conn.execute("CREATE TABLE traces_device (device_trace_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE events (event_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY)")
+    conn.execute("PRAGMA user_version = 1")
+    # v1 库里插一行,验证 migration 不丢数据
+    conn.execute("INSERT INTO traces (trace_id, timestamp) VALUES ('t1', 111)")
+
+    init_schema(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert "action_ledger" in tables
+    # 旧数据仍在
+    assert conn.execute(
+        "SELECT trace_id FROM traces"
+    ).fetchone()[0] == "t1"

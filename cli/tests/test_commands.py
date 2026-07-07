@@ -2142,3 +2142,80 @@ def test_dashboard_not_running_hint(runner, monkeypatch):
     assert data["running"] is False
     assert data["opened"] is False  # 无头环境不开浏览器
     assert "hint" in data
+
+
+# ─── actions list ─────────────────────────────────────────────────────────────
+
+
+_ACTIONS_RESP = [
+    {
+        "id": "a1", "timestamp": 1_700_000_000_000,
+        "action_type": "set_property", "did": "lamp_001",
+        "device_name": "台灯", "room": "客厅", "iid": "prop.2.1",
+        "value_json": "true", "result_code": None, "result_msg": None,
+        "success": 1, "error": None, "trace_id": None,
+    },
+    {
+        "id": "a2", "timestamp": 1_700_000_100_000,
+        "action_type": "call_action", "did": "spk_001",
+        "device_name": "音箱", "room": "卧室", "iid": "action.5.1",
+        "value_json": "[\"你好\"]", "result_code": -704042011,
+        "result_msg": "设备离线", "success": 0, "error": None, "trace_id": None,
+    },
+]
+
+
+def test_actions_list_renders_tsv(runner):
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = _ACTIONS_RESP
+        result = runner.invoke(cli, ["actions", "list"])
+    assert result.exit_code == 0
+    lines = result.output.strip().splitlines()
+    # 头注释行 + 两行数据
+    assert lines[0].startswith("# ts|action_type|did")
+    assert len(lines) == 3
+    # 成功项:ok;失败项:fail + 中文 reason
+    assert "|set_property|lamp_001|台灯|客厅|prop.2.1|ok|ok|" in lines[1]
+    assert "|call_action|spk_001|音箱|卧室|action.5.1|fail|设备离线|" in lines[2]
+
+
+def test_actions_list_passes_filters(runner):
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = []
+        result = runner.invoke(
+            cli,
+            ["actions", "list", "--did", "lamp_001", "--failed-only",
+             "--since", "24h", "--limit", "10"],
+        )
+    assert result.exit_code == 0
+    path, kwargs = mock.call_args[0][0], mock.call_args[1]
+    assert path == "/api/actions"
+    params = dict(kwargs["params"])
+    assert params["did"] == "lamp_001"
+    assert params["failed_only"] == 1
+    assert params["limit"] == 10
+    assert "since_ms" in params  # 24h 已转 epoch ms
+
+
+def test_actions_list_value_json_truncated(runner):
+    long_val = "x" * 200
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = [{
+            "id": "a3", "timestamp": 1_700_000_000_000,
+            "action_type": "call_action", "did": "d", "device_name": None,
+            "room": None, "iid": "action.5.1", "value_json": long_val,
+            "result_code": None, "result_msg": None, "success": 1,
+            "error": None, "trace_id": None,
+        }]
+        result = runner.invoke(cli, ["actions", "list"])
+    assert result.exit_code == 0
+    data_line = result.output.strip().splitlines()[1]
+    # value 字段截断到 ~60 字符(含省略号),远短于 200
+    value_field = data_line.split("|")[-1]
+    assert len(value_field) <= 61
+    assert value_field.endswith("…")
+
+
+def test_actions_list_bad_since_errors(runner):
+    result = runner.invoke(cli, ["actions", "list", "--since", "notatime"])
+    assert result.exit_code == 1

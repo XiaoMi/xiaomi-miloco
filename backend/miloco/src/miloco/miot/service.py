@@ -6,7 +6,10 @@ MiOT service module
 """
 
 import asyncio
+import json
 import logging
+import time
+import uuid
 
 from miot.types import (
     MIoTActionParam,
@@ -40,6 +43,7 @@ from miloco.miot.filter import (
 )
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
+from miloco.miot.result_codes import summarize_results
 from miloco.miot.schema import (
     CameraChannel,
     CameraImgSeq,
@@ -79,6 +83,72 @@ def _parse_action_iid(iid: str) -> tuple[int, int]:
         return int(parts[1]), int(parts[2])
     except ValueError as e:
         raise ValidationException(f"Invalid iid numbers in '{iid}'") from e
+
+
+def _truncate_value_len(value_json: str | None) -> int:
+    """日志用:value_json 长度(不记内容,防 TTS 全文 / secrets 落日志)。"""
+    return len(value_json) if value_json else 0
+
+
+async def _write_action_ledger(
+    miot_proxy: MiotProxy,
+    *,
+    action_type: str,
+    did: str,
+    iid: str | None,
+    value_json: str | None,
+    result_code: int | None,
+    result_msg: str | None,
+    success: bool,
+    error: str | None,
+) -> None:
+    """落一行 action_ledger + 打一条 INFO 结果日志。**fail-open**:
+
+    整体裹 try/except,任何异常只 warning,绝不影响调用方的控制结果。
+    device_name / room 从内存 device cache 解析(便宜),解析失败留 None。
+    日志行不含 secrets:TTS / set 值只记 value_json 长度,全文只进 DB。
+    """
+    try:
+        from miloco.observability.metrics_client import get_metrics_client
+        from miloco.observability.types import ActionLedgerRecord
+
+        device_name: str | None = None
+        room: str | None = None
+        try:
+            dev = (await miot_proxy.get_devices()).get(did)
+            if dev is not None:
+                device_name = getattr(dev, "name", None)
+                room = getattr(dev, "room_name", None)
+        except Exception:
+            pass  # cache 解析失败不影响审计主体
+
+        client = get_metrics_client()
+        if client is not None:
+            client.record_action(
+                ActionLedgerRecord(
+                    id=str(uuid.uuid4()),
+                    timestamp=int(time.time() * 1000),
+                    action_type=action_type,
+                    did=did,
+                    device_name=device_name,
+                    room=room,
+                    iid=iid,
+                    value_json=value_json,
+                    result_code=result_code,
+                    result_msg=result_msg,
+                    success=success,
+                    error=error,
+                )
+            )
+
+        logger.info(
+            "action_ledger did=%s type=%s iid=%s success=%s reason=%s value_len=%d",
+            did, action_type, iid, success,
+            (result_msg or error or "ok"),
+            _truncate_value_len(value_json),
+        )
+    except Exception as e:  # noqa: BLE001 —— 审计 fail-open,绝不拖垮控制调用
+        logger.warning("action_ledger write failed (did=%s): %s", did, e)
 
 
 class MiotService:
@@ -772,6 +842,15 @@ class MiotService:
                 ]
                 results = await self._miot_proxy.set_device_properties(params)
                 self._safe_lru_touch(did, [request.iid])
+                success, code, msg = summarize_results(results)
+                await _write_action_ledger(
+                    self._miot_proxy,
+                    action_type="set_property",
+                    did=did, iid=request.iid,
+                    value_json=json.dumps(request.value, ensure_ascii=False),
+                    result_code=code, result_msg=msg,
+                    success=success, error=None,
+                )
                 return {"results": results}
 
             if request.type == "set_properties":
@@ -789,6 +868,20 @@ class MiotService:
                     )
                 results = await self._miot_proxy.set_device_properties(params)
                 self._safe_lru_touch(did, [p.iid for p in request.properties])
+                success, code, msg = summarize_results(results)
+                await _write_action_ledger(
+                    self._miot_proxy,
+                    action_type="set_properties",
+                    # 复数 iid 逗号拼接;value_json 存 {iid: value} 全集
+                    iid=",".join(p.iid for p in request.properties),
+                    did=did,
+                    value_json=json.dumps(
+                        {p.iid: p.value for p in request.properties},
+                        ensure_ascii=False,
+                    ),
+                    result_code=code, result_msg=msg,
+                    success=success, error=None,
+                )
                 return {"results": results}
 
             # call_action
@@ -800,6 +893,16 @@ class MiotService:
             )
             result = await self._miot_proxy.call_device_action(param)
             self._safe_lru_touch(did, [request.iid])
+            success, code, msg = summarize_results(result)
+            # call_action 的 in_params 存 value_json —— speaker play-text 的 TTS 全文落这里
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="call_action",
+                did=did, iid=request.iid,
+                value_json=json.dumps(request.params or [], ensure_ascii=False),
+                result_code=code, result_msg=msg,
+                success=success, error=None,
+            )
             return {"result": result}
 
         # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
@@ -808,6 +911,15 @@ class MiotService:
             raise
         except Exception as e:
             logger.error("Failed to control device %s: %s", did, e)
+            # 异常路径也落一行:success=0 + error;action_type 尽量取 request.type
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=getattr(request, "type", None) or "call_action",
+                did=did, iid=getattr(request, "iid", None),
+                value_json=None,
+                result_code=None, result_msg=None,
+                success=False, error=str(e),
+            )
             raise MiotServiceException(f"Failed to control device: {str(e)}") from e
 
     async def get_device_status(self, did: str, iids: list[str] | None) -> dict:
@@ -1146,9 +1258,31 @@ class MiotService:
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
-            return await self._miot_proxy.execute_miot_scene(scene_id)
+            ok = await self._miot_proxy.execute_miot_scene(scene_id)
+            # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
+            scene_name = getattr(scenes[scene_id], "scene_name", None)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="scene_trigger",
+                did=scene_id, iid=scene_id,
+                value_json=json.dumps(
+                    {"scene_name": scene_name}, ensure_ascii=False
+                ),
+                result_code=None,
+                result_msg=None if ok else "场景触发失败",
+                success=bool(ok), error=None,
+            )
+            return ok
         except (ResourceNotFoundException, ValidationException):
             raise
         except Exception as e:
             logger.error("Failed to trigger scene %s: %s", scene_id, e)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="scene_trigger",
+                did=scene_id, iid=scene_id,
+                value_json=None,
+                result_code=None, result_msg=None,
+                success=False, error=str(e),
+            )
             raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e

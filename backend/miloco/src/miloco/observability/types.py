@@ -124,6 +124,45 @@ class AgentRunRecord:
         }
 
 
+@dataclass(frozen=True)
+class ActionLedgerRecord:
+    """一次设备控制 / TTS / 场景触发的持久审计,对应 action_ledger 表一行。
+
+    value_json 已是序列化好的字符串(set 值 / action in_params,含 TTS 全文);
+    调用方负责 json.dumps,避免 record 层再持有原始对象。
+    """
+    id: str
+    timestamp: int              # 写入时刻 ms
+    action_type: str            # set_property | set_properties | call_action | scene_trigger
+    did: str
+    device_name: str | None
+    room: str | None
+    iid: str | None
+    value_json: str | None
+    result_code: int | None
+    result_msg: str | None
+    success: bool
+    error: str | None
+    trace_id: str | None = None  # v1 留 None
+
+    def to_row(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "action_type": self.action_type,
+            "did": self.did,
+            "device_name": self.device_name,
+            "room": self.room,
+            "iid": self.iid,
+            "value_json": self.value_json,
+            "result_code": self.result_code,
+            "result_msg": self.result_msg,
+            "success": int(self.success),
+            "error": self.error,
+            "trace_id": self.trace_id,
+        }
+
+
 @dataclass
 class DeviceTraceRecord:
     device_trace_id: str
