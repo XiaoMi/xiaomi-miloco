@@ -1,13 +1,13 @@
 /**
- * ActionsFeed 数据层测试 —— 动作审计流。
+ * 动作流数据层 + 单流合并测试。
  *
  * node 环境无 jsdom,沿用 real.test.ts 的做法:覆写 globalThis.fetch,直接测
- * 导出的逻辑函数(fetchActions / formatActionTime / actionTypeKey),不渲 DOM。
+ * 导出的逻辑函数,不渲 DOM。
  *
  * 覆盖:
- * - fetchActions 解析 backend BARE 数组(渲染行的数据来源)
- * - 空数组 → 空态数据
- * - failedOnly=true 时 query 带 failed_only=1(「只看失败」重拉参数)
+ * - fetchActions 解析 backend BARE 数组 + query 参数(limit / failed_only)
+ * - formatActionTime / actionTypeKey 纯映射
+ * - mergeFeedRows:事件 + 动作交错顺序、checkbox 筛选、窗口裁剪规则
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -17,6 +17,8 @@ import {
   actionTypeKey,
   type BackendActionRow,
 } from "@/components/ActionsFeed";
+import { mergeFeedRows } from "@/components/ActivityFeed";
+import type { ActivityEvent } from "@/lib/types";
 
 const originalFetch = globalThis.fetch;
 
@@ -57,6 +59,10 @@ function row(extra: Partial<BackendActionRow> = {}): BackendActionRow {
   };
 }
 
+function ev(id: string, ts: number, extra: Partial<ActivityEvent> = {}): ActivityEvent {
+  return { id, timestamp: ts, text: "x", device_ids: [], snapshot_count: 0, ...extra };
+}
+
 describe("fetchActions — /api/actions 契约", () => {
   it("解析 backend bare 数组为行", async () => {
     mockActions([
@@ -77,10 +83,10 @@ describe("fetchActions — /api/actions 契约", () => {
     expect(rows).toEqual([]);
   });
 
-  it("默认不带 failed_only,limit=100", async () => {
+  it("默认不带 failed_only,单流一次拉全 limit=500", async () => {
     const m = mockActions([]);
     await fetchActions(false);
-    expect(m.url()).toContain("limit=100");
+    expect(m.url()).toContain("limit=500");
     expect(m.url()).not.toContain("failed_only");
   });
 
@@ -88,7 +94,7 @@ describe("fetchActions — /api/actions 契约", () => {
     const m = mockActions([]);
     await fetchActions(true);
     expect(m.url()).toContain("failed_only=1");
-    expect(m.url()).toContain("limit=100");
+    expect(m.url()).toContain("limit=500");
   });
 });
 
@@ -111,5 +117,60 @@ describe("actionTypeKey", () => {
   });
   it("未知类型 → typeUnknown", () => {
     expect(actionTypeKey("weird")).toBe("actions.typeUnknown");
+  });
+});
+
+describe("mergeFeedRows — 单流合并 / 交错 / 窗口", () => {
+  const events = [ev("e-new", 300), ev("e-mid", 200), ev("e-old", 100)];
+  const actions = [
+    row({ id: "act-newer", timestamp: 350 }), // 比最新事件更新
+    row({ id: "act-inwin", timestamp: 250 }), // 落在事件窗内
+    row({ id: "act-older", timestamp: 50 }), // 比最旧展示事件更早 → 属未翻到的分页窗
+  ];
+
+  it("两 flag 都开:按 ts DESC 交错,窗外(更早)动作被裁掉", () => {
+    const r = mergeFeedRows(events, actions, true, true);
+    // 350(act) 300(ev) 250(act) 200(ev) 100(ev);act-older(50)被裁
+    expect(r.map((x) => (x.kind === "event" ? x.event.id : x.action.id))).toEqual([
+      "act-newer",
+      "e-new",
+      "act-inwin",
+      "e-mid",
+      "e-old",
+    ]);
+  });
+
+  it("比最新展示事件更新的动作被保留在最上", () => {
+    const r = mergeFeedRows(events, actions, true, true);
+    expect(r[0].kind).toBe("action");
+    expect(r[0].kind === "action" && r[0].action.id).toBe("act-newer");
+  });
+
+  it("仅事件(动作 flag 关):不含任何动作行", () => {
+    const r = mergeFeedRows(events, actions, true, false);
+    expect(r.every((x) => x.kind === "event")).toBe(true);
+    expect(r.map((x) => x.ts)).toEqual([300, 200, 100]);
+  });
+
+  it("仅动作(事件 flag 关):动作不设窗口下界,全展示且不含事件", () => {
+    const r = mergeFeedRows(events, actions, false, true);
+    expect(r.every((x) => x.kind === "action")).toBe(true);
+    // 无事件窗 → 连更早的 act-older 也保留,ts DESC
+    expect(r.map((x) => x.ts)).toEqual([350, 250, 50]);
+  });
+
+  it("两 flag 都关 → 空(渲染层显 emptyFilter 提示)", () => {
+    expect(mergeFeedRows(events, actions, false, false)).toEqual([]);
+  });
+
+  it("事件为空但显事件:动作不设下界(避免全裁),仍全展示", () => {
+    const r = mergeFeedRows([], actions, true, true);
+    expect(r.map((x) => x.ts)).toEqual([350, 250, 50]);
+  });
+
+  it("同 ts:事件排在动作前(因果:先有事件后有动作)", () => {
+    const r = mergeFeedRows([ev("e", 200)], [row({ id: "a", timestamp: 200 })], true, true);
+    expect(r[0].kind).toBe("event");
+    expect(r[1].kind).toBe("action");
   });
 });

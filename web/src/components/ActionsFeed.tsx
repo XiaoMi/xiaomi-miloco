@@ -1,14 +1,12 @@
 /**
- * 「miloco 做了什么」动作审计流。
+ * 「miloco 做了什么」动作审计——现已并入 ActivityFeed 单流,本文件降为
+ * 纯数据 helper + 行组件(ActionRow),不再是独立 tab 组件。
  *
  * 数据源:GET /api/actions(observability/router::list_actions)。
  * 返回 BARE JSON 数组(无 {code,data} 信封),新到旧排序。一次 agent 控制/播报/触发一行。
- * 行展示:时间 · 设备名(米家别名)+ 房间 · 动作类型 humanize + iid + value 截断 · 成功/失败徽标。
- * 交互:「只看失败」勾选走 failed_only=1 重拉;刷新按钮重拉。
+ * ActionRow 展示:时间 · 设备名(米家别名)+ 房间 · 动作类型 humanize + iid + value 截断 · 成功/失败徽标。
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { apiFetch } from "@/api/client";
 
@@ -31,9 +29,14 @@ export interface BackendActionRow {
 
 const VALUE_MAX = 60;
 
+/** 单流合并窗口用 limit=500 一次拉全,不再分页(见 ActivityFeed mergeFeedRows)。 */
+const ACTIONS_LIMIT = 500;
+
 /** 统一拉取——failedOnly 时带 failed_only=1。导出供 tests 守 query 参数 + 解析。 */
 export async function fetchActions(failedOnly: boolean): Promise<BackendActionRow[]> {
-  const q = failedOnly ? "?limit=100&failed_only=1" : "?limit=100";
+  const q = failedOnly
+    ? `?limit=${ACTIONS_LIMIT}&failed_only=1`
+    : `?limit=${ACTIONS_LIMIT}`;
   return apiFetch<BackendActionRow[]>(`/api/actions${q}`);
 }
 
@@ -65,100 +68,9 @@ function truncateValue(v: string | null): string {
   return v.length <= VALUE_MAX ? v : `${v.slice(0, VALUE_MAX)}…`;
 }
 
-export function ActionsFeed() {
-  const { t } = useTranslation();
-  const [rows, setRows] = useState<BackendActionRow[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [failedOnly, setFailedOnly] = useState(false);
-
-  const load = useCallback((only: boolean) => {
-    setLoading(true);
-    setError(null);
-    fetchActions(only)
-      .then((data) => {
-        setRows(data);
-      })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e));
-        setRows(null);
-      })
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    load(failedOnly);
-  }, [load, failedOnly]);
-
-  return (
-    <section
-      className="rounded-xl bg-bg-secondary border border-border shadow-sm anim-in"
-      aria-labelledby="actions-title"
-    >
-      <div className="flex items-baseline justify-between gap-3 px-5 pt-4 pb-3 flex-wrap">
-        <h2
-          id="actions-title"
-          className="text-title text-text-primary inline-flex items-baseline gap-2"
-        >
-          {t("actions.title")}
-          {rows && (
-            <span className="text-caption-mono text-text-tertiary font-normal">
-              {t("actions.loadedCount", { n: rows.length })}
-            </span>
-          )}
-        </h2>
-        <div className="inline-flex items-center gap-3">
-          <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={failedOnly}
-              onChange={(e) => setFailedOnly(e.target.checked)}
-              className="accent-brand-primary w-[13px] h-[13px]"
-            />
-            {t("actions.failedOnly")}
-          </label>
-          <button
-            type="button"
-            onClick={() => load(failedOnly)}
-            disabled={loading}
-            className="text-caption px-3 py-1 rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors disabled:opacity-50"
-          >
-            {t("actions.refresh")}
-          </button>
-        </div>
-      </div>
-
-      {loading && !rows ? (
-        <div className="text-body text-center py-10 text-text-secondary">
-          {t("actions.loading")}
-        </div>
-      ) : error ? (
-        <div className="px-5 py-10 text-center">
-          <div className="text-body text-error mb-3">{error}</div>
-          <button
-            type="button"
-            onClick={() => load(failedOnly)}
-            className="text-caption px-4 py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary"
-          >
-            {t("actions.retry")}
-          </button>
-        </div>
-      ) : !rows || rows.length === 0 ? (
-        <div className="text-body text-center py-10 text-text-secondary">
-          {t("actions.empty")}
-        </div>
-      ) : (
-        <ul className="divide-y divide-border">
-          {rows.map((r) => (
-            <ActionRow key={r.id} row={r} t={t} />
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
+/** 动作行——并入 ActivityFeed 单流时,动作行套一层 brand-soft 底色 + brand 左边条
+ *  跟事件行(无底色)区分;失败原因仍走 error 语义色(spec 允许行内保留失败徽标)。 */
+export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
   const ok = row.success === 1;
   const value = truncateValue(row.value_json);
   // 失败原因:优先 result_msg,退回 error;成功时不显。
@@ -166,7 +78,7 @@ function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
   const deviceLabel = row.device_name || row.did;
 
   return (
-    <li className="px-5 py-2.5 hover:bg-bg-tertiary transition-colors">
+    <li className="px-5 py-2.5 bg-brand-soft border-l-2 border-brand-primary hover:bg-brand-soft-strong transition-colors">
       <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[128px_1fr_auto] sm:gap-x-3 sm:gap-y-1 sm:items-baseline">
         <span className="text-caption-mono text-text-tertiary whitespace-nowrap">
           {formatActionTime(row.timestamp)}

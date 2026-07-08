@@ -9,12 +9,17 @@
  * 时间筛选:datetime-local 双输入(自 / 至),非法值守(NaN 不更新 state).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { eventClipUrl, listActivity, revealDir, submitEventFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
 import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
+import {
+  ActionRow,
+  fetchActions,
+  type BackendActionRow,
+} from "./ActionsFeed";
 
 interface Props {
   events: ActivityEvent[];
@@ -24,6 +29,52 @@ interface Props {
 
 const PAGE_SIZE = 50;
 const FILTER_DEBOUNCE_MS = 300;
+
+/** 单流合并后的行:事件 or 动作(tagged union),供渲染层分派 ActivityRow / ActionRow。 */
+export type FeedRow =
+  | { kind: "event"; ts: number; event: ActivityEvent }
+  | { kind: "action"; ts: number; action: BackendActionRow };
+
+/** 事件流 + 动作流合并成单条时间倒序流。纯函数,导出供 tests 守 window + 交错顺序。
+ *
+ *  窗口规则(spec):动作一次拉全(limit=500),但只交错**落在当前展示事件时间窗内**的
+ *  动作,外加**比最新展示事件更新**的动作。合起来即:保留所有 ts >= 最旧展示事件 ts 的
+ *  动作(既覆盖"窗内",也覆盖"比最新更新"——后者 ts 天然 >= 最旧)。展示事件为空时
+ *  (events 关 / 事件列表空)动作不设下界,全部展示。
+ *
+ *  同 ts 时事件排在动作前(事件是"发生了什么"、动作是"因此做了什么",因果上事件在先)。
+ */
+export function mergeFeedRows(
+  events: ActivityEvent[],
+  actions: BackendActionRow[],
+  showEvents: boolean,
+  showActions: boolean,
+): FeedRow[] {
+  const rows: FeedRow[] = [];
+  if (showEvents) {
+    for (const e of events) rows.push({ kind: "event", ts: e.timestamp, event: e });
+  }
+  if (showActions) {
+    // 窗口下界:仅当同时展示事件、且有事件时,才用"最旧展示事件 ts"裁掉更早的动作
+    // (那些更早动作属于尚未翻到的分页窗口)。否则(仅动作 / 无事件)动作全展示。
+    const oldestEventTs =
+      showEvents && events.length > 0
+        ? Math.min(...events.map((e) => e.timestamp))
+        : -Infinity;
+    for (const a of actions) {
+      if (a.timestamp >= oldestEventTs) {
+        rows.push({ kind: "action", ts: a.timestamp, action: a });
+      }
+    }
+  }
+  // ts DESC;同 ts 事件优先(event 在 action 前)。
+  rows.sort((x, y) => {
+    if (y.ts !== x.ts) return y.ts - x.ts;
+    if (x.kind === y.kind) return 0;
+    return x.kind === "event" ? -1 : 1;
+  });
+  return rows;
+}
 
 /** 合并两段 event 列表:by id dedup(后到的字段优先)+ timestamp DESC 排序.
  *
@@ -73,6 +124,25 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
   const fetchGenRef = useRef(0);
   /** 全屏播放器(点开看大):null 关闭 */
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+
+  // ── 单流:事件 / 动作两个 checkbox 筛选(默认都勾),动作一次拉全后 merge ──
+  const [showEvents, setShowEvents] = useState(true);
+  const [showActions, setShowActions] = useState(true);
+  const [actions, setActions] = useState<BackendActionRow[]>([]);
+
+  /** 动作重拉:mount / SSE 新事件 / 手动 reload 时调,失败静默(不阻断事件流)。 */
+  const reloadActions = useCallback(() => {
+    fetchActions(false)
+      .then(setActions)
+      .catch(() => {
+        /* 动作流失败不影响事件流;保留上次结果 */
+      });
+  }, []);
+
+  // mount 时拉一次动作(homeId 变也重拉——切家后动作流应随之刷新)。
+  useEffect(() => {
+    reloadActions();
+  }, [reloadActions, homeId]);
 
   const filterActive = appliedSince !== undefined || appliedBefore !== undefined;
 
@@ -171,6 +241,8 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       unsub = subscribeEvents(
         (e) => {
           if (!inRange(e.timestamp)) return; // 越界事件丢弃
+          // 新事件到达时顺带重拉动作——事件常伴随 agent 控制,让动作行跟上单流。
+          reloadActions();
           setEvents((prev) => {
             const idx = prev.findIndex((x) => x.id === e.id);
             if (idx === -1) {
@@ -220,14 +292,25 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       document.removeEventListener("visibilitychange", onVisibility);
       stop();
     };
+    // reloadActions 是稳定 useCallback(空 deps),列入不 churn EventSource。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedSince, appliedBefore, homeId]);
+  }, [appliedSince, appliedBefore, homeId, reloadActions]);
 
   /** 触发翻页:offset += PAGE_SIZE,append 模式 */
   const loadMore = () => {
     if (loading || !hasMore) return;
     fetchPage({ append: true, pageOffset: offset });
   };
+
+  // 事件 + 动作合并成单条时间倒序流(见 mergeFeedRows 的窗口规则)。
+  const feedRows = useMemo(
+    () => mergeFeedRows(events, actions, showEvents, showActions),
+    [events, actions, showEvents, showActions],
+  );
+
+  const noneChecked = !showEvents && !showActions;
+  // "查看更早" 仅在展示事件时有意义(动作已一次拉全 500,无分页)。
+  const showLoadMore = showEvents && hasMore && events.length > 0;
 
   return (
     <section
@@ -241,33 +324,58 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
         >
           {t("activity.title")}
           <span className="text-caption-mono text-text-tertiary font-normal">
-            {/* 已加载 N 条 — 仅反映当前内存中加载/累积的数量;hasMore=true 时后端
-                还有更早的事件可拉,N 不等于"事件总数" */}
+            {/* 已加载 N 条 — 单流合并后的行数(事件 + 窗内动作);showEvents 且 hasMore
+                时后端还有更早事件可拉,N 不等于"总数" */}
             {t("activity.loadedCount", {
-              n: events.length,
-              more: hasMore ? "+" : "",
+              n: feedRows.length,
+              more: showLoadMore ? "+" : "",
             })}
           </span>
         </h2>
-        <TimeRangeFilter
-          since={since}
-          before={before}
-          onSinceChange={setSince}
-          onBeforeChange={setBefore}
-          onReset={() => {
-            // 恢复"今日实时"默认态:since=今天 00:00 + before=undefined → SSE inRange
-            // 不拦截后续新事件,Feed 继续实时刷新.
-            setSince(todayStartMs());
-            setBefore(undefined);
-          }}
-        />
+        <div className="inline-flex items-center gap-3 flex-wrap">
+          {/* 事件 / 动作 checkbox — 都默认勾选,仅组件内 state 不持久化 */}
+          <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showEvents}
+              onChange={(e) => setShowEvents(e.target.checked)}
+              className="accent-brand-primary w-[13px] h-[13px]"
+            />
+            {t("actions.filterEvents")}
+          </label>
+          <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showActions}
+              onChange={(e) => setShowActions(e.target.checked)}
+              className="accent-brand-primary w-[13px] h-[13px]"
+            />
+            {t("actions.filterActions")}
+          </label>
+          <TimeRangeFilter
+            since={since}
+            before={before}
+            onSinceChange={setSince}
+            onBeforeChange={setBefore}
+            onReset={() => {
+              // 恢复"今日实时"默认态:since=今天 00:00 + before=undefined → SSE inRange
+              // 不拦截后续新事件,Feed 继续实时刷新.
+              setSince(todayStartMs());
+              setBefore(undefined);
+            }}
+          />
+        </div>
       </div>
 
-      {loading && events.length === 0 ? (
+      {noneChecked ? (
+        <div className="text-body text-center py-10 text-text-secondary">
+          {t("actions.emptyFilter")}
+        </div>
+      ) : loading && showEvents && events.length === 0 && feedRows.length === 0 ? (
         <div className="text-body text-center py-10 text-text-secondary">
           {t("activity.loading")}
         </div>
-      ) : events.length === 0 ? (
+      ) : feedRows.length === 0 ? (
         <div className="text-body text-center py-10 text-text-secondary">
           {filterActive
             ? t("activity.emptyFiltered")
@@ -275,23 +383,27 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
         </div>
       ) : (
         <ul className="divide-y divide-border">
-          {events.map((e) => (
-            <ActivityRow
-              key={e.id}
-              event={e}
-              onOpenLightbox={setLightboxSrc}
-              feedbackSet={feedbackSet}
-              feedbackPacks={feedbackPacks}
-              onFeedbackSubmitted={(id, path, size) => {
-                setFeedbackSet(prev => new Set(prev).add(id));
-                setFeedbackPacks(prev => new Map(prev).set(id, { path, size }));
-              }}
-            />
-          ))}
+          {feedRows.map((r) =>
+            r.kind === "event" ? (
+              <ActivityRow
+                key={`e:${r.event.id}`}
+                event={r.event}
+                onOpenLightbox={setLightboxSrc}
+                feedbackSet={feedbackSet}
+                feedbackPacks={feedbackPacks}
+                onFeedbackSubmitted={(id, path, size) => {
+                  setFeedbackSet(prev => new Set(prev).add(id));
+                  setFeedbackPacks(prev => new Map(prev).set(id, { path, size }));
+                }}
+              />
+            ) : (
+              <ActionRow key={`a:${r.action.id}`} row={r.action} t={t} />
+            ),
+          )}
         </ul>
       )}
 
-      {hasMore && events.length > 0 && (
+      {showLoadMore && (
         <div className="px-5 py-3 border-t border-border flex justify-center">
           <button
             type="button"
