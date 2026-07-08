@@ -14,7 +14,13 @@ import httpx
 
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.omni.circuit_breaker import (
+    CircuitOpenError, get_omni_circuit_breaker,
+)
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
+from miloco.perception.engine.omni.error_classifier import (
+    ClassifiedError, ErrorCategory, classify_exception, classify_response,
+)
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
     call_omni,
@@ -283,10 +289,13 @@ async def _call_omni_messages(
     }
 
     client = _get_fused_http_client(config.timeout)
+    cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    short_circuited = False
     try:
+        await cb.before_call()
         resp = await client.post(
             f"{config.base_url}/chat/completions",
             headers={
@@ -296,47 +305,52 @@ async def _call_omni_messages(
             },
             json=body,
         )
-        if resp.status_code != 200:
+        classified = classify_response(resp)
+        if classified is not None:
+            await cb.record_failure(classified)
             logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
-            # 400 通常是 multimodal payload 服务端拒收 (corrupted image/video)。
-            # 静态从 traceback 无法定位是哪个块出问题, 这里输出每个多模态块的尺寸
-            # summary (不打 base64 本身, 仅尺寸) 便于事后定位。仅 400 路径打, 不影响
-            # 常态 log 量。
             if resp.status_code == 400:
                 logger.error(
                     "[omni] omni 400 payload 摘要 | %s",
                     _summarize_multimodal_payload(messages),
                 )
-        resp.raise_for_status()
+            resp.raise_for_status()
         raw = resp.json()
-        # 服务端在 fused 大 payload 下偶发返回非 dict body (~1.5%);此处校验
-        # 形态并 dump 截断后的原始响应,便于事后定位服务端返回了什么。
         if not isinstance(raw, dict):
+            # 用 __class__.__name__ 而非 type(...) 避免遮盖问题(参数名 type)
+            raw_cls = raw.__class__.__name__
             logger.error(
                 "[omni-fused] unexpected response shape | status=%d type=%s body=%s",
-                resp.status_code,
-                type(raw).__name__,
-                resp.text[:1000],
+                resp.status_code, raw_cls, resp.text[:1000],
             )
-            raise OmniError(
-                f"omni response is not a dict (got {type(raw).__name__})"
-            )
+            await cb.record_failure(ClassifiedError(
+                "bad_response", f"non-dict body ({raw_cls})",
+                ErrorCategory.RECOVERABLE,
+            ))
+            raise OmniError(f"omni response is not a dict (got {raw_cls})")
+        await cb.record_success()
         fire_record(config.model, raw.get("usage", {}), type)
         return raw
+    except CircuitOpenError as ce:
+        short_circuited = True
+        error = {"code": ce.code, "msg": ce.message[:512]}
+        raise OmniError(f"_call_omni_messages short-circuited: {ce.message}", original=ce) from ce
     except OmniError:
         raise
     except Exception as e:
+        if not isinstance(e, httpx.HTTPStatusError):
+            await cb.record_failure(classify_exception(e))
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
             f"_call_omni_messages failed: {e.__class__.__name__}: {e}",
             original=e,
         ) from e
     finally:
-        # 跟 call_omni / call_omni_stream 口径一致:推 omni trace 到当前 event artifacts.
+        latency_ms = 0.0 if short_circuited else (time.monotonic() - t0) * 1000
         push_omni_trace(
             request_messages=messages,
             response_raw=raw,
-            latency_ms=(time.monotonic() - t0) * 1000,
+            latency_ms=latency_ms,
             error=error,
             model=config.model,
             inference_params={
