@@ -169,6 +169,26 @@ describe("before_prompt_build 组装", () => {
     }
   });
 
+  it("当天文件只有 H1、无正文 → 回退到昨天，不注入空段", async () => {
+    const ws = mkdtempSync(path.join(tmpdir(), "miloco-ws-h1-"));
+    try {
+      // digest 建了当天文件、写下 H1，却把这批日志全判为该丢弃 → 仅剩 H1。
+      writePerception(perceptionFile(ws, "Asia/Shanghai"), "# 2026-01-02 感知记忆\n");
+      writePerception(
+        perceptionFile(ws, "Asia/Shanghai", -1),
+        "# 2026-01-01 感知记忆\n\n- 20:00–21:00 客厅 · 全家：一起看电视",
+      );
+      const { api, run } = makeApi();
+      registerBeforePromptBuildHook(api, {} as any);
+      const r = await run("agent:main:miloco", { workspaceDir: ws });
+      expect(r.appendSystemContext).toContain("## 最近感知日志");
+      expect(r.appendSystemContext).not.toContain("## 今日感知日志");
+      expect(r.appendSystemContext).toContain("一起看电视");
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it("rule：无能力概览，感知用规则触发格式", async () => {
     const { api, run } = makeApi();
     registerBeforePromptBuildHook(api, {} as any);
