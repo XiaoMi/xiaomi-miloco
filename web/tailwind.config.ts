@@ -36,7 +36,6 @@ export default {
           secondary: "var(--color-brand-secondary)",
           accent: "var(--color-brand-accent)",
           soft: "var(--color-brand-soft)",
-          "soft-strong": "var(--color-brand-soft-strong)",
           ring: "var(--color-brand-ring)",
         },
 

@@ -8,6 +8,7 @@
     "typeSetProperty": "设置属性",
     "typeCallAction": "执行动作",
     "typeSceneTrigger": "触发场景",
-    "typeUnknown": "未知动作"
+    "typeUnknown": "未知动作",
+    "limitHint": "动作仅显示最近 500 条"
   }
 }

@@ -8,6 +8,7 @@
     "typeSetProperty": "Set property",
     "typeCallAction": "Call action",
     "typeSceneTrigger": "Trigger scene",
-    "typeUnknown": "Unknown action"
+    "typeUnknown": "Unknown action",
+    "limitHint": "Showing the latest 500 actions only"
   }
 }

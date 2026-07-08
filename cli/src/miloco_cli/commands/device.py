@@ -83,7 +83,7 @@ def _annotate_result_codes(data: dict) -> None:
     for it in items:
         total += 1
         code = it.get("code")
-        if isinstance(code, int) and code not in _MIOT_OK_CODES:
+        if isinstance(code, int) and code < 0 and code not in _MIOT_OK_CODES:
             msg = _MIOT_SPEC_CODES.get(
                 code, "设备侧执行失败（未知错误码，详见米家 spec 错误码表）"
             )

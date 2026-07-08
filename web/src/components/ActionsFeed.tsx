@@ -30,8 +30,9 @@ export interface BackendActionRow {
 
 const VALUE_MAX = 60;
 
-/** 单流合并窗口用 limit=500 一次拉全,不再分页(见 ActivityFeed mergeFeedRows)。 */
-const ACTIONS_LIMIT = 500;
+/** 单流合并窗口用 limit=500 一次拉全,不再分页(见 ActivityFeed mergeFeedRows)。
+ *  导出供 ActivityFeed 判「是否已达上限」以渲染截断提示。 */
+export const ACTIONS_LIMIT = 500;
 
 /** 统一拉取——failedOnly 时带 failed_only=1。导出供 tests 守 query 参数 + 解析。 */
 export async function fetchActions(failedOnly: boolean): Promise<BackendActionRow[]> {

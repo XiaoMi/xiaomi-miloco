@@ -15,6 +15,7 @@ import { eventClipUrl, listActivity, revealDir, submitEventFeedback, subscribeEv
 import { humanizeRulesInText } from "@/lib/eventText";
 import type { ActivityEvent, HomeId } from "@/lib/types";
 import {
+  ACTIONS_LIMIT,
   ActionRow,
   fetchActions,
   type BackendActionRow,
@@ -29,6 +30,9 @@ interface Props {
 
 const PAGE_SIZE = 50;
 const FILTER_DEBOUNCE_MS = 300;
+// SSE 事件常成串到达(一次 agent 控制伴随多条事件),每条都全量重拉 500 行动作太重。
+// 合并突发:末条到达后 ~1.5s 才拉一次(trailing debounce)。mount / homeId 切换仍即时拉。
+const SSE_ACTIONS_DEBOUNCE_MS = 1500;
 
 /** 单流合并后的行:事件 or 动作(tagged union),供渲染层分派 ActivityRow / ActionRow。 */
 export type FeedRow =
@@ -130,7 +134,7 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
   const [showActions, setShowActions] = useState(true);
   const [actions, setActions] = useState<BackendActionRow[]>([]);
 
-  /** 动作重拉:mount / SSE 新事件 / 手动 reload 时调,失败静默(不阻断事件流)。 */
+  /** 动作重拉:mount / homeId 切换 / 手动 reload 时调,失败静默(不阻断事件流)。 */
   const reloadActions = useCallback(() => {
     fetchActions(false)
       .then(setActions)
@@ -139,7 +143,25 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       });
   }, []);
 
-  // mount 时拉一次动作(homeId 变也重拉——切家后动作流应随之刷新)。
+  /** SSE 触发的动作重拉:trailing debounce 合并突发,避免每条事件都全量拉 500 行。 */
+  const sseReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedReloadActions = useCallback(() => {
+    if (sseReloadTimerRef.current) clearTimeout(sseReloadTimerRef.current);
+    sseReloadTimerRef.current = setTimeout(() => {
+      sseReloadTimerRef.current = null;
+      reloadActions();
+    }, SSE_ACTIONS_DEBOUNCE_MS);
+  }, [reloadActions]);
+
+  // 卸载时清掉悬挂的 debounce 定时器,避免 setState-after-unmount。
+  useEffect(
+    () => () => {
+      if (sseReloadTimerRef.current) clearTimeout(sseReloadTimerRef.current);
+    },
+    [],
+  );
+
+  // mount 时拉一次动作(homeId 变也重拉——切家后动作流应随之刷新)。即时,不 debounce。
   useEffect(() => {
     reloadActions();
   }, [reloadActions, homeId]);
@@ -242,7 +264,8 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
         (e) => {
           if (!inRange(e.timestamp)) return; // 越界事件丢弃
           // 新事件到达时顺带重拉动作——事件常伴随 agent 控制,让动作行跟上单流。
-          reloadActions();
+          // debounce 合并突发:一串事件只在末条后拉一次,而非每条都全量拉 500 行。
+          debouncedReloadActions();
           setEvents((prev) => {
             const idx = prev.findIndex((x) => x.id === e.id);
             if (idx === -1) {
@@ -292,9 +315,9 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       document.removeEventListener("visibilitychange", onVisibility);
       stop();
     };
-    // reloadActions 是稳定 useCallback(空 deps),列入不 churn EventSource。
+    // debouncedReloadActions 是稳定 useCallback,列入不 churn EventSource。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedSince, appliedBefore, homeId, reloadActions]);
+  }, [appliedSince, appliedBefore, homeId, debouncedReloadActions]);
 
   /** 触发翻页:offset += PAGE_SIZE,append 模式 */
   const loadMore = () => {
@@ -399,6 +422,12 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
             ) : (
               <ActionRow key={`a:${r.action.id}`} row={r.action} t={t} />
             ),
+          )}
+          {/* 动作拉取达上限(500):最旧的动作被截断,底部给条弱提示告知只显最近 500 条。 */}
+          {showActions && actions.length === ACTIONS_LIMIT && (
+            <li className="px-5 py-2 text-caption text-text-tertiary text-center">
+              {t("actions.limitHint")}
+            </li>
           )}
         </ul>
       )}
