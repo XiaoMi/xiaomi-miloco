@@ -726,3 +726,188 @@ async def test_dispatch_event_threads_intra_priority(patched, monkeypatch):
     finally:
         set_agent_dispatcher(None)
         await d.stop()
+        await d.dispatch("bind", ["x"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_transport_exhaustion(patched, monkeypatch):
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        raise AgentWebhookException("boom")
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    d._TRANSPORT_BACKOFF_S = 0.0
+    await d.start()
+    fut = _delivered_fut()
+    try:
+        await d.dispatch("bind", ["x"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_builder_failure_and_empty(patched):
+    def boom(items):
+        raise RuntimeError("builder broke")
+
+    d = AgentDispatcher()
+    await d.start()
+    fut_fail = _delivered_fut()
+    fut_empty = _delivered_fut()
+    try:
+        await d.dispatch("bind", ["x"], boom, delivered=fut_fail)
+        await _settle(d)
+        await d.dispatch("interaction", [], _join, delivered=fut_empty)  # _join([]) -> None
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert fut_fail.result() is False
+    assert fut_empty.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_when_closed_or_unknown_type(patched):
+    d = AgentDispatcher()
+    await d.start()
+    fut_unknown = _delivered_fut()
+    assert await d.dispatch("nope", ["x"], _join, delivered=fut_unknown) is False  # type: ignore[arg-type]
+    await d.stop()
+    fut_closed = _delivered_fut()
+    assert await d.dispatch("bind", ["x"], _join, delivered=fut_closed) is False
+    assert fut_unknown.result() is False
+    assert fut_closed.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_eviction(patched):
+    d = AgentDispatcher()
+    await d.start()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    for i in range(MAX_QUEUE):  # 满队 urgent interactions
+        q.append(_QueuedEvent("interaction", [f"i{i}"], _join, 0, now + i))
+    fut = _delivered_fut()
+    try:
+        # bind 最不紧急 → 自己的超额 append 即被淘汰。
+        accepted = await d.dispatch("bind", ["late"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+    assert accepted is False
+    assert fut.result() is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_stop_with_inflight_and_queued(patched, monkeypatch):
+    """stop()：在途批被 cancel（finally 兜底）、排队未发的清队 resolve，均 False。"""
+
+    async def parked_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
+        await asyncio.sleep(3600)
+        return "run-x", "ok", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", parked_turn)
+    d = AgentDispatcher()
+    await d.start()
+    fut_inflight = _delivered_fut()
+    fut_queued = _delivered_fut()
+    await d.dispatch("interaction", ["x"], _join, delivered=fut_inflight)
+    await asyncio.sleep(0.03)  # 让 drainer 进入 parked turn
+    await d.dispatch("interaction", ["y"], _join, delivered=fut_queued)  # 排队等在途批
+
+    await d.stop()
+
+    assert fut_inflight.result() is False
+    assert fut_queued.result() is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_event_resolves_delivered_without_dispatcher():
+    set_agent_dispatcher(None)
+    fut = asyncio.get_event_loop().create_future()
+    assert await dispatch_event("bind", ["x"], _join, delivered=fut) is False
+    assert fut.result() is False
+
+
+# ─── 类型级投递参数（_DELIVERY）：仅 onboarding 走 owner-channel + deliver ───────
+
+
+@pytest.mark.asyncio
+async def test_onboarding_batch_sends_delivery_metadata(monkeypatch, patched):
+    """onboarding 批次带 resolve_target=owner-channel + deliver=True 发 turn。"""
+    seen: list[dict] = []
+
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
+        seen.append(kw)
+        return "run-x", "ok", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    await d.start()
+    try:
+        await d.dispatch("onboarding", ["invite"], _join)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert seen == [{"resolve_target": "owner-channel", "deliver": True}]
+
+
+@pytest.mark.asyncio
+async def test_other_types_send_without_delivery_metadata(patched):
+    """非 onboarding 类型不带投递参数（patched 的假 turn 签名收紧，多传即 TypeError）。"""
+    d = AgentDispatcher()
+    await d.start()
+    try:
+        await d.dispatch("interaction", ["x"], _join)
+        await d.dispatch("bind", ["y"], _join)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert len(patched.turns) == 2  # 两批都成功走完 → 没有多余 kwargs
+
+
+@pytest.mark.asyncio
+async def test_delivered_false_on_no_channel_status(patched, monkeypatch):
+    """no-channel（插件解析不到车主 IM 会话）→ 结构化未送达：False 且不烧传输重试。"""
+    calls = 0
+
+    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
+        nonlocal calls
+        calls += 1
+        return None, "no-channel", 1.0
+
+    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    d = AgentDispatcher()
+    await d.start()
+    fut = _delivered_fut()
+    try:
+        await d.dispatch("onboarding", ["invite"], _join, delivered=fut)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert fut.result() is False
+    assert calls == 1  # 正常 HTTP 返回，不走传输重试
+
+
+def test_miloco_session_keys_derived_from_route():
+    """MILOCO_SESSION_KEYS = _ROUTE 去重后的 sessionKey 全集（供切换家庭批量 reset）。
+    以 _ROUTE 为唯一事实源，别处手抄会漂移。"""
+    from miloco.dispatch.dispatcher import MILOCO_SESSION_KEYS
+
+    assert MILOCO_SESSION_KEYS == [
+        "agent:main:miloco",
+        "agent:main:miloco-rule",
+        "agent:main:miloco-suggest",
+    ]
+    # 无重复，且是 _ROUTE 里 sessionKey 的去重集合。
+    assert len(MILOCO_SESSION_KEYS) == len(set(MILOCO_SESSION_KEYS))
+    assert set(MILOCO_SESSION_KEYS) == {sk for sk, _, _ in disp_mod._ROUTE.values()}
