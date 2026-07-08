@@ -6,6 +6,8 @@ CoreML session(不依赖 CoreML EP / 真实模型推理)。
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 from miloco.perception.inference import ort_utils
 
@@ -41,7 +43,7 @@ def _cache_root(monkeypatch):
     """取当前 settings 下的 cache 根目录,并把进程级 once-guard 复位以便本次 sweep 生效。"""
     from miloco.config import get_settings
 
-    monkeypatch.setattr(ort_utils, "_cache_sweep_done", False)
+    monkeypatch.setattr(ort_utils, "_cache_swept", threading.Event())
     dirs = get_settings().directories
     return dirs.models_dir, dirs.workspace_dir / ort_utils._COREML_CACHE_DIRNAME
 
