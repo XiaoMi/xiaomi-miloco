@@ -24,6 +24,7 @@ import { useAsync } from "./hooks/useAsync";
 import type { Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { HomeSwitcher } from "./components/HomeSwitcher";
+import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
@@ -405,6 +406,9 @@ function MainApp() {
             window.location.reload();
           }}
         />
+
+        {/* omni 熔断器告警条(shrink-0):非 ok 时才渲染 */}
+        <OmniHealthBanner onGoToConfig={() => setActiveTab("usage")} />
 
         {/* 状态条(shrink-0) */}
         {status.data && (

@@ -550,7 +550,21 @@ export function UsageOmniConfig() {
                           {/* 固定宽 w-44 单行截断(列宽恒定不横向挤压);文字被截断时鼠标悬浮即时弹出
                               锚定元素底部的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
                           <td className="px-3 py-2.5">
-                            {rowTesting === p.label ? (
+                            {/* active 行且 health 非 ok:优先显实时熔断状态,覆盖手动测试结果
+                                (health 是真实运行时反映,手动测试是快照)。 */}
+                            {p.active && state.active.health && state.active.health.state !== "ok" ? (
+                              <span
+                                className={`block w-44 truncate ${SEV_CLASS[state.active.health.state === "error" ? "error" : "warn"]}`}
+                                onMouseEnter={showTip}
+                                onMouseLeave={hideTip}
+                              >
+                                {SEV_GLYPH[state.active.health.state === "error" ? "error" : "warn"]}{" "}
+                                {state.active.health.message}
+                                {state.active.health.consecutive_failures > 0 && (
+                                  <> · {state.active.health.consecutive_failures}次</>
+                                )}
+                              </span>
+                            ) : rowTesting === p.label ? (
                               <span className="block w-44 truncate text-text-tertiary">{t("usage.testing")}</span>
                             ) : rowTestResults[p.label] ? (
                               <span

@@ -40,6 +40,7 @@ import type {
   UsageStats,
   OmniConfigState,
   OmniConfigUpdate,
+  OmniHealth,
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
@@ -383,6 +384,18 @@ export async function testOmniConfig(
   input: OmniConfigUpdate,
 ): Promise<OmniTestResult> {
   return impl.realTestOmniConfig(input);
+}
+
+// 用户点「立即重试」触发一次 omni probe;跳过熔断剩余 backoff。
+export async function retryOmniProbe(): Promise<OmniConfigState> {
+  return impl.realRetryOmniProbe();
+}
+
+// 订阅 omni 熔断器实时健康度变化(全局 top banner 用)。首连即推当前状态,返回 unsubscribe。
+export function subscribeOmniHealth(
+  onHealth: (h: OmniHealth) => void,
+): () => void {
+  return impl.realSubscribeOmniHealth(onHealth);
 }
 
 // ── 性能 tab（observability）────────────────────────────

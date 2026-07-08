@@ -6,6 +6,8 @@ Admin controller
 System status check interface
 """
 
+import asyncio
+import json
 import logging
 import re
 import subprocess
@@ -17,12 +19,13 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, StrictBool
+from sse_starlette.sse import EventSourceResponse
 
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
 from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
-from miloco.middleware import verify_token
+from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni.probe import (
     fetch_models as _fetch_models,
@@ -777,3 +780,35 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
             code, result.get("message", ""), cat,
         ))
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+
+@router.get(
+    "/omni-config/stream",
+    summary="SSE 流:omni 熔断器状态变化时推送 omni_health 事件",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def omni_health_stream():
+    """复用 pipeline._sse_subscribers 广播通道;generator 过滤 event_type=='omni_health'。
+    鉴权支持 Authorization header 或 ?token=... query(EventSource 无法传 header)。
+    """
+    pipeline = manager.perception_service._pipeline
+    q = pipeline.subscribe_sse()
+
+    async def event_generator():
+        try:
+            # 首次连上立刻推一次当前状态,让 web 拿到初始态
+            from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+            from dataclasses import asdict
+            initial = asdict(get_omni_circuit_breaker().snapshot())
+            yield {"event": "omni_health", "data": json.dumps(initial, ensure_ascii=False)}
+            while True:
+                event_type, data = await q.get()
+                if event_type != "omni_health":
+                    continue
+                yield {"event": "omni_health", "data": json.dumps(data, ensure_ascii=False)}
+        except asyncio.CancelledError:
+            pass
+        finally:
+            pipeline.unsubscribe_sse(q)
+
+    return EventSourceResponse(event_generator())

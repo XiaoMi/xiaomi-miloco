@@ -1,0 +1,12 @@
+{
+  "omniHealth": {
+    "configInvalid": "omni 配置无效：{{message}}",
+    "retrying": "omni 服务暂不可用（{{message}}），正在重试…{{seconds}} 秒后下次探测",
+    "retryingNoTime": "omni 服务暂不可用（{{message}}），正在重试…",
+    "retryNow": "立即重试",
+    "retryingBtn": "重试中…",
+    "goToConfig": "到「模型」页修改",
+    "retryFailed": "重试失败",
+    "failuresCount": "{{n}} 次失败"
+  }
+}

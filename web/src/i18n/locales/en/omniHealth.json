@@ -1,0 +1,12 @@
+{
+  "omniHealth": {
+    "configInvalid": "Omni configuration is invalid: {{message}}",
+    "retrying": "Omni service is unavailable ({{message}}). Retrying in {{seconds}}s…",
+    "retryingNoTime": "Omni service is unavailable ({{message}}). Retrying…",
+    "retryNow": "Retry now",
+    "retryingBtn": "Retrying…",
+    "goToConfig": "Fix in Model tab",
+    "retryFailed": "Retry failed",
+    "failuresCount": "{{n}} failures"
+  }
+}

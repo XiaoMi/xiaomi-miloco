@@ -291,9 +291,38 @@ export interface OmniProfile extends OmniModelConfig {
   active: boolean;
 }
 
+/** omni 熔断器实时健康度（对齐后端 HealthSnapshot）。 */
+export interface OmniHealth {
+  /** ok=正常;warn=可恢复错(重试中);error=不可恢复错(配置无效,已软停)。 */
+  state: "ok" | "warn" | "error";
+  /** 错误机器码;state=ok 时为 null。 */
+  code:
+    | null
+    | "unreachable" | "timeout" | "http_error" | "rate_limited"
+    | "bad_key" | "not_found" | "rejected_authed" | "bad_response"
+    | "no_key";
+  /** 本地化文案。 */
+  message: string;
+  /** 当前非 ok 状态起始时间;ok 时为 0。 */
+  since_ms: number;
+  /** 累计连续失败次数;每次熔断关闭时清零。 */
+  consecutive_failures: number;
+  /** 下次自动探测时刻(unix ms);仅 warn 状态非空。 */
+  next_probe_at_ms: number | null;
+  /** 最近一次探测时刻(unix ms)。 */
+  last_probe_at_ms: number | null;
+  /** 最近一次探测结果。 */
+  last_probe_result: "ok" | "fail" | null;
+}
+
+/** active 字段扩展:附带熔断器的 health snapshot。 */
+export interface OmniActiveConfig extends OmniModelConfig {
+  health: OmniHealth;
+}
+
 /** GET /omni-config 返回：当前生效 active + 已存档案 profiles。 */
 export interface OmniConfigState {
-  active: OmniModelConfig;
+  active: OmniActiveConfig;
   profiles: OmniProfile[];
 }
 
