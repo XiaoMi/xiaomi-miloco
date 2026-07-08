@@ -217,11 +217,11 @@ class Adapter:
         if delivery.get("resolve_target") == "owner-channel":
             owner_session = _resolve_owner_session()
             if owner_session:
-                session_key = "owner"
                 session_id = owner_session
             else:
                 return _result(run_id="", status="no-channel")
-        session_id = _map_session(session_key, lane)
+        else:
+            session_id = _map_session(session_key, lane)
         timeout_s = max(wait_timeout_ms / 1000.0, 1.0) + _HTTP_BUFFER_S
 
         # 组装 messages: <system>(可选) + <user>
