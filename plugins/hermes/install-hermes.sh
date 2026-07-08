@@ -756,7 +756,7 @@ step 7 "重启 backend (supervisord)"
 info "  委托给 miloco-cli service start（管 supervisord / miloco-backend）"
 # Step 5 的 config set 可能已触发 backend 重启，此时 start 返回 already running 是正常的
 if ! START_OUTPUT=$(miloco-cli service start 2>&1); then
-  if echo "$START_OUTPUT" | grep -qi "already running"; then
+  if echo "$START_OUTPUT" | grep -qi "already"; then
     info "  backend 已在运行（Step 5 config set 已触发重启），跳过"
   else
     err "backend 启动失败: $START_OUTPUT"
