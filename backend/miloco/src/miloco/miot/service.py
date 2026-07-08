@@ -32,7 +32,7 @@ from miloco.middleware.exceptions import (
 from miloco.miot.client import MiotProxy, build_sub_device_names
 from miloco.miot.filter import (
     MAX_ENABLED_CAMERAS,
-    _load_schedule_map,
+    load_schedule_map,
     allowed_home_ids,
     camera_schedule_for,
     camera_schedule_paused,
@@ -992,7 +992,7 @@ class MiotService:
         out: list[dict] = []
         tz = deploy_timezone()
         now = datetime.now(tz)
-        schedule_map = _load_schedule_map(self._kv_repo)
+        schedule_map = load_schedule_map(self._kv_repo)
         for did, info in cameras.items():
             online = bool(getattr(info, "online", False)) and bool(
                 getattr(info, "lan_online", False)
@@ -1027,10 +1027,12 @@ class MiotService:
 
     async def set_camera_schedule(self, did: str, schedule: CameraSchedule) -> dict:
         """Set a camera's daily sensing schedule and hot-sync perception."""
-        cameras = await self._miot_proxy.get_cameras() or {}
-        if did not in cameras:
+        scoped = filter_by_home(
+            self._kv_repo, await self._miot_proxy.get_cameras() or {}
+        )
+        if did not in scoped:
             raise ValidationException(
-                f"Unknown camera did {did!r}; valid: {sorted(cameras.keys())}"
+                f"Unknown camera did {did!r}; valid: {sorted(scoped.keys())}"
             )
 
         normalized, changed = set_camera_schedule(
@@ -1096,19 +1098,10 @@ class MiotService:
             manual_final_enabled = (
                 (in_scope - denied) - set(disable_dids)
             ) | (set(enable_dids) & in_scope)
-            now = datetime.now(deploy_timezone())
-            schedule_map = _load_schedule_map(self._kv_repo)
-            final_enabled = {
-                d
-                for d in manual_final_enabled
-                if not camera_schedule_paused(
-                    camera_schedule_for(self._kv_repo, d, schedules=schedule_map), now
-                )
-            }
-            if len(final_enabled) > MAX_ENABLED_CAMERAS:
+            if len(manual_final_enabled) > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
                     f"最多同时启用 {MAX_ENABLED_CAMERAS} 台摄像头"
-                    f"（操作后将有 {len(final_enabled)} 台），"
+                    f"（操作后将有 {len(manual_final_enabled)} 台），"
                     f"请先禁用一台再启用新摄像头"
                 )
 

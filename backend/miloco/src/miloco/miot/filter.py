@@ -27,7 +27,7 @@ T = TypeVar("T")
 # /api/miot/status 下发）。用户主动 enable 超限直接报错（service.toggle_camera 校验）。
 MAX_ENABLED_CAMERAS = 4
 
-_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$")
 
 DEFAULT_CAMERA_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]
 DEFAULT_CAMERA_SCHEDULE = {
@@ -78,7 +78,7 @@ def _normalize_weekdays(raw_weekdays: object, *, enabled: bool) -> list[int]:
     return sorted(weekdays)
 
 
-def _load_schedule_map(kv_repo: KVRepo) -> dict[str, dict]:
+def load_schedule_map(kv_repo: KVRepo) -> dict[str, dict]:
     raw = kv_repo.get(ScopeConfigKeys.CAMERA_SCHEDULES_KEY) or "{}"
     try:
         value = json.loads(raw)
@@ -154,12 +154,12 @@ def camera_schedule_for(
     schedules: dict[str, dict] | None = None,
 ) -> dict:
     if schedules is None:
-        schedules = _load_schedule_map(kv_repo)
+        schedules = load_schedule_map(kv_repo)
     return normalize_camera_schedule(schedules.get(did))
 
 
 def set_camera_schedule(kv_repo: KVRepo, did: str, schedule: dict) -> tuple[dict, bool]:
-    schedules = _load_schedule_map(kv_repo)
+    schedules = load_schedule_map(kv_repo)
     current = normalize_camera_schedule(schedules.get(did))
     if (
         schedule.get("enabled") is False
@@ -194,16 +194,23 @@ def camera_schedule_paused(schedule: dict, now: datetime) -> bool:
     normalized = normalize_camera_schedule(schedule)
     if not normalized["enabled"]:
         return False
-    if now.weekday() not in normalized["weekdays"]:
-        return True
+
+    weekdays = set(normalized["weekdays"])
     minute = now.hour * 60 + now.minute
+    today = now.weekday()
+    yesterday = (today - 1) % 7
+
     for window in normalized["windows"]:
-        if _minute_in_window(
-            minute,
-            _minute_of_day(window["start"]),
-            _minute_of_day(window["end"]),
-        ):
-            return False
+        start = _minute_of_day(window["start"])
+        end = _minute_of_day(window["end"])
+        if start < end:
+            if today in weekdays and start <= minute < end:
+                return False
+        else:
+            if today in weekdays and minute >= start:
+                return False
+            if yesterday in weekdays and minute < end:
+                return False
     return True
 
 
@@ -315,7 +322,7 @@ def select_active_camera_dids(
     from miloco.utils.time_utils import deploy_timezone
 
     denied = denied_camera_dids(kv_repo)
-    schedules = _load_schedule_map(kv_repo) if apply_schedule else None
+    schedules = load_schedule_map(kv_repo) if apply_schedule else None
     now = datetime.now(deploy_timezone()) if apply_schedule else None
     result: list[str] = []
     for did, info in cameras.items():

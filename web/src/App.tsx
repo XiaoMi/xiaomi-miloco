@@ -244,10 +244,12 @@ function MainApp() {
                     e instanceof Error ? e.message : t("common.switchFailed"),
                     "warn",
                   );
+                  throw e;
+                } finally {
+                  scopeCameras.reload();
+                  cameras.reload();
+                  status.reload();
                 }
-                scopeCameras.reload();
-                cameras.reload();
-                status.reload();
               }}
             />
           </div>

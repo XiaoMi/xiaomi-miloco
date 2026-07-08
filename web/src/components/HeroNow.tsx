@@ -548,13 +548,17 @@ function CameraScheduleDialog({
   );
   const [error, setError] = useState<string | null>(null);
 
+  const normalizeTimeValue = (value: string) => value.trim().slice(0, 5);
+
   const updateWindow = (
     index: number,
     key: "start" | "end",
     value: string,
   ) => {
     setWindows((items) =>
-      items.map((item, i) => (i === index ? { ...item, [key]: value } : item)),
+      items.map((item, i) =>
+        i === index ? { ...item, [key]: normalizeTimeValue(value) } : item,
+      ),
     );
   };
   const removeWindow = (index: number) => {
@@ -585,7 +589,10 @@ function CameraScheduleDialog({
     await onSave({
       enabled: enabled && nextWindows.length > 0,
       weekdays,
-      windows: nextWindows,
+      windows: nextWindows.map((window) => ({
+        start: normalizeTimeValue(window.start),
+        end: normalizeTimeValue(window.end),
+      })),
     });
   };
 

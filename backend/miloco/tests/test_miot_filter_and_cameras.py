@@ -273,7 +273,7 @@ def test_normalize_camera_schedule_returns_independent_lists():
     assert default["windows"] == []
 
 
-def test_camera_schedule_weekdays_and_natural_day_cross_midnight():
+def test_camera_schedule_weekdays_and_cross_midnight_carryover():
     schedule = miot_filter.normalize_camera_schedule({
         "enabled": True,
         "weekdays": [0, 0],
@@ -284,15 +284,19 @@ def test_camera_schedule_weekdays_and_natural_day_cross_midnight():
     assert schedule["weekdays"] == [0]
     assert miot_filter.camera_schedule_paused(
         schedule,
-        datetime(2026, 6, 22, 6, 30, tzinfo=tz),  # Monday
+        datetime(2026, 6, 22, 6, 30, tzinfo=tz),  # Monday morning
+    ) is True
+    assert miot_filter.camera_schedule_paused(
+        schedule,
+        datetime(2026, 6, 22, 23, 30, tzinfo=tz),  # Monday evening
     ) is False
     assert miot_filter.camera_schedule_paused(
         schedule,
-        datetime(2026, 6, 22, 23, 30, tzinfo=tz),  # Monday
+        datetime(2026, 6, 23, 6, 30, tzinfo=tz),  # Tuesday morning (Monday carryover)
     ) is False
     assert miot_filter.camera_schedule_paused(
         schedule,
-        datetime(2026, 6, 23, 6, 30, tzinfo=tz),  # Tuesday
+        datetime(2026, 6, 23, 12, 0, tzinfo=tz),  # Tuesday afternoon
     ) is True
 
 
@@ -310,7 +314,7 @@ def test_next_camera_schedule_change_handles_weekday_midnight():
             datetime(2026, 6, 22, 23, 30, tzinfo=tz),  # Monday
             tz,
         ).isoformat(timespec="seconds")
-        == "2026-06-23T00:00:00+08:00"
+        == "2026-06-23T07:00:00+08:00"
     )
     assert (
         miot_filter.next_camera_schedule_change_at(
@@ -318,8 +322,18 @@ def test_next_camera_schedule_change_handles_weekday_midnight():
             datetime(2026, 6, 23, 12, 0, tzinfo=tz),  # Tuesday
             tz,
         ).isoformat(timespec="seconds")
-        == "2026-06-29T00:00:00+08:00"
+        == "2026-06-29T22:00:00+08:00"
     )
+
+
+def test_camera_schedule_accepts_optional_seconds():
+    schedule = miot_filter.normalize_camera_schedule({
+        "enabled": True,
+        "windows": [{"start": "08:00:00", "end": "20:00:59"}],
+    })
+    assert schedule["windows"] == [
+        {"start": "08:00:00", "end": "20:00:59"},
+    ]
 
 
 def test_camera_schedule_rejects_bad_and_overlapping_windows():
@@ -1595,7 +1609,7 @@ async def test_toggle_camera_enable_rejected_at_limit():
 
 
 @pytest.mark.asyncio
-async def test_toggle_camera_limit_counts_effective_enabled(monkeypatch):
+async def test_toggle_camera_limit_uses_manual_enabled_not_schedule_pause(monkeypatch):
     tz = ZoneInfo("Asia/Shanghai")
     monkeypatch.setattr("miloco.miot.service.deploy_timezone", lambda: tz)
     class FixedDateTime(datetime):
@@ -1621,9 +1635,8 @@ async def test_toggle_camera_limit_counts_effective_enabled(monkeypatch):
     cameras = {d: _camera(d, home_id="H1") for d in dids}
     svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
 
-    # 手动允许态有 LIMIT 台，但 paused 当前不在感知窗口；启用新相机后
-    # 有效投喂仍为 LIMIT 台，应通过。
-    await svc.toggle_camera([{"did": to_enable, "in_use": True}])
+    with pytest.raises(ValidationException, match="最多同时启用"):
+        await svc.toggle_camera([{"did": to_enable, "in_use": True}])
 
 
 @pytest.mark.asyncio
