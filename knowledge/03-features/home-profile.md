@@ -4,7 +4,7 @@
 
 AI 的每次对话默认是无记忆的。用户每次说"我爸爸有高血压"、"我们家有两个孩子在上小学"，下一次对话 AI 又要重新介绍。
 
-家庭记忆（home-profile）让 Miloco 记住家庭成员的喜好、习惯、身体状况、作息、家庭规则等长期知识，并在每次 Agent 对话时注入 system prompt，让 Agent 的回应更贴合这个家庭的实际情况。
+家庭记忆（home-profile）让 Miloco 记住家庭成员的喜好、习惯、身体状况、作息、家庭规则等长期知识。Agent 在对话中按需用 `home-profile list` 自取档案（不再随每轮 system prompt 注入），感知推理时档案也注入 Omni prompt，让回应与识别都更贴合这个家庭的实际情况。
 
 ---
 
@@ -12,8 +12,8 @@ AI 的每次对话默认是无记忆的。用户每次说"我爸爸有高血压"
 
 ### 能做什么
 
-- **长期知识注入**：每次 Agent turn 前，将家庭档案注入 system context，Agent 开口就带着家庭背景
-- **感知闭环**：档案同时注入 Omni prompt，让 VLM 在识别和描述时具备家庭背景，感知越丰富，档案越精确
+- **长期知识按需取用**：Agent 需要时用 `home-profile list` 自取家庭档案，据此贴合家庭背景作答（主 agent 上下文改注入「今日感知日志」，见 openclaw-integration.md）
+- **感知闭环**：档案注入 Omni prompt，让 VLM 在识别和描述时具备家庭背景，感知越丰富，档案越精确
 - **候选区审核**：新知识先进候选区积累证据，经审核或自动晋升后才生效，防止单次偶然观察污染长期记忆
 - **用户直告优先**：用户在对话中直接告知的事实（`source=user_told`）权重最高，不受过期约束
 - **被动感知触发**：用户在对话中提及家人喜好/习惯/身体状况/作息/家庭规则时，Agent 无需用户明确要求"记录"，直接静默写入档案
@@ -27,14 +27,14 @@ AI 的每次对话默认是无记忆的。用户每次说"我爸爸有高血压"
 
 ### 典型场景
 
-**场景 1 — 健康禁忌记忆**：用户对 Agent 说"我爸有高血压，饮食偏淡"。这条信息通过 `miloco-home-profile` Skill 写入正式档案，`HomeProfileService` 重新渲染 `profile.md`。之后 Agent 在推荐食谱、讨论外卖时，system prompt 中已含这条约束，Agent 自动就此调整建议，用户无需每次提醒。
+**场景 1 — 健康禁忌记忆**：用户对 Agent 说"我爸有高血压，饮食偏淡"。这条信息通过 `miloco-home-profile` Skill 写入正式档案，`HomeProfileService` 重新渲染 `profile.md`。之后 Agent 在推荐食谱、讨论外卖前，用 `home-profile list` 拉到这条约束并据此调整建议，用户无需每次提醒。
 
 **场景 2 — 作息规律积累**：感知流水线多次在晚间识别到"客厅无人、卧室有人走动"的场景。家庭记忆 Dreaming 的 Observe 步骤提取出候选知识"家庭通常 22:00 入睡"，经候选区积累证据后晋升为正式档案。此后夜间响铃时 Agent 会主动询问是否需要静音模式。
 
 ### 能力边界
 
-- 档案注入受 token 上限约束，超出时按权重截断（权重高的知识优先保留）
-- 候选区知识不直接影响 Agent 行为，需晋升到正式档案后才注入
+- 档案渲染受 token 上限约束，超出时按权重截断（权重高的知识优先保留）；Omni prompt 注入与 `home-profile list` 取用的都是这份截断后的档案
+- 候选区知识不直接影响 Agent 行为，需晋升到正式档案后才生效
 - 档案内容质量取决于感知日志的丰富程度和用户主动告知的频率
 - 档案规则/偏好是默认倾向而非硬约束；仅明确标注为底线/安全注意事项的条目优先于用户实时指令
 
@@ -61,8 +61,9 @@ AI 的每次对话默认是无记忆的。用户每次说"我爸爸有高血压"
 
 ```
 profile.md（$MILOCO_HOME/home-profile/profile.md）
-  ├─ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
-  │    helpers.ts::loadHomeProfile 读取文件 → 拼档案块 → 追加到 Agent system prompt
+  ├─ 主 agent（plugins/openclaw/src/hooks/prompt.ts）
+  │    不再随 system prompt 注入；agent 按需用 `home-profile list` 自取。
+  │    （before_prompt_build 的 append 区改注入当日感知日志，见 openclaw-integration.md）
   │
   └─ home_profile_loader.py（perception/engine/omni/home_profile_loader.py）
        → 注入 Omni prompt 动态层（感知推理时用）
@@ -73,11 +74,11 @@ profile.md（$MILOCO_HOME/home-profile/profile.md）
 **TypeScript 侧（OpenClaw 插件，`plugins/openclaw/src/home-profile/`）**
 
 - **`scheduler.ts`**：在 `gateway_start` Hook 中调用 OpenClaw Cron 服务的 `reconcile` 流程，以 `[miloco:home-profile]` 标签管理受管 cron 任务。插件重启后自动对齐到代码定义的最新状态，避免孤儿 cron 积累。
-- **`helpers.ts`**：同步读取 `profile.md`，不存在时返回占位内容，供注入 Hook 调用。
+- **`helpers.ts`**：`readFileSafe`（安全只读，缺失返回空串）+ `habitSuggestionsPath`；档案本身改由 agent 用 `home-profile list` 自取，插件不再读 `profile.md` 拼进 system prompt。
 - **`injection.ts`**：提供待回应习惯建议块（`buildPendingSuggestionBlock`），供注入 Hook 追加；内容取自 `suggestions.ts` 的待回应状态。
 - **`suggestions.ts`**：习惯建议状态库 + `miloco_habit_suggest` 工具。承接每日 `miloco-habit-suggest` cron 的「扫描家庭档案 → IM 推荐 → 用户认可后建任务」闭环，用持久状态把互不共享上下文的扫描会话与回应会话衔接起来；防骚扰闸门（限流、去重、拒绝后不再追问、超期自动作废）由工具裁定拒绝越界写入，不靠扫描 Agent 自觉。其状态库即下文「已成任务的习惯剔除渲染」所依赖的 `task-suggestions.json`（与 Python 端档案文件同目录、文件名独立）。任务创建侧见 [任务管理](task-management.md)。
 
-> 档案注入 Hook 本身在 `plugins/openclaw/src/hooks/prompt.ts`（不在 `home-profile/`）：唯一的 `before_prompt_build` Hook，每次 Agent turn 前读 `profile.md` 拼档案块追加到 system prompt，并注入被动记录触发规则（用户提及家庭信息时 Agent 静默写入档案）。
+> 系统上下文注入 Hook 本身在 `plugins/openclaw/src/hooks/prompt.ts`（不在 `home-profile/`）：唯一的 `before_prompt_build` Hook，每次 Agent turn 前装配系统上下文并追加「今日感知日志」块（`buildPerceptionLogBlock`），同时注入被动记录触发规则（用户提及家庭信息时 Agent 静默写入档案）。家庭档案不再随此 Hook 注入，改由 agent 按需 `home-profile list` 自取。
 
 **HomeProfileService**（`home_profile/service.py`）
 
@@ -97,22 +98,22 @@ profile.md（$MILOCO_HOME/home-profile/profile.md）
 
 **已成任务的习惯剔除渲染**：习惯一旦被显式建成任务（TS 端 `task-suggestions.json` 记 `status=created`），其源档案条目在 commit 渲染 `profile.md` 时被剔除，避免与任务重复展示；条目本身仍完整保存在 `profile.json`。
 
-**注入机制双路**：档案渲染为 `profile.md` 后通过两条独立路径注入：① Agent turn 前经 `before_prompt_build` Hook 追加到 system prompt；② 每次感知推理时注入 Omni prompt 动态层。这形成感知→记忆→感知的正反馈闭环：档案越丰富，VLM 识别描述越精准。
+**档案取用双路**：档案渲染为 `profile.md` 后通过两条独立路径消费：① 主 agent 在对话中按需用 `home-profile list` 自取（主 agent 上下文改由 `before_prompt_build` Hook 注入「今日感知日志」）；② 每次感知推理时注入 Omni prompt 动态层。②形成感知→记忆→感知的正反馈闭环：档案越丰富，VLM 识别描述越精准。
 
 **Cron reconcile 意图**：`scheduler.ts` 不直接 add/delete cron，而是先 diff 已有受管任务与代码中 `kCronTasks` 的差异，再增/改/删对齐。插件重启、升级后自动收敛，避免孤儿 cron 积累。
 
 ### 如果我要修改家庭记忆相关功能
 
-| 修改目标                          | 去看哪个文件                                                                              |
-| --------------------------------- | ----------------------------------------------------------------------------------------- |
-| 修改档案写入/权重逻辑             | `home_profile/service.py`（HomeProfileService）                                           |
-| 修改档案存储格式                  | `home_profile/store.py`                                                                   |
-| 修改 `profile.md` 渲染 / 分组格式 | `home_profile/render.py`                                                                  |
-| 修改档案 Agent 注入方式           | `plugins/openclaw/src/hooks/prompt.ts`（注入 Hook；档案读取见 `home-profile/helpers.ts`） |
-| 修改档案 Omni 注入方式            | `perception/engine/omni/home_profile_loader.py`                                           |
-| 修改 cron 调度配置                | `plugins/openclaw/src/home-profile/scheduler.ts`（`kCronTasks`）                          |
-| 修改全新安装 onboarding 触发      | `home_profile/onboarding_trigger.py`（OnboardingTriggerService）                          |
-| 修改家庭档案 API                  | `home_profile/router.py`                                                                  |
+| 修改目标                          | 去看哪个文件                                                                                                                               |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| 修改档案写入/权重逻辑             | `home_profile/service.py`（HomeProfileService）                                                                                            |
+| 修改档案存储格式                  | `home_profile/store.py`                                                                                                                    |
+| 修改 `profile.md` 渲染 / 分组格式 | `home_profile/render.py`                                                                                                                   |
+| 修改档案 Agent 取用方式           | 档案改由 agent 用 `home-profile list` 自取（见 `miloco-home-profile` skill）；主 agent 上下文注入见 `plugins/openclaw/src/hooks/prompt.ts` |
+| 修改档案 Omni 注入方式            | `perception/engine/omni/home_profile_loader.py`                                                                                            |
+| 修改 cron 调度配置                | `plugins/openclaw/src/home-profile/scheduler.ts`（`kCronTasks`）                                                                           |
+| 修改全新安装 onboarding 触发      | `home_profile/onboarding_trigger.py`（OnboardingTriggerService）                                                                           |
+| 修改家庭档案 API                  | `home_profile/router.py`                                                                                                                   |
 
 ### 家庭档案相关 API 路径
 
@@ -122,6 +123,6 @@ profile.md（$MILOCO_HOME/home-profile/profile.md）
 
 **上游**：`miloco-perception-digest` 周期从感知日志提取摘要，是家庭记忆的主要知识来源之一。用户对话中 Agent 通过 `miloco-home-profile` Skill 直接写入档案。全新安装且 person 表与正式档案均为空，是 `OnboardingTriggerService`（见上「核心模块」）主动发起 onboarding 访谈邀请的触发条件之一。
 
-**下游**：每次 Agent turn 前，`hooks/prompt.ts` 的 `before_prompt_build` Hook 将档案注入 Agent system context。感知推理时，`home_profile_loader.py` 将档案注入 Omni prompt。
+**下游**：主 agent 在对话中按需用 `home-profile list` 自取档案（`hooks/prompt.ts` 的 `before_prompt_build` Hook 改注入「今日感知日志」，不再注入档案）。感知推理时，`home_profile_loader.py` 将档案注入 Omni prompt。
 
 **共享**：`person/router.py` 与 `HomeProfileService` 双向联动——成员新增 / 改名改角色 / 注册成功后级联触发一次 `commit()`，重渲染 `profile.md`（已绑定 `subject_id` 的条目 `subject_name` 在 commit 内按成员当前名字自动纠偏）；成员删除则调 `remove_subject` 联动清理绑定该成员的条目。
