@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool
 
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
@@ -816,9 +816,9 @@ async def list_omni_models(
 
 
 class PerceptionConfigBody(BaseModel):
-    video_short_edge: int | None = None
-    omni_fps: int | None = None
-    window_size: int | None = None
+    video_short_edge: int | None = Field(default=None, ge=64, le=2160)
+    omni_fps: int | None = Field(default=None, ge=1, le=30)
+    window_size: int | None = Field(default=None, ge=1, le=60)
 
 
 def _perception_config_payload() -> dict:
@@ -842,10 +842,10 @@ def get_perception_config(current_user: str = Depends(verify_token)):
 
 @router.put(
     "/perception-config",
-    summary="修改感知参数（写 config.json，重启生效）",
+    summary="修改感知参数（写 config.json 并重启感知引擎使其生效）",
     response_model=NormalResponse,
 )
-def put_perception_config(body: PerceptionConfigBody, current_user: str = Depends(verify_token)):
+async def put_perception_config(body: PerceptionConfigBody, current_user: str = Depends(verify_token)):
     update: dict = {}
     if body.video_short_edge is not None:
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["video_short_edge"] = body.video_short_edge
@@ -853,6 +853,14 @@ def put_perception_config(body: PerceptionConfigBody, current_user: str = Depend
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    payload = _perception_config_payload()
     if update:
         update_shared_config(**update)
-    return NormalResponse(code=0, message="ok", data=_perception_config_payload())
+        # omni_fps / window_size 是引擎/runner 构造时 cache 的，写 config 后需重启才生效
+        # （video_short_edge 每帧实时读 settings，不重启也生效）。同步等重启完成再返回。
+        # config 已写盘(不可回滚)；重启若失败仅带 restart_ok=False，不冒泡成 500——
+        # 否则前端会把「已保存+重启失败」误报成「保存失败」，误导用户以为改动丢失。
+        restart_ok = await manager.perception_service.apply_config_restart()
+        payload = _perception_config_payload()
+        payload["restart_ok"] = restart_ok
+    return NormalResponse(code=0, message="ok", data=payload)

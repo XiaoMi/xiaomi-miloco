@@ -3,8 +3,6 @@ import { useTranslation } from "react-i18next";
 import {
   getPerceptionConfig,
   updatePerceptionConfig,
-  pausePerception,
-  resumePerception,
   type PerceptionConfig,
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
@@ -52,20 +50,21 @@ export function SettingsDrawer({ open, onClose }: Props) {
   async function handleSaveAndRestart() {
     setBusy(true);
     try {
+      // PUT 后端会同步写 config + 重启引擎使参数生效，前端不再单独 pause/resume。
+      // config 写盘不可回滚：写盘成功但重启失败时后端返回 restart_ok=false（非报错），
+      // 此时提示「已保存但需手动重启」而非「保存失败」，避免误导用户以为改动丢失。
       const updated = await updatePerceptionConfig({
         video_short_edge: videoShortEdge,
         omni_fps: omniFps,
         window_size: windowSize,
       });
       setConfig(updated);
-      try {
-        await pausePerception();
-        await resumePerception();
-        toast(t("settings.applySuccess"), "ok");
-        onClose();
-      } catch {
+      if (updated.restart_ok === false) {
         toast(t("settings.restartFailed"), "warn");
+      } else {
+        toast(t("settings.applySuccess"), "ok");
       }
+      onClose();
     } catch {
       toast(t("settings.saveFailed"), "danger");
     } finally {
