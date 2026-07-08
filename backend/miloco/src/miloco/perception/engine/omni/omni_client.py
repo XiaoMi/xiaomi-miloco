@@ -192,6 +192,11 @@ async def call_omni(
             latency_ms=(time.monotonic() - t0) * 1000,
             error=error,
             model=config.model,
+            inference_params={
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "max_tokens": config.max_completion_tokens,
+            },
         )
 
 
@@ -371,4 +376,9 @@ async def call_omni_stream(
             latency_ms=(time.monotonic() - t0) * 1000,
             error=error,
             model=config.model,
+            inference_params={
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "max_tokens": config.max_completion_tokens,
+            },
         )

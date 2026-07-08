@@ -2,6 +2,13 @@
 
 <p align="center"><a href="README.md">English</a> | 简体中文</p>
 
+<p align="center">
+  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases/latest"><img src="https://img.shields.io/github/v/release/XiaoMi/xiaomi-miloco?label=release" alt="最新版本" /></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-Xiaomi%20Miloco-blue" alt="许可协议" /></a>
+  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases"><img src="https://img.shields.io/github/downloads/XiaoMi/xiaomi-miloco/total" alt="下载量" /></a>
+  <a href="https://github.com/XiaoMi/xiaomi-miloco/stargazers"><img src="https://img.shields.io/github/stars/XiaoMi/xiaomi-miloco" alt="Star 数" /></a>
+</p>
+
 小米面向未来的全屋智能 AI 开源方案，以米家摄像头的画面与声音为全模态感知入口，以自研 MiMo 大模型为智能大脑，以 Agent 插件形式运行在 [OpenClaw](https://openclaw.ai) 之上，联动全屋设备带来主动智能体验。
 
 Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控设备，能将"模糊又长期"的目标拆解成可追踪的家庭任务，能识别家庭成员、依托家庭记忆为每位成员提供个性化服务——查询和控制设备、把家调到成员舒适的状态，或在合适的时机给出有用的提醒。
@@ -10,6 +17,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 ## 最新动态
 
+- **2026-07-03** — 发布 v2026.7.3：新增事件反馈打包，以及全新安装时主动发起的对话式初始化引导；并改进面板内模型配置管理、感知稳定性（非人误检防护）、相机生命周期与 CLI 诊断。
 - **2026-06-18** — Miloco 2.0 正式发布：重构为 OpenClaw 插件，新增通用常识、身份识别、家庭记忆、家庭任务、主动智能、家庭面板。详见下方[核心特性](#核心特性)。
 
 ## 核心特性
@@ -28,6 +36,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 - **硬件**：建议内存 ≥ 4GB，存储 ≥ 256GB，7×24 常驻运行，推荐 Mac mini
 - **操作系统**：macOS / Linux（Windows 请在 WSL 中运行）
+- **OpenClaw** — Miloco 以插件形式运行其上，需先[安装](https://openclaw.ai)且版本 ≥ 2026.5.2
 - **小米账号** + 已接入米家的设备
 - **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro（在 OpenClaw 中配置）
 

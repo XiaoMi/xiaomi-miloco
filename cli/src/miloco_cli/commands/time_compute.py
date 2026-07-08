@@ -2,9 +2,10 @@
 
 LLM 只负责"识别 user 表达对应哪种 anchor"，本工具负责"按 anchor 算 ISO"。
 
-时区按 ``deploy_timezone()`` 解读:优先 ``MILOCO_TIMEZONE`` env,其次系统 IANA 反查
-(``TZ`` env / ``/etc/timezone`` / ``/etc/localtime``),兜底 ``Asia/Shanghai``。
-跨时区部署天然支持(DST 时区由 ZoneInfo 处理)。
+时区按共享 ``deploy_tz.deploy_timezone()`` 解读:显式配置（``MILOCO_TIMEZONE`` env >
+``$MILOCO_HOME/config.json`` ``timezone``,与 backend settings 同源）> 系统 IANA 反查
+(``TZ`` env / ``/etc/timezone`` / ``/etc/localtime`` symlink / 内容反查),兜底 OS 本地
+偏移——绝不猜 Asia/Shanghai。跨时区部署天然支持(DST 时区由 ZoneInfo 处理)。
 
 9 个 anchor primitives：
 - ``end_of_day``                  今日 23:59:59
@@ -20,77 +21,20 @@ LLM 只负责"识别 user 表达对应哪种 anchor"，本工具负责"按 ancho
 输出：``{ok: true, iso: "..."}`` 或 ``{ok: false, error: "...", detail?: "..."}``。
 """
 
-import functools
 import json
-import logging
-import os
 import re
 import sys
-from datetime import datetime, timedelta, tzinfo
-from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import click
 
-_logger = logging.getLogger(__name__)
-_FALLBACK_TZ = ZoneInfo("Asia/Shanghai")
-_warned_no_iana = False
+# 部署时区解析已升级并迁移到共享模块 deploy_tz(新增 config.json ``timezone`` 优先级、
+# /etc/localtime 内容反查、OS 本地偏移兜底,与 backend time_utils 完全同序同兜底);
+# 此处 re-export 保持既有 import 路径兼容(tests / 旧调用方 from time_compute import)。
+from miloco_cli.deploy_tz import deploy_timezone
 
-
-@functools.lru_cache(maxsize=1)
-def _system_iana_tz() -> ZoneInfo | None:
-    """读 ``TZ`` env / ``/etc/timezone`` / ``/etc/localtime`` symlink → ``ZoneInfo``。
-
-    进程级缓存。返回 ``ZoneInfo`` 而非固定偏移,DST 规则内建生效。全失败返回 ``None``。
-    """
-    if name := os.environ.get("TZ"):
-        try:
-            return ZoneInfo(name)
-        except ZoneInfoNotFoundError:
-            pass
-    p = Path("/etc/timezone")
-    if p.is_file():
-        try:
-            return ZoneInfo(p.read_text().strip())
-        except (ZoneInfoNotFoundError, OSError):
-            pass
-    p = Path("/etc/localtime")
-    if p.is_symlink():
-        try:
-            target = os.readlink(p)
-            # rfind:防止 target 路径中其他位置出现 "zoneinfo" 子串切错位置。
-            idx = target.rfind("zoneinfo/")
-            if idx >= 0:
-                return ZoneInfo(target[idx + len("zoneinfo/") :])
-        except (ZoneInfoNotFoundError, OSError):
-            pass
-    return None
-
-
-def deploy_timezone() -> tzinfo:
-    """部署时区。优先级:
-
-    1. ``MILOCO_TIMEZONE`` env (CLI 不读 backend ``config.json``,仅 env)
-    2. 系统 IANA 反查 (``TZ`` / ``/etc/timezone`` / ``/etc/localtime``)
-    3. 兜底 ``Asia/Shanghai`` + warning
-
-    第 2 步必须拿 IANA 名(而非 ``datetime.now().astimezone().tzinfo`` 那种固定偏移),
-    DST 区跨切换日才不会偏 1 小时。
-    """
-    if name := os.environ.get("MILOCO_TIMEZONE"):
-        return ZoneInfo(name)
-    if iana := _system_iana_tz():
-        return iana
-    global _warned_no_iana
-    if not _warned_no_iana:
-        _logger.warning(
-            "Could not detect system IANA timezone; falling back to Asia/Shanghai. "
-            "If running outside China, set MILOCO_TIMEZONE to your IANA zone name "
-            "(e.g. America/Los_Angeles, Europe/London)."
-        )
-        _warned_no_iana = True
-    return _FALLBACK_TZ
+__all__ = ["compute_anchor", "deploy_timezone", "time_compute_cmd"]
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$")
 _MONTH_DAY_RE = re.compile(r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")

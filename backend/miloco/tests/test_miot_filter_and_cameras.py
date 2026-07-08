@@ -321,6 +321,94 @@ async def test_switch_home_persists_through_kv():
     assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H2"]
 
 
+async def _drain_reset(mock, timeout: float = 1.0) -> None:
+    """switch_home 的 reset 走 fire-and-forget 后台任务，轮询等它跑完（或超时）。"""
+    import time as _t
+
+    deadline = _t.monotonic() + timeout
+    while _t.monotonic() < deadline:
+        if mock.await_count:
+            return
+        await asyncio.sleep(0.01)
+
+
+def _kv_with_home(home_id: str) -> "_FakeKV":
+    """预置某家庭为启用，避免 list_homes 兜底自动选家干扰 reset 计数。"""
+    return _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps([home_id])})
+
+
+@pytest.mark.asyncio
+async def test_switch_home_resets_agent_sessions():
+    """启用家庭真的变化时，后台批量 reset miloco session，传入 MILOCO_SESSION_KEYS 全集。"""
+    from unittest.mock import patch
+
+    from miloco.dispatch import MILOCO_SESSION_KEYS
+
+    # 预置 H1 启用 → list_homes 不会兜底自动切；switch 到 H2 才是唯一一次启用集变化。
+    svc = _make_service(
+        devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H1")
+    )
+    reset = AsyncMock(return_value={"reset": MILOCO_SESSION_KEYS, "failed": []})
+    with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
+        res = await svc.switch_home("H2")
+        await _drain_reset(reset)
+
+    assert {h["home_id"]: h["in_use"] for h in res}["H2"] is True
+    reset.assert_awaited_once_with(MILOCO_SESSION_KEYS)
+
+
+@pytest.mark.asyncio
+async def test_switch_home_noop_when_already_active_skips_reset():
+    """切到"已是当前唯一启用"的家庭 → 启用集没变 → 不 reset，保住热上下文。"""
+    from unittest.mock import patch
+
+    svc = _make_service(
+        devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H2")
+    )
+    reset = AsyncMock()
+    with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
+        res = await svc.switch_home("H2")  # 目标已启用
+        await _drain_reset(reset, timeout=0.2)
+
+    assert {h["home_id"]: h["in_use"] for h in res}["H2"] is True
+    reset.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_switch_home_reset_failure_is_swallowed():
+    """reset 失败（openclaw 不可达）只 WARN，绝不打断切换本身。"""
+    from unittest.mock import patch
+
+    svc = _make_service(
+        devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H1")
+    )
+    reset = AsyncMock(side_effect=RuntimeError("openclaw down"))
+    with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
+        res = await svc.switch_home("H2")  # 不抛异常
+        await _drain_reset(reset)
+
+    assert {h["home_id"]: h["in_use"] for h in res}["H2"] is True
+    reset.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_list_homes_fallback_auto_switch_resets_sessions():
+    """list_homes 兜底自动切换（选中家失效）也触发 reset——与显式切换同一 bug class。"""
+    from unittest.mock import patch
+
+    # 启用集 = {H_gone}（已从账号消失），可见家庭只有 H1/H2 → 无交集 → 兜底选 H1。
+    svc = _make_service(
+        devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H_gone")
+    )
+    reset = AsyncMock()
+    with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
+        homes = await svc.list_homes()
+        await _drain_reset(reset)
+
+    assert {h["home_id"]: h["in_use"] for h in homes}["H1"] is True
+    reset.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_switch_home_rejects_unknown():
     svc = _make_service(devices={"d1": _home("H1")})

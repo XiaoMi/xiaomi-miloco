@@ -45,6 +45,12 @@ _ROUTE: dict[EventType, tuple[str, str, int]] = {
     "onboarding": ("agent:main:miloco", "miloco-interactive", 30),
 }
 
+# 去重后的 miloco session 全集（保持插入序），供切换家庭时批量 reset 用——
+# 以 _ROUTE 为唯一事实源，避免在别处手抄 sessionKey 造成漂移。
+MILOCO_SESSION_KEYS: list[str] = list(
+    dict.fromkeys(session_key for session_key, _lane, _prio in _ROUTE.values())
+)
+
 # 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})
 

@@ -748,3 +748,18 @@ async def test_delivered_false_on_no_channel_status(patched, monkeypatch):
 
     assert fut.result() is False
     assert calls == 1  # 正常 HTTP 返回，不走传输重试
+
+
+def test_miloco_session_keys_derived_from_route():
+    """MILOCO_SESSION_KEYS = _ROUTE 去重后的 sessionKey 全集（供切换家庭批量 reset）。
+    以 _ROUTE 为唯一事实源，别处手抄会漂移。"""
+    from miloco.dispatch.dispatcher import MILOCO_SESSION_KEYS
+
+    assert MILOCO_SESSION_KEYS == [
+        "agent:main:miloco",
+        "agent:main:miloco-rule",
+        "agent:main:miloco-suggest",
+    ]
+    # 无重复，且是 _ROUTE 里 sessionKey 的去重集合。
+    assert len(MILOCO_SESSION_KEYS) == len(set(MILOCO_SESSION_KEYS))
+    assert set(MILOCO_SESSION_KEYS) == {sk for sk, _, _ in disp_mod._ROUTE.values()}

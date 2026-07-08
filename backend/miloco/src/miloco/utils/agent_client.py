@@ -87,6 +87,32 @@ async def call_agent_webhook(
     return result.get("data")
 
 
+async def reset_agent_sessions(
+    session_keys: list[str],
+    *,
+    delete_transcript: bool = True,
+    timeout: float = 10.0,
+) -> Any:
+    """批量重置（删除）指定 agent session：调插件 ``reset_sessions`` webhook。
+
+    用于切换家庭时清掉旧家庭遗留的 miloco 会话上下文。``session_keys`` 空则直接短路
+    （不发请求）。传输 / 结构化失败沿用 :func:`call_agent_webhook` 抛
+    :class:`AgentWebhookException`——本函数不兜底，由调用方（switch_home 的后台任务）
+    捕获并降级为 WARN，绝不影响切换本身。返回 webhook 的 ``data``
+    （``{"reset": [...], "failed": [...]}``）。
+    """
+    if not session_keys:
+        return None
+    return await call_agent_webhook(
+        "reset_sessions",
+        {
+            "sessionKeys": list(session_keys),
+            "deleteTranscript": delete_transcript,
+        },
+        timeout=timeout,
+    )
+
+
 async def run_agent_turn(
     text: str,
     *,
