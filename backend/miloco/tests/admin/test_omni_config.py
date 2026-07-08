@@ -13,7 +13,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from miloco.admin.router import router
 
-
 # 模块 import 时立刻抓一份真实的 probe_omni 引用,避免被 autouse mock 覆盖后 real_probe fixture 拿到 mock 版
 from miloco.perception.engine.omni.probe import probe_omni as _real_probe_omni
 

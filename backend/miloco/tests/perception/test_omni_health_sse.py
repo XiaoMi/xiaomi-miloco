@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import asdict
 
 import pytest
-
 from miloco.perception.engine.omni.circuit_breaker import (
     OmniCircuitBreaker,
     get_omni_circuit_breaker,

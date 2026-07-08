@@ -5,10 +5,7 @@ from __future__ import annotations
 import json
 
 import httpx
-import pytest
-
 from miloco.perception.engine.omni.error_classifier import (
-    ClassifiedError,
     ErrorCategory,
     classify_exception,
     classify_response,

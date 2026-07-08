@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import httpx
-import pytest
-
 from miloco.perception.engine.omni import probe
 
 

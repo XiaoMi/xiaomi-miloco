@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 
 import pytest
-
 from miloco.perception.engine.omni.circuit_breaker import (
     CircuitOpenError,
     CircuitState,

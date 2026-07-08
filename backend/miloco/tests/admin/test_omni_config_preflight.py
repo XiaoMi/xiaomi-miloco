@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from miloco.admin.router import router
 
-
 # ─── 复用 test_omni_config.py 的 fixture 集合(简化版) ────────────────────────
 
 
@@ -209,6 +208,7 @@ def test_get_includes_health(client, mock_probe):
 def test_get_health_reflects_open_config(client, mock_probe):
     """熔断到 OPEN_CONFIG 后 GET 里 health.state == error。"""
     import asyncio
+
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
     from miloco.perception.engine.omni.error_classifier import (
         ClassifiedError,
@@ -249,6 +249,7 @@ def test_retry_open_recoverable_probes_and_recovers(client, mock_probe):
         },
     )
     import asyncio
+
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
     from miloco.perception.engine.omni.error_classifier import (
         ClassifiedError,
@@ -284,6 +285,7 @@ def test_retry_open_recoverable_probe_still_fails_stays_warn(client, mock_probe)
         },
     )
     import asyncio
+
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
     from miloco.perception.engine.omni.error_classifier import (
         ClassifiedError,
@@ -320,6 +322,7 @@ def test_retry_open_config_bad_key_stays_error(client, mock_probe):
         },
     )
     import asyncio
+
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
     from miloco.perception.engine.omni.error_classifier import (
         ClassifiedError,
@@ -344,6 +347,7 @@ def test_retry_no_key_returns_no_key(client, mock_probe):
     """没配 key 时 retry 直接标记 no_key 错误。"""
     # 让 cb 先进入 warn(否则 retry 会 noop)
     import asyncio
+
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
     from miloco.perception.engine.omni.error_classifier import (
         ClassifiedError,

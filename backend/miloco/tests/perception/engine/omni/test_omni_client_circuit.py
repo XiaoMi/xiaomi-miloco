@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import httpx
 import pytest
-
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni import omni_client
 from miloco.perception.engine.omni.circuit_breaker import (
@@ -179,7 +178,7 @@ async def test_call_omni_bad_response_non_dict(monkeypatch):
 
 async def test_resolve_live_config_no_change_keeps_state(monkeypatch):
     """三元组不变时不动熔断。"""
-    from miloco.config import get_settings, reset_settings
+    from miloco.config import reset_settings
 
     reset_settings()
     cb = get_omni_circuit_breaker()
@@ -199,7 +198,7 @@ async def test_resolve_live_config_no_change_keeps_state(monkeypatch):
 
 async def test_resolve_live_config_change_resets_breaker(monkeypatch):
     """settings.model.omni 三元组变化时清熔断。"""
-    from miloco.config import get_settings, reset_settings
+    from miloco.config import reset_settings
 
     reset_settings()
     cb = get_omni_circuit_breaker()
