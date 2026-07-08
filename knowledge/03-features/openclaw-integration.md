@@ -76,7 +76,7 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 ```
 
 > 家庭档案 `profile.md` 不再随主 agent system prompt 注入；agent 需要时用 `home-profile list` 自取。
-> 感知日志由 `miloco-perception-digest` cron 归档，见 [感知记忆](./perception.md) 与该 skill。
+> 感知日志由 `miloco-perception-digest` cron 归档，见 [感知流水线](./perception-pipeline.md) 与该 skill。
 
 ### 插件注册点全貌
 
