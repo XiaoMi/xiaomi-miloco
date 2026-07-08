@@ -8,6 +8,8 @@ Responsible for database initialization, connection management and basic operati
 
 import logging
 import sqlite3
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
@@ -16,8 +18,9 @@ from miloco.config import get_settings
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# 发布版 v1 新基线。后续版本升级走 PRAGMA user_version 步进迁移。
-_DB_SCHEMA_VERSION = 1
+# 当前 schema 版本。fresh-build 直接落到此值; 老库启动时按 _SCHEMA_MIGRATIONS
+# 步进跑到此值。历史基线 v1 (cron 挪出 task_link + rule 加 FK CASCADE 前)。
+_DB_SCHEMA_VERSION = 2
 
 
 class SQLiteConnector:
@@ -109,10 +112,14 @@ class SQLiteConnector:
                         self._create_task_table(conn)
                         tables_created.append("task")
 
-                    if "task_link" not in existing_tables:
-                        logger.info("task_link table not found, creating...")
-                        self._create_task_link_table(conn)
-                        tables_created.append("task_link")
+                    # task_link 表在 v2 已废弃 (rule 关联搬到 rule.task_id,
+                    # cron 关联搬到 cron 表)。老 v1 库启动时 task_link 表已存在,
+                    # 会在 _migrate_v1_to_v2 里被 DROP; v2 fresh-build 直接不建。
+
+                    if "cron" not in existing_tables:
+                        logger.info("cron table not found, creating...")
+                        self._create_cron_table(conn)
+                        tables_created.append("cron")
 
                     if "device_lru" not in existing_tables:
                         logger.info("device_lru table not found, creating...")
@@ -162,16 +169,6 @@ class SQLiteConnector:
                             create_fn(conn)
                             tables_created.append(tbl)
 
-                    # 走到兜底分支的老库可能 user_version=0(无版本号),
-                    # 钉到当前基线;已有版本号的库(未来 1.x 升级路径)不动。
-                    current_version = cursor.execute(
-                        "PRAGMA user_version"
-                    ).fetchone()[0]
-                    if current_version == 0:
-                        conn.execute(
-                            f"PRAGMA user_version = {_DB_SCHEMA_VERSION}"
-                        )
-
                     # If new tables were created, commit transaction
                     if tables_created:
                         conn.commit()
@@ -179,6 +176,36 @@ class SQLiteConnector:
                     else:
                         conn.commit()
                         logger.info("All required tables already exist")
+
+                    # PRAGMA user_version 步进迁移: v1 老库跑一次 _migrate_v1_to_v2
+                    # 到 v2, 未来 v3 时补 {3: _migrate_v2_to_v3}。函数内部
+                    # 单事务原子 (业务 DML + PRAGMA user_version 同 COMMIT),
+                    # 抛异常 → backend fail-fast, 运维介入。
+                    current_version = cursor.execute(
+                        "PRAGMA user_version"
+                    ).fetchone()[0]
+                    if current_version == 0:
+                        # v1 老库从没显式写过 PRAGMA user_version, 但 task_link
+                        # 表必然存在 (v1 schema 包含它); 反之若既没版本号也没
+                        # task_link, 说明是"partial 缺表兜底 / fresh 后手工干预"
+                        # 场景, 直接钉到当前基线, 不跑迁移。
+                        if "task_link" in existing_tables:
+                            current_version = 1
+                            conn.execute("PRAGMA user_version = 1")
+                            conn.commit()
+                        else:
+                            conn.execute(
+                                f"PRAGMA user_version = {_DB_SCHEMA_VERSION}"
+                            )
+                            conn.commit()
+                            current_version = _DB_SCHEMA_VERSION
+                    for target in range(
+                        current_version + 1, _DB_SCHEMA_VERSION + 1
+                    ):
+                        logger.info(
+                            "running schema migration to v%d", target
+                        )
+                        _SCHEMA_MIGRATIONS[target](conn)
 
                     logger.info("Database loaded successfully: %s", self.db_path)
             else:
@@ -207,10 +234,10 @@ class SQLiteConnector:
         self._create_biometric_table(conn)
         self._create_perception_log_table(conn)
         self._create_meaningful_events_table(conn)
+        self._create_task_table(conn)
         self._create_rule_table(conn)
         self._create_rule_log_table(conn)
-        self._create_task_table(conn)
-        self._create_task_link_table(conn)
+        self._create_cron_table(conn)
         self._create_device_lru_table(conn)
         self._create_token_usage_table(conn)
         self._create_token_usage_daily_table(conn)
@@ -344,13 +371,16 @@ class SQLiteConnector:
         logger.info("Meaningful events table created successfully")
 
     def _create_rule_table(self, conn: sqlite3.Connection) -> None:
-        """Create rule table for the rule system (V3 schema).
+        """Create rule table for the rule system (V3 schema, v2 form).
 
         See rule-design.md §4.1 for column semantics.
 
         actions / on_enter_actions / on_exit_actions store JSON lists of
         RuleAction objects ({did, iid, value/params, idempotent,
         cooldown_minutes}).
+
+        v2 form: task_id NOT NULL + FK CASCADE to task. Old v1 databases go
+        through _migrate_v1_to_v2 table-rebuild.
         """
         cursor = conn.cursor()
         # duration_ratio DEFAULT 0.8 是历史值,与应用层 settings 0.6 故意不同步;
@@ -359,7 +389,7 @@ class SQLiteConnector:
             CREATE TABLE IF NOT EXISTS rule (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                task_id TEXT,
+                task_id TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'event',
                 lifecycle TEXT NOT NULL DEFAULT 'permanent',
                 enabled BOOLEAN DEFAULT 1,
@@ -376,13 +406,74 @@ class SQLiteConnector:
                 duration_seconds INTEGER,
                 duration_ratio REAL NOT NULL DEFAULT 0.8,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES task(task_id) ON DELETE CASCADE
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_name ON rule(name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_task_id ON rule(task_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_enabled ON rule(enabled)")
         logger.info("Rule table created successfully")
+
+    def _create_cron_table(self, conn: sqlite3.Connection) -> None:
+        """Create cron table — schedule (cron / at / every) 主表。
+
+        dispatch_owner='internal' 表示 backend 完整管理 (APScheduler 建 in-memory
+        job 触发); ='external' 表示 backend 只存引用, 触发仍走 openclaw 老通路。
+        internal 行 name/kind/message 等业务字段严格 NOT NULL; external 允许 NULL。
+        schema 详见 _local/schedule-migration-plan.md § 3.4。
+        """
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cron (
+                cron_id       TEXT PRIMARY KEY,
+                task_id       TEXT,
+                dispatch_owner TEXT NOT NULL DEFAULT 'internal'
+                    CHECK (dispatch_owner IN ('internal', 'external')),
+
+                name          TEXT,
+                kind          TEXT,
+                cron_expr     TEXT,
+                at_ms         INTEGER,
+                every_ms      INTEGER,
+                anchor_ms     INTEGER,
+                tz            TEXT,
+                message       TEXT,
+
+                light_context INTEGER NOT NULL DEFAULT 0
+                    CHECK (light_context IN (0, 1)),
+                max_delay_seconds INTEGER,
+
+                enabled       INTEGER NOT NULL DEFAULT 1
+                    CHECK (enabled IN (0, 1)),
+                fired_at      INTEGER,
+                retry_attempt INTEGER NOT NULL DEFAULT 0
+                    CHECK (retry_attempt >= 0),
+                created_at    INTEGER NOT NULL,
+                updated_at    INTEGER NOT NULL,
+
+                CHECK (
+                    dispatch_owner = 'external' OR
+                    (name IS NOT NULL AND kind IS NOT NULL AND message IS NOT NULL AND
+                     ((kind='cron'  AND cron_expr IS NOT NULL AND at_ms IS NULL AND every_ms IS NULL AND anchor_ms IS NULL) OR
+                      (kind='at'    AND at_ms     IS NOT NULL AND cron_expr IS NULL AND every_ms IS NULL AND anchor_ms IS NULL) OR
+                      (kind='every' AND every_ms  IS NOT NULL AND every_ms >= 60000 AND tz IS NULL AND cron_expr IS NULL AND at_ms IS NULL)))
+                ),
+                CHECK (max_delay_seconds IS NULL OR max_delay_seconds >= 0),
+                CHECK (fired_at IS NULL OR (kind = 'at' AND dispatch_owner = 'internal')),
+                CHECK (retry_attempt = 0 OR (kind = 'at' AND dispatch_owner = 'internal')),
+
+                FOREIGN KEY (task_id) REFERENCES task(task_id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cron_task_id ON cron(task_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cron_dispatch_owner "
+            "ON cron(dispatch_owner)"
+        )
+        logger.info("cron table created successfully")
 
     def _create_task_table(self, conn: sqlite3.Connection) -> None:
         """Create task table — task metadata SSOT (description / status)."""
@@ -401,10 +492,14 @@ class SQLiteConnector:
     def _create_task_link_table(self, conn: sqlite3.Connection) -> None:
         """Create task_link table — task ↔ rule/cron/memory junction.
 
-        复合主键 (task_id, link_kind, link_ref)；task_id FK→task.task_id
-        ON DELETE CASCADE，删 task 时自动清 task_link 行。全局
-        UNIQUE(link_kind, link_ref) 强制跨 task ref 唯一（同一 rule_id /
-        cron jobId / memory ref 不能挂在两个 task 上）。
+        **v2 起废弃, 不再被 fresh-build 或缺表兜底调用**。cron 关联迁到 cron
+        表 (dispatch_owner 分派), rule 关联迁到 rule.task_id FK CASCADE, 老 v1
+        库在 _migrate_v1_to_v2 里被 DROP。保留函数体供未来审计参考 (rollback
+        场景内联 CREATE TABLE, 不共用此函数)。
+
+        v1 语义: 复合主键 (task_id, link_kind, link_ref); task_id FK→task.task_id
+        ON DELETE CASCADE, 删 task 时自动清 task_link 行。全局
+        UNIQUE(link_kind, link_ref) 强制跨 task ref 唯一。
         """
         cursor = conn.cursor()
         cursor.execute("""
@@ -801,6 +896,420 @@ class SQLiteConnector:
         except Exception as e:
             logger.error("Failed to get database info: %s", e)
             return {}
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """v1 → v2 schema step.
+
+    一次事务原子完成:
+      (a0) 预扫 cron dangling (task_link.cron 指向已删 task) → fail-fast + log
+           理由: cron 权威数据在 openclaw 侧, dangling 需人工修复不能自动删
+      (a)  搬 task_link cron 行 → cron 表 external 分区
+      (b1) 预扫 D 型 rule 归属冲突 (rule.task_id != task_link.task_id) → fail-fast
+           理由: UI 从 task_link 读归属, 自动选边会静默切换用户可见 task
+      (b2) 预扫 A/E 型 orphan rule 完整字段 log (自动删除, log 便于事后审计)
+      (c)  建 rule_new (task_id NOT NULL + FK CASCADE) + INSERT SELECT
+           (B 型 COALESCE 回填, A/E 型 WHERE 排除 = 等价 DELETE)
+      (d)  DROP rule → RENAME rule_new → 重建 indices
+      (e)  DROP task_link
+      (f)  三重不变量断言 (foreign_key_check rule/cron 空 + rule.task_id 无 NULL)
+      (g)  PRAGMA user_version = 2 (同事务)
+      COMMIT
+
+    crash 语义: 单事务原子, COMMIT 前 crash → rollback 到 v1, 重启从头再跑;
+    COMMIT 后 crash → user_version=2, 外层步进循环跳过, 不重入。
+
+    A/E 型 DELETE 破坏性不可逆, 回滚只能靠冷备份 restore。
+    """
+    now = int(time.time() * 1000)
+    counts: dict[str, int] = {
+        "cron_planned": 0,
+        "cron_migrated": 0,
+        "cron_skipped_existing": 0,
+        "rule_backfilled": 0,
+        "rule_orphan_deleted": 0,
+        "task_link_rule_deleted": 0,
+    }
+    cursor = conn.cursor()
+
+    # SQLite 语法约束: PRAGMA foreign_keys 只能事务外切换
+    # OFF 期间 table-rebuild 可打破 FK; COMMIT 后再 ON 让运行时生效
+    cursor.execute("PRAGMA foreign_keys=OFF")
+
+    cursor.execute("BEGIN IMMEDIATE")
+    try:
+        # ── (a0) cron dangling 预扫 ────────────────────────────────
+        cron_dangling = cursor.execute("""
+            SELECT tl.task_id, tl.link_ref AS cron_id
+              FROM task_link tl
+             WHERE tl.link_kind='cron'
+               AND NOT EXISTS(
+                     SELECT 1 FROM task t WHERE t.task_id = tl.task_id
+                   )
+        """).fetchall()
+        if cron_dangling:
+            logger.error(
+                "v1→v2 cron dangling: %d cron row(s) reference non-existent task",
+                len(cron_dangling),
+            )
+            for row in cron_dangling:
+                logger.error(
+                    "v1→v2 cron dangling: task_id=%s cron_id=%s "
+                    "(openclaw side may still have this cron)",
+                    row["task_id"],
+                    row["cron_id"],
+                )
+            raise RuntimeError(
+                f"v1→v2 migration aborted: {len(cron_dangling)} cron row(s) "
+                f"in task_link reference non-existent task. Unlike rule A/E "
+                f"orphan (auto-deleted), cron dangling requires manual fix: "
+                f"verify openclaw-side cron still exists, decide whether to "
+                f"clean openclaw / re-create task / manually correct task_id, "
+                f"then retry migration."
+            )
+
+        # ── (a) task_link cron 行 → cron 表 external 分区 ──────────
+        cron_rows = cursor.execute(
+            "SELECT task_id, link_ref FROM task_link WHERE link_kind='cron'"
+        ).fetchall()
+        counts["cron_planned"] = len(cron_rows)
+
+        for row in cron_rows:
+            cron_id = row["link_ref"]
+            task_id = row["task_id"]
+
+            existing = cursor.execute(
+                "SELECT task_id, dispatch_owner FROM cron WHERE cron_id=?",
+                (cron_id,),
+            ).fetchone()
+
+            if existing is not None:
+                # user_version=2 后本函数永久跳过, 理论不该有已存在的 cron_id;
+                # defensive: 若命中, 校验 external 且 task_id 一致 → 安全 skip
+                if (
+                    existing["dispatch_owner"] != "external"
+                    or existing["task_id"] != task_id
+                ):
+                    raise RuntimeError(
+                        f"v1→v2 cron migration conflict at cron_id={cron_id}: "
+                        f"existing (task_id={existing['task_id']}, "
+                        f"dispatch_owner={existing['dispatch_owner']}) "
+                        f"vs task_link (task_id={task_id}, expected "
+                        f"dispatch_owner='external'). Human review required."
+                    )
+                counts["cron_skipped_existing"] += 1
+            else:
+                cursor.execute(
+                    "INSERT INTO cron (cron_id, task_id, dispatch_owner, "
+                    "enabled, created_at, updated_at) "
+                    "VALUES (?, ?, 'external', 1, ?, ?)",
+                    (cron_id, task_id, now, now),
+                )
+                counts["cron_migrated"] += 1
+
+            cursor.execute(
+                "DELETE FROM task_link WHERE link_kind='cron' AND link_ref=?",
+                (cron_id,),
+            )
+
+        # ── (b1) D 型 rule 归属冲突预扫 → fail-fast ────────────────
+        d_conflicts = cursor.execute("""
+            SELECT r.*, tl.task_id AS link_task_id
+              FROM rule r
+              JOIN task_link tl
+                ON tl.link_kind='rule' AND tl.link_ref=r.id
+             WHERE r.task_id IS NOT NULL
+               AND tl.task_id IS NOT NULL
+               AND r.task_id != tl.task_id
+        """).fetchall()
+        if d_conflicts:
+            logger.error(
+                "v1→v2 D-type rule ownership conflict: %d row(s); full content follows",
+                len(d_conflicts),
+            )
+            for row in d_conflicts:
+                logger.error("v1→v2 D-type conflict: %s", dict(row))
+            raise RuntimeError(
+                f"v1→v2 migration aborted: {len(d_conflicts)} D-type rule(s) "
+                f"have rule.task_id != task_link.task_id. UI reads ownership "
+                f"from task_link, auto-picking rule.task_id would silently "
+                f"change user-visible task binding. Manually reconcile each "
+                f"conflict then retry."
+            )
+
+        # ── (b2) A/E 型 orphan rule 预扫 + 完整字段 log ────────────
+        # A 型: r.task_id IS NULL 且 task_link 无关联
+        # E 型: COALESCE(r.task_id, tl.task_id) 指向已不存在的 task
+        # 每条 rule 一行 log (dict(row) 拿全部业务字段), 便于用户上报时手工复原
+        orphan_rows = cursor.execute("""
+            SELECT r.*, tl.task_id AS link_task_id
+              FROM rule r
+              LEFT JOIN task_link tl
+                ON tl.link_kind='rule' AND tl.link_ref=r.id
+             WHERE COALESCE(r.task_id, tl.task_id) IS NULL
+                OR NOT EXISTS(
+                     SELECT 1 FROM task t
+                      WHERE t.task_id = COALESCE(r.task_id, tl.task_id)
+                   )
+        """).fetchall()
+        counts["rule_orphan_deleted"] = len(orphan_rows)
+        if orphan_rows:
+            logger.warning(
+                "v1→v2 will drop %d orphan rule(s); full content follows",
+                len(orphan_rows),
+            )
+            for row in orphan_rows:
+                logger.warning("v1→v2 dropping orphan rule: %s", dict(row))
+
+        # ── (c) 建 rule_new + INSERT SELECT (B 型回填, A/E 型 WHERE 排除) ──
+        cursor.execute("""
+            CREATE TABLE rule_new (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'event',
+                lifecycle TEXT NOT NULL DEFAULT 'permanent',
+                enabled BOOLEAN DEFAULT 1,
+                condition TEXT NOT NULL,
+                actions TEXT NOT NULL DEFAULT '[]',
+                action_descriptions TEXT NOT NULL DEFAULT '[]',
+                on_enter_actions TEXT NOT NULL DEFAULT '[]',
+                on_enter_desc TEXT,
+                on_exit_actions TEXT NOT NULL DEFAULT '[]',
+                on_exit_desc TEXT,
+                on_target_desc TEXT,
+                terminate_when TEXT,
+                exit_debounce_seconds INTEGER NOT NULL DEFAULT 60,
+                duration_seconds INTEGER,
+                duration_ratio REAL NOT NULL DEFAULT 0.8,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES task(task_id) ON DELETE CASCADE
+            )
+        """)
+
+        # effective task_id = COALESCE(rule.task_id, task_link.task_id)
+        #   A 型 (r.task_id NULL & tl 无): effective=NULL → WHERE 排除
+        #   B 型 (r.task_id NULL & tl 有): effective=tl.task_id → 回填 INSERT
+        #   C 型 (r.task_id NOT NULL & tl 无): effective=r.task_id → 原样 INSERT
+        #   E 型 (r.task_id 指向已删 task): EXISTS 失败 → WHERE 排除
+        # D 型已在 (b1) fail-fast, 走到这里必然不含冲突
+        cursor.execute("""
+            INSERT INTO rule_new
+                SELECT r.id, r.name,
+                       COALESCE(r.task_id, tl.task_id) AS task_id,
+                       r.mode, r.lifecycle, r.enabled, r.condition,
+                       r.actions, r.action_descriptions,
+                       r.on_enter_actions, r.on_enter_desc,
+                       r.on_exit_actions, r.on_exit_desc,
+                       r.on_target_desc, r.terminate_when,
+                       r.exit_debounce_seconds, r.duration_seconds, r.duration_ratio,
+                       r.created_at, r.updated_at
+                FROM rule r
+                LEFT JOIN task_link tl
+                  ON tl.link_kind='rule' AND tl.link_ref=r.id
+                WHERE COALESCE(r.task_id, tl.task_id) IS NOT NULL
+                  AND EXISTS(
+                        SELECT 1 FROM task t
+                         WHERE t.task_id = COALESCE(r.task_id, tl.task_id)
+                      )
+        """)
+
+        counts["rule_backfilled"] = cursor.execute("""
+            SELECT COUNT(*) FROM rule_new rn
+              JOIN rule r ON r.id=rn.id
+             WHERE r.task_id IS NULL
+        """).fetchone()[0]
+
+        # ── (d) DROP + RENAME + 重建 indices ────────────────────────
+        cursor.execute("DROP TABLE rule")
+        cursor.execute("ALTER TABLE rule_new RENAME TO rule")
+        cursor.execute("CREATE INDEX idx_rule_name ON rule(name)")
+        cursor.execute("CREATE INDEX idx_rule_task_id ON rule(task_id)")
+        cursor.execute("CREATE INDEX idx_rule_enabled ON rule(enabled)")
+
+        # ── (e) DROP task_link ──────────────────────────────────────
+        rule_row_count = cursor.execute(
+            "SELECT COUNT(*) FROM task_link WHERE link_kind='rule'"
+        ).fetchone()[0]
+        counts["task_link_rule_deleted"] = rule_row_count
+        cursor.execute("DROP TABLE task_link")
+
+        # ── (f) 三重不变量断言 ──────────────────────────────────────
+        rule_violations = cursor.execute(
+            "PRAGMA foreign_key_check(rule)"
+        ).fetchall()
+        if rule_violations:
+            raise RuntimeError(
+                f"v1→v2 migration invariant broken: {len(rule_violations)} "
+                f"rule FK violation(s) remain after A/E deletion; "
+                f"details={rule_violations}"
+            )
+        cron_violations = cursor.execute(
+            "PRAGMA foreign_key_check(cron)"
+        ).fetchall()
+        if cron_violations:
+            raise RuntimeError(
+                f"v1→v2 migration invariant broken: {len(cron_violations)} "
+                f"cron FK violation(s) remain (should have been caught by "
+                f"(a0) pre-scan); details={cron_violations}"
+            )
+        null_count = cursor.execute(
+            "SELECT COUNT(*) FROM rule WHERE task_id IS NULL"
+        ).fetchone()[0]
+        if null_count > 0:
+            raise RuntimeError(
+                f"v1→v2 migration invariant broken: {null_count} rule(s) "
+                f"with NULL task_id remain after A/E deletion"
+            )
+
+        # ── (g) PRAGMA user_version 与业务 DML 同事务 ─────────────
+        cursor.execute("PRAGMA user_version = 2")
+        conn.commit()
+        logger.info("v1→v2 migration done: %s", counts)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.execute("PRAGMA foreign_keys=ON")
+
+
+# schema 步进迁移登记表; 未来加 v3 时新增 {3: _migrate_v2_to_v3} 条目
+_SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    2: _migrate_v1_to_v2,
+}
+
+
+def rollback_v2_to_v1() -> dict[str, int]:
+    """v2 → v1 反向迁移 (人工触发, 不在正常启动路径).
+
+    与正向 _migrate_v1_to_v2 对称, 单事务原子回退所有 v2 引入的 schema 变化:
+    重建 task_link + rule 反向 table-rebuild + cron external 反写 + DROP cron。
+
+    **不可逆的部分**: A/E 型 orphan rule 在正向迁移已被 DELETE, log 里有完整
+    字段。如需恢复必须从 log 手工提取 SQL 重建, 本函数不管。
+
+    **前置条件**: internal cron 必须已被 caller 手工清空 (v1 无 cron 表, rollback
+    语义 = 彻底回到迁移前状态; internal 是 backend 建的用户数据, 不能盲目丢弃)。
+    函数内断言 internal_count == 0, 否则 raise。
+    """
+    stats: dict[str, int] = {
+        "rule_reverted_to_link": 0,
+        "cron_reverted_to_link": 0,
+        "cron_skipped_existing": 0,
+        "conflicts": 0,
+    }
+    with get_db_connector().get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            internal_count = cursor.execute(
+                "SELECT COUNT(*) FROM cron WHERE dispatch_owner='internal'"
+            ).fetchone()[0]
+            if internal_count > 0:
+                raise RuntimeError(
+                    f"rollback_v2_to_v1 refused: {internal_count} internal "
+                    f"cron row(s) remain (v1 schema has no cron table). Clear "
+                    f"internal cron via user re-provisioning or manual export "
+                    f"before rollback."
+                )
+
+            # 重建 task_link 表 (v1 形态)
+            cursor.execute("""
+                CREATE TABLE task_link (
+                    task_id TEXT NOT NULL,
+                    link_kind TEXT NOT NULL,
+                    link_ref TEXT NOT NULL,
+                    PRIMARY KEY (task_id, link_kind, link_ref),
+                    FOREIGN KEY (task_id) REFERENCES task(task_id) ON DELETE CASCADE
+                )
+            """)
+            cursor.execute(
+                "CREATE UNIQUE INDEX idx_task_link_ref_unique "
+                "ON task_link(link_kind, link_ref)"
+            )
+
+            # rule 关联反写 task_link (v2 后 rule.task_id 均非 NULL, 全部反写)
+            cursor.execute(
+                "INSERT INTO task_link (task_id, link_kind, link_ref) "
+                "SELECT task_id, 'rule', id FROM rule"
+            )
+            stats["rule_reverted_to_link"] = cursor.rowcount
+
+            # rule 表反向 table-rebuild: 恢复 v1 形态 (无 FK, task_id NULLABLE)
+            cursor.execute("""
+                CREATE TABLE rule_v1 (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    task_id TEXT,
+                    mode TEXT NOT NULL DEFAULT 'event',
+                    lifecycle TEXT NOT NULL DEFAULT 'permanent',
+                    enabled BOOLEAN DEFAULT 1,
+                    condition TEXT NOT NULL,
+                    actions TEXT NOT NULL DEFAULT '[]',
+                    action_descriptions TEXT NOT NULL DEFAULT '[]',
+                    on_enter_actions TEXT NOT NULL DEFAULT '[]',
+                    on_enter_desc TEXT,
+                    on_exit_actions TEXT NOT NULL DEFAULT '[]',
+                    on_exit_desc TEXT,
+                    on_target_desc TEXT,
+                    terminate_when TEXT,
+                    exit_debounce_seconds INTEGER NOT NULL DEFAULT 60,
+                    duration_seconds INTEGER,
+                    duration_ratio REAL NOT NULL DEFAULT 0.8,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            cursor.execute("INSERT INTO rule_v1 SELECT * FROM rule")
+            cursor.execute("DROP TABLE rule")
+            cursor.execute("ALTER TABLE rule_v1 RENAME TO rule")
+            cursor.execute("CREATE INDEX idx_rule_name ON rule(name)")
+            cursor.execute("CREATE INDEX idx_rule_task_id ON rule(task_id)")
+            cursor.execute("CREATE INDEX idx_rule_enabled ON rule(enabled)")
+
+            # cron external 行反写 task_link
+            cron_rows = cursor.execute(
+                "SELECT cron_id, task_id FROM cron WHERE dispatch_owner='external'"
+            ).fetchall()
+            for row in cron_rows:
+                cron_id = row["cron_id"]
+                task_id = row["task_id"]
+
+                existing = cursor.execute(
+                    "SELECT task_id FROM task_link "
+                    "WHERE link_kind='cron' AND link_ref=?",
+                    (cron_id,),
+                ).fetchone()
+
+                if existing is not None:
+                    if existing["task_id"] != task_id:
+                        stats["conflicts"] += 1
+                        raise RuntimeError(
+                            f"rollback conflict at cron_id={cron_id}: "
+                            f"existing task_link.task_id={existing['task_id']} "
+                            f"vs cron.task_id={task_id}. Human review required."
+                        )
+                    stats["cron_skipped_existing"] += 1
+                else:
+                    cursor.execute(
+                        "INSERT INTO task_link (task_id, link_kind, link_ref) "
+                        "VALUES (?, 'cron', ?)",
+                        (task_id, cron_id),
+                    )
+                    stats["cron_reverted_to_link"] += 1
+
+            cursor.execute("DROP TABLE cron")
+            cursor.execute("PRAGMA user_version = 1")
+            conn.commit()
+            logger.info("v2→v1 rollback done: %s", stats)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.execute("PRAGMA foreign_keys=ON")
+    return stats
 
 
 # Global database connector instance
