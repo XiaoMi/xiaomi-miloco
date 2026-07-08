@@ -24,7 +24,6 @@ from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from miloco.node_monitor import Lifecycle, NodeName
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.engine.resource_validator import (

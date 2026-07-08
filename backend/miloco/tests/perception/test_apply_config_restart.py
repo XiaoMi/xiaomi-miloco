@@ -19,7 +19,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from miloco.perception.service import PerceptionService
 
 
