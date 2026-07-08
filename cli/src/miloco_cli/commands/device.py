@@ -83,7 +83,10 @@ def _annotate_result_codes(data: dict) -> None:
     for it in items:
         total += 1
         code = it.get("code")
-        if isinstance(code, int) and code not in _MIOT_OK_CODES:
+        # 负值才是失败：米家 spec 错误码全为大负数（见 _MIOT_SPEC_CODES）。正数 / 0
+        # 代表指令已下发并执行（实测部分开关返回 code:1 仍生效），绝不能误判为失败——
+        # 否则上层 agent 见"失败"会盲目重试（甚至换 toggle 反复翻转开关）、并谎报失败。
+        if isinstance(code, int) and code < 0 and code not in _MIOT_OK_CODES:
             msg = _MIOT_SPEC_CODES.get(
                 code, "设备侧执行失败（未知错误码，详见米家 spec 错误码表）"
             )
