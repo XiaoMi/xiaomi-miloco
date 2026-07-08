@@ -133,6 +133,12 @@ class StabilityConfigDC:
     # 让"连续 N 次一致"更快凑齐。代价: 攒库阶段 omni 调用更密(仅 confirmed 且非冷却时;
     # 攒满即写并进冷却转慢, 不会持续高频)。
     recheck_interval_accumulating_sec: float = 10.0
+    # 身份库(persons)为空时 unknown track 的重派慢周期（秒）。库空=没有任何成员可匹配，
+    # unknown 常规 30s 重派唯一价值（等人转身/走近再匹配成员）恒为 0 → 放慢到此周期，只保留
+    # 周期性给 omni 翻 no_person 的机会（静物误检的延迟纠正），不破坏"永不永久静音"不变式。
+    # 只作用于 unknown；pending 不放慢（no_person 落定靠 pending 期连续投票，见 needs_omni_call）。
+    # 库非空自动回落到 recheck_interval_sec。按 engine_fps 换算成帧，与其它周期同款秒标定。
+    gallery_empty_recheck_sec: float = 600.0
     hysteresis_unmatched_count: int = 2
     # 时序一致性写库门 (tier_c 污染修复): 同一 person_id **连续 N 次 confirmed 重审一致**
     # 才允许写入 tier_c。把"显示用 commit"(灵敏, conf-aware 1/2/3 次) 跟"写库资格"(严格)

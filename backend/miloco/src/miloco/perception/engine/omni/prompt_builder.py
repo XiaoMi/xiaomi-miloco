@@ -169,6 +169,7 @@ def build_fused_payload(
     gallery_snapshot: dict[str, "GallerySamples"],
     config: FusedPromptConfig | None = None,
     label_lookup: "dict[str, str] | None" = None,
+    matching_moot: bool = False,
 ) -> dict:
     """构造 fused 主调用的 payload（身份识别和场景理解合并到同一次 omni 调用）。
 
@@ -189,6 +190,9 @@ def build_fused_payload(
         config:            FusedPromptConfig；None 走默认值
         label_lookup:      person_id → 姓名/标签 反查表（供 ``_build_device_header`` 渲染人名）；
                            None 时由本函数自动从 gallery_snapshot 构造
+        matching_moot:     身份库为空（无注册成员）→ 成员匹配不可能。True 时 identities 字段
+                           改精简版（只判 unknown/no_person）、gallery 段整段不渲染。no_person
+                           判定链路不变（见 field_registry.IDENTITY_NO_MATCH）。
 
     Returns:
         dict，含字段：
@@ -254,6 +258,7 @@ def build_fused_payload(
         route="video", has_identity=bool(candidates), stream=False,
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
+        identity_match_disabled=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False)
     user_content = _build_fused_user_content(
@@ -265,6 +270,7 @@ def build_fused_payload(
         video_fps=fps,
         cfg=cfg,
         label_lookup=label_lookup,
+        matching_moot=matching_moot,
     )
 
     messages = _assemble_fused_messages(
@@ -558,11 +564,16 @@ def _build_fused_user_content(
     video_fps: int,
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
+    matching_moot: bool = False,
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
 
     fused 模式专用：与纯文本版 ``_build_user_content`` 不同，本函数返回
     ``list[dict]``（OpenAI 多模态 content array），不是 ``str``。
+
+    ``matching_moot=True``（身份库为空）时整个 gallery 段不渲染——库空无成员可比对，
+    identities 已由精简版 spec 指示"只判 unknown/no_person"（见 build_fused_payload），
+    此处不再塞"<gallery>库为空…"这类无用文本。待识别 track 列表仍照常渲染（no_person 判定按 track 给结论）。
     """
     gallery_content: list[dict] = []
 
@@ -572,7 +583,10 @@ def _build_fused_user_content(
     # 人，omni 容易把他的脸贴到 gallery 里最相似的另一位 → 错认（caption/speeches
     # 全跟着错），代价比"漏识别"高一个量级。face 是 nice-to-have，单人 face 失败不
     # 触发放弃。
-    if candidates:
+    #
+    # matching_moot（身份库为空）→ 整段跳过：库空无成员可比对，精简版 identities spec 已
+    # 指示只判 unknown/no_person，不需要 gallery 图，也不再塞"库为空"占位文本。
+    if candidates and not matching_moot:
         if gallery_snapshot:
             # 渲染上限保护：超出 cfg.max_gallery_persons 仅取前 N 人，避免 prompt token 爆
             gallery_items = list(gallery_snapshot.items())
