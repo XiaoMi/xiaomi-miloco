@@ -38,6 +38,14 @@ from miloco.utils.time_utils import now_ms
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_log(value) -> str:
+    """去 CR/LF 防 log injection (CodeQL py/log-injection)。"""
+    if value is None:
+        return "None"
+    return str(value).replace("\r", "").replace("\n", " ")
+
+
 router = APIRouter(prefix="/crons", tags=["Schedule"])
 
 
@@ -148,10 +156,10 @@ async def create_cron(
 
     logger.info(
         "cron created - user=%s cron_id=%s kind=%s task_id=%s",
-        current_user,
+        _safe_log(current_user),
         cron_id,
-        req.kind,
-        req.task_id,
+        _safe_log(req.kind),
+        _safe_log(req.task_id),
     )
     return NormalResponse(
         code=0, message="Cron created", data={"cron_id": cron_id}
@@ -256,7 +264,9 @@ def _toggle_enabled(cron_id: str, enabled: bool) -> NormalResponse:
                     get_runner().apply_enabled_state(updated)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
-                        "apply_enabled_state failed for %s: %s", cron_id, e
+                        "apply_enabled_state failed for %s: %s",
+                        _safe_log(cron_id),
+                        e,
                     )
     else:
         agent_pending.append(

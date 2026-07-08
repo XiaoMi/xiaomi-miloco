@@ -228,6 +228,50 @@ async def test_fire_at_overdue_gives_up_on_retry_path(runner_env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fire_at_status_timeout_schedules_retry(runner_env, monkeypatch):
+    """at status=timeout → 走 :retry (turn 可能仍在跑或已失败, 稳定 idempotency 防重投)."""
+    runner, runner_module, _ = runner_env
+    at_ms = 1_000_000
+    _insert_internal_at("at-1", at_ms=at_ms)
+
+    agent_mock = AsyncMock(return_value=("run-1", "timeout", 100.0))
+    monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+    monkeypatch.setattr(runner_module, "now_ms", lambda: at_ms + 60_000)
+
+    added = []
+    runner._scheduler.add_job = lambda *args, **kwargs: added.append(kwargs.get("id"))
+
+    await runner._fire("at-1")
+
+    from miloco.schedule.repo import CronRepo
+
+    cron = CronRepo().get("at-1")
+    assert cron is not None  # 行还在, 未被当成功删掉
+    assert cron.retry_attempt == 0  # transport_error 路径不 +1
+    assert "at-1:retry" in added
+
+
+@pytest.mark.asyncio
+async def test_fire_cron_kind_timeout_leaves_row_no_retry(runner_env, monkeypatch):
+    """cron kind status=timeout → 无副作用, 下周期自然重触, 不挂 :retry."""
+    runner, runner_module, _ = runner_env
+    _insert_internal_cron("c1")
+
+    agent_mock = AsyncMock(return_value=("run-1", "timeout", 100.0))
+    monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+
+    added = []
+    runner._scheduler.add_job = lambda *args, **kwargs: added.append(kwargs.get("id"))
+
+    await runner._fire("c1")
+
+    from miloco.schedule.repo import CronRepo
+
+    assert CronRepo().get("c1") is not None
+    assert added == []  # cron/every 无 :retry
+
+
+@pytest.mark.asyncio
 async def test_fire_cron_kind_success_leaves_row(runner_env, monkeypatch):
     """cron kind 成功 → 保留行等下次 fire (无 mark_fired_and_delete)."""
     runner, runner_module, _ = runner_env

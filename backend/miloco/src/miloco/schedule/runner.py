@@ -285,8 +285,14 @@ class ScheduleRunner:
             # cron/every 传输失败不 retry (下周期自然重触)
             return
 
-        if status in ("ok", "timeout"):
+        if status == "ok":
             self._handle_success(cron)
+        elif status == "timeout":
+            # at: turn 可能仍在跑或已失败, 走 :retry 链兜底 (稳定 idempotency
+            # + openclaw dedupe TTL 保证重投安全)。cron/every: 无副作用, 下周
+            # 期自然重触, 不需要额外重试。
+            if cron.kind == "at":
+                self._handle_at_failure(cron_id, transport_error=True)
         elif status == "error":
             if cron.kind == "at":
                 self._handle_at_failure(cron_id, transport_error=False)

@@ -146,13 +146,35 @@ class TaskService:
                 )
             )
 
+        # cron 联动: internal 改 cron.enabled + apply_enabled_state (函数内部
+        # 已双向, disabled 会 _remove_job); external 产 agent_pending 让 skill
+        # 处理 openclaw 侧。跟 router._toggle_enabled 对称。
+        from miloco.config import get_settings
+        from miloco.schedule.repo import CronRepo
+        from miloco.schedule.runner import get_runner
+
+        cron_repo = CronRepo()
+        cron_enabled = target_status == "active"
         cron_action = "disable" if target_status == "paused" else "enable"
-        full = self.repo.get_full_view(task_id)
+        schedule_enabled = get_settings().schedule.enabled
+
         agent_pending: list[PendingOp] = []
-        for link in full["links"]:
-            if link["kind"] == "cron":
+        for cron in cron_repo.list_by_task(task_id):
+            if cron.dispatch_owner == "internal":
+                cron_repo.set_enabled(cron.cron_id, cron_enabled)
+                if schedule_enabled:
+                    updated = cron_repo.get(cron.cron_id)
+                    if updated is not None:
+                        try:
+                            get_runner().apply_enabled_state(updated)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(
+                                "apply_enabled_state failed for %s: %s",
+                                cron.cron_id, e,
+                            )
+            else:
                 agent_pending.append(
-                    PendingOp(kind="cron", ref=link["ref"], action=cron_action)
+                    PendingOp(kind="cron", ref=cron.cron_id, action=cron_action)
                 )
 
         return TaskDisableResult(
@@ -248,12 +270,28 @@ class TaskService:
                         "remove_rule_from_runner failed for rid=%s: %s", rid, e
                     )
 
-        # cron agent_pending: internal 走 backend in-memory remove (阶段 3 接入),
-        # external 走 skill/agent 处理 openclaw 侧。source 字段留待 schema 扩展。
-        agent_pending: list[PendingOp] = [
-            PendingOp(kind="cron", ref=c["cron_id"], action="remove")
-            for c in cron_refs
-        ]
+        # cron 联动: internal 调 runner.remove_job 清 in-memory job; external
+        # 产 agent_pending 让 skill 处理 openclaw 侧。跟 router.delete_cron 对称。
+        # kill switch off 时跳过 in-memory 操作 (DB 行已 CASCADE 删, 下次启动
+        # rebuild 时 dispatch_owner='internal' 过滤已看不到孤儿行)。
+        from miloco.config import get_settings
+        from miloco.schedule.runner import get_runner
+
+        schedule_enabled = get_settings().schedule.enabled
+        agent_pending: list[PendingOp] = []
+        for c in cron_refs:
+            if c["dispatch_owner"] == "internal":
+                if schedule_enabled:
+                    try:
+                        get_runner().remove_job(c["cron_id"])
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "remove_job failed for %s: %s", c["cron_id"], e
+                        )
+            else:
+                agent_pending.append(
+                    PendingOp(kind="cron", ref=c["cron_id"], action="remove")
+                )
 
         return TaskDeleteResult(
             task_id=task_id,

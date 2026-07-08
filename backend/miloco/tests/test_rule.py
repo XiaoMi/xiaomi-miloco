@@ -183,8 +183,7 @@ def mock_rule_repo():
 @pytest.fixture
 def mock_task_repo():
     repo = MagicMock()
-    repo.delete_link_by_ref = MagicMock(return_value=1)
-    # 方案 P：rule create 前置校验 task 存在；mock 默认放行
+    # rule create 前置校验 task 存在；mock 默认放行
     repo.task_exists = MagicMock(return_value=True)
     return repo
 
