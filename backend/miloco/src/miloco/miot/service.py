@@ -142,8 +142,9 @@ async def _write_action_ledger(
             )
 
         logger.info(
-            "action_ledger did=%s type=%s iid=%s success=%s reason=%s value_len=%d",
-            did, action_type, iid, success,
+            "action_ledger device=%s(did=%s room=%s) type=%s iid=%s success=%s "
+            "reason=%s value_len=%d",
+            device_name or "?", did, room or "?", action_type, iid, success,
             (result_msg or error or "ok"),
             _truncate_value_len(value_json),
         )

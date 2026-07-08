@@ -28,6 +28,8 @@ import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
 import { ActivityFeed } from "./components/ActivityFeed";
+import { ActionsFeed } from "./components/ActionsFeed";
+import { Segmented } from "./components/Segmented";
 import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
@@ -159,6 +161,8 @@ function MainApp() {
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
   const [activeTab, setActiveTab] = useState<TabKey>("now");
+  // 活动 tab 的子视图:事件(ActivityFeed)/ 动作(ActionsFeed);切 tab 不重置。
+  const [activitySub, setActivitySub] = useState<"events" | "actions">("events");
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
     undefined,
   );
@@ -332,20 +336,43 @@ function MainApp() {
         );
       }
       case "activity": {
-        if (activity.error) {
-          return (
-            <TabPanelError
-              message={t("app.tabActivityError", { msg: activity.error.message })}
-              onRetry={() => activity.reload()}
+        // 子视图切换(事件 / 动作)常驻——动作流独立走 /api/actions,不受
+        // events(activity)加载/错误态阻断,故 segmented 控件在 gate 之外先渲染。
+        const switcher = (
+          <div className="flex justify-end">
+            <Segmented
+              options={[
+                { key: "events", label: t("actions.subEvents") },
+                { key: "actions", label: t("actions.subActions") },
+              ]}
+              value={activitySub}
+              onChange={setActivitySub}
+              ariaLabel={t("actions.subLabel")}
             />
+          </div>
+        );
+        if (activitySub === "actions") {
+          return (
+            <div className="space-y-6">
+              {switcher}
+              <ActionsFeed />
+            </div>
           );
         }
-        if (!activity.data) {
-          return <TabPanelLoading text={t("app.tabActivityLoading")} />;
-        }
+        // events 子视图:沿用原 gate(error / loading)后再渲染 ActivityFeed。
         return (
           <div className="space-y-6">
-            <ActivityFeed events={activity.data} homeId={homeId} />
+            {switcher}
+            {activity.error ? (
+              <TabPanelError
+                message={t("app.tabActivityError", { msg: activity.error.message })}
+                onRetry={() => activity.reload()}
+              />
+            ) : !activity.data ? (
+              <TabPanelLoading text={t("app.tabActivityLoading")} />
+            ) : (
+              <ActivityFeed events={activity.data} homeId={homeId} />
+            )}
           </div>
         );
       }

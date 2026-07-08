@@ -1,0 +1,20 @@
+{
+  "actions": {
+    "subEvents": "事件",
+    "subActions": "动作",
+    "subLabel": "活动子视图",
+    "title": "miloco 做了什么",
+    "loading": "加载中…",
+    "empty": "还没有动作记录——miloco 控制设备、播报 TTS 后会出现在这里",
+    "failedOnly": "只看失败",
+    "refresh": "刷新",
+    "retry": "重试",
+    "loadedCount": "已加载 {{n}} 条",
+    "resultSuccess": "成功",
+    "resultFailed": "失败",
+    "typeSetProperty": "设置属性",
+    "typeCallAction": "执行动作",
+    "typeSceneTrigger": "触发场景",
+    "typeUnknown": "未知动作"
+  }
+}

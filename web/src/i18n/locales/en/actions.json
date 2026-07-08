@@ -1,0 +1,20 @@
+{
+  "actions": {
+    "subEvents": "Events",
+    "subActions": "Actions",
+    "subLabel": "Activity sub-view",
+    "title": "What miloco did",
+    "loading": "Loading…",
+    "empty": "No actions yet — they'll show up here after miloco controls a device or plays TTS",
+    "failedOnly": "Failed only",
+    "refresh": "Refresh",
+    "retry": "Retry",
+    "loadedCount": "{{n}} loaded",
+    "resultSuccess": "OK",
+    "resultFailed": "Failed",
+    "typeSetProperty": "Set property",
+    "typeCallAction": "Call action",
+    "typeSceneTrigger": "Trigger scene",
+    "typeUnknown": "Unknown action"
+  }
+}

@@ -1,0 +1,115 @@
+/**
+ * ActionsFeed 数据层测试 —— 动作审计流。
+ *
+ * node 环境无 jsdom,沿用 real.test.ts 的做法:覆写 globalThis.fetch,直接测
+ * 导出的逻辑函数(fetchActions / formatActionTime / actionTypeKey),不渲 DOM。
+ *
+ * 覆盖:
+ * - fetchActions 解析 backend BARE 数组(渲染行的数据来源)
+ * - 空数组 → 空态数据
+ * - failedOnly=true 时 query 带 failed_only=1(「只看失败」重拉参数)
+ */
+
+import { describe, it, expect, vi, afterEach } from "vitest";
+import {
+  fetchActions,
+  formatActionTime,
+  actionTypeKey,
+  type BackendActionRow,
+} from "@/components/ActionsFeed";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  globalThis.fetch = originalFetch;
+});
+
+/** 捕获 fetch 收到的 url,并返一份 bare 数组响应(backend /api/actions 形状)。 */
+function mockActions(rows: unknown[]): { url: () => string } {
+  let captured = "";
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    captured = typeof input === "string" ? input : input.toString();
+    return new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+  return { url: () => captured };
+}
+
+function row(extra: Partial<BackendActionRow> = {}): BackendActionRow {
+  return {
+    id: "a1",
+    timestamp: 1780374052720,
+    action_type: "set_property",
+    did: "dev-1",
+    device_name: "客厅灯",
+    room: "客厅",
+    iid: "2.1",
+    value_json: "true",
+    result_code: 0,
+    result_msg: null,
+    success: 1,
+    error: null,
+    trace_id: null,
+    ...extra,
+  };
+}
+
+describe("fetchActions — /api/actions 契约", () => {
+  it("解析 backend bare 数组为行", async () => {
+    mockActions([
+      row({ id: "a1", device_name: "客厅灯" }),
+      row({ id: "a2", device_name: "卧室空调", action_type: "call_action", success: 0, error: "-704 限频" }),
+    ]);
+    const rows = await fetchActions(false);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].id).toBe("a1");
+    expect(rows[0].device_name).toBe("客厅灯");
+    expect(rows[1].success).toBe(0);
+    expect(rows[1].error).toBe("-704 限频");
+  });
+
+  it("空数组 → 空态(rows 长度 0)", async () => {
+    mockActions([]);
+    const rows = await fetchActions(false);
+    expect(rows).toEqual([]);
+  });
+
+  it("默认不带 failed_only,limit=100", async () => {
+    const m = mockActions([]);
+    await fetchActions(false);
+    expect(m.url()).toContain("limit=100");
+    expect(m.url()).not.toContain("failed_only");
+  });
+
+  it("failedOnly=true → query 带 failed_only=1", async () => {
+    const m = mockActions([]);
+    await fetchActions(true);
+    expect(m.url()).toContain("failed_only=1");
+    expect(m.url()).toContain("limit=100");
+  });
+});
+
+describe("formatActionTime", () => {
+  it("ms → 本地 MM-DD HH:mm:ss(补零)", () => {
+    // 用本地时区构造,避免测试机时区差异
+    const ms = new Date(2026, 6, 8, 9, 5, 3).getTime();
+    expect(formatActionTime(ms)).toBe("07-08 09:05:03");
+  });
+});
+
+describe("actionTypeKey", () => {
+  it("set_property / set_properties 归设置属性", () => {
+    expect(actionTypeKey("set_property")).toBe("actions.typeSetProperty");
+    expect(actionTypeKey("set_properties")).toBe("actions.typeSetProperty");
+  });
+  it("call_action / scene_trigger 各自映射", () => {
+    expect(actionTypeKey("call_action")).toBe("actions.typeCallAction");
+    expect(actionTypeKey("scene_trigger")).toBe("actions.typeSceneTrigger");
+  });
+  it("未知类型 → typeUnknown", () => {
+    expect(actionTypeKey("weird")).toBe("actions.typeUnknown");
+  });
+});
