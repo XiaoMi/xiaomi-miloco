@@ -67,3 +67,20 @@ export function cameraStatus(
     benchHintKey,
   };
 }
+
+/**
+ * 开关「不可开」的理由文案 key——仅未启用时给理由:离线 / 满额。已启用的相机随时可关,
+ * 返回 undefined。瞬态忙(busy)是操作 in-flight、走原生禁用,不属此列、也不在此判。
+ *
+ * 抽成纯函数便于单测「文案随原因切换」,并让开关的点击 toast 与 hover 气泡取同一文案。
+ */
+export function switchBlockedReasonKey(opts: {
+  inUse: boolean;
+  canEnable: boolean;
+  atCapacity: boolean;
+}): string | undefined {
+  if (opts.inUse) return undefined;
+  if (!opts.canEnable) return "hero.disabledOfflineHint";
+  if (opts.atCapacity) return "hero.disabledCapacityHint";
+  return undefined;
+}

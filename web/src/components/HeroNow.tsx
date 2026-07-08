@@ -22,6 +22,7 @@ import { toast } from "./Toast";
 import {
   cameraStatus,
   CAMERA_GRACE_MS,
+  switchBlockedReasonKey,
   type CameraStatus,
 } from "@/lib/cameraStatus";
 
@@ -358,15 +359,13 @@ function CameraSection({
                     now,
                     enabledAt: enabledAt.get(c.did),
                   });
-                  // 「不可开」理由(仅未启用时):离线 → offline 提示;满额 → capacity 提示。
-                  // 已启用的相机随时可关,无理由。bulk/single in-flight 走 busy(瞬态真禁)。
-                  let blockedReasonKey: string | undefined;
-                  if (!c.inUse) {
-                    if (!status.canEnable)
-                      blockedReasonKey = "hero.disabledOfflineHint";
-                    else if (atCapacity)
-                      blockedReasonKey = "hero.disabledCapacityHint";
-                  }
+                  // 「不可开」理由(仅未启用时):离线 / 满额。bulk/single in-flight 走 busy
+                  // (瞬态真禁),不在此列。逻辑抽到 switchBlockedReasonKey 便于单测。
+                  const blockedReasonKey = switchBlockedReasonKey({
+                    inUse: c.inUse,
+                    canEnable: status.canEnable,
+                    atCapacity,
+                  });
                   return (
                     <BenchCamItem
                       key={c.did}
@@ -406,37 +405,64 @@ function CamSwitch({
   const { t } = useTranslation();
   const blocked = !!blockedReasonKey;
   const dim = busy || blocked;
+  // 桌面 hover 点缀:语义不可开时在鼠标附近弹原因气泡,与点击 toast 互补——hover 即时看
+  // 原因(悬停就有),点击给明确反馈 + 触屏兜底。fixed + 鼠标坐标定位,不被下区 ul 的
+  // overflow-hidden 裁掉;触屏无 hover,自然只走 toast。仅 blocked 时才挂监听。
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={inUse}
-      aria-disabled={dim}
-      aria-label={t(inUse ? "hero.toggleAriaInUse" : "hero.toggleAriaNotInUse", {
-        name,
-      })}
-      title={inUse ? t("hero.toggleTitleInUse") : t("hero.toggleTitleNotInUse")}
-      // native disabled 只给瞬态忙(吞点击可接受);语义不可开不能用 native disabled——
-      // 否则 click 被吞、触屏弹不出提示。改成可点,点了走 toast 说明为何不可开。
-      disabled={busy}
-      onClick={() => {
-        if (busy) return;
-        if (blocked) {
-          toast(t(blockedReasonKey), "warn");
-          return;
+    <>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={inUse}
+        aria-disabled={dim}
+        aria-label={t(inUse ? "hero.toggleAriaInUse" : "hero.toggleAriaNotInUse", {
+          name,
+        })}
+        // 语义不可开时把原生 title 让位给自定义气泡(避免双 tooltip);其余保留原提示。
+        title={
+          blocked
+            ? undefined
+            : t(inUse ? "hero.toggleTitleInUse" : "hero.toggleTitleNotInUse")
         }
-        onToggle(!inUse);
-      }}
-      className={`relative inline-flex h-[14px] w-[26px] shrink-0 rounded-full transition-colors shadow-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
-        dim ? "opacity-40 cursor-not-allowed" : ""
-      } ${inUse ? "bg-brand-primary" : "bg-black/60"}`}
-    >
-      <span
-        className={`absolute top-0.5 left-0.5 inline-block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform ${
-          inUse ? "translate-x-[12px]" : "translate-x-0"
-        }`}
-      />
-    </button>
+        // native disabled 只给瞬态忙(吞点击可接受);语义不可开不能用 native disabled——
+        // 否则 click 被吞、触屏弹不出提示。改成可点,点了走 toast 说明为何不可开。
+        disabled={busy}
+        onClick={() => {
+          if (busy) return;
+          if (blocked) {
+            toast(t(blockedReasonKey), "warn");
+            return;
+          }
+          onToggle(!inUse);
+        }}
+        onMouseEnter={
+          blocked ? (e) => setTip({ x: e.clientX, y: e.clientY }) : undefined
+        }
+        onMouseMove={
+          blocked ? (e) => setTip({ x: e.clientX, y: e.clientY }) : undefined
+        }
+        onMouseLeave={() => setTip(null)}
+        className={`relative inline-flex h-[14px] w-[26px] shrink-0 rounded-full transition-colors shadow-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+          dim ? "opacity-40 cursor-not-allowed" : ""
+        } ${inUse ? "bg-brand-primary" : "bg-black/60"}`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 inline-block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform ${
+            inUse ? "translate-x-[12px]" : "translate-x-0"
+          }`}
+        />
+      </button>
+      {blocked && tip && (
+        <div
+          role="tooltip"
+          className="fixed z-[90] w-56 max-w-[70vw] -translate-x-1/2 -translate-y-full rounded-lg border border-warning bg-warning-bg text-warning text-caption px-2.5 py-1.5 shadow-md pointer-events-none"
+          style={{ left: tip.x, top: tip.y - 10 }}
+        >
+          {t(blockedReasonKey)}
+        </div>
+      )}
+    </>
   );
 }
 

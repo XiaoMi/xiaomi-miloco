@@ -220,6 +220,20 @@ class TestDiscoverDevicesOnlineConnected:
         assert "cam1" in result
 
     @pytest.mark.asyncio
+    async def test_perception_device_online_follows_cloud_only(self, adapter):
+        """PerceptionDevice.online 只随云端 online,不再 AND lan_online:云端在线但 LAN
+        不可见的相机(require_lan=False 放行)其 online 元数据应为 True——旧口径
+        online AND lan_online 会得 False,与 is_online / toggle 的云端口径不一致。"""
+        cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
+            update={"home_id": "H1"}
+        )
+        adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
+
+        result = await adapter.discover_devices(online_only=True, require_lan=False)
+
+        assert result["cam1"].online is True
+
+    @pytest.mark.asyncio
     async def test_require_lan_false_still_excludes_offline_camera(self, adapter):
         """A2 应连数判据仍排除云端离线相机(online=False)——它救不活，算进应连数
         会让判据永真、refresh_cameras 每轮空转(MR review 指出的过度触发)。"""

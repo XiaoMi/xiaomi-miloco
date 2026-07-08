@@ -6,7 +6,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { cameraStatus, CAMERA_GRACE_MS } from "@/lib/cameraStatus";
+import {
+  cameraStatus,
+  CAMERA_GRACE_MS,
+  switchBlockedReasonKey,
+} from "@/lib/cameraStatus";
 
 // 只需 cameraStatus 读的四个字段;默认「云端在线 + LAN 可见 + 未启用 + 未订阅」。
 function cam(
@@ -108,5 +112,37 @@ describe("cameraStatus", () => {
     expect(
       cameraStatus(cam({ inUse: true, connected: false }), { now: T0 }).canEnable,
     ).toBe(true);
+  });
+});
+
+describe("switchBlockedReasonKey", () => {
+  it("已启用 → 无理由(随时可关,即便离线/满额)", () => {
+    expect(
+      switchBlockedReasonKey({ inUse: true, canEnable: false, atCapacity: true }),
+    ).toBeUndefined();
+  });
+
+  it("未启用 + 不可开(离线) → 离线提示", () => {
+    expect(
+      switchBlockedReasonKey({ inUse: false, canEnable: false, atCapacity: false }),
+    ).toBe("hero.disabledOfflineHint");
+  });
+
+  it("未启用 + 可开 + 满额 → 满额提示", () => {
+    expect(
+      switchBlockedReasonKey({ inUse: false, canEnable: true, atCapacity: true }),
+    ).toBe("hero.disabledCapacityHint");
+  });
+
+  it("未启用 + 可开 + 未满额 → 无理由(可开)", () => {
+    expect(
+      switchBlockedReasonKey({ inUse: false, canEnable: true, atCapacity: false }),
+    ).toBeUndefined();
+  });
+
+  it("离线优先于满额(未启用 + 不可开 + 满额)→ 离线提示", () => {
+    expect(
+      switchBlockedReasonKey({ inUse: false, canEnable: false, atCapacity: true }),
+    ).toBe("hero.disabledOfflineHint");
   });
 });
