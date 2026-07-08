@@ -855,12 +855,19 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
     payload = _perception_config_payload()
     if update:
+        # omni_fps / window_size 是引擎/runner 构造时 cache 的，改这两个才需重启生效；
+        # video_short_edge 每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
+        # 前端 drawer 三字段一起 PUT，故按「新值 != 旧值」判断，避免只拖分辨率也整机重启
+        # （重启会丢在途感知窗口、重置 tracker）。
+        need_restart = (
+            (body.omni_fps is not None and body.omni_fps != payload["omni_fps"])
+            or (body.window_size is not None and body.window_size != payload["window_size"])
+        )
         update_shared_config(**update)
-        # omni_fps / window_size 是引擎/runner 构造时 cache 的，写 config 后需重启才生效
-        # （video_short_edge 每帧实时读 settings，不重启也生效）。同步等重启完成再返回。
-        # config 已写盘(不可回滚)；重启若失败仅带 restart_ok=False，不冒泡成 500——
-        # 否则前端会把「已保存+重启失败」误报成「保存失败」，误导用户以为改动丢失。
-        restart_ok = await manager.perception_service.apply_config_restart()
         payload = _perception_config_payload()
-        payload["restart_ok"] = restart_ok
+        if need_restart:
+            # config 已写盘(不可回滚)；重启若失败仅带 restart_ok=False，不冒泡成 500——
+            # 否则前端会把「已保存+重启失败」误报成「保存失败」，误导用户以为改动丢失。
+            # 同步等重启完成再返回。
+            payload["restart_ok"] = await manager.perception_service.apply_config_restart()
     return NormalResponse(code=0, message="ok", data=payload)
