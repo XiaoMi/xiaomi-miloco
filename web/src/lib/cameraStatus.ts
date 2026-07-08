@@ -52,13 +52,14 @@ export function cameraStatus(
   // 云端在线、已启用、未订阅：已启用·未出流。按 grace + lanOnline 分流诊断。
   //  - grace 内（刚点开）：接入中，不提跨 LAN，避免误报失败。
   //  - 超 grace + lan 不可见：多半跨网段 / NAT / WSL。
-  //  - 超 grace + lan 可见：相机可能没开 LAN 模式。
+  //  - 超 grace + lan 可见：LAN 可发现却仍不出流（异常态），给中性提示、不预设归因
+  //    （lanOnline=true 恰说明 LAN 发现在工作，断言「未开 LAN 模式」会自相矛盾、误导）。
   const inGrace =
     opts.enabledAt !== undefined && opts.now - opts.enabledAt < graceMs;
   const benchHintKey = inGrace
     ? "hero.noStreamHintConnecting"
     : cam.lanOnline
-      ? "hero.noStreamHintNoLanMode"
+      ? "hero.noStreamHintLanReachable"
       : "hero.noStreamHintCrossLan";
   return {
     kind: "noStream",

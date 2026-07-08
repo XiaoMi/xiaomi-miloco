@@ -86,13 +86,13 @@ describe("cameraStatus", () => {
     expect(s.benchHintKey).toBe("hero.noStreamHintCrossLan");
   });
 
-  it("已启用未出流 + 超 grace + LAN 可见 → 未开 LAN 模式诊断", () => {
+  it("已启用未出流 + 超 grace + LAN 可见 → 中性诊断(不预设未开 LAN 模式)", () => {
     const s = cameraStatus(cam({ inUse: true, connected: false, lanOnline: true }), {
       now: T0,
       enabledAt: T0 - (CAMERA_GRACE_MS + 1),
     });
     expect(s.kind).toBe("noStream");
-    expect(s.benchHintKey).toBe("hero.noStreamHintNoLanMode");
+    expect(s.benchHintKey).toBe("hero.noStreamHintLanReachable");
   });
 
   it("已启用未出流 + 无 enabledAt(重启后残留态) → 直接给诊断,不算接入中", () => {

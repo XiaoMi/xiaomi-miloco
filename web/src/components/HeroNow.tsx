@@ -277,7 +277,10 @@ function CameraSection({
         {total > 0 && (
           <div className="text-caption flex items-center gap-2 text-text-tertiary">
             <span className="num">
-              {t("hero.perceivingCount", { n: activeCount })}
+              {/* 「在感知」计数与上区 live 卡同口径:数 perceiving(streamingCams),不数
+                  inUse 意图——否则跨 LAN 相机被启用后 inUse 虚增,顶部说「N 个在感知」而
+                  上区空、下区「未出流」,三处自相矛盾。 */}
+              {t("hero.perceivingCount", { n: streamingCams.length })}
             </span>
             <button
               type="button"
