@@ -129,7 +129,7 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 
 注意事项：
 
-- **openclaw 是独立进程，只读宿主系统时区**（Node `Intl`），不读 `MILOCO_TIMEZONE` / miloco `config.json`——它会在 agent prompt 底部注入自己解析的 `Current time`。只配 miloco 侧而宿主仍是 UTC 时，prompt 内会同时出现两个矛盾时间源（此时只能靠 miloco 时区块的换算指引软性调解）。**这是"首选改宿主"的核心原因**：宿主时区是唯一能同时对齐 miloco 与 openclaw 的信道。
+- **openclaw 运行时是独立进程，只读宿主系统时区**（Node `Intl`），不读 `MILOCO_TIMEZONE` / miloco `config.json`——它在 agent prompt 底部注入的 `Current time` 行只跟宿主时区走。（注意区分信道：**miloco 插件**虽然运行在 openclaw 内，它自己的 `deployTimezone()` 是读 miloco 配置的，注入的「时间与时区」块因此正确；但 openclaw **运行时**那行 `Current time` 不经过插件，miloco 侧配置无法影响它。）只配 miloco 侧而宿主仍是 UTC 时，prompt 内会同时出现两个矛盾时间源（此时只能靠 miloco 时区块的换算指引软性调解）。**这是"首选改宿主"的核心原因**：宿主时区是唯一能同时对齐 miloco 与 openclaw 运行时的信道。
 - **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应优先给宿主 / 容器设置正确时区；确实无法修改宿主时再用 miloco 侧 `timezone` 配置（注意 openclaw 不受其影响）。
 - `miloco-cli service start` 生成 supervisord.conf 时会把解析出的时区以 `TZ` + `MILOCO_TIMEZONE` 注入 backend 子进程环境（改配置后重启生效）。
 
