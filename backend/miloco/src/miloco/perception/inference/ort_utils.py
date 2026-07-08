@@ -43,8 +43,11 @@ _COREML_CACHE_DIRNAME = "coreml_cache"
 _CACHE_OVERSIZE_MULTIPLIER = 3
 
 # 总量兜底清理进程内只跑一次(首个 CoreML session 创建前),避免边清边读。
+# 用 threading.Event 表达「已清」这一次性标志:is_set / set 线程安全,配合下面的
+# 锁做双检锁;比模块级 bool + global 更贴 once 语义,也让 CodeQL 不再把「本次
+# 调用写、下次调用读」的跨调用持久 flag 按单次数据流误判为 unused global。
 _cache_sweep_lock = threading.Lock()
-_cache_sweep_done = False
+_cache_swept = threading.Event()
 
 
 def _ort_version_ge(major: int, minor: int) -> bool:
@@ -85,11 +88,10 @@ def _model_cache_dir(model_path: str) -> Path:
 
 def _sweep_coreml_cache_if_oversized_once() -> None:
     """进程内一次:cache 目录总量超阈值则整目录清空重建。失败只告警不阻断启动。"""
-    global _cache_sweep_done
-    if _cache_sweep_done:
+    if _cache_swept.is_set():
         return
     with _cache_sweep_lock:
-        if _cache_sweep_done:
+        if _cache_swept.is_set():
             return
         try:
             from miloco.config import get_settings
@@ -126,10 +128,10 @@ def _sweep_coreml_cache_if_oversized_once() -> None:
                 "CoreML cache 兜底清理失败(忽略,不影响启动)", exc_info=True
             )
         finally:
-            # 置位移到清理完成之后:并发 make_session 的其它线程在快速路径见到未置位
+            # set 移到清理完成之后:并发 make_session 的其它线程在快速路径见到未 set
             # 时会进锁阻塞,直到 rmtree 结束才放行,兑现「首个 session 创建前清完」
-            # 屏障、杜绝边清边读;用 finally 保证即便清理体抛异常也只跑一次、不重试。
-            _cache_sweep_done = True
+            # 屏障、杜绝边清边读;用 finally 保证即便清理体抛异常也只 set 一次、不重试。
+            _cache_swept.set()
 
 
 def make_session(
