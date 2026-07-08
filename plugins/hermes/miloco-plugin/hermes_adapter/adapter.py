@@ -283,7 +283,12 @@ class Adapter:
                 # 对 deliver=True 的 turn，Hermes /v1/chat/completions 不会
                 # 自动推回 IM（纯拉取端点），需从响应体读回复经 hermes send 投递
                 if delivery.get("deliver") and owner_platform:
-                    _deliver_response(resp, owner_platform)
+                    if not _deliver_response(resp, owner_platform):
+                        return _err_result(
+                            run_id,
+                            "deliver failed: hermes send returned error",
+                            rtt_ms=rtt_ms,
+                        )
                 return _result(run_id=run_id, status="ok", rtt_ms=rtt_ms)
 
             # 非 2xx: 尝试溢出识别 + 自愈
@@ -419,18 +424,18 @@ class Adapter:
             self._client = None
 
 
-def _deliver_response(resp: httpx.Response, platform: str) -> None:
+def _deliver_response(resp: httpx.Response, platform: str) -> bool:
     """从 Hermes chat completions 响应里提取回复，经 hermes send 投递到 IM。
 
     Hermes /v1/chat/completions 不会自动推 IM，需显式投递。
+    返回 True 表示投递成功（或内容为空跳过），False 表示投递失败。
     """
     import shutil
     import subprocess
-    import sys
     hermes_bin = shutil.which("hermes")
     if not hermes_bin:
         logger.warning("[hermes adapter] hermes CLI not found, cannot deliver")
-        return
+        return False
     try:
         body = resp.json()
         content = None
@@ -438,11 +443,10 @@ def _deliver_response(resp: httpx.Response, platform: str) -> None:
         if choices and choices[0].get("message"):
             content = choices[0]["message"].get("content")
         if not content:
-            logger.warning("[hermes adapter] no content in response, skip deliver")
-            return
+            return True  # 无内容不是故障
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("[hermes adapter] parse response for deliver failed: %s", exc)
-        return
+        return False
     try:
         proc = subprocess.run(
             [hermes_bin, "send", "--to", platform, "--json", "-q", content],
@@ -451,12 +455,14 @@ def _deliver_response(resp: httpx.Response, platform: str) -> None:
         )
     except (subprocess.TimeoutExpired, Exception) as exc:
         logger.warning("[hermes adapter] hermes send failed: %s", exc)
-        return
+        return False
     if proc.returncode != 0:
         logger.warning(
             "[hermes adapter] hermes send error rc=%d: %s",
             proc.returncode, (proc.stderr or "")[:200],
         )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
