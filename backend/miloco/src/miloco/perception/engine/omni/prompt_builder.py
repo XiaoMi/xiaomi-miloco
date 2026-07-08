@@ -460,7 +460,12 @@ def _render_task_list(scene: SceneDescriptor) -> str:
         av = av2 = "视频"
     items: list[str] = []
     if scene.has_identity:
-        items.append("身份识别：对照图片库，识别画面中的人对应库中哪一位（或都不是）")
+        if scene.identity_match_disabled:
+            # 库空：没有成员可对照，任务收敛为「判真人 / 非人误检」，与精简版 identities spec 一致，
+            # 不再写「对照图片库…库中哪一位」这类成员匹配任务（否则与精简 spec 自相矛盾、白占 token）。
+            items.append("身份识别：判断画面中每个目标是真人还是被误检成人的非人物体（本轮无注册成员，不做成员匹配）")
+        else:
+            items.append("身份识别：对照图片库，识别画面中的人对应库中哪一位（或都不是）")
     if scene.route == "video":
         items.append("视频理解：描述画面中的人、宠物、物体，优先描述动态部分")
     if scene.has_audio:
@@ -490,11 +495,16 @@ def _render_examples(scene: SceneDescriptor) -> str:
     has_speech=False（VAD 判无人声、speeches 已剥）时：实例 A 的输出含 speeches（且是
     needs_response 指令），留着会与剥掉的 schema 矛盾、并重新诱导脑补人声指令，故不附
     实例 A（身份判定已由「## identities」充分约束）；实例 B 无 speeches、照常附。
+
+    identity_match_disabled=True（库空）时同样不附实例 A：它演示的是成员匹配（摆
+    ``<gallery>`` 成员、输出成员名 + 五官匹配 reason），与库空的精简版 identities
+    spec / schema（只判 unknown/no_person、无 gallery）自相矛盾，且抵消库空省 token 的
+    目标；身份任务已由精简版「## identities」充分约束。实例 B 无 identities 字段、照常附。
     """
     if scene.route == "audio" or not scene.has_audio:
         return ""
     examples = []
-    if scene.has_identity and scene.has_speech:
+    if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
     examples.append(_EXAMPLE_CHAIN)
     return "# 输出实例\n\n" + "\n\n".join(examples)

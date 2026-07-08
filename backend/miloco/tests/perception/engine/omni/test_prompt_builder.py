@@ -1274,3 +1274,72 @@ class TestIdentityMatchDisabled:
         main_text = "\n".join(b.get("text", "") for b in main if b.get("type") == "text")
         assert "库为空" in main_text
         assert self._MATCH_ONLY_MARKER in system_prompt
+
+    # ---- follow-up（PR #407 code review）：库空时「任务描述 / 示例」也须收敛，非只 gallery/字段说明 ----
+    _TASK_MATCH_MARKER = "对照图片库"    # 只在完整版「# 任务」身份行里出现
+    _EXAMPLE_A_MARKER = "## 实例 A"       # 只在成员匹配 few-shot（实例 A）里出现
+
+    def test_task_list_slim_when_matching_moot(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_task_list
+
+        slim = _render_task_list(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True))
+        assert self._TASK_MATCH_MARKER not in slim
+        assert "库中哪一位" not in slim
+        assert "不做成员匹配" in slim
+
+    def test_task_list_full_when_gallery_present(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_task_list
+
+        full = _render_task_list(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=False))
+        assert self._TASK_MATCH_MARKER in full
+
+    def test_example_a_dropped_when_matching_moot(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_examples
+
+        # has_speech=True：未修复时实例 A 本会注入，确保断言有意义
+        out = _render_examples(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True))
+        assert self._EXAMPLE_A_MARKER not in out   # 成员匹配 few-shot 不注入
+        assert "实例 B" in out                       # 通用观察 few-shot 照常
+
+    def test_example_a_present_when_gallery_present(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_examples
+
+        out = _render_examples(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=False))
+        assert self._EXAMPLE_A_MARKER in out
+
+    def test_system_prompt_no_member_matching_leak_when_moot(self):
+        """整类 catch-all：库空 system prompt 不得残留任何成员匹配内容（任务描述 /
+        字段说明规则 / few-shot 示例），且带精简版标记。has_speech=True 让实例 A 在
+        未修复时本会注入——确保 absence 断言不是空断言。将来新增身份 prompt 段若漏 gate，
+        这条会红。"""
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import build_system_prompt
+
+        moot = SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True)
+        sp = build_system_prompt(moot, include_home_profile=False)
+        for leak in (self._TASK_MATCH_MARKER, "库中哪一位",
+                     self._EXAMPLE_A_MARKER, self._MATCH_ONLY_MARKER):
+            assert leak not in sp, f"库空 system prompt 残留成员匹配内容: {leak!r}"
+        assert self._NO_MATCH_MARKER in sp
+
+        # 正向对照：库非空同场景，上述 marker 确实存在（证明 absence 断言非空断言）
+        full = build_system_prompt(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=False), include_home_profile=False)
+        assert self._TASK_MATCH_MARKER in full
+        assert self._EXAMPLE_A_MARKER in full
+        assert self._MATCH_ONLY_MARKER in full
