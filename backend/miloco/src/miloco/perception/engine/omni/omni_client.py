@@ -16,11 +16,15 @@ import httpx
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.circuit_breaker import (
-    CircuitOpenError, get_omni_circuit_breaker,
+    CircuitOpenError,
+    get_omni_circuit_breaker,
 )
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.error_classifier import (
-    ClassifiedError, ErrorCategory, classify_exception, classify_response,
+    ClassifiedError,
+    ErrorCategory,
+    classify_exception,
+    classify_response,
 )
 from miloco.perception.snapshot_context import push_omni_trace
 
@@ -76,6 +80,7 @@ class OmniError(Exception):
 @dataclass(frozen=True)
 class OmniCallMeta:
     """omni 单次调用的元数据(latency / retry / token / error)。"""
+
     latency_ms: float
     retry_count: int = 0
     input_tokens: int | None = None
@@ -98,11 +103,21 @@ class OmniCallMeta:
         return cls(
             latency_ms=latency_ms,
             retry_count=retry_count,
-            input_tokens=int(usage["prompt_tokens"]) if usage.get("prompt_tokens") is not None else None,
-            output_tokens=int(usage["completion_tokens"]) if usage.get("completion_tokens") is not None else None,
-            cached_tokens=int(details["cached_tokens"]) if details.get("cached_tokens") is not None else None,
-            audio_tokens=int(details["audio_tokens"]) if details.get("audio_tokens") is not None else None,
-            video_tokens=int(details["video_tokens"]) if details.get("video_tokens") is not None else None,
+            input_tokens=int(usage["prompt_tokens"])
+            if usage.get("prompt_tokens") is not None
+            else None,
+            output_tokens=int(usage["completion_tokens"])
+            if usage.get("completion_tokens") is not None
+            else None,
+            cached_tokens=int(details["cached_tokens"])
+            if details.get("cached_tokens") is not None
+            else None,
+            audio_tokens=int(details["audio_tokens"])
+            if details.get("audio_tokens") is not None
+            else None,
+            video_tokens=int(details["video_tokens"])
+            if details.get("video_tokens") is not None
+            else None,
             error_code=error_code,
         )
 
@@ -210,10 +225,13 @@ async def call_omni(
             if not isinstance(raw, dict):
                 # 用 __class__.__name__ 而非 type(...) 避免遮盖问题(参数名 type)
                 raw_cls = raw.__class__.__name__
-                await cb.record_failure(ClassifiedError(
-                    "bad_response", f"non-dict body ({raw_cls})",
-                    ErrorCategory.RECOVERABLE,
-                ))
+                await cb.record_failure(
+                    ClassifiedError(
+                        "bad_response",
+                        f"non-dict body ({raw_cls})",
+                        ErrorCategory.RECOVERABLE,
+                    )
+                )
                 raise OmniError(f"omni response is not a dict (got {raw_cls})")
             await cb.record_success()
             fire_record(config.model, raw.get("usage", {}), type)
@@ -373,7 +391,9 @@ async def call_omni_stream(
                 if classified is not None:
                     await resp.aread()
                     await cb.record_failure(classified)
-                    logger.error("Omni stream error %d: %s", resp.status_code, resp.text[:500])
+                    logger.error(
+                        "Omni stream error %d: %s", resp.status_code, resp.text[:500]
+                    )
                     resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     line = line.strip()
@@ -396,7 +416,9 @@ async def call_omni_stream(
                     # content delta：choices[0].delta.content
                     try:
                         delta = (
-                            chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                            chunk.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content")
                         )
                     except (IndexError, KeyError):
                         delta = None
@@ -407,7 +429,9 @@ async def call_omni_stream(
     except CircuitOpenError as ce:
         short_circuited = True
         error = {"code": ce.code, "msg": ce.message[:512]}
-        raise OmniError(f"call_omni_stream short-circuited: {ce.message}", original=ce) from ce
+        raise OmniError(
+            f"call_omni_stream short-circuited: {ce.message}", original=ce
+        ) from ce
     except OmniError:
         raise  # 不重复包装
     except Exception as e:

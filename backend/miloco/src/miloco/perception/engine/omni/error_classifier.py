@@ -2,6 +2,7 @@
 
 映射规则见 spec §2。code 集合与 web 前端 OMNI_CODE_KEY 保持一致,前端可直接复用 i18n。
 """
+
 from __future__ import annotations
 
 import json
@@ -13,7 +14,7 @@ import httpx
 
 class ErrorCategory(Enum):
     RECOVERABLE = "recoverable"  # 进指数退避熔断
-    CONFIG = "config"            # 直接软停,等用户改配置
+    CONFIG = "config"  # 直接软停,等用户改配置
 
 
 @dataclass(frozen=True)
@@ -21,12 +22,20 @@ class ClassifiedError:
     code: str
     message: str
     category: ErrorCategory
-    retry_after_seconds: float | None = None  # 仅 rate_limited 且 Retry-After 存在时非空
+    retry_after_seconds: float | None = (
+        None  # 仅 rate_limited 且 Retry-After 存在时非空
+    )
 
 
 CODES: set[str] = {
-    "unreachable", "timeout", "http_error", "rate_limited",
-    "bad_key", "not_found", "rejected_authed", "bad_response",
+    "unreachable",
+    "timeout",
+    "http_error",
+    "rate_limited",
+    "bad_key",
+    "not_found",
+    "rejected_authed",
+    "bad_response",
 }
 
 
@@ -45,12 +54,20 @@ _MESSAGES: dict[str, str] = {
 def classify_exception(exc: BaseException) -> ClassifiedError:
     """httpx 异常/本地异常 → ClassifiedError。未知异常保守归 unreachable。"""
     if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
-        return ClassifiedError("timeout", _MESSAGES["timeout"], ErrorCategory.RECOVERABLE)
+        return ClassifiedError(
+            "timeout", _MESSAGES["timeout"], ErrorCategory.RECOVERABLE
+        )
     if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError, httpx.NetworkError)):
-        return ClassifiedError("unreachable", _MESSAGES["unreachable"], ErrorCategory.RECOVERABLE)
+        return ClassifiedError(
+            "unreachable", _MESSAGES["unreachable"], ErrorCategory.RECOVERABLE
+        )
     if isinstance(exc, (json.JSONDecodeError, ValueError)):
-        return ClassifiedError("bad_response", _MESSAGES["bad_response"], ErrorCategory.RECOVERABLE)
-    return ClassifiedError("unreachable", _MESSAGES["unreachable"], ErrorCategory.RECOVERABLE)
+        return ClassifiedError(
+            "bad_response", _MESSAGES["bad_response"], ErrorCategory.RECOVERABLE
+        )
+    return ClassifiedError(
+        "unreachable", _MESSAGES["unreachable"], ErrorCategory.RECOVERABLE
+    )
 
 
 def classify_response(resp: httpx.Response) -> ClassifiedError | None:
@@ -61,15 +78,32 @@ def classify_response(resp: httpx.Response) -> ClassifiedError | None:
     if s in (401, 403):
         return ClassifiedError("bad_key", _MESSAGES["bad_key"], ErrorCategory.CONFIG)
     if s == 404:
-        return ClassifiedError("not_found", _MESSAGES["not_found"], ErrorCategory.CONFIG)
+        return ClassifiedError(
+            "not_found", _MESSAGES["not_found"], ErrorCategory.CONFIG
+        )
     if s in (400, 422):
-        return ClassifiedError("rejected_authed", _MESSAGES["rejected_authed"], ErrorCategory.CONFIG)
+        return ClassifiedError(
+            "rejected_authed", _MESSAGES["rejected_authed"], ErrorCategory.CONFIG
+        )
     if s == 429:
         retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-        return ClassifiedError("rate_limited", _MESSAGES["rate_limited"], ErrorCategory.RECOVERABLE, retry_after)
+        return ClassifiedError(
+            "rate_limited",
+            _MESSAGES["rate_limited"],
+            ErrorCategory.RECOVERABLE,
+            retry_after,
+        )
     if s >= 500:
-        return ClassifiedError("http_error", f"{_MESSAGES['http_error']}（HTTP {s}）", ErrorCategory.RECOVERABLE)
-    return ClassifiedError("http_error", f"{_MESSAGES['http_error']}（HTTP {s}）", ErrorCategory.RECOVERABLE)
+        return ClassifiedError(
+            "http_error",
+            f"{_MESSAGES['http_error']}（HTTP {s}）",
+            ErrorCategory.RECOVERABLE,
+        )
+    return ClassifiedError(
+        "http_error",
+        f"{_MESSAGES['http_error']}（HTTP {s}）",
+        ErrorCategory.RECOVERABLE,
+    )
 
 
 def _parse_retry_after(v: str | None) -> float | None:

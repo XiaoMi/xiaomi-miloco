@@ -5,13 +5,13 @@
 
 返回统一形状 {ok, code, status?, latency_ms?, message}。code 集合与 spec §2 一致。
 """
+
 from __future__ import annotations
 
 import time
 from typing import Any
 
 import httpx
-
 
 _TIMEOUT = httpx.Timeout(15.0, connect=10.0)
 
@@ -28,7 +28,10 @@ async def probe_reachable(base_url: str) -> dict | None:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(f"{url}/models")
     except Exception as e:  # noqa: BLE001
-        return {"code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
+        return {
+            "code": "unreachable",
+            "message": f"无法连接 Base URL（{type(e).__name__}）",
+        }
     if r.status_code < 400 or r.status_code in (401, 403):
         return None
     return {"code": "http_error", "message": f"服务返回异常（HTTP {r.status_code}）"}
@@ -39,9 +42,16 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
     base = base_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
+            r = await client.get(
+                f"{base}/models", headers={"Authorization": f"Bearer {api_key}"}
+            )
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "models": [], "message": f"无法连接 Base URL（{type(e).__name__}）"}
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "models": [],
+            "message": f"无法连接 Base URL（{type(e).__name__}）",
+        }
     if r.status_code == 200:
         try:
             ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
@@ -49,7 +59,12 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
             ids = []
         return {"ok": True, "models": sorted(ids)}
     if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "models": [], "message": "API Key 无效或无权限"}
+        return {
+            "ok": False,
+            "code": "bad_key",
+            "models": [],
+            "message": "API Key 无效或无权限",
+        }
     return {
         "ok": False,
         "code": "http_error",
@@ -70,24 +85,55 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.post(
                 f"{base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
                 json=body,
             )
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "message": f"无法连接 Base URL（{type(e).__name__}）",
+        }
     latency_ms = round((time.monotonic() - t0) * 1000)
     if r.status_code == 200:
-        return {"ok": True, "code": "ok", "status": 200, "latency_ms": latency_ms, "message": "连接正常"}
+        return {
+            "ok": True,
+            "code": "ok",
+            "status": 200,
+            "latency_ms": latency_ms,
+            "message": "连接正常",
+        }
     if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "status": r.status_code, "message": "API Key 无效或无权限"}
+        return {
+            "ok": False,
+            "code": "bad_key",
+            "status": r.status_code,
+            "message": "API Key 无效或无权限",
+        }
     if r.status_code == 404:
-        return {"ok": False, "code": "not_found", "status": 404, "message": "模型或地址不存在"}
+        return {
+            "ok": False,
+            "code": "not_found",
+            "status": 404,
+            "message": "模型或地址不存在",
+        }
     if r.status_code in (400, 422):
         return {
-            "ok": False, "code": "rejected_authed", "status": r.status_code,
-            "latency_ms": latency_ms, "message": "已连接，但拒绝了模型请求（模型名可能错误）",
+            "ok": False,
+            "code": "rejected_authed",
+            "status": r.status_code,
+            "latency_ms": latency_ms,
+            "message": "已连接，但拒绝了模型请求（模型名可能错误）",
         }
-    return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
+    return {
+        "ok": False,
+        "code": "http_error",
+        "status": r.status_code,
+        "message": f"服务返回异常（HTTP {r.status_code}）",
+    }
 
 
 async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
@@ -101,11 +147,27 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     base = base_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
+            r = await client.get(
+                f"{base}/models", headers={"Authorization": f"Bearer {api_key}"}
+            )
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "message": f"无法连接 Base URL（{type(e).__name__}）",
+        }
     if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "status": r.status_code, "message": "API Key 无效或无权限"}
+        return {
+            "ok": False,
+            "code": "bad_key",
+            "status": r.status_code,
+            "message": "API Key 无效或无权限",
+        }
     if r.status_code >= 500:
-        return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
+        return {
+            "ok": False,
+            "code": "http_error",
+            "status": r.status_code,
+            "message": f"服务返回异常（HTTP {r.status_code}）",
+        }
     return await probe_chat(model, base, api_key)

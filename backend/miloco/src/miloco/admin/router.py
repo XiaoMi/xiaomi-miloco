@@ -11,12 +11,10 @@ import json
 import logging
 import re
 import subprocess
-import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, StrictBool
 from sse_starlette.sse import EventSourceResponse
@@ -29,8 +27,11 @@ from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni.probe import (
     fetch_models as _fetch_models,
-    probe_chat as _probe_chat,
+)
+from miloco.perception.engine.omni.probe import (
     probe_omni as _probe_omni,
+)
+from miloco.perception.engine.omni.probe import (
     probe_reachable as _probe_reachable,
 )
 from miloco.schema.common_schema import NormalResponse
@@ -99,7 +100,9 @@ def _run_git(args: list[str]) -> str | None:
     try:
         r = subprocess.run(
             ["git"] + args,
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
             cwd=Path(__file__).resolve().parent,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -214,9 +217,7 @@ async def get_token_usage_daily(
 ):
     """Daily rollup rows (date / model / type) combining historical + today's live."""
     rows = get_token_usage_repo().aggregate_daily(since, until)
-    return NormalResponse(
-        code=0, message="ok", data={"rows": rows, "total": len(rows)}
-    )
+    return NormalResponse(code=0, message="ok", data={"rows": rows, "total": len(rows)})
 
 
 @router.get(
@@ -237,9 +238,7 @@ async def get_token_usage_buckets(
     over /token-usage for the today timeline.
     """
     rows = get_token_usage_repo().aggregate_buckets(since, until, bin_minutes)
-    return NormalResponse(
-        code=0, message="ok", data={"rows": rows, "total": len(rows)}
-    )
+    return NormalResponse(code=0, message="ok", data={"rows": rows, "total": len(rows)})
 
 
 @router.post(
@@ -334,7 +333,9 @@ async def submit_event_feedback(
         if user_info:
             uid = user_info.uid
     except Exception:
-        logger.exception("Failed to resolve miot uid for feedback pack; falling back to anonymous")
+        logger.exception(
+            "Failed to resolve miot uid for feedback pack; falling back to anonymous"
+        )
 
     try:
         result = await asyncio.to_thread(
@@ -384,6 +385,7 @@ async def reveal_dir(
     from pathlib import Path
 
     from miloco.utils.paths import miloco_home
+
     dir_path = Path(body.path).resolve()
     allowed_root = (miloco_home() / "packs").resolve()
     if not dir_path.is_relative_to(allowed_root):
@@ -456,6 +458,7 @@ def _full_omni_payload() -> dict:
     与「模型」页 active 行的连接状态列均读此字段。
     """
     from dataclasses import asdict
+
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
 
     m = get_settings().model
@@ -472,14 +475,17 @@ def _full_omni_payload() -> dict:
         for p in m.omni_profiles
     ]
     if active.api_key and not any(p["active"] for p in profiles):
-        profiles.insert(0, {
-            "label": _active_display_label(),
-            "model": active.model,
-            "base_url": active.base_url,
-            "api_key_masked": _mask_api_key(active.api_key),
-            "has_key": True,
-            "active": True,
-        })
+        profiles.insert(
+            0,
+            {
+                "label": _active_display_label(),
+                "model": active.model,
+                "base_url": active.base_url,
+                "api_key_masked": _mask_api_key(active.api_key),
+                "has_key": True,
+                "active": True,
+            },
+        )
     health = asdict(get_omni_circuit_breaker().snapshot())
     return {
         "active": {
@@ -496,7 +502,12 @@ def _full_omni_payload() -> dict:
 
 def _profiles_as_dicts() -> list[dict]:
     return [
-        {"label": p.label, "model": p.model, "base_url": p.base_url, "api_key": p.api_key}
+        {
+            "label": p.label,
+            "model": p.model,
+            "base_url": p.base_url,
+            "api_key": p.api_key,
+        }
         for p in get_settings().model.omni_profiles
     ]
 
@@ -530,7 +541,9 @@ def get_omni_config(current_user: str = Depends(verify_token)):
     summary="保存一套 omni 配置(upsert 档案;activate=true 时设为当前，默认 true)",
     response_model=NormalResponse,
 )
-async def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_token)):
+async def put_omni_config(
+    body: OmniConfigBody, current_user: str = Depends(verify_token)
+):
     """保存(新增/更新)一套档案到列表。
 
     - 档案名(label)= 唯一 id,非空;base_url / api_key / model 均为该档案可改属性。
@@ -562,7 +575,9 @@ async def put_omni_config(body: OmniConfigBody, current_user: str = Depends(veri
     will_activate = body.activate or _label_is_active(tgt)
     if will_activate:
         if not key:
-            raise HTTPException(status_code=400, detail={"code": "no_key", "message": "未配置 API Key"})
+            raise HTTPException(
+                status_code=400, detail={"code": "no_key", "message": "未配置 API Key"}
+            )
         result = await _probe_omni(model, base_url, key)
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result)
@@ -582,13 +597,18 @@ async def put_omni_config(body: OmniConfigBody, current_user: str = Depends(veri
     summary="切换当前生效配置为某套已存档案(激活前跑 preflight)",
     response_model=NormalResponse,
 )
-async def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def activate_omni_config(
+    body: OmniSelectBody, current_user: str = Depends(verify_token)
+):
     """激活前跑 preflight;失败返 400 + 错误码。"""
     label = body.label.strip()
     for p in get_settings().model.omni_profiles:
         if p.label == label:
             if not p.api_key:
-                raise HTTPException(status_code=400, detail={"code": "no_key", "message": "未配置 API Key"})
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "no_key", "message": "未配置 API Key"},
+                )
             result = await _probe_omni(p.model, p.base_url, p.api_key)
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
@@ -632,7 +652,9 @@ async def _soft_stop_best_effort(action: str) -> None:
     summary="删除一套已存档案;删的是当前生效那套时,回到「未配模型」态并软停感知",
     response_model=NormalResponse,
 )
-async def delete_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def delete_omni_config(
+    body: OmniSelectBody, current_user: str = Depends(verify_token)
+):
     """删除一套档案。删的若是当前生效模型,则把当前生效配置重置为「未配」(清空 key)并软停
     感知 —— 等价于回到初始未配模型态:感知停下,等重新配置并启用模型后由 tick 自愈自动拉起。
     """
@@ -656,7 +678,9 @@ async def delete_omni_config(body: OmniSelectBody, current_user: str = Depends(v
     summary="停用当前生效模型:回到「未配模型」态并软停感知,但保留所有档案(可再启用)",
     response_model=NormalResponse,
 )
-async def deactivate_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def deactivate_omni_config(
+    body: OmniSelectBody, current_user: str = Depends(verify_token)
+):
     """停用当前生效模型:当前生效配置重置为「未配」(清空 key)+ 软停感知,但**不删除档案**。
     与 delete 的区别:delete 会移除该档案,deactivate 仅停用、档案保留,可随后再「启用」恢复。
     """
@@ -723,13 +747,28 @@ async def list_omni_models(
         reach = await _probe_reachable(base_url)
         if reach is not None:
             return NormalResponse(
-                code=0, message="ok",
-                data={"ok": False, "code": reach["code"], "models": [], "message": reach["message"]},
+                code=0,
+                message="ok",
+                data={
+                    "ok": False,
+                    "code": reach["code"],
+                    "models": [],
+                    "message": reach["message"],
+                },
             )
         return NormalResponse(
-            code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
+            code=0,
+            message="ok",
+            data={
+                "ok": False,
+                "code": "no_key",
+                "models": [],
+                "message": "未配置 API Key",
+            },
         )
-    return NormalResponse(code=0, message="ok", data=await _fetch_models(base_url, api_key))
+    return NormalResponse(
+        code=0, message="ok", data=await _fetch_models(base_url, api_key)
+    )
 
 
 @router.post(
@@ -744,10 +783,12 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
       若之前是 OPEN_CONFIG(引擎已被软停),成功后调 try_reinit_engine 重建引擎。
     """
     from miloco.perception.engine.omni.circuit_breaker import (
-        CircuitState, get_omni_circuit_breaker,
+        CircuitState,
+        get_omni_circuit_breaker,
     )
     from miloco.perception.engine.omni.error_classifier import (
-        ClassifiedError, ErrorCategory,
+        ClassifiedError,
+        ErrorCategory,
     )
 
     cb = get_omni_circuit_breaker()
@@ -759,9 +800,14 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     omni = get_settings().model.omni
     if not omni.api_key:
         # 无 key:直接标记 probe 失败,回 OPEN_CONFIG
-        await cb.record_probe_result(False, ClassifiedError(
-            "no_key", "未配置 API Key", ErrorCategory.CONFIG,
-        ))
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(
+                "no_key",
+                "未配置 API Key",
+                ErrorCategory.CONFIG,
+            ),
+        )
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
     result = await _probe_omni(omni.model, omni.base_url, omni.api_key)
@@ -770,15 +816,26 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
         if prev_state == CircuitState.OPEN_CONFIG:
             # 之前触发过软停,现在重建引擎
             try:
-                manager.perception_service._pipeline.try_reinit_engine(include_failed=True)
+                manager.perception_service._pipeline.try_reinit_engine(
+                    include_failed=True
+                )
             except Exception as e:  # noqa: BLE001
                 logger.warning("retry 后重建引擎失败(将靠 tick 自愈): %s", e)
     else:
         code = result.get("code", "unreachable")
-        cat = ErrorCategory.CONFIG if code in ("bad_key", "not_found", "rejected_authed") else ErrorCategory.RECOVERABLE
-        await cb.record_probe_result(False, ClassifiedError(
-            code, result.get("message", ""), cat,
-        ))
+        cat = (
+            ErrorCategory.CONFIG
+            if code in ("bad_key", "not_found", "rejected_authed")
+            else ErrorCategory.RECOVERABLE
+        )
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(
+                code,
+                result.get("message", ""),
+                cat,
+            ),
+        )
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 
@@ -797,15 +854,25 @@ async def omni_health_stream():
     async def event_generator():
         try:
             # 首次连上立刻推一次当前状态,让 web 拿到初始态
-            from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
             from dataclasses import asdict
+
+            from miloco.perception.engine.omni.circuit_breaker import (
+                get_omni_circuit_breaker,
+            )
+
             initial = asdict(get_omni_circuit_breaker().snapshot())
-            yield {"event": "omni_health", "data": json.dumps(initial, ensure_ascii=False)}
+            yield {
+                "event": "omni_health",
+                "data": json.dumps(initial, ensure_ascii=False),
+            }
             while True:
                 event_type, data = await q.get()
                 if event_type != "omni_health":
                     continue
-                yield {"event": "omni_health", "data": json.dumps(data, ensure_ascii=False)}
+                yield {
+                    "event": "omni_health",
+                    "data": json.dumps(data, ensure_ascii=False),
+                }
         except asyncio.CancelledError:
             pass
         finally:

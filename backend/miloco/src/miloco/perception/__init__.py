@@ -67,6 +67,7 @@ async def init_perception_module(miot_proxy, kv_repo):
     # 让 web 顶部横条实时反映 warn/error 状态。listener 在锁外调用,里面只做非阻塞
     # put_nowait,单个订阅队列满就 log warning + drop(见 _publish)。
     from dataclasses import asdict
+
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
 
     def _emit_omni_health(snap):

@@ -1,4 +1,5 @@
 """omni_client 三个 HTTP 出口 × 熔断器 集成测试。"""
+
 from __future__ import annotations
 
 import httpx
@@ -7,16 +8,23 @@ import pytest
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni import omni_client
 from miloco.perception.engine.omni.circuit_breaker import (
-    get_omni_circuit_breaker, reset_omni_circuit_breaker_for_tests,
+    get_omni_circuit_breaker,
+    reset_omni_circuit_breaker_for_tests,
 )
 from miloco.perception.engine.omni.error_classifier import (
-    ClassifiedError, ErrorCategory,
+    ClassifiedError,
+    ErrorCategory,
 )
 
 
 class _FakeResp:
-    def __init__(self, status_code: int, json_data: dict | None = None, text: str = "",
-                 headers: dict | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        json_data: dict | None = None,
+        text: str = "",
+        headers: dict | None = None,
+    ):
         self.status_code = status_code
         self._json = json_data if json_data is not None else {}
         self.text = text
@@ -27,8 +35,11 @@ class _FakeResp:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise httpx.HTTPStatusError("err", request=httpx.Request("POST", "https://x"),
-                                        response=httpx.Response(self.status_code))
+            raise httpx.HTTPStatusError(
+                "err",
+                request=httpx.Request("POST", "https://x"),
+                response=httpx.Response(self.status_code),
+            )
 
 
 def _fake_async_client(resp: _FakeResp | None = None, *, exc: Exception | None = None):
@@ -59,8 +70,14 @@ def _reset_cb():
 
 def _cfg() -> OmniConfig:
     return OmniConfig(
-        model="m", base_url="https://x/v1", api_key="sk-1",
-        temperature=0, top_p=1, max_completion_tokens=1, timeout=1.0, stream=False,
+        model="m",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=1,
+        timeout=1.0,
+        stream=False,
     )
 
 
@@ -72,15 +89,19 @@ def _payload() -> dict:
 
 
 async def test_call_omni_success_records_success(monkeypatch):
-    monkeypatch.setattr(omni_client.httpx, "AsyncClient",
-                        _fake_async_client(resp=_FakeResp(200, {"choices": [], "usage": {}})))
+    monkeypatch.setattr(
+        omni_client.httpx,
+        "AsyncClient",
+        _fake_async_client(resp=_FakeResp(200, {"choices": [], "usage": {}})),
+    )
     await omni_client.call_omni(_payload(), _cfg())
     assert get_omni_circuit_breaker().snapshot().state == "ok"
 
 
 async def test_call_omni_401_opens_config_immediately(monkeypatch):
-    monkeypatch.setattr(omni_client.httpx, "AsyncClient",
-                        _fake_async_client(resp=_FakeResp(401)))
+    monkeypatch.setattr(
+        omni_client.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(401))
+    )
     with pytest.raises(omni_client.OmniError):
         await omni_client.call_omni(_payload(), _cfg())
     snap = get_omni_circuit_breaker().snapshot()
@@ -88,16 +109,20 @@ async def test_call_omni_401_opens_config_immediately(monkeypatch):
 
 
 async def test_call_omni_404_opens_config(monkeypatch):
-    monkeypatch.setattr(omni_client.httpx, "AsyncClient",
-                        _fake_async_client(resp=_FakeResp(404)))
+    monkeypatch.setattr(
+        omni_client.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(404))
+    )
     with pytest.raises(omni_client.OmniError):
         await omni_client.call_omni(_payload(), _cfg())
     assert get_omni_circuit_breaker().snapshot().code == "not_found"
 
 
 async def test_call_omni_three_connect_errors_open_recoverable(monkeypatch):
-    monkeypatch.setattr(omni_client.httpx, "AsyncClient",
-                        _fake_async_client(exc=httpx.ConnectError("nope")))
+    monkeypatch.setattr(
+        omni_client.httpx,
+        "AsyncClient",
+        _fake_async_client(exc=httpx.ConnectError("nope")),
+    )
     for _ in range(3):
         with pytest.raises(omni_client.OmniError):
             await omni_client.call_omni(_payload(), _cfg())
@@ -117,10 +142,17 @@ async def test_call_omni_open_short_circuits_no_http(monkeypatch):
 
     def bomb_client(*a, **k):
         call_count["n"] += 1
+
         class C:
-            async def __aenter__(self_): return self_
-            async def __aexit__(self_, *a_): return False
-            async def post(self_, *a_, **k_): raise AssertionError("should not reach HTTP")
+            async def __aenter__(self_):
+                return self_
+
+            async def __aexit__(self_, *a_):
+                return False
+
+            async def post(self_, *a_, **k_):
+                raise AssertionError("should not reach HTTP")
+
         return C()
 
     monkeypatch.setattr(omni_client.httpx, "AsyncClient", bomb_client)
@@ -132,8 +164,9 @@ async def test_call_omni_open_short_circuits_no_http(monkeypatch):
 
 async def test_call_omni_bad_response_non_dict(monkeypatch):
     """非 dict 响应算 recoverable,单次未到阈值不熔断;3 次后熔断为 bad_response。"""
-    monkeypatch.setattr(omni_client.httpx, "AsyncClient",
-                        _fake_async_client(resp=_FakeResp(200, [])))  # list 不是 dict
+    monkeypatch.setattr(
+        omni_client.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(200, []))
+    )  # list 不是 dict
     for _ in range(3):
         with pytest.raises(omni_client.OmniError):
             await omni_client.call_omni(_payload(), _cfg())
@@ -190,11 +223,15 @@ async def test_resolve_live_config_change_resets_breaker(monkeypatch):
     base = OmniConfig(model="m1", base_url="https://x/v1", api_key="sk-OLD")
     # patch get_settings 引用点
     import miloco.perception.engine.omni.omni_client as oc
+
     monkeypatch.setattr(
-        "miloco.config.get_settings", lambda: _S(), raising=True,
+        "miloco.config.get_settings",
+        lambda: _S(),
+        raising=True,
     )
     oc.resolve_live_omni_config(base)
     # 等待 create_task 完成
     import asyncio
+
     await asyncio.sleep(0)
     assert cb.snapshot().state == "ok"

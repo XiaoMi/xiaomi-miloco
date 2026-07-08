@@ -1,4 +1,5 @@
 """circuit_breaker 单元测试。用 monkeypatch 冻结时间便于断言 backoff。"""
+
 from __future__ import annotations
 
 import time
@@ -6,14 +7,19 @@ import time
 import pytest
 
 from miloco.perception.engine.omni.circuit_breaker import (
-    CircuitOpenError, CircuitState, OmniCircuitBreaker,
+    CircuitOpenError,
+    CircuitState,
+    OmniCircuitBreaker,
 )
 from miloco.perception.engine.omni.error_classifier import (
-    ClassifiedError, ErrorCategory,
+    ClassifiedError,
+    ErrorCategory,
 )
 
 
-def _rec(code: str = "unreachable", retry_after: float | None = None) -> ClassifiedError:
+def _rec(
+    code: str = "unreachable", retry_after: float | None = None
+) -> ClassifiedError:
     return ClassifiedError(code, "m", ErrorCategory.RECOVERABLE, retry_after)
 
 
@@ -38,9 +44,13 @@ def cb():
 @pytest.fixture
 def frozen_time(monkeypatch):
     """冻结 time.monotonic(),测试可通过 tick(s) 推进。"""
+
     class Clock:
         now = 1_000_000.0
-        def tick(self, sec: float): self.now += sec
+
+        def tick(self, sec: float):
+            self.now += sec
+
     c = Clock()
     monkeypatch.setattr(time, "monotonic", lambda: c.now)
     return c
@@ -259,8 +269,10 @@ async def test_listener_fires_on_state_change(cb):
 
 async def test_listener_exceptions_are_swallowed(cb):
     """listener 抛异常不能连累熔断器。"""
+
     def bad(snap):
         raise RuntimeError("listener crashed")
+
     cb.register_listener(bad)
     # 不抛
     await cb.record_failure(_cfg("bad_key"))

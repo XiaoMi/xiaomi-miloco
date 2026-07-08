@@ -4,6 +4,7 @@
 线程模型:asyncio 单线程 + Lock 保护;不跨线程使用(inference 线程有自己的 loop,
 但 omni 调用回到主 loop 通过 run_coroutine_threadsafe,所以本模块只从主 loop 调)。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +16,8 @@ from enum import Enum
 from typing import Callable
 
 from miloco.perception.engine.omni.error_classifier import (
-    ClassifiedError, ErrorCategory,
+    ClassifiedError,
+    ErrorCategory,
 )
 
 
@@ -45,10 +47,10 @@ class CircuitOpenError(Exception):
 
 @dataclass(frozen=True)
 class HealthSnapshot:
-    state: str                  # ok | warn | error(前端 Severity)
+    state: str  # ok | warn | error(前端 Severity)
     code: str | None
     message: str
-    since_ms: int               # 当前非 CLOSED 状态起点(CLOSED 时=0)
+    since_ms: int  # 当前非 CLOSED 状态起点(CLOSED 时=0)
     consecutive_failures: int
     next_probe_at_ms: int | None
     last_probe_at_ms: int | None
@@ -127,7 +129,10 @@ class OmniCircuitBreaker:
                     self._current_code, self._current_message = err.code, err.message
                     emit = True
             else:
-                if self._should_open_locked() and self._state != CircuitState.OPEN_RECOVERABLE:
+                if (
+                    self._should_open_locked()
+                    and self._state != CircuitState.OPEN_RECOVERABLE
+                ):
                     self._transition_to_open_recoverable_locked(err)
                     emit = True
         if emit:
@@ -153,8 +158,10 @@ class OmniCircuitBreaker:
         """外部 tick 查询:是否到 HALF_OPEN 时刻(不改状态)。"""
         if self._state != CircuitState.OPEN_RECOVERABLE:
             return False
-        return (self._next_probe_at_monotonic is not None
-                and time.monotonic() >= self._next_probe_at_monotonic)
+        return (
+            self._next_probe_at_monotonic is not None
+            and time.monotonic() >= self._next_probe_at_monotonic
+        )
 
     async def mark_half_open(self) -> None:
         """外部驱动:进入 HALF_OPEN(发起 probe 前调)。"""
@@ -180,7 +187,10 @@ class OmniCircuitBreaker:
         now_ms = int(time.time() * 1000)
         mono_now = time.monotonic()
         next_ms: int | None = None
-        if self._next_probe_at_monotonic is not None and self._state == CircuitState.OPEN_RECOVERABLE:
+        if (
+            self._next_probe_at_monotonic is not None
+            and self._state == CircuitState.OPEN_RECOVERABLE
+        ):
             next_ms = now_ms + int((self._next_probe_at_monotonic - mono_now) * 1000)
         last_ms = None
         if self._last_probe_at is not None:
@@ -231,7 +241,11 @@ class OmniCircuitBreaker:
             base = min(self._current_backoff * self._backoff_multiplier, cap)
         if err.retry_after_seconds is not None:
             base = max(base, min(err.retry_after_seconds, cap))
-        jitter = 1 + random.uniform(-self._jitter_ratio, self._jitter_ratio) if self._jitter_ratio else 1.0
+        jitter = (
+            1 + random.uniform(-self._jitter_ratio, self._jitter_ratio)
+            if self._jitter_ratio
+            else 1.0
+        )
         self._current_backoff = base
         self._next_probe_at_monotonic = time.monotonic() + base * jitter
 

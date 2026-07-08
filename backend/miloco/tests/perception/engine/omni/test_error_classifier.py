@@ -1,4 +1,5 @@
 """error_classifier 单元测试:覆盖 spec §2 完整分类矩阵。"""
+
 from __future__ import annotations
 
 import json
@@ -7,12 +8,17 @@ import httpx
 import pytest
 
 from miloco.perception.engine.omni.error_classifier import (
-    ClassifiedError, ErrorCategory, classify_exception, classify_response,
+    ClassifiedError,
+    ErrorCategory,
+    classify_exception,
+    classify_response,
 )
 
 
 def _resp(status: int, headers: dict | None = None) -> httpx.Response:
-    return httpx.Response(status, headers=headers or {}, request=httpx.Request("GET", "https://x/y"))
+    return httpx.Response(
+        status, headers=headers or {}, request=httpx.Request("GET", "https://x/y")
+    )
 
 
 # ─── classify_exception ─────────────────────────────────────────────────────

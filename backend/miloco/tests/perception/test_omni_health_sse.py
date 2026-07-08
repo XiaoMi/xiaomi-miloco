@@ -1,4 +1,5 @@
 """circuit_breaker 状态变化 → PipelineProcessor SSE 广播 omni_health 事件。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,10 +8,13 @@ from dataclasses import asdict
 import pytest
 
 from miloco.perception.engine.omni.circuit_breaker import (
-    OmniCircuitBreaker, get_omni_circuit_breaker, reset_omni_circuit_breaker_for_tests,
+    OmniCircuitBreaker,
+    get_omni_circuit_breaker,
+    reset_omni_circuit_breaker_for_tests,
 )
 from miloco.perception.engine.omni.error_classifier import (
-    ClassifiedError, ErrorCategory,
+    ClassifiedError,
+    ErrorCategory,
 )
 
 
@@ -33,9 +37,14 @@ async def test_listener_emits_asdict_snapshot():
     assert payload["code"] == "bad_key"
     # 必需字段全在
     assert set(payload.keys()) >= {
-        "state", "code", "message", "since_ms",
-        "consecutive_failures", "next_probe_at_ms",
-        "last_probe_at_ms", "last_probe_result",
+        "state",
+        "code",
+        "message",
+        "since_ms",
+        "consecutive_failures",
+        "next_probe_at_ms",
+        "last_probe_at_ms",
+        "last_probe_result",
     }
 
 
@@ -43,7 +52,9 @@ async def test_multiple_transitions_emit_multiple_events():
     seen: list[str] = []
     cb = OmniCircuitBreaker(consecutive_threshold=1, jitter_ratio=0.0)
     cb.register_listener(lambda snap: seen.append(snap.state))
-    await cb.record_failure(ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE))
+    await cb.record_failure(
+        ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
+    )
     await cb.mark_half_open()
     await cb.record_probe_result(True, None)
     # warn → warn(half_open 也是 warn) → ok
@@ -93,8 +104,16 @@ async def test_short_circuit_records_zero_latency_trace(monkeypatch):
     cb = get_omni_circuit_breaker()
     await cb.record_failure(ClassifiedError("bad_key", "无效", ErrorCategory.CONFIG))
 
-    cfg = OmniConfig(model="m", base_url="https://x/v1", api_key="sk-x",
-                     temperature=0, top_p=1, max_completion_tokens=1, timeout=1.0, stream=False)
+    cfg = OmniConfig(
+        model="m",
+        base_url="https://x/v1",
+        api_key="sk-x",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=1,
+        timeout=1.0,
+        stream=False,
+    )
     with pytest.raises(omni_client.OmniError):
         await omni_client.call_omni({"system_prompt": "s", "user_content": "u"}, cfg)
 
