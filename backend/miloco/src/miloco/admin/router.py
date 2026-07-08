@@ -448,7 +448,13 @@ def _full_omni_payload() -> dict:
     omni 是默认 MiMo)或历史遗留场景下,active 不在档案列表里。此时若直接返回 profiles,
     前端列表就看不到「当前生效模型」(只有折叠态标题栏读 active 能看到),造成「配没配好」
     的困惑。故在 active 未出现在档案列表时,把它作为一条合成档案补到列表头部(标 active)。
+
+    active 字段附带 health 子对象(见 spec §6.1),来自 omni 熔断器 snapshot;前端顶部横条
+    与「模型」页 active 行的连接状态列均读此字段。
     """
+    from dataclasses import asdict
+    from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+
     m = get_settings().model
     active = m.omni
     profiles = [
@@ -462,18 +468,16 @@ def _full_omni_payload() -> dict:
         }
         for p in m.omni_profiles
     ]
-    # 仅当 active 真有 key(确有模型在跑)、且未出现在档案列表时才合成补入并标 active。
-    # 无 key 态(出厂未配 / 删当前生效后回到未配)不合成 —— 列表呈现为空 + 顶部「未配 key」
-    # 警告,清楚表达「没有模型在跑」,而不是显示一条诡异的无 key 行。
     if active.api_key and not any(p["active"] for p in profiles):
         profiles.insert(0, {
-            "label": _active_display_label(),  # 空 label 回退 model@base_url,保证可编辑/删除
+            "label": _active_display_label(),
             "model": active.model,
             "base_url": active.base_url,
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": True,
             "active": True,
         })
+    health = asdict(get_omni_circuit_breaker().snapshot())
     return {
         "active": {
             "label": active.label,
@@ -481,6 +485,7 @@ def _full_omni_payload() -> dict:
             "base_url": active.base_url,
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
+            "health": health,
         },
         "profiles": profiles,
     }
@@ -522,7 +527,7 @@ def get_omni_config(current_user: str = Depends(verify_token)):
     summary="保存一套 omni 配置(upsert 档案;activate=true 时设为当前，默认 true)",
     response_model=NormalResponse,
 )
-def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_token)):
+async def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_token)):
     """保存(新增/更新)一套档案到列表。
 
     - 档案名(label)= 唯一 id,非空;base_url / api_key / model 均为该档案可改属性。
@@ -532,6 +537,9 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
     - ``activate``=true(默认)同时设为当前生效;false 只入列表、不切换当前(激活走
       ``/activate``,即列表的「启用」)。但**正在编辑的就是当前生效那套时**,无论 activate
       与否都同步刷新 ``model.omni``,使改 key/model 即时对运行中的感知生效。
+    - 若本次会写 ``model.omni``(激活或编辑当前生效那套),落盘前先跑 preflight
+      (``_probe_omni``),失败返 400——避免任何绕过 web「测试连接」的调用方(CLI/curl)
+      把未校验配置写进运行时。
     - 写 config.json,感知下个推理周期热生效。env ``MILOCO_MODEL__OMNI__*`` 优先级更高会盖过。
     """
     label = body.label.strip()
@@ -547,16 +555,20 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
         raise HTTPException(status_code=409, detail=f"档案名「{label}」已存在")
     key = _key_by_label(orig or label, body.api_key)
     entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
+    tgt = orig or label
+    will_activate = body.activate or _label_is_active(tgt)
+    if will_activate:
+        if not key:
+            raise HTTPException(status_code=400, detail={"code": "no_key", "message": "未配置 API Key"})
+        result = await _probe_omni(model, base_url, key)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result)
     if target:
         profiles[profiles.index(target)] = entry
     else:
         profiles.append(entry)
     update: dict = {"omni_profiles": profiles}
-    # activate=true 显式设为当前;或编辑的就是当前生效那套(含空 label 当前生效的合成展示 label)→
-    # 同步刷新 active(改 key/model 即时生效)。复用 _label_is_active,与删除/停用同一处判定。
-    # tgt 由非空 label 或 orig 组成,恒非空,故 _label_is_active 的 bool 守卫不影响语义。
-    tgt = orig or label
-    if body.activate or _label_is_active(tgt):
+    if will_activate:
         update["omni"] = entry
     update_shared_config(model=update)
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
@@ -564,13 +576,19 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
 
 @router.post(
     "/omni-config/activate",
-    summary="切换当前生效配置为某套已存档案",
+    summary="切换当前生效配置为某套已存档案(激活前跑 preflight)",
     response_model=NormalResponse,
 )
-def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+    """激活前跑 preflight;失败返 400 + 错误码。"""
     label = body.label.strip()
     for p in get_settings().model.omni_profiles:
         if p.label == label:
+            if not p.api_key:
+                raise HTTPException(status_code=400, detail={"code": "no_key", "message": "未配置 API Key"})
+            result = await _probe_omni(p.model, p.base_url, p.api_key)
+            if not result.get("ok"):
+                raise HTTPException(status_code=400, detail=result)
             update_shared_config(
                 model={
                     "omni": {
@@ -709,3 +727,53 @@ async def list_omni_models(
             code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
         )
     return NormalResponse(code=0, message="ok", data=await _fetch_models(base_url, api_key))
+
+
+@router.post(
+    "/omni-config/retry",
+    summary="用户主动触发一次 omni 探测,跳过熔断剩余 backoff",
+    response_model=NormalResponse,
+)
+async def retry_omni_probe(current_user: str = Depends(verify_token)):
+    """用户点「立即重试」时调:
+    - CLOSED: no-op,返回当前 health
+    - OPEN_RECOVERABLE / OPEN_CONFIG / HALF_OPEN: 跑一次 probe_omni,成功回 CLOSED;
+      若之前是 OPEN_CONFIG(引擎已被软停),成功后调 try_reinit_engine 重建引擎。
+    """
+    from miloco.perception.engine.omni.circuit_breaker import (
+        CircuitState, get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError, ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+    prev_state = cb.state_for_test()
+    if prev_state == CircuitState.CLOSED:
+        return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+    await cb.retry_now()
+    omni = get_settings().model.omni
+    if not omni.api_key:
+        # 无 key:直接标记 probe 失败,回 OPEN_CONFIG
+        await cb.record_probe_result(False, ClassifiedError(
+            "no_key", "未配置 API Key", ErrorCategory.CONFIG,
+        ))
+        return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+    result = await _probe_omni(omni.model, omni.base_url, omni.api_key)
+    if result.get("ok"):
+        await cb.record_probe_result(True, None)
+        if prev_state == CircuitState.OPEN_CONFIG:
+            # 之前触发过软停,现在重建引擎
+            try:
+                manager.perception_service._pipeline.try_reinit_engine(include_failed=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("retry 后重建引擎失败(将靠 tick 自愈): %s", e)
+    else:
+        code = result.get("code", "unreachable")
+        cat = ErrorCategory.CONFIG if code in ("bad_key", "not_found", "rejected_authed") else ErrorCategory.RECOVERABLE
+        await cb.record_probe_result(False, ClassifiedError(
+            code, result.get("message", ""), cat,
+        ))
+    return NormalResponse(code=0, message="ok", data=_full_omni_payload())

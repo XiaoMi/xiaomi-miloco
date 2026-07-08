@@ -13,6 +13,38 @@ from fastapi.testclient import TestClient
 from miloco.admin.router import router
 
 
+# 模块 import 时立刻抓一份真实的 probe_omni 引用,避免被 autouse mock 覆盖后 real_probe fixture 拿到 mock 版
+from miloco.perception.engine.omni.probe import probe_omni as _real_probe_omni
+
+
+@pytest.fixture(autouse=True)
+def _default_probe_success(monkeypatch):
+    """默认让 preflight 通过——绝大多数用例关心 config CRUD,不关心 probe 结果。
+    需要测 preflight 失败或 test_connection 具体错误码的用例请加 real_probe fixture
+    还原 admin.router._probe_omni 到真实实现。"""
+    async def _ok(*a, **k):
+        return {"ok": True, "code": "ok", "status": 200, "latency_ms": 1, "message": "连接正常"}
+    monkeypatch.setattr("miloco.admin.router._probe_omni", _ok)
+
+
+@pytest.fixture(autouse=True)
+def _reset_omni_circuit_breaker():
+    """避免熔断状态跨 test 泄漏(retry 端点、SSE 事件等)。"""
+    from miloco.perception.engine.omni.circuit_breaker import (
+        reset_omni_circuit_breaker_for_tests,
+    )
+    reset_omni_circuit_breaker_for_tests()
+    yield
+    reset_omni_circuit_breaker_for_tests()
+
+
+@pytest.fixture
+def real_probe(monkeypatch):
+    """还原 preflight 的 probe mock,让 test_test_connection_* 真走 probe.py 逻辑
+    (用底层 httpx patch 替代)。用模块 import 时抓的原始引用。"""
+    monkeypatch.setattr("miloco.admin.router._probe_omni", _real_probe_omni)
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     from miloco.config.settings import reset_settings
@@ -131,14 +163,16 @@ def test_second_profile_has_independent_key(client):
         "/api/admin/omni-config",
         json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-keyforjia12"},
     )
-    # 另一套(新 label)不传 key → 不借别人的(key 属该档案)
+    # 另一套(新 label)不传 key → 不借别人的(key 属该档案);activate=False 因为无 key 无法激活
     out = client.put(
         "/api/admin/omni-config",
-        json={"label": "乙", "model": "m2", "base_url": "https://x/v1"},
+        json={"label": "乙", "model": "m2", "base_url": "https://x/v1", "activate": False},
     ).json()["data"]
-    assert out["active"]["label"] == "乙"
-    assert out["active"]["has_key"] is False
+    # activate=False 只入列表,不切换 active(active 仍是先前的甲)
+    assert out["active"]["label"] == "甲"
     assert len(out["profiles"]) == 2
+    yi = next(p for p in out["profiles"] if p["label"] == "乙")
+    assert yi["has_key"] is False
 
 
 def test_update_same_label_blank_key_keeps_it(client):
@@ -198,7 +232,7 @@ def test_put_activate_false_editing_active_still_syncs(client):
 
 def test_duplicate_label_409(client):
     client.put("/api/admin/omni-config", json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"})
-    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1"})
+    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1", "activate": False})
     # 把「乙」改名成已存在的「甲」→ 409
     resp = client.put(
         "/api/admin/omni-config",
@@ -209,7 +243,7 @@ def test_duplicate_label_409(client):
 
 def test_activate_by_label(client):
     client.put("/api/admin/omni-config", json={"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k111111111"})
-    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1"})
+    client.put("/api/admin/omni-config", json={"label": "乙", "model": "m2", "base_url": "https://x/v1", "api_key": "sk-k222222222"})
     out = client.post("/api/admin/omni-config/activate", json={"label": "甲"}).json()["data"]
     assert out["active"]["label"] == "甲"
     actives = {p["label"]: p["active"] for p in out["profiles"]}
@@ -423,7 +457,7 @@ def _fake_async_client(resp=None, exc=None, get_resp=None, post_resp=None):
     return _C
 
 
-def test_test_connection_ok_chat_succeeds(client, monkeypatch):
+def test_test_connection_ok_chat_succeeds(client, monkeypatch, real_probe):
     """GET /models 过鉴权/可达预检后,极简 chat 调通 → ok(连接正常)。不再以模型在不在列表为准。"""
     from miloco.admin import router as r
 
@@ -440,7 +474,7 @@ def test_test_connection_ok_chat_succeeds(client, monkeypatch):
     assert data["message"] == "连接正常"
 
 
-def test_test_connection_ok_even_if_model_not_listed(client, monkeypatch):
+def test_test_connection_ok_even_if_model_not_listed(client, monkeypatch, real_probe):
     """模型不在 /models 列表、但 chat 能调通 → 仍判 ok —— 直接验证模型是否可用,
     不靠「在不在可用列表」这种弱判据(列表常不全)。"""
     from miloco.admin import router as r
@@ -458,7 +492,7 @@ def test_test_connection_ok_even_if_model_not_listed(client, monkeypatch):
     assert data["code"] == "ok"  # 不在列表照样判 ok
 
 
-def test_test_connection_not_found(client, monkeypatch):
+def test_test_connection_not_found(client, monkeypatch, real_probe):
     # GET /models 404 → 回退 chat 探测,chat 也 404 → not_found
     from miloco.admin import router as r
 
@@ -474,7 +508,7 @@ def test_test_connection_not_found(client, monkeypatch):
     assert data["code"] == "not_found"
 
 
-def test_test_connection_rejected_authed(client, monkeypatch):
+def test_test_connection_rejected_authed(client, monkeypatch, real_probe):
     # GET /models 404 → 回退 chat,chat 返 400(鉴权过、仅请求体被拒)→ rejected_authed
     from miloco.admin import router as r
 
@@ -490,7 +524,7 @@ def test_test_connection_rejected_authed(client, monkeypatch):
     assert data["code"] == "rejected_authed"
 
 
-def test_test_connection_bad_key(client, monkeypatch):
+def test_test_connection_bad_key(client, monkeypatch, real_probe):
     from miloco.admin import router as r
 
     monkeypatch.setattr(
@@ -506,7 +540,7 @@ def test_test_connection_bad_key(client, monkeypatch):
     assert "API Key" in data["message"]
 
 
-def test_test_connection_unreachable(client, monkeypatch):
+def test_test_connection_unreachable(client, monkeypatch, real_probe):
     import httpx
     from miloco.admin import router as r
 
