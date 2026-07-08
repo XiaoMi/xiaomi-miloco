@@ -62,8 +62,10 @@ function truncateValue(v: string | null): string {
   return v.length <= VALUE_MAX ? v : `${v.slice(0, VALUE_MAX)}…`;
 }
 
-/** 动作行——并入 ActivityFeed 单流时,动作行套一层 brand-soft 底色 + brand 左边条
- *  跟事件行(无底色)区分;失败原因仍走 error 语义色(spec 允许行内保留失败徽标)。 */
+/** 动作行——并入 ActivityFeed 单流时,动作行按**结果**着底色跟事件行(无底色)区分:
+ *  成功=低饱和的柔和绿(success-bg,~8-12% alpha 的主题 token)、失败=柔和红(error-bg),
+ *  「尽量和原色接近一点,别太扎眼」——不再用统一的 brand 橙;左边条用语义色全值
+ *  (2px 细条,比底色略强的强调)。失败徽标保持不变。 */
 export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
   const ok = row.success === 1;
   const value = truncateValue(row.value_json);
@@ -72,7 +74,11 @@ export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
   const deviceLabel = row.device_name || row.did;
 
   return (
-    <li className="px-5 py-2.5 bg-brand-soft border-l-2 border-brand-primary hover:bg-brand-soft-strong transition-colors">
+    <li
+      className={`px-5 py-2.5 border-l-2 transition-colors ${
+        ok ? "bg-success-bg border-success" : "bg-error-bg border-error"
+      }`}
+    >
       {/* 时间列与事件行(ActivityRow)完全一致:同一 TimeLabel 组件 + 同 70px 列宽,
           合并单流里两种行的时间格式/对齐不再有差异(修「时间格式不一致」)。 */}
       <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[70px_1fr_auto] sm:gap-x-3 sm:gap-y-1 sm:items-baseline">
