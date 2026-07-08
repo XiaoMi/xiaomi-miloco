@@ -4,6 +4,7 @@
     "videoShortEdge": "分辨率",
     "videoShortEdgeHint": "短边像素，保持原始宽高比",
     "omniFps": "帧率",
+    "omniFpsHint": "帧率越高，资源占用越多",
     "windowSize": "感知窗口",
     "windowSizeUnit": "秒",
     "apply": "应用设置",

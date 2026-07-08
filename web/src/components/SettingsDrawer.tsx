@@ -164,6 +164,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
                     </button>
                   ))}
                 </div>
+                <p className="text-caption text-text-tertiary">
+                  {t("settings.omniFpsHint")}
+                </p>
               </div>
 
               {/* 感知窗口 */}

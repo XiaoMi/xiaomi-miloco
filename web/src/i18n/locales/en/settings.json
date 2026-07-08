@@ -4,6 +4,7 @@
     "videoShortEdge": "Resolution",
     "videoShortEdgeHint": "Short edge pixels, keeps aspect ratio",
     "omniFps": "Frame Rate",
+    "omniFpsHint": "Higher frame rate uses more resources",
     "windowSize": "Perception Window",
     "windowSizeUnit": "sec",
     "apply": "Apply Settings",
