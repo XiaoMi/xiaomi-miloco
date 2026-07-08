@@ -122,24 +122,24 @@ def _map_session(session_key: str, lane: str) -> str:
     return f"miloco:{session_key}:{lane}"
 
 
-def _resolve_owner_session() -> Optional[str]:
-    """解析车主 IM 会话 ID。
+def _resolve_owner_session() -> tuple[Optional[str], Optional[str]]:
+    """解析车主 IM 会话 ID 和投递平台名。
 
-    从 Hermes channel_directory 找任一已绑定 IM 频道对应的 session，
-    用于 onboarding 等需要投递到车主可见会话的 turn。
-    返回 None 表示还没绑过 IM（用户还没跟 bot 聊过）。
+    从 Hermes channel_directory 找任一已绑定 IM 频道对应的 session 和 platform。
+    返回 (session_id, platform)。均为 None 表示还没绑过 IM。
     """
     channel_file = Path.home() / ".hermes" / "channel_directory.json"
     try:
         data = json.loads(channel_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return None, None
     if not isinstance(data, dict):
-        return None
-    for entry in data.values():
+        return None, None
+    for key, entry in data.items():
         if isinstance(entry, dict) and entry.get("session_id"):
-            return str(entry["session_id"])
-    return None
+            platform = entry.get("platform") or key.split(":")[0]
+            return str(entry["session_id"]), platform
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +213,11 @@ class Adapter:
 
         # 处理投递意图（对齐底座 WebhookAdapter，见 base.py:179）
         # dispatcher 为 onboarding 等交互型事件塞了 {"resolve_target": "owner-channel", "deliver": True}
-        # Hermes adapter 需据此把 turn 从后台会话切到车主 IM 会话
+        # Hermes adapter 需据此把 turn 从后台会话切到车主 IM 会话，
+        # 并在 turn 跑完后经 hermes send 把回复推回 IM
+        owner_platform = None
         if delivery.get("resolve_target") == "owner-channel":
-            owner_session = _resolve_owner_session()
+            owner_session, owner_platform = _resolve_owner_session()
             if owner_session:
                 session_id = owner_session
             else:
@@ -278,6 +280,10 @@ class Adapter:
                     "[hermes adapter] ← Hermes HTTP %d session=%s OK rtt=%.0fms",
                     resp.status_code, session_id, rtt_ms,
                 )
+                # 对 deliver=True 的 turn，Hermes /v1/chat/completions 不会
+                # 自动推回 IM（纯拉取端点），需从响应体读回复经 hermes send 投递
+                if delivery.get("deliver") and owner_platform:
+                    _deliver_response(resp, owner_platform)
                 return _result(run_id=run_id, status="ok", rtt_ms=rtt_ms)
 
             # 非 2xx: 尝试溢出识别 + 自愈
@@ -411,6 +417,46 @@ class Adapter:
             except Exception:
                 pass
             self._client = None
+
+
+def _deliver_response(resp: httpx.Response, platform: str) -> None:
+    """从 Hermes chat completions 响应里提取回复，经 hermes send 投递到 IM。
+
+    Hermes /v1/chat/completions 不会自动推 IM，需显式投递。
+    """
+    import shutil
+    import subprocess
+    import sys
+    hermes_bin = shutil.which("hermes")
+    if not hermes_bin:
+        logger.warning("[hermes adapter] hermes CLI not found, cannot deliver")
+        return
+    try:
+        body = resp.json()
+        content = None
+        choices = body.get("choices") or []
+        if choices and choices[0].get("message"):
+            content = choices[0]["message"].get("content")
+        if not content:
+            logger.warning("[hermes adapter] no content in response, skip deliver")
+            return
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        logger.warning("[hermes adapter] parse response for deliver failed: %s", exc)
+        return
+    try:
+        proc = subprocess.run(
+            [hermes_bin, "send", "--to", platform, "--json", "-q", content],
+            capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, Exception) as exc:
+        logger.warning("[hermes adapter] hermes send failed: %s", exc)
+        return
+    if proc.returncode != 0:
+        logger.warning(
+            "[hermes adapter] hermes send error rc=%d: %s",
+            proc.returncode, (proc.stderr or "")[:200],
+        )
 
 
 # ---------------------------------------------------------------------------
