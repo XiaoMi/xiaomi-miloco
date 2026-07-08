@@ -78,6 +78,9 @@ _FIRST_FRAME_TIMEOUT_S = 12.0
 async def _check_camera_power(camera_id: str) -> bool | None:
     """检查摄像头电源状态。
 
+    这里用 camera-control/on 区分摄像头关闭/物理遮蔽,适用于该属性语义就是
+    取流/隐私挡片可用状态的机型;若机型把物理遮蔽做成独立属性,本判断只作为弱提示。
+
     Returns:
         True  — 摄像头开启
         False — 摄像头关闭(可能摄像头关闭或开了物理遮蔽)
@@ -87,7 +90,7 @@ async def _check_camera_power(camera_id: str) -> bool | None:
         from miot.types import MIoTGetPropertyParam
 
         miot_proxy = manager.miot_proxy
-        spec = await miot_proxy.get_device_spec(camera_id)
+        spec = await miot_proxy.get_raw_spec(camera_id)
         power_iids = [
             iid
             for iid, entry in spec.items()
@@ -110,6 +113,9 @@ async def _check_camera_power(camera_id: str) -> bool | None:
             value = props[0].get("value")
             if isinstance(value, bool):
                 return value
+            if isinstance(value, (int, str)):
+                return str(value).lower() in ("1", "true", "on")
+            logger.debug("camera power value not interpretable: %r", value)
         return None
     except Exception:
         logger.warning("check camera power failed")
