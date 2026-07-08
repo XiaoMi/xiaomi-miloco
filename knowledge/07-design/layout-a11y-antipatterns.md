@@ -91,7 +91,7 @@ input:focus-visible {
 | Drawer 写死 `w-[400px]`                                                     | `max-w-md`                                                                |
 | `<div onClick>` 当按钮                                                      | 改 `<button type="button">`                                               |
 | 多个 modal 抢 `z-50`                                                        | 都用 `z-50`,最多再 +1 + 注释                                              |
-| 装饰 emoji `🏠` 写在文案里                                                  | 用 `<IconHome />`(`src/lib/icons.tsx`)                                    |
+| 装饰 emoji `🏠` 写在文案里                                                  | 用 lucide 风 icon 组件(`src/lib/icons.tsx`,如 `IconPerson`/`IconCamera`)  |
 | 直接 `console.log` 加 emoji 标记                                            | 走 `toast()`(见 `Toast.tsx`)                                              |
 | `style={{ fontSize: 14 }}` 或 `style={{ fontSize: "var(--font-size-md)" }}` | `className="text-title"`(design-tokens §3)                                |
 | `style={{ fontSize: 11, letterSpacing: "0.02em" }}`                         | `className="text-caption-mono"`                                           |

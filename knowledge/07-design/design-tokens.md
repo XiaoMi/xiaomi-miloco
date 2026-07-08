@@ -9,7 +9,7 @@
 
 ## 1. 颜色
 
-### 1.1 背景层级(2026-05 v2:画布灰 / 卡片白)
+### 1.1 背景层级(画布灰 / 卡片白)
 
 | token          | light     | dark      | 用途                                                |
 | -------------- | --------- | --------- | --------------------------------------------------- |
@@ -82,19 +82,20 @@ font-mono  Geist Mono → JetBrains Mono → SF Mono — 数字 / ID / 时间戳
 
 ---
 
-## 3. 字号(4 档黄金阶梯,2026-05 v2)
+## 3. 字号(4 档黄金阶梯)
 
 **铁律:不允许写 inline `style={{ fontSize: ... }}`,一律用 `text-*` Tailwind 类。**
 
-| 类名                | px     | line-height | letter-spacing | 用途                                                                         |
-| ------------------- | ------ | ----------- | -------------- | ---------------------------------------------------------------------------- |
-| `text-caption`      | **12** | 1.45        | —              | 辅助文字:元数据 / 计数 / hint / 角标 / source 标签                           |
-| `text-caption-mono` | 12     | 1.45        | `0.02em`       | mono caption(cam_did / 时间戳 / rule_id / events 计数)                       |
-| `text-body`         | **14** | 1.55        | —              | 标准正文 / 列表项 / chip / dropdown / 按钮文字 / 输入框                      |
-| `text-title`        | **16** | 1.4         | `-0.005em`     | 卡片标题 / dialog 标题 / 列表主字 / nav label                                |
-| `text-display`      | **24** | 1.2         | `-0.01em`      | Hero 数字 / 醒目计数 / 头像首字                                              |
-| `text-display-lg`   | **32** | 1.1         | `-0.01em`      | Usage Hero 大数字 — 全项目仅 1 处                                            |
-| `text-page-title`   | **20** | 1.3         | `-0.005em`     | 已退出业务使用(2026-05);保留 token 作为黄金阶梯外的备用 20px 档,需要时再启用 |
+| 类名                 | px     | line-height | letter-spacing | 用途                                                                                              |
+| -------------------- | ------ | ----------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| `text-caption`       | **12** | 1.45        | —              | 辅助文字:元数据 / 计数 / hint / 角标 / source 标签                                                |
+| `text-caption-mono`  | 12     | 1.45        | `0.02em`       | mono caption(cam_did / 时间戳 / rule_id / events 计数)                                            |
+| `text-body`          | **14** | 1.55        | —              | 标准正文 / 列表项 / chip / dropdown / 按钮文字 / 输入框                                           |
+| `text-title`         | **16** | 1.4         | `-0.005em`     | 卡片标题 / dialog 标题 / 列表主字 / nav label                                                     |
+| `text-display`       | **24** | 1.2         | `-0.01em`      | Hero 数字 / 醒目计数 / 头像首字                                                                   |
+| `text-display-lg`    | **32** | 1.1         | `-0.01em`      | Usage Hero 大数字 — 全项目仅 1 处                                                                 |
+| `text-section-title` | **20** | 1.35        | `-0.005em`     | 分区大标题(20px + 加粗):比 `text-title` 更显著,用于「模型配置 / Token 用量 / 性能监测」等页内分区 |
+| `text-page-title`    | **20** | 1.3         | `-0.005em`     | 20px 档 token(`--font-size-page-title`),现由 `text-section-title` 复用承载分区标题                |
 
 **设计原则**:
 
@@ -103,7 +104,7 @@ font-mono  Geist Mono → JetBrains Mono → SF Mono — 数字 / ID / 时间戳
 - 相邻档 Δ ≥ 2px,确保视觉层级清晰
 - 字号类**已经包含** line-height 与必要的 letter-spacing,不要再 inline override
 
-**老人模式**(`data-text-size="large"` / `"xlarge"`):整套 +2/+4 px 自动 scale,基底 → 16/18px,标题 → 18/20px。**注:2026-05 v2 起取消运行时调节,字号锁在黄金阶梯;如需恢复,加回 `:root[data-text-size="large"]` 的 token override 即可。**
+**字号锁定**:字号统一锁在上表黄金阶梯,无运行时缩放档(不提供动态字号调节)。
 
 **deprecated 别名**(渐进迁移期保留,实际 px 自动指向新阶梯):
 
@@ -209,10 +210,10 @@ class="lift"
 ```
 z-base     1     — 默认
 z-sidebar  10    — Sidebar / TopBar
-z-50      50    — 已弃用层位(早期 Toast 兜底值,2026-05 起 Toast 已移到 z-[100])
-z-[60]    60    — 所有顶层 dialog / drawer / modal(PersonDrawer / EnrollFlow / MiotBindDialog / ConfirmUnbindDialog / LivePlayer expanded 等)
-z-[70]    70    — drawer 上层位预留:未来 inline 触发删除/确认 dialog 时用此层,跟基线 drawer 同时在场。家庭面板 v3 删除约定后此层位无活跃组件。
-z-[80]    80    — 在 z-[70] 之上的次级确认预留(原本给"约定删除二次丢弃"用,v3 删除后无活跃组件,留作未来双层 modal 场景预留)
+z-50      50    — 早期 Toast 兜底值已上移到 z-[100];当前仅 ActivityFeed 媒体灯箱(Lightbox 全屏视频浮层,独立于 dialog 栈、故意坐在 z-[60] 基线下)仍用 z-50
+z-[60]    60    — 所有顶层 dialog / drawer / modal(PersonDrawer / EnrollFlow / MiotBindDialog / ConfirmUnbindDialog 等);LivePlayer expanded 用 z-[61] 叠在其 scrim 之上
+z-[70]    70    — drawer 之上的次级弹层:家庭记忆详情卡(HomeProfileParts 的 EntryDetailSheet,叠在 HomeKnowledgePanel 抽屉上)、模型配置连通性 tooltip(UsageOmniConfig)
+z-[80]    80    — 在 z-[70] 之上的次级确认预留,当前无活跃组件,留作未来双层 modal 场景
 z-[100]   100   — Toast 顶层兜底,必须高于所有 modal stack;dialog onConfirm catch 抛 toast 时不被 modal scrim 盖住
 ```
 
@@ -250,7 +251,7 @@ z-[100]   100   — Toast 顶层兜底,必须高于所有 modal stack;dialog onC
 
 ### 10.3 字号工具类
 
-`.text-caption` / `.text-caption-mono` / `.text-body` / `.text-title` / `.text-display` / `.text-display-lg` / `.text-page-title` —— 见 §3 表格。
+`.text-caption` / `.text-caption-mono` / `.text-body` / `.text-title` / `.text-section-title` / `.text-display` / `.text-display-lg` / `.text-page-title` —— 见 §3 表格。
 
 ### 10.4 modal 表面
 

@@ -145,6 +145,18 @@ miloco-cli perceive devices         # 列出感知设备
 miloco-cli perceive query --source <did> --query "客厅有人吗"
 ```
 
+### perceive 鉴权
+
+`miloco-cli perceive` 命令（包括 `devices` / `query` / `logs`）需要 `server.token` 配置才能正常访问后端 API。首次启动后端时会自动生成一个随机 token 写入 `~/.openclaw/miloco/config.json`，无需手动设置。
+
+如果遇到访问 perceive 失败的情况，按下述顺序排查：
+
+1. CLI 报 `cannot connect to Miloco backend at ...` → 后端没启，启动后端即可（首次启动时后端会自动生成 `server.token` 写入 config.json）。
+2. CLI 报 `401 Unauthorized` → 后端在跑但 token 不匹配：
+   - 打开 `~/.openclaw/miloco/config.json` 确认 `server.token` 非空；
+   - 确认 CLI 与后端读到的是同一份配置（未通过 `MILOCO_HOME` 切到其它目录，也未通过 `MILOCO_SERVER__TOKEN` 单边覆盖）；
+   - 若曾手改过其中一端的 token，把两端改回一致并重启后端。
+
 ## 6. 规则与通知
 
 ```bash
