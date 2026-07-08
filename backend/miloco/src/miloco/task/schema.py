@@ -9,7 +9,6 @@ v2 起 task_link 表已 DROP: rule 关联走 rule.task_id FK CASCADE, cron 关�
 """
 
 import re
-from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator

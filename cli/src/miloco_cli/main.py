@@ -16,13 +16,13 @@ import click
 from miloco_cli.commands.account import account_group
 from miloco_cli.commands.admin import admin_group
 from miloco_cli.commands.config import config_group
+from miloco_cli.commands.cron import cron_group
 from miloco_cli.commands.dashboard import dashboard_cmd
 from miloco_cli.commands.debug import debug_group
 from miloco_cli.commands.device import device_group
 from miloco_cli.commands.doctor import doctor_cmd
 from miloco_cli.commands.home_profile import home_profile_group
 from miloco_cli.commands.identity import identity_group
-from miloco_cli.commands.cron import cron_group
 from miloco_cli.commands.monitor import monitor_group
 from miloco_cli.commands.notify import notify_group
 from miloco_cli.commands.perceive import perceive_group

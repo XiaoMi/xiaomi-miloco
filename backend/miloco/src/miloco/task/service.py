@@ -14,7 +14,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from miloco.database.rule_repo import RuleRepo
-from miloco.database.task_repo import TaskConflict, TaskNotFound, TaskRepo
+from miloco.database.task_repo import TaskNotFound, TaskRepo
 from miloco.task.schema import (
     BackendSyncResult,
     BackendSyncRuleResult,
