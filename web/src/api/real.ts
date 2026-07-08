@@ -921,6 +921,7 @@ interface BackendScopeCamera {
   name: string | null;
   room_name?: string | null;
   is_online: boolean;
+  lan_online: boolean;
   in_use: boolean;
   connected: boolean;
 }
@@ -934,6 +935,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     name: c.name ?? c.did,
     roomName: c.room_name ?? undefined,
     isOnline: c.is_online,
+    lanOnline: c.lan_online,
     inUse: c.in_use,
     connected: c.connected,
   }));

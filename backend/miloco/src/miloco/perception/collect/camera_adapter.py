@@ -153,7 +153,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 device_type="camera",
                 room_id=camera_info.room_name,
                 room_name=camera_info.room_name,
-                online=camera_info.online and camera_info.lan_online,
+                # 在线口径与 is_online / toggle 对齐:只看云端 online(lan_online 仅诊断)。
+                # 该字段是只写元数据(感知包内无读取点),放宽无行为后果,纯为口径一致。
+                online=bool(camera_info.online),
             )
         return result
 
@@ -343,7 +345,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             device_type="camera",
             room_id=camera.room_name,
             room_name=camera.room_name,
-            online=camera.online and camera.lan_online,
+            # 在线口径与 is_online / toggle 对齐:只看云端 online(lan_online 仅诊断)。
+            # 该字段是只写元数据(感知包内无读取点),放宽无行为后果,纯为口径一致。
+            online=bool(camera.online),
         )
 
     def _build_device_data(

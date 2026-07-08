@@ -1018,9 +1018,11 @@ class MiotService:
         cameras = {did: info for did, info in cameras.items() if did in devices}
         out: list[dict] = []
         for did, info in cameras.items():
-            online = bool(getattr(info, "online", False)) and bool(
-                getattr(info, "lan_online", False)
-            )
+            # 在线口径只看云端 online:lan_online 仅表示 backend 主机能否在局域网直接
+            # 发现这台相机(跨网段 / NAT / 容器 / WSL 恒 false),不代表云端离线。它降级为
+            # 诊断字段单独透出、不再参与在线判定——否则米家显示在线的相机会被误判离线。
+            is_online = bool(getattr(info, "online", False))
+            lan_online = bool(getattr(info, "lan_online", False))
             out.append(
                 {
                     "did": did,
@@ -1028,7 +1030,9 @@ class MiotService:
                     # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
                     # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
                     "room_name": getattr(info, "room_name", None),
-                    "is_online": online,
+                    "is_online": is_online,
+                    # 局域网可发现:仅诊断用(给「已启用但未出流」的前端文案分流),不参与在线判定。
+                    "lan_online": lan_online,
                     "in_use": did not in denied,
                     "connected": did in connected,
                 }
@@ -1055,12 +1059,11 @@ class MiotService:
             # 离线设备禁止「开启」投喂:它被感知接入层 online_only 过滤、永远连不上,
             # 开了也不出画面、徒占上限名额。只拦「开启」——已启用的设备掉线后仍保留
             # inUse=true(允许态不被强制改),且可正常被「关闭」(disable 不走这条校验)。
-            # 在线口径 = online && lan_online,与 list_cameras_with_state 的 is_online 一致。
+            # 在线口径只看云端 online,与 list_cameras_with_state 的 is_online 一致:不再
+            # 要求 lan_online(局域网可发现)——否则跨网段 / NAT / WSL 下云端在线的相机会被误拒。
             def _online(did: str) -> bool:
                 info = cameras[did]
-                return bool(getattr(info, "online", False)) and bool(
-                    getattr(info, "lan_online", False)
-                )
+                return bool(getattr(info, "online", False))
 
             offline_enable = [d for d in enable_dids if not _online(d)]
             if offline_enable:

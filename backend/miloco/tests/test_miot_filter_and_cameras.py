@@ -423,9 +423,13 @@ async def test_list_cameras_with_state_flags():
     assert set(by_did.keys()) == {"c1", "c2"}
     assert by_did["c1"]["in_use"] is False  # in deny list
     assert by_did["c1"]["is_online"] is True
+    assert by_did["c1"]["lan_online"] is True
     assert by_did["c1"]["connected"] is False
     assert by_did["c2"]["in_use"] is True
-    assert by_did["c2"]["is_online"] is False  # lan_online=False
+    # 在线口径只看云端 online:c2 云端在线但 lan_online=False,新口径仍判在线(旧口径
+    # online && lan_online 会误判离线)。lan_online 作为诊断字段单独透出。
+    assert by_did["c2"]["is_online"] is True
+    assert by_did["c2"]["lan_online"] is False
     assert by_did["c2"]["connected"] is True
 
 
@@ -475,6 +479,50 @@ async def test_toggle_camera_rejects_unknown():
     svc = _make_service(cameras={"c1": _camera("c1")})
     with pytest.raises(ValidationException):
         await svc.toggle_camera([{"did": "ghost", "in_use": False}])
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_is_online_follows_cloud_only():
+    """is_online 只随云端 online:云端在线即在线(不管 lan_online);云端离线才离线。
+    并校验回包透出 lan_online 诊断字段。"""
+    cameras = {
+        "c1": _camera("c1", home_id="H1", online=True, lan_online=False),
+        "c2": _camera("c2", home_id="H1", online=False, lan_online=True),
+    }
+    devices = dict(cameras)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices=devices, cameras=cameras, kv=kv)
+
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+
+    # 云端在线 + LAN 不可见 → 在线(旧口径会误判离线)
+    assert by_did["c1"]["is_online"] is True
+    assert by_did["c1"]["lan_online"] is False
+    # 云端离线 → 离线(即便 LAN 可见)
+    assert by_did["c2"]["is_online"] is False
+    assert by_did["c2"]["lan_online"] is True
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_allows_cloud_online_without_lan():
+    """云端在线但 LAN 不可见的相机应放行「开启」：在线口径只看云端 online，
+    不再要求 lan_online（旧口径 online && lan_online 会误拒跨网段相机）。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cam = _camera("c1", online=True, lan_online=False)
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    res = await svc.toggle_camera([{"did": "c1", "in_use": True}])
+    assert any(c["did"] == "c1" and c["in_use"] is True for c in res)
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_still_rejects_cloud_offline():
+    """云端离线（online=False）仍应拒绝开启——放行只针对云端在线。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cam = _camera("c1", online=False, lan_online=False)
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    with pytest.raises(ValidationException):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
 
 
 # ─── _assert_did_in_allowed_home ─────────────────────────────────────────────

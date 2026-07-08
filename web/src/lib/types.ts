@@ -190,7 +190,12 @@ export interface ScopeCamera {
   // 米家分配的房间名（"客厅" / "卧室" / ...）。多摄像头家庭里 name 常是
   // "小米智能摄像机 2 代"等泛称，靠 roomName 才能区分。米家未分房间时为空。
   roomName?: string;
+  // 云端在线（米家 App 显示的在线）。开关门控 / 「离线」标签都用它。
   isOnline: boolean;
+  // LAN 发现：backend 主机能否在局域网直接发现这台相机。仅诊断用——跨网段 /
+  // NAT / docker bridge / WSL 等场景恒为 false，不代表云端离线；用来给「已启用
+  // 但没出流」的诊断文案分流，不参与在线判定。
+  lanOnline: boolean;
   inUse: boolean;
   connected: boolean;
 }

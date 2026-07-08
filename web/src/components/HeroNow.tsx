@@ -16,8 +16,14 @@ import { LivePlayerPlaceholder } from "./LivePlayerPlaceholder";
 import { getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
 import { humanTokens } from "@/lib/formatTokens";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "./Toast";
+import {
+  cameraStatus,
+  CAMERA_GRACE_MS,
+  type CameraStatus,
+} from "@/lib/cameraStatus";
 
 interface Props {
   persons: Person[];
@@ -78,7 +84,11 @@ export function HeroNow({
     const sorted = [...scopeCameras].sort(byDid);
     // 不再前端截断:connected 集天然受后端 MAX_ENABLED_CAMERAS 约束(感知接入层按 did
     // 升序截断到上限、只连前 N 路；主动 enable 超限也被 toggle_camera 挡下)，展示集即真实投喂集。
-    const streaming = sorted.filter((c) => c.connected);
+    // 上区 = 派生态 perceiving(云端在线 + 已启用 + 已订阅出流),用 cameraStatus 单一真相源,
+    // 与下区标签 / 开关门控同口径。perceiving 判定不涉及 grace,now 传 0 即可。
+    const streaming = sorted.filter(
+      (c) => cameraStatus(c, { now: 0 }).kind === "perceiving",
+    );
     const sset = new Set(streaming.map((c) => c.did));
     const bench = sorted.filter((c) => !sset.has(c.did));
     return { streamingCams: streaming, benchCams: bench };
@@ -198,9 +208,27 @@ function CameraSection({
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
   const [singleBusyDids, setSingleBusyDids] = useState<Set<string>>(new Set());
+  // 每台的启用时刻:给下区「已启用·未出流」的 grace 窗口用(刚点开的几秒算接入中,
+  // 别立刻甩锅跨 LAN);关闭时清掉。
+  const [enabledAt, setEnabledAt] = useState<Map<string, number>>(new Map());
+  // now 只驱动下区诊断文案的 grace 判定(perceiving / 上下区划分不看它)。列表 poll
+  // 之外,再给「grace 内的相机」按到点时刻定一次时,让文案准时从「接入中」切到诊断。
+  const [now, setNow] = useState(() => Date.now());
+  const markEnabled = (dids: string[], inUse: boolean) => {
+    setEnabledAt((m) => {
+      const n = new Map(m);
+      const ts = Date.now();
+      for (const d of dids) {
+        if (inUse) n.set(d, ts);
+        else n.delete(d);
+      }
+      return n;
+    });
+  };
   const runBulk = async (dids: string[], inUse: boolean) => {
     if (bulkBusy) return;
     setBulkBusy(true);
+    markEnabled(dids, inUse);
     try {
       await onToggleCameras(dids, inUse);
     } finally {
@@ -210,6 +238,7 @@ function CameraSection({
   const runSingle = async (did: string, inUse: boolean) => {
     if (bulkBusy || singleBusyDids.has(did)) return;
     setSingleBusyDids((s) => new Set(s).add(did));
+    markEnabled([did], inUse);
     try {
       await onToggleCameras([did], inUse);
     } finally {
@@ -220,6 +249,23 @@ function CameraSection({
       });
     }
   };
+  // grace 内相机到点后触发一次重渲染,让诊断文案从「接入中」切到跨 LAN / 未开 LAN 判定,
+  // 不必等下一次列表 poll。只给最近一个到点时刻定时;now 纳入依赖——setNow 触发后 effect
+  // 重跑、为下一台(交错启用、到点更晚者)重排,否则较晚者会永远停在「接入中」文案。
+  useEffect(() => {
+    const deadlines = benchCams
+      .filter((c) => c.inUse && !c.connected)
+      .map((c) => enabledAt.get(c.did))
+      .filter((ts): ts is number => ts !== undefined)
+      .map((ts) => ts + CAMERA_GRACE_MS - Date.now())
+      .filter((ms) => ms > 0);
+    if (deadlines.length === 0) return;
+    const timer = setTimeout(
+      () => setNow(Date.now()),
+      Math.min(...deadlines) + 50,
+    );
+    return () => clearTimeout(timer);
+  }, [benchCams, enabledAt, now]);
 
   return (
     <>
@@ -307,21 +353,31 @@ function CameraSection({
                   : t("hero.benchTitle")}
               </SectionLabel>
               <ul className="rounded-xl bg-bg-secondary border border-border divide-y divide-border overflow-hidden">
-                {benchCams.map((c) => (
-                  <BenchCamItem
-                    key={c.did}
-                    cam={c}
-                    // 离线 + 未投喂 → 禁用(开不了);离线 + 已投喂 → 仍可点(允许关闭)。
-                    // 满额时也只挡「开启未启用的」,已启用的随时可关。即:仅当
-                    // 「当前未投喂 且 (离线 或 已满额)」时禁用,其余可点。
-                    disabled={
-                      bulkBusy ||
-                      singleBusyDids.has(c.did) ||
-                      (!c.inUse && (!c.isOnline || atCapacity))
-                    }
-                    onToggle={(v) => runSingle(c.did, v)}
-                  />
-                ))}
+                {benchCams.map((c) => {
+                  const status = cameraStatus(c, {
+                    now,
+                    enabledAt: enabledAt.get(c.did),
+                  });
+                  // 「不可开」理由(仅未启用时):离线 → offline 提示;满额 → capacity 提示。
+                  // 已启用的相机随时可关,无理由。bulk/single in-flight 走 busy(瞬态真禁)。
+                  let blockedReasonKey: string | undefined;
+                  if (!c.inUse) {
+                    if (!status.canEnable)
+                      blockedReasonKey = "hero.disabledOfflineHint";
+                    else if (atCapacity)
+                      blockedReasonKey = "hero.disabledCapacityHint";
+                  }
+                  return (
+                    <BenchCamItem
+                      key={c.did}
+                      cam={c}
+                      status={status}
+                      busy={bulkBusy || singleBusyDids.has(c.did)}
+                      blockedReasonKey={blockedReasonKey}
+                      onToggle={(v) => runSingle(c.did, v)}
+                    />
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -335,29 +391,45 @@ function CameraSection({
 function CamSwitch({
   inUse,
   name,
-  disabled,
+  busy,
+  blockedReasonKey,
   onToggle,
 }: {
   inUse: boolean;
   name: string;
-  disabled: boolean;
+  /** 瞬态忙（bulk / single 操作进行中）：真禁、忽略点击、不提示。 */
+  busy: boolean;
+  /** 语义不可开（离线 / 满额，仅未启用时）：置灰但仍可点 → toast 理由；已启用为空。 */
+  blockedReasonKey?: string;
   onToggle: (next: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const blocked = !!blockedReasonKey;
+  const dim = busy || blocked;
   return (
     <button
       type="button"
       role="switch"
       aria-checked={inUse}
+      aria-disabled={dim}
       aria-label={t(inUse ? "hero.toggleAriaInUse" : "hero.toggleAriaNotInUse", {
         name,
       })}
       title={inUse ? t("hero.toggleTitleInUse") : t("hero.toggleTitleNotInUse")}
-      disabled={disabled}
-      onClick={() => onToggle(!inUse)}
-      className={`relative inline-flex h-[14px] w-[26px] shrink-0 rounded-full transition-colors shadow-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:opacity-40 disabled:cursor-not-allowed ${
-        inUse ? "bg-brand-primary" : "bg-black/60"
-      }`}
+      // native disabled 只给瞬态忙(吞点击可接受);语义不可开不能用 native disabled——
+      // 否则 click 被吞、触屏弹不出提示。改成可点,点了走 toast 说明为何不可开。
+      disabled={busy}
+      onClick={() => {
+        if (busy) return;
+        if (blocked) {
+          toast(t(blockedReasonKey), "warn");
+          return;
+        }
+        onToggle(!inUse);
+      }}
+      className={`relative inline-flex h-[14px] w-[26px] shrink-0 rounded-full transition-colors shadow-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+        dim ? "opacity-40 cursor-not-allowed" : ""
+      } ${inUse ? "bg-brand-primary" : "bg-black/60"}`}
     >
       <span
         className={`absolute top-0.5 left-0.5 inline-block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform ${
@@ -392,7 +464,7 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
           <CamSwitch
             inUse={cam.inUse}
             name={cam.name}
-            disabled={bulkBusy}
+            busy={bulkBusy}
             onToggle={onToggle}
           />
         </div>
@@ -404,39 +476,53 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
 /** 下区横条行（日志页风格）：摄像头信息 + 投喂开关，无小窗。开关 on → 升入上区投喂。 */
 function BenchCamItem({
   cam,
-  disabled,
+  status,
+  busy,
+  blockedReasonKey,
   onToggle,
 }: {
   cam: ScopeCamera;
-  disabled: boolean;
+  status: CameraStatus;
+  busy: boolean;
+  blockedReasonKey?: string;
   onToggle: (next: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const offline = status.kind === "offline";
   return (
     <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
       <div className="min-w-0">
         {/* 离线相机名字淡化,跟开关禁用呼应——离线就别让住户以为点一下能投喂。 */}
         <div
           className={`text-body truncate ${
-            cam.isOnline ? "text-text-primary" : "text-text-tertiary"
+            offline ? "text-text-tertiary" : "text-text-primary"
           }`}
         >
           {cam.name}
         </div>
-        {(!cam.isOnline || cam.roomName) && (
+        {(status.benchPrimaryKey || cam.roomName) && (
           <div className="text-caption text-text-tertiary truncate">
-            {!cam.isOnline && (
-              <span className="text-warning">{t("hero.benchOffline")}</span>
+            {status.benchPrimaryKey && (
+              <span className={offline ? "text-warning" : "text-text-secondary"}>
+                {t(status.benchPrimaryKey)}
+              </span>
             )}
-            {!cam.isOnline && cam.roomName ? " · " : ""}
+            {status.benchPrimaryKey && cam.roomName ? " · " : ""}
             {cam.roomName}
+          </div>
+        )}
+        {/* 「已启用·未出流」诊断说明(接入中 / 跨 LAN / 未开 LAN 模式),单独一行。 */}
+        {status.benchHintKey && (
+          <div className="text-caption text-text-tertiary truncate mt-0.5">
+            {t(status.benchHintKey)}
           </div>
         )}
       </div>
       <CamSwitch
         inUse={cam.inUse}
         name={cam.name}
-        disabled={disabled}
+        busy={busy}
+        blockedReasonKey={blockedReasonKey}
         onToggle={onToggle}
       />
     </li>
