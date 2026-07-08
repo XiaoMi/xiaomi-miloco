@@ -22,6 +22,7 @@ from miloco_cli.commands.device import device_group
 from miloco_cli.commands.doctor import doctor_cmd
 from miloco_cli.commands.home_profile import home_profile_group
 from miloco_cli.commands.identity import identity_group
+from miloco_cli.commands.cron import cron_group
 from miloco_cli.commands.monitor import monitor_group
 from miloco_cli.commands.notify import notify_group
 from miloco_cli.commands.perceive import perceive_group
@@ -76,6 +77,7 @@ cli.add_command(account_group)
 cli.add_command(scene_group)
 cli.add_command(perceive_group)
 cli.add_command(rule_group)
+cli.add_command(cron_group)
 cli.add_command(task_group)
 cli.add_command(person_group)
 cli.add_command(identity_group)
