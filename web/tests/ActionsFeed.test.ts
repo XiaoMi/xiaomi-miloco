@@ -6,14 +6,16 @@
  *
  * 覆盖:
  * - fetchActions 解析 backend BARE 数组 + query 参数(limit / failed_only)
- * - formatActionTime / actionTypeKey 纯映射
+ * - actionTypeKey 纯映射
  * - mergeFeedRows:事件 + 动作交错顺序、checkbox 筛选、窗口裁剪规则
+ *
+ * (动作行时间列已改用与事件行同一 TimeLabel/smartTimeParts 渲染——专属
+ * formatActionTime 及其测试随之删除;smartTimeParts 由 relativeTime.test.ts 覆盖。)
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   fetchActions,
-  formatActionTime,
   actionTypeKey,
   type BackendActionRow,
 } from "@/components/ActionsFeed";
@@ -95,14 +97,6 @@ describe("fetchActions — /api/actions 契约", () => {
     await fetchActions(true);
     expect(m.url()).toContain("failed_only=1");
     expect(m.url()).toContain("limit=500");
-  });
-});
-
-describe("formatActionTime", () => {
-  it("ms → 本地 MM-DD HH:mm:ss(补零)", () => {
-    // 用本地时区构造,避免测试机时区差异
-    const ms = new Date(2026, 6, 8, 9, 5, 3).getTime();
-    expect(formatActionTime(ms)).toBe("07-08 09:05:03");
   });
 });
 

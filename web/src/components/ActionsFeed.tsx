@@ -9,6 +9,7 @@
 
 import type { TFunction } from "i18next";
 import { apiFetch } from "@/api/client";
+import { TimeLabel } from "./TimeLabel";
 
 /** backend action_ledger 行——就地类型,不进 lib/types.ts(仅本组件用)。 */
 export interface BackendActionRow {
@@ -38,13 +39,6 @@ export async function fetchActions(failedOnly: boolean): Promise<BackendActionRo
     ? `?limit=${ACTIONS_LIMIT}&failed_only=1`
     : `?limit=${ACTIONS_LIMIT}`;
   return apiFetch<BackendActionRow[]>(`/api/actions${q}`);
-}
-
-/** ms → 本地 "MM-DD HH:mm:ss"(feed 用等宽时间列)。导出供 tests。 */
-export function formatActionTime(ms: number): string {
-  const d = new Date(ms);
-  const p = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /** action_type → i18n key。set_property/set_properties 归"设置属性";其余各自映射。 */
@@ -79,10 +73,10 @@ export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
 
   return (
     <li className="px-5 py-2.5 bg-brand-soft border-l-2 border-brand-primary hover:bg-brand-soft-strong transition-colors">
-      <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[128px_1fr_auto] sm:gap-x-3 sm:gap-y-1 sm:items-baseline">
-        <span className="text-caption-mono text-text-tertiary whitespace-nowrap">
-          {formatActionTime(row.timestamp)}
-        </span>
+      {/* 时间列与事件行(ActivityRow)完全一致:同一 TimeLabel 组件 + 同 70px 列宽,
+          合并单流里两种行的时间格式/对齐不再有差异(修「时间格式不一致」)。 */}
+      <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[70px_1fr_auto] sm:gap-x-3 sm:gap-y-1 sm:items-baseline">
+        <TimeLabel timestamp={row.timestamp} />
 
         <div className="min-w-0 sm:order-2">
           <div className="text-body text-text-primary break-words">

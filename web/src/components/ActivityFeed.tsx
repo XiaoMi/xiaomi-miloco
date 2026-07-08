@@ -13,13 +13,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { eventClipUrl, listActivity, revealDir, submitEventFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
-import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
 import {
   ActionRow,
   fetchActions,
   type BackendActionRow,
 } from "./ActionsFeed";
+import { TimeLabel } from "./TimeLabel";
 
 interface Props {
   events: ActivityEvent[];
@@ -583,26 +583,6 @@ function TimeRangeFilter({
           {t("activity.liveButton")}
         </button>
       )}
-    </div>
-  );
-}
-
-function TimeLabel({ timestamp }: { timestamp: number }) {
-  // 双行布局:第 1 行日期(YYYY/MM/DD 或"今天/昨天"),第 2 行时分秒.
-  // sm+(>=640px):父 grid 三列(70px / 1fr / auto),TimeLabel 在 70px 列内
-  // sm:justify-self-stretch 占满,两行 sm:text-center 各自居中(等宽字体下日期
-  // 10 字符撑满列宽,时间 8 字符居中显著).
-  // mobile(<640px):父 flex-col 纵向堆叠,TimeLabel 自然左对齐,不加 text-center
-  // 保持跟下方 text-body 文本同锚线(否则居中会让 feed 视觉节奏断裂).
-  const { time, date } = smartTimeParts(timestamp);
-  return (
-    <div className="sm:justify-self-stretch leading-tight">
-      <div className="text-caption-mono text-text-secondary whitespace-nowrap sm:text-center">
-        {date}
-      </div>
-      <div className="text-caption-mono text-text-tertiary whitespace-nowrap sm:text-center">
-        {time}
-      </div>
     </div>
   );
 }
