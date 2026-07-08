@@ -186,8 +186,9 @@ async def test_resolve_live_config_no_change_keeps_state(monkeypatch):
     await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
     assert cb.snapshot().state == "error"
 
-    # 第一次调用建立 _LAST_TRIPLE
-    monkeypatch.setattr(omni_client, "_LAST_TRIPLE", None)
+    # 第一次调用建立 cache
+    if hasattr(omni_client._maybe_reset_breaker_on_config_change, "_last_triple"):
+        del omni_client._maybe_reset_breaker_on_config_change._last_triple
     base = OmniConfig(model="m1", base_url="https://x/v1", api_key="sk-1")
     omni_client.resolve_live_omni_config(base)
     # 第二次调用同样值:不 reset
@@ -202,7 +203,11 @@ async def test_resolve_live_config_change_resets_breaker(monkeypatch):
 
     reset_settings()
     cb = get_omni_circuit_breaker()
-    monkeypatch.setattr(omni_client, "_LAST_TRIPLE", ("m1", "https://x/v1", "sk-OLD"))
+    omni_client._maybe_reset_breaker_on_config_change._last_triple = (
+        "m1",
+        "https://x/v1",
+        "sk-OLD",
+    )
     await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
     assert cb.snapshot().state == "error"
 

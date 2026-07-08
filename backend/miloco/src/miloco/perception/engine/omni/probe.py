@@ -10,23 +10,45 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 _TIMEOUT = httpx.Timeout(15.0, connect=10.0)
+_ALLOWED_SCHEMES = ("http", "https")
+
+
+def _normalize_base_url(base_url: str) -> tuple[str | None, str | None]:
+    """校验 base_url 并归一化(去尾斜杠)。
+
+    只允许 http/https scheme;其他(file/gopher/ftp/data 等)拒绝,防止 base_url 由用户
+    可控时被恶意配置成 SSRF 载荷。返回 (normalized, error_message);合法时 error 为 None。
+    """
+    parsed = urlparse(base_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        return (
+            None,
+            f"Base URL 协议非法（仅支持 http/https，实际: {scheme or 'empty'}）",
+        )
+    if not parsed.netloc:
+        return None, "Base URL 缺少主机名"
+    return base_url.rstrip("/"), None
 
 
 async def probe_reachable(base_url: str) -> dict | None:
     """无 key 时判 Base URL 是否明显有问题;使 URL 错优先于「缺 key」暴露。
 
-    - 连接失败(DNS/拒连/超时/URL 非法) → {code: unreachable, ...}
+    - scheme 非法 / 网络错 → {code: unreachable, ...}
     - 2xx/3xx 或 401/403 → None(URL 没问题,问题在缺 key)
     - 其他 4xx/5xx → {code: http_error, ...}
     """
-    url = base_url.rstrip("/")
+    base, err = _normalize_base_url(base_url)
+    if err is not None:
+        return {"code": "unreachable", "message": err}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(f"{url}/models")
+            r = await client.get(f"{base}/models")
     except Exception as e:  # noqa: BLE001
         return {
             "code": "unreachable",
@@ -39,7 +61,9 @@ async def probe_reachable(base_url: str) -> dict | None:
 
 async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
     """拉取 provider 模型列表(GET /models)。"""
-    base = base_url.rstrip("/")
+    base, err = _normalize_base_url(base_url)
+    if err is not None:
+        return {"ok": False, "code": "unreachable", "models": [], "message": err}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(
@@ -75,6 +99,9 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
 
 async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     """极简 chat 探测(max_tokens=1)真校验模型是否可用。"""
+    base, err = _normalize_base_url(base_url)
+    if err is not None:
+        return {"ok": False, "code": "unreachable", "message": err}
     body = {
         "model": model,
         "messages": [{"role": "user", "content": "ping"}],
@@ -84,7 +111,7 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.post(
-                f"{base_url.rstrip('/')}/chat/completions",
+                f"{base}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -144,7 +171,9 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     - GET /models 5xx → http_error
     - 其他(含 200 / 404 等) → 回退到 chat,以其结论为准
     """
-    base = base_url.rstrip("/")
+    base, err = _normalize_base_url(base_url)
+    if err is not None:
+        return {"ok": False, "code": "unreachable", "message": err}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(

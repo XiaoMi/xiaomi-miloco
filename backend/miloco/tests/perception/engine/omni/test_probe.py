@@ -178,6 +178,43 @@ async def test_probe_chat_unreachable_on_exception(monkeypatch):
     assert r["code"] == "unreachable"
 
 
+# ─── scheme 白名单(防 SSRF) ───────────────────────────────────────────────
+
+
+async def test_probe_reachable_rejects_file_scheme():
+    """file:// 被拒,不发 HTTP;不需要 mock httpx 因为压根不会调。"""
+    r = await probe.probe_reachable("file:///etc/passwd")
+    assert r == {
+        "code": "unreachable",
+        "message": "Base URL 协议非法（仅支持 http/https，实际: file）",
+    }
+
+
+async def test_probe_reachable_rejects_gopher_scheme():
+    r = await probe.probe_reachable("gopher://evil/x")
+    assert r["code"] == "unreachable" and "gopher" in r["message"]
+
+
+async def test_probe_chat_rejects_file_scheme():
+    r = await probe.probe_chat("m", "file:///etc/passwd", "sk-x")
+    assert r["ok"] is False and r["code"] == "unreachable"
+
+
+async def test_probe_omni_rejects_file_scheme():
+    r = await probe.probe_omni("m", "file:///etc/passwd", "sk-x")
+    assert r["ok"] is False and r["code"] == "unreachable"
+
+
+async def test_fetch_models_rejects_ftp_scheme():
+    r = await probe.fetch_models("ftp://x/y", "sk-x")
+    assert r["ok"] is False and r["code"] == "unreachable" and r["models"] == []
+
+
+async def test_probe_reachable_rejects_empty_host():
+    r = await probe.probe_reachable("https:///")
+    assert r["code"] == "unreachable" and "主机名" in r["message"]
+
+
 # ─── probe_omni (两阶段) ────────────────────────────────────────────────────
 
 

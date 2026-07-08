@@ -32,9 +32,6 @@ logger = logging.getLogger(__name__)
 
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
 
-# 三元组 (model, base_url, api_key) 变化时清熔断;模块级 cache 一次。
-_LAST_TRIPLE: tuple[str, str, str] | None = None
-
 
 class OmniError(Exception):
     """omni API 调用失败的统一异常包装。
@@ -161,16 +158,18 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
 
 
 def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
-    global _LAST_TRIPLE
+    """检测 (model, base_url, api_key) 三元组变化,变了就清熔断。跨调用状态保存在
+    函数属性 ``._last_triple`` 上——比 module-level global 更内聚。"""
     triple = (resolved.model, resolved.base_url, resolve_omni_api_key(resolved.api_key))
-    if _LAST_TRIPLE is not None and _LAST_TRIPLE != triple:
+    prev = getattr(_maybe_reset_breaker_on_config_change, "_last_triple", None)
+    if prev is not None and prev != triple:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop is not None:
             loop.create_task(get_omni_circuit_breaker().reset_on_config_change())
-    _LAST_TRIPLE = triple
+    _maybe_reset_breaker_on_config_change._last_triple = triple  # type: ignore[attr-defined]
 
 
 async def call_omni(
