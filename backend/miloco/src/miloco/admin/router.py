@@ -767,8 +767,7 @@ async def list_omni_models(
 async def retry_omni_probe(current_user: str = Depends(verify_token)):
     """用户点「立即重试」时调:
     - CLOSED: no-op,返回当前 health
-    - OPEN_RECOVERABLE / OPEN_CONFIG / HALF_OPEN: 跑一次 probe_omni,成功回 CLOSED;
-      若之前是 OPEN_CONFIG(引擎已被软停),成功后调 try_reinit_engine 重建引擎。
+    - OPEN_RECOVERABLE / OPEN_CONFIG / HALF_OPEN: 跑一次 probe_omni,成功回 CLOSED。
     """
     from miloco.perception.engine.omni.circuit_breaker import (
         CircuitState,
@@ -780,8 +779,7 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     )
 
     cb = get_omni_circuit_breaker()
-    prev_state = cb.state_for_test()
-    if prev_state == CircuitState.CLOSED:
+    if cb.state_for_test() == CircuitState.CLOSED:
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
     await cb.retry_now()
@@ -801,14 +799,6 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
     if result.get("ok"):
         await cb.record_probe_result(True, None)
-        if prev_state == CircuitState.OPEN_CONFIG:
-            # 之前触发过软停,现在重建引擎
-            try:
-                manager.perception_service._pipeline.try_reinit_engine(
-                    include_failed=True
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("retry 后重建引擎失败(将靠 tick 自愈): %s", e)
     else:
         code = result.get("code", "unreachable")
         cat = (

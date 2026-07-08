@@ -289,3 +289,101 @@ async def test_snapshot_since_ms_nonzero_when_open(cb, frozen_time):
     await cb.record_failure(_cfg("bad_key"))
     frozen_time.tick(5)
     assert cb.snapshot().since_ms > 4000
+
+
+# ─── try_arm_probe / probe_in_flight ────────────────────────────────────────
+
+
+async def test_try_arm_probe_false_when_closed(cb):
+    assert cb.try_arm_probe() is False
+
+
+async def test_try_arm_probe_false_when_open_config(cb):
+    await cb.record_failure(_cfg("bad_key"))
+    assert cb.try_arm_probe() is False
+
+
+async def test_try_arm_probe_false_when_backoff_not_due(cb, frozen_time):
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    # 刚 open,backoff 未到期
+    assert cb.try_arm_probe() is False
+
+
+async def test_try_arm_probe_true_when_all_three_conditions_met(cb, frozen_time):
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    assert cb.try_arm_probe() is True
+
+
+async def test_try_arm_probe_singleflight(cb, frozen_time):
+    """并发 arm 只有一个能拿到 True。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    assert cb.try_arm_probe() is True
+    assert cb.try_arm_probe() is False  # in-flight 位已占
+
+
+async def test_record_probe_result_clears_in_flight(cb, frozen_time):
+    """record_probe_result 无论成功/失败都要清位,下一 tick 才能再 arm。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    assert cb.try_arm_probe() is True
+    await cb.record_probe_result(False, _rec())  # 失败,回 OPEN_RECOVERABLE,清位
+    # 新一轮 backoff 到期后应可再 arm
+    frozen_time.tick(10)
+    assert cb.try_arm_probe() is True
+
+
+async def test_clear_probe_in_flight_bypasses_state_change(cb, frozen_time):
+    """clear_probe_in_flight 只清位、不动状态,给 finally 兜底用。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    assert cb.try_arm_probe() is True
+    prev_state = cb.state_for_test()
+    cb.clear_probe_in_flight()
+    assert cb.state_for_test() == prev_state  # 状态不动
+    # 再次 arm 依然能成功(位已清)
+    assert cb.try_arm_probe() is True
+
+
+# ─── before_call 短路 HALF_OPEN ─────────────────────────────────────────────
+
+
+async def test_before_call_short_circuits_half_open(cb, frozen_time):
+    """HALF_OPEN 期间感知 omni 调用也要被短路,防"探测中真发带视频请求"漏发。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    await cb.mark_half_open()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+    with pytest.raises(CircuitOpenError):
+        await cb.before_call()
+
+
+# ─── record_success 稳态不 emit ─────────────────────────────────────────────
+
+
+async def test_record_success_no_emit_when_already_closed(cb):
+    """CLOSED → CLOSED 稳态不 emit,避免感知每 4s 成功窗口全刷 SSE。"""
+    seen: list = []
+    cb.register_listener(lambda snap: seen.append(snap.state))
+    await cb.record_success()
+    await cb.record_success()
+    await cb.record_success()
+    assert seen == []
+
+
+async def test_record_success_emits_on_transition(cb, frozen_time):
+    """非 CLOSED → CLOSED 仍要 emit,让 UI 感知恢复。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    seen: list = []
+    cb.register_listener(lambda snap: seen.append(snap.state))
+    frozen_time.tick(1.5)
+    await cb.record_probe_result(True, None)  # OPEN_RECOVERABLE → CLOSED
+    assert "ok" in seen

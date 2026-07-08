@@ -153,6 +153,11 @@ class PerceptionRunner:
         # (见 try_reinit);配合 STARTING 后移,未满足前置条件时零开销、零 event_log 噪声。
         self._pipeline.try_reinit_engine()
 
+        # 每 tick 驱动一次 omni 熔断器自动探测:OPEN_RECOVERABLE + backoff 到期时 spawn
+        # 一次后台 probe。无外部驱动时 probe_due 归零后状态永远不动,provider 恢复后感知
+        # 也不会自愈,只能靠用户手动点「立即重试」。sync 判断 + 后台 spawn,tick 不阻塞。
+        self._pipeline.drive_omni_probe()
+
         result = await self._pipeline.process_realtime()
         # 缓冲区里可能积压了多个 ready 窗口，此处循环处理直到缓冲区清空
         while result is not None and self._is_running:

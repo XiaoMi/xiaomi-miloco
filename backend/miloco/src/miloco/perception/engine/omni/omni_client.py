@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
 
+# 三元组变化触发的 fire-and-forget reset task 强引用集合;asyncio 只对 task 持弱引用,
+# 不持强引用短协程可能被 GC 提前回收。done_callback 里自动 discard。
+_RESET_TASKS: set[asyncio.Task] = set()
+
 
 class OmniError(Exception):
     """omni API 调用失败的统一异常包装。
@@ -168,7 +172,9 @@ def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
         except RuntimeError:
             loop = None
         if loop is not None:
-            loop.create_task(get_omni_circuit_breaker().reset_on_config_change())
+            task = loop.create_task(get_omni_circuit_breaker().reset_on_config_change())
+            _RESET_TASKS.add(task)
+            task.add_done_callback(_RESET_TASKS.discard)
     _maybe_reset_breaker_on_config_change._last_triple = triple  # type: ignore[attr-defined]
 
 

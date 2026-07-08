@@ -61,6 +61,74 @@ def _ms_since(start: float) -> float:
 _GATE_TOTAL_RE = re.compile(r"^gate_[^_]+_ms$")
 
 
+# omni 熔断器 tick 驱动的探测 task 强引用集合;防 asyncio 弱引用模型下 GC 提前回收。
+# done_callback 里自动 discard。
+_OMNI_PROBE_TASKS: set[asyncio.Task] = set()
+
+
+async def _run_omni_probe() -> None:
+    """OPEN_RECOVERABLE + backoff 到期时的自动探测协程。
+
+    走 mark_half_open → probe_omni(bypass before_call) → record_probe_result 三步。
+    record_probe_result 会清 in-flight 位;探测本身异常也走一次失败记录,保证 in-flight
+    位一定被清,不会死锁下次 tick 驱动。
+
+    finally 里再调一次 clear_probe_in_flight 兜底:asyncio.CancelledError 是
+    BaseException 子类,进不了 except Exception,若 task 被 cancel 时正好卡在 await
+    上,位就残留了。finally 无条件清位保证下次 tick 还能再 arm(状态不动,如果
+    task 已跑到 record_probe_result 位早就清了,再清一次也是 no-op)。
+    """
+    from miloco.config import get_settings
+    from miloco.perception.engine.omni import probe as _probe
+    from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+    try:
+        await cb.mark_half_open()
+        omni = get_settings().model.omni
+        if not omni.api_key:
+            await cb.record_probe_result(
+                False,
+                ClassifiedError("bad_key", "未配置 API Key", ErrorCategory.CONFIG),
+            )
+            return
+        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+        if result.get("ok"):
+            await cb.record_probe_result(True, None)
+            return
+        code = result.get("code", "unreachable")
+        cat = (
+            ErrorCategory.CONFIG
+            if code in ("bad_key", "not_found", "rejected_authed")
+            else ErrorCategory.RECOVERABLE
+        )
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(code, result.get("message", ""), cat),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("[omni] tick 自动探测异常 | %s", e, exc_info=True)
+        try:
+            await cb.record_probe_result(
+                False,
+                ClassifiedError(
+                    "unreachable",
+                    f"probe 抛异常({type(e).__name__})",
+                    ErrorCategory.RECOVERABLE,
+                ),
+            )
+        except Exception as e2:  # noqa: BLE001
+            logger.error("[omni] record_probe_result 兜底失败 | %s", e2)
+    finally:
+        # CancelledError / KeyboardInterrupt 等 BaseException 子类进不来 except Exception,
+        # finally 里兜底强制清位。record_probe_result 里已清过时,这里再清一次是 no-op。
+        cb.clear_probe_in_flight()
+
+
 def _aggregate_stage_ms(timing: dict) -> tuple[float, float, float]:
     """从 result.timing 聚合 gate / identity / omni 每 cycle 耗时。
 
@@ -121,6 +189,27 @@ class PipelineProcessor:
             self._perception_engine_proxy.set_tierc_frame_provider(
                 self._collector.peek_latest_frame
             )
+
+    def drive_omni_probe(self) -> None:
+        """tick 入口驱动 omni 熔断器自动探测。
+
+        三条件齐(state==OPEN_RECOVERABLE + backoff 到期 + 无 in-flight)时 fire-and-forget
+        spawn 一次 probe task;否则 sync 判断后立即返回。CLOSED 稳态开销 = 一次 sync 读,
+        可忽略。
+
+        单飞位由熔断器内部维护(try_arm_probe 原子占位、record_probe_result 释放),
+        并发 tick / 多相机 batch 场景下同一时刻只会有一个 probe in-flight。
+        """
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+
+        cb = get_omni_circuit_breaker()
+        if not cb.try_arm_probe():
+            return
+        task = asyncio.create_task(_run_omni_probe())
+        _OMNI_PROBE_TASKS.add(task)
+        task.add_done_callback(_OMNI_PROBE_TASKS.discard)
 
     def set_inference_executor(self, executor: ThreadPoolExecutor) -> None:
         """Forward the inference executor to the engine proxy.

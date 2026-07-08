@@ -92,6 +92,7 @@ class OmniCircuitBreaker:
         self._state_since: float = time.monotonic()
         self._last_probe_at: float | None = None
         self._last_probe_result: str | None = None
+        self._probe_in_flight: bool = False
         self._on_state_change: list[Callable[[HealthSnapshot], None]] = []
 
     def register_listener(self, cb: Callable[[HealthSnapshot], None]) -> None:
@@ -101,19 +102,28 @@ class OmniCircuitBreaker:
     # ---- 主接口 --------------------------------------------------------------
 
     async def before_call(self) -> None:
-        """CLOSED / HALF_OPEN 直接放行;OPEN_* 抛 CircuitOpenError。"""
+        """只有 CLOSED 放行;其他态(OPEN_* / HALF_OPEN)全部短路。
+
+        HALF_OPEN 也短路是为了让 tick 自动探测独占探测请求:probe.probe_omni 直接调
+        httpx、绕开本方法,期间感知 tick 里 omni 调用继续被短路,避免"探测中却又真发
+        带视频 base64"的窗口漏发。转 CLOSED 后感知才恢复。
+        """
         async with self._lock:
-            if self._state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG):
+            if self._state != CircuitState.CLOSED:
                 code = self._current_code or "unreachable"
                 raise CircuitOpenError(f"skipped:cooling:{code}", self._current_message)
 
     async def record_success(self) -> None:
+        """CLOSED → CLOSED 稳态不 emit,避免感知每 4s 一次的成功窗口全都广播 SSE。"""
+        changed = False
         async with self._lock:
             self._append_sample(True)
             self._consecutive_failures = 0
             if self._state != CircuitState.CLOSED:
                 self._transition_to_closed_locked()
-        self._emit()
+                changed = True
+        if changed:
+            self._emit()
 
     async def record_failure(self, err: ClassifiedError) -> None:
         emit = False
@@ -152,6 +162,7 @@ class OmniCircuitBreaker:
                     self._grow_backoff_locked(err)
                     self._state = CircuitState.OPEN_RECOVERABLE
                     self._current_code, self._current_message = err.code, err.message
+            self._probe_in_flight = False
         self._emit()
 
     def probe_due(self) -> bool:
@@ -162,6 +173,29 @@ class OmniCircuitBreaker:
             self._next_probe_at_monotonic is not None
             and time.monotonic() >= self._next_probe_at_monotonic
         )
+
+    def try_arm_probe(self) -> bool:
+        """tick 驱动占位:三条件齐(OPEN_RECOVERABLE + probe_due + 未 in-flight)时置
+        in-flight 位并返回 True。调用方拿到 True 后 spawn probe task,task 里必须走
+        mark_half_open → probe_omni → record_probe_result(record_probe_result 会清位)。
+
+        asyncio 单线程 + 本方法无 await,判断和置位不会被切换,并发调用天然只有一个
+        能拿到 True。
+        """
+        if self._state != CircuitState.OPEN_RECOVERABLE:
+            return False
+        if self._probe_in_flight:
+            return False
+        if not self.probe_due():
+            return False
+        self._probe_in_flight = True
+        return True
+
+    def clear_probe_in_flight(self) -> None:
+        """强制清 in-flight 位。record_probe_result 之外的兜底:probe task 被 cancel
+        (asyncio.CancelledError 不进 except Exception)时保证下次 tick 还能再 arm。
+        不改状态,只清位。"""
+        self._probe_in_flight = False
 
     async def mark_half_open(self) -> None:
         """外部驱动:进入 HALF_OPEN(发起 probe 前调)。"""

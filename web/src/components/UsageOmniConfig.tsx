@@ -561,7 +561,7 @@ export function UsageOmniConfig() {
                                 {SEV_GLYPH[state.active.health.state === "error" ? "error" : "warn"]}{" "}
                                 {state.active.health.message}
                                 {state.active.health.consecutive_failures > 0 && (
-                                  <> · {state.active.health.consecutive_failures}次</>
+                                  <> · {t("omniHealth.failuresCount", { n: state.active.health.consecutive_failures })}</>
                                 )}
                               </span>
                             ) : rowTesting === p.label ? (
