@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import re
+import threading
 
 import cv2
 import numpy as np
@@ -13,7 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
-from miloco.config import get_settings
+from miloco.config import get_settings, register_reset_hook
 from miloco.database.person_repo import UNSET
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
@@ -968,13 +969,42 @@ class RegisterCommitPayload(BaseModel):
     _norm_role = field_validator("member_role")(_normalize_optional_str)
 
 
+_detector_lock = threading.Lock()
+_detector_singleton = None
+
+
 def _load_detector():
     # 走 settings.directories.models_dir($MILOCO_HOME/models/)而非 __file__ 相对路径:
     # uv tool install miloco 后 __file__ 落在 site-packages 内, 但 wheel 不打 onnx,
     # 真模型部署到 $MILOCO_HOME/models/。主流程 perception/client.py 走的也是这个口径。
-    from miloco.perception.engine.identity.tracker.detector import Detector
-    det_path = get_settings().directories.models_dir / "det_4C.onnx"
-    return Detector(model_path=str(det_path), conf_threshold=0.4, use_gpu=False)
+    #
+    # 显式双检锁做进程内单例:本函数被 7+ 处注册/分析路径调用,且都在
+    # asyncio.to_thread 里跑(真实多线程并发)。用锁把构造串起来 —— 而非依赖
+    # functools.lru_cache(其执行期间不持锁,冷启动并发 miss 会各建一个 Detector、
+    # 只留一个),让「单例」在冷启动瞬间也严格成立、不多建 CoreML session。
+    # detect() 只读 self、ORT session.run 线程安全,故复用同一实例并发安全;生产原地
+    # 热替换模型需重启进程才生效。
+    global _detector_singleton
+    if _detector_singleton is not None:
+        return _detector_singleton
+    with _detector_lock:
+        if _detector_singleton is None:
+            from miloco.perception.engine.identity.tracker.detector import Detector
+            det_path = get_settings().directories.models_dir / "det_4C.onnx"
+            _detector_singleton = Detector(
+                model_path=str(det_path), conf_threshold=0.4, use_gpu=False
+            )
+    return _detector_singleton
+
+
+def _reset_detector_singleton():
+    # settings reset(换 workspace / 测试)后让单例失效,避免返回指向旧 models_dir
+    # 的残留 Detector。
+    global _detector_singleton
+    _detector_singleton = None
+
+
+register_reset_hook("person_router_detector", _reset_detector_singleton)
 
 
 def _should_use_frontal_seed(
