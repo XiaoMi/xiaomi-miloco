@@ -8,7 +8,7 @@
 in _MIOT_OK_CODES`` 才判失败,其余(0 / 正码 / 非 int / 缺失)一律视作成功。
 
 注意:CLI 侧 ``cli/src/miloco_cli/commands/device.py`` 另有一份 ``_MIOT_SPEC_CODES`` 副本用于
-stdout 渲染(独立轮子,CLI 不能 import backend)。两份需手动保持同步。
+stdout 渲染(独立轮子,CLI 不能 import backend)。两份需手动保持同步(tests/test_result_codes.py 的跨包一致性测试会在两表漂移时变红)。
 """
 from __future__ import annotations
 
