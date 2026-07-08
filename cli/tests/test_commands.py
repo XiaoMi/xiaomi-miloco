@@ -565,6 +565,29 @@ def test_device_control_annotates_unknown_error_code(runner, fake_home_info):
     assert data["code"] == -999999999
 
 
+def test_device_control_positive_code_is_success(runner, fake_home_info):
+    """设备侧正数码（如 code:1，指令已执行生效）不可误判为失败——对齐"负值即失败"。
+
+    回归：某些开关 set_property 成功后仍返回 code:1。旧逻辑（非白名单即失败）把它
+    打成"失败：设备侧执行失败"，上层 agent 据此盲目重试 / 谎报失败。修复后正数码
+    不补失败释义、外层信封保持成功。
+    """
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {
+            "code": 0,
+            "message": "executed successfully",
+            "data": {"results": [{"code": 1}]},
+        }
+        result = runner.invoke(
+            cli, ["device", "control", "lamp_001", "prop.2.1", "true"]
+        )
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert "code_msg" not in data["data"]["results"][0]
+    assert data["code"] == 0
+    assert "失败" not in data["message"]
+
+
 def test_device_control_partial_failure_envelope(runner, fake_home_info):
     """多设备部分失败 → 外层 message 标"部分失败（n/total）"。"""
     with patch("miloco_cli.client.api_post") as mock:
