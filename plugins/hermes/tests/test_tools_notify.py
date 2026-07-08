@@ -13,9 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
-
 from miloco_plugin_pkg import tools_notify as tn
-
 
 # ---------- fake ctx ----------
 

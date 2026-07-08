@@ -275,10 +275,10 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
     diag "state.json::deliver.target" 0 "state.json 不存在 — 重跑 install-hermes.sh"
   fi
 
-  # 13. 16 个 skill
+  # 13. 16+ 个 skill
   SKILL_COUNT="$(ls -d "$HERMES_HOME/skills/miloco-"* 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "$SKILL_COUNT" = "16" ]; then
-    diag "16 个 miloco-* skill" 1
+  if [ "$SKILL_COUNT" -ge 16 ]; then
+    diag "$SKILL_COUNT 个 miloco-* skill" 1
   else
     diag "16 个 miloco-* skill" 0 "只装到 $SKILL_COUNT 个 — 重跑 install-hermes.sh"
   fi
@@ -754,9 +754,18 @@ mark_done 6
 # 旧 launchd / nohup adapter 进程已被清理。
 step 7 "重启 backend (supervisord)"
 info "  委托给 miloco-cli service start（管 supervisord / miloco-backend）"
-if ! miloco-cli service start; then
-  err "backend 启动失败"
-  exit 1
+START_OUTPUT=$(miloco-cli service start 2>&1)
+START_RC=$?
+if [ $START_RC -ne 0 ]; then
+  # Step 5 的 config set 可能已触发 backend 重启，此时 start 返回 already running 是正常的
+  if echo "$START_OUTPUT" | grep -qi "already running"; then
+    info "  backend 已在运行（Step 5 config set 已触发重启），跳过"
+  else
+    err "backend 启动失败: $START_OUTPUT"
+    exit 1
+  fi
+else
+  info "  $START_OUTPUT"
 fi
 mark_done 7
 

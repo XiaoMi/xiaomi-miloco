@@ -18,6 +18,7 @@ profile 判定（与 TS 端 ``resolveProfile`` 对齐）：
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -65,6 +66,34 @@ def resolve_profile(
 # ---------------------------------------------------------------------------
 # 静态指令块（抄自 prompt.ts，文本保持 1:1）
 # ---------------------------------------------------------------------------
+
+def _deploy_timezone() -> str:
+    """读取部署时区（对齐 OpenClaw deployTimezone）。"""
+    try:
+        cfg_path = miloco_home() / "config.json"
+        if cfg_path.is_file():
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            tz = (cfg.get("server") or {}).get("timezone") or (cfg.get("timezone"))
+            if tz:
+                return str(tz)
+    except (OSError, json.JSONDecodeError):
+        pass
+    import time as _time
+    tz_idx = 1 if _time.localtime().tm_isdst > 0 else 0
+    return _time.tzname[tz_idx] if _time.tzname[tz_idx] else "UTC"
+
+
+def _build_timezone_block() -> str:
+    tz = _deploy_timezone()
+    return (
+        f"## 时间与时区\n"
+        f"家庭所在时区为 {tz}。感知事件、日志与 CLI 返回中的所有时刻"
+        f"（如 `HH:MM:SS`）均已按此时区表示；创建定时任务也一律以此时区为准。"
+        f"对话或系统消息中明确标注为 UTC / 其他时区的时刻，先换算到家庭时区再理解与表达；"
+        f"向用户表达时间一律用家庭时区。"
+        f"若上方家庭时区显示为 UTC，大概率是服务器未配置时区（没有家庭真住在 UTC）；"
+        f"应与用户确认真实时区，并通过 `miloco-cli config set timezone <IANA>` 写入配置。"
+    )
 
 B_IDENTITY = (
     "你是经验丰富的家庭智能管家 Miloco。你能感知家中发生的事件，理解家庭成员的生活习惯，"
@@ -243,7 +272,7 @@ def build_pending_suggestion_block() -> str:
 
 def _build_prepend(profile: Profile) -> str:
     """指令块，按 prompt.ts §3 序。"""
-    parts: List[str] = [B_IDENTITY]
+    parts: List[str] = [B_IDENTITY, _build_timezone_block()]
     if profile == "full":
         parts.append(B_CAPABILITIES)
     if profile != "minimal":

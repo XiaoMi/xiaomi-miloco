@@ -9,7 +9,8 @@
 - 三个 tool：``miloco_im_push``（通知投递，对齐 OpenClaw 版
   ``subagent.run({deliver:true})`` 体验：装好就能用，cron 场景下也能直接
   投递）、``miloco_habit_suggest``（习惯建议防骚扰状态机，移植自
-  ``home-profile/suggestions.ts``）、``miloco_notify_bind``（IM 渠道切换：list/switch）。
+  ``home-profile/suggestions.ts``）、``miloco_notify_bind``
+  （IM 渠道切换：list/switch）。
   注：早期版本有 ``miloco_status`` + ``miloco_test_push`` 两个调试工具，PR #279 收敛为
   外部脚本 ``plugins/hermes/scripts/miloco-status.sh``（确定性 wrapper，不走 LLM 推断）。
 - 启动时 reconcile 4 个受管 cron job（移植自 ``home-profile/scheduler.ts``）。
@@ -36,7 +37,6 @@ from __future__ import annotations
 import logging
 
 from .cron_setup import reconcile_cron_jobs
-from .trace import register_trace_hooks
 from .tools_habit import (
     MILOCO_HABIT_SUGGEST_SCHEMA,
     handle_habit_suggest,
@@ -49,6 +49,7 @@ from .tools_status import (
     MILOCO_NOTIFY_BIND_SCHEMA,
     handle_notify_bind,
 )
+from .trace import register_trace_hooks
 
 logger = logging.getLogger(__name__)
 

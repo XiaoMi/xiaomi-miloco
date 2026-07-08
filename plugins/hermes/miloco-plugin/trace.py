@@ -27,7 +27,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .paths import miloco_home
 

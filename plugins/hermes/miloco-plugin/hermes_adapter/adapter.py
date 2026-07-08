@@ -159,8 +159,8 @@ class Adapter:
         ``_build_append``(都是 module-private,这里直接 import 或 inline)。
         """
         from .context_injection import (
-            _build_prepend,
             _build_append,
+            _build_prepend,
         )
 
         prepend = _build_prepend(profile)

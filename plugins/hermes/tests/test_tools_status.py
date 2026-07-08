@@ -15,9 +15,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import pytest
-
 from miloco_plugin_pkg import tools_status as ts
-
 
 # ─── fake ctx ────────────────────────────────────────────────────────────
 
@@ -182,7 +180,6 @@ def test_versions_match(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    import yaml as _y
     plugin_yaml = tmp_path / "plugin.yaml"
     plugin_yaml.write_text("version: 0.4.0\n", encoding="utf-8")
     state = {
@@ -241,7 +238,6 @@ def test_trace_hooks_today_dir_no_files(tmp_path: Path, monkeypatch):
 def test_trace_hooks_today_has_files(tmp_path: Path, monkeypatch):
     """今天有 meta.json → ok=True + count。"""
     from datetime import datetime
-    import time
     monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
     today = tmp_path / "trace" / "agent" / datetime.now().strftime("%Y%m%d")
     today.mkdir(parents=True, exist_ok=True)
@@ -446,7 +442,6 @@ def test_adapter_health_source_uses_status_not_status_code():
 def test_adapter_health_reads_correct_status_field(monkeypatch):
     """运行时验证：mock urllib 返回的对象带 .status（不是 .status_code）时，
     _check_adapter_health 必须正确判 ok=True。"""
-    import http.client
 
     class _FakeResp:
         # 只实现 urllib 真实会用到的字段：status（int）

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -400,7 +400,7 @@ MILOCO_HABIT_SUGGEST_SCHEMA: Dict[str, Any] = {
             "suggestion": {"type": "string", "description": "要推荐给用户的任务点子（自然语言，认可后即据此建任务）。record 用"},
             "title": {"type": "string", "description": "一句话标题（可选，缺省截取 habit）。record 用"},
             "evidence": {"type": "string", "description": "依据（档案条目/出现频率，可选）。record 用"},
-            "item_id": {"type": "string", "description": "该习惯所依据的家庭档案条目 id。record 用"},
+            "item_id": {"type": "string", "description": "该习惯所依据的家庭档案条目 id（**来自 home-profile list 的 id 字段**）。record 用：**追踪建议来源，建成任务后据此把该条目从家庭档案渲染中剔除**"},
             "outcome": {
                 "type": "string",
                 "enum": ["accepted", "rejected", "created"],

@@ -21,7 +21,7 @@ import logging
 import os
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from . import tools_notify as tn
 from .paths import miloco_home
@@ -247,7 +247,6 @@ def _check_trace_hooks() -> Dict[str, Any]:
     注意：trace 是 debug 开关，没开过不代表坏了。所以 trace 目录不存在时
     返回 ``ok=True, note="trace debug 未启用"``，不进 failed_count。
     """
-    from .paths import miloco_home
     trace_dir = miloco_home() / "trace" / "agent"
     if not trace_dir.is_dir():
         return {

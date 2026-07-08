@@ -6,11 +6,8 @@ import gzip
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import patch
 
 import pytest
-
 from miloco_plugin_pkg import trace as tr
 
 
@@ -241,16 +238,17 @@ def test_pop_done_turn_empty():
 
 # ── debug 落盘 ────────────────────────────────────────────────────────────
 
-def test_flush_disabled_when_debug_off():
-    """debug 默认关 → 落盘是 no-op，meta.json 不写。"""
+def test_flush_writes_even_without_debug():
+    """debug 默认关时也常写 trace（已去 debug 门槛，对齐 hermes-pr.md §五 #11）。"""
     tr.register_trace_link("sess-1", "trace-abc")
     tr._hk_pre_llm_call("sess-1", "hi", [], True, "m", "p")
     tr._hk_on_session_end("sess-1", True, False, "m", "p")
     state = tr._turns["sess-1"]
-    assert state.done["jsonlPath"] is None
-    # meta.json 不应出现
+    # 去 debug 门槛后常写，jsonlPath 不应为 None
+    assert state.done["jsonlPath"] is not None
+    # meta.json 应出现
     today = Path(os.environ["MILOCO_HOME"]) / "trace" / "agent"
-    assert not today.exists() or not any(today.rglob("*.meta.json"))
+    assert any(today.rglob("*.meta.json"))
 
 
 def test_flush_enabled_writes_jsonl_and_meta(monkeypatch):
@@ -294,7 +292,6 @@ def test_daily_cap_skips_dump(monkeypatch):
         (today / f"old_{i}.jsonl.gz").write_bytes(b"")
 
     # 把系统时间推到 2099-12-31 让 _today_dir() 用这个
-    from datetime import datetime as _dt
     real_today = tr._today_dir
 
     def fake_today():
