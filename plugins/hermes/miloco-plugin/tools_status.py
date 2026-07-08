@@ -3,7 +3,7 @@
 装好 miloco 兼容层后用户 / agent 能主动验证链路是否完整：
 
 - ``miloco_status`` — 一键自检 7 项不变量，返回结构化 JSON（plugin enabled /
-  state.json deliver.target / adapter health / 4 cron jobs / 16 skills /
+  state.json deliver.target / adapter health / 4 cron jobs / 16+ skills /
   miloco backend status / 上次 webhook 时间）。诊断 root cause 用。
 - ``miloco_test_push`` — 强制走一次完整投递链路（绕开 cron / perception），用户能立刻
   验证推送通不通。
@@ -142,17 +142,18 @@ def _check_cron_jobs() -> Dict[str, Any]:
 
 
 def _check_skills_installed() -> Dict[str, Any]:
-    """检查 16 个 miloco-* skill 是否装到 ~/.hermes/skills/。"""
+    """检查 miloco-* skill 是否装到 ~/.hermes/skills/（至少 16 个）。"""
+    min_expected = 16
     skills_dir = Path.home() / ".hermes" / "skills"
     if not skills_dir.is_dir():
-        return {"ok": False, "installed": 0, "expected": 16, "fix": "重跑 install-hermes.sh"}
+        return {"ok": False, "installed": 0, "expected": min_expected, "fix": "重跑 install-hermes.sh"}
     installed = sorted(
         p.name for p in skills_dir.iterdir() if p.is_dir() and p.name.startswith("miloco-")
     )
     return {
-        "ok": len(installed) == 16,
+        "ok": len(installed) >= min_expected,
         "installed": len(installed),
-        "expected": 16,
+        "expected": min_expected,
         "names": installed,
     }
 
@@ -451,7 +452,7 @@ MILOCO_STATUS_SCHEMA: Dict[str, Any] = {
     "name": "miloco_status",
     "description": (
         "一键自检 miloco 推送链路 7 项不变量（plugin / state.json target / hermes plugin enabled / "
-        "adapter health / 4 cron jobs / miloco backend / 16 skills）。\n"
+        "adapter health / 4 cron jobs / miloco backend / 16+ skills）。\n"
         "返回结构化 JSON：checks[*].ok + 失败项 fix 提示。**没收到推送时第一时间调这个**——"
         "会告诉你卡在哪一环（绝大多数情况是 state.json::deliver.target=null）。\n"
         "无需参数，agent / 用户都能调。"

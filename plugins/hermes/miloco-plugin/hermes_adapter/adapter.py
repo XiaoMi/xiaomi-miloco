@@ -122,6 +122,26 @@ def _map_session(session_key: str, lane: str) -> str:
     return f"miloco:{session_key}:{lane}"
 
 
+def _resolve_owner_session() -> Optional[str]:
+    """解析车主 IM 会话 ID。
+
+    从 Hermes channel_directory 找任一已绑定 IM 频道对应的 session，
+    用于 onboarding 等需要投递到车主可见会话的 turn。
+    返回 None 表示还没绑过 IM（用户还没跟 bot 聊过）。
+    """
+    channel_file = Path.home() / ".hermes" / "channel_directory.json"
+    try:
+        data = json.loads(channel_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for entry in data.values():
+        if isinstance(entry, dict) and entry.get("session_id"):
+            return str(entry["session_id"])
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Adapter 主类
 # ---------------------------------------------------------------------------
@@ -189,7 +209,18 @@ class Adapter:
         wait_timeout_ms = int(getattr(ctx, "wait_timeout_ms", 180_000) or 180_000)
         profile = getattr(ctx, "profile", "full") or "full"
         extra = getattr(ctx, "extra", {}) or {}
+        delivery = extra.get("delivery") or {}
 
+        # 处理投递意图（对齐底座 WebhookAdapter，见 base.py:179）
+        # dispatcher 为 onboarding 等交互型事件塞了 {"resolve_target": "owner-channel", "deliver": True}
+        # Hermes adapter 需据此把 turn 从后台会话切到车主 IM 会话
+        if delivery.get("resolve_target") == "owner-channel":
+            owner_session = _resolve_owner_session()
+            if owner_session:
+                session_key = "owner"
+                session_id = owner_session
+            else:
+                return _result(run_id="", status="no-channel")
         session_id = _map_session(session_key, lane)
         timeout_s = max(wait_timeout_ms / 1000.0, 1.0) + _HTTP_BUFFER_S
 
