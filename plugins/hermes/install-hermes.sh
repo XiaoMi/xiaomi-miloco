@@ -865,6 +865,47 @@ PY
 mark_done 9
 
 # --- 终态 ---
+
+# --- 内联 cron reconcile（不依赖 gateway restart）---
+# Hermes register() 只在 gateway 启动时跑一次。这里用 Hermes 的 venv Python
+# 直接调 cron.jobs API，装完立刻生成 4 个受管 cron，不需等重启。
+HERMES_PYTHON="$HERMES_HOME/hermes-agent/venv/bin/python"
+if [ -x "$HERMES_PYTHON" ]; then
+  step 10 "直接创建 4 个受管 cron job（Hermes Python 调 cron.jobs API）"
+  "$HERMES_PYTHON" - "${MILOCO_HOME}/config.json" "$HERMES_HOME" <<'INNERPY' 2>&1 | tail -3
+import json, sys
+from pathlib import Path
+try:
+    from cron.jobs import create_job, list_jobs
+except ImportError:
+    print("cron.jobs 不可用")
+    sys.exit(0)
+MANAGED_TAG = "[miloco:home-profile]"
+CRON_TASKS = [
+    {"name":"miloco-perception-digest","schedule":"*/15 * * * *","skills":["miloco-perception-digest"],"prompt":"执行感知日志摘要。加载 miloco-perception-digest skill 进行处理。"},
+    {"name":"miloco-home-patrol","schedule":"*/30 * * * *","skills":["miloco-home-patrol"],"prompt":"执行家庭巡检。加载 miloco-home-patrol skill 进行巡检。每次巡检都是隔离会话，务必先读巡检日志（已处理台账）知道已做过什么，回看最近约 2 小时的新情况、只做没做过的，处理完把做过的追加回台账，避免重复提醒 / 重复操作。注意：老人长时间无活动 / 成员远超回家时间未归这类缺席型安全信号不受 2 小时近窗限制，须按 skill 内规则回看历史评估。"},
+    {"name":"miloco-home-dreaming","schedule":"0 0 * * *","skills":["miloco-home-observe","miloco-home-promote","miloco-home-prune"],"prompt":"执行 home-dreaming 流程。\n1. **Observe** — 加载 miloco-home-observe skill\n2. **Promote** — 加载 miloco-home-promote skill\n3. **Prune** — 加载 miloco-home-prune skill\n执行规则：按顺序依次执行不可跳过。"},
+    {"name":"miloco-habit-suggest","schedule":"0 10 * * *","skills":["miloco-habit-suggest"],"prompt":"执行每日习惯洞察。加载 miloco-habit-suggest skill，按【路径 A · 扫描推荐】处理：从家庭档案识别值得建成任务的习惯，至多主动推荐一条。"},
+]
+existing = list_jobs(include_disabled=True)
+managed = [j for j in existing if str(j.get("name","")).startswith(MANAGED_TAG)]
+created = 0
+for t in CRON_TASKS:
+    nm = f"{MANAGED_TAG} {t['name']}"
+    if not any(j.get("name") == nm for j in managed):
+        try:
+            create_job(prompt=t["prompt"],schedule=t["schedule"],name=nm,skills=list(t["skills"]))
+            created += 1
+        except Exception as e:
+            print(f"create_job FAIL: {e}")
+print(f"cron reconcile: created={created} of {len(CRON_TASKS)}")
+INNERPY
+  info "  内联 cron reconcile 完成"
+  mark_done 10
+else
+  warn "  找不到 Hermes Python ($HERMES_PYTHON)，跳过内联 cron reconcile"
+  warn "  cron 将在下次 hermes gateway restart 时通过插件 register() 自动创建"
+fi
 cat <<EOF
 
 ============================================================
