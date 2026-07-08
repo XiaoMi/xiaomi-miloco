@@ -20,7 +20,7 @@ from miloco.rule.schema import (
     RuleLifecycle,
     RuleMode,
 )
-from miloco.task.schema import TaskCreateRequest, TaskUpdateRequest
+from miloco.task.schema import CronRef, TaskCreateRequest, TaskUpdateRequest
 
 
 def _insert_external_cron(task_id: str, cron_id: str) -> None:
@@ -353,3 +353,25 @@ def test_delete_task_mixed_cron_only_external_in_pending(service, stub_runner):
     refs = {op.ref for op in result.agent_pending}
     assert refs == {"job-ext"}
     assert stub_runner.remove_calls == ["job-int"]
+
+
+def test_get_full_view_returns_cron_refs_with_dispatch_owner(service):
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    _insert_internal_cron("t1", "job-int")
+    _insert_external_cron("t1", "job-ext")
+
+    view = service.get_full_view("t1")
+
+    assert view is not None
+    refs = {(c.ref, c.dispatch_owner) for c in view.cron_refs}
+    assert refs == {("job-int", "internal"), ("job-ext", "external")}
+
+
+def test_list_for_dedupe_returns_cron_refs(service):
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    _insert_internal_cron("t1", "job-int")
+
+    views = service.list_for_dedupe()
+
+    by_id = {v.task_id: v for v in views}
+    assert by_id["t1"].cron_refs == [CronRef(ref="job-int", dispatch_owner="internal")]

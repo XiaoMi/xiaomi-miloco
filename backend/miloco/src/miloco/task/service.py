@@ -18,6 +18,7 @@ from miloco.database.task_repo import TaskNotFound, TaskRepo
 from miloco.task.schema import (
     BackendSyncResult,
     BackendSyncRuleResult,
+    CronRef,
     PendingOp,
     RuleBrief,
     TaskCreateRequest,
@@ -101,6 +102,7 @@ class TaskService:
             paused_at=raw["paused_at"],
             created_at=raw["created_at"],
             rule_briefs=rule_briefs,
+            cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
             links=[TaskLinkEntry(**link) for link in raw["links"]],
         )
 
