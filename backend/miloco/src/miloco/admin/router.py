@@ -314,8 +314,6 @@ async def submit_event_feedback(
 
     后续上传服务就绪后,打包完成会自动上传.当前仅本地存储.
     """
-    import asyncio
-
     from miloco.admin import feedback_pack as _fb_mod
 
     uid = ""
@@ -371,9 +369,7 @@ async def reveal_dir(
     current_user: str = Depends(verify_token),
 ):
     """macOS: open <dir>, Linux: xdg-open <dir>."""
-    import asyncio
     import platform
-    import subprocess
     from pathlib import Path
 
     from miloco.utils.paths import miloco_home
