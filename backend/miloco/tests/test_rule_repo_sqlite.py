@@ -462,6 +462,12 @@ class TestRuleRepoCorruptedRow:
         ts = now_iso()
         with get_db_connector().get_connection() as conn:
             cursor = conn.cursor()
+            # v2: rule.task_id NOT NULL + FK 到 task 表, 先建 bad_task 让 FK 通过,
+            # 测试关注 mode enum 损坏容错, 与 FK 无关。
+            cursor.execute(
+                "INSERT INTO task (task_id, description, created_at) "
+                "VALUES ('bad_task', 'x', 0)"
+            )
             cursor.execute(
                 """INSERT INTO rule (
                     id, name, task_id, mode, lifecycle, enabled,

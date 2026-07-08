@@ -932,7 +932,7 @@ class TestRuleServiceDelete:
         assert result is True
         mock_rule_repo.delete.assert_called_once_with("r1")
         mock_log_repo.delete_by_rule_id.assert_called_once_with("r1")
-        mock_task_repo.delete_link_by_ref.assert_called_once_with("rule", "r1")
+        # v2: delete_link_by_ref 已删除 (task_link 表 DROP), 不再联动
 
     @pytest.mark.asyncio
     async def test_delete_not_found(self, service, mock_rule_repo):

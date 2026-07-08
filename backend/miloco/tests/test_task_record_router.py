@@ -246,47 +246,6 @@ class TestMutate:
         assert data["derived"]["accumulated_minutes_today"] == 25
 
 
-# ── link ────────────────────────────────────────────────────────────────────
-
-
-class TestLink:
-    def test_link_cron_ok(self, client):
-        _create_task_minimal(client, "t1")
-        r = client.post(
-            "/api/tasks/t1/link", json={"kind": "cron", "ref": "job-001"}
-        )
-        assert r.status_code == 200
-        assert r.json()["code"] == 0
-
-    def test_link_rule_rejected(self, client):
-        _create_task_minimal(client, "t1")
-        r = client.post(
-            "/api/tasks/t1/link", json={"kind": "rule", "ref": "rule-xx"}
-        )
-        # ValidationException → 422
-        assert r.status_code == 422
-        assert "wrong_kind" in r.text
-
-    def test_link_duplicate_conflict(self, client):
-        _create_task_minimal(client, "t1")
-        client.post(
-            "/api/tasks/t1/link", json={"kind": "cron", "ref": "job-001"}
-        )
-        r = client.post(
-            "/api/tasks/t1/link", json={"kind": "cron", "ref": "job-001"}
-        )
-        assert r.status_code == 200
-        assert r.json()["code"] == 2002
-        assert "link_already_exists" in r.json()["message"]
-
-    def test_link_task_not_found(self, client):
-        r = client.post(
-            "/api/tasks/nope/link", json={"kind": "cron", "ref": "j"}
-        )
-        assert r.status_code == 200
-        assert r.json()["code"] == 2001
-
-
 # ── delete reason ────────────────────────────────────────────────────────────
 
 

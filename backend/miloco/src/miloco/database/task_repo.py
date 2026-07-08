@@ -1,15 +1,15 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""task / task_link 双表数据访问层。
+"""task 表数据访问层 (v2)。
 
-事务原子性陷阱:SQLiteConnector 默认 ``isolation_level=None``(autocommit),
+v2 起 task_link 表已 DROP: rule 归属由 rule.task_id FK CASCADE 表达,
+cron 归属由 cron.task_id FK CASCADE 表达。task 视图数据源改成 rule / cron
+两表 JOIN, 老 task_link 中转路径消失。
+
+事务原子性陷阱: SQLiteConnector 默认 ``isolation_level=None`` (autocommit),
 每条 execute 自动提交。必须显式 ``cursor.execute("BEGIN")`` + 末尾
-``conn.commit()`` 才能让 create_task 的多条 INSERT 构成原子事务。
-
-跨 task ref 唯一性靠 DB 层 ``UNIQUE INDEX idx_task_link_ref_unique``
-``(link_kind, link_ref)`` 强制,service 层不做 SELECT 预检——撞库走
-IntegrityError 异常路径。
+``conn.commit()`` 才能让多条 INSERT 构成原子事务。
 """
 
 import logging
@@ -22,8 +22,17 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 logger = logging.getLogger(__name__)
 
 
-class TaskLinkConflict(Exception):
-    """task PK 撞库 / 跨 task ref 撞库 / FK 引用不存在的 task。"""
+class TaskConflict(Exception):
+    """409: task PK 撞库 (create_task UNIQUE 冲突)。"""
+
+
+class TaskNotFound(Exception):
+    """404: task 不存在 (toggle / update / delete 时读到 not_found)。"""
+
+
+# 迁移期兼容 alias — 老 caller 抛 TaskLinkConflict 的路径逐步改成
+# TaskConflict / TaskNotFound 明确语义后, 此 alias 独立 PR 清理。
+TaskLinkConflict = TaskConflict
 
 
 class TaskRepo:
@@ -31,12 +40,7 @@ class TaskRepo:
         self.db = get_db_connector()
 
     def create_task(self, task_id: str, description: str) -> None:
-        """方案 P 阶段 D'：仅 INSERT task 行（占位），不写 task_link。
-
-        rule / cron 关联挂载由后续 endpoint 完成：rule create 内部一笔事务
-        INSERT rule + INSERT task_link；cron 走 ``POST /tasks/{id}/link``。
-        record 不进 task_link，由 ``POST /tasks/{id}/record`` 经 FK 直连 task。
-        """
+        """INSERT task 行 (占位)。rule / cron 关联挂载由后续 endpoint 完成。"""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             try:
@@ -51,36 +55,11 @@ class TaskRepo:
                 conn.rollback()
                 msg = str(e)
                 if "task.task_id" in msg or "UNIQUE" in msg:
-                    raise TaskLinkConflict(f"task_id {task_id!r} 已存在") from e
+                    raise TaskConflict(f"task_id {task_id!r} 已存在") from e
                 raise
 
-    def add_link(self, task_id: str, kind: str, ref: str) -> None:
-        """追加单条 task_link 行。``kind`` 仅接受 ``rule`` / ``cron``。"""
-        if kind not in ("rule", "cron"):
-            raise TaskLinkConflict(
-                f"link_kind {kind!r} 不合法，方案 P 仅支持 rule / cron"
-            )
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "INSERT INTO task_link "
-                    "(task_id, link_kind, link_ref) VALUES (?, ?, ?)",
-                    (task_id, kind, ref),
-                )
-                conn.commit()
-            except sqlite3.IntegrityError as e:
-                msg = str(e)
-                if "FOREIGN KEY" in msg:
-                    raise TaskLinkConflict(
-                        f"task {task_id!r} 不存在,先调 task create"
-                    ) from e
-                raise TaskLinkConflict(
-                    f"{kind} ref {ref!r} 撞库（已挂在其它 task 或重复添加）"
-                ) from e
-
     def task_exists(self, task_id: str) -> bool:
-        """task 表是否含此 task_id（rule create 前置校验用）。"""
+        """task 表是否含此 task_id。"""
         with self.db.get_connection() as conn:
             row = conn.execute(
                 "SELECT 1 FROM task WHERE task_id = ?", (task_id,)
@@ -88,7 +67,12 @@ class TaskRepo:
             return row is not None
 
     def get_full_view(self, task_id: str) -> dict[str, Any] | None:
-        """单 task 视图:task 元信息 + 所有 task_link 行。"""
+        """单 task 视图: task 元信息 + rule / cron 引用清单。
+
+        `links` 字段: 兼容旧前端契约, 由 rule.task_id + cron.task_id 联合构造。
+        v2 后 rule / cron 是权威源, task_link 表已 DROP; caller 逐步迁到读
+        `rule_briefs` (由 service 层拼装 RuleBrief) / `cron_refs` 两个独立字段。
+        """
         with self.db.get_connection() as conn:
             task_row = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at "
@@ -97,38 +81,65 @@ class TaskRepo:
             ).fetchone()
             if task_row is None:
                 return None
-            links = conn.execute(
-                "SELECT link_kind AS kind, link_ref AS ref FROM task_link "
-                "WHERE task_id=?",
+            rule_refs = [
+                r["id"]
+                for r in conn.execute(
+                    "SELECT id FROM rule WHERE task_id=?", (task_id,)
+                ).fetchall()
+            ]
+            cron_rows = conn.execute(
+                "SELECT cron_id, dispatch_owner FROM cron WHERE task_id=?",
                 (task_id,),
             ).fetchall()
+            links = [{"kind": "rule", "ref": rid} for rid in rule_refs] + [
+                {"kind": "cron", "ref": c["cron_id"]} for c in cron_rows
+            ]
             return {
                 "task_id": task_row["task_id"],
                 "description": task_row["description"],
                 "status": task_row["status"],
                 "paused_at": ms_to_iso_local(task_row["paused_at"]),
                 "created_at": ms_to_iso_local(task_row["created_at"]),
-                "links": [{"kind": link["kind"], "ref": link["ref"]} for link in links],
+                "links": links,
+                "cron_refs": [
+                    {
+                        "ref": c["cron_id"],
+                        "dispatch_owner": c["dispatch_owner"],
+                    }
+                    for c in cron_rows
+                ],
             }
 
     def list_all(self) -> list[dict[str, Any]]:
-        """所有 task 的聚合视图(service 层接管 rule_briefs JOIN)。
+        """所有 task 的聚合视图 (service 层接管 rule_briefs JOIN)。
 
-        实现:1 次 SELECT task + 1 次 SELECT task_link 全表,Python 内 join。
-        简单可读,task 量级(< 1000)下性能足够。
+        `links` 字段沿用老契约兼容前端。task 量级 (< 1000) 下按 task 循环单查
+        性能足够, 不做全表 JOIN 展开。
         """
         with self.db.get_connection() as conn:
             tasks = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at "
                 "FROM task ORDER BY created_at DESC"
             ).fetchall()
-            all_links = conn.execute(
-                "SELECT task_id, link_kind AS kind, link_ref AS ref FROM task_link"
+            all_rules = conn.execute(
+                "SELECT task_id, id AS ref FROM rule WHERE task_id IS NOT NULL"
+            ).fetchall()
+            all_crons = conn.execute(
+                "SELECT task_id, cron_id, dispatch_owner FROM cron "
+                "WHERE task_id IS NOT NULL"
             ).fetchall()
             links_by_task: dict[str, list[dict]] = {}
-            for link in all_links:
-                links_by_task.setdefault(link["task_id"], []).append(
-                    {"kind": link["kind"], "ref": link["ref"]}
+            crons_by_task: dict[str, list[dict]] = {}
+            for r in all_rules:
+                links_by_task.setdefault(r["task_id"], []).append(
+                    {"kind": "rule", "ref": r["ref"]}
+                )
+            for c in all_crons:
+                links_by_task.setdefault(c["task_id"], []).append(
+                    {"kind": "cron", "ref": c["cron_id"]}
+                )
+                crons_by_task.setdefault(c["task_id"], []).append(
+                    {"ref": c["cron_id"], "dispatch_owner": c["dispatch_owner"]}
                 )
             return [
                 {
@@ -138,6 +149,7 @@ class TaskRepo:
                     "paused_at": ms_to_iso_local(t["paused_at"]),
                     "created_at": ms_to_iso_local(t["created_at"]),
                     "links": links_by_task.get(t["task_id"], []),
+                    "cron_refs": crons_by_task.get(t["task_id"], []),
                 }
                 for t in tasks
             ]
@@ -173,7 +185,7 @@ class TaskRepo:
             return cursor.rowcount > 0
 
     def delete_task(self, task_id: str) -> int:
-        """删 task 行(FK CASCADE 自动清 task_link)。返回 task 表 affected rows。"""
+        """删 task 行 (FK CASCADE 自动清 rule / cron / task_record_*)。"""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM task WHERE task_id=?", (task_id,))
@@ -182,31 +194,6 @@ class TaskRepo:
 
     @staticmethod
     def delete_task_in_tx(cursor, task_id: str) -> int:
-        """外层事务版本：用 caller 提供的 cursor 删 task，不 own connection。"""
+        """外层事务版本: 用 caller 提供的 cursor 删 task, 不 own connection。"""
         cursor.execute("DELETE FROM task WHERE task_id=?", (task_id,))
         return cursor.rowcount
-
-    def get_rule_refs(self, task_id: str) -> list[str]:
-        """拿该 task 的 rule_id 列表(service 层 disable/delete 联动用)。"""
-        with self.db.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT link_ref FROM task_link "
-                "WHERE task_id=? AND link_kind='rule'",
-                (task_id,),
-            ).fetchall()
-            return [r["link_ref"] for r in rows]
-
-    def delete_link_by_ref(self, kind: str, ref: str) -> int:
-        """删 task_link 行(kind, ref)。返回 affected rows。
-
-        UNIQUE(link_kind, link_ref) 保证最多影响 1 行。底层 ref 被先删
-        (rule delete / cron 删除) 时调用,清理 task_link 中的 dangling 行。
-        """
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM task_link WHERE link_kind=? AND link_ref=?",
-                (kind, ref),
-            )
-            conn.commit()
-            return cursor.rowcount

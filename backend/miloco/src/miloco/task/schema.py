@@ -1,7 +1,12 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""task / task_link 数据模型 — task SSOT（spec 2026-06-06）。"""
+"""task 数据模型 — task SSOT (v2)。
+
+v2 起 task_link 表已 DROP: rule 关联走 rule.task_id FK CASCADE, cron 关联
+走 cron.task_id FK CASCADE。TaskFullView.links 字段保留作为老前端兼容 backfill
+(由 rule / cron 联合构造), 新字段 cron_refs 是 v2 权威源。
+"""
 
 import re
 from enum import Enum
@@ -12,26 +17,15 @@ from pydantic import BaseModel, Field, field_validator
 _TASK_ID_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
-class LinkKind(str, Enum):
-    """``task_link.link_kind`` 取值。方案 P 后 ``memory`` 移除——record 不进
-    task_link，FK 直连 task；rule / cron 仍保留。"""
-
-    RULE = "rule"
-    CRON = "cron"
-
-
 class TaskCreateRequest(BaseModel):
-    """``POST /tasks`` 入参（方案 P 倒序）。
+    """``POST /tasks`` 入参 (v2)。
 
-    body 收窄为 ``{task_id, description}``——task create 仅建占位 task 行，
-    rule / cron / record 关联挂载由后续 endpoint 完成：
+    body 收窄为 ``{task_id, description}`` — task create 仅建占位 task 行,
+    rule / cron / record 关联挂载由后续 endpoint 完成:
 
-    - rule create endpoint 内部一笔事务 INSERT rule + INSERT task_link
-    - ``POST /tasks/{id}/link`` agent 显式挂 cron
-    - ``POST /tasks/{id}/record`` record 不走 task_link（FK 直连 task）
-
-    旧 ``rule_refs / cron_refs / memory_refs`` 字段全部移除（``extra='forbid'``
-    拒绝 unknown field，旧 caller 调用会 422）。
+    - rule create endpoint 内部 INSERT rule (rule.task_id FK 挂载)
+    - ``POST /crons`` internal cron 装配 (阶段 3)
+    - ``POST /tasks/{id}/record`` record 直连 task (FK CASCADE)
     """
 
     model_config = {"extra": "forbid"}
@@ -49,16 +43,6 @@ class TaskCreateRequest(BaseModel):
         return v
 
 
-class TaskLinkAddRequest(BaseModel):
-    """``POST /tasks/{task_id}/links`` 追加单条 link 行（保留 endpoint 兼容）。
-
-    方案 P 下 link_kind 收窄到 ``rule | cron``——``memory`` 不再合法。
-    """
-
-    kind: Literal["rule", "cron"]
-    ref: str = Field(..., min_length=1)
-
-
 class TaskUpdateRequest(BaseModel):
     """`PATCH /tasks/{task_id}` 改 description。"""
 
@@ -74,8 +58,18 @@ class RuleBrief(BaseModel):
 
 
 class TaskLinkEntry(BaseModel):
+    """(v2 兼容) 老前端从 links 字段读 kind/ref 分派; 新前端读 rule_briefs +
+    cron_refs 两个独立字段。等前端切换完成后独立 PR 删。"""
+
     kind: Literal["rule", "cron"]
     ref: str
+
+
+class CronRef(BaseModel):
+    """task 名下的 cron 引用 (v2 新增, 与 rule_briefs 并列)。"""
+
+    ref: str
+    dispatch_owner: Literal["internal", "external"]
 
 
 class TaskFullView(BaseModel):
@@ -87,11 +81,12 @@ class TaskFullView(BaseModel):
     paused_at: str | None = None
     created_at: str
     rule_briefs: list[RuleBrief] = Field(default_factory=list)
+    cron_refs: list[CronRef] = Field(default_factory=list)
     links: list[TaskLinkEntry] = Field(default_factory=list)
 
 
 class PendingOp(BaseModel):
-    """agent 待执行的 cron 操作（方案 P 后 memory 类已移除）。"""
+    """agent 待执行的 cron 操作。source 缺省 openclaw, 保留供未来接别的 agent。"""
 
     kind: Literal["cron"]
     ref: str
@@ -100,6 +95,7 @@ class PendingOp(BaseModel):
         "enable",
         "remove",
     ]
+    source: Literal["openclaw"] = "openclaw"
 
 
 class BackendSyncRuleResult(BaseModel):
@@ -121,7 +117,6 @@ class TaskDisableResult(BaseModel):
 
 class TaskDeleteBackendSynced(BaseModel):
     rules_deleted: list[str] = Field(default_factory=list)
-    task_link_rows_deleted: int = 0
 
 
 class TaskDeleteResult(BaseModel):

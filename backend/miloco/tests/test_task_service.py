@@ -1,19 +1,19 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""TaskService 业务流测试（方案 P）。
+"""TaskService 业务流测试 (v2)。
 
-新流程时序倒序：
-1. ``service.create_task(req)``  仅占位，无 task_link
-2. ``RuleRepo().create(rule)`` 内部一笔事务同时写 task_link(kind='rule')
-3. ``repo.add_link(task_id, 'cron', ref)`` 显式挂 cron
+流程:
+1. ``service.create_task(req)`` 仅占位
+2. ``RuleRepo().create(rule)`` 只写 rule 表 (rule.task_id FK 挂载)
+3. cron 引用直接 INSERT cron 表 (v2: cron.task_id FK CASCADE, dispatch_owner='external')
 
-PendingOp 不再含 ``memory`` kind；delete 触发 ``task_terminate_log`` 写入。
+PendingOp 只含 cron kind; delete 触发 task_terminate_log。
 """
 
 import pytest
 from miloco.database.rule_repo import RuleRepo
-from miloco.database.task_repo import TaskLinkConflict
+from miloco.database.task_repo import TaskConflict
 from miloco.rule.schema import (
     Rule,
     RuleCondition,
@@ -21,6 +21,19 @@ from miloco.rule.schema import (
     RuleMode,
 )
 from miloco.task.schema import TaskCreateRequest, TaskUpdateRequest
+
+
+def _insert_external_cron(task_id: str, cron_id: str) -> None:
+    """测试辅助: 直接往 cron 表塞一条 external 引用行 (模拟老 openclaw cron 挂钩)."""
+    from miloco.database.connector import get_db_connector
+
+    with get_db_connector().get_connection() as conn:
+        conn.execute(
+            "INSERT INTO cron (cron_id, task_id, dispatch_owner, enabled, "
+            "created_at, updated_at) VALUES (?, ?, 'external', 1, 0, 0)",
+            (cron_id, task_id),
+        )
+        conn.commit()
 
 
 @pytest.fixture
@@ -65,7 +78,7 @@ def _setup_task_with_rule(service, task_id="t1", description="d", query="客厅�
 
 
 def test_create_task_then_rule_auto_links(service):
-    """rule create 内部自动写 task_link(kind='rule')。"""
+    """rule create 只写 rule 表; task view.links 从 rule.task_id backfill."""
     service.create_task(TaskCreateRequest(task_id="t1", description="客厅有人开灯"))
     rule_id = RuleRepo().create(_make_rule_obj(task_id="t1", query="客厅有人"))
 
@@ -76,13 +89,13 @@ def test_create_task_then_rule_auto_links(service):
     assert len(view.rule_briefs) == 1
     assert view.rule_briefs[0].rule_id == rule_id
     assert view.rule_briefs[0].query == "客厅有人"
-    # task_link 表自动多了一行 kind='rule'
+    # links 字段兼容 backfill: rule.task_id → links[kind='rule']
     assert any(link.kind == "rule" and link.ref == rule_id for link in view.links)
 
 
 def test_create_task_409_on_duplicate_id(service):
     service.create_task(TaskCreateRequest(task_id="t1", description="d"))
-    with pytest.raises(TaskLinkConflict):
+    with pytest.raises(TaskConflict):
         service.create_task(TaskCreateRequest(task_id="t1", description="d2"))
 
 
@@ -96,9 +109,9 @@ def test_disable_task_marks_meta_paused_and_disables_rules(service):
 
 
 def test_disable_pending_ops_for_cron_only(service):
-    """方案 P：disable 返回的 agent_pending 仅含 cron，无 memory。"""
+    """disable 返回的 agent_pending 仅含 cron。"""
     service.create_task(TaskCreateRequest(task_id="t1", description="d"))
-    service.repo.add_link("t1", "cron", "job-001")
+    _insert_external_cron("t1", "job-001")
     result = service.disable_task("t1")
     kinds = {op.kind for op in result.agent_pending}
     assert kinds == {"cron"}
@@ -107,7 +120,7 @@ def test_disable_pending_ops_for_cron_only(service):
 
 def test_enable_pending_ops_cron_only(service):
     service.create_task(TaskCreateRequest(task_id="t1", description="d"))
-    service.repo.add_link("t1", "cron", "job-001")
+    _insert_external_cron("t1", "job-001")
     service.disable_task("t1")
     result = service.enable_task("t1")
     assert result.status == "active"
@@ -116,13 +129,13 @@ def test_enable_pending_ops_cron_only(service):
 
 
 def test_delete_task_writes_terminate_log_and_cascade(service, real_db):
-    """方案 P：delete 事务先写 task_terminate_log，FK CASCADE 清 task_link + record。"""
+    """delete 事务先写 task_terminate_log, FK CASCADE 清 rule / cron / task_record_*."""
     from miloco.database.connector import get_db_connector
     from miloco.task_record.schema import RecordKind
     from miloco.task_record.service import TaskRecordService
 
     rid = _setup_task_with_rule(service)
-    service.repo.add_link("t1", "cron", "job-001")
+    _insert_external_cron("t1", "job-001")
     rec_svc = TaskRecordService()
     rec_svc.init_record(
         "t1", RecordKind.PROGRESS, {"target": 8, "unit": "杯", "window": "day"}
@@ -132,12 +145,9 @@ def test_delete_task_writes_terminate_log_and_cascade(service, real_db):
     result = service.delete_task("t1", reason="abandoned")
     assert result is not None
     assert result.backend_synced.rules_deleted == [rid]
-    # task_link 行数包含 rule + cron 共 2 行
-    assert result.backend_synced.task_link_rows_deleted == 2
     # agent_pending 仅 cron
     assert {op.kind for op in result.agent_pending} == {"cron"}
 
-    # task_terminate_log 写了一行
     with get_db_connector().get_connection() as conn:
         log_rows = list(
             conn.execute(
@@ -147,8 +157,8 @@ def test_delete_task_writes_terminate_log_and_cascade(service, real_db):
         assert len(log_rows) == 1
         assert log_rows[0]["reason"] == "abandoned"
         assert log_rows[0]["kind"] == "progress"
-        # task / task_link / task_record_progress 全部清空
-        for tbl in ("task", "task_link", "task_record_progress"):
+        # task / rule / cron / task_record_progress 全部清空 (FK CASCADE)
+        for tbl in ("task", "rule", "cron", "task_record_progress"):
             n = conn.execute(
                 f"SELECT COUNT(*) FROM {tbl} WHERE task_id='t1'"
             ).fetchone()[0]
@@ -227,11 +237,9 @@ def test_delete_task_is_atomic_on_mid_failure(service, real_db, monkeypatch):
     assert task_exists is not None
 
 
-def test_dangling_rule_link_warns_but_skips(service):
-    """rule 行被外部删但 task_link 残留 → list_for_dedupe 应跳过这个 rule。"""
+def test_dangling_rule_link_no_op_after_v2(service):
+    """v2 后 rule.task_id 是权威源, rule 行删则 list_by_task 直接不返回 → rule_briefs 空。"""
     rid = _setup_task_with_rule(service)
-    # 外部直接删 rule（绕过 RuleService.delete_rule）
     RuleRepo().delete(rid)
     view = service.get_full_view("t1")
-    # rule_briefs 应过滤掉 dangling rule
     assert view.rule_briefs == []
