@@ -24,6 +24,12 @@ from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.observability import debug as debug_mod
+from miloco.perception.engine.omni.probe import (
+    fetch_models as _fetch_models,
+    probe_chat as _probe_chat,
+    probe_omni as _probe_omni,
+    probe_reachable as _probe_reachable,
+)
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
 
@@ -649,67 +655,6 @@ class OmniTestBody(BaseModel):
     label: str | None = None
 
 
-async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
-    """回退探测：少数服务不支持 GET /models 时，发一次极简非流式 chat（自测本次耗时）。"""
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-    }
-    t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    latency_ms = round((time.monotonic() - t0) * 1000)
-    if r.status_code == 200:
-        return {"ok": True, "code": "ok", "status": 200, "latency_ms": latency_ms, "message": "连接正常"}
-    if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "status": r.status_code, "message": "API Key 无效或无权限"}
-    if r.status_code == 404:
-        return {"ok": False, "code": "not_found", "status": 404, "message": "模型或地址不存在"}
-    if r.status_code in (400, 422):
-        # 鉴权已过、仅请求体被该模型拒（如只支持流式）→ Key 大概率有效。
-        return {
-            "ok": False,
-            "code": "rejected_authed",
-            "status": r.status_code,
-            "latency_ms": latency_ms,
-            "message": "已连接，但拒绝了模型请求（模型名可能错误）",
-        }
-    return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
-
-
-async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
-    """验证「这套配置能否真正调用该模型」。
-
-    先 GET /models 做廉价的鉴权 + 可达性预检(快速失败、省 token):连不上→unreachable,
-    401/403→bad_key,5xx→http_error。预检通过后,用一次极简 chat(``max_tokens=1``)**真正
-    探测该模型是否可用**——不依赖「模型是否出现在 /models 列表」这种弱判据(列表常不全,
-    在不在列表都不等于能不能调通)。chat 探测结果(ok / not_found / rejected_authed / …)即最终结论。
-    """
-    base = base_url.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "status": r.status_code, "message": "API Key 无效或无权限"}
-    if r.status_code >= 500:
-        return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
-    # 鉴权/可达性 OK → 用极简 chat 真正验证该模型(在不在 /models 列表都以此为准)。
-    return await _probe_chat(model, base, api_key)
-
-
 @router.post(
     "/omni-config/test",
     summary="测试 omni 配置连通性（鉴权/可达预检 + 极简 chat 真校验，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
@@ -733,50 +678,6 @@ async def test_omni_config(
         )
     result = await _probe_omni(model, base_url, api_key)
     return NormalResponse(code=0, message="ok", data=result)
-
-
-async def _fetch_models(base_url: str, api_key: str) -> dict:
-    """拉取 provider 模型列表(GET /models)。成功返回 {ok, models:[id...]}。"""
-    base_url = base_url.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(
-                f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
-            )
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "models": [], "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    if r.status_code == 200:
-        try:
-            ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
-        except Exception:  # noqa: BLE001
-            ids = []
-        return {"ok": True, "models": sorted(ids)}
-    if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "models": [], "message": "API Key 无效或无权限"}
-    return {
-        "ok": False,
-        "code": "http_error",
-        "models": [],
-        "message": f"服务返回异常（HTTP {r.status_code}）",
-    }
-
-
-async def _probe_reachable(base_url: str) -> dict | None:
-    """无 key 时判 Base URL 是否「明显有问题」,使 URL 错优先于「缺 key」暴露(而非被短路成「未配置」)。
-
-    - 连接失败(DNS/拒连/超时/URL 非法)→ unreachable
-    - 2xx/3xx,或 401/403(地址对、只是需要 key)→ None(URL 没问题,问题在缺 key)
-    - 其余(404/405/4xx/5xx,如填错地址命中 openresty 404 页)→ http_error(地址/端点大概率不对)
-    """
-    url = base_url.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{url}/models")
-    except Exception as e:  # noqa: BLE001
-        return {"code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    if r.status_code < 400 or r.status_code in (401, 403):
-        return None
-    return {"code": "http_error", "message": f"服务返回异常（HTTP {r.status_code}）"}
 
 
 class OmniModelsBody(BaseModel):
