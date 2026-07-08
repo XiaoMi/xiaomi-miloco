@@ -116,7 +116,7 @@ def select_active_camera_dids(
     for did in sorted(result):
         ch = getattr(cameras.get(did), "channel_count", None) or 1
         if total_streams + ch > MAX_ENABLED_CAMERAS:
-            break
+            continue
         capped.append(did)
         total_streams += ch
     return capped

@@ -958,11 +958,11 @@ class MiotService:
                 # 多通道摄像头：为每个通道创建独立的条目
                 for ch in range(channel_count):
                     channel_did = f"{did}:ch{ch}"
-                    channel_name = f"{getattr(info, 'name', None)} (通道{ch})"
+                    # Keep camera original name; channel label is a frontend concern.
                     out.append(
                         {
                             "did": did,  # 保持原始 did，用于 SDK 请求
-                            "name": channel_name,
+                            "name": getattr(info, "name", None),
                             "room_name": getattr(info, "room_name", None),
                             "is_online": online,
                             "in_use": did not in denied,  # 使用原始 did 判断是否启用

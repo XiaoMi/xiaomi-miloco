@@ -178,16 +178,17 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             if channel_count > 1:
                 for ch in range(channel_count):
                     channel_did = f"{did}:ch{ch}"
-                    channel_name = f"{camera_info.name} (通道{ch})"
                     # Store mapping for later use (including channel_count)
                     self._channel_did_map[channel_did] = (did, ch, channel_count)
+                    # Keep camera original name; channel label is a frontend concern.
                     result[channel_did] = PerceptionDevice(
                         did=channel_did,
-                        name=channel_name,
+                        name=camera_info.name,
                         device_type="camera",
                         room_id=camera_info.room_name,
                         room_name=camera_info.room_name,
                         online=camera_info.online and camera_info.lan_online,
+                        extra={"original_did": did, "channel": ch},
                     )
             else:
                 result[did] = PerceptionDevice(
@@ -244,17 +245,19 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         collect_cfg = get_settings().perception.collect
 
-        # Check if this is a multi-channel camera
-        # Read from _channel_did_map (populated by discover_devices)
-        if did in self._channel_did_map:
-            original_did, channel, channel_count = self._channel_did_map[did]
-            actual_did = original_did
+        # Parse channel from did suffix directly (consistent with disconnect_device,
+        # collect, peek_latest_frame, and _current_source).
+        if ':ch' in did:
+            actual_did, ch_str = did.rsplit(':ch', 1)
+            channel = int(ch_str)
         else:
-            # Single-channel camera
-            original_did = None
-            channel = DEFAULT_VIDEO_CHANNEL
-            channel_count = 1
             actual_did = did
+            channel = DEFAULT_VIDEO_CHANNEL
+
+        # Read channel_count from MiotProxy cache (already refreshed in
+        # discover_devices → sync_devices before connect).
+        camera_info = self._miot_proxy.get_cached_camera(actual_did)
+        channel_count = getattr(camera_info, 'channel_count', None) or 1 if camera_info else 1
 
         # Get or create device state
         if actual_did not in self._devices:
@@ -281,10 +284,6 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             window_settle_ms=collect_cfg.settle_ms,
             buffer_full_action=collect_cfg.full_action,
         )
-
-        # Store mapping for multi-channel devices (if not already in map from discover)
-        if original_did and did != actual_did and did not in self._channel_did_map:
-            self._channel_did_map[did] = (actual_did, channel, channel_count)
 
         # Subscribe decoded video frame stream (multi-reg)
         try:
@@ -475,11 +474,12 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         camera = CameraInfo.model_validate(camera_info.model_dump())
 
         if channel is not None:
-            # Multi-channel camera
-            channel_name = f"{camera.name} (通道{channel})"
+            # Multi-channel camera — keep camera original name; channel label
+            # is a frontend concern (the `channel` field in extra is available
+            # for frontend to append "通道N" / "Channel N" as needed).
             return PerceptionDevice(
                 did=did,
-                name=channel_name,
+                name=camera.name,
                 device_type="camera",
                 room_id=camera.room_name,
                 room_name=camera.room_name,
