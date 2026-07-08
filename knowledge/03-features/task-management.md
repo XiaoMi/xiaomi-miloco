@@ -48,7 +48,8 @@
 创建任务（Agent: miloco-create-task）
   → POST /api/tasks → TaskService（task/service.py）
       写 task 主体 + 装配 rule / cron / record
-      task↔rule/cron 关联记入 task_link
+      rule 归属由 rule.task_id FK CASCADE 表达
+      cron 归属由 cron.task_id FK CASCADE 表达（dispatch_owner='internal'|'external' 二分）
 
 累积统计（CLI / Agent）
   → POST /api/tasks/{id}/record/...（init / progress-inc / event-append / session-start|end）
@@ -63,15 +64,15 @@
 
 终止任务（Agent: miloco-terminate-task）
   → DELETE /api/tasks/{id} → TaskService.delete_task（单事务）
-      写 task_terminate_log 审计快照 → 删 rule → 删 task
-      （FK CASCADE 连带清 task_link 与全部 task_record_* 表）
+      写 task_terminate_log 审计快照 → 删 task
+      （FK CASCADE 连带清 rule / cron / 全部 task_record_* 表）
 ```
 
 ### 核心模块
 
 **TaskService**（`backend/miloco/src/miloco/task/service.py`）
 
-任务生命周期主体的业务层：创建 / 启停 / 更新 / 删除任务，装配规则与定时，维护 task↔rule/cron 关联（记入 `task_link`）。`delete_task` 单事务编排终止——写审计快照 + 删规则 + 删任务（FK CASCADE 清理关联与记录）。
+任务生命周期主体的业务层：创建 / 启停 / 更新 / 删除任务，装配规则与定时。rule / cron 归属通过各自的 `task_id` FK CASCADE 直连 task。`delete_task` 单事务编排终止——写审计快照 + 删任务（FK CASCADE 连带清 rule / cron / 全部 task_record_* 表）。
 
 **TaskRecordService**（`backend/miloco/src/miloco/task_record/service.py`）
 
@@ -102,10 +103,11 @@
 
 ### 涉及的数据表
 
-- **task 子系统**：任务生命周期主体表 + task↔rule/cron 关联表（`task_link`）
+- **task 子系统**：任务生命周期主体表 + `rule` / `cron` 两表通过 `task_id` FK CASCADE 挂到 task
+- **schedule 子系统**：`cron` 表统一装 internal（backend + APScheduler MemoryJobStore 管理）与 external（backend 只存引用，触发仍走 openclaw 老通路）两类
 - **task_record 子系统**：按 kind 拆的主表（进度 / 时长 / 事件）+ 时长与事件各自的子表 + 一张终止审计表
 
-记录不进 `task_link`，FK 直连 task。表名与 schema 见 `database/connector.py`。
+所有子表 FK 直连 task；老 `task_link` 表已在 v1→v2 迁移中 DROP，rule/cron 关联改由各自 `task_id` 表达。表名与 schema 见 `database/connector.py`。
 
 ### 任务相关 API 路径
 

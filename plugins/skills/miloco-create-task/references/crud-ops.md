@@ -23,7 +23,11 @@
 miloco-cli task list --pretty
 ```
 
-返回每个 task 的 task_id / description / status / rule_briefs / links。
+返回每个 task 的 task_id / description / status / rule_briefs / cron_refs / links。
+
+- `rule_briefs`: rule 摘要列表（rule_id / query / actions_desc）
+- `cron_refs`: cron 引用列表（`ref` + `dispatch_owner`；`internal` = backend 完整管理，`external` = 只存引用，触发仍走 openclaw 老通路，需 agent 通过自然语言指令处理）
+- `links`: v1 兼容字段（backfill 由 rule / cron 联合构造，`{kind, ref}` 结构；新 caller 直接读 rule_briefs / cron_refs）
 
 **回复**:≤30 字简述 + Markdown 表(task_id / 概要 / 状态)。
 
@@ -34,7 +38,7 @@ miloco-cli task list --pretty
 **步骤**:
 
 1. 解析 task_id(通用前置)
-2. 拿 rule_id 列表:`miloco-cli task get <task_id>` → `data.links` 过滤 `kind=="rule"` 取 `ref`
+2. 拿 rule_id 列表:`miloco-cli task get <task_id>` → `data.rule_briefs` 取每项 `rule_id`
 3. 对每个 rule_id:`miloco-cli rule logs --rule <rule_id> --since <window>`(默认 24h)
 4. 汇总条数、kind 分布、时间分布
 
@@ -93,9 +97,9 @@ miloco-cli task enable <task_id>    # 启用
 
 | 改什么 | 改哪 | 怎么做 |
 |---|---|---|
-| rule 条件 / 动作 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 links[] 拿） |
+| rule 条件 / 动作 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 `rule_briefs[].rule_id` 拿） |
 | 持续时长门槛 | rule | `miloco-cli rule update <rule_id> --duration-seconds <N>`（单位换算见 SKILL.md §Rule.duration_seconds）；desc 含字面分钟/小时数时同步改 |
-| 触发时间 / cron 表达式 | schedule | cron remove + cron add（cron 无 update API）；jobId 从 `task get` 的 links[] 拿；新 jobId 紧跟 `task link --kind cron --ref <new_jobId>` 重新挂；新建 cron 同样必带独立 `tz="<家庭时区>"` 字段（见 SKILL.md §Schedule.时区） |
+| 触发时间 / cron 表达式 | schedule | `miloco-cli cron remove <cron_id>` + `cron add ...`（cron 无 update API）；`cron_id` 从 `task get` 的 `cron_refs[].ref` 拿；新 cron 通过 `task_id` 参数直接绑到 task，无需额外 link 步骤；新建 cron 必带独立 `tz="<家庭时区>"` 字段（见 SKILL.md §Schedule.时区）。`dispatch_owner=external` 的老 cron 属 openclaw 侧接管，agent 通过自然语言指令让 openclaw 内部 cron API 处理 |
 | 目标值 / 单位 / window / recurring_pattern / expires_at | record | `miloco-cli task record update <task_id> --patch '{...}'`（白名单按 kind：progress=target/unit/window/recurring_pattern/expires_at；duration=target_minutes/recurring_pattern/expires_at；event=recurring_pattern/expires_at）|
 
 跨件套修改时**按 record → schedule → rule 顺序**逐一更新；任一步失败则停止后续。

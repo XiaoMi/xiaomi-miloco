@@ -418,7 +418,7 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
    - 时段：限清醒时段 06:00-22:00
    - 时点分布按任务自然执行场景定（服药对齐三餐、晨练放早晨、课后活动放放学时段等）；无强场景信号 → N 个时点均分 10:00-20:00
    - 周期：window=day → `* * *`；用户明示工作日/周末 → `* * 1-5` / `* * 0,6`
-   - 装配：N 个时点合并装单 cron `expr="0 H1,H2,...,Hn * * *"` + `tz="<家庭时区>"`，单 jobId 单 task_link（tz 必带，见 §Schedule.时区）
+   - 装配：N 个时点合并装单 cron `expr="0 H1,H2,...,Hn * * *"` + `tz="<家庭时区>"`，通过 `miloco-cli cron add --task X --kind cron --cron-expr ... --tz ...` 一步绑到 task（backend 内部走 `cron.task_id` FK CASCADE，tz 必带，见 §Schedule.时区）
 3. **其他**（无 target / Record=event / Record=duration / 无 Record） → 每周期单时点：day → `0 9 * * *`；week → `0 9 * * 1`；month → `0 9 1 * *`（均须配 `tz="<家庭时区>"`）
 
 命中默认路径 → **触发装配提示**（按 §装配提示元规则）
@@ -611,11 +611,11 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 
 ## 装配失败回滚
 
-多步执行（task create → record init → cron+link → rule create）任一步失败 → 调 `miloco-cli task delete <task_id> --reason abandoned` 回滚。
+多步执行（task create → record init → cron add → rule create）任一步失败 → 调 `miloco-cli task delete <task_id> --reason abandoned` 回滚。
 
-- backend 一笔事务同步清 task / rule / record / task_link，agent 不重复清
+- backend 一笔事务同步清 task / rule / cron / record（FK CASCADE），agent 不重复清
 - 跑响应里的 `agent_pending`（仅含 cron kind），按顺序逐条 `cron remove`
-- 本 turn 已建但**未挂 task_link** 的 cron jobId → 按本 turn 已知的 jobId 单独 `cron remove`
+- 本 turn 已建但**尚未绑 task**（`cron.task_id=NULL`）的 cron → 按本 turn 已知的 `cron_id` 单独 `cron remove`
 - task create 本身失败 → 无需调 delete
 
 ## 装配示例

@@ -154,7 +154,7 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 
 **Catalog 注入机制**：每次 Agent turn 前，`before_prompt_build` Hook 中调 `miloco-cli device catalog`（节流防止短期 spam）。catalog 是 TSV 格式文本，列出最近操作过的高频设备及其 spec，让 Agent 在 system context 中直接看到最相关设备，无需每次调 `device list`。
 
-**任务管理系统**：任务是持久性意图的主体，可装配 rule（感知触发条件）、cron（定时触发）、record（行为统计）三类能力；task↔rule/cron 关联记入 `task_link`（record 不进 link，FK 直连 task）。cron 制品存活在 OpenClaw 侧，backend 不直接操作——维持松耦合。删除任务时，backend 单事务清理 task 记录与关联 rule（FK 级联清 link 与 record），cron 由 Agent 按 agent_pending 清理。任务子系统详见 [任务管理](task-management.md)。
+**任务管理系统**：任务是持久性意图的主体，可装配 rule（感知触发条件）、cron（定时触发）、record（行为统计）三类能力；rule / cron 通过各自的 `task_id` FK CASCADE 挂到 task。cron 分两类：`internal` 由 backend + APScheduler MemoryJobStore 完整管理并触发；`external` 是 v1 遗留数据，backend 只存引用、触发仍走 OpenClaw 老通路，随用户 update / task delete 逐步消亡。删除任务时 backend 单事务写 audit + 删 task（FK CASCADE 一并清 rule / cron / record），残留的 external cron 由 Agent 按 agent_pending 通过自然语言指令让 OpenClaw 侧下线。任务子系统详见 [任务管理](task-management.md)。
 
 **AgentDispatcher 调度保证**：
 
