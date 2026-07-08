@@ -1,0 +1,17 @@
+{
+  "settings": {
+    "title": "感知设置",
+    "videoShortEdge": "分辨率",
+    "videoShortEdgeHint": "短边像素，保持原始宽高比",
+    "omniFps": "帧率",
+    "windowSize": "感知窗口",
+    "windowSizeUnit": "秒",
+    "apply": "应用设置",
+    "applying": "应用中…",
+    "applySuccess": "设置已生效",
+    "saveFailed": "保存失败",
+    "restartFailed": "设置已保存，但引擎重启失败，请手动重启",
+    "loadFailed": "加载设置失败",
+    "resetDefaults": "恢复默认设置"
+  }
+}

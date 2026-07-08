@@ -23,6 +23,7 @@ import {
 import { useAsync } from "./hooks/useAsync";
 import type { Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
+import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
 import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
@@ -168,6 +169,7 @@ function MainApp() {
   // Person；null 时回退到第一位。改名 / 删除后随 reload 自动同步。
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
   const [miotBindOpen, setMiotBindOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // 米家家庭名直接走 backend `/api/miot/home::home_name`，米家给啥前端就显啥；
   // 未绑或 backend 没返时**不渲染** HomeSwitcher（未登录提示由头像 button 承担，
@@ -363,6 +365,7 @@ function MainApp() {
         miot={status.data?.miot}
         onOpenMiotBind={() => setMiotBindOpen(true)}
         onMiotChanged={() => window.location.reload()}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       {/* 主区:固定高度 + flex-col,TopBar/StatusRibbon 顶在上面,只 main 区滚 */}
@@ -481,6 +484,7 @@ function MainApp() {
             miot={status.data?.miot}
             onOpenMiotBind={() => setMiotBindOpen(true)}
             onMiotChanged={() => window.location.reload()}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
         </div>
       </div>
@@ -519,6 +523,8 @@ function MainApp() {
           window.location.reload();
         }}
       />
+
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       <ToastHost />
     </div>

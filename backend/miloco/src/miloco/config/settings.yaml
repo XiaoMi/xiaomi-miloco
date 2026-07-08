@@ -85,7 +85,7 @@ perception:
       #   omni_fps —— 送 omni 的视频帧率, 与 fps 解耦; omni 已是瓶颈, 不随 tracker 提频涨
       fps: 3
       omni_fps: 1
-      video_short_edge: 512   # 视频编码短边像素（保持宽高比缩放）
+      video_short_edge: 512
     gate:
       # visual 滞回时长(秒)。visual 最近通过过、距今 <= 此值时,本窗 visual 不通过
       # 也强制生成 packet 并打 hold 标志,保住 video 路由不被纯音频短路。

@@ -1,0 +1,17 @@
+{
+  "settings": {
+    "title": "Perception Settings",
+    "videoShortEdge": "Resolution",
+    "videoShortEdgeHint": "Short edge pixels, keeps aspect ratio",
+    "omniFps": "Frame Rate",
+    "windowSize": "Perception Window",
+    "windowSizeUnit": "sec",
+    "apply": "Apply Settings",
+    "applying": "Applying…",
+    "applySuccess": "Settings applied",
+    "saveFailed": "Save failed",
+    "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
+    "loadFailed": "Failed to load settings",
+    "resetDefaults": "Restore Defaults"
+  }
+}

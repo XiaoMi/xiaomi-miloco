@@ -808,3 +808,51 @@ async def list_omni_models(
             code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
         )
     return NormalResponse(code=0, message="ok", data=await _fetch_models(base_url, api_key))
+
+
+# =============================================================================
+# 感知参数配置
+# =============================================================================
+
+
+class PerceptionConfigBody(BaseModel):
+    video_short_edge: int | None = None
+    omni_fps: int | None = None
+    window_size: int | None = None
+
+
+def _perception_config_payload() -> dict:
+    s = get_settings()
+    inp = s.perception.engine.get("input", {})
+    return {
+        "video_short_edge": inp.get("video_short_edge", 512),
+        "omni_fps": inp.get("omni_fps", 1),
+        "window_size": s.perception.collect.window_size,
+    }
+
+
+@router.get(
+    "/perception-config",
+    summary="获取当前感知参数",
+    response_model=NormalResponse,
+)
+def get_perception_config(current_user: str = Depends(verify_token)):
+    return NormalResponse(code=0, message="ok", data=_perception_config_payload())
+
+
+@router.put(
+    "/perception-config",
+    summary="修改感知参数（写 config.json，重启生效）",
+    response_model=NormalResponse,
+)
+def put_perception_config(body: PerceptionConfigBody, current_user: str = Depends(verify_token)):
+    update: dict = {}
+    if body.video_short_edge is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["video_short_edge"] = body.video_short_edge
+    if body.omni_fps is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
+    if body.window_size is not None:
+        update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if update:
+        update_shared_config(**update)
+    return NormalResponse(code=0, message="ok", data=_perception_config_payload())

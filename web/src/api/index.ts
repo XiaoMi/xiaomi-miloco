@@ -528,3 +528,28 @@ export async function getMemorySeries(
     `/api/monitor/memory/series?window=${w}&bucket=${bucket}`,
   );
 }
+
+// ─── Perception Config ─────────────────────────────────────────────────
+
+export interface PerceptionConfig {
+  video_short_edge: number;
+  omni_fps: number;
+  window_size: number;
+}
+
+export async function getPerceptionConfig(): Promise<PerceptionConfig> {
+  const r = await apiFetch<{ code: number; data: PerceptionConfig }>(
+    "/api/admin/perception-config",
+  );
+  return r.data;
+}
+
+export async function updatePerceptionConfig(
+  input: Partial<PerceptionConfig>,
+): Promise<PerceptionConfig> {
+  const r = await apiFetch<{ code: number; data: PerceptionConfig }>(
+    "/api/admin/perception-config",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+  return r.data;
+}
