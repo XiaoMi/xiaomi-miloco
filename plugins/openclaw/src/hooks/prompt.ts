@@ -137,7 +137,7 @@ const DEVICE_CATALOG_INTRO = `## 设备目录
 
 // 感知日志逐轮全量注入、随一天增长会挤占上下文（它替换掉的家庭档案块原本按 token 截断），
 // 故设一个字符上限；超限时保留末尾（日志按时间追加，尾部即最近），并提示用 memory_search 查全量。
-const PERCEPTION_LOG_MAX_CHARS = 8000;
+const PERCEPTION_LOG_MAX_CHARS = 2000;
 
 let warnedMissingWorkspace = false;
 // workspaceDir 是让整个 feature 生效的唯一外部耦合点，缺失时会静默走「不出现」分支、
