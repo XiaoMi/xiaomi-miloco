@@ -38,6 +38,7 @@ from .constants import (
     _COMMONSENSE,
     _COMMONSENSE_AUDIO,
     _EXAMPLE_CHAIN,
+    _EXAMPLE_CHAIN_NO_NAME,
     _EXAMPLE_IDENTITY,
     _HISTORY_HEADER,
     _OUTPUT_MODE_FREE,
@@ -506,7 +507,11 @@ def _render_examples(scene: SceneDescriptor) -> str:
     examples = []
     if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
-    examples.append(_EXAMPLE_CHAIN)
+    # 库空时实例 B 用泛称版：此窗无成员铺垫（实例 A 已 gate 掉），caption 示范不该叫专名，
+    # 与「库空不产成员名」收敛一致。库非空照旧用带名版（其"小明"由上方实例 A 的 gallery 铺垫）。
+    examples.append(
+        _EXAMPLE_CHAIN_NO_NAME if scene.identity_match_disabled else _EXAMPLE_CHAIN
+    )
     return "# 输出实例\n\n" + "\n\n".join(examples)
 
 

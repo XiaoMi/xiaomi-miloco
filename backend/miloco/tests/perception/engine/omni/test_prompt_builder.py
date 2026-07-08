@@ -1309,6 +1309,9 @@ class TestIdentityMatchDisabled:
             identity_match_disabled=True))
         assert self._EXAMPLE_A_MARKER not in out   # 成员匹配 few-shot 不注入
         assert "实例 B" in out                       # 通用观察 few-shot 照常
+        # 库空实例 B 用泛称版：无成员铺垫的窗口不示范 caption 叫专名
+        assert "小明" not in out
+        assert "某人坐在电脑前" in out
 
     def test_example_a_present_when_gallery_present(self):
         from miloco.perception.engine.omni.field_registry import SceneDescriptor
@@ -1318,6 +1321,8 @@ class TestIdentityMatchDisabled:
             route="video", has_identity=True, has_audio=True, has_speech=True,
             identity_match_disabled=False))
         assert self._EXAMPLE_A_MARKER in out
+        # 库非空用带名版实例 B（专名由实例 A 的 gallery 铺垫），非泛称版
+        assert "小明坐在电脑前" in out
 
     def test_system_prompt_no_member_matching_leak_when_moot(self):
         """整类 catch-all：库空 system prompt 不得残留任何成员匹配内容（任务描述 /
