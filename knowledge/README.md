@@ -154,7 +154,8 @@ knowledge/
   - [Agent 集成](03-features/openclaw-integration.md)
   - [实时摄像头观看](03-features/live-camera-view.md)
   - [设备欢迎](03-features/device-welcome.md)
-- **04-testing** — [评测框架](04-testing/README.md)（内容待测试团队补充）
+  - [事件反馈打包](03-features/event-feedback.md)
+- **04-testing** — [评测方法论](04-testing/README.md)
 - **05-external-deps**
   - [MiOT SDK](05-external-deps/sdk-miot.md)
   - [ONNX Runtime](05-external-deps/sdk-onnxruntime.md)
@@ -176,19 +177,20 @@ knowledge/
 
 > 重构时统一收敛到此处，features 内不再各自重复定义。
 
-| 术语                                | 含义                                                                                                                                                           |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 感知流水线                          | 设备感知的核心处理管道，采用 `MultimodalCollector → Gate → Identity → Omni` 四层架构，核心编排在 `PerceptionEngine`                                            |
-| Omni                                | 感知流水线中负责场景理解的编排层，调用 VLM（MiMo）输出场景描述与规则匹配                                                                                       |
-| VLM                                 | 视觉语言模型，能同时理解图像与文本的多模态大模型；配置入口在 `model.omni`（见 [开发指南「配置分段与用途」表](06-dev-guide/dev-guide.md#配置分段与用途)）       |
-| Agent                               | OpenClaw 上运行的智能体，通过 Skill 调用 Miloco 能力                                                                                                           |
-| OpenClaw                            | Miloco 所基于的 Agent 框架与插件平台                                                                                                                           |
-| MiOT                                | 小米 IoT SDK，用于发现与控制米家设备                                                                                                                           |
-| tier_a / tier_c / tier_u            | 身份样本三层：用户登记样本 / 系统沉淀样本 / 陌生人未确认池（即陌生人池，见下行）                                                                               |
-| 陌生人池                            | 未识别身形的暂存与聚类区，供主动注册抽样（对应 tier_u）                                                                                                        |
-| Skill                               | OpenClaw 插件提供给 Agent 的能力单元（`miloco-*` 前缀）                                                                                                        |
-| STATIC / DYNAMIC 规则               | 静态规则直接执行设备动作；动态规则通过插件回调让 Agent 决策                                                                                                    |
-| task / task_record                  | 任务是持久意图主体（生命周期 + 挂载规则 / 定时 / 记录）；任务记录是其行为统计载体（做了多少 / 多久 / 几次），定义见 [任务管理](03-features/task-management.md) |
-| kind（progress / duration / event） | 任务记录的三种统计形态：进度型（目标累积）/ 时长型（计时累积）/ 事件型（次数留痕）                                                                             |
-| rollover                            | 周期型任务记录跨周期时归档旧成绩、开新一期的自动滚动机制                                                                                                       |
-| 有价值事件（meaningful_events）     | 规则命中 / 语音指令 / 建议三类事件的持久化沉淀，附视频片段，供 Agent 与用户回溯                                                                                |
+| 术语                                | 含义                                                                                                                                                                         |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 感知流水线                          | 设备感知的核心处理管道，采用 `MultimodalCollector → Gate → Identity → Omni` 四层架构，核心编排在 `PerceptionEngine`                                                          |
+| Omni                                | 感知流水线中负责场景理解的编排层，调用 VLM（MiMo）输出场景描述与规则匹配                                                                                                     |
+| VLM                                 | 视觉语言模型，能同时理解图像与文本的多模态大模型；配置入口在 `model.omni`（见 [开发指南「配置分段与用途」表](06-dev-guide/dev-guide.md#配置分段与用途)）                     |
+| Agent                               | OpenClaw 上运行的智能体，通过 Skill 调用 Miloco 能力                                                                                                                         |
+| OpenClaw                            | Miloco 所基于的 Agent 框架与插件平台                                                                                                                                         |
+| MiOT                                | 小米 IoT SDK，用于发现与控制米家设备                                                                                                                                         |
+| tier_a / tier_c / tier_u            | 身份样本三层：用户登记样本 / 系统沉淀样本 / 陌生人未确认池（即陌生人池，见下行）                                                                                             |
+| 陌生人池                            | 未识别身形的暂存与聚类区，供主动注册抽样（对应 tier_u）                                                                                                                      |
+| Skill                               | OpenClaw 插件提供给 Agent 的能力单元（`miloco-*` 前缀）                                                                                                                      |
+| STATIC / DYNAMIC 规则               | 静态规则直接执行设备动作；动态规则通过插件回调让 Agent 决策                                                                                                                  |
+| task / task_record                  | 任务是持久意图主体（生命周期 + 挂载规则 / 定时 / 记录）；任务记录是其行为统计载体（做了多少 / 多久 / 几次），定义见 [任务管理](03-features/task-management.md)               |
+| kind（progress / duration / event） | 任务记录的三种统计形态：进度型（目标累积）/ 时长型（计时累积）/ 事件型（次数留痕）                                                                                           |
+| rollover                            | 周期型任务记录跨周期时归档旧成绩、开新一期的自动滚动机制                                                                                                                     |
+| 有价值事件（meaningful_events）     | 规则命中 / 语音指令 / 建议三类事件的持久化沉淀，附视频片段，供 Agent 与用户回溯                                                                                              |
+| 反馈打包（feedback pack）           | 用户指认某事件感知有误时，把该事件的 omni 复现数据（omni_trace + 原始 clip + 元数据）脱敏后打成本地 tar.gz，供坏例回收，定义见 [事件反馈打包](03-features/event-feedback.md) |
