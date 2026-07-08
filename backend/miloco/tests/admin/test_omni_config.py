@@ -22,7 +22,7 @@ from miloco.perception.engine.omni.probe import probe_omni as _real_probe_omni
 def _default_probe_success(monkeypatch):
     """默认让 preflight 通过——绝大多数用例关心 config CRUD,不关心 probe 结果。
     需要测 preflight 失败或 test_connection 具体错误码的用例请加 real_probe fixture
-    还原 admin.router._probe_omni 到真实实现。"""
+    还原 admin.router._probe.probe_omni 到真实实现。"""
 
     async def _ok(*a, **k):
         return {
@@ -33,7 +33,7 @@ def _default_probe_success(monkeypatch):
             "message": "连接正常",
         }
 
-    monkeypatch.setattr("miloco.admin.router._probe_omni", _ok)
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _ok)
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +52,7 @@ def _reset_omni_circuit_breaker():
 def real_probe(monkeypatch):
     """还原 preflight 的 probe mock,让 test_test_connection_* 真走 probe.py 逻辑
     (用底层 httpx patch 替代)。用模块 import 时抓的原始引用。"""
-    monkeypatch.setattr("miloco.admin.router._probe_omni", _real_probe_omni)
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _real_probe_omni)
 
 
 @pytest.fixture

@@ -25,15 +25,7 @@ from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
-from miloco.perception.engine.omni.probe import (
-    fetch_models as _fetch_models,
-)
-from miloco.perception.engine.omni.probe import (
-    probe_omni as _probe_omni,
-)
-from miloco.perception.engine.omni.probe import (
-    probe_reachable as _probe_reachable,
-)
+from miloco.perception.engine.omni import probe as _probe
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
 
@@ -578,7 +570,7 @@ async def put_omni_config(
             raise HTTPException(
                 status_code=400, detail={"code": "no_key", "message": "未配置 API Key"}
             )
-        result = await _probe_omni(model, base_url, key)
+        result = await _probe.probe_omni(model, base_url, key)
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result)
     if target:
@@ -609,7 +601,7 @@ async def activate_omni_config(
                     status_code=400,
                     detail={"code": "no_key", "message": "未配置 API Key"},
                 )
-            result = await _probe_omni(p.model, p.base_url, p.api_key)
+            result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
             update_shared_config(
@@ -721,7 +713,7 @@ async def test_omni_config(
             message="ok",
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
-    result = await _probe_omni(model, base_url, api_key)
+    result = await _probe.probe_omni(model, base_url, api_key)
     return NormalResponse(code=0, message="ok", data=result)
 
 
@@ -744,7 +736,7 @@ async def list_omni_models(
     api_key = _key_by_label((body.label or "").strip(), body.api_key)
     if not api_key:
         # URL 本身错优先于「缺 key」暴露:无 key 时先探可达性,连不上→报 URL 错;能连上才报缺 key。
-        reach = await _probe_reachable(base_url)
+        reach = await _probe.probe_reachable(base_url)
         if reach is not None:
             return NormalResponse(
                 code=0,
@@ -767,7 +759,7 @@ async def list_omni_models(
             },
         )
     return NormalResponse(
-        code=0, message="ok", data=await _fetch_models(base_url, api_key)
+        code=0, message="ok", data=await _probe.fetch_models(base_url, api_key)
     )
 
 
@@ -810,7 +802,7 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
         )
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
-    result = await _probe_omni(omni.model, omni.base_url, omni.api_key)
+    result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
     if result.get("ok"):
         await cb.record_probe_result(True, None)
         if prev_state == CircuitState.OPEN_CONFIG:

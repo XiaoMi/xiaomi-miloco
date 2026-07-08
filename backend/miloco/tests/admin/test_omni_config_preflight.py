@@ -68,7 +68,7 @@ def mock_probe(monkeypatch):
     async def _fn(*a, **k):
         return state["result"]
 
-    monkeypatch.setattr("miloco.admin.router._probe_omni", _fn)
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _fn)
 
     class _H:
         def set(self, r):
