@@ -99,9 +99,12 @@ async def _run_omni_probe() -> None:
         await cb.mark_half_open()
         omni = get_settings().model.omni
         if not omni.api_key:
+            # 用 no_key 而非 bad_key:语义"未配置"与"key 存在但无效"不同,前端两者
+            # 各自有 i18n 条目;router.retry_omni_probe 无 key 分支也用 no_key,
+            # 两端保持一致。
             await cb.record_probe_result(
                 False,
-                ClassifiedError("bad_key", "未配置 API Key", ErrorCategory.CONFIG),
+                ClassifiedError("no_key", "未配置 API Key", ErrorCategory.CONFIG),
             )
             return
         result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
@@ -116,7 +119,12 @@ async def _run_omni_probe() -> None:
         )
         await cb.record_probe_result(
             False,
-            ClassifiedError(code, result.get("message", ""), cat),
+            ClassifiedError(
+                code,
+                result.get("message", ""),
+                cat,
+                result.get("retry_after_seconds"),
+            ),
         )
     except Exception as e:  # noqa: BLE001
         logger.error("[omni] tick 自动探测异常 | %s", e, exc_info=True)

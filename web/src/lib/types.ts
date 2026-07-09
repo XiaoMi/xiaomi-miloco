@@ -300,7 +300,7 @@ export interface OmniHealth {
     | null
     | "unreachable" | "timeout" | "http_error" | "rate_limited"
     | "bad_key" | "not_found" | "rejected_authed" | "bad_response"
-    | "no_key";
+    | "no_key" | "cancelled";
   /** 本地化文案。 */
   message: string;
   /** 当前非 ok 状态起始时间;ok 时为 0。 */
@@ -318,6 +318,10 @@ export interface OmniHealth {
   last_probe_result: "ok" | "fail" | null;
   /** 「立即重试」按钮的本地冷却时长(秒),与后端 retry 端点冷却期同源。 */
   retry_cooldown_sec: number;
+  /** 距离下次可以真发 retry probe 的剩余秒数(monotonic 差算,不受时钟偏差影响)。
+   *  按钮置灰用这个而不是本地 Date.now() 锚点,避免前端锚点早于后端 last_probe_at
+   *  记录点导致「按钮可点但后端仍在冷却期」的静默拒。 */
+  retry_available_in_seconds: number | null;
 }
 
 /** active 字段扩展:附带熔断器的 health snapshot。 */

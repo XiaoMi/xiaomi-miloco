@@ -176,6 +176,28 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
             "latency_ms": latency_ms,
             "message": "已连接，但拒绝了模型请求（模型名可能错误）",
         }
+    if r.status_code == 429:
+        # 429 不加分支时会掉到 http_error 兜底,后果:上层用 http_error 走 _default cap
+        # (600s)而非 rate_limited cap(60s),且丢 Retry-After header → backoff 无法尊重
+        # server 明示的等待时长,可能过快复触发限流或过慢恢复。
+        retry_after: float | None = None
+        rah = r.headers.get("Retry-After")
+        if rah:
+            try:
+                retry_after = float(rah)
+            except ValueError:
+                # HTTP-date 格式不解析,靠默认 backoff 兜底
+                retry_after = None
+        payload: dict[str, Any] = {
+            "ok": False,
+            "code": "rate_limited",
+            "status": 429,
+            "latency_ms": latency_ms,
+            "message": "被 provider 限流",
+        }
+        if retry_after is not None:
+            payload["retry_after_seconds"] = retry_after
+        return payload
     return {
         "ok": False,
         "code": "http_error",

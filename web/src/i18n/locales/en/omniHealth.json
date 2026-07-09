@@ -15,9 +15,11 @@
       "http_error": "Omni service returned an error",
       "rate_limited": "Rate-limited by the provider",
       "bad_key": "Invalid API key or insufficient permission",
+      "no_key": "API key not configured",
       "not_found": "Model or URL not found",
       "rejected_authed": "Connected, but the model request was rejected (model name may be wrong)",
-      "bad_response": "Malformed response from Omni"
+      "bad_response": "Malformed response from Omni",
+      "cancelled": "Retry was interrupted"
     }
   }
 }

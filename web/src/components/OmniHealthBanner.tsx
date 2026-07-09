@@ -33,7 +33,14 @@ function useCountdownSeconds(initial_seconds: number | null): number | null {
     setRemaining(initial_seconds);
     if (initial_seconds == null || initial_seconds <= 0) return;
     const id = setInterval(() => {
-      setRemaining((prev) => (prev == null ? null : Math.max(0, prev - 1)));
+      setRemaining((prev) => {
+        if (prev == null) return null;
+        const next = Math.max(0, prev - 1);
+        // 归零后自清:setState(0) 每秒仍触发 setInterval callback → banner 空转
+        // 重渲染。与 useCountdownToDeadline 的 CB-N6 对齐。
+        if (next === 0) clearInterval(id);
+        return next;
+      });
     }, 1000);
     return () => clearInterval(id);
   }, [initial_seconds]);
@@ -85,6 +92,15 @@ export function OmniHealthBanner({
   }, []);
 
   const nextSec = useCountdownSeconds(health?.next_probe_in_seconds ?? null);
+  // 后端每次 record_probe_result 后 snapshot 里带 retry_available_in_seconds
+  // (monotonic 差算),用它同步本地 deadline 到后端节奏——只用 Date.now() 锚会早于
+  // 后端 last_probe_at 记录点,冷却结束后按钮可点、后端仍拒。
+  useEffect(() => {
+    const s = health?.retry_available_in_seconds;
+    if (s != null && s > 0) {
+      setCooldownDeadline(Date.now() + s * 1000);
+    }
+  }, [health?.retry_available_in_seconds]);
   const cooldownRemaining = useCountdownToDeadline(cooldownDeadline);
   const inCooldown = cooldownRemaining != null && cooldownRemaining > 0;
 
@@ -113,11 +129,14 @@ export function OmniHealthBanner({
   }
 
   // 优先用 code 查本地化文案(backend message 是硬编码中文,直接注入会污染英文界面);
-  // code 为空或未在 omniHealth.codes 里定义时回退到 backend message,保留 http_error
-  // 附带的 HTTP 状态码等动态细节。
-  const localizedMsg = health.code
-    ? t(`omniHealth.codes.${health.code}`, { defaultValue: health.message })
-    : health.message;
+  // code 为空或未在 omniHealth.codes 里定义时回退到 backend message。
+  // http_error 特例:backend message 带动态 HTTP 状态码(HTTP 502/503 等),i18n
+  // codes.http_error 是静态"omni 服务返回异常",查表会吞掉状态码信息,故直接用
+  // backend message。
+  const localizedMsg =
+    health.code && health.code !== "http_error"
+      ? t(`omniHealth.codes.${health.code}`, { defaultValue: health.message })
+      : health.message;
   const message = isConfig
     ? t("omniHealth.configInvalid", { message: localizedMsg })
     : nextSec != null

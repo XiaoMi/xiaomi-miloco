@@ -565,7 +565,13 @@ export function UsageOmniConfig() {
                                 onMouseLeave={hideTip}
                               >
                                 {SEV_GLYPH[state.active.health.state === "error" ? "error" : "warn"]}{" "}
-                                {state.active.health.message}
+                                {/* backend message 硬编码中文,英文界面走 codes i18n;
+                                    http_error 带动态状态码不走 codes,直接显 message。 */}
+                                {state.active.health.code && state.active.health.code !== "http_error"
+                                  ? t(`omniHealth.codes.${state.active.health.code}`, {
+                                      defaultValue: state.active.health.message,
+                                    })
+                                  : state.active.health.message}
                                 {state.active.health.consecutive_failures > 0 && (
                                   <> · {t("omniHealth.failuresCount", { n: state.active.health.consecutive_failures })}</>
                                 )}

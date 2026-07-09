@@ -787,7 +787,10 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     # 兜的是 `last_probe_at` 时间差,拦不住「探测中」——tick arm 后 state=HALF_OPEN
     # 且 last_probe_at 仍是上一次完成时刻,冷却已过,retry_now 对 HALF_OPEN 又是 no-op,
     # 会绕过所有拦截并发第二次 probe,两次 record_probe_result 相互覆盖导致横条闪跳。
-    if cb.state_for_test() == CircuitState.HALF_OPEN:
+    #
+    # probe_in_flight 补 tick 已 arm 但尚未 mark_half_open 的窗口:此时 state 仍是
+    # OPEN_RECOVERABLE 但 _probe_in_flight 已 True,只判 state 会漏。
+    if cb.state_for_test() == CircuitState.HALF_OPEN or cb.probe_in_flight():
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
     # 冷却期内(距上次 probe 完成不足 RETRY_COOLDOWN_SEC)不发新 probe,防 UI
@@ -847,6 +850,9 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
                 code,
                 result.get("message", ""),
                 cat,
+                # rate_limited 时 probe_chat 会在 result 里回带 retry_after_seconds,
+                # 传给 _grow_backoff_locked 让 backoff 尊重 server Retry-After。
+                result.get("retry_after_seconds"),
             ),
         )
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())

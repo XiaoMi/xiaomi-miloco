@@ -33,9 +33,11 @@ CODES: set[str] = {
     "http_error",
     "rate_limited",
     "bad_key",
+    "no_key",
     "not_found",
     "rejected_authed",
     "bad_response",
+    "cancelled",
 }
 
 
@@ -45,9 +47,11 @@ _MESSAGES: dict[str, str] = {
     "http_error": "omni 服务返回异常",
     "rate_limited": "被 provider 限流",
     "bad_key": "API Key 无效或无权限",
+    "no_key": "未配置 API Key",
     "not_found": "模型或地址不存在",
     "rejected_authed": "已连接，但拒绝了模型请求（模型名可能错误）",
     "bad_response": "omni 响应格式异常",
+    "cancelled": "重试被中断",
 }
 
 

@@ -71,6 +71,11 @@ class HealthSnapshot:
     # 前端「立即重试」按钮的本地冷却时长(秒),与后端 retry 端点冷却期同源,前端读此值
     # 不再自己 hardcode,避免两处手动同步。
     retry_cooldown_sec: float
+    # 距离下次可以真发 retry probe 的剩余秒数(monotonic 差算,不依赖两端时钟)。
+    # 前端点重试后拿这个刷新本地按钮冷却截止点——之前前端只用 Date.now() 锚,可能
+    # 早于后端 last_probe_at 记录点,导致本地冷却结束后按钮可点、后端仍在冷却期
+    # 静默拒。>0 时前端置灰,==0 或 None 时可点。
+    retry_available_in_seconds: float | None
 
 
 class OmniCircuitBreaker:
@@ -235,6 +240,16 @@ class OmniCircuitBreaker:
         不改状态,只清位。"""
         self._probe_in_flight = False
 
+    def probe_in_flight(self) -> bool:
+        """只读:是否有 probe 正在执行(tick 已 arm 但 record_probe_result 未回)。
+
+        用于 router.retry_omni_probe:tick.try_arm_probe 已置 _probe_in_flight=True
+        但尚未 mark_half_open 的短暂窗口里,state 仍是 OPEN_RECOVERABLE,只判 state
+        的短路会漏掉这段,导致 retry 与 tick 双 probe 并发、record_probe_result 互相
+        覆盖引起横条闪跳。
+        """
+        return self._probe_in_flight
+
     async def mark_half_open(self) -> None:
         """外部驱动:进入 HALF_OPEN(发起 probe 前调)。"""
         async with self._lock:
@@ -268,8 +283,11 @@ class OmniCircuitBreaker:
             next_ms = now_ms + int(delta_s * 1000)
             next_in_s = round(delta_s, 1)
         last_ms = None
+        retry_avail_s: float | None = None
         if self._last_probe_at is not None:
             last_ms = now_ms - int((mono_now - self._last_probe_at) * 1000)
+            remaining = RETRY_COOLDOWN_SEC - (mono_now - self._last_probe_at)
+            retry_avail_s = round(max(0.0, remaining), 2)
         since_ms = 0
         if self._state != CircuitState.CLOSED:
             since_ms = now_ms - int((mono_now - self._state_since) * 1000)
@@ -284,6 +302,7 @@ class OmniCircuitBreaker:
             last_probe_at_ms=last_ms,
             last_probe_result=self._last_probe_result,
             retry_cooldown_sec=RETRY_COOLDOWN_SEC,
+            retry_available_in_seconds=retry_avail_s,
         )
 
     def state_for_test(self) -> CircuitState:
@@ -318,13 +337,12 @@ class OmniCircuitBreaker:
             base = min(self._current_backoff * self._backoff_multiplier, cap)
         if err.retry_after_seconds is not None:
             base = max(base, min(err.retry_after_seconds, cap))
-        jitter = (
-            1 + random.uniform(-self._jitter_ratio, self._jitter_ratio)
-            if self._jitter_ratio
-            else 1.0
-        )
+        # jitter 只加不减:原来 [-ratio, +ratio] 双向抖动会把 next_probe 拉到 base*0.8,
+        # server 明示 Retry-After: 45 时可能被抖成 36s,违反 server 意图触发再次限流。
+        # 改成 [0, +ratio] 单向,底线固定为 base(不小于 Retry-After),仅在其上打散并发。
+        jitter_add = random.uniform(0.0, self._jitter_ratio) if self._jitter_ratio else 0.0
         self._current_backoff = base
-        self._next_probe_at_monotonic = time.monotonic() + base * jitter
+        self._next_probe_at_monotonic = time.monotonic() + base * (1.0 + jitter_add)
 
     def _transition_to_open_recoverable_locked(self, err: ClassifiedError) -> None:
         self._state = CircuitState.OPEN_RECOVERABLE

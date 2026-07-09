@@ -203,7 +203,35 @@ async def test_retry_after_header_bumps_backoff(cb):
         await cb.record_failure(_rec("rate_limited", retry_after=45.0))
     snap = cb.snapshot()
     delta_ms = snap.next_probe_at_ms - int(time.time() * 1000)
-    assert 40_000 < delta_ms < 50_000
+    # jitter 只加不减(review Finding 6):下限约等于 45_000ms,不可显著低于 Retry-After
+    # (允许 int(delta_s*1000) 与 time.time() 的 1-2ms rounding 抖动)
+    assert delta_ms >= 44_990
+    # jitter 上限 +20%: 45 * 1.2 = 54_000
+    assert delta_ms < 55_000
+
+
+async def test_jitter_never_shorter_than_base(monkeypatch):
+    """review Finding 6 回归:jitter 双向抖动会把 next_probe 拉到 base*0.8,
+    server 明示 Retry-After: 45s 时可能被抖成 36s,违反 server 意图。
+    改成 [0, +ratio] 单向后,即使 random 返回 0 也保证 >= base。"""
+    import random as _random
+
+    from miloco.perception.engine.omni.circuit_breaker import OmniCircuitBreaker
+
+    # random.uniform 恒返 0 (最容易触发早于 base 的边界)
+    monkeypatch.setattr(_random, "uniform", lambda a, b: 0.0)
+    cb = OmniCircuitBreaker(
+        consecutive_threshold=1,
+        backoff_start=10.0,
+        backoff_multiplier=2.0,
+        jitter_ratio=0.5,
+    )
+    await cb.record_failure(_rec("rate_limited", retry_after=45.0))
+    snap = cb.snapshot()
+    delta_ms = snap.next_probe_at_ms - int(time.time() * 1000)
+    # random 恒 0 时 next = base * 1.0 = 45s,不再是 base*0.5=22.5s
+    # (允许 1-2ms rounding)
+    assert delta_ms >= 44_990
 
 
 # ─── HALF_OPEN 恢复 ─────────────────────────────────────────────────────────
@@ -458,6 +486,39 @@ async def test_record_success_from_half_open_closes(cb, frozen_time):
 
 
 # ─── 多相机 gather 并发场景(review Finding 1 回归防护) ─────────────────────
+
+
+async def test_probe_in_flight_reflects_arm_state(cb, frozen_time):
+    """review Finding 2 回归:tick.try_arm_probe 后 probe_in_flight() 返 True,
+    router.retry_omni_probe 靠这个短路,防 tick arm 与用户 retry 撞车双 probe。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    assert cb.probe_in_flight() is False
+    frozen_time.tick(1.5)
+    assert cb.try_arm_probe() is True
+    # arm 之后 mark_half_open 之前的窗口,state 仍是 OPEN_RECOVERABLE 但 in_flight 已 True
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    assert cb.probe_in_flight() is True
+
+
+async def test_snapshot_retry_available_in_seconds(cb, frozen_time):
+    """review Finding 7d 回归:snapshot 携带 retry_available_in_seconds (monotonic
+    差算),前端用它同步本地按钮冷却截止点,避免锚早于后端 last_probe_at 记录点。"""
+    from miloco.perception.engine.omni.circuit_breaker import RETRY_COOLDOWN_SEC
+
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    # 触发一次 probe 完成后 last_probe_at 落点
+    await cb.record_probe_result(False, _rec())
+    snap = cb.snapshot()
+    # 刚 record 完,retry_available ≈ COOLDOWN
+    assert snap.retry_available_in_seconds is not None
+    assert snap.retry_available_in_seconds > RETRY_COOLDOWN_SEC - 0.5
+    # 过冷却期后归零
+    frozen_time.tick(RETRY_COOLDOWN_SEC + 1)
+    snap2 = cb.snapshot()
+    assert snap2.retry_available_in_seconds == 0.0
 
 
 async def test_multi_camera_concurrent_success_after_open(cb):
