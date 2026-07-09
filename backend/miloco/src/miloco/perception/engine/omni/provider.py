@@ -99,7 +99,7 @@ class QwenOmniAdapter(OmniProviderAdapter):
     仅支持 Qwen3.5-Omni 系列——fused 模式需要视频+图片+文本组合输入，
     旧版 qwen3-omni-flash 只支持文本+单一模态，无法满足。
 
-    - video block: ``video_url``（无 fps / media_resolution，API 端固定 2fps 自行抽帧）
+    - video block: ``video_url``（不传 fps / media_resolution 字段，Qwen 从 mp4 本身读帧率）
     - audio block: ``input_audio`` + ``format``
     - request body: 强制 ``stream: true``（Qwen-Omni 非流式会报错）、``modalities: ["text"]``
     """
