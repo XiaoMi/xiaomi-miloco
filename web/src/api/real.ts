@@ -24,6 +24,7 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
+  TaskFullView,
   TokenBreakdown,
   UsageCallType,
   UsageGroup,
@@ -1522,6 +1523,7 @@ interface BackendTaskSummary {
     kind: "progress" | "duration" | "event";
     completed: boolean;
     active_session: { started_at: string; elapsed_minutes: number } | null;
+    window_remaining: { seconds: number; display: string } | null;
     derived: Record<string, unknown>;
   } | null;
 }
@@ -1545,6 +1547,12 @@ export async function realListTasks(): Promise<Task[]> {
                 elapsedMinutes: t.record.active_session.elapsed_minutes,
               }
             : null,
+          windowRemaining: t.record.window_remaining
+            ? {
+                seconds: t.record.window_remaining.seconds,
+                display: t.record.window_remaining.display,
+              }
+            : null,
           derived: t.record.derived ?? {},
         }
       : null,
@@ -1566,5 +1574,55 @@ export async function realDeleteTask(taskId: string): Promise<void> {
   await apiFetch<Normal<unknown>>(
     `/api/tasks/${encodeURIComponent(taskId)}?reason=abandoned`,
     { method: "DELETE" },
+  );
+}
+
+// 任务全量视图：详情抽屉用，补 summary 没有的驱动规则 / 关联。
+interface BackendTaskFullView {
+  task_id: string;
+  description: string;
+  status: "active" | "paused";
+  paused_at?: string | null;
+  created_at: string;
+  rule_briefs?: {
+    rule_id: string;
+    query: string;
+    actions_desc?: string[];
+  }[];
+  links?: { kind: "rule" | "cron"; ref: string }[];
+}
+
+export async function realGetTask(taskId: string): Promise<TaskFullView> {
+  const r = await apiFetch<Normal<BackendTaskFullView>>(
+    `/api/tasks/${encodeURIComponent(taskId)}`,
+  );
+  const d = r.data;
+  return {
+    taskId: d.task_id,
+    description: d.description,
+    status: d.status,
+    pausedAt: d.paused_at ?? null,
+    createdAt: d.created_at,
+    ruleBriefs: (d.rule_briefs ?? []).map((b) => ({
+      ruleId: b.rule_id,
+      query: b.query,
+      actionsDesc: b.actions_desc ?? [],
+    })),
+    links: (d.links ?? []).map((l) => ({ kind: l.kind, ref: l.ref })),
+  };
+}
+
+// 改任务描述（PATCH /api/tasks/{id}）。
+export async function realUpdateTaskDescription(
+  taskId: string,
+  description: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description }),
+    },
   );
 }

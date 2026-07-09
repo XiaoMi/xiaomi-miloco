@@ -578,6 +578,8 @@ export interface TaskRecordSummary {
   completed: boolean;
   // duration 当前计时段（非 duration 恒 null）
   activeSession: { startedAt: string; elapsedMinutes: number } | null;
+  // 距当前 window（当日 24:00 上海时区）边界的剩余时间；window=all 或后端未返时为 null。
+  windowRemaining: { seconds: number; display: string } | null;
   // 按 kind 形态不同的派生量，原样透传 backend snake_case：
   //   progress: target / current / unit / remaining / progress_pct
   //   duration: target_minutes / accumulated_minutes_today / remaining_minutes
@@ -591,4 +593,31 @@ export interface Task {
   status: TaskStatus;
   createdAt: string;
   record: TaskRecordSummary | null;
+}
+
+// ── 任务全量视图（GET /api/tasks/{task_id}）─────────────────────
+// summary 视图不含驱动规则/关联；详情抽屉额外拉这个补齐「有价值的详情」。
+// 注意：full view **不含** record（record 只在 summary 接口返回），详情卡的进度
+// 直接复用列表已加载的 Task.record，full view 只补 ruleBriefs / links。
+export interface TaskRuleBrief {
+  ruleId: string;
+  // 规则的自然语言条件（"孩子在书桌前学习" 之类）
+  query: string;
+  // 命中后执行的动作人话摘要
+  actionsDesc: string[];
+}
+
+export interface TaskLinkEntry {
+  kind: "rule" | "cron";
+  ref: string;
+}
+
+export interface TaskFullView {
+  taskId: string;
+  description: string;
+  status: TaskStatus;
+  pausedAt?: string | null;
+  createdAt: string;
+  ruleBriefs: TaskRuleBrief[];
+  links: TaskLinkEntry[];
 }

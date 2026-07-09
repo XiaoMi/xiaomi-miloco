@@ -36,6 +36,7 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
+  TaskFullView,
   UsagePeriod,
   UsageStats,
   OmniConfigState,
@@ -210,6 +211,19 @@ export async function setTaskEnabled(
 
 export async function deleteTask(taskId: string): Promise<void> {
   return impl.realDeleteTask(taskId);
+}
+
+// 任务全量视图（详情抽屉：驱动规则 / 关联）。
+export async function getTask(taskId: string): Promise<TaskFullView> {
+  return impl.realGetTask(taskId);
+}
+
+// 改任务描述。
+export async function updateTaskDescription(
+  taskId: string,
+  description: string,
+): Promise<void> {
+  return impl.realUpdateTaskDescription(taskId, description);
 }
 
 // ── 设备 ──────────────────────────────────────────────────
