@@ -16,6 +16,12 @@ import type { OmniHealth } from "@/lib/types";
 import { toast } from "./Toast";
 
 
+// 立即重试冷却期:点击后本地 disabled 这么久,后端 /omni-config/retry 端点也有
+// 同款冷却拦截(admin/router.py::_OMNI_RETRY_COOLDOWN_SEC),双层保护——前端防止
+// 误触,后端防止绕过 UI 的脚本狂调。两端值需保持一致。
+const RETRY_COOLDOWN_SEC = 5;
+
+
 function useCountdownSeconds(target_ms: number | null): number | null {
   // 不缓存 now：如果缓存挂载时的 Date.now(),target_ms 稍后才从 SSE 到达时,首次 render
   // 会用挂载时刻的老 now 与将来的 target 作差,显示"等待时长"而非"到期剩余秒数"。
@@ -40,6 +46,7 @@ export function OmniHealthBanner({
   const { t } = useTranslation();
   const [health, setHealth] = useState<OmniHealth | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [cooldownUntil, setCooldownUntil] = useState<number>(0);
 
   useEffect(() => {
     return subscribeOmniHealth(setHealth, () => {
@@ -49,6 +56,10 @@ export function OmniHealthBanner({
   }, []);
 
   const nextSec = useCountdownSeconds(health?.next_probe_at_ms ?? null);
+  const cooldownRemaining = useCountdownSeconds(
+    cooldownUntil > 0 ? cooldownUntil : null,
+  );
+  const inCooldown = cooldownRemaining != null && cooldownRemaining > 0;
 
   if (!health || health.state === "ok") return null;
 
@@ -59,6 +70,9 @@ export function OmniHealthBanner({
 
   async function onRetry() {
     setRetrying(true);
+    // 无论成功/失败都进入本地冷却:成功时后端已发 probe 不该立刻再触发;失败时
+    // (含后端返 code=1 冷却拦截)也要阻止用户狂点。用户看到按钮变倒计时即知冷却中。
+    setCooldownUntil(Date.now() + RETRY_COOLDOWN_SEC * 1000);
     try {
       await retryOmniProbe();
       // SSE 会推新 health,不需要手动 setHealth
@@ -95,10 +109,14 @@ export function OmniHealthBanner({
         <button
           type="button"
           onClick={onRetry}
-          disabled={retrying}
+          disabled={retrying || inCooldown}
           className="text-caption px-3 py-1 rounded border border-current hover:opacity-80 disabled:opacity-60"
         >
-          {retrying ? t("omniHealth.retryingBtn") : t("omniHealth.retryNow")}
+          {retrying
+            ? t("omniHealth.retryingBtn")
+            : inCooldown
+              ? t("omniHealth.cooldownBtn", { seconds: cooldownRemaining })
+              : t("omniHealth.retryNow")}
         </button>
         {isConfig && onGoToConfig && (
           <button

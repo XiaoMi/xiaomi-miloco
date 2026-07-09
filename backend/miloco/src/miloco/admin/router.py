@@ -786,15 +786,21 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     if cb.state_for_test() == CircuitState.CLOSED:
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
-    # 冷却期内(距上次 probe 完成不足 _OMNI_RETRY_COOLDOWN_SEC)直接返当前 snapshot,
-    # 不发新 probe。防 UI 反复点 / 脚本反复 curl 打爆 provider。
+    # 冷却期内(距上次 probe 完成不足 _OMNI_RETRY_COOLDOWN_SEC)不发新 probe,防 UI
+    # 反复点 / 脚本 curl 打爆 provider。返 code=1 让前端 apiFetch 抛 ApiError,
+    # 用户能通过 toast 直接看到"冷却中"反馈,而不是静默返当前 snapshot 让用户误以为
+    # 探测已完成。
     snap = cb.snapshot()
     if snap.last_probe_at_ms is not None:
         import time as _time
 
         elapsed_ms = int(_time.time() * 1000) - snap.last_probe_at_ms
         if elapsed_ms < int(_OMNI_RETRY_COOLDOWN_SEC * 1000):
-            return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+            return NormalResponse(
+                code=1,
+                message="omni 探测冷却中,请稍后再试",
+                data=_full_omni_payload(),
+            )
 
     await cb.retry_now()
     omni = get_settings().model.omni

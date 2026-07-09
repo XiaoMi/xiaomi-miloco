@@ -5,6 +5,7 @@
     "retryingNoTime": "Omni service is unavailable ({{message}}). Retrying…",
     "retryNow": "Retry now",
     "retryingBtn": "Retrying…",
+    "cooldownBtn": "Cool down {{seconds}}s",
     "goToConfig": "Fix in Model tab",
     "retryFailed": "Retry failed",
     "failuresCount": "{{n}} failures",
