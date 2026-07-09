@@ -158,6 +158,23 @@ def test_post_cron_missing_expr_rejected(client):
     assert r.status_code == 422
 
 
+def test_post_kind_at_rejects_past_at_ms(client):
+    import time
+
+    at_ms = int(time.time() * 1000) - 600_000
+    r = client.post(
+        "/api/crons",
+        json={
+            "name": "过去",
+            "kind": "at",
+            "task_id": "t1",
+            "at_ms": at_ms,
+            "message": "已过期",
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
 def test_post_at_missing_at_ms_rejected(client):
     r = client.post(
         "/api/crons",

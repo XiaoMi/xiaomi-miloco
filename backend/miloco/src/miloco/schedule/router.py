@@ -87,15 +87,12 @@ def _validate_cron_expr(expr: str, tz: str | None) -> None:
 def _validate_at_ms(at_ms: int) -> None:
     current = now_ms()
     ten_years_ms = 10 * 365 * 86400 * 1000
-    thirty_days_ms = 30 * 86400 * 1000
     if at_ms > current + ten_years_ms:
         raise ValidationException(
             "at_ms out of reasonable range (>10y in future)"
         )
-    if at_ms < current - thirty_days_ms:
-        raise ValidationException(
-            "at_ms out of reasonable range (>30d in past)"
-        )
+    if at_ms <= current:
+        raise ValidationException("at_ms must be in the future")
 
 
 # ── POST /crons ─────────────────────────────────────────────────────────────

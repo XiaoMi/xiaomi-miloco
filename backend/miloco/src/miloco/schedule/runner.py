@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -423,8 +422,3 @@ def reset_runner_for_tests() -> None:
     if _runner is not None and _runner.running:
         _runner.shutdown()
     _runner = None
-
-
-async def _noop_ensure_event_loop() -> None:
-    """占位: 保证异步事件循环存在 (AsyncIOScheduler 需要)."""
-    await asyncio.sleep(0)
