@@ -810,12 +810,10 @@ class MiotService:
         spec = await self._miot_proxy._fetch_device_spec(
             urn=urn,
             sub_device_names=build_sub_device_names(dev),
-        )
-        if not spec:
-            return None
+)
         names: dict[str, str] = {}
         values: dict[str, dict[str, str]] = {}
-        for iid, item in spec.items():
+        for iid, item in (spec or {}).items():
             if not iid.startswith("prop."):
                 continue
             names[iid] = item.get("description") or item.get("prop_description") or iid
