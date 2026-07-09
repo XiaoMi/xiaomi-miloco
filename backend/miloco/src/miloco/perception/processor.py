@@ -49,6 +49,14 @@ def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
+def _safe_put_nowait(q: asyncio.Queue, event_type: str, data: dict) -> None:
+    """跨 loop marshal 用的 call_soon_threadsafe 回调,QueueFull 走 drop + log。"""
+    try:
+        q.put_nowait((event_type, data))
+    except asyncio.QueueFull:
+        logger.warning("SSE subscriber queue full, dropping %s", event_type)
+
+
 # gate 阶段 pipeline 一个 device 写 5 个 key:gate_{did}_ms(总) +
 # gate_video/audio_{did}_ms(子模态拆分) + gate_video/audio_{did}_pass(0/1 标志)。
 # 直接用 startswith("gate_") 会把 5 个全加进 gate_ms,造成 ~2-3 倍虚高。
@@ -167,8 +175,13 @@ class PipelineProcessor:
         self._log_repo = log_repo
         self._last_latency: PerceptionLatency | None = None
         self._last_batch: PerceptionBatch | None = None
-        # SSE 订阅者队列;由 events_router / metric stream 等通过 subscribe_sse() 注册
-        self._sse_subscribers: list[asyncio.Queue] = []
+        # SSE 订阅者队列 + 队列归属的 loop;由 events_router / metric stream 等通过
+        # subscribe_sse() 注册。存 loop 是因为 omni 熔断器 record_failure / _emit 可能
+        # 在 inference worker 线程的临时 loop 里跑(client._realtime_perceive 用
+        # run_in_executor(asyncio.run(...))),而 asyncio.Queue.put_nowait 非线程安全,
+        # 跨 loop 调用会踩 Queue 内部状态、丢事件或抛 RuntimeError。_publish 里对
+        # 跨 loop 调用统一走 call_soon_threadsafe marshal 回归属 loop。
+        self._sse_subscribers: list[tuple[asyncio.Queue, asyncio.AbstractEventLoop]] = []
 
         # tier_c 闲时定期清:把 collector 的"按 did 取最近一帧"接到引擎(gate 关停时 live 检测取帧)。
         self._perception_engine_proxy.set_tierc_frame_provider(self._collector.peek_latest_frame)
@@ -324,11 +337,12 @@ class PipelineProcessor:
         _publish 会撞 QueueFull 走 drop + log,而非无界增长.
         """
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
-        self._sse_subscribers.append(q)
+        loop = asyncio.get_running_loop()
+        self._sse_subscribers.append((q, loop))
         return q
 
     def unsubscribe_sse(self, q: asyncio.Queue) -> None:
-        self._sse_subscribers = [s for s in self._sse_subscribers if s is not q]
+        self._sse_subscribers = [(sq, sl) for (sq, sl) in self._sse_subscribers if sq is not q]
 
     def _publish(self, event_type: str, data: dict) -> None:
         """非阻塞广播给所有 SSE 订阅者;队列满时跳过该订阅(B11 非阻塞约束).
@@ -336,12 +350,29 @@ class PipelineProcessor:
         与 _publish_trace / _publish_failed_trace 是两套不同的发布通道:
         - _publish_trace:写 observability traces SQLite
         - _publish:走 in-process asyncio.Queue 给 SSE 客户端
+
+        跨 loop 兜底:若当前 running loop 不是 Queue 归属 loop(omni 熔断器
+        record_failure/_emit 在 inference worker 临时 loop 触发的场景),
+        通过 loop.call_soon_threadsafe 把 put 委托回归属 loop——put_nowait
+        本身非线程安全,直接跨 loop 调会踩 Queue 状态。
         """
-        for q in self._sse_subscribers:
-            try:
-                q.put_nowait((event_type, data))
-            except asyncio.QueueFull:
-                logger.warning("SSE subscriber queue full, dropping %s", event_type)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        for q, loop in self._sse_subscribers:
+            if running is loop:
+                try:
+                    q.put_nowait((event_type, data))
+                except asyncio.QueueFull:
+                    logger.warning("SSE subscriber queue full, dropping %s", event_type)
+            else:
+                try:
+                    loop.call_soon_threadsafe(_safe_put_nowait, q, event_type, data)
+                except RuntimeError:
+                    # 归属 loop 已关(测试拆解 / 优雅退出中);跳过该订阅,后续
+                    # unsubscribe_sse 或 GC 清理即可。
+                    continue
 
     async def process_realtime(self) -> RealtimePerceptionResult | None | bool:
         """Realtime perception pipeline.

@@ -816,7 +816,22 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
         )
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
-    result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+    try:
+        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+    except asyncio.CancelledError:
+        # 客户端断开 HTTP(用户切页/关 tab/网络抖动)时 FastAPI 抛 CancelledError。
+        # 此前 retry_now() 已把 state 置 HALF_OPEN,若不复位则 before_call 永久短路、
+        # tick 只 arm OPEN_RECOVERABLE 也不会驱动新 probe,只能改配置或重启。
+        # 走 record_probe_result(fail, RECOVERABLE) 回落到 OPEN_RECOVERABLE 让 tick 接管。
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(
+                "cancelled",
+                "重试被中断",
+                ErrorCategory.RECOVERABLE,
+            ),
+        )
+        raise
     if result.get("ok"):
         await cb.record_probe_result(True, None)
     else:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import time
 from collections import deque
@@ -19,6 +20,8 @@ from miloco.perception.engine.omni.error_classifier import (
     ClassifiedError,
     ErrorCategory,
 )
+
+_emit_logger = logging.getLogger(__name__)
 
 
 class CircuitState(Enum):
@@ -127,28 +130,50 @@ class OmniCircuitBreaker:
                 raise CircuitOpenError(f"skipped:cooling:{code}", self._current_message)
 
     async def record_success(self) -> None:
-        """CLOSED → CLOSED 稳态不 emit,避免感知每 4s 一次的成功窗口全都广播 SSE。"""
+        """只允许 HALF_OPEN → CLOSED;OPEN_* 忽略,CLOSED 稳态不 emit。
+
+        多相机 gather 并发下(pipeline._run_device 每 device 一个 Task,run_omni_fused
+        并行),cam1 的 record_failure 已把断路打开,cam2 之前拿到 before_call 通过
+        的 in-flight 请求随后 200 回来 —— 若这里无差别转 CLOSED,cam1 打开的
+        OPEN_RECOVERABLE / OPEN_CONFIG 就被抹掉。改用 HALF_OPEN 门控:唯一让熔断
+        关闭的路径是 tick / retry 主动探测转 HALF_OPEN 后的 record_probe_result 或
+        本方法(此时新调用是刻意放的探测请求,200 视为真恢复)。运行时并发 200 保持
+        no-op,由 tick 的独立 probe 通道决定何时闭合。
+        """
         changed = False
         async with self._lock:
             self._append_sample(True)
             self._consecutive_failures = 0
-            if self._state != CircuitState.CLOSED:
+            if self._state == CircuitState.HALF_OPEN:
                 self._transition_to_closed_locked()
                 changed = True
         if changed:
             self._emit()
 
     async def record_failure(self, err: ClassifiedError) -> None:
+        """运行时错误上报(omni_client / omni fused 出口调)。CONFIG 不再一击进
+        OPEN_CONFIG —— 运行时 400 通常是 corrupted image/video 之类瞬时错(见
+        error_classifier 里的注释),一帧坏画面就永久停感知比 PR 前"log 后继续"倒退;
+        401/403/404 也可能是 provider 侧临时抖动。改成 CONFIG 也走 _should_open_locked
+        的连续/窗口阈值,真正稳定复现的配置问题一样会打开熔断,只是需要多几次证据。
+
+        探测语境(record_probe_result)保持"探到就信"—— 探测是主动、独占的一次调用,
+        探到 401 就是 key 错,没有必要再等窗口。
+        """
         emit = False
         async with self._lock:
             self._append_sample(False)
             self._consecutive_failures += 1
 
             if err.category == ErrorCategory.CONFIG:
-                if self._state != CircuitState.OPEN_CONFIG:
+                if (
+                    self._should_open_locked()
+                    and self._state != CircuitState.OPEN_CONFIG
+                ):
                     self._transition_to_open_config_locked(err)
                     emit = True
-                else:
+                elif self._state == CircuitState.OPEN_CONFIG:
+                    # 已在 OPEN_CONFIG,只刷最新错误码/文案让前端横条显示最新原因。
                     self._current_code, self._current_message = err.code, err.message
                     emit = True
             else:
@@ -330,7 +355,10 @@ class OmniCircuitBreaker:
             try:
                 cb(snap)
             except Exception:  # noqa: BLE001
-                pass
+                # 之前 pass 吞掉了所有异常 —— 包括跨 loop put_nowait 踩 Queue 状态
+                # 抛出的 RuntimeError,状态永远丢失。改成 warning + exc_info,监控/日志
+                # 能看到"招牌横条不弹"的根因,即使问题在下游 listener 里。
+                _emit_logger.warning("omni CB listener raised", exc_info=True)
 
 
 _INSTANCE: OmniCircuitBreaker | None = None

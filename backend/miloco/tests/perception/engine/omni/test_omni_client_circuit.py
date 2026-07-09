@@ -97,22 +97,36 @@ async def test_call_omni_success_records_success(monkeypatch):
     assert get_omni_circuit_breaker().snapshot().state == "ok"
 
 
-async def test_call_omni_401_opens_config_immediately(monkeypatch):
+async def test_call_omni_single_401_does_not_open(monkeypatch):
+    """瞬时 401 不该一击停感知——运行时 CONFIG 走窗口阈值(consecutive=3),
+    连续 3 次才开断路,单次视为噪声(provider 侧鉴权抖动 / 换 key 中转)。"""
     monkeypatch.setattr(
         omni_client.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(401))
     )
     with pytest.raises(omni_client.OmniError):
         await omni_client.call_omni(_payload(), _cfg())
+    assert get_omni_circuit_breaker().snapshot().state == "ok"
+
+
+async def test_call_omni_three_consecutive_401_open_config(monkeypatch):
+    """连续 3 次 401 稳定复现才 OPEN_CONFIG。"""
+    monkeypatch.setattr(
+        omni_client.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(401))
+    )
+    for _ in range(3):
+        with pytest.raises(omni_client.OmniError):
+            await omni_client.call_omni(_payload(), _cfg())
     snap = get_omni_circuit_breaker().snapshot()
     assert snap.state == "error" and snap.code == "bad_key"
 
 
-async def test_call_omni_404_opens_config(monkeypatch):
+async def test_call_omni_three_consecutive_404_open_config(monkeypatch):
     monkeypatch.setattr(
         omni_client.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(404))
     )
-    with pytest.raises(omni_client.OmniError):
-        await omni_client.call_omni(_payload(), _cfg())
+    for _ in range(3):
+        with pytest.raises(omni_client.OmniError):
+            await omni_client.call_omni(_payload(), _cfg())
     assert get_omni_circuit_breaker().snapshot().code == "not_found"
 
 
@@ -131,9 +145,10 @@ async def test_call_omni_three_connect_errors_open_recoverable(monkeypatch):
 
 async def test_call_omni_open_short_circuits_no_http(monkeypatch):
     """熔断 OPEN 时不再发 HTTP,直接抛。"""
-    # 先让熔断打开
+    # 先让熔断打开(CONFIG 走窗口阈值,连打 3 次 bad_key 才 OPEN_CONFIG)
     cb = get_omni_circuit_breaker()
-    await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
     assert cb.snapshot().state == "error"
 
     # 下一次 call 不应发 HTTP;用 exc 兜底如果被调到会抛这个可辨识 exception
@@ -182,7 +197,8 @@ async def test_resolve_live_config_no_change_keeps_state(monkeypatch):
 
     reset_settings()
     cb = get_omni_circuit_breaker()
-    await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
     assert cb.snapshot().state == "error"
 
     # 第一次调用建立 cache
@@ -207,7 +223,8 @@ async def test_resolve_live_config_change_resets_breaker(monkeypatch):
         "https://x/v1",
         "sk-OLD",
     )
-    await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
     assert cb.snapshot().state == "error"
 
     # settings 返回不同的 api_key

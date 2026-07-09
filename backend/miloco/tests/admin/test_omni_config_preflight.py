@@ -224,9 +224,11 @@ def test_get_health_reflects_open_config(client, mock_probe):
     )
 
     async def _fill():
-        await get_omni_circuit_breaker().record_failure(
-            ClassifiedError("bad_key", "无效", ErrorCategory.CONFIG)
-        )
+        # CONFIG 走窗口阈值,连续 3 次才 OPEN_CONFIG
+        for _ in range(3):
+            await get_omni_circuit_breaker().record_failure(
+                ClassifiedError("bad_key", "无效", ErrorCategory.CONFIG)
+            )
 
     asyncio.run(_fill())
     data = client.get("/api/admin/omni-config").json()["data"]
@@ -338,9 +340,10 @@ def test_retry_open_config_bad_key_stays_error(client, mock_probe):
     )
 
     async def _fill():
-        await get_omni_circuit_breaker().record_failure(
-            ClassifiedError("bad_key", "旧无效", ErrorCategory.CONFIG)
-        )
+        for _ in range(3):
+            await get_omni_circuit_breaker().record_failure(
+                ClassifiedError("bad_key", "旧无效", ErrorCategory.CONFIG)
+            )
 
     asyncio.run(_fill())
 
@@ -496,3 +499,54 @@ def test_snapshot_carries_relative_seconds_and_cooldown(client):
     # OPEN_RECOVERABLE 下相对秒数非空且为非负数
     assert health["next_probe_in_seconds"] is not None
     assert health["next_probe_in_seconds"] >= 0
+
+
+# ─── retry 端点 CancelledError 兜底(review Finding 4 回归防护) ─────────────
+
+
+async def test_retry_probe_cancelled_falls_back_to_open_recoverable(monkeypatch):
+    """review Finding 4:retry_now() 已把 state 置 HALF_OPEN,若 probe_omni 期间
+    客户端断开(CancelledError),必须回落 OPEN_RECOVERABLE,让 tick 能重新驱动 probe。
+    修复前:HALF_OPEN 卡死,tick 只 arm OPEN_RECOVERABLE,before_call 又永远短路。"""
+    import asyncio
+
+    from miloco.admin import router as admin_router
+    from miloco.config.settings import reset_settings
+    from miloco.perception.engine.omni.circuit_breaker import (
+        CircuitState,
+        get_omni_circuit_breaker,
+        reset_omni_circuit_breaker_for_tests,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 配 api_key,否则 retry_omni_probe 会在到 probe_omni 前走 no_key 短路 return
+    monkeypatch.setenv("MILOCO_MODEL__OMNI__API_KEY", "sk-xxxxxx")
+    monkeypatch.setenv("MILOCO_MODEL__OMNI__MODEL", "m1")
+    monkeypatch.setenv("MILOCO_MODEL__OMNI__BASE_URL", "https://x/v1")
+    reset_settings()
+    reset_omni_circuit_breaker_for_tests()
+    cb = get_omni_circuit_breaker()
+
+    # 先让 cb 进 OPEN_RECOVERABLE(retry_now 才生效)
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
+        )
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+
+    # mock probe_omni 抛 CancelledError 模拟客户端断开
+    async def _cancelled_probe(*a, **k):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(admin_router._probe, "probe_omni", _cancelled_probe)
+
+    # 直接跑 endpoint 函数(bypass TestClient,方便断言 CancelledError 被 re-raise)
+    with pytest.raises(asyncio.CancelledError):
+        await admin_router.retry_omni_probe(current_user="test")
+
+    # 关键断言:state 已从 HALF_OPEN 回落到 OPEN_RECOVERABLE,tick 可以再 arm
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    assert cb.snapshot().code == "cancelled"

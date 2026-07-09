@@ -113,8 +113,24 @@ async def test_window_error_rate_triggers_open(cb):
 # ─── OPEN_CONFIG 触发 ───────────────────────────────────────────────────────
 
 
-async def test_single_config_error_opens_config(cb):
+async def test_single_config_error_does_not_open(cb):
+    """瞬时 400/422(corrupted image/video)不应一击停感知——CONFIG 也走窗口阈值。"""
     await cb.record_failure(_cfg("bad_key"))
+    await cb.before_call()  # 仍 CLOSED,不抛
+    assert cb.state_for_test() == CircuitState.CLOSED
+
+
+async def test_two_consecutive_config_errors_do_not_open(cb):
+    """threshold=3,2 次 config 未达阈值,仍 CLOSED。"""
+    await cb.record_failure(_cfg("bad_key"))
+    await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.CLOSED
+
+
+async def test_three_consecutive_config_errors_open_config(cb):
+    """连续 3 次 CONFIG(consecutive_threshold=3)→ OPEN_CONFIG。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
     with pytest.raises(CircuitOpenError):
         await cb.before_call()
     snap = cb.snapshot()
@@ -123,11 +139,21 @@ async def test_single_config_error_opens_config(cb):
 
 
 async def test_config_error_takes_precedence_over_recoverable(cb):
-    """recoverable 失败 2 次后再来一次 config 错 → OPEN_CONFIG,不是 OPEN_RECOVERABLE。"""
+    """recoverable 失败 2 次后再来一次 config 错,3 连续达阈值,最后一击是 CONFIG
+    → OPEN_CONFIG,不是 OPEN_RECOVERABLE。"""
     await cb.record_failure(_rec())
     await cb.record_failure(_rec())
     await cb.record_failure(_cfg("bad_key"))
     assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+
+
+async def test_open_config_refreshes_code_on_subsequent_config_error(cb):
+    """已在 OPEN_CONFIG 后再来 config 错,不改状态但刷新 code/message 给前端横条。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    await cb.record_failure(_cfg("not_found"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.snapshot().code == "not_found"
 
 
 # ─── 指数退避 ───────────────────────────────────────────────────────────────
@@ -225,7 +251,8 @@ async def test_retry_now_from_open_recoverable(cb):
 
 async def test_retry_now_from_open_config(cb):
     """OPEN_CONFIG 也允许手动 retry。"""
-    await cb.record_failure(_cfg("bad_key"))
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
     await cb.retry_now()
     assert cb.state_for_test() == CircuitState.HALF_OPEN
 
@@ -239,7 +266,8 @@ async def test_retry_now_from_closed_is_noop(cb):
 
 
 async def test_reset_on_config_change_from_config_error(cb):
-    await cb.record_failure(_cfg("bad_key"))
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
     await cb.reset_on_config_change()
     await cb.before_call()
     assert cb.snapshot().state == "ok"
@@ -266,16 +294,20 @@ async def test_listener_fires_on_state_change(cb):
     assert seen[-1] == "ok"
 
 
-async def test_listener_exceptions_are_swallowed(cb):
-    """listener 抛异常不能连累熔断器。"""
+async def test_listener_exceptions_are_swallowed(cb, caplog):
+    """listener 抛异常不能连累熔断器,但要走 warning + exc_info 让运维能看到。"""
 
     def bad(snap):
         raise RuntimeError("listener crashed")
 
     cb.register_listener(bad)
     # 不抛
-    await cb.record_failure(_cfg("bad_key"))
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            await cb.record_failure(_cfg("bad_key"))
     assert cb.snapshot().state == "error"
+    # _emit 里改成 logger.warning(exc_info=True) 后应能看到堆栈
+    assert any("listener" in r.message for r in caplog.records)
 
 
 # ─── snapshot 字段 ─────────────────────────────────────────────────────────
@@ -286,7 +318,8 @@ async def test_snapshot_since_ms_zero_when_closed(cb):
 
 
 async def test_snapshot_since_ms_nonzero_when_open(cb, frozen_time):
-    await cb.record_failure(_cfg("bad_key"))
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
     frozen_time.tick(5)
     assert cb.snapshot().since_ms > 4000
 
@@ -299,7 +332,8 @@ async def test_try_arm_probe_false_when_closed(cb):
 
 
 async def test_try_arm_probe_false_when_open_config(cb):
-    await cb.record_failure(_cfg("bad_key"))
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
     assert cb.try_arm_probe() is False
 
 
@@ -387,3 +421,59 @@ async def test_record_success_emits_on_transition(cb, frozen_time):
     frozen_time.tick(1.5)
     await cb.record_probe_result(True, None)  # OPEN_RECOVERABLE → CLOSED
     assert "ok" in seen
+
+
+# ─── record_success 严格门控:防多相机并发 200 抹掉断路 ────────────────────────
+
+
+async def test_record_success_from_open_recoverable_is_noop(cb):
+    """多相机 gather 并发:cam1 fail 触发 OPEN_RECOVERABLE 后,cam2 之前的 in-flight
+    请求 200 到达调用 record_success —— 必须保持 OPEN_RECOVERABLE 不动,
+    否则运行时 200 会抹掉刚打开的断路,`before_call` 又放行,失败风暴复发。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    await cb.record_success()  # cam2 的迟到 200
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+
+
+async def test_record_success_from_open_config_is_noop(cb):
+    """OPEN_CONFIG 同样不受运行时 200 影响。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    await cb.record_success()
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+
+
+async def test_record_success_from_half_open_closes(cb, frozen_time):
+    """HALF_OPEN → CLOSED 才是 record_success 关闭断路的唯一路径。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    await cb.mark_half_open()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+    await cb.record_success()
+    assert cb.state_for_test() == CircuitState.CLOSED
+
+
+# ─── 多相机 gather 并发场景(review Finding 1 回归防护) ─────────────────────
+
+
+async def test_multi_camera_concurrent_success_after_open(cb):
+    """模拟 pipeline._run_device 多相机 gather:cam1 触发 OPEN_RECOVERABLE 后,
+    cam2/cam3 的 in-flight 200 asyncio.gather 并发调 record_success —— 不应抹掉
+    cam1 打开的断路。修复前:任意一个 success 都走 _transition_to_closed_locked。"""
+    import asyncio as _asyncio
+
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+
+    await _asyncio.gather(
+        cb.record_success(),
+        cb.record_success(),
+        cb.record_success(),
+        cb.record_success(),
+    )
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
