@@ -38,6 +38,7 @@ from .constants import (
     _COMMONSENSE,
     _COMMONSENSE_AUDIO,
     _EXAMPLE_CHAIN,
+    _EXAMPLE_CHAIN_NO_NAME,
     _EXAMPLE_IDENTITY,
     _HISTORY_HEADER,
     _OUTPUT_MODE_FREE,
@@ -173,6 +174,7 @@ def build_fused_payload(
     config: FusedPromptConfig | None = None,
     label_lookup: "dict[str, str] | None" = None,
     adapter: OmniProviderAdapter | None = None,
+    matching_moot: bool = False,
 ) -> dict:
     """构造 fused 主调用的 payload（身份识别和场景理解合并到同一次 omni 调用）。
 
@@ -193,6 +195,9 @@ def build_fused_payload(
         config:            FusedPromptConfig；None 走默认值
         label_lookup:      person_id → 姓名/标签 反查表（供 ``_build_device_header`` 渲染人名）；
                            None 时由本函数自动从 gallery_snapshot 构造
+        matching_moot:     身份库为空（无注册成员）→ 成员匹配不可能。True 时 identities 字段
+                           改精简版（只判 unknown/no_person）、gallery 段整段不渲染。no_person
+                           判定链路不变（见 field_registry.IDENTITY_NO_MATCH）。
 
     Returns:
         dict，含字段：
@@ -257,6 +262,7 @@ def build_fused_payload(
         route="video", has_identity=bool(candidates), stream=False,
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
+        identity_match_disabled=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False)
     user_content = _build_fused_user_content(
@@ -269,6 +275,7 @@ def build_fused_payload(
         adapter=adapter,
         cfg=cfg,
         label_lookup=label_lookup,
+        matching_moot=matching_moot,
     )
 
     messages = _assemble_fused_messages(
@@ -460,7 +467,12 @@ def _render_task_list(scene: SceneDescriptor) -> str:
         av = av2 = "视频"
     items: list[str] = []
     if scene.has_identity:
-        items.append("身份识别：对照图片库，识别画面中的人对应库中哪一位（或都不是）")
+        if scene.identity_match_disabled:
+            # 库空：没有成员可对照，任务收敛为「判真人 / 非人误检」，与精简版 identities spec 一致，
+            # 不再写「对照图片库…库中哪一位」这类成员匹配任务（否则与精简 spec 自相矛盾、白占 token）。
+            items.append("身份识别：判断画面中每个目标是真人还是被误检成人的非人物体（本轮无注册成员，不做成员匹配）")
+        else:
+            items.append("身份识别：对照图片库，识别画面中的人对应库中哪一位（或都不是）")
     if scene.route == "video":
         items.append("视频理解：描述画面中的人、宠物、物体，优先描述动态部分")
     if scene.has_audio:
@@ -490,13 +502,22 @@ def _render_examples(scene: SceneDescriptor) -> str:
     has_speech=False（VAD 判无人声、speeches 已剥）时：实例 A 的输出含 speeches（且是
     needs_response 指令），留着会与剥掉的 schema 矛盾、并重新诱导脑补人声指令，故不附
     实例 A（身份判定已由「## identities」充分约束）；实例 B 无 speeches、照常附。
+
+    identity_match_disabled=True（库空）时同样不附实例 A：它演示的是成员匹配（摆
+    ``<gallery>`` 成员、输出成员名 + 五官匹配 reason），与库空的精简版 identities
+    spec / schema（只判 unknown/no_person、无 gallery）自相矛盾，且抵消库空省 token 的
+    目标；身份任务已由精简版「## identities」充分约束。实例 B 无 identities 字段、照常附。
     """
     if scene.route == "audio" or not scene.has_audio:
         return ""
     examples = []
-    if scene.has_identity and scene.has_speech:
+    if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
-    examples.append(_EXAMPLE_CHAIN)
+    # 库空时实例 B 用泛称版：此窗无成员铺垫（实例 A 已 gate 掉），caption 示范不该叫专名，
+    # 与「库空不产成员名」收敛一致。库非空照旧用带名版（其"小明"由上方实例 A 的 gallery 铺垫）。
+    examples.append(
+        _EXAMPLE_CHAIN_NO_NAME if scene.identity_match_disabled else _EXAMPLE_CHAIN
+    )
     return "# 输出实例\n\n" + "\n\n".join(examples)
 
 
@@ -565,11 +586,16 @@ def _build_fused_user_content(
     adapter: OmniProviderAdapter,
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
+    matching_moot: bool = False,
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
 
     fused 模式专用：与纯文本版 ``_build_user_content`` 不同，本函数返回
     ``list[dict]``（OpenAI 多模态 content array），不是 ``str``。
+
+    ``matching_moot=True``（身份库为空）时整个 gallery 段不渲染——库空无成员可比对，
+    identities 已由精简版 spec 指示"只判 unknown/no_person"（见 build_fused_payload），
+    此处不再塞"<gallery>库为空…"这类无用文本。待识别 track 列表仍照常渲染（no_person 判定按 track 给结论）。
     """
     gallery_content: list[dict] = []
 
@@ -579,7 +605,10 @@ def _build_fused_user_content(
     # 人，omni 容易把他的脸贴到 gallery 里最相似的另一位 → 错认（caption/speeches
     # 全跟着错），代价比"漏识别"高一个量级。face 是 nice-to-have，单人 face 失败不
     # 触发放弃。
-    if candidates:
+    #
+    # matching_moot（身份库为空）→ 整段跳过：库空无成员可比对，精简版 identities spec 已
+    # 指示只判 unknown/no_person，不需要 gallery 图，也不再塞"库为空"占位文本。
+    if candidates and not matching_moot:
         if gallery_snapshot:
             # 渲染上限保护：超出 cfg.max_gallery_persons 仅取前 N 人，避免 prompt token 爆
             gallery_items = list(gallery_snapshot.items())
