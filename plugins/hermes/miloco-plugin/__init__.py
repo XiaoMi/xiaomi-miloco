@@ -131,31 +131,31 @@ def register(ctx) -> None:
     # 插件启动时确认 miloco backend 在跑(miloco-cli service start 幂等,已在跑也无副作用)。
     # 不在 install-hermes.sh 里硬拉,改在 plugin register() 触发 —— install 漏跑或 backend
     # 异常退出后重启 Hermes,plugin register 时自动拉起。
-    try:
-        import subprocess
-        proc = subprocess.run(
-            ["miloco-cli", "service", "start"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if proc.returncode == 0:
-            logger.info("[miloco-backend] register() 拉起 backend OK")
-            return
-        # 区分"已经在跑"(expected,幂等)和真错:
-        # miloco-cli service start 在已跑时返 exit=1 + stdout/stderr 含
-        # `already running (pid=...)`。这种情况 plugin 不该当 WARN 报 —— 正常
-        # 重启 Hermes 时 plugin register() 总会撞到这条,75+ 次/20 分钟是噪音。
-        out = ((proc.stdout or "") + " " + (proc.stderr or "")).strip()
-        already_running = "already running" in out.lower()
-        if already_running:
-            logger.info("[miloco-backend] register() 检测 backend 已在跑(pid 已存在,免拉)")
-        else:
-            logger.warning(
-                "[miloco-backend] register() 拉起失败 (exit=%s): %s",
-                proc.returncode, out[:200],
+    # 放后台 daemon 线程：register() 是 Hermes 插件加载的同步调用，subprocess.run(timeout=30)
+    # 会让 Hermes 启动阻塞。挪到 daemon 线程，不影响 Hermes 启动。
+    def _start_backend_if_needed() -> None:
+        try:
+            import subprocess
+            proc = subprocess.run(
+                ["miloco-cli", "service", "start"],
+                capture_output=True, text=True, timeout=30,
             )
-    except FileNotFoundError:
-        logger.warning("[miloco-backend] miloco-cli 不在 PATH,跳过 (install 时会处理)")
-    except subprocess.TimeoutExpired:
-        logger.warning("[miloco-backend] miloco-cli service start 30s 超时,跳过")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[miloco-backend] register() 拉起异常: %s", exc)
+            if proc.returncode == 0:
+                logger.info("[miloco-backend] register() 拉起 backend OK")
+                return
+            out = ((proc.stdout or "") + " " + (proc.stderr or "")).strip()
+            already_running = "already running" in out.lower()
+            if already_running:
+                logger.info("[miloco-backend] register() 检测 backend 已在跑(pid 已存在,免拉)")
+            else:
+                logger.warning(
+                    "[miloco-backend] register() 拉起失败 (exit=%s): %s",
+                    proc.returncode, out[:200],
+                )
+        except FileNotFoundError:
+            logger.warning("[miloco-backend] miloco-cli 不在 PATH,跳过 (install 时会处理)")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[miloco-backend] register() 拉起异常: %s", exc)
+
+    import threading
+    threading.Thread(target=_start_backend_if_needed, daemon=True).start()
