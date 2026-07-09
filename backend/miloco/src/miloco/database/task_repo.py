@@ -30,11 +30,6 @@ class TaskNotFound(Exception):
     """404: task 不存在 (toggle / update / delete 时读到 not_found)。"""
 
 
-# 迁移期兼容 alias — 老 caller 抛 TaskLinkConflict 的路径逐步改成
-# TaskConflict / TaskNotFound 明确语义后, 此 alias 独立 PR 清理。
-TaskLinkConflict = TaskConflict
-
-
 class TaskRepo:
     def __init__(self):
         self.db = get_db_connector()

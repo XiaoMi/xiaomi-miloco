@@ -135,6 +135,13 @@ async def create_cron(
 
     _validate_tz(req.tz)
     if req.kind == "cron":
+        # 强制 tz: APScheduler 缺省会退到机器本地时区 (容器常见 UTC), 与
+        # SKILL.md 里对 cron 类"必带家庭 tz"的强约束不一致; 应用层拒收,
+        # 与 every 拒 tz 形成对称防线。
+        if req.tz is None:
+            raise ValidationException(
+                "kind='cron' requires tz (IANA, e.g. Asia/Shanghai)"
+            )
         _validate_cron_expr(req.cron_expr, req.tz)
     at_ms: int | None = None
     if req.kind == "at":

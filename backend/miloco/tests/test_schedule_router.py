@@ -160,6 +160,22 @@ def test_post_cron_missing_expr_rejected(client):
     assert r.status_code == 422
 
 
+def test_post_cron_missing_tz_rejected(client):
+    """kind='cron' 缺 tz 直接 422: APScheduler 缺省会掉到机器本地时区,
+    与 SKILL.md 里"cron 必带家庭 tz"的强约束不一致, 应用层拒收补齐防线。"""
+    r = client.post(
+        "/api/crons",
+        json={
+            "name": "no_tz",
+            "kind": "cron",
+            "task_id": "t1",
+            "cron_expr": "0 9 * * *",
+            "message": "x",
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
 def test_post_kind_at_rejects_past_at_iso(client):
     from datetime import datetime, timedelta, timezone
 
@@ -225,6 +241,7 @@ def test_post_task_id_not_found_returns_404(client):
             "kind": "cron",
             "task_id": "ghost",
             "cron_expr": "* * * * *",
+            "tz": "Asia/Shanghai",
             "message": "x",
         },
     )
@@ -257,6 +274,7 @@ def test_post_bad_cron_expr_rejected(client):
             "kind": "cron",
             "task_id": "t1",
             "cron_expr": "not a cron",
+            "tz": "Asia/Shanghai",
             "message": "x",
         },
     )
@@ -271,6 +289,7 @@ def test_post_max_delay_zero_only_for_at(client):
             "kind": "cron",
             "task_id": "t1",
             "cron_expr": "* * * * *",
+            "tz": "Asia/Shanghai",
             "message": "x",
             "max_delay_seconds": 0,
         },
@@ -292,6 +311,7 @@ def test_post_returns_503_when_kill_switch_active(client, monkeypatch):
             "kind": "cron",
             "task_id": "t1",
             "cron_expr": "* * * * *",
+            "tz": "Asia/Shanghai",
             "message": "x",
         },
     )
@@ -320,6 +340,7 @@ def test_get_lists_and_filters(client, app_db):
             "kind": "cron",
             "task_id": "t1",
             "cron_expr": "* * * * *",
+            "tz": "Asia/Shanghai",
             "message": "x",
         },
     )
@@ -343,6 +364,7 @@ def test_get_single_and_404(client):
             "kind": "cron",
             "task_id": "t1",
             "cron_expr": "* * * * *",
+            "tz": "Asia/Shanghai",
             "message": "x",
         },
     )
@@ -368,6 +390,7 @@ def test_delete_internal_calls_scheduler(client, app_db):
             "kind": "cron",
             "task_id": "t1",
             "cron_expr": "* * * * *",
+            "tz": "Asia/Shanghai",
             "message": "x",
         },
     )
@@ -424,6 +447,7 @@ def test_enable_disable_internal_calls_apply(client, app_db):
             "kind": "cron",
             "task_id": "t1",
             "cron_expr": "* * * * *",
+            "tz": "Asia/Shanghai",
             "message": "x",
         },
     )

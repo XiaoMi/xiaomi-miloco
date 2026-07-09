@@ -489,34 +489,6 @@ class SQLiteConnector:
         """)
         logger.info("task table created successfully")
 
-    def _create_task_link_table(self, conn: sqlite3.Connection) -> None:
-        """Create task_link table — task ↔ rule/cron/memory junction.
-
-        **v2 起废弃, 不再被 fresh-build 或缺表兜底调用**。cron 关联迁到 cron
-        表 (dispatch_owner 分派), rule 关联迁到 rule.task_id FK CASCADE, 老 v1
-        库在 _migrate_v1_to_v2 里被 DROP。保留函数体供未来审计参考 (rollback
-        场景内联 CREATE TABLE, 不共用此函数)。
-
-        v1 语义: 复合主键 (task_id, link_kind, link_ref); task_id FK→task.task_id
-        ON DELETE CASCADE, 删 task 时自动清 task_link 行。全局
-        UNIQUE(link_kind, link_ref) 强制跨 task ref 唯一。
-        """
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS task_link (
-                task_id   TEXT NOT NULL,
-                link_kind TEXT NOT NULL,
-                link_ref  TEXT NOT NULL,
-                PRIMARY KEY (task_id, link_kind, link_ref),
-                FOREIGN KEY (task_id) REFERENCES task(task_id) ON DELETE CASCADE
-            )
-        """)
-        cursor.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_link_ref_unique "
-            "ON task_link(link_kind, link_ref)"
-        )
-        logger.info("task_link table created successfully")
-
     def _create_rule_log_table(self, conn: sqlite3.Connection) -> None:
         """Create rule_log table for rule execution logs (V3 schema).
 
