@@ -38,7 +38,7 @@ from miloco.miot.filter import (
     set_cameras_in_use,
     set_cameras_voice_in_use,
     set_homes_in_use,
-    voice_denied_camera_dids,
+    voice_allowed_camera_dids,
 )
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
@@ -152,7 +152,7 @@ class MiotService:
         """Clear service-layer scope residue (called on account switch)."""
         self._kv_repo.delete(ScopeConfigKeys.HOME_WHITE_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
-        self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_BLACK_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._lru.clear()
 
     @property
@@ -1011,12 +1011,12 @@ class MiotService:
     async def list_cameras_with_state(self) -> list[dict]:
         """列出当前启用家庭下的相机，每项含 is_online / in_use / voice_in_use / connected。
 
-        ``voice_in_use`` 是**存储的拾音偏好**（不在拾音黑名单即 True，默认 True；false =
+        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**；false =
         该相机声音完全不被处理），与 ``in_use`` 正交；「生效态」= ``in_use and voice_in_use``
         由前端派生，此处不合并。
         """
         denied = denied_camera_dids(self._kv_repo)
-        voice_denied = voice_denied_camera_dids(self._kv_repo)
+        voice_allowed = voice_allowed_camera_dids(self._kv_repo)
         connected = self._connected_camera_dids()
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
@@ -1039,8 +1039,8 @@ class MiotService:
                     "room_name": getattr(info, "room_name", None),
                     "is_online": online,
                     "in_use": did not in denied,
-                    # 存储偏好：不在拾音黑名单 = 拾音开启（默认开启）。
-                    "voice_in_use": did not in voice_denied,
+                    # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。
+                    "voice_in_use": did in voice_allowed,
                     "connected": did in connected,
                 }
             )

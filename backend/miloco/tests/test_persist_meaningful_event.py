@@ -71,6 +71,22 @@ def dao(isolated_db):
     return get_manager().meaningful_events_dao
 
 
+@pytest.fixture(autouse=True)
+def _voice_allowlist(isolated_db):
+    """拾音**默认关**(opt-in)后,speech 只有在相机拾音开启(在白名单)时才落库。
+    本模块的持久化用例统一把测试相机 ``cam_living_01`` 加入拾音白名单,让 speech
+    走到落库路径(否则第二道防线 _filter_voice_enabled 会按默认关剥掉)。
+    voice 专项用例 test_asr_from_mic_off_cam_stripped_not_persisted 自建 KVRepo 覆盖此处。
+    """
+    from miloco.database.kv_repo import KVRepo
+    from miloco.manager import get_manager
+    from miloco.miot.filter import set_cameras_voice_in_use
+
+    mgr = get_manager()
+    mgr._kv_repo = KVRepo()
+    set_cameras_voice_in_use(mgr._kv_repo, ["cam_living_01"], True)
+
+
 def _clip_payload(
     seed: int = 0, kind: str = "mp4"
 ) -> "tuple[bytes, str]":
@@ -357,11 +373,11 @@ class TestPersistMeaningfulEvent:
         assert "rule 已被删" in rows[0]["text"]
 
     async def test_asr_from_mic_off_cam_stripped_not_persisted(self, isolated_db, dao):
-        """对照(拾音默认开启,mic-off 为 opt-out):相机在拾音黑名单 → speech 在
-        _persist 内被 _filter_voice_enabled 剥掉,speech-only 结果不入表。
+        """默认关(opt-in):相机不在拾音白名单 → speech 在 _persist 内被
+        _filter_voice_enabled 剥掉,speech-only 结果不入表。
 
-        默认全开时其余 speech 用例靠 fail-open 放行;这颗单独把某相机加入黑名单,
-        验证「关拾音的相机转写不落库」这条第二道防线在真实 DB 路径上确实生效
+        显式把某相机设为拾音关闭(不加入白名单),验证「未开启拾音的相机转写不落库」
+        这条第二道防线在真实 DB 路径上确实生效
         （与 test_perception_client 的 _filter_voice_enabled 单测同源）。
         """
         from miloco.database.kv_repo import KVRepo
@@ -369,10 +385,10 @@ class TestPersistMeaningfulEvent:
         from miloco.miot.filter import set_cameras_voice_in_use
 
         # isolated Manager 未 initialize：现挂一个建在隔离 DB 上的真 KVRepo,
-        # 让 _filter_voice_enabled 读到真实黑名单(而非 fail-open 放行)。
+        # 让 _filter_voice_enabled 读到真实白名单(cam_muted 不在其中 → 剥离)。
         mgr = get_manager()
         mgr._kv_repo = KVRepo()
-        set_cameras_voice_in_use(mgr._kv_repo, ["cam_muted"], False)  # mic-off
+        set_cameras_voice_in_use(mgr._kv_repo, ["cam_muted"], False)  # 未开启拾音
 
         result = RealtimePerceptionResult(
             speeches=[

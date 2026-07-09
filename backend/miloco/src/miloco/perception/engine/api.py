@@ -72,20 +72,20 @@ def _fmt_clock(ms: float) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=deploy_timezone()).strftime("%H:%M:%S")
 
 
-def _voice_denied_dids() -> set[str]:
-    """实时读相机「拾音黑名单」（与 client._filter_voice_enabled 同源同口径）。
+def _voice_allowed_dids() -> set[str]:
+    """实时读相机「拾音白名单」（与 client._filter_voice_enabled 同源同口径）。
 
-    读 KV（进程内缓存）失败时 fail-open 返回空集并 warning——瞬时故障不应把全部相机
-    静音（第二道防线 dispatch/落库闸门仍在，单测无 manager 场景也靠此兜底）。
+    读 KV（进程内缓存）失败时返回空集并 warning——空集在 allow-list 语义下 = 全部相机
+    拾音关闭（fail-closed：瞬时故障宁可整批剥离音频，也不擅自处理未授权相机的音频）。
     """
     from miloco.manager import get_manager
-    from miloco.miot.filter import voice_denied_camera_dids
+    from miloco.miot.filter import voice_allowed_camera_dids
 
     try:
-        return voice_denied_camera_dids(get_manager().kv_repo)
+        return voice_allowed_camera_dids(get_manager().kv_repo)
     except Exception as e:  # noqa: BLE001
         logger.warning(
-            "voice blacklist lookup failed, keeping audio for all cameras: %s", e
+            "voice allow-list lookup failed, stripping audio for all cameras (fail-closed): %s", e
         )
         return set()
 
@@ -815,33 +815,32 @@ class PerceptionEngine(BasePerceptionEngine):
         self._gate_hold_active.clear()
         self._gate_hold_started_at.clear()
 
-    def _strip_voice_denied_audio(self, batch: BatchedSnapshot) -> None:
-        """硬切「拾音关闭」相机的音频——mic-off 语义的**第一道防线（唯一切点）**。
+    def _strip_unauthorized_voice_audio(self, batch: BatchedSnapshot) -> None:
+        """硬切**未开启拾音**相机的音频——opt-in / 默认关语义的**第一道防线（唯一切点）**。
 
-        在引擎入口（输入组装处）整批剥离：音频不进 gate / identity / omni——不参与
-        gate 触发（audio_clip 为空时 evaluate_audio 恒 False、VAD 跳过，audio-only
-        窗口不再产生）、不合成进 mp4、schema 自动剥 speeches/env_sounds（has_audio
-        机制）——不转写、不产生任何语音派生 suggestion、不烧云端音频 token。
+        allow-list 语义：只有在拾音白名单内的相机音频才被处理，其余相机在引擎入口
+        （输入组装处）整批剥离：音频不进 gate / identity / omni——不参与 gate 触发
+        （audio_clip 为空时 evaluate_audio 恒 False、VAD 跳过，audio-only 窗口不再
+        产生）、不合成进 mp4、schema 自动剥 speeches/env_sounds（has_audio 机制）——
+        不转写、不产生任何语音派生 suggestion、不烧云端音频 token。
         dispatch/落库闸门（client._filter_voice_enabled）保留为第二道防线。
-        实时读 KV，改开关下一窗即生效、无需重启引擎。
+        实时读 KV，改开关下一窗即生效、无需重启引擎。白名单为空（默认态）时剥离全部。
 
-        一并清掉该相机的跨窗残留：audio_tail（否则重新开启后首窗会把关闭前的音频
-        尾巴拼进新窗）与 pending_speech（关闭前的半句转写不得再注入后续 prompt——
+        一并清掉该相机的跨窗残留：audio_tail（否则重新开启后首窗会把开启前的音频
+        尾巴拼进新窗）与 pending_speech（开启前的半句转写不得再注入后续 prompt——
         那也是语音内容上云）。原地改 snapshot（引擎内 audio-tail prepend 同款惯例）。
         """
-        denied = _voice_denied_dids()
+        allowed = _voice_allowed_dids()
         # 重新开启拾音的相机移出「已打日志」集，下次再关闭时重新打一条 INFO。
         if self._mic_off_logged:
-            self._mic_off_logged &= denied
-        if not denied:
-            return
+            self._mic_off_logged -= allowed
         for snapshot in batch.snapshots:
             did = snapshot.device.did
-            if did not in denied:
+            if did in allowed:
                 continue
             if did not in self._mic_off_logged:
                 logger.info(
-                    "拾音已关闭：剥离相机音频，本相机声音不作任何处理 did=%s name=%s",
+                    "拾音未开启：剥离相机音频，本相机声音不作任何处理 did=%s name=%s",
                     did, snapshot.device.name,
                 )
                 self._mic_off_logged.add(did)
@@ -867,9 +866,9 @@ class PerceptionEngine(BasePerceptionEngine):
         if batch.empty:
             return None
 
-        # 拾音关闭的相机在此整批剥音频（mic-off 第一道防线）；必须先于 contexts 构建
-        # （pending_speech 注入）与 audio-tail 拼接，见 _strip_voice_denied_audio。
-        self._strip_voice_denied_audio(batch)
+        # 未开启拾音的相机在此整批剥音频（opt-in 第一道防线）；必须先于 contexts 构建
+        # （pending_speech 注入）与 audio-tail 拼接，见 _strip_unauthorized_voice_audio。
+        self._strip_unauthorized_voice_audio(batch)
 
         # 进入新一轮前先按 TTL 淘汰过期事件链
         now = time.monotonic()
@@ -979,9 +978,9 @@ class PerceptionEngine(BasePerceptionEngine):
         if batch.empty:
             return OnDemandPerceptionResult(answer="")
 
-        # 主动查询同样尊重 mic-off：拾音关闭的相机音频不进 query 视频
+        # 主动查询同样尊重 opt-in：未开启拾音的相机音频不进 query 视频
         # （_encode_video_mp4 对空 audio 自动出纯视频 mp4）。
-        self._strip_voice_denied_audio(batch)
+        self._strip_unauthorized_voice_audio(batch)
 
         # query 路径 omni 仍是 per-room 一次（产品语义：用户问"房间"，答案单份），
         # 需要 per-room 的 last_caption 作为参考。``_last_captions`` 已改 per-device，

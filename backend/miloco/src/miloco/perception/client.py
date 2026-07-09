@@ -81,35 +81,35 @@ _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
-    """按摄像头「拾音黑名单」过滤 speech：``source_device_ids[0]``(相机 did)在
-    黑名单里的丢弃,其余放行。实时读 KV(进程内缓存),改开关即时生效、无需重启感知引擎。
+    """按摄像头「拾音白名单」过滤 speech：``source_device_ids[0]``(相机 did)在
+    白名单里(拾音已开启)的放行,其余丢弃。**默认关**:不在白名单 = 拾音关闭。
+    实时读 KV(进程内缓存),改开关即时生效、无需重启感知引擎。
 
-    分层防线:**第一道**在引擎入口——``engine/api.py::_strip_voice_denied_audio``
-    对拾音关闭的相机整批剥离音频(不进 gate/omni,不转写、无语音派生 suggestion、
-    不烧音频 token),正常情况下 speech 根本不会产生。本函数是**第二道**(引擎入口
-    剥离失效 / 旧窗口残留时兜底),两个执法点:① 语音指令 dispatch(早出
+    分层防线:**第一道**在引擎入口——``engine/api.py::_strip_unauthorized_voice_audio``
+    对未开启拾音的相机整批剥离音频(不进 gate/omni,不转写、无语音派生 suggestion、
+    不烧音频 token),正常情况下这些相机的 speech 根本不会产生。本函数是**第二道**
+    (引擎入口剥离失效 / 旧窗口残留时兜底),两个执法点:① 语音指令 dispatch(早出
     _on_early_speeches + 终态 handle_realtime_perception_result);
     ② meaningful_events 落库/SSE(_persist_meaningful_event 在 classify 前过滤)
     ——拾音关闭 = 不执行也不记录转写。
     规则匹配及 caption / suggestion 等视觉产物不经此函数,不受影响。读 KV 失败时
-    fail-open(放行全部)以免吞掉语音链路。
+    **fail-closed**(丢弃全部语音):默认关语义下,宁可漏掉一次语音,也不处理用户
+    未授权相机的音频。
     """
     from miloco.manager import get_manager
-    from miloco.miot.filter import voice_denied_camera_dids
+    from miloco.miot.filter import voice_allowed_camera_dids
 
     try:
-        voice_denied = voice_denied_camera_dids(get_manager().kv_repo)
+        voice_allowed = voice_allowed_camera_dids(get_manager().kv_repo)
     except Exception as e:
-        logger.warning("voice blacklist lookup failed, passing all speeches: %s", e)
-        return speeches
-    if not voice_denied:
-        return speeches
+        logger.warning("voice allow-list lookup failed, dropping all speeches (fail-closed): %s", e)
+        return []
     kept: list[Speech] = []
     for s in speeches:
         did = s.source_device_ids[0] if s.source_device_ids else None
-        if did is not None and did in voice_denied:
+        if did is None or did not in voice_allowed:
             logger.info(
-                "speech 被摄像头声音开关拦截丢弃(不下发/不落库): did=%s device_name=%s content_len=%d",
+                "speech 被摄像头声音开关拦截丢弃(未开启拾音,不下发/不落库): did=%s device_name=%s content_len=%d",
                 did, s.device_name, len(s.content),
             )
             continue
