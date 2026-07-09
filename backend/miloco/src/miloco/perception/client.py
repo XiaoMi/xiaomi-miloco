@@ -121,6 +121,43 @@ class MeaningfulEventPersistResult:
     clip_kind: ClipKind | None
 
 
+def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
+    """按摄像头「拾音白名单」过滤 speech：``source_device_ids[0]``(相机 did)在
+    白名单里(拾音已开启)的放行,其余丢弃。**默认关**:不在白名单 = 拾音关闭。
+    实时读 KV(进程内缓存),改开关即时生效、无需重启感知引擎。
+
+    分层防线:**第一道**在引擎入口——``engine/api.py::_strip_unauthorized_voice_audio``
+    对未开启拾音的相机整批剥离音频(不进 gate/omni,不转写、无语音派生 suggestion、
+    不烧音频 token),正常情况下这些相机的 speech 根本不会产生。本函数是**第二道**
+    (引擎入口剥离失效 / 旧窗口残留时兜底),两个执法点:① 语音指令 dispatch(早出
+    _on_early_speeches + 终态 handle_realtime_perception_result);
+    ② meaningful_events 落库/SSE(_persist_meaningful_event 在 classify 前过滤)
+    ——拾音关闭 = 不执行也不记录转写。
+    规则匹配及 caption / suggestion 等视觉产物不经此函数,不受影响。读 KV 失败时
+    **fail-closed**(丢弃全部语音):默认关语义下,宁可漏掉一次语音,也不处理用户
+    未授权相机的音频。
+    """
+    from miloco.manager import get_manager
+    from miloco.miot.filter import voice_allowed_camera_dids
+
+    try:
+        voice_allowed = voice_allowed_camera_dids(get_manager().kv_repo)
+    except Exception as e:
+        logger.warning("voice allow-list lookup failed, dropping all speeches (fail-closed): %s", e)
+        return []
+    kept: list[Speech] = []
+    for s in speeches:
+        did = s.source_device_ids[0] if s.source_device_ids else None
+        if did is None or did not in voice_allowed:
+            logger.info(
+                "speech 被摄像头声音开关拦截丢弃(未开启拾音,不下发/不落库): did=%s device_name=%s content_len=%d",
+                did, s.device_name, len(s.content),
+            )
+            continue
+        kept.append(s)
+    return kept
+
+
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
@@ -381,6 +418,20 @@ class PerceptionEngineProxy:
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎 proxy 失败 | %s", e)
 
+    async def rebuild(self) -> None:
+        """无条件销毁当前引擎实例并按最新配置重建（运行时改感知参数后生效用）。
+
+        与 ``stop_to_unconfigured`` 不同：不依赖 key 被删的降级语义；与 ``try_reinit``
+        不同：不受 ``ready`` 守卫限制，``ready`` 态也强制重造。调用方须保证 settings
+        缓存已刷新（PUT config 已 ``reset_settings()``），使 ``_init_engine`` 读到新值
+        （omni_fps 等 cache 在 ``_create_engine`` 的配置）。
+        """
+        async with self._engine_lock:
+            if self.perception_engine is not None:
+                await self.close()
+                self.perception_engine = None
+            self._init_engine()
+
     async def stop_to_unconfigured(self) -> None:
         """软停引擎,回到「未配模型」态——与「启用→tick 自愈拉起」对称的反向操作。
 
@@ -451,6 +502,8 @@ class PerceptionEngineProxy:
             commands = [
                 i for i in speeches if i.needs_response and i.is_complete
             ]
+            # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+            commands = _filter_voice_enabled(commands)
             if not commands:
                 return
             for c in commands:
@@ -935,6 +988,8 @@ class PerceptionEngineProxy:
                 if early_sent_contents and interaction.content in early_sent_contents:
                     continue
                 speeches.append(interaction)
+        # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+        speeches = _filter_voice_enabled(speeches)
         if speeches:
             _attach_caption(speeches, result.caption)
             for it in speeches:
@@ -967,6 +1022,8 @@ async def _persist_meaningful_event(
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
     流程:
+      0. 语音黑名单过滤 speech(与 dispatch 同一闸门)→ 语音关闭相机的转写既不
+         入分类判定也不落库/推 SSE;caption / suggestion / 规则命中照常
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
       3. INSERT meaningful_events(snapshot_count=0)
@@ -991,12 +1048,17 @@ async def _persist_meaningful_event(
     )
 
     try:
-        persist_result = result
+        # 语音关闭相机的转写不落库：与 dispatch 同一闸门先滤 speech，classify / payload /
+        # text / SSE 全部基于过滤后的视图。只滤 speech，同相机的 caption / suggestion /
+        # 规则命中照常。result 与主路径共享，不可原地改。
+        persist_result = result.model_copy(
+            update={"speeches": _filter_voice_enabled(result.speeches)}
+        )
         if rule_id_filter is not None:
-            persist_result = result.model_copy(
+            persist_result = persist_result.model_copy(
                 update={
                     "matched_rules": [
-                        mr for mr in result.matched_rules if mr.rule_id in rule_id_filter
+                        mr for mr in persist_result.matched_rules if mr.rule_id in rule_id_filter
                     ]
                 }
             )
@@ -1009,7 +1071,7 @@ async def _persist_meaningful_event(
         event_id = event_id or str(uuid.uuid4())
         timestamp_ms = timestamp_ms or int(time.time() * 1000)
         # timing 已被 observability traces 消费,DB 里这份是冗余副本
-        payload_dict = result.model_dump()
+        payload_dict = persist_result.model_dump()
         payload_dict.pop("timing", None)
         if rule_id_filter is not None:
             payload_dict["matched_rules"] = [

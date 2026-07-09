@@ -2,6 +2,13 @@
 
 <p align="center">English | <a href="README.zh.md">简体中文</a></p>
 
+<p align="center">
+  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases/latest"><img src="https://img.shields.io/github/v/release/XiaoMi/xiaomi-miloco?label=release" alt="Latest release" /></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-Xiaomi%20Miloco-blue" alt="License" /></a>
+  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases"><img src="https://img.shields.io/github/downloads/XiaoMi/xiaomi-miloco/total" alt="Downloads" /></a>
+  <a href="https://github.com/XiaoMi/xiaomi-miloco/stargazers"><img src="https://img.shields.io/github/stars/XiaoMi/xiaomi-miloco" alt="Stars" /></a>
+</p>
+
 Xiaomi's open-source AI solution for the future of whole-home intelligence. It uses the video and audio from Mi Home cameras as a full-modal perception gateway, the in-house MiMo large model as its intelligent brain, and runs as an Agent plugin on top of [OpenClaw](https://openclaw.ai) to orchestrate whole-home devices for a proactive, intelligent experience.
 
 Miloco 2.0 perceives what happens at home, makes proactive decisions and controls devices based on common sense, breaks down "vague and long-term" goals into trackable household tasks, recognizes family members, and—drawing on home memory—delivers personalized service to each member: querying and controlling devices, tuning the home to each member's comfort, or offering useful reminders at the right moment.
@@ -29,6 +36,7 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 
 - **Hardware**: ≥ 4GB RAM and ≥ 256GB storage recommended, running 24/7. A Mac mini is recommended.
 - **Operating System**: macOS / Linux (run under WSL on Windows).
+- **OpenClaw** — Miloco runs as a plugin on top of it, so [install it](https://openclaw.ai) first with version ≥ 2026.5.2.
 - **Xiaomi account** + devices already added to Mi Home.
 - **Multimodal large model API key** — [Xiaomi MiMo](https://platform.xiaomimimo.com) is recommended: MiMo-v2.5 for perception, MiMo-v2.5-pro for the Agent (configured in OpenClaw).
 

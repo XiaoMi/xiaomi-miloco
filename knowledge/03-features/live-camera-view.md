@@ -53,13 +53,13 @@ GET /api/miot/watch → watch.html（server.token 注入）
 
 **`/api/miot/watch` 端点**（`miot/router.py::watch_page`）
 
-入口端点：读取 `static/watch.html` 模板，将 `__MILOCO_TOKEN__` 占位符替换为真实 `server.token` 后返回给浏览器。浏览器收到注入 token 的页面后，用 token 调 `/api/perception/devices` 拉摄像头列表，用户选择后通过 WebSocket 接入视频流。
+入口端点：把 `server.token` 注入 `watch.html` 模板（运行期在 `static_dir`，源文件为 `web/public/watch.html`）后返回，让页面无需用户手动粘贴 token 即可自足启动。浏览器收到注入 token 的页面后，用 token 调 `/api/perception/devices` 拉摄像头列表，用户选择后通过 WebSocket 接入视频流。同一页面还支持 `embedded=1` 模式：`camera_id`/`channel` 由 URL 直接传入、隐藏选择器与页面 chrome，供家庭面板以 iframe 内嵌复用（HeroNow 实时卡、可展开播放器均如此），播放器只有这一份实现。
 
 **信任边界**：`/api/miot/watch` 响应体内嵌明文 token，等价于"能访问该 URL 的人拥有 token"。默认仅监听 `127.0.0.1`；若开放 LAN 访问，应自行评估网络可信边界。`server.token` 未配置则返回 `503`。
 
 **MIoTVideoStreamManager**（`miot/ws.py`）
 
-管理所有 WebSocket 订阅者。每个摄像头持有一个 `H264LiveEncoder` 实例；第一个订阅者触发编码器创建和帧订阅，后续订阅者直接复用已编码输出。首帧超时检测：若摄像头在指定时间内一帧都没出，向前端发送明确的 error 信令后关闭连接，避免用户看到"正在连接"一直等下去。
+管理所有 WebSocket 订阅者。每个摄像头持有一个 `H264LiveEncoder` 实例；第一个订阅者触发编码器创建和帧订阅，后续订阅者直接复用已编码输出。订阅新旧交替、SDK 启停在每个摄像头一把 `asyncio.Lock` 下串行，避免并发首订阅者互相踩坏 reg_id/编码器。管理器只对外暴露 `has_emitted_frame`（是否已广播过首帧）；真正的首帧超时检测在 WS 路由侧（`video_stream_websocket` 起的看门狗，`miot/router.py`）：等满首帧超时窗口后检查 `has_emitted_frame`，若期间一帧都没出（跨局域网 / PPCS 中继未建立等），向前端发送明确的 error 信令后关闭连接，避免用户看到"正在连接"一直等下去。
 
 **H264LiveEncoder**（`miot/transcoder.py`）
 
@@ -71,16 +71,16 @@ GET /api/miot/watch → watch.html（server.token 注入）
 
 **浏览器端解码双路径**：secure context（HTTPS / localhost）下用 WebCodecs `VideoDecoder` API，通过多档 `hardwareAcceleration` 轮试确保兼容性，解决 Linux Chrome / VAAPI 过度乐观导致运行时失败的问题。非 secure context（如 LAN HTTP 访问）下 WebCodecs 不可用，回退到 MSE + jmuxer（`/vendor/jmuxer.min.js`）：把 Annex-B NAL 重封为 fmp4 喂给 `<video>` 播放。
 
-**直播与 scope/感知解耦**：watch 视频流由独立的 camera manager 维持，scope 切换、摄像头停用、感知暂停/停止都不会中断正在进行的直播——只要摄像头还在账号内，manager 即保活；仅当摄像头真正从账号消失才销毁。正因如此，前端无需在切换 scope/感知时弹"停止直播"确认框。
+**直播与感知引擎解耦、与相机启停同源**：直播复用的 native 会话（camera manager，含 PPCS 会话 + 解码）与感知投喂**共用同一套「活跃相机」选择口径**（启用家庭 + 未拉黑 + 在线，且受并发相机上限约束，见 `miot/filter.py::select_active_camera_dids`）——拉流集与投喂集同源、不漂移。由此产生两条边界：Omni 感知引擎暂停/停止不销毁 native 会话，正在进行的直播照常；但把某相机停用（关闭感知）或移出当前家庭，会真正销毁其 native 会话（停 PPCS + 停解码），其直播随之中断（离线或超出并发上限的相机同理不建会话）。native 会话的建/销在 `refresh_cameras`（`miot/client.py`）里统一编排，每台单独兜异常，避免批量销毁时一台失败拖垮其余。
 
 ### 如果我要修改直播相关功能
 
-| 修改目标                              | 去看哪个文件                                           |
-| ------------------------------------- | ------------------------------------------------------ |
-| 修改 WebSocket 订阅/管理逻辑          | `miot/ws.py`（MIoTVideoStreamManager）                 |
-| 修改编码参数或 WebSocket 帧格式       | `miot/transcoder.py`（H264LiveEncoder）                |
-| 修改 watch.html 页面或 token 注入逻辑 | `miot/router.py`（`watch_page`）和 `static/watch.html` |
-| 修改浏览器端解码逻辑                  | `static/watch.html` 内的 JavaScript 部分               |
+| 修改目标                              | 去看哪个文件                                               |
+| ------------------------------------- | ---------------------------------------------------------- |
+| 修改 WebSocket 订阅/管理逻辑          | `miot/ws.py`（MIoTVideoStreamManager）                     |
+| 修改编码参数或 WebSocket 帧格式       | `miot/transcoder.py`（H264LiveEncoder）                    |
+| 修改 watch.html 页面或 token 注入逻辑 | `miot/router.py`（`watch_page`）和 `web/public/watch.html` |
+| 修改浏览器端解码逻辑                  | `web/public/watch.html` 内的 JavaScript 部分               |
 
 ### 与其他模块的关系
 

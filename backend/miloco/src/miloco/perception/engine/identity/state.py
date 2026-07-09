@@ -444,6 +444,7 @@ def needs_omni_call(
     config: StabilityConfig,
     engine_fps: float,
     no_person_recheck_sec: float = 1200.0,
+    gallery_empty: bool = False,
 ) -> bool:
     """判断该 track 是否需要派发新的 omni 识别任务。
 
@@ -457,6 +458,12 @@ def needs_omni_call(
         unknown 首次重审 (count==0) 距 ≥ recheck//2                 → True   ← 抢翻转窗口
         unknown 后续重审 (count>0)  距 ≥ recheck 周期                → True
         unknown,   未达上述阈值                                    → False
+
+    ``gallery_empty=True``（身份库为空）时只改 unknown 分支：把重派周期从 recheck_interval_sec
+    放慢到 config.gallery_empty_recheck_sec（且不走 count==0 的 interval//2 抢翻转——库空无从翻成
+    成员）。库空下 unknown 常规重派唯一价值（等人转身/走近再匹配成员）恒为 0，放慢只留周期性
+    翻 no_person 的机会。**pending 分支不受影响**：no_person 落定靠 pending 期连续投票在
+    pending_timeout(60s) 内累计，放慢会破坏它。库非空时该参数无作用（等价旧行为）。
 
     重审周期(秒)在此入口按 ``engine_fps`` 换算成 frame_index 帧数(round(sec×fps)),
     与 max_age_sec 同款"秒标定、运行时换算", 改 fps 墙钟周期不漂移。
@@ -515,6 +522,12 @@ def needs_omni_call(
         # unknown 也走重审，让"刚登记的人"或"角度误判的人"能被自动识别上。
         # 自适应: 首次重审用 interval//2 (commit unknown 后最可能翻转的窗口——
         # 人刚入镜信息不全被误判, 几秒后全身入镜就该翻回),后续恢复正常间隔。
+        if gallery_empty:
+            # 库空: 没有任何成员可匹配, "等人转身/走近再匹配成员"的重派价值恒为 0 → 放慢到
+            # 库空专用慢周期, 只保留周期性给 omni 翻 no_person 的机会(静物误检延迟纠正)。不走
+            # count==0 的 interval//2 抢翻转(库空无从翻成成员)。库非空时不进此分支、回常规间隔。
+            interval = max(1, round(config.gallery_empty_recheck_sec * engine_fps))
+            return (now_frame - state.last_omni_call_frame) >= interval
         interval = max(1, round(config.recheck_interval_sec * engine_fps))
         if state.unknown_recheck_count == 0:
             interval = interval // 2

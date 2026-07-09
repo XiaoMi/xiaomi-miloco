@@ -104,3 +104,10 @@ _EXAMPLE_CHAIN = """\
 本轮（节选）：当前时间 02:31:00；画面里小明坐在电脑前操作鼠标键盘；听到重物倒地声
 输出（speeches 无故省略）：
 {"caption":"小明坐在电脑前操作鼠标键盘，屏幕显示游戏画面","env_sounds":"重物倒地声","suggestions":[{"event":"听到重物倒地声","action":"提醒用户确认房间情况","urgency":"medium"}]}"""
+
+# 身份库为空（identity_match_disabled）时用的实例 B 变体：把示范专名换成泛称。库空窗口没有
+# 成员铺垫（实例 A 已被 gate 掉），caption 示范不该叫专名——与 caption 字段说明「没识别出的
+# 人写 某人 / 陌生人」一致。从 _EXAMPLE_CHAIN 派生而非另写一份，避免两份实例将来漂移；
+# assert 兜住「示范专名被改名致 replace 静默失效」。
+_EXAMPLE_CHAIN_NO_NAME = _EXAMPLE_CHAIN.replace("小明", "某人")
+assert "小明" not in _EXAMPLE_CHAIN_NO_NAME

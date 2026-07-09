@@ -19,7 +19,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from miloco.middleware.exceptions import AgentWebhookException
-from miloco.utils.agent_client import _HTTP_BUFFER_S, run_agent_turn
+from miloco.utils.agent_client import (
+    _HTTP_BUFFER_S,
+    reset_agent_sessions,
+    run_agent_turn,
+)
 
 _WAIT_MS = 30_000
 
@@ -137,3 +141,34 @@ async def test_run_agent_turn_passes_no_channel_status_through():
         )
     assert run_id is None
     assert status == "no-channel"
+
+
+async def test_reset_agent_sessions_builds_payload():
+    # session_keys / deleteTranscript 原样组包成 reset_sessions webhook payload。
+    mock = AsyncMock(return_value={"reset": ["a", "b"], "failed": []})
+    keys = ["agent:main:miloco", "agent:main:miloco-rule"]
+    with patch("miloco.utils.agent_client.call_agent_webhook", new=mock):
+        data = await reset_agent_sessions(keys)
+    assert data == {"reset": ["a", "b"], "failed": []}
+    action, payload = mock.await_args.args[0], mock.await_args.args[1]
+    assert action == "reset_sessions"
+    assert payload["sessionKeys"] == keys
+    assert payload["deleteTranscript"] is True
+
+
+async def test_reset_agent_sessions_short_circuits_on_empty():
+    # 空列表直接短路：不发 webhook。
+    mock = AsyncMock()
+    with patch("miloco.utils.agent_client.call_agent_webhook", new=mock):
+        assert await reset_agent_sessions([]) is None
+    mock.assert_not_awaited()
+
+
+async def test_reset_agent_sessions_propagates_webhook_exception():
+    # 传输/结构化失败不吞：交由调用方（switch_home 后台任务）兜底降级。
+    with patch(
+        "miloco.utils.agent_client.call_agent_webhook",
+        new=AsyncMock(side_effect=AgentWebhookException("boom")),
+    ):
+        with pytest.raises(AgentWebhookException):
+            await reset_agent_sessions(["agent:main:miloco"])

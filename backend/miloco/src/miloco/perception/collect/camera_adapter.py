@@ -135,14 +135,19 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         kv = self._miot_proxy._kv_repo
         # 选择口径与 refresh_cameras 的 manager 建销共用同一函数，避免投喂集与拉流集
-        # 漂移：在启用家庭 + 未拉黑 + 在线、按 did 截到 MAX_ENABLED_CAMERAS。
+        # 漂移：在启用家庭 + 未拉黑 + 在线 + 镜头未关、按 did 截到 MAX_ENABLED_CAMERAS。
         cams = {
             did: info
             for did, info in all_devices.items()
             if isinstance(info, MIoTCameraInfo)
         }
         active = select_active_camera_dids(
-            kv, cams, online_only=online_only, require_lan=require_lan, cap=cap
+            kv,
+            cams,
+            online_only=online_only,
+            require_lan=require_lan,
+            cap=cap,
+            awake_map=getattr(self._miot_proxy, "_camera_awake_cache", None),
         )
         result: dict[str, PerceptionDevice] = {}
         for did in active:

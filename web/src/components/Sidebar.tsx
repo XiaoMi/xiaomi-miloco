@@ -46,6 +46,15 @@ export interface TabDef {
   Icon: NavIcon;
 }
 
+function SettingsGear({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
 // label / hint 对齐 product owner @lichao61 维护的飞书 wiki §一
 // （Family UI 模块职责与边界）—— 改 label / hint 前**先核对 wiki 现状**，
 // 不然这条注释半年后又会跟现实分叉。wiki URL / token 跟 PO 拿。
@@ -96,9 +105,10 @@ interface Props {
   miot?: HomeStatus["miot"];
   onOpenMiotBind: () => void;
   onMiotChanged: () => void;
+  onOpenSettings?: () => void;
 }
 
-export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged }: Props) {
+export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged, onOpenSettings }: Props) {
   const { t } = useTranslation();
   // 整个底部账号 row 当 hit area:onClick 转发给内部 MiotAccountButton 的
   // button DOM 触发同款交互(已绑 toggle popover / 未绑 onBind)。住户不用瞄准
@@ -247,6 +257,16 @@ export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged 
             </div>
           )}
         </div>
+        {onOpenSettings && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onOpenSettings(); }}
+            className="shrink-0 p-1.5 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            aria-label={t("settings.title")}
+          >
+            <SettingsGear />
+          </button>
+        )}
       </div>
     </aside>
   );
@@ -259,13 +279,14 @@ export function MobileTabBar({
   miot,
   onOpenMiotBind,
   onMiotChanged,
+  onOpenSettings,
 }: {
   active: TabKey;
   onChange: (key: TabKey) => void;
-  /** 米家账号信息——尾部加 MiotAccountButton 让 mobile 也能解绑/重绑。 */
   miot?: HomeStatus["miot"];
   onOpenMiotBind?: () => void;
   onMiotChanged?: () => void;
+  onOpenSettings?: () => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -299,8 +320,18 @@ export function MobileTabBar({
           </button>
         );
       })}
+      {onOpenSettings && (
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="shrink-0 px-2 py-2 text-text-secondary"
+          aria-label={t("settings.title")}
+        >
+          <SettingsGear size={22} />
+        </button>
+      )}
       {onOpenMiotBind && onMiotChanged && (
-        <div className="px-3 shrink-0">
+        <div className="px-2 shrink-0">
           <MiotAccountButton
             miot={miot ?? { bound: false, devicesCount: 0, roomsCount: 0 }}
             onBind={onOpenMiotBind}

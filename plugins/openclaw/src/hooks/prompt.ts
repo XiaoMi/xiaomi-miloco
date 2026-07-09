@@ -1,7 +1,9 @@
-import { loadHomeProfile } from "../home-profile/helpers.js";
+import path from "node:path";
+import { readFileSafe } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
 import { getCatalog } from "../services/catalog.js";
-import { deployTimezone } from "../utils/time.js";
+import { logger } from "../utils/logger.js";
+import { deployTimezone, toLocalParts } from "../utils/time.js";
 import type { HookRegister } from "./index.js";
 
 // 注入 profile：按 session 类型组合不同的块（方案见 _local/prompt-refactor-plan.md §3）。
@@ -98,9 +100,9 @@ ${formats.join("\n")}
 }
 
 const B_MEMORY = `## 家庭记忆
-做任何事（控设备、给建议、写通知）之前，先查这两份记忆，让动作更精准、更合成员心意：
-- **感知记忆**——家里最近发生了什么（每天自动归档的事件），用 \`memory_search\` 查（读不到当天文件就跳过）。
-- **家庭档案**——成员的偏好、习惯、家庭规则、设备使用经验，见另注入的家庭档案摘要。
+做任何事（控设备、给建议、写通知）之前，先结合这两份记忆，让动作更精准、更合成员心意：
+- **感知记忆**——家里发生了什么。**若下方有「今日感知日志」或「最近感知日志」段，直接读它拿最新情况**；没有该段或要看更早的日子，用 \`memory_search\` 查。
+- **家庭档案**——成员的偏好、习惯、家庭规则、设备使用经验，用 \`miloco-cli home-profile list\` 按需查（不再随上下文注入）。
 
 用户实时指令 > 档案规则（除非档案明确标注为底线 / 红线）。对话中出现成员喜好 / 家人信息 / 作息规律时，即使没说"记录"，也静默写入档案（先 \`home-profile list\` 看全量再写）。`;
 
@@ -134,17 +136,85 @@ const DEVICE_CATALOG_INTRO = `## 设备目录
 下方 \`# devices catalog\` 是预注入的高频设备子集（≤50 台，非全量），字段规则见下方目录头部的注释。它**只用于快速拿到已点名单台设备的 did / spec_name**，不是全屋设备的全集。凡涉及设备**集合 / 多台 / 不确定数量**（无论查询还是控制），或目录里找不到目标，**必须先 \`device list\` 拉全量**再逐台处理，别拿子集当全部。
 **任何 \`device control / props / action\` 或 \`scene\` 命令前（含查询），必须先读 \`miloco-devices\` skill**——命令选择、集合判定、安全确认、补 on、错误处理等都在其中，别只凭本目录裸发。`;
 
-function buildHomeProfileBlock(): string {
-  const md = loadHomeProfile().trim();
+// 感知日志逐轮全量注入、随一天增长会挤占上下文（它替换掉的家庭档案块原本按 token 截断），
+// 故设一个字符上限；超限时保留末尾（日志按时间追加，尾部即最近），并提示用 memory_search 查全量。
+const PERCEPTION_LOG_MAX_CHARS = 2000;
+
+let warnedMissingWorkspace = false;
+// workspaceDir 是让整个 feature 生效的唯一外部耦合点，缺失时会静默走「不出现」分支、
+// agent 同时失去感知日志与家庭档案两份上下文。打一条 warn（一次即可）让失败可观测。
+function warnMissingWorkspaceOnce(): void {
+  if (warnedMissingWorkspace) return;
+  warnedMissingWorkspace = true;
+  logger.warn(
+    "before_prompt_build 未拿到 workspaceDir：今日感知日志无法注入，" +
+      "agent 将同时缺少感知日志与家庭档案上下文。",
+  );
+}
+
+/** 超出上限时保留末尾（最近），从行首切齐，并加省略提示。 */
+function capPerceptionLog(text: string): string {
+  if (text.length <= PERCEPTION_LOG_MAX_CHARS) return text;
+  const tail = text.slice(text.length - PERCEPTION_LOG_MAX_CHARS);
+  const nl = tail.indexOf("\n");
+  const trimmed = nl >= 0 ? tail.slice(nl + 1) : tail;
+  return `…（更早的记录已省略，需要时用 \`memory_search\` 查全量）\n${trimmed}`;
+}
+
+/**
+ * 读工作区某日感知日志正文（剥掉首行冗余 H1）；不存在 / 空文件 / 仅 H1 → 返回空串。
+ *
+ * 在读取处就剥 H1 并判空，是为了让昨日回退在「digest 建了当天文件、写下 H1，却把这批日志
+ * 全判为该丢弃、正文为空」这种 LLM 偏差下也能触发——否则仅 H1 的文件会被当成"有内容"，
+ * 顶掉回退并注入一个空段。
+ */
+function readPerceptionBody(workspaceDir: string, date: string): string {
+  const file = path.join(workspaceDir, "memory", `${date}-miloco-perception.md`);
+  const md = readFileSafe(file).trim();
   if (!md) return "";
-  // profile.md 是 Python render.py 产出的独立文档（`# 家庭档案` 为根，omni 感知 prompt
-  // 也读同一份、且按 `# 家庭档案` 引用它）。注入 agent prompt 时整体降一级，嵌进 openclaw
-  // base 的 `##` 章节层级下：# 家庭档案→##、## 家庭成员→###、### 成员→####。改 render.py
-  // 会连带打掉 omni 的档案根标题，故只在注入侧降级。
-  const demoted = md.replace(/^(#{1,5}) /gm, "#$1 ");
-  // 空档案哨兵串（loadHomeProfile 的 "(暂无内容)"）无标题行，补上 ## 家庭档案 以免
-  // append 区出现无归属的孤立文本。
-  return demoted.startsWith("## 家庭档案") ? demoted : `## 家庭档案\n\n${md}`;
+  // digest 首行写 `# <date> 感知记忆`（H1）；本段段头已含日期 / 时区语境，该 H1 冗余，剥掉。
+  // 用字面空格 `^# +` 而非 `^#\s+`：`\s` 含换行且贪婪，遇到畸形首行 `#\n` 会一路吃进真正的 H1 + 正文。
+  // 尾部换行用 `*`（可零个）：仅 H1、无正文的文件（trim 后无尾换行）也要能整行剥净 → 正文判空 → 触发回退。
+  return md.replace(/^# +.*(?:\r?\n)*/, "").trim();
+}
+
+// 今日感知日志：把当天的感知记忆整段注入 agent 全局上下文，替代过去注入的家庭档案摘要——
+// 家庭管家更需要"家里今天发生了什么"这样的活上下文；家庭档案改由 agent 用 `home-profile list`
+// 按需自取。文件由 miloco-perception-digest cron 写在工作区 `memory/<date>-miloco-perception.md`，
+// 文件名日期按部署时区。工作区路径由宿主经 ctx.workspaceDir 提供，拿不到时整段不出现并 warn。
+//
+// 日期匹配：消费端按部署时区确定性拼文件名，生产端由 LLM 按家庭时区命名，两者只是**约定对齐**、
+// 并非严格同源——午夜窗口 / 清晨当天首个 digest 未落盘 / LLM 偶发命名偏差都可能让当天文件缺失。
+// 故当天缺失时回退到昨天的日志，且如实标注为「最近感知日志（<date>）」而非谎称今日。
+function buildPerceptionLogBlock(workspaceDir: string | undefined): string {
+  if (!workspaceDir) {
+    warnMissingWorkspaceOnce();
+    return "";
+  }
+  const now = toLocalParts(new Date().toISOString());
+  if (!now) return "";
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const today = `${now.y}-${pad2(now.m)}-${pad2(now.d)}`;
+
+  let body = readPerceptionBody(workspaceDir, today);
+  let heading = "今日感知日志";
+  let lead = "下面是今天家里发生的事";
+  if (!body) {
+    const y = toLocalParts(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+    if (y) {
+      const yDate = `${y.y}-${pad2(y.m)}-${pad2(y.d)}`;
+      const yBody = readPerceptionBody(workspaceDir, yDate);
+      if (yBody) {
+        body = yBody;
+        heading = "最近感知日志";
+        lead = `今天还没有感知记录，下面是最近一次（${yDate}）家里发生的事`;
+      }
+    }
+  }
+  if (!body) return "";
+  // 把余下标题各降一级，真正嵌进本段 H2 之下（否则降级后的 H2 会与段头同级）。
+  const demoted = capPerceptionLog(body.replace(/^(#{1,5}) /gm, "#$1 "));
+  return `## ${heading}\n${lead}（感知引擎自动归档，按家庭时区记录）。做判断 / 给建议前先读它；更早的日子用 \`memory_search\` 查。\n\n${demoted}`;
 }
 
 // ===== 组装 =====
@@ -154,7 +224,7 @@ export const registerBeforePromptBuildHook: HookRegister = (api) => {
     "before_prompt_build",
     async (
       event?: { prompt?: string },
-      ctx?: { sessionKey?: string; trigger?: string },
+      ctx?: { sessionKey?: string; trigger?: string; workspaceDir?: string },
     ) => {
     const profile = resolveProfile(ctx?.sessionKey, {
       prompt: event?.prompt,
@@ -171,11 +241,11 @@ export const registerBeforePromptBuildHook: HookRegister = (api) => {
     if (B_CONSTRAINTS) prepend.push(B_CONSTRAINTS);
     prepend.push(B_NOTIFY, B_LANGUAGE);
 
-    // ---- append：数据块（档案 → 待回应 → 目录），minimal 不带 ----
+    // ---- append：数据块（今日感知日志 → 待回应 → 目录），minimal 不带 ----
     const append: string[] = [];
     if (profile !== "minimal") {
-      const profileBlock = buildHomeProfileBlock();
-      if (profileBlock) append.push(profileBlock);
+      const perceptionBlock = buildPerceptionLogBlock(ctx?.workspaceDir);
+      if (perceptionBlock) append.push(perceptionBlock);
 
       if (profile === "full") {
         const pending = buildPendingSuggestionBlock();

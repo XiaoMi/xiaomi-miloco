@@ -474,7 +474,7 @@ miloco-cli identity register from-cluster \
 - 单帧的人体特征不足以代表一个人, **样本多样性差** → 后续识别误识率高
 - 后端 `--video` 通路已含完整的多人物追踪 + 跨帧关联 + 单帧选样, agent 端重做无意义
 
-CLI 已加防呆: `--image` 收到视频文件或 `xxx.mp4.png` 衍生帧直接 exit 1。OpenClaw 飞书插件下载视频默认存 `~/.openclaw/media/inbound/<原文件名>.mp4`。
+CLI 已加防呆: `--image` 收到视频文件或 `xxx.mp4.png` 衍生帧直接 exit 1。视频原文件由宿主框架下载到本地, 用框架本轮给出的真实路径直接调 `--video`(落盘目录随框架而异, 见"其他通用规则")。
 
 ### 约束 3 · 同一条消息内 ≥ 2 张图必须单次批量, 禁止拆调
 
@@ -509,7 +509,9 @@ miloco-cli identity register preview \
 
 - **入库前必须用户确认**, 不调 `register from-media`(已在约束 1 强调)
 - **重名后端自动追加同 person**, agent 不需要自己查重
-- **附件下载是 agent 框架职责**, 本 SKILL 假设附件已存到本地路径(飞书默认 `~/.openclaw/media/inbound/`)
+- **附件下载是 agent 框架职责**: 本 SKILL 假设附件已由宿主框架下载到本地, agent 一律使用框架在本轮消息/上下文中给出的**真实本地路径**调 `--image/--video`, **不要凭文件名自行拼目录**——文件名通常是框架生成的随机标识、无法预先推断, 落盘目录也随框架与渠道配置而异。下列各框架的实际落盘位置**仅供理解、不可作为路径来源**:
+    - OpenClaw: 附件真实文件在 `~/.openclaw/media/inbound/` 下, 本轮消息会给你它的完整路径(`MediaPath` 字段)和一个 `media://` 别名。调 `--image/--video` 用 `MediaPath` 的完整路径, 别用 `media://`(不是真实文件, 会报错)。
+    - Hermes(NousResearch): 落 `$HERMES_HOME`(默认 `~/.hermes`)下 `cache/images/` / `cache/videos/`(旧版 `image_cache/` / `video_cache/`)
 - **CLI 非零 exit code 时用人话告知用户**, 不直接抛 stack
 
 ## 异常处理

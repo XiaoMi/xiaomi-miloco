@@ -565,6 +565,29 @@ def test_device_control_annotates_unknown_error_code(runner, fake_home_info):
     assert data["code"] == -999999999
 
 
+def test_device_control_positive_code_is_success(runner, fake_home_info):
+    """设备侧正数码（如 code:1，指令已执行生效）不可误判为失败——对齐"负值即失败"。
+
+    回归：某些开关 set_property 成功后仍返回 code:1。旧逻辑（非白名单即失败）把它
+    打成"失败：设备侧执行失败"，上层 agent 据此盲目重试 / 谎报失败。修复后正数码
+    不补失败释义、外层信封保持成功。
+    """
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {
+            "code": 0,
+            "message": "executed successfully",
+            "data": {"results": [{"code": 1}]},
+        }
+        result = runner.invoke(
+            cli, ["device", "control", "lamp_001", "prop.2.1", "true"]
+        )
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert "code_msg" not in data["data"]["results"][0]
+    assert data["code"] == 0
+    assert "失败" not in data["message"]
+
+
 def test_device_control_partial_failure_envelope(runner, fake_home_info):
     """多设备部分失败 → 外层 message 标"部分失败（n/total）"。"""
     with patch("miloco_cli.client.api_post") as mock:
@@ -1956,6 +1979,80 @@ def test_scope_home_switch(runner):
         result = runner.invoke(cli, ["scope", "home", "switch", "home_1"])
     assert result.exit_code == 0
     mock_put.assert_called_once_with("/api/miot/scope/homes", {"home_id": "home_1"})
+
+
+# ─── scope camera enable/disable ─────────────────────────────────────────────
+
+
+def test_scope_camera_enable_batch(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "enable", "c1", "c2"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras",
+        {"items": [{"did": "c1", "in_use": True}, {"did": "c2", "in_use": True}]},
+    )
+
+
+def test_scope_camera_disable(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "disable", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras", {"items": [{"did": "c1", "in_use": False}]}
+    )
+
+
+# ─── scope camera mic-on / mic-off（拾音开关，走 voice 端点）──────────────────
+
+
+def test_scope_camera_mic_off(runner):
+    """mic-off → PUT voice 端点 voice_in_use=false。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "mic-off", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/voice",
+        {"items": [{"did": "c1", "voice_in_use": False}]},
+    )
+
+
+def test_scope_camera_mic_on_batch(runner):
+    """批量 did 语义与 enable/disable 同款。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "mic-on", "c1", "c2", "c3"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/voice",
+        {
+            "items": [
+                {"did": "c1", "voice_in_use": True},
+                {"did": "c2", "voice_in_use": True},
+                {"did": "c3", "voice_in_use": True},
+            ]
+        },
+    )
+
+
+def test_scope_camera_mic_requires_did(runner):
+    result = runner.invoke(cli, ["scope", "camera", "mic-off"])
+    assert result.exit_code != 0  # 缺 did 由 click 拒绝
+
+
+def test_scope_camera_mic_backend_rejection_passthrough(runner):
+    """backend 拒绝（未知 did / 感知已关闭不可设拾音）→ api_put 打错误并 exit 3，
+    CLI 不吞不改写（api_put 内部 sys.exit(3)，这里以 SystemExit 模拟其行为）。"""
+    with patch(
+        "miloco_cli.commands.scope.api_put",
+        side_effect=SystemExit(3),
+    ) as mock_put:
+        result = runner.invoke(cli, ["scope", "camera", "mic-off", "ghost"])
+    assert result.exit_code == 3
+    mock_put.assert_called_once()
 
 
 # ─── home-profile ───────────────────────────────────────────────────────────

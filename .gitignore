@@ -28,6 +28,8 @@ out/
 build
 dist
 target
+# 前端构建产物落地目录（scripts/build.sh 打 wheel 时生成并拷入，不进 git）
+backend/miloco/src/miloco/static/
 
 # Build-time generated skills copy
 plugins/openclaw/skills/
