@@ -86,6 +86,10 @@ class PerceptionRunner:
 
         self._is_running = True
 
+        # 重启时重读窗口时长（config 可能在停止期间被改）——__init__ 只读一次，
+        # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
+        self._collect_interval = get_settings().perception.collect.window_size
+
         # Recreate executor if it was shut down by a previous stop()
         if self._inference_executor._shutdown:
             self._inference_executor = ThreadPoolExecutor(

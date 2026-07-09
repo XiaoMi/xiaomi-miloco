@@ -17,6 +17,7 @@ from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
+    _collect_stream_response,
     call_omni,
     call_omni_stream,
     extract_usage,
@@ -31,6 +32,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_stream_prompt,
     format_person_label,
 )
+from miloco.perception.engine.omni.provider import get_adapter
 from miloco.perception.engine.omni.response_parser import (
     parse_identity_assignments,
     parse_omni_response,
@@ -45,6 +47,7 @@ from miloco.perception.types import MatchedRule, Speech, Suggestion
 
 if TYPE_CHECKING:
     from miloco.perception.engine.identity.engine import IdentityEngine
+    from miloco.perception.engine.omni.provider import OmniProviderAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,7 @@ async def run_omni_fused(
     # deliver_fused_failure，否则 mark_dispatched 已置 inflight=True 的 track
     # 永远不会被 GC（_gc_dead_tracks 跳过 inflight）也不会被重新派发
     # （needs_omni_call 返回 False）。
+    adapter = get_adapter(config.model)
     try:
         payload = build_fused_payload(
             packets=edge_packets,
@@ -164,9 +168,10 @@ async def run_omni_fused(
             gallery_snapshot=gallery_snapshot,
             config=fused_prompt_config,
             label_lookup=name_lookup,
+            adapter=adapter,
             matching_moot=person_lib_empty,
         )
-        raw_response = await _call_omni_messages(payload["messages"], config)
+        raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -260,7 +265,10 @@ def _get_fused_http_client(timeout: float) -> httpx.AsyncClient:
 
 
 async def _call_omni_messages(
-    messages: list[dict], config: OmniConfig, type: str = "realtime"
+    messages: list[dict],
+    config: OmniConfig,
+    type: str = "realtime",
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict[str, Any]:
     """调 omni——直接传 messages（fused 模式专用）。
 
@@ -272,54 +280,55 @@ async def _call_omni_messages(
     if not api_key:
         raise ValueError("MILOCO_MODEL__OMNI__API_KEY is not set; cannot call fused omni")
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": False,
-        "thinking": {"type": "disabled"},
-    }
+    if adapter is None:
+        adapter = get_adapter(config.model)
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=False,
+    )
+
+    forced_stream = body.get("stream", False)
 
     client = _get_fused_http_client(config.timeout)
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": MILOCO_USER_AGENT,
+    }
     try:
-        resp = await client.post(
-            f"{config.base_url}/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": MILOCO_USER_AGENT,
-            },
-            json=body,
-        )
-        if resp.status_code != 200:
-            logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
-            # 400 通常是 multimodal payload 服务端拒收 (corrupted image/video)。
-            # 静态从 traceback 无法定位是哪个块出问题, 这里输出每个多模态块的尺寸
-            # summary (不打 base64 本身, 仅尺寸) 便于事后定位。仅 400 路径打, 不影响
-            # 常态 log 量。
-            if resp.status_code == 400:
-                logger.error(
-                    "[omni] omni 400 payload 摘要 | %s",
-                    _summarize_multimodal_payload(messages),
-                )
-        resp.raise_for_status()
-        raw = resp.json()
+        if not forced_stream:
+            resp = await client.post(
+                f"{config.base_url}/chat/completions",
+                headers=headers,
+                json=body,
+            )
+            if resp.status_code != 200:
+                logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
+                if resp.status_code == 400:
+                    logger.error(
+                        "[omni] omni 400 payload 摘要 | %s",
+                        _summarize_multimodal_payload(messages),
+                    )
+            resp.raise_for_status()
+            raw = resp.json()
+        else:
+            raw = await _collect_stream_response(client, config.base_url, headers, body)
         # 服务端在 fused 大 payload 下偶发返回非 dict body (~1.5%);此处校验
         # 形态并 dump 截断后的原始响应,便于事后定位服务端返回了什么。
         if not isinstance(raw, dict):
-            logger.error(
-                "[omni-fused] unexpected response shape | status=%d type=%s body=%s",
-                resp.status_code,
-                type(raw).__name__,
-                resp.text[:1000],
-            )
+            detail = f"type={raw.__class__.__name__} body={str(raw)[:1000]}"
+            if not forced_stream:
+                detail = f"status={resp.status_code} {detail}"
+            logger.error("[omni-fused] unexpected response shape | %s", detail)
             raise OmniError(
-                f"omni response is not a dict (got {type(raw).__name__})"
+                f"omni response is not a dict (got {raw.__class__.__name__})"
             )
         fire_record(config.model, raw.get("usage", {}), type)
         return raw

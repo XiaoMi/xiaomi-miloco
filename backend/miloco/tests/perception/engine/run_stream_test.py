@@ -358,7 +358,7 @@ async def run_pipeline_with_timing(
     from miloco.perception.engine.omni.prompt_builder import _encode_video
 
     t0 = time.monotonic()
-    _video_b64 = _encode_video(identity_packet)
+    _video_b64, _media_info = _encode_video(identity_packet)
     timer.video_encode_ms = (time.monotonic() - t0) * 1000
 
     t0 = time.monotonic()

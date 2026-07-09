@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool
 
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
@@ -808,3 +808,66 @@ async def list_omni_models(
             code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
         )
     return NormalResponse(code=0, message="ok", data=await _fetch_models(base_url, api_key))
+
+
+# =============================================================================
+# 感知参数配置
+# =============================================================================
+
+
+class PerceptionConfigBody(BaseModel):
+    video_short_edge: int | None = Field(default=None, ge=64, le=2160)
+    omni_fps: int | None = Field(default=None, ge=1, le=30)
+    window_size: int | None = Field(default=None, ge=1, le=60)
+
+
+def _perception_config_payload() -> dict:
+    s = get_settings()
+    inp = s.perception.engine.get("input", {})
+    return {
+        "video_short_edge": inp.get("video_short_edge", 512),
+        "omni_fps": inp.get("omni_fps", 1),
+        "window_size": s.perception.collect.window_size,
+    }
+
+
+@router.get(
+    "/perception-config",
+    summary="获取当前感知参数",
+    response_model=NormalResponse,
+)
+def get_perception_config(current_user: str = Depends(verify_token)):
+    return NormalResponse(code=0, message="ok", data=_perception_config_payload())
+
+
+@router.put(
+    "/perception-config",
+    summary="修改感知参数（写 config.json 并重启感知引擎使其生效）",
+    response_model=NormalResponse,
+)
+async def put_perception_config(body: PerceptionConfigBody, current_user: str = Depends(verify_token)):
+    update: dict = {}
+    if body.video_short_edge is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["video_short_edge"] = body.video_short_edge
+    if body.omni_fps is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
+    if body.window_size is not None:
+        update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    payload = _perception_config_payload()
+    if update:
+        # omni_fps / window_size 是引擎/runner 构造时 cache 的，改这两个才需重启生效；
+        # video_short_edge 每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
+        # 前端 drawer 三字段一起 PUT，故按「新值 != 旧值」判断，避免只拖分辨率也整机重启
+        # （重启会丢在途感知窗口、重置 tracker）。
+        need_restart = (
+            (body.omni_fps is not None and body.omni_fps != payload["omni_fps"])
+            or (body.window_size is not None and body.window_size != payload["window_size"])
+        )
+        update_shared_config(**update)
+        payload = _perception_config_payload()
+        if need_restart:
+            # config 已写盘(不可回滚)；重启若失败仅带 restart_ok=False，不冒泡成 500——
+            # 否则前端会把「已保存+重启失败」误报成「保存失败」，误导用户以为改动丢失。
+            # 同步等重启完成再返回。
+            payload["restart_ok"] = await manager.perception_service.apply_config_restart()
+    return NormalResponse(code=0, message="ok", data=payload)

@@ -528,3 +528,34 @@ export async function getMemorySeries(
     `/api/monitor/memory/series?window=${w}&bucket=${bucket}`,
   );
 }
+
+// ─── Perception Config ─────────────────────────────────────────────────
+
+export interface PerceptionConfig {
+  video_short_edge: number;
+  omni_fps: number;
+  window_size: number;
+}
+
+export async function getPerceptionConfig(): Promise<PerceptionConfig> {
+  const r = await apiFetch<{ code: number; data: PerceptionConfig }>(
+    "/api/admin/perception-config",
+  );
+  return r.data;
+}
+
+// PUT 额外带 restart_ok：config 已写盘，但引擎重启可能失败（磁盘满/模型加载异常），
+// 前端据此区分「已生效」与「已保存但需手动重启」，不把后者误报成「保存失败」。
+export type UpdatePerceptionConfigResult = PerceptionConfig & {
+  restart_ok?: boolean;
+};
+
+export async function updatePerceptionConfig(
+  input: Partial<PerceptionConfig>,
+): Promise<UpdatePerceptionConfigResult> {
+  const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
+    "/api/admin/perception-config",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+  return r.data;
+}

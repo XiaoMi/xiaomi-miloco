@@ -17,6 +17,7 @@ class InputConfig:
     audio_overlap_ms: int = (
         100  # overlap window to reduce audio truncation at boundaries
     )
+    video_short_edge: int = 512
 
 
 @dataclass
