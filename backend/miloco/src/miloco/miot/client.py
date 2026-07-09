@@ -667,6 +667,24 @@ class MiotProxy:
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
+                # 启动/新设备补读 awake：对当前家庭、awake 缓存里还没有的相机读一次并回填。
+                # 重启后 refresh_cameras 在感知首轮 sync 就会跑 → 镜头态从启动即热，不依赖
+                # 开面板/上下线推送；select_active 的镜头门随即可用。只补"缺失的"→ 启动读
+                # 一遍、之后命中缓存不重复；后续新鲜度由 refresh_camera_online_status / 开启
+                # 校验 / 相机上下线推送刷新（属性变更订阅待后续补）。
+                try:
+                    missing = [
+                        did
+                        for did, info in cameras.items()
+                        if did not in self._camera_awake_cache
+                        and is_home_allowed(
+                            self._kv_repo, getattr(info, "home_id", None)
+                        )
+                    ]
+                    if missing:
+                        await self.read_cameras_awake(missing)
+                except Exception as e:
+                    logger.warning("refresh_cameras awake gap-fill failed: %s", e)
                 # manager(native PPCS 会话+解码线程)的建/销与感知投喂**共用同一口径**
                 # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线 + 镜头未关、按 did
                 # 截到上限。拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/镜头关/超额的
@@ -759,9 +777,14 @@ class MiotProxy:
                 return None
         # 锁外顺带刷新 awake(镜头开关)缓存：select_active / list_cameras_with_state 只读缓存
         # 做门、不各自打云；awake 的云读收在这条"前端列表前必调、且本就在读云"的路径里。
-        # awake 是云端属性、与 LAN 正交，故对全部相机一视同仁地读（不按 lan 过滤）。
+        # 只读**当前启用家庭**的相机——awake 缓存的消费方(list filter_by_home / select_active
+        # 镜头门)都只作用于当前家庭，对非当前家庭相机预读纯属浪费、还挤米家限频。
         try:
-            dids = list(self._camera_info_dict.keys())
+            dids = [
+                did
+                for did, info in self._camera_info_dict.items()
+                if is_home_allowed(self._kv_repo, getattr(info, "home_id", None))
+            ]
             if dids:
                 await self.read_cameras_awake(dids)
         except Exception as e:

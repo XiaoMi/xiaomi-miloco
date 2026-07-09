@@ -1649,3 +1649,92 @@ async def test_read_cameras_awake_cache_only(_scope_proxy_env):
     out = await proxy.read_cameras_awake(["c1", "c2"], cache_only=True)
     assert out == {"c1": True, "c2": None}
     assert proxy.get_device_properties.await_count == 1
+
+
+# ─── toggle_camera 三态开启门 + 可用集上限 ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_toggle_enable_rejected_cloud_offline():
+    """开启云端离线的相机 → 拒绝，文案含「米家云端离线」。"""
+    cam = _camera("c1", home_id="H1", online=False)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    with pytest.raises(ValidationException, match="米家云端离线"):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_enable_rejected_lan_unreachable():
+    """开启局域网不可达（云端在线）的相机 → 拒绝，文案含「局域网不可达」。"""
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    with pytest.raises(ValidationException, match="局域网不可达"):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_enable_rejected_lens_off():
+    """开启镜头关闭（awake=False，云端+局域网都好）的相机 → 拒绝，含「镜头已关闭」。
+    awake 走新鲜读，CLI/API 直连同样被挡（闸在后端）。"""
+    cam = _camera("c1", home_id="H1")  # 云端+局域网都好
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    svc._miot_proxy.read_cameras_awake = AsyncMock(  # type: ignore[assignment]
+        side_effect=lambda dids, **kw: {"c1": False}
+    )
+    with pytest.raises(ValidationException, match="镜头已关闭"):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_cap_counts_usable_offline_frees_slot():
+    """上限数「可用集」：已启用相机里有一台离线时，它不占名额 → 仍可再开一台在线相机。"""
+    dids = _cam_dids(LIMIT)  # c001..cN，全在线、未拉黑
+    cameras = {d: _camera(d, home_id="H1") for d in dids}
+    cameras[dids[0]] = _camera(dids[0], home_id="H1", online=False)  # 其中一台离线
+    new = "c_new"
+    cameras[new] = _camera(new, home_id="H1")  # 新的在线相机，初始被拉黑(关)
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps([new]),
+    })
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+
+    # 未拉黑意图 = LIMIT 台，但其中 1 台离线 → 可用只有 LIMIT-1 → 开 new(在线)
+    # 后可用 = LIMIT ≤ 上限 → 放行（离线那台把名额让了出来）。
+    res = await svc.toggle_camera([{"did": new, "in_use": True}])
+    by_did = {c["did"]: c for c in res}
+    assert by_did[new]["in_use"] is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_gap_fills_awake_for_current_home(_scope_proxy_env):
+    """启动/新设备：refresh_cameras 对当前家庭、awake 缓存里还没有的相机补读并回填，
+    不依赖 web/推送。已在缓存的不重复读；别的家庭的不补。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    miot_client.get_cameras_async = AsyncMock(return_value={
+        "c1": _camera("c1", home_id="H1"),  # 已在缓存 → 不重复
+        "c2": _camera("c2", home_id="H1"),  # 缺失 → 补读
+        "c3": _camera("c3", home_id="H2"),  # 别的家庭 → 不补
+    })
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+    proxy._device_info_dict = {  # type: ignore[attr-defined]
+        "c1": SimpleNamespace(urn="urn:c1", model="m"),
+        "c2": SimpleNamespace(urn="urn:c2", model="m"),
+        "c3": SimpleNamespace(urn="urn:c3", model="m"),
+    }
+    spec = {"prop.2.1": {"service_type_name": "camera-control", "type_name": "on"}}
+    proxy._fetch_device_spec = AsyncMock(return_value=spec)  # type: ignore[assignment]
+    proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
+        {"did": "c2", "siid": 2, "piid": 1, "value": False, "code": 0},
+    ])
+    proxy._camera_awake_cache["c1"] = True  # 预置：已有
+
+    await proxy.refresh_cameras()
+
+    assert proxy._camera_awake_cache.get("c1") is True      # 未被重复读、保持
+    assert proxy._camera_awake_cache.get("c2") is False     # 缺失 → 补读到 False
+    assert "c3" not in proxy._camera_awake_cache            # 别的家庭 → 不补

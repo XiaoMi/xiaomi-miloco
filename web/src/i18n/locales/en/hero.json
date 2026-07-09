@@ -17,7 +17,6 @@
     "noStreaming": "No cameras perceiving yet, enable one to start",
     "benchTitle": "Cameras not perceiving",
     "benchTitleFull": "Maxed out at {{n}} cameras, disable one to enable another",
-    "benchOffline": "Offline",
     "stateCloudOnline": "Cloud online",
     "stateCloudOffline": "Cloud offline",
     "stateLanOk": "LAN reachable",

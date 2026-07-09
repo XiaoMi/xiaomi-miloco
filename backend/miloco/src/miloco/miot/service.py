@@ -1081,45 +1081,65 @@ class MiotService:
                 f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
             )
 
+        def _in_scope(did: str) -> bool:
+            return is_home_allowed(
+                self._kv_repo, getattr(cameras[did], "home_id", None)
+            )
+
         if enable_dids:
-            # 离线设备禁止「开启」投喂:它被感知接入层 online_only 过滤、永远连不上,
-            # 开了也不出画面、徒占上限名额。只拦「开启」——已启用的设备掉线后仍保留
-            # inUse=true(允许态不被强制改),且可正常被「关闭」(disable 不走这条校验)。
-            # 在线口径 = online && lan_online,与 list_cameras_with_state 的 is_online 一致。
-            def _online(did: str) -> bool:
-                info = cameras[did]
-                return bool(getattr(info, "online", False)) and bool(
-                    getattr(info, "lan_online", False)
-                )
+            in_scope = {d for d in cameras if _in_scope(d)}
+            # 三态门（后端唯一执法点：web 置灰只保护前端，CLI/API 绕过前端全靠这里）。
+            # 开启的相机必须 云端在线 && 局域网可达 && 镜头未关，任一坏都拒、给对应文案。
+            # awake 走**新鲜云读**（非 cache_only）——CLI/冷缓存下也能准确挡镜头关。
+            # 只拦「开启」；已启用的相机掉线/镜头关仍可被「关闭」(disable 不走这条)。
+            awake_map = await self._miot_proxy.read_cameras_awake(sorted(in_scope))
 
-            offline_enable = [d for d in enable_dids if not _online(d)]
-            if offline_enable:
+            def _cloud(did: str) -> bool:
+                return bool(getattr(cameras[did], "online", False))
+
+            def _lan(did: str) -> bool:
+                return bool(getattr(cameras[did], "lan_online", False))
+
+            def _lens_ok(did: str) -> bool:
+                return awake_map.get(did) is not False  # None/True 放行,未知不误杀
+
+            cloud_offline = [d for d in enable_dids if not _cloud(d)]
+            if cloud_offline:
                 raise ValidationException(
-                    f"摄像头当前离线,无法开启投喂（{offline_enable}）;请待其上线后再启用"
+                    f"摄像头米家云端离线,无法开启（{cloud_offline}）;请待其上线后再启用"
+                )
+            lan_offline = [d for d in enable_dids if not _lan(d)]
+            if lan_offline:
+                raise ValidationException(
+                    f"摄像头局域网不可达,无法开启（{lan_offline}）;"
+                    "请确认主机与相机在同一局域网后再启用"
+                )
+            lens_off = [d for d in enable_dids if not _lens_ok(d)]
+            if lens_off:
+                raise ValidationException(
+                    f"摄像头镜头已关闭,无法开启感知（{lens_off}）;"
+                    "请先在米家中打开该摄像头镜头后再启用"
                 )
 
-            # 上限检查：用户主动 enable 超限时直接报错，不做自动禁用。计数口径与
-            # list_cameras_with_state / refresh_cameras 一致——只数当前启用家庭内、
-            # 未拉黑的相机（get_cameras 返回全部家庭，须按 home 过滤）。
+            # 上限检查：数「可用集」而非「意图集」——未拉黑 + 在当前家庭 + 三态好
+            # (云端+局域网+镜头开)。离线/局域网不可达/镜头关的相机**不占名额**（与前端
+            # activeCount 按 in_use=活跃集 计数同口径；也与 list/refresh 的 select_active
+            # 一致）。这样不会出现「面板显示有名额、点开启却被后端拒」的口径背离。
             denied = denied_camera_dids(self._kv_repo)
 
-            def _in_scope(did: str) -> bool:
-                return is_home_allowed(
-                    self._kv_repo, getattr(cameras[did], "home_id", None)
-                )
+            def _usable(did: str) -> bool:
+                return _cloud(did) and _lan(did) and _lens_ok(did)
 
-            in_scope = {d for d in cameras if _in_scope(d)}
-            # 模拟本批操作后的启用集：现状未拉黑的，先去掉本批 disable，再并入
-            # 本批 enable。enable 最后并入 → 与写库顺序一致（disable 先写、
-            # enable 后写，矛盾输入 enable 胜出）。单向 enable / 单向 disable /
-            # 混合换机都按净结果校验。
-            final_enabled = (
+            # 模拟本批操作后的启用集：现状未拉黑的，先去掉本批 disable，再并入本批
+            # enable（enable 最后并入 → 与写库顺序一致，矛盾输入 enable 胜出）。
+            intent_after = (
                 (in_scope - denied) - set(disable_dids)
             ) | (set(enable_dids) & in_scope)
-            if len(final_enabled) > MAX_ENABLED_CAMERAS:
+            usable_after = {d for d in intent_after if _usable(d)}
+            if len(usable_after) > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
                     f"最多同时启用 {MAX_ENABLED_CAMERAS} 台摄像头"
-                    f"（操作后将有 {len(final_enabled)} 台），"
+                    f"（操作后将有 {len(usable_after)} 台），"
                     f"请先禁用一台再启用新摄像头"
                 )
 

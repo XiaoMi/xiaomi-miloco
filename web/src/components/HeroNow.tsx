@@ -215,8 +215,9 @@ function CameraSection({
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;
   const allOff = activeCount === 0;
-  // 满额判断按 inUse 计数(与后端 toggle_camera 上限校验同口径):已启用的相机即便
-  // 掉线仍保留 inUse、占名额(允许态不被强制改),要腾名额得显式关掉它。
+  // 满额判断按 inUse(=活跃集:未拉黑 + 三态好 + 上限内)计数,与后端 toggle_camera 的
+  // 上限校验同口径——后端也数「可用集」(离线/局域网不可达/镜头关的不占名额)。所以
+  // 面板显示的名额 = 后端认的名额,不会出现「看着有位、点开启却被后端拒」。
   const atCapacity = activeCount >= maxStreamCams;
   // 「全开」只能开「可用且未投喂」的——不可用相机(云端离线/局域网不可达/镜头关)后端
   // toggle_camera 会整批拒绝,若把它们塞进批量 enable,会连带可用的一起失败。

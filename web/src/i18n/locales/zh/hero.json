@@ -17,7 +17,6 @@
     "noStreaming": "还没有摄像头在感知，打开开关开启感知",
     "benchTitle": "miloco 未感知设备",
     "benchTitleFull": "已达到上限 {{n}} 路，先关掉上方一路才能开启感知",
-    "benchOffline": "已离线",
     "stateCloudOnline": "云端在线",
     "stateCloudOffline": "云端离线",
     "stateLanOk": "局域网可达",
