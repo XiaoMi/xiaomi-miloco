@@ -93,10 +93,12 @@ def _warn_utc_once() -> None:
     _logger.warning(
         "Resolved deploy timezone is UTC — no household lives in UTC; the server "
         "timezone is likely unconfigured and all user-facing times may be "
-        "mislabeled. Preferred fix (aligns every component incl. the openclaw "
-        "agent, which only reads the host timezone): set the HOST timezone, e.g. "
-        "`sudo timedatectl set-timezone <IANA-name>` or container `TZ` env. If "
-        "the host cannot be changed: miloco-cli config set timezone <IANA-name>."
+        "mislabeled. Preferred fix: set the HOST timezone — the shared fallback for "
+        "both miloco and the openclaw agent (each reads its own config first, then "
+        "falls back to the host), e.g. `sudo timedatectl set-timezone <IANA-name>` "
+        "or container `TZ` env. If the host cannot be changed, set both app-side: "
+        "miloco-cli config set timezone <IANA-name> AND openclaw's "
+        "agents.defaults.userTimezone."
     )
 
 
