@@ -1132,6 +1132,17 @@ class MIoTClient:
         self._event_sub_dids.update(dids)
         return dids
 
+    async def unsub_device_event_occurred_many_async(self, dids: list[str]) -> None:
+        """Unsubscribe device-event topics for multiple dids in one packet."""
+        if not dids:
+            return
+        topics = [f"device/{did}/up/event_occured/#" for did in dids]
+        mips = self._mips_cloud
+        if mips is not None:
+            await mips.unsub_many_async(topics)
+        for did in dids:
+            self._event_sub_dids.discard(did)
+
     async def unsub_device_event_occurred_async(self, did: str) -> None:
         self._event_sub_dids.discard(did)
         mips = self._mips_cloud

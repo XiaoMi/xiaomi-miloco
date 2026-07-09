@@ -1138,6 +1138,27 @@ class MiotProxy:
                 logger.error("unsubscribe device-event failed did=%s: %s", did, e)
             return did
 
+        async def _unsub_many(dids: set) -> set:
+            """Batch unsubscribe multiple event dids in one MQTT packet."""
+            if not dids:
+                return set()
+            removed: set[str] = set()
+            try:
+                await self._miot_client.unsub_device_event_occurred_many_async(
+                    sorted(dids)
+                )
+                removed = dids
+                logger.info(
+                    "device-event batch unsubscribed: dids=%s", sorted(dids)
+                )
+            except Exception as e:
+                logger.error(
+                    "batch device-event unsubscribe failed, falling back: %s", e
+                )
+                results = await asyncio.gather(*(_unsub(d) for d in dids))
+                removed = {d for d in results if d}
+            return removed
+
         if len(to_add) > 1 and hasattr(
             self._miot_client, "sub_device_event_occurred_many_async"
         ):
@@ -1147,7 +1168,11 @@ class MiotProxy:
                         sorted(to_add)
                     )
                 )
-                removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+                removed = (
+                    await _unsub_many(to_remove)
+                    if len(to_remove) > 1
+                    else await asyncio.gather(*(_unsub(d) for d in to_remove))
+                )
                 self._subscribed_event_dids |= set(added_batch)
                 self._subscribed_event_dids -= {d for d in removed if d}
                 logger.info(
@@ -1164,7 +1189,11 @@ class MiotProxy:
                 )
 
         added = await asyncio.gather(*(_sub(d) for d in to_add))
-        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        removed = (
+            await _unsub_many(to_remove)
+            if len(to_remove) > 1
+            else await asyncio.gather(*(_unsub(d) for d in to_remove))
+        )
         self._subscribed_event_dids |= {d for d in added if d}
         self._subscribed_event_dids -= {d for d in removed if d}
         logger.info(

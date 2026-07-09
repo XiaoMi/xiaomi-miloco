@@ -724,6 +724,28 @@ class MIoTMipsCloud:
             if unattended:
                 self._fire_subscribe_success(topic)
 
+    async def unsub_many_async(self, topics: list[str]) -> None:
+        """Unsubscribe multiple topics in one MQTT UNSUBSCRIBE packet."""
+        if not topics:
+            return
+        mqtt = self._mqtt
+        with self._subs_lock:
+            for topic in topics:
+                self._subs.pop(topic, None)
+        if mqtt is None or not self._connected:
+            return
+        try:
+            result, mid = mqtt.unsubscribe(topics)
+            if result != MQTTErrorCode.MQTT_ERR_SUCCESS:
+                _LOGGER.warning(
+                    "batch unsubscribe failed: result=%s mid=%s topics=%s",
+                    result, mid, topics,
+                )
+            else:
+                _LOGGER.info("mips_cloud batch unsubscribed topics=%s", topics)
+        except Exception as e:
+            _LOGGER.warning("mips_cloud batch unsubscribe(%s) raised: %s", topics, e)
+
     async def _unsubscribe_async(self, topic: str) -> None:
         mqtt = self._mqtt
         with self._subs_lock:
@@ -771,8 +793,8 @@ class MIoTMipsCloud:
         # to the main loop via call_soon_threadsafe.
         with self._subs_lock:
             active = list(self._subs.values())
-        for sub in active:
-            self._main_loop.call_soon_threadsafe(self._spawn_resubscribe, sub)
+        if active:
+            self._main_loop.call_soon_threadsafe(self._spawn_batch_resubscribe, active)
 
         self._fire_connect_future(None)
         self._dispatch_state_handlers(True)
@@ -788,6 +810,73 @@ class MIoTMipsCloud:
                 unattended=True,
             )
         )
+
+    def _spawn_batch_resubscribe(self, subs: list[_Subscription]) -> None:
+        """Spawn a batch unattended resubscribe. Called via call_soon_threadsafe."""
+        asyncio.create_task(self._resubscribe_batch_async(subs))
+
+    async def _resubscribe_batch_async(self, subs: list[_Subscription]) -> None:
+        """Re-subscribe all topics in one MQTT SUBSCRIBE packet after reconnect.
+
+        Issuing one SUBSCRIBE with all topics lets the broker evaluate them
+        against a single ACL snapshot, avoiding the intermittent 0x87 window
+        that can occur when topics are re-issued one-by-one.  On any failure
+        the method falls back to individual ``_spawn_resubscribe`` calls so
+        that a single bad topic cannot block the rest.
+        """
+        try:
+            mqtt = self._mqtt
+            if mqtt is None or not self._connected:
+                return
+            future: asyncio.Future[list[int]] = self._main_loop.create_future()
+            topics = [(sub.topic, sub.qos) for sub in subs]
+            result, mid = mqtt.subscribe(topics)
+            if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
+                _LOGGER.error(
+                    "batch resubscribe failed locally: result=%s mid=%s", result, mid
+                )
+                for sub in subs:
+                    self._spawn_resubscribe(sub)
+                return
+            with self._pending_lock:
+                self._pending_subscribes[mid] = future
+            try:
+                reason_codes = await asyncio.wait_for(
+                    future, timeout=MIHOME_MQTT_SUBSCRIBE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.error(
+                    "batch resubscribe SUBACK timeout, falling back to individual"
+                )
+                with self._pending_lock:
+                    self._pending_subscribes.pop(mid, None)
+                for sub in subs:
+                    self._spawn_resubscribe(sub)
+                return
+            ok = 0
+            for sub, code in zip(subs, reason_codes):
+                if code in _SUBACK_SUCCESS_CODES:
+                    ok += 1
+                    self._fire_subscribe_success(sub.topic)
+                else:
+                    if code in _PERMANENT_SUBACK_FAILURES:
+                        with self._subs_lock:
+                            self._subs.pop(sub.topic, None)
+                    self._fire_subscribe_error(
+                        sub.topic, code, _describe_reason_code(code)
+                    )
+            _LOGGER.info(
+                "mips_cloud batch resubscribed after reconnect: %d/%d ok topics=%s",
+                ok,
+                len(subs),
+                [sub.topic for sub in subs],
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "batch resubscribe unexpected error, falling back: %s", e
+            )
+            for sub in subs:
+                self._spawn_resubscribe(sub)
 
     def _on_disconnect(
         self,
