@@ -303,3 +303,136 @@ async def test_handle_realtime_sends_all_when_no_early_sent(proxy):
 # test_unmatched_enabled_rules_get_false_each_cycle / test_unmatched_skips_early_sent_rules
 # 已迁移到 test_perception_client_rule_dispatch.py(per-device 状态机重构后,
 # false 广播改为按 device_rule_map 精确推退,旧 case 的全集 enabled rule 模型不再适用)。
+
+
+# Regression test: timezone-aware suggestion filtering (PR #359, issue #317)
+#
+# Verifies that _filter_suggestions_by_rules correctly handles suggestions
+# whose time_window is in the deploy timezone. Before the fix, time.time() % 86400
+# returned UTC seconds, causing fresh suggestions to be incorrectly filtered as stale
+# in non-UTC deployments (e.g. UTC+8).
+
+from miloco.perception.client import _filter_suggestions_by_rules
+from miloco.perception.types import Suggestion
+
+
+def _make_suggestion(sugg_id, time_window="", source_device_ids=None):
+    return Suggestion(
+        event=f"event_{sugg_id}",
+        action=f"action_{sugg_id}",
+        urgency="medium",
+        id=sugg_id,
+        time_window=time_window,
+        source_device_ids=source_device_ids or [],
+    )
+
+
+class TestTimezoneAwareFiltering:
+    """Regression: now_sec must be in deploy timezone, not UTC.
+
+    These tests use concrete time_window strings (HH:MM:SS-HH:MM:SS format)
+    and matching now_sec values. The math is timezone-agnostic — the important
+    thing is that the caller provides now_sec in the SAME timezone as time_window.
+    """
+
+    def test_fresh_suggestion_not_filtered(self):
+        """Suggestion from 3 seconds ago should NOT be filtered as stale."""
+        # time_window: produced 10:00:00 to 10:00:03 (3-second window)
+        # now: 10:00:06 → age = 3 seconds, well under 300s threshold
+        s = _make_suggestion(1, time_window="10:00:00-10:00:03")
+        now_sec = 10 * 3600 + 0 * 60 + 6  # 10:00:06
+
+        result = _filter_suggestions_by_rules(
+            [s], enabled_device_ids=set(), has_any_rule=False,
+            now_sec=now_sec, log_prefix="tz-test",
+        )
+        assert len(result) == 1, "Fresh suggestion should be kept"
+
+    def test_stale_suggestion_filtered(self):
+        """Suggestion from 600 seconds ago should be filtered (past 300s threshold)."""
+        # time_window: 09:50:00 to 09:50:03
+        # now: 10:00:06 → age = 603 seconds > 300
+        s = _make_suggestion(1, time_window="09:50:00-09:50:03")
+        now_sec = 10 * 3600 + 0 * 60 + 6  # 10:00:06
+
+        result = _filter_suggestions_by_rules(
+            [s], enabled_device_ids=set(), has_any_rule=False,
+            now_sec=now_sec, log_prefix="tz-test",
+        )
+        assert len(result) == 0, "Stale suggestion should be filtered"
+
+    def test_cross_midnight_fresh(self):
+        """Suggestion from 20 seconds before midnight, checked 10 seconds after midnight.
+
+        age = (0*3600 + 0*60 + 10) - (23*3600 + 59*60 + 50) + 86400 = 20
+        Should NOT be filtered (20s < 300s).
+        """
+        s = _make_suggestion(1, time_window="23:59:50-23:59:53")
+        now_sec = 0 * 3600 + 0 * 60 + 10  # 00:00:10
+
+        result = _filter_suggestions_by_rules(
+            [s], enabled_device_ids=set(), has_any_rule=False,
+            now_sec=now_sec, log_prefix="tz-test",
+        )
+        assert len(result) == 1, "Cross-midnight fresh suggestion should be kept"
+
+    def test_cross_midnight_stale(self):
+        """Suggestion from >300s before midnight, checked after midnight."""
+        # time_window: 23:54:50 to 23:54:53
+        # now: 00:00:10 → age = 10 - (23*3600+59*60+50) + 86400 = 320 seconds > 300
+        s = _make_suggestion(1, time_window="23:54:50-23:54:53")
+        now_sec = 0 * 3600 + 0 * 60 + 10  # 00:00:10
+
+        result = _filter_suggestions_by_rules(
+            [s], enabled_device_ids=set(), has_any_rule=False,
+            now_sec=now_sec, log_prefix="tz-test",
+        )
+        assert len(result) == 0, "Cross-midnight stale suggestion should be filtered"
+
+    def test_no_time_window_not_filtered(self):
+        """Suggestion with empty time_window should NOT be filtered by age."""
+        s = _make_suggestion(1, time_window="")
+        now_sec = 12 * 3600  # noon
+
+        result = _filter_suggestions_by_rules(
+            [s], enabled_device_ids=set(), has_any_rule=False,
+            now_sec=now_sec, log_prefix="tz-test",
+        )
+        assert len(result) == 1, "Empty time_window should pass through"
+
+    def test_utc_plus_8_scenario(self):
+        """Simulates the exact bug: UTC+8 deployment.
+
+        Before fix: time.time() % 86400 returns UTC seconds.
+        If UTC time is 02:00:06 (Shanghai 10:00:06), UTC now_sec = 7206.
+        A suggestion with time_window in Shanghai timezone "10:00:00-10:00:03"
+        would have end_sec = 36003. age = 7206 - 36003 = -29797 → +86400 = 56603s.
+        This exceeds 300s → false positive stale → ALL suggestions filtered!
+
+        After fix: now_sec is in deploy timezone = 36006.
+        age = 36006 - 36003 = 3 seconds → NOT stale. ✓
+        """
+        # Suggestion produced at Shanghai 10:00:00-10:00:03
+        s = _make_suggestion(1, time_window="10:00:00-10:00:03")
+
+        # Deploy timezone now = 10:00:06 (correct)
+        now_sec_correct = 10 * 3600 + 0 * 60 + 6  # 36006
+
+        result = _filter_suggestions_by_rules(
+            [s], enabled_device_ids=set(), has_any_rule=False,
+            now_sec=now_sec_correct, log_prefix="tz-correct",
+        )
+        assert len(result) == 1, "Deploy-timezone now_sec: fresh suggestion kept"
+
+        # Simulate the OLD buggy path: UTC now_sec when time_window is in UTC+8
+        # UTC 02:00:06 → now_sec = 7206
+        now_sec_utc = 2 * 3600 + 0 * 60 + 6  # 7206 (buggy UTC)
+
+        result_buggy = _filter_suggestions_by_rules(
+            [s], enabled_device_ids=set(), has_any_rule=False,
+            now_sec=now_sec_utc, log_prefix="tz-buggy",
+        )
+        assert len(result_buggy) == 0, (
+            "UTC now_sec with deploy-timezone time_window: "
+            "demonstrates the bug (fresh suggestion falsely filtered)"
+        )
