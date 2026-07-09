@@ -922,8 +922,8 @@ interface BackendScopeCamera {
   room_name?: string | null;
   is_online: boolean;
   in_use: boolean;
-  // 拾音存储偏好（不在拾音黑名单即 true，默认 true）。false = mic-off：该相机声音
-  // 完全不被处理。旧后端无此字段时兜底 true。
+  // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
+  // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
   voice_in_use?: boolean;
   connected: boolean;
 }
@@ -938,7 +938,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     roomName: c.room_name ?? undefined,
     isOnline: c.is_online,
     inUse: c.in_use,
-    voiceInUse: c.voice_in_use ?? true,
+    voiceInUse: c.voice_in_use ?? false,
     connected: c.connected,
   }));
 }
