@@ -167,6 +167,9 @@ def build_agent_text(
 ) -> str:
     """拼接 meaningful_events.text 字段（聚合三类信息，顺序固定：指令 → 提醒 → 规则）。"""
     parts: list[str] = []
+    # 在通知头部注入系统时间，让 agent 感知到当前时刻（用于判断时段/时效性）
+    if result.time:
+        parts.append(f"当前时间: {result.time}")
     if sp := build_speeches_text(_with_caption(result.speeches, result.caption)):
         parts.append(sp)
     if sg := build_suggestions_text(_with_caption(result.suggestions, result.caption)):
