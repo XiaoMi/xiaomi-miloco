@@ -18,7 +18,10 @@ from concurrent.futures import ThreadPoolExecutor
 from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.perception.collect.collector import MultimodalCollector
-from miloco.perception.processor import PipelineProcessor
+from miloco.perception.processor import (
+    PipelineProcessor,
+    cancel_inflight_omni_probe_tasks,
+)
 from miloco.perception.schema import EngineState, PerceptionEngineStatus
 
 logger = logging.getLogger(__name__)
@@ -135,22 +138,9 @@ class PerceptionRunner:
         self._perception_task = None
         self._sync_devices_task = None
 
-        # 清理 in-flight probe task:_run_omni_probe 起的 fire-and-forget task 只被
-        # _OMNI_PROBE_TASKS 强引用,不受 _perception_task cancel 影响。若不清,shutdown
-        # 时 loop 销毁前 probe 未跑到 finally 的 clear_probe_in_flight,同进程重启 runner
-        # (测试 / manager 重建) 时 _probe_in_flight 残留 True,try_arm_probe 永远返 False,
-        # 自愈通道永久卡死,只能重启进程。
-        from miloco.perception.processor import _OMNI_PROBE_TASKS
-
-        for task in list(_OMNI_PROBE_TASKS):
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[engine] 清理 omni probe task 时异常 | %s", e)
+        # 清理 in-flight probe task,防同进程再启 runner 时 _probe_in_flight 残留导致
+        # 自愈通道永久卡死。逻辑封在 processor.cancel_inflight_omni_probe_tasks 里。
+        await cancel_inflight_omni_probe_tasks()
 
         self._inference_executor.shutdown(wait=False)
 

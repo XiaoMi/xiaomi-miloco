@@ -74,6 +74,28 @@ _GATE_TOTAL_RE = re.compile(r"^gate_[^_]+_ms$")
 _OMNI_PROBE_TASKS: set[asyncio.Task] = set()
 
 
+async def cancel_inflight_omni_probe_tasks() -> None:
+    """runner.stop 用:取消所有未完成的 omni probe task 并等待它们退出。
+
+    独立函数暴露给外部,是为了让 runner 不用 import 私有名 _OMNI_PROBE_TASKS
+    (CodeQL py/import-private-name / py/cyclic-import 会报)。若不清理,shutdown
+    时 loop 销毁前 probe 未跑到 finally 的 clear_probe_in_flight,同进程再启
+    runner (测试 / manager 重建) 时 _probe_in_flight 残留 True,try_arm_probe
+    永远返 False,自愈通道永久卡死,只能重启进程。
+    """
+    for task in list(_OMNI_PROBE_TASKS):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # 预期路径:probe 被 cancel 后走 finally 里的 clear_probe_in_flight
+                # 再抛出 CancelledError,这里只需吞掉 —— 不是错误状态。
+                pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[engine] 清理 omni probe task 时异常 | %s", e)
+
+
 async def _run_omni_probe() -> None:
     """OPEN_RECOVERABLE + backoff 到期时的自动探测协程。
 
