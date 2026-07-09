@@ -17,14 +17,17 @@ import { toast } from "./Toast";
 
 
 function useCountdownSeconds(target_ms: number | null): number | null {
-  const [now, setNow] = useState(Date.now());
+  // 不缓存 now：如果缓存挂载时的 Date.now(),target_ms 稍后才从 SSE 到达时,首次 render
+  // 会用挂载时刻的老 now 与将来的 target 作差,显示"等待时长"而非"到期剩余秒数"。
+  // 每秒 setTick 触发重渲染,渲染时直接读 Date.now() 保证首帧就正确。
+  const [, setTick] = useState(0);
   useEffect(() => {
     if (target_ms == null) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, [target_ms]);
   if (target_ms == null) return null;
-  return Math.max(0, Math.round((target_ms - now) / 1000));
+  return Math.max(0, Math.round((target_ms - Date.now()) / 1000));
 }
 
 
