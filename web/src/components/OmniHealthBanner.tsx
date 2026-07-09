@@ -51,11 +51,16 @@ function useCountdownToDeadline(deadline_ms: number | null): number | null {
   const [, setTick] = useState(0);
   useEffect(() => {
     if (deadline_ms == null) return;
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    const id = setInterval(() => {
+      setTick((t) => t + 1);
+      // 到点即停,避免 setTick 每次产生新值持续触发 banner 重渲染空转(CB-N6)。
+      if (Date.now() >= deadline_ms) clearInterval(id);
+    }, 1000);
     return () => clearInterval(id);
   }, [deadline_ms]);
   if (deadline_ms == null) return null;
-  return Math.max(0, Math.round((deadline_ms - Date.now()) / 1000));
+  // ceil 而非 round:避免真实剩余 <500ms 时四舍五入到 0 让按钮提前 ~0.5s 可点(CB-N7)。
+  return Math.max(0, Math.ceil((deadline_ms - Date.now()) / 1000));
 }
 
 
