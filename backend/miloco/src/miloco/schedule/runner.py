@@ -318,6 +318,11 @@ class ScheduleRunner:
         if cron.kind == "at":
             self._cron_repo.mark_fired_and_delete(cron.cron_id, now_ms())
             self._remove_retry_job(cron.cron_id)
+            logger.info(
+                "at cron %s fired ok and deleted (task_id=%s)",
+                cron.cron_id,
+                cron.task_id,
+            )
 
     def _handle_at_failure(self, cron_id: str, *, transport_error: bool) -> None:
         """at 失败路径: 挂 :retry DateTrigger 60s 后重试, 超 max_delay 放弃."""
