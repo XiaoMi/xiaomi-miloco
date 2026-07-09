@@ -222,7 +222,7 @@ def reconcile_cron_jobs(ctx: Optional[Any] = None) -> Dict[str, Any]:
                 "schedule": task["schedule"],
                 "skills": list(task["skills"]),
                 "prompt": task["prompt"],
-                "deliver": None,
+                "deliver": "local",
             }
             if not cron_active:
                 if found.get("state") != "paused":
