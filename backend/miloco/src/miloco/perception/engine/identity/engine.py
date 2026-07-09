@@ -494,6 +494,11 @@ class IdentityEngine:
             logger.warning("library.list_persons 异常，本窗口跳过身份库变化监听", exc_info=True)
         self._maybe_reset_on_library_change(person_refs, now_ts)
 
+        # 身份库(persons)为空 → 成员匹配不可能, 下方 needs_omni_call 对 unknown track 放慢重派
+        # (省无意义的周期重问; no_person 判定在 pending 期照常累积、不受影响)。person_refs is None
+        # (读库异常) 不当作空, 保守走常规间隔。注: pets 不计入 list_persons, 不影响此判定。
+        gallery_empty = person_refs is not None and len(person_refs) == 0
+
         # ----- 1. 维护 state（创建/promote/timeout）-----
         active_track_ids: set[int] = set()
         for tr in tracking_results:
@@ -611,6 +616,7 @@ class IdentityEngine:
                 self.config.stability,
                 self._engine_fps,
                 self.config.no_person.no_person_recheck_sec,
+                gallery_empty=gallery_empty,
             ):
                 continue
             # coasting（人离开/跟丢后纯 Kalman 预测残留）的 track 当窗口不进 omni

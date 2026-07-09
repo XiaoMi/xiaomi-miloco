@@ -131,8 +131,13 @@ async def run_omni_fused(
     name_lookup: dict[str, str] = {}
     name_to_pid: dict[str, str] = {}
     role_counts: Counter[str] = Counter()  # library 全局角色计数，role 唯一性判断的权威来源
+    # 身份库(persons)为空 → 成员匹配不可能，改用精简版 identities prompt（只判 unknown/no_person、
+    # 不做成员匹配，见 field_registry.IDENTITY_NO_MATCH）。仅在 list_persons 成功且确为 0 时置
+    # True；读库异常（下方 except 落到 pass）保持 False，不把一次 IO 抖动误判成"库空"而错误关掉匹配。
+    person_lib_empty = False
     try:
         persons = list(identity_engine.library.list_persons())
+        person_lib_empty = len(persons) == 0
         role_counts = Counter(r.role for r in persons if r.role)
         for ref in persons:
             if ref.name:
@@ -159,6 +164,7 @@ async def run_omni_fused(
             gallery_snapshot=gallery_snapshot,
             config=fused_prompt_config,
             label_lookup=name_lookup,
+            matching_moot=person_lib_empty,
         )
         raw_response = await _call_omni_messages(payload["messages"], config)
     except OmniError as e:
