@@ -18,7 +18,6 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
@@ -55,25 +54,23 @@ from miloco.perception.types import (
 MAX_SUGGESTION_AGE_SEC = 300  # 5 分钟
 
 
-def _parse_time_window_end(time_window: str) -> datetime | None:
-    """解析 time_window 字符串（[HH:MM:SS-HH:MM:SS]），返回结束时间。
+def _parse_time_window_end_sec(time_window: str) -> int | None:
+    """解析 time_window 字符串（[HH:MM:SS-HH:MM:SS]），返回结束时间距午夜的秒数。
     
     _fmt_time_window 产出的格式带方括号: "[14:30:25-14:30:30]"
-    使用今天的日期 + 结束时间构建 datetime 对象。
+    返回 int 秒数（0-86399），避免 datetime 时区/格式问题。
     如果解析失败返回 None。
     """
     if not time_window:
         return None
     try:
-        # _fmt_time_window 产出的格式带方括号: "[14:30:25-14:30:30]"
         cleaned = time_window.strip("[]")
         parts = cleaned.split("-")
         if len(parts) != 2:
             return None
         end_time_str = parts[1].strip()
-        end_time = datetime.strptime(end_time_str, "%H:%M:%S").time()
-        today = datetime.now().date()
-        return datetime.combine(today, end_time)
+        h, m, s = end_time_str.split(":")
+        return int(h) * 3600 + int(m) * 60 + int(s)
     except (ValueError, IndexError):
         return None
 
@@ -82,7 +79,7 @@ def _filter_suggestions_by_rules(
     suggestions: list[Suggestion],
     enabled_device_ids: set[str],
     has_any_rule: bool,
-    now: datetime,
+    now_sec: int,
     log_prefix: str = "issue-311/317",
 ) -> list[Suggestion]:
     """过滤 disabled rule 关联 + 过期的 suggestion，返回保留列表。
@@ -91,7 +88,7 @@ def _filter_suggestions_by_rules(
         suggestions: 待过滤的 suggestion 列表
         enabled_device_ids: 所有 enabled rule 监听的 device_ids 集合
         has_any_rule: 是否存在任何 rule（区分"无 rule"和"有 rule 但全 disabled"）
-        now: 当前时间
+        now_sec: 当前时刻距午夜的秒数（time.time() % 86400）
         log_prefix: 日志前缀
     
     Returns:
@@ -107,10 +104,12 @@ def _filter_suggestions_by_rules(
                 log_prefix, s.event, s.source_device_ids,
             )
             continue
-        # Issue #317: 过滤过期的 suggestions
-        end_time = _parse_time_window_end(s.time_window)
-        if end_time is not None:
-            age = (now - end_time).total_seconds()
+        # Issue #317: 过滤过期的 suggestions（timestamp 比较，避免 datetime 时区问题）
+        end_sec = _parse_time_window_end_sec(s.time_window)
+        if end_sec is not None:
+            age = now_sec - end_sec
+            if age < 0:
+                age += 86400  # 跨午夜修正
             if age > MAX_SUGGESTION_AGE_SEC:
                 logger.info(
                     "[%s] filtered stale suggestion: event=%s time_window=%s age=%.0fs",
@@ -521,9 +520,9 @@ class PerceptionEngineProxy:
                     if r.get("enabled", True):
                         rule_device_ids = r.get("condition", {}).get("perceive_device_ids", [])
                         enabled_device_ids.update(rule_device_ids)
-            now = datetime.now()
+            now_sec = int(time.time() % 86400)
             filtered_suggestions = _filter_suggestions_by_rules(
-                suggestions, enabled_device_ids, has_any_rule, now, "issue-311/317-early",
+                suggestions, enabled_device_ids, has_any_rule, now_sec, "issue-311/317-early",
             )
             # 过滤后才标记为 early-sent（避免被过滤的 suggestion 在终态路径被双重吞掉）
             for s in filtered_suggestions:
@@ -845,9 +844,9 @@ class PerceptionEngineProxy:
         for r in all_rules:
             if r.enabled:
                 enabled_device_ids.update(r.condition.perceive_device_ids)
-        now = datetime.now()
+        now_sec = int(time.time() % 86400)
         pending_suggestions = _filter_suggestions_by_rules(
-            pending_suggestions, enabled_device_ids, has_any_rule, now, "issue-311/317-batch",
+            pending_suggestions, enabled_device_ids, has_any_rule, now_sec, "issue-311/317-batch",
         )
         if pending_suggestions:
             _attach_caption(pending_suggestions, result.caption)
