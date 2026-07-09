@@ -503,7 +503,7 @@ async def switch_scope_home(
 
 @router.get(
     path="/scope/cameras",
-    summary="List all cameras with in_use / connected / is_online flags",
+    summary="List cameras with cloud_online / lan_reachable / awake / in_use / connected",
     response_model=NormalResponse,
 )
 async def list_scope_cameras(current_user: str = Depends(verify_token)):

@@ -92,15 +92,18 @@ def select_active_camera_dids(
     online_only: bool = True,
     require_lan: bool = True,
     cap: bool = True,
+    awake_map: dict[str, bool | None] | None = None,
 ) -> list[str]:
     """决定「哪些相机该投喂/拉流」的**单一口径**——感知投喂(camera_adapter)与 native
     会话建销(refresh_cameras)共用此函数，避免两套判定漂移。
 
-    过滤：在启用家庭内 + 未拉黑 +（``online_only`` 时）在线。``require_lan=True`` 看
-    ``online and lan_online``；``False`` 只看云端 ``online``（放过 lan_online 陈旧的卡死态
-    相机）。``cap=True`` 时按 did 升序确定性截断到 ``MAX_ENABLED_CAMERAS``——投喂/拉流
-    上限的唯一兜底，与 ``service.toggle_camera`` 的主动 enable 校验互补；不写 KV、不碰
-    黑名单。``cap=False`` 用于「列全集」语义（如 rule target 校验）。
+    过滤：在启用家庭内 + 未拉黑 +（``online_only`` 时）在线 + 镜头未关。``require_lan=True``
+    看 ``online and lan_online``；``False`` 只看云端 ``online``（放过 lan_online 陈旧的卡死态
+    相机）。``awake_map``（did→镜头开关态，来自 MiotProxy 的 awake 缓存）给出时，``awake``
+    明确为 ``False``（镜头关/物理遮挡）的相机被排除；``None``/``True``/未给出一律放行
+    （awake 未知不误杀，与 toggle 开启校验同口径）。``cap=True`` 时按 did 升序确定性截断到
+    ``MAX_ENABLED_CAMERAS``——投喂/拉流上限的唯一兜底，与 ``service.toggle_camera`` 的主动
+    enable 校验互补；不写 KV、不碰黑名单。``cap=False`` 用于「列全集」语义（如 rule target 校验）。
 
     返回 did 列表：未截断为输入顺序，截断为 did 升序前 N。``cameras`` 的 value 需带
     ``home_id`` / ``online`` / ``lan_online`` 属性。
@@ -116,6 +119,9 @@ def select_active_camera_dids(
         lan = bool(getattr(info, "lan_online", False))
         connectable = (online and lan) if require_lan else online
         if online_only and not connectable:
+            continue
+        # 镜头关闭（camera-control:on == false）排除；未知(None)不误杀。
+        if awake_map is not None and awake_map.get(did) is False:
             continue
         result.append(did)
     if not cap or len(result) <= MAX_ENABLED_CAMERAS:

@@ -920,6 +920,10 @@ interface BackendScopeCamera {
   did: string;
   name: string | null;
   room_name?: string | null;
+  // 三个正交可用性指标。旧后端只有 is_online 时用它兜底 cloud+lan。
+  cloud_online?: boolean;
+  lan_reachable?: boolean;
+  awake?: boolean | null;
   is_online: boolean;
   in_use: boolean;
   // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
@@ -936,7 +940,10 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     did: c.did,
     name: c.name ?? c.did,
     roomName: c.room_name ?? undefined,
-    isOnline: c.is_online,
+    // 旧后端无三指标时用 is_online 兜底：cloud/lan 都取 is_online、awake 未知。
+    cloudOnline: c.cloud_online ?? c.is_online,
+    lanReachable: c.lan_reachable ?? c.is_online,
+    awake: c.awake ?? null,
     inUse: c.in_use,
     voiceInUse: c.voice_in_use ?? false,
     connected: c.connected,

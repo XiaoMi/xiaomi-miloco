@@ -50,7 +50,8 @@ def scope_camera():
 @scope_camera.command("list")
 @click.option("--pretty", is_flag=True)
 def scope_camera_list(pretty):
-    """列出全部摄像头；in_use=已开启，is_online=设备在线，connected=视频流已连接。"""
+    """列出全部摄像头；in_use=当下真正开启(活跃集,≤4)，三态可用性 cloud_online(云端在线)/
+    lan_reachable(局域网可达)/awake(镜头开关:true=开/false=关/null=未知)，connected=视频流已连接。"""
     print_result(api_get(_CAMERAS_PATH), pretty)
 
 

@@ -190,13 +190,26 @@ export interface ScopeCamera {
   // 米家分配的房间名（"客厅" / "卧室" / ...）。多摄像头家庭里 name 常是
   // "小米智能摄像机 2 代"等泛称，靠 roomName 才能区分。米家未分房间时为空。
   roomName?: string;
-  isOnline: boolean;
+  // 三个正交可用性指标（替代旧的一把揉 isOnline）：
+  cloudOnline: boolean; // 米家云端在线
+  lanReachable: boolean; // 局域网可达（拉流前提）
+  // 镜头开关（camera-control:on）。true=镜头开启 / false=镜头关闭(隐私·遮挡) /
+  // null=该机型无开关属性或读取失败（未知）。
+  awake: boolean | null;
+  // 当下真正开启（后端 = 在活跃集里：默认开·未拉黑 + 三态满足 + 上限≤4）。离线/
+  // 不可达/镜头关的相机 inUse=false，不显示为开；超上限的也不算开。
   inUse: boolean;
   // 拾音「存储偏好」（PUT /api/miot/scope/cameras/voice）。false = mic-off：该相机
   // 声音完全不被处理（引擎入口剥离音频，不转写、不上云）。与 inUse 正交：
   // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
   voiceInUse: boolean;
   connected: boolean;
+}
+
+// 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。
+// awake=null(机型无开关/未知) 不算不可用（与后端放行口径一致）。
+export function cameraAvailable(c: ScopeCamera): boolean {
+  return c.cloudOnline && c.lanReachable && c.awake !== false;
 }
 
 // ── 米家家庭接入范围(scope.homes)─────────────────────────────────
