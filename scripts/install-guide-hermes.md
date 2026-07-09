@@ -47,7 +47,7 @@ bash plugins/hermes/install-hermes.sh
 ### Step 2：用户操作（agent 逐个引导，不要一次贴完）
 
 **2.1 绑米家账号** → `miloco-cli account status` 判是否已绑，未绑就引导 OAuth  
-**2.2 配 Omni 模型** → `miloco-cli config get model.omni.api_key` 判是否已配  
+**2.2 配 Omni 模型** → `miloco-cli config get model.omni.api_key` / `model.omni.model` / `model.omni.base_url` 判是否已配  
 **2.3 重启 gateway** → `hermes gateway restart`（用户自己跑，agent 不能代跑）
 
 ### Step 3：验证
