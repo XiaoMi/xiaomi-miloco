@@ -76,6 +76,12 @@ class _CameraDeviceState:
     # Clock calibration: epoch_delta = unix_ms - monotonic_ms (locked on first frame)
     # Used to convert monotonic wall_ms to unix timestamps for display.
     epoch_delta: int | None = None
+    # Monotonic wall_ms of the most recent decoded frame; None until first frame.
+    # Consumed by awake corroboration (service.camera_frames_flowing): the
+    # camera-control:on property has false negatives — a camera still emitting
+    # frames whose property reads on=False is not actually 镜头关/休眠; live frames
+    # veto the stale property read.
+    last_frame_wall_ms: int | None = None
 
 
 class CameraDeviceAdapter(BaseDeviceAdapter):
@@ -430,6 +436,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         to derive unix_ms for display.
         """
         wall_ms = _monotonic_ms()
+        state.last_frame_wall_ms = wall_ms
         if state.epoch_delta is None:
             state.epoch_delta = _unix_ms() - wall_ms
             logger.debug(
@@ -439,6 +446,18 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             )
         unix_ms = wall_ms + state.epoch_delta
         return wall_ms, unix_ms
+
+    def frame_age_ms(self, did: str) -> int | None:
+        """该机位距最近一帧的毫秒数；从未出过帧 / 未订阅返回 None。
+
+        单调时钟差值，不受系统时间调整影响。消费方（awake 佐证）用它判断
+        「帧流是否还活着」——camera-control:on 属性有假阴性，帧在流可一票否决
+        属性说关的误读。
+        """
+        state = self._devices.get(did)
+        if state is None or state.last_frame_wall_ms is None:
+            return None
+        return _monotonic_ms() - state.last_frame_wall_ms
 
     @staticmethod
     def _compute_decode_latency(

@@ -479,6 +479,65 @@ async def test_list_cameras_with_state_flags():
     assert by_did["c4"]["connected"] is True
 
 
+# ─── awake 帧流佐证（纠正 camera-control:on 假阴性）───────────────────────────
+
+
+def test_corroborate_awake_matrix():
+    """帧流佐证 awake 的纯函数矩阵：只纠正 False→True（假阴性），不反向覆盖。"""
+    from miloco.miot.service import _corroborate_awake
+
+    # 属性说醒 / 未知：帧流不改写（醒着就是醒着；未知保持未知）
+    assert _corroborate_awake(True, False) is True
+    assert _corroborate_awake(True, None) is True
+    assert _corroborate_awake(None, True) is None
+    assert _corroborate_awake(None, None) is None
+    # 属性说关但帧在流：假阴性，纠正为醒
+    assert _corroborate_awake(False, True) is True
+    # 属性说关且帧流已死 / 无佐证：维持关
+    assert _corroborate_awake(False, False) is False
+    assert _corroborate_awake(False, None) is False
+
+
+@pytest.mark.asyncio
+async def test_frames_flowing_vetoes_awake_false_negative():
+    """真机假阴性场景：属性读 on=False 但帧在流 → 该相机不该被踢出活跃集，awake=True。
+
+    这修的是 #403 裸读属性的缺陷：单凭 camera-control:on 会把明明在拍的相机误判
+    镜头关、从 select_active 踢掉丢感知。帧流佐证一票否决属性说关的误读。
+    """
+    cameras = {"c1": _camera("c1", home_id="H1")}
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    # 属性读到假阴性 on=False
+    svc._miot_proxy.read_cameras_awake = AsyncMock(
+        side_effect=lambda dids, **kw: {"c1": False}
+    )
+    # 但帧还在流（帧龄新鲜）
+    svc.camera_frames_flowing = lambda did: True  # type: ignore[assignment]
+
+    out = await svc.list_cameras_with_state()
+    c1 = {c["did"]: c for c in out}["c1"]
+    assert c1["awake"] is True  # 佐证后纠正为醒
+    assert c1["in_use"] is True  # 没被 select_active 误踢
+
+
+@pytest.mark.asyncio
+async def test_awake_false_and_no_frames_stays_off():
+    """属性说关且帧流已死 → 确认镜头关：awake=False，被 select_active 排除。"""
+    cameras = {"c1": _camera("c1", home_id="H1")}
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    svc._miot_proxy.read_cameras_awake = AsyncMock(
+        side_effect=lambda dids, **kw: {"c1": False}
+    )
+    svc.camera_frames_flowing = lambda did: False  # type: ignore[assignment]
+
+    out = await svc.list_cameras_with_state()
+    c1 = {c["did"]: c for c in out}["c1"]
+    assert c1["awake"] is False
+    assert c1["in_use"] is False  # 镜头关 → 不活跃
+
+
 @pytest.mark.asyncio
 async def test_toggle_camera_writes_disabled():
     kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})

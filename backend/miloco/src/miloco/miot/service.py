@@ -54,8 +54,34 @@ from miloco.miot.schema import (
 
 logger = logging.getLogger(__name__)
 
+# 帧流「还活着」的判定窗口：距最近一帧 ≤ 此毫秒数视为在出帧。用于给 awake 属性
+# 佐证——camera-control:on 有假阴性（真机实测：正在出帧的机位属性仍读到 on=False），
+# 帧在流可一票否决属性说关的误读。30s 覆盖感知采样间隔的抖动，不至于把短暂断流误判为醒。
+_FRAME_ALIVE_MS = 30_000
+
 # 持有后台 task 引用，避免 CPython GC 回收 fire-and-forget task。
 _background_tasks: set[asyncio.Task] = set()
+
+
+def _corroborate_awake(
+    raw_awake: bool | None, frames_flowing: bool | None
+) -> bool | None:
+    """用帧流佐证镜头开关（awake）属性，纠正其假阴性。
+
+    ``camera-control:on`` 属性存在假阴性——真机实测：正在出帧的机位属性仍读到
+    ``on=False``（云端缓存陈旧 / 型号语义差异）。若单凭属性把它判成「镜头关」，
+    #403 的 ``select_active`` 会据此把一台**明明在拍**的相机踢出活跃集、丢掉感知。
+
+    佐证规则（只纠正 False→True 这一种假阴性，不反向覆盖）：
+      - 属性说醒（True）/ 未知（None）：原样返回，帧流不改写（醒着就是醒着）。
+      - 属性说关（False）但帧在流（True）：属性不可信，纠正为 True。
+      - 属性说关（False）且帧流已死 / 无佐证（False/None）：维持 False（确认镜头关）。
+    """
+    if raw_awake is not False:
+        return raw_awake
+    if frames_flowing:
+        return True
+    return False
 
 
 def _parse_prop_iid(iid: str) -> tuple[int, int]:
@@ -1034,10 +1060,18 @@ class MiotService:
         devices = await self._miot_proxy.get_devices()
         cameras = {did: info for did, info in cameras.items() if did in devices}
         # awake：只读缓存（云读收在 refresh_camera_online_status，前端列表前必调）。
-        awake_map = await self._miot_proxy.read_cameras_awake(
+        raw_awake = await self._miot_proxy.read_cameras_awake(
             list(cameras.keys()), cache_only=True
         )
+        # 帧流佐证：camera-control:on 有假阴性——正在出帧的机位属性仍可能读到 on=False。
+        # 若不纠正，select_active 会把明明在拍的相机当「镜头关」踢出活跃集、丢掉感知。
+        # 用帧龄一票否决属性说关的误读（只纠正 False→True，不反向覆盖）。
+        awake_map = {
+            did: _corroborate_awake(raw_awake.get(did), self.camera_frames_flowing(did))
+            for did in cameras
+        }
         # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
+        # 喂佐证后的 awake_map，醒着的相机不再因属性假阴性被误踢。
         active = set(
             select_active_camera_dids(self._kv_repo, cameras, awake_map=awake_map)
         )
@@ -1217,6 +1251,24 @@ class MiotService:
     def _connected_camera_dids(self) -> set[str]:
         adapter = self._camera_adapter()
         return set(adapter.get_connected_devices().keys()) if adapter else set()
+
+    def camera_frames_flowing(self, did: str) -> bool | None:
+        """该机位当前是否在出帧。True/False；适配器不可用或从未出帧返回 None。
+
+        读 camera_adapter 的帧龄（单调时钟差），≤ ``_FRAME_ALIVE_MS`` 视为在流。
+        供 ``_corroborate_awake`` 纠正 camera-control:on 的假阴性。
+        """
+        adapter = self._camera_adapter()
+        if adapter is None:
+            return None
+        try:
+            age = adapter.frame_age_ms(did)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("frame age lookup failed for %s: %s", did, e)
+            return None
+        if age is None:
+            return None
+        return age <= _FRAME_ALIVE_MS
 
     async def _sync_camera_adapter(self) -> None:
         """Hot-sync camera connections after a scope change."""

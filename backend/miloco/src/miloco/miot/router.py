@@ -89,20 +89,31 @@ async def _first_frame_watchdog(
     await asyncio.sleep(_FIRST_FRAME_TIMEOUT_S)
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
         return
+    # 分流「休眠」vs「连不上」：无首帧有两种截然不同的原因，给住户的行动指引也不同。
+    # 读镜头开关（camera-control:on）缓存——明确为 False（镜头关/休眠）时不是"连不上"，
+    # 而是需要住户去米家唤醒；其余（True/未知）仍按连不上处理。
+    reason, message = "camera_unreachable", "连不上摄像头(可能不在同一局域网,或摄像头离线)"
+    try:
+        awake = (
+            await manager.miot_service._miot_proxy.read_cameras_awake(
+                [camera_id], cache_only=True
+            )
+        ).get(camera_id)
+        if awake is False:
+            reason, message = (
+                "camera_sleeping",
+                "摄像头处于休眠状态(在米家 app 或面板中唤醒后即可观看)",
+            )
+    except Exception as err:  # noqa: BLE001 — 分流失败退回默认 unreachable，不阻断
+        logger.info("watchdog awake lookup skipped, %s.%d: %s", camera_id, channel, err)
     logger.warning(
-        "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
-        "unreachable (cross-LAN / offline / PPCS relay not established)",
-        camera_id, channel, _FIRST_FRAME_TIMEOUT_S,
+        "First-frame watchdog fired, %s.%d — no frame in %.0fs, reason=%s",
+        camera_id, channel, _FIRST_FRAME_TIMEOUT_S, reason,
     )
     try:
-        # reason 是给将来按机器码分流预留的字段;前端 watch.html 当前只展示 message,
-        # 不读 reason。两个都发,前端按需取。
+        # 前端 watch.html 当前只展示 message,不读 reason。两个都发,前端按需取。
         await websocket.send_text(
-            json.dumps({
-                "type": "error",
-                "reason": "camera_unreachable",
-                "message": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
-            })
+            json.dumps({"type": "error", "reason": reason, "message": message})
         )
     except Exception as err:
         # send 失败基本意味着连接已被对端关掉——再 close 也是白搭,还会再抛一条
@@ -113,9 +124,7 @@ async def _first_frame_watchdog(
         return
     try:
         # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)
-        await websocket.close(
-            code=1011, reason=_truncate_ws_reason("camera_unreachable")
-        )
+        await websocket.close(code=1011, reason=_truncate_ws_reason(reason))
     except Exception as err:
         logger.info("watchdog close failed, %s.%d: %s", camera_id, channel, err)
 

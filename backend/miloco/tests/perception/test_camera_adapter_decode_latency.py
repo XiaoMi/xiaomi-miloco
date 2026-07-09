@@ -88,6 +88,29 @@ class TestComputeDecodeLatency:
         assert dec == 0.0
 
 
+class TestFrameAgeMs:
+    """frame_age_ms 给 awake 佐证提供「帧流是否还活着」的信号。"""
+
+    def test_never_emitted_returns_none(self):
+        adapter = CameraDeviceAdapter(miot_proxy=object())  # type: ignore[arg-type]
+        adapter._devices["cam1"] = _CameraDeviceState(did="cam1")  # 无 last_frame
+        assert adapter.frame_age_ms("cam1") is None
+
+    def test_unknown_did_returns_none(self):
+        adapter = CameraDeviceAdapter(miot_proxy=object())  # type: ignore[arg-type]
+        assert adapter.frame_age_ms("ghost") is None
+
+    def test_recent_frame_small_age(self, monkeypatch):
+        import miloco.perception.collect.camera_adapter as mod
+
+        adapter = CameraDeviceAdapter(miot_proxy=object())  # type: ignore[arg-type]
+        state = _CameraDeviceState(did="cam1")
+        state.last_frame_wall_ms = 10_000
+        adapter._devices["cam1"] = state
+        monkeypatch.setattr(mod, "_monotonic_ms", lambda: 10_500)
+        assert adapter.frame_age_ms("cam1") == 500
+
+
 class TestCallbackIntegration:
     """Drive the async decoded-frame callbacks end-to-end."""
 
