@@ -126,12 +126,29 @@ class MiotService:
             # list_homes 兜底会自动选第一个家庭，这里再调一次确保 KV 已更新
             await self.list_homes()
             allow = allowed_home_ids(self._kv_repo)
-        devices = await self._miot_proxy.get_devices()
+        devices_error: Exception | None = None
+        try:
+            devices = await self._miot_proxy.get_devices()
+        except Exception as e:
+            logger.warning("get_devices failed while validating did=%s: %s", did, e)
+            devices = {}
+            devices_error = e
         info = devices.get(did)
         if info is None:
-            cameras = await self._miot_proxy.get_cameras()
+            try:
+                cameras = await self._miot_proxy.get_cameras()
+            except Exception:
+                if devices_error is not None:
+                    raise MiotServiceException(
+                        f"Failed to validate device allowed home: {str(devices_error)}"
+                    ) from devices_error
+                raise
             info = cameras.get(did) if cameras else None
         if info is None:
+            if devices_error is not None:
+                raise MiotServiceException(
+                    f"Failed to validate device allowed home: {str(devices_error)}"
+                ) from devices_error
             raise ResourceNotFoundException(f"Device '{did}' not found")
         if not is_home_allowed(self._kv_repo, getattr(info, "home_id", None)):
             raise ValidationException(
@@ -672,23 +689,44 @@ class MiotService:
     async def get_home_info(self, *, refresh: bool = False) -> dict:
         """Get home info。refresh=True 时先刷新云端数据。"""
         try:
+            device_refresh_failed = False
             if refresh:
-                await asyncio.gather(
+                refresh_results = await asyncio.gather(
                     self._miot_proxy.refresh_devices(),
                     self._miot_proxy.refresh_scenes(),
                     self._miot_proxy.refresh_cameras(),
+                    return_exceptions=True,
                 )
+                for label, result in zip(
+                    ("devices", "scenes", "cameras"), refresh_results, strict=True
+                ):
+                    if isinstance(result, Exception):
+                        logger.warning(
+                            "refresh_%s failed in get_home_info: %s", label, result
+                        )
+                        if label == "devices":
+                            device_refresh_failed = True
             data = await self._miot_proxy.get_home_info_data()
 
             # 家庭过滤：data 内的 devices/scenes 不带 home_id，借助原始 dict 反查
             allow = allowed_home_ids(self._kv_repo)
             if allow:
+                if device_refresh_failed:
+                    raw_devices = getattr(self._miot_proxy, "_device_info_dict", {})
+                else:
+                    try:
+                        raw_devices = await self._miot_proxy.get_devices()
+                    except Exception as e:
+                        logger.warning(
+                            "get_devices failed in get_home_info filter: %s", e
+                        )
+                        raw_devices = {}
                 allowed_dids = set(
-                    filter_by_home(self._kv_repo, await self._miot_proxy.get_devices()).keys()
+                    filter_by_home(self._kv_repo, raw_devices or {}).keys()
                 )
                 allowed_scene_ids = set(
-                    filter_by_home(self._kv_repo,
-                        await self._miot_proxy.get_all_scenes() or {}
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_all_scenes() or {}
                     ).keys()
                 )
                 data["devices"] = [
@@ -701,7 +739,9 @@ class MiotService:
                 ]
                 data["areas"] = [
                     {"name": a}
-                    for a in sorted({d.get("room") for d in data["devices"] if d.get("room")})
+                    for a in sorted(
+                        {d.get("room") for d in data["devices"] if d.get("room")}
+                    )
                 ]
             else:
                 # 未选择家庭：清空 devices/scenes/areas
