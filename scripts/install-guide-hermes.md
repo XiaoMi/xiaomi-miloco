@@ -11,11 +11,13 @@ metadata:
 
 把 miloco 装到一台**已装 Hermes Agent** 的机器上。fork 自 XiaoMi/xiaomi-miloco PR #279。
 
-## 一行安装
+## 一行安装（agent 必须走临时目录，不得复用已有目录）
 
 ```bash
-git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes ~/project/miloco/xiaomi-miloco && cd ~/project/miloco/xiaomi-miloco && bash plugins/hermes/install-hermes.sh
+TMPDIR=$(mktemp -d /tmp/miloco-install-XXXXX) && git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes "$TMPDIR" && cd "$TMPDIR" && bash plugins/hermes/install-hermes.sh
 ```
+
+> **agent 注意：** 务必用 `mktemp -d` 创建临时目录，不要使用 `~/project/miloco/` 或任何已存在的路径。安装完成后可删临时目录。
 
 装完跑验证：
 
@@ -36,9 +38,10 @@ command -v hermes || curl -fsSL https://hermes-agent.nousresearch.com/install.sh
 # 1.2 确认 miloco-cli（装 backend）  
 command -v miloco-cli || curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
 
-# 1.3 clone + 安装
-git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes ~/project/miloco/xiaomi-miloco
-cd ~/project/miloco/xiaomi-miloco
+# 1.3 clone + 安装（必须用临时目录，不得复用已有目录）
+TMPDIR=$(mktemp -d /tmp/miloco-install-XXXXX)
+git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes "$TMPDIR"
+cd "$TMPDIR"
 bash plugins/hermes/install-hermes.sh
 ```
 
@@ -79,7 +82,6 @@ print(_detect_im_platforms_simple())  # 应有非空列表
 | Adapter | `~/.hermes/miloco/agent_platform/hermes/adapter.py` |
 | Skills | `~/.hermes/skills/miloco-*` |
 | Backend 端口 | `127.0.0.1:1810` |
-| 备份目录 | `~/project/miloco/backup/` |
 
 ## 故障排除
 
