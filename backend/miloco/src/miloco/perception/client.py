@@ -16,6 +16,9 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime
+
+from miloco.utils.time_utils import deploy_timezone
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -88,7 +91,7 @@ def _filter_suggestions_by_rules(
         suggestions: 待过滤的 suggestion 列表
         enabled_device_ids: 所有 enabled rule 监听的 device_ids 集合
         has_any_rule: 是否存在任何 rule（区分"无 rule"和"有 rule 但全 disabled"）
-        now_sec: 当前时刻距午夜的秒数（time.time() % 86400）
+        now_sec: 当前部署时区时刻距午夜的秒数（datetime.now(tz=deploy_timezone())）
         log_prefix: 日志前缀
     
     Returns:
@@ -520,7 +523,8 @@ class PerceptionEngineProxy:
                     if r.get("enabled", True):
                         rule_device_ids = r.get("condition", {}).get("perceive_device_ids", [])
                         enabled_device_ids.update(rule_device_ids)
-            now_sec = int(time.time() % 86400)
+            now_dt = datetime.now(tz=deploy_timezone())
+            now_sec = now_dt.hour * 3600 + now_dt.minute * 60 + now_dt.second
             filtered_suggestions = _filter_suggestions_by_rules(
                 suggestions, enabled_device_ids, has_any_rule, now_sec, "issue-311/317-early",
             )
@@ -844,7 +848,8 @@ class PerceptionEngineProxy:
         for r in all_rules:
             if r.enabled:
                 enabled_device_ids.update(r.condition.perceive_device_ids)
-        now_sec = int(time.time() % 86400)
+        now_dt = datetime.now(tz=deploy_timezone())
+            now_sec = now_dt.hour * 3600 + now_dt.minute * 60 + now_dt.second
         pending_suggestions = _filter_suggestions_by_rules(
             pending_suggestions, enabled_device_ids, has_any_rule, now_sec, "issue-311/317-batch",
         )
