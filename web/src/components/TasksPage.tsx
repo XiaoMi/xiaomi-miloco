@@ -469,10 +469,11 @@ function TaskDetailSheet({
             </>
           ) : confirmDel ? (
             <>
-              <span className="text-caption text-text-secondary">
-                {t("tasks.confirmDeleteTitle")}?
+              {/* 删除是级联且不可逆（连带清理规则 / 记录），确认态显式给出后果警示。 */}
+              <span className="flex-1 min-w-0 text-caption text-error break-words line-clamp-2">
+                {t("tasks.confirmDeleteMessage", { desc: task.description })}
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => setConfirmDel(false)}
@@ -662,6 +663,7 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
           title={t("tasks.howToTitle")}
           hint={t("tasks.howToBody")}
           initialText={t("tasks.example1")}
+          examples={[t("tasks.example1"), t("tasks.example2")]}
           onClose={() => setHelpOpen(false)}
         />
       )}
