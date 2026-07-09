@@ -546,6 +546,87 @@ class MIoTMipsCloud:
 
     # ------------------------------------------------------- subscribe core
 
+    async def sub_many_async(
+        self,
+        specs: list[
+            tuple[
+                str,
+                Callable[[Any], Union[None, Awaitable[None]]],
+                Callable[[str, bytes], Optional[Any]],
+            ]
+        ],
+        qos: int = _DEFAULT_QOS,
+    ) -> None:
+        """Subscribe multiple topics in one MQTT SUBSCRIBE packet."""
+        if not specs:
+            return
+        mqtt = self._mqtt
+        if mqtt is None or not self._connected:
+            raise MipsConnectionError("mips_cloud not connected; cannot batch subscribe")
+
+        future: asyncio.Future[list[int]] = self._main_loop.create_future()
+        subs = [
+            _Subscription(topic=topic, qos=qos, handler=handler, decoder=decoder)
+            for topic, handler, decoder in specs
+        ]
+        with self._subs_lock:
+            for sub in subs:
+                self._subs[sub.topic] = sub
+
+        topics = [(sub.topic, sub.qos) for sub in subs]
+        result, mid = mqtt.subscribe(topics)
+        if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
+            with self._subs_lock:
+                for sub in subs:
+                    self._subs.pop(sub.topic, None)
+            raise MipsConnectionError(
+                f"batch subscribe failed locally: result={result} mid={mid} "
+                f"topics={[topic for topic, _qos in topics]}"
+            )
+
+        with self._pending_lock:
+            self._pending_subscribes[mid] = future
+
+        try:
+            reason_codes = await asyncio.wait_for(
+                future, timeout=MIHOME_MQTT_SUBSCRIBE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            with self._pending_lock:
+                self._pending_subscribes.pop(mid, None)
+            raise MipsSubscribeTimeoutError(",".join(sub.topic for sub in subs)) from None
+
+        if len(reason_codes) != len(subs):
+            _LOGGER.warning(
+                "mips_cloud batch SUBACK code count mismatch topics=%d codes=%d codes=%s",
+                len(subs),
+                len(reason_codes),
+                reason_codes,
+            )
+
+        rejected: list[tuple[str, int]] = []
+        for sub, code in zip(subs, reason_codes):
+            if code not in _SUBACK_SUCCESS_CODES:
+                rejected.append((sub.topic, code))
+
+        if rejected:
+            with self._subs_lock:
+                for topic, code in rejected:
+                    if code in _PERMANENT_SUBACK_FAILURES:
+                        self._subs.pop(topic, None)
+            topic, code = rejected[0]
+            raise MipsSubscribeRejectedError(
+                topic=topic,
+                reason_code=code,
+                reason_string=_describe_reason_code(code),
+            )
+
+        _LOGGER.info(
+            "mips_cloud batch subscribed topics=%s qos=%d",
+            [sub.topic for sub in subs],
+            qos,
+        )
+
     async def _subscribe_async(
         self,
         topic: str,

@@ -168,6 +168,40 @@ async def test_sync_event_subscriptions_only_tracks_device_event_mappings():
 
 
 @pytest.mark.asyncio
+async def test_sync_event_subscriptions_batches_multiple_new_dids():
+    proxy = _bare_proxy()
+    proxy._device_info_dict = {
+        "A": SimpleNamespace(did="A"),
+        "B": SimpleNamespace(did="B"),
+    }
+    proxy._miot_client.sub_device_event_occurred_many_async = AsyncMock(
+        return_value=["A", "B"]
+    )
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="A",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.3.1"],
+        ),
+    ]
+    await proxy._sync_event_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_event_occurred_many_async.assert_awaited_once_with(
+        ["A", "B"]
+    )
+    proxy._miot_client.sub_device_event_occurred_async.assert_not_awaited()
+    assert proxy._subscribed_event_dids == {"A", "B"}
+
+
+@pytest.mark.asyncio
 async def test_sync_property_subscriptions_adds_new_enabled_mapping():
     proxy = _bare_proxy()
     proxy._device_info_dict = {"C": SimpleNamespace(did="C")}

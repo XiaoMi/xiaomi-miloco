@@ -1138,6 +1138,31 @@ class MiotProxy:
                 logger.error("unsubscribe device-event failed did=%s: %s", did, e)
             return did
 
+        if len(to_add) > 1 and hasattr(
+            self._miot_client, "sub_device_event_occurred_many_async"
+        ):
+            try:
+                added_batch = (
+                    await self._miot_client.sub_device_event_occurred_many_async(
+                        sorted(to_add)
+                    )
+                )
+                removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+                self._subscribed_event_dids |= set(added_batch)
+                self._subscribed_event_dids -= {d for d in removed if d}
+                logger.info(
+                    "device-event subscriptions synced by batch: +%d -%d (total=%d) dids=%s",
+                    len(added_batch),
+                    len([d for d in removed if d]),
+                    len(self._subscribed_event_dids),
+                    added_batch,
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    "batch device-event subscribe failed, falling back: %s", e
+                )
+
         added = await asyncio.gather(*(_sub(d) for d in to_add))
         removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
         self._subscribed_event_dids |= {d for d in added if d}

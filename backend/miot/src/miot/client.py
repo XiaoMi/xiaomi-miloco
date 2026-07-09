@@ -1113,6 +1113,36 @@ class MIoTClient:
         )
         self._event_sub_dids.add(did)
 
+    async def sub_device_event_occurred_many_async(self, dids: list[str]) -> list[str]:
+        """Subscribe multiple device-event topics in one MQTT SUBSCRIBE packet."""
+        dids = [str(did) for did in dids if str(did) not in self._event_sub_dids]
+        if not dids:
+            return []
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._event_sub_dids.update(dids)
+            return dids
+
+        state_decoder = mips._make_device_state_decoder()
+        event_decoder = mips._make_device_event_decoder()
+        specs = []
+        for did in dids:
+            for op in ("online", "offline"):
+                specs.append(
+                    (f"device/{did}/state/{op}", self._on_device_state_msg, state_decoder)
+                )
+            specs.append(
+                (
+                    f"device/{did}/up/event_occured/#",
+                    self._on_device_event_occurred_msg,
+                    event_decoder,
+                )
+            )
+        await mips.sub_many_async(specs)
+        self._state_sub_dids.update(dids)
+        self._event_sub_dids.update(dids)
+        return dids
+
     async def unsub_device_event_occurred_async(self, did: str) -> None:
         self._event_sub_dids.discard(did)
         mips = self._mips_cloud
