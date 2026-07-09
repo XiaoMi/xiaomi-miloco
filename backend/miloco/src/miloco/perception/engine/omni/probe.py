@@ -126,6 +126,27 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
         }
     latency_ms = round((time.monotonic() - t0) * 1000)
     if r.status_code == 200:
+        # status 200 不代表 body 合法:mock/中间层可能返 200 + 非 JSON。运行时 omni_client
+        # 走 json.loads + 非 dict → bad_response,probe 需对齐,否则 mock/异常网关下 probe
+        # 误判 ok,熔断状态被 record_probe_result(True) 复位 CLOSED,与真实调用行为背离。
+        try:
+            payload = r.json()
+        except Exception:  # noqa: BLE001 — 任何解码错都归 bad_response
+            return {
+                "ok": False,
+                "code": "bad_response",
+                "status": 200,
+                "latency_ms": latency_ms,
+                "message": "omni 响应格式异常",
+            }
+        if not isinstance(payload, dict):
+            return {
+                "ok": False,
+                "code": "bad_response",
+                "status": 200,
+                "latency_ms": latency_ms,
+                "message": "omni 响应格式异常",
+            }
         return {
             "ok": True,
             "code": "ok",

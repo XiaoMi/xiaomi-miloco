@@ -7,9 +7,9 @@ from miloco.perception.engine.omni import probe
 
 
 class _FakeResp:
-    def __init__(self, status_code: int, json_data: dict | None = None, text: str = ""):
+    def __init__(self, status_code: int, json_data: object | None = None, text: str = ""):
         self.status_code = status_code
-        self._json = json_data if json_data is not None else {}
+        self._json: object = json_data if json_data is not None else {}
         self.text = text
 
     def json(self):
@@ -174,6 +174,39 @@ async def test_probe_chat_unreachable_on_exception(monkeypatch):
     )
     r = await probe.probe_chat("m1", "https://ok/v1", "sk-x")
     assert r["code"] == "unreachable"
+
+
+async def test_probe_chat_bad_response_on_json_decode_error(monkeypatch):
+    """status=200 但 body 非 JSON → bad_response(而非误判 ok)。"""
+    import json as _json
+
+    class _Bad200:
+        status_code = 200
+        text = "not a json body"
+
+        def json(self):
+            raise _json.JSONDecodeError("Expecting value", "", 0)
+
+    monkeypatch.setattr(
+        probe.httpx, "AsyncClient", _fake_async_client(resp=_Bad200())
+    )
+    r = await probe.probe_chat("m1", "https://ok/v1", "sk-x")
+    assert r["ok"] is False
+    assert r["code"] == "bad_response"
+    assert r["status"] == 200
+
+
+async def test_probe_chat_bad_response_on_non_dict_body(monkeypatch):
+    """status=200 但 body 是 list/非 dict → bad_response。"""
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_async_client(resp=_FakeResp(200, json_data=["not", "a", "dict"])),
+    )
+    r = await probe.probe_chat("m1", "https://ok/v1", "sk-x")
+    assert r["ok"] is False
+    assert r["code"] == "bad_response"
+    assert r["status"] == 200
 
 
 # ─── scheme 白名单(防 SSRF) ───────────────────────────────────────────────
