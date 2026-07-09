@@ -1067,8 +1067,7 @@ class MiotService:
         # 若不纠正，select_active 会把明明在拍的相机当「镜头关」踢出活跃集、丢掉感知。
         # 用帧龄一票否决属性说关的误读（只纠正 False→True，不反向覆盖）。
         awake_map = {
-            did: _corroborate_awake(raw_awake.get(did), self.camera_frames_flowing(did))
-            for did in cameras
+            did: self.corroborated_awake(did, raw_awake.get(did)) for did in cameras
         }
         # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
         # 喂佐证后的 awake_map，醒着的相机不再因属性假阴性被误踢。
@@ -1269,6 +1268,13 @@ class MiotService:
         if age is None:
             return None
         return age <= _FRAME_ALIVE_MS
+
+    def corroborated_awake(self, did: str, raw_awake: bool | None) -> bool | None:
+        """对单台相机的镜头开关（awake）做帧流佐证——与 list_cameras_with_state 同口径。
+
+        给看门狗等调用点复用同一佐证逻辑，避免「list 佐证、看门狗裸读」的口径分裂。
+        """
+        return _corroborate_awake(raw_awake, self.camera_frames_flowing(did))
 
     async def _sync_camera_adapter(self) -> None:
         """Hot-sync camera connections after a scope change."""

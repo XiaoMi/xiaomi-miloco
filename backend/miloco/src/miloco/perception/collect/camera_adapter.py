@@ -436,7 +436,6 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         to derive unix_ms for display.
         """
         wall_ms = _monotonic_ms()
-        state.last_frame_wall_ms = wall_ms
         if state.epoch_delta is None:
             state.epoch_delta = _unix_ms() - wall_ms
             logger.debug(
@@ -508,6 +507,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     h.skip_rolling()
                     return
                 wall_ms, unix_ms = self._calibrate(state, ts)
+                # 帧流佐证只用**视频**帧盖时刻：awake / camera-control 是镜头(视频)属性，
+                # 视频在出 = 镜头开着；音频单独在流不足以佐证镜头未关，故不在音频回调盖。
+                state.last_frame_wall_ms = wall_ms
                 decode_latency_ms = self._compute_decode_latency(
                     recv_unix_ms, decoded_unix_ms
                 )

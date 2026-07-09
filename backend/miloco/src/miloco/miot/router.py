@@ -94,11 +94,15 @@ async def _first_frame_watchdog(
     # 而是需要住户去米家唤醒；其余（True/未知）仍按连不上处理。
     reason, message = "camera_unreachable", "连不上摄像头(可能不在同一局域网,或摄像头离线)"
     try:
-        awake = (
+        raw_awake = (
             await manager.miot_service._miot_proxy.read_cameras_awake(
                 [camera_id], cache_only=True
             )
         ).get(camera_id)
+        # 与 list 路径同口径：帧流佐证 awake，纠正 camera-control:on 的假阴性。watch WS 拿不到
+        # 首帧不代表镜头关——感知 decode 可能仍在出帧（属性假阴性 / 直播 relay 单独故障）。
+        # 帧在流则相机是醒的，不该把住户指去唤醒，回落 unreachable。
+        awake = manager.miot_service.corroborated_awake(camera_id, raw_awake)
         if awake is False:
             reason, message = (
                 "camera_sleeping",

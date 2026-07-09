@@ -522,6 +522,21 @@ async def test_frames_flowing_vetoes_awake_false_negative():
 
 
 @pytest.mark.asyncio
+async def test_corroborated_awake_watchdog_path():
+    """看门狗分流走的 corroborated_awake：属性说关但帧在流 → 不判休眠（醒着，只是 watch
+    relay 没首帧）；属性说关且帧流已死 → 判休眠（提示去米家唤醒）。与 list 路径同口径。"""
+    svc = _make_service(cameras={"c1": _camera("c1")})
+    # 帧在流：即使属性假阴性 on=False，也不该判休眠
+    svc.camera_frames_flowing = lambda did: True  # type: ignore[assignment]
+    assert svc.corroborated_awake("c1", False) is True
+    # 帧流已死 + 属性说关：确认休眠
+    svc.camera_frames_flowing = lambda did: False  # type: ignore[assignment]
+    assert svc.corroborated_awake("c1", False) is False
+    # 属性说醒：原样，帧流不改写
+    assert svc.corroborated_awake("c1", True) is True
+
+
+@pytest.mark.asyncio
 async def test_awake_false_and_no_frames_stays_off():
     """属性说关且帧流已死 → 确认镜头关：awake=False，被 select_active 排除。"""
     cameras = {"c1": _camera("c1", home_id="H1")}
