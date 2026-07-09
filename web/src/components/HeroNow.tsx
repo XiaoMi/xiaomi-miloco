@@ -408,9 +408,9 @@ function CamSwitch({
   const { t } = useTranslation();
   const blocked = !!blockedReasonKey;
   const dim = busy || blocked;
-  // 桌面 hover 点缀:语义不可开时在鼠标附近弹原因气泡,与点击 toast 互补——hover 即时看
-  // 原因(悬停就有),点击给明确反馈 + 触屏兜底。fixed + 鼠标坐标定位,不被下区 ul 的
-  // overflow-hidden 裁掉;触屏无 hover,自然只走 toast。仅 blocked 时才挂监听。
+  // 桌面 hover 点缀:语义不可开时在鼠标入场处弹原因气泡,与点击 toast 互补——hover 即时看
+  // 原因(悬停就有),点击给明确反馈 + 触屏兜底。fixed 定位锚定入场点(只 onMouseEnter 记一次、
+  // 不跟随光标,省逐像素重渲染),不被下区 ul 的 overflow-hidden 裁掉;触屏无 hover,只走 toast。
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   return (
     <>
@@ -440,9 +440,6 @@ function CamSwitch({
           onToggle(!inUse);
         }}
         onMouseEnter={
-          blocked ? (e) => setTip({ x: e.clientX, y: e.clientY }) : undefined
-        }
-        onMouseMove={
           blocked ? (e) => setTip({ x: e.clientX, y: e.clientY }) : undefined
         }
         onMouseLeave={() => setTip(null)}
