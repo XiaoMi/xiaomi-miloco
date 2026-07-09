@@ -540,6 +540,28 @@ async def test_multi_camera_concurrent_success_after_open(cb):
     assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
 
 
+# ─── 跨 loop / 跨线程锁 (review 🔵 threading.RLock 回归) ─────────────────────
+
+
+def test_cross_loop_lock_access_does_not_raise_bound_error(cb):
+    """review 🔵 回归:asyncio.Lock 绑定到首次 acquire 时的 event loop,跨 loop 竞争
+    会抛"bound to a different event loop"。改成 threading.RLock 后,同一实例可在
+    多个 loop / 线程访问不炸。这里用两个独立 asyncio.run 模拟主 loop 与 worker
+    临时 loop,验证不抛 RuntimeError。"""
+    import asyncio as _a
+
+    async def _op():
+        await cb.record_failure(_rec())
+        cb.snapshot()
+
+    # 第一个 loop 用一次(建立"如果是 asyncio.Lock 就会绑定"的场景)
+    _a.run(_op())
+    # 第二个 loop(全新)也用同一 cb 实例 —— asyncio.Lock 在这里会炸,RLock 不炸
+    _a.run(_op())
+    # 顺便验证状态累积正确
+    assert cb.snapshot().consecutive_failures >= 2
+
+
 # ─── record_probe_result 非 CONFIG 失败不应覆盖 OPEN_CONFIG (review #3) ─────
 
 

@@ -1,15 +1,22 @@
 """omni 全局熔断器。
 
 状态机与阈值见 spec §3、§10。全进程单例;所有 omni HTTP 出口共用。
-线程模型:asyncio 单线程 + Lock 保护;不跨线程使用(inference 线程有自己的 loop,
-但 omni 调用回到主 loop 通过 run_coroutine_threadsafe,所以本模块只从主 loop 调)。
+
+线程模型:本模块被主 loop 的 probe task 与 inference 每窗临时 loop 的 omni 调用
+并发触碰(client._realtime_perceive_impl 用 main_loop.run_in_executor(executor,
+lambda: asyncio.run(...)) 起临时 loop,该 loop 上 await 熔断器方法;tick 起的
+probe task 跑在 app 主 loop)。用 threading.RLock 跨 loop 保护,不用 asyncio.Lock
+—— 后者绑定到首次 acquire 时的 event loop,跨 loop 竞争会抛
+"bound to a different event loop"。所有临界区**纯同步无 await**,threading.Lock
+天然跨线程跨 loop 安全;开销仅同步锁,快路径亦不 yield。RLock 允许 try_arm_probe
+内部再调 probe_due 时嵌套 acquire。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -79,7 +86,10 @@ class HealthSnapshot:
 
 
 class OmniCircuitBreaker:
-    """全局单例。所有方法可从主 event loop 安全并发调用。"""
+    """全局单例。方法可从任意 event loop / 任意线程并发调用,靠 threading.RLock 序列化。
+
+    async 方法只是签名保留(caller 都在 await),内部实际是同步临界区;无 await 意味着
+    锁不释放期间不会切换 task,不会踩 asyncio.Lock 的 loop 绑定坑。"""
 
     def __init__(
         self,
@@ -102,7 +112,10 @@ class OmniCircuitBreaker:
         self._backoff_caps = backoff_caps or {"rate_limited": 60.0, "_default": 600.0}
         self._jitter_ratio = jitter_ratio
 
-        self._lock = asyncio.Lock()
+        # RLock:允许 try_arm_probe 持锁调 probe_due (probe_due 单独调用时也持锁,
+        # 嵌套 acquire 靠 RLock 兼容)。跨 loop / 跨线程访问全部通过它序列化,配合
+        # "临界区无 await" 的不变式,消除 asyncio.Lock 的 loop 绑定问题。
+        self._lock = threading.RLock()
         self._state = CircuitState.CLOSED
         self._consecutive_failures = 0
         self._samples: deque[tuple[float, bool]] = deque()  # (timestamp, success)
@@ -129,7 +142,7 @@ class OmniCircuitBreaker:
         httpx、绕开本方法,期间感知 tick 里 omni 调用继续被短路,避免"探测中却又真发
         带视频 base64"的窗口漏发。转 CLOSED 后感知才恢复。
         """
-        async with self._lock:
+        with self._lock:
             if self._state != CircuitState.CLOSED:
                 code = self._current_code or "unreachable"
                 raise CircuitOpenError(f"skipped:cooling:{code}", self._current_message)
@@ -146,7 +159,7 @@ class OmniCircuitBreaker:
         no-op,由 tick 的独立 probe 通道决定何时闭合。
         """
         changed = False
-        async with self._lock:
+        with self._lock:
             self._append_sample(True)
             self._consecutive_failures = 0
             if self._state == CircuitState.HALF_OPEN:
@@ -166,7 +179,7 @@ class OmniCircuitBreaker:
         探到 401 就是 key 错,没有必要再等窗口。
         """
         emit = False
-        async with self._lock:
+        with self._lock:
             self._append_sample(False)
             self._consecutive_failures += 1
 
@@ -192,7 +205,7 @@ class OmniCircuitBreaker:
             self._emit()
 
     async def record_probe_result(self, ok: bool, err: ClassifiedError | None) -> None:
-        async with self._lock:
+        with self._lock:
             self._last_probe_at = time.monotonic()
             self._last_probe_result = "ok" if ok else "fail"
             if ok:
@@ -216,35 +229,38 @@ class OmniCircuitBreaker:
 
     def probe_due(self) -> bool:
         """外部 tick 查询:是否到 HALF_OPEN 时刻(不改状态)。"""
-        if self._state != CircuitState.OPEN_RECOVERABLE:
-            return False
-        return (
-            self._next_probe_at_monotonic is not None
-            and time.monotonic() >= self._next_probe_at_monotonic
-        )
+        with self._lock:
+            if self._state != CircuitState.OPEN_RECOVERABLE:
+                return False
+            return (
+                self._next_probe_at_monotonic is not None
+                and time.monotonic() >= self._next_probe_at_monotonic
+            )
 
     def try_arm_probe(self) -> bool:
         """tick 驱动占位:三条件齐(OPEN_RECOVERABLE + probe_due + 未 in-flight)时置
         in-flight 位并返回 True。调用方拿到 True 后 spawn probe task,task 里必须走
         mark_half_open → probe_omni → record_probe_result(record_probe_result 会清位)。
 
-        asyncio 单线程 + 本方法无 await,判断和置位不会被切换,并发调用天然只有一个
-        能拿到 True。
+        RLock 持锁下调 probe_due(嵌套 acquire 由 RLock 支持),判断和置位对同一临界区
+        原子;并发调用只有一个能拿到 True。
         """
-        if self._state != CircuitState.OPEN_RECOVERABLE:
-            return False
-        if self._probe_in_flight:
-            return False
-        if not self.probe_due():
-            return False
-        self._probe_in_flight = True
-        return True
+        with self._lock:
+            if self._state != CircuitState.OPEN_RECOVERABLE:
+                return False
+            if self._probe_in_flight:
+                return False
+            if not self.probe_due():
+                return False
+            self._probe_in_flight = True
+            return True
 
     def clear_probe_in_flight(self) -> None:
         """强制清 in-flight 位。record_probe_result 之外的兜底:probe task 被 cancel
         (asyncio.CancelledError 不进 except Exception)时保证下次 tick 还能再 arm。
         不改状态,只清位。"""
-        self._probe_in_flight = False
+        with self._lock:
+            self._probe_in_flight = False
 
     def probe_in_flight(self) -> bool:
         """只读:是否有 probe 正在执行(tick 已 arm 但 record_probe_result 未回)。
@@ -254,65 +270,68 @@ class OmniCircuitBreaker:
         的短路会漏掉这段,导致 retry 与 tick 双 probe 并发、record_probe_result 互相
         覆盖引起横条闪跳。
         """
-        return self._probe_in_flight
+        with self._lock:
+            return self._probe_in_flight
 
     async def mark_half_open(self) -> None:
         """外部驱动:进入 HALF_OPEN(发起 probe 前调)。"""
-        async with self._lock:
+        with self._lock:
             if self._state == CircuitState.OPEN_RECOVERABLE:
                 self._state = CircuitState.HALF_OPEN
         self._emit()
 
     async def retry_now(self) -> None:
         """用户点「立即重试」;OPEN_RECOVERABLE / OPEN_CONFIG → HALF_OPEN。"""
-        async with self._lock:
+        with self._lock:
             if self._state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG):
                 self._state = CircuitState.HALF_OPEN
                 self._next_probe_at_monotonic = time.monotonic()
         self._emit()
 
     async def reset_on_config_change(self) -> None:
-        async with self._lock:
+        with self._lock:
             self._transition_to_closed_locked()
         self._emit()
 
     def snapshot(self) -> HealthSnapshot:
-        now_ms = int(time.time() * 1000)
-        mono_now = time.monotonic()
-        next_ms: int | None = None
-        next_in_s: float | None = None
-        if (
-            self._next_probe_at_monotonic is not None
-            and self._state == CircuitState.OPEN_RECOVERABLE
-        ):
-            delta_s = max(0.0, self._next_probe_at_monotonic - mono_now)
-            next_ms = now_ms + int(delta_s * 1000)
-            next_in_s = round(delta_s, 1)
-        last_ms = None
-        retry_avail_s: float | None = None
-        if self._last_probe_at is not None:
-            last_ms = now_ms - int((mono_now - self._last_probe_at) * 1000)
-            remaining = RETRY_COOLDOWN_SEC - (mono_now - self._last_probe_at)
-            retry_avail_s = round(max(0.0, remaining), 2)
-        since_ms = 0
-        if self._state != CircuitState.CLOSED:
-            since_ms = now_ms - int((mono_now - self._state_since) * 1000)
-        return HealthSnapshot(
-            state=_STATE_TO_UI[self._state],
-            code=self._current_code,
-            message=self._current_message,
-            since_ms=since_ms,
-            consecutive_failures=self._consecutive_failures,
-            next_probe_at_ms=next_ms,
-            next_probe_in_seconds=next_in_s,
-            last_probe_at_ms=last_ms,
-            last_probe_result=self._last_probe_result,
-            retry_cooldown_sec=RETRY_COOLDOWN_SEC,
-            retry_available_in_seconds=retry_avail_s,
-        )
+        with self._lock:
+            now_ms = int(time.time() * 1000)
+            mono_now = time.monotonic()
+            next_ms: int | None = None
+            next_in_s: float | None = None
+            if (
+                self._next_probe_at_monotonic is not None
+                and self._state == CircuitState.OPEN_RECOVERABLE
+            ):
+                delta_s = max(0.0, self._next_probe_at_monotonic - mono_now)
+                next_ms = now_ms + int(delta_s * 1000)
+                next_in_s = round(delta_s, 1)
+            last_ms = None
+            retry_avail_s: float | None = None
+            if self._last_probe_at is not None:
+                last_ms = now_ms - int((mono_now - self._last_probe_at) * 1000)
+                remaining = RETRY_COOLDOWN_SEC - (mono_now - self._last_probe_at)
+                retry_avail_s = round(max(0.0, remaining), 2)
+            since_ms = 0
+            if self._state != CircuitState.CLOSED:
+                since_ms = now_ms - int((mono_now - self._state_since) * 1000)
+            return HealthSnapshot(
+                state=_STATE_TO_UI[self._state],
+                code=self._current_code,
+                message=self._current_message,
+                since_ms=since_ms,
+                consecutive_failures=self._consecutive_failures,
+                next_probe_at_ms=next_ms,
+                next_probe_in_seconds=next_in_s,
+                last_probe_at_ms=last_ms,
+                last_probe_result=self._last_probe_result,
+                retry_cooldown_sec=RETRY_COOLDOWN_SEC,
+                retry_available_in_seconds=retry_avail_s,
+            )
 
     def state_for_test(self) -> CircuitState:
-        return self._state
+        with self._lock:
+            return self._state
 
     # ---- private (锁内调用) ---------------------------------------------------
 
