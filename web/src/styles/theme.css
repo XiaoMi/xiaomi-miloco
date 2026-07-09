@@ -443,3 +443,42 @@ select:focus-visible {
 .modal-surface {
   background-color: var(--color-bg-secondary);
 }
+
+/* Settings slider: 橙色已选轨道 + 浅灰未选轨道 + 白色描边橙色圆点 */
+.settings-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-border, #e5e5e5);
+  outline: none;
+}
+.settings-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-brand-primary, #ff6900);
+  border: 3px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  margin-top: -7px;
+}
+.settings-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+}
+.settings-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-brand-primary, #ff6900);
+  border: 3px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+}
+.settings-slider::-moz-range-progress {
+  background: var(--color-brand-primary, #ff6900);
+  height: 6px;
+  border-radius: 3px;
+}

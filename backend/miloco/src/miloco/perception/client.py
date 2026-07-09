@@ -340,6 +340,20 @@ class PerceptionEngineProxy:
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎 proxy 失败 | %s", e)
 
+    async def rebuild(self) -> None:
+        """无条件销毁当前引擎实例并按最新配置重建（运行时改感知参数后生效用）。
+
+        与 ``stop_to_unconfigured`` 不同：不依赖 key 被删的降级语义；与 ``try_reinit``
+        不同：不受 ``ready`` 守卫限制，``ready`` 态也强制重造。调用方须保证 settings
+        缓存已刷新（PUT config 已 ``reset_settings()``），使 ``_init_engine`` 读到新值
+        （omni_fps 等 cache 在 ``_create_engine`` 的配置）。
+        """
+        async with self._engine_lock:
+            if self.perception_engine is not None:
+                await self.close()
+                self.perception_engine = None
+            self._init_engine()
+
     async def stop_to_unconfigured(self) -> None:
         """软停引擎,回到「未配模型」态——与「启用→tick 自愈拉起」对称的反向操作。
 

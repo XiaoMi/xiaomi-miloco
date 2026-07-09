@@ -81,7 +81,7 @@ class TestBuildPrompt:
         assert "位置: 书房" in payload["user_content"]  # room_name 作场景参考注入 U4
         assert "读书开灯" in payload["user_content"]  # 规则按 rule_name 渲染（# 待判断规则）
         assert payload["video_base64"] is not None
-        assert payload["video_fps"] == ep.frame_info.fps
+        assert payload["media_info"] is not None
 
     def test_rule_rendered_by_name_without_evidence_suffix(self):
         """规则按 rule_name 渲染进「# 待判断规则」，不带已删除的 ｜允许证据= 后缀。"""
@@ -455,20 +455,19 @@ class TestResolveRoute:
 
 class TestAudioRoutePayload:
     def test_audio_payload_shape(self):
-        """audio route：payload 只有 audio_base64，没有 video_base64 / video_fps。"""
+        """audio route：payload 只有 audio_base64，没有 video_base64。"""
         ep = _audio_only_packet()
         payload = build_prompt(ep, OmniContext())
         assert "audio_base64" in payload
-        assert payload["audio_base64"]  # 非空 base64
+        assert payload["audio_base64"]
         assert "video_base64" not in payload
-        assert "video_fps" not in payload
 
     def test_video_route_no_audio_field(self):
-        """video route：payload 含 video_base64 / video_fps，不含 audio_base64。"""
+        """video route：payload 含 video_base64 + media_info，不含 audio_base64。"""
         ep = _video_route_packet()
         payload = build_prompt(ep, OmniContext())
         assert "video_base64" in payload
-        assert "video_fps" in payload
+        assert "media_info" in payload
         assert "audio_base64" not in payload
 
     def test_audio_route_drops_visual_fields(self):
@@ -495,10 +494,11 @@ class TestBuildMessagesContentBlocks:
 
     def test_audio_route_emits_input_audio_block(self):
         from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import MiMoAdapter
 
         ep = _audio_only_packet()
         payload = build_prompt(ep, OmniContext())
-        messages = _build_messages(payload)
+        messages = _build_messages(payload, MiMoAdapter())
         user_blocks = messages[1]["content"]
         types = [b["type"] for b in user_blocks]
 
@@ -509,10 +509,11 @@ class TestBuildMessagesContentBlocks:
 
     def test_video_route_emits_video_url_block(self):
         from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import MiMoAdapter
 
         ep = _video_route_packet()
         payload = build_prompt(ep, OmniContext())
-        messages = _build_messages(payload)
+        messages = _build_messages(payload, MiMoAdapter())
         user_blocks = messages[1]["content"]
         types = [b["type"] for b in user_blocks]
 
@@ -940,12 +941,12 @@ class TestEncodeVideoAudioGating:
     """video 路由按 audio gate 结果决定是否把音频轨编进 mp4（反语音幻觉）。"""
 
     def test_audio_track_included_when_audio_active(self):
-        b64 = _encode_video(_video_packet(audio_active=True))
+        b64, _info = _encode_video(_video_packet(audio_active=True))
         assert b64 is not None
         assert _mp4_has_audio_stream(b64)
 
     def test_audio_track_dropped_when_audio_inactive(self):
-        b64 = _encode_video(_video_packet(audio_active=False))
+        b64, _info = _encode_video(_video_packet(audio_active=False))
         assert b64 is not None
         assert not _mp4_has_audio_stream(b64)
 
@@ -954,7 +955,7 @@ class TestEncodeVideoAudioGating:
         ep = _mock_edge_packet()
         ep.audio_clip = np.zeros(16000, dtype=np.int16)
         assert ep.trigger is None
-        b64 = _encode_video(ep)
+        b64, _info = _encode_video(ep)
         assert b64 is not None
         assert _mp4_has_audio_stream(b64)
 

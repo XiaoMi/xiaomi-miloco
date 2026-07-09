@@ -89,6 +89,22 @@ class PerceptionEngine(BasePerceptionEngine):
 
         self._config = config or PerceptionConfig()
 
+        from miloco.perception.engine.omni.provider import adjust_fps_for_omni
+
+        fps = self._config.input.fps
+        omni_fps = self._config.input.omni_fps
+        new_fps = adjust_fps_for_omni(fps, omni_fps)
+        if new_fps != fps:
+            logger.info(
+                "fps(%d) %% omni_fps(%d) != 0，自动调整 fps=%d → %d 保证整除",
+                fps, omni_fps, fps, new_fps,
+            )
+            from dataclasses import replace
+            self._config = replace(
+                self._config,
+                input=replace(self._config.input, fps=new_fps),
+            )
+
         # ============ tracking_service 构造参数缓存（懒加载 factory 复用）============
         self._tracking_mode = self._config.identity.tracking_service_mode
         # 把 IdentityEngineConfig.sort 转成 sort.py 的 SortConfig（duck typing：字段同名）

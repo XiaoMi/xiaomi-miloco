@@ -26,6 +26,7 @@ from miloco.perception.engine.omni.error_classifier import (
     classify_exception,
     classify_response,
 )
+from miloco.perception.engine.omni.provider import OmniProviderAdapter, get_adapter
 from miloco.perception.snapshot_context import push_omni_trace
 
 logger = logging.getLogger(__name__)
@@ -192,41 +193,49 @@ async def call_omni(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    adapter = get_adapter(config.model)
+    messages = _build_messages(payload, adapter)
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": False,
-        "thinking": {"type": "disabled"},
-    }
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=False,
+    )
+
+    forced_stream = body.get("stream", False)
 
     cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     short_circuited = False
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": MILOCO_USER_AGENT,
+    }
     try:
         await cb.before_call()  # 熔断 OPEN → 直接抛 CircuitOpenError
         async with httpx.AsyncClient(timeout=config.timeout) as client:
-            resp = await client.post(
-                f"{config.base_url}/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": MILOCO_USER_AGENT,
-                },
-                json=body,
-            )
-            classified = classify_response(resp)
-            if classified is not None:
-                await cb.record_failure(classified)
-                logger.error("Omni API error %d: %s", resp.status_code, resp.text[:500])
-                resp.raise_for_status()
-            raw = resp.json()
+            if not forced_stream:
+                resp = await client.post(
+                    f"{config.base_url}/chat/completions",
+                    headers=headers,
+                    json=body,
+                )
+                classified = classify_response(resp)
+                if classified is not None:
+                    await cb.record_failure(classified)
+                    logger.error(
+                        "Omni API error %d: %s", resp.status_code, resp.text[:500]
+                    )
+                    resp.raise_for_status()
+                raw = resp.json()
+            else:
+                raw = await _collect_stream_response(client, config.base_url, headers, body)
             if not isinstance(raw, dict):
                 # 用 __class__.__name__ 而非 type(...) 避免遮盖问题(参数名 type)
                 raw_cls = raw.__class__.__name__
@@ -246,7 +255,7 @@ async def call_omni(
         error = {"code": ce.code, "msg": ce.message[:512]}
         raise OmniError(f"call_omni short-circuited: {ce.message}", original=ce) from ce
     except OmniError:
-        raise  # 不重复包装
+        raise
     except Exception as e:
         # HTTP 响应异常已在 record_failure 里记过;这里补记 exception 类。
         if not isinstance(e, httpx.HTTPStatusError):
@@ -272,33 +281,74 @@ async def call_omni(
         )
 
 
-def _build_messages(payload: dict) -> list[dict]:
+async def _iter_sse_chunks(resp) -> AsyncGenerator[dict, None]:
+    """从 SSE 响应逐行解析 JSON chunks，跳过空行、非 data 行和畸形 JSON。"""
+    async for line in resp.aiter_lines():
+        line = line.strip()
+        if not line or not line.startswith("data: "):
+            continue
+        data = line[6:]
+        if data == "[DONE]":
+            break
+        try:
+            yield json.loads(data)
+        except json.JSONDecodeError:
+            continue
+
+
+async def _collect_stream_response(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """读取 SSE 流并拼接为等效的非流式响应 dict。
+
+    用于 adapter 强制 stream=True（如 Qwen）但调用方期望同步返回的场景。
+    """
+    content_parts: list[str] = []
+    usage: dict[str, Any] = {}
+    async with client.stream(
+        "POST", f"{base_url}/chat/completions", headers=headers, json=body,
+    ) as resp:
+        if resp.status_code != 200:
+            await resp.aread()
+            logger.error("Omni stream error %d: %s", resp.status_code, resp.text[:500])
+            if resp.status_code == 400:
+                from miloco.perception.engine.omni.omni import (
+                    _summarize_multimodal_payload,
+                )
+                logger.error(
+                    "[omni] stream 400 payload 摘要 | %s",
+                    _summarize_multimodal_payload(body.get("messages", [])),
+                )
+            resp.raise_for_status()
+        async for chunk in _iter_sse_chunks(resp):
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk["usage"]
+            try:
+                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+            except (IndexError, KeyError):
+                delta = None
+            if delta:
+                content_parts.append(delta)
+    return {
+        "choices": [{"message": {"content": "".join(content_parts)}}],
+        "usage": usage,
+    }
+
+
+def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": payload["system_prompt"]}]
 
     content: list[dict] = [{"type": "text", "text": payload["user_content"]}]
 
-    # Video (frames + audio merged into mp4)；与 audio_base64 互斥（上游 _build_payload 保证）
+    media_info = payload.get("media_info")
+
     if payload.get("video_base64"):
-        content.append(
-            {
-                "type": "video_url",
-                "video_url": {
-                    "url": f"data:video/mp4;base64,{payload['video_base64']}"
-                },
-                "fps": payload.get("video_fps", 3),
-                "media_resolution": "max",
-            }
-        )
-    # Audio-only route：独立 input_audio 块（仅当无 video_base64 时启用）
+        content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
-        content.append(
-            {
-                "type": "input_audio",
-                "input_audio": {
-                    "data": f"data:audio/m4a;base64,{payload['audio_base64']}"
-                },
-            }
-        )
+        content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):
@@ -355,18 +405,17 @@ async def call_omni_stream(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    adapter = get_adapter(config.model)
+    messages = _build_messages(payload, adapter)
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-        "thinking": {"type": "disabled"},
-    }
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=True,
+    )
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -400,25 +449,12 @@ async def call_omni_stream(
                         "Omni stream error %d: %s", resp.status_code, resp.text[:500]
                     )
                     resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # usage 在最后一个 chunk 的顶层
+                async for chunk in _iter_sse_chunks(resp):
                     if isinstance(chunk.get("usage"), dict):
                         raw_usage_seen = chunk["usage"]
                         if usage_out is not None:
                             usage_out.update(extract_usage({"usage": raw_usage_seen}))
 
-                    # content delta：choices[0].delta.content
                     try:
                         delta = (
                             chunk.get("choices", [{}])[0]

@@ -306,6 +306,10 @@ class PipelineProcessor:
         """软停底层引擎(删当前生效模型→回未配态),保留 tick 自愈循环。透传 proxy。"""
         await self._perception_engine_proxy.stop_to_unconfigured()
 
+    async def rebuild(self) -> None:
+        """无条件重建底层引擎(改感知参数后生效用)。透传 proxy。"""
+        await self._perception_engine_proxy.rebuild()
+
     @property
     def last_batch(self) -> PerceptionBatch | None:
         return self._last_batch
