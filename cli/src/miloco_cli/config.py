@@ -98,14 +98,25 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
 
 
 def atomic_write(path: Path, data: dict) -> None:
-    """原子写：临时文件 + ``os.replace``。"""
+    """原子写：临时文件 + fsync + ``os.replace`` + 目录 fsync。
+
+    fsync 数据页与目录项后再 rename，掉电也不会留下改了名却没落盘的空/半文件
+    （与 backend ``home_profile/store.py::_atomic_write_text`` 同款持久化保证）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except BaseException:
         try:
             os.unlink(tmp)
