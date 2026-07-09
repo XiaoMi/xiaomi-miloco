@@ -7,6 +7,16 @@
     "retryingBtn": "重试中…",
     "goToConfig": "到「模型」页修改",
     "retryFailed": "重试失败",
-    "failuresCount": "{{n}} 次失败"
+    "failuresCount": "{{n}} 次失败",
+    "codes": {
+      "unreachable": "无法连接 omni 服务",
+      "timeout": "omni 服务响应超时",
+      "http_error": "omni 服务返回异常",
+      "rate_limited": "被 provider 限流",
+      "bad_key": "API Key 无效或无权限",
+      "not_found": "模型或地址不存在",
+      "rejected_authed": "已连接，但拒绝了模型请求（模型名可能错误）",
+      "bad_response": "omni 响应格式异常"
+    }
   }
 }

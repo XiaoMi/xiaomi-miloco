@@ -7,6 +7,16 @@
     "retryingBtn": "Retrying…",
     "goToConfig": "Fix in Model tab",
     "retryFailed": "Retry failed",
-    "failuresCount": "{{n}} failures"
+    "failuresCount": "{{n}} failures",
+    "codes": {
+      "unreachable": "Couldn't reach the Omni service",
+      "timeout": "Omni service timed out",
+      "http_error": "Omni service returned an error",
+      "rate_limited": "Rate-limited by the provider",
+      "bad_key": "Invalid API key or insufficient permission",
+      "not_found": "Model or URL not found",
+      "rejected_authed": "Connected, but the model request was rejected (model name may be wrong)",
+      "bad_response": "Malformed response from Omni"
+    }
   }
 }

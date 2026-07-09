@@ -69,11 +69,17 @@ export function OmniHealthBanner({
     }
   }
 
+  // 优先用 code 查本地化文案(backend message 是硬编码中文,直接注入会污染英文界面);
+  // code 为空或未在 omniHealth.codes 里定义时回退到 backend message,保留 http_error
+  // 附带的 HTTP 状态码等动态细节。
+  const localizedMsg = health.code
+    ? t(`omniHealth.codes.${health.code}`, { defaultValue: health.message })
+    : health.message;
   const message = isConfig
-    ? t("omniHealth.configInvalid", { message: health.message })
+    ? t("omniHealth.configInvalid", { message: localizedMsg })
     : nextSec != null
-      ? t("omniHealth.retrying", { message: health.message, seconds: nextSec })
-      : t("omniHealth.retryingNoTime", { message: health.message });
+      ? t("omniHealth.retrying", { message: localizedMsg, seconds: nextSec })
+      : t("omniHealth.retryingNoTime", { message: localizedMsg });
 
   return (
     <div className={`w-full px-4 py-2 flex items-center justify-between gap-3 shrink-0 ${cls}`}>
