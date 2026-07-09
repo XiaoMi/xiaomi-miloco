@@ -33,7 +33,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 - **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro（在 OpenClaw 中配置）
 
 > [!CAUTION]
-> **费用提示**：感知与 Agent 调用依赖云端大模型，会持续产生 API 费用，请关注用量。可在家庭面板「模型」页查看 token 消耗。
+> **费用提示**：感知与 Agent 调用主要依赖云端大模型，会持续产生 API 费用，请关注用量。可在家庭面板「模型」页查看 token 消耗。
 >
 > **需本地 ONNX 推理。** Miloco 的感知管线通过 ONNX Runtime 在本地运行人体检测和重识别模型，并非全部依赖云端。
 
