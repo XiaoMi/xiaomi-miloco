@@ -33,39 +33,36 @@ logger = logging.getLogger(__name__)
 _STATE_FILENAME = "state.json"
 
 
-def _detect_im_platforms_simple() -> List[str]:
-    """扫 ~/.hermes/auth.json + config.yaml, 列出已配 bot_token 的 IM platform 名。
+def _load_channel_directory() -> dict:
+    """读取 Hermes ``channel_directory.json`` 的平台可达 channel 列表。
 
-    给 resolveNotifyTarget 用作 fallback: 没有显式 deliver.target 时, 给 agent
-    一个候选列表(让 agent 知道哪个平台可用)。
+    优先用 Hermes 官方 API ``gateway.channel_directory.load_directory()``
+    （gateway 启动时构建、每 5 分钟刷新），不可 import 时退化读文件。
     """
-    candidates: List[str] = []
-    auth_path = Path.home() / ".hermes" / "auth.json"
-    if auth_path.is_file():
-        try:
-            auth = json.loads(auth_path.read_text(encoding="utf-8"))
-            if isinstance(auth, dict):
-                for platform, conf in auth.items():
-                    if isinstance(conf, dict) and conf.get("bot_token"):
-                        candidates.append(platform)
-        except (OSError, json.JSONDecodeError):
-            pass
-    cfg_path = Path.home() / ".hermes" / "config.yaml"
-    if cfg_path.is_file():
-        try:
-            text = cfg_path.read_text(encoding="utf-8")
-            import re
-            for m in re.finditer(
-                r"^(\w+):\s*\n(?:\s+.+\n)*?\s+bot_token:", text, re.MULTILINE,
-            ):
-                plat = m.group(1)
-                if plat not in candidates and plat not in (
-                    "platforms", "gateway", "model", "plugins",
-                ):
-                    candidates.append(plat)
-        except OSError:
-            pass
-    return candidates
+    try:
+        from gateway.channel_directory import load_directory
+        result = load_directory()
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+    path = Path.home() / ".hermes" / "channel_directory.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _detect_im_platforms_simple() -> List[str]:
+    """列出当前已连接(非空 channel 列表)的 IM 平台名。
+
+    从 ``~/.hermes/channel_directory.json`` 的 ``platforms`` 下取——
+    而不是 auth.json/config.yaml（后者没有 bot_token 字段，旧假设错误）。
+    """
+    platforms = _load_channel_directory().get("platforms")
+    if not isinstance(platforms, dict):
+        return []
+    return [name for name, channels in platforms.items() if channels]
 
 
 def resolve_notify_target(ctx: Any) -> Dict[str, Any]:

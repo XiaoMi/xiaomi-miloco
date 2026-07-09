@@ -125,8 +125,9 @@ def _map_session(session_key: str, lane: str) -> str:
 def _resolve_owner_session() -> tuple[Optional[str], Optional[str]]:
     """解析车主 IM 会话 ID 和投递平台名。
 
-    从 Hermes channel_directory 找任一已绑定 IM 频道对应的 session 和 platform。
-    返回 (session_id, platform)。均为 None 表示还没绑过 IM。
+    从 Hermes channel_directory 的 ``platforms.{name}`` 下找第一个已绑定 IM 频道。
+    channel 对象的 ``id`` 字段即为 session_id。返回 (session_id, platform)。
+    均为 None 表示还没绑过 IM。
     """
     channel_file = Path.home() / ".hermes" / "channel_directory.json"
     try:
@@ -135,10 +136,14 @@ def _resolve_owner_session() -> tuple[Optional[str], Optional[str]]:
         return None, None
     if not isinstance(data, dict):
         return None, None
-    for key, entry in data.items():
-        if isinstance(entry, dict) and entry.get("session_id"):
-            platform = entry.get("platform") or key.split(":")[0]
-            return str(entry["session_id"]), platform
+    platforms = data.get("platforms")
+    if not isinstance(platforms, dict):
+        return None, None
+    for plat_name, channels in platforms.items():
+        if isinstance(channels, list) and channels:
+            for ch in channels:
+                if isinstance(ch, dict) and ch.get("id"):
+                    return str(ch["id"]), plat_name
     return None, None
 
 
@@ -165,8 +170,13 @@ class Adapter:
         self._api_url = (api_url or _DEFAULT_HERMES_URL).rstrip("/")
         self._api_key = api_key or _DEFAULT_API_KEY
         self._trace_dir = trace_dir or _resolve_trace_dir()
-        # 每 turn 新建 httpx.AsyncClient(避免跨回合连接复用导致 cancellation 串扰)
         self._client: Optional[httpx.AsyncClient] = None
+        # run_id → send_turn 发送原文。trace.py 用 Hermes session_id 落盘，
+        # adapter 用 uuid 当 run_id——两边文件名对不上。此处存文本，
+        # read_trace_meta 按文本前缀反查 meta.json 实现关联。
+        self._pending_texts: dict[str, str] = {}
+
+    _PENDING_TEXTS_MAX = 200
 
     # ---- build_system --------------------------------------------------
 
@@ -203,9 +213,12 @@ class Adapter:
         """
         run_id = _new_run_id()
         text = getattr(ctx, "text", "") or ""
+        # 存储文本供 read_trace_meta 反查（trace.py 用 session_id 落盘，不认这里的 uuid）
+        self._pending_texts[run_id] = text
+        if len(self._pending_texts) > self._PENDING_TEXTS_MAX:
+            self._pending_texts.pop(next(iter(self._pending_texts)), None)
         session_key = getattr(ctx, "session_key", "main") or "main"
         lane = getattr(ctx, "lane", "default") or "default"
-        trace_id = getattr(ctx, "trace_id", "") or ""
         wait_timeout_ms = int(getattr(ctx, "wait_timeout_ms", 180_000) or 180_000)
         profile = getattr(ctx, "profile", "full") or "full"
         extra = getattr(ctx, "extra", {}) or {}
@@ -367,29 +380,35 @@ class Adapter:
     # ---- read_trace_meta ----------------------------------------------
 
     async def read_trace_meta(self, run_id: str) -> Optional[Any]:
-        """读 ``$MILOCO_HOME/trace/agent/<YYYYMMDD>/<runId>__<query>.meta.json`` → TraceMeta-like。
+        """按发送原文反查 trace.py 落盘的 meta.json。
 
-        trace.py 写带日期子目录+query后缀,此处 glob 搜索匹配。
+        adapter 用 uuid 当 run_id，trace.py 用 Hermes session_id 落盘文件名——
+        两边对不上，无法按文件名匹配。此处用 _pending_texts 存的发送原文，
+        按 ``query`` 字段前缀匹配最近落盘的 meta.json。
         """
+        text = self._pending_texts.pop(run_id, None)
+        if not text:
+            return None
         candidates = sorted(
-            self._trace_dir.rglob(f"*{run_id}*.meta.json"),
+            self._trace_dir.rglob("*.meta.json"),
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
-        if not candidates:
+        data: dict[str, Any] | None = None
+        for meta_path in candidates[:50]:
+            try:
+                candidate = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.debug("[hermes adapter] read_trace_meta skip %s: %s", meta_path.name, exc)
+                continue
+            query = (candidate.get("query") or "").strip()
+            if query and text.strip().startswith(query):
+                data = candidate
+                break
+        if not data:
             return None
-        meta_path = candidates[0]
-        try:
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "[hermes adapter] read_trace_meta 解析失败 run=%s path=%s err=%s",
-                run_id, meta_path, exc,
-            )
-            return None
-        # 简单包成 SimpleNamespace,够 backend poller 字段读取
         from types import SimpleNamespace
         return SimpleNamespace(
-            run_id=data.get("run_id") or run_id,
+            run_id=run_id,
             query=data.get("query", ""),
             duration_ms=float(data.get("duration_ms") or 0.0),
             llm_call_count=int(data.get("llm_call_count") or 0),
@@ -403,6 +422,17 @@ class Adapter:
             error_msg=data.get("error_msg"),
             jsonl_path=data.get("jsonl_path"),
         )
+
+    # ---- max_send_turn_latency_s (AgentPlatformAdapter 契约) -----------
+
+    def max_send_turn_latency_s(self) -> float:
+        """返回单次 send_turn 最长耗时估计（含溢出自愈重试一次）。
+
+        onboarding_trigger._delivery_guard_timeout_s 靠此方法估算守护 timeo。
+        WebhookAdapter 已实现（考虑重试+退避），Hermes Adapter 补齐。
+        """
+        timeout_s = 180.0 + _HTTP_BUFFER_S
+        return 2 * timeout_s
 
     # ---- helpers -------------------------------------------------------
 
