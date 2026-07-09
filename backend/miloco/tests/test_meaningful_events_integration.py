@@ -35,6 +35,15 @@ def isolated_env(tmp_path, monkeypatch):
     manager_module.Manager._instance = None
     manager_module.manager_instance = None
 
+    # 拾音默认关(opt-in)后，speech 需相机在拾音白名单才落库/推 SSE：把测试相机加进白名单。
+    from miloco.database.kv_repo import KVRepo
+    from miloco.manager import get_manager
+    from miloco.miot.filter import set_cameras_voice_in_use
+
+    _mgr = get_manager()
+    _mgr._kv_repo = KVRepo()
+    set_cameras_voice_in_use(_mgr._kv_repo, ["cam_living_01"], True)
+
     yield tmp_path
 
     manager_module.Manager._instance = None
