@@ -218,14 +218,14 @@ def _reduce_meta(buffer: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if error_msg is None:
                     error_msg = str(pl.get("error"))[:1024]
     return {
-        "llmCallCount": llm_call_count,
-        "toolCallCount": tool_call_count,
-        "llmTotalMs": llm_total_ms,
-        "toolTotalMs": tool_total_ms,
-        "toolMaxMs": tool_max_ms,
-        "slowestToolName": slowest_tool_name,
-        "errorCount": error_count,
-        "errorMsg": error_msg,
+        "llm_call_count": llm_call_count,
+        "tool_call_count": tool_call_count,
+        "llm_total_ms": llm_total_ms,
+        "tool_total_ms": tool_total_ms,
+        "tool_max_ms": tool_max_ms,
+        "slowest_tool_name": slowest_tool_name,
+        "error_count": error_count,
+        "error_msg": error_msg,
     }
 
 
@@ -249,18 +249,19 @@ def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> Optio
         text = "\n".join(json.dumps(e, ensure_ascii=False) for e in state.buffer) + "\n"
         with gzip.open(full_path, "wt", encoding="utf-8") as f:
             f.write(text)
-        # meta 文件（adapter get_trace 读这个）——小 JSON 包含聚合统计 + 路径
+        # meta 文件（adapter read_trace_meta 读这个）——小 JSON 包含聚合统计 + 路径。
+        # 字段名统一 snake_case，与 adapter.py read_trace_meta 读盘侧一致。
         meta = _reduce_meta(state.buffer)
-        meta["runId"] = run_id
-        meta["traceId"] = _trace_links.get(run_id)
+        meta["run_id"] = run_id
+        meta["trace_id"] = _trace_links.get(run_id)
         meta["query"] = state.query
         meta["success"] = final_success
-        meta["jsonlPath"] = f"trace/agent/{dir_path.name}/{filename}"
-        meta["startedAt"] = state.started_at
-        meta["doneAt"] = _now_ms()
+        meta["jsonl_path"] = f"trace/agent/{dir_path.name}/{filename}"
+        meta["started_at"] = state.started_at
+        meta["done_at"] = _now_ms()
         meta_path = dir_path / f"{run_id}__{_sanitize_filename(state.query)}.meta.json"
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        return meta["jsonlPath"]
+        return meta["jsonl_path"]
     except OSError as exc:
         logger.warning("[miloco-trace] flush failed runId=%s: %s", run_id, exc)
         return None
@@ -345,7 +346,6 @@ def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kw
         state = _turns.get(run_id)
         if not state or state.done:
             return
-        # record end event
         _push_event(state, {
             "ts": _now_iso(),
             "hook": "on_session_end",
@@ -359,24 +359,24 @@ def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kw
                 "durationMs": _now_ms() - state.started_at,
             },
         })
-        # traceId 为空 = 非 miloco 触发的 turn（普通 chat）→ GC，不落盘
-        if not _trace_links.get(run_id):
+        # session_id 不以 "miloco:" 开头 = 非 miloco 触发的 turn（普通 chat）→ GC，不落盘。
+        # 替代旧的 register_trace_link 跨进程机制：该函数在两个进程间无法调用，
+        # 用 session_id 前缀判定更可靠（_map_session 生成固定前缀 "miloco:<key>:<lane>"）。
+        if not (session_id or "").startswith("miloco:"):
             _turns.pop(run_id, None)
             _gc_expired_turns()
             return
-        # 落盘
         jsonl_path = _flush_to_disk(run_id, state, bool(completed))
         meta = _reduce_meta(state.buffer)
-        meta["runId"] = run_id
-        meta["traceId"] = _trace_links.get(run_id)
+        meta["run_id"] = run_id
+        meta["trace_id"] = _trace_links.get(run_id)
         meta["query"] = state.query
-        meta["durationMs"] = _now_ms() - state.started_at
+        meta["duration_ms"] = _now_ms() - state.started_at
         meta["success"] = bool(completed)
-        meta["jsonlPath"] = jsonl_path
+        meta["jsonl_path"] = jsonl_path
         state.done = meta
         state.done_at = _now_ms()
         _gc_expired_turns()
-    # 清掉 traceLink（与 openclaw popTraceLink 等价）
     pop_trace_link(run_id)
 
 
