@@ -71,6 +71,22 @@ def dao(isolated_db):
     return get_manager().meaningful_events_dao
 
 
+@pytest.fixture(autouse=True)
+def _voice_allowlist(isolated_db):
+    """拾音**默认关**(opt-in)后,speech 只有在相机拾音开启(在白名单)时才落库。
+    本模块的持久化用例统一把测试相机 ``cam_living_01`` 加入拾音白名单,让 speech
+    走到落库路径(否则第二道防线 _filter_voice_enabled 会按默认关剥掉)。
+    voice 专项用例 test_asr_from_mic_off_cam_stripped_not_persisted 自建 KVRepo 覆盖此处。
+    """
+    from miloco.database.kv_repo import KVRepo
+    from miloco.manager import get_manager
+    from miloco.miot.filter import set_cameras_voice_in_use
+
+    mgr = get_manager()
+    mgr._kv_repo = KVRepo()
+    set_cameras_voice_in_use(mgr._kv_repo, ["cam_living_01"], True)
+
+
 def _clip_payload(
     seed: int = 0, kind: str = "mp4"
 ) -> "tuple[bytes, str]":
@@ -149,6 +165,7 @@ class TestPersistMeaningfulEvent:
                     speaker="妈妈",
                     content="今天好热",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ]
         )
@@ -168,6 +185,7 @@ class TestPersistMeaningfulEvent:
                     speaker="用户",
                     content="打开窗户",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ]
         )
@@ -192,6 +210,7 @@ class TestPersistMeaningfulEvent:
                     speaker="u",
                     content="开灯",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ],
         )
@@ -271,7 +290,8 @@ class TestPersistMeaningfulEvent:
         result = RealtimePerceptionResult(
             speeches=[
                 Speech(
-                    needs_response=True, speaker="u", content="c", is_complete=True
+                    needs_response=True, speaker="u", content="c", is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ]
         )
@@ -296,6 +316,7 @@ class TestPersistMeaningfulEvent:
                     speaker="u",
                     content="开灯",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ],
             suggestions=[Suggestion(event="e", action="a")],
@@ -350,6 +371,42 @@ class TestPersistMeaningfulEvent:
         # row 仍正常入,text 不受影响
         assert rows[0]["has_rule_hit"] is True
         assert "rule 已被删" in rows[0]["text"]
+
+    async def test_asr_from_mic_off_cam_stripped_not_persisted(self, isolated_db, dao):
+        """默认关(opt-in):相机不在拾音白名单 → speech 在 _persist 内被
+        _filter_voice_enabled 剥掉,speech-only 结果不入表。
+
+        显式把某相机设为拾音关闭(不加入白名单),验证「未开启拾音的相机转写不落库」
+        这条第二道防线在真实 DB 路径上确实生效
+        （与 test_perception_client 的 _filter_voice_enabled 单测同源）。
+        """
+        from miloco.database.kv_repo import KVRepo
+        from miloco.manager import get_manager
+        from miloco.miot.filter import set_cameras_voice_in_use
+
+        # isolated Manager 未 initialize：现挂一个建在隔离 DB 上的真 KVRepo,
+        # 让 _filter_voice_enabled 读到真实白名单(cam_muted 不在其中 → 剥离)。
+        mgr = get_manager()
+        mgr._kv_repo = KVRepo()
+        set_cameras_voice_in_use(mgr._kv_repo, ["cam_muted"], False)  # 未开启拾音
+
+        result = RealtimePerceptionResult(
+            speeches=[
+                Speech(
+                    needs_response=True,
+                    speaker="u",
+                    content="开灯",
+                    is_complete=True,
+                    source_device_ids=["cam_muted"],
+                )
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_muted"],
+            artifacts=_artifacts({"cam_muted": _clip_payload()}),
+        )
+        assert dao.query() == []
 
     async def test_device_ids_from_clips_keys(self, isolated_db, dao):
         """D4 第 2 轮 F-Q7 + B2:processor.py 改造后 device_ids 应来自

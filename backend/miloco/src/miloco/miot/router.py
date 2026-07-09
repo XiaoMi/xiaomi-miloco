@@ -26,6 +26,7 @@ from miloco.middleware.exceptions import HTTPException
 from miloco.miot.schema import (
     AuthorizeRequest,
     CameraToggleRequest,
+    CameraVoiceToggleRequest,
     DeviceControlRequest,
     HomeSwitchRequest,
     MipsStatusResponse,
@@ -520,6 +521,22 @@ async def toggle_scope_camera(
 ):
     data = await manager.miot_service.toggle_camera(
         [{"did": i.did, "in_use": i.in_use} for i in request.items]
+    )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.put(
+    path="/scope/cameras/voice",
+    summary="Batch toggle per-camera audio pickup (mic-off) state",
+    response_model=NormalResponse,
+)
+async def toggle_scope_camera_voice(
+    request: CameraVoiceToggleRequest, current_user: str = Depends(verify_token)
+):
+    # 单独端点(不复用 /scope/cameras)：拾音开关无投喂上限/离线校验、不重启感知引擎,
+    # 与相机启用开关的 refresh/sync/restart 逻辑正交,分开更清晰。
+    data = await manager.miot_service.toggle_camera_voice(
+        [{"did": i.did, "voice_in_use": i.voice_in_use} for i in request.items]
     )
     return NormalResponse(code=0, message="ok", data=data)
 

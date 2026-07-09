@@ -73,6 +73,12 @@ def isolated_env(tmp_path, monkeypatch):
 
     mgr = manager_module.Manager()
     mgr._perception_service = _FakeService()
+    # 拾音默认关(opt-in)后，speech 需相机在拾音白名单才落库/推 SSE：把测试相机加进白名单。
+    from miloco.database.kv_repo import KVRepo
+    from miloco.miot.filter import set_cameras_voice_in_use
+
+    mgr._kv_repo = KVRepo()
+    set_cameras_voice_in_use(mgr._kv_repo, ["cam_living_01"], True)
 
     yield tmp_path, fake_pipeline
 
@@ -111,6 +117,7 @@ class TestSSEPublishFromPersist:
                     speaker="u",
                     content="开灯",
                     is_complete=True,
+                    source_device_ids=["cam_living_01"],
                 )
             ],
         )

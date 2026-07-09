@@ -7,6 +7,7 @@ from miloco_cli.output import print_result
 
 _HOMES_PATH = "/api/miot/scope/homes"
 _CAMERAS_PATH = "/api/miot/scope/cameras"
+_CAMERAS_VOICE_PATH = "/api/miot/scope/cameras/voice"
 
 
 @click.group("scope")
@@ -68,4 +69,35 @@ def scope_camera_enable(dids, pretty):
 def scope_camera_disable(dids, pretty):
     """关闭指定摄像头感知。"""
     result = api_put(_CAMERAS_PATH, {"items": [{"did": d, "in_use": False} for d in dids]})
+    print_result(result, pretty)
+
+
+# ── 拾音开关（mic-off 语义）：与 enable/disable 同款批量 did 语义，走 voice 端点 ──
+#
+# 关闭 = 该相机声音完全不被处理（引擎入口剥离音频：不转写、不上云、语音指令不
+# dispatch），视频照常感知。从属规则：仅感知已启用(in_use=true)的相机可设，感知已
+# 关闭时 backend 整批拒绝——api_put 透传其错误信息并以业务错误码退出，CLI 不吞。
+
+
+@scope_camera.command("mic-on")
+@click.argument("dids", nargs=-1, required=True)
+@click.option("--pretty", is_flag=True)
+def scope_camera_mic_on(dids, pretty):
+    """开启指定摄像头声音（声音重新参与感知）。"""
+    result = api_put(
+        _CAMERAS_VOICE_PATH,
+        {"items": [{"did": d, "voice_in_use": True} for d in dids]},
+    )
+    print_result(result, pretty)
+
+
+@scope_camera.command("mic-off")
+@click.argument("dids", nargs=-1, required=True)
+@click.option("--pretty", is_flag=True)
+def scope_camera_mic_off(dids, pretty):
+    """关闭指定摄像头声音（该相机声音完全不被处理：不识别、不理解、不上云）。"""
+    result = api_put(
+        _CAMERAS_VOICE_PATH,
+        {"items": [{"did": d, "voice_in_use": False} for d in dids]},
+    )
     print_result(result, pretty)

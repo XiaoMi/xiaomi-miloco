@@ -288,6 +288,15 @@ export async function toggleScopeCamera(
   return impl.realToggleScopeCamera(dids, inUse);
 }
 
+// 切换相机拾音开关（PUT /api/miot/scope/cameras/voice；关闭 = 声音完全不被处理）。
+// 仅对感知已启用的相机可设。
+export async function toggleScopeCameraVoice(
+  dids: string[],
+  voiceInUse: boolean,
+): Promise<void> {
+  return impl.realToggleScopeCameraVoice(dids, voiceInUse);
+}
+
 export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> {
   if (!isPrimary(homeId)) {
     return [];

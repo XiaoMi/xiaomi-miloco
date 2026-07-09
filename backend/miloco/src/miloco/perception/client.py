@@ -80,6 +80,43 @@ logger = logging.getLogger(__name__)
 _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 
 
+def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
+    """按摄像头「拾音白名单」过滤 speech：``source_device_ids[0]``(相机 did)在
+    白名单里(拾音已开启)的放行,其余丢弃。**默认关**:不在白名单 = 拾音关闭。
+    实时读 KV(进程内缓存),改开关即时生效、无需重启感知引擎。
+
+    分层防线:**第一道**在引擎入口——``engine/api.py::_strip_unauthorized_voice_audio``
+    对未开启拾音的相机整批剥离音频(不进 gate/omni,不转写、无语音派生 suggestion、
+    不烧音频 token),正常情况下这些相机的 speech 根本不会产生。本函数是**第二道**
+    (引擎入口剥离失效 / 旧窗口残留时兜底),两个执法点:① 语音指令 dispatch(早出
+    _on_early_speeches + 终态 handle_realtime_perception_result);
+    ② meaningful_events 落库/SSE(_persist_meaningful_event 在 classify 前过滤)
+    ——拾音关闭 = 不执行也不记录转写。
+    规则匹配及 caption / suggestion 等视觉产物不经此函数,不受影响。读 KV 失败时
+    **fail-closed**(丢弃全部语音):默认关语义下,宁可漏掉一次语音,也不处理用户
+    未授权相机的音频。
+    """
+    from miloco.manager import get_manager
+    from miloco.miot.filter import voice_allowed_camera_dids
+
+    try:
+        voice_allowed = voice_allowed_camera_dids(get_manager().kv_repo)
+    except Exception as e:
+        logger.warning("voice allow-list lookup failed, dropping all speeches (fail-closed): %s", e)
+        return []
+    kept: list[Speech] = []
+    for s in speeches:
+        did = s.source_device_ids[0] if s.source_device_ids else None
+        if did is None or did not in voice_allowed:
+            logger.info(
+                "speech 被摄像头声音开关拦截丢弃(未开启拾音,不下发/不落库): did=%s device_name=%s content_len=%d",
+                did, s.device_name, len(s.content),
+            )
+            continue
+        kept.append(s)
+    return kept
+
+
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
@@ -421,6 +458,8 @@ class PerceptionEngineProxy:
             commands = [
                 i for i in speeches if i.needs_response and i.is_complete
             ]
+            # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+            commands = _filter_voice_enabled(commands)
             if not commands:
                 return
             for c in commands:
@@ -810,6 +849,8 @@ class PerceptionEngineProxy:
                 if early_sent_contents and interaction.content in early_sent_contents:
                     continue
                 speeches.append(interaction)
+        # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+        speeches = _filter_voice_enabled(speeches)
         if speeches:
             _attach_caption(speeches, result.caption)
             for it in speeches:
@@ -833,6 +874,8 @@ async def _persist_meaningful_event(
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
     流程:
+      0. 语音黑名单过滤 speech(与 dispatch 同一闸门)→ 语音关闭相机的转写既不
+         入分类判定也不落库/推 SSE;caption / suggestion / 规则命中照常
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
       3. INSERT meaningful_events(snapshot_count=0)
@@ -857,6 +900,14 @@ async def _persist_meaningful_event(
     )
 
     try:
+        # 语音关闭相机的转写不落库:与 dispatch 同一闸门先滤 speech,classify /
+        # payload / text / SSE 全部基于过滤后的视图——语音开关 = 不执行也不记录。
+        # 只滤 speech,同相机的 caption / suggestion / 规则命中照常(开关只管语音,
+        # 不管相机感知)。result 与主路径(规则匹配 / speech dispatch)共享,不可原地
+        # 改 → model_copy 浅拷贝换 speeches 列表。
+        result = result.model_copy(
+            update={"speeches": _filter_voice_enabled(result.speeches)}
+        )
         cls = classify(result)
         if not cls["is_meaningful"]:
             return

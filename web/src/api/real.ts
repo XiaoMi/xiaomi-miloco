@@ -922,6 +922,9 @@ interface BackendScopeCamera {
   room_name?: string | null;
   is_online: boolean;
   in_use: boolean;
+  // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
+  // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
+  voice_in_use?: boolean;
   connected: boolean;
 }
 
@@ -935,6 +938,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     roomName: c.room_name ?? undefined,
     isOnline: c.is_online,
     inUse: c.in_use,
+    voiceInUse: c.voice_in_use ?? false,
     connected: c.connected,
   }));
 }
@@ -965,6 +969,23 @@ export async function realToggleScopeCamera(
   });
   // 写后立即 invalidate + 主动 prefetch homeCache(同 switchScopeHome 同款消 race)。
   invalidateMiotHomeCache();
+}
+
+// 拾音开关走独立端点 PUT /api/miot/scope/cameras/voice（不复用相机启用端点：
+// 拾音无投喂上限/离线校验、不重启感知引擎）。关闭 = mic-off：该相机声音完全不被处理
+// （引擎入口剥离音频）。后端只接受对 in_use=true 相机的设置,
+// 感知已关闭的相机会被拒（前端已把其开关置灰,这是二次兜底）。
+// 不 invalidate homeCache:拾音状态只存在于 /scope/cameras,调用方 reload scopeCameras 即可。
+export async function realToggleScopeCameraVoice(
+  dids: string[],
+  voiceInUse: boolean,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/miot/scope/cameras/voice", {
+    method: "PUT",
+    body: JSON.stringify({
+      items: dids.map((did) => ({ did, voice_in_use: voiceInUse })),
+    }),
+  });
 }
 
 // ── 今天发生了什么(meaningful_events)───────────────────────

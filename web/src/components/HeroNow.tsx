@@ -19,6 +19,27 @@ import { humanTokens } from "@/lib/formatTokens";
 import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+// 「关声音」确认弹窗的「不再提醒」持久化标记（与 web:theme / web:lang 同命名空间）。
+// 复位说明：清除站点数据 / localStorage 即恢复弹窗；本分支不做设置项 UI——将来若加
+// 隐私设置面板，一句 localStorage.removeItem(VOICE_ON_CONFIRMED_KEY) 即可重置。
+const VOICE_ON_CONFIRMED_KEY = "web:voiceOnConfirmed";
+
+function isVoiceOnConfirmed(): boolean {
+  try {
+    return localStorage.getItem(VOICE_ON_CONFIRMED_KEY) === "1";
+  } catch {
+    return false; // localStorage 不可用(隐私模式/测试桩)→ 每次仍确认,无害
+  }
+}
+
+function setVoiceOnConfirmed(): void {
+  try {
+    localStorage.setItem(VOICE_ON_CONFIRMED_KEY, "1");
+  } catch {
+    /* 写不了就算了：本会话每次仍弹确认,不影响功能 */
+  }
+}
+
 interface Props {
   persons: Person[];
   /** perception 当前订阅的画面（含 channel，用于真播放）；scope 是子集映射的字典源 */
@@ -36,6 +57,10 @@ interface Props {
   onJumpUsage?: () => void;
   /** 切换摄像头启用（PUT /api/miot/scope/cameras）；批量传 dids */
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
+  /** 切换单台摄像头拾音（PUT /api/miot/scope/cameras/voice）。关闭 = 该相机声音完全
+   *  不被处理（mic-off：不转写、不上云）。从属于感知开关：仅当该相机 inUse=true 时
+   *  可设，感知关时前端置灰。 */
+  onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -55,6 +80,7 @@ export function HeroNow({
   onPersonClick,
   onJumpUsage,
   onToggleCameras,
+  onToggleCameraVoice,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -153,6 +179,7 @@ export function HeroNow({
         miotHasCamera={miotHasCamera}
         channelByDid={channelByDid}
         onToggleCameras={onToggleCameras}
+        onToggleCameraVoice={onToggleCameraVoice}
       />
     </section>
   );
@@ -169,6 +196,7 @@ interface CameraSectionProps {
   miotHasCamera: boolean;
   channelByDid: Map<string, number>;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
+  onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
 }
 
 function CameraSection({
@@ -179,6 +207,7 @@ function CameraSection({
   miotHasCamera,
   channelByDid,
   onToggleCameras,
+  onToggleCameraVoice,
 }: CameraSectionProps) {
   const { t } = useTranslation();
   const total = scopeCameras.length;
@@ -198,6 +227,8 @@ function CameraSection({
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
   const [singleBusyDids, setSingleBusyDids] = useState<Set<string>>(new Set());
+  // 拾音开关独立 in-flight 集：拾音 PUT 走独立端点,与投喂 PUT 互不阻塞,分开跟踪。
+  const [voiceBusyDids, setVoiceBusyDids] = useState<Set<string>>(new Set());
   const runBulk = async (dids: string[], inUse: boolean) => {
     if (bulkBusy) return;
     setBulkBusy(true);
@@ -218,6 +249,38 @@ function CameraSection({
         n.delete(did);
         return n;
       });
+    }
+  };
+  const runSingleVoice = async (did: string, voiceInUse: boolean) => {
+    if (voiceBusyDids.has(did)) return;
+    setVoiceBusyDids((s) => new Set(s).add(did));
+    try {
+      await onToggleCameraVoice(did, voiceInUse);
+    } finally {
+      setVoiceBusyDids((s) => {
+        const n = new Set(s);
+        n.delete(did);
+        return n;
+      });
+    }
+  };
+  // 声音默认关（opt-in）：开启方向先弹一次知情提示，讲清可能的问题与适用场景；关闭
+  // 方向无害（只是停止处理声音），直接执行。待确认的相机存这里。用户勾「不再提醒」并
+  // 确认后，落 localStorage 标记，之后开声音直接执行、不再弹（批量开多台安静机位时不啰嗦）。
+  const [pendingVoiceOn, setPendingVoiceOn] = useState<{
+    did: string;
+    name: string;
+  } | null>(null);
+  const [dontRemind, setDontRemind] = useState(false);
+  const requestVoiceToggle = (did: string, name: string, next: boolean) => {
+    if (voiceBusyDids.has(did)) return;
+    if (!next) {
+      void runSingleVoice(did, false); // 关闭声音无需确认（无害）
+    } else if (isVoiceOnConfirmed()) {
+      void runSingleVoice(did, true); // 已选「不再提醒」→ 直接开
+    } else {
+      setDontRemind(false); // 每次开框默认不勾
+      setPendingVoiceOn({ did, name }); // 开启 → 知情提示
     }
   };
 
@@ -289,6 +352,14 @@ function CameraSection({
                   channel={channelByDid.get(c.did)}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
+                  // 相机开关 in-flight 时拾音开关也置灰:关相机的 PUT 落库后拾音 PUT 会被
+                  // 后端「感知已关闭」拒掉,别让住户在窗口期点出个报错 toast。
+                  voiceBusy={
+                    voiceBusyDids.has(c.did) ||
+                    bulkBusy ||
+                    singleBusyDids.has(c.did)
+                  }
+                  onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
                 />
               ))}
             </div>
@@ -320,12 +391,103 @@ function CameraSection({
                       (!c.inUse && (!c.isOnline || atCapacity))
                     }
                     onToggle={(v) => runSingle(c.did, v)}
+                    // 同上区卡:相机开关 in-flight 时拾音开关一并置灰,防交叠竞态。
+                    voiceBusy={
+                      voiceBusyDids.has(c.did) ||
+                      bulkBusy ||
+                      singleBusyDids.has(c.did)
+                    }
+                    onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
                   />
                 ))}
               </ul>
             </div>
           )}
         </>
+      )}
+
+      {/* 开声音知情提示：opt-in。讲清可能的问题 + 适用/不适用场景。复用居中弹窗形态。 */}
+      {pendingVoiceOn && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+          onClick={
+            voiceBusyDids.has(pendingVoiceOn.did)
+              ? undefined
+              : () => setPendingVoiceOn(null)
+          }
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="voice-on-title"
+            className="w-[90%] max-w-sm bg-bg-secondary border border-border rounded-2xl shadow-lg p-6 anim-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2
+              id="voice-on-title"
+              className="text-title font-semibold text-text-primary mb-2"
+            >
+              {t("hero.voiceOnConfirmTitle", { name: pendingVoiceOn.name })}
+            </h2>
+            <p className="text-body text-text-secondary mb-3">
+              {t("hero.voiceOnConfirmIntro")}
+            </p>
+            {/* 可能的问题 + 适用/不适用场景：三行图标标记，一眼可辨。 */}
+            <ul className="flex flex-col gap-2 mb-5 text-body">
+              <li className="flex gap-2">
+                <span className="text-warning shrink-0" aria-hidden="true">⚠</span>
+                <span className="text-text-secondary">
+                  {t("hero.voiceOnConfirmRisk")}
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-success shrink-0" aria-hidden="true">✓</span>
+                <span className="text-text-secondary">
+                  {t("hero.voiceOnConfirmRecommend")}
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-error shrink-0" aria-hidden="true">✕</span>
+                <span className="text-text-secondary">
+                  {t("hero.voiceOnConfirmAvoid")}
+                </span>
+              </li>
+            </ul>
+            {/* 不再提醒：勾选并确认后落 localStorage,之后开声音直接执行、不再弹框。 */}
+            <label className="flex items-center gap-2 mb-5 text-body text-text-secondary cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={dontRemind}
+                onChange={(e) => setDontRemind(e.target.checked)}
+                className="h-4 w-4 rounded border-border accent-brand-primary cursor-pointer"
+              />
+              {t("hero.voiceOnConfirmDontRemind")}
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingVoiceOn(null)}
+                disabled={voiceBusyDids.has(pendingVoiceOn.did)}
+                className="text-body px-4 py-2 rounded-lg bg-bg-primary border border-border text-text-primary hover:border-border-strong disabled:opacity-60"
+              >
+                {t("hero.voiceOnConfirmCancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const { did } = pendingVoiceOn;
+                  if (dontRemind) setVoiceOnConfirmed();
+                  setPendingVoiceOn(null);
+                  void runSingleVoice(did, true);
+                }}
+                disabled={voiceBusyDids.has(pendingVoiceOn.did)}
+                className="text-body px-4 py-2 rounded-lg font-semibold bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
+              >
+                {t("hero.voiceOnConfirmOk")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );
@@ -368,6 +530,68 @@ function CamSwitch({
   );
 }
 
+/** 拾音开关（mic-off：关闭后此摄像头的声音完全不被处理——不监听、不转写、不上云）。
+ *  从属于感知开关：相机感知关(inUse=false)时置灰、显示为「关」
+ *  (生效态 = inUse && voiceInUse)；感知开时反映并编辑存储偏好 voiceInUse。
+ *  与投喂开关(CamSwitch)并排,靠麦克风图标 + 文字标签区分,免得两个开关混淆。 */
+function VoiceSwitch({
+  on,
+  name,
+  disabled,
+  onToggle,
+}: {
+  on: boolean;
+  name: string;
+  disabled: boolean;
+  onToggle: (next: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={t(on ? "hero.voiceAriaOn" : "hero.voiceAriaOff", { name })}
+      title={
+        disabled
+          ? t("hero.voiceTitleDisabled")
+          : on
+            ? t("hero.voiceTitleOn")
+            : t("hero.voiceTitleOff")
+      }
+      disabled={disabled}
+      onClick={() => onToggle(!on)}
+      className={`inline-flex items-center gap-1 h-[16px] pl-1 pr-1.5 rounded-full text-[10px] leading-none shadow-sm transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:opacity-40 disabled:cursor-not-allowed ${
+        on ? "bg-brand-primary text-white" : "bg-black/60 text-white/85"
+      }`}
+    >
+      <MicIcon muted={!on} />
+      <span>{t("hero.voiceLabel")}</span>
+    </button>
+  );
+}
+
+/** 小麦克风图标；muted=true 画一道斜杠,表示该相机拾音关闭（声音不被处理）。 */
+function MicIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-3 w-3 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <path d="M12 18v3" />
+      {muted && <path d="M4 4l16 16" />}
+    </svg>
+  );
+}
+
 interface CamCardProps {
   cam: ScopeCamera;
   /** PerceptionCamera 提供的真 channel；undefined = 还没拉到 / 多家庭场景无映射 */
@@ -375,10 +599,20 @@ interface CamCardProps {
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
+  /** 拾音开关置灰条件:拾音 PUT 或相机开关 PUT 本卡 in-flight（防两个 PUT 交叠竞态） */
+  voiceBusy: boolean;
+  onToggleVoice: (next: boolean) => void;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
-function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
+function CamCardWithToggle({
+  cam,
+  channel,
+  bulkBusy,
+  onToggle,
+  voiceBusy,
+  onToggleVoice,
+}: CamCardProps) {
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
       <div className="relative">
@@ -388,7 +622,14 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
           cameraDid={cam.did}
           channel={channel ?? 0}
         />
-        <div className="absolute top-2 right-2">
+        {/* 拾音 + 投喂两个开关并排浮在画面右上;connected 卡必然 inUse=true,拾音可编辑。 */}
+        <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          <VoiceSwitch
+            on={cam.inUse && cam.voiceInUse}
+            name={cam.name}
+            disabled={!cam.inUse || voiceBusy}
+            onToggle={onToggleVoice}
+          />
           <CamSwitch
             inUse={cam.inUse}
             name={cam.name}
@@ -401,15 +642,19 @@ function CamCardWithToggle({ cam, channel, bulkBusy, onToggle }: CamCardProps) {
   );
 }
 
-/** 下区横条行（日志页风格）：摄像头信息 + 投喂开关，无小窗。开关 on → 升入上区投喂。 */
+/** 下区横条行（日志页风格）：摄像头信息 + 拾音/投喂开关，无小窗。投喂 on → 升入上区。 */
 function BenchCamItem({
   cam,
   disabled,
   onToggle,
+  voiceBusy,
+  onToggleVoice,
 }: {
   cam: ScopeCamera;
   disabled: boolean;
   onToggle: (next: boolean) => void;
+  voiceBusy: boolean;
+  onToggleVoice: (next: boolean) => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -433,12 +678,21 @@ function BenchCamItem({
           </div>
         )}
       </div>
-      <CamSwitch
-        inUse={cam.inUse}
-        name={cam.name}
-        disabled={disabled}
-        onToggle={onToggle}
-      />
+      <div className="flex items-center gap-2 shrink-0">
+        {/* 拾音开关从属于感知:相机未启用(inUse=false)时置灰、显示为关。 */}
+        <VoiceSwitch
+          on={cam.inUse && cam.voiceInUse}
+          name={cam.name}
+          disabled={!cam.inUse || voiceBusy}
+          onToggle={onToggleVoice}
+        />
+        <CamSwitch
+          inUse={cam.inUse}
+          name={cam.name}
+          disabled={disabled}
+          onToggle={onToggle}
+        />
+      </div>
     </li>
   );
 }

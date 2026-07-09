@@ -3,9 +3,9 @@
 
 """miloco scope 过滤工具：家庭接入范围 + 相机接入范围。
 
-数据落在 SQLite ``kv`` 表的 ``HOME_WHITE_LIST_KEY``（启用的家庭集合）和
-``CAMERA_BLACK_LIST_KEY``（停用的相机集合），JSON array 字符串，由
-:class:`KVRepo` 缓存。
+数据落在 SQLite ``kv`` 表的 ``HOME_WHITE_LIST_KEY``（启用的家庭集合）、
+``CAMERA_BLACK_LIST_KEY``（停用的相机集合）和 ``CAMERA_VOICE_ALLOW_LIST_KEY``
+（**开启**拾音的相机集合，opt-in / 默认关语义），JSON array 字符串，由 :class:`KVRepo` 缓存。
 """
 
 from __future__ import annotations
@@ -66,6 +66,17 @@ def allowed_home_ids(kv_repo: KVRepo) -> set[str]:
 def denied_camera_dids(kv_repo: KVRepo) -> set[str]:
     """已停用的相机 did 集合；空表示全部启用。"""
     return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_BLACK_LIST_KEY))
+
+
+def voice_allowed_camera_dids(kv_repo: KVRepo) -> set[str]:
+    """已**开启**「拾音」的相机 did 集合（allow-list / opt-in）；空表示全部关闭（**默认关闭**）。
+
+    与 ``denied_camera_dids`` 正交：相机可照常投喂**视频**感知，但只有本集内相机的
+    **音频才被处理**（转写 / 语音派生 suggestion / 上云 token）；不在集内的相机——
+    引擎入口整批剥离音频，dispatch/落库闸门作第二道防线。各执法点实时读取本集，
+    改开关即时生效、不重启感知引擎。读 KV 失败时按空集处理（fail-closed）。
+    """
+    return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY))
 
 
 def is_home_allowed(kv_repo: KVRepo, home_id: str | None) -> bool:
@@ -154,6 +165,24 @@ def set_cameras_in_use(
     """批量切换相机启用状态。去重后一次性写入 KV。"""
     return _toggle_members(
         kv_repo, ScopeConfigKeys.CAMERA_BLACK_LIST_KEY, dids, include=not in_use
+    )
+
+
+def set_camera_voice_in_use(
+    kv_repo: KVRepo, did: str, in_use: bool
+) -> tuple[list[str], bool]:
+    """切换单个相机的拾音启用状态。``in_use=True`` 即加入拾音开启集（allow-list）。"""
+    return _toggle_member(
+        kv_repo, ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY, did, include=in_use
+    )
+
+
+def set_cameras_voice_in_use(
+    kv_repo: KVRepo, dids: list[str], in_use: bool
+) -> tuple[list[str], bool]:
+    """批量切换相机拾音启用状态。去重后一次性写入 KV。拾音无投喂上限，不设 cap。"""
+    return _toggle_members(
+        kv_repo, ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY, dids, include=in_use
     )
 
 

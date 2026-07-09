@@ -192,6 +192,10 @@ export interface ScopeCamera {
   roomName?: string;
   isOnline: boolean;
   inUse: boolean;
+  // 拾音「存储偏好」（PUT /api/miot/scope/cameras/voice）。false = mic-off：该相机
+  // 声音完全不被处理（引擎入口剥离音频，不转写、不上云）。与 inUse 正交：
+  // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
+  voiceInUse: boolean;
   connected: boolean;
 }
 

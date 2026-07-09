@@ -36,7 +36,9 @@ from miloco.miot.filter import (
     filter_by_home,
     is_home_allowed,
     set_cameras_in_use,
+    set_cameras_voice_in_use,
     set_homes_in_use,
+    voice_allowed_camera_dids,
 )
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
@@ -150,6 +152,7 @@ class MiotService:
         """Clear service-layer scope residue (called on account switch)."""
         self._kv_repo.delete(ScopeConfigKeys.HOME_WHITE_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._lru.clear()
 
     @property
@@ -1006,8 +1009,14 @@ class MiotService:
         return homes
 
     async def list_cameras_with_state(self) -> list[dict]:
-        """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。"""
+        """列出当前启用家庭下的相机，每项含 is_online / in_use / voice_in_use / connected。
+
+        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**；false =
+        该相机声音完全不被处理），与 ``in_use`` 正交；「生效态」= ``in_use and voice_in_use``
+        由前端派生，此处不合并。
+        """
         denied = denied_camera_dids(self._kv_repo)
+        voice_allowed = voice_allowed_camera_dids(self._kv_repo)
         connected = self._connected_camera_dids()
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
@@ -1030,6 +1039,8 @@ class MiotService:
                     "room_name": getattr(info, "room_name", None),
                     "is_online": online,
                     "in_use": did not in denied,
+                    # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。
+                    "voice_in_use": did in voice_allowed,
                     "connected": did in connected,
                 }
             )
@@ -1107,6 +1118,48 @@ class MiotService:
             # 否则 sync 先连上随后 manager 被销,会留 stale reg_id。
             await self._miot_proxy.refresh_cameras()
             await self._sync_camera_adapter()
+        # 返回受影响的相机，结构与 list_cameras_with_state 一致
+        all_cameras = await self.list_cameras_with_state()
+        affected = [cam for cam in all_cameras if cam["did"] in set(all_dids)]
+        return affected
+
+    async def toggle_camera_voice(self, items: list[dict]) -> list[dict]:
+        """批量切换相机「拾音」状态（mic-off 语义）。每项 {"did": str, "voice_in_use": bool}。
+
+        关闭 = 该相机声音完全不被处理：引擎入口剥离音频（不进 gate/omni、不转写、
+        不上云、语音指令不 dispatch），dispatch/落库闸门作第二道防线。
+
+        拾音开关从属于感知开关：只能在相机感知启用(in_use=True)时设置；相机感知已关闭
+        (在黑名单)时整批拒绝。与 ``toggle_camera`` 不同,**不**调 refresh_cameras /
+        _sync_camera_adapter / _restart_perception_engine——拾音黑名单在引擎入口与
+        client.py dispatch 阶段实时读取(KVRepo.set 已同步更新进程内缓存),下一感知窗
+        即生效,无需重建 manager 或重启。本地拉流不变(音频仍解码进缓冲,只是不被处理)。
+        """
+        all_dids = [i["did"] for i in items]
+
+        cameras = await self._miot_proxy.get_cameras() or {}
+        unknown = [d for d in all_dids if d not in cameras]
+        if unknown:
+            raise ValidationException(
+                f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
+            )
+
+        # 拾音从属于感知：感知已关闭(在黑名单)的相机不允许设置拾音。前端会把这类
+        # 相机的拾音开关置灰,这里再兜一道防脏请求。关相机不改写拾音黑名单——存储偏好
+        # 保留,相机重新启用后旧拾音设置自动生效(「自动关」是派生生效态,不落库)。
+        denied = denied_camera_dids(self._kv_repo)
+        disabled = [d for d in all_dids if d in denied]
+        if disabled:
+            raise ValidationException(
+                f"摄像头感知已关闭，无法设置声音（{disabled}）；请先开启该摄像头感知"
+            )
+
+        enable_dids = [i["did"] for i in items if i["voice_in_use"]]
+        disable_dids = [i["did"] for i in items if not i["voice_in_use"]]
+        if disable_dids:
+            set_cameras_voice_in_use(self._kv_repo, disable_dids, False)
+        if enable_dids:
+            set_cameras_voice_in_use(self._kv_repo, enable_dids, True)
         # 返回受影响的相机，结构与 list_cameras_with_state 一致
         all_cameras = await self.list_cameras_with_state()
         affected = [cam for cam in all_cameras if cam["did"] in set(all_dids)]

@@ -1981,6 +1981,80 @@ def test_scope_home_switch(runner):
     mock_put.assert_called_once_with("/api/miot/scope/homes", {"home_id": "home_1"})
 
 
+# ─── scope camera enable/disable ─────────────────────────────────────────────
+
+
+def test_scope_camera_enable_batch(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "enable", "c1", "c2"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras",
+        {"items": [{"did": "c1", "in_use": True}, {"did": "c2", "in_use": True}]},
+    )
+
+
+def test_scope_camera_disable(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "disable", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras", {"items": [{"did": "c1", "in_use": False}]}
+    )
+
+
+# ─── scope camera mic-on / mic-off（拾音开关，走 voice 端点）──────────────────
+
+
+def test_scope_camera_mic_off(runner):
+    """mic-off → PUT voice 端点 voice_in_use=false。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "mic-off", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/voice",
+        {"items": [{"did": "c1", "voice_in_use": False}]},
+    )
+
+
+def test_scope_camera_mic_on_batch(runner):
+    """批量 did 语义与 enable/disable 同款。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "mic-on", "c1", "c2", "c3"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/voice",
+        {
+            "items": [
+                {"did": "c1", "voice_in_use": True},
+                {"did": "c2", "voice_in_use": True},
+                {"did": "c3", "voice_in_use": True},
+            ]
+        },
+    )
+
+
+def test_scope_camera_mic_requires_did(runner):
+    result = runner.invoke(cli, ["scope", "camera", "mic-off"])
+    assert result.exit_code != 0  # 缺 did 由 click 拒绝
+
+
+def test_scope_camera_mic_backend_rejection_passthrough(runner):
+    """backend 拒绝（未知 did / 感知已关闭不可设拾音）→ api_put 打错误并 exit 3，
+    CLI 不吞不改写（api_put 内部 sys.exit(3)，这里以 SystemExit 模拟其行为）。"""
+    with patch(
+        "miloco_cli.commands.scope.api_put",
+        side_effect=SystemExit(3),
+    ) as mock_put:
+        result = runner.invoke(cli, ["scope", "camera", "mic-off", "ghost"])
+    assert result.exit_code == 3
+    mock_put.assert_called_once()
+
+
 # ─── home-profile ───────────────────────────────────────────────────────────
 
 
