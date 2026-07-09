@@ -1123,23 +1123,12 @@ class MIoTClient:
             self._event_sub_dids.update(dids)
             return dids
 
-        state_decoder = mips._make_device_state_decoder()
         event_decoder = mips._make_device_event_decoder()
-        specs = []
-        for did in dids:
-            for op in ("online", "offline"):
-                specs.append(
-                    (f"device/{did}/state/{op}", self._on_device_state_msg, state_decoder)
-                )
-            specs.append(
-                (
-                    f"device/{did}/up/event_occured/#",
-                    self._on_device_event_occurred_msg,
-                    event_decoder,
-                )
-            )
+        specs = [
+            (f"device/{did}/up/event_occured/#", self._on_device_event_occurred_msg, event_decoder)
+            for did in dids
+        ]
         await mips.sub_many_async(specs)
-        self._state_sub_dids.update(dids)
         self._event_sub_dids.update(dids)
         return dids
 
