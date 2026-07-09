@@ -33,7 +33,9 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 - **Multimodal large model API key** — [Xiaomi MiMo](https://platform.xiaomimimo.com) is recommended: MiMo-v2.5 for perception, MiMo-v2.5-pro for the Agent (configured in OpenClaw).
 
 > [!CAUTION]
-> **Cost note**: Miloco 2.0's perception and Agent rely primarily on cloud-based large models and will incur ongoing API usage costs—keep an eye on your usage. You can review token consumption on the "Models" page of the home dashboard.
+> **Local ONNX inference required.** Miloco's perception pipeline runs person detection and re-identification models locally via ONNX Runtime — it is not purely cloud-based.
+>
+> **API cost note**: Perception and Agent use cloud large models and will incur ongoing API usage costs — keep an eye on your usage. Token consumption is visible on the "Models" page of the home dashboard.
 
 ## Install
 
