@@ -114,7 +114,7 @@ MiOT MQTT / 业务事件
 ```bash
 miloco-cli automation catalog
 miloco-cli automation list
-miloco-cli automation add --source-id <device_did> --camera-did <camera_did> --kind device_prop
+miloco-cli automation add --source-id <device_did> --camera <camera_did> --event-kind device_prop
 miloco-cli automation delete <mapping_id>
 miloco-cli automation test --source-id <device_did>
 ```

@@ -473,64 +473,7 @@ class AutomationService:
         失败返回 None，调用方回退到裸 ID（不破坏功能）。
         """
         try:
-            proxy = miot_service._miot_proxy
-            device = proxy._device_info_dict.get(trigger.source_id)
-            if not device:
-                return None
-            urn = getattr(device, "urn", "") or ""
-            if not urn:
-                return None
-            names: dict[str, str] = {}
-            values: dict[str, dict[str, str]] = {}
-            # properties（changed_properties 的 prop.x.y）
-            spec = await proxy._fetch_device_spec(urn=urn)
-            if spec:
-                for iid, item in spec.items():
-                    if not iid.startswith("prop."):
-                        continue
-                    names[iid] = (
-                        item.get("description")
-                        or item.get("prop_description")
-                        or iid
-                    )
-                    vl = item.get("value_list") or []
-                    if vl:
-                        values[iid] = {
-                            str(v.get("value", "")): (
-                                v.get("description")
-                                or v.get("name")
-                                or str(v.get("value", ""))
-                            )
-                            for v in vl
-                        }
-                    elif item.get("format") == "bool":
-                        values[iid] = {"0": "关", "1": "开"}
-            # events（event_name 的 event.x.y + arg.x.y）
-            spec_device = await proxy.miot_client.spec_parser.parse_async(urn=urn)
-            if spec_device:
-                for service in spec_device.services:
-                    for event in service.events:
-                        event_key = f"event.{service.iid}.{event.iid}"
-                        event_name = (
-                            f"{service.description_trans} {event.description_trans}"
-                            if service.description_trans != event.description_trans
-                            else event.description_trans
-                        )
-                        names[event_key] = event_name or event.description or event_key
-                        for prop in event.arguments:
-                            arg_key = f"arg.{service.iid}.{prop.iid}"
-                            arg_name = (
-                                f"{service.description_trans} {prop.description_trans}"
-                                if service.description_trans != prop.description_trans
-                                else prop.description_trans
-                            )
-                            names[arg_key] = arg_name or prop.description or arg_key
-                            if prop.value_list:
-                                values[arg_key] = {
-                                    str(v.value): (v.description or v.name or str(v.value))
-                                    for v in prop.value_list
-                                }
-            return {"names": names, "values": values}
+            return await miot_service.get_automation_spec_meta(trigger.source_id)
         except Exception:
             logger.debug(
                 "build_spec_meta failed for did=%s", trigger.source_id, exc_info=True
