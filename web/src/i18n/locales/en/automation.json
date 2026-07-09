@@ -49,6 +49,7 @@
     "save": "Save Trigger",
     "toastSelectSource": "Please select an event source",
     "toastSelectEvent": "Please select a device event",
+    "toastCreateFailed": "Failed to create perception trigger",
     "existingTitle": "Configured Triggers",
     "existingDesc": "{{count}} config(s). Matching configs trigger corresponding camera perception.",
     "camerasLabel": "Cameras",

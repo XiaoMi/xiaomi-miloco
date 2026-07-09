@@ -1226,6 +1226,10 @@ class MiotProxy:
                 removed = {d for d in results if d}
             return removed
 
+        # 启动/全量重建也保留批量订阅：实测米家 broker 对逐条事件订阅更容易
+        # 撞上间歇性 ACL 0x87，批量 SUBSCRIBE 让 broker 用同一份 ACL 快照评估
+        # 多个 event topic，成功率更高。若批量失败，再回退逐条路径执行残留清理
+        # 与 0x87 重试，作为兜底而不是主路径。
         if len(to_add) > 1 and hasattr(
             self._miot_client, "sub_device_event_occurred_many_async"
         ):

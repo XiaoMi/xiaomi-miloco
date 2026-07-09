@@ -202,6 +202,47 @@ async def test_sync_event_subscriptions_batches_multiple_new_dids():
 
 
 @pytest.mark.asyncio
+async def test_sync_event_subscriptions_batches_during_residual_reconcile():
+    """启动/全量重建也走批量事件订阅。
+
+    米家 broker 对逐条 event SUBSCRIBE 更容易撞间歇性 ACL 0x87；批量订阅
+    让 broker 用同一份 ACL 快照评估多个 topic。残留清理/重试只作为批量失败
+    后的逐条 fallback，不应阻止启动路径使用批量主路径。
+    """
+    proxy = _bare_proxy()
+    proxy._device_info_dict = {
+        "A": SimpleNamespace(did="A"),
+        "B": SimpleNamespace(did="B"),
+    }
+    proxy._miot_client.sub_device_event_occurred_many_async = AsyncMock(
+        return_value=["A", "B"]
+    )
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="A",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.3.1"],
+        ),
+    ]
+    await proxy._sync_event_subscriptions(mappings, reconcile_residual=True)
+
+    proxy._miot_client.sub_device_event_occurred_many_async.assert_awaited_once_with(
+        ["A", "B"]
+    )
+    proxy._miot_client.sub_device_event_occurred_async.assert_not_awaited()
+    proxy._miot_client.unsub_device_event_occurred_async.assert_not_awaited()
+    assert proxy._subscribed_event_dids == {"A", "B"}
+
+
+@pytest.mark.asyncio
 async def test_sync_property_subscriptions_adds_new_enabled_mapping():
     proxy = _bare_proxy()
     proxy._device_info_dict = {"C": SimpleNamespace(did="C")}

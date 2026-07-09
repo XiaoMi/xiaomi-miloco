@@ -49,6 +49,7 @@
     "save": "保存触发配置",
     "toastSelectSource": "请选择事件源",
     "toastSelectEvent": "请选择设备事件",
+    "toastCreateFailed": "创建感知触发配置失败",
     "existingTitle": "已配置感知触发",
     "existingDesc": "{{count}} 条配置。命中配置后会按规则触发对应摄像头感知。",
     "camerasLabel": "摄像头",

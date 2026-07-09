@@ -609,12 +609,7 @@ class AutomationService:
         perception_rules = [
             rule
             for rule in all_rules
-            if getattr(
-                getattr(rule, "trigger_type", RuleTriggerType.PERCEPTION),
-                "value",
-                getattr(rule, "trigger_type", RuleTriggerType.PERCEPTION),
-            )
-            == RuleTriggerType.PERCEPTION.value
+            if rule.trigger_type == RuleTriggerType.PERCEPTION
         ]
         prompt_rules = [
             rule.model_dump(mode="json") if hasattr(rule, "model_dump") else _rule_to_prompt_dict(rule)

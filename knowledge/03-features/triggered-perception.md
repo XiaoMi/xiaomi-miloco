@@ -34,7 +34,7 @@
 - 是否触发感知由“事件映射 + 属性条件”共同决定；未配置映射时不会触发
 - 一个事件可以关联多个摄像头，但只会对本次命中的事件做一次主动感知编排
 - 高频重复事件可通过“冷却时间”抑制，避免短时间内重复触发
-- 当前 CLI 侧**还没有独立的 `miloco-cli automation ...` 子命令**，命令行调试通过读取 `miloco-cli` 配置后直接访问 API 完成
+- CLI 侧已提供 `miloco-cli automation ...` 子命令，可用于查看目录、列出配置、新增/删除映射和手动测试触发
 
 ---
 
@@ -107,16 +107,26 @@ MiOT MQTT / 业务事件
 
 ## CLI / API 调试用法
 
-当前还没有单独的 `miloco-cli automation` 子命令。命令行调试推荐使用 `miloco-cli` 读取服务地址和 token，再通过 `curl` 调用感知触发相关 API。
+推荐优先使用 `miloco-cli automation` 子命令完成常见调试和配置操作；需要排查 HTTP 细节时，再读取服务地址和 token 后直接调用 API。
 
-### 1. 读取服务地址和 token
+### 常用 CLI 命令
+
+```bash
+miloco-cli automation catalog
+miloco-cli automation list
+miloco-cli automation add --source-id <device_did> --camera-did <camera_did> --kind device_prop
+miloco-cli automation delete <mapping_id>
+miloco-cli automation test --source-id <device_did>
+```
+
+### 直接调用 API：读取服务地址和 token
 
 ```bash
 SERVER_URL=$(miloco-cli config get server.url)
 TOKEN=$(miloco-cli config get server.token)
 ```
 
-### 2. 查看感知触发目录
+### 1. 查看感知触发目录
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
@@ -128,7 +138,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 - 可选事件源设备列表
 - 可关联摄像头列表
 
-### 3. 查询某个设备的属性和值定义
+### 2. 查询某个设备的属性和值定义
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
@@ -142,7 +152,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 - 可选值列表
 - 数值范围
 
-### 4. 创建一条设备属性变化映射
+### 3. 创建一条设备属性变化映射
 
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" \

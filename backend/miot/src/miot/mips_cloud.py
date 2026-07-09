@@ -853,6 +853,14 @@ class MIoTMipsCloud:
                 for sub in subs:
                     self._spawn_resubscribe(sub)
                 return
+            if len(reason_codes) != len(subs):
+                _LOGGER.warning(
+                    "mips_cloud batch resubscribe SUBACK code count mismatch "
+                    "topics=%d codes=%d codes=%s",
+                    len(subs),
+                    len(reason_codes),
+                    reason_codes,
+                )
             ok = 0
             for sub, code in zip(subs, reason_codes):
                 if code in _SUBACK_SUCCESS_CODES:

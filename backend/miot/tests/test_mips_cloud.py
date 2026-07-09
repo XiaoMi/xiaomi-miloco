@@ -136,10 +136,16 @@ class _FakeMqttClient:
     def is_connected(self) -> bool:
         return self._connected
 
-    def subscribe(self, topic: str, qos: int) -> tuple[MQTTErrorCode, int]:
+    def subscribe(
+        self, topic: str | list[tuple[str, int]], qos: int = 0
+    ) -> tuple[MQTTErrorCode, int]:
         mid = self._next_mid
         self._next_mid += 1
-        self.subscribed.append((topic, qos, mid))
+        if isinstance(topic, list):
+            for item_topic, item_qos in topic:
+                self.subscribed.append((item_topic, item_qos, mid))
+        else:
+            self.subscribed.append((topic, qos, mid))
         return MQTTErrorCode.MQTT_ERR_SUCCESS, mid
 
     def unsubscribe(self, topic: str) -> tuple[MQTTErrorCode, int]:
@@ -529,6 +535,141 @@ async def test_reconnect_resubscribes_active_topics():
         fake.fire_suback(new_mid, [2])
         await asyncio.sleep(0.01)
     finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_sub_many_partial_permanent_rejection_drops_only_rejected_topic():
+    """Batch subscribe validates every SUBACK code and only removes topics
+    rejected with permanent errors; successful siblings remain desired."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    async def driver() -> None:
+        for _ in range(50):
+            if len(fake.subscribed) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        _topic, _qos, mid = fake.subscribed[-1]
+        fake.fire_suback(mid, [2, 0x87])
+
+    try:
+        with pytest.raises(MipsSubscribeRejectedError) as excinfo:
+            await asyncio.gather(
+                mips.sub_many_async(
+                    [
+                        ("device/A/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                        ("device/B/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                    ]
+                ),
+                driver(),
+            )
+        assert excinfo.value.topic == "device/B/up/event_occured/#"
+        assert "device/A/up/event_occured/#" in mips._subs  # type: ignore[attr-defined]
+        assert "device/B/up/event_occured/#" not in mips._subs  # type: ignore[attr-defined]
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_batch_resubscribe_local_failure_falls_back_to_individual():
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    async def driver() -> None:
+        for _ in range(50):
+            if len(fake.subscribed) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        _topic, _qos, mid = fake.subscribed[-1]
+        fake.fire_suback(mid, [2, 2])
+
+    try:
+        await asyncio.gather(
+            mips.sub_many_async(
+                [
+                    ("device/A/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                    ("device/B/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                ]
+            ),
+            driver(),
+        )
+        fallback: list[str] = []
+
+        def fail_subscribe(topic: str | list[tuple[str, int]], qos: int = 0):
+            return MQTTErrorCode.MQTT_ERR_NO_CONN, None
+
+        fake.subscribe = fail_subscribe  # type: ignore[assignment]
+        mips._spawn_resubscribe = lambda sub: fallback.append(sub.topic)  # type: ignore[method-assign]
+
+        await mips._resubscribe_batch_async(list(mips._subs.values()))  # type: ignore[attr-defined]
+        assert fallback == [
+            "device/A/up/event_occured/#",
+            "device/B/up/event_occured/#",
+        ]
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_batch_resubscribe_timeout_falls_back_to_individual():
+    import miot.mips_cloud as mc
+
+    orig_timeout = mc.MIHOME_MQTT_SUBSCRIBE_TIMEOUT
+    mc.MIHOME_MQTT_SUBSCRIBE_TIMEOUT = 0.05
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    async def driver() -> None:
+        for _ in range(50):
+            if len(fake.subscribed) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        _topic, _qos, mid = fake.subscribed[-1]
+        fake.fire_suback(mid, [2, 2])
+
+    try:
+        await asyncio.gather(
+            mips.sub_many_async(
+                [
+                    ("device/A/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                    ("device/B/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                ]
+            ),
+            driver(),
+        )
+        fallback: list[str] = []
+        mips._spawn_resubscribe = lambda sub: fallback.append(sub.topic)  # type: ignore[method-assign]
+
+        await mips._resubscribe_batch_async(list(mips._subs.values()))  # type: ignore[attr-defined]
+        assert fallback == [
+            "device/A/up/event_occured/#",
+            "device/B/up/event_occured/#",
+        ]
+        assert not mips._pending_subscribes  # type: ignore[attr-defined]
+    finally:
+        mc.MIHOME_MQTT_SUBSCRIBE_TIMEOUT = orig_timeout
         await mips.deinit_async()
 
 

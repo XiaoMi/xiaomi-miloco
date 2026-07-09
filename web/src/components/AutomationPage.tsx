@@ -312,32 +312,41 @@ export function AutomationPage({ devices, cameras }: Props) {
       toast(t("automation.toastSelectEvent"), "warn");
       return;
     }
-    const created = await createMiotEventMapping({
-      source_type: "device",
-      source_id: source.source_id,
-      source_name_snapshot: source.source_name,
-      camera_dids: cameraIds,
-      enabled: true,
-      query_template: queryTemplate,
-      event_kinds: [
-        sourceKind === "device_prop"
-          ? "device_prop"
-          : selectedEventKey,
-      ],
-      property_filters: getSelectedProp(),
-      cooldown_seconds: cooldownSeconds,
-      notes,
-      created_at: null,
-      updated_at: null,
-    });
-    mappings.mutate((items) => [created, ...(items ?? [])]);
-    setCameraIds([]);
-    setQueryTemplate("");
-    setCooldownSeconds(30);
-    setNotes("");
-    setPropFilters([]);
-    setSelectedEventKey("");
-    setDeviceSpec(null);
+    try {
+      const created = await createMiotEventMapping({
+        source_type: "device",
+        source_id: source.source_id,
+        source_name_snapshot: source.source_name,
+        camera_dids: cameraIds,
+        enabled: true,
+        query_template: queryTemplate,
+        event_kinds: [
+          sourceKind === "device_prop"
+            ? "device_prop"
+            : selectedEventKey,
+        ],
+        property_filters: getSelectedProp(),
+        cooldown_seconds: cooldownSeconds,
+        notes,
+        created_at: null,
+        updated_at: null,
+      });
+      mappings.mutate((items) => [created, ...(items ?? [])]);
+      setSourceId("");
+      setSourceKind("device_prop");
+      setCameraIds([]);
+      setQueryTemplate("");
+      setCooldownSeconds(30);
+      setNotes("");
+      setPropFilters([]);
+      setSelectedEventKey("");
+      setDeviceSpec(null);
+    } catch (err) {
+      toast(
+        err instanceof Error ? err.message : t("automation.toastCreateFailed"),
+        "warn",
+      );
+    }
   }
 
   async function toggleEnabled(item: MiotEventMapping) {
