@@ -15,7 +15,7 @@ daemon 提供的 standalone 入口（``hermes_cli/send_cmd.py``），不依赖 a
 loop、不需要 gateway 运行（bot-token 类平台走 REST 直发，plugin 类平台走
 registry 的 standalone_sender_fn）。
 
-**state.json 不自动写，安装时不探测 IM。** 首次调 miloco_im_push 时走 ``resolve_notify_target`` 三级 fallback（读 state.json → 扫 auth.json/config.yaml → needsBind）。也可手动调 miloco_notify_bind 设置。"""
+**state.json 不自动写，安装时不探测 IM。** 首次调 miloco_im_push 时走 ``resolve_notify_target`` 三级 fallback（读 state.json → channel_directory.json → needsBind）。也可手动调 miloco_notify_bind 设置。"""
 
 from __future__ import annotations
 

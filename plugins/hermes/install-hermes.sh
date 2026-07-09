@@ -48,10 +48,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 MILOCO_HOME="${MILOCO_HOME:-$HOME/.openclaw/miloco}"
 ADAPTER_PORT="${ADAPTER_PORT:-18789}"
-ADAPTER_LOG="$HERMES_HOME/miloco-adapter.log"
-ADAPTER_PID="$HERMES_HOME/miloco-adapter.pid"
 HERMES_PLUGINS_DIR="$HERMES_HOME/plugins/miloco"
-LAUNCHD_LABEL="com.xiaomi.miloco.hermes.adapter"  # 旧架构残留清理
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 info() { echo -e "${G}[✓]${N} $*"; }
@@ -78,54 +75,6 @@ on_exit() {
   fi
 }
 trap on_exit EXIT
-
-# 跨平台查占用某端口的进程 PID（Windows netstat / POSIX lsof/ss）
-# 注意：函数内对每个 pipeline 加 || true 兜底，因为脚本 set -o pipefail，
-# 跨调用方用 $(get_pid_by_port ... | tr ...) 拿值时，local 赋值在 pipeline 返回非零时
-# 行为在某些 bash 版本下会触发 set -e 退出，函数内兜底最稳。
-get_pid_by_port() {
-  local port="$1"
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -ano 2>/dev/null \
-      | grep -E "[:.]$port[[:space:]]" 2>/dev/null \
-      | grep LISTENING 2>/dev/null \
-      | head -1 | awk '{print $NF}' \
-      || true
-  elif command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true
-  elif command -v ss >/dev/null 2>&1; then
-    ss -ltnp 2>/dev/null | grep ":$port " 2>/dev/null | head -1 | grep -oP 'pid=\K[0-9]+' | head -1 || true
-  fi
-}
-
-# 跨平台杀进程：taskkill 优先，POSIX kill -9 兜底
-kill_pid() {
-  local pid="$1"
-  [ -z "$pid" ] && return 0
-  if command -v taskkill >/dev/null 2>&1; then
-    taskkill //PID "$pid" //F >/dev/null 2>&1 || true
-  else
-    kill -9 "$pid" 2>/dev/null || true
-  fi
-}
-
-# 杀 adapter 的两个兜底：先按 PID 杀（taskkill），再按端口反查 Windows PID 杀
-# 因为 Git Bash 的 $! 在 Windows 下不一定是 Windows native PID
-kill_adapter() {
-  local pid="$1" port="$2"
-  kill_pid "$pid"
-  sleep 1
-  if [ -n "$port" ]; then
-    # 注意：pipeline + set -o pipefail 会让空匹配返回 1 触发 set -e，
-    # 用 || echo "" 兜底
-    local p
-    p="$(get_pid_by_port "$port" | tr -d '\r\n ' || echo '')"
-    if [ -n "$p" ] && [ "$p" != "$pid" ]; then
-      warn "端口 $port 还被 Windows PID=$p 占着，taskkill 兜底"
-      kill_pid "$p"
-    fi
-  fi
-}
 
 # --- 0. --diagnose 模式：跑 12 项检查输出 ✓/✗ + 汇总报告，不做任何修改 ---
 if [ "$DIAGNOSE_ONLY" -eq 1 ]; then

@@ -85,7 +85,7 @@ pip install pytest aiohttp httpx
 pytest plugins/hermes/tests/test_*.py
 
 # E2E install test (bash, exercises install-hermes.sh + adapter lifecycle)
-bash plugins/hermes/tests/test_install_e2e.sh
+bash plugins/hermes/tests/test_acceptance.sh
 
 # Re-sync skills from upstream source (after editing plugins/skills/miloco-*)
 python plugins/hermes/scripts/sync-skills.py
