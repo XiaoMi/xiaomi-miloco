@@ -406,19 +406,42 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:3]}…{key[-4:]}"
 
 
-def _key_by_label(label: str, provided: str | None) -> str:
-    """provided 非空用它;否则取该 label 档案(或当前生效配置)已存的 key。"""
+def _key_by_label(label: str, provided: str | None, *, base_url: str | None = None) -> str:
+    """provided 非空用它;否则取该 label 档案(或当前生效配置)已存的 key。
+
+    base_url 非 None 时,还要求档案里存的 base_url 与传入一致,否则不沿用 key
+    (返 "" 让调用方走 no_key 分支)。这是防"跨 URL 复用凭证"—— 攻击者拿到
+    admin token 后可以:
+      - upsert:改档案 base_url 但 api_key 留空 → 沿用旧 key(可能是云 provider 真 key)
+      - test / list_models:传新 base_url + 已存档案 label → 后端拿档案里的 key 送到新 URL
+    这两条路径覆盖内网 SSRF (base_url 改成 127.0.0.1 / 169.254.169.254 / 内网 IP)
+    和公网钓鱼 (base_url 改成攻击者控制的 endpoint) 两个场景;共同点是 key 跟着
+    base_url 走。此参数强制"key 只能配合它当初被存进来的那个 URL 用"。
+
+    自建 LLM 场景不受影响 —— 自建 provider 通常无鉴权,用户本来就传空 key,
+    走的是"无 key"分支而非"沿用"分支。
+    """
     if provided and provided.strip():
         return provided.strip()
     if not label:
         return ""
     m = get_settings().model
+
+    def _url_matches(stored: str) -> bool:
+        if base_url is None:
+            return True  # caller 没提供 base_url = 无 URL 上下文,按老语义沿用
+        return stored.rstrip("/") == base_url.rstrip("/")
+
     # 命中当前生效配置(含 label 为空、按展示 label 合成的「当前生效行」)→ 回退其 key。
     if m.omni.api_key and label in (m.omni.label, _active_display_label()):
-        return m.omni.api_key
+        if _url_matches(m.omni.base_url):
+            return m.omni.api_key
+        return ""
     for p in m.omni_profiles:
         if p.label == label and p.api_key:
-            return p.api_key
+            if _url_matches(p.base_url):
+                return p.api_key
+            return ""
     return ""
 
 
@@ -557,7 +580,8 @@ async def put_omni_config(
     clash = next((p for p in profiles if p["label"] == label and p is not target), None)
     if clash:
         raise HTTPException(status_code=409, detail=f"档案名「{label}」已存在")
-    key = _key_by_label(orig or label, body.api_key)
+    # 传 base_url 让 _key_by_label 校验"URL 未变才沿用旧 key",防跨 URL 复用凭证。
+    key = _key_by_label(orig or label, body.api_key, base_url=base_url)
     entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
     tgt = orig or label
     will_activate = body.activate or _label_is_active(tgt)
@@ -702,7 +726,13 @@ async def test_omni_config(
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
     base_url = (body.base_url or omni.base_url).strip()
-    api_key = _key_by_label((body.label or omni.label or "").strip(), body.api_key)
+    # base_url 传入 _key_by_label:test 端点不写盘,是隐蔽性最高的钓鱼跳板——攻击者
+    # 只需一次调用就能让后端把已存的真 key 送到攻击者的 base_url。校验 URL 一致才沿用。
+    api_key = _key_by_label(
+        (body.label or omni.label or "").strip(),
+        body.api_key,
+        base_url=base_url,
+    )
     if not api_key:
         return NormalResponse(
             code=0,
@@ -729,7 +759,8 @@ async def list_omni_models(
 ):
     """用 base_url + key(留空则按 label 取该档案已存 key)请求 GET /models,返回模型 id 列表。"""
     base_url = body.base_url.strip()
-    api_key = _key_by_label((body.label or "").strip(), body.api_key)
+    # 同 test 端点:传 base_url 校验 URL 一致才沿用旧 key,防用已存 key 拉取攻击者 URL 的 /models。
+    api_key = _key_by_label((body.label or "").strip(), body.api_key, base_url=base_url)
     if not api_key:
         # URL 本身错优先于「缺 key」暴露:无 key 时先探可达性,连不上→报 URL 错;能连上才报缺 key。
         reach = await _probe.probe_reachable(base_url)

@@ -550,3 +550,113 @@ async def test_retry_probe_cancelled_falls_back_to_open_recoverable(monkeypatch)
     # 关键断言:state 已从 HALF_OPEN 回落到 OPEN_RECOVERABLE,tick 可以再 arm
     assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
     assert cb.snapshot().code == "cancelled"
+
+
+# ─── 跨 URL 复用 key 防护(review 追问:公网钓鱼 / 内网 SSRF 共用跳板) ────────
+
+
+def test_test_endpoint_rejects_cross_url_key_reuse(client, mock_probe):
+    """review 追问回归:test 端点不能允许"传新 base_url + 已存档案 label,后端
+    拿档案里的真 key 送去攻击者 URL"—— 这是公网钓鱼 / 内网 SSRF 共用的隐蔽跳板
+    (test 不写盘,零持久化痕迹)。base_url 与档案里存的不一致时,后端拒沿用旧 key,
+    返 no_key,而不是拿真 key 打新 URL。"""
+    # 先存一个档案(base_url=https://x/v1)
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-realkey12",
+            "activate": True,
+        },
+    )
+    # 攻击者拿 label + 不同 base_url 调 test,期望"沿用甲的 key 打 evil"
+    n_before = mock_probe.call_count
+    r = client.post(
+        "/api/admin/omni-config/test",
+        json={"label": "甲", "base_url": "https://api.evil.com/v1", "model": "m1"},
+    )
+    data = r.json()["data"]
+    assert data["ok"] is False
+    assert data["code"] == "no_key"
+    # 关键:probe_omni 根本没被调用 → 攻击者 URL 拿不到任何请求(更别说 Authorization)
+    assert mock_probe.call_count == n_before
+
+
+def test_list_models_rejects_cross_url_key_reuse(client, mock_probe):
+    """同 test 端点:/omni-config/models 也是隐蔽跳板,同样必须校验 URL 一致才沿用 key。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-realkey34",
+            "activate": True,
+        },
+    )
+    r = client.post(
+        "/api/admin/omni-config/models",
+        json={"label": "甲", "base_url": "https://api.evil.com/v1"},
+    )
+    data = r.json()["data"]
+    assert data["ok"] is False
+    # 空 key 时先探可达性,连不上返 unreachable;连得上返 no_key。evil.com 显然连不上,
+    # 关键断言是"ok=False + 未沿用真 key",两种 code 都算防住了。
+    assert data["code"] in ("no_key", "unreachable", "http_error")
+
+
+def test_upsert_rejects_cross_url_key_reuse(client, mock_probe):
+    """upsert 场景:改档案 base_url 但 api_key 留空 → 后端应拒沿用旧 key,
+    走 no_key 报错(而不是把真 key 写到新 base_url 的档案上)。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-realkey56",
+            "activate": True,
+        },
+    )
+    # 改 base_url 到 evil,不填 key —— 期望 400 no_key,不允许沿用
+    r = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://api.evil.com/v1",
+            "original_label": "甲",
+            "activate": True,
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "no_key"
+
+
+def test_upsert_same_url_blank_key_still_reuses(client, mock_probe):
+    """回归防护:仅在 base_url 变时不沿用;URL 不变、只改 model 时保留 key 沿用能力
+    (原 test_update_same_label_blank_key_keeps_it 语义,防误伤)。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-realkey78",
+            "activate": True,
+        },
+    )
+    r = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m2",
+            "base_url": "https://x/v1",  # URL 不变
+            "original_label": "甲",
+        },
+    )
+    data = r.json()["data"]
+    assert data["active"]["model"] == "m2"
+    assert data["active"]["has_key"] is True  # key 仍沿用
