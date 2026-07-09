@@ -61,10 +61,14 @@ def client(tmp_path, monkeypatch):
 
 @pytest.fixture
 def mock_probe(monkeypatch):
-    """给 preflight/retry 测试提供可控 mock。set(result) 决定下一次调用返回什么。"""
-    state = {"result": {"ok": True, "code": "ok", "message": "连接正常"}}
+    """给 preflight/retry 测试提供可控 mock。set(result) 决定下一次调用返回什么。
+
+    ``call_count`` 记录 probe_omni 被实际调用次数,供冷却期测试断言"没真发 probe"。
+    """
+    state = {"result": {"ok": True, "code": "ok", "message": "连接正常"}, "n": 0}
 
     async def _fn(*a, **k):
+        state["n"] += 1
         return state["result"]
 
     monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _fn)
@@ -72,6 +76,10 @@ def mock_probe(monkeypatch):
     class _H:
         def set(self, r):
             state["result"] = r
+
+        @property
+        def call_count(self):
+            return state["n"]
 
     return _H()
 
@@ -220,7 +228,7 @@ def test_get_health_reflects_open_config(client, mock_probe):
             ClassifiedError("bad_key", "无效", ErrorCategory.CONFIG)
         )
 
-    asyncio.get_event_loop().run_until_complete(_fill())
+    asyncio.run(_fill())
     data = client.get("/api/admin/omni-config").json()["data"]
     assert data["active"]["health"]["state"] == "error"
     assert data["active"]["health"]["code"] == "bad_key"
@@ -264,7 +272,7 @@ def test_retry_open_recoverable_probes_and_recovers(client, mock_probe):
                 ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
             )
 
-    asyncio.get_event_loop().run_until_complete(_fill())
+    asyncio.run(_fill())
     assert cb.snapshot().state == "warn"
 
     mock_probe.set({"ok": True, "code": "ok"})
@@ -300,7 +308,7 @@ def test_retry_open_recoverable_probe_still_fails_stays_warn(client, mock_probe)
                 ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
             )
 
-    asyncio.get_event_loop().run_until_complete(_fill())
+    asyncio.run(_fill())
 
     mock_probe.set({"ok": False, "code": "unreachable", "message": "仍连不上"})
     r = client.post("/api/admin/omni-config/retry")
@@ -334,7 +342,7 @@ def test_retry_open_config_bad_key_stays_error(client, mock_probe):
             ClassifiedError("bad_key", "旧无效", ErrorCategory.CONFIG)
         )
 
-    asyncio.get_event_loop().run_until_complete(_fill())
+    asyncio.run(_fill())
 
     mock_probe.set({"ok": False, "code": "bad_key", "message": "仍无效"})
     r = client.post("/api/admin/omni-config/retry")
@@ -360,9 +368,50 @@ def test_retry_no_key_returns_no_key(client, mock_probe):
                 ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
             )
 
-    asyncio.get_event_loop().run_until_complete(_fill())
+    asyncio.run(_fill())
     r = client.post("/api/admin/omni-config/retry")
     assert r.status_code == 200
     # 无 key → cb 现在 code=no_key state=error
     health = r.json()["data"]["active"]["health"]
     assert health["code"] == "no_key"
+
+
+def test_retry_cooldown_skips_second_probe(client, mock_probe):
+    """连续两次 retry:第二次落在冷却期内,不真发 probe(mock 计数不变),返当前 snapshot。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-xxxxxx",
+            "activate": True,
+        },
+    )
+    import asyncio
+
+    from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    async def _fill():
+        for _ in range(3):
+            await get_omni_circuit_breaker().record_failure(
+                ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
+            )
+
+    asyncio.run(_fill())
+    n_before_put = mock_probe.call_count  # 前面 PUT 触发过一次 probe
+
+    mock_probe.set({"ok": False, "code": "unreachable", "message": "仍连不上"})
+    r1 = client.post("/api/admin/omni-config/retry")
+    assert r1.status_code == 200
+    n_after_first = mock_probe.call_count
+    assert n_after_first == n_before_put + 1  # 第一次 retry 真发了 probe
+
+    # 立即再点 → 冷却期内,skip probe
+    r2 = client.post("/api/admin/omni-config/retry")
+    assert r2.status_code == 200
+    assert mock_probe.call_count == n_after_first  # 计数不变
