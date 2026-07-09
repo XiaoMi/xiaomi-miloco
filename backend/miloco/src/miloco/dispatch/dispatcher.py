@@ -8,8 +8,13 @@
 透明存储，按会话维护队列、同类合并、单飞投递，平台侧同一会话在途 turn 恒 ≤1。
 
 调度全部前置在 ``run_agent_turn``（openclaw ``agent`` webhook）之前完成——平台一旦
-入队不可取消 / 改序，故合并 / 淘汰 / 排序必须在此层做。合并 / 丢弃 / 超时三类
+入队不可取消 / 改序，故合并 / 淘汰 / 排序必须在此层做。合并 / 丢弃 / 超时 / 过期四类
 「静默动作」均带 WARN 日志兜底。
+
+过期（TTL）：每条事件记入队时刻 ``enqueued_at``，入队龄超过
+``dispatcher.message_ttl_sec`` 即为过期。过期清理在两处发生——「新消息入队」时
+（先腾出过期占用的空间，再判超长淘汰）与「打包发送前」（``_take_batch`` 取批前）。
+收发在同一台机器实时进行，故仅 backend 发送前统一判过期，插件侧不重复校验。
 """
 
 from __future__ import annotations
@@ -73,7 +78,7 @@ class _QueuedEvent:
     items: list[Any]  # 结构化条目（list[Speech] / list[Suggestion] / [RuleTriggerCallback] / [str]）
     builder: Builder  # 该类型格式化函数引用；同一类型恒为同一 builder
     priority: int  # 类型级优先级（来自 _ROUTE，数字小=优先）
-    enqueued_at: float  # time.monotonic()，用于同类合并排序 + 淘汰判旧
+    enqueued_at: float  # time.monotonic()，即消息创建时刻；用于同类合并排序 + 淘汰判旧 + 过期判龄
     intra_priority: int = 0  # 条目级优先级（数字小=优先）；无内层优先级的类型恒 0，仅参与淘汰、不改渲染序
     # 可选投递结果 future：需要区分「入队被接纳」与「真正送达平台」的 producer
     # （如 onboarding 终身一次性标记）传入；dispatcher 保证它在**每一条**丢弃/送达
@@ -163,8 +168,11 @@ class AgentDispatcher:
         )
         q = self._queues.setdefault(session_key, [])
         q.append(ev)
+        # 新消息入队即先清理过期条目腾空间，再判超长淘汰——这样过期者优先让位，
+        # 避免用「淘汰有效消息」去容纳一条本该被过期清掉的僵尸。
+        self._drop_expired(session_key)
         self._enforce_cap(session_key)
-        accepted = any(e is ev for e in q)
+        accepted = any(e is ev for e in self._queues.get(session_key, ()))
         self._kick(session_key)
         return accepted
 
@@ -189,6 +197,38 @@ class AgentDispatcher:
                 evicted,
                 cap,
             )
+
+    def _drop_expired(self, session_key: str) -> None:
+        """清理入队龄超过 ``message_ttl_sec`` 的过期事件（被淘汰即未送达）。
+
+        入队龄 = ``time.monotonic() - enqueued_at``。TTL<=0 视作关闭过期，直接返回。
+        过期属「静默丢弃」→ 逐条 resolve delivered=False + WARN 兜底。
+        """
+        ttl_sec = get_settings().dispatcher.message_ttl_sec
+        if ttl_sec <= 0:
+            return
+        q = self._queues.get(session_key)
+        if not q:
+            return
+        now = time.monotonic()
+        fresh: list[_QueuedEvent] = []
+        expired: list[_QueuedEvent] = []
+        for ev in q:
+            (expired if now - ev.enqueued_at > ttl_sec else fresh).append(ev)
+        if not expired:
+            return
+        self._queues[session_key] = fresh
+        for ev in expired:
+            _resolve_delivered(ev.delivered, False)
+        # [DROPPED] 标记便于在 miloco-backend.log 里 grep；附最旧条目的延迟时长。
+        max_age = max(now - ev.enqueued_at for ev in expired)
+        logger.warning(
+            "[DROPPED] dispatcher expired %d event(s) session=%s ttl_sec=%.1f max_delay_sec=%.1f",
+            len(expired),
+            session_key,
+            ttl_sec,
+            max_age,
+        )
 
     def _kick(self, session_key: str) -> None:
         if self._closed or session_key in self._draining:
@@ -215,7 +255,9 @@ class AgentDispatcher:
         """取会话内优先级最高的类型的全部事件，按入队时间升序，移出队列。
 
         每轮 turn 恒单一类型（同一 builder），保证「单头、统一编号」。
+        取批前先清理过期条目：僵尸消息绝不打包进本轮 turn。
         """
+        self._drop_expired(session_key)
         q = self._queues.get(session_key)
         if not q:
             return []

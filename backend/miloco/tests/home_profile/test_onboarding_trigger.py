@@ -252,7 +252,9 @@ async def real_dispatcher(monkeypatch):
         disp_mod,
         "get_settings",
         lambda: SimpleNamespace(
-            dispatcher=SimpleNamespace(turn_wait_timeout_ms=1_000, max_queue=16)
+            dispatcher=SimpleNamespace(
+                turn_wait_timeout_ms=1_000, max_queue=16, message_ttl_sec=1e9
+            )
         ),
     )
     monkeypatch.setattr(AgentDispatcher, "_TRANSPORT_BACKOFF_S", 0.001)
