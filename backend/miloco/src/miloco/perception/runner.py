@@ -17,11 +17,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
+from miloco.perception import omni_probe_registry
 from miloco.perception.collect.collector import MultimodalCollector
-from miloco.perception.processor import (
-    PipelineProcessor,
-    cancel_inflight_omni_probe_tasks,
-)
+from miloco.perception.processor import PipelineProcessor
 from miloco.perception.schema import EngineState, PerceptionEngineStatus
 
 logger = logging.getLogger(__name__)
@@ -139,8 +137,8 @@ class PerceptionRunner:
         self._sync_devices_task = None
 
         # 清理 in-flight probe task,防同进程再启 runner 时 _probe_in_flight 残留导致
-        # 自愈通道永久卡死。逻辑封在 processor.cancel_inflight_omni_probe_tasks 里。
-        await cancel_inflight_omni_probe_tasks()
+        # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
+        await omni_probe_registry.cancel_inflight()
 
         self._inference_executor.shutdown(wait=False)
 

@@ -19,7 +19,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from miloco.perception.processor import _OMNI_PROBE_TASKS
+from miloco.perception.omni_probe_registry import _OMNI_PROBE_TASKS
 from miloco.perception.runner import PerceptionRunner
 from miloco.perception.service import PerceptionService
 

@@ -32,6 +32,7 @@ from miloco.observability.types import (
     IdentityTrace,
     OmniTrace,
 )
+from miloco.perception import omni_probe_registry
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.engine.types import RealtimePerceptionResult
@@ -67,33 +68,6 @@ def _safe_put_nowait(q: asyncio.Queue, event_type: str, data: dict) -> None:
 # per-device trace 走 f"{room}/gate_{did}_ms" 精确 key,不走正则,不受影响。
 # did 改名时同步看一眼这条。
 _GATE_TOTAL_RE = re.compile(r"^gate_[^_]+_ms$")
-
-
-# omni 熔断器 tick 驱动的探测 task 强引用集合;防 asyncio 弱引用模型下 GC 提前回收。
-# done_callback 里自动 discard。
-_OMNI_PROBE_TASKS: set[asyncio.Task] = set()
-
-
-async def cancel_inflight_omni_probe_tasks() -> None:
-    """runner.stop 用:取消所有未完成的 omni probe task 并等待它们退出。
-
-    独立函数暴露给外部,是为了让 runner 不用 import 私有名 _OMNI_PROBE_TASKS
-    (CodeQL py/import-private-name / py/cyclic-import 会报)。若不清理,shutdown
-    时 loop 销毁前 probe 未跑到 finally 的 clear_probe_in_flight,同进程再启
-    runner (测试 / manager 重建) 时 _probe_in_flight 残留 True,try_arm_probe
-    永远返 False,自愈通道永久卡死,只能重启进程。
-    """
-    for task in list(_OMNI_PROBE_TASKS):
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                # 预期路径:probe 被 cancel 后走 finally 里的 clear_probe_in_flight
-                # 再抛出 CancelledError,这里只需吞掉 —— 不是错误状态。
-                pass
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[engine] 清理 omni probe task 时异常 | %s", e)
 
 
 async def _run_omni_probe() -> None:
@@ -251,8 +225,7 @@ class PipelineProcessor:
         if not cb.try_arm_probe():
             return
         task = asyncio.create_task(_run_omni_probe())
-        _OMNI_PROBE_TASKS.add(task)
-        task.add_done_callback(_OMNI_PROBE_TASKS.discard)
+        omni_probe_registry.register(task)
 
     def set_inference_executor(self, executor: ThreadPoolExecutor) -> None:
         """Forward the inference executor to the engine proxy.

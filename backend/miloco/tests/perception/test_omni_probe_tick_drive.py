@@ -132,6 +132,7 @@ async def test_tick_drive_probe_failure_grows_backoff(monkeypatch, _mock_omni_co
 
 async def test_tick_drive_noop_when_closed(_mock_omni_config):
     """CLOSED 稳态下 drive_omni_probe 直接 sync 返回,不 spawn。"""
+    from miloco.perception import omni_probe_registry as _registry
     from miloco.perception import processor as _processor
 
     cb = get_omni_circuit_breaker()
@@ -145,15 +146,16 @@ async def test_tick_drive_noop_when_closed(_mock_omni_config):
         pipe, _Stub
     )
 
-    task_set_before = set(_processor._OMNI_PROBE_TASKS)
+    task_set_before = set(_registry._OMNI_PROBE_TASKS)
     pipe.drive_omni_probe()
-    task_set_after = set(_processor._OMNI_PROBE_TASKS)
+    task_set_after = set(_registry._OMNI_PROBE_TASKS)
 
     assert task_set_after == task_set_before  # 没 spawn
 
 
 async def test_tick_drive_noop_when_backoff_not_due(_mock_omni_config):
     """OPEN_RECOVERABLE 但 backoff 未到期 → 不 spawn。"""
+    from miloco.perception import omni_probe_registry as _registry
     from miloco.perception import processor as _processor
 
     cb = get_omni_circuit_breaker()
@@ -171,9 +173,9 @@ async def test_tick_drive_noop_when_backoff_not_due(_mock_omni_config):
         pipe, _Stub
     )
 
-    task_set_before = set(_processor._OMNI_PROBE_TASKS)
+    task_set_before = set(_registry._OMNI_PROBE_TASKS)
     pipe.drive_omni_probe()
-    task_set_after = set(_processor._OMNI_PROBE_TASKS)
+    task_set_after = set(_registry._OMNI_PROBE_TASKS)
 
     assert task_set_after == task_set_before
 
