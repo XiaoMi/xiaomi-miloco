@@ -255,8 +255,9 @@ def test_trace_hooks_today_has_files(tmp_path: Path, monkeypatch):
 # ─── test_push ───────────────────────────────────────────────────────────
 
 
-def test_test_push_no_target_returns_clear_error(tmp_path: Path):
+def test_test_push_no_target_returns_clear_error(tmp_path: Path, monkeypatch):
     ctx = _FakeCtx(tmp_path)  # 无 state.json
+    monkeypatch.setattr(ts.tn, "_detect_im_platforms_simple", lambda: [])
     result = ts.test_push(ctx)
     assert result["ok"] is False
     assert "no deliver target" in result["error"]

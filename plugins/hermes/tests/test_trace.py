@@ -145,14 +145,14 @@ def test_reduce_meta_counts_llm_and_tools():
 
     state = tr._turns["sess-1"]
     meta = tr._reduce_meta(state.buffer)
-    assert meta["llmCallCount"] == 2
-    assert meta["toolCallCount"] == 2
-    assert meta["llmTotalMs"] == 3000
-    assert meta["toolTotalMs"] == 800
-    assert meta["toolMaxMs"] == 500
-    assert meta["slowestToolName"] == "bad_tool"
-    assert meta["errorCount"] == 1
-    assert "fail" in (meta["errorMsg"] or "")
+    assert meta["llm_call_count"] == 2
+    assert meta["tool_call_count"] == 2
+    assert meta["llm_total_ms"] == 3000
+    assert meta["tool_total_ms"] == 800
+    assert meta["tool_max_ms"] == 500
+    assert meta["slowest_tool_name"] == "bad_tool"
+    assert meta["error_count"] == 1
+    assert "fail" in (meta["error_msg"] or "")
 
 
 # ── traceLink ─────────────────────────────────────────────────────────────
@@ -172,36 +172,37 @@ def test_pop_trace_link_missing_returns_none():
 
 # ── on_session_end finalize ───────────────────────────────────────────────
 
+MILOCO_SESSION = "miloco:agent:main:miloco-suggest:miloco-suggest"
+
+
 def test_session_end_without_trace_id_drops():
-    """无 traceId 的普通 chat → 直接 GC，不留 meta、不落盘。"""
+    """非 miloco: 前缀的 session → 直接 GC，不留 meta、不落盘。"""
     tr._hk_pre_llm_call("sess-1", "hi", [], True, "m", "p")
     tr._hk_on_session_end("sess-1", True, False, "m", "p")
     assert "sess-1" not in tr._turns
 
 
 def test_session_end_with_trace_id_keeps_done_meta():
-    """有 traceId 的 miloco turn → finalize，留 done meta 给 backend 拉。"""
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "hi", [], True, "m", "p")
-    tr._hk_post_llm_call("sess-1", "hi", "ans", [], "m", "p", duration_ms=500)
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
-    state = tr._turns["sess-1"]
+    """miloco: 前缀的 session → finalize，留 done meta 给 backend 拉。"""
+    tr.register_trace_link(MILOCO_SESSION, "trace-abc")
+    tr._hk_pre_llm_call(MILOCO_SESSION, "hi", [], True, "m", "p")
+    tr._hk_post_llm_call(MILOCO_SESSION, "hi", "ans", [], "m", "p", duration_ms=500)
+    tr._hk_on_session_end(MILOCO_SESSION, True, False, "m", "p")
+    state = tr._turns[MILOCO_SESSION]
     assert state.done is not None
-    assert state.done["traceId"] == "trace-abc"
+    assert state.done["trace_id"] == "trace-abc"
     assert state.done["success"] is True
-    assert state.done["llmCallCount"] == 1
-    # traceLink 已清（与 openclaw popTraceLink 等价）
-    assert "sess-1" not in tr._trace_links
+    assert state.done["llm_call_count"] == 1
+    assert MILOCO_SESSION not in tr._trace_links
 
 
 def test_session_end_idempotent():
     """同一 session end 调两次，第二次是 no-op。"""
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "hi", [], True, "m", "p")
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
-    state = tr._turns["sess-1"]
-    # 第二次没新增 end event（被 state.done 检查挡住）
+    tr.register_trace_link(MILOCO_SESSION, "trace-abc")
+    tr._hk_pre_llm_call(MILOCO_SESSION, "hi", [], True, "m", "p")
+    tr._hk_on_session_end(MILOCO_SESSION, True, False, "m", "p")
+    tr._hk_on_session_end(MILOCO_SESSION, True, False, "m", "p")
+    state = tr._turns[MILOCO_SESSION]
     end_events = [e for e in state.buffer if e["hook"] == "on_session_end"]
     assert len(end_events) == 1
 
@@ -209,26 +210,25 @@ def test_session_end_idempotent():
 # ── pop_done_turn（adapter get_trace 用） ─────────────────────────────────
 
 def test_pop_done_turn_specific_run_id():
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "hi", [], True, "m", "p")
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
-    meta = tr.pop_done_turn("sess-1")
+    tr.register_trace_link(MILOCO_SESSION, "trace-abc")
+    tr._hk_pre_llm_call(MILOCO_SESSION, "hi", [], True, "m", "p")
+    tr._hk_on_session_end(MILOCO_SESSION, True, False, "m", "p")
+    meta = tr.pop_done_turn(MILOCO_SESSION)
     assert meta is not None
-    assert meta["traceId"] == "trace-abc"
-    # 原子 pop：再调返 None
-    assert tr.pop_done_turn("sess-1") is None
+    assert meta["trace_id"] == "trace-abc"
+    assert tr.pop_done_turn(MILOCO_SESSION) is None
 
 
 def test_pop_done_turn_latest():
     """run_id=None 返最新一个 done turn。"""
-    for sid in ("sess-1", "sess-2", "sess-3"):
+    sids = ["miloco:sess-1", "miloco:sess-2", "miloco:sess-3"]
+    for sid in sids:
         tr.register_trace_link(sid, f"trace-{sid}")
         tr._hk_pre_llm_call(sid, "hi", [], True, "m", "p")
         tr._hk_on_session_end(sid, True, False, "m", "p")
     meta = tr.pop_done_turn(None)
     assert meta is not None
-    # 最新的是最后 finalize 的 sess-3
-    assert meta["runId"] in ("sess-1", "sess-2", "sess-3")
+    assert meta["run_id"] in sids
 
 
 def test_pop_done_turn_empty():
@@ -240,12 +240,13 @@ def test_pop_done_turn_empty():
 
 def test_flush_writes_even_without_debug():
     """debug 默认关时也常写 trace（已去 debug 门槛，对齐 hermes-pr.md §五 #11）。"""
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "hi", [], True, "m", "p")
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
-    state = tr._turns["sess-1"]
-    # 去 debug 门槛后常写，jsonlPath 不应为 None
-    assert state.done["jsonlPath"] is not None
+    sess = "miloco:test-flush"
+    tr.register_trace_link(sess, "trace-abc")
+    tr._hk_pre_llm_call(sess, "hi", [], True, "m", "p")
+    tr._hk_on_session_end(sess, True, False, "m", "p")
+    state = tr._turns[sess]
+    # 去 debug 门槛后常写，jsonl_path 不应为 None
+    assert state.done["jsonl_path"] is not None
     # meta.json 应出现
     today = Path(os.environ["MILOCO_HOME"]) / "trace" / "agent"
     assert any(today.rglob("*.meta.json"))
@@ -253,13 +254,14 @@ def test_flush_writes_even_without_debug():
 
 def test_flush_enabled_writes_jsonl_and_meta(monkeypatch):
     monkeypatch.setenv("MILOCO_TRACE_DEBUG", "1")
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "[Mon Jun 18 14:32:11 2026] 你好", [], True, "m", "p")
-    tr._hk_post_tool_call("miloco_im_push", {}, "ok", "sess-1", duration_ms=42)
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
+    sess = "miloco:test-flush-enabled"
+    tr.register_trace_link(sess, "trace-abc")
+    tr._hk_pre_llm_call(sess, "[Mon Jun 18 14:32:11 2026] 你好", [], True, "m", "p")
+    tr._hk_post_tool_call("miloco_im_push", {}, "ok", sess, duration_ms=42)
+    tr._hk_on_session_end(sess, True, False, "m", "p")
 
-    state = tr._turns["sess-1"]
-    assert state.done["jsonlPath"] is not None
+    state = tr._turns[sess]
+    assert state.done["jsonl_path"] is not None
 
     today = Path(os.environ["MILOCO_HOME"]) / "trace" / "agent"
     jsonl_files = list(today.rglob("*.jsonl.gz"))
@@ -276,14 +278,14 @@ def test_flush_enabled_writes_jsonl_and_meta(monkeypatch):
 
     # meta 内容齐
     meta = json.loads(meta_files[0].read_text(encoding="utf-8"))
-    assert meta["traceId"] == "trace-abc"
-    assert meta["toolCallCount"] == 1
-    assert meta["slowestToolName"] == "miloco_im_push"
-    assert meta["jsonlPath"].endswith(".jsonl.gz")
+    assert meta["trace_id"] == "trace-abc"
+    assert meta["tool_call_count"] == 1
+    assert meta["slowest_tool_name"] == "miloco_im_push"
+    assert meta["jsonl_path"].endswith(".jsonl.gz")
 
 
 def test_daily_cap_skips_dump(monkeypatch):
-    """cap = 300，超出 warn 跳过（不抛错，jsonlPath=None）。"""
+    """cap = 300，超出 warn 跳过（不抛错，jsonl_path=None）。"""
     monkeypatch.setenv("MILOCO_TRACE_DEBUG", "1")
     # 预先建 300 个 .gz 文件
     today = Path(os.environ["MILOCO_HOME"]) / "trace" / "agent" / "20991231"
@@ -292,32 +294,31 @@ def test_daily_cap_skips_dump(monkeypatch):
         (today / f"old_{i}.jsonl.gz").write_bytes(b"")
 
     # 把系统时间推到 2099-12-31 让 _today_dir() 用这个
-    real_today = tr._today_dir
+    monkeypatch.setattr(tr, "_today_dir", lambda: today)
 
-    def fake_today():
-        return today
-    monkeypatch.setattr(tr, "_today_dir", fake_today)
-
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "hi", [], True, "m", "p")
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
-    state = tr._turns["sess-1"]
-    assert state.done["jsonlPath"] is None  # 跳过落盘
+    sess = "miloco:test-cap"
+    tr.register_trace_link(sess, "trace-abc")
+    tr._hk_pre_llm_call(sess, "hi", [], True, "m", "p")
+    tr._hk_on_session_end(sess, True, False, "m", "p")
+    state = tr._turns[sess]
+    assert state.done["jsonl_path"] is None  # 跳过落盘
 
 
 # ── GC ────────────────────────────────────────────────────────────────────
 
 def test_gc_removes_old_done_turns():
     """done_at 超过 TTL 的 turn 被 GC。"""
-    tr.register_trace_link("old-1", "trace-old")
-    tr._hk_pre_llm_call("old-1", "hi", [], True, "m", "p")
-    tr._hk_on_session_end("old-1", True, False, "m", "p")
+    sess_old = "miloco:old-1"
+    sess_new = "miloco:new-1"
+    tr.register_trace_link(sess_old, "trace-old")
+    tr._hk_pre_llm_call(sess_old, "hi", [], True, "m", "p")
+    tr._hk_on_session_end(sess_old, True, False, "m", "p")
     # 把 done_at 改到很久以前
-    tr._turns["old-1"].done_at = 0  # epoch
+    tr._turns[sess_old].done_at = 0  # epoch
     # 加一个新鲜的
-    tr.register_trace_link("new-1", "trace-new")
-    tr._hk_pre_llm_call("new-1", "hi", [], True, "m", "p")
-    tr._hk_on_session_end("new-1", True, False, "m", "p")
+    tr.register_trace_link(sess_new, "trace-new")
+    tr._hk_pre_llm_call(sess_new, "hi", [], True, "m", "p")
+    tr._hk_on_session_end(sess_new, True, False, "m", "p")
     tr._gc_expired_turns()
-    assert "old-1" not in tr._turns
-    assert "new-1" in tr._turns
+    assert sess_old not in tr._turns
+    assert sess_new in tr._turns

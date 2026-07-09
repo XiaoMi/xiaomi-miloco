@@ -12,12 +12,9 @@
 
 from __future__ import annotations
 
-import json
 import threading
-from pathlib import Path
 
 import pytest
-
 from miloco_plugin_pkg import tools_habit as th
 
 # ── ISO 常量（与 OpenClaw 测试对齐，+08:00 时区） ──────────────────────────
@@ -146,7 +143,6 @@ def test_expired_key_revives_as_pending(tmp_store):
 
 def test_expired_after_max_asks_gives_up(tmp_store):
     """累计问满 MAX_ASKS 次仍无果 → 永久放弃。每次需在过期后重新 record+mark_asked。"""
-    base = "2026-06-01T10:00:00+08:00"
     for i in range(th.MAX_ASKS):
         day = f"2026-06-{1 + i*8:02d}T10:00:00+08:00"  # D1, D9, D17
         _record("wl_sleep_dim", now=day)

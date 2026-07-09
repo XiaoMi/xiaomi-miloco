@@ -38,6 +38,9 @@ for arg in "$@"; do
 EOF
       exit 0
       ;;
+    *)
+      warn "未知参数: $arg（可用: --diagnose, --no-start-backend, -h）"
+      ;;
   esac
 done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -276,7 +279,7 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
   fi
 
   # 13. 16+ 个 skill
-  SKILL_COUNT="$(ls -d "$HERMES_HOME/skills/miloco-"* 2>/dev/null | wc -l | tr -d ' ')"
+  SKILL_COUNT="$(ls -d "$HERMES_HOME/skills/miloco-"* 2>/dev/null | wc -l | tr -d ' ')"; true
   if [ "$SKILL_COUNT" -ge 16 ]; then
     diag "$SKILL_COUNT 个 miloco-* skill" 1
   else
@@ -323,21 +326,51 @@ if [ ! -d "$HERMES_HOME" ]; then
   err "找不到 Hermes 目录 ${HERMES_HOME}，请先装 Hermes Agent"; exit 1
 fi
 if [ ! -f "$MILOCO_HOME/config.json" ]; then
-  # 第一次装：miloco 后端可能没初始化 config.json。两种情况处理：
-  #   1) miloco service start 会自动 init（upstream behavior）
-  #   2) 如果 start 后还是没 config.json，给用户明确指引而不是直接退出
-  info "${MILOCO_HOME}/config.json 不存在，尝试 miloco service start 自动初始化..."
-  if ! miloco-cli service start 2>&1 | tail -3; then
-    err "miloco-cli service start 失败，config.json 还是没生成"
-    err "请手动跑：miloco-cli init 或 export MILOCO_HOME=$HOME/.openclaw/miloco 后重跑 install"
+  # 第一次装：miloco 后端可能没初始化 config.json。
+  # miloco-cli 没有 init 命令——先写最小 config.json 让 backend 能启动。
+  info "${MILOCO_HOME}/config.json 不存在，写最小配置..."
+
+  # 找能 import miloco 的 Python（系统 python3 通常没装 miloco 包）
+  FOUND_PY=""
+  for cand in \
+    "$HOME/.local/share/uv/tools/miloco/bin/python" \
+    "$HOME/.local/share/uv/tools/miloco/bin/python3" \
+    "$HOME/.venvs/miloco/bin/python" \
+    "$HOME/.venvs/miloco/bin/python3"
+  do
+    if [ -x "$cand" ] && "$cand" -c 'import miloco' >/dev/null 2>&1; then
+      FOUND_PY="$cand"
+      break
+    fi
+  done
+  [ -z "$FOUND_PY" ] && FOUND_PY="$PYTHON"
+
+  mkdir -p "$MILOCO_HOME"
+  "$PYTHON" - "$MILOCO_HOME" "$FOUND_PY" <<'PY' || { err "无法创建 config.json"; exit 1; }
+import json, sys
+home = sys.argv[1]
+py = sys.argv[2]
+cfg = {
+    "server": {"port": 1810, "url": "http://127.0.0.1:1810", "token": "", "python_bin": py},
+    "model": {"omni": {"model": "", "base_url": "", "api_key": ""}},
+    "agent": {},
+    "directories": {},
+    "database": {"path": "miloco.db"},
+}
+path = f"{home}/config.json"
+json.dump(cfg, open(path, 'w'), indent=2, ensure_ascii=False)
+print(f"  config.json 已创建 (python_bin={py})")
+PY
+  # 启 backend 让它初始化 DB、填充 server.token
+  if miloco-cli service start 2>&1 | tail -3; then
+    info "  backend 初始化完成"
+  elif miloco-cli service status 2>&1 | grep -q '"running":true'; then
+    info "  backend 已在运行"
+  else
+    err "miloco-cli service start 失败，backend 无法启动"
+    err "看日志: $(miloco-cli service logs 2>&1 | tail -5)"
     exit 1
   fi
-  if [ ! -f "$MILOCO_HOME/config.json" ]; then
-    err "miloco service start 后 ${MILOCO_HOME}/config.json 还是不存在"
-    err "可能 miloco backend 的 Python venv 缺包。看 $(miloco-cli service logs 2>&1 | tail -5)"
-    exit 1
-  fi
-  info "config.json 自动初始化成功"
 fi
 
 # 1.5 自动拉起 miloco backend（upstream install.py 注册了 atexit._stop_service，
@@ -436,14 +469,15 @@ fi
 # 但 miloco service start 用的是 system python3，找不到 miloco 模块 → backend 装包失败。
 # 修法：扫 uv venv + pyenv venv，找到 miloco 包所在 python，patch 进 config.json。
 if [ -f "$MILOCO_HOME/config.json" ]; then
-  CUR_PY_BIN="$("$PYTHON" -c "
-import json
+  CUR_PY_BIN="$("$PYTHON" - "$MILOCO_HOME" <<'PY'
+import json, sys
 try:
-    d = json.load(open('$MILOCO_HOME/config.json'))
+    d = json.load(open(sys.argv[1] + '/config.json'))
     print(d.get('server', {}).get('python_bin', '') or '')
 except Exception:
     print('')
-" 2>/dev/null || true)"
+PY
+  )"
 
   # 测试当前配置的 python_bin 能不能 import miloco
   NEEDS_FIX=0
@@ -596,8 +630,18 @@ mark_done 3
 step 4 "复制 Hermes 插件 → ${HERMES_PLUGINS_DIR}/"
 mkdir -p "$HERMES_PLUGINS_DIR"
 info "  复制 miloco-plugin/"
+# 备份用户 state.json（含 deliver.target 等手工配置），复制后还原
+STATE_BAK="$("$PYTHON" -c "import tempfile,os; f=tempfile.mktemp(suffix='.json');print(f)" 2>/dev/null || echo "")"
+if [ -n "$STATE_BAK" ] && [ -f "$HERMES_PLUGINS_DIR/miloco-plugin/state.json" ]; then
+  cp "$HERMES_PLUGINS_DIR/miloco-plugin/state.json" "$STATE_BAK"
+fi
 rm -rf "$HERMES_PLUGINS_DIR/miloco-plugin"
 cp -r "$HERE/miloco-plugin" "$HERMES_PLUGINS_DIR/miloco-plugin"
+if [ -n "$STATE_BAK" ] && [ -f "$STATE_BAK" ]; then
+  cp "$STATE_BAK" "$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
+  rm -f "$STATE_BAK"
+  info "  已还原 state.json（保留用户配置的 deliver.target）"
+fi
 # 架构 #1+#2 收敛:pr-hermes 已删独立 aiohttp 进程 + plugins/hermes/adapter/ 整个目录。
 # 入站 webhook 由 backend 侧 AgentPlatformAdapter 接管(plugins/hermes/miloco-plugin/hermes_adapter/adapter.py)。
 # 此处只删旧 adapter/ 残留,不复制任何"老 adapter"。
@@ -616,7 +660,7 @@ mkdir -p "$ADAPTER_DEST"
 for f in __init__.py adapter.py; do
   cp -f "$HERE/miloco-plugin/hermes_adapter/$f" "$ADAPTER_DEST/$f"
 done
-for f in context_injection.py catalog.py paths.py; do
+for f in context_injection.py catalog.py paths.py tools_habit.py; do
   cp -f "$HERE/miloco-plugin/$f" "$ADAPTER_DEST/$f"
 done
 # 清旧的 adapter/ 目录残留(独立 aiohttp 进程栈,架构 #1+#2 后不再用)
@@ -643,11 +687,18 @@ PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 #
 # 跳过条件：MILOCO_HOME/models/det_4C.onnx 已存在（用户已装）。
 step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
+
+# 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
+# 安装到 ~/.hermes/plugins/miloco/ 后 $HERE 不再指向 git checkout，
+# 但 pip install -e 的 miloco 包内 models/ 仍可达，以此兜底。
 MODEL_SRC="$HERE/../../backend/miloco/src/miloco/perception/models"
 if [ ! -d "$MODEL_SRC" ]; then
-  warn "fork 仓库里找不到 ONNX 模型源目录：$MODEL_SRC"
+  MODEL_SRC=$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)
+fi
+if [ ! -d "$MODEL_SRC" ]; then
+  warn "找不到 ONNX 模型源目录（fork 仓库 & miloco 包内均无）"
   warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-  warn "修法：手动 git pull 拉新，或从 upstream release 下载到 $MILOCO_HOME/models/"
+  warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
 else
   mkdir -p "$MILOCO_HOME/models"
   # 同步 .onnx + .json（bge tokenizer）；已存在的不覆盖（保留用户手动调整）
@@ -723,16 +774,16 @@ else
   # miloco-cli 可能不认识 agent.platform(旧版 CLI,PR 未合)
   # 降级: Python 直写 config.json
   warn "  miloco-cli config set agent.platform 失败,降级为 Python 直写 config.json"
-  "$PYTHON" -c "
-import json
-p = r'$MILOCO_HOME/config.json'
+  "$PYTHON" - "$MILOCO_HOME" <<'PY' && info "  agent.platform = hermes (via Python 直写)" || { err "agent.platform 写入失败"; exit 1; }
+import json, sys
+p = sys.argv[1] + '/config.json'
 with open(p) as f:
     d = json.load(f)
 d.setdefault('agent', {})['platform'] = 'hermes'
 with open(p, 'w') as f:
     json.dump(d, f, indent=2, ensure_ascii=False)
 print('agent.platform = hermes 已写入')
-" && info "  agent.platform = hermes (via Python 直写)" || { err "agent.platform 写入失败"; exit 1; }
+PY
 fi
 mark_done 5
 
@@ -751,19 +802,27 @@ mark_done 6
 # --- 7. 重启 backend ---
 # 架构 #1+#2 后适配器收敛到 miloco backend 的 AgentPlatformAdapter。
 # 委托给 miloco-cli service start（管 supervisord / miloco-backend）。
-# 旧 launchd / nohup adapter 进程已被清理。
+# Step 5 的 config set 可能已触发不完整的 backend 重启——这里做一次彻底 stop + start。
 step 7 "重启 backend (supervisord)"
-info "  委托给 miloco-cli service start（管 supervisord / miloco-backend）"
-# Step 5 的 config set 可能已触发 backend 重启，此时 start 返回 already running 是正常的
+info "  停止旧 backend（防 Step 5 restart 残留）"
+miloco-cli service stop 2>/dev/null || true
+sleep 2
+info "  启动 backend"
 if ! START_OUTPUT=$(miloco-cli service start 2>&1); then
-  if echo "$START_OUTPUT" | grep -qi "already"; then
-    info "  backend 已在运行（Step 5 config set 已触发重启），跳过"
-  else
-    err "backend 启动失败: $START_OUTPUT"
-    exit 1
-  fi
+  err "backend 启动失败: $START_OUTPUT"
+  exit 1
 else
-  info "  $START_OUTPUT"
+  if [ -n "$START_OUTPUT" ]; then
+    info "  $START_OUTPUT"
+  fi
+  # 确认 /health
+  for i in 1 2 3 4 5 6 7 8; do
+    if curl -sSf "http://127.0.0.1:$(echo "$BACKEND_URL" | cut -d: -f3)/health" >/dev/null 2>&1; then
+      info "  backend /health OK (等了 ${i}s)"
+      break
+    fi
+    sleep 1
+  done
 fi
 mark_done 7
 

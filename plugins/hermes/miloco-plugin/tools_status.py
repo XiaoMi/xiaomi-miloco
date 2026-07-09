@@ -325,7 +325,7 @@ def _check_hermes_plugin_enabled() -> Dict[str, Any]:
             text=True,
             timeout=5,
         )
-        out = (result.stdout or "").lower()
+        (result.stdout or "").lower()
         # 简单匹配：找含 miloco 的行，看有没有 enabled
         enabled = any(
             "miloco" in line and "enabled" in line

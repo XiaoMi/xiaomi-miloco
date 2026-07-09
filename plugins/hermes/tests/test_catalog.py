@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import subprocess
-import time
 
 import pytest
-
 from miloco_plugin_pkg import catalog as ct
 
 

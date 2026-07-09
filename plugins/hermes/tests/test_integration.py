@@ -7,10 +7,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
-
 
 # ── 配置写入 / 读取 ─────────────────────────────────────────────────────────
 
@@ -60,35 +56,31 @@ def test_hermes_adapter_instantiable():
 
 def test_trace_full_write_read_cycle(tmp_path, monkeypatch):
     """trace.py 常写 → 读取，验证文件 IPC 链路。"""
-    import os
     monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
     from miloco_plugin_pkg import trace as tr
 
-    # 清状态
     tr._turns.clear()
     tr._trace_links.clear()
 
-    # 写
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "hello world", [], True, "m", "p")
-    tr._hk_post_llm_call("sess-1", "hi", "resp", [], "m", "p", duration_ms=100)
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
+    sess = "miloco:test-ipc"
+    tr.register_trace_link(sess, "trace-abc")
+    tr._hk_pre_llm_call(sess, "hello world", [], True, "m", "p")
+    tr._hk_post_llm_call(sess, "hi", "resp", [], "m", "p", duration_ms=100)
+    tr._hk_on_session_end(sess, True, False, "m", "p")
 
-    # 验证 meta.json 已写
     today_dirs = list((tmp_path / "trace" / "agent").glob("*"))
     assert len(today_dirs) == 1
     meta_files = list(today_dirs[0].glob("*.meta.json"))
     assert len(meta_files) == 1, f"应该写 meta.json: {list(today_dirs[0].iterdir())}"
 
     meta = json.loads(meta_files[0].read_text(encoding="utf-8"))
-    assert meta["runId"] == "sess-1"
-    assert meta["traceId"] == "trace-abc"
+    assert meta["run_id"] == sess
+    assert meta["trace_id"] == "trace-abc"
     assert meta["query"] == "hello world"
     assert meta["success"] is True
-    assert "jsonlPath" in meta
-    assert meta["jsonlPath"] is not None
+    assert "jsonl_path" in meta
+    assert meta["jsonl_path"] is not None
 
-    # 验证 jsonl.gz 也存在
     gz_files = list(today_dirs[0].glob("*.jsonl.gz"))
     assert len(gz_files) == 1
 
@@ -101,19 +93,19 @@ def test_trace_pop_done_turn_gives_meta(tmp_path, monkeypatch):
     tr._turns.clear()
     tr._trace_links.clear()
 
-    tr.register_trace_link("sess-1", "trace-abc")
-    tr._hk_pre_llm_call("sess-1", "test query", [], True, "m", "p")
-    tr._hk_on_session_end("sess-1", True, False, "m", "p")
+    sess = "miloco:test-pop"
+    tr.register_trace_link(sess, "trace-abc")
+    tr._hk_pre_llm_call(sess, "test query", [], True, "m", "p")
+    tr._hk_on_session_end(sess, True, False, "m", "p")
 
-    meta = tr.pop_done_turn("sess-1")
+    meta = tr.pop_done_turn(sess)
     assert meta is not None
-    assert meta["runId"] == "sess-1"
-    assert meta["traceId"] == "trace-abc"
-    assert "llmCallCount" in meta
-    assert "toolCallCount" in meta
+    assert meta["run_id"] == sess
+    assert meta["trace_id"] == "trace-abc"
+    assert "llm_call_count" in meta
+    assert "tool_call_count" in meta
 
-    # pop 后清掉
-    assert tr.pop_done_turn("sess-1") is None
+    assert tr.pop_done_turn(sess) is None
 
 
 # ── notify 三级 fallback ────────────────────────────────────────────────────

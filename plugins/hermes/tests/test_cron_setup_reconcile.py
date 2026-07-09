@@ -87,7 +87,7 @@ def test_updates_existing_cron_jobs(monkeypatch):
     assert result["updated"] >= 1
     assert not result["skipped"]
     for _, _, updates in [c for c in rec.calls if c[0] == "update"]:
-        assert updates.get("deliver") is None, f"deliver should be None to clear old value, got {updates.get('deliver')}"
+        assert updates.get("deliver") == "local", f"deliver should be 'local' not None, got {updates.get('deliver')}"
 
 
 def test_removes_orphaned_managed_jobs(monkeypatch):
