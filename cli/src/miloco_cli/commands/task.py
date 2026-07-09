@@ -64,7 +64,7 @@ def task_create(task_id, description, pretty):
     rule / cron / record 关联挂载由后续命令完成:
 
     - ``miloco-cli rule create --task-id X ...``  写 rule.task_id FK
-    - ``miloco-cli cron add --task X ...``        阶段 3 装配 internal cron
+    - ``miloco-cli cron add --task-id X ...``     阶段 3 装配 internal cron
     - ``miloco-cli task record init X ...``       挂 record
     """
     from miloco_cli.client import api_post

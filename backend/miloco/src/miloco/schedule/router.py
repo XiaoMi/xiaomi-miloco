@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -84,15 +85,34 @@ def _validate_cron_expr(expr: str, tz: str | None) -> None:
         raise ValidationException(f"invalid cron expression: {e}") from e
 
 
-def _validate_at_ms(at_ms: int) -> None:
+def _validate_at_iso(at_iso: str) -> int:
+    """解析 at_iso, 返回 UTC epoch 毫秒;
+
+    严格校验:
+    - ISO8601 合法
+    - 必须带时区偏移 (naive 拒收, 避免与部署时区耦合)
+    - 未来时刻 (<= now 拒收)
+    - 上限 10 年 (防误传)
+    """
+    try:
+        dt = datetime.fromisoformat(at_iso)
+    except ValueError as e:
+        raise ValidationException(f"invalid at_iso: {e}") from e
+    if dt.tzinfo is None:
+        raise ValidationException(
+            "at_iso must carry a timezone offset "
+            "(e.g. 2026-06-11T09:00:00+08:00)"
+        )
+    at_ms = int(dt.timestamp() * 1000)
     current = now_ms()
     ten_years_ms = 10 * 365 * 86400 * 1000
     if at_ms > current + ten_years_ms:
         raise ValidationException(
-            "at_ms out of reasonable range (>10y in future)"
+            "at_iso out of reasonable range (>10y in future)"
         )
     if at_ms <= current:
-        raise ValidationException("at_ms must be in the future")
+        raise ValidationException("at_iso must be in the future")
+    return at_ms
 
 
 # ── POST /crons ─────────────────────────────────────────────────────────────
@@ -116,8 +136,9 @@ async def create_cron(
     _validate_tz(req.tz)
     if req.kind == "cron":
         _validate_cron_expr(req.cron_expr, req.tz)
+    at_ms: int | None = None
     if req.kind == "at":
-        _validate_at_ms(req.at_ms)
+        at_ms = _validate_at_iso(req.at_iso)
 
     cron_id = str(uuid.uuid4())
     ts = now_ms()
@@ -128,7 +149,7 @@ async def create_cron(
         name=req.name.strip(),
         kind=req.kind,
         cron_expr=req.cron_expr,
-        at_ms=req.at_ms,
+        at_ms=at_ms,
         every_ms=req.every_ms,
         anchor_ms=req.anchor_ms,
         tz=req.tz,

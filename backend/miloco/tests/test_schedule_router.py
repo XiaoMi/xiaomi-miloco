@@ -105,16 +105,18 @@ def test_post_kind_cron_ok(client, app_db):
 
 
 def test_post_kind_at_ok(client):
-    import time
+    from datetime import datetime, timedelta, timezone
 
-    at_ms = int(time.time() * 1000) + 3600_000
+    at_iso = (datetime.now(tz=timezone.utc) + timedelta(hours=1)).isoformat(
+        timespec="seconds"
+    )
     r = client.post(
         "/api/crons",
         json={
             "name": "闹钟",
             "kind": "at",
             "task_id": "t1",
-            "at_ms": at_ms,
+            "at_iso": at_iso,
             "message": "起床",
         },
     )
@@ -158,29 +160,61 @@ def test_post_cron_missing_expr_rejected(client):
     assert r.status_code == 422
 
 
-def test_post_kind_at_rejects_past_at_ms(client):
-    import time
+def test_post_kind_at_rejects_past_at_iso(client):
+    from datetime import datetime, timedelta, timezone
 
-    at_ms = int(time.time() * 1000) - 600_000
+    past_iso = (datetime.now(tz=timezone.utc) - timedelta(minutes=10)).isoformat(
+        timespec="seconds"
+    )
     r = client.post(
         "/api/crons",
         json={
             "name": "过去",
             "kind": "at",
             "task_id": "t1",
-            "at_ms": at_ms,
+            "at_iso": past_iso,
             "message": "已过期",
         },
     )
     assert r.status_code == 422, r.text
 
 
-def test_post_at_missing_at_ms_rejected(client):
+def test_post_at_missing_at_iso_rejected(client):
     r = client.post(
         "/api/crons",
         json={"name": "bad", "kind": "at", "task_id": "t1", "message": "x"},
     )
     assert r.status_code == 422
+
+
+def test_post_at_iso_naive_rejected(client):
+    """裸 ISO(不含 offset) 拒收: agent 心智里 time-compute 出的一律带 offset,
+    naive 说明来源不明, 直接 422 让上游查。"""
+    r = client.post(
+        "/api/crons",
+        json={
+            "name": "bad",
+            "kind": "at",
+            "task_id": "t1",
+            "at_iso": "2026-06-11T09:00:00",
+            "message": "x",
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_post_at_iso_malformed_rejected(client):
+    r = client.post(
+        "/api/crons",
+        json={
+            "name": "bad",
+            "kind": "at",
+            "task_id": "t1",
+            "at_iso": "not-a-date",
+            "message": "x",
+        },
+    )
+    assert r.status_code == 422, r.text
 
 
 def test_post_task_id_not_found_returns_404(client):

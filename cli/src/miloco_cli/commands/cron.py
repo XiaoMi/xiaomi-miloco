@@ -3,6 +3,10 @@
 对应 backend /api/crons 全套 endpoint。CLI 只透传参数 + 友好打印。
 仅装 internal cron (backend 强制 dispatch_owner='internal'); external 只通过
 迁移脚本 / P2 系统 job 特殊路径入库, 不走这里。
+
+at 类用 ``--at-iso`` 传带偏移的 ISO8601 字符串 (与 ``time-compute`` 输出、
+record ``expires_at`` 同格式); backend router 边界统一解析 + 校验 (naive
+拒收 / past 拒收 / 10y 上限), CLI 只透传字符串, 不做本地校验。
 """
 
 from __future__ import annotations
@@ -30,7 +34,10 @@ def cron_group():
 @click.option("--message", required=True, help="触发时投递给 agent 的消息")
 @click.option("--cron-expr", "cron_expr", default=None, help="kind=cron 必填")
 @click.option(
-    "--at-ms", "at_ms", type=int, default=None, help="kind=at 必填 (Unix ms)"
+    "--at-iso",
+    "at_iso",
+    default=None,
+    help="kind=at 必填 (带时区偏移的 ISO8601, e.g. 2026-06-10T09:00:00+08:00; 与 time-compute 输出、record.expires_at 同格式)",
 )
 @click.option(
     "--every-ms",
@@ -68,7 +75,7 @@ def cron_add(
     task_id,
     message,
     cron_expr,
-    at_ms,
+    at_iso,
     every_ms,
     anchor_ms,
     tz,
@@ -84,8 +91,8 @@ def cron_add(
         body["task_id"] = task_id
     if cron_expr is not None:
         body["cron_expr"] = cron_expr
-    if at_ms is not None:
-        body["at_ms"] = at_ms
+    if at_iso is not None:
+        body["at_iso"] = at_iso
     if every_ms is not None:
         body["every_ms"] = every_ms
     if anchor_ms is not None:

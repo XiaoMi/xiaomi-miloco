@@ -298,7 +298,8 @@ miloco-cli rule logs --since 1h
 
 # 任务管理（task：生命周期；record：行为统计）
 miloco-cli task create --task-id <id> --description "<desc>"
-miloco-cli task link --task <task_id> --kind cron --ref <jobId>       # 挂 cron（rule 由 rule create 自动 link）
+miloco-cli cron add --task-id <task_id> --kind at --at-iso <ISO> \
+  --name "[<task_id>] <desc>" --message "<意图>"                    # 挂 at 型定时（cron 用 --kind cron --cron-expr --tz；rule 由 rule create 自动挂）
 miloco-cli task delete <task_id> --reason completed|expired|abandoned  # 终止（写审计快照）
 miloco-cli task record init <task_id> --kind progress|duration|event  # 初始化记录
 miloco-cli task record progress-inc <task_id> [--delta N]             # 进度累加

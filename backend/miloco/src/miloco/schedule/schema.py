@@ -42,7 +42,12 @@ class Cron(BaseModel):
 
 
 class CronCreateRequest(BaseModel):
-    """POST /crons body. dispatch_owner 强制 internal (external 只能走迁移脚本)."""
+    """POST /crons body. dispatch_owner 强制 internal (external 只能走迁移脚本).
+
+    at 型时刻用 ``at_iso`` (带时区偏移的 ISO8601, e.g. ``2026-06-11T09:00:00+08:00``)
+    上送, 与 SKILL.md 里 ``time-compute`` 输出、record ``expires_at`` 同格式;
+    router 边界统一解析 → 内部 Cron.at_ms 存 UTC epoch 毫秒。
+    """
 
     model_config = {"extra": "forbid"}
 
@@ -52,7 +57,7 @@ class CronCreateRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
     cron_expr: str | None = None
-    at_ms: int | None = None
+    at_iso: str | None = None
     every_ms: int | None = Field(default=None, ge=60000)
     anchor_ms: int | None = None
     tz: str | None = None
@@ -67,14 +72,14 @@ class CronCreateRequest(BaseModel):
             if self.cron_expr is None:
                 raise ValueError("kind='cron' requires cron_expr")
             if any(
-                x is not None for x in (self.at_ms, self.every_ms, self.anchor_ms)
+                x is not None for x in (self.at_iso, self.every_ms, self.anchor_ms)
             ):
                 raise ValueError(
-                    "kind='cron' rejects at_ms / every_ms / anchor_ms"
+                    "kind='cron' rejects at_iso / every_ms / anchor_ms"
                 )
         elif self.kind == "at":
-            if self.at_ms is None:
-                raise ValueError("kind='at' requires at_ms")
+            if self.at_iso is None:
+                raise ValueError("kind='at' requires at_iso")
             if any(
                 x is not None
                 for x in (self.cron_expr, self.every_ms, self.anchor_ms)
@@ -87,8 +92,8 @@ class CronCreateRequest(BaseModel):
                 raise ValueError("kind='every' requires every_ms")
             if self.tz is not None:
                 raise ValueError("kind='every' rejects tz (interval has no tz)")
-            if any(x is not None for x in (self.cron_expr, self.at_ms)):
-                raise ValueError("kind='every' rejects cron_expr / at_ms")
+            if any(x is not None for x in (self.cron_expr, self.at_iso)):
+                raise ValueError("kind='every' rejects cron_expr / at_iso")
 
         if (
             self.max_delay_seconds == 0

@@ -14,7 +14,6 @@
   以及 aware 输入不受 env 影响绝对时刻。系统时区 fallback 依赖 stdlib,不测。
 """
 
-import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -217,6 +216,8 @@ class TestEdgeCases:
 
 class TestCli:
     def test_cli_basic(self, runner):
+        """成功走 stdout 裸 ISO,与 SKILL.md 里 EXPIRES_AT=$(time-compute ...) 直接串到
+        record content / cron add --at-iso 的用法契约一致。"""
         result = runner.invoke(
             cli,
             [
@@ -228,8 +229,7 @@ class TestCli:
             ],
         )
         assert result.exit_code == 0
-        body = json.loads(result.output)
-        assert body == {"ok": True, "iso": "2026-06-10T23:59:59+08:00"}
+        assert result.output.strip() == "2026-06-10T23:59:59+08:00"
 
     def test_cli_error_exit_code(self, runner):
         result = runner.invoke(
@@ -256,6 +256,22 @@ class TestCli:
             ],
         )
         assert result.exit_code == 1
+
+    def test_cli_error_goes_to_stderr_not_stdout(self, runner):
+        """错误消息走 stderr, stdout 干净, 便于 $(time-compute ...) 在管道里安全用。"""
+        result = runner.invoke(
+            cli,
+            [
+                "time-compute",
+                "--now",
+                "2026-06-10T14:30:00+08:00",
+                "--anchor",
+                '{"kind":"today_at","time":"25:00:00"}',
+            ],
+        )
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert result.stderr.startswith("error: invalid_time")
 
 
 # ── 跨时区不变量 ─────────────────────────────────────────────────────────────
