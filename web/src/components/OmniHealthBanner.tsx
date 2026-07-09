@@ -11,7 +11,7 @@
 
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { retryOmniProbe, subscribeOmniHealth } from "@/api";
+import { OMNI_CONFIG_STALE_EVENT, retryOmniProbe, subscribeOmniHealth } from "@/api";
 import type { OmniHealth } from "@/lib/types";
 import { toast } from "./Toast";
 
@@ -39,7 +39,10 @@ export function OmniHealthBanner({
   const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
-    return subscribeOmniHealth(setHealth);
+    return subscribeOmniHealth(setHealth, () => {
+      // SSE 重连:backend 可能刚重启,广播事件让「模型」页 refetch config。
+      window.dispatchEvent(new Event(OMNI_CONFIG_STALE_EVENT));
+    });
   }, []);
 
   const nextSec = useCountdownSeconds(health?.next_probe_at_ms ?? null);

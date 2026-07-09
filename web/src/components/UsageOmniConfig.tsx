@@ -14,6 +14,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  OMNI_CONFIG_STALE_EVENT,
   getOmniConfig,
   updateOmniConfig,
   activateOmniConfig,
@@ -197,6 +198,11 @@ export function UsageOmniConfig() {
 
   useEffect(() => {
     void load();
+    // OmniHealthBanner 的 SSE 重连(backend 重启后)会 dispatch 此事件,
+    // 让当前页面同步 refetch 最新 config,避免视觉与实际状态错位。
+    const onStale = () => void load();
+    window.addEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
+    return () => window.removeEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
   }, []);
 
   async function load() {
