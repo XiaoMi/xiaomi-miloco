@@ -45,6 +45,12 @@ class CircuitOpenError(Exception):
         self.message = message
 
 
+# 「立即重试」冷却期:两次 probe 之间至少间隔这么久,防 UI 反复点 / 脚本 curl 打爆
+# provider。放在这里而非 router.py 是为了让 snapshot 直接把它推给前端(单一来源),
+# retry 端点与前端按钮冷却都从 snapshot.retry_cooldown_sec 读,不再手动两端同步。
+RETRY_COOLDOWN_SEC = 5.0
+
+
 @dataclass(frozen=True)
 class HealthSnapshot:
     state: str  # ok | warn | error(前端 Severity)
@@ -53,8 +59,15 @@ class HealthSnapshot:
     since_ms: int  # 当前非 CLOSED 状态起点(CLOSED 时=0)
     consecutive_failures: int
     next_probe_at_ms: int | None
+    # 到下次 tick 探测的剩余秒数(monotonic 差算,不依赖两端时钟一致)。前端直接倒计时
+    # 该值,避免 next_probe_at_ms(服务端 unix ms)与客户端 Date.now() 时钟偏差导致
+    # 倒计时不准(家用 NAS/容器场景常见)。CLOSED / OPEN_CONFIG / HALF_OPEN 时为 None。
+    next_probe_in_seconds: float | None
     last_probe_at_ms: int | None
     last_probe_result: str | None  # "ok" | "fail" | None
+    # 前端「立即重试」按钮的本地冷却时长(秒),与后端 retry 端点冷却期同源,前端读此值
+    # 不再自己 hardcode,避免两处手动同步。
+    retry_cooldown_sec: float
 
 
 class OmniCircuitBreaker:
@@ -221,11 +234,14 @@ class OmniCircuitBreaker:
         now_ms = int(time.time() * 1000)
         mono_now = time.monotonic()
         next_ms: int | None = None
+        next_in_s: float | None = None
         if (
             self._next_probe_at_monotonic is not None
             and self._state == CircuitState.OPEN_RECOVERABLE
         ):
-            next_ms = now_ms + int((self._next_probe_at_monotonic - mono_now) * 1000)
+            delta_s = max(0.0, self._next_probe_at_monotonic - mono_now)
+            next_ms = now_ms + int(delta_s * 1000)
+            next_in_s = round(delta_s, 1)
         last_ms = None
         if self._last_probe_at is not None:
             last_ms = now_ms - int((mono_now - self._last_probe_at) * 1000)
@@ -239,8 +255,10 @@ class OmniCircuitBreaker:
             since_ms=since_ms,
             consecutive_failures=self._consecutive_failures,
             next_probe_at_ms=next_ms,
+            next_probe_in_seconds=next_in_s,
             last_probe_at_ms=last_ms,
             last_probe_result=self._last_probe_result,
+            retry_cooldown_sec=RETRY_COOLDOWN_SEC,
         )
 
     def state_for_test(self) -> CircuitState:

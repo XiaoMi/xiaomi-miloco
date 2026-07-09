@@ -16,24 +16,28 @@ import type { OmniHealth } from "@/lib/types";
 import { toast } from "./Toast";
 
 
-// 立即重试冷却期:点击后本地 disabled 这么久,后端 /omni-config/retry 端点也有
-// 同款冷却拦截(admin/router.py::_OMNI_RETRY_COOLDOWN_SEC),双层保护——前端防止
-// 误触,后端防止绕过 UI 的脚本狂调。两端值需保持一致。
-const RETRY_COOLDOWN_SEC = 5;
+// 后端 SSE 断连时用的兜底冷却秒数:正常情况下前端从 health.retry_cooldown_sec 读,
+// 拿不到再回退这里。值与后端 circuit_breaker.RETRY_COOLDOWN_SEC 对齐即可,不再要求
+// 精确同步——单源在后端。
+const RETRY_COOLDOWN_SEC_FALLBACK = 5;
 
 
-function useCountdownSeconds(target_ms: number | null): number | null {
-  // 不缓存 now：如果缓存挂载时的 Date.now(),target_ms 稍后才从 SSE 到达时,首次 render
-  // 会用挂载时刻的老 now 与将来的 target 作差,显示"等待时长"而非"到期剩余秒数"。
-  // 每秒 setTick 触发重渲染,渲染时直接读 Date.now() 保证首帧就正确。
-  const [, setTick] = useState(0);
+/**
+ * 倒计时 hook:每秒 -1,归零后返 0。
+ * 入参是「初始剩余秒数」而不是绝对时刻,因为剩余秒数由服务端按 monotonic 差算好推来,
+ * 不依赖两端时钟一致(NAS/容器场景常见几十秒时钟偏差),前端只做单调递减即可。
+ */
+function useCountdownSeconds(initial_seconds: number | null): number | null {
+  const [remaining, setRemaining] = useState<number | null>(initial_seconds);
   useEffect(() => {
-    if (target_ms == null) return;
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    setRemaining(initial_seconds);
+    if (initial_seconds == null || initial_seconds <= 0) return;
+    const id = setInterval(() => {
+      setRemaining((prev) => (prev == null ? null : Math.max(0, prev - 1)));
+    }, 1000);
     return () => clearInterval(id);
-  }, [target_ms]);
-  if (target_ms == null) return null;
-  return Math.max(0, Math.round((target_ms - Date.now()) / 1000));
+  }, [initial_seconds]);
+  return remaining;
 }
 
 
@@ -46,7 +50,8 @@ export function OmniHealthBanner({
   const { t } = useTranslation();
   const [health, setHealth] = useState<OmniHealth | null>(null);
   const [retrying, setRetrying] = useState(false);
-  const [cooldownUntil, setCooldownUntil] = useState<number>(0);
+  // 点击「立即重试」后本地按钮冷却:置为剩余秒数,交给 useCountdownSeconds 单调递减。
+  const [cooldownStart, setCooldownStart] = useState<number | null>(null);
 
   useEffect(() => {
     return subscribeOmniHealth(setHealth, () => {
@@ -55,10 +60,8 @@ export function OmniHealthBanner({
     });
   }, []);
 
-  const nextSec = useCountdownSeconds(health?.next_probe_at_ms ?? null);
-  const cooldownRemaining = useCountdownSeconds(
-    cooldownUntil > 0 ? cooldownUntil : null,
-  );
+  const nextSec = useCountdownSeconds(health?.next_probe_in_seconds ?? null);
+  const cooldownRemaining = useCountdownSeconds(cooldownStart);
   const inCooldown = cooldownRemaining != null && cooldownRemaining > 0;
 
   if (!health || health.state === "ok") return null;
@@ -72,7 +75,8 @@ export function OmniHealthBanner({
     setRetrying(true);
     // 无论成功/失败都进入本地冷却:成功时后端已发 probe 不该立刻再触发;失败时
     // (含后端返 code=1 冷却拦截)也要阻止用户狂点。用户看到按钮变倒计时即知冷却中。
-    setCooldownUntil(Date.now() + RETRY_COOLDOWN_SEC * 1000);
+    // 冷却秒数从 health 里读(后端 circuit_breaker.RETRY_COOLDOWN_SEC 单源),缺省回退。
+    setCooldownStart(health?.retry_cooldown_sec ?? RETRY_COOLDOWN_SEC_FALLBACK);
     try {
       await retryOmniProbe();
       // SSE 会推新 health,不需要手动 setHealth

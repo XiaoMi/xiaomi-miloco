@@ -34,8 +34,9 @@ describe("realRetryOmniProbe", () => {
               health: {
                 state: "ok", code: null, message: "",
                 since_ms: 0, consecutive_failures: 0,
-                next_probe_at_ms: null, last_probe_at_ms: null,
-                last_probe_result: null,
+                next_probe_at_ms: null, next_probe_in_seconds: null,
+                last_probe_at_ms: null, last_probe_result: null,
+                retry_cooldown_sec: 5,
               },
             },
             profiles: [],
@@ -72,7 +73,9 @@ describe("realSubscribeOmniHealth", () => {
     const health = {
       state: "warn", code: "unreachable", message: "网络不通",
       since_ms: 1000, consecutive_failures: 3,
-      next_probe_at_ms: 2000, last_probe_at_ms: null, last_probe_result: null,
+      next_probe_at_ms: 2000, next_probe_in_seconds: 2,
+      last_probe_at_ms: null, last_probe_result: null,
+      retry_cooldown_sec: 5,
     };
     listeners["omni_health"][0](
       { data: JSON.stringify(health) } as MessageEvent,

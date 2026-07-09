@@ -104,10 +104,6 @@ def _run_git(args: list[str]) -> str | None:
 
 _HATCH_VCS_LOCAL_RE = re.compile(r"\+g([0-9a-f]{7,40})(?:\.d(\d{8}))?")
 
-# 「立即重试」端点冷却期:两次 probe 之间至少间隔这么久,防止 UI 反复点 / 脚本 curl
-# 打爆 provider。冷却期内命中的调用直接返当前 snapshot,不发实际 probe。
-_OMNI_RETRY_COOLDOWN_SEC = 5.0
-
 
 def _parse_version_git(v: str) -> dict | None:
     """从 hatch-vcs local version 段提取 commit_short + dirty。
@@ -774,6 +770,7 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     - OPEN_RECOVERABLE / OPEN_CONFIG / HALF_OPEN: 跑一次 probe_omni,成功回 CLOSED。
     """
     from miloco.perception.engine.omni.circuit_breaker import (
+        RETRY_COOLDOWN_SEC,
         CircuitState,
         get_omni_circuit_breaker,
     )
@@ -786,16 +783,23 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     if cb.state_for_test() == CircuitState.CLOSED:
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
-    # 冷却期内(距上次 probe 完成不足 _OMNI_RETRY_COOLDOWN_SEC)不发新 probe,防 UI
+    # HALF_OPEN 说明已有 tick 自愈或上次 retry 触发的 probe 在飞,不重复发。冷却期
+    # 兜的是 `last_probe_at` 时间差,拦不住「探测中」——tick arm 后 state=HALF_OPEN
+    # 且 last_probe_at 仍是上一次完成时刻,冷却已过,retry_now 对 HALF_OPEN 又是 no-op,
+    # 会绕过所有拦截并发第二次 probe,两次 record_probe_result 相互覆盖导致横条闪跳。
+    if cb.state_for_test() == CircuitState.HALF_OPEN:
+        return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+    # 冷却期内(距上次 probe 完成不足 RETRY_COOLDOWN_SEC)不发新 probe,防 UI
     # 反复点 / 脚本 curl 打爆 provider。静默返当前 snapshot——前端已在按钮层做本地
-    # 冷却置灰(OmniHealthBanner::RETRY_COOLDOWN_SEC),用户不需要 toast 提示;后端
+    # 冷却置灰(值同源自 health.retry_cooldown_sec),用户不需要 toast 提示;后端
     # 这里仍是硬阻,即使脚本绕过 UI 也拦得住。
     snap = cb.snapshot()
     if snap.last_probe_at_ms is not None:
         import time as _time
 
         elapsed_ms = int(_time.time() * 1000) - snap.last_probe_at_ms
-        if elapsed_ms < int(_OMNI_RETRY_COOLDOWN_SEC * 1000):
+        if elapsed_ms < int(RETRY_COOLDOWN_SEC * 1000):
             return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
     await cb.retry_now()

@@ -415,3 +415,84 @@ def test_retry_cooldown_skips_second_probe(client, mock_probe):
     r2 = client.post("/api/admin/omni-config/retry")
     assert r2.status_code == 200
     assert mock_probe.call_count == n_after_first  # 计数不变
+
+
+def test_retry_half_open_short_circuits_no_new_probe(client, mock_probe):
+    """HALF_OPEN 短路:tick 自愈已 arm 探测在飞时,用户点重试不并发第二次 probe。
+
+    冷却期兜的是「上次完成」时间差,拦不住「探测中」;retry_now 对 HALF_OPEN 又是
+    no-op。修复靠 CLOSED 判定后追加的 HALF_OPEN 短路,直接返当前 snapshot。
+    """
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-xxxxxx",
+            "activate": True,
+        },
+    )
+    import asyncio
+
+    from miloco.perception.engine.omni.circuit_breaker import (
+        CircuitState,
+        get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+
+    async def _to_half_open():
+        for _ in range(3):
+            await cb.record_failure(
+                ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
+            )
+        # 模拟 tick 探测已 arm:置 in-flight 位 + 状态推到 HALF_OPEN
+        cb._probe_in_flight = True  # noqa: SLF001
+        await cb.mark_half_open()
+
+    asyncio.run(_to_half_open())
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+
+    n_before = mock_probe.call_count
+    r = client.post("/api/admin/omni-config/retry")
+    assert r.status_code == 200
+    # 关键断言:HALF_OPEN 短路 → 没跑新的 probe_omni
+    assert mock_probe.call_count == n_before
+    # 状态保持 HALF_OPEN,不被 no-op retry_now 意外改动
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+
+
+def test_snapshot_carries_relative_seconds_and_cooldown(client):
+    """CB-N2/CB-N3:snapshot 附带 next_probe_in_seconds(相对秒数,不受时钟偏差影响)
+    与 retry_cooldown_sec(前端冷却单源),前端直接消费。"""
+    import asyncio
+
+    from miloco.perception.engine.omni.circuit_breaker import (
+        RETRY_COOLDOWN_SEC,
+        get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    async def _to_recoverable():
+        for _ in range(3):
+            await get_omni_circuit_breaker().record_failure(
+                ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
+            )
+
+    asyncio.run(_to_recoverable())
+    r = client.get("/api/admin/omni-config")
+    assert r.status_code == 200
+    health = r.json()["data"]["active"]["health"]
+    # 常量单源:每次 snapshot 都带上,前端不再自己 hardcode
+    assert health["retry_cooldown_sec"] == RETRY_COOLDOWN_SEC
+    # OPEN_RECOVERABLE 下相对秒数非空且为非负数
+    assert health["next_probe_in_seconds"] is not None
+    assert health["next_probe_in_seconds"] >= 0

@@ -309,10 +309,15 @@ export interface OmniHealth {
   consecutive_failures: number;
   /** 下次自动探测时刻(unix ms);仅 warn 状态非空。 */
   next_probe_at_ms: number | null;
+  /** 下次自动探测的剩余秒数(monotonic 差算,不受两端时钟偏差影响);仅 warn 状态非空。
+   *  前端倒计时应吃这个字段,不再算 next_probe_at_ms - Date.now()。 */
+  next_probe_in_seconds: number | null;
   /** 最近一次探测时刻(unix ms)。 */
   last_probe_at_ms: number | null;
   /** 最近一次探测结果。 */
   last_probe_result: "ok" | "fail" | null;
+  /** 「立即重试」按钮的本地冷却时长(秒),与后端 retry 端点冷却期同源。 */
+  retry_cooldown_sec: number;
 }
 
 /** active 字段扩展:附带熔断器的 health snapshot。 */
