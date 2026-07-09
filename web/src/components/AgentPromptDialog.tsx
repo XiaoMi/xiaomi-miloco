@@ -22,9 +22,17 @@ interface Props {
   /** 覆盖标题/说明，缺省用通用文案。 */
   title?: string;
   hint?: string;
+  /** 可选：多条示例话术，点击即填入编辑框（≥2 条时才渲染选择区）。 */
+  examples?: string[];
 }
 
-export function AgentPromptDialog({ initialText, onClose, title, hint }: Props) {
+export function AgentPromptDialog({
+  initialText,
+  onClose,
+  title,
+  hint,
+  examples,
+}: Props) {
   const { t } = useTranslation();
   const [text, setText] = useState(initialText);
   const [copied, setCopied] = useState(false);
@@ -89,6 +97,29 @@ export function AgentPromptDialog({ initialText, onClose, title, hint }: Props) 
             rows={4}
             className="w-full resize-none rounded-lg bg-bg-primary border border-border px-3 py-2.5 text-body text-text-primary focus:outline-none focus:border-border-strong"
           />
+          {examples && examples.length > 1 && (
+            <div className="mt-3">
+              <div className="text-caption text-text-tertiary mb-1.5">
+                {t("tasks.examplesLabel")}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {examples.map((ex, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setText(ex)}
+                    className={`text-left text-caption px-3 py-1.5 rounded-md border transition-colors ${
+                      text === ex
+                        ? "border-brand-primary bg-brand-soft text-brand-primary"
+                        : "border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong"
+                    }`}
+                  >
+                    {ex}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="flex justify-end mt-3">
             <button
               type="button"
