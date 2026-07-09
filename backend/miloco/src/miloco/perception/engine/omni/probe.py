@@ -21,8 +21,15 @@ _ALLOWED_SCHEMES = ("http", "https")
 def _normalize_base_url(base_url: str) -> tuple[str | None, str | None]:
     """校验 base_url 并归一化(去尾斜杠)。
 
-    只允许 http/https scheme;其他(file/gopher/ftp/data 等)拒绝,防止 base_url 由用户
-    可控时被恶意配置成 SSRF 载荷。返回 (normalized, error_message);合法时 error 为 None。
+    只挡非 http/https scheme(拒 file/gopher/ftp/data 等)。**不挡内网/链路本地 IP**——
+    家用场景的自建 LLM (Ollama http://127.0.0.1:11434 / vLLM http://192.168.x.x:8000
+    / Tailscale http://100.64.x.x) 就是常见 base_url,禁内网 = 禁自建。
+
+    防"key 通过 base_url 外泄"靠的是 admin/router.py::_key_by_label 的跨 URL 凭证隔离
+    (base_url 变了不沿用旧 key),不靠这里的 IP 黑名单。docstring 明说这点避免后续读者
+    误以为这层做了 SSRF 防护。
+
+    返回 (normalized, error_message);合法时 error 为 None。
     """
     parsed = urlparse(base_url)
     scheme = parsed.scheme.lower()

@@ -256,3 +256,96 @@ async def test_resolve_live_config_change_resets_breaker(monkeypatch):
 
     await asyncio.sleep(0)
     assert cb.snapshot().state == "ok"
+
+
+# ─── forced-stream 路径熔断器记录(review #1 回归防护) ──────────────────────
+
+
+def _forced_stream_client_ok():
+    """post 返 200 (让 body["stream"]=True 前的构造走通),真正 forced_stream 分支
+    走 _collect_stream_response —— 由测试自己 monkeypatch 抛 HTTPStatusError。"""
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _FakeResp(200, {"choices": [], "usage": {}})
+
+    return _C
+
+
+async def test_call_omni_forced_stream_401_records_failure(monkeypatch):
+    """review #1 回归:forced-stream 路径遇 401 时熔断器必须能看到。之前
+    _collect_stream_response 直接 raise_for_status 抛 HTTPStatusError,上层
+    `not isinstance(e, HTTPStatusError)` 守卫会跳过 record_failure,导致
+    Qwen 等强制 stream adapter 的 4xx/5xx 熔断器根本感知不到。"""
+    # 强制 forced_stream=True:让 adapter 生成 body["stream"]=True
+    from miloco.perception.engine.omni import provider
+
+    orig_adapter = provider.get_adapter("m")
+
+    class _StreamAdapter:
+        def build_request_body(self, messages, **kw):
+            kw["stream"] = True  # 关键:忽略调用方传的 stream=False
+            return orig_adapter.build_request_body(messages, **kw)
+
+    monkeypatch.setattr(
+        omni_client, "get_adapter", lambda model: _StreamAdapter()
+    )
+
+    # 让 _collect_stream_response 抛 401 的 HTTPStatusError,模拟真 SSE 401 场景
+    async def _raise_401(*a, **k):
+        raise httpx.HTTPStatusError(
+            "unauthorized",
+            request=httpx.Request("POST", "https://x/v1/chat/completions"),
+            response=httpx.Response(401),
+        )
+
+    monkeypatch.setattr(omni_client, "_collect_stream_response", _raise_401)
+    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _forced_stream_client_ok())
+
+    with pytest.raises(omni_client.OmniError):
+        await omni_client.call_omni(_payload(), _cfg())
+    # 关键断言:熔断器看到了 401 → consecutive_failures = 1(修复前会是 0)
+    assert get_omni_circuit_breaker().snapshot().consecutive_failures == 1
+
+
+async def test_call_omni_forced_stream_500_records_failure(monkeypatch):
+    """forced-stream 遇 5xx (recoverable) 同样要 record_failure 累计到熔断阈值。"""
+    from miloco.perception.engine.omni import provider
+
+    orig_adapter = provider.get_adapter("m")
+
+    class _StreamAdapter:
+        def build_request_body(self, messages, **kw):
+            kw["stream"] = True
+            return orig_adapter.build_request_body(messages, **kw)
+
+    monkeypatch.setattr(
+        omni_client, "get_adapter", lambda model: _StreamAdapter()
+    )
+
+    async def _raise_500(*a, **k):
+        raise httpx.HTTPStatusError(
+            "server error",
+            request=httpx.Request("POST", "https://x/v1/chat/completions"),
+            response=httpx.Response(500),
+        )
+
+    monkeypatch.setattr(omni_client, "_collect_stream_response", _raise_500)
+    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _forced_stream_client_ok())
+
+    # 连打 3 次触发 OPEN_RECOVERABLE (consecutive_threshold=3)
+    for _ in range(3):
+        with pytest.raises(omni_client.OmniError):
+            await omni_client.call_omni(_payload(), _cfg())
+    snap = get_omni_circuit_breaker().snapshot()
+    assert snap.state == "warn"
+    assert snap.code == "http_error"

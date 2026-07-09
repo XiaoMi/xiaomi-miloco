@@ -235,7 +235,25 @@ async def call_omni(
                     resp.raise_for_status()
                 raw = resp.json()
             else:
-                raw = await _collect_stream_response(client, config.base_url, headers, body)
+                # forced-stream (Qwen 等 adapter 强制 stream=True) 走 _collect_stream_response,
+                # 该函数内部对非 200 直接 raise_for_status → HTTPStatusError。下方 except
+                # 守卫 `not isinstance(e, HTTPStatusError)` 会跳过 record_failure(防非流路径
+                # 双重计数),导致 forced-stream 路径的 4xx/5xx 熔断器完全看不到。此处显式
+                # 补一次 classify + record_failure 后再抛,与非流路径行为对齐。
+                try:
+                    raw = await _collect_stream_response(
+                        client, config.base_url, headers, body
+                    )
+                except httpx.HTTPStatusError as e:
+                    classified = classify_response(e.response)
+                    if classified is not None:
+                        await cb.record_failure(classified)
+                        logger.error(
+                            "Omni API error %d (stream): %s",
+                            e.response.status_code,
+                            e.response.text[:500],
+                        )
+                    raise
             if not isinstance(raw, dict):
                 # 用 __class__.__name__ 而非 type(...) 避免遮盖问题(参数名 type)
                 raw_cls = raw.__class__.__name__

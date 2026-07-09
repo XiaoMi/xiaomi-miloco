@@ -349,7 +349,25 @@ async def _call_omni_messages(
                 resp.raise_for_status()
             raw = resp.json()
         else:
-            raw = await _collect_stream_response(client, config.base_url, headers, body)
+            # forced-stream (Qwen 等 adapter 强制 stream=True) 走 _collect_stream_response,
+            # 内部对非 200 直接 raise_for_status → HTTPStatusError。下方 except 守卫
+            # `not isinstance(e, HTTPStatusError)` 会跳过 record_failure(防非流路径双重
+            # 计数),导致 forced-stream 路径的 4xx/5xx 熔断器完全看不到。此处显式补一次
+            # classify + record_failure 后再抛,与非流路径行为对齐。
+            try:
+                raw = await _collect_stream_response(
+                    client, config.base_url, headers, body
+                )
+            except httpx.HTTPStatusError as e:
+                classified = classify_response(e.response)
+                if classified is not None:
+                    await cb.record_failure(classified)
+                    logger.error(
+                        "[omni] omni API 调用失败(stream)，错误码=%d | %s",
+                        e.response.status_code,
+                        e.response.text[:500],
+                    )
+                raise
         # 服务端在 fused 大 payload 下偶发返回非 dict body (~1.5%);此处校验
         # 形态并 dump 截断后的原始响应,便于事后定位服务端返回了什么。
         if not isinstance(raw, dict):

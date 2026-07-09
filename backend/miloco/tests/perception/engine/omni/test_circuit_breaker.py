@@ -538,3 +538,47 @@ async def test_multi_camera_concurrent_success_after_open(cb):
         cb.record_success(),
     )
     assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+
+
+# ─── record_probe_result 非 CONFIG 失败不应覆盖 OPEN_CONFIG (review #3) ─────
+
+
+async def test_probe_result_recoverable_fail_does_not_overwrite_open_config(
+    cb, frozen_time
+):
+    """review #3 回归:try_arm_probe 通过后到 record_probe_result 之间的 await 窗口
+    里,并发 record_failure(CONFIG) 可能把 state 推到 OPEN_CONFIG(真 auth failure)。
+    此时 probe 失败(recoverable)不该无条件覆盖成 OPEN_RECOVERABLE —— 那会把"等改配置"
+    降级到"自动退避重试",tick 继续探测注定失败的 key,浪费 backoff 周期。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    frozen_time.tick(1.5)
+    cb.try_arm_probe()  # 占 in-flight 位
+
+    # 并发窗口:probe await 期间外部有 CONFIG 错累积到阈值,推到 OPEN_CONFIG
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+
+    # probe 完成,回来的是 recoverable 失败(比如 timeout)—— 不该覆盖 OPEN_CONFIG
+    await cb.record_probe_result(False, _rec("timeout"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    # code 也保持 CONFIG 侧的,不被 recoverable 的覆盖
+    assert cb.snapshot().code == "bad_key"
+
+
+async def test_probe_result_recoverable_fail_still_reopens_from_half_open(
+    cb, frozen_time
+):
+    """守卫仅针对 OPEN_CONFIG。HALF_OPEN(mark_half_open 后 record_probe_result 前)
+    下 probe 失败仍要正常回 OPEN_RECOVERABLE,不受守卫影响。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(1.5)
+    await cb.mark_half_open()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+
+    await cb.record_probe_result(False, _rec("unreachable"))
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    assert cb.snapshot().code == "unreachable"

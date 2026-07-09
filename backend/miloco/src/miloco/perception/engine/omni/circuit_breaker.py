@@ -203,8 +203,14 @@ class OmniCircuitBreaker:
                     self._transition_to_open_config_locked(err)
                 else:
                     self._grow_backoff_locked(err)
-                    self._state = CircuitState.OPEN_RECOVERABLE
-                    self._current_code, self._current_message = err.code, err.message
+                    # 守卫 OPEN_CONFIG:try_arm_probe 通过后到 probe 完成之间的 await
+                    # 窗口里,并发 record_failure(CONFIG) 可能把 state 推到 OPEN_CONFIG
+                    # (真 auth failure)。若这里无条件设 OPEN_RECOVERABLE 会把它抹回
+                    # "自动退避重试",tick 继续探测注定失败的 key,浪费 backoff 周期。
+                    # 只有 state 不是 OPEN_CONFIG 时才降级到 OPEN_RECOVERABLE。
+                    if self._state != CircuitState.OPEN_CONFIG:
+                        self._state = CircuitState.OPEN_RECOVERABLE
+                        self._current_code, self._current_message = err.code, err.message
             self._probe_in_flight = False
         self._emit()
 
