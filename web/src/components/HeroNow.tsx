@@ -11,6 +11,7 @@ import type {
   ScopeCamera,
   UsageStats,
 } from "@/lib/types";
+import { cameraAvailable } from "@/lib/types";
 import { PersonChip } from "./PersonChip";
 import { LivePlayerPlaceholder } from "./LivePlayerPlaceholder";
 import { getUsageStats } from "@/api";
@@ -214,14 +215,15 @@ function CameraSection({
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;
   const allOff = activeCount === 0;
-  // 满额判断按 inUse 计数(与后端 toggle_camera 上限校验同口径):已启用的相机即便
-  // 掉线仍保留 inUse、占名额(允许态不被强制改),要腾名额得显式关掉它。
+  // 满额判断按 inUse(=活跃集:未拉黑 + 三态好 + 上限内)计数,与后端 toggle_camera 的
+  // 上限校验同口径——后端也数「可用集」(离线/局域网不可达/镜头关的不占名额)。所以
+  // 面板显示的名额 = 后端认的名额,不会出现「看着有位、点开启却被后端拒」。
   const atCapacity = activeCount >= maxStreamCams;
-  // 「全开」只能开「在线且未投喂」的——离线相机后端 toggle_camera 会整批拒绝
-  // (offline_enable 校验),若把离线 did 也塞进批量 enable,会连带在线的一起失败。
-  // 与下区单台开关「离线不可开」同口径。
+  // 「全开」只能开「可用且未投喂」的——不可用相机(云端离线/局域网不可达/镜头关)后端
+  // toggle_camera 会整批拒绝,若把它们塞进批量 enable,会连带可用的一起失败。
+  // 与下区单台开关「不可用不可开」同口径(cameraAvailable)。
   const enableableDids = scopeCameras
-    .filter((c) => !c.inUse && c.isOnline)
+    .filter((c) => !c.inUse && cameraAvailable(c))
     .map((c) => c.did);
   // bulkBusy 锁防"全开/全关"连点;singleBusyDids 跟踪单卡 in-flight,让住户切单卡 A
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
@@ -382,13 +384,13 @@ function CameraSection({
                   <BenchCamItem
                     key={c.did}
                     cam={c}
-                    // 离线 + 未投喂 → 禁用(开不了);离线 + 已投喂 → 仍可点(允许关闭)。
+                    // 不可用 + 未投喂 → 禁用(开不了);不可用 + 已投喂 → 仍可点(允许关闭)。
                     // 满额时也只挡「开启未启用的」,已启用的随时可关。即:仅当
-                    // 「当前未投喂 且 (离线 或 已满额)」时禁用,其余可点。
+                    // 「当前未启用 且 (不可用 或 已满额)」时禁用,其余可点。
                     disabled={
                       bulkBusy ||
                       singleBusyDids.has(c.did) ||
-                      (!c.inUse && (!c.isOnline || atCapacity))
+                      (!c.inUse && (!cameraAvailable(c) || atCapacity))
                     }
                     onToggle={(v) => runSingle(c.did, v)}
                     // 同上区卡:相机开关 in-flight 时拾音开关一并置灰,防交叠竞态。
@@ -660,23 +662,45 @@ function BenchCamItem({
   return (
     <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
       <div className="min-w-0">
-        {/* 离线相机名字淡化,跟开关禁用呼应——离线就别让住户以为点一下能投喂。 */}
+        {/* 不可用相机名字淡化,跟开关禁用呼应——不可用就别让住户以为点一下能投喂。 */}
         <div
           className={`text-body truncate ${
-            cam.isOnline ? "text-text-primary" : "text-text-tertiary"
+            cameraAvailable(cam) ? "text-text-primary" : "text-text-tertiary"
           }`}
         >
           {cam.name}
         </div>
-        {(!cam.isOnline || cam.roomName) && (
-          <div className="text-caption text-text-tertiary truncate">
-            {!cam.isOnline && (
-              <span className="text-warning">{t("hero.benchOffline")}</span>
-            )}
-            {!cam.isOnline && cam.roomName ? " · " : ""}
-            {cam.roomName}
-          </div>
-        )}
+        {/* 三个并列的可用性指标:云端在线 / 局域网可达 / 镜头开关。各自独立好坏,
+            住户能一眼看出到底卡在哪一环,不再一把揉成"离线"。 */}
+        <div className="text-caption flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
+          <StateDot
+            ok={cam.cloudOnline}
+            label={
+              cam.cloudOnline
+                ? t("hero.stateCloudOnline")
+                : t("hero.stateCloudOffline")
+            }
+          />
+          <StateDot
+            ok={cam.lanReachable}
+            label={
+              cam.lanReachable ? t("hero.stateLanOk") : t("hero.stateLanOffline")
+            }
+          />
+          <StateDot
+            ok={cam.awake === null ? "unknown" : cam.awake}
+            label={
+              cam.awake === false
+                ? t("hero.stateSleeping")
+                : cam.awake === null
+                  ? t("hero.stateAwakeUnknown")
+                  : t("hero.stateAwake")
+            }
+          />
+          {cam.roomName && (
+            <span className="text-text-tertiary">· {cam.roomName}</span>
+          )}
+        </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
         {/* 拾音开关从属于感知:相机未启用(inUse=false)时置灰、显示为关。 */}
@@ -694,6 +718,29 @@ function BenchCamItem({
         />
       </div>
     </li>
+  );
+}
+
+/** 单个可用性指标:一个圆点 + 文字。ok=true 绿点/常规色,false 橙点/警示色,
+ *  "unknown"(镜头开关读不到)灰点/淡化。三个并列即"云端在线 | 局域网可达 | 镜头开启"。 */
+function StateDot({ ok, label }: { ok: boolean | "unknown"; label: string }) {
+  const dot =
+    ok === true
+      ? "bg-success"
+      : ok === "unknown"
+        ? "bg-text-tertiary"
+        : "bg-warning";
+  const text =
+    ok === true
+      ? "text-text-secondary"
+      : ok === "unknown"
+        ? "text-text-tertiary"
+        : "text-warning";
+  return (
+    <span className={`inline-flex items-center gap-1 ${text}`}>
+      <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />
+      {label}
+    </span>
   );
 }
 
