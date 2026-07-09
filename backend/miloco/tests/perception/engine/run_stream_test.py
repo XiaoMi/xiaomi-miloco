@@ -291,7 +291,7 @@ async def run_pipeline_with_timing(
     # --- Gate ---
     t0 = time.monotonic()
     # 流式 ad-hoc 入口无跨窗状态(prev_frame / hold ts),丢弃后 3 个返回项
-    gate_packet, _, _, _, _ = run_gate(input_slice, config.gate)
+    gate_packet, _, _, _, _ = await run_gate(input_slice, config.gate)
     timer.gate_ms = (time.monotonic() - t0) * 1000
     result["gate_packet"] = gate_packet
 

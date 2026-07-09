@@ -48,15 +48,11 @@ DEFAULT_MAX_TOKENS = 1024
 # ---------------------------------------------------------------------------
 
 
-def prepare(video_path: str):
+async def prepare(video_path: str):
     """Run Gate → Edge on each window, extract prompts/images/audio, save to JSON."""
     from miloco.perception.engine.config import PerceptionConfig
     from miloco.perception.engine.gate.gate import run_gate
     from miloco.perception.engine.identity.identity import run_identity
-    from miloco.perception.engine.identity.speech_accumulator import (
-        SpeechAccumulator,
-        SpeechAccumulatorConfig,
-    )
     from miloco.perception.engine.identity.tracking_service import (
         create_tracking_service,
     )
@@ -68,9 +64,6 @@ def prepare(video_path: str):
     config = PerceptionConfig()
     windows = simulate_stream(video_path, 3, 3)
     tracking = create_tracking_service("real")
-    accumulator = SpeechAccumulator(
-        SpeechAccumulatorConfig(max_windows=config.identity.speech_max_windows)
-    )
     context = OmniContext(
         rule_conditions=[
             RuleCondition(
@@ -84,13 +77,13 @@ def prepare(video_path: str):
     test_data: list[dict] = []
 
     for i, (input_slice, win_start) in enumerate(windows):
-        gate_packet, _, _ = run_gate(input_slice, config.gate)
+        gate_packet, _, _, _, _ = await run_gate(input_slice, config.gate)
         if gate_packet is None:
             print(f"  窗口 #{i + 1} ({win_start:.0f}s): SKIPPED (gate)")
             continue
 
-        identity_packet = run_identity(
-            gate_packet, config.identity, tracking, accumulator
+        identity_packet = await run_identity(
+            gate_packet, config.identity, tracking
         )
 
         # Build prompt payload (same as pipeline)
@@ -441,7 +434,7 @@ async def main():
             print("[ERROR] prepare/all 模式需要指定视频路径")
             sys.exit(1)
         print(f"\n[准备] 从 {args.video} 提取测试数据...")
-        prepare(args.video)
+        await prepare(args.video)
 
     if args.command in ("run", "all"):
         print("\n[测试] 开始 MiMo API 测试...")
