@@ -49,6 +49,21 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 MILOCO_HOME="${MILOCO_HOME:-$HOME/.openclaw/miloco}"
 HERMES_PLUGINS_DIR="$HERMES_HOME/plugins/miloco"
 
+# 从 config.json 动态读取 backend 端口（不写死 1810）
+_read_backend_port() {
+  "$PYTHON" - "$MILOCO_HOME" <<'PY' 2>/dev/null || echo "1810"
+import json, sys, os
+p = os.path.join(sys.argv[1], 'config.json')
+try:
+    from urllib.parse import urlparse
+    d = json.load(open(p))
+    url = d.get('server',{}).get('url','') or 'http://127.0.0.1:1810'
+    print(urlparse(url).port or 1810)
+except Exception:
+    print(1810)
+PY
+}
+
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 info() { echo -e "${G}[✓]${N} $*"; }
 warn() { echo -e "${Y}[!]${N} $*"; }
@@ -210,9 +225,6 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
   fi
 
   # 11. 检查旧 launchd adapter 是否残留（旧架构遗留）
-  if launchctl list 2>/dev/null | grep -q "$LAUNCHD_LABEL" 2>/dev/null; then
-    diag "旧 launchd adapter 残留" 0 "launchctl unload ~/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
-  fi
 
   # 12. state.json::deliver.target
   if [ -f "$HERMES_PLUGINS_DIR/miloco-plugin/state.json" ]; then
@@ -348,7 +360,7 @@ if [ "$NO_START_BACKEND" -eq 0 ]; then
       info "service start 成功，等 backend /health..."
       for i in $(seq 1 30); do
         sleep 1
-        if curl -fsS --max-time 2 http://127.0.0.1:1810/health >/dev/null 2>&1; then
+        if curl -fsS --max-time 2 "http://127.0.0.1:$(_read_backend_port)/health" >/dev/null 2>&1; then
           info "backend 就绪（等了 ${i}s）"
           break
         fi
@@ -687,20 +699,8 @@ mark_done 4.7
 # Author #7 收敛:不再直接编辑 config.json 结构,改用 miloco-cli config set 写 agent.*
 # (CLI 是 source of truth,插件不碰 config.json schema —— 未来 CLI 改键名不影响)
 step 5 "miloco-cli config set 写 agent.webhook_url + agent.auth_bearer"
-# 从 config.json 动态读取 backend 端口（不写死 18789/1810）
-BACKEND_PORT=$("$PYTHON" - "$MILOCO_HOME" <<'PY'
-import json, sys, os
-p = os.path.join(sys.argv[1], 'config.json')
-try:
-    from urllib.parse import urlparse
-    d = json.load(open(p))
-    url = d.get('server',{}).get('url','') or 'http://127.0.0.1:1810'
-    port = urlparse(url).port or 1810
-    print(port)
-except Exception:
-    print(1810)
-PY
-)
+# 从 config.json 动态读取 backend 端口
+BACKEND_PORT=$(_read_backend_port)
 WEBHOOK_URL="http://127.0.0.1:${BACKEND_PORT}/miloco/webhook"
 
 # 备份一次(防御:miloco-cli config set 若实现改了 schema,rollback 用)
@@ -779,7 +779,7 @@ else
   fi
   # 确认 /health
   for i in 1 2 3 4 5 6 7 8; do
-    if curl -sSf "http://127.0.0.1:$(echo "$BACKEND_URL" | cut -d: -f3)/health" >/dev/null 2>&1; then
+    if curl -sSf "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null 2>&1; then
       info "  backend /health OK (等了 ${i}s)"
       break
     fi
