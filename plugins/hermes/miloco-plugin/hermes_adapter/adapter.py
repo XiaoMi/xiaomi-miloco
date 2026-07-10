@@ -236,7 +236,9 @@ class Adapter:
             else:
                 return _result(run_id="", status="no-channel")
         else:
-            session_id = _map_session(session_key, lane)
+            # suggestion 每个事件独立评估，不用持久 session：
+            # 同 session 历史累积 190k+ tokens 会让 LLM 麻木，全部建议都沉默
+            session_id = _map_session(session_key, lane) if lane != "miloco-suggest" else None
         timeout_s = max(wait_timeout_ms / 1000.0, 1.0) + _HTTP_BUFFER_S
 
         # 组装 messages: <system>(可选) + <user>
