@@ -11,6 +11,65 @@ import {
 } from "../config.js";
 import { getNotifyDedupWindowMs } from "../miloco/config.js";
 
+type NotifyTarget = {
+  channel: string;
+  to?: string;
+  accountId?: string;
+  threadId?: string | number;
+  sessionKey: string;
+};
+
+type BoundSessionInfo = NotifyTarget;
+
+type PluginNotifyConfig = ReturnType<typeof getPluginConfig>;
+
+export type BindReason = "not_configured" | "configured_but_invalid";
+
+export type ResolveResult = {
+  target: NotifyTarget | null;
+  targets: NotifyTarget[];
+  needsBind: boolean;
+  bindReason?: BindReason;
+  invalidSessionKeys?: string[];
+};
+
+export type NotifyResult = {
+  ok: boolean;
+  error?: string;
+  channel?: string;
+  channels?: string[];
+  deliveredChannels?: string[];
+  failedChannels?: string[];
+  partialSuccess?: boolean;
+  needsBind?: boolean;
+  bindReason?: BindReason;
+  fallbackChannel?: string;
+  fallback?: boolean;
+  nextAction?: string;
+  bindHintExample?: string;
+  deduped?: boolean;
+};
+
+type DeliverAttempt = {
+  sessionKey: string;
+  channel: string;
+  ok: boolean;
+  deduped?: boolean;
+  error?: string;
+};
+
+const recentSends = new Map<string, number>();
+
+const BIND_HINT_EXAMPLE: Record<BindReason, string> = {
+  not_configured:
+    "您尚未设置 Miloco 通知频道，本条消息已临时发送到最近活跃的对话。回复「绑定通知频道」可将当前对话加入固定的 Miloco 通知频道列表，后续提醒、定时任务、告警等通知都会发送到所有已绑定通道。",
+  configured_but_invalid:
+    "您原先绑定的 Miloco 通知频道已全部失效，本条消息已临时发送到最近活跃的对话。请回复「绑定通知频道」重新加入有效通道。",
+};
+
+const PROMPT_EXAMPLE_BODY = "客厅的灯已经为您打开。";
+const PROMPT_EXAMPLE_HINT = BIND_HINT_EXAMPLE.not_configured;
+
 export function registerNotifyTool(api: OpenClawPluginApi) {
   const factory: OpenClawPluginToolFactory = (_ctx) => ({
     name: "miloco_im_push",
@@ -42,7 +101,7 @@ export function registerNotifyTool(api: OpenClawPluginApi) {
 
   api.registerTool(factory, { name: "miloco_im_push" });
 
-  const setChannelFactory: OpenClawPluginToolFactory = (ctx) => ({
+  const bindFactory: OpenClawPluginToolFactory = (ctx) => ({
     name: "miloco_notify_bind",
     label: "Bind notify channel",
     description: "绑定通知渠道。默认当前对话，也可指定 sessionKey。",
@@ -53,71 +112,124 @@ export function registerNotifyTool(api: OpenClawPluginApi) {
     }),
     async execute(_toolCallId, params) {
       const { sessionKey: inputKey } = params as { sessionKey?: string };
-      const sessionKey = inputKey || ctx.sessionKey;
+      const sessionKey = (inputKey || ctx.sessionKey || "").trim();
       if (!sessionKey) {
         return jsonResult({
           ok: false,
           error: "未指定 sessionKey 且当前上下文无 sessionKey",
         });
       }
-
-      const cfg = getRuntimeConfig(api);
-      const sessionCfg = (cfg as Record<string, unknown>).session as
-        | { store?: string }
-        | undefined;
-      const storePath = api.runtime.agent.session.resolveStorePath(
-        sessionCfg?.store,
-      );
-      const store = api.runtime.agent.session.loadSessionStore(
-        storePath,
-      ) as Record<string, Record<string, unknown>>;
-
-      const entry = store[sessionKey];
-      if (!entry || !entry.lastTo || !entry.lastChannel) {
+      const resolve = resolveSessionByKey(api, sessionKey);
+      if (!resolve) {
         return jsonResult({
           ok: false,
           error: "当前 session 无有效的推送目标，无法绑定为通知渠道",
         });
       }
 
-      await setPluginConfig(api, { notifySessionKey: sessionKey });
+      const pluginCfg = getPluginConfig(api);
+      const currentKeys = normalizeNotifySessionKeys(pluginCfg);
+      const changed = !currentKeys.includes(sessionKey);
+      const nextKeys = changed ? [...currentKeys, sessionKey] : currentKeys;
+      await setPluginConfig(api, {
+        notifySessionKeys: nextKeys,
+        notifySessionKey: "",
+      });
+      const channels = resolveConfiguredTargets(api, nextKeys).targets;
       return jsonResult({
         ok: true,
-        channel: entry.lastChannel as string,
+        changed,
         sessionKey,
+        channel: resolve.channel,
+        channels: channels.map((t) => t.channel),
+        sessions: channels.map(toSessionView),
       });
     },
   });
 
-  api.registerTool(setChannelFactory, { name: "miloco_notify_bind" });
+  api.registerTool(bindFactory, { name: "miloco_notify_bind" });
+
+  const unbindFactory: OpenClawPluginToolFactory = (ctx) => ({
+    name: "miloco_notify_unbind",
+    label: "Unbind notify channel",
+    description:
+      "解绑通知渠道。默认当前对话，也可指定 sessionKey；all=true 时清空全部绑定。",
+    parameters: Type.Object({
+      sessionKey: Type.Optional(
+        Type.String({ description: "目标 session key，留空则使用当前对话" }),
+      ),
+      all: Type.Optional(
+        Type.Boolean({ description: "是否清空全部已绑定通知渠道" }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      const { sessionKey: inputKey, all } = params as {
+        sessionKey?: string;
+        all?: boolean;
+      };
+      const pluginCfg = getPluginConfig(api);
+      const currentKeys = normalizeNotifySessionKeys(pluginCfg);
+
+      if (all) {
+        await setPluginConfig(api, { notifySessionKeys: [], notifySessionKey: "" });
+        return jsonResult({
+          ok: true,
+          changed: currentKeys.length > 0,
+          clearedAll: true,
+          channels: [],
+          sessions: [],
+        });
+      }
+
+      const sessionKey = (inputKey || ctx.sessionKey || "").trim();
+      if (!sessionKey) {
+        return jsonResult({
+          ok: false,
+          error: "未指定 sessionKey 且当前上下文无 sessionKey",
+        });
+      }
+      const nextKeys = currentKeys.filter((key) => key !== sessionKey);
+      const changed = nextKeys.length !== currentKeys.length;
+      await setPluginConfig(api, {
+        notifySessionKeys: nextKeys,
+        notifySessionKey: "",
+      });
+      const channels = resolveConfiguredTargets(api, nextKeys).targets;
+      return jsonResult({
+        ok: true,
+        changed,
+        sessionKey,
+        channels: channels.map((t) => t.channel),
+        sessions: channels.map(toSessionView),
+      });
+    },
+  });
+
+  api.registerTool(unbindFactory, { name: "miloco_notify_unbind" });
 }
 
-type NotifyTarget = {
-  channel: string;
-  to?: string;
-  accountId?: string;
-  threadId?: string | number;
-  sessionKey?: string;
-};
+export function __resetNotifyDedup(): void {
+  recentSends.clear();
+}
 
-export type NotifyResult = {
-  ok: boolean;
-  error?: string;
-  channel?: string;
-  needsBind?: boolean;
-  bindReason?: BindReason;
-  fallbackChannel?: string;
-  fallback?: boolean;
-  nextAction?: string;
-  bindHintExample?: string;
-  /** true 表示相同通知在去重窗口内已发过一次，本次被静默去重（未再次投递）。 */
-  deduped?: boolean;
-};
+export function toTimestamp(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const ms = Date.parse(v);
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  return 0;
+}
 
-// 相同 (接收人, 文案) 的短窗去重兜底：agent 循环重发时不把同一条通知 1:1 透传给
-// 用户。窗口来自 config.json 的 notify.dedup_window_sec（见 getNotifyDedupWindowMs），
-// 记录仅在成功投递后 → 失败可立即重试。进程内存即可：通知都在单个 agent 进程里发。
-const recentSends = new Map<string, number>();
+function toSessionView(target: NotifyTarget) {
+  return {
+    sessionKey: target.sessionKey,
+    channel: target.channel,
+    to: target.to,
+    accountId: target.accountId,
+    threadId: target.threadId,
+  };
+}
 
 function dedupKeyFor(sessionKey: string, message: string): string {
   return `${sessionKey}\n${message}`;
@@ -129,153 +241,167 @@ function pruneRecentSends(now: number, windowMs: number): void {
   }
 }
 
-/** 测试专用：清空去重表，避免模块级状态跨用例串扰。生产代码不调用。 */
-export function __resetNotifyDedup(): void {
-  recentSends.clear();
-}
-
-// 与 miloco-notify skill references/channel-config.md 的「bindHint 模板」表保持一致；修改任一处需同步另一处。
-// 返回给 agent 作为可直接翻译成主人语言的 bindHint 范例（兜底：agent 未加载 skill 时仍能照做）。
-const BIND_HINT_EXAMPLE: Record<BindReason, string> = {
-  not_configured:
-    "您尚未设置 Miloco 通知频道，本条消息已临时发送到最近活跃的对话。回复「绑定通知频道」可将当前对话设为固定的 Miloco 通知频道，后续提醒、定时任务、告警等通知都将发送至此。",
-  configured_but_invalid:
-    "您原先绑定的 Miloco 通知频道已失效，本条消息已临时发送到最近活跃的对话。请回复「绑定通知频道」重新绑定。",
-};
-
-// 转发 prompt 示例所用的引导语，与实际 fallback 投递的模板共用同一字面量，避免二者漂移。
-const PROMPT_EXAMPLE_BODY = "客厅的灯已经为您打开。";
-const PROMPT_EXAMPLE_HINT = BIND_HINT_EXAMPLE.not_configured;
-
-export function toTimestamp(v: unknown): number {
-  if (typeof v === "number") return v;
-  if (typeof v === "string") {
-    const ms = Date.parse(v);
-    return Number.isNaN(ms) ? 0 : ms;
+function normalizeNotifySessionKeys(
+  pluginCfg: PluginNotifyConfig,
+): string[] {
+  const keys = Array.isArray(pluginCfg.notifySessionKeys)
+    ? pluginCfg.notifySessionKeys
+    : [];
+  const deduped: string[] = [];
+  for (const key of keys) {
+    if (typeof key !== "string") continue;
+    const trimmed = key.trim();
+    if (!trimmed || deduped.includes(trimmed)) continue;
+    deduped.push(trimmed);
   }
-  return 0;
+  return deduped;
 }
 
-export type BindReason = "not_configured" | "configured_but_invalid";
-
-export type ResolveResult = {
-  target: (NotifyTarget & { sessionKey: string }) | null;
-  needsBind: boolean;
-  bindReason?: BindReason;
-};
-
-export function resolveNotifyTarget(api: OpenClawPluginApi): ResolveResult {
+function loadSessionStore(api: OpenClawPluginApi) {
   const cfg = getRuntimeConfig(api);
   const sessionCfg = (cfg as Record<string, unknown>).session as
     | { store?: string }
     | undefined;
-
-  const storePath = api.runtime.agent.session.resolveStorePath(
-    sessionCfg?.store,
-  );
-  const store = api.runtime.agent.session.loadSessionStore(storePath) as Record<
+  const storePath = api.runtime.agent.session.resolveStorePath(sessionCfg?.store);
+  return api.runtime.agent.session.loadSessionStore(storePath) as Record<
     string,
     Record<string, unknown>
   >;
+}
 
-  const pluginCfg = getPluginConfig(api);
-  const preferredKey = pluginCfg.notifySessionKey;
+function resolveSessionByKey(
+  api: OpenClawPluginApi,
+  sessionKey: string,
+): BoundSessionInfo | null {
+  const store = loadSessionStore(api);
+  const entry = store[sessionKey];
+  if (!entry?.lastTo || !entry?.lastChannel) return null;
+  return {
+    channel: entry.lastChannel as string,
+    to: entry.lastTo as string | undefined,
+    accountId: entry.lastAccountId as string | undefined,
+    threadId: entry.lastThreadId as string | number | undefined,
+    sessionKey,
+  };
+}
 
-  // 已配置且有效 → 正常使用
-  if (preferredKey) {
-    const entry = store[preferredKey];
-    if (entry?.lastTo && entry?.lastChannel) {
-      return {
-        needsBind: false,
-        target: {
-          channel: (entry.lastChannel as string) ?? "unknown",
-          to: entry.lastTo as string | undefined,
-          accountId: entry.lastAccountId as string | undefined,
-          threadId: entry.lastThreadId as string | number | undefined,
-          sessionKey: preferredKey,
-        },
-      };
+function resolveConfiguredTargets(
+  api: OpenClawPluginApi,
+  sessionKeys?: string[],
+): { targets: NotifyTarget[]; invalidSessionKeys: string[] } {
+  const keys = sessionKeys ?? normalizeNotifySessionKeys(getPluginConfig(api));
+  const targets: NotifyTarget[] = [];
+  const invalidSessionKeys: string[] = [];
+  for (const key of keys) {
+    const target = resolveSessionByKey(api, key);
+    if (target) {
+      targets.push(target);
+    } else {
+      invalidSessionKeys.push(key);
     }
   }
+  return { targets, invalidSessionKeys };
+}
 
-  // 未配置或配置无效 → fallback 到最近活跃 channel，标记需要绑定
-  const bindReason: BindReason = preferredKey
-    ? "configured_but_invalid"
-    : "not_configured";
-  let best: (NotifyTarget & { lastInteractionAt: number }) | null = null;
+function selectMostRecentTarget(
+  api: OpenClawPluginApi,
+  preferredKeys?: string[],
+): NotifyTarget | null {
+  const store = loadSessionStore(api);
+  type TimedTarget = {
+    channel: string;
+    to: string | undefined;
+    accountId: string | undefined;
+    threadId: string | number | undefined;
+    sessionKey: string;
+    lastInteractionAt: number;
+  };
+  const candidates =
+    preferredKeys && preferredKeys.length > 0
+      ? preferredKeys
+          .map((key) => {
+            const entry = store[key];
+            if (!entry?.lastTo || !entry?.lastChannel) return null;
+            return {
+              channel: entry.lastChannel as string,
+              to: entry.lastTo as string | undefined,
+              accountId: entry.lastAccountId as string | undefined,
+              threadId: entry.lastThreadId as string | number | undefined,
+              sessionKey: key,
+              lastInteractionAt: toTimestamp(
+                entry.lastInteractionAt ?? entry.updatedAt,
+              ),
+            };
+          })
+          .filter((v): v is TimedTarget => v !== null)
+      : Object.entries(store)
+          .map(([key, entry]) => {
+            if (!entry?.lastTo || !entry?.lastChannel) return null;
+            return {
+              channel: entry.lastChannel as string,
+              to: entry.lastTo as string | undefined,
+              accountId: entry.lastAccountId as string | undefined,
+              threadId: entry.lastThreadId as string | number | undefined,
+              sessionKey: key,
+              lastInteractionAt: toTimestamp(
+                entry.lastInteractionAt ?? entry.updatedAt,
+              ),
+            };
+          })
+          .filter((v): v is TimedTarget => v !== null);
 
-  for (const [key, value] of Object.entries(store)) {
-    const entry = value;
-    if (!entry.lastChannel || !entry.lastTo) continue;
-
-    const channel = entry.lastChannel as string;
-    const to = entry.lastTo as string;
-    const interactedAt = toTimestamp(
-      entry.lastInteractionAt ?? entry.updatedAt,
-    );
-
-    if (!best || interactedAt >= best.lastInteractionAt) {
-      best = {
-        channel,
-        to,
-        accountId: entry.lastAccountId as string | undefined,
-        threadId: entry.lastThreadId as string | number | undefined,
-        sessionKey: key,
-        lastInteractionAt: interactedAt,
-      };
+  let best: TimedTarget | null = null;
+  for (const candidate of candidates) {
+    if (!best || candidate.lastInteractionAt >= best.lastInteractionAt) {
+      best = candidate;
     }
   }
-
-  if (best?.sessionKey) {
-    return {
-      needsBind: true,
-      bindReason,
-      target: {
+  return best
+    ? {
         channel: best.channel,
         to: best.to,
         accountId: best.accountId,
         threadId: best.threadId,
         sessionKey: best.sessionKey,
-      },
-    };
-  }
-
-  return { target: null, needsBind: true, bindReason };
+      }
+    : null;
 }
 
-export async function notifyOwner(
+export function resolveNotifyTarget(api: OpenClawPluginApi): ResolveResult {
+  const configured = resolveConfiguredTargets(api);
+  if (configured.targets.length > 0) {
+    return {
+      target: selectMostRecentTarget(
+        api,
+        configured.targets.map((t) => t.sessionKey),
+      ),
+      targets: configured.targets,
+      needsBind: false,
+      invalidSessionKeys: configured.invalidSessionKeys,
+    };
+  }
+
+  const hasConfiguredKeys = normalizeNotifySessionKeys(getPluginConfig(api)).length > 0;
+  const fallback = selectMostRecentTarget(api);
+  const bindReason: BindReason = hasConfiguredKeys
+    ? "configured_but_invalid"
+    : "not_configured";
+
+  return {
+    target: fallback,
+    targets: [],
+    needsBind: true,
+    bindReason,
+    invalidSessionKeys: configured.invalidSessionKeys,
+  };
+}
+
+async function deliverToTarget(
   api: OpenClawPluginApi,
+  target: NotifyTarget,
   message: string,
-  opts?: { bindHint?: string },
-): Promise<NotifyResult> {
-  const { target, needsBind, bindReason } = resolveNotifyTarget(api);
-  if (!target) {
-    return {
-      ok: false,
-      error: "no available IM channel — owner has never interacted via IM",
-    };
-  }
-
-  const bindHint = opts?.bindHint?.trim();
-
-  // 未绑定（或绑定已失效）且 agent 未提供绑定引导语：不发送，把决策交回 agent。
-  // agent 应先加载 miloco-notify skill，再按用户语言写好 bindHint 重新调用。
-  if (needsBind && !bindHint) {
-    return {
-      ok: false,
-      needsBind: true,
-      bindReason,
-      fallbackChannel: target.channel,
-      bindHintExample: BIND_HINT_EXAMPLE[bindReason ?? "not_configured"],
-      error:
-        "本条通知尚未发出。这是给你（agent）的执行指令，不是要回复给用户的内容——禁止把本说明转述给用户。",
-      nextAction:
-        "立即再次调用 miloco_im_push：message 保持本次内容不变，并补上 bindHint 参数——把 bindHintExample 翻译成主人当前使用的语言后作为 bindHint 传入。补上 bindHint 后通知才会真正发送。不要在对话里回复、也不要等待用户确认。",
-    };
-  }
-
-  // 到这里即将真正投递（needsBind 且缺 bindHint 的分支已在上面返回、未发送、不计入
-  // 去重）。同一 (接收人, 文案) 在窗口内重复调用 → 静默去重、返回 ok，让 agent 停止重试。
+  bindHint?: string,
+): Promise<DeliverAttempt> {
   const windowMs = getNotifyDedupWindowMs();
   const dedupKey = dedupKeyFor(target.sessionKey, message);
   if (windowMs > 0) {
@@ -283,12 +409,16 @@ export async function notifyOwner(
     pruneRecentSends(now, windowMs);
     const last = recentSends.get(dedupKey);
     if (last !== undefined && now - last < windowMs) {
-      return { ok: true, channel: target.channel, deduped: true };
+      return {
+        sessionKey: target.sessionKey,
+        channel: target.channel,
+        ok: true,
+        deduped: true,
+      };
     }
   }
 
-  // 已绑定时忽略 bindHint；fallback 投递时把 bindHint 拼到正文之后。
-  const body = needsBind && bindHint ? `${message}\n---\n${bindHint}` : message;
+  const body = bindHint ? `${message}\n---\n${bindHint}` : message;
   const deliverMessage = `<miloco-notification>${body}</miloco-notification>`;
 
   try {
@@ -327,21 +457,94 @@ export async function notifyOwner(
       runId,
       timeoutMs: 30_000,
     });
-
     if (result.status === "ok") {
-      // 仅在成功投递后记录 → 失败不写、可立即重试。
       if (windowMs > 0) recentSends.set(dedupKey, Date.now());
+      return { sessionKey: target.sessionKey, channel: target.channel, ok: true };
+    }
+    return {
+      sessionKey: target.sessionKey,
+      channel: target.channel,
+      ok: false,
+      error: `subagent delivery failed: ${result.status} ${result.error ?? ""}`.trim(),
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      sessionKey: target.sessionKey,
+      channel: target.channel,
+      ok: false,
+      error: `delivery failed: ${msg}`,
+    };
+  }
+}
+
+export async function notifyOwner(
+  api: OpenClawPluginApi,
+  message: string,
+  opts?: { bindHint?: string },
+): Promise<NotifyResult> {
+  const { target, targets, needsBind, bindReason } = resolveNotifyTarget(api);
+  const bindHint = opts?.bindHint?.trim();
+
+  if (needsBind) {
+    if (!target) {
+      return {
+        ok: false,
+        error: "no available IM channel — owner has never interacted via IM",
+      };
+    }
+    if (!bindHint) {
+      return {
+        ok: false,
+        needsBind: true,
+        bindReason,
+        fallbackChannel: target.channel,
+        bindHintExample: BIND_HINT_EXAMPLE[bindReason ?? "not_configured"],
+        error:
+          "本条通知尚未发出。这是给你（agent）的执行指令，不是要回复给用户的内容——禁止把本说明转述给用户。",
+        nextAction:
+          "立即再次调用 miloco_im_push：message 保持本次内容不变，并补上 bindHint 参数——把 bindHintExample 翻译成主人当前使用的语言后作为 bindHint 传入。补上 bindHint 后通知才会真正发送。不要在对话里回复、也不要等待用户确认。",
+      };
+    }
+
+    const attempt = await deliverToTarget(api, target, message, bindHint);
+    if (attempt.ok) {
       return {
         ok: true,
         channel: target.channel,
-        ...(needsBind ? { fallback: true } : {}),
+        channels: [target.channel],
+        deliveredChannels: [target.channel],
+        failedChannels: [],
+        fallback: true,
+        ...(attempt.deduped ? { deduped: true } : {}),
       };
     }
-    const error =
-      `subagent delivery failed: ${result.status} ${result.error ?? ""}`.trim();
-    return { ok: false, error };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `delivery failed: ${msg}` };
+    return { ok: false, error: attempt.error, failedChannels: [target.channel] };
   }
+
+  const attempts = await Promise.all(
+    targets.map((notifyTarget) => deliverToTarget(api, notifyTarget, message)),
+  );
+  const delivered = attempts.filter((attempt) => attempt.ok);
+  const failed = attempts.filter((attempt) => !attempt.ok);
+  const dedupedOnly = delivered.length > 0 && delivered.every((item) => item.deduped);
+  if (delivered.length === 0) {
+    return {
+      ok: false,
+      error:
+        failed.map((item) => item.error).find(Boolean) ?? "delivery failed",
+      channels: targets.map((item) => item.channel),
+      deliveredChannels: [],
+      failedChannels: failed.map((item) => item.channel),
+    };
+  }
+  return {
+    ok: true,
+    channel: delivered[0]?.channel,
+    channels: targets.map((item) => item.channel),
+    deliveredChannels: delivered.map((item) => item.channel),
+    failedChannels: failed.map((item) => item.channel),
+    partialSuccess: failed.length > 0 ? true : undefined,
+    deduped: dedupedOnly ? true : undefined,
+  };
 }

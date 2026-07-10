@@ -1,6 +1,10 @@
 import path from "node:path";
 import { readFileSafe } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
+import {
+  lockOnboardingSession,
+  readOnboardingState,
+} from "../home-profile/onboarding_state.js";
 import { getCatalog } from "../services/catalog.js";
 import { logger } from "../utils/logger.js";
 import { deployTimezone, toLocalParts } from "../utils/time.js";
@@ -116,6 +120,26 @@ const B_NOTIFY = `## 通知用户
 为什么是硬性前置、不能跳过：
 - **处理系统推送时你的回话对用户不可见**——光把结论写进回复，没有任何人收到，等于没通知。必须经本 skill 决策并交付渠道才算送达。
 - 通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 \`miloco_im_push\` / \`miloco-cli notify push\` / TTS，否则容易选错人、选错渠道、说错话。`;
+
+function buildOnboardingSessionBlock(
+  sessionKey: string | undefined,
+  prompt: string | undefined,
+): string {
+  const key = sessionKey?.trim();
+  if (!key || !prompt || prompt.startsWith("[系统事件]")) return "";
+  const state = lockOnboardingSession(key) ?? readOnboardingState();
+  if (!state || !state.invitedSessionKeys.includes(key)) return "";
+  if (state.lockedSessionKey && state.lockedSessionKey !== key) {
+    return `## Onboarding 会话收敛
+当前存在一场已经在另一条 IM 会话中继续的 onboarding（锁定会话：${state.lockedSessionKey}）。
+若用户在本会话继续回应那次初始化邀请，不要并行继续登记流程；简短告知用户：初始化已经在另一条会话里继续，请回到那条会话完成，或明确要求你重新开始时再处理。`;
+  }
+  if (state.lockedSessionKey === key) {
+    return `## Onboarding 会话收敛
+当前会话已被锁定为正在继续的 onboarding 会话。若用户是在回应之前收到的初始化邀请，就继续同一条 onboarding 流程；不要让用户跳到别的会话重复做一遍。`;
+  }
+  return "";
+}
 
 const B_LANGUAGE = `## 输出语言
 用用户使用的语言回复用户（设备名、人名、专有名词保持原样）。`;
@@ -243,6 +267,12 @@ export const registerBeforePromptBuildHook: HookRegister = (api) => {
     // ---- append：数据块（今日感知日志 → 待回应 → 目录），minimal 不带 ----
     const append: string[] = [];
     if (profile !== "minimal") {
+      const onboardingBlock = buildOnboardingSessionBlock(
+        ctx?.sessionKey,
+        event?.prompt,
+      );
+      if (onboardingBlock) append.push(onboardingBlock);
+
       const perceptionBlock = buildPerceptionLogBlock(ctx?.workspaceDir);
       if (perceptionBlock) append.push(perceptionBlock);
 
