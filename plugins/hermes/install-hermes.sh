@@ -47,7 +47,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 MILOCO_HOME="${MILOCO_HOME:-$HOME/.openclaw/miloco}"
-ADAPTER_PORT="${ADAPTER_PORT:-1810}"
 HERMES_PLUGINS_DIR="$HERMES_HOME/plugins/miloco"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
@@ -688,7 +687,21 @@ mark_done 4.7
 # Author #7 收敛:不再直接编辑 config.json 结构,改用 miloco-cli config set 写 agent.*
 # (CLI 是 source of truth,插件不碰 config.json schema —— 未来 CLI 改键名不影响)
 step 5 "miloco-cli config set 写 agent.webhook_url + agent.auth_bearer"
-WEBHOOK_URL="http://127.0.0.1:${ADAPTER_PORT}/miloco/webhook"
+# 从 config.json 动态读取 backend 端口（不写死 18789/1810）
+BACKEND_PORT=$("$PYTHON" - "$MILOCO_HOME" <<'PY'
+import json, sys, os
+p = os.path.join(sys.argv[1], 'config.json')
+try:
+    from urllib.parse import urlparse
+    d = json.load(open(p))
+    url = d.get('server',{}).get('url','') or 'http://127.0.0.1:1810'
+    port = urlparse(url).port or 1810
+    print(port)
+except Exception:
+    print(1810)
+PY
+)
+WEBHOOK_URL="http://127.0.0.1:${BACKEND_PORT}/miloco/webhook"
 
 # 备份一次(防御:miloco-cli config set 若实现改了 schema,rollback 用)
 TS="$(date +%Y%m%d-%H%M%S)-pid$$-nsec$(date +%N)"
