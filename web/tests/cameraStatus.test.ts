@@ -1,6 +1,6 @@
 /**
  * cameraStatus 派生态单测 — 四原子字段(isOnline / lanOnline / inUse / connected)
- * + grace 窗口 → 展示态(kind / canEnable / benchPrimaryKey / benchHintKey)。
+ * + grace 窗口 → 展示态(kind / canEnable / labelKey / tone / connecting / diagKey)。
  *
  * 纯函数、now/enabledAt 注入,不读时钟,故可精确断言 grace 边界。
  */
@@ -27,12 +27,13 @@ function cam(
 const T0 = 1_000_000;
 
 describe("cameraStatus", () => {
-  it("云端离线 → offline，不可开，标签「已离线」", () => {
+  it("云端离线 → offline，红色「已离线」，不可开", () => {
     const s = cameraStatus(cam({ isOnline: false }), { now: T0 });
     expect(s.kind).toBe("offline");
     expect(s.canEnable).toBe(false);
-    expect(s.benchPrimaryKey).toBe("hero.benchOffline");
-    expect(s.benchHintKey).toBeUndefined();
+    expect(s.labelKey).toBe("hero.stOffline");
+    expect(s.tone).toBe("error");
+    expect(s.diagKey).toBeUndefined();
   });
 
   it("云端离线优先于 connected 残留(切断过渡期也判离线,不误显在感知)", () => {
@@ -43,37 +44,44 @@ describe("cameraStatus", () => {
     expect(s.canEnable).toBe(false);
   });
 
-  it("在线未启用 → online，可开，无标签/诊断", () => {
+  it("在线未启用 → online，灰色「已关闭感知」，可开", () => {
     const s = cameraStatus(cam({ inUse: false }), { now: T0 });
     expect(s.kind).toBe("online");
     expect(s.canEnable).toBe(true);
-    expect(s.benchPrimaryKey).toBeUndefined();
-    expect(s.benchHintKey).toBeUndefined();
+    expect(s.labelKey).toBe("hero.stPerceptionOff");
+    expect(s.tone).toBe("muted");
+    expect(s.diagKey).toBeUndefined();
   });
 
-  it("在线已启用已订阅 → perceiving(上区 live)", () => {
+  it("在线已启用已订阅 → perceiving(上区 live,下区无标签)", () => {
     const s = cameraStatus(cam({ inUse: true, connected: true }), { now: T0 });
     expect(s.kind).toBe("perceiving");
     expect(s.canEnable).toBe(true);
+    expect(s.labelKey).toBeUndefined();
   });
 
-  it("已启用未出流 + grace 内 → 接入中(不甩锅跨 LAN)", () => {
+  it("已启用未出流 + grace 内 → 「接入中」灰色 + 转圈,不甩锅、不出诊断框", () => {
     const s = cameraStatus(cam({ inUse: true, connected: false, lanOnline: false }), {
       now: T0,
       enabledAt: T0 - (CAMERA_GRACE_MS - 1),
     });
     expect(s.kind).toBe("noStream");
-    expect(s.benchPrimaryKey).toBe("hero.benchNoStream");
-    expect(s.benchHintKey).toBe("hero.noStreamHintConnecting");
+    expect(s.labelKey).toBe("hero.stConnecting");
+    expect(s.tone).toBe("muted");
+    expect(s.connecting).toBe(true);
+    expect(s.diagKey).toBeUndefined();
   });
 
-  it("已启用未出流 + 超 grace + LAN 不可见 → 跨 LAN 诊断", () => {
+  it("已启用未出流 + 超 grace + LAN 不可见 → 「未出流」黄色 + 跨 LAN 诊断框", () => {
     const s = cameraStatus(cam({ inUse: true, connected: false, lanOnline: false }), {
       now: T0,
       enabledAt: T0 - (CAMERA_GRACE_MS + 1),
     });
     expect(s.kind).toBe("noStream");
-    expect(s.benchHintKey).toBe("hero.noStreamHintCrossLan");
+    expect(s.labelKey).toBe("hero.stNoStream");
+    expect(s.tone).toBe("warning");
+    expect(s.connecting).toBeFalsy();
+    expect(s.diagKey).toBe("hero.diagCrossLan");
   });
 
   it("grace 精确边界(now - enabledAt === CAMERA_GRACE_MS)算超 grace,给诊断而非接入中", () => {
@@ -82,8 +90,8 @@ describe("cameraStatus", () => {
       now: T0,
       enabledAt: T0 - CAMERA_GRACE_MS,
     });
-    expect(s.kind).toBe("noStream");
-    expect(s.benchHintKey).toBe("hero.noStreamHintCrossLan");
+    expect(s.connecting).toBeFalsy();
+    expect(s.diagKey).toBe("hero.diagCrossLan");
   });
 
   it("已启用未出流 + 超 grace + LAN 可见 → 中性诊断(不预设未开 LAN 模式)", () => {
@@ -92,7 +100,8 @@ describe("cameraStatus", () => {
       enabledAt: T0 - (CAMERA_GRACE_MS + 1),
     });
     expect(s.kind).toBe("noStream");
-    expect(s.benchHintKey).toBe("hero.noStreamHintLanReachable");
+    expect(s.labelKey).toBe("hero.stNoStream");
+    expect(s.diagKey).toBe("hero.diagLanReachable");
   });
 
   it("已启用未出流 + 无 enabledAt(重启后残留态) → 直接给诊断,不算接入中", () => {
@@ -100,7 +109,8 @@ describe("cameraStatus", () => {
       now: T0,
     });
     expect(s.kind).toBe("noStream");
-    expect(s.benchHintKey).toBe("hero.noStreamHintCrossLan");
+    expect(s.connecting).toBeFalsy();
+    expect(s.diagKey).toBe("hero.diagCrossLan");
   });
 
   it("canEnable 仅 offline 为 false，其余三态为 true", () => {

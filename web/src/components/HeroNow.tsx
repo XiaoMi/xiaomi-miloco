@@ -19,6 +19,7 @@ import { humanTokens } from "@/lib/formatTokens";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "./Toast";
+import { IconAlert } from "@/lib/icons";
 import {
   cameraStatus,
   CAMERA_GRACE_MS,
@@ -515,42 +516,57 @@ function BenchCamItem({
 }) {
   const { t } = useTranslation();
   const offline = status.kind === "offline";
+  // 状态词按严重度染色:error 红(离线) / warning 黄(未出流异常) / muted 灰(正常态·接入中)。
+  const toneClass =
+    status.tone === "error"
+      ? "text-error"
+      : status.tone === "warning"
+        ? "text-warning"
+        : "text-text-secondary";
   return (
-    <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
-      <div className="min-w-0">
-        {/* 离线相机名字淡化,跟开关禁用呼应——离线就别让住户以为点一下能投喂。 */}
-        <div
-          className={`text-body truncate ${
-            offline ? "text-text-tertiary" : "text-text-primary"
-          }`}
-        >
-          {cam.name}
+    <li className="px-4 py-3 flex flex-col gap-2 hover:bg-bg-tertiary transition-colors">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          {/* 离线相机名字淡化,跟开关禁用呼应——离线就别让住户以为点一下能投喂。 */}
+          <div
+            className={`text-body truncate ${
+              offline ? "text-text-tertiary" : "text-text-primary"
+            }`}
+          >
+            {cam.name}
+          </div>
+          {(status.labelKey || cam.roomName) && (
+            <div className="text-caption text-text-tertiary truncate mt-0.5">
+              {status.labelKey && (
+                <span className={toneClass}>
+                  {t(status.labelKey)}
+                  {/* 接入中:主标签后接内联转圈,让住户感知系统正在尝试拉流。 */}
+                  {status.connecting && (
+                    <span className="ml-1 inline-block w-2.5 h-2.5 align-[-1px] border-2 border-border border-t-text-tertiary rounded-full animate-spin" />
+                  )}
+                </span>
+              )}
+              {status.labelKey && cam.roomName ? " · " : ""}
+              {cam.roomName}
+            </div>
+          )}
         </div>
-        {(status.benchPrimaryKey || cam.roomName) && (
-          <div className="text-caption text-text-tertiary truncate">
-            {status.benchPrimaryKey && (
-              <span className={offline ? "text-warning" : "text-text-secondary"}>
-                {t(status.benchPrimaryKey)}
-              </span>
-            )}
-            {status.benchPrimaryKey && cam.roomName ? " · " : ""}
-            {cam.roomName}
-          </div>
-        )}
-        {/* 「已启用·未出流」诊断说明(接入中 / 跨 LAN / 未开 LAN 模式),单独一行。 */}
-        {status.benchHintKey && (
-          <div className="text-caption text-text-tertiary truncate mt-0.5">
-            {t(status.benchHintKey)}
-          </div>
-        )}
+        <CamSwitch
+          inUse={cam.inUse}
+          name={cam.name}
+          busy={busy}
+          blockedReasonKey={blockedReasonKey}
+          onToggle={onToggle}
+        />
       </div>
-      <CamSwitch
-        inUse={cam.inUse}
-        name={cam.name}
-        busy={busy}
-        blockedReasonKey={blockedReasonKey}
-        onToggle={onToggle}
-      />
+      {/* 「未出流」的诊断说明(为什么没画面 + 怎么办)是「当前状态的解释」,与设备名 / 状态
+          分层,单独成一个软底提示框;接入中不出框(状态词 + 转圈已够)。 */}
+      {status.diagKey && (
+        <div className="flex items-start gap-2 rounded-lg bg-warning-bg border border-warning/30 text-warning text-caption px-3 py-2">
+          <IconAlert width={14} height={14} className="shrink-0 mt-0.5" />
+          <span>{t(status.diagKey)}</span>
+        </div>
+      )}
     </li>
   );
 }
