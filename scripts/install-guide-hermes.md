@@ -178,7 +178,12 @@ hermes cron list 2>&1 | grep -c miloco
 ```
 ≥ 4 → 进 Step 3。
 
-### Step 3：验证
+### Step 3：验证 + 完成安装
+
+验证通过后，重启 backend 触发 onboarding（家庭初始化询问）：
+```bash
+miloco-cli service restart
+```
 
 **目标：** 确认安装完整可用。
 
