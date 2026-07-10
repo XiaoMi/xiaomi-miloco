@@ -91,7 +91,7 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 | **Webhook**      | `webhooks/reset_sessions.ts` | 后端切换家庭时批量重置（删除）指定 miloco session，清掉旧家庭遗留上下文；逐个 deleteSession，单个失败不影响其余，返回 reset / failed 清单（切换家庭语义见 [设备控制 · Scope 变更](device-control.md)）                                          |
 | **Service**      | `services/backend.ts`        | 唯一注册的 Service：插件启动时 `miloco-cli service restart`，停止时 `miloco-cli service stop`                                                                                                                                                   |
 | **辅助模块**     | `services/catalog.ts`        | 非注册 Service；由 `hooks/prompt.ts` 在 `before_prompt_build` 中调 `getCatalog`（`miloco-cli device catalog`，节流防抖）                                                                                                                        |
-| **Tool**         | `tools/notify.ts`            | 注册 `miloco_im_push`（通知分发）、`miloco_notify_bind`（通知渠道绑定）和 `miloco_notify_unbind`（通知渠道解绑）三个工具                                                                                                                                                                |
+| **Tool**         | `tools/notify.ts`            | 注册 `miloco_im_push`（通知分发）、`miloco_notify_bind`（通知渠道绑定）和 `miloco_notify_unbind`（通知渠道解绑）三个工具                                                                                                                        |
 | **Home Profile** | `home-profile/`              | 家庭档案调度（受管 Cron）+ `miloco_habit_suggest` 工具；档案改由 agent 用 `home-profile list` 按需自取，不再随主 agent system prompt 注入                                                                                                       |
 
 所有 Webhook 统一挂在 `/miloco/webhook`，`auth: "gateway"` 鉴权，请求体通过 `action` 字段路由到对应处理器。
