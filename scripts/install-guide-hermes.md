@@ -135,17 +135,21 @@ miloco-cli config get model.omni.base_url
 > - **没有**：去 https://platform.xiaomimimo.com 申请一个，拿到 Key 发我
 > - **用其他模型**（OpenAI / 自建 / 任何 OpenAI 兼容 API）：把 model 名、Base URL、API Key 一起发我
 
-用户回复后，agent 根据回复内容跑：
+用户回复后，agent 一次性配置（避免逐条 config set 触发多次 restart 竞态）：
 
-**用户只发了 API Key（用默认 MiMo）：**
+**用户只发了 API Key：**
 ```bash
-miloco-cli config set model.omni.api_key "<key>" model.omni.model "xiaomi/mimo-v2.5" model.omni.base_url "https://api.xiaomimimo.com/v1"
+miloco-cli config set model.omni.api_key "<key>"
 ```
 
-**用户指定了 model / base_url（第三方模型）：**
+**用户指定了 model / base_url：**
 ```bash
-miloco-cli config set model.omni.model "<model>" model.omni.base_url "<url>" model.omni.api_key "<key>"
+miloco-cli config set model.omni.api_key "<key>"
+miloco-cli config set model.omni.model "<model>"
+miloco-cli config set model.omni.base_url "<url>"
 ```
+
+> 设置完成后不要立即 restart——等 2.3 统一 restart。
 
 验证通过后进 2.3。
 
