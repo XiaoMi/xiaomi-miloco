@@ -762,14 +762,13 @@ fi
 mark_done 6
 
 # --- 7. 重启 backend ---
-# 架构 #1+#2 后适配器收敛到 miloco backend 的 AgentPlatformAdapter。
-# 委托给 miloco-cli service start（管 supervisord / miloco-backend）。
-# Step 5 的 config set 可能已触发不完整的 backend 重启——这里做一次彻底 stop + start。
-step 7 "重启 backend (supervisord)"
-info "  停止旧 backend（防 Step 5 restart 残留）"
+# Step 5 写了 agent.platform，必须重启 backend 才能加载新的 HermesAdapter（缓存刷新）。
+# 否则旧进程缓存的是 WebhookAdapter fallback → onboarding 走 webhook → 405。
+step 7 "重启 backend 加载 HermesAdapter（agent.platform 刚写入）"
+info "  停止旧 backend"
 miloco-cli service stop 2>/dev/null || true
-sleep 2
-info "  启动 backend"
+sleep 3
+info "  启动新 backend"
 if ! START_OUTPUT=$(miloco-cli service start 2>&1); then
   err "backend 启动失败: $START_OUTPUT"
   exit 1
