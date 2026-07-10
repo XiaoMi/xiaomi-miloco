@@ -226,15 +226,16 @@ class Adapter:
 
         # 处理投递意图（对齐底座 WebhookAdapter，见 base.py:179）
         # dispatcher 为 onboarding 等交互型事件塞了 {"resolve_target": "owner-channel", "deliver": True}
-        # Hermes adapter 需据此把 turn 从后台会话切到车主 IM 会话，
-        # 并在 turn 跑完后经 hermes send 把回复推回 IM
+        # turn 用新会话让 LLM 干净评估，投递才用车主 IM 会话
         owner_platform = None
+        _deliver_to_owner = False
         if delivery.get("resolve_target") == "owner-channel":
             owner_session, owner_platform = _resolve_owner_session()
-            if owner_session:
-                session_id = owner_session
-            else:
+            if not owner_session:
                 return _result(run_id="", status="no-channel")
+            # LLM turn 用新会话（不污染车主 IM 历史），投递才用 IM 会话
+            session_id = None
+            _deliver_to_owner = True
         else:
             # suggestion 每个事件独立评估，不用持久 session：
             # 同 session 历史累积 190k+ tokens 会让 LLM 麻木，全部建议都沉默
