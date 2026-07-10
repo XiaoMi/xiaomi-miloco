@@ -570,3 +570,62 @@ async def test_app_notify_async(
         _LOGGER.info("send app notify, notify_id: %s, result: %s", notify_id, result)
 
     await miot_http.deinit_async()
+
+# ---------------------------------------------------------------------------
+# cloud API response parsing regression test
+# ---------------------------------------------------------------------------
+
+
+def test_localip_field_parsing():
+    """Cloud device list returns localip (all-lowercase, no underscore).
+
+    The MIoTDeviceInfo constructor receives the raw cloud JSON field name
+    ``localip`` (NOT ``local_ip``).  If the key ever changes back in the
+    caller, this regression test catches it before the entire cross-subnet
+    camera-direct-connect chain goes silent.
+    """
+    from miot.types import MIoTDeviceInfo
+
+    raw = {
+        "did": "123456",
+        "name": "test_device",
+        "uid": 999,
+        "spec_type": "urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4",
+        "model": "chuangmi.camera.81ac1",
+        "localip": "192.168.1.50",
+        "isOnline": True,
+        "token": "abc",
+        "icon": "",
+        "pid": 0,
+        "voice_ctrl": 0,
+        "rssi": -42,
+        "ssid": "mywifi",
+        "bssid": "aa:bb:cc:dd:ee:ff",
+        "orderTime": 0,
+    }
+    info = MIoTDeviceInfo(**raw)
+    assert info.local_ip == "192.168.1.50"
+
+
+def test_localip_field_missing():
+    """If cloud API omits ``localip``, local_ip should fall back to None."""
+    from miot.types import MIoTDeviceInfo
+
+    raw = {
+        "did": "123456",
+        "name": "test_device",
+        "uid": 999,
+        "spec_type": "urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4",
+        "model": "chuangmi.camera.81ac1",
+        "isOnline": True,
+        "token": "abc",
+        "icon": "",
+        "pid": 0,
+        "voice_ctrl": 0,
+        "rssi": -42,
+        "ssid": "mywifi",
+        "bssid": "aa:bb:cc:dd:ee:ff",
+        "orderTime": 0,
+    }
+    info = MIoTDeviceInfo(**raw)
+    assert info.local_ip is None

@@ -729,7 +729,7 @@ class MIoTHttpClient:
                 voice_ctrl=device.get("voice_ctrl", 0),
                 rssi=device.get("rssi", None),
                 pid=device.get("pid", None),
-                local_ip=device.get("local_ip", None),
+                local_ip=device.get("localip", None),
                 ssid=device.get("ssid", None),
                 bssid=device.get("bssid", None),
                 order_time=device.get("orderTime", 0),
