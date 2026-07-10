@@ -125,26 +125,29 @@ async def _probe_stream_chat(
     headers: dict[str, str],
     body: dict[str, Any],
     t0: float,
-) -> tuple[int, int, bool]:
+) -> tuple[int, int, bool, dict[str, str]]:
     """流式探测:开 SSE stream,读第一条 data 行就视为可达。返回
-    (status_code, latency_ms, ok)。非 200 status 只回 (status, 0, False),
-    交给上层的 status_code 分支处理。"""
+    (status_code, latency_ms, ok, resp_headers)。非 200 status 回带原始 response
+    headers,让上层 429 分支能读 Retry-After —— 否则 forced-stream provider (Qwen)
+    撞 429 时熔断退避会丢掉 server 明示的等待时长,与非流式路径 (MiMo) 行为不一致。"""
     async with client.stream(
         "POST", f"{base}/chat/completions", headers=headers, json=body,
     ) as resp:
         if resp.status_code != 200:
             await resp.aread()  # 允许连接释放
-            return resp.status_code, 0, False
+            return resp.status_code, 0, False, dict(resp.headers)
         # 读到任一 data 行即算可达 (200 已经通过);不等 [DONE] 避免 max_tokens=1 下
         # provider 拖延 keep-alive 直到 _TIMEOUT。
         async for line in resp.aiter_lines():
             line = line.strip()
             if line.startswith("data: "):
                 latency_ms = round((time.monotonic() - t0) * 1000)
-                return 200, latency_ms, True
-        # 流开完了都没有 data 行 → 视为 bad_response;走上层非 200 兜底(伪造 200 后
-        # 让 json 解析进 bad_response 分支)。简化处理:直接返 False + 500 让 http_error 兜。
-        return 500, 0, False
+                return 200, latency_ms, True, {}
+        # 流开完无 data 行 → 视为 http_error(RECOVERABLE),返 500 让上层 http_error
+        # 兜底分支处理(与 bad_response 都归 RECOVERABLE、cap 同为 _default 600s,
+        # 运行时行为无差;此处选 http_error 是让 code 与状态码语义一致 —— 无 payload
+        # 更像上游异常而非结构错)。
+        return 500, 0, False, {}
 
 
 async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
@@ -183,7 +186,7 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
                 # 视为可达(不等 [DONE],避免 max_tokens=1 下 provider 拖延 keep-alive
                 # 撑到超时)。任何一条 status_code / auth / model 错都会在开 stream 时
                 # 直接抛,与非流式行为对齐。
-                status_code, latency_ms, ok = await _probe_stream_chat(
+                status_code, latency_ms, ok, resp_headers = await _probe_stream_chat(
                     client, base, headers, body, t0
                 )
                 if ok:
@@ -194,8 +197,9 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
                         "latency_ms": latency_ms,
                         "message": "连接正常",
                     }
-                # 非 200: 用同一段 body-shape 分支(下面) 处理,伪造一个非流响应对象
-                r = _FakeStatusResp(status_code, {}, "")
+                # 非 200: 复用下方 status_code 分支;把 headers 一起塞进 _FakeStatusResp,
+                # 429 分支能读 Retry-After,行为与非流式路径对齐。
+                r = _FakeStatusResp(status_code, {}, "", resp_headers)
             else:
                 r = await client.post(  # type: ignore[assignment]
                     f"{base}/chat/completions",

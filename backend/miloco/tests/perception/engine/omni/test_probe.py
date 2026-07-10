@@ -311,9 +311,15 @@ async def test_probe_omni_connect_error(monkeypatch):
 class _FakeStreamResp:
     """模拟 client.stream() 返回的 async context manager。"""
 
-    def __init__(self, status_code: int, lines: list[str] | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        lines: list[str] | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.status_code = status_code
         self._lines = lines or []
+        self.headers = headers or {}
 
     async def __aenter__(self):
         return self
@@ -398,3 +404,20 @@ async def test_probe_chat_non_qwen_still_uses_post(monkeypatch):
     )
     r = await probe.probe_omni("xiaomi/mimo-v2.5", "https://mimo.example/v1", "sk-x")
     assert r["ok"] is True
+
+
+async def test_probe_chat_stream_429_preserves_retry_after(monkeypatch):
+    """review 🟡 回归:Qwen 撞 429 时 forced-stream 路径必须回传 Retry-After header,
+    不然熔断退避走纯指数(early 12s vs server 说的 45s),对着限流的 Qwen 反复打 429、
+    拖慢恢复。修复前 _probe_stream_chat 只返 (status, latency, ok),headers 恒空。"""
+    stream_resp = _FakeStreamResp(429, lines=[], headers={"Retry-After": "45"})
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_stream_client(_FakeResp(200, {"data": [{"id": "qwen-omni"}]}), stream_resp),
+    )
+    r = await probe.probe_omni("qwen3.5-omni-plus", "https://qwen.example/v1", "sk-x")
+    assert r["ok"] is False
+    assert r["code"] == "rate_limited"
+    # 关键:Retry-After 被解析出来传给上层 _grow_backoff_locked
+    assert r["retry_after_seconds"] == 45.0
