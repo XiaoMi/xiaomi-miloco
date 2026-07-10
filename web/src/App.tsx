@@ -256,6 +256,7 @@ function MainApp() {
                 await refreshCameraOnline(homeId, true).catch(() => {});
                 scopeCameras.reload();
               }}
+              camerasLoading={scopeCameras.loading}
             />
           </div>
         );

@@ -67,6 +67,8 @@ interface Props {
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
   /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + 重拉列表）。 */
   onRefresh?: () => void | Promise<void>;
+  /** 相机列表是否正在(重新)拉取——让刷新转圈覆盖到「列表真更新到位」,而非只包刷缓存那一程。 */
+  camerasLoading?: boolean;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -88,6 +90,7 @@ export function HeroNow({
   onToggleCameras,
   onToggleCameraVoice,
   onRefresh,
+  camerasLoading,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -188,6 +191,7 @@ export function HeroNow({
         onToggleCameras={onToggleCameras}
         onToggleCameraVoice={onToggleCameraVoice}
         onRefresh={onRefresh}
+        camerasLoading={camerasLoading}
       />
     </section>
   );
@@ -206,6 +210,7 @@ interface CameraSectionProps {
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
   onRefresh?: () => void | Promise<void>;
+  camerasLoading?: boolean;
 }
 
 function CameraSection({
@@ -218,6 +223,7 @@ function CameraSection({
   onToggleCameras,
   onToggleCameraVoice,
   onRefresh,
+  camerasLoading,
 }: CameraSectionProps) {
   const { t } = useTranslation();
   // 手动刷新未感知设备状态:in-flight 期间转圈 + disable 防连点(force 刷新本身绕过 8s 节流)。
@@ -404,7 +410,9 @@ function CameraSection({
                   <button
                     type="button"
                     onClick={runRefresh}
-                    disabled={refreshing}
+                    // 转圈 / 禁用覆盖「刷缓存(refreshing)+ 列表重拉(camerasLoading)」两程,
+                    // 转到列表真更新到位为止(useAsync reload 期 loading=true 且 data 保留)。
+                    disabled={refreshing || camerasLoading}
                     aria-label={t("hero.refreshCamerasAria")}
                     title={t("hero.refreshCamerasTitle")}
                     className="shrink-0 text-text-tertiary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -412,7 +420,9 @@ function CameraSection({
                     <IconRefresh
                       width={15}
                       height={15}
-                      className={refreshing ? "animate-spin" : ""}
+                      className={
+                        refreshing || camerasLoading ? "animate-spin" : ""
+                      }
                     />
                   </button>
                 )}
