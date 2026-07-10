@@ -120,6 +120,11 @@ class OnboardingTriggerService:
         """
         async with self._lock:
             if self._fired:
+                return False
+            # install 流程完成前先等 10s（模型可能在配置中），避免和安装引导同时提问
+            await asyncio.sleep(10)
+            if self._fired:
+                return False
                 logger.debug("onboarding trigger skipped: already fired this run")
                 return False
             if self._kv_repo.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY):
