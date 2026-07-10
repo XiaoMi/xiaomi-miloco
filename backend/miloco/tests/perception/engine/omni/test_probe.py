@@ -309,17 +309,25 @@ async def test_probe_omni_connect_error(monkeypatch):
 
 
 class _FakeStreamResp:
-    """模拟 client.stream() 返回的 async context manager。"""
+    """模拟 client.stream() 返回的 async context manager。
+
+    headers 存 httpx.Headers 而非 plain dict,精确复现生产路径:
+    _probe_stream_chat 里 dict(resp.headers) 会把 httpx.Headers 里的 key 全部小写化
+    (httpx 0.28.1: dict(Headers({"Retry-After": "45"})) == {"retry-after": "45"});
+    若测试 fake 用 plain dict 装原大小写 key,dict() 会保留原样,反而绕过生产路径的
+    小写化,让「不区分大小写」相关的 bug 不能被回归测试守住。
+    """
 
     def __init__(
         self,
         status_code: int,
         lines: list[str] | None = None,
-        headers: dict[str, str] | None = None,
+        headers: httpx.Headers | dict[str, str] | None = None,
     ):
         self.status_code = status_code
         self._lines = lines or []
-        self.headers = headers or {}
+        # 强制包成 httpx.Headers,即使传入 plain dict 也走真实 httpx 语义
+        self.headers = httpx.Headers(headers or {})
 
     async def __aenter__(self):
         return self

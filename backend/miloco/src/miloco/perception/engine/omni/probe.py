@@ -107,13 +107,20 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
 class _FakeStatusResp:
     """占位:probe_chat 流式路径下,非 200 场景把 status_code 塞进"看起来像 httpx.Response"
     的最小对象里,复用下方 status_code 分支代码。仅用 status_code / json / text / headers
-    四个属性。"""
+    四个属性。
+
+    headers 包成 httpx.Headers 而非 plain dict:非流式路径的真实 Response.headers 是
+    httpx.Headers(大小写不敏感);_probe_stream_chat 传上来的 dict(resp.headers) 已经把
+    header 名小写化了(httpx 语义),若这里存成 plain dict,下方 429 分支的
+    r.headers.get("Retry-After")(大写 R/A)会大小写敏感 miss → 恒 None,与非流式路径的
+    大小写不敏感 hit 行为不一致,Qwen 撞 429 时会丢掉 server 明示的 Retry-After。
+    """
 
     def __init__(self, status_code: int, json_body: dict, text: str, headers: dict | None = None):
         self.status_code = status_code
         self._json = json_body
         self.text = text
-        self.headers = headers or {}
+        self.headers = httpx.Headers(headers or {})
 
     def json(self) -> Any:
         return self._json
