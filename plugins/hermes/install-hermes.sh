@@ -793,22 +793,21 @@ mark_done 7
 step 7.5 "打补丁：覆盖 miloco 包关键修复（来自 fork）"
 MILOCO_PKG_DIR=$("$PYTHON" -c "import miloco; from pathlib import Path; print(Path(miloco.__file__).parent)" 2>/dev/null || echo "")
 if [ -n "$MILOCO_PKG_DIR" ] && [ -d "$MILOCO_PKG_DIR" ]; then
-  # loader.py: 取消 adapter 缓存（防 WebhookAdapter 永久缓存）
-  if [ -f "$HERE/miloco-plugin/../../backend/miloco/src/miloco/agent_platform/loader.py" ]; then
-    cp -f "$HERE/miloco-plugin/../../backend/miloco/src/miloco/agent_platform/loader.py" "$MILOCO_PKG_DIR/agent_platform/loader.py" 2>/dev/null && info "  ✓ loader.py（取消 adapter 缓存）" || true
+  SRC_BACKEND="$HERE/../../backend/miloco/src/miloco"
+  # loader.py: 取消 adapter 缓存
+  [ -f "$SRC_BACKEND/agent_platform/loader.py" ] && cp -f "$SRC_BACKEND/agent_platform/loader.py" "$MILOCO_PKG_DIR/agent_platform/loader.py" 2>/dev/null && info "  ✓ loader.py"
+  # onboarding_trigger.py: 配完模型才触发
+  [ -f "$SRC_BACKEND/home_profile/onboarding_trigger.py" ] && cp -f "$SRC_BACKEND/home_profile/onboarding_trigger.py" "$MILOCO_PKG_DIR/home_profile/onboarding_trigger.py" 2>/dev/null && info "  ✓ onboarding_trigger.py"
+  # manager.py: 传 is_omni_ready
+  [ -f "$SRC_BACKEND/manager.py" ] && cp -f "$SRC_BACKEND/manager.py" "$MILOCO_PKG_DIR/manager.py" 2>/dev/null && info "  ✓ manager.py"
+  # 保护 web 前端：fork 源码无 static，检查并跳过
+  if [ -d "$MILOCO_PKG_DIR/static" ]; then
+    info "  · static 已存在（保留上游 release 版 web 前端）"
   fi
-  # onboarding_trigger.py: 配完模型才触发（防 install 中途并发）
-  if [ -f "$HERE/miloco-plugin/../../backend/miloco/src/miloco/home_profile/onboarding_trigger.py" ]; then
-    cp -f "$HERE/miloco-plugin/../../backend/miloco/src/miloco/home_profile/onboarding_trigger.py" "$MILOCO_PKG_DIR/home_profile/onboarding_trigger.py" 2>/dev/null && info "  ✓ onboarding_trigger.py（等模型配好 + 60s延迟）" || true
-  fi
-  # manager.py: onboarding 传 is_omni_ready
-  if [ -f "$HERE/miloco-plugin/../../backend/miloco/src/miloco/manager.py" ]; then
-    cp -f "$HERE/miloco-plugin/../../backend/miloco/src/miloco/manager.py" "$MILOCO_PKG_DIR/manager.py" 2>/dev/null && info "  ✓ manager.py（is_omni_ready 回调）" || true
-  fi
+  find "$MILOCO_PKG_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 else
-  warn "  找不到 miloco 包路径，跳过补丁（backend 启动后 adapter/onboarding 可能异常）"
+  warn "  找不到 miloco 包路径，跳过"
 fi
-# 补丁打完需重启 backend 生效
 miloco-cli service stop 2>/dev/null || true
 sleep 2
 miloco-cli service start 2>&1 | tail -1 || true
