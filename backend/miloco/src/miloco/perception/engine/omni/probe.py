@@ -104,27 +104,104 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
     }
 
 
+class _FakeStatusResp:
+    """占位:probe_chat 流式路径下,非 200 场景把 status_code 塞进"看起来像 httpx.Response"
+    的最小对象里,复用下方 status_code 分支代码。仅用 status_code / json / text / headers
+    四个属性。"""
+
+    def __init__(self, status_code: int, json_body: dict, text: str, headers: dict | None = None):
+        self.status_code = status_code
+        self._json = json_body
+        self.text = text
+        self.headers = headers or {}
+
+    def json(self) -> Any:
+        return self._json
+
+
+async def _probe_stream_chat(
+    client: httpx.AsyncClient,
+    base: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    t0: float,
+) -> tuple[int, int, bool]:
+    """流式探测:开 SSE stream,读第一条 data 行就视为可达。返回
+    (status_code, latency_ms, ok)。非 200 status 只回 (status, 0, False),
+    交给上层的 status_code 分支处理。"""
+    async with client.stream(
+        "POST", f"{base}/chat/completions", headers=headers, json=body,
+    ) as resp:
+        if resp.status_code != 200:
+            await resp.aread()  # 允许连接释放
+            return resp.status_code, 0, False
+        # 读到任一 data 行即算可达 (200 已经通过);不等 [DONE] 避免 max_tokens=1 下
+        # provider 拖延 keep-alive 直到 _TIMEOUT。
+        async for line in resp.aiter_lines():
+            line = line.strip()
+            if line.startswith("data: "):
+                latency_ms = round((time.monotonic() - t0) * 1000)
+                return 200, latency_ms, True
+        # 流开完了都没有 data 行 → 视为 bad_response;走上层非 200 兜底(伪造 200 后
+        # 让 json 解析进 bad_response 分支)。简化处理:直接返 False + 500 让 http_error 兜。
+        return 500, 0, False
+
+
 async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
-    """极简 chat 探测(max_tokens=1)真校验模型是否可用。"""
+    """极简 chat 探测(max_tokens=1)真校验模型是否可用。
+
+    走 provider adapter 生成 body,兼容不同 provider 的强制要求(Qwen 强制
+    stream=True + modalities=["text"])。之前硬编码非流式 body 打 Qwen 会被
+    400/422 判成 rejected_authed,合法配置反而进 OPEN_CONFIG。
+    """
     base, err = _normalize_base_url(base_url)
     if err is not None:
         return {"ok": False, "code": "unreachable", "message": err}
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
+    # 延迟 import 避免 probe 被 wire 时循环拉起 provider (provider 只依赖标准库,
+    # 但保险起见延后到函数内)。
+    from miloco.perception.engine.omni.provider import get_adapter
+
+    adapter = get_adapter(model)
+    body = adapter.build_request_body(
+        [{"role": "user", "content": "ping"}],
+        model=model,
+        max_tokens=1,
+        temperature=0.0,
+        top_p=1.0,
+        stream=False,  # 请求非流式;adapter 若强制 stream=True (Qwen) 会覆盖
+    )
+    forced_stream = body.get("stream", False)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.post(
-                f"{base}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
+            if forced_stream:
+                # forced-stream provider (Qwen):走 SSE 流,读第一条有效 data chunk 就
+                # 视为可达(不等 [DONE],避免 max_tokens=1 下 provider 拖延 keep-alive
+                # 撑到超时)。任何一条 status_code / auth / model 错都会在开 stream 时
+                # 直接抛,与非流式行为对齐。
+                status_code, latency_ms, ok = await _probe_stream_chat(
+                    client, base, headers, body, t0
+                )
+                if ok:
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "status": status_code,
+                        "latency_ms": latency_ms,
+                        "message": "连接正常",
+                    }
+                # 非 200: 用同一段 body-shape 分支(下面) 处理,伪造一个非流响应对象
+                r = _FakeStatusResp(status_code, {}, "")
+            else:
+                r = await client.post(  # type: ignore[assignment]
+                    f"{base}/chat/completions",
+                    headers=headers,
+                    json=body,
+                )
     except Exception as e:  # noqa: BLE001
         return {
             "ok": False,

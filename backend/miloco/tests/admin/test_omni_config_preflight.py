@@ -660,3 +660,102 @@ def test_upsert_same_url_blank_key_still_reuses(client, mock_probe):
     data = r.json()["data"]
     assert data["active"]["model"] == "m2"
     assert data["active"]["has_key"] is True  # key 仍沿用
+
+
+# ─── PUT / activate 成功后立即 reset 熔断状态 (review #2 回归) ────────────
+
+
+def test_put_activate_resets_open_config_breaker(client, mock_probe):
+    """review #2 回归:用户修好 omni 配置后,PUT 应立即清熔断状态,不用手动点 retry。
+    之前 OPEN_CONFIG (bad_key) 下 before_call 短路一切,omni_client 的
+    _maybe_reset_breaker_on_config_change 永远等不到,只能等用户手动 retry。"""
+    import asyncio
+
+    from miloco.perception.engine.omni.circuit_breaker import (
+        CircuitState,
+        get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+
+    # 先制造 OPEN_CONFIG 状态 (连续 3 次 bad_key)
+    async def _to_open_config():
+        for _ in range(3):
+            await cb.record_failure(
+                ClassifiedError("bad_key", "旧 key 无效", ErrorCategory.CONFIG)
+            )
+
+    asyncio.run(_to_open_config())
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+
+    # PUT 新 key,mock_probe 默认返 ok=True(preflight 通过)
+    r = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-newkey12",
+            "activate": True,
+        },
+    )
+    assert r.status_code == 200
+    # 关键:熔断状态已被清,不需要用户手动 retry
+    assert cb.state_for_test() == CircuitState.CLOSED
+    assert cb.snapshot().state == "ok"
+
+
+def test_activate_endpoint_resets_open_config_breaker(client, mock_probe):
+    """/omni-config/activate 端点切换档案后也要清熔断,与 PUT 路径对齐。"""
+    import asyncio
+
+    from miloco.perception.engine.omni.circuit_breaker import (
+        CircuitState,
+        get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 先存两个档案,再让当前 active 进 OPEN_CONFIG
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-key1",
+            "activate": True,
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "乙",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-key2",
+            "activate": False,
+        },
+    )
+
+    cb = get_omni_circuit_breaker()
+
+    async def _to_open_config():
+        for _ in range(3):
+            await cb.record_failure(
+                ClassifiedError("bad_key", "旧无效", ErrorCategory.CONFIG)
+            )
+
+    asyncio.run(_to_open_config())
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+
+    # 切换到「乙」
+    r = client.post("/api/admin/omni-config/activate", json={"label": "乙"})
+    assert r.status_code == 200
+    assert cb.state_for_test() == CircuitState.CLOSED

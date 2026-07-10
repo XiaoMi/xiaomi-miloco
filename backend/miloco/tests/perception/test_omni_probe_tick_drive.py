@@ -250,3 +250,44 @@ async def test_probe_exception_falls_back_to_failure_record(monkeypatch, _mock_o
 
     assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
     assert cb._probe_in_flight is False
+
+
+async def test_probe_cancelled_falls_back_to_open_recoverable(monkeypatch, _mock_omni_config):
+    """review #1 回归:_run_omni_probe 在 mark_half_open 后 probe_omni 被 cancel
+    (runner.stop / loop 关闭 / 显式 cancel task),之前只在 finally 清 _probe_in_flight
+    不改 state,state 卡在 HALF_OPEN → tick 不 arm、before_call 短路、retry no-op,
+    永久卡死。修复后 CancelledError 分支走 record_probe_result(cancelled, RECOVERABLE)
+    把 state 回落到 OPEN_RECOVERABLE。"""
+    import asyncio as _a
+
+    from miloco.perception.processor import _run_omni_probe
+
+    cb = get_omni_circuit_breaker()
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("unreachable", "m", ErrorCategory.RECOVERABLE)
+        )
+    cb._probe_in_flight = True  # 模拟 try_arm_probe 已置位
+
+    # probe_omni 挂起足够久,让我们能在中间 cancel
+    async def _hang(*a, **k):
+        await _a.sleep(30)
+
+    monkeypatch.setattr("miloco.perception.engine.omni.probe.probe_omni", _hang)
+
+    task = _a.create_task(_run_omni_probe())
+    # 让 task 跑到 await probe_omni 那一步 (先 mark_half_open,再进 sleep)
+    for _ in range(10):
+        await _a.sleep(0)
+        if cb.state_for_test() == CircuitState.HALF_OPEN:
+            break
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+
+    task.cancel()
+    with pytest.raises(_a.CancelledError):
+        await task
+
+    # 关键断言:state 已回落到 OPEN_RECOVERABLE,不再卡在 HALF_OPEN
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    assert cb._probe_in_flight is False
+    assert cb.snapshot().code == "cancelled"

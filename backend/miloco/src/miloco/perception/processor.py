@@ -122,6 +122,25 @@ async def _run_omni_probe() -> None:
                 result.get("retry_after_seconds"),
             ),
         )
+    except asyncio.CancelledError:
+        # CancelledError 是 BaseException 子类,进不了 except Exception。
+        # mark_half_open 后被 cancel (runner.stop / loop 关闭 / task.cancel 等) 若不复位,
+        # state 会卡在 HALF_OPEN:tick 只 arm OPEN_RECOVERABLE、before_call 短路一切、
+        # retry_now 对 HALF_OPEN no-op → 永久卡死,只能重启进程。走一次
+        # record_probe_result(fail, RECOVERABLE) 回落到 OPEN_RECOVERABLE 让 tick 接管;
+        # 之后 re-raise 让 cancel 语义正确传播(task 状态标记为 cancelled)。
+        try:
+            await cb.record_probe_result(
+                False,
+                ClassifiedError(
+                    "cancelled",
+                    "probe 被中断",
+                    ErrorCategory.RECOVERABLE,
+                ),
+            )
+        except Exception as e2:  # noqa: BLE001
+            logger.error("[omni] cancelled 回落 record_probe_result 失败 | %s", e2)
+        raise
     except Exception as e:  # noqa: BLE001
         logger.error("[omni] tick 自动探测异常 | %s", e, exc_info=True)
         try:
@@ -136,8 +155,8 @@ async def _run_omni_probe() -> None:
         except Exception as e2:  # noqa: BLE001
             logger.error("[omni] record_probe_result 兜底失败 | %s", e2)
     finally:
-        # CancelledError / KeyboardInterrupt 等 BaseException 子类进不来 except Exception,
-        # finally 里兜底强制清位。record_probe_result 里已清过时,这里再清一次是 no-op。
+        # KeyboardInterrupt 等 BaseException 子类仍走 finally 兜底清位。CancelledError
+        # 分支已经通过 record_probe_result 清位,这里 no-op;正常/异常路径也已清,幂等。
         cb.clear_probe_in_flight()
 
 

@@ -601,6 +601,15 @@ async def put_omni_config(
     if will_activate:
         update["omni"] = entry
     update_shared_config(model=update)
+    if will_activate:
+        # preflight 通过 = 新配置已验可用,主动把熔断状态清掉。之前 OPEN_CONFIG (bad_key
+        # 之类) 时 before_call 短路一切,omni_client 里的 _maybe_reset_breaker_on_config_change
+        # 只在真正调 omni 时才触发,永远等不到,用户改完 key 仍要手动点 retry 才恢复。
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+
+        await get_omni_circuit_breaker().reset_on_config_change()
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 
@@ -634,6 +643,12 @@ async def activate_omni_config(
                     }
                 }
             )
+            # 同 upsert 路径:preflight 通过后主动清熔断状态,避免 OPEN_CONFIG 卡死。
+            from miloco.perception.engine.omni.circuit_breaker import (
+                get_omni_circuit_breaker,
+            )
+
+            await get_omni_circuit_breaker().reset_on_config_change()
             return NormalResponse(code=0, message="ok", data=_full_omni_payload())
     raise HTTPException(status_code=404, detail="档案不存在")
 

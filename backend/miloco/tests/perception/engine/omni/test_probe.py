@@ -303,3 +303,98 @@ async def test_probe_omni_connect_error(monkeypatch):
     )
     r = await probe.probe_omni("m1", "https://nope/v1", "sk-x")
     assert r["code"] == "unreachable"
+
+
+# ─── probe_chat × provider adapter (review #3 回归) ─────────────────────────
+
+
+class _FakeStreamResp:
+    """模拟 client.stream() 返回的 async context manager。"""
+
+    def __init__(self, status_code: int, lines: list[str] | None = None):
+        self.status_code = status_code
+        self._lines = lines or []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def aread(self):
+        return b""
+
+
+def _fake_stream_client(get_resp, stream_resp):
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return get_resp
+
+        async def post(self, *a, **k):
+            raise AssertionError("forced-stream should not call POST")
+
+        def stream(self, *a, **k):
+            return stream_resp
+
+    return _C
+
+
+async def test_probe_chat_uses_adapter_body_for_qwen(monkeypatch):
+    """review #3 回归:Qwen adapter forced stream=True + modalities=["text"],
+    probe_chat 必须走 SSE 流不是硬编码非流式 POST。原实现固定发非流式 body,合法
+    Qwen 配置会被 400/422 判成 rejected_authed → OPEN_CONFIG,用户被卡死。"""
+    stream_resp = _FakeStreamResp(
+        200,
+        lines=[
+            'data: {"choices":[{"delta":{"content":"pong"}}]}',
+            "data: [DONE]",
+        ],
+    )
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_stream_client(_FakeResp(200, {"data": [{"id": "qwen-omni"}]}), stream_resp),
+    )
+    r = await probe.probe_omni("qwen3.5-omni-plus", "https://qwen.example/v1", "sk-x")
+    assert r["ok"] is True
+    assert r["code"] == "ok"
+
+
+async def test_probe_chat_stream_401_maps_to_bad_key(monkeypatch):
+    """forced-stream 路径撞 401 也要正常走 bad_key 分类,不能因为走了流式就丢掉状态码。"""
+    stream_resp = _FakeStreamResp(401, lines=[])
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_stream_client(_FakeResp(200, {"data": []}), stream_resp),
+    )
+    r = await probe.probe_omni("qwen3.5-omni-plus", "https://qwen.example/v1", "sk-x")
+    assert r["ok"] is False
+    assert r["code"] == "bad_key"
+
+
+async def test_probe_chat_non_qwen_still_uses_post(monkeypatch):
+    """回归防护:非 Qwen 模型 (MiMo 默认) 仍走非流式 POST,行为未变。"""
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_async_client(
+            get_resp=_FakeResp(200, {"data": [{"id": "xiaomi/mimo-v2.5"}]}),
+            post_resp=_FakeResp(200, {"choices": [{"message": {"content": "pong"}}]}),
+        ),
+    )
+    r = await probe.probe_omni("xiaomi/mimo-v2.5", "https://mimo.example/v1", "sk-x")
+    assert r["ok"] is True
