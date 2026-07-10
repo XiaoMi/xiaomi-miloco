@@ -246,6 +246,22 @@ class ScheduleRunner:
             self._remove_retry_job(cron_id)
             return
 
+        # defensive 分支 4: at 已过 max_delay 窗口 → 放弃 (retry 挂时应已拦,
+        # 兜底防 APScheduler 到点延迟 / misfire_grace 内 fire 等极端时序)
+        if cron.kind == "at":
+            max_delay = _resolve_max_delay(cron)
+            if (
+                max_delay is not None
+                and now_ms() > cron.at_ms + max_delay * 1000
+            ):
+                logger.warning(
+                    "_fire: at %s past max_delay window, cleaning row",
+                    cron_id,
+                )
+                self._cron_repo.delete(cron_id)
+                self._remove_retry_job(cron_id)
+                return
+
         # 触发 agent
         fire_ms = now_ms()
         message = f"[cron:{cron.name}] {cron.message}"
@@ -358,9 +374,28 @@ class ScheduleRunner:
         self._schedule_at_retry(cron)
 
     def _schedule_at_retry(self, cron: Cron) -> None:
-        """挂 :retry DateTrigger, 60s 后触发 _fire (再次走应用层重试链)."""
+        """挂 :retry DateTrigger, 60s 后触发 _fire (再次走应用层重试链).
+
+        run_at 若已越过 max_delay 窗口, 直接 delete 放弃, 不挂 retry —— 防
+        止 "当前未超窗 → 挂 retry → retry 到点已超窗仍 fire" 的越窗触发。
+        """
         run_at_ms = now_ms() + _RETRY_DELAY_MS
         max_delay = _resolve_max_delay(cron)
+        if (
+            max_delay is not None
+            and run_at_ms > cron.at_ms + max_delay * 1000
+        ):
+            logger.warning(
+                "at %s retry would exceed max_delay window "
+                "(run_at=%d, deadline=%d), giving up (attempt=%d)",
+                cron.cron_id,
+                run_at_ms,
+                cron.at_ms + max_delay * 1000,
+                cron.retry_attempt,
+            )
+            self._cron_repo.delete(cron.cron_id)
+            self._remove_retry_job(cron.cron_id)
+            return
         self._scheduler.add_job(
             self._fire,
             trigger=DateTrigger(

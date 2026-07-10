@@ -121,10 +121,12 @@ async def test_fire_disabled_skips_agent_call(runner_env, monkeypatch):
 async def test_fire_at_success_marks_fired_and_deletes(runner_env, monkeypatch):
     """at 成功 → mark_fired_and_delete 单事务, 表行清空."""
     runner, runner_module, _ = runner_env
-    _insert_internal_at("at-1", at_ms=1_000_000)
+    at_ms = 1_000_000
+    _insert_internal_at("at-1", at_ms=at_ms)
 
     agent_mock = AsyncMock(return_value=("run-1", "ok", 100.0))
     monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+    monkeypatch.setattr(runner_module, "now_ms", lambda: at_ms + 60_000)
 
     await runner._fire("at-1")
 
@@ -225,6 +227,66 @@ async def test_fire_at_overdue_gives_up_on_retry_path(runner_env, monkeypatch):
 
     assert CronRepo().get("at-1") is None
     assert added == []  # 不挂 :retry
+
+
+@pytest.mark.asyncio
+async def test_fire_at_retry_run_at_would_exceed_window_gives_up(
+    runner_env, monkeypatch
+):
+    """现在未超窗但 run_at (now+60s) 已越过 deadline → 不挂 retry, DELETE 放弃.
+
+    复现: at_ms=T, max_delay=300s (default), agent 在 T+250s status=error.
+    _handle_at_failure 检查 current(T+250) > T+300 = false 不放弃, 走
+    _schedule_at_retry; run_at=T+310s 已超 deadline, 必须前置拦掉。
+    """
+    runner, runner_module, _ = runner_env
+    at_ms = 1_000_000
+    _insert_internal_at("at-1", at_ms=at_ms)
+
+    agent_mock = AsyncMock(return_value=("run-1", "error", 100.0))
+    monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+
+    # now = at_ms + 250s: 未超 default max_delay 300s, 但 now+60s = at_ms+310s 已超窗
+    monkeypatch.setattr(runner_module, "now_ms", lambda: at_ms + 250 * 1000)
+
+    added = []
+    runner._scheduler.add_job = lambda *args, **kwargs: added.append(
+        kwargs.get("id")
+    )
+
+    await runner._fire("at-1")
+
+    from miloco.schedule.repo import CronRepo
+
+    assert CronRepo().get("at-1") is None
+    assert added == []  # retry 前置拦下, 未挂 job
+
+
+@pytest.mark.asyncio
+async def test_fire_at_past_max_delay_defensive_short_circuits(
+    runner_env, monkeypatch
+):
+    """_fire 兜底: 进入时已超 max_delay 窗口 → 不调 agent, DELETE 放弃.
+
+    防 APScheduler 到点延迟 / retry job 从 rebuild 恢复后 misfire_grace_time
+    内触发等极端时序, 让 defensive 分支 4 兜住。
+    """
+    runner, runner_module, _ = runner_env
+    at_ms = 1_000_000
+    _insert_internal_at("at-1", at_ms=at_ms)
+
+    agent_mock = AsyncMock(return_value=("run-1", "ok", 100.0))
+    monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+
+    # 进入 _fire 时已超 default max_delay 300s
+    monkeypatch.setattr(runner_module, "now_ms", lambda: at_ms + 400 * 1000)
+
+    await runner._fire("at-1")
+
+    from miloco.schedule.repo import CronRepo
+
+    agent_mock.assert_not_called()
+    assert CronRepo().get("at-1") is None
 
 
 @pytest.mark.asyncio
@@ -345,6 +407,7 @@ async def test_fire_at_idempotency_key_stable_for_first_attempt(
 
     agent_mock = AsyncMock(return_value=("run-1", "ok", 100.0))
     monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+    monkeypatch.setattr(runner_module, "now_ms", lambda: at_ms + 60_000)
 
     await runner._fire("at-1")
 
@@ -368,6 +431,7 @@ async def test_fire_at_idempotency_key_incremented_on_retry(
 
     agent_mock = AsyncMock(return_value=("run-1", "ok", 100.0))
     monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+    monkeypatch.setattr(runner_module, "now_ms", lambda: at_ms + 60_000)
 
     await runner._fire("at-1")
 
