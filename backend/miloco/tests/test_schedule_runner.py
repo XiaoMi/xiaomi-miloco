@@ -193,12 +193,18 @@ async def test_fire_at_transport_error_schedules_retry(runner_env, monkeypatch):
 async def test_fire_at_no_channel_gives_up(runner_env, monkeypatch):
     """at status=no-channel → 直接 DELETE 放弃, 不重试."""
     runner, runner_module, _ = runner_env
-    _insert_internal_at("at-1", at_ms=1_000_000)
+    at_ms = 1_000_000
+    _insert_internal_at("at-1", at_ms=at_ms)
 
     agent_mock = AsyncMock(return_value=(None, "no-channel", 100.0))
     monkeypatch.setattr(runner_module, "run_agent_turn", agent_mock)
+    # 拉回窗口内, 否则 _fire defensive 分支 4 会抢先删行, agent 不被调用,
+    # no-channel handler 变假绿 (row 是分支 4 删的, 不是 no-channel 分支删的)
+    monkeypatch.setattr(runner_module, "now_ms", lambda: at_ms + 60_000)
 
     await runner._fire("at-1")
+
+    agent_mock.assert_awaited_once()  # 断言真走到 agent, 命中 no-channel 分支
 
     from miloco.schedule.repo import CronRepo
 
