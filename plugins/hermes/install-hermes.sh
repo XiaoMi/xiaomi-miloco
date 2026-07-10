@@ -883,37 +883,6 @@ elif old_commit and old_commit != git_c:
 PY
 mark_done 9
 
-# --- 9.5 绑定通知渠道：取第一个已连接 IM 写 state.json ---
-step 9.5 "绑定通知渠道 → state.json"
-"$PYTHON" - "$PLUGIN_STATE" <<'PY' || true
-import json, sys
-from pathlib import Path
-state_path = Path(sys.argv[1])
-cd = Path.home() / ".hermes" / "channel_directory.json"
-target = None
-try:
-    data = json.loads(cd.read_text(encoding="utf-8"))
-    platforms = data.get("platforms", {})
-    target = next((name for name, chs in platforms.items() if chs), None)
-except Exception:
-    pass
-if not target:
-    print("  · 无已连接 IM，跳过")
-    sys.exit(0)
-try:
-    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-except Exception:
-    state = {}
-d = state.setdefault("deliver", {})
-if d.get("target"):
-    print(f"  · deliver.target 已存在 ({d['target']})，跳过")
-else:
-    d["target"] = target
-    state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"  ✓ deliver.target = {target}（以后说'通知发到微信'可切换）")
-PY
-mark_done 9.5
-
 # --- 终态 ---
 
 # --- 内联 cron reconcile（不依赖 gateway restart）---
