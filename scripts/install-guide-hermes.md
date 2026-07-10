@@ -44,8 +44,7 @@ bash plugins/hermes/install-hermes.sh
 
 成功标志：exit 0 + `✅ 安装完成`。
 
-**Step 1 完成后，agent 必须只说这一句（不可提 Step 2 内容）：**
-> 基础环境装好了 ✓ 下面我带你一步步绑账号、配模型。准备好了回我"继续"。
+**Step 1 完成后直接进 2.1，不要停顿。**
 
 ### Step 2：收集用户配置（逐个询问，不可一次贴完）
 
@@ -89,7 +88,7 @@ miloco-cli account bind 2>&1 | grep -o 'https://[^ ]*'
 miloco-cli account authorize "<用户给的授权码>"
 ```
 
-验证通过后进 2.2。**发完这条就停等回复，不可提前发 2.2 内容。**
+验证通过后进 2.2。
 
 #### 2.2 Omni 模型
 
@@ -119,7 +118,7 @@ miloco-cli config set model.omni.api_key "<key>"
 miloco-cli config set model.omni.model "<model>" model.omni.base_url "<url>"
 ```
 
-验证通过后进 2.3。**发完这条就停等回复，不可提前发 2.3 内容。**
+验证通过后进 2.3。
 
 #### 2.3 重启 gateway
 
