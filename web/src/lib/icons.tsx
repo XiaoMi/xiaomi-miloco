@@ -26,6 +26,12 @@ export const IconCamera = (p: Props) => (
   </svg>
 );
 
+export const IconRefresh = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v5h-5" />
+  </svg>
+);
+
 export const IconLightbulb = (p: Props) => (
   <svg {...base(p)}>
     <path d="M9 18h6M10 21h4M12 3a6 6 0 0 1 4 10.5c-1 .8-1.5 1.7-1.5 2.5h-5c0-.8-.5-1.7-1.5-2.5A6 6 0 0 1 12 3z" />

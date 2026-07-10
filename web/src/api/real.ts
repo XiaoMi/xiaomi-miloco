@@ -959,9 +959,11 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
 // 仍能拿到上一份缓存,不阻断列表渲染。
 let lastCamRefreshTs = 0;
 const CAM_REFRESH_THROTTLE_MS = 8000;
-export async function realRefreshCameraOnline(): Promise<void> {
+export async function realRefreshCameraOnline(force = false): Promise<void> {
   const now = Date.now();
-  if (now - lastCamRefreshTs < CAM_REFRESH_THROTTLE_MS) return;
+  // force = 手动刷新按钮:绕过 8s 节流(用户主动点应即时响应);自动加载(force=false)
+  // 仍走节流,防列表频繁 / 并发加载狂打后端 → 米家云限频。
+  if (!force && now - lastCamRefreshTs < CAM_REFRESH_THROTTLE_MS) return;
   lastCamRefreshTs = now;
   await apiFetch<Normal<unknown>>("/api/miot/refresh_camera_online");
 }

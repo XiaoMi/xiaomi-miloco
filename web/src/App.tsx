@@ -251,6 +251,11 @@ function MainApp() {
                 // 只需 reload scopeCameras 拿新 voiceInUse。
                 scopeCameras.reload();
               }}
+              onRefresh={async () => {
+                // 手动刷新:force 绕过 8s 节流,真打后端刷新相机在线 / 镜头状态,再 reload 重拉列表。
+                await refreshCameraOnline(homeId, true).catch(() => {});
+                scopeCameras.reload();
+              }}
             />
           </div>
         );
