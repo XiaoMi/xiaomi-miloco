@@ -62,8 +62,11 @@ miloco-cli account status
 根据输出判定：
 
 **已绑定（输出含 `"is_bound": true`）：**
-> 米家账号已绑定 ✓
-> 跳到配模型。
+> 当前已绑定米家账号：{user_info.nickname 或 user_info.uid}
+> 是否继续使用当前账号？还是重新绑定？
+>
+> - 继续使用 → 进 2.2
+> - 重新绑定 → 给用户 {bind_url}
 
 **未绑定：**
 > Miloco 需要绑定小米账号才能控制智能设备。
@@ -101,7 +104,16 @@ miloco-cli config get model.omni.base_url
 
 根据输出判定：
 
-**三项都非空：** → 进 2.3。
+**三项都非空：**
+> 当前模型配置：
+> - Model: {model.omni.model 的值}
+> - Base URL: {model.omni.base_url 的值}
+> - API Key: {前4位}****{后4位}
+> 
+> 是否沿用当前配置？还是使用新的模型服务？
+>
+> - 沿用 → 进 2.3
+> - 重新配置 → 收集新信息
 
 **任一项为空，发：**
 > Miloco 感知引擎需要一个多模态大模型来看懂摄像头画面。
@@ -155,22 +167,23 @@ hermes cron list 2>&1 | grep -c miloco
 
 ### Step 3：验证
 
+**目标：** 确认安装完整可用。
+
 ```bash
 bash plugins/hermes/tests/test_acceptance.sh
 ```
 
-或手动逐项查：
+验证通过后告知用户：
 
-```bash
-hermes cron list              # 应有 4+ miloco cron，不抛异常
-hermes plugins list | grep miloco  # enabled
-ls ~/.hermes/skills/miloco-* | wc -l  # >=16
-python3 -c "
-import sys; sys.path.insert(0,'$HOME/.hermes/plugins/miloco-plugin')
-from tools_notify import _detect_im_platforms_simple
-print(_detect_im_platforms_simple())  # 应有非空列表
-"
-```
+> 安装完成！miloco 已就绪 ✓
+> 
+> 常用命令：
+> - `miloco-cli service status` — 查看服务状态
+> - `miloco-cli device list` — 查看设备列表
+> - `miloco-cli config show` — 查看配置
+> - `hermes cron list` — 查看定时任务
+> 
+> 试一下：`hermes chat -q "把客厅灯打开" -Q`
 
 ## 关键路径
 
