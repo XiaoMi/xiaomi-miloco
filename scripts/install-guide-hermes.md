@@ -35,8 +35,13 @@ bash plugins/hermes/tests/test_acceptance.sh
 # 1.1 确认 hermes
 command -v hermes || curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 
-# 1.2 确认 miloco-cli（装 backend）  
-command -v miloco-cli || curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
+# 1.2 安装 miloco-cli + backend（从 fork 源码）
+if ! command -v miloco-cli >/dev/null 2>&1; then
+  cd "$(git rev-parse --show-toplevel)" && uv tool install ./cli --force 2>&1 | tail -3
+fi
+command -v miloco-cli || { echo "miloco-cli 未安装成功"; exit 1; }
+# 安装 backend 包
+cd "$(git rev-parse --show-toplevel)" && uv pip install -e backend/miloco/ 2>&1 | tail -3 || pip install -e backend/miloco/ 2>&1 | tail -3
 
 # 1.3 clone + 安装（HTTPS 不通则配置 SSH 替换）
 git config --global url."git@github.com:".insteadOf "https://github.com/" 2>/dev/null; true
