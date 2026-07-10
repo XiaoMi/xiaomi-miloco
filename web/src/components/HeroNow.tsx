@@ -65,10 +65,8 @@ interface Props {
    *  不被处理（mic-off：不转写、不上云）。从属于感知开关：仅当该相机 inUse=true 时
    *  可设，感知关时前端置灰。 */
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
-  /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + 重拉列表）。 */
+  /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + await 列表重拉落地）。 */
   onRefresh?: () => void | Promise<void>;
-  /** 相机列表是否正在(重新)拉取——让刷新转圈覆盖到「列表真更新到位」,而非只包刷缓存那一程。 */
-  camerasLoading?: boolean;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -90,7 +88,6 @@ export function HeroNow({
   onToggleCameras,
   onToggleCameraVoice,
   onRefresh,
-  camerasLoading,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -191,7 +188,6 @@ export function HeroNow({
         onToggleCameras={onToggleCameras}
         onToggleCameraVoice={onToggleCameraVoice}
         onRefresh={onRefresh}
-        camerasLoading={camerasLoading}
       />
     </section>
   );
@@ -210,7 +206,6 @@ interface CameraSectionProps {
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
   onRefresh?: () => void | Promise<void>;
-  camerasLoading?: boolean;
 }
 
 function CameraSection({
@@ -223,7 +218,6 @@ function CameraSection({
   onToggleCameras,
   onToggleCameraVoice,
   onRefresh,
-  camerasLoading,
 }: CameraSectionProps) {
   const { t } = useTranslation();
   // 手动刷新未感知设备状态:in-flight 期间转圈 + disable 防连点(force 刷新本身绕过 8s 节流)。
@@ -410,9 +404,9 @@ function CameraSection({
                   <button
                     type="button"
                     onClick={runRefresh}
-                    // 转圈 / 禁用覆盖「刷缓存(refreshing)+ 列表重拉(camerasLoading)」两程,
-                    // 转到列表真更新到位为止(useAsync reload 期 loading=true 且 data 保留)。
-                    disabled={refreshing || camerasLoading}
+                    // refreshing 覆盖整个手动刷新(onRefresh 里 await 到列表重拉落地),故只看它;
+                    // 点其他开关触发的 reload 不置 refreshing,刷新图标不会被借用转圈。
+                    disabled={refreshing}
                     aria-label={t("hero.refreshCamerasAria")}
                     title={t("hero.refreshCamerasTitle")}
                     className="shrink-0 text-text-tertiary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -420,9 +414,7 @@ function CameraSection({
                     <IconRefresh
                       width={15}
                       height={15}
-                      className={
-                        refreshing || camerasLoading ? "animate-spin" : ""
-                      }
+                      className={refreshing ? "animate-spin" : ""}
                     />
                   </button>
                 )}

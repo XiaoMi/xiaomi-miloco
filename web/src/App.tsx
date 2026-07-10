@@ -252,11 +252,12 @@ function MainApp() {
                 scopeCameras.reload();
               }}
               onRefresh={async () => {
-                // 手动刷新:force 绕过 8s 节流,真打后端刷新相机在线 / 镜头状态,再 reload 重拉列表。
+                // 手动刷新:force 绕过 8s 节流打后端刷相机状态,再 await 列表重拉落地——
+                // reload() 的 Promise 在 listScopeCameras settle 后 resolve,故 onRefresh 完成
+                // = 列表已更新到位,刷新按钮转圈据此精确覆盖全程(不被其他 reload 借用)。
                 await refreshCameraOnline(homeId, true).catch(() => {});
-                scopeCameras.reload();
+                await scopeCameras.reload();
               }}
-              camerasLoading={scopeCameras.loading}
             />
           </div>
         );

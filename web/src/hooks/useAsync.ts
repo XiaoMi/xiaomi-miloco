@@ -6,7 +6,7 @@
  * 这样调用方不必逐个检查 error;只在需要重试时才取 error 字段。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/Toast";
 import i18n from "@/i18n";
 
@@ -14,7 +14,7 @@ export interface AsyncState<T> {
   data: T | undefined;
   loading: boolean;
   error: Error | undefined;
-  reload: () => void;
+  reload: () => Promise<void>;
 }
 
 export interface UseAsyncOptions {
@@ -32,7 +32,18 @@ export function useAsync<T>(
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
 
-  const reload = useCallback(() => setTick((x) => x + 1), []);
+  // reload 返回 Promise:在「本次触发的重拉」settle(成功 / 失败)后 resolve,让调用方能
+  // await 到数据真落地(如手动刷新按钮转圈覆盖到列表更新到位)。不 await 的现有调用照常
+  // 工作(忽略返回的 Promise),向后兼容。
+  const pendingResolvers = useRef<Array<() => void>>([]);
+  const reload = useCallback(
+    () =>
+      new Promise<void>((resolve) => {
+        pendingResolvers.current.push(resolve);
+        setTick((x) => x + 1);
+      }),
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -54,6 +65,11 @@ export function useAsync<T>(
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
+        // 本轮拉取 settle:唤醒所有等待「重拉落地」的 reload() 调用方。即使 cancelled 也
+        // resolve,避免 await reload() 永挂(deps 变会另起新一轮拉取)。
+        const resolvers = pendingResolvers.current;
+        pendingResolvers.current = [];
+        resolvers.forEach((r) => r());
       });
     return () => {
       cancelled = true;
