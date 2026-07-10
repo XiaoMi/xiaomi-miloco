@@ -103,6 +103,7 @@ def _make_mock_lan(net_ifs=None):
     return miot_lan
 
 
+@pytest.mark.unit
 def test_set_unicast_targets_before_init_noop():
     """set_unicast_targets before init is a safe no-op, not a crash."""
     miot_lan = _make_mock_lan()
@@ -111,6 +112,7 @@ def test_set_unicast_targets_before_init_noop():
     assert miot_lan._unicast_targets == {}
 
 
+@pytest.mark.unit
 def test_set_unicast_targets_dispatches_non_empty():
     """A non-empty target dict is dispatched to the internal loop verbatim."""
     miot_lan = _make_mock_lan()
@@ -123,6 +125,7 @@ def test_set_unicast_targets_dispatches_non_empty():
     assert args[1]["did1"] == "10.0.0.1"
 
 
+@pytest.mark.unit
 def test_clear_unicast_targets_dispatches_empty():
     """clear_unicast_targets dispatches {} via set_unicast_targets."""
     miot_lan = _make_mock_lan()
@@ -134,6 +137,7 @@ def test_clear_unicast_targets_dispatches_empty():
     assert args[1] == {}
 
 
+@pytest.mark.unit
 def test_probe_unicast_targets_empty_noop():
     """Empty targets or empty sockets → early return, no sendto calls."""
     miot_lan = _make_mock_lan()
@@ -153,6 +157,7 @@ def test_probe_unicast_targets_empty_noop():
     mock_sock.sendto.assert_not_called()
 
 
+@pytest.mark.unit
 def test_probe_unicast_targets_sends_to_ip():
     """Unicast probe sends OTU message to each target IP via a bound socket."""
     miot_lan = _make_mock_lan()
@@ -173,6 +178,7 @@ def test_probe_unicast_targets_sends_to_ip():
     assert call2_args[2][1] == miot_lan.OT_PORT
 
 
+@pytest.mark.unit
 def test_probe_unicast_targets_skips_enetunreach():
     """ENETUNREACH on first socket → silently try next; EHOSTUNREACH same."""
     miot_lan = _make_mock_lan(net_ifs=["eth0", "wlan0"])
@@ -202,6 +208,7 @@ def test_probe_unicast_targets_skips_enetunreach():
     sock4.sendto.assert_called_once()
 
 
+@pytest.mark.unit
 def test_probe_unicast_targets_skips_empty_ip():
     """Target with empty IP string is skipped without touching sockets."""
     miot_lan = _make_mock_lan()

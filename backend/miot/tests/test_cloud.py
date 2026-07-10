@@ -12,7 +12,7 @@ import webbrowser
 from typing import Dict, Optional
 
 import pytest
-from miot.cloud import MIoTHttpClient, MIoTOAuth2Client
+from miot.cloud import MIoTHttpClient, MIoTOAuth2Client, _cloud_device_to_info
 from miot.storage import MIoTStorage
 from miot.types import MIoTManualSceneInfo, MIoTOauthInfo, MIoTUserInfo
 from pydantic_core import to_jsonable_python
@@ -572,60 +572,46 @@ async def test_app_notify_async(
     await miot_http.deinit_async()
 
 # ---------------------------------------------------------------------------
-# cloud API response parsing regression test
+# localip → local_ip 映射回归测试
+# cloud.py _cloud_device_to_info 用 device.get("localip", None)
+# 填入 MIoTDeviceInfo(local_ip=...). 这是跨网段相机直连的数据源，
+# 一字之差（localip ↔ local_ip）就会导致整条链路静默失效.
+# 测试直接调用生产函数 _cloud_device_to_info，而非复刻构造代码.
 # ---------------------------------------------------------------------------
 
 
-def test_localip_field_parsing():
-    """Cloud device list returns localip (all-lowercase, no underscore).
-
-    The MIoTDeviceInfo constructor receives the raw cloud JSON field name
-    ``localip`` (NOT ``local_ip``).  If the key ever changes back in the
-    caller, this regression test catches it before the entire cross-subnet
-    camera-direct-connect chain goes silent.
-    """
-    from miot.types import MIoTDeviceInfo
-
-    raw = {
-        "did": "123456",
-        "name": "test_device",
-        "uid": 999,
-        "spec_type": "urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4",
+@pytest.mark.unit
+def test_cloud_device_to_info_localip_parsed():
+    """_cloud_device_to_info 正确映射 cloud API key 'localip' → local_ip."""
+    device = {
+        "did": "test-did-001",
+        "name": "Test Camera",
         "model": "chuangmi.camera.81ac1",
-        "localip": "192.168.1.50",
-        "isOnline": True,
-        "token": "abc",
-        "icon": "",
+        "uid": 999,
         "pid": 0,
-        "voice_ctrl": 0,
-        "rssi": -42,
-        "ssid": "mywifi",
-        "bssid": "aa:bb:cc:dd:ee:ff",
+        "token": "abc123",
+        "isOnline": True,
+        "localip": "**.*.*.*",
         "orderTime": 0,
     }
-    info = MIoTDeviceInfo(**raw)
-    assert info.local_ip == "192.168.1.50"
+    info = _cloud_device_to_info(device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4")
+    assert info is not None
+    assert info.local_ip == "**.*.*.*"
 
 
-def test_localip_field_missing():
-    """If cloud API omits ``localip``, local_ip should fall back to None."""
-    from miot.types import MIoTDeviceInfo
-
-    raw = {
-        "did": "123456",
-        "name": "test_device",
-        "uid": 999,
-        "spec_type": "urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4",
+@pytest.mark.unit
+def test_cloud_device_to_info_localip_missing():
+    """_cloud_device_to_info: 无 localip key 时 local_ip 应为 None."""
+    device = {
+        "did": "test-did-002",
+        "name": "Test Camera",
         "model": "chuangmi.camera.81ac1",
-        "isOnline": True,
-        "token": "abc",
-        "icon": "",
+        "uid": 999,
         "pid": 0,
-        "voice_ctrl": 0,
-        "rssi": -42,
-        "ssid": "mywifi",
-        "bssid": "aa:bb:cc:dd:ee:ff",
+        "token": "abc123",
+        "isOnline": True,
         "orderTime": 0,
     }
-    info = MIoTDeviceInfo(**raw)
+    info = _cloud_device_to_info(device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4")
+    assert info is not None
     assert info.local_ip is None
