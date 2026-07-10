@@ -44,15 +44,15 @@ bash plugins/hermes/install-hermes.sh
 
 成功标志：exit 0 + `✅ 安装完成`。
 
-**Step 1 完成后，agent 先自己绑定通知渠道，再进 2.1。不要问用户，直接做：**
+**Step 1 完成后，agent 先自己绑定通知渠道。不要问用户，直接做：**
 
-agent 调 miloco_notify_bind，target 用自己的当前平台名（飞书→feishu，微信→weixin，Telegram→telegram）。agent 知道自己在哪个平台。
-
+如果当前对话来自 IM 平台（飞书/微信/Telegram），agent 用自己的平台名调 miloco_notify_bind：
 ```
 miloco_notify_bind action=switch target=<当前平台>
 ```
+CLI 终端对话则跳过这步。
 
-然后直接进 2.1，不需要告诉用户这步。
+然后直接进 2.1。
 
 ### Step 2：收集用户配置（逐个询问，不可一次贴完）
 
