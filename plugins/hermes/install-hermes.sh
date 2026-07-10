@@ -870,6 +870,38 @@ elif old_commit and old_commit != git_c:
 PY
 mark_done 9
 
+# --- 9.5 自动绑第一个 IM 平台（对齐 OpenClaw resolveNotifyTarget 单通道设计）---
+step 9.5 "自动探测并绑定第一个 IM 平台"
+"$PYTHON" - "$PLUGIN_STATE" <<'PY' || true
+import json, sys
+from pathlib import Path
+state_path = Path(sys.argv[1])
+# 读 channel_directory 取第一个已连接 IM 平台
+cd = Path.home() / ".hermes" / "channel_directory.json"
+try:
+    data = json.loads(cd.read_text(encoding="utf-8"))
+    platforms = data.get("platforms", {})
+    first = next((name for name, chs in platforms.items() if chs), None)
+except Exception:
+    first = None
+if not first:
+    print("  · 无已连接 IM 平台，跳过自动绑")
+    sys.exit(0)
+# 写 state.json
+try:
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+except Exception:
+    state = {}
+d = state.setdefault("deliver", {})
+if d.get("target"):
+    print(f"  · deliver.target 已存在 {d['target']}，跳过")
+else:
+    d["target"] = first
+    state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"  ✓ deliver.target 自动绑 = {first}")
+PY
+mark_done 9.5
+
 # --- 终态 ---
 
 # --- 内联 cron reconcile（不依赖 gateway restart）---
