@@ -4,8 +4,6 @@ const milocoHomeMock = vi.fn(() => "/fake/miloco-home");
 const readJsonFileSyncMock = vi.fn();
 const writeJsonFileSyncMock = vi.fn();
 
-const kStatePathSuffix = "fake\\miloco-home\\home-profile\\onboarding-session-lock.json";
-
 vi.mock("../src/miloco/paths.js", () => ({
   milocoHome: () => milocoHomeMock(),
 }));
@@ -32,7 +30,7 @@ describe("onboarding session lock state", () => {
 
     expect(writeJsonFileSyncMock).toHaveBeenCalledTimes(1);
     const [path, payload, options] = writeJsonFileSyncMock.mock.calls[0];
-    expect(String(path)).toContain(kStatePathSuffix);
+    expect(String(path)).toMatch(/[\\/]home-profile[\\/]onboarding-session-lock\.json$/);
     expect(options).toEqual({ pretty: true });
     expect(payload).toMatchObject({
       invitedSessionKeys: ["wechat:a", "telegram:b"],
@@ -104,7 +102,9 @@ describe("onboarding session lock state", () => {
     const result = readOnboardingState(nowMs);
 
     expect(result).toBeNull();
-    expect(String(writeJsonFileSyncMock.mock.calls[0][0])).toContain(kStatePathSuffix);
+    expect(String(writeJsonFileSyncMock.mock.calls[0][0])).toMatch(
+      /[\\/]home-profile[\\/]onboarding-session-lock\.json$/,
+    );
     expect(writeJsonFileSyncMock.mock.calls[0][1]).toEqual({});
     expect(writeJsonFileSyncMock.mock.calls[0][2]).toEqual({ pretty: true });
   });

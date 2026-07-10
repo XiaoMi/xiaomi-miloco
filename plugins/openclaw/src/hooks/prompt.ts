@@ -1,10 +1,7 @@
 import path from "node:path";
 import { readFileSafe } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
-import {
-  lockOnboardingSession,
-  readOnboardingState,
-} from "../home-profile/onboarding_state.js";
+import { lockOnboardingSession } from "../home-profile/onboarding_state.js";
 import { getCatalog } from "../services/catalog.js";
 import { logger } from "../utils/logger.js";
 import { deployTimezone, toLocalParts } from "../utils/time.js";
@@ -130,7 +127,7 @@ function buildOnboardingSessionBlock(
   // 借此排除「广播 turn 自身」触发锁定——只有用户真实回复才会锁定 onboarding 会话。
   // 若改动该前缀约定，需同步调整这里的守卫逻辑。
   if (!key || !prompt || prompt.startsWith("[系统事件]")) return "";
-  const state = lockOnboardingSession(key) ?? readOnboardingState();
+  const state = lockOnboardingSession(key);
   if (!state || !state.invitedSessionKeys.includes(key)) return "";
   if (state.lockedSessionKey && state.lockedSessionKey !== key) {
     return `## Onboarding 会话收敛

@@ -37,6 +37,24 @@ interface WaitResult {
   error?: string;
 }
 
+function pickOwnerBroadcastPrimary(
+  waitResults: Array<{ sessionKey: string; runId: string; wait: WaitResult }>,
+  effectiveSessionKey: string,
+  isOwnerBroadcast: boolean,
+) {
+  if (isOwnerBroadcast) {
+    return (
+      waitResults.find((item) => item.wait.status === "ok") ??
+      waitResults.find((item) => item.wait.status === "timeout") ??
+      waitResults[0]
+    );
+  }
+  return (
+    waitResults.find((item) => item.sessionKey === effectiveSessionKey) ??
+    waitResults[0]
+  );
+}
+
 function isContextOverflow(text: string | null | undefined): boolean {
   return typeof text === "string" && /context overflow/i.test(text);
 }
@@ -146,9 +164,11 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
           })) as WaitResult,
         })),
       );
-      const primary =
-        waitResults.find((item) => item.sessionKey === effectiveSessionKey) ??
-        waitResults[0];
+      const primary = pickOwnerBroadcastPrimary(
+        waitResults,
+        effectiveSessionKey,
+        isOwnerBroadcast,
+      );
       return { runId: primary.runId, wait: primary.wait };
     };
 

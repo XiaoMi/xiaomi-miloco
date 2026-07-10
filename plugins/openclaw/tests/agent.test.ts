@@ -349,4 +349,32 @@ describe("kAgentWebhook owner-channel 投递", () => {
     expect(res.runId).toBe("t1:broadcast:0");
     expect(res.status).toBe("ok");
   });
+
+  it("owner-channel 广播部分失败时，只要有一条成功仍按送达回报", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+    }));
+    resolveNotifyTargetMock.mockReturnValue({
+      target: { sessionKey: "wechat:dm:owner-1" },
+      targets: [
+        { sessionKey: "wechat:dm:owner-1" },
+        { sessionKey: "telegram:dm:owner-2" },
+      ],
+    });
+    const { api, run } = makeApi({
+      waitByRunId: {
+        "t1:broadcast:0": { status: "error", error: "boom" },
+        "t1:broadcast:1": { status: "ok" },
+      },
+    });
+
+    const res = (await invokeWith(api, {
+      resolveTarget: "owner-channel",
+    })) as { runId: string; status: string };
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(res.runId).toBe("t1:broadcast:1");
+    expect(res.status).toBe("ok");
+  });
 });
