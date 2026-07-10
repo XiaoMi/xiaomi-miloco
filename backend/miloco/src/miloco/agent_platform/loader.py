@@ -158,10 +158,9 @@ def load_adapter(adapter_name: Optional[str] = None) -> AgentPlatformAdapter:
 
 
 def get_adapter() -> AgentPlatformAdapter:
-    """获取已缓存 adapter(若未加载则尝试一次)。永远返回非 None。"""
-    if _cached_adapter is None:
-        return load_adapter()
-    return _cached_adapter
+    """获取 adapter。不再缓存——每次调用重新读 settings.agent.platform，
+    防 install-hermes.sh 写 config 后 adapter 缓存旧 WebhookAdapter 不更新。"""
+    return load_adapter()
 
 
 def reset_cache() -> None:

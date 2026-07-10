@@ -313,7 +313,7 @@ py = sys.argv[2]
 cfg = {
     "server": {"port": 1810, "url": "http://127.0.0.1:1810", "token": "", "python_bin": py},
     "model": {"omni": {"model": "", "base_url": "", "api_key": ""}},
-    "agent": {},
+    "agent": {"platform": "hermes"},
     "directories": {},
     "database": {"path": "miloco.db"},
 }
