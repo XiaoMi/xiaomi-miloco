@@ -68,37 +68,35 @@ def _detect_im_platforms_simple() -> List[str]:
 def resolve_notify_target(ctx: Any) -> Dict[str, Any]:
     """【hermes-pr.md §五 #4 目标解析】解析 deliver target:
 
-    1. ``state.json::deliver.target`` 显式配(优先, 即使有 fallback 候选)
-    2. 没有 → fallback 到最近活跃 IM home channel(扫 ~/.hermes/auth.json +
-       config.yaml, 取第一个)
-    3. 都没有 → needsBind=true, 给 agent 提示调 miloco_notify_bind 配 IM
+    1. ``state.json::deliver.target`` 显式配(优先)
+    2. 没有 → 扫 channel_directory.json 取所有已连接 IM 平台
+    3. 都没有 → needsBind=true
 
     返回 ``{"target": str | None, "needsBind": bool, "hint": str, "candidates": [...]}``。
-    不直接投递, 给 notify_owner 单独调用投递原语。
+    target="all" 时 notify_owner 会遍历 candidates 逐个推。
     """
     # 1. state.json 显式 target
     state = load_state(ctx)
     explicit_target = (state.get("deliver") or {}).get("target")
     if explicit_target:
+        candidates = (state.get("deliver") or {}).get("candidates") or _detect_im_platforms_simple()
         return {
             "target": explicit_target,
             "needsBind": False,
             "hint": None,
-            "candidates": [],
+            "candidates": candidates,
         }
 
-    # 2. fallback: 最近活跃 IM home channel
+    # 2. fallback: 多个已连接 IM → 全部推；只有一个 → 只推那个
     candidates = _detect_im_platforms_simple()
     if candidates:
-        # 用第一个作为 home channel(target 格式: "platform")
-        fallback_target = candidates[0]
+        fallback_target = "all" if len(candidates) > 1 else candidates[0]
         return {
             "target": fallback_target,
             "needsBind": False,
             "hint": (
-                f"未显式配 deliver.target, fallback 到最近活跃 IM home channel: "
-                f"{fallback_target}。如需指定具体 chat_id, 调 miloco_notify_bind(action='switch', "
-                f"target='{fallback_target}:chat_id')。"
+                f"未显式配 deliver.target, fallback 到{'所有已连接 IM 平台' if len(candidates) > 1 else f'最近活跃 IM home channel: {candidates[0]}'}。"
+                f"如需指定具体平台, 调 miloco_notify_bind(action='switch', target='<platform>:<chat_id>')。"
             ),
             "candidates": candidates,
         }
@@ -314,12 +312,11 @@ def notify_owner(ctx: Any, message: str) -> Dict[str, Any]:
 
     # Fanout: target="all" → 逐个候选发
     if target == "all":
-        state = load_state(ctx)
-        candidates = (state.get("deliver") or {}).get("candidates") or []
+        candidates = resolved.get("candidates") or []
         if not candidates:
             return {
                 "ok": False,
-                "error": "deliver.target='all' 但 state.json::deliver.candidates 为空,装时没探测到任何 IM",
+                "error": "deliver.target='all' 但没有可用的 IM 平台",
             }
         results = []
         for c in candidates:
