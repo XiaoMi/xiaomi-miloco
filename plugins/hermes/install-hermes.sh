@@ -47,7 +47,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 MILOCO_HOME="${MILOCO_HOME:-$HOME/.openclaw/miloco}"
-ADAPTER_PORT="${ADAPTER_PORT:-18789}"
+ADAPTER_PORT="${ADAPTER_PORT:-1810}"
 HERMES_PLUGINS_DIR="$HERMES_HOME/plugins/miloco"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
