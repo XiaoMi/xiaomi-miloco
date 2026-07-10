@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+import os
+import time
 from datetime import datetime
 
 from miloco.config import get_settings
@@ -110,6 +111,7 @@ class OnboardingTriggerService:
         # lock 串行化「检查-发送-置位」，_fired 兜底 KV 写失败时同一进程内不重发。
         self._lock = asyncio.Lock()
         self._fired = False
+        self._created_at = time.monotonic()
 
     async def maybe_trigger(self) -> bool:
         """条件全满足时发一次主动邀请。仅真正发出（sent=True）返回 True。
@@ -119,6 +121,9 @@ class OnboardingTriggerService:
         把启动 / 授权主流程带崩。
         """
         async with self._lock:
+            # backend 刚启动时跳过——install 流程还没跑完，组件可能未就绪
+            if time.monotonic() - self._created_at < 60:
+                return False
             if self._fired:
                 logger.debug("onboarding trigger skipped: already fired this run")
                 return False
