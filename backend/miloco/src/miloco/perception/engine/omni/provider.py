@@ -252,6 +252,21 @@ def _gemini_usage_to_openai(usage_metadata: dict[str, Any] | None) -> dict[str, 
     return usage
 
 
+def _gemini_media_resolution() -> str:
+    """读 Gemini media_resolution 档位配置（``""`` / ``"low"`` / ``"high"``）。
+
+    与 ``prompt_builder._get_video_short_edge`` 同款：每次调用实时读 settings，CLI 改后
+    下一推理周期生效；读失败回退 ``""``（= Gemini 默认 low / 66 tok 每帧）。
+    """
+    try:
+        from miloco.config import get_settings
+
+        val = get_settings().perception.engine.get("input", {}).get("media_resolution", "")
+        return str(val or "")
+    except Exception:
+        return ""
+
+
 class GeminiAdapter(OmniProviderAdapter):
     """Gemini 原生 ``generateContent`` 协议 adapter。
 
@@ -349,14 +364,21 @@ class GeminiAdapter(OmniProviderAdapter):
                 grole = "model" if role == "assistant" else "user"
                 contents.append({"role": grole, "parts": parts})
 
-        body: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": max_tokens,
-                "temperature": temperature,
-                "topP": top_p,
-            },
+        gen_cfg: dict[str, Any] = {
+            "maxOutputTokens": max_tokens,
+            "temperature": temperature,
+            "topP": top_p,
+            # 关思考：感知要直给结构化结果（对标 MiMo 的 thinking:disabled）。gemini-3 用
+            # thinkingBudget=0 可彻底关闭（thinkingLevel:"low" 关不掉），省 token 且防思考
+            # 挤占 maxOutputTokens 导致可见输出被截断。
+            "thinkingConfig": {"thinkingBudget": 0},
         }
+        # media_resolution 档位：仅 "high" 显式请求高预算(264 tok/帧)；其余(""/"low")不发该
+        # 字段即 Gemini 默认 low(66 tok/帧)。默认 low 最省，identity 等细节场景可经 CLI 切 high。
+        if _gemini_media_resolution().lower() == "high":
+            gen_cfg["mediaResolution"] = "MEDIA_RESOLUTION_HIGH"
+
+        body: dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
         if system_texts:
             body["system_instruction"] = {"parts": [{"text": "\n\n".join(system_texts)}]}
         return body

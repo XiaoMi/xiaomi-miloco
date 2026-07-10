@@ -1,5 +1,6 @@
 """Tests for Omni Provider Adapter."""
 
+from miloco.perception.engine.omni import provider
 from miloco.perception.engine.omni.provider import (
     GeminiAdapter,
     LocalMediaInfo,
@@ -184,7 +185,8 @@ class TestGeminiAdapter:
         assert block["fps"] == 1
         assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
 
-    def test_request_body_system_instruction(self):
+    def test_request_body_system_instruction(self, monkeypatch):
+        monkeypatch.setattr(provider, "_gemini_media_resolution", lambda: "")
         messages = [
             {"role": "system", "content": "你是助手"},
             {"role": "user", "content": [{"type": "text", "text": "hi"}]},
@@ -195,12 +197,33 @@ class TestGeminiAdapter:
         )
         assert body["system_instruction"] == {"parts": [{"text": "你是助手"}]}
         assert body["contents"] == [{"role": "user", "parts": [{"text": "hi"}]}]
-        assert body["generationConfig"] == {
-            "maxOutputTokens": 512, "temperature": 0.1, "topP": 0.95,
-        }
-        # 暂不启用 JSON 模式；stream 不进 body（由 endpoint 决定）
-        assert "responseMimeType" not in body["generationConfig"]
+        gc = body["generationConfig"]
+        assert gc["maxOutputTokens"] == 512
+        assert gc["temperature"] == 0.1
+        assert gc["topP"] == 0.95
+        # 默认关思考；暂不启用 JSON 模式；default media_resolution 不发字段；stream 不进 body
+        assert gc["thinkingConfig"] == {"thinkingBudget": 0}
+        assert "mediaResolution" not in gc
+        assert "responseMimeType" not in gc
         assert "stream" not in body
+
+    def test_media_resolution_default_omitted(self, monkeypatch):
+        # ""/"low" → 不发 mediaResolution（= Gemini 默认 low）
+        for val in ("", "low", "LOW"):
+            monkeypatch.setattr(provider, "_gemini_media_resolution", lambda v=val: v)
+            body = self.adapter.build_request_body(
+                [{"role": "user", "content": "x"}], model="gemini-3-flash",
+                max_tokens=512, temperature=0.1, top_p=0.95,
+            )
+            assert "mediaResolution" not in body["generationConfig"], val
+
+    def test_media_resolution_high(self, monkeypatch):
+        monkeypatch.setattr(provider, "_gemini_media_resolution", lambda: "high")
+        body = self.adapter.build_request_body(
+            [{"role": "user", "content": "x"}], model="gemini-3-flash",
+            max_tokens=512, temperature=0.1, top_p=0.95,
+        )
+        assert body["generationConfig"]["mediaResolution"] == "MEDIA_RESOLUTION_HIGH"
 
     def test_request_body_video_metadata_at_part_level(self):
         video_block = self.adapter.build_video_block("VIDEOB64", _VIDEO_MEDIA)

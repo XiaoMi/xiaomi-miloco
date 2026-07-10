@@ -82,6 +82,11 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         1,
         "送给 omni 的视频帧率（应为 fps 的因数），重启生效",
     ),
+    "perception.engine.input.media_resolution": (
+        str,
+        "",
+        "仅 Gemini：每帧视觉 token 预算档位（\"\"/\"low\"=省，\"high\"=小目标更清但 4× token），下一周期生效",
+    ),
     "perception.collect.window_size": (
         int,
         4,
