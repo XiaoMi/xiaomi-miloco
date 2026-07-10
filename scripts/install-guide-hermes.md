@@ -130,7 +130,7 @@ miloco-cli config get model.omni.base_url
 
 **用户只发了 API Key（用默认 MiMo）：**
 ```bash
-miloco-cli config set model.omni.api_key "<key>"
+miloco-cli config set model.omni.api_key "<key>" model.omni.model "xiaomi/mimo-v2.5" model.omni.base_url "https://api.xiaomimimo.com/v1"
 ```
 
 **用户指定了 model / base_url（第三方模型）：**
