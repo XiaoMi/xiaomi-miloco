@@ -141,6 +141,7 @@ def list_agent_runs(
 def list_actions(
     request: Request,
     since_ms: int | None = None,
+    until_ms: int | None = None,
     did: str | None = None,
     action_type: str | None = None,
     failed_only: int | None = None,
@@ -160,6 +161,9 @@ def list_actions(
         if since_ms is not None:
             clauses.append("timestamp >= ?")
             params.append(since_ms)
+        if until_ms is not None:
+            clauses.append("timestamp <= ?")
+            params.append(until_ms)
         if did:
             clauses.append("did = ?")
             params.append(did)

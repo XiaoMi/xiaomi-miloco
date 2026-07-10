@@ -125,6 +125,43 @@ async def test_set_property_writes_ledger_row(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_control_device_records_source_cli(bound_client, tmp_path):
+    """control_device 路径台账 source=cli(默认)、source_id 空——与 rule static 区分。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await svc.control_device(
+        "dev1", DeviceControlRequest(type="set_property", iid="prop.2.1", value=True)
+    )
+    await client.flush()
+    r = _rows(obs_db)[0]
+    assert r["source"] == "cli"
+    assert r["source_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_writer_records_source_rule(bound_client, tmp_path):
+    """公共 helper 带 source=rule / source_id=rule_id 时台账落对应触发源。
+
+    这是 rule static 直控路径复用的同一 helper(RuleRunner._execute_action 调用),
+    验证 source 语义:trace_id 为 NULL 也能区分「手动 CLI」与「rule static」。
+    """
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None, source="rule", source_id="rule-42",
+    )
+    await client.flush()
+    r = _rows(obs_db)[0]
+    assert r["source"] == "rule"
+    assert r["source_id"] == "rule-42"
+
+
+@pytest.mark.asyncio
 async def test_call_action_writes_ledger_with_tts_text(bound_client, tmp_path):
     """speaker play-text 也是 call_action:in_params(TTS 全文)进 value_json。"""
     client, obs_db = bound_client

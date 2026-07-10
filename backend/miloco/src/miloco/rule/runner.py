@@ -1348,7 +1348,12 @@ class RuleRunner:
                     action=action, result=True, skipped=True
                 )
 
-        # Execute
+        # Execute. rule static 直控不经 MiotService.control_device,故这里显式落 action_ledger
+        # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
+        import json as _json
+
+        from miloco.miot.service import _write_action_ledger
+
         try:
             if is_prop:
                 params = [
@@ -1363,6 +1368,9 @@ class RuleRunner:
                     if success
                     else f"miot_failed: {results[0] if results else 'no_result'}"
                 )
+                _ltype = "set_property"
+                _lvalue = _json.dumps(action.value, ensure_ascii=False)
+                _lcode = results[0].get("code") if results else None
             else:
                 param = MIoTActionParam(
                     did=action.did,
@@ -1373,6 +1381,16 @@ class RuleRunner:
                 result = await self._miot_proxy.call_device_action(param)
                 success = bool(result and result.get("code", -1) == 0)
                 err = None if success else f"miot_failed: {result}"
+                _ltype = "call_action"
+                _lvalue = _json.dumps(action.params or [], ensure_ascii=False)
+                _lcode = result.get("code") if result else None
+
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=_ltype, did=action.did, iid=action.iid,
+                value_json=_lvalue, result_code=_lcode, result_msg=None,
+                success=success, error=err, source="rule", source_id=rule_id,
+            )
 
             if success and not action.idempotent and action.cooldown_minutes:
                 self._ensure_state(rule_id).action_cooldown[
@@ -1384,6 +1402,13 @@ class RuleRunner:
             )
 
         except Exception as e:
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="set_property" if is_prop else "call_action",
+                did=action.did, iid=action.iid, value_json=None,
+                result_code=None, result_msg=None,
+                success=False, error=str(e), source="rule", source_id=rule_id,
+            )
             logger.error(
                 "Failed to execute action %s %s: %s",
                 action.did, action.iid, e,

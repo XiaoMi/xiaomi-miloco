@@ -349,20 +349,19 @@ function MainApp() {
         );
       }
       case "activity": {
-        // 单流:事件 + 动作合并,筛选 checkbox 在 ActivityFeed 内部。动作流独立走
-        // /api/actions(组件内拉),不受 events 加载/错误态阻断;此处 gate 仅守事件。
+        // 单流:事件 + 动作合并,筛选 checkbox 在 ActivityFeed 内部。**无条件挂载**
+        // ActivityFeed——动作流走 /api/actions 组件内独立拉,不再被事件流(/api/events)的
+        // 加载/错误态阻断(修 Zirconi review:此前 gate 在 activity.data 上,事件慢/失败时
+        // 动作根本不请求)。事件的加载/失败以内联提示呈现在组件内,不挡动作流。
         return (
           <div className="space-y-6">
-            {activity.error ? (
-              <TabPanelError
-                message={t("app.tabActivityError", { msg: activity.error.message })}
-                onRetry={() => activity.reload()}
-              />
-            ) : !activity.data ? (
-              <TabPanelLoading text={t("app.tabActivityLoading")} />
-            ) : (
-              <ActivityFeed events={activity.data} homeId={homeId} />
-            )}
+            <ActivityFeed
+              events={activity.data ?? []}
+              homeId={homeId}
+              eventsLoading={activity.loading}
+              eventsError={activity.error}
+              onRetryEvents={() => activity.reload()}
+            />
           </div>
         );
       }

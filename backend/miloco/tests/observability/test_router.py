@@ -135,6 +135,16 @@ async def test_list_actions_filters_and_orders(app_with_db):
             rows = r.json()
             assert [x["id"] for x in rows] == ["a2"]
 
+            # until_ms 过滤(上界)——选定时间段时不混入范围外历史动作
+            r = tc.get("/api/actions?until_ms=1500", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a1"]
+
+            # since_ms + until_ms 组合窗口
+            r = tc.get("/api/actions?since_ms=500&until_ms=1500", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a1"]
+
             # action_type 过滤
             r = tc.get("/api/actions?action_type=call_action", headers=headers)
             rows = r.json()

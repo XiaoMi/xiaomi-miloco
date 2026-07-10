@@ -143,7 +143,9 @@ class ActionLedgerRecord:
     result_msg: str | None
     success: bool
     error: str | None
-    trace_id: str | None = None  # v1 留 None
+    trace_id: str | None = None  # 预留槽,尚未串联 agent turn
+    source: str | None = None    # v3: cli | rule
+    source_id: str | None = None  # v3: rule 写 rule_id,cli 留空
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -160,6 +162,8 @@ class ActionLedgerRecord:
             "success": int(self.success),
             "error": self.error,
             "trace_id": self.trace_id,
+            "source": self.source,
+            "source_id": self.source_id,
         }
 
 

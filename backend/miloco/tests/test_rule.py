@@ -208,6 +208,33 @@ def runner(mock_miot_proxy, mock_log_repo, mock_task_record_service):
     )
 
 
+@pytest.mark.asyncio
+async def test_rule_static_action_writes_ledger_source_rule(runner, monkeypatch):
+    """rule static 直控经 _execute_action 也落 action_ledger(source=rule / source_id=rule_id)。
+
+    修 Zirconi review:rule 直控绕过 MiotService.control_device,原先审计不到——现复用
+    同一 _write_action_ledger helper,不再有覆盖盲区。
+    """
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.rule.schema import RuleAction
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+
+    action = RuleAction(did="dev1", iid="prop.2.1", value=True,
+                        idempotent=False, cooldown_minutes=10)
+    await runner._execute_action("rule-42", action)
+
+    spy.assert_awaited_once()
+    kw = spy.await_args.kwargs
+    assert kw["source"] == "rule"
+    assert kw["source_id"] == "rule-42"
+    assert kw["did"] == "dev1"
+    assert kw["action_type"] == "set_property"
+    assert kw["success"] is True
+
+
 @pytest.fixture
 def service(
     mock_rule_repo, mock_log_repo, mock_miot_proxy, mock_task_repo,

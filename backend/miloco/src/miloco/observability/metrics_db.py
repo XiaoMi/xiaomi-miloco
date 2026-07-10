@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _TRACES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -129,7 +129,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_success ON agent_runs(success) WHERE s
 # agent 每次控制设备 / 播 TTS(speaker play-text 也是 call_action)/ 触发场景写一行。
 # result_code / result_msg 是设备侧执行结果(负码即失败,详见 miot.result_codes);
 # value_json 存 set 值或 action in_params —— TTS 全文落这里(日志只记长度,DB 存内容)。
-# trace_id v1 留 NULL,v2 起串联 agent turn(见 v2 计划)。
+# source ∈ {cli, rule} 区分触发源(v3)：cli=control_device 路径 / rule=RuleRunner 直控
+# (source_id=rule_id)。trace_id 目前是**预留槽**(NULL)——尚未实际串联 agent turn,
+# 后续经 CLI --trace-id / X-Miloco-Trace-Id → ContextVar 串联(见 PR 后续工作)。
 _ACTION_LEDGER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS action_ledger (
   id            TEXT    NOT NULL PRIMARY KEY,
@@ -144,9 +146,12 @@ CREATE TABLE IF NOT EXISTS action_ledger (
   result_msg    TEXT,
   success       INTEGER NOT NULL,
   error         TEXT,
-  trace_id      TEXT
+  trace_id      TEXT,
+  source        TEXT,
+  source_id     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_ledger_ts ON action_ledger(timestamp);
+CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts ON action_ledger(source, timestamp);
 """
 
 _TRACES_V_VIEW = """
@@ -241,7 +246,25 @@ def _migrate_v2_action_ledger(conn: sqlite3.Connection) -> None:
     conn.executescript(_ACTION_LEDGER_SCHEMA)
 
 
+def _migrate_v3_action_source(conn: sqlite3.Connection) -> None:
+    """v2 → v3:给 action_ledger 补触发源列 source / source_id(幂等)。
+
+    trace_id IS NULL 分不清「手动 CLI」与「rule static 直控」——加显式 source:
+    ``cli``（control_device 路径）/ ``rule``（RuleRunner._execute_action，source_id=rule_id）。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    if "source" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN source TEXT")
+    if "source_id" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN source_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts "
+        "ON action_ledger(source, timestamp)"
+    )
+
+
 # 步进迁移注册表:{target_version: fn}。fn 只做 additive DDL,须幂等。
 _MIGRATIONS = {
     2: _migrate_v2_action_ledger,
+    3: _migrate_v3_action_source,
 }

@@ -34,12 +34,18 @@ const VALUE_MAX = 60;
  *  导出供 ActivityFeed 判「是否已达上限」以渲染截断提示。 */
 export const ACTIONS_LIMIT = 500;
 
-/** 统一拉取——failedOnly 时带 failed_only=1。导出供 tests 守 query 参数 + 解析。 */
-export async function fetchActions(failedOnly: boolean): Promise<BackendActionRow[]> {
-  const q = failedOnly
-    ? `?limit=${ACTIONS_LIMIT}&failed_only=1`
-    : `?limit=${ACTIONS_LIMIT}`;
-  return apiFetch<BackendActionRow[]>(`/api/actions${q}`);
+/** 统一拉取——failedOnly 时带 failed_only=1;传时间窗时带 since_ms/until_ms(与事件流同口径,
+ *  让动作也受当前筛选段约束,不混入范围外历史动作)。导出供 tests 守 query 参数 + 解析。 */
+export async function fetchActions(
+  failedOnly: boolean,
+  sinceMs?: number,
+  untilMs?: number,
+): Promise<BackendActionRow[]> {
+  const params = new URLSearchParams({ limit: String(ACTIONS_LIMIT) });
+  if (failedOnly) params.set("failed_only", "1");
+  if (sinceMs !== undefined) params.set("since_ms", String(sinceMs));
+  if (untilMs !== undefined) params.set("until_ms", String(untilMs));
+  return apiFetch<BackendActionRow[]>(`/api/actions?${params.toString()}`);
 }
 
 /** action_type → i18n key。set_property/set_properties 归"设置属性";其余各自映射。 */

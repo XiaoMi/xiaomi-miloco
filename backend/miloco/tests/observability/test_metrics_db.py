@@ -219,7 +219,7 @@ def test_action_ledger_columns(tmp_path):
     assert cols == {
         "id", "timestamp", "action_type", "did", "device_name", "room",
         "iid", "value_json", "result_code", "result_msg", "success",
-        "error", "trace_id",
+        "error", "trace_id", "source", "source_id",
     }
 
 
@@ -232,10 +232,54 @@ def test_action_ledger_has_timestamp_index(tmp_path):
     assert "idx_action_ledger_ts" in idx
 
 
-def test_user_version_is_2(tmp_path):
+def test_user_version_matches_schema(tmp_path):
     conn = connect(tmp_path / "obs.db")
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_fresh_schema_action_ledger_has_source_cols(tmp_path):
+    """新建库的 action_ledger 直接带 source / source_id 列(v3)。"""
+    conn = connect(tmp_path / "obs.db")
+    init_schema(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    assert {"source", "source_id"} <= cols
+
+
+def test_v2_to_v3_migration_adds_source_columns(tmp_path):
+    """模拟 v2 库(action_ledger 无 source/source_id,user_version=2),init_schema 应
+    additive 补两列 + 推到 v3,不丢数据;重复 init 幂等。"""
+    db = tmp_path / "obs.db"
+    conn = connect(db)
+    # 手搭 v2 骨架:旧表 + 无 source 列的 action_ledger + user_version=2
+    conn.execute("CREATE TABLE traces (trace_id TEXT PRIMARY KEY, timestamp INTEGER)")
+    conn.execute("CREATE TABLE traces_device (device_trace_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE events (event_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE action_ledger (id TEXT PRIMARY KEY, timestamp INTEGER, "
+        "action_type TEXT, did TEXT, success INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO action_ledger (id, timestamp, action_type, did, success) "
+        "VALUES ('a1', 111, 'set_property', 'd1', 1)"
+    )
+    conn.execute("PRAGMA user_version = 2")
+
+    init_schema(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    assert {"source", "source_id"} <= cols
+    # 旧行仍在,新列对老数据为 NULL
+    row = conn.execute(
+        "SELECT id, source, source_id FROM action_ledger WHERE id='a1'"
+    ).fetchone()
+    assert row == ("a1", None, None)
+
+    # 幂等:再 init 一次不报错、列不重复
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_v1_to_v2_migration_adds_action_ledger(tmp_path):

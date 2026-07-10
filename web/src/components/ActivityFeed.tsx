@@ -26,6 +26,12 @@ interface Props {
   events: ActivityEvent[];
   /** 当前作用域 home;切换时整个列表 + SSE 都要重建 */
   homeId: HomeId;
+  /** 事件初始页仍在加载。App 现无条件挂载本组件(让动作流独立于事件加载态),事件到达后
+   *  经 setEvents 合并;加载中在事件区顶部显一条内联提示,不阻断动作流。 */
+  eventsLoading?: boolean;
+  /** 事件初始页加载失败——内联提示 + 重试,同样不阻断动作流。 */
+  eventsError?: Error | null;
+  onRetryEvents?: () => void;
 }
 
 const PAGE_SIZE = 50;
@@ -53,20 +59,25 @@ export function mergeFeedRows(
   actions: BackendActionRow[],
   showEvents: boolean,
   showActions: boolean,
+  sinceMs?: number,
+  beforeMs?: number,
 ): FeedRow[] {
   const rows: FeedRow[] = [];
   if (showEvents) {
     for (const e of events) rows.push({ kind: "event", ts: e.timestamp, event: e });
   }
   if (showActions) {
-    // 窗口下界:仅当同时展示事件、且有事件时,才用"最旧展示事件 ts"裁掉更早的动作
-    // (那些更早动作属于尚未翻到的分页窗口)。否则(仅动作 / 无事件)动作全展示。
-    const oldestEventTs =
-      showEvents && events.length > 0
+    // 动作的时间窗与事件同段:显式筛选段(sinceMs/beforeMs)优先——它是权威下/上界,
+    // 即使没有事件也生效(修:事件为空时动作曾无下界、混入范围外历史动作)。未设筛选段时
+    // (全量视图)回落"最旧展示事件 ts"的分页启发式,裁掉尚未翻到的更早动作。
+    const lower =
+      sinceMs ??
+      (showEvents && events.length > 0
         ? Math.min(...events.map((e) => e.timestamp))
-        : -Infinity;
+        : -Infinity);
+    const upper = beforeMs ?? Infinity;
     for (const a of actions) {
-      if (a.timestamp >= oldestEventTs) {
+      if (a.timestamp >= lower && a.timestamp <= upper) {
         rows.push({ kind: "action", ts: a.timestamp, action: a });
       }
     }
@@ -105,9 +116,24 @@ function todayStartMs(): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
 
-export function ActivityFeed({ events: initial, homeId }: Props) {
+export function ActivityFeed({
+  events: initial,
+  homeId,
+  eventsLoading,
+  eventsError,
+  onRetryEvents,
+}: Props) {
   const { t } = useTranslation();
   const [events, setEvents] = useState<ActivityEvent[]>(initial);
+  // App 现无条件挂载本组件(动作流独立于事件加载态),初始事件页在 loading→loaded 后才到达。
+  // initial 变化时按 id dedup 合并进 events(用 mergeAndSort,不 clobber 期间 SSE prepend 的新事件)。
+  const prevInitialRef = useRef(initial);
+  useEffect(() => {
+    if (initial !== prevInitialRef.current) {
+      prevInitialRef.current = initial;
+      if (initial.length > 0) setEvents((prev) => mergeAndSort(prev, initial));
+    }
+  }, [initial]);
   // since 默认今天 00:00,跟标题语义对齐;before 留空 → 后端取 now,允许"看到现在".
   // 用户改 since 看更早历史 / 设 before 卡截止 / 清 since 看全量.
   const [since, setSince] = useState<number | undefined>(todayStartMs);
@@ -134,14 +160,15 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
   const [showActions, setShowActions] = useState(true);
   const [actions, setActions] = useState<BackendActionRow[]>([]);
 
-  /** 动作重拉:mount / homeId 切换 / 手动 reload 时调,失败静默(不阻断事件流)。 */
+  /** 动作重拉:mount / homeId 切换 / 时间窗变化 / 手动 reload 时调,失败静默(不阻断事件流)。
+   *  带上当前应用的时间窗(appliedSince/appliedBefore),让动作与事件同段,不混入范围外记录。 */
   const reloadActions = useCallback(() => {
-    fetchActions(false)
+    fetchActions(false, appliedSince, appliedBefore)
       .then(setActions)
       .catch(() => {
         /* 动作流失败不影响事件流;保留上次结果 */
       });
-  }, []);
+  }, [appliedSince, appliedBefore]);
 
   /** SSE 触发的动作重拉:trailing debounce 合并突发,避免每条事件都全量拉 500 行。 */
   const sseReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -325,10 +352,14 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
     fetchPage({ append: true, pageOffset: offset });
   };
 
-  // 事件 + 动作合并成单条时间倒序流(见 mergeFeedRows 的窗口规则)。
+  // 事件 + 动作合并成单条时间倒序流(见 mergeFeedRows 的窗口规则);带上当前应用的时间窗,
+  // 让动作与事件同段约束(即使无事件也按 since/before 卡界)。
   const feedRows = useMemo(
-    () => mergeFeedRows(events, actions, showEvents, showActions),
-    [events, actions, showEvents, showActions],
+    () =>
+      mergeFeedRows(
+        events, actions, showEvents, showActions, appliedSince, appliedBefore,
+      ),
+    [events, actions, showEvents, showActions, appliedSince, appliedBefore],
   );
 
   const noneChecked = !showEvents && !showActions;
@@ -389,6 +420,26 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
           />
         </div>
       </div>
+
+      {/* 事件初始页加载中 / 失败:内联提示,不阻断下方合流(动作已独立加载)。 */}
+      {(eventsError || eventsLoading) && (
+        <div className="mx-5 mb-2 px-3 py-2 rounded-lg bg-bg-primary border border-border text-caption text-text-secondary flex items-center justify-between gap-2">
+          <span>
+            {eventsError
+              ? t("activity.eventsBannerFailed", { msg: eventsError.message })
+              : t("activity.eventsBannerLoading")}
+          </span>
+          {eventsError && onRetryEvents && (
+            <button
+              type="button"
+              onClick={onRetryEvents}
+              className="shrink-0 px-2 py-0.5 rounded border border-border text-text-primary hover:border-border-strong"
+            >
+              {t("activity.retry")}
+            </button>
+          )}
+        </div>
+      )}
 
       {noneChecked ? (
         <div className="text-body text-center py-10 text-text-secondary">

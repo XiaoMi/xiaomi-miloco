@@ -104,8 +104,13 @@ async def _write_action_ledger(
     result_msg: str | None,
     success: bool,
     error: str | None,
+    source: str = "cli",
+    source_id: str | None = None,
 ) -> None:
     """落一行 action_ledger + 打一条 INFO 结果日志。**fail-open**:
+
+    ``source`` 区分触发源:``cli``(control_device 路径,含 manual CLI 与 agent-via-CLI,
+    后者由 trace_id 区分)/ ``rule``(RuleRunner 直控,``source_id`` 写 rule_id)。
 
     整体裹 try/except,任何异常只 warning,绝不影响调用方的控制结果。
     device_name / room 从内存 device cache 解析(便宜),解析失败留 None。
@@ -141,6 +146,8 @@ async def _write_action_ledger(
                     result_msg=result_msg,
                     success=success,
                     error=error,
+                    source=source,
+                    source_id=source_id,
                 )
             )
 
