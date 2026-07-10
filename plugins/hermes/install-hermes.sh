@@ -380,7 +380,7 @@ fi
 # 后果：miloco service status 永远说"在跑"，但实际接不上 / 行为异常。
 # 修法：检测到这种状态就 warn + 提示用户怎么清理，**不**擅自 kill supervisord（它可能管着别的服务）。
 if [ -d "$MILOCO_HOME" ]; then
-  SUPERVISORD_CONF="$MILOCO_HOME/supervisord.conf"
+SUPERVISORD_CONF="$MILOCO_HOME/supervisord.conf"
   SUPERVISORD_PID="$MILOCO_HOME/supervisord.pid"
   SUPERVISORD_SOCK="$MILOCO_HOME/supervisord.sock"
   # 情况 1: supervisord.conf 缺失但 PID 还在
