@@ -17,6 +17,8 @@ metadata:
 git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes ~/xiaomi-miloco && cd ~/xiaomi-miloco && bash plugins/hermes/install-hermes.sh
 ```
 
+> HTTPS 超时可改用 SSH：`git clone git@github.com:n0tssss/xiaomi-miloco.git -b pr-hermes ~/xiaomi-miloco`
+
 装完跑验证：
 
 ```bash
@@ -36,7 +38,8 @@ command -v hermes || curl -fsSL https://hermes-agent.nousresearch.com/install.sh
 # 1.2 确认 miloco-cli（装 backend）  
 command -v miloco-cli || curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
 
-# 1.3 clone + 安装
+# 1.3 clone + 安装（HTTPS 不通则配置 SSH 替换）
+git config --global url."git@github.com:".insteadOf "https://github.com/" 2>/dev/null; true
 git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes ~/xiaomi-miloco
 cd ~/xiaomi-miloco
 bash plugins/hermes/install-hermes.sh
