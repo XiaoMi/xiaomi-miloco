@@ -457,6 +457,9 @@ async def catch_all_exceptions_middleware(request: Request, call_next):
         return handle_exception(request, exc)
 
 
+from miloco.agent_platform.webhook_router import router as webhook_router
+
+app.include_router(webhook_router)  # /miloco/webhook, no prefix needed
 app.include_router(admin_router, prefix="/api")
 app.include_router(miot_router, prefix="/api")
 app.include_router(person_router, prefix="/api")
