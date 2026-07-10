@@ -99,11 +99,13 @@ class OnboardingTriggerService:
         is_miot_ready: Callable[[], bool],
         has_persons: Callable[[], bool],
         has_profile_entries: Callable[[], bool],
+        is_omni_ready: Callable[[], bool],
     ) -> None:
         self._kv_repo = kv_repo
         self._is_miot_ready = is_miot_ready
         self._has_persons = has_persons
         self._has_profile_entries = has_profile_entries
+        self._is_omni_ready = is_omni_ready
         # 进程内一次性护栏：多个调用点（启动 + 授权回调）可能并发汇入，
         # lock 串行化「检查-发送-置位」，_fired 兜底 KV 写失败时同一进程内不重发。
         self._lock = asyncio.Lock()
@@ -132,6 +134,9 @@ class OnboardingTriggerService:
                     return False
                 if self._has_profile_entries():
                     logger.info("onboarding trigger skipped: home profile not empty")
+                    return False
+                if not self._is_omni_ready():
+                    logger.info("onboarding trigger skipped: omni model not configured")
                     return False
             except Exception:  # noqa: BLE001
                 logger.warning("onboarding trigger: 条件检查失败，跳过本次", exc_info=True)

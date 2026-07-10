@@ -192,12 +192,14 @@ class Manager:
             from miloco.miot.filter import allowed_home_ids
 
             kv = self._kv_repo
+            from miloco.config import get_settings
             svc = OnboardingTriggerService(
                 kv_repo=kv,
                 is_miot_ready=lambda: bool(kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY))
                 and bool(allowed_home_ids(kv)),
                 has_persons=lambda: bool(self._person_service.list_persons()),
                 has_profile_entries=lambda: bool(hp_store.load_profile().entries),
+                is_omni_ready=lambda: bool(get_settings().model.omni.api_key),
             )
             self._onboarding_trigger = svc
         return svc
