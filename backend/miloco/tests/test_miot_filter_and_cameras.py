@@ -88,6 +88,26 @@ def test_denied_camera_dids_with_values():
     assert miot_filter.denied_camera_dids(kv) == {"c1", "c2"}
 
 
+def test_voice_allowed_camera_dids_empty():
+    kv = _FakeKV()
+    assert miot_filter.voice_allowed_camera_dids(kv) == set()
+
+
+def test_voice_allowed_camera_dids_with_values():
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY: json.dumps(["c1", "c2"])}
+    )
+    assert miot_filter.voice_allowed_camera_dids(kv) == {"c1", "c2"}
+
+
+def test_voice_allow_is_orthogonal_to_feed_deny():
+    """语音白名单与感知黑名单互不影响：改一个不动另一个。"""
+    kv = _FakeKV({ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"])})
+    miot_filter.set_camera_voice_in_use(kv, "c2", True)
+    assert miot_filter.denied_camera_dids(kv) == {"c1"}
+    assert miot_filter.voice_allowed_camera_dids(kv) == {"c2"}
+
+
 def test_is_home_allowed_no_filter():
     kv = _FakeKV()
     # 空启用集 → 什么都不允许
@@ -189,6 +209,23 @@ def test_set_camera_in_use_inverts_disabled():
     assert miot_filter.set_camera_in_use(kv, "ghost", True) == (["c2"], False)
 
 
+def test_set_camera_voice_in_use_writes_allowlist():
+    kv = _FakeKV()
+    # voice_in_use=True adds to voice allow list
+    assert miot_filter.set_camera_voice_in_use(kv, "c1", True) == (["c1"], True)
+    assert miot_filter.set_cameras_voice_in_use(kv, ["c2", "c3"], True) == (
+        ["c1", "c2", "c3"],
+        True,
+    )
+    # voice_in_use=False removes from voice allow list
+    assert miot_filter.set_camera_voice_in_use(kv, "c1", False) == (["c2", "c3"], True)
+    # no-op re-toggle → changed=False
+    assert miot_filter.set_camera_voice_in_use(kv, "ghost", False) == (
+        ["c2", "c3"],
+        False,
+    )
+
+
 def test_set_in_use_no_op_skips_kv_write():
     """No-op toggles 不应该再写 kv。"""
     kv = _FakeKV()
@@ -225,6 +262,9 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         refresh_devices=AsyncMock(return_value=None),
         refresh_cameras=AsyncMock(return_value=None),
         refresh_scenes=AsyncMock(return_value=None),
+        # 默认：awake 缓存空（全部相机镜头态未知→None，不 gate）。需要构造镜头关闭的
+        # 测试自行覆盖该 mock 返回 {did: False}。
+        read_cameras_awake=AsyncMock(side_effect=lambda dids, **kw: {}),
     )
     svc = MiotService(miot_proxy=proxy)
 
@@ -399,34 +439,44 @@ async def test_switch_home_returns_all_homes():
 
 @pytest.mark.asyncio
 async def test_list_cameras_with_state_flags():
+    """in_use = 活跃集（未停用 + home + 三态 + 上限）；三态并列指标 + is_online 兼容。"""
     cameras = {
-        "c1": _camera("c1", home_id="H1"),
-        "c2": _camera("c2", home_id="H1", lan_online=False),
-        "c3": _camera("c3", home_id="H2"),
+        "c1": _camera("c1", home_id="H1"),  # 三态好但在停用集 → 不活跃
+        "c2": _camera("c2", home_id="H1", lan_online=False),  # 局域网不可达 → 不活跃
+        "c4": _camera("c4", home_id="H1"),  # 三态好 + 未停用 → 活跃
+        "c3": _camera("c3", home_id="H2"),  # 别的家庭 → 过滤掉
     }
-    devices = {
-        "c1": _camera("c1", home_id="H1"),
-        "c2": _camera("c2", home_id="H1"),
-        "c3": _camera("c3", home_id="H2"),
-    }
+    devices = {d: v for d, v in cameras.items()}
     kv = _FakeKV({
         ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
         ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
     })
     svc = _make_service(devices=devices, cameras=cameras, kv=kv)
-    svc._connected_camera_dids = lambda: {"c2"}  # type: ignore[assignment]
+    svc._connected_camera_dids = lambda: {"c4"}  # type: ignore[assignment]
 
     out = await svc.list_cameras_with_state()
     by_did = {c["did"]: c for c in out}
 
-    # 按家庭过滤：只返回 H1 的相机（c3 属于 H2，被过滤掉）
-    assert set(by_did.keys()) == {"c1", "c2"}
-    assert by_did["c1"]["in_use"] is False  # in deny list
-    assert by_did["c1"]["is_online"] is True
+    # 按家庭过滤：只返回 H1 的相机（c3 属于 H2）
+    assert set(by_did.keys()) == {"c1", "c2", "c4"}
+
+    # c1：三态好但被停用 → 不在活跃集 → in_use=false
+    assert by_did["c1"]["cloud_online"] is True
+    assert by_did["c1"]["lan_reachable"] is True
+    assert by_did["c1"]["in_use"] is False
+    assert by_did["c1"]["is_online"] is True  # 兼容字段 = cloud && lan
     assert by_did["c1"]["connected"] is False
-    assert by_did["c2"]["in_use"] is True
-    assert by_did["c2"]["is_online"] is False  # lan_online=False
-    assert by_did["c2"]["connected"] is True
+
+    # c2：未停用但局域网不可达 → 被可用性 gate 掉 → in_use=false
+    assert by_did["c2"]["cloud_online"] is True
+    assert by_did["c2"]["lan_reachable"] is False
+    assert by_did["c2"]["in_use"] is False
+    assert by_did["c2"]["is_online"] is False
+
+    # c4：三态好 + 未停用 → 活跃 → in_use=true；awake 缓存空=未知(None)；connected 正交
+    assert by_did["c4"]["in_use"] is True
+    assert by_did["c4"]["awake"] is None
+    assert by_did["c4"]["connected"] is True
 
 
 @pytest.mark.asyncio
@@ -475,6 +525,102 @@ async def test_toggle_camera_rejects_unknown():
     svc = _make_service(cameras={"c1": _camera("c1")})
     with pytest.raises(ValidationException):
         await svc.toggle_camera([{"did": "ghost", "in_use": False}])
+
+
+# ─── MiotService: 拾音开关（voice_in_use，mic-off 语义）───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_voice_flags():
+    """voice_in_use 是存储偏好：在语音白名单即 True（**默认 False**），与 in_use 正交。"""
+    cameras = {"c1": _camera("c1", home_id="H1"), "c2": _camera("c2", home_id="H1")}
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY: json.dumps(["c1"]),
+    })
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["voice_in_use"] is True   # 在语音白名单
+    assert by_did["c1"]["in_use"] is True          # 感知仍启用（正交）
+    assert by_did["c2"]["voice_in_use"] is False   # 默认关闭
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_writes_allowlist():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    res = await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": True}])
+    assert any(c["did"] == "c1" and c["voice_in_use"] is True for c in res)
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)) == ["c1"]
+
+    res = await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": False}])
+    assert any(c["did"] == "c1" and c["voice_in_use"] is False for c in res)
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)) == []
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_rejects_unknown():
+    svc = _make_service(cameras={"c1": _camera("c1")})
+    with pytest.raises(ValidationException):
+        await svc.toggle_camera_voice([{"did": "ghost", "voice_in_use": False}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_rejected_when_camera_disabled():
+    """拾音从属于感知：感知已关闭(在黑名单)的相机不允许设置拾音。"""
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),  # c1 感知已关闭
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    with pytest.raises(ValidationException, match="声音"):
+        await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": True}])
+    # 拒绝后不落库
+    assert kv.get(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_off_on_preserves_voice_preference():
+    """关相机不改写语音白名单：off→on 循环后语音偏好原样保留（存储偏好不落库为「自动关」）。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    # 先把 c1 语音打开（此时感知仍开）
+    await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": True}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)) == ["c1"]
+    # 关相机感知 → 语音白名单不应被改写
+    await svc.toggle_camera([{"did": "c1", "in_use": False}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)) == ["c1"]
+    # 重新开相机感知 → 旧语音偏好仍在（voice_in_use=True）
+    await svc.toggle_camera([{"did": "c1", "in_use": True}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)) == ["c1"]
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["in_use"] is True
+    assert by_did["c1"]["voice_in_use"] is True  # 偏好保留
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_voice_does_not_restart_or_refresh():
+    """语音开关不 refresh_cameras / _sync_camera_adapter / _restart_perception_engine
+    （dispatch 阶段实时读 KV，改开关即时生效）。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    svc._miot_proxy.refresh_cameras = AsyncMock()
+    svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
+    svc._restart_perception_engine = AsyncMock()  # type: ignore[assignment]
+    await svc.toggle_camera_voice([{"did": "c1", "voice_in_use": False}])
+    svc._miot_proxy.refresh_cameras.assert_not_awaited()
+    svc._sync_camera_adapter.assert_not_awaited()
+    svc._restart_perception_engine.assert_not_awaited()
 
 
 # ─── _assert_did_in_allowed_home ─────────────────────────────────────────────
@@ -528,6 +674,7 @@ async def test_unbind_miot_clears_scope_config():
     kv = _FakeKV({
         ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
         ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+        ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY: json.dumps(["c1"]),
     })
     db_connector = MagicMock()
     db_connector.execute_update = MagicMock(return_value=0)
@@ -553,6 +700,7 @@ async def test_unbind_miot_clears_scope_config():
 
     assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None
     assert kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY) is None
+    assert kv.get(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY) is None
     # LRU: 必须有一次 DELETE FROM device_lru
     lru_calls = [
         c for c in db_connector.execute_update.call_args_list
@@ -1384,3 +1532,209 @@ async def test_toggle_camera_swap_still_rejects_net_over_limit():
             {"did": b1, "in_use": True},
             {"did": b2, "in_use": True},
         ])
+
+
+# ─── awake（镜头开关）门 + 三态 ───────────────────────────────────────────────
+
+
+def test_select_active_awake_gate():
+    """select_active 的 awake_map：awake==False 的相机被排除；None/True/未给出放行。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {
+        "c1": _camera("c1", home_id="H1"),  # awake True → 保留
+        "c2": _camera("c2", home_id="H1"),  # awake False → 排除
+        "c3": _camera("c3", home_id="H1"),  # awake None → 保留
+    }
+    awake = {"c1": True, "c2": False, "c3": None}
+    got = set(miot_filter.select_active_camera_dids(kv, cameras, awake_map=awake))
+    assert got == {"c1", "c3"}  # c2 镜头关被 gate 掉
+    # 不给 awake_map → 全放行（向后兼容）
+    assert set(miot_filter.select_active_camera_dids(kv, cameras)) == {
+        "c1", "c2", "c3",
+    }
+
+
+def test_resolve_camera_switch_iids():
+    """从 spec 定位 camera-control:on；双摄命中多个；indicator-light 排除；无则空。"""
+    from miloco.miot.client import _resolve_camera_switch_iids
+
+    single = {
+        "prop.2.1": {"service_type_name": "camera-control", "type_name": "on"},
+        "prop.4.1": {"service_type_name": "indicator-light", "type_name": "on"},
+    }
+    assert _resolve_camera_switch_iids(single) == [(2, 1)]
+
+    dual = {
+        "prop.2.22": {"service_type_name": "camera-control", "type_name": "on"},
+        "prop.24.1": {"service_type_name": "camera-control", "type_name": "on"},
+        "prop.25.1": {"service_type_name": "camera-control", "type_name": "on"},
+    }
+    assert set(_resolve_camera_switch_iids(dual)) == {(2, 22), (24, 1), (25, 1)}
+
+    none = {"prop.3.1": {"service_type_name": "environment", "type_name": "temperature"}}
+    assert _resolve_camera_switch_iids(none) == []
+
+
+@pytest.mark.asyncio
+async def test_list_camera_lens_off_not_in_use():
+    """镜头关闭(awake=False)的相机：不进活跃集 → in_use=false（不显示为开）。"""
+    cameras = {"c1": _camera("c1", home_id="H1")}  # 云端+局域网都好
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    # 镜头关闭
+    svc._miot_proxy.read_cameras_awake = AsyncMock(  # type: ignore[assignment]
+        side_effect=lambda dids, **kw: {"c1": False}
+    )
+
+    out = await svc.list_cameras_with_state()
+    c1 = {c["did"]: c for c in out}["c1"]
+    assert c1["cloud_online"] is True
+    assert c1["lan_reachable"] is True
+    assert c1["awake"] is False
+    assert c1["in_use"] is False  # 镜头关 → 不活跃 → 不显示为开
+
+
+@pytest.mark.asyncio
+async def test_read_cameras_awake_or_combine(_scope_proxy_env):
+    """双摄多开关 OR 合并：任一 on→True；全 off→False；无一 on 且有读失败→None。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    proxy._device_info_dict = {  # type: ignore[attr-defined]
+        "c1": SimpleNamespace(urn="urn:dual", model="dual"),
+    }
+    spec = {
+        "prop.2.22": {"service_type_name": "camera-control", "type_name": "on"},
+        "prop.24.1": {"service_type_name": "camera-control", "type_name": "on"},
+    }
+    proxy._fetch_device_spec = AsyncMock(return_value=spec)  # type: ignore[assignment]
+
+    # 任一 on → True
+    proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
+        {"did": "c1", "siid": 2, "piid": 22, "value": False, "code": 0},
+        {"did": "c1", "siid": 24, "piid": 1, "value": True, "code": 0},
+    ])
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is True
+    assert proxy._camera_awake_cache["c1"] is True  # 回填缓存
+
+    # 全 off → False
+    proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
+        {"did": "c1", "siid": 2, "piid": 22, "value": False, "code": 0},
+        {"did": "c1", "siid": 24, "piid": 1, "value": False, "code": 0},
+    ])
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is False
+
+    # 无一 on 且有读失败(code!=0) → None（不误判整机关闭）
+    proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
+        {"did": "c1", "siid": 2, "piid": 22, "value": False, "code": 0},
+        {"did": "c1", "siid": 24, "piid": 1, "code": -704},
+    ])
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is None
+
+
+@pytest.mark.asyncio
+async def test_read_cameras_awake_cache_only(_scope_proxy_env):
+    """cache_only：只读缓存、零云请求；命中返回、缺失→None。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    proxy._device_info_dict = {  # type: ignore[attr-defined]
+        "c1": SimpleNamespace(urn="urn:c1", model="m1"),
+    }
+    spec = {"prop.2.1": {"service_type_name": "camera-control", "type_name": "on"}}
+    proxy._fetch_device_spec = AsyncMock(return_value=spec)  # type: ignore[assignment]
+    proxy.get_device_properties = AsyncMock(  # type: ignore[assignment]
+        return_value=[{"did": "c1", "siid": 2, "piid": 1, "value": True, "code": 0}]
+    )
+    # 先真读一次填缓存
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is True
+    assert proxy.get_device_properties.await_count == 1
+    # cache_only：c1 命中、c2 未缓存→None，不再打云
+    out = await proxy.read_cameras_awake(["c1", "c2"], cache_only=True)
+    assert out == {"c1": True, "c2": None}
+    assert proxy.get_device_properties.await_count == 1
+
+
+# ─── toggle_camera 三态开启门 + 可用集上限 ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_toggle_enable_rejected_cloud_offline():
+    """开启云端离线的相机 → 拒绝，文案含「米家云端离线」。"""
+    cam = _camera("c1", home_id="H1", online=False)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    with pytest.raises(ValidationException, match="米家云端离线"):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_enable_rejected_lan_unreachable():
+    """开启局域网不可达（云端在线）的相机 → 拒绝，文案含「局域网不可达」。"""
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    with pytest.raises(ValidationException, match="局域网不可达"):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_enable_rejected_lens_off():
+    """开启镜头关闭（awake=False，云端+局域网都好）的相机 → 拒绝，含「镜头已关闭」。
+    awake 走新鲜读，CLI/API 直连同样被挡（闸在后端）。"""
+    cam = _camera("c1", home_id="H1")  # 云端+局域网都好
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+    svc._miot_proxy.read_cameras_awake = AsyncMock(  # type: ignore[assignment]
+        side_effect=lambda dids, **kw: {"c1": False}
+    )
+    with pytest.raises(ValidationException, match="镜头已关闭"):
+        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+
+@pytest.mark.asyncio
+async def test_toggle_cap_counts_usable_offline_frees_slot():
+    """上限数「可用集」：已启用相机里有一台离线时，它不占名额 → 仍可再开一台在线相机。"""
+    dids = _cam_dids(LIMIT)  # c001..cN，全在线、未拉黑
+    cameras = {d: _camera(d, home_id="H1") for d in dids}
+    cameras[dids[0]] = _camera(dids[0], home_id="H1", online=False)  # 其中一台离线
+    new = "c_new"
+    cameras[new] = _camera(new, home_id="H1")  # 新的在线相机，初始被拉黑(关)
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps([new]),
+    })
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+
+    # 未拉黑意图 = LIMIT 台，但其中 1 台离线 → 可用只有 LIMIT-1 → 开 new(在线)
+    # 后可用 = LIMIT ≤ 上限 → 放行（离线那台把名额让了出来）。
+    res = await svc.toggle_camera([{"did": new, "in_use": True}])
+    by_did = {c["did"]: c for c in res}
+    assert by_did[new]["in_use"] is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_gap_fills_awake_for_current_home(_scope_proxy_env):
+    """启动/新设备：refresh_cameras 对当前家庭、awake 缓存里还没有的相机补读并回填，
+    不依赖 web/推送。已在缓存的不重复读；别的家庭的不补。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    miot_client.get_cameras_async = AsyncMock(return_value={
+        "c1": _camera("c1", home_id="H1"),  # 已在缓存 → 不重复
+        "c2": _camera("c2", home_id="H1"),  # 缺失 → 补读
+        "c3": _camera("c3", home_id="H2"),  # 别的家庭 → 不补
+    })
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+    proxy._device_info_dict = {  # type: ignore[attr-defined]
+        "c1": SimpleNamespace(urn="urn:c1", model="m"),
+        "c2": SimpleNamespace(urn="urn:c2", model="m"),
+        "c3": SimpleNamespace(urn="urn:c3", model="m"),
+    }
+    spec = {"prop.2.1": {"service_type_name": "camera-control", "type_name": "on"}}
+    proxy._fetch_device_spec = AsyncMock(return_value=spec)  # type: ignore[assignment]
+    proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
+        {"did": "c2", "siid": 2, "piid": 1, "value": False, "code": 0},
+    ])
+    proxy._camera_awake_cache["c1"] = True  # 预置：已有
+
+    await proxy.refresh_cameras()
+
+    assert proxy._camera_awake_cache.get("c1") is True      # 未被重复读、保持
+    assert proxy._camera_awake_cache.get("c2") is False     # 缺失 → 补读到 False
+    assert "c3" not in proxy._camera_awake_cache            # 别的家庭 → 不补

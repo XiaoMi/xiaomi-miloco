@@ -32,6 +32,7 @@
 ### 能力边界
 
 - 任务记录只做统计与归档，不做自动化触发（那是规则）、不做定时提醒（那是 cron）
+- 任务被暂停后，记录累积类操作（进度累加 / 事件追加 / 计时段起止）被静默跳过（返回 noop 而非报错，不计数），恢复启用后才继续累积
 - 一个任务同时只能有一条活跃记录；记录形态（kind）在创建时定死，不可中途切换
 - 事件型记录长期累积、不参与周期归档
 - 任务被删除后，关联的规则与所有记录一并清理，仅保留独立的终止审计快照
@@ -45,10 +46,11 @@
 任务管理由两个模块协作：`task/`（任务生命周期主体）与 `task_record/`（任务的行为统计载体）。
 
 ```
-创建任务（Agent: miloco-create-task）
-  → POST /api/tasks → TaskService（task/service.py）
-      写 task 主体 + 装配 rule / cron / record
-      task↔rule/cron 关联记入 task_link
+创建任务（Agent: miloco-create-task 分步装配）
+  → POST /api/tasks → TaskService（task/service.py）仅建 task 占位行
+  → 再分步挂载（rule 置于最后，故称倒序）：POST /api/tasks/{id}/record 初始化记录（FK 直连 task，不进 task_link）；
+      POST /api/tasks/{id}/link 挂 cron（记入 task_link）；
+      rule create endpoint 内部一笔事务写 rule + task_link（依赖 record 先就位）
 
 累积统计（CLI / Agent）
   → POST /api/tasks/{id}/record/...（init / progress-inc / event-append / session-start|end）
@@ -69,22 +71,23 @@
 
 ### 核心模块
 
-**TaskService**（`backend/miloco/src/miloco/task/service.py`）
+**TaskService**（`task/service.py`）
 
-任务生命周期主体的业务层：创建 / 启停 / 更新 / 删除任务，装配规则与定时，维护 task↔rule/cron 关联（记入 `task_link`）。`delete_task` 单事务编排终止——写审计快照 + 删规则 + 删任务（FK CASCADE 清理关联与记录）。
+任务生命周期主体的业务层：创建（仅建占位行）/ 启停 / 更新 / 删除任务，维护 task↔rule/cron 关联（记入 `task_link`）。启停时联动改写关联规则的 `enabled`，并把 cron 侧操作汇总成 `agent_pending` 交由 Agent 落地——后端不直接操作 OpenClaw Cron。`delete_task` 单事务编排终止——写审计快照 + 删规则 + 删任务（FK CASCADE 清理关联与记录）。另提供 summary 聚合视图：以 task 为主表左连接各任务的活跃记录摘要（没绑记录的 task 也返，不丢行），一次性出全部任务的完整状态（基础 + 规则摘要 + 关联 + 记录摘要），供前端任务面板拉取；记录侧摘要由 `TaskRecordService.list_active_summaries` 拼装。
 
-**TaskRecordService**（`backend/miloco/src/miloco/task_record/service.py`）
+**TaskRecordService**（`task_record/service.py`）
 
 任务记录的业务层，跨表事务编排 + 派生量计算 + 字段校验：
 
 - **init**：按 kind 校验内容后插入活跃记录（前提任务已存在，FK 直连 task）
 - **累积**：进度累加 / 事件追加 / 计时段开始与结束，写表后返回派生量
-- **读取**：取活跃记录 + 子表 + 派生量；支持当前 / 单日历史 / 区间聚合三套互斥查询
+- **调整**：按 kind 白名单 PATCH 记录的可配字段（目标 / 单位 / 周期窗口 / 过期时间等），kind 本身不在任何白名单、永不可改
+- **读取**：取活跃记录 + 子表 + 派生量；支持当前 / 单日历史 / 区间聚合三套互斥查询，另有归档列表读取按日回看历史成绩
 - **派生量**：进度型出剩余量与百分比，时长型出今日累计 / 剩余分钟 / 活跃计时段，事件型出总次数 / 今日次数 / 最近时间
 
 四个 Repo（`ProgressRepo` / `DurationRepo` / `EventRepo` / `TerminateLogRepo`，`task_record/repo.py`）是薄包装，接 caller 传入的 cursor、不持有连接、不做业务判断——把事务边界统一交给 service。
 
-**rollover_daily_job**（`backend/miloco/src/miloco/task_record/rollover.py`）
+**rollover_daily_job**（`task_record/rollover.py`）
 
 周期归档调度入口，由 `main.py` 的 lifespan 起一个每日凌晨触发的 asyncio daemon。具备自愈：启动即跑一次，跨日重启漏滚由"上次归档时间早于上一周期结束"判据兜底，重复跑靠唯一索引无副作用。
 

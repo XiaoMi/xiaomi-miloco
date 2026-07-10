@@ -38,8 +38,11 @@ from miloco.miot.filter import (
     denied_camera_dids,
     filter_by_home,
     is_home_allowed,
+    select_active_camera_dids,
     set_cameras_in_use,
+    set_cameras_voice_in_use,
     set_homes_in_use,
+    voice_allowed_camera_dids,
 )
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
@@ -221,6 +224,7 @@ class MiotService:
         """Clear service-layer scope residue (called on account switch)."""
         self._kv_repo.delete(ScopeConfigKeys.HOME_WHITE_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._lru.clear()
 
     @property
@@ -1119,8 +1123,21 @@ class MiotService:
         return homes
 
     async def list_cameras_with_state(self) -> list[dict]:
-        """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。"""
-        denied = denied_camera_dids(self._kv_repo)
+        """列出当前启用家庭下的相机，每项含三态可用性 + in_use / voice_in_use / connected。
+
+        可用性拆成三个正交指标（替代旧的一把揉 is_online）：
+          - ``cloud_online``：米家云端在线
+          - ``lan_reachable``：局域网可达（能拉流的前提）
+          - ``awake``：镜头开关。True=镜头开启 / False=镜头关闭(隐私·遮挡) /
+            None=该机型无开关属性或读取失败（未知）。走 cache_only 只读 refresh_camera_online_status
+            已填的缓存，不单独打云；缓存空时为 None（未知），刷新后自愈。
+        ``in_use``=**当下真正开启**（= 该相机在 select_active 的活跃集里：默认开·未拉黑 +
+        三态满足 + 上限≤4）——离线/不可达/镜头关的相机 in_use=false，不显示为开；超上限的
+        也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
+        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
+        ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
+        """
+        voice_allowed = voice_allowed_camera_dids(self._kv_repo)
         connected = self._connected_camera_dids()
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
@@ -1129,11 +1146,18 @@ class MiotService:
         # 设备删除后不会自动清除，需要用 _device_info_dict 做交集校验。
         devices = await self._miot_proxy.get_devices()
         cameras = {did: info for did, info in cameras.items() if did in devices}
+        # awake：只读缓存（云读收在 refresh_camera_online_status，前端列表前必调）。
+        awake_map = await self._miot_proxy.read_cameras_awake(
+            list(cameras.keys()), cache_only=True
+        )
+        # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
+        active = set(
+            select_active_camera_dids(self._kv_repo, cameras, awake_map=awake_map)
+        )
         out: list[dict] = []
         for did, info in cameras.items():
-            online = bool(getattr(info, "online", False)) and bool(
-                getattr(info, "lan_online", False)
-            )
+            cloud_online = bool(getattr(info, "online", False))
+            lan_reachable = bool(getattr(info, "lan_online", False))
             out.append(
                 {
                     "did": did,
@@ -1141,8 +1165,14 @@ class MiotService:
                     # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
                     # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
                     "room_name": getattr(info, "room_name", None),
-                    "is_online": online,
-                    "in_use": did not in denied,
+                    "cloud_online": cloud_online,
+                    "lan_reachable": lan_reachable,
+                    "awake": awake_map.get(did),
+                    # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
+                    "is_online": cloud_online and lan_reachable,
+                    "in_use": did in active,
+                    # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。
+                    "voice_in_use": did in voice_allowed,
                     "connected": did in connected,
                 }
             )
@@ -1164,45 +1194,65 @@ class MiotService:
                 f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
             )
 
+        def _in_scope(did: str) -> bool:
+            return is_home_allowed(
+                self._kv_repo, getattr(cameras[did], "home_id", None)
+            )
+
         if enable_dids:
-            # 离线设备禁止「开启」投喂:它被感知接入层 online_only 过滤、永远连不上,
-            # 开了也不出画面、徒占上限名额。只拦「开启」——已启用的设备掉线后仍保留
-            # inUse=true(允许态不被强制改),且可正常被「关闭」(disable 不走这条校验)。
-            # 在线口径 = online && lan_online,与 list_cameras_with_state 的 is_online 一致。
-            def _online(did: str) -> bool:
-                info = cameras[did]
-                return bool(getattr(info, "online", False)) and bool(
-                    getattr(info, "lan_online", False)
-                )
+            in_scope = {d for d in cameras if _in_scope(d)}
+            # 三态门（后端唯一执法点：web 置灰只保护前端，CLI/API 绕过前端全靠这里）。
+            # 开启的相机必须 云端在线 && 局域网可达 && 镜头未关，任一坏都拒、给对应文案。
+            # awake 走**新鲜云读**（非 cache_only）——CLI/冷缓存下也能准确挡镜头关。
+            # 只拦「开启」；已启用的相机掉线/镜头关仍可被「关闭」(disable 不走这条)。
+            awake_map = await self._miot_proxy.read_cameras_awake(sorted(in_scope))
 
-            offline_enable = [d for d in enable_dids if not _online(d)]
-            if offline_enable:
+            def _cloud(did: str) -> bool:
+                return bool(getattr(cameras[did], "online", False))
+
+            def _lan(did: str) -> bool:
+                return bool(getattr(cameras[did], "lan_online", False))
+
+            def _lens_ok(did: str) -> bool:
+                return awake_map.get(did) is not False  # None/True 放行,未知不误杀
+
+            cloud_offline = [d for d in enable_dids if not _cloud(d)]
+            if cloud_offline:
                 raise ValidationException(
-                    f"摄像头当前离线,无法开启投喂（{offline_enable}）;请待其上线后再启用"
+                    f"摄像头米家云端离线,无法开启（{cloud_offline}）;请待其上线后再启用"
+                )
+            lan_offline = [d for d in enable_dids if not _lan(d)]
+            if lan_offline:
+                raise ValidationException(
+                    f"摄像头局域网不可达,无法开启（{lan_offline}）;"
+                    "请确认主机与相机在同一局域网后再启用"
+                )
+            lens_off = [d for d in enable_dids if not _lens_ok(d)]
+            if lens_off:
+                raise ValidationException(
+                    f"摄像头镜头已关闭,无法开启感知（{lens_off}）;"
+                    "请先在米家中打开该摄像头镜头后再启用"
                 )
 
-            # 上限检查：用户主动 enable 超限时直接报错，不做自动禁用。计数口径与
-            # list_cameras_with_state / refresh_cameras 一致——只数当前启用家庭内、
-            # 未拉黑的相机（get_cameras 返回全部家庭，须按 home 过滤）。
+            # 上限检查：数「可用集」而非「意图集」——未拉黑 + 在当前家庭 + 三态好
+            # (云端+局域网+镜头开)。离线/局域网不可达/镜头关的相机**不占名额**（与前端
+            # activeCount 按 in_use=活跃集 计数同口径；也与 list/refresh 的 select_active
+            # 一致）。这样不会出现「面板显示有名额、点开启却被后端拒」的口径背离。
             denied = denied_camera_dids(self._kv_repo)
 
-            def _in_scope(did: str) -> bool:
-                return is_home_allowed(
-                    self._kv_repo, getattr(cameras[did], "home_id", None)
-                )
+            def _usable(did: str) -> bool:
+                return _cloud(did) and _lan(did) and _lens_ok(did)
 
-            in_scope = {d for d in cameras if _in_scope(d)}
-            # 模拟本批操作后的启用集：现状未拉黑的，先去掉本批 disable，再并入
-            # 本批 enable。enable 最后并入 → 与写库顺序一致（disable 先写、
-            # enable 后写，矛盾输入 enable 胜出）。单向 enable / 单向 disable /
-            # 混合换机都按净结果校验。
-            final_enabled = (
+            # 模拟本批操作后的启用集：现状未拉黑的，先去掉本批 disable，再并入本批
+            # enable（enable 最后并入 → 与写库顺序一致，矛盾输入 enable 胜出）。
+            intent_after = (
                 (in_scope - denied) - set(disable_dids)
             ) | (set(enable_dids) & in_scope)
-            if len(final_enabled) > MAX_ENABLED_CAMERAS:
+            usable_after = {d for d in intent_after if _usable(d)}
+            if len(usable_after) > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
                     f"最多同时启用 {MAX_ENABLED_CAMERAS} 台摄像头"
-                    f"（操作后将有 {len(final_enabled)} 台），"
+                    f"（操作后将有 {len(usable_after)} 台），"
                     f"请先禁用一台再启用新摄像头"
                 )
 
@@ -1220,6 +1270,48 @@ class MiotService:
             # 否则 sync 先连上随后 manager 被销,会留 stale reg_id。
             await self._miot_proxy.refresh_cameras()
             await self._sync_camera_adapter()
+        # 返回受影响的相机，结构与 list_cameras_with_state 一致
+        all_cameras = await self.list_cameras_with_state()
+        affected = [cam for cam in all_cameras if cam["did"] in set(all_dids)]
+        return affected
+
+    async def toggle_camera_voice(self, items: list[dict]) -> list[dict]:
+        """批量切换相机「拾音」状态（mic-off 语义）。每项 {"did": str, "voice_in_use": bool}。
+
+        关闭 = 该相机声音完全不被处理：引擎入口剥离音频（不进 gate/omni、不转写、
+        不上云、语音指令不 dispatch），dispatch/落库闸门作第二道防线。
+
+        拾音开关从属于感知开关：只能在相机感知启用(in_use=True)时设置；相机感知已关闭
+        (在黑名单)时整批拒绝。与 ``toggle_camera`` 不同,**不**调 refresh_cameras /
+        _sync_camera_adapter / _restart_perception_engine——拾音黑名单在引擎入口与
+        client.py dispatch 阶段实时读取(KVRepo.set 已同步更新进程内缓存),下一感知窗
+        即生效,无需重建 manager 或重启。本地拉流不变(音频仍解码进缓冲,只是不被处理)。
+        """
+        all_dids = [i["did"] for i in items]
+
+        cameras = await self._miot_proxy.get_cameras() or {}
+        unknown = [d for d in all_dids if d not in cameras]
+        if unknown:
+            raise ValidationException(
+                f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
+            )
+
+        # 拾音从属于感知：感知已关闭(在黑名单)的相机不允许设置拾音。前端会把这类
+        # 相机的拾音开关置灰,这里再兜一道防脏请求。关相机不改写拾音黑名单——存储偏好
+        # 保留,相机重新启用后旧拾音设置自动生效(「自动关」是派生生效态,不落库)。
+        denied = denied_camera_dids(self._kv_repo)
+        disabled = [d for d in all_dids if d in denied]
+        if disabled:
+            raise ValidationException(
+                f"摄像头感知已关闭，无法设置声音（{disabled}）；请先开启该摄像头感知"
+            )
+
+        enable_dids = [i["did"] for i in items if i["voice_in_use"]]
+        disable_dids = [i["did"] for i in items if not i["voice_in_use"]]
+        if disable_dids:
+            set_cameras_voice_in_use(self._kv_repo, disable_dids, False)
+        if enable_dids:
+            set_cameras_voice_in_use(self._kv_repo, enable_dids, True)
         # 返回受影响的相机，结构与 list_cameras_with_state 一致
         all_cameras = await self.list_cameras_with_state()
         affected = [cam for cam in all_cameras if cam["did"] in set(all_dids)]

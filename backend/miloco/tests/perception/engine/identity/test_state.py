@@ -475,3 +475,42 @@ class TestNeedsOmniCallPendingNextWindow:
         # inflight 仍挡(每 omni 窗最多一次)
         st.inflight = True
         assert needs_omni_call(st, 2, 101.0, 5.0, cfg, _FPS) is False
+
+
+class TestNeedsOmniCallGalleryEmpty:
+    """身份库为空时的重派节流（Part 2）：只放慢 unknown 到 gallery_empty_recheck_sec，
+    pending 不动（no_person 落定靠 pending 期连续投票，放慢会破坏它）。库非空行为不变。
+    """
+
+    def test_unknown_gallery_empty_uses_slow_recheck(self):
+        cfg = _config()
+        state = TrackIdentityState(track_id=1, status="unknown")
+        slow = _frames(cfg.gallery_empty_recheck_sec)   # 600s
+        normal = _frames(cfg.recheck_interval_sec)      # 30s
+        # 常规 30s 到点也不派（要等库空慢周期）
+        assert needs_omni_call(state, normal, 0.0, 0.0, cfg, _FPS, gallery_empty=True) is False
+        assert needs_omni_call(state, slow - 1, 0.0, 0.0, cfg, _FPS, gallery_empty=True) is False
+        assert needs_omni_call(state, slow, 0.0, 0.0, cfg, _FPS, gallery_empty=True) is True
+
+    def test_unknown_gallery_empty_ignores_half_interval(self):
+        """库空不走 count==0 的 interval//2 抢翻转（库空无从翻成成员）。"""
+        cfg = _config()
+        state = TrackIdentityState(track_id=1, status="unknown")
+        assert state.unknown_recheck_count == 0
+        slow = _frames(cfg.gallery_empty_recheck_sec)
+        assert needs_omni_call(state, slow // 2, 0.0, 0.0, cfg, _FPS, gallery_empty=True) is False
+
+    def test_pending_gallery_empty_still_immediate(self):
+        """pending 不受库空影响，仍下窗即派——保住 no_person 在 pending_timeout 内攒够票。"""
+        cfg = _config()
+        state = TrackIdentityState(track_id=1, status="pending")
+        assert needs_omni_call(state, 1, 0.0, 0.0, cfg, _FPS, gallery_empty=True) is True
+        assert needs_omni_call(state, 10_000, 0.0, 0.0, cfg, _FPS, gallery_empty=True) is True
+
+    def test_unknown_gallery_nonempty_unchanged(self):
+        """gallery_empty=False（库非空/默认）→ unknown 仍走 30s（首次 //2），行为不变。"""
+        cfg = _config()
+        state = TrackIdentityState(track_id=1, status="unknown")
+        half = _frames(cfg.recheck_interval_sec) // 2
+        assert needs_omni_call(state, half - 1, 0.0, 0.0, cfg, _FPS, gallery_empty=False) is False
+        assert needs_omni_call(state, half, 0.0, 0.0, cfg, _FPS, gallery_empty=False) is True

@@ -72,6 +72,21 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "多模态模型服务 Base URL",
     ),
     "model.omni.api_key": (str, "", "多模态模型 API Key"),
+    "perception.engine.input.video_short_edge": (
+        int,
+        512,
+        "视频编码短边像素（保持宽高比缩放），重启生效",
+    ),
+    "perception.engine.input.omni_fps": (
+        int,
+        1,
+        "送给 omni 的视频帧率（应为 fps 的因数），重启生效",
+    ),
+    "perception.collect.window_size": (
+        int,
+        4,
+        "感知窗口时长（秒），重启生效",
+    ),
 }
 
 # ─── 基础读写 ────────────────────────────────────────────────────────────────
