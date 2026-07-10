@@ -870,37 +870,6 @@ elif old_commit and old_commit != git_c:
 PY
 mark_done 9
 
-# --- 9.5 自动绑定通知平台：安装时默认用当前活跃的 IM 渠道 ---
-step 9.5 "自动绑定通知平台（第一个已连接 IM）"
-"$PYTHON" - "$PLUGIN_STATE" <<'PY' || true
-import json, sys
-from pathlib import Path
-state_path = Path(sys.argv[1])
-cd = Path.home() / ".hermes" / "channel_directory.json"
-first = None
-try:
-    data = json.loads(cd.read_text(encoding="utf-8"))
-    platforms = data.get("platforms", {})
-    first = next((name for name, chs in platforms.items() if chs), None)
-except Exception:
-    pass
-if not first:
-    print("  · 无已连接 IM，跳过")
-    sys.exit(0)
-try:
-    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-except Exception:
-    state = {}
-d = state.setdefault("deliver", {})
-if d.get("target"):
-    print(f"  · deliver.target 已存在 ({d['target']})，跳过")
-else:
-    d["target"] = first
-    state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"  ✓ deliver.target = {first}")
-PY
-mark_done 9.5
-
 # --- 终态 ---
 
 # --- 内联 cron reconcile（不依赖 gateway restart）---
