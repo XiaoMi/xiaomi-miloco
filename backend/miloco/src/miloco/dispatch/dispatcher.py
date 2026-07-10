@@ -63,8 +63,9 @@ _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"}
 # turn 直接跑在车主 IM 会话里且回复用户可见（deliver=True）——只把开场白 push 过去
 # 而 turn 留在后台会话会割裂上下文（用户的 IM 回复落在 channel 会话，访谈状态却在
 # 别处）。注意：队列仍按 _ROUTE 的 sessionKey 归并/单飞，实际 turn 会话由插件侧按
-# resolveTarget 解析（owner-channel = 配置的 notifySessionKey，否则最近活跃的已绑定
-# channel 会话）。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
+# resolveTarget 解析：owner-channel 会先看 notifySessionKeys，对多个已绑定会话广播
+# 首邀并在首个回复处锁定后续 onboarding；一个都没有时才回退到最近活跃的已绑定
+# channel 会话。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
 _DELIVERY: dict[EventType, dict[str, Any]] = {
     "onboarding": {"resolve_target": "owner-channel", "deliver": True},
 }

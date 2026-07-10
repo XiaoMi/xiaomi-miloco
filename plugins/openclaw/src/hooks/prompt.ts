@@ -126,6 +126,9 @@ function buildOnboardingSessionBlock(
   prompt: string | undefined,
 ): string {
   const key = sessionKey?.trim();
+  // 广播首邀正文以 [系统事件] 开头（见 backend onboarding_trigger._INSTRUCTION），
+  // 借此排除「广播 turn 自身」触发锁定——只有用户真实回复才会锁定 onboarding 会话。
+  // 若改动该前缀约定，需同步调整这里的守卫逻辑。
   if (!key || !prompt || prompt.startsWith("[系统事件]")) return "";
   const state = lockOnboardingSession(key) ?? readOnboardingState();
   if (!state || !state.invitedSessionKeys.includes(key)) return "";

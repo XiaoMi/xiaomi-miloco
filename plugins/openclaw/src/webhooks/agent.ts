@@ -134,7 +134,6 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       if (isOwnerBroadcast) {
         writeOnboardingInviteState(runTargets);
       }
-      const result = results[0];
       if (traceId) {
         for (const item of results) registerTraceLink(item.runId, traceId);
       }
