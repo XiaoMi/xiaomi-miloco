@@ -429,15 +429,7 @@ fi
 # 但 miloco service start 用的是 system python3，找不到 miloco 模块 → backend 装包失败。
 # 修法：扫 uv venv + pyenv venv，找到 miloco 包所在 python，patch 进 config.json。
 if [ -f "$MILOCO_HOME/config.json" ]; then
-  CUR_PY_BIN="$("$PYTHON" - "$MILOCO_HOME" <<'PY'
-import json, sys
-try:
-    d = json.load(open(sys.argv[1] + '/config.json'))
-    print(d.get('server', {}).get('python_bin', '') or '')
-except Exception:
-    print('')
-PY
-  )"
+  CUR_PY_BIN="$("$PYTHON" "$HERE/scripts/read_python_bin.py" "$MILOCO_HOME" 2>/dev/null || echo "")"
 
   # 测试当前配置的 python_bin 能不能 import miloco
   NEEDS_FIX=0
@@ -470,8 +462,11 @@ PY
         info "config.json::server.python_bin 找不到能 import miloco 的 python，尝试 pip install miloco..."
         if "$PYTHON" -m pip install --quiet miloco 2>&1 | tail -3; then
           FOUND_PY="$PYTHON"
-        fi
-      fi
+  fi
+fi
+# 清理 pycache 确保新代码生效
+find "$MILOCO_PKG_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    fi
 
     if [ -n "$FOUND_PY" ]; then
       info "auto-fix: config.json::server.python_bin = $FOUND_PY"
