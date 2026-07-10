@@ -17,7 +17,7 @@ import { LivePlayerPlaceholder } from "./LivePlayerPlaceholder";
 import { getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
 import { humanTokens } from "@/lib/formatTokens";
-import { useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "./Toast";
 import { switchBlockedReasonKey } from "@/lib/cameraSwitch";
@@ -555,6 +555,9 @@ function CamSwitch({
   // 原因,点击给明确反馈 + 触屏兜底。fixed 定位锚定入场点(只 onMouseEnter 记一次、不跟随
   // 光标,省逐像素重渲染),不被下区 ul 的 overflow-hidden 裁掉;触屏无 hover,只走 toast。
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  // SR 用:稳定 id 关联「原因文本」与开关。aria-describedby 需常驻(见下 sr-only 文本),
+  // 不依赖 tip——否则 SR 聚焦瞬间视觉气泡可能还没渲染、describedby 落空。
+  const tipId = useId();
   return (
     <>
       <button
@@ -562,6 +565,8 @@ function CamSwitch({
         role="switch"
         aria-checked={inUse}
         aria-disabled={dim}
+        // block 态常驻指向 sr-only 原因文本,让屏幕阅读器聚焦即读出「为什么不可开」。
+        aria-describedby={blocked ? tipId : undefined}
         aria-label={t(inUse ? "hero.toggleAriaInUse" : "hero.toggleAriaNotInUse", {
           name,
         })}
@@ -604,9 +609,17 @@ function CamSwitch({
           }`}
         />
       </button>
+      {/* SR 用:block 态常挂一份 sr-only 原因文本(视觉隐藏),承载 aria-describedby——常驻
+          不依赖 tip,故屏幕阅读器聚焦瞬间就能读到,不受视觉气泡渲染时机影响。 */}
+      {blocked && (
+        <span id={tipId} className="sr-only">
+          {t(blockedReasonKey)}
+        </span>
+      )}
+      {/* 视觉气泡:hover / focus 弹,纯视觉——aria-hidden 避免与上面 sr-only 文本重复朗读。 */}
       {blocked && tip && (
         <div
-          role="tooltip"
+          aria-hidden="true"
           className="fixed z-[90] w-56 max-w-[70vw] -translate-x-1/2 -translate-y-full rounded-lg border border-warning bg-warning-bg text-warning text-caption px-2.5 py-1.5 shadow-md pointer-events-none"
           style={{ left: tip.x, top: tip.y - 10 }}
         >
