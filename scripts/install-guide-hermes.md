@@ -44,11 +44,96 @@ bash plugins/hermes/install-hermes.sh
 
 成功标志：exit 0 + `✅ 安装完成`。
 
-### Step 2：用户操作（agent 逐个引导，不要一次贴完）
+### Step 2：收集用户配置（逐个询问，不可一次贴完）
 
-**2.1 绑米家账号** → `miloco-cli account status` 判是否已绑，未绑就引导 OAuth  
-**2.2 配 Omni 模型** → `miloco-cli config get model.omni.api_key` / `model.omni.model` / `model.omni.base_url` 判是否已配  
-**2.3 重启 gateway** → `hermes gateway restart`（用户自己跑，agent 不能代跑）
+此步骤 **不运行脚本**，由 agent 直接与用户交互。
+
+> **关键纪律：必须按 2.1 → 2.2 → 2.3 顺序逐项询问。每项完成（用户回复"好了"/"ok"/"继续"）才发下一项。禁止一次性贴出全部步骤。**
+
+#### 2.1 米家账号
+
+agent 先跑：
+```bash
+miloco-cli account status
+```
+
+根据输出判定：
+
+**已绑定（输出含 `"is_bound": true`）：**
+> 米家账号已绑定 ✓
+> 跳到配模型。
+
+**未绑定：**
+> Miloco 需要绑定小米账号才能控制智能设备。
+> 请在浏览器中打开以下链接完成授权：
+> 
+> {bind_url}
+>
+> 完成后，**把页面上显示的授权码（base64 字符串）复制给我**。
+>
+> ⚠️ 授权码 5 分钟过期，请尽快操作。
+
+用户回复授权码后，agent 跑：
+```bash
+miloco-cli account authorize "<用户给的授权码>"
+```
+
+验证通过后进 2.2。
+
+#### 2.2 Omni 模型
+
+agent 先跑：
+```bash
+miloco-cli config get model.omni.api_key
+miloco-cli config get model.omni.model
+miloco-cli config get model.omni.base_url
+```
+
+根据输出判定：
+
+**三项都非空：** → 进 2.3。
+
+**任一项为空，发：**
+> Miloco 感知引擎需要一个多模态大模型来看懂摄像头画面。
+> 默认推荐 **小米 MiMo**。你有 MiMo 的 API Key 吗？
+> 
+> - **有**：直接发我 API Key，我帮你配好
+> - **没有**：去 https://platform.xiaomimimo.com 申请一个，拿到 Key 发我
+> - **用其他模型**（OpenAI / 自建 / 任何 OpenAI 兼容 API）：把 model 名、Base URL、API Key 一起发我
+
+用户回复后，agent 跑：
+```bash
+miloco-cli config set model.omni.api_key "<key>"
+# 如用户指定了 model 和 base_url：
+miloco-cli config set model.omni.model "<model>" model.omni.base_url "<url>"
+```
+
+验证通过后进 2.3。
+
+#### 2.3 重启 gateway
+
+agent 先跑确认：
+```bash
+hermes cron list 2>&1 | grep -c miloco
+```
+
+**≥ 4 个 miloco cron：** → 后台插件已加载，进 Step 3。
+
+**否则发：**
+> 最后一步：重启 Hermes gateway 让新装的插件生效。
+> 你在终端跑一下（agent 不能代跑，会被防重启循环拦截）：
+> 
+> ```bash
+> hermes gateway restart
+> ```
+> 
+> 跑完告诉我"好了"。
+
+用户回复后 agent 验证：
+```bash
+hermes cron list 2>&1 | grep -c miloco
+```
+≥ 4 → 进 Step 3。
 
 ### Step 3：验证
 
@@ -80,7 +165,14 @@ print(_detect_im_platforms_simple())  # 应有非空列表
 | Skills | `~/.hermes/skills/miloco-*` |
 | Backend 端口 | `127.0.0.1:1810` |
 
-## 故障排除
+## Agent 执行要点
+
+1. **严格按 3 步执行** — Step 1 → Step 2 → Step 3，不可跳步
+2. **Step 1 全程不问用户** — 全部 agent 自己跑，只汇报结果
+3. **Step 2 逐项引导** — 2.1 完成后等用户回复才发 2.2，禁止一次性贴出全部步骤
+4. **不要代跑 `hermes gateway restart`** — Hermes 会拒绝，让用户自己终端跑
+5. **尊重用户选择** — 可以跳过账号绑定或模型配置（但会影响功能）
+6. **不要在聊天里回显 API Key 明文** — 仅通过 `miloco-cli config set` 传入
 
 | 现象 | 修法 |
 |---|---|
