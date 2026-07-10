@@ -583,6 +583,17 @@ function CamSwitch({
           blocked ? (e) => setTip({ x: e.clientX, y: e.clientY }) : undefined
         }
         onMouseLeave={() => setTip(null)}
+        // 键盘可达:block 态开关仍可 Tab 聚焦,focus 时也弹原因气泡(取按钮外接矩形顶边中点
+        // 作锚点),与 hover 对齐——纯键盘用户 Tab 停上来即看到原因,不必等激活 toast 才知道。
+        onFocus={
+          blocked
+            ? (e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setTip({ x: r.left + r.width / 2, y: r.top });
+              }
+            : undefined
+        }
+        onBlur={() => setTip(null)}
         className={`relative inline-flex h-[14px] w-[26px] shrink-0 rounded-full transition-colors shadow-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
           dim ? "opacity-40 cursor-not-allowed" : ""
         } ${inUse ? "bg-brand-primary" : "bg-black/60"}`}
