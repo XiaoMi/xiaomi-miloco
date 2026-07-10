@@ -470,11 +470,8 @@ PY
         info "config.json::server.python_bin 找不到能 import miloco 的 python，尝试 pip install miloco..."
         if "$PYTHON" -m pip install --quiet miloco 2>&1 | tail -3; then
           FOUND_PY="$PYTHON"
-  fi
-fi
-# 清理 pycache 确保新代码生效
-find "$MILOCO_PKG_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    fi
+        fi
+      fi
 
     if [ -n "$FOUND_PY" ]; then
       info "auto-fix: config.json::server.python_bin = $FOUND_PY"

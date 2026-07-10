@@ -134,7 +134,7 @@ section "G. IM 探测 (author bug #1)"
 # ═══════════════════════════════════════════════════════════════════════
 
 IM_RESULT=$(python3 -c "
-import sys; sys.path.insert(0,'$HERMES_HOME/plugins/miloco-plugin')
+import sys; sys.path.insert(0,'$HERMES_HOME/plugins/miloco/miloco-plugin')
 from tools_notify import _detect_im_platforms_simple
 r = _detect_im_platforms_simple()
 print(','.join(r) if r else 'EMPTY')
@@ -165,7 +165,7 @@ section "I. State.json 保留 (author bug #11)"
 
 STATE_NOW=$(python3 -c "
 import json,os
-p=os.path.expanduser('$HERMES_HOME/plugins/miloco-plugin/state.json')
+p=os.path.expanduser('$HERMES_HOME/plugins/miloco/miloco-plugin/state.json')
 if os.path.exists(p):
     d=json.load(open(p))
     t=(d.get('deliver') or {}).get('target','')
