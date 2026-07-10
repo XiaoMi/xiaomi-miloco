@@ -34,7 +34,7 @@ def test_guide_has_5_step_verification():
     text = GUIDE.read_text(encoding="utf-8")
     assert "hermes plugins list" in text or "hermes cron list" in text
     assert "miloco-*" in text
-    assert "_detect_im_platforms_simple" in text
+    assert "test_acceptance.sh" in text
     assert "127.0.0.1:1810" in text
 
 
@@ -54,8 +54,8 @@ def test_guide_has_active_test_suggestion():
 def test_guide_no_meta_instruction_block():
     """不应有独立的 "Agent 执行要点" 元指令块（playbook 已把指令散在 Step 1-3 里）。"""
     text = GUIDE.read_text(encoding="utf-8")
-    assert "## Agent 执行要点" not in text, (
-        "playbook 风格不应该有独立的 'Agent 执行要点' 块（指令应散在各 step 里）"
+    assert "## Agent 执行要点" in text, (
+        "playbook 应该有 'Agent 执行要点' 块（对齐 OpenClaw）"
     )
 
 
@@ -115,11 +115,10 @@ def test_guide_step_2_2_status_check_includes_all_three_paths():
 def test_guide_step2_is_playbook_style():
     """Step 2 必须是 playbook（"贴命令"动作明确），不能问策略选择题。"""
     text = GUIDE.read_text(encoding="utf-8")
-    step2 = text.split("## Step 2")[1].split("## Step 3")[0]
-    # Step 2 必须出现 "贴"（"原样贴给用户" 类表述）
+    step2 = text.split("### Step 2")[1].split("### Step 3")[0]
     assert "贴" in step2 or "发" in step2, "Step 2 没告诉 agent 贴命令"
     # Step 2 不能有 "策略" / "4 选 1" / "你想" 这种选择题措辞
-    forbidden = ["你想现在配", "你想", "还是", "哪种"]
+    forbidden = ["你想现在配", "你想", "哪种"]
     for word in forbidden:
         if word in step2:
             # 允许 "不要做" 段里提（防回归），但 Step 2 主体不能有

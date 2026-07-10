@@ -1,6 +1,8 @@
 """install-hermes.sh helper: 写 config.json::server.python_bin"""
-import json, sys
+import json
+import sys
 from pathlib import Path
+
 home, py_bin = sys.argv[1], sys.argv[2]
 p = Path(home) / "config.json"
 try:

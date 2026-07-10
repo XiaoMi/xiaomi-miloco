@@ -228,6 +228,17 @@ bash plugins/hermes/tests/test_acceptance.sh
 5. **尊重用户选择** — 可以跳过账号绑定或模型配置（但会影响功能）
 6. **不要在聊天里回显 API Key 明文** — 仅通过 `miloco-cli config set` 传入
 
+## 故障排除
+
+| 现象 | 修法 |
+|---|---|
+| `miloco-cli: command not found` | 跑 Step 1.2 的 install.sh |
+| backend 启动失败 | 看 `~/.hermes/miloco/log/miloco-backend.log` |
+| 感知引擎 `no_omni_api_key` | 配 `miloco-cli config set model.omni.api_key <key>` |
+| `hermes cron list` 崩溃 | 重跑 install-hermes.sh（cron deliver 修复） |
+| trace 找不到 | gateway 进程需设 `MILOCO_HOME=~/.hermes/miloco` |
+| im_push 报 needsBind | 在 Hermes 配 IM 后跑 `hermes gateway restart` |
+
 | 现象 | 修法 |
 |---|---|
 | `miloco-cli: command not found` | 跑 Step 1.2 的 install.sh |
