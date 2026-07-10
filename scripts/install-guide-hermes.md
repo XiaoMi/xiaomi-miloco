@@ -105,17 +105,25 @@ miloco-cli config get model.omni.base_url
 
 **任一项为空，发：**
 > Miloco 感知引擎需要一个多模态大模型来看懂摄像头画面。
-> 默认推荐 **小米 MiMo**。你有 MiMo 的 API Key 吗？
+> 默认推荐 **小米 MiMo**。
+> - Model: `xiaomi/mimo-v2.5`
+> - Base URL: `https://api.xiaomimimo.com/v1`
 > 
+> 你有 MiMo 的 API Key 吗？
 > - **有**：直接发我 API Key，我帮你配好
 > - **没有**：去 https://platform.xiaomimimo.com 申请一个，拿到 Key 发我
 > - **用其他模型**（OpenAI / 自建 / 任何 OpenAI 兼容 API）：把 model 名、Base URL、API Key 一起发我
 
-用户回复后，agent 跑：
+用户回复后，agent 根据回复内容跑：
+
+**用户只发了 API Key（用默认 MiMo）：**
 ```bash
 miloco-cli config set model.omni.api_key "<key>"
-# 如用户指定了 model 和 base_url：
-miloco-cli config set model.omni.model "<model>" model.omni.base_url "<url>"
+```
+
+**用户指定了 model / base_url（第三方模型）：**
+```bash
+miloco-cli config set model.omni.model "<model>" model.omni.base_url "<url>" model.omni.api_key "<key>"
 ```
 
 验证通过后进 2.3。
