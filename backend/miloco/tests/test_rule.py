@@ -1766,7 +1766,11 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
 
     @pytest.mark.asyncio
     async def test_set_property_returns_nonzero_code(self, runner, mock_miot_proxy):
-        """set_device_properties 返回 code!=0 → action 标记 false 并附 miot_failed。"""
+        """set_device_properties 返回负码 → action 标记 false 并附失败释义。
+
+        与 control_device 同口径(summarize_results / #394):负码即失败,error 是失败码
+        的中文释义(而非旧的裸 dict repr),台账 result_msg 也据此非 NULL。
+        """
         mock_miot_proxy.set_device_properties = AsyncMock(
             return_value=[{"code": -1, "value": None}]
         )
@@ -1776,7 +1780,8 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
 
         result = await runner.trigger_rule("rule-bad-code", "测试")
         assert result.action_results[0].result is False
-        assert "miot_failed" in (result.action_results[0].error or "")
+        # 失败附带释义(summarize_results 的 msg),非 None/空
+        assert result.action_results[0].error
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)

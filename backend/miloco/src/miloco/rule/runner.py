@@ -1352,6 +1352,7 @@ class RuleRunner:
         # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
         import json as _json
 
+        from miloco.miot.result_codes import summarize_results
         from miloco.miot.service import _write_action_ledger
 
         try:
@@ -1362,15 +1363,9 @@ class RuleRunner:
                     )
                 ]
                 results = await self._miot_proxy.set_device_properties(params)
-                success = bool(results and results[0].get("code", -1) == 0)
-                err: str | None = (
-                    None
-                    if success
-                    else f"miot_failed: {results[0] if results else 'no_result'}"
-                )
+                success, _lcode, _lmsg = summarize_results(results)
                 _ltype = "set_property"
                 _lvalue = _json.dumps(action.value, ensure_ascii=False)
-                _lcode = results[0].get("code") if results else None
             else:
                 param = MIoTActionParam(
                     did=action.did,
@@ -1379,16 +1374,18 @@ class RuleRunner:
                     in_=action.params or [],
                 )
                 result = await self._miot_proxy.call_device_action(param)
-                success = bool(result and result.get("code", -1) == 0)
-                err = None if success else f"miot_failed: {result}"
+                success, _lcode, _lmsg = summarize_results(result)
                 _ltype = "call_action"
                 _lvalue = _json.dumps(action.params or [], ensure_ascii=False)
-                _lcode = result.get("code") if result else None
+            # 与 control_device 同口径:summarize_results 归一 (success, worst_code, msg)——
+            # 负码即失败(镜像 #394)、msg 是失败码释义。避免第三套谓词,且台账 result_msg
+            # 不再恒 NULL(合流页对"设备离线"等常见失败显示释义而非裸 dict repr)。
+            err: str | None = None if success else (_lmsg or "miot_failed")
 
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=_ltype, did=action.did, iid=action.iid,
-                value_json=_lvalue, result_code=_lcode, result_msg=None,
+                value_json=_lvalue, result_code=_lcode, result_msg=_lmsg,
                 success=success, error=err, source="rule", source_id=rule_id,
             )
 
