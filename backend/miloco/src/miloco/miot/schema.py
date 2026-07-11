@@ -296,6 +296,13 @@ class MipsStatusResponse(BaseModel):
             "None means subscribe is healthy."
         ),
     )
+    subscriptions: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Diagnostic snapshot of desired/active MQTT subscriptions, including "
+            "automation property/event topic state."
+        ),
+    )
 
 
 # ============ MIoT Event Trigger Schema ============
