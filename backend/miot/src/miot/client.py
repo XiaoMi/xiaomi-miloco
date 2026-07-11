@@ -788,6 +788,29 @@ class MIoTClient:
         """
         return self._mips_user_sub_error
 
+    def has_active_device_property_subscription(self, did: str) -> bool:
+        """Whether the property-change topic for *did* is SUBACK-confirmed."""
+        mips = self._mips_cloud
+        if mips is None:
+            return False
+        return mips.has_active_subscription(
+            f"device/{did}/up/properties_changed/#"
+        )
+
+    def has_active_device_event_subscription(self, did: str) -> bool:
+        """Whether the event-occured topic for *did* is SUBACK-confirmed."""
+        mips = self._mips_cloud
+        if mips is None:
+            return False
+        return mips.has_active_subscription(f"device/{did}/up/event_occured/#")
+
+    def get_mips_subscription_state(self) -> dict[str, list[str]]:
+        """Return desired/active MQTT subscription topics for diagnostics."""
+        mips = self._mips_cloud
+        if mips is None:
+            return {"desired": [], "active": []}
+        return mips.list_subscription_state()
+
     async def _setup_mips_async(self) -> None:
         """Build (or rebuild) the mips_cloud client and attempt user-level subs.
 

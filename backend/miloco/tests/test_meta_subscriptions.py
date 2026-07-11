@@ -37,6 +37,8 @@ def _bare_proxy() -> MiotProxy:
     proxy._camera_info_dict = {}
     proxy._scene_info_dict = {}
     proxy._miot_client = AsyncMock()
+    proxy._miot_client.has_active_device_property_subscription = lambda _did: True
+    proxy._miot_client.has_active_device_event_subscription = lambda _did: True
     proxy._kv_repo = object()  # only passed through to is_home_allowed
     return proxy
 
@@ -253,6 +255,41 @@ async def test_sync_property_subscriptions_adds_new_enabled_mapping():
     proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
     proxy._miot_client.unsub_device_property_changed_async.assert_not_awaited()
     assert proxy._subscribed_property_dids == {"C"}
+
+
+@pytest.mark.asyncio
+async def test_sync_property_subscriptions_resubscribes_stale_active_topic():
+    proxy = _bare_proxy()
+    proxy._subscribed_property_dids = {"C"}
+    proxy._device_info_dict = {"C": SimpleNamespace(did="C")}
+    proxy._miot_client.has_active_device_property_subscription = lambda _did: False
+
+    mappings = [MiotEventMapping(source_type="device", source_id="C", enabled=True)]
+    await proxy._sync_property_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
+    assert proxy._subscribed_property_dids == {"C"}
+
+
+@pytest.mark.asyncio
+async def test_sync_event_subscriptions_resubscribes_stale_active_topic():
+    proxy = _bare_proxy()
+    proxy._subscribed_event_dids = {"B"}
+    proxy._device_info_dict = {"B": SimpleNamespace(did="B")}
+    proxy._miot_client.has_active_device_event_subscription = lambda _did: False
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        )
+    ]
+    await proxy._sync_event_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_event_occurred_async.assert_awaited_once_with("B")
+    assert proxy._subscribed_event_dids == {"B"}
 
 
 @pytest.mark.asyncio

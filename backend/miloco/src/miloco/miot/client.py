@@ -1118,6 +1118,18 @@ class MiotProxy:
             and mapping.source_id in self._device_info_dict
             and "/" not in mapping.source_id
         }
+        stale = {
+            did
+            for did in self._subscribed_property_dids
+            if did in target
+            and not self._miot_client.has_active_device_property_subscription(did)
+        }
+        if stale:
+            logger.warning(
+                "device-property subscription state stale, will resubscribe: dids=%s",
+                sorted(stale),
+            )
+            self._subscribed_property_dids -= stale
         to_add = target - self._subscribed_property_dids
         to_remove = self._subscribed_property_dids - target
         if not to_add and not to_remove:
@@ -1184,6 +1196,18 @@ class MiotProxy:
             and mapping.source_id in self._device_info_dict
             and "/" not in mapping.source_id
         }
+        stale = {
+            did
+            for did in self._subscribed_event_dids
+            if did in target
+            and not self._miot_client.has_active_device_event_subscription(did)
+        }
+        if stale:
+            logger.warning(
+                "device-event subscription state stale, will resubscribe: dids=%s",
+                sorted(stale),
+            )
+            self._subscribed_event_dids -= stale
         to_add = target - self._subscribed_event_dids
         to_remove = self._subscribed_event_dids - target
         if not to_add and not to_remove:
@@ -1424,10 +1448,36 @@ class MiotProxy:
                 "last_error": "miot_client not initialized",
             }
         last_error = client.mips_user_sub_error
+        sub_state = client.get_mips_subscription_state()
+        desired_topics = set(sub_state.get("desired", []))
+        active_topics = set(sub_state.get("active", []))
+
+        def _topic_state(topic: str) -> dict[str, bool]:
+            return {
+                "desired": topic in desired_topics,
+                "active": topic in active_topics,
+            }
+
         return {
             "connected": client.mips_connected,
             "user_bind_subscribed": client.mips_connected and last_error is None,
             "last_error": last_error,
+            "subscriptions": {
+                "desired_count": len(desired_topics),
+                "active_count": len(active_topics),
+                "automation": {
+                    "property": {
+                        did: _topic_state(
+                            f"device/{did}/up/properties_changed/#"
+                        )
+                        for did in sorted(self._subscribed_property_dids)
+                    },
+                    "event": {
+                        did: _topic_state(f"device/{did}/up/event_occured/#")
+                        for did in sorted(self._subscribed_event_dids)
+                    },
+                },
+            },
         }
 
     async def refresh_scenes(self) -> dict[str, MIoTManualSceneInfo] | None:

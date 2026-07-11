@@ -226,7 +226,13 @@ class MIoTMipsCloud:
         self._pending_subscribes: dict[int, asyncio.Future[list[int]]] = {}
         self._pending_lock = threading.Lock()
 
-        # Active subscriptions, keyed by topic. Used to resubscribe on reconnect.
+        # Desired subscriptions, keyed by topic. This is the long-lived intent
+        # registry used to replay subscriptions after reconnect. SUBACK failures
+        # must not remove entries from here, otherwise transient Mi Home ACL
+        # windows (notably 0x87 during reconnect) permanently lose the topic.
+        self._desired_subs: dict[str, _Subscription] = {}
+        # Active subscriptions, keyed by topic. Only topics with a successful
+        # SUBACK live here; message dispatch and health checks use this table.
         self._subs: dict[str, _Subscription] = {}
         self._subs_lock = threading.Lock()
 
@@ -367,7 +373,26 @@ class MIoTMipsCloud:
                     )
             self._pending_subscribes.clear()
         with self._subs_lock:
+            self._desired_subs.clear()
             self._subs.clear()
+
+    def has_active_subscription(self, topic: str) -> bool:
+        """Return whether *topic* is currently confirmed active by SUBACK."""
+        with self._subs_lock:
+            return topic in self._subs
+
+    def has_desired_subscription(self, topic: str) -> bool:
+        """Return whether *topic* is still part of the desired subscribe set."""
+        with self._subs_lock:
+            return topic in self._desired_subs
+
+    def list_subscription_state(self) -> dict[str, list[str]]:
+        """Debug snapshot of desired and active subscription topics."""
+        with self._subs_lock:
+            return {
+                "desired": sorted(self._desired_subs),
+                "active": sorted(self._subs),
+            }
 
     # ---------------------------------------------------------- token rotate
 
@@ -377,7 +402,7 @@ class MIoTMipsCloud:
         paho's username_pw_set takes effect on the *next* CONNECT, so we also
         force a reconnect so the new token is actually used. While the
         reconnect cycles, on_disconnect → on_connect will resubscribe all
-        active topics from ``self._subs`` (see _on_connect).
+        desired topics from ``self._desired_subs`` (see _on_connect).
         """
         self._token = token
         mqtt = self._mqtt
@@ -571,13 +596,14 @@ class MIoTMipsCloud:
         ]
         with self._subs_lock:
             for sub in subs:
-                self._subs[sub.topic] = sub
+                self._desired_subs[sub.topic] = sub
 
         topics = [(sub.topic, sub.qos) for sub in subs]
         result, mid = mqtt.subscribe(topics)
         if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
             with self._subs_lock:
                 for sub in subs:
+                    self._desired_subs.pop(sub.topic, None)
                     self._subs.pop(sub.topic, None)
             raise MipsConnectionError(
                 f"batch subscribe failed locally: result={result} mid={mid} "
@@ -605,15 +631,22 @@ class MIoTMipsCloud:
             )
 
         rejected: list[tuple[str, int]] = []
-        for sub, code in zip(subs, reason_codes):
-            if code not in _SUBACK_SUCCESS_CODES:
-                rejected.append((sub.topic, code))
+        with self._subs_lock:
+            for sub, code in zip(subs, reason_codes):
+                if code in _SUBACK_SUCCESS_CODES:
+                    self._subs[sub.topic] = sub
+                else:
+                    self._subs.pop(sub.topic, None)
+                    rejected.append((sub.topic, code))
 
         if rejected:
-            with self._subs_lock:
-                for topic, code in rejected:
-                    if code in _PERMANENT_SUBACK_FAILURES:
-                        self._subs.pop(topic, None)
+            for topic, code in rejected:
+                _LOGGER.error(
+                    "mips_cloud batch subscribe rejected topic=%s code=0x%02x reason=%s",
+                    topic,
+                    code,
+                    _describe_reason_code(code),
+                )
             topic, code = rejected[0]
             raise MipsSubscribeRejectedError(
                 topic=topic,
@@ -656,11 +689,12 @@ class MIoTMipsCloud:
             # before this coroutine yields still finds the entry.
             sub = _Subscription(topic=topic, qos=qos, handler=handler, decoder=decoder)
             with self._subs_lock:
-                self._subs[topic] = sub
+                self._desired_subs[topic] = sub
 
             result, mid = mqtt.subscribe(topic, qos=qos)
             if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
                 with self._subs_lock:
+                    self._desired_subs.pop(topic, None)
                     self._subs.pop(topic, None)
                 raise MipsConnectionError(
                     f"subscribe({topic}) failed locally: result={result} mid={mid}"
@@ -681,14 +715,16 @@ class MIoTMipsCloud:
 
             for code in reason_codes:
                 if code not in _SUBACK_SUCCESS_CODES:
-                    if code in _PERMANENT_SUBACK_FAILURES:
-                        with self._subs_lock:
-                            self._subs.pop(topic, None)
+                    with self._subs_lock:
+                        self._subs.pop(topic, None)
                     raise MipsSubscribeRejectedError(
                         topic=topic,
                         reason_code=code,
                         reason_string=_describe_reason_code(code),
                     )
+
+            with self._subs_lock:
+                self._subs[topic] = sub
 
         except Exception as exc:
             if not unattended:
@@ -731,6 +767,7 @@ class MIoTMipsCloud:
         mqtt = self._mqtt
         with self._subs_lock:
             for topic in topics:
+                self._desired_subs.pop(topic, None)
                 self._subs.pop(topic, None)
         if mqtt is None or not self._connected:
             return
@@ -749,6 +786,7 @@ class MIoTMipsCloud:
     async def _unsubscribe_async(self, topic: str) -> None:
         mqtt = self._mqtt
         with self._subs_lock:
+            self._desired_subs.pop(topic, None)
             self._subs.pop(topic, None)
         if mqtt is None or not self._connected:
             return
@@ -785,16 +823,20 @@ class MIoTMipsCloud:
             self._connected = True
         _LOGGER.info("mips_cloud CONNACK success")
 
-        # Broker forgot our session on reconnect — re-issue every active
-        # subscribe. MQTT-wise this is the same SUBSCRIBE packet as the
-        # first-time path. The only difference: no caller is awaiting, so
-        # exceptions get routed to _fire_subscribe_error instead of raised.
+        # Broker forgot our session on reconnect — active subscriptions are no
+        # longer trustworthy. Re-issue every desired subscribe. MQTT-wise this
+        # is the same SUBSCRIBE packet as the first-time path. The only
+        # difference: no caller is awaiting, so failures are dispatched via
+        # _fire_subscribe_error instead of raised.
         # paho's on_connect is sync + on a different thread, so we hand off
         # to the main loop via call_soon_threadsafe.
         with self._subs_lock:
-            active = list(self._subs.values())
-        if active:
-            self._main_loop.call_soon_threadsafe(self._spawn_batch_resubscribe, active)
+            self._subs.clear()
+            desired = list(self._desired_subs.values())
+        if desired:
+            self._main_loop.call_soon_threadsafe(
+                self._spawn_batch_resubscribe, desired
+            )
 
         self._fire_connect_future(None)
         self._dispatch_state_handlers(True)
@@ -865,14 +907,20 @@ class MIoTMipsCloud:
             for sub, code in zip(subs, reason_codes):
                 if code in _SUBACK_SUCCESS_CODES:
                     ok += 1
+                    with self._subs_lock:
+                        self._subs[sub.topic] = sub
                     self._fire_subscribe_success(sub.topic)
                 else:
-                    if code in _PERMANENT_SUBACK_FAILURES:
-                        with self._subs_lock:
-                            self._subs.pop(sub.topic, None)
-                    self._fire_subscribe_error(
-                        sub.topic, code, _describe_reason_code(code)
+                    reason = _describe_reason_code(code)
+                    with self._subs_lock:
+                        self._subs.pop(sub.topic, None)
+                    _LOGGER.error(
+                        "mips_cloud batch resubscribe rejected topic=%s code=0x%02x reason=%s",
+                        sub.topic,
+                        code,
+                        reason,
                     )
+                    self._fire_subscribe_error(sub.topic, code, reason)
             _LOGGER.info(
                 "mips_cloud batch resubscribed after reconnect: %d/%d ok topics=%s",
                 ok,
@@ -899,6 +947,8 @@ class MIoTMipsCloud:
         log("mips_cloud disconnected, reason_code=%s", reason_code)
         with self._state_lock:
             self._connected = False
+        with self._subs_lock:
+            self._subs.clear()
         # paho will auto-reconnect on its own thread per reconnect_delay_set.
         self._dispatch_state_handlers(False)
 
