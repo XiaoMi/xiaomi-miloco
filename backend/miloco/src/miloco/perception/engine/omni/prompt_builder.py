@@ -346,7 +346,7 @@ def _build_readonly_history(context: OmniContext) -> str | None:
     """
     # last_caption / last_suggestions 已不再注入（见 _build_context_parts），只剩
     # pending_speech 这类客观跨窗事实可能需要 readonly 段。
-    if not context.pending_speech:
+    if not context.pending_speech and not context.extra_context:
         return None
     parts = _build_context_parts(context, stream=False)
     return _HISTORY_HEADER + "\n" + "\n".join(parts)
@@ -838,6 +838,9 @@ def _build_context_parts(context: OmniContext, *, stream: bool = False) -> list[
             f"is_complete=true；拼接后语义不完整 / 矛盾 / 本轮与它无关 → 仅输出本轮 speech 内容，"
             f"不要拼接、也不能用 last_speech 改写本轮。"
         )
+
+    if context.extra_context:
+        parts.append(context.extra_context.strip())
 
     return parts
 

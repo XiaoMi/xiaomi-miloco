@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
@@ -63,6 +64,36 @@ def _attach_caption(
             item.caption = caption_for_dids(captions, item.source_device_ids)
 
 
+def _build_caption_fallback_text(captions: list[CaptionEntry]) -> str:
+    blocks: list[str] = []
+    for caption in captions:
+        lines: list[str] = []
+        if caption.time_window:
+            time_window = caption.time_window.strip("[]")
+            lines.append(f"时间：{time_window.split('-')[-1]}")
+        source = ""
+        did_tag = (
+            f"(did={','.join(caption.source_device_ids)})"
+            if caption.source_device_ids
+            else ""
+        )
+        if caption.room_name and caption.device_name:
+            source = f"{caption.room_name}的{caption.device_name}{did_tag}"
+        elif caption.room_name:
+            source = f"{caption.room_name}{did_tag}" if did_tag else caption.room_name
+        elif caption.device_name:
+            source = caption.device_name
+        if source:
+            lines.append(f"来源：{source}")
+        if caption.description:
+            lines.append(f"画面描述：{caption.description.rstrip('。.')}")
+        if lines:
+            blocks.append("\n".join(lines))
+    if not blocks:
+        return ""
+    return "[感知引擎]画面观察：\n" + "\n\n═══\n\n".join(blocks)
+
+
 def _publish_perception_event(event_type: str, source: str, payload: dict) -> None:
     client = get_metrics_client()
     if client is None:
@@ -78,6 +109,16 @@ logger = logging.getLogger(__name__)
 # 模块级强引用持有 _persist_meaningful_event 后台任务,防 asyncio 只持弱引用导致
 # 任务运行中被 GC 回收(CPython 文档明确警告).done_callback 在任务结束时自动 discard.
 _PERSIST_BG_TASKS: set[asyncio.Task] = set()
+
+
+@dataclass(frozen=True)
+class MeaningfulEventPersistResult:
+    event_id: str
+    timestamp: int
+    text: str
+    snapshot_count: int
+    rule_names: dict[str, str]
+    clip_kind: ClipKind | None
 
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
@@ -418,6 +459,9 @@ class PerceptionEngineProxy:
         convert_ms: float,
         main_loop: asyncio.AbstractEventLoop,
         skipped_task_ids: list[str],
+        force_gate_pass_dids: set[str] | None = None,
+        extra_context_by_did: dict[str, str] | None = None,
+        dedupe_suggestions: bool = True,
     ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
         """Actual realtime perceive logic — runs in the inference thread.
 
@@ -517,6 +561,9 @@ class PerceptionEngineProxy:
                 on_early_speeches=_on_early_speeches,
                 on_early_matched_rules=_on_early_matched_rules,
                 on_early_suggestions=_on_early_suggestions,
+                force_gate_pass_dids=force_gate_pass_dids,
+                extra_context_by_did=extra_context_by_did,
+                dedupe_suggestions=dedupe_suggestions,
             )
         except OmniError as e:
             # 兜底分支:主路径 run_batch_pipeline 已在 _run_device 内逐相机吞掉 OmniError
@@ -593,6 +640,10 @@ class PerceptionEngineProxy:
     async def realtime_perceive(
         self, batch: PerceptionBatch,
         artifacts: OmniEventArtifacts | None = None,
+        rules: list[dict] | None = None,
+        force_gate_pass_dids: set[str] | None = None,
+        extra_context_by_did: dict[str, str] | None = None,
+        dedupe_suggestions: bool = True,
     ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
         """Run full engine pipeline — offloaded to inference thread.
 
@@ -612,8 +663,11 @@ class PerceptionEngineProxy:
 
             from miloco.manager import get_manager
 
-            rules = await get_manager().rule_service.get_all_rules(enabled_only=True)
-            rules = [rule.model_dump() for rule in rules]
+            if rules is None:
+                loaded_rules = await get_manager().rule_service.get_all_rules(enabled_only=True)
+                rules = [rule.model_dump() for rule in loaded_rules]
+            else:
+                rules = list(rules)
             rules, skipped_task_ids = _filter_completed_event_rules(rules)
 
             device_count = sum(1 for d in batch.devices.values() if d.has_data)
@@ -655,6 +709,9 @@ class PerceptionEngineProxy:
                                 convert_ms,
                                 main_loop,
                                 skipped_task_ids,
+                                force_gate_pass_dids=force_gate_pass_dids,
+                                extra_context_by_did=extra_context_by_did,
+                                dedupe_suggestions=dedupe_suggestions,
                             ),
                             artifacts=artifacts,
                         )
@@ -672,6 +729,9 @@ class PerceptionEngineProxy:
                         convert_ms,
                         main_loop,
                         skipped_task_ids,
+                        force_gate_pass_dids=force_gate_pass_dids,
+                        extra_context_by_did=extra_context_by_did,
+                        dedupe_suggestions=dedupe_suggestions,
                     )
             return await self._realtime_perceive_impl(
                 batched_snapshot,
@@ -680,10 +740,16 @@ class PerceptionEngineProxy:
                 convert_ms,
                 main_loop,
                 skipped_task_ids,
+                force_gate_pass_dids=force_gate_pass_dids,
+                extra_context_by_did=extra_context_by_did,
+                dedupe_suggestions=dedupe_suggestions,
             )
 
     async def on_demand_perceive(
-        self, batch: PerceptionBatch, query: str
+        self,
+        batch: PerceptionBatch,
+        query: str,
+        snapshot_sink: dict | None = None,
     ) -> OnDemandPerceptionResult | None:
         """Run on-demand query pipeline — offloaded to inference thread."""
         async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
@@ -710,9 +776,15 @@ class PerceptionEngineProxy:
                         _run_with_trace_id(
                             trace_id,
                             self._on_demand_perceive_impl(batched_snapshot, query),
+                            snapshot_sink=snapshot_sink,
                         )
                     ),
                 )
+            if snapshot_sink is not None:
+                from miloco.perception.snapshot_context import snapshot_collector_scope
+
+                with snapshot_collector_scope(snapshot_sink):
+                    return await self._on_demand_perceive_impl(batched_snapshot, query)
 
             return await self._on_demand_perceive_impl(batched_snapshot, query)
 
@@ -724,7 +796,39 @@ class PerceptionEngineProxy:
         early_sent_sugg_ids: set[int] | None = None,
         device_ids: list[str] | None = None,
         artifacts: OmniEventArtifacts | None = None,
+        pulse_reset_rule_ids: set[str] | None = None,
     ):
+        await self.handle_structured_perception_result(
+            result=result,
+            early_sent_contents=early_sent_contents,
+            early_sent_rule_ids=early_sent_rule_ids,
+            early_sent_sugg_ids=early_sent_sugg_ids,
+            device_ids=device_ids,
+            artifacts=artifacts,
+            pulse_reset_rule_ids=pulse_reset_rule_ids,
+            persist_in_background=True,
+        )
+
+    async def handle_structured_perception_result(
+        self,
+        *,
+        result: RealtimePerceptionResult,
+        early_sent_contents: set[str] | None = None,
+        early_sent_rule_ids: set[tuple[str, str]] | None = None,
+        early_sent_sugg_ids: set[int] | None = None,
+        device_ids: list[str] | None = None,
+        artifacts: OmniEventArtifacts | None = None,
+        persist_in_background: bool = False,
+        event_id: str | None = None,
+        timestamp_ms: int | None = None,
+        text_prefix: str = "",
+        payload_extra: dict | None = None,
+        home_id: str | None = None,
+        rule_id_filter: set[str] | None = None,
+        pulse_reset_matched_rules: bool = False,
+        pulse_reset_rule_ids: set[str] | None = None,
+        force_persist: bool = False,
+    ) -> MeaningfulEventPersistResult | None:
         """Handle realtime perception result — runs on main loop.
 
         device_ids / artifacts 由 processor 透传;给 _persist_meaningful_event
@@ -735,24 +839,34 @@ class PerceptionEngineProxy:
         落盘扩展名 + SSE 推 kind.artifacts.trace 由 omni HTTP 调用 finally 填入,
         随 clip 一起落到 event_dir.
         """
-        if result.skipped:
-            return
+        if getattr(result, "skipped", False):
+            return None
 
         # T6: meaningful_events 后台异步持久化 — 不阻塞下面 webhook 主路径(B4 / B11).
         # 失败仅 log,不抛.classify / device_ids 空 / artifacts 空等所有
         # 降级路径都在 _persist 内自处理.
         # 任务必须挂 _PERSIST_BG_TASKS 强引用,否则 asyncio 弱引用模型下 GC 可能在
         # 任务完成前回收 → 偶发"INSERT 没落库 / SSE 不推" 难复现.
+        persist_result: MeaningfulEventPersistResult | None = None
         if artifacts is not None:
-            task = asyncio.create_task(
-                _persist_meaningful_event(
-                    result=result,
-                    device_ids=device_ids or [],
-                    artifacts=artifacts,
-                )
+            persist_coro = _persist_meaningful_event(
+                result=result,
+                device_ids=device_ids or [],
+                artifacts=artifacts,
+                event_id=event_id,
+                timestamp_ms=timestamp_ms,
+                text_prefix=text_prefix,
+                payload_extra=payload_extra,
+                home_id=home_id,
+                rule_id_filter=rule_id_filter,
+                force_persist=force_persist,
             )
-            _PERSIST_BG_TASKS.add(task)
-            task.add_done_callback(_PERSIST_BG_TASKS.discard)
+            if persist_in_background:
+                task = asyncio.create_task(persist_coro)
+                _PERSIST_BG_TASKS.add(task)
+                task.add_done_callback(_PERSIST_BG_TASKS.discard)
+            else:
+                persist_result = await persist_coro
 
         from miloco.manager import get_manager
 
@@ -775,8 +889,18 @@ class PerceptionEngineProxy:
             for rule_id, did in early_sent_rule_ids:
                 cycle_source_states_by_rule.setdefault(rule_id, {})[did] = True
 
+        reset_candidates: list[tuple[str, str]] = []
         for matched_rule in result.matched_rules:
+            if rule_id_filter is not None and matched_rule.rule_id not in rule_id_filter:
+                continue
             did = matched_rule.source_device_ids[0] if matched_rule.source_device_ids else "perception"
+            should_pulse_reset = pulse_reset_matched_rules or (
+                pulse_reset_rule_ids is not None and matched_rule.rule_id in pulse_reset_rule_ids
+            )
+            if should_pulse_reset:
+                # 流式早回调已经 update_state(True) 的规则仍需在本轮末尾复位，
+                # 否则 event 规则会停在 True，下一次同类离散触发不再产生边沿。
+                reset_candidates.append((matched_rule.rule_id, did))
             if early_sent_rule_ids and (matched_rule.rule_id, did) in early_sent_rule_ids:
                 continue
             _publish_perception_event(
@@ -792,6 +916,19 @@ class PerceptionEngineProxy:
                     matched_rule.rule_id
                 ),
             )
+
+        for rule_id, did in reset_candidates:
+            try:
+                rule = await svc.get_rule(rule_id)
+                mode = getattr(getattr(rule, "mode", None), "value", getattr(rule, "mode", ""))
+            except Exception:  # noqa: BLE001
+                mode = ""
+            if mode != "event":
+                continue
+            # MiOT 触发是离散脉冲；连续两次 False 走完帧级抗抖，只复位 event
+            # 规则状态，避免同一规则下次命中时因仍为 True 而不再通知。
+            await svc.update_state(rule_id, did, False)
+            await svc.update_state(rule_id, did, False)
 
         # 对本 batch 实际下发过、但未命中的 (rule_id, did) 喂 update_state(False)。
         # frame-driven 模式:runner 帧级抗抖(_pending_source_exit)需要"持续 F"才能完成
@@ -809,8 +946,10 @@ class PerceptionEngineProxy:
             matched_pairs |= early_sent_rule_ids
 
         enabled_set = set(svc.get_enabled_rule_ids())
-        for did, rule_ids in result.device_rule_map.items():
+        for did, rule_ids in getattr(result, "device_rule_map", {}).items():
             for rule_id in rule_ids:
+                if rule_id_filter is not None and rule_id not in rule_id_filter:
+                    continue
                 if (rule_id, did) in matched_pairs:
                     continue
                 # 防 race:下发后 rule 在 cycle 内被 disable
@@ -861,6 +1000,8 @@ class PerceptionEngineProxy:
             # B2 单源真值:文本构造延迟到 drainer(builder 二次过滤对已过滤列表 idempotent)
             await dispatch_event("interaction", speeches, build_speeches_text)
 
+        return persist_result
+
 
 # ─── meaningful_events 后台持久化(异步,不阻塞 webhook 主路径)───────────
 
@@ -870,7 +1011,14 @@ async def _persist_meaningful_event(
     result: RealtimePerceptionResult,
     device_ids: list[str],
     artifacts: OmniEventArtifacts,
-) -> None:
+    event_id: str | None = None,
+    timestamp_ms: int | None = None,
+    text_prefix: str = "",
+    payload_extra: dict | None = None,
+    home_id: str | None = None,
+    rule_id_filter: set[str] | None = None,
+    force_persist: bool = False,
+) -> MeaningfulEventPersistResult | None:
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
     流程:
@@ -900,25 +1048,39 @@ async def _persist_meaningful_event(
     )
 
     try:
-        # 语音关闭相机的转写不落库:与 dispatch 同一闸门先滤 speech,classify /
-        # payload / text / SSE 全部基于过滤后的视图——语音开关 = 不执行也不记录。
-        # 只滤 speech,同相机的 caption / suggestion / 规则命中照常(开关只管语音,
-        # 不管相机感知)。result 与主路径(规则匹配 / speech dispatch)共享,不可原地
-        # 改 → model_copy 浅拷贝换 speeches 列表。
-        result = result.model_copy(
+        # 语音关闭相机的转写不落库：与 dispatch 同一闸门先滤 speech，classify / payload /
+        # text / SSE 全部基于过滤后的视图。只滤 speech，同相机的 caption / suggestion /
+        # 规则命中照常。result 与主路径共享，不可原地改。
+        persist_result = result.model_copy(
             update={"speeches": _filter_voice_enabled(result.speeches)}
         )
-        cls = classify(result)
-        if not cls["is_meaningful"]:
-            return
+        if rule_id_filter is not None:
+            persist_result = persist_result.model_copy(
+                update={
+                    "matched_rules": [
+                        mr for mr in persist_result.matched_rules if mr.rule_id in rule_id_filter
+                    ]
+                }
+            )
+        cls = classify(persist_result)
+        if not cls["is_meaningful"] and not force_persist:
+            return None
 
         mgr = get_manager()
         dao = mgr.meaningful_events_dao
-        event_id = str(uuid.uuid4())
-        timestamp_ms = int(time.time() * 1000)
+        event_id = event_id or str(uuid.uuid4())
+        timestamp_ms = timestamp_ms or int(time.time() * 1000)
         # timing 已被 observability traces 消费,DB 里这份是冗余副本
-        payload_dict = result.model_dump()
+        payload_dict = persist_result.model_dump()
         payload_dict.pop("timing", None)
+        if rule_id_filter is not None:
+            payload_dict["matched_rules"] = [
+                item
+                for item in payload_dict.get("matched_rules", [])
+                if item.get("rule_id") in rule_id_filter
+            ]
+        if payload_extra:
+            payload_dict.update(payload_extra)
         payload_json = json.dumps(payload_dict, ensure_ascii=False)
 
         # 反查 rule_names:让 DB.text 与 webhook 文本里 rule 段渲染为
@@ -928,6 +1090,8 @@ async def _persist_meaningful_event(
         rule_queries: dict[str, str] = {}
         if result.matched_rules:
             for mr in result.matched_rules:
+                if rule_id_filter is not None and mr.rule_id not in rule_id_filter:
+                    continue
                 try:
                     rule = await mgr.rule_service.get_rule(mr.rule_id)
                     if rule:
@@ -937,27 +1101,20 @@ async def _persist_meaningful_event(
                 except Exception:  # noqa: BLE001
                     pass
 
-        text = build_agent_text(result, rule_names=rule_names, rule_queries=rule_queries)
-
-        insert_ok = dao.insert(
-            event_id=event_id,
-            timestamp=timestamp_ms,
-            text=text,
-            payload_json=payload_json,
-            has_rule_hit=cls["has_rule_hit"],
-            has_suggestion=cls["has_suggestion"],
-            has_asr=cls["has_asr"],
-            device_ids=device_ids,
-            snapshot_count=0,
+        text = build_agent_text(
+            persist_result,
             rule_names=rule_names,
+            rule_queries=rule_queries,
         )
-        if not insert_ok:
-            logger.error("meaningful_events insert failed for %s", event_id)
-            return  # INSERT 失败不继续
+        if not text and force_persist:
+            text = _build_caption_fallback_text(persist_result.caption)
+        if text_prefix and text:
+            text = f"{text_prefix.rstrip()}\n\n{text}"
+        elif text_prefix:
+            text = text_prefix.rstrip()
 
-        # 落盘 event artifacts — 可能因 clips/trace 都缺失 / 磁盘紧张提前 return,
-        # 此时 count 保持 0;不论哪种降级,row 都已 INSERT,SSE 应该推(否则前端
-        # 实时收不到 metadata-only 事件).
+        # 落盘 event artifacts — 先落盘拿 count,insert 时直接传真实值,
+        # 省 update_snapshot_count 二次写(原 insert(0)+update(count) 两步合并).
         count = 0
         if artifacts.clips or artifacts.trace is not None or artifacts.gallery:
             settings = get_settings()
@@ -970,13 +1127,33 @@ async def _persist_meaningful_event(
                     settings.perception.snapshot_min_free_disk_mb,
                     event_id,
                 )
-                # count 留 0,继续走 publish
+                # count 留 0,继续走 insert
             else:
                 count = save_event_artifacts(event_id, artifacts)
-                if count > 0:
-                    dao.update_snapshot_count(event_id, count)
         else:
             logger.debug("no artifacts for event %s, snapshot_count stays 0", event_id)
+
+        # 共用字段：insert + publish 复用，避免手工重建 payload（DRY）
+        event_data = {
+            "event_id": event_id,
+            "timestamp": timestamp_ms,
+            "text": text,
+            "has_rule_hit": cls["has_rule_hit"],
+            "has_suggestion": cls["has_suggestion"],
+            "has_asr": cls["has_asr"],
+            "snapshot_count": count,
+            "device_ids": device_ids,
+            "rule_names": rule_names,
+        }
+
+        insert_ok = dao.insert(
+            **event_data,
+            payload_json=payload_json,
+            home_id=home_id,
+        )
+        if not insert_ok:
+            logger.error("meaningful_events insert failed for %s", event_id)
+            return None  # INSERT 失败不继续 publish(clip 已落盘但无 row,不推 SSE)
 
         # 从 artifacts.clips 取 clip_kind:同 batch 要么全 video 要么全 audio-only
         # (_is_audio_only 是 batch 级共识,见 prompt_builder._is_audio_only),
@@ -992,23 +1169,26 @@ async def _persist_meaningful_event(
 
         try:
             _publish_meaningful_event(
-                event_id=event_id,
-                timestamp=timestamp_ms,
-                text=text,
-                has_rule_hit=cls["has_rule_hit"],
-                has_suggestion=cls["has_suggestion"],
-                has_asr=cls["has_asr"],
-                snapshot_count=count,
-                device_ids=device_ids,
-                rule_names=rule_names,
+                **event_data,
                 clip_kind=clip_kind,
+                trigger_source=(payload_extra or {}).get("trigger_source"),
                 has_trace=has_trace,
             )
         except Exception as e:  # noqa: BLE001
             logger.error("SSE publish failed for event %s: %s", event_id, e)
 
+        return MeaningfulEventPersistResult(
+            event_id=event_id,
+            timestamp=timestamp_ms,
+            text=text,
+            snapshot_count=count,
+            rule_names=rule_names,
+            clip_kind=clip_kind,
+        )
+
     except Exception as e:  # noqa: BLE001
         logger.error("_persist_meaningful_event failed: %s", e, exc_info=True)
+        return None
 
 
 def _publish_meaningful_event(
@@ -1023,6 +1203,7 @@ def _publish_meaningful_event(
     device_ids: list[str],
     rule_names: dict[str, str] | None = None,
     clip_kind: str | None = None,
+    trigger_source: str | None = None,
     has_trace: bool = False,
 ) -> None:
     """通过 processor._publish 推送 meaningful_event SSE 帧.
@@ -1052,4 +1233,6 @@ def _publish_meaningful_event(
         "clip_kind": clip_kind,
         "has_trace": has_trace,
     }
+    if trigger_source:
+        payload["trigger_source"] = trigger_source
     processor._publish("meaningful_event", payload)

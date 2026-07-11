@@ -15,7 +15,12 @@ class BasePerceptionEngine(ABC):
     """Abstract base class for perception engine."""
 
     @abstractmethod
-    async def realtime_perceive(self, batch: BatchedSnapshot, rules: list[dict]) -> RealtimePerceptionResult | None:
+    async def realtime_perceive(
+        self,
+        batch: BatchedSnapshot,
+        rules: list[dict],
+        dedupe_suggestions: bool = True,
+    ) -> RealtimePerceptionResult | None:
         """Realtime perception — batch inference across all devices in one cycle.
         Receives a BatchedSnapshot containing multimodal data from all active
         devices collected within the same cycle window. The implementation can

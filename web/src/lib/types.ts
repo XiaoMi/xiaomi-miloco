@@ -220,6 +220,99 @@ export interface ScopeHome {
   inUse: boolean;
 }
 
+export interface MiotEventSource {
+  source_type: "device";
+  source_id: string;
+  source_name: string;
+  home_id?: string | null;
+  room_name?: string | null;
+}
+
+export type MiotPropertyFilterOp =
+  | "eq"
+  | "ne"
+  | "gt"
+  | "lt"
+  | "gte"
+  | "lte"
+  | "any";
+
+export interface MiotPropertyFilterCondition {
+  op: MiotPropertyFilterOp;
+  value: string;
+}
+
+export interface MiotEventMapping {
+  id: string;
+  rule_id?: string;
+  source_type: "device";
+  source_id: string;
+  source_name_snapshot: string;
+  camera_dids: string[];
+  enabled: boolean;
+  query_template: string;
+  event_kinds: string[];
+  property_filters: Record<string, string | MiotPropertyFilterCondition>;
+  cooldown_seconds: number;
+  notes: string;
+  created_at?: number | null;
+  updated_at?: number | null;
+}
+
+export interface DeviceSpecProperty {
+  siid: number;
+  piid: number;
+  key: string;
+  name: string;
+  description: string;
+  format: string;
+  access: string[];
+  unit: string;
+  value_list?: { value: string; description: string }[];
+  value_range?: { min: number; max: number; step: number };
+}
+
+export interface DeviceSpecEvent {
+  siid: number;
+  eiid: number;
+  key: string;
+  name: string;
+  description: string;
+  arguments: DeviceSpecProperty[];
+}
+
+export interface DeviceSpec {
+  model: string;
+  name: string;
+  properties: DeviceSpecProperty[];
+  events?: DeviceSpecEvent[];
+}
+
+export interface MiotEventTriggerLog {
+  id: string;
+  trigger: {
+    source_type: "device";
+    source_id: string;
+    source_name: string;
+    home_id?: string | null;
+    room_name?: string | null;
+    event_name: string;
+    changed_properties: Record<string, unknown>;
+    occurred_at: number;
+  };
+  mapping_ids: string[];
+  candidate_rule_ids: string[];
+  camera_dids: string[];
+  clip_device_ids: string[];
+  clip_kind: string;
+  perception_started: boolean;
+  perception_answer: string;
+  matched_rule_ids: string[];
+  skipped_reason: string;
+  error: string;
+  created_at: number;
+}
+
 // ── 多家庭 ─────────────────────────────────────────────────
 // HomeId 仅作 useAsync 缓存 key 占位用("primary"),真 home_id 走 ScopeHome.homeId
 // (已接通 PUT/GET /api/miot/scope/homes,backend 多家庭接入范围已上线)。

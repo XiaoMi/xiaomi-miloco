@@ -21,7 +21,9 @@ from miot.types import (
     MIoTActionParam,
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
+    MIoTDeviceEventOccurredEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropertyChangedEvent,
     MIoTDeviceStateEvent,
     MIoTGetPropertyParam,
     MIoTLanDeviceInfo,
@@ -43,7 +45,7 @@ from miloco.miot.mips_listeners import (
     DeviceMetaEventListener,
     SceneEventListener,
 )
-from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
+from miloco.miot.schema import CameraImgSeq, MiotEventTrigger, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
@@ -160,6 +162,12 @@ class MiotProxy:
         # intends to subscribe. Drives the diff in _sync_meta_subscriptions; the
         # authoritative broker-side state lives in MIoTClient._meta_sub_dids.
         self._subscribed_meta_dids: set[str] = set()
+        self._subscribed_property_dids: set[str] = set()
+        self._subscribed_event_dids: set[str] = set()
+        self._automation_mappings: list = []
+        self._automation_trigger_handler: Callable[
+            [MiotEventTrigger], Coroutine
+        ] | None = None
 
         # Listener for home-level scene changes (rename/delete/edit). Debounces
         # then refreshes the scene list.
@@ -206,6 +214,11 @@ class MiotProxy:
             oauth_info=self._oauth_info,
             cloud_server=self._cloud_server,
         )
+
+    def register_automation_trigger_handler(
+        self, handler: Callable[[MiotEventTrigger], Coroutine] | None
+    ) -> None:
+        self._automation_trigger_handler = handler
 
     @property
     def miot_client(self) -> MIoTClient:
@@ -254,6 +267,8 @@ class MiotProxy:
             welcome=self._welcome_service.welcome,
         )
         self._subscribed_meta_dids = set()
+        self._subscribed_property_dids = set()
+        self._subscribed_event_dids = set()
         self._scene_listener = SceneEventListener(refresh_scenes=self.refresh_scenes)
         self._subscribed_scene_home_ids = set()
         self._camera_state_listener = CameraStateEventListener(
@@ -265,6 +280,12 @@ class MiotProxy:
         # name/room/home propagates. Kept off the bind welcome path.
         self._miot_client.register_device_meta_changed_callback(
             self._on_device_meta_changed_event
+        )
+        self._miot_client.register_device_property_changed_callback(
+            self._on_device_property_changed_event
+        )
+        self._miot_client.register_device_event_occurred_callback(
+            self._on_device_event_occurred
         )
         # Device cloud online/offline state: update the cached `online` field
         # directly (event-driven recovery for cameras that went stale across a
@@ -335,6 +356,8 @@ class MiotProxy:
         self._scene_info_dict = {}
         self._user_info = None
         self._subscribed_meta_dids = set()
+        self._subscribed_property_dids = set()
+        self._subscribed_event_dids = set()
         self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
         # Welcome service survives deinit (rebuilt only in __init__), but its
@@ -796,7 +819,9 @@ class MiotProxy:
             try:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
-                await self._sync_meta_subscriptions()
+                await self.sync_automation_property_subscriptions(
+                    self._automation_mappings
+                )
                 await self._sync_scene_subscriptions()
                 return devices
             except Exception as e:
@@ -882,6 +907,68 @@ class MiotProxy:
             )
         await self._camera_state_listener.on_event(msg)
 
+    async def _on_device_property_changed_event(
+        self, msg: MIoTDevicePropertyChangedEvent
+    ) -> None:
+        try:
+            handler = self._automation_trigger_handler
+            if handler is None:
+                return
+            device = self._device_info_dict.get(msg.did)
+            if device is None:
+                # get_devices 仅整表空时刷新；单 did 缺失（整表非空）不触发
+                # 全量拉取。接受该窄窗口（设备刚加入但缓存未刷新），等下次
+                # refresh_devices 全量补上；不在事件热路径调 refresh_devices
+                # （开销大，含全量订阅 sync）。
+                device = (await self.get_devices()).get(msg.did)
+            if device is None:
+                return
+            trigger = MiotEventTrigger(
+                source_type="device",
+                source_id=msg.did,
+                source_name=device.name,
+                home_id=device.home_id,
+                room_name=device.room_name,
+                event_name="device_prop",
+                changed_properties=msg.changed_properties,
+                occurred_at=msg.timestamp_ms,
+                raw=msg.raw,
+            )
+            await handler(trigger)
+        except Exception as e:
+            logger.error("Failed to dispatch device-property automation trigger: %s", e)
+
+    async def _on_device_event_occurred(
+        self, msg: MIoTDeviceEventOccurredEvent
+    ) -> None:
+        try:
+            handler = self._automation_trigger_handler
+            if handler is None:
+                return
+            device = self._device_info_dict.get(msg.did)
+            if device is None:
+                # get_devices 仅整表空时刷新；单 did 缺失（整表非空）不触发
+                # 全量拉取。接受该窄窗口（设备刚加入但缓存未刷新），等下次
+                # refresh_devices 全量补上；不在事件热路径调 refresh_devices
+                # （开销大，含全量订阅 sync）。
+                device = (await self.get_devices()).get(msg.did)
+            if device is None:
+                return
+            trigger = MiotEventTrigger(
+                source_type="device",
+                source_id=msg.did,
+                source_name=device.name,
+                home_id=device.home_id,
+                room_name=device.room_name,
+                event_name=msg.event_key,
+                changed_properties=msg.arguments,
+                occurred_at=msg.timestamp_ms,
+                raw=msg.raw,
+            )
+            await handler(trigger)
+        except Exception as e:
+            logger.error("Failed to dispatch device-event automation trigger: %s", e)
+
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an
         unmanaged one.
@@ -904,13 +991,66 @@ class MiotProxy:
             self._kv_repo, str(old_home)
         )
 
-    async def _sync_meta_subscriptions(self) -> None:
+    async def _subscribe_with_residual_retry(
+        self,
+        did: str,
+        *,
+        sub_fn,
+        unsub_fn,
+        label: str,
+        reconcile_residual: bool = False,
+    ) -> str | None:
+        """订阅一个 did，可选先 unsub 清云端残留 + Not authorized retry。
+
+        reconcile_residual=True（启动/全量重建）：先 unsub 清上个进程
+        client_id 的残留订阅，等 5s 让云端清理，再 sub。热加路径传 False
+        跳过此步（当前进程同一 client，无跨进程残留，5s sleep 纯属浪费）。
+        遇 Not authorized 等 5s retry（meta ACL propagate 延迟），最多 3 次。
+        """
+        for attempt in range(3):
+            if reconcile_residual:
+                try:
+                    await unsub_fn(did)
+                    await asyncio.sleep(5)
+                except Exception:
+                    # 清理残留订阅是 best-effort：目标可能本来就未订阅，失败不应阻断后续 sub/retry。
+                    logger.debug(
+                        "unsubscribe stale %s before subscribe ignored did=%s",
+                        label,
+                        did,
+                        exc_info=True,
+                    )
+            try:
+                await sub_fn(did)
+                return did
+            except Exception as e:
+                if "Not authorized" in str(e) and attempt < 2:
+                    logger.warning(
+                        "subscribe %s Not authorized, retry %d/3 in 5s: did=%s",
+                        label, attempt + 1, did,
+                    )
+                    await asyncio.sleep(5)
+                    continue
+                logger.error("subscribe %s failed did=%s: %s", label, did, e)
+                return None
+        return None
+
+    async def _sync_meta_subscriptions(
+        self, *, reconcile_residual: bool = False
+    ) -> None:
         """Reconcile per-device meta (rename/hr_change) subs to the device list.
 
-        Called at the tail of refresh_devices (under _refresh_devices_lock, so
-        the diff against _subscribed_meta_dids is race-free). New dids are
-        subscribed, removed dids unsubscribed; both run concurrently and
-        per-did failures only log — they never abort the refresh.
+        Called from two paths: (1) refresh_devices under _refresh_devices_lock
+        (serialized against other refresh calls, but NOT against path (2),
+        which is lock-free — so the diff is never globally race-free;
+        correctness rests on sub/unsub idempotency below, not on the lock);
+        (2) sync_automation_property_subscriptions —无锁热更新入口（router
+        create/update/delete + 启动）。两条路径的差集都基于调用瞬间的快照，
+        并发刷新可能让 diff/gather/回写交错；但 sub/unsub 幂等，最坏冗余不
+        破坏正确性，稳态差集空即 return、per-did 失败只 log、下次 refresh
+        自愈，故不加独立订阅锁。New dids are subscribed, removed dids
+        unsubscribed; both run concurrently and per-did failures only log —
+        they never abort the refresh.
 
         ACCOUNT-WIDE ON PURPOSE — do NOT scope-filter this by managed home.
         A device sitting in an out-of-scope home must already be subscribed so
@@ -937,12 +1077,13 @@ class MiotProxy:
             return
 
         async def _sub(did: str) -> str | None:
-            try:
-                await self._miot_client.sub_device_meta_async(did)
-                return did
-            except Exception as e:
-                logger.error("subscribe device-meta failed did=%s: %s", did, e)
-                return None
+            return await self._subscribe_with_residual_retry(
+                did,
+                sub_fn=self._miot_client.sub_device_meta_async,
+                unsub_fn=self._miot_client.unsub_device_meta_async,
+                label="device-meta",
+                reconcile_residual=reconcile_residual,
+            )
 
         async def _unsub(did: str) -> str | None:
             try:
@@ -960,6 +1101,201 @@ class MiotProxy:
             len([d for d in added if d]),
             len([d for d in removed if d]),
             len(self._subscribed_meta_dids),
+        )
+
+    async def _sync_property_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
+        target = {
+            mapping.source_id
+            for mapping in mappings
+            if mapping.enabled
+            and mapping.source_type == "device"
+            and (
+                not mapping.event_kinds
+                or "device_prop" in mapping.event_kinds
+            )
+            and mapping.source_id in self._device_info_dict
+            and "/" not in mapping.source_id
+        }
+        stale = {
+            did
+            for did in self._subscribed_property_dids
+            if did in target
+            and not self._miot_client.has_active_device_property_subscription(did)
+        }
+        if stale:
+            logger.warning(
+                "device-property subscription state stale, will resubscribe: dids=%s",
+                sorted(stale),
+            )
+            self._subscribed_property_dids -= stale
+        to_add = target - self._subscribed_property_dids
+        to_remove = self._subscribed_property_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            return await self._subscribe_with_residual_retry(
+                did,
+                sub_fn=self._miot_client.sub_device_property_changed_async,
+                unsub_fn=self._miot_client.unsub_device_property_changed_async,
+                label="device-property",
+                reconcile_residual=reconcile_residual,
+            )
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_property_changed_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-property failed did=%s: %s", did, e)
+            return did
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        self._subscribed_property_dids |= {d for d in added if d}
+        self._subscribed_property_dids -= {d for d in removed if d}
+        logger.info(
+            "device-property subscriptions synced: +%d -%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            len(self._subscribed_property_dids),
+        )
+
+    async def sync_automation_property_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
+        """Hot-sync MiOT property/event subscriptions for automation mappings.
+
+        先刷新 meta 订阅：米家云端 ACL 要求对 did 先建立 meta 订阅（meta ACL 授权），
+        才能授权 event/property 订阅。create_mapping 路径若跳过此步，新 did 的
+        event 订阅会 Not authorized（需重启才全量刷 meta）。在此入口补一次，
+        保证新 did 先拿 meta ACL 再订阅事件/属性。
+
+        reconcile_residual=True 时每个 sub 前先 unsub 清云端残留 + sleep 5s，
+        仅用于启动/全量重建（上个进程 client_id 残留）；热加路径传 False。
+        """
+        self._automation_mappings = list(mappings)
+        await self._sync_meta_subscriptions(reconcile_residual=reconcile_residual)
+        await self._sync_property_subscriptions(
+            mappings, reconcile_residual=reconcile_residual
+        )
+        await self._sync_event_subscriptions(
+            mappings, reconcile_residual=reconcile_residual
+        )
+
+    async def _sync_event_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
+        target = {
+            mapping.source_id
+            for mapping in mappings
+            if mapping.enabled
+            and mapping.source_type == "device"
+            and any(kind.startswith("event.") for kind in mapping.event_kinds)
+            and mapping.source_id in self._device_info_dict
+            and "/" not in mapping.source_id
+        }
+        stale = {
+            did
+            for did in self._subscribed_event_dids
+            if did in target
+            and not self._miot_client.has_active_device_event_subscription(did)
+        }
+        if stale:
+            logger.warning(
+                "device-event subscription state stale, will resubscribe: dids=%s",
+                sorted(stale),
+            )
+            self._subscribed_event_dids -= stale
+        to_add = target - self._subscribed_event_dids
+        to_remove = self._subscribed_event_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            return await self._subscribe_with_residual_retry(
+                did,
+                sub_fn=self._miot_client.sub_device_event_occurred_async,
+                unsub_fn=self._miot_client.unsub_device_event_occurred_async,
+                label="device-event",
+                reconcile_residual=reconcile_residual,
+            )
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_event_occurred_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-event failed did=%s: %s", did, e)
+            return did
+
+        async def _unsub_many(dids: set) -> set:
+            """Batch unsubscribe multiple event dids in one MQTT packet."""
+            if not dids:
+                return set()
+            removed: set[str] = set()
+            try:
+                await self._miot_client.unsub_device_event_occurred_many_async(
+                    sorted(dids)
+                )
+                removed = dids
+                logger.info(
+                    "device-event batch unsubscribed: dids=%s", sorted(dids)
+                )
+            except Exception as e:
+                logger.error(
+                    "batch device-event unsubscribe failed, falling back: %s", e
+                )
+                results = await asyncio.gather(*(_unsub(d) for d in dids))
+                removed = {d for d in results if d}
+            return removed
+
+        # 启动/全量重建也保留批量订阅：实测米家 broker 对逐条事件订阅更容易
+        # 撞上间歇性 ACL 0x87，批量 SUBSCRIBE 让 broker 用同一份 ACL 快照评估
+        # 多个 event topic，成功率更高。若批量失败，再回退逐条路径执行残留清理
+        # 与 0x87 重试，作为兜底而不是主路径。
+        if len(to_add) > 1 and hasattr(
+            self._miot_client, "sub_device_event_occurred_many_async"
+        ):
+            try:
+                added_batch = (
+                    await self._miot_client.sub_device_event_occurred_many_async(
+                        sorted(to_add)
+                    )
+                )
+                removed = (
+                    await _unsub_many(to_remove)
+                    if len(to_remove) > 1
+                    else await asyncio.gather(*(_unsub(d) for d in to_remove))
+                )
+                self._subscribed_event_dids |= set(added_batch)
+                self._subscribed_event_dids -= {d for d in removed if d}
+                logger.info(
+                    "device-event subscriptions synced by batch: +%d -%d (total=%d) dids=%s",
+                    len(added_batch),
+                    len([d for d in removed if d]),
+                    len(self._subscribed_event_dids),
+                    added_batch,
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    "batch device-event subscribe failed, falling back: %s", e
+                )
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = (
+            await _unsub_many(to_remove)
+            if len(to_remove) > 1
+            else await asyncio.gather(*(_unsub(d) for d in to_remove))
+        )
+        self._subscribed_event_dids |= {d for d in added if d}
+        self._subscribed_event_dids -= {d for d in removed if d}
+        logger.info(
+            "device-event subscriptions synced: +%d -%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            len(self._subscribed_event_dids),
         )
 
     async def _sync_camera_state_subscriptions(self) -> None:
@@ -1017,7 +1353,7 @@ class MiotProxy:
         )
 
     async def _on_scene_changed_event(self, msg: MIoTSceneChangedEvent) -> None:
-        """Forward home scene-change push events to the dedicated listener.
+        """Forward home scene-configuration changes to the dedicated listener.
 
         The debounce + refresh logic lives in
         ``miloco.miot.mips_listeners.SceneEventListener`` — this method is a
@@ -1112,10 +1448,36 @@ class MiotProxy:
                 "last_error": "miot_client not initialized",
             }
         last_error = client.mips_user_sub_error
+        sub_state = client.get_mips_subscription_state()
+        desired_topics = set(sub_state.get("desired", []))
+        active_topics = set(sub_state.get("active", []))
+
+        def _topic_state(topic: str) -> dict[str, bool]:
+            return {
+                "desired": topic in desired_topics,
+                "active": topic in active_topics,
+            }
+
         return {
             "connected": client.mips_connected,
             "user_bind_subscribed": client.mips_connected and last_error is None,
             "last_error": last_error,
+            "subscriptions": {
+                "desired_count": len(desired_topics),
+                "active_count": len(active_topics),
+                "automation": {
+                    "property": {
+                        did: _topic_state(
+                            f"device/{did}/up/properties_changed/#"
+                        )
+                        for did in sorted(self._subscribed_property_dids)
+                    },
+                    "event": {
+                        did: _topic_state(f"device/{did}/up/event_occured/#")
+                        for did in sorted(self._subscribed_event_dids)
+                    },
+                },
+            },
         }
 
     async def refresh_scenes(self) -> dict[str, MIoTManualSceneInfo] | None:
@@ -1502,7 +1864,7 @@ class MiotProxy:
                     ]
                 if s.value_list:
                     entry["value_list"] = [
-                        {"name": v.name, "value": v.value} for v in s.value_list
+                        {"name": v.name, "value": v.value, "description": v.description} for v in s.value_list
                     ]
                 if s.type_name:
                     entry["type_name"] = s.type_name

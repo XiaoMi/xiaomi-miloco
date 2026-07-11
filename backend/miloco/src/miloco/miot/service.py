@@ -7,6 +7,7 @@ MiOT service module
 
 import asyncio
 import logging
+import re
 
 from miot.types import (
     MIoTActionParam,
@@ -313,6 +314,20 @@ class MiotService:
             logger.error("Failed to refresh MiOT devices: %s", e)
             raise MiotServiceException(
                 f"Failed to refresh MiOT devices: {str(e)}"
+            ) from e
+
+    async def sync_automation_property_subscriptions(
+        self, mappings: list, *, reconcile_residual: bool = False
+    ) -> None:
+        """Hot-sync MiOT property subscriptions used by automation mappings."""
+        try:
+            await self._miot_proxy.sync_automation_property_subscriptions(
+                mappings, reconcile_residual=reconcile_residual
+            )
+        except Exception as e:
+            logger.error("Failed to sync automation property subscriptions: %s", e)
+            raise MiotServiceException(
+                f"Failed to sync automation property subscriptions: {str(e)}"
             ) from e
 
     def get_mips_status(self) -> dict:
@@ -759,6 +774,207 @@ class MiotService:
             "category": dev.urn.split(":")[3] if ":" in dev.urn else None,
             "spec": spec,
         }
+
+    async def get_automation_device_spec(self, did: str) -> dict | None:
+        """Return device spec data used by automation filtering UI."""
+        dev = (await self._miot_proxy.get_devices()).get(did)
+        if dev is None:
+            return None
+
+        urn = getattr(dev, "urn", "") or ""
+        base = {
+            "model": dev.model,
+            "name": dev.name,
+            "properties": [],
+            "events": [],
+        }
+        if not urn:
+            return base
+        if not re.match(r"^urn:miot-spec-v2:[A-Za-z0-9:_.\-]+$", urn):
+            return base
+
+        sub_names = build_sub_device_names(dev)
+        spec = await self._miot_proxy._fetch_device_spec(urn=urn, sub_device_names=sub_names)
+        base["properties"] = self._build_automation_property_entries(spec or {})
+        base["events"] = await self._build_automation_event_entries(urn)
+        return base
+
+    async def get_automation_spec_meta(self, did: str) -> dict | None:
+        """Return readable names/value maps for automation trigger rendering."""
+        dev = (await self._miot_proxy.get_devices()).get(did)
+        if dev is None:
+            return None
+        urn = getattr(dev, "urn", "") or ""
+        if not urn:
+            return None
+        spec = await self._miot_proxy._fetch_device_spec(
+            urn=urn,
+            sub_device_names=build_sub_device_names(dev),
+)
+        names: dict[str, str] = {}
+        values: dict[str, dict[str, str]] = {}
+        for iid, item in (spec or {}).items():
+            if not iid.startswith("prop."):
+                continue
+            names[iid] = item.get("description") or item.get("prop_description") or iid
+            value_list = item.get("value_list") or []
+            if value_list:
+                values[iid] = {
+                    str(v.get("value", "")): v.get("description")
+                    or v.get("name")
+                    or str(v.get("value", ""))
+                    for v in value_list
+                }
+            elif item.get("format") == "bool":
+                values[iid] = {"0": "关", "1": "开"}
+        spec_device = await self._miot_proxy.miot_client.spec_parser.parse_async(urn=urn)
+        if spec_device:
+            for service in spec_device.services:
+                for event in service.events:
+                    event_key = f"event.{service.iid}.{event.iid}"
+                    event_name = (
+                        f"{service.description_trans} {event.description_trans}"
+                        if service.description_trans != event.description_trans
+                        else event.description_trans
+                    )
+                    names[event_key] = event_name or event.description or event_key
+                    for prop in event.arguments:
+                        arg_key = f"arg.{service.iid}.{prop.iid}"
+                        arg_name = (
+                            f"{service.description_trans} {prop.description_trans}"
+                            if service.description_trans != prop.description_trans
+                            else prop.description_trans
+                        )
+                        names[arg_key] = arg_name or prop.description or arg_key
+                        if prop.value_list:
+                            values[arg_key] = {
+                                str(v.value): (v.description or v.name or str(v.value))
+                                for v in prop.value_list
+                            }
+        return {"names": names, "values": values}
+
+    @staticmethod
+    def _build_automation_property_entry(iid: str, item: dict) -> dict | None:
+        if not iid.startswith("prop."):
+            return None
+        parts = iid.split(".")
+        if len(parts) != 3:
+            return None
+        _, siid, piid = parts
+        entry = {
+            "siid": int(siid),
+            "piid": int(piid),
+            "key": iid,
+            "name": item.get("description") or item.get("prop_description") or iid,
+            "description": item.get("description") or "",
+            "format": item.get("format") or "",
+            "access": [
+                access
+                for enabled, access in (
+                    (item.get("readable"), "read"),
+                    (item.get("writeable"), "write"),
+                )
+                if enabled
+            ],
+            "unit": item.get("unit") or "",
+        }
+        value_list = item.get("value_list") or []
+        if value_list:
+            entry["value_list"] = [
+                {
+                    "value": str(v.get("value", "")),
+                    "description": v.get("description")
+                    or v.get("name")
+                    or str(v.get("value", "")),
+                }
+                for v in value_list
+            ]
+        elif entry["format"] == "bool":
+            entry["value_list"] = [
+                {"value": "0", "description": "关"},
+                {"value": "1", "description": "开"},
+            ]
+        value_range = item.get("value_range")
+        if value_range and len(value_range) == 3:
+            entry["value_range"] = {
+                "min": value_range[0],
+                "max": value_range[1],
+                "step": value_range[2],
+            }
+        return entry
+
+    @classmethod
+    def _build_automation_property_entries(cls, spec: dict) -> list[dict]:
+        props = [
+            entry
+            for iid, item in spec.items()
+            if (entry := cls._build_automation_property_entry(iid, item)) is not None
+        ]
+        props.sort(key=lambda item: (item["siid"], item["piid"]))
+        return props
+
+    async def _build_automation_event_entries(self, urn: str) -> list[dict]:
+        if not re.match(r"^urn:miot-spec-v2:[A-Za-z0-9:_.\-]+$", urn):
+            return []
+        spec_device = await self._miot_proxy.miot_client.spec_parser.parse_async(urn=urn)
+        if spec_device and not any(service.events for service in spec_device.services):
+            spec_device = await self._miot_proxy.miot_client.spec_parser.parse_async(
+                urn=urn,
+                skip_cache=True,
+            )
+        if not spec_device:
+            return []
+        events: list[dict] = []
+        for service in spec_device.services:
+            for event in service.events:
+                args = []
+                for prop in event.arguments:
+                    item = {
+                        "description": (
+                            f"{service.description_trans} {prop.description_trans}"
+                            if service.description_trans != prop.description_trans
+                            else prop.description_trans
+                        ),
+                        "prop_description": prop.description,
+                        "format": prop.format,
+                        "readable": prop.readable,
+                        "writeable": prop.writable,
+                        "unit": prop.unit,
+                    }
+                    if prop.value_list:
+                        item["value_list"] = [
+                            {"name": v.name, "value": v.value, "description": v.description}
+                            for v in prop.value_list
+                        ]
+                    if prop.value_range:
+                        item["value_range"] = [
+                            prop.value_range.min_,
+                            prop.value_range.max_,
+                            prop.value_range.step,
+                        ]
+                    entry = self._build_automation_property_entry(
+                        f"prop.{service.iid}.{prop.iid}",
+                        item,
+                    )
+                    if entry is not None:
+                        entry["key"] = f"arg.{service.iid}.{prop.iid}"
+                        args.append(entry)
+                events.append(
+                    {
+                        "siid": service.iid,
+                        "eiid": event.iid,
+                        "key": f"event.{service.iid}.{event.iid}",
+                        "name": (
+                            f"{service.description_trans} {event.description_trans}"
+                            if service.description_trans != event.description_trans
+                            else event.description_trans
+                        ),
+                        "description": event.description_trans or event.description,
+                        "arguments": args,
+                    }
+                )
+        events.sort(key=lambda item: (item["siid"], item["eiid"]))
+        return events
 
     async def control_device(self, did: str, request: DeviceControlRequest) -> dict:
         """Control device: set_property / set_properties / call_action."""
@@ -1234,11 +1450,13 @@ class MiotService:
             scenes = await self._miot_proxy.get_all_scenes()
             if not scenes or scene_id not in scenes:
                 raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
+            scene = scenes[scene_id]
+            if not is_home_allowed(self._kv_repo, getattr(scene, "home_id", None)):
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
-            return await self._miot_proxy.execute_miot_scene(scene_id)
+            success = await self._miot_proxy.execute_miot_scene(scene_id)
+            return success
         except (ResourceNotFoundException, ValidationException):
             raise
         except Exception as e:

@@ -24,6 +24,9 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
+  MiotEventMapping,
+  MiotEventSource,
+  MiotEventTriggerLog,
   TokenBreakdown,
   UsageCallType,
   UsageGroup,
@@ -856,7 +859,73 @@ export async function realListCameras(): Promise<PerceptionCamera[]> {
     }));
 }
 
+export async function realGetAutomationCatalog(): Promise<{
+  devices: MiotEventSource[];
+  cameras: ScopeCamera[];
+}> {
+  const r = await apiFetch<
+    Normal<{ devices: MiotEventSource[]; cameras: ScopeCamera[] }>
+  >("/api/automation/catalog");
+  return r.data;
+}
+
+export async function realListMiotEventMappings(): Promise<MiotEventMapping[]> {
+  const r = await apiFetch<Normal<MiotEventMapping[]>>("/api/automation/mappings");
+  return r.data;
+}
+
+export async function realCreateMiotEventMapping(
+  input: Omit<MiotEventMapping, "id">,
+): Promise<MiotEventMapping> {
+  const r = await apiFetch<Normal<MiotEventMapping>>("/api/automation/mappings", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return r.data;
+}
+
+export async function realUpdateMiotEventMapping(
+  id: string,
+  input: Partial<MiotEventMapping>,
+): Promise<MiotEventMapping> {
+  const r = await apiFetch<Normal<MiotEventMapping>>(`/api/automation/mappings/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  return r.data;
+}
+
+export async function realDeleteMiotEventMapping(id: string): Promise<void> {
+  await apiFetch<Normal<null>>(`/api/automation/mappings/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function realTestMiotEventTrigger(input: {
+  source_type: "device";
+  source_id: string;
+  source_name: string;
+  event_name?: string;
+  changed_properties?: Record<string, unknown>;
+}): Promise<MiotEventTriggerLog> {
+  const r = await apiFetch<Normal<MiotEventTriggerLog>>("/api/automation/test-trigger", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return r.data;
+}
+
 // ── 米家账号绑定 OAuth ────────────────────────────────────
+// ── Automation: device spec ───────────────────────────────
+export async function realFetchDeviceSpec(
+  did: string,
+): Promise<import("@/lib/types").DeviceSpec> {
+  const r = await apiFetch<Normal<import("@/lib/types").DeviceSpec>>(
+    `/api/automation/device-spec/${did}`,
+  );
+  return r.data;
+}
+
 // 流程跟 cli/src/miloco_cli/commands/account.py 同源：
 //   ① POST /api/miot/bind → backend 返 oauth_url（小米授权页）
 //   ② 用户浏览器打开 oauth_url 走授权 → 回调到

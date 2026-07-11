@@ -145,6 +145,7 @@ knowledge/
 - **01-overview** — [系统架构总览](01-overview/overview.md)
 - **02-strategy** — [产品战略](02-strategy/README.md)（内容待产品团队补充）
 - **03-features**
+  - [感知触发](03-features/triggered-perception.md)
   - [感知流水线](03-features/perception-pipeline.md)
   - [身份识别](03-features/person-identity.md)
   - [设备控制](03-features/device-control.md)

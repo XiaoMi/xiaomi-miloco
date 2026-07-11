@@ -34,7 +34,14 @@ from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["interaction", "bind", "rule", "suggestion", "onboarding"]
+EventType = Literal[
+    "interaction",
+    "bind",
+    "rule",
+    "suggestion",
+    "notify",
+    "onboarding",
+]
 
 # builder：把「合并后的同类条目列表」重构成一条 message（单一头、统一编号）。
 # 返回 None/空 → drainer 跳过该批。dispatcher 不感知 items 的具体业务类型。

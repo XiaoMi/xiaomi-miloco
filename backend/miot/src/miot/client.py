@@ -36,7 +36,9 @@ from .types import (
     MIoTCameraInfo,
     MIoTCameraStatus,
     MIoTDeviceBindEvent,
+    MIoTDeviceEventOccurredEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropertyChangedEvent,
     MIoTDeviceStateEvent,
     MIoTHomeInfo,
     MIoTLanDeviceInfo,
@@ -100,11 +102,19 @@ class MIoTClient:
     # `online` field directly (event-driven recovery), not the meta refresh
     # path.
     _callback_device_state_changed: Optional[Callable[[MIoTDeviceStateEvent], Any]]
+    _callback_device_property_changed: Optional[
+        Callable[[MIoTDevicePropertyChangedEvent], Any]
+    ]
+    _callback_device_event_occurred: Optional[
+        Callable[[MIoTDeviceEventOccurredEvent], Any]
+    ]
     # Dids whose `device/{did}/g_op/#` meta topic is (intended to be)
     # subscribed. This client owns the per-device meta subs: it re-issues them
     # on _setup_mips_async (re-OAuth / fresh setup); plain reconnects are
     # handled by mips_cloud's own _subs replay.
     _meta_sub_dids: set
+    _property_sub_dids: set
+    _event_sub_dids: set
     # Dids whose `device/{did}/state/#` cloud online/offline topic is
     # (intended to be) subscribed. Same ownership/replay model as
     # _meta_sub_dids.
@@ -171,7 +181,11 @@ class MIoTClient:
         self._callback_user_bind = None
         self._callback_device_meta_changed = None
         self._callback_device_state_changed = None
+        self._callback_device_property_changed = None
+        self._callback_device_event_occurred = None
         self._meta_sub_dids = set()
+        self._property_sub_dids = set()
+        self._event_sub_dids = set()
         self._state_sub_dids = set()
         self._scene_sub_home_ids = set()
         self._callback_scene_changed = None
@@ -428,6 +442,8 @@ class MIoTClient:
             self._callback_device_meta_changed = None
             self._callback_device_state_changed = None
             self._meta_sub_dids = set()
+            self._property_sub_dids = set()
+            self._event_sub_dids = set()
             self._state_sub_dids = set()
             self._scene_sub_home_ids = set()
             self._callback_scene_changed = None
@@ -772,6 +788,29 @@ class MIoTClient:
         """
         return self._mips_user_sub_error
 
+    def has_active_device_property_subscription(self, did: str) -> bool:
+        """Whether the property-change topic for *did* is SUBACK-confirmed."""
+        mips = self._mips_cloud
+        if mips is None:
+            return False
+        return mips.has_active_subscription(
+            f"device/{did}/up/properties_changed/#"
+        )
+
+    def has_active_device_event_subscription(self, did: str) -> bool:
+        """Whether the event-occured topic for *did* is SUBACK-confirmed."""
+        mips = self._mips_cloud
+        if mips is None:
+            return False
+        return mips.has_active_subscription(f"device/{did}/up/event_occured/#")
+
+    def get_mips_subscription_state(self) -> dict[str, list[str]]:
+        """Return desired/active MQTT subscription topics for diagnostics."""
+        mips = self._mips_cloud
+        if mips is None:
+            return {"desired": [], "active": []}
+        return mips.list_subscription_state()
+
     async def _setup_mips_async(self) -> None:
         """Build (or rebuild) the mips_cloud client and attempt user-level subs.
 
@@ -886,6 +925,46 @@ class MIoTClient:
                 len(dids),
             )
 
+        if self._property_sub_dids:
+            dids = sorted(self._property_sub_dids)
+            self._property_sub_dids = set()
+            ok = 0
+            for did in dids:
+                try:
+                    await self.sub_device_property_changed_async(did)
+                    ok += 1
+                except Exception as e:
+                    _LOGGER.error(
+                        "mips_cloud re-subscribe device-property FAILED did=%s: %s",
+                        did,
+                        e,
+                    )
+            _LOGGER.info(
+                "mips_cloud re-subscribed device-property for %d/%d devices",
+                ok,
+                len(dids),
+            )
+
+        if self._event_sub_dids:
+            dids = sorted(self._event_sub_dids)
+            self._event_sub_dids = set()
+            ok = 0
+            for did in dids:
+                try:
+                    await self.sub_device_event_occurred_async(did)
+                    ok += 1
+                except Exception as e:
+                    _LOGGER.error(
+                        "mips_cloud re-subscribe device-event FAILED did=%s: %s",
+                        did,
+                        e,
+                    )
+            _LOGGER.info(
+                "mips_cloud re-subscribed device-event for %d/%d devices",
+                ok,
+                len(dids),
+            )
+
         # Same replay for per-home scene subscriptions.
         if self._scene_sub_home_ids:
             home_ids = sorted(self._scene_sub_home_ids)
@@ -966,6 +1045,34 @@ class MIoTClient:
         if asyncio.iscoroutine(ret):
             asyncio.ensure_future(ret)
 
+    def register_device_property_changed_callback(
+        self, callback: Optional[Callable[[MIoTDevicePropertyChangedEvent], Any]]
+    ) -> None:
+        self._callback_device_property_changed = callback
+
+    def _on_device_property_changed_msg(
+        self, msg: MIoTDevicePropertyChangedEvent
+    ) -> None:
+        cb = self._callback_device_property_changed
+        if cb is None:
+            return
+        ret = cb(msg)
+        if asyncio.iscoroutine(ret):
+            asyncio.ensure_future(ret)
+
+    def register_device_event_occurred_callback(
+        self, callback: Optional[Callable[[MIoTDeviceEventOccurredEvent], Any]]
+    ) -> None:
+        self._callback_device_event_occurred = callback
+
+    def _on_device_event_occurred_msg(self, msg: MIoTDeviceEventOccurredEvent) -> None:
+        cb = self._callback_device_event_occurred
+        if cb is None:
+            return
+        ret = cb(msg)
+        if asyncio.iscoroutine(ret):
+            asyncio.ensure_future(ret)
+
     async def sub_device_meta_async(self, did: str) -> None:
         """Subscribe one device's `device/{did}/g_op/{rename,hr_change}` meta
         topics (idempotent).
@@ -997,6 +1104,74 @@ class MIoTClient:
         if mips is None:
             return
         await mips.unsub_device_meta_changed_async(did)
+
+    async def sub_device_property_changed_async(self, did: str) -> None:
+        if did in self._property_sub_dids:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._property_sub_dids.add(did)
+            return
+        await mips.sub_device_property_changed_async(
+            did, self._on_device_property_changed_msg
+        )
+        self._property_sub_dids.add(did)
+
+    async def unsub_device_property_changed_async(self, did: str) -> None:
+        self._property_sub_dids.discard(did)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_property_changed_async(did)
+
+    async def sub_device_event_occurred_async(self, did: str) -> None:
+        if did in self._event_sub_dids:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._event_sub_dids.add(did)
+            return
+        await mips.sub_device_event_occurred_async(
+            did, self._on_device_event_occurred_msg
+        )
+        self._event_sub_dids.add(did)
+
+    async def sub_device_event_occurred_many_async(self, dids: list[str]) -> list[str]:
+        """Subscribe multiple device-event topics in one MQTT SUBSCRIBE packet."""
+        dids = [str(did) for did in dids if str(did) not in self._event_sub_dids]
+        if not dids:
+            return []
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._event_sub_dids.update(dids)
+            return dids
+
+        event_decoder = mips._make_device_event_decoder()
+        specs = [
+            (f"device/{did}/up/event_occured/#", self._on_device_event_occurred_msg, event_decoder)
+            for did in dids
+        ]
+        await mips.sub_many_async(specs)
+        self._event_sub_dids.update(dids)
+        return dids
+
+    async def unsub_device_event_occurred_many_async(self, dids: list[str]) -> None:
+        """Unsubscribe device-event topics for multiple dids in one packet."""
+        if not dids:
+            return
+        topics = [f"device/{did}/up/event_occured/#" for did in dids]
+        mips = self._mips_cloud
+        if mips is not None:
+            await mips.unsub_many_async(topics)
+        for did in dids:
+            self._event_sub_dids.discard(did)
+
+    async def unsub_device_event_occurred_async(self, did: str) -> None:
+        self._event_sub_dids.discard(did)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_event_occurred_async(did)
 
     def register_device_state_changed_callback(
         self, callback: Optional[Callable[[MIoTDeviceStateEvent], Any]]

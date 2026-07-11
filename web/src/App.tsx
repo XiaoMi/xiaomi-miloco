@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import {
   getHomeStatus,
+  getAutomationCatalog,
   listActivity,
   listCameras,
   listDevices,
@@ -29,6 +30,7 @@ import { HomeSwitcher } from "./components/HomeSwitcher";
 import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
+import { AutomationPage } from "./components/AutomationPage";
 import { ActivityFeed } from "./components/ActivityFeed";
 import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
@@ -146,6 +148,9 @@ function MainApp() {
   });
   const activity = useAsync(() => listActivity(homeId), [homeId], {
     errorLabel: t("app.loadActivityFail"),
+  });
+  const automationCatalog = useAsync(() => getAutomationCatalog(), [homeId], {
+    errorLabel: "加载感知触发配置失败",
   });
   // 家庭档案（候选区 + 正式区记忆）——家庭 tab 用，成员抽屉与非人面板共享。
   const home = useAsync(() => listHomeEntries(homeId), [homeId], {
@@ -282,6 +287,26 @@ function MainApp() {
               }}
             />
           </div>
+        );
+      }
+      case "automation": {
+        const err = automationCatalog.error;
+        if (err) {
+          return (
+            <TabPanelError
+              message={`感知触发页加载失败：${err.message}`}
+              onRetry={() => automationCatalog.reload()}
+            />
+          );
+        }
+        if (!automationCatalog.data) {
+          return <TabPanelLoading text="正在加载感知触发配置…" />;
+        }
+        return (
+          <AutomationPage
+            devices={automationCatalog.data.devices}
+            cameras={automationCatalog.data.cameras}
+          />
         );
       }
       case "family": {

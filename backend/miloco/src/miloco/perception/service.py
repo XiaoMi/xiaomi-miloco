@@ -119,6 +119,10 @@ class PerceptionService:
         """
         return self._pipeline.get_active_confirmed_track_keys()
 
+    def publish_meaningful_event(self, payload: dict) -> None:
+        """Publish an already-persisted meaningful event to live listeners."""
+        self._pipeline.publish_sse("meaningful_event", payload)
+
     def get_reid_extractor(self):
         """从任一活动的 DeepSortTracker 借 HumanReID 实例,给身份库注册时
         ``add_tier_a_samples_batch`` 做 .npy 兜底抽取用。
@@ -142,7 +146,9 @@ class PerceptionService:
     # ---- Active perception ----
 
     async def on_demand_perceive(
-        self, request: OnDemandPerceptionRequest
+        self,
+        request: OnDemandPerceptionRequest,
+        snapshot_sink: dict | None = None,
     ) -> OnDemandPerceptionResultItem | None:
         """On-demand perception: batch-collects requested devices and runs
         a single fusion inference via pipeline.
@@ -169,7 +175,11 @@ class PerceptionService:
             )
 
         # Single batch inference call — collector assembles batch, processor infers
-        result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        result = await self._pipeline.process_on_demand(
+            valid_dids,
+            request.query,
+            snapshot_sink=snapshot_sink,
+        )
 
         if not result:
             raise BusinessException(
@@ -182,6 +192,44 @@ class PerceptionService:
             answer=result.answer,
             timestamp=ms_to_iso_local(now_ms()),
         )
+
+    async def external_trigger_perceive(
+        self,
+        sources: list[str],
+        rules: list[dict],
+        extra_context_by_did: dict[str, str] | None = None,
+    ):
+        """米家等外部事件触发：放行指定相机 Gate，后续复用实时感知链路。"""
+        active_sources = self._collector.get_all_active_sources()
+        valid_dids: list[str] = []
+        for did in sources:
+            if did not in active_sources:
+                logger.warning("[service](device=%s) 未激活感知(skipped)", did)
+                continue
+            valid_dids.append(did)
+
+        if not valid_dids:
+            raise BusinessException(
+                "No valid active perception sources found. "
+                "Ensure the perception engine is running and devices are online.",
+                code=2011,
+            )
+
+        result = await self._pipeline.process_external_trigger(
+            valid_dids,
+            rules,
+            extra_context_by_did=extra_context_by_did,
+        )
+        if not result or not result[0]:
+            raise BusinessException(
+                "Failed to perform external trigger perception.",
+                code=2012,
+            )
+        return result
+
+    async def handle_structured_perception_result(self, **kwargs):
+        """Run the same post-processing path used by realtime perception."""
+        return await self._pipeline.handle_structured_perception_result(**kwargs)
 
     # ---- Perception logs ----
 

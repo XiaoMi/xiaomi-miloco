@@ -24,16 +24,21 @@ from unittest.mock import AsyncMock
 import pytest
 from miloco.miot import client as client_module
 from miloco.miot.client import MiotProxy
+from miloco.miot.schema import MiotEventMapping
 
 
 def _bare_proxy() -> MiotProxy:
     proxy = MiotProxy.__new__(MiotProxy)
     proxy._subscribed_meta_dids = set()
+    proxy._subscribed_property_dids = set()
+    proxy._subscribed_event_dids = set()
     proxy._subscribed_scene_home_ids = set()
     proxy._device_info_dict = {}
     proxy._camera_info_dict = {}
     proxy._scene_info_dict = {}
     proxy._miot_client = AsyncMock()
+    proxy._miot_client.has_active_device_property_subscription = lambda _did: True
+    proxy._miot_client.has_active_device_event_subscription = lambda _did: True
     proxy._kv_repo = object()  # only passed through to is_home_allowed
     return proxy
 
@@ -85,6 +90,206 @@ async def test_sync_noop_when_already_in_sync():
     proxy._miot_client.sub_device_meta_async.assert_not_awaited()
     proxy._miot_client.unsub_device_meta_async.assert_not_awaited()
     assert proxy._subscribed_meta_dids == {"A", "B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
+    monkeypatch,
+):
+    proxy = _bare_proxy()
+    proxy._subscribed_property_dids = {"OLD", "B"}
+    proxy._device_info_dict = {
+        "B": SimpleNamespace(did="B"),
+        "C": SimpleNamespace(did="C"),
+        "dev/skip": SimpleNamespace(did="dev/skip"),
+    }
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["device_prop"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="C",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+        MiotEventMapping(source_type="device", source_id="C", enabled=False),
+        MiotEventMapping(source_type="device", source_id="dev/skip", enabled=True),
+        MiotEventMapping(source_type="device", source_id="missing", enabled=True),
+    ]
+    await proxy._sync_property_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_property_changed_async.assert_not_awaited()
+    proxy._miot_client.unsub_device_property_changed_async.assert_awaited_once_with(
+        "OLD"
+    )
+    assert proxy._subscribed_property_dids == {"B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_event_subscriptions_only_tracks_device_event_mappings():
+    proxy = _bare_proxy()
+    proxy._subscribed_event_dids = {"OLD"}
+    proxy._device_info_dict = {
+        "B": SimpleNamespace(did="B"),
+        "C": SimpleNamespace(did="C"),
+        "dev/skip": SimpleNamespace(did="dev/skip"),
+    }
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="C",
+            enabled=True,
+            event_kinds=["device_prop"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="dev/skip",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+    ]
+    await proxy._sync_event_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_event_occurred_async.assert_awaited_once_with("B")
+    proxy._miot_client.unsub_device_event_occurred_async.assert_awaited_once_with(
+        "OLD"
+    )
+    assert proxy._subscribed_event_dids == {"B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_event_subscriptions_batches_multiple_new_dids():
+    proxy = _bare_proxy()
+    proxy._device_info_dict = {
+        "A": SimpleNamespace(did="A"),
+        "B": SimpleNamespace(did="B"),
+    }
+    proxy._miot_client.sub_device_event_occurred_many_async = AsyncMock(
+        return_value=["A", "B"]
+    )
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="A",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.3.1"],
+        ),
+    ]
+    await proxy._sync_event_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_event_occurred_many_async.assert_awaited_once_with(
+        ["A", "B"]
+    )
+    proxy._miot_client.sub_device_event_occurred_async.assert_not_awaited()
+    assert proxy._subscribed_event_dids == {"A", "B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_event_subscriptions_batches_during_residual_reconcile():
+    """启动/全量重建也走批量事件订阅。
+
+    米家 broker 对逐条 event SUBSCRIBE 更容易撞间歇性 ACL 0x87；批量订阅
+    让 broker 用同一份 ACL 快照评估多个 topic。残留清理/重试只作为批量失败
+    后的逐条 fallback，不应阻止启动路径使用批量主路径。
+    """
+    proxy = _bare_proxy()
+    proxy._device_info_dict = {
+        "A": SimpleNamespace(did="A"),
+        "B": SimpleNamespace(did="B"),
+    }
+    proxy._miot_client.sub_device_event_occurred_many_async = AsyncMock(
+        return_value=["A", "B"]
+    )
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="A",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.3.1"],
+        ),
+    ]
+    await proxy._sync_event_subscriptions(mappings, reconcile_residual=True)
+
+    proxy._miot_client.sub_device_event_occurred_many_async.assert_awaited_once_with(
+        ["A", "B"]
+    )
+    proxy._miot_client.sub_device_event_occurred_async.assert_not_awaited()
+    proxy._miot_client.unsub_device_event_occurred_async.assert_not_awaited()
+    assert proxy._subscribed_event_dids == {"A", "B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_property_subscriptions_adds_new_enabled_mapping():
+    proxy = _bare_proxy()
+    proxy._device_info_dict = {"C": SimpleNamespace(did="C")}
+
+    mappings = [MiotEventMapping(source_type="device", source_id="C", enabled=True)]
+    await proxy._sync_property_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
+    proxy._miot_client.unsub_device_property_changed_async.assert_not_awaited()
+    assert proxy._subscribed_property_dids == {"C"}
+
+
+@pytest.mark.asyncio
+async def test_sync_property_subscriptions_resubscribes_stale_active_topic():
+    proxy = _bare_proxy()
+    proxy._subscribed_property_dids = {"C"}
+    proxy._device_info_dict = {"C": SimpleNamespace(did="C")}
+    proxy._miot_client.has_active_device_property_subscription = lambda _did: False
+
+    mappings = [MiotEventMapping(source_type="device", source_id="C", enabled=True)]
+    await proxy._sync_property_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
+    assert proxy._subscribed_property_dids == {"C"}
+
+
+@pytest.mark.asyncio
+async def test_sync_event_subscriptions_resubscribes_stale_active_topic():
+    proxy = _bare_proxy()
+    proxy._subscribed_event_dids = {"B"}
+    proxy._device_info_dict = {"B": SimpleNamespace(did="B")}
+    proxy._miot_client.has_active_device_event_subscription = lambda _did: False
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        )
+    ]
+    await proxy._sync_event_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_event_occurred_async.assert_awaited_once_with("B")
+    assert proxy._subscribed_event_dids == {"B"}
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,8 @@ from .const import (
 )
 from .types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceEventOccurredEvent,
+    MIoTDevicePropertyChangedEvent,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsConnectionError,
@@ -109,6 +111,17 @@ _TOPIC_DEVICE_STATE = re.compile(
     r"^device/([^/]+)/state/(" + "|".join(_DEVICE_STATE_OPS) + r")$"
 )
 
+# Device property push: `device/{did}/up/properties_changed/#`.
+_TOPIC_DEVICE_PROPERTIES_CHANGED = re.compile(
+    r"^device/([^/]+)/up/properties_changed(?:/.*)?$"
+)
+
+# Device event push: `device/{did}/up/event_occured/#`.
+# The upstream MIoT cloud topic uses the misspelled "occured"; keep it as-is.
+_TOPIC_DEVICE_EVENT_OCCURRED = re.compile(
+    r"^device/([^/]+)/up/event_occured(?:/.*)?$"
+)
+
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
 # decoded message object and may be sync or async — both are dispatched on the
@@ -116,6 +129,12 @@ _TOPIC_DEVICE_STATE = re.compile(
 BindHandler = Callable[[MIoTDeviceBindEvent], Union[None, Awaitable[None]]]
 SceneChangedHandler = Callable[[MIoTSceneChangedEvent], Union[None, Awaitable[None]]]
 DeviceStateHandler = Callable[[MIoTDeviceStateEvent], Union[None, Awaitable[None]]]
+PropertyChangedHandler = Callable[
+    [MIoTDevicePropertyChangedEvent], Union[None, Awaitable[None]]
+]
+DeviceEventHandler = Callable[
+    [MIoTDeviceEventOccurredEvent], Union[None, Awaitable[None]]
+]
 MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe (no awaiter, e.g. the reconnect-time
 # re-issue in _on_connect) fails. Arg tuple = (topic, reason_code,
@@ -207,7 +226,13 @@ class MIoTMipsCloud:
         self._pending_subscribes: dict[int, asyncio.Future[list[int]]] = {}
         self._pending_lock = threading.Lock()
 
-        # Active subscriptions, keyed by topic. Used to resubscribe on reconnect.
+        # Desired subscriptions, keyed by topic. This is the long-lived intent
+        # registry used to replay subscriptions after reconnect. SUBACK failures
+        # must not remove entries from here, otherwise transient Mi Home ACL
+        # windows (notably 0x87 during reconnect) permanently lose the topic.
+        self._desired_subs: dict[str, _Subscription] = {}
+        # Active subscriptions, keyed by topic. Only topics with a successful
+        # SUBACK live here; message dispatch and health checks use this table.
         self._subs: dict[str, _Subscription] = {}
         self._subs_lock = threading.Lock()
 
@@ -348,7 +373,26 @@ class MIoTMipsCloud:
                     )
             self._pending_subscribes.clear()
         with self._subs_lock:
+            self._desired_subs.clear()
             self._subs.clear()
+
+    def has_active_subscription(self, topic: str) -> bool:
+        """Return whether *topic* is currently confirmed active by SUBACK."""
+        with self._subs_lock:
+            return topic in self._subs
+
+    def has_desired_subscription(self, topic: str) -> bool:
+        """Return whether *topic* is still part of the desired subscribe set."""
+        with self._subs_lock:
+            return topic in self._desired_subs
+
+    def list_subscription_state(self) -> dict[str, list[str]]:
+        """Debug snapshot of desired and active subscription topics."""
+        with self._subs_lock:
+            return {
+                "desired": sorted(self._desired_subs),
+                "active": sorted(self._subs),
+            }
 
     # ---------------------------------------------------------- token rotate
 
@@ -358,7 +402,7 @@ class MIoTMipsCloud:
         paho's username_pw_set takes effect on the *next* CONNECT, so we also
         force a reconnect so the new token is actually used. While the
         reconnect cycles, on_disconnect → on_connect will resubscribe all
-        active topics from ``self._subs`` (see _on_connect).
+        desired topics from ``self._desired_subs`` (see _on_connect).
         """
         self._token = token
         mqtt = self._mqtt
@@ -482,6 +526,30 @@ class MIoTMipsCloud:
         for op in _HOME_SCENE_OPS:
             await self._unsubscribe_async(f"home/{home_id}/scene/{op}")
 
+    async def sub_device_property_changed_async(
+        self, did: str, handler: PropertyChangedHandler
+    ) -> None:
+        await self._subscribe_async(
+            f"device/{did}/up/properties_changed/#",
+            handler,
+            self._make_property_changed_decoder(),
+        )
+
+    async def unsub_device_property_changed_async(self, did: str) -> None:
+        await self._unsubscribe_async(f"device/{did}/up/properties_changed/#")
+
+    async def sub_device_event_occurred_async(
+        self, did: str, handler: DeviceEventHandler
+    ) -> None:
+        await self._subscribe_async(
+            f"device/{did}/up/event_occured/#",
+            handler,
+            self._make_device_event_decoder(),
+        )
+
+    async def unsub_device_event_occurred_async(self, did: str) -> None:
+        await self._unsubscribe_async(f"device/{did}/up/event_occured/#")
+
     async def sub_device_state_async(
         self, did: str, handler: DeviceStateHandler
     ) -> None:
@@ -502,6 +570,95 @@ class MIoTMipsCloud:
             await self._unsubscribe_async(f"device/{did}/state/{op}")
 
     # ------------------------------------------------------- subscribe core
+
+    async def sub_many_async(
+        self,
+        specs: list[
+            tuple[
+                str,
+                Callable[[Any], Union[None, Awaitable[None]]],
+                Callable[[str, bytes], Optional[Any]],
+            ]
+        ],
+        qos: int = _DEFAULT_QOS,
+    ) -> None:
+        """Subscribe multiple topics in one MQTT SUBSCRIBE packet."""
+        if not specs:
+            return
+        mqtt = self._mqtt
+        if mqtt is None or not self._connected:
+            raise MipsConnectionError("mips_cloud not connected; cannot batch subscribe")
+
+        future: asyncio.Future[list[int]] = self._main_loop.create_future()
+        subs = [
+            _Subscription(topic=topic, qos=qos, handler=handler, decoder=decoder)
+            for topic, handler, decoder in specs
+        ]
+        with self._subs_lock:
+            for sub in subs:
+                self._desired_subs[sub.topic] = sub
+
+        topics = [(sub.topic, sub.qos) for sub in subs]
+        result, mid = mqtt.subscribe(topics)
+        if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
+            with self._subs_lock:
+                for sub in subs:
+                    self._desired_subs.pop(sub.topic, None)
+                    self._subs.pop(sub.topic, None)
+            raise MipsConnectionError(
+                f"batch subscribe failed locally: result={result} mid={mid} "
+                f"topics={[topic for topic, _qos in topics]}"
+            )
+
+        with self._pending_lock:
+            self._pending_subscribes[mid] = future
+
+        try:
+            reason_codes = await asyncio.wait_for(
+                future, timeout=MIHOME_MQTT_SUBSCRIBE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            with self._pending_lock:
+                self._pending_subscribes.pop(mid, None)
+            raise MipsSubscribeTimeoutError(",".join(sub.topic for sub in subs)) from None
+
+        if len(reason_codes) != len(subs):
+            _LOGGER.warning(
+                "mips_cloud batch SUBACK code count mismatch topics=%d codes=%d codes=%s",
+                len(subs),
+                len(reason_codes),
+                reason_codes,
+            )
+
+        rejected: list[tuple[str, int]] = []
+        with self._subs_lock:
+            for sub, code in zip(subs, reason_codes):
+                if code in _SUBACK_SUCCESS_CODES:
+                    self._subs[sub.topic] = sub
+                else:
+                    self._subs.pop(sub.topic, None)
+                    rejected.append((sub.topic, code))
+
+        if rejected:
+            for topic, code in rejected:
+                _LOGGER.error(
+                    "mips_cloud batch subscribe rejected topic=%s code=0x%02x reason=%s",
+                    topic,
+                    code,
+                    _describe_reason_code(code),
+                )
+            topic, code = rejected[0]
+            raise MipsSubscribeRejectedError(
+                topic=topic,
+                reason_code=code,
+                reason_string=_describe_reason_code(code),
+            )
+
+        _LOGGER.info(
+            "mips_cloud batch subscribed topics=%s qos=%d",
+            [sub.topic for sub in subs],
+            qos,
+        )
 
     async def _subscribe_async(
         self,
@@ -532,11 +689,12 @@ class MIoTMipsCloud:
             # before this coroutine yields still finds the entry.
             sub = _Subscription(topic=topic, qos=qos, handler=handler, decoder=decoder)
             with self._subs_lock:
-                self._subs[topic] = sub
+                self._desired_subs[topic] = sub
 
             result, mid = mqtt.subscribe(topic, qos=qos)
             if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
                 with self._subs_lock:
+                    self._desired_subs.pop(topic, None)
                     self._subs.pop(topic, None)
                 raise MipsConnectionError(
                     f"subscribe({topic}) failed locally: result={result} mid={mid}"
@@ -557,14 +715,16 @@ class MIoTMipsCloud:
 
             for code in reason_codes:
                 if code not in _SUBACK_SUCCESS_CODES:
-                    if code in _PERMANENT_SUBACK_FAILURES:
-                        with self._subs_lock:
-                            self._subs.pop(topic, None)
+                    with self._subs_lock:
+                        self._subs.pop(topic, None)
                     raise MipsSubscribeRejectedError(
                         topic=topic,
                         reason_code=code,
                         reason_string=_describe_reason_code(code),
                     )
+
+            with self._subs_lock:
+                self._subs[topic] = sub
 
         except Exception as exc:
             if not unattended:
@@ -600,9 +760,33 @@ class MIoTMipsCloud:
             if unattended:
                 self._fire_subscribe_success(topic)
 
+    async def unsub_many_async(self, topics: list[str]) -> None:
+        """Unsubscribe multiple topics in one MQTT UNSUBSCRIBE packet."""
+        if not topics:
+            return
+        mqtt = self._mqtt
+        with self._subs_lock:
+            for topic in topics:
+                self._desired_subs.pop(topic, None)
+                self._subs.pop(topic, None)
+        if mqtt is None or not self._connected:
+            return
+        try:
+            result, mid = mqtt.unsubscribe(topics)
+            if result != MQTTErrorCode.MQTT_ERR_SUCCESS:
+                _LOGGER.warning(
+                    "batch unsubscribe failed: result=%s mid=%s topics=%s",
+                    result, mid, topics,
+                )
+            else:
+                _LOGGER.info("mips_cloud batch unsubscribed topics=%s", topics)
+        except Exception as e:
+            _LOGGER.warning("mips_cloud batch unsubscribe(%s) raised: %s", topics, e)
+
     async def _unsubscribe_async(self, topic: str) -> None:
         mqtt = self._mqtt
         with self._subs_lock:
+            self._desired_subs.pop(topic, None)
             self._subs.pop(topic, None)
         if mqtt is None or not self._connected:
             return
@@ -639,16 +823,20 @@ class MIoTMipsCloud:
             self._connected = True
         _LOGGER.info("mips_cloud CONNACK success")
 
-        # Broker forgot our session on reconnect — re-issue every active
-        # subscribe. MQTT-wise this is the same SUBSCRIBE packet as the
-        # first-time path. The only difference: no caller is awaiting, so
-        # exceptions get routed to _fire_subscribe_error instead of raised.
+        # Broker forgot our session on reconnect — active subscriptions are no
+        # longer trustworthy. Re-issue every desired subscribe. MQTT-wise this
+        # is the same SUBSCRIBE packet as the first-time path. The only
+        # difference: no caller is awaiting, so failures are dispatched via
+        # _fire_subscribe_error instead of raised.
         # paho's on_connect is sync + on a different thread, so we hand off
         # to the main loop via call_soon_threadsafe.
         with self._subs_lock:
-            active = list(self._subs.values())
-        for sub in active:
-            self._main_loop.call_soon_threadsafe(self._spawn_resubscribe, sub)
+            self._subs.clear()
+            desired = list(self._desired_subs.values())
+        if desired:
+            self._main_loop.call_soon_threadsafe(
+                self._spawn_batch_resubscribe, desired
+            )
 
         self._fire_connect_future(None)
         self._dispatch_state_handlers(True)
@@ -665,6 +853,87 @@ class MIoTMipsCloud:
             )
         )
 
+    def _spawn_batch_resubscribe(self, subs: list[_Subscription]) -> None:
+        """Spawn a batch unattended resubscribe. Called via call_soon_threadsafe."""
+        asyncio.create_task(self._resubscribe_batch_async(subs))
+
+    async def _resubscribe_batch_async(self, subs: list[_Subscription]) -> None:
+        """Re-subscribe all topics in one MQTT SUBSCRIBE packet after reconnect.
+
+        Issuing one SUBSCRIBE with all topics lets the broker evaluate them
+        against a single ACL snapshot, avoiding the intermittent 0x87 window
+        that can occur when topics are re-issued one-by-one.  On any failure
+        the method falls back to individual ``_spawn_resubscribe`` calls so
+        that a single bad topic cannot block the rest.
+        """
+        try:
+            mqtt = self._mqtt
+            if mqtt is None or not self._connected:
+                return
+            future: asyncio.Future[list[int]] = self._main_loop.create_future()
+            topics = [(sub.topic, sub.qos) for sub in subs]
+            result, mid = mqtt.subscribe(topics)
+            if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
+                _LOGGER.error(
+                    "batch resubscribe failed locally: result=%s mid=%s", result, mid
+                )
+                for sub in subs:
+                    self._spawn_resubscribe(sub)
+                return
+            with self._pending_lock:
+                self._pending_subscribes[mid] = future
+            try:
+                reason_codes = await asyncio.wait_for(
+                    future, timeout=MIHOME_MQTT_SUBSCRIBE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.error(
+                    "batch resubscribe SUBACK timeout, falling back to individual"
+                )
+                with self._pending_lock:
+                    self._pending_subscribes.pop(mid, None)
+                for sub in subs:
+                    self._spawn_resubscribe(sub)
+                return
+            if len(reason_codes) != len(subs):
+                _LOGGER.warning(
+                    "mips_cloud batch resubscribe SUBACK code count mismatch "
+                    "topics=%d codes=%d codes=%s",
+                    len(subs),
+                    len(reason_codes),
+                    reason_codes,
+                )
+            ok = 0
+            for sub, code in zip(subs, reason_codes):
+                if code in _SUBACK_SUCCESS_CODES:
+                    ok += 1
+                    with self._subs_lock:
+                        self._subs[sub.topic] = sub
+                    self._fire_subscribe_success(sub.topic)
+                else:
+                    reason = _describe_reason_code(code)
+                    with self._subs_lock:
+                        self._subs.pop(sub.topic, None)
+                    _LOGGER.error(
+                        "mips_cloud batch resubscribe rejected topic=%s code=0x%02x reason=%s",
+                        sub.topic,
+                        code,
+                        reason,
+                    )
+                    self._fire_subscribe_error(sub.topic, code, reason)
+            _LOGGER.info(
+                "mips_cloud batch resubscribed after reconnect: %d/%d ok topics=%s",
+                ok,
+                len(subs),
+                [sub.topic for sub in subs],
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "batch resubscribe unexpected error, falling back: %s", e
+            )
+            for sub in subs:
+                self._spawn_resubscribe(sub)
+
     def _on_disconnect(
         self,
         client: Client,
@@ -678,6 +947,8 @@ class MIoTMipsCloud:
         log("mips_cloud disconnected, reason_code=%s", reason_code)
         with self._state_lock:
             self._connected = False
+        with self._subs_lock:
+            self._subs.clear()
         # paho will auto-reconnect on its own thread per reconnect_delay_set.
         self._dispatch_state_handlers(False)
 
@@ -865,6 +1136,77 @@ class MIoTMipsCloud:
             return MIoTDeviceStateEvent(
                 did=did,
                 event=op,  # type: ignore[arg-type]  # op ∈ {online,offline}
+                raw=raw if isinstance(raw, dict) else {},
+                timestamp_ms=_now_ms(),
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_property_changed_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDevicePropertyChangedEvent]
+    ]:
+        def decode(
+            topic: str, payload: bytes
+        ) -> Optional[MIoTDevicePropertyChangedEvent]:
+            m = _TOPIC_DEVICE_PROPERTIES_CHANGED.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            raw = _parse_json_payload(payload) or {}
+            # prod 实测形态：params = {"did","siid","piid","value"}（单属性）。
+            # 严格按 (siid,piid) 抽取；其余不塞 changed，完整 payload 已在 raw 备查。
+            changed: dict[str, Any] = {}
+            params = raw.get("params")
+            if isinstance(params, dict) and "siid" in params and "piid" in params:
+                changed[f"prop.{params['siid']}.{params['piid']}"] = params.get("value")
+            return MIoTDevicePropertyChangedEvent(
+                did=did,
+                changed_properties=changed,
+                raw=raw if isinstance(raw, dict) else {},
+                timestamp_ms=_now_ms(),
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_device_event_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDeviceEventOccurredEvent]
+    ]:
+        def decode(topic: str, payload: bytes) -> Optional[MIoTDeviceEventOccurredEvent]:
+            m = _TOPIC_DEVICE_EVENT_OCCURRED.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            raw = _parse_json_payload(payload) or {}
+            params = raw.get("params")
+            if not isinstance(params, dict):
+                return None
+            if "siid" not in params or "eiid" not in params:
+                return None
+            try:
+                siid = int(params["siid"])
+                eiid = int(params["eiid"])
+            except (TypeError, ValueError):
+                return None
+            arguments: dict[str, Any] = {}
+            raw_args = params.get("arguments") or []
+            if isinstance(raw_args, list):
+                for index, item in enumerate(raw_args):
+                    if not isinstance(item, dict):
+                        continue
+                    if "value" not in item:
+                        continue
+                    if "piid" in item:
+                        arguments[f"arg.{siid}.{item['piid']}"] = item.get("value")
+                    else:
+                        arguments[f"arg.{siid}.{index}"] = item.get("value")
+            return MIoTDeviceEventOccurredEvent(
+                did=did,
+                siid=siid,
+                eiid=eiid,
+                event_key=f"event.{siid}.{eiid}",
+                arguments=arguments,
                 raw=raw if isinstance(raw, dict) else {},
                 timestamp_ms=_now_ms(),
             )

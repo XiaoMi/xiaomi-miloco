@@ -198,6 +198,8 @@ def _setup_client(
     client._main_loop = None
     client._mips_user_sub_error = "stale"
     client._meta_sub_dids = set(meta_dids)
+    client._property_sub_dids = set()
+    client._event_sub_dids = set()
     client._scene_sub_home_ids = set(scene_home_ids)
     client._state_sub_dids = set(state_dids)
     client._callback_device_meta_changed = None

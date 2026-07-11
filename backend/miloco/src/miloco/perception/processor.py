@@ -15,6 +15,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from typing import Any
 
 from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
@@ -240,6 +241,9 @@ class PipelineProcessor:
 
     def unsubscribe_sse(self, q: asyncio.Queue) -> None:
         self._sse_subscribers = [s for s in self._sse_subscribers if s is not q]
+
+    def publish_sse(self, event_type: str, data: dict) -> None:
+        self._publish(event_type, data)
 
     def _publish(self, event_type: str, data: dict) -> None:
         """非阻塞广播给所有 SSE 订阅者;队列满时跳过该订阅(B11 非阻塞约束).
@@ -646,7 +650,10 @@ class PipelineProcessor:
         )
 
     async def process_on_demand(
-        self, dids: list[str] | None, query: str
+        self,
+        dids: list[str] | None,
+        query: str,
+        snapshot_sink: dict | None = None,
     ) -> OnDemandPerceptionResult | None:
         """Active perception pipeline — multi-device batch query.
 
@@ -667,7 +674,64 @@ class PipelineProcessor:
                 _proc_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
 
             try:
-                return await self._perception_engine_proxy.on_demand_perceive(batch, query)
+                return await self._perception_engine_proxy.on_demand_perceive(
+                    batch,
+                    query,
+                    snapshot_sink=snapshot_sink,
+                )
             except Exception as e:
                 logger.error("[processor] 主动查询感知失败 | %s", e, exc_info=True)
                 return None
+
+    async def process_external_trigger(
+        self,
+        dids: list[str],
+        rules: list[dict],
+        extra_context_by_did: dict[str, str] | None = None,
+    ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int], Any]:
+        """External event perception: MiOT 等离散事件替代本轮 Gate 后复用实时链路。"""
+        async with get_monitor().track_async(NodeName.PROCESSOR, "realtime") as _proc_h:
+            batch = self._collector.collect_batch(dids, drain=False)
+            if batch.empty:
+                logger.warning("[collect](device=%s) 无可用数据源(skipped)", dids)
+                _proc_h.skip_rolling()
+                from miloco.perception.snapshot_context import OmniEventArtifacts
+
+                return None, set(), set(), set(), OmniEventArtifacts()
+
+            if batch.end_timestamp and batch.start_timestamp:
+                _proc_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
+
+            from miloco.perception.snapshot_context import OmniEventArtifacts
+
+            artifacts = OmniEventArtifacts()
+            try:
+                result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids = (
+                    await self._perception_engine_proxy.realtime_perceive(
+                        batch,
+                        artifacts=artifacts,
+                        rules=rules,
+                        force_gate_pass_dids=set(dids),
+                        extra_context_by_did=extra_context_by_did,
+                        dedupe_suggestions=False,
+                    )
+                )
+            except Exception as e:
+                logger.error("[processor] 外部触发实时感知失败 | %s", e, exc_info=True)
+                return None, set(), set(), set(), artifacts
+
+            if result and result.skipped:
+                artifacts.clips.clear()
+            else:
+                artifacts.clips = {
+                    did: payload
+                    for did, payload in artifacts.clips.items()
+                    if payload[0]
+                }
+            return result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids, artifacts
+
+    async def handle_structured_perception_result(self, **kwargs):
+        """Expose realtime post-processing for non-realtime structured results."""
+        return await self._perception_engine_proxy.handle_structured_perception_result(
+            **kwargs
+        )

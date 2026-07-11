@@ -98,6 +98,8 @@ class SQLiteConnector:
                         logger.info("Rule table not found, creating...")
                         self._create_rule_table(conn)
                         tables_created.append("rule")
+                    else:
+                        self._ensure_rule_table_columns(conn)
 
                     if "rule_log" not in existing_tables:
                         logger.info("Rule log table not found, creating...")
@@ -360,6 +362,7 @@ class SQLiteConnector:
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 task_id TEXT,
+                trigger_type TEXT NOT NULL DEFAULT 'perception',
                 mode TEXT NOT NULL DEFAULT 'event',
                 lifecycle TEXT NOT NULL DEFAULT 'permanent',
                 enabled BOOLEAN DEFAULT 1,
@@ -383,6 +386,24 @@ class SQLiteConnector:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_task_id ON rule(task_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_enabled ON rule(enabled)")
         logger.info("Rule table created successfully")
+
+    def _ensure_rule_table_columns(self, conn: sqlite3.Connection) -> None:
+        """Add columns introduced after the V3 rule table baseline.
+
+        Older deployments already have the rule table, so CREATE TABLE changes
+        are not enough. Keep this idempotent for mixed-version upgrades.
+        """
+        cursor = conn.cursor()
+        columns = {
+            row[1]
+            for row in cursor.execute("PRAGMA table_info(rule)").fetchall()
+        }
+        if "trigger_type" not in columns:
+            cursor.execute(
+                "ALTER TABLE rule "
+                "ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'perception'"
+            )
+            logger.info("Added missing rule.trigger_type column")
 
     def _create_task_table(self, conn: sqlite3.Connection) -> None:
         """Create task table — task metadata SSOT (description / status)."""

@@ -307,7 +307,20 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             tracks = state.sync_buffer.peek_latest(duration_ms=collect_ms)
             if tracks is None or not any(tracks.values()):
                 return None
-            return self._build_device_data(state, tracks)
+            wall_values = [
+                fragment.wall_ms
+                for fragments in tracks.values()
+                for fragment in fragments
+                if fragment.wall_ms
+            ]
+            window_start_ms = min(wall_values) if wall_values else 0
+            window_end_ms = max(wall_values) if wall_values else 0
+            return self._build_device_data(
+                state,
+                tracks,
+                window_start_ms=window_start_ms,
+                window_end_ms=window_end_ms,
+            )
 
     def peek_latest_frame(self, did: str, *, window_ms: int = 2000) -> "NDArray[np.uint8] | None":
         """非破坏性取该相机最近一帧解码图(numpy BGR);无缓存返 None。

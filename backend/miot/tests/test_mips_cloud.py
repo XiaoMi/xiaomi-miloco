@@ -28,6 +28,7 @@ import pytest
 from miot.mips_cloud import MIoTMipsCloud
 from miot.types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceEventOccurredEvent,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsSubscribeRejectedError,
@@ -36,6 +37,19 @@ from miot.types import (
 from paho.mqtt.enums import MQTTErrorCode
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def test_device_event_decoder_flattens_arguments():
+    decoder = MIoTMipsCloud._make_device_event_decoder()
+    msg = decoder(
+        "device/did-1/up/event_occured/2/1",
+        b'{"params":{"siid":2,"eiid":1,"arguments":[{"piid":3,"value":7},{"piid":4,"value":"on"}]}}',
+    )
+
+    assert isinstance(msg, MIoTDeviceEventOccurredEvent)
+    assert msg.did == "did-1"
+    assert msg.event_key == "event.2.1"
+    assert msg.arguments == {"arg.2.3": 7, "arg.2.4": "on"}
 
 
 class _FakeReasonCode:
@@ -122,10 +136,16 @@ class _FakeMqttClient:
     def is_connected(self) -> bool:
         return self._connected
 
-    def subscribe(self, topic: str, qos: int) -> tuple[MQTTErrorCode, int]:
+    def subscribe(
+        self, topic: str | list[tuple[str, int]], qos: int = 0
+    ) -> tuple[MQTTErrorCode, int]:
         mid = self._next_mid
         self._next_mid += 1
-        self.subscribed.append((topic, qos, mid))
+        if isinstance(topic, list):
+            for item_topic, item_qos in topic:
+                self.subscribed.append((item_topic, item_qos, mid))
+        else:
+            self.subscribed.append((topic, qos, mid))
         return MQTTErrorCode.MQTT_ERR_SUCCESS, mid
 
     def unsubscribe(self, topic: str) -> tuple[MQTTErrorCode, int]:
@@ -519,6 +539,146 @@ async def test_reconnect_resubscribes_active_topics():
 
 
 @pytest.mark.asyncio
+async def test_sub_many_partial_rejection_updates_active_but_keeps_desired():
+    """Batch subscribe validates every SUBACK code.
+
+    Successful siblings become active; rejected topics are not active but remain
+    desired so later sync/reconnect can retry transient Mi Home ACL windows.
+    """
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    async def driver() -> None:
+        for _ in range(50):
+            if len(fake.subscribed) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        _topic, _qos, mid = fake.subscribed[-1]
+        fake.fire_suback(mid, [2, 0x87])
+
+    try:
+        with pytest.raises(MipsSubscribeRejectedError) as excinfo:
+            await asyncio.gather(
+                mips.sub_many_async(
+                    [
+                        ("device/A/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                        ("device/B/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                    ]
+                ),
+                driver(),
+            )
+        assert excinfo.value.topic == "device/B/up/event_occured/#"
+        assert "device/A/up/event_occured/#" in mips._subs  # type: ignore[attr-defined]
+        assert "device/B/up/event_occured/#" not in mips._subs  # type: ignore[attr-defined]
+        assert "device/A/up/event_occured/#" in mips._desired_subs  # type: ignore[attr-defined]
+        assert "device/B/up/event_occured/#" in mips._desired_subs  # type: ignore[attr-defined]
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_batch_resubscribe_local_failure_falls_back_to_individual():
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    async def driver() -> None:
+        for _ in range(50):
+            if len(fake.subscribed) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        _topic, _qos, mid = fake.subscribed[-1]
+        fake.fire_suback(mid, [2, 2])
+
+    try:
+        await asyncio.gather(
+            mips.sub_many_async(
+                [
+                    ("device/A/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                    ("device/B/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                ]
+            ),
+            driver(),
+        )
+        fallback: list[str] = []
+
+        def fail_subscribe(topic: str | list[tuple[str, int]], qos: int = 0):
+            return MQTTErrorCode.MQTT_ERR_NO_CONN, None
+
+        fake.subscribe = fail_subscribe  # type: ignore[assignment]
+        mips._spawn_resubscribe = lambda sub: fallback.append(sub.topic)  # type: ignore[method-assign]
+
+        await mips._resubscribe_batch_async(list(mips._subs.values()))  # type: ignore[attr-defined]
+        assert fallback == [
+            "device/A/up/event_occured/#",
+            "device/B/up/event_occured/#",
+        ]
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_batch_resubscribe_timeout_falls_back_to_individual():
+    import miot.mips_cloud as mc
+
+    orig_timeout = mc.MIHOME_MQTT_SUBSCRIBE_TIMEOUT
+    mc.MIHOME_MQTT_SUBSCRIBE_TIMEOUT = 0.05
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    async def driver() -> None:
+        for _ in range(50):
+            if len(fake.subscribed) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        _topic, _qos, mid = fake.subscribed[-1]
+        fake.fire_suback(mid, [2, 2])
+
+    try:
+        await asyncio.gather(
+            mips.sub_many_async(
+                [
+                    ("device/A/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                    ("device/B/up/event_occured/#", lambda _m: None, lambda _t, _p: None),
+                ]
+            ),
+            driver(),
+        )
+        fallback: list[str] = []
+        mips._spawn_resubscribe = lambda sub: fallback.append(sub.topic)  # type: ignore[method-assign]
+
+        await mips._resubscribe_batch_async(list(mips._subs.values()))  # type: ignore[attr-defined]
+        assert fallback == [
+            "device/A/up/event_occured/#",
+            "device/B/up/event_occured/#",
+        ]
+        assert not mips._pending_subscribes  # type: ignore[attr-defined]
+    finally:
+        mc.MIHOME_MQTT_SUBSCRIBE_TIMEOUT = orig_timeout
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
 async def test_subscribe_after_reconnect_rejection_fires_error_handler():
     """ACL revoked mid-session: reconnect → subscribe SUBACK 0x87 →
     subscribe_error_handler fires + topic dropped from active subs.
@@ -582,9 +742,10 @@ async def test_subscribe_after_reconnect_rejection_fires_error_handler():
         assert topic == "user/uid-acl/g_op/bind"
         assert code == 0x87
         assert "Not authorized" in reason
-        # Topic must be dropped from _subs so we don't re-issue the doomed
-        # subscribe on the *next* reconnect cycle.
+        # Topic is dropped from active _subs, but desired intent is retained so
+        # a later ACL recovery/reconnect can retry instead of losing the topic.
         assert "user/uid-acl/g_op/bind" not in mips._subs  # type: ignore[attr-defined]
+        assert "user/uid-acl/g_op/bind" in mips._desired_subs  # type: ignore[attr-defined]
     finally:
         await mips.deinit_async()
 
@@ -647,7 +808,7 @@ async def test_subscribe_after_reconnect_success_fires_success_handler():
 
 @pytest.mark.asyncio
 async def test_subscribe_timeout_keeps_topic_and_reconnect_retries():
-    """SUBACK timeout is treated as transient: the topic stays in _subs so the
+    """SUBACK timeout is treated as transient: the topic stays desired so the
     next reconnect re-issues SUBSCRIBE. A momentary network blip must not
     permanently disable push delivery."""
     import miot.mips_cloud as mc
@@ -666,10 +827,12 @@ async def test_subscribe_timeout_keeps_topic_and_reconnect_retries():
     fake = await _connect(mips, holder)
 
     try:
-        # First subscribe never gets a SUBACK → raises but topic stays.
+        # First subscribe never gets a SUBACK → raises, active is absent but
+        # desired intent stays.
         with pytest.raises(MipsSubscribeTimeoutError):
             await mips.sub_user_bind_async("uid-to", handler=lambda _m: None)
-        assert "user/uid-to/g_op/bind" in mips._subs  # type: ignore[attr-defined]
+        assert "user/uid-to/g_op/bind" not in mips._subs  # type: ignore[attr-defined]
+        assert "user/uid-to/g_op/bind" in mips._desired_subs  # type: ignore[attr-defined]
 
         # Reconnect should re-issue SUBSCRIBE for the kept topic.
         before = len(fake.subscribed)
@@ -693,9 +856,8 @@ async def test_subscribe_timeout_keeps_topic_and_reconnect_retries():
 @pytest.mark.asyncio
 async def test_subscribe_transient_rejection_keeps_topic_and_reconnect_retries():
     """Non-permanent SUBACK rejection (0x97 Quota exceeded) is treated as
-    transient: topic stays in _subs and reconnect re-issues SUBSCRIBE. Only
-    permanent codes (0x87 ACL, 0x8F invalid filter, 0x9E/A1/A2 unsupported)
-    pop the topic — covered by test_subscribe_after_reconnect_rejection_*."""
+    transient: topic stays desired and reconnect re-issues SUBSCRIBE. Rejected
+    topics are removed from active _subs regardless of reason code."""
     mips, _ = _make_mips()
     holder: dict[str, _FakeMqttClient] = {}
 
@@ -721,8 +883,9 @@ async def test_subscribe_transient_rejection_keeps_topic_and_reconnect_retries()
                 driver(),
             )
         assert excinfo.value.reason_code == 0x97
-        # Transient rejection: topic must stay so reconnect retries.
-        assert "user/uid-q/g_op/bind" in mips._subs  # type: ignore[attr-defined]
+        # Transient rejection: active is absent, desired must stay so reconnect retries.
+        assert "user/uid-q/g_op/bind" not in mips._subs  # type: ignore[attr-defined]
+        assert "user/uid-q/g_op/bind" in mips._desired_subs  # type: ignore[attr-defined]
 
         before = len(fake.subscribed)
         fake.fire_disconnect(reason_code=1)
