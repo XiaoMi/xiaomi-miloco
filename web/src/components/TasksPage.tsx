@@ -550,14 +550,15 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
               {t("tasks.hint")}
             </p>
           </div>
+          {/* Web 端不直接建任务（感知规则由 Agent 接线），故按钮带「?」暗示这是引导 */}
           <button
             type="button"
             onClick={() => setHelpOpen(true)}
-            aria-label={t("tasks.howToTitle")}
             title={t("tasks.howToTitle")}
-            className="shrink-0 p-1.5 -mr-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
+            className="shrink-0 inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-caption font-semibold border border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
           >
-            <IconHelp width={18} height={18} />
+            {t("tasks.addTask")}
+            <IconHelp width={14} height={14} className="text-text-tertiary" />
           </button>
         </div>
 
@@ -648,8 +649,11 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
         <AgentPromptDialog
           title={t("tasks.howToTitle")}
           hint={t("tasks.howToBody")}
-          initialText={t("tasks.example1")}
-          examples={[t("tasks.example1"), t("tasks.example2")]}
+          examples={[
+            t("tasks.example1"),
+            t("tasks.example2"),
+            t("tasks.example3"),
+          ]}
           onClose={() => setHelpOpen(false)}
         />
       )}

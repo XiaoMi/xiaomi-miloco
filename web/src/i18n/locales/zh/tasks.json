@@ -37,16 +37,12 @@
     "rulesManagedHint": "规则与推送由 Agent 创建管理，如需调整可与 Agent 对话。",
     "editDescription": "编辑描述",
     "descPlaceholder": "输入任务描述…",
+    "addTask": "新增任务",
     "howToTitle": "想新增任务？和 Agent 说一句就行",
-    "howToBody": "任务由装有 miloco 插件的 Agent（如 OpenClaw）创建并接线感知规则，Web 端不直接创建。和这个 Agent 对话、用一句话描述诉求即可，例如把下面这句发给它：",
+    "howToBody": "任务由装有 miloco 插件的 Agent（如 OpenClaw）创建并接线感知规则，Web 端不直接创建。和这个 Agent 对话、用一句话描述诉求即可，比如这样说：",
     "example1": "帮我盯着孩子每天练琴，满 30 分钟提醒我",
     "example2": "提醒家里老人每天量一次血压",
-    "examplesLabel": "示例话术（点击填入）",
-    "viewExamples": "如何新增任务",
-    "promptDialogTitle": "把这段话发给 Agent",
-    "promptDialogHint": "复制下面这段话，发送给装有 miloco 插件的 Agent（如 OpenClaw），它会为你创建并接线任务。",
-    "copy": "复制",
-    "copied": "已复制",
-    "copyFail": "复制失败，请手动选择文本复制"
+    "example3": "家里没人时如果窗户还开着就通知我",
+    "viewExamples": "如何新增任务"
   }
 }

@@ -37,16 +37,12 @@
     "rulesManagedHint": "Rules and push notifications are created and managed by the Agent; chat with it to adjust.",
     "editDescription": "Edit description",
     "descPlaceholder": "Enter a task description…",
+    "addTask": "Add task",
     "howToTitle": "Want to add a task? Just tell the Agent",
-    "howToBody": "Tasks are created — and their perception rules wired up — by an Agent with the miloco plugin (e.g. OpenClaw), not by the web app. Just chat with that Agent and describe what you want in one sentence, for example send it the line below:",
+    "howToBody": "Tasks are created — and their perception rules wired up — by an Agent with the miloco plugin (e.g. OpenClaw), not by the web app. Just chat with that Agent and describe what you want in one sentence, for example:",
     "example1": "Help me watch that my kid practices piano 30 minutes a day and remind me when done",
     "example2": "Remind the elder at home to measure blood pressure once a day",
-    "examplesLabel": "Example prompts (tap to fill)",
-    "viewExamples": "How to add a task",
-    "promptDialogTitle": "Send this to the Agent",
-    "promptDialogHint": "Copy the text below and send it to an Agent with the miloco plugin (e.g. OpenClaw); it will create and wire up the task for you.",
-    "copy": "Copy",
-    "copied": "Copied",
-    "copyFail": "Couldn't copy, please select the text manually"
+    "example3": "Let me know if a window is left open when nobody's home",
+    "viewExamples": "How to add a task"
   }
 }
