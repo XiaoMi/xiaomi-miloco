@@ -58,7 +58,7 @@ def _stub_check_backend_ready(value: bool):
 
 
 def test_creates_4_cron_jobs_when_none_exist(monkeypatch):
-    """空列表 → 创建 4 个 cron，不传 deliver（对齐 OpenClaw delivery:none）。"""
+    """空列表 → 创建 4 个 cron，deliver="local" 对齐 OpenClaw。"""
     rec = _Recording(existing=[])
     monkeypatch.setattr(cron_setup, "_import_cron_jobs", _stub_import_cron_jobs(rec))
     monkeypatch.setattr(cron_setup, "_check_backend_ready", _stub_check_backend_ready(True))
@@ -66,7 +66,7 @@ def test_creates_4_cron_jobs_when_none_exist(monkeypatch):
     assert result["created"] == 4
     assert not result["skipped"]
     for _, kw in [c for c in rec.calls if c[0] == "create"]:
-        assert "deliver" not in kw
+        assert kw.get("deliver") == "local"
 
 
 def test_updates_existing_cron_jobs(monkeypatch):
