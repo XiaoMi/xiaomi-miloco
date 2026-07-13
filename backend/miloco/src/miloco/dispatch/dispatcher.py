@@ -55,6 +55,10 @@ _ROUTE: dict[EventType, tuple[str, str, int]] = {
 MILOCO_SESSION_KEYS: list[str] = list(
     dict.fromkeys(session_key for session_key, _lane, _prio in _ROUTE.values())
 )
+# session_key + lane 配对（供 reset_sessions 精确按 lane 区分会话）
+MILOCO_SESSION_ROUTES: list[tuple[str, str]] = list(
+    dict.fromkeys((session_key, lane) for session_key, lane, _prio in _ROUTE.values())
+)
 
 # 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})

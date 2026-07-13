@@ -67,22 +67,18 @@ def _run_cli_catalog() -> Optional[str]:
 def get_catalog() -> str:
     """拿到当前缓存中的目录文本，必要时刷新。失败返回空字符串。
 
-    线程安全：用锁保护缓存读写，避免并发 hook 触发时多次跑 CLI。
+    线程安全：整段持锁——「判过期→跑 CLI→写缓存」原子化，防并发 TOCTOU 竞态。
     """
     global _cached
-    now = time.monotonic()
-
     with _lock:
+        now = time.monotonic()
         if _cached and now - _cached["generated_at"] < REGEN_THROTTLE_SECONDS:
             return _cached["text"]
 
-    text = _run_cli_catalog()
-    if text is None:
-        # 生成失败 → 沿用旧缓存（如果有），否则空字符串
-        with _lock:
+        text = _run_cli_catalog()
+        if text is None:
             return _cached["text"] if _cached else ""
 
-    with _lock:
         _cached = {"text": text, "generated_at": now}
     logger.info("device catalog refreshed (%d chars)", len(text))
     return text

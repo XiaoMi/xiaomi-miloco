@@ -342,22 +342,23 @@ def _kv_with_home(home_id: str) -> "_FakeKV":
 
 @pytest.mark.asyncio
 async def test_switch_home_resets_agent_sessions():
-    """启用家庭真的变化时，后台批量 reset miloco session，传入 MILOCO_SESSION_KEYS 全集。"""
+    """启用家庭真的变化时，后台批量 reset miloco session，传入 MILOCO_SESSION_ROUTES 全集。"""
     from unittest.mock import patch
 
-    from miloco.dispatch import MILOCO_SESSION_KEYS
+    from miloco.dispatch import MILOCO_SESSION_ROUTES
 
     # 预置 H1 启用 → list_homes 不会兜底自动切；switch 到 H2 才是唯一一次启用集变化。
     svc = _make_service(
         devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H1")
     )
-    reset = AsyncMock(return_value={"reset": MILOCO_SESSION_KEYS, "failed": []})
+    session_keys = [k for k, _ in MILOCO_SESSION_ROUTES]
+    reset = AsyncMock(return_value={"reset": session_keys, "failed": []})
     with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
         res = await svc.switch_home("H2")
         await _drain_reset(reset)
 
     assert {h["home_id"]: h["in_use"] for h in res}["H2"] is True
-    reset.assert_awaited_once_with(MILOCO_SESSION_KEYS)
+    reset.assert_awaited_once_with(MILOCO_SESSION_ROUTES)
 
 
 @pytest.mark.asyncio

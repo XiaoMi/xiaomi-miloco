@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -150,6 +152,24 @@ def _resolve_owner_session() -> tuple[Optional[str], Optional[str]]:
 # ---------------------------------------------------------------------------
 # Adapter 主类
 # ---------------------------------------------------------------------------
+
+
+# hermes CLI 删除会话子进程。CLI 不在 PATH 或未知输出时保守返回 False。
+def _delete_hermes_session(session_id: str) -> bool:
+    hermes_bin = shutil.which("hermes")
+    if not hermes_bin:
+        return False
+    try:
+        proc = subprocess.run(
+            [hermes_bin, "sessions", "delete", session_id, "--yes"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, Exception):
+        return False
+    out = proc.stdout + proc.stderr
+    if "Deleted session" in out or "not found" in out:
+        return True
+    return False
 
 
 class Adapter:
@@ -436,6 +456,27 @@ class Adapter:
         """
         timeout_s = 180.0 + _HTTP_BUFFER_S
         return 2 * timeout_s
+
+    # ---- reset_sessions (AgentPlatformAdapter 可选契约) -------------------
+
+    async def reset_sessions(
+        self, routes: list[tuple[str, str]], *, delete_transcript: bool = True, timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """切家庭时批量清理 Hermes 会话。按 (session_key, lane) 映射为 session_id 后逐个删。
+
+        返回 ``{"reset": [...], "failed": [...]}``。
+        """
+        reset, failed, seen = [], [], set()
+        import asyncio as _asyncio
+        loop = _asyncio.get_running_loop()
+        for session_key, lane in routes:
+            session_id = _map_session(session_key, lane)
+            if session_id in seen:
+                continue
+            seen.add(session_id)
+            ok = await loop.run_in_executor(None, _delete_hermes_session, session_id)
+            (reset if ok else failed).append(session_id)
+        return {"reset": reset, "failed": failed}
 
     # ---- helpers -------------------------------------------------------
 

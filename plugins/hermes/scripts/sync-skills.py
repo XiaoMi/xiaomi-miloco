@@ -42,58 +42,6 @@ SKILL_GLOB = "miloco-*"
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 
-def strip_openclaw_block(frontmatter_text: str) -> str:
-    """从 frontmatter 文本里删 `metadata.openclaw` 子键整块。
-
-    frontmatter 形如::
-
-        metadata:
-              author: miloco
-              version: "3.0"
-              date: "2026-06-10"
-              openclaw:
-                requires:
-                  bins: ["miloco-cli"]
-
-    策略：逐行扫描，找到 `  openclaw:`（2 空格缩进，metadata 子键）后，
-    连同其后所有缩进更深的行（>2 空格）一并删除，直到遇到同级或更浅缩进
-    的键为止。保留其余行原样，包括引号 / 内联数组 / 多行 description 等。
-
-    若 frontmatter 无 `openclaw:` 子键（部分 skill 本就没有），返回原文。
-    """
-    lines = frontmatter_text.split("\n")
-    out: list[str] = []
-    i = 0
-    n = len(lines)
-    while i < n:
-        line = lines[i]
-        # 仅识别 metadata 下 2 空格缩进的 `openclaw:` 键。
-        if line == "  openclaw:":
-            # 跳过该行 + 之后所有缩进 > 2 空格的子行（含空行夹带也跳，
-            # 实际 YAML 里 openclaw 块内不会有空行）。
-            i += 1
-            while i < n:
-                nxt = lines[i]
-                if nxt == "" or nxt.startswith("  "):
-                    # 仍属 openclaw 子块（≥2 空格缩进）或块内空行。
-                    # 但需排除下一个同级 2 空格顶层键 —— 走更严格判断：
-                    # 2 空格缩进且非空格开头后紧跟非空格字符视为同级键。
-                    if (
-                        nxt.startswith("  ")
-                        and not nxt.startswith("   ")
-                        and nxt[2:3] != " "
-                        and nxt[2:3] != ""
-                    ):
-                        # 同级键（2 空格 + 非空非空格字符），停止跳过。
-                        break
-                    i += 1
-                    continue
-                break
-            continue
-        out.append(line)
-        i += 1
-    return "\n".join(out)
-
 
 def quote_date_field(frontmatter_text: str) -> str:
     """给 frontmatter 里未加引号的 `date:` 值加上双引号。
@@ -139,8 +87,7 @@ def adapt_skill_md(content: str, skill_name: str) -> str:
         return body
 
     fm_text = m.group(1)
-    new_fm = strip_openclaw_block(fm_text)
-    new_fm = quote_date_field(new_fm)
+    new_fm = quote_date_field(fm_text)
     body = content[m.end():]
     if skill_name == "miloco-terminate-task":
         body = patch_terminate_task_body(body)
