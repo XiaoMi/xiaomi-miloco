@@ -461,9 +461,9 @@ async def catch_all_exceptions_middleware(request: Request, call_next):
 @app.post("/miloco/webhook")
 async def agent_webhook(request: Request):
     """入站 agent webhook → 转发给当前 adapter.send_turn()"""
+
     from miloco.agent_platform import get_adapter
     from miloco.agent_platform.base import TurnContext
-    import json as _json
     try:
         body = await request.json()
     except Exception:

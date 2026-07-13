@@ -192,7 +192,6 @@ class Manager:
             from miloco.miot.filter import allowed_home_ids
 
             kv = self._kv_repo
-            from miloco.config import get_settings
             svc = OnboardingTriggerService(
                 kv_repo=kv,
                 is_miot_ready=lambda: bool(kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY))
