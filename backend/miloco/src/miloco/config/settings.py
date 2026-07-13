@@ -250,7 +250,7 @@ class SchedulerSettings(BaseModel):
         default=True,
         description=(
             "是否由 miloco 自动管理内置定时任务（感知摘要 / 家庭巡检 / Dreaming / "
-            "习惯洞察）；关闭后 openclaw 插件在网关启动时会清除这些自动任务且不再重建。"
+            "习惯洞察）；关闭后 agent 网关启动时会清除这些自动任务且不再重建。"
         ),
     )
 
