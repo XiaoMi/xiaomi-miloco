@@ -114,35 +114,46 @@ class OnboardingTriggerService:
     async def maybe_trigger(self) -> bool:
         """条件全满足时发一次主动邀请。仅真正发出（sent=True）返回 True。
 
-        任何条件不满足、重复调用、发送失败都返回 False（并各自留日志）。
-        条件判定回调抛异常按「不满足」处理——主动邀请是锦上添花，绝不能
-        把启动 / 授权主流程带崩。
+        首次条件不满足时不立刻放弃——配模型可能晚于授权，最多重试 5 次
+        （每次间隔 30s），覆盖"先绑账号后配模型"的安装时序。
         """
-        async with self._lock:
+        # 快速路径：已经 fired 或 KV 已标记，直接返回
+        if self._fired:
+            return False
+        if self._kv_repo.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY):
+            return False
+
+        for attempt in range(5):
             if self._fired:
-                logger.debug("onboarding trigger skipped: already fired this run")
                 return False
-            # install 流程完成前先等 10s（模型可能在配置中），避免和安装引导同时提问
-            await asyncio.sleep(10)
-            if self._kv_repo.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY):
-                logger.debug("onboarding trigger skipped: prompted flag already set")
-                return False
+            if attempt == 0:
+                await asyncio.sleep(10)  # 首次等 10s，避免和 install 引导同时问
+
             try:
-                if not self._is_miot_ready():
-                    logger.info("onboarding trigger skipped: miot not authed / no home selected")
-                    return False
-                if self._has_persons():
-                    logger.info("onboarding trigger skipped: person table not empty")
-                    return False
-                if self._has_profile_entries():
-                    logger.info("onboarding trigger skipped: home profile not empty")
-                    return False
-                if not self._is_omni_ready():
-                    logger.info("onboarding trigger skipped: omni model not configured")
-                    return False
-            except Exception:  # noqa: BLE001
-                logger.warning("onboarding trigger: 条件检查失败，跳过本次", exc_info=True)
+                miot_ok = self._is_miot_ready()
+                persons_empty = not self._has_persons()
+                profile_empty = not self._has_profile_entries()
+                omni_ok = self._is_omni_ready()
+            except Exception:
+                logger.warning("onboarding trigger: 条件检查失败", exc_info=True)
                 return False
+
+            if miot_ok and persons_empty and profile_empty and omni_ok:
+                break  # 条件满足
+            if not omni_ok and attempt < 4:
+                logger.info("onboarding trigger: omni not configured, retry %d/5", attempt + 1)
+                await asyncio.sleep(30)
+                continue
+            if not miot_ok and attempt < 4:
+                logger.debug("onboarding trigger: miot not ready, retry %d/5", attempt + 1)
+                await asyncio.sleep(30)
+                continue
+            return False  # 最终不满足，放弃
+        else:
+            return False  # 5 次都没满足
+
+        # 条件满足 → 拿锁 dispatch
+        async with self._lock:
 
             # dispatch_event 的返回值只是「入队被接纳」——drainer 随后才真正发
             # turn，传输耗尽时会静默丢批。终身一次性标记必须以**真送达**为准，
