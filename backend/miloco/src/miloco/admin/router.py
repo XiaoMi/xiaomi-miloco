@@ -679,13 +679,15 @@ async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
     if r.status_code == 404:
         return {"ok": False, "code": "not_found", "status": 404, "message": "模型或地址不存在"}
     if r.status_code in (400, 422):
-        # 鉴权已过、仅请求体被该模型拒（如只支持流式）→ Key 大概率有效。
+        # OpenAI 兼容族此前有 GET /models 预检拦过 401/403，到这里 400 多为请求体/模型名被拒；
+        # 但原生协议(Gemini)无预检、且部分 provider 对无效 key 就返回 400(而非 401/403)——
+        # 故 400 也可能是 key 无效,无法仅凭 status code 区分,文案同时提示两种可能。
         return {
             "ok": False,
             "code": "rejected_authed",
             "status": r.status_code,
             "latency_ms": latency_ms,
-            "message": "已连接，但拒绝了模型请求（模型名可能错误）",
+            "message": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
         }
     return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
 
@@ -717,14 +719,17 @@ async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
 
 @router.post(
     "/omni-config/test",
-    summary="测试 omni 配置连通性（鉴权/可达预检 + 极简 chat 真校验，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
+    summary="测试 omni 配置连通性（OpenAI 兼容族两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
     response_model=NormalResponse,
 )
 async def test_omni_config(
     body: OmniTestBody, current_user: str = Depends(verify_token)
 ):
-    """用表单值（缺省回退当前已保存配置）做两阶段探测：先 GET /models 验鉴权/可达，再发一次
-    max_tokens=1 的极简 chat 真正验证该模型可用（消耗极少量 token，不计入 miloco 用量统计）。
+    """用表单值（缺省回退当前已保存配置）探测配置可用性。
+
+    OpenAI 兼容族（MiMo/Qwen）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
+    极简 chat 真正验证该模型可用；非 OpenAI 兼容族（Gemini 等原生协议）没有等价 GET /models
+    预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
     返回 {ok, code, status, latency_ms, message}。"""
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
