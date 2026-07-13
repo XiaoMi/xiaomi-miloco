@@ -33,19 +33,19 @@ def _loud_audio() -> np.ndarray:
 class TestGateOrchestrator:
     config = GateConfig()
 
-    def test_returns_none_when_no_change(self):
+    async def test_returns_none_when_no_change(self):
         frame = _solid_frame(100, 100, 100)
         s = create_input_slice("room", [frame] * 6, _silent_audio())
         # 有基准(非 cold-start)的静止窗才会被丢
-        packet, timing, _, _, _ = run_gate(s, self.config, prev_frame=_baseline())
+        packet, timing, _, _, _ = await run_gate(s, self.config, prev_frame=_baseline())
         assert packet is None
         assert not (timing.video_pass or timing.audio_pass)
 
-    def test_triggers_on_visual_change(self):
+    async def test_triggers_on_visual_change(self):
         gray = _solid_frame(100, 100, 100)
         white = _solid_frame(255, 255, 255)
         s = create_input_slice("room", [gray, gray, white, white, white, white], _silent_audio())
-        result, timing, _, _, _ = run_gate(s, self.config)
+        result, timing, _, _, _ = await run_gate(s, self.config)
 
         assert result is not None
         assert result.trigger.visual_changed
@@ -53,22 +53,22 @@ class TestGateOrchestrator:
         assert len(result.frames) == 6
         assert timing.video_pass and not timing.audio_pass
 
-    def test_triggers_on_audio(self):
+    async def test_triggers_on_audio(self):
         frame = _solid_frame(100, 100, 100)
         s = create_input_slice("room", [frame] * 6, _loud_audio())
-        result, timing, _, _, _ = run_gate(s, self.config, prev_frame=_baseline())
+        result, timing, _, _, _ = await run_gate(s, self.config, prev_frame=_baseline())
 
         assert result is not None
         assert not result.trigger.visual_changed
         assert result.trigger.audio_active
         assert not timing.video_pass and timing.audio_pass
 
-    def test_passes_all_data_through(self):
+    async def test_passes_all_data_through(self):
         gray = _solid_frame(100, 100, 100)
         white = _solid_frame(255, 255, 255)
         audio = _loud_audio()
         s = create_input_slice("room", [gray, gray, white, white, white, white], audio)
-        result, _timing, _, _, _ = run_gate(s, self.config)
+        result, _timing, _, _, _ = await run_gate(s, self.config)
 
         assert result is not None
         assert len(result.frames) == 6
@@ -101,12 +101,12 @@ class TestGateHold:
             lambda: now,
         )
 
-    def test_A1_cold_start_both_pass(self, monkeypatch):
+    async def test_A1_cold_start_both_pass(self, monkeypatch):
         self._patch_time(monkeypatch, 0.0)
         gray = _solid_frame(100, 100, 100)
         white = _solid_frame(255, 255, 255)
         s = create_input_slice("room", [gray, gray, white, white, white, white], _loud_audio())
-        packet, timing, _last_checked, new_v, new_a = run_gate(
+        packet, timing, _last_checked, new_v, new_a = await run_gate(
             s, self.config, last_visual_pass_ts=None, last_audio_pass_ts=None,
         )
         assert packet is not None
@@ -115,10 +115,10 @@ class TestGateHold:
         assert timing.hold_pass is False
         assert new_v == 0.0 and new_a == 0.0
 
-    def test_A2_cold_start_audio_only(self, monkeypatch):
+    async def test_A2_cold_start_audio_only(self, monkeypatch):
         self._patch_time(monkeypatch, 0.0)
         s = self._slice_no_change_loud()
-        packet, timing, _, new_v, new_a = run_gate(
+        packet, timing, _, new_v, new_a = await run_gate(
             s, self.config, prev_frame=_baseline(),
             last_visual_pass_ts=None, last_audio_pass_ts=None,
         )
@@ -127,10 +127,10 @@ class TestGateHold:
         assert packet.trigger.hold is False
         assert new_v is None and new_a == 0.0
 
-    def test_A3_cold_start_all_silent(self, monkeypatch):
+    async def test_A3_cold_start_all_silent(self, monkeypatch):
         self._patch_time(monkeypatch, 0.0)
         s = self._slice_no_change()
-        packet, timing, _, new_v, new_a = run_gate(
+        packet, timing, _, new_v, new_a = await run_gate(
             s, self.config, prev_frame=_baseline(),
             last_visual_pass_ts=None, last_audio_pass_ts=None,
         )
@@ -138,10 +138,10 @@ class TestGateHold:
         assert timing.hold_pass is False
         assert new_v is None and new_a is None
 
-    def test_A4_hold_within_window_all_silent(self, monkeypatch):
+    async def test_A4_hold_within_window_all_silent(self, monkeypatch):
         self._patch_time(monkeypatch, 3.0)
         s = self._slice_no_change()
-        packet, timing, _, new_v, new_a = run_gate(
+        packet, timing, _, new_v, new_a = await run_gate(
             s, self.config, prev_frame=_baseline(),
             last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
@@ -152,10 +152,10 @@ class TestGateHold:
         assert timing.hold_pass is True
         assert new_v == 0.0 and new_a == 0.0
 
-    def test_A5_hold_within_window_audio_active(self, monkeypatch):
+    async def test_A5_hold_within_window_audio_active(self, monkeypatch):
         self._patch_time(monkeypatch, 6.0)
         s = self._slice_no_change_loud()
-        packet, _timing, _, new_v, new_a = run_gate(
+        packet, _timing, _, new_v, new_a = await run_gate(
             s, self.config, prev_frame=_baseline(),
             last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
@@ -163,92 +163,92 @@ class TestGateHold:
         assert packet.trigger.hold is True
         assert new_v == 0.0 and new_a == 6.0
 
-    def test_A6_hold_recovered_visual(self, monkeypatch):
+    async def test_A6_hold_recovered_visual(self, monkeypatch):
         self._patch_time(monkeypatch, 30.0)
         s = self._slice_visual_change()
-        packet, _timing, _, new_v, new_a = run_gate(
+        packet, _timing, _, new_v, new_a = await run_gate(
             s, self.config, last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert packet is not None
         assert packet.trigger.hold is False
         assert new_v == 30.0
 
-    def test_A7_hold_boundary_inclusive(self, monkeypatch):
+    async def test_A7_hold_boundary_inclusive(self, monkeypatch):
         self._patch_time(monkeypatch, 360.0)
         s = self._slice_no_change()
-        packet, _timing, _, _, _ = run_gate(
+        packet, _timing, _, _, _ = await run_gate(
             s, self.config, prev_frame=_baseline(),
             last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert packet is not None
         assert packet.trigger.hold is True
 
-    def test_A8_hold_boundary_expired(self, monkeypatch):
+    async def test_A8_hold_boundary_expired(self, monkeypatch):
         self._patch_time(monkeypatch, 363.0)
         s = self._slice_no_change()
-        packet, timing, _, _, _ = run_gate(
+        packet, timing, _, _, _ = await run_gate(
             s, self.config, prev_frame=_baseline(),
             last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert packet is None
         assert timing.hold_pass is False
 
-    def test_A9_hold_expired_audio_only(self, monkeypatch):
+    async def test_A9_hold_expired_audio_only(self, monkeypatch):
         self._patch_time(monkeypatch, 363.0)
         s = self._slice_no_change_loud()
-        packet, _, _, _, new_a = run_gate(
+        packet, _, _, _, new_a = await run_gate(
             s, self.config, last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert packet is not None
         assert packet.trigger.hold is False
         assert new_a == 363.0
 
-    def test_A10_post_expired_visual_recovers(self, monkeypatch):
+    async def test_A10_post_expired_visual_recovers(self, monkeypatch):
         self._patch_time(monkeypatch, 400.0)
         s = self._slice_visual_change()
-        packet, _, _, new_v, _ = run_gate(
+        packet, _, _, new_v, _ = await run_gate(
             s, self.config, last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert packet is not None
         assert packet.trigger.hold is False
         assert new_v == 400.0
 
-    def test_A11_hold_disabled_zero(self, monkeypatch):
+    async def test_A11_hold_disabled_zero(self, monkeypatch):
         cfg = GateConfig(hold_duration_sec=0.0)
         self._patch_time(monkeypatch, 3.0)
         s = self._slice_no_change()
-        packet, _, _, _, _ = run_gate(
+        packet, _, _, _, _ = await run_gate(
             s, cfg, prev_frame=_baseline(),
             last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert packet is None
 
-    def test_A12_hold_disabled_does_not_block_real_pass(self, monkeypatch):
+    async def test_A12_hold_disabled_does_not_block_real_pass(self, monkeypatch):
         cfg = GateConfig(hold_duration_sec=0.0)
         self._patch_time(monkeypatch, 0.0)
         gray = _solid_frame(100, 100, 100)
         white = _solid_frame(255, 255, 255)
         s = create_input_slice("room", [gray, gray, white, white, white, white], _loud_audio())
-        packet, _, _, _, _ = run_gate(
+        packet, _, _, _, _ = await run_gate(
             s, cfg, last_visual_pass_ts=None, last_audio_pass_ts=None,
         )
         assert packet is not None
         assert packet.trigger.hold is False
 
-    def test_A13_last_v_only_refreshed_on_visual_changed(self, monkeypatch):
+    async def test_A13_last_v_only_refreshed_on_visual_changed(self, monkeypatch):
         self._patch_time(monkeypatch, 10.0)
         s = self._slice_no_change_loud()
-        _packet, _, _, new_v, new_a = run_gate(
+        _packet, _, _, new_v, new_a = await run_gate(
             s, self.config, prev_frame=_baseline(),
             last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert new_v == 0.0
         assert new_a == 10.0
 
-    def test_A14_last_a_only_refreshed_on_audio_active(self, monkeypatch):
+    async def test_A14_last_a_only_refreshed_on_audio_active(self, monkeypatch):
         self._patch_time(monkeypatch, 10.0)
         s = self._slice_visual_change()
-        _packet, _, _, new_v, new_a = run_gate(
+        _packet, _, _, new_v, new_a = await run_gate(
             s, self.config, last_visual_pass_ts=0.0, last_audio_pass_ts=0.0,
         )
         assert new_v == 10.0

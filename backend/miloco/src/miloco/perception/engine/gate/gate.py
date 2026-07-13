@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -23,7 +24,7 @@ from miloco.perception.engine.types import (
 logger = logging.getLogger(__name__)
 
 
-def run_gate(
+async def run_gate(
     input_slice: InputSlice,
     config: GateConfig,
     input_fps: int = 1,
@@ -65,7 +66,7 @@ def run_gate(
     # 触发既有监控阈值。
     t = time.monotonic()
     speech_active, speech_prob = (
-        evaluate_speech(input_slice.audio_clip, config)
+        await asyncio.to_thread(evaluate_speech, input_slice.audio_clip, config)
         if audio_active
         else (False, 0.0)
     )

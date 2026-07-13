@@ -17,7 +17,6 @@ import json
 import logging
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
@@ -37,6 +36,7 @@ from miloco.perception.event_text_builder import (
     build_suggestions_text,
     caption_for_dids,
 )
+from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.schema import PerceptionBatch
 from miloco.perception.snapshot_context import (
     ClipKind,
@@ -173,7 +173,7 @@ async def _run_with_trace_id(
 ):
     """新 event loop 入口:把主线程的 trace_id / artifacts set 回当前 Context.
 
-    ContextVar 不跨线程边界 — run_in_executor 在新线程里 asyncio.run() 起新 loop,
+    ContextVar 不跨线程边界 — submit 在 worker 线程里执行协程,
     主线程的 ContextVar 值全部 reset 成 default.必须显式抓主线程值,在新 loop 入口
     重新 set,omni 内部才能拿到.
     """
@@ -208,7 +208,7 @@ class PerceptionEngineProxy:
         self._status: str = "not_initialized"
         self._status_message: str = ""
         self._last_captions: dict[str, str] = {}
-        self._executor: ThreadPoolExecutor | None = None
+        self._inference_worker: InferenceWorker | None = None
         # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
         # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
         self._engine_lock = asyncio.Lock()
@@ -294,7 +294,7 @@ class PerceptionEngineProxy:
         tick 自动重试——重型 ``_create_engine`` 每 tick 跑会阻塞 event loop。
 
         已 ``ready`` / ``not_initialized`` 直接返回 ``False``(no-op,不碰已有引擎实例)。
-        成功重建时 ``_init_engine`` 已把 lifecycle 翻到 ``READY``——``set_executor`` 守卫
+        成功重建时 ``_init_engine`` 已把 lifecycle 翻到 ``READY``——``set_inference_worker`` 守卫
         只认 ``STOPPED`` 不会帮翻,故必须在创建路径里显式置(``_init_engine`` 已做)。
         返回是否「本次转入 ready」。
         """
@@ -347,14 +347,14 @@ class PerceptionEngineProxy:
 
         return PerceptionEngine(config=config)
 
-    def set_executor(self, executor: ThreadPoolExecutor) -> None:
-        """Attach inference thread executor (called by engine at startup).
+    def set_inference_worker(self, worker: InferenceWorker) -> None:
+        """Attach persistent inference worker (called by engine at startup).
 
         Lifecycle: 仅 STOPPED → READY (stop_engine 后的热重启场景)。
         __init__ 已把 ENGINE 设过 READY/FAILED;FAILED 通常是永久性的
-        (模型缺失/API key 没配),不应被 set_executor 误唤醒回 READY。
+        (模型缺失/API key 没配),不应被 set_inference_worker 误唤醒回 READY。
         """
-        self._executor = executor
+        self._inference_worker = worker
         mon = get_monitor()
         state = mon.get_state(NodeName.ENGINE)
         if state and state.lifecycle == Lifecycle.STOPPED and self.perception_engine is not None:
@@ -436,12 +436,11 @@ class PerceptionEngineProxy:
         early_sent_rule_ids: set[tuple[str, str]] = set()
         early_sent_sugg_ids: set[int] = set()
 
-        # 当 self._executor is not None 时，本协程跑在 inference 线程的临时
-        # loop 上（asyncio.run 创建的）。engine 在此处 await callback 后，
-        # callback 内部任何 asyncio.create_task(...) 都会挂在临时 loop 上，
-        # asyncio.run 退出时会被 cancel —— 即使 caller 持有强引用也救不回来
-        # （问题不是 GC 是 loop 关闭）。把 callback 派发回主 loop 后，副作用
-        # （如 RuleRunner._spawn_fire）创建的 task 才有稳定的执行环境。
+        # 当 self._inference_worker is not None 时，本协程跑在 inference 线程
+        # 的持久 loop 上。engine 在此处 await callback 后，callback 内部任何
+        # asyncio.create_task(...) 都会挂在 worker loop 上，把 callback 派发回
+        # 主 loop 后，副作用（如 RuleRunner._spawn_fire）创建的 task 才有稳定
+        # 的执行环境。
         def _on_main_loop(coro_fn):
             async def wrapped(*args, **kwargs):
                 if asyncio.get_running_loop() is main_loop:
@@ -634,35 +633,32 @@ class PerceptionEngineProxy:
 
             main_loop = asyncio.get_running_loop()
             # 把持久 app loop 注入 PerceptionEngine→各 identity engine, 供 tier_c 写库协程
-            # run_coroutine_threadsafe 调度(脱离下方 asyncio.run 起的每窗临时 loop, 否则
-            # 写库协程会在窗末被 cancel, 候选永远写不进)。
+            # run_coroutine_threadsafe 调度(脱离下方 worker loop, 否则写库协程会在 worker
+            # shutdown 时被 cancel, 候选永远写不进)。
             if self.perception_engine is not None:
                 self.perception_engine.set_main_loop(main_loop)
-            # inference 线程通过 asyncio.run() 起新 loop,ContextVar 不跨 loop。
-            # 显式抓主线程的 trace_id / artifacts,在新 loop 入口 set 回去,
-            # 保证 omni / publish_event / push_clip_bytes / push_omni_trace 能拿到。
+            # 协程在主线程创建（closure 捕获主线程 trace_id / artifacts 值），通过
+            # InferenceWorker.submit() 调度到 worker 线程的持久 loop 上执行。
+            # 持久 loop 只创建一次 default executor，消除反复建/拆线程的开销和泄漏。
             trace_id = get_trace_id()
-            if self._executor is not None:
-                return await main_loop.run_in_executor(
-                    self._executor,
-                    lambda: asyncio.run(
-                        _run_with_trace_id(
-                            trace_id,
-                            self._realtime_perceive_impl(
-                                batched_snapshot,
-                                rules,
-                                device_count,
-                                convert_ms,
-                                main_loop,
-                                skipped_task_ids,
-                            ),
-                            artifacts=artifacts,
-                        )
-                    ),
+            if self._inference_worker is not None:
+                return await self._inference_worker.submit(
+                    _run_with_trace_id(
+                        trace_id,
+                        self._realtime_perceive_impl(
+                            batched_snapshot,
+                            rules,
+                            device_count,
+                            convert_ms,
+                            main_loop,
+                            skipped_task_ids,
+                        ),
+                        artifacts=artifacts,
+                    )
                 )
-            # 单线程路径(无 executor,测试 / runner 启动前的短窗口):processor 只传
+            # 单线程路径(无 worker,测试 / runner 启动前的短窗口):processor 只传
             # artifacts 不开 scope,这里手动开,保证 omni 内部 push_clip_bytes /
-            # push_omni_trace 能命中.executor 路径由上面 _run_with_trace_id 开,两条路径都覆盖.
+            # push_omni_trace 能命中——worker 路径由上面 _run_with_trace_id 开，两条路径都覆盖。
             if artifacts is not None:
                 with event_artifacts_scope(artifacts):
                     return await self._realtime_perceive_impl(
@@ -701,17 +697,13 @@ class PerceptionEngineProxy:
             if batch.end_timestamp and batch.start_timestamp:
                 _eng_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
 
-            if self._executor is not None:
-                loop = asyncio.get_running_loop()
+            if self._inference_worker is not None:
                 trace_id = get_trace_id()
-                return await loop.run_in_executor(
-                    self._executor,
-                    lambda: asyncio.run(
-                        _run_with_trace_id(
-                            trace_id,
-                            self._on_demand_perceive_impl(batched_snapshot, query),
-                        )
-                    ),
+                return await self._inference_worker.submit(
+                    _run_with_trace_id(
+                        trace_id,
+                        self._on_demand_perceive_impl(batched_snapshot, query),
+                    )
                 )
 
             return await self._on_demand_perceive_impl(batched_snapshot, query)
