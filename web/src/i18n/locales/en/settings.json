@@ -17,6 +17,7 @@
     "resetDefaults": "Restore Defaults",
     "schedulerSaved": "Saved. Takes effect after the next agent gateway restart.",
     "autoSchedule": "Auto scheduled tasks",
-    "autoScheduleHint": "When on, miloco auto-creates and maintains its built-in scheduled tasks (perception digest / home patrol / memory dreaming / habit insights). When off, those tasks are removed and not recreated. Takes effect after the next agent gateway restart."
+    "autoScheduleHint": "When on, miloco auto-creates and maintains its built-in scheduled tasks (perception digest / home patrol / memory dreaming / habit insights). When off, those tasks are removed and not recreated. Takes effect after the next agent gateway restart.",
+    "autoScheduleUnavailable": "This backend doesn't support this toggle (version may be too old); not configurable for now."
   }
 }
