@@ -26,6 +26,8 @@ export interface BackendActionRow {
   success: 0 | 1;
   error: string | null;
   trace_id: string | null;
+  /** v4:设备所属家庭;老行 / 解析失败为 null(后端按 home 过滤时对 null 放行) */
+  home_id?: string | null;
 }
 
 const VALUE_MAX = 60;
@@ -35,16 +37,19 @@ const VALUE_MAX = 60;
 export const ACTIONS_LIMIT = 500;
 
 /** 统一拉取——failedOnly 时带 failed_only=1;传时间窗时带 since_ms/until_ms(与事件流同口径,
- *  让动作也受当前筛选段约束,不混入范围外历史动作)。导出供 tests 守 query 参数 + 解析。 */
+ *  让动作也受当前筛选段约束,不混入范围外历史动作);传 homeId 时带 home_id(多 home 下
+ *  切家后动作流只显当前家,无 home 标的老行后端放行)。导出供 tests 守 query 参数 + 解析。 */
 export async function fetchActions(
   failedOnly: boolean,
   sinceMs?: number,
   untilMs?: number,
+  homeId?: string,
 ): Promise<BackendActionRow[]> {
   const params = new URLSearchParams({ limit: String(ACTIONS_LIMIT) });
   if (failedOnly) params.set("failed_only", "1");
   if (sinceMs !== undefined) params.set("since_ms", String(sinceMs));
   if (untilMs !== undefined) params.set("until_ms", String(untilMs));
+  if (homeId !== undefined) params.set("home_id", homeId);
   return apiFetch<BackendActionRow[]>(`/api/actions?${params.toString()}`);
 }
 

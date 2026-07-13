@@ -358,6 +358,7 @@ function MainApp() {
             <ActivityFeed
               events={activity.data ?? []}
               homeId={homeId}
+              activeHomeId={(scopeHomes.data ?? []).find((h) => h.inUse)?.homeId}
               eventsLoading={activity.loading}
               eventsError={activity.error}
               onRetryEvents={() => activity.reload()}

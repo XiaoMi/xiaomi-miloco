@@ -26,6 +26,10 @@ interface Props {
   events: ActivityEvent[];
   /** 当前作用域 home;切换时整个列表 + SSE 都要重建 */
   homeId: HomeId;
+  /** 真实的当前 in_use 家庭 id(来自 scope homes;HomeId 只是缓存 key 占位)。
+   *  传入后动作流带 home_id 过滤——多 home 下切家不再串入他家动作;
+   *  scope 未加载完时为 undefined → 先不过滤,到达后 reloadActions 依赖变化自动重拉。 */
+  activeHomeId?: string;
   /** 事件初始页仍在加载。App 现无条件挂载本组件(让动作流独立于事件加载态),事件到达后
    *  经 setEvents 合并;加载中在事件区顶部显一条内联提示,不阻断动作流。 */
   eventsLoading?: boolean;
@@ -119,6 +123,7 @@ function todayStartMs(): number {
 export function ActivityFeed({
   events: initial,
   homeId,
+  activeHomeId,
   eventsLoading,
   eventsError,
   onRetryEvents,
@@ -161,14 +166,15 @@ export function ActivityFeed({
   const [actions, setActions] = useState<BackendActionRow[]>([]);
 
   /** 动作重拉:mount / homeId 切换 / 时间窗变化 / 手动 reload 时调,失败静默(不阻断事件流)。
-   *  带上当前应用的时间窗(appliedSince/appliedBefore),让动作与事件同段,不混入范围外记录。 */
+   *  带上当前应用的时间窗(appliedSince/appliedBefore),让动作与事件同段,不混入范围外记录;
+   *  带上 activeHomeId,切家后动作流只显当前家(依赖变化自动重拉,不再是空转)。 */
   const reloadActions = useCallback(() => {
-    fetchActions(false, appliedSince, appliedBefore)
+    fetchActions(false, appliedSince, appliedBefore, activeHomeId)
       .then(setActions)
       .catch(() => {
         /* 动作流失败不影响事件流;保留上次结果 */
       });
-  }, [appliedSince, appliedBefore]);
+  }, [appliedSince, appliedBefore, activeHomeId]);
 
   /** SSE 触发的动作重拉:trailing debounce 合并突发,避免每条事件都全量拉 500 行。 */
   const sseReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

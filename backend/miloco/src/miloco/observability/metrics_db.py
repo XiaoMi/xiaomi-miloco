@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _TRACES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -148,10 +148,12 @@ CREATE TABLE IF NOT EXISTS action_ledger (
   error         TEXT,
   trace_id      TEXT,
   source        TEXT,
-  source_id     TEXT
+  source_id     TEXT,
+  home_id       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_ledger_ts ON action_ledger(timestamp);
 CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts ON action_ledger(source, timestamp);
+CREATE INDEX IF NOT EXISTS idx_action_ledger_home_ts ON action_ledger(home_id, timestamp);
 """
 
 _TRACES_V_VIEW = """
@@ -263,8 +265,25 @@ def _migrate_v3_action_source(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v4_action_home(conn: sqlite3.Connection) -> None:
+    """v3 → v4:给 action_ledger 补设备所属家庭列 home_id(幂等)。
+
+    合流页事件在生成时打了 home 标而动作没有——补上列 + (home_id, timestamp)
+    索引,`/api/actions` 才能按家过滤。老行 / 解析失败的行为 NULL,查询侧对
+    NULL 放行(历史台账不因迁移在前端蒸发)。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    if "home_id" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN home_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_action_ledger_home_ts "
+        "ON action_ledger(home_id, timestamp)"
+    )
+
+
 # 步进迁移注册表:{target_version: fn}。fn 只做 additive DDL,须幂等。
 _MIGRATIONS = {
     2: _migrate_v2_action_ledger,
     3: _migrate_v3_action_source,
+    4: _migrate_v4_action_home,
 }

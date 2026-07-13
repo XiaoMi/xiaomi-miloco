@@ -122,11 +122,13 @@ async def _write_action_ledger(
 
         device_name: str | None = None
         room: str | None = None
+        home_id: str | None = None
         try:
             dev = (await miot_proxy.get_devices()).get(did)
             if dev is not None:
                 device_name = getattr(dev, "name", None)
                 room = getattr(dev, "room_name", None)
+                home_id = getattr(dev, "home_id", None)
         except Exception:
             pass  # cache 解析失败不影响审计主体
 
@@ -148,6 +150,7 @@ async def _write_action_ledger(
                     error=error,
                     source=source,
                     source_id=source_id,
+                    home_id=home_id,
                 )
             )
 

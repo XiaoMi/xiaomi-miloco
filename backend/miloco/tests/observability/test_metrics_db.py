@@ -219,7 +219,7 @@ def test_action_ledger_columns(tmp_path):
     assert cols == {
         "id", "timestamp", "action_type", "did", "device_name", "room",
         "iid", "value_json", "result_code", "result_msg", "success",
-        "error", "trace_id", "source", "source_id",
+        "error", "trace_id", "source", "source_id", "home_id",
     }
 
 
@@ -276,6 +276,44 @@ def test_v2_to_v3_migration_adds_source_columns(tmp_path):
         "SELECT id, source, source_id FROM action_ledger WHERE id='a1'"
     ).fetchone()
     assert row == ("a1", None, None)
+
+    # 幂等:再 init 一次不报错、列不重复
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_v3_to_v4_migration_adds_home_column(tmp_path):
+    """模拟 v3 库(action_ledger 无 home_id,user_version=3),init_schema 应
+    additive 补列 + (home_id, timestamp) 索引 + 推到 v4,不丢数据;重复 init 幂等。"""
+    db = tmp_path / "obs.db"
+    conn = connect(db)
+    # 手搭 v3 骨架:旧表 + 带 source 列但无 home_id 的 action_ledger + user_version=3
+    conn.execute("CREATE TABLE traces (trace_id TEXT PRIMARY KEY, timestamp INTEGER)")
+    conn.execute("CREATE TABLE traces_device (device_trace_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE events (event_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE action_ledger (id TEXT PRIMARY KEY, timestamp INTEGER, "
+        "action_type TEXT, did TEXT, success INTEGER, source TEXT, source_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO action_ledger (id, timestamp, action_type, did, success, source) "
+        "VALUES ('a1', 111, 'set_property', 'd1', 1, 'cli')"
+    )
+    conn.execute("PRAGMA user_version = 3")
+
+    init_schema(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    assert "home_id" in cols
+    # 旧行仍在,新列对老数据为 NULL
+    assert conn.execute(
+        "SELECT id, home_id FROM action_ledger WHERE id='a1'"
+    ).fetchone() == ("a1", None)
+    idx = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+    assert "idx_action_ledger_home_ts" in idx
 
     # 幂等:再 init 一次不报错、列不重复
     init_schema(conn)

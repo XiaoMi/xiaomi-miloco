@@ -144,6 +144,7 @@ def list_actions(
     until_ms: int | None = None,
     did: str | None = None,
     action_type: str | None = None,
+    home_id: str | None = None,
     failed_only: int | None = None,
     limit: int = 50,
 ):
@@ -170,6 +171,11 @@ def list_actions(
         if action_type:
             clauses.append("action_type = ?")
             params.append(action_type)
+        if home_id:
+            # NULL 放行:v4 迁移前的老行 / device cache 解析失败的行没有 home 标,
+            # 严格等值会让历史台账在任何家的视图里都蒸发——宁可多显示不可丢审计。
+            clauses.append("(home_id = ? OR home_id IS NULL)")
+            params.append(home_id)
         if failed_only:
             clauses.append("success = 0")
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""

@@ -162,6 +162,35 @@ async def test_writer_records_source_rule(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ledger_records_device_home_id(bound_client, tmp_path):
+    """v4:写入时从 device cache 解析设备所属家庭(dev1 ∈ H1),合流页才能按家过滤。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await svc.control_device(
+        "dev1", DeviceControlRequest(type="set_property", iid="prop.2.1", value=True)
+    )
+    await client.flush()
+    assert _rows(obs_db)[0]["home_id"] == "H1"
+
+
+@pytest.mark.asyncio
+async def test_ledger_home_id_null_when_device_unknown(bound_client, tmp_path):
+    """device cache 查不到 did → home_id 落 NULL(fail-open,不影响审计主体)。"""
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="ghost", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None,
+    )
+    await client.flush()
+    assert _rows(obs_db)[0]["home_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_call_action_writes_ledger_with_tts_text(bound_client, tmp_path):
     """speaker play-text 也是 call_action:in_params(TTS 全文)进 value_json。"""
     client, obs_db = bound_client

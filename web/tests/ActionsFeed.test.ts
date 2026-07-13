@@ -98,6 +98,25 @@ describe("fetchActions — /api/actions 契约", () => {
     expect(m.url()).toContain("failed_only=1");
     expect(m.url()).toContain("limit=500");
   });
+
+  it("传 sinceMs/untilMs → query 带 since_ms/until_ms(动作与事件同段约束)", async () => {
+    const m = mockActions([]);
+    await fetchActions(false, 1000, 2000);
+    expect(m.url()).toContain("since_ms=1000");
+    expect(m.url()).toContain("until_ms=2000");
+  });
+
+  it("传 homeId → query 带 home_id(v4:切家后动作流只显当前家)", async () => {
+    const m = mockActions([]);
+    await fetchActions(false, undefined, undefined, "H1");
+    expect(m.url()).toContain("home_id=H1");
+  });
+
+  it("不传 homeId → query 不带 home_id(scope 未加载时不过滤)", async () => {
+    const m = mockActions([]);
+    await fetchActions(false);
+    expect(m.url()).not.toContain("home_id");
+  });
 });
 
 describe("actionTypeKey", () => {
@@ -132,6 +151,19 @@ describe("mergeFeedRows — 单流合并 / 交错 / 窗口", () => {
       "e-mid",
       "e-old",
     ]);
+  });
+
+  it("显式时间窗:即使无事件,动作也按 since/before 卡界(修:事件空时动作曾无下界)", () => {
+    const acts = [
+      row({ id: "before-win", timestamp: 50 }),
+      row({ id: "in-win", timestamp: 150 }),
+      row({ id: "after-win", timestamp: 250 }),
+    ];
+    // 窗 [100, 200],无事件:只保留 in-win(150);before/after 都被卡掉
+    const r = mergeFeedRows([], acts, true, true, 100, 200);
+    expect(
+      r.map((x) => (x.kind === "event" ? x.event.id : x.action.id)),
+    ).toEqual(["in-win"]);
   });
 
   it("比最新展示事件更新的动作被保留在最上", () => {
