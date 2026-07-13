@@ -346,6 +346,13 @@ function TaskDetailSheet({
                 >
                   {paused ? t("tasks.statusPaused") : t("tasks.statusActive")}
                 </span>
+                {paused && task.pausedAt && (
+                  <span className="ml-2 text-caption text-text-tertiary num">
+                    {t("tasks.pausedAtLabel", {
+                      time: relativeTime(task.pausedAt),
+                    })}
+                  </span>
+                )}
               </>
             )}
           </div>

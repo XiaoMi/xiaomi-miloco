@@ -7,6 +7,7 @@
     "emptyHint": "任务由装有 miloco 插件的 Agent（如 OpenClaw）创建，创建后会在这里展示",
     "statusActive": "进行中",
     "statusPaused": "已暂停",
+    "pausedAtLabel": "暂停于 {{time}}",
     "completed": "已完成",
     "pause": "暂停任务",
     "enable": "启用任务",

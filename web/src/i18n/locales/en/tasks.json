@@ -7,6 +7,7 @@
     "emptyHint": "Tasks are created by an Agent with the miloco plugin (e.g. OpenClaw); they'll show up here once created",
     "statusActive": "Active",
     "statusPaused": "Paused",
+    "pausedAtLabel": "Paused {{time}}",
     "completed": "Done",
     "pause": "Pause task",
     "enable": "Enable task",
