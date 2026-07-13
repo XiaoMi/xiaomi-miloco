@@ -1,13 +1,15 @@
-<h1 align="center">Xiaomi Miloco</h1>
+<div align="center">
 
-<p align="center">English | <a href="README.zh.md">简体中文</a></p>
+# Xiaomi Miloco
 
-<p align="center">
-  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases/latest"><img src="https://img.shields.io/github/v/release/XiaoMi/xiaomi-miloco?label=release" alt="Latest release" /></a>
-  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-Xiaomi%20Miloco-blue" alt="License" /></a>
-  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases"><img src="https://img.shields.io/github/downloads/XiaoMi/xiaomi-miloco/total" alt="Downloads" /></a>
-  <a href="https://github.com/XiaoMi/xiaomi-miloco/stargazers"><img src="https://img.shields.io/github/stars/XiaoMi/xiaomi-miloco" alt="Stars" /></a>
-</p>
+English | [简体中文](README.zh.md)
+
+[![Latest release](https://img.shields.io/github/v/release/XiaoMi/xiaomi-miloco?label=release)](https://github.com/XiaoMi/xiaomi-miloco/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/XiaoMi/xiaomi-miloco/total)](https://github.com/XiaoMi/xiaomi-miloco/releases)
+[![Stars](https://img.shields.io/github/stars/XiaoMi/xiaomi-miloco)](https://github.com/XiaoMi/xiaomi-miloco/stargazers)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/XiaoMi/xiaomi-miloco/pulls)
+
+</div>
 
 Xiaomi's open-source AI solution for the future of whole-home intelligence. It uses the video and audio from Mi Home cameras as a full-modal perception gateway, the in-house MiMo large model as its intelligent brain, and runs as an Agent plugin on top of [OpenClaw](https://openclaw.ai) to orchestrate whole-home devices for a proactive, intelligent experience.
 
