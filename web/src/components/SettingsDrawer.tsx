@@ -69,8 +69,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
     (videoShortEdge !== config.video_short_edge ||
       omniFps !== config.omni_fps ||
       windowSize !== config.window_size);
+  // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
+  // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
+  // 实则静默丢弃」的控件。
+  const schedulerAvailable = schedulerLoaded != null;
   const schedulerDirty =
-    schedulerLoaded != null && schedulerEnabled !== schedulerLoaded;
+    schedulerAvailable && schedulerEnabled !== schedulerLoaded;
 
   async function handleSaveAndRestart() {
     setBusy(true);
@@ -253,10 +257,11 @@ export function SettingsDrawer({ open, onClose }: Props) {
                     type="button"
                     role="switch"
                     aria-checked={schedulerEnabled}
+                    disabled={!schedulerAvailable}
                     onClick={() => setSchedulerEnabled((v) => !v)}
                     className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
                       schedulerEnabled ? "bg-brand-primary" : "bg-border"
-                    }`}
+                    } ${schedulerAvailable ? "" : "opacity-50 cursor-not-allowed"}`}
                   >
                     <span
                       className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
@@ -266,7 +271,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   </button>
                 </div>
                 <p className="text-caption text-text-tertiary">
-                  {t("settings.autoScheduleHint")}
+                  {schedulerAvailable
+                    ? t("settings.autoScheduleHint")
+                    : t("settings.autoScheduleUnavailable")}
                 </p>
               </div>
 
