@@ -206,9 +206,9 @@ def reconcile_cron_jobs(ctx: Optional[Any] = None) -> Dict[str, Any]:
                     "name": target_name,
                     "skills": list(task["skills"]),
                 }
-                # 对齐 OpenClaw：不传 deliver → cron 输出静默
-                # agent 需要通知时显式调 miloco_im_push
-                create_job(**base_kwargs)
+                # 对齐 OpenClaw：cron 默认 delivery:none，agent 调 miloco_im_push 才主动通知
+                # create_job 里不传 deliver 与传 "local" 行为一致（Hermes 归一化），显式传以防静默变更
+                create_job(**base_kwargs, deliver="local")
                 if not cron_active:
                     try:
                         pause_job(target_name)

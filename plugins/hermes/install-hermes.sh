@@ -24,6 +24,13 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 # --- CLI 参数解析（--diagnose / --reset-deliver / --notify-mode / --notify-primary） ---
 DIAGNOSE_ONLY=0
 NO_START_BACKEND=0
+
+# 日志函数必须先定义（CLI 参数解析里会用到 warn）
+G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
+info() { echo -e "${G}[✓]${N} $*"; }
+warn() { echo -e "${Y}[!]${N} $*"; }
+err()  { echo -e "${R}[✗]${N} $*" >&2; }
+
 for arg in "$@"; do
   case "$arg" in
     --diagnose) DIAGNOSE_ONLY=1 ;;
@@ -64,10 +71,6 @@ except Exception:
 PY
 }
 
-G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
-info() { echo -e "${G}[✓]${N} $*"; }
-warn() { echo -e "${Y}[!]${N} $*"; }
-err()  { echo -e "${R}[✗]${N} $*" >&2; }
 step() { echo -e "${G}[${1}/${TOTAL_STEPS}]${N} ${2}"; }
 
 # 跟踪已生效步骤，失败时 trap 打印（给 agent / 用户明确当前状态）
