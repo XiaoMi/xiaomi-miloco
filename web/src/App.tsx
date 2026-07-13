@@ -327,6 +327,14 @@ function MainApp() {
         );
       }
       case "tasks":
+        if (tasks.error) {
+          return (
+            <TabPanelError
+              message={t("app.tabTasksError", { msg: tasks.error.message })}
+              onRetry={() => tasks.reload()}
+            />
+          );
+        }
         return (
           <TasksPage
             tasks={tasks.data}
