@@ -13,6 +13,7 @@ import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -748,7 +749,10 @@ async def _fetch_models(base_url: str, api_key: str) -> dict:
     (经代理转发的 Gemini 不含该域名时,仍走 OpenAI 兼容分支——用户可手填 model 名兜底。)
     """
     base_url = base_url.rstrip("/")
-    is_gemini = "generativelanguage.googleapis.com" in base_url
+    # 解析出主机名精确匹配,不用子串判断(``"…" in base_url`` 会被
+    # ``https://evil.com/generativelanguage.googleapis.com`` 之类绕过——CodeQL 报的
+    # incomplete URL substring sanitization)。
+    is_gemini = (urlparse(base_url).hostname or "").lower() == "generativelanguage.googleapis.com"
     headers = (
         {"x-goog-api-key": api_key} if is_gemini else {"Authorization": f"Bearer {api_key}"}
     )

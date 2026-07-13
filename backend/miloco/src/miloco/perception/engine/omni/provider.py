@@ -394,10 +394,12 @@ class GeminiAdapter(OmniProviderAdapter):
         # 刷屏,也弱化"名字不含 flash"这个粗判据对 gemini-3-pro 等大概率可用模型的误报噪音。
         if "flash" not in model.lower() and model not in _warned_non_flash_gemini:
             _warned_non_flash_gemini.add(model)
+            # model 来自用户配置,记日志前清掉 CR/LF 防日志注入(CodeQL log-injection)。
+            safe_model = model.replace("\r", " ").replace("\n", " ")
             logger.warning(
                 "[omni] GeminiAdapter 默认发 thinkingConfig.thinkingBudget=0,仅对 gemini-3-flash "
                 "系列验证过;model=%s 若为强制思考模型(如 gemini-2.5-pro)会 400,需按模型放开此项",
-                model,
+                safe_model,
             )
         gen_cfg: dict[str, Any] = {
             "maxOutputTokens": max_tokens,
