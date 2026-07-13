@@ -267,6 +267,22 @@ def _gemini_media_resolution() -> str:
         return ""
 
 
+def _gemini_extract_text(payload: dict[str, Any]) -> str | None:
+    """从 Gemini 响应体（非流式 raw 或流式 chunk）抽 ``candidates[0].content.parts[].text`` 拼接。
+
+    无 candidates / parts 空 / 拼出空串 → 返回 ``None``，让上游走「无内容」fallback，
+    与「真·空回答」区分开。非 dict（服务端偶发返回 list/str）同样返回 None。
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        return None
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    return text or None
+
+
 class GeminiAdapter(OmniProviderAdapter):
     """Gemini 原生 ``generateContent`` 协议 adapter。
 
@@ -368,9 +384,12 @@ class GeminiAdapter(OmniProviderAdapter):
             "maxOutputTokens": max_tokens,
             "temperature": temperature,
             "topP": top_p,
-            # 关思考：感知要直给结构化结果（对标 MiMo 的 thinking:disabled）。gemini-3 用
-            # thinkingBudget=0 可彻底关闭（thinkingLevel:"low" 关不掉），省 token 且防思考
-            # 挤占 maxOutputTokens 导致可见输出被截断。
+            # 关思考：感知要直给结构化结果（对标 MiMo 的 thinking:disabled）。省 token，
+            # 且防思考挤占 maxOutputTokens 导致可见输出被截断。
+            # 【假设面向 gemini-3 系列】gemini-3 用 thinkingBudget=0 可彻底关闭（thinkingLevel
+            # "low" 关不掉），实测 gemini-3-flash-preview / gemini-3.5-flash 均接受。注意强制思考
+            # 的模型（如 gemini-2.5-pro，最小 budget 128）会因 budget=0 直接 400——本 adapter
+            # 面向 gemini-3-flash，不覆盖那类模型；若未来要接，需按模型放开此项。
             "thinkingConfig": {"thinkingBudget": 0},
         }
         # media_resolution 档位：仅 "high" 显式请求高预算(264 tok/帧)；其余(""/"low")不发该
@@ -391,28 +410,22 @@ class GeminiAdapter(OmniProviderAdapter):
         return {"x-goog-api-key": api_key}
 
     def parse_response(self, raw: dict[str, Any]) -> dict[str, Any]:
-        candidates = raw.get("candidates") or []
-        text: str | None = None
-        if candidates:
-            parts = (candidates[0].get("content") or {}).get("parts") or []
-            text = "".join(
-                p.get("text", "") for p in parts if isinstance(p, dict)
-            )
+        # 非 dict（服务端偶发返回 list/str）原样透传，交给 _call_omni_messages 的
+        # ``isinstance(raw, dict)`` 守卫 dump 诊断，与 OpenAICompat 的 passthrough 行为对齐。
+        if not isinstance(raw, dict):
+            return raw
+        text = _gemini_extract_text(raw)
         usage = _gemini_usage_to_openai(raw.get("usageMetadata"))
-        # 无 candidates（空/被 promptFeedback 拦）→ choices 空 → _extract_content 得 None 走 fallback。
+        # text 为 None（无 candidates / parts 空 / 空串）→ choices 空 → _extract_content 得
+        # None 走「无内容」fallback，与真·空回答区分。
         choices = [{"message": {"content": text}}] if text is not None else []
         return {"choices": choices, "usage": usage}
 
     def parse_stream_chunk(
         self, chunk: dict[str, Any]
     ) -> tuple[str | None, dict[str, Any] | None]:
-        delta: str | None = None
-        candidates = chunk.get("candidates") or []
-        if candidates:
-            parts = (candidates[0].get("content") or {}).get("parts") or []
-            text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-            delta = text or None
-        usage_meta = chunk.get("usageMetadata")
+        delta = _gemini_extract_text(chunk)
+        usage_meta = chunk.get("usageMetadata") if isinstance(chunk, dict) else None
         usage = _gemini_usage_to_openai(usage_meta) if usage_meta else None
         return delta, usage
 

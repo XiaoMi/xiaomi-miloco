@@ -282,6 +282,18 @@ class TestGeminiAdapter:
         out = self.adapter.parse_response({"promptFeedback": {"blockReason": "SAFETY"}})
         assert out["choices"] == []
 
+    def test_parse_response_empty_parts_fallback(self):
+        # candidate 有但 parts 空（如 finishReason=MAX_TOKENS 无文本）→ choices 空走 fallback，
+        # 不产空串 content(与真·空回答区分)。
+        out = self.adapter.parse_response(
+            {"candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}]}
+        )
+        assert out["choices"] == []
+
+    def test_parse_response_non_dict_passthrough(self):
+        # 服务端偶发返回非 dict → 原样透传，交给上游 shape 守卫。
+        assert self.adapter.parse_response(["x"]) == ["x"]
+
     def test_parse_stream_chunk(self):
         delta, usage = self.adapter.parse_stream_chunk(
             {"candidates": [{"content": {"parts": [{"text": "ab"}]}}]}
