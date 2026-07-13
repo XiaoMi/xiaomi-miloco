@@ -619,7 +619,9 @@ done
 rm -rf "$MILOCO_HOME/agent_platform/adapter"
 info "  部署 AgentPlatformAdapter → $ADAPTER_DEST/"
 
-# 部署 web 前端（fork 源码无预构建，npm build 一次）
+# 部署 web 前端
+# [PR合并后] 可删除：上游 release 包自带 pre-built web，不需要此步骤
+# 原因：fork 源码安装时 static/ 为空，需本地 npm build
 WEB_DIR="$HERE/../../web"
 STATIC_DST="$HERE/../../backend/miloco/src/miloco/static"
 if [ ! -f "$STATIC_DST/index.html" ] && [ -f "$WEB_DIR/package.json" ]; then
@@ -648,6 +650,8 @@ mark_done 4
 PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 
 # --- 4.7 同步本地感知 ONNX 模型到 MILOCO_HOME/models/ ---
+# [PR合并后] 可简化：上游 --agent-finish 自动下载模型，不再需要从 fork 仓库 cp
+# 原因：fork 走"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑
 # 对齐上游 install.sh --agent-finish 的"下载感知模型"步骤（见
 # upstream install-guide.md 第 131 行"下载感知模型"）。
 #
