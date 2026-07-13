@@ -74,13 +74,17 @@ export function SettingsDrawer({ open, onClose }: Props) {
 
   async function handleSaveAndRestart() {
     setBusy(true);
+    // 调度开关先于感知参数提交；记录其是否已写盘，供 catch 区分「部分成功」——
+    // 开关已存但感知失败时不应笼统报「保存失败」，那会让用户误以为开关也没存住。
+    let schedulerSaved = false;
     try {
-      // scheduler 开关仅写盘 config.json（openclaw 网关下次启动读取生效），
+      // scheduler 开关仅写盘 config.json（agent 网关下次启动读取生效），
       // 与感知参数各自独立 PUT——只在各自变更时提交，避免仅改开关却重启引擎。
       if (schedulerDirty) {
         const s = await updateSchedulerConfig({ enabled: schedulerEnabled });
         setSchedulerLoaded(s.enabled);
         setSchedulerEnabled(s.enabled);
+        schedulerSaved = true;
       }
       // PUT 后端会同步写 config + 重启引擎使参数生效，前端不再单独 pause/resume。
       // config 写盘不可回滚：写盘成功但重启失败时后端返回 restart_ok=false（非报错），
@@ -104,7 +108,14 @@ export function SettingsDrawer({ open, onClose }: Props) {
       }
       onClose();
     } catch {
-      toast(t("settings.saveFailed"), "danger");
+      // 部分成功(开关已存、感知失败)与全败区分:前者 schedulerDirty 已随
+      // schedulerLoaded 收敛为 false,重试只补发感知那半,故文案要如实说明。
+      toast(
+        schedulerSaved
+          ? t("settings.partialSaveFailed")
+          : t("settings.saveFailed"),
+        "danger",
+      );
     } finally {
       setBusy(false);
     }

@@ -11,6 +11,7 @@
     "applying": "应用中…",
     "applySuccess": "设置已生效",
     "saveFailed": "保存失败",
+    "partialSaveFailed": "调度开关已保存，但感知设置保存失败，请重试",
     "restartFailed": "设置已保存，但引擎重启失败，请手动重启",
     "loadFailed": "加载设置失败",
     "resetDefaults": "恢复默认设置",

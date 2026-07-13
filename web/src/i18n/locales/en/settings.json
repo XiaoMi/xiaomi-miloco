@@ -11,6 +11,7 @@
     "applying": "Applying…",
     "applySuccess": "Settings applied",
     "saveFailed": "Save failed",
+    "partialSaveFailed": "Scheduler toggle saved, but perception settings failed to save. Please retry.",
     "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
     "loadFailed": "Failed to load settings",
     "resetDefaults": "Restore Defaults",
