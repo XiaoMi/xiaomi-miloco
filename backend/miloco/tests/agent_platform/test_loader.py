@@ -296,22 +296,28 @@ def test_load_adapter_module_exception_caught(tmp_path: Path, monkeypatch):
     assert isinstance(inst, WebhookAdapter)
 
 
-def test_load_adapter_no_cache(tmp_path: Path, monkeypatch, adapter_dir: Path):
-    """load_adapter 每次返回正确 name 的结果（不再缓存）。"""
+def test_load_adapter_caches_singleton(tmp_path: Path, monkeypatch, adapter_dir: Path):
+    """load_adapter 第二次调用返缓存,不重新 import。"""
     from miloco import agent_platform as ap_mod
 
+    monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     _patch_miloco_home(monkeypatch, tmp_path)
 
     a = ap_mod.loader.load_adapter("fake")
     b = ap_mod.loader.load_adapter("fake")
-    assert a.name == "fake"
-    assert b.name == "fake"
+    assert a is b  # same object — cached
 
 
 def test_get_adapter_loads_when_none(tmp_path: Path, monkeypatch, adapter_dir: Path):
-    """get_adapter 每次主动 load_adapter。"""
+    """get_adapter 没缓存时主动 load_adapter。
+
+    stub loader.get_settings 让 platform='fake',避免用全局的 'hermes'(找不到 fake)。
+    loader 内部 `from miloco.config import get_settings`,patch 不到原 module attr,
+    必须 patch loader 模块里的本地绑定。
+    """
     from miloco import agent_platform as ap_mod
 
+    monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     _patch_miloco_home(monkeypatch, tmp_path)
 
     @dataclass
@@ -335,6 +341,7 @@ def test_get_adapter_no_platform_configured(tmp_path: Path, monkeypatch):
 
     from miloco import agent_platform as ap_mod
 
+    # stub settings.agent.platform = ""
     @dataclass
     class FakeAgent:
         platform: str = ""
@@ -343,6 +350,7 @@ def test_get_adapter_no_platform_configured(tmp_path: Path, monkeypatch):
     class FakeSettings:
         agent: Any = field(default_factory=FakeAgent)
 
+    monkeypatch.setattr(ap_mod.loader, "_cached_adapter", None)
     monkeypatch.setattr(ap_mod.loader, "get_settings", lambda: FakeSettings())
     _patch_miloco_home(monkeypatch, tmp_path)
 
@@ -350,10 +358,13 @@ def test_get_adapter_no_platform_configured(tmp_path: Path, monkeypatch):
     assert isinstance(inst, WebhookAdapter)
 
 
-def test_reset_cache_noop():
-    """reset_cache 兼容旧接口，不抛异常。"""
+def test_reset_cache_clears_singleton():
+    """reset_cache 把 _cached_adapter 置 None。"""
     from miloco import agent_platform as ap_mod
-    ap_mod.reset_cache()  # should not raise
+
+    ap_mod.loader._cached_adapter = "fake-obj"
+    ap_mod.reset_cache()
+    assert ap_mod.loader._cached_adapter is None
 
 
 # ---------------------------------------------------------------------------

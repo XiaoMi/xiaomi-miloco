@@ -113,14 +113,20 @@ def _load_adapter_class(adapter_name: str) -> type:
     return _find_adapter_class(module, adapter_name)
 
 
+_cached_adapter: Optional[AgentPlatformAdapter] = None
 # 注意：load_adapter() 初次加载后设为非 None；reset_cache() 清回 None。
 
 
 def load_adapter(adapter_name: Optional[str] = None) -> AgentPlatformAdapter:
-    """按 ``settings.agent.platform`` 加载 Adapter。
+    """按 ``settings.agent.platform`` 加载 Adapter 单例。
 
-    每次调用重新读 settings，不缓存——确保 ``agent.platform`` 变更后热生效。
+    若 platform 未配置或加载失败，返回内置的 :class:`WebhookAdapter` 作为兜底。
+    ``get_adapter()`` 永远返回实现了同一接口的非 None 对象。
     """
+    global _cached_adapter
+    if _cached_adapter is not None:
+        return _cached_adapter
+
     settings = get_settings()
     name = adapter_name or getattr(settings.agent, "platform", None)
     if not name:
@@ -128,31 +134,49 @@ def load_adapter(adapter_name: Optional[str] = None) -> AgentPlatformAdapter:
             "agent.platform 未配置,使用内置 WebhookAdapter 兜底"
         )
         from miloco.agent_platform.base import WebhookAdapter
-        return WebhookAdapter()
+        _cached_adapter = WebhookAdapter()
+        return _cached_adapter
 
     try:
         cls = _load_adapter_class(name)
         inst = cls()
         if not inst.name:
             inst.name = name
+        _cached_adapter = inst
         logger.info(
             "agent adapter loaded: name=%s class=%s dir=%s",
             name, cls.__name__, _resolve_adapter_dir(name),
         )
-        return inst
+        return _cached_adapter
     except Exception as exc:
         logger.warning(
             "agent adapter '%s' 加载失败:%s,使用内置 WebhookAdapter 兜底", name, exc,
         )
         from miloco.agent_platform.base import WebhookAdapter
-        return WebhookAdapter()
+        _cached_adapter = WebhookAdapter()
+        return _cached_adapter
 
 
 def get_adapter() -> AgentPlatformAdapter:
-    """获取 adapter。每次调用重新读 settings.agent.platform。"""
+    """获取 adapter。不再缓存——每次调用重新读 settings.agent.platform，
+    防 install-hermes.sh 写 config 后 adapter 缓存旧 WebhookAdapter 不更新。"""
     return load_adapter()
 
 
 def reset_cache() -> None:
-    """兼容旧接口(无缓存，无需清)。"""
-    pass
+    """清缓存(测试用)。"""
+    global _cached_adapter
+    if _cached_adapter is not None:
+        try:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_cached_adapter.aclose())
+                else:
+                    loop.run_until_complete(_cached_adapter.aclose())
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
+    _cached_adapter = None
