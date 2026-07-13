@@ -1,13 +1,15 @@
-<h1 align="center">Xiaomi Miloco</h1>
+<div align="center">
 
-<p align="center"><a href="README.md">English</a> | 简体中文</p>
+# Xiaomi Miloco
 
-<p align="center">
-  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases/latest"><img src="https://img.shields.io/github/v/release/XiaoMi/xiaomi-miloco?label=release" alt="最新版本" /></a>
-  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-Xiaomi%20Miloco-blue" alt="许可协议" /></a>
-  <a href="https://github.com/XiaoMi/xiaomi-miloco/releases"><img src="https://img.shields.io/github/downloads/XiaoMi/xiaomi-miloco/total" alt="下载量" /></a>
-  <a href="https://github.com/XiaoMi/xiaomi-miloco/stargazers"><img src="https://img.shields.io/github/stars/XiaoMi/xiaomi-miloco" alt="Star 数" /></a>
-</p>
+[English](README.md) | 简体中文
+
+[![最新版本](https://img.shields.io/github/v/release/XiaoMi/xiaomi-miloco?label=release)](https://github.com/XiaoMi/xiaomi-miloco/releases/latest)
+[![下载量](https://img.shields.io/github/downloads/XiaoMi/xiaomi-miloco/total)](https://github.com/XiaoMi/xiaomi-miloco/releases)
+[![Star 数](https://img.shields.io/github/stars/XiaoMi/xiaomi-miloco)](https://github.com/XiaoMi/xiaomi-miloco/stargazers)
+[![欢迎 PR](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/XiaoMi/xiaomi-miloco/pulls)
+
+</div>
 
 小米面向未来的全屋智能 AI 开源方案，以米家摄像头的画面与声音为全模态感知入口，以自研 MiMo 大模型为智能大脑，以 Agent 插件形式运行在 [OpenClaw](https://openclaw.ai) 之上，联动全屋设备带来主动智能体验。
 
