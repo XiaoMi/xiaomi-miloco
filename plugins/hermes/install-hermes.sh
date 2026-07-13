@@ -619,6 +619,24 @@ done
 rm -rf "$MILOCO_HOME/agent_platform/adapter"
 info "  部署 AgentPlatformAdapter → $ADAPTER_DEST/"
 
+# 部署 web 前端（fork 源码无预构建，npm build 一次）
+WEB_DIR="$HERE/../../web"
+STATIC_DST="$HERE/../../backend/miloco/src/miloco/static"
+if [ ! -f "$STATIC_DST/index.html" ] && [ -f "$WEB_DIR/package.json" ]; then
+  info "  构建 web 前端（首次安装，约 30s）..."
+  if command -v pnpm >/dev/null 2>&1; then
+    (cd "$WEB_DIR" && pnpm install --frozen-lockfile 2>&1 | tail -1 && pnpm build 2>&1 | tail -1) || true
+  elif command -v npm >/dev/null 2>&1; then
+    (cd "$WEB_DIR" && npm install 2>&1 | tail -1 && npm run build 2>&1 | tail -1) || true
+  fi
+  if [ -f "$WEB_DIR/dist/index.html" ]; then
+    mkdir -p "$STATIC_DST" && cp -r "$WEB_DIR/dist"/* "$STATIC_DST/"
+    info "  ✓ web 前端已部署"
+  else
+    info "  · web 前端构建失败（跳过，不影响核心功能）"
+  fi
+fi
+
 # 建 ~/.hermes/memory/(感知 cron skill 写感知摘要的目标目录)。首次跑 cron 时
 # skill 会 `ls /Users/wkea/memory/<date>-miloco-perception.md`,目录不存在会报
 # "No such file or directory"。这里是 cron 链路真 bug —— skill 写文件前必须
