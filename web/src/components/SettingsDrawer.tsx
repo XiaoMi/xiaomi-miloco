@@ -42,6 +42,10 @@ export function SettingsDrawer({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     setLoading(true);
+    // 抽屉靠 `if (!open) return null` 隐藏而非卸载，state 会跨「关闭→重开」保留。
+    // 每次重载先把调度值复位为 null：本次读不到就稳定退回 unavailable（disable 开关），
+    // 不留用上次会话的旧值，与 e107541 的「读不到就禁用」保持一致。
+    setSchedulerLoaded(null);
     // 感知参数与调度开关是两个正交接口，用 allSettled 各自独立成败——
     // 任一接口出错（如版本错位）只影响自己那块，不把另一块也拖进错误态。
     Promise.allSettled([
