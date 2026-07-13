@@ -42,21 +42,25 @@ export function SettingsDrawer({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     setLoading(true);
-    Promise.all([
-      getPerceptionConfig()
-        .then((c) => {
-          setConfig(c);
-          setVideoShortEdge(c.video_short_edge);
-          setOmniFps(c.omni_fps);
-          setWindowSize(c.window_size);
-        }),
-      getSchedulerConfig()
-        .then((s) => {
-          setSchedulerLoaded(s.enabled);
-          setSchedulerEnabled(s.enabled);
-        }),
+    // 感知参数与调度开关是两个正交接口，用 allSettled 各自独立成败——
+    // 任一接口出错（如版本错位）只影响自己那块，不把另一块也拖进错误态。
+    Promise.allSettled([
+      getPerceptionConfig().then((c) => {
+        setConfig(c);
+        setVideoShortEdge(c.video_short_edge);
+        setOmniFps(c.omni_fps);
+        setWindowSize(c.window_size);
+      }),
+      getSchedulerConfig().then((s) => {
+        setSchedulerLoaded(s.enabled);
+        setSchedulerEnabled(s.enabled);
+      }),
     ])
-      .catch(() => toast(t("settings.loadFailed"), "danger"))
+      .then((rs) => {
+        if (rs.some((r) => r.status === "rejected")) {
+          toast(t("settings.loadFailed"), "danger");
+        }
+      })
       .finally(() => setLoading(false));
   }, [open, t]);
 
@@ -94,7 +98,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
           toast(t("settings.applySuccess"), "ok");
         }
       } else {
-        toast(t("settings.applySuccess"), "ok");
+        // 仅改调度开关：写盘当下并未生效（要等 agent 网关下次重启），
+        // 与感知参数「即时生效」区分，避免过度承诺。
+        toast(t("settings.schedulerSaved"), "ok");
       }
       onClose();
     } catch {

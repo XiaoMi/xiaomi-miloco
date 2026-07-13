@@ -14,6 +14,7 @@
     "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
     "loadFailed": "Failed to load settings",
     "resetDefaults": "Restore Defaults",
+    "schedulerSaved": "Saved. Takes effect after the next agent gateway restart.",
     "autoSchedule": "Auto scheduled tasks",
     "autoScheduleHint": "When on, miloco auto-creates and maintains its built-in scheduled tasks (perception digest / home patrol / memory dreaming / habit insights). When off, those tasks are removed and not recreated. Takes effect after the next agent gateway restart."
   }
