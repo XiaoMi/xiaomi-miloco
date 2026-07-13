@@ -181,10 +181,9 @@ def list_actions(
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT * FROM action_ledger {where} ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
-        rows = conn.execute(sql, params).fetchall()
-        cols = [d[0] for d in conn.execute(
-            "SELECT * FROM action_ledger LIMIT 0").description]
-        return [dict(zip(cols, r)) for r in rows]
+        cursor = conn.execute(sql, params)
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, r)) for r in cursor.fetchall()]
     finally:
         conn.close()
 

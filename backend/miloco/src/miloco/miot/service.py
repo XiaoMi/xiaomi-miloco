@@ -106,6 +106,7 @@ async def _write_action_ledger(
     error: str | None,
     source: str = "cli",
     source_id: str | None = None,
+    home_id: str | None = None,
 ) -> None:
     """落一行 action_ledger + 打一条 INFO 结果日志。**fail-open**:
 
@@ -122,13 +123,15 @@ async def _write_action_ledger(
 
         device_name: str | None = None
         room: str | None = None
-        home_id: str | None = None
         try:
             dev = (await miot_proxy.get_devices()).get(did)
             if dev is not None:
                 device_name = getattr(dev, "name", None)
                 room = getattr(dev, "room_name", None)
-                home_id = getattr(dev, "home_id", None)
+                if home_id is None:
+                    # 未显式传入才从 device cache 补。scene_trigger 的 did 是
+                    # scene_id,cache 必 miss——那条路径由调用方带场景所属家传入。
+                    home_id = getattr(dev, "home_id", None)
         except Exception:
             pass  # cache 解析失败不影响审计主体
 
@@ -1353,9 +1356,10 @@ class MiotService:
 
     async def trigger_scene(self, scene_id: str) -> bool:
         """Trigger a MIoT manual scene."""
+        scenes: dict = {}
         try:
-            scenes = await self._miot_proxy.get_all_scenes()
-            if not scenes or scene_id not in scenes:
+            scenes = (await self._miot_proxy.get_all_scenes()) or {}
+            if scene_id not in scenes:
                 raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
             if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
                 raise ValidationException(
@@ -1363,6 +1367,8 @@ class MiotService:
                 )
             ok = await self._miot_proxy.execute_miot_scene(scene_id)
             # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
+            # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
+            # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
             scene_name = getattr(scenes[scene_id], "scene_name", None)
             await _write_action_ledger(
                 self._miot_proxy,
@@ -1374,6 +1380,7 @@ class MiotService:
                 result_code=None,
                 result_msg=None if ok else "场景触发失败",
                 success=bool(ok), error=None,
+                home_id=getattr(scenes[scene_id], "home_id", None),
             )
             return ok
         except (ResourceNotFoundException, ValidationException):
@@ -1387,5 +1394,7 @@ class MiotService:
                 value_json=None,
                 result_code=None, result_msg=None,
                 success=False, error=str(e),
+                # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
+                home_id=getattr(scenes.get(scene_id), "home_id", None),
             )
             raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e

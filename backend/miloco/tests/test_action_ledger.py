@@ -260,6 +260,26 @@ async def test_scene_trigger_writes_ledger_row(bound_client, tmp_path):
     assert r["iid"] == "scene1"
     assert r["success"] == 1
     assert json.loads(r["value_json"]) == {"scene_name": "回家"}
+    # did 是 scene_id、device cache 必 miss——home 由 trigger_scene 显式传入
+    # (scene1 ∈ H1),否则场景台账恒 NULL、经 NULL 放行串入他家合流页。
+    assert r["home_id"] == "H1"
+
+
+@pytest.mark.asyncio
+async def test_writer_explicit_home_overrides_cache(bound_client, tmp_path):
+    """显式 home_id 形参优先于 device cache 解析(dev1 ∈ H1,显式传 H9 应落 H9)。"""
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None, home_id="H9",
+    )
+    await client.flush()
+    assert _rows(obs_db)[0]["home_id"] == "H9"
 
 
 @pytest.mark.asyncio
