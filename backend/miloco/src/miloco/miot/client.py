@@ -9,6 +9,7 @@ import asyncio
 import copy
 import json
 import logging
+import secrets
 import time
 from collections.abc import Callable, Coroutine
 
@@ -16,6 +17,7 @@ from av.audio.frame import AudioFrame
 from av.video.frame import VideoFrame
 from miot.camera import MIoTCameraInstance
 from miot.client import MIoTClient
+from miot.error import MIoTErrorCode
 from miot.spec import MIoTSpecTypeLevel
 from miot.types import (
     MIoTActionParam,
@@ -34,7 +36,12 @@ from miot.types import (
 from pydantic_core import to_jsonable_python
 
 from miloco.config import get_settings
-from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
+from miloco.database.kv_repo import (
+    AuthConfigKeys,
+    DeviceInfoKeys,
+    KVRepo,
+    SystemConfigKeys,
+)
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
     is_home_allowed,
@@ -51,6 +58,30 @@ from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
+
+# Local (central hub) result codes that mean "the local path did not work" —
+# fall back to cloud. These are transport/RPC-layer failures, NOT device-level
+# rejections (a real device error is returned as-is, never re-run on cloud, to
+# avoid double execution).
+_LOCAL_FALLBACK_CODES = frozenset(
+    {
+        MIoTErrorCode.CODE_TIMEOUT.value,  # -10006 (rpc reply timeout)
+        MIoTErrorCode.CODE_INTERNAL_ERROR.value,  # -10004
+        MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,  # -10040
+        MIoTErrorCode.CODE_UNAVAILABLE.value,  # -10001
+    }
+)
+# Local set_properties success codes (mirrors the Xiaomi Home integration).
+_LOCAL_SET_OK_CODES = frozenset({0, 1})
+
+# After a local RPC for a did fails/times out, skip the local path for that did
+# for this long and route straight to cloud. Without this, a device that is
+# "online" in the gateway device table but actually unreachable (e.g. a flaky
+# WiFi plug) makes every property in a batch wait the full local RPC timeout
+# serially — an N-prop read becomes N × timeout, blowing the caller's deadline.
+# The cooldown bounds that to one timeout per did per window; it self-heals when
+# the window lapses. Kept in the business layer next to the fallback policy.
+_LOCAL_COOLDOWN_SEC = 30.0
 
 
 def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
@@ -117,9 +148,25 @@ class MiotProxy:
 
         self._miot_client: MIoTClient = None  # type: ignore
 
+        # did -> monotonic expiry: local control path is skipped (route cloud)
+        # for a did whose recent local RPC failed/timed out, until the window
+        # lapses. See _LOCAL_COOLDOWN_SEC.
+        self._local_cooldown: dict[str, float] = {}
+
         _settings = get_settings()
         self._frame_interval: int = _settings.camera.frame_interval
         self._max_cache_images: int = _settings.camera.max_cache_images
+        # Local central hub master switch + static gateway endpoints
+        # (mDNS-independent, for environments where multicast can't reach it).
+        self._central_hub_enabled: bool = _settings.miot.central_hub_enabled
+        self._central_hub_gateways: list[tuple[str, int]] = self._parse_gateways(
+            _settings.miot.central_hub_gateways
+        )
+        # Virtual did = this install's client identity for the local hub
+        # (MQTT client_id / cert CN / reply-push topic prefix). Persisted in the
+        # KV store (like the device uuid) and injected into the SDK, so it is
+        # stable across restarts and lives with Miloco's other identity state.
+        self._virtual_did: str = self._ensure_virtual_did()
 
         # two times cache ttl, at least 1 second
         # frame_interval * cache_max_size / 1000 * 2 = seconds
@@ -203,6 +250,44 @@ class MiotProxy:
             refresh_scenes=self.refresh_scenes,
         )
 
+    def _ensure_virtual_did(self) -> str:
+        """Load the persisted virtual did from KV, generating one on first use.
+
+        Kept in the KV store alongside the device uuid so it is stable across
+        restarts; injected into the SDK at construction.
+        """
+        did = self._kv_repo.get(SystemConfigKeys.MIOT_VIRTUAL_DID_KEY)
+        if did and did.strip():
+            return did.strip()
+        did = str(secrets.randbits(64))
+        self._kv_repo.set(SystemConfigKeys.MIOT_VIRTUAL_DID_KEY, did)
+        logger.info("generated central hub virtual did (persisted to KV)")
+        return did
+
+    @staticmethod
+    def _parse_gateways(raw: list[str]) -> list[tuple[str, int]]:
+        """Parse config 'ip' / 'ip:port' entries into (host, port) tuples.
+
+        Port defaults to 8883 (the central hub mTLS MQTT port). Malformed
+        entries are skipped with a warning.
+        """
+        out: list[tuple[str, int]] = []
+        for item in raw or []:
+            s = str(item).strip()
+            if not s:
+                continue
+            host, _, port = s.partition(":")
+            host = host.strip()
+            if not host:
+                continue
+            try:
+                p = int(port) if port.strip() else 8883
+            except ValueError:
+                logger.warning("invalid central_hub_gateways entry %r, skip", item)
+                continue
+            out.append((host, p))
+        return out
+
     def _create_miot_client(self) -> MIoTClient:
         """Create a new MIoTClient instance."""
         return MIoTClient(
@@ -211,6 +296,9 @@ class MiotProxy:
             cache_path=str(get_settings().directories.miot_cache_dir),
             oauth_info=self._oauth_info,
             cloud_server=self._cloud_server,
+            central_hub_enabled=self._central_hub_enabled,
+            central_hub_gateways=self._central_hub_gateways,
+            central_hub_virtual_did=self._virtual_did,
         )
 
     @property
@@ -804,6 +892,11 @@ class MiotProxy:
 
     async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:
         async with self._refresh_devices_lock:
+            # Attach the central hub device-list-change hook once it exists
+            # (the coordinator is built lazily during mips setup). Idempotent.
+            ch = getattr(self._miot_client, "central_hub", None)
+            if ch is not None and ch.on_dev_list_changed is None:
+                ch.on_dev_list_changed = self._on_central_hub_dev_list_changed
             try:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
@@ -813,6 +906,20 @@ class MiotProxy:
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
                 return None
+
+    async def _on_central_hub_dev_list_changed(
+        self, added: list, removed: list
+    ) -> None:
+        """Central hub reported a device-list change — mirror it into the same
+        refresh path the cloud bind/unbind events use (scope aligned with the
+        existing cloud subscriptions; property telemetry is not consumed here).
+        """
+        logger.info(
+            "central hub device list changed: +%d -%d; refreshing devices",
+            len(added),
+            len(removed),
+        )
+        await self.refresh_devices()
 
     @staticmethod
     def _log_device_diff(action: str, dev: MIoTDeviceInfo | None, did: str) -> None:
@@ -1254,21 +1361,150 @@ class MiotProxy:
                 logger.error("Scheduled token refresh task exception: %s", e)
                 await asyncio.sleep(60)  # Wait 1 minute after error before continuing
 
+    def _local_reachable(self, ch, did: str) -> bool:
+        """True if this did should try the local path now.
+
+        Combines the central hub's own predicate with a short per-did failure
+        cooldown so a device that is nominally controllable but currently
+        unreachable does not make every call pay the full local RPC timeout.
+        """
+        if not ch.can_control(did):
+            return False
+        expiry = self._local_cooldown.get(did)
+        if expiry is not None:
+            if time.monotonic() < expiry:
+                return False
+            del self._local_cooldown[did]  # window lapsed — allow local again
+        return True
+
+    def _note_local_failure(self, did: str) -> None:
+        """Mark a did's local path as failed; route it to cloud for a window."""
+        self._local_cooldown[did] = time.monotonic() + _LOCAL_COOLDOWN_SEC
+
     async def set_device_properties(self, params: list[MIoTSetPropertyParam]) -> list:
-        """Set device properties via MIoT cloud API."""
-        try:
+        """Set device properties, preferring the local central hub per-did.
+
+        Each param whose did is locally controllable goes to the gateway; any
+        param that isn't, or whose local RPC fails at the transport layer, is
+        batched to the cloud HTTP API. The returned list preserves input order
+        and matches the cloud shape (``{did, siid, piid, code}``).
+        """
+        ch = getattr(self.miot_client, "central_hub", None)
+        if not ch or not ch.enabled:
             return await self.miot_client.http_client.set_props_async(params)
-        except Exception as e:
-            logger.error("Failed to set device properties: %s", e)
-            raise
+
+        results: list = [None] * len(params)
+        cloud_idx: list[int] = []
+        for i, p in enumerate(params):
+            if not self._local_reachable(ch, p.did):
+                cloud_idx.append(i)
+                continue
+            try:
+                r = await ch.set_prop_async(p.did, p.siid, p.piid, p.value)
+            except Exception as e:
+                logger.warning(
+                    "local set_prop transport error did=%s, fallback cloud: %s",
+                    p.did,
+                    e,
+                )
+                self._note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            code = r.get("code") if isinstance(r, dict) else None
+            if code is None or code in _LOCAL_FALLBACK_CODES:
+                logger.info(
+                    "local set_prop unreachable did=%s code=%s, fallback cloud",
+                    p.did,
+                    code,
+                )
+                self._note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            results[i] = {
+                "did": p.did,
+                "siid": p.siid,
+                "piid": p.piid,
+                "code": 0 if code in _LOCAL_SET_OK_CODES else code,
+            }
+
+        if cloud_idx:
+            cloud_res = await self.miot_client.http_client.set_props_async(
+                [params[i] for i in cloud_idx]
+            )
+            for j, i in enumerate(cloud_idx):
+                results[i] = (
+                    cloud_res[j]
+                    if j < len(cloud_res)
+                    else {
+                        "did": params[i].did,
+                        "siid": params[i].siid,
+                        "piid": params[i].piid,
+                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+                    }
+                )
+        return results
 
     async def get_device_properties(self, params: list[MIoTGetPropertyParam]) -> list:
-        """Get device properties via MIoT cloud API."""
-        try:
+        """Get device properties, preferring the local central hub per-did.
+
+        Mirrors :meth:`set_device_properties`: locally-reachable dids read from
+        the gateway, the rest (and any local read that returns no value) are
+        batched to the cloud. Result shape matches cloud
+        (``{did, siid, piid, value, code}``).
+        """
+        ch = getattr(self.miot_client, "central_hub", None)
+        if not ch or not ch.enabled:
             return await self.miot_client.http_client.get_props_async(params)
-        except Exception as e:
-            logger.error("Failed to get device properties: %s", e)
-            raise
+
+        results: list = [None] * len(params)
+        cloud_idx: list[int] = []
+        for i, p in enumerate(params):
+            if not self._local_reachable(ch, p.did):
+                cloud_idx.append(i)
+                continue
+            try:
+                value = await ch.get_prop_async(p.did, p.siid, p.piid)
+            except Exception as e:
+                logger.warning(
+                    "local get_prop transport error did=%s, fallback cloud: %s",
+                    p.did,
+                    e,
+                )
+                self._note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            if value is None:
+                # No value returned — the local RPC timed out or the device is
+                # unreachable. Cool the did down so the rest of this batch (and
+                # subsequent calls) skip local instead of each waiting the full
+                # timeout, then read from cloud.
+                self._note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            results[i] = {
+                "did": p.did,
+                "siid": p.siid,
+                "piid": p.piid,
+                "value": value,
+                "code": 0,
+            }
+
+        if cloud_idx:
+            cloud_res = await self.miot_client.http_client.get_props_async(
+                [params[i] for i in cloud_idx]
+            )
+            for j, i in enumerate(cloud_idx):
+                results[i] = (
+                    cloud_res[j]
+                    if j < len(cloud_res)
+                    else {
+                        "did": params[i].did,
+                        "siid": params[i].siid,
+                        "piid": params[i].piid,
+                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+                    }
+                )
+        return results
 
     async def get_readable_prop_iids(self, did: str) -> list[str]:
         """Return all readable prop iids for a device, derived from its spec."""
@@ -1407,7 +1643,34 @@ class MiotProxy:
         return result
 
     async def call_device_action(self, param: MIoTActionParam) -> dict:
-        """Call device action via MIoT cloud API."""
+        """Call a device action, preferring the local central hub.
+
+        Falls back to the cloud only when the local path is unreachable
+        (transport error / RPC timeout), never on a device-level rejection, so
+        an action is not executed twice.
+        """
+        ch = getattr(self.miot_client, "central_hub", None)
+        if ch and ch.enabled and self._local_reachable(ch, param.did):
+            try:
+                r = await ch.action_async(
+                    param.did, param.siid, param.aiid, param.in_
+                )
+                code = r.get("code") if isinstance(r, dict) else None
+                if code is not None and code not in _LOCAL_FALLBACK_CODES:
+                    return r
+                logger.info(
+                    "local action unreachable did=%s code=%s, fallback cloud",
+                    param.did,
+                    code,
+                )
+                self._note_local_failure(param.did)
+            except Exception as e:
+                logger.warning(
+                    "local action transport error did=%s, fallback cloud: %s",
+                    param.did,
+                    e,
+                )
+                self._note_local_failure(param.did)
         try:
             return await self.miot_client.http_client.action_async(param)
         except Exception as e:

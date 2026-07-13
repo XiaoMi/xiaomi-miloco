@@ -28,6 +28,7 @@ from .const import (
 )
 from .i18n import MIoTI18n
 from .lan import MIoTLan
+from .central_hub import CentralHubManager
 from .mips_cloud import MIoTMipsCloud
 from .network import MIoTNetwork
 from .types import (
@@ -125,6 +126,9 @@ class MIoTClient:
         lang: Optional[str] = None,
         oauth_info: Optional[MIoTOauthInfo | Dict] = None,
         cloud_server: Optional[str] = None,
+        central_hub_enabled: bool = True,
+        central_hub_gateways: Optional[list[tuple[str, int]]] = None,
+        central_hub_virtual_did: Optional[str] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         """MIoT Client init.
@@ -168,6 +172,19 @@ class MIoTClient:
         # mips_cloud state
         self._mips_cloud = None
         self._mips_user_sub_error = None
+        # Central hub gateway (local control) coordinator. Built lazily in
+        # _setup_mips_async once OAuth is done; stays None outside cn.
+        self._central_hub: Optional[CentralHubManager] = None
+        # Master switch: when False the central hub is never built (no cert /
+        # mDNS / gateway connection) and all control falls back to cloud.
+        self._central_hub_enabled = central_hub_enabled
+        # Optional static gateway endpoints [(host, port), ...] used in addition
+        # to mDNS discovery (for mDNS-isolated environments).
+        self._central_hub_gateways = list(central_hub_gateways or [])
+        # Optional injected virtual did (client identity). When absent the
+        # coordinator generates+persists its own (file-backed), keeping the SDK
+        # usable standalone.
+        self._central_hub_virtual_did = central_hub_virtual_did
         self._callback_user_bind = None
         self._callback_device_meta_changed = None
         self._callback_device_state_changed = None
@@ -232,6 +249,11 @@ class MIoTClient:
     def http_client(self) -> MIoTHttpClient:
         """HTTP client."""
         return self._http_client
+
+    @property
+    def central_hub(self) -> Optional[CentralHubManager]:
+        """Central hub gateway coordinator (None outside cn / before login)."""
+        return self._central_hub
 
     async def __on_lan_device_status_changed(
         self, did: str, info: MIoTLanDeviceInfo, ctx: Any = None
@@ -356,6 +378,14 @@ class MIoTClient:
         # cannot strand the instance in a half-torn-down state. A sub-client
         # may be None if init_async aborted before creating it.
         try:
+            # Central hub (LAN clients + mDNS + cert timer) first; independent
+            # of the cloud clients.
+            await _safe(
+                "central_hub",
+                lambda: (
+                    self._central_hub.deinit_async() if self._central_hub else None
+                ),
+            )
             # mips_cloud must be deinit-ed before oauth_client / http_client
             # so any in-flight subscribe futures see MipsConnectionError
             # rather than hanging on a closed http session.
@@ -424,6 +454,7 @@ class MIoTClient:
             self._callbacks_lan_device_status_changed = {}
             self._mips_cloud = None
             self._mips_user_sub_error = None
+            self._central_hub = None
             self._callback_user_bind = None
             self._callback_device_meta_changed = None
             self._callback_device_state_changed = None
@@ -772,6 +803,49 @@ class MIoTClient:
         """
         return self._mips_user_sub_error
 
+    async def _setup_central_hub_async(self) -> None:
+        """Build the central hub gateway coordinator once (idempotent, cn-only).
+
+        Requires storage (for cert/virtual-did persistence) and a resolved uid.
+        The manager is region-gated internally, so this is a cheap no-op outside
+        ``SUPPORT_CENTRAL_GATEWAY_CTRL``. Access-token rotation does not affect
+        the already-signed mTLS clients, so we only build it the first time.
+        """
+        # Never let central hub setup break the (independent) cloud MQTT setup.
+        try:
+            if not getattr(self, "_central_hub_enabled", True):
+                _LOGGER.info("central hub disabled by config; skipping setup")
+                return
+            if getattr(self, "_central_hub", None) is not None:
+                return
+            storage = getattr(self, "_storage", None)
+            http_client = getattr(self, "_http_client", None)
+            if not storage:
+                _LOGGER.info("central hub skipped: no cache_path / storage")
+                return
+            uid = (
+                self._oauth_info.user_info.uid
+                if self._oauth_info and self._oauth_info.user_info
+                else None
+            )
+            if not uid or not http_client:
+                return
+            manager = CentralHubManager(
+                storage=storage,
+                http_client=http_client,
+                uid=uid,
+                cloud_server=self._cloud_server,
+                static_gateways=getattr(self, "_central_hub_gateways", None),
+                virtual_did=getattr(self, "_central_hub_virtual_did", None),
+                loop=self._main_loop,
+            )
+            if not manager.enabled:
+                return
+            self._central_hub = manager
+            await manager.init_async()
+        except Exception as e:
+            _LOGGER.error("central hub setup failed: %s", e)
+
     async def _setup_mips_async(self) -> None:
         """Build (or rebuild) the mips_cloud client and attempt user-level subs.
 
@@ -790,6 +864,11 @@ class MIoTClient:
             # Should not happen — get_user_info_async populates user_info.
             _LOGGER.warning("mips setup skipped: no user uid")
             return
+
+        # Central hub gateway (LAN control) is independent of the cloud MQTT
+        # path — set it up first so a cloud-MQTT connect failure below does not
+        # disable local control. Idempotent + region-gated (no-op outside cn).
+        await self._setup_central_hub_async()
 
         # Tear down any pre-existing instance (re-OAuth scenario).
         if self._mips_cloud is not None:

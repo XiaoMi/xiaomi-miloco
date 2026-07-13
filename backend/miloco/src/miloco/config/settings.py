@@ -239,6 +239,20 @@ class MiotSettings(BaseModel):
     cloud_server: str = Field(
         default="cn", description="MIoT 云区域（cn/de/i2/ru/sg/us）"
     )
+    central_hub_enabled: bool = Field(
+        default=True,
+        description=(
+            "本地中枢网关总开关。false 时完全不启用本地中枢"
+            "（不签证书/不 mDNS/不连网关），设备控制全部走云端。"
+        ),
+    )
+    central_hub_gateways: list[str] = Field(
+        default_factory=list,
+        description=(
+            "静态中枢网关地址（mDNS 发现不到时用，如容器/跨网段隔离环境）。"
+            "每项为 'ip' 或 'ip:port'，端口缺省 8883。"
+        ),
+    )
 
 
 class NotifySettings(BaseModel):

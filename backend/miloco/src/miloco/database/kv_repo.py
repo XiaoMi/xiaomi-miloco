@@ -206,6 +206,9 @@ class AuthConfigKeys:
 class SystemConfigKeys:
     DEVICE_UUID_KEY = "DEVICE_UUID_KEY"
     PERCEPTION_ENABLED_KEY = "PERCEPTION_ENABLED_KEY"  # 用户「感知开关」意图（缺省=开）
+    # 本地中枢连接用的虚拟 did（客户端身份 / 证书 CN / 回复推送主题前缀）。
+    # 首次生成后持久化，跨重启稳定；由业务层读取并透传给 MIoT SDK。
+    MIOT_VIRTUAL_DID_KEY = "MIOT_VIRTUAL_DID_KEY"
 
 
 class DeviceInfoKeys:
