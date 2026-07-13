@@ -259,6 +259,7 @@ def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> Optio
         meta["jsonl_path"] = f"trace/agent/{dir_path.name}/{filename}"
         meta["started_at"] = state.started_at
         meta["done_at"] = _now_ms()
+        meta["duration_ms"] = meta["done_at"] - meta["started_at"]
         meta_path = dir_path / f"{run_id}__{_sanitize_filename(state.query)}.meta.json"
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         return meta["jsonl_path"]

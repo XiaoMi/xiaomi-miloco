@@ -73,6 +73,14 @@ _DELIVERY: dict[EventType, dict[str, Any]] = {
     "onboarding": {"resolve_target": "owner-channel", "deliver": True},
 }
 
+# send_turn profile 按事件类型映射，避免 suggestion/rule 后台事件背 full profile 的高 token 开销。
+_PROFILE: dict[EventType, str] = {
+    "interaction": "full",
+    "onboarding": "full",
+    "rule": "rule",
+    "suggestion": "suggestion",
+}
+
 
 @dataclass(eq=False)
 class _QueuedEvent:
@@ -293,13 +301,14 @@ class AgentDispatcher:
             delivery = _DELIVERY.get(event_type, {})
             adapter = get_adapter()
             try:
+                profile = _PROFILE.get(event_type, "full")
                 ctx_obj = TurnContext(
                     text=msg,
                     session_key=session_key,
                     lane=lane,
                     trace_id=trace_id,
                     wait_timeout_ms=wait_ms,
-                    profile="full",
+                    profile=profile,
                     extra={"delivery": delivery},
                 )
                 result = await adapter.send_turn(ctx_obj)

@@ -33,6 +33,7 @@ _CLI_TIMEOUT_SECONDS = 10.0
 _lock = threading.Lock()
 # 进程内缓存：{text, generated_at}。None 表示从未成功生成过。
 _cached: Optional[dict] = None
+_generating = False
 
 
 def _run_cli_catalog() -> Optional[str]:
@@ -67,25 +68,36 @@ def _run_cli_catalog() -> Optional[str]:
 def get_catalog() -> str:
     """拿到当前缓存中的目录文本，必要时刷新。失败返回空字符串。
 
-    线程安全：整段持锁——「判过期→跑 CLI→写缓存」原子化，防并发 TOCTOU 竞态。
+    线程安全：持锁判过期后置 _generating 标志、释放锁跑 CLI、再持锁写
+    缓存。同一时刻最多一个线程在生成，其它并发调用直接沿用旧缓存。
     """
-    global _cached
+    global _cached, _generating
+
     with _lock:
         now = time.monotonic()
         if _cached and now - _cached["generated_at"] < REGEN_THROTTLE_SECONDS:
             return _cached["text"]
-
-        text = _run_cli_catalog()
-        if text is None:
+        if _generating:
             return _cached["text"] if _cached else ""
+        _generating = True
 
-        _cached = {"text": text, "generated_at": now}
-    logger.info("device catalog refreshed (%d chars)", len(text))
-    return text
+    text = _run_cli_catalog()
+
+    with _lock:
+        if text is not None:
+            _cached = {"text": text, "generated_at": time.monotonic()}
+            logger.info("device catalog refreshed (%d chars)", len(text))
+        _generating = False
+
+    if text is not None:
+        return text
+    with _lock:
+        return _cached["text"] if _cached else ""
 
 
 def _reset_catalog_cache() -> None:
     """仅为测试 / hot-reload 之用：手动清缓存。"""
-    global _cached
+    global _cached, _generating
     with _lock:
         _cached = None
+        _generating = False

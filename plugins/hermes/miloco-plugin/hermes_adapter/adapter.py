@@ -155,14 +155,14 @@ def _resolve_owner_session() -> tuple[Optional[str], Optional[str]]:
 
 
 # hermes CLI 删除会话子进程。CLI 不在 PATH 或未知输出时保守返回 False。
-def _delete_hermes_session(session_id: str) -> bool:
+def _delete_hermes_session(session_id: str, timeout: float = 15.0) -> bool:
     hermes_bin = shutil.which("hermes")
     if not hermes_bin:
         return False
     try:
         proc = subprocess.run(
             [hermes_bin, "sessions", "delete", session_id, "--yes"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.TimeoutExpired, Exception):
         return False
@@ -248,18 +248,20 @@ class Adapter:
         # dispatcher 为 onboarding 等交互型事件塞了 {"resolve_target": "owner-channel", "deliver": True}
         # turn 用新会话让 LLM 干净评估，投递才用车主 IM 会话
         owner_platform = None
-        _deliver_to_owner = False
         if delivery.get("resolve_target") == "owner-channel":
             owner_session, owner_platform = _resolve_owner_session()
             if not owner_session:
                 return _result(run_id="", status="no-channel")
             # LLM turn 用新会话（不污染车主 IM 历史），投递才用 IM 会话
             session_id = None
-            _deliver_to_owner = True
         else:
-            # suggestion 每个事件独立评估，不用持久 session：
-            # 同 session 历史累积 190k+ tokens 会让 LLM 麻木，全部建议都沉默
-            session_id = _map_session(session_key, lane) if lane != "miloco-suggest" else None
+            # suggestion 每个事件独立评估，不用持久 session；
+            # 但需保留 miloco: 前缀让 trace hook 正常落盘。
+            import uuid as _uuid
+
+            session_id = _map_session(session_key, lane) if lane != "miloco-suggest" else (
+                f"{_map_session(session_key, lane)}:{_uuid.uuid4().hex[:8]}"
+            )
         timeout_s = max(wait_timeout_ms / 1000.0, 1.0) + _HTTP_BUFFER_S
 
         # 组装 messages: <system>(可选) + <user>
@@ -474,7 +476,7 @@ class Adapter:
             if session_id in seen:
                 continue
             seen.add(session_id)
-            ok = await loop.run_in_executor(None, _delete_hermes_session, session_id)
+            ok = await loop.run_in_executor(None, _delete_hermes_session, session_id, timeout)
             (reset if ok else failed).append(session_id)
         return {"reset": reset, "failed": failed}
 
@@ -536,7 +538,12 @@ def _deliver_response(resp: httpx.Response, platform: str) -> bool:
             proc.returncode, (proc.stderr or "")[:200],
         )
         return False
-    return True
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return False
+    # rc=0 不等于送达：hermes send 可能 rc=0 但 payload 表示软失败。
+    return bool(payload.get("success") is True or payload.get("ok") is True)
 
 
 # ---------------------------------------------------------------------------

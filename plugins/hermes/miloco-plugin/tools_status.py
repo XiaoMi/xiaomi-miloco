@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -35,11 +34,6 @@ EXPECTED_CRON_NAMES = (
     "miloco-home-dreaming",
     "miloco-habit-suggest",
 )
-
-# 默认 adapter 端口（与 OpenClaw webhook 默认 18789 对齐，与 install-hermes.sh 一致）
-_DEFAULT_ADAPTER_PORT = 18789
-_ADAPTER_HEALTH_TIMEOUT_S = 1.5
-
 
 # ---------------------------------------------------------------------------
 # 自检子项（每个独立 try/except，单项失败不影响其它）
@@ -79,26 +73,21 @@ def _check_state_json(ctx: Any) -> Dict[str, Any]:
 
 
 def _check_adapter_health() -> Dict[str, Any]:
-    """HTTP GET ``/health`` 探 adapter（端口默认 18789）。"""
-    port = int(os.environ.get("ADAPTER_PORT") or _DEFAULT_ADAPTER_PORT)
-    host = os.environ.get("ADAPTER_HOST") or "127.0.0.1"
-    url = f"http://{host}:{port}/health"
+    """检查 backend 侧 adapter 是否加载了非兜底实现。"""
     try:
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=_ADAPTER_HEALTH_TIMEOUT_S) as resp:
-            # urllib 返回 http.client.HTTPResponse，状态码字段是 .status（int），
-            # 不是 .status_code（那是 requests 库的命名）。之前写错会 AttributeError
-            # → except 兜底成 "adapter not ok" → 自检假阳性挂。
-            code = resp.status
-            ok = 200 <= code < 300
-            return {"ok": ok, "url": url, "status": code}
+        from miloco.agent_platform import get_adapter
+
+        adapter = get_adapter()
+        name = getattr(adapter, "name", "unknown")
+        if name == "webhook":
+            return {
+                "ok": False,
+                "error": "adapter 仍为 WebhookAdapter 兜底（插件未加载）",
+                "fix": "确认 agent.platform=hermes 已写入 config.json 并重跑 install-hermes.sh",
+            }
+        return {"ok": True, "adapter": name}
     except Exception as exc:  # noqa: BLE001
-        return {
-            "ok": False,
-            "url": url,
-            "error": f"{type(exc).__name__}: {exc}",
-            "fix": "miloco-cli service start（看 miloco-cli service logs）",
-        }
+        return {"ok": False, "error": str(exc)}
 
 
 def _check_cron_jobs() -> Dict[str, Any]:

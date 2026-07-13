@@ -282,7 +282,7 @@ def notify_owner(ctx: Any, message: str) -> Dict[str, Any]:
 
     target 解析顺序：
     1. state.json::deliver.target（显式配置，优先）
-    2. runtime fallback：``resolve_notify_target`` 扫 ~/.hermes/auth.json + config.yaml
+     2. runtime fallback：``resolve_notify_target`` 扫 channel_directory.json
     3. 没有 → needsBind=true，返回让 agent 调 miloco_notify_bind
 
     ``target == "all"`` → fanout：遍历 state.json::deliver.candidates 逐个

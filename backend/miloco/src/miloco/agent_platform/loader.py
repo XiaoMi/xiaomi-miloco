@@ -158,8 +158,12 @@ def load_adapter(adapter_name: Optional[str] = None) -> AgentPlatformAdapter:
 
 
 def get_adapter() -> AgentPlatformAdapter:
-    """获取 adapter。不再缓存——每次调用重新读 settings.agent.platform，
-    防 install-hermes.sh 写 config 后 adapter 缓存旧 WebhookAdapter 不更新。"""
+    """按 agent.platform 返回 adapter 单例（模块级缓存）。
+
+    首次调用后缓存实例，实例内状态（如 Hermes adapter 的 _pending_texts）
+    跨 send_turn / read_trace_meta 存活。运行时切换 agent.platform 需重启
+    backend 或调 reset_cache() 才生效——install-hermes.sh Step 7 已做重启。
+    """
     return load_adapter()
 
 

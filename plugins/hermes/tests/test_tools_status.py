@@ -414,95 +414,60 @@ def test_plugin_yaml_lists_all_5_tools():
 # ─── Issue 5: adapter_health 用 .status_code 而不是 .status ─────────────
 
 
-def test_adapter_health_source_uses_status_not_status_code():
-    """urllib 返回 http.client.HTTPResponse，状态码字段叫 .status（int），
-    不是 .status_code（requests 库的命名）。Source 必须用 .status。
-    之前写错：resp.status_code → AttributeError → except 兜底 → 自检假阳性 ✗。
-    """
-    from pathlib import Path as P
-    src = (P(__file__).resolve().parents[1] / "miloco-plugin" / "tools_status.py").read_text(encoding="utf-8")
-    # 找 _check_adapter_health 函数体
-    start = src.find("def _check_adapter_health")
-    assert start >= 0
-    # 切到下一个 def / class / 顶层 "def " 前
-    rest = src[start:]
-    body_end = rest.find("\ndef ")
-    body = rest[: body_end if body_end > 0 else len(rest)]
-    # 函数体内不能出现 .status_code（排除 docstring 注释里举例的字面量）
-    lines = [
-        ln for ln in body.splitlines()
-        if ".status_code" in ln and not ln.lstrip().startswith(("#", '"""', "'''"))
-    ]
-    assert not lines, (
-        f"_check_adapter_health 还在用 .status_code（urllib 没这个字段，AttributeError 假阳性挂）: {lines}"
-    )
-    # 必须用 .status（http.client.HTTPResponse 的真实字段名）
-    assert "resp.status" in body or ".status\n" in body, "_check_adapter_health 没读 .status"
+class _FakeAdapter:
+    def __init__(self, name: str) -> None:
+        self._name = name
+    @property
+    def name(self) -> str:
+        return self._name
 
 
-def test_adapter_health_reads_correct_status_field(monkeypatch):
-    """运行时验证：mock urllib 返回的对象带 .status（不是 .status_code）时，
-    _check_adapter_health 必须正确判 ok=True。"""
+def _install_mock_adapter_module(monkeypatch, get_adapter_fn):
+    """让 ``from miloco.agent_platform import get_adapter`` 可导入。"""
+    import sys
+    import types
 
-    class _FakeResp:
-        # 只实现 urllib 真实会用到的字段：status（int）
-        def __init__(self, code: int) -> None:
-            self.status = code
-        def read(self) -> bytes:
-            return b'{"status":"ok"}'
-        # 故意不实现 .status_code（模拟 http.client.HTTPResponse 的真实行为）
-        def __getattr__(self, name):
-            if name == "status_code":
-                raise AttributeError(
-                    "http.client.HTTPResponse 没有 .status_code 字段"
-                )
-            raise AttributeError(name)
+    ap = types.ModuleType("miloco.agent_platform")
+    ap.get_adapter = staticmethod(get_adapter_fn)
+    # 只 mock leaf module，不碰父包避免副作用
+    orig = sys.modules.get("miloco.agent_platform")
+    monkeypatch.setitem(sys.modules, "miloco.agent_platform", ap)
+    try:
+        # 已缓存的 import 可能导致旧符号残留，顺手清掉触发重 import
+        monkeypatch.delitem(sys.modules, "miloco.agent_platform", raising=False)
+    except KeyError:
+        pass
+    monkeypatch.setitem(sys.modules, "miloco.agent_platform", ap)
+    return orig
 
-    class _FakeUrlopen:
-        def __init__(self, code: int) -> None:
-            self._code = code
-        def __enter__(self): return _FakeResp(self._code)
-        def __exit__(self, *a): return False
 
-    def fake_urlopen(req, timeout=None):
-        return _FakeUrlopen(200)
-
-    monkeypatch.setattr(ts.urllib.request, "urlopen", fake_urlopen)
+def test_adapter_health_detects_hermes_adapter(monkeypatch):
+    """get_adapter 返回 hermes adapter → ok=True。"""
+    _install_mock_adapter_module(monkeypatch, lambda: _FakeAdapter("hermes"))
     out = ts._check_adapter_health()
-    assert out["ok"] is True, f"adapter /health 200 应该 ok=True，实际: {out}"
-    assert out["status"] == 200
+    assert out["ok"] is True
+    assert out["adapter"] == "hermes"
 
 
-def test_adapter_health_5xx_returns_ok_false(monkeypatch):
-    """/health 返 503 → ok=False（避免假阳性）。"""
-    class _FakeResp:
-        def __init__(self, code: int) -> None:
-            self.status = code
-        def read(self) -> bytes: return b""
-
-    class _FakeUrlopen:
-        def __init__(self, code: int) -> None:
-            self._code = code
-        def __enter__(self): return _FakeResp(self._code)
-        def __exit__(self, *a): return False
-
-    monkeypatch.setattr(ts.urllib.request, "urlopen", lambda req, timeout=None: _FakeUrlopen(503))
+def test_adapter_health_detects_webhook_fallback(monkeypatch):
+    """get_adapter 返回 webhook 兜底 → ok=False + fix 提示。"""
+    _install_mock_adapter_module(monkeypatch, lambda: _FakeAdapter("webhook"))
     out = ts._check_adapter_health()
     assert out["ok"] is False
-    assert out["status"] == 503
+    assert "WebhookAdapter" in out.get("error", "")
+    assert "fix" in out
 
 
-def test_adapter_health_connection_refused_returns_clear_error(monkeypatch):
-    """adapter 没启（连接拒绝）→ ok=False + 明确 fix 提示（不要被 AttributeError 吞掉）。"""
-    def fake_urlopen(req, timeout=None):
-        raise ConnectionRefusedError("Connection refused")
+def test_adapter_health_unknown_adapter_is_ok(monkeypatch):
+    """未知 adapter name → ok=True（作为绿色出厂配置放行）。"""
+    _install_mock_adapter_module(monkeypatch, lambda: _FakeAdapter("unknown"))
+    out = ts._check_adapter_health()
+    assert out["ok"] is True
 
-    monkeypatch.setattr(ts.urllib.request, "urlopen", fake_urlopen)
+
+def test_adapter_health_import_error_returns_false():
+    """miloco 不可导入 → ok=False + error 信息。"""
+    # 不做 mock → 函数内 import 就抛 ImportError，被 try/except 兜底。
     out = ts._check_adapter_health()
     assert out["ok"] is False
-    # 不要被 AttributeError 误报（之前的 bug 就是 AttributeError 被兜底成"not ok"，
-    # 用户看不到真实原因）
-    assert "AttributeError" not in out.get("error", ""), (
-        f"adapter /health 失败不应是 AttributeError（之前 .status_code bug 会导致这个）: {out}"
-    )
-    assert "miloco-cli service start" in out.get("fix", "")
+    assert "error" in out
