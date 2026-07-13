@@ -31,7 +31,9 @@ from .lan import MIoTLan
 from .central_hub import CentralHubManager
 from .mips_cloud import MIoTMipsCloud
 from .network import MIoTNetwork
+from .error import MIoTErrorCode
 from .types import (
+    MIoTActionParam,
     MIoTAppNotify,
     MIoTCameraExtraInfo,
     MIoTCameraInfo,
@@ -39,11 +41,13 @@ from .types import (
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
+    MIoTGetPropertyParam,
     MIoTHomeInfo,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
     MIoTOauthInfo,
     MIoTSceneChangedEvent,
+    MIoTSetPropertyParam,
     MIoTUserInfo,
     MipsConnectionError,
     MipsSubscribeRejectedError,
@@ -51,6 +55,21 @@ from .types import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Local (central hub) result codes that mean "the local path did not work" —
+# fall back to cloud. Transport/RPC-layer failures, NOT device-level rejections
+# (a real device error is returned as-is, never re-run on cloud, to avoid double
+# execution).
+_LOCAL_FALLBACK_CODES = frozenset(
+    {
+        MIoTErrorCode.CODE_TIMEOUT.value,  # -10006 (rpc reply timeout)
+        MIoTErrorCode.CODE_INTERNAL_ERROR.value,  # -10004
+        MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,  # -10040
+        MIoTErrorCode.CODE_UNAVAILABLE.value,  # -10001
+    }
+)
+# Local set_properties success codes.
+_LOCAL_SET_OK_CODES = frozenset({0, 1})
 
 
 class MIoTClient:
@@ -254,6 +273,163 @@ class MIoTClient:
     def central_hub(self) -> Optional[CentralHubManager]:
         """Central hub gateway coordinator (None outside cn / before login)."""
         return self._central_hub
+
+    # ---------------------------------------------------------- control routing
+    # Unified device control that auto-routes per-did: prefer the local central
+    # hub when the device is locally controllable, fall back to cloud only on a
+    # transport failure (never on a device-level rejection, to avoid executing
+    # an operation twice). Result shape matches the cloud API so callers are
+    # transport-agnostic.
+
+    async def set_props_async(
+        self, params: list[MIoTSetPropertyParam]
+    ) -> list:
+        """Set device properties, local-preferred with cloud fallback."""
+        ch = self._central_hub
+        if not ch or not ch.enabled:
+            return await self._http_client.set_props_async(params)
+
+        results: list = [None] * len(params)
+        cloud_idx: list[int] = []
+        for i, p in enumerate(params):
+            if not ch.local_control_ready(p.did):
+                cloud_idx.append(i)
+                continue
+            try:
+                r = await ch.set_prop_async(p.did, p.siid, p.piid, p.value)
+            except Exception as e:
+                _LOGGER.warning(
+                    "local set_prop transport error did=%s, fallback cloud: %s",
+                    p.did,
+                    e,
+                )
+                ch.note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            code = r.get("code") if isinstance(r, dict) else None
+            if code is None or code in _LOCAL_FALLBACK_CODES:
+                _LOGGER.info(
+                    "local set_prop unreachable did=%s code=%s, fallback cloud",
+                    p.did,
+                    code,
+                )
+                ch.note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            results[i] = {
+                "did": p.did,
+                "siid": p.siid,
+                "piid": p.piid,
+                "code": 0 if code in _LOCAL_SET_OK_CODES else code,
+            }
+
+        if cloud_idx:
+            cloud_res = await self._http_client.set_props_async(
+                [params[i] for i in cloud_idx]
+            )
+            for j, i in enumerate(cloud_idx):
+                results[i] = (
+                    cloud_res[j]
+                    if j < len(cloud_res)
+                    else {
+                        "did": params[i].did,
+                        "siid": params[i].siid,
+                        "piid": params[i].piid,
+                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+                    }
+                )
+        return results
+
+    async def get_props_async(
+        self, params: list[MIoTGetPropertyParam]
+    ) -> list:
+        """Get device properties, local-preferred with cloud fallback."""
+        ch = self._central_hub
+        if not ch or not ch.enabled:
+            return await self._http_client.get_props_async(params)
+
+        results: list = [None] * len(params)
+        cloud_idx: list[int] = []
+        for i, p in enumerate(params):
+            if not ch.local_control_ready(p.did):
+                cloud_idx.append(i)
+                continue
+            try:
+                value = await ch.get_prop_async(p.did, p.siid, p.piid)
+            except Exception as e:
+                _LOGGER.warning(
+                    "local get_prop transport error did=%s, fallback cloud: %s",
+                    p.did,
+                    e,
+                )
+                ch.note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            if value is None:
+                # Local RPC timed out / device unreachable — cool down the did
+                # and read from cloud.
+                ch.note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            results[i] = {
+                "did": p.did,
+                "siid": p.siid,
+                "piid": p.piid,
+                "value": value,
+                "code": 0,
+            }
+
+        if cloud_idx:
+            cloud_res = await self._http_client.get_props_async(
+                [params[i] for i in cloud_idx]
+            )
+            for j, i in enumerate(cloud_idx):
+                results[i] = (
+                    cloud_res[j]
+                    if j < len(cloud_res)
+                    else {
+                        "did": params[i].did,
+                        "siid": params[i].siid,
+                        "piid": params[i].piid,
+                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+                    }
+                )
+        return results
+
+    async def action_async(self, param: MIoTActionParam) -> dict:
+        """Call a device action, local-preferred with cloud fallback.
+
+        Falls back to cloud only when the local path is unreachable (transport
+        error / RPC timeout), never on a device-level rejection, so an action is
+        not executed twice.
+        """
+        ch = self._central_hub
+        if ch and ch.enabled and ch.local_control_ready(param.did):
+            try:
+                r = await ch.action_async(
+                    param.did, param.siid, param.aiid, param.in_
+                )
+                code = r.get("code") if isinstance(r, dict) else None
+                if code is not None and code not in _LOCAL_FALLBACK_CODES:
+                    return r
+                _LOGGER.info(
+                    "local action unreachable did=%s code=%s, fallback cloud",
+                    param.did,
+                    code,
+                )
+                ch.note_local_failure(param.did)
+            except Exception as e:
+                _LOGGER.warning(
+                    "local action transport error did=%s, fallback cloud: %s",
+                    param.did,
+                    e,
+                )
+                ch.note_local_failure(param.did)
+        try:
+            return await self._http_client.action_async(param)
+        except Exception as e:
+            _LOGGER.error("Failed to call device action: %s", e)
+            raise
 
     async def __on_lan_device_status_changed(
         self, did: str, info: MIoTLanDeviceInfo, ctx: Any = None

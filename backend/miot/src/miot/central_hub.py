@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from typing import Any, Callable, Coroutine, Optional
 
 from .cert import MIoTCert
@@ -45,6 +46,11 @@ _LOGGER = logging.getLogger(__name__)
 # Storage location of the persistent per-instance virtual did.
 _VIRTUAL_DID_DOMAIN = "cert"
 _VIRTUAL_DID_NAME = "virtual_did.txt"
+
+# After a local RPC for a did fails/times out, skip the local path for that did
+# for this long and route straight to cloud. Bounds a flaky device to one
+# timeout per window instead of N; self-heals when the window lapses.
+_LOCAL_COOLDOWN_SEC = 30.0
 
 # Callback: (added_dids, removed_dids) -> awaitable. Fires after the device
 # table changes (gateway discovered, devListChange, getDevList refresh).
@@ -85,6 +91,9 @@ class CentralHubManager:
         self._virtual_did: Optional[str] = None
         self._refresh_cert_timer: Optional[asyncio.TimerHandle] = None
 
+        # did -> monotonic expiry: local path skipped (route cloud) for a did
+        # whose recent local RPC failed/timed out, until the window lapses.
+        self._local_cooldown: dict[str, float] = {}
         # group_id -> live local MQTT client
         self._clients: dict[str, MipsLocalClient] = {}
         # did -> {group_id, online, specv2_access, push_available}
@@ -206,6 +215,27 @@ class CentralHubManager:
             return False
         client = self._clients.get(info["group_id"])
         return bool(client and client.is_connected)
+
+    def local_control_ready(self, did: str) -> bool:
+        """``can_control`` AND not in a recent local-failure cooldown.
+
+        The routing layer uses this instead of ``can_control`` so a device that
+        is nominally controllable but currently unreachable does not make every
+        call pay the full local RPC timeout — after one failure it is routed to
+        cloud for a window, then retried.
+        """
+        if not self.can_control(did):
+            return False
+        expiry = self._local_cooldown.get(did)
+        if expiry is not None:
+            if time.monotonic() < expiry:
+                return False
+            del self._local_cooldown[did]  # window lapsed — allow local again
+        return True
+
+    def note_local_failure(self, did: str) -> None:
+        """Mark a did's local path as failed; route it to cloud for a window."""
+        self._local_cooldown[did] = time.monotonic() + _LOCAL_COOLDOWN_SEC
 
     async def set_prop_async(self, did: str, siid: int, piid: int, value: Any) -> dict:
         return await self.__client_for(did).set_prop_async(did, siid, piid, value)

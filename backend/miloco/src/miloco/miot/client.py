@@ -17,7 +17,6 @@ from av.audio.frame import AudioFrame
 from av.video.frame import VideoFrame
 from miot.camera import MIoTCameraInstance
 from miot.client import MIoTClient
-from miot.error import MIoTErrorCode
 from miot.spec import MIoTSpecTypeLevel
 from miot.types import (
     MIoTActionParam,
@@ -58,30 +57,6 @@ from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
-
-# Local (central hub) result codes that mean "the local path did not work" —
-# fall back to cloud. These are transport/RPC-layer failures, NOT device-level
-# rejections (a real device error is returned as-is, never re-run on cloud, to
-# avoid double execution).
-_LOCAL_FALLBACK_CODES = frozenset(
-    {
-        MIoTErrorCode.CODE_TIMEOUT.value,  # -10006 (rpc reply timeout)
-        MIoTErrorCode.CODE_INTERNAL_ERROR.value,  # -10004
-        MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,  # -10040
-        MIoTErrorCode.CODE_UNAVAILABLE.value,  # -10001
-    }
-)
-# Local set_properties success codes (mirrors the Xiaomi Home integration).
-_LOCAL_SET_OK_CODES = frozenset({0, 1})
-
-# After a local RPC for a did fails/times out, skip the local path for that did
-# for this long and route straight to cloud. Without this, a device that is
-# "online" in the gateway device table but actually unreachable (e.g. a flaky
-# WiFi plug) makes every property in a batch wait the full local RPC timeout
-# serially — an N-prop read becomes N × timeout, blowing the caller's deadline.
-# The cooldown bounds that to one timeout per did per window; it self-heals when
-# the window lapses. Kept in the business layer next to the fallback policy.
-_LOCAL_COOLDOWN_SEC = 30.0
 
 
 def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
@@ -147,11 +122,6 @@ class MiotProxy:
         self._cloud_server = cloud_server
 
         self._miot_client: MIoTClient = None  # type: ignore
-
-        # did -> monotonic expiry: local control path is skipped (route cloud)
-        # for a did whose recent local RPC failed/timed out, until the window
-        # lapses. See _LOCAL_COOLDOWN_SEC.
-        self._local_cooldown: dict[str, float] = {}
 
         _settings = get_settings()
         self._frame_interval: int = _settings.camera.frame_interval
@@ -1361,150 +1331,16 @@ class MiotProxy:
                 logger.error("Scheduled token refresh task exception: %s", e)
                 await asyncio.sleep(60)  # Wait 1 minute after error before continuing
 
-    def _local_reachable(self, ch, did: str) -> bool:
-        """True if this did should try the local path now.
-
-        Combines the central hub's own predicate with a short per-did failure
-        cooldown so a device that is nominally controllable but currently
-        unreachable does not make every call pay the full local RPC timeout.
-        """
-        if not ch.can_control(did):
-            return False
-        expiry = self._local_cooldown.get(did)
-        if expiry is not None:
-            if time.monotonic() < expiry:
-                return False
-            del self._local_cooldown[did]  # window lapsed — allow local again
-        return True
-
-    def _note_local_failure(self, did: str) -> None:
-        """Mark a did's local path as failed; route it to cloud for a window."""
-        self._local_cooldown[did] = time.monotonic() + _LOCAL_COOLDOWN_SEC
-
     async def set_device_properties(self, params: list[MIoTSetPropertyParam]) -> list:
-        """Set device properties, preferring the local central hub per-did.
-
-        Each param whose did is locally controllable goes to the gateway; any
-        param that isn't, or whose local RPC fails at the transport layer, is
-        batched to the cloud HTTP API. The returned list preserves input order
-        and matches the cloud shape (``{did, siid, piid, code}``).
-        """
-        ch = getattr(self.miot_client, "central_hub", None)
-        if not ch or not ch.enabled:
-            return await self.miot_client.http_client.set_props_async(params)
-
-        results: list = [None] * len(params)
-        cloud_idx: list[int] = []
-        for i, p in enumerate(params):
-            if not self._local_reachable(ch, p.did):
-                cloud_idx.append(i)
-                continue
-            try:
-                r = await ch.set_prop_async(p.did, p.siid, p.piid, p.value)
-            except Exception as e:
-                logger.warning(
-                    "local set_prop transport error did=%s, fallback cloud: %s",
-                    p.did,
-                    e,
-                )
-                self._note_local_failure(p.did)
-                cloud_idx.append(i)
-                continue
-            code = r.get("code") if isinstance(r, dict) else None
-            if code is None or code in _LOCAL_FALLBACK_CODES:
-                logger.info(
-                    "local set_prop unreachable did=%s code=%s, fallback cloud",
-                    p.did,
-                    code,
-                )
-                self._note_local_failure(p.did)
-                cloud_idx.append(i)
-                continue
-            results[i] = {
-                "did": p.did,
-                "siid": p.siid,
-                "piid": p.piid,
-                "code": 0 if code in _LOCAL_SET_OK_CODES else code,
-            }
-
-        if cloud_idx:
-            cloud_res = await self.miot_client.http_client.set_props_async(
-                [params[i] for i in cloud_idx]
-            )
-            for j, i in enumerate(cloud_idx):
-                results[i] = (
-                    cloud_res[j]
-                    if j < len(cloud_res)
-                    else {
-                        "did": params[i].did,
-                        "siid": params[i].siid,
-                        "piid": params[i].piid,
-                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
-                    }
-                )
-        return results
+        """Set device properties. Local-vs-cloud routing (prefer local, fall
+        back to cloud on transport failure) lives in the SDK
+        (:meth:`MIoTClient.set_props_async`); this is a thin delegate."""
+        return await self.miot_client.set_props_async(params)
 
     async def get_device_properties(self, params: list[MIoTGetPropertyParam]) -> list:
-        """Get device properties, preferring the local central hub per-did.
-
-        Mirrors :meth:`set_device_properties`: locally-reachable dids read from
-        the gateway, the rest (and any local read that returns no value) are
-        batched to the cloud. Result shape matches cloud
-        (``{did, siid, piid, value, code}``).
-        """
-        ch = getattr(self.miot_client, "central_hub", None)
-        if not ch or not ch.enabled:
-            return await self.miot_client.http_client.get_props_async(params)
-
-        results: list = [None] * len(params)
-        cloud_idx: list[int] = []
-        for i, p in enumerate(params):
-            if not self._local_reachable(ch, p.did):
-                cloud_idx.append(i)
-                continue
-            try:
-                value = await ch.get_prop_async(p.did, p.siid, p.piid)
-            except Exception as e:
-                logger.warning(
-                    "local get_prop transport error did=%s, fallback cloud: %s",
-                    p.did,
-                    e,
-                )
-                self._note_local_failure(p.did)
-                cloud_idx.append(i)
-                continue
-            if value is None:
-                # No value returned — the local RPC timed out or the device is
-                # unreachable. Cool the did down so the rest of this batch (and
-                # subsequent calls) skip local instead of each waiting the full
-                # timeout, then read from cloud.
-                self._note_local_failure(p.did)
-                cloud_idx.append(i)
-                continue
-            results[i] = {
-                "did": p.did,
-                "siid": p.siid,
-                "piid": p.piid,
-                "value": value,
-                "code": 0,
-            }
-
-        if cloud_idx:
-            cloud_res = await self.miot_client.http_client.get_props_async(
-                [params[i] for i in cloud_idx]
-            )
-            for j, i in enumerate(cloud_idx):
-                results[i] = (
-                    cloud_res[j]
-                    if j < len(cloud_res)
-                    else {
-                        "did": params[i].did,
-                        "siid": params[i].siid,
-                        "piid": params[i].piid,
-                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
-                    }
-                )
-        return results
+        """Get device properties. Local-vs-cloud routing lives in the SDK
+        (:meth:`MIoTClient.get_props_async`); this is a thin delegate."""
+        return await self.miot_client.get_props_async(params)
 
     async def get_readable_prop_iids(self, did: str) -> list[str]:
         """Return all readable prop iids for a device, derived from its spec."""
@@ -1643,39 +1479,11 @@ class MiotProxy:
         return result
 
     async def call_device_action(self, param: MIoTActionParam) -> dict:
-        """Call a device action, preferring the local central hub.
-
-        Falls back to the cloud only when the local path is unreachable
-        (transport error / RPC timeout), never on a device-level rejection, so
-        an action is not executed twice.
-        """
-        ch = getattr(self.miot_client, "central_hub", None)
-        if ch and ch.enabled and self._local_reachable(ch, param.did):
-            try:
-                r = await ch.action_async(
-                    param.did, param.siid, param.aiid, param.in_
-                )
-                code = r.get("code") if isinstance(r, dict) else None
-                if code is not None and code not in _LOCAL_FALLBACK_CODES:
-                    return r
-                logger.info(
-                    "local action unreachable did=%s code=%s, fallback cloud",
-                    param.did,
-                    code,
-                )
-                self._note_local_failure(param.did)
-            except Exception as e:
-                logger.warning(
-                    "local action transport error did=%s, fallback cloud: %s",
-                    param.did,
-                    e,
-                )
-                self._note_local_failure(param.did)
-        try:
-            return await self.miot_client.http_client.action_async(param)
-        except Exception as e:
-            logger.error("Failed to call device action: %s", e)
-            raise
+        """Call a device action. Local-vs-cloud routing (fall back to cloud only
+        on transport failure, never on a device-level rejection, so an action is
+        not executed twice) lives in the SDK (:meth:`MIoTClient.action_async`);
+        this is a thin delegate."""
+        return await self.miot_client.action_async(param)
 
     async def get_home_info_data(self) -> dict:
         """Build home info dict for CLI cache, including spec data fetched via spec_parser."""
