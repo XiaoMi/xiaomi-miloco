@@ -1,6 +1,6 @@
 {
   "settings": {
-    "title": "Perception Settings",
+    "title": "Settings",
     "videoShortEdge": "Resolution",
     "videoShortEdgeHint": "Short edge pixels, keeps aspect ratio",
     "omniFps": "Frame Rate",
@@ -13,6 +13,8 @@
     "saveFailed": "Save failed",
     "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
     "loadFailed": "Failed to load settings",
-    "resetDefaults": "Restore Defaults"
+    "resetDefaults": "Restore Defaults",
+    "autoSchedule": "Auto scheduled tasks",
+    "autoScheduleHint": "When on, miloco auto-creates and maintains its built-in scheduled tasks (perception digest / home patrol / memory dreaming / habit insights). When off, those tasks are removed and not recreated, and tasks you delete manually stay deleted. Takes effect after the next openclaw gateway restart."
   }
 }

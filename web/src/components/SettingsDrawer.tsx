@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   getPerceptionConfig,
+  getSchedulerConfig,
   updatePerceptionConfig,
+  updateSchedulerConfig,
   type PerceptionConfig,
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
@@ -31,36 +33,66 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [omniFps, setOmniFps] = useState(DEFAULTS.omni_fps);
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
 
+  // 内置定时任务自动管理开关（scheduler.enabled）。缺省 true = 自动管理。
+  const [schedulerLoaded, setSchedulerLoaded] = useState<boolean | null>(null);
+  const [schedulerEnabled, setSchedulerEnabled] = useState(true);
+
   useEscClose(open, onClose);
 
   useEffect(() => {
     if (!open) return;
     setLoading(true);
-    getPerceptionConfig()
-      .then((c) => {
-        setConfig(c);
-        setVideoShortEdge(c.video_short_edge);
-        setOmniFps(c.omni_fps);
-        setWindowSize(c.window_size);
-      })
+    Promise.all([
+      getPerceptionConfig()
+        .then((c) => {
+          setConfig(c);
+          setVideoShortEdge(c.video_short_edge);
+          setOmniFps(c.omni_fps);
+          setWindowSize(c.window_size);
+        }),
+      getSchedulerConfig()
+        .then((s) => {
+          setSchedulerLoaded(s.enabled);
+          setSchedulerEnabled(s.enabled);
+        }),
+    ])
       .catch(() => toast(t("settings.loadFailed"), "danger"))
       .finally(() => setLoading(false));
   }, [open, t]);
 
+  const perceptionDirty =
+    config != null &&
+    (videoShortEdge !== config.video_short_edge ||
+      omniFps !== config.omni_fps ||
+      windowSize !== config.window_size);
+  const schedulerDirty =
+    schedulerLoaded != null && schedulerEnabled !== schedulerLoaded;
+
   async function handleSaveAndRestart() {
     setBusy(true);
     try {
+      // scheduler 开关仅写盘 config.json（openclaw 网关下次启动读取生效），
+      // 与感知参数各自独立 PUT——只在各自变更时提交，避免仅改开关却重启引擎。
+      if (schedulerDirty) {
+        const s = await updateSchedulerConfig({ enabled: schedulerEnabled });
+        setSchedulerLoaded(s.enabled);
+        setSchedulerEnabled(s.enabled);
+      }
       // PUT 后端会同步写 config + 重启引擎使参数生效，前端不再单独 pause/resume。
       // config 写盘不可回滚：写盘成功但重启失败时后端返回 restart_ok=false（非报错），
       // 此时提示「已保存但需手动重启」而非「保存失败」，避免误导用户以为改动丢失。
-      const updated = await updatePerceptionConfig({
-        video_short_edge: videoShortEdge,
-        omni_fps: omniFps,
-        window_size: windowSize,
-      });
-      setConfig(updated);
-      if (updated.restart_ok === false) {
-        toast(t("settings.restartFailed"), "warn");
+      if (perceptionDirty) {
+        const updated = await updatePerceptionConfig({
+          video_short_edge: videoShortEdge,
+          omni_fps: omniFps,
+          window_size: windowSize,
+        });
+        setConfig(updated);
+        if (updated.restart_ok === false) {
+          toast(t("settings.restartFailed"), "warn");
+        } else {
+          toast(t("settings.applySuccess"), "ok");
+        }
       } else {
         toast(t("settings.applySuccess"), "ok");
       }
@@ -76,13 +108,10 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setVideoShortEdge(DEFAULTS.video_short_edge);
     setOmniFps(DEFAULTS.omni_fps);
     setWindowSize(DEFAULTS.window_size);
+    setSchedulerEnabled(true);
   }
 
-  const dirty =
-    config != null &&
-    (videoShortEdge !== config.video_short_edge ||
-      omniFps !== config.omni_fps ||
-      windowSize !== config.window_size);
+  const dirty = perceptionDirty || schedulerDirty;
 
   if (!open) return null;
 
@@ -195,6 +224,33 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   <span>{WINDOW_MIN} {t("settings.windowSizeUnit")}</span>
                   <span>{WINDOW_MAX} {t("settings.windowSizeUnit")}</span>
                 </div>
+              </div>
+
+              {/* 内置定时任务自动管理开关 */}
+              <div className="space-y-2.5 pt-1 border-t border-border">
+                <div className="flex items-center justify-between pt-5">
+                  <label className="text-body font-medium text-text-primary">
+                    {t("settings.autoSchedule")}
+                  </label>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={schedulerEnabled}
+                    onClick={() => setSchedulerEnabled((v) => !v)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      schedulerEnabled ? "bg-brand-primary" : "bg-border"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
+                        schedulerEnabled ? "translate-x-[22px]" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+                <p className="text-caption text-text-tertiary">
+                  {t("settings.autoScheduleHint")}
+                </p>
               </div>
 
               {/* 恢复默认 */}

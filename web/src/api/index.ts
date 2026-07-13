@@ -568,3 +568,27 @@ export async function updatePerceptionConfig(
   );
   return r.data;
 }
+
+// ─── Scheduler Config（内置定时任务自动管理开关）──────────────────────────
+
+export interface SchedulerConfig {
+  enabled: boolean;
+}
+
+export async function getSchedulerConfig(): Promise<SchedulerConfig> {
+  const r = await apiFetch<{ code: number; data: SchedulerConfig }>(
+    "/api/admin/scheduler-config",
+  );
+  return r.data;
+}
+
+// 写盘 config.json；实际生效方是 openclaw 插件，故改动在 openclaw 网关下次重启后生效。
+export async function updateSchedulerConfig(
+  input: SchedulerConfig,
+): Promise<SchedulerConfig> {
+  const r = await apiFetch<{ code: number; data: SchedulerConfig }>(
+    "/api/admin/scheduler-config",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+  return r.data;
+}
