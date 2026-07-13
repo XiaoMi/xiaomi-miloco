@@ -6,21 +6,16 @@
  *    miloco 插件的 Agent（如 OpenClaw）接线），点开弹窗引导用户与 Agent 对话创建，
  *    并给示例话术一键复制。
  *  - 任务行：描述 + 进度摘要 + 启停开关；整行点击打开详情抽屉。
- *  - 详情抽屉：拉 GET /api/tasks/{id} 全量视图。驱动规则在前（触发条件 / 执行动作
- *    结构化展示），进度可视化（进度条 / 计时 / 计数），创建时间作次要信息。支持就地
- *    编辑任务描述与删除；规则与推送由 Agent 管理，此处只读。
+ *  - 详情抽屉：复用列表已加载的 summary 数据（含驱动规则 / 关联 / 进度），无需再拉
+ *    单条全量视图。驱动规则在前（触发条件 / 执行动作结构化展示），进度可视化（进度条 /
+ *    计时 / 计数），创建时间作次要信息。支持就地编辑任务描述与删除；规则与推送由 Agent
+ *    管理，此处只读。
  */
 
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  deleteTask,
-  getTask,
-  setTaskEnabled,
-  updateTaskDescription,
-} from "@/api";
-import { useAsync } from "@/hooks/useAsync";
+import { deleteTask, setTaskEnabled, updateTaskDescription } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
@@ -255,7 +250,6 @@ function TaskDetailSheet({
   onChanged: () => void;
 }) {
   const { t } = useTranslation();
-  const full = useAsync(() => getTask(task.taskId), [task.taskId]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.description);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -368,17 +362,9 @@ function TaskDetailSheet({
         {/* 主体：驱动规则在前 → 进度 → 创建时间（次要） */}
         <div className="px-5 py-5 overflow-y-auto space-y-6">
           <Section title={t("tasks.rulesTitle")}>
-            {full.loading && !full.data ? (
-              <div className="text-caption text-text-tertiary">
-                {t("tasks.detailLoading")}
-              </div>
-            ) : full.error ? (
-              <div className="text-caption text-error">
-                {t("tasks.detailLoadFail")}
-              </div>
-            ) : full.data && full.data.ruleBriefs.length > 0 ? (
+            {task.ruleBriefs.length > 0 ? (
               <div className="space-y-3">
-                {full.data.ruleBriefs.map((r) => {
+                {task.ruleBriefs.map((r) => {
                   const actions = splitActions(r.actionsDesc);
                   return (
                     <div

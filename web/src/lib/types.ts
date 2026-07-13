@@ -587,18 +587,9 @@ export interface TaskRecordSummary {
   derived: Record<string, unknown>;
 }
 
-export interface Task {
-  taskId: string;
-  description: string;
-  status: TaskStatus;
-  createdAt: string;
-  record: TaskRecordSummary | null;
-}
-
-// ── 任务全量视图（GET /api/tasks/{task_id}）─────────────────────
-// summary 视图不含驱动规则/关联；详情抽屉额外拉这个补齐「有价值的详情」。
-// 注意：full view **不含** record（record 只在 summary 接口返回），详情卡的进度
-// 直接复用列表已加载的 Task.record，full view 只补 ruleBriefs / links。
+// 驱动规则摘要 / 关联：后端 summary 接口（GET /api/tasks/summary）返回的
+// TaskSummaryView 继承 TaskFullView，本就带 rule_briefs / links，故随列表一并
+// 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 export interface TaskRuleBrief {
   ruleId: string;
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
@@ -612,12 +603,15 @@ export interface TaskLinkEntry {
   ref: string;
 }
 
-export interface TaskFullView {
+// 任务视图 = 基础字段 + record 进度摘要 + 驱动规则/关联，一次 summary 请求全拿到。
+export interface Task {
   taskId: string;
   description: string;
   status: TaskStatus;
-  pausedAt?: string | null;
+  pausedAt: string | null;
   createdAt: string;
+  record: TaskRecordSummary | null;
+  // 详情抽屉「有价值的详情」：驱动规则与关联，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
   links: TaskLinkEntry[];
 }

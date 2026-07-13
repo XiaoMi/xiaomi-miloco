@@ -24,7 +24,6 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
-  TaskFullView,
   TokenBreakdown,
   UsageCallType,
   UsageGroup,
@@ -1514,11 +1513,21 @@ async function fetchUsageStats(
 // ── 任务（task）─────────────────────────────────────────────
 // summary 视图 = task 基础字段 + record 进度摘要（window=day：progress 走 snapshot，
 // duration/event 走今日累计）。derived 形态按 kind 多态，原样透传给 UI 自行解读。
+// TaskSummaryView 继承 TaskFullView，除基础字段 + record 外，本就带驱动规则
+// （rule_briefs）/ 关联（links）/ paused_at；一并映射，详情抽屉直接复用列表数据，
+// 不再单独拉 GET /api/tasks/{id}。
 interface BackendTaskSummary {
   task_id: string;
   description: string;
   status: "active" | "paused";
+  paused_at?: string | null;
   created_at: string;
+  rule_briefs?: {
+    rule_id: string;
+    query: string;
+    actions_desc?: string[];
+  }[];
+  links?: { kind: "rule" | "cron"; ref: string }[];
   record: {
     kind: "progress" | "duration" | "event";
     completed: boolean;
@@ -1536,7 +1545,14 @@ export async function realListTasks(): Promise<Task[]> {
     taskId: t.task_id,
     description: t.description,
     status: t.status,
+    pausedAt: t.paused_at ?? null,
     createdAt: t.created_at,
+    ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
+      ruleId: b.rule_id,
+      query: b.query,
+      actionsDesc: b.actions_desc ?? [],
+    })),
+    links: (t.links ?? []).map((l) => ({ kind: l.kind, ref: l.ref })),
     record: t.record
       ? {
           kind: t.record.kind,
@@ -1575,41 +1591,6 @@ export async function realDeleteTask(taskId: string): Promise<void> {
     `/api/tasks/${encodeURIComponent(taskId)}?reason=abandoned`,
     { method: "DELETE" },
   );
-}
-
-// 任务全量视图：详情抽屉用，补 summary 没有的驱动规则 / 关联。
-interface BackendTaskFullView {
-  task_id: string;
-  description: string;
-  status: "active" | "paused";
-  paused_at?: string | null;
-  created_at: string;
-  rule_briefs?: {
-    rule_id: string;
-    query: string;
-    actions_desc?: string[];
-  }[];
-  links?: { kind: "rule" | "cron"; ref: string }[];
-}
-
-export async function realGetTask(taskId: string): Promise<TaskFullView> {
-  const r = await apiFetch<Normal<BackendTaskFullView>>(
-    `/api/tasks/${encodeURIComponent(taskId)}`,
-  );
-  const d = r.data;
-  return {
-    taskId: d.task_id,
-    description: d.description,
-    status: d.status,
-    pausedAt: d.paused_at ?? null,
-    createdAt: d.created_at,
-    ruleBriefs: (d.rule_briefs ?? []).map((b) => ({
-      ruleId: b.rule_id,
-      query: b.query,
-      actionsDesc: b.actions_desc ?? [],
-    })),
-    links: (d.links ?? []).map((l) => ({ kind: l.kind, ref: l.ref })),
-  };
 }
 
 // 改任务描述（PATCH /api/tasks/{id}）。

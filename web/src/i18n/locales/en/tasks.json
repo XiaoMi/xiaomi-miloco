@@ -27,8 +27,6 @@
     "unitTimes": "times",
     "windowRemaining": "{{display}} left until today's reset",
     "detailTitle": "Task details",
-    "detailLoading": "Loading details…",
-    "detailLoadFail": "Couldn't load details",
     "createdLabel": "Created",
     "progressLabel": "Progress",
     "rulesTitle": "Driving rules",

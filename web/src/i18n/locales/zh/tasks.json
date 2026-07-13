@@ -27,8 +27,6 @@
     "unitTimes": "次",
     "windowRemaining": "距今日结算还剩 {{display}}",
     "detailTitle": "任务详情",
-    "detailLoading": "加载详情中…",
-    "detailLoadFail": "详情加载失败",
     "createdLabel": "创建于",
     "progressLabel": "进度",
     "rulesTitle": "驱动规则",
