@@ -5,12 +5,8 @@
 Service manager module
 """
 
-import json
 import logging
 import uuid
-from pathlib import Path
-
-from miloco.utils.paths import miloco_home
 
 from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo, SystemConfigKeys
@@ -203,10 +199,6 @@ class Manager:
                 and bool(allowed_home_ids(kv)),
                 has_persons=lambda: bool(self._person_service.list_persons()),
                 has_profile_entries=lambda: bool(hp_store.load_profile().entries),
-                is_omni_ready=lambda: bool(
-                    json.loads((miloco_home() / "config.json").read_text(encoding="utf-8"))
-                    .get("model", {}).get("omni", {}).get("api_key", "")
-                ),
             )
             self._onboarding_trigger = svc
         return svc
