@@ -25,6 +25,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 已对哪些非 flash 的 gemini model 打过 thinkingBudget=0 告警——进程内按 model 去重,
+# 避免每个推理窗口刷屏(build_request_body 在热路径上每窗调一次)。
+_warned_non_flash_gemini: set[str] = set()
+
 
 @dataclass(frozen=True)
 class LocalMediaInfo:
@@ -385,8 +389,11 @@ class GeminiAdapter(OmniProviderAdapter):
 
         # get_adapter 用子串匹配路由,任何含 "gemini" 的 model 都到这里;但 thinkingBudget=0
         # 只对 gemini-3-flash 系列验证过。非 flash 的 gemini(如强制思考的 gemini-2.5-pro,
-        # 最小 budget 128)会因 budget=0 直接 400——此处打一条 warning 让失败可读、点名本字段。
-        if "flash" not in model.lower():
+        # 最小 budget 128)会因 budget=0 直接 400——打一条 warning 让失败可读、点名本字段。
+        # build_request_body 在每个推理窗口热路径上,故按 model 进程内去重、只打一次:既避免
+        # 刷屏,也弱化"名字不含 flash"这个粗判据对 gemini-3-pro 等大概率可用模型的误报噪音。
+        if "flash" not in model.lower() and model not in _warned_non_flash_gemini:
+            _warned_non_flash_gemini.add(model)
             logger.warning(
                 "[omni] GeminiAdapter 默认发 thinkingConfig.thinkingBudget=0,仅对 gemini-3-flash "
                 "系列验证过;model=%s 若为强制思考模型(如 gemini-2.5-pro)会 400,需按模型放开此项",

@@ -24,6 +24,7 @@ from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.observability import debug as debug_mod
+from miloco.perception.engine.omni.provider import OpenAICompatAdapter, get_adapter
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
 
@@ -650,23 +651,23 @@ class OmniTestBody(BaseModel):
 
 
 async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
-    """回退探测：少数服务不支持 GET /models 时，发一次极简非流式 chat（自测本次耗时）。"""
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-    }
+    """发一次极简 chat（max_tokens=1）验证配置可调通。
+
+    经 adapter 取 endpoint / 鉴权头 / 请求体，使 Gemini 等原生协议 provider 也能被正确探测
+    （原来硬编码 ``/chat/completions`` + ``Bearer`` 会对合法的 Gemini 配置误报失败）。
+    只看 status_code、不解析响应体，故 Qwen 强制 stream 的 body 也不影响判定。
+    """
+    adapter = get_adapter(model)
+    body = adapter.build_request_body(
+        [{"role": "user", "content": "ping"}],
+        model=model, max_tokens=1, temperature=0.0, top_p=1.0,
+    )
+    url = adapter.endpoint(base_url, model, stream=False)
+    headers = {**adapter.auth_headers(api_key), "Content-Type": "application/json"}
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
+            r = await client.post(url, headers=headers, json=body)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
     latency_ms = round((time.monotonic() - t0) * 1000)
@@ -691,12 +692,15 @@ async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
 async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
     """验证「这套配置能否真正调用该模型」。
 
-    先 GET /models 做廉价的鉴权 + 可达性预检(快速失败、省 token):连不上→unreachable,
-    401/403→bad_key,5xx→http_error。预检通过后,用一次极简 chat(``max_tokens=1``)**真正
-    探测该模型是否可用**——不依赖「模型是否出现在 /models 列表」这种弱判据(列表常不全,
-    在不在列表都不等于能不能调通)。chat 探测结果(ok / not_found / rejected_authed / …)即最终结论。
+    OpenAI 兼容族(MiMo/Qwen):先 GET /models 做廉价的鉴权 + 可达性预检(快速失败、省 token):
+    连不上→unreachable,401/403→bad_key,5xx→http_error。预检通过后,用一次极简 chat
+    (``max_tokens=1``)**真正探测该模型是否可用**——不依赖「模型是否出现在 /models 列表」这种
+    弱判据。非 OpenAI 兼容族(Gemini 等原生协议)没有等价的 GET /models 预检语义,直接走
+    adapter 化的 chat 探测(``_probe_chat`` 已按 provider 取 endpoint / 鉴权)。
     """
     base = base_url.rstrip("/")
+    if not isinstance(get_adapter(model), OpenAICompatAdapter):
+        return await _probe_chat(model, base, api_key)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
@@ -736,21 +740,36 @@ async def test_omni_config(
 
 
 async def _fetch_models(base_url: str, api_key: str) -> dict:
-    """拉取 provider 模型列表(GET /models)。成功返回 {ok, models:[id...]}。"""
+    """拉取 provider 模型列表(GET /models)。成功返回 {ok, models:[id...]}。
+
+    模型下拉在「选定 model 之前」拉取,没有 model 可路由 adapter,故按 base_url 判 provider:
+    Gemini 原生根(generativelanguage)用 ``x-goog-api-key`` 鉴权、响应形态 ``{models:[{name}]}``
+    (需剥 "models/" 前缀);其余按 OpenAI 兼容 ``{data:[{id}]}`` + ``Bearer`` 解析。
+    (经代理转发的 Gemini 不含该域名时,仍走 OpenAI 兼容分支——用户可手填 model 名兜底。)
+    """
     base_url = base_url.rstrip("/")
+    is_gemini = "generativelanguage.googleapis.com" in base_url
+    headers = (
+        {"x-goog-api-key": api_key} if is_gemini else {"Authorization": f"Bearer {api_key}"}
+    )
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(
-                f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
-            )
+            r = await client.get(f"{base_url}/models", headers=headers)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "code": "unreachable", "models": [], "message": f"无法连接 Base URL（{type(e).__name__}）"}
     if r.status_code == 200:
         try:
-            ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+            if is_gemini:
+                ids = [
+                    (m.get("name") or "").removeprefix("models/")
+                    for m in (r.json().get("models") or [])
+                    if m.get("name")
+                ]
+            else:
+                ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
         except Exception:  # noqa: BLE001
             ids = []
-        return {"ok": True, "models": sorted(ids)}
+        return {"ok": True, "models": sorted(i for i in ids if i)}
     if r.status_code in (401, 403):
         return {"ok": False, "code": "bad_key", "models": [], "message": "API Key 无效或无权限"}
     return {
