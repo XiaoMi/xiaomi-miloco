@@ -277,6 +277,46 @@ def set_debug_override(
     return NormalResponse(code=0, message="ok", data=debug_mod.get_state())
 
 
+class SchedulerConfigBody(BaseModel):
+    enabled: StrictBool
+
+
+@router.get(
+    "/scheduler-config",
+    summary="内置定时任务自动管理开关状态",
+    response_model=NormalResponse,
+)
+def get_scheduler_config(current_user: str = Depends(verify_token)):
+    """返回 ``scheduler.enabled``：是否由 miloco 自动管理内置定时任务。"""
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data={"enabled": get_settings().scheduler.enabled},
+    )
+
+
+@router.put(
+    "/scheduler-config",
+    summary="设置内置定时任务自动管理开关(写盘 config.json)",
+    response_model=NormalResponse,
+)
+def put_scheduler_config(
+    body: SchedulerConfigBody, current_user: str = Depends(verify_token)
+):
+    """写入 ``scheduler.enabled`` 到 ``config.json``。
+
+    实际生效方是 openclaw 插件——它在网关下次启动时读取此开关；
+    ``enabled=false`` 时清除并停止重建内置定时任务。backend 不控制 openclaw
+    网关生命周期，故此改动在网关下次重启后生效。
+    """
+    update_shared_config(scheduler={"enabled": body.enabled})
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data={"enabled": get_settings().scheduler.enabled},
+    )
+
+
 @router.post(
     "/debug/log-pack",
     summary="打包 trace db / jsonl / log 到 $MILOCO_HOME/packs/",
