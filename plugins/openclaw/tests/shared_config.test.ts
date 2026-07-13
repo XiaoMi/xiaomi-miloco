@@ -191,3 +191,53 @@ describe("loadSharedConfig", () => {
     expect(cfg.server.token).toBe("preset-token");
   });
 });
+
+describe("isSchedulerAutoManageEnabled", () => {
+  let origHome: string | undefined;
+  let tmpHome: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    origHome = process.env.MILOCO_HOME;
+    tmpHome = mkdtempSync(path.join(tmpdir(), "miloco-home-"));
+    configPath = path.join(tmpHome, "config.json");
+    process.env.MILOCO_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (origHome === undefined) delete process.env.MILOCO_HOME;
+    else process.env.MILOCO_HOME = origHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("config.json 缺失 → 默认开启（保持既有自动管理行为）", async () => {
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(true);
+  });
+
+  it("scheduler.enabled=false → 关闭", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: false } }));
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(false);
+  });
+
+  it("scheduler.enabled=true → 开启", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: true } }));
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(true);
+  });
+
+  it("非布尔（含缺 scheduler 段）→ 回落默认开启", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: "no" } }));
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(true);
+  });
+});

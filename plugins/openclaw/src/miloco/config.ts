@@ -122,6 +122,20 @@ const SHARED_CONFIG_SCHEMA = {
       },
       required: ["omni"],
     },
+    /** 内置定时任务自动管理开关（与 settings.schema.json 的 scheduler 对齐） */
+    scheduler: {
+      type: "object",
+      default: {},
+      additionalProperties: true,
+      properties: {
+        enabled: {
+          type: "boolean",
+          default: true,
+          description:
+            "是否由 miloco 自动管理内置定时任务；关闭后网关启动时清除自动任务且不再重建",
+        },
+      },
+    },
     /** 通知发送运行参数（与 settings.schema.json 的 notify 对齐） */
     notify: {
       type: "object",
@@ -307,4 +321,19 @@ export function getNotifyDedupWindowMs(): number {
       ? notify.dedup_window_sec
       : DEFAULT_NOTIFY_DEDUP_SEC;
   return Math.max(0, sec) * 1000;
+}
+
+/**
+ * 无副作用读取「是否自动管理内置定时任务」开关。读 config.json 的
+ * `scheduler.enabled`（与后端 `SchedulerSettings` / CLI `scheduler.enabled` 同键）。
+ * 缺失或非布尔一律按缺省 `true`（保持既有默认自动管理行为）。
+ *
+ * 刻意不走 {@link loadSharedConfig}：调度器只需在网关启停时读一个布尔，
+ * 无需归一化落盘 / 解析 gateway auth。
+ */
+export function isSchedulerAutoManageEnabled(): boolean {
+  const existing = safeJsonParse(readTextOrUndefined(sharedConfigPath()));
+  const raw = isRecord(existing) ? existing : {};
+  const scheduler = isRecord(raw.scheduler) ? raw.scheduler : undefined;
+  return typeof scheduler?.enabled === "boolean" ? scheduler.enabled : true;
 }
