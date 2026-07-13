@@ -40,7 +40,7 @@ def _make_proxy(status: str, *, engine=None, message: str = "stale") -> Percepti
     p._status = status
     p._status_message = message
     p._last_captions = {}
-    p._executor = None
+    p._inference_worker = None
     p._engine_lock = asyncio.Lock()
     return p
 

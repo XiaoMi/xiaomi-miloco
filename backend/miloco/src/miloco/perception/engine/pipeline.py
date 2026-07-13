@@ -297,7 +297,7 @@ async def run_pipeline(
     # Gate（本入口为无状态单次调用，无跨窗口基准可传，丢弃 last_checked / 两 ts）。
     # 注意:prev_frame 恒为 None → 视觉 gate 每次都走 cold-start 放行,本入口不会因静止画面 skipped。
     # 若将来把它放进循环复用,需自行在外维护 prev_frame 才能恢复静止 skip 语义。
-    gate_packet, gate_timing, _, _, _ = run_gate(input_slice, config.gate, config.input.fps)
+    gate_packet, gate_timing, _, _, _ = await run_gate(input_slice, config.gate, config.input.fps)
     timing["gate_ms"] = gate_timing.total_ms
     timing["gate_video_ms"] = gate_timing.video_ms
     timing["gate_audio_ms"] = gate_timing.audio_ms
@@ -481,7 +481,7 @@ async def run_batch_pipeline(
             gate_last_audio_pass_ts.get(did)
             if gate_last_audio_pass_ts is not None else None
         )
-        gate_packet, gate_timing, last_checked, new_last_v, new_last_a = run_gate(
+        gate_packet, gate_timing, last_checked, new_last_v, new_last_a = await run_gate(
             snapshot, config.gate, config.input.fps,
             prev_frame=prev_frame,
             last_visual_pass_ts=last_v,

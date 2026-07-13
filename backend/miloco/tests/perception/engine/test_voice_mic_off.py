@@ -148,7 +148,7 @@ class TestStripUnauthorizedVoiceAudio:
 class TestGateVideoOnlyAfterStrip:
     config = GateConfig()
 
-    def test_audio_only_stimulus_does_not_fire_when_stripped(self, monkeypatch):
+    async def test_audio_only_stimulus_does_not_fire_when_stripped(self, monkeypatch):
         """响亮音频 + 静止画面的未开启相机：剥离后 gate 不开窗（原本会 audio 触发）。
 
         传 prev_frame 基准帧隔离视觉 cold-start 放行——生产流式循环里 prev_frames
@@ -160,7 +160,7 @@ class TestGateVideoOnlyAfterStrip:
         prev = _preprocess(s.frames[0])
         # 对照：未剥离时 audio 触发开窗
         slice_before = create_input_slice("room", s.frames, s.audio_clip)
-        packet_before, timing_before, *_ = run_gate(
+        packet_before, timing_before, *_ = await run_gate(
             slice_before, self.config, prev_frame=prev
         )
         assert packet_before is not None and timing_before.audio_pass
@@ -168,14 +168,14 @@ class TestGateVideoOnlyAfterStrip:
         # 剥离后：同样刺激不再开窗
         eng._strip_unauthorized_voice_audio(BatchedSnapshot(snapshots=[s]))
         slice_after = create_input_slice("room", s.frames, s.audio_clip)
-        packet_after, timing_after, *_ = run_gate(
+        packet_after, timing_after, *_ = await run_gate(
             slice_after, self.config, prev_frame=prev
         )
         assert packet_after is None
         assert not timing_after.audio_pass
         assert timing_after.speech_prob == 0.0  # VAD 也被跳过（不做任何音频处理）
 
-    def test_video_stimulus_still_fires_with_audio_inactive(self, monkeypatch):
+    async def test_video_stimulus_still_fires_with_audio_inactive(self, monkeypatch):
         """视频刺激照常开窗，但 packet 的 audio 触发为 False、audio_clip 为空。"""
         monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: set())
         eng = _make_engine()
@@ -192,19 +192,19 @@ class TestGateVideoOnlyAfterStrip:
         )
         eng._strip_unauthorized_voice_audio(BatchedSnapshot(snapshots=[s]))
         slice_ = create_input_slice("room", s.frames, s.audio_clip)
-        packet, timing, *_ = run_gate(slice_, self.config)
+        packet, timing, *_ = await run_gate(slice_, self.config)
         assert packet is not None and timing.video_pass
         assert not packet.trigger.audio_active
         assert packet.audio_clip.size == 0
 
-    def test_voice_on_cam_unchanged(self, monkeypatch):
+    async def test_voice_on_cam_unchanged(self, monkeypatch):
         """拾音已开启（在白名单内）的相机：audio 触发行为与改动前一致（对照组）。"""
         monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: {"cam_on"})
         eng = _make_engine()
         s = _snapshot("cam_on")
         eng._strip_unauthorized_voice_audio(BatchedSnapshot(snapshots=[s]))
         slice_ = create_input_slice("room", s.frames, s.audio_clip)
-        packet, timing, *_ = run_gate(slice_, self.config)
+        packet, timing, *_ = await run_gate(slice_, self.config)
         assert packet is not None and timing.audio_pass
         assert packet.trigger.audio_active
 
@@ -213,7 +213,7 @@ class TestGateVideoOnlyAfterStrip:
 
 
 class TestPromptNoAudioTasksAfterStrip:
-    def _packet_from_stripped_gate(self):
+    async def _packet_from_stripped_gate(self):
         """走真实 run_gate 产出 trigger，再套进 IdentityPacket（与主链同构）。"""
         from miloco.perception.engine.types import (
             AudioAnalysis,
@@ -229,7 +229,7 @@ class TestPromptNoAudioTasksAfterStrip:
         white = np.full((64, 64, 3), 255, dtype=np.uint8)
         frames = [gray, gray, white, white, white, white]
         slice_ = create_input_slice("room", frames, np.array([], dtype=np.int16))
-        gate_packet, *_ = run_gate(slice_, GateConfig())
+        gate_packet, *_ = await run_gate(slice_, GateConfig())
         assert gate_packet is not None  # 视频触发
 
         return IdentityPacket(
@@ -253,22 +253,22 @@ class TestPromptNoAudioTasksAfterStrip:
             trigger=gate_packet.trigger,
         )
 
-    def test_schema_and_principle_drop_audio_tasks(self):
+    async def test_schema_and_principle_drop_audio_tasks(self):
         from miloco.perception.engine.omni.prompt_builder import build_prompt
         from miloco.perception.engine.types import OmniContext
 
-        payload = build_prompt(self._packet_from_stripped_gate(), OmniContext())
+        payload = build_prompt(await self._packet_from_stripped_gate(), OmniContext())
         sp = payload["system_prompt"]
         assert '"speeches"' not in sp
         assert '"env_sounds"' not in sp
         assert "本轮只有视频、没有音频" in sp  # _PRINCIPLE_VIDEO_NO_AUDIO
 
-    def test_audio_tasks_present_for_voice_on(self):
+    async def test_audio_tasks_present_for_voice_on(self):
         """对照组：audio_active=True（拾音开启）时 speeches/env_sounds 照常在 schema。"""
         from miloco.perception.engine.omni.prompt_builder import build_prompt
         from miloco.perception.engine.types import GateTrigger, OmniContext
 
-        ep = self._packet_from_stripped_gate()
+        ep = await self._packet_from_stripped_gate()
         ep.audio_clip = _loud_audio()
         ep.trigger = GateTrigger(
             visual_changed=True,

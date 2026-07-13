@@ -3,13 +3,12 @@
 
 """Tests for PerceptionEngineProxy early-callback main-loop dispatch.
 
-Production path: realtime_perceive() offloads _realtime_perceive_impl to an
-inference thread via run_in_executor + asyncio.run, so the impl coroutine
-runs on a temporary event loop. The engine awaits early callbacks from that
-temp loop. Without dispatching back, any task spawned inside (e.g.
-RuleRunner._spawn_fire's create_task) ends up on the temp loop and gets
-cancelled when asyncio.run() exits — even when held in a strong-reference
-set, because the issue is loop closure, not GC.
+Production path: realtime_perceive() offloads _realtime_perceive_impl to a
+persistent worker thread via InferenceWorker.submit(). The impl coroutine
+runs on the worker's durable event loop. The engine awaits early callbacks
+from that worker loop. Without dispatching back, any task spawned inside
+(eg RuleRunner._spawn_fire's create_task) would end up on the worker loop.
+These tests verify the _on_main_loop dispatch keeps tasks on the main loop.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ def proxy():
     p = PerceptionEngineProxy.__new__(PerceptionEngineProxy)
     p.perception_engine = MagicMock()
     p._last_captions = {}
-    p._executor = None
+    p._inference_worker = None
     return p
 
 
@@ -213,8 +212,8 @@ async def test_spawn_in_callback_survives_temp_loop_close(proxy):
     assert task.done() and not task.cancelled()
 
 
-async def test_no_executor_fallback_runs_callback_inline(proxy):
-    """When self._executor is None, _realtime_perceive_impl runs on the main
+async def test_no_worker_fallback_runs_callback_inline(proxy):
+    """When self._inference_worker is None, _realtime_perceive_impl runs on the main
     loop directly. The wrapper must short-circuit (current is main_loop) and
     not introduce cross-thread overhead."""
 

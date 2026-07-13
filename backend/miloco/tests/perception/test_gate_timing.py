@@ -29,9 +29,9 @@ def _make_slice() -> DeviceSnapshot:
     )
 
 
-def test_run_gate_returns_packet_and_timing():
+async def test_run_gate_returns_packet_and_timing():
     cfg = GateConfig()
-    result = run_gate(_make_slice(), cfg, input_fps=1)
+    result = await run_gate(_make_slice(), cfg, input_fps=1)
     assert isinstance(result, tuple) and len(result) == 5
     _packet, timing, _last_checked, _new_last_v, _new_last_a = result
     assert isinstance(timing, GateTiming)

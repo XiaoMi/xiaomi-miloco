@@ -27,6 +27,7 @@ _CONTEXT = 64  # silero 16kHz 每帧前置的上一帧尾部 context（模型实
 _SAMPLE_RATE = 16000
 
 _lock = threading.Lock()
+_inference_lock = threading.Lock()  # 保护全局 VAD session 并发 sess.run()（多设备并行推理）
 _session = None  # ort.InferenceSession | None
 _load_failed = False
 
@@ -94,9 +95,10 @@ def evaluate_speech(
     for i in range(0, pcm.size - _CHUNK + 1, _CHUNK):
         chunk = pcm[i : i + _CHUNK].reshape(1, _CHUNK)
         x = np.concatenate([context, chunk], axis=1)
-        out, state = sess.run(
-            ["output", "stateN"], {"input": x, "state": state, "sr": sr}
-        )
+        with _inference_lock:
+            out, state = sess.run(
+                ["output", "stateN"], {"input": x, "state": state, "sr": sr}
+            )
         context = chunk[:, -_CONTEXT:]
         p = float(out[0, 0])
         if p > peak:

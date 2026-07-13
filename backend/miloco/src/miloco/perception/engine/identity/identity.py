@@ -12,6 +12,7 @@ crop / motion / frame 选择——这些细节都在 IdentityEngine 内部。
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -58,8 +59,9 @@ async def run_identity(
         input_height=config.perception_input_height,
     )
 
-    # Step 1: tracking
-    tracking_resp = service.analyze(gate_packet.frames, fps=gate_packet.fps)
+    # Step 1: tracking (ONNX inference — offloaded to thread pool so the
+    # perception loop stays responsive and multi-device gather can overlap).
+    tracking_resp = await asyncio.to_thread(service.analyze, gate_packet.frames, fps=gate_packet.fps)
     output_frames = gate_packet.frames
 
     # Step 2: 调 IdentityEngine.process 获取 face_id 映射（异步派发 omni）
