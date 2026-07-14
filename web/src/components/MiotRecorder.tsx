@@ -20,10 +20,21 @@
  * 上拿不出包,详见 NalClipRecorder docstring。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PerceptionCamera } from "@/lib/types";
 import { authHeaders } from "@/api/register";
+
+// 感知层用合成 did（多通道相机 cam:ch{n}）；后端 watch / record_clip 按**物理 did +
+// 通道号**走（SDK 会话按物理 did 建），故发请求前把合成 did 拆回。裸 did 原样返回、channel 0。
+function splitChannelDid(did: string): { physicalDid: string; channel: number } {
+  const i = did.lastIndexOf(":ch");
+  if (i < 0) return { physicalDid: did, channel: 0 };
+  const ch = Number(did.slice(i + 3));
+  return Number.isFinite(ch)
+    ? { physicalDid: did.slice(0, i), channel: ch }
+    : { physicalDid: did, channel: 0 };
+}
 
 interface Props {
   cameras: PerceptionCamera[];
@@ -53,9 +64,20 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [iframeReady, setIframeReady] = useState(false);
 
-  const channel = 0; // 第一版只用通道 0
-  const watchUrl = selectedDid
-    ? `/api/miot/watch?camera_id=${encodeURIComponent(selectedDid)}&channel=${channel}&embedded=1`
+  // 出现多于一条记录的物理 did = 多通道相机；下拉框才给它们拼「通道N」区分同名两条。
+  const multiChannelDids = useMemo(() => {
+    const count = new Map<string, number>();
+    for (const c of cameras) {
+      const p = splitChannelDid(c.did).physicalDid;
+      count.set(p, (count.get(p) ?? 0) + 1);
+    }
+    return new Set([...count].filter(([, n]) => n > 1).map(([p]) => p));
+  }, [cameras]);
+
+  // 选中的是合成 did；发请求时拆成物理 did + 真通道号(后端 watch/record 按此)。
+  const { physicalDid, channel } = splitChannelDid(selectedDid);
+  const watchUrl = physicalDid
+    ? `/api/miot/watch?camera_id=${encodeURIComponent(physicalDid)}&channel=${channel}&embedded=1`
     : "";
 
   // 录制中允许中止:abort 立即掐断前端 fetch、回到 preview。注意后端 record_clip
@@ -108,7 +130,7 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
     }, FETCH_TIMEOUT_MS);
     try {
       const url =
-        `/api/miot/record_clip?camera_id=${encodeURIComponent(selectedDid)}` +
+        `/api/miot/record_clip?camera_id=${encodeURIComponent(physicalDid)}` +
         `&channel=${channel}&duration_ms=${RECORD_SECONDS * 1000}`;
       const r = await fetch(url, {
         method: "POST",
@@ -175,12 +197,19 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
                 disabled={stage !== "preview"}
                 className="text-caption px-2 py-1 rounded-lg bg-bg-primary border border-border text-text-primary"
               >
-                {cameras.map((c) => (
-                  <option key={c.did} value={c.did}>
-                    {c.name}
-                    {c.roomName ? ` · ${c.roomName}` : ""}
-                  </option>
-                ))}
+                {cameras.map((c) => {
+                  const { physicalDid: p, channel: ch } = splitChannelDid(c.did);
+                  const chLabel = multiChannelDids.has(p)
+                    ? ` · ${t("hero.channelLabel", { n: ch })}`
+                    : "";
+                  return (
+                    <option key={c.did} value={c.did}>
+                      {c.name}
+                      {c.roomName ? ` · ${c.roomName}` : ""}
+                      {chLabel}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           )}

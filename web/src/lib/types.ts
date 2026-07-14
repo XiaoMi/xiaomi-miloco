@@ -185,10 +185,14 @@ export interface PerceptionCamera {
 // 来源：GET /api/miot/scope/cameras（in_use=false 即停用该摄像头的感知）。
 // PerceptionCamera 是「当前 perception 在订阅」的子集（含 channel 用于播放），
 // ScopeCamera 是「米家账号下全集」（含已禁用 / 离线，用于显示开关）。
-// 渲染卡片时 ScopeCamera 是主列表，channel 通过 did 从 PerceptionCamera 字典查。
+// 多通道相机（双摄等）每条通道产出一条 ScopeCamera：did 相同（物理 did，启停按整台
+// 走），channel 区分通道号。渲染时用 (did, channel) 复合键区分两行、拼「通道 N」标签。
 export interface ScopeCamera {
   did: string;
   name: string;
+  // 通道号（多通道相机各条通道 0 / 1 / ...）；单通道相机恒为 0。用于播放取流、
+  // 复合键去重、以及在同一 did 出现多行时拼通道标签。
+  channel: number;
   // 米家分配的房间名（"客厅" / "卧室" / ...）。多摄像头家庭里 name 常是
   // "小米智能摄像机 2 代"等泛称，靠 roomName 才能区分。米家未分房间时为空。
   roomName?: string;
@@ -206,8 +210,6 @@ export interface ScopeCamera {
   // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
   voiceInUse: boolean;
   connected: boolean;
-  // 通道号，用于多通道摄像头（如双摄摄像头）。默认为 0。
-  channel?: number;
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。

@@ -1,6 +1,7 @@
 {
   "hero": {
     "title": "Right now at home",
+    "channelLabel": "Channel {{n}}",
     "usageAriaLabel": "Today's usage, see usage page for details",
     "usageTitle": "Today's token usage",
     "usageToday": "Today",

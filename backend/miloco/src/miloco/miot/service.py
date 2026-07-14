@@ -58,6 +58,15 @@ logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task] = set()
 
 
+def _physical_camera_did(did: str) -> str:
+    """合成通道 did → 物理 did：``'cam:ch1'`` → ``'cam'``；裸 did 原样返回。
+
+    相机启停 / 拾音都按整台相机（物理 did）走，多通道相机没有单通道级别的操作；
+    合成 did（``did:ch{n}``）一律先归一再操作 / 校验。
+    """
+    return did.rsplit(":ch", 1)[0] if ":ch" in did else did
+
+
 def _parse_prop_iid(iid: str) -> tuple[int, int]:
     """Parse 'prop.{siid}.{piid}' → (siid, piid)."""
     parts = iid.split(".")
@@ -1010,14 +1019,22 @@ class MiotService:
         return homes
 
     async def list_cameras_with_state(self) -> list[dict]:
-        """列出当前启用家庭下的相机，每项含 is_online / in_use / connected。
+        """列出当前启用家庭下的相机，每项含三态可用性 + in_use / voice_in_use / connected。
 
-        对于多通道摄像头（如双摄摄像头），每个通道会作为独立的条目返回。
-        注意：did 字段保持原始格式（如 1193497463），channel 字段标识通道号。
+        可用性拆成三个正交指标（替代旧的一把揉 is_online）：
+          - ``cloud_online``：米家云端在线
+          - ``lan_reachable``：局域网可达（能拉流的前提）
+          - ``awake``：镜头开关。True=镜头开启 / False=镜头关闭(隐私·遮挡) /
+            None=该机型无开关属性或读取失败（未知）。走 cache_only 只读 refresh_camera_online_status
+            已填的缓存，不单独打云；缓存空时为 None（未知），刷新后自愈。
+        ``in_use``=**当下真正开启**（= 该相机在 select_active 的活跃集里：默认开·未拉黑 +
+        三态满足 + 上限≤4）——离线/不可达/镜头关的相机 in_use=false，不显示为开；超上限的
+        也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
+        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
+        ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
         """
-        denied = denied_camera_dids(self._kv_repo)
-        connected = self._connected_camera_dids()  # 多通道格式的 did
-        connected_original = self._connected_camera_dids_original()  # 原始格式的 did
+        voice_allowed = voice_allowed_camera_dids(self._kv_repo)
+        connected = self._connected_camera_dids()
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
         )
@@ -1035,58 +1052,44 @@ class MiotService:
         )
         out: list[dict] = []
         for did, info in cameras.items():
-            online = bool(getattr(info, "online", False)) and bool(
-                getattr(info, "lan_online", False)
-            )
-            # 检查是否是多通道摄像头
+            cloud_online = bool(getattr(info, "online", False))
+            lan_reachable = bool(getattr(info, "lan_online", False))
+            # 多通道相机（双摄等）每条通道产出一条记录：``did`` 保持物理 did（toggle /
+            # 黑名单 / in_use 都按整台走），``channel`` 标识通道号供前端拼标签并区分两行；
+            # ``connected`` 按合成 did ``did:ch{n}`` 判定（感知接入层按通道建连）。单通道
+            # channel=0、connected 按裸 did 判定——与旧行为完全一致，仅多带一个 channel 字段。
             channel_count = getattr(info, "channel_count", None) or 1
-            if channel_count > 1:
-                # 多通道摄像头：为每个通道创建独立的条目
-                for ch in range(channel_count):
-                    channel_did = f"{did}:ch{ch}"
-                    # Keep camera original name; channel label is a frontend concern.
-                    out.append(
-                        {
-                            "did": did,  # 保持原始 did，用于 SDK 请求
-                            "name": getattr(info, "name", None),
-                            "room_name": getattr(info, "room_name", None),
-                            "is_online": online,
-                            "in_use": did not in denied,  # 使用原始 did 判断是否启用
-                            "connected": channel_did in connected,
-                            "channel": ch,  # 通道号，用于请求视频流
-                        }
-                    )
-            else:
-                # 单通道摄像头
-                out.append(
-                    {
-                        "did": did,
-                        "name": getattr(info, "name", None),
-                        # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
-                        # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
-                        "room_name": getattr(info, "room_name", None),
-                        "is_online": online,
-                        "in_use": did not in denied,
-                        "connected": did in connected_original,  # 使用原始格式的 did 判断
-                        "channel": 0,  # 默认通道 0
-                    }
-                )
+            base = {
+                "did": did,
+                "name": getattr(info, "name", None),
+                # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
+                # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
+                "room_name": getattr(info, "room_name", None),
+                "cloud_online": cloud_online,
+                "lan_reachable": lan_reachable,
+                "awake": awake_map.get(did),
+                # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
+                "is_online": cloud_online and lan_reachable,
+                "in_use": did in active,
+                # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。
+                "voice_in_use": did in voice_allowed,
+            }
+            for ch in range(channel_count):
+                syn_did = f"{did}:ch{ch}" if channel_count > 1 else did
+                out.append({**base, "channel": ch, "connected": syn_did in connected})
         return out
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
         """批量切换相机启用状态。每项 {"did": str, "in_use": bool}。
 
-        支持多通道格式的 did（如 1193497463:ch0），会自动转换为原始 did 进行操作。
-        全部校验通过后才一起写入。双向均校验未知 did 防 typo。
+        全部校验通过后才一起写入。双向均校验未知 did 防 typo。启用/停用按**整台相机**
+        （物理 did）走——多通道相机没有单通道级别的启停，故合成 did（``did:ch{n}``）一律
+        归一到物理 did 再操作。
         """
-        # 将多通道格式的 did 转换为原始 did
-        def _to_original_did(did: str) -> str:
-            if ':ch' in did:
-                return did.rsplit(':ch', 1)[0]
-            return did
-
-        enable_dids = [_to_original_did(i["did"]) for i in items if i["in_use"]]
-        disable_dids = [_to_original_did(i["did"]) for i in items if not i["in_use"]]
+        enable_dids = [_physical_camera_did(i["did"]) for i in items if i["in_use"]]
+        disable_dids = [
+            _physical_camera_did(i["did"]) for i in items if not i["in_use"]
+        ]
         all_dids = enable_dids + disable_dids
 
         cameras = await self._miot_proxy.get_cameras() or {}
@@ -1136,8 +1139,10 @@ class MiotService:
                     "请先在米家中打开该摄像头镜头后再启用"
                 )
 
-            # 上限检查：用户主动 enable 超限时直接报错，不做自动禁用。计数口径按
-            # 流路数（而非设备数），避免双摄设备悄悄翻倍解码管线。
+            # 上限检查：数「可用集」而非「意图集」——未拉黑 + 在当前家庭 + 三态好
+            # (云端+局域网+镜头开)。离线/局域网不可达/镜头关的相机**不占名额**（与前端
+            # activeCount 按 in_use=活跃集 计数同口径；也与 list/refresh 的 select_active
+            # 一致）。这样不会出现「面板显示有名额、点开启却被后端拒」的口径背离。
             denied = denied_camera_dids(self._kv_repo)
 
             def _usable(did: str) -> bool:
@@ -1148,15 +1153,17 @@ class MiotService:
             intent_after = (
                 (in_scope - denied) - set(disable_dids)
             ) | (set(enable_dids) & in_scope)
-            # 按流路数计数（双摄设备算 2 条流）
-            total_streams = sum(
-                (getattr(cameras.get(did), "channel_count", None) or 1)
-                for did in final_enabled
+            usable_after = {d for d in intent_after if _usable(d)}
+            # 名额按「流路数」计：多通道相机一台吃 channel_count 路（与
+            # select_active_camera_dids 的截断口径、解码管线路数一致）。
+            streams_after = sum(
+                (getattr(cameras.get(d), "channel_count", None) or 1)
+                for d in usable_after
             )
-            if total_streams > MAX_ENABLED_CAMERAS:
+            if streams_after > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
-                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 条摄像头流"
-                    f"（操作后将有 {total_streams} 条流），"
+                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 条摄像头视频流"
+                    f"（操作后将有 {streams_after} 条），"
                     f"请先禁用一台再启用新摄像头"
                 )
 
@@ -1190,8 +1197,10 @@ class MiotService:
         _sync_camera_adapter / _restart_perception_engine——拾音黑名单在引擎入口与
         client.py dispatch 阶段实时读取(KVRepo.set 已同步更新进程内缓存),下一感知窗
         即生效,无需重建 manager 或重启。本地拉流不变(音频仍解码进缓冲,只是不被处理)。
+
+        拾音同样按**整台相机**走（拾音白名单存物理 did），合成 did（``did:ch{n}``）先归一。
         """
-        all_dids = [i["did"] for i in items]
+        all_dids = [_physical_camera_did(i["did"]) for i in items]
 
         cameras = await self._miot_proxy.get_cameras() or {}
         unknown = [d for d in all_dids if d not in cameras]
@@ -1210,8 +1219,12 @@ class MiotService:
                 f"摄像头感知已关闭，无法设置声音（{disabled}）；请先开启该摄像头感知"
             )
 
-        enable_dids = [i["did"] for i in items if i["voice_in_use"]]
-        disable_dids = [i["did"] for i in items if not i["voice_in_use"]]
+        enable_dids = [
+            _physical_camera_did(i["did"]) for i in items if i["voice_in_use"]
+        ]
+        disable_dids = [
+            _physical_camera_did(i["did"]) for i in items if not i["voice_in_use"]
+        ]
         if disable_dids:
             set_cameras_voice_in_use(self._kv_repo, disable_dids, False)
         if enable_dids:
@@ -1233,28 +1246,7 @@ class MiotService:
 
     def _connected_camera_dids(self) -> set[str]:
         adapter = self._camera_adapter()
-        if not adapter:
-            return set()
-        connected = adapter.get_connected_devices().keys()
-        # 返回多通道格式的 did（如 1193497463:ch0）
-        # 这样前端可以区分每个通道的连接状态
-        return set(connected)
-    
-    def _connected_camera_dids_original(self) -> set[str]:
-        """返回原始格式的 did（如 1193497463），用于单通道摄像头的连接状态判断。"""
-        adapter = self._camera_adapter()
-        if not adapter:
-            return set()
-        connected = adapter.get_connected_devices().keys()
-        # 将多通道 did 转换回原始 did
-        result = set()
-        for did in connected:
-            if ':ch' in did:
-                original_did = did.rsplit(':ch', 1)[0]
-                result.add(original_did)
-            else:
-                result.add(did)
-        return result
+        return set(adapter.get_connected_devices().keys()) if adapter else set()
 
     async def _sync_camera_adapter(self) -> None:
         """Hot-sync camera connections after a scope change."""

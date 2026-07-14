@@ -239,18 +239,17 @@ class RuleService:
             )
 
     async def _get_valid_perceive_device_ids(self) -> list[str]:
-        """All valid perception device IDs (offline included), including
-        physical dids for multi-channel cameras so rules can bind to either
-        granularity."""
+        """All valid perception device IDs (offline included).
+
+        多通道相机的感知 did 是合成 did（``cam1:ch0`` / ``cam1:ch1``）；rule 可以按
+        整台相机的物理 did（``cam1``）绑定，也可以精确到某条通道。两种粒度都收进合法集。
+        """
         from miloco.manager import get_manager
 
         devices = await get_manager().perception_service.get_devices(online_only=False)
         valid = [device.did for device in devices]
-        # Also accept physical dids — rules may bind to the camera as a whole
-        # (e.g. 'cam1') while perception operates on channel-level dids
-        # (e.g. 'cam1:ch0', 'cam1:ch1').
-        physical = {d.rsplit(':ch', 1)[0] for d in valid if ':ch' in d}
-        return valid + list(physical)
+        physical = {d.rsplit(":ch", 1)[0] for d in valid if ":ch" in d}
+        return valid + sorted(physical - set(valid))
 
     async def _validate_perceive_device_ids(self, dids: list[str]) -> None:
         valid_dids = await self._get_valid_perceive_device_ids()

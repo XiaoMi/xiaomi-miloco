@@ -25,7 +25,6 @@ class PerceptionDevice:
     online: bool = True
     room_id: str | None = None  # 兼容字段，与 room_name 等价
     room_name: str | None = None
-    extra: dict[str, Any] | None = None  # 扩展字段，用于存储多通道等信息
 
 
 @dataclass

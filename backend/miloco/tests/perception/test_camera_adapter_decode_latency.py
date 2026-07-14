@@ -24,9 +24,7 @@ def _make_state(
     epoch_delta: int | None = 1_700_000_000_000, did: str = "cam1"
 ) -> _CameraDeviceState:
     state = _CameraDeviceState(did=did)
-    # For single-channel camera, set epoch_delta on channel 0
-    if 0 in state.channels:
-        state.channels[0].epoch_delta = epoch_delta
+    state.epoch_delta = epoch_delta
     return state
 
 
@@ -110,7 +108,7 @@ class TestCallbackIntegration:
             lambda: 1_700_000_005_000,
         )
 
-        cb = adapter._make_decoded_video_callback("cam1", 0)
+        cb = adapter._make_decoded_video_callback("cam1")
         # recv=...090, decoded=...130 → decode=40ms
         asyncio.run(
             cb(
@@ -123,7 +121,7 @@ class TestCallbackIntegration:
             )
         )
 
-        ready = state.channels[0].sync_buffer.peek_latest(duration_ms=10_000)
+        ready = state.sync_buffer.peek_latest(duration_ms=10_000)
         assert ready is not None
         frag = ready["decoded_video"][0]
         assert isinstance(frag, StreamFragment)
@@ -140,7 +138,7 @@ class TestCallbackIntegration:
             lambda: 4_925,
         )
 
-        cb = adapter._make_decoded_audio_callback("cam1", 0)
+        cb = adapter._make_decoded_audio_callback("cam1")
         # recv=...870, decoded=...995 → decode=125ms
         asyncio.run(
             cb(
@@ -153,7 +151,7 @@ class TestCallbackIntegration:
             )
         )
 
-        ready = state.channels[0].sync_buffer.peek_latest(duration_ms=10_000)
+        ready = state.sync_buffer.peek_latest(duration_ms=10_000)
         assert ready is not None
         decoded: DecodedAudioFrame = ready["decoded_audio"][0].data
         assert decoded.recv_unix_ms == 1_700_000_004_870
@@ -162,7 +160,7 @@ class TestCallbackIntegration:
 
     def test_missing_device_is_noop(self, monkeypatch):
         adapter, _ = self._make_adapter_with_device()
-        cb = adapter._make_decoded_video_callback("cam_unknown", 0)
+        cb = adapter._make_decoded_video_callback("cam_unknown")
         # Should not raise and should produce nothing useful.
         asyncio.run(
             cb(
@@ -206,7 +204,6 @@ class TestBuildDeviceDataAggregation:
         state = _make_state()
         dd = adapter._build_device_data(
             state,
-            state.channels[0],
             tracks={"decoded_video": [], "decoded_audio": []},
             window_start_ms=0,
             window_end_ms=1000,
@@ -230,7 +227,7 @@ class TestBuildDeviceDataAggregation:
             "decoded_audio": [],
         }
 
-        dd = adapter._build_device_data(state, state.channels[0], tracks, 100, 200)
+        dd = adapter._build_device_data(state, tracks, 100, 200)
 
         assert dd is not None
         assert dd.meta.name == "cam-new"
@@ -278,7 +275,7 @@ class TestBuildDeviceDataAggregation:
             "decoded_video": [self._fragment(f, f.stream_ts, f.wall_ms) for f in frames],
             "decoded_audio": [],
         }
-        dd = adapter._build_device_data(state, state.channels[0], tracks, 100, 400)
+        dd = adapter._build_device_data(state, tracks, 100, 400)
         assert dd is not None
         assert dd.decode_video_avg_ms == pytest.approx(30.0)
         assert dd.decode_audio_avg_ms == 0.0
@@ -302,7 +299,7 @@ class TestBuildDeviceDataAggregation:
             "decoded_video": [],
             "decoded_audio": [self._fragment(f, f.stream_ts, f.wall_ms) for f in frames],
         }
-        dd = adapter._build_device_data(state, state.channels[0], tracks, 100, 300)
+        dd = adapter._build_device_data(state, tracks, 100, 300)
         assert dd is not None
         assert dd.decode_video_avg_ms == 0.0
         assert dd.decode_audio_avg_ms == pytest.approx(10.0)
@@ -337,7 +334,7 @@ class TestBuildDeviceDataAggregation:
             "decoded_video": [self._fragment(f, f.stream_ts, f.wall_ms) for f in vframes],
             "decoded_audio": [self._fragment(f, f.stream_ts, f.wall_ms) for f in aframes],
         }
-        dd = adapter._build_device_data(state, state.channels[0], tracks, 100, 400)
+        dd = adapter._build_device_data(state, tracks, 100, 400)
         assert dd is not None
         assert dd.decode_video_avg_ms == pytest.approx(30.0)
         assert dd.decode_audio_avg_ms == pytest.approx(90.0)

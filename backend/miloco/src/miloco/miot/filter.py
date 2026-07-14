@@ -101,12 +101,14 @@ def select_active_camera_dids(
     看 ``online and lan_online``；``False`` 只看云端 ``online``（放过 lan_online 陈旧的卡死态
     相机）。``awake_map``（did→镜头开关态，来自 MiotProxy 的 awake 缓存）给出时，``awake``
     明确为 ``False``（镜头关/物理遮挡）的相机被排除；``None``/``True``/未给出一律放行
-    （awake 未知不误杀，与 toggle 开启校验同口径）。``cap=True`` 时按 did 升序确定性截断到
-    ``MAX_ENABLED_CAMERAS``——投喂/拉流上限的唯一兜底，与 ``service.toggle_camera`` 的主动
-    enable 校验互补；不写 KV、不碰黑名单。``cap=False`` 用于「列全集」语义（如 rule target 校验）。
+    （awake 未知不误杀，与 toggle 开启校验同口径）。``cap=True`` 时按**流路数**（多通道
+    相机一台算 ``channel_count`` 路）确定性截断到 ``MAX_ENABLED_CAMERAS``——投喂/拉流上限
+    的唯一兜底，与 ``service.toggle_camera`` 的主动 enable 校验互补；不写 KV、不碰黑名单。
+    ``cap=False`` 用于「列全集」语义（如 rule target 校验）。
 
-    返回 did 列表：未截断为输入顺序，截断为 did 升序前 N。``cameras`` 的 value 需带
-    ``home_id`` / ``online`` / ``lan_online`` 属性。
+    返回**物理 did** 列表（通道展开在上层 camera_adapter 做）：未截断为输入顺序，截断
+    为 did 升序。``cameras`` 的 value 需带 ``home_id`` / ``online`` / ``lan_online``
+    （及可选 ``channel_count``）属性。
     """
     denied = denied_camera_dids(kv_repo)
     result: list[str] = []
@@ -126,16 +128,26 @@ def select_active_camera_dids(
         result.append(did)
     if not cap:
         return result
-    # 超限：按流路数（而非设备数）截断，避免双摄设备悄悄翻倍解码管线。
-    # 按 did 升序确定性截断（同一账号每轮选同一批）。
-    total_streams = 0
+    # 上限按「流路数」而非「设备数」计——多通道相机（双摄等）一台吃 channel_count 个
+    # 名额，避免双摄悄悄把解码管线翻倍。未超限保持输入顺序；超限按 did 升序确定性
+    # 截断（同一账号每轮选同一批）。
+    total_streams = sum(
+        (getattr(cameras.get(did), "channel_count", None) or 1) for did in result
+    )
+    if total_streams <= MAX_ENABLED_CAMERAS:
+        return result
+    # 贪心装箱：以整台相机为原子单位（不拆通道，避免只接双摄的一半）。注意边界——
+    # 单台相机 channel_count > MAX_ENABLED_CAMERAS（如多路 NVR）会永远塞不进而被整台
+    # 排除、完全不感知；当前目标机型是双摄（≤4 路）不触发，日后接大通道设备需另设
+    # 「部分通道接入」策略。
     capped: list[str] = []
+    used = 0
     for did in sorted(result):
         ch = getattr(cameras.get(did), "channel_count", None) or 1
-        if total_streams + ch > MAX_ENABLED_CAMERAS:
+        if used + ch > MAX_ENABLED_CAMERAS:
             continue
         capped.append(did)
-        total_streams += ch
+        used += ch
     return capped
 
 

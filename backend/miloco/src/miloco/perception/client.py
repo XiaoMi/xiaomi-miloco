@@ -98,6 +98,7 @@ def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
     """
     from miloco.manager import get_manager
     from miloco.miot.filter import voice_allowed_camera_dids
+    from miloco.perception.collect.camera_adapter import split_channel_did
 
     try:
         voice_allowed = voice_allowed_camera_dids(get_manager().kv_repo)
@@ -107,7 +108,10 @@ def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
     kept: list[Speech] = []
     for s in speeches:
         did = s.source_device_ids[0] if s.source_device_ids else None
-        if did is None or did not in voice_allowed:
+        # 白名单存物理 did（整台相机）；source_device_ids 是合成通道 did（多通道相机
+        # ``did:ch{n}``），比对前归一到物理 did，否则双摄开了拾音也会被这道兜底误丢。
+        physical = split_channel_did(did)[0] if did is not None else None
+        if physical is None or physical not in voice_allowed:
             logger.info(
                 "speech 被摄像头声音开关拦截丢弃(未开启拾音,不下发/不落库): did=%s device_name=%s content_len=%d",
                 did, s.device_name, len(s.content),
