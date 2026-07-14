@@ -59,6 +59,25 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
 
+_EMPTY_RESULT_MSG = "MIoT 返回为空/不可判定,无法确认执行结果"
+
+
+def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
+    """规则执行语义的结果归一:**空/不可判定返回 = 失败**。
+
+    summarize_results 对 ``[]`` / ``None`` / 非法形态按成功处理(CLI 展示场景的
+    宽松口径),但规则这里"成功"会写 cooldown、压掉后续真实动作——未确认的执行
+    不能算成功。故仅当返回体里有实际结果项时才复用 #394 的负码判定。
+    """
+    has_result = isinstance(obj, dict) or (
+        isinstance(obj, list) and any(isinstance(it, dict) for it in obj)
+    )
+    if not has_result:
+        return False, None, _EMPTY_RESULT_MSG
+    from miloco.miot.result_codes import summarize_results
+
+    return summarize_results(obj)
+
 
 def build_rule_callbacks_text(callbacks: list[RuleTriggerCallback]) -> str | None:
     """合并后的 rule DYNAMIC 回调列表 → 给 agent 的 message。
@@ -1352,7 +1371,6 @@ class RuleRunner:
         # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
         import json as _json
 
-        from miloco.miot.result_codes import summarize_results
         from miloco.miot.service import _write_action_ledger
 
         try:
@@ -1363,7 +1381,7 @@ class RuleRunner:
                     )
                 ]
                 results = await self._miot_proxy.set_device_properties(params)
-                success, _lcode, _lmsg = summarize_results(results)
+                success, _lcode, _lmsg = _summarize_rule_result(results)
                 _ltype = "set_property"
                 _lvalue = _json.dumps(action.value, ensure_ascii=False)
             else:
@@ -1374,12 +1392,12 @@ class RuleRunner:
                     in_=action.params or [],
                 )
                 result = await self._miot_proxy.call_device_action(param)
-                success, _lcode, _lmsg = summarize_results(result)
+                success, _lcode, _lmsg = _summarize_rule_result(result)
                 _ltype = "call_action"
                 _lvalue = _json.dumps(action.params or [], ensure_ascii=False)
-            # 与 control_device 同口径:summarize_results 归一 (success, worst_code, msg)——
-            # 负码即失败(镜像 #394)、msg 是失败码释义。避免第三套谓词,且台账 result_msg
-            # 不再恒 NULL(合流页对"设备离线"等常见失败显示释义而非裸 dict repr)。
+            # 有实际结果时与 control_device 同口径(负码即失败,镜像 #394,msg 是失败码
+            # 释义);空/不可判定返回按失败处理(见 _summarize_rule_result:未确认的执行
+            # 不能写 cooldown)。台账 result_msg 不再恒 NULL。
             err: str | None = None if success else (_lmsg or "miot_failed")
 
             await _write_action_ledger(

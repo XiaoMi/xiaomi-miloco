@@ -1784,6 +1784,36 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
         assert result.action_results[0].error
 
     @pytest.mark.asyncio
+    async def test_set_property_empty_result_is_failure(
+        self, runner, mock_miot_proxy
+    ):
+        """MIoT 空返回 = 失败(规则执行语义):未确认的执行不能算成功,
+        否则会误写 cooldown 压掉后续真实动作(review: Zirconi)。"""
+        mock_miot_proxy.set_device_properties = AsyncMock(return_value=[])
+        action = _make_action(idempotent=False, cooldown=5)
+        rule = _make_static_rule(rule_id="rule-empty-res", actions=[action])
+        runner.add_rule(rule)
+
+        result = await runner.trigger_rule("rule-empty-res", "测试")
+        assert result.action_results[0].result is False
+        assert "无法确认" in (result.action_results[0].error or "")
+        # 失败不得写 cooldown——否则空返回后真实动作被压掉
+        assert not runner._ensure_state("rule-empty-res").action_cooldown
+
+    @pytest.mark.asyncio
+    async def test_call_action_none_result_is_failure(self, runner, mock_miot_proxy):
+        """call_device_action 返回 None(不可判定)→ 失败,不按成功处理。"""
+        mock_miot_proxy.call_device_action = AsyncMock(return_value=None)
+        action = _make_action(iid="action.5.1", value=None, idempotent=False)
+        action.params = []
+        rule = _make_static_rule(rule_id="rule-none-res", actions=[action])
+        runner.add_rule(rule)
+
+        result = await runner.trigger_rule("rule-none-res", "测试")
+        assert result.action_results[0].result is False
+        assert "无法确认" in (result.action_results[0].error or "")
+
+    @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
     async def test_state_temporary_dynamic_full_combo(
         self, mock_send, service, mock_rule_repo

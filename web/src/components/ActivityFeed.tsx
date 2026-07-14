@@ -165,12 +165,20 @@ export function ActivityFeed({
   const [showActions, setShowActions] = useState(true);
   const [actions, setActions] = useState<BackendActionRow[]>([]);
 
+  /** 动作拉取的 generation token(N1 同款,镜像事件流的 fetchGenRef):首屏先发的
+   *  无 home 过滤请求 / 切家前旧请求若晚返回,不得覆盖已按新 home 过滤的结果。 */
+  const actionsGenRef = useRef(0);
+
   /** 动作重拉:mount / homeId 切换 / 时间窗变化 / 手动 reload 时调,失败静默(不阻断事件流)。
    *  带上当前应用的时间窗(appliedSince/appliedBefore),让动作与事件同段,不混入范围外记录;
-   *  带上 activeHomeId,切家后动作流只显当前家(依赖变化自动重拉,不再是空转)。 */
+   *  带上 activeHomeId,切家后动作流只显当前家(依赖变化自动重拉,不再是空转)。
+   *  只允许最新一代请求 setActions——stale 响应直接丢弃。 */
   const reloadActions = useCallback(() => {
+    const gen = ++actionsGenRef.current;
     fetchActions(false, appliedSince, appliedBefore, activeHomeId)
-      .then(setActions)
+      .then((rows) => {
+        if (gen === actionsGenRef.current) setActions(rows);
+      })
       .catch(() => {
         /* 动作流失败不影响事件流;保留上次结果 */
       });
