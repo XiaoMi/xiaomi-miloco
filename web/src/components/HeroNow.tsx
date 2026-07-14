@@ -22,6 +22,12 @@ import { useId, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "./Toast";
 import { switchBlockedReasonKey } from "@/lib/cameraSwitch";
+import {
+  isCrossMidnightWindow,
+  mergeScheduleWindows,
+  normalizeTimeValue,
+  weekdaysEqual,
+} from "@/lib/cameraSchedule";
 import { IconClock, IconPlus, IconRefresh, IconTrash, IconX } from "@/lib/icons";
 
 // 「关声音」确认弹窗的「不再提醒」持久化标记（与 web:theme / web:lang 同命名空间）。
@@ -46,42 +52,62 @@ function setVoiceOnConfirmed(): void {
   }
 }
 
-function scheduleMinuteOfDay(value: string): number {
-  const [hour, minute] = value.split(":").map((part) => Number(part));
-  return hour * 60 + minute;
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) =>
+  String(i).padStart(2, "0"),
+);
+const MINUTE_OPTIONS = Array.from({ length: 60 }, (_, i) =>
+  String(i).padStart(2, "0"),
+);
+
+function Time24Input({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  disabled?: boolean;
+  onChange: (next: string) => void;
+}) {
+  const { t } = useTranslation();
+  const normalized = normalizeTimeValue(value) || "00:00";
+  const [hour = "00", minute = "00"] = normalized.split(":");
+  return (
+    <div
+      className={`flex min-w-0 items-center gap-1 rounded-md border border-border bg-bg-primary px-2 py-1.5 ${
+        disabled ? "opacity-50" : ""
+      }`}
+    >
+      <select
+        aria-label={t("hero.scheduleHour")}
+        value={hour}
+        disabled={disabled}
+        onChange={(e) => onChange(`${e.currentTarget.value}:${minute}`)}
+        className="min-w-0 flex-1 appearance-none bg-transparent text-body text-text-primary outline-none disabled:cursor-not-allowed"
+      >
+        {HOUR_OPTIONS.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+      <span className="text-text-tertiary">:</span>
+      <select
+        aria-label={t("hero.scheduleMinute")}
+        value={minute}
+        disabled={disabled}
+        onChange={(e) => onChange(`${hour}:${e.currentTarget.value}`)}
+        className="min-w-0 flex-1 appearance-none bg-transparent text-body text-text-primary outline-none disabled:cursor-not-allowed"
+      >
+        {MINUTE_OPTIONS.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
 }
 
-function scheduleDayIntervals(start: number, end: number): [number, number][] {
-  if (start === end) return [];
-  if (start < end) return [[start, end]];
-  return [
-    [start, 24 * 60],
-    [0, end],
-  ];
-}
-
-function scheduleWindowsInvalid(
-  windows: Array<{ start: string; end: string }>,
-): boolean {
-  const occupied: [number, number][] = [];
-  for (const window of windows) {
-    const start = scheduleMinuteOfDay(window.start);
-    const end = scheduleMinuteOfDay(window.end);
-    if (start === end) return true;
-    for (const interval of scheduleDayIntervals(start, end)) {
-      occupied.push(interval);
-    }
-  }
-  occupied.sort((a, b) => a[0] - b[0]);
-  for (let i = 1; i < occupied.length; i++) {
-    if (occupied[i][0] < occupied[i - 1][1]) return true;
-  }
-  return false;
-}
-
-function normalizeTimeValue(value: string): string {
-  return value.trim().slice(0, 5);
-}
 
 interface Props {
   persons: Person[];
@@ -1043,35 +1069,62 @@ function CameraScheduleDialog({
         : [...items, weekday].sort((a, b) => a - b),
     );
   };
+  const applyWeekdayPreset = (preset: readonly number[]) => {
+    setWeekdays([...preset]);
+  };
   const submit = async () => {
-    const nextWindows = windows;
     if (enabled && weekdays.length === 0) {
       setError(t("hero.scheduleNeedWeekday"));
       return;
     }
-    if (enabled && nextWindows.length === 0) {
+    if (enabled && windows.length === 0) {
       setError(t("hero.scheduleNeedWindow"));
       return;
     }
-    if (enabled && nextWindows.some((w) => !w.start || !w.end)) {
+    if (enabled && windows.some((w) => !w.start || !w.end)) {
       setError(t("hero.scheduleInvalid"));
       return;
     }
-    const normalizedWindows = nextWindows.map((window) => ({
+    const normalizedWindows = windows.map((window) => ({
       start: normalizeTimeValue(window.start),
       end: normalizeTimeValue(window.end),
     }));
-    if (enabled && scheduleWindowsInvalid(normalizedWindows)) {
-      setError(t("hero.scheduleOverlap"));
+    // 重叠/相邻区间自动合并，用户只需关心「哪些时间要感知」
+    const mergedWindows = enabled
+      ? mergeScheduleWindows(normalizedWindows)
+      : normalizedWindows;
+    if (enabled && mergedWindows.length === 0) {
+      setError(t("hero.scheduleNeedWindow"));
       return;
+    }
+    if (mergedWindows !== normalizedWindows) {
+      setWindows(mergedWindows);
     }
     setError(null);
     await onSave({
-      enabled: enabled && normalizedWindows.length > 0,
+      enabled: enabled && mergedWindows.length > 0,
       weekdays,
-      windows: normalizedWindows,
+      windows: mergedWindows,
     });
   };
+
+  const weekdayPresets = [
+    {
+      id: "everyday",
+      days: CAMERA_SCHEDULE_WEEKDAYS,
+      label: t("hero.schedulePresetEveryday"),
+    },
+    {
+      id: "weekdays",
+      days: [0, 1, 2, 3, 4],
+      label: t("hero.schedulePresetWeekdays"),
+    },
+    {
+      id: "weekend",
+      days: [5, 6],
+      label: t("hero.schedulePresetWeekend"),
+    },
+  ] as const;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
@@ -1116,8 +1169,31 @@ function CameraScheduleDialog({
             </button>
           </label>
           <div className="space-y-2">
-            <div className="text-caption text-text-tertiary">
-              {t("hero.scheduleWeekdays")}
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-caption text-text-tertiary">
+                {t("hero.scheduleWeekdays")}
+              </div>
+              <div className="flex flex-wrap justify-end gap-1">
+                {weekdayPresets.map((preset) => {
+                  const selected = weekdaysEqual(weekdays, preset.days);
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={!enabled}
+                      onClick={() => applyWeekdayPreset(preset.days)}
+                      className={`rounded-md border px-2 py-0.5 text-caption transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                        selected
+                          ? "border-brand-primary bg-brand-primary/10 text-brand-primary"
+                          : "border-border bg-bg-primary text-text-secondary hover:border-border-strong hover:text-text-primary"
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div className="grid grid-cols-7 gap-1.5">
               {CAMERA_SCHEDULE_WEEKDAYS.map((weekday) => {
@@ -1142,42 +1218,58 @@ function CameraScheduleDialog({
             </div>
           </div>
           <div className="space-y-2">
-            {windows.map((window, index) => (
-              <div
-                key={`${index}-${window.start}-${window.end}`}
-                className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2"
-              >
-                <input
-                  type="time"
-                  value={window.start}
-                  disabled={!enabled}
-                  onChange={(e) =>
-                    updateWindow(index, "start", e.currentTarget.value)
-                  }
-                  className="min-w-0 rounded-md border border-border bg-bg-primary px-3 py-2 text-body text-text-primary disabled:opacity-50"
-                />
-                <span className="text-text-tertiary">-</span>
-                <input
-                  type="time"
-                  value={window.end}
-                  disabled={!enabled}
-                  onChange={(e) =>
-                    updateWindow(index, "end", e.currentTarget.value)
-                  }
-                  className="min-w-0 rounded-md border border-border bg-bg-primary px-3 py-2 text-body text-text-primary disabled:opacity-50"
-                />
-                <button
-                  type="button"
-                  onClick={() => removeWindow(index)}
-                  disabled={!enabled || windows.length <= 1}
-                  aria-label={t("hero.scheduleRemoveWindow")}
-                  title={t("hero.scheduleRemoveWindow")}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-text-tertiary hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            {windows.map((window, index) => {
+              const crossMidnight = isCrossMidnightWindow(window);
+              return (
+                <div
+                  key={`${index}-${window.start}-${window.end}`}
+                  className="space-y-1.5 rounded-md border border-border bg-bg-primary/40 p-2"
                 >
-                  <IconTrash className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
+                  <div className="grid grid-cols-[1fr_auto_1fr_auto] items-end gap-2">
+                    <div className="min-w-0 space-y-1">
+                      {crossMidnight && (
+                        <span className="inline-flex rounded bg-brand-primary/10 px-1.5 py-0.5 text-[11px] text-brand-primary">
+                          {t("hero.scheduleSameDay")}
+                        </span>
+                      )}
+                      <Time24Input
+                        value={window.start}
+                        disabled={!enabled}
+                        onChange={(next) => updateWindow(index, "start", next)}
+                      />
+                    </div>
+                    <span className="pb-2 text-text-tertiary">-</span>
+                    <div className="min-w-0 space-y-1">
+                      {crossMidnight && (
+                        <span className="inline-flex rounded bg-brand-primary/10 px-1.5 py-0.5 text-[11px] text-brand-primary">
+                          {t("hero.scheduleNextDay")}
+                        </span>
+                      )}
+                      <Time24Input
+                        value={window.end}
+                        disabled={!enabled}
+                        onChange={(next) => updateWindow(index, "end", next)}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeWindow(index)}
+                      disabled={!enabled || windows.length <= 1}
+                      aria-label={t("hero.scheduleRemoveWindow")}
+                      title={t("hero.scheduleRemoveWindow")}
+                      className="mb-0.5 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-text-tertiary hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <IconTrash className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {crossMidnight && (
+                    <div className="text-caption text-text-tertiary">
+                      {t("hero.scheduleCrossMidnightHint")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
             <button
               type="button"
               onClick={() =>
