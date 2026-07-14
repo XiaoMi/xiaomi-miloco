@@ -84,7 +84,7 @@ def proxy_with_runner(mock_miot_proxy, mock_log_repo):
     p = PerceptionEngineProxy.__new__(PerceptionEngineProxy)
     p.perception_engine = MagicMock()
     p._last_captions = {}
-    p._executor = None
+    p._inference_worker = None
 
     mock_task_record_service = MagicMock()
     mock_task_record_service.read_duration_target_state = MagicMock(return_value=None)

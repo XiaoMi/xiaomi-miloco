@@ -128,3 +128,4 @@ miloco-cli perceive query --source <did> [--source <did>] --query "<用户问题
 4. **设备信息动态获取。** 从 `perceive devices` 拿摄像头，不硬编码设备清单。
 5. **回复简短自然。** 按第四步组合，不堆砌术语或原始字段。
 6. **隐私保护。** 摄像头感知结果不存储原始画面/录音，仅返回文本描述。不主动拍摄/录音，仅在用户明确提问时触发。
+7. **声音关闭的相机听不到它的现场声音。** 声音可按相机开关（面板或 `scope camera mic-on/mic-off`，见 miloco-miot-scope；状态看 `scope camera list` 的 `voice_in_use`）——`voice_in_use=false` 时该相机音频完全不被处理，`perceive query` 也听不到它的现场声音（问"有没有人说话"只能靠画面判断）；视频感知照常。查询时如实告知「该摄像头声音已关闭」；除非用户明确要求打开，不要自行改动。

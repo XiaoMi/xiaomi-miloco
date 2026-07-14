@@ -87,12 +87,15 @@ def patched(monkeypatch):
         )
 
     monkeypatch.setattr(disp_mod, "track_agent_run", fake_track)
+    # message_ttl_sec 默认给一个极大值 → 现有用例不触发过期；过期专项用例各自覆盖。
     monkeypatch.setattr(
         disp_mod,
         "get_settings",
         lambda: SimpleNamespace(
             dispatcher=SimpleNamespace(
-                turn_wait_timeout_ms=30_000, max_queue=MAX_QUEUE
+                turn_wait_timeout_ms=30_000,
+                max_queue=MAX_QUEUE,
+                message_ttl_sec=1e9,
             )
         ),
     )
@@ -168,6 +171,82 @@ def test_enforce_cap_type_priority_dominates_intra():
 
     assert len(q) == MAX_QUEUE
     assert all(e.event_type == "interaction" for e in q)
+
+
+def _patch_ttl(monkeypatch, ttl_sec: float, max_queue: int = MAX_QUEUE) -> None:
+    """Point disp_mod.get_settings at a stub with the given message_ttl_sec."""
+    monkeypatch.setattr(
+        disp_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            dispatcher=SimpleNamespace(
+                turn_wait_timeout_ms=30_000,
+                max_queue=max_queue,
+                message_ttl_sec=ttl_sec,
+            )
+        ),
+    )
+
+
+def test_drop_expired_evicts_aged_keeps_fresh(monkeypatch):
+    """入队龄超过 TTL 的清掉，龄内的保留。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    q.append(_QueuedEvent("interaction", ["old"], _join, 0, now - 60))  # 60s 前，过期
+    q.append(_QueuedEvent("interaction", ["fresh"], _join, 0, now - 1))  # 1s 前，未过期
+
+    d._drop_expired(sk)
+
+    assert [e.items[0] for e in d._queues[sk]] == ["fresh"]
+
+
+def test_drop_expired_disabled_when_ttl_non_positive(monkeypatch):
+    """TTL<=0 关闭过期：再旧也不清。"""
+    _patch_ttl(monkeypatch, ttl_sec=0.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    q.append(_QueuedEvent("interaction", ["ancient"], _join, 0, now - 10_000))
+
+    d._drop_expired(sk)
+
+    assert [e.items[0] for e in d._queues[sk]] == ["ancient"]
+
+
+@pytest.mark.asyncio
+async def test_drop_expired_resolves_delivered_false(monkeypatch):
+    """过期即丢弃 → delivered future resolve False（与淘汰同语义）。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    fut = asyncio.get_event_loop().create_future()
+    ev = _QueuedEvent("interaction", ["old"], _join, 0, now - 60)
+    ev.delivered = fut
+    d._queues.setdefault(sk, []).append(ev)
+
+    d._drop_expired(sk)
+
+    assert fut.result() is False
+
+
+def test_take_batch_drops_expired_before_packing(monkeypatch):
+    """打包发送前先清过期：僵尸消息绝不进本轮 turn。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    q.append(_QueuedEvent("interaction", ["stale"], _join, 0, now - 60))
+    q.append(_QueuedEvent("interaction", ["live"], _join, 0, now - 1))
+
+    batch = d._take_batch(sk)
+
+    assert [e.items[0] for e in batch] == ["live"]
 
 
 def test_take_batch_render_order_ignores_intra_priority():
@@ -417,6 +496,71 @@ async def test_dispatch_returns_false_when_new_event_evicted(patched):
         await d.stop()
 
     assert accepted is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_expired_freed_space_admits_new_event(patched, monkeypatch):
+    """新消息入队时清理过期腾空间：满队全过期 → 新消息不被超长淘汰而被接纳。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    await d.start()
+    monkeypatch.setattr(d, "_kick", lambda sk: None)  # 冻结 drainer，留住队列供检查
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    for i in range(MAX_QUEUE):  # 满队，且全部过期
+        q.append(_QueuedEvent("interaction", [f"i{i}"], _join, 0, now - 60))
+    try:
+        # 若无过期清理，bind 最不紧急会被自己的超额 append 淘汰（False）；
+        # 过期清理先腾空 → bind 被接纳。
+        accepted = await d.dispatch("bind", ["late"], _join)
+        assert accepted is True
+        assert [e.items[0] for e in d._queues[sk]] == ["late"]
+    finally:
+        await d.stop()
+
+
+@pytest.mark.asyncio
+async def test_expired_event_dropped_before_send(patched, monkeypatch):
+    """过期条目在发送前被清：turn 只收到新鲜内容，过期者 delivered=False。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    await d.start()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    stale_fut = asyncio.get_event_loop().create_future()
+    stale = _QueuedEvent("interaction", ["stale"], _join, 0, now - 60)
+    stale.delivered = stale_fut
+    try:
+        d._queues.setdefault(sk, []).append(stale)  # 预置一条过期
+        await d.dispatch("interaction", ["fresh"], _join)  # 新鲜的触发 drain
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert len(patched.turns) == 1
+    assert patched.turns[0].msg == "fresh"  # 仅新鲜条目送出
+    assert stale_fut.result() is False  # 过期条目未送达
+
+
+@pytest.mark.asyncio
+async def test_ttl_disabled_keeps_aged_events(patched, monkeypatch):
+    """TTL<=0 关闭过期：陈旧条目照常送出。"""
+    _patch_ttl(monkeypatch, ttl_sec=0.0)
+    d = AgentDispatcher()
+    await d.start()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    try:
+        d._queues.setdefault(sk, []).append(
+            _QueuedEvent("interaction", ["ancient"], _join, 0, now - 10_000)
+        )
+        d._kick(sk)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert [t.msg for t in patched.turns] == ["ancient"]
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,6 @@ import logging
 import re
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from miloco.config import get_settings
@@ -36,6 +35,7 @@ from miloco.perception import omni_probe_registry
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.engine.types import RealtimePerceptionResult
+from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.schema import (
     PerceptionBatch,
     PerceptionLatency,
@@ -246,8 +246,8 @@ class PipelineProcessor:
         task = asyncio.create_task(_run_omni_probe())
         omni_probe_registry.register(task)
 
-    def set_inference_executor(self, executor: ThreadPoolExecutor) -> None:
-        """Forward the inference executor to the engine proxy.
+    def set_inference_worker(self, worker: InferenceWorker) -> None:
+        """Forward the inference worker to the engine proxy.
 
         Lifecycle: STARTING → READY (success) / FAILED (异常)。
         """
@@ -255,7 +255,7 @@ class PipelineProcessor:
         mon.set_lifecycle(NodeName.PROCESSOR, Lifecycle.STARTING)
 
         try:
-            self._perception_engine_proxy.set_executor(executor)
+            self._perception_engine_proxy.set_inference_worker(worker)
         except Exception as e:
             state = mon.get_state(NodeName.PROCESSOR)
             if state and state.lifecycle == Lifecycle.STARTING:

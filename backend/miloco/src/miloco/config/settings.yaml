@@ -110,6 +110,7 @@ perception:
 dispatcher:
   turn_wait_timeout_ms: 180000   # 同步等待单个 agent turn 结束的超时（毫秒）
   max_queue: 10                  # 每会话队列上限；超出按 (类型优先级, 条目级优先级, 入队时间) 淘汰最不紧急者
+  message_ttl_sec: 300           # 待发送消息最大存活时长（秒）；入队龄超此值在入队/发送前清理，不再投递。<=0 关闭
 
 # 可观测性
 perf:
