@@ -691,7 +691,7 @@ def test_device_spec_default_table(runner, fake_home_info):
     assert "home=我的家" in text
     assert "device_name=台灯" in text
     assert "room=客厅" in text
-    assert "properties" in text
+    assert "[service 2]" in text  # 按 service 分组的标题行
     assert "prop.2.1" in text
     mock.assert_called_once_with("/api/miot/devices/lamp_001/spec")
 
@@ -728,6 +728,51 @@ def test_device_spec_multiple_partial_failure(runner, fake_home_info):
         result = runner.invoke(cli, ["device", "spec", "good", "bad"])
     assert result.exit_code == 0
     assert "did=good" in result.output
+
+
+def test_device_spec_groups_by_service_with_description(runner, fake_home_info):
+    """spec 按 service 分组：标题行带 service_type_name（service_description），
+    props/action 归到各自 service 小节下。"""
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {
+            "code": 0,
+            "data": {
+                "did": "lamp_001",
+                "name": "台灯",
+                "online": True,
+                "category": "light",
+                "spec": {
+                    "prop.2.1": {
+                        "type_name": "on", "format": "bool",
+                        "writeable": True, "readable": True,
+                        "service_type_name": "light",
+                        "service_description": "灯光",
+                    },
+                    "action.2.1": {
+                        "type_name": "toggle",
+                        "service_type_name": "light",
+                        "service_description": "灯光",
+                    },
+                    "prop.3.1": {
+                        "type_name": "on", "format": "bool",
+                        "writeable": True, "readable": True,
+                        "service_type_name": "indicator-light",
+                        "service_description": "指示灯",
+                    },
+                },
+            },
+        }
+        result = runner.invoke(cli, ["device", "spec", "lamp_001"])
+    assert result.exit_code == 0
+    text = result.output
+    # 两个 service 各成小节，标题带类型与中文描述
+    assert "[service 2] light（灯光）" in text
+    assert "[service 3] indicator-light（指示灯）" in text
+    # action 归到 service 2 下，且在 service 3 标题之前出现
+    assert text.index("action.2.1") < text.index("[service 3]")
+    # 无 properties:/actions: 小节标题，行不缩进（iid 顶格）
+    assert "properties:" not in text and "actions:" not in text
+    assert "\nprop.2.1  " in text and "\naction.2.1  " in text
 
 
 def test_device_props_annotates_spec_name(runner, fake_home_info):
