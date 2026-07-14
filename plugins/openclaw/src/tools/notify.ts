@@ -60,6 +60,8 @@ type DeliverAttempt = {
 
 const recentSends = new Map<string, number>();
 
+// 与 miloco-notify skill references/channel-config.md 的「bindHint 模板」表保持一致；修改任一处需同步另一处。
+// 返回给 agent 作为可直接翻译成主人语言的 bindHint 范例（兜底：agent 未加载 skill 时仍能照做）。
 const BIND_HINT_EXAMPLE: Record<BindReason, string> = {
   not_configured:
     "您尚未设置 Miloco 通知频道，本条消息已临时发送到最近活跃的对话。回复「绑定通知频道」可将当前对话加入固定的 Miloco 通知频道列表，后续提醒、定时任务、告警等通知都会发送到所有已绑定通道。",

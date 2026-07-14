@@ -55,6 +55,11 @@ function pickOwnerBroadcastPrimary(
   );
 }
 
+function isDeliveredOnboardingInvite(wait: WaitResult): boolean {
+  // timeout 表示插件未在等待窗口内拿到终态；按 webhook 回传口径视为已提交投递，避免后端重试。
+  return wait.status === "ok" || wait.status === "timeout";
+}
+
 function isContextOverflow(text: string | null | undefined): boolean {
   return typeof text === "string" && /context overflow/i.test(text);
 }
@@ -149,9 +154,6 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
         });
         results.push({ sessionKey: runSessionKey, runId: result.runId });
       }
-      if (isOwnerBroadcast) {
-        writeOnboardingInviteState(runTargets);
-      }
       if (traceId) {
         for (const item of results) registerTraceLink(item.runId, traceId);
       }
@@ -164,6 +166,15 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
           })) as WaitResult,
         })),
       );
+      if (isOwnerBroadcast) {
+        // 只有实际送达（或已提交但等待超时）的会话才允许承接后续 onboarding 回复。
+        const deliveredSessionKeys = waitResults
+          .filter((item) => isDeliveredOnboardingInvite(item.wait))
+          .map((item) => item.sessionKey);
+        if (deliveredSessionKeys.length > 0) {
+          writeOnboardingInviteState(deliveredSessionKeys);
+        }
+      }
       const primary = pickOwnerBroadcastPrimary(
         waitResults,
         effectiveSessionKey,
