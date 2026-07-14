@@ -65,9 +65,11 @@ run_backend_tests() {
     for d in "${ignore_dirs[@]}"; do
         ignore_args="$ignore_args --ignore=$d"
     done
-    local out
+    local out rc
+    set +e
     out=$(uv run pytest miloco/tests/ -q $ignore_args --tb=line --color=no 2>&1)
-    local rc=$?
+    rc=$?
+    set -e
     if [[ $rc -eq 0 ]]; then
         ok "backend 测试"
     else
