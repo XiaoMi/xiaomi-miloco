@@ -216,25 +216,25 @@ class CentralHubManager:
         client = self._clients.get(info["group_id"])
         return bool(client and client.is_connected)
 
-    def local_control_ready(self, did: str) -> bool:
-        """``can_control`` AND not in a recent local-failure cooldown.
+    def in_local_cooldown(self, did: str) -> bool:
+        """True if did is within a recent local-failure cooldown window.
 
-        The routing layer uses this instead of ``can_control`` so a device that
-        is nominally controllable but currently unreachable does not make every
-        call pay the full local RPC timeout — after one failure it is routed to
-        cloud for a window, then retried.
+        After a local RPC fails, the did is cooled down for a short window. The
+        routing layer fast-fails local control for it during the window — does
+        not retry local (avoids paying the full RPC timeout again) and, aligned
+        with the Xiaomi Home integration, does NOT fall back to cloud. Bounds a
+        flaky device's batch to one timeout; self-heals when the window lapses.
         """
-        if not self.can_control(did):
-            return False
         expiry = self._local_cooldown.get(did)
-        if expiry is not None:
-            if time.monotonic() < expiry:
-                return False
-            del self._local_cooldown[did]  # window lapsed — allow local again
-        return True
+        if expiry is None:
+            return False
+        if time.monotonic() < expiry:
+            return True
+        del self._local_cooldown[did]  # window lapsed
+        return False
 
     def note_local_failure(self, did: str) -> None:
-        """Mark a did's local path as failed; route it to cloud for a window."""
+        """Mark a did's local path as failed → fast-fail local for a window."""
         self._local_cooldown[did] = time.monotonic() + _LOCAL_COOLDOWN_SEC
 
     async def set_prop_async(self, did: str, siid: int, piid: int, value: Any) -> dict:
