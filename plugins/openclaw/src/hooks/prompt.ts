@@ -133,10 +133,11 @@ function buildOnboardingSessionBlock(
   const currentState = readOnboardingState();
   if (!currentState?.invitedSessionKeys.includes(key)) return "";
 
-  const state =
-    currentState.lockedSessionKey || !isOnboardingInviteReply(prompt)
-      ? currentState
-      : lockOnboardingSession(key);
+  if (!isOnboardingInviteReply(prompt)) return "";
+
+  const state = currentState.lockedSessionKey
+    ? currentState
+    : lockOnboardingSession(key);
   if (!state || !state.invitedSessionKeys.includes(key)) return "";
   if (state.lockedSessionKey && state.lockedSessionKey !== key) {
     return `## Onboarding 会话收敛

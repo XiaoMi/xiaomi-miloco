@@ -315,4 +315,40 @@ describe("before_prompt_build 组装", () => {
     expect(r.appendSystemContext).toContain("不要强行要求切回");
     expect(readOnboardingState()?.lockedSessionKey).toBe("wechat:s1");
   });
+
+  it("已锁到本会话后，普通闲聊不会继续注入 onboarding 收敛块", async () => {
+    writeOnboardingInviteState(["wechat:s1", "telegram:s2"]);
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    await run("telegram:s2", {
+      prompt: "好的，开始登记吧",
+      workspaceDir: tmpWorkspace,
+    });
+
+    const r = await run("telegram:s2", {
+      prompt: "现在几点",
+      workspaceDir: tmpWorkspace,
+    });
+
+    expect(r.appendSystemContext ?? "").not.toContain("Onboarding 会话收敛");
+    expect(readOnboardingState()?.lockedSessionKey).toBe("telegram:s2");
+  });
+
+  it("已锁到另一会话后，普通设备指令不会注入 onboarding 收敛块", async () => {
+    writeOnboardingInviteState(["wechat:s1", "telegram:s2"]);
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    await run("telegram:s2", {
+      prompt: "好的，开始登记吧",
+      workspaceDir: tmpWorkspace,
+    });
+
+    const r = await run("wechat:s1", {
+      prompt: "帮我把客厅灯打开",
+      workspaceDir: tmpWorkspace,
+    });
+
+    expect(r.appendSystemContext ?? "").not.toContain("Onboarding 会话收敛");
+    expect(readOnboardingState()?.lockedSessionKey).toBe("telegram:s2");
+  });
 });
