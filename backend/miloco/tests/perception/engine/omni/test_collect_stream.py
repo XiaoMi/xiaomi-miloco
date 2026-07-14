@@ -6,6 +6,11 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from miloco.perception.engine.omni.omni_client import _collect_stream_response
+from miloco.perception.engine.omni.provider import MiMoAdapter
+
+# _collect_stream_response 现在收「预算好的 url」+ adapter；OpenAI 兼容族的 chunk 反解析
+# 走 MiMoAdapter（OpenAICompatAdapter 抽 choices[].delta.content）。
+_ADAPTER = MiMoAdapter()
 
 
 def _sse_body(*chunks: dict, done: bool = True) -> str:
@@ -67,7 +72,7 @@ class TestCollectStreamResponse:
     async def test_basic_content(self):
         body = _sse_body(_chunk("Hello"), _chunk(" world"))
         client = _mock_client(200, body)
-        result = await _collect_stream_response(client, "https://test", {}, {"messages": []})
+        result = await _collect_stream_response(client, "https://test", {}, {"messages": []}, _ADAPTER)
         assert result["choices"][0]["message"]["content"] == "Hello world"
 
     @pytest.mark.asyncio
@@ -75,14 +80,14 @@ class TestCollectStreamResponse:
         usage = {"prompt_tokens": 100, "completion_tokens": 20}
         body = _sse_body(_chunk("Hi"), _chunk(usage=usage))
         client = _mock_client(200, body)
-        result = await _collect_stream_response(client, "https://test", {}, {"messages": []})
+        result = await _collect_stream_response(client, "https://test", {}, {"messages": []}, _ADAPTER)
         assert result["usage"] == usage
 
     @pytest.mark.asyncio
     async def test_empty_stream(self):
         body = "data: [DONE]\n"
         client = _mock_client(200, body)
-        result = await _collect_stream_response(client, "https://test", {}, {"messages": []})
+        result = await _collect_stream_response(client, "https://test", {}, {"messages": []}, _ADAPTER)
         assert result["choices"][0]["message"]["content"] == ""
         assert result["usage"] == {}
 
@@ -90,25 +95,25 @@ class TestCollectStreamResponse:
     async def test_skips_malformed_json(self):
         body = "data: {bad}\n\n" + _sse_body(_chunk("ok"))
         client = _mock_client(200, body)
-        result = await _collect_stream_response(client, "https://test", {}, {"messages": []})
+        result = await _collect_stream_response(client, "https://test", {}, {"messages": []}, _ADAPTER)
         assert result["choices"][0]["message"]["content"] == "ok"
 
     @pytest.mark.asyncio
     async def test_skips_empty_and_non_data_lines(self):
         body = "\n  \nretry: 3000\n" + _sse_body(_chunk("a"))
         client = _mock_client(200, body)
-        result = await _collect_stream_response(client, "https://test", {}, {"messages": []})
+        result = await _collect_stream_response(client, "https://test", {}, {"messages": []}, _ADAPTER)
         assert result["choices"][0]["message"]["content"] == "a"
 
     @pytest.mark.asyncio
     async def test_multiple_content_chunks(self):
         body = _sse_body(_chunk("a"), _chunk("b"), _chunk("c"))
         client = _mock_client(200, body)
-        result = await _collect_stream_response(client, "https://test", {}, {"messages": []})
+        result = await _collect_stream_response(client, "https://test", {}, {"messages": []}, _ADAPTER)
         assert result["choices"][0]["message"]["content"] == "abc"
 
     @pytest.mark.asyncio
     async def test_400_raises(self):
         client = _mock_client(400, '{"error": "bad"}')
         with pytest.raises(httpx.HTTPStatusError):
-            await _collect_stream_response(client, "https://test", {}, {"messages": []})
+            await _collect_stream_response(client, "https://test", {}, {"messages": []}, _ADAPTER)

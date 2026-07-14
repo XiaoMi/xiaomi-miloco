@@ -586,3 +586,72 @@ def test_list_models_no_key_bad_url_404_reports_url_first(client, monkeypatch):
     ).json()["data"]
     assert data["ok"] is False
     assert data["code"] == "http_error"  # 地址错优先于缺 key,且不泄漏原始 HTML
+
+
+# ─── Gemini(原生协议）探测 / 列模型：走 adapter、x-goog-api-key、跳过 GET /models ───
+
+
+def _recording_async_client(calls, get_resp=None, post_resp=None):
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            calls.append(("GET", a[0] if a else k.get("url"), k.get("headers") or {}))
+            return get_resp
+
+        async def post(self, *a, **k):
+            calls.append(("POST", a[0] if a else k.get("url"), k.get("headers") or {}))
+            return post_resp
+
+    return _C
+
+
+def test_test_connection_gemini_skips_preflight_uses_goog_key(client, monkeypatch):
+    """Gemini（非 OpenAI 兼容族）测连通性：跳过 GET /models 预检，直接 adapter 化 chat，
+    用 x-goog-api-key + :generateContent。原硬编码 Bearer + /models 会对合法 Gemini 误报失败。"""
+    from miloco.admin import router as r
+
+    calls: list = []
+    monkeypatch.setattr(
+        r.httpx, "AsyncClient", _recording_async_client(calls, post_resp=_FakeResp(200))
+    )
+    data = client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "model": "gemini-3-flash-preview",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": "k",
+        },
+    ).json()["data"]
+    assert data["ok"] is True and data["code"] == "ok"
+    assert "GET" not in [c[0] for c in calls]  # 跳过 OpenAI 特有的 /models 预检
+    post = next(c for c in calls if c[0] == "POST")
+    assert post[1].endswith(":generateContent")
+    assert "x-goog-api-key" in post[2] and "Authorization" not in post[2]
+
+
+def test_fetch_models_gemini_parses_name_and_goog_key(client, monkeypatch):
+    """Gemini 列模型：用 x-goog-api-key，解析 {models:[{name}]} 并剥 "models/" 前缀。"""
+    from miloco.admin import router as r
+
+    calls: list = []
+    resp = _FakeResp(200, {"models": [
+        {"name": "models/gemini-3.5-flash"},
+        {"name": "models/gemini-3-flash-preview"},
+    ]})
+    monkeypatch.setattr(r.httpx, "AsyncClient", _recording_async_client(calls, get_resp=resp))
+    data = client.post(
+        "/api/admin/omni-config/models",
+        json={"base_url": "https://generativelanguage.googleapis.com/v1beta", "api_key": "k"},
+    ).json()["data"]
+    assert data["ok"] is True
+    assert data["models"] == ["gemini-3-flash-preview", "gemini-3.5-flash"]  # 剥前缀 + sorted
+    get = next(c for c in calls if c[0] == "GET")
+    assert "x-goog-api-key" in get[2] and "Authorization" not in get[2]

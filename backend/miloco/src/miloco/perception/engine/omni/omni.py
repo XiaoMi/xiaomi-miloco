@@ -292,6 +292,7 @@ async def _call_omni_messages(
     )
 
     forced_stream = body.get("stream", False)
+    url = adapter.endpoint(config.base_url, config.model, stream=forced_stream)
 
     client = _get_fused_http_client(config.timeout)
     t0 = time.monotonic()
@@ -299,16 +300,12 @@ async def _call_omni_messages(
     error: dict[str, Any] | None = None
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
     }
     try:
         if not forced_stream:
-            resp = await client.post(
-                f"{config.base_url}/chat/completions",
-                headers=headers,
-                json=body,
-            )
+            resp = await client.post(url, headers=headers, json=body)
             if resp.status_code != 200:
                 logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
                 if resp.status_code == 400:
@@ -317,9 +314,9 @@ async def _call_omni_messages(
                         _summarize_multimodal_payload(messages),
                     )
             resp.raise_for_status()
-            raw = resp.json()
+            raw = adapter.parse_response(resp.json())
         else:
-            raw = await _collect_stream_response(client, config.base_url, headers, body)
+            raw = await _collect_stream_response(client, url, headers, body, adapter)
         # 服务端在 fused 大 payload 下偶发返回非 dict body (~1.5%);此处校验
         # 形态并 dump 截断后的原始响应,便于事后定位服务端返回了什么。
         if not isinstance(raw, dict):
