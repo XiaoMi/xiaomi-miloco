@@ -276,9 +276,12 @@ export async function listScopeCameras(homeId?: HomeId): Promise<ScopeCamera[]> 
 
 // 轻量触发 backend 刷新相机云端 online 状态(节流见 impl,不扰流)。「此刻」页加载
 // 相机前调,让"已离线/在线"判断不读陈旧缓存。非主家庭(mock)直接 no-op。
-export async function refreshCameraOnline(homeId?: HomeId): Promise<void> {
+export async function refreshCameraOnline(
+  homeId?: HomeId,
+  force = false,
+): Promise<void> {
   if (!isPrimary(homeId)) return;
-  return impl.realRefreshCameraOnline();
+  return impl.realRefreshCameraOnline(force);
 }
 
 export async function toggleScopeCamera(
