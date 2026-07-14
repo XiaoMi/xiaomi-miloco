@@ -35,7 +35,7 @@ describe("onboarding session lock state", () => {
     expect(payload).toMatchObject({
       invitedSessionKeys: ["wechat:a", "telegram:b"],
       invitedAt: "2026-07-10T00:00:00.000Z",
-      expiresAt: "2026-07-10T12:00:00.000Z",
+      expiresAt: "2026-07-10T01:00:00.000Z",
     });
 
     readJsonFileSyncMock.mockReturnValue(payload);
@@ -50,7 +50,7 @@ describe("onboarding session lock state", () => {
     readJsonFileSyncMock.mockReturnValue({
       invitedSessionKeys: ["wechat:a", "telegram:b"],
       invitedAt: "2026-07-10T00:00:00.000Z",
-      expiresAt: "2026-07-10T12:00:00.000Z",
+      expiresAt: "2026-07-10T02:00:00.000Z",
     });
 
     const result = lockOnboardingSession("telegram:b", nowMs);
@@ -73,7 +73,7 @@ describe("onboarding session lock state", () => {
     const lockedState = {
       invitedSessionKeys: ["wechat:a", "telegram:b"],
       invitedAt: "2026-07-10T00:00:00.000Z",
-      expiresAt: "2026-07-10T12:00:00.000Z",
+      expiresAt: "2026-07-10T02:00:00.000Z",
       lockedSessionKey: "wechat:a",
       lockedAt: "2026-07-10T00:10:00.000Z",
     };
@@ -92,11 +92,11 @@ describe("onboarding session lock state", () => {
     const { readOnboardingState } = await import(
       "../src/home-profile/onboarding_state.js"
     );
-    const nowMs = Date.parse("2026-07-10T12:00:00.001Z");
+    const nowMs = Date.parse("2026-07-10T01:00:00.001Z");
     readJsonFileSyncMock.mockReturnValue({
       invitedSessionKeys: ["wechat:a"],
       invitedAt: "2026-07-10T00:00:00.000Z",
-      expiresAt: "2026-07-10T12:00:00.000Z",
+      expiresAt: "2026-07-10T01:00:00.000Z",
     });
 
     const result = readOnboardingState(nowMs);

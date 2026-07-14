@@ -2,7 +2,9 @@ import path from "node:path";
 import { milocoHome } from "../miloco/paths.js";
 import { readJsonFileSync, writeJsonFileSync } from "../utils/io.js";
 
-const ONBOARDING_LOCK_TTL_MS = 12 * 60 * 60 * 1000;
+// 当前插件侧没有现成的 onboarding 完成回调；本轮先采用短 TTL 收窄完成后残留窗口，
+// 避免为一条提示收敛状态引入后端 ↔ 插件的新完成信号协议。
+const ONBOARDING_LOCK_TTL_MS = 60 * 60 * 1000;
 
 type OnboardingState = {
   invitedSessionKeys: string[];

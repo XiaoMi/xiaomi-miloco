@@ -133,11 +133,13 @@ function buildOnboardingSessionBlock(
   const currentState = readOnboardingState();
   if (!currentState?.invitedSessionKeys.includes(key)) return "";
 
-  if (!isOnboardingInviteReply(prompt)) return "";
+  const hasLock = Boolean(currentState.lockedSessionKey);
+  const isOnboardingReply = hasLock
+    ? isOnboardingContinuationReply(prompt)
+    : isOnboardingInviteReply(prompt);
+  if (!isOnboardingReply) return "";
 
-  const state = currentState.lockedSessionKey
-    ? currentState
-    : lockOnboardingSession(key);
+  const state = hasLock ? currentState : lockOnboardingSession(key);
   if (!state || !state.invitedSessionKeys.includes(key)) return "";
   if (state.lockedSessionKey && state.lockedSessionKey !== key) {
     return `## Onboarding 会话收敛
@@ -156,17 +158,32 @@ function isOnboardingInviteReply(prompt: string): boolean {
   if (!text) return false;
   if (/[?？]/.test(text)) return false;
 
-  const onboardingIntent =
-    /(onboarding|初始化|入门|引导|登记|注册|家庭档案|家庭信息|成员信息|家庭成员|开始登记|开始初始化|继续登记|继续初始化)/i;
-  if (onboardingIntent.test(text)) return true;
-
-  const controlIntent =
-    /(打开|关闭|开灯|关灯|开空调|关空调|空调|窗帘|灯|插座|电视|查询|查看|提醒|闹钟|定时|执行|控制|调到|设置|播放)/;
-  if (controlIntent.test(text)) return false;
+  if (hasExplicitOnboardingIntent(text)) return true;
+  if (hasControlIntent(text)) return false;
 
   return /^(好|好的|可以|行|嗯|嗯嗯|是|对|开始吧|开始|继续吧|继续|来吧|ok|okay|yes|yep|sure)[。.!！\s]*$/i.test(
     text,
   );
+}
+
+function isOnboardingContinuationReply(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  // 首次抢锁需要兼容“好的”这类自然回复；锁定后只接受明确 onboarding 意图，
+  // 避免 onboarding 完成前后的一句裸肯定在 TTL 内重新注入收敛指令。
+  return hasExplicitOnboardingIntent(text);
+}
+
+function hasExplicitOnboardingIntent(text: string): boolean {
+  const onboardingIntent =
+    /(onboarding|初始化|入门|引导|登记|注册|家庭档案|家庭信息|成员信息|家庭成员|开始登记|开始初始化|继续登记|继续初始化)/i;
+  return onboardingIntent.test(text);
+}
+
+function hasControlIntent(text: string): boolean {
+  const controlIntent =
+    /(打开|关闭|开灯|关灯|开空调|关空调|空调|窗帘|灯|插座|电视|查询|查看|提醒|闹钟|定时|执行|控制|调到|设置|播放)/;
+  return controlIntent.test(text);
 }
 
 const B_LANGUAGE = `## 输出语言
