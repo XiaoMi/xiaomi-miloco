@@ -17,6 +17,11 @@ class InputConfig:
     audio_overlap_ms: int = (
         100  # overlap window to reduce audio truncation at boundaries
     )
+    # 仅为接住 InputConfig(**engine_cfg["input"]) 的 kwargs（settings.yaml 的 engine.input
+    # 默认含此键，config.json 亦可覆盖）。
+    # 与 fps / omni_fps 不同：运行时真值由 _get_video_short_edge() 每帧读 settings 字典
+    # （见 prompt_builder），不从此 dataclass 字段读——故改分辨率免重启。别照 fps 的先例
+    # 在构造前设 config.input.video_short_edge 期望生效，那样会被静默忽略。
     video_short_edge: int = 512
 
 
