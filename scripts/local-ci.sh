@@ -153,7 +153,7 @@ run_pr_review_gate() {
     local pr_num repo
     pr_num=$(_detect_pr_number)
     if [[ -z "$pr_num" ]]; then
-        _info "未检测到 PR 号（设 MILOCO_PR_NUMBER 或从 PR 分支执行），跳过门禁"
+        info "未检测到 PR 号（设 MILOCO_PR_NUMBER 或从 PR 分支执行），跳过门禁"
         return
     fi
     repo="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
