@@ -292,8 +292,11 @@ class MIoTClient:
     async def set_props_async(
         self, params: list[MIoTSetPropertyParam]
     ) -> list:
-        """Set device properties. Local-controllable dids go local (no cloud
-        fallback on failure); the rest go cloud."""
+        """Set device properties. Local-controllable dids go local; on local
+        failure the failing item is returned as an error (no in-call cloud
+        fallback, so a set is never double-sent) and the did enters a cooldown
+        window during which its subsequent requests route to cloud. Not
+        locally-controllable dids go cloud."""
         ch = self._central_hub
         if not ch or not ch.enabled:
             return await self._http_client.set_props_async(params)
@@ -304,11 +307,8 @@ class MIoTClient:
             if not ch.can_control(p.did):
                 cloud_idx.append(i)  # not locally controllable → cloud
                 continue
-            if ch.in_local_cooldown(p.did):  # recent local failure → fast-fail
-                results[i] = {
-                    "did": p.did, "siid": p.siid, "piid": p.piid,
-                    "code": MIoTErrorCode.CODE_UNAVAILABLE.value,
-                }
+            if ch.in_local_cooldown(p.did):  # recent local failure → cloud during cooldown
+                cloud_idx.append(i)
                 continue
             try:
                 r = await ch.set_prop_async(p.did, p.siid, p.piid, p.value)
@@ -356,8 +356,11 @@ class MIoTClient:
     async def get_props_async(
         self, params: list[MIoTGetPropertyParam]
     ) -> list:
-        """Get device properties. Local-controllable dids read local (no cloud
-        fallback on failure); the rest read cloud."""
+        """Get device properties. Local-controllable dids read local; on local
+        failure the failing item is returned as an error (no in-call cloud
+        fallback) and the did enters a cooldown window during which its
+        subsequent requests read from cloud. Not locally-controllable dids read
+        cloud."""
         ch = self._central_hub
         if not ch or not ch.enabled:
             return await self._http_client.get_props_async(params)
@@ -368,11 +371,8 @@ class MIoTClient:
             if not ch.can_control(p.did):
                 cloud_idx.append(i)  # not locally controllable → cloud
                 continue
-            if ch.in_local_cooldown(p.did):  # recent local failure → fast-fail
-                results[i] = {
-                    "did": p.did, "siid": p.siid, "piid": p.piid,
-                    "value": None, "code": MIoTErrorCode.CODE_UNAVAILABLE.value,
-                }
+            if ch.in_local_cooldown(p.did):  # recent local failure → cloud during cooldown
+                cloud_idx.append(i)
                 continue
             try:
                 value = await ch.get_prop_async(p.did, p.siid, p.piid)
@@ -416,16 +416,15 @@ class MIoTClient:
         return results
 
     async def action_async(self, param: MIoTActionParam) -> dict:
-        """Call a device action. Locally-controllable → local only (no cloud
-        fallback on failure, so an action is never executed twice); otherwise
-        cloud."""
+        """Call a device action. Locally-controllable + not in cooldown → local
+        only (no in-call cloud fallback, so an action is never double-sent in one
+        call); on local failure the did enters a cooldown window during which its
+        subsequent actions route to cloud. Not locally-controllable → cloud."""
         ch = self._central_hub
-        if ch and ch.enabled and ch.can_control(param.did):
-            if ch.in_local_cooldown(param.did):  # recent local failure → fast-fail
-                return {
-                    "did": param.did, "siid": param.siid, "aiid": param.aiid,
-                    "code": MIoTErrorCode.CODE_UNAVAILABLE.value,
-                }
+        if (
+            ch and ch.enabled and ch.can_control(param.did)
+            and not ch.in_local_cooldown(param.did)
+        ):
             try:
                 r = await ch.action_async(
                     param.did, param.siid, param.aiid, param.in_
@@ -447,7 +446,7 @@ class MIoTClient:
                     "code": code if code is not None else MIoTErrorCode.CODE_UNAVAILABLE.value,
                 }
             return r  # success or device-level rejection → as-is
-        # not locally controllable → cloud
+        # not locally controllable, or in local cooldown → cloud
         try:
             return await self._http_client.action_async(param)
         except Exception as e:
