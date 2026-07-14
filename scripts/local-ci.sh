@@ -129,10 +129,34 @@ run_shellcheck() {
 }
 
 # ---- pr-review 门禁 (优先本地 Claude 审查，无 key 则拉云端 comment) ----------
+_detect_pr_number() {
+    # 优先 MILOCO_PR_NUMBER 环境变量，否则 gh pr view 自动检测当前分支关联的 PR
+    if [[ -n "${MILOCO_PR_NUMBER:-}" ]]; then
+        echo "$MILOCO_PR_NUMBER"
+        return
+    fi
+    if command -v gh &>/dev/null; then
+        set +e
+        local num
+        num=$(gh pr view --json number -q '.number' 2>/dev/null)
+        set -e
+        if [[ -n "$num" ]]; then
+            echo "$num"
+            return
+        fi
+    fi
+    echo ""
+}
+
 run_pr_review_gate() {
     info "pr-review 门禁…"
-    local pr_num="${MILOCO_PR_NUMBER:-279}"
-    local repo="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
+    local pr_num repo
+    pr_num=$(_detect_pr_number)
+    if [[ -z "$pr_num" ]]; then
+        _info "未检测到 PR 号（设 MILOCO_PR_NUMBER 或从 PR 分支执行），跳过门禁"
+        return
+    fi
+    repo="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
 
     # 优先跑本地 Claude 审查
     # 读 ~/.claude/settings.json 里的 ANTHROPIC_AUTH_TOKEN（系统自带真实 key）

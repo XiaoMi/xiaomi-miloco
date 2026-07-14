@@ -228,7 +228,18 @@ check_pr_review_gate() {
         _info "gh CLI 未安装，跳过"
         return
     fi
-    local pr_num="${MILOCO_PR_NUMBER:-279}"
+    local pr_num
+    pr_num=$("$SCRIPT_DIR/local-ci.sh" -c 'echo __detect__' 2>/dev/null || true)
+    # 复用 local-ci.sh 的检测逻辑：先 env 再 gh pr view
+    if [[ -z "${MILOCO_PR_NUMBER:-}" ]]; then
+        set +e; pr_num=$(gh pr view --json number -q '.number' 2>/dev/null); set -e
+    else
+        pr_num="$MILOCO_PR_NUMBER"
+    fi
+    if [[ -z "$pr_num" ]]; then
+        _info "未检测到 PR 号，跳过门禁"
+        return
+    fi
     local repo="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
     local comment severity_count
     set +e

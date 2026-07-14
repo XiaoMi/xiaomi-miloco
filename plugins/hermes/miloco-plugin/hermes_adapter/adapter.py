@@ -164,7 +164,7 @@ def _delete_hermes_session(session_id: str, timeout: float = 15.0) -> bool:
             [hermes_bin, "sessions", "delete", session_id, "--yes"],
             capture_output=True, text=True, timeout=timeout,
         )
-    except (subprocess.TimeoutExpired, Exception):
+    except Exception:
         return False
     out = proc.stdout + proc.stderr
     if "Deleted session" in out or "not found" in out:
@@ -466,12 +466,15 @@ class Adapter:
     ) -> dict[str, Any]:
         """切家庭时批量清理 Hermes 会话。按 (session_key, lane) 映射为 session_id 后逐个删。
 
-        返回 ``{"reset": [...], "failed": [...]}``。
+        返回 ``{"reset": [...], "failed": [...]}``。suggest 车道每次 turn
+        用一次性会话（带 uuid 后缀），无跨轮状态，跳过重置。
         """
         reset, failed, seen = [], [], set()
         import asyncio as _asyncio
         loop = _asyncio.get_running_loop()
         for session_key, lane in routes:
+            if lane == "miloco-suggest":
+                continue
             session_id = _map_session(session_key, lane)
             if session_id in seen:
                 continue
