@@ -65,14 +65,19 @@ class CronRepo:
             ).fetchall()
             return [self._row_to_cron(dict(r)) for r in rows]
 
-    def list_where(self, where_clause: str) -> list[Cron]:
-        """透传 SQL WHERE 子句 (调用方内部用, 不接受外部参数拼接).
-
-        用于 rebuild_scheduler_from_db 按 dispatch_owner 过滤等场景。
-        """
+    def list_orphans(self) -> list[Cron]:
+        """列出 task_id 为空的孤儿 cron 行 (task 被删或迁移遗留)."""
         with self.db.get_connection() as conn:
             rows = conn.execute(
-                f"SELECT * FROM cron WHERE {where_clause}"
+                "SELECT * FROM cron WHERE task_id IS NULL"
+            ).fetchall()
+            return [self._row_to_cron(dict(r)) for r in rows]
+
+    def list_internal(self) -> list[Cron]:
+        """列出所有 internal 分区 cron (backend 自管定时器, rebuild 重放用)."""
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cron WHERE dispatch_owner='internal'"
             ).fetchall()
             return [self._row_to_cron(dict(r)) for r in rows]
 
@@ -125,26 +130,16 @@ class CronRepo:
             conn.commit()
             return cursor.rowcount
 
-    def mark_fired_and_delete(self, cron_id: str, fired_at: int) -> int:
-        """at 成功后单事务 mark + DELETE (消除"fired_at 已填但未 DELETE"窄窗口).
+    def mark_fired_and_delete(self, cron_id: str) -> int:
+        """at 成功后单事务 DELETE.
 
-        UPDATE + DELETE 同一 BEGIN/COMMIT, 正常路径永远读不到 fired_at 已填的行。
+        原子性由单事务保证, 无需先 UPDATE fired_at (中间态外部读者永不可见);
+        runner 侧 fired_at 已填的 defensive 分支保留作两步事务未来重构的兜底。
         """
         with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("BEGIN")
-            try:
-                cursor.execute(
-                    "UPDATE cron SET fired_at=?, updated_at=? WHERE cron_id=?",
-                    (fired_at, now_ms(), cron_id),
-                )
-                cursor.execute("DELETE FROM cron WHERE cron_id=?", (cron_id,))
-                affected = cursor.rowcount
-                conn.commit()
-                return affected
-            except Exception:
-                conn.rollback()
-                raise
+            cursor = conn.execute("DELETE FROM cron WHERE cron_id=?", (cron_id,))
+            conn.commit()
+            return cursor.rowcount
 
     def increment_retry_attempt(self, cron_id: str) -> int:
         """status=error 后 retry_attempt +1, 返回新 attempt 值 (-1 = 不存在)."""

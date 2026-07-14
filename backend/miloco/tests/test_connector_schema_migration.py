@@ -5,8 +5,8 @@
 
 覆盖:
 - fresh-build 直接落 v2 形态 (rule NOT NULL + FK, cron 表存在, 无 task_link)
-- 迁移 A/B/C/D/E 五型 orphan 各自的处置策略
-- cron 行迁移 + cron dangling fail-fast
+- 迁移 A/B/C/D/E 五型 orphan 各自的处置策略 (D 取 task_link 侧, A/E 删+log)
+- cron 行迁移 + cron dangling 跳过+log (不阻塞启动)
 - 迁移后三重不变量
 - rollback_v2_to_v1 反向 + internal cron 前置断言
 """
@@ -290,8 +290,8 @@ def test_migrate_e_type_deleted(v1_db, caplog):
     assert "rule-e" in log_text
 
 
-def test_migrate_d_type_fails_fast(v1_db, caplog):
-    """D 型 (rule.task_id != task_link.task_id) → fail-fast + log 完整字段."""
+def test_migrate_d_type_takes_task_link_side(v1_db, caplog):
+    """D 型 (rule.task_id != task_link.task_id) → 取 task_link 侧 + log 完整字段."""
     conn = sqlite3.connect(str(v1_db))
     cursor = conn.cursor()
     _insert_task(cursor, "task-d-a")
@@ -303,15 +303,20 @@ def test_migrate_d_type_fails_fast(v1_db, caplog):
 
     import logging
 
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(Exception) as exc_info:
-            _run_init(v1_db)
+    with caplog.at_level(logging.WARNING):
+        _run_init(v1_db)
 
-    err_msg = str(exc_info.value)
-    assert "D-type" in err_msg or "aborted" in err_msg
+    from miloco.database.connector import get_db_connector
+
+    with get_db_connector().get_connection() as conn:
+        row = conn.execute(
+            "SELECT task_id FROM rule WHERE id='rule-d'"
+        ).fetchone()
+        assert row is not None
+        assert row["task_id"] == "task-d-b"  # 取 task_link 侧
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "D-type conflict" in log_text
+    assert "D-type conflict took link" in log_text
     assert "rule-d" in log_text
 
 
@@ -352,8 +357,8 @@ def test_migrate_cron_row_moved_to_external(v1_db):
         assert "task_link" not in tables
 
 
-def test_migrate_cron_dangling_fails_fast(v1_db, caplog):
-    """cron dangling (task_link.cron 指向已删 task) → fail-fast + log."""
+def test_migrate_cron_dangling_skipped_with_log(v1_db, caplog):
+    """cron dangling (task_link.cron 指向已删 task) → 跳过 + 全字段 log, 不阻塞启动."""
     conn = sqlite3.connect(str(v1_db))
     cursor = conn.cursor()
     # 建了 task_link.cron 但没建对应的 task
@@ -361,20 +366,41 @@ def test_migrate_cron_dangling_fails_fast(v1_db, caplog):
     # 或者直接 disable FK check.
     cursor.execute("PRAGMA foreign_keys=OFF")
     _insert_task_link(cursor, "task-gone", "cron", "dangling-cron")
+    _insert_task(cursor, "task-alive")
+    _insert_task_link(cursor, "task-alive", "cron", "alive-cron")
     conn.commit()
     conn.close()
 
     import logging
 
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(Exception) as exc_info:
-            _run_init(v1_db)
+    with caplog.at_level(logging.WARNING):
+        _run_init(v1_db)
 
-    err_msg = str(exc_info.value)
-    assert "cron dangling" in err_msg or "aborted" in err_msg
+    from miloco.database.connector import get_db_connector
+
+    with get_db_connector().get_connection() as conn:
+        # dangling 未 INSERT 到 cron 表
+        dangling = conn.execute(
+            "SELECT * FROM cron WHERE cron_id='dangling-cron'"
+        ).fetchone()
+        assert dangling is None
+        # 正常 cron 迁移未受影响
+        alive = conn.execute(
+            "SELECT * FROM cron WHERE cron_id='alive-cron'"
+        ).fetchone()
+        assert alive is not None
+        assert alive["task_id"] == "task-alive"
+        # task_link 表已 DROP
+        tables = {
+            r["name"]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "task_link" not in tables
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "cron dangling" in log_text
+    assert "skipping dangling cron" in log_text
     assert "dangling-cron" in log_text
 
 

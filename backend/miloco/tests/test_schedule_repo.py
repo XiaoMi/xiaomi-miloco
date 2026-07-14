@@ -95,14 +95,19 @@ def test_insert_external_nullable_fields(repo):
     assert got.name is None and got.kind is None
 
 
-def test_list_by_task_and_where(repo):
+def test_list_by_task_and_internal(repo):
     repo.insert(_make_internal_cron("c1"))
     repo.insert(_make_external_cron("ext-1"))
     assert {c.cron_id for c in repo.list_by_task("t1")} == {"c1", "ext-1"}
-    assert {c.cron_id for c in repo.list_where("dispatch_owner='internal'")} == {"c1"}
-    assert {
-        c.cron_id for c in repo.list_where("dispatch_owner='external'")
-    } == {"ext-1"}
+    assert {c.cron_id for c in repo.list_internal()} == {"c1"}
+
+
+def test_list_orphans(repo):
+    orphan = _make_external_cron("ext-orphan")
+    orphan.task_id = None
+    repo.insert(orphan)
+    repo.insert(_make_internal_cron("c1"))
+    assert {c.cron_id for c in repo.list_orphans()} == {"ext-orphan"}
 
 
 def test_delete(repo):
@@ -121,9 +126,9 @@ def test_set_enabled_updates_flag(repo):
 
 
 def test_mark_fired_and_delete_is_atomic(repo):
-    """mark_fired_and_delete 单事务: 提交后行整行 DELETE, fired_at 中间态读不到."""
+    """mark_fired_and_delete 单事务 DELETE, 提交后行不存在."""
     repo.insert(_make_at_cron("at-1", at_ms=1_000_000))
-    affected = repo.mark_fired_and_delete("at-1", fired_at=9_999_999)
+    affected = repo.mark_fired_and_delete("at-1")
     assert affected == 1
     assert repo.get("at-1") is None
 

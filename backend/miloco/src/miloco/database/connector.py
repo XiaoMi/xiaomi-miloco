@@ -874,16 +874,18 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     """v1 → v2 schema step.
 
     一次事务原子完成:
-      (a0) 预扫 cron dangling (task_link.cron 指向已删 task) → fail-fast + log
-           理由: cron 权威数据在 openclaw 侧, dangling 需人工修复不能自动删
-      (a)  搬 task_link cron 行 → cron 表 external 分区
-      (b1) 预扫 D 型 rule 归属冲突 (rule.task_id != task_link.task_id) → fail-fast
-           理由: UI 从 task_link 读归属, 自动选边会静默切换用户可见 task
+      (a0) 预扫 cron dangling (task_link.cron 指向已删 task) → 全字段 log + 跳过
+           理由: task 已不存在, 自动化上下文无, 迁移不该为此卡启动;
+           openclaw 侧残留 cron 由 openclaw 自行清理, 与 backend 无关。
+      (a)  搬 task_link cron 行 → cron 表 external 分区 (跳过 dangling)
+      (b1) 预扫 D 型 rule 归属冲突 (rule.task_id != task_link.task_id) → 全字段 log,
+           一律取 task_link 侧 (迁移前 UI 从 task_link 读归属, 保持零意外)
       (b2) 预扫 A/E 型 orphan rule 完整字段 log (自动删除, log 便于事后审计)
       (c)  建 rule_new (task_id NOT NULL + FK CASCADE) + INSERT SELECT
-           (B 型 COALESCE 回填, A/E 型 WHERE 排除 = 等价 DELETE)
+           (COALESCE(tl.task_id, r.task_id) 优先 task_link 侧,
+            A/E 型 EXISTS/COALESCE 双滤 = 等价 DELETE)
       (d)  DROP rule → RENAME rule_new → 重建 indices
-      (e)  DROP task_link
+      (e)  DROP task_link (dangling 行已在 (a) 单独删)
       (f)  三重不变量断言 (foreign_key_check rule/cron 空 + rule.task_id 无 NULL)
       (g)  PRAGMA user_version = 2 (同事务)
       COMMIT
@@ -891,15 +893,18 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     crash 语义: 单事务原子, COMMIT 前 crash → rollback 到 v1, 重启从头再跑;
     COMMIT 后 crash → user_version=2, 外层步进循环跳过, 不重入。
 
-    A/E 型 DELETE 破坏性不可逆, 回滚只能靠冷备份 restore。
+    fail-soft 哲学: 数据冲突永不阻塞启动, 按确定性规则就地处置 + 全字段 log。
+    A/E 删 / dangling 跳 / D 取 tl 侧均不可逆, 复原靠 log + 冷备份 restore。
     """
     now = int(time.time() * 1000)
     counts: dict[str, int] = {
         "cron_planned": 0,
         "cron_migrated": 0,
         "cron_skipped_existing": 0,
+        "cron_dangling_skipped": 0,
         "rule_backfilled": 0,
         "rule_orphan_deleted": 0,
+        "rule_d_conflict_took_link": 0,
         "task_link_rule_deleted": 0,
     }
     cursor = conn.cursor()
@@ -910,35 +915,32 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
 
     cursor.execute("BEGIN IMMEDIATE")
     try:
-        # ── (a0) cron dangling 预扫 ────────────────────────────────
+        # ── (a0) cron dangling 全字段 log + 跳过 ────────────────────
         cron_dangling = cursor.execute("""
-            SELECT tl.task_id, tl.link_ref AS cron_id
+            SELECT tl.*
               FROM task_link tl
              WHERE tl.link_kind='cron'
                AND NOT EXISTS(
                      SELECT 1 FROM task t WHERE t.task_id = tl.task_id
                    )
         """).fetchall()
+        counts["cron_dangling_skipped"] = len(cron_dangling)
         if cron_dangling:
-            logger.error(
-                "v1→v2 cron dangling: %d cron row(s) reference non-existent task",
+            logger.warning(
+                "v1→v2 skipping %d dangling cron task_link row(s); "
+                "full content follows",
                 len(cron_dangling),
             )
             for row in cron_dangling:
-                logger.error(
-                    "v1→v2 cron dangling: task_id=%s cron_id=%s "
-                    "(openclaw side may still have this cron)",
-                    row["task_id"],
-                    row["cron_id"],
-                )
-            raise RuntimeError(
-                f"v1→v2 migration aborted: {len(cron_dangling)} cron row(s) "
-                f"in task_link reference non-existent task. Unlike rule A/E "
-                f"orphan (auto-deleted), cron dangling requires manual fix: "
-                f"verify openclaw-side cron still exists, decide whether to "
-                f"clean openclaw / re-create task / manually correct task_id, "
-                f"then retry migration."
-            )
+                logger.warning("v1→v2 skipping dangling cron: %s", dict(row))
+            # 单独删掉 dangling task_link 行, 后续 (a) 主循环拿到的都是 valid
+            cursor.execute("""
+                DELETE FROM task_link
+                 WHERE link_kind='cron'
+                   AND NOT EXISTS(
+                         SELECT 1 FROM task t WHERE t.task_id = task_link.task_id
+                       )
+            """)
 
         # ── (a) task_link cron 行 → cron 表 external 分区 ──────────
         cron_rows = cursor.execute(
@@ -957,17 +959,20 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
 
             if existing is not None:
                 # user_version=2 后本函数永久跳过, 理论不该有已存在的 cron_id;
-                # defensive: 若命中, 校验 external 且 task_id 一致 → 安全 skip
+                # defensive: 若命中且校验 external + task_id 一致 → 安全 skip;
+                # 冲突时 log 后仍以 cron 表现值为准, 不阻塞启动
                 if (
                     existing["dispatch_owner"] != "external"
                     or existing["task_id"] != task_id
                 ):
-                    raise RuntimeError(
-                        f"v1→v2 cron migration conflict at cron_id={cron_id}: "
-                        f"existing (task_id={existing['task_id']}, "
-                        f"dispatch_owner={existing['dispatch_owner']}) "
-                        f"vs task_link (task_id={task_id}, expected "
-                        f"dispatch_owner='external'). Human review required."
+                    logger.warning(
+                        "v1→v2 cron pre-existing conflict at cron_id=%s: "
+                        "existing (task_id=%s, dispatch_owner=%s) "
+                        "vs task_link (task_id=%s); keeping cron table value",
+                        cron_id,
+                        existing["task_id"],
+                        existing["dispatch_owner"],
+                        task_id,
                     )
                 counts["cron_skipped_existing"] += 1
             else:
@@ -984,7 +989,7 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
                 (cron_id,),
             )
 
-        # ── (b1) D 型 rule 归属冲突预扫 → fail-fast ────────────────
+        # ── (b1) D 型 rule 归属冲突全字段 log, 取 task_link 侧 ─────
         d_conflicts = cursor.execute("""
             SELECT r.*, tl.task_id AS link_task_id
               FROM rule r
@@ -994,34 +999,29 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
                AND tl.task_id IS NOT NULL
                AND r.task_id != tl.task_id
         """).fetchall()
+        counts["rule_d_conflict_took_link"] = len(d_conflicts)
         if d_conflicts:
-            logger.error(
-                "v1→v2 D-type rule ownership conflict: %d row(s); full content follows",
+            logger.warning(
+                "v1→v2 D-type rule ownership conflict: %d row(s) taking "
+                "task_link side; full content follows",
                 len(d_conflicts),
             )
             for row in d_conflicts:
-                logger.error("v1→v2 D-type conflict: %s", dict(row))
-            raise RuntimeError(
-                f"v1→v2 migration aborted: {len(d_conflicts)} D-type rule(s) "
-                f"have rule.task_id != task_link.task_id. UI reads ownership "
-                f"from task_link, auto-picking rule.task_id would silently "
-                f"change user-visible task binding. Manually reconcile each "
-                f"conflict then retry."
-            )
+                logger.warning("v1→v2 D-type conflict took link: %s", dict(row))
 
         # ── (b2) A/E 型 orphan rule 预扫 + 完整字段 log ────────────
         # A 型: r.task_id IS NULL 且 task_link 无关联
-        # E 型: COALESCE(r.task_id, tl.task_id) 指向已不存在的 task
+        # E 型: COALESCE(tl.task_id, r.task_id) 指向已不存在的 task
         # 每条 rule 一行 log (dict(row) 拿全部业务字段), 便于用户上报时手工复原
         orphan_rows = cursor.execute("""
             SELECT r.*, tl.task_id AS link_task_id
               FROM rule r
               LEFT JOIN task_link tl
                 ON tl.link_kind='rule' AND tl.link_ref=r.id
-             WHERE COALESCE(r.task_id, tl.task_id) IS NULL
+             WHERE COALESCE(tl.task_id, r.task_id) IS NULL
                 OR NOT EXISTS(
                      SELECT 1 FROM task t
-                      WHERE t.task_id = COALESCE(r.task_id, tl.task_id)
+                      WHERE t.task_id = COALESCE(tl.task_id, r.task_id)
                    )
         """).fetchall()
         counts["rule_orphan_deleted"] = len(orphan_rows)
@@ -1033,7 +1033,14 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
             for row in orphan_rows:
                 logger.warning("v1→v2 dropping orphan rule: %s", dict(row))
 
-        # ── (c) 建 rule_new + INSERT SELECT (B 型回填, A/E 型 WHERE 排除) ──
+        # ── (c) 建 rule_new + INSERT SELECT ────────────────────────
+        # 迁移前 UI 从 task_link 读归属, effective task_id 优先 task_link 侧:
+        #   A 型 (r.task_id NULL & tl 无): COALESCE=NULL → WHERE 排除
+        #   B 型 (r.task_id NULL & tl 有): COALESCE=tl.task_id → 回填 INSERT
+        #   C 型 (r.task_id NOT NULL & tl 无): COALESCE=r.task_id → 原样 INSERT
+        #   D 型 (两者都有且冲突): COALESCE=tl.task_id → 取 task_link 侧, 与
+        #     迁移前 UI 可见归属一致 (b1 已 log 全字段)
+        #   E 型 (COALESCE 指向已删 task): EXISTS 失败 → WHERE 排除
         cursor.execute("""
             CREATE TABLE rule_new (
                 id TEXT PRIMARY KEY,
@@ -1060,16 +1067,10 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
             )
         """)
 
-        # effective task_id = COALESCE(rule.task_id, task_link.task_id)
-        #   A 型 (r.task_id NULL & tl 无): effective=NULL → WHERE 排除
-        #   B 型 (r.task_id NULL & tl 有): effective=tl.task_id → 回填 INSERT
-        #   C 型 (r.task_id NOT NULL & tl 无): effective=r.task_id → 原样 INSERT
-        #   E 型 (r.task_id 指向已删 task): EXISTS 失败 → WHERE 排除
-        # D 型已在 (b1) fail-fast, 走到这里必然不含冲突
         cursor.execute("""
             INSERT INTO rule_new
                 SELECT r.id, r.name,
-                       COALESCE(r.task_id, tl.task_id) AS task_id,
+                       COALESCE(tl.task_id, r.task_id) AS task_id,
                        r.mode, r.lifecycle, r.enabled, r.condition,
                        r.actions, r.action_descriptions,
                        r.on_enter_actions, r.on_enter_desc,
@@ -1080,10 +1081,10 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
                 FROM rule r
                 LEFT JOIN task_link tl
                   ON tl.link_kind='rule' AND tl.link_ref=r.id
-                WHERE COALESCE(r.task_id, tl.task_id) IS NOT NULL
+                WHERE COALESCE(tl.task_id, r.task_id) IS NOT NULL
                   AND EXISTS(
                         SELECT 1 FROM task t
-                         WHERE t.task_id = COALESCE(r.task_id, tl.task_id)
+                         WHERE t.task_id = COALESCE(tl.task_id, r.task_id)
                       )
         """)
 
@@ -1108,18 +1109,14 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         cursor.execute("DROP TABLE task_link")
 
         # ── (f) 三重不变量断言 ──────────────────────────────────────
-        rule_violations = cursor.execute(
-            "PRAGMA foreign_key_check(rule)"
-        ).fetchall()
+        rule_violations = cursor.execute("PRAGMA foreign_key_check(rule)").fetchall()
         if rule_violations:
             raise RuntimeError(
                 f"v1→v2 migration invariant broken: {len(rule_violations)} "
                 f"rule FK violation(s) remain after A/E deletion; "
                 f"details={rule_violations}"
             )
-        cron_violations = cursor.execute(
-            "PRAGMA foreign_key_check(cron)"
-        ).fetchall()
+        cron_violations = cursor.execute("PRAGMA foreign_key_check(cron)").fetchall()
         if cron_violations:
             raise RuntimeError(
                 f"v1→v2 migration invariant broken: {len(cron_violations)} "

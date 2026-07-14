@@ -4,8 +4,8 @@
 """task 数据模型 — task SSOT (v2)。
 
 v2 起 task_link 表已 DROP: rule 关联走 rule.task_id FK CASCADE, cron 关联
-走 cron.task_id FK CASCADE。TaskFullView.links 字段保留作为老前端兼容 backfill
-(由 rule / cron 联合构造), 新字段 cron_refs 是 v2 权威源。
+走 cron.task_id FK CASCADE。前端 / agent 从 rule_briefs + cron_refs 两个独立
+字段读归属。
 """
 
 import re
@@ -56,14 +56,6 @@ class RuleBrief(BaseModel):
     actions_desc: list[str] = Field(default_factory=list)
 
 
-class TaskLinkEntry(BaseModel):
-    """(v2 兼容) 老前端从 links 字段读 kind/ref 分派; 新前端读 rule_briefs +
-    cron_refs 两个独立字段。等前端切换完成后独立 PR 删。"""
-
-    kind: Literal["rule", "cron"]
-    ref: str
-
-
 class CronRef(BaseModel):
     """task 名下的 cron 引用 (v2 新增, 与 rule_briefs 并列)。"""
 
@@ -81,7 +73,6 @@ class TaskFullView(BaseModel):
     created_at: str
     rule_briefs: list[RuleBrief] = Field(default_factory=list)
     cron_refs: list[CronRef] = Field(default_factory=list)
-    links: list[TaskLinkEntry] = Field(default_factory=list)
 
 
 class PendingOp(BaseModel):

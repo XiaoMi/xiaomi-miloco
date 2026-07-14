@@ -116,7 +116,7 @@ def _setup_task_with_rule(service, task_id="t1", description="d", query="客厅�
 
 
 def test_create_task_then_rule_auto_links(service):
-    """rule create 只写 rule 表; task view.links 从 rule.task_id backfill."""
+    """rule create 只写 rule 表; task view.rule_briefs 从 rule.task_id backfill."""
     service.create_task(TaskCreateRequest(task_id="t1", description="客厅有人开灯"))
     rule_id = RuleRepo().create(_make_rule_obj(task_id="t1", query="客厅有人"))
 
@@ -127,8 +127,6 @@ def test_create_task_then_rule_auto_links(service):
     assert len(view.rule_briefs) == 1
     assert view.rule_briefs[0].rule_id == rule_id
     assert view.rule_briefs[0].query == "客厅有人"
-    # links 字段兼容 backfill: rule.task_id → links[kind='rule']
-    assert any(link.kind == "rule" and link.ref == rule_id for link in view.links)
 
 
 def test_create_task_409_on_duplicate_id(service):

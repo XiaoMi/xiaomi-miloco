@@ -169,10 +169,11 @@ class ScheduleRunner:
         不能 log error 继续跑降级)。
         """
         current_ms = now_ms()
-        for cron in self._cron_repo.list_where("dispatch_owner='internal'"):
+        for cron in self._cron_repo.list_internal():
             cron_id = cron.cron_id
 
-            # at + fired_at 已填 → 极端亚毫秒 crash 残留, defensive 清行
+            # at + fired_at 已填 → 单事务下正常路径不可达, 仅兜底未来
+            # 若拆两步事务或外部工具直写 fired_at 时的残留清行
             if cron.kind == "at" and cron.fired_at is not None:
                 logger.info(
                     "rebuild: at %s fired_at=%d (defensive cleanup)",
@@ -237,7 +238,8 @@ class ScheduleRunner:
             self._remove_retry_job(cron_id)
             return
 
-        # defensive 分支 3: at fired_at 已填 → 已成功但清行漏了, 补删
+        # defensive 分支 3: at fired_at 已填 → 单事务下正常路径不可达, 仅兜底
+        # 未来若拆两步事务或外部工具直写 fired_at 时的清行
         if cron.kind == "at" and cron.fired_at is not None:
             logger.warning(
                 "_fire: at %s fired_at already set, cleaning row", cron_id
@@ -332,7 +334,7 @@ class ScheduleRunner:
     def _handle_success(self, cron: Cron) -> None:
         """成功路径: at 走 mark_fired_and_delete 单事务; cron/every 无副作用."""
         if cron.kind == "at":
-            self._cron_repo.mark_fired_and_delete(cron.cron_id, now_ms())
+            self._cron_repo.mark_fired_and_delete(cron.cron_id)
             self._remove_retry_job(cron.cron_id)
             logger.info(
                 "at cron %s fired ok and deleted (task_id=%s)",

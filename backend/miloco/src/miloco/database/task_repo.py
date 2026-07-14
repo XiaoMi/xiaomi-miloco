@@ -62,12 +62,7 @@ class TaskRepo:
             return row is not None
 
     def get_full_view(self, task_id: str) -> dict[str, Any] | None:
-        """单 task 视图: task 元信息 + rule / cron 引用清单。
-
-        `links` 字段: 兼容旧前端契约, 由 rule.task_id + cron.task_id 联合构造。
-        v2 后 rule / cron 是权威源, task_link 表已 DROP; caller 逐步迁到读
-        `rule_briefs` (由 service 层拼装 RuleBrief) / `cron_refs` 两个独立字段。
-        """
+        """单 task 视图: task 元信息 + cron_refs (rule_briefs 由 service 层拼装)."""
         with self.db.get_connection() as conn:
             task_row = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at "
@@ -76,26 +71,16 @@ class TaskRepo:
             ).fetchone()
             if task_row is None:
                 return None
-            rule_refs = [
-                r["id"]
-                for r in conn.execute(
-                    "SELECT id FROM rule WHERE task_id=?", (task_id,)
-                ).fetchall()
-            ]
             cron_rows = conn.execute(
                 "SELECT cron_id, dispatch_owner FROM cron WHERE task_id=?",
                 (task_id,),
             ).fetchall()
-            links = [{"kind": "rule", "ref": rid} for rid in rule_refs] + [
-                {"kind": "cron", "ref": c["cron_id"]} for c in cron_rows
-            ]
             return {
                 "task_id": task_row["task_id"],
                 "description": task_row["description"],
                 "status": task_row["status"],
                 "paused_at": ms_to_iso_local(task_row["paused_at"]),
                 "created_at": ms_to_iso_local(task_row["created_at"]),
-                "links": links,
                 "cron_refs": [
                     {
                         "ref": c["cron_id"],
@@ -106,33 +91,18 @@ class TaskRepo:
             }
 
     def list_all(self) -> list[dict[str, Any]]:
-        """所有 task 的聚合视图 (service 层接管 rule_briefs JOIN)。
-
-        `links` 字段沿用老契约兼容前端。task 量级 (< 1000) 下按 task 循环单查
-        性能足够, 不做全表 JOIN 展开。
-        """
+        """所有 task 的聚合视图 (service 层接管 rule_briefs JOIN)."""
         with self.db.get_connection() as conn:
             tasks = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at "
                 "FROM task ORDER BY created_at DESC"
             ).fetchall()
-            all_rules = conn.execute(
-                "SELECT task_id, id AS ref FROM rule WHERE task_id IS NOT NULL"
-            ).fetchall()
             all_crons = conn.execute(
                 "SELECT task_id, cron_id, dispatch_owner FROM cron "
                 "WHERE task_id IS NOT NULL"
             ).fetchall()
-            links_by_task: dict[str, list[dict]] = {}
             crons_by_task: dict[str, list[dict]] = {}
-            for r in all_rules:
-                links_by_task.setdefault(r["task_id"], []).append(
-                    {"kind": "rule", "ref": r["ref"]}
-                )
             for c in all_crons:
-                links_by_task.setdefault(c["task_id"], []).append(
-                    {"kind": "cron", "ref": c["cron_id"]}
-                )
                 crons_by_task.setdefault(c["task_id"], []).append(
                     {"ref": c["cron_id"], "dispatch_owner": c["dispatch_owner"]}
                 )
@@ -143,7 +113,6 @@ class TaskRepo:
                     "status": t["status"],
                     "paused_at": ms_to_iso_local(t["paused_at"]),
                     "created_at": ms_to_iso_local(t["created_at"]),
-                    "links": links_by_task.get(t["task_id"], []),
                     "cron_refs": crons_by_task.get(t["task_id"], []),
                 }
                 for t in tasks

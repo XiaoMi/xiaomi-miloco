@@ -203,7 +203,7 @@ async def list_crons(
 ):
     repo = _repo()
     if orphan:
-        rows = repo.list_where("task_id IS NULL")
+        rows = repo.list_orphans()
     elif task_id is not None:
         rows = repo.list_by_task(task_id)
     else:

@@ -70,7 +70,6 @@ def test_create_task_inserts_placeholder_only(repo):
     view = repo.get_full_view("drink_water")
     assert view["status"] == "active"
     assert view["description"] == "每天喝 8 杯水"
-    assert view["links"] == []
     assert view["cron_refs"] == []
 
 
@@ -138,20 +137,18 @@ def test_get_full_view_returns_none_for_missing(repo):
     assert repo.get_full_view("nope") is None
 
 
-def test_get_full_view_backfills_links_from_rule_and_cron(repo):
-    """v2: links 字段兼容 backfill 由 rule.task_id + cron.task_id 联合构造."""
+def test_get_full_view_returns_cron_refs(repo):
+    """v2: cron_refs 从 cron.task_id 直查; rule 归属由 service 层拼 rule_briefs."""
     repo.create_task(task_id="t1", description="d")
     _insert_rule_row("t1", "r1")
     _insert_cron_ref("t1", "c1")
     view = repo.get_full_view("t1")
-    kinds_refs = {(ln["kind"], ln["ref"]) for ln in view["links"]}
-    assert kinds_refs == {("rule", "r1"), ("cron", "c1")}
     assert view["cron_refs"] == [
         {"ref": "c1", "dispatch_owner": "external"}
     ]
 
 
-def test_list_all_returns_all_tasks_with_links(repo):
+def test_list_all_returns_all_tasks_with_cron_refs(repo):
     repo.create_task(task_id="t1", description="d1")
     _insert_rule_row("t1", "r1")
     repo.create_task(task_id="t2", description="d2")
@@ -159,8 +156,7 @@ def test_list_all_returns_all_tasks_with_links(repo):
     rows = repo.list_all()
     assert {r["task_id"] for r in rows} == {"t1", "t2"}
     by_id = {r["task_id"]: r for r in rows}
-    assert by_id["t1"]["links"] == [{"kind": "rule", "ref": "r1"}]
-    assert by_id["t2"]["links"] == [{"kind": "cron", "ref": "c2"}]
+    assert by_id["t1"]["cron_refs"] == []
     assert by_id["t2"]["cron_refs"] == [
         {"ref": "c2", "dispatch_owner": "internal"}
     ]

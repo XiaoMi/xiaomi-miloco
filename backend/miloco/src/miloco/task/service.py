@@ -26,7 +26,6 @@ from miloco.task.schema import (
     TaskDeleteResult,
     TaskDisableResult,
     TaskFullView,
-    TaskLinkEntry,
     TaskSummaryView,
     TaskUpdateRequest,
 )
@@ -68,7 +67,7 @@ class TaskService:
         return [self._to_full_view(raw) for raw in self.repo.list_all()]
 
     def list_summary(self, window: str) -> list[TaskSummaryView]:
-        """一次性出所有 task 的完整状态 (基础 + rule_briefs + links + record 摘要)。
+        """一次性出所有 task 的完整状态 (基础 + rule_briefs + cron_refs + record 摘要)。
 
         左连接语义: 以 task 为主表, 没绑 record 的 task 也返 (record=None), 不丢行。
         TaskRecordService 是无状态轻服务, 内部实例化即可, 不进 Manager 单例。
@@ -103,7 +102,6 @@ class TaskService:
             created_at=raw["created_at"],
             rule_briefs=rule_briefs,
             cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
-            links=[TaskLinkEntry(**link) for link in raw["links"]],
         )
 
     @staticmethod
