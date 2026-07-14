@@ -61,7 +61,11 @@ export function SettingsDrawer({ open, onClose }: Props) {
       }),
     ])
       .then((rs) => {
-        if (rs.some((r) => r.status === "rejected")) {
+        // 只有感知参数（rs[0]，核心设置）加载失败才报错；调度开关（rs[1]）失败
+        // 已由 schedulerLoaded=null 优雅降级为「不可配置」（置灰 + 专属 hint），
+        // 不应再弹「加载设置失败」——否则老后端(无 /scheduler-config)每次打开
+        // 设置都会看到与降级体验自相矛盾的误导性红条。
+        if (rs[0].status === "rejected") {
           toast(t("settings.loadFailed"), "danger");
         }
       })
