@@ -54,6 +54,60 @@ _LOGGER = logging.getLogger(__name__)
 TOKEN_EXPIRES_TS_RATIO = 0.7
 
 
+def _cloud_device_to_info(device: Dict[str, Any], urn: str) -> Optional[MIoTDeviceInfo]:
+    """Build an MIoTDeviceInfo from a raw cloud API device dict.
+
+    Pure function — no I/O, no ``self``.  The caller must pre-resolve *urn*.
+    Returns ``None`` when required fields (did, name, model) are missing.
+    """
+    did = device.get("did", None)
+    name = device.get("name", None)
+    model = device.get("model", None)
+    if did is None or name is None or model is None:
+        return None
+    if not urn:
+        return None
+
+    info = MIoTDeviceInfo(
+        did=did,
+        name=name,
+        urn=urn,
+        model=model,
+        uid=str(device["uid"]),
+        connect_type=device.get("pid", -1),
+        token=device.get("token", None),
+        online=device.get("isOnline", False),
+        icon=device.get("icon", None),
+        parent_id=device.get("parent_id", None),
+        manufacturer=model.split(".")[0],
+        # 2: xiao-ai, 1: general speaker
+        voice_ctrl=device.get("voice_ctrl", 0),
+        rssi=device.get("rssi", None),
+        pid=device.get("pid", None),
+        local_ip=device.get("localip", None),
+        ssid=device.get("ssid", None),
+        bssid=device.get("bssid", None),
+        order_time=device.get("orderTime", 0),
+    )
+
+    # Post-process owner sub-dict
+    owner = device.get("owner", None)
+    if isinstance(owner, dict) and owner:
+        info.owner_id = str(owner["userid"])
+        info.owner_nickname = owner["nickname"]
+
+    # Post-process extra sub-dict
+    extra = device.get("extra", None)
+    if isinstance(extra, dict) and extra:
+        info.fw_version = extra.get("fw_version", None)
+        info.mcu_version = extra.get("mcu_version", None)
+        info.platform = extra.get("platform", None)
+        info.is_set_pincode = extra.get("isSetPincode", None)
+        info.pincode_type = extra.get("pincodeType", None)
+
+    return info
+
+
 class MIoTOAuth2Client:
     """OAuth2 agent url, default: product env."""
 
@@ -713,40 +767,11 @@ class MIoTHttpClient:
                     _LOGGER.info("missing the urn field, cloud, %s", device)
                     continue
 
-            device_infos[did] = MIoTDeviceInfo(
-                did=did,
-                name=name,
-                urn=urn,
-                model=model,
-                uid=str(device["uid"]),
-                connect_type=device.get("pid", -1),
-                token=device.get("token", None),
-                online=device.get("isOnline", False),
-                icon=device.get("icon", None),
-                parent_id=device.get("parent_id", None),
-                manufacturer=model.split(".")[0],
-                # 2: xiao-ai, 1: general speaker
-                voice_ctrl=device.get("voice_ctrl", 0),
-                rssi=device.get("rssi", None),
-                pid=device.get("pid", None),
-                local_ip=device.get("local_ip", None),
-                ssid=device.get("ssid", None),
-                bssid=device.get("bssid", None),
-                order_time=device.get("orderTime", 0),
-            )
-            if isinstance(device.get("owner", None), Dict) and device["owner"]:
-                device_infos[did].owner_id = str(device["owner"]["userid"])
-                device_infos[did].owner_nickname = device["owner"]["nickname"]
-            if isinstance(device.get("extra", None), Dict) and device["extra"]:
-                device_infos[did].fw_version = device["extra"].get("fw_version", None)
-                device_infos[did].mcu_version = device["extra"].get("mcu_version", None)
-                device_infos[did].platform = device["extra"].get("platform", None)
-                device_infos[did].is_set_pincode = device["extra"].get(
-                    "isSetPincode", None
-                )
-                device_infos[did].pincode_type = device["extra"].get(
-                    "pincodeType", None
-                )
+            info = _cloud_device_to_info(device, urn)
+            if info is None:
+                _LOGGER.info("failed to build device info, cloud, %s", device)
+                continue
+            device_infos[info.did] = info
 
         # get device icon
         if models:
