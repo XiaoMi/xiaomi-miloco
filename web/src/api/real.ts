@@ -178,6 +178,7 @@ interface BackendCamera {
   online: boolean;
   room_id?: string;
   room_name?: string;
+  channel?: number;  // 通道号，用于多通道摄像头
 }
 
 // ── 状态条聚合 ────────────────────────────────────────────
@@ -851,7 +852,7 @@ export async function realListCameras(): Promise<PerceptionCamera[]> {
     .map((c) => ({
       did: c.did,
       name: c.name,
-      channel: 0,
+      channel: c.channel ?? 0,  // 使用后端返回的通道号
       roomName: c.room_name,
     }));
 }
@@ -930,6 +931,7 @@ interface BackendScopeCamera {
   // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
   voice_in_use?: boolean;
   connected: boolean;
+  channel?: number;  // 通道号，用于多通道摄像头
 }
 
 export async function realListScopeCameras(): Promise<ScopeCamera[]> {
@@ -947,6 +949,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     inUse: c.in_use,
     voiceInUse: c.voice_in_use ?? false,
     connected: c.connected,
+    channel: c.channel ?? 0,  // 传递通道号，默认为 0
   }));
 }
 

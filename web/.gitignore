@@ -24,3 +24,4 @@ pnpm-debug.log*
 
 # TypeScript incremental build cache（本地路径相关，不入仓）
 *.tsbuildinfo
+package-lock.json

@@ -206,6 +206,8 @@ export interface ScopeCamera {
   // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
   voiceInUse: boolean;
   connected: boolean;
+  // 通道号，用于多通道摄像头（如双摄摄像头）。默认为 0。
+  channel?: number;
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。

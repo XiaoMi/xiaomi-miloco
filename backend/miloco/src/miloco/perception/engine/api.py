@@ -58,6 +58,16 @@ MAX_EID: int = 999
 SUGG_SIM_THRESHOLD: float = 0.70
 
 
+def _physical_did(did: str) -> str:
+    """Extract physical did from synthetic channel did.
+
+    'cam1:ch0' -> 'cam1'; 'cam1' -> 'cam1' (single-camera passthrough).
+    Used for rule matching — rules may bind to physical did, but
+    perception operates on synthetic channel dids.
+    """
+    return did.rsplit(':ch', 1)[0] if ':ch' in did else did
+
+
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
@@ -906,6 +916,7 @@ class PerceptionEngine(BasePerceptionEngine):
                     r for r in rules
                     if not r.get("condition", {}).get("perceive_device_ids")
                     or did in r["condition"]["perceive_device_ids"]
+                    or _physical_did(did) in r["condition"]["perceive_device_ids"]
                 ]
                 device_rule_map[did] = [r["id"] for r in dispatched]
                 device_rules = [

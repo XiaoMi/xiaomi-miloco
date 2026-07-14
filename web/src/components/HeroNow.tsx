@@ -6,7 +6,6 @@
  */
 
 import type {
-  PerceptionCamera,
   Person,
   ScopeCamera,
   UsageStats,
@@ -46,8 +45,6 @@ function setVoiceOnConfirmed(): void {
 
 interface Props {
   persons: Person[];
-  /** perception 当前订阅的画面（含 channel，用于真播放）；scope 是子集映射的字典源 */
-  cameras: PerceptionCamera[];
   /** 米家全集（含被禁用 / 离线），用于渲染所有摄像头卡片 + Switch */
   scopeCameras: ScopeCamera[];
   /** miot 上是否有 camera 类设备——区分两种空态 */
@@ -79,7 +76,6 @@ function sortPersons(ps: Person[]): Person[] {
 
 export function HeroNow({
   persons,
-  cameras,
   scopeCameras,
   miotHasCamera,
   maxStreamCams,
@@ -91,14 +87,6 @@ export function HeroNow({
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
-  // scope 是主列表（含禁用/离线/未接入）；cameras 仅用作 channel 字典。
-  // useMemo 让 Map 引用稳定—— Map 每次 render 重建会让传到 CameraSection 的 prop
-  // 引用变更,父级状态变（如 todayUsage 异步到达）触发的 re-render 会冲掉子组件
-  // memo 优化机会。
-  const channelByDid = useMemo(
-    () => new Map(cameras.map((c) => [c.did, c.channel])),
-    [cameras],
-  );
   // 上区 = miloco **当前真正在投喂视频** 的相机。判据用后端权威字段 `connected`
   // (= MiotService._connected_camera_dids() = 感知 camera_adapter.get_connected_devices()，
   // 即真正建连、在喂解码帧给感知的那几路)，而不是 `inUse`(只是 KV 里的"想启用"意图——
@@ -106,14 +94,18 @@ export function HeroNow({
   // 其余卡 key+DOM 位置不变，React 复用其 iframe，不会连带把其它路的 watch 流断开重连。
   // 其余相机(未投喂:未启用 / 启用中未连上 / 超出上限)进下区「无流」横向列表。
   const { streamingCams, benchCams } = useMemo(() => {
-    const byDid = (a: ScopeCamera, b: ScopeCamera) =>
-      a.did < b.did ? -1 : a.did > b.did ? 1 : 0;
+    const byDid = (a: ScopeCamera, b: ScopeCamera) => {
+      // 先按 did 排序，再按 channel 排序
+      if (a.did !== b.did) return a.did < b.did ? -1 : 1;
+      return (a.channel ?? 0) - (b.channel ?? 0);
+    };
     const sorted = [...scopeCameras].sort(byDid);
     // 不再前端截断:connected 集天然受后端 MAX_ENABLED_CAMERAS 约束(感知接入层按 did
     // 升序截断到上限、只连前 N 路；主动 enable 超限也被 toggle_camera 挡下)，展示集即真实投喂集。
     const streaming = sorted.filter((c) => c.connected);
-    const sset = new Set(streaming.map((c) => c.did));
-    const bench = sorted.filter((c) => !sset.has(c.did));
+    // 使用 did|channel 作为唯一标识来区分多通道摄像头
+    const sset = new Set(streaming.map((c) => `${c.did}|${c.channel ?? 0}`));
+    const bench = sorted.filter((c) => !sset.has(`${c.did}|${c.channel ?? 0}`));
     return { streamingCams: streaming, benchCams: bench };
   }, [scopeCameras]);
   // 今日 token 用量小入口（omni 计费）
@@ -184,7 +176,6 @@ export function HeroNow({
         benchCams={benchCams}
         maxStreamCams={maxStreamCams}
         miotHasCamera={miotHasCamera}
-        channelByDid={channelByDid}
         onToggleCameras={onToggleCameras}
         onToggleCameraVoice={onToggleCameraVoice}
         onRefresh={onRefresh}
@@ -202,7 +193,6 @@ interface CameraSectionProps {
   /** 最多投喂数(后端 MAX_ENABLED_CAMERAS)，用于满额置灰下区「启用」 */
   maxStreamCams: number;
   miotHasCamera: boolean;
-  channelByDid: Map<string, number>;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
   onRefresh?: () => void | Promise<void>;
@@ -214,7 +204,6 @@ function CameraSection({
   benchCams,
   maxStreamCams,
   miotHasCamera,
-  channelByDid,
   onToggleCameras,
   onToggleCameraVoice,
   onRefresh,
@@ -239,12 +228,15 @@ function CameraSection({
   // 上限校验同口径——后端也数「可用集」(离线/局域网不可达/镜头关的不占名额)。所以
   // 面板显示的名额 = 后端认的名额,不会出现「看着有位、点开启却被后端拒」。
   const atCapacity = activeCount >= maxStreamCams;
-  // 「全开」只能开「可用且未投喂」的——不可用相机(云端离线/局域网不可达/镜头关)后端
-  // toggle_camera 会整批拒绝,若把它们塞进批量 enable,会连带可用的一起失败。
-  // 与下区单台开关「不可用不可开」同口径(cameraAvailable)。
-  const enableableDids = scopeCameras
-    .filter((c) => !c.inUse && cameraAvailable(c))
-    .map((c) => c.did);
+  // 「全开」只能开「在线且未投喂」的——离线相机后端 toggle_camera 会整批拒绝
+  // (offline_enable 校验),若把离线 did 也塞进批量 enable,会连带在线的一起失败。
+  // 与下区单台开关「离线不可开」同口径。
+  // 去重：双摄设备会有两条记录（通道 0/1），did 相同
+  const enableableDids = [...new Set(
+    scopeCameras
+      .filter((c) => !c.inUse && c.isOnline)
+      .map((c) => c.did)
+  )];
   // bulkBusy 锁防"全开/全关"连点;singleBusyDids 跟踪单卡 in-flight,让住户切单卡 A
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -369,9 +361,9 @@ function CameraSection({
             <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1">
               {streamingCams.map((c) => (
                 <CamCardWithToggle
-                  key={c.did}
+                  key={`${c.did}|${c.channel ?? 0}`}
                   cam={c}
-                  channel={channelByDid.get(c.did)}
+                  channel={c.channel ?? 0}
                   bulkBusy={bulkBusy || singleBusyDids.has(c.did)}
                   onToggle={(v) => runSingle(c.did, v)}
                   // 相机开关 in-flight 时拾音开关也置灰:关相机的 PUT 落库后拾音 PUT 会被
@@ -422,7 +414,7 @@ function CameraSection({
               <ul className="rounded-xl bg-bg-secondary border border-border divide-y divide-border overflow-hidden">
                 {benchCams.map((c) => (
                   <BenchCamItem
-                    key={c.did}
+                    key={`${c.did}|${c.channel ?? 0}`}
                     cam={c}
                     // 瞬态忙才原生禁用;语义不可开(离线 / 镜头关 / 局域网不可达 / 满额)走
                     // blockedReasonKey——置灰但可点,点击 toast、桌面悬停气泡说明原因。
