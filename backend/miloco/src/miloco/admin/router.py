@@ -857,8 +857,9 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
     if update:
         # 三个参数生效路径各不同，按「新值 != 旧值」判断（前端 drawer 三字段一起 PUT）：
         #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
-        #   - omni_fps：每窗实时读 settings，但顶起的 tracker fps 有构造期派生缓存——走
-        #     apply_omni_fps_live 运行时热更（原地刷缓存），免重建引擎 / 免模型重载 / 不丢 track。
+        #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
+        #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live
+        #     运行时热更（原地刷 _config + 缓存），免重建引擎 / 免模型重载 / 不丢 track。
         #   - window_size：runner 构造时 cache，需 stop→start 重读（apply_config_restart）。
         omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
         window_changed = body.window_size is not None and body.window_size != payload["window_size"]
