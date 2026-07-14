@@ -17,8 +17,11 @@ import { LivePlayerPlaceholder } from "./LivePlayerPlaceholder";
 import { getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
 import { humanTokens } from "@/lib/formatTokens";
-import { useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "./Toast";
+import { switchBlockedReasonKey } from "@/lib/cameraSwitch";
+import { IconRefresh } from "@/lib/icons";
 
 // 「关声音」确认弹窗的「不再提醒」持久化标记（与 web:theme / web:lang 同命名空间）。
 // 复位说明：清除站点数据 / localStorage 即恢复弹窗；本分支不做设置项 UI——将来若加
@@ -62,6 +65,8 @@ interface Props {
    *  不被处理（mic-off：不转写、不上云）。从属于感知开关：仅当该相机 inUse=true 时
    *  可设，感知关时前端置灰。 */
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
+  /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + await 列表重拉落地）。 */
+  onRefresh?: () => void | Promise<void>;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -82,6 +87,7 @@ export function HeroNow({
   onJumpUsage,
   onToggleCameras,
   onToggleCameraVoice,
+  onRefresh,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -181,6 +187,7 @@ export function HeroNow({
         channelByDid={channelByDid}
         onToggleCameras={onToggleCameras}
         onToggleCameraVoice={onToggleCameraVoice}
+        onRefresh={onRefresh}
       />
     </section>
   );
@@ -198,6 +205,7 @@ interface CameraSectionProps {
   channelByDid: Map<string, number>;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
+  onRefresh?: () => void | Promise<void>;
 }
 
 function CameraSection({
@@ -209,8 +217,20 @@ function CameraSection({
   channelByDid,
   onToggleCameras,
   onToggleCameraVoice,
+  onRefresh,
 }: CameraSectionProps) {
   const { t } = useTranslation();
+  // 手动刷新未感知设备状态:in-flight 期间转圈 + disable 防连点(force 刷新本身绕过 8s 节流)。
+  const [refreshing, setRefreshing] = useState(false);
+  const runRefresh = async () => {
+    if (refreshing || !onRefresh) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  };
   const total = scopeCameras.length;
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;
@@ -374,24 +394,43 @@ function CameraSection({
               改成日志页风格的横条行:每行 摄像头信息 + 一个开关，开关直接控制是否投喂。 */}
           {benchCams.length > 0 && (
             <div className="mt-4">
-              <SectionLabel>
-                {atCapacity
-                  ? t("hero.benchTitleFull", { n: maxStreamCams })
-                  : t("hero.benchTitle")}
-              </SectionLabel>
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-caption text-text-tertiary">
+                  {atCapacity
+                    ? t("hero.benchTitleFull", { n: maxStreamCams })
+                    : t("hero.benchTitle")}
+                </span>
+                {onRefresh && (
+                  <button
+                    type="button"
+                    onClick={runRefresh}
+                    // refreshing 覆盖整个手动刷新(onRefresh 里 await 到列表重拉落地),故只看它;
+                    // 点其他开关触发的 reload 不置 refreshing,刷新图标不会被借用转圈。
+                    disabled={refreshing}
+                    aria-label={t("hero.refreshCamerasAria")}
+                    title={t("hero.refreshCamerasTitle")}
+                    className="shrink-0 text-text-tertiary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <IconRefresh
+                      width={15}
+                      height={15}
+                      className={refreshing ? "animate-spin" : ""}
+                    />
+                  </button>
+                )}
+              </div>
               <ul className="rounded-xl bg-bg-secondary border border-border divide-y divide-border overflow-hidden">
                 {benchCams.map((c) => (
                   <BenchCamItem
                     key={c.did}
                     cam={c}
-                    // 不可用 + 未投喂 → 禁用(开不了);不可用 + 已投喂 → 仍可点(允许关闭)。
-                    // 满额时也只挡「开启未启用的」,已启用的随时可关。即:仅当
-                    // 「当前未启用 且 (不可用 或 已满额)」时禁用,其余可点。
-                    disabled={
-                      bulkBusy ||
-                      singleBusyDids.has(c.did) ||
-                      (!c.inUse && (!cameraAvailable(c) || atCapacity))
-                    }
+                    // 瞬态忙才原生禁用;语义不可开(离线 / 镜头关 / 局域网不可达 / 满额)走
+                    // blockedReasonKey——置灰但可点,点击 toast、桌面悬停气泡说明原因。
+                    busy={bulkBusy || singleBusyDids.has(c.did)}
+                    blockedReasonKey={switchBlockedReasonKey(c, {
+                      inUse: c.inUse,
+                      atCapacity,
+                    })}
                     onToggle={(v) => runSingle(c.did, v)}
                     // 同上区卡:相机开关 in-flight 时拾音开关一并置灰,防交叠竞态。
                     voiceBusy={
@@ -499,36 +538,97 @@ function CameraSection({
 function CamSwitch({
   inUse,
   name,
-  disabled,
+  busy,
+  blockedReasonKey,
   onToggle,
 }: {
   inUse: boolean;
   name: string;
-  disabled: boolean;
+  /** 瞬态忙（bulk / single 操作进行中）：真禁、忽略点击、不提示。 */
+  busy: boolean;
+  /** 语义不可开（离线 / 镜头关 / 局域网不可达 / 满额，仅未启用时）：置灰但仍可点 → toast 理由；已启用为空。 */
+  blockedReasonKey?: string;
   onToggle: (next: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const blocked = !!blockedReasonKey;
+  const dim = busy || blocked;
+  // 桌面 hover 点缀:语义不可开时在鼠标入场处弹原因气泡,与点击 toast 互补——hover 即时看
+  // 原因,点击给明确反馈 + 触屏兜底。fixed 定位锚定入场点(只 onMouseEnter 记一次、不跟随
+  // 光标,省逐像素重渲染),不被下区 ul 的 overflow-hidden 裁掉;触屏无 hover,只走 toast。
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  // SR 用:稳定 id 关联「原因文本」与开关。aria-describedby 需常驻(见下 sr-only 文本),
+  // 不依赖 tip——否则 SR 聚焦瞬间视觉气泡可能还没渲染、describedby 落空。
+  const tipId = useId();
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={inUse}
-      aria-label={t(inUse ? "hero.toggleAriaInUse" : "hero.toggleAriaNotInUse", {
-        name,
-      })}
-      title={inUse ? t("hero.toggleTitleInUse") : t("hero.toggleTitleNotInUse")}
-      disabled={disabled}
-      onClick={() => onToggle(!inUse)}
-      className={`relative inline-flex h-[14px] w-[26px] shrink-0 rounded-full transition-colors shadow-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:opacity-40 disabled:cursor-not-allowed ${
-        inUse ? "bg-brand-primary" : "bg-black/60"
-      }`}
-    >
-      <span
-        className={`absolute top-0.5 left-0.5 inline-block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform ${
-          inUse ? "translate-x-[12px]" : "translate-x-0"
-        }`}
-      />
-    </button>
+    <>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={inUse}
+        aria-disabled={dim}
+        // block 态常驻指向 sr-only 原因文本,让屏幕阅读器聚焦即读出「为什么不可开」。
+        aria-describedby={blocked ? tipId : undefined}
+        aria-label={t(inUse ? "hero.toggleAriaInUse" : "hero.toggleAriaNotInUse", {
+          name,
+        })}
+        title={
+          blocked
+            ? undefined
+            : t(inUse ? "hero.toggleTitleInUse" : "hero.toggleTitleNotInUse")
+        }
+        disabled={busy}
+        onClick={() => {
+          if (busy) return;
+          if (blocked) {
+            toast(t(blockedReasonKey), "warn");
+            return;
+          }
+          onToggle(!inUse);
+        }}
+        onMouseEnter={
+          blocked ? (e) => setTip({ x: e.clientX, y: e.clientY }) : undefined
+        }
+        onMouseLeave={() => setTip(null)}
+        // 键盘可达:block 态开关仍可 Tab 聚焦,focus 时也弹原因气泡(取按钮外接矩形顶边中点
+        // 作锚点),与 hover 对齐——纯键盘用户 Tab 停上来即看到原因,不必等激活 toast 才知道。
+        onFocus={
+          blocked
+            ? (e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setTip({ x: r.left + r.width / 2, y: r.top });
+              }
+            : undefined
+        }
+        onBlur={() => setTip(null)}
+        className={`relative inline-flex h-[14px] w-[26px] shrink-0 rounded-full transition-colors shadow-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+          dim ? "opacity-40 cursor-not-allowed" : ""
+        } ${inUse ? "bg-brand-primary" : "bg-black/60"}`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 inline-block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform ${
+            inUse ? "translate-x-[12px]" : "translate-x-0"
+          }`}
+        />
+      </button>
+      {/* SR 用:block 态常挂一份 sr-only 原因文本(视觉隐藏),承载 aria-describedby——常驻
+          不依赖 tip,故屏幕阅读器聚焦瞬间就能读到,不受视觉气泡渲染时机影响。 */}
+      {blocked && (
+        <span id={tipId} className="sr-only">
+          {t(blockedReasonKey)}
+        </span>
+      )}
+      {/* 视觉气泡:hover / focus 弹,纯视觉——aria-hidden 避免与上面 sr-only 文本重复朗读。 */}
+      {blocked && tip && (
+        <div
+          aria-hidden="true"
+          className="fixed z-[90] w-56 max-w-[70vw] -translate-x-1/2 -translate-y-full rounded-lg border border-warning bg-warning-bg text-warning text-caption px-2.5 py-1.5 shadow-md pointer-events-none"
+          style={{ left: tip.x, top: tip.y - 10 }}
+        >
+          {t(blockedReasonKey)}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -635,7 +735,7 @@ function CamCardWithToggle({
           <CamSwitch
             inUse={cam.inUse}
             name={cam.name}
-            disabled={bulkBusy}
+            busy={bulkBusy}
             onToggle={onToggle}
           />
         </div>
@@ -647,13 +747,15 @@ function CamCardWithToggle({
 /** 下区横条行（日志页风格）：摄像头信息 + 拾音/投喂开关，无小窗。投喂 on → 升入上区。 */
 function BenchCamItem({
   cam,
-  disabled,
+  busy,
+  blockedReasonKey,
   onToggle,
   voiceBusy,
   onToggleVoice,
 }: {
   cam: ScopeCamera;
-  disabled: boolean;
+  busy: boolean;
+  blockedReasonKey?: string;
   onToggle: (next: boolean) => void;
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
@@ -662,16 +764,24 @@ function BenchCamItem({
   return (
     <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
       <div className="min-w-0">
-        {/* 不可用相机名字淡化,跟开关禁用呼应——不可用就别让住户以为点一下能投喂。 */}
-        <div
-          className={`text-body truncate ${
-            cameraAvailable(cam) ? "text-text-primary" : "text-text-tertiary"
-          }`}
-        >
-          {cam.name}
+        {/* 设备名 + 房间 badge 同一行:房间是设备固有属性,贴设备名比贴状态灯更统一;
+            不可用相机名字淡化,跟开关呼应——不可用就别让住户以为点一下能投喂。 */}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span
+            className={`text-body truncate ${
+              cameraAvailable(cam) ? "text-text-primary" : "text-text-tertiary"
+            }`}
+          >
+            {cam.name}
+          </span>
+          {cam.roomName && (
+            <span className="shrink-0 text-caption text-text-tertiary border border-border rounded px-1.5 py-0.5 leading-none">
+              {cam.roomName}
+            </span>
+          )}
         </div>
         {/* 三个并列的可用性指标:云端在线 / 局域网可达 / 镜头开关。各自独立好坏,
-            住户能一眼看出到底卡在哪一环,不再一把揉成"离线"。 */}
+            住户能一眼看出到底卡在哪一环(房间已移到设备名旁,这行只放状态)。 */}
         <div className="text-caption flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
           <StateDot
             ok={cam.cloudOnline}
@@ -697,9 +807,6 @@ function BenchCamItem({
                   : t("hero.stateAwake")
             }
           />
-          {cam.roomName && (
-            <span className="text-text-tertiary">· {cam.roomName}</span>
-          )}
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
@@ -713,7 +820,8 @@ function BenchCamItem({
         <CamSwitch
           inUse={cam.inUse}
           name={cam.name}
-          disabled={disabled}
+          busy={busy}
+          blockedReasonKey={blockedReasonKey}
           onToggle={onToggle}
         />
       </div>

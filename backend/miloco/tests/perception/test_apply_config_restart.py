@@ -3,11 +3,15 @@
 
 """Tests for PerceptionService.apply_config_restart.
 
-「应用设置」改感知参数后需真正重建引擎(omni_fps)+ runner 重读(window_size)才生效。
-本方法:停 runner → 重建引擎 → 启 runner,全程持 lifecycle 锁串行化。覆盖:
+「应用设置」改感知参数后需真正生效：停 runner →（按需重建引擎）→ 启 runner,
+全程持 lifecycle 锁串行化。``rebuild_engine`` 拆开「重建引擎」与「重启 runner」：
+omni_fps 变才需 rebuild（重读构造期 cache,含模型重载）；window_size 变只需
+runner.start() 重读,跳过 rebuild。覆盖:
 
-- was_running=True:走 stop → rebuild → start,返 True
-- was_running=False:只 rebuild,不 stop/start(未运行时不误拉起 runner)
+- rebuild_engine=True + was_running:走 stop → rebuild → start,返 True
+- rebuild_engine=True + not running:只 rebuild,不 stop/start(不误拉起 runner)
+- rebuild_engine=False + was_running:stop → start 重启 runner,跳过 rebuild(不重载模型)
+- rebuild_engine=False + not running:全 no-op
 - 重建抛异常(如磁盘满/模型加载失败)→ 返 False 不冒泡(config 已写盘,由调用方
   据 restart_ok 区分「已保存但重启失败」,否则前端误报「保存失败」)
 - lifecycle 锁串行化 apply_config_restart 与并发 start/stop,防交错状态错乱
@@ -61,6 +65,32 @@ async def test_apply_config_restart_not_running_only_rebuilds():
 
     svc._pipeline.rebuild.assert_awaited_once()
     svc._engine.stop.assert_not_awaited()
+    svc._engine.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_config_restart_no_rebuild_only_restarts_runner():
+    """rebuild_engine=False(仅 window_size 变):stop → start 重启 runner 重读窗口,
+    但跳过 rebuild——不重载模型。omni_fps 未变,引擎实例无需重建。"""
+    svc = _make_service(is_running=True)
+
+    assert await svc.apply_config_restart(rebuild_engine=False) is True
+
+    svc._engine.stop.assert_awaited_once()
+    svc._engine.start.assert_awaited_once()
+    svc._pipeline.rebuild.assert_not_awaited()  # 关键:未重建引擎、未重载模型
+
+
+@pytest.mark.asyncio
+async def test_apply_config_restart_no_rebuild_not_running_is_noop():
+    """rebuild_engine=False 且引擎未运行:什么都不做(不 stop/rebuild/start)。
+    window_size 靠下次 start 时 runner 重读,当前无 runner 在跑无需动。"""
+    svc = _make_service(is_running=False)
+
+    assert await svc.apply_config_restart(rebuild_engine=False) is True
+
+    svc._engine.stop.assert_not_awaited()
+    svc._pipeline.rebuild.assert_not_awaited()
     svc._engine.start.assert_not_awaited()
 
 

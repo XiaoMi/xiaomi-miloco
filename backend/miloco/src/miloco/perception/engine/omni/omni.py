@@ -313,6 +313,7 @@ async def _call_omni_messages(
     )
 
     forced_stream = body.get("stream", False)
+    url = adapter.endpoint(config.base_url, config.model, stream=forced_stream)
 
     client = _get_fused_http_client(config.timeout)
     cb = get_omni_circuit_breaker()
@@ -322,17 +323,13 @@ async def _call_omni_messages(
     short_circuited = False
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
     }
     try:
         await cb.before_call()
         if not forced_stream:
-            resp = await client.post(
-                f"{config.base_url}/chat/completions",
-                headers=headers,
-                json=body,
-            )
+            resp = await client.post(url, headers=headers, json=body)
             classified = classify_response(resp)
             if classified is not None:
                 await cb.record_failure(classified)
@@ -347,7 +344,7 @@ async def _call_omni_messages(
                         _summarize_multimodal_payload(messages),
                     )
                 resp.raise_for_status()
-            raw = resp.json()
+            raw = adapter.parse_response(resp.json())
         else:
             # forced-stream (Qwen 等 adapter 强制 stream=True) 走 _collect_stream_response,
             # 内部对非 200 直接 raise_for_status → HTTPStatusError。下方 except 守卫
@@ -356,7 +353,7 @@ async def _call_omni_messages(
             # classify + record_failure 后再抛,与非流路径行为对齐。
             try:
                 raw = await _collect_stream_response(
-                    client, config.base_url, headers, body
+                    client, url, headers, body, adapter
                 )
             except httpx.HTTPStatusError as e:
                 classified = classify_response(e.response)

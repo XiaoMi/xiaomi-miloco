@@ -35,7 +35,7 @@ import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
-import { TaskListPanel } from "./components/TaskListPanel";
+import { TasksPage } from "./components/TasksPage";
 import { CandidateReviewPanel } from "./components/CandidateReviewPanel";
 import { MiotBindDialog } from "./components/MiotBindDialog";
 import { ToastHost, toast } from "./components/Toast";
@@ -252,6 +252,13 @@ function MainApp() {
                 // 只需 reload scopeCameras 拿新 voiceInUse。
                 scopeCameras.reload();
               }}
+              onRefresh={async () => {
+                // 手动刷新:force 绕过 8s 节流打后端刷相机状态,再 await 列表重拉落地——
+                // reload() 的 Promise 在 listScopeCameras settle 后 resolve,故 onRefresh 完成
+                // = 列表已更新到位,刷新按钮转圈据此精确覆盖全程(不被其他 reload 借用)。
+                await refreshCameraOnline(homeId, true).catch(() => {});
+                await scopeCameras.reload();
+              }}
             />
           </div>
         );
@@ -336,11 +343,6 @@ function MainApp() {
               loading={home.loading}
               onChanged={() => home.reload()}
             />
-            <TaskListPanel
-              tasks={tasks.data}
-              loading={tasks.loading}
-              onChanged={() => tasks.reload()}
-            />
             <CandidateReviewPanel
               data={home.data}
               onChanged={() => home.reload()}
@@ -348,6 +350,22 @@ function MainApp() {
           </div>
         );
       }
+      case "tasks":
+        if (tasks.error) {
+          return (
+            <TabPanelError
+              message={t("app.tabTasksError", { msg: tasks.error.message })}
+              onRetry={() => tasks.reload()}
+            />
+          );
+        }
+        return (
+          <TasksPage
+            tasks={tasks.data}
+            loading={tasks.loading}
+            onChanged={() => tasks.reload()}
+          />
+        );
       case "activity": {
         if (activity.error) {
           return (

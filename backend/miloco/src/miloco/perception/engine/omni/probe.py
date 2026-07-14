@@ -67,15 +67,30 @@ async def probe_reachable(base_url: str) -> dict | None:
 
 
 async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
-    """拉取 provider 模型列表(GET /models)。"""
+    """拉取 provider 模型列表(GET /models)。
+
+    模型下拉在「选定 model 之前」拉取,没有 model 可路由 adapter,故按 base_url 判 provider:
+    Gemini 原生根(generativelanguage)用 ``x-goog-api-key`` 鉴权、响应形态 ``{models:[{name}]}``
+    (需剥 "models/" 前缀);其余按 OpenAI 兼容 ``{data:[{id}]}`` + ``Bearer`` 解析。
+    (经代理转发的 Gemini 不含该域名时,仍走 OpenAI 兼容分支——用户可手填 model 名兜底。)
+    """
     base, err = _normalize_base_url(base_url)
     if err is not None:
         return {"ok": False, "code": "unreachable", "models": [], "message": err}
+    # 解析出主机名精确匹配,不用子串判断(``"…" in base_url`` 会被
+    # ``https://evil.com/generativelanguage.googleapis.com`` 之类绕过——CodeQL 报的
+    # incomplete URL substring sanitization)。
+    is_gemini = (
+        (urlparse(base).hostname or "").lower() == "generativelanguage.googleapis.com"
+    )
+    headers = (
+        {"x-goog-api-key": api_key}
+        if is_gemini
+        else {"Authorization": f"Bearer {api_key}"}
+    )
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(
-                f"{base}/models", headers={"Authorization": f"Bearer {api_key}"}
-            )
+            r = await client.get(f"{base}/models", headers=headers)
     except Exception as e:  # noqa: BLE001
         return {
             "ok": False,
@@ -85,10 +100,17 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
         }
     if r.status_code == 200:
         try:
-            ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+            if is_gemini:
+                ids = [
+                    (m.get("name") or "").removeprefix("models/")
+                    for m in (r.json().get("models") or [])
+                    if m.get("name")
+                ]
+            else:
+                ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
         except Exception:  # noqa: BLE001
             ids = []
-        return {"ok": True, "models": sorted(ids)}
+        return {"ok": True, "models": sorted(i for i in ids if i)}
     if r.status_code in (401, 403):
         return {
             "ok": False,
@@ -128,7 +150,7 @@ class _FakeStatusResp:
 
 async def _probe_stream_chat(
     client: httpx.AsyncClient,
-    base: str,
+    url: str,
     headers: dict[str, str],
     body: dict[str, Any],
     t0: float,
@@ -138,7 +160,7 @@ async def _probe_stream_chat(
     headers,让上层 429 分支能读 Retry-After —— 否则 forced-stream provider (Qwen)
     撞 429 时熔断退避会丢掉 server 明示的等待时长,与非流式路径 (MiMo) 行为不一致。"""
     async with client.stream(
-        "POST", f"{base}/chat/completions", headers=headers, json=body,
+        "POST", url, headers=headers, json=body,
     ) as resp:
         if resp.status_code != 200:
             await resp.aread()  # 允许连接释放
@@ -181,8 +203,12 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
         stream=False,  # 请求非流式;adapter 若强制 stream=True (Qwen) 会覆盖
     )
     forced_stream = body.get("stream", False)
+    url = adapter.endpoint(base, model, stream=forced_stream)
+    # adapter.auth_headers 走 provider 特化 —— Gemini 用 ``x-goog-api-key`` 头,
+    # OpenAI 兼容族用 ``Authorization: Bearer``。硬编码 Bearer 会对合法 Gemini
+    # 配置误报失败(401)。
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        **adapter.auth_headers(api_key),
         "Content-Type": "application/json",
     }
     t0 = time.monotonic()
@@ -194,7 +220,7 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
                 # 撑到超时)。任何一条 status_code / auth / model 错都会在开 stream 时
                 # 直接抛,与非流式行为对齐。
                 status_code, latency_ms, ok, resp_headers = await _probe_stream_chat(
-                    client, base, headers, body, t0
+                    client, url, headers, body, t0
                 )
                 if ok:
                     return {
@@ -209,7 +235,7 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
                 r = _FakeStatusResp(status_code, {}, "", resp_headers)
             else:
                 r = await client.post(  # type: ignore[assignment]
-                    f"{base}/chat/completions",
+                    url,
                     headers=headers,
                     json=body,
                 )
@@ -308,10 +334,21 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     - GET /models 401/403 → bad_key
     - GET /models 5xx → http_error
     - 其他(含 200 / 404 等) → 回退到 chat,以其结论为准
+
+    非 OpenAI 兼容族(Gemini 等原生协议)没有等价的 GET /models 预检语义,直接走
+    adapter 化的 chat 探测(``probe_chat`` 已按 provider 取 endpoint / 鉴权)。
     """
     base, err = _normalize_base_url(base_url)
     if err is not None:
         return {"ok": False, "code": "unreachable", "message": err}
+    # 延迟 import 避免顶层循环依赖。
+    from miloco.perception.engine.omni.provider import (
+        OpenAICompatAdapter,
+        get_adapter,
+    )
+
+    if not isinstance(get_adapter(model), OpenAICompatAdapter):
+        return await probe_chat(model, base, api_key)
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(

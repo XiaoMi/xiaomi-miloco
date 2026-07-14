@@ -729,14 +729,17 @@ class OmniTestBody(BaseModel):
 
 @router.post(
     "/omni-config/test",
-    summary="测试 omni 配置连通性（鉴权/可达预检 + 极简 chat 真校验，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
+    summary="测试 omni 配置连通性（OpenAI 兼容族两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
     response_model=NormalResponse,
 )
 async def test_omni_config(
     body: OmniTestBody, current_user: str = Depends(verify_token)
 ):
-    """用表单值（缺省回退当前已保存配置）做两阶段探测：先 GET /models 验鉴权/可达，再发一次
-    max_tokens=1 的极简 chat 真正验证该模型可用（消耗极少量 token，不计入 miloco 用量统计）。
+    """用表单值（缺省回退当前已保存配置）探测配置可用性。
+
+    OpenAI 兼容族（MiMo/Qwen）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
+    极简 chat 真正验证该模型可用；非 OpenAI 兼容族（Gemini 等原生协议）没有等价 GET /models
+    预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
     返回 {ok, code, status, latency_ms, message}。"""
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
@@ -993,17 +996,19 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
     if update:
         # omni_fps / window_size 是引擎/runner 构造时 cache 的，改这两个才需重启生效；
         # video_short_edge 每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
-        # 前端 drawer 三字段一起 PUT，故按「新值 != 旧值」判断，避免只拖分辨率也整机重启
-        # （重启会丢在途感知窗口、重置 tracker）。
-        need_restart = (
-            (body.omni_fps is not None and body.omni_fps != payload["omni_fps"])
-            or (body.window_size is not None and body.window_size != payload["window_size"])
-        )
+        # 前端 drawer 三字段一起 PUT，故按「新值 != 旧值」判断，避免只拖分辨率也重启。
+        omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
+        window_changed = body.window_size is not None and body.window_size != payload["window_size"]
+        # omni_fps 变才需重建引擎（重读构造期 cache 的 omni_fps，代价含模型重载）；window_size
+        # 只需 runner 重启（start 重读窗口）。故 window_size-only 时跳过 rebuild，省一次模型重载。
+        need_restart = omni_fps_changed or window_changed
         update_shared_config(**update)
         payload = _perception_config_payload()
         if need_restart:
             # config 已写盘(不可回滚)；重启若失败仅带 restart_ok=False，不冒泡成 500——
             # 否则前端会把「已保存+重启失败」误报成「保存失败」，误导用户以为改动丢失。
             # 同步等重启完成再返回。
-            payload["restart_ok"] = await manager.perception_service.apply_config_restart()
+            payload["restart_ok"] = await manager.perception_service.apply_config_restart(
+                rebuild_engine=omni_fps_changed
+            )
     return NormalResponse(code=0, message="ok", data=payload)

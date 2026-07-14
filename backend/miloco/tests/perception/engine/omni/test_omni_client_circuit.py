@@ -296,6 +296,12 @@ async def test_call_omni_forced_stream_401_records_failure(monkeypatch):
             kw["stream"] = True  # 关键:忽略调用方传的 stream=False
             return orig_adapter.build_request_body(messages, **kw)
 
+        def endpoint(self, base_url, model, *, stream):
+            return orig_adapter.endpoint(base_url, model, stream=stream)
+
+        def auth_headers(self, api_key):
+            return orig_adapter.auth_headers(api_key)
+
     monkeypatch.setattr(
         omni_client, "get_adapter", lambda model: _StreamAdapter()
     )
@@ -327,6 +333,12 @@ async def test_call_omni_forced_stream_500_records_failure(monkeypatch):
         def build_request_body(self, messages, **kw):
             kw["stream"] = True
             return orig_adapter.build_request_body(messages, **kw)
+
+        def endpoint(self, base_url, model, *, stream):
+            return orig_adapter.endpoint(base_url, model, stream=stream)
+
+        def auth_headers(self, api_key):
+            return orig_adapter.auth_headers(api_key)
 
     monkeypatch.setattr(
         omni_client, "get_adapter", lambda model: _StreamAdapter()

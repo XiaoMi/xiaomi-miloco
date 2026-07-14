@@ -66,11 +66,16 @@ class PerceptionService:
         async with self._lifecycle_lock:
             await self._pipeline.stop_to_unconfigured()
 
-    async def apply_config_restart(self) -> bool:
-        """感知参数变更后重启使新值生效：停 runner → 重建引擎 → 启 runner。
+    async def apply_config_restart(self, *, rebuild_engine: bool = True) -> bool:
+        """感知参数变更后重启使新值生效：停 runner →（按需重建引擎）→ 启 runner。
 
-        引擎构造时 cache 的 omni_fps 靠 rebuild 重读；runner 的 window_size 靠
-        start() 重读（见 runner.start）。运行时未启动则只重建引擎不拉起 runner。
+        ``rebuild_engine`` 拆开「重建引擎」与「重启 runner」两件事，各自最小化：
+          - omni_fps 变 → 需 ``rebuild_engine=True``：omni_fps 是引擎构造时 cache 的，
+            必须 rebuild（close + _init_engine）才重读，代价含模型重载（秒级）。
+          - window_size 变（omni_fps 不变）→ ``rebuild_engine=False``：window_size 靠
+            runner.start() 重读即可（见 runner.start），只 stop→start，跳过模型重载。
+        无论哪种，只要 was_running 都要 stop→start：rebuild 后新引擎实例需靠 start 重挂
+        inference executor；window_size-only 时 stop→start 也让 runner 重读窗口。
         全程持 lifecycle 锁,避免与并发的 start_engine/stop_engine 交错。
 
         返回重启是否成功。config 已由调用方写盘(不可回滚),重建失败(如磁盘满/
@@ -82,7 +87,8 @@ class PerceptionService:
                 was_running = self._engine.is_running
                 if was_running:
                     await self._engine.stop()
-                await self._pipeline.rebuild()
+                if rebuild_engine:
+                    await self._pipeline.rebuild()
                 if was_running:
                     await self._engine.start()
                 return True
