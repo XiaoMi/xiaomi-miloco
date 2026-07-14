@@ -229,12 +229,10 @@ check_pr_review_gate() {
         return
     fi
     local pr_num
-    pr_num=$("$SCRIPT_DIR/local-ci.sh" -c 'echo __detect__' 2>/dev/null || true)
-    # 复用 local-ci.sh 的检测逻辑：先 env 再 gh pr view
-    if [[ -z "${MILOCO_PR_NUMBER:-}" ]]; then
-        set +e; pr_num=$(gh pr view --json number -q '.number' 2>/dev/null); set -e
-    else
+    if [[ -n "${MILOCO_PR_NUMBER:-}" ]]; then
         pr_num="$MILOCO_PR_NUMBER"
+    elif command -v gh &>/dev/null; then
+        set +e; pr_num=$(gh pr view --json number -q '.number' 2>/dev/null); set -e
     fi
     if [[ -z "$pr_num" ]]; then
         _info "未检测到 PR 号，跳过门禁"
