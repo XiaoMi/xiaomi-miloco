@@ -311,6 +311,16 @@ class SortTracker:
         self._next_track_id = 0
         self.last_detections = []
 
+    def set_fps(self, fps: int) -> None:
+        """运行时更新 fps：仅重算 max_age 帧数阈值，不清跟踪状态。
+
+        fps 在本 tracker 里只用于把 ``max_age_sec`` 换算成帧数（构造期算一次）；
+        Kalman / 关联逻辑均工作在帧单位、与 fps 无关。故改 fps 无需重建 tracker，
+        重算 ``_max_age_frames`` 后活跃 track 下一帧的删除判定即用新阈值。
+        """
+        self.fps = max(1, int(fps))
+        self._max_age_frames = max(1, int(round(self.config.max_age_sec * self.fps)))
+
     def update_with_detections(
         self, frame: NDArray[np.uint8], all_dets: list
     ) -> None:

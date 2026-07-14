@@ -110,6 +110,10 @@ class PerceptionEngine(BasePerceptionEngine):
         from miloco.perception.engine.omni.provider import adjust_fps_for_omni
 
         fps = self._config.input.fps
+        # 未经 adjust_fps_for_omni 调整前的 base fps（来自 settings/config），供
+        # apply_omni_fps 运行时重算——必须从 base 重算而非已调整值，否则 omni_fps
+        # 多次变更会累积错算（如 base=3 时 omni 2→3 应回 3，拿 4 再调会得 6）。
+        self._base_fps = fps
         omni_fps = self._config.input.omni_fps
         new_fps = adjust_fps_for_omni(fps, omni_fps)
         if new_fps != fps:
@@ -830,6 +834,35 @@ class PerceptionEngine(BasePerceptionEngine):
         self._gate_last_audio_pass_ts.clear()
         self._gate_hold_active.clear()
         self._gate_hold_started_at.clear()
+
+    def apply_omni_fps(self, omni_fps: int) -> None:
+        """运行时热更 omni_fps（含其经 adjust_fps_for_omni 顶起的 tracker fps），
+        免重建引擎 / 免模型重载 / 不丢 track 状态。
+
+        omni_fps 本身在 pipeline 每窗现读 config.input.omni_fps，更新 config 即生效；
+        它顶起的 fps 也在 pipeline 现读，但有 3 处构造期派生缓存不会自动刷新——这里
+        显式重算：tracking kwargs（后续懒建）、每个 live tracker 的 max_age、每个 live
+        IdentityEngine 的帧数派生量。fps 必须从 base 重算（见 __init__ self._base_fps）。
+        """
+        from dataclasses import replace
+
+        from miloco.perception.engine.omni.provider import adjust_fps_for_omni
+
+        new_fps = adjust_fps_for_omni(self._base_fps, omni_fps)
+        self._config = replace(
+            self._config,
+            input=replace(self._config.input, omni_fps=omni_fps, fps=new_fps),
+        )
+        # 构造期缓存 1：后续懒建的 tracking_service 拿新 fps
+        self._tracking_service_kwargs["fps"] = new_fps
+        # 构造期缓存 2：已建的 per-camera tracker（SortTracker / DeepSort）重算 max_age
+        for svc in self._tracking_services.values():
+            if hasattr(svc, "set_fps"):
+                svc.set_fps(new_fps)
+        # 构造期缓存 3：已建的 per-camera IdentityEngine 重算 grace / cooldown / frames_per_window
+        for eng in self._identity_engines.values():
+            if eng is not None:
+                eng.set_engine_fps(new_fps)
 
     def _strip_unauthorized_voice_audio(self, batch: BatchedSnapshot) -> None:
         """硬切**未开启拾音**相机的音频——opt-in / 默认关语义的**第一道防线（唯一切点）**。

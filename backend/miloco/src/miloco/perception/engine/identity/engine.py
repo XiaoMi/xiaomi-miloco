@@ -319,6 +319,8 @@ class IdentityEngine:
         # 仅供冷却日志把 frame_index 余量换算成"窗 / 秒"展示: frame_index 每窗推进 fps×period_sec、
         # 每实际秒推进 fps(见 api.py _global_frame_index)。不参与任何阈值判定。
         self._engine_fps: float = max(engine_fps, 1e-6)
+        # period_sec 单独存一份，供 set_engine_fps 运行时重算 _frames_per_window。
+        self._period_sec: float = period_sec
         self._frames_per_window: float = max(1.0, engine_fps * period_sec)
 
         # tier_c 写库冷却(秒) = mult × 写库门 × 快重审间隔(秒) = 2 × 6 × 10 = 120s; 在此按 engine_fps
@@ -791,6 +793,26 @@ class IdentityEngine:
         # 监听层 snapshot 也回 None，让 reset 后的首窗口仅记录、不误触发重置
         # （reset 后 _states 是空的，重置也无害，但保持"启动语义"与首次启动一致）
         self._last_library_snapshot = None
+
+    def set_engine_fps(self, fps: float) -> None:
+        """运行时更新 engine_fps：重算所有 fps 派生帧数缓存，免重建 engine。
+
+        与构造期算法数值一致（构造期 grace/frames_per_window 用裸 ``engine_fps``、此处
+        统一用 clamp 后的 ``self._engine_fps``；因 fps 恒 ≥1，clamp 为 no-op、结果相同）。
+        4 个 recheck 间隔在 state.py 每窗现算、直接读 ``self._engine_fps``，重赋即生效。
+        已 stamp 的 per-track ``tier_c_cooldown_until_frame`` 是绝对帧号，保持不动
+        （fps 变后墙钟余量的漂移是 transient，下次写库自愈）。
+        """
+        self._engine_fps = max(fps, 1e-6)
+        self._frames_per_window = max(1.0, self._engine_fps * self._period_sec)
+        self._dead_track_grace_frames = max(1, round(_DEAD_TRACK_GRACE_SEC * self._engine_fps))
+        _stab = self.config.stability
+        _cooldown_sec = (
+            _stab.tier_c_cooldown_mult
+            * _stab.write_eligible_min_count
+            * _stab.recheck_interval_accumulating_sec
+        )
+        self._tier_c_cooldown_frames = max(1, round(_cooldown_sec * self._engine_fps))
 
     # =========================================================================
     # 身份库变化监听

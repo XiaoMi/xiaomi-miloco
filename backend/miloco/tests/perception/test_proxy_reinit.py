@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from miloco.node_monitor import Lifecycle, NodeName
@@ -253,42 +253,29 @@ def test_pipeline_try_reinit_forwards_include_failed():
     proxy.try_reinit.assert_called_once_with(include_failed=True)
 
 
-# ── proxy: rebuild 强制重建(改感知参数后生效) ─────────────────────────
+# ── proxy: apply_omni_fps 运行时热更(改 omni_fps 免重建/免重载模型) ──────────
 
 @pytest.mark.asyncio
-async def test_rebuild_forces_recreate_even_when_ready():
-    """rebuild 与 try_reinit 相反:ready 态也强制 close 旧实例 + 重跑 _init_engine
-    (读新 config 的 omni_fps)。否则「应用设置」改 omni_fps 不生效——ready 时
-    try_reinit 是 no-op,旧引擎带旧配置原样恢复。"""
-    old_engine = MagicMock()
-    old_engine.close = AsyncMock()
-    proxy = _make_proxy("ready", engine=old_engine, message="")
+async def test_apply_omni_fps_forwards_to_live_engine():
+    """引擎在跑(ready)时:透传给 engine.apply_omni_fps(新值)，不 close、不重建实例。"""
+    engine = MagicMock()
+    engine.apply_omni_fps = MagicMock()
+    proxy = _make_proxy("ready", engine=engine, message="")
 
-    def _fake_init():
-        # 模拟 _init_engine 用新 config 重建出一个新实例
-        proxy.perception_engine = MagicMock(name="new_engine")
-        proxy._status = "ready"
+    await proxy.apply_omni_fps(2)
 
-    proxy._init_engine = MagicMock(side_effect=_fake_init)
-
-    with patch("miloco.perception.client.get_monitor", return_value=MagicMock()):
-        await proxy.rebuild()
-
-    # 旧实例被关闭,_init_engine 被调用重建
-    old_engine.close.assert_awaited_once()
-    proxy._init_engine.assert_called_once()
-    # 引擎实例已被替换(不再是旧的)
-    assert proxy.perception_engine is not old_engine
-    assert proxy.status == "ready"
+    engine.apply_omni_fps.assert_called_once_with(2)
+    # 引擎实例原样保留（热更不换实例、不丢 track）
+    assert proxy.perception_engine is engine
 
 
 @pytest.mark.asyncio
-async def test_rebuild_no_prior_engine_skips_close():
-    """无引擎实例(未配 key/模型的降级态)时 rebuild 只 _init_engine,不 close。"""
+async def test_apply_omni_fps_no_engine_is_noop():
+    """无引擎实例(未配 key/模型的降级态)时 apply_omni_fps no-op、不崩。
+    settings 已由 PUT config 持久化，下次 _init_engine 自然读到新 omni_fps。"""
     proxy = _make_proxy("no_omni_api_key", engine=None)
-    proxy._init_engine = MagicMock()
 
-    with patch("miloco.perception.client.get_monitor", return_value=MagicMock()):
-        await proxy.rebuild()
+    # 不应抛 AttributeError（engine is None 时守卫跳过）
+    await proxy.apply_omni_fps(2)
 
-    proxy._init_engine.assert_called_once()
+    assert proxy.perception_engine is None

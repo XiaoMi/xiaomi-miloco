@@ -113,6 +113,18 @@ class DeepSortTracker:
     def reset(self) -> None:
         self._mot.reset()
 
+    def set_fps(self, fps: int) -> None:
+        """运行时更新 fps：重算 max_age 帧数并写穿到内部 MultiObjectTracker.config。
+
+        与 SortTracker 同理，fps 仅用于把 ``max_age_sec`` 换算成帧数（构造期算一次、
+        烘进 TrackerConfig）。改 fps 无需重建 tracker：``_mot.config`` 是可变 dataclass，
+        track 循环每帧现读 ``max_age`` / ``human_max_lost_frames``，改字段下一帧即生效。
+        """
+        self.fps = max(1, int(fps))
+        max_age_frames = max(1, int(round(self.config.max_age_sec * self.fps)))
+        self._mot.config.max_age = max_age_frames
+        self._mot.config.human_max_lost_frames = max_age_frames
+
     def update_with_detections(self, frame: NDArray[np.uint8], detections: list) -> None:
         """update() 的变体：跳过内部 detect，使用外部传入的检测结果。"""
         self._mot.update_with_detections(frame, detections)
