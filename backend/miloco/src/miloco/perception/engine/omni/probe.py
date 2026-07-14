@@ -290,12 +290,15 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
             "message": "模型或地址不存在",
         }
     if r.status_code in (400, 422):
+        # OpenAI 兼容族此前有 GET /models 预检拦过 401/403，到这里 400 多为请求体/模型名被拒；
+        # 但原生协议(Gemini)无预检、且部分 provider 对无效 key 就返回 400(而非 401/403)——
+        # 故 400 也可能是 key 无效,无法仅凭 status code 区分,文案同时提示两种可能。
         return {
             "ok": False,
             "code": "rejected_authed",
             "status": r.status_code,
             "latency_ms": latency_ms,
-            "message": "已连接，但拒绝了模型请求（模型名可能错误）",
+            "message": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
         }
     if r.status_code == 429:
         # 429 不加分支时会掉到 http_error 兜底,后果:上层用 http_error 走 _default cap
