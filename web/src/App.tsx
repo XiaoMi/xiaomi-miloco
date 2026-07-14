@@ -34,7 +34,7 @@ import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
-import { TaskListPanel } from "./components/TaskListPanel";
+import { TasksPage } from "./components/TasksPage";
 import { CandidateReviewPanel } from "./components/CandidateReviewPanel";
 import { MiotBindDialog } from "./components/MiotBindDialog";
 import { ToastHost, toast } from "./components/Toast";
@@ -342,11 +342,6 @@ function MainApp() {
               loading={home.loading}
               onChanged={() => home.reload()}
             />
-            <TaskListPanel
-              tasks={tasks.data}
-              loading={tasks.loading}
-              onChanged={() => tasks.reload()}
-            />
             <CandidateReviewPanel
               data={home.data}
               onChanged={() => home.reload()}
@@ -354,6 +349,22 @@ function MainApp() {
           </div>
         );
       }
+      case "tasks":
+        if (tasks.error) {
+          return (
+            <TabPanelError
+              message={t("app.tabTasksError", { msg: tasks.error.message })}
+              onRetry={() => tasks.reload()}
+            />
+          );
+        }
+        return (
+          <TasksPage
+            tasks={tasks.data}
+            loading={tasks.loading}
+            onChanged={() => tasks.reload()}
+          />
+        );
       case "activity": {
         if (activity.error) {
           return (

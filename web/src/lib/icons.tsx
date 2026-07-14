@@ -145,6 +145,13 @@ export const IconAlert = (p: Props) => (
   </svg>
 );
 
+export const IconHelp = (p: Props) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M9.5 9.2a2.5 2.5 0 0 1 4.9.8c0 1.7-2.4 2-2.4 3.5M12 17h.01" />
+  </svg>
+);
+
 export const IconCheck = (p: Props) => (
   <svg {...base(p)}>
     <path d="M5 13l4 4L19 7" />

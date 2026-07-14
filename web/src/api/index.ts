@@ -212,6 +212,14 @@ export async function deleteTask(taskId: string): Promise<void> {
   return impl.realDeleteTask(taskId);
 }
 
+// 改任务描述。
+export async function updateTaskDescription(
+  taskId: string,
+  description: string,
+): Promise<void> {
+  return impl.realUpdateTaskDescription(taskId, description);
+}
+
 // ── 设备 ──────────────────────────────────────────────────
 export async function listDevices(homeId?: HomeId): Promise<Device[]> {
   if (!isPrimary(homeId)) return [];
