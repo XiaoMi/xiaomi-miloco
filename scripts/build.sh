@@ -312,10 +312,15 @@ pack_platform_bundles() {
     cli_whl=$(ls "$DIST_DIR"/miloco_cli-*.whl 2>/dev/null | head -1)
     tgz=$(ls "$DIST_DIR"/miloco-openclaw-plugin-*.tgz 2>/dev/null | head -1)
 
+    # 子集构建（--packages 只构建部分包）本就产不出完整平台归档：跳过而非硬失败，
+    # 否则 sync-to-remote.sh --packages <子集> 这类 dev 工作流会被 set -e 中断。
+    # 全量构建（默认 / CI）时缺文件仍走硬失败，暴露 CI 打包异常。
+    if [[ "$PACKAGES" != "$ALL_PACKAGES" ]]; then
+        log "子集构建（--packages=$PACKAGES），跳过平台归档打包"
+        return
+    fi
+
     if [[ -z "$miloco_whl" || -z "$cli_whl" || -z "$tgz" || -z "$models_tar" ]]; then
-        # 上游 build_* / pack_models 都会自己 fail，走到这里还缺文件只可能是 should_build
-        # 关掉了某段构建；此时静默跳过会打出没 bundles 的 manifest → 用户装机命中
-        # error.no_bundle。红线前置到这里，构建者立刻看到少了哪个。
         log "FATAL: 缺失文件 — miloco_whl=$miloco_whl cli_whl=$cli_whl tgz=$tgz models_tar=$models_tar"
         exit 1
     fi
