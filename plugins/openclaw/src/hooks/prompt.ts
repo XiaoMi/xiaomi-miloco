@@ -1,7 +1,10 @@
 import path from "node:path";
 import { readFileSafe } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
-import { lockOnboardingSession } from "../home-profile/onboarding_state.js";
+import {
+  lockOnboardingSession,
+  readOnboardingState,
+} from "../home-profile/onboarding_state.js";
 import { getCatalog } from "../services/catalog.js";
 import { logger } from "../utils/logger.js";
 import { deployTimezone, toLocalParts } from "../utils/time.js";
@@ -127,18 +130,42 @@ function buildOnboardingSessionBlock(
   // 借此排除「广播 turn 自身」触发锁定——只有用户真实回复才会锁定 onboarding 会话。
   // 若改动该前缀约定，需同步调整这里的守卫逻辑。
   if (!key || !prompt || prompt.startsWith("[系统事件]")) return "";
-  const state = lockOnboardingSession(key);
+  const currentState = readOnboardingState();
+  if (!currentState?.invitedSessionKeys.includes(key)) return "";
+
+  const state =
+    currentState.lockedSessionKey || !isOnboardingInviteReply(prompt)
+      ? currentState
+      : lockOnboardingSession(key);
   if (!state || !state.invitedSessionKeys.includes(key)) return "";
   if (state.lockedSessionKey && state.lockedSessionKey !== key) {
     return `## Onboarding 会话收敛
-当前存在一场已经在另一条 IM 会话中继续的 onboarding（锁定会话：${state.lockedSessionKey}）。
-若用户在本会话继续回应那次初始化邀请，不要并行继续登记流程；简短告知用户：初始化已经在另一条会话里继续，请回到那条会话完成，或明确要求你重新开始时再处理。`;
+检测到 onboarding 可能已在另一条 IM 会话中开始（锁定会话：${state.lockedSessionKey}）。
+若用户明确是在本会话回应初始化邀请、且确有继续意愿，可直接在本会话继续；否则简短提示曾在另一条会话发起过，交由用户选择，不要强行要求切回。`;
   }
   if (state.lockedSessionKey === key) {
     return `## Onboarding 会话收敛
 当前会话已被锁定为正在继续的 onboarding 会话。若用户是在回应之前收到的初始化邀请，就继续同一条 onboarding 流程；不要让用户跳到别的会话重复做一遍。`;
   }
   return "";
+}
+
+function isOnboardingInviteReply(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  if (/[?？]/.test(text)) return false;
+
+  const onboardingIntent =
+    /(onboarding|初始化|入门|引导|登记|注册|家庭档案|家庭信息|成员信息|家庭成员|开始登记|开始初始化|继续登记|继续初始化)/i;
+  if (onboardingIntent.test(text)) return true;
+
+  const controlIntent =
+    /(打开|关闭|开灯|关灯|开空调|关空调|空调|窗帘|灯|插座|电视|查询|查看|提醒|闹钟|定时|执行|控制|调到|设置|播放)/;
+  if (controlIntent.test(text)) return false;
+
+  return /^(好|好的|可以|行|嗯|嗯嗯|是|对|开始吧|开始|继续吧|继续|来吧|ok|okay|yes|yep|sure)[。.!！\s]*$/i.test(
+    text,
+  );
 }
 
 const B_LANGUAGE = `## 输出语言
