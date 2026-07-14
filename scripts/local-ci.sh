@@ -122,15 +122,91 @@ run_shellcheck() {
     fi
 }
 
-# ---- pr-review 门禁 (拉云端 review comment，本地正则检查) --------------------
+# ---- pr-review 门禁 (优先本地 Claude 审查，无 key 则拉云端 comment) ----------
 run_pr_review_gate() {
-    info "pr-review 门禁 (拉 GitHub review comment 检查 🔴/🟡)…"
-    if ! command -v gh &>/dev/null; then
-        info "gh CLI 未安装，跳过 pr-review 门禁"
-        return
-    fi
+    info "pr-review 门禁…"
     local pr_num="${MILOCO_PR_NUMBER:-279}"
     local repo="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
+
+    # 优先跑本地 Claude 审查（需要 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN）
+    if command -v claude &>/dev/null; then
+        local anthropic_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+        if [[ -n "$anthropic_key" ]]; then
+            info "本地 Claude 审查 PR #$pr_num…"
+            _run_claude_review "$pr_num" "$repo"
+            return
+        fi
+    fi
+
+    # 无 key → 回落到拉云端已发布 review comment 做门禁
+    info "无 Anthropic key，拉云端 review comment 做门禁…"
+    _check_cloud_review "$pr_num" "$repo"
+}
+
+_run_claude_review() {
+    local pr_num="$1" repo="$2"
+    local review_tmp
+    review_tmp=$(mktemp)
+
+    # Claude Code 需要 .claude/commands/ 里有 review-pr.md（CI 从 origin/main 恢复）
+    if [[ ! -f "$REPO_ROOT/.claude/commands/review-pr.md" ]]; then
+        mkdir -p "$REPO_ROOT/.claude/commands"
+        cp "$REPO_ROOT/.agents/commands/review-pr.md" "$REPO_ROOT/.claude/commands/review-pr.md"
+    fi
+
+    # macOS 没有 stdbuf（Linux CI 用它防缓冲），直接管道即可
+    local claude_cmd="claude"
+    if [[ "$(uname)" == "Linux" ]] && command -v stdbuf &>/dev/null; then
+        claude_cmd="stdbuf -oL claude"
+    fi
+
+    info "运行中（~5-10 分钟）…"
+    # 注意: dontAsk 模式下 claude 只会运行白名单命令（Bash/Read/Glob/Grep）
+    ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN}}" \
+        $claude_cmd \
+        --permission-mode dontAsk \
+        --tools "Bash,Read,Glob,Grep" \
+        --verbose --output-format stream-json \
+        -p "/review-pr ${pr_num} --ci" 2>&1 \
+        | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        t = d.get('type','')
+        if t == 'assistant':
+            for c in d.get('message',{}).get('content',[]):
+                if c.get('type')=='text':
+                    print('[assistant]', c['text'][:300], flush=True)
+        elif t == 'result':
+            cost = d.get('total_cost_usd', 0)
+            turns = d.get('num_turns', 0)
+            err = d.get('is_error', False)
+            label = '[FAIL]' if err else '[DONE]'
+            print(f'{label} cost=\${cost}, turns={turns}', flush=True)
+    except: pass
+" > "$review_tmp" 2>&1
+
+    if grep -q '\[DONE\]' "$review_tmp" 2>/dev/null; then
+        if grep -qE '🔴|🟡' "$review_tmp" 2>/dev/null; then
+            grep -E '🔴|🟡|结论|审查完成|需要修改' "$review_tmp" || true
+            fail "pr-review 发现严重/重要问题"
+        else
+            ok "pr-review 通过"
+        fi
+    else
+        tail -10 "$review_tmp"
+        fail "pr-review 执行失败"
+    fi
+    rm -f "$review_tmp"
+}
+
+_check_cloud_review() {
+    local pr_num="$1" repo="$2"
+    if ! command -v gh &>/dev/null; then
+        info "gh CLI 未安装，跳过"
+        return
+    fi
     local comment
     comment=$(gh api "/repos/$repo/issues/$pr_num/comments" --paginate 2>/dev/null \
         | python3 -c "
@@ -143,19 +219,16 @@ for c in comments:
         break
 " 2>/dev/null)
     if [[ -z "$comment" ]]; then
-        fail "未找到 review-pr-ci comment（review 尚未跑完或未执行？）"
+        fail "未找到 review-pr-ci comment"
         return
     fi
     if echo "$comment" | grep -qE '^#{1,4} .*(🔴 严重|🟡 重要)'; then
         echo "$comment" | grep -E '^#{1,4} .*(🔴 严重|🟡 重要)' || true
         fail "pr-review 发现严重/重要问题"
+    elif echo "$comment" | grep -qE '需要修改|发现严重'; then
+        fail "pr-review 结论: 需要修改"
     else
-        # 检查结论行
-        if echo "$comment" | grep -qE '需要修改|发现严重'; then
-            fail "pr-review 结论: 需要修改"
-        else
-            ok "pr-review 门禁通过"
-        fi
+        ok "pr-review 通过"
     fi
 }
 
