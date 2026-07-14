@@ -128,12 +128,23 @@ run_pr_review_gate() {
     local pr_num="${MILOCO_PR_NUMBER:-279}"
     local repo="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
 
-    # 优先跑本地 Claude 审查（需要 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN）
-    if command -v claude &>/dev/null; then
-        local anthropic_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
-        if [[ -n "$anthropic_key" ]]; then
-            info "本地 Claude 审查 PR #$pr_num…"
-            _run_claude_review "$pr_num" "$repo"
+    # 优先跑本地 Claude 审查
+    # 读 ~/.claude/settings.json 里的 ANTHROPIC_AUTH_TOKEN（系统自带真实 key）
+    # MiMo Anthropic 兼容端点 claude CLI 不完全兼容（部分 SDK 调用超时），
+    # 实际审查请用真实 Anthropic key
+    local anthropic_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+    if [[ -z "$anthropic_key" ]] && [[ -f ~/.claude/settings.json ]]; then
+        anthropic_key=$(python3 -c "
+import json
+try:
+    d = json.load(open('$HOME/.claude/settings.json'))
+    print(d.get('env',{}).get('ANTHROPIC_AUTH_TOKEN',''))
+except: pass
+" 2>/dev/null)
+    fi
+    if command -v claude &>/dev/null && [[ -n "$anthropic_key" ]]; then
+        info "本地 Claude 审查 PR #$pr_num（~5-10 分钟）…"
+        _run_claude_review "$pr_num" "$repo"
             return
         fi
     fi
