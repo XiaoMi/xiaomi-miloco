@@ -65,14 +65,18 @@ run_backend_tests() {
     for d in "${ignore_dirs[@]}"; do
         ignore_args="$ignore_args --ignore=$d"
     done
-    if uv run pytest miloco/tests/ -q $ignore_args --tb=line 2>&1; then
+    local out
+    out=$(uv run pytest miloco/tests/ -q $ignore_args --tb=line --color=no 2>&1)
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
         ok "backend 测试"
     else
         local failed
-        failed=$(uv run pytest miloco/tests/ -q $ignore_args --tb=line 2>/dev/null | grep -c "^FAILED" || echo 0)
+        failed=$(echo "$out" | grep -c "^FAILED" || echo 0)
         if [[ "$(uname)" == "Darwin" && "$failed" -le 3 ]]; then
             ok "backend 测试 (macOS 已知 $failed 项跳过: node_monitor smaps)"
         else
+            echo "$out" | grep -E "^FAILED" || true
             fail "backend 测试 ($failed 失败)"
         fi
     fi
@@ -132,7 +136,10 @@ run_pr_review_gate() {
     # 读 ~/.claude/settings.json 里的 ANTHROPIC_AUTH_TOKEN（系统自带真实 key）
     # MiMo Anthropic 兼容端点 claude CLI 不完全兼容（部分 SDK 调用超时），
     # 实际审查请用真实 Anthropic key
-    local anthropic_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+    local anthropic_key=""
+    # 1. 优先读 env 变量
+    anthropic_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+    # 2. env 无 → 读 ~/.claude/settings.json
     if [[ -z "$anthropic_key" ]] && [[ -f ~/.claude/settings.json ]]; then
         anthropic_key=$(python3 -c "
 import json
@@ -144,9 +151,8 @@ except: pass
     fi
     if command -v claude &>/dev/null && [[ -n "$anthropic_key" ]]; then
         info "本地 Claude 审查 PR #$pr_num（~5-10 分钟）…"
-        _run_claude_review "$pr_num" "$repo"
-            return
-        fi
+        _run_claude_review "$pr_num" "$repo" "$anthropic_key"
+        return
     fi
 
     # 无 key → 回落到拉云端已发布 review comment 做门禁
@@ -155,7 +161,7 @@ except: pass
 }
 
 _run_claude_review() {
-    local pr_num="$1" repo="$2"
+    local pr_num="$1" repo="$2" key="$3"
     local review_tmp
     review_tmp=$(mktemp)
 
@@ -173,7 +179,7 @@ _run_claude_review() {
 
     info "运行中（~5-10 分钟）…"
     # 注意: dontAsk 模式下 claude 只会运行白名单命令（Bash/Read/Glob/Grep）
-    ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN}}" \
+    ANTHROPIC_AUTH_TOKEN="$key" \
         $claude_cmd \
         --permission-mode dontAsk \
         --tools "Bash,Read,Glob,Grep" \
@@ -188,7 +194,7 @@ for line in sys.stdin:
         if t == 'assistant':
             for c in d.get('message',{}).get('content',[]):
                 if c.get('type')=='text':
-                    print('[assistant]', c['text'][:300], flush=True)
+                    print('[assistant]', c['text'], flush=True)
         elif t == 'result':
             cost = d.get('total_cost_usd', 0)
             turns = d.get('num_turns', 0)
