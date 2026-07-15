@@ -96,8 +96,8 @@ export interface Scene {
 // ── 活动事件(meaningful_events)─────────────────────────────
 // 数据源:GET /api/events(perception/events_router).
 // 一次感知推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids 记录本行真正相关的
-// 摄像头——有 rule/suggestion/asr 命中时收窄到其 source_device_ids,否则为参与本次
-// 推理的全部摄像头.
+// 摄像头——有 rule/suggestion/asr 命中时收窄到其 source_device_ids,否则退化为本次
+// 推理中成功出图(可落盘)的全部摄像头.
 // `text` 字段是 agent webhook 收到的同一段聚合文本(单源真值,B2 约束).
 //
 // has_rule_hit / has_suggestion / has_asr 只用于诊断,**UI 不渲染 badge**(B14:
