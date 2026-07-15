@@ -46,6 +46,7 @@ from miloco.observability.agent_meta_poller import (
     set_agent_meta_poller,
 )
 from miloco.observability.cleanup import (
+    cleanup_action_ledger_table,
     cleanup_agent_runs_table,
     cleanup_events_table,
     cleanup_trace_jsonl,
@@ -116,9 +117,13 @@ async def _log_cleanup_loop() -> None:
                     da = cleanup_agent_runs_table(
                         conn, settings.perf.retention.agent_runs_days
                     )
+                    dal = cleanup_action_ledger_table(
+                        conn, settings.perf.retention.action_ledger_days
+                    )
                     logger.info(
-                        "Observability cleanup: traces=%d, traces_device=%d, events=%d, agent_runs=%d",
-                        dt, dtd, de, da,
+                        "Observability cleanup: traces=%d, traces_device=%d, "
+                        "events=%d, agent_runs=%d, action_ledger=%d",
+                        dt, dtd, de, da, dal,
                     )
                     # auto_vacuum=INCREMENTAL 下,DELETE 把页标 free 但不还 OS。
                     # 这里集中触发 incremental_vacuum,每页 4KB × 10000 ≈ 40MB 回收上限。

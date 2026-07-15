@@ -1373,6 +1373,17 @@ class RuleRunner:
 
         from miloco.miot.service import _write_action_ledger
 
+        # 台账元组先归一好,成功/异常路径共用——SDK/网络抛异常时台账也要能看到
+        # 规则当时试图设置什么值 / 什么参数(失败审计完整性)。
+        _ltype = "set_property" if is_prop else "call_action"
+        try:
+            _lvalue = _json.dumps(
+                action.value if is_prop else (action.params or []),
+                ensure_ascii=False,
+            )
+        except Exception:
+            _lvalue = None  # 参数不可序列化时不反噬规则执行
+
         try:
             if is_prop:
                 params = [
@@ -1382,8 +1393,6 @@ class RuleRunner:
                 ]
                 results = await self._miot_proxy.set_device_properties(params)
                 success, _lcode, _lmsg = _summarize_rule_result(results)
-                _ltype = "set_property"
-                _lvalue = _json.dumps(action.value, ensure_ascii=False)
             else:
                 param = MIoTActionParam(
                     did=action.did,
@@ -1393,8 +1402,6 @@ class RuleRunner:
                 )
                 result = await self._miot_proxy.call_device_action(param)
                 success, _lcode, _lmsg = _summarize_rule_result(result)
-                _ltype = "call_action"
-                _lvalue = _json.dumps(action.params or [], ensure_ascii=False)
             # 有实际结果时与 control_device 同口径(负码即失败,镜像 #394,msg 是失败码
             # 释义);空/不可判定返回按失败处理(见 _summarize_rule_result:未确认的执行
             # 不能写 cooldown)。台账 result_msg 不再恒 NULL。
@@ -1419,8 +1426,8 @@ class RuleRunner:
         except Exception as e:
             await _write_action_ledger(
                 self._miot_proxy,
-                action_type="set_property" if is_prop else "call_action",
-                did=action.did, iid=action.iid, value_json=None,
+                action_type=_ltype,
+                did=action.did, iid=action.iid, value_json=_lvalue,
                 result_code=None, result_msg=None,
                 success=False, error=str(e), source="rule", source_id=rule_id,
             )

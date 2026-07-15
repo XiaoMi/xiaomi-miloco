@@ -235,6 +235,31 @@ async def test_rule_static_action_writes_ledger_source_rule(runner, monkeypatch)
     assert kw["success"] is True
 
 
+@pytest.mark.asyncio
+async def test_rule_action_exception_ledger_keeps_attempted_value(
+    runner, monkeypatch, mock_miot_proxy
+):
+    """异常路径台账保留尝试参数(value_json 非 NULL)——失败动作是排查时最有
+    价值的场景,不能只落 error 看不到当时想设什么值(review: Zirconi)。"""
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.rule.schema import RuleAction
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+    mock_miot_proxy.set_device_properties = _AM(side_effect=RuntimeError("net down"))
+
+    action = RuleAction(did="dev1", iid="prop.2.1", value=True, idempotent=False)
+    result = await runner._execute_action("rule-9", action)
+
+    assert result.result is False
+    spy.assert_awaited_once()
+    kw = spy.await_args.kwargs
+    assert kw["success"] is False
+    assert kw["action_type"] == "set_property"
+    assert kw["value_json"] == "true"
+
+
 @pytest.fixture
 def service(
     mock_rule_repo, mock_log_repo, mock_miot_proxy, mock_task_repo,

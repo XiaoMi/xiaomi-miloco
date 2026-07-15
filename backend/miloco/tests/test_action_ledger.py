@@ -70,6 +70,14 @@ def _make_service(tmp_path: Path) -> MiotService:
         ),
         call_device_action=AsyncMock(return_value={"code": 0}),
         get_devices=AsyncMock(return_value={"dev1": dev}),
+        # 摄像头只在 camera cache(MIoTCameraInfo 继承 MIoTDeviceInfo 同字段)
+        get_cameras=AsyncMock(
+            return_value={
+                "cam1": SimpleNamespace(
+                    home_id="H1", name="门口摄像头", room_name="门口"
+                )
+            }
+        ),
         get_all_scenes=AsyncMock(
             return_value={"scene1": SimpleNamespace(home_id="H1", scene_name="回家")}
         ),
@@ -191,6 +199,27 @@ async def test_ledger_home_id_null_when_device_unknown(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ledger_camera_fallback_resolves_home(bound_client, tmp_path):
+    """did 只在 camera cache(get_devices miss)→ 回落 get_cameras 补齐
+    home/name/room——否则摄像头动作 home_id=NULL,经 NULL 放行串到所有家。"""
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="cam1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None,
+    )
+    await client.flush()
+    r = _rows(obs_db)[0]
+    assert r["home_id"] == "H1"
+    assert r["device_name"] == "门口摄像头"
+    assert r["room"] == "门口"
+
+
+@pytest.mark.asyncio
 async def test_call_action_writes_ledger_with_tts_text(bound_client, tmp_path):
     """speaker play-text 也是 call_action:in_params(TTS 全文)进 value_json。"""
     client, obs_db = bound_client
@@ -235,7 +264,9 @@ async def test_exception_path_writes_failure_row(bound_client, tmp_path):
     client, obs_db = bound_client
     svc = _make_service(tmp_path)
     svc._miot_proxy.call_device_action = AsyncMock(side_effect=RuntimeError("boom"))
-    req = DeviceControlRequest(type="call_action", iid="action.5.1", params=[])
+    req = DeviceControlRequest(
+        type="call_action", iid="action.5.1", params=["晚上好,回家啦"]
+    )
     with pytest.raises(MiotServiceException):
         await svc.control_device("dev1", req)
     await client.flush()
@@ -244,6 +275,8 @@ async def test_exception_path_writes_failure_row(bound_client, tmp_path):
     assert r["success"] == 0
     assert r["action_type"] == "call_action"
     assert "boom" in (r["error"] or "")
+    # 失败审计完整性:异常路径也保留尝试参数(当时想播什么 TTS/设什么值)
+    assert json.loads(r["value_json"]) == ["晚上好,回家啦"]
 
 
 @pytest.mark.asyncio

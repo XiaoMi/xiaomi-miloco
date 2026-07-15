@@ -93,6 +93,25 @@ def _truncate_value_len(value_json: str | None) -> int:
     return len(value_json) if value_json else 0
 
 
+def _request_value_json(request: "DeviceControlRequest") -> str | None:
+    """把控制请求的尝试参数归一成 value_json(成功/异常路径共用)。
+
+    失败动作是排查时最有价值的场景——异常路径的台账也必须能看到 agent 当时
+    具体试图设置什么值 / 播什么 TTS / 调用什么参数,不能只落 error。
+    """
+    try:
+        if request.type == "set_property":
+            return json.dumps(request.value, ensure_ascii=False)
+        if request.type == "set_properties":
+            return json.dumps(
+                {p.iid: p.value for p in (request.properties or [])},
+                ensure_ascii=False,
+            )
+        return json.dumps(request.params or [], ensure_ascii=False)
+    except Exception:
+        return None  # 参数本身不可序列化时不反噬审计主体
+
+
 async def _write_action_ledger(
     miot_proxy: MiotProxy,
     *,
@@ -125,11 +144,16 @@ async def _write_action_ledger(
         room: str | None = None
         try:
             dev = (await miot_proxy.get_devices()).get(did)
+            if dev is None:
+                # 摄像头只在 camera cache(control_device 的家庭校验同样两级查):
+                # 不回落会让摄像头动作 home_id=NULL,经查询侧 NULL 放行串到所有家。
+                # MIoTCameraInfo 继承 MIoTDeviceInfo,name/room_name/home_id 同字段。
+                dev = ((await miot_proxy.get_cameras()) or {}).get(did)
             if dev is not None:
                 device_name = getattr(dev, "name", None)
                 room = getattr(dev, "room_name", None)
                 if home_id is None:
-                    # 未显式传入才从 device cache 补。scene_trigger 的 did 是
+                    # 未显式传入才从 cache 补。scene_trigger 的 did 是
                     # scene_id,cache 必 miss——那条路径由调用方带场景所属家传入。
                     home_id = getattr(dev, "home_id", None)
         except Exception:
@@ -846,6 +870,9 @@ class MiotService:
 
     async def control_device(self, did: str, request: DeviceControlRequest) -> dict:
         """Control device: set_property / set_properties / call_action."""
+        # 尝试参数先归一好,成功/异常路径共用——SDK/网络抛异常时台账也能看到
+        # agent 当时试图设置什么值 / 播什么 TTS / 什么参数。
+        attempted_value_json = _request_value_json(request)
         try:
             await self._assert_did_in_allowed_home(did)
 
@@ -865,7 +892,7 @@ class MiotService:
                     self._miot_proxy,
                     action_type="set_property",
                     did=did, iid=request.iid,
-                    value_json=json.dumps(request.value, ensure_ascii=False),
+                    value_json=attempted_value_json,
                     result_code=code, result_msg=msg,
                     success=success, error=None,
                 )
@@ -893,10 +920,7 @@ class MiotService:
                     # 复数 iid 逗号拼接;value_json 存 {iid: value} 全集
                     iid=",".join(p.iid for p in request.properties),
                     did=did,
-                    value_json=json.dumps(
-                        {p.iid: p.value for p in request.properties},
-                        ensure_ascii=False,
-                    ),
+                    value_json=attempted_value_json,
                     result_code=code, result_msg=msg,
                     success=success, error=None,
                 )
@@ -917,7 +941,7 @@ class MiotService:
                 self._miot_proxy,
                 action_type="call_action",
                 did=did, iid=request.iid,
-                value_json=json.dumps(request.params or [], ensure_ascii=False),
+                value_json=attempted_value_json,
                 result_code=code, result_msg=msg,
                 success=success, error=None,
             )
@@ -929,12 +953,12 @@ class MiotService:
             raise
         except Exception as e:
             logger.error("Failed to control device %s: %s", did, e)
-            # 异常路径也落一行:success=0 + error;action_type 尽量取 request.type
+            # 异常路径也落一行:success=0 + error + 尝试参数(失败审计完整性)
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=getattr(request, "type", None) or "call_action",
                 did=did, iid=getattr(request, "iid", None),
-                value_json=None,
+                value_json=attempted_value_json,
                 result_code=None, result_msg=None,
                 success=False, error=str(e),
             )

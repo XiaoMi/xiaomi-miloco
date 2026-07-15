@@ -329,6 +329,10 @@ class PerfRetentionSettings(BaseModel):
     events_days: int = Field(default=7, description="events 表保留天数")
     agent_runs_days: int = Field(default=7, description="agent_runs 表保留天数")
     trace_jsonl_days: int = Field(default=7, description="agent jsonl.gz 文件保留天数")
+    action_ledger_days: int = Field(
+        default=7,
+        description="action_ledger 表保留天数(value_json 含 TTS 全文等敏感文本)",
+    )
 
 
 class PerfSettings(BaseModel):
