@@ -595,6 +595,8 @@ export interface TaskRecordSummary {
   completed: boolean;
   // duration 当前计时段（非 duration 恒 null）
   activeSession: { startedAt: string; elapsedMinutes: number } | null;
+  // 距当前 window（当日 24:00 上海时区）边界的剩余时间；window=all 或后端未返时为 null。
+  windowRemaining: { seconds: number; display: string } | null;
   // 按 kind 形态不同的派生量，原样透传 backend snake_case：
   //   progress: target / current / unit / remaining / progress_pct
   //   duration: target_minutes / accumulated_minutes_today / remaining_minutes
@@ -602,10 +604,31 @@ export interface TaskRecordSummary {
   derived: Record<string, unknown>;
 }
 
+// 驱动规则摘要 / 关联：后端 summary 接口（GET /api/tasks/summary）返回的
+// TaskSummaryView 继承 TaskFullView，本就带 rule_briefs / links，故随列表一并
+// 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
+export interface TaskRuleBrief {
+  ruleId: string;
+  // 规则的自然语言条件（"孩子在书桌前学习" 之类）
+  query: string;
+  // 命中后执行的动作人话摘要
+  actionsDesc: string[];
+}
+
+export interface TaskLinkEntry {
+  kind: "rule" | "cron";
+  ref: string;
+}
+
+// 任务视图 = 基础字段 + record 进度摘要 + 驱动规则/关联，一次 summary 请求全拿到。
 export interface Task {
   taskId: string;
   description: string;
   status: TaskStatus;
+  pausedAt: string | null;
   createdAt: string;
   record: TaskRecordSummary | null;
+  // 详情抽屉「有价值的详情」：驱动规则与关联，随 summary 一并返回。
+  ruleBriefs: TaskRuleBrief[];
+  links: TaskLinkEntry[];
 }

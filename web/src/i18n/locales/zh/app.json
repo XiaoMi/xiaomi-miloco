@@ -18,6 +18,7 @@
     "tabFamilyLoading": "正在读家人列表…",
     "tabActivityError": "加载今天事件失败：{{msg}}",
     "tabActivityLoading": "正在读今天发生了什么…",
+    "tabTasksError": "加载任务列表失败：{{msg}}",
     "switchedTo": "已切到 {{name}}",
     "anotherHome": "另一个家",
     "woke": "它醒过来了",

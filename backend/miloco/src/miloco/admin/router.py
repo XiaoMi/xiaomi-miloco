@@ -13,6 +13,7 @@ import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,6 +25,7 @@ from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.observability import debug as debug_mod
+from miloco.perception.engine.omni.provider import OpenAICompatAdapter, get_adapter
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
 
@@ -650,23 +652,23 @@ class OmniTestBody(BaseModel):
 
 
 async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
-    """回退探测：少数服务不支持 GET /models 时，发一次极简非流式 chat（自测本次耗时）。"""
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-    }
+    """发一次极简 chat（max_tokens=1）验证配置可调通。
+
+    经 adapter 取 endpoint / 鉴权头 / 请求体，使 Gemini 等原生协议 provider 也能被正确探测
+    （原来硬编码 ``/chat/completions`` + ``Bearer`` 会对合法的 Gemini 配置误报失败）。
+    只看 status_code、不解析响应体，故 Qwen 强制 stream 的 body 也不影响判定。
+    """
+    adapter = get_adapter(model)
+    body = adapter.build_request_body(
+        [{"role": "user", "content": "ping"}],
+        model=model, max_tokens=1, temperature=0.0, top_p=1.0,
+    )
+    url = adapter.endpoint(base_url, model, stream=False)
+    headers = {**adapter.auth_headers(api_key), "Content-Type": "application/json"}
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
+            r = await client.post(url, headers=headers, json=body)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
     latency_ms = round((time.monotonic() - t0) * 1000)
@@ -677,13 +679,15 @@ async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
     if r.status_code == 404:
         return {"ok": False, "code": "not_found", "status": 404, "message": "模型或地址不存在"}
     if r.status_code in (400, 422):
-        # 鉴权已过、仅请求体被该模型拒（如只支持流式）→ Key 大概率有效。
+        # OpenAI 兼容族此前有 GET /models 预检拦过 401/403，到这里 400 多为请求体/模型名被拒；
+        # 但原生协议(Gemini)无预检、且部分 provider 对无效 key 就返回 400(而非 401/403)——
+        # 故 400 也可能是 key 无效,无法仅凭 status code 区分,文案同时提示两种可能。
         return {
             "ok": False,
             "code": "rejected_authed",
             "status": r.status_code,
             "latency_ms": latency_ms,
-            "message": "已连接，但拒绝了模型请求（模型名可能错误）",
+            "message": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
         }
     return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
 
@@ -691,12 +695,15 @@ async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
 async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
     """验证「这套配置能否真正调用该模型」。
 
-    先 GET /models 做廉价的鉴权 + 可达性预检(快速失败、省 token):连不上→unreachable,
-    401/403→bad_key,5xx→http_error。预检通过后,用一次极简 chat(``max_tokens=1``)**真正
-    探测该模型是否可用**——不依赖「模型是否出现在 /models 列表」这种弱判据(列表常不全,
-    在不在列表都不等于能不能调通)。chat 探测结果(ok / not_found / rejected_authed / …)即最终结论。
+    OpenAI 兼容族(MiMo/Qwen):先 GET /models 做廉价的鉴权 + 可达性预检(快速失败、省 token):
+    连不上→unreachable,401/403→bad_key,5xx→http_error。预检通过后,用一次极简 chat
+    (``max_tokens=1``)**真正探测该模型是否可用**——不依赖「模型是否出现在 /models 列表」这种
+    弱判据。非 OpenAI 兼容族(Gemini 等原生协议)没有等价的 GET /models 预检语义,直接走
+    adapter 化的 chat 探测(``_probe_chat`` 已按 provider 取 endpoint / 鉴权)。
     """
     base = base_url.rstrip("/")
+    if not isinstance(get_adapter(model), OpenAICompatAdapter):
+        return await _probe_chat(model, base, api_key)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
@@ -712,14 +719,17 @@ async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
 
 @router.post(
     "/omni-config/test",
-    summary="测试 omni 配置连通性（鉴权/可达预检 + 极简 chat 真校验，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
+    summary="测试 omni 配置连通性（OpenAI 兼容族两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
     response_model=NormalResponse,
 )
 async def test_omni_config(
     body: OmniTestBody, current_user: str = Depends(verify_token)
 ):
-    """用表单值（缺省回退当前已保存配置）做两阶段探测：先 GET /models 验鉴权/可达，再发一次
-    max_tokens=1 的极简 chat 真正验证该模型可用（消耗极少量 token，不计入 miloco 用量统计）。
+    """用表单值（缺省回退当前已保存配置）探测配置可用性。
+
+    OpenAI 兼容族（MiMo/Qwen）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
+    极简 chat 真正验证该模型可用；非 OpenAI 兼容族（Gemini 等原生协议）没有等价 GET /models
+    预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
     返回 {ok, code, status, latency_ms, message}。"""
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
@@ -736,21 +746,39 @@ async def test_omni_config(
 
 
 async def _fetch_models(base_url: str, api_key: str) -> dict:
-    """拉取 provider 模型列表(GET /models)。成功返回 {ok, models:[id...]}。"""
+    """拉取 provider 模型列表(GET /models)。成功返回 {ok, models:[id...]}。
+
+    模型下拉在「选定 model 之前」拉取,没有 model 可路由 adapter,故按 base_url 判 provider:
+    Gemini 原生根(generativelanguage)用 ``x-goog-api-key`` 鉴权、响应形态 ``{models:[{name}]}``
+    (需剥 "models/" 前缀);其余按 OpenAI 兼容 ``{data:[{id}]}`` + ``Bearer`` 解析。
+    (经代理转发的 Gemini 不含该域名时,仍走 OpenAI 兼容分支——用户可手填 model 名兜底。)
+    """
     base_url = base_url.rstrip("/")
+    # 解析出主机名精确匹配,不用子串判断(``"…" in base_url`` 会被
+    # ``https://evil.com/generativelanguage.googleapis.com`` 之类绕过——CodeQL 报的
+    # incomplete URL substring sanitization)。
+    is_gemini = (urlparse(base_url).hostname or "").lower() == "generativelanguage.googleapis.com"
+    headers = (
+        {"x-goog-api-key": api_key} if is_gemini else {"Authorization": f"Bearer {api_key}"}
+    )
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(
-                f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
-            )
+            r = await client.get(f"{base_url}/models", headers=headers)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "code": "unreachable", "models": [], "message": f"无法连接 Base URL（{type(e).__name__}）"}
     if r.status_code == 200:
         try:
-            ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+            if is_gemini:
+                ids = [
+                    (m.get("name") or "").removeprefix("models/")
+                    for m in (r.json().get("models") or [])
+                    if m.get("name")
+                ]
+            else:
+                ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
         except Exception:  # noqa: BLE001
             ids = []
-        return {"ok": True, "models": sorted(ids)}
+        return {"ok": True, "models": sorted(i for i in ids if i)}
     if r.status_code in (401, 403):
         return {"ok": False, "code": "bad_key", "models": [], "message": "API Key 无效或无权限"}
     return {
@@ -857,17 +885,19 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
     if update:
         # omni_fps / window_size 是引擎/runner 构造时 cache 的，改这两个才需重启生效；
         # video_short_edge 每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
-        # 前端 drawer 三字段一起 PUT，故按「新值 != 旧值」判断，避免只拖分辨率也整机重启
-        # （重启会丢在途感知窗口、重置 tracker）。
-        need_restart = (
-            (body.omni_fps is not None and body.omni_fps != payload["omni_fps"])
-            or (body.window_size is not None and body.window_size != payload["window_size"])
-        )
+        # 前端 drawer 三字段一起 PUT，故按「新值 != 旧值」判断，避免只拖分辨率也重启。
+        omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
+        window_changed = body.window_size is not None and body.window_size != payload["window_size"]
+        # omni_fps 变才需重建引擎（重读构造期 cache 的 omni_fps，代价含模型重载）；window_size
+        # 只需 runner 重启（start 重读窗口）。故 window_size-only 时跳过 rebuild，省一次模型重载。
+        need_restart = omni_fps_changed or window_changed
         update_shared_config(**update)
         payload = _perception_config_payload()
         if need_restart:
             # config 已写盘(不可回滚)；重启若失败仅带 restart_ok=False，不冒泡成 500——
             # 否则前端会把「已保存+重启失败」误报成「保存失败」，误导用户以为改动丢失。
             # 同步等重启完成再返回。
-            payload["restart_ok"] = await manager.perception_service.apply_config_restart()
+            payload["restart_ok"] = await manager.perception_service.apply_config_restart(
+                rebuild_engine=omni_fps_changed
+            )
     return NormalResponse(code=0, message="ok", data=payload)

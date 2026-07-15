@@ -158,31 +158,28 @@ async def call_omni(
     )
 
     forced_stream = body.get("stream", False)
+    url = adapter.endpoint(config.base_url, config.model, stream=forced_stream)
 
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
     }
     try:
         async with httpx.AsyncClient(timeout=config.timeout) as client:
             if not forced_stream:
-                resp = await client.post(
-                    f"{config.base_url}/chat/completions",
-                    headers=headers,
-                    json=body,
-                )
+                resp = await client.post(url, headers=headers, json=body)
                 if resp.status_code != 200:
                     logger.error(
                         "Omni API error %d: %s", resp.status_code, resp.text[:500]
                     )
                 resp.raise_for_status()
-                raw = resp.json()
+                raw = adapter.parse_response(resp.json())
             else:
-                raw = await _collect_stream_response(client, config.base_url, headers, body)
+                raw = await _collect_stream_response(client, url, headers, body, adapter)
             fire_record(config.model, raw.get("usage", {}), type)
         return raw
     except OmniError:
@@ -224,18 +221,21 @@ async def _iter_sse_chunks(resp) -> AsyncGenerator[dict, None]:
 
 async def _collect_stream_response(
     client: httpx.AsyncClient,
-    base_url: str,
+    url: str,
     headers: dict[str, str],
     body: dict[str, Any],
+    adapter: OmniProviderAdapter,
 ) -> dict[str, Any]:
-    """读取 SSE 流并拼接为等效的非流式响应 dict。
+    """读取 SSE 流并拼接为等效的非流式响应 dict（OpenAI 形态）。
 
-    用于 adapter 强制 stream=True（如 Qwen）但调用方期望同步返回的场景。
+    用于 adapter 强制 stream=True（如 Qwen）或原生流式（如 Gemini）但调用方期望同步返回的
+    场景。``url`` 由调用方经 ``adapter.endpoint(..., stream=True)`` 预算好，chunk 反解析走
+    ``adapter.parse_stream_chunk``。
     """
     content_parts: list[str] = []
     usage: dict[str, Any] = {}
     async with client.stream(
-        "POST", f"{base_url}/chat/completions", headers=headers, json=body,
+        "POST", url, headers=headers, json=body,
     ) as resp:
         if resp.status_code != 200:
             await resp.aread()
@@ -250,12 +250,9 @@ async def _collect_stream_response(
                 )
             resp.raise_for_status()
         async for chunk in _iter_sse_chunks(resp):
-            if isinstance(chunk.get("usage"), dict):
-                usage = chunk["usage"]
-            try:
-                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-            except (IndexError, KeyError):
-                delta = None
+            delta, chunk_usage = adapter.parse_stream_chunk(chunk)
+            if chunk_usage is not None:
+                usage = chunk_usage
             if delta:
                 content_parts.append(delta)
     return {
@@ -344,9 +341,10 @@ async def call_omni_stream(
     )
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
     }
+    url = adapter.endpoint(config.base_url, config.model, stream=True)
 
     # 累积本次调用最后一次见到的 raw usage（OpenAI 字段），循环结束后统一上报一次，
     # 跟 call_omni / _call_omni_messages 的非 stream 路径完全对齐。
@@ -360,7 +358,7 @@ async def call_omni_stream(
         ) as client:
             async with client.stream(
                 "POST",
-                f"{config.base_url}/chat/completions",
+                url,
                 headers=headers,
                 json=body,
             ) as resp:
@@ -371,17 +369,11 @@ async def call_omni_stream(
                     )
                     resp.raise_for_status()
                 async for chunk in _iter_sse_chunks(resp):
-                    if isinstance(chunk.get("usage"), dict):
-                        raw_usage_seen = chunk["usage"]
+                    delta, chunk_usage = adapter.parse_stream_chunk(chunk)
+                    if chunk_usage is not None:
+                        raw_usage_seen = chunk_usage
                         if usage_out is not None:
                             usage_out.update(extract_usage({"usage": raw_usage_seen}))
-
-                    try:
-                        delta = (
-                            chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-                        )
-                    except (IndexError, KeyError):
-                        delta = None
                     if delta:
                         response_chunks.append(delta)
                         yield delta

@@ -17,7 +17,17 @@ class InputConfig:
     audio_overlap_ms: int = (
         100  # overlap window to reduce audio truncation at boundaries
     )
+    # 仅为接住 InputConfig(**engine_cfg["input"]) 的 kwargs（settings.yaml 的 engine.input
+    # 默认含此键，config.json 亦可覆盖）。
+    # 与 fps / omni_fps 不同：运行时真值由 _get_video_short_edge() 每帧读 settings 字典
+    # （见 prompt_builder），不从此 dataclass 字段读——故改分辨率免重启。别照 fps 的先例
+    # 在构造前设 config.input.video_short_edge 期望生效，那样会被静默忽略。
     video_short_edge: int = 512
+    # media_resolution: 仅 Gemini 生效的「每帧视觉 token 预算」档位。""/"low" = 66 tok/帧
+    # (默认、最省);"high" = 264 tok/帧(小目标/文字更清但 4× token)。mimo/qwen 忽略此字段。
+    # 实测:小目标清晰度主要由输入像素分辨率(video_short_edge)决定,本档位只控每帧 token 预算,
+    # 故默认 low;identity 等细节敏感场景可经 CLI 切 high。运行时由 GeminiAdapter 实时读 settings。
+    media_resolution: str = ""
 
 
 @dataclass

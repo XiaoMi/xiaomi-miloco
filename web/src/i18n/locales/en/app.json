@@ -18,6 +18,7 @@
     "tabFamilyLoading": "Reading family list…",
     "tabActivityError": "Couldn't load today's events: {{msg}}",
     "tabActivityLoading": "Reading what happened today…",
+    "tabTasksError": "Couldn't load tasks: {{msg}}",
     "switchedTo": "Switched to {{name}}",
     "anotherHome": "another home",
     "woke": "It woke up",
