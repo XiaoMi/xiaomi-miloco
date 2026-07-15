@@ -508,7 +508,9 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 
 1. 用户原话**明示视角**（描述了摄像头位置或视角能力）→ 按字面装，不反问不提示
 2. 用户原话有房间名 + 房间名提供**强常识默认**（某类房间位置的摄像头按常识应当覆盖该视角）→ **按常识默认装** + **触发装配提示**（让用户验证）
-3. 其他（无房间名 / 房间名无强常识默认）+ 触发依赖关键视角 → **反问 A/B 二选一**
+3. 其他（无房间名 / 房间名无强常识默认）+ 触发依赖关键视角：
+   - 落到单台摄像头（有房间名或已锁 `--source`）→ **反问 A/B 二选一**
+   - 无单一摄像头对象（"家里 / 全屋"、不传 `--source`）→ 反问无对象 → 直接退化为存在态命题
 
 反问模板：
 
@@ -851,7 +853,7 @@ miloco-cli task link --task drink_8_daily --kind cron --ref <jobId_remind>
 
 用户："家里来陌生人就用音箱说'请注意，有陌生人进入'"
 
-推理：「陌生人」瞬时存在态触发 → §Rule?=Y；触发本属 §Rule.mode 判据第 5 条覆盖范围（陌生存在态+反问 A/B），但「进入」+「就」明示每次发生即响 → §事件触发频率(明示即时) → 跳过反问 → §Rule.mode=event；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；主语=陌生人（存在态命题，反例排除必含"不含家庭成员"）；「家里」全屋无具体摄像头/房间词 → §感知视角(无单一摄像头对象，反问跳过) → 退化为存在态命题；用户原话含引号台词「请注意，有陌生人进入」→ §Rule.action=action JSON（TTS 类：`iid` 走 `action.<siid>.<aiid>` 从 device spec 输出行首列复制，`params` 按 spec in_params 列填数组，`idempotent:false`，`cooldown_minutes=5`（紧急报警上限，陌生人识别高频重复））；音箱候选 ≥ 2 且无房间词 → 默认装第一候选 + 触发装配提示；§Rule.感知设备 N≥1 + 「家里」未指定房间 → 不传 `--source` + 触发装配提示
+推理：「陌生人」瞬时存在态触发 → §Rule?=Y；触发本属 §Rule.mode 判据第 5 条覆盖范围（陌生存在态+反问 A/B），但「进入」+「就」明示每次发生即响 → §事件触发频率(明示即时) → 跳过反问 → §Rule.mode=event；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；主语=陌生人（存在态命题，反例排除必含"不含家庭成员"）；「家里」全屋无具体摄像头/房间词 → §感知视角(路径 3 · 无单一摄像头对象，反问无对象) → 退化为存在态命题；用户原话含引号台词「请注意，有陌生人进入」→ §Rule.action=action JSON（TTS 类：`iid` 走 `action.<siid>.<aiid>` 从 device spec 输出行首列复制，`params` 按 spec in_params 列填数组，`idempotent:false`，`cooldown_minutes=5`（紧急报警上限，陌生人识别高频重复））；音箱候选 ≥ 2 且无房间词 → 默认装第一候选 + 触发装配提示；§Rule.感知设备 N≥1 + 「家里」未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
