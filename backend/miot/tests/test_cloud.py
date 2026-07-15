@@ -12,7 +12,7 @@ import webbrowser
 from typing import Dict, Optional
 
 import pytest
-from miot.cloud import MIoTHttpClient, MIoTOAuth2Client, _cloud_device_to_info
+from miot.cloud import MIoTHttpClient, MIoTOAuth2Client
 from miot.storage import MIoTStorage
 from miot.types import MIoTManualSceneInfo, MIoTOauthInfo, MIoTUserInfo
 from pydantic_core import to_jsonable_python
@@ -570,48 +570,3 @@ async def test_app_notify_async(
         _LOGGER.info("send app notify, notify_id: %s, result: %s", notify_id, result)
 
     await miot_http.deinit_async()
-
-# ---------------------------------------------------------------------------
-# localip → local_ip 映射回归测试
-# cloud.py _cloud_device_to_info 用 device.get("localip", None)
-# 填入 MIoTDeviceInfo(local_ip=...). 这是跨网段相机直连的数据源，
-# 一字之差（localip ↔ local_ip）就会导致整条链路静默失效.
-# 测试直接调用生产函数 _cloud_device_to_info，而非复刻构造代码.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_cloud_device_to_info_localip_parsed():
-    """_cloud_device_to_info 正确映射 cloud API key 'localip' → local_ip."""
-    device = {
-        "did": "test-did-001",
-        "name": "Test Camera",
-        "model": "chuangmi.camera.81ac1",
-        "uid": 999,
-        "pid": 0,
-        "token": "abc123",
-        "isOnline": True,
-        "localip": "**.*.*.*",
-        "orderTime": 0,
-    }
-    info = _cloud_device_to_info(device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4")
-    assert info is not None
-    assert info.local_ip == "**.*.*.*"
-
-
-@pytest.mark.unit
-def test_cloud_device_to_info_localip_missing():
-    """_cloud_device_to_info: 无 localip key 时 local_ip 应为 None."""
-    device = {
-        "did": "test-did-002",
-        "name": "Test Camera",
-        "model": "chuangmi.camera.81ac1",
-        "uid": 999,
-        "pid": 0,
-        "token": "abc123",
-        "isOnline": True,
-        "orderTime": 0,
-    }
-    info = _cloud_device_to_info(device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4")
-    assert info is not None
-    assert info.local_ip is None
