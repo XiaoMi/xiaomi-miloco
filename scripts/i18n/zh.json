@@ -79,7 +79,7 @@
   "download.manifest_missing": "未找到 manifest.json",
   "download.no_sites": "未配置下载站点",
   "download.models_verified": "%1 个模型已就绪",
-  "plugin.title": "安装 OpenClaw 插件",
+  "plugin.title": "安装 Agent 插件",
   "plugin.subtitle": "让 AI 助手接入你的智能家居",
   "plugin.installing": "正在从本地包安装插件...",
   "plugin.no_tgz": "未找到插件包 (.tgz)",
@@ -130,5 +130,22 @@
   "uninstall.plugin_removed": "openclaw 插件已卸载",
   "uninstall.delete_home_ask": "是否删除配置目录 %1？",
   "uninstall.home_deleted": "配置目录已删除",
-  "uninstall.done": "卸载完成"
+  "uninstall.done": "卸载完成",
+
+  "plugin.hermes_not_found": "未找到 hermes 命令，请先安装 Hermes Agent",
+  "plugin.no_hermes_tarball": "release 归档里未找到 Hermes 插件包",
+  "plugin.hermes_config_failed": "通过 miloco-cli 写入 agent.* 配置失败",
+  "plugin.hermes_enable_failed": "hermes plugins enable miloco 失败（gateway 可能还没起来），装完手动跑：hermes plugins enable miloco",
+  "plugin.hermes_ok": "Hermes 插件安装完成",
+
+  "platform.title": "选择运行平台",
+  "platform.subtitle": "确定要把插件装给哪个 agent 平台",
+  "platform.already_set": "已通过 --agent-platform 指定为 %1",
+  "platform.skip_non_interactive": "非交互模式，默认使用 openclaw",
+  "platform.ask": "要把 Miloco 装给哪个 Agent 平台？",
+  "platform.openclaw_option": "OpenClaw",
+  "platform.hermes_option": "Hermes Agent",
+  "platform.selected": "已选择：%1",
+
+  "summary.restart_hermes_desc": "重启 Hermes gateway 以加载新插件"
 }

@@ -73,10 +73,9 @@ _DELIVERY: dict[EventType, dict[str, Any]] = {
     "onboarding": {"resolve_target": "owner-channel", "deliver": True},
 }
 
-# send_turn profile 按事件类型映射，避免 suggestion/rule 后台事件背 full profile 的高 token 开销。
+# send_turn profile 按事件类型映射。不在表内的类型（interaction/bind/onboarding）
+# 统一走 "full"（`_PROFILE.get(event_type, "full")` 兜底）；rule/suggestion 后台事件显式降级。
 _PROFILE: dict[EventType, str] = {
-    "interaction": "full",
-    "onboarding": "full",
     "rule": "rule",
     "suggestion": "suggestion",
 }

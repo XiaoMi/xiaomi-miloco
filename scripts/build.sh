@@ -26,7 +26,7 @@ export COPYFILE_DISABLE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$PROJECT_ROOT/dist"
-ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web"
+ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web,hermes"
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────
 
@@ -196,6 +196,28 @@ build_openclaw() {
     restore_pkg_json plugins/openclaw/package.json
 }
 
+build_hermes() {
+    log "构建 hermes 插件 ..."
+    local hermes_dir="$PROJECT_ROOT/plugins/hermes"
+    python3 "$hermes_dir/scripts/sync-skills.py"
+
+    local stage; stage=$(mktemp -d)
+    cp -r "$hermes_dir/miloco-plugin" "$stage/miloco-plugin"
+    find "$stage/miloco-plugin" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+    mkdir -p "$stage/miloco-plugin-skills"
+    for skill_dir in "$hermes_dir/skills"/miloco-*; do
+        if [ -d "$skill_dir" ]; then
+            local name; name=$(basename "$skill_dir")
+            cp -r "$skill_dir" "$stage/miloco-plugin-skills/$name"
+        fi
+    done
+
+    local tar_name="miloco-hermes-plugin-${RESOLVED_PEP}.tar.gz"
+    tar -czf "$DIST_DIR/$tar_name" -C "$stage" .
+    rm -rf "$stage"
+    log "  hermes 插件: $tar_name"
+}
+
 build_web() {
     log "构建 web 家庭面板 ..."
     local web_static="$PROJECT_ROOT/backend/miloco/src/miloco/static"
@@ -340,6 +362,14 @@ pack_platform_bundles() {
         local stage="$tmp_root/$key"
         mkdir -p "$stage"
         cp "$miloco_whl" "$cli_whl" "$miot_whl" "$tgz" "$models_tar" "$stage/"
+        # Hermes 插件 tarball（可选；缺失时只 warn，不阻塞其余平台归档）
+        local hermes_tgz
+        hermes_tgz=$(ls "$DIST_DIR"/miloco-hermes-plugin-*.tar.gz 2>/dev/null | head -1)
+        if [[ -n "$hermes_tgz" ]]; then
+            cp "$hermes_tgz" "$stage/"
+        else
+            log "  WARN: 缺 hermes 插件 tarball，$key 归档不支持 --agent-platform=hermes"
+        fi
         local bundle="miloco-$key-$raw.tar.gz"
         tar -czf "$DIST_DIR/$bundle" -C "$stage" .
         log "  $(du -h "$DIST_DIR/$bundle" | cut -f1) $bundle"
@@ -493,6 +523,7 @@ main() {
     if should_build "miloco";      then build_miloco; fi
     if should_build "miloco-cli";  then build_miloco_cli; fi
     if should_build "openclaw";    then build_openclaw; fi
+    if should_build "hermes";     then build_hermes; fi
 
     # 更新 manifest
     update_manifest

@@ -265,7 +265,13 @@ class Adapter:
         timeout_s = max(wait_timeout_ms / 1000.0, 1.0) + _HTTP_BUFFER_S
 
         # 组装 messages: <system>(可选) + <user>
-        system_text = self.build_system(profile, extra) if profile != "minimal" else ""
+        # build_system 内部可能走 subprocess（catalog CLI），丢线程池避免阻塞事件循环
+        if profile != "minimal":
+            import asyncio as _asyncio
+            loop = _asyncio.get_running_loop()
+            system_text = await loop.run_in_executor(None, self.build_system, profile, extra)
+        else:
+            system_text = ""
         messages: list[dict[str, str]] = []
         if system_text:
             messages.append({"role": "system", "content": system_text})

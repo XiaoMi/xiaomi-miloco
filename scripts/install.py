@@ -30,6 +30,7 @@ import json
 import locale
 import os
 import platform as _platform
+import secrets
 import shutil
 import signal
 import subprocess
@@ -555,6 +556,7 @@ class Installer:
         account_auth: str | None = None,
         miloco_home: Path,
         skip_openclaw: bool = False,
+        agent_platform: str = "",
     ) -> None:
         self.platform = plat
         self.ui = ui
@@ -564,6 +566,7 @@ class Installer:
         self.account_auth = account_auth
         self.miloco_home = miloco_home
         self.skip_openclaw = skip_openclaw
+        self.agent_platform = agent_platform
         self.script_dir = Path(__file__).parent
         # dev 安装源：仓库 dist/（build.sh 产物）；release 下为下载归档解压后的缓存目录。
         self.dist_dir = self.script_dir.parent / "dist"
@@ -577,6 +580,7 @@ class Installer:
             self._run_dev_build()
         self._service_started = False
         self._steps: list[tuple[str, Callable[[], None]]] = [
+            ("platform", self._step_choose_platform),
             ("env", self._step_check_deps),
             ("install", self._step_install),
             ("service", self._step_init_service),
@@ -590,6 +594,28 @@ class Installer:
             self._current_step = i
             fn()
         self._print_summary()
+
+    def _step_choose_platform(self) -> None:
+        self._step_header("platform.title", "platform.subtitle")
+
+        if self.agent_platform:
+            self.ui.step_skip(self.ui.i18n.t("platform.already_set", self.agent_platform))
+            return
+
+        if not self.platform.is_interactive:
+            self.agent_platform = "openclaw"
+            self.ui.step_skip(self.ui.i18n.t("platform.skip_non_interactive"))
+            return
+
+        openclaw_label = self.ui.i18n.t("platform.openclaw_option")
+        hermes_label = self.ui.i18n.t("platform.hermes_option")
+        choice = self.ui.prompt_select(
+            self.ui.i18n.t("platform.ask"),
+            choices=[openclaw_label, hermes_label],
+            default=openclaw_label,
+        )
+        self.agent_platform = "hermes" if choice == hermes_label else "openclaw"
+        self.ui.step_ok(self.ui.i18n.t("platform.selected", self.agent_platform))
 
     def _step_header(self, title_key: str, subtitle_key: str) -> None:
         prefix = f"{self._current_step}/{self._total_steps}"
@@ -1192,10 +1218,17 @@ class Installer:
     def _step_plugin(self) -> None:
         self._step_header("plugin.title", "plugin.subtitle")
 
+        if self.agent_platform == "hermes":
+            self._step_plugin_hermes()
+            return
+
         if self.skip_openclaw:
             self.ui.step_skip(self.ui.i18n.t("plugin.skipped"))
             return
 
+        self._step_plugin_openclaw()
+
+    def _step_plugin_openclaw(self) -> None:
         self._ensure_openclaw()
 
         # dev 与 release 都从本地 .tgz 装（release 的来自下载归档解压后的缓存目录）。
@@ -1216,6 +1249,110 @@ class Installer:
 
         self._register_plugin_tools()
         self._enable_conversation_access()
+
+    def _step_plugin_hermes(self) -> None:
+        hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        if not shutil.which("hermes"):
+            self.ui.step_fail(self.ui.i18n.t("plugin.hermes_not_found"))
+            return
+
+        tarballs = _visible(self._get_src_dir().glob("miloco-hermes-plugin-*.tar.gz"))
+        if not tarballs:
+            self.ui.step_fail(self.ui.i18n.t("plugin.no_hermes_tarball"))
+            raise subprocess.CalledProcessError(
+                1, "install hermes plugin", stderr="no hermes plugin tarball found"
+            )
+
+        extract_dir = self.miloco_home / ".install-cache" / "hermes-plugin"
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tarballs[0]) as tf:
+            _tarfile_extract_safe(tf, extract_dir)
+
+        self._hermes_deploy_plugin(hermes_home, extract_dir)
+        self._hermes_deploy_adapter(extract_dir)
+
+        bearer = self._hermes_get_or_create_bearer(hermes_home)
+        webhook_url = f"http://127.0.0.1:{os.environ.get('ADAPTER_PORT', '18789')}/miloco/webhook"
+        try:
+            subprocess.run(
+                ["miloco-cli", "config", "set",
+                 "agent.webhook_url", webhook_url,
+                 "agent.auth_bearer", bearer,
+                 "agent.platform", "hermes"],
+                check=True, capture_output=True, text=True,
+            )
+        except subprocess.CalledProcessError:
+            self.ui.step_fail(self.ui.i18n.t("plugin.hermes_config_failed"))
+            return
+        self._hermes_patch_env(hermes_home, bearer)
+        try:
+            subprocess.run(
+                ["hermes", "plugins", "enable", "miloco"],
+                capture_output=True, text=True, check=True,
+            )
+        except subprocess.CalledProcessError:
+            self.ui.warn(self.ui.i18n.t("plugin.hermes_enable_failed"))
+        self.ui.step_ok(self.ui.i18n.t("plugin.hermes_ok"))
+
+    def _hermes_deploy_plugin(self, hermes_home: Path, extract_dir: Path) -> None:
+        plugin_dir = hermes_home / "plugins" / "miloco-plugin"
+        if plugin_dir.exists():
+            shutil.rmtree(plugin_dir)
+        plugin_dir.parent.mkdir(parents=True, exist_ok=True)
+        src_plugin = extract_dir / "miloco-plugin"
+        if src_plugin.exists():
+            shutil.copytree(src_plugin, plugin_dir)
+
+        skills_dir = extract_dir / "miloco-plugin-skills"
+        target_skills = hermes_home / "skills"
+        if skills_dir.exists():
+            target_skills.mkdir(parents=True, exist_ok=True)
+            for skill in skills_dir.iterdir():
+                dest = target_skills / skill.name
+                if dest.exists():
+                    shutil.rmtree(dest)
+                if skill.is_dir():
+                    shutil.copytree(skill, dest)
+                else:
+                    shutil.copy2(skill, dest)
+
+    def _hermes_deploy_adapter(self, extract_dir: Path) -> None:
+        adapter_dir = self.miloco_home / "agent_platform" / "hermes"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        src_adapter = extract_dir / "miloco-plugin" / "hermes_adapter"
+        if not src_adapter.exists():
+            return
+        for f in src_adapter.iterdir():
+            if f.suffix == ".py":
+                shutil.copy2(f, adapter_dir / f.name)
+
+    def _hermes_get_or_create_bearer(self, hermes_home: Path) -> str:
+        import secrets
+        cfg = self.miloco_home / "config.json"
+        if cfg.exists():
+            try:
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                existing = (data.get("agent") or {}).get("auth_bearer")
+                if existing:
+                    return existing
+            except Exception:
+                pass
+        bearer = secrets.token_hex(32)
+        return bearer
+
+    def _hermes_patch_env(self, hermes_home: Path, bearer: str) -> None:
+        env_file = hermes_home / ".env"
+        existing = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
+        key_line = f"API_SERVER_KEY={bearer}"
+        if "API_SERVER_KEY=" in existing:
+            existing = "\n".join(
+                line if not line.startswith("API_SERVER_KEY=") else key_line
+                for line in existing.split("\n")
+            )
+        else:
+            existing = existing.rstrip("\n") + "\n" + key_line + "\n"
+        env_file.write_text(existing, encoding="utf-8")
 
     # plugin 注册到 OpenClaw 后还要把 builtin tool 名加进 tools.alsoAllow 白名单
     def _plugin_tools(self) -> list[str]:
@@ -1454,7 +1591,11 @@ class Installer:
         )
         self.ui.console.print()
         self.ui.console.print(f"[dim]{self.ui.i18n.t('summary.next_steps')}[/dim]")
-        if self.skip_openclaw:
+        if self.agent_platform == "hermes":
+            self.ui.console.print(
+                f"  [cyan]hermes gateway restart[/cyan]    {self.ui.i18n.t('summary.restart_hermes_desc')}"
+            )
+        elif self.skip_openclaw:
             self.ui.console.print(
                 f"  [cyan]miloco-cli service start[/cyan]    {self.ui.i18n.t('summary.start_service_desc')}"
             )
@@ -1560,6 +1701,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-openclaw", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--agent-platform",
+        dest="agent_platform",
+        default="",
+        choices=["", "openclaw", "hermes"],
+        help="Agent platform to deploy the plugin for (default: openclaw)",
+    )
+    parser.add_argument(
         "--agent-prepare",
         dest="agent_prepare",
         action="store_true",
@@ -1610,6 +1758,7 @@ def main() -> None:
             account_auth=args.account_auth,
             miloco_home=miloco_home,
             skip_openclaw=args.skip_openclaw,
+            agent_platform=args.agent_platform,
         )
         atexit.register(installer._stop_service)
         atexit.register(installer._cleanup_install_cache)
@@ -1658,6 +1807,7 @@ def main() -> None:
         account_auth=args.account_auth,
         miloco_home=miloco_home,
         skip_openclaw=args.skip_openclaw,
+        agent_platform=args.agent_platform,
     )
 
     atexit.register(installer._stop_service)
