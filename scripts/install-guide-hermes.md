@@ -14,10 +14,12 @@ metadata:
 ## 一行安装
 
 ```bash
-git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes ~/xiaomi-miloco && cd ~/xiaomi-miloco && bash plugins/hermes/install-hermes.sh
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-finish --agent-platform=hermes
+hermes gateway restart
 ```
 
-> HTTPS 超时可改用 SSH：`git clone git@github.com:n0tssss/xiaomi-miloco.git -b pr-hermes ~/xiaomi-miloco`
+> [PR合并前] 从 fork 装：`git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes ~/xiaomi-miloco && cd ~/xiaomi-miloco && bash plugins/hermes/install-hermes.sh`
 
 装完跑验证：
 
