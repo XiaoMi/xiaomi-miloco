@@ -247,11 +247,13 @@ async def register_sample(
         current_user, person_id, body_image.filename, face_image.filename if face_image else None,
     )
 
-    # person_id 校验：格式白名单 + 必须已在 DB 中注册
-    # 防止 ../ 等路径穿越构造，同时拒绝对未注册 ID 写文件
+    # person_id 校验：格式白名单（防 ../ 路径穿越）+ 必须已在 DB 中注册。
+    # 一次 get_person 兼做存在性校验（缺失返 None→404）与后面写 meta 的真名来源,
+    # 不再 exists()+get_person 查两遍。
     if not _PERSON_ID_RE.match(person_id):
         raise HTTPException(status_code=400, detail="Invalid person_id format")
-    if not manager.person_service.exists(person_id):
+    person = manager.person_service.get_person(person_id)
+    if person is None:
         raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
 
     body_arr = await _decode_image_upload(body_image)
@@ -277,11 +279,10 @@ async def register_sample(
         except Exception:  # noqa: BLE001
             logger.warning("ReID emb 抽取失败 person_id=%s (登记继续)", person_id, exc_info=True)
 
-    # 取 person 真名一并写进 meta.json——与 register_sample_batch 对齐。否则单图登记只落
+    # person 真名一并写进 meta.json——与 register_sample_batch 对齐。否则单图登记只落
     # body 图、不写 name,感知层 list_persons 读不到 name → omni gallery 渲染退化成 UUID
-    # 而非姓名(表现为"认不出已注册成员")。SQL 是 name 单一事实源。
-    person = manager.person_service.get_person(person_id)
-    name = person.name if person else None
+    # 而非姓名(表现为"认不出已注册成员")。SQL 是 name 单一事实源。person 上面已查、非 None。
+    name = person.name
 
     ok = library.add_tier_a_sample(
         person_id=person_id,
@@ -2051,6 +2052,12 @@ async def register_from_cluster(
     # member_id 绑定既有成员且未带 member_name 时,commit 不写 meta name → 从 SQL 补齐,
     # 避免感知层 get_name 读空、omni gallery 退化成 UUID。
     _ensure_meta_name_from_sql(result.person_id)
+    # 从簇注册可能按 name 新建成员，级联刷新家庭档案 md 让新成员进档案（与 register_commit
+    # 对齐）；否则新建成员不会立即进 profile.md 的家庭成员名册。
+    try:
+        manager.home_profile_service.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("级联刷新家庭档案失败(register_from_cluster) person_id=%s: %s", result.person_id, e)
 
     # commit 成功 → 关闭 cluster 全部成员的写入 gate(决策 1.1 α 行为)
     try:
