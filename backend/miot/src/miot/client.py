@@ -576,8 +576,7 @@ class MIoTClient:
                 self._device_buffer[did].local_ip = lan_devices[did].ip
             else:
                 self._device_buffer[did].lan_online = False
-                # Keep cloud local_ip — it serves as the unicast probe fallback
-                # for cross-subnet cameras that broadcast can't reach.
+                self._device_buffer[did].local_ip = None
 
         return self._device_buffer
 
@@ -659,14 +658,6 @@ class MIoTClient:
             if did in lan_devices:
                 camera_info.lan_online = lan_devices[did].online
                 camera_info.local_ip = lan_devices[did].ip
-
-        # Sync unicast probe targets so cross-subnet cameras can also be
-        # reached via unicast UDP (broadcast is blocked by subnet boundary).
-        unicast_targets: Dict[str, str] = {}
-        for did, camera_info in self._cameras_buffer.items():
-            if camera_info.local_ip:
-                unicast_targets[did] = camera_info.local_ip
-        self._lan_client.set_unicast_targets(unicast_targets)
 
         return self._cameras_buffer
 
