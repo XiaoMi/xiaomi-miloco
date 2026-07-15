@@ -19,13 +19,18 @@ GUIDE = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "inst
 
 
 def test_guide_has_3_step_quick_install():
-    """开头必须有用户的 3 步速装命令（git clone / install-hermes.sh / hermes gateway restart）。
+    """开头必须有用户的速装命令（统一 install.sh + fork 回退 + hermes gateway restart）。
 
     ci-bot 6/29 #4 修法:URL 改主仓 `XiaoMi/xiaomi-miloco`,不再指 fork。
+    统一安装方案:新增 `install.sh --agent-platform=hermes` 主路径，fork 路径保留为 [PR合并前] 回退。
     """
     text = GUIDE.read_text(encoding="utf-8")
+    # 新统一入口
+    assert "install.sh" in text
+    assert "--agent-platform=hermes" in text
+    # fork 回退路径（PR合并前）
     assert "git clone https://github.com/n0tssss/xiaomi-miloco.git" in text
-    assert "bash plugins/hermes/install-hermes.sh" in text
+    assert "install-hermes.sh" in text
     assert "hermes gateway restart" in text
 
 
