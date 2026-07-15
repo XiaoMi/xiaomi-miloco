@@ -17,7 +17,7 @@
       "bad_key": "API Key 无效或无权限",
       "no_key": "未配置 API Key",
       "not_found": "模型或地址不存在",
-      "rejected_authed": "已连接，但拒绝了模型请求（模型名可能错误）",
+      "rejected_authed": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
       "bad_response": "omni 响应格式异常",
       "cancelled": "重试被中断"
     }

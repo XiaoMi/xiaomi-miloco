@@ -929,3 +929,174 @@ def test_fetch_models_gemini_parses_name_and_goog_key(client, monkeypatch):
     assert data["models"] == ["gemini-3-flash-preview", "gemini-3.5-flash"]  # 剥前缀 + sorted
     get = next(c for c in calls if c[0] == "GET")
     assert "x-goog-api-key" in get[2] and "Authorization" not in get[2]
+
+
+# ─── 测通 + 三元组匹配 active → 主动清熔断(与 put/activate/retry 恢复路径对齐) ───
+
+
+def _force_breaker_open_config():
+    """把熔断打到 OPEN_CONFIG(bad_key),模拟 provider 侧 401 抖动后卡在配置态的场景。"""
+    import asyncio
+
+    from miloco.perception.engine.omni.circuit_breaker import (
+        get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+    asyncio.run(
+        cb.record_probe_result(
+            False,
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG),
+        )
+    )
+    assert cb.snapshot().state == "error"
+
+
+def test_test_connection_ok_matching_active_clears_breaker(client):
+    """测通 + 三元组与当前 active 完全一致 → 熔断从 OPEN_CONFIG 回 CLOSED。
+    这是「测通即恢复」的最直觉路径,OPEN_CONFIG 下 tick 不自动探测,不清则用户困在红条上。"""
+    from miloco.perception.engine.omni.circuit_breaker import (
+        get_omni_circuit_breaker,
+    )
+
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    _force_breaker_open_config()
+
+    data = client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    ).json()["data"]
+    assert data["ok"] is True
+
+    assert get_omni_circuit_breaker().snapshot().state == "ok"
+
+
+def test_test_connection_ok_normalizes_base_url_trailing_slash(client):
+    """三元组匹配时 base_url 归一化(rstrip '/'):存 https://x/v1、测 https://x/v1/ 仍算匹配。"""
+    from miloco.perception.engine.omni.circuit_breaker import (
+        get_omni_circuit_breaker,
+    )
+
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    _force_breaker_open_config()
+
+    client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1/",  # 结尾多一个斜杠
+            "api_key": "sk-active",
+        },
+    )
+    assert get_omni_circuit_breaker().snapshot().state == "ok"
+
+
+def test_test_connection_ok_not_matching_active_leaves_breaker(client):
+    """测通但三元组 ≠ 当前 active(测的是另一档案 / 未保存的新配置) → 熔断状态不变,
+    防止「测别的档案通了」把 active 的熔断误清。"""
+    from miloco.perception.engine.omni.circuit_breaker import (
+        get_omni_circuit_breaker,
+    )
+
+    # 存 active 档案「甲」
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    # 再存一套非 active 档案「乙」
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "乙",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-other",
+            "activate": False,
+        },
+    )
+    _force_breaker_open_config()
+
+    # 测「乙」(非 active) → 测通,但不该动 active 的熔断
+    data = client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "label": "乙",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-other",
+        },
+    ).json()["data"]
+    assert data["ok"] is True
+
+    assert get_omni_circuit_breaker().snapshot().state == "error"
+
+
+def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, real_probe):
+    """测失败(不管测的是不是 active) → 不动熔断状态。测失败本就没有"已验可用"的语义。"""
+    from miloco.perception.engine.omni import probe
+    from miloco.perception.engine.omni.circuit_breaker import (
+        get_omni_circuit_breaker,
+    )
+
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    _force_breaker_open_config()
+
+    # 把 probe 打成 401 → bad_key
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_async_client(resp=_FakeResp(401, text="unauthorized")),
+    )
+    data = client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    ).json()["data"]
+    assert data["ok"] is False
+    assert data["code"] == "bad_key"
+
+    # 熔断仍是 error
+    assert get_omni_circuit_breaker().snapshot().state == "error"

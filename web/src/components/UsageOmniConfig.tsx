@@ -33,6 +33,9 @@ const INPUT_CLS =
 
 // omni 测试 / 模型列表的后端机器码 → i18n key;命中走前端本地化,
 // 未命中(如 http_error,含动态 HTTP 细节)回退后端 message。
+// 与 error_classifier.CODES 保持一致(10 个 code):测试路径撞 429 会返 rate_limited、
+// 200+非 JSON body 会返 bad_response,retry 被中断会返 cancelled。缺 code = 回退
+// 后端硬编码中文 message、污染英文界面。
 const OMNI_CODE_KEY: Record<string, string> = {
   ok: "usage.testOk",
   bad_key: "usage.testBadKey",
@@ -41,6 +44,9 @@ const OMNI_CODE_KEY: Record<string, string> = {
   unreachable: "usage.testUnreachable",
   no_key: "usage.testNoKey",
   http_error: "usage.testHttpError",
+  rate_limited: "usage.testRateLimited",
+  bad_response: "usage.testBadResponse",
+  cancelled: "usage.testCancelled",
 };
 
 // 测试结果三档语义:连接正常(✓ 绿,chat 调通)/ 鉴权过但探测被拒(⚠ 黄,rejected_authed)/ 失败(✗ 红)。
@@ -373,6 +379,11 @@ export function UsageOmniConfig() {
     try {
       const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
       setRowTestResults((m) => ({ ...m, [p.label]: res }));
+      // 测通当前生效那套时,后端已主动清熔断,前端触发一次 refetch 刷新 health,
+      // 让状态列从"熔断红/黄"变回"测试结果"。stale 事件复用配置变更通道。
+      if (res.ok && p.active) {
+        window.dispatchEvent(new Event(OMNI_CONFIG_STALE_EVENT));
+      }
     } catch (e) {
       setRowTestResults((m) => ({
         ...m,

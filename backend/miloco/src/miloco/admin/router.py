@@ -565,7 +565,7 @@ async def put_omni_config(
       ``/activate``,即列表的「启用」)。但**正在编辑的就是当前生效那套时**,无论 activate
       与否都同步刷新 ``model.omni``,使改 key/model 即时对运行中的感知生效。
     - 若本次会写 ``model.omni``(激活或编辑当前生效那套),落盘前先跑 preflight
-      (``_probe_omni``),失败返 400——避免任何绕过 web「测试连接」的调用方(CLI/curl)
+      (``_probe.probe_omni``),失败返 400——避免任何绕过 web「测试连接」的调用方(CLI/curl)
       把未校验配置写进运行时。
     - 写 config.json,感知下个推理周期热生效。env ``MILOCO_MODEL__OMNI__*`` 优先级更高会盖过。
     """
@@ -758,6 +758,27 @@ async def test_omni_config(
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
     result = await _probe.probe_omni(model, base_url, api_key)
+    # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
+    # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
+    # OPEN_CONFIG 下 tick 不会自动探测(只探 OPEN_RECOVERABLE),不清则用户测通了红条仍不消失,
+    # 只能靠横条上的「立即重试」或改配置重存才能恢复——「测通即恢复」是最直觉的路径。
+    if result.get("ok"):
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+        from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
+
+        live = get_settings().model.omni
+        live_key = resolve_omni_api_key(live.api_key)
+        tested_is_active = (
+            model == live.model
+            and base_url.rstrip("/") == live.base_url.rstrip("/")
+            and api_key == live_key
+        )
+        if tested_is_active:
+            cb = get_omni_circuit_breaker()
+            if cb.snapshot().state != "ok":
+                await cb.reset_on_config_change()
     return NormalResponse(code=0, message="ok", data=result)
 
 

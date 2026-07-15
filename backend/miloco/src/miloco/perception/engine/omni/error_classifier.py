@@ -1,6 +1,7 @@
 """omni 调用异常/响应到统一错误码集合的映射。
 
-映射规则见 spec §2。code 集合与 web 前端 OMNI_CODE_KEY 保持一致,前端可直接复用 i18n。
+映射规则见 spec §2。code 集合与 web 前端 OMNI_CODE_KEY / omniHealth.codes 保持一致
+(10 个 code),前端可直接复用 i18n。
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ _MESSAGES: dict[str, str] = {
     "bad_key": "API Key 无效或无权限",
     "no_key": "未配置 API Key",
     "not_found": "模型或地址不存在",
-    "rejected_authed": "已连接，但拒绝了模型请求（模型名可能错误）",
+    "rejected_authed": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
     "bad_response": "omni 响应格式异常",
     "cancelled": "重试被中断",
 }
