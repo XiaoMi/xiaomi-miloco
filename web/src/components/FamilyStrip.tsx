@@ -10,6 +10,8 @@ import type { Person, Pet } from "@/lib/types";
 import { PersonAvatar } from "@/components/PersonAvatar";
 import { PetAvatar } from "@/components/PetAvatar";
 import { Switch } from "@/components/Switch";
+import { HelpTip } from "@/components/HelpTip";
+import { InfoNote } from "@/components/InfoNote";
 import { IconPlus } from "@/lib/icons";
 
 interface Props {
@@ -98,6 +100,7 @@ export function FamilyStrip({
                 <span className="text-caption text-warning font-medium px-1.5 py-0.5 rounded bg-warning-bg">
                   {t("pet.experimentalBadge")}
                 </span>
+                <HelpTip text={t("pet.speciesTip")} />
               </h3>
               <Switch
                 checked={petsEnabled}
@@ -106,24 +109,29 @@ export function FamilyStrip({
               />
             </div>
             {petsEnabled && (
-              <div className="flex flex-wrap items-center gap-2">
-                {(pets ?? []).map((p) => (
-                  <PetChip
-                    key={p.id}
-                    pet={p}
-                    selected={p.id === selectedPetId}
-                    onClick={() => onSelectPet?.(p)}
-                  />
-                ))}
-                <button
-                  type="button"
-                  onClick={onAddPet}
-                  className="inline-flex items-center gap-1 h-11 px-3.5 rounded-full border border-dashed border-border text-caption text-text-tertiary hover:text-text-primary hover:border-border-strong transition-colors"
-                >
-                  <IconPlus width={14} height={14} />
-                  {t("pet.addPet")}
-                </button>
-              </div>
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  {(pets ?? []).map((p) => (
+                    <PetChip
+                      key={p.id}
+                      pet={p}
+                      selected={p.id === selectedPetId}
+                      onClick={() => onSelectPet?.(p)}
+                    />
+                  ))}
+                  <button
+                    type="button"
+                    onClick={onAddPet}
+                    className="inline-flex items-center gap-1 h-11 px-3.5 rounded-full border border-dashed border-border text-caption text-text-tertiary hover:text-text-primary hover:border-border-strong transition-colors"
+                  >
+                    <IconPlus width={14} height={14} />
+                    {t("pet.addPet")}
+                  </button>
+                </div>
+                {(pets ?? []).length > 3 && (
+                  <InfoNote className="mt-2">{t("pet.countHint")}</InfoNote>
+                )}
+              </>
             )}
           </div>
         )}

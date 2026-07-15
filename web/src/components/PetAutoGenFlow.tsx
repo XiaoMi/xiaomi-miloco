@@ -11,7 +11,50 @@ import { useTranslation } from "react-i18next";
 import { getOmniConfig, observePet, testOmniConfig } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconAlert, IconX } from "@/lib/icons";
+import { ImageZoom } from "./ImageZoom";
+import { InfoNote } from "./InfoNote";
+import { Spinner } from "./Spinner";
 import { toast } from "./Toast";
+
+/**
+ * 纯客户端提取视频首帧为 dataURL（不经后端）：<video> 加载元数据 → seek 到起始 →
+ * 绘到离屏 canvas → toDataURL。失败则 reject，调用方降级为不显示预览。
+ */
+function firstFrameDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    const finish = (result: string | null, err?: Error) => {
+      URL.revokeObjectURL(url);
+      result ? resolve(result) : reject(err ?? new Error("frame extract failed"));
+    };
+    video.onloadedmetadata = () => {
+      try {
+        video.currentTime = Math.min(0.1, (video.duration || 1) / 2);
+      } catch {
+        /* seek 不支持则等 onseeked/loadeddata 不触发，由 onerror 兜底 */
+      }
+    };
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth || 320;
+        canvas.height = video.videoHeight || 240;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return finish(null);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        finish(canvas.toDataURL("image/jpeg", 0.8));
+      } catch (e) {
+        finish(null, e as Error);
+      }
+    };
+    video.onerror = () => finish(null, new Error("video decode failed"));
+    video.src = url;
+  });
+}
 
 interface Props {
   /** 是否要头部 grounding（取 features.petHeadGrounding） */
@@ -35,6 +78,7 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
   const [species, setSpecies] = useState("");
   const [cropB64, setCropB64] = useState("");
   const [headBbox, setHeadBbox] = useState<number[] | null>(null);
+  const [srcPreview, setSrcPreview] = useState(""); // 上传展示区：图片=所选图 / 视频=首帧
   const [note, setNote] = useState("");
   const [check, setCheck] = useState<CheckState>("checking");
   const [checkMsg, setCheckMsg] = useState("");
@@ -79,6 +123,18 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
     if (!file) return;
     setBusy(true);
     setNote("");
+    // 上传展示区预览（纯客户端）：图片显示所选图，视频提取并显示首帧
+    if (file.type.startsWith("video")) {
+      firstFrameDataUrl(file)
+        .then(setSrcPreview)
+        .catch(() => setSrcPreview(""));
+    } else {
+      const reader = new FileReader();
+      reader.onload = () =>
+        setSrcPreview(typeof reader.result === "string" ? reader.result : "");
+      reader.onerror = () => setSrcPreview("");
+      reader.readAsDataURL(file);
+    }
     try {
       const r = await observePet(file, file.name, grounding);
       if (!r.detected) {
@@ -134,6 +190,7 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
                 : "bg-error-bg text-error"
             }`}
           >
+            {check === "checking" && <Spinner className="w-3.5 h-3.5 mt-0.5" />}
             {check !== "checking" && (
               <IconAlert width={16} height={16} className="shrink-0 mt-0.5" />
             )}
@@ -157,8 +214,9 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
           type="button"
           onClick={() => fileRef.current?.click()}
           disabled={busy || check !== "ok"}
-          className="w-full py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary disabled:opacity-60"
+          className="w-full py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary disabled:opacity-60 flex items-center justify-center gap-2"
         >
+          {busy && <Spinner />}
           {busy
             ? t("pet.analyzing")
             : analyzed
@@ -166,19 +224,45 @@ export function PetAutoGenFlow({ grounding, onClose, onDone }: Props) {
               : t("pet.uploadMedia")}
         </button>
 
+        {srcPreview && (
+          <div
+            className={`mt-3 flex items-start justify-center gap-4 transition-all ${
+              busy ? "opacity-40 grayscale" : ""
+            }`}
+          >
+            <figure className="flex flex-col items-center gap-1">
+              <ImageZoom
+                src={srcPreview}
+                thumbClass="h-24 w-auto max-w-[10rem] rounded-lg border border-border object-contain"
+              />
+              <figcaption className="text-caption text-text-tertiary">
+                {t("pet.previewSource")}
+              </figcaption>
+            </figure>
+            {cropB64 && (
+              <figure className="flex flex-col items-center gap-1">
+                <ImageZoom
+                  src={`data:image/jpeg;base64,${cropB64}`}
+                  thumbClass="h-24 w-auto max-w-[10rem] rounded-lg border border-border object-contain"
+                />
+                <figcaption className="text-caption text-text-tertiary">
+                  {t("pet.previewDetected")}
+                </figcaption>
+              </figure>
+            )}
+          </div>
+        )}
+
         {note && <div className="text-caption text-text-tertiary mt-2">{note}</div>}
 
+        <InfoNote className="mt-3">{t("pet.poseGuide")}</InfoNote>
+
         {analyzed && (
-          <div className="mt-4 pt-4 border-t border-border">
-            {cropB64 && (
-              <div className="flex justify-center mb-3">
-                <img
-                  src={`data:image/jpeg;base64,${cropB64}`}
-                  alt=""
-                  className="w-24 h-24 rounded-lg object-cover border border-border"
-                />
-              </div>
-            )}
+          <div
+            className={`mt-4 pt-4 border-t border-border transition-all ${
+              busy ? "opacity-40 grayscale pointer-events-none" : ""
+            }`}
+          >
             <div className="text-caption text-text-secondary mb-1">
               {t("pet.drawerSpecies")}
             </div>
