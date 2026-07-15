@@ -144,10 +144,12 @@ async def _write_action_ledger(
         room: str | None = None
         try:
             dev = (await miot_proxy.get_devices()).get(did)
-            if dev is None:
+            if dev is None and home_id is None:
                 # 摄像头只在 camera cache(control_device 的家庭校验同样两级查):
                 # 不回落会让摄像头动作 home_id=NULL,经查询侧 NULL 放行串到所有家。
                 # MIoTCameraInfo 继承 MIoTDeviceInfo,name/room_name/home_id 同字段。
+                # 仅在 home_id 未显式传入时才回落——get_cameras() cache miss 会触发
+                # 网络刷新,scene_trigger(did=scene_id、home 已传)不该为此买单。
                 dev = ((await miot_proxy.get_cameras()) or {}).get(did)
             if dev is not None:
                 device_name = getattr(dev, "name", None)
@@ -1381,6 +1383,9 @@ class MiotService:
     async def trigger_scene(self, scene_id: str) -> bool:
         """Trigger a MIoT manual scene."""
         scenes: dict = {}
+        # 异常路径也要能看到"当时想触发什么"(失败审计完整性)——scene_name
+        # 在校验通过后、执行前就归一好,成功/异常两路复用。
+        scene_value_json: str | None = None
         try:
             scenes = (await self._miot_proxy.get_all_scenes()) or {}
             if scene_id not in scenes:
@@ -1389,18 +1394,19 @@ class MiotService:
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
-            ok = await self._miot_proxy.execute_miot_scene(scene_id)
             # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
             # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
             # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
             scene_name = getattr(scenes[scene_id], "scene_name", None)
+            scene_value_json = json.dumps(
+                {"scene_name": scene_name}, ensure_ascii=False
+            )
+            ok = await self._miot_proxy.execute_miot_scene(scene_id)
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type="scene_trigger",
                 did=scene_id, iid=scene_id,
-                value_json=json.dumps(
-                    {"scene_name": scene_name}, ensure_ascii=False
-                ),
+                value_json=scene_value_json,
                 result_code=None,
                 result_msg=None if ok else "场景触发失败",
                 success=bool(ok), error=None,
@@ -1415,7 +1421,8 @@ class MiotService:
                 self._miot_proxy,
                 action_type="scene_trigger",
                 did=scene_id, iid=scene_id,
-                value_json=None,
+                # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
+                value_json=scene_value_json,
                 result_code=None, result_msg=None,
                 success=False, error=str(e),
                 # scenes 取列表阶段就炸时为空 dict → .get 兜底 None

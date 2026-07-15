@@ -220,6 +220,43 @@ async def test_ledger_camera_fallback_resolves_home(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ledger_explicit_home_skips_camera_fetch(bound_client, tmp_path):
+    """home_id 已显式传入(scene_trigger 路径)→ 不回落 get_cameras——
+    其 cache miss 会触发网络刷新,场景台账不该为此买单。"""
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="scene_trigger", did="scene-x", iid="scene-x",
+        value_json=None, result_code=None, result_msg=None,
+        success=True, error=None, home_id="H1",
+    )
+    await client.flush()
+    svc._miot_proxy.get_cameras.assert_not_awaited()
+    assert _rows(obs_db)[0]["home_id"] == "H1"
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_exception_keeps_scene_name(bound_client, tmp_path):
+    """场景执行抛异常 → 台账仍带 scene_name(失败审计要能看到想触发什么)。"""
+    from miloco.middleware.exceptions import MiotServiceException
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.execute_miot_scene = AsyncMock(side_effect=RuntimeError("boom"))
+    with pytest.raises(MiotServiceException):
+        await svc.trigger_scene("scene1")
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert json.loads(r["value_json"]) == {"scene_name": "回家"}
+    assert r["home_id"] == "H1"
+
+
+@pytest.mark.asyncio
 async def test_call_action_writes_ledger_with_tts_text(bound_client, tmp_path):
     """speaker play-text 也是 call_action:in_params(TTS 全文)进 value_json。"""
     client, obs_db = bound_client
