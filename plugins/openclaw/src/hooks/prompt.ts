@@ -1,6 +1,10 @@
 import path from "node:path";
 import { readFileSafe } from "../home-profile/helpers.js";
 import { buildPendingSuggestionBlock } from "../home-profile/injection.js";
+import {
+  lockOnboardingSession,
+  readOnboardingState,
+} from "../home-profile/onboarding_state.js";
 import { getCatalog } from "../services/catalog.js";
 import { logger } from "../utils/logger.js";
 import { deployTimezone, toLocalParts } from "../utils/time.js";
@@ -116,6 +120,71 @@ const B_NOTIFY = `## 通知用户
 为什么是硬性前置、不能跳过：
 - **处理系统推送时你的回话对用户不可见**——光把结论写进回复，没有任何人收到，等于没通知。必须经本 skill 决策并交付渠道才算送达。
 - 通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 \`miloco_im_push\` / \`miloco-cli notify push\` / TTS，否则容易选错人、选错渠道、说错话。`;
+
+function buildOnboardingSessionBlock(
+  sessionKey: string | undefined,
+  prompt: string | undefined,
+): string {
+  const key = sessionKey?.trim();
+  // 广播首邀正文以 [系统事件] 开头（见 backend onboarding_trigger._INSTRUCTION），
+  // 借此排除「广播 turn 自身」触发锁定——只有用户真实回复才会锁定 onboarding 会话。
+  // 若改动该前缀约定，需同步调整这里的守卫逻辑。
+  if (!key || !prompt || prompt.startsWith("[系统事件]")) return "";
+  const currentState = readOnboardingState();
+  if (!currentState?.invitedSessionKeys.includes(key)) return "";
+
+  const hasLock = Boolean(currentState.lockedSessionKey);
+  const isOnboardingReply = hasLock
+    ? isOnboardingContinuationReply(prompt)
+    : isOnboardingInviteReply(prompt);
+  if (!isOnboardingReply) return "";
+
+  const state = hasLock ? currentState : lockOnboardingSession(key);
+  if (!state || !state.invitedSessionKeys.includes(key)) return "";
+  if (state.lockedSessionKey && state.lockedSessionKey !== key) {
+    return `## Onboarding 会话收敛
+检测到 onboarding 可能已在另一条 IM 会话中开始（锁定会话：${state.lockedSessionKey}）。
+若用户明确是在本会话回应初始化邀请、且确有继续意愿，可直接在本会话继续；否则简短提示曾在另一条会话发起过，交由用户选择，不要强行要求切回。`;
+  }
+  if (state.lockedSessionKey === key) {
+    return `## Onboarding 会话收敛
+当前会话已被锁定为正在继续的 onboarding 会话。若用户是在回应之前收到的初始化邀请，就继续同一条 onboarding 流程；不要让用户跳到别的会话重复做一遍。`;
+  }
+  return "";
+}
+
+function isOnboardingInviteReply(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  if (/[?？]/.test(text)) return false;
+
+  if (hasExplicitOnboardingIntent(text)) return true;
+  if (hasControlIntent(text)) return false;
+
+  return /^(好|好的|可以|行|嗯|嗯嗯|是|对|开始吧|开始|继续吧|继续|来吧|ok|okay|yes|yep|sure)[。.!！\s]*$/i.test(
+    text,
+  );
+}
+
+function isOnboardingContinuationReply(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  // 首次抢锁需要兼容“好的”这类自然回复；锁定后只接受明确 onboarding 意图，
+  // 避免 onboarding 完成前后的一句裸肯定在 TTL 内重新注入收敛指令。
+  return hasExplicitOnboardingIntent(text);
+}
+
+function hasExplicitOnboardingIntent(text: string): boolean {
+  const onboardingIntent =
+    /(onboarding|初始化|入门|引导|登记|注册|家庭档案|家庭信息|成员信息|家庭成员|开始登记|开始初始化|继续登记|继续初始化)/i;
+  return onboardingIntent.test(text);
+}
+
+function hasControlIntent(text: string): boolean {
+  const controlIntent =
+    /(打开|关闭|开灯|关灯|开空调|关空调|空调|窗帘|灯|插座|电视|查询|查看|提醒|闹钟|定时|执行|控制|调到|设置|播放)/;
+  return controlIntent.test(text);
+}
 
 const B_LANGUAGE = `## 输出语言
 用用户使用的语言回复用户（设备名、人名、专有名词保持原样）。`;
@@ -243,6 +312,12 @@ export const registerBeforePromptBuildHook: HookRegister = (api) => {
     // ---- append：数据块（今日感知日志 → 待回应 → 目录），minimal 不带 ----
     const append: string[] = [];
     if (profile !== "minimal") {
+      const onboardingBlock = buildOnboardingSessionBlock(
+        ctx?.sessionKey,
+        event?.prompt,
+      );
+      if (onboardingBlock) append.push(onboardingBlock);
+
       const perceptionBlock = buildPerceptionLogBlock(ctx?.workspaceDir);
       if (perceptionBlock) append.push(perceptionBlock);
 

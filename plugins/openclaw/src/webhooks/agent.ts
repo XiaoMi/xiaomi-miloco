@@ -3,6 +3,7 @@ import {
   peekTurnMeta,
   registerTraceLink,
 } from "../hooks/trace.js";
+import { writeOnboardingInviteState } from "../home-profile/onboarding_state.js";
 import { resolveNotifyTarget } from "../tools/notify.js";
 import { logger } from "../utils/logger.js";
 import type { WebhookEntry } from "./index.js";
@@ -25,17 +26,38 @@ interface IRequestBody {
   timeoutMs?: number;
   // 回复是否投递到会话绑定的 IM channel（默认 false：后台 turn，用户不可见）。
   deliver?: boolean;
-  // "owner-channel"：忽略 payload sessionKey，插件侧解析车主 IM 会话（配置的
-  // notifySessionKey，否则最近活跃的已绑定 channel 会话），整个 turn 直接跑在
-  // 该 channel-peer 会话里、deliver 默认 true——用户在自己的聊天里看到回复并
-  // 可直接接话（交互式访谈的唯一合理形态：若只把开场白 push 过去而 turn 留在
-  // 后台会话，用户的回复会落在 channel 会话、访谈状态却在别处，上下文割裂）。
+  // "owner-channel"：忽略 payload sessionKey，插件侧解析已绑定的主人 IM 会话。
+  // onboarding 首条邀请会广播到全部已绑定会话；谁先回复，后续流程就在那条
+  // 会话里继续。deliver 默认 true，让用户在自己的聊天里看到回复并可直接接话。
   resolveTarget?: "owner-channel";
 }
 
 interface WaitResult {
   status: "ok" | "error" | "timeout";
   error?: string;
+}
+
+function pickOwnerBroadcastPrimary(
+  waitResults: Array<{ sessionKey: string; runId: string; wait: WaitResult }>,
+  effectiveSessionKey: string,
+  isOwnerBroadcast: boolean,
+) {
+  if (isOwnerBroadcast) {
+    return (
+      waitResults.find((item) => item.wait.status === "ok") ??
+      waitResults.find((item) => item.wait.status === "timeout") ??
+      waitResults[0]
+    );
+  }
+  return (
+    waitResults.find((item) => item.sessionKey === effectiveSessionKey) ??
+    waitResults[0]
+  );
+}
+
+function isDeliveredOnboardingInvite(wait: WaitResult): boolean {
+  // timeout 表示插件未在等待窗口内拿到终态；按 webhook 回传口径视为已提交投递，避免后端重试。
+  return wait.status === "ok" || wait.status === "timeout";
 }
 
 function isContextOverflow(text: string | null | undefined): boolean {
@@ -89,15 +111,16 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
     // 自愈双 turn 串联须留在 backend HTTP 超时内，startedAt 用于给重试 turn 算剩余等待预算。
     const startedAt = Date.now();
 
-    // owner-channel 模式：复用 miloco_im_push 的车主会话解析（notify.ts 单一事实源），
-    // turn 直接跑在解析出的 channel-peer 会话、deliver 默认 true。needsBind 的
-    // fallback 会话（最近活跃 channel）照用——对"跑 turn"而言它就是车主的聊天；
-    // 解析不到任何 channel（车主从未私聊过 bot）→ 返回结构化 no-channel（code 0，
-    // 非 500），backend 按"未送达、不重试传输"处理，等车主绑定后下次启动再送。
+    // owner-channel 模式：复用 miloco_im_push 的主人会话解析（notify.ts 单一事实源）。
+    // 若已绑定多个 IM 会话，则 onboarding 首邀广播到全部会话；若尚未绑定，则复用
+    // needsBind fallback 的最近活跃会话。解析不到任何 channel（主人从未私聊过 bot）
+    // → 返回结构化 no-channel（code 0，非 500），backend 按"未送达、不重试传输"
+    // 处理，等车主绑定后下次启动再送。
     let effectiveSessionKey = sessionKey;
     let effectiveDeliver = deliver ?? false;
+    let ownerChannelTargets: string[] = [];
     if (resolveTarget === "owner-channel") {
-      const { target } = resolveNotifyTarget(api);
+      const { target, targets } = resolveNotifyTarget(api);
       if (!target?.sessionKey) {
         logger.warn(
           "[agent-webhook] resolveTarget=owner-channel but no IM channel available; returning no-channel",
@@ -110,27 +133,54 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       }
       effectiveSessionKey = target.sessionKey;
       effectiveDeliver = deliver ?? true;
+      ownerChannelTargets = targets.map((item) => item.sessionKey);
     }
 
     const runOnce = async (idem: string, waitMs: number) => {
-      const result = await api.runtime.subagent.run({
-        sessionKey: effectiveSessionKey,
-        message,
-        lane,
-        // 不设 lightContext：owner-channel 访谈要延续该会话的完整上下文。
-        deliver: effectiveDeliver,
-        idempotencyKey: idem,
-        extraSystemPrompt,
-      });
-      if (traceId) {
-        registerTraceLink(result.runId, traceId);
+      const isOwnerBroadcast =
+        resolveTarget === "owner-channel" && ownerChannelTargets.length > 1;
+      const runTargets = isOwnerBroadcast ? ownerChannelTargets : [effectiveSessionKey];
+      const results = [];
+      for (const [index, runSessionKey] of runTargets.entries()) {
+        const result = await api.runtime.subagent.run({
+          sessionKey: runSessionKey,
+          message,
+          lane,
+          // 不设 lightContext：owner-channel 访谈要延续该会话的完整上下文。
+          deliver: effectiveDeliver,
+          idempotencyKey:
+            runTargets.length === 1 ? idem : `${idem}:broadcast:${index}`,
+          extraSystemPrompt,
+        });
+        results.push({ sessionKey: runSessionKey, runId: result.runId });
       }
-      // 同步等待该 turn 跑完(或超时),再回传结果 — backend 单飞调度依赖此阻塞语义。
-      const wait = (await api.runtime.subagent.waitForRun({
-        runId: result.runId,
-        timeoutMs: waitMs,
-      })) as WaitResult;
-      return { runId: result.runId, wait };
+      if (traceId) {
+        for (const item of results) registerTraceLink(item.runId, traceId);
+      }
+      const waitResults = await Promise.all(
+        results.map(async (item) => ({
+          ...item,
+          wait: (await api.runtime.subagent.waitForRun({
+            runId: item.runId,
+            timeoutMs: waitMs,
+          })) as WaitResult,
+        })),
+      );
+      if (isOwnerBroadcast) {
+        // 只有实际送达（或已提交但等待超时）的会话才允许承接后续 onboarding 回复。
+        const deliveredSessionKeys = waitResults
+          .filter((item) => isDeliveredOnboardingInvite(item.wait))
+          .map((item) => item.sessionKey);
+        if (deliveredSessionKeys.length > 0) {
+          writeOnboardingInviteState(deliveredSessionKeys);
+        }
+      }
+      const primary = pickOwnerBroadcastPrimary(
+        waitResults,
+        effectiveSessionKey,
+        isOwnerBroadcast,
+      );
+      return { runId: primary.runId, wait: primary.wait };
     };
 
     const first = await runOnce(idempotencyKey, timeoutMs ?? DEFAULT_WAIT_MS);
