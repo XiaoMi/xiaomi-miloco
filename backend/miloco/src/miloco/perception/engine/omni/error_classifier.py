@@ -1,7 +1,8 @@
 """omni 调用异常/响应到统一错误码集合的映射。
 
-映射规则见 spec §2。code 集合与 web 前端 OMNI_CODE_KEY / omniHealth.codes 保持一致
-(10 个 code),前端可直接复用 i18n。
+映射规则见 spec §2。CODES 与 web 前端 omniHealth.codes 一一对应(10 个 code),
+前端直接复用 i18n。「测试连接」结果表 OMNI_CODE_KEY 是本集合的裁剪变体:去掉
+probe 路径不会产生的 timeout(probe 把所有异常统一归 unreachable)、加上成功码 ok。
 """
 
 from __future__ import annotations
