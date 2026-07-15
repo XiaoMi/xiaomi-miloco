@@ -379,16 +379,17 @@ async def register_sample_batch(
     )
     if not _PERSON_ID_RE.match(person_id):
         raise HTTPException(status_code=400, detail="Invalid person_id format")
-    if not manager.person_service.exists(person_id):
+    # 一次 get_person 兼做存在性校验（缺失返 None→404）与下面写 meta 的真名来源,与单图端点对齐,
+    # 不再 exists()+get_person 查两遍。
+    person = manager.person_service.get_person(person_id)
+    if person is None:
         raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
     if not body.items:
         raise HTTPException(status_code=400, detail="items 不能为空")
 
-    # 取 person 的 name(真名) —— batch endpoint 不接 name 入参, 从 person 库查出来传进
-    # library 写进 meta.json, 否则感知层 list_persons 读不到 name → omni prompt 渲染退化
-    # 成 UUID 而非姓名。
-    person = manager.person_service.get_person(person_id)
-    name = person.name if person else None
+    # person 真名 —— batch endpoint 不接 name 入参, 从 person 库查出来传进 library 写进
+    # meta.json, 否则感知层 list_persons 读不到 name → omni prompt 渲染退化成 UUID 而非姓名。
+    name = person.name
 
     # ReID extractor 借 perception service 现场抽 emb, 给 body 路径落 .npy。
     # 无活动 tracker 时返 None, 抽取失败也吞掉, 不阻塞登记主流程。
