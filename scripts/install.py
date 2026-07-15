@@ -1334,7 +1334,6 @@ class Installer:
                 shutil.copy2(dep_path, adapter_dir / dep)
 
     def _hermes_get_or_create_bearer(self, hermes_home: Path) -> str:
-        import secrets
         cfg = self.miloco_home / "config.json"
         if cfg.exists():
             try:
