@@ -24,6 +24,7 @@ import { useEscClose } from "@/hooks/useEscClose";
 import { IconCamera, IconCheck, IconX } from "@/lib/icons";
 import { AvatarCropEditor } from "./AvatarCropEditor";
 import { PetAutoGenFlow } from "./PetAutoGenFlow";
+import { InfoNote } from "./InfoNote";
 import { toast } from "./Toast";
 
 interface Props {
@@ -31,6 +32,7 @@ interface Props {
   open: boolean;
   grounding: boolean; // features.petHeadGrounding
   entries?: HomeEntries; // 家庭档案，用于回填/更新宠物外观（member_persona）
+  petCount?: number; // 现有宠物数（新增态 ≥3 时提示"建议不超过 3"——正好 3 只再加即超）
   onClose: () => void;
   onChanged: () => void;
 }
@@ -46,6 +48,7 @@ export function PetDrawer({
   open,
   grounding,
   entries,
+  petCount = 0,
   onClose,
   onChanged,
 }: Props) {
@@ -230,6 +233,10 @@ export function PetDrawer({
               <IconX />
             </button>
           </div>
+
+          {isNew && petCount >= 3 && (
+            <InfoNote className="mb-4">{t("pet.countHint")}</InfoNote>
+          )}
 
           {/* 头像：hover 出相机蒙版点击上传（走裁剪）；新增态另有「自动生成外观描述」 */}
           <div className="flex flex-col items-center gap-2 mb-4">

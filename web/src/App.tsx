@@ -555,6 +555,7 @@ function MainApp() {
         open={editingPet !== undefined}
         grounding={features.data?.petHeadGrounding ?? false}
         entries={home.data}
+        petCount={(pets.data ?? []).length}
         onClose={() => setEditingPet(undefined)}
         onChanged={() => {
           pets.reload();
