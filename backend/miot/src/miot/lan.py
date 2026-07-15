@@ -6,7 +6,6 @@ MIoT lan device detector.
 """
 
 import asyncio
-import errno
 import ipaddress
 import logging
 import random
@@ -163,7 +162,6 @@ class MIoTLan:
     _scan_timer: Optional[asyncio.TimerHandle]
     _last_scan_interval: Optional[float]
     _callbacks_device_status_changed: Dict[str, _MIoTLanRegDeviceData]
-    _unicast_targets: Dict[str, str]
 
     _init_lock: asyncio.Lock
     _init_done: bool
@@ -200,7 +198,6 @@ class MIoTLan:
         self._scan_timer = None
         self._last_scan_interval = None
         self._callbacks_device_status_changed = {}
-        self._unicast_targets = {}
 
         self._init_lock = asyncio.Lock()
         self._init_done = False
@@ -260,7 +257,6 @@ class MIoTLan:
                 self._local_port = None
                 self._scan_timer = None
                 self._last_scan_interval = None
-                self._unicast_targets = {}
                 # 注意：故意不清空 _callbacks_device_status_changed。
                 # __on_network_info_change_external_async 会在网卡变化时主动 deinit→init，
                 # 复位会让用户在 init_async 后注册的回调在第一次网络抖动时丢失。
@@ -351,65 +347,6 @@ class MIoTLan:
             port=self.OT_PORT,
         )
 
-    def set_unicast_targets(self, targets: Dict[str, str]) -> None:
-        """Set unicast probe targets (did → ip).
-
-        These IPs will be probed via unicast UDP in every scan cycle,
-        in addition to the normal broadcast.  Useful when cameras are on
-        a different subnet that is still routable — broadcast won't cross
-        the subnet boundary, but unicast will.
-
-        Call with an empty dict to clear all targets.
-        Safe to call when not initialized (no-op).
-        """
-        if not self._init_done:
-            return
-        try:
-            self._internal_loop.call_soon_threadsafe(
-                self.__set_unicast_targets, dict(targets)
-            )
-        except RuntimeError as e:
-            # Event loop may already be stopped during deinit; silently skip.
-            _LOGGER.debug(
-                "set_unicast_targets skipped: internal loop unavailable: %s", e
-            )
-
-    def clear_unicast_targets(self) -> None:
-        """Clear all unicast probe targets."""
-        self.set_unicast_targets({})
-
-    def __set_unicast_targets(self, targets: Dict[str, str]) -> None:
-        """Internal: replace unicast targets (runs on internal loop thread)."""
-        self._unicast_targets = targets
-
-    def _probe_unicast_targets(self) -> None:
-        """Send unicast OTU probes to all registered target IPs.
-
-        Tries each network interface socket in turn; the first that accepts
-        the send wins.  Routing-related errors (ENETUNREACH, EHOSTUNREACH)
-        are silently skipped — that interface simply has no route to the
-        target.  Other OSError subtypes (e.g. EBADF, EMSGSIZE) are logged
-        as warnings since they indicate an unexpected socket state.
-        """
-        if not self._unicast_targets or not self._broadcast_socks:
-            return
-        for ip in self._unicast_targets.values():
-            if not ip:
-                continue
-            for sock in self._broadcast_socks.values():
-                try:
-                    sock.sendto(
-                        self._probe_msg, socket.MSG_DONTWAIT, (ip, self.OT_PORT)
-                    )
-                    break  # sent successfully via this interface
-                except OSError as e:
-                    if e.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
-                        continue  # no route from this iface, try next
-                    _LOGGER.warning(
-                        "unicast probe to %s via socket fd %s failed: %s",
-                        ip, sock.fileno(), e,
-                    )
-
     def broadcast_device_info_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         """Broadcast device info changed."""
         for handler in self._callbacks_device_status_changed.values():
@@ -426,7 +363,6 @@ class MIoTLan:
         for device in self._lan_devices.values():
             device.on_delete()
         self._lan_devices.clear()
-        self._unicast_targets.clear()
         self.__deinit_socket()
         self._internal_loop.stop()
 
@@ -584,10 +520,8 @@ class MIoTLan:
             self._scan_timer.cancel()
             self._scan_timer = None
         try:
-            # Scan devices — broadcast
+            # Scan devices
             self.ping_internal()
-            # Additionally probe known unicast targets (cross-subnet cameras)
-            self._probe_unicast_targets()
         except Exception as err:
             # Ignore any exceptions to avoid blocking the loop
             _LOGGER.error("ping device error, %s", err)
