@@ -61,9 +61,17 @@ _LOGGER = logging.getLogger(__name__)
 # controllable device whose local RPC hits one of these is reported as failed
 # and is NOT retried via cloud (avoids double-executing a maybe-delivered
 # request). Device-level rejections (other codes) are returned as-is.
-_LOCAL_FAILURE_CODES = frozenset(
+# RPC reply timeout: the request may have reached and executed on the device,
+# so a locally-controllable set/action is NOT retried on cloud (avoids double-
+# executing a maybe-delivered request). A read (get) is idempotent and still
+# falls back. A timeout also arms the per-did cooldown (subsequent requests skip
+# local for a window, so a flaky device's batch pays the timeout at most once).
+_LOCAL_TIMEOUT_CODE = MIoTErrorCode.CODE_TIMEOUT.value  # -10006
+# Local failures where the request definitely did NOT execute on the device
+# (gateway could not process / rejected before dispatch). Safe to retry on
+# cloud, and cheap (no timeout wait) so they do NOT arm the cooldown.
+_LOCAL_FALLBACK_CODES = frozenset(
     {
-        MIoTErrorCode.CODE_TIMEOUT.value,  # -10006 (rpc reply timeout)
         MIoTErrorCode.CODE_INTERNAL_ERROR.value,  # -10004
         MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,  # -10040
         MIoTErrorCode.CODE_UNAVAILABLE.value,  # -10001
@@ -292,11 +300,12 @@ class MIoTClient:
     async def set_props_async(
         self, params: list[MIoTSetPropertyParam]
     ) -> list:
-        """Set device properties. Local-controllable dids go local; on local
-        failure the failing item is returned as an error (no in-call cloud
-        fallback, so a set is never double-sent) and the did enters a cooldown
-        window during which its subsequent requests route to cloud. Not
-        locally-controllable dids go cloud."""
+        """Set device properties. Local-controllable dids go local. On local
+        **timeout** the item is returned as an error and the did is cooled down
+        (no cloud retry — the set may have been delivered, avoid double-send);
+        on any **other** local failure (exception / non-timeout error code) the
+        item retries on cloud (it clearly did not execute), without cooldown.
+        Not locally-controllable dids go cloud."""
         ch = self._central_hub
         if not ch or not ch.enabled:
             return await self._http_client.set_props_async(params)
@@ -307,28 +316,30 @@ class MIoTClient:
             if not ch.can_control(p.did):
                 cloud_idx.append(i)  # not locally controllable → cloud
                 continue
-            if ch.in_local_cooldown(p.did):  # recent local failure → cloud during cooldown
+            if ch.in_local_cooldown(p.did):  # recent local timeout → cloud during cooldown
                 cloud_idx.append(i)
                 continue
             try:
                 r = await ch.set_prop_async(p.did, p.siid, p.piid, p.value)
             except Exception as e:
-                _LOGGER.warning("local set_prop failed did=%s (no cloud fallback): %s", p.did, e)
-                ch.note_local_failure(p.did)
-                results[i] = {
-                    "did": p.did, "siid": p.siid, "piid": p.piid,
-                    "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
-                }
+                # local call errored → clearly not delivered → retry cloud, no cooldown
+                _LOGGER.warning("local set_prop errored did=%s → cloud: %s", p.did, e)
+                cloud_idx.append(i)
                 continue
             code = r.get("code") if isinstance(r, dict) else None
-            if code is None or code in _LOCAL_FAILURE_CODES:
-                # local transport failure — report as error, do NOT retry cloud
-                _LOGGER.info("local set_prop failed did=%s code=%s (no cloud fallback)", p.did, code)
+            if code == _LOCAL_TIMEOUT_CODE:
+                # timeout — may have been delivered → no cloud retry, cool down
+                _LOGGER.info("local set_prop timeout did=%s (no cloud fallback)", p.did)
                 ch.note_local_failure(p.did)
                 results[i] = {
                     "did": p.did, "siid": p.siid, "piid": p.piid,
-                    "code": code if code is not None else MIoTErrorCode.CODE_UNAVAILABLE.value,
+                    "code": code,
                 }
+                continue
+            if code is None or code in _LOCAL_FALLBACK_CODES:
+                # clearly did not execute → retry on cloud, no cooldown
+                _LOGGER.info("local set_prop failed did=%s code=%s → cloud", p.did, code)
+                cloud_idx.append(i)
                 continue
             # success (0/1) or device-level result → return as-is
             results[i] = {
@@ -371,27 +382,22 @@ class MIoTClient:
             if not ch.can_control(p.did):
                 cloud_idx.append(i)  # not locally controllable → cloud
                 continue
-            if ch.in_local_cooldown(p.did):  # recent local failure → cloud during cooldown
+            if ch.in_local_cooldown(p.did):  # recent local timeout → cloud during cooldown
                 cloud_idx.append(i)
                 continue
             try:
                 value = await ch.get_prop_async(p.did, p.siid, p.piid)
             except Exception as e:
-                _LOGGER.warning("local get_prop failed did=%s (no cloud fallback): %s", p.did, e)
-                ch.note_local_failure(p.did)
-                results[i] = {
-                    "did": p.did, "siid": p.siid, "piid": p.piid,
-                    "value": None, "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
-                }
+                # local read errored → cloud (reads are idempotent), no cooldown
+                _LOGGER.warning("local get_prop errored did=%s → cloud: %s", p.did, e)
+                cloud_idx.append(i)
                 continue
             if value is None:
-                # local RPC timed out / unreachable — error, do NOT read cloud
-                _LOGGER.info("local get_prop no value did=%s (no cloud fallback)", p.did)
+                # no reply (timeout/unreachable) — read is idempotent so fall back
+                # to cloud; cool down so a flaky device's batch read pays ≤1 timeout
+                _LOGGER.info("local get_prop no value did=%s → cloud (cooldown)", p.did)
                 ch.note_local_failure(p.did)
-                results[i] = {
-                    "did": p.did, "siid": p.siid, "piid": p.piid,
-                    "value": None, "code": MIoTErrorCode.CODE_UNAVAILABLE.value,
-                }
+                cloud_idx.append(i)
                 continue
             results[i] = {
                 "did": p.did, "siid": p.siid, "piid": p.piid,
@@ -416,37 +422,40 @@ class MIoTClient:
         return results
 
     async def action_async(self, param: MIoTActionParam) -> dict:
-        """Call a device action. Locally-controllable + not in cooldown → local
-        only (no in-call cloud fallback, so an action is never double-sent in one
-        call); on local failure the did enters a cooldown window during which its
-        subsequent actions route to cloud. Not locally-controllable → cloud."""
+        """Call a device action. Locally-controllable + not in cooldown → local.
+        On local **timeout** the action returns an error and the did is cooled
+        down (no cloud retry — the action may have executed, avoid double-run);
+        on any **other** local failure (exception / non-timeout error code) it
+        retries on cloud (it clearly did not run), without cooldown. Not
+        locally-controllable or in cooldown → cloud."""
         ch = self._central_hub
         if (
             ch and ch.enabled and ch.can_control(param.did)
             and not ch.in_local_cooldown(param.did)
         ):
+            local_result = None
             try:
-                r = await ch.action_async(
+                local_result = await ch.action_async(
                     param.did, param.siid, param.aiid, param.in_
                 )
             except Exception as e:
-                _LOGGER.warning("local action failed did=%s (no cloud fallback): %s", param.did, e)
-                ch.note_local_failure(param.did)
-                return {
-                    "did": param.did, "siid": param.siid, "aiid": param.aiid,
-                    "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
-                }
-            code = r.get("code") if isinstance(r, dict) else None
-            if code is None or code in _LOCAL_FAILURE_CODES:
-                # local transport failure — report as error, do NOT retry cloud
-                _LOGGER.info("local action failed did=%s code=%s (no cloud fallback)", param.did, code)
-                ch.note_local_failure(param.did)
-                return {
-                    "did": param.did, "siid": param.siid, "aiid": param.aiid,
-                    "code": code if code is not None else MIoTErrorCode.CODE_UNAVAILABLE.value,
-                }
-            return r  # success or device-level rejection → as-is
-        # not locally controllable, or in local cooldown → cloud
+                # local call errored → clearly did not run → retry cloud, no cooldown
+                _LOGGER.warning("local action errored did=%s → cloud: %s", param.did, e)
+            if local_result is not None:
+                code = local_result.get("code") if isinstance(local_result, dict) else None
+                if code == _LOCAL_TIMEOUT_CODE:
+                    # timeout — may have run → no cloud retry, cool down
+                    _LOGGER.info("local action timeout did=%s (no cloud fallback)", param.did)
+                    ch.note_local_failure(param.did)
+                    return {
+                        "did": param.did, "siid": param.siid, "aiid": param.aiid,
+                        "code": code,
+                    }
+                if code is not None and code not in _LOCAL_FALLBACK_CODES:
+                    return local_result  # success or device-level rejection → as-is
+                # non-timeout failure → fall through to cloud
+                _LOGGER.info("local action failed did=%s code=%s → cloud", param.did, code)
+        # not locally controllable / in cooldown / non-timeout local failure → cloud
         try:
             return await self._http_client.action_async(param)
         except Exception as e:

@@ -217,15 +217,14 @@ class CentralHubManager:
         return bool(client and client.is_connected)
 
     def in_local_cooldown(self, did: str) -> bool:
-        """True if did is within a recent local-failure cooldown window.
+        """True if did is within a recent local-timeout cooldown window.
 
-        After a local RPC fails, the did is cooled down for a short window.
-        During the window the routing layer does not retry local (avoids paying
-        the full RPC timeout again) and routes the did's requests to cloud, so a
-        device that has gone flaky on the LAN stays controllable. The failing
-        call itself is never retried on cloud in-call (no double-send); only
-        subsequent requests within the window take the cloud path. Bounds a
-        flaky device's batch to one timeout; self-heals when the window lapses.
+        A local RPC **timeout** (not other errors — those fail fast and just
+        retry on cloud) cools the did down for a short window. During the window
+        the routing layer skips local and routes the did's requests to cloud,
+        so a device that has gone flaky on the LAN stays controllable without
+        paying the full RPC timeout on every call. Bounds a flaky device's batch
+        to one timeout; self-heals when the window lapses.
         """
         expiry = self._local_cooldown.get(did)
         if expiry is None:
@@ -236,7 +235,8 @@ class CentralHubManager:
         return False
 
     def note_local_failure(self, did: str) -> None:
-        """Mark a did's local path as failed → route it to cloud for a window."""
+        """Arm the cooldown after a local RPC timeout → route the did to cloud
+        for a window (called only on timeout, not on fast failures)."""
         self._local_cooldown[did] = time.monotonic() + _LOCAL_COOLDOWN_SEC
 
     async def set_prop_async(self, did: str, siid: int, piid: int, value: Any) -> dict:
