@@ -354,17 +354,29 @@ const ENV_FALSE_TOKENS = new Set(["0", "false", "f", "no", "n", "off"]);
 type SchemaNode = { type?: string; properties?: Record<string, SchemaNode> };
 
 /**
- * 读取「与某配置路径对应的环境变量」原始字符串。
- * 路径 `["scheduler", "enabled"]` → `MILOCO_SCHEDULER__ENABLED`。
- * 大小写不敏感匹配（对齐后端 `case_sensitive=False`；POSIX env 名本身区分大小写，
- * 逐一 lower-case 比较以兼容用户误用小写）。
+ * 把 `process.env` 建成「小写名 → 值」索引，供一次 {@link applyEnvOverrides} 内所有
+ * 叶子共用。大小写不敏感对齐后端 `case_sensitive=False`（POSIX env 名本身区分大小写，
+ * 索引化以兼容用户误用小写）。同名仅大小写不同时后者覆盖前者——极端场景，忽略。
  */
-function readEnvRaw(path: readonly string[]): string | undefined {
-  const target = `${ENV_PREFIX}${path.join(ENV_NESTED_DELIMITER)}`.toLowerCase();
+function buildEnvIndex(): Map<string, string> {
+  const index = new Map<string, string>();
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key.toLowerCase() === target) return value;
+    if (value !== undefined) index.set(key.toLowerCase(), value);
   }
-  return undefined;
+  return index;
+}
+
+/**
+ * 从 env 索引 O(1) 取「与某配置路径对应的环境变量」原始字符串。
+ * 路径 `["scheduler", "enabled"]` → `MILOCO_SCHEDULER__ENABLED`。
+ */
+function readEnvRaw(
+  path: readonly string[],
+  envIndex: Map<string, string>,
+): string | undefined {
+  return envIndex.get(
+    `${ENV_PREFIX}${path.join(ENV_NESTED_DELIMITER)}`.toLowerCase(),
+  );
 }
 
 /**
@@ -402,15 +414,16 @@ function coerceEnvValue(type: string, raw: string): unknown {
 function collectEnvOverrides(
   props: Record<string, SchemaNode>,
   prefix: readonly string[],
+  envIndex: Map<string, string>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, node] of Object.entries(props)) {
     const path = [...prefix, key];
     if (node.type === "object" && node.properties) {
-      const child = collectEnvOverrides(node.properties, path);
+      const child = collectEnvOverrides(node.properties, path, envIndex);
       if (Object.keys(child).length > 0) out[key] = child;
     } else if (typeof node.type === "string") {
-      const rawVal = readEnvRaw(path);
+      const rawVal = readEnvRaw(path, envIndex);
       if (rawVal !== undefined) {
         const coerced = coerceEnvValue(node.type, rawVal);
         if (coerced !== undefined) out[key] = coerced;
@@ -431,9 +444,13 @@ function collectEnvOverrides(
 function applyEnvOverrides(
   raw: Record<string, unknown>,
 ): Record<string, unknown> {
+  // 一次性把 process.env 建成小写索引，避免每个 schema 叶子都重扫一遍 process.env
+  // （getNotifyDedupWindowMs 走每条通知的热路径，env 多的容器里能省掉数千次比较）。
+  const envIndex = buildEnvIndex();
   const overrides = collectEnvOverrides(
     SHARED_CONFIG_SCHEMA.properties as unknown as Record<string, SchemaNode>,
     [],
+    envIndex,
   );
   if (Object.keys(overrides).length === 0) return raw;
   const merged: Record<string, unknown> = { ...raw };
