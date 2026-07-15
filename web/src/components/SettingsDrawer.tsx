@@ -113,9 +113,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
         } else {
           toast(t("settings.applySuccess"), "ok");
         }
-      } else {
-        // 仅改调度开关：写盘当下并未生效（要等 agent 网关下次重启），
-        // 与感知参数「即时生效」区分，避免过度承诺。
+      }
+      // 调度开关写盘当下并不生效（要等 agent 网关下次重启），与感知参数「即时生效」
+      // 区分。独立于感知分支单发：仅改开关时是唯一 toast；与感知同改时在感知 toast
+      // 之上再堆一条，补全开关的「延迟生效」措辞——否则双改会只走感知的
+      // applySuccess，把开关也说成已即时生效（过度承诺）。
+      if (schedulerSaved) {
         toast(t("settings.schedulerSaved"), "ok");
       }
       onClose();
@@ -137,7 +140,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setVideoShortEdge(DEFAULTS.video_short_edge);
     setOmniFps(DEFAULTS.omni_fps);
     setWindowSize(DEFAULTS.window_size);
-    setSchedulerEnabled(true);
+    // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
+    // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。
+    if (schedulerAvailable) setSchedulerEnabled(true);
   }
 
   const dirty = perceptionDirty || schedulerDirty;
