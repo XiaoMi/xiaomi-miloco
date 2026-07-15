@@ -190,6 +190,29 @@ describe("loadSharedConfig", () => {
     const cfg = loadSharedConfig(api);
     expect(cfg.server.token).toBe("preset-token");
   });
+
+  it("env（schema 驱动，非 scheduler/notify 字段）覆盖返回值但绝不落盘", async () => {
+    // 验证 env 覆盖是 schema 驱动的通用能力（不止 scheduler/notify），且 env 只是
+    // 运行时 overlay——写盘用的是叠加前的 raw，config.json 永不含 env 值。
+    writeFileSync(
+      configPath,
+      JSON.stringify({ server: { token: "preset-token" } }),
+    );
+    const orig = process.env.MILOCO_SERVER__URL;
+    process.env.MILOCO_SERVER__URL = "http://env.example:9999";
+    try {
+      const { loadSharedConfig } = await import("../src/miloco/config.js");
+      const api = await makeApi();
+      const cfg = loadSharedConfig(api);
+      expect(cfg.server.url).toBe("http://env.example:9999");
+      const onDisk = JSON.parse(readFileSync(configPath, "utf-8"));
+      expect(onDisk.server.url).toBeUndefined();
+      expect(onDisk.server.token).toBe("preset-token");
+    } finally {
+      if (orig === undefined) delete process.env.MILOCO_SERVER__URL;
+      else process.env.MILOCO_SERVER__URL = orig;
+    }
+  });
 });
 
 describe("isSchedulerAutoManageEnabled", () => {
