@@ -39,16 +39,18 @@ def _jpeg_b64(seed: int = 0) -> str:
 def lib(tmp_path, monkeypatch) -> IdentityLibrary:
     library = IdentityLibrary(tmp_path / "identity_lib")
     monkeypatch.setattr(prouter, "_get_identity_library", lambda: library)
-    # 端点用到 manager.person_service.{exists,list_persons} + perception_service.
+    # 端点用到 manager.person_service.{exists,get_person} + perception_service.
     # get_reid_extractor;person_service 是只读 property、不能直接 setattr,故整体把
-    # 模块级 manager 替换成桩。list_persons 返回带 id/name 的 person 供 batch 查 name;
+    # 模块级 manager 替换成桩。get_person 按 id 返带 name 的 person 供 batch 查 name;
     # get_reid_extractor 返 None(本测试只验容量契约,不验 ReID/name 写入)。
     monkeypatch.setattr(
         prouter, "manager",
         SimpleNamespace(
             person_service=SimpleNamespace(
                 exists=lambda person_id: True,
-                list_persons=lambda: [SimpleNamespace(id=_PID, name="测试")],
+                get_person=lambda person_id: (
+                    SimpleNamespace(id=_PID, name="测试") if person_id == _PID else None
+                ),
             ),
             perception_service=SimpleNamespace(get_reid_extractor=lambda: None),
         ),

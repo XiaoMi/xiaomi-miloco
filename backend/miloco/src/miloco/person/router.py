@@ -280,7 +280,7 @@ async def register_sample(
     # 取 person 真名一并写进 meta.json——与 register_sample_batch 对齐。否则单图登记只落
     # body 图、不写 name,感知层 list_persons 读不到 name → omni gallery 渲染退化成 UUID
     # 而非姓名(表现为"认不出已注册成员")。SQL 是 name 单一事实源。
-    person = next((p for p in manager.person_service.list_persons() if p.id == person_id), None)
+    person = manager.person_service.get_person(person_id)
     name = person.name if person else None
 
     ok = library.add_tier_a_sample(
@@ -386,7 +386,7 @@ async def register_sample_batch(
     # 取 person 的 name(真名) —— batch endpoint 不接 name 入参, 从 person 库查出来传进
     # library 写进 meta.json, 否则感知层 list_persons 读不到 name → omni prompt 渲染退化
     # 成 UUID 而非姓名。
-    person = next((p for p in manager.person_service.list_persons() if p.id == person_id), None)
+    person = manager.person_service.get_person(person_id)
     name = person.name if person else None
 
     # ReID extractor 借 perception service 现场抽 emb, 给 body 路径落 .npy。
