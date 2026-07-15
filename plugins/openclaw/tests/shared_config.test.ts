@@ -194,11 +194,14 @@ describe("loadSharedConfig", () => {
 
 describe("isSchedulerAutoManageEnabled", () => {
   let origHome: string | undefined;
+  let origEnvOverride: string | undefined;
   let tmpHome: string;
   let configPath: string;
 
   beforeEach(() => {
     origHome = process.env.MILOCO_HOME;
+    origEnvOverride = process.env.MILOCO_SCHEDULER__ENABLED;
+    delete process.env.MILOCO_SCHEDULER__ENABLED;
     tmpHome = mkdtempSync(path.join(tmpdir(), "miloco-home-"));
     configPath = path.join(tmpHome, "config.json");
     process.env.MILOCO_HOME = tmpHome;
@@ -207,6 +210,9 @@ describe("isSchedulerAutoManageEnabled", () => {
   afterEach(() => {
     if (origHome === undefined) delete process.env.MILOCO_HOME;
     else process.env.MILOCO_HOME = origHome;
+    if (origEnvOverride === undefined)
+      delete process.env.MILOCO_SCHEDULER__ENABLED;
+    else process.env.MILOCO_SCHEDULER__ENABLED = origEnvOverride;
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
@@ -239,5 +245,122 @@ describe("isSchedulerAutoManageEnabled", () => {
       "../src/miloco/config.js"
     );
     expect(isSchedulerAutoManageEnabled()).toBe(true);
+  });
+
+  // ── env 覆盖：与后端 pydantic-settings（env > config.json）对齐 ──────────
+  // 消除 review 指出的「设了 MILOCO_SCHEDULER__ENABLED 时界面显示与插件实际行为背离」。
+
+  it("MILOCO_SCHEDULER__ENABLED=false 覆盖 config.json 的 true", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: true } }));
+    process.env.MILOCO_SCHEDULER__ENABLED = "false";
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(false);
+  });
+
+  it("MILOCO_SCHEDULER__ENABLED=true 覆盖 config.json 的 false", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: false } }));
+    process.env.MILOCO_SCHEDULER__ENABLED = "true";
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(true);
+  });
+
+  it("env 覆盖认 pydantic 布尔别名（0/off/no，大小写不敏感）", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: true } }));
+    for (const raw of ["0", "off", "No", "FALSE"]) {
+      process.env.MILOCO_SCHEDULER__ENABLED = raw;
+      const { isSchedulerAutoManageEnabled } = await import(
+        "../src/miloco/config.js"
+      );
+      expect(isSchedulerAutoManageEnabled()).toBe(false);
+    }
+  });
+
+  it("env 缺失时回落 config.json（不误伤原有读法）", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: false } }));
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(false);
+  });
+
+  it("env 值无法解析为布尔 → 回落 config.json（不崩、区别于后端抛错）", async () => {
+    writeFileSync(configPath, JSON.stringify({ scheduler: { enabled: false } }));
+    process.env.MILOCO_SCHEDULER__ENABLED = "maybe";
+    const { isSchedulerAutoManageEnabled } = await import(
+      "../src/miloco/config.js"
+    );
+    expect(isSchedulerAutoManageEnabled()).toBe(false);
+  });
+});
+
+describe("getNotifyDedupWindowMs", () => {
+  let origHome: string | undefined;
+  let origEnvOverride: string | undefined;
+  let tmpHome: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    origHome = process.env.MILOCO_HOME;
+    origEnvOverride = process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC;
+    delete process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC;
+    tmpHome = mkdtempSync(path.join(tmpdir(), "miloco-home-"));
+    configPath = path.join(tmpHome, "config.json");
+    process.env.MILOCO_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (origHome === undefined) delete process.env.MILOCO_HOME;
+    else process.env.MILOCO_HOME = origHome;
+    if (origEnvOverride === undefined)
+      delete process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC;
+    else process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC = origEnvOverride;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("config.json 缺失 → 默认 60s（60000ms）", async () => {
+    const { getNotifyDedupWindowMs } = await import("../src/miloco/config.js");
+    expect(getNotifyDedupWindowMs()).toBe(60_000);
+  });
+
+  it("读 config.json 的 notify.dedup_window_sec", async () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ notify: { dedup_window_sec: 30 } }),
+    );
+    const { getNotifyDedupWindowMs } = await import("../src/miloco/config.js");
+    expect(getNotifyDedupWindowMs()).toBe(30_000);
+  });
+
+  it("负值经 Math.max(0,…) 归零 = 关闭去重", async () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ notify: { dedup_window_sec: -5 } }),
+    );
+    const { getNotifyDedupWindowMs } = await import("../src/miloco/config.js");
+    expect(getNotifyDedupWindowMs()).toBe(0);
+  });
+
+  it("MILOCO_NOTIFY__DEDUP_WINDOW_SEC 覆盖 config.json（对齐后端 env 优先）", async () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ notify: { dedup_window_sec: 30 } }),
+    );
+    process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC = "90";
+    const { getNotifyDedupWindowMs } = await import("../src/miloco/config.js");
+    expect(getNotifyDedupWindowMs()).toBe(90_000);
+  });
+
+  it("env 非数 → 回落 config.json（不崩）", async () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ notify: { dedup_window_sec: 30 } }),
+    );
+    process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC = "abc";
+    const { getNotifyDedupWindowMs } = await import("../src/miloco/config.js");
+    expect(getNotifyDedupWindowMs()).toBe(30_000);
   });
 });

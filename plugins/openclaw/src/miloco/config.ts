@@ -300,40 +300,123 @@ function safeJsonParse(text: string | undefined): unknown {
   }
 }
 
+// ─── 环境变量覆盖（与后端 pydantic-settings 对齐） ────────────────────────────
+//
+// 后端 `MilocoSettings` 用 pydantic-settings 以「环境变量 > config.json >
+// settings.yaml > 默认值」的优先级解析配置（见 backend settings.py 的
+// `SettingsConfigDict(env_prefix="MILOCO_", env_nested_delimiter="__",
+// case_sensitive=False)`）。backend GET /admin/scheduler-config 与 Web 开关读
+// `get_settings()`，因此 env 会覆盖界面显示值。
+//
+// 下面这批轻量读取器（scheduler / notify）此前直接 raw 读 config.json、无视 env，
+// 导致「设了 MILOCO_SCHEDULER__ENABLED 时界面状态与插件实际行为背离」。这里补齐
+// 同一套 env 覆盖语义，让插件生效值与 backend / Web 显示值一致。
+
+/** 环境变量前缀，与后端 `SettingsConfigDict.env_prefix` 对齐。 */
+const ENV_PREFIX = "MILOCO_";
+/** 嵌套字段分隔符，与后端 `SettingsConfigDict.env_nested_delimiter` 对齐。 */
+const ENV_NESTED_DELIMITER = "__";
+
+/** pydantic v2 认可为 `true` 的布尔字符串（大小写不敏感）。 */
+const ENV_TRUE_TOKENS = new Set(["1", "true", "t", "yes", "y", "on"]);
+/** pydantic v2 认可为 `false` 的布尔字符串（大小写不敏感）。 */
+const ENV_FALSE_TOKENS = new Set(["0", "false", "f", "no", "n", "off"]);
+
+/**
+ * 读取「与某配置路径对应的环境变量」原始字符串。
+ * 路径 `["scheduler", "enabled"]` → `MILOCO_SCHEDULER__ENABLED`。
+ * 大小写不敏感匹配（对齐后端 `case_sensitive=False`；POSIX env 名本身区分大小写，
+ * 逐一 lower-case 比较以兼容用户误用小写）。
+ */
+function readEnvOverride(path: readonly string[]): string | undefined {
+  const target = `${ENV_PREFIX}${path.join(ENV_NESTED_DELIMITER)}`.toLowerCase();
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && key.toLowerCase() === target) return value;
+  }
+  return undefined;
+}
+
+/** 按 pydantic bool 规则解析环境变量字符串；无法识别返回 `undefined`。 */
+function parseEnvBool(raw: string): boolean | undefined {
+  const t = raw.trim().toLowerCase();
+  if (ENV_TRUE_TOKENS.has(t)) return true;
+  if (ENV_FALSE_TOKENS.has(t)) return false;
+  return undefined;
+}
+
+/** 按 pydantic float 规则解析环境变量字符串；非数返回 `undefined`。 */
+function parseEnvNumber(raw: string): number | undefined {
+  const t = raw.trim();
+  if (t === "") return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * 统一解析「单个 miloco 标量配置项」的生效值，语义与后端 pydantic-settings 对齐：
+ *
+ *   环境变量 `MILOCO_<A>__<B>` > `config.json` 的 `A.B` > 调用方缺省 `fallback`。
+ *
+ * - `path`：`[section, field]` 两级路径（当前消费方都是两级，够用且更直白）；
+ * - `coerceEnv`：把 env 原始字符串按目标类型解析，无法解析（含空值）返回 `undefined`；
+ * - `coerceFile`：从 config.json 已解析的原始值取目标类型，类型不符返回 `undefined`。
+ *
+ * 与后端的一个刻意差异：env 值非法时后端会抛 ValidationError 直接崩，
+ * 而插件回落到文件 / 缺省——避免误配 env 阻断网关启停这类关键路径。
+ *
+ * 刻意不走 {@link loadSharedConfig}：这些读取器只需一个标量，
+ * 无需归一化落盘 / 解析 gateway auth，且会被高频调用（如每条通知）。
+ */
+function resolveScalarConfig<T>(
+  path: readonly [string, string],
+  coerceEnv: (raw: string) => T | undefined,
+  coerceFile: (value: unknown) => T | undefined,
+  fallback: T,
+): T {
+  const envRaw = readEnvOverride(path);
+  if (envRaw !== undefined) {
+    const parsed = coerceEnv(envRaw);
+    if (parsed !== undefined) return parsed;
+  }
+  const existing = safeJsonParse(readTextOrUndefined(sharedConfigPath()));
+  const raw = isRecord(existing) ? existing : {};
+  const [section, field] = path;
+  const obj = isRecord(raw[section]) ? raw[section] : undefined;
+  const fileVal = obj !== undefined ? coerceFile(obj[field]) : undefined;
+  return fileVal !== undefined ? fileVal : fallback;
+}
+
 /** 通知去重窗口默认值（秒），与 settings.schema.json / 后端 NotifySettings 对齐。 */
 const DEFAULT_NOTIFY_DEDUP_SEC = 60;
 
 /**
- * 无副作用读取通知去重窗口（毫秒）。读 config.json 的 `notify.dedup_window_sec`
- * （秒，与后端 `MilocoSettings.notify` 同键）。非数（含缺失）按缺省 60；负值经
- * `Math.max(0, …)` 归零 = 关闭去重，与后端 `MessageDeduper` 的 `window_sec<=0` 同义。返回毫秒。
- *
- * 刻意不走 {@link loadSharedConfig}：那会在每次调用时归一化落盘、解析 gateway auth，
- * 而本函数会被每条通知调用，只需读一个数值。
+ * 无副作用读取通知去重窗口（毫秒）。读 `notify.dedup_window_sec`（秒，与后端
+ * `MilocoSettings.notify` 同键），环境变量 `MILOCO_NOTIFY__DEDUP_WINDOW_SEC`
+ * 优先（对齐后端）。非数（含缺失）按缺省 60；负值经 `Math.max(0, …)` 归零 =
+ * 关闭去重，与后端 `MessageDeduper` 的 `window_sec<=0` 同义。返回毫秒。
  */
 export function getNotifyDedupWindowMs(): number {
-  const existing = safeJsonParse(readTextOrUndefined(sharedConfigPath()));
-  const raw = isRecord(existing) ? existing : {};
-  const notify = isRecord(raw.notify) ? raw.notify : undefined;
-  const sec =
-    typeof notify?.dedup_window_sec === "number" &&
-    Number.isFinite(notify.dedup_window_sec)
-      ? notify.dedup_window_sec
-      : DEFAULT_NOTIFY_DEDUP_SEC;
+  const sec = resolveScalarConfig(
+    ["notify", "dedup_window_sec"],
+    parseEnvNumber,
+    (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+    DEFAULT_NOTIFY_DEDUP_SEC,
+  );
   return Math.max(0, sec) * 1000;
 }
 
 /**
- * 无副作用读取「是否自动管理内置定时任务」开关。读 config.json 的
- * `scheduler.enabled`（与后端 `SchedulerSettings` / CLI `scheduler.enabled` 同键）。
- * 缺失或非布尔一律按缺省 `true`（保持既有默认自动管理行为）。
- *
- * 刻意不走 {@link loadSharedConfig}：调度器只需在网关启停时读一个布尔，
- * 无需归一化落盘 / 解析 gateway auth。
+ * 无副作用读取「是否自动管理内置定时任务」开关。读 `scheduler.enabled`（与后端
+ * `SchedulerSettings` / CLI `scheduler.enabled` 同键），环境变量
+ * `MILOCO_SCHEDULER__ENABLED` 优先（对齐后端 GET / Web 开关的 `get_settings()` 读法，
+ * 消除「设了 env 时界面显示与插件实际行为背离」）。缺失或非布尔一律按缺省 `true`
+ * （保持既有默认自动管理行为）。
  */
 export function isSchedulerAutoManageEnabled(): boolean {
-  const existing = safeJsonParse(readTextOrUndefined(sharedConfigPath()));
-  const raw = isRecord(existing) ? existing : {};
-  const scheduler = isRecord(raw.scheduler) ? raw.scheduler : undefined;
-  return typeof scheduler?.enabled === "boolean" ? scheduler.enabled : true;
+  return resolveScalarConfig(
+    ["scheduler", "enabled"],
+    parseEnvBool,
+    (v) => (typeof v === "boolean" ? v : undefined),
+    true,
+  );
 }
