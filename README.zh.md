@@ -61,7 +61,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash
 ```
 
-安装程序会询问装给哪个 Agent 平台（OpenClaw / Hermes）。想跳过询问直接指定：
+默认为 OpenClaw。如果要装给 Hermes Agent，显式指定：
 
 ```bash
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-platform=hermes

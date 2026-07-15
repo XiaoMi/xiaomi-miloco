@@ -61,7 +61,7 @@ Please install the Miloco plugin for me: https://raw.githubusercontent.com/XiaoM
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash
 ```
 
-The installer will ask which agent platform (OpenClaw / Hermes) to install for. To skip the prompt, pass it explicitly:
+Default: OpenClaw. To install for Hermes Agent, specify it explicitly:
 
 ```bash
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-platform=hermes
