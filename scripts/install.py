@@ -1320,12 +1320,18 @@ class Installer:
     def _hermes_deploy_adapter(self, extract_dir: Path) -> None:
         adapter_dir = self.miloco_home / "agent_platform" / "hermes"
         adapter_dir.mkdir(parents=True, exist_ok=True)
+        # adapter.py + __init__.py（hermes_adapter 目录内）
         src_adapter = extract_dir / "miloco-plugin" / "hermes_adapter"
-        if not src_adapter.exists():
-            return
-        for f in src_adapter.iterdir():
-            if f.suffix == ".py":
-                shutil.copy2(f, adapter_dir / f.name)
+        if src_adapter.exists():
+            for f in src_adapter.iterdir():
+                if f.suffix == ".py":
+                    shutil.copy2(f, adapter_dir / f.name)
+        # 适配器运行时依赖：跟 adapter.py 平铺同目录才被 submodule_search_locations 发现
+        src_plugin = extract_dir / "miloco-plugin"
+        for dep in ("context_injection.py", "catalog.py", "paths.py", "tools_habit.py"):
+            dep_path = src_plugin / dep
+            if dep_path.exists():
+                shutil.copy2(dep_path, adapter_dir / dep)
 
     def _hermes_get_or_create_bearer(self, hermes_home: Path) -> str:
         import secrets
