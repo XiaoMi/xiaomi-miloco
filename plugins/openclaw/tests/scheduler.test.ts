@@ -100,4 +100,29 @@ describe("home-profile scheduler toggle", () => {
     expect(cron.calls.add).toBe(0);
     expect(cron.calls.remove).toBe(1);
   });
+
+  it("scheduler.enabled=false → 只删 managed，用户无 tag 任务原样保留", async () => {
+    writeFileSync(
+      path.join(tmpHome, "config.json"),
+      JSON.stringify({ scheduler: { enabled: false } }),
+    );
+    const { api, fireStart } = makeApi();
+    // 队列里混入用户在 openclaw 后台自建的无 tag 任务（一条带描述、一条无描述），
+    // 断言 teardown 的 tag 过滤只碰 managed，绝不误删用户任务。
+    const cron = makeCron([
+      { id: "user-1", name: "my-custom-cron", description: "用户自建，无 tag" },
+      { id: "user-2", name: "another-user-cron" },
+      {
+        id: "old-1",
+        name: "miloco-home-patrol",
+        description: "[miloco:home-profile] miloco-home-patrol",
+      },
+    ]);
+    registerHomeProfileScheduler(api);
+    await fireStart(cron.service);
+    expect(cron.calls.add).toBe(0);
+    expect(cron.calls.remove).toBe(1);
+    // 唯一被删的是 managed 任务；两条用户任务留存。
+    expect(cron.jobs.map((j) => j.id).sort()).toEqual(["user-1", "user-2"]);
+  });
 });
