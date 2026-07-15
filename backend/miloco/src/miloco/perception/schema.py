@@ -495,7 +495,10 @@ class MeaningfulEvent(BaseModel):
     )
     device_ids: list[str] = Field(
         default_factory=list,
-        description="参与本次推理的 device_id 列表(对齐实际可落盘 frames)",
+        description=(
+            "本次事件相关的 device_id 列表(对齐实际可落盘 frames)。有 rule/suggestion/asr "
+            "命中时收窄到其 source_device_ids,否则为参与本次推理的全部摄像头"
+        ),
     )
     rule_names: dict[str, str] = Field(
         default_factory=dict,

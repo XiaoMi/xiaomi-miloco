@@ -429,3 +429,94 @@ class TestPersistMeaningfulEvent:
         rows = dao.query()
         assert len(rows) == 1
         assert rows[0]["device_ids"] == ["cam_with_clip"]
+
+    async def test_device_ids_narrowed_to_rule_source(self, isolated_db, dao):
+        """规则只在玄关摄像头命中(source_device_ids=[玄关 did]),同批次里书房
+        摄像头也产出了 clip,但 device_ids 应只保留玄关,不带出书房画面;书房的
+        clip 也不应该被落盘,snapshot_count 应跟 device_ids 同步收窄。
+
+        复现 bug:日志页面规则提醒只绑玄关,却展示了书房的画面。
+        """
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="陌生人进入玄关",
+                    source_device_ids=["cam_entrance"],
+                )
+            ]
+        )
+        clips_by_device = {
+            "cam_entrance": _clip_payload(1),
+            "cam_study": _clip_payload(2),
+        }
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_entrance", "cam_study"],
+            artifacts=_artifacts(clips_by_device),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_entrance"]
+        assert rows[0]["snapshot_count"] == 1
+
+        from miloco.perception.snapshot_writer import get_snapshot_root
+
+        event_dir = get_snapshot_root() / rows[0]["id"]
+        assert (event_dir / "cam_entrance" / "clip.mp4").exists()
+        assert not (event_dir / "cam_study").exists()
+
+    async def test_device_ids_union_across_rules_and_asr(self, isolated_db, dao):
+        """同一行事件里规则命中书房、语音指令来自客厅(拾音白名单相机)→ device_ids
+        取两者并集,无关的卧室不落盘."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="x", source_device_ids=["cam_study"],
+                )
+            ],
+            speeches=[
+                Speech(
+                    needs_response=True, speaker="用户", content="开灯",
+                    is_complete=True, source_device_ids=["cam_living_01"],
+                )
+            ],
+        )
+        clips_by_device = {
+            "cam_study": _clip_payload(1),
+            "cam_living_01": _clip_payload(2),
+            "cam_bedroom": _clip_payload(3),
+        }
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_study", "cam_living_01", "cam_bedroom"],
+            artifacts=_artifacts(clips_by_device),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_study", "cam_living_01"]
+        assert rows[0]["snapshot_count"] == 2
+
+    async def test_device_ids_empty_when_source_has_no_clip(self, isolated_db, dao):
+        """规则命中的摄像头(cam_entrance)本身没有可用 clip,同批次里不相关的
+        cam_study 却有 clip——不应静默回退展示 cam_study,device_ids 该收窄为空."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="x", source_device_ids=["cam_entrance"],
+                )
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_study"],
+            artifacts=_artifacts({"cam_study": _clip_payload(1)}),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == []
+        assert rows[0]["snapshot_count"] == 0
