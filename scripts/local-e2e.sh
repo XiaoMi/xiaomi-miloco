@@ -538,6 +538,7 @@ main() {
             check_silent_except
             check_redundant_except
             check_vulture
+            check_ruff
             ;;
         *)
             check_shell_syntax
@@ -554,6 +555,7 @@ main() {
             check_silent_except
             check_redundant_except
             check_vulture
+            check_ruff
             run_tests
             check_pr_review_gate
             ;;
@@ -562,3 +564,22 @@ main() {
 }
 
 main "$@"
+
+# R17: ruff lint（对齐 CI lint job）
+check_ruff() {
+    _hdr "ruff lint"
+    if ! command -v uv &>/dev/null; then
+        _info "uv 未安装，跳过"
+        return
+    fi
+    local out
+    set +e
+    out=$(cd "$REPO_ROOT/backend" && uv run ruff check . 2>&1)
+    set -e
+    if [[ -z "$out" ]]; then
+        _ok "ruff 无问题"
+    else
+        echo "$out" | head -20
+        _err "ruff 发现问题"
+    fi
+}
