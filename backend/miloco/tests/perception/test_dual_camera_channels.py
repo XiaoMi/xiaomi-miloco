@@ -84,11 +84,16 @@ def test_select_active_caps_by_stream_count(monkeypatch):
         "c2": _cam("c2"),  # 单摄 = 1 路 → 累计 3，正好到顶
         "c3": _cam("c3"),  # 第 4 路 → 超限，被截断
     }
-    # 按流路数：c1(2)+c2(1)=3 ≤ 3，c3 会让总数到 4 → 排除。
-    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1", "c2"]
-    # cap=False（列全集语义）不受上限影响。
+    # 全拆后返回合成 did、cap 按启用通道数：c1 双摄两路 + c2 = 3 ≤ 3，c3(第 4 路)超限截断。
+    assert miot_filter.select_active_camera_dids(kv, cameras) == [
+        "c1:ch0",
+        "c1:ch1",
+        "c2",
+    ]
+    # cap=False（列全集语义）不受上限影响：全部合成 did。
     assert set(miot_filter.select_active_camera_dids(kv, cameras, cap=False)) == {
-        "c1",
+        "c1:ch0",
+        "c1:ch1",
         "c2",
         "c3",
     }
@@ -311,3 +316,120 @@ def test_filter_voice_enabled_keys_by_physical_did(monkeypatch):
 
     # 双摄两路放行（物理 "dual" 已授权），未授权相机的语音丢弃。
     assert {s.source_device_ids[0] for s in kept} == {"dual:ch0", "dual:ch1"}
+
+
+# ── 全拆 P0：黑名单 per-channel 读（OR 容错）+ 通道展开 ──────────────────────────
+
+
+def test_channel_denied_read_or_tolerant():
+    # 裸物理 did = 两路全关（兼容全拆上线前旧条目）
+    assert miot_filter.is_camera_channel_denied({"dual"}, "dual", 0, 2)
+    assert miot_filter.is_camera_channel_denied({"dual"}, "dual", 1, 2)
+    # 合成 did = 精确到某路
+    assert miot_filter.is_camera_channel_denied({"dual:ch1"}, "dual", 1, 2)
+    assert not miot_filter.is_camera_channel_denied({"dual:ch1"}, "dual", 0, 2)
+    # 单摄按裸 did 本身
+    assert miot_filter.is_camera_channel_denied({"solo"}, "solo", 0, 1)
+    assert not miot_filter.is_camera_channel_denied(set(), "solo", 0, 1)
+
+
+def test_denied_channels_of_expands_bare():
+    assert miot_filter.denied_channels_of({"dual"}, "dual", 2) == {0, 1}
+    assert miot_filter.denied_channels_of({"dual:ch1"}, "dual", 2) == {1}
+    assert miot_filter.denied_channels_of(set(), "dual", 2) == set()
+
+
+# ── 全拆 P0：黑名单写=按 did 整台重算+覆盖（D3 写）──────────────────────────────
+
+
+def test_write_migrates_bare_to_per_channel_on_open_ch0():
+    """存量裸 dual(两路全关)；开 ch0 → 迁成只剩 cam:ch1（裸条目被清、逐路化）。"""
+    kv = _FakeKV({ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["dual"])})
+    miot_filter.set_cameras_channels_in_use(kv, {"dual": {0: True}}, {"dual": 2})
+    assert miot_filter.denied_camera_dids(kv) == {"dual:ch1"}
+
+
+def test_write_overwrite_cleans_stray():
+    """裸 dual + 杂散 dual:ch0 并存；开 ch0 → 整台重算清掉裸+stray，只留 dual:ch1；无关项保留。"""
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(
+                ["dual", "dual:ch0", "other"]
+            )
+        }
+    )
+    miot_filter.set_cameras_channels_in_use(kv, {"dual": {0: True}}, {"dual": 2})
+    assert miot_filter.denied_camera_dids(kv) == {"dual:ch1", "other"}
+
+
+def test_write_single_camera_stays_bare():
+    kv = _FakeKV()
+    miot_filter.set_cameras_channels_in_use(kv, {"solo": {0: False}}, {"solo": 1})
+    assert miot_filter.denied_camera_dids(kv) == {"solo"}  # 单摄禁用 = 裸 did
+
+
+def test_write_never_writes_bare_multichannel():
+    """双摄两路都关 → 写两条 :chN，不回退裸 did。"""
+    kv = _FakeKV()
+    miot_filter.set_cameras_channels_in_use(
+        kv, {"dual": {0: False, 1: False}}, {"dual": 2}
+    )
+    assert miot_filter.denied_camera_dids(kv) == {"dual:ch0", "dual:ch1"}
+
+
+def test_write_changed_flag_is_set_based_not_ordered():
+    """changed 按**集合**判，非有序列表：黑名单里有「排在受影响 did 之后的无关项」时，
+    语义无变化的 toggle（开一条本就开着的通道）整台重算会把该 did 条目挪到末尾——集合没变、
+    列表序变了，必须仍返回 changed=False，否则白触发一轮 refresh/会话收敛。"""
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["dual:ch1", "other"])}
+    )
+    # no-op：开已开的 ch0（不在禁用集）→ 禁用集仍 {dual:ch1}，纯重排 → changed=False。
+    _, changed = miot_filter.set_cameras_channels_in_use(
+        kv, {"dual": {0: True}}, {"dual": 2}
+    )
+    assert changed is False
+    assert miot_filter.denied_camera_dids(kv) == {"dual:ch1", "other"}
+    # 真变化：关 ch0 → 集合新增 dual:ch0 → changed=True。
+    _, changed2 = miot_filter.set_cameras_channels_in_use(
+        kv, {"dual": {0: False}}, {"dual": 2}
+    )
+    assert changed2 is True
+    assert miot_filter.denied_camera_dids(kv) == {"dual:ch0", "dual:ch1", "other"}
+
+
+# ── 全拆 P0：select_active 里 per-lens awake + per-channel 黑名单收敛 ────────────
+
+
+def test_select_active_per_lens_awake_gate():
+    """球机(ch0)镜头关、枪机(ch1)开 → 只 ch1 进活跃集。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {"dual": _cam("dual", channel_count=2)}
+    awake = {"dual": {0: False, 1: True}}
+    assert miot_filter.select_active_camera_dids(
+        kv, cameras, awake_map=awake
+    ) == ["dual:ch1"]
+
+
+def test_select_active_per_channel_denied():
+    """单独拉黑 ch0 → 只 ch1 活跃。"""
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+            ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["dual:ch0"]),
+        }
+    )
+    cameras = {"dual": _cam("dual", channel_count=2)}
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["dual:ch1"]
+
+
+def test_select_active_bare_denied_kills_both():
+    """旧裸条目 dual = 两路全关 → 活跃集为空（兼容读）。"""
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+            ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["dual"]),
+        }
+    )
+    cameras = {"dual": _cam("dual", channel_count=2)}
+    assert miot_filter.select_active_camera_dids(kv, cameras) == []

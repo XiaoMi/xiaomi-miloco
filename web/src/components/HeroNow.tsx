@@ -20,6 +20,12 @@ import { useId, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "./Toast";
 import { switchBlockedReasonKey } from "@/lib/cameraSwitch";
+import {
+  channelHasMic,
+  feedDid as synthFeedDid,
+  lensLabelKey,
+  multiChannelDidSet,
+} from "@/lib/cameraChannel";
 import { IconRefresh } from "@/lib/icons";
 
 // 「关声音」确认弹窗的「不再提醒」持久化标记（与 web:theme / web:lang 同命名空间）。
@@ -78,21 +84,6 @@ function sortPersons(ps: Person[]): Person[] {
 // 把「一台相机的若干通道行」按物理 did 聚成一组(单摄一条、双摄两条),保持传入顺序
 // (调用方已按 did、channel 排序)。方案 A:启停按整台走,故分组后每组只出一套开关,
 // 画面 / 状态仍按通道逐条展示。每组即一台相机的若干通道行。
-function groupByDid(cams: ScopeCamera[]): ScopeCamera[][] {
-  const groups: ScopeCamera[][] = [];
-  const byDid = new Map<string, ScopeCamera[]>();
-  for (const c of cams) {
-    let g = byDid.get(c.did);
-    if (!g) {
-      g = [];
-      byDid.set(c.did, g);
-      groups.push(g); // 首次见到该 did 时定位次序,同 did 后续通道追加进同组
-    }
-    g.push(c);
-  }
-  return groups;
-}
-
 export function HeroNow({
   persons,
   scopeCameras,
@@ -241,27 +232,23 @@ function CameraSection({
     }
   };
   const total = scopeCameras.length;
-  // 出现多于一条记录的物理 did = 多通道相机；这些相机的每张卡 / 每行才拼「通道 N」
-  // 标签，好让同名同房间的两条彼此区分（单通道相机不显示，免噪声）。
-  const multiChannelDids = useMemo(() => {
-    const count = new Map<string, number>();
-    for (const c of scopeCameras) count.set(c.did, (count.get(c.did) ?? 0) + 1);
-    return new Set(
-      [...count.entries()].filter(([, n]) => n > 1).map(([did]) => did),
-    );
-  }, [scopeCameras]);
-  const channelLabelOf = (c: ScopeCamera): string | undefined =>
-    multiChannelDids.has(c.did)
-      ? t("hero.channelLabel", { n: c.channel })
-      : undefined;
-  // 方案 A:上 / 下区都按物理 did 分组后再渲染——每组一台相机、一套开关,画面 / 状态
-  // 仍逐通道展示。分组保持既有 (did, channel) 排序,故整台内通道顺序稳定、卡的 key
-  // (物理 did)在 toggle 时不变,React 复用其 iframe,不会连带断掉其它相机的流。
-  const streamingGroups = useMemo(
-    () => groupByDid(streamingCams),
-    [streamingCams],
+  // 出现多于一条记录的物理 did = 多通道相机；这些相机每卡/每行才拼镜头标签，好让同名
+  // 同房间的两条彼此区分（单通道不显示，免噪声）。逻辑收在 @/lib/cameraChannel（可单测）。
+  const multiChannelDids = useMemo(
+    () => multiChannelDidSet(scopeCameras),
+    [scopeCameras],
   );
-  const benchGroups = useMemo(() => groupByDid(benchCams), [benchCams]);
+  // 每路显镜头名（ch0=移动画面 / ch1=固定画面；ch≥2 兜底「通道 N」）；单摄不显示。
+  const channelLabelOf = (c: ScopeCamera): string | undefined => {
+    if (!multiChannelDids.has(c.did)) return undefined;
+    const key = lensLabelKey(c.channel);
+    return key ? t(key) : t("hero.channelLabel", { n: c.channel });
+  };
+  // 全拆:每路逐通道渲染、各控自己那路。投喂开关目标 = 该路合成 did(多摄 `did:ch{n}`、单摄
+  // 裸 did);拾音是相机级(mic 只在球机/ch0)、按物理 did。
+  const feedDidOf = (c: ScopeCamera): string =>
+    synthFeedDid(c.did, c.channel, multiChannelDids.has(c.did));
+  const hasMic = (c: ScopeCamera): boolean => channelHasMic(c.channel);
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;
   const allOff = activeCount === 0;
@@ -269,17 +256,11 @@ function CameraSection({
   // 上限校验同口径——后端也数「可用集」(离线/局域网不可达/镜头关的不占名额)。所以
   // 面板显示的名额 = 后端认的名额,不会出现「看着有位、点开启却被后端拒」。
   const atCapacity = activeCount >= maxStreamCams;
-  // 「全开」只能开「可用且未投喂」的——不可用相机(云端离线/局域网不可达/镜头关)后端
-  // toggle_camera 会整批拒绝,若把它们塞进批量 enable,会连带可用的一起失败。
-  // 与下区单台开关「不可用不可开」同口径(cameraAvailable)。
-  // 去重物理 did：多通道相机有多条记录（同 did），启停按整台走，别把同一 did 塞进批量两次。
-  const enableableDids = [
-    ...new Set(
-      scopeCameras
-        .filter((c) => !c.inUse && cameraAvailable(c))
-        .map((c) => c.did),
-    ),
-  ];
+  // 「全开」只能开「可用且未投喂」的**通道**——不可用(云端离线/局域网不可达/该路镜头关)
+  // 后端 toggle_camera 会整批拒绝。全拆按通道走：每路一个合成 did，各自独立(不去重物理 did)。
+  const enableableDids = scopeCameras
+    .filter((c) => !c.inUse && cameraAvailable(c))
+    .map(feedDidOf);
   // bulkBusy 锁防"全开/全关"连点;singleBusyDids 跟踪单卡 in-flight,让住户切单卡 A
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -369,11 +350,7 @@ function CameraSection({
               type="button"
               onClick={() =>
                 runBulk(
-                  [
-                    ...new Set(
-                      scopeCameras.filter((c) => c.inUse).map((c) => c.did),
-                    ),
-                  ],
+                  scopeCameras.filter((c) => c.inUse).map(feedDidOf),
                   false,
                 )
               }
@@ -405,27 +382,27 @@ function CameraSection({
           {/* 上区:最多 4 路「带实时流」的相机,按物理 did 分组——每台一张卡(卡内每通道
               一个小窗),整台一套开关。卡 key=物理 did,稳定排序,toggle 某台时其余卡
               key+位置不变，React 复用其 iframe，不会连带把其它台的流断开重连。 */}
-          {streamingGroups.length > 0 ? (
+          {streamingCams.length > 0 ? (
             <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1">
-              {streamingGroups.map((group) => {
-                const cam = group[0]; // 相机级字段(name/roomName/inUse/voiceInUse 同 did 各通道一致)
+              {streamingCams.map((c) => {
+                const feedDid = feedDidOf(c);
                 return (
                   <CamCardWithToggle
-                    key={cam.did}
-                    channels={group}
-                    channelLabelOf={channelLabelOf}
-                    bulkBusy={bulkBusy || singleBusyDids.has(cam.did)}
-                    onToggle={(v) => runSingle(cam.did, v)}
-                    // 相机开关 in-flight 时拾音开关也置灰:关相机的 PUT 落库后拾音 PUT 会被
-                    // 后端「感知已关闭」拒掉,别让住户在窗口期点出个报错 toast。
+                    key={feedDid}
+                    cam={c}
+                    channelLabel={channelLabelOf(c)}
+                    // 拾音只在有 mic 的通道(球机/ch0)显示;枪机(ch1)永久无音频不给开关。
+                    showVoice={hasMic(c)}
+                    bulkBusy={bulkBusy || singleBusyDids.has(feedDid)}
+                    onToggle={(v) => runSingle(feedDid, v)}
+                    // 投喂开关 in-flight(按该路合成 did)时拾音也置灰,防交叠竞态。拾音是
+                    // 相机级,按物理 did 跟踪。
                     voiceBusy={
-                      voiceBusyDids.has(cam.did) ||
+                      voiceBusyDids.has(c.did) ||
                       bulkBusy ||
-                      singleBusyDids.has(cam.did)
+                      singleBusyDids.has(feedDid)
                     }
-                    onToggleVoice={(v) =>
-                      requestVoiceToggle(cam.did, cam.name, v)
-                    }
+                    onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
                   />
                 );
               })}
@@ -465,40 +442,33 @@ function CameraSection({
                 )}
               </div>
               <ul className="rounded-xl bg-bg-secondary border border-border divide-y divide-border overflow-hidden">
-                {benchGroups.map((group) => {
-                  const cam = group[0]; // 相机级字段(name/roomName/inUse/voiceInUse)
-                  // blockedReasonKey 取相机级可用性:镜头 OR 语义——任一路没关=整台没关
-                  // (awake 各通道可能不同);cloudOnline/lanReachable 相机级、各通道一致。
-                  // 相机级镜头态:任一路没关(on 或未知)= 整台没关;全 false = 整台关。
-                  // 不用三态——null 在此与 true 等价(switchBlockedReasonKey 只对 false 拦),
-                  // 且「全 null」也会被 !==false 归到 true,故 null 分支不可达,直接布尔。
-                  const groupAwake = group.some((c) => c.awake !== false);
+                {benchCams.map((c) => {
+                  const feedDid = feedDidOf(c);
                   return (
                     <BenchCamItem
-                      key={cam.did}
-                      channels={group}
-                      channelLabelOf={channelLabelOf}
-                      // 瞬态忙才原生禁用;语义不可开(离线 / 镜头关 / 局域网不可达 / 满额)走
+                      key={feedDid}
+                      cam={c}
+                      channelLabel={channelLabelOf(c)}
+                      showVoice={hasMic(c)}
+                      // 瞬态忙才原生禁用;语义不可开(离线 / 该路镜头关 / 局域网不可达 / 满额)走
                       // blockedReasonKey——置灰但可点,点击 toast、桌面悬停气泡说明原因。
-                      busy={bulkBusy || singleBusyDids.has(cam.did)}
+                      // awake 用**该路**的 per-lens 值(全拆后每行一路,不再整台 OR)。
+                      busy={bulkBusy || singleBusyDids.has(feedDid)}
                       blockedReasonKey={switchBlockedReasonKey(
                         {
-                          cloudOnline: cam.cloudOnline,
-                          lanReachable: cam.lanReachable,
-                          awake: groupAwake,
+                          cloudOnline: c.cloudOnline,
+                          lanReachable: c.lanReachable,
+                          awake: c.awake,
                         },
-                        { inUse: cam.inUse, atCapacity },
+                        { inUse: c.inUse, atCapacity },
                       )}
-                      onToggle={(v) => runSingle(cam.did, v)}
-                      // 同上区卡:相机开关 in-flight 时拾音开关一并置灰,防交叠竞态。
+                      onToggle={(v) => runSingle(feedDid, v)}
                       voiceBusy={
-                        voiceBusyDids.has(cam.did) ||
+                        voiceBusyDids.has(c.did) ||
                         bulkBusy ||
-                        singleBusyDids.has(cam.did)
+                        singleBusyDids.has(feedDid)
                       }
-                      onToggleVoice={(v) =>
-                        requestVoiceToggle(cam.did, cam.name, v)
-                      }
+                      onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
                     />
                   );
                 })}
@@ -756,52 +726,56 @@ function MicIcon({ muted }: { muted: boolean }) {
 }
 
 interface CamCardProps {
-  /** 同一台相机的若干通道行(单摄一条、双摄两条);相机级字段取 channels[0]。 */
-  channels: ScopeCamera[];
-  /** 取某通道的「通道 N」标签;单通道相机返回 undefined（不显示）。 */
-  channelLabelOf: (c: ScopeCamera) => string | undefined;
+  /** 一路通道(全拆后每路一张卡)。 */
+  cam: ScopeCamera;
+  /** 「通道 N」标签;单摄 undefined（不显示）。 */
+  channelLabel?: string;
+  /** 是否显示拾音开关——只有 mic 的通道(球机/ch0)给,枪机(ch1)永久无音频不给。 */
+  showVoice: boolean;
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
-  /** 拾音开关置灰条件:拾音 PUT 或相机开关 PUT 本卡 in-flight（防两个 PUT 交叠竞态） */
+  /** 拾音开关置灰条件:拾音 PUT 或本路投喂 PUT in-flight（防两个 PUT 交叠竞态） */
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
-// 方案 A:一台相机一张卡,卡内每通道一个小窗（多摄竖向堆叠 + 各窗通道标签,单摄一个
-// 满宽窗、无标签,与分组前一模一样）,整台只一套投喂 / 拾音开关（相机级,绑物理 did）。
+// 全拆:每路一张卡(一个画面 + 该路自己的投喂开关);多摄名字/画面角标「通道 N」区分镜头,
+// 拾音只在有 mic 的通道显示。房间贴名字(相机级)。
 function CamCardWithToggle({
-  channels,
-  channelLabelOf,
+  cam,
+  channelLabel,
+  showVoice,
   bulkBusy,
   onToggle,
   voiceBusy,
   onToggleVoice,
 }: CamCardProps) {
-  const cam = channels[0]; // 相机级字段(name/roomName/inUse/voiceInUse 各通道一致)
-  const multi = channels.length > 1;
-  // 单/多摄统一:卡头(名字 + 房间 + 开关)在画面**之外**,画面在下。开关整台一套、绑
-  // 物理 did。单摄一个窗、无通道标签;多摄每路一个窗、左上角标「通道 N」区分镜头。
-  // 房间只放卡头(窗内不重复);相机名 caption 在 connected 卡里本就不显示,故无冗余。
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
-      <div className="flex items-center justify-between gap-2 mb-1.5">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-body truncate text-text-primary">{cam.name}</span>
-          {cam.roomName && (
-            <span className="shrink-0 text-caption text-text-tertiary border border-border rounded px-1.5 py-0.5 leading-none">
-              {cam.roomName}
-            </span>
+      <div className="relative">
+        <LivePlayerPlaceholder
+          cameraName={cam.name}
+          roomName={cam.roomName}
+          cameraDid={cam.did}
+          channel={cam.channel}
+        />
+        {/* 画面左上角标相机名(单/多摄一致都显示);多摄再后缀镜头标签(移动/固定画面)区分同台两路。 */}
+        <span className="absolute top-2 left-2 max-w-[calc(100%-1rem)] truncate px-1.5 py-0.5 rounded-md bg-black/50 text-white text-caption pointer-events-none z-10">
+          {channelLabel ? `${cam.name} · ${channelLabel}` : cam.name}
+        </span>
+        {/* 全拆后每路一个独立开关 → 拾音 + 投喂开关回到画面内右上角(不再放画面外的卡头)。
+            拾音仅有 mic 的通道(球机/ch0)显示。 */}
+        <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          {showVoice && (
+            <VoiceSwitch
+              on={cam.inUse && cam.voiceInUse}
+              name={cam.name}
+              disabled={!cam.inUse || voiceBusy}
+              onToggle={onToggleVoice}
+            />
           )}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <VoiceSwitch
-            on={cam.inUse && cam.voiceInUse}
-            name={cam.name}
-            disabled={!cam.inUse || voiceBusy}
-            onToggle={onToggleVoice}
-          />
           <CamSwitch
             inUse={cam.inUse}
             name={cam.name}
@@ -810,108 +784,79 @@ function CamCardWithToggle({
           />
         </div>
       </div>
-      <div className={multi ? "flex flex-col gap-2" : ""}>
-        {channels.map((ch) => (
-          <div key={ch.channel} className="relative">
-            <LivePlayerPlaceholder
-              cameraName={multi ? `${cam.name} · ${channelLabelOf(ch)}` : cam.name}
-              cameraDid={ch.did}
-              channel={ch.channel}
-            />
-            {multi && channelLabelOf(ch) && (
-              <span className="absolute top-2 left-2 px-1.5 py-0.5 rounded-md bg-black/50 text-white text-caption pointer-events-none z-10">
-                {channelLabelOf(ch)}
-              </span>
-            )}
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
 
 /** 下区横条行（日志页风格）：摄像头信息 + 拾音/投喂开关，无小窗。投喂 on → 升入上区。
- *  方案 A:一台相机一行,整台一套开关(相机级,绑物理 did)。单摄=一条扁平行(名字 + 房间
- *  + 一行三态灯 + 一套开关,无通道标签、无子行,与分组前一模一样);多摄=头部(名字 + 房间
- *  + 一套开关)下每通道一子行(通道标签 + 该通道自己的三态灯)。 */
+ *  全拆:每路一行、各控自己那路。行内 名字(+通道标签+房间) + 该路三态灯 + 该路投喂开关;
+ *  拾音只在有 mic 的通道显示。 */
 function BenchCamItem({
-  channels,
-  channelLabelOf,
+  cam,
+  channelLabel,
+  showVoice,
   busy,
   blockedReasonKey,
   onToggle,
   voiceBusy,
   onToggleVoice,
 }: {
-  channels: ScopeCamera[];
-  channelLabelOf: (c: ScopeCamera) => string | undefined;
+  cam: ScopeCamera;
+  channelLabel?: string;
+  showVoice: boolean;
   busy: boolean;
   blockedReasonKey?: string;
   onToggle: (next: boolean) => void;
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
 }) {
-  const cam = channels[0]; // 相机级字段(name/roomName/inUse/voiceInUse)
-  const multi = channels.length > 1;
-  // 名字淡化口径:单摄按该条可用性;多摄按「任一通道可用」——只要有一路能投喂,整台
-  // 就不该淡成不可点(与 blockedReasonKey 的镜头 OR 语义呼应)。
-  const available = multi
-    ? channels.some((c) => cameraAvailable(c))
-    : cameraAvailable(cam);
+  const available = cameraAvailable(cam);
   return (
-    <li className="px-4 py-3 hover:bg-bg-tertiary transition-colors">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          {/* 设备名 + 房间 badge 同一行(相机级):房间是设备固有属性,贴设备名比贴状态灯
-              更统一;不可用相机名字淡化,跟开关呼应——不可用就别让住户以为点一下能投喂。 */}
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span
-              className={`text-body truncate ${
-                available ? "text-text-primary" : "text-text-tertiary"
-              }`}
-            >
-              {cam.name}
+    <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
+      <div className="min-w-0">
+        {/* 名字 + 通道标签 + 房间 badge 同一行;不可用(该路镜头关/离线/不可达)名字淡化,
+            跟开关呼应——不可用就别让住户以为点一下能投喂。 */}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span
+            className={`text-body truncate ${
+              available ? "text-text-primary" : "text-text-tertiary"
+            }`}
+          >
+            {cam.name}
+          </span>
+          {channelLabel && (
+            <span className="shrink-0 text-caption text-text-tertiary">
+              {channelLabel}
             </span>
-            {cam.roomName && (
-              <span className="shrink-0 text-caption text-text-tertiary border border-border rounded px-1.5 py-0.5 leading-none">
-                {cam.roomName}
-              </span>
-            )}
-          </div>
-          {/* 单摄:名字下直接一行三态灯(无通道标签、无子行嵌套)。 */}
-          {!multi && <ChannelStateDots cam={cam} />}
+          )}
+          {cam.roomName && (
+            <span className="shrink-0 text-caption text-text-tertiary border border-border rounded px-1.5 py-0.5 leading-none">
+              {cam.roomName}
+            </span>
+          )}
         </div>
-        {/* 拾音 + 投喂两个开关(整台一套,绑物理 did)。拾音从属于感知:相机未启用
-            (inUse=false)时置灰、显示为关。 */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* 该路自己的三态灯（各路镜头 / 连通可能不同）。 */}
+        <ChannelStateDots cam={cam} />
+      </div>
+      {/* 拾音 + 投喂开关(各控本路;拾音相机级、仅有 mic 的通道显示)。拾音从属于感知:
+          相机未启用(inUse=false)时置灰、显示为关。 */}
+      <div className="flex items-center gap-2 shrink-0">
+        {showVoice && (
           <VoiceSwitch
             on={cam.inUse && cam.voiceInUse}
             name={cam.name}
             disabled={!cam.inUse || voiceBusy}
             onToggle={onToggleVoice}
           />
-          <CamSwitch
-            inUse={cam.inUse}
-            name={cam.name}
-            busy={busy}
-            blockedReasonKey={blockedReasonKey}
-            onToggle={onToggle}
-          />
-        </div>
+        )}
+        <CamSwitch
+          inUse={cam.inUse}
+          name={cam.name}
+          busy={busy}
+          blockedReasonKey={blockedReasonKey}
+          onToggle={onToggle}
+        />
       </div>
-      {/* 多摄:头部下每通道一子行——通道标签 + 该通道自己的三态灯(各路镜头 / 连通可能不同)。 */}
-      {multi && (
-        <div className="mt-2 flex flex-col gap-1.5 pl-3 border-l border-border">
-          {channels.map((ch) => (
-            <div key={ch.channel}>
-              <span className="text-caption text-text-tertiary">
-                {channelLabelOf(ch)}
-              </span>
-              <ChannelStateDots cam={ch} />
-            </div>
-          ))}
-        </div>
-      )}
     </li>
   );
 }

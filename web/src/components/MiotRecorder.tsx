@@ -24,17 +24,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PerceptionCamera } from "@/lib/types";
 import { authHeaders } from "@/api/register";
-
 // 感知层用合成 did（多通道相机 cam:ch{n}）；后端 watch / record_clip 按**物理 did +
-// 通道号**走（SDK 会话按物理 did 建），故发请求前把合成 did 拆回。裸 did 原样返回、channel 0。
-function splitChannelDid(did: string): { physicalDid: string; channel: number } {
-  const i = did.lastIndexOf(":ch");
-  if (i < 0) return { physicalDid: did, channel: 0 };
-  const ch = Number(did.slice(i + 3));
-  return Number.isFinite(ch)
-    ? { physicalDid: did.slice(0, i), channel: ch }
-    : { physicalDid: did, channel: 0 };
-}
+// 通道号**走（SDK 会话按物理 did 建），故发请求前把合成 did 拆回。工具收在 @/lib/cameraChannel。
+import {
+  lensLabelKey,
+  multiChannelDidSet,
+  splitChannelDid,
+} from "@/lib/cameraChannel";
 
 interface Props {
   cameras: PerceptionCamera[];
@@ -64,15 +60,15 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [iframeReady, setIframeReady] = useState(false);
 
-  // 出现多于一条记录的物理 did = 多通道相机；下拉框才给它们拼「通道N」区分同名两条。
-  const multiChannelDids = useMemo(() => {
-    const count = new Map<string, number>();
-    for (const c of cameras) {
-      const p = splitChannelDid(c.did).physicalDid;
-      count.set(p, (count.get(p) ?? 0) + 1);
-    }
-    return new Set([...count].filter(([, n]) => n > 1).map(([p]) => p));
-  }, [cameras]);
+  // 出现多于一条记录的物理 did = 多通道相机；下拉框才给它们拼镜头标签区分同名两条。
+  // cameras 是合成 did，先拆成物理 did 再统计。
+  const multiChannelDids = useMemo(
+    () =>
+      multiChannelDidSet(
+        cameras.map((c) => ({ did: splitChannelDid(c.did).physicalDid })),
+      ),
+    [cameras],
+  );
 
   // 选中的是合成 did；发请求时拆成物理 did + 真通道号(后端 watch/record 按此)。
   const { physicalDid, channel } = splitChannelDid(selectedDid);
@@ -199,8 +195,10 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
               >
                 {cameras.map((c) => {
                   const { physicalDid: p, channel: ch } = splitChannelDid(c.did);
+                  // 镜头名(ch0=移动画面 / ch1=固定画面);ch≥2 兜底「通道 N」。单摄不拼。
+                  const key = lensLabelKey(ch);
                   const chLabel = multiChannelDids.has(p)
-                    ? ` · ${t("hero.channelLabel", { n: ch })}`
+                    ? ` · ${key ? t(key) : t("hero.channelLabel", { n: ch })}`
                     : "";
                   return (
                     <option key={c.did} value={c.did}>

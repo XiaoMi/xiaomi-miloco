@@ -177,27 +177,21 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             cap=cap,
             awake_map=getattr(self._miot_proxy, "_camera_awake_cache", None),
         )
+        # ``select_active_camera_dids`` 已按通道展开、返回**合成 did**（单摄裸 did、多摄
+        # ``{did}:ch{n}``），并已做过 per-channel 黑名单 / per-lens 镜头门 / 上限截断。这里
+        # 只需按合成 did 建 PerceptionDevice;相机元数据按物理 did 从 cams 取。
         result: dict[str, PerceptionDevice] = {}
-        for did in active:
-            camera_info = CameraInfo.model_validate(cams[did].model_dump())
-            online = camera_info.online and camera_info.lan_online
-            # 多通道相机（双摄等）：每条通道展成独立感知单元，合成 did = ``did:ch{n}``。
-            # 单通道保留裸 did（零回归）。相机名不带通道标签，通道标签是前端关注点。
-            channel_count = camera_info.channel_count or 1
-            channel_dids = (
-                [f"{did}{_CHANNEL_SEP}{ch}" for ch in range(channel_count)]
-                if channel_count > 1
-                else [did]
+        for syn_did in active:
+            physical_did, _ = split_channel_did(syn_did)
+            camera_info = CameraInfo.model_validate(cams[physical_did].model_dump())
+            result[syn_did] = PerceptionDevice(
+                did=syn_did,
+                name=camera_info.name,
+                device_type="camera",
+                room_id=camera_info.room_name,
+                room_name=camera_info.room_name,
+                online=camera_info.online and camera_info.lan_online,
             )
-            for channel_did in channel_dids:
-                result[channel_did] = PerceptionDevice(
-                    did=channel_did,
-                    name=camera_info.name,
-                    device_type="camera",
-                    room_id=camera_info.room_name,
-                    room_name=camera_info.room_name,
-                    online=online,
-                )
         return result
 
     async def sync_devices(self, all_devices: dict | None = None) -> None:
