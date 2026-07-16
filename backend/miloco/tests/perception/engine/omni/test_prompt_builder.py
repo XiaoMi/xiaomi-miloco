@@ -558,6 +558,66 @@ class TestFusedAudioRoute:
         assert "input_audio" not in types
 
 
+class TestFusedPetRefs:
+    """P2：has_pets 时 fused 主 user content 注入已登记宠物参考图块。"""
+
+    _JPEG = b"\xff\xd8\xff" + b"\x00" * 300
+
+    def test_pet_refs_injected_when_has_pets(self, tmp_path, monkeypatch):
+        from miloco.perception.engine.identity.pet_library import PetLibrary
+        from miloco.perception.engine.omni import pet_refs
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        lib = PetLibrary(root_dir=tmp_path)
+        p = lib.create(name="小黑", species="猫")
+        lib.set_reference_crops(p.id, [self._JPEG], scores=[1.0])
+        monkeypatch.setattr(pet_refs, "_cache", {"sig": None, "content": []})
+        monkeypatch.setattr(
+            "miloco.perception.engine.identity.pet_library.get_pet_library", lambda: lib
+        )
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.home_profile_has_pets",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            lambda: "",
+        )
+        fused = build_fused_payload(
+            packets=[_video_route_packet()],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+        )
+        blocks = _multimodal_user_content(fused["messages"])
+        texts = [b["text"] for b in blocks if b["type"] == "text"]
+        assert any("<pets>" in t for t in texts)
+        assert any("【小黑】" in t for t in texts)
+        assert any(b["type"] == "image_url" for b in blocks)  # 宠物参考图注入
+
+    def test_pet_refs_absent_when_no_pets_flag(self, monkeypatch):
+        from miloco.perception.engine.omni import pet_refs
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        monkeypatch.setattr(pet_refs, "_cache", {"sig": None, "content": []})
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.home_profile_has_pets",
+            lambda: False,
+        )
+        fused = build_fused_payload(
+            packets=[_video_route_packet()],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+        )
+        texts = [
+            b["text"]
+            for b in _multimodal_user_content(fused["messages"])
+            if b["type"] == "text"
+        ]
+        assert not any("<pets>" in t for t in texts)
+
+
 class TestMultimodalSanityCheck:
     """防 omni 服务端 400 Multimodal data corrupted: 非空但 size 异常小的 bytes
     入 payload 兜底过滤。"""

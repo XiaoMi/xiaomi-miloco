@@ -53,6 +53,7 @@ from .constants import (
 )
 from .field_registry import SceneDescriptor, render_field_spec, render_schema
 from .home_profile_loader import get_home_profile_prefix, home_profile_has_pets
+from .pet_refs import build_pet_reference_content
 
 RouteType = Literal["video", "audio"]
 
@@ -88,6 +89,11 @@ class FusedPromptConfig:
     # 单人 body+face composite 占约 20-40KB jpeg ≈ 60-120KB base64 ≈ 15-30K tokens；
     # >10 人 prompt 容易超出 omni token 预算，需在配置或上游 gallery_snapshot 处控制。
     max_gallery_persons: int = 10
+    # 宠物参考图上限（P2 / C-D1）：最多注入几只宠物（每只带其已存的 ≤3 张多姿态参考图）。
+    # 家庭多 1-3 只覆盖 99%，仿人 gallery 上限保护；仅 has_pets（video route）时注入。
+    # ⚠️ token 预算：最坏 max_pet_refs×3 张 crop（3×3=9 张），每张 ~数 KB base64；上线前须按 A5
+    # 实测 prompt token/延迟涨幅（决策 C-D4），必要时下调本值或改每只只注入 top-scored 1-2 张。
+    max_pet_refs: int = 3
 
 
 # =============================================================================
@@ -266,6 +272,7 @@ def build_fused_payload(
         video_fps=fps,
         cfg=cfg,
         label_lookup=label_lookup,
+        has_pets=scene.has_pets,  # 复用 scene 已算好的 has_pets，避免注入点再读一次 profile.md
     )
 
     messages = _assemble_fused_messages(
@@ -560,6 +567,7 @@ def _build_fused_user_content(
     video_fps: int,
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
+    has_pets: bool = False,
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
 
@@ -676,6 +684,11 @@ def _build_fused_user_content(
 
     # 4. gallery（候选成员参考图，紧邻 video 便于视觉比对）
     content.extend(gallery_content)
+
+    # 4.5. 已登记宠物多姿态参考图（P2）——仅 has_pets 时注入（用上游 scene 已算好的值，不重读盘）；
+    # 读盘/编码失败或无图则空，退化为纯文字（PET_NAMING_SPEC + 档案「## 宠物」段仍在，不阻断识别）。
+    if has_pets:
+        content.extend(build_pet_reference_content(max_pets=cfg.max_pet_refs))
 
     # 5. 主 video
     # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短
