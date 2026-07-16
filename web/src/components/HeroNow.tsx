@@ -24,7 +24,6 @@ import {
   channelHasMic,
   feedDid as synthFeedDid,
   lensLabelKey,
-  multiChannelDidSet,
 } from "@/lib/cameraChannel";
 import { IconRefresh } from "@/lib/icons";
 
@@ -234,20 +233,18 @@ function CameraSection({
   const total = scopeCameras.length;
   // 出现多于一条记录的物理 did = 多通道相机；这些相机每卡/每行才拼镜头标签，好让同名
   // 同房间的两条彼此区分（单通道不显示，免噪声）。逻辑收在 @/lib/cameraChannel（可单测）。
-  const multiChannelDids = useMemo(
-    () => multiChannelDidSet(scopeCameras),
-    [scopeCameras],
-  );
+  // 多通道判据用后端权威信号 channelCount>1（与 backend/CLI 同口径），不用「同 did 出现几行」代理。
+  const isMulti = (c: ScopeCamera): boolean => c.channelCount > 1;
   // 每路显镜头名（ch0=移动画面 / ch1=固定画面；ch≥2 兜底「通道 N」）；单摄不显示。
   const channelLabelOf = (c: ScopeCamera): string | undefined => {
-    if (!multiChannelDids.has(c.did)) return undefined;
+    if (!isMulti(c)) return undefined;
     const key = lensLabelKey(c.channel);
     return key ? t(key) : t("hero.channelLabel", { n: c.channel });
   };
   // 全拆:每路逐通道渲染、各控自己那路。投喂开关目标 = 该路合成 did(多摄 `did:ch{n}`、单摄
   // 裸 did);拾音是相机级(mic 只在球机/ch0)、按物理 did。
   const feedDidOf = (c: ScopeCamera): string =>
-    synthFeedDid(c.did, c.channel, multiChannelDids.has(c.did));
+    synthFeedDid(c.did, c.channel, isMulti(c));
   const hasMic = (c: ScopeCamera): boolean => channelHasMic(c.channel);
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;

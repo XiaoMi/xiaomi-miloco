@@ -10,6 +10,29 @@ _CAMERAS_PATH = "/api/miot/scope/cameras"
 _CAMERAS_VOICE_PATH = "/api/miot/scope/cameras/voice"
 
 
+def _compose_channel_dids(resp: dict) -> dict:
+    """CLI 展示层：把**多通道相机**每行的 ``did`` 显示成合成 did ``{did}:ch{n}``、去掉
+    ``channel`` / ``channel_count`` 列（通道号已编码进 did），单摄保持裸 did。
+
+    纯展示变换，不动后端：backend 仍按物理 did + channel 建模；这里只是让双摄两行不再
+    「did / name 都相同、只差一个 channel 数字」难以区分。合成 did 也能**直接复制**给
+    ``scope camera enable/disable <did:chN>`` 精确到某一路（backend 解析 ``:ch`` 后处理）。
+    多通道判定用后端透出的权威信号 **``channel_count > 1``**（与 backend/前端同口径，不用行数代理）。
+    """
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if not isinstance(data, list):
+        return resp
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        cc = row.pop("channel_count", 1) or 1  # 取判据并从展示里去掉
+        ch = row.pop("channel", None)  # 通道号已并入合成 did，展示层去掉
+        did = row.get("did")
+        if did is not None and ch is not None and cc > 1:
+            row["did"] = f"{did}:ch{ch}"
+    return resp
+
+
 @click.group("scope")
 def scope_group():
     """管理 miloco 的感知范围：哪些家庭、哪些摄像头接入。"""
@@ -51,8 +74,10 @@ def scope_camera():
 @click.option("--pretty", is_flag=True)
 def scope_camera_list(pretty):
     """列出全部摄像头；in_use=当下真正开启(活跃集,≤4)，三态可用性 cloud_online(云端在线)/
-    lan_reachable(局域网可达)/awake(镜头开关:true=开/false=关/null=未知)，connected=视频流已连接。"""
-    print_result(api_get(_CAMERAS_PATH), pretty)
+    lan_reachable(局域网可达)/awake(镜头开关:true=开/false=关/null=未知)，connected=视频流已连接。
+    多通道相机(双摄)每路一行，did 显示为合成 did did:chN(单摄保持裸 did)——该 did 可直接用于
+    enable/disable/mic-on/off 精确到某一路。"""
+    print_result(_compose_channel_dids(api_get(_CAMERAS_PATH)), pretty)
 
 
 @scope_camera.command("enable")

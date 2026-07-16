@@ -1059,6 +1059,9 @@ class MiotService:
                 # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
                 # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
                 "room_name": getattr(info, "room_name", None),
+                # 通道总数：判「多通道相机」的权威信号（channel_count>1），前端/CLI 据此
+                # 决定是否拼合成 did、显镜头标签——与后端 select_active 同口径，别再用「行数」代理。
+                "channel_count": channel_count,
                 "cloud_online": cloud_online,
                 "lan_reachable": lan_reachable,
                 # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
