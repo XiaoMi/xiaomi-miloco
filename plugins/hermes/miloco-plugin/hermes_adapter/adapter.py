@@ -462,17 +462,6 @@ class Adapter:
             jsonl_path=data.get("jsonl_path"),
         )
 
-    # ---- max_send_turn_latency_s (AgentPlatformAdapter 契约) -----------
-
-    def max_send_turn_latency_s(self) -> float:
-        """返回单次 send_turn 最长耗时估计（含溢出自愈重试一次）。
-
-        onboarding_trigger._delivery_guard_timeout_s 靠此方法估算守护 timeo。
-        WebhookAdapter 已实现（考虑重试+退避），Hermes Adapter 补齐。
-        """
-        timeout_s = 180.0 + _HTTP_BUFFER_S
-        return 2 * timeout_s
-
     # ---- reset_sessions (AgentPlatformAdapter 可选契约) -------------------
 
     async def reset_sessions(

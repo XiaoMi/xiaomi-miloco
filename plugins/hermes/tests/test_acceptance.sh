@@ -187,18 +187,10 @@ for f in __init__.py adapter.py context_injection.py catalog.py paths.py tools_h
 done
 
 # ═══════════════════════════════════════════════════════════════════════
-section "K. max_send_turn_latency_s (author bug #7)"
-# ═══════════════════════════════════════════════════════════════════════
-
-LATENCY=$(python3 -c "
-import sys; sys.path.insert(0,'$ADAPTER_DIR')
-from adapter import Adapter
-a = Adapter()
-print(a.max_send_turn_latency_s() if hasattr(a,'max_send_turn_latency_s') else 'MISSING')
-" 2>/dev/null)
-
-[ "$LATENCY" != "MISSING" ] && ok "max_send_turn_latency_s=$LATENCY" || no "max_send_turn_latency_s 未实现"
-
+section "K. max_send_turn_latency_s —— 已从契约删除"
+# onboarding_trigger 硬引 WebhookAdapter 常量而非调 adapter 方法，
+# 全仓无真实调用方。从 ABC 和 adapter 移除，此项不再检查。
+ok "max_send_turn_latency_s 已从契约删除（无调用方）"
 # ═══════════════════════════════════════════════════════════════════════
 section "汇总"
 # ═══════════════════════════════════════════════════════════════════════

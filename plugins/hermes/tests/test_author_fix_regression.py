@@ -255,28 +255,7 @@ def test_make_test_push_handler_would_nameerror():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Bug 10: max_send_turn_latency_s 缺失
+# Bug 10: max_send_turn_latency_s 已从契约中删除
+# 原因: onboarding_trigger 硬引 WebhookAdapter 常量而非调 adapter 方法，
+# 全仓无真实调用方——不是契约只是 adapter 内部预留。从 ABC 和 adapter 移除。
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_adapter_has_max_send_turn_latency_s():
-    """验证 Hermes Adapter 实现了 max_send_turn_latency_s。
-
-    base.py WebhookAdapter 已实现（考虑重试+退避），但 Hermes Adapter 没实现——
-    `onboarding_trigger._delivery_guard_timeout_s` 用通用兜底估算，没考虑
-    Hermes 自己的溢出自愈重试一次。
-    """
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "miloco-plugin" / "hermes_adapter"))
-    try:
-        from adapter import Adapter
-        a = Adapter()
-        # WebhookAdapter/AgentPlatformAdapter ABC 要求这个方法
-        assert hasattr(a, "max_send_turn_latency_s"), (
-            "Hermes Adapter 没有实现 max_send_turn_latency_s()。"
-            "base.py 的契约要求所有适配器实现此方法。"
-        )
-        # 不能是通用兜底值——必须考虑 Hermes 特有的溢出自愈重试
-        val = a.max_send_turn_latency_s()
-        assert val > 0
-    finally:
-        sys.path.pop(0)
