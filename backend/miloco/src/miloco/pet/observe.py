@@ -245,9 +245,11 @@ def _select_video_crops(
 ) -> tuple[list[dict], int]:
     """视频：无 ReID 的 SORT 分 track → 主体 track 候选池 → 门控 ≤3 张同一只多姿态。
 
-    返回 ``(selected≤3, n_tracks)``。喂 SortTracker 的是**预过滤宠物检测**（detect_pets）+
+    返回 ``(selected≤3, n_coincident)``——``n_coincident`` = **同一帧内真检测匹配的宠物数的跨帧最大值**
+    （判 multiple_pets 用；见循环内注释）。喂 SortTracker 的是**预过滤宠物检测**（detect_pets）+
     ``track_human_only=False``，即便日后该开关被移除（只跟踪所喂检测）逻辑仍成立。
-    ⚠️ 无 ReID 时同一只可能被 SORT 断成两 track → crowded 误判 / 主体选错；短注册片段少见，v1 接受。
+    ⚠️ 无 ReID 时同一只可能被 SORT 断成两 track → 主体选错；短注册片段少见，v1 接受。**但"多只"判定
+    不再用"累计 track 数"（会把断轨的一只算成多只），改用"同帧共现最大只数"，见下。**
     """
     from miloco.perception.engine.identity.sort import SortConfig, SortTracker
 
@@ -257,6 +259,7 @@ def _select_video_crops(
         fps=max(1, fps),
     )
     pool: dict[int, list[dict]] = {}
+    n_coincident = 0  # 同帧真检测匹配宠物数的跨帧最大值（= 最多同时有几只入镜）
     for _idx, frame in frames:
         fh, fw = frame.shape[:2]
         pet_dets = [
@@ -266,6 +269,12 @@ def _select_video_crops(
         tracks = [
             t for t in tracker.get_tracking_results() if t["class_id"] in _PET_CLASS_IDS
         ]
+        # 「多只」判定维度 = **同一帧**共现，且只数**本帧真检测匹配**（time_since_update==0）的 track：
+        # 一只宠物跟丢又重现时，旧 track 靠 Kalman 预测续命、新 track 已开启——若按"整段累计 track 数"
+        # 或把预测框也算进来，会把这**一只**误判成"多只/同帧多只"（伪多宠）。get_tracking_results 已
+        # pre-filter tsu>=1，这里显式再夹一道 tsu==0，兼容将来 DeepSORT 路径可能回预测框。
+        matched_ids = {t["id"] for t in tracks if t.get("time_since_update", 0) == 0}
+        n_coincident = max(n_coincident, len(matched_ids))
         for tr in tracks:
             crop = _crop_with_padding(frame, tr["bbox"], _PADDING_RATIO)
             if crop is None or crop.size == 0:
@@ -292,17 +301,17 @@ def _select_video_crops(
     if not pool:
         return [], 0
     # 主体（dominant）track = 被注册那一只：匹配帧数最多，平手取累计 sharpness 最大。
-    # 多只入镜时只取主体，其它 track 由 observe_pet 出 multiple_pets 提示（别静默丢，决策 D8）。
+    # 多只【同帧】入镜时只取主体，由 observe_pet 出 multiple_pets 提示（别静默丢，决策 D8）。
     primary_tid = max(
         pool, key=lambda t: (len(pool[t]), sum(c["sharpness"] for c in pool[t]))
     )
-    return _gate_select(pool[primary_tid]), len(pool)
+    return _gate_select(pool[primary_tid]), n_coincident
 
 
 def _video_pet_crops(
     frames: list[tuple[int, np.ndarray]], detector: Any, fps: int
 ) -> list[dict]:
-    """薄封装：只取主体 track 的门控结果（丢弃 n_tracks，供直接测试/复用）。"""
+    """薄封装：只取主体 track 的门控结果（丢弃 n_coincident，供直接测试/复用）。"""
     return _select_video_crops(frames, detector, fps)[0]
 
 
@@ -407,7 +416,7 @@ def _build_warnings(
     description: dict | None,
     selected: list[dict],
     refs_inconsistent: bool | None,
-    n_tracks: int,
+    n_coincident: int,
 ) -> list[dict]:
     """后端算的建议类不阻断提示（web 渲染黄叹号 / 软确认）。"""
     out: list[dict] = []
@@ -447,7 +456,7 @@ def _build_warnings(
                 "message": "上传的几张图差异较大，疑似不是同一只宠物，请确认是否继续。",
             }
         )
-    if n_tracks > 1:
+    if n_coincident > 1:
         out.append(
             {
                 "type": "multiple_pets",
@@ -551,7 +560,7 @@ async def observe_pet(
     detector = default_detector()
     if is_video:  # 视频恒单个
         sampled, fps = _decode_and_sample(medias[0], max_frames)
-        selected, n_tracks = _select_video_crops(sampled, detector, int(fps) or 1)
+        selected, n_coincident = _select_video_crops(sampled, detector, int(fps) or 1)
         fallback_frame = _sharpest_frame(sampled)
     else:  # 图 1~3 张，每张各取最大 crop 过单图硬门槛
         selected = []
@@ -560,7 +569,7 @@ async def observe_pet(
             one = _largest_pet_crop(img, detector) if img is not None else None
             if one is not None:
                 selected.append(one)
-        n_tracks = 0
+        n_coincident = 0
         fallback_frame = _first_decodable(medias)
 
     # 检测器框到并过门槛 → 一次性把 ≤3 张 crop 送 omni 出共性描述（主路径不做本体 grounding）
@@ -587,7 +596,7 @@ async def observe_pet(
             ],
             "refs_inconsistent": refs_inconsistent,
             "warnings": _build_warnings(
-                description, selected, refs_inconsistent, n_tracks
+                description, selected, refs_inconsistent, n_coincident
             ),
         }
 
@@ -627,7 +636,7 @@ async def observe_pet(
             "candidates": [_candidate_out(cand, head_bbox=None)],
             "refs_inconsistent": None,
             # 视频多 track 但主体被门控全灭而落到回退时，仍要透出 multiple_pets（别静默丢，决策 D8）
-            "warnings": _build_warnings(description, [], None, n_tracks),
+            "warnings": _build_warnings(description, [], None, n_coincident),
         }
     # 未开本体 grounding / omni 框不出 → 回传整幅画面，由前端裁剪器手动收窄，不产参考 crop
     return {
@@ -638,5 +647,5 @@ async def observe_pet(
         "primary_index": 0,
         "candidates": [],
         "refs_inconsistent": None,
-        "warnings": _build_warnings(description, [], None, n_tracks),
+        "warnings": _build_warnings(description, [], None, n_coincident),
     }
