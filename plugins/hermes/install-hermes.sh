@@ -427,6 +427,27 @@ if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.openclaw/miloco" ]; then
   fi
 fi
 
+# --- 1.75 MILOCO_HOME 也写进 ~/.hermes/.env ---
+# Hermes gateway 由 launchd plist 直接拉起，不 source shell rc，
+# 但会通过 load_hermes_dotenv 加载 $HERMES_HOME/.env。
+# 不写这条的话 trace.py 路径解析会退回默认值 ~/.openclaw/miloco。
+if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.openclaw/miloco" ]; then
+  touch "$HERMES_HOME/.env"
+  chmod 600 "$HERMES_HOME/.env"
+  if grep -q '^MILOCO_HOME=' "$HERMES_HOME/.env" 2>/dev/null; then
+    "$PYTHON" - "$HERMES_HOME/.env" "$MILOCO_HOME" <<'PY'
+import sys
+lines = open(sys.argv[1]).readlines()
+with open(sys.argv[1], 'w') as f:
+    for ln in lines:
+        f.write(f'MILOCO_HOME={sys.argv[2]}\n' if ln.startswith('MILOCO_HOME=') else ln)
+PY
+  else
+    echo "MILOCO_HOME=$MILOCO_HOME" >> "$HERMES_HOME/.env"
+  fi
+  info "MILOCO_HOME 已持久化到 $HERMES_HOME/.env"
+fi
+
 # --- 1.8 config.json::server.python_bin auto-fix ---
 # 现象：miloco 用 uv 装时 backend 装在 ~/.local/share/uv/tools/miloco/bin/python，
 # 但 miloco service start 用的是 system python3，找不到 miloco 模块 → backend 装包失败。
