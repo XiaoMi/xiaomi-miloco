@@ -182,7 +182,6 @@ class WebhookAdapter(AgentPlatformAdapter):
                 await asyncio.sleep(self._TRANSPORT_BACKOFF_S * (2 ** attempt))
 
     async def read_trace_meta(self, run_id: str) -> Optional[TraceMeta]:
-        from miloco.middleware.exceptions import AgentWebhookException
         from miloco.utils.agent_client import call_agent_webhook
 
         try:
