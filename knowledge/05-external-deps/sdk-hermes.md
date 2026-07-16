@@ -12,13 +12,13 @@ miloco 通过 `plugins/hermes/` 接入 Hermes，作为 OpenClaw 之外的并列 
 
 ### 扩展点映射
 
-| miloco 需求                  | Hermes 机制                                                                    | 文件                                                     |
-| ---------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| 16 个 skill                  | `~/.hermes/skills/`（agentskills.io 标准，miloco skill 已合规）                | `scripts/sync-skills.py`                                 |
-| 注入设备目录/家庭档案/身份块 | adapter.build_system → `<system>` 消息（backend 侧组装，不依赖插件钩子）       | `miloco-plugin/context_injection.py`                     |
-| 注册 tool（通知/习惯建议）   | `ctx.register_tool(name, toolset, schema, handler)`                            | `miloco-plugin/tools_*.py`                               |
-| 4 个受管 cron                | `cron.jobs.create_job(prompt, schedule, skills=[...])` + reconcile             | `miloco-plugin/cron_setup.py`                            |
-| 后端→agent 同步回调          | adapter.send_turn → httpx POST `/v1/chat/completions`（X-Hermes-Session-Id）   | `plugins/hermes/miloco-plugin/hermes_adapter/adapter.py` |
+| miloco 需求                  | Hermes 机制                                                                  | 文件                                                     |
+| ---------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 16 个 skill                  | `~/.hermes/skills/`（agentskills.io 标准，miloco skill 已合规）              | `scripts/sync-skills.py`                                 |
+| 注入设备目录/家庭档案/身份块 | adapter.build_system → `<system>` 消息（backend 侧组装，不依赖插件钩子）     | `miloco-plugin/context_injection.py`                     |
+| 注册 tool（通知/习惯建议）   | `ctx.register_tool(name, toolset, schema, handler)`                          | `miloco-plugin/tools_*.py`                               |
+| 4 个受管 cron                | `cron.jobs.create_job(prompt, schedule, skills=[...])` + reconcile           | `miloco-plugin/cron_setup.py`                            |
+| 后端→agent 同步回调          | adapter.send_turn → httpx POST `/v1/chat/completions`（X-Hermes-Session-Id） | `plugins/hermes/miloco-plugin/hermes_adapter/adapter.py` |
 
 ### 关键契约
 
