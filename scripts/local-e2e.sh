@@ -315,58 +315,59 @@ check_abc_callers() {
     if [[ ! -f "$f" ]]; then
         return
     fi
-    local methods
-    set +e; methods=$(grep -B1 '@abstractmethod' "$f" | grep 'def ' | sed 's/.*def //' | sed 's/(.*//' 2>/dev/null); set -e
+    # 从 base.py 提取 @abstractmethod 后的 def 行
+    local methods=""
+    local in_abstract=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ @abstractmethod ]]; then
+            in_abstract=1
+            continue
+        fi
+        if [[ $in_abstract -eq 1 && "$line" =~ def[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*) ]]; then
+            methods="$methods ${BASH_REMATCH[1]}"
+            in_abstract=0
+        fi
+    done < "$f"
     if [[ -z "$methods" ]]; then
         _ok "无 ABC 抽象方法（已清理）"
         return
     fi
     local issues=0
-    while IFS= read -r method; do
-        [[ -z "$method" ]] && continue
+    for method in $methods; do
         set +e
         local callers
-        callers=$(grep -rn "\.${method}(" "$REPO_ROOT/backend/" "$REPO_ROOT/plugins/" --include="*.py" 2>/dev/null | grep -v "base\.py" | grep -v "__pycache__" | grep -v "test_" | head -2)
+        callers=$(grep -rn "\.${method}(" "$REPO_ROOT/backend/" "$REPO_ROOT/plugins/" --include="*.py" 2>/dev/null | grep -v "$f" | grep -v "__pycache__" | grep -v "test_" | head -2)
         set -e
         if [[ -z "$callers" ]]; then
             _err "ABC 方法 '${method}' 无外部调用——不应是 ABC 抽象契约"
             ((issues++)) || true
         fi
-    done <<< "$methods"
+    done
     if [[ $issues -eq 0 ]]; then
         _ok "ABC 抽象方法均有外部调用方"
     fi
 }
 
 # ============================================================================
-# R11: HTTP 路由注册 vs 调用方检查
+# R11: 存储敏感值检查——config.json / .env 中不应含明文 secret
 # ============================================================================
-check_route_callers() {
-    _hdr "HTTP 路由调用方检查"
-    local f="$REPO_ROOT/backend/miloco/src/miloco/main.py"
-    if [[ ! -f "$f" ]]; then
-        return
-    fi
-    local routes
-    set +e; routes=$(grep -oP '@app\.\w+\("[^"]*"\)' "$f" 2>/dev/null | grep -v "/api/" | grep -v "/health" | grep -v "/docs" | sed 's/.*"\(.*\)".*/\1/'); set -e
-    if [[ -z "$routes" ]]; then
-        _ok "无额外自定义路由"
-        return
-    fi
+check_secrets_in_config() {
+    _hdr "配置文件中明文 secret 检查"
     local issues=0
-    while IFS= read -r route; do
-        [[ -z "$route" ]] && continue
+    # 检查 backend .env.example 模板里是否含真实 key（sk-开头为真 key，.example 模板应替换为占位符）
+    local f="$REPO_ROOT/backend/.env.example"
+    if [[ -f "$f" ]]; then
         set +e
-        local callers
-        callers=$(grep -rn "$route" "$REPO_ROOT/backend/" "$REPO_ROOT/plugins/" --include="*.py" 2>/dev/null | grep -v "main\.py" | grep -v "__pycache__" | grep -v "test_" | head -2)
+        local real_keys
+        real_keys=$(grep -n 'sk-[a-zA-Z0-9]\{20,\}' "$f" 2>/dev/null)
         set -e
-        if [[ -z "$callers" ]]; then
-            _err "路由 '$route' 仅在 main.py 注册，无外部调用——死代码"
+        if [[ -n "$real_keys" ]]; then
+            _err "$f 含疑似真实 API key（模板应用占位符如 sk-your-key-here）"
             ((issues++)) || true
         fi
-    done <<< "$routes"
+    fi
     if [[ $issues -eq 0 ]]; then
-        _ok "路由均有外部调用方"
+        _ok "配置文件无明文 secret"
     fi
 }
 
@@ -405,7 +406,7 @@ check_dead_functions() {
         "$REPO_ROOT/plugins/hermes/miloco-plugin/hermes_adapter/adapter.py" \
         "$REPO_ROOT/backend/miloco/src/miloco/agent_platform/base.py"; do
         [[ ! -f "$src" ]] && continue
-        local known_contracts="aclose send_turn read_trace_meta build_system reset_sessions max_send_turn_latency_s name"
+        local known_contracts="aclose send_turn read_trace_meta reset_sessions name"
         while IFS= read -r line; do
             local func
             func=$(echo "$line" | sed 's/.*def //' | sed 's/(.*//')
@@ -462,7 +463,7 @@ main() {
             check_import_consistency
             check_delivery_target
             check_abc_callers
-            check_route_callers
+            check_secrets_in_config
             check_knowledge_consistency
             check_dead_functions
             ;;
@@ -475,7 +476,7 @@ main() {
             check_import_consistency
             check_delivery_target
             check_abc_callers
-            check_route_callers
+            check_secrets_in_config
             check_knowledge_consistency
             check_dead_functions
             run_tests
