@@ -68,7 +68,7 @@ def test_video_single_pet_one_track():
 
 
 def test_video_multi_pet_picks_dominant_track():
-    # 两只相距很远的宠物 → SORT 分两 track；新语义只取主体 track（不再一 track 一候选）
+    # 两只【同帧】共现的宠物 → n_coincident=2（同帧共现）；新语义只取主体 track（不再一 track 一候选）
     frames = [(i, _frame(400, 400)) for i in range(8)]
     detector = SimpleNamespace(
         detect_pets=lambda f: [
@@ -76,10 +76,32 @@ def test_video_multi_pet_picks_dominant_track():
             _det(300, 300, 60, 60, cls=Detection.CLASS_DOG),
         ]
     )
-    selected, n_tracks = obs._select_video_crops(frames, detector, fps=1)
-    assert n_tracks == 2  # 检测到两只（供 observe_pet 出 multiple_pets 提示）
+    selected, n_coincident = obs._select_video_crops(frames, detector, fps=1)
+    assert n_coincident == 2  # 同帧两只 → 供 observe_pet 出 multiple_pets 提示
     assert 1 <= len(selected) <= 3  # 只取主体 track 的 ≤3 张
     assert len({c["class_id"] for c in selected}) == 1  # 同一 track → 物种单一
+
+
+def test_video_fragmented_single_pet_not_counted_as_multiple():
+    # 回归（伪多宠修复）：一只宠物前段出现→中段消失→后段在别处重现（SORT 断成两 track）。
+    # 累计 track 数会是 2（旧口径误报"多只"），但**任一帧都只有 1 只真检测匹配** → n_coincident==1。
+    calls = {"n": 0}
+
+    def _dets(_f):
+        i = calls["n"]
+        calls["n"] += 1
+        if i < 4:  # 前段：位置 A
+            return [_det(20, 20, 60, 60, cls=Detection.CLASS_CAT)]
+        if i < 8:  # 中段：消失（无检测）
+            return []
+        return [_det(320, 320, 60, 60, cls=Detection.CLASS_CAT)]  # 后段：位置 B（远离 A）
+
+    frames = [(i, _frame(400, 400)) for i in range(12)]
+    selected, n_coincident = obs._select_video_crops(
+        frames, SimpleNamespace(detect_pets=_dets), fps=1
+    )
+    assert n_coincident == 1  # 从不同帧共现 → 不是"多只"，不误报 multiple_pets
+    assert selected  # 仍能选出主体的参考 crop
 
 
 def test_gate_select_hard_exclude_returns_empty():
