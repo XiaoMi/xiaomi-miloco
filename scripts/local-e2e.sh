@@ -288,6 +288,145 @@ check_import_consistency() {
 }
 
 # ============================================================================
+# R9: 投递参数检查——_deliver_response 调用是否带 chat_id
+# ============================================================================
+check_delivery_target() {
+    _hdr "投递参数 (platform vs platform:chat_id)"
+    local f="$REPO_ROOT/plugins/hermes/miloco-plugin/hermes_adapter/adapter.py"
+    if [[ ! -f "$f" ]]; then
+        _info "adapter.py 不存在，跳过"
+        return
+    fi
+    local calls
+    set +e; calls=$(grep -n "_deliver_response\|delivery_target\|owner_chat" "$f" 2>/dev/null); set -e
+    if echo "$calls" | grep -qE "delivery_target|owner_chat|owner_session.*:"; then
+        _ok "投递目标含 chat_id（非裸平台名）"
+    else
+        _err "$f: _deliver_response 只传平台名，需 platform:chat_id 格式"
+    fi
+}
+
+# ============================================================================
+# R10: ABC 抽象方法外部引用检查
+# ============================================================================
+check_abc_callers() {
+    _hdr "ABC 抽象方法外部引用"
+    local f="$REPO_ROOT/backend/miloco/src/miloco/agent_platform/base.py"
+    if [[ ! -f "$f" ]]; then
+        return
+    fi
+    local methods
+    set +e; methods=$(grep -B1 '@abstractmethod' "$f" | grep 'def ' | sed 's/.*def //' | sed 's/(.*//' 2>/dev/null); set -e
+    if [[ -z "$methods" ]]; then
+        _ok "无 ABC 抽象方法（已清理）"
+        return
+    fi
+    local issues=0
+    while IFS= read -r method; do
+        [[ -z "$method" ]] && continue
+        set +e
+        local callers
+        callers=$(grep -rn "\.${method}(" "$REPO_ROOT/backend/" "$REPO_ROOT/plugins/" --include="*.py" 2>/dev/null | grep -v "base\.py" | grep -v "__pycache__" | grep -v "test_" | head -2)
+        set -e
+        if [[ -z "$callers" ]]; then
+            _err "ABC 方法 '${method}' 无外部调用——不应是 ABC 抽象契约"
+            ((issues++)) || true
+        fi
+    done <<< "$methods"
+    if [[ $issues -eq 0 ]]; then
+        _ok "ABC 抽象方法均有外部调用方"
+    fi
+}
+
+# ============================================================================
+# R11: HTTP 路由注册 vs 调用方检查
+# ============================================================================
+check_route_callers() {
+    _hdr "HTTP 路由调用方检查"
+    local f="$REPO_ROOT/backend/miloco/src/miloco/main.py"
+    if [[ ! -f "$f" ]]; then
+        return
+    fi
+    local routes
+    set +e; routes=$(grep -oP '@app\.\w+\("[^"]*"\)' "$f" 2>/dev/null | grep -v "/api/" | grep -v "/health" | grep -v "/docs" | sed 's/.*"\(.*\)".*/\1/'); set -e
+    if [[ -z "$routes" ]]; then
+        _ok "无额外自定义路由"
+        return
+    fi
+    local issues=0
+    while IFS= read -r route; do
+        [[ -z "$route" ]] && continue
+        set +e
+        local callers
+        callers=$(grep -rn "$route" "$REPO_ROOT/backend/" "$REPO_ROOT/plugins/" --include="*.py" 2>/dev/null | grep -v "main\.py" | grep -v "__pycache__" | grep -v "test_" | head -2)
+        set -e
+        if [[ -z "$callers" ]]; then
+            _err "路由 '$route' 仅在 main.py 注册，无外部调用——死代码"
+            ((issues++)) || true
+        fi
+    done <<< "$routes"
+    if [[ $issues -eq 0 ]]; then
+        _ok "路由均有外部调用方"
+    fi
+}
+
+# ============================================================================
+# R12: knowledge 文档架构一致性
+# ============================================================================
+check_knowledge_consistency() {
+    _hdr "knowledge 文档架构一致性"
+    local issues=0
+    for doc in "$REPO_ROOT/knowledge/03-features/hermes-integration.md" "$REPO_ROOT/knowledge/05-external-deps/sdk-hermes.md"; do
+        [[ ! -f "$doc" ]] && continue
+        set +e
+        local old
+        old=$(grep -n "独立适配进程\|dispatch_tool.*send_message\|18789.*health\|适配进程.*aiohttp" "$doc" 2>/dev/null)
+        set -e
+        if [[ -n "$old" ]]; then
+            echo "$old" | while read line; do
+                _err "$(basename "$doc"): 含旧架构描述: ${line:0:100}"
+            done
+            ((issues++)) || true
+        fi
+    done
+    if [[ $issues -eq 0 ]]; then
+        _ok "knowledge 文档与当前架构一致"
+    fi
+}
+
+# ============================================================================
+# R13: Python 死函数检测
+# ============================================================================
+check_dead_functions() {
+    _hdr "死函数检测"
+    local issues=0
+    # 检查 adapter.py / base.py 中非 contract 函数是否有外部引用
+    for src in \
+        "$REPO_ROOT/plugins/hermes/miloco-plugin/hermes_adapter/adapter.py" \
+        "$REPO_ROOT/backend/miloco/src/miloco/agent_platform/base.py"; do
+        [[ ! -f "$src" ]] && continue
+        local known_contracts="aclose send_turn read_trace_meta build_system reset_sessions max_send_turn_latency_s name"
+        while IFS= read -r line; do
+            local func
+            func=$(echo "$line" | sed 's/.*def //' | sed 's/(.*//')
+            [[ -z "$func" || "$func" == __* ]] && continue
+            echo "$known_contracts" | grep -qw "$func" && continue
+            set +e
+            local refs
+            refs=$(grep -rn "\b${func}\b" "$REPO_ROOT/backend/" "$REPO_ROOT/plugins/hermes/" --include="*.py" 2>/dev/null | grep -v "$(basename "$src")" | grep -v "__pycache__" | grep -v "test_" | head -2)
+            set -e
+            if [[ -z "$refs" ]]; then
+                _info "$(basename "$src"): '${func}' 无外部引用"
+                ((issues++)) || true
+            fi
+        done < <(grep -n 'def ' "$src" | grep -v '#\|"""')
+    done
+    if [[ $issues -eq 0 ]]; then
+        _ok "无检测到死函数"
+    fi
+}
+
+# ============================================================================
 # 汇总
 # ============================================================================
 summary() {
@@ -321,6 +460,11 @@ main() {
             check_python_syntax
             check_dead_files
             check_import_consistency
+            check_delivery_target
+            check_abc_callers
+            check_route_callers
+            check_knowledge_consistency
+            check_dead_functions
             ;;
         *)
             check_shell_syntax
@@ -329,6 +473,11 @@ main() {
             check_python_syntax
             check_dead_files
             check_import_consistency
+            check_delivery_target
+            check_abc_callers
+            check_route_callers
+            check_knowledge_consistency
+            check_dead_functions
             run_tests
             check_pr_review_gate
             ;;
