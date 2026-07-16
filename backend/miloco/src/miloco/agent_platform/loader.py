@@ -15,7 +15,7 @@ Adapter 实现由 Plugin 侧提供,随插件打包,装到
 
 **duck typing 校验**:
 - Plugin 的 adapter.py **不强制** import 后端的 ABC(避免 plugin 依赖 backend wheel)
-- Loader 用 ``hasattr`` 检查 ``send_turn`` / ``read_trace_meta`` / ``build_system`` /
+- Loader 用 ``hasattr`` 检查 ``send_turn`` / ``read_trace_meta`` / ``name``,
   ``aclose`` / ``name`` 五个接口,缺一即失败
 - 这样 plugin 实现可零依赖 backend,但必须实现约定的方法集
 
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 # duck-typed required 接口集:plugin adapter 必须暴露这些 attr/方法
-_REQUIRED_ATTRS = ("name", "send_turn", "read_trace_meta", "build_system")
+_REQUIRED_ATTRS = ("name", "send_turn", "read_trace_meta")
 
 
 def _resolve_adapter_dir(adapter_name: str) -> Path:
@@ -51,7 +51,7 @@ def _resolve_adapter_dir(adapter_name: str) -> Path:
 
 def _find_adapter_class(module: Any, adapter_name: str) -> type:
     """在 module 里找一个类(优先名字 ``Adapter``,否则第一个匹配 duck-typed 的类)。
-    duck-typed 校验:暴露 ``name`` + ``send_turn`` + ``read_trace_meta`` + ``build_system``。
+    duck-typed 校验:暴露 ``name`` + ``send_turn`` + ``read_trace_meta``。
     """
     # 优先 ``Adapter`` 通用名(避免 plugin 写无关名字)
     candidate = getattr(module, "Adapter", None)

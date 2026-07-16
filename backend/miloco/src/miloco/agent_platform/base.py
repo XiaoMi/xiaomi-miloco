@@ -133,21 +133,6 @@ class AgentPlatformAdapter(ABC):
         Plugin 端 trace.py 负责常写(meta.json),Adapter 不感知写入,只读取。
         """
 
-    @abstractmethod
-    def build_system(self, profile: str, extra: dict[str, Any]) -> str:
-        """组装 OpenAI ``<system>`` 消息文本。
-
-        字段对齐 doc §五 #2:
-        - HARD_CONSTRAINTS(平台硬约束,Hermes 等)
-        - 工具索引(B_CAPABILITIES 移过来)
-        - 感知格式(PERCEPTION_FORMAT 移过来)
-        - 家庭档案 / 设备目录(动态,按 profile 分级)
-        - 数据源路径(感知记忆 / 家庭档案位置)
-
-        profile = ``"full" | "suggestion" | "rule" | "minimal"``,与
-        ``context_injection.resolve_profile`` 对齐。
-        """
-
     async def aclose(self) -> None:
         """Adapter 关闭钩子(释放 httpx client 等)。dispatcher.stop 时调。子类按需 override。"""
         return None
@@ -234,7 +219,6 @@ class WebhookAdapter(AgentPlatformAdapter):
             error_count=int(translated.get("error_count", 0) or 0),
             error_msg=translated.get("error_msg"),
             jsonl_path=translated.get("jsonl_path"),
-        )
+                )
 
-    def build_system(self, profile: str, extra: dict[str, Any]) -> str:
-        return ""
+

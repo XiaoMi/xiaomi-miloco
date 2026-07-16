@@ -248,12 +248,14 @@ class Adapter:
         # dispatcher 为 onboarding 等交互型事件塞了 {"resolve_target": "owner-channel", "deliver": True}
         # turn 用新会话让 LLM 干净评估，投递才用车主 IM 会话
         owner_platform = None
+        owner_chat = None
         if delivery.get("resolve_target") == "owner-channel":
             owner_session, owner_platform = _resolve_owner_session()
             if not owner_session:
                 return _result(run_id="", status="no-channel")
             # LLM turn 用新会话（不污染车主 IM 历史），投递才用 IM 会话
             session_id = None
+            owner_chat = owner_session
         else:
             # suggestion 每个事件独立评估，不用持久 session；
             # 但需保留 miloco: 前缀让 trace hook 正常落盘。
@@ -325,9 +327,15 @@ class Adapter:
                     resp.status_code, session_id, rtt_ms,
                 )
                 # 对 deliver=True 的 turn，Hermes /v1/chat/completions 不会
-                # 自动推回 IM（纯拉取端点），需从响应体读回复经 hermes send 投递
-                if delivery.get("deliver") and owner_platform:
-                    if not _deliver_response(resp, owner_platform):
+                # 自动推回 IM（纯拉取端点），需从响应体读回复经 hermes send 投递。
+                # 带 chat_id（`platform:chat_id`）而非裸平台名，定位车主具体的绑定会话
+                # 而非依赖 PLATFORM_HOME_CHANNEL 环境变量（多数平台没配）。
+                delivery_target = (
+                    f"{owner_platform}:{owner_chat}" if owner_chat
+                    else owner_platform
+                )
+                if delivery.get("deliver") and delivery_target:
+                    if not _deliver_response(resp, delivery_target):
                         return _err_result(
                             run_id,
                             "deliver failed: hermes send returned error",

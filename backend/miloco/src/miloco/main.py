@@ -457,43 +457,6 @@ async def catch_all_exceptions_middleware(request: Request, call_next):
         return handle_exception(request, exc)
 
 
-# POST /miloco/webhook — adapter 未加载时的兜底路由
-_webhook_active = False
-
-
-@app.post("/miloco/webhook")
-async def agent_webhook(request: Request):
-    """入站 agent webhook → 转发给当前 adapter.send_turn()"""
-    global _webhook_active
-    if _webhook_active:
-        return JSONResponse({"status": "recursion_guard"}, 503)
-    _webhook_active = True
-    try:
-        from miloco.agent_platform import get_adapter
-        from miloco.agent_platform.base import TurnContext
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"status": "error"}, 400)
-        payload = body.get("payload", body)
-        msg = payload.get("message", "")
-        if not msg:
-            return JSONResponse({"status": "ok", "run_id": ""})
-        adapter = get_adapter()
-        ctx = TurnContext(
-            text=msg, session_key=payload.get("sessionKey", "agent:main:miloco"),
-            lane=payload.get("lane", "miloco-interactive"),
-            trace_id=payload.get("traceId", ""),
-            wait_timeout_ms=payload.get("timeoutMs", 180_000),
-            profile="full",
-            extra={"delivery": payload if payload.get("deliver") else {}},
-        )
-        result = await adapter.send_turn(ctx)
-        return JSONResponse({"status": result.status, "run_id": result.run_id, "rtt_ms": result.rtt_ms})
-    finally:
-        _webhook_active = False
-
-
 app.include_router(admin_router, prefix="/api")
 app.include_router(miot_router, prefix="/api")
 app.include_router(person_router, prefix="/api")
