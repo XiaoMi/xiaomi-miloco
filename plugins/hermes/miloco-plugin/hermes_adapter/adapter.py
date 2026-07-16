@@ -465,7 +465,7 @@ class Adapter:
     # ---- reset_sessions (AgentPlatformAdapter 可选契约) -------------------
 
     async def reset_sessions(
-        self, routes: list[tuple[str, str]], *, delete_transcript: bool = True, timeout: float = 10.0,
+        self, routes: list[tuple[str, str]], *, timeout: float = 10.0,
     ) -> dict[str, Any]:
         """切家庭时批量清理 Hermes 会话。按 (session_key, lane) 映射为 session_id 后逐个删。
 

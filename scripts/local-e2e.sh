@@ -472,6 +472,31 @@ check_redundant_except() {
 }
 
 # ============================================================================
+# R16: vulture 死代码检测（可选，需 uv 能装 vulture）
+# ============================================================================
+check_vulture() {
+    _hdr "vulture 死代码检测"
+    if ! command -v uv &>/dev/null; then
+        _info "uv 未安装，跳过"
+        return
+    fi
+    local out
+    set +e
+    out=$(uv run --with vulture python -m vulture \
+        "$REPO_ROOT/plugins/hermes/miloco-plugin/" \
+        "$REPO_ROOT/backend/miloco/src/miloco/agent_platform/" \
+        --min-confidence 80 2>&1 | grep -v "test_\|conftest\|__pycache__")
+    set -e
+    if [[ -z "$out" ]]; then
+        _ok "vulture 未发现死代码"
+    else
+        echo "$out" | while read line; do
+            _info "$line"
+        done
+    fi
+}
+
+# ============================================================================
 # 汇总
 # ============================================================================
 summary() {
@@ -512,7 +537,7 @@ main() {
             check_dead_functions
             check_silent_except
             check_redundant_except
-            ;;
+            check_vulture            ;;
         *)
             check_shell_syntax
             check_set_e_bare_subshell
@@ -527,7 +552,7 @@ main() {
             check_dead_functions
             check_silent_except
             check_redundant_except
-            run_tests
+            check_vulture            run_tests
             check_pr_review_gate
             ;;
     esac
