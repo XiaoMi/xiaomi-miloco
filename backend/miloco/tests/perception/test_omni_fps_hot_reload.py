@@ -106,9 +106,13 @@ def test_mock_tracking_service_set_fps_is_noop():
 
 
 def test_identity_engine_set_engine_fps_recomputes_frame_counts():
+    from miloco.perception.engine.config import IdentityEngineConfig, StabilityConfigDC
+
     eng = IdentityEngine.__new__(IdentityEngine)
-    eng.config = SimpleNamespace(
-        stability=SimpleNamespace(
+    # 用真实 IdentityEngineConfig / StabilityConfigDC（非 SimpleNamespace）：stability
+    # 字段一旦改名，构造处即 TypeError，守住 setter 公式对真实 config 字段的依赖。
+    eng.config = IdentityEngineConfig(
+        stability=StabilityConfigDC(
             tier_c_cooldown_mult=2,
             write_eligible_min_count=6,
             recheck_interval_accumulating_sec=10,
@@ -138,6 +142,7 @@ def _make_engine():
     eng = PerceptionEngine.__new__(PerceptionEngine)
     eng._config = PerceptionConfig()  # input.fps=3, omni_fps=1（默认）
     eng._base_fps = eng._config.input.fps  # 3
+    eng._tracking_mode = "real"
     eng._tracking_service_kwargs = {"fps": 3}
     eng._tracking_services = {}
     eng._identity_engines = {}
@@ -158,6 +163,18 @@ def test_apply_omni_fps_updates_config_and_pushes_to_live_instances():
     assert eng._tracking_service_kwargs["fps"] == 4
     svc.set_fps.assert_called_once_with(4)
     identity.set_engine_fps.assert_called_once_with(4)
+
+
+def test_apply_omni_fps_mock_mode_keeps_kwargs_empty():
+    """mock 模式：kwargs 恒为空，热更不塞孤儿 fps key（与 __init__ mock 分支对称）。"""
+    eng = _make_engine()
+    eng._tracking_mode = "mock"
+    eng._tracking_service_kwargs = {}
+
+    eng.apply_omni_fps(2)
+
+    assert eng._tracking_service_kwargs == {}  # 无消费者的 fps key 不该出现
+    assert eng._config.input.fps == 4  # config/base 重算照常
 
 
 def test_apply_omni_fps_recomputes_from_base_not_accumulate():

@@ -853,8 +853,11 @@ class PerceptionEngine(BasePerceptionEngine):
             self._config,
             input=replace(self._config.input, omni_fps=omni_fps, fps=new_fps),
         )
-        # 构造期缓存 1：后续懒建的 tracking_service 拿新 fps
-        self._tracking_service_kwargs["fps"] = new_fps
+        # 构造期缓存 1：后续懒建的 tracking_service 拿新 fps。mock 模式 kwargs 恒为空
+        # 且 factory 忽略 kwargs（返回无参 MockTrackingService），不塞 fps，与 __init__
+        # 的 mock 分支保持对称，避免留下无消费者的孤儿 key。
+        if self._tracking_mode != "mock":
+            self._tracking_service_kwargs["fps"] = new_fps
         # 构造期缓存 2：已建的 per-camera tracker（SortTracker / DeepSort）重算 max_age
         for svc in self._tracking_services.values():
             if hasattr(svc, "set_fps"):
