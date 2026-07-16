@@ -118,6 +118,11 @@
           "type": "boolean",
           "default": true,
           "description": "宠物头像头部定位子开关（默认开）：开启后注册时由 omni 输出头部区域坐标作头像默认裁剪框；关闭则用全身 crop。仅在 pet_recognition 开启时有意义"
+        },
+        "pet_body_grounding": {
+          "type": "boolean",
+          "default": true,
+          "description": "宠物本体定位子开关（默认开）：仅作用于检测器框不到猫/狗的回退路径——开启后由 omni 在整幅画面输出目标动物本体坐标、裁本体作参考 crop（兼容非猫狗物种）；关闭则回退路径不产参考 crop。仅在 pet_recognition 开启时有意义"
         }
       }
     },

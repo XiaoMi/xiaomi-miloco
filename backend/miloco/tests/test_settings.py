@@ -121,10 +121,11 @@ def test_tier_u_dump_enable_env_override(monkeypatch) -> None:
 
 
 def test_features_default_off() -> None:
-    """pet_recognition 默认关（住户需在 web 显式开）；pet_head_grounding 默认开（头部定位子能力）。"""
+    """pet_recognition 默认关（住户需在 web 显式开）；grounding 子开关默认开。"""
     s = get_settings()
     assert s.features.pet_recognition is False
     assert s.features.pet_head_grounding is True
+    assert s.features.pet_body_grounding is True
 
 
 def test_features_env_override(monkeypatch) -> None:
