@@ -6,26 +6,26 @@ Admin controller
 System status check interface
 """
 
+import asyncio
+import json
 import logging
 import re
 import subprocess
-import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from urllib.parse import urlparse
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool
+from sse_starlette.sse import EventSourceResponse
 
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
 from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
-from miloco.middleware import verify_token
+from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
-from miloco.perception.engine.omni.provider import OpenAICompatAdapter, get_adapter
+from miloco.perception.engine.omni import probe as _probe
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
 
@@ -92,7 +92,9 @@ def _run_git(args: list[str]) -> str | None:
     try:
         r = subprocess.run(
             ["git"] + args,
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
             cwd=Path(__file__).resolve().parent,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -207,9 +209,7 @@ async def get_token_usage_daily(
 ):
     """Daily rollup rows (date / model / type) combining historical + today's live."""
     rows = get_token_usage_repo().aggregate_daily(since, until)
-    return NormalResponse(
-        code=0, message="ok", data={"rows": rows, "total": len(rows)}
-    )
+    return NormalResponse(code=0, message="ok", data={"rows": rows, "total": len(rows)})
 
 
 @router.get(
@@ -230,9 +230,7 @@ async def get_token_usage_buckets(
     over /token-usage for the today timeline.
     """
     rows = get_token_usage_repo().aggregate_buckets(since, until, bin_minutes)
-    return NormalResponse(
-        code=0, message="ok", data={"rows": rows, "total": len(rows)}
-    )
+    return NormalResponse(code=0, message="ok", data={"rows": rows, "total": len(rows)})
 
 
 @router.post(
@@ -316,8 +314,6 @@ async def submit_event_feedback(
 
     后续上传服务就绪后,打包完成会自动上传.当前仅本地存储.
     """
-    import asyncio
-
     from miloco.admin import feedback_pack as _fb_mod
 
     uid = ""
@@ -327,7 +323,9 @@ async def submit_event_feedback(
         if user_info:
             uid = user_info.uid
     except Exception:
-        logger.exception("Failed to resolve miot uid for feedback pack; falling back to anonymous")
+        logger.exception(
+            "Failed to resolve miot uid for feedback pack; falling back to anonymous"
+        )
 
     try:
         result = await asyncio.to_thread(
@@ -371,12 +369,11 @@ async def reveal_dir(
     current_user: str = Depends(verify_token),
 ):
     """macOS: open <dir>, Linux: xdg-open <dir>."""
-    import asyncio
     import platform
-    import subprocess
     from pathlib import Path
 
     from miloco.utils.paths import miloco_home
+
     dir_path = Path(body.path).resolve()
     allowed_root = (miloco_home() / "packs").resolve()
     if not dir_path.is_relative_to(allowed_root):
@@ -409,19 +406,42 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:3]}…{key[-4:]}"
 
 
-def _key_by_label(label: str, provided: str | None) -> str:
-    """provided 非空用它;否则取该 label 档案(或当前生效配置)已存的 key。"""
+def _key_by_label(label: str, provided: str | None, *, base_url: str | None = None) -> str:
+    """provided 非空用它;否则取该 label 档案(或当前生效配置)已存的 key。
+
+    base_url 非 None 时,还要求档案里存的 base_url 与传入一致,否则不沿用 key
+    (返 "" 让调用方走 no_key 分支)。这是防"跨 URL 复用凭证"—— 攻击者拿到
+    admin token 后可以:
+      - upsert:改档案 base_url 但 api_key 留空 → 沿用旧 key(可能是云 provider 真 key)
+      - test / list_models:传新 base_url + 已存档案 label → 后端拿档案里的 key 送到新 URL
+    这两条路径覆盖内网 SSRF (base_url 改成 127.0.0.1 / 169.254.169.254 / 内网 IP)
+    和公网钓鱼 (base_url 改成攻击者控制的 endpoint) 两个场景;共同点是 key 跟着
+    base_url 走。此参数强制"key 只能配合它当初被存进来的那个 URL 用"。
+
+    自建 LLM 场景不受影响 —— 自建 provider 通常无鉴权,用户本来就传空 key,
+    走的是"无 key"分支而非"沿用"分支。
+    """
     if provided and provided.strip():
         return provided.strip()
     if not label:
         return ""
     m = get_settings().model
+
+    def _url_matches(stored: str) -> bool:
+        if base_url is None:
+            return True  # caller 没提供 base_url = 无 URL 上下文,按老语义沿用
+        return stored.rstrip("/") == base_url.rstrip("/")
+
     # 命中当前生效配置(含 label 为空、按展示 label 合成的「当前生效行」)→ 回退其 key。
     if m.omni.api_key and label in (m.omni.label, _active_display_label()):
-        return m.omni.api_key
+        if _url_matches(m.omni.base_url):
+            return m.omni.api_key
+        return ""
     for p in m.omni_profiles:
         if p.label == label and p.api_key:
-            return p.api_key
+            if _url_matches(p.base_url):
+                return p.api_key
+            return ""
     return ""
 
 
@@ -444,7 +464,14 @@ def _full_omni_payload() -> dict:
     omni 是默认 MiMo)或历史遗留场景下,active 不在档案列表里。此时若直接返回 profiles,
     前端列表就看不到「当前生效模型」(只有折叠态标题栏读 active 能看到),造成「配没配好」
     的困惑。故在 active 未出现在档案列表时,把它作为一条合成档案补到列表头部(标 active)。
+
+    active 字段附带 health 子对象(见 spec §6.1),来自 omni 熔断器 snapshot;前端顶部横条
+    与「模型」页 active 行的连接状态列均读此字段。
     """
+    from dataclasses import asdict
+
+    from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+
     m = get_settings().model
     active = m.omni
     profiles = [
@@ -458,18 +485,19 @@ def _full_omni_payload() -> dict:
         }
         for p in m.omni_profiles
     ]
-    # 仅当 active 真有 key(确有模型在跑)、且未出现在档案列表时才合成补入并标 active。
-    # 无 key 态(出厂未配 / 删当前生效后回到未配)不合成 —— 列表呈现为空 + 顶部「未配 key」
-    # 警告,清楚表达「没有模型在跑」,而不是显示一条诡异的无 key 行。
     if active.api_key and not any(p["active"] for p in profiles):
-        profiles.insert(0, {
-            "label": _active_display_label(),  # 空 label 回退 model@base_url,保证可编辑/删除
-            "model": active.model,
-            "base_url": active.base_url,
-            "api_key_masked": _mask_api_key(active.api_key),
-            "has_key": True,
-            "active": True,
-        })
+        profiles.insert(
+            0,
+            {
+                "label": _active_display_label(),
+                "model": active.model,
+                "base_url": active.base_url,
+                "api_key_masked": _mask_api_key(active.api_key),
+                "has_key": True,
+                "active": True,
+            },
+        )
+    health = asdict(get_omni_circuit_breaker().snapshot())
     return {
         "active": {
             "label": active.label,
@@ -477,6 +505,7 @@ def _full_omni_payload() -> dict:
             "base_url": active.base_url,
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
+            "health": health,
         },
         "profiles": profiles,
     }
@@ -484,7 +513,12 @@ def _full_omni_payload() -> dict:
 
 def _profiles_as_dicts() -> list[dict]:
     return [
-        {"label": p.label, "model": p.model, "base_url": p.base_url, "api_key": p.api_key}
+        {
+            "label": p.label,
+            "model": p.model,
+            "base_url": p.base_url,
+            "api_key": p.api_key,
+        }
         for p in get_settings().model.omni_profiles
     ]
 
@@ -518,7 +552,9 @@ def get_omni_config(current_user: str = Depends(verify_token)):
     summary="保存一套 omni 配置(upsert 档案;activate=true 时设为当前，默认 true)",
     response_model=NormalResponse,
 )
-def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_token)):
+async def put_omni_config(
+    body: OmniConfigBody, current_user: str = Depends(verify_token)
+):
     """保存(新增/更新)一套档案到列表。
 
     - 档案名(label)= 唯一 id,非空;base_url / api_key / model 均为该档案可改属性。
@@ -528,6 +564,9 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
     - ``activate``=true(默认)同时设为当前生效;false 只入列表、不切换当前(激活走
       ``/activate``,即列表的「启用」)。但**正在编辑的就是当前生效那套时**,无论 activate
       与否都同步刷新 ``model.omni``,使改 key/model 即时对运行中的感知生效。
+    - 若本次会写 ``model.omni``(激活或编辑当前生效那套),落盘前先跑 preflight
+      (``_probe.probe_omni``),失败返 400——避免任何绕过 web「测试连接」的调用方(CLI/curl)
+      把未校验配置写进运行时。
     - 写 config.json,感知下个推理周期热生效。env ``MILOCO_MODEL__OMNI__*`` 优先级更高会盖过。
     """
     label = body.label.strip()
@@ -541,32 +580,59 @@ def put_omni_config(body: OmniConfigBody, current_user: str = Depends(verify_tok
     clash = next((p for p in profiles if p["label"] == label and p is not target), None)
     if clash:
         raise HTTPException(status_code=409, detail=f"档案名「{label}」已存在")
-    key = _key_by_label(orig or label, body.api_key)
+    # 传 base_url 让 _key_by_label 校验"URL 未变才沿用旧 key",防跨 URL 复用凭证。
+    key = _key_by_label(orig or label, body.api_key, base_url=base_url)
     entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
+    tgt = orig or label
+    will_activate = body.activate or _label_is_active(tgt)
+    if will_activate:
+        if not key:
+            raise HTTPException(
+                status_code=400, detail={"code": "no_key", "message": "未配置 API Key"}
+            )
+        result = await _probe.probe_omni(model, base_url, key)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result)
     if target:
         profiles[profiles.index(target)] = entry
     else:
         profiles.append(entry)
     update: dict = {"omni_profiles": profiles}
-    # activate=true 显式设为当前;或编辑的就是当前生效那套(含空 label 当前生效的合成展示 label)→
-    # 同步刷新 active(改 key/model 即时生效)。复用 _label_is_active,与删除/停用同一处判定。
-    # tgt 由非空 label 或 orig 组成,恒非空,故 _label_is_active 的 bool 守卫不影响语义。
-    tgt = orig or label
-    if body.activate or _label_is_active(tgt):
+    if will_activate:
         update["omni"] = entry
     update_shared_config(model=update)
+    if will_activate:
+        # preflight 通过 = 新配置已验可用,主动把熔断状态清掉。之前 OPEN_CONFIG (bad_key
+        # 之类) 时 before_call 短路一切,omni_client 里的 _maybe_reset_breaker_on_config_change
+        # 只在真正调 omni 时才触发,永远等不到,用户改完 key 仍要手动点 retry 才恢复。
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+
+        await get_omni_circuit_breaker().reset_on_config_change()
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 
 @router.post(
     "/omni-config/activate",
-    summary="切换当前生效配置为某套已存档案",
+    summary="切换当前生效配置为某套已存档案(激活前跑 preflight)",
     response_model=NormalResponse,
 )
-def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def activate_omni_config(
+    body: OmniSelectBody, current_user: str = Depends(verify_token)
+):
+    """激活前跑 preflight;失败返 400 + 错误码。"""
     label = body.label.strip()
     for p in get_settings().model.omni_profiles:
         if p.label == label:
+            if not p.api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "no_key", "message": "未配置 API Key"},
+                )
+            result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
+            if not result.get("ok"):
+                raise HTTPException(status_code=400, detail=result)
             update_shared_config(
                 model={
                     "omni": {
@@ -577,6 +643,12 @@ def activate_omni_config(body: OmniSelectBody, current_user: str = Depends(verif
                     }
                 }
             )
+            # 同 upsert 路径:preflight 通过后主动清熔断状态,避免 OPEN_CONFIG 卡死。
+            from miloco.perception.engine.omni.circuit_breaker import (
+                get_omni_circuit_breaker,
+            )
+
+            await get_omni_circuit_breaker().reset_on_config_change()
             return NormalResponse(code=0, message="ok", data=_full_omni_payload())
     raise HTTPException(status_code=404, detail="档案不存在")
 
@@ -607,7 +679,9 @@ async def _soft_stop_best_effort(action: str) -> None:
     summary="删除一套已存档案;删的是当前生效那套时,回到「未配模型」态并软停感知",
     response_model=NormalResponse,
 )
-async def delete_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def delete_omni_config(
+    body: OmniSelectBody, current_user: str = Depends(verify_token)
+):
     """删除一套档案。删的若是当前生效模型,则把当前生效配置重置为「未配」(清空 key)并软停
     感知 —— 等价于回到初始未配模型态:感知停下,等重新配置并启用模型后由 tick 自愈自动拉起。
     """
@@ -631,7 +705,9 @@ async def delete_omni_config(body: OmniSelectBody, current_user: str = Depends(v
     summary="停用当前生效模型:回到「未配模型」态并软停感知,但保留所有档案(可再启用)",
     response_model=NormalResponse,
 )
-async def deactivate_omni_config(body: OmniSelectBody, current_user: str = Depends(verify_token)):
+async def deactivate_omni_config(
+    body: OmniSelectBody, current_user: str = Depends(verify_token)
+):
     """停用当前生效模型:当前生效配置重置为「未配」(清空 key)+ 软停感知,但**不删除档案**。
     与 delete 的区别:delete 会移除该档案,deactivate 仅停用、档案保留,可随后再「启用」恢复。
     """
@@ -651,72 +727,6 @@ class OmniTestBody(BaseModel):
     label: str | None = None
 
 
-async def _probe_chat(model: str, base_url: str, api_key: str) -> dict:
-    """发一次极简 chat（max_tokens=1）验证配置可调通。
-
-    经 adapter 取 endpoint / 鉴权头 / 请求体，使 Gemini 等原生协议 provider 也能被正确探测
-    （原来硬编码 ``/chat/completions`` + ``Bearer`` 会对合法的 Gemini 配置误报失败）。
-    只看 status_code、不解析响应体，故 Qwen 强制 stream 的 body 也不影响判定。
-    """
-    adapter = get_adapter(model)
-    body = adapter.build_request_body(
-        [{"role": "user", "content": "ping"}],
-        model=model, max_tokens=1, temperature=0.0, top_p=1.0,
-    )
-    url = adapter.endpoint(base_url, model, stream=False)
-    headers = {**adapter.auth_headers(api_key), "Content-Type": "application/json"}
-    t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(url, headers=headers, json=body)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    latency_ms = round((time.monotonic() - t0) * 1000)
-    if r.status_code == 200:
-        return {"ok": True, "code": "ok", "status": 200, "latency_ms": latency_ms, "message": "连接正常"}
-    if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "status": r.status_code, "message": "API Key 无效或无权限"}
-    if r.status_code == 404:
-        return {"ok": False, "code": "not_found", "status": 404, "message": "模型或地址不存在"}
-    if r.status_code in (400, 422):
-        # OpenAI 兼容族此前有 GET /models 预检拦过 401/403，到这里 400 多为请求体/模型名被拒；
-        # 但原生协议(Gemini)无预检、且部分 provider 对无效 key 就返回 400(而非 401/403)——
-        # 故 400 也可能是 key 无效,无法仅凭 status code 区分,文案同时提示两种可能。
-        return {
-            "ok": False,
-            "code": "rejected_authed",
-            "status": r.status_code,
-            "latency_ms": latency_ms,
-            "message": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
-        }
-    return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
-
-
-async def _probe_omni(model: str, base_url: str, api_key: str) -> dict:
-    """验证「这套配置能否真正调用该模型」。
-
-    OpenAI 兼容族(MiMo/Qwen):先 GET /models 做廉价的鉴权 + 可达性预检(快速失败、省 token):
-    连不上→unreachable,401/403→bad_key,5xx→http_error。预检通过后,用一次极简 chat
-    (``max_tokens=1``)**真正探测该模型是否可用**——不依赖「模型是否出现在 /models 列表」这种
-    弱判据。非 OpenAI 兼容族(Gemini 等原生协议)没有等价的 GET /models 预检语义,直接走
-    adapter 化的 chat 探测(``_probe_chat`` 已按 provider 取 endpoint / 鉴权)。
-    """
-    base = base_url.rstrip("/")
-    if not isinstance(get_adapter(model), OpenAICompatAdapter):
-        return await _probe_chat(model, base, api_key)
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "status": r.status_code, "message": "API Key 无效或无权限"}
-    if r.status_code >= 500:
-        return {"ok": False, "code": "http_error", "status": r.status_code, "message": f"服务返回异常（HTTP {r.status_code}）"}
-    # 鉴权/可达性 OK → 用极简 chat 真正验证该模型(在不在 /models 列表都以此为准)。
-    return await _probe_chat(model, base, api_key)
-
-
 @router.post(
     "/omni-config/test",
     summary="测试 omni 配置连通性（OpenAI 兼容族两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
@@ -734,77 +744,42 @@ async def test_omni_config(
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
     base_url = (body.base_url or omni.base_url).strip()
-    api_key = _key_by_label((body.label or omni.label or "").strip(), body.api_key)
+    # base_url 传入 _key_by_label:test 端点不写盘,是隐蔽性最高的钓鱼跳板——攻击者
+    # 只需一次调用就能让后端把已存的真 key 送到攻击者的 base_url。校验 URL 一致才沿用。
+    api_key = _key_by_label(
+        (body.label or omni.label or "").strip(),
+        body.api_key,
+        base_url=base_url,
+    )
     if not api_key:
         return NormalResponse(
             code=0,
             message="ok",
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
-    result = await _probe_omni(model, base_url, api_key)
+    result = await _probe.probe_omni(model, base_url, api_key)
+    # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
+    # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
+    # OPEN_CONFIG 下 tick 不会自动探测(只探 OPEN_RECOVERABLE),不清则用户测通了红条仍不消失,
+    # 只能靠横条上的「立即重试」或改配置重存才能恢复——「测通即恢复」是最直觉的路径。
+    if result.get("ok"):
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+        from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
+
+        live = get_settings().model.omni
+        live_key = resolve_omni_api_key(live.api_key)
+        tested_is_active = (
+            model == live.model
+            and base_url.rstrip("/") == live.base_url.rstrip("/")
+            and api_key == live_key
+        )
+        if tested_is_active:
+            cb = get_omni_circuit_breaker()
+            if cb.snapshot().state != "ok":
+                await cb.reset_on_config_change()
     return NormalResponse(code=0, message="ok", data=result)
-
-
-async def _fetch_models(base_url: str, api_key: str) -> dict:
-    """拉取 provider 模型列表(GET /models)。成功返回 {ok, models:[id...]}。
-
-    模型下拉在「选定 model 之前」拉取,没有 model 可路由 adapter,故按 base_url 判 provider:
-    Gemini 原生根(generativelanguage)用 ``x-goog-api-key`` 鉴权、响应形态 ``{models:[{name}]}``
-    (需剥 "models/" 前缀);其余按 OpenAI 兼容 ``{data:[{id}]}`` + ``Bearer`` 解析。
-    (经代理转发的 Gemini 不含该域名时,仍走 OpenAI 兼容分支——用户可手填 model 名兜底。)
-    """
-    base_url = base_url.rstrip("/")
-    # 解析出主机名精确匹配,不用子串判断(``"…" in base_url`` 会被
-    # ``https://evil.com/generativelanguage.googleapis.com`` 之类绕过——CodeQL 报的
-    # incomplete URL substring sanitization)。
-    is_gemini = (urlparse(base_url).hostname or "").lower() == "generativelanguage.googleapis.com"
-    headers = (
-        {"x-goog-api-key": api_key} if is_gemini else {"Authorization": f"Bearer {api_key}"}
-    )
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{base_url}/models", headers=headers)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "code": "unreachable", "models": [], "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    if r.status_code == 200:
-        try:
-            if is_gemini:
-                ids = [
-                    (m.get("name") or "").removeprefix("models/")
-                    for m in (r.json().get("models") or [])
-                    if m.get("name")
-                ]
-            else:
-                ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
-        except Exception:  # noqa: BLE001
-            ids = []
-        return {"ok": True, "models": sorted(i for i in ids if i)}
-    if r.status_code in (401, 403):
-        return {"ok": False, "code": "bad_key", "models": [], "message": "API Key 无效或无权限"}
-    return {
-        "ok": False,
-        "code": "http_error",
-        "models": [],
-        "message": f"服务返回异常（HTTP {r.status_code}）",
-    }
-
-
-async def _probe_reachable(base_url: str) -> dict | None:
-    """无 key 时判 Base URL 是否「明显有问题」,使 URL 错优先于「缺 key」暴露(而非被短路成「未配置」)。
-
-    - 连接失败(DNS/拒连/超时/URL 非法)→ unreachable
-    - 2xx/3xx,或 401/403(地址对、只是需要 key)→ None(URL 没问题,问题在缺 key)
-    - 其余(404/405/4xx/5xx,如填错地址命中 openresty 404 页)→ http_error(地址/端点大概率不对)
-    """
-    url = base_url.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{url}/models")
-    except Exception as e:  # noqa: BLE001
-        return {"code": "unreachable", "message": f"无法连接 Base URL（{type(e).__name__}）"}
-    if r.status_code < 400 or r.status_code in (401, 403):
-        return None
-    return {"code": "http_error", "message": f"服务返回异常（HTTP {r.status_code}）"}
 
 
 class OmniModelsBody(BaseModel):
@@ -823,19 +798,176 @@ async def list_omni_models(
 ):
     """用 base_url + key(留空则按 label 取该档案已存 key)请求 GET /models,返回模型 id 列表。"""
     base_url = body.base_url.strip()
-    api_key = _key_by_label((body.label or "").strip(), body.api_key)
+    # 同 test 端点:传 base_url 校验 URL 一致才沿用旧 key,防用已存 key 拉取攻击者 URL 的 /models。
+    api_key = _key_by_label((body.label or "").strip(), body.api_key, base_url=base_url)
     if not api_key:
         # URL 本身错优先于「缺 key」暴露:无 key 时先探可达性,连不上→报 URL 错;能连上才报缺 key。
-        reach = await _probe_reachable(base_url)
+        reach = await _probe.probe_reachable(base_url)
         if reach is not None:
             return NormalResponse(
-                code=0, message="ok",
-                data={"ok": False, "code": reach["code"], "models": [], "message": reach["message"]},
+                code=0,
+                message="ok",
+                data={
+                    "ok": False,
+                    "code": reach["code"],
+                    "models": [],
+                    "message": reach["message"],
+                },
             )
         return NormalResponse(
-            code=0, message="ok", data={"ok": False, "code": "no_key", "models": [], "message": "未配置 API Key"}
+            code=0,
+            message="ok",
+            data={
+                "ok": False,
+                "code": "no_key",
+                "models": [],
+                "message": "未配置 API Key",
+            },
         )
-    return NormalResponse(code=0, message="ok", data=await _fetch_models(base_url, api_key))
+    return NormalResponse(
+        code=0, message="ok", data=await _probe.fetch_models(base_url, api_key)
+    )
+
+
+@router.post(
+    "/omni-config/retry",
+    summary="用户主动触发一次 omni 探测,跳过熔断剩余 backoff",
+    response_model=NormalResponse,
+)
+async def retry_omni_probe(current_user: str = Depends(verify_token)):
+    """用户点「立即重试」时调:
+    - CLOSED: no-op,返回当前 health
+    - OPEN_RECOVERABLE / OPEN_CONFIG / HALF_OPEN: 跑一次 probe_omni,成功回 CLOSED。
+    """
+    from miloco.perception.engine.omni.circuit_breaker import (
+        RETRY_COOLDOWN_SEC,
+        CircuitState,
+        get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+    if cb.state_for_test() == CircuitState.CLOSED:
+        return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+    # HALF_OPEN 说明已有 tick 自愈或上次 retry 触发的 probe 在飞,不重复发。冷却期
+    # 兜的是 `last_probe_at` 时间差,拦不住「探测中」——tick arm 后 state=HALF_OPEN
+    # 且 last_probe_at 仍是上一次完成时刻,冷却已过,retry_now 对 HALF_OPEN 又是 no-op,
+    # 会绕过所有拦截并发第二次 probe,两次 record_probe_result 相互覆盖导致横条闪跳。
+    #
+    # probe_in_flight 补 tick 已 arm 但尚未 mark_half_open 的窗口:此时 state 仍是
+    # OPEN_RECOVERABLE 但 _probe_in_flight 已 True,只判 state 会漏。
+    if cb.state_for_test() == CircuitState.HALF_OPEN or cb.probe_in_flight():
+        return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+    # 冷却期内(距上次 probe 完成不足 RETRY_COOLDOWN_SEC)不发新 probe,防 UI
+    # 反复点 / 脚本 curl 打爆 provider。静默返当前 snapshot——前端已在按钮层做本地
+    # 冷却置灰(值同源自 health.retry_cooldown_sec),用户不需要 toast 提示;后端
+    # 这里仍是硬阻,即使脚本绕过 UI 也拦得住。
+    snap = cb.snapshot()
+    if snap.last_probe_at_ms is not None:
+        import time as _time
+
+        elapsed_ms = int(_time.time() * 1000) - snap.last_probe_at_ms
+        if elapsed_ms < int(RETRY_COOLDOWN_SEC * 1000):
+            return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+    await cb.retry_now()
+    omni = get_settings().model.omni
+    if not omni.api_key:
+        # 无 key:直接标记 probe 失败,回 OPEN_CONFIG
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(
+                "no_key",
+                "未配置 API Key",
+                ErrorCategory.CONFIG,
+            ),
+        )
+        return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+    try:
+        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+    except asyncio.CancelledError:
+        # 客户端断开 HTTP(用户切页/关 tab/网络抖动)时 FastAPI 抛 CancelledError。
+        # 此前 retry_now() 已把 state 置 HALF_OPEN,若不复位则 before_call 永久短路、
+        # tick 只 arm OPEN_RECOVERABLE 也不会驱动新 probe,只能改配置或重启。
+        # 走 record_probe_result(fail, RECOVERABLE) 回落到 OPEN_RECOVERABLE 让 tick 接管。
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(
+                "cancelled",
+                "重试被中断",
+                ErrorCategory.RECOVERABLE,
+            ),
+        )
+        raise
+    if result.get("ok"):
+        await cb.record_probe_result(True, None)
+    else:
+        code = result.get("code", "unreachable")
+        cat = (
+            ErrorCategory.CONFIG
+            if code in ("bad_key", "not_found", "rejected_authed")
+            else ErrorCategory.RECOVERABLE
+        )
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(
+                code,
+                result.get("message", ""),
+                cat,
+                # rate_limited 时 probe_chat 会在 result 里回带 retry_after_seconds,
+                # 传给 _grow_backoff_locked 让 backoff 尊重 server Retry-After。
+                result.get("retry_after_seconds"),
+            ),
+        )
+    return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+
+@router.get(
+    "/omni-config/stream",
+    summary="SSE 流:omni 熔断器状态变化时推送 omni_health 事件",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def omni_health_stream():
+    """复用 pipeline._sse_subscribers 广播通道;generator 过滤 event_type=='omni_health'。
+    鉴权支持 Authorization header 或 ?token=... query(EventSource 无法传 header)。
+    """
+    pipeline = manager.perception_service._pipeline
+    q = pipeline.subscribe_sse()
+
+    async def event_generator():
+        try:
+            # 首次连上立刻推一次当前状态,让 web 拿到初始态
+            from dataclasses import asdict
+
+            from miloco.perception.engine.omni.circuit_breaker import (
+                get_omni_circuit_breaker,
+            )
+
+            initial = asdict(get_omni_circuit_breaker().snapshot())
+            yield {
+                "event": "omni_health",
+                "data": json.dumps(initial, ensure_ascii=False),
+            }
+            while True:
+                event_type, data = await q.get()
+                if event_type != "omni_health":
+                    continue
+                yield {
+                    "event": "omni_health",
+                    "data": json.dumps(data, ensure_ascii=False),
+                }
+        except asyncio.CancelledError:
+            pass
+        finally:
+            pipeline.unsubscribe_sse(q)
+
+    return EventSourceResponse(event_generator())
 
 
 # =============================================================================

@@ -32,6 +32,7 @@ import type {
   UsageStats,
   OmniConfigState,
   OmniConfigUpdate,
+  OmniHealth,
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
@@ -1505,6 +1506,51 @@ export async function realTestOmniConfig(
     { method: "POST", body: JSON.stringify(body) },
   );
   return r.data;
+}
+
+// 用户主动触发一次 omni probe(跳过熔断剩余 backoff),返回 OmniConfigState 含新 health。
+export async function realRetryOmniProbe(): Promise<OmniConfigState> {
+  const r = await apiFetch<Normal<OmniConfigState>>(
+    "/api/admin/omni-config/retry",
+    { method: "POST" },
+  );
+  return r.data;
+}
+
+// 订阅 /api/admin/omni-config/stream SSE:熔断器状态变化 → 推送 OmniHealth 快照。
+// 首次连上即会推一次当前状态。返回 unsubscribe 函数。
+//
+// onOpen 可选:**仅在断线后重连成功时**触发(EventSource 'open' 事件首次也会 fire,
+// firstOpenSeen 旗标跳过初次连接)。调用方典型用法是借此 refetch 一次 omni-config,
+// 因为 backend 重启后 config 字段(label/model/base_url)可能变但 SSE 不推 config。
+export function realSubscribeOmniHealth(
+  onHealth: (h: OmniHealth) => void,
+  onOpen?: () => void,
+): () => void {
+  const token = resolveToken();
+  const url = token
+    ? `/api/admin/omni-config/stream?token=${encodeURIComponent(token)}`
+    : "/api/admin/omni-config/stream";
+  const es = new EventSource(url);
+  let firstOpenSeen = false;
+  if (onOpen) {
+    es.addEventListener("open", () => {
+      if (!firstOpenSeen) {
+        firstOpenSeen = true;
+        return;
+      }
+      onOpen();
+    });
+  }
+  es.addEventListener("omni_health", (ev) => {
+    try {
+      const payload = JSON.parse((ev as MessageEvent).data) as OmniHealth;
+      onHealth(payload);
+    } catch {
+      // 忽略解析失败,后端保证 payload 结构。
+    }
+  });
+  return () => es.close();
 }
 
 async function fetchUsageStats(

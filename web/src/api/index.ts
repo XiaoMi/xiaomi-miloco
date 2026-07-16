@@ -40,6 +40,7 @@ import type {
   UsageStats,
   OmniConfigState,
   OmniConfigUpdate,
+  OmniHealth,
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
@@ -404,6 +405,24 @@ export async function testOmniConfig(
 ): Promise<OmniTestResult> {
   return impl.realTestOmniConfig(input);
 }
+
+// 用户点「立即重试」触发一次 omni probe;跳过熔断剩余 backoff。
+export async function retryOmniProbe(): Promise<OmniConfigState> {
+  return impl.realRetryOmniProbe();
+}
+
+// 订阅 omni 熔断器实时健康度变化(全局 top banner 用)。首连即推当前状态,返回 unsubscribe。
+// onOpen 只在断线后重连时触发,调用方借此感知 backend 重启并 refetch config。
+export function subscribeOmniHealth(
+  onHealth: (h: OmniHealth) => void,
+  onOpen?: () => void,
+): () => void {
+  return impl.realSubscribeOmniHealth(onHealth, onOpen);
+}
+
+// SSE 重连后广播的全局事件名:让「模型」页监听并 refetch config
+// (backend 重启会断 SSE,重连意味着 config 可能已变)。
+export const OMNI_CONFIG_STALE_EVENT = "miloco:omni-config-stale";
 
 // ── 性能 tab（observability）────────────────────────────
 // backend observability/router.py 不走 Normal 包装,直接返回原始 JSON。

@@ -310,9 +310,47 @@ export interface OmniProfile extends OmniModelConfig {
   active: boolean;
 }
 
+/** omni 熔断器实时健康度（对齐后端 HealthSnapshot）。 */
+export interface OmniHealth {
+  /** ok=正常;warn=可恢复错(重试中);error=不可恢复错(配置无效,已软停)。 */
+  state: "ok" | "warn" | "error";
+  /** 错误机器码;state=ok 时为 null。 */
+  code:
+    | null
+    | "unreachable" | "timeout" | "http_error" | "rate_limited"
+    | "bad_key" | "not_found" | "rejected_authed" | "bad_response"
+    | "no_key" | "cancelled";
+  /** 本地化文案。 */
+  message: string;
+  /** 当前非 ok 状态起始时间;ok 时为 0。 */
+  since_ms: number;
+  /** 累计连续失败次数;每次熔断关闭时清零。 */
+  consecutive_failures: number;
+  /** 下次自动探测时刻(unix ms);仅 warn 状态非空。 */
+  next_probe_at_ms: number | null;
+  /** 下次自动探测的剩余秒数(monotonic 差算,不受两端时钟偏差影响);仅 warn 状态非空。
+   *  前端倒计时应吃这个字段,不再算 next_probe_at_ms - Date.now()。 */
+  next_probe_in_seconds: number | null;
+  /** 最近一次探测时刻(unix ms)。 */
+  last_probe_at_ms: number | null;
+  /** 最近一次探测结果。 */
+  last_probe_result: "ok" | "fail" | null;
+  /** 「立即重试」按钮的本地冷却时长(秒),与后端 retry 端点冷却期同源。 */
+  retry_cooldown_sec: number;
+  /** 距离下次可以真发 retry probe 的剩余秒数(monotonic 差算,不受时钟偏差影响)。
+   *  按钮置灰用这个而不是本地 Date.now() 锚点,避免前端锚点早于后端 last_probe_at
+   *  记录点导致「按钮可点但后端仍在冷却期」的静默拒。 */
+  retry_available_in_seconds: number | null;
+}
+
+/** active 字段扩展:附带熔断器的 health snapshot。 */
+export interface OmniActiveConfig extends OmniModelConfig {
+  health: OmniHealth;
+}
+
 /** GET /omni-config 返回：当前生效 active + 已存档案 profiles。 */
 export interface OmniConfigState {
-  active: OmniModelConfig;
+  active: OmniActiveConfig;
   profiles: OmniProfile[];
 }
 
@@ -347,7 +385,9 @@ export interface OmniConfigUpdate {
 /** 测试连接结果：ok=true 即连通；否则 message 给出原因（Key 无效 / 不可达 / 模型不存在等）。 */
 export interface OmniTestResult {
   ok: boolean;
-  /** 机器码,前端按它本地化(ok/bad_key/not_found/rejected_authed/unreachable/no_key/http_error);缺省回退 message。 */
+  /** 机器码,前端按它本地化;缺省回退 message。与 error_classifier.CODES 一致:
+   *  ok / bad_key / no_key / not_found / rejected_authed / unreachable / timeout /
+   *  http_error / rate_limited / bad_response / cancelled。 */
   code?: string;
   status?: number;
   latency_ms?: number;
