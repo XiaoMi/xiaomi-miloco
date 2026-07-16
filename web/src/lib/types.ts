@@ -95,7 +95,9 @@ export interface Scene {
 
 // ── 活动事件(meaningful_events)─────────────────────────────
 // 数据源:GET /api/events(perception/events_router).
-// 一次感知推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids 记录参与摄像头.
+// 一次感知推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids 记录本行真正相关的
+// 摄像头——有 rule/suggestion/asr 命中时收窄到其 source_device_ids,否则退化为本次
+// 推理中成功出图(可落盘)的全部摄像头.
 // `text` 字段是 agent webhook 收到的同一段聚合文本(单源真值,B2 约束).
 //
 // has_rule_hit / has_suggestion / has_asr 只用于诊断,**UI 不渲染 badge**(B14:
@@ -110,7 +112,7 @@ export interface ActivityEvent {
   /** 成功落 clip 的 device 数(0 ~ len(device_ids);每 device 1 个 mp4/m4a 文件);
    *  字段名沿用历史,语义现是 device 数而非帧数.0 表示 metadata-only(磁盘满 / 落盘失败) */
   snapshot_count: number;
-  /** 参与本次推理的 device_id 列表;clip URL 拼接用(eventClipUrl) */
+  /** 本次事件相关的 device_id 列表;clip URL 拼接用(eventClipUrl) */
   device_ids: string[];
   /** rule_id → rule_name 映射;UI 渲染规则提醒时把 [rule_id] 替换成 rule_name */
   rule_names?: Record<string, string>;

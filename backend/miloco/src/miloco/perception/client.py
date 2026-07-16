@@ -857,6 +857,31 @@ class PerceptionEngineProxy:
 # ─── meaningful_events 后台持久化(异步,不阻塞 webhook 主路径)───────────
 
 
+def _collect_relevant_device_ids(result: RealtimePerceptionResult) -> list[str]:
+    """本行事件真正"有意义"的来源摄像头(去重,保序).
+
+    一次推理批次(processor.py 传入的 device_ids)可能包含全屋所有摄像头,但
+    matched_rules / suggestions / needs_response speech 各自的 source_device_ids
+    才是"引发这行事件"的那台/那几台摄像头(engine 逐设备跑 pipeline 时按
+    input_slice.device.did 精确注入,见 pipeline.py:_inject_source_meta)。
+    用于把展示的 clip 收窄到真正相关的摄像头,避免规则只绑玄关却带出书房画面。
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in (*result.matched_rules, *result.suggestions):
+        for did in item.source_device_ids:
+            if did not in seen:
+                seen.add(did)
+                ordered.append(did)
+    for s in result.speeches:
+        if s.needs_response and s.is_complete:
+            for did in s.source_device_ids:
+                if did not in seen:
+                    seen.add(did)
+                    ordered.append(did)
+    return ordered
+
+
 async def _persist_meaningful_event(
     *,
     result: RealtimePerceptionResult,
@@ -930,6 +955,20 @@ async def _persist_meaningful_event(
                     pass
 
         text = build_agent_text(result, rule_names=rule_names, rule_queries=rule_queries)
+
+        # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
+        # 否则 device_ids 和 artifacts.clips 必须同步收窄——两者分别驱动"日志展示哪些
+        # 摄像头"和"落盘哪些摄像头的 clip",不同步会导致不相关摄像头的 clip 被落盘、
+        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 文档的
+        # "0 ~ len(artifacts.clips)"不变量)。trace / gallery 不是按事件相关性归属的
+        # 产物,不参与收窄。
+        relevant_device_ids = _collect_relevant_device_ids(result)
+        if relevant_device_ids:
+            device_ids = [did for did in device_ids if did in relevant_device_ids]
+            artifacts.clips = {
+                did: payload for did, payload in artifacts.clips.items()
+                if did in relevant_device_ids
+            }
 
         insert_ok = dao.insert(
             event_id=event_id,

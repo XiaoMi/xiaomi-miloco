@@ -478,7 +478,8 @@ class PerceptionLogEntry(BaseModel):
 class MeaningfulEvent(BaseModel):
     """有意义事件(family-ui Activity tab 展示用).
 
-    一次推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids JSON 记录参与摄像头.
+    一次推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids JSON 记录本行真正相关的摄像头
+    (语义详见下方 device_ids 字段的 description).
     `text` 字段与 agent webhook 收到的同一段聚合文本(B2 单源真值).
     响应不含 payload_json / schema_version / created_at(后端复盘用,API 不返).
     """
@@ -495,7 +496,10 @@ class MeaningfulEvent(BaseModel):
     )
     device_ids: list[str] = Field(
         default_factory=list,
-        description="参与本次推理的 device_id 列表(对齐实际可落盘 frames)",
+        description=(
+            "本次事件相关的 device_id 列表(对齐实际可落盘 frames)。有 rule/suggestion/asr "
+            "命中时收窄到其 source_device_ids,否则退化为本次推理中成功出图(可落盘)的全部摄像头"
+        ),
     )
     rule_names: dict[str, str] = Field(
         default_factory=dict,
