@@ -23,11 +23,10 @@
 miloco-cli task list --pretty
 ```
 
-返回每个 task 的 task_id / description / status / rule_briefs / cron_refs / links。
+返回每个 task 的 task_id / description / status / rule_briefs / cron_refs。
 
 - `rule_briefs`: rule 摘要列表（rule_id / query / actions_desc）
 - `cron_refs`: cron 引用列表（`ref` + `dispatch_owner`；`internal` = backend 完整管理，`external` = 只存引用，触发仍走 openclaw 老通路，需 agent 通过自然语言指令处理）
-- `links`: v1 兼容字段（backfill 由 rule / cron 联合构造，`{kind, ref}` 结构；新 caller 直接读 rule_briefs / cron_refs）
 
 **回复**:≤30 字简述 + Markdown 表(task_id / 概要 / 状态)。
 
