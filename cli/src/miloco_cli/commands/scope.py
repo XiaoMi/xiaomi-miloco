@@ -75,8 +75,9 @@ def scope_camera():
 def scope_camera_list(pretty):
     """列出全部摄像头；in_use=当下真正开启(活跃集,≤4)，三态可用性 cloud_online(云端在线)/
     lan_reachable(局域网可达)/awake(镜头开关:true=开/false=关/null=未知)，connected=视频流已连接。
-    多通道相机(双摄)每路一行，did 显示为合成 did did:chN(单摄保持裸 did)——该 did 可直接用于
-    enable/disable/mic-on/off 精确到某一路。"""
+    多通道相机(双摄)每路一行，did 显示为合成 did did:chN(单摄保持裸 did)——该 did 可直接复制给
+    enable/disable 精确到某一路；mic-on/off 是相机级(拾音只在球机/ch0，:chN 会被归一到整台，
+    不精确到路)。"""
     print_result(_compose_channel_dids(api_get(_CAMERAS_PATH)), pretty)
 
 
