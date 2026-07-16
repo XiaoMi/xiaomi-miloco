@@ -38,6 +38,7 @@ from .constants import (
     _COMMONSENSE,
     _COMMONSENSE_AUDIO,
     _EXAMPLE_CHAIN,
+    _EXAMPLE_CHAIN_NO_NAME,
     _EXAMPLE_IDENTITY,
     _HISTORY_HEADER,
     _OUTPUT_MODE_FREE,
@@ -53,6 +54,7 @@ from .constants import (
 )
 from .field_registry import SceneDescriptor, render_field_spec, render_schema
 from .home_profile_loader import get_home_profile_prefix
+from .provider import LocalMediaInfo, OmniProviderAdapter
 
 RouteType = Literal["video", "audio"]
 
@@ -106,7 +108,7 @@ def build_prompt(
         label_lookup: person_id (UUID) → 姓名/标签 反查表，渲染 "已识别人物" 段时把
                       UUID 替换为人名。None 时直接渲染 person_id 字段值（与旧行为兼容）。
 
-    Returns dict with keys: system_prompt, user_content, video_base64, video_fps, crops.
+    Returns dict with keys: system_prompt, user_content, video_base64, media_info, crops.
     """
     return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup)
 
@@ -153,11 +155,13 @@ def build_query_prompt(
     home_profile = get_home_profile_prefix()
     if home_profile:
         parts.append(home_profile)
+    short_edge = _get_video_short_edge()
+    video_b64, media_info = _encode_batch_video(identity_packets, short_edge=short_edge)
     return {
         "system_prompt": "\n\n".join(parts),
         "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
-        "video_base64": _encode_batch_video(identity_packets),
-        "video_fps": identity_packets[0].frame_info.fps if identity_packets else 1,
+        "video_base64": video_b64,
+        "media_info": media_info,
         "crops": [],
     }
 
@@ -169,6 +173,8 @@ def build_fused_payload(
     gallery_snapshot: dict[str, "GallerySamples"],
     config: FusedPromptConfig | None = None,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: OmniProviderAdapter | None = None,
+    matching_moot: bool = False,
 ) -> dict:
     """构造 fused 主调用的 payload（身份识别和场景理解合并到同一次 omni 调用）。
 
@@ -189,14 +195,21 @@ def build_fused_payload(
         config:            FusedPromptConfig；None 走默认值
         label_lookup:      person_id → 姓名/标签 反查表（供 ``_build_device_header`` 渲染人名）；
                            None 时由本函数自动从 gallery_snapshot 构造
+        matching_moot:     身份库为空（无注册成员）→ 成员匹配不可能。True 时 identities 字段
+                           改精简版（只判 unknown/no_person）、gallery 段整段不渲染。no_person
+                           判定链路不变（见 field_registry.IDENTITY_NO_MATCH）。
 
     Returns:
         dict，含字段：
           - ``messages``：直接构建好的 OpenAI 兼容 messages 列表（system + user）
-          - ``video_fps``：调用 omni_client 时填进 video block
           - ``candidate_track_ids``：本次 dispatch 候选 track id 列表（debug + 校验用）
     """
     cfg = config or FusedPromptConfig()
+    if adapter is None:
+        from miloco.config import get_settings
+
+        from .provider import get_adapter as _get_adapter
+        adapter = _get_adapter(get_settings().model.omni.model)
     if not packets:
         raise ValueError("build_fused_payload: packets 不能为空")
 
@@ -220,12 +233,8 @@ def build_fused_payload(
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
         if context.room_name:
             user_content.append({"type": "text", "text": f"位置: {context.room_name}"})
-        # 跟 video_b64 / _jpeg_block 同款 size gate, 防极短损坏 b64 入 payload。
         if audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
-            user_content.append({
-                "type": "input_audio",
-                "input_audio": {"data": f"data:audio/m4a;base64,{audio_b64}"},
-            })
+            user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate)))
         elif audio_b64:
             logger.warning(
                 "event=fused_audio_b64_too_short size=%d (< %d), 跳过 input_audio 块, "
@@ -240,12 +249,11 @@ def build_fused_payload(
                 rule_conditions=None,
                 readonly_history=_build_readonly_history(context),
             ),
-            "video_fps": packets[0].frame_info.fps,
             "candidate_track_ids": [],
         }
 
-    fps = packets[0].frame_info.fps
-    video_b64 = _encode_batch_video(packets)
+    short_edge = _get_video_short_edge()
+    video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
@@ -254,6 +262,7 @@ def build_fused_payload(
         route="video", has_identity=bool(candidates), stream=False,
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
+        identity_match_disabled=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False)
     user_content = _build_fused_user_content(
@@ -262,9 +271,11 @@ def build_fused_payload(
         candidates=candidates,
         gallery_snapshot=gallery_snapshot,
         video_b64=video_b64,
-        video_fps=fps,
+        media_info=media_info,
+        adapter=adapter,
         cfg=cfg,
         label_lookup=label_lookup,
+        matching_moot=matching_moot,
     )
 
     messages = _assemble_fused_messages(
@@ -276,7 +287,6 @@ def build_fused_payload(
 
     return {
         "messages": messages,
-        "video_fps": fps,
         "candidate_track_ids": [c.track_id for c in candidates],
     }
 
@@ -378,9 +388,12 @@ def _build_payload(
     if route == "audio":
         ep = packets[0]
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
+        base["media_info"] = _audio_only_media_info(ep.sample_rate)
     else:
-        base["video_base64"] = _encode_batch_video(packets)
-        base["video_fps"] = packets[0].frame_info.fps
+        short_edge = _get_video_short_edge()
+        video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
+        base["video_base64"] = video_b64
+        base["media_info"] = media_info
     return base
 
 
@@ -454,7 +467,12 @@ def _render_task_list(scene: SceneDescriptor) -> str:
         av = av2 = "视频"
     items: list[str] = []
     if scene.has_identity:
-        items.append("身份识别：对照图片库，识别画面中的人对应库中哪一位（或都不是）")
+        if scene.identity_match_disabled:
+            # 库空：没有成员可对照，任务收敛为「判真人 / 非人误检」，与精简版 identities spec 一致，
+            # 不再写「对照图片库…库中哪一位」这类成员匹配任务（否则与精简 spec 自相矛盾、白占 token）。
+            items.append("身份识别：判断画面中每个目标是真人还是被误检成人的非人物体（本轮无注册成员，不做成员匹配）")
+        else:
+            items.append("身份识别：对照图片库，识别画面中的人对应库中哪一位（或都不是）")
     if scene.route == "video":
         items.append("视频理解：描述画面中的人、宠物、物体，优先描述动态部分")
     if scene.has_audio:
@@ -484,13 +502,22 @@ def _render_examples(scene: SceneDescriptor) -> str:
     has_speech=False（VAD 判无人声、speeches 已剥）时：实例 A 的输出含 speeches（且是
     needs_response 指令），留着会与剥掉的 schema 矛盾、并重新诱导脑补人声指令，故不附
     实例 A（身份判定已由「## identities」充分约束）；实例 B 无 speeches、照常附。
+
+    identity_match_disabled=True（库空）时同样不附实例 A：它演示的是成员匹配（摆
+    ``<gallery>`` 成员、输出成员名 + 五官匹配 reason），与库空的精简版 identities
+    spec / schema（只判 unknown/no_person、无 gallery）自相矛盾，且抵消库空省 token 的
+    目标；身份任务已由精简版「## identities」充分约束。实例 B 无 identities 字段、照常附。
     """
     if scene.route == "audio" or not scene.has_audio:
         return ""
     examples = []
-    if scene.has_identity and scene.has_speech:
+    if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
-    examples.append(_EXAMPLE_CHAIN)
+    # 库空时实例 B 用泛称版：此窗无成员铺垫（实例 A 已 gate 掉），caption 示范不该叫专名，
+    # 与「库空不产成员名」收敛一致。库非空照旧用带名版（其"小明"由上方实例 A 的 gallery 铺垫）。
+    examples.append(
+        _EXAMPLE_CHAIN_NO_NAME if scene.identity_match_disabled else _EXAMPLE_CHAIN
+    )
     return "# 输出实例\n\n" + "\n\n".join(examples)
 
 
@@ -555,14 +582,20 @@ def _build_fused_user_content(
     candidates: list["IdentityQueryItem"],
     gallery_snapshot: dict[str, "GallerySamples"],
     video_b64: str | None,
-    video_fps: int,
+    media_info: LocalMediaInfo | None,
+    adapter: OmniProviderAdapter,
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
+    matching_moot: bool = False,
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
 
     fused 模式专用：与纯文本版 ``_build_user_content`` 不同，本函数返回
     ``list[dict]``（OpenAI 多模态 content array），不是 ``str``。
+
+    ``matching_moot=True``（身份库为空）时整个 gallery 段不渲染——库空无成员可比对，
+    identities 已由精简版 spec 指示"只判 unknown/no_person"（见 build_fused_payload），
+    此处不再塞"<gallery>库为空…"这类无用文本。待识别 track 列表仍照常渲染（no_person 判定按 track 给结论）。
     """
     gallery_content: list[dict] = []
 
@@ -572,7 +605,10 @@ def _build_fused_user_content(
     # 人，omni 容易把他的脸贴到 gallery 里最相似的另一位 → 错认（caption/speeches
     # 全跟着错），代价比"漏识别"高一个量级。face 是 nice-to-have，单人 face 失败不
     # 触发放弃。
-    if candidates:
+    #
+    # matching_moot（身份库为空）→ 整段跳过：库空无成员可比对，精简版 identities spec 已
+    # 指示只判 unknown/no_person，不需要 gallery 图，也不再塞"库为空"占位文本。
+    if candidates and not matching_moot:
         if gallery_snapshot:
             # 渲染上限保护：超出 cfg.max_gallery_persons 仅取前 N 人，避免 prompt token 爆
             gallery_items = list(gallery_snapshot.items())
@@ -680,12 +716,7 @@ def _build_fused_user_content(
     # base64 串, 入 payload 会让 omni 服务端 400 Multimodal data is corrupted。
     # 太短 → 跳过 video_url 块, 退化为"无视频窗口"(text + gallery 仍能识别)。
     if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
-        content.append({
-            "type": "video_url",
-            "video_url": {"url": f"data:video/mp4;base64,{video_b64}"},
-            "fps": video_fps,
-            "media_resolution": "max",
-        })
+        content.append(adapter.build_video_block(video_b64, media_info))
     elif video_b64:
         logger.warning(
             "event=fused_video_b64_too_short size=%d (< %d), 跳过 video_url 块, "
@@ -1063,7 +1094,22 @@ def _resolve_person_face_jpg(
 # Video encoding (frames + audio → mp4)
 # =============================================================================
 
-_VIDEO_SHORT_EDGE = 512
+_VIDEO_SHORT_EDGE = 512  # fallback; runtime value from settings.yaml / config.json via _get_video_short_edge()
+
+
+def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
+    return LocalMediaInfo(
+        video_width=0, video_height=0, fps=0, frame_count=0,
+        has_audio=True, audio_sample_rate=sample_rate,
+    )
+
+
+def _get_video_short_edge() -> int:
+    try:
+        from miloco.config import get_settings
+        return get_settings().perception.engine.get("input", {}).get("video_short_edge", _VIDEO_SHORT_EDGE)
+    except Exception:
+        return _VIDEO_SHORT_EDGE
 _CROP_SIZE = (512, 512)
 
 # 多模态 payload sanity check 下限 — 防"非 None 但实际损坏"的 bytes 入 payload
@@ -1119,19 +1165,15 @@ def _batch_video_has_speech(packets: list[IdentityPacket]) -> bool:
     return False
 
 
-def _encode_video(identity_packet: IdentityPacket) -> str | None:
-    """Encode all frames + audio into mp4 video, return base64.
-
-    若 ContextVar `event_artifacts_scope` 在当前 task 中激活,`_encode_video_mp4`
-    会在 resize 后旁路 append 帧给 meaningful_events 截图复用.snapshot 落的就是
-    omni 实际看到的那份 frames.
-    """
+def _encode_video(
+    identity_packet: IdentityPacket,
+    short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[str | None, LocalMediaInfo | None]:
+    """Encode all frames + audio into mp4 video, return ``(base64, media_info)``。"""
     frames = identity_packet.all_frames
     if not frames:
-        return None
+        return None, None
 
-    # audio gate 没通过(audio_active=False)就不把音频喂进 mp4：办公底噪等被持续转写会让
-    # Omni 在低信息音频上幻觉出"看起来像指令"的话。trigger=None(主动查询/旧路径)保持原行为。
     audio = (
         identity_packet.audio_clip
         if _packet_audio_included(identity_packet)
@@ -1142,6 +1184,7 @@ def _encode_video(identity_packet: IdentityPacket) -> str | None:
         audio,
         identity_packet.sample_rate,
         fps=identity_packet.frame_info.fps,
+        short_edge=short_edge,
     )
 
 
@@ -1150,8 +1193,11 @@ def _encode_video_mp4(
     audio_clip: NDArray[np.int16],
     sample_rate: int,
     fps: int,
-) -> str | None:
+    short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[str | None, LocalMediaInfo | None]:
     """Encode BGR frames + PCM audio into mp4 using PyAV.
+
+    Returns ``(base64_str, media_info)``。
 
     Uses a temp file because mp4 container requires seekable output.
 
@@ -1167,7 +1213,7 @@ def _encode_video_mp4(
     from miloco.perception.snapshot_context import push_clip_bytes
 
     if not frames:
-        return None
+        return None, None
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
@@ -1175,10 +1221,8 @@ def _encode_video_mp4(
     try:
         container = av.open(tmp_path, "w")
 
-        # Video stream — scale to short-edge = _VIDEO_SHORT_EDGE, keep aspect ratio.
-        # h264 requires even dimensions, so round to nearest even number.
         h0, w0 = frames[0].shape[:2]
-        scale = _VIDEO_SHORT_EDGE / min(h0, w0)
+        scale = short_edge / min(h0, w0)
         target_w = int(w0 * scale) // 2 * 2
         target_h = int(h0 * scale) // 2 * 2
         v_stream = container.add_stream("h264", rate=fps)
@@ -1227,9 +1271,16 @@ def _encode_video_mp4(
 
         with open(tmp_path, "rb") as f:
             mp4_bytes = f.read()
-        # 旁路把 omni 看到的字节级 mp4 push 给 meaningful_events 复用(零重编)
         push_clip_bytes(mp4_bytes, "mp4")
-        return base64.b64encode(mp4_bytes).decode()
+        media_info = LocalMediaInfo(
+            video_width=target_w,
+            video_height=target_h,
+            fps=fps,
+            frame_count=len(frames),
+            has_audio=has_audio,
+            audio_sample_rate=sample_rate if has_audio else 0,
+        )
+        return base64.b64encode(mp4_bytes).decode(), media_info
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -1346,16 +1397,20 @@ def _encode_audio_only_mp4(
             os.unlink(tmp_path)
 
 
-def _encode_batch_video(edge_packets: list[IdentityPacket]) -> str | None:
+def _encode_batch_video(
+    edge_packets: list[IdentityPacket],
+    short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[str | None, LocalMediaInfo | None]:
     """Encode video from the first device that has frames.
 
     audio route 由 _build_payload 短路，不会进入本函数。
+    返回 ``(base64_str, media_info)``。
     """
     for ep in edge_packets:
-        encoded = _encode_video(ep)
-        if encoded is not None:
-            return encoded
-    return None
+        b64, media_info = _encode_video(ep, short_edge=short_edge)
+        if b64 is not None:
+            return b64, media_info
+    return None, None
 
 
 def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, str]]:

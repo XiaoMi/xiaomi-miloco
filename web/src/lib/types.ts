@@ -190,9 +190,26 @@ export interface ScopeCamera {
   // 米家分配的房间名（"客厅" / "卧室" / ...）。多摄像头家庭里 name 常是
   // "小米智能摄像机 2 代"等泛称，靠 roomName 才能区分。米家未分房间时为空。
   roomName?: string;
-  isOnline: boolean;
+  // 三个正交可用性指标（替代旧的一把揉 isOnline）：
+  cloudOnline: boolean; // 米家云端在线
+  lanReachable: boolean; // 局域网可达（拉流前提）
+  // 镜头开关（camera-control:on）。true=镜头开启 / false=镜头关闭(隐私·遮挡) /
+  // null=该机型无开关属性或读取失败（未知）。
+  awake: boolean | null;
+  // 当下真正开启（后端 = 在活跃集里：默认开·未拉黑 + 三态满足 + 上限≤4）。离线/
+  // 不可达/镜头关的相机 inUse=false，不显示为开；超上限的也不算开。
   inUse: boolean;
+  // 拾音「存储偏好」（PUT /api/miot/scope/cameras/voice）。false = mic-off：该相机
+  // 声音完全不被处理（引擎入口剥离音频，不转写、不上云）。与 inUse 正交：
+  // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
+  voiceInUse: boolean;
   connected: boolean;
+}
+
+// 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。
+// awake=null(机型无开关/未知) 不算不可用（与后端放行口径一致）。
+export function cameraAvailable(c: ScopeCamera): boolean {
+  return c.cloudOnline && c.lanReachable && c.awake !== false;
 }
 
 // ── 米家家庭接入范围(scope.homes)─────────────────────────────────
@@ -578,6 +595,8 @@ export interface TaskRecordSummary {
   completed: boolean;
   // duration 当前计时段（非 duration 恒 null）
   activeSession: { startedAt: string; elapsedMinutes: number } | null;
+  // 距当前 window（当日 24:00 上海时区）边界的剩余时间；window=all 或后端未返时为 null。
+  windowRemaining: { seconds: number; display: string } | null;
   // 按 kind 形态不同的派生量，原样透传 backend snake_case：
   //   progress: target / current / unit / remaining / progress_pct
   //   duration: target_minutes / accumulated_minutes_today / remaining_minutes
@@ -585,10 +604,31 @@ export interface TaskRecordSummary {
   derived: Record<string, unknown>;
 }
 
+// 驱动规则摘要 / 关联：后端 summary 接口（GET /api/tasks/summary）返回的
+// TaskSummaryView 继承 TaskFullView，本就带 rule_briefs / links，故随列表一并
+// 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
+export interface TaskRuleBrief {
+  ruleId: string;
+  // 规则的自然语言条件（"孩子在书桌前学习" 之类）
+  query: string;
+  // 命中后执行的动作人话摘要
+  actionsDesc: string[];
+}
+
+export interface TaskLinkEntry {
+  kind: "rule" | "cron";
+  ref: string;
+}
+
+// 任务视图 = 基础字段 + record 进度摘要 + 驱动规则/关联，一次 summary 请求全拿到。
 export interface Task {
   taskId: string;
   description: string;
   status: TaskStatus;
+  pausedAt: string | null;
   createdAt: string;
   record: TaskRecordSummary | null;
+  // 详情抽屉「有价值的详情」：驱动规则与关联，随 summary 一并返回。
+  ruleBriefs: TaskRuleBrief[];
+  links: TaskLinkEntry[];
 }

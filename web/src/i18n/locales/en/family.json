@@ -123,28 +123,6 @@
     "profileEmptyHint": "The system records daily habits and preferences automatically; you can also add profile info manually",
 
     "candidateTitle": "Observing",
-    "candidateHint": "Info observed from daily life, recorded to the home profile only after you confirm",
-
-    "taskTitle": "Family tasks",
-    "taskCount": "{{count}} in total",
-    "taskHint": "Ongoing tasks Miloco created for your home — view progress, pause or remove",
-    "taskEmpty": "No tasks yet",
-    "taskEmptyHint": "Tasks Miloco creates for you will show up here",
-    "taskCompleted": "Done",
-    "taskPause": "Pause task",
-    "taskEnable": "Enable task",
-    "taskMore": "More",
-    "taskDelete": "Delete",
-    "taskConfirmDeleteTitle": "Delete task",
-    "taskConfirmDeleteMessage": "Delete \"{{desc}}\"? The task and its rules and records will be removed and cannot be recovered.",
-    "taskPaused": "Task paused",
-    "taskEnabled": "Task enabled",
-    "taskDeleted": "Task deleted",
-    "taskProgress": "{{current}}/{{target}} {{unit}}",
-    "taskDurationToday": "{{minutes}} min today",
-    "taskDurationTarget": "target {{minutes}} min",
-    "taskTiming": "Timing",
-    "taskEventTotal": "{{count}} times total",
-    "taskEventToday": "{{count}} today"
+    "candidateHint": "Info observed from daily life, recorded to the home profile only after you confirm"
   }
 }

@@ -33,7 +33,7 @@ def _make_proxy(engine=None) -> PerceptionEngineProxy:
     p._status = "ready" if engine is not None else "no_omni_api_key"
     p._status_message = ""
     p._last_captions = {}
-    p._executor = None
+    p._inference_worker = None
     p._engine_lock = asyncio.Lock()
     return p
 

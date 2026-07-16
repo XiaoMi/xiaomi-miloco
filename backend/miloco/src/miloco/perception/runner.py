@@ -13,11 +13,11 @@ The perception loop reacts to two triggers:
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 
 from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.perception.collect.collector import MultimodalCollector
+from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.processor import PipelineProcessor
 from miloco.perception.schema import EngineState, PerceptionEngineStatus
 
@@ -44,11 +44,14 @@ class PerceptionRunner:
         self._sync_devices_task: asyncio.Task | None = None
         self._window_ready = window_ready_event
 
-        # Dedicated single-thread executor for inference — keeps the main
-        # event loop free for stream frame callbacks.
-        self._inference_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="perception-infer"
-        )
+        # Persistent worker thread with a durable event loop for inference.
+        # Replaces the old ThreadPoolExecutor + asyncio.run() pattern that
+        # leaked threads via repeated default executor creation. Safe to
+        # stop() then start() again on this same instance — see its
+        # docstring for how it isolates each restart's thread/loop so a
+        # still-draining previous generation never blocks or races the new
+        # one.
+        self._inference_worker = InferenceWorker(thread_name="perception-infer")
 
     @property
     def is_running(self) -> bool:
@@ -86,20 +89,26 @@ class PerceptionRunner:
 
         self._is_running = True
 
-        # Recreate executor if it was shut down by a previous stop()
-        if self._inference_executor._shutdown:
-            self._inference_executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="perception-infer"
-            )
+        # 重启时重读窗口时长（config 可能在停止期间被改）——__init__ 只读一次，
+        # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
+        self._collect_interval = get_settings().perception.collect.window_size
+
+        # Restart worker if it was stopped by a previous stop(). Safe even
+        # if that previous generation's thread hasn't exited yet (it may
+        # still be draining a non-preemptible ONNX call) — start() spins up
+        # a new generation on this same instance without waiting on the old
+        # one; see InferenceWorker's docstring.
+        if not self._inference_worker.is_running:
+            self._inference_worker.start()
 
         # 显式启动/重启(含「重启感知」按钮):全可恢复态重建一次,含 engine_init_failed
         # ——引擎构造失败(如临时磁盘满)补救后靠这条恢复,不在 tick 每秒重试重型构造。
-        # 必须在 set_inference_executor 之前,确保引擎已存在再挂 executor。
+        # 必须在 set_inference_worker 之前,确保引擎已存在再挂 worker。
         self._pipeline.try_reinit_engine(include_failed=True)
 
-        # Attach inference executor to engine proxy so perceive calls
+        # Attach inference worker to engine proxy so perceive calls
         # run in the dedicated thread, not on the main event loop.
-        self._pipeline.set_inference_executor(self._inference_executor)
+        self._pipeline.set_inference_worker(self._inference_worker)
 
         # Initial device sync before first tick
         await self._collector.sync_all_devices()
@@ -131,7 +140,7 @@ class PerceptionRunner:
         self._perception_task = None
         self._sync_devices_task = None
 
-        self._inference_executor.shutdown(wait=False)
+        self._inference_worker.shutdown(wait=False)
 
         # 关闭 perception engine（含 IdentityEngine dispatcher worker 等）
         try:

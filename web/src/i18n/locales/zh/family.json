@@ -123,28 +123,6 @@
     "profileEmptyHint": "系统将自动记录日常习惯与偏好，你也可以手动补充档案信息",
 
     "candidateTitle": "观察中",
-    "candidateHint": "从日常里观察到的信息，确认后才会记入家庭档案",
-
-    "taskTitle": "家庭任务",
-    "taskCount": "共 {{count}} 个",
-    "taskHint": "Miloco 为家庭创建的持续任务，可查看进度、暂停或删除",
-    "taskEmpty": "暂无任务",
-    "taskEmptyHint": "当 Miloco 为你创建持续任务后，会在这里展示",
-    "taskCompleted": "已完成",
-    "taskPause": "暂停任务",
-    "taskEnable": "启用任务",
-    "taskMore": "更多",
-    "taskDelete": "删除",
-    "taskConfirmDeleteTitle": "删除任务",
-    "taskConfirmDeleteMessage": "确定删除「{{desc}}」？任务及其规则、记录会一并清理，不可恢复。",
-    "taskPaused": "已暂停任务",
-    "taskEnabled": "已启用任务",
-    "taskDeleted": "已删除任务",
-    "taskProgress": "{{current}}/{{target}} {{unit}}",
-    "taskDurationToday": "今日 {{minutes}} 分钟",
-    "taskDurationTarget": "目标 {{minutes}} 分钟",
-    "taskTiming": "计时中",
-    "taskEventTotal": "共 {{count}} 次",
-    "taskEventToday": "今日 {{count}} 次"
+    "candidateHint": "从日常里观察到的信息，确认后才会记入家庭档案"
   }
 }

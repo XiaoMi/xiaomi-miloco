@@ -212,6 +212,14 @@ export async function deleteTask(taskId: string): Promise<void> {
   return impl.realDeleteTask(taskId);
 }
 
+// 改任务描述。
+export async function updateTaskDescription(
+  taskId: string,
+  description: string,
+): Promise<void> {
+  return impl.realUpdateTaskDescription(taskId, description);
+}
+
 // ── 设备 ──────────────────────────────────────────────────
 export async function listDevices(homeId?: HomeId): Promise<Device[]> {
   if (!isPrimary(homeId)) return [];
@@ -276,9 +284,12 @@ export async function listScopeCameras(homeId?: HomeId): Promise<ScopeCamera[]> 
 
 // 轻量触发 backend 刷新相机云端 online 状态(节流见 impl,不扰流)。「此刻」页加载
 // 相机前调,让"已离线/在线"判断不读陈旧缓存。非主家庭(mock)直接 no-op。
-export async function refreshCameraOnline(homeId?: HomeId): Promise<void> {
+export async function refreshCameraOnline(
+  homeId?: HomeId,
+  force = false,
+): Promise<void> {
   if (!isPrimary(homeId)) return;
-  return impl.realRefreshCameraOnline();
+  return impl.realRefreshCameraOnline(force);
 }
 
 export async function toggleScopeCamera(
@@ -286,6 +297,15 @@ export async function toggleScopeCamera(
   inUse: boolean,
 ): Promise<void> {
   return impl.realToggleScopeCamera(dids, inUse);
+}
+
+// 切换相机拾音开关（PUT /api/miot/scope/cameras/voice；关闭 = 声音完全不被处理）。
+// 仅对感知已启用的相机可设。
+export async function toggleScopeCameraVoice(
+  dids: string[],
+  voiceInUse: boolean,
+): Promise<void> {
+  return impl.realToggleScopeCameraVoice(dids, voiceInUse);
 }
 
 export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> {
@@ -527,4 +547,35 @@ export async function getMemorySeries(
   return apiFetch<MemorySeries>(
     `/api/monitor/memory/series?window=${w}&bucket=${bucket}`,
   );
+}
+
+// ─── Perception Config ─────────────────────────────────────────────────
+
+export interface PerceptionConfig {
+  video_short_edge: number;
+  omni_fps: number;
+  window_size: number;
+}
+
+export async function getPerceptionConfig(): Promise<PerceptionConfig> {
+  const r = await apiFetch<{ code: number; data: PerceptionConfig }>(
+    "/api/admin/perception-config",
+  );
+  return r.data;
+}
+
+// PUT 额外带 restart_ok：config 已写盘，但引擎重启可能失败（磁盘满/模型加载异常），
+// 前端据此区分「已生效」与「已保存但需手动重启」，不把后者误报成「保存失败」。
+export type UpdatePerceptionConfigResult = PerceptionConfig & {
+  restart_ok?: boolean;
+};
+
+export async function updatePerceptionConfig(
+  input: Partial<PerceptionConfig>,
+): Promise<UpdatePerceptionConfigResult> {
+  const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
+    "/api/admin/perception-config",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+  return r.data;
 }

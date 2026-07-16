@@ -288,8 +288,11 @@ print(f'  {len(tools)} 个工具, 版本 {manifest[\"version\"]}, 下载 tag v$r
 pack_models() {
     local models_dir="$PROJECT_ROOT/backend/miloco/src/miloco/perception/models"
     if [ ! -d "$models_dir" ] || [ -z "$(ls -A "$models_dir"/*.onnx 2>/dev/null)" ]; then
-        log "models/ 目录为空或不存在，跳过模型打包"
-        return
+        # 硬失败而非跳过：源码目录缺 .onnx 是异常状态（正常 clone 该有），
+        # 空跳只会让下游 pack_platform_bundles 一起空跳、install.py 收到"缺模型" fail，
+        # 排查链路变长。直接在源头中止。
+        log "FATAL: $models_dir 缺 .onnx"
+        exit 1
     fi
 
     local tar_name="miloco-models-${RESOLVED_PEP}.tar.gz"
@@ -309,9 +312,17 @@ pack_platform_bundles() {
     cli_whl=$(ls "$DIST_DIR"/miloco_cli-*.whl 2>/dev/null | head -1)
     tgz=$(ls "$DIST_DIR"/miloco-openclaw-plugin-*.tgz 2>/dev/null | head -1)
 
-    if [[ -z "$miloco_whl" || -z "$cli_whl" || -z "$tgz" || -z "$models_tar" ]]; then
-        log "缺 wheel/tgz/模型 tarball，跳过平台归档打包"
+    # 子集构建（--packages 只构建部分包）本就产不出完整平台归档：跳过而非硬失败，
+    # 否则 sync-to-remote.sh --packages <子集> 这类 dev 工作流会被 set -e 中断。
+    # 全量构建（默认 / CI）时缺文件仍走硬失败，暴露 CI 打包异常。
+    if [[ "$PACKAGES" != "$ALL_PACKAGES" ]]; then
+        log "子集构建（--packages=$PACKAGES），跳过平台归档打包"
         return
+    fi
+
+    if [[ -z "$miloco_whl" || -z "$cli_whl" || -z "$tgz" || -z "$models_tar" ]]; then
+        log "FATAL: 缺失文件 — miloco_whl=$miloco_whl cli_whl=$cli_whl tgz=$tgz models_tar=$models_tar"
+        exit 1
     fi
 
     # raw（= git tag，去掉前导 v）：归档文件名用它，与下载 tag / GitHub Release ref 对齐。

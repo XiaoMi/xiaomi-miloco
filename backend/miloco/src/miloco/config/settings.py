@@ -116,6 +116,15 @@ class DispatcherSettings(BaseModel):
             "每会话 dispatcher 队列上限；超出时按 (类型优先级, 条目级优先级, 入队时间) 淘汰最不紧急者。"
         ),
     )
+    message_ttl_sec: float = Field(
+        default=300.0,
+        description=(
+            "待发送消息在队列中的最大存活时长（秒）；入队龄超过该值的消息在"
+            "「新消息入队」与「打包发送前」两处被清理，不再投递。<=0 = 关闭过期。"
+        ),
+    )
+    # 不加 ge=0.0：与 notify.dedup_window_sec 一致，<=0 语义为「关闭过期」；
+    # 加 ge 会让误配负值直接崩掉整个 settings 加载（后端起不来）。
 
 
 class OmniModelSettings(BaseModel):

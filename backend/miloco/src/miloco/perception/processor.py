@@ -13,7 +13,6 @@ import logging
 import re
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from miloco.config import get_settings
@@ -35,6 +34,7 @@ from miloco.observability.types import (
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.engine.types import RealtimePerceptionResult
+from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.schema import (
     PerceptionBatch,
     PerceptionLatency,
@@ -122,8 +122,8 @@ class PipelineProcessor:
                 self._collector.peek_latest_frame
             )
 
-    def set_inference_executor(self, executor: ThreadPoolExecutor) -> None:
-        """Forward the inference executor to the engine proxy.
+    def set_inference_worker(self, worker: InferenceWorker) -> None:
+        """Forward the inference worker to the engine proxy.
 
         Lifecycle: STARTING → READY (success) / FAILED (异常)。
         """
@@ -131,7 +131,7 @@ class PipelineProcessor:
         mon.set_lifecycle(NodeName.PROCESSOR, Lifecycle.STARTING)
 
         try:
-            self._perception_engine_proxy.set_executor(executor)
+            self._perception_engine_proxy.set_inference_worker(worker)
         except Exception as e:
             state = mon.get_state(NodeName.PROCESSOR)
             if state and state.lifecycle == Lifecycle.STARTING:
@@ -216,6 +216,10 @@ class PipelineProcessor:
     async def stop_to_unconfigured(self) -> None:
         """软停底层引擎(删当前生效模型→回未配态),保留 tick 自愈循环。透传 proxy。"""
         await self._perception_engine_proxy.stop_to_unconfigured()
+
+    async def rebuild(self) -> None:
+        """无条件重建底层引擎(改感知参数后生效用)。透传 proxy。"""
+        await self._perception_engine_proxy.rebuild()
 
     @property
     def last_batch(self) -> PerceptionBatch | None:

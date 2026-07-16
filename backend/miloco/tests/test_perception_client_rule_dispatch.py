@@ -24,7 +24,7 @@ def proxy():
     p = PerceptionEngineProxy.__new__(PerceptionEngineProxy)
     p.perception_engine = MagicMock()
     p._last_captions = {}
-    p._executor = None
+    p._inference_worker = None
     return p
 
 

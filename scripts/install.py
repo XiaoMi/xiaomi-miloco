@@ -576,13 +576,16 @@ class Installer:
         if self.dev:
             self._run_dev_build()
         self._service_started = False
+        # download 前置到 install 之后、service 之前：模型解压不依赖 service/account/model
+        # 配置，放在 service 之前才能保证服务启动时磁盘上已有模型；否则 service 先起来，
+        # 任何交互步骤（account/model）中止都会让模型未解压，落到"服务在跑但缺模型"的中间态。
         self._steps: list[tuple[str, Callable[[], None]]] = [
             ("env", self._step_check_deps),
             ("install", self._step_install),
+            ("download", self._step_download),
             ("service", self._step_init_service),
             ("account", self._step_account),
             ("model", self._step_configure),
-            ("download", self._step_download),
             ("plugin", self._step_plugin),
         ]
         self._total_steps = len(self._steps)
@@ -905,8 +908,11 @@ class Installer:
                 ]
                 _tarfile_extract_safe(tf, models_dest)
         except (tarfile.TarError, OSError) as exc:
-            self.ui.warn(f"Failed to extract {tarballs[0].name}: {exc}")
-            return 0
+            # tarball 损坏必须硬失败，warn+return 0 会被 _step_download 当作"没模型"
+            # 走 fail 路径，但 UI 上只显示"缺失模型文件"看不出是解压错，排查会走弯路。
+            self.ui.fail(
+                self.ui.i18n.t("download.extract_failed", tarballs[0].name, str(exc))
+            )
         return len(members)  # 仅本次归档内的模型成员数
 
     # ── Account ───────────────────────────────────────────
@@ -1150,11 +1156,12 @@ class Installer:
         self._step_header("download.title", "download.subtitle")
         models_dest = self.miloco_home / "models"
         self.ui.step(self.ui.i18n.t("download.extracting_models"))
+        # 缺模型是硬失败：dev 通道源码目录若无 .onnx、release 通道若打包漏 tarball，
+        # 都必须在此暴露而非静默 skip——服务后续依赖这些文件，跳过等于装了个空壳。
         count = self._extract_models(self._get_src_dir(), models_dest)
-        if count:
-            self.ui.step_ok(self.ui.i18n.t("download.models_verified", str(count)))
-        else:
-            self.ui.step_skip(self.ui.i18n.t("download.no_models"))
+        if not count:
+            self.ui.fail(self.ui.i18n.t("download.models_missing"))
+        self.ui.step_ok(self.ui.i18n.t("download.models_verified", str(count)))
 
     # ── Plugin ────────────────────────────────────────────
 
@@ -1316,6 +1323,7 @@ class Installer:
         self._steps = [
             ("env", self._step_check_deps),
             ("install", self._step_install),
+            ("download", self._step_download),
             ("service", self._step_init_service),
         ]
         self._total_steps = len(self._steps)
@@ -1347,11 +1355,13 @@ class Installer:
         """Step 3: service init, configure account/model, download, plugin."""
         self._print_welcome()
         self._service_started = False
+        # download 前置到 service 之前：与 Installer.run 对齐；step1 已解压过时再解一次
+        # 幂等（tar 覆盖同名文件），代价 <1s，换来 step1 未跑到解压时的兜底补齐。
         self._steps = [
+            ("download", self._step_download),
             ("service", self._step_init_service),
             ("account", self._step_account),
             ("model", self._agent_step_configure_model),
-            ("download", self._step_download),
             ("plugin", self._step_plugin),
         ]
         self._omni_model = omni_model
