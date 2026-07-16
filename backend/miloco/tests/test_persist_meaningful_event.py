@@ -520,3 +520,84 @@ class TestPersistMeaningfulEvent:
         assert len(rows) == 1
         assert rows[0]["device_ids"] == []
         assert rows[0]["snapshot_count"] == 0
+
+    async def test_device_ids_narrowed_by_suggestion_source(self, isolated_db, dao):
+        """建议(suggestion)单独驱动收窄:来源摄像头之外的相机不该被带出来."""
+        result = RealtimePerceptionResult(
+            suggestions=[
+                Suggestion(event="高温", action="开窗", source_device_ids=["cam_kitchen"]),
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen", "cam_bedroom"],
+            artifacts=_artifacts({
+                "cam_kitchen": _clip_payload(1),
+                "cam_bedroom": _clip_payload(2),
+            }),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_kitchen"]
+        assert rows[0]["snapshot_count"] == 1
+
+    async def test_needs_response_false_speech_excluded_from_narrowing(
+        self, isolated_db, dao
+    ):
+        """needs_response=False 的闲聊,即使带了 source_device_ids,也不该被收窄
+        进 device_ids——只有规则命中的书房才该展示,客厅的闲聊画面不该带出来."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="x", source_device_ids=["cam_study"],
+                )
+            ],
+            speeches=[
+                Speech(
+                    needs_response=False, speaker="妈妈", content="今天好热",
+                    is_complete=True, source_device_ids=["cam_living_01"],
+                )
+            ],
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_study", "cam_living_01"],
+            artifacts=_artifacts({
+                "cam_study": _clip_payload(1),
+                "cam_living_01": _clip_payload(2),
+            }),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_study"]
+        assert rows[0]["snapshot_count"] == 1
+
+    async def test_mixed_source_one_empty_does_not_trigger_full_fallback(
+        self, isolated_db, dao
+    ):
+        """混合来源:一条规则命中未标 source_device_ids(如老规则/引擎异常兜底),
+        另一条正常带 source——整体 relevant 集合非空,应正常收窄,不该因为其中一条
+        缺失来源就整体退化成展示全量摄像头."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="legacy_rule", reason="老规则未标来源"),
+                MatchedRule(
+                    rule_id="r2", reason="x", source_device_ids=["cam_entrance"],
+                ),
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_entrance", "cam_kitchen"],
+            artifacts=_artifacts({
+                "cam_entrance": _clip_payload(1),
+                "cam_kitchen": _clip_payload(2),
+            }),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_entrance"]
+        assert rows[0]["snapshot_count"] == 1
