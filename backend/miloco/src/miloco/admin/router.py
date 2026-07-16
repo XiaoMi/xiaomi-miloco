@@ -818,6 +818,7 @@ class FeaturesUpdateBody(BaseModel):
 
     pet_recognition: bool | None = None
     pet_head_grounding: bool | None = None
+    pet_body_grounding: bool | None = None
 
 
 def _features_state() -> dict:
@@ -825,6 +826,7 @@ def _features_state() -> dict:
     return {
         "pet_recognition": f.pet_recognition,
         "pet_head_grounding": f.pet_head_grounding,
+        "pet_body_grounding": f.pet_body_grounding,
     }
 
 
@@ -850,6 +852,8 @@ def set_features(body: FeaturesUpdateBody, current_user: str = Depends(verify_to
         update["pet_recognition"] = body.pet_recognition
     if body.pet_head_grounding is not None:
         update["pet_head_grounding"] = body.pet_head_grounding
+    if body.pet_body_grounding is not None:
+        update["pet_body_grounding"] = body.pet_body_grounding
     if update:
         update_shared_config(features=update)
     return NormalResponse(code=0, message="ok", data=_features_state())

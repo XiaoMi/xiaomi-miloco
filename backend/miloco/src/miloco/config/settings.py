@@ -373,6 +373,15 @@ class FeaturesSettings(BaseModel):
             "grounding 段。仅在 pet_recognition 开启时有意义。"
         ),
     )
+    pet_body_grounding: bool = Field(
+        default=True,
+        description=(
+            "宠物本体定位子开关（默认开）：仅作用于「检测器框不到猫/狗」的回退路径"
+            "——开启后让 omni 在整幅画面中输出目标动物本体坐标，裁本体作参考 crop"
+            "（兼容兔/鸟/仓鼠等非猫狗物种也能有参考图）；关闭时回退路径不产参考 crop。"
+            "仅在 pet_recognition 开启时有意义。"
+        ),
+    )
 
 
 class DirectorySettings(BaseModel):

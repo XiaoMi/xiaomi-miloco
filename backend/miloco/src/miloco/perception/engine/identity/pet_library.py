@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 # 头像允许的图片扩展名（小写、无点）
 _AVATAR_EXTS = frozenset({"jpg", "jpeg", "png", "webp"})
 
+# 参考 crop（③ 识别的多姿态参照图）存储上限
+_MAX_REF_CROPS = 3
+
 
 class Pet(BaseModel):
     """宠物花名册条目（身份壳）。"""
@@ -44,6 +47,12 @@ class Pet(BaseModel):
     name: str
     species: str
     avatar_ext: str | None = None
+    # 参考 crop（喂 ③ 识别的多姿态参照图）：文件名锁死 ref_crop_{0..N-1}.jpg。
+    # count 为读取权威（崩溃残留的高位 stale 帧被切掉、不喂识别，评审 §H A2）；
+    # scores 为每张的【绝对】质量分（conf×sharpness×area_ratio），与 crop 对齐，
+    # 供 append 跨批次留 top-3（决策5(b)：绝对分跨批可比，池内归一化分不可比）。
+    reference_crop_count: int = 0
+    reference_crop_scores: list[float] = []
     created_at: str
     updated_at: str
 
@@ -66,16 +75,38 @@ def _normalize_avatar_ext(ext: str) -> str:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    """write-temp-then-rename 原子落盘（同 home_profile/store 的范式）。"""
+    """write-temp-then-rename 原子落盘 + fsync（同 home_profile/store 的范式）。
+
+    fsync 保证 rename 前数据已落盘——否则崩溃可能留下"半张图"，喂给识别会污染
+    （参考图/头像/meta 皆经此，评审 C11）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def _ref_index(path: Path) -> int | None:
+    """从 ref_crop_<n>.jpg 取数字下标；非法名返回 None（用于数值排序 / 清理）。"""
+    try:
+        return int(path.stem.split("_")[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _pair_crops(
+    crops: list[bytes], scores: list[float] | None
+) -> list[tuple[bytes, float]]:
+    """把 crop 字节与绝对质量分配对；scores 缺失/短缺补 0.0。"""
+    scores = scores or []
+    return [(c, float(scores[i]) if i < len(scores) else 0.0) for i, c in enumerate(crops)]
 
 
 class PetLibrary:
@@ -208,6 +239,86 @@ class PetLibrary:
             return None
         p = self._pet_dir(pet_id) / f"avatar.{pet.avatar_ext}"
         return p if p.is_file() else None
+
+    # ── 参考 crop（③ 多姿态参照图）────────────────────────────────────────
+
+    def reference_crop_paths(self, pet_id: str) -> list[Path]:
+        """按序返回参考 crop 路径（供 P2 识别端读）。
+
+        **count 权威**：仅取前 `reference_crop_count` 张——崩溃残留的高位 stale 帧
+        被切掉、不喂识别（评审 §H A2）；再 `is_file()` 过滤自愈 meta↔实体不齐。
+        """
+        pet = self.get(pet_id)
+        if pet is None:
+            return []
+        d = self._pet_dir(pet_id)
+        if not d.is_dir():
+            return []
+        ordered = sorted(
+            (p for p in d.glob("ref_crop_*.jpg") if _ref_index(p) is not None),
+            key=lambda p: _ref_index(p) or 0,
+        )
+        return [p for p in ordered[: pet.reference_crop_count] if p.is_file()]
+
+    def reference_crop_scores(self, pet_id: str) -> list[float]:
+        """与 `reference_crop_paths` 对齐的绝对质量分（越界补 0）。"""
+        pet = self.get(pet_id)
+        if pet is None:
+            return []
+        n = len(self.reference_crop_paths(pet_id))
+        sc = list(pet.reference_crop_scores)
+        return [(sc[i] if i < len(sc) else 0.0) for i in range(n)]
+
+    def set_reference_crops(
+        self, pet_id: str, crops: list[bytes], scores: list[float] | None = None
+    ) -> Pet:
+        """整组替换（注册时一次性写；上限 3，按给定顺序取前 3）。"""
+        return self._rewrite_ref_crops(pet_id, _pair_crops(crops, scores)[:_MAX_REF_CROPS])
+
+    def append_reference_crops(
+        self, pet_id: str, crops: list[bytes], scores: list[float] | None = None
+    ) -> Pet:
+        """追加（决策5(b)）：现有 + 新，按【绝对质量分】降序留 top-3（非 FIFO）。"""
+        with self._lock:
+            merged = self._read_ref_items(pet_id) + _pair_crops(crops, scores)
+            merged.sort(key=lambda it: it[1], reverse=True)
+            return self._rewrite_ref_crops(pet_id, merged[:_MAX_REF_CROPS])
+
+    def _read_ref_items(self, pet_id: str) -> list[tuple[bytes, float]]:
+        paths = self.reference_crop_paths(pet_id)
+        scores = self.reference_crop_scores(pet_id)
+        return [(p.read_bytes(), scores[i]) for i, p in enumerate(paths)]
+
+    def _rewrite_ref_crops(
+        self, pet_id: str, items: list[tuple[bytes, float]]
+    ) -> Pet:
+        """连号重写 ref_crop_0..k-1 + 清多余旧槽 + 最后写 meta（count 权威）。
+
+        set/append 都收敛到此。写序（评审 §H A2，崩溃安全）：① 原子写全部 crop
+        （每张 fsync）② 删索引 ≥k 的旧槽 ③ **最后**写 meta。全程持锁。
+        """
+        with self._lock:
+            pet = self.get(pet_id)
+            if pet is None:
+                raise KeyError(pet_id)
+            items = items[:_MAX_REF_CROPS]
+            if any(not b for b, _ in items):
+                raise ValueError("参考 crop 数据为空")
+            d = self._pet_dir(pet_id)
+            for i, (data, _s) in enumerate(items):
+                _atomic_write(d / f"ref_crop_{i}.jpg", data)
+            for p in d.glob("ref_crop_*.jpg"):  # 清多余旧槽（别误伤 avatar/meta）
+                idx = _ref_index(p)
+                if idx is None or idx >= len(items):
+                    try:
+                        p.unlink()
+                    except OSError:  # noqa: PERF203
+                        logger.warning("删除多余参考 crop 失败: %s", p, exc_info=True)
+            pet.reference_crop_count = len(items)
+            pet.reference_crop_scores = [float(s) for _, s in items]
+            pet.updated_at = now_iso()
+            self._write_meta(pet)
+            return pet
 
     # ── 内部 ──────────────────────────────────────────────────────────────
 

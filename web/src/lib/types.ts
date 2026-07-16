@@ -69,7 +69,17 @@ export interface PetObserveResult {
   description: Record<string, unknown> | null; // {species, breed, size_build, ..., summary}
   headBbox: number[] | null; // grounding 开时头部归一化 [x,y,w,h]（相对 primary crop）
   primaryCropB64: string;
-  candidates: { trackId: number | null; speciesGuess: string; cropB64: string }[];
+  candidates: {
+    trackId: number | null;
+    speciesGuess: string;
+    cropB64: string;
+    // P0 契约质量分（可选；P1+ 消费于门控/候选网格展示）
+    conf?: number;
+    sharpness?: number;
+    areaRatio?: number;
+    bbox?: number[] | null; // [x, y, w, h]（相对来源帧像素）
+    frameIdx?: number | null;
+  }[];
 }
 
 // ── 设备 ────────────────────────────────────────────────────

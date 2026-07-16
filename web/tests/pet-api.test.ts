@@ -75,7 +75,18 @@ describe("pet api client", () => {
         description: { species: "猫", summary: "黑猫" },
         head_bbox: [0.1, 0.1, 0.2, 0.2],
         primary_crop_b64: "abc",
-        candidates: [{ track_id: 1, species_guess: "猫", crop_b64: "c1" }],
+        candidates: [
+          {
+            track_id: 1,
+            species_guess: "猫",
+            crop_b64: "c1",
+            conf: 0.9,
+            sharpness: 12.5,
+            area_ratio: 0.3,
+            bbox: [10, 10, 50, 50],
+            frame_idx: 4,
+          },
+        ],
       },
     });
     const blob = new Blob(["x"], { type: "image/jpeg" });
@@ -83,7 +94,17 @@ describe("pet api client", () => {
     expect(r.detected).toBe(true);
     expect(r.primaryCropB64).toBe("abc");
     expect(r.headBbox).toEqual([0.1, 0.1, 0.2, 0.2]);
-    expect(r.candidates[0]).toEqual({ trackId: 1, speciesGuess: "猫", cropB64: "c1" });
+    // P0 契约质量分随候选映射（snake_case → camelCase）
+    expect(r.candidates[0]).toEqual({
+      trackId: 1,
+      speciesGuess: "猫",
+      cropB64: "c1",
+      conf: 0.9,
+      sharpness: 12.5,
+      areaRatio: 0.3,
+      bbox: [10, 10, 50, 50],
+      frameIdx: 4,
+    });
     expect(r.description).toEqual({ species: "猫", summary: "黑猫" });
   });
 

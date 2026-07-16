@@ -136,12 +136,16 @@ def test_avatar_bad_ext_400(client):
     assert r.status_code == 400
 
 
-def _stub_settings(monkeypatch, *, recognition: bool, grounding: bool = False):
+def _stub_settings(
+    monkeypatch, *, recognition: bool, grounding: bool = False, body_grounding: bool = True
+):
     monkeypatch.setattr(
         "miloco.pet.router.get_settings",
         lambda: SimpleNamespace(
             features=SimpleNamespace(
-                pet_recognition=recognition, pet_head_grounding=grounding
+                pet_recognition=recognition,
+                pet_head_grounding=grounding,
+                pet_body_grounding=body_grounding,
             )
         ),
     )
@@ -176,3 +180,86 @@ def test_observe_enabled_returns_description(client, monkeypatch):
     )
     assert r.status_code == 200
     assert r.json()["data"]["description"]["species"] == "猫"
+
+
+def test_observe_passes_body_grounding_from_feature(client, monkeypatch):
+    # body_grounding（D7）取 features.pet_body_grounding 并透传给 observe_pet
+    _stub_settings(monkeypatch, recognition=True, body_grounding=False)
+    holder = {}
+
+    async def _fake(medias, *, is_video, grounding, body_grounding=True, **kw):
+        holder["body_grounding"] = body_grounding
+        holder["medias_is_list"] = isinstance(medias, list)
+        return {
+            "detected": True,
+            "description": {"species": "猫"},
+            "head_bbox": None,
+            "primary_crop_b64": "x",
+            "candidates": [],
+        }
+
+    monkeypatch.setattr("miloco.pet.observe.observe_pet", _fake)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files={"media": ("c.jpg", b"x", "image/jpeg")},
+    )
+    assert r.status_code == 200
+    assert holder["body_grounding"] is False  # 关时透传 False
+    assert holder["medias_is_list"] is True  # 端点包成单元素列表（向后兼容）
+
+
+# ── 参考 crop 端点（P1a-C）────────────────────────────────────────────
+
+
+def _upload_refs(client, pet_id, crops, scores, mode="replace"):
+    files = [("crops", (f"r{i}.jpg", b, "image/jpeg")) for i, b in enumerate(crops)]
+    data = {"mode": mode}
+    if scores is not None:
+        data["scores"] = [str(s) for s in scores]
+    return client.post(f"/api/identity/pets/{pet_id}/reference-crops", files=files, data=data)
+
+
+def test_reference_crops_set_and_get(client):
+    pet = _create(client)
+    r = _upload_refs(client, pet["id"], [b"c0", b"c1"], [10.0, 20.0])
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["reference_crop_count"] == 2
+    assert data["reference_crop_scores"] == [10.0, 20.0]
+    got = client.get(f"/api/identity/pets/{pet['id']}/reference-crops/0")
+    assert got.status_code == 200 and got.content == b"c0"
+    assert got.headers["content-type"].startswith("image/jpeg")
+
+
+def test_reference_crops_append_top3_by_score(client):
+    pet = _create(client)
+    _upload_refs(client, pet["id"], [b"lo1", b"lo2"], [1.0, 2.0])
+    r = _upload_refs(client, pet["id"], [b"hi1", b"hi2"], [9.0, 8.0], mode="append")
+    assert r.status_code == 200
+    assert r.json()["data"]["reference_crop_count"] == 3
+    assert r.json()["data"]["reference_crop_scores"] == [9.0, 8.0, 2.0]  # 绝对分 top-3
+
+
+def test_reference_crops_replace_over3_400(client):
+    pet = _create(client)
+    assert _upload_refs(client, pet["id"], [b"a", b"b", b"c", b"d"], [1, 2, 3, 4]).status_code == 400
+
+
+def test_reference_crops_bad_mode_400(client):
+    pet = _create(client)
+    assert _upload_refs(client, pet["id"], [b"a"], [1], mode="weird").status_code == 400
+
+
+def test_reference_crops_empty_400(client):
+    pet = _create(client)
+    assert _upload_refs(client, pet["id"], [b""], [1]).status_code == 400
+
+
+def test_reference_crops_unknown_pet_404(client):
+    assert _upload_refs(client, "pet_000000000000", [b"a"], [1]).status_code == 404
+
+
+def test_reference_crops_get_out_of_range_404(client):
+    pet = _create(client)
+    _upload_refs(client, pet["id"], [b"c0"], [1])
+    assert client.get(f"/api/identity/pets/{pet['id']}/reference-crops/5").status_code == 404

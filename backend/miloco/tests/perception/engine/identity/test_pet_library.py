@@ -147,6 +147,86 @@ def test_pet_model_shape() -> None:
         "name",
         "species",
         "avatar_ext",
+        "reference_crop_count",
+        "reference_crop_scores",
         "created_at",
         "updated_at",
     }
+
+
+# ── 参考 crop（③ 多姿态参照图；P1a-B 存储）────────────────────────────
+
+
+def test_set_reference_crops_and_read(lib: PetLibrary) -> None:
+    pet = lib.create(name="小黑", species="猫")
+    assert lib.reference_crop_paths(pet.id) == []
+    updated = lib.set_reference_crops(pet.id, [b"c0", b"c1"], scores=[10.0, 20.0])
+    assert updated.reference_crop_count == 2
+    paths = lib.reference_crop_paths(pet.id)
+    assert [p.name for p in paths] == ["ref_crop_0.jpg", "ref_crop_1.jpg"]
+    assert [p.read_bytes() for p in paths] == [b"c0", b"c1"]  # set 保序、不重排
+    assert lib.reference_crop_scores(pet.id) == [10.0, 20.0]
+
+
+def test_set_reference_crops_caps_at_3(lib: PetLibrary) -> None:
+    pet = lib.create(name="x", species="猫")
+    lib.set_reference_crops(pet.id, [b"a", b"b", b"c", b"d"], scores=[1, 2, 3, 4])
+    paths = lib.reference_crop_paths(pet.id)
+    assert [p.read_bytes() for p in paths] == [b"a", b"b", b"c"]  # 取前 3、连号
+
+
+def test_append_keeps_top3_by_absolute_score(lib: PetLibrary) -> None:
+    pet = lib.create(name="x", species="猫")
+    lib.set_reference_crops(pet.id, [b"lo1", b"lo2"], scores=[1.0, 2.0])
+    # 追加两张更高分 → 按绝对分留 top-3（决策5(b)，非 FIFO）
+    lib.append_reference_crops(pet.id, [b"hi1", b"hi2"], scores=[9.0, 8.0])
+    got = {p.read_bytes() for p in lib.reference_crop_paths(pet.id)}
+    assert got == {b"hi1", b"hi2", b"lo2"}  # 分 9/8/2 胜出，lo1(1) 被挤掉
+    assert lib.get(pet.id).reference_crop_count == 3
+    assert lib.reference_crop_scores(pet.id) == [9.0, 8.0, 2.0]  # 与 crop 对齐、降序
+
+
+def test_reference_crops_renumbered_no_gaps(lib: PetLibrary) -> None:
+    pet = lib.create(name="x", species="猫")
+    lib.set_reference_crops(pet.id, [b"a", b"b", b"c"], scores=[1, 2, 3])
+    lib.set_reference_crops(pet.id, [b"z"], scores=[5])  # 替换成 1 张 → 清掉 1/2 槽
+    names = sorted(p.name for p in lib._pet_dir(pet.id).glob("ref_crop_*.jpg"))
+    assert names == ["ref_crop_0.jpg"]  # 连号无空洞
+    assert lib.reference_crop_paths(pet.id)[0].read_bytes() == b"z"
+
+
+def test_count_authoritative_ignores_stale_high_index(lib: PetLibrary) -> None:
+    # 模拟崩溃残留：count=1 但盘上多出 ref_crop_1 → count 权威、切掉 stale
+    pet = lib.create(name="x", species="猫")
+    lib.set_reference_crops(pet.id, [b"keep"], scores=[1])
+    (lib._pet_dir(pet.id) / "ref_crop_1.jpg").write_bytes(b"stale")
+    assert [p.name for p in lib.reference_crop_paths(pet.id)] == ["ref_crop_0.jpg"]
+
+
+def test_set_reference_crops_empty_data_raises(lib: PetLibrary) -> None:
+    pet = lib.create(name="x", species="猫")
+    with pytest.raises(ValueError):
+        lib.set_reference_crops(pet.id, [b""], scores=[1])
+
+
+def test_reference_crops_missing_pet_raises(lib: PetLibrary) -> None:
+    with pytest.raises(KeyError):
+        lib.set_reference_crops("pet_nope", [b"a"], scores=[1])
+
+
+def test_delete_removes_reference_crops(lib: PetLibrary) -> None:
+    pet = lib.create(name="x", species="猫")
+    lib.set_reference_crops(pet.id, [b"a", b"b"], scores=[1, 2])
+    d = lib._pet_dir(pet.id)
+    assert list(d.glob("ref_crop_*.jpg"))
+    lib.delete(pet.id)
+    assert not d.exists()  # rmtree 整目录 → 参考 crop 随之清
+
+
+def test_reference_crops_persist_across_instances(tmp_path) -> None:
+    lib1 = PetLibrary(root_dir=tmp_path)
+    pet = lib1.create(name="x", species="猫")
+    lib1.set_reference_crops(pet.id, [b"a", b"b"], scores=[3, 4])
+    lib2 = PetLibrary(root_dir=tmp_path)
+    assert [p.read_bytes() for p in lib2.reference_crop_paths(pet.id)] == [b"a", b"b"]
+    assert lib2.reference_crop_scores(pet.id) == [3.0, 4.0]

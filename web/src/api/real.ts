@@ -391,6 +391,11 @@ export async function realObservePet(
       track_id: number | null;
       species_guess: string;
       crop_b64: string;
+      conf?: number;
+      sharpness?: number;
+      area_ratio?: number;
+      bbox?: number[] | null;
+      frame_idx?: number | null;
     }[];
   }>;
   const d = r.data;
@@ -403,6 +408,11 @@ export async function realObservePet(
       trackId: c.track_id,
       speciesGuess: c.species_guess,
       cropB64: c.crop_b64,
+      conf: c.conf,
+      sharpness: c.sharpness,
+      areaRatio: c.area_ratio,
+      bbox: c.bbox,
+      frameIdx: c.frame_idx,
     })),
   };
 }

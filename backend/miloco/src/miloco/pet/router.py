@@ -82,7 +82,15 @@ async def observe_pet_media(
     use_grounding = (
         settings.features.pet_head_grounding if grounding is None else grounding
     )
-    result = await observe_pet(raw, is_video=is_video, grounding=use_grounding)
+    # observe_pet 已支持多图（图 1~3 张）；本端点当前仅收单个 media，包成单元素列表调用
+    # （向后兼容——多图上传入口随 P1b web 一起加，届时端点同时接单/多，避免部署顺序耦合）。
+    # body_grounding（D7）仅影响回退路径（框不到猫狗时裁本体作参考图），取 feature 开关。
+    result = await observe_pet(
+        [raw],
+        is_video=is_video,
+        grounding=use_grounding,
+        body_grounding=settings.features.pet_body_grounding,
+    )
     return NormalResponse(code=0, message="OK", data=result)
 
 
@@ -174,3 +182,59 @@ async def upload_pet_avatar(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return NormalResponse(code=0, message="Avatar updated", data=pet.model_dump())
+
+
+@router.post(
+    "/pets/{pet_id}/reference-crops",
+    summary="Set/Append Pet Reference Crops",
+    response_model=NormalResponse,
+)
+async def upload_pet_reference_crops(
+    pet_id: str,
+    crops: list[UploadFile] = File(..., description="参考 crop（客户端已裁好的 JPEG）"),
+    scores: list[float] = Form(
+        [], description="每张的【绝对】质量分（conf×sharpness×area_ratio），与 crops 对齐"
+    ),
+    mode: str = Form(
+        "replace", description="replace=整组替换（注册）/ append=追加（按绝对分留 top-3）"
+    ),
+    current_user: str = Depends(verify_token),
+):
+    """存客户端已裁好的参考 crop（③ 多姿态参照图）。服务端只存不裁（同 avatar 范式）。
+
+    ``mode=replace`` 整组替换（注册时一次性写 ≤3）；``append`` 追加，与现有合并后
+    按绝对质量分降序留 top-3（决策5(b)）。``scores`` 与 ``crops`` 对齐、缺省补 0。
+    """
+    _require_pet_id(pet_id)
+    if mode not in ("replace", "append"):
+        raise HTTPException(status_code=400, detail="mode 只能是 replace 或 append")
+    if not crops:
+        raise HTTPException(status_code=400, detail="no reference crops")
+    data = [await c.read() for c in crops]
+    if any(not d for d in data):
+        raise HTTPException(status_code=400, detail="empty reference crop")
+    if mode == "replace" and len(data) > 3:  # 存储层也会 cap，这里给更友好的 400
+        raise HTTPException(status_code=400, detail="最多 3 张参考 crop")
+    lib = get_pet_library()
+    fn = lib.append_reference_crops if mode == "append" else lib.set_reference_crops
+    try:
+        pet = fn(pet_id, data, scores=scores or None)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Pet '{pet_id}' not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return NormalResponse(code=0, message="Reference crops updated", data=pet.model_dump())
+
+
+@router.get(
+    "/pets/{pet_id}/reference-crops/{idx}", summary="Get Pet Reference Crop"
+)
+async def get_pet_reference_crop(
+    pet_id: str, idx: int, current_user: str = Depends(verify_token)
+):
+    """读第 idx 张参考 crop（调试/校验用；识别端 P2 直接读盘、不走 HTTP）。"""
+    _require_pet_id(pet_id)
+    paths = get_pet_library().reference_crop_paths(pet_id)
+    if idx < 0 or idx >= len(paths):
+        raise HTTPException(status_code=404, detail="reference crop 不存在")
+    return FileResponse(str(paths[idx]), media_type="image/jpeg")
