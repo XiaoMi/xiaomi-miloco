@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   getPerceptionConfig,
+  getSchedulerConfig,
   updatePerceptionConfig,
+  updateSchedulerConfig,
   type PerceptionConfig,
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
@@ -31,42 +33,104 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [omniFps, setOmniFps] = useState(DEFAULTS.omni_fps);
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
 
+  // 内置定时任务自动管理开关（scheduler.enabled）。缺省 true = 自动管理。
+  const [schedulerLoaded, setSchedulerLoaded] = useState<boolean | null>(null);
+  const [schedulerEnabled, setSchedulerEnabled] = useState(true);
+
   useEscClose(open, onClose);
 
   useEffect(() => {
     if (!open) return;
     setLoading(true);
-    getPerceptionConfig()
-      .then((c) => {
+    // 抽屉靠 `if (!open) return null` 隐藏而非卸载，state 会跨「关闭→重开」保留。
+    // 每次重载先把调度值复位为 null：本次读不到就稳定退回 unavailable（disable 开关），
+    // 不留用上次会话的旧值，与 e107541 的「读不到就禁用」保持一致。
+    setSchedulerLoaded(null);
+    // 感知参数与调度开关是两个正交接口，用 allSettled 各自独立成败——
+    // 任一接口出错（如版本错位）只影响自己那块，不把另一块也拖进错误态。
+    Promise.allSettled([
+      getPerceptionConfig().then((c) => {
         setConfig(c);
         setVideoShortEdge(c.video_short_edge);
         setOmniFps(c.omni_fps);
         setWindowSize(c.window_size);
+      }),
+      getSchedulerConfig().then((s) => {
+        setSchedulerLoaded(s.enabled);
+        setSchedulerEnabled(s.enabled);
+      }),
+    ])
+      .then((rs) => {
+        // 只有感知参数（rs[0]，核心设置）加载失败才报错；调度开关（rs[1]）失败
+        // 已由 schedulerLoaded=null 优雅降级为「不可配置」（置灰 + 专属 hint），
+        // 不应再弹「加载设置失败」——否则老后端(无 /scheduler-config)每次打开
+        // 设置都会看到与降级体验自相矛盾的误导性红条。
+        if (rs[0].status === "rejected") {
+          toast(t("settings.loadFailed"), "danger");
+        }
       })
-      .catch(() => toast(t("settings.loadFailed"), "danger"))
       .finally(() => setLoading(false));
   }, [open, t]);
 
+  const perceptionDirty =
+    config != null &&
+    (videoShortEdge !== config.video_short_edge ||
+      omniFps !== config.omni_fps ||
+      windowSize !== config.window_size);
+  // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
+  // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
+  // 实则静默丢弃」的控件。
+  const schedulerAvailable = schedulerLoaded != null;
+  const schedulerDirty =
+    schedulerAvailable && schedulerEnabled !== schedulerLoaded;
+
   async function handleSaveAndRestart() {
     setBusy(true);
+    // 调度开关先于感知参数提交；记录其是否已写盘，供 catch 区分「部分成功」——
+    // 开关已存但感知失败时不应笼统报「保存失败」，那会让用户误以为开关也没存住。
+    let schedulerSaved = false;
     try {
+      // scheduler 开关仅写盘 config.json（agent 网关下次启动读取生效），
+      // 与感知参数各自独立 PUT——只在各自变更时提交，避免仅改开关却重启引擎。
+      if (schedulerDirty) {
+        const s = await updateSchedulerConfig({ enabled: schedulerEnabled });
+        setSchedulerLoaded(s.enabled);
+        setSchedulerEnabled(s.enabled);
+        schedulerSaved = true;
+      }
       // PUT 后端会同步写 config + 重启引擎使参数生效，前端不再单独 pause/resume。
       // config 写盘不可回滚：写盘成功但重启失败时后端返回 restart_ok=false（非报错），
       // 此时提示「已保存但需手动重启」而非「保存失败」，避免误导用户以为改动丢失。
-      const updated = await updatePerceptionConfig({
-        video_short_edge: videoShortEdge,
-        omni_fps: omniFps,
-        window_size: windowSize,
-      });
-      setConfig(updated);
-      if (updated.restart_ok === false) {
-        toast(t("settings.restartFailed"), "warn");
-      } else {
-        toast(t("settings.applySuccess"), "ok");
+      if (perceptionDirty) {
+        const updated = await updatePerceptionConfig({
+          video_short_edge: videoShortEdge,
+          omni_fps: omniFps,
+          window_size: windowSize,
+        });
+        setConfig(updated);
+        if (updated.restart_ok === false) {
+          toast(t("settings.restartFailed"), "warn");
+        } else {
+          toast(t("settings.applySuccess"), "ok");
+        }
+      }
+      // 调度开关写盘当下并不生效（要等 agent 网关下次重启），与感知参数「即时生效」
+      // 区分。独立于感知分支单发：仅改开关时是唯一 toast；与感知同改时在感知 toast
+      // 之上再堆一条，补全开关的「延迟生效」措辞——否则双改会只走感知的
+      // applySuccess，把开关也说成已即时生效（过度承诺）。
+      if (schedulerSaved) {
+        toast(t("settings.schedulerSaved"), "ok");
       }
       onClose();
     } catch {
-      toast(t("settings.saveFailed"), "danger");
+      // 部分成功(开关已存、感知失败)与全败区分:前者 schedulerDirty 已随
+      // schedulerLoaded 收敛为 false,重试只补发感知那半,故文案要如实说明。
+      toast(
+        schedulerSaved
+          ? t("settings.partialSaveFailed")
+          : t("settings.saveFailed"),
+        "danger",
+      );
     } finally {
       setBusy(false);
     }
@@ -76,13 +140,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setVideoShortEdge(DEFAULTS.video_short_edge);
     setOmniFps(DEFAULTS.omni_fps);
     setWindowSize(DEFAULTS.window_size);
+    // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
+    // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。
+    if (schedulerAvailable) setSchedulerEnabled(true);
   }
 
-  const dirty =
-    config != null &&
-    (videoShortEdge !== config.video_short_edge ||
-      omniFps !== config.omni_fps ||
-      windowSize !== config.window_size);
+  const dirty = perceptionDirty || schedulerDirty;
 
   if (!open) return null;
 
@@ -195,6 +258,36 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   <span>{WINDOW_MIN} {t("settings.windowSizeUnit")}</span>
                   <span>{WINDOW_MAX} {t("settings.windowSizeUnit")}</span>
                 </div>
+              </div>
+
+              {/* 内置定时任务自动管理开关 */}
+              <div className="space-y-2.5 pt-1 border-t border-border">
+                <div className="flex items-center justify-between pt-5">
+                  <label className="text-body font-medium text-text-primary">
+                    {t("settings.autoSchedule")}
+                  </label>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={schedulerEnabled}
+                    disabled={!schedulerAvailable}
+                    onClick={() => setSchedulerEnabled((v) => !v)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      schedulerEnabled ? "bg-brand-primary" : "bg-border"
+                    } ${schedulerAvailable ? "" : "opacity-50 cursor-not-allowed"}`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
+                        schedulerEnabled ? "translate-x-[22px]" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+                <p className="text-caption text-text-tertiary">
+                  {schedulerAvailable
+                    ? t("settings.autoScheduleHint")
+                    : t("settings.autoScheduleUnavailable")}
+                </p>
               </div>
 
               {/* 恢复默认 */}

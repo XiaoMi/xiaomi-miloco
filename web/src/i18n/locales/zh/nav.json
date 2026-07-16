@@ -7,6 +7,8 @@
     "devicesHint": "管理米家设备",
     "family": "家庭",
     "familyHint": "管理家庭成员",
+    "tasks": "任务",
+    "tasksHint": "管理家庭任务",
     "activity": "日志",
     "activityHint": "回看发生过的事",
     "usage": "模型",

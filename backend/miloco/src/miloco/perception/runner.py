@@ -16,6 +16,7 @@ import logging
 
 from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
+from miloco.perception import omni_probe_registry
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.processor import PipelineProcessor
@@ -140,6 +141,10 @@ class PerceptionRunner:
         self._perception_task = None
         self._sync_devices_task = None
 
+        # 清理 in-flight probe task,防同进程再启 runner 时 _probe_in_flight 残留导致
+        # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
+        await omni_probe_registry.cancel_inflight()
+
         self._inference_worker.shutdown(wait=False)
 
         # 关闭 perception engine（含 IdentityEngine dispatcher worker 等）
@@ -153,6 +158,14 @@ class PerceptionRunner:
 
     async def _tick(self) -> None:
         """Drain all ready windows and infer sequentially."""
+        # 每 tick 驱动一次 omni 熔断器自动探测:OPEN_RECOVERABLE + backoff 到期时 spawn
+        # 一次后台 probe。无外部驱动时 probe_due 归零后状态永远不动,provider 恢复后感知
+        # 也不会自愈,只能靠用户手动点「立即重试」。sync 判断 + 后台 spawn,tick 不阻塞。
+        # 前置到 active_sources 判断之前:无摄像头联调 / 摄像头全部掉线场景下也要能自愈,
+        # 否则 backoff 到期后 next_probe_at_monotonic 卡在过去、SSE 快照持续显示"0 秒后下次探测"。
+        # 非 OPEN_RECOVERABLE 时 try_arm_probe 零开销直接返 False,前置安全。
+        self._pipeline.drive_omni_probe()
+
         if not self._collector.get_all_active_sources():
             return
 

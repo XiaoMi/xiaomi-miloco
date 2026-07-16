@@ -354,3 +354,48 @@ export const IconUsage = ({ active, ...p }: Props) =>
       <path d="M16 26V30" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
+
+/** 任务 — 圆角方框 + 勾选（与其它 nav 图标同款「填充容器 + 白色字形」双态） */
+export const IconTasks = ({ active, ...p }: Props) =>
+  active ? (
+    <svg {...baseSvg(p)}>
+      <rect
+        x="6"
+        y="6"
+        width="36"
+        height="36"
+        rx="9"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M15 24L21.5 30.5L34 17"
+        stroke="#fff"
+        strokeWidth="4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ) : (
+    <svg {...baseSvg(p)}>
+      <rect
+        x="6"
+        y="6"
+        width="36"
+        height="36"
+        rx="9"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M15 24L21.5 30.5L34 17"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );

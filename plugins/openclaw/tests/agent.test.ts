@@ -13,10 +13,21 @@ vi.mock("../src/hooks/trace.js", () => ({
   peekTurnMeta: (runId: string) => peekTurnMetaMock(runId),
 }));
 
+const writeOnboardingInviteStateMock = vi.fn();
+
+vi.mock("../src/home-profile/onboarding_state.js", () => ({
+  writeOnboardingInviteState: (...args: unknown[]) =>
+    writeOnboardingInviteStateMock(...args),
+}));
+
 // owner-channel 解析：按测试用例切换"解析到车主会话 / 无可用 channel"。
-type ResolveResultLike = { target: { sessionKey: string } | null };
+type ResolveResultLike = {
+  target: { sessionKey: string } | null;
+  targets: { sessionKey: string }[];
+};
 const resolveNotifyTargetMock = vi.fn<() => ResolveResultLike>(() => ({
   target: null,
+  targets: [],
 }));
 
 vi.mock("../src/tools/notify.js", () => ({
@@ -232,6 +243,7 @@ describe("kAgentWebhook owner-channel 投递", () => {
     }));
     resolveNotifyTargetMock.mockReturnValue({
       target: { sessionKey: "wechat:dm:owner-1" },
+      targets: [{ sessionKey: "wechat:dm:owner-1" }],
     });
     const { api, run } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
 
@@ -256,6 +268,7 @@ describe("kAgentWebhook owner-channel 投递", () => {
     }));
     resolveNotifyTargetMock.mockReturnValue({
       target: { sessionKey: "wechat:dm:owner-1" },
+      targets: [{ sessionKey: "wechat:dm:owner-1" }],
     });
     const { api, run } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
 
@@ -270,7 +283,7 @@ describe("kAgentWebhook owner-channel 投递", () => {
   });
 
   it("无可用 IM channel → 结构化 no-channel（非抛错），不起 turn", async () => {
-    resolveNotifyTargetMock.mockReturnValue({ target: null });
+    resolveNotifyTargetMock.mockReturnValue({ target: null, targets: [] });
     const { api, run } = makeApi({});
 
     const res = (await invokeWith(api, {
@@ -290,6 +303,7 @@ describe("kAgentWebhook owner-channel 投递", () => {
     }));
     resolveNotifyTargetMock.mockReturnValue({
       target: { sessionKey: "wechat:dm:owner-1" },
+      targets: [{ sessionKey: "wechat:dm:owner-1" }],
     });
     const { api, run, deleteSession } = makeApi({
       waitByRunId: { t1: { status: "ok" } },
@@ -302,5 +316,97 @@ describe("kAgentWebhook owner-channel 投递", () => {
     expect(deleteSession).not.toHaveBeenCalled();
     expect(run).toHaveBeenCalledTimes(1); // 无重试 turn
     expect(res.runId).toBe("t1");
+  });
+
+  it("owner-channel 多绑定时广播邀请到全部会话", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+    }));
+    resolveNotifyTargetMock.mockReturnValue({
+      target: { sessionKey: "wechat:dm:owner-1" },
+      targets: [
+        { sessionKey: "wechat:dm:owner-1" },
+        { sessionKey: "telegram:dm:owner-2" },
+      ],
+    });
+    const { api, run } = makeApi({
+      waitByRunId: {
+        "t1:broadcast:0": { status: "ok" },
+        "t1:broadcast:1": { status: "ok" },
+      },
+    });
+
+    const res = (await invokeWith(api, {
+      resolveTarget: "owner-channel",
+    })) as { runId: string; status: string };
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(writeOnboardingInviteStateMock).toHaveBeenCalledWith([
+      "wechat:dm:owner-1",
+      "telegram:dm:owner-2",
+    ]);
+    expect(res.runId).toBe("t1:broadcast:0");
+    expect(res.status).toBe("ok");
+  });
+
+  it("owner-channel 广播部分失败时，只要有一条成功仍按送达回报", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+    }));
+    resolveNotifyTargetMock.mockReturnValue({
+      target: { sessionKey: "wechat:dm:owner-1" },
+      targets: [
+        { sessionKey: "wechat:dm:owner-1" },
+        { sessionKey: "telegram:dm:owner-2" },
+      ],
+    });
+    const { api, run } = makeApi({
+      waitByRunId: {
+        "t1:broadcast:0": { status: "error", error: "boom" },
+        "t1:broadcast:1": { status: "ok" },
+      },
+    });
+
+    const res = (await invokeWith(api, {
+      resolveTarget: "owner-channel",
+    })) as { runId: string; status: string };
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(writeOnboardingInviteStateMock).toHaveBeenCalledWith([
+      "telegram:dm:owner-2",
+    ]);
+    expect(res.runId).toBe("t1:broadcast:1");
+    expect(res.status).toBe("ok");
+  });
+
+  it("owner-channel 广播全部失败时不记录 onboarding 邀请状态", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+    }));
+    resolveNotifyTargetMock.mockReturnValue({
+      target: { sessionKey: "wechat:dm:owner-1" },
+      targets: [
+        { sessionKey: "wechat:dm:owner-1" },
+        { sessionKey: "telegram:dm:owner-2" },
+      ],
+    });
+    const { api, run } = makeApi({
+      waitByRunId: {
+        "t1:broadcast:0": { status: "error", error: "boom" },
+        "t1:broadcast:1": { status: "error", error: "boom" },
+      },
+    });
+
+    const res = (await invokeWith(api, {
+      resolveTarget: "owner-channel",
+    })) as { runId: string; status: string };
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(writeOnboardingInviteStateMock).not.toHaveBeenCalled();
+    expect(res.runId).toBe("t1:broadcast:0");
+    expect(res.status).toBe("error");
   });
 });

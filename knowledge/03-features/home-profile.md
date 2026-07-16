@@ -88,7 +88,7 @@ profile.md（$MILOCO_HOME/home-profile/profile.md）
 
 **OnboardingTriggerService**（`home_profile/onboarding_trigger.py`）
 
-全新安装检测器：米家已授权且已选家、person 表与正式档案均为空、且一次性 KV 标记未置位时，向 Agent 主动发起 onboarding 访谈邀请。启动就绪与米家授权成功两处调用点汇入同一幂等入口，进程内 + KV 双重护栏防重发。设计上「终身只邀请一次」以**真送达**为准落标记——事件入队被接纳不算数，须 dispatcher 确认投递成功才置位；未送达（含主人尚未绑定 IM channel）不置位、留待下次启动重试。邀请 turn 经 owner-channel 直达用户 IM 会话的投递机制见 [Agent 集成](openclaw-integration.md)。
+全新安装检测器：米家已授权且已选家、person 表与正式档案均为空、且一次性 KV 标记未置位时，向 Agent 主动发起 onboarding 访谈邀请。启动就绪与米家授权成功两处调用点汇入同一幂等入口，进程内 + KV 双重护栏防重发。设计上「终身只邀请一次」以**真送达**为准落标记——事件入队被接纳不算数，须 dispatcher 确认投递成功才置位；未送达（含主人尚未绑定 IM channel）不置位、留待下次启动重试。邀请 turn 经 owner-channel 先广播到全部已绑定 IM 会话，再由首个回复锁定单会话继续；完整投递机制见 [Agent 集成](openclaw-integration.md)。
 
 ### 关键设计决策
 

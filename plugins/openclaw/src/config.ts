@@ -48,11 +48,18 @@ const MILOCO_PLUGIN_CONFIG_SCHEMA = {
         type: "string",
         description: "多模态模型 API Key：覆盖 config.json model.omni.api_key",
       },
-      /** 通知目标 sessionKey：指定接收通知的 IM channel */
+      /** 通知目标 sessionKey 列表：指定接收通知的 IM channel */
+      notifySessionKeys: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "通知目标 sessionKey 列表：指定接收 miloco 通知的 IM channel sessions",
+      },
+      /** 兼容旧配置：单个通知目标 sessionKey */
       notifySessionKey: {
         type: "string",
         description:
-          "通知目标 sessionKey：指定接收 miloco 通知的 IM channel session",
+          "【兼容旧配置】单个通知目标 sessionKey：指定接收 miloco 通知的 IM channel session",
       },
     },
   },
@@ -73,9 +80,13 @@ const MILOCO_PLUGIN_CONFIG_SCHEMA = {
       label: "多模态模型 API Key",
       help: "留空则使用 ~/.openclaw/miloco/config.json model.omni.api_key。",
     },
+    notifySessionKeys: {
+      label: "通知目标 Channels",
+      help: "指定接收 miloco 通知的 IM channel session keys。留空则自动选择最近活跃的 channel。",
+    },
     notifySessionKey: {
-      label: "通知目标 Channel",
-      help: "指定接收 miloco 通知的 IM channel session key。留空则自动选择最近活跃的 channel。",
+      label: "通知目标 Channel（旧）",
+      help: "兼容旧配置的单个 IM channel session key；读取时会自动并入新列表配置。",
     },
   },
 } as const satisfies OpenClawPluginConfigSchema;
@@ -105,7 +116,21 @@ export function getPluginConfig(api: OpenClawPluginApi) {
   if (kPluginConfig) return kPluginConfig;
   const cfg = getRuntimeConfig(api);
   const plugin = cfg.plugins?.entries?.[kPluginId];
-  return resolvePluginConfig(plugin?.config);
+  const parsed = resolvePluginConfig(plugin?.config);
+  const legacyKey =
+    typeof parsed.notifySessionKey === "string" &&
+    parsed.notifySessionKey.trim().length > 0
+      ? parsed.notifySessionKey.trim()
+      : undefined;
+  const mergedKeys = Array.isArray(parsed.notifySessionKeys)
+    ? parsed.notifySessionKeys
+        .map((v) => (typeof v === "string" ? v.trim() : ""))
+        .filter((v, idx, arr) => v.length > 0 && arr.indexOf(v) === idx)
+    : [];
+  if (legacyKey && !mergedKeys.includes(legacyKey)) {
+    mergedKeys.unshift(legacyKey);
+  }
+  return { ...parsed, notifySessionKeys: mergedKeys };
 }
 
 /**
@@ -121,7 +146,11 @@ export async function setPluginConfig(
     return; // 插件没有正常安装
   }
   const oldConfig = getPluginConfig(api);
-  const newConfig = { ...oldConfig, ...config };
+  const normalizedConfig =
+    "notifySessionKeys" in config && !("notifySessionKey" in config)
+      ? { ...config, notifySessionKey: "" }
+      : config;
+  const newConfig = { ...oldConfig, ...normalizedConfig };
   kPluginConfig = newConfig;
 
   // mutateConfigFile 方法依赖 openclaw >= v2026.4.26-beta.1

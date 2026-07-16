@@ -26,6 +26,7 @@ import type { Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
+import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
@@ -34,7 +35,7 @@ import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
-import { TaskListPanel } from "./components/TaskListPanel";
+import { TasksPage } from "./components/TasksPage";
 import { CandidateReviewPanel } from "./components/CandidateReviewPanel";
 import { MiotBindDialog } from "./components/MiotBindDialog";
 import { ToastHost, toast } from "./components/Toast";
@@ -342,11 +343,6 @@ function MainApp() {
               loading={home.loading}
               onChanged={() => home.reload()}
             />
-            <TaskListPanel
-              tasks={tasks.data}
-              loading={tasks.loading}
-              onChanged={() => tasks.reload()}
-            />
             <CandidateReviewPanel
               data={home.data}
               onChanged={() => home.reload()}
@@ -354,6 +350,22 @@ function MainApp() {
           </div>
         );
       }
+      case "tasks":
+        if (tasks.error) {
+          return (
+            <TabPanelError
+              message={t("app.tabTasksError", { msg: tasks.error.message })}
+              onRetry={() => tasks.reload()}
+            />
+          );
+        }
+        return (
+          <TasksPage
+            tasks={tasks.data}
+            loading={tasks.loading}
+            onChanged={() => tasks.reload()}
+          />
+        );
       case "activity": {
         if (activity.error) {
           return (
@@ -429,6 +441,9 @@ function MainApp() {
             window.location.reload();
           }}
         />
+
+        {/* omni 熔断器告警条(shrink-0):非 ok 时才渲染 */}
+        <OmniHealthBanner onGoToConfig={() => setActiveTab("usage")} />
 
         {/* 状态条(shrink-0) */}
         {status.data && (

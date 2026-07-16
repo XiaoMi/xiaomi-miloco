@@ -23,6 +23,11 @@ class InputConfig:
     # （见 prompt_builder），不从此 dataclass 字段读——故改分辨率免重启。别照 fps 的先例
     # 在构造前设 config.input.video_short_edge 期望生效，那样会被静默忽略。
     video_short_edge: int = 512
+    # media_resolution: 仅 Gemini 生效的「每帧视觉 token 预算」档位。""/"low" = 66 tok/帧
+    # (默认、最省);"high" = 264 tok/帧(小目标/文字更清但 4× token)。mimo/qwen 忽略此字段。
+    # 实测:小目标清晰度主要由输入像素分辨率(video_short_edge)决定,本档位只控每帧 token 预算,
+    # 故默认 low;identity 等细节敏感场景可经 CLI 切 high。运行时由 GeminiAdapter 实时读 settings。
+    media_resolution: str = ""
 
 
 @dataclass

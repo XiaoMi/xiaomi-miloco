@@ -1,0 +1,25 @@
+{
+  "omniHealth": {
+    "configInvalid": "omni 配置无效：{{message}}",
+    "retrying": "omni 服务暂不可用（{{message}}），正在重试…{{seconds}} 秒后下次探测",
+    "retryingNoTime": "omni 服务暂不可用（{{message}}），正在重试…",
+    "retryNow": "立即重试",
+    "retryingBtn": "重试中…",
+    "cooldownBtn": "冷却中 {{seconds}}s",
+    "goToConfig": "到「模型」页修改",
+    "retryFailed": "重试失败",
+    "failuresCount": "{{n}} 次失败",
+    "codes": {
+      "unreachable": "无法连接 omni 服务",
+      "timeout": "omni 服务响应超时",
+      "http_error": "omni 服务返回异常",
+      "rate_limited": "被 provider 限流",
+      "bad_key": "API Key 无效或无权限",
+      "no_key": "未配置 API Key",
+      "not_found": "模型或地址不存在",
+      "rejected_authed": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
+      "bad_response": "omni 响应格式异常",
+      "cancelled": "重试被中断"
+    }
+  }
+}

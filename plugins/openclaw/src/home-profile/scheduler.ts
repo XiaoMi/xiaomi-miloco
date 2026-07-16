@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { PluginHookGatewayCronService } from "openclaw/plugin-sdk/plugin-runtime";
+import { isSchedulerAutoManageEnabled } from "../miloco/config.js";
 
 const MANAGED_TAG = "[miloco:home-profile]";
 
@@ -116,6 +117,12 @@ export function registerHomeProfileScheduler(api: OpenClawPluginApi): void {
     const cron = ctx.getCron?.();
     if (!cron) return;
     cachedCron = cron;
+    // 用户可在 CLI / Web 关闭自动管理（scheduler.enabled=false）。关闭时清除已创建的
+    // 内置定时任务并跳过重建——让用户在后台手动删除的任务不会被网关重启重新拉起。
+    if (!isSchedulerAutoManageEnabled()) {
+      await teardown(cron);
+      return;
+    }
     await reconcile(cron);
   });
 

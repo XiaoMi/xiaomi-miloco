@@ -32,6 +32,7 @@ import type {
   UsageStats,
   OmniConfigState,
   OmniConfigUpdate,
+  OmniHealth,
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
@@ -1507,6 +1508,51 @@ export async function realTestOmniConfig(
   return r.data;
 }
 
+// 用户主动触发一次 omni probe(跳过熔断剩余 backoff),返回 OmniConfigState 含新 health。
+export async function realRetryOmniProbe(): Promise<OmniConfigState> {
+  const r = await apiFetch<Normal<OmniConfigState>>(
+    "/api/admin/omni-config/retry",
+    { method: "POST" },
+  );
+  return r.data;
+}
+
+// 订阅 /api/admin/omni-config/stream SSE:熔断器状态变化 → 推送 OmniHealth 快照。
+// 首次连上即会推一次当前状态。返回 unsubscribe 函数。
+//
+// onOpen 可选:**仅在断线后重连成功时**触发(EventSource 'open' 事件首次也会 fire,
+// firstOpenSeen 旗标跳过初次连接)。调用方典型用法是借此 refetch 一次 omni-config,
+// 因为 backend 重启后 config 字段(label/model/base_url)可能变但 SSE 不推 config。
+export function realSubscribeOmniHealth(
+  onHealth: (h: OmniHealth) => void,
+  onOpen?: () => void,
+): () => void {
+  const token = resolveToken();
+  const url = token
+    ? `/api/admin/omni-config/stream?token=${encodeURIComponent(token)}`
+    : "/api/admin/omni-config/stream";
+  const es = new EventSource(url);
+  let firstOpenSeen = false;
+  if (onOpen) {
+    es.addEventListener("open", () => {
+      if (!firstOpenSeen) {
+        firstOpenSeen = true;
+        return;
+      }
+      onOpen();
+    });
+  }
+  es.addEventListener("omni_health", (ev) => {
+    try {
+      const payload = JSON.parse((ev as MessageEvent).data) as OmniHealth;
+      onHealth(payload);
+    } catch {
+      // 忽略解析失败,后端保证 payload 结构。
+    }
+  });
+  return () => es.close();
+}
+
 async function fetchUsageStats(
   period: UsagePeriod,
   binMinutes: number,
@@ -1543,15 +1589,26 @@ async function fetchUsageStats(
 // ── 任务（task）─────────────────────────────────────────────
 // summary 视图 = task 基础字段 + record 进度摘要（window=day：progress 走 snapshot，
 // duration/event 走今日累计）。derived 形态按 kind 多态，原样透传给 UI 自行解读。
+// TaskSummaryView 继承 TaskFullView，除基础字段 + record 外，本就带驱动规则
+// （rule_briefs）/ 关联（links）/ paused_at；一并映射，详情抽屉直接复用列表数据，
+// 不再单独拉 GET /api/tasks/{id}。
 interface BackendTaskSummary {
   task_id: string;
   description: string;
   status: "active" | "paused";
+  paused_at?: string | null;
   created_at: string;
+  rule_briefs?: {
+    rule_id: string;
+    query: string;
+    actions_desc?: string[];
+  }[];
+  links?: { kind: "rule" | "cron"; ref: string }[];
   record: {
     kind: "progress" | "duration" | "event";
     completed: boolean;
     active_session: { started_at: string; elapsed_minutes: number } | null;
+    window_remaining: { seconds: number; display: string } | null;
     derived: Record<string, unknown>;
   } | null;
 }
@@ -1564,7 +1621,14 @@ export async function realListTasks(): Promise<Task[]> {
     taskId: t.task_id,
     description: t.description,
     status: t.status,
+    pausedAt: t.paused_at ?? null,
     createdAt: t.created_at,
+    ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
+      ruleId: b.rule_id,
+      query: b.query,
+      actionsDesc: b.actions_desc ?? [],
+    })),
+    links: (t.links ?? []).map((l) => ({ kind: l.kind, ref: l.ref })),
     record: t.record
       ? {
           kind: t.record.kind,
@@ -1573,6 +1637,12 @@ export async function realListTasks(): Promise<Task[]> {
             ? {
                 startedAt: t.record.active_session.started_at,
                 elapsedMinutes: t.record.active_session.elapsed_minutes,
+              }
+            : null,
+          windowRemaining: t.record.window_remaining
+            ? {
+                seconds: t.record.window_remaining.seconds,
+                display: t.record.window_remaining.display,
               }
             : null,
           derived: t.record.derived ?? {},
@@ -1596,5 +1666,20 @@ export async function realDeleteTask(taskId: string): Promise<void> {
   await apiFetch<Normal<unknown>>(
     `/api/tasks/${encodeURIComponent(taskId)}?reason=abandoned`,
     { method: "DELETE" },
+  );
+}
+
+// 改任务描述（PATCH /api/tasks/{id}）。
+export async function realUpdateTaskDescription(
+  taskId: string,
+  description: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description }),
+    },
   );
 }

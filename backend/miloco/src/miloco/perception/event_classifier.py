@@ -5,9 +5,10 @@
 
 判断一次推理(全屋视图 result)是否有意义 + 计算 has_* 标志位.
 
-注:result 是 `_merge_results` 合并后的全屋视图;classifier 不关心 device 归属
-(device_ids 由 client.py 从 processor.py 入参直接传入);MatchedRule / Suggestion
-本来就是全屋视角概念,不区分单摄像头.
+注:result 是 `_merge_results` 合并后的全屋视图;classifier 本身只算 has_* 标志位,
+不关心 device 归属——device 层面的收窄(把 device_ids 收窄到真正触发事件的来源摄像头)
+由 client.py 的 `_collect_relevant_device_ids` 基于 matched_rules / suggestions /
+speeches 各自的 source_device_ids 另外处理,不在这里做.
 """
 
 from __future__ import annotations
