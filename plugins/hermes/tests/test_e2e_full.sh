@@ -14,9 +14,16 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 MILOCO_HOME="${MILOCO_HOME:-$HOME/.hermes/miloco}"
 HERMES_BIN="$HOME/.local/bin/hermes"
 MILOCO_CLI="$HOME/.local/bin/miloco-cli"
-BACKEND_URL="http://127.0.0.1:1810"
+BACKEND_URL=$(python3 -c "
+import json, os
+mh = os.environ.get('MILOCO_HOME', os.path.expanduser('~/.openclaw/miloco'))
+try:
+    cfg = json.load(open(os.path.join(mh, 'config.json')))
+    print(cfg.get('server', {}).get('url', 'http://127.0.0.1:1810'))
+except: print('http://127.0.0.1:1810')
+" 2>/dev/null)
 
-cd "$(dirname "$0")/../.."  # 切到 repo 根
+cd "$(dirname "$0")/../../.."  # 切到 repo 根 (tests → hermes → plugins → root)
 
 # ═══════════════════════════════════════════════════════════════════════
 section "Phase 0: 干净环境"
@@ -129,7 +136,7 @@ section "Phase 6: 全量 pytest"
 # ═══════════════════════════════════════════════════════════════════════
 
 echo "  运行 199 tests..."
-PYTEST_OUT=$(cd "$(dirname "$0")/../.." && uv run --with pytest --with httpx python -m pytest plugins/hermes/tests/ -q 2>&1) && PYTEST_OK=1 || PYTEST_OK=0
+PYTEST_OUT=$(cd "$(dirname "$0")/../../.." && uv run --with pytest --with httpx python -m pytest plugins/hermes/tests/ -q 2>&1) && PYTEST_OK=1 || PYTEST_OK=0
 echo "$PYTEST_OUT" | tail -3
 [ "$PYTEST_OK" -eq 1 ] && ok "pytest 全绿" || no "pytest 有失败"
 
