@@ -537,7 +537,8 @@ main() {
             check_dead_functions
             check_silent_except
             check_redundant_except
-            check_vulture            ;;
+            check_vulture
+            ;;
         *)
             check_shell_syntax
             check_set_e_bare_subshell
@@ -552,7 +553,8 @@ main() {
             check_dead_functions
             check_silent_except
             check_redundant_except
-            check_vulture            run_tests
+            check_vulture
+            run_tests
             check_pr_review_gate
             ;;
     esac

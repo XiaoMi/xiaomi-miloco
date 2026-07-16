@@ -106,7 +106,7 @@ async def reset_agent_sessions(
     adapter = get_adapter()
     adapter_reset = getattr(adapter, "reset_sessions", None)
     if callable(adapter_reset):
-        return await adapter_reset(routes, delete_transcript=delete_transcript, timeout=timeout)
+        return await adapter_reset(routes, timeout=timeout)
 
     # 兜底：adapter 未实现 → 退回旧 webhook（OpenClaw / WebhookAdapter）
     session_keys = list({sk for sk, _ in routes})
