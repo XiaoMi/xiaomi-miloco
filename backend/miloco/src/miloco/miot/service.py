@@ -38,6 +38,7 @@ from miloco.miot.filter import (
     denied_camera_dids,
     denied_channels_of,
     filter_by_home,
+    is_camera_connected,
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
@@ -1214,7 +1215,11 @@ class MiotService:
         out: list[dict] = []
         for did, info in cameras.items():
             cloud_online = bool(getattr(info, "online", False))
-            lan_reachable = bool(getattr(info, "lan_online", False))
+            # 已连上的相机即视为局域网可达（直连掐死 OTU 保活令 lan_online 掉 False，
+            # 但连都连上了、可达是显然的），口径与 select_active / toggle gate 一致。
+            lan_reachable = bool(getattr(info, "lan_online", False)) or is_camera_connected(
+                info
+            )
             channel_count = getattr(info, "channel_count", None) or 1
             lens_awake = awake_map.get(did) or {}
             # 全拆后每路是独立一等相机：``did`` 仍是物理 did（会话/拾音按整台），``channel``
@@ -1313,7 +1318,10 @@ class MiotService:
             return bool(getattr(cameras[pdid], "online", False))
 
         def _lan(pdid: str) -> bool:
-            return bool(getattr(cameras[pdid], "lan_online", False))
+            # 已连上的相机即视为可达（直连会掐死 OTU 保活令 lan_online 掉 False）。
+            return bool(
+                getattr(cameras[pdid], "lan_online", False)
+            ) or is_camera_connected(cameras[pdid])
 
         enabling = [
             (p, ch) for p, chs in updates.items() for ch, iu in chs.items() if iu

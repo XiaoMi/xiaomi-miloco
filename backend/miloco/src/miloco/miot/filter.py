@@ -14,11 +14,28 @@ import json
 import logging
 from typing import TypeVar
 
+from miot.types import MIoTCameraStatus
+
 from miloco.database.kv_repo import KVRepo, ScopeConfigKeys
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def is_camera_connected(info: object) -> bool:
+    """相机是否有活着的拉流会话（miss 直连/中继已连上）。
+
+    连上本身就是「局域网可达」的铁证——同网段 direct-connect 会掐死相机的 OTU
+    保活，令 ``lan_online`` 掉 ``False``，但此时相机显然可达。故各处可达判据一律
+    用 ``lan_online or is_camera_connected(info)``，避免正在拉流的相机被误判不可达
+    而拆流 / 拒绝开启。
+
+    等价于 ``MIoTCameraInfo.connected`` 属性——这里用 ``getattr`` 重实现一遍，
+    是为了容忍非 ``MIoTCameraInfo`` 对象（``camera_status`` 缺失时返回 ``False``），
+    不是另一套独立判据；两边的枚举口径要保持同步。
+    """
+    return getattr(info, "camera_status", None) == MIoTCameraStatus.CONNECTED
 
 # 同时投喂给 miloco 感知的摄像头数量上限（前端展示上限也以此为唯一来源，经
 # /api/miot/status 下发）。用户主动 enable 超限直接报错（service.toggle_camera 校验）。
@@ -148,7 +165,9 @@ def select_active_camera_dids(
         if not is_home_allowed(kv_repo, getattr(info, "home_id", None)):
             continue
         online = bool(getattr(info, "online", False))
-        lan = bool(getattr(info, "lan_online", False))
+        # 已连上的相机即视为局域网可达：直连会掐死同网段 OTU 保活令 lan_online 掉
+        # False，但连都连上了、可达是显然的，不能因此把正在拉流的相机踢出活跃集拆流。
+        lan = bool(getattr(info, "lan_online", False)) or is_camera_connected(info)
         connectable = (online and lan) if require_lan else online
         if online_only and not connectable:
             continue
