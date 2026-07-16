@@ -26,6 +26,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -374,3 +375,90 @@ def make_im_push_handler(ctx: Any):
             result = {"ok": False, "error": f"internal error: {exc}"}
         return json.dumps(result, ensure_ascii=False)
     return _handler
+# ---------------------------------------------------------------------------
+# miloco_notify_bind (from tools_status.py)
+# ---------------------------------------------------------------------------
+
+def list_candidates(ctx: Any) -> Dict[str, Any]:
+    """列 state.json::candidates + 当前 target（标 ✓）。"""
+    state = load_state(ctx)
+    deliver = state.get("deliver") or {}
+    candidates = deliver.get("candidates") or []
+    current = deliver.get("target")
+    return {
+        "ok": True,
+        "current": current,
+        "auto_configured": deliver.get("auto_configured"),
+        "candidates": candidates,
+        "candidates_count": len(candidates),
+        "hint": (
+            "candidates 为空 → install-hermes.sh 装时没读到任何 IM。"
+            "在 Hermes 里连 IM（hermes config set feishu.app_id ...）后重跑 install-hermes.sh，"
+            "或直接 miloco_notify_bind(action='switch', target='feishu') 临时设。"
+        ),
+    }
+
+def switch_target(ctx: Any, target: str) -> Dict[str, Any]:
+    """切换 deliver.target（覆盖 auto_configured 标记，标 source=manual）。"""
+    target = (target or "").strip()
+    if not target:
+        return {"ok": False, "error": "target 不能为空"}
+    from datetime import datetime
+
+    state = load_state(ctx)
+    state["deliver"] = {
+        "target": target,
+        "auto_configured": False,
+        "configured_at": datetime.now().astimezone().isoformat(),
+        "source": "manual via miloco_notify_bind",
+        "candidates": (state.get("deliver") or {}).get("candidates") or [],
+    }
+    save_state(ctx, state)
+    return {"ok": True, "target": target, "note": "已切换；下次 miloco_im_push 会用新 target"}
+
+MILOCO_NOTIFY_BIND_SCHEMA: Dict[str, Any] = {
+    "name": "miloco_notify_bind",
+    "description": (
+        "IM 渠道管理：list 候选 / switch 切换。\n"
+        "action='list'：列 state.json 里 install-hermes.sh 探测到的所有候选 + 当前 target。"
+        "返回 candidates 数组，每个元素是 send_message 接受的 target 串（如 'feishu:oc_xxx:om_xxx'）。\n"
+        "action='switch'：覆盖当前 target，标 source=manual。target 必须是 send_message 接受的格式\n"
+        "（'platform' 或 'platform:chat_id' 或 'platform:chat_id:thread_id'）。\n"
+        "**无需重启 hermes**——下次 miloco_im_push 自动用新 target。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "switch"],
+                "description": "操作：list 候选 / switch 切换",
+            },
+            "target": {
+                "type": "string",
+                "description": "switch 的目标 target（如 'feishu' 或 'feishu:oc_xxx'）",
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+def handle_notify_bind(args: Dict[str, Any], ctx: Any) -> str:
+    """``miloco_notify_bind`` handler（ctx 由 __init__.py 闭包注入）。
+
+    不用 ``**kwargs`` 是因为 hermes 的 tool 注册签名通常显式传 ctx；
+    为兼容各种 hermes 版本，把 ctx 显式作为第二参数。
+    """
+    args = args if isinstance(args, dict) else {}
+    action = (args.get("action") or "").strip()
+    try:
+        if action == "list":
+            result = list_candidates(ctx)
+        elif action == "switch":
+            result = switch_target(ctx, args.get("target", ""))
+        else:
+            result = {"ok": False, "error": f"未知 action：{action!r}（应为 list / switch）"}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("miloco_notify_bind 失败: %s", exc)
+        result = {"ok": False, "error": f"internal error: {exc}"}
+    return json.dumps(result, ensure_ascii=False)

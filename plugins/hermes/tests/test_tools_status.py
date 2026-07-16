@@ -16,6 +16,7 @@ from typing import Any, Dict
 
 import pytest
 from miloco_plugin_pkg import tools_status as ts
+from miloco_plugin_pkg import tools_notify as tn
 
 # ─── fake ctx ────────────────────────────────────────────────────────────
 
@@ -71,8 +72,8 @@ def test_test_push_schema_message_optional():
 
 def test_notify_bind_schema_requires_action():
     """miloco_notify_bind 必填 action（list / switch）。"""
-    assert "action" in ts.MILOCO_NOTIFY_BIND_SCHEMA["parameters"]["required"]
-    assert set(ts.MILOCO_NOTIFY_BIND_SCHEMA["parameters"]["properties"]["action"]["enum"]) == {"list", "switch"}
+    assert "action" in tn.MILOCO_NOTIFY_BIND_SCHEMA["parameters"]["required"]
+    assert set(tn.MILOCO_NOTIFY_BIND_SCHEMA["parameters"]["properties"]["action"]["enum"]) == {"list", "switch"}
 
 
 # ─── gather_status 子项 ──────────────────────────────────────────────────
@@ -302,7 +303,7 @@ def test_test_push_default_message_includes_timestamp(tmp_path: Path, monkeypatc
 
 def test_notify_bind_list_empty(tmp_path: Path):
     ctx = _FakeCtx(tmp_path)
-    result = ts.list_candidates(ctx)
+    result = tn.list_candidates(ctx)
     assert result["ok"] is True
     assert result["candidates"] == []
     assert result["current"] is None
@@ -314,7 +315,7 @@ def test_notify_bind_list_with_candidates(tmp_path: Path):
         encoding="utf-8",
     )
     ctx = _FakeCtx(tmp_path)
-    result = ts.list_candidates(ctx)
+    result = tn.list_candidates(ctx)
     assert result["ok"] is True
     assert result["current"] == "feishu"
     assert result["candidates"] == ["feishu", "telegram"]
@@ -322,7 +323,7 @@ def test_notify_bind_list_with_candidates(tmp_path: Path):
 
 def test_notify_bind_switch_writes_state(tmp_path: Path):
     ctx = _FakeCtx(tmp_path)
-    result = ts.switch_target(ctx, "telegram")
+    result = tn.switch_target(ctx, "telegram")
     assert result["ok"] is True
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["deliver"]["target"] == "telegram"
@@ -332,7 +333,7 @@ def test_notify_bind_switch_writes_state(tmp_path: Path):
 
 def test_notify_bind_switch_empty_target_rejected(tmp_path: Path):
     ctx = _FakeCtx(tmp_path)
-    result = ts.switch_target(ctx, "")
+    result = tn.switch_target(ctx, "")
     assert result["ok"] is False
 
 
@@ -343,7 +344,7 @@ def test_notify_bind_switch_preserves_candidates(tmp_path: Path):
         encoding="utf-8",
     )
     ctx = _FakeCtx(tmp_path)
-    ts.switch_target(ctx, "telegram")
+    tn.switch_target(ctx, "telegram")
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["deliver"]["candidates"] == ["feishu", "telegram"]
 
@@ -374,20 +375,20 @@ def test_notify_bind_handler_list(tmp_path: Path):
         json.dumps({"deliver": {"target": "feishu", "candidates": ["feishu"]}}), encoding="utf-8"
     )
     ctx = _FakeCtx(tmp_path)
-    out = json.loads(ts.handle_notify_bind({"action": "list"}, ctx))
+    out = json.loads(tn.handle_notify_bind({"action": "list"}, ctx))
     assert out["ok"] is True
     assert out["current"] == "feishu"
 
 
 def test_notify_bind_handler_switch(tmp_path: Path):
     ctx = _FakeCtx(tmp_path)
-    out = json.loads(ts.handle_notify_bind({"action": "switch", "target": "telegram"}, ctx))
+    out = json.loads(tn.handle_notify_bind({"action": "switch", "target": "telegram"}, ctx))
     assert out["ok"] is True
 
 
 def test_notify_bind_handler_unknown_action(tmp_path: Path):
     ctx = _FakeCtx(tmp_path)
-    out = json.loads(ts.handle_notify_bind({"action": "bad"}, ctx))
+    out = json.loads(tn.handle_notify_bind({"action": "bad"}, ctx))
     assert out["ok"] is False
 
 

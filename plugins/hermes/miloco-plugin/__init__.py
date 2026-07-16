@@ -43,11 +43,9 @@ from .tools_habit import (
 )
 from .tools_notify import (
     MILOCO_IM_PUSH_SCHEMA,
-    make_im_push_handler,
-)
-from .tools_status import (
     MILOCO_NOTIFY_BIND_SCHEMA,
     handle_notify_bind,
+    make_im_push_handler,
 )
 from .trace import register_trace_hooks
 
