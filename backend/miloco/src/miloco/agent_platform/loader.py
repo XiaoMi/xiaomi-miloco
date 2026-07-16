@@ -149,6 +149,7 @@ def load_adapter(adapter_name: Optional[str] = None) -> AgentPlatformAdapter:
         )
         return _cached_adapter
     except Exception as exc:
+        # 故意宽捕获：动态 importlib 加载第三方插件，任何异常都兜底到 WebhookAdapter
         logger.warning(
             "agent adapter '%s' 加载失败:%s,使用内置 WebhookAdapter 兜底", name, exc,
         )
@@ -180,7 +181,7 @@ def reset_cache() -> None:
                 else:
                     loop.run_until_complete(_cached_adapter.aclose())
             except RuntimeError:
-                pass
+                pass  # 没有可用事件循环（如已在解释器退出阶段），跳过 aclose
         except Exception:
-            pass
+            logger.debug("reset_cache: aclose 失败，忽略", exc_info=True)
     _cached_adapter = None

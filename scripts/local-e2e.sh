@@ -428,6 +428,50 @@ check_dead_functions() {
 }
 
 # ============================================================================
+# R14: 静默吞异常检测（except: pass 无注释）
+# ============================================================================
+check_silent_except() {
+    _hdr "静默吞异常检测"
+    local issues=0
+    while IFS= read -r -d '' py; do
+        local lineno=0
+        while IFS= read -r line; do
+            ((lineno++))
+            if [[ "$line" =~ except.*:\ *pass$ ]] && [[ ! "$line" =~ \# ]]; then
+                _err "$py:$lineno: 静默吞异常——加日志或注释说明可忽略原因"
+                ((issues++))
+            fi
+        done < "$py"
+    done < <(find "$REPO_ROOT/plugins/hermes" "$REPO_ROOT/backend/miloco/src" -name "*.py" -not -path "*/test_*" -not -path "*/tests/*" -print0 2>/dev/null)
+    if [[ $issues -eq 0 ]]; then
+        _ok "无静默吞异常"
+    fi
+}
+
+# ============================================================================
+# R15: 冗余 except (SpecificException, Exception) 检测
+# ============================================================================
+check_redundant_except() {
+    _hdr "冗余 except 类型检测"
+    local issues=0
+    while IFS= read -r -d '' py; do
+        set +e
+        local hits
+        hits=$(grep -n 'except.*Error.*Exception\|except.*,\ *Exception' "$py" 2>/dev/null | grep -v 'test_' | grep -v '^[^:]*:#')
+        set -e
+        if [[ -n "$hits" ]]; then
+            echo "$hits" | while IFS= read -r hit; do
+                _err "$py: 冗余 except——子类被 Exception 覆盖: ${hit:0:100}"
+            done
+            ((issues++))
+        fi
+    done < <(find "$REPO_ROOT/plugins/hermes" "$REPO_ROOT/backend/miloco/src" -name "*.py" -not -path "*/test_*" -not -path "*/tests/*" -print0 2>/dev/null)
+    if [[ $issues -eq 0 ]]; then
+        _ok "无冗余 except 类型"
+    fi
+}
+
+# ============================================================================
 # 汇总
 # ============================================================================
 summary() {
@@ -466,6 +510,8 @@ main() {
             check_secrets_in_config
             check_knowledge_consistency
             check_dead_functions
+            check_silent_except
+            check_redundant_except
             ;;
         *)
             check_shell_syntax
@@ -479,6 +525,8 @@ main() {
             check_secrets_in_config
             check_knowledge_consistency
             check_dead_functions
+            check_silent_except
+            check_redundant_except
             run_tests
             check_pr_review_gate
             ;;

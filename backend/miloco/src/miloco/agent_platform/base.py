@@ -189,7 +189,7 @@ class WebhookAdapter(AgentPlatformAdapter):
             data = await call_agent_webhook(
                 "get_trace", {"runId": run_id}, timeout=5.0,
             )
-        except (AgentWebhookException, Exception):
+        except Exception:
             return None
         status = (data or {}).get("status") if isinstance(data, dict) else None
         if status != "done":
