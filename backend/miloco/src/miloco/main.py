@@ -296,6 +296,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize node event log
     settings = get_settings()
+    # 启动即并排打出三条 single-source-of-truth 路径。home（MILOCO_HOME）漂移、或 db 与
+    # identity_lib 被解耦时（samples 在盘但 SQL 空 → omni roster 渲染“暂无已注册成员”），
+    # 这一行能一眼判出后端实际读的是哪套存储、二者是否同锚。
+    try:
+        from miloco.perception.engine.identity.config_loader import resolve_library_root
+        logger.info(
+            "存储路径: workspace_dir=%s | database=%s | identity_lib=%s",
+            settings.directories.workspace_dir, settings.database_path, resolve_library_root(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("打印存储路径失败（忽略）", exc_info=True)
     log_dir = settings.directories.log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     event_log = NodeEventLog(str(log_dir / "node_events.log"))
