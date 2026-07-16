@@ -365,12 +365,12 @@ export async function realDeletePet(petId: string): Promise<void> {
 }
 
 export async function realObservePet(
-  media: Blob,
-  filename: string,
+  files: File[],
   grounding?: boolean,
 ): Promise<PetObserveResult> {
   const form = new FormData();
-  form.append("media", media, filename);
+  // 多图走 medias（视频恒单个也走 medias，后端按内容判定）；向后兼容仍接单个 media 键
+  for (const f of files) form.append("medias", f, f.name);
   if (grounding !== undefined) form.append("grounding", String(grounding));
   // 直接 fetch，避免 apiFetch 设上 Content-Type: application/json
   const resp = await fetch("/api/identity/pets:observe", {
@@ -387,10 +387,14 @@ export async function realObservePet(
     description: Record<string, unknown> | null;
     head_bbox: number[] | null;
     primary_crop_b64: string;
+    primary_index?: number;
+    refs_inconsistent?: boolean | null;
+    warnings?: { type: string; level: string; message: string }[];
     candidates: {
       track_id: number | null;
       species_guess: string;
       crop_b64: string;
+      head_bbox?: number[] | null;
       conf?: number;
       sharpness?: number;
       area_ratio?: number;
@@ -404,10 +408,14 @@ export async function realObservePet(
     description: d.description,
     headBbox: d.head_bbox,
     primaryCropB64: d.primary_crop_b64,
+    primaryIndex: d.primary_index ?? 0,
+    refsInconsistent: d.refs_inconsistent ?? null,
+    warnings: d.warnings ?? [],
     candidates: (d.candidates ?? []).map((c) => ({
       trackId: c.track_id,
       speciesGuess: c.species_guess,
       cropB64: c.crop_b64,
+      headBbox: c.head_bbox,
       conf: c.conf,
       sharpness: c.sharpness,
       areaRatio: c.area_ratio,
@@ -437,16 +445,45 @@ export async function realUploadPetAvatar(
   return mapBackendPet(r.data);
 }
 
+/**
+ * 上传客户端已裁好的参考 crop（③ 多姿态参照图）。服务端只存不裁（同 avatar 范式）。
+ * mode=replace 整组替换（注册一次性写 ≤3）；append 追加（后端按绝对分留 top-3）。
+ * scores 与 crops 对齐（绝对质量分 conf×sharpness×area_ratio），缺省补 0。
+ */
+export async function realUploadPetReferenceCrops(
+  petId: string,
+  crops: { blob: Blob; score?: number }[],
+  mode: "replace" | "append" = "replace",
+): Promise<Pet> {
+  const form = new FormData();
+  crops.forEach((c, i) => form.append("crops", c.blob, `ref_${i}.jpg`));
+  crops.forEach((c) => form.append("scores", String(c.score ?? 0)));
+  form.append("mode", mode);
+  const resp = await fetch(`/api/identity/pets/${petId}/reference-crops`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+  const r = (await resp.json()) as Normal<BackendPet>;
+  return mapBackendPet(r.data);
+}
+
 // ── 实验性功能开关 ───────────────────────────────────────────
 interface BackendFeatures {
   pet_recognition: boolean;
   pet_head_grounding: boolean;
+  pet_body_grounding: boolean;
 }
 
 function mapFeatures(f: BackendFeatures): Features {
   return {
     petRecognition: f.pet_recognition,
     petHeadGrounding: f.pet_head_grounding,
+    petBodyGrounding: f.pet_body_grounding,
   };
 }
 
@@ -460,6 +497,8 @@ export async function realSetFeatures(patch: Partial<Features>): Promise<Feature
   if (patch.petRecognition !== undefined) body.pet_recognition = patch.petRecognition;
   if (patch.petHeadGrounding !== undefined)
     body.pet_head_grounding = patch.petHeadGrounding;
+  if (patch.petBodyGrounding !== undefined)
+    body.pet_body_grounding = patch.petBodyGrounding;
   const r = await apiFetch<Normal<BackendFeatures>>("/api/admin/features", {
     method: "POST",
     body: JSON.stringify(body),

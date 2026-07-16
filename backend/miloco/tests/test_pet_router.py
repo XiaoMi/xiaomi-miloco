@@ -208,6 +208,81 @@ def test_observe_passes_body_grounding_from_feature(client, monkeypatch):
     assert holder["medias_is_list"] is True  # 端点包成单元素列表（向后兼容）
 
 
+def _stub_observe_capture(monkeypatch):
+    """桩 observe_pet：记录收到的 medias 张数与 is_video，返回最简 detected。"""
+    holder = {}
+
+    async def _fake(medias, *, is_video, grounding, body_grounding=True, **kw):
+        holder["n"] = len(medias)
+        holder["is_video"] = is_video
+        return {
+            "detected": True,
+            "description": {"species": "猫"},
+            "head_bbox": None,
+            "primary_crop_b64": "x",
+            "candidates": [],
+        }
+
+    monkeypatch.setattr("miloco.pet.observe.observe_pet", _fake)
+    return holder
+
+
+def test_observe_multi_image_passes_list(client, monkeypatch):
+    # 多图走 medias：2 张 → observe_pet 收 2 张、非视频
+    _stub_settings(monkeypatch, recognition=True)
+    holder = _stub_observe_capture(monkeypatch)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files=[
+            ("medias", ("a.jpg", b"a", "image/jpeg")),
+            ("medias", ("b.jpg", b"b", "image/jpeg")),
+        ],
+    )
+    assert r.status_code == 200
+    assert holder["n"] == 2 and holder["is_video"] is False
+
+
+def test_observe_too_many_images_400(client, monkeypatch):
+    _stub_settings(monkeypatch, recognition=True)
+    _stub_observe_capture(monkeypatch)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files=[("medias", (f"{i}.jpg", b"x", "image/jpeg")) for i in range(4)],
+    )
+    assert r.status_code == 400
+
+
+def test_observe_video_not_mixed_with_images_400(client, monkeypatch):
+    _stub_settings(monkeypatch, recognition=True)
+    _stub_observe_capture(monkeypatch)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files=[
+            ("medias", ("v.mp4", b"v", "video/mp4")),
+            ("medias", ("a.jpg", b"a", "image/jpeg")),
+        ],
+    )
+    assert r.status_code == 400
+
+
+def test_observe_single_video_ok(client, monkeypatch):
+    _stub_settings(monkeypatch, recognition=True)
+    holder = _stub_observe_capture(monkeypatch)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files=[("medias", ("v.mp4", b"v", "video/mp4"))],
+    )
+    assert r.status_code == 200
+    assert holder["n"] == 1 and holder["is_video"] is True
+
+
+def test_observe_no_media_400(client, monkeypatch):
+    _stub_settings(monkeypatch, recognition=True)
+    _stub_observe_capture(monkeypatch)
+    r = client.post("/api/identity/pets:observe", data={"grounding": "false"})
+    assert r.status_code == 400
+
+
 # ── 参考 crop 端点（P1a-C）────────────────────────────────────────────
 
 

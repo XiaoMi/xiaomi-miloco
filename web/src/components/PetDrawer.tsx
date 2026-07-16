@@ -18,14 +18,23 @@ import {
   updateHomeEntry,
   updatePet,
   uploadPetAvatar,
+  uploadPetReferenceCrops,
 } from "@/api";
 import { PetAvatar } from "@/components/PetAvatar";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconCamera, IconCheck, IconX } from "@/lib/icons";
 import { AvatarCropEditor } from "./AvatarCropEditor";
-import { PetAutoGenFlow } from "./PetAutoGenFlow";
+import { PetAutoGenFlow, type AutoGenDoneResult } from "./PetAutoGenFlow";
 import { InfoNote } from "./InfoNote";
 import { toast } from "./Toast";
+
+/** 裸 base64（JPEG，无 data: 前缀）→ Blob，供参考 crop 上传。 */
+function b64ToBlob(b64: string, type = "image/jpeg"): Blob {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type });
+}
 
 interface Props {
   pet: Pet | null; // null = 新增
@@ -60,7 +69,9 @@ export function PetDrawer({
   const [apprEntryId, setApprEntryId] = useState<string | null>(null);
   const [confirmingDel, setConfirmingDel] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [autoGen, setAutoGen] = useState(false);
+  const [autoGen, setAutoGen] = useState<false | "register" | "append">(false);
+  // 待保存的参考 crop（D6 候选全集）——新增时随保存整组 replace 落库；补充素材走 append 即时落库。
+  const [refCrops, setRefCrops] = useState<{ cropB64: string; score: number }[]>([]);
   const [crop, setCrop] = useState<CropSource | null>(null);
   const [avatarBlob, setAvatarBlob] = useState<Blob | null>(null);
   const [avatarName, setAvatarName] = useState("avatar.jpg");
@@ -87,6 +98,7 @@ export function PetDrawer({
       setApprEntryId(apprEntry?.id ?? null);
       setConfirmingDel(false);
       setAutoGen(false);
+      setRefCrops([]);
       setCrop(null);
       setAvatarBlob(null);
       setAvatarName("avatar.jpg");
@@ -108,17 +120,47 @@ export function PetDrawer({
 
   if (!open) return null;
 
+  // 补充素材（D3）：存量宠物追加参考图——即时以 append 落库（不动描述/头像）。
+  const onAppendMaterial = async (result: AutoGenDoneResult) => {
+    setAutoGen(false);
+    if (!pet || result.referenceCrops.length === 0) return;
+    setBusy(true);
+    try {
+      await uploadPetReferenceCrops(
+        pet.id,
+        result.referenceCrops.map((c) => ({
+          blob: b64ToBlob(c.cropB64),
+          score: c.score,
+        })),
+        "append",
+      );
+      toast(t("pet.materialAppended", { count: result.referenceCrops.length }), "ok");
+      onChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("pet.saveFail"), "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (autoGen) {
     return (
       <PetAutoGenFlow
         grounding={grounding}
+        mode={autoGen}
         onClose={() => setAutoGen(false)}
-        onDone={({ appearance: appr, species: sp, cropB64, headBbox }) => {
-          if (appr) setAppearance(appr);
-          if (sp) setSpecies((cur) => (cur.trim() ? cur : sp)); // 物种自动回填（不覆盖已填）
-          setAutoGen(false);
-          if (cropB64) setCrop({ source: { b64: cropB64 }, initialBox: headBbox });
-        }}
+        onDone={
+          autoGen === "append"
+            ? onAppendMaterial
+            : ({ appearance: appr, species: sp, avatarCropB64, avatarHeadBbox, referenceCrops }) => {
+                if (appr) setAppearance(appr);
+                if (sp) setSpecies((cur) => (cur.trim() ? cur : sp)); // 物种自动回填（不覆盖已填）
+                setRefCrops(referenceCrops); // D6：全部候选待保存时整组落库
+                setAutoGen(false);
+                if (avatarCropB64)
+                  setCrop({ source: { b64: avatarCropB64 }, initialBox: avatarHeadBbox });
+              }
+        }
       />
     );
   }
@@ -139,6 +181,14 @@ export function PetDrawer({
           species: species.trim(),
         });
         if (avatarBlob) await uploadPetAvatar(created.id, avatarBlob, avatarName);
+        // D6：注册时把 observe 选出的候选全集整组落库为参考图（③ 多姿态参照图）
+        if (refCrops.length > 0) {
+          await uploadPetReferenceCrops(
+            created.id,
+            refCrops.map((c) => ({ blob: b64ToBlob(c.cropB64), score: c.score })),
+            "replace",
+          );
+        }
         if (appearance.trim()) {
           await addHomeEntry({
             type: "member_persona",
@@ -259,15 +309,13 @@ export function PetDrawer({
                 <IconCamera width={22} height={22} />
               </span>
             </button>
-            {isNew && (
-              <button
-                type="button"
-                onClick={() => setAutoGen(true)}
-                className="text-body px-4 py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
-              >
-                {t("pet.autoGenTitle")}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setAutoGen(isNew ? "register" : "append")}
+              className="text-body px-4 py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
+            >
+              {isNew ? t("pet.autoGenTitle") : t("pet.addMaterial")}
+            </button>
           </div>
 
           {/* 基本信息（始终可编辑）：名字 / 物种；外观仅新增时录入 */}

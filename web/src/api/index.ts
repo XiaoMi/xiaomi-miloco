@@ -138,11 +138,10 @@ export async function deletePet(id: string): Promise<void> {
 }
 
 export async function observePet(
-  media: Blob,
-  filename: string,
+  files: File[],
   grounding?: boolean,
 ): Promise<PetObserveResult> {
-  return impl.realObservePet(media, filename, grounding);
+  return impl.realObservePet(files, grounding);
 }
 
 export async function uploadPetAvatar(
@@ -151,6 +150,14 @@ export async function uploadPetAvatar(
   filename: string,
 ): Promise<Pet> {
   return impl.realUploadPetAvatar(petId, image, filename);
+}
+
+export async function uploadPetReferenceCrops(
+  petId: string,
+  crops: { blob: Blob; score?: number }[],
+  mode: "replace" | "append" = "replace",
+): Promise<Pet> {
+  return impl.realUploadPetReferenceCrops(petId, crops, mode);
 }
 
 // ── 实验性功能开关 ─────────────────────────────────────────

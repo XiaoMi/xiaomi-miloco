@@ -61,25 +61,40 @@ export interface Pet {
 export interface Features {
   petRecognition: boolean;
   petHeadGrounding: boolean;
+  petBodyGrounding: boolean; // 回退路径（框不到猫狗）裁本体作参考图；默认开
 }
 
-// pet:observe 返回：选出的最优 crop + omni 按维度生成的外观描述（+ 可选头部框）
+// observe 建议类不阻断提示（后端算）：species_mismatch / generic_look / refs_inconsistent / multiple_pets
+export interface PetObserveWarning {
+  type: string;
+  level: string; // "warn"
+  message: string;
+}
+
+// observe 单个候选（一只宠物的一张姿态 crop）
+export interface PetObserveCandidate {
+  trackId: number | null;
+  speciesGuess: string;
+  cropB64: string;
+  headBbox?: number[] | null; // 该 crop 的头部归一化框（grounding 开时）
+  // P0 契约质量分（可选；门控/候选展示/落盘绝对分用）
+  conf?: number;
+  sharpness?: number;
+  areaRatio?: number;
+  bbox?: number[] | null; // [x, y, w, h]（相对来源帧像素）
+  frameIdx?: number | null;
+}
+
+// pet:observe 返回：门控选出的 ≤3 张同一只多姿态 crop + omni 一次成型共性描述
 export interface PetObserveResult {
   detected: boolean;
   description: Record<string, unknown> | null; // {species, breed, size_build, ..., summary}
-  headBbox: number[] | null; // grounding 开时头部归一化 [x,y,w,h]（相对 primary crop）
+  headBbox: number[] | null; // primary crop 的头部归一化 [x,y,w,h]
   primaryCropB64: string;
-  candidates: {
-    trackId: number | null;
-    speciesGuess: string;
-    cropB64: string;
-    // P0 契约质量分（可选；P1+ 消费于门控/候选网格展示）
-    conf?: number;
-    sharpness?: number;
-    areaRatio?: number;
-    bbox?: number[] | null; // [x, y, w, h]（相对来源帧像素）
-    frameIdx?: number | null;
-  }[];
+  primaryIndex: number; // candidates 中主候选下标（默认头像/primary_crop 对应那张）
+  candidates: PetObserveCandidate[];
+  refsInconsistent: boolean | null; // 多图时 omni 判"疑似不是同一只"；单图/回退恒 null
+  warnings: PetObserveWarning[];
 }
 
 // ── 设备 ────────────────────────────────────────────────────
