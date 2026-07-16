@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 from miloco.perception.engine.omni.prompt_builder import (
     _batch_video_has_audio,
@@ -561,7 +562,10 @@ class TestFusedAudioRoute:
 class TestFusedPetRefs:
     """P2：has_pets 时 fused 主 user content 注入已登记宠物参考图块。"""
 
-    _JPEG = b"\xff\xd8\xff" + b"\x00" * 300
+    # 真实可解码 JPEG（pet_refs 现会 imdecode 后 hstack 成 composite）
+    _JPEG = cv2.imencode(
+        ".jpg", np.random.default_rng(1).integers(0, 255, (48, 48, 3), dtype=np.uint8)
+    )[1].tobytes()
 
     def test_pet_refs_injected_when_has_pets(self, tmp_path, monkeypatch):
         from miloco.perception.engine.identity.pet_library import PetLibrary
