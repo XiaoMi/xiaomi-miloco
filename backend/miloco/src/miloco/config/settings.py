@@ -238,6 +238,23 @@ class NotifySettings(BaseModel):
     # settings 加载（后端起不来），对一个可选兜底旋钮是过度约束。
 
 
+class SchedulerSettings(BaseModel):
+    """miloco 内置定时任务自动管理开关。
+
+    实际消费方是 openclaw 插件（``plugins/openclaw/src/home-profile/scheduler.ts``），
+    它在网关启动时读取此开关：``enabled=false`` 时清除并停止重建自动定时任务。
+    backend 本身不消费此字段，仅负责经 config.json 契约对齐与 Web 读写落盘。
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "是否由 miloco 自动管理内置定时任务（感知摘要 / 家庭巡检 / Dreaming / "
+            "习惯洞察）；关闭后 agent 网关启动时会清除这些自动任务且不再重建。"
+        ),
+    )
+
+
 class CameraSettings(BaseModel):
     """摄像头采集参数。"""
 
@@ -557,6 +574,10 @@ class MilocoSettings(BaseSettings):
         default_factory=NotifySettings,
         description="通知发送运行参数（去重窗口等）",
     )
+    scheduler: SchedulerSettings = Field(
+        default_factory=SchedulerSettings,
+        description="miloco 内置定时任务自动管理开关（由 openclaw 插件消费）",
+    )
     camera: CameraSettings = Field(
         default_factory=CameraSettings,
         description="摄像头采集参数",
@@ -761,6 +782,7 @@ __all__ = [
     "PerfSettings",
     "RuleSettings",
     "ScheduleSettings",
+    "SchedulerSettings",
     "ServerSettings",
     "get_settings",
     "reset_settings",

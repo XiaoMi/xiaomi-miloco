@@ -72,6 +72,12 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "多模态模型服务 Base URL",
     ),
     "model.omni.api_key": (str, "", "多模态模型 API Key"),
+    "scheduler.enabled": (
+        bool,
+        True,
+        "是否由 miloco 自动管理内置定时任务（感知摘要 / 家庭巡检 / Dreaming / 习惯洞察）；"
+        "关闭后 agent 网关启动时会清除这些自动任务且不再重建",
+    ),
     "perception.engine.input.video_short_edge": (
         int,
         512,

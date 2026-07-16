@@ -69,7 +69,17 @@ def sync_person_meta_from_sql(library) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    if synced or orphans:
+    if orphans:
+        # orphan = 盘上有 person 目录但 SQL 无对应行。这些人不进 SQL 驱动的家庭档案 roster,
+        # omni prompt 会渲染成"(暂无已注册成员)"——正是该类上报的症状。升 WARNING 并点明含义,
+        # 让静默矛盾变可操作信号（成因多为 home/db 漂移，或删人时 rmtree 残留；修复留人工裁决）。
+        logger.warning(
+            "meta sync 完成：synced=%d orphans=%d total=%d —— 有 %d 个 person 目录在盘但 SQL 无对应行,"
+            "这些成员不会进家庭档案 roster、omni 可能渲染“暂无已注册成员”;"
+            "常见成因：MILOCO_HOME/db 路径漂移，或删除成员时目录未清干净。请人工核实后决定重注册 / 恢复 db / 删目录。",
+            synced, orphans, len(persons), orphans,
+        )
+    elif synced:
         logger.info(
             "meta sync 完成：synced=%d orphans=%d total=%d", synced, orphans, len(persons)
         )

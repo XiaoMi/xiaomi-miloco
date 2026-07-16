@@ -52,3 +52,9 @@ def test_cli_load_matches_fixture(fixture_home):
         cfg["model"]["omni"]["base_url"] == expected["model"]["omni"]["base_url"]
     )
     assert cfg["model"]["omni"]["api_key"] == expected["model"]["omni"]["api_key"]
+    # scheduler / notify：openclaw 插件消费方，键名/形状必须与 fixture 一致
+    assert cfg["scheduler"]["enabled"] is expected["scheduler"]["enabled"]
+    assert (
+        cfg["notify"]["dedup_window_sec"]
+        == expected["notify"]["dedup_window_sec"]
+    )

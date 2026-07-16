@@ -16,5 +16,11 @@
       "base_url": "https://api.xiaomimimo.com/v1",
       "api_key": "sk-fixture-xxxx"
     }
+  },
+  "scheduler": {
+    "enabled": false
+  },
+  "notify": {
+    "dedup_window_sec": 120
   }
 }

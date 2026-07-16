@@ -60,8 +60,13 @@ class SQLiteConnector:
                     # 走 fresh 路径:_create_tables 会先跑 db-level PRAGMA
                     # (auto_vacuum 只对空库生效,缺表兜底建一旦先建了表就来不及了)。
                     if not existing_tables:
-                        logger.info(
-                            "Empty pre-created db file, running fresh init"
+                        # WARNING 而非 INFO:老部署突然读到一个"文件在但零表"的空 db,几乎必是
+                        # home/db 路径配错(读错了文件),而非正常首启——一旦静默 fresh init,
+                        # person 表建空,已注册成员从 roster 消失、omni 渲染"暂无已注册成员"。
+                        logger.warning(
+                            "Empty pre-created db file, running fresh init: %s "
+                            "(若本应有历史数据，请核实 MILOCO_HOME / database 路径是否漂移)",
+                            self.db_path,
                         )
                         self._create_tables(conn)
                         logger.info(
@@ -209,8 +214,11 @@ class SQLiteConnector:
 
                     logger.info("Database loaded successfully: %s", self.db_path)
             else:
-                logger.info(
-                    "Database file does not exist, creating new database: %s",
+                # WARNING 而非 INFO:除首次装机,产品运行中突然新建 db 基本等于"读错了 home/
+                # 路径"——新库 person 表为空,已注册成员从 roster 消失、omni 渲染"暂无已注册成员"。
+                logger.warning(
+                    "Database file does not exist, creating new database: %s "
+                    "(非首次装机时请核实 MILOCO_HOME / database 路径是否漂移)",
                     self.db_path,
                 )
                 # Create database connection and initialize table structure
@@ -338,7 +346,9 @@ class SQLiteConnector:
     def _create_meaningful_events_table(self, conn: sqlite3.Connection) -> None:
         """Create meaningful_events table.
 
-        每次推理 = 一行 event(同窗口 N 摄像头合并 1 行,device_ids JSON 记录参与摄像头).
+        每次推理 = 一行 event(同窗口 N 摄像头合并 1 行;device_ids JSON 记录本行真正相关的
+        摄像头——有 rule/suggestion/asr 命中时收窄到其 source_device_ids,否则退化为本次
+        推理中成功出图(可落盘)的全部摄像头).
         schema_version 字段(行级)标识本行按哪个 schema 版本写入;本期 INSERT 恒写 1,
         后续 ALTER TABLE 加字段时新行写 2,DAO 读取按版本走兼容分支.
         """

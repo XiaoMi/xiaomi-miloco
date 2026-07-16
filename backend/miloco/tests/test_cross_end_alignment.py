@@ -48,3 +48,9 @@ def test_backend_load_matches_fixture(fixture_home):
     assert settings.model.omni.model == expected["model"]["omni"]["model"]
     assert settings.model.omni.base_url == expected["model"]["omni"]["base_url"]
     assert settings.model.omni.api_key == expected["model"]["omni"]["api_key"]
+    # scheduler / notify：openclaw 插件消费方，键名/形状必须与 fixture 一致
+    assert settings.scheduler.enabled is expected["scheduler"]["enabled"]
+    assert (
+        settings.notify.dedup_window_sec
+        == expected["notify"]["dedup_window_sec"]
+    )

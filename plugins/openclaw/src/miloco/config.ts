@@ -122,6 +122,20 @@ const SHARED_CONFIG_SCHEMA = {
       },
       required: ["omni"],
     },
+    /** 内置定时任务自动管理开关（与 settings.schema.json 的 scheduler 对齐） */
+    scheduler: {
+      type: "object",
+      default: {},
+      additionalProperties: true,
+      properties: {
+        enabled: {
+          type: "boolean",
+          default: true,
+          description:
+            "是否由 miloco 自动管理内置定时任务；关闭后网关启动时清除自动任务且不再重建",
+        },
+      },
+    },
     /** 通知发送运行参数（与 settings.schema.json 的 notify 对齐） */
     notify: {
       type: "object",
@@ -141,7 +155,33 @@ const SHARED_CONFIG_SCHEMA = {
 
 export type MilocoSharedConfig = FromSchema<typeof SHARED_CONFIG_SCHEMA>;
 
-const { parse: parseSharedConfig } = createParser(SHARED_CONFIG_SCHEMA);
+// createParser 只做「校验 + 补默认」。环境变量覆盖由 applyEnvOverrides 在校验前叠加，
+// 因此下面的 parseSharedConfig / parseSharedConfigSafe（以及走它们的 loadSharedConfig /
+// updateSharedConfig / 两个读取器）返回值天然带 env 覆盖。
+const {
+  parse: validateSharedConfig,
+  safeParse: safeValidateSharedConfig,
+} = createParser(SHARED_CONFIG_SCHEMA);
+
+/**
+ * 校验并补齐默认值，返回完整配置。校验前先叠加环境变量覆盖（见 {@link applyEnvOverrides}）。
+ * 校验失败抛 {@link ValidationError}（沿用既有行为，供 loadSharedConfig / updateSharedConfig）。
+ */
+function parseSharedConfig(raw: Record<string, unknown>): MilocoSharedConfig {
+  return validateSharedConfig(applyEnvOverrides(raw));
+}
+
+/**
+ * {@link parseSharedConfig} 的不抛错版本：校验失败返回 `undefined`。供高频、
+ * 关键路径的轻量读取器（网关启停 / 每条通知）使用——一份被手改坏的 config.json
+ * 不该让调度或通知直接崩，回落各自缺省即可。
+ */
+function parseSharedConfigSafe(
+  raw: Record<string, unknown>,
+): MilocoSharedConfig | undefined {
+  const res = safeValidateSharedConfig(applyEnvOverrides(raw));
+  return res.success ? res.data : undefined;
+}
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -286,25 +326,166 @@ function safeJsonParse(text: string | undefined): unknown {
   }
 }
 
+// ─── 环境变量覆盖（schema 驱动，对齐后端 pydantic-settings） ──────────────────
+//
+// 后端 `MilocoSettings` 用 pydantic-settings 以「环境变量 > config.json >
+// settings.yaml > 默认值」的优先级解析配置（见 backend settings.py 的
+// `SettingsConfigDict(env_prefix="MILOCO_", env_nested_delimiter="__",
+// case_sensitive=False)`）。backend GET /admin/scheduler-config 与 Web 开关读
+// `get_settings()`（env 优先）；插件侧若无视 env，会「设了 env 时界面显示与实际
+// 行为背离」。
+//
+// 这里不逐键手写，而是像 pydantic-settings 那样 **schema 驱动**：遍历
+// SHARED_CONFIG_SCHEMA 的叶子字段，自动按其声明的 `type` 探测同名环境变量
+// `MILOCO_<A>__<B>` 并强转，收集成一份 partial，在 schema 校验前叠加进 raw。
+// 新增配置字段时无需改这里，env 覆盖自动生效。
+
+/** 环境变量前缀，与后端 `SettingsConfigDict.env_prefix` 对齐。 */
+const ENV_PREFIX = "MILOCO_";
+/** 嵌套字段分隔符，与后端 `SettingsConfigDict.env_nested_delimiter` 对齐。 */
+const ENV_NESTED_DELIMITER = "__";
+
+/** pydantic v2 认可为 `true` 的布尔字符串（大小写不敏感）。 */
+const ENV_TRUE_TOKENS = new Set(["1", "true", "t", "yes", "y", "on"]);
+/** pydantic v2 认可为 `false` 的布尔字符串（大小写不敏感）。 */
+const ENV_FALSE_TOKENS = new Set(["0", "false", "f", "no", "n", "off"]);
+
+/** JSON Schema 节点的运行时最小视图（只取 env 遍历需要的字段）。 */
+type SchemaNode = { type?: string; properties?: Record<string, SchemaNode> };
+
+/**
+ * 把 `process.env` 建成「小写名 → 值」索引，供一次 {@link applyEnvOverrides} 内所有
+ * 叶子共用。大小写不敏感对齐后端 `case_sensitive=False`（POSIX env 名本身区分大小写，
+ * 索引化以兼容用户误用小写）。同名仅大小写不同时后者覆盖前者——极端场景，忽略。
+ */
+function buildEnvIndex(): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) index.set(key.toLowerCase(), value);
+  }
+  return index;
+}
+
+/**
+ * 从 env 索引 O(1) 取「与某配置路径对应的环境变量」原始字符串。
+ * 路径 `["scheduler", "enabled"]` → `MILOCO_SCHEDULER__ENABLED`。
+ */
+function readEnvRaw(
+  path: readonly string[],
+  envIndex: Map<string, string>,
+): string | undefined {
+  return envIndex.get(
+    `${ENV_PREFIX}${path.join(ENV_NESTED_DELIMITER)}`.toLowerCase(),
+  );
+}
+
+/**
+ * 按 schema 声明的类型解析环境变量字符串（布尔规则对齐 pydantic v2）。
+ * 无法解析（含空串、类型不认）返回 `undefined` = 忽略该 env，回落文件/默认。
+ */
+function coerceEnvValue(type: string, raw: string): unknown {
+  switch (type) {
+    case "boolean": {
+      const t = raw.trim().toLowerCase();
+      if (ENV_TRUE_TOKENS.has(t)) return true;
+      if (ENV_FALSE_TOKENS.has(t)) return false;
+      return undefined;
+    }
+    case "integer": {
+      const t = raw.trim();
+      if (t === "") return undefined;
+      const n = Number(t);
+      return Number.isInteger(n) ? n : undefined;
+    }
+    case "number": {
+      const t = raw.trim();
+      if (t === "") return undefined;
+      const n = Number(t);
+      return Number.isFinite(n) ? n : undefined;
+    }
+    case "string":
+      return raw;
+    default:
+      return undefined;
+  }
+}
+
+/** 递归遍历 schema.properties，收集所有被环境变量覆盖的叶子，返回「只含覆盖项」的 partial。 */
+function collectEnvOverrides(
+  props: Record<string, SchemaNode>,
+  prefix: readonly string[],
+  envIndex: Map<string, string>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, node] of Object.entries(props)) {
+    const path = [...prefix, key];
+    if (node.type === "object" && node.properties) {
+      const child = collectEnvOverrides(node.properties, path, envIndex);
+      if (Object.keys(child).length > 0) out[key] = child;
+    } else if (typeof node.type === "string") {
+      const rawVal = readEnvRaw(path, envIndex);
+      if (rawVal !== undefined) {
+        const coerced = coerceEnvValue(node.type, rawVal);
+        if (coerced !== undefined) out[key] = coerced;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * schema 驱动地把 `MILOCO_*` 环境变量覆盖 **合并进 raw 的副本**（绝不改动入参、
+ * 绝不落盘——env 只是运行时 overlay），返回新对象供 schema 校验。无任何匹配 env
+ * 时原样返回入参。
+ *
+ * 与后端的一个刻意差异：env 值非法（如 bool 写成 `maybe`）时后端会抛
+ * ValidationError 崩，这里跳过该 env、回落文件/默认，避免误配阻断网关启停。
+ */
+function applyEnvOverrides(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  // 一次性把 process.env 建成小写索引，避免每个 schema 叶子都重扫一遍 process.env
+  // （getNotifyDedupWindowMs 走每条通知的热路径，env 多的容器里能省掉数千次比较）。
+  const envIndex = buildEnvIndex();
+  const overrides = collectEnvOverrides(
+    SHARED_CONFIG_SCHEMA.properties as unknown as Record<string, SchemaNode>,
+    [],
+    envIndex,
+  );
+  if (Object.keys(overrides).length === 0) return raw;
+  const merged: Record<string, unknown> = { ...raw };
+  deepMerge(merged, overrides);
+  return merged;
+}
+
 /** 通知去重窗口默认值（秒），与 settings.schema.json / 后端 NotifySettings 对齐。 */
 const DEFAULT_NOTIFY_DEDUP_SEC = 60;
 
 /**
- * 无副作用读取通知去重窗口（毫秒）。读 config.json 的 `notify.dedup_window_sec`
- * （秒，与后端 `MilocoSettings.notify` 同键）。非数（含缺失）按缺省 60；负值经
- * `Math.max(0, …)` 归零 = 关闭去重，与后端 `MessageDeduper` 的 `window_sec<=0` 同义。返回毫秒。
- *
- * 刻意不走 {@link loadSharedConfig}：那会在每次调用时归一化落盘、解析 gateway auth，
- * 而本函数会被每条通知调用，只需读一个数值。
+ * 无副作用读取通知去重窗口（毫秒）。经 {@link parseSharedConfig} 语义读
+ * `notify.dedup_window_sec`（秒，与后端 `MilocoSettings.notify` 同键），环境变量
+ * `MILOCO_NOTIFY__DEDUP_WINDOW_SEC` 优先、缺失补默认 60。负值经 `Math.max(0, …)`
+ * 归零 = 关闭去重，与后端 `MessageDeduper` 的 `window_sec<=0` 同义。返回毫秒。
  */
 export function getNotifyDedupWindowMs(): number {
-  const existing = safeJsonParse(readTextOrUndefined(sharedConfigPath()));
-  const raw = isRecord(existing) ? existing : {};
-  const notify = isRecord(raw.notify) ? raw.notify : undefined;
-  const sec =
-    typeof notify?.dedup_window_sec === "number" &&
-    Number.isFinite(notify.dedup_window_sec)
-      ? notify.dedup_window_sec
-      : DEFAULT_NOTIFY_DEDUP_SEC;
+  const cfg = parseSharedConfigSafe(readRawConfig());
+  const sec = cfg?.notify?.dedup_window_sec ?? DEFAULT_NOTIFY_DEDUP_SEC;
   return Math.max(0, sec) * 1000;
+}
+
+/**
+ * 无副作用读取「是否自动管理内置定时任务」开关。经 {@link parseSharedConfig} 语义读
+ * `scheduler.enabled`（与后端 `SchedulerSettings` / CLI `scheduler.enabled` 同键），
+ * 环境变量 `MILOCO_SCHEDULER__ENABLED` 优先（对齐后端 GET / Web 开关的
+ * `get_settings()` 读法，消除「设了 env 时界面显示与插件实际行为背离」）。
+ * 缺失 / config 校验失败一律按缺省 `true`（保持既有默认自动管理行为）。
+ */
+export function isSchedulerAutoManageEnabled(): boolean {
+  return parseSharedConfigSafe(readRawConfig())?.scheduler?.enabled ?? true;
+}
+
+/** 无副作用读取磁盘 raw config（缺失 / 非法 JSON → 空对象）。 */
+function readRawConfig(): Record<string, unknown> {
+  const existing = safeJsonParse(readTextOrUndefined(sharedConfigPath()));
+  return isRecord(existing) ? existing : {};
 }
