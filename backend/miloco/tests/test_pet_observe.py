@@ -60,7 +60,7 @@ def test_largest_pet_crop_ignores_non_pet_class():
 
 def test_video_single_pet_one_track():
     frames = [(i, _frame(300, 300)) for i in range(8)]
-    detector = SimpleNamespace(detect_pets=lambda f: [_det(50, 50, 60, 60)])
+    detector = SimpleNamespace(detect_pets=lambda f: [_det(50, 50, 80, 80)])
     crops = obs._video_pet_crops(frames, detector, fps=1)
     assert len(crops) >= 1
     assert crops[0]["class_id"] == Detection.CLASS_CAT
@@ -72,8 +72,8 @@ def test_video_multi_pet_picks_dominant_track():
     frames = [(i, _frame(400, 400)) for i in range(8)]
     detector = SimpleNamespace(
         detect_pets=lambda f: [
-            _det(20, 20, 60, 60, cls=Detection.CLASS_CAT),
-            _det(300, 300, 60, 60, cls=Detection.CLASS_DOG),
+            _det(20, 20, 80, 80, cls=Detection.CLASS_CAT),
+            _det(300, 300, 80, 80, cls=Detection.CLASS_DOG),
         ]
     )
     selected, n_coincident = obs._select_video_crops(frames, detector, fps=1)
@@ -91,10 +91,10 @@ def test_video_fragmented_single_pet_not_counted_as_multiple():
         i = calls["n"]
         calls["n"] += 1
         if i < 4:  # 前段：位置 A
-            return [_det(20, 20, 60, 60, cls=Detection.CLASS_CAT)]
+            return [_det(20, 20, 80, 80, cls=Detection.CLASS_CAT)]
         if i < 8:  # 中段：消失（无检测）
             return []
-        return [_det(320, 320, 60, 60, cls=Detection.CLASS_CAT)]  # 后段：位置 B（远离 A）
+        return [_det(300, 300, 80, 80, cls=Detection.CLASS_CAT)]  # 后段：位置 B（远离 A）
 
     frames = [(i, _frame(400, 400)) for i in range(12)]
     selected, n_coincident = obs._select_video_crops(
@@ -105,12 +105,12 @@ def test_video_fragmented_single_pet_not_counted_as_multiple():
 
 
 def test_gate_select_hard_exclude_returns_empty():
-    # 全部被硬排除（这里用 crowded 标记）→ 返回 []（退纯描述，绝不放宽）
+    # 全部被硬排除（crowded 或 尺寸不达标）→ 返回 []（退纯描述，绝不放宽）
     cands = [
         {"crop": _frame(40, 40), "conf": 0.9, "sharpness": 999.0, "area_ratio": 0.3,
-         "class_id": Detection.CLASS_CAT, "crowded": True},
+         "class_id": Detection.CLASS_CAT, "crowded": True, "size_ok": True},  # crowded 排除
         {"crop": _frame(40, 40), "conf": 0.9, "sharpness": 999.0, "area_ratio": 0.001,
-         "class_id": Detection.CLASS_CAT, "crowded": False},  # 面积过小
+         "class_id": Detection.CLASS_CAT, "crowded": False, "size_ok": False},  # 尺寸不达标
     ]
     assert obs._gate_select(cands) == []
 
@@ -119,7 +119,7 @@ def test_gate_select_dedups_and_caps_at_3():
     # 5 张过门槛的候选 → gate_score 排序 + dHash 多样性 → ≤3
     cands = [
         {"crop": _frame(60, 60), "conf": 0.9, "sharpness": 800.0 + i, "area_ratio": 0.2,
-         "class_id": Detection.CLASS_CAT, "crowded": False}
+         "class_id": Detection.CLASS_CAT, "crowded": False, "size_ok": True}
         for i in range(5)
     ]
     out = obs._gate_select(cands)
@@ -327,7 +327,7 @@ def test_largest_pet_crop_has_quality_fields():
 
 def test_video_crop_has_quality_fields():
     frames = [(i, _frame(300, 300)) for i in range(6)]
-    detector = SimpleNamespace(detect_pets=lambda f: [_det(50, 50, 60, 60)])
+    detector = SimpleNamespace(detect_pets=lambda f: [_det(50, 50, 80, 80)])
     crops = obs._video_pet_crops(frames, detector, fps=1)
     assert crops
     c = crops[0]
@@ -464,11 +464,22 @@ def test_gate_select_backfills_near_duplicates_without_crash():
             "area_ratio": 0.2,
             "class_id": Detection.CLASS_CAT,
             "crowded": False,
+            "size_ok": True,
         }
         for _ in range(4)
     ]
     out = obs._gate_select(cands)
     assert len(out) == 3  # 回填到 k=3、不抛 ValueError
+
+
+def test_size_gate_ok():
+    # 三条 AND：短边>25 / 绝对面积>=4096 / (w+h)>=0.05*(fw+fh)
+    assert obs._size_gate_ok(120, 120, 1920, 1080) is True   # 大框全过（线性 8%）
+    assert obs._size_gate_ok(220, 320, 2960, 1666) is True   # 美短量级（面积 70k、线性 11.7%）
+    assert obs._size_gate_ok(64, 64, 1280, 720) is True      # 恰 64×64@720p：面积门起作用、线性 6.4% 过
+    assert obs._size_gate_ok(20, 200, 1920, 1080) is False   # 短边 20<25
+    assert obs._size_gate_ok(60, 60, 1920, 1080) is False    # 面积 3600<4096
+    assert obs._size_gate_ok(80, 80, 8000, 6000) is False    # 巨帧远景：线性 160/14000=1.1%<5%
 
 
 def test_box_crowded_overlap_gate():
@@ -511,9 +522,9 @@ def test_video_dominant_track_is_longer_lived():
 
     def _dets(f):
         calls["n"] += 1
-        cat = _det(20, 20, 60, 60, cls=Detection.CLASS_CAT)
+        cat = _det(20, 20, 80, 80, cls=Detection.CLASS_CAT)
         if calls["n"] == 1:  # 仅首次出现狗
-            return [cat, _det(320, 320, 60, 60, cls=Detection.CLASS_DOG)]
+            return [cat, _det(300, 300, 80, 80, cls=Detection.CLASS_DOG)]
         return [cat]
 
     frames = [(i, _frame(400, 400)) for i in range(8)]

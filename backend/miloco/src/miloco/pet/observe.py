@@ -56,8 +56,12 @@ _MAX_SELECT = 3  # 参考 crop 上限（对齐 pet_library._MAX_REF_CROPS）
 
 # ── 宠物注册专用门控常量（决策6，刻意不复用 identity/extractor._passes_quality_gate）──
 # extractor 那套是 area5% / 绝对 sharpness50，服务 TierU/TierC 人体质量门。宠物注册素材
-# 多为用户随手拍，用更低面积门 + 只卡"很糊"的绝对清晰度低阈，减少误伤。
-PET_GATE_AREA_MIN = 0.02  # crop bbox 面积 / 帧面积；低于此→太小，不作参考
+# 多为用户随手拍，尺寸门用「短边 + 绝对面积 + 相对线性占比」三条，兼顾低分辨率来源与大画面远景。
+# 尺寸硬门槛（三条 AND，见 _size_gate_ok）——起因：旧的"面积比例 ≥2%"对大画面过苛（2960×1666 里
+# 一只清晰的猫只占 1.4% 面积就被误杀）。改成：
+PET_GATE_MIN_SIDE_PX = 25  # 短边 min(w,h) 下限：挡细长条 / 极小框
+PET_GATE_MIN_AREA_PX = 4096  # 绝对面积下限 ≈64×64：保证低分辨率下 crop 也够大够辨个体
+PET_GATE_MIN_LINEAR_RATIO = 0.05  # (w+h) ≥ 该系数*(fw+fh)：够份量（≈0.27%面积；高清下主力门）
 # 决策 D2：清晰度用**绝对低阈**（非分位）——只卡很糊。实测 22 张注册 crop：绝对30 卡 ~5%、
 # 绝对50 卡 ~14%（20 分位恒卡 20% 不合适已弃）；先取保守下界 30，**须在生产 60 帧口径复标**。
 # sharpness 仍进 gate_score 加权（此处只做硬下限）。
@@ -65,6 +69,21 @@ PET_GATE_SHARP_MIN = 30.0
 PET_GATE_OVERLAP_MAX = 0.10  # 同帧两框相交 > min(area)*该值 → 判多只同框（crowded）
 POOL_CAP_PER_TRACK = 12  # 每 track 候选池上限（控内存/算力）
 # conf 硬门槛不单列：detector(0.4)/tracker(0.5) 既有过滤已承担；conf 仅进加权分。
+
+
+def _size_gate_ok(bw: int, bh: int, fw: int, fh: int) -> bool:
+    """crop 尺寸硬门槛：短边 / 绝对面积 / 相对线性占比 三条都过才算够大够辨。
+
+    - 短边 ``min(w,h) > 25``：挡细长条 / 极小框。
+    - 绝对面积 ``w*h >= 4096``（≈64×64）：低分辨率来源也保证内在细节够辨个体。
+    - 线性占比 ``w+h >= 0.05*(fw+fh)``（≈0.27% 面积）：够份量，挡巨帧里的远景小点。
+    用线性占比而非面积比例，是因为大画面里裁出的框即便面积占比很低、绝对尺寸仍可很大很清晰。
+    """
+    return (
+        min(bw, bh) > PET_GATE_MIN_SIDE_PX
+        and bw * bh >= PET_GATE_MIN_AREA_PX
+        and (bw + bh) >= PET_GATE_MIN_LINEAR_RATIO * (fw + fh)
+    )
 
 OBSERVE_SYSTEM_PROMPT = """你是宠物外貌观察助手。先**准确判定物种**（狗 / 猫 / 兔 / 鸟 / 龟 …；别把狗当猫、也别把猫当狗），再客观描述这只动物用于日后在监控画面中区分和称呼它的**稳定外观特征**。
 只描述可见且长期稳定的特征；不描述背景、动作、情绪；把握不大的维度（如品种）宁可留空也不要猜。
@@ -191,7 +210,7 @@ def _gate_select(cands: list[dict]) -> list[dict]:
         c
         for c in cands
         if (not c["crowded"])
-        and c["area_ratio"] >= PET_GATE_AREA_MIN
+        and c["size_ok"]  # 尺寸硬门槛（短边/绝对面积/线性占比，见 _size_gate_ok）
         and c["sharpness"] >= PET_GATE_SHARP_MIN
     ]
     if not ok:
@@ -223,8 +242,8 @@ def _largest_pet_crop(frame: np.ndarray, detector: Any) -> dict | None:
     crowded = _box_crowded(
         best.xyxy, [d.xyxy for d in dets if d is not best], PET_GATE_OVERLAP_MAX
     )
-    # A3 单图硬门槛：面积过小 / 多只同框无法择一 → 退回整幅描述（不产参考 crop）
-    if crowded or area_ratio < PET_GATE_AREA_MIN:
+    # A3 单图硬门槛：尺寸不够（短边/绝对面积/线性占比）或多只同框无法择一 → 退回整幅描述（不产参考 crop）
+    if crowded or not _size_gate_ok(best.w, best.h, fw, fh):
         return None
     return {
         "track_id": None,
@@ -296,6 +315,8 @@ def _select_video_crops(
                 "bbox": tuple(tr["bbox"]),
                 "frame_idx": _idx,
                 "crowded": crowded,
+                # 尺寸门在此算好（有帧尺寸），_gate_select 直接读（短边/绝对面积/线性占比）
+                "size_ok": _size_gate_ok(bw, bh, fw, fh),
             }
             _push_bounded(pool.setdefault(tr["id"], []), cand, POOL_CAP_PER_TRACK)
     if not pool:
