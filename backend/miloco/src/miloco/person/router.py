@@ -203,6 +203,27 @@ def _resolve_member(member_id: str | None, name: str | None, role: str | None) -
     return None
 
 
+def _ensure_meta_name_from_sql(person_id: str) -> None:
+    """commit 后兜底:仅当 meta.json 尚无 name 时,从 SQL(name 单一事实源)补一次真名。
+
+    按 member_id 绑定既有成员且未带 member_name 时,commit_pending →
+    add_tier_a_samples_batch(name=None) 不写 meta name(registration_session 设计:
+    member_name 为 None 就"不覆盖、保留 meta 原值")。若该 person 首次注册即走这条
+    member_id 绑定路径,meta 从没被写过 name → 一直留空 → 感知层 get_name 读空 →
+    omni gallery 标签退化成 UUID(与单图端点同一类缺口)。这里用 SQL 补齐,只在缺失时
+    写、不动已有 name;幂等、best-effort,失败仅 warn 不阻塞注册主流程。
+    """
+    try:
+        library = _get_identity_library()
+        if library.get_name(person_id):
+            return
+        person = manager.person_service.get_person(person_id)
+        if person is not None and person.name:
+            library.set_meta(person_id, name=person.name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("commit 后回填 meta name 失败 person_id=%s: %s", person_id, e)
+
+
 @router.post(
     "/persons/{person_id}/samples",
     summary="Register Identity Sample (Tier A)",
@@ -226,11 +247,13 @@ async def register_sample(
         current_user, person_id, body_image.filename, face_image.filename if face_image else None,
     )
 
-    # person_id 校验：格式白名单 + 必须已在 DB 中注册
-    # 防止 ../ 等路径穿越构造，同时拒绝对未注册 ID 写文件
+    # person_id 校验：格式白名单（防 ../ 路径穿越）+ 必须已在 DB 中注册。
+    # 一次 get_person 兼做存在性校验（缺失返 None→404）与后面写 meta 的真名来源,
+    # 不再 exists()+get_person 查两遍。
     if not _PERSON_ID_RE.match(person_id):
         raise HTTPException(status_code=400, detail="Invalid person_id format")
-    if not manager.person_service.exists(person_id):
+    person = manager.person_service.get_person(person_id)
+    if person is None:
         raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
 
     body_arr = await _decode_image_upload(body_image)
@@ -256,11 +279,17 @@ async def register_sample(
         except Exception:  # noqa: BLE001
             logger.warning("ReID emb 抽取失败 person_id=%s (登记继续)", person_id, exc_info=True)
 
+    # person 真名一并写进 meta.json——与 register_sample_batch 对齐。否则单图登记只落
+    # body 图、不写 name,感知层 list_persons 读不到 name → omni gallery 渲染退化成 UUID
+    # 而非姓名(表现为"认不出已注册成员")。SQL 是 name 单一事实源。person 上面已查、非 None。
+    name = person.name
+
     ok = library.add_tier_a_sample(
         person_id=person_id,
         body_crop=body_arr,
         face_crop=face_arr,
         source=source,
+        name=name,
         reid_embedding=reid_emb,
     )
     if not ok:
@@ -350,16 +379,17 @@ async def register_sample_batch(
     )
     if not _PERSON_ID_RE.match(person_id):
         raise HTTPException(status_code=400, detail="Invalid person_id format")
-    if not manager.person_service.exists(person_id):
+    # 一次 get_person 兼做存在性校验（缺失返 None→404）与下面写 meta 的真名来源,与单图端点对齐,
+    # 不再 exists()+get_person 查两遍。
+    person = manager.person_service.get_person(person_id)
+    if person is None:
         raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
     if not body.items:
         raise HTTPException(status_code=400, detail="items 不能为空")
 
-    # 取 person 的 name(真名) —— batch endpoint 不接 name 入参, 从 person 库查出来传进
-    # library 写进 meta.json, 否则感知层 list_persons 读不到 name → omni prompt 渲染退化
-    # 成 UUID 而非姓名。
-    person = next((p for p in manager.person_service.list_persons() if p.id == person_id), None)
-    name = person.name if person else None
+    # person 真名 —— batch endpoint 不接 name 入参, 从 person 库查出来传进 library 写进
+    # meta.json, 否则感知层 list_persons 读不到 name → omni prompt 渲染退化成 UUID 而非姓名。
+    name = person.name
 
     # ReID extractor 借 perception service 现场抽 emb, 给 body 路径落 .npy。
     # 无活动 tracker 时返 None, 抽取失败也吞掉, 不阻塞登记主流程。
@@ -1445,6 +1475,9 @@ async def register_commit(
             status_code=410,
             detail="pending session 过期 / 不存在 / 无目标身份",
         )
+    # member_id 绑定既有成员且未带 member_name 时,commit 不写 meta name → 从 SQL 补齐,
+    # 避免感知层 get_name 读空、omni gallery 退化成 UUID。
+    _ensure_meta_name_from_sql(result.person_id)
     # 注册可能按 name 新建成员（member_id 缺失时），级联刷新家庭档案 md 让新成员进档案，否则 profile.md 不刷新
     try:
         manager.home_profile_service.commit()
@@ -2016,6 +2049,16 @@ async def register_from_cluster(
     )
     if result is None:
         raise HTTPException(status_code=410, detail="提交失败(筛选无可用样本)")
+
+    # member_id 绑定既有成员且未带 member_name 时,commit 不写 meta name → 从 SQL 补齐,
+    # 避免感知层 get_name 读空、omni gallery 退化成 UUID。
+    _ensure_meta_name_from_sql(result.person_id)
+    # 从簇注册可能按 name 新建成员，级联刷新家庭档案 md 让新成员进档案（与 register_commit
+    # 对齐）；否则新建成员不会立即进 profile.md 的家庭成员名册。
+    try:
+        manager.home_profile_service.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("级联刷新家庭档案失败(register_from_cluster) person_id=%s: %s", result.person_id, e)
 
     # commit 成功 → 关闭 cluster 全部成员的写入 gate(决策 1.1 α 行为)
     try:
