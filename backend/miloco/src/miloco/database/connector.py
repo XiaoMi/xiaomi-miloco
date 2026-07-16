@@ -311,7 +311,9 @@ class SQLiteConnector:
     def _create_meaningful_events_table(self, conn: sqlite3.Connection) -> None:
         """Create meaningful_events table.
 
-        每次推理 = 一行 event(同窗口 N 摄像头合并 1 行,device_ids JSON 记录参与摄像头).
+        每次推理 = 一行 event(同窗口 N 摄像头合并 1 行;device_ids JSON 记录本行真正相关的
+        摄像头——有 rule/suggestion/asr 命中时收窄到其 source_device_ids,否则退化为本次
+        推理中成功出图(可落盘)的全部摄像头).
         schema_version 字段(行级)标识本行按哪个 schema 版本写入;本期 INSERT 恒写 1,
         后续 ALTER TABLE 加字段时新行写 2,DAO 读取按版本走兼容分支.
         """

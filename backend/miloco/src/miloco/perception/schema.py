@@ -478,7 +478,8 @@ class PerceptionLogEntry(BaseModel):
 class MeaningfulEvent(BaseModel):
     """有意义事件(family-ui Activity tab 展示用).
 
-    一次推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids JSON 记录参与摄像头.
+    一次推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids JSON 记录本行真正相关的摄像头
+    (语义详见下方 device_ids 字段的 description).
     `text` 字段与 agent webhook 收到的同一段聚合文本(B2 单源真值).
     响应不含 payload_json / schema_version / created_at(后端复盘用,API 不返).
     """
