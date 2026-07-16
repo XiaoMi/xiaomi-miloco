@@ -53,40 +53,65 @@ def _require_pet_id(pet_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid pet_id format")
 
 
+_VIDEO_EXTS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
+
+
+def _is_video_upload(u: UploadFile) -> bool:
+    ct = (u.content_type or "").lower()
+    fn = (u.filename or "").lower()
+    return ct.startswith("video/") or fn.endswith(_VIDEO_EXTS)
+
+
 @router.post("/pets:observe", summary="Observe Pet From Media", response_model=NormalResponse)
 async def observe_pet_media(
-    media: UploadFile = File(..., description="宠物图片或视频"),
+    media: UploadFile | None = File(
+        None, description="宠物图片或视频（单个，向后兼容旧前端）"
+    ),
+    medias: list[UploadFile] | None = File(
+        None, description="宠物图片 1~3 张（多图注册）；视频仍恰 1 个，不与图混传"
+    ),
     grounding: bool | None = Form(
         None, description="是否要头部 grounding；缺省取 features.pet_head_grounding"
     ),
     current_user: str = Depends(verify_token),
 ):
-    """上传图/视频 → 选最优宠物 crop → omni 按维度生成外观描述（无副作用，不落库）。
+    """上传图（1~3 张）/视频（1 个）→ 门控选 ≤3 张同一只 crop → omni 一次性生成共性描述（无副作用，不落库）。
 
     总开关 ``pet_recognition`` 关闭时该端点不可用；``grounding`` 缺省取
-    ``features.pet_head_grounding``。
+    ``features.pet_head_grounding``。**向后兼容**：单个走 ``media``、多图走 ``medias``，两者取其一。
     """
     from miloco.pet.observe import observe_pet
 
     settings = get_settings()
     if not settings.features.pet_recognition:
         raise HTTPException(status_code=404, detail="pet recognition 未启用")
-    raw = await media.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="empty file")
-    ct = (media.content_type or "").lower()
-    fn = (media.filename or "").lower()
-    is_video = ct.startswith("video/") or fn.endswith(
-        (".mp4", ".webm", ".mov", ".avi", ".mkv")
-    )
+    # 多图优先走 medias；两者都传时 medias 胜（单个 media 仅为旧前端兼容）。
+    uploads = [u for u in (medias or []) if u is not None] or ([media] if media else [])
+    if not uploads:
+        raise HTTPException(status_code=400, detail="no media")
+    # 先按头部（content_type/filename）判形，超量/混传在**读盘前**就拒，
+    # 避免把将被 400 的超量请求整批读进内存（multipart 最多 1000 个文件片，无单片大小上限）。
+    any_video = any(_is_video_upload(u) for u in uploads)
+    if any_video:
+        if len(uploads) != 1:
+            raise HTTPException(status_code=400, detail="视频仅支持单个文件、且不与图片混传")
+        is_video = True
+    else:
+        if len(uploads) > 3:
+            raise HTTPException(status_code=400, detail="最多 3 张图片")
+        is_video = False
+    raws: list[bytes] = []
+    for u in uploads:
+        raw = await u.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="empty file")
+        raws.append(raw)
     use_grounding = (
         settings.features.pet_head_grounding if grounding is None else grounding
     )
-    # observe_pet 已支持多图（图 1~3 张）；本端点当前仅收单个 media，包成单元素列表调用
-    # （向后兼容——多图上传入口随 P1b web 一起加，届时端点同时接单/多，避免部署顺序耦合）。
     # body_grounding（D7）仅影响回退路径（框不到猫狗时裁本体作参考图），取 feature 开关。
     result = await observe_pet(
-        [raw],
+        raws,
         is_video=is_video,
         grounding=use_grounding,
         body_grounding=settings.features.pet_body_grounding,

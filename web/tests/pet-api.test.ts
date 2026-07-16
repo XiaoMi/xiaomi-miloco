@@ -75,11 +75,15 @@ describe("pet api client", () => {
         description: { species: "猫", summary: "黑猫" },
         head_bbox: [0.1, 0.1, 0.2, 0.2],
         primary_crop_b64: "abc",
+        primary_index: 0,
+        refs_inconsistent: null,
+        warnings: [{ type: "generic_look", level: "warn", message: "大众脸" }],
         candidates: [
           {
             track_id: 1,
             species_guess: "猫",
             crop_b64: "c1",
+            head_bbox: [0.3, 0.1, 0.4, 0.4],
             conf: 0.9,
             sharpness: 12.5,
             area_ratio: 0.3,
@@ -89,16 +93,22 @@ describe("pet api client", () => {
         ],
       },
     });
-    const blob = new Blob(["x"], { type: "image/jpeg" });
-    const r = await realObservePet(blob, "p.jpg", true);
+    const file = new File(["x"], "p.jpg", { type: "image/jpeg" });
+    const r = await realObservePet([file], true);
     expect(r.detected).toBe(true);
     expect(r.primaryCropB64).toBe("abc");
     expect(r.headBbox).toEqual([0.1, 0.1, 0.2, 0.2]);
-    // P0 契约质量分随候选映射（snake_case → camelCase）
+    expect(r.primaryIndex).toBe(0);
+    expect(r.refsInconsistent).toBeNull();
+    expect(r.warnings).toEqual([
+      { type: "generic_look", level: "warn", message: "大众脸" },
+    ]);
+    // P0 契约质量分 + per-crop head_bbox 随候选映射（snake_case → camelCase）
     expect(r.candidates[0]).toEqual({
       trackId: 1,
       speciesGuess: "猫",
       cropB64: "c1",
+      headBbox: [0.3, 0.1, 0.4, 0.4],
       conf: 0.9,
       sharpness: 12.5,
       areaRatio: 0.3,
