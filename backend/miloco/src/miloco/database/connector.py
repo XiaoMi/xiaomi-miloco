@@ -990,6 +990,8 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
             )
 
         # ── (b1) D 型 rule 归属冲突全字段 log, 取 task_link 侧 ─────
+        # 只统计「link 侧 task 真实存在」的 D 型: 与 (c) 处置口径一致。
+        # link 侧 task 也已删的行由 (b2) 作 orphan 记录并 drop, 不重复计入。
         d_conflicts = cursor.execute("""
             SELECT r.*, tl.task_id AS link_task_id
               FROM rule r
@@ -998,6 +1000,7 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
              WHERE r.task_id IS NOT NULL
                AND tl.task_id IS NOT NULL
                AND r.task_id != tl.task_id
+               AND EXISTS(SELECT 1 FROM task t WHERE t.task_id = tl.task_id)
         """).fetchall()
         counts["rule_d_conflict_took_link"] = len(d_conflicts)
         if d_conflicts:

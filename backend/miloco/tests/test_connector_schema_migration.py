@@ -320,6 +320,45 @@ def test_migrate_d_type_takes_task_link_side(v1_db, caplog):
     assert "rule-d" in log_text
 
 
+def test_migrate_d_type_link_side_task_missing_goes_to_orphan(v1_db, caplog):
+    """D 型但 link 侧 task 已删 → 应作为 orphan 丢弃, 不计入 took_link."""
+    conn = sqlite3.connect(str(v1_db))
+    cursor = conn.cursor()
+    _insert_task(cursor, "task-d-a")  # 只建 A, 不建 B
+    _insert_rule(cursor, "rule-d-orphan", task_id="task-d-a")
+    _insert_task_link(cursor, "task-d-b-missing", "rule", "rule-d-orphan")
+    conn.commit()
+    conn.close()
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _run_init(v1_db)
+
+    from miloco.database.connector import get_db_connector
+
+    with get_db_connector().get_connection() as conn:
+        assert _read_rule(conn, "rule-d-orphan") is None
+
+    took_link_lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "D-type conflict took link" in r.getMessage()
+        and "rule-d-orphan" in r.getMessage()
+    ]
+    assert took_link_lines == [], (
+        "link 侧 task 已删的 D 型不应记入 took_link"
+    )
+
+    orphan_lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "dropping orphan rule" in r.getMessage()
+        and "rule-d-orphan" in r.getMessage()
+    ]
+    assert orphan_lines, "该行应由 orphan 口径 log"
+
+
 # ── cron 迁移 ─────────────────────────────────────────────────────────
 
 
