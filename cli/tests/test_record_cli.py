@@ -1,4 +1,4 @@
-"""``miloco-cli task record`` 子组 + ``task link`` + ``task delete --reason`` 测试。
+"""``miloco-cli task record`` 子组 + ``task delete --reason`` 测试。
 
 mock 底层 ``api_*`` 调用，验证参数解析与 endpoint path 正确。
 """
@@ -376,35 +376,6 @@ def test_record_compute_date_alias_today(runner):
     path = m.call_args[0][0]
     assert "date=today" not in path
     assert re.search(r"date=\d{4}-\d{2}-\d{2}", path) is not None
-
-
-def test_task_link_cron(runner):
-    with patch("miloco_cli.client.api_post", return_value=_OK) as m:
-        result = runner.invoke(
-            cli,
-            [
-                "task",
-                "link",
-                "--task",
-                "t1",
-                "--kind",
-                "cron",
-                "--ref",
-                "jobid-1",
-            ],
-        )
-    assert result.exit_code == 0
-    path, body = m.call_args[0]
-    assert path == "/api/tasks/t1/link"
-    assert body == {"kind": "cron", "ref": "jobid-1"}
-
-
-def test_task_link_rule_rejected_by_cli(runner):
-    """CLI 层直接拒绝 rule kind（type=Choice(['cron']))。"""
-    result = runner.invoke(
-        cli, ["task", "link", "--task", "t1", "--kind", "rule", "--ref", "r1"]
-    )
-    assert result.exit_code != 0
 
 
 def test_task_delete_with_reason(runner):

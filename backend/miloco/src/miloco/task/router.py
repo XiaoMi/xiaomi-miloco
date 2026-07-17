@@ -8,7 +8,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 
-from miloco.database.task_repo import TaskLinkConflict
+from miloco.database.task_repo import TaskConflict, TaskNotFound
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.middleware.exceptions import (
@@ -18,7 +18,6 @@ from miloco.middleware.exceptions import (
 from miloco.schema.common_schema import NormalResponse
 from miloco.task.schema import (
     TaskCreateRequest,
-    TaskLinkAddRequest,
     TaskUpdateRequest,
 )
 
@@ -32,7 +31,7 @@ async def create_task(req: TaskCreateRequest, current_user: str = Depends(verify
     logger.info("Create task - User: %s, task_id: %s", current_user, req.task_id)
     try:
         get_manager().task_service.create_task(req)
-    except TaskLinkConflict as e:
+    except TaskConflict as e:
         raise ConflictException(str(e)) from e
     return NormalResponse(code=0, message="Task created", data={"task_id": req.task_id})
 
@@ -71,22 +70,6 @@ async def get_task(task_id: str, current_user: str = Depends(verify_token)):
     return NormalResponse(code=0, message="Task retrieved", data=view.model_dump())
 
 
-@router.post("/{task_id}/links", summary="Add Link", response_model=NormalResponse)
-async def add_link(
-    task_id: str,
-    req: TaskLinkAddRequest,
-    current_user: str = Depends(verify_token),
-):
-    logger.info(
-        "Add link - User: %s, task_id: %s, kind: %s", current_user, task_id, req.kind
-    )
-    try:
-        get_manager().task_service.add_link(task_id, req)
-    except TaskLinkConflict as e:
-        raise ConflictException(str(e)) from e
-    return NormalResponse(code=0, message="Link added", data=None)
-
-
 @router.patch(
     "/{task_id}", summary="Update Task Description", response_model=NormalResponse
 )
@@ -109,7 +92,7 @@ async def disable_task(task_id: str, current_user: str = Depends(verify_token)):
     logger.info("Disable task - User: %s, task_id: %s", current_user, task_id)
     try:
         result = get_manager().task_service.disable_task(task_id)
-    except TaskLinkConflict as e:
+    except TaskNotFound as e:
         raise ResourceNotFoundException(str(e)) from e
     return NormalResponse(code=0, message="Task disabled", data=result.model_dump())
 
@@ -119,7 +102,7 @@ async def enable_task(task_id: str, current_user: str = Depends(verify_token)):
     logger.info("Enable task - User: %s, task_id: %s", current_user, task_id)
     try:
         result = get_manager().task_service.enable_task(task_id)
-    except TaskLinkConflict as e:
+    except TaskNotFound as e:
         raise ResourceNotFoundException(str(e)) from e
     return NormalResponse(code=0, message="Task enabled", data=result.model_dump())
 

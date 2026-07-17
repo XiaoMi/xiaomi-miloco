@@ -365,6 +365,20 @@ class PerfSettings(BaseModel):
     )
 
 
+class ScheduleSettings(BaseModel):
+    """cron / APScheduler 相关配置。"""
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "cron 调度总开关(应急 kill switch)。false 时启动跳过 scheduler.start() 与"
+            "rebuild_scheduler_from_db(),CRUD 端点降级为 DB-only:POST /crons 返 503,"
+            "GET/DELETE/enable/disable 只读写 cron 表不碰 in-memory scheduler。"
+            "关闭下重启后打开会由 rebuild 从 cron 表出发建全部 in-memory job。"
+        ),
+    )
+
+
 _DEFAULT_PERF_FIELD_LABELS: dict[str, str] = {
     "decode": "音视频解码",
     "collect": "数据采集",
@@ -580,6 +594,10 @@ class MilocoSettings(BaseSettings):
         default_factory=PerfSettings,
         description="性能指标总开关与报告参数",
     )
+    schedule: ScheduleSettings = Field(
+        default_factory=ScheduleSettings,
+        description="cron 调度总开关与相关参数",
+    )
 
     @field_validator("timezone")
     @classmethod
@@ -763,6 +781,7 @@ __all__ = [
     "PerfRetentionSettings",
     "PerfSettings",
     "RuleSettings",
+    "ScheduleSettings",
     "SchedulerSettings",
     "ServerSettings",
     "get_settings",

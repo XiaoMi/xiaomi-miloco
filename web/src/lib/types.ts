@@ -646,8 +646,8 @@ export interface TaskRecordSummary {
   derived: Record<string, unknown>;
 }
 
-// 驱动规则摘要 / 关联：后端 summary 接口（GET /api/tasks/summary）返回的
-// TaskSummaryView 继承 TaskFullView，本就带 rule_briefs / links，故随列表一并
+// 驱动规则摘要：后端 summary 接口（GET /api/tasks/summary）返回的
+// TaskSummaryView 继承 TaskFullView，本就带 rule_briefs，故随列表一并
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 export interface TaskRuleBrief {
   ruleId: string;
@@ -657,12 +657,7 @@ export interface TaskRuleBrief {
   actionsDesc: string[];
 }
 
-export interface TaskLinkEntry {
-  kind: "rule" | "cron";
-  ref: string;
-}
-
-// 任务视图 = 基础字段 + record 进度摘要 + 驱动规则/关联，一次 summary 请求全拿到。
+// 任务视图 = 基础字段 + record 进度摘要 + 驱动规则，一次 summary 请求全拿到。
 export interface Task {
   taskId: string;
   description: string;
@@ -670,7 +665,6 @@ export interface Task {
   pausedAt: string | null;
   createdAt: string;
   record: TaskRecordSummary | null;
-  // 详情抽屉「有价值的详情」：驱动规则与关联，随 summary 一并返回。
+  // 详情抽屉「有价值的详情」：驱动规则，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
-  links: TaskLinkEntry[];
 }

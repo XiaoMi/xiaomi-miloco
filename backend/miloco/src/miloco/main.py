@@ -60,6 +60,8 @@ from miloco.perception.events_router import router as events_router
 from miloco.perception.router import router as perception_router
 from miloco.person.router import router as person_router
 from miloco.rule.router import router as rule_router
+from miloco.schedule.router import router as schedule_router
+from miloco.schedule.runner import get_runner as get_schedule_runner
 from miloco.task.router import router as task_router
 from miloco.task_record.router import router as task_record_router
 from miloco.utils.common import escape_for_js_string
@@ -324,6 +326,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     set_agent_dispatcher(dispatcher)
     _app.state.dispatcher = dispatcher
 
+    # ScheduleRunner: cron/at/every 定时器. kill switch (settings.schedule.enabled=false)
+    # 时完全跳过 start + rebuild, CRUD 端点降级为 DB-only。
+    # rebuild 失败 fail-fast: in-memory 空 = cron 全静默停跑, 依赖 systemd 拉起重试。
+    if settings.schedule.enabled:
+        schedule_runner = get_schedule_runner()
+        schedule_runner.start()
+        try:
+            schedule_runner.rebuild_from_db()
+        except Exception as e:
+            logger.error("rebuild_scheduler_from_db failed: %s", e)
+            raise
+        _app.state.schedule_runner = schedule_runner
+    else:
+        logger.warning(
+            "schedule kill switch active (settings.schedule.enabled=false); "
+            "scheduler not started, CRUD degraded to DB-only"
+        )
+
     try:
         await get_manager().initialize()
         logger.info("Manager initialization completed")
@@ -428,6 +448,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             logger.error("Failed to stop agent dispatcher: %s", e)
         set_agent_dispatcher(None)
 
+    if hasattr(_app.state, "schedule_runner"):
+        try:
+            _app.state.schedule_runner.shutdown()
+        except Exception as e:
+            logger.error("Failed to stop schedule runner: %s", e)
+
     if hasattr(_app.state, "agent_meta_poller"):
         try:
             await _app.state.agent_meta_poller.stop()
@@ -473,6 +499,7 @@ app.include_router(miot_router, prefix="/api")
 app.include_router(person_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")
 app.include_router(rule_router, prefix="/api")
+app.include_router(schedule_router, prefix="/api")
 app.include_router(task_router, prefix="/api")
 app.include_router(task_record_router, prefix="/api")
 app.include_router(perception_router, prefix="/api")

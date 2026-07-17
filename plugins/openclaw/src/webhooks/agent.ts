@@ -30,6 +30,11 @@ interface IRequestBody {
   // onboarding 首条邀请会广播到全部已绑定会话；谁先回复，后续流程就在那条
   // 会话里继续。deliver 默认 true，让用户在自己的聊天里看到回复并可直接接话。
   resolveTarget?: "owner-channel";
+  // subagent.run 的 lightweight bootstrap 开关：true 让 openclaw 侧走精简
+  // bootstrap-snapshot / tool inventory（P2 系统 job digest / dreaming /
+  // habit-suggest 等高频低负载场景）。owner-channel 模式强制忽略此字段（延续
+  // 完整上下文）。
+  lightContext?: boolean;
 }
 
 interface WaitResult {
@@ -107,6 +112,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       timeoutMs,
       deliver,
       resolveTarget,
+      lightContext,
     } = payload;
     // 自愈双 turn 串联须留在 backend HTTP 超时内，startedAt 用于给重试 turn 算剩余等待预算。
     const startedAt = Date.now();
@@ -136,6 +142,11 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       ownerChannelTargets = targets.map((item) => item.sessionKey);
     }
 
+    // owner-channel 模式强制关掉 lightContext——访谈要延续该会话的完整上下文,
+    // 精简 bootstrap 会丢失用户可见 IM 会话的历史线索。
+    const effectiveLightContext =
+      resolveTarget === "owner-channel" ? false : !!lightContext;
+
     const runOnce = async (idem: string, waitMs: number) => {
       const isOwnerBroadcast =
         resolveTarget === "owner-channel" && ownerChannelTargets.length > 1;
@@ -146,11 +157,11 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
           sessionKey: runSessionKey,
           message,
           lane,
-          // 不设 lightContext：owner-channel 访谈要延续该会话的完整上下文。
           deliver: effectiveDeliver,
           idempotencyKey:
             runTargets.length === 1 ? idem : `${idem}:broadcast:${index}`,
           extraSystemPrompt,
+          lightContext: effectiveLightContext,
         });
         results.push({ sessionKey: runSessionKey, runId: result.runId });
       }

@@ -1590,7 +1590,7 @@ async function fetchUsageStats(
 // summary 视图 = task 基础字段 + record 进度摘要（window=day：progress 走 snapshot，
 // duration/event 走今日累计）。derived 形态按 kind 多态，原样透传给 UI 自行解读。
 // TaskSummaryView 继承 TaskFullView，除基础字段 + record 外，本就带驱动规则
-// （rule_briefs）/ 关联（links）/ paused_at；一并映射，详情抽屉直接复用列表数据，
+// （rule_briefs）/ paused_at；一并映射，详情抽屉直接复用列表数据，
 // 不再单独拉 GET /api/tasks/{id}。
 interface BackendTaskSummary {
   task_id: string;
@@ -1603,7 +1603,6 @@ interface BackendTaskSummary {
     query: string;
     actions_desc?: string[];
   }[];
-  links?: { kind: "rule" | "cron"; ref: string }[];
   record: {
     kind: "progress" | "duration" | "event";
     completed: boolean;
@@ -1628,7 +1627,6 @@ export async function realListTasks(): Promise<Task[]> {
       query: b.query,
       actionsDesc: b.actions_desc ?? [],
     })),
-    links: (t.links ?? []).map((l) => ({ kind: l.kind, ref: l.ref })),
     record: t.record
       ? {
           kind: t.record.kind,
