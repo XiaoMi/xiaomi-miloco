@@ -261,7 +261,7 @@ def test_test_push_no_target_returns_clear_error(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ts.tn, "_detect_im_platforms_simple", lambda: [])
     result = ts.test_push(ctx)
     assert result["ok"] is False
-    assert "no deliver target" in result["error"]
+    assert "needsBind" in result["error"] or result.get("needsBind") is True
 
 
 def test_test_push_success(tmp_path: Path, monkeypatch):

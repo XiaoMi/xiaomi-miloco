@@ -30,6 +30,19 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# 与 OpenClaw notify.ts BIND_HINT_EXAMPLE 对齐，agent 按 bindHintExample 翻译
+# 成用户语言后作为 bindHint 传回。
+BIND_HINT_EXAMPLE: Dict[str, str] = {
+    "not_configured": (
+        "您尚未设置 Miloco 通知频道，本条消息已临时发送到最近活跃的对话。"
+        "回复「绑定通知频道」即可将后续通知切换到您想要的渠道。"
+    ),
+    "configured_but_invalid": (
+        "您原先绑定的 Miloco 通知频道已失效（可能是渠道凭证过期或被移除）。"
+        "请您重新设置通知频道：告诉助理「重新绑定通知频道」，或在本平台设置中更新凭证后回复。"
+    ),
+}
+
 # state.json 文件名(与 OpenClaw 版 notify.ts 对齐,存于插件根目录)
 _STATE_FILENAME = "state.json"
 
@@ -74,7 +87,7 @@ def resolve_notify_target(ctx: Any) -> Dict[str, Any]:
     2. 没有 → 取最近活跃的 IM channel（扫 channel_directory.json，取第一个）
     3. 都没有 → needsBind=true
 
-    返回 ``{"target": str | None, "needsBind": bool, "hint": str, "candidates": [...]}``。
+    返回 ``{"target", "needsBind", "bindReason", "hint", "candidates"}``。
     """
     # 1. state.json 显式 target
     state = load_state(ctx)
@@ -83,6 +96,7 @@ def resolve_notify_target(ctx: Any) -> Dict[str, Any]:
         return {
             "target": explicit_target,
             "needsBind": False,
+            "bindReason": None,
             "hint": None,
             "candidates": [],
         }
@@ -94,6 +108,7 @@ def resolve_notify_target(ctx: Any) -> Dict[str, Any]:
         return {
             "target": fallback_target,
             "needsBind": False,
+            "bindReason": None,
             "hint": (
                 f"未显式配 deliver.target，fallback 到最近活跃 IM channel: "
                 f"{fallback_target}。如需指定具体 chat_id，调 miloco_notify_bind(action='switch', "
@@ -106,6 +121,7 @@ def resolve_notify_target(ctx: Any) -> Dict[str, Any]:
     return {
         "target": None,
         "needsBind": True,
+        "bindReason": "not_configured",
         "hint": (
             "没有 deliver target, 也没探测到任何已配 IM 平台。"
             "请先在 Hermes 里连一个 IM(hermes config set feishu.app_id ... / "
@@ -278,26 +294,44 @@ def _deliver_via_hermes_send(target: str, body: str) -> Dict[str, Any]:
     return {"ok": False, "error": err_msg}
 
 
-def notify_owner(ctx: Any, message: str) -> Dict[str, Any]:
+def notify_owner(ctx: Any, message: str, *, bind_hint: Optional[str] = None) -> Dict[str, Any]:
     """投递入口。与 OpenClaw 版 ``notifyOwner`` 行为对齐。
 
     target 解析顺序：
     1. state.json::deliver.target（显式配置，优先）
-     2. runtime fallback：``resolve_notify_target`` 扫 channel_directory.json
+    2. runtime fallback：``resolve_notify_target`` 扫 channel_directory.json
     3. 没有 → needsBind=true，返回让 agent 调 miloco_notify_bind
+
+    若 needsBind=true 且 agent 传了 bind_hint：将 bind_hint 附在消息末尾后
+    投递，让用户知道通知已发到临时渠道。
 
     ``target == "all"`` → fanout：遍历 state.json::deliver.candidates 逐个
     投递。Hermes 原生 cron 的 ``Deliver: all`` 是这语义，但 hermes send CLI
     不支持 "all" target（会返 "Unknown platform: all"），所以 fanout 在 plugin 端做。
     """
     resolved = resolve_notify_target(ctx)
+    bind_reason = resolved.get("bindReason")
     if resolved.get("needsBind"):
+        if bind_hint:
+            message = f"{message}\n---\n{bind_hint}"
+            if resolved.get("target"):
+                return _deliver(ctx, resolved, message)
+            return {
+                "ok": False,
+                "needsBind": True,
+                "bindReason": bind_reason,
+                "error": "已附 bindHint 但仍无投递目标——请先通过 miloco_notify_bind 设置通知渠道",
+            }
         return {
             "ok": False,
             "needsBind": True,
-            "hint": resolved.get("hint", ""),
-            "error": "no deliver target and no IM platform detected",
-            "candidates": [],
+            "bindReason": bind_reason,
+            "bindHintExample": BIND_HINT_EXAMPLE.get(bind_reason or "not_configured", ""),
+            "nextAction": (
+                "立即再次调用 miloco_im_push：message 保持本次内容不变，"
+                "并补上 bindHint 参数（把 bindHintExample 翻译成用户当前使用的语言后传入）。"
+            ),
+            "error": "通知渠道未绑定——请按 bindHintExample/nextAction 指引操作",
         }
     target = resolved.get("target")
     if not target:
@@ -356,6 +390,13 @@ MILOCO_IM_PUSH_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "description": "要发给主人的通知正文",
             },
+            "bindHint": {
+                "type": "string",
+                "description": (
+                    "仅当上次调用返回 needsBind=true 时才传：按返回的 bindHintExample "
+                    "翻译成用户语言后作为 bindHint 传入。工具会把它附在消息末尾一起发出。"
+                ),
+            },
         },
         "required": ["message"],
     },
@@ -369,7 +410,8 @@ def make_im_push_handler(ctx: Any):
         if not message:
             return json.dumps({"ok": False, "error": "message 不能为空"}, ensure_ascii=False)
         try:
-            result = notify_owner(ctx, message)
+            bind_hint = (args.get("bindHint") or "").strip() or None
+            result = notify_owner(ctx, message, bind_hint=bind_hint)
         except Exception as exc:  # noqa: BLE001
             logger.exception("miloco_im_push 失败: %s", exc)
             result = {"ok": False, "error": f"internal error: {exc}"}

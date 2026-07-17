@@ -120,7 +120,8 @@ def test_notify_no_target_returns_clear_error(tmp_path: Path, monkeypatch):
     result = tn.notify_owner(ctx, "hello")
     assert result["ok"] is False
     assert result.get("needsBind") is True
-    assert "miloco_notify_bind" in result.get("hint", "")
+    assert result.get("bindReason") == "not_configured"
+    assert "bindHintExample" in result
 
 
 def test_notify_success(fake_hermes, tmp_path: Path):
