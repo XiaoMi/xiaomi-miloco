@@ -121,6 +121,7 @@
   "summary.restart_gateway_desc": "Restart gateway",
   "summary.help_desc": "Show help",
   "summary.config_label": "Config directory",
+  "summary.rc_hint": "Tip: 'miloco-cli' not found? Run 'source ~/.zshrc' (or ~/.bashrc) or open a new terminal tab for PATH to take effect",
   "summary.error_title": "An error occurred during installation",
   "summary.retry_hint": "Retry: bash scripts/install.sh %1",
   "summary.uninstall_hint": "Uninstall: bash scripts/install.sh --uninstall",

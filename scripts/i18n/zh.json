@@ -121,6 +121,7 @@
   "summary.restart_gateway_desc": "重启网关",
   "summary.help_desc": "查看帮助",
   "summary.config_label": "配置目录",
+  "summary.rc_hint": "提示：miloco-cli 命令找不到？请 source ~/.zshrc（或 ~/.bashrc）或开新终端 tab 让 PATH 生效",
   "summary.error_title": "安装过程中出错",
   "summary.retry_hint": "重试: bash scripts/install.sh %1",
   "summary.uninstall_hint": "卸载: bash scripts/install.sh --uninstall",
