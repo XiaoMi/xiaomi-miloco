@@ -22,7 +22,7 @@ import {
 } from "@/api";
 import { PetAvatar } from "@/components/PetAvatar";
 import { useEscClose } from "@/hooks/useEscClose";
-import { IconCamera, IconCheck, IconX } from "@/lib/icons";
+import { IconCamera, IconCheck, IconTrash, IconX } from "@/lib/icons";
 import { AvatarCropEditor } from "./AvatarCropEditor";
 import { PetAutoGenFlow, type AutoGenDoneResult } from "./PetAutoGenFlow";
 import { InfoNote } from "./InfoNote";
@@ -375,9 +375,9 @@ export function PetDrawer({
             </div>
           )}
 
-          {/* 动作：取消 / 保存；存量宠物另有删除 */}
+          {/* 动作：取消 / 保存一行；存量宠物的删除在分隔线下弱化呈现 */}
           {!confirmingDel && (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col">
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -398,14 +398,17 @@ export function PetDrawer({
                 </button>
               </div>
               {!isNew && (
-                <button
-                  type="button"
-                  onClick={() => setConfirmingDel(true)}
-                  disabled={busy}
-                  className="w-full py-2 rounded-lg bg-bg-primary border border-border text-error hover:bg-error-bg disabled:opacity-60"
-                >
-                  {t("pet.delete")}
-                </button>
+                <div className="mt-4 pt-3 border-t border-border">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingDel(true)}
+                    disabled={busy}
+                    className="w-full py-2 rounded-lg text-error hover:bg-error-bg disabled:opacity-60 flex items-center justify-center gap-1.5"
+                  >
+                    <IconTrash width={16} height={16} />
+                    {t("pet.delete")}
+                  </button>
+                </div>
               )}
             </div>
           )}

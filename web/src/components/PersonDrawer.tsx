@@ -1,11 +1,12 @@
 /**
  * 家人详情抽屉。
- * - 创建模式：新增家人（仅名字 + 家庭角色）
- * - 编辑模式：改名 / 换头像（悬停→裁剪→保存时上传）/ 恢复默认头像 / 删（二次确认）/ 录入身份
+ * - 创建模式：新增家人（名字 + 家庭角色）
+ * - 编辑模式：从档案卡「编辑」进入即直接可改名字/家庭角色/头像，删除就在同屏
+ *   （无「查看→改名」中间态）；另可从档案头部入口直达身份录入。
  *
  * 头像：显式头像落 avatars/persons/<id>.<ext>（展示层，与识别数据分离）；上传经
  * AvatarCropEditor 裁 256×256，随「保存」提交。「恢复默认头像」清显式头像→读取回落
- * tier_a face[0]。头像变更仅编辑态可提交（picking/restore 会进入编辑态露出保存按钮）。
+ * tier_a face[0]。
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -20,7 +21,7 @@ import {
 } from "@/api";
 import { PersonAvatar } from "@/components/PersonAvatar";
 import { useEscClose } from "@/hooks/useEscClose";
-import { IconCamera, IconCheck, IconX } from "@/lib/icons";
+import { IconCamera, IconCheck, IconTrash, IconX } from "@/lib/icons";
 import { AvatarCropEditor } from "./AvatarCropEditor";
 import { EnrollFlow } from "./EnrollFlow";
 import { toast } from "./Toast";
@@ -46,7 +47,6 @@ export function PersonDrawer({
   const { t } = useTranslation();
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
-  const [editing, setEditing] = useState(false);
   const [enrolling, setEnrolling] = useState(false);
   const [confirmingDel, setConfirmingDel] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -65,7 +65,6 @@ export function PersonDrawer({
     if (open) {
       setName(person?.name ?? "");
       setRole(person?.role ?? "");
-      setEditing(person == null); // 新增模式默认编辑
       // 从档案头部「录入身份 / 补充身份样本」入口打开即进流程；新增模式不触发。
       setEnrolling(!!person && startEnrolling);
       setConfirmingDel(false);
@@ -119,7 +118,6 @@ export function PersonDrawer({
   const restoreDefault = () => {
     setAvatarBlob(null);
     setRemoveAvatar(true);
-    setEditing(true); // 露出「保存」以提交
   };
 
   const submit = async () => {
@@ -236,39 +234,26 @@ export function PersonDrawer({
             </div>
           )}
 
-          {/* 基本信息 / 编辑 */}
-          {editing ? (
-            <div className="space-y-3 mb-4">
-              <Field label={t("family.drawerName")}>
-                <input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder={t("family.drawerNamePlaceholder")}
-                  autoFocus
-                  className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border focus:border-brand-primary focus:outline-none text-text-primary"
-                />
-              </Field>
-              <Field label={t("family.drawerRole")}>
-                <input
-                  value={role}
-                  onChange={(e) => setRole(e.target.value)}
-                  placeholder={t("family.drawerRolePlaceholder")}
-                  className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border focus:border-brand-primary focus:outline-none text-text-primary"
-                />
-              </Field>
-            </div>
-          ) : (
-            person && (
-              <div className="text-center mb-4">
-                <div className="text-text-primary">{person.name}</div>
-                {person.role && (
-                  <div className="text-caption text-text-secondary">
-                    {person.role}
-                  </div>
-                )}
-              </div>
-            )
-          )}
+          {/* 基本信息（直接可编辑）：名字 / 家庭角色 */}
+          <div className="space-y-3 mb-4">
+            <Field label={t("family.drawerName")}>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={t("family.drawerNamePlaceholder")}
+                autoFocus
+                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border focus:border-brand-primary focus:outline-none text-text-primary"
+              />
+            </Field>
+            <Field label={t("family.drawerRole")}>
+              <input
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                placeholder={t("family.drawerRolePlaceholder")}
+                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border focus:border-brand-primary focus:outline-none text-text-primary"
+              />
+            </Field>
+          </div>
 
           {/* 删除二次确认态 */}
           {confirmingDel && (
@@ -297,59 +282,40 @@ export function PersonDrawer({
             </div>
           )}
 
-          {/* 动作按钮 */}
+          {/* 动作：取消 / 保存一行；存量成员的删除在分隔线下弱化呈现 */}
           {!confirmingDel && (
-            <div className="flex flex-col gap-2">
-              {editing ? (
-                <div className="flex gap-2">
+            <div className="flex flex-col">
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={guardedClose}
+                  disabled={busy}
+                  className="flex-1 py-2 rounded-lg bg-bg-primary border border-border text-text-secondary disabled:opacity-60"
+                >
+                  {t("family.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!name.trim() || busy}
+                  className="flex-1 py-2 rounded-lg bg-brand-primary text-white hover:bg-brand-accent disabled:opacity-60"
+                >
+                  <IconCheck className="inline mr-1" />
+                  {busy ? t("family.saving") : t("family.save")}
+                </button>
+              </div>
+              {!isNew && (
+                <div className="mt-4 pt-3 border-t border-border">
                   <button
                     type="button"
-                    onClick={() => {
-                      if (isNew) {
-                        onClose();
-                      } else {
-                        // 退出编辑态时把 name/role/头像暂存回滚，
-                        // 避免下次再进编辑看到上次未保存的脏值
-                        setName(person?.name ?? "");
-                        setRole(person?.role ?? "");
-                        setAvatarBlob(null);
-                        setRemoveAvatar(false);
-                        setEditing(false);
-                      }
-                    }}
-                    className="flex-1 py-2 rounded-lg bg-bg-primary border border-border text-text-secondary"
+                    onClick={() => setConfirmingDel(true)}
+                    disabled={busy}
+                    className="w-full py-2 rounded-lg text-error hover:bg-error-bg disabled:opacity-60 flex items-center justify-center gap-1.5"
                   >
-                    {t("family.cancel")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={submit}
-                    disabled={!name.trim() || busy}
-                    className="flex-1 py-2 rounded-lg bg-brand-primary text-white hover:bg-brand-accent disabled:opacity-60"
-                  >
-                    <IconCheck className="inline mr-1" />
-                    {busy ? t("family.saving") : t("family.save")}
+                    <IconTrash width={16} height={16} />
+                    {t("family.delete")}
                   </button>
                 </div>
-              ) : (
-                !isNew && (
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setEditing(true)}
-                      className="flex-1 py-2 rounded-lg bg-bg-primary border border-border text-text-secondary hover:text-text-primary"
-                    >
-                      {t("family.rename")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmingDel(true)}
-                      className="flex-1 py-2 rounded-lg bg-bg-primary border border-border text-error hover:bg-error-bg"
-                    >
-                      {t("family.delete")}
-                    </button>
-                  </div>
-                )
               )}
             </div>
           )}
@@ -365,7 +331,6 @@ export function PersonDrawer({
             setAvatarBlob(blob);
             setRemoveAvatar(false);
             setCrop(null);
-            setEditing(true); // 露出「保存」
           }}
         />
       )}
