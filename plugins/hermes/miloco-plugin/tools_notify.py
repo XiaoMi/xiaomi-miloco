@@ -105,14 +105,15 @@ def resolve_notify_target(ctx: Any) -> Dict[str, Any]:
             "candidates": [],
         }
 
-    # 2. fallback: 最近活跃 IM channel（对齐 OpenClaw 取第一个）
+    # 2. fallback: 最近活跃 IM channel（对齐 OpenClaw：needsBind=true 让
+    # 第二回合把 bindHint 拼到消息后投递到该渠道，bindHintExample 提示用户去显式配）
     candidates = _detect_im_platforms_simple()
     if candidates:
         fallback_target = candidates[0]
         return {
             "target": fallback_target,
-            "needsBind": False,
-            "bindReason": None,
+            "needsBind": True,
+            "bindReason": "not_configured",
             "hint": (
                 f"未显式配 deliver.target，fallback 到最近活跃 IM channel: "
                 f"{fallback_target}。如需指定具体 chat_id，调 miloco_notify_bind(action='switch', "
@@ -319,7 +320,7 @@ def notify_owner(ctx: Any, message: str, *, bind_hint: Optional[str] = None) -> 
         if bind_hint:
             message = f"{message}\n---\n{bind_hint}"
             if resolved.get("target"):
-                return _deliver(ctx, resolved, message)
+                return _deliver_via_hermes_send(resolved["target"], message)
             return {
                 "ok": False,
                 "needsBind": True,
@@ -330,6 +331,7 @@ def notify_owner(ctx: Any, message: str, *, bind_hint: Optional[str] = None) -> 
             "ok": False,
             "needsBind": True,
             "bindReason": bind_reason,
+            "target": resolved.get("target"),
             "bindHintExample": BIND_HINT_EXAMPLE.get(bind_reason or "not_configured", ""),
             "nextAction": (
                 "立即再次调用 miloco_im_push：message 保持本次内容不变，"

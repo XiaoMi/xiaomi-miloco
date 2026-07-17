@@ -102,10 +102,10 @@ class TestIMDetectionWithRealHermes:
         ctx = FakeCtx()
 
         result = tn.resolve_notify_target(ctx)
-        assert not result.get("needsBind"), (
-            f"真实 Hermes 上 feishu 已连接，resolve_notify_target 不该返回 needsBind。"
-            f"返回: {result}"
-        )
+        # 方案 A：有 fallback 但未显式配时也返回 needsBind=True + target，让 M2 bindHint 协议可投递
+        assert result.get("needsBind") is True
+        assert result.get("target") == "feishu"
+        assert result.get("bindReason") == "not_configured"
         assert result.get("target") is not None
 
 

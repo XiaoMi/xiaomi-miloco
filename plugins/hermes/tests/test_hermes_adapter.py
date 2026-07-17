@@ -274,7 +274,8 @@ def test_resolve_notify_target_fallback_to_home_channel(tmp_miloco_home):
          ):
         result = tn.resolve_notify_target(ctx=None)
     assert result["target"] in ("feishu", "telegram")
-    assert result["needsBind"] is False
+    assert result["needsBind"] is True  # 方案 A：有 fallback 时也走 needsBind，让第二回合带 bindHint 投递
+    assert result["bindReason"] == "not_configured"
     assert "fallback" in result.get("hint", "").lower()
     assert "feishu" in result["candidates"]
 

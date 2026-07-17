@@ -148,6 +148,38 @@ def test_notify_success(fake_hermes, tmp_path: Path):
     assert "<miloco-notification>" not in cmd[6]
 
 
+def test_notify_bind_hint_appends_and_delivers(fake_hermes, tmp_path: Path, monkeypatch):
+    """方案 A：resolve 在有 fallback 渠道时返回 needsBind=True + target。
+    第二回合 agent 带 bindHint 调用 → notify_owner 拼接后投递到该 fallback 渠道。
+    """
+    from miloco_plugin_pkg import tools_notify as tn_local
+    # 无显式 state.json，但 channel_directory.json 有可 fallback 的平台
+    monkeypatch.setattr(tn_local, "_detect_im_platforms_simple", lambda: ["telegram"])
+
+    fake_hermes(returncode=0, payload={"success": True, "platform": "telegram"})
+    ctx = _FakeCtx(tmp_path)
+
+    # 第一回合：agent 拿到 needsBind 引导
+    r1 = tn.notify_owner(ctx, "hello")
+    assert r1.get("needsBind") is True
+    assert r1.get("bindReason") == "not_configured"
+    assert "bindHintExample" in r1
+    assert r1.get("target") == "telegram"
+
+    # 第二回合：agent 翻译 bindHintExample 后回传
+    r2 = tn.notify_owner(ctx, "hello", bind_hint="请绑定通知渠道")
+    assert r2["ok"] is True
+    assert r2["platform"] == "telegram"
+    # 验证消息体拼接：原 message + "\n---\n" + bindHint
+    call = _FakeProcess.last_call
+    assert call is not None
+    cmd = call["cmd"]
+    body = cmd[6]
+    assert "hello" in body
+    assert "---" in body
+    assert "请绑定通知渠道" in body
+
+
 def test_notify_with_chat_id_target(fake_hermes, tmp_path: Path):
     state_file = tmp_path / "state.json"
     state_file.write_text(
