@@ -528,24 +528,25 @@ fi
 
 mark_done 1
 
-# --- 1.9 【hermes-pr.md §五 #10 MILOCO_HOME 显式配置】 ---
-# doc 要求 plugin / backend / CLI 三进程解析到同一个 MILOCO_HOME。
-# 默认 ~/.openclaw/miloco,本步切到 ~/.hermes/miloco(用户态根目录,跨 host 迁移更顺)。
+# --- 1.9 MILOCO_HOME 显式持久化 ---
+# doc 要求 plugin / backend / CLI 三进程解析到同一个 MILOCO_HOME。默认路径已切到
+# ~/.hermes/miloco（脚本顶部 line 58），数据直装该目录，不再借道 ~/.openclaw/miloco。
 #
-# 实现策略:
-# 1. 创建 symlink ~/.hermes/miloco → ~/.openclaw/miloco(避免数据迁移)
-# 2. 写 export MILOCO_HOME=~/.hermes/miloco 到 ~/.zshrc + ~/.bashrc(用户 shell rc)
-#    —— 关键:miloco-cli service start 每次都重新生成 supervisord.conf(用
-#    miloco_home() 的当前值,直接读环境),所以 supervisor conf 写什么不重要,
-#    重要的是 supervisor 进程(macOS 是 launchd 启动的 shell)能拿到 MILOCO_HOME env。
-# 3. 改 supervisord.conf 的 environment(防御性,launchd 父进程若不传 env 时兜底)
-# 4. supervisorctl reread + update(下次 backend 重启继承)
-step 1.9 "MILOCO_HOME 显式配置 ${HERMES_HOME}/miloco"
+# 实现策略：
+# 1. 用户自定义了非默认 MILOCO_HOME（$MILOCO_HOME_HERMES != $MILOCO_HOME）才建
+#    symlink，避免旧数据迁移；默认路径下两者相等，symlink 分支恒不进。
+# 2. 写 export MILOCO_HOME 到 ~/.zshrc + ~/.bashrc —— 关键：miloco-cli service
+#    start 每次都重新生成 supervisord.conf（用 miloco_home() 的当前值），所以
+#    supervisor conf 写什么不重要，重要的是 supervisor 父进程（macOS launchd
+#    启动的 shell）能拿到 MILOCO_HOME env。
+# 3. 改 supervisord.conf 的 environment（防御性，launchd 父进程若不传 env 时兜底）。
+# 4. supervisorctl reread + update（下次 backend 重启继承）。
+step 1.9 "MILOCO_HOME 显式持久化 → ${MILOCO_HOME}"
 MILOCO_HOME_HERMES="${HERMES_HOME}/miloco"
-if [ ! -e "$MILOCO_HOME_HERMES" ] && [ -d "$MILOCO_HOME" ]; then
-  info "  创建 symlink: $MILOCO_HOME_HERMES -> $MILOCO_HOME (避免数据迁移)"
+if [ "$MILOCO_HOME_HERMES" != "$MILOCO_HOME" ] && [ ! -e "$MILOCO_HOME_HERMES" ] && [ -d "$MILOCO_HOME" ]; then
+  info "  创建 symlink: $MILOCO_HOME_HERMES -> $MILOCO_HOME (自定义 MILOCO_HOME 场景)"
   ln -s "$MILOCO_HOME" "$MILOCO_HOME_HERMES"
-elif [ -d "$MILOCO_HOME_HERMES" ] && [ ! -L "$MILOCO_HOME_HERMES" ]; then
+elif [ "$MILOCO_HOME_HERMES" != "$MILOCO_HOME" ] && [ -d "$MILOCO_HOME_HERMES" ] && [ ! -L "$MILOCO_HOME_HERMES" ]; then
   warn "  $MILOCO_HOME_HERMES 已是真实目录(非 symlink),不强行覆盖"
 fi
 # 写用户 shell rc(关键路径:macOS supervisor 由 launchd 启动,env 来自 launchd
@@ -567,7 +568,7 @@ PY
       info "  $_rc: export MILOCO_HOME 已更新"
     else
       echo "" >> "$_rc"
-      echo "# miloco Hermes 兼容层(MILOCO_HOME=${MILOCO_HOME_HERMES:-默认 ~/.openclaw/miloco})" >> "$_rc"
+      echo "# miloco Hermes runtime (MILOCO_HOME=$MILOCO_HOME_HERMES)" >> "$_rc"
       echo "export MILOCO_HOME=\"$MILOCO_HOME_HERMES\"" >> "$_rc"
       info "  $_rc: export MILOCO_HOME 已追加"
     fi
