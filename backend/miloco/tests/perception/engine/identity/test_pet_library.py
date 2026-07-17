@@ -88,6 +88,11 @@ def test_delete(lib: PetLibrary) -> None:
     assert lib.delete(pet.id) is False
 
 
+# 头像已迁到 <root>/avatars/pets/<id>.<ext>（展示层，与 pet 识别目录分离）。
+def _avatar_dir(lib: PetLibrary):
+    return lib.root / "avatars" / "pets"
+
+
 def test_set_avatar_and_path(lib: PetLibrary) -> None:
     pet = lib.create(name="小黑", species="猫")
     assert lib.avatar_path(pet.id) is None
@@ -97,15 +102,18 @@ def test_set_avatar_and_path(lib: PetLibrary) -> None:
     path = lib.avatar_path(pet.id)
     assert path is not None and path.is_file()
     assert path.read_bytes() == b"\xff\xd8\xff_fake_jpeg"
-    assert path.name == "avatar.jpg"
+    assert path.name == f"{pet.id}.jpg"
+    assert path.parent == _avatar_dir(lib)
+    # 头像不落在 pet 识别目录内
+    assert not list(lib._pet_dir(pet.id).glob("avatar.*"))
 
 
 def test_set_avatar_ext_change_removes_old(lib: PetLibrary) -> None:
     pet = lib.create(name="小黑", species="猫")
     lib.set_avatar(pet.id, data=b"jpgdata", ext="jpg")
     lib.set_avatar(pet.id, data=b"pngdata", ext="png")
-    avatars = sorted(p.name for p in lib._pet_dir(pet.id).glob("avatar.*"))
-    assert avatars == ["avatar.png"]  # 旧 avatar.jpg 已清
+    avatars = sorted(p.name for p in _avatar_dir(lib).glob(f"{pet.id}.*"))
+    assert avatars == [f"{pet.id}.png"]  # 旧 .jpg 已清
     assert lib.avatar_path(pet.id).read_bytes() == b"pngdata"
     assert lib.get(pet.id).avatar_ext == "png"
 
@@ -114,11 +122,20 @@ def test_set_avatar_same_ext_overwrites(lib: PetLibrary) -> None:
     pet = lib.create(name="小黑", species="猫")
     lib.set_avatar(pet.id, data=b"v1", ext="png")
     lib.set_avatar(pet.id, data=b"v2", ext="png")
-    avatars = sorted(p.name for p in lib._pet_dir(pet.id).glob("avatar.*"))
-    assert avatars == ["avatar.png"]
+    avatars = sorted(p.name for p in _avatar_dir(lib).glob(f"{pet.id}.*"))
+    assert avatars == [f"{pet.id}.png"]
     assert lib.avatar_path(pet.id).read_bytes() == b"v2"
     # meta 始终指向存在的文件
     assert lib.get(pet.id).avatar_ext == "png"
+
+
+def test_delete_pet_removes_avatar(lib: PetLibrary) -> None:
+    pet = lib.create(name="小黑", species="猫")
+    lib.set_avatar(pet.id, data=b"x", ext="png")
+    assert lib.avatar_path(pet.id) is not None
+    assert lib.delete(pet.id) is True
+    # 头像在 avatars/pets/ 内、rmtree(pet 目录) 清不到，delete 须显式清
+    assert not list(_avatar_dir(lib).glob(f"{pet.id}.*"))
 
 
 def test_set_avatar_unsupported_ext_raises(lib: PetLibrary) -> None:

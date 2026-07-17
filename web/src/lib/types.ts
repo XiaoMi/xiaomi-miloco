@@ -45,6 +45,8 @@ export interface Person {
   voiceEnrolled: boolean;
   // 头像底色（personPalette 选）
   avatarHue: number; // 0..5
+  // 手动上传的显式头像后缀（avatars/persons/<id>.<ext>）；无则回落 tier_a face[0] / 占位
+  avatarExt?: string | null;
 }
 
 // 宠物（非人家庭成员）——独立花名册，不进人身份库

@@ -113,6 +113,19 @@ export async function enrollPersonSample(
   return impl.realEnrollPersonSample(personId, imageBase64);
 }
 
+// 手动头像：上传显式头像 / 清除（恢复默认→回落 tier_a face[0]）
+export async function uploadPersonAvatar(
+  personId: string,
+  image: Blob,
+  filename: string,
+): Promise<void> {
+  return impl.realUploadPersonAvatar(personId, image, filename);
+}
+
+export async function deletePersonAvatar(personId: string): Promise<void> {
+  return impl.realDeletePersonAvatar(personId);
+}
+
 // ── 宠物（非人家庭成员）────────────────────────────────────
 export async function listPets(homeId?: HomeId): Promise<Pet[]> {
   if (!isPrimary(homeId)) return [];

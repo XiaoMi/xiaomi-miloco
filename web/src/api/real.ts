@@ -170,6 +170,8 @@ interface BackendPerson {
   num_tier_a_body?: number;
   num_tier_c?: number;
   has_tier_a?: boolean;
+  // 手动上传的显式头像后缀（avatars/persons/<id>.<ext>）；无则 null
+  avatar_ext?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -240,6 +242,7 @@ export async function realListPersons(): Promise<Person[]> {
       faceEnrolled: p.has_tier_a ?? p.face_enrolled,
       voiceEnrolled: p.voice_enrolled,
       avatarHue: i % 6,
+      avatarExt: p.avatar_ext ?? null,
     };
   });
 }
@@ -443,6 +446,31 @@ export async function realUploadPetAvatar(
   }
   const r = (await resp.json()) as Normal<BackendPet>;
   return mapBackendPet(r.data);
+}
+
+export async function realUploadPersonAvatar(
+  personId: string,
+  image: Blob,
+  filename: string,
+): Promise<void> {
+  const form = new FormData();
+  form.append("image", image, filename);
+  const resp = await fetch(`/api/identity/persons/${personId}/avatar`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+}
+
+// 清显式头像（恢复默认→读取回落 tier_a face[0]）
+export async function realDeletePersonAvatar(personId: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(`/api/identity/persons/${personId}/avatar`, {
+    method: "DELETE",
+  });
 }
 
 /**
