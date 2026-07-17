@@ -1314,7 +1314,7 @@ class Installer:
         """
         script = extract_dir / "install-hermes.sh"
         if not script.is_file():
-            self.ui.warn(f"install-hermes.sh 未找到于 {script}，跳过 env 持久化 / cron 等后置步骤。")
+            self.ui.warn(self.ui.i18n.t("plugin.hermes_post_install_missing"))
             return
         env = os.environ.copy()
         env["MILOCO_HOME"] = str(self.miloco_home)
@@ -1324,8 +1324,8 @@ class Installer:
                 ["bash", str(script), "--post-install"],
                 check=True, env=env, stdin=subprocess.DEVNULL,
             )
-        except subprocess.CalledProcessError:
-            self.ui.warn("install-hermes.sh --post-install 失败")
+        except subprocess.CalledProcessError as exc:
+            self.ui.warn(self.ui.i18n.t("plugin.hermes_post_install_failed", str(exc.returncode)))
 
     def _hermes_deploy_plugin(self, hermes_home: Path, extract_dir: Path) -> None:
         plugin_dir = hermes_home / "plugins" / "miloco" / "miloco-plugin"

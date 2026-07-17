@@ -136,6 +136,8 @@
   "plugin.no_hermes_tarball": "release 归档里未找到 Hermes 插件包",
   "plugin.hermes_config_failed": "通过 miloco-cli 写入 agent.* 配置失败",
   "plugin.hermes_enable_failed": "hermes plugins enable miloco 失败（gateway 可能还没起来），装完手动跑：hermes plugins enable miloco",
+  "plugin.hermes_post_install_missing": "hermes-plugin tarball 里没找到 install-hermes.sh；env 持久化 / cron reconcile 跳过，请手动跑：bash plugins/hermes/install-hermes.sh --post-install",
+  "plugin.hermes_post_install_failed": "install-hermes.sh --post-install 退出码 %1；env 持久化 / cron reconcile 可能没走完",
   "plugin.hermes_ok": "Hermes 插件安装完成",
 
   "platform.title": "选择运行平台",
