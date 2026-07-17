@@ -314,83 +314,85 @@ class Adapter:
         import httpx
 
         max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                logger.info(
-                    "[hermes adapter] → chat session=%s url=%s/v1/chat/completions "
-                    "timeout=%.1fs sys_len=%d user_len=%d%s",
-                    session_id, self._api_url, timeout_s,
-                    len(system_text), len(text),
-                    f" retry={attempt}" if attempt else "",
-                )
-                resp = await client.post(
-                    f"{self._api_url}/v1/chat/completions",
-                    json=body, headers=headers, timeout=timeout_s,
-                )
-                break
-            except httpx.TimeoutException:
-                logger.warning(
-                    "[hermes adapter] ← Hermes TIMEOUT session=%s timeout=%.1fs",
-                    session_id, timeout_s,
-                )
-                return _result(run_id=run_id, status="timeout")
-            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
-                if attempt < max_retries:
+        try:
+            for attempt in range(max_retries + 1):
+                try:
+                    logger.info(
+                        "[hermes adapter] → chat session=%s url=%s/v1/chat/completions "
+                        "timeout=%.1fs sys_len=%d user_len=%d%s",
+                        session_id, self._api_url, timeout_s,
+                        len(system_text), len(text),
+                        f" retry={attempt}" if attempt else "",
+                    )
+                    resp = await client.post(
+                        f"{self._api_url}/v1/chat/completions",
+                        json=body, headers=headers, timeout=timeout_s,
+                    )
+                    break
+                except httpx.TimeoutException:
                     logger.warning(
-                        "[hermes adapter] ← Hermes transport error retry %d/%d: %s",
-                        attempt + 1, max_retries, exc,
+                        "[hermes adapter] ← Hermes TIMEOUT session=%s timeout=%.1fs",
+                        session_id, timeout_s,
                     )
-                    continue
-                raise AdapterTransportError(str(exc)) from exc
-            except httpx.HTTPError as exc:
-                raise AdapterTransportError(str(exc)) from exc
+                    return _result(run_id=run_id, status="timeout")
+                except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                    if attempt < max_retries:
+                        logger.warning(
+                            "[hermes adapter] ← Hermes transport error retry %d/%d: %s",
+                            attempt + 1, max_retries, exc,
+                        )
+                        continue
+                    raise AdapterTransportError(str(exc)) from exc
+                except httpx.HTTPError as exc:
+                    raise AdapterTransportError(str(exc)) from exc
 
-        rtt_ms = (time.monotonic() - started_at) * 1000
+            rtt_ms = (time.monotonic() - started_at) * 1000
 
-        # 2xx → 成功
-        if 200 <= resp.status_code < 300:
-            logger.info(
-                "[hermes adapter] ← Hermes HTTP %d session=%s OK rtt=%.0fms",
-                resp.status_code, session_id, rtt_ms,
-            )
-            # 对 deliver=True 的 turn，Hermes /v1/chat/completions 不会
-            # 自动推回 IM（纯拉取端点），需从响应体读回复经 hermes send 投递。
-            # 带 chat_id（`platform:chat_id`）而非裸平台名，定位车主具体的绑定会话
-            # 而非依赖 PLATFORM_HOME_CHANNEL 环境变量（多数平台没配）。
-            delivery_target = (
-                f"{owner_platform}:{owner_chat}" if owner_chat
-                else owner_platform
-            )
-            if delivery.get("deliver") and delivery_target:
-                if not _deliver_response(resp, delivery_target):
-                    return _err_result(
-                        run_id,
-                        "deliver failed: hermes send returned error",
-                        rtt_ms=rtt_ms,
-                    )
-            return _result(run_id=run_id, status="ok", rtt_ms=rtt_ms)
+            # 2xx → 成功
+            if 200 <= resp.status_code < 300:
+                logger.info(
+                    "[hermes adapter] ← Hermes HTTP %d session=%s OK rtt=%.0fms",
+                    resp.status_code, session_id, rtt_ms,
+                )
+                # 对 deliver=True 的 turn，Hermes /v1/chat/completions 不会
+                # 自动推回 IM（纯拉取端点），需从响应体读回复经 hermes send 投递。
+                # 带 chat_id（`platform:chat_id`）而非裸平台名，定位车主具体的绑定会话
+                # 而非依赖 PLATFORM_HOME_CHANNEL 环境变量（多数平台没配）。
+                delivery_target = (
+                    f"{owner_platform}:{owner_chat}" if owner_chat
+                    else owner_platform
+                )
+                if delivery.get("deliver") and delivery_target:
+                    if not _deliver_response(resp, delivery_target):
+                        return _err_result(
+                            run_id,
+                            "deliver failed: hermes send returned error",
+                            rtt_ms=rtt_ms,
+                        )
+                return _result(run_id=run_id, status="ok", rtt_ms=rtt_ms)
 
-        # 非 2xx: 尝试溢出识别 + 自愈
-        err_text = _extract_error_text(resp)
-        logger.warning(
-            "[hermes adapter] ← Hermes HTTP %d session=%s err=%s",
-            resp.status_code, session_id, err_text[:200],
-        )
-        if _looks_like_overflow(err_text):
+            # 非 2xx: 尝试溢出识别 + 自愈
+            err_text = _extract_error_text(resp)
             logger.warning(
-                "[hermes adapter] overflow self-heal: session=%s, retry stateless",
-                session_id,
+                "[hermes adapter] ← Hermes HTTP %d session=%s err=%s",
+                resp.status_code, session_id, err_text[:200],
             )
-            return await self._heal_and_retry(
-                messages, timeout_s, run_id, err_text, started_at,
-            )
+            if _looks_like_overflow(err_text):
+                logger.warning(
+                    "[hermes adapter] overflow self-heal: session=%s, retry stateless",
+                    session_id,
+                )
+                return await self._heal_and_retry(
+                    messages, timeout_s, run_id, err_text, started_at,
+                )
 
-        return _err_result(
-            run_id,
-            f"hermes chat HTTP {resp.status_code}: {err_text[:300]}",
-            rtt_ms=rtt_ms,
-        )
-        await client.aclose()
+            return _err_result(
+                run_id,
+                f"hermes chat HTTP {resp.status_code}: {err_text[:300]}",
+                rtt_ms=rtt_ms,
+            )
+        finally:
+            await client.aclose()
 
     async def _heal_and_retry(
         self,
