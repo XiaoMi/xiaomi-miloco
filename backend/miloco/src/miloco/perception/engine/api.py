@@ -843,11 +843,16 @@ class PerceptionEngine(BasePerceptionEngine):
         它顶起的 fps 也在 pipeline 现读，但有 3 处构造期派生缓存不会自动刷新——这里
         显式重算：tracking kwargs（后续懒建）、每个 live tracker 的 max_age、每个 live
         IdentityEngine 的帧数派生量。fps 必须从 base 重算（见 __init__ self._base_fps）。
+
+        「不丢 track」仅对 omni_fps-only 变更成立：本路径不停 runner、不重建实例，故活
+        跃 track 状态原样保留；若同时改 window_size，则另经 apply_config_restart 走
+        stop→start，track 会随重启丢失（那是 window 变更的固有代价，非本路径）。
         """
         from dataclasses import replace
 
         from miloco.perception.engine.omni.provider import adjust_fps_for_omni
 
+        old_omni_fps = self._config.input.omni_fps
         new_fps = adjust_fps_for_omni(self._base_fps, omni_fps)
         self._config = replace(
             self._config,
@@ -858,14 +863,23 @@ class PerceptionEngine(BasePerceptionEngine):
         # 的 mock 分支保持对称，避免留下无消费者的孤儿 key。
         if self._tracking_mode != "mock":
             self._tracking_service_kwargs["fps"] = new_fps
-        # 构造期缓存 2：已建的 per-camera tracker（SortTracker / DeepSort）重算 max_age
+        # 构造期缓存 2：已建的 per-camera tracker（SortTracker / DeepSort）重算 max_age。
+        # set_fps 已提到 TrackingService 基类、各实现均具备，无需 hasattr 守卫。
         for svc in self._tracking_services.values():
-            if hasattr(svc, "set_fps"):
-                svc.set_fps(new_fps)
+            svc.set_fps(new_fps)
         # 构造期缓存 3：已建的 per-camera IdentityEngine 重算 grace / cooldown / frames_per_window
         for eng in self._identity_engines.values():
             if eng is not None:
                 eng.set_engine_fps(new_fps)
+
+        # 成功路径留痕：旧 rebuild 会经 _init_engine 打 fps 自动调整日志，改热更后运行时
+        # 改 omni_fps 若无日志则运维无法确认新值是否真推到活跃引擎 / tracker。
+        logger.info(
+            "[engine] omni_fps 热更 %s→%s：tracker fps→%s，已刷新 %d tracker / %d identity engine",
+            old_omni_fps, omni_fps, new_fps,
+            len(self._tracking_services),
+            sum(1 for e in self._identity_engines.values() if e is not None),
+        )
 
     def _strip_unauthorized_voice_audio(self, batch: BatchedSnapshot) -> None:
         """硬切**未开启拾音**相机的音频——opt-in / 默认关语义的**第一道防线（唯一切点）**。

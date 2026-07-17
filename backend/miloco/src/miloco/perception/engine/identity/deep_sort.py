@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.perception.engine.identity._fps_utils import sec_to_frames
+
 if TYPE_CHECKING:
     from miloco.perception.engine.config import DeepSortConfigDC
 
@@ -85,7 +87,7 @@ class DeepSortTracker:
         # 把 DeepSortConfigDC 业务字段映射到 TrackerConfig;其它字段
         # (max_cosine_distance / max_iou_distance / static_displacement_ratio /
         # static_min_abs_px 等)保持 TrackerConfig 默认。
-        max_age_frames = max(1, int(round(self.config.max_age_sec * self.fps)))
+        max_age_frames = sec_to_frames(self.config.max_age_sec, self.fps)
         tracker_cfg = TrackerConfig(
             mode=self.config.mode,
             max_age=max_age_frames,
@@ -121,7 +123,7 @@ class DeepSortTracker:
         track 循环每帧现读 ``max_age`` / ``human_max_lost_frames``，改字段下一帧即生效。
         """
         self.fps = max(1, int(fps))
-        max_age_frames = max(1, int(round(self.config.max_age_sec * self.fps)))
+        max_age_frames = sec_to_frames(self.config.max_age_sec, self.fps)
         self._mot.config.max_age = max_age_frames
         self._mot.config.human_max_lost_frames = max_age_frames
 
