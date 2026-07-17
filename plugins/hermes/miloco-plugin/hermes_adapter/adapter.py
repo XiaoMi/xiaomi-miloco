@@ -30,6 +30,20 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+
+# ---- 异常类 -------------------------------------------------------------
+# 对齐 backend AgentPlatformAdapter 契约：dispatcher 专 catch 此异常做特殊处理。
+# adapter 在 backend 同进程加载，可以 import base 模块。
+try:
+    from miloco.agent_platform.base import AdapterTransportError
+except ImportError:
+    class AdapterTransportError(Exception):
+        """fallback: 独立测试时 base 模块不可用"""
+        pass
+
+
+# ---- 常量 ---------------------------------------------------------------
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -316,7 +330,7 @@ class Adapter:
                     "[hermes adapter] ← Hermes transport error session=%s: %s",
                     session_id, exc,
                 )
-                return _err_result(run_id, str(exc))
+                raise AdapterTransportError(str(exc)) from exc
 
             rtt_ms = (time.monotonic() - started_at) * 1000
 
@@ -425,7 +439,7 @@ class Adapter:
         两边对不上，无法按文件名匹配。此处用 _pending_texts 存的发送原文，
         按 ``query`` 字段前缀匹配最近落盘的 meta.json。
         """
-        text = self._pending_texts.pop(run_id, None)
+        text = self._pending_texts.get(run_id)
         if not text:
             return None
         candidates = sorted(
@@ -442,6 +456,7 @@ class Adapter:
             query = (candidate.get("query") or "").strip()
             if query and text.strip().startswith(query):
                 data = candidate
+                self._pending_texts.pop(run_id, None)
                 break
         if not data:
             return None

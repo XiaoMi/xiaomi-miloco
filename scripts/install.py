@@ -1296,7 +1296,7 @@ class Installer:
         self.ui.step_ok(self.ui.i18n.t("plugin.hermes_ok"))
 
     def _hermes_deploy_plugin(self, hermes_home: Path, extract_dir: Path) -> None:
-        plugin_dir = hermes_home / "plugins" / "miloco-plugin"
+        plugin_dir = hermes_home / "plugins" / "miloco" / "miloco-plugin"
         if plugin_dir.exists():
             shutil.rmtree(plugin_dir)
         plugin_dir.parent.mkdir(parents=True, exist_ok=True)
