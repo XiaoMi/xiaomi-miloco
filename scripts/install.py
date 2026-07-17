@@ -1295,7 +1295,39 @@ class Installer:
             )
         except subprocess.CalledProcessError:
             self.ui.warn(self.ui.i18n.t("plugin.hermes_enable_failed"))
+        self._hermes_run_post_install(hermes_home, extract_dir)
         self.ui.step_ok(self.ui.i18n.t("plugin.hermes_ok"))
+
+    def _hermes_run_post_install(self, hermes_home: Path, extract_dir: Path) -> None:
+        """调 install-hermes.sh --post-install 补齐 env 持久化 / cron / 收尾提示。
+
+        install.py step 8 已做 plugin 分发 / adapter 部署 / config.json patch / .env 写入 /
+        hermes plugins enable；--post-install 模式跳过它们，只跑：
+          - shell rc / supervisord.conf 里 MILOCO_HOME 持久化
+          - hermes disabled 残留清理
+          - 版本记录
+          - cron reconcile
+          - 收尾 banner
+
+        install-hermes.sh 由 build.sh::build_hermes 打进 miloco-hermes-plugin tarball，
+        跟 miloco-plugin 平级。找不到就 warn 跳过。
+        """
+        script = extract_dir / "install-hermes.sh"
+        if not script.is_file():
+            self.ui.warn("plugin.hermes_post_install_missing",
+                         f"注：{script} 未找到——跳过 env 持久化 / cron 等后置步骤。")
+            return
+        env = os.environ.copy()
+        env["MILOCO_HOME"] = str(self.miloco_home)
+        env["HERMES_HOME"] = str(hermes_home)
+        try:
+            subprocess.run(
+                ["bash", str(script), "--post-install"],
+                check=True, env=env, stdin=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            self.ui.warn("plugin.hermes_post_install_failed",
+                         f"install-hermes.sh --post-install 失败")
 
     def _hermes_deploy_plugin(self, hermes_home: Path, extract_dir: Path) -> None:
         plugin_dir = hermes_home / "plugins" / "miloco" / "miloco-plugin"

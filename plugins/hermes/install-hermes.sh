@@ -21,9 +21,10 @@ set -euo pipefail
 # 强制 UTF-8 + POSIX 字符类，防止 "$VAR中文" 被 bash 误识别为变量名延续
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-# --- CLI 参数解析（--diagnose / --no-start-backend / -h） ---
+# --- CLI 参数解析（--diagnose / --no-start-backend / --post-install / -h） ---
 DIAGNOSE_ONLY=0
 NO_START_BACKEND=0
+POST_INSTALL_ONLY=0
 
 # 日志函数必须先定义（CLI 参数解析里会用到 warn）
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
@@ -35,7 +36,7 @@ for arg in "$@"; do
   case "$arg" in
     --diagnose) DIAGNOSE_ONLY=1 ;;
     --no-start-backend) NO_START_BACKEND=1 ;;
-    --help|-h)
+    --post-install) POST_INSTALL_ONLY=1 ;;    --help|-h)
       cat <<EOF
 用法：bash install-hermes.sh [options]
   （无参数）       完整安装（patch config / 写 .env / 复制 plugin / 启 backend / enable plugin）
@@ -276,8 +277,14 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
   fi
 fi
 
+# --post-install: install.py 调起，跳过 install.py 已做的前端部署步骤，
+# 只跑 env 持久化 + 残留清理 + 版本记录 + cron + 收尾
+if [ "$POST_INSTALL_ONLY" -eq 1 ]; then
+  info "post-install 模式: 跳过 step 1/2/3/4/5/6/7/8，只做 env 持久化 + cron + 收尾"
+fi
+
 # --- 1. 前置检查 ---
-step 1 "前置检查 (python / miloco-cli / Hermes / config.json)"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 1 "前置检查 (python / miloco-cli / Hermes / config.json)"
 command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 \
   || { err "找不到 python，请先装 python"; exit 1; }
 PYTHON="$(command -v python3 || command -v python)"
@@ -584,7 +591,7 @@ fi
 mark_done 1.9
 
 # --- 2. 拿/复用 Bearer ---
-step 2 "拿/复用 adapter Bearer"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 2 "拿/复用 adapter Bearer"
 # 优先级：.env 已有的 API_SERVER_KEY > 旧 adapter pid 存在则重新生成 > 新生成
 if [ -f "$HERMES_HOME/.env" ] && grep -q '^API_SERVER_KEY=' "$HERMES_HOME/.env" 2>/dev/null; then
   BEARER="$(grep '^API_SERVER_KEY=' "$HERMES_HOME/.env" | head -1 | cut -d= -f2-)"
@@ -596,14 +603,14 @@ fi
 mark_done 2
 
 # --- 3. 同步 skills ---
-step 3 "同步 16 个 miloco-* skill → ${HERMES_HOME}/skills/"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 3 "同步 16 个 miloco-* skill → ${HERMES_HOME}/skills/"
 "$PYTHON" "$HERE/scripts/sync-skills.py"
 mkdir -p "$HERMES_HOME/skills"
 cp -r "$HERE/skills"/miloco-* "$HERMES_HOME/skills/"
 mark_done 3
 
 # --- 4. 复制插件 ---
-step 4 "复制 Hermes 插件 → ${HERMES_PLUGINS_DIR}/"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 4 "复制 Hermes 插件 → ${HERMES_PLUGINS_DIR}/"
 mkdir -p "$HERMES_PLUGINS_DIR"
 info "  复制 miloco-plugin/"
 # 备份用户 state.json（含 deliver.target 等手工配置），复制后还原
@@ -684,7 +691,7 @@ PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 # 同一份模型 — 直接 cp 即可（避免再下 80MB+）。
 #
 # 跳过条件：MILOCO_HOME/models/det_4C.onnx 已存在（用户已装）。
-step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
 
 # 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
 # 安装到 ~/.hermes/plugins/miloco/ 后 $HERE 不再指向 git checkout，
@@ -736,7 +743,7 @@ mark_done 4.7
 # --- 5. patch ${MILOCO_HOME}/config.json (走 miloco-cli config set) ---
 # Author #7 收敛:不再直接编辑 config.json 结构,改用 miloco-cli config set 写 agent.*
 # (CLI 是 source of truth,插件不碰 config.json schema —— 未来 CLI 改键名不影响)
-step 5 "miloco-cli config set 写 agent.webhook_url + agent.auth_bearer"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 5 "miloco-cli config set 写 agent.webhook_url + agent.auth_bearer"
 # 从 config.json 动态读取 backend 端口
 BACKEND_PORT=$(_read_backend_port)
 WEBHOOK_URL="http://127.0.0.1:${BACKEND_PORT}/miloco/webhook"
@@ -788,7 +795,7 @@ fi
 mark_done 5
 
 # --- 6. patch ~/.hermes/.env（仅当缺失时追加）---
-step 6 "确保 ${HERMES_HOME}/.env 有 API_SERVER_KEY"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 6 "确保 ${HERMES_HOME}/.env 有 API_SERVER_KEY"
 touch "$HERMES_HOME/.env"
 chmod 600 "$HERMES_HOME/.env"
 if ! grep -q '^API_SERVER_KEY=' "$HERMES_HOME/.env" 2>/dev/null; then
@@ -802,7 +809,7 @@ mark_done 6
 # --- 7. 重启 backend ---
 # Step 5 写了 agent.platform，必须重启 backend 才能加载新的 HermesAdapter（缓存刷新）。
 # 否则旧进程缓存的是 WebhookAdapter fallback → onboarding 走 webhook → 405。
-step 7 "重启 backend 加载 HermesAdapter（agent.platform 刚写入）"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 7 "重启 backend 加载 HermesAdapter（agent.platform 刚写入）"
 info "  停止旧 backend"
 miloco-cli service stop 2>/dev/null || true
 sleep 3
@@ -826,7 +833,7 @@ fi
 mark_done 7
 
 # --- 8. enable plugin（Hermes 是 opt-in，不 enable 就不会加载工具）---
-step 8 "enable Hermes 插件 miloco"
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 8 "enable Hermes 插件 miloco"
 # plugin.yaml 里的 name 字段是 'miloco'，enable 时用它
 if command -v hermes >/dev/null 2>&1; then
   # 已 enabled 跳过；未 enabled 才 enable

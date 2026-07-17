@@ -212,6 +212,9 @@ build_hermes() {
         fi
     done
 
+    # install-hermes.sh 打进 tarball：install.py step 8 完成后调 --post-install 跑后置步骤
+    cp "$hermes_dir/install-hermes.sh" "$stage/install-hermes.sh"
+
     local tar_name="miloco-hermes-plugin-${RESOLVED_PEP}.tar.gz"
     tar -czf "$DIST_DIR/$tar_name" -C "$stage" .
     rm -rf "$stage"
