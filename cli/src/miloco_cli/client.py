@@ -94,6 +94,26 @@ def api_post(path: str, body: dict | None = None) -> dict:
         _connect_error(cfg["server"]["url"])
 
 
+def api_post_multipart(
+    path: str,
+    files: list[tuple[str, tuple[str, bytes, str]]],
+    data: dict | None = None,
+) -> dict:
+    """POST multipart/form-data（上传文件 + 表单字段）。
+
+    ``files``：``[("字段名", ("文件名", 字节, content_type)), ...]``；同名字段可重复
+    （如 medias / crops 多文件）。``data``：普通表单字段，list 值会展开成重复字段
+    （如 scores=[...]）。不设 Content-Type，交 httpx 按 multipart 自动生成 boundary。
+    """
+    cfg = load_config()
+    try:
+        with _get_client(cfg) as client:
+            resp = client.post(path, files=files, data=data or {})
+            return _handle_response(resp)
+    except httpx.RequestError:
+        _connect_error(cfg["server"]["url"])
+
+
 def api_put(path: str, body: dict | None = None) -> dict:
     cfg = load_config()
     try:
