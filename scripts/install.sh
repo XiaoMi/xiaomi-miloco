@@ -70,4 +70,4 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ensure_uv
 ensure_python
 ensure_user_local_bin_on_path
-exec "$UV_CMD" run "$SCRIPT_DIR/install.py" "$@"
+exec "$UV_CMD" run --with httpx --with socksio "$SCRIPT_DIR/install.py" "$@"
