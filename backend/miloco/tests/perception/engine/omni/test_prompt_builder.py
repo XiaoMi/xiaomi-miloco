@@ -580,7 +580,7 @@ class TestFusedPetRefs:
             "miloco.perception.engine.identity.pet_library.get_pet_library", lambda: lib
         )
         monkeypatch.setattr(
-            "miloco.perception.engine.omni.prompt_builder.home_profile_has_pets",
+            "miloco.perception.engine.omni.prompt_builder._has_pets_for_scene",
             lambda: True,
         )
         monkeypatch.setattr(
@@ -605,7 +605,7 @@ class TestFusedPetRefs:
 
         monkeypatch.setattr(pet_refs, "_cache", {"sig": None, "content": []})
         monkeypatch.setattr(
-            "miloco.perception.engine.omni.prompt_builder.home_profile_has_pets",
+            "miloco.perception.engine.omni.prompt_builder._has_pets_for_scene",
             lambda: False,
         )
         fused = build_fused_payload(
@@ -620,6 +620,22 @@ class TestFusedPetRefs:
             if b["type"] == "text"
         ]
         assert not any("<pets>" in t for t in texts)
+
+    def test_pet_gate_requires_feature_on(self, monkeypatch):
+        # 门控组合：档案有宠物段但 pet_recognition 关 → _has_pets_for_scene False → 不注入
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.home_profile_has_pets",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.get_settings",
+            lambda: SimpleNamespace(features=SimpleNamespace(pet_recognition=False)),
+        )
+        from miloco.perception.engine.omni.prompt_builder import _has_pets_for_scene
+
+        assert _has_pets_for_scene() is False  # 有宠物但功能关 → 不注入
 
 
 class TestMultimodalSanityCheck:

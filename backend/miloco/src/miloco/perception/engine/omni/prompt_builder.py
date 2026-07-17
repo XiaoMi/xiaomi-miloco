@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.config import get_settings
 from miloco.perception.engine.identity.gallery_composite import (
     build_body_composite_png,
     build_face_composite_png,
@@ -54,6 +55,15 @@ from .constants import (
 from .field_registry import SceneDescriptor, render_field_spec, render_schema
 from .home_profile_loader import get_home_profile_prefix, home_profile_has_pets
 from .pet_refs import build_pet_reference_content
+
+
+def _has_pets_for_scene() -> bool:
+    """宠物注入门：家庭档案有「## 宠物」段 **且** pet_recognition 开启。
+
+    直接查 feature（不只靠档案渲染时序）——关功能后档案尚未重渲的窗口里也立即停注入，省 token。
+    统一驱动 caption/suggestions/matched_rules 命名纪律、参考图、pet_identities 的注入。
+    """
+    return home_profile_has_pets() and get_settings().features.pet_recognition
 
 RouteType = Literal["video", "audio"]
 
@@ -260,7 +270,7 @@ def build_fused_payload(
         route="video", has_identity=bool(candidates), stream=False,
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
-        has_pets=home_profile_has_pets(),
+        has_pets=_has_pets_for_scene(),
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False)
     user_content = _build_fused_user_content(
@@ -375,7 +385,7 @@ def _build_payload(
     scene = SceneDescriptor(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
-        has_pets=home_profile_has_pets(),
+        has_pets=_has_pets_for_scene(),
     )
     base: dict = {
         "system_prompt": build_system_prompt(scene, include_home_profile=include_home_profile),
