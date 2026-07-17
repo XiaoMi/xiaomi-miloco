@@ -338,6 +338,14 @@ select:focus-visible {
   animation: fade-in-up var(--duration-slow) var(--easing-emphasized);
 }
 
+/* 尊重系统"减少动态效果"偏好：关掉入场动画与脉冲等循环动效（a11y / 前庭敏感用户）。 */
+@media (prefers-reduced-motion: reduce) {
+  .anim-in,
+  .animate-pulse {
+    animation: none !important;
+  }
+}
+
 /* 隐藏滚动条但保留滚动功能（横向 chip 列表） */
 .scrollbar-none {
   scrollbar-width: none;
@@ -426,6 +434,10 @@ select:focus-visible {
 .status-dot-brand {
   background: var(--color-brand-primary);
   box-shadow: 0 0 0 3px var(--color-brand-soft);
+}
+.status-dot-muted {
+  background: var(--color-text-tertiary);
+  box-shadow: 0 0 0 3px var(--color-bg-tertiary);
 }
 
 /* deprecated alias 保留(已经被 .text-caption-mono 替代,

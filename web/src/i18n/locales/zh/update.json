@@ -1,0 +1,38 @@
+{
+  "update": {
+    "newVersion": "有新版本 {{version}}",
+    "releaseNotes": "更新日志",
+    "upgrade": "升级",
+    "dismiss": "关闭",
+    "confirmTitle": "升级到 {{version}}？",
+    "confirmBody": "升级期间感知与自动化会短暂中断（约数分钟），页面会自动重连。确定现在升级吗？",
+    "cancel": "取消",
+    "confirm": "确定升级",
+    "upgrading": "正在升级到 {{version}}…",
+    "upgradingHint": "请保持页面打开，升级完成后会自动刷新。",
+    "slowHint": "首次升级需下载较大安装包，可能持续数分钟，请耐心等待。",
+    "success": "升级完成，正在刷新…",
+    "runInBackground": "转入后台（升级继续，点侧栏版本号可重新打开）",
+    "refresh": "刷新页面",
+    "timeoutTitle": "升级未在预期时间内完成",
+    "timeoutHint": "升级可能仍在后台进行，也可能未成功。稍后刷新页面确认即可；若长时间仍无法打开，请联系管理员协助。",
+    "failedTitle": "升级未成功",
+    "failedHint": "本次升级未能完成，当前仍运行在原版本。请刷新页面确认；可稍后重试升级，若反复失败请联系管理员协助。",
+    "failed": "启动升级失败：{{msg}}",
+    "step": {
+      "download": "下载新版本",
+      "install": "安装组件",
+      "restart": "重启服务"
+    },
+    "versionLabel": "版本 {{version}}",
+    "footerUpdateAria": "有新版本 {{version}}，点击升级",
+    "footerCheckAria": "点击检查更新",
+    "checking": "正在检查更新…",
+    "checkTitle": "检查更新",
+    "upToDate": "当前已是最新版本（{{version}}）",
+    "devDeploy": "当前为 git 源码部署，请用 git pull 更新代码后重启服务（一键升级仅用于正式版部署）",
+    "checkFailed": "暂时无法检查更新，请稍后再试（连不上更新服务器）",
+    "authError": "升级中身份校验失败（登录状态可能已过期），请刷新页面重新登录后确认升级结果",
+    "gotIt": "知道了"
+  }
+}

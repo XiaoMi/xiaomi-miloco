@@ -28,6 +28,7 @@ import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
 import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
+import UpgradeNotice from "./components/UpgradeNotice";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
 import { ActivityFeed } from "./components/ActivityFeed";
@@ -504,6 +505,9 @@ function MainApp() {
             }}
           />
         )}
+
+        {/* 升级提示 banner（仅 release 部署 + 有新版 + 未按版本 dismiss 时显示）*/}
+        <UpgradeNotice />
 
         {/* tab 内容——这里是唯一会滚的区域 */}
         <main className="flex-1 overflow-y-auto min-h-0">

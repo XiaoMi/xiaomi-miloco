@@ -18,6 +18,8 @@ import { useRef } from "react";
 import type { ComponentType, SVGProps } from "react";
 import { useTranslation } from "react-i18next";
 import type { HomeStatus } from "@/lib/types";
+import { updateAvailable } from "@/lib/upgrade";
+import { useUpgradeInfo, requestOpenUpgrade } from "@/hooks/useUpgrade";
 import { MiotAccountButton } from "./MiotAccountButton";
 import {
   IconNow,
@@ -108,8 +110,29 @@ interface Props {
   onOpenSettings?: () => void;
 }
 
-export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged, onOpenSettings }: Props) {
+export function Sidebar({
+  active,
+  onChange,
+  miot,
+  onOpenMiotBind,
+  onMiotChanged,
+  onOpenSettings,
+}: Props) {
   const { t } = useTranslation();
+  // 底部版本号：有可升级新版时整行变可点入口（点击=确认该版本 + 打开升级弹窗，意图经
+  // window 事件转给 UpgradeNotice，本组件不耦合弹窗 UI）。提示点（右上角橙点）与顶部 banner
+  // 共用同一"已确认版本"——点了入口 / 关了 banner 即消，直到出现更新的版本才再现。
+  const upgradeInfo = useUpgradeInfo();
+  const hasUpdate = updateAvailable(upgradeInfo);
+  // 红点 = 只要存在可升级新版就常驻显示（被动指示器），**不受 dismiss 影响**——顶部 banner
+  // 才是可按版本关闭的 naggy 提示。此前红点也跟 banner 共用 dismiss，导致"确认过某版本后红点
+  // 就再也不冒"；用户要的是"更新版本存在红点就在"，故解耦：红点看 hasUpdate、banner 看 dismiss。
+  const showDot = hasUpdate;
+  const versionText = t("update.versionLabel", {
+    version: __APP_VERSION__.startsWith("v")
+      ? __APP_VERSION__
+      : `v${__APP_VERSION__}`,
+  });
   // 整个底部账号 row 当 hit area:onClick 转发给内部 MiotAccountButton 的
   // button DOM 触发同款交互(已绑 toggle popover / 未绑 onBind)。住户不用瞄准
   // 32x32 头像那一小点,点 row 任意位置都行。wrapperRef 传给 MiotAccountButton
@@ -118,9 +141,7 @@ export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged,
   const accountBtnRef = useRef<HTMLButtonElement>(null);
   const accountRowRef = useRef<HTMLDivElement>(null);
   return (
-    <aside
-      className="hidden md:flex flex-col shrink-0 border-r border-border bg-bg-secondary w-[15%] min-w-[172px]"
-    >
+    <aside className="hidden md:flex flex-col shrink-0 border-r border-border bg-bg-secondary w-[15%] min-w-[172px]">
       {/* 品牌区:M logo + Miloco,高度跟主区 TopBar 一致(64px)*/}
       <header
         className="flex items-center gap-2.5 shrink-0"
@@ -152,14 +173,13 @@ export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged,
           />
         </svg>
         <span className="text-title text-text-primary">Miloco</span>
-        {/* 构建版本号（vite define 注入）：生产为 vYYYY.M.D，dev 为 git describe */}
-        <span className="text-caption text-text-tertiary self-end mb-1 truncate" title={__APP_VERSION__}>
-          {__APP_VERSION__}
-        </span>
       </header>
 
       {/* Tab 列表 */}
-      <nav className="flex-1 px-2 py-2.5 space-y-0.5 overflow-y-auto" aria-label={t("nav.aria")}>
+      <nav
+        className="flex-1 px-2 py-2.5 space-y-0.5 overflow-y-auto"
+        aria-label={t("nav.aria")}
+      >
         {TABS.map((tab) => {
           const on = active === tab.key;
           const Icon = tab.Icon;
@@ -177,17 +197,13 @@ export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged,
               }`}
             >
               {/* 图标:激活时 brand-primary 橙 + 填充态,默认 inherit currentColor + 描边态 */}
-              <span
-                className={`shrink-0 ${on ? "text-brand-primary" : ""}`}
-              >
+              <span className={`shrink-0 ${on ? "text-brand-primary" : ""}`}>
                 <Icon active={on} width={24} height={24} />
               </span>
               <span className="flex flex-col leading-tight">
                 <span className="text-title">{t(tab.labelKey)}</span>
                 {/* 副标题用 tertiary 灰阶,自动适配 light/dark */}
-                <span
-                  className="text-caption text-text-tertiary"
-                >
+                <span className="text-caption text-text-tertiary">
                   {t(tab.hintKey)}
                 </span>
               </span>
@@ -268,6 +284,41 @@ export function Sidebar({ active, onChange, miot, onOpenMiotBind, onMiotChanged,
           </button>
         )}
       </div>
+
+      {/* 版本号页脚：低频元信息置于侧栏底部（07-design 无位置硬规，元数据用
+          caption/tertiary）。v 前缀 + "版本" 标注，明确其为版本而非裸数字。
+          **整行始终可点**：有新版时点击直接进升级确认（右上角挂提示点，复用 StatusRibbon/
+          banner 的 5px 点 + 3px brand-soft 环）；无新版时点击 = 现查一次更新（结果在弹窗里给：
+          最新 / 无法检查 / dev）。是否弹确认 vs 检查由 UpgradeNotice 据 info 决定，本组件只
+          发意图（requestOpenUpgrade），确认某版本也由 UpgradeNotice 落。 */}
+      <button
+        type="button"
+        onClick={requestOpenUpgrade}
+        aria-label={
+          hasUpdate
+            ? t("update.footerUpdateAria", { version: upgradeInfo!.latest })
+            : t("update.footerCheckAria")
+        }
+        title={
+          hasUpdate
+            ? t("update.footerUpdateAria", { version: upgradeInfo!.latest })
+            : t("update.footerCheckAria")
+        }
+        className="w-full flex items-start justify-between gap-1 px-3 pb-2 pt-1 text-caption-mono text-text-tertiary hover:text-text-primary transition-colors"
+      >
+        <span className="truncate">{versionText}</span>
+        {showDot && (
+          <span
+            aria-hidden
+            className="shrink-0 rounded-full bg-brand-primary"
+            style={{
+              width: 5,
+              height: 5,
+              boxShadow: "0 0 0 3px var(--color-brand-soft)",
+            }}
+          />
+        )}
+      </button>
     </aside>
   );
 }

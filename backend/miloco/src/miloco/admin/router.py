@@ -10,11 +10,14 @@ import asyncio
 import json
 import logging
 import re
+import shlex
 import subprocess
+import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool
 from sse_starlette.sse import EventSourceResponse
@@ -28,6 +31,7 @@ from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni import probe as _probe
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
+from miloco.utils.paths import miloco_home
 
 logger = logging.getLogger(name=__name__)
 
@@ -169,6 +173,398 @@ async def get_version(current_user: str = Depends(verify_token)):
             "version": version,
             "git": _git_info(version),
         },
+    )
+
+
+# ── 升级检测 / 一键升级 ────────────────────────────────────────────────
+# 发布只走 GitHub Release（CalVer tag）。检测 = 查 releases/latest（最新正式版）比对
+# 当前版本；一键升级 = detached 起官方 install.sh 的**非交互 agent 模式**——install.py
+# 默认 run() 在无 tty 时会 fail("non_interactive") 中止（main:1643-1645），故必须走
+# --agent-prepare/--agent-finish（它在 tty 检查前 return，全程无交互、保留现有 config）。
+# 仅 release/wheel 部署可一键升级；dev(git) 只提示 git pull。roll-forward，不回滚。
+_GH_REPO = "XiaoMi/xiaomi-miloco"
+_GH_LATEST_API = f"https://api.github.com/repos/{_GH_REPO}/releases/latest"
+_INSTALL_SH_URL = f"https://github.com/{_GH_REPO}/releases/latest/download/install.sh"
+_UPGRADE_CHECK_TTL_S = 6 * 3600
+# 失败（GitHub 不可达/限流）时的短退避 TTL：负缓存，避免故障期间每次开页都重打接口
+# （正是缓存要防的）。成功缓存 6h，失败仅缓存 10min 后重试。
+_UPGRADE_CHECK_NEG_TTL_S = 10 * 60
+
+# 服务端共享缓存（进程内），避免多用户每次打开页面都打 GitHub / 触发限流。
+_upgrade_check_cache: dict = {"ts": 0.0, "data": None}
+# 一键升级单飞标志（进程内；升级成功会重启 backend，重启后自然复位）。用时间戳而非
+# 布尔：正常路径靠重启复位，但若 detached 脚本在重启服务前就失败（如 curl 下载失败、
+# set -e 提前中止，service 从未停/起），当前 backend 会一直存活且标志永远为 True，导致
+# 后续一键升级永久 409。故加 TTL 自愈——超过 TTL 视为上次尝试已失败，允许重新触发。
+# **TTL 必须 ≥ 前端轮询超时（POLL_TIMEOUT_MS=20min）**：否则一次合法的慢升级（冷下载
+# 68MB 可达十几分钟）跑到 15min 后，第二个标签页仍看到缓存 has_update 触发 /run 就能通过
+# 单飞、起第二个 install.sh，与第一个抢共享下载缓存 + 抢 upgrade.log 截断 + 抢 service restart。
+_UPGRADE_SINGLEFLIGHT_TTL_S = 25 * 60
+# 单飞状态放进可变 dict 而非模块级标量：subscript 赋值是"就地修改"、非全局名重绑定，
+# 从而避开 CodeQL py/unused-global-variable 的跨调用误报（标量 global 在函数内写后当轮不再读，
+# 静态分析看不到"下次请求才读"而误判为写死）。语义不变：进程级、跨请求持久的单飞时间戳。
+_upgrade_state: dict[str, float] = {"started_at": 0.0}
+
+
+# 「已确认（dismiss）到的版本」：用户关闭升级 banner 即记录于此，之后该版本 banner 永久不再
+# 出现、直到出现更新的版本。**存后端**（MILOCO_HOME 下文件），不放浏览器——随服务器状态走：
+# 彻底卸载/重装即清零、跨浏览器一致、可测、不被浏览器缓存干扰。红点不看它（有更新就显）。
+def _dismiss_file() -> Path:
+    return miloco_home() / "upgrade_dismissed"
+
+
+def _read_dismissed() -> str | None:
+    try:
+        v = _dismiss_file().read_text(encoding="utf-8").strip()
+        return v or None
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _write_dismissed(version: str) -> None:
+    # 尽力持久化：写盘失败（磁盘满/权限）不该让"关 banner"这个纯 UI 动作 500。失败只记
+    # 日志、静默降级——banner 本次仍会隐藏（前端已就地更新），仅重载后可能再现。
+    try:
+        _dismiss_file().write_text(version.strip(), encoding="utf-8")
+    except Exception as e:
+        logger.warning("failed to persist dismissed version %s: %s", _scrub_log(version), e)
+
+
+def _scrub_log(value: object) -> str:
+    """中和插入日志的外部值里的 CR/LF，防日志伪造/注入（CodeQL py/log-injection）。"""
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
+def _deploy_kind() -> str:
+    """release = 正式发布版（干净 CalVer tag）；dev = git checkout / 未打 tag 的构建。
+
+    用**包版本串**判定而非 ``git rev-parse``：后者会沿目录向上误命中 $HOME / venv 所在的
+    无关 .git 仓库（如 dotfiles 仓），把正式 wheel 部署误判成 dev、白白禁用一键升级。
+    hatch-vcs 对非 tag 构建会写 ``.dev<N>`` / ``+g<sha>`` 本地段；干净 tag 版则没有。"""
+    v = _pkg_version()
+    if v == "unknown":
+        return "release"
+    return "dev" if (".dev" in v or _HATCH_VCS_LOCAL_RE.search(v)) else "release"
+
+
+def _norm_ver(v: str) -> str:
+    return v[1:] if v.startswith("v") else v
+
+
+def _latest_is_newer(current: str, latest: str) -> bool:
+    """latest 是否严格新于 current（按 PEP440/CalVer 解析，非字符串比较）。
+
+    packaging 是 miloco 的传递依赖（非直接声明）。若环境里缺失（ImportError）、
+    或版本串非法（InvalidVersion）、或任何解析异常，都**保守视为"无更新"**并静默降级——
+    绝不让 ``/upgrade/check`` 因版本比较抛错而 500（宁可不提示，也不误报/不崩）。
+    """
+    try:
+        from packaging.version import Version
+
+        return Version(_norm_ver(latest)) > Version(_norm_ver(current))
+    except Exception as e:
+        # latest 源自 GitHub tag_name（外部可控），current 源自本地包版本——统一经
+        # _scrub_log 中和 CR/LF，与 upgrade_run/_write_dismissed 一致地闭合日志注入这一类。
+        # 异常 e 也必须 _scrub_log：packaging 的 InvalidVersion 会把原始（未净化的）版本串
+        # 原样嵌进消息（"Invalid version: '<latest>'"），直接打 e 等于把 latest 的 CR/LF
+        # 从旁路重新带回日志、抵消上面对 latest 的净化——故一并中和。
+        logger.info(
+            "upgrade check: version compare failed (%s vs %s): %s",
+            _scrub_log(current),
+            _scrub_log(latest),
+            _scrub_log(e),
+        )
+        return False
+
+
+async def _fetch_latest_release() -> dict | None:
+    """查 GitHub releases/latest（最新正式版）。不可达 / 失败返回 None，不抛。"""
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                _GH_LATEST_API, headers={"Accept": "application/vnd.github+json"}
+            )
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        tag = j.get("tag_name")
+        if not tag:
+            return None
+        return {"tag": tag, "html_url": j.get("html_url")}
+    except Exception as e:  # 网络不可达 / 超时 / 解析失败 → 静默降级，不打扰用户
+        # e 亦经 _scrub_log：JSONDecodeError 等可能把响应体片段（外部数据）嵌进消息，
+        # 与 _latest_is_newer 一致地闭合日志注入旁路。
+        logger.info("upgrade check: fetch latest release failed: %s", _scrub_log(e))
+        return None
+
+
+@router.get(
+    "/upgrade/check",
+    summary="Check whether a newer official release is available",
+    response_model=NormalResponse,
+)
+async def upgrade_check(
+    force: bool = Query(
+        False, description="跳过服务端缓存强制现查一次（供用户手动「检查更新」）"
+    ),
+    current_user: str = Depends(verify_token),
+):
+    """检测是否有新版本。前端打开页面时调一次（走服务端缓存、无轮询）；用户手动「检查更新」
+    时带 ``force=true`` 跳过缓存现查一次。GitHub 不可达时 ``reachable=false`` 且
+    ``has_update=false``——不报错、不打扰。dev(git) 部署不给一键升级，仅提示。"""
+    current = _pkg_version()
+    kind = _deploy_kind()
+    now = time.time()
+
+    # 负缓存：失败(rel=None)也缓存，但用更短 TTL 退避——ts==0 表示从未查过。
+    # force：用户手动检查，跳过缓存强制现查（结果仍写回缓存）。
+    ts = _upgrade_check_cache["ts"]
+    cached = _upgrade_check_cache["data"]
+    ttl = _UPGRADE_CHECK_TTL_S if cached is not None else _UPGRADE_CHECK_NEG_TTL_S
+    if force or ts == 0.0 or (now - ts) > ttl:
+        rel = await _fetch_latest_release()
+        if rel is not None:
+            _upgrade_check_cache["data"] = rel
+            _upgrade_check_cache["ts"] = now
+        elif cached is not None:
+            # 一次抖动（GitHub 限流/超时）不清空上次好结果——否则 banner 会因短暂不可达消失。
+            # 把 ts 回拨成"再过 NEG_TTL 就重试"，保留旧好值继续展示。
+            _upgrade_check_cache["ts"] = now - (
+                _UPGRADE_CHECK_TTL_S - _UPGRADE_CHECK_NEG_TTL_S
+            )
+            rel = cached
+        else:
+            # 从未成功过：记不可达，NEG_TTL 短退避后再试。
+            _upgrade_check_cache["data"] = None
+            _upgrade_check_cache["ts"] = now
+    else:
+        rel = cached
+
+    reachable = rel is not None
+    latest = _norm_ver(rel["tag"]) if reachable else None
+    has_update = bool(
+        reachable and kind == "release" and _latest_is_newer(current, rel["tag"])
+    )
+    return NormalResponse(
+        code=0,
+        message="upgrade check",
+        data={
+            "current": current,
+            "latest": latest,
+            "has_update": has_update,
+            "deploy_kind": kind,
+            "release_url": rel["html_url"] if reachable else None,
+            "reachable": reachable,
+            "checked_at": int(_upgrade_check_cache["ts"]),
+            # 已确认版本（后端持久化）。前端据此决定 banner 显隐：latest === dismissed 则不显。
+            "dismissed": _read_dismissed(),
+        },
+    )
+
+
+@router.post(
+    "/upgrade/dismiss",
+    summary="Dismiss the upgrade banner for a version (won't reappear until a newer release)",
+    response_model=NormalResponse,
+)
+async def upgrade_dismiss(
+    version: str = Query(..., description="要标记为已确认的版本号（一般传当前 latest）"),
+    current_user: str = Depends(verify_token),
+):
+    """用户关闭升级 banner 时调用：把该版本记为「已确认」并持久化到后端（MILOCO_HOME）。
+    之后 banner 对该版本永久不再出现，直到出现更新的版本。语义与存储位置解释见 `_read_dismissed`。"""
+    v = _norm_ver(version)
+    _write_dismissed(v)
+    return NormalResponse(code=0, message="dismissed", data={"dismissed": v})
+
+
+@router.post(
+    "/upgrade/run",
+    summary="Trigger a one-click upgrade to the latest official release",
+    response_model=NormalResponse,
+)
+async def upgrade_run(current_user: str = Depends(verify_token)):
+    """一键升级：detached 起官方 install.sh（非交互 agent 模式）覆盖安装并重启服务。
+    仅 release 部署可用；dev(git) 拒绝。升级进程脱离 backend 进程组，backend 被安装器
+    重启也不影响它；日志落 ``<log_dir>/upgrade.log``。roll-forward、不回滚——失败由
+    前端引导用户重跑 install.sh / 查日志。"""
+    if _deploy_kind() != "release":
+        raise HTTPException(
+            status_code=400,
+            detail="git checkout deployment: use `git pull`; one-click upgrade is disabled",
+        )
+    # 前置校验：确实有更新才升（防御纵深——前端已 gate 按钮，但直接 POST 也不该
+    # 触发"重装同版本"式的无谓重启）。latest 取自 /check 的服务端缓存；不可达/未查过
+    # 时保守拒绝，让前端先跑 check。
+    current = _pkg_version()
+    latest_rel = _upgrade_check_cache["data"]
+    target = _norm_ver(latest_rel["tag"]) if latest_rel else None
+    if not latest_rel or not _latest_is_newer(current, latest_rel["tag"]):
+        # 400（非 409）：与"已在升级中"区分开——前端据状态码判定，409=接管进度、400=失败提示。
+        raise HTTPException(
+            status_code=400,
+            detail="already on the latest release (or latest unknown); nothing to upgrade",
+        )
+    since_last = time.time() - _upgrade_state["started_at"]
+    if _upgrade_state["started_at"] and since_last < _UPGRADE_SINGLEFLIGHT_TTL_S:
+        # 单飞 TTL 内——但若上次尝试已在日志写下终态标记（done/failed），证明它已彻底
+        # 结束、无进程在跑（终态是脚本 exit 前最后一步 echo），提前解除单飞允许重试，
+        # 避免快失败（如 curl 连不上 GitHub/限流，install 从未跑、原 backend 从未重启）
+        # 后被硬锁满 TTL。这**不违反单飞不变量**（TTL 常量与「TTL ≥ 前端轮询超时」不等式
+        # 均不变，仅在有正向"已结束"证据时短路）：仍在跑的慢升级日志无终态标记 → 照旧 409，
+        # 不会起第二个 install.sh 与其抢下载缓存/日志/重启。此判定与 /run 其余部分同样无
+        # await，事件循环内原子执行；放行后 open("w") 会截断残留日志、重开一份干净的。
+        if _read_upgrade_phase() not in _UPGRADE_TERMINAL_PHASES:
+            raise HTTPException(
+                status_code=409, detail="an upgrade is already in progress"
+            )
+
+    launched = False
+    try:
+        settings = get_settings()
+        log_dir = Path(settings.directories.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        upgrade_log = log_dir / "upgrade.log"
+        home = miloco_home()
+        tmp_sh = home / ".upgrade-install.sh"
+
+        # 关键点：
+        #  - `export MILOCO_LANG=zh`：把安装器日志语言**钉死为中文**，使 /upgrade/status 的
+        #    阶段解析与服务器 LANG 无关（否则英文 locale 服务器上日志是英文、中文标记全不匹配、
+        #    进度失灵）。日志是内部产物，用户看到的步骤文字走前端 i18n、跟随网页语言，与此无关。
+        #  - 路径经 shlex.quote 防注入（MILOCO_HOME 来自环境变量，双引号内仍会展开 $()/反引号）。
+        #  - **不能用 `set -e`**：curl 下载失败（连不上 GitHub / 限流——恰是最常见的失败）会让
+        #    `set -e` 在写终态标记前就中止整脚本，日志无 AGENT_UPGRADE_FAILED，前端只能空等
+        #    20min 轮询超时才知失败。故改为把 curl 用 `|| rc=$?` 收进 rc、下载失败即跳过安装、
+        #    仍走到末尾 echo AGENT_UPGRADE_FAILED，保证任何失败都有终态标记（快失败）。
+        #  - 末尾无条件 `service start` 兜底 install.py 的 atexit 停服务（curl 失败时服务从未被
+        #    停、start 幂等无害）；prepare/finish 用 `&&`+`|| rc=$?`，失败也走到 service start
+        #    （roll-forward、不回滚），最后以安装码收尾。
+        #  - **终态标记**：install.py 在 prepare/finish 里会多次重启到新版本（新版本会"提前"
+        #    可达），单看版本变更会误判完成。故脚本在**全部跑完 + 最后一次 service start 之后**
+        #    才 echo AGENT_UPGRADE_DONE/FAILED 到日志——这是整个升级唯一可靠的终态信号，
+        #    /upgrade/status 据此报 done/failed，前端只认这个标记才判完成，不看中途版本变更。
+        q_url = shlex.quote(_INSTALL_SH_URL)
+        q_sh = shlex.quote(str(tmp_sh))
+        script = (
+            "export MILOCO_LANG=zh; rc=0; "
+            f"curl -fsSL {q_url} -o {q_sh} || rc=$?; "
+            'if [ "$rc" = "0" ]; then '
+            f"bash {q_sh} --agent-prepare && bash {q_sh} --agent-finish || rc=$?; "
+            "fi; "
+            "miloco-cli service start || true; "
+            'if [ "$rc" = "0" ]; then echo "AGENT_UPGRADE_DONE"; '
+            'else echo "AGENT_UPGRADE_FAILED rc=$rc"; fi; '
+            # 清理下载的临时安装脚本：放在终态标记 echo 之后，不影响进度/终态解析；
+            # 无论 done/failed 都删，避免 MILOCO_HOME 长期残留 .upgrade-install.sh。
+            f"rm -f {q_sh}; "
+            "exit $rc"
+        )
+        # 截断（"w"）：每次升级独立日志，避免上轮旧内容让 /upgrade/status 误报阶段。
+        logf = open(upgrade_log, "w")
+        try:
+            subprocess.Popen(
+                ["bash", "-lc", script],
+                cwd=str(home),
+                stdin=subprocess.DEVNULL,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # 脱离 backend 进程组/会话，重启 backend 不波及它
+            )
+            # 起进程成功即占单飞（在 finally 关 fd 之前置位）：即便随后 logf.close() 抛错走到
+            # except，也不会漏计已启动的进程、避免下一次 /run 与其并起第二个 install.sh。
+            launched = True
+            _upgrade_state["started_at"] = time.time()
+        finally:
+            logf.close()  # 子进程已 dup fd，父进程可关
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 启动失败（未起任何进程）：显式释放单飞。否则若本次是「快失败后重试」（上一轮已写终态
+        # 标记、_upgrade_state["started_at"] 仍在 TTL 内），上面的 open("w") 已把日志截断、终态标记丢失
+        # （phase 退回 starting=非终态），而 _upgrade_state["started_at"] 未被本次刷新 → TTL 内后续 /run
+        # 恒 409 锁死用户，却根本没有进程在跑。未起进程即释放，允许立即重试（fail-open 且安全：
+        # 无进程 → 不会 racing）。
+        if not launched:
+            _upgrade_state["started_at"] = 0.0
+        logger.error("failed to launch upgrade process: %s", _scrub_log(e))
+        raise HTTPException(
+            status_code=500, detail="failed to launch upgrade process"
+        ) from e
+
+    # 审计日志刻意**不插入** target / current_user：current_user 恒为 None（verify_token
+    # 返回 None、仅做鉴权），target 源自 GitHub tag（外部可控）——两者都是 CodeQL 日志注入
+    # 的污点源。目标版本已随响应体 data.target 返回给调用方，无需再进日志。静态文案即可、
+    # 零外部值进日志，彻底闭合 py/log-injection（不靠脱敏兜）。
+    logger.info("one-click upgrade triggered")
+    return NormalResponse(
+        code=0,
+        message="upgrade started",
+        data={"started": True, "target": target},
+    )
+
+
+# upgrade.log 阶段锚点。取在日志中**出现位置最靠后**（rfind）的标记，而非列表顺序——
+# 因为安装器会先打印「安装核心组件」标题、再打印「正在下载」，按列表顺序会把整段下载误判成安装。
+# 升级子进程强制 MILOCO_LANG=zh（见 /upgrade/run），中文标记确定可匹配；归档名 `.tar.gz`
+# 与语言无关，作下载兜底锚点。done/failed 由 /upgrade/run 脚本在全部跑完后 echo，是整个升级
+# 唯一可靠的终态标记（位置必在最后）——前端只认它判完成，不看中途"提前"的版本变更。
+# 前端把 downloading/installing 映射到「下载」「安装」步，「重启」由前端凭后端连不上判定。
+_UPGRADE_STAGES = [
+    (".tar.gz", "downloading"),
+    ("正在下载", "downloading"),
+    ("安装核心组件", "installing"),
+    ("安装 miloco", "installing"),
+    ("初始化服务", "installing"),
+    ("引擎预热", "installing"),
+    ("准备感知模型", "installing"),
+    ("解压感知模型", "installing"),
+    ("AGENT_JSON", "installing"),
+    ("AGENT_UPGRADE_FAILED", "failed"),
+    ("AGENT_UPGRADE_DONE", "done"),
+]
+
+# 终态标记：脚本 exit 前的最后一步 echo，出现即证明升级子进程已彻底结束（无进程在跑）。
+_UPGRADE_TERMINAL_PHASES = ("done", "failed")
+
+
+def _read_upgrade_phase() -> str:
+    """从 upgrade.log 解析当前升级阶段（单一事实源，/upgrade/status 与单飞自愈共用）。
+
+    无日志 → idle；有日志但无任何锚点 → starting；否则取**出现位置最靠后**（rfind）
+    的阶段。强制 utf-8 解码：日志已被 MILOCO_LANG=zh 钉成中文，若按 locale 默认
+    （C/POSIX）解码中文标记会成 U+FFFD 全不匹配、进度失灵；errors="replace" 只兜底
+    非法字节，不改匹配。
+    """
+    settings = get_settings()
+    log = Path(settings.directories.log_dir) / "upgrade.log"
+    if not log.exists():
+        return "idle"
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")[-8000:]
+    except Exception:
+        text = ""
+    phase, best_pos = "starting", -1
+    for marker, ph in _UPGRADE_STAGES:
+        pos = text.rfind(marker)
+        if pos > best_pos:
+            best_pos, phase = pos, ph  # 取日志中出现位置最靠后的阶段
+    return phase
+
+
+@router.get(
+    "/upgrade/status",
+    summary="Progress of an in-flight one-click upgrade (parsed from upgrade.log)",
+    response_model=NormalResponse,
+)
+async def upgrade_status(current_user: str = Depends(verify_token)):
+    """升级阶段：从 upgrade.log 解析当前处于哪一阶段，供前端点亮对应步骤 / 判完成。
+    「重启」阶段本端点随 backend 一起消失（前端凭连不上判定）。
+    返回 phase ∈ {idle, starting, downloading, installing, done, failed}。"""
+    return NormalResponse(
+        code=0, message="upgrade status", data={"phase": _read_upgrade_phase()}
     )
 
 
