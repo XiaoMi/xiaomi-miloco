@@ -26,6 +26,8 @@
     "save": "Save",
     "rename": "Rename",
     "delete": "Delete",
+    "changeAvatar": "Change avatar",
+    "restoreDefaultAvatar": "Restore default avatar",
 
     "enrollTitle": "Enroll identity · {{name}}",
     "analyzing": "Analyzing…",

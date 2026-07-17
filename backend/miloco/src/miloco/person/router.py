@@ -7,6 +7,7 @@ import asyncio
 import logging
 import re
 import threading
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -18,6 +19,7 @@ from miloco.config import get_settings, register_reset_hook
 from miloco.database.person_repo import UNSET
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
+from miloco.perception.engine.identity import _avatar
 from miloco.perception.engine.identity.config_loader import resolve_library_root
 from miloco.perception.engine.identity.library import IdentityLibrary, _list_crop_files
 from miloco.person.schema import PersonCreate, PersonUpdate, _normalize_optional_str
@@ -44,11 +46,16 @@ async def list_persons(current_user: str = Depends(verify_token)):
     logger.info("List persons - user: %s", current_user)
     persons = manager.person_service.list_persons()
     # PersonRef 索引化:避免 N×M scan
+    refs: dict = {}
+    avatar_exts: dict = {}
     try:
-        refs = {r.person_id: r for r in _get_identity_library().list_persons()}
+        lib = _get_identity_library()
+        refs = {r.person_id: r for r in lib.list_persons()}
+        # 显式头像扩展名（<root>/avatars/persons/<id>.<ext>）一次扫描批量取，供前端
+        # 决定头像取自"显式头像"还是回落 face[0]。
+        avatar_exts = lib.list_person_avatar_exts()
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_persons: 读 identity_lib 失败,sample 计数归零: %s", exc)
-        refs = {}
     data = []
     for p in persons:
         d = p.model_dump()
@@ -56,6 +63,7 @@ async def list_persons(current_user: str = Depends(verify_token)):
         d["num_tier_a_body"] = r.num_tier_a_body if r else 0
         d["num_tier_c"] = r.num_tier_c if r else 0
         d["has_tier_a"] = bool(r and r.has_tier_a)
+        d["avatar_ext"] = avatar_exts.get(p.id)
         data.append(d)
     return NormalResponse(
         code=0,
@@ -131,9 +139,12 @@ async def delete_person(person_id: str, current_user: str = Depends(verify_token
         raise HTTPException(status_code=400, detail="Invalid person_id format")
     manager.person_service.delete_person(person_id)
     # 级联删 identity_lib 文件——否则 list_persons / gallery 仍含此人，
-    # omni 会继续把画面中的人识别为已删除成员
+    # omni 会继续把画面中的人识别为已删除成员。顺带清 <root>/avatars/persons/<id>.*
+    # （显式头像在 avatars/ 树、不在 persons/<id>/ 内，rmtree 清不到，须显式删）。
     try:
-        _get_identity_library().delete_person(person_id)
+        lib = _get_identity_library()
+        lib.delete_person(person_id)
+        lib.clear_person_avatar(person_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("级联删除 identity_lib 失败 person_id=%s: %s", person_id, e)
     # 级联清家庭档案：移除该成员绑定的候选+正式条目并重渲染 md，
@@ -712,6 +723,74 @@ async def read_tier_sample(
     # 落盘格式 jpg→png 迁移后, Content-Type 随实际后缀走, 否则浏览器按 jpeg 解析 png 字节会坏图
     media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     return FileResponse(str(path), media_type=media_type)
+
+
+# =============================================================================
+# 显式头像（手动上传，展示层）——落 <root>/avatars/persons/<id>.<ext>，与识别样本分离。
+# 不建 persons/<id>/ 目录，故给"没录入的人"设头像也不扰动 IdentityEngine 快照。
+# 读取优先级：显式头像 > 回落 tier_a face[0]（旧行为）> 404（前端显示占位色块）。
+# =============================================================================
+
+
+@router.post(
+    "/persons/{person_id}/avatar", summary="Upload Person Avatar", response_model=NormalResponse
+)
+async def upload_person_avatar(
+    person_id: str,
+    image: UploadFile = File(..., description="头像图片（jpg/jpeg/png/webp）"),
+    current_user: str = Depends(verify_token),
+):
+    if not _PERSON_ID_RE.match(person_id):
+        raise HTTPException(status_code=400, detail="Invalid person_id format")
+    if not manager.person_service.exists(person_id):
+        raise HTTPException(status_code=404, detail="person 不存在")
+    data = await image.read()
+    ext = Path(image.filename or "").suffix.lstrip(".").lower()
+    try:
+        norm = _get_identity_library().set_person_avatar(person_id, data=data, ext=ext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return NormalResponse(
+        code=0, message="Avatar updated", data={"id": person_id, "avatar_ext": norm}
+    )
+
+
+@router.get(
+    "/persons/{person_id}/avatar",
+    summary="Get Person Avatar（显式头像，无则回落 tier_a face[0]）",
+)
+async def get_person_avatar(person_id: str, current_user: str = Depends(verify_token)):
+    if not _PERSON_ID_RE.match(person_id):
+        raise HTTPException(status_code=400, detail="Invalid person_id format")
+    library = _get_identity_library()
+    # 1) 显式头像优先
+    path = library.person_avatar_path(person_id)
+    if path is not None:
+        return FileResponse(
+            str(path), media_type=_avatar.media_type(path.suffix.lstrip(".").lower())
+        )
+    # 2) 回落 tier_a face[0]（字母序首张，旧 PersonAvatar 行为）
+    _body, face = _list_tier_a_files_dict(person_id)
+    if face:
+        fpath = library.persons_dir / person_id / "tier_a" / face[0]["filename"]
+        if fpath.is_file():
+            media = "image/png" if fpath.suffix.lower() == ".png" else "image/jpeg"
+            return FileResponse(str(fpath), media_type=media)
+    raise HTTPException(status_code=404, detail="avatar 不存在")
+
+
+@router.delete(
+    "/persons/{person_id}/avatar",
+    summary="Delete Person Avatar（清显式头像，恢复默认 face[0]）",
+    response_model=NormalResponse,
+)
+async def delete_person_avatar(person_id: str, current_user: str = Depends(verify_token)):
+    if not _PERSON_ID_RE.match(person_id):
+        raise HTTPException(status_code=400, detail="Invalid person_id format")
+    _get_identity_library().clear_person_avatar(person_id)
+    return NormalResponse(
+        code=0, message="Avatar cleared", data={"id": person_id, "avatar_ext": None}
+    )
 
 
 @router.get(
