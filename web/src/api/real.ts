@@ -178,7 +178,6 @@ interface BackendCamera {
   online: boolean;
   room_id?: string;
   room_name?: string;
-  channel?: number;  // 通道号，用于多通道摄像头
 }
 
 // ── 状态条聚合 ────────────────────────────────────────────
@@ -852,7 +851,6 @@ export async function realListCameras(): Promise<PerceptionCamera[]> {
     .map((c) => ({
       did: c.did,
       name: c.name,
-      channel: c.channel ?? 0,  // 使用后端返回的通道号
       roomName: c.room_name,
     }));
 }

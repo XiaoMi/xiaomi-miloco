@@ -177,13 +177,13 @@ export interface HomeEntries {
 export interface PerceptionCamera {
   did: string;
   name: string;
-  channel: number;
   roomName?: string;
 }
 
 // ── 米家 scope 摄像头（含禁用 / 离线，控件配置用） ─────────────
 // 来源：GET /api/miot/scope/cameras（in_use=false 即停用该摄像头的感知）。
-// PerceptionCamera 是「当前 perception 在订阅」的子集（含 channel 用于播放），
+// PerceptionCamera 是「当前 perception 在订阅」的子集（did 为合成 did，通道号已编码其中，
+// 播放时由 splitChannelDid 拆出，无需单独 channel 字段），
 // ScopeCamera 是「米家账号下全集」（含已禁用 / 离线，用于显示开关）。
 // 多通道相机（双摄等）每条通道产出一条 ScopeCamera：did 相同（物理 did，启停按整台
 // 走），channel 区分通道号。渲染时用 (did, channel) 复合键区分两行、拼「通道 N」标签。
