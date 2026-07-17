@@ -88,7 +88,8 @@ class TrackingService(ABC):
         """
         self._fps = fps
         tracker = getattr(self, "_tracker", None)
-        if tracker is not None and hasattr(tracker, "set_fps"):
+        # SortTracker / DeepSortTracker 均实现 set_fps；Mock 的 _tracker 为 None 由此短路。
+        if tracker is not None:
             tracker.set_fps(fps)
 
 
