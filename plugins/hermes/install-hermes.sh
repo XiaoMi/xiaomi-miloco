@@ -349,8 +349,10 @@ fi
 
 # 1.5 自动拉起 miloco backend（upstream install.py 注册了 atexit._stop_service，
 # 装完会停 backend；fork 集成必须自己再 service start，否则 Step 2 OAuth 会 502 假错误）
-# 用 --no-start-backend flag 可跳过（用户在外部管理 backend 时）
-if [ "$NO_START_BACKEND" -eq 0 ]; then
+# 用 --no-start-backend flag 可跳过（用户在外部管理 backend 时）。
+# --post-install 场景下 install.py 主流程已经启动了 backend，跳过避免 miloco-cli
+# service start 撞已在跑实例。
+if [ "$NO_START_BACKEND" -eq 0 ] && [ "$POST_INSTALL_ONLY" -eq 0 ]; then
   # 注意：miloco-cli service status 输出 JSON 形如 {"running": true/false,...}。
   # 老版本用 grep -qiE "running|active|ok|started" 会把 {"running": false} 也当成"在跑"，
   # 假阳性导致本该 start 的 backend 没起，Step 2 OAuth 必 502。改成 jq 解析 running 字段。
