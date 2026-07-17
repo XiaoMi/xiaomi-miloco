@@ -211,16 +211,15 @@ build_web() {
     mkdir -p "$web_static"
     (
         cd "$PROJECT_ROOT/web"
-        npm version "$RESOLVED_NPM" --no-git-tag-version --allow-same-version >/dev/null
         CI=true pnpm install --frozen-lockfile
         # vite.config.ts::outDir 是 "dist"(默认 web/dist),build 完后再 cp 到 backend
         # static_dir,让 backend wheel 打包时一并带上。改 vite outDir 直接指 backend
         # 会跟 dev 期 vite serve 的产物路径冲突,统一用 dist + cp 更清晰。
-        # MILOCO_APP_VERSION 注入界面版本(vite define __APP_VERSION__)：用 RESOLVED_PEP,与
-        # CLI/Python 包权威版本同源一致,界面不再依赖上面 npm version 写入的装配占位串。
+        # 界面版本由 MILOCO_APP_VERSION 注入(vite define __APP_VERSION__)：用 RESOLVED_PEP,与
+        # CLI/Python 包权威版本同源一致。web 不 npm pack、package.json version 无消费者,
+        # 故无需 npm version stamp(不 stamp 也就无需 restore package.json)。
         MILOCO_APP_VERSION="$RESOLVED_PEP" pnpm build
     )
-    restore_pkg_json web/package.json
     # cp dist 内容到 backend static_dir,组装进 wheel。watch.html / vendor 的源仍
     # 在 web/public(唯一真源),vite build 已把 public/* 拷进 dist;这里和 index.html
     # /assets 同等处理,把「构建产物」落进 static,让 backend wheel 带上可直接 serve
