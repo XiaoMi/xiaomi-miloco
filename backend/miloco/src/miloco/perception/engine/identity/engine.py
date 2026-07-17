@@ -28,6 +28,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Optional
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.perception.engine.identity._fps_utils import (
+    frames_per_window as _frames_per_window_of,
+)
+from miloco.perception.engine.identity._fps_utils import (
+    sec_to_frames as _sec_to_frames,
+)
 from miloco.perception.engine.identity._image_utils import (
     compute_sharpness as _compute_sharpness,
 )
@@ -313,15 +319,15 @@ class IdentityEngine:
         # 全部成员。未注入时本期所有"接池逻辑"安全 no-op,老路径完全不受影响。
         self.tier_u_pool = tier_u_pool
 
-        # grace_frames 按真实秒数 × fps 换算；fps 改动后 grace 自动跟随。
-        # 至少 1 帧防极端配置导致 0。
-        self._dead_track_grace_frames: int = max(1, round(_DEAD_TRACK_GRACE_SEC * engine_fps))
+        # grace_frames 按真实秒数 × fps 换算；fps 改动后 grace 自动跟随。换算与
+        # set_engine_fps 共用 _sec_to_frames，杜绝构造期↔热更公式漂移。
+        self._dead_track_grace_frames: int = _sec_to_frames(_DEAD_TRACK_GRACE_SEC, engine_fps)
         # 仅供冷却日志把 frame_index 余量换算成"窗 / 秒"展示: frame_index 每窗推进 fps×period_sec、
         # 每实际秒推进 fps(见 api.py _global_frame_index)。不参与任何阈值判定。
         self._engine_fps: float = max(engine_fps, 1e-6)
         # period_sec 单独存一份，供 set_engine_fps 运行时重算 _frames_per_window。
         self._period_sec: float = period_sec
-        self._frames_per_window: float = max(1.0, engine_fps * period_sec)
+        self._frames_per_window: float = _frames_per_window_of(engine_fps, period_sec)
 
         # tier_c 写库冷却(秒) = mult × 写库门 × 快重审间隔(秒) = 2 × 6 × 10 = 120s; 在此按 engine_fps
         # 换算成 frame_index 帧数计冷却(用 frame_index 而非墙钟 now_ts: 确定性、按窗口走, now_ts
@@ -334,7 +340,7 @@ class IdentityEngine:
             * _stab.write_eligible_min_count
             * _stab.recheck_interval_accumulating_sec
         )
-        self._tier_c_cooldown_frames: int = max(1, round(_cooldown_sec * self._engine_fps))
+        self._tier_c_cooldown_frames: int = _sec_to_frames(_cooldown_sec, self._engine_fps)
 
         # per-track state
         self._states: dict[int, TrackIdentityState] = {}
@@ -797,22 +803,23 @@ class IdentityEngine:
     def set_engine_fps(self, fps: float) -> None:
         """运行时更新 engine_fps：重算所有 fps 派生帧数缓存，免重建 engine。
 
-        与构造期算法数值一致（构造期 grace/frames_per_window 用裸 ``engine_fps``、此处
-        统一用 clamp 后的 ``self._engine_fps``；因 fps 恒 ≥1，clamp 为 no-op、结果相同）。
+        与构造期换算共用 ``_sec_to_frames`` / ``_frames_per_window_of``（结构上杜绝公式
+        漂移）：构造期传裸 ``engine_fps``、此处传 clamp 后的 ``self._engine_fps``，因 fps
+        恒 ≥1，clamp 为 no-op、结果逐字节相同。
         4 个 recheck 间隔在 state.py 每窗现算、直接读 ``self._engine_fps``，重赋即生效。
         已 stamp 的 per-track ``tier_c_cooldown_until_frame`` 是绝对帧号，保持不动
         （fps 变后墙钟余量的漂移是 transient，下次写库自愈）。
         """
         self._engine_fps = max(fps, 1e-6)
-        self._frames_per_window = max(1.0, self._engine_fps * self._period_sec)
-        self._dead_track_grace_frames = max(1, round(_DEAD_TRACK_GRACE_SEC * self._engine_fps))
+        self._frames_per_window = _frames_per_window_of(self._engine_fps, self._period_sec)
+        self._dead_track_grace_frames = _sec_to_frames(_DEAD_TRACK_GRACE_SEC, self._engine_fps)
         _stab = self.config.stability
         _cooldown_sec = (
             _stab.tier_c_cooldown_mult
             * _stab.write_eligible_min_count
             * _stab.recheck_interval_accumulating_sec
         )
-        self._tier_c_cooldown_frames = max(1, round(_cooldown_sec * self._engine_fps))
+        self._tier_c_cooldown_frames = _sec_to_frames(_cooldown_sec, self._engine_fps)
 
     # =========================================================================
     # 身份库变化监听

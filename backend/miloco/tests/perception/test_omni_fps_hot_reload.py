@@ -24,6 +24,26 @@ from miloco.perception.engine.identity.engine import (
     IdentityEngine,
 )
 
+# ---- 共享纯函数 sec_to_frames / frames_per_window ----------------------------
+# 构造期与 setter 共用同一段换算，从结构上杜绝公式漂移；这里直接钉住纯函数语义。
+
+
+def test_sec_to_frames_rounds_and_floors_to_one():
+    from miloco.perception.engine.identity._fps_utils import sec_to_frames
+
+    assert sec_to_frames(2.0, 4) == 8  # round(8.0)
+    assert sec_to_frames(1.0, 3) == 3
+    assert sec_to_frames(0.0, 30) == 1  # 极端换算得 0 → 兜到 1 帧
+    assert sec_to_frames(0.1, 3) == 1  # round(0.3)=0 → 兜到 1
+
+
+def test_frames_per_window_floors_to_one():
+    from miloco.perception.engine.identity._fps_utils import frames_per_window
+
+    assert frames_per_window(4, 4.0) == 16.0
+    assert frames_per_window(3, 0.1) == 1.0  # 0.3 → 兜到 1.0
+
+
 # ---- SortTracker.set_fps -----------------------------------------------------
 
 
