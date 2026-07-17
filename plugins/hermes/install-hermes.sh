@@ -278,10 +278,14 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
   fi
 fi
 
-# --post-install: install.py 调起，跳过 install.py 已做的前端部署步骤，
-# 只跑 env 持久化 + 残留清理 + 版本记录 + cron + 收尾
+# --post-install: install.py 调起。跳过 step 3 / step 4 前端部署主体（这两步依赖
+# tarball 里没有的 scripts/sync-skills.py / skills/，必须整段跳）；
+# step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable plugin) 主体幂等，
+# 会重跑一次以保证 config/enable/backend 状态收敛（step 7 会多一次 stop+sleep 3s+start）。
+# 重点补齐的是 1.6/1.75/1.9 env 持久化 + 4.7 ONNX 模型 + 8.5 disable 残留清理 +
+# 9 版本记录 + 10 cron reconcile + 收尾 banner。
 if [ "$POST_INSTALL_ONLY" -eq 1 ]; then
-  info "post-install 模式: 跳过 step 1-8，只做 env 持久化 + cron + 收尾"
+  info "post-install 模式: 跳过 step 3/4 前端部署；step 5-8 幂等重跑；补 env / cron / 收尾"
   POST_INSTALL_SKIP=1
 else
   POST_INSTALL_SKIP=0
@@ -689,8 +693,6 @@ fi
 # "No such file or directory"。这里是 cron 链路真 bug —— skill 写文件前必须
 # 保证父目录存在。
 mkdir -p "$HERMES_HOME/memory"
-
-mark_done 4
 
 PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 

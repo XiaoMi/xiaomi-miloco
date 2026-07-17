@@ -1301,16 +1301,18 @@ class Installer:
     def _hermes_run_post_install(self, hermes_home: Path, extract_dir: Path) -> None:
         """调 install-hermes.sh --post-install 补齐 env 持久化 / cron / 收尾提示。
 
-        install.py step 8 已做 plugin 分发 / adapter 部署 / config.json patch / .env 写入 /
-        hermes plugins enable；--post-install 模式跳过它们，只跑：
-          - shell rc / supervisord.conf 里 MILOCO_HOME 持久化
-          - hermes disabled 残留清理
-          - 版本记录
-          - cron reconcile
-          - 收尾 banner
+        install.py step 8 已做的部分（plugin 分发 / adapter 部署 / config.json patch /
+        .env 写入 / hermes plugins enable），install-hermes.sh --post-install 的分工：
+
+          - **跳过**：step 3 (sync-skills) / step 4 (复制插件)——依赖 tarball 里没有的
+            scripts/ / skills/，只能整段跳，由 POST_INSTALL_SKIP guard 兜底
+          - **幂等重跑**：step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable)
+            —— 都是幂等的，重跑一遍保证状态收敛（代价是 step 7 会多一次 stop+3s+start）
+          - **本模式真正补齐**：1.6/1.75/1.9 env 持久化、4.7 ONNX 模型、8.5 disable 残留
+            清理、9 版本记录、10 cron reconcile、收尾 banner「hermes gateway restart」提示
 
         install-hermes.sh 由 build.sh::build_hermes 打进 miloco-hermes-plugin tarball，
-        跟 miloco-plugin 平级。找不到就 warn 跳过。
+        跟 miloco-plugin 平级。找不到就 warn 跳过（不阻塞主流程）。
         """
         script = extract_dir / "install-hermes.sh"
         if not script.is_file():
