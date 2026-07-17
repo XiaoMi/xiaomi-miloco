@@ -36,7 +36,8 @@ for arg in "$@"; do
   case "$arg" in
     --diagnose) DIAGNOSE_ONLY=1 ;;
     --no-start-backend) NO_START_BACKEND=1 ;;
-    --post-install) POST_INSTALL_ONLY=1 ;;    --help|-h)
+    --post-install) POST_INSTALL_ONLY=1 ;;
+    --help|-h)
       cat <<EOF
 用法：bash install-hermes.sh [options]
   （无参数）       完整安装（patch config / 写 .env / 复制 plugin / 启 backend / enable plugin）
