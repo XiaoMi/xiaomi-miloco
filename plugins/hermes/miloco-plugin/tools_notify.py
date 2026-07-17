@@ -327,8 +327,10 @@ def notify_owner(
     resolved = resolve_notify_target(ctx)
     bind_reason = resolved.get("bindReason")
     target = resolved.get("target")
-    # allow_fallback_deliver=true（test_push 等）即使走 needsBind 也直发干净正文
-    if allow_fallback_deliver and target:
+    # allow_fallback_deliver=true（test_push 等）即使走 needsBind 也直发干净正文。
+    # 但 target=="all" 是 fanout 语义（不是平台名），必须让它落到下面 fanout 分支，
+    # 否则会把字面 "all" 传给 hermes send，返回 "Unknown platform: all" 误报失败。
+    if allow_fallback_deliver and target and target != "all":
         return _deliver_via_hermes_send(target, message)
     if resolved.get("needsBind"):
         if bind_hint:

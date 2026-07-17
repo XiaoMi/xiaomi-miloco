@@ -47,10 +47,12 @@ def _patch_hermes_send(monkeypatch, *, payload=None, returncode: int = 0):
     from miloco_plugin_pkg import tools_notify as tn
     monkeypatch.setattr(tn.shutil, "which", lambda _: "/usr/local/bin/hermes")
 
-    state = {"last_cmd": None}
+    state = {"last_cmd": None, "call_count": 0, "cmds": []}
 
     def fake_run(cmd, **kwargs):
         state["last_cmd"] = cmd
+        state["call_count"] += 1
+        state["cmds"].append(cmd)
         return _FakeCompleted(returncode=returncode, stdout=json.dumps(payload or {}))
 
     monkeypatch.setattr(tn.subprocess, "run", fake_run)
@@ -275,6 +277,32 @@ def test_test_push_case2_fallback_delivers(tmp_path: Path, monkeypatch):
     assert result["ok"] is True
     assert result["platform"] == "feishu"
     assert state["last_cmd"][3] == "feishu"
+
+
+def test_test_push_fanout_targets_all_candidates(tmp_path: Path, monkeypatch):
+    """deliver.target="all" 时 test_push 应走 fanout（不能被 allow_fallback_deliver 旁路截走）。
+
+    回归防护：旁路条件之前是 `if allow_fallback_deliver and target`，
+    target=="all" 也命中 → 把字面 "all" 传给 hermes send → "Unknown platform: all"。
+    """
+    (tmp_path / "state.json").write_text(
+        json.dumps({
+            "deliver": {"target": "all", "candidates": ["feishu", "wechat"]},
+        }),
+        encoding="utf-8",
+    )
+    state = _patch_hermes_send(
+        monkeypatch, payload={"success": True, "platform": "feishu"}
+    )
+    ctx = _FakeCtx(tmp_path)
+    result = ts.test_push(ctx, "fanout probe")
+    assert result["ok"] is True
+    assert result.get("mode") == "fanout", (
+        f"target='all' 应走 fanout 分支，实际返回：{result}"
+    )
+    assert result.get("total") == 2
+    # 两次候选都发过（feishu + wechat）
+    assert state["call_count"] >= 2
 
 
 def test_test_push_success(tmp_path: Path, monkeypatch):
