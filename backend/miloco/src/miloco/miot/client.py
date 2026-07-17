@@ -48,6 +48,13 @@ from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
 
+# Camera managers reconnect internally.  A disconnected manager gets three
+# 10-second sync/refresh observations to establish direct-IP/PPCS before it is
+# deprioritized under >MAX_ENABLED_CAMERAS pressure.  Once it yields a slot it
+# cools down for another three refreshes, then becomes eligible to retry.
+_CAMERA_CONNECT_FAILURE_THRESHOLD = 3
+_CAMERA_RETRY_COOLDOWN_REFRESHES = 3
+
 
 def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
     """从设备 spec 里定位所有相机开关属性（camera-control 服务的 on 属性）的 (siid, piid)。
@@ -96,6 +103,10 @@ class MiotProxy:
         self._kv_repo = kv_repo
         self.init_miot_info_dict()
         self._camera_img_managers: dict[str, CameraVisionHandler] = {}
+        self._camera_connect_failures: dict[str, int] = {}
+        self._camera_retry_cooldowns: dict[str, int] = {}
+        self._camera_priority_dids: set[str] = set()
+        self._camera_deprioritized_dids: set[str] = set()
         self._token_refresh_task: asyncio.Task | None = None
         # Serialize refresh_devices: multiple entries (MQTT reconnect,
         # bind-debounce, device refresh, lazy load) can fire concurrently
@@ -309,6 +320,10 @@ class MiotProxy:
         for mgr in self._camera_img_managers.values():
             await mgr.destroy()
         self._camera_img_managers.clear()
+        self._camera_connect_failures.clear()
+        self._camera_retry_cooldowns.clear()
+        self._camera_priority_dids.clear()
+        self._camera_deprioritized_dids.clear()
 
         # 3. Deinit MIoTClient and invalidate reference
         if self._miot_client:
@@ -623,6 +638,14 @@ class MiotProxy:
         """Return camera metadata from the in-memory cache without refreshing."""
         return self._camera_info_dict.get(did)
 
+    def is_camera_stream_connected(self, did: str) -> bool:
+        """Return native/PPCS connection health for an existing manager."""
+        manager = self._camera_img_managers.get(did)
+        return bool(
+            manager is not None
+            and getattr(manager.camera_info, "connected", False)
+        )
+
     async def get_camera_dids(self) -> list[str]:
         """
         Get all available camera device ID list
@@ -660,6 +683,57 @@ class MiotProxy:
             info.ip,
         )
 
+    def _advance_camera_selection_health(
+        self, eligible_dids: set[str]
+    ) -> tuple[set[str], set[str]]:
+        """Advance bounded connection-failure/cooldown state for cap ordering.
+
+        The state is deliberately in-memory and only affects ordering when the
+        eligible set exceeds the camera cap.  Cameras outside the current scope
+        are forgotten immediately.  A camera with a connected native manager
+        is always preferred; a disconnected manager is demoted only after the
+        grace threshold.  Demoted cameras get a finite cooldown and are then
+        retried, so transient failures do not become permanent starvation.
+        """
+        for state in (self._camera_connect_failures, self._camera_retry_cooldowns):
+            for did in list(state):
+                if did not in eligible_dids:
+                    del state[did]
+
+        # Tick cooldown only while the camera has no manager (a demoted stream
+        # should have yielded its slot in the previous refresh).
+        for did in list(self._camera_retry_cooldowns):
+            if did in self._camera_img_managers:
+                continue
+            remaining = self._camera_retry_cooldowns[did] - 1
+            if remaining <= 0:
+                del self._camera_retry_cooldowns[did]
+            else:
+                self._camera_retry_cooldowns[did] = remaining
+
+        connected: set[str] = set()
+        for did, manager in self._camera_img_managers.items():
+            if did not in eligible_dids:
+                continue
+            if bool(getattr(manager.camera_info, "connected", False)):
+                connected.add(did)
+                self._camera_connect_failures.pop(did, None)
+                self._camera_retry_cooldowns.pop(did, None)
+                continue
+            self._camera_connect_failures[did] = min(
+                _CAMERA_CONNECT_FAILURE_THRESHOLD,
+                self._camera_connect_failures.get(did, 0) + 1,
+            )
+
+        deprioritized = {
+            did
+            for did, failures in self._camera_connect_failures.items()
+            if failures >= _CAMERA_CONNECT_FAILURE_THRESHOLD
+        } | set(self._camera_retry_cooldowns)
+        self._camera_priority_dids = connected
+        self._camera_deprioritized_dids = deprioritized
+        return connected, deprioritized
+
     async def refresh_cameras(self) -> dict[str, MIoTCameraInfo] | None:
         async with self._refresh_cameras_lock:
             try:
@@ -686,10 +760,10 @@ class MiotProxy:
                 except Exception as e:
                     logger.warning("refresh_cameras awake gap-fill failed: %s", e)
                 # manager(native PPCS 会话+解码线程)的建/销与感知投喂**共用同一口径**
-                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线 + 镜头未关、按 did
-                # 截到上限。拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/镜头关/超额的
-                # 相机都不在 active 里 → 不建/已建则销，真正停掉 native 会话与解码。
-                active = set(
+                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线 + 镜头未关，超额时
+                # 按连接健康度 + did 稳定顺序截到上限。拉流集 = 投喂集，单一来源不漂移；
+                # 关掉/移出家庭/离线/镜头关/超额的相机不在 active → 不建/已建则销。
+                eligible = set(
                     select_active_camera_dids(
                         self._kv_repo,
                         cameras,
@@ -701,13 +775,51 @@ class MiotProxy:
                         # manager from ever being created, so PPCS never gets a
                         # chance to establish and the state cannot self-heal.
                         require_lan=False,
+                        cap=False,
                         awake_map=self._camera_awake_cache,
                     )
                 )
+                priority, deprioritized = self._advance_camera_selection_health(
+                    eligible
+                )
+                active = set(
+                    select_active_camera_dids(
+                        self._kv_repo,
+                        cameras,
+                        require_lan=False,
+                        awake_map=self._camera_awake_cache,
+                        priority_dids=priority,
+                        deprioritized_dids=deprioritized,
+                    )
+                )
+                # A persistently disconnected/failed camera only yields a slot
+                # when there is actual cap pressure.  Give it a finite cooldown
+                # before retrying; connected managers keep top priority.
+                newly_demoted = {
+                    did
+                    for did in deprioritized - active
+                    if did not in self._camera_retry_cooldowns
+                }
+                for did in newly_demoted:
+                    self._camera_connect_failures.pop(did, None)
+                    self._camera_retry_cooldowns[did] = (
+                        _CAMERA_RETRY_COOLDOWN_REFRESHES
+                    )
+                if newly_demoted:
+                    logger.warning(
+                        "Camera connection attempts yielded capped slots after "
+                        "%d failed refreshes: %s (cooldown=%d refreshes)",
+                        _CAMERA_CONNECT_FAILURE_THRESHOLD,
+                        sorted(newly_demoted),
+                        _CAMERA_RETRY_COOLDOWN_REFRESHES,
+                    )
                 logger.debug(
-                    "Camera streaming set: active=%s managers=%s",
+                    "Camera streaming set: active=%s managers=%s priority=%s "
+                    "deprioritized=%s",
                     sorted(active),
                     sorted(self._camera_img_managers),
+                    sorted(priority),
+                    sorted(deprioritized),
                 )
                 for camera_did in cameras.keys():
                     if camera_did not in self._camera_img_managers:
@@ -716,6 +828,15 @@ class MiotProxy:
                         manager = await self._create_camera_img_manager(
                             cameras[camera_did]
                         )
+                        if manager is None:
+                            # Creation failures have no manager whose connected
+                            # state can be observed, so count the failed attempt
+                            # explicitly.  On the next capped refresh it can
+                            # yield to an untried candidate.
+                            self._camera_connect_failures[camera_did] = min(
+                                _CAMERA_CONNECT_FAILURE_THRESHOLD,
+                                self._camera_connect_failures.get(camera_did, 0) + 1,
+                            )
                         # Only register when the manager exists, so register/unregister
                         # stay paired with _camera_img_managers.
                         if manager is not None:

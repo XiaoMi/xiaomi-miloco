@@ -235,11 +235,11 @@ function CameraSection({
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;
   const allOff = activeCount === 0;
-  // 满额判断按 inUse(=活跃集:未拉黑 + 三态好 + 上限内)计数,与后端 toggle_camera 的
-  // 上限校验同口径——后端也数「可用集」(离线/局域网不可达/镜头关的不占名额)。所以
+  // 满额判断按 inUse(=活跃集:未拉黑 + 云在线 + 镜头开 + 上限内)计数,与后端
+  // toggle_camera 的上限校验同口径——离线/镜头关不占名额，OT 未发现照常尝试。所以
   // 面板显示的名额 = 后端认的名额,不会出现「看着有位、点开启却被后端拒」。
   const atCapacity = activeCount >= maxStreamCams;
-  // 「全开」只能开「可用且未投喂」的——不可用相机(云端离线/局域网不可达/镜头关)后端
+  // 「全开」只能开「可用且未投喂」的——不可用相机(云端离线/镜头关)后端
   // toggle_camera 会整批拒绝,若把它们塞进批量 enable,会连带可用的一起失败。
   // 与下区单台开关「不可用不可开」同口径(cameraAvailable)。
   const enableableDids = scopeCameras
@@ -424,7 +424,7 @@ function CameraSection({
                   <BenchCamItem
                     key={c.did}
                     cam={c}
-                    // 瞬态忙才原生禁用;语义不可开(离线 / 镜头关 / 局域网不可达 / 满额)走
+                    // 瞬态忙才原生禁用;语义不可开(离线 / 镜头关 / 满额)走
                     // blockedReasonKey——置灰但可点,点击 toast、桌面悬停气泡说明原因。
                     busy={bulkBusy || singleBusyDids.has(c.did)}
                     blockedReasonKey={switchBlockedReasonKey(c, {
@@ -546,7 +546,7 @@ function CamSwitch({
   name: string;
   /** 瞬态忙（bulk / single 操作进行中）：真禁、忽略点击、不提示。 */
   busy: boolean;
-  /** 语义不可开（离线 / 镜头关 / 局域网不可达 / 满额，仅未启用时）：置灰但仍可点 → toast 理由；已启用为空。 */
+  /** 语义不可开（离线 / 镜头关 / 满额，仅未启用时）：置灰但仍可点 → toast 理由；已启用为空。 */
   blockedReasonKey?: string;
   onToggle: (next: boolean) => void;
 }) {
@@ -780,8 +780,8 @@ function BenchCamItem({
             </span>
           )}
         </div>
-        {/* 三个并列的可用性指标:云端在线 / 局域网可达 / 镜头开关。各自独立好坏,
-            住户能一眼看出到底卡在哪一环(房间已移到设备名旁,这行只放状态)。 */}
+        {/* 三个并列诊断指标:云端在线 / OT或PPCS链路 / 镜头开关。LAN/OT 不作
+            开启硬门，只用于说明最终走的是局域网发现还是 PPCS。 */}
         <div className="text-caption flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
           <StateDot
             ok={cam.cloudOnline}
@@ -792,9 +792,13 @@ function BenchCamItem({
             }
           />
           <StateDot
-            ok={cam.lanReachable}
+            ok={cam.lanReachable ? true : "unknown"}
             label={
-              cam.lanReachable ? t("hero.stateLanOk") : t("hero.stateLanOffline")
+              cam.lanDetected
+                ? t("hero.stateLanDetected")
+                : cam.lanReachable
+                  ? t("hero.statePpcsConnected")
+                  : t("hero.statePpcsPending")
             }
           />
           <StateDot

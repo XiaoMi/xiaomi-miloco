@@ -273,15 +273,15 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_filter_cameras_from_all_no_lan(self, adapter):
-        """_filter_cameras_from_all filters when lan_online is False."""
+        """默认投喂口径不以 OT/LAN 发现为硬门。"""
         cam = _make_camera_info(
             did="cam1", online=True, lan_online=False,
-        )
+        ).model_copy(update={"home_id": "H1"})
         result = adapter._filter_cameras_from_all(
             {"cam1": cam},
             online_only=True,
         )
-        assert "cam1" not in result
+        assert "cam1" in result
 
     @pytest.mark.asyncio
     async def test_filter_cameras_drops_disallowed_home(self, adapter):
@@ -337,4 +337,3 @@ class TestCameraInfoLanStatus:
         ci = CameraInfo.model_validate(cam.model_dump())
         assert ci.lan_online is False
         assert ci.local_ip is None
-

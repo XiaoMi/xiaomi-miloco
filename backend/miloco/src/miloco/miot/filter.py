@@ -93,6 +93,8 @@ def select_active_camera_dids(
     require_lan: bool = True,
     cap: bool = True,
     awake_map: dict[str, bool | None] | None = None,
+    priority_dids: set[str] | None = None,
+    deprioritized_dids: set[str] | None = None,
 ) -> list[str]:
     """决定「哪些相机该投喂/拉流」的**单一口径**——感知投喂(camera_adapter)与 native
     会话建销(refresh_cameras)共用此函数，避免两套判定漂移。
@@ -101,12 +103,15 @@ def select_active_camera_dids(
     看 ``online and lan_online``；``False`` 只看云端 ``online``（放过 lan_online 陈旧的卡死态
     相机）。``awake_map``（did→镜头开关态，来自 MiotProxy 的 awake 缓存）给出时，``awake``
     明确为 ``False``（镜头关/物理遮挡）的相机被排除；``None``/``True``/未给出一律放行
-    （awake 未知不误杀，与 toggle 开启校验同口径）。``cap=True`` 时按 did 升序确定性截断到
-    ``MAX_ENABLED_CAMERAS``——投喂/拉流上限的唯一兜底，与 ``service.toggle_camera`` 的主动
-    enable 校验互补；不写 KV、不碰黑名单。``cap=False`` 用于「列全集」语义（如 rule target 校验）。
+    （awake 未知不误杀，与 toggle 开启校验同口径）。``cap=True`` 时截断到
+    ``MAX_ENABLED_CAMERAS``：已连通的 ``priority_dids`` 优先，普通候选其次，超过连接宽限期的
+    ``deprioritized_dids`` 最后；每组内仍按 did 确定排序。两个优先级集合仅影响超额排序，不改变
+    scope / online / awake 过滤。这样真正连不上的相机可以临时让出稀缺名额，而不影响≤4路场景。
+    这是投喂/拉流上限的唯一兜底，与 ``service.toggle_camera`` 的主动 enable 校验互补；不写 KV、
+    不碰黑名单。``cap=False`` 用于「列全集」语义（如 rule target 校验）。
 
-    返回 did 列表：未截断为输入顺序，截断为 did 升序前 N。``cameras`` 的 value 需带
-    ``home_id`` / ``online`` / ``lan_online`` 属性。
+    返回 did 列表：未截断为输入顺序；截断时按上述健康度分组、组内 did 升序取前 N。
+    ``cameras`` 的 value 需带 ``home_id`` / ``online`` / ``lan_online`` 属性。
     """
     denied = denied_camera_dids(kv_repo)
     result: list[str] = []
@@ -126,8 +131,18 @@ def select_active_camera_dids(
         result.append(did)
     if not cap or len(result) <= MAX_ENABLED_CAMERAS:
         return result
-    # 超限：按 did 升序确定性截断（同一账号每轮选同一批）。
-    return sorted(result)[:MAX_ENABLED_CAMERAS]
+    # 超限：已连通 > 普通 > 持续失败/冷却；组内按 did 稳定排序。
+    priority = priority_dids or set()
+    deprioritized = deprioritized_dids or set()
+
+    def _rank(did: str) -> tuple[int, str]:
+        if did in priority:
+            return (0, did)
+        if did in deprioritized:
+            return (2, did)
+        return (1, did)
+
+    return sorted(result, key=_rank)[:MAX_ENABLED_CAMERAS]
 
 
 def filter_by_home(kv_repo: KVRepo, items: dict[str, T]) -> dict[str, T]:

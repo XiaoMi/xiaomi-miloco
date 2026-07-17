@@ -76,6 +76,7 @@ class TestSyncDevicesOnDemandRefresh:
         proxy = MagicMock()
         proxy.is_authenticated = True
         proxy.refresh_cameras = AsyncMock()
+        proxy.is_camera_stream_connected = MagicMock(return_value=True)
         proxy.get_cached_camera = MagicMock(return_value=None)
         adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
         adapter._devices["cam1"] = _CameraDeviceState(did="cam1")  # 已连 1 台
@@ -86,6 +87,23 @@ class TestSyncDevicesOnDemandRefresh:
         asyncio.run(adapter.sync_devices())
 
         proxy.refresh_cameras.assert_not_awaited()
+
+    def test_refresh_when_manager_exists_but_ppcs_is_disconnected(self, monkeypatch):
+        """订阅已登记不代表 native/PPCS 已连；断流也应推进 refresh/降权计数。"""
+        proxy = MagicMock()
+        proxy.is_authenticated = True
+        proxy.refresh_cameras = AsyncMock()
+        proxy.is_camera_stream_connected = MagicMock(return_value=False)
+        proxy.get_cached_camera = MagicMock(return_value=None)
+        adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
+        adapter._devices["cam1"] = _CameraDeviceState(did="cam1")
+        monkeypatch.setattr(
+            adapter, "discover_devices", AsyncMock(return_value={"cam1": _source()})
+        )
+
+        asyncio.run(adapter.sync_devices())
+
+        proxy.refresh_cameras.assert_awaited_once()
 
     def test_no_refresh_when_unauthenticated(self, monkeypatch):
         proxy = MagicMock()

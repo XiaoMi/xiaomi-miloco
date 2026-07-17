@@ -18,6 +18,7 @@ import {
   realDeleteOmniConfig,
   realListOmniModels,
   realTestOmniConfig,
+  realListScopeCameras,
   _resetUsageStatsCache,
 } from "@/api/real";
 
@@ -120,6 +121,39 @@ describe("realListActivity — /api/events 契约", () => {
     expect(calls[0]).toContain("before=1780999999999");
     expect(calls[0]).toContain("limit=100");
     expect(calls[0]).toContain("offset=50");
+  });
+});
+
+describe("realListScopeCameras — OT/PPCS 诊断字段", () => {
+  it("保留原始 lan_detected，并独立映射派生 lan_reachable", async () => {
+    mockFetchByUrl({
+      "/api/miot/scope/cameras": {
+        code: 0,
+        message: "ok",
+        data: [
+          {
+            did: "cam1",
+            name: "客厅摄像机",
+            cloud_online: true,
+            lan_detected: false,
+            lan_reachable: true,
+            awake: true,
+            is_online: true,
+            in_use: true,
+            connected: true,
+          },
+        ],
+      },
+    });
+
+    const cameras = await realListScopeCameras();
+
+    expect(cameras[0]).toMatchObject({
+      did: "cam1",
+      cloudOnline: true,
+      lanDetected: false,
+      lanReachable: true,
+    });
   });
 });
 

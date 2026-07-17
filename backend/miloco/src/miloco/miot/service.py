@@ -1038,6 +1038,14 @@ class MiotService:
         awake_map = await self._miot_proxy.read_cameras_awake(
             list(cameras.keys()), cache_only=True
         )
+        priority_dids = getattr(self._miot_proxy, "_camera_priority_dids", set())
+        if not isinstance(priority_dids, set):
+            priority_dids = set()
+        deprioritized_dids = getattr(
+            self._miot_proxy, "_camera_deprioritized_dids", set()
+        )
+        if not isinstance(deprioritized_dids, set):
+            deprioritized_dids = set()
         # in_use = 活跃集：与拉流/投喂同一口径（未拉黑 + home + cloud + awake + 上限）。
         active = set(
             select_active_camera_dids(
@@ -1048,6 +1056,8 @@ class MiotService:
                 # on lan_online would prevent the video handshake itself.
                 require_lan=False,
                 awake_map=awake_map,
+                priority_dids=priority_dids,
+                deprioritized_dids=deprioritized_dids,
             )
         )
         out: list[dict] = []
