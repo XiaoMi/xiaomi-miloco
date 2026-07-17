@@ -41,6 +41,10 @@ BIND_HINT_EXAMPLE: Dict[str, str] = {
         "您原先绑定的 Miloco 通知频道已失效（可能是渠道凭证过期或被移除）。"
         "请您重新设置通知频道：告诉助理「重新绑定通知频道」，或在本平台设置中更新凭证后回复。"
     ),
+    "no_platform": (
+        "您的设备上尚未连接任何 IM 平台（飞书/微信/Telegram 等），"
+        "无法发送通知。请先在 Hermes 中连接至少一个 IM 平台后重试。"
+    ),
 }
 
 # state.json 文件名(与 OpenClaw 版 notify.ts 对齐,存于插件根目录)
@@ -121,7 +125,7 @@ def resolve_notify_target(ctx: Any) -> Dict[str, Any]:
     return {
         "target": None,
         "needsBind": True,
-        "bindReason": "not_configured",
+        "bindReason": "no_platform",
         "hint": (
             "没有 deliver target, 也没探测到任何已配 IM 平台。"
             "请先在 Hermes 里连一个 IM(hermes config set feishu.app_id ... / "

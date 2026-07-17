@@ -120,7 +120,7 @@ def test_notify_no_target_returns_clear_error(tmp_path: Path, monkeypatch):
     result = tn.notify_owner(ctx, "hello")
     assert result["ok"] is False
     assert result.get("needsBind") is True
-    assert result.get("bindReason") == "not_configured"
+    assert result.get("bindReason") == "no_platform"
     assert "bindHintExample" in result
 
 
