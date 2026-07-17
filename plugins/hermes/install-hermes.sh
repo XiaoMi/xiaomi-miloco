@@ -426,26 +426,6 @@ SUPERVISORD_CONF="$MILOCO_HOME/supervisord.conf"
   fi
 fi
 
-# --- 1.7 MILOCO_HOME 持久化（写进 shell rc，下次新 shell 不用再 export） ---
-# 用户的 shell rc 文件（macOS = ~/.zshrc，Linux = ~/.bashrc，WSL Git Bash = ~/.bashrc）
-SHELL_RC=""
-case "${SHELL:-}" in
-  */zsh)  SHELL_RC="$HOME/.zshrc" ;;
-  */bash) SHELL_RC="$HOME/.bashrc" ;;
-  *)      SHELL_RC="$HOME/.bashrc" ;;  # 兜底 bash
-esac
-if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.openclaw/miloco" ]; then
-  # 消费方：miloco-cli （cli/src/miloco_cli/config.py::miloco_home fallback = ~/.openclaw/miloco）。
-  # 只有 MILOCO_HOME 恰好等于 CLI fallback 时才可省略 shell rc（新 shell 读不到 env
-  # 也会 fallback 到同一路径）。其余情况（含默认 ~/.hermes/miloco）都必须持久化。
-  if [ -n "$SHELL_RC" ] && [ -f "$SHELL_RC" ] && ! grep -q "export MILOCO_HOME=" "$SHELL_RC" 2>/dev/null; then
-    echo "" >> "$SHELL_RC"
-    echo "# miloco Hermes 兼容层" >> "$SHELL_RC"
-    echo "export MILOCO_HOME=\"$MILOCO_HOME\"" >> "$SHELL_RC"
-    info "MILOCO_HOME 已持久化到 $SHELL_RC"
-  fi
-fi
-
 # --- 1.75 MILOCO_HOME 也写进 ~/.hermes/.env ---
 # Hermes gateway 由 launchd plist 直接拉起，不 source shell rc，
 # 但会通过 load_hermes_dotenv 加载 $HERMES_HOME/.env。
