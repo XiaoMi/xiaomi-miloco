@@ -467,16 +467,34 @@ async def test_list_cameras_with_state_flags():
     assert by_did["c1"]["is_online"] is True  # 兼容字段 = cloud && lan
     assert by_did["c1"]["connected"] is False
 
-    # c2：未停用但局域网不可达 → 被可用性 gate 掉 → in_use=false
+    # c2：OT 探测未响应，但云端在线 → 仍进入活跃集尝试 PPCS；在 PPCS
+    # 真正连上之前保留 lan_reachable=false 诊断态。
     assert by_did["c2"]["cloud_online"] is True
     assert by_did["c2"]["lan_reachable"] is False
-    assert by_did["c2"]["in_use"] is False
+    assert by_did["c2"]["lan_detected"] is False
+    assert by_did["c2"]["in_use"] is True
     assert by_did["c2"]["is_online"] is False
 
     # c4：三态好 + 未停用 → 活跃 → in_use=true；awake 缓存空=未知(None)；connected 正交
     assert by_did["c4"]["in_use"] is True
     assert by_did["c4"]["awake"] is None
     assert by_did["c4"]["connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_camera_ppcs_connected_overrides_missing_ot_discovery():
+    """PPCS 已连接就是视频可达的强证据，不应继续显示“局域网不可达”。"""
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    cam.connected = True
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+
+    out = await svc.list_cameras_with_state()
+
+    assert out[0]["lan_detected"] is False
+    assert out[0]["lan_reachable"] is True
+    assert out[0]["is_online"] is True
+    assert out[0]["in_use"] is True
 
 
 @pytest.mark.asyncio
@@ -1236,6 +1254,25 @@ async def test_refresh_cameras_offline_not_built(_scope_proxy_env):
     assert "c2" not in proxy._camera_img_managers
 
 
+@pytest.mark.asyncio
+async def test_refresh_cameras_ot_undiscovered_still_builds_manager(
+    _scope_proxy_env,
+):
+    """OT 未发现不能阻止 manager 创建，否则 PPCS 永远没有握手机会。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1", online=True, lan_online=False),
+        }
+    )
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    miot_client.create_camera_instance_async.assert_awaited_once()
+
+
 # ─── service.toggle_*: 写完 KV 后驱动 MIoT manager 收敛 ──────────────────────
 
 
@@ -1665,13 +1702,16 @@ async def test_toggle_enable_rejected_cloud_offline():
 
 
 @pytest.mark.asyncio
-async def test_toggle_enable_rejected_lan_unreachable():
-    """开启局域网不可达（云端在线）的相机 → 拒绝，文案含「局域网不可达」。"""
+async def test_toggle_enable_allows_ot_undiscovered_camera_to_attempt_ppcs():
+    """OT 未发现但云端在线时允许开启，让 direct-IP/PPCS 有握手机会。"""
     cam = _camera("c1", home_id="H1", online=True, lan_online=False)
     kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
     svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
-    with pytest.raises(ValidationException, match="局域网不可达"):
-        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+    out = await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+    assert out[0]["did"] == "c1"
+    assert out[0]["in_use"] is True
 
 
 @pytest.mark.asyncio

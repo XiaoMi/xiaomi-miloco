@@ -98,7 +98,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self,
         all_devices: dict | None = None,
         online_only: bool = True,
-        require_lan: bool = True,
+        require_lan: bool = False,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         if not self._miot_proxy.is_authenticated:
@@ -115,7 +115,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         all_devices: dict,
         *,
         online_only: bool = True,
-        require_lan: bool = True,
+        require_lan: bool = False,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         """Filter camera-type devices from a full device dict.
@@ -158,7 +158,11 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 device_type="camera",
                 room_id=camera_info.room_name,
                 room_name=camera_info.room_name,
-                online=camera_info.online and camera_info.lan_online,
+                # LAN discovery and PPCS are independent transports.  A
+                # cloud-online camera must be allowed to attempt PPCS even
+                # when the OT probe did not answer; actual frame delivery is
+                # the authoritative stream-health signal.
+                online=camera_info.online,
             )
         return result
 
@@ -348,7 +352,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             device_type="camera",
             room_id=camera.room_name,
             room_name=camera.room_name,
-            online=camera.online and camera.lan_online,
+            online=camera.online,
         )
 
     def _build_device_data(

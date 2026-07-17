@@ -1010,16 +1010,17 @@ class MiotService:
         return homes
 
     async def list_cameras_with_state(self) -> list[dict]:
-        """列出当前启用家庭下的相机，每项含三态可用性 + in_use / voice_in_use / connected。
+        """列出当前启用家庭下的相机，每项含链路状态 + in_use / voice_in_use / connected。
 
-        可用性拆成三个正交指标（替代旧的一把揉 is_online）：
+        可用性拆成正交指标（替代旧的一把揉 is_online）：
           - ``cloud_online``：米家云端在线
-          - ``lan_reachable``：局域网可达（能拉流的前提）
+          - ``lan_detected``：原始 MiOT/OT 局域网发现结果，仅用于诊断
+          - ``lan_reachable``：兼容字段；OT 已发现或 PPCS 已连接时为 True
           - ``awake``：镜头开关。True=镜头开启 / False=镜头关闭(隐私·遮挡) /
             None=该机型无开关属性或读取失败（未知）。走 cache_only 只读 refresh_camera_online_status
             已填的缓存，不单独打云；缓存空时为 None（未知），刷新后自愈。
         ``in_use``=**当下真正开启**（= 该相机在 select_active 的活跃集里：默认开·未拉黑 +
-        三态满足 + 上限≤4）——离线/不可达/镜头关的相机 in_use=false，不显示为开；超上限的
+        云端在线 + 镜头未关 + 上限≤4）——离线/镜头关的相机 in_use=false；超上限的
         也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
         ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
         ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
@@ -1037,14 +1038,28 @@ class MiotService:
         awake_map = await self._miot_proxy.read_cameras_awake(
             list(cameras.keys()), cache_only=True
         )
-        # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
+        # in_use = 活跃集：与拉流/投喂同一口径（未拉黑 + home + cloud + awake + 上限）。
         active = set(
-            select_active_camera_dids(self._kv_repo, cameras, awake_map=awake_map)
+            select_active_camera_dids(
+                self._kv_repo,
+                cameras,
+                # OT LAN discovery is diagnostic only for cameras.  PPCS can
+                # connect by local_ip (and may relay), so gating the active set
+                # on lan_online would prevent the video handshake itself.
+                require_lan=False,
+                awake_map=awake_map,
+            )
         )
         out: list[dict] = []
         for did, info in cameras.items():
             cloud_online = bool(getattr(info, "online", False))
-            lan_reachable = bool(getattr(info, "lan_online", False))
+            lan_detected = bool(getattr(info, "lan_online", False))
+            # Preserve the raw OT result for diagnostics, but report the
+            # camera as reachable once its PPCS/native session is connected.
+            # The dashboard's historical ``lan_reachable`` name predates the
+            # direct-IP libmiss path and is effectively stream reachability.
+            stream_connected = bool(getattr(info, "connected", False))
+            lan_reachable = lan_detected or stream_connected
             out.append(
                 {
                     "did": did,
@@ -1054,8 +1069,9 @@ class MiotService:
                     "room_name": getattr(info, "room_name", None),
                     "cloud_online": cloud_online,
                     "lan_reachable": lan_reachable,
+                    "lan_detected": lan_detected,
                     "awake": awake_map.get(did),
-                    # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
+                    # 兼容旧字段：云端在线且视频链路可达，不含镜头开关维度。
                     "is_online": cloud_online and lan_reachable,
                     "in_use": did in active,
                     # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。
@@ -1088,17 +1104,16 @@ class MiotService:
 
         if enable_dids:
             in_scope = {d for d in cameras if _in_scope(d)}
-            # 三态门（后端唯一执法点：web 置灰只保护前端，CLI/API 绕过前端全靠这里）。
-            # 开启的相机必须 云端在线 && 局域网可达 && 镜头未关，任一坏都拒、给对应文案。
+            # 开启门（后端唯一执法点：web 置灰只保护前端，CLI/API 绕过前端全靠这里）。
+            # 云端在线 + 镜头未关即可尝试 PPCS。``lan_online`` 只是 MiOT/OT
+            # 发现结果，不是视频链路结果；拿它做硬门会让 libmiss direct-IP/PPCS
+            # 永远没有握手机会。
             # awake 走**新鲜云读**（非 cache_only）——CLI/冷缓存下也能准确挡镜头关。
             # 只拦「开启」；已启用的相机掉线/镜头关仍可被「关闭」(disable 不走这条)。
             awake_map = await self._miot_proxy.read_cameras_awake(sorted(in_scope))
 
             def _cloud(did: str) -> bool:
                 return bool(getattr(cameras[did], "online", False))
-
-            def _lan(did: str) -> bool:
-                return bool(getattr(cameras[did], "lan_online", False))
 
             def _lens_ok(did: str) -> bool:
                 return awake_map.get(did) is not False  # None/True 放行,未知不误杀
@@ -1108,12 +1123,6 @@ class MiotService:
                 raise ValidationException(
                     f"摄像头米家云端离线,无法开启（{cloud_offline}）;请待其上线后再启用"
                 )
-            lan_offline = [d for d in enable_dids if not _lan(d)]
-            if lan_offline:
-                raise ValidationException(
-                    f"摄像头局域网不可达,无法开启（{lan_offline}）;"
-                    "请确认主机与相机在同一局域网后再启用"
-                )
             lens_off = [d for d in enable_dids if not _lens_ok(d)]
             if lens_off:
                 raise ValidationException(
@@ -1121,14 +1130,14 @@ class MiotService:
                     "请先在米家中打开该摄像头镜头后再启用"
                 )
 
-            # 上限检查：数「可用集」而非「意图集」——未拉黑 + 在当前家庭 + 三态好
-            # (云端+局域网+镜头开)。离线/局域网不可达/镜头关的相机**不占名额**（与前端
+            # 上限检查：数「可用集」而非「意图集」——未拉黑 + 在当前家庭 + 云端在线
+            # + 镜头开。离线/镜头关的相机**不占名额**（与前端
             # activeCount 按 in_use=活跃集 计数同口径；也与 list/refresh 的 select_active
             # 一致）。这样不会出现「面板显示有名额、点开启却被后端拒」的口径背离。
             denied = denied_camera_dids(self._kv_repo)
 
             def _usable(did: str) -> bool:
-                return _cloud(did) and _lan(did) and _lens_ok(did)
+                return _cloud(did) and _lens_ok(did)
 
             # 模拟本批操作后的启用集：现状未拉黑的，先去掉本批 disable，再并入本批
             # enable（enable 最后并入 → 与写库顺序一致，矛盾输入 enable 胜出）。

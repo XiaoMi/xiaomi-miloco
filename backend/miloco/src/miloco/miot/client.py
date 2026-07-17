@@ -691,7 +691,17 @@ class MiotProxy:
                 # 相机都不在 active 里 → 不建/已建则销，真正停掉 native 会话与解码。
                 active = set(
                     select_active_camera_dids(
-                        self._kv_repo, cameras, awake_map=self._camera_awake_cache
+                        self._kv_repo,
+                        cameras,
+                        # ``lan_online`` is the MiOT/OT discovery result, not
+                        # the PPCS video-path result.  Some cameras (notably on
+                        # macOS) do not answer OT probes even though libmiss can
+                        # connect directly with the cloud-provided local_ip.
+                        # Requiring LAN discovery here prevents the native
+                        # manager from ever being created, so PPCS never gets a
+                        # chance to establish and the state cannot self-heal.
+                        require_lan=False,
+                        awake_map=self._camera_awake_cache,
                     )
                 )
                 logger.debug(
