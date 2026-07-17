@@ -54,7 +54,7 @@ const __pkgVersion = JSON.parse(
 function resolveAppVersion(command: string): string {
   if (command === "build") {
     // build.sh 经 MILOCO_APP_VERSION 注入 RESOLVED_PEP(与 CLI/Python 包权威版本同源一致)；
-    // 这才是界面该显示的版本。package.json 的 version 只是 npm 装配占位(0.0.0-dev.<sha>)，
+    // 这才是界面该显示的版本。package.json 的 version 只是 npm 装配占位(非权威版本)，
     // 仅当脱离 build.sh 直接 `pnpm build` 时兜底用它。
     return process.env.MILOCO_APP_VERSION || __pkgVersion;
   }

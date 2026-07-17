@@ -217,7 +217,7 @@ build_web() {
         # static_dir,让 backend wheel 打包时一并带上。改 vite outDir 直接指 backend
         # 会跟 dev 期 vite serve 的产物路径冲突,统一用 dist + cp 更清晰。
         # MILOCO_APP_VERSION 注入界面版本(vite define __APP_VERSION__)：用 RESOLVED_PEP,与
-        # CLI/Python 包权威版本同源一致,界面不再显示上面 npm version 的装配占位 0.0.0-dev.<sha>。
+        # CLI/Python 包权威版本同源一致,界面不再依赖上面 npm version 写入的装配占位串。
         MILOCO_APP_VERSION="$RESOLVED_PEP" pnpm build
     )
     restore_pkg_json web/package.json
