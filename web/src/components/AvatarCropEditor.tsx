@@ -180,17 +180,17 @@ export function AvatarCropEditor({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={t("pet.cropTitle")}
+        aria-label={t("avatar.cropTitle")}
         className="w-full max-w-sm bg-bg-secondary border border-border rounded-t-2xl md:rounded-xl shadow-sm p-6 anim-in"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-title text-text-primary">{t("pet.cropTitle")}</h3>
+          <h3 className="text-title text-text-primary">{t("avatar.cropTitle")}</h3>
           <button
             type="button"
             onClick={onCancel}
             className="rounded-full p-1 text-text-secondary hover:text-text-primary"
-            aria-label={t("pet.cancel")}
+            aria-label={t("avatar.cancel")}
           >
             <IconX />
           </button>
@@ -223,11 +223,11 @@ export function AvatarCropEditor({
               }}
             />
           </div>
-          <p className="text-caption text-text-tertiary">{t("pet.cropHint")}</p>
+          <p className="text-caption text-text-tertiary">{t("avatar.cropHint")}</p>
 
           <div className="w-full flex items-center gap-3">
             <span className="text-caption text-text-secondary shrink-0">
-              {t("pet.cropZoom")}
+              {t("avatar.cropZoom")}
             </span>
             <input
               type="range"
@@ -246,7 +246,7 @@ export function AvatarCropEditor({
             disabled={!dims}
             className="w-full py-2 rounded-lg bg-brand-primary text-white hover:bg-brand-accent disabled:opacity-60"
           >
-            {t("pet.cropConfirm")}
+            {t("avatar.cropConfirm")}
           </button>
         </div>
       </div>
