@@ -36,7 +36,7 @@ import signal
 import subprocess
 import sys
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NoReturn
 
@@ -1812,6 +1812,12 @@ def main() -> None:
     plat = Platform.detect(lang_override=args.lang)
     i18n = I18n(plat.lang, Path(__file__).parent)
     ui = UI(i18n)
+
+    # curl|bash 场景 stdin 被 pipe 占用，Platform.detect() 拿到 is_interactive=False。
+    # 主动 open("/dev/tty") 抢回交互能力（下面还会再做一次严格 fallback + fatal 报错，
+    # 这里只是提前，让 _decide_agent_platform 的 platform prompt 能弹出来）。
+    if not plat.is_interactive and _try_tty_fallback():
+        plat = replace(plat, is_interactive=True)
 
     agent_platform = _decide_agent_platform(args, plat, ui)
     miloco_home = Path(
