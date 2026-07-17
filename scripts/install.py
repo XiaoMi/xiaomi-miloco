@@ -254,13 +254,37 @@ class I18n:
 # ---------------------------------------------------------------------------
 
 
+def _force_asyncio_select_selector() -> None:
+    """把 asyncio 默认 event loop 从 KqueueSelector 换成 SelectSelector。
+
+    实测（Python 3.14.6 macOS）：即使 fd 0 是 tty character device，
+    ``KqueueSelector.register(0, EVENT_READ)`` 也稳定返回 ``[Errno 22]
+    Invalid argument``（无论 O_RDONLY / O_RDWR、无论 fd 号）。这是 3.14
+    asyncio KqueueSelector 对 tty fd 的回归。SelectSelector 用 ``select(2)``，
+    对 tty fd 无差别支持。
+
+    install.py 主流程只跑几个 questionary prompt + 下载器 httpx 调用，换
+    selector 对性能无感知影响。
+    """
+    import asyncio
+    import selectors
+
+    class _SelectPolicy(asyncio.DefaultEventLoopPolicy):
+        def new_event_loop(self):
+            return asyncio.SelectorEventLoop(selectors.SelectSelector())
+
+    asyncio.set_event_loop_policy(_SelectPolicy())
+
+
 def _try_tty_fallback() -> bool:
     """把 fd 0 换成 /dev/tty，让 curl|bash 场景下 questionary/prompt_toolkit 能读交互输入。
 
-    仅换 ``sys.stdin`` 对象（原 upstream 做法）不够：prompt_toolkit 在 macOS 上
-    走 kqueue，通过 ``os.dup(0)`` / ``add_reader(fd, ...)`` 直接操作 fd 0；fd 0
-    还是 pipe → ``kevent.control()`` 报 ``OSError: [Errno 22] Invalid argument``。
-    必须用 ``os.dup2(tty_fd, 0)`` 把 fd 0 本身换成 tty character device。
+    仅换 ``sys.stdin`` 对象（原 upstream 做法）不够 —— prompt_toolkit 从
+    ``sys.stdin.fileno()`` 拿 fd 交给 asyncio；macOS 上默认 KqueueSelector
+    对 tty fd 直接 EINVAL（见 ``_force_asyncio_select_selector`` docstring）。
+    双重修补：
+      1. ``os.dup2(tty_fd, 0)`` 把 fd 0 本身换成 tty character device
+      2. macOS 场景顺手把 asyncio selector 换成 SelectSelector 绕开 kqueue
     """
     if sys.stdin.isatty():
         return True
@@ -272,11 +296,12 @@ def _try_tty_fallback() -> bool:
     try:
         tty_fd = os.open(tty_path, os.O_RDONLY)
         try:
-            os.dup2(tty_fd, 0)  # 关键：让 fd 0 本身指向 tty，覆盖 pipe stdin
+            os.dup2(tty_fd, 0)  # 让 fd 0 本身指向 tty，覆盖 pipe stdin
         finally:
             os.close(tty_fd)
-        # 重建 sys.stdin，让 Python 层 IO 也走新的 fd 0
         sys.stdin = os.fdopen(0, "r", closefd=False)
+        if sys.platform == "darwin":
+            _force_asyncio_select_selector()
         return True
     except OSError:
         return False
