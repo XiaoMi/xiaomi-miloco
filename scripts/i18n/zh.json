@@ -17,6 +17,7 @@
   "install.configure_python": "配置 Python 解释器...",
   "install.python_ok": "Python %1 → %2",
   "install.dev_building": "开发模式：正在从源码构建（耗时数分钟）...",
+  "install.version_needs_dev": "--version 仅对 --dev 构建生效；release 安装将忽略该参数",
   "install.downloading_bundle": "正在下载 miloco 安装包...",
   "install.bundle_ok": "miloco 安装包下载完成",
   "install.bundle_failed": "安装包下载失败: %1",

@@ -555,6 +555,7 @@ class Installer:
         account_auth: str | None = None,
         miloco_home: Path,
         skip_openclaw: bool = False,
+        version: str | None = None,
     ) -> None:
         self.platform = plat
         self.ui = ui
@@ -564,6 +565,9 @@ class Installer:
         self.account_auth = account_auth
         self.miloco_home = miloco_home
         self.skip_openclaw = skip_openclaw
+        # 仅 --dev 有意义：透传给 build.sh --version，覆盖本地构建版本号，
+        # 方便指定版本号做本地安装测试（release 通道版本由下载归档决定，此值被忽略）。
+        self.version = version
         self.script_dir = Path(__file__).parent
         # dev 安装源：仓库 dist/（build.sh 产物）；release 下为下载归档解压后的缓存目录。
         self.dist_dir = self.script_dir.parent / "dist"
@@ -625,8 +629,13 @@ class Installer:
         if not build_sh.is_file():
             self.ui.fail(self.ui.i18n.t("error.dev_outside_repo"))
         self.ui.info(self.ui.i18n.t("install.dev_building"))
+        cmd = ["bash", str(build_sh)]
+        # 透传 --version 给 build.sh：本地构建版本号缺省由 setuptools_scm 从 git 派生，
+        # 指定后可覆盖，方便按指定版本号做本地安装测试。
+        if self.version:
+            cmd += ["--version", self.version]
         subprocess.run(
-            ["bash", str(build_sh)],
+            cmd,
             cwd=str(self.script_dir.parent),
             check=True,
         )
@@ -1543,6 +1552,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Dev install: build from source (scripts/build.sh) then install from dist/",
     )
+    parser.add_argument(
+        "--version",
+        dest="version",
+        default=None,
+        metavar="VER",
+        help="Override build version, forwarded to scripts/build.sh --version "
+        "(only takes effect with --dev; ignored for release install)",
+    )
     parser.add_argument("--lang", default=None, help="Language (en/zh)")
     parser.add_argument(
         "--omni-api-key",
@@ -1608,6 +1625,11 @@ def main() -> None:
     i18n = I18n(plat.lang, Path(__file__).parent)
     ui = UI(i18n)
 
+    # --version 只在 --dev 本地构建时透传给 build.sh；release 通道版本由下载归档决定，
+    # 此时给了也无效，提前 warn 避免住户误以为能指定 release 版本。
+    if args.version and not args.dev:
+        ui.warn(ui.i18n.t("install.version_needs_dev"))
+
     # Agent mode: --agent-prepare or --agent-finish implies non-interactive agent flow
     if args.agent_prepare or args.agent_finish:
         downloader = Downloader()
@@ -1620,6 +1642,7 @@ def main() -> None:
             account_auth=args.account_auth,
             miloco_home=miloco_home,
             skip_openclaw=args.skip_openclaw,
+            version=args.version,
         )
         atexit.register(installer._stop_service)
         atexit.register(installer._cleanup_install_cache)
@@ -1668,6 +1691,7 @@ def main() -> None:
         account_auth=args.account_auth,
         miloco_home=miloco_home,
         skip_openclaw=args.skip_openclaw,
+        version=args.version,
     )
 
     atexit.register(installer._stop_service)

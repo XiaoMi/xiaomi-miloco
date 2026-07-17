@@ -17,6 +17,7 @@
   "install.configure_python": "Configuring Python interpreter...",
   "install.python_ok": "Python %1 → %2",
   "install.dev_building": "Dev mode: building from source (takes a few minutes)...",
+  "install.version_needs_dev": "--version only applies to --dev builds; ignoring it for release install",
   "install.downloading_bundle": "Downloading miloco package...",
   "install.bundle_ok": "miloco package downloaded",
   "install.bundle_failed": "Package download failed: %1",
