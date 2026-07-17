@@ -49,6 +49,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.perception.engine.identity import _avatar
 from miloco.perception.engine.identity._image_utils import (
     hamming as _hamming,
 )
@@ -550,6 +551,28 @@ class IdentityLibrary:
         """该 person 在文件层是否已有目录(已注册样本/meta)。封装 persons_dir/<id> 布局,
         供调用方做"无样本 person 不建目录"之类的守卫, 不必自己拼内部路径。"""
         return (self.persons_dir / person_id).is_dir()
+
+    # ── 显式头像（展示层）────────────────────────────────────────────────────
+    # 落点 <root>/avatars/persons/<id>.<ext>，与 tier_a/tier_c 识别数据分离；**不建
+    # persons/<id>/ 目录**——给没录入的人设头像也不会让空目录进 list_persons、
+    # 从而不扰动 IdentityEngine 的 person 快照。展示优先级由调用方决定（显式头像 >
+    # 否则回落 tier_a face[0]），见 person/router 的 GET /avatar。
+
+    def person_avatar_path(self, person_id: str) -> Path | None:
+        """显式头像文件路径（无则 None）。"""
+        return _avatar.avatar_path(self.root, "persons", person_id)
+
+    def set_person_avatar(self, person_id: str, data: bytes, ext: str) -> str:
+        """写显式头像，返回规范化后的 ext。"""
+        return _avatar.set_avatar(self.root, "persons", person_id, data, ext)
+
+    def clear_person_avatar(self, person_id: str) -> None:
+        """清显式头像（"恢复默认"→下次读取回落 face[0]）。"""
+        _avatar.remove_avatar(self.root, "persons", person_id)
+
+    def list_person_avatar_exts(self) -> dict[str, str]:
+        """一次扫描返回 ``{person_id: ext}``，供 list_persons 批量填 avatar_ext。"""
+        return _avatar.list_avatar_exts(self.root, "persons")
 
     def add_face_only_sample(self, person_id: str, face_crop, source: str = "user_upload") -> bool:
         """只写一张 face_*.png + sidecar, 绕过 add_tier_a_sample 的"必须有 body"约束。

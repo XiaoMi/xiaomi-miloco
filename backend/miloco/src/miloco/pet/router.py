@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from miloco.config import get_settings
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
+from miloco.perception.engine.identity import _avatar
 from miloco.perception.engine.identity.pet_library import (
     PetNameConflict,
     get_pet_library,
@@ -30,12 +31,6 @@ from miloco.schema.common_schema import NormalResponse
 router = APIRouter(prefix="/identity", tags=["Pet"])
 
 _PET_ID_RE = re.compile(r"^pet_[0-9a-f]{12}$")
-_AVATAR_MEDIA = {
-    "jpg": "image/jpeg",
-    "jpeg": "image/jpeg",
-    "png": "image/png",
-    "webp": "image/webp",
-}
 
 
 class PetCreate(BaseModel):
@@ -184,9 +179,7 @@ async def get_pet_avatar(pet_id: str, current_user: str = Depends(verify_token))
     if path is None:
         raise HTTPException(status_code=404, detail="avatar 不存在")
     ext = path.suffix.lstrip(".").lower()
-    return FileResponse(
-        str(path), media_type=_AVATAR_MEDIA.get(ext, "application/octet-stream")
-    )
+    return FileResponse(str(path), media_type=_avatar.media_type(ext))
 
 
 @router.post(

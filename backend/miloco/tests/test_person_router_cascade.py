@@ -43,8 +43,12 @@ def calls(monkeypatch):
     )
     monkeypatch.setattr(
         prouter, "_get_identity_library",
-        lambda: SimpleNamespace(delete_person=lambda pid: rec["lib_delete"].append(pid)),
+        lambda: SimpleNamespace(
+            delete_person=lambda pid: rec["lib_delete"].append(pid),
+            clear_person_avatar=lambda pid: rec["clear_avatar"].append(pid),
+        ),
     )
+    rec["clear_avatar"] = []
     return rec
 
 
@@ -53,6 +57,8 @@ async def test_delete_person_cascades_remove_subject(calls):
     assert res.code == 0
     assert calls["lib_delete"] == [_PID]
     assert calls["remove"] == [_PID]
+    # 级联清显式头像（avatars/persons/<id>.*，不在 persons/<id>/ 内）
+    assert calls["clear_avatar"] == [_PID]
 
 
 async def test_update_person_cascades_commit(calls):

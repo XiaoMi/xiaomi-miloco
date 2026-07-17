@@ -3,8 +3,9 @@
 
 """宠物花名册（PetLibrary）—— 宠物作为「非人家庭成员」的轻量身份壳存取。
 
-落点：``<identity_lib_root>/pets/<pet_id>/{meta.json, avatar.<ext>}``，与人类样本
-目录 ``<root>/persons/`` 并列（存储整齐）。
+落点：``<identity_lib_root>/pets/<pet_id>/{meta.json, ref_crop_*.jpg}``，与人类样本
+目录 ``<root>/persons/`` 并列（存储整齐）。展示头像不在此——统一落
+``<root>/avatars/pets/<pet_id>.<ext>``（见 ``_avatar``，展示层与识别数据分离）。
 
 **红线**：本模块只做文件存取，**不接 IdentityEngine / ReID / 身份状态机 / person
 表**。``IdentityLibrary`` 只遍历 ``root/persons``、从不遍历 ``root`` 本身，故
@@ -28,13 +29,11 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from miloco.config.settings import register_reset_hook
+from miloco.perception.engine.identity import _avatar
 from miloco.perception.engine.identity.config_loader import resolve_library_root
 from miloco.utils.time_utils import now_iso
 
 logger = logging.getLogger(__name__)
-
-# 头像允许的图片扩展名（小写、无点）
-_AVATAR_EXTS = frozenset({"jpg", "jpeg", "png", "webp"})
 
 # 参考 crop（③ 识别的多姿态参照图）存储上限
 _MAX_REF_CROPS = 3
@@ -63,15 +62,6 @@ class PetNameConflict(ValueError):
 
 def _gen_pet_id() -> str:
     return f"pet_{secrets.token_hex(6)}"
-
-
-def _normalize_avatar_ext(ext: str) -> str:
-    e = (ext or "").lower().lstrip(".")
-    if e not in _AVATAR_EXTS:
-        raise ValueError(
-            f"不支持的头像格式: {ext!r}（允许 {sorted(_AVATAR_EXTS)}）"
-        )
-    return e
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -209,36 +199,31 @@ class PetLibrary:
     def delete(self, pet_id: str) -> bool:
         with self._lock:
             d = self._pet_dir(pet_id)
-            if not d.exists():
-                return False
-            shutil.rmtree(d, ignore_errors=True)
-            logger.info("宠物已删除: id=%s", pet_id)
-            return True
+            existed = d.exists()
+            if existed:
+                shutil.rmtree(d, ignore_errors=True)
+            # 头像在 <root>/avatars/pets/ 内（不在 pet 目录下），须显式清、否则残留孤儿。
+            _avatar.remove_avatar(self.root, "pets", pet_id)
+            if existed:
+                logger.info("宠物已删除: id=%s", pet_id)
+            return existed
 
     def set_avatar(self, pet_id: str, data: bytes, ext: str) -> Pet:
-        norm_ext = _normalize_avatar_ext(ext)
-        if not data:
-            raise ValueError("头像数据为空")
+        # 头像落点 <root>/avatars/pets/<id>.<ext>（展示层，与识别数据分离）。
+        # 顺序保证「meta.avatar_ext 始终指向一个存在的头像文件」：先原子落新图 +
+        # 清旧扩展名，再让 meta 指向它——中断也不会出现「meta 指向已删文件」的窗口。
         with self._lock:
             pet = self.get(pet_id)
             if pet is None:
                 raise KeyError(pet_id)
-            # 顺序保证「meta 始终指向一个存在的头像文件」：先落新图（原子），
-            # 再让 meta 指向它，最后清理其它扩展名的旧图——任一步中断都不会
-            # 出现「meta 指向已删文件」的窗口。
-            _atomic_write(self._pet_dir(pet_id) / f"avatar.{norm_ext}", data)
+            norm_ext = _avatar.set_avatar(self.root, "pets", pet_id, data, ext)
             pet.avatar_ext = norm_ext
             pet.updated_at = now_iso()
             self._write_meta(pet)
-            self._remove_avatar_files(pet_id, keep=norm_ext)
             return pet
 
     def avatar_path(self, pet_id: str) -> Path | None:
-        pet = self.get(pet_id)
-        if pet is None or not pet.avatar_ext:
-            return None
-        p = self._pet_dir(pet_id) / f"avatar.{pet.avatar_ext}"
-        return p if p.is_file() else None
+        return _avatar.avatar_path(self.root, "pets", pet_id)
 
     # ── 参考 crop（③ 多姿态参照图）────────────────────────────────────────
 
@@ -327,19 +312,6 @@ class PetLibrary:
             self._meta_path(pet.id),
             pet.model_dump_json(indent=2).encode("utf-8"),
         )
-
-    def _remove_avatar_files(self, pet_id: str, keep: str | None = None) -> None:
-        d = self._pet_dir(pet_id)
-        if not d.is_dir():
-            return
-        keep_name = f"avatar.{keep}" if keep else None
-        for f in d.glob("avatar.*"):
-            if keep_name and f.name == keep_name:
-                continue
-            try:
-                f.unlink()
-            except OSError:  # noqa: PERF203
-                logger.warning("删除旧头像失败: %s", f, exc_info=True)
 
 
 @functools.lru_cache(maxsize=1)
