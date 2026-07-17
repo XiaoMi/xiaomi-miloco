@@ -712,18 +712,28 @@ PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 # 跳过条件：MILOCO_HOME/models/det_4C.onnx 已存在（用户已装）。
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
 
-# 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
-# 安装到 ~/.hermes/plugins/miloco/ 后 $HERE 不再指向 git checkout，
-# 但 pip install -e 的 miloco 包内 models/ 仍可达，以此兜底。
-MODEL_SRC="$HERE/../../backend/miloco/src/miloco/perception/models"
-if [ ! -d "$MODEL_SRC" ]; then
-  MODEL_SRC=$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)
+# Release 装机场景 install.py step 7「准备感知模型」已经从 miloco-models-*.tar.gz
+# 解压 5 个 ONNX 到 $MILOCO_HOME/models/。本步只是 dev/fork 场景的兜底（从 git
+# checkout 或 miloco 包内 cp），已经有模型就跳过 fork/pkg 搜索，避免误报
+# 「找不到 ONNX 模型源目录」。
+if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
+  onnx_count=$(ls "$MILOCO_HOME/models"/*.onnx 2>/dev/null | wc -l | tr -d ' ')
+  info "  $MILOCO_HOME/models/ 已有 $onnx_count 个 ONNX 模型（install.py step 7 已解压 release tarball），跳过 fork/pkg 兜底"
+  MODEL_SRC=""
+else
+  # 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
+  # 安装到 ~/.hermes/plugins/miloco/ 后 $HERE 不再指向 git checkout，
+  # 但 pip install -e 的 miloco 包内 models/ 仍可达，以此兜底。
+  MODEL_SRC="$HERE/../../backend/miloco/src/miloco/perception/models"
+  if [ ! -d "$MODEL_SRC" ]; then
+    MODEL_SRC=$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)
+  fi
 fi
-if [ ! -d "$MODEL_SRC" ]; then
+if [ -n "$MODEL_SRC" ] && [ ! -d "$MODEL_SRC" ]; then
   warn "找不到 ONNX 模型源目录（fork 仓库 & miloco 包内均无）"
   warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
   warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
-else
+elif [ -n "$MODEL_SRC" ]; then
   mkdir -p "$MILOCO_HOME/models"
   # 同步 .onnx + .json（bge tokenizer）；已存在的不覆盖（保留用户手动调整）
   synced=0
