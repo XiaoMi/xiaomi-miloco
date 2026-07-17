@@ -428,8 +428,10 @@ case "${SHELL:-}" in
   */bash) SHELL_RC="$HOME/.bashrc" ;;
   *)      SHELL_RC="$HOME/.bashrc" ;;  # 兜底 bash
 esac
-if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.hermes/miloco" ]; then
-  # 用户用了非默认路径，持久化
+if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.openclaw/miloco" ]; then
+  # miloco-plugin/paths.py fallback = ~/.openclaw/miloco；只有 MILOCO_HOME 恰好等于
+  # fallback 时才不用写 shell rc（gateway 读不到 env 也会 fallback 到同一路径）。
+  # 其余情况（含默认 ~/.hermes/miloco）都必须持久化，否则新 shell 会走错路径。
   if [ -n "$SHELL_RC" ] && [ -f "$SHELL_RC" ] && ! grep -q "export MILOCO_HOME=" "$SHELL_RC" 2>/dev/null; then
     echo "" >> "$SHELL_RC"
     echo "# miloco Hermes 兼容层" >> "$SHELL_RC"
@@ -441,8 +443,8 @@ fi
 # --- 1.75 MILOCO_HOME 也写进 ~/.hermes/.env ---
 # Hermes gateway 由 launchd plist 直接拉起，不 source shell rc，
 # 但会通过 load_hermes_dotenv 加载 $HERMES_HOME/.env。
-# 不写这条的话 trace.py 路径解析会退回默认值 ~/.hermes/miloco。
-if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.hermes/miloco" ]; then
+# 不写这条的话 miloco-plugin/paths.py 路径解析会退回默认值 ~/.openclaw/miloco。
+if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.openclaw/miloco" ]; then
   touch "$HERMES_HOME/.env"
   chmod 600 "$HERMES_HOME/.env"
   if grep -q '^MILOCO_HOME=' "$HERMES_HOME/.env" 2>/dev/null; then
