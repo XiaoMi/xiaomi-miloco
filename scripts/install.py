@@ -255,7 +255,13 @@ class I18n:
 
 
 def _try_tty_fallback() -> bool:
-    """Attempt /dev/tty fallback. Returns True if stdin is now interactive."""
+    """把 fd 0 换成 /dev/tty，让 curl|bash 场景下 questionary/prompt_toolkit 能读交互输入。
+
+    仅换 ``sys.stdin`` 对象（原 upstream 做法）不够：prompt_toolkit 在 macOS 上
+    走 kqueue，通过 ``os.dup(0)`` / ``add_reader(fd, ...)`` 直接操作 fd 0；fd 0
+    还是 pipe → ``kevent.control()`` 报 ``OSError: [Errno 22] Invalid argument``。
+    必须用 ``os.dup2(tty_fd, 0)`` 把 fd 0 本身换成 tty character device。
+    """
     if sys.stdin.isatty():
         return True
     if sys.platform == "win32":
@@ -264,8 +270,13 @@ def _try_tty_fallback() -> bool:
     if not os.path.exists(tty_path):
         return False
     try:
-        tty_file = open(tty_path)  # noqa: SIM115
-        sys.stdin = tty_file
+        tty_fd = os.open(tty_path, os.O_RDONLY)
+        try:
+            os.dup2(tty_fd, 0)  # 关键：让 fd 0 本身指向 tty，覆盖 pipe stdin
+        finally:
+            os.close(tty_fd)
+        # 重建 sys.stdin，让 Python 层 IO 也走新的 fd 0
+        sys.stdin = os.fdopen(0, "r", closefd=False)
         return True
     except OSError:
         return False
