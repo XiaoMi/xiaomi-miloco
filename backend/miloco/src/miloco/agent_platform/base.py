@@ -93,7 +93,7 @@ SystemPromptBuilder = Callable[[str, dict[str, Any]], str]
 
 
 class AdapterTransportError(Exception):
-    """Adapter 传输失败(连接 / 5xx / HTTP 超时)。dispatcher 捕获后有限重试。"""
+    """Adapter 传输失败(连接 / 5xx / HTTP 超时)。dispatcher 捕获后跳过该批,不重试。"""
 
 
 class AdapterTransientError(Exception):
