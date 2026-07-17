@@ -16,37 +16,37 @@ from miloco.perception.engine.omni.field_registry import (
 )
 
 
-def test_pet_rule_appended_when_has_pets_video():
-    spec = render_field_spec(SceneDescriptor(route="video", has_pets=True))
-    assert "## 宠物命名" in spec
-    # 软化后的门槛：主特征吻合且名单内唯一即可叫名（不再要求逐项显著标记）
-    assert "主要可观察特征" in spec
+def test_pet_field_and_naming_when_has_pets_video():
+    # P3：has_pets && video → pet_identities 结构化字段（弃权纪律）进 schema+spec，
+    # 且追加「## 宠物称呼」派生规则（caption/suggestions/matched_rules 从 pet_identities 派生）。
+    on = SceneDescriptor(route="video", has_pets=True)
+    spec = render_field_spec(on)
+    assert "## pet_identities" in spec  # 结构化字段 spec（唯一真源）
+    assert "## 宠物称呼" in spec  # 派生规则
+    assert "疑似" in spec  # mid → 疑似档
+    assert '"pet_identities"' in render_schema(on)  # 进 JSON schema
 
 
-def test_pet_rule_absent_when_no_pets():
-    spec = render_field_spec(SceneDescriptor(route="video", has_pets=False))
-    assert "## 宠物命名" not in spec
+def test_pet_field_and_naming_absent_when_no_pets():
+    off = SceneDescriptor(route="video", has_pets=False)
+    spec = render_field_spec(off)
+    assert "## pet_identities" not in spec and "## 宠物称呼" not in spec
+    assert '"pet_identities"' not in render_schema(off)
 
 
-def test_pet_rule_absent_on_audio_route_even_if_has_pets():
-    # 宠物命名是视觉判断，audio 路由（无 caption）即便 has_pets 也不注入
+def test_pet_absent_on_audio_route_even_if_has_pets():
+    # pet_identities requires_video；「## 宠物称呼」仅 video 追加 → audio 两者皆无
     spec = render_field_spec(SceneDescriptor(route="audio", has_pets=True))
-    assert "## 宠物命名" not in spec
+    assert "## pet_identities" not in spec and "## 宠物称呼" not in spec
+    assert '"pet_identities"' not in render_schema(SceneDescriptor(route="audio", has_pets=True))
 
 
-def test_render_schema_unaffected_by_has_pets():
-    # 宠物命名是内容纪律、非新输出字段 → JSON schema 不随 has_pets 变化
-    on = SceneDescriptor(route="video", has_pets=True)
-    off = SceneDescriptor(route="video", has_pets=False)
-    assert render_schema(on) == render_schema(off)
-
-
-def test_selected_fields_unaffected_by_has_pets():
-    on = SceneDescriptor(route="video", has_pets=True)
-    off = SceneDescriptor(route="video", has_pets=False)
-    assert [f.name for f in on.selected_fields()] == [
-        f.name for f in off.selected_fields()
-    ]
+def test_pet_identities_field_gated_by_has_pets():
+    # pet_identities 现是真字段：仅 has_pets 时进 selected_fields，且置于 caption 前；其余字段不变
+    on = [f.name for f in SceneDescriptor(route="video", has_pets=True).selected_fields()]
+    off = [f.name for f in SceneDescriptor(route="video", has_pets=False).selected_fields()]
+    assert on == ["pet_identities", *off]
+    assert "pet_identities" not in off
 
 
 def test_home_profile_has_pets_true_when_section_present(monkeypatch):
