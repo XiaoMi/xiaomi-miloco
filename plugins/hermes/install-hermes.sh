@@ -641,6 +641,8 @@ find "$HERMES_PLUGINS_DIR" -type d -name __pycache__ -prune -exec rm -rf {} + 2>
 "$PYTHON" -m compileall -q "$HERMES_PLUGINS_DIR/miloco-plugin" 2>/dev/null || true
 fi
 mark_done 4
+
+# --- 4.x 部署 AgentPlatformAdapter 到 MILOCO_HOME ---
 # backend loader (backend/miloco/src/miloco/agent_platform/loader.py) 按
 # settings.agent.platform 从 $MILOCO_HOME/agent_platform/<name>/ 加载 adapter.py,
 # submodule_search_locations 指向该目录,所以 adapter.py 内 from .xxx import 的
