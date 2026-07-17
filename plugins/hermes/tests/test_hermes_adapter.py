@@ -440,26 +440,41 @@ async def test_send_turn_connect_timeout_raises(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_send_turn_closes_client_on_every_exit(monkeypatch):
-    """无论哪个出口，client.aclose 都被调 1 次"""
-    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+@pytest.mark.parametrize("exit_kind", ["ok_2xx", "timeout", "transport_error"])
+async def test_send_turn_closes_client_on_every_exit(monkeypatch, exit_kind):
+    """无论哪个出口（2xx / timeout / transport-error），client.aclose 都恰好被调 1 次。
+
+    aclose 由 send_turn 内部 try/finally 兜底；transport-error 走重试 2 次也只关 1 次。
+    """
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter, AdapterTransportError
     import httpx
 
     aclose_count = [0]
     async def fake_aclose(self):
         aclose_count[0] += 1
 
-    async def fake_post(self, url, **kw):
-        resp = mock.MagicMock()
-        resp.status_code = 200
-        return resp
+    if exit_kind == "ok_2xx":
+        async def fake_post(self, url, **kw):
+            resp = mock.MagicMock()
+            resp.status_code = 200
+            return resp
+    elif exit_kind == "timeout":
+        async def fake_post(self, url, **kw):
+            raise httpx.TimeoutException("read timeout")
+    else:  # transport_error → 重试耗尽后抛 AdapterTransportError
+        async def fake_post(self, url, **kw):
+            raise httpx.ConnectError("connect refused")
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
     monkeypatch.setattr(httpx.AsyncClient, "aclose", fake_aclose)
 
     a = Adapter()
-    await a.send_turn(_fake_ctx("ok"))
-    assert aclose_count[0] == 1
+    if exit_kind == "transport_error":
+        with pytest.raises(AdapterTransportError):
+            await a.send_turn(_fake_ctx("probe"))
+    else:
+        await a.send_turn(_fake_ctx("probe"))
+    assert aclose_count[0] == 1, f"exit={exit_kind} aclose 应恰好 1 次，实际 {aclose_count[0]}"
 
 
 def _fake_ctx(text: str, trace_id: str = "tr-test", lane: str = "miloco-interactive"):
