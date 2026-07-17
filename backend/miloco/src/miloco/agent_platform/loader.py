@@ -150,7 +150,7 @@ def load_adapter(adapter_name: Optional[str] = None) -> AgentPlatformAdapter:
         return _cached_adapter
     except Exception as exc:
         # 故意宽捕获：动态 importlib 加载第三方插件，任何异常都兜底到 WebhookAdapter
-        logger.warning(
+        logger.error(
             "agent adapter '%s' 加载失败:%s,使用内置 WebhookAdapter 兜底", name, exc,
         )
         from miloco.agent_platform.base import WebhookAdapter
