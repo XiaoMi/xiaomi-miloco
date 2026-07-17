@@ -383,8 +383,7 @@ def test_push(ctx: Any, message: Optional[str] = None) -> Dict[str, Any]:
         "如果你在 IM 看到这条说明推送链路完整。"
     )
     try:
-        # M2 协议下 case 2 走两回合握手，自动提供 bindHint 触发投递
-        result = tn.notify_owner(ctx, msg, bind_hint="[test_push 自动 bind]")
+        result = tn.notify_owner(ctx, msg, allow_fallback_deliver=True)
     except Exception as exc:  # noqa: BLE001
         logger.exception("miloco_test_push 失败: %s", exc)
         return {"ok": False, "error": f"internal error: {exc}"}

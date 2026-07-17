@@ -15,8 +15,9 @@ Adapter 实现由 Plugin 侧提供,随插件打包,装到
 
 **duck typing 校验**:
 - Plugin 的 adapter.py **不强制** import 后端的 ABC(避免 plugin 依赖 backend wheel)
-- Loader 用 ``hasattr`` 检查 ``send_turn`` / ``read_trace_meta`` / ``name``,
-  ``aclose`` / ``name`` 五个接口,缺一即失败
+- Loader 用 ``hasattr`` 检查 ``name`` / ``send_turn`` / ``read_trace_meta``
+  三个接口,缺一即失败
+- ``aclose`` 在 base.py 有默认实现,plugin 可不实现(非必需)
 - 这样 plugin 实现可零依赖 backend,但必须实现约定的方法集
 
 **MILOCO_HOME 解析**:

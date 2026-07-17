@@ -68,7 +68,7 @@ jobs:
         with:
           enable-cache: true
       - name: hermes 插件测试
-        run: uv run --with pytest --with httpx python -m pytest plugins/hermes/tests/ -v
+        run: uv run --with pytest --with httpx --with anyio python -m pytest plugins/hermes/tests/ -v
 
   web-test:
     runs-on: ubuntu-latest

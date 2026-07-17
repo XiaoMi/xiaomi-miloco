@@ -4,17 +4,24 @@ miloco-plugin 目录名含连字符，不是合法 Python 包名，Hermes 走路
 但 pytest 直接 import 不行——这里用 importlib 以唯一别名装载，让相对导入
 (``from .catalog import ...``) 能解析。
 """
-
 from __future__ import annotations
 
 import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 TESTS_DIR = Path(__file__).resolve().parent
 HERMES_DIR = TESTS_DIR.parent  # plugins/hermes/
 
 _PLUGIN_DIR = HERMES_DIR / "miloco-plugin"
+
+
+@pytest.fixture
+def anyio_backend():
+    """固定 anyio 后端，避免 CI 隐式依赖。"""
+    return "asyncio"
 
 
 def _load_pkg(alias: str, pkg_dir: Path) -> None:

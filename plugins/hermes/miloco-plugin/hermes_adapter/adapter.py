@@ -327,7 +327,17 @@ class Adapter:
                         json=body, headers=headers, timeout=timeout_s,
                     )
                     break
+                except httpx.ConnectTimeout:
+                    # TCP 握手超时：请求**未到达** Hermes，平台不可达
+                    if attempt < max_retries:
+                        logger.warning(
+                            "[hermes adapter] ← Hermes ConnectTimeout retry %d/%d session=%s",
+                            attempt + 1, max_retries, session_id,
+                        )
+                        continue
+                    raise AdapterTransportError("ConnectTimeout: Hermes 不可达") from None
                 except httpx.TimeoutException:
+                    # ReadTimeout 等：请求已到 Hermes、turn 跑太久
                     logger.warning(
                         "[hermes adapter] ← Hermes TIMEOUT session=%s timeout=%.1fs",
                         session_id, timeout_s,

@@ -264,6 +264,19 @@ def test_test_push_no_target_returns_clear_error(tmp_path: Path, monkeypatch):
     assert "needsBind" in result["error"] or result.get("needsBind") is True
 
 
+def test_test_push_case2_fallback_delivers(tmp_path: Path, monkeypatch):
+    """case 2：无 state.json 但探测到已连 IM → test_push 仍应直发成功（防 M2 回归）。"""
+    ctx = _FakeCtx(tmp_path)  # 无 state.json
+    monkeypatch.setattr(ts.tn, "_detect_im_platforms_simple", lambda: ["feishu"])
+    state = _patch_hermes_send(
+        monkeypatch, payload={"success": True, "platform": "feishu"}
+    )
+    result = ts.test_push(ctx)
+    assert result["ok"] is True
+    assert result["platform"] == "feishu"
+    assert state["last_cmd"][3] == "feishu"
+
+
 def test_test_push_success(tmp_path: Path, monkeypatch):
     (tmp_path / "state.json").write_text(
         json.dumps({"deliver": {"target": "feishu"}}), encoding="utf-8"

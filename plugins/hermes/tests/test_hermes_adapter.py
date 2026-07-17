@@ -419,6 +419,27 @@ async def test_send_turn_adds_idempotency_key(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_send_turn_connect_timeout_raises(monkeypatch):
+    """ConnectTimeout（TCP 握手超时，请求未达）→ AdapterTransportError，不是 timeout 状态。
+
+    与 ReadTimeout（请求已到、turn 跑太久）区分：前者 dispatcher 该当传输错误丢 batch，
+    不该误标 delivered=True 让 onboarding 漏发。
+    """
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter, AdapterTransportError
+    import httpx
+
+    async def fake_post(self, url, **kw):
+        raise httpx.ConnectTimeout("connect timeout")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", mock.AsyncMock())
+
+    a = Adapter()
+    with pytest.raises(AdapterTransportError):
+        await a.send_turn(_fake_ctx("ping"))
+
+
+@pytest.mark.anyio
 async def test_send_turn_closes_client_on_every_exit(monkeypatch):
     """无论哪个出口，client.aclose 都被调 1 次"""
     from miloco_plugin_pkg.hermes_adapter.adapter import Adapter

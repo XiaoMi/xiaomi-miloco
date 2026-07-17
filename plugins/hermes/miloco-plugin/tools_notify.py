@@ -1,7 +1,8 @@
 """miloco_im_push 通知投递。
 
-对齐 OpenClaw 版 ``subagent.run({deliver:true})`` 的体验：装好就能用，cron
+对齐 OpenClaw 版 ``subagent.run({deliver:true})`` 的体验：显式配置（case 1）场景下装好就能用，cron
 场景下也能自动投递，不需要 LLM 配合做"两段式 bind"。
+未显式配但有 fallback 渠道（case 2）走两回合 bindHint 协议。
 
 **投递路径**：读插件 state.json 里的 ``deliver.target``（格式
 ``platform[:chat_id[:thread_id]]``，对齐 Hermes 官方 ``hermes send`` CLI 的 ``--to`` 参数格式），通过
@@ -31,15 +32,15 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # 与 OpenClaw notify.ts BIND_HINT_EXAMPLE 对齐，agent 按 bindHintExample 翻译
-# 成用户语言后作为 bindHint 传回。
+# 成用户语言后作为 bindHint 传回。当前只覆盖两个产出路径：
+# - "not_configured"：case 2（未显式配 deliver.target 但有 fallback 渠道）
+# - "no_platform"：case 3（任何 IM 平台都没连）
+# "configured_but_invalid"（曾配置但凭证失效）暂无产出路径，待
+# resolve_notify_target 增加对应检测分支后再补回。
 BIND_HINT_EXAMPLE: Dict[str, str] = {
     "not_configured": (
         "您尚未设置 Miloco 通知频道，本条消息已临时发送到最近活跃的对话。"
         "回复「绑定通知频道」即可将后续通知切换到您想要的渠道。"
-    ),
-    "configured_but_invalid": (
-        "您原先绑定的 Miloco 通知频道已失效（可能是渠道凭证过期或被移除）。"
-        "请您重新设置通知频道：告诉助理「重新绑定通知频道」，或在本平台设置中更新凭证后回复。"
     ),
     "no_platform": (
         "您的设备上尚未连接任何 IM 平台（飞书/微信/Telegram 等），"
@@ -299,16 +300,25 @@ def _deliver_via_hermes_send(target: str, body: str) -> Dict[str, Any]:
     return {"ok": False, "error": err_msg}
 
 
-def notify_owner(ctx: Any, message: str, *, bind_hint: Optional[str] = None) -> Dict[str, Any]:
+def notify_owner(
+    ctx: Any,
+    message: str,
+    *,
+    bind_hint: Optional[str] = None,
+    allow_fallback_deliver: bool = False,
+) -> Dict[str, Any]:
     """投递入口。与 OpenClaw 版 ``notifyOwner`` 行为对齐。
 
     target 解析顺序：
-    1. state.json::deliver.target（显式配置，优先）
-    2. runtime fallback：``resolve_notify_target`` 扫 channel_directory.json
-    3. 没有 → needsBind=true，返回让 agent 调 miloco_notify_bind
+    1. state.json::deliver.target（显式配置，优先）→ needsBind=False 直接投递
+    2. 未显式配但探测到已连 IM 渠道 → needsBind=True + target=fallback，
+       等 agent 两回合握手把 bindHint 拼到消息后投递（方案 A 行为）
+    3. 任何 IM 平台都没连 → needsBind=True + target=None，
+       引导用户去连平台，agent 不必再调本工具
 
-    若 needsBind=true 且 agent 传了 bind_hint：将 bind_hint 附在消息末尾后
-    投递，让用户知道通知已发到临时渠道。
+    bind_hint 已传（agent 第二回合）：
+    - target 非空 → 拼接 "message\\n---\\nbindHint" 投递到该渠道
+    - target 为空 → 报错"已附 bindHint 但仍无投递目标"（agent 该停手了）
 
     ``target == "all"`` → fanout：遍历 state.json::deliver.candidates 逐个
     投递。Hermes 原生 cron 的 ``Deliver: all`` 是这语义，但 hermes send CLI
@@ -316,6 +326,10 @@ def notify_owner(ctx: Any, message: str, *, bind_hint: Optional[str] = None) -> 
     """
     resolved = resolve_notify_target(ctx)
     bind_reason = resolved.get("bindReason")
+    target = resolved.get("target")
+    # allow_fallback_deliver=true（test_push 等）即使走 needsBind 也直发干净正文
+    if allow_fallback_deliver and target:
+        return _deliver_via_hermes_send(target, message)
     if resolved.get("needsBind"):
         if bind_hint:
             message = f"{message}\n---\n{bind_hint}"
@@ -327,16 +341,25 @@ def notify_owner(ctx: Any, message: str, *, bind_hint: Optional[str] = None) -> 
                 "bindReason": bind_reason,
                 "error": "已附 bindHint 但仍无投递目标——请先通过 miloco_notify_bind 设置通知渠道",
             }
+        # 无 bindHint：给 agent 返回握手引导
+        # no_platform 场景下 target=None，不必再试一次（注定失败），
+        # 直接告诉用户去连 IM 平台；其他 bindReason 才驱动重试
+        next_action = (
+            "请告知用户在 Hermes 中连接至少一个 IM 平台（飞书/微信/Telegram 等），"
+            "本工具当前无投递目标——无需再次调用本工具。"
+            if bind_reason == "no_platform"
+            else (
+                "立即再次调用 miloco_im_push：message 保持本次内容不变，"
+                "并补上 bindHint 参数（把 bindHintExample 翻译成用户当前使用的语言后传入）。"
+            )
+        )
         return {
             "ok": False,
             "needsBind": True,
             "bindReason": bind_reason,
             "target": resolved.get("target"),
             "bindHintExample": BIND_HINT_EXAMPLE.get(bind_reason or "not_configured", ""),
-            "nextAction": (
-                "立即再次调用 miloco_im_push：message 保持本次内容不变，"
-                "并补上 bindHint 参数（把 bindHintExample 翻译成用户当前使用的语言后传入）。"
-            ),
+            "nextAction": next_action,
             "error": "通知渠道未绑定——请按 bindHintExample/nextAction 指引操作",
         }
     target = resolved.get("target")
