@@ -779,23 +779,27 @@ if [ -f "$MILOCO_HOME/config.json" ]; then
   fi
 fi
 
-# 走 CLI 写(Author #7:插件不碰 config.json 结构)
-if miloco-cli config set agent.webhook_url "$WEBHOOK_URL" 2>&1 | tail -3; then
-  info "  webhook_url = $WEBHOOK_URL (via miloco-cli config set)"
+# 走 CLI 写(Author #7:插件不碰 config.json 结构)。
+# 三次 config set 都带 --no-restart，让 step 7 统一 restart 一次收敛——避免
+# 每次 config set 都触发一次 supervisorctl restart（3 次冗余 restart，每次
+# 带 _wait_for_health + sleep 3，纯拉长安装耗时）。参考 install.py:1623
+# 批量 config set 的做法。
+if miloco-cli config set agent.webhook_url "$WEBHOOK_URL" --no-restart 2>&1 | tail -3; then
+  info "  webhook_url = $WEBHOOK_URL (via miloco-cli config set --no-restart)"
 else
   err "miloco-cli config set agent.webhook_url 失败"
   exit 1
 fi
-if miloco-cli config set agent.auth_bearer "$BEARER" 2>&1 | tail -3; then
-  info "  auth_bearer = ${BEARER:0:8}... (via miloco-cli config set)"
+if miloco-cli config set agent.auth_bearer "$BEARER" --no-restart 2>&1 | tail -3; then
+  info "  auth_bearer = ${BEARER:0:8}... (via miloco-cli config set --no-restart)"
 else
   err "miloco-cli config set agent.auth_bearer 失败"
   exit 1
 fi
 # 🔴#2 修复: 写 agent.platform=hermes 让 backend loader 加载 Adapter
 # 不写则 loader 返回 None → dispatcher 静默丢弃所有入站 turn
-if miloco-cli config set agent.platform hermes 2>&1 | tail -3; then
-  info "  agent.platform = hermes (via miloco-cli config set)"
+if miloco-cli config set agent.platform hermes --no-restart 2>&1 | tail -3; then
+  info "  agent.platform = hermes (via miloco-cli config set --no-restart)"
 else
   # miloco-cli 可能不认识 agent.platform(旧版 CLI,PR 未合)
   # 降级: Python 直写 config.json
