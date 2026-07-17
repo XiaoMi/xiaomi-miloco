@@ -88,25 +88,32 @@ async def call_agent_webhook(
 
 
 async def reset_agent_sessions(
-    session_keys: list[str],
+    routes: list[tuple[str, str]],
     *,
     delete_transcript: bool = True,
     timeout: float = 10.0,
 ) -> Any:
-    """批量重置（删除）指定 agent session：调插件 ``reset_sessions`` webhook。
+    """批量重置 agent session。优先走 adapter.reset_sessions（精确按 lane 区分），
+    adapter 未实现时退回 webhook（只传 session_key，兼容 OpenClaw / WebhookAdapter）。
 
-    用于切换家庭时清掉旧家庭遗留的 miloco 会话上下文。``session_keys`` 空则直接短路
-    （不发请求）。传输 / 结构化失败沿用 :func:`call_agent_webhook` 抛
-    :class:`AgentWebhookException`——本函数不兜底，由调用方（switch_home 的后台任务）
-    捕获并降级为 WARN，绝不影响切换本身。返回 webhook 的 ``data``
-    （``{"reset": [...], "failed": [...]}``）。
+    用于切换家庭时清掉旧家庭遗留的 miloco 会话上下文。异常不抛，由调用方（switch_home
+    的后台任务）捕获并降级为 WARN，绝不影响切换本身。
     """
-    if not session_keys:
+    if not routes:
         return None
+
+    from miloco.agent_platform import get_adapter
+    adapter = get_adapter()
+    adapter_reset = getattr(adapter, "reset_sessions", None)
+    if callable(adapter_reset):
+        return await adapter_reset(routes, timeout=timeout)
+
+    # 兜底：adapter 未实现 → 退回旧 webhook（OpenClaw / WebhookAdapter）
+    session_keys = list({sk for sk, _ in routes})
     return await call_agent_webhook(
         "reset_sessions",
         {
-            "sessionKeys": list(session_keys),
+            "sessionKeys": session_keys,
             "deleteTranscript": delete_transcript,
         },
         timeout=timeout,

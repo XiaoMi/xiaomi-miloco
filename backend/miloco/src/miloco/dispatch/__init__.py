@@ -5,6 +5,7 @@
 
 from miloco.dispatch.dispatcher import (
     MILOCO_SESSION_KEYS,
+    MILOCO_SESSION_ROUTES,
     AgentDispatcher,
     EventType,
     dispatch_event,
@@ -15,6 +16,7 @@ from miloco.dispatch.dispatcher import (
 
 __all__ = [
     "MILOCO_SESSION_KEYS",
+    "MILOCO_SESSION_ROUTES",
     "AgentDispatcher",
     "EventType",
     "dispatch_event",
