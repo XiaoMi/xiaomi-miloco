@@ -1777,7 +1777,9 @@ def main() -> None:
     args = parse_args()
 
     miloco_home = Path(
-        os.environ.get("MILOCO_HOME", Path.home() / ".openclaw" / "miloco")
+        os.environ.get("MILOCO_HOME", Path.home() / (
+            ".hermes/miloco" if args.agent_platform == "hermes" else ".openclaw/miloco"
+        ))
     )
     miloco_home.mkdir(parents=True, exist_ok=True)
     os.environ["MILOCO_HOME"] = str(miloco_home)
