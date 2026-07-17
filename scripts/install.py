@@ -2,7 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "rich>=13.0",
-#   "httpx>=0.27",
+#   "httpx[socks]>=0.27",
 #   "questionary>=2.1",
 # ]
 # [tool.uv]
