@@ -1771,20 +1771,54 @@ def _print_error_summary(ui: UI, _args: argparse.Namespace) -> None:
     ui.console.print()
 
 
+def _decide_agent_platform(
+    args: argparse.Namespace, plat: "Platform", ui: "UI"
+) -> str:
+    """决定 agent_platform：--agent-platform > 非交互 fallback openclaw > 交互 prompt。
+
+    必须在 miloco_home 计算之前跑，否则交互选 hermes 时 miloco_home 仍走 openclaw 默认。
+    非交互路径（agent-prepare/agent-finish/uninstall/no tty）不弹 prompt，直接 fallback。
+    """
+    if args.agent_platform:
+        return args.agent_platform
+    if (
+        args.agent_prepare
+        or args.agent_finish
+        or args.uninstall
+        or not plat.is_interactive
+    ):
+        return "openclaw"
+    openclaw_label = ui.i18n.t("platform.openclaw_option")
+    hermes_label = ui.i18n.t("platform.hermes_option")
+    choice = ui.prompt_select(
+        ui.i18n.t("platform.ask"),
+        choices=[openclaw_label, hermes_label],
+        default=openclaw_label,
+    )
+    return "hermes" if choice == hermes_label else "openclaw"
+
+
+def _default_miloco_home(agent_platform: str) -> Path:
+    """按 agent runtime 决定 MILOCO_HOME 默认路径。hermes → ~/.hermes/miloco，其余 → ~/.openclaw/miloco。"""
+    subdir = ".hermes" if agent_platform == "hermes" else ".openclaw"
+    return Path.home() / subdir / "miloco"
+
+
 def main() -> None:
     args = parse_args()
-
-    miloco_home = Path(
-        os.environ.get("MILOCO_HOME", Path.home() / (
-            ".hermes/miloco" if args.agent_platform == "hermes" else ".openclaw/miloco"
-        ))
-    )
-    miloco_home.mkdir(parents=True, exist_ok=True)
-    os.environ["MILOCO_HOME"] = str(miloco_home)
 
     plat = Platform.detect(lang_override=args.lang)
     i18n = I18n(plat.lang, Path(__file__).parent)
     ui = UI(i18n)
+
+    agent_platform = _decide_agent_platform(args, plat, ui)
+    miloco_home = Path(
+        os.environ.get("MILOCO_HOME") or _default_miloco_home(agent_platform)
+    )
+    miloco_home.mkdir(parents=True, exist_ok=True)
+    # 关键：导出到 environ，让所有子进程 (miloco-cli / supervisord / backend / 打包 wheel
+    # 起的 miloco.main) 继承正确的 MILOCO_HOME，否则 backend fallback 到 ~/.openclaw/miloco。
+    os.environ["MILOCO_HOME"] = str(miloco_home)
 
     # Agent mode: --agent-prepare or --agent-finish implies non-interactive agent flow
     if args.agent_prepare or args.agent_finish:
@@ -1798,7 +1832,7 @@ def main() -> None:
             account_auth=args.account_auth,
             miloco_home=miloco_home,
             skip_openclaw=args.skip_openclaw,
-            agent_platform=args.agent_platform,
+            agent_platform=agent_platform,
         )
         atexit.register(installer._stop_service)
         atexit.register(installer._cleanup_install_cache)
@@ -1847,7 +1881,7 @@ def main() -> None:
         account_auth=args.account_auth,
         miloco_home=miloco_home,
         skip_openclaw=args.skip_openclaw,
-        agent_platform=args.agent_platform,
+        agent_platform=agent_platform,
     )
 
     atexit.register(installer._stop_service)
