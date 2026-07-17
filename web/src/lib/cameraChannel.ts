@@ -7,17 +7,17 @@
  */
 
 /** 拆合成 did → {物理 did, 通道}。`'cam:ch1'`→`{cam,1}`；裸 did→`{did,0}`（单通道直通）。
- *  只认末尾的 `:ch{n}`，物理 did 里含冒号也不误伤。对齐后端 `split_channel_did`。 */
+ *  **严格**只认末尾的 `:ch{非负整数}`（正则 `/:ch\d+$/`）——空 `:ch`、小数、负数、十六进制
+ *  等后端 `toggle_camera` 会拒绝的畸形一律不当作通道，退化成整串裸 did（后续按 did 查相机时
+ *  自然落空，不会被误挂到某台的 ch0）。贪婪 `(.*)` 保证物理 did 内含冒号也不误伤，口径与后端
+ *  `physical_camera_did` / `toggle_camera` 校验一致。 */
 export function splitChannelDid(did: string): {
   physicalDid: string;
   channel: number;
 } {
-  const i = did.lastIndexOf(":ch");
-  if (i < 0) return { physicalDid: did, channel: 0 };
-  const ch = Number(did.slice(i + 3));
-  return Number.isFinite(ch)
-    ? { physicalDid: did.slice(0, i), channel: ch }
-    : { physicalDid: did, channel: 0 };
+  const m = /^(.*):ch(\d+)$/.exec(did);
+  if (!m) return { physicalDid: did, channel: 0 };
+  return { physicalDid: m[1], channel: Number(m[2]) };
 }
 
 /** 在一批相机记录里，出现多于一条记录的物理 did = 多通道相机（双摄两条同 did）。 */
