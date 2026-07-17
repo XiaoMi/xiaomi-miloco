@@ -1055,21 +1055,23 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
     payload = _perception_config_payload()
     if update:
-        # omni_fps / window_size 是引擎/runner 构造时 cache 的，改这两个才需重启生效；
-        # video_short_edge 每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
-        # 前端 drawer 三字段一起 PUT，故按「新值 != 旧值」判断，避免只拖分辨率也重启。
+        # 三个参数生效路径各不同，按「新值 != 旧值」判断（前端 drawer 三字段一起 PUT）：
+        #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
+        #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
+        #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live
+        #     运行时热更（原地刷 _config + 缓存），免重建引擎 / 免模型重载 / 不丢 track。
+        #   - window_size：runner 构造时 cache，需 stop→start 重读（apply_config_restart）。
         omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
         window_changed = body.window_size is not None and body.window_size != payload["window_size"]
-        # omni_fps 变才需重建引擎（重读构造期 cache 的 omni_fps，代价含模型重载）；window_size
-        # 只需 runner 重启（start 重读窗口）。故 window_size-only 时跳过 rebuild，省一次模型重载。
-        need_restart = omni_fps_changed or window_changed
         update_shared_config(**update)
         payload = _perception_config_payload()
-        if need_restart:
-            # config 已写盘(不可回滚)；重启若失败仅带 restart_ok=False，不冒泡成 500——
-            # 否则前端会把「已保存+重启失败」误报成「保存失败」，误导用户以为改动丢失。
-            # 同步等重启完成再返回。
-            payload["restart_ok"] = await manager.perception_service.apply_config_restart(
-                rebuild_engine=omni_fps_changed
-            )
+        # config 已写盘(不可回滚)；热更/重启失败仅带 restart_ok=False，不冒泡成 500——
+        # 否则前端会把「已保存+失败」误报成「保存失败」，误导用户以为改动丢失。同步等完成再返回。
+        restart_ok = True
+        if omni_fps_changed:
+            restart_ok = await manager.perception_service.apply_omni_fps_live(body.omni_fps) and restart_ok
+        if window_changed:
+            restart_ok = await manager.perception_service.apply_config_restart() and restart_ok
+        if omni_fps_changed or window_changed:
+            payload["restart_ok"] = restart_ok
     return NormalResponse(code=0, message="ok", data=payload)

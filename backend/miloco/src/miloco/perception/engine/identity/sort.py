@@ -20,6 +20,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import linear_sum_assignment
 
+from miloco.perception.engine.identity._fps_utils import sec_to_frames
+
 if TYPE_CHECKING:
     from miloco.perception.engine.identity.tracker.detector import Detection, Detector
 
@@ -295,8 +297,9 @@ class SortTracker:
         self.detector = detector
         self.fps = max(1, int(fps))
 
-        # 把秒数换算成帧数（暴露给配置层的是真实秒数 max_age_sec）
-        self._max_age_frames: int = max(1, int(round(config.max_age_sec * self.fps)))
+        # 把秒数换算成帧数（暴露给配置层的是真实秒数 max_age_sec）；换算与 set_fps
+        # 共用 sec_to_frames，杜绝构造期↔热更公式漂移。
+        self._max_age_frames: int = sec_to_frames(config.max_age_sec, self.fps)
 
         self._tracks: list[KalmanBoxTracker] = []
         self._frame_count: int = 0
@@ -310,6 +313,16 @@ class SortTracker:
         self._frame_count = 0
         self._next_track_id = 0
         self.last_detections = []
+
+    def set_fps(self, fps: int) -> None:
+        """运行时更新 fps：仅重算 max_age 帧数阈值，不清跟踪状态。
+
+        fps 在本 tracker 里只用于把 ``max_age_sec`` 换算成帧数（构造期算一次）；
+        Kalman / 关联逻辑均工作在帧单位、与 fps 无关。故改 fps 无需重建 tracker，
+        重算 ``_max_age_frames`` 后活跃 track 下一帧的删除判定即用新阈值。
+        """
+        self.fps = max(1, int(fps))
+        self._max_age_frames = sec_to_frames(self.config.max_age_sec, self.fps)
 
     def update_with_detections(
         self, frame: NDArray[np.uint8], all_dets: list

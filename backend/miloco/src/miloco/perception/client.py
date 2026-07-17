@@ -381,19 +381,17 @@ class PerceptionEngineProxy:
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎 proxy 失败 | %s", e)
 
-    async def rebuild(self) -> None:
-        """无条件销毁当前引擎实例并按最新配置重建（运行时改感知参数后生效用）。
+    async def apply_omni_fps(self, omni_fps: int) -> None:
+        """运行时热更 omni_fps（含其顶起的 tracker fps）到活跃引擎，不重建、不重载模型。
 
-        与 ``stop_to_unconfigured`` 不同：不依赖 key 被删的降级语义；与 ``try_reinit``
-        不同：不受 ``ready`` 守卫限制，``ready`` 态也强制重造。调用方须保证 settings
-        缓存已刷新（PUT config 已 ``reset_settings()``），使 ``_init_engine`` 读到新值
-        （omni_fps 等 cache 在 ``_create_engine`` 的配置）。
+        与 ``rebuild`` 不同：不销毁引擎实例，只原地更新 config + 刷新构造期派生缓存，
+        在途 track 状态全保留。持 ``_engine_lock`` 与在飞 perceive 互斥，避免推理线程
+        读到半更新状态。引擎未起（未配模型 / 降级态，``perception_engine is None``）时
+        no-op：settings 已由 PUT config 持久化，下次 ``_init_engine`` 自然读到新值。
         """
         async with self._engine_lock:
             if self.perception_engine is not None:
-                await self.close()
-                self.perception_engine = None
-            self._init_engine()
+                self.perception_engine.apply_omni_fps(omni_fps)
 
     async def stop_to_unconfigured(self) -> None:
         """软停引擎,回到「未配模型」态——与「启用→tick 自愈拉起」对称的反向操作。
