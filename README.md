@@ -49,7 +49,7 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 
 ### Option 1: Install via the Agent (recommended)
 
-Send the following instruction to OpenClaw to complete the installation automatically:
+Works with both **OpenClaw** and **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — send this instruction to your agent:
 
 ```text
 Please install the Miloco plugin for me: https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/scripts/install-guide.md
@@ -59,6 +59,12 @@ Please install the Miloco plugin for me: https://raw.githubusercontent.com/XiaoM
 
 ```bash
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash
+```
+
+Default: OpenClaw. To install for Hermes Agent, specify it explicitly:
+
+```bash
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-platform=hermes
 ```
 
 ### Option 3: Build from source

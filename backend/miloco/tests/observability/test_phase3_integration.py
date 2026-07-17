@@ -59,20 +59,24 @@ async def test_cycle_publish_then_poller_fetches_meta_then_query(tmp_path):
         client.publish_event("interaction", "用户", {"content": "开灯"}, trace_id="e2e-1")
         await client.flush()
 
-        # 3. mock openclaw get_trace webhook 直接返回 done meta,
+        # 3. mock adapter.read_trace_meta 返回 done meta,
         #    poller 拿到后调 record_agent_run 写入 agent_runs
-        fake_meta = {
-            "status": "done",
-            "runId": "r-1", "query": "开客厅灯",
-            "durationMs": 1200.0, "success": True,
-            "llmCallCount": 1, "toolCallCount": 1,
-            "llmTotalMs": 900.0, "toolTotalMs": 100.0,
-            "toolMaxMs": 100.0, "slowestToolName": "miot_call",
-            "errorCount": 0, "errorMsg": None, "jsonlPath": None,
-        }
+        from miloco.agent_platform.base import TraceMeta
+        fake_meta = TraceMeta(
+            run_id="r-1", query="开客厅灯",
+            duration_ms=1200.0,
+            llm_call_count=1, tool_call_count=1,
+            llm_total_ms=900.0, tool_total_ms=100.0,
+            tool_max_ms=100.0, slowest_tool_name="miot_call",
+            success=True, error_count=0, error_msg=None,
+            jsonl_path=None,
+        )
+        from unittest.mock import Mock
+        mock_adapter = Mock()
+        mock_adapter.read_trace_meta = AsyncMock(return_value=fake_meta)
         with patch(
-            "miloco.observability.agent_meta_poller.call_agent_webhook",
-            new=AsyncMock(return_value=fake_meta),
+            "miloco.observability.agent_meta_poller.get_adapter",
+            return_value=mock_adapter,
         ):
             poller.enqueue("e2e-1", "r-1", "interaction", webhook_rtt_ms=15.5)
             await poller._queue.join()

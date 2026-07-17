@@ -80,7 +80,7 @@
   "download.manifest_missing": "manifest.json not found",
   "download.no_sites": "No download sites configured",
   "download.models_verified": "%1 models ready",
-  "plugin.title": "Plugin",
+  "plugin.title": "Agent plugin",
   "plugin.subtitle": "Connect AI to your smart home",
   "plugin.installing": "Installing plugin from local package...",
   "plugin.no_tgz": "No plugin package (.tgz) found",
@@ -122,6 +122,7 @@
   "summary.restart_gateway_desc": "Restart gateway",
   "summary.help_desc": "Show help",
   "summary.config_label": "Config directory",
+  "summary.rc_hint": "Tip: 'miloco-cli' not found? Run 'source ~/.zshrc' (or ~/.bashrc) or open a new terminal tab for PATH to take effect",
   "summary.error_title": "An error occurred during installation",
   "summary.retry_hint": "Retry: bash scripts/install.sh %1",
   "summary.uninstall_hint": "Uninstall: bash scripts/install.sh --uninstall",
@@ -131,5 +132,24 @@
   "uninstall.plugin_removed": "openclaw plugin uninstalled",
   "uninstall.delete_home_ask": "Delete config directory %1?",
   "uninstall.home_deleted": "Config directory deleted",
-  "uninstall.done": "Uninstall complete"
+  "uninstall.done": "Uninstall complete",
+
+  "plugin.hermes_not_found": "hermes command not found, please install Hermes Agent first",
+  "plugin.no_hermes_tarball": "Hermes plugin tarball not found in release archive",
+  "plugin.hermes_config_failed": "Failed to write agent.* config via miloco-cli",
+  "plugin.hermes_enable_failed": "hermes plugins enable miloco failed (gateway may not be running), manually run: hermes plugins enable miloco",
+  "plugin.hermes_post_install_missing": "install-hermes.sh not found in plugin tarball; env persistence / cron reconcile skipped, please manually run: bash plugins/hermes/install-hermes.sh --post-install",
+  "plugin.hermes_post_install_failed": "install-hermes.sh --post-install exited with code %1; env persistence / cron reconcile may be incomplete",
+  "plugin.hermes_ok": "Hermes plugin deployment done",
+
+  "platform.title": "Agent platform",
+  "platform.subtitle": "Choose which agent runtime to install the plugin for",
+  "platform.already_set": "Already specified as %1 via --agent-platform",
+  "platform.skip_non_interactive": "Non-interactive mode, defaulting to openclaw",
+  "platform.ask": "Which agent platform should Miloco be installed for?",
+  "platform.openclaw_option": "OpenClaw",
+  "platform.hermes_option": "Hermes Agent",
+  "platform.selected": "Platform selected: %1",
+
+  "summary.restart_hermes_desc": "restart Hermes gateway to pick up the new plugin"
 }

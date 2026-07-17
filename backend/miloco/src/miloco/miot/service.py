@@ -945,11 +945,11 @@ class MiotService:
         openclaw 不可达 / 删除失败只 WARN、不上抛，绝不阻塞或打断切换本身。
         """
         async def _bg():
-            from miloco.dispatch.dispatcher import MILOCO_SESSION_KEYS
+            from miloco.dispatch.dispatcher import MILOCO_SESSION_ROUTES
             from miloco.utils.agent_client import reset_agent_sessions
 
             try:
-                await reset_agent_sessions(MILOCO_SESSION_KEYS)
+                await reset_agent_sessions(MILOCO_SESSION_ROUTES)
             except Exception as e:
                 logger.warning("reset agent sessions failed: %s", e)
 

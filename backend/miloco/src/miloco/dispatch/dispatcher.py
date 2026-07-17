@@ -27,10 +27,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from miloco.agent_platform import get_adapter
+from miloco.agent_platform.base import AdapterTransportError, TurnContext
 from miloco.config import get_settings
-from miloco.middleware.exceptions import AgentWebhookException
 from miloco.observability.agent_meta_poller import AgentRunSource, track_agent_run
-from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,10 @@ _ROUTE: dict[EventType, tuple[str, str, int]] = {
 MILOCO_SESSION_KEYS: list[str] = list(
     dict.fromkeys(session_key for session_key, _lane, _prio in _ROUTE.values())
 )
+# session_key + lane 配对（供 reset_sessions 精确按 lane 区分会话）
+MILOCO_SESSION_ROUTES: list[tuple[str, str]] = list(
+    dict.fromkeys((session_key, lane) for session_key, lane, _prio in _ROUTE.values())
+)
 
 # 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})
@@ -68,6 +72,13 @@ _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"}
 # channel 会话。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
 _DELIVERY: dict[EventType, dict[str, Any]] = {
     "onboarding": {"resolve_target": "owner-channel", "deliver": True},
+}
+
+# send_turn profile 按事件类型映射。不在表内的类型（interaction/bind/onboarding）
+# 统一走 "full"（`_PROFILE.get(event_type, "full")` 兜底）；rule/suggestion 后台事件显式降级。
+_PROFILE: dict[EventType, str] = {
+    "rule": "rule",
+    "suggestion": "suggestion",
 }
 
 
@@ -97,12 +108,6 @@ def _resolve_delivered(fut: "asyncio.Future[bool] | None", ok: bool) -> None:
 
 class AgentDispatcher:
     """按 sessionKey 维护队列与单飞 drainer。"""
-
-    # 传输级重试:仅对 AgentWebhookException(连接 / 5xx / HTTP 超时)做有限短退避重试,
-    # 覆盖 webhook 瞬时不可达;exhausted 后 WARN 跳过该批。status=="timeout" 不在此列
-    # (turn 已在平台侧运行,重试会重复触发)。
-    _TRANSPORT_RETRIES = 2
-    _TRANSPORT_BACKOFF_S = 0.5
 
     def __init__(self) -> None:
         self._queues: dict[str, list[_QueuedEvent]] = {}
@@ -294,31 +299,28 @@ class AgentDispatcher:
             status: str = "error"
             rtt_ms: float = 0.0
             delivery = _DELIVERY.get(event_type, {})
-            for attempt in range(self._TRANSPORT_RETRIES + 1):
-                try:
-                    run_id, status, rtt_ms = await run_agent_turn(
-                        msg,
-                        session_key=session_key,
-                        lane=lane,
-                        trace_id=trace_id,
-                        wait_timeout_ms=wait_ms,
-                        **delivery,
-                    )
-                    break
-                except AgentWebhookException as e:
-                    # 传输失败（连接 / 5xx / HTTP 超时）→ 有限短退避重试,
-                    # exhausted 后 WARN、跳过该批，继续下一批。
-                    if attempt == self._TRANSPORT_RETRIES:
-                        logger.warning(
-                            "agent turn transport failed session=%s type=%s err=%s; "
-                            "skipping batch after %d attempts",
-                            session_key,
-                            event_type,
-                            e,
-                            attempt + 1,
-                        )
-                        return
-                    await asyncio.sleep(self._TRANSPORT_BACKOFF_S * (2**attempt))
+            adapter = get_adapter()
+            try:
+                profile = _PROFILE.get(event_type, "full")
+                ctx_obj = TurnContext(
+                    text=msg,
+                    session_key=session_key,
+                    lane=lane,
+                    trace_id=trace_id,
+                    wait_timeout_ms=wait_ms,
+                    profile=profile,
+                    extra={"delivery": delivery},
+                )
+                result = await adapter.send_turn(ctx_obj)
+                run_id = result.run_id
+                status = result.status
+                rtt_ms = result.rtt_ms
+            except AdapterTransportError:
+                logger.warning(
+                    "adapter send_turn failed session=%s type=%s; skipping batch",
+                    session_key, event_type,
+                )
+                return
 
             if status == "no-channel":
                 # 插件侧结构化失败：车主从未私聊过 bot，解析不到 IM 会话。这不是
