@@ -1281,6 +1281,7 @@ class Installer:
                  "agent.auth_bearer", bearer,
                  "agent.platform", "hermes"],
                 check=True, capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
             )
         except subprocess.CalledProcessError:
             self.ui.step_fail(self.ui.i18n.t("plugin.hermes_config_failed"))
@@ -1290,6 +1291,7 @@ class Installer:
             subprocess.run(
                 ["hermes", "plugins", "enable", "miloco"],
                 capture_output=True, text=True, check=True,
+                stdin=subprocess.DEVNULL,
             )
         except subprocess.CalledProcessError:
             self.ui.warn(self.ui.i18n.t("plugin.hermes_enable_failed"))
@@ -1746,6 +1748,7 @@ def main() -> None:
         os.environ.get("MILOCO_HOME", Path.home() / ".openclaw" / "miloco")
     )
     miloco_home.mkdir(parents=True, exist_ok=True)
+    os.environ["MILOCO_HOME"] = str(miloco_home)
 
     plat = Platform.detect(lang_override=args.lang)
     i18n = I18n(plat.lang, Path(__file__).parent)
