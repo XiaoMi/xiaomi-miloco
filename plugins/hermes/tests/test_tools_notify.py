@@ -170,11 +170,10 @@ def test_notify_hermes_send_error_propagates(fake_hermes, tmp_path: Path):
     assert "no route" in result["error"]
 
 
-def test_notify_hermes_send_runtime_error(fake_hermes, tmp_path: Path):
+def test_notify_hermes_send_runtime_error(fake_hermes, tmp_path: Path, monkeypatch):
     """subprocess.run 抛 RuntimeError → notify_owner 返回明确错误，不裸抛。"""
     import shutil
-    if not shutil.which("hermes"):
-        pytest.skip("hermes CLI not in PATH")
+    monkeypatch.setattr(shutil, "which", lambda _: "/fake/hermes")
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({"deliver": {"target": "telegram"}}), encoding="utf-8")
     monkeypatch = fake_hermes.__self__ if hasattr(fake_hermes, "__self__") else None  # noqa
