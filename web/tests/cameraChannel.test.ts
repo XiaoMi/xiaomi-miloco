@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   channelHasMic,
   feedDid,
+  isChannelDid,
   lensLabelKey,
-  multiChannelDidSet,
   splitChannelDid,
 } from "@/lib/cameraChannel";
 
@@ -61,29 +61,27 @@ describe("split/feed 往返一致", () => {
   });
 });
 
-describe("multiChannelDidSet", () => {
-  it("出现 >1 次的 did 判为多通道；单条不算", () => {
-    const set = multiChannelDidSet([
-      { did: "dual" },
-      { did: "dual" },
-      { did: "solo" },
-    ]);
-    expect(set.has("dual")).toBe(true);
-    expect(set.has("solo")).toBe(false);
+describe("isChannelDid", () => {
+  it("合成 did(:chN) → true", () => {
+    expect(isChannelDid("cam:ch0")).toBe(true);
+    expect(isChannelDid("cam:ch1")).toBe(true);
+    expect(isChannelDid("cam:ch10")).toBe(true);
+    expect(isChannelDid("a:b:ch2")).toBe(true);
   });
-  it("空输入 → 空集", () => {
-    expect(multiChannelDidSet([]).size).toBe(0);
+  it("裸 did → false", () => {
+    expect(isChannelDid("cam")).toBe(false);
+    expect(isChannelDid("1213460650")).toBe(false);
+    expect(isChannelDid("")).toBe(false);
   });
-  it("同 did 出现 3 次仍只进集合一次；多台双摄各自判定", () => {
-    const set = multiChannelDidSet([
-      { did: "d1" },
-      { did: "d1" },
-      { did: "d1" },
-      { did: "d2" },
-      { did: "d2" },
-      { did: "solo" },
-    ]);
-    expect([...set].sort()).toEqual(["d1", "d2"]);
+  it("畸形 :ch 后缀不算通道（与 splitChannelDid 同口径）", () => {
+    for (const bad of ["cam:ch", "cam:ch1.5", "cam:ch-1", "cam:ch0x1", "cam:chX"]) {
+      expect(isChannelDid(bad)).toBe(false);
+    }
+  });
+  it("单摄单路在列表里也能凭 did 形态识别（不再依赖行数）", () => {
+    // 只有一路时行数代理会漏判；合成 did 形态是每行独立的权威信号。
+    expect(isChannelDid("dual:ch0")).toBe(true);
+    expect(isChannelDid("solo")).toBe(false);
   });
 });
 

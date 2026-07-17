@@ -20,15 +20,15 @@
  * 上拿不出包,详见 NalClipRecorder docstring。
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PerceptionCamera } from "@/lib/types";
 import { authHeaders } from "@/api/register";
 // 感知层用合成 did（多通道相机 cam:ch{n}）；后端 watch / record_clip 按**物理 did +
 // 通道号**走（SDK 会话按物理 did 建），故发请求前把合成 did 拆回。工具收在 @/lib/cameraChannel。
 import {
+  isChannelDid,
   lensLabelKey,
-  multiChannelDidSet,
   splitChannelDid,
 } from "@/lib/cameraChannel";
 
@@ -59,16 +59,6 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
   const [recElapsed, setRecElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [iframeReady, setIframeReady] = useState(false);
-
-  // 出现多于一条记录的物理 did = 多通道相机；下拉框才给它们拼镜头标签区分同名两条。
-  // cameras 是合成 did，先拆成物理 did 再统计。
-  const multiChannelDids = useMemo(
-    () =>
-      multiChannelDidSet(
-        cameras.map((c) => ({ did: splitChannelDid(c.did).physicalDid })),
-      ),
-    [cameras],
-  );
 
   // 选中的是合成 did；发请求时拆成物理 did + 真通道号(后端 watch/record 按此)。
   const { physicalDid, channel } = splitChannelDid(selectedDid);
@@ -194,10 +184,11 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
                 className="text-caption px-2 py-1 rounded-lg bg-bg-primary border border-border text-text-primary"
               >
                 {cameras.map((c) => {
-                  const { physicalDid: p, channel: ch } = splitChannelDid(c.did);
-                  // 镜头名(ch0=移动画面 / ch1=固定画面);ch≥2 兜底「通道 N」。单摄不拼。
+                  const { channel: ch } = splitChannelDid(c.did);
+                  // 镜头名(ch0=移动画面 / ch1=固定画面);ch≥2 兜底「通道 N」。单摄(裸 did)不拼。
+                  // 权威判据:did 为合成形态(:chN)即多通道某一路——即便该台只有一路在列表里也带标签。
                   const key = lensLabelKey(ch);
-                  const chLabel = multiChannelDids.has(p)
+                  const chLabel = isChannelDid(c.did)
                     ? ` · ${key ? t(key) : t("hero.channelLabel", { n: ch })}`
                     : "";
                   return (

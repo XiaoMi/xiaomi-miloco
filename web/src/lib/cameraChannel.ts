@@ -20,13 +20,12 @@ export function splitChannelDid(did: string): {
   return { physicalDid: m[1], channel: Number(m[2]) };
 }
 
-/** 在一批相机记录里，出现多于一条记录的物理 did = 多通道相机（双摄两条同 did）。 */
-export function multiChannelDidSet(cams: { did: string }[]): Set<string> {
-  const count = new Map<string, number>();
-  for (const c of cams) count.set(c.did, (count.get(c.did) ?? 0) + 1);
-  return new Set(
-    [...count.entries()].filter(([, n]) => n > 1).map(([did]) => did),
-  );
+/** 该 did 是否为多通道相机的某一路——即合成 did 形态 `…:ch{n}`。
+ *  后端只对多通道相机（channel_count>1）合成 `:ch{n}`、单摄保持裸 did，故「did 带 :ch{n}
+ *  后缀」与「channel_count>1」等价，是每行独立的**权威**判据（不依赖同 did 出现几行的行数
+ *  代理，即便某台只有一路在列表里也能正确识别）。与后端 `synthetic_camera_did` 口径一致。 */
+export function isChannelDid(did: string): boolean {
+  return /:ch\d+$/.test(did);
 }
 
 /** 投喂开关的目标 did：多通道 → 合成 `did:ch{n}`（精确到某路）；单通道 → 裸 did。 */
