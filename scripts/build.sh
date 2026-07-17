@@ -91,13 +91,17 @@ resolve_version() {
         RESOLVED_PEP=$(python3 "$SCRIPT_DIR/version_normalize.py" "$VERSION" --target pep440) || die 4 "版本号非法: $VERSION"
         RESOLVED_NPM=$(python3 "$SCRIPT_DIR/version_normalize.py" "$VERSION" --target npm)
     else
-        # 本地：用 setuptools_scm 从 git 派生 PEP440 dev 版（与 uv sync 时 hatch-vcs 一致）
+        # 本地：用 setuptools_scm 从 git 派生 PEP440 dev 版（与 uv sync 时 hatch-vcs 一致）。
+        # version_scheme=no-guess-dev 必须与各 pyproject [tool.hatch.version].raw-options 一致：
+        # CalVer 不猜"下一版"，以当前 tag 作 base + post 段（形如 2026.7.3.post1.devN+g<hash>）。
         RESOLVED_PEP=$(uv run --no-project --with setuptools-scm python3 -c \
-            "from setuptools_scm import get_version; print(get_version())" 2>/dev/null || echo "0.0.0")
+            "from setuptools_scm import get_version; print(get_version(version_scheme='no-guess-dev'))" 2>/dev/null || echo "0.0.0")
         RESOLVED_RAW="$RESOLVED_PEP"
-        # npm 包版本仅是装配占位（运行时不读 package.json 版本），给个合法 semver dev 串即可
-        local sha; sha=$(git rev-parse --short HEAD 2>/dev/null || echo "0000000")
-        RESOLVED_NPM="0.0.0-dev.$sha"
+        # npm 包版本：把 PEP440 dev 版转成合法 semver（保留真实 base，如 2026.7.3-post1.dev117
+        # +ge88bd38），不再用丢了 base 的 0.0.0 占位。web 不发布、openclaw 走本地 tgz 装，均
+        # 不依赖 npm 版本排序，故 semver 里 dev 版 < 正式版无碍。转换失败兜底回 PEP 串（会让
+        # npm version 报错以暴露异常，而非静默用假版本）。
+        RESOLVED_NPM=$(python3 "$SCRIPT_DIR/version_normalize.py" "$RESOLVED_PEP" --pep2semver 2>/dev/null || echo "$RESOLVED_PEP")
     fi
     export SETUPTOOLS_SCM_PRETEND_VERSION="$RESOLVED_PEP"
     log "版本: pep440=$RESOLVED_PEP npm=$RESOLVED_NPM (raw=$RESOLVED_RAW)"
@@ -212,7 +216,9 @@ build_web() {
         # vite.config.ts::outDir 是 "dist"(默认 web/dist),build 完后再 cp 到 backend
         # static_dir,让 backend wheel 打包时一并带上。改 vite outDir 直接指 backend
         # 会跟 dev 期 vite serve 的产物路径冲突,统一用 dist + cp 更清晰。
-        pnpm build
+        # MILOCO_APP_VERSION 注入界面版本(vite define __APP_VERSION__)：用 RESOLVED_PEP,与
+        # CLI/Python 包权威版本同源一致,界面不再显示上面 npm version 的装配占位 0.0.0-dev.<sha>。
+        MILOCO_APP_VERSION="$RESOLVED_PEP" pnpm build
     )
     restore_pkg_json web/package.json
     # cp dist 内容到 backend static_dir,组装进 wheel。watch.html / vendor 的源仍
