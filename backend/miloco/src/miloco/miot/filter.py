@@ -202,15 +202,6 @@ def set_homes_in_use(
     )
 
 
-def set_cameras_in_use(
-    kv_repo: KVRepo, dids: list[str], in_use: bool
-) -> tuple[list[str], bool]:
-    """批量切换相机启用状态。去重后一次性写入 KV。"""
-    return _toggle_members(
-        kv_repo, ScopeConfigKeys.CAMERA_BLACK_LIST_KEY, dids, include=not in_use
-    )
-
-
 def denied_channels_of(
     denied: set[str], physical_did: str, channel_count: int
 ) -> set[int]:
