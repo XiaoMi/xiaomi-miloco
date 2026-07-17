@@ -159,6 +159,8 @@ miloco-cli device control 4912 --set brightness 30 --set on true ; miloco-cli de
 - 用户要音箱**念出/播报一段话**（"让音箱说'晚安'"）→ `play-text`。
 - 用户要**借音箱下达小爱指令**（"让音箱查下天气/关灯"、"让音箱放首歌"）→ `execute-text-directive`。
 
+> **不为自检 / 探测而播报。** `play-text` 会让音箱当场真出声，没有 dry-run；别用它测"音箱能不能响 / 命令能不能跑"——真要播时按流程发即可，设备或参数有问题会在调用时报错（见「异常处理」，注意"CLI 超时 3 秒重试一次"叠在探测上会重复扰人）。这只约束**自检式**播报，不影响"让音箱说晚安"这类正常请求。主动外发的整体决策护栏见 miloco-notify skill。
+
 ### 厨房电器（微波炉 / 烤箱 / 热水器 等）：先设参数，再 `start-cook` 启动
 
 这类设备**不能只设温度、也不能 `set on true` 就开始工作**：必须**先设好温度、时间等参数**，再调用启动类 action（如 `start-cook`）才会真正运转。启动 action 的确切 spec_name 以该设备 `device spec` 为准。
