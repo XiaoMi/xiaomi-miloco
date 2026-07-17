@@ -326,3 +326,128 @@ def test_resolve_notify_target_missing_state_file(tmp_miloco_home):
          ):
         result = tn.resolve_notify_target(ctx=None)
     assert result["target"] == "telegram"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# send_turn 传输层: 重试 / Idempotency-Key / client 生命周期
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.anyio
+async def test_send_turn_connects_on_retry(monkeypatch):
+    """ConnectError 前两次失败，第三次成功 → 调 3 次 client.post"""
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter, AdapterTransportError
+    import httpx
+
+    call_count = [0]
+    async def fake_post(self, url, **kw):
+        call_count[0] += 1
+        if call_count[0] < 3:
+            raise httpx.ConnectError("refused")
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        return resp
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", mock.AsyncMock())
+
+    a = Adapter()
+    ctx = _fake_ctx("test query")
+    result = await a.send_turn(ctx)
+    assert result.status == "ok"
+    assert call_count[0] == 3
+
+
+@pytest.mark.anyio
+async def test_send_turn_exhausts_retries_raises(monkeypatch):
+    """ConnectError 连抛 3 次 → AdapterTransportError"""
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter, AdapterTransportError
+    import httpx
+
+    async def fake_post(self, url, **kw):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", mock.AsyncMock())
+
+    a = Adapter()
+    with pytest.raises(AdapterTransportError):
+        await a.send_turn(_fake_ctx("test"))
+
+
+@pytest.mark.anyio
+async def test_send_turn_timeout_no_retry(monkeypatch):
+    """TimeoutException → status="timeout", 只调 1 次"""
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+    import httpx
+
+    call_count = [0]
+    async def fake_post(self, url, **kw):
+        call_count[0] += 1
+        raise httpx.TimeoutException("timeout")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", mock.AsyncMock())
+
+    a = Adapter()
+    result = await a.send_turn(_fake_ctx("timeout"))
+    assert result.status == "timeout"
+    assert call_count[0] == 1
+
+
+@pytest.mark.anyio
+async def test_send_turn_adds_idempotency_key(monkeypatch):
+    """请求头包含 Idempotency-Key == ctx.trace_id"""
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+    import httpx
+
+    captured_headers = {}
+    async def fake_post(self, url, headers=None, **kw):
+        captured_headers.update(headers or {})
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        return resp
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", mock.AsyncMock())
+
+    a = Adapter()
+    ctx = _fake_ctx("ping", trace_id="tr-abc123")
+    await a.send_turn(ctx)
+    assert captured_headers.get("Idempotency-Key") == "tr-abc123"
+
+
+@pytest.mark.anyio
+async def test_send_turn_closes_client_on_every_exit(monkeypatch):
+    """无论哪个出口，client.aclose 都被调 1 次"""
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+    import httpx
+
+    aclose_count = [0]
+    async def fake_aclose(self):
+        aclose_count[0] += 1
+
+    async def fake_post(self, url, **kw):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        return resp
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", fake_aclose)
+
+    a = Adapter()
+    await a.send_turn(_fake_ctx("ok"))
+    assert aclose_count[0] == 1
+
+
+def _fake_ctx(text: str, trace_id: str = "tr-test", lane: str = "miloco-interactive"):
+    """构造 TurnContext duck-typed 对象"""
+    ctx = mock.MagicMock()
+    ctx.text = text
+    ctx.trace_id = trace_id
+    ctx.lane = lane
+    ctx.session_key = "test:main:miloco"
+    ctx.wait_timeout_ms = 1000
+    ctx.profile = "minimal"
+    ctx.extra = {}
+    return ctx

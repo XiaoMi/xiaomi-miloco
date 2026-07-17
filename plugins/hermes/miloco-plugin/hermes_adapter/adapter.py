@@ -311,8 +311,6 @@ class Adapter:
             logger.error("[hermes adapter] AsyncClient 创建失败: %s", exc)
             return _err_result(run_id, f"client init failed: {exc}")
 
-        import httpx
-
         max_retries = 2
         try:
             for attempt in range(max_retries + 1):
