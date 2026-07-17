@@ -24,19 +24,18 @@ interface Props {
   badge?: boolean;
 }
 
-interface SampleList {
-  face?: { filename: string }[];
-}
-
 export function PersonAvatar({ person, size = 28, badge = false }: Props) {
   const [src, setSrc] = useState<string | null>(null);
   const enrolled = person.faceEnrolled;
+  // 有显式头像 或 已录入(可回落 tier_a face[0]) 才拉图；都无则占位色块。
+  // 后端 GET /avatar 内部按「显式头像 > face[0] > 404」解析，前端只需一条 URL。
+  const hasAvatar = enrolled || !!person.avatarExt;
   const iconSize = Math.round(size * 0.58);
   const palette = paletteFor(person.avatarHue);
   const badgeSize = Math.max(14, Math.round(size * 0.34));
 
   useEffect(() => {
-    if (!enrolled) {
+    if (!hasAvatar) {
       setSrc(null);
       return;
     }
@@ -44,23 +43,12 @@ export function PersonAvatar({ person, size = 28, badge = false }: Props) {
     let objectUrl: string | null = null;
     (async () => {
       try {
-        const r = await fetch(`/api/identity/persons/${person.id}/samples`, {
+        // <img> 挂不了 Bearer header，故 fetch + blobURL（与旧实现同因）；单一 URL
+        // 交后端解析显式头像 or 回落 face[0]。avatarExt 入 dep：换/清头像后自动刷新。
+        const imgRes = await fetch(`/api/identity/persons/${person.id}/avatar`, {
           cache: "no-store",
           headers: authHeaders(),
         });
-        if (!r.ok) return;
-        const json = (await r.json()) as { data?: SampleList };
-        const filename = json.data?.face?.[0]?.filename;
-        if (!filename || cancelled) return;
-        // 不能直接 <img src="/api/...">:/sample/{tier}/{filename} 端点要求
-        // Bearer token,而 <img> 元素没法挂 Authorization header。dev 下走
-        // vite proxy::attachAuth 注入还能跑;prod 下后端直发 SPA,前端用 Bearer
-        // header 鉴权,<img> 直接拿不到 → 401 → 头像变色块。改成 fetch + blob
-        // URL,统一 authHeaders 注入,两环境一致。
-        const imgRes = await fetch(
-          `/api/identity/persons/${person.id}/sample/a/${filename}`,
-          { headers: authHeaders() },
-        );
         if (!imgRes.ok || cancelled) return;
         const blob = await imgRes.blob();
         if (cancelled) return;
@@ -81,7 +69,7 @@ export function PersonAvatar({ person, size = 28, badge = false }: Props) {
         URL.revokeObjectURL(url);
       }
     };
-  }, [person.id, enrolled]);
+  }, [person.id, hasAvatar, person.avatarExt]);
 
   return (
     <span
