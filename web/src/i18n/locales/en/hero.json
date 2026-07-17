@@ -1,6 +1,9 @@
 {
   "hero": {
     "title": "Right now at home",
+    "channelLabel": "Channel {{n}}",
+    "lensMoving": "Moving view",
+    "lensFixed": "Fixed view",
     "usageAriaLabel": "Today's usage, see usage page for details",
     "usageTitle": "Today's token usage",
     "usageToday": "Today",

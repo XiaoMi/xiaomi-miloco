@@ -177,18 +177,24 @@ export interface HomeEntries {
 export interface PerceptionCamera {
   did: string;
   name: string;
-  channel: number;
   roomName?: string;
 }
 
 // ── 米家 scope 摄像头（含禁用 / 离线，控件配置用） ─────────────
 // 来源：GET /api/miot/scope/cameras（in_use=false 即停用该摄像头的感知）。
-// PerceptionCamera 是「当前 perception 在订阅」的子集（含 channel 用于播放），
+// PerceptionCamera 是「当前 perception 在订阅」的子集（did 为合成 did，通道号已编码其中，
+// 播放时由 splitChannelDid 拆出，无需单独 channel 字段），
 // ScopeCamera 是「米家账号下全集」（含已禁用 / 离线，用于显示开关）。
-// 渲染卡片时 ScopeCamera 是主列表，channel 通过 did 从 PerceptionCamera 字典查。
+// 多通道相机（双摄等）每条通道产出一条 ScopeCamera：did 相同（物理 did，启停按整台
+// 走），channel 区分通道号。渲染时用 (did, channel) 复合键区分两行、拼「通道 N」标签。
 export interface ScopeCamera {
   did: string;
   name: string;
+  // 通道号（多通道相机各条通道 0 / 1 / ...）；单通道相机恒为 0。用于播放取流、复合键去重。
+  channel: number;
+  // 该相机的通道总数（后端 channel_count）。判「多通道相机」的权威信号：channelCount>1 才
+  // 拼合成 did / 显镜头标签——与后端 select_active、CLI 同口径，不再用「同 did 出现几行」代理。
+  channelCount: number;
   // 米家分配的房间名（"客厅" / "卧室" / ...）。多摄像头家庭里 name 常是
   // "小米智能摄像机 2 代"等泛称，靠 roomName 才能区分。米家未分房间时为空。
   roomName?: string;

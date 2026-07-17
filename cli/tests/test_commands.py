@@ -2284,3 +2284,47 @@ def test_dashboard_not_running_hint(runner, monkeypatch):
     assert data["running"] is False
     assert data["opened"] is False  # 无头环境不开浏览器
     assert "hint" in data
+
+
+# ─── scope camera list：多通道合成 did 展示（A：仅展示层，不动 API）─────────────
+
+
+def test_compose_channel_dids_transforms_multi_only():
+    """多通道相机每行 did → 合成 did、去 channel 列；单摄保持裸 did、也去 channel 列。"""
+    from miloco_cli.commands.scope import _compose_channel_dids
+
+    resp = {
+        "code": 0,
+        "message": "ok",
+        "data": [
+            {"did": "solo", "name": "单摄", "channel_count": 1, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 1},
+        ],
+    }
+    out = _compose_channel_dids(resp)["data"]
+    # 单摄:裸 did；双摄:合成 did。channel / channel_count 都从展示里去掉。
+    assert out[0]["did"] == "solo"
+    assert out[1]["did"] == "dual:ch0"
+    assert out[2]["did"] == "dual:ch1"
+    for r in out:
+        assert "channel" not in r and "channel_count" not in r
+
+
+def test_scope_camera_list_shows_composite_did(runner):
+    """双摄两行 did 展示成 dual:ch0 / dual:ch1（不再是相同 did），单摄裸 did。"""
+    resp = {
+        "code": 0,
+        "message": "ok",
+        "data": [
+            {"did": "solo", "name": "单摄", "channel_count": 1, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 1},
+        ],
+    }
+    with patch("miloco_cli.commands.scope.api_get", return_value=resp):
+        result = runner.invoke(cli, ["scope", "camera", "list", "--pretty"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)["data"]
+    assert [r["did"] for r in data] == ["solo", "dual:ch0", "dual:ch1"]
+    assert all("channel" not in r and "channel_count" not in r for r in data)
