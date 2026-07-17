@@ -265,15 +265,23 @@ def _force_asyncio_select_selector() -> None:
 
     install.py 主流程只跑几个 questionary prompt + 下载器 httpx 调用，换
     selector 对性能无感知影响。
+
+    ``asyncio.DefaultEventLoopPolicy`` / ``set_event_loop_policy`` 在 3.14 被
+    标记为 3.16 移除，但 3.14 目前没有稳定的无 warning API 能干预
+    ``asyncio.run()`` 内部创建的 loop 类型，暂静音 DeprecationWarning。
     """
     import asyncio
     import selectors
+    import warnings
 
-    class _SelectPolicy(asyncio.DefaultEventLoopPolicy):
-        def new_event_loop(self):
-            return asyncio.SelectorEventLoop(selectors.SelectSelector())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
 
-    asyncio.set_event_loop_policy(_SelectPolicy())
+        class _SelectPolicy(asyncio.DefaultEventLoopPolicy):
+            def new_event_loop(self):
+                return asyncio.SelectorEventLoop(selectors.SelectSelector())
+
+        asyncio.set_event_loop_policy(_SelectPolicy())
 
 
 def _try_tty_fallback() -> bool:
@@ -1680,6 +1688,10 @@ class Installer:
             )
         self.ui.console.print(
             f"  [cyan]miloco-cli --help[/cyan]           {self.ui.i18n.t('summary.help_desc')}"
+        )
+        self.ui.console.print()
+        self.ui.console.print(
+            f"[dim]{self.ui.i18n.t('summary.rc_hint')}[/dim]"
         )
         self.ui.console.print()
         self.ui.console.print(
