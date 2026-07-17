@@ -281,7 +281,10 @@ fi
 # --post-install: install.py 调起，跳过 install.py 已做的前端部署步骤，
 # 只跑 env 持久化 + 残留清理 + 版本记录 + cron + 收尾
 if [ "$POST_INSTALL_ONLY" -eq 1 ]; then
-  info "post-install 模式: 跳过 step 1/2/3/4/5/6/7/8，只做 env 持久化 + cron + 收尾"
+  info "post-install 模式: 跳过 step 1-8，只做 env 持久化 + cron + 收尾"
+  POST_INSTALL_SKIP=1
+else
+  POST_INSTALL_SKIP=0
 fi
 
 # --- 1. 前置检查 ---
@@ -605,13 +608,16 @@ mark_done 2
 
 # --- 3. 同步 skills ---
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 3 "同步 16 个 miloco-* skill → ${HERMES_HOME}/skills/"
+if [ "$POST_INSTALL_SKIP" -eq 0 ]; then
 "$PYTHON" "$HERE/scripts/sync-skills.py"
 mkdir -p "$HERMES_HOME/skills"
 cp -r "$HERE/skills"/miloco-* "$HERMES_HOME/skills/"
+fi
 mark_done 3
 
 # --- 4. 复制插件 ---
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 4 "复制 Hermes 插件 → ${HERMES_PLUGINS_DIR}/"
+if [ "$POST_INSTALL_SKIP" -eq 0 ]; then
 mkdir -p "$HERMES_PLUGINS_DIR"
 info "  复制 miloco-plugin/"
 # 备份用户 state.json（含 deliver.target 等手工配置），复制后还原
@@ -633,8 +639,8 @@ rm -rf "$HERMES_PLUGINS_DIR/adapter"
 # 清 pycache + 预编译（首次启动少 ~2s）
 find "$HERMES_PLUGINS_DIR" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 "$PYTHON" -m compileall -q "$HERMES_PLUGINS_DIR/miloco-plugin" 2>/dev/null || true
-
-# --- 4.x 部署 AgentPlatformAdapter 到 MILOCO_HOME ---
+fi
+mark_done 4
 # backend loader (backend/miloco/src/miloco/agent_platform/loader.py) 按
 # settings.agent.platform 从 $MILOCO_HOME/agent_platform/<name>/ 加载 adapter.py,
 # submodule_search_locations 指向该目录,所以 adapter.py 内 from .xxx import 的
