@@ -132,9 +132,13 @@ class MiMoAdapter(OpenAICompatAdapter):
         }
 
     def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        audio_data_url = f"data:audio/m4a;base64,{audio_base64}"
         return {
             "type": "input_audio",
-            "input_audio": {"data": f"data:audio/m4a;base64,{audio_base64}"},
+            "input_audio": {
+                "data": audio_data_url,
+                "format": audio_data_url.split(";")[0].split(":")[1],
+            },
         }
 
     def build_request_body(
@@ -318,9 +322,13 @@ class GeminiAdapter(OmniProviderAdapter):
     def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
         # m4a(AAC) 容器 mime 记为 audio/mp4；Gemini 原生 inline audio 对 m4a 的接受度需实测，
         # 不达标属编码层问题（见 prompt_builder._encode_audio_only_mp4），不在 adapter 范围。
+        audio_data_url = f"data:audio/mp4;base64,{audio_base64}"
         return {
             "type": "input_audio",
-            "input_audio": {"data": f"data:audio/mp4;base64,{audio_base64}"},
+            "input_audio": {
+                "data": audio_data_url,
+                "format": audio_data_url.split(";")[0].split(":")[1],
+            },
         }
 
     def _content_to_parts(self, content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
