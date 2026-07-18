@@ -75,6 +75,13 @@ def test_bad_ext_raises(lib):
         lib.set_person_avatar(_PID, data=b"x", ext="gif")
 
 
+def test_bad_subject_id_raises(lib):
+    """路径穿越防御：非法 id（含 / . 或 ..）在库层即 raise、不落盘。"""
+    for bad in ("../etc/passwd", "a/b", "..", "x.y", ""):
+        with pytest.raises(ValueError):
+            lib.set_person_avatar(bad, data=b"x", ext="png")
+
+
 # ── 端点：GET 解析优先级 ─────────────────────────────────────────────────────
 
 async def test_get_explicit_avatar(wired, lib):

@@ -31,13 +31,14 @@ export function AvatarCropEditor({
   onConfirm,
 }: Props) {
   const { t } = useTranslation();
-  const src = useMemo(
-    () =>
-      "b64" in source
-        ? `data:image/jpeg;base64,${source.b64}`
-        : URL.createObjectURL(source.file),
-    [source],
-  );
+  const src = useMemo(() => {
+    if ("b64" in source) {
+      // 仅接受 base64 字符再拼 data URL，挡住畸形/注入输入（避免 DOM 文本被当 HTML）
+      const b64 = /^[A-Za-z0-9+/=]*$/.test(source.b64) ? source.b64 : "";
+      return `data:image/jpeg;base64,${b64}`;
+    }
+    return URL.createObjectURL(source.file);
+  }, [source]);
   useEffect(() => {
     // 仅 file 分支创建了 objectURL，需回收
     return () => {

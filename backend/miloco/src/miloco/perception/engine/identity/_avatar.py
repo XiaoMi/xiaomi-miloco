@@ -20,10 +20,21 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# subject_id 白名单：人的 UUID 与宠物 pet_<hex> 都只含这些字符。用作路径/日志前一律
+# 强制校验——helper 不盲信调用方，从源头杜绝路径穿越与日志注入（纵深防御）。
+_SAFE_SUBJECT_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _safe_subject_id(subject_id: str) -> str:
+    if not _SAFE_SUBJECT_ID.fullmatch(subject_id or ""):
+        raise ValueError(f"非法 subject_id: {subject_id!r}")
+    return subject_id
 
 # 允许的头像扩展名（小写、无点）；_EXT_ORDER 供确定性遍历（正常只存在一个）。
 AVATAR_EXTS = frozenset({"jpg", "jpeg", "png", "webp"})
@@ -69,8 +80,9 @@ def _avatar_dir(root: Path, kind: str) -> Path:
 def avatar_path(root: Path, kind: str, subject_id: str) -> Path | None:
     """返回 ``<root>/avatars/<kind>/<id>.<ext>`` 中实际存在的那张（无则 None）。
 
-    逐 ext 精确探测（不 glob）：subject_id 已由上层白名单校验，此处不引入 glob 语义。
+    逐 ext 精确探测（不 glob）；subject_id 先过白名单校验，杜绝路径穿越。
     """
+    subject_id = _safe_subject_id(subject_id)
     d = _avatar_dir(root, kind)
     for ext in _EXT_ORDER:
         p = d / f"{subject_id}.{ext}"
@@ -86,6 +98,7 @@ def avatar_ext(root: Path, kind: str, subject_id: str) -> str | None:
 
 def set_avatar(root: Path, kind: str, subject_id: str, data: bytes, ext: str) -> str:
     """原子写头像并清掉该 subject 的其它扩展名旧图；返回规范化后的 ext。"""
+    subject_id = _safe_subject_id(subject_id)
     norm = normalize_avatar_ext(ext)
     if not data:
         raise ValueError("头像数据为空")
@@ -96,10 +109,11 @@ def set_avatar(root: Path, kind: str, subject_id: str, data: bytes, ext: str) ->
 
 def remove_avatar(root: Path, kind: str, subject_id: str) -> None:
     """删掉该 subject 的所有头像文件（恢复默认 / 删除实体级联时用）。"""
-    _remove(root, kind, subject_id, keep=None)
+    _remove(root, kind, _safe_subject_id(subject_id), keep=None)
 
 
 def _remove(root: Path, kind: str, subject_id: str, keep: str | None) -> None:
+    subject_id = _safe_subject_id(subject_id)
     d = _avatar_dir(root, kind)
     keep_name = f"{subject_id}.{keep}" if keep else None
     for ext in _EXT_ORDER:
