@@ -137,7 +137,7 @@ class MiMoAdapter(OpenAICompatAdapter):
             "type": "input_audio",
             "input_audio": {
                 "data": audio_data_url,
-                "format": audio_data_url.split(";")[0].split(":")[1],
+                "format": audio_data_url.split(";")[0].split("/")[-1],
             },
         }
 
@@ -327,7 +327,7 @@ class GeminiAdapter(OmniProviderAdapter):
             "type": "input_audio",
             "input_audio": {
                 "data": audio_data_url,
-                "format": audio_data_url.split(";")[0].split(":")[1],
+                "format": audio_data_url.split(";")[0].split("/")[-1],
             },
         }
 
