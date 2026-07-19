@@ -32,6 +32,7 @@ import type {
   UsageStats,
   OmniConfigState,
   OmniConfigUpdate,
+  OmniHealth,
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
@@ -851,7 +852,6 @@ export async function realListCameras(): Promise<PerceptionCamera[]> {
     .map((c) => ({
       did: c.did,
       name: c.name,
-      channel: 0,
       roomName: c.room_name,
     }));
 }
@@ -930,6 +930,8 @@ interface BackendScopeCamera {
   // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
   voice_in_use?: boolean;
   connected: boolean;
+  channel?: number;  // 通道号，用于多通道摄像头
+  channel_count?: number;  // 通道总数；判多通道的权威信号（旧后端无则兜底 1）
 }
 
 export async function realListScopeCameras(): Promise<ScopeCamera[]> {
@@ -947,6 +949,8 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     inUse: c.in_use,
     voiceInUse: c.voice_in_use ?? false,
     connected: c.connected,
+    channel: c.channel ?? 0,  // 传递通道号，默认为 0
+    channelCount: c.channel_count ?? 1,  // 通道总数，判多通道用；旧后端兜底 1
   }));
 }
 
@@ -1507,6 +1511,51 @@ export async function realTestOmniConfig(
   return r.data;
 }
 
+// 用户主动触发一次 omni probe(跳过熔断剩余 backoff),返回 OmniConfigState 含新 health。
+export async function realRetryOmniProbe(): Promise<OmniConfigState> {
+  const r = await apiFetch<Normal<OmniConfigState>>(
+    "/api/admin/omni-config/retry",
+    { method: "POST" },
+  );
+  return r.data;
+}
+
+// 订阅 /api/admin/omni-config/stream SSE:熔断器状态变化 → 推送 OmniHealth 快照。
+// 首次连上即会推一次当前状态。返回 unsubscribe 函数。
+//
+// onOpen 可选:**仅在断线后重连成功时**触发(EventSource 'open' 事件首次也会 fire,
+// firstOpenSeen 旗标跳过初次连接)。调用方典型用法是借此 refetch 一次 omni-config,
+// 因为 backend 重启后 config 字段(label/model/base_url)可能变但 SSE 不推 config。
+export function realSubscribeOmniHealth(
+  onHealth: (h: OmniHealth) => void,
+  onOpen?: () => void,
+): () => void {
+  const token = resolveToken();
+  const url = token
+    ? `/api/admin/omni-config/stream?token=${encodeURIComponent(token)}`
+    : "/api/admin/omni-config/stream";
+  const es = new EventSource(url);
+  let firstOpenSeen = false;
+  if (onOpen) {
+    es.addEventListener("open", () => {
+      if (!firstOpenSeen) {
+        firstOpenSeen = true;
+        return;
+      }
+      onOpen();
+    });
+  }
+  es.addEventListener("omni_health", (ev) => {
+    try {
+      const payload = JSON.parse((ev as MessageEvent).data) as OmniHealth;
+      onHealth(payload);
+    } catch {
+      // 忽略解析失败,后端保证 payload 结构。
+    }
+  });
+  return () => es.close();
+}
+
 async function fetchUsageStats(
   period: UsagePeriod,
   binMinutes: number,
@@ -1544,7 +1593,7 @@ async function fetchUsageStats(
 // summary 视图 = task 基础字段 + record 进度摘要（window=day：progress 走 snapshot，
 // duration/event 走今日累计）。derived 形态按 kind 多态，原样透传给 UI 自行解读。
 // TaskSummaryView 继承 TaskFullView，除基础字段 + record 外，本就带驱动规则
-// （rule_briefs）/ 关联（links）/ paused_at；一并映射，详情抽屉直接复用列表数据，
+// （rule_briefs）/ paused_at；一并映射，详情抽屉直接复用列表数据，
 // 不再单独拉 GET /api/tasks/{id}。
 interface BackendTaskSummary {
   task_id: string;
@@ -1557,7 +1606,6 @@ interface BackendTaskSummary {
     query: string;
     actions_desc?: string[];
   }[];
-  links?: { kind: "rule" | "cron"; ref: string }[];
   record: {
     kind: "progress" | "duration" | "event";
     completed: boolean;
@@ -1582,7 +1630,6 @@ export async function realListTasks(): Promise<Task[]> {
       query: b.query,
       actionsDesc: b.actions_desc ?? [],
     })),
-    links: (t.links ?? []).map((l) => ({ kind: l.kind, ref: l.ref })),
     record: t.record
       ? {
           kind: t.record.kind,

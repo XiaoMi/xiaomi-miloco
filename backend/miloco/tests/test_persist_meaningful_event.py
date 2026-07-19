@@ -429,3 +429,175 @@ class TestPersistMeaningfulEvent:
         rows = dao.query()
         assert len(rows) == 1
         assert rows[0]["device_ids"] == ["cam_with_clip"]
+
+    async def test_device_ids_narrowed_to_rule_source(self, isolated_db, dao):
+        """规则只在玄关摄像头命中(source_device_ids=[玄关 did]),同批次里书房
+        摄像头也产出了 clip,但 device_ids 应只保留玄关,不带出书房画面;书房的
+        clip 也不应该被落盘,snapshot_count 应跟 device_ids 同步收窄。
+
+        复现 bug:日志页面规则提醒只绑玄关,却展示了书房的画面。
+        """
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="陌生人进入玄关",
+                    source_device_ids=["cam_entrance"],
+                )
+            ]
+        )
+        clips_by_device = {
+            "cam_entrance": _clip_payload(1),
+            "cam_study": _clip_payload(2),
+        }
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_entrance", "cam_study"],
+            artifacts=_artifacts(clips_by_device),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_entrance"]
+        assert rows[0]["snapshot_count"] == 1
+
+        from miloco.perception.snapshot_writer import get_snapshot_root
+
+        event_dir = get_snapshot_root() / rows[0]["id"]
+        assert (event_dir / "cam_entrance" / "clip.mp4").exists()
+        assert not (event_dir / "cam_study").exists()
+
+    async def test_device_ids_union_across_rules_and_asr(self, isolated_db, dao):
+        """同一行事件里规则命中书房、语音指令来自客厅(拾音白名单相机)→ device_ids
+        取两者并集,无关的卧室不落盘."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="x", source_device_ids=["cam_study"],
+                )
+            ],
+            speeches=[
+                Speech(
+                    needs_response=True, speaker="用户", content="开灯",
+                    is_complete=True, source_device_ids=["cam_living_01"],
+                )
+            ],
+        )
+        clips_by_device = {
+            "cam_study": _clip_payload(1),
+            "cam_living_01": _clip_payload(2),
+            "cam_bedroom": _clip_payload(3),
+        }
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_study", "cam_living_01", "cam_bedroom"],
+            artifacts=_artifacts(clips_by_device),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_study", "cam_living_01"]
+        assert rows[0]["snapshot_count"] == 2
+
+    async def test_device_ids_empty_when_source_has_no_clip(self, isolated_db, dao):
+        """规则命中的摄像头(cam_entrance)本身没有可用 clip,同批次里不相关的
+        cam_study 却有 clip——不应静默回退展示 cam_study,device_ids 该收窄为空."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="x", source_device_ids=["cam_entrance"],
+                )
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_study"],
+            artifacts=_artifacts({"cam_study": _clip_payload(1)}),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == []
+        assert rows[0]["snapshot_count"] == 0
+
+    async def test_device_ids_narrowed_by_suggestion_source(self, isolated_db, dao):
+        """建议(suggestion)单独驱动收窄:来源摄像头之外的相机不该被带出来."""
+        result = RealtimePerceptionResult(
+            suggestions=[
+                Suggestion(event="高温", action="开窗", source_device_ids=["cam_kitchen"]),
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen", "cam_bedroom"],
+            artifacts=_artifacts({
+                "cam_kitchen": _clip_payload(1),
+                "cam_bedroom": _clip_payload(2),
+            }),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_kitchen"]
+        assert rows[0]["snapshot_count"] == 1
+
+    async def test_needs_response_false_speech_excluded_from_narrowing(
+        self, isolated_db, dao
+    ):
+        """needs_response=False 的闲聊,即使带了 source_device_ids,也不该被收窄
+        进 device_ids——只有规则命中的书房才该展示,客厅的闲聊画面不该带出来."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="x", source_device_ids=["cam_study"],
+                )
+            ],
+            speeches=[
+                Speech(
+                    needs_response=False, speaker="妈妈", content="今天好热",
+                    is_complete=True, source_device_ids=["cam_living_01"],
+                )
+            ],
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_study", "cam_living_01"],
+            artifacts=_artifacts({
+                "cam_study": _clip_payload(1),
+                "cam_living_01": _clip_payload(2),
+            }),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_study"]
+        assert rows[0]["snapshot_count"] == 1
+
+    async def test_mixed_source_one_empty_does_not_trigger_full_fallback(
+        self, isolated_db, dao
+    ):
+        """混合来源:一条规则命中未标 source_device_ids(如老规则/引擎异常兜底),
+        另一条正常带 source——整体 relevant 集合非空,应正常收窄,不该因为其中一条
+        缺失来源就整体退化成展示全量摄像头."""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="legacy_rule", reason="老规则未标来源"),
+                MatchedRule(
+                    rule_id="r2", reason="x", source_device_ids=["cam_entrance"],
+                ),
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_entrance", "cam_kitchen"],
+            artifacts=_artifacts({
+                "cam_entrance": _clip_payload(1),
+                "cam_kitchen": _clip_payload(2),
+            }),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_entrance"]
+        assert rows[0]["snapshot_count"] == 1

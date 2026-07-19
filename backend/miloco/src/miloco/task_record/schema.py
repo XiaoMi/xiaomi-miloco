@@ -290,15 +290,6 @@ class RecordPatchRequest(BaseModel):
     model_config = {"extra": "allow"}
 
 
-class TaskLinkRequest(BaseModel):
-    """``POST /tasks/{task_id}/link`` body。当前仅支持 cron kind。"""
-
-    model_config = {"extra": "forbid"}
-
-    kind: Literal["cron", "rule"]
-    ref: str = Field(..., min_length=1)
-
-
 class ProgressIncrementRequest(BaseModel):
     model_config = {"extra": "forbid"}
 

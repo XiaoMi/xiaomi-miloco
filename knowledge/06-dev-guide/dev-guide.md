@@ -284,6 +284,8 @@ metadata:
       bins: ["miloco-cli"] # 依赖的命令行工具
       tools: # 依赖的 OpenClaw built-in tools（可选）
         - miloco_im_push
+        - miloco_notify_bind
+        - miloco_notify_unbind
 ---
 # Skill 正文（Markdown）
 ```
@@ -310,7 +312,8 @@ miloco-cli rule logs --since 1h
 
 # 任务管理（task：生命周期；record：行为统计）
 miloco-cli task create --task-id <id> --description "<desc>"
-miloco-cli task link --task <task_id> --kind cron --ref <jobId>       # 挂 cron（rule 由 rule create 自动 link）
+miloco-cli cron add --task-id <task_id> --kind at --at-iso <ISO> \
+  --name "[<task_id>] <desc>" --message "<意图>"                    # 挂 at 型定时（cron 用 --kind cron --cron-expr --tz；rule 由 rule create 自动挂）
 miloco-cli task delete <task_id> --reason completed|expired|abandoned  # 终止（写审计快照）
 miloco-cli task record init <task_id> --kind progress|duration|event  # 初始化记录
 miloco-cli task record progress-inc <task_id> [--delta N]             # 进度累加
@@ -334,7 +337,7 @@ CLI 会读取 `$MILOCO_HOME/config.json` 中的 `server.url`（后端 HTTP Base 
 4. 验证：`openclaw skills list | grep miloco-<name>`
 5. 在 Agent 对话中触发，观察日志 `$MILOCO_HOME/log/openclaw-plugin.log`
 
-Skill 正文中可以通过 `Bash` tool 调用 `miloco-cli` 任意子命令（含 `task record` 行为统计），或通过插件注册的 built-in tools（`miloco_im_push` 发通知、`miloco_notify_bind` 绑通知渠道、`miloco_habit_suggest` 习惯建议状态）操作。
+Skill 正文中可以通过 `Bash` tool 调用 `miloco-cli` 任意子命令（含 `task record` 行为统计），或通过插件注册的 built-in tools（`miloco_im_push` 发通知、`miloco_notify_bind` 绑通知渠道、`miloco_notify_unbind` 解绑定通知渠道、`miloco_habit_suggest` 习惯建议状态）操作。
 
 ### 场景四：直接调用 API 进行调试
 

@@ -14,6 +14,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  OMNI_CONFIG_STALE_EVENT,
   getOmniConfig,
   updateOmniConfig,
   activateOmniConfig,
@@ -32,6 +33,9 @@ const INPUT_CLS =
 
 // omni 测试 / 模型列表的后端机器码 → i18n key;命中走前端本地化,
 // 未命中(如 http_error,含动态 HTTP 细节)回退后端 message。
+// 与 error_classifier.CODES 保持一致(10 个 code):测试路径撞 429 会返 rate_limited、
+// 200+非 JSON body 会返 bad_response,retry 被中断会返 cancelled。缺 code = 回退
+// 后端硬编码中文 message、污染英文界面。
 const OMNI_CODE_KEY: Record<string, string> = {
   ok: "usage.testOk",
   bad_key: "usage.testBadKey",
@@ -40,6 +44,9 @@ const OMNI_CODE_KEY: Record<string, string> = {
   unreachable: "usage.testUnreachable",
   no_key: "usage.testNoKey",
   http_error: "usage.testHttpError",
+  rate_limited: "usage.testRateLimited",
+  bad_response: "usage.testBadResponse",
+  cancelled: "usage.testCancelled",
 };
 
 // 测试结果三档语义:连接正常(✓ 绿,chat 调通)/ 鉴权过但探测被拒(⚠ 黄,rejected_authed)/ 失败(✗ 红)。
@@ -197,6 +204,11 @@ export function UsageOmniConfig() {
 
   useEffect(() => {
     void load();
+    // OmniHealthBanner 的 SSE 重连(backend 重启后)会 dispatch 此事件,
+    // 让当前页面同步 refetch 最新 config,避免视觉与实际状态错位。
+    const onStale = () => void load();
+    window.addEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
+    return () => window.removeEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
   }, []);
 
   async function load() {
@@ -367,6 +379,11 @@ export function UsageOmniConfig() {
     try {
       const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
       setRowTestResults((m) => ({ ...m, [p.label]: res }));
+      // 测通当前生效那套时,后端已主动清熔断,前端触发一次 refetch 刷新 health,
+      // 让状态列从"熔断红/黄"变回"测试结果"。stale 事件复用配置变更通道。
+      if (res.ok && p.active) {
+        window.dispatchEvent(new Event(OMNI_CONFIG_STALE_EVENT));
+      }
     } catch (e) {
       setRowTestResults((m) => ({
         ...m,
@@ -550,7 +567,27 @@ export function UsageOmniConfig() {
                           {/* 固定宽 w-44 单行截断(列宽恒定不横向挤压);文字被截断时鼠标悬浮即时弹出
                               锚定元素底部的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
                           <td className="px-3 py-2.5">
-                            {rowTesting === p.label ? (
+                            {/* active 行且 health 非 ok:优先显实时熔断状态,覆盖手动测试结果
+                                (health 是真实运行时反映,手动测试是快照)。 */}
+                            {p.active && state.active.health && state.active.health.state !== "ok" ? (
+                              <span
+                                className={`block w-44 truncate ${SEV_CLASS[state.active.health.state === "error" ? "error" : "warn"]}`}
+                                onMouseEnter={showTip}
+                                onMouseLeave={hideTip}
+                              >
+                                {SEV_GLYPH[state.active.health.state === "error" ? "error" : "warn"]}{" "}
+                                {/* backend message 硬编码中文,英文界面走 codes i18n;
+                                    http_error 带动态状态码不走 codes,直接显 message。 */}
+                                {state.active.health.code && state.active.health.code !== "http_error"
+                                  ? t(`omniHealth.codes.${state.active.health.code}`, {
+                                      defaultValue: state.active.health.message,
+                                    })
+                                  : state.active.health.message}
+                                {state.active.health.consecutive_failures > 0 && (
+                                  <> · {t("omniHealth.failuresCount", { n: state.active.health.consecutive_failures })}</>
+                                )}
+                              </span>
+                            ) : rowTesting === p.label ? (
                               <span className="block w-44 truncate text-text-tertiary">{t("usage.testing")}</span>
                             ) : rowTestResults[p.label] ? (
                               <span

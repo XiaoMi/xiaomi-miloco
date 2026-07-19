@@ -46,11 +46,11 @@
 任务管理由两个模块协作：`task/`（任务生命周期主体）与 `task_record/`（任务的行为统计载体）。
 
 ```
-创建任务（Agent: miloco-create-task 分步装配）
-  → POST /api/tasks → TaskService（task/service.py）仅建 task 占位行
-  → 再分步挂载（rule 置于最后，故称倒序）：POST /api/tasks/{id}/record 初始化记录（FK 直连 task，不进 task_link）；
-      POST /api/tasks/{id}/link 挂 cron（记入 task_link）；
-      rule create endpoint 内部一笔事务写 rule + task_link（依赖 record 先就位）
+创建任务（Agent: miloco-create-task）
+  → POST /api/tasks → TaskService（task/service.py）
+      写 task 主体 + 装配 rule / cron / record
+      rule 归属由 rule.task_id FK CASCADE 表达
+      cron 归属由 cron.task_id FK CASCADE 表达（dispatch_owner='internal'|'external' 二分）
 
 累积统计（CLI / Agent）
   → POST /api/tasks/{id}/record/...（init / progress-inc / event-append / session-start|end）
@@ -65,15 +65,15 @@
 
 终止任务（Agent: miloco-terminate-task）
   → DELETE /api/tasks/{id} → TaskService.delete_task（单事务）
-      写 task_terminate_log 审计快照 → 删 rule → 删 task
-      （FK CASCADE 连带清 task_link 与全部 task_record_* 表）
+      写 task_terminate_log 审计快照 → 删 task
+      （FK CASCADE 连带清 rule / cron / 全部 task_record_* 表）
 ```
 
 ### 核心模块
 
 **TaskService**（`task/service.py`）
 
-任务生命周期主体的业务层：创建（仅建占位行）/ 启停 / 更新 / 删除任务，维护 task↔rule/cron 关联（记入 `task_link`）。启停时联动改写关联规则的 `enabled`，并把 cron 侧操作汇总成 `agent_pending` 交由 Agent 落地——后端不直接操作 OpenClaw Cron。`delete_task` 单事务编排终止——写审计快照 + 删规则 + 删任务（FK CASCADE 清理关联与记录）。另提供 summary 聚合视图：以 task 为主表左连接各任务的活跃记录摘要（没绑记录的 task 也返，不丢行），一次性出全部任务的完整状态（基础 + 规则摘要 + 关联 + 记录摘要），供前端任务面板拉取；记录侧摘要由 `TaskRecordService.list_active_summaries` 拼装。
+任务生命周期主体的业务层：创建 / 启停 / 更新 / 删除任务，装配规则与定时。rule / cron 归属通过各自的 `task_id` FK CASCADE 直连 task。启停时联动改写关联规则的 `enabled`，internal cron 直接联动 `runner.apply_enabled_state`，external cron 汇总成 `agent_pending` 交由 Agent 落地。`delete_task` 单事务编排终止——写审计快照 + 删任务（FK CASCADE 连带清 rule / cron / 全部 task_record_* 表）。另提供 summary 聚合视图：以 task 为主表左连接各任务的活跃记录摘要（没绑记录的 task 也返，不丢行），一次性出全部任务的完整状态（基础 + 规则摘要 + 关联 + 记录摘要），供前端任务面板拉取；记录侧摘要由 `TaskRecordService.list_active_summaries` 拼装。
 
 **TaskRecordService**（`task_record/service.py`）
 
@@ -105,10 +105,11 @@
 
 ### 涉及的数据表
 
-- **task 子系统**：任务生命周期主体表 + task↔rule/cron 关联表（`task_link`）
+- **task 子系统**：任务生命周期主体表 + `rule` / `cron` 两表通过 `task_id` FK CASCADE 挂到 task
+- **schedule 子系统**：`cron` 表统一装 internal（backend + APScheduler MemoryJobStore 管理）与 external（backend 只存引用，触发仍走 openclaw 老通路）两类
 - **task_record 子系统**：按 kind 拆的主表（进度 / 时长 / 事件）+ 时长与事件各自的子表 + 一张终止审计表
 
-记录不进 `task_link`，FK 直连 task。表名与 schema 见 `database/connector.py`。
+所有子表 FK 直连 task；老 `task_link` 表已在 v1→v2 迁移中 DROP，rule/cron 关联改由各自 `task_id` 表达。表名与 schema 见 `database/connector.py`。
 
 ### 任务相关 API 路径
 

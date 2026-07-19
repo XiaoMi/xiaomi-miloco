@@ -63,6 +63,18 @@ async def init_perception_module(miot_proxy, kv_repo):
         log_repo=perception_log_repo,
     )
 
+    # 7.1 把 omni 熔断器的状态变化桥接到 SSE(通过 PipelineProcessor._publish),
+    # 让 web 顶部横条实时反映 warn/error 状态。listener 在锁外调用,里面只做非阻塞
+    # put_nowait,单个订阅队列满就 log warning + drop(见 _publish)。
+    from dataclasses import asdict
+
+    from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+
+    def _emit_omni_health(snap):
+        pipeline_processor._publish("omni_health", asdict(snap))
+
+    get_omni_circuit_breaker().register_listener(_emit_omni_health)
+
     # 8. 启动引擎 —— 尊重用户「休息」意图：上次被手动暂停则不自动拉起，
     #    否则后台每次重启都会无视暂停、继续烧 token。
     from miloco.perception.engine_state import is_perception_enabled

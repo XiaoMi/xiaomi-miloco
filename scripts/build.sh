@@ -26,7 +26,7 @@ export COPYFILE_DISABLE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$PROJECT_ROOT/dist"
-ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web"
+ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web,hermes"
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────
 
@@ -91,13 +91,17 @@ resolve_version() {
         RESOLVED_PEP=$(python3 "$SCRIPT_DIR/version_normalize.py" "$VERSION" --target pep440) || die 4 "版本号非法: $VERSION"
         RESOLVED_NPM=$(python3 "$SCRIPT_DIR/version_normalize.py" "$VERSION" --target npm)
     else
-        # 本地：用 setuptools_scm 从 git 派生 PEP440 dev 版（与 uv sync 时 hatch-vcs 一致）
+        # 本地：用 setuptools_scm 从 git 派生 PEP440 dev 版（与 uv sync 时 hatch-vcs 一致）。
+        # version_scheme=no-guess-dev 必须与各 pyproject [tool.hatch.version].raw-options 一致：
+        # CalVer 不猜"下一版"，以当前 tag 作 base + post 段（形如 2026.7.3.post1.devN+g<hash>）。
         RESOLVED_PEP=$(uv run --no-project --with setuptools-scm python3 -c \
-            "from setuptools_scm import get_version; print(get_version())" 2>/dev/null || echo "0.0.0")
+            "from setuptools_scm import get_version; print(get_version(version_scheme='no-guess-dev'))" 2>/dev/null || echo "0.0.0")
         RESOLVED_RAW="$RESOLVED_PEP"
-        # npm 包版本仅是装配占位（运行时不读 package.json 版本），给个合法 semver dev 串即可
-        local sha; sha=$(git rev-parse --short HEAD 2>/dev/null || echo "0000000")
-        RESOLVED_NPM="0.0.0-dev.$sha"
+        # npm 包版本：把 PEP440 dev 版转成合法 semver（保留真实 base，如 2026.7.3-post1.dev117
+        # +ge88bd38），不再用丢了 base 的 0.0.0 占位。web 不发布、openclaw 走本地 tgz 装，均
+        # 不依赖 npm 版本排序，故 semver 里 dev 版 < 正式版无碍。转换失败兜底回 PEP 串（会让
+        # npm version 报错以暴露异常，而非静默用假版本）。
+        RESOLVED_NPM=$(python3 "$SCRIPT_DIR/version_normalize.py" "$RESOLVED_PEP" --pep2semver 2>/dev/null || echo "$RESOLVED_PEP")
     fi
     export SETUPTOOLS_SCM_PRETEND_VERSION="$RESOLVED_PEP"
     log "版本: pep440=$RESOLVED_PEP npm=$RESOLVED_NPM (raw=$RESOLVED_RAW)"
@@ -196,6 +200,31 @@ build_openclaw() {
     restore_pkg_json plugins/openclaw/package.json
 }
 
+build_hermes() {
+    log "构建 hermes 插件 ..."
+    local hermes_dir="$PROJECT_ROOT/plugins/hermes"
+    python3 "$hermes_dir/scripts/sync-skills.py"
+
+    local stage; stage=$(mktemp -d)
+    cp -r "$hermes_dir/miloco-plugin" "$stage/miloco-plugin"
+    find "$stage/miloco-plugin" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+    mkdir -p "$stage/miloco-plugin-skills"
+    for skill_dir in "$hermes_dir/skills"/miloco-*; do
+        if [ -d "$skill_dir" ]; then
+            local name; name=$(basename "$skill_dir")
+            cp -r "$skill_dir" "$stage/miloco-plugin-skills/$name"
+        fi
+    done
+
+    # install-hermes.sh 打进 tarball：install.py step 8 完成后调 --post-install 跑后置步骤
+    cp "$hermes_dir/install-hermes.sh" "$stage/install-hermes.sh"
+
+    local tar_name="miloco-hermes-plugin-${RESOLVED_PEP}.tar.gz"
+    tar -czf "$DIST_DIR/$tar_name" -C "$stage" .
+    rm -rf "$stage"
+    log "  hermes 插件: $tar_name"
+}
+
 build_web() {
     log "构建 web 家庭面板 ..."
     local web_static="$PROJECT_ROOT/backend/miloco/src/miloco/static"
@@ -207,14 +236,15 @@ build_web() {
     mkdir -p "$web_static"
     (
         cd "$PROJECT_ROOT/web"
-        npm version "$RESOLVED_NPM" --no-git-tag-version --allow-same-version >/dev/null
         CI=true pnpm install --frozen-lockfile
         # vite.config.ts::outDir 是 "dist"(默认 web/dist),build 完后再 cp 到 backend
         # static_dir,让 backend wheel 打包时一并带上。改 vite outDir 直接指 backend
         # 会跟 dev 期 vite serve 的产物路径冲突,统一用 dist + cp 更清晰。
-        pnpm build
+        # 界面版本由 MILOCO_APP_VERSION 注入(vite define __APP_VERSION__)：用 RESOLVED_PEP,与
+        # CLI/Python 包权威版本同源一致。web 不 npm pack、package.json version 无消费者,
+        # 故无需 npm version stamp(不 stamp 也就无需 restore package.json)。
+        MILOCO_APP_VERSION="$RESOLVED_PEP" pnpm build
     )
-    restore_pkg_json web/package.json
     # cp dist 内容到 backend static_dir,组装进 wheel。watch.html / vendor 的源仍
     # 在 web/public(唯一真源),vite build 已把 public/* 拷进 dist;这里和 index.html
     # /assets 同等处理,把「构建产物」落进 static,让 backend wheel 带上可直接 serve
@@ -351,6 +381,14 @@ pack_platform_bundles() {
         local stage="$tmp_root/$key"
         mkdir -p "$stage"
         cp "$miloco_whl" "$cli_whl" "$miot_whl" "$tgz" "$models_tar" "$stage/"
+        # Hermes 插件 tarball（可选；缺失时只 warn，不阻塞其余平台归档）
+        local hermes_tgz
+        hermes_tgz=$(ls "$DIST_DIR"/miloco-hermes-plugin-*.tar.gz 2>/dev/null | head -1)
+        if [[ -n "$hermes_tgz" ]]; then
+            cp "$hermes_tgz" "$stage/"
+        else
+            log "  WARN: 缺 hermes 插件 tarball，$key 归档不支持 --agent-platform=hermes"
+        fi
         local bundle="miloco-$key-$raw.tar.gz"
         tar -czf "$DIST_DIR/$bundle" -C "$stage" .
         log "  $(du -h "$DIST_DIR/$bundle" | cut -f1) $bundle"
@@ -504,6 +542,7 @@ main() {
     if should_build "miloco";      then build_miloco; fi
     if should_build "miloco-cli";  then build_miloco_cli; fi
     if should_build "openclaw";    then build_openclaw; fi
+    if should_build "hermes";     then build_hermes; fi
 
     # 更新 manifest
     update_manifest

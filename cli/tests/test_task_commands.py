@@ -41,30 +41,6 @@ def test_create_no_longer_accepts_refs(runner):
     assert "No such option" in result.output or "no such option" in result.output.lower()
 
 
-def test_link_posts_to_link_endpoint(runner):
-    """方案 P：``task link`` 走 ``/link`` (singular) 仅支持 cron kind。"""
-    with patch("miloco_cli.client.api_post") as mock_post:
-        mock_post.return_value = {"code": 0}
-        result = runner.invoke(
-            task_group,
-            ["link", "--task", "t1", "--kind", "cron", "--ref", "j1"],
-        )
-        assert result.exit_code == 0
-        path, body = mock_post.call_args.args
-        assert path == "/api/tasks/t1/link"
-        assert body == {"kind": "cron", "ref": "j1"}
-
-
-def test_link_rejects_non_cron_kinds(runner):
-    """rule / memory / bad 三类全部被 Click Choice 拒绝。"""
-    for kind in ("rule", "memory", "bad"):
-        result = runner.invoke(
-            task_group,
-            ["link", "--task", "t1", "--kind", kind, "--ref", "x"],
-        )
-        assert result.exit_code != 0, f"kind={kind} should be rejected"
-
-
 def test_update_uses_patch(runner):
     with patch("miloco_cli.client.api_patch") as mock_patch:
         mock_patch.return_value = {"code": 0}

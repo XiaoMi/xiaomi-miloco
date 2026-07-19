@@ -1,15 +1,13 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""Task router e2e 集成测试（方案 P）。
+"""Task router e2e 集成测试 (v2)。
 
 TestClient → task_router / task_record_router → 各 Service → SQLite。
-覆盖方案 P 后的实际调用链：
 
-1. ``POST /api/tasks`` 仅占位（body 不接 refs）
-2. rule create 内部自动写 task_link(kind='rule')
-3. ``POST /api/tasks/{id}/link`` 显式挂 cron
-4. ``DELETE /api/tasks/{id}?reason=X`` 写 terminate_log + FK CASCADE 清表
+1. ``POST /api/tasks`` 仅占位 (body 不接 refs)
+2. rule create 只写 rule 表 (rule.task_id FK CASCADE)
+3. ``DELETE /api/tasks/{id}?reason=X`` 写 terminate_log + FK CASCADE 清表
 """
 
 import sqlite3
@@ -121,7 +119,7 @@ def test_create_get_lifecycle(client, isolated_app):
     assert body["backend_synced"]["rules_deleted"] == [rule_id]
 
     with sqlite3.connect(str(db_file)) as conn:
-        for tbl in ("task", "task_link"):
+        for tbl in ("task", "rule"):
             n = conn.execute(
                 f"SELECT COUNT(*) FROM {tbl} WHERE task_id='living_room_light'"
             ).fetchone()[0]
@@ -185,8 +183,8 @@ def test_delete_writes_terminate_log_with_reason(client, isolated_app):
         assert log["reason"] == "abandoned"
         assert log["kind"] == "progress"
         assert log["description"] == "喝水"
-        # FK CASCADE 清完
-        for tbl in ("task", "task_link", "task_record_progress"):
+        # FK CASCADE 清 rule / task_record_*; task_link 表已 DROP
+        for tbl in ("task", "rule", "task_record_progress"):
             n = conn.execute(
                 f"SELECT COUNT(*) FROM {tbl} WHERE task_id='t1'"
             ).fetchone()[0]
@@ -197,18 +195,6 @@ def test_delete_invalid_reason_rejected(client):
     _create_task(client, "t1")
     r = client.delete("/api/tasks/t1?reason=garbage")
     assert r.status_code == 422
-
-
-def test_link_endpoint_only_accepts_cron(client):
-    _create_task(client, "t1")
-    # rule kind 拒绝（rule 走 rule create 自动 link）
-    r = client.post("/api/tasks/t1/link", json={"kind": "rule", "ref": "r1"})
-    assert r.status_code == 422
-
-    # cron kind 接受
-    r = client.post("/api/tasks/t1/link", json={"kind": "cron", "ref": "job-001"})
-    assert r.status_code == 200
-    assert r.json()["code"] == 0
 
 
 def test_list_returns_rule_briefs(client):

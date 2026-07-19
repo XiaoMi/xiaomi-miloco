@@ -26,6 +26,7 @@ import type { Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
+import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
@@ -210,7 +211,6 @@ function MainApp() {
           <div className="space-y-6">
             <HeroNow
               persons={persons.data}
-              cameras={cameras.data}
               scopeCameras={scopeCameras.data}
               miotHasCamera={devices.data.some(
                 (d) => d.category === "camera",
@@ -441,6 +441,9 @@ function MainApp() {
             window.location.reload();
           }}
         />
+
+        {/* omni 熔断器告警条(shrink-0):非 ok 时才渲染 */}
+        <OmniHealthBanner onGoToConfig={() => setActiveTab("usage")} />
 
         {/* 状态条(shrink-0) */}
         {status.data && (

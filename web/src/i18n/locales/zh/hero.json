@@ -1,6 +1,9 @@
 {
   "hero": {
     "title": "家里此刻",
+    "channelLabel": "通道 {{n}}",
+    "lensMoving": "移动画面",
+    "lensFixed": "固定画面",
     "usageAriaLabel": "今日用量,详见用量页",
     "usageTitle": "今日 token 用量",
     "usageToday": "今日",

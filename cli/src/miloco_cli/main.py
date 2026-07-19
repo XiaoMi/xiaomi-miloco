@@ -17,6 +17,7 @@ from miloco_cli.commands.account import account_group
 from miloco_cli.commands.actions import actions_group
 from miloco_cli.commands.admin import admin_group
 from miloco_cli.commands.config import config_group
+from miloco_cli.commands.cron import cron_group
 from miloco_cli.commands.dashboard import dashboard_cmd
 from miloco_cli.commands.debug import debug_group
 from miloco_cli.commands.device import device_group
@@ -78,6 +79,7 @@ cli.add_command(account_group)
 cli.add_command(scene_group)
 cli.add_command(perceive_group)
 cli.add_command(rule_group)
+cli.add_command(cron_group)
 cli.add_command(task_group)
 cli.add_command(person_group)
 cli.add_command(identity_group)
