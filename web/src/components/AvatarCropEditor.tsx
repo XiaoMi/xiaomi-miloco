@@ -1,12 +1,10 @@
 /**
  * 头像裁剪编辑器（手写，纯 React + canvas + pointer，不引库）。
  * 圆形取景框内定位一张源图：拖动平移、滚轮 / 滑杆缩放，图像始终铺满取景框。
- * 有 initialBox（如 grounding 头部归一化 [x,y,w,h]）时，初始把该框贴合取景框；
- * 否则居中 cover。确认时把可见区域绘到 OUT×OUT 离屏 canvas → JPEG blob。
- *
- * 上传头像与「自动生成外观描述」两条路线都经本组件确认，产物统一是裁好的方图 blob。
+ * 有 initialBox（归一化 [x,y,w,h]）时初始把该框贴合取景框；否则居中 cover。
+ * 确认时把可见区域绘到 OUT×OUT 离屏 canvas → JPEG blob。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconX } from "@/lib/icons";
@@ -16,8 +14,8 @@ const OUT = 256; // 输出方图边长（px）
 const MAX_ZOOM = 4;
 
 interface Props {
-  /** 源图：上传的文件 或 base64（自动生成的 crop）。 */
-  source: { file: File } | { b64: string };
+  /** 源图：用户选的图片文件。 */
+  source: { file: File };
   /** 头部等归一化初始框 [x,y,w,h]（相对源图），用作默认裁剪范围。 */
   initialBox?: number[] | null;
   onCancel: () => void;
@@ -31,20 +29,14 @@ export function AvatarCropEditor({
   onConfirm,
 }: Props) {
   const { t } = useTranslation();
-  const src = useMemo(() => {
-    if ("b64" in source) {
-      // 仅接受 base64 字符再拼 data URL，挡住畸形/注入输入（避免 DOM 文本被当 HTML）
-      const b64 = /^[A-Za-z0-9+/=]*$/.test(source.b64) ? source.b64 : "";
-      return `data:image/jpeg;base64,${b64}`;
-    }
-    return URL.createObjectURL(source.file);
-  }, [source]);
+  // objectURL 的创建与回收同处一个 effect 生命周期（不放渲染期）：source 变化 / 卸载时
+  // 都 revoke 到对应的旧 URL，杜绝泄漏。
+  const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
-    // 仅 file 分支创建了 objectURL，需回收
-    return () => {
-      if ("file" in source) URL.revokeObjectURL(src);
-    };
-  }, [src, source]);
+    const url = URL.createObjectURL(source.file);
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [source]);
 
   const imgRef = useRef<HTMLImageElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
@@ -210,7 +202,7 @@ export function AvatarCropEditor({
             {/* eslint-disable-next-line jsx-a11y/alt-text */}
             <img
               ref={imgRef}
-              src={src}
+              src={src ?? undefined}
               onLoad={onImgLoad}
               draggable={false}
               alt=""

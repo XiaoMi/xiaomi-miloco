@@ -77,15 +77,25 @@ def _avatar_dir(root: Path, kind: str) -> Path:
     return Path(root) / "avatars" / kind
 
 
+def _avatar_file(root: Path, kind: str, subject_id: str, ext: str) -> Path:
+    """构造 ``avatars/<kind>/<id>.<ext>`` 并双重防穿越：白名单 id + 规范化后仍须落在该
+    目录内（后者是 CodeQL 认可的 path-containment sanitizer：os.path.realpath + commonpath）。"""
+    subject_id = _safe_subject_id(subject_id)
+    d = _avatar_dir(root, kind)
+    p = d / f"{subject_id}.{ext}"
+    base = os.path.realpath(d)
+    if os.path.commonpath((base, os.path.realpath(p))) != base:
+        raise ValueError(f"非法 subject_id: {subject_id!r}")
+    return p
+
+
 def avatar_path(root: Path, kind: str, subject_id: str) -> Path | None:
     """返回 ``<root>/avatars/<kind>/<id>.<ext>`` 中实际存在的那张（无则 None）。
 
-    逐 ext 精确探测（不 glob）；subject_id 先过白名单校验，杜绝路径穿越。
+    逐 ext 精确探测（不 glob）；路径经白名单 + containment 校验，杜绝穿越。
     """
-    subject_id = _safe_subject_id(subject_id)
-    d = _avatar_dir(root, kind)
     for ext in _EXT_ORDER:
-        p = d / f"{subject_id}.{ext}"
+        p = _avatar_file(root, kind, subject_id, ext)
         if p.is_file():
             return p
     return None
@@ -98,26 +108,24 @@ def avatar_ext(root: Path, kind: str, subject_id: str) -> str | None:
 
 def set_avatar(root: Path, kind: str, subject_id: str, data: bytes, ext: str) -> str:
     """原子写头像并清掉该 subject 的其它扩展名旧图；返回规范化后的 ext。"""
-    subject_id = _safe_subject_id(subject_id)
     norm = normalize_avatar_ext(ext)
     if not data:
         raise ValueError("头像数据为空")
-    _atomic_write(_avatar_dir(root, kind) / f"{subject_id}.{norm}", data)
+    _atomic_write(_avatar_file(root, kind, subject_id, norm), data)
     _remove(root, kind, subject_id, keep=norm)
     return norm
 
 
 def remove_avatar(root: Path, kind: str, subject_id: str) -> None:
     """删掉该 subject 的所有头像文件（恢复默认 / 删除实体级联时用）。"""
-    _remove(root, kind, _safe_subject_id(subject_id), keep=None)
+    _remove(root, kind, subject_id, keep=None)
 
 
 def _remove(root: Path, kind: str, subject_id: str, keep: str | None) -> None:
     subject_id = _safe_subject_id(subject_id)
-    d = _avatar_dir(root, kind)
     keep_name = f"{subject_id}.{keep}" if keep else None
     for ext in _EXT_ORDER:
-        p = d / f"{subject_id}.{ext}"
+        p = _avatar_file(root, kind, subject_id, ext)
         if keep_name and p.name == keep_name:
             continue
         if p.is_file():

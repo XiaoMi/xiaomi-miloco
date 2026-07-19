@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import io
 
+import cv2
+import numpy as np
 import pytest
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -19,6 +21,8 @@ from miloco.person.router import (
 )
 
 _PID = "33333333-3333-4333-8333-333333333333"
+# 真·PNG 字节（cv2 可解码），供需要「合法图片」的端点用例
+_PNG = cv2.imencode(".png", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
 
 
 @pytest.fixture
@@ -119,7 +123,7 @@ async def test_explicit_beats_face(wired, lib):
 # ── 端点：POST / DELETE ─────────────────────────────────────────────────────
 
 async def test_post_sets_avatar(wired, lib):
-    up = UploadFile(filename="a.png", file=io.BytesIO(b"\x89PNGdata"))
+    up = UploadFile(filename="a.png", file=io.BytesIO(_PNG))
     res = await upload_person_avatar(_PID, image=up, current_user="t")
     assert res.code == 0 and res.data["avatar_ext"] == "png"
     assert lib.person_avatar_path(_PID) is not None
@@ -138,7 +142,16 @@ async def test_post_404_no_person(monkeypatch, lib):
 
 
 async def test_post_bad_ext_400(wired):
-    up = UploadFile(filename="a.gif", file=io.BytesIO(b"x"))
+    # 合法图片、但后缀不在白名单 → 400（走 ext 校验，不被字节校验提前拦）
+    up = UploadFile(filename="a.gif", file=io.BytesIO(_PNG))
+    with pytest.raises(HTTPException) as ei:
+        await upload_person_avatar(_PID, image=up, current_user="t")
+    assert ei.value.status_code == 400
+
+
+async def test_post_bad_bytes_400(wired):
+    # 后缀合法、但内容不是可解码图片 → 400
+    up = UploadFile(filename="a.png", file=io.BytesIO(b"not-an-image"))
     with pytest.raises(HTTPException) as ei:
         await upload_person_avatar(_PID, image=up, current_user="t")
     assert ei.value.status_code == 400

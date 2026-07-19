@@ -745,6 +745,10 @@ async def upload_person_avatar(
     if not manager.person_service.exists(person_id):
         raise HTTPException(status_code=404, detail="person 不存在")
     data = await image.read()
+    # 校验确为可解码图片：挡「后缀是图、内容不是图」的坏字节（用现有 cv2，同 enroll 口径，
+    # 不引额外依赖）。避免坏字节被落盘后按 image/* 发回。
+    if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
+        raise HTTPException(status_code=400, detail="无法识别的图片")
     ext = Path(image.filename or "").suffix.lstrip(".").lower()
     try:
         norm = _get_identity_library().set_person_avatar(person_id, data=data, ext=ext)
