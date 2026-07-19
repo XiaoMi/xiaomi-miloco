@@ -112,6 +112,21 @@ def _request_value_json(request: "DeviceControlRequest") -> str | None:
         return None  # 参数本身不可序列化时不反噬审计主体
 
 
+def _request_iid(request: "DeviceControlRequest") -> str | None:
+    """把控制请求归一成台账 iid 列(成功/异常路径共用)。
+
+    set_properties 不填顶层 iid(iid 在 properties 各项里),其台账行落逗号
+    拼接的复数 iid——异常路径若直接取 request.iid 会恒落 NULL,按 iid 检索
+    失败动作时就会漏行,故与成功路径同构地按 type 重建。
+    """
+    try:
+        if request.type == "set_properties":
+            return ",".join(p.iid for p in (request.properties or [])) or None
+        return request.iid
+    except Exception:
+        return None  # 与 value_json 同口径:归一失败不反噬审计主体
+
+
 async def _write_action_ledger(
     miot_proxy: MiotProxy,
     *,
@@ -920,7 +935,7 @@ class MiotService:
                     self._miot_proxy,
                     action_type="set_properties",
                     # 复数 iid 逗号拼接;value_json 存 {iid: value} 全集
-                    iid=",".join(p.iid for p in request.properties),
+                    iid=_request_iid(request),
                     did=did,
                     value_json=attempted_value_json,
                     result_code=code, result_msg=msg,
@@ -959,7 +974,7 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=getattr(request, "type", None) or "call_action",
-                did=did, iid=getattr(request, "iid", None),
+                did=did, iid=_request_iid(request),
                 value_json=attempted_value_json,
                 result_code=None, result_msg=None,
                 success=False, error=str(e),

@@ -317,6 +317,36 @@ async def test_exception_path_writes_failure_row(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_exception_path_keeps_joined_iids_for_set_properties(
+    bound_client, tmp_path
+):
+    """set_properties 异常行 iid 列与成功行同构(逗号拼接),不落 NULL。"""
+    from miloco.middleware.exceptions import MiotServiceException
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.set_device_properties = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    req = DeviceControlRequest(
+        type="set_properties",
+        properties=[
+            {"iid": "prop.2.1", "value": True},
+            {"iid": "prop.3.1", "value": 50},
+        ],
+    )
+    with pytest.raises(MiotServiceException):
+        await svc.control_device("dev1", req)
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    # 按 iid 检索失败动作不能漏:set_properties 顶层 iid 恒空,须按 type 重建
+    assert r["iid"] == "prop.2.1,prop.3.1"
+    assert json.loads(r["value_json"]) == {"prop.2.1": True, "prop.3.1": 50}
+
+
+@pytest.mark.asyncio
 async def test_scene_trigger_writes_ledger_row(bound_client, tmp_path):
     client, obs_db = bound_client
     svc = _make_service(tmp_path)
