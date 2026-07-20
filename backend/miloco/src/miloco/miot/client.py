@@ -645,8 +645,16 @@ class MiotProxy:
         return self._camera_info_dict.get(did)
 
     def is_camera_stream_connected(self, did: str) -> bool:
-        """Return native/PPCS connection health for an existing manager."""
-        manager = self._camera_img_managers.get(did)
+        """Return native/PPCS connection health for an existing manager.
+
+        Accepts either a physical or a synthetic channel did.  The native
+        session is one per physical camera, so ``_camera_img_managers`` is
+        keyed by physical did while perception addresses cameras per channel
+        (``{did}:ch{n}``); normalising here keeps every caller from having to
+        remember the difference — looking a synthetic did up directly would
+        silently never match and report a healthy camera as disconnected.
+        """
+        manager = self._camera_img_managers.get(physical_camera_did(did))
         return bool(
             manager is not None
             and getattr(manager.camera_info, "connected", False)
