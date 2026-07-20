@@ -866,6 +866,6 @@ miloco-cli rule create --task-id stranger_alert \
   --name "[stranger_alert] 陌生人进入" \
   --mode event \
   --condition "画面中出现非家庭成员的成年人身影；不含家庭成员，不含快递员/物业人员等短暂停留在门外未入户的访客" \
-  --action '{"did":"<客厅音箱 DID>","iid":"action.<siid>.<aiid>","params":["请注意，有陌生人进入"],"idempotent":false,"cooldown_minutes":5}'
+  --action '{"did":"<默认音箱 DID>","iid":"action.<siid>.<aiid>","params":["请注意，有陌生人进入"],"idempotent":false,"cooldown_minutes":5}'
 ```
 
