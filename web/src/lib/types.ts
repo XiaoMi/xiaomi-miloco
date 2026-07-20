@@ -119,8 +119,10 @@ export interface ActivityEvent {
   /** clip 容器类型,服务端 stat 落盘文件后缀计算:
    *   "mp4" = 视频路径(H264+AAC,UI 显 🎬)
    *   "m4a" = audio-only 路径(纯 AAC,UI 显 🎤 音频)
+   *   "wav" = audio-only 路径(PCM,UI 显 🎤 音频)
+   *   "mp3" = audio-only 路径(MP3,UI 显 🎤 音频)
    *   undefined / null = 未落盘(老 event / metadata-only / 已被 cleanup 清掉) */
-  clip_kind?: "mp4" | "m4a" | null;
+  clip_kind?: "mp4" | "m4a" | "wav" | "mp3" | null;
   /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
   has_trace?: boolean;
   /** 该事件是否已有反馈打包 */

@@ -514,8 +514,10 @@ function ActivityRow({
   // 区分音频事件 vs 视频事件 — backend stat 落盘文件后缀计算 clip_kind:
   //   "mp4" → 视频路径 (H264+AAC),UI 🎬
   //   "m4a" → audio-only 路径(纯 AAC,画面静止),UI 🎤 音频
+  //   "wav" → audio-only 路径(PCM,画面静止),UI 🎤 音频
+  //   "mp3" → audio-only 路径(MP3,画面静止),UI 🎤 音频
   //   null/undefined → 未落盘(磁盘满预检失败 / 老库 event),UI 🎤
-  const isAudioOnly = event.clip_kind === "m4a";
+  const isAudioOnly = event.clip_kind === "m4a" || event.clip_kind === "wav" || event.clip_kind === "mp3";
 
   // humanize 后按 \n\n 分章节渲染.每章节自成一段(line-clamp-2 折叠模式).
   const humanized = useMemo(

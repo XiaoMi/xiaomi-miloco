@@ -14,6 +14,7 @@ import subprocess
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool
@@ -574,7 +575,7 @@ class OmniConfigBody(BaseModel):
     api_key: str | None = None  # 留空 = 沿用该档案原 key(不被打码值覆盖)
     original_label: str | None = None  # 正在编辑的档案原名(支持改名/定位);None=新增
     activate: bool = True  # True=同时设为当前生效;False=只入列表(激活由 /activate 负责)
-    audio_format: str | None = None  # 音频编码格式:m4a/wav/mp3
+    audio_format: Literal["m4a", "wav", "mp3"] | None = None  # 音频编码格式
 
 
 class OmniSelectBody(BaseModel):
@@ -687,6 +688,7 @@ async def activate_omni_config(
                         "model": p.model,
                         "base_url": p.base_url,
                         "api_key": p.api_key,
+                        "audio_format": getattr(p, "audio_format", "m4a"),
                     }
                 }
             )
