@@ -21,8 +21,10 @@ from miloco.person.router import (
 )
 
 _PID = "33333333-3333-4333-8333-333333333333"
-# 真·PNG 字节（cv2 可解码），供需要「合法图片」的端点用例
+# 真·PNG / BMP 字节（cv2 可解码），供端点用例：PNG 是白名单格式；BMP 用于「可解码但
+# 非白名单格式」→ 400 的用例。
 _PNG = cv2.imencode(".png", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
+_BMP = cv2.imencode(".bmp", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
 
 
 @pytest.fixture
@@ -141,12 +143,20 @@ async def test_post_404_no_person(monkeypatch, lib):
     assert ei.value.status_code == 404
 
 
-async def test_post_bad_ext_400(wired):
-    # 合法图片、但后缀不在白名单 → 400（走 ext 校验，不被字节校验提前拦）
-    up = UploadFile(filename="a.gif", file=io.BytesIO(_PNG))
+async def test_post_unsupported_format_400(wired):
+    # 内容可解码但非白名单格式（BMP）→ 400（格式由内容定，不看文件名后缀）
+    up = UploadFile(filename="a.png", file=io.BytesIO(_BMP))
     with pytest.raises(HTTPException) as ei:
         await upload_person_avatar(_PID, image=up, current_user="t")
     assert ei.value.status_code == 400
+
+
+async def test_post_ext_from_content_not_filename(wired, lib):
+    # 落盘扩展名取自真实内容而非文件名后缀：真 PNG 命名 x.jpg → 存成 png
+    up = UploadFile(filename="x.jpg", file=io.BytesIO(_PNG))
+    res = await upload_person_avatar(_PID, image=up, current_user="t")
+    assert res.data["avatar_ext"] == "png"
+    assert lib.person_avatar_path(_PID).suffix == ".png"
 
 
 async def test_post_bad_bytes_400(wired):
