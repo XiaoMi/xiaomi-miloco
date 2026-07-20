@@ -674,6 +674,7 @@ export async function realListDevices(): Promise<Device[]> {
     const allProps: DeviceProperty[] = Object.entries(d.spec ?? {})
       .filter(([iid]) => iid.startsWith("prop."))
       .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
+    const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
 
     return {
       did: d.did,
@@ -681,7 +682,8 @@ export async function realListDevices(): Promise<Device[]> {
       category: cat,
       room: cleanRoom(d.room),
       online: d.online,
-      statusText: humanDeviceStatus(d, mainSwitch?.current, valueByIid),
+      statusText: humanDeviceStatus(d, valueByIid, statusKind),
+      statusKind,
       dangerous,
       mainSwitch,
       props: allProps,
@@ -791,34 +793,64 @@ const STATUS_TEXT: Record<string, StatusText> = {
   },
 };
 
-function humanDeviceStatus(
+function lockStatusKind(
+  d: BackendDevice,
+  values: Map<string, unknown>,
+): Device["statusKind"] {
+  const stateProp = Object.entries(d.spec ?? {}).find(([, spec]) => spec.type_name === "door-state");
+  if (stateProp) {
+    const [iid, spec] = stateProp;
+    const value = values.get(iid);
+    const optionName = spec.value_list?.find((item) => item.value === value)?.name;
+    if (optionName?.includes("Unlocked") || optionName?.includes("Ajar") || optionName?.includes("Not Close")) {
+      return "unlocked";
+    }
+    if (optionName?.includes("Locked") || optionName?.includes("Closed Properly")) {
+      return "locked";
+    }
+  }
+  const v = values.get("prop.2.1");
+  if (typeof v === "boolean") return v ? "locked" : "unlocked";
+  return "connected";
+}
+
+function deviceStatusKind(
   d: BackendDevice,
   mainOn: boolean | undefined,
   values: Map<string, unknown>,
+): Device["statusKind"] {
+  if (!d.online) return "offline";
+  if (mapCategory(d.category) === "lock") return lockStatusKind(d, values);
+  if (mainOn === undefined) return "connected";
+  return mainOn ? "on" : "off";
+}
+
+function humanDeviceStatus(
+  d: BackendDevice,
+  values: Map<string, unknown>,
+  kind: Device["statusKind"],
 ): string {
   const s = STATUS_TEXT[langKey()] ?? STATUS_TEXT.zh;
-  if (!d.online) return s.offline;
-  const cat = mapCategory(d.category);
+  if (kind === "offline") return s.offline;
+  if (kind === "locked") return s.locked;
+  if (kind === "unlocked") return s.unlocked;
+  if (kind === "connected") return s.connected;
 
-  if (cat === "lock") {
-    const v = values.get("prop.2.1");
-    return v ? s.locked : s.unlocked;
-  }
-  if (mainOn === undefined) return s.connected;
+  const cat = mapCategory(d.category);
   if (cat === "aircond") {
-    if (!mainOn) return s.off;
+    if (kind === "off") return s.off;
     const t = values.get("prop.2.5") ?? values.get("prop.2.4");
     if (typeof t === "number") return `${t}°C`;
     return s.running;
   }
   if (cat === "purifier") {
-    if (!mainOn) return s.off;
+    if (kind === "off") return s.off;
     const mode = values.get("prop.2.4");
     if (mode === 1) return s.sleepMode;
     if (mode === 0) return s.autoMode;
     return s.running;
   }
-  return mainOn ? s.on : s.off;
+  return kind === "on" ? s.on : s.off;
 }
 
 export async function realControlDeviceProp(
