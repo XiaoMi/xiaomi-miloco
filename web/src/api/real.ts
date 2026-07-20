@@ -1438,6 +1438,7 @@ export async function realUpdateOmniConfig(
   if (input.api_key) body.api_key = input.api_key;
   if (input.original_label !== undefined) body.original_label = input.original_label;
   if (input.activate !== undefined) body.activate = input.activate;
+  if (input.audio_format) body.audio_format = input.audio_format;
   const r = await apiFetch<Normal<OmniConfigState>>("/api/admin/omni-config", {
     method: "PUT",
     body: JSON.stringify(body),

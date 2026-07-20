@@ -49,7 +49,7 @@ class OmniProviderAdapter(ABC):
         """构建 video content block（进 messages[].content[]，恒为 OpenAI 形态）。"""
 
     @abstractmethod
-    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo, audio_format: str = "m4a") -> dict[str, Any]:
         """构建 audio-only content block（恒为 OpenAI 形态）。"""
 
     @abstractmethod
@@ -131,10 +131,12 @@ class MiMoAdapter(OpenAICompatAdapter):
             "media_resolution": "max",
         }
 
-    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo, audio_format: str = "m4a") -> dict[str, Any]:
+        mime_map = {"m4a": "audio/m4a", "wav": "audio/wav", "mp3": "audio/mpeg"}
+        mime_type = mime_map.get(audio_format, "audio/m4a")
         return {
             "type": "input_audio",
-            "input_audio": {"data": f"data:audio/m4a;base64,{audio_base64}"},
+            "input_audio": {"data": f"data:{mime_type};base64,{audio_base64}"},
         }
 
     def build_request_body(
@@ -178,12 +180,12 @@ class QwenOmniAdapter(OpenAICompatAdapter):
             "video_url": {"url": f"data:;base64,{video_base64}"},
         }
 
-    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo, audio_format: str = "m4a") -> dict[str, Any]:
         return {
             "type": "input_audio",
             "input_audio": {
                 "data": f"data:;base64,{audio_base64}",
-                "format": "m4a",
+                "format": audio_format,
             },
         }
 
@@ -315,12 +317,14 @@ class GeminiAdapter(OmniProviderAdapter):
             "fps": media.fps,
         }
 
-    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo, audio_format: str = "m4a") -> dict[str, Any]:
         # m4a(AAC) 容器 mime 记为 audio/mp4；Gemini 原生 inline audio 对 m4a 的接受度需实测，
-        # 不达标属编码层问题（见 prompt_builder._encode_audio_only_mp4），不在 adapter 范围。
+        # 不达标属编码层问题（见 prompt_builder._encode_audio），不在 adapter 范围。
+        mime_map = {"m4a": "audio/mp4", "wav": "audio/wav", "mp3": "audio/mpeg"}
+        mime_type = mime_map.get(audio_format, "audio/mp4")
         return {
             "type": "input_audio",
-            "input_audio": {"data": f"data:audio/mp4;base64,{audio_base64}"},
+            "input_audio": {"data": f"data:{mime_type};base64,{audio_base64}"},
         }
 
     def _content_to_parts(self, content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:

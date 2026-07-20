@@ -522,6 +522,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
             "active": p.label == active.label,
+            "audio_format": getattr(p, "audio_format", "m4a"),
         }
         for p in m.omni_profiles
     ]
@@ -535,6 +536,7 @@ def _full_omni_payload() -> dict:
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
                 "active": True,
+                "audio_format": getattr(active, "audio_format", "m4a"),
             },
         )
     health = asdict(get_omni_circuit_breaker().snapshot())
@@ -546,6 +548,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
             "health": health,
+            "audio_format": getattr(active, "audio_format", "m4a"),
         },
         "profiles": profiles,
     }
@@ -558,6 +561,7 @@ def _profiles_as_dicts() -> list[dict]:
             "model": p.model,
             "base_url": p.base_url,
             "api_key": p.api_key,
+            "audio_format": getattr(p, "audio_format", "m4a"),
         }
         for p in get_settings().model.omni_profiles
     ]
@@ -570,6 +574,7 @@ class OmniConfigBody(BaseModel):
     api_key: str | None = None  # 留空 = 沿用该档案原 key(不被打码值覆盖)
     original_label: str | None = None  # 正在编辑的档案原名(支持改名/定位);None=新增
     activate: bool = True  # True=同时设为当前生效;False=只入列表(激活由 /activate 负责)
+    audio_format: str | None = None  # 音频编码格式:m4a/wav/mp3
 
 
 class OmniSelectBody(BaseModel):
@@ -623,6 +628,8 @@ async def put_omni_config(
     # 传 base_url 让 _key_by_label 校验"URL 未变才沿用旧 key",防跨 URL 复用凭证。
     key = _key_by_label(orig or label, body.api_key, base_url=base_url)
     entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
+    if body.audio_format:
+        entry["audio_format"] = body.audio_format
     tgt = orig or label
     will_activate = body.activate or _label_is_active(tgt)
     if will_activate:
