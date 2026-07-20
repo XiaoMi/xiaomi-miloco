@@ -178,3 +178,10 @@ async def test_bad_id_400(wired):
     with pytest.raises(HTTPException) as ei:
         await get_person_avatar("../etc/passwd", current_user="t")
     assert ei.value.status_code == 400
+
+
+async def test_trailing_newline_id_400(wired):
+    # UUID 带结尾换行：正则用 \Z 严格锚尾，应 400（不被 re.match 的 $ 放过）
+    with pytest.raises(HTTPException) as ei:
+        await get_person_avatar(_PID + "\n", current_user="t")
+    assert ei.value.status_code == 400

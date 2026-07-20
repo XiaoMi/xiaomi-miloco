@@ -26,8 +26,10 @@ from miloco.schema.common_schema import NormalResponse
 from miloco.utils.paths import miloco_home
 
 # 严格 UUID4 白名单：拒绝路径分隔符、`..` 等可构造路径穿越的字符
+# 用 \Z（而非 $）严格锚定串尾：$ 会放过结尾一个换行（re.match 下 "uuid\n" 也 match），
+# \Z 不会——杜绝带尾随换行的 id 混入。
 _PERSON_ID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 logger = logging.getLogger(__name__)
