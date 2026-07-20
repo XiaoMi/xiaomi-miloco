@@ -154,7 +154,7 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 | 修改家庭档案注入 Omni 的方式            | `perception/engine/omni/home_profile_loader.py`                                              |
 | 修改身份识别逻辑                        | `perception/engine/identity/engine.py`（识别状态机）、`tracking_service.py`（DeepSORT 跟踪） |
 | 修改感知结果后处理（规则上报/事件投递） | `perception/client.py`（`PerceptionEngineProxy`，`handle_realtime_perception_result`）       |
-| 修改摄像头投喂集 / 拉流名额口径         | `miot/filter.py`（`select_active_camera_dids` 单一口径）；did 归一见上「两级身份」          |
+| 修改摄像头投喂集 / 拉流名额口径         | `miot/filter.py`（`select_active_camera_dids` 单一口径）；did 归一见上「两级身份」           |
 | 修改感知调度/触发频率                   | `perception/runner.py`；配置在 `settings.yaml::perception.collect`                           |
 | 修改感知 API 端点                       | `perception/router.py`                                                                       |
 
