@@ -88,3 +88,103 @@ async def test_list_traces_filters(app_with_db):
         assert rows[0]["trace_id"] == "x-3"
     finally:
         await client.stop()
+
+
+async def test_list_actions_filters_and_orders(app_with_db):
+    from miloco.config import get_settings
+    from miloco.observability.types import ActionLedgerRecord
+
+    # router 挂 verify_token 依赖:测试环境 settings 有 token,需带 Bearer 头。
+    token = get_settings().server.token
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    app, _db, client = app_with_db
+    await client.start()
+    try:
+        client.record_action(ActionLedgerRecord(
+            id="a1", timestamp=1000, action_type="set_property", did="d1",
+            device_name="台灯", room="客厅", iid="prop.2.1", value_json="true",
+            result_code=None, result_msg=None, success=True, error=None,
+        ))
+        client.record_action(ActionLedgerRecord(
+            id="a2", timestamp=2000, action_type="call_action", did="d2",
+            device_name=None, room=None, iid="action.5.1", value_json="[]",
+            result_code=-704042011, result_msg="设备离线", success=False, error=None,
+        ))
+        await client.flush()
+
+        with TestClient(app) as tc:
+            # 默认:新到旧
+            r = tc.get("/api/actions", headers=headers)
+            assert r.status_code == 200
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a2", "a1"]
+
+            # failed_only
+            r = tc.get("/api/actions?failed_only=1", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a2"]
+
+            # did 过滤
+            r = tc.get("/api/actions?did=d1", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a1"]
+
+            # since_ms 过滤
+            r = tc.get("/api/actions?since_ms=1500", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a2"]
+
+            # until_ms 过滤(上界)——选定时间段时不混入范围外历史动作
+            r = tc.get("/api/actions?until_ms=1500", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a1"]
+
+            # since_ms + until_ms 组合窗口
+            r = tc.get("/api/actions?since_ms=500&until_ms=1500", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a1"]
+
+            # action_type 过滤
+            r = tc.get("/api/actions?action_type=call_action", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["a2"]
+    finally:
+        await client.stop()
+
+
+async def test_list_actions_home_filter(app_with_db):
+    """home_id 过滤(v4):等值命中 + NULL 放行(老行/未解析行不蒸发),他家行排除。"""
+    from miloco.config import get_settings
+    from miloco.observability.types import ActionLedgerRecord
+
+    token = get_settings().server.token
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    app, _db, client = app_with_db
+    await client.start()
+    try:
+        def rec(rid: str, ts: int, home: str | None) -> ActionLedgerRecord:
+            return ActionLedgerRecord(
+                id=rid, timestamp=ts, action_type="set_property", did="d1",
+                device_name=None, room=None, iid="prop.2.1", value_json="true",
+                result_code=None, result_msg=None, success=True, error=None,
+                home_id=home,
+            )
+
+        client.record_action(rec("h1-row", 1000, "H1"))
+        client.record_action(rec("h2-row", 2000, "H2"))
+        client.record_action(rec("legacy", 3000, None))
+        await client.flush()
+
+        with TestClient(app) as tc:
+            # 不带 home_id:全部返回(向后兼容)
+            r = tc.get("/api/actions", headers=headers)
+            assert r.status_code == 200
+            assert [x["id"] for x in r.json()] == ["legacy", "h2-row", "h1-row"]
+
+            # home_id=H1:H1 行 + NULL 老行保留,H2 行排除,仍新到旧
+            r = tc.get("/api/actions?home_id=H1", headers=headers)
+            assert [x["id"] for x in r.json()] == ["legacy", "h1-row"]
+    finally:
+        await client.stop()

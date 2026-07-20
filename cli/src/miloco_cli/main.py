@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import click
 
 from miloco_cli.commands.account import account_group
+from miloco_cli.commands.actions import actions_group
 from miloco_cli.commands.admin import admin_group
 from miloco_cli.commands.config import config_group
 from miloco_cli.commands.cron import cron_group
@@ -73,6 +74,7 @@ def cli():
 # ─── 子命令组 ─────────────────────────────────────────────────────────────────
 
 cli.add_command(device_group)
+cli.add_command(actions_group)
 cli.add_command(account_group)
 cli.add_command(scene_group)
 cli.add_command(perceive_group)

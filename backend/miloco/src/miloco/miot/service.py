@@ -6,7 +6,10 @@ MiOT service module
 """
 
 import asyncio
+import json
 import logging
+import time
+import uuid
 
 from miot.types import (
     MIoTActionParam,
@@ -46,6 +49,7 @@ from miloco.miot.filter import (
 )
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
+from miloco.miot.result_codes import summarize_results
 from miloco.miot.schema import (
     CameraChannel,
     CameraImgSeq,
@@ -85,6 +89,127 @@ def _parse_action_iid(iid: str) -> tuple[int, int]:
         return int(parts[1]), int(parts[2])
     except ValueError as e:
         raise ValidationException(f"Invalid iid numbers in '{iid}'") from e
+
+
+def _truncate_value_len(value_json: str | None) -> int:
+    """日志用:value_json 长度(不记内容,防 TTS 全文 / secrets 落日志)。"""
+    return len(value_json) if value_json else 0
+
+
+def _request_value_json(request: "DeviceControlRequest") -> str | None:
+    """把控制请求的尝试参数归一成 value_json(成功/异常路径共用)。
+
+    失败动作是排查时最有价值的场景——异常路径的台账也必须能看到 agent 当时
+    具体试图设置什么值 / 播什么 TTS / 调用什么参数,不能只落 error。
+    """
+    try:
+        if request.type == "set_property":
+            return json.dumps(request.value, ensure_ascii=False)
+        if request.type == "set_properties":
+            return json.dumps(
+                {p.iid: p.value for p in (request.properties or [])},
+                ensure_ascii=False,
+            )
+        return json.dumps(request.params or [], ensure_ascii=False)
+    except Exception:
+        return None  # 参数本身不可序列化时不反噬审计主体
+
+
+def _request_iid(request: "DeviceControlRequest") -> str | None:
+    """把控制请求归一成台账 iid 列(成功/异常路径共用)。
+
+    set_properties 不填顶层 iid(iid 在 properties 各项里),其台账行落逗号
+    拼接的复数 iid——异常路径若直接取 request.iid 会恒落 NULL,按 iid 检索
+    失败动作时就会漏行,故与成功路径同构地按 type 重建。
+    """
+    try:
+        if request.type == "set_properties":
+            return ",".join(p.iid for p in (request.properties or [])) or None
+        return request.iid
+    except Exception:
+        return None  # 与 value_json 同口径:归一失败不反噬审计主体
+
+
+async def _write_action_ledger(
+    miot_proxy: MiotProxy,
+    *,
+    action_type: str,
+    did: str,
+    iid: str | None,
+    value_json: str | None,
+    result_code: int | None,
+    result_msg: str | None,
+    success: bool,
+    error: str | None,
+    source: str = "cli",
+    source_id: str | None = None,
+    home_id: str | None = None,
+) -> None:
+    """落一行 action_ledger + 打一条 INFO 结果日志。**fail-open**:
+
+    ``source`` 区分触发源:``cli``(control_device 路径,含 manual CLI 与 agent-via-CLI,
+    后者由 trace_id 区分)/ ``rule``(RuleRunner 直控,``source_id`` 写 rule_id)。
+
+    整体裹 try/except,任何异常只 warning,绝不影响调用方的控制结果。
+    device_name / room 从内存 device cache 解析(便宜),解析失败留 None。
+    日志行不含 secrets:TTS / set 值只记 value_json 长度,全文只进 DB。
+    """
+    try:
+        from miloco.observability.metrics_client import get_metrics_client
+        from miloco.observability.types import ActionLedgerRecord
+
+        device_name: str | None = None
+        room: str | None = None
+        try:
+            dev = (await miot_proxy.get_devices()).get(did)
+            if dev is None and home_id is None:
+                # 摄像头只在 camera cache(control_device 的家庭校验同样两级查):
+                # 不回落会让摄像头动作 home_id=NULL,经查询侧 NULL 放行串到所有家。
+                # MIoTCameraInfo 继承 MIoTDeviceInfo,name/room_name/home_id 同字段。
+                # 仅在 home_id 未显式传入时才回落——get_cameras() cache miss 会触发
+                # 网络刷新,scene_trigger(did=scene_id、home 已传)不该为此买单。
+                dev = ((await miot_proxy.get_cameras()) or {}).get(did)
+            if dev is not None:
+                device_name = getattr(dev, "name", None)
+                room = getattr(dev, "room_name", None)
+                if home_id is None:
+                    # 未显式传入才从 cache 补。scene_trigger 的 did 是
+                    # scene_id,cache 必 miss——那条路径由调用方带场景所属家传入。
+                    home_id = getattr(dev, "home_id", None)
+        except Exception:
+            pass  # cache 解析失败不影响审计主体
+
+        client = get_metrics_client()
+        if client is not None:
+            client.record_action(
+                ActionLedgerRecord(
+                    id=str(uuid.uuid4()),
+                    timestamp=int(time.time() * 1000),
+                    action_type=action_type,
+                    did=did,
+                    device_name=device_name,
+                    room=room,
+                    iid=iid,
+                    value_json=value_json,
+                    result_code=result_code,
+                    result_msg=result_msg,
+                    success=success,
+                    error=error,
+                    source=source,
+                    source_id=source_id,
+                    home_id=home_id,
+                )
+            )
+
+        logger.info(
+            "action_ledger device=%s(did=%s room=%s) type=%s iid=%s success=%s "
+            "reason=%s value_len=%d",
+            device_name or "?", did, room or "?", action_type, iid, success,
+            (result_msg or error or "ok"),
+            _truncate_value_len(value_json),
+        )
+    except Exception as e:  # noqa: BLE001 —— 审计 fail-open,绝不拖垮控制调用
+        logger.warning("action_ledger write failed (did=%s): %s", did, e)
 
 
 class MiotService:
@@ -765,6 +890,9 @@ class MiotService:
 
     async def control_device(self, did: str, request: DeviceControlRequest) -> dict:
         """Control device: set_property / set_properties / call_action."""
+        # 尝试参数先归一好,成功/异常路径共用——SDK/网络抛异常时台账也能看到
+        # agent 当时试图设置什么值 / 播什么 TTS / 什么参数。
+        attempted_value_json = _request_value_json(request)
         try:
             await self._assert_did_in_allowed_home(did)
 
@@ -779,6 +907,15 @@ class MiotService:
                 ]
                 results = await self._miot_proxy.set_device_properties(params)
                 self._safe_lru_touch(did, [request.iid])
+                success, code, msg = summarize_results(results)
+                await _write_action_ledger(
+                    self._miot_proxy,
+                    action_type="set_property",
+                    did=did, iid=request.iid,
+                    value_json=attempted_value_json,
+                    result_code=code, result_msg=msg,
+                    success=success, error=None,
+                )
                 return {"results": results}
 
             if request.type == "set_properties":
@@ -796,6 +933,17 @@ class MiotService:
                     )
                 results = await self._miot_proxy.set_device_properties(params)
                 self._safe_lru_touch(did, [p.iid for p in request.properties])
+                success, code, msg = summarize_results(results)
+                await _write_action_ledger(
+                    self._miot_proxy,
+                    action_type="set_properties",
+                    # 复数 iid 逗号拼接;value_json 存 {iid: value} 全集
+                    iid=_request_iid(request),
+                    did=did,
+                    value_json=attempted_value_json,
+                    result_code=code, result_msg=msg,
+                    success=success, error=None,
+                )
                 return {"results": results}
 
             # call_action
@@ -807,6 +955,16 @@ class MiotService:
             )
             result = await self._miot_proxy.call_device_action(param)
             self._safe_lru_touch(did, [request.iid])
+            success, code, msg = summarize_results(result)
+            # call_action 的 in_params 存 value_json —— speaker play-text 的 TTS 全文落这里
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="call_action",
+                did=did, iid=request.iid,
+                value_json=attempted_value_json,
+                result_code=code, result_msg=msg,
+                success=success, error=None,
+            )
             return {"result": result}
 
         # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
@@ -815,6 +973,15 @@ class MiotService:
             raise
         except Exception as e:
             logger.error("Failed to control device %s: %s", did, e)
+            # 异常路径也落一行:success=0 + error + 尝试参数(失败审计完整性)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=getattr(request, "type", None) or "call_action",
+                did=did, iid=_request_iid(request),
+                value_json=attempted_value_json,
+                result_code=None, result_msg=None,
+                success=False, error=str(e),
+            )
             raise MiotServiceException(f"Failed to control device: {str(e)}") from e
 
     async def get_device_status(self, did: str, iids: list[str] | None) -> dict:
@@ -1300,17 +1467,50 @@ class MiotService:
 
     async def trigger_scene(self, scene_id: str) -> bool:
         """Trigger a MIoT manual scene."""
+        scenes: dict = {}
+        # 异常路径也要能看到"当时想触发什么"(失败审计完整性)——scene_name
+        # 在校验通过后、执行前就归一好,成功/异常两路复用。
+        scene_value_json: str | None = None
         try:
-            scenes = await self._miot_proxy.get_all_scenes()
-            if not scenes or scene_id not in scenes:
+            scenes = (await self._miot_proxy.get_all_scenes()) or {}
+            if scene_id not in scenes:
                 raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
             if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
-            return await self._miot_proxy.execute_miot_scene(scene_id)
+            # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
+            # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
+            # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
+            scene_name = getattr(scenes[scene_id], "scene_name", None)
+            scene_value_json = json.dumps(
+                {"scene_name": scene_name}, ensure_ascii=False
+            )
+            ok = await self._miot_proxy.execute_miot_scene(scene_id)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="scene_trigger",
+                did=scene_id, iid=scene_id,
+                value_json=scene_value_json,
+                result_code=None,
+                result_msg=None if ok else "场景触发失败",
+                success=bool(ok), error=None,
+                home_id=getattr(scenes[scene_id], "home_id", None),
+            )
+            return ok
         except (ResourceNotFoundException, ValidationException):
             raise
         except Exception as e:
             logger.error("Failed to trigger scene %s: %s", scene_id, e)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="scene_trigger",
+                did=scene_id, iid=scene_id,
+                # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
+                value_json=scene_value_json,
+                result_code=None, result_msg=None,
+                success=False, error=str(e),
+                # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
+                home_id=getattr(scenes.get(scene_id), "home_id", None),
+            )
             raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e
