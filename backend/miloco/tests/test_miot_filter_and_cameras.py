@@ -48,13 +48,21 @@ def _home(home_id: str, name: str = "Home"):
     return SimpleNamespace(home_id=home_id, home_name=name)
 
 
-def _camera(did: str, home_id: str = "H1", *, online: bool = True, lan_online: bool = True):
+def _camera(
+    did: str,
+    home_id: str = "H1",
+    *,
+    online: bool = True,
+    lan_online: bool = True,
+    channel_count: int = 1,
+):
     return SimpleNamespace(
         did=did,
         home_id=home_id,
         name=f"cam-{did}",
         online=online,
         lan_online=lan_online,
+        channel_count=channel_count,
     )
 
 
@@ -222,6 +230,37 @@ def test_select_active_health_order_does_not_drop_when_under_cap(monkeypatch):
     ) == ["c1", "c2"]
 
 
+def test_health_sets_are_keyed_by_physical_did_across_channels(monkeypatch):
+    """健康度按**物理 did** 记账：多通道相机的各路一起优先/一起让位。
+
+    native/PPCS 会话是整台相机一条，两路共享连通命运；若排序时拿合成 did 去查
+    健康集合就永远查不中，降权对多摄相机静默失效。
+    """
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {
+        "dual": _camera("dual", home_id="H1", channel_count=2),
+        "s1": _camera("s1", home_id="H1"),
+        "s2": _camera("s2", home_id="H1"),
+    }
+
+    # 双摄整台降权（按物理 did 给）→ 它的两路都排到最后，名额让给两台未尝试的单摄。
+    assert miot_filter.select_active_camera_dids(
+        kv,
+        cameras,
+        require_lan=False,
+        deprioritized_dids={"dual"},
+    ) == ["s1", "s2"]
+
+    # 反过来：双摄已连通 → 两路一起占满名额，单摄让位。
+    assert miot_filter.select_active_camera_dids(
+        kv,
+        cameras,
+        require_lan=False,
+        priority_dids={"dual"},
+    ) == ["dual:ch0", "dual:ch1"]
+
+
 # ─── filter.py: write helpers ────────────────────────────────────────────────
 
 
@@ -380,22 +419,23 @@ def _kv_with_home(home_id: str) -> "_FakeKV":
 
 @pytest.mark.asyncio
 async def test_switch_home_resets_agent_sessions():
-    """启用家庭真的变化时，后台批量 reset miloco session，传入 MILOCO_SESSION_KEYS 全集。"""
+    """启用家庭真的变化时，后台批量 reset miloco session，传入 MILOCO_SESSION_ROUTES 全集。"""
     from unittest.mock import patch
 
-    from miloco.dispatch import MILOCO_SESSION_KEYS
+    from miloco.dispatch import MILOCO_SESSION_ROUTES
 
     # 预置 H1 启用 → list_homes 不会兜底自动切；switch 到 H2 才是唯一一次启用集变化。
     svc = _make_service(
         devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H1")
     )
-    reset = AsyncMock(return_value={"reset": MILOCO_SESSION_KEYS, "failed": []})
+    session_keys = [k for k, _ in MILOCO_SESSION_ROUTES]
+    reset = AsyncMock(return_value={"reset": session_keys, "failed": []})
     with patch("miloco.utils.agent_client.reset_agent_sessions", new=reset):
         res = await svc.switch_home("H2")
         await _drain_reset(reset)
 
     assert {h["home_id"]: h["in_use"] for h in res}["H2"] is True
-    reset.assert_awaited_once_with(MILOCO_SESSION_KEYS)
+    reset.assert_awaited_once_with(MILOCO_SESSION_ROUTES)
 
 
 @pytest.mark.asyncio
@@ -1693,7 +1733,8 @@ def test_select_active_awake_gate():
         "c2": _camera("c2", home_id="H1"),  # awake False → 排除
         "c3": _camera("c3", home_id="H1"),  # awake None → 保留
     }
-    awake = {"c1": True, "c2": False, "c3": None}
+    # awake_map 是 per-lens {did: {channel: bool|None}}；单摄只有 ch0。
+    awake = {"c1": {0: True}, "c2": {0: False}, "c3": {0: None}}
     got = set(miot_filter.select_active_camera_dids(kv, cameras, awake_map=awake))
     assert got == {"c1", "c3"}  # c2 镜头关被 gate 掉
     # 不给 awake_map → 全放行（向后兼容）
@@ -1703,7 +1744,8 @@ def test_select_active_awake_gate():
 
 
 def test_resolve_camera_switch_iids():
-    """从 spec 定位 camera-control:on；双摄命中多个；indicator-light 排除；无则空。"""
+    """从 spec 定位 camera-control:on 的 (siid,piid)；双摄命中多个；indicator-light 排除；
+    只认语言无关的 service_type_name/type_name，不看 service_description。"""
     from miloco.miot.client import _resolve_camera_switch_iids
 
     single = {
@@ -1712,6 +1754,7 @@ def test_resolve_camera_switch_iids():
     }
     assert _resolve_camera_switch_iids(single) == [(2, 1)]
 
+    # 双摄:主控 + 球/枪各一;不靠描述区分(描述给不给都一样)。
     dual = {
         "prop.2.22": {"service_type_name": "camera-control", "type_name": "on"},
         "prop.24.1": {"service_type_name": "camera-control", "type_name": "on"},
@@ -1731,7 +1774,7 @@ async def test_list_camera_lens_off_not_in_use():
     svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
     # 镜头关闭
     svc._miot_proxy.read_cameras_awake = AsyncMock(  # type: ignore[assignment]
-        side_effect=lambda dids, **kw: {"c1": False}
+        side_effect=lambda dids, **kw: {"c1": {0: False}}
     )
 
     out = await svc.list_cameras_with_state()
@@ -1755,27 +1798,58 @@ async def test_read_cameras_awake_or_combine(_scope_proxy_env):
     }
     proxy._fetch_device_spec = AsyncMock(return_value=spec)  # type: ignore[assignment]
 
-    # 任一 on → True
+    # spec 两开关都无 球机/枪机 标签 → 单摄路径：全部 OR 后归 ch0。返回 per-lens {0: …}。
+    # 任一 on → ch0 True
     proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
         {"did": "c1", "siid": 2, "piid": 22, "value": False, "code": 0},
         {"did": "c1", "siid": 24, "piid": 1, "value": True, "code": 0},
     ])
-    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is True
-    assert proxy._camera_awake_cache["c1"] is True  # 回填缓存
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] == {0: True}
+    assert proxy._camera_awake_cache["c1"] == {0: True}  # 回填缓存
 
-    # 全 off → False
+    # 全 off → ch0 False
     proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
         {"did": "c1", "siid": 2, "piid": 22, "value": False, "code": 0},
         {"did": "c1", "siid": 24, "piid": 1, "value": False, "code": 0},
     ])
-    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is False
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] == {0: False}
 
-    # 无一 on 且有读失败(code!=0) → None（不误判整机关闭）
+    # 无一 on 且有读失败(code!=0) → ch0 None（不误判整机关闭）
     proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
         {"did": "c1", "siid": 2, "piid": 22, "value": False, "code": 0},
         {"did": "c1", "siid": 24, "piid": 1, "code": -704},
     ])
-    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is None
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] == {0: None}
+
+
+@pytest.mark.asyncio
+async def test_read_cameras_awake_per_lens_by_siid_order(_scope_proxy_env):
+    """双摄 per-lens 按 **siid 序数**分路：取最高 channel_count 个开关、按 siid 升序配
+    ch0/ch1，低 siid 主控自动排除；**不依赖 service_description**（spec 里干脆不给）。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    proxy._device_info_dict = {  # type: ignore[attr-defined]
+        "dual": SimpleNamespace(urn="urn:dual", model="dual"),
+    }
+    proxy._camera_info_dict = {  # type: ignore[attr-defined]
+        "dual": SimpleNamespace(channel_count=2),
+    }
+    # 主控 siid2 + 球机 siid24 + 枪机 siid25，均无 service_description（证明不靠它分路）。
+    spec = {
+        "prop.2.22": {"service_type_name": "camera-control", "type_name": "on"},
+        "prop.24.1": {"service_type_name": "camera-control", "type_name": "on"},
+        "prop.25.1": {"service_type_name": "camera-control", "type_name": "on"},
+    }
+    proxy._fetch_device_spec = AsyncMock(return_value=spec)  # type: ignore[assignment]
+    # siid24=True(球机/ch0)、siid25=False(枪机/ch1)、主控 siid2=True(必须被忽略,否则会污染 ch1)
+    proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
+        {"did": "dual", "siid": 2, "piid": 22, "value": True, "code": 0},
+        {"did": "dual", "siid": 24, "piid": 1, "value": True, "code": 0},
+        {"did": "dual", "siid": 25, "piid": 1, "value": False, "code": 0},
+    ])
+    # 取 siid 最高 2 个 {24,25}、升序 → ch0=siid24=True、ch1=siid25=False；主控 siid2 落选。
+    out = await proxy.read_cameras_awake(["dual"])
+    assert out["dual"] == {0: True, 1: False}
+    assert proxy._camera_awake_cache["dual"] == {0: True, 1: False}
 
 
 @pytest.mark.asyncio
@@ -1790,12 +1864,12 @@ async def test_read_cameras_awake_cache_only(_scope_proxy_env):
     proxy.get_device_properties = AsyncMock(  # type: ignore[assignment]
         return_value=[{"did": "c1", "siid": 2, "piid": 1, "value": True, "code": 0}]
     )
-    # 先真读一次填缓存
-    assert (await proxy.read_cameras_awake(["c1"]))["c1"] is True
+    # 先真读一次填缓存（单摄 → {0: True}）
+    assert (await proxy.read_cameras_awake(["c1"]))["c1"] == {0: True}
     assert proxy.get_device_properties.await_count == 1
-    # cache_only：c1 命中、c2 未缓存→None，不再打云
+    # cache_only：c1 命中、c2 未缓存→{}(整机未知)，不再打云
     out = await proxy.read_cameras_awake(["c1", "c2"], cache_only=True)
-    assert out == {"c1": True, "c2": None}
+    assert out == {"c1": {0: True}, "c2": {}}
     assert proxy.get_device_properties.await_count == 1
 
 
@@ -1833,7 +1907,7 @@ async def test_toggle_enable_rejected_lens_off():
     kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
     svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
     svc._miot_proxy.read_cameras_awake = AsyncMock(  # type: ignore[assignment]
-        side_effect=lambda dids, **kw: {"c1": False}
+        side_effect=lambda dids, **kw: {"c1": {0: False}}
     )
     with pytest.raises(ValidationException, match="镜头已关闭"):
         await svc.toggle_camera([{"did": "c1", "in_use": True}])
@@ -1861,6 +1935,23 @@ async def test_toggle_cap_counts_usable_offline_frees_slot():
 
 
 @pytest.mark.asyncio
+async def test_toggle_camera_rejects_malformed_and_out_of_range_channel():
+    """后端唯一执法点：畸形合成 did（`:ch` 后为空/非数字）与越界通道（≥ channel_count）
+    都拒为 ValidationException（不崩 500），且拒在写库前 → 不污染黑名单（否则读侧只遍历
+    range(cc) 永远清不掉那条死条目）。CLI/API 直连绕过前端全靠这层挡。"""
+    cam = _camera("dual", home_id="H1")
+    cam.channel_count = 2  # 双摄
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"dual": cam}, cameras={"dual": cam}, kv=kv)
+
+    for bad in ("dual:ch", "dual:chX", "dual:ch9"):
+        with pytest.raises(ValidationException):
+            await svc.toggle_camera([{"did": bad, "in_use": False}])
+        # 拒在 set_cameras_channels_in_use 之前 → 黑名单一条没写
+        assert miot_filter.denied_camera_dids(kv) == set()
+
+
+@pytest.mark.asyncio
 async def test_refresh_cameras_gap_fills_awake_for_current_home(_scope_proxy_env):
     """启动/新设备：refresh_cameras 对当前家庭、awake 缓存里还没有的相机补读并回填，
     不依赖 web/推送。已在缓存的不重复读；别的家庭的不补。"""
@@ -1882,10 +1973,10 @@ async def test_refresh_cameras_gap_fills_awake_for_current_home(_scope_proxy_env
     proxy.get_device_properties = AsyncMock(return_value=[  # type: ignore[assignment]
         {"did": "c2", "siid": 2, "piid": 1, "value": False, "code": 0},
     ])
-    proxy._camera_awake_cache["c1"] = True  # 预置：已有
+    proxy._camera_awake_cache["c1"] = {0: True}  # 预置：已有（per-lens）
 
     await proxy.refresh_cameras()
 
-    assert proxy._camera_awake_cache.get("c1") is True      # 未被重复读、保持
-    assert proxy._camera_awake_cache.get("c2") is False     # 缺失 → 补读到 False
-    assert "c3" not in proxy._camera_awake_cache            # 别的家庭 → 不补
+    assert proxy._camera_awake_cache.get("c1") == {0: True}   # 未被重复读、保持
+    assert proxy._camera_awake_cache.get("c2") == {0: False}  # 缺失 → 补读(单摄→ch0 False)
+    assert "c3" not in proxy._camera_awake_cache             # 别的家庭 → 不补

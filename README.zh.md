@@ -19,6 +19,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 ## 最新动态
 
+- **2026-07-17** — 发布 v2026.7.17：新增 Hermes Agent 兼容层（可插拔 agent runtime）、双摄多通道双流感知、Omni 多模型支持与运行时帧率热更；并新增独立任务 Tab、相机级麦克风开关，以及时区 / 版本 / 安装加固。
 - **2026-07-03** — 发布 v2026.7.3：新增事件反馈打包，以及全新安装时主动发起的对话式初始化引导；并改进面板内模型配置管理、感知稳定性（非人误检防护）、相机生命周期与 CLI 诊断。
 - **2026-06-18** — Miloco 2.0 正式发布：重构为 OpenClaw 插件，新增通用常识、身份识别、家庭记忆、家庭任务、主动智能、家庭面板。详见下方[核心特性](#核心特性)。
 
@@ -49,7 +50,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 ### 方式一：通过 Agent 安装（推荐）
 
-向 OpenClaw 发送以下指令即可自动完成安装：
+适用于 **OpenClaw** 和 **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** —— 向你的 Agent 发送以下指令：
 
 ```text
 帮我安装 Miloco 插件：https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/scripts/install-guide.md
@@ -59,6 +60,12 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 ```bash
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash
+```
+
+默认为 OpenClaw。如果要装给 Hermes Agent，显式指定：
+
+```bash
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-platform=hermes
 ```
 
 ### 方式三：从源码构建

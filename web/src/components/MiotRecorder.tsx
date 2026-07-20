@@ -24,6 +24,13 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PerceptionCamera } from "@/lib/types";
 import { authHeaders } from "@/api/register";
+// 感知层用合成 did（多通道相机 cam:ch{n}）；后端 watch / record_clip 按**物理 did +
+// 通道号**走（SDK 会话按物理 did 建），故发请求前把合成 did 拆回。工具收在 @/lib/cameraChannel。
+import {
+  isChannelDid,
+  lensLabelKey,
+  splitChannelDid,
+} from "@/lib/cameraChannel";
 
 interface Props {
   cameras: PerceptionCamera[];
@@ -53,9 +60,10 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [iframeReady, setIframeReady] = useState(false);
 
-  const channel = 0; // 第一版只用通道 0
-  const watchUrl = selectedDid
-    ? `/api/miot/watch?camera_id=${encodeURIComponent(selectedDid)}&channel=${channel}&embedded=1`
+  // 选中的是合成 did；发请求时拆成物理 did + 真通道号(后端 watch/record 按此)。
+  const { physicalDid, channel } = splitChannelDid(selectedDid);
+  const watchUrl = physicalDid
+    ? `/api/miot/watch?camera_id=${encodeURIComponent(physicalDid)}&channel=${channel}&embedded=1`
     : "";
 
   // 录制中允许中止:abort 立即掐断前端 fetch、回到 preview。注意后端 record_clip
@@ -108,7 +116,7 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
     }, FETCH_TIMEOUT_MS);
     try {
       const url =
-        `/api/miot/record_clip?camera_id=${encodeURIComponent(selectedDid)}` +
+        `/api/miot/record_clip?camera_id=${encodeURIComponent(physicalDid)}` +
         `&channel=${channel}&duration_ms=${RECORD_SECONDS * 1000}`;
       const r = await fetch(url, {
         method: "POST",
@@ -175,12 +183,22 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
                 disabled={stage !== "preview"}
                 className="text-caption px-2 py-1 rounded-lg bg-bg-primary border border-border text-text-primary"
               >
-                {cameras.map((c) => (
-                  <option key={c.did} value={c.did}>
-                    {c.name}
-                    {c.roomName ? ` · ${c.roomName}` : ""}
-                  </option>
-                ))}
+                {cameras.map((c) => {
+                  const { channel: ch } = splitChannelDid(c.did);
+                  // 镜头名(ch0=移动画面 / ch1=固定画面);ch≥2 兜底「通道 N」。单摄(裸 did)不拼。
+                  // 权威判据:did 为合成形态(:chN)即多通道某一路——即便该台只有一路在列表里也带标签。
+                  const key = lensLabelKey(ch);
+                  const chLabel = isChannelDid(c.did)
+                    ? ` · ${key ? t(key) : t("hero.channelLabel", { n: ch })}`
+                    : "";
+                  return (
+                    <option key={c.did} value={c.did}>
+                      {c.name}
+                      {c.roomName ? ` · ${c.roomName}` : ""}
+                      {chLabel}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           )}

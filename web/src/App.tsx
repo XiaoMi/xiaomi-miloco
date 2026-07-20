@@ -210,7 +210,6 @@ function MainApp() {
           <div className="space-y-6">
             <HeroNow
               persons={persons.data}
-              cameras={cameras.data}
               scopeCameras={scopeCameras.data}
               miotHasCamera={devices.data.some(
                 (d) => d.category === "camera",

@@ -33,9 +33,12 @@ build-backend = "hatchling.build"
 
 # 版本号从 git tag 派生（发布时 build.sh 经 SETUPTOOLS_SCM_PRETEND_VERSION 注入）；
 # fallback-version 让无 tag 的克隆仍能 uv sync。root 指向仓库根（git 元数据所在）。
+# version_scheme=no-guess-dev：CalVer 项目不猜"下一版"（默认 guess-next 会把末位+1 造出虚构的
+# 2026.7.4）；改以当前 tag 作 base + post 段，dev 版形如 2026.7.3.post1.devN+g<hash>，PEP440
+# 排序 > 已发布正式版（直接用 2026.7.3.devN 会被判早于正式版，引发降级误判）。
 [tool.hatch.version]
 source = "vcs"
-raw-options = { root = "../..", fallback_version = "0.0.0" }
+raw-options = { root = "../..", fallback_version = "0.0.0", version_scheme = "no-guess-dev" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/miloco"]
