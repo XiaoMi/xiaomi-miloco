@@ -69,6 +69,8 @@ def _observe_resp():
             "detected": True,
             "description": {"summary": "一只黑猫"},
             "primary_crop_b64": base64.b64encode(b"PRIMARY").decode(),
+            "avatar_b64": base64.b64encode(b"AVATAR").decode(),
+            "montage_b64": base64.b64encode(b"MONTAGE").decode(),
             "candidates": [
                 {"crop_b64": base64.b64encode(b"C0").decode(), "conf": 0.9,
                  "sharpness": 0.8, "area_ratio": 0.5, "species_guess": "猫"},
@@ -102,9 +104,17 @@ def test_pet_observe_saves_crops_and_strips_b64():
         assert Path("obs_0.jpg").read_bytes() == b"C0"
         assert Path("obs_1.jpg").read_bytes() == b"C1"
         assert Path("obs_primary.jpg").read_bytes() == b"PRIMARY"
-        # stdout 清掉冗长 base64，保留 crops_saved（含绝对分）
+        # 默认头像（头部裁剪）也落盘
+        assert Path("obs_avatar.jpg").read_bytes() == b"AVATAR"
+        # 多姿态参考图横向拼图落盘（发用户看这一张）
+        assert Path("obs_montage.jpg").read_bytes() == b"MONTAGE"
+        # stdout 清掉冗长 base64，保留 crops_saved（含绝对分）+ avatar/montage_saved_to
         assert "crop_b64" not in r.output
+        assert "avatar_b64" not in r.output
+        assert "montage_b64" not in r.output
         assert "crops_saved" in r.output
+        assert "avatar_saved_to" in r.output
+        assert "montage_saved_to" in r.output
 
 
 def test_pet_observe_video_single():
@@ -193,6 +203,28 @@ def test_pet_reference_crops_append_space_scores():
 def test_pet_reference_crops_requires_crops():
     r = CliRunner().invoke(cli, ["pet", "reference-crops", "pet_x"])
     assert r.exit_code != 0  # --crops required
+
+
+# ── avatar ───────────────────────────────────────────────────────────────────
+
+def test_pet_avatar():
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write("av.png")
+        with patch(
+            "miloco_cli.client.api_post_multipart",
+            return_value={"code": 0, "data": {"id": "pet_x", "avatar_ext": "png"}},
+        ) as m:
+            r = runner.invoke(cli, ["pet", "avatar", "pet_x", "--image", "av.png"])
+        assert r.exit_code == 0, r.output
+        path, files = m.call_args.args
+        assert path == "/api/identity/pets/pet_x/avatar"
+        assert files[0][0] == "image"
+
+
+def test_pet_avatar_requires_image():
+    r = CliRunner().invoke(cli, ["pet", "avatar", "pet_x"])
+    assert r.exit_code != 0  # --image required
 
 
 def test_pet_reference_crops_replace_over_3_errors():

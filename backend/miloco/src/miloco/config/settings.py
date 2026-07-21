@@ -382,6 +382,15 @@ class FeaturesSettings(BaseModel):
             "仅在 pet_recognition 开启时有意义。"
         ),
     )
+    pet_reid_diverse: bool = Field(
+        default=True,
+        description=(
+            "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 嵌入的特征距离，在同一只"
+            "候选里贪心选出最不相似的 ≤3 张多姿态参考图（第 1 张仍取质量分最高，第 2/3 张依次"
+            "选特征距离最远者）；关闭或模型不可用时回退感知哈希（dHash）多样性。仅在 "
+            "pet_recognition 开启时有意义。"
+        ),
+    )
 
 
 class DirectorySettings(BaseModel):

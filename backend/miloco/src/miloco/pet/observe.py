@@ -39,6 +39,7 @@ from miloco.perception.engine.identity.extractor import (
     _crop_with_padding,
     _sample_video_frames,
 )
+from miloco.perception.engine.identity.gallery_composite import hstack_to_height
 from miloco.perception.engine.identity.tracker.detector import Detection, Detector
 from miloco.perception.engine.omni import response_parser
 from miloco.perception.engine.omni.omni_client import (
@@ -53,6 +54,7 @@ _SPECIES_BY_CLASS = {Detection.CLASS_CAT: "猫", Detection.CLASS_DOG: "狗"}
 _PADDING_RATIO = 0.05
 _MAX_VIDEO_FRAMES = 60
 _MAX_SELECT = 3  # 参考 crop 上限（对齐 pet_library._MAX_REF_CROPS）
+_MONTAGE_HEIGHT = 384  # 多姿态参考图横向拼图统一高度（等比缩放后 hconcat；Agent 一张图发用户）
 
 # ── 宠物注册专用门控常量（决策6，刻意不复用 identity/extractor._passes_quality_gate）──
 # extractor 那套是 area5% / 绝对 sharpness50，服务 TierU/TierC 人体质量门。宠物注册素材
@@ -201,6 +203,73 @@ def _dhash_diverse_topk(
     return out[:k]
 
 
+_pet_reid_singleton: Any = None
+_pet_reid_tried = False
+
+
+def _get_pet_reid() -> Any:
+    """惰性载入人体 ReID（仅用于参考图**多样性**打分，不接 IdentityEngine/gallery/person 表）。
+
+    与本模块检测器同源(get_settings().directories.models_dir，见 det_4C 载入)。载入失败缓存
+    None、不每次重试；模型不可用时上层回退 dHash 多样性。它给的是"外观相似度"，正好当"姿态
+    是否雷同"的距离用——不作身份判定。
+    """
+    global _pet_reid_singleton, _pet_reid_tried
+    if _pet_reid_tried:
+        return _pet_reid_singleton
+    _pet_reid_tried = True
+    try:
+        from miloco.perception.engine.identity.tracker.human_reid import HumanReID
+
+        path = str(get_settings().directories.models_dir / "human_body_reid_v2.onnx")
+        inst = HumanReID(model_path=path, use_gpu=False)
+        _pet_reid_singleton = inst if inst.session is not None else None
+        if _pet_reid_singleton is None:
+            logger.warning("宠物参考图 ReID 初始化失败(session None)，回退 dHash: %s", path)
+    except Exception:  # noqa: BLE001 - 任意失败都回退 dHash，绝不影响注册
+        logger.warning("宠物参考图 ReID 载入异常，回退 dHash", exc_info=True)
+        _pet_reid_singleton = None
+    return _pet_reid_singleton
+
+
+def _reid_diverse_topk(
+    cands_sorted: list[dict], k: int, extractor: Any, pool_cap: int = 15
+) -> list[dict] | None:
+    """人体 ReID 特征距离贪心选多样 top-k（合格样本内，纯"最远优先"、无相似度下限）。
+
+    - 只在按 gate_score 降序的**前 pool_cap** 个里选（限特征提取成本；宠物池本就 ≤12）。
+    - 第 1 张 = gate_score 最高（种子，与 dHash 路径一致）；此后每张 = 到已选集合的最大余弦
+      相似度**最小**者（k-center 贪心，离已选都最远）。HumanReID 输出 L2 归一，余弦=点积。
+    - 有效嵌入不足 2 个（模型/裁剪失败）→ 返回 ``None``，由上层回退 dHash。
+    """
+    pool = cands_sorted[:pool_cap]
+    valid: list[tuple[dict, Any]] = []
+    for c in pool:
+        emb = c.get("_reid_emb")
+        if emb is None:
+            try:
+                emb = extractor.extract_feature(c["crop"])  # 128-d，已 L2 归一
+            except Exception:  # noqa: BLE001
+                emb = None
+            c["_reid_emb"] = emb
+        if emb is not None:
+            valid.append((c, emb))
+    if len(valid) < 2:
+        return None  # 交回上层走 dHash
+    sel_idx = [0]  # 种子 = 最高 gate_score 的有效候选
+    while len(sel_idx) < k and len(sel_idx) < len(valid):
+        best_j, best_maxsim = None, None
+        for j in range(len(valid)):
+            if j in sel_idx:
+                continue
+            ej = valid[j][1]
+            maxsim = max(float(np.dot(ej, valid[i][1])) for i in sel_idx)
+            if best_maxsim is None or maxsim < best_maxsim:
+                best_maxsim, best_j = maxsim, j
+        sel_idx.append(best_j)
+    return [valid[i][0] for i in sel_idx]
+
+
 def _gate_select(cands: list[dict]) -> list[dict]:
     """主体 track 候选池 → 硬排除 → 加权分 → dHash 多样性 → 同一只的 ≤3 张多姿态。
 
@@ -222,6 +291,14 @@ def _gate_select(cands: list[dict]) -> list[dict]:
             0.5 * c["conf_n"] + 0.4 * c["sharpness_n"] + 0.1 * c["area_ratio_n"]
         )
     ok.sort(key=lambda c: c["gate_score"], reverse=True)
+    # 多样性：默认用人体 ReID 特征距离贪心选多姿态（_reid_diverse_topk）；关闭该开关、
+    # 或模型不可用 / 有效嵌入不足 → 回退感知哈希 dHash 多样性（安全网，绝不阻断注册）。
+    if get_settings().features.pet_reid_diverse:
+        ext = _get_pet_reid()
+        if ext is not None:
+            picked = _reid_diverse_topk(ok, _MAX_SELECT, ext)
+            if picked is not None:
+                return picked
     return _dhash_diverse_topk(ok, _MAX_SELECT)
 
 
@@ -549,12 +626,38 @@ def _sharpest_frame(frames: list[tuple[int, np.ndarray]]) -> np.ndarray | None:
     return best
 
 
+def _avatar_b64(src_crop: "np.ndarray | None", head_norm_bbox: Any = None) -> str:
+    """默认头像 b64：有头部框则裁头部区域（圆形展示自会 center-crop），否则用整张 src_crop；
+    无图则空串。供 Agent 注册（省去用户手动裁剪确认）落一个默认头像——Agent 注册省的是
+    "用户调整头像"这步，不是"不要头像"。src_crop 与 head_norm_bbox 须同一坐标系。"""
+    if src_crop is None or getattr(src_crop, "size", 0) == 0:
+        return ""
+    head, _ = _crop_from_norm_bbox(src_crop, head_norm_bbox)
+    return _jpeg_b64(head if head is not None else src_crop)
+
+
+def _montage_b64(crops: list[np.ndarray]) -> str:
+    """把选出的多姿态参考 crop 横向拼成一张（统一高 _MONTAGE_HEIGHT、等比缩放），JPEG base64。
+
+    仿人体样本 montage（person get_sample_montage / gallery hstack_to_height）——Agent 展示候选时
+    发**一张**拼图，不逐张刷屏。空 / 拼接失败 → 返回 ""（调用方不发图）。
+    """
+    imgs = [c for c in crops if c is not None and getattr(c, "size", 0) > 0]
+    if not imgs:
+        return ""
+    # max_total_width=None：宠物候选 ≤3 张，宽度天然有界，不再整体缩窄——保证高度恒为 384
+    montage = hstack_to_height(imgs, _MONTAGE_HEIGHT, max_total_width=None)
+    return _jpeg_b64(montage) if montage is not None else ""
+
+
 def _empty_result() -> dict:
     return {
         "detected": False,
         "description": None,
         "head_bbox": None,
         "primary_crop_b64": "",
+        "avatar_b64": "",
+        "montage_b64": "",
         "primary_index": 0,
         "candidates": [],
         "refs_inconsistent": None,
@@ -572,8 +675,9 @@ async def observe_pet(
 ) -> dict:
     """上传媒体（图 1~3 张 / 视频 1 个）→ 门控选 ≤3 张同一只 crop → omni 一次性生成共性描述。无副作用。
 
-    返回 ``{detected, description, head_bbox, primary_crop_b64, primary_index,
-    candidates, refs_inconsistent, warnings}``。检测器（YOLO 只认猫/狗）框到并过门槛时用选出的
+    返回 ``{detected, description, head_bbox, primary_crop_b64, avatar_b64, primary_index,
+    candidates, refs_inconsistent, warnings}``（``avatar_b64``：头部裁剪的默认头像，供 Agent
+    注册免用户手动裁剪时直接落头像）。检测器（YOLO 只认猫/狗）框到并过门槛时用选出的
     crop；**框不到 / 门控全灭时回退**：把整幅画面交给 omni 聚焦最明显的一只动物描述（兼容兔/鸟/
     仓鼠等非猫狗物种）。回退路径 ``body_grounding=True`` 时让 omni 框出本体、裁本体作**一张参考 crop**
     （决策 D7）；关或框不出则不产参考 crop（candidates=[]）。仅当 omni 判画面确无动物时 detected=False。
@@ -611,6 +715,10 @@ async def observe_pet(
             "description": description,
             "head_bbox": primary.get("head_bbox"),
             "primary_crop_b64": _jpeg_b64(primary["crop"]),
+            # 默认头像：裁 primary 的头部（head_bbox 相对 primary crop）；无头框则用整张 primary crop
+            "avatar_b64": _avatar_b64(primary["crop"], primary.get("head_bbox")),
+            # 多姿态参考图横向拼图（统一高 384）——Agent 一张图发用户，不逐张刷屏
+            "montage_b64": _montage_b64(crops),
             "primary_index": primary_index,
             "candidates": [
                 _candidate_out(c, head_bbox=c.get("head_bbox")) for c in selected
@@ -647,12 +755,18 @@ async def observe_pet(
             "bbox": body_px,
             "frame_idx": None,
         }
+        # 默认头像：head_bbox 相对整幅画面 → 从整幅裁头部；无头框则退回本体 crop
+        _fb_head, _ = _crop_from_norm_bbox(
+            fallback_frame, head_bboxes[0] if head_bboxes else None
+        )
         return {
             "detected": True,
             "description": description,
             # head_bbox 是相对整幅画面算的；primary/candidate 已裁成本体子图 → 整幅头框对它无意义，置 None
             "head_bbox": None,
             "primary_crop_b64": _jpeg_b64(body_crop),
+            "avatar_b64": _jpeg_b64(_fb_head if _fb_head is not None else body_crop),
+            "montage_b64": _montage_b64([body_crop]),  # 单张本体 crop → 拼图=该图 @384
             "primary_index": 0,
             "candidates": [_candidate_out(cand, head_bbox=None)],
             "refs_inconsistent": None,
@@ -665,6 +779,9 @@ async def observe_pet(
         "description": description,
         "head_bbox": head_bboxes[0] if head_bboxes else None,  # primary=整幅画面 → 头框仍相对整幅有效
         "primary_crop_b64": _jpeg_b64(fallback_frame),
+        # 默认头像：从整幅裁头部；无头框则整幅（圆形展示会 center-crop）
+        "avatar_b64": _avatar_b64(fallback_frame, head_bboxes[0] if head_bboxes else None),
+        "montage_b64": "",  # 整幅回退无参考 crop（前端裁剪器手动收窄）→ 无拼图
         "primary_index": 0,
         "candidates": [],
         "refs_inconsistent": None,
