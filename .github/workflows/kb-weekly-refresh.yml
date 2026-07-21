@@ -1,0 +1,67 @@
+# 知识库每周自动刷新：拉最新 main → 算近月 commit 覆盖清单 → N 轮全量复审（连续若干轮无新增即停）
+# → commit 覆盖审计 → 出 PR 前多轮 review → 护栏（只允许改 knowledge/）→ docs 格式门 → 开一个待人工确认
+# 的 PR。人是唯一合并闸门：本 workflow 只开 PR、从不自动合并。通知沿用 GitHub 原生（PR 一开即发通知邮件）。
+# 复用 pr-review 基础设施：pr-review:trixie 容器（含 claude CLI）+ ANTHROPIC_* 密钥。
+name: KB Weekly Refresh
+
+on:
+  # 每周五 UTC 01:07 ≈ 北京时间周五 09:07（避开整点分散负载）；PR 留到周一人工确认。
+  schedule:
+    - cron: "7 1 * * 5"
+  workflow_dispatch:
+    inputs:
+      max_rounds:
+        description: "复审轮数上限（兜底；正常连续若干轮无新增即提前停）。须为正整数、无前导零、且 >= 脚本 CONVERGE_AFTER（默认 3）。想快速验证可填 3。"
+        required: false
+        default: "8"
+
+# 串行：同一时刻只跑一个，避免并发开重复 PR。cancel-in-progress: false —— 任务耗时长（~90min）且开 PR
+# 幂等，让在跑的先跑完、新触发排队，不打断。
+concurrency:
+  group: kb-weekly-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write # 建分支 + 提交 knowledge/ 改动
+  pull-requests: write # 开 PR
+  issues: write # 建标签 + 打标签走 issues API，缺此权限去重按标签查不到
+  packages: read # 拉 ghcr 上的 pr-review 容器镜像
+
+jobs:
+  kb-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120 # 留余量：极端不收敛会跑满 MAX_ROUNDS
+    container:
+      image: ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      # 只用主模型、不接主/备降级：批处理任务，模型故障时脚本 fail-loud（exit 5），人工重跑即可。
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      PR_AGENT_MODEL: ${{ vars.PR_AGENT_MODEL }}
+      # 内置 GITHUB_TOKEN 开的 PR 不触发其它 workflow（防递归），故 docs.yml / pr-review 不会自动跑——脚本已
+      # 内联等效补救（docs 门 + 出 PR 前 review）。若日后配"必需检查"分支保护，需改用 PAT / App token 开 PR。
+      GH_TOKEN: ${{ github.token }}
+      # 不写 `|| '8'`：schedule 触发时 inputs 为空 → 脚本的 ${MAX_ROUNDS:-8} 兜底，默认值单源在脚本里。
+      MAX_ROUNDS: ${{ github.event.inputs.max_rounds }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: main # 始终对最新 main 复审
+          fetch-depth: 0 # 保留历史，供 git log / git diff 感知近期变更
+
+      - name: 允许 git 访问工作区
+        # 容器内 HOME 指到 /github/home，镜像预设的 safe.directory 不生效，运行时再设一次
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # pr-review 容器无 node/npx；docs 门要跑 prettier+markdownlint，显式装 node（版本与 docs.yml 对齐）。
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+
+      # 安全：agent 仅 Read + 只读 Bash 白名单（写范围由事后路径护栏硬保证）；密钥经 env 注入、不落文件。
+      - name: 跑知识库刷新（复审 → 审计 → review → 护栏 → docs 门 → 开 PR）
+        run: bash .ci/kb-refresh.sh
