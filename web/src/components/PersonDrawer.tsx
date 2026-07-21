@@ -72,7 +72,12 @@ export function PersonDrawer({
       setRemoveAvatar(false);
       setCrop(null);
     } else {
+      // 关闭即清暂存（趁抽屉渲染 null、屏幕不可见时清干净）——否则重开另一成员时
+      // 会先闪现上一次未保存的裁剪预览 / 恢复默认态一帧。
       setConfirmingDel(false);
+      setAvatarBlob(null);
+      setRemoveAvatar(false);
+      setCrop(null);
     }
   }, [open, person, startEnrolling]);
 
@@ -159,14 +164,14 @@ export function PersonDrawer({
     }
   };
 
-  // 头像内容：待上传新图预览 > （恢复默认时按清空后状态预览）> 当前头像。
+  // 头像内容：待上传新图预览 > 当前头像。「恢复默认」是暂存态，不改这里的预览——
+  // 显式头像文件要到「保存」才删、GET /avatar 在那之前仍会返回它，试图预览回落图
+  // 只会误导；改由下方「保存后恢复默认」提示告知。恒传稳定的 person 引用，避免
+  // PersonAvatar 收到每帧新建的对象字面量而反复拉图、闪占位。
   const avatarInner = avatarPreview ? (
     <img src={avatarPreview} alt="" className="w-full h-full object-cover" />
   ) : person ? (
-    <PersonAvatar
-      person={removeAvatar ? { ...person, avatarExt: null } : person}
-      size={96}
-    />
+    <PersonAvatar person={person} size={96} />
   ) : null;
 
   return (
@@ -230,6 +235,18 @@ export function PersonDrawer({
                 >
                   {t("family.restoreDefaultAvatar")}
                 </button>
+              )}
+              {removeAvatar && (
+                <div className="flex items-center gap-2 text-caption text-text-secondary">
+                  <span>{t("family.avatarWillReset")}</span>
+                  <button
+                    type="button"
+                    onClick={() => setRemoveAvatar(false)}
+                    className="text-brand-primary hover:text-brand-accent"
+                  >
+                    {t("family.undo")}
+                  </button>
+                </div>
               )}
             </div>
           )}

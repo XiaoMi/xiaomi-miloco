@@ -102,6 +102,11 @@ export function PetDrawer({
       setCrop(null);
       setAvatarBlob(null);
       setAvatarName("avatar.jpg");
+    } else {
+      // 关闭即清头像暂存（趁抽屉渲染 null、屏幕不可见时清）——否则编辑宠物 A 裁图后取消、
+      // 再开 B 会先闪现 A 上次裁的图一帧。
+      setCrop(null);
+      setAvatarBlob(null);
     }
     // 仅在打开/切换宠物时回填；entries 变更不重置用户正在编辑的内容。
     // eslint-disable-next-line react-hooks/exhaustive-deps

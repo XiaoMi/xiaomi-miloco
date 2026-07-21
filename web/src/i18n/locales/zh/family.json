@@ -28,6 +28,8 @@
     "delete": "删除",
     "changeAvatar": "更换头像",
     "restoreDefaultAvatar": "恢复默认头像",
+    "avatarWillReset": "保存后恢复默认",
+    "undo": "撤销",
 
     "enrollTitle": "录入身份 · {{name}}",
     "analyzing": "分析中…",

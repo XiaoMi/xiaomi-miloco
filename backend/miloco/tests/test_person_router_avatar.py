@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import io
 
+import cv2
+import numpy as np
 import pytest
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -19,6 +21,10 @@ from miloco.person.router import (
 )
 
 _PID = "33333333-3333-4333-8333-333333333333"
+# 真·PNG / BMP 字节（cv2 可解码），供端点用例：PNG 是白名单格式；BMP 用于「可解码但
+# 非白名单格式」→ 400 的用例。
+_PNG = cv2.imencode(".png", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
+_BMP = cv2.imencode(".bmp", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
 
 
 @pytest.fixture
@@ -75,6 +81,13 @@ def test_bad_ext_raises(lib):
         lib.set_person_avatar(_PID, data=b"x", ext="gif")
 
 
+def test_bad_subject_id_raises(lib):
+    """路径穿越防御：非法 id（含 / . 或 ..）在库层即 raise、不落盘。"""
+    for bad in ("../etc/passwd", "a/b", "..", "x.y", ""):
+        with pytest.raises(ValueError):
+            lib.set_person_avatar(bad, data=b"x", ext="png")
+
+
 # ── 端点：GET 解析优先级 ─────────────────────────────────────────────────────
 
 async def test_get_explicit_avatar(wired, lib):
@@ -112,7 +125,7 @@ async def test_explicit_beats_face(wired, lib):
 # ── 端点：POST / DELETE ─────────────────────────────────────────────────────
 
 async def test_post_sets_avatar(wired, lib):
-    up = UploadFile(filename="a.png", file=io.BytesIO(b"\x89PNGdata"))
+    up = UploadFile(filename="a.png", file=io.BytesIO(_PNG))
     res = await upload_person_avatar(_PID, image=up, current_user="t")
     assert res.code == 0 and res.data["avatar_ext"] == "png"
     assert lib.person_avatar_path(_PID) is not None
@@ -130,8 +143,25 @@ async def test_post_404_no_person(monkeypatch, lib):
     assert ei.value.status_code == 404
 
 
-async def test_post_bad_ext_400(wired):
-    up = UploadFile(filename="a.gif", file=io.BytesIO(b"x"))
+async def test_post_unsupported_format_400(wired):
+    # 内容可解码但非白名单格式（BMP）→ 400（格式由内容定，不看文件名后缀）
+    up = UploadFile(filename="a.png", file=io.BytesIO(_BMP))
+    with pytest.raises(HTTPException) as ei:
+        await upload_person_avatar(_PID, image=up, current_user="t")
+    assert ei.value.status_code == 400
+
+
+async def test_post_ext_from_content_not_filename(wired, lib):
+    # 落盘扩展名取自真实内容而非文件名后缀：真 PNG 命名 x.jpg → 存成 png
+    up = UploadFile(filename="x.jpg", file=io.BytesIO(_PNG))
+    res = await upload_person_avatar(_PID, image=up, current_user="t")
+    assert res.data["avatar_ext"] == "png"
+    assert lib.person_avatar_path(_PID).suffix == ".png"
+
+
+async def test_post_bad_bytes_400(wired):
+    # 后缀合法、但内容不是可解码图片 → 400
+    up = UploadFile(filename="a.png", file=io.BytesIO(b"not-an-image"))
     with pytest.raises(HTTPException) as ei:
         await upload_person_avatar(_PID, image=up, current_user="t")
     assert ei.value.status_code == 400
@@ -147,4 +177,11 @@ async def test_delete_clears(wired, lib):
 async def test_bad_id_400(wired):
     with pytest.raises(HTTPException) as ei:
         await get_person_avatar("../etc/passwd", current_user="t")
+    assert ei.value.status_code == 400
+
+
+async def test_trailing_newline_id_400(wired):
+    # UUID 带结尾换行：正则用 \Z 严格锚尾，应 400（不被 re.match 的 $ 放过）
+    with pytest.raises(HTTPException) as ei:
+        await get_person_avatar(_PID + "\n", current_user="t")
     assert ei.value.status_code == 400

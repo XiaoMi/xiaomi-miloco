@@ -20,10 +20,21 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# subject_id 白名单：人的 UUID 与宠物 pet_<hex> 都只含这些字符。用作路径/日志前一律
+# 强制校验——helper 不盲信调用方，从源头杜绝路径穿越与日志注入（纵深防御）。
+_SAFE_SUBJECT_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _safe_subject_id(subject_id: str) -> str:
+    if not _SAFE_SUBJECT_ID.fullmatch(subject_id or ""):
+        raise ValueError(f"非法 subject_id: {subject_id!r}")
+    return subject_id
 
 # 允许的头像扩展名（小写、无点）；_EXT_ORDER 供确定性遍历（正常只存在一个）。
 AVATAR_EXTS = frozenset({"jpg", "jpeg", "png", "webp"})
@@ -66,14 +77,25 @@ def _avatar_dir(root: Path, kind: str) -> Path:
     return Path(root) / "avatars" / kind
 
 
+def _avatar_file(root: Path, kind: str, subject_id: str, ext: str) -> Path:
+    """构造 ``avatars/<kind>/<id>.<ext>`` 并双重防穿越：白名单 id + 规范化后仍须落在该
+    目录内（后者是 CodeQL 认可的 path-containment sanitizer：os.path.realpath + commonpath）。"""
+    subject_id = _safe_subject_id(subject_id)
+    d = _avatar_dir(root, kind)
+    p = d / f"{subject_id}.{ext}"
+    base = os.path.realpath(d)
+    if os.path.commonpath((base, os.path.realpath(p))) != base:
+        raise ValueError(f"非法 subject_id: {subject_id!r}")
+    return p
+
+
 def avatar_path(root: Path, kind: str, subject_id: str) -> Path | None:
     """返回 ``<root>/avatars/<kind>/<id>.<ext>`` 中实际存在的那张（无则 None）。
 
-    逐 ext 精确探测（不 glob）：subject_id 已由上层白名单校验，此处不引入 glob 语义。
+    逐 ext 精确探测（不 glob）；路径经白名单 + containment 校验，杜绝穿越。
     """
-    d = _avatar_dir(root, kind)
     for ext in _EXT_ORDER:
-        p = d / f"{subject_id}.{ext}"
+        p = _avatar_file(root, kind, subject_id, ext)
         if p.is_file():
             return p
     return None
@@ -89,7 +111,7 @@ def set_avatar(root: Path, kind: str, subject_id: str, data: bytes, ext: str) ->
     norm = normalize_avatar_ext(ext)
     if not data:
         raise ValueError("头像数据为空")
-    _atomic_write(_avatar_dir(root, kind) / f"{subject_id}.{norm}", data)
+    _atomic_write(_avatar_file(root, kind, subject_id, norm), data)
     _remove(root, kind, subject_id, keep=norm)
     return norm
 
@@ -100,10 +122,10 @@ def remove_avatar(root: Path, kind: str, subject_id: str) -> None:
 
 
 def _remove(root: Path, kind: str, subject_id: str, keep: str | None) -> None:
-    d = _avatar_dir(root, kind)
+    subject_id = _safe_subject_id(subject_id)
     keep_name = f"{subject_id}.{keep}" if keep else None
     for ext in _EXT_ORDER:
-        p = d / f"{subject_id}.{ext}"
+        p = _avatar_file(root, kind, subject_id, ext)
         if keep_name and p.name == keep_name:
             continue
         if p.is_file():

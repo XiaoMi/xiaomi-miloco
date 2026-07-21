@@ -1,0 +1,9 @@
+{
+  "avatar": {
+    "cropTitle": "调整头像",
+    "cropHint": "拖动移动 · 滚轮或滑杆缩放",
+    "cropZoom": "缩放",
+    "cropConfirm": "确认",
+    "cancel": "取消"
+  }
+}

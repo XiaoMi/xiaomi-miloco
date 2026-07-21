@@ -47,7 +47,10 @@ export function PetAvatar({ pet, size = 34 }: Props) {
         URL.revokeObjectURL(url);
       }
     };
-  }, [pet.id, hasAvatar, pet.avatarExt]);
+    // 依赖整个 pet 对象而非仅 avatarExt：同扩展名替换头像（jpg→jpg）时 avatarExt 值不变，
+    // 只盯它会漏刷新（显示旧图）。pets 列表用 useAsync，data 仅在 reload 时换新对象，
+    // 换/删头像保存后触发 pets.reload() → 新对象 → 重新拉图；平时 re-render 引用不变不多拉。
+  }, [pet, hasAvatar]);
 
   return (
     <span
