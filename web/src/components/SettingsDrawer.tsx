@@ -26,7 +26,7 @@ interface Props {
 export function SettingsDrawer({ open, onClose }: Props) {
   const { t } = useTranslation();
   const [config, setConfig] = useState<PerceptionConfig | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const [videoShortEdge, setVideoShortEdge] = useState(DEFAULTS.video_short_edge);
@@ -42,6 +42,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) {
       setConfig(null);
+      setLoading(true);
       return;
     }
     setLoading(true);
