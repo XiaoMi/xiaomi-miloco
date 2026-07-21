@@ -144,6 +144,9 @@ export function PersonDrawer({
       onChanged();
       onClose();
     } catch (e) {
+      // 部分失败也刷新：updatePerson 成功但头像步骤抛错时，name/role 已存服务端，
+      // 先 reload 反映已保存的改动（不 onClose，留着让用户重试头像）；全失败时 reload 亦无害。
+      onChanged();
       toast(e instanceof Error ? e.message : t("family.saveFail"), "warn");
     } finally {
       setBusy(false);

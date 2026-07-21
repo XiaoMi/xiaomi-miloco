@@ -167,6 +167,15 @@ async def test_post_bad_bytes_400(wired):
     assert ei.value.status_code == 400
 
 
+async def test_post_too_large_400(wired):
+    # 超过大小上限（>5MB）→ 400（在解码前就拦下）
+    big = _PNG + b"\x00" * (5 * 1024 * 1024)
+    up = UploadFile(filename="a.png", file=io.BytesIO(big))
+    with pytest.raises(HTTPException) as ei:
+        await upload_person_avatar(_PID, image=up, current_user="t")
+    assert ei.value.status_code == 400
+
+
 async def test_delete_clears(wired, lib):
     lib.set_person_avatar(_PID, data=b"x", ext="png")
     res = await delete_person_avatar(_PID, current_user="t")
