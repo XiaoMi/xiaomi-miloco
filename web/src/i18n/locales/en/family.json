@@ -28,6 +28,8 @@
     "delete": "Delete",
     "changeAvatar": "Change avatar",
     "restoreDefaultAvatar": "Restore default avatar",
+    "avatarWillReset": "Reverts to default after saving",
+    "undo": "Undo",
 
     "enrollTitle": "Enroll identity · {{name}}",
     "analyzing": "Analyzing…",

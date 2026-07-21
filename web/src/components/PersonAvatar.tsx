@@ -44,7 +44,7 @@ export function PersonAvatar({ person, size = 28, badge = false }: Props) {
     (async () => {
       try {
         // <img> 挂不了 Bearer header，故 fetch + blobURL（与旧实现同因）；单一 URL
-        // 交后端解析显式头像 or 回落 face[0]。avatarExt 入 dep：换/清头像后自动刷新。
+        // 交后端解析显式头像 or 回落 face[0]。
         const imgRes = await fetch(`/api/identity/persons/${person.id}/avatar`, {
           cache: "no-store",
           headers: authHeaders(),
@@ -69,7 +69,11 @@ export function PersonAvatar({ person, size = 28, badge = false }: Props) {
         URL.revokeObjectURL(url);
       }
     };
-  }, [person.id, hasAvatar, person.avatarExt]);
+    // 依赖整个 person 对象而非仅 avatarExt：同扩展名替换头像（jpg→jpg）时 avatarExt
+    // 值不变，只盯它会漏刷新（显示旧图）。useAsync 的 data 仅在 reload 时才产生新
+    // person 对象，而换/清头像保存后正好触发 persons.reload() → 新对象 → 重新拉图；
+    // 平时 re-render 引用不变、不会多拉。
+  }, [person, hasAvatar]);
 
   return (
     <span

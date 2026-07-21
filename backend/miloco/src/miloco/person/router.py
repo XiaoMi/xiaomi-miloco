@@ -6,7 +6,6 @@
 import asyncio
 import logging
 import re
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -26,8 +25,10 @@ from miloco.schema.common_schema import NormalResponse
 from miloco.utils.paths import miloco_home
 
 # 严格 UUID4 白名单：拒绝路径分隔符、`..` 等可构造路径穿越的字符
+# 用 \Z（而非 $）严格锚定串尾：$ 会放过结尾一个换行（re.match 下 "uuid\n" 也 match），
+# \Z 不会——杜绝带尾随换行的 id 混入。
 _PERSON_ID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 logger = logging.getLogger(__name__)
@@ -701,6 +702,19 @@ async def read_tier_sample(
 # =============================================================================
 
 
+def _sniff_image_ext(data: bytes) -> str | None:
+    """按文件头魔数判定真实图片格式（jpg/png/webp），不看文件名后缀——杜绝「后缀与
+    内容不符」，让盘上后缀 / Content-Type / 真实字节恒一致；不在白名单则 None。
+    （不引 imghdr——3.13 已移除；也不引 Pillow 新依赖。）"""
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
 @router.post(
     "/persons/{person_id}/avatar", summary="Upload Person Avatar", response_model=NormalResponse
 )
@@ -714,7 +728,13 @@ async def upload_person_avatar(
     if not manager.person_service.exists(person_id):
         raise HTTPException(status_code=404, detail="person 不存在")
     data = await image.read()
-    ext = Path(image.filename or "").suffix.lstrip(".").lower()
+    # 先确认能解码（挡垃圾字节），再按魔数取真实格式作落盘扩展名——不信任文件名后缀，
+    # 让 盘上后缀 / Content-Type / 真实字节 三者恒一致（同 enroll 口径用 cv2、不引新依赖）。
+    if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
+        raise HTTPException(status_code=400, detail="无法识别的图片")
+    ext = _sniff_image_ext(data)
+    if ext is None:
+        raise HTTPException(status_code=400, detail="不支持的图片格式（仅 jpg/png/webp）")
     try:
         norm = _get_identity_library().set_person_avatar(person_id, data=data, ext=ext)
     except ValueError as e:

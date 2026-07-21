@@ -1,12 +1,10 @@
 /**
  * 头像裁剪编辑器（手写，纯 React + canvas + pointer，不引库）。
  * 圆形取景框内定位一张源图：拖动平移、滚轮 / 滑杆缩放，图像始终铺满取景框。
- * 有 initialBox（如 grounding 头部归一化 [x,y,w,h]）时，初始把该框贴合取景框；
- * 否则居中 cover。确认时把可见区域绘到 OUT×OUT 离屏 canvas → JPEG blob。
- *
- * 上传头像与「自动生成外观描述」两条路线都经本组件确认，产物统一是裁好的方图 blob。
+ * 有 initialBox（归一化 [x,y,w,h]）时初始把该框贴合取景框；否则居中 cover。
+ * 确认时把可见区域绘到 OUT×OUT 离屏 canvas → JPEG blob。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconX } from "@/lib/icons";
@@ -16,7 +14,7 @@ const OUT = 256; // 输出方图边长（px）
 const MAX_ZOOM = 4;
 
 interface Props {
-  /** 源图：上传的文件 或 base64（自动生成的 crop）。 */
+  /** 源图：上传的图片文件 或 base64（宠物「自动生成外观」流传 crop 的 b64）。 */
   source: { file: File } | { b64: string };
   /** 头部等归一化初始框 [x,y,w,h]（相对源图），用作默认裁剪范围。 */
   initialBox?: number[] | null;
@@ -31,19 +29,19 @@ export function AvatarCropEditor({
   onConfirm,
 }: Props) {
   const { t } = useTranslation();
-  const src = useMemo(
-    () =>
-      "b64" in source
-        ? `data:image/jpeg;base64,${source.b64}`
-        : URL.createObjectURL(source.file),
-    [source],
-  );
+  // objectURL 的创建与回收同处一个 effect 生命周期（不放渲染期）：source 变化 / 卸载时
+  // 都 revoke 到对应的旧 URL，杜绝泄漏。
+  const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
-    // 仅 file 分支创建了 objectURL，需回收
-    return () => {
-      if ("file" in source) URL.revokeObjectURL(src);
-    };
-  }, [src, source]);
+    // b64 源（自动生成流）直接用 data URL，无需 revoke；file 源建 objectURL、卸载/换源时回收。
+    if ("b64" in source) {
+      setSrc(`data:image/jpeg;base64,${source.b64}`);
+      return;
+    }
+    const url = URL.createObjectURL(source.file);
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [source]);
 
   const imgRef = useRef<HTMLImageElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
@@ -180,17 +178,17 @@ export function AvatarCropEditor({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={t("pet.cropTitle")}
+        aria-label={t("avatar.cropTitle")}
         className="w-full max-w-sm bg-bg-secondary border border-border rounded-t-2xl md:rounded-xl shadow-sm p-6 anim-in"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-title text-text-primary">{t("pet.cropTitle")}</h3>
+          <h3 className="text-title text-text-primary">{t("avatar.cropTitle")}</h3>
           <button
             type="button"
             onClick={onCancel}
             className="rounded-full p-1 text-text-secondary hover:text-text-primary"
-            aria-label={t("pet.cancel")}
+            aria-label={t("avatar.cancel")}
           >
             <IconX />
           </button>
@@ -209,7 +207,7 @@ export function AvatarCropEditor({
             {/* eslint-disable-next-line jsx-a11y/alt-text */}
             <img
               ref={imgRef}
-              src={src}
+              src={src ?? undefined}
               onLoad={onImgLoad}
               draggable={false}
               alt=""
@@ -223,11 +221,11 @@ export function AvatarCropEditor({
               }}
             />
           </div>
-          <p className="text-caption text-text-tertiary">{t("pet.cropHint")}</p>
+          <p className="text-caption text-text-tertiary">{t("avatar.cropHint")}</p>
 
           <div className="w-full flex items-center gap-3">
             <span className="text-caption text-text-secondary shrink-0">
-              {t("pet.cropZoom")}
+              {t("avatar.cropZoom")}
             </span>
             <input
               type="range"
@@ -246,7 +244,7 @@ export function AvatarCropEditor({
             disabled={!dims}
             className="w-full py-2 rounded-lg bg-brand-primary text-white hover:bg-brand-accent disabled:opacity-60"
           >
-            {t("pet.cropConfirm")}
+            {t("avatar.cropConfirm")}
           </button>
         </div>
       </div>
