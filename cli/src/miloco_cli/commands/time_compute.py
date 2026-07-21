@@ -18,7 +18,11 @@ LLM 只负责"识别 user 表达对应哪种 anchor"，本工具负责"按 ancho
 - ``date {month_day, time?}``     今年 MM-DD（已过则明年；2/29 非闰年 → 2/28）
 - ``date_full {date, time?}``     绝对 YYYY-MM-DD
 
-输出：``{ok: true, iso: "..."}`` 或 ``{ok: false, error: "...", detail?: "..."}``。
+输出：成功 → stdout 裸 ISO（如 ``2026-06-10T23:59:59+08:00``）+ exit 0；
+失败 → stderr ``error: <code>[ <detail>]`` + exit 1。
+
+``compute_anchor`` 纯函数仍返 ``{ok: ..., iso/error/detail}`` dict，供 Python 侧
+调用方结构化判读；CLI wrapper 只做展平输出。
 """
 
 import json
@@ -269,24 +273,23 @@ def compute_anchor(now_iso: str, anchor: dict[str, Any]) -> dict[str, Any]:
     help="当前时间 ISO8601（含或不含时区；不含按 Asia/Shanghai）",
 )
 @click.option("--anchor", required=True, help="anchor JSON")
-@click.option("--pretty", is_flag=True)
-def time_compute_cmd(now, anchor, pretty):
-    """时间锚点纯算。本地执行，不调 backend。"""
+def time_compute_cmd(now, anchor):
+    """时间锚点纯算。本地执行，不调 backend。
+
+    成功：stdout 裸 ISO（带时区偏移）+ exit 0。
+    失败：stderr ``error: <code>[ <detail>]`` + exit 1。
+    """
     try:
         anchor_obj = json.loads(anchor)
     except json.JSONDecodeError as e:
-        print(
-            json.dumps(
-                {"ok": False, "error": "invalid_anchor", "detail": e.msg},
-                ensure_ascii=False,
-            ),
-            file=sys.stderr,
-        )
+        print(f"error: invalid_anchor {e.msg}", file=sys.stderr)
         sys.exit(1)
     result = compute_anchor(now, anchor_obj)
-    out = json.dumps(
-        result, ensure_ascii=False, indent=2 if pretty else None
-    )
-    print(out)
     if not result.get("ok"):
+        detail = result.get("detail")
+        msg = f"error: {result.get('error')}"
+        if detail:
+            msg += f" {detail}"
+        print(msg, file=sys.stderr)
         sys.exit(1)
+    print(result["iso"])

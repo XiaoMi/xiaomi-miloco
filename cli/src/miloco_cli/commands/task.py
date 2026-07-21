@@ -1,11 +1,8 @@
-"""task 命令组:create / link / record / update / list / get / disable / enable / delete。
+"""task 命令组: create / record / update / list / get / disable / enable / delete (v2)。
 
-对应 backend `/api/tasks` 全套 endpoint + ``/api/tasks/{id}/record`` 系列
-（spec 2026-06-10 方案 P）。CLI 只透传参数 + 友好打印。
-
-``task record`` 子组提供 9 个子命令对应 record 生命周期（init/get/compute/
-update/progress-inc/event-append/session-start/session-end）。``task link``
-当前仅接受 ``cron`` kind（rule 类由 rule create endpoint 内部自动 link）。
+对应 backend `/api/tasks` 全套 endpoint + ``/api/tasks/{id}/record`` 系列。
+v2 起 ``task link`` 子命令已移除: rule 关联由 ``rule create`` 完成 (rule.task_id
+FK CASCADE), cron 关联由 ``cron add`` (阶段 3) 完成。
 """
 
 import json
@@ -62,36 +59,18 @@ def task_group():
 )
 @click.option("--pretty", is_flag=True)
 def task_create(task_id, description, pretty):
-    """方案 P 阶段 D'：建 task 占位行。
+    """建 task 占位行 (v2)。
 
-    rule / cron / record 关联挂载由后续命令完成：
+    rule / cron / record 关联挂载由后续命令完成:
 
-    - ``miloco-cli rule create --task-id X ...``   内部一笔事务 INSERT rule + task_link
-    - ``miloco-cli task link --task X --kind cron --ref <jobId>``  显式挂 cron
-    - ``miloco-cli task record init X --kind ... --content ...``  挂 record
+    - ``miloco-cli rule create --task-id X ...``  写 rule.task_id FK
+    - ``miloco-cli cron add --task-id X ...``     阶段 3 装配 internal cron
+    - ``miloco-cli task record init X ...``       挂 record
     """
     from miloco_cli.client import api_post
 
     body = {"task_id": task_id, "description": description}
     data = api_post(API_PREFIX, body)
-    print_result(data, pretty)
-
-
-@task_group.command("link")
-@click.option("--task", "--task-id", "task_id", required=True)
-@click.option(
-    "--kind",
-    type=click.Choice(["cron"]),
-    required=True,
-    help="当前仅 cron（rule 类由 rule create 自动 link）",
-)
-@click.option("--ref", required=True, help="cron jobId")
-@click.option("--pretty", is_flag=True)
-def task_link(task_id, kind, ref, pretty):
-    """方案 P 阶段 B：显式挂 cron jobId 到 task_link。"""
-    from miloco_cli.client import api_post
-
-    data = api_post(f"{API_PREFIX}/{task_id}/link", {"kind": kind, "ref": ref})
     print_result(data, pretty)
 
 

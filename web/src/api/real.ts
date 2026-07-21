@@ -35,6 +35,7 @@ import type {
   UsageStats,
   OmniConfigState,
   OmniConfigUpdate,
+  OmniHealth,
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
@@ -902,6 +903,7 @@ export async function realListDevices(): Promise<Device[]> {
     const allProps: DeviceProperty[] = Object.entries(d.spec ?? {})
       .filter(([iid]) => iid.startsWith("prop."))
       .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
+    const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
 
     return {
       did: d.did,
@@ -909,7 +911,8 @@ export async function realListDevices(): Promise<Device[]> {
       category: cat,
       room: cleanRoom(d.room),
       online: d.online,
-      statusText: humanDeviceStatus(d, mainSwitch?.current, valueByIid),
+      statusText: humanDeviceStatus(d, valueByIid, statusKind),
+      statusKind,
       dangerous,
       mainSwitch,
       props: allProps,
@@ -1019,34 +1022,64 @@ const STATUS_TEXT: Record<string, StatusText> = {
   },
 };
 
-function humanDeviceStatus(
+function lockStatusKind(
+  d: BackendDevice,
+  values: Map<string, unknown>,
+): Device["statusKind"] {
+  const stateProp = Object.entries(d.spec ?? {}).find(([, spec]) => spec.type_name === "door-state");
+  if (stateProp) {
+    const [iid, spec] = stateProp;
+    const value = values.get(iid);
+    const optionName = spec.value_list?.find((item) => item.value === value)?.name;
+    if (optionName?.includes("Unlocked") || optionName?.includes("Ajar") || optionName?.includes("Not Close")) {
+      return "unlocked";
+    }
+    if (optionName?.includes("Locked") || optionName?.includes("Closed Properly")) {
+      return "locked";
+    }
+  }
+  const v = values.get("prop.2.1");
+  if (typeof v === "boolean") return v ? "locked" : "unlocked";
+  return "connected";
+}
+
+function deviceStatusKind(
   d: BackendDevice,
   mainOn: boolean | undefined,
   values: Map<string, unknown>,
+): Device["statusKind"] {
+  if (!d.online) return "offline";
+  if (mapCategory(d.category) === "lock") return lockStatusKind(d, values);
+  if (mainOn === undefined) return "connected";
+  return mainOn ? "on" : "off";
+}
+
+function humanDeviceStatus(
+  d: BackendDevice,
+  values: Map<string, unknown>,
+  kind: Device["statusKind"],
 ): string {
   const s = STATUS_TEXT[langKey()] ?? STATUS_TEXT.zh;
-  if (!d.online) return s.offline;
-  const cat = mapCategory(d.category);
+  if (kind === "offline") return s.offline;
+  if (kind === "locked") return s.locked;
+  if (kind === "unlocked") return s.unlocked;
+  if (kind === "connected") return s.connected;
 
-  if (cat === "lock") {
-    const v = values.get("prop.2.1");
-    return v ? s.locked : s.unlocked;
-  }
-  if (mainOn === undefined) return s.connected;
+  const cat = mapCategory(d.category);
   if (cat === "aircond") {
-    if (!mainOn) return s.off;
+    if (kind === "off") return s.off;
     const t = values.get("prop.2.5") ?? values.get("prop.2.4");
     if (typeof t === "number") return `${t}°C`;
     return s.running;
   }
   if (cat === "purifier") {
-    if (!mainOn) return s.off;
+    if (kind === "off") return s.off;
     const mode = values.get("prop.2.4");
     if (mode === 1) return s.sleepMode;
     if (mode === 0) return s.autoMode;
     return s.running;
   }
-  return mainOn ? s.on : s.off;
+  return kind === "on" ? s.on : s.off;
 }
 
 export async function realControlDeviceProp(
@@ -1080,7 +1113,6 @@ export async function realListCameras(): Promise<PerceptionCamera[]> {
     .map((c) => ({
       did: c.did,
       name: c.name,
-      channel: 0,
       roomName: c.room_name,
     }));
 }
@@ -1149,9 +1181,18 @@ interface BackendScopeCamera {
   did: string;
   name: string | null;
   room_name?: string | null;
+  // 三个正交可用性指标。旧后端只有 is_online 时用它兜底 cloud+lan。
+  cloud_online?: boolean;
+  lan_reachable?: boolean;
+  awake?: boolean | null;
   is_online: boolean;
   in_use: boolean;
+  // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
+  // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
+  voice_in_use?: boolean;
   connected: boolean;
+  channel?: number;  // 通道号，用于多通道摄像头
+  channel_count?: number;  // 通道总数；判多通道的权威信号（旧后端无则兜底 1）
 }
 
 export async function realListScopeCameras(): Promise<ScopeCamera[]> {
@@ -1162,9 +1203,15 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     did: c.did,
     name: c.name ?? c.did,
     roomName: c.room_name ?? undefined,
-    isOnline: c.is_online,
+    // 旧后端无三指标时用 is_online 兜底：cloud/lan 都取 is_online、awake 未知。
+    cloudOnline: c.cloud_online ?? c.is_online,
+    lanReachable: c.lan_reachable ?? c.is_online,
+    awake: c.awake ?? null,
     inUse: c.in_use,
+    voiceInUse: c.voice_in_use ?? false,
     connected: c.connected,
+    channel: c.channel ?? 0,  // 传递通道号，默认为 0
+    channelCount: c.channel_count ?? 1,  // 通道总数，判多通道用；旧后端兜底 1
   }));
 }
 
@@ -1177,9 +1224,11 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
 // 仍能拿到上一份缓存,不阻断列表渲染。
 let lastCamRefreshTs = 0;
 const CAM_REFRESH_THROTTLE_MS = 8000;
-export async function realRefreshCameraOnline(): Promise<void> {
+export async function realRefreshCameraOnline(force = false): Promise<void> {
   const now = Date.now();
-  if (now - lastCamRefreshTs < CAM_REFRESH_THROTTLE_MS) return;
+  // force = 手动刷新按钮:绕过 8s 节流(用户主动点应即时响应);自动加载(force=false)
+  // 仍走节流,防列表频繁 / 并发加载狂打后端 → 米家云限频。
+  if (!force && now - lastCamRefreshTs < CAM_REFRESH_THROTTLE_MS) return;
   lastCamRefreshTs = now;
   await apiFetch<Normal<unknown>>("/api/miot/refresh_camera_online");
 }
@@ -1194,6 +1243,23 @@ export async function realToggleScopeCamera(
   });
   // 写后立即 invalidate + 主动 prefetch homeCache(同 switchScopeHome 同款消 race)。
   invalidateMiotHomeCache();
+}
+
+// 拾音开关走独立端点 PUT /api/miot/scope/cameras/voice（不复用相机启用端点：
+// 拾音无投喂上限/离线校验、不重启感知引擎）。关闭 = mic-off：该相机声音完全不被处理
+// （引擎入口剥离音频）。后端只接受对 in_use=true 相机的设置,
+// 感知已关闭的相机会被拒（前端已把其开关置灰,这是二次兜底）。
+// 不 invalidate homeCache:拾音状态只存在于 /scope/cameras,调用方 reload scopeCameras 即可。
+export async function realToggleScopeCameraVoice(
+  dids: string[],
+  voiceInUse: boolean,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/miot/scope/cameras/voice", {
+    method: "PUT",
+    body: JSON.stringify({
+      items: dids.map((did) => ({ did, voice_in_use: voiceInUse })),
+    }),
+  });
 }
 
 // ── 今天发生了什么(meaningful_events)───────────────────────
@@ -1706,6 +1772,51 @@ export async function realTestOmniConfig(
   return r.data;
 }
 
+// 用户主动触发一次 omni probe(跳过熔断剩余 backoff),返回 OmniConfigState 含新 health。
+export async function realRetryOmniProbe(): Promise<OmniConfigState> {
+  const r = await apiFetch<Normal<OmniConfigState>>(
+    "/api/admin/omni-config/retry",
+    { method: "POST" },
+  );
+  return r.data;
+}
+
+// 订阅 /api/admin/omni-config/stream SSE:熔断器状态变化 → 推送 OmniHealth 快照。
+// 首次连上即会推一次当前状态。返回 unsubscribe 函数。
+//
+// onOpen 可选:**仅在断线后重连成功时**触发(EventSource 'open' 事件首次也会 fire,
+// firstOpenSeen 旗标跳过初次连接)。调用方典型用法是借此 refetch 一次 omni-config,
+// 因为 backend 重启后 config 字段(label/model/base_url)可能变但 SSE 不推 config。
+export function realSubscribeOmniHealth(
+  onHealth: (h: OmniHealth) => void,
+  onOpen?: () => void,
+): () => void {
+  const token = resolveToken();
+  const url = token
+    ? `/api/admin/omni-config/stream?token=${encodeURIComponent(token)}`
+    : "/api/admin/omni-config/stream";
+  const es = new EventSource(url);
+  let firstOpenSeen = false;
+  if (onOpen) {
+    es.addEventListener("open", () => {
+      if (!firstOpenSeen) {
+        firstOpenSeen = true;
+        return;
+      }
+      onOpen();
+    });
+  }
+  es.addEventListener("omni_health", (ev) => {
+    try {
+      const payload = JSON.parse((ev as MessageEvent).data) as OmniHealth;
+      onHealth(payload);
+    } catch {
+      // 忽略解析失败,后端保证 payload 结构。
+    }
+  });
+  return () => es.close();
+}
+
 async function fetchUsageStats(
   period: UsagePeriod,
   binMinutes: number,
@@ -1742,15 +1853,25 @@ async function fetchUsageStats(
 // ── 任务（task）─────────────────────────────────────────────
 // summary 视图 = task 基础字段 + record 进度摘要（window=day：progress 走 snapshot，
 // duration/event 走今日累计）。derived 形态按 kind 多态，原样透传给 UI 自行解读。
+// TaskSummaryView 继承 TaskFullView，除基础字段 + record 外，本就带驱动规则
+// （rule_briefs）/ paused_at；一并映射，详情抽屉直接复用列表数据，
+// 不再单独拉 GET /api/tasks/{id}。
 interface BackendTaskSummary {
   task_id: string;
   description: string;
   status: "active" | "paused";
+  paused_at?: string | null;
   created_at: string;
+  rule_briefs?: {
+    rule_id: string;
+    query: string;
+    actions_desc?: string[];
+  }[];
   record: {
     kind: "progress" | "duration" | "event";
     completed: boolean;
     active_session: { started_at: string; elapsed_minutes: number } | null;
+    window_remaining: { seconds: number; display: string } | null;
     derived: Record<string, unknown>;
   } | null;
 }
@@ -1763,7 +1884,13 @@ export async function realListTasks(): Promise<Task[]> {
     taskId: t.task_id,
     description: t.description,
     status: t.status,
+    pausedAt: t.paused_at ?? null,
     createdAt: t.created_at,
+    ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
+      ruleId: b.rule_id,
+      query: b.query,
+      actionsDesc: b.actions_desc ?? [],
+    })),
     record: t.record
       ? {
           kind: t.record.kind,
@@ -1772,6 +1899,12 @@ export async function realListTasks(): Promise<Task[]> {
             ? {
                 startedAt: t.record.active_session.started_at,
                 elapsedMinutes: t.record.active_session.elapsed_minutes,
+              }
+            : null,
+          windowRemaining: t.record.window_remaining
+            ? {
+                seconds: t.record.window_remaining.seconds,
+                display: t.record.window_remaining.display,
               }
             : null,
           derived: t.record.derived ?? {},
@@ -1795,5 +1928,20 @@ export async function realDeleteTask(taskId: string): Promise<void> {
   await apiFetch<Normal<unknown>>(
     `/api/tasks/${encodeURIComponent(taskId)}?reason=abandoned`,
     { method: "DELETE" },
+  );
+}
+
+// 改任务描述（PATCH /api/tasks/{id}）。
+export async function realUpdateTaskDescription(
+  taskId: string,
+  description: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description }),
+    },
   );
 }

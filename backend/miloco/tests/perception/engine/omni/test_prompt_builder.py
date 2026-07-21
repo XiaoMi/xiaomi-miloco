@@ -82,7 +82,7 @@ class TestBuildPrompt:
         assert "位置: 书房" in payload["user_content"]  # room_name 作场景参考注入 U4
         assert "读书开灯" in payload["user_content"]  # 规则按 rule_name 渲染（# 待判断规则）
         assert payload["video_base64"] is not None
-        assert payload["video_fps"] == ep.frame_info.fps
+        assert payload["media_info"] is not None
 
     def test_rule_rendered_by_name_without_evidence_suffix(self):
         """规则按 rule_name 渲染进「# 待判断规则」，不带已删除的 ｜允许证据= 后缀。"""
@@ -456,20 +456,19 @@ class TestResolveRoute:
 
 class TestAudioRoutePayload:
     def test_audio_payload_shape(self):
-        """audio route：payload 只有 audio_base64，没有 video_base64 / video_fps。"""
+        """audio route：payload 只有 audio_base64，没有 video_base64。"""
         ep = _audio_only_packet()
         payload = build_prompt(ep, OmniContext())
         assert "audio_base64" in payload
-        assert payload["audio_base64"]  # 非空 base64
+        assert payload["audio_base64"]
         assert "video_base64" not in payload
-        assert "video_fps" not in payload
 
     def test_video_route_no_audio_field(self):
-        """video route：payload 含 video_base64 / video_fps，不含 audio_base64。"""
+        """video route：payload 含 video_base64 + media_info，不含 audio_base64。"""
         ep = _video_route_packet()
         payload = build_prompt(ep, OmniContext())
         assert "video_base64" in payload
-        assert "video_fps" in payload
+        assert "media_info" in payload
         assert "audio_base64" not in payload
 
     def test_audio_route_drops_visual_fields(self):
@@ -496,10 +495,11 @@ class TestBuildMessagesContentBlocks:
 
     def test_audio_route_emits_input_audio_block(self):
         from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import MiMoAdapter
 
         ep = _audio_only_packet()
         payload = build_prompt(ep, OmniContext())
-        messages = _build_messages(payload)
+        messages = _build_messages(payload, MiMoAdapter())
         user_blocks = messages[1]["content"]
         types = [b["type"] for b in user_blocks]
 
@@ -510,10 +510,11 @@ class TestBuildMessagesContentBlocks:
 
     def test_video_route_emits_video_url_block(self):
         from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import MiMoAdapter
 
         ep = _video_route_packet()
         payload = build_prompt(ep, OmniContext())
-        messages = _build_messages(payload)
+        messages = _build_messages(payload, MiMoAdapter())
         user_blocks = messages[1]["content"]
         types = [b["type"] for b in user_blocks]
 
@@ -1020,12 +1021,12 @@ class TestEncodeVideoAudioGating:
     """video 路由按 audio gate 结果决定是否把音频轨编进 mp4（反语音幻觉）。"""
 
     def test_audio_track_included_when_audio_active(self):
-        b64 = _encode_video(_video_packet(audio_active=True))
+        b64, _info = _encode_video(_video_packet(audio_active=True))
         assert b64 is not None
         assert _mp4_has_audio_stream(b64)
 
     def test_audio_track_dropped_when_audio_inactive(self):
-        b64 = _encode_video(_video_packet(audio_active=False))
+        b64, _info = _encode_video(_video_packet(audio_active=False))
         assert b64 is not None
         assert not _mp4_has_audio_stream(b64)
 
@@ -1034,7 +1035,7 @@ class TestEncodeVideoAudioGating:
         ep = _mock_edge_packet()
         ep.audio_clip = np.zeros(16000, dtype=np.int16)
         assert ep.trigger is None
-        b64 = _encode_video(ep)
+        b64, _info = _encode_video(ep)
         assert b64 is not None
         assert _mp4_has_audio_stream(b64)
 
@@ -1262,3 +1263,169 @@ class TestNoAudioPromptDropsAudioFieldRefs:
         assert "speeches" in sp
         assert "env_sounds" in sp
         assert "音频理解" in sp
+
+
+# =============================================================================
+# 身份库为空 → identity 精简为 no_person-only（matching_moot / identity_match_disabled）
+# =============================================================================
+class TestIdentityMatchDisabled:
+    """库空时 identities 字段改精简版（只判 unknown/no_person、不做成员匹配）。
+
+    这是"gallery 为空不该激活成员匹配"修复的 prompt 侧断言：schema 的 name 域收成
+    <unknown|no_person>、字段说明砍掉全套面部匹配规则、gallery 段整段不渲染；no_person
+    判定链路不动（name 仍走 no_person）。库非空（默认 matching_moot=False）行为不变。
+    """
+
+    _MATCH_ONLY_MARKER = "本人正向吻合"   # 只在完整版 IDENTITY spec 里出现
+    _NO_MATCH_MARKER = "不做成员匹配"     # 只在精简版 IDENTITY_NO_MATCH spec 里出现
+
+    def test_render_schema_name_domain_collapses(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import render_schema
+
+        slim = render_schema(SceneDescriptor(
+            route="video", has_identity=True, identity_match_disabled=True))
+        full = render_schema(SceneDescriptor(
+            route="video", has_identity=True, identity_match_disabled=False))
+        assert '"name":"<unknown|no_person>"' in slim
+        assert "姓名" not in slim
+        assert '"name":"<姓名|unknown|no_person>"' in full
+
+    def test_render_field_spec_drops_matching_rules(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import render_field_spec
+
+        slim = render_field_spec(SceneDescriptor(
+            route="video", has_identity=True, identity_match_disabled=True))
+        full = render_field_spec(SceneDescriptor(
+            route="video", has_identity=True, identity_match_disabled=False))
+        # 精简版：有 no_person 判据、无成员匹配规则
+        assert self._NO_MATCH_MARKER in slim
+        assert self._MATCH_ONLY_MARKER not in slim
+        assert "no_person" in slim
+        # 完整版：保留匹配规则（回归保护）
+        assert self._MATCH_ONLY_MARKER in full
+        assert self._NO_MATCH_MARKER not in full
+
+    def _candidate(self):
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+        return IdentityQueryItem(
+            track_id=7, bbox_xyxy_norm=(100, 100, 200, 400), face_visible=False)
+
+    def test_matching_moot_skips_gallery_block_keeps_track_list(self):
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="",
+        ):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()], context=OmniContext(),
+                candidates=[self._candidate()], gallery_snapshot={},
+                matching_moot=True,
+            )
+        messages = fused["messages"]
+        system_prompt = messages[0]["content"]
+        main = _multimodal_user_content(messages)
+        main_text = "\n".join(b.get("text", "") for b in main if b.get("type") == "text")
+
+        # 主 user：无 gallery 段（连"库为空"占位文本都不塞），但待识别 track 列表仍在
+        assert "<gallery>" not in main_text
+        assert "库为空" not in main_text
+        assert "待识别 track" in main_text
+        # system prompt：用精简版 identity spec
+        assert self._NO_MATCH_MARKER in system_prompt
+        assert self._MATCH_ONLY_MARKER not in system_prompt
+
+    def test_default_matching_moot_false_keeps_empty_gallery_placeholder(self):
+        """回归保护：matching_moot 默认 False 时，库空仍走旧行为（塞"库为空"占位 + 完整匹配 spec）。"""
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="",
+        ):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()], context=OmniContext(),
+                candidates=[self._candidate()], gallery_snapshot={},
+            )
+        messages = fused["messages"]
+        system_prompt = messages[0]["content"]
+        main = _multimodal_user_content(messages)
+        main_text = "\n".join(b.get("text", "") for b in main if b.get("type") == "text")
+        assert "库为空" in main_text
+        assert self._MATCH_ONLY_MARKER in system_prompt
+
+    # ---- follow-up（PR #407 code review）：库空时「任务描述 / 示例」也须收敛，非只 gallery/字段说明 ----
+    _TASK_MATCH_MARKER = "对照图片库"    # 只在完整版「# 任务」身份行里出现
+    _EXAMPLE_A_MARKER = "## 实例 A"       # 只在成员匹配 few-shot（实例 A）里出现
+
+    def test_task_list_slim_when_matching_moot(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_task_list
+
+        slim = _render_task_list(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True))
+        assert self._TASK_MATCH_MARKER not in slim
+        assert "库中哪一位" not in slim
+        assert "不做成员匹配" in slim
+
+    def test_task_list_full_when_gallery_present(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_task_list
+
+        full = _render_task_list(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=False))
+        assert self._TASK_MATCH_MARKER in full
+
+    def test_example_a_dropped_when_matching_moot(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_examples
+
+        # has_speech=True：未修复时实例 A 本会注入，确保断言有意义
+        out = _render_examples(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True))
+        assert self._EXAMPLE_A_MARKER not in out   # 成员匹配 few-shot 不注入
+        assert "实例 B" in out                       # 通用观察 few-shot 照常
+        # 库空实例 B 用泛称版：无成员铺垫的窗口不示范 caption 叫专名
+        assert "小明" not in out
+        assert "某人坐在电脑前" in out
+
+    def test_example_a_present_when_gallery_present(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_examples
+
+        out = _render_examples(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=False))
+        assert self._EXAMPLE_A_MARKER in out
+        # 库非空用带名版实例 B（专名由实例 A 的 gallery 铺垫），非泛称版
+        assert "小明坐在电脑前" in out
+
+    def test_system_prompt_no_member_matching_leak_when_moot(self):
+        """整类 catch-all：库空 system prompt 不得残留任何成员匹配内容（任务描述 /
+        字段说明规则 / few-shot 示例），且带精简版标记。has_speech=True 让实例 A 在
+        未修复时本会注入——确保 absence 断言不是空断言。将来新增身份 prompt 段若漏 gate，
+        这条会红。"""
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import build_system_prompt
+
+        moot = SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True)
+        sp = build_system_prompt(moot, include_home_profile=False)
+        for leak in (self._TASK_MATCH_MARKER, "库中哪一位",
+                     self._EXAMPLE_A_MARKER, self._MATCH_ONLY_MARKER):
+            assert leak not in sp, f"库空 system prompt 残留成员匹配内容: {leak!r}"
+        assert self._NO_MATCH_MARKER in sp
+
+        # 正向对照：库非空同场景，上述 marker 确实存在（证明 absence 断言非空断言）
+        full = build_system_prompt(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=False), include_home_profile=False)
+        assert self._TASK_MATCH_MARKER in full
+        assert self._EXAMPLE_A_MARKER in full
+        assert self._MATCH_ONLY_MARKER in full

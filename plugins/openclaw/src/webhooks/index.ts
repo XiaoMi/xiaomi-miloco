@@ -4,6 +4,7 @@ import { getPluginConfig, type MilocoPluginConfig } from "../config.js";
 import { logger } from "../utils/logger.js";
 import { kAgentWebhook } from "./agent.js";
 import { kGetTraceWebhook } from "./get_trace.js";
+import { kResetSessionsWebhook } from "./reset_sessions.js";
 
 // 已处理标记
 export const ALREADY_HANDLED = "ALREADY_HANDLED";
@@ -11,6 +12,7 @@ export const ALREADY_HANDLED = "ALREADY_HANDLED";
 const kWebhooks = [
   kAgentWebhook, // 向 Agent 发消息
   kGetTraceWebhook, // backend 反向取 agent turn 元数据
+  kResetSessionsWebhook, // 切换家庭时批量重置 miloco session
 ].reduce(
   (acc, e) => {
     acc[e.name] = e.action;

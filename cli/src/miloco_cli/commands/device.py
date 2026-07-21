@@ -83,7 +83,10 @@ def _annotate_result_codes(data: dict) -> None:
     for it in items:
         total += 1
         code = it.get("code")
-        if isinstance(code, int) and code not in _MIOT_OK_CODES:
+        # 负值才是失败：米家 spec 错误码全为大负数（见 _MIOT_SPEC_CODES）。正数 / 0
+        # 代表指令已下发并执行（实测部分开关返回 code:1 仍生效），绝不能误判为失败——
+        # 否则上层 agent 见"失败"会盲目重试（甚至换 toggle 反复翻转开关）、并谎报失败。
+        if isinstance(code, int) and code < 0 and code not in _MIOT_OK_CODES:
             msg = _MIOT_SPEC_CODES.get(
                 code, "设备侧执行失败（未知错误码，详见米家 spec 错误码表）"
             )
@@ -167,7 +170,8 @@ def device_spec(dids):
     单台：device spec <did>
     多台：device spec <did1> <did2> …   （各设备规格依次输出，设备之间空两行分隔）
 
-    对齐表格：每行一个 prop / action，列宽自适应。
+    按 service 分组：每个 service 一个标题行（服务类型 + 中文描述），其下平铺
+    该服务的 prop / action 行（prop 在前），列宽自适应。
     """
     from miloco_cli.client import api_get
 
@@ -188,7 +192,11 @@ def device_spec(dids):
 
 
 def _render_device_spec(dev: dict) -> str:
-    """DEVICE 头 + PROPERTIES + ACTIONS 两段，spec 行与 catalog 同款 pipe 形式。"""
+    """DEVICE 头 + 按 service 分组的 properties / actions。
+
+    每个 service 一个小节，标题行给出 ``service_type_name（service_description）``；
+    组内 spec 行与 catalog 同款 pipe 形式，spec_name 可直接复制给 device control。
+    """
     from miloco_cli.catalog import (
         _build_spec_line,
         _resolve_keys_for_device,
@@ -211,30 +219,45 @@ def _render_device_spec(dev: dict) -> str:
         return "\n".join(out)
 
     out.append("")
-    out.append("# 每行：iid  spec_name|access|format|constraint|unit（action 行：iid  spec_name|x|in_params）；字段含义同 catalog「# 数据格式」")
+    out.append("# 按 service 分组")
+    out.append("# prop.iid    spec_name|access|format|constraint|unit")
+    out.append("# action.iid  spec_name|x|in_params")
     out.append("# access：wr=读写 / w=只写 / r=只读 / x=动作")
 
     iid_to_key = _resolve_keys_for_device(spec)
-    prop_rows: list[tuple[str, str]] = []
-    action_rows: list[tuple[str, str]] = []
+
+    # 按 iid 里的 siid（prop.{siid}.{piid} / action.{siid}.{aiid}）分组，保留 spec 原序
+    # （dict 自 Python 3.7 起保证按插入顺序迭代）。
+    # service_type_name / service_description 是 service 级字段，取组内首个非空值即可。
+    services: dict[str, dict] = {}
     for iid, entry in spec.items():
         if not isinstance(entry, dict):
             continue
+        parts = iid.split(".")
+        siid = parts[1] if len(parts) >= 3 else "?"
+        svc = services.setdefault(
+            siid,
+            {"type_name": None, "description": None, "props": [], "actions": []},
+        )
+        if svc["type_name"] is None and entry.get("service_type_name"):
+            svc["type_name"] = entry["service_type_name"]
+        if svc["description"] is None and entry.get("service_description"):
+            svc["description"] = entry["service_description"]
         key = iid_to_key.get(iid) or iid
         line = _build_spec_line(iid, entry, key)
-        (action_rows if line.is_action else prop_rows).append((iid, line.render()))
+        (svc["actions"] if line.is_action else svc["props"]).append((iid, line.render()))
 
-    def _section(title: str, rows: list[tuple[str, str]]) -> None:
-        if not rows:
-            return
+    for siid, svc in services.items():
         out.append("")
-        out.append(f"{title} ({len(rows)}):")
+        header = f"[service {siid}] {svc['type_name'] or '-'}"
+        if svc["description"]:
+            header += f"（{svc['description']}）"
+        out.append(header)
+        # prop 行在前、action 行在后，直接平铺（iid 前缀已区分二者，无需小节标题 / 缩进）。
+        rows = svc["props"] + svc["actions"]
         width = max(len(iid) for iid, _ in rows)
         for iid, rendered in rows:
-            out.append(f"  {iid:<{width}}  {rendered}")
-
-    _section("properties", prop_rows)
-    _section("actions", action_rows)
+            out.append(f"{iid:<{width}}  {rendered}")
 
     return "\n".join(out)
 

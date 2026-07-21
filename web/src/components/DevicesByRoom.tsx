@@ -4,7 +4,7 @@
  * 视觉规格：
  * - 房间标题行用 chevron + 名字 + mono 计数 meta
  * - 设备行：紧凑（44px 高），左侧图标 + 名字 + 状态点+状态文字 + 主开关 + ⋯
- * - 离线设备状态点用 warn 色
+ * - 状态点与状态文案同色：在线绿、离线灰；异常态预留 warning
  * - 场景行底部 hairline 分隔
  */
 
@@ -195,19 +195,20 @@ function DeviceRow({ device }: RowProps) {
   const offline = !device.online;
   const ms = device.mainSwitch;
   const isOn = !offline && (ms?.current ?? false);
+  const isUnlocked = device.statusKind === "unlocked";
 
-  // 状态点颜色:离线=warn,开=ok,关=tertiary,危险设备(锁)=info
+  // 状态提示同色表达：在线=绿，离线=灰，需要注意=warning。
   let dotColor = "bg-text-tertiary";
   let dotRing = "var(--color-bg-tertiary)";
-  if (offline) {
+  let statusTextColor = "text-text-tertiary";
+  if (isUnlocked) {
     dotColor = "bg-warning";
     dotRing = "var(--color-warning-bg)";
-  } else if (device.category === "lock") {
-    dotColor = "bg-info";
-    dotRing = "var(--color-info-bg)";
-  } else if (isOn) {
+    statusTextColor = "text-warning";
+  } else if (!offline) {
     dotColor = "bg-success";
     dotRing = "var(--color-success-bg)";
+    statusTextColor = "text-success";
   }
 
   // v5：纯展示，不响应点击。原 DeviceQuickSheet 弹窗已删（控制能力暂未补齐
@@ -246,9 +247,7 @@ function DeviceRow({ device }: RowProps) {
             boxShadow: `0 0 0 3px ${dotRing}`,
           }}
         />
-        <span
-          className={`text-caption-mono ${offline ? "text-warning" : "text-text-secondary"}`}
-        >
+        <span className={`text-caption-mono ${statusTextColor}`}>
           {device.statusText}
         </span>
       </span>

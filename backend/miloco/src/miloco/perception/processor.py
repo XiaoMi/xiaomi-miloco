@@ -13,7 +13,6 @@ import logging
 import re
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from miloco.config import get_settings
@@ -32,9 +31,11 @@ from miloco.observability.types import (
     IdentityTrace,
     OmniTrace,
 )
+from miloco.perception import omni_probe_registry
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.engine.types import RealtimePerceptionResult
+from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.schema import (
     PerceptionBatch,
     PerceptionLatency,
@@ -49,6 +50,14 @@ def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
+def _safe_put_nowait(q: asyncio.Queue, event_type: str, data: dict) -> None:
+    """跨 loop marshal 用的 call_soon_threadsafe 回调,QueueFull 走 drop + log。"""
+    try:
+        q.put_nowait((event_type, data))
+    except asyncio.QueueFull:
+        logger.warning("SSE subscriber queue full, dropping %s", event_type)
+
+
 # gate 阶段 pipeline 一个 device 写 5 个 key:gate_{did}_ms(总) +
 # gate_video/audio_{did}_ms(子模态拆分) + gate_video/audio_{did}_pass(0/1 标志)。
 # 直接用 startswith("gate_") 会把 5 个全加进 gate_ms,造成 ~2-3 倍虚高。
@@ -59,6 +68,96 @@ def _ms_since(start: float) -> float:
 # per-device trace 走 f"{room}/gate_{did}_ms" 精确 key,不走正则,不受影响。
 # did 改名时同步看一眼这条。
 _GATE_TOTAL_RE = re.compile(r"^gate_[^_]+_ms$")
+
+
+async def _run_omni_probe() -> None:
+    """OPEN_RECOVERABLE + backoff 到期时的自动探测协程。
+
+    走 mark_half_open → probe_omni(bypass before_call) → record_probe_result 三步。
+    record_probe_result 会清 in-flight 位;探测本身异常也走一次失败记录,保证 in-flight
+    位一定被清,不会死锁下次 tick 驱动。
+
+    finally 里再调一次 clear_probe_in_flight 兜底:asyncio.CancelledError 是
+    BaseException 子类,进不了 except Exception,若 task 被 cancel 时正好卡在 await
+    上,位就残留了。finally 无条件清位保证下次 tick 还能再 arm(状态不动,如果
+    task 已跑到 record_probe_result 位早就清了,再清一次也是 no-op)。
+    """
+    from miloco.config import get_settings
+    from miloco.perception.engine.omni import probe as _probe
+    from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+    try:
+        await cb.mark_half_open()
+        omni = get_settings().model.omni
+        if not omni.api_key:
+            # 用 no_key 而非 bad_key:语义"未配置"与"key 存在但无效"不同,前端两者
+            # 各自有 i18n 条目;router.retry_omni_probe 无 key 分支也用 no_key,
+            # 两端保持一致。
+            await cb.record_probe_result(
+                False,
+                ClassifiedError("no_key", "未配置 API Key", ErrorCategory.CONFIG),
+            )
+            return
+        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+        if result.get("ok"):
+            await cb.record_probe_result(True, None)
+            return
+        code = result.get("code", "unreachable")
+        cat = (
+            ErrorCategory.CONFIG
+            if code in ("bad_key", "not_found", "rejected_authed")
+            else ErrorCategory.RECOVERABLE
+        )
+        await cb.record_probe_result(
+            False,
+            ClassifiedError(
+                code,
+                result.get("message", ""),
+                cat,
+                result.get("retry_after_seconds"),
+            ),
+        )
+    except asyncio.CancelledError:
+        # CancelledError 是 BaseException 子类,进不了 except Exception。
+        # mark_half_open 后被 cancel (runner.stop / loop 关闭 / task.cancel 等) 若不复位,
+        # state 会卡在 HALF_OPEN:tick 只 arm OPEN_RECOVERABLE、before_call 短路一切、
+        # retry_now 对 HALF_OPEN no-op → 永久卡死,只能重启进程。走一次
+        # record_probe_result(fail, RECOVERABLE) 回落到 OPEN_RECOVERABLE 让 tick 接管;
+        # 之后 re-raise 让 cancel 语义正确传播(task 状态标记为 cancelled)。
+        try:
+            await cb.record_probe_result(
+                False,
+                ClassifiedError(
+                    "cancelled",
+                    "probe 被中断",
+                    ErrorCategory.RECOVERABLE,
+                ),
+            )
+        except Exception as e2:  # noqa: BLE001
+            logger.error("[omni] cancelled 回落 record_probe_result 失败 | %s", e2)
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.error("[omni] tick 自动探测异常 | %s", e, exc_info=True)
+        try:
+            await cb.record_probe_result(
+                False,
+                ClassifiedError(
+                    "unreachable",
+                    f"probe 抛异常({type(e).__name__})",
+                    ErrorCategory.RECOVERABLE,
+                ),
+            )
+        except Exception as e2:  # noqa: BLE001
+            logger.error("[omni] record_probe_result 兜底失败 | %s", e2)
+    finally:
+        # KeyboardInterrupt 等 BaseException 子类仍走 finally 兜底清位。CancelledError
+        # 分支已经通过 record_probe_result 清位,这里 no-op;正常/异常路径也已清,幂等。
+        cb.clear_probe_in_flight()
 
 
 def _aggregate_stage_ms(timing: dict) -> tuple[float, float, float]:
@@ -99,8 +198,13 @@ class PipelineProcessor:
         self._log_repo = log_repo
         self._last_latency: PerceptionLatency | None = None
         self._last_batch: PerceptionBatch | None = None
-        # SSE 订阅者队列;由 events_router / metric stream 等通过 subscribe_sse() 注册
-        self._sse_subscribers: list[asyncio.Queue] = []
+        # SSE 订阅者队列 + 队列归属的 loop;由 events_router / metric stream 等通过
+        # subscribe_sse() 注册。存 loop 是因为 omni 熔断器 record_failure / _emit 可能
+        # 在 inference worker 线程的临时 loop 里跑(client._realtime_perceive 用
+        # run_in_executor(asyncio.run(...))),而 asyncio.Queue.put_nowait 非线程安全,
+        # 跨 loop 调用会踩 Queue 内部状态、丢事件或抛 RuntimeError。_publish 里对
+        # 跨 loop 调用统一走 call_soon_threadsafe marshal 回归属 loop。
+        self._sse_subscribers: list[tuple[asyncio.Queue, asyncio.AbstractEventLoop]] = []
 
         # tier_c 闲时定期清:把 collector 的"按 did 取最近一帧"接到引擎(gate 关停时 live 检测取帧)。
         self._perception_engine_proxy.set_tierc_frame_provider(self._collector.peek_latest_frame)
@@ -122,8 +226,28 @@ class PipelineProcessor:
                 self._collector.peek_latest_frame
             )
 
-    def set_inference_executor(self, executor: ThreadPoolExecutor) -> None:
-        """Forward the inference executor to the engine proxy.
+    def drive_omni_probe(self) -> None:
+        """tick 入口驱动 omni 熔断器自动探测。
+
+        三条件齐(state==OPEN_RECOVERABLE + backoff 到期 + 无 in-flight)时 fire-and-forget
+        spawn 一次 probe task;否则 sync 判断后立即返回。CLOSED 稳态开销 = 一次 sync 读,
+        可忽略。
+
+        单飞位由熔断器内部维护(try_arm_probe 原子占位、record_probe_result 释放),
+        并发 tick / 多相机 batch 场景下同一时刻只会有一个 probe in-flight。
+        """
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+
+        cb = get_omni_circuit_breaker()
+        if not cb.try_arm_probe():
+            return
+        task = asyncio.create_task(_run_omni_probe())
+        omni_probe_registry.register(task)
+
+    def set_inference_worker(self, worker: InferenceWorker) -> None:
+        """Forward the inference worker to the engine proxy.
 
         Lifecycle: STARTING → READY (success) / FAILED (异常)。
         """
@@ -131,7 +255,7 @@ class PipelineProcessor:
         mon.set_lifecycle(NodeName.PROCESSOR, Lifecycle.STARTING)
 
         try:
-            self._perception_engine_proxy.set_executor(executor)
+            self._perception_engine_proxy.set_inference_worker(worker)
         except Exception as e:
             state = mon.get_state(NodeName.PROCESSOR)
             if state and state.lifecycle == Lifecycle.STARTING:
@@ -217,6 +341,10 @@ class PipelineProcessor:
         """软停底层引擎(删当前生效模型→回未配态),保留 tick 自愈循环。透传 proxy。"""
         await self._perception_engine_proxy.stop_to_unconfigured()
 
+    async def apply_omni_fps(self, omni_fps: int) -> None:
+        """运行时热更 omni_fps（含顶起的 tracker fps），免重建引擎。透传 proxy。"""
+        await self._perception_engine_proxy.apply_omni_fps(omni_fps)
+
     @property
     def last_batch(self) -> PerceptionBatch | None:
         return self._last_batch
@@ -231,11 +359,12 @@ class PipelineProcessor:
         _publish 会撞 QueueFull 走 drop + log,而非无界增长.
         """
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
-        self._sse_subscribers.append(q)
+        loop = asyncio.get_running_loop()
+        self._sse_subscribers.append((q, loop))
         return q
 
     def unsubscribe_sse(self, q: asyncio.Queue) -> None:
-        self._sse_subscribers = [s for s in self._sse_subscribers if s is not q]
+        self._sse_subscribers = [(sq, sl) for (sq, sl) in self._sse_subscribers if sq is not q]
 
     def _publish(self, event_type: str, data: dict) -> None:
         """非阻塞广播给所有 SSE 订阅者;队列满时跳过该订阅(B11 非阻塞约束).
@@ -243,12 +372,29 @@ class PipelineProcessor:
         与 _publish_trace / _publish_failed_trace 是两套不同的发布通道:
         - _publish_trace:写 observability traces SQLite
         - _publish:走 in-process asyncio.Queue 给 SSE 客户端
+
+        跨 loop 兜底:若当前 running loop 不是 Queue 归属 loop(omni 熔断器
+        record_failure/_emit 在 inference worker 临时 loop 触发的场景),
+        通过 loop.call_soon_threadsafe 把 put 委托回归属 loop——put_nowait
+        本身非线程安全,直接跨 loop 调会踩 Queue 状态。
         """
-        for q in self._sse_subscribers:
-            try:
-                q.put_nowait((event_type, data))
-            except asyncio.QueueFull:
-                logger.warning("SSE subscriber queue full, dropping %s", event_type)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        for q, loop in self._sse_subscribers:
+            if running is loop:
+                try:
+                    q.put_nowait((event_type, data))
+                except asyncio.QueueFull:
+                    logger.warning("SSE subscriber queue full, dropping %s", event_type)
+            else:
+                try:
+                    loop.call_soon_threadsafe(_safe_put_nowait, q, event_type, data)
+                except RuntimeError:
+                    # 归属 loop 已关(测试拆解 / 优雅退出中);跳过该订阅,后续
+                    # unsubscribe_sse 或 GC 清理即可。
+                    continue
 
     async def process_realtime(self) -> RealtimePerceptionResult | None | bool:
         """Realtime perception pipeline.

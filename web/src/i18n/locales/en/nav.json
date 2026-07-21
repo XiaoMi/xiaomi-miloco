@@ -7,6 +7,8 @@
     "devicesHint": "Manage Xiaomi Home devices",
     "family": "Family",
     "familyHint": "Manage family members",
+    "tasks": "Tasks",
+    "tasksHint": "Manage family tasks",
     "activity": "Activity",
     "activityHint": "Review what happened",
     "usage": "Models",

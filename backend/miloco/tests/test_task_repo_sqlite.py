@@ -1,7 +1,7 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""TaskRepo SQLite 集成测试（方案 P：create_task 仅占位，link 由后续 endpoint 挂）。"""
+"""TaskRepo SQLite 集成测试 (v2: task_link 表已 DROP; rule/cron 关联走 FK CASCADE)."""
 
 import pytest
 
@@ -31,49 +31,56 @@ def repo(real_db):
     return TaskRepo()
 
 
+def _insert_rule_row(task_id: str, rule_id: str) -> None:
+    """辅助: 塞一条 rule 引用行 (模拟 rule create 已完成)."""
+    from miloco.database.connector import get_db_connector
+
+    with get_db_connector().get_connection() as conn:
+        conn.execute(
+            "INSERT INTO rule (id, name, task_id, condition, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, 0)",
+            (rule_id, f"rule-{rule_id}", task_id, '{"query":"q"}'),
+        )
+        conn.commit()
+
+
+def _insert_cron_ref(task_id: str, cron_id: str, dispatch_owner: str = "external") -> None:
+    """internal 需要满足 CHECK 约束 (name/kind/message 全 NOT NULL); external 允许 NULL."""
+    from miloco.database.connector import get_db_connector
+
+    with get_db_connector().get_connection() as conn:
+        if dispatch_owner == "internal":
+            conn.execute(
+                "INSERT INTO cron (cron_id, task_id, dispatch_owner, name, kind, "
+                "cron_expr, message, enabled, created_at, updated_at) "
+                "VALUES (?, ?, 'internal', ?, 'cron', '* * * * *', ?, 1, 0, 0)",
+                (cron_id, task_id, f"cron-{cron_id}", "test"),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO cron (cron_id, task_id, dispatch_owner, enabled, "
+                "created_at, updated_at) VALUES (?, ?, 'external', 1, 0, 0)",
+                (cron_id, task_id),
+            )
+        conn.commit()
+
+
 def test_create_task_inserts_placeholder_only(repo):
     repo.create_task(task_id="drink_water", description="每天喝 8 杯水")
     view = repo.get_full_view("drink_water")
     assert view["status"] == "active"
     assert view["description"] == "每天喝 8 杯水"
-    # 方案 P：create 不再写 task_link
-    assert view["links"] == []
+    assert view["cron_refs"] == []
 
 
 def test_create_409_on_duplicate_task_id(repo):
-    from miloco.database.task_repo import TaskLinkConflict
+    from miloco.database.task_repo import TaskConflict
 
     repo.create_task(task_id="drink_water", description="d1")
-    with pytest.raises(TaskLinkConflict):
+    with pytest.raises(TaskConflict):
         repo.create_task(task_id="drink_water", description="d2")
     view = repo.get_full_view("drink_water")
     assert view["description"] == "d1"
-
-
-def test_add_link_fk_rejects_missing_task(repo):
-    from miloco.database.task_repo import TaskLinkConflict
-
-    with pytest.raises(TaskLinkConflict):
-        repo.add_link("ghost", "rule", "r1")
-
-
-def test_add_link_rejects_memory_kind(repo):
-    """方案 P：memory kind 已废除。"""
-    from miloco.database.task_repo import TaskLinkConflict
-
-    repo.create_task(task_id="t1", description="d")
-    with pytest.raises(TaskLinkConflict):
-        repo.add_link("t1", "memory", "x")
-
-
-def test_add_link_unique_rejects_cross_task_ref(repo):
-    from miloco.database.task_repo import TaskLinkConflict
-
-    repo.create_task(task_id="t1", description="d")
-    repo.create_task(task_id="t2", description="d")
-    repo.add_link("t1", "cron", "job1")
-    with pytest.raises(TaskLinkConflict):
-        repo.add_link("t2", "cron", "job1")
 
 
 def test_set_status_paused_then_active(repo):
@@ -100,19 +107,26 @@ def test_update_description(repo):
     assert repo.update_description("ghost", "x") is False
 
 
-def test_delete_task_cascades_to_task_link(repo, real_db):
+def test_delete_task_cascades_rule_and_cron(repo, real_db):
     import sqlite3
 
     repo.create_task(task_id="t1", description="d")
-    repo.add_link("t1", "cron", "job1")
+    _insert_rule_row("t1", "r1")
+    _insert_cron_ref("t1", "c1")
+
     deleted = repo.delete_task("t1")
     assert deleted == 1
     assert repo.get_full_view("t1") is None
     with sqlite3.connect(str(real_db)) as conn:
-        cnt = conn.execute(
-            "SELECT COUNT(*) FROM task_link WHERE task_id='t1'"
+        conn.execute("PRAGMA foreign_keys=ON")
+        rule_cnt = conn.execute(
+            "SELECT COUNT(*) FROM rule WHERE task_id='t1'"
         ).fetchone()[0]
-        assert cnt == 0
+        cron_cnt = conn.execute(
+            "SELECT COUNT(*) FROM cron WHERE task_id='t1'"
+        ).fetchone()[0]
+        assert rule_cnt == 0
+        assert cron_cnt == 0
 
 
 def test_delete_task_idempotent_returns_zero(repo):
@@ -123,40 +137,26 @@ def test_get_full_view_returns_none_for_missing(repo):
     assert repo.get_full_view("nope") is None
 
 
-def test_get_rule_refs(repo):
-    """方案 P：rule link 由 rule create 内部写；此处直接 add_link 模拟。"""
+def test_get_full_view_returns_cron_refs(repo):
+    """v2: cron_refs 从 cron.task_id 直查; rule 归属由 service 层拼 rule_briefs."""
     repo.create_task(task_id="t1", description="d")
-    repo.add_link("t1", "rule", "r1")
-    repo.add_link("t1", "rule", "r2")
-    assert sorted(repo.get_rule_refs("t1")) == ["r1", "r2"]
-    assert repo.get_rule_refs("ghost") == []
+    _insert_rule_row("t1", "r1")
+    _insert_cron_ref("t1", "c1")
+    view = repo.get_full_view("t1")
+    assert view["cron_refs"] == [
+        {"ref": "c1", "dispatch_owner": "external"}
+    ]
 
 
-def test_delete_link_by_ref_clears_dangling_row(repo):
-    repo.create_task(task_id="t1", description="d")
-    repo.add_link("t1", "rule", "r1")
-    repo.add_link("t1", "rule", "r2")
-    repo.add_link("t1", "cron", "c1")
-    assert repo.delete_link_by_ref("rule", "r1") == 1
-    assert repo.get_rule_refs("t1") == ["r2"]
-    full = repo.get_full_view("t1")
-    assert {(ln["kind"], ln["ref"]) for ln in full["links"]} == {
-        ("rule", "r2"),
-        ("cron", "c1"),
-    }
-
-
-def test_delete_link_by_ref_missing_returns_zero(repo):
-    assert repo.delete_link_by_ref("rule", "ghost") == 0
-
-
-def test_list_all_returns_all_tasks_with_links(repo):
+def test_list_all_returns_all_tasks_with_cron_refs(repo):
     repo.create_task(task_id="t1", description="d1")
-    repo.add_link("t1", "rule", "r1")
+    _insert_rule_row("t1", "r1")
     repo.create_task(task_id="t2", description="d2")
-    repo.add_link("t2", "cron", "c2")
+    _insert_cron_ref("t2", "c2", dispatch_owner="internal")
     rows = repo.list_all()
     assert {r["task_id"] for r in rows} == {"t1", "t2"}
     by_id = {r["task_id"]: r for r in rows}
-    assert by_id["t1"]["links"] == [{"kind": "rule", "ref": "r1"}]
-    assert by_id["t2"]["links"] == [{"kind": "cron", "ref": "c2"}]
+    assert by_id["t1"]["cron_refs"] == []
+    assert by_id["t2"]["cron_refs"] == [
+        {"ref": "c2", "dispatch_owner": "internal"}
+    ]

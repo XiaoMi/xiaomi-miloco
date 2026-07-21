@@ -418,7 +418,7 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
    - 时段：限清醒时段 06:00-22:00
    - 时点分布按任务自然执行场景定（服药对齐三餐、晨练放早晨、课后活动放放学时段等）；无强场景信号 → N 个时点均分 10:00-20:00
    - 周期：window=day → `* * *`；用户明示工作日/周末 → `* * 1-5` / `* * 0,6`
-   - 装配：N 个时点合并装单 cron `expr="0 H1,H2,...,Hn * * *"` + `tz="<家庭时区>"`，单 jobId 单 task_link（tz 必带，见 §Schedule.时区）
+   - 装配：N 个时点合并装单 cron `expr="0 H1,H2,...,Hn * * *"` + `tz="<家庭时区>"`，通过 `miloco-cli cron add --task-id <id> --kind cron --cron-expr ... --tz ...` 一步绑到 task（backend 内部走 `cron.task_id` FK CASCADE，tz 必带，见 §Schedule.时区）
 3. **其他**（无 target / Record=event / Record=duration / 无 Record） → 每周期单时点：day → `0 9 * * *`；week → `0 9 * * 1`；month → `0 9 1 * *`（均须配 `tz="<家庭时区>"`）
 
 命中默认路径 → **触发装配提示**（按 §装配提示元规则）
@@ -568,9 +568,9 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 |---|---|
 | 创建 task | `miloco-cli task create --task-id <id> --description "<描述>"` |
 | Rule=Y | `miloco-cli rule create --task-id <id> <rule-flags>` |
-| Schedule=Y | 调 OpenClaw cron tool 创建 cron job（`name` 必带 `[<id>]` 前缀，`message` 写业务意图，cron 类 schedule 必带独立 `tz="<家庭时区>"` 字段，见 §Schedule.时区）→ 拿 `jobId`；调 `miloco-cli task link --task <id> --kind cron --ref <jobId>` 挂 |
+| Schedule=Y | `miloco-cli cron add --task-id <id> --kind cron --name "[<id>] <描述>" --cron-expr "<expr>" --tz "<家庭时区>" --message "<业务意图>"`（backend 强制 `dispatch_owner=internal`，经 `cron.task_id` FK 直接绑 task，无需 link；cron 类必带 tz，见 §Schedule.时区） |
 | Record=Y | `miloco-cli task record init <id> --kind <progress/duration/event> --content '<JSON>'` |
-| Lifecycle=temporary | 调 OpenClaw cron tool 建 termination at job（at=`<expires_at>`，message=`到期销毁 task <id>`），expires_at 用 `miloco-cli time-compute --anchor <kind>` 算 |
+| Lifecycle=temporary | `miloco-cli cron add --task-id <id> --kind at --at-iso <expires_at> --name "[<id>] 到期销毁" --message "到期销毁 task <id>" --max-delay 0`（`<expires_at>` 由 `miloco-cli time-compute --anchor <kind>` 直出裸 ISO，`--max-delay 0` 让 termination 无限补跑） |
 
 ## Rule flag 映射
 
@@ -611,18 +611,18 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 
 ## 装配失败回滚
 
-多步执行（task create → record init → cron+link → rule create）任一步失败 → 调 `miloco-cli task delete <task_id> --reason abandoned` 回滚。
+多步执行（task create → record init → cron add → rule create）任一步失败 → 调 `miloco-cli task delete <task_id> --reason abandoned` 回滚。
 
-- backend 一笔事务同步清 task / rule / record / task_link，agent 不重复清
+- backend 一笔事务同步清 task / rule / cron / record（FK CASCADE），agent 不重复清
 - 跑响应里的 `agent_pending`（仅含 cron kind），按顺序逐条 `cron remove`
-- 本 turn 已建但**未挂 task_link** 的 cron jobId → 按本 turn 已知的 jobId 单独 `cron remove`
+- 本 turn 已建但**尚未绑 task**（`cron.task_id=NULL`）的 cron → 按本 turn 已知的 `cron_id` 单独 `cron remove`
 - task create 本身失败 → 无需调 delete
 
 ## 装配示例
 
 > example 展示判据→取值的推导过程，具体取值仅适用其原话场景。每个用户原话独立按 §第一层 / §第二层 判据推。
 
-cron 由 OpenClaw cron tool 创建，拿到 `jobId` 后用 `miloco-cli task link --task <id> --kind cron --ref <jobId>` 挂关联。
+cron / at / termination 均由 `miloco-cli cron add` 单步装配：`--task-id` 直绑 task（backend 强制 `dispatch_owner=internal`，经 `cron.task_id` FK CASCADE），cron 类必带 `--tz "<家庭时区>"`，at 类用 `--at-iso` 传带偏移 ISO（与 `time-compute` 输出、record `expires_at` 同格式）。
 
 ### 例 1
 
@@ -678,12 +678,10 @@ Rule?=N · Schedule?=Y(at) · Record?=N · Lifecycle=temporary
 ```
 
 ```bash
-AT_TIME=$(miloco-cli time-compute --anchor '{"kind":"tomorrow_at","time":"09:00:00"}')
+AT_ISO=$(miloco-cli time-compute --anchor '{"kind":"tomorrow_at","time":"09:00:00"}')
 miloco-cli task create --task-id med_tomorrow_9am --description "明天 9 点提醒吃药"
-
-# 调 OpenClaw cron tool 建 at job：name="[med_tomorrow_9am] 吃药提醒"，at=$AT_TIME，message="提醒用户吃药"
-# → 拿 jobId
-miloco-cli task link --task med_tomorrow_9am --kind cron --ref <jobId>
+miloco-cli cron add --task-id med_tomorrow_9am --kind at --at-iso "$AT_ISO" \
+  --name "[med_tomorrow_9am] 吃药提醒" --message "提醒用户吃药"
 ```
 
 ### 例 4
@@ -712,11 +710,13 @@ miloco-cli task record init drink_8_today \
   --kind progress \
   --content "{\"target\":8,\"unit\":\"杯\",\"window\":\"day\",\"expires_at\":\"$EXPIRES_AT\"}"
 
-# 调 OpenClaw cron 建提醒 cron（喝水无强场景 → 均分 10-20，N=min(8,6)=6 时点）：name="[drink_8_today] 喝水提醒"，expr="0 10,12,14,16,18,20 * * *"，tz="<家庭时区>"（独立字段、必带，见 §Schedule.时区），message="调 miloco-cli task record get drink_8_today，按 derived.remaining 决定是否催"
-miloco-cli task link --task drink_8_today --kind cron --ref <jobId_remind>
+miloco-cli cron add --task-id drink_8_today --kind cron \
+  --name "[drink_8_today] 喝水提醒" \
+  --cron-expr "0 10,12,14,16,18,20 * * *" --tz "<家庭时区>" \
+  --message "调 miloco-cli task record get drink_8_today，按 derived.remaining 决定是否催"
 
-# 调 OpenClaw cron 建到期销毁 at：name="[drink_8_today] 到期销毁"，at=$EXPIRES_AT，message="到期销毁 task drink_8_today"
-miloco-cli task link --task drink_8_today --kind cron --ref <jobId_termination>
+miloco-cli cron add --task-id drink_8_today --kind at --at-iso "$EXPIRES_AT" \
+  --name "[drink_8_today] 到期销毁" --message "到期销毁 task drink_8_today" --max-delay 0
 ```
 
 ### 例 5
@@ -841,7 +841,9 @@ miloco-cli task record init drink_8_daily \
   --kind progress \
   --content '{"target":8,"unit":"杯","window":"day","recurring_pattern":{"window":"day"}}'
 
-# 调 OpenClaw cron 建提醒 cron（喝水无强场景 → 均分 10-20，N=min(8,6)=6 时点）：name="[drink_8_daily] 喝水提醒"，expr="0 10,12,14,16,18,20 * * *"，tz="<家庭时区>"（独立字段、必带，见 §Schedule.时区），message="调 miloco-cli task record get drink_8_daily，按 derived.remaining 决定是否催"
-miloco-cli task link --task drink_8_daily --kind cron --ref <jobId_remind>
+miloco-cli cron add --task-id drink_8_daily --kind cron \
+  --name "[drink_8_daily] 喝水提醒" \
+  --cron-expr "0 10,12,14,16,18,20 * * *" --tz "<家庭时区>" \
+  --message "调 miloco-cli task record get drink_8_daily，按 derived.remaining 决定是否催"
 ```
 

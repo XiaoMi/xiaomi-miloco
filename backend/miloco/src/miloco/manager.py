@@ -103,7 +103,7 @@ class Manager:
                 self._miot_proxy, self._kv_repo
             )
 
-        self._task_service = TaskService()
+        self._task_service = TaskService(rule_service=self._rule_service)
 
         self._initialized = True
 

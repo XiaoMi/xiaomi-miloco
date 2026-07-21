@@ -220,7 +220,13 @@ class ScopeConfigKeys:
 
     HOME_WHITE_LIST_KEY = "HOME_WHITE_LIST_KEY"       # 已启用的家庭 home_id 列表
     CAMERA_BLACK_LIST_KEY = "CAMERA_BLACK_LIST_KEY" # 已停用的摄像头 did 列表
-
+    # 已**开启**「拾音」的摄像头 did 列表（allow-list，opt-in）；不在此集 = 拾音关闭
+    # （**默认关闭**）。默认关是产品决策：现阶段远场拾音/转写质量不稳，默认开会带来
+    # 误报等负体验，故改为用户按场景显式开启（详见前端开启时的知情提示）。
+    # 与 CAMERA_BLACK_LIST_KEY 正交：相机可正常投喂**视频**感知，但只有在本集内的相机
+    # 音频才会被处理（转写 / 语音派生 / 上云）；不在集内 = 引擎入口整批剥离音频。
+    # KV 读取失败时按空集处理（fail-closed：宁可不处理，也不擅自开启未授权相机的音频）。
+    CAMERA_VOICE_ALLOW_LIST_KEY = "CAMERA_VOICE_ALLOW_LIST_KEY"
 
 class OnboardingKeys:
     """主动 onboarding 邀请的一次性标记。

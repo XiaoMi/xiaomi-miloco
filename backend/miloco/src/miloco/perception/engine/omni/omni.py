@@ -14,9 +14,20 @@ import httpx
 
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.omni.circuit_breaker import (
+    CircuitOpenError,
+    get_omni_circuit_breaker,
+)
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
+from miloco.perception.engine.omni.error_classifier import (
+    ClassifiedError,
+    ErrorCategory,
+    classify_exception,
+    classify_response,
+)
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
+    _collect_stream_response,
     call_omni,
     call_omni_stream,
     extract_usage,
@@ -31,6 +42,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_stream_prompt,
     format_person_label,
 )
+from miloco.perception.engine.omni.provider import get_adapter
 from miloco.perception.engine.omni.response_parser import (
     parse_identity_assignments,
     parse_omni_response,
@@ -45,6 +57,7 @@ from miloco.perception.types import MatchedRule, Speech, Suggestion
 
 if TYPE_CHECKING:
     from miloco.perception.engine.identity.engine import IdentityEngine
+    from miloco.perception.engine.omni.provider import OmniProviderAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +83,15 @@ def _rule_name_to_id(context: OmniContext) -> dict[str, str]:
 
     key 必须与 _render_rule_conditions 写进 prompt 的标识一致：rule_name 为空时同样回退
     [rule_id]，否则模型照抄的 [rule_id] 在映射里找不到，命中的 matched_rules 会被静默丢弃。"""
-    return {(rc.rule_name or f"[{rc.rule_id}]"): rc.rule_id for rc in context.rule_conditions}
+    return {
+        (rc.rule_name or f"[{rc.rule_id}]"): rc.rule_id
+        for rc in context.rule_conditions
+    }
 
 
-async def run_omni(edge_packet: IdentityPacket, context: OmniContext, config: OmniConfig) -> OmniOutput:
+async def run_omni(
+    edge_packet: IdentityPacket, context: OmniContext, config: OmniConfig
+) -> OmniOutput:
     """Run Omni layer: build prompt → call model → parse response."""
     payload = build_prompt(edge_packet, context)
     raw_response = await call_omni(payload, config)
@@ -82,7 +100,9 @@ async def run_omni(edge_packet: IdentityPacket, context: OmniContext, config: Om
     return output
 
 
-async def run_omni_batch(edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig) -> OmniOutput:
+async def run_omni_batch(
+    edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig
+) -> OmniOutput:
     """Run Omni layer for multiple devices in the same room."""
     payload = build_batch_prompt(edge_packets, context)
     raw_response = await call_omni(payload, config)
@@ -130,9 +150,16 @@ async def run_omni_fused(
     #                   同角色，纯角色反查会误命中最早遍历到的那个 pid）。
     name_lookup: dict[str, str] = {}
     name_to_pid: dict[str, str] = {}
-    role_counts: Counter[str] = Counter()  # library 全局角色计数，role 唯一性判断的权威来源
+    role_counts: Counter[str] = (
+        Counter()
+    )  # library 全局角色计数，role 唯一性判断的权威来源
+    # 身份库(persons)为空 → 成员匹配不可能，改用精简版 identities prompt（只判 unknown/no_person、
+    # 不做成员匹配，见 field_registry.IDENTITY_NO_MATCH）。仅在 list_persons 成功且确为 0 时置
+    # True；读库异常（下方 except 落到 pass）保持 False，不把一次 IO 抖动误判成"库空"而错误关掉匹配。
+    person_lib_empty = False
     try:
         persons = list(identity_engine.library.list_persons())
+        person_lib_empty = len(persons) == 0
         role_counts = Counter(r.role for r in persons if r.role)
         for ref in persons:
             if ref.name:
@@ -151,6 +178,7 @@ async def run_omni_fused(
     # deliver_fused_failure，否则 mark_dispatched 已置 inflight=True 的 track
     # 永远不会被 GC（_gc_dead_tracks 跳过 inflight）也不会被重新派发
     # （needs_omni_call 返回 False）。
+    adapter = get_adapter(config.model)
     try:
         payload = build_fused_payload(
             packets=edge_packets,
@@ -159,8 +187,10 @@ async def run_omni_fused(
             gallery_snapshot=gallery_snapshot,
             config=fused_prompt_config,
             label_lookup=name_lookup,
+            adapter=adapter,
+            matching_moot=person_lib_empty,
         )
-        raw_response = await _call_omni_messages(payload["messages"], config)
+        raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -178,9 +208,7 @@ async def run_omni_fused(
     # 中途抛异常 → mark_dispatched 已置 inflight=True 的 track 漏清(永不 GC、永不重派,直到进程重启)。
     delivered = False
     try:
-        omni_output = parse_omni_response(
-            raw_response, _rule_name_to_id(context)
-        )
+        omni_output = parse_omni_response(raw_response, _rule_name_to_id(context))
         omni_output.usage = extract_usage(raw_response)
 
         # 抽 identity_assignments 并写回 state（仅当有 candidate 才有意义）
@@ -219,7 +247,9 @@ async def run_omni_fused(
         # deliver_fused_failure 幂等——deliver_response 成功已置 _pending=None → 此处短路 no-op;
         # 仅"有候选 且 未走完 deliver"时才回 on_result(failure)、清 inflight。
         if candidates and not delivered:
-            await identity_engine.deliver_fused_failure("run_omni_fused parse/deliver incomplete")
+            await identity_engine.deliver_fused_failure(
+                "run_omni_fused parse/deliver incomplete"
+            )
 
 
 # fused 模式共享 httpx.AsyncClient（连接池 + keepalive），避免每窗口一次 TLS 握手
@@ -254,7 +284,10 @@ def _get_fused_http_client(timeout: float) -> httpx.AsyncClient:
 
 
 async def _call_omni_messages(
-    messages: list[dict], config: OmniConfig, type: str = "realtime"
+    messages: list[dict],
+    config: OmniConfig,
+    type: str = "realtime",
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict[str, Any]:
     """调 omni——直接传 messages（fused 模式专用）。
 
@@ -264,73 +297,115 @@ async def _call_omni_messages(
     """
     api_key = resolve_api_key(config)
     if not api_key:
-        raise ValueError("MILOCO_MODEL__OMNI__API_KEY is not set; cannot call fused omni")
+        raise ValueError(
+            "MILOCO_MODEL__OMNI__API_KEY is not set; cannot call fused omni"
+        )
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": False,
-        "thinking": {"type": "disabled"},
-    }
+    if adapter is None:
+        adapter = get_adapter(config.model)
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=False,
+    )
+
+    forced_stream = body.get("stream", False)
+    url = adapter.endpoint(config.base_url, config.model, stream=forced_stream)
 
     client = _get_fused_http_client(config.timeout)
+    cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    short_circuited = False
+    headers = {
+        "Content-Type": "application/json",
+        **adapter.auth_headers(api_key),
+        "User-Agent": MILOCO_USER_AGENT,
+    }
     try:
-        resp = await client.post(
-            f"{config.base_url}/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": MILOCO_USER_AGENT,
-            },
-            json=body,
-        )
-        if resp.status_code != 200:
-            logger.error("[omni] omni API 调用失败，错误码=%d | %s", resp.status_code, resp.text[:500])
-            # 400 通常是 multimodal payload 服务端拒收 (corrupted image/video)。
-            # 静态从 traceback 无法定位是哪个块出问题, 这里输出每个多模态块的尺寸
-            # summary (不打 base64 本身, 仅尺寸) 便于事后定位。仅 400 路径打, 不影响
-            # 常态 log 量。
-            if resp.status_code == 400:
+        await cb.before_call()
+        if not forced_stream:
+            resp = await client.post(url, headers=headers, json=body)
+            classified = classify_response(resp)
+            if classified is not None:
+                await cb.record_failure(classified)
                 logger.error(
-                    "[omni] omni 400 payload 摘要 | %s",
-                    _summarize_multimodal_payload(messages),
+                    "[omni] omni API 调用失败，错误码=%d | %s",
+                    resp.status_code,
+                    resp.text[:500],
                 )
-        resp.raise_for_status()
-        raw = resp.json()
+                if resp.status_code == 400:
+                    logger.error(
+                        "[omni] omni 400 payload 摘要 | %s",
+                        _summarize_multimodal_payload(messages),
+                    )
+                resp.raise_for_status()
+            raw = adapter.parse_response(resp.json())
+        else:
+            # forced-stream (Qwen 等 adapter 强制 stream=True) 走 _collect_stream_response,
+            # 内部对非 200 直接 raise_for_status → HTTPStatusError。下方 except 守卫
+            # `not isinstance(e, HTTPStatusError)` 会跳过 record_failure(防非流路径双重
+            # 计数),导致 forced-stream 路径的 4xx/5xx 熔断器完全看不到。此处显式补一次
+            # classify + record_failure 后再抛,与非流路径行为对齐。
+            try:
+                raw = await _collect_stream_response(
+                    client, url, headers, body, adapter
+                )
+            except httpx.HTTPStatusError as e:
+                classified = classify_response(e.response)
+                if classified is not None:
+                    await cb.record_failure(classified)
+                    logger.error(
+                        "[omni] omni API 调用失败(stream)，错误码=%d | %s",
+                        e.response.status_code,
+                        e.response.text[:500],
+                    )
+                raise
         # 服务端在 fused 大 payload 下偶发返回非 dict body (~1.5%);此处校验
         # 形态并 dump 截断后的原始响应,便于事后定位服务端返回了什么。
         if not isinstance(raw, dict):
-            logger.error(
-                "[omni-fused] unexpected response shape | status=%d type=%s body=%s",
-                resp.status_code,
-                type(raw).__name__,
-                resp.text[:1000],
+            raw_cls = raw.__class__.__name__
+            detail = f"type={raw_cls} body={str(raw)[:1000]}"
+            if not forced_stream:
+                detail = f"status={resp.status_code} {detail}"
+            logger.error("[omni-fused] unexpected response shape | %s", detail)
+            await cb.record_failure(
+                ClassifiedError(
+                    "bad_response",
+                    f"non-dict body ({raw_cls})",
+                    ErrorCategory.RECOVERABLE,
+                )
             )
-            raise OmniError(
-                f"omni response is not a dict (got {type(raw).__name__})"
-            )
+            raise OmniError(f"omni response is not a dict (got {raw_cls})")
+        await cb.record_success()
         fire_record(config.model, raw.get("usage", {}), type)
         return raw
+    except CircuitOpenError as ce:
+        short_circuited = True
+        error = {"code": ce.code, "msg": ce.message[:512]}
+        raise OmniError(
+            f"_call_omni_messages short-circuited: {ce.message}", original=ce
+        ) from ce
     except OmniError:
         raise
     except Exception as e:
+        if not isinstance(e, httpx.HTTPStatusError):
+            await cb.record_failure(classify_exception(e))
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
             f"_call_omni_messages failed: {e.__class__.__name__}: {e}",
             original=e,
         ) from e
     finally:
-        # 跟 call_omni / call_omni_stream 口径一致:推 omni trace 到当前 event artifacts.
+        latency_ms = 0.0 if short_circuited else (time.monotonic() - t0) * 1000
         push_omni_trace(
             request_messages=messages,
             response_raw=raw,
-            latency_ms=(time.monotonic() - t0) * 1000,
+            latency_ms=latency_ms,
             error=error,
             model=config.model,
             inference_params={
@@ -396,13 +471,18 @@ async def run_omni_stream(
     context: OmniContext,
     config: OmniConfig,
     on_early_speeches: Callable[[list[Speech]], Awaitable[None]] | None = None,
-    on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]] | None = None,
+    on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]]
+    | None = None,
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
 ) -> OmniOutput:
     """Run Omni layer with streaming — extracts actionable fields early via callbacks."""
     payload = build_stream_prompt(edge_packet, context)
     return await _stream_and_parse(
-        payload, config, on_early_speeches, on_early_matched_rules, on_early_suggestions,
+        payload,
+        config,
+        on_early_speeches,
+        on_early_matched_rules,
+        on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
     )
 
@@ -412,13 +492,18 @@ async def run_omni_batch_stream(
     context: OmniContext,
     config: OmniConfig,
     on_early_speeches: Callable[[list[Speech]], Awaitable[None]] | None = None,
-    on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]] | None = None,
+    on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]]
+    | None = None,
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
 ) -> OmniOutput:
     """Run Omni layer for multiple devices with streaming — extracts actionable fields early."""
     payload = build_batch_stream_prompt(edge_packets, context)
     return await _stream_and_parse(
-        payload, config, on_early_speeches, on_early_matched_rules, on_early_suggestions,
+        payload,
+        config,
+        on_early_speeches,
+        on_early_matched_rules,
+        on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
     )
 

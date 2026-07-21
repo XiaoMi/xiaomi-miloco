@@ -21,12 +21,15 @@ import {
   resumePerception,
   setFeatures,
   toggleScopeCamera,
+  toggleScopeCameraVoice,
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
 import type { Pet, Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
+import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
+import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
@@ -37,7 +40,7 @@ import { PetDrawer } from "./components/PetDrawer";
 import { PetProfilePanel } from "./components/PetProfilePanel";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
-import { TaskListPanel } from "./components/TaskListPanel";
+import { TasksPage } from "./components/TasksPage";
 import { CandidateReviewPanel } from "./components/CandidateReviewPanel";
 import { MiotBindDialog } from "./components/MiotBindDialog";
 import { ToastHost, toast } from "./components/Toast";
@@ -171,6 +174,7 @@ function MainApp() {
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
   const [activeTab, setActiveTab] = useState<TabKey>("now");
+  // 活动 tab 现为单流(事件 + 动作合并);筛选 checkbox 在 ActivityFeed 内部,不占 App state。
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
     undefined,
   );
@@ -183,6 +187,7 @@ function MainApp() {
   const [selectedPetId, setSelectedPetId] = useState<string | null>(null);
   const [editingPet, setEditingPet] = useState<Pet | null | undefined>(undefined);
   const [miotBindOpen, setMiotBindOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // 米家家庭名直接走 backend `/api/miot/home::home_name`，米家给啥前端就显啥；
   // 未绑或 backend 没返时**不渲染** HomeSwitcher（未登录提示由头像 button 承担，
@@ -223,7 +228,6 @@ function MainApp() {
               persons={persons.data}
               pets={pets.data}
               petsEnabled={features.data?.petRecognition ?? false}
-              cameras={cameras.data}
               scopeCameras={scopeCameras.data}
               miotHasCamera={devices.data.some(
                 (d) => d.category === "camera",
@@ -251,6 +255,26 @@ function MainApp() {
                 scopeCameras.reload();
                 cameras.reload();
                 status.reload();
+              }}
+              onToggleCameraVoice={async (did, voiceInUse) => {
+                try {
+                  await toggleScopeCameraVoice([did], voiceInUse);
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("common.switchFailed"),
+                    "warn",
+                  );
+                }
+                // 拾音开关只改 KV 偏好,不动投喂/流(音频在引擎入口按 KV 实时剥离),
+                // 只需 reload scopeCameras 拿新 voiceInUse。
+                scopeCameras.reload();
+              }}
+              onRefresh={async () => {
+                // 手动刷新:force 绕过 8s 节流打后端刷相机状态,再 await 列表重拉落地——
+                // reload() 的 Promise 在 listScopeCameras settle 后 resolve,故 onRefresh 完成
+                // = 列表已更新到位,刷新按钮转圈据此精确覆盖全程(不被其他 reload 借用)。
+                await refreshCameraOnline(homeId, true).catch(() => {});
+                await scopeCameras.reload();
               }}
             />
           </div>
@@ -368,11 +392,6 @@ function MainApp() {
               loading={home.loading}
               onChanged={() => home.reload()}
             />
-            <TaskListPanel
-              tasks={tasks.data}
-              loading={tasks.loading}
-              onChanged={() => tasks.reload()}
-            />
             <CandidateReviewPanel
               data={home.data}
               onChanged={() => home.reload()}
@@ -380,21 +399,37 @@ function MainApp() {
           </div>
         );
       }
-      case "activity": {
-        if (activity.error) {
+      case "tasks":
+        if (tasks.error) {
           return (
             <TabPanelError
-              message={t("app.tabActivityError", { msg: activity.error.message })}
-              onRetry={() => activity.reload()}
+              message={t("app.tabTasksError", { msg: tasks.error.message })}
+              onRetry={() => tasks.reload()}
             />
           );
         }
-        if (!activity.data) {
-          return <TabPanelLoading text={t("app.tabActivityLoading")} />;
-        }
+        return (
+          <TasksPage
+            tasks={tasks.data}
+            loading={tasks.loading}
+            onChanged={() => tasks.reload()}
+          />
+        );
+      case "activity": {
+        // 单流:事件 + 动作合并,筛选 checkbox 在 ActivityFeed 内部。**无条件挂载**
+        // ActivityFeed——动作流走 /api/actions 组件内独立拉,不再被事件流(/api/events)的
+        // 加载/错误态阻断(修 Zirconi review:此前 gate 在 activity.data 上,事件慢/失败时
+        // 动作根本不请求)。事件的加载/失败以内联提示呈现在组件内,不挡动作流。
         return (
           <div className="space-y-6">
-            <ActivityFeed events={activity.data} homeId={homeId} />
+            <ActivityFeed
+              events={activity.data ?? []}
+              homeId={homeId}
+              activeHomeId={(scopeHomes.data ?? []).find((h) => h.inUse)?.homeId}
+              eventsLoading={activity.loading}
+              eventsError={activity.error}
+              onRetryEvents={() => activity.reload()}
+            />
           </div>
         );
       }
@@ -412,6 +447,7 @@ function MainApp() {
         miot={status.data?.miot}
         onOpenMiotBind={() => setMiotBindOpen(true)}
         onMiotChanged={() => window.location.reload()}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       {/* 主区:固定高度 + flex-col,TopBar/StatusRibbon 顶在上面,只 main 区滚 */}
@@ -454,6 +490,9 @@ function MainApp() {
             window.location.reload();
           }}
         />
+
+        {/* omni 熔断器告警条(shrink-0):非 ok 时才渲染 */}
+        <OmniHealthBanner onGoToConfig={() => setActiveTab("usage")} />
 
         {/* 状态条(shrink-0) */}
         {status.data && (
@@ -530,6 +569,7 @@ function MainApp() {
             miot={status.data?.miot}
             onOpenMiotBind={() => setMiotBindOpen(true)}
             onMiotChanged={() => window.location.reload()}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
         </div>
       </div>
@@ -580,6 +620,8 @@ function MainApp() {
           window.location.reload();
         }}
       />
+
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       <ToastHost />
     </div>

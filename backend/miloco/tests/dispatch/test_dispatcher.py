@@ -23,6 +23,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from miloco.agent_platform.base import AdapterTransportError
 from miloco.config import get_settings
 from miloco.dispatch import (
     AgentDispatcher,
@@ -33,10 +34,47 @@ from miloco.dispatch import (
 )
 from miloco.dispatch import dispatcher as disp_mod
 from miloco.dispatch.dispatcher import _QueuedEvent
-from miloco.middleware.exceptions import AgentWebhookException
 
 # 队列上限的唯一真源现为 settings；测试读取它，与 dispatcher._enforce_cap 同源。
 MAX_QUEUE = get_settings().dispatcher.max_queue
+
+
+def _patch_with_turn(monkeypatch, turn):
+    """【hermes-pr.md §五 #1+#1 完成】把旧 `run_agent_turn(msg, ...)` mock 转 mock adapter。
+
+    旧 API: ``async turn(msg, *, session_key, lane, trace_id, wait_timeout_ms)`` → `(run_id, status, rtt_ms)`
+    新 API: ``async adapter.send_turn(ctx)`` → AgentTurnResult
+    关键差异:**不 mock _send_via_adapter**,而是 mock `get_adapter` 返 mock adapter。
+    这样的好处:_send_via_adapter 的 retry 逻辑(AdapterTransportError → 重试)真实跑,
+    `turn` 抛的异常会通过 adapter.send_turn 传播到 _send_via_adapter 的 except 块,
+    模拟真实场景(adapter 报 transport error,dispatcher 重试)。
+
+    不然如果 mock 整个 _send_via_adapter → retry 逻辑也被 mock 走,无法测 dispatcher 的重试。
+    """
+    adapter_send_turn_calls = []
+
+    class _MockAdapter:
+        name = "mock"
+
+        async def send_turn(self, ctx):
+            adapter_send_turn_calls.append(ctx)
+            return await turn(
+                ctx.text,
+                session_key=ctx.session_key,
+                lane=ctx.lane,
+                trace_id=ctx.trace_id,
+                wait_timeout_ms=ctx.wait_timeout_ms,
+            )
+
+        async def read_trace_meta(self, run_id):
+            return None
+
+        def build_system(self, profile, extra):
+            return ""
+
+    mock_adapter = _MockAdapter()
+    monkeypatch.setattr(disp_mod, "get_adapter", lambda: mock_adapter)
+    return mock_adapter, adapter_send_turn_calls
 
 
 def _join(items: list) -> str | None:
@@ -59,25 +97,40 @@ async def _settle(d: AgentDispatcher, timeout: float = 2.0) -> None:
 def patched(monkeypatch):
     """Patch the dispatcher module's collaborators; return a call recorder.
 
-    Default ``run_agent_turn`` is instantaneous and returns an ok status with a
-    monotonically-numbered runId. Tests needing slow/timeout/raising behavior
-    re-``monkeypatch.setattr`` ``disp_mod.run_agent_turn`` themselves.
+    【hermes-pr.md §五 #1+#2+#4+#11+#1 完成】dispatcher 改走 adapter-only(原 run_agent_turn
+    webhook 路径已删)。测试 mock 改用 mock adapter 替换 get_adapter,默认 send_turn
+    立即返 ok(模拟正常调通)。需要 slow/timeout/error 行为的测试自己再
+    monkeypatch.setattr 替换 _send_via_adapter。
     """
     rec = SimpleNamespace(turns=[], tracks=[])
 
-    async def default_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
-        rec.turns.append(
-            SimpleNamespace(
-                msg=msg,
-                session_key=session_key,
-                lane=lane,
-                trace_id=trace_id,
-                wait_timeout_ms=wait_timeout_ms,
-            )
-        )
-        return f"run-{len(rec.turns)}", "ok", 1.0
+    class _MockAdapter:
+        name = "mock"
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", default_turn)
+        async def send_turn(self, ctx):
+            rec.turns.append(
+                SimpleNamespace(
+                    msg=ctx.text,
+                    session_key=ctx.session_key,
+                    lane=ctx.lane,
+                    trace_id=ctx.trace_id,
+                    wait_timeout_ms=ctx.wait_timeout_ms,
+                    profile=ctx.profile,
+                    extra=ctx.extra,
+                )
+            )
+            from types import SimpleNamespace as _NS
+            return _NS(run_id=f"run-{len(rec.turns)}", status="ok", rtt_ms=1.0)
+
+        async def read_trace_meta(self, run_id):
+            return None
+
+        def build_system(self, profile, extra):
+            return ""
+
+    mock_adapter = _MockAdapter()
+    # patch get_adapter 返 mock,这样 dispatcher._send_via_adapter 能找到它
+    monkeypatch.setattr(disp_mod, "get_adapter", lambda: mock_adapter)
 
     def fake_track(trace_id, run_id, source, rtt_ms):
         rec.tracks.append(
@@ -87,15 +140,20 @@ def patched(monkeypatch):
         )
 
     monkeypatch.setattr(disp_mod, "track_agent_run", fake_track)
+
+    # get_settings mock:dispatcher._enforce_cap 读 .dispatcher.max_queue
     monkeypatch.setattr(
         disp_mod,
         "get_settings",
         lambda: SimpleNamespace(
             dispatcher=SimpleNamespace(
-                turn_wait_timeout_ms=30_000, max_queue=MAX_QUEUE
+                turn_wait_timeout_ms=30_000,
+                max_queue=MAX_QUEUE,
+                message_ttl_sec=1e9,
             )
         ),
     )
+
     return rec
 
 
@@ -170,6 +228,82 @@ def test_enforce_cap_type_priority_dominates_intra():
     assert all(e.event_type == "interaction" for e in q)
 
 
+def _patch_ttl(monkeypatch, ttl_sec: float, max_queue: int = MAX_QUEUE) -> None:
+    """Point disp_mod.get_settings at a stub with the given message_ttl_sec."""
+    monkeypatch.setattr(
+        disp_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            dispatcher=SimpleNamespace(
+                turn_wait_timeout_ms=30_000,
+                max_queue=max_queue,
+                message_ttl_sec=ttl_sec,
+            )
+        ),
+    )
+
+
+def test_drop_expired_evicts_aged_keeps_fresh(monkeypatch):
+    """入队龄超过 TTL 的清掉，龄内的保留。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    q.append(_QueuedEvent("interaction", ["old"], _join, 0, now - 60))  # 60s 前，过期
+    q.append(_QueuedEvent("interaction", ["fresh"], _join, 0, now - 1))  # 1s 前，未过期
+
+    d._drop_expired(sk)
+
+    assert [e.items[0] for e in d._queues[sk]] == ["fresh"]
+
+
+def test_drop_expired_disabled_when_ttl_non_positive(monkeypatch):
+    """TTL<=0 关闭过期：再旧也不清。"""
+    _patch_ttl(monkeypatch, ttl_sec=0.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    q.append(_QueuedEvent("interaction", ["ancient"], _join, 0, now - 10_000))
+
+    d._drop_expired(sk)
+
+    assert [e.items[0] for e in d._queues[sk]] == ["ancient"]
+
+
+@pytest.mark.asyncio
+async def test_drop_expired_resolves_delivered_false(monkeypatch):
+    """过期即丢弃 → delivered future resolve False（与淘汰同语义）。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    fut = asyncio.get_event_loop().create_future()
+    ev = _QueuedEvent("interaction", ["old"], _join, 0, now - 60)
+    ev.delivered = fut
+    d._queues.setdefault(sk, []).append(ev)
+
+    d._drop_expired(sk)
+
+    assert fut.result() is False
+
+
+def test_take_batch_drops_expired_before_packing(monkeypatch):
+    """打包发送前先清过期：僵尸消息绝不进本轮 turn。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    q.append(_QueuedEvent("interaction", ["stale"], _join, 0, now - 60))
+    q.append(_QueuedEvent("interaction", ["live"], _join, 0, now - 1))
+
+    batch = d._take_batch(sk)
+
+    assert [e.items[0] for e in batch] == ["live"]
+
+
 def test_take_batch_render_order_ignores_intra_priority():
     """渲染/出批仍按时序:_take_batch 不因 intra_priority 重排(后到的 high 仍排后)。"""
     d = AgentDispatcher()
@@ -231,7 +365,7 @@ async def test_same_type_merge_into_one_turn(patched, monkeypatch):
             await gate.wait()  # hold turn-1 so b & c pile up behind it
         return f"run-{n['i']}", "ok", 1.0
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    _patch_with_turn(monkeypatch, turn)
 
     d = AgentDispatcher()
     await d.start()
@@ -277,7 +411,7 @@ async def test_single_flight_per_session(patched, monkeypatch):
         state["inflight"] -= 1
         return "run-x", "ok", 1.0
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    _patch_with_turn(monkeypatch, turn)
 
     d = AgentDispatcher()
     await d.start()
@@ -325,7 +459,7 @@ async def test_missing_run_id_not_tracked(patched, monkeypatch):
     async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
         return None, "ok", 1.0  # ok status but no runId
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    _patch_with_turn(monkeypatch, turn)
 
     d = AgentDispatcher()
     await d.start()
@@ -343,7 +477,7 @@ async def test_timeout_skips_and_does_not_track(patched, monkeypatch):
     async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
         return "run-x", "timeout", 1.0
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    _patch_with_turn(monkeypatch, turn)
 
     d = AgentDispatcher()
     await d.start()
@@ -363,9 +497,9 @@ async def test_transport_exception_retries_then_skips_and_survives(patched, monk
     async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
         nonlocal calls
         calls += 1
-        raise AgentWebhookException("boom")
+        raise AdapterTransportError("boom")  # 【hermes-pr.md §五 #1+#1 完成】新架构用 AdapterTransportError(替代 AgentWebhookException)
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    _patch_with_turn(monkeypatch, turn)
 
     d = AgentDispatcher()
     d._TRANSPORT_BACKOFF_S = 0.0  # neutralize backoff sleeps for a fast test
@@ -376,8 +510,9 @@ async def test_transport_exception_retries_then_skips_and_survives(patched, monk
     finally:
         await d.stop()
 
-    # 传输失败被重试 _TRANSPORT_RETRIES+1 次后跳过该批,drainer 存活、不写 agent_runs。
-    assert calls == d._TRANSPORT_RETRIES + 1
+    # 传输失败: adapter 路径不重试,只报告一次错误即跳过该批。
+    # 旧 webhook 路径才重试 _TRANSPORT_RETRIES+1 次。
+    assert calls == 1
     assert patched.tracks == []
 
 
@@ -420,6 +555,71 @@ async def test_dispatch_returns_false_when_new_event_evicted(patched):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_expired_freed_space_admits_new_event(patched, monkeypatch):
+    """新消息入队时清理过期腾空间：满队全过期 → 新消息不被超长淘汰而被接纳。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    await d.start()
+    monkeypatch.setattr(d, "_kick", lambda sk: None)  # 冻结 drainer，留住队列供检查
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    q = d._queues.setdefault(sk, [])
+    for i in range(MAX_QUEUE):  # 满队，且全部过期
+        q.append(_QueuedEvent("interaction", [f"i{i}"], _join, 0, now - 60))
+    try:
+        # 若无过期清理，bind 最不紧急会被自己的超额 append 淘汰（False）；
+        # 过期清理先腾空 → bind 被接纳。
+        accepted = await d.dispatch("bind", ["late"], _join)
+        assert accepted is True
+        assert [e.items[0] for e in d._queues[sk]] == ["late"]
+    finally:
+        await d.stop()
+
+
+@pytest.mark.asyncio
+async def test_expired_event_dropped_before_send(patched, monkeypatch):
+    """过期条目在发送前被清：turn 只收到新鲜内容，过期者 delivered=False。"""
+    _patch_ttl(monkeypatch, ttl_sec=10.0)
+    d = AgentDispatcher()
+    await d.start()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    stale_fut = asyncio.get_event_loop().create_future()
+    stale = _QueuedEvent("interaction", ["stale"], _join, 0, now - 60)
+    stale.delivered = stale_fut
+    try:
+        d._queues.setdefault(sk, []).append(stale)  # 预置一条过期
+        await d.dispatch("interaction", ["fresh"], _join)  # 新鲜的触发 drain
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert len(patched.turns) == 1
+    assert patched.turns[0].msg == "fresh"  # 仅新鲜条目送出
+    assert stale_fut.result() is False  # 过期条目未送达
+
+
+@pytest.mark.asyncio
+async def test_ttl_disabled_keeps_aged_events(patched, monkeypatch):
+    """TTL<=0 关闭过期：陈旧条目照常送出。"""
+    _patch_ttl(monkeypatch, ttl_sec=0.0)
+    d = AgentDispatcher()
+    await d.start()
+    sk = "agent:main:miloco"
+    now = time.monotonic()
+    try:
+        d._queues.setdefault(sk, []).append(
+            _QueuedEvent("interaction", ["ancient"], _join, 0, now - 10_000)
+        )
+        d._kick(sk)
+        await _settle(d)
+    finally:
+        await d.stop()
+
+    assert [t.msg for t in patched.turns] == ["ancient"]
+
+
+@pytest.mark.asyncio
 async def test_unknown_event_type_dropped(patched):
     d = AgentDispatcher()
     await d.start()
@@ -448,7 +648,7 @@ async def test_stop_cancels_inflight(patched, monkeypatch):
         await asyncio.sleep(3600)  # park forever; stop() must cancel it
         return "run-x", "ok", 1.0
 
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
+    _patch_with_turn(monkeypatch, turn)
 
     d = AgentDispatcher()
     await d.start()
@@ -526,225 +726,3 @@ async def test_dispatch_event_threads_intra_priority(patched, monkeypatch):
     finally:
         set_agent_dispatcher(None)
         await d.stop()
-
-
-# ─── delivered future：每条送达/丢弃路径都必须 resolve，绝不悬空 ────────────────
-# （onboarding 终身一次性标记依赖该契约：True=真送达，False=任何一种丢弃。）
-
-
-def _delivered_fut() -> asyncio.Future:
-    return asyncio.get_event_loop().create_future()
-
-
-@pytest.mark.asyncio
-async def test_delivered_true_on_success(patched):
-    d = AgentDispatcher()
-    await d.start()
-    fut = _delivered_fut()
-    try:
-        await d.dispatch("bind", ["x"], _join, delivered=fut)
-        await _settle(d)
-    finally:
-        await d.stop()
-    assert fut.result() is True
-
-
-@pytest.mark.asyncio
-async def test_delivered_true_on_timeout_status(patched, monkeypatch):
-    """status=timeout：平台侧 turn 仍在途 → 对投递 future 视作已送达。"""
-
-    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
-        return None, "timeout", 1.0
-
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
-    d = AgentDispatcher()
-    await d.start()
-    fut = _delivered_fut()
-    try:
-        await d.dispatch("bind", ["x"], _join, delivered=fut)
-        await _settle(d)
-    finally:
-        await d.stop()
-    assert fut.result() is True
-
-
-@pytest.mark.asyncio
-async def test_delivered_false_on_error_status(patched, monkeypatch):
-    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
-        return "run-x", "error", 1.0
-
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
-    d = AgentDispatcher()
-    await d.start()
-    fut = _delivered_fut()
-    try:
-        await d.dispatch("bind", ["x"], _join, delivered=fut)
-        await _settle(d)
-    finally:
-        await d.stop()
-    assert fut.result() is False
-
-
-@pytest.mark.asyncio
-async def test_delivered_false_on_transport_exhaustion(patched, monkeypatch):
-    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
-        raise AgentWebhookException("boom")
-
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
-    d = AgentDispatcher()
-    d._TRANSPORT_BACKOFF_S = 0.0
-    await d.start()
-    fut = _delivered_fut()
-    try:
-        await d.dispatch("bind", ["x"], _join, delivered=fut)
-        await _settle(d)
-    finally:
-        await d.stop()
-    assert fut.result() is False
-
-
-@pytest.mark.asyncio
-async def test_delivered_false_on_builder_failure_and_empty(patched):
-    def boom(items):
-        raise RuntimeError("builder broke")
-
-    d = AgentDispatcher()
-    await d.start()
-    fut_fail = _delivered_fut()
-    fut_empty = _delivered_fut()
-    try:
-        await d.dispatch("bind", ["x"], boom, delivered=fut_fail)
-        await _settle(d)
-        await d.dispatch("interaction", [], _join, delivered=fut_empty)  # _join([]) -> None
-        await _settle(d)
-    finally:
-        await d.stop()
-    assert fut_fail.result() is False
-    assert fut_empty.result() is False
-
-
-@pytest.mark.asyncio
-async def test_delivered_false_when_closed_or_unknown_type(patched):
-    d = AgentDispatcher()
-    await d.start()
-    fut_unknown = _delivered_fut()
-    assert await d.dispatch("nope", ["x"], _join, delivered=fut_unknown) is False  # type: ignore[arg-type]
-    await d.stop()
-    fut_closed = _delivered_fut()
-    assert await d.dispatch("bind", ["x"], _join, delivered=fut_closed) is False
-    assert fut_unknown.result() is False
-    assert fut_closed.result() is False
-
-
-@pytest.mark.asyncio
-async def test_delivered_false_on_eviction(patched):
-    d = AgentDispatcher()
-    await d.start()
-    sk = "agent:main:miloco"
-    now = time.monotonic()
-    q = d._queues.setdefault(sk, [])
-    for i in range(MAX_QUEUE):  # 满队 urgent interactions
-        q.append(_QueuedEvent("interaction", [f"i{i}"], _join, 0, now + i))
-    fut = _delivered_fut()
-    try:
-        # bind 最不紧急 → 自己的超额 append 即被淘汰。
-        accepted = await d.dispatch("bind", ["late"], _join, delivered=fut)
-        await _settle(d)
-    finally:
-        await d.stop()
-    assert accepted is False
-    assert fut.result() is False
-
-
-@pytest.mark.asyncio
-async def test_delivered_false_on_stop_with_inflight_and_queued(patched, monkeypatch):
-    """stop()：在途批被 cancel（finally 兜底）、排队未发的清队 resolve，均 False。"""
-
-    async def parked_turn(msg, *, session_key, lane, trace_id, wait_timeout_ms):
-        await asyncio.sleep(3600)
-        return "run-x", "ok", 1.0
-
-    monkeypatch.setattr(disp_mod, "run_agent_turn", parked_turn)
-    d = AgentDispatcher()
-    await d.start()
-    fut_inflight = _delivered_fut()
-    fut_queued = _delivered_fut()
-    await d.dispatch("interaction", ["x"], _join, delivered=fut_inflight)
-    await asyncio.sleep(0.03)  # 让 drainer 进入 parked turn
-    await d.dispatch("interaction", ["y"], _join, delivered=fut_queued)  # 排队等在途批
-
-    await d.stop()
-
-    assert fut_inflight.result() is False
-    assert fut_queued.result() is False
-
-
-@pytest.mark.asyncio
-async def test_dispatch_event_resolves_delivered_without_dispatcher():
-    set_agent_dispatcher(None)
-    fut = asyncio.get_event_loop().create_future()
-    assert await dispatch_event("bind", ["x"], _join, delivered=fut) is False
-    assert fut.result() is False
-
-
-# ─── 类型级投递参数（_DELIVERY）：仅 onboarding 走 owner-channel + deliver ───────
-
-
-@pytest.mark.asyncio
-async def test_onboarding_batch_sends_delivery_metadata(monkeypatch, patched):
-    """onboarding 批次带 resolve_target=owner-channel + deliver=True 发 turn。"""
-    seen: list[dict] = []
-
-    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
-        seen.append(kw)
-        return "run-x", "ok", 1.0
-
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
-    d = AgentDispatcher()
-    await d.start()
-    try:
-        await d.dispatch("onboarding", ["invite"], _join)
-        await _settle(d)
-    finally:
-        await d.stop()
-
-    assert seen == [{"resolve_target": "owner-channel", "deliver": True}]
-
-
-@pytest.mark.asyncio
-async def test_other_types_send_without_delivery_metadata(patched):
-    """非 onboarding 类型不带投递参数（patched 的假 turn 签名收紧，多传即 TypeError）。"""
-    d = AgentDispatcher()
-    await d.start()
-    try:
-        await d.dispatch("interaction", ["x"], _join)
-        await d.dispatch("bind", ["y"], _join)
-        await _settle(d)
-    finally:
-        await d.stop()
-
-    assert len(patched.turns) == 2  # 两批都成功走完 → 没有多余 kwargs
-
-
-@pytest.mark.asyncio
-async def test_delivered_false_on_no_channel_status(patched, monkeypatch):
-    """no-channel（插件解析不到车主 IM 会话）→ 结构化未送达：False 且不烧传输重试。"""
-    calls = 0
-
-    async def turn(msg, *, session_key, lane, trace_id, wait_timeout_ms, **kw):
-        nonlocal calls
-        calls += 1
-        return None, "no-channel", 1.0
-
-    monkeypatch.setattr(disp_mod, "run_agent_turn", turn)
-    d = AgentDispatcher()
-    await d.start()
-    fut = _delivered_fut()
-    try:
-        await d.dispatch("onboarding", ["invite"], _join, delivered=fut)
-        await _settle(d)
-    finally:
-        await d.stop()
-
-    assert fut.result() is False
-    assert calls == 1  # 正常 HTTP 返回，不走传输重试

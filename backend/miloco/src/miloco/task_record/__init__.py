@@ -24,7 +24,6 @@ from miloco.task_record.schema import (
     RecordPatchRequest,
     RecordStatus,
     SessionAtRequest,
-    TaskLinkRequest,
     TerminateReason,
 )
 from miloco.task_record.service import (
@@ -53,7 +52,6 @@ __all__ = [
     "RecordStatus",
     "RecordWrongKindError",
     "SessionAtRequest",
-    "TaskLinkRequest",
     "TaskNotFoundError",
     "TaskRecordService",
     "TerminateReason",

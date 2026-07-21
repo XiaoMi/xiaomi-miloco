@@ -9,7 +9,7 @@
     "allowConversationAccess": true
   },
   "contracts": {
-    "tools": ["miloco_im_push", "miloco_notify_bind", "miloco_habit_suggest"]
+    "tools": ["miloco_im_push", "miloco_notify_bind", "miloco_notify_unbind", "miloco_habit_suggest"]
   },
   "skills": ["./skills"],
   "configSchema": {
@@ -33,9 +33,16 @@
         "type": "string",
         "description": "多模态模型 API Key：覆盖 config.json model.omni.api_key"
       },
+      "notifySessionKeys": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "通知目标 sessionKey 列表：指定接收 miloco 通知的 IM channel sessions"
+      },
       "notifySessionKey": {
         "type": "string",
-        "description": "通知目标 sessionKey：指定接收 miloco 通知的 IM channel session"
+        "description": "【兼容旧配置】单个通知目标 sessionKey：指定接收 miloco 通知的 IM channel session"
       }
     }
   },
@@ -56,9 +63,13 @@
       "label": "多模态模型 API Key",
       "help": "留空则使用 ~/.openclaw/miloco/config.json model.omni.api_key。"
     },
+    "notifySessionKeys": {
+      "label": "通知目标 Channels",
+      "help": "指定接收 miloco 通知的 IM channel session keys。留空则自动选择最近活跃的 channel。"
+    },
     "notifySessionKey": {
-      "label": "通知目标 Channel",
-      "help": "指定接收 miloco 通知的 IM channel session key。留空则自动选择最近活跃的 channel。"
+      "label": "通知目标 Channel（旧）",
+      "help": "兼容旧配置的单个 IM channel session key；读取时会自动并入新列表配置。"
     }
   }
 }

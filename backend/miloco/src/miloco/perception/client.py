@@ -17,7 +17,6 @@ import json
 import logging
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
@@ -37,6 +36,7 @@ from miloco.perception.event_text_builder import (
     build_suggestions_text,
     caption_for_dids,
 )
+from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.schema import PerceptionBatch
 from miloco.perception.snapshot_context import (
     ClipKind,
@@ -78,6 +78,47 @@ logger = logging.getLogger(__name__)
 # 模块级强引用持有 _persist_meaningful_event 后台任务,防 asyncio 只持弱引用导致
 # 任务运行中被 GC 回收(CPython 文档明确警告).done_callback 在任务结束时自动 discard.
 _PERSIST_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
+    """按摄像头「拾音白名单」过滤 speech：``source_device_ids[0]``(相机 did)在
+    白名单里(拾音已开启)的放行,其余丢弃。**默认关**:不在白名单 = 拾音关闭。
+    实时读 KV(进程内缓存),改开关即时生效、无需重启感知引擎。
+
+    分层防线:**第一道**在引擎入口——``engine/api.py::_strip_unauthorized_voice_audio``
+    对未开启拾音的相机整批剥离音频(不进 gate/omni,不转写、无语音派生 suggestion、
+    不烧音频 token),正常情况下这些相机的 speech 根本不会产生。本函数是**第二道**
+    (引擎入口剥离失效 / 旧窗口残留时兜底),两个执法点:① 语音指令 dispatch(早出
+    _on_early_speeches + 终态 handle_realtime_perception_result);
+    ② meaningful_events 落库/SSE(_persist_meaningful_event 在 classify 前过滤)
+    ——拾音关闭 = 不执行也不记录转写。
+    规则匹配及 caption / suggestion 等视觉产物不经此函数,不受影响。读 KV 失败时
+    **fail-closed**(丢弃全部语音):默认关语义下,宁可漏掉一次语音,也不处理用户
+    未授权相机的音频。
+    """
+    from miloco.manager import get_manager
+    from miloco.miot.filter import voice_allowed_camera_dids
+    from miloco.perception.collect.camera_adapter import split_channel_did
+
+    try:
+        voice_allowed = voice_allowed_camera_dids(get_manager().kv_repo)
+    except Exception as e:
+        logger.warning("voice allow-list lookup failed, dropping all speeches (fail-closed): %s", e)
+        return []
+    kept: list[Speech] = []
+    for s in speeches:
+        did = s.source_device_ids[0] if s.source_device_ids else None
+        # 白名单存物理 did（整台相机）；source_device_ids 是合成通道 did（多通道相机
+        # ``did:ch{n}``），比对前归一到物理 did，否则双摄开了拾音也会被这道兜底误丢。
+        physical = split_channel_did(did)[0] if did is not None else None
+        if physical is None or physical not in voice_allowed:
+            logger.info(
+                "speech 被摄像头声音开关拦截丢弃(未开启拾音,不下发/不落库): did=%s device_name=%s content_len=%d",
+                did, s.device_name, len(s.content),
+            )
+            continue
+        kept.append(s)
+    return kept
 
 
 def _ms_since(start: float) -> float:
@@ -136,7 +177,7 @@ async def _run_with_trace_id(
 ):
     """新 event loop 入口:把主线程的 trace_id / artifacts set 回当前 Context.
 
-    ContextVar 不跨线程边界 — run_in_executor 在新线程里 asyncio.run() 起新 loop,
+    ContextVar 不跨线程边界 — submit 在 worker 线程里执行协程,
     主线程的 ContextVar 值全部 reset 成 default.必须显式抓主线程值,在新 loop 入口
     重新 set,omni 内部才能拿到.
     """
@@ -171,7 +212,7 @@ class PerceptionEngineProxy:
         self._status: str = "not_initialized"
         self._status_message: str = ""
         self._last_captions: dict[str, str] = {}
-        self._executor: ThreadPoolExecutor | None = None
+        self._inference_worker: InferenceWorker | None = None
         # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
         # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
         self._engine_lock = asyncio.Lock()
@@ -257,7 +298,7 @@ class PerceptionEngineProxy:
         tick 自动重试——重型 ``_create_engine`` 每 tick 跑会阻塞 event loop。
 
         已 ``ready`` / ``not_initialized`` 直接返回 ``False``(no-op,不碰已有引擎实例)。
-        成功重建时 ``_init_engine`` 已把 lifecycle 翻到 ``READY``——``set_executor`` 守卫
+        成功重建时 ``_init_engine`` 已把 lifecycle 翻到 ``READY``——``set_inference_worker`` 守卫
         只认 ``STOPPED`` 不会帮翻,故必须在创建路径里显式置(``_init_engine`` 已做)。
         返回是否「本次转入 ready」。
         """
@@ -310,14 +351,14 @@ class PerceptionEngineProxy:
 
         return PerceptionEngine(config=config)
 
-    def set_executor(self, executor: ThreadPoolExecutor) -> None:
-        """Attach inference thread executor (called by engine at startup).
+    def set_inference_worker(self, worker: InferenceWorker) -> None:
+        """Attach persistent inference worker (called by engine at startup).
 
         Lifecycle: 仅 STOPPED → READY (stop_engine 后的热重启场景)。
         __init__ 已把 ENGINE 设过 READY/FAILED;FAILED 通常是永久性的
-        (模型缺失/API key 没配),不应被 set_executor 误唤醒回 READY。
+        (模型缺失/API key 没配),不应被 set_inference_worker 误唤醒回 READY。
         """
-        self._executor = executor
+        self._inference_worker = worker
         mon = get_monitor()
         state = mon.get_state(NodeName.ENGINE)
         if state and state.lifecycle == Lifecycle.STOPPED and self.perception_engine is not None:
@@ -339,6 +380,18 @@ class PerceptionEngineProxy:
             pass
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎 proxy 失败 | %s", e)
+
+    async def apply_omni_fps(self, omni_fps: int) -> None:
+        """运行时热更 omni_fps（含其顶起的 tracker fps）到活跃引擎，不重建、不重载模型。
+
+        与 ``rebuild`` 不同：不销毁引擎实例，只原地更新 config + 刷新构造期派生缓存，
+        在途 track 状态全保留。持 ``_engine_lock`` 与在飞 perceive 互斥，避免推理线程
+        读到半更新状态。引擎未起（未配模型 / 降级态，``perception_engine is None``）时
+        no-op：settings 已由 PUT config 持久化，下次 ``_init_engine`` 自然读到新值。
+        """
+        async with self._engine_lock:
+            if self.perception_engine is not None:
+                self.perception_engine.apply_omni_fps(omni_fps)
 
     async def stop_to_unconfigured(self) -> None:
         """软停引擎,回到「未配模型」态——与「启用→tick 自愈拉起」对称的反向操作。
@@ -385,12 +438,11 @@ class PerceptionEngineProxy:
         early_sent_rule_ids: set[tuple[str, str]] = set()
         early_sent_sugg_ids: set[int] = set()
 
-        # 当 self._executor is not None 时，本协程跑在 inference 线程的临时
-        # loop 上（asyncio.run 创建的）。engine 在此处 await callback 后，
-        # callback 内部任何 asyncio.create_task(...) 都会挂在临时 loop 上，
-        # asyncio.run 退出时会被 cancel —— 即使 caller 持有强引用也救不回来
-        # （问题不是 GC 是 loop 关闭）。把 callback 派发回主 loop 后，副作用
-        # （如 RuleRunner._spawn_fire）创建的 task 才有稳定的执行环境。
+        # 当 self._inference_worker is not None 时，本协程跑在 inference 线程
+        # 的持久 loop 上。engine 在此处 await callback 后，callback 内部任何
+        # asyncio.create_task(...) 都会挂在 worker loop 上，把 callback 派发回
+        # 主 loop 后，副作用（如 RuleRunner._spawn_fire）创建的 task 才有稳定
+        # 的执行环境。
         def _on_main_loop(coro_fn):
             async def wrapped(*args, **kwargs):
                 if asyncio.get_running_loop() is main_loop:
@@ -407,6 +459,8 @@ class PerceptionEngineProxy:
             commands = [
                 i for i in speeches if i.needs_response and i.is_complete
             ]
+            # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+            commands = _filter_voice_enabled(commands)
             if not commands:
                 return
             for c in commands:
@@ -581,35 +635,32 @@ class PerceptionEngineProxy:
 
             main_loop = asyncio.get_running_loop()
             # 把持久 app loop 注入 PerceptionEngine→各 identity engine, 供 tier_c 写库协程
-            # run_coroutine_threadsafe 调度(脱离下方 asyncio.run 起的每窗临时 loop, 否则
-            # 写库协程会在窗末被 cancel, 候选永远写不进)。
+            # run_coroutine_threadsafe 调度(脱离下方 worker loop, 否则写库协程会在 worker
+            # shutdown 时被 cancel, 候选永远写不进)。
             if self.perception_engine is not None:
                 self.perception_engine.set_main_loop(main_loop)
-            # inference 线程通过 asyncio.run() 起新 loop,ContextVar 不跨 loop。
-            # 显式抓主线程的 trace_id / artifacts,在新 loop 入口 set 回去,
-            # 保证 omni / publish_event / push_clip_bytes / push_omni_trace 能拿到。
+            # 协程在主线程创建（closure 捕获主线程 trace_id / artifacts 值），通过
+            # InferenceWorker.submit() 调度到 worker 线程的持久 loop 上执行。
+            # 持久 loop 只创建一次 default executor，消除反复建/拆线程的开销和泄漏。
             trace_id = get_trace_id()
-            if self._executor is not None:
-                return await main_loop.run_in_executor(
-                    self._executor,
-                    lambda: asyncio.run(
-                        _run_with_trace_id(
-                            trace_id,
-                            self._realtime_perceive_impl(
-                                batched_snapshot,
-                                rules,
-                                device_count,
-                                convert_ms,
-                                main_loop,
-                                skipped_task_ids,
-                            ),
-                            artifacts=artifacts,
-                        )
-                    ),
+            if self._inference_worker is not None:
+                return await self._inference_worker.submit(
+                    _run_with_trace_id(
+                        trace_id,
+                        self._realtime_perceive_impl(
+                            batched_snapshot,
+                            rules,
+                            device_count,
+                            convert_ms,
+                            main_loop,
+                            skipped_task_ids,
+                        ),
+                        artifacts=artifacts,
+                    )
                 )
-            # 单线程路径(无 executor,测试 / runner 启动前的短窗口):processor 只传
+            # 单线程路径(无 worker,测试 / runner 启动前的短窗口):processor 只传
             # artifacts 不开 scope,这里手动开,保证 omni 内部 push_clip_bytes /
-            # push_omni_trace 能命中.executor 路径由上面 _run_with_trace_id 开,两条路径都覆盖.
+            # push_omni_trace 能命中——worker 路径由上面 _run_with_trace_id 开，两条路径都覆盖。
             if artifacts is not None:
                 with event_artifacts_scope(artifacts):
                     return await self._realtime_perceive_impl(
@@ -648,17 +699,13 @@ class PerceptionEngineProxy:
             if batch.end_timestamp and batch.start_timestamp:
                 _eng_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
 
-            if self._executor is not None:
-                loop = asyncio.get_running_loop()
+            if self._inference_worker is not None:
                 trace_id = get_trace_id()
-                return await loop.run_in_executor(
-                    self._executor,
-                    lambda: asyncio.run(
-                        _run_with_trace_id(
-                            trace_id,
-                            self._on_demand_perceive_impl(batched_snapshot, query),
-                        )
-                    ),
+                return await self._inference_worker.submit(
+                    _run_with_trace_id(
+                        trace_id,
+                        self._on_demand_perceive_impl(batched_snapshot, query),
+                    )
                 )
 
             return await self._on_demand_perceive_impl(batched_snapshot, query)
@@ -796,6 +843,8 @@ class PerceptionEngineProxy:
                 if early_sent_contents and interaction.content in early_sent_contents:
                     continue
                 speeches.append(interaction)
+        # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
+        speeches = _filter_voice_enabled(speeches)
         if speeches:
             _attach_caption(speeches, result.caption)
             for it in speeches:
@@ -810,6 +859,31 @@ class PerceptionEngineProxy:
 # ─── meaningful_events 后台持久化(异步,不阻塞 webhook 主路径)───────────
 
 
+def _collect_relevant_device_ids(result: RealtimePerceptionResult) -> list[str]:
+    """本行事件真正"有意义"的来源摄像头(去重,保序).
+
+    一次推理批次(processor.py 传入的 device_ids)可能包含全屋所有摄像头,但
+    matched_rules / suggestions / needs_response speech 各自的 source_device_ids
+    才是"引发这行事件"的那台/那几台摄像头(engine 逐设备跑 pipeline 时按
+    input_slice.device.did 精确注入,见 pipeline.py:_inject_source_meta)。
+    用于把展示的 clip 收窄到真正相关的摄像头,避免规则只绑玄关却带出书房画面。
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in (*result.matched_rules, *result.suggestions):
+        for did in item.source_device_ids:
+            if did not in seen:
+                seen.add(did)
+                ordered.append(did)
+    for s in result.speeches:
+        if s.needs_response and s.is_complete:
+            for did in s.source_device_ids:
+                if did not in seen:
+                    seen.add(did)
+                    ordered.append(did)
+    return ordered
+
+
 async def _persist_meaningful_event(
     *,
     result: RealtimePerceptionResult,
@@ -819,6 +893,8 @@ async def _persist_meaningful_event(
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
     流程:
+      0. 语音黑名单过滤 speech(与 dispatch 同一闸门)→ 语音关闭相机的转写既不
+         入分类判定也不落库/推 SSE;caption / suggestion / 规则命中照常
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
       3. INSERT meaningful_events(snapshot_count=0)
@@ -843,6 +919,14 @@ async def _persist_meaningful_event(
     )
 
     try:
+        # 语音关闭相机的转写不落库:与 dispatch 同一闸门先滤 speech,classify /
+        # payload / text / SSE 全部基于过滤后的视图——语音开关 = 不执行也不记录。
+        # 只滤 speech,同相机的 caption / suggestion / 规则命中照常(开关只管语音,
+        # 不管相机感知)。result 与主路径(规则匹配 / speech dispatch)共享,不可原地
+        # 改 → model_copy 浅拷贝换 speeches 列表。
+        result = result.model_copy(
+            update={"speeches": _filter_voice_enabled(result.speeches)}
+        )
         cls = classify(result)
         if not cls["is_meaningful"]:
             return
@@ -873,6 +957,20 @@ async def _persist_meaningful_event(
                     pass
 
         text = build_agent_text(result, rule_names=rule_names, rule_queries=rule_queries)
+
+        # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
+        # 否则 device_ids 和 artifacts.clips 必须同步收窄——两者分别驱动"日志展示哪些
+        # 摄像头"和"落盘哪些摄像头的 clip",不同步会导致不相关摄像头的 clip 被落盘、
+        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 文档的
+        # "0 ~ len(artifacts.clips)"不变量)。trace / gallery 不是按事件相关性归属的
+        # 产物,不参与收窄。
+        relevant_device_ids = _collect_relevant_device_ids(result)
+        if relevant_device_ids:
+            device_ids = [did for did in device_ids if did in relevant_device_ids]
+            artifacts.clips = {
+                did: payload for did, payload in artifacts.clips.items()
+                if did in relevant_device_ids
+            }
 
         insert_ok = dao.insert(
             event_id=event_id,

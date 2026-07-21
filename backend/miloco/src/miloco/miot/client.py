@@ -36,7 +36,11 @@ from pydantic_core import to_jsonable_python
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
-from miloco.miot.filter import is_home_allowed, select_active_camera_dids
+from miloco.miot.filter import (
+    is_home_allowed,
+    physical_camera_did,
+    select_active_camera_dids,
+)
 from miloco.miot.mips_listeners import (
     BindEventListener,
     CameraStateEventListener,
@@ -47,6 +51,32 @@ from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
+    """从设备 spec 里定位所有相机镜头开关属性（camera-control 服务的 on 属性）的 (siid, piid)。
+
+    按 spec 类型名匹配（``service_type_name == "camera-control"`` 且 ``type_name == "on"``，
+    均为语言无关的 URN 类型名），不硬编码 siid/piid，也**不看本地化的 service_description**；
+    指示灯的 on 属于 ``indicator-light`` 服务，天然排除。双摄命中多个（主控 + 每镜头各一）。
+    镜头→通道的归属由调用方按 **siid 序数**决定（见 ``read_cameras_awake``），不靠中文标签。
+    找不到返回空列表。
+    """
+    iids: list[tuple[int, int]] = []
+    for iid, entry in spec.items():
+        if not iid.startswith("prop."):
+            continue
+        if (
+            entry.get("service_type_name") == "camera-control"
+            and entry.get("type_name") == "on"
+        ):
+            parts = iid.split(".")
+            if len(parts) == 3:
+                try:
+                    iids.append((int(parts[1]), int(parts[2])))
+                except ValueError:
+                    continue
+    return iids
 
 
 def build_sub_device_names(device: MIoTDeviceInfo) -> dict[str, str]:
@@ -101,6 +131,13 @@ class MiotProxy:
         # immutable per model — once fetched they never change. Typical home has
         # < 100 device models so memory footprint is negligible.
         self._spec_cache: dict[str, dict] = {}
+
+        # did → {channel: 「镜头开关」态} 缓存（camera-control:on 最近一次云读结果，per-lens）。
+        # 每路 True=镜头开启 / False=镜头关闭(隐私·物理遮挡) / None=未知(读失败)；channel 缺失
+        # 亦视为未知。单摄只有 {0: …}；双摄 {0: 球机, 1: 枪机}。由 refresh_camera_online_status
+        # 的云读路径填充；select_active / 列表只读它做门，不各自打云。属性无变更推送、只能按需
+        # 云读，故新鲜度到「上次 refresh」为止。
+        self._camera_awake_cache: dict[str, dict[int, bool | None]] = {}
 
         # Welcome action shared by the bind path and the home-move path:
         # given a refreshed did, greet it if present + in a managed home.
@@ -636,13 +673,40 @@ class MiotProxy:
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
+                # 启动/新设备补读 awake：对当前家庭、awake 缓存里还没有的相机读一次并回填。
+                # 重启后 refresh_cameras 在感知首轮 sync 就会跑 → 镜头态从启动即热，不依赖
+                # 开面板/上下线推送；select_active 的镜头门随即可用。只补"缺失的"→ 启动读
+                # 一遍、之后命中缓存不重复；后续新鲜度由 refresh_camera_online_status / 开启
+                # 校验 / 相机上下线推送刷新（属性变更订阅待后续补）。
+                try:
+                    missing = [
+                        did
+                        for did, info in cameras.items()
+                        if did not in self._camera_awake_cache
+                        and is_home_allowed(
+                            self._kv_repo, getattr(info, "home_id", None)
+                        )
+                    ]
+                    if missing:
+                        await self.read_cameras_awake(missing)
+                except Exception as e:
+                    logger.warning("refresh_cameras awake gap-fill failed: %s", e)
                 # manager(native PPCS 会话+解码线程)的建/销与感知投喂**共用同一口径**
-                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线、按 did 截到上限。
-                # 拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/超额的相机都不在
-                # active 里 → 不建/已建则销，真正停掉 native 会话与解码（含 over-cap 收敛）。
-                active = set(select_active_camera_dids(self._kv_repo, cameras))
+                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线 + 镜头未关、按 did
+                # 截到上限。拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/镜头关/超额的
+                # 相机都不在 active 里 → 不建/已建则销，真正停掉 native 会话与解码。
+                # select_active 返回**合成 did**（每路一台）；manager / native 会话是
+                # **每物理相机一条**，故按物理 did 收敛做 ref-count：任一路在 active →
+                # 该物理相机会话该在；两路都不在 → 拆。
+                active_channels = set(
+                    select_active_camera_dids(
+                        self._kv_repo, cameras, awake_map=self._camera_awake_cache
+                    )
+                )
+                active = {physical_camera_did(d) for d in active_channels}
                 logger.debug(
-                    "Camera streaming set: active=%s managers=%s",
+                    "Camera streaming set: channels=%s physical=%s managers=%s",
+                    sorted(active_channels),
                     sorted(active),
                     sorted(self._camera_img_managers),
                 )
@@ -719,10 +783,24 @@ class MiotProxy:
             try:
                 cameras = await self._miot_client.get_cameras_async()
                 self._camera_info_dict = copy.deepcopy(cameras)
-                return self._camera_info_dict
             except Exception as e:
                 logger.error("Failed to refresh camera online status: %s", e)
                 return None
+        # 锁外顺带刷新 awake(镜头开关)缓存：select_active / list_cameras_with_state 只读缓存
+        # 做门、不各自打云；awake 的云读收在这条"前端列表前必调、且本就在读云"的路径里。
+        # 只读**当前启用家庭**的相机——awake 缓存的消费方(list filter_by_home / select_active
+        # 镜头门)都只作用于当前家庭，对非当前家庭相机预读纯属浪费、还挤米家限频。
+        try:
+            dids = [
+                did
+                for did, info in self._camera_info_dict.items()
+                if is_home_allowed(self._kv_repo, getattr(info, "home_id", None))
+            ]
+            if dids:
+                await self.read_cameras_awake(dids)
+        except Exception as e:
+            logger.warning("refresh awake cache failed: %s", e)
+        return self._camera_info_dict
 
     async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:
         async with self._refresh_devices_lock:
@@ -1203,6 +1281,130 @@ class MiotProxy:
             for iid, entry in spec.items()
             if iid.startswith("prop.") and entry.get("readable", False)
         ]
+
+    async def read_cameras_awake(
+        self, dids: list[str], *, cache_only: bool = False
+    ) -> dict[str, dict[int, bool | None]]:
+        """读取相机「镜头开关」态（``camera-control:on``），**per-lens**，写入 ``_camera_awake_cache``。
+
+        返回 ``{did: {channel: True | False | None}}``：每路 ``True``=镜头开着、``False``=镜头关
+        （隐私/物理遮挡）、``None``=读失败/未知；channel 缺失亦视为未知。单摄只有 ``{0: …}``；
+        双摄 ``{0: 球机, 1: 枪机}``。机型无 ``camera-control:on`` → ``{}``（整机未知）。
+
+        镜头→通道映射**按 siid 序数**（不看本地化描述）：多通道且开关数 ≥ 通道数时，取 siid
+        最高的 ``channel_count`` 个开关作「每路开关」（自动排除低 siid 的主控），按 siid 升序依次
+        配 ch0/ch1/…；否则（开关数 < 通道数，或单摄）全部开关 OR 后归各路（单摄即归 ch0，与旧整机
+        OR 等价）并打 warning。同一路多开关按 OR 合并（任一 True→True；否则任一 None→None；全
+        False→False，不因个别读失败误判关闭）。未来某机型 siid 顺序不符时走 per-model 配置覆盖，
+        不退整机 OR、不加启发（详见函数体注释）。
+
+        ``cache_only=True``：只返回缓存里已有的值（没有→``{}``），**完全不发云端请求**——给
+        ``list_cameras_with_state`` 用。默认走云端新鲜读、回填缓存。属性无变更推送、只能云端读，
+        故新鲜度到「上次 refresh」为止。
+        """
+        result: dict[str, dict[int, bool | None]] = {}
+        if cache_only:
+            for did in dids:
+                result[did] = dict(self._camera_awake_cache.get(did) or {})
+            return result
+        params: list[MIoTGetPropertyParam] = []
+        # did → {channel: [(siid, piid), ...]}：每路由哪些开关 iid 供值。
+        param_meta: dict[str, dict[int, list[tuple[int, int]]]] = {}
+        for did in dids:
+            device = self._device_info_dict.get(did)
+            if device is None:
+                result[did] = {}
+                continue
+            try:
+                spec = await self._fetch_device_spec(device.urn)
+            except Exception as e:
+                logger.warning("read awake: fetch spec failed did=%s: %s", did, e)
+                result[did] = {}
+                continue
+            switch_iids = _resolve_camera_switch_iids(spec)
+            if not switch_iids:
+                # 该机型 spec 无 camera-control:on → 无法判断镜头态，记 model 便于排查。
+                logger.info(
+                    "camera %s (model=%s) has no camera-control:on prop; awake=unknown",
+                    did,
+                    getattr(device, "model", "?"),
+                )
+                result[did] = {}
+                self._camera_awake_cache[did] = {}
+                continue
+            channel_count = (
+                getattr(self._camera_info_dict.get(did), "channel_count", None) or 1
+            )
+            # 镜头开关 → 通道**按 siid 序数**归属（不看本地化描述）：多通道且开关数 ≥ 通道数时，
+            # 取 siid 最高的 channel_count 个作「每路开关」（自动排除低 siid 的主控），按 siid
+            # 升序依次配 ch0/ch1/…（实测球机 siid 恒低于枪机、主控最低 → 升序=通道序）。
+            #
+            # 「siid 升序 = 通道序」是**序数假设**。**若未来某机型不符**（球/枪 siid 顺序反了、
+            # 或主控不是最低 siid 等），**不要**退整机 OR、也**不要**再加别的猜测式启发——那只会
+            # 把静默错位换个花样。**正确处置是给该 model 单独在配置里显式罗列 `{model: {siid:
+            # channel}}` 覆盖**（届时补一个 per-model 映射表 + 实证一次即可）。
+            #
+            # 下面的**整机 OR** 只是「连每路开关都枚举不出」（开关数 < 通道数）的最后兜底——它能
+            # 正确处理「整台全关→排除」，只是丢了 per-lens 精度；命中即打 warning 让降级可观测。
+            # 它**不是**用来顶替错序映射的，错序请走上面的 per-model 配置路径。
+            ch_iids: dict[int, list[tuple[int, int]]] = {}
+            if channel_count > 1 and len(switch_iids) >= channel_count:
+                per_lens = sorted(switch_iids)[-channel_count:]  # 最高 cc 个、已按 siid 升序
+                for ch in range(channel_count):
+                    ch_iids[ch] = [per_lens[ch]]
+            else:
+                if channel_count > 1:
+                    logger.warning(
+                        "camera %s (model=%s) channel_count=%d 但仅 %d 个 camera-control:on "
+                        "开关，无法按 siid 分路，awake 退整机 OR",
+                        did,
+                        getattr(device, "model", "?"),
+                        channel_count,
+                        len(switch_iids),
+                    )
+                for ch in range(channel_count):
+                    ch_iids[ch] = list(switch_iids)
+            param_meta[did] = ch_iids
+
+        # 从 param_meta 汇出**去重**的待读属性（整机 OR 兜底会让多路引用同一开关）。
+        for did, ch_iids in param_meta.items():
+            for siid, piid in {sp for iids in ch_iids.values() for sp in iids}:
+                params.append(MIoTGetPropertyParam(did=did, siid=siid, piid=piid))
+        if not params:
+            return result
+        try:
+            rows = await self.get_device_properties(params)
+        except Exception as e:
+            logger.warning("read awake: get_props failed: %s", e)
+            for did in param_meta:
+                result[did] = {}
+            return result
+
+        by_key: dict[tuple, dict] = {}
+        for row in rows or []:
+            try:
+                by_key[(row["did"], row["siid"], row["piid"])] = row
+            except (TypeError, KeyError):
+                continue
+        for did, ch_iids in param_meta.items():
+            per_ch: dict[int, bool | None] = {}
+            for ch, iids in ch_iids.items():
+                vals: list[bool | None] = []
+                for siid, piid in iids:
+                    row = by_key.get((did, siid, piid))
+                    if not row or row.get("code", -1) != 0:
+                        vals.append(None)
+                    else:
+                        vals.append(bool(row.get("value")))
+                if any(v is True for v in vals):
+                    per_ch[ch] = True
+                elif any(v is None for v in vals):
+                    per_ch[ch] = None
+                else:
+                    per_ch[ch] = False
+            result[did] = per_ch
+            self._camera_awake_cache[did] = per_ch
+        return result
 
     async def call_device_action(self, param: MIoTActionParam) -> dict:
         """Call device action via MIoT cloud API."""

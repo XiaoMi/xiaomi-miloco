@@ -91,11 +91,26 @@ class ServerSettings(BaseModel):
 
 
 class AgentSettings(BaseModel):
-    """Agent webhook 出站调用配置（与具体 agent 平台无关）。"""
+    """Agent 平台出站调用配置（推荐架构见 ``hermes-pr.md``）。
+
+    三段配置:
+    - ``platform``: 选 adapter,空走 webhook fallback(临时过渡,见 doc 主线)
+    - ``webhook_url`` + ``auth_bearer``: 旧 webhook 通路(PR #279),adapter 加载失败/未配时 fallback 用
+    - Adapter 自身配置(hermes_url / hermes_api_key 等)由 plugin 自己读
+      ``$MILOCO_HOME/agent_platform/<name>/config.yaml``,不写进 backend config.json
+    """
+
+    platform: str = Field(
+        default="",
+        description=(
+            "Agent 平台名;非空时 backend 按此从 $MILOCO_HOME/agent_platform/<name>/ 加载 Adapter"
+            "(hermes / openclaw / ...)。空时走 webhook 模式(PR #279 兼容,过渡期临时)。"
+        ),
+    )
 
     webhook_url: str = Field(
         default="http://127.0.0.1:18789/miloco/webhook",
-        description="agent webhook 回调地址",
+        description="agent webhook 回调地址(adapter 缺失/fallback 时用)",
     )
     auth_bearer: str = Field(
         default="",
@@ -116,6 +131,15 @@ class DispatcherSettings(BaseModel):
             "每会话 dispatcher 队列上限；超出时按 (类型优先级, 条目级优先级, 入队时间) 淘汰最不紧急者。"
         ),
     )
+    message_ttl_sec: float = Field(
+        default=300.0,
+        description=(
+            "待发送消息在队列中的最大存活时长（秒）；入队龄超过该值的消息在"
+            "「新消息入队」与「打包发送前」两处被清理，不再投递。<=0 = 关闭过期。"
+        ),
+    )
+    # 不加 ge=0.0：与 notify.dedup_window_sec 一致，<=0 语义为「关闭过期」；
+    # 加 ge 会让误配负值直接崩掉整个 settings 加载（后端起不来）。
 
 
 class OmniModelSettings(BaseModel):
@@ -229,6 +253,23 @@ class NotifySettings(BaseModel):
     # settings 加载（后端起不来），对一个可选兜底旋钮是过度约束。
 
 
+class SchedulerSettings(BaseModel):
+    """miloco 内置定时任务自动管理开关。
+
+    实际消费方是 openclaw 插件（``plugins/openclaw/src/home-profile/scheduler.ts``），
+    它在网关启动时读取此开关：``enabled=false`` 时清除并停止重建自动定时任务。
+    backend 本身不消费此字段，仅负责经 config.json 契约对齐与 Web 读写落盘。
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "是否由 miloco 自动管理内置定时任务（感知摘要 / 家庭巡检 / Dreaming / "
+            "习惯洞察）；关闭后 agent 网关启动时会清除这些自动任务且不再重建。"
+        ),
+    )
+
+
 class CameraSettings(BaseModel):
     """摄像头采集参数。"""
 
@@ -320,6 +361,11 @@ class PerfRetentionSettings(BaseModel):
     events_days: int = Field(default=7, description="events 表保留天数")
     agent_runs_days: int = Field(default=7, description="agent_runs 表保留天数")
     trace_jsonl_days: int = Field(default=7, description="agent jsonl.gz 文件保留天数")
+    action_ledger_days: int = Field(
+        default=7,
+        description="action_ledger 表保留天数(value_json 含 TTS 全文等敏感文本)",
+    )
+    omni_log_days: int = Field(default=7, description="omni 交互 log 保留天数")
 
 
 class PerfSettings(BaseModel):
@@ -336,6 +382,20 @@ class PerfSettings(BaseModel):
     retention: PerfRetentionSettings = Field(
         default_factory=PerfRetentionSettings,
         description="observability 数据保留参数",
+    )
+
+
+class ScheduleSettings(BaseModel):
+    """cron / APScheduler 相关配置。"""
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "cron 调度总开关(应急 kill switch)。false 时启动跳过 scheduler.start() 与"
+            "rebuild_scheduler_from_db(),CRUD 端点降级为 DB-only:POST /crons 返 503,"
+            "GET/DELETE/enable/disable 只读写 cron 表不碰 in-memory scheduler。"
+            "关闭下重启后打开会由 rebuild 从 cron 表出发建全部 in-memory job。"
+        ),
     )
 
 
@@ -573,6 +633,10 @@ class MilocoSettings(BaseSettings):
         default_factory=NotifySettings,
         description="通知发送运行参数（去重窗口等）",
     )
+    scheduler: SchedulerSettings = Field(
+        default_factory=SchedulerSettings,
+        description="miloco 内置定时任务自动管理开关（由 openclaw 插件消费）",
+    )
     camera: CameraSettings = Field(
         default_factory=CameraSettings,
         description="摄像头采集参数",
@@ -592,6 +656,10 @@ class MilocoSettings(BaseSettings):
     features: FeaturesSettings = Field(
         default_factory=FeaturesSettings,
         description="产品级实验性功能开关（默认关）",
+    )
+    schedule: ScheduleSettings = Field(
+        default_factory=ScheduleSettings,
+        description="cron 调度总开关与相关参数",
     )
 
     @field_validator("timezone")
@@ -777,6 +845,8 @@ __all__ = [
     "PerfRetentionSettings",
     "PerfSettings",
     "RuleSettings",
+    "ScheduleSettings",
+    "SchedulerSettings",
     "ServerSettings",
     "get_settings",
     "reset_settings",

@@ -58,6 +58,15 @@ MAX_EID: int = 999
 SUGG_SIM_THRESHOLD: float = 0.70
 
 
+def _physical_did(did: str) -> str:
+    """合成通道 did → 物理 did：``'cam1:ch0'`` → ``'cam1'``；``'cam1'`` → ``'cam1'``。
+
+    感知按合成通道 did（``did:ch{n}``）运作，而 rule 可绑到整台相机的物理 did；匹配时
+    两种粒度都要能命中。
+    """
+    return did.rsplit(":ch", 1)[0] if ":ch" in did else did
+
+
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
@@ -70,6 +79,24 @@ def _fmt_clock(ms: float) -> str:
     的时段标签（如 UTC 主机把北京 10:52 说成「凌晨02:52」），故与 ``_fmt_time_window``
     / API 出口 ISO 同源统一到部署时区。"""
     return datetime.fromtimestamp(ms / 1000, tz=deploy_timezone()).strftime("%H:%M:%S")
+
+
+def _voice_allowed_dids() -> set[str]:
+    """实时读相机「拾音白名单」（与 client._filter_voice_enabled 同源同口径）。
+
+    读 KV（进程内缓存）失败时返回空集并 warning——空集在 allow-list 语义下 = 全部相机
+    拾音关闭（fail-closed：瞬时故障宁可整批剥离音频，也不擅自处理未授权相机的音频）。
+    """
+    from miloco.manager import get_manager
+    from miloco.miot.filter import voice_allowed_camera_dids
+
+    try:
+        return voice_allowed_camera_dids(get_manager().kv_repo)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "voice allow-list lookup failed, stripping audio for all cameras (fail-closed): %s", e
+        )
+        return set()
 
 
 class PerceptionEngine(BasePerceptionEngine):
@@ -88,6 +115,26 @@ class PerceptionEngine(BasePerceptionEngine):
         from miloco.perception.engine.identity.engine import build_identity_library
 
         self._config = config or PerceptionConfig()
+
+        from miloco.perception.engine.omni.provider import adjust_fps_for_omni
+
+        fps = self._config.input.fps
+        # 未经 adjust_fps_for_omni 调整前的 base fps（来自 settings/config），供
+        # apply_omni_fps 运行时重算——必须从 base 重算而非已调整值，否则 omni_fps
+        # 多次变更会累积错算（如 base=3 时 omni 2→3 应回 3，拿 4 再调会得 6）。
+        self._base_fps = fps
+        omni_fps = self._config.input.omni_fps
+        new_fps = adjust_fps_for_omni(fps, omni_fps)
+        if new_fps != fps:
+            logger.info(
+                "fps(%d) %% omni_fps(%d) != 0，自动调整 fps=%d → %d 保证整除",
+                fps, omni_fps, fps, new_fps,
+            )
+            from dataclasses import replace
+            self._config = replace(
+                self._config,
+                input=replace(self._config.input, fps=new_fps),
+            )
 
         # ============ tracking_service 构造参数缓存（懒加载 factory 复用）============
         self._tracking_mode = self._config.identity.tracking_service_mode
@@ -238,6 +285,8 @@ class PerceptionEngine(BasePerceptionEngine):
         self._pending_speech_rounds: dict[str, int] = {}            # key: device_id
         self._max_pending_speech_rounds = max(1, _PENDING_SPEECH_TIMEOUT_SEC // self._config.input.period_sec)
         self._audio_tail: dict[str, NDArray[np.int16]] = {}         # key: device_id
+        # 拾音关闭已打过 INFO 的相机集合（防每窗刷屏；重新开启时移除、下次关闭再打）
+        self._mic_off_logged: set[str] = set()
         # 上一窗口末次被检帧（gate 预处理后的 448 灰度），visual gate 跨窗口比较用
         self._gate_prev_frames: dict[str, NDArray[np.uint8]] = {}   # key: device_id
         # visual / audio 最近通过的 monotonic ts,喂 gate hold 判定。
@@ -795,6 +844,91 @@ class PerceptionEngine(BasePerceptionEngine):
         self._gate_hold_active.clear()
         self._gate_hold_started_at.clear()
 
+    def apply_omni_fps(self, omni_fps: int) -> None:
+        """运行时热更 omni_fps（含其经 adjust_fps_for_omni 顶起的 tracker fps），
+        免重建引擎 / 免模型重载 / 不丢 track 状态。
+
+        omni_fps 本身在 pipeline 每窗现读 config.input.omni_fps，更新 config 即生效；
+        它顶起的 fps 也在 pipeline 现读，但有 3 处构造期派生缓存不会自动刷新——这里
+        显式重算：tracking kwargs（后续懒建）、每个 live tracker 的 max_age、每个 live
+        IdentityEngine 的帧数派生量。fps 必须从 base 重算（见 __init__ self._base_fps）。
+
+        「不丢 track」仅对 omni_fps-only 变更成立：本路径不停 runner、不重建实例，故活
+        跃 track 状态原样保留；若同时改 window_size，则另经 apply_config_restart 走
+        stop→start，track 会随重启丢失（那是 window 变更的固有代价，非本路径）。
+        """
+        from dataclasses import replace
+
+        from miloco.perception.engine.omni.provider import adjust_fps_for_omni
+
+        old_omni_fps = self._config.input.omni_fps
+        new_fps = adjust_fps_for_omni(self._base_fps, omni_fps)
+        self._config = replace(
+            self._config,
+            input=replace(self._config.input, omni_fps=omni_fps, fps=new_fps),
+        )
+        # 构造期缓存 1：后续懒建的 tracking_service 拿新 fps。mock 模式 kwargs 恒为空
+        # 且 factory 忽略 kwargs（返回无参 MockTrackingService），不塞 fps，与 __init__
+        # 的 mock 分支保持对称，避免留下无消费者的孤儿 key。
+        if self._tracking_mode != "mock":
+            self._tracking_service_kwargs["fps"] = new_fps
+        # 构造期缓存 2：已建的 per-camera tracker（SortTracker / DeepSort）重算 max_age。
+        # set_fps 已提到 TrackingService 基类、各实现均具备，无需 hasattr 守卫。
+        for svc in self._tracking_services.values():
+            svc.set_fps(new_fps)
+        # 构造期缓存 3：已建的 per-camera IdentityEngine 重算 grace / cooldown / frames_per_window
+        for eng in self._identity_engines.values():
+            if eng is not None:
+                eng.set_engine_fps(new_fps)
+
+        # 成功路径留痕：旧 rebuild 会经 _init_engine 打 fps 自动调整日志，改热更后运行时
+        # 改 omni_fps 若无日志则运维无法确认新值是否真推到活跃引擎 / tracker。
+        logger.info(
+            "[engine] omni_fps 热更 %s→%s：tracker fps→%s，已刷新 %d tracker / %d identity engine",
+            old_omni_fps, omni_fps, new_fps,
+            len(self._tracking_services),
+            sum(1 for e in self._identity_engines.values() if e is not None),
+        )
+
+    def _strip_unauthorized_voice_audio(self, batch: BatchedSnapshot) -> None:
+        """硬切**未开启拾音**相机的音频——opt-in / 默认关语义的**第一道防线（唯一切点）**。
+
+        allow-list 语义：只有在拾音白名单内的相机音频才被处理，其余相机在引擎入口
+        （输入组装处）整批剥离：音频不进 gate / identity / omni——不参与 gate 触发
+        （audio_clip 为空时 evaluate_audio 恒 False、VAD 跳过，audio-only 窗口不再
+        产生）、不合成进 mp4、schema 自动剥 speeches/env_sounds（has_audio 机制）——
+        不转写、不产生任何语音派生 suggestion、不烧云端音频 token。
+        dispatch/落库闸门（client._filter_voice_enabled）保留为第二道防线。
+        实时读 KV，改开关下一窗即生效、无需重启引擎。白名单为空（默认态）时剥离全部。
+
+        一并清掉该相机的跨窗残留：audio_tail（否则重新开启后首窗会把开启前的音频
+        尾巴拼进新窗）与 pending_speech（开启前的半句转写不得再注入后续 prompt——
+        那也是语音内容上云）。原地改 snapshot（引擎内 audio-tail prepend 同款惯例）。
+        """
+        allowed = _voice_allowed_dids()
+        # 重新开启拾音的相机移出「已打日志」集，下次再关闭时重新打一条 INFO。
+        if self._mic_off_logged:
+            self._mic_off_logged -= allowed
+        for snapshot in batch.snapshots:
+            did = snapshot.device.did
+            # 拾音白名单存的是物理 did（整台相机）；感知 did 是合成通道 did（多通道相机
+            # ``did:ch{n}``），故白名单命中判定与日志去重都按物理 did（否则双摄开了拾音也
+            # 会因 ``cam:ch0`` ∉ ``{cam}`` 被误剥）。音频剥离与跨窗残留清理仍按合成 did
+            # ——那几个 dict 是每通道独立状态。
+            physical = _physical_did(did)
+            if physical in allowed:
+                continue
+            if physical not in self._mic_off_logged:
+                logger.info(
+                    "拾音未开启：剥离相机音频，本相机声音不作任何处理 did=%s name=%s",
+                    did, snapshot.device.name,
+                )
+                self._mic_off_logged.add(physical)
+            snapshot.audio = None
+            self._audio_tail.pop(did, None)
+            self._pending_speech.pop(did, None)
+            self._pending_speech_rounds.pop(did, None)
+
     async def realtime_perceive(
         self,
         batch: BatchedSnapshot,
@@ -811,6 +945,10 @@ class PerceptionEngine(BasePerceptionEngine):
 
         if batch.empty:
             return None
+
+        # 未开启拾音的相机在此整批剥音频（opt-in 第一道防线）；必须先于 contexts 构建
+        # （pending_speech 注入）与 audio-tail 拼接，见 _strip_unauthorized_voice_audio。
+        self._strip_unauthorized_voice_audio(batch)
 
         # 进入新一轮前先按 TTL 淘汰过期事件链
         now = time.monotonic()
@@ -832,6 +970,8 @@ class PerceptionEngine(BasePerceptionEngine):
                     r for r in rules
                     if not r.get("condition", {}).get("perceive_device_ids")
                     or did in r["condition"]["perceive_device_ids"]
+                    # rule 绑物理 did（整台相机）时，命中该相机的任一通道。
+                    or _physical_did(did) in r["condition"]["perceive_device_ids"]
                 ]
                 device_rule_map[did] = [r["id"] for r in dispatched]
                 device_rules = [
@@ -919,6 +1059,10 @@ class PerceptionEngine(BasePerceptionEngine):
 
         if batch.empty:
             return OnDemandPerceptionResult(answer="")
+
+        # 主动查询同样尊重 opt-in：未开启拾音的相机音频不进 query 视频
+        # （_encode_video_mp4 对空 audio 自动出纯视频 mp4）。
+        self._strip_unauthorized_voice_audio(batch)
 
         # query 路径 omni 仍是 per-room 一次（产品语义：用户问"房间"，答案单份），
         # 需要 per-room 的 last_caption 作为参考。``_last_captions`` 已改 per-device，

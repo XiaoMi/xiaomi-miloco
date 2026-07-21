@@ -1,0 +1,25 @@
+{
+  "omniHealth": {
+    "configInvalid": "Omni configuration is invalid: {{message}}",
+    "retrying": "Omni service is unavailable ({{message}}). Retrying in {{seconds}}s…",
+    "retryingNoTime": "Omni service is unavailable ({{message}}). Retrying…",
+    "retryNow": "Retry now",
+    "retryingBtn": "Retrying…",
+    "cooldownBtn": "Cool down {{seconds}}s",
+    "goToConfig": "Fix in Model tab",
+    "retryFailed": "Retry failed",
+    "failuresCount": "{{n}} failures",
+    "codes": {
+      "unreachable": "Couldn't reach the Omni service",
+      "timeout": "Omni service timed out",
+      "http_error": "Omni service returned an error",
+      "rate_limited": "Rate-limited by the provider",
+      "bad_key": "Invalid API key or insufficient permission",
+      "no_key": "API key not configured",
+      "not_found": "Model or URL not found",
+      "rejected_authed": "Connected, but the request was rejected (model name or API key may be wrong)",
+      "bad_response": "Malformed response from Omni",
+      "cancelled": "Retry was interrupted"
+    }
+  }
+}

@@ -3,13 +3,16 @@
 发布版 v1 新基线。Schema 版本通过 PRAGMA user_version 管理,
 后续版本升级在此处补 _MIGRATIONS 注册表 + 步进迁移函数。
 v0(无版本号老 db) → 要求删 db(无法判断列集)。
+
+v2:新增 action_ledger 表(agent 控制设备 / 播 TTS / 触发场景的持久审计)。
+纯 additive CREATE,对 v1 老库走 _MIGRATIONS 步进补表,无需删 db。
 """
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 _TRACES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -123,6 +126,36 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_source_ts ON agent_runs(source, timest
 CREATE INDEX IF NOT EXISTS idx_agent_runs_success ON agent_runs(success) WHERE success IS NOT NULL;
 """
 
+# agent 每次控制设备 / 播 TTS(speaker play-text 也是 call_action)/ 触发场景写一行。
+# result_code / result_msg 是设备侧执行结果(负码即失败,详见 miot.result_codes);
+# value_json 存 set 值或 action in_params —— TTS 全文落这里(日志只记长度,DB 存内容)。
+# source ∈ {cli, rule} 区分触发源(v3)：cli=control_device 路径 / rule=RuleRunner 直控
+# (source_id=rule_id)。trace_id 目前是**预留槽**(NULL)——尚未实际串联 agent turn,
+# 后续经 CLI --trace-id / X-Miloco-Trace-Id → ContextVar 串联(见 PR 后续工作)。
+_ACTION_LEDGER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS action_ledger (
+  id            TEXT    NOT NULL PRIMARY KEY,
+  timestamp     INTEGER NOT NULL,
+  action_type   TEXT    NOT NULL,
+  did           TEXT    NOT NULL,
+  device_name   TEXT,
+  room          TEXT,
+  iid           TEXT,
+  value_json    TEXT,
+  result_code   INTEGER,
+  result_msg    TEXT,
+  success       INTEGER NOT NULL,
+  error         TEXT,
+  trace_id      TEXT,
+  source        TEXT,
+  source_id     TEXT,
+  home_id       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_action_ledger_ts ON action_ledger(timestamp);
+CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts ON action_ledger(source, timestamp);
+CREATE INDEX IF NOT EXISTS idx_action_ledger_home_ts ON action_ledger(home_id, timestamp);
+"""
+
 _TRACES_V_VIEW = """
 CREATE VIEW IF NOT EXISTS traces_v AS
 SELECT
@@ -190,13 +223,67 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(_TRACES_DEVICE_SCHEMA)
         conn.executescript(_EVENTS_SCHEMA)
         conn.executescript(_AGENT_RUNS_SCHEMA)
+        conn.executescript(_ACTION_LEDGER_SCHEMA)
         conn.executescript(_TRACES_V_VIEW)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
 
-    # cur ∈ (0, SCHEMA_VERSION):未来版本升级时在此引入 _MIGRATIONS 注册表 +
-    # 步进循环。当前发布版只有 v1,不应抵达此分支。
-    raise RuntimeError(
-        f"db schema v{cur} → v{SCHEMA_VERSION} 无 migration 注册,"
-        "请删除 db 文件后重启。"
+    # cur ∈ (0, SCHEMA_VERSION):步进迁移。每步是 additive DDL(建表/加列),
+    # 幂等(CREATE ... IF NOT EXISTS),做完把 user_version 推到目标步。
+    for step, migrate in sorted(_MIGRATIONS.items()):
+        if cur < step:
+            migrate(conn)
+            conn.execute(f"PRAGMA user_version = {step}")
+            cur = step
+
+    if cur != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"db schema v{cur} → v{SCHEMA_VERSION} 无 migration 注册,"
+            "请删除 db 文件后重启。"
+        )
+
+
+def _migrate_v2_action_ledger(conn: sqlite3.Connection) -> None:
+    """v1 → v2:additive 建 action_ledger 表。"""
+    conn.executescript(_ACTION_LEDGER_SCHEMA)
+
+
+def _migrate_v3_action_source(conn: sqlite3.Connection) -> None:
+    """v2 → v3:给 action_ledger 补触发源列 source / source_id(幂等)。
+
+    trace_id IS NULL 分不清「手动 CLI」与「rule static 直控」——加显式 source:
+    ``cli``（control_device 路径）/ ``rule``（RuleRunner._execute_action，source_id=rule_id）。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    if "source" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN source TEXT")
+    if "source_id" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN source_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts "
+        "ON action_ledger(source, timestamp)"
     )
+
+
+def _migrate_v4_action_home(conn: sqlite3.Connection) -> None:
+    """v3 → v4:给 action_ledger 补设备所属家庭列 home_id(幂等)。
+
+    合流页事件在生成时打了 home 标而动作没有——补上列 + (home_id, timestamp)
+    索引,`/api/actions` 才能按家过滤。老行 / 解析失败的行为 NULL,查询侧对
+    NULL 放行(历史台账不因迁移在前端蒸发)。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    if "home_id" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN home_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_action_ledger_home_ts "
+        "ON action_ledger(home_id, timestamp)"
+    )
+
+
+# 步进迁移注册表:{target_version: fn}。fn 只做 additive DDL,须幂等。
+_MIGRATIONS = {
+    2: _migrate_v2_action_ledger,
+    3: _migrate_v3_action_source,
+    4: _migrate_v4_action_home,
+}

@@ -41,11 +41,19 @@ async function makeApi(
 describe("cross-end alignment", () => {
   let origHome: string | undefined;
   let origGatewayToken: string | undefined;
+  let origSchedulerEnv: string | undefined;
+  let origNotifyEnv: string | undefined;
   let tmpHome: string;
 
   beforeEach(() => {
     origHome = process.env.MILOCO_HOME;
     origGatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+    // 插件的 scheduler / notify 读取器尊重 env 覆盖（对齐后端）；跨端字段对齐要读的是
+    // fixture 本身，故清掉可能污染的 env（与 Python 两端「清空 MILOCO_* 后再跑」同理）。
+    origSchedulerEnv = process.env.MILOCO_SCHEDULER__ENABLED;
+    origNotifyEnv = process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC;
+    delete process.env.MILOCO_SCHEDULER__ENABLED;
+    delete process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC;
     tmpHome = mkdtempSync(path.join(tmpdir(), "miloco-home-"));
     writeFileSync(
       path.join(tmpHome, "config.json"),
@@ -62,6 +70,12 @@ describe("cross-end alignment", () => {
     if (origGatewayToken === undefined)
       delete process.env.OPENCLAW_GATEWAY_TOKEN;
     else process.env.OPENCLAW_GATEWAY_TOKEN = origGatewayToken;
+    if (origSchedulerEnv === undefined)
+      delete process.env.MILOCO_SCHEDULER__ENABLED;
+    else process.env.MILOCO_SCHEDULER__ENABLED = origSchedulerEnv;
+    if (origNotifyEnv === undefined)
+      delete process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC;
+    else process.env.MILOCO_NOTIFY__DEDUP_WINDOW_SEC = origNotifyEnv;
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
@@ -81,5 +95,20 @@ describe("cross-end alignment", () => {
     expect(cfg.model.omni.model).toBe(expected.model.omni.model);
     expect(cfg.model.omni.base_url).toBe(expected.model.omni.base_url);
     expect(cfg.model.omni.api_key).toBe(expected.model.omni.api_key);
+    expect(cfg.scheduler?.enabled).toBe(expected.scheduler.enabled);
+    expect(cfg.notify?.dedup_window_sec).toBe(expected.notify.dedup_window_sec);
+  });
+
+  it("scheduler / notify 读取器读 fixture 的值与 backend 写出的形状一致", async () => {
+    // 用生产实际消费方（而非 loadSharedConfig 的 schema 补齐）验证键名/形状契约：
+    // 若任一端把 scheduler 写成扁平键或改了形状，这两个读取器会回落缺省而与 fixture 背离。
+    const { isSchedulerAutoManageEnabled, getNotifyDedupWindowMs } =
+      await import("../src/miloco/config.js");
+    const expected = JSON.parse(readFileSync(FIXTURE, "utf-8"));
+
+    expect(isSchedulerAutoManageEnabled()).toBe(expected.scheduler.enabled);
+    expect(getNotifyDedupWindowMs()).toBe(
+      expected.notify.dedup_window_sec * 1000,
+    );
   });
 });

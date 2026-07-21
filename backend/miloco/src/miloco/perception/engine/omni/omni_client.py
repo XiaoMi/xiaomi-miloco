@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,12 +15,27 @@ import httpx
 
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.omni.circuit_breaker import (
+    CircuitOpenError,
+    get_omni_circuit_breaker,
+)
 from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
+from miloco.perception.engine.omni.error_classifier import (
+    ClassifiedError,
+    ErrorCategory,
+    classify_exception,
+    classify_response,
+)
+from miloco.perception.engine.omni.provider import OmniProviderAdapter, get_adapter
 from miloco.perception.snapshot_context import push_omni_trace
 
 logger = logging.getLogger(__name__)
 
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
+
+# 三元组变化触发的 fire-and-forget reset task 强引用集合;asyncio 只对 task 持弱引用,
+# 不持强引用短协程可能被 GC 提前回收。done_callback 里自动 discard。
+_RESET_TASKS: set[asyncio.Task] = set()
 
 
 class OmniError(Exception):
@@ -66,6 +82,7 @@ class OmniError(Exception):
 @dataclass(frozen=True)
 class OmniCallMeta:
     """omni 单次调用的元数据(latency / retry / token / error)。"""
+
     latency_ms: float
     retry_count: int = 0
     input_tokens: int | None = None
@@ -88,11 +105,21 @@ class OmniCallMeta:
         return cls(
             latency_ms=latency_ms,
             retry_count=retry_count,
-            input_tokens=int(usage["prompt_tokens"]) if usage.get("prompt_tokens") is not None else None,
-            output_tokens=int(usage["completion_tokens"]) if usage.get("completion_tokens") is not None else None,
-            cached_tokens=int(details["cached_tokens"]) if details.get("cached_tokens") is not None else None,
-            audio_tokens=int(details["audio_tokens"]) if details.get("audio_tokens") is not None else None,
-            video_tokens=int(details["video_tokens"]) if details.get("video_tokens") is not None else None,
+            input_tokens=int(usage["prompt_tokens"])
+            if usage.get("prompt_tokens") is not None
+            else None,
+            output_tokens=int(usage["completion_tokens"])
+            if usage.get("completion_tokens") is not None
+            else None,
+            cached_tokens=int(details["cached_tokens"])
+            if details.get("cached_tokens") is not None
+            else None,
+            audio_tokens=int(details["audio_tokens"])
+            if details.get("audio_tokens") is not None
+            else None,
+            video_tokens=int(details["video_tokens"])
+            if details.get("video_tokens") is not None
+            else None,
             error_code=error_code,
         )
 
@@ -116,18 +143,40 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     在每次 omni 调用前用本函数取一次当前 settings(``update_shared_config`` 写完已
     ``reset_settings()`` 清缓存),即可让新模型在**下一个推理周期**自动生效,无需重启
     进程、不重建引擎。api_key 为空时退回快照值,最终调用点 ``resolve_api_key`` 仍会兜底环境变量。
+
+    副作用:三元组 (model, base_url, api_key) 变化时清熔断状态到 CLOSED。覆盖所有配置源
+    (web PUT/activate / CLI set / env / 直接改 config.json)——只要 settings 变了就自动重置。
     """
     from dataclasses import replace
 
     from miloco.config import get_settings
 
     o = get_settings().model.omni
-    return replace(
+    resolved = replace(
         base,
         model=o.model,
         base_url=o.base_url,
         api_key=o.api_key or base.api_key,
     )
+    _maybe_reset_breaker_on_config_change(resolved)
+    return resolved
+
+
+def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
+    """检测 (model, base_url, api_key) 三元组变化,变了就清熔断。跨调用状态保存在
+    函数属性 ``._last_triple`` 上——比 module-level global 更内聚。"""
+    triple = (resolved.model, resolved.base_url, resolve_omni_api_key(resolved.api_key))
+    prev = getattr(_maybe_reset_breaker_on_config_change, "_last_triple", None)
+    if prev is not None and prev != triple:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            task = loop.create_task(get_omni_circuit_breaker().reset_on_config_change())
+            _RESET_TASKS.add(task)
+            task.add_done_callback(_RESET_TASKS.discard)
+    _maybe_reset_breaker_on_config_change._last_triple = triple  # type: ignore[attr-defined]
 
 
 async def call_omni(
@@ -144,52 +193,99 @@ async def call_omni(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    adapter = get_adapter(config.model)
+    messages = _build_messages(payload, adapter)
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": False,
-        "thinking": {"type": "disabled"},
-    }
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=False,
+    )
 
+    forced_stream = body.get("stream", False)
+    url = adapter.endpoint(config.base_url, config.model, stream=forced_stream)
+
+    cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    short_circuited = False
+    headers = {
+        "Content-Type": "application/json",
+        **adapter.auth_headers(api_key),
+        "User-Agent": MILOCO_USER_AGENT,
+    }
     try:
+        await cb.before_call()  # 熔断 OPEN → 直接抛 CircuitOpenError
         async with httpx.AsyncClient(timeout=config.timeout) as client:
-            resp = await client.post(
-                f"{config.base_url}/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": MILOCO_USER_AGENT,
-                },
-                json=body,
-            )
-            if resp.status_code != 200:
-                logger.error(
-                    "Omni API error %d: %s", resp.status_code, resp.text[:500]
+            if not forced_stream:
+                resp = await client.post(url, headers=headers, json=body)
+                classified = classify_response(resp)
+                if classified is not None:
+                    await cb.record_failure(classified)
+                    logger.error(
+                        "Omni API error %d: %s", resp.status_code, resp.text[:500]
+                    )
+                    resp.raise_for_status()
+                raw = adapter.parse_response(resp.json())
+            else:
+                # forced-stream (Qwen 等 adapter 强制 stream=True) 走 _collect_stream_response,
+                # 该函数内部对非 200 直接 raise_for_status → HTTPStatusError。下方 except
+                # 守卫 `not isinstance(e, HTTPStatusError)` 会跳过 record_failure(防非流路径
+                # 双重计数),导致 forced-stream 路径的 4xx/5xx 熔断器完全看不到。此处显式
+                # 补一次 classify + record_failure 后再抛,与非流路径行为对齐。
+                try:
+                    raw = await _collect_stream_response(
+                        client, url, headers, body, adapter
+                    )
+                except httpx.HTTPStatusError as e:
+                    classified = classify_response(e.response)
+                    if classified is not None:
+                        await cb.record_failure(classified)
+                        logger.error(
+                            "Omni API error %d (stream): %s",
+                            e.response.status_code,
+                            e.response.text[:500],
+                        )
+                    raise
+            if not isinstance(raw, dict):
+                # 用 __class__.__name__ 而非 type(...) 避免遮盖问题(参数名 type)
+                raw_cls = raw.__class__.__name__
+                await cb.record_failure(
+                    ClassifiedError(
+                        "bad_response",
+                        f"non-dict body ({raw_cls})",
+                        ErrorCategory.RECOVERABLE,
+                    )
                 )
-            resp.raise_for_status()
-            raw = resp.json()
+                raise OmniError(f"omni response is not a dict (got {raw_cls})")
+            await cb.record_success()
             fire_record(config.model, raw.get("usage", {}), type)
         return raw
+    except CircuitOpenError as ce:
+        short_circuited = True
+        error = {"code": ce.code, "msg": ce.message[:512]}
+        raise OmniError(f"call_omni short-circuited: {ce.message}", original=ce) from ce
     except OmniError:
-        raise  # 不重复包装
+        raise
     except Exception as e:
+        # HTTP 响应异常已在 record_failure 里记过;这里补记 exception 类。
+        if not isinstance(e, httpx.HTTPStatusError):
+            await cb.record_failure(classify_exception(e))
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
             f"call_omni failed: {e.__class__.__name__}: {e}", original=e
         ) from e
     finally:
+        # 熔断短路 latency=0(不占实际墙钟),便于 dashboard 区分"实际尝试失败"和"熔断跳过"
+        latency_ms = 0.0 if short_circuited else (time.monotonic() - t0) * 1000
         push_omni_trace(
             request_messages=messages,
             response_raw=raw,
-            latency_ms=(time.monotonic() - t0) * 1000,
+            latency_ms=latency_ms,
             error=error,
             model=config.model,
             inference_params={
@@ -200,33 +296,74 @@ async def call_omni(
         )
 
 
-def _build_messages(payload: dict) -> list[dict]:
+async def _iter_sse_chunks(resp) -> AsyncGenerator[dict, None]:
+    """从 SSE 响应逐行解析 JSON chunks，跳过空行、非 data 行和畸形 JSON。"""
+    async for line in resp.aiter_lines():
+        line = line.strip()
+        if not line or not line.startswith("data: "):
+            continue
+        data = line[6:]
+        if data == "[DONE]":
+            break
+        try:
+            yield json.loads(data)
+        except json.JSONDecodeError:
+            continue
+
+
+async def _collect_stream_response(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    adapter: OmniProviderAdapter,
+) -> dict[str, Any]:
+    """读取 SSE 流并拼接为等效的非流式响应 dict（OpenAI 形态）。
+
+    用于 adapter 强制 stream=True（如 Qwen）或原生流式（如 Gemini）但调用方期望同步返回的
+    场景。``url`` 由调用方经 ``adapter.endpoint(..., stream=True)`` 预算好，chunk 反解析走
+    ``adapter.parse_stream_chunk``。
+    """
+    content_parts: list[str] = []
+    usage: dict[str, Any] = {}
+    async with client.stream(
+        "POST", url, headers=headers, json=body,
+    ) as resp:
+        if resp.status_code != 200:
+            await resp.aread()
+            logger.error("Omni stream error %d: %s", resp.status_code, resp.text[:500])
+            if resp.status_code == 400:
+                from miloco.perception.engine.omni.omni import (
+                    _summarize_multimodal_payload,
+                )
+                logger.error(
+                    "[omni] stream 400 payload 摘要 | %s",
+                    _summarize_multimodal_payload(body.get("messages", [])),
+                )
+            resp.raise_for_status()
+        async for chunk in _iter_sse_chunks(resp):
+            delta, chunk_usage = adapter.parse_stream_chunk(chunk)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            if delta:
+                content_parts.append(delta)
+    return {
+        "choices": [{"message": {"content": "".join(content_parts)}}],
+        "usage": usage,
+    }
+
+
+def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": payload["system_prompt"]}]
 
     content: list[dict] = [{"type": "text", "text": payload["user_content"]}]
 
-    # Video (frames + audio merged into mp4)；与 audio_base64 互斥（上游 _build_payload 保证）
+    media_info = payload.get("media_info")
+
     if payload.get("video_base64"):
-        content.append(
-            {
-                "type": "video_url",
-                "video_url": {
-                    "url": f"data:video/mp4;base64,{payload['video_base64']}"
-                },
-                "fps": payload.get("video_fps", 3),
-                "media_resolution": "max",
-            }
-        )
-    # Audio-only route：独立 input_audio 块（仅当无 video_base64 时启用）
+        content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
-        content.append(
-            {
-                "type": "input_audio",
-                "input_audio": {
-                    "data": f"data:audio/m4a;base64,{payload['audio_base64']}"
-                },
-            }
-        )
+        content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):
@@ -283,77 +420,72 @@ async def call_omni_stream(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    messages = _build_messages(payload)
+    adapter = get_adapter(config.model)
+    messages = _build_messages(payload, adapter)
 
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "max_tokens": config.max_completion_tokens,
-        "temperature": config.temperature,
-        "top_p": config.top_p,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-        "thinking": {"type": "disabled"},
-    }
+    body = adapter.build_request_body(
+        messages,
+        model=config.model,
+        max_tokens=config.max_completion_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=True,
+    )
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
     }
+    url = adapter.endpoint(config.base_url, config.model, stream=True)
 
     # 累积本次调用最后一次见到的 raw usage（OpenAI 字段），循环结束后统一上报一次，
     # 跟 call_omni / _call_omni_messages 的非 stream 路径完全对齐。
     raw_usage_seen: dict | None = None
     response_chunks: list[str] = []
     error: dict[str, Any] | None = None
+    short_circuited = False
+    cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
     try:
+        await cb.before_call()
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(config.timeout, connect=10.0)
         ) as client:
             async with client.stream(
                 "POST",
-                f"{config.base_url}/chat/completions",
+                url,
                 headers=headers,
                 json=body,
             ) as resp:
-                if resp.status_code != 200:
+                classified = classify_response(resp)
+                if classified is not None:
                     await resp.aread()
+                    await cb.record_failure(classified)
                     logger.error(
                         "Omni stream error %d: %s", resp.status_code, resp.text[:500]
                     )
                     resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # usage 在最后一个 chunk 的顶层
-                    if isinstance(chunk.get("usage"), dict):
-                        raw_usage_seen = chunk["usage"]
+                async for chunk in _iter_sse_chunks(resp):
+                    delta, chunk_usage = adapter.parse_stream_chunk(chunk)
+                    if chunk_usage is not None:
+                        raw_usage_seen = chunk_usage
                         if usage_out is not None:
                             usage_out.update(extract_usage({"usage": raw_usage_seen}))
-
-                    # content delta：choices[0].delta.content
-                    try:
-                        delta = (
-                            chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-                        )
-                    except (IndexError, KeyError):
-                        delta = None
                     if delta:
                         response_chunks.append(delta)
                         yield delta
+        await cb.record_success()
+    except CircuitOpenError as ce:
+        short_circuited = True
+        error = {"code": ce.code, "msg": ce.message[:512]}
+        raise OmniError(
+            f"call_omni_stream short-circuited: {ce.message}", original=ce
+        ) from ce
     except OmniError:
         raise  # 不重复包装
     except Exception as e:
+        if not isinstance(e, httpx.HTTPStatusError):
+            await cb.record_failure(classify_exception(e))
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
             f"call_omni_stream failed: {e.__class__.__name__}: {e}", original=e
@@ -370,10 +502,11 @@ async def call_omni_stream(
             "choices": [{"message": {"content": "".join(response_chunks)}}],
             "usage": raw_usage_seen or {},
         }
+        latency_ms = 0.0 if short_circuited else (time.monotonic() - t0) * 1000
         push_omni_trace(
             request_messages=messages,
             response_raw=raw_for_trace,
-            latency_ms=(time.monotonic() - t0) * 1000,
+            latency_ms=latency_ms,
             error=error,
             model=config.model,
             inference_params={

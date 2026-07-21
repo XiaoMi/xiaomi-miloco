@@ -87,6 +87,39 @@ async def call_agent_webhook(
     return result.get("data")
 
 
+async def reset_agent_sessions(
+    routes: list[tuple[str, str]],
+    *,
+    delete_transcript: bool = True,
+    timeout: float = 10.0,
+) -> Any:
+    """批量重置 agent session。优先走 adapter.reset_sessions（精确按 lane 区分），
+    adapter 未实现时退回 webhook（只传 session_key，兼容 OpenClaw / WebhookAdapter）。
+
+    用于切换家庭时清掉旧家庭遗留的 miloco 会话上下文。异常不抛，由调用方（switch_home
+    的后台任务）捕获并降级为 WARN，绝不影响切换本身。
+    """
+    if not routes:
+        return None
+
+    from miloco.agent_platform import get_adapter
+    adapter = get_adapter()
+    adapter_reset = getattr(adapter, "reset_sessions", None)
+    if callable(adapter_reset):
+        return await adapter_reset(routes, timeout=timeout)
+
+    # 兜底：adapter 未实现 → 退回旧 webhook（OpenClaw / WebhookAdapter）
+    session_keys = list({sk for sk, _ in routes})
+    return await call_agent_webhook(
+        "reset_sessions",
+        {
+            "sessionKeys": session_keys,
+            "deleteTranscript": delete_transcript,
+        },
+        timeout=timeout,
+    )
+
+
 async def run_agent_turn(
     text: str,
     *,
@@ -96,6 +129,8 @@ async def run_agent_turn(
     wait_timeout_ms: int,
     deliver: bool | None = None,
     resolve_target: str | None = None,
+    light_context: bool = False,
+    idempotency_key: str | None = None,
 ) -> tuple[str | None, str, float]:
     """投递一条消息并**同步等待**该 turn 结束(或超时),返回 ``(run_id, status, rtt_ms)``。
 
@@ -108,6 +143,12 @@ async def run_agent_turn(
       assistant 回复投递到会话绑定的 IM channel(用户可见);resolve_target=
       "owner-channel" 让插件忽略 sessionKey、把 turn 跑在车主 IM 会话里。
       不传(None)时不进 payload,插件按原默认行为(后台 turn,deliver=false)。
+    - ``light_context``:透传到 webhook body 的 ``lightContext``。true 时 openclaw
+      侧走 lightweight bootstrap (bootstrap-snapshot / tool inventory 精简), 用于
+      高频低负载 job (P2 sys:* digest / dreaming / habit-suggest)。P1 用户级 cron
+      默认 false。
+    - ``idempotency_key``:显式传入的幂等键 (cron runner at 型走稳定 key, 靠
+      openclaw dedupe TTL 兜重试)。不传时 fallback ``trace_id`` (维持老行为)。
 
     HTTP 超时 = ``wait_timeout_ms/1000 + _HTTP_BUFFER_S``,**必须 > wait_timeout_ms**,
     否则 HTTP 先超时而平台 turn 仍在跑。webhook 传输失败(连接/5xx/HTTP 超时)直接
@@ -119,15 +160,17 @@ async def run_agent_turn(
         "sessionKey": session_key,
         "lane": lane,
         "traceId": trace_id,
-        # 批次稳定幂等键:HTTP 真断(turn 已起但响应丢)后 dispatcher 重试会发新
-        # 请求,平台按此键去重,避免同会话并发起第二个 turn 击穿 "在途 turn ≤ 1"。
-        "idempotencyKey": trace_id,
+        # 幂等键:cron runner 走稳定 key + openclaw dedupe TTL, 别的路径 fallback
+        # 到 trace_id (HTTP 真断重试时按此键去重, 避免击穿"在途 turn ≤ 1")。
+        "idempotencyKey": idempotency_key or trace_id,
         "timeoutMs": wait_timeout_ms,
     }
     if deliver is not None:
         payload["deliver"] = deliver
     if resolve_target is not None:
         payload["resolveTarget"] = resolve_target
+    if light_context:
+        payload["lightContext"] = True
     data = await call_agent_webhook(
         "agent",
         payload,

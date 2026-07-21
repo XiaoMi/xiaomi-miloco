@@ -183,8 +183,7 @@ def mock_rule_repo():
 @pytest.fixture
 def mock_task_repo():
     repo = MagicMock()
-    repo.delete_link_by_ref = MagicMock(return_value=1)
-    # 方案 P：rule create 前置校验 task 存在；mock 默认放行
+    # rule create 前置校验 task 存在；mock 默认放行
     repo.task_exists = MagicMock(return_value=True)
     return repo
 
@@ -206,6 +205,58 @@ def runner(mock_miot_proxy, mock_log_repo, mock_task_record_service):
         rules=rules, miot_proxy=mock_miot_proxy, rule_log_repo=mock_log_repo,
         task_record_service=mock_task_record_service,
     )
+
+
+@pytest.mark.asyncio
+async def test_rule_static_action_writes_ledger_source_rule(runner, monkeypatch):
+    """rule static 直控经 _execute_action 也落 action_ledger(source=rule / source_id=rule_id)。
+
+    修 Zirconi review:rule 直控绕过 MiotService.control_device,原先审计不到——现复用
+    同一 _write_action_ledger helper,不再有覆盖盲区。
+    """
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.rule.schema import RuleAction
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+
+    action = RuleAction(did="dev1", iid="prop.2.1", value=True,
+                        idempotent=False, cooldown_minutes=10)
+    await runner._execute_action("rule-42", action)
+
+    spy.assert_awaited_once()
+    kw = spy.await_args.kwargs
+    assert kw["source"] == "rule"
+    assert kw["source_id"] == "rule-42"
+    assert kw["did"] == "dev1"
+    assert kw["action_type"] == "set_property"
+    assert kw["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_rule_action_exception_ledger_keeps_attempted_value(
+    runner, monkeypatch, mock_miot_proxy
+):
+    """异常路径台账保留尝试参数(value_json 非 NULL)——失败动作是排查时最有
+    价值的场景,不能只落 error 看不到当时想设什么值(review: Zirconi)。"""
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.rule.schema import RuleAction
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+    mock_miot_proxy.set_device_properties = _AM(side_effect=RuntimeError("net down"))
+
+    action = RuleAction(did="dev1", iid="prop.2.1", value=True, idempotent=False)
+    result = await runner._execute_action("rule-9", action)
+
+    assert result.result is False
+    spy.assert_awaited_once()
+    kw = spy.await_args.kwargs
+    assert kw["success"] is False
+    assert kw["action_type"] == "set_property"
+    assert kw["value_json"] == "true"
 
 
 @pytest.fixture
@@ -932,7 +983,7 @@ class TestRuleServiceDelete:
         assert result is True
         mock_rule_repo.delete.assert_called_once_with("r1")
         mock_log_repo.delete_by_rule_id.assert_called_once_with("r1")
-        mock_task_repo.delete_link_by_ref.assert_called_once_with("rule", "r1")
+        # v2: delete_link_by_ref 已删除 (task_link 表 DROP), 不再联动
 
     @pytest.mark.asyncio
     async def test_delete_not_found(self, service, mock_rule_repo):
@@ -1739,7 +1790,11 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
 
     @pytest.mark.asyncio
     async def test_set_property_returns_nonzero_code(self, runner, mock_miot_proxy):
-        """set_device_properties 返回 code!=0 → action 标记 false 并附 miot_failed。"""
+        """set_device_properties 返回负码 → action 标记 false 并附失败释义。
+
+        与 control_device 同口径(summarize_results / #394):负码即失败,error 是失败码
+        的中文释义(而非旧的裸 dict repr),台账 result_msg 也据此非 NULL。
+        """
         mock_miot_proxy.set_device_properties = AsyncMock(
             return_value=[{"code": -1, "value": None}]
         )
@@ -1749,7 +1804,38 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
 
         result = await runner.trigger_rule("rule-bad-code", "测试")
         assert result.action_results[0].result is False
-        assert "miot_failed" in (result.action_results[0].error or "")
+        # 失败附带释义(summarize_results 的 msg),非 None/空
+        assert result.action_results[0].error
+
+    @pytest.mark.asyncio
+    async def test_set_property_empty_result_is_failure(
+        self, runner, mock_miot_proxy
+    ):
+        """MIoT 空返回 = 失败(规则执行语义):未确认的执行不能算成功,
+        否则会误写 cooldown 压掉后续真实动作(review: Zirconi)。"""
+        mock_miot_proxy.set_device_properties = AsyncMock(return_value=[])
+        action = _make_action(idempotent=False, cooldown=5)
+        rule = _make_static_rule(rule_id="rule-empty-res", actions=[action])
+        runner.add_rule(rule)
+
+        result = await runner.trigger_rule("rule-empty-res", "测试")
+        assert result.action_results[0].result is False
+        assert "无法确认" in (result.action_results[0].error or "")
+        # 失败不得写 cooldown——否则空返回后真实动作被压掉
+        assert not runner._ensure_state("rule-empty-res").action_cooldown
+
+    @pytest.mark.asyncio
+    async def test_call_action_none_result_is_failure(self, runner, mock_miot_proxy):
+        """call_device_action 返回 None(不可判定)→ 失败,不按成功处理。"""
+        mock_miot_proxy.call_device_action = AsyncMock(return_value=None)
+        action = _make_action(iid="action.5.1", value=None, idempotent=False)
+        action.params = []
+        rule = _make_static_rule(rule_id="rule-none-res", actions=[action])
+        runner.add_rule(rule)
+
+        result = await runner.trigger_rule("rule-none-res", "测试")
+        assert result.action_results[0].result is False
+        assert "无法确认" in (result.action_results[0].error or "")
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)

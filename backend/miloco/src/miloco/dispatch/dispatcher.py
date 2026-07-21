@@ -8,8 +8,13 @@
 透明存储，按会话维护队列、同类合并、单飞投递，平台侧同一会话在途 turn 恒 ≤1。
 
 调度全部前置在 ``run_agent_turn``（openclaw ``agent`` webhook）之前完成——平台一旦
-入队不可取消 / 改序，故合并 / 淘汰 / 排序必须在此层做。合并 / 丢弃 / 超时三类
+入队不可取消 / 改序，故合并 / 淘汰 / 排序必须在此层做。合并 / 丢弃 / 超时 / 过期四类
 「静默动作」均带 WARN 日志兜底。
+
+过期（TTL）：每条事件记入队时刻 ``enqueued_at``，入队龄超过
+``dispatcher.message_ttl_sec`` 即为过期。过期清理在两处发生——「新消息入队」时
+（先腾出过期占用的空间，再判超长淘汰）与「打包发送前」（``_take_batch`` 取批前）。
+收发在同一台机器实时进行，故仅 backend 发送前统一判过期，插件侧不重复校验。
 """
 
 from __future__ import annotations
@@ -22,10 +27,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from miloco.agent_platform import get_adapter
+from miloco.agent_platform.base import AdapterTransportError, TurnContext
 from miloco.config import get_settings
-from miloco.middleware.exceptions import AgentWebhookException
 from miloco.observability.agent_meta_poller import AgentRunSource, track_agent_run
-from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,16 @@ _ROUTE: dict[EventType, tuple[str, str, int]] = {
     "onboarding": ("agent:main:miloco", "miloco-interactive", 30),
 }
 
+# 去重后的 miloco session 全集（保持插入序），供切换家庭时批量 reset 用——
+# 以 _ROUTE 为唯一事实源，避免在别处手抄 sessionKey 造成漂移。
+MILOCO_SESSION_KEYS: list[str] = list(
+    dict.fromkeys(session_key for session_key, _lane, _prio in _ROUTE.values())
+)
+# session_key + lane 配对（供 reset_sessions 精确按 lane 区分会话）
+MILOCO_SESSION_ROUTES: list[tuple[str, str]] = list(
+    dict.fromkeys((session_key, lane) for session_key, lane, _prio in _ROUTE.values())
+)
+
 # 仅这三类（== AgentRunSource）写 agent_runs；bind / onboarding 不统计。
 _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"})
 
@@ -52,10 +67,18 @@ _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"}
 # turn 直接跑在车主 IM 会话里且回复用户可见（deliver=True）——只把开场白 push 过去
 # 而 turn 留在后台会话会割裂上下文（用户的 IM 回复落在 channel 会话，访谈状态却在
 # 别处）。注意：队列仍按 _ROUTE 的 sessionKey 归并/单飞，实际 turn 会话由插件侧按
-# resolveTarget 解析（owner-channel = 配置的 notifySessionKey，否则最近活跃的已绑定
-# channel 会话）。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
+# resolveTarget 解析：owner-channel 会先看 notifySessionKeys，对多个已绑定会话广播
+# 首邀并在首个回复处锁定后续 onboarding；一个都没有时才回退到最近活跃的已绑定
+# channel 会话。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
 _DELIVERY: dict[EventType, dict[str, Any]] = {
     "onboarding": {"resolve_target": "owner-channel", "deliver": True},
+}
+
+# send_turn profile 按事件类型映射。不在表内的类型（interaction/bind/onboarding）
+# 统一走 "full"（`_PROFILE.get(event_type, "full")` 兜底）；rule/suggestion 后台事件显式降级。
+_PROFILE: dict[EventType, str] = {
+    "rule": "rule",
+    "suggestion": "suggestion",
 }
 
 
@@ -67,7 +90,7 @@ class _QueuedEvent:
     items: list[Any]  # 结构化条目（list[Speech] / list[Suggestion] / [RuleTriggerCallback] / [str]）
     builder: Builder  # 该类型格式化函数引用；同一类型恒为同一 builder
     priority: int  # 类型级优先级（来自 _ROUTE，数字小=优先）
-    enqueued_at: float  # time.monotonic()，用于同类合并排序 + 淘汰判旧
+    enqueued_at: float  # time.monotonic()，即消息创建时刻；用于同类合并排序 + 淘汰判旧 + 过期判龄
     intra_priority: int = 0  # 条目级优先级（数字小=优先）；无内层优先级的类型恒 0，仅参与淘汰、不改渲染序
     # 可选投递结果 future：需要区分「入队被接纳」与「真正送达平台」的 producer
     # （如 onboarding 终身一次性标记）传入；dispatcher 保证它在**每一条**丢弃/送达
@@ -85,12 +108,6 @@ def _resolve_delivered(fut: "asyncio.Future[bool] | None", ok: bool) -> None:
 
 class AgentDispatcher:
     """按 sessionKey 维护队列与单飞 drainer。"""
-
-    # 传输级重试:仅对 AgentWebhookException(连接 / 5xx / HTTP 超时)做有限短退避重试,
-    # 覆盖 webhook 瞬时不可达;exhausted 后 WARN 跳过该批。status=="timeout" 不在此列
-    # (turn 已在平台侧运行,重试会重复触发)。
-    _TRANSPORT_RETRIES = 2
-    _TRANSPORT_BACKOFF_S = 0.5
 
     def __init__(self) -> None:
         self._queues: dict[str, list[_QueuedEvent]] = {}
@@ -157,8 +174,11 @@ class AgentDispatcher:
         )
         q = self._queues.setdefault(session_key, [])
         q.append(ev)
+        # 新消息入队即先清理过期条目腾空间，再判超长淘汰——这样过期者优先让位，
+        # 避免用「淘汰有效消息」去容纳一条本该被过期清掉的僵尸。
+        self._drop_expired(session_key)
         self._enforce_cap(session_key)
-        accepted = any(e is ev for e in q)
+        accepted = any(e is ev for e in self._queues.get(session_key, ()))
         self._kick(session_key)
         return accepted
 
@@ -183,6 +203,38 @@ class AgentDispatcher:
                 evicted,
                 cap,
             )
+
+    def _drop_expired(self, session_key: str) -> None:
+        """清理入队龄超过 ``message_ttl_sec`` 的过期事件（被淘汰即未送达）。
+
+        入队龄 = ``time.monotonic() - enqueued_at``。TTL<=0 视作关闭过期，直接返回。
+        过期属「静默丢弃」→ 逐条 resolve delivered=False + WARN 兜底。
+        """
+        ttl_sec = get_settings().dispatcher.message_ttl_sec
+        if ttl_sec <= 0:
+            return
+        q = self._queues.get(session_key)
+        if not q:
+            return
+        now = time.monotonic()
+        fresh: list[_QueuedEvent] = []
+        expired: list[_QueuedEvent] = []
+        for ev in q:
+            (expired if now - ev.enqueued_at > ttl_sec else fresh).append(ev)
+        if not expired:
+            return
+        self._queues[session_key] = fresh
+        for ev in expired:
+            _resolve_delivered(ev.delivered, False)
+        # [DROPPED] 标记便于在 miloco-backend.log 里 grep；附最旧条目的延迟时长。
+        max_age = max(now - ev.enqueued_at for ev in expired)
+        logger.warning(
+            "[DROPPED] dispatcher expired %d event(s) session=%s ttl_sec=%.1f max_delay_sec=%.1f",
+            len(expired),
+            session_key,
+            ttl_sec,
+            max_age,
+        )
 
     def _kick(self, session_key: str) -> None:
         if self._closed or session_key in self._draining:
@@ -209,7 +261,9 @@ class AgentDispatcher:
         """取会话内优先级最高的类型的全部事件，按入队时间升序，移出队列。
 
         每轮 turn 恒单一类型（同一 builder），保证「单头、统一编号」。
+        取批前先清理过期条目：僵尸消息绝不打包进本轮 turn。
         """
+        self._drop_expired(session_key)
         q = self._queues.get(session_key)
         if not q:
             return []
@@ -245,31 +299,28 @@ class AgentDispatcher:
             status: str = "error"
             rtt_ms: float = 0.0
             delivery = _DELIVERY.get(event_type, {})
-            for attempt in range(self._TRANSPORT_RETRIES + 1):
-                try:
-                    run_id, status, rtt_ms = await run_agent_turn(
-                        msg,
-                        session_key=session_key,
-                        lane=lane,
-                        trace_id=trace_id,
-                        wait_timeout_ms=wait_ms,
-                        **delivery,
-                    )
-                    break
-                except AgentWebhookException as e:
-                    # 传输失败（连接 / 5xx / HTTP 超时）→ 有限短退避重试,
-                    # exhausted 后 WARN、跳过该批，继续下一批。
-                    if attempt == self._TRANSPORT_RETRIES:
-                        logger.warning(
-                            "agent turn transport failed session=%s type=%s err=%s; "
-                            "skipping batch after %d attempts",
-                            session_key,
-                            event_type,
-                            e,
-                            attempt + 1,
-                        )
-                        return
-                    await asyncio.sleep(self._TRANSPORT_BACKOFF_S * (2**attempt))
+            adapter = get_adapter()
+            try:
+                profile = _PROFILE.get(event_type, "full")
+                ctx_obj = TurnContext(
+                    text=msg,
+                    session_key=session_key,
+                    lane=lane,
+                    trace_id=trace_id,
+                    wait_timeout_ms=wait_ms,
+                    profile=profile,
+                    extra={"delivery": delivery},
+                )
+                result = await adapter.send_turn(ctx_obj)
+                run_id = result.run_id
+                status = result.status
+                rtt_ms = result.rtt_ms
+            except AdapterTransportError:
+                logger.warning(
+                    "adapter send_turn failed session=%s type=%s; skipping batch",
+                    session_key, event_type,
+                )
+                return
 
             if status == "no-channel":
                 # 插件侧结构化失败：车主从未私聊过 bot，解析不到 IM 会话。这不是

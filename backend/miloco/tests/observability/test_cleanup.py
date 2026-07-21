@@ -2,6 +2,7 @@ import time
 from datetime import datetime, timedelta
 
 from miloco.observability.cleanup import (
+    cleanup_action_ledger_table,
     cleanup_agent_runs_table,
     cleanup_events_table,
     cleanup_trace_jsonl,
@@ -61,6 +62,25 @@ def test_cleanup_events_independent(tmp_path):
     )
     deleted = cleanup_events_table(conn, retention_days=7)
     assert deleted == 1
+
+
+def test_cleanup_action_ledger_table(tmp_path):
+    """action_ledger 过期清理:旧行删、新行留(value_json 含 TTS 全文,
+    不接入 cleanup 会无限增长且敏感文本无限期留存——review: Zirconi)。"""
+    conn = connect(tmp_path / "obs.db")
+    init_schema(conn)
+    now_ms = int(time.time() * 1000)
+    old = now_ms - 8 * 86400 * 1000
+    new = now_ms - 1 * 86400 * 1000
+    for rid, ts in [("a-old", old), ("a-new", new)]:
+        conn.execute(
+            "INSERT INTO action_ledger (id, timestamp, action_type, did, success) "
+            "VALUES (?, ?, ?, ?, ?)", (rid, ts, "set_property", "d1", 1)
+        )
+    deleted = cleanup_action_ledger_table(conn, retention_days=7)
+    assert deleted == 1
+    remaining = [r[0] for r in conn.execute("SELECT id FROM action_ledger")]
+    assert remaining == ["a-new"]
 
 
 def test_cleanup_trace_jsonl_removes_old_dir(tmp_path):
