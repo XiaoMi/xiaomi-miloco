@@ -225,7 +225,7 @@ def build_fused_payload(
     # 待识别 track（名册的 bbox 是为"把姓名对应到视频里的人"，audio 场景无意义）。
     if _resolve_route(packets) == "audio":
         scene = SceneDescriptor(route="audio", has_identity=False, stream=False)
-        system_prompt = build_system_prompt(scene, include_home_profile=False)
+        system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
         ep = packets[0]
         audio_b64 = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
         user_content: list[dict] = []
@@ -264,7 +264,7 @@ def build_fused_payload(
         has_speech=_batch_video_has_speech(packets),
         identity_match_disabled=matching_moot,
     )
-    system_prompt = build_system_prompt(scene, include_home_profile=False)
+    system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
     user_content = _build_fused_user_content(
         packets=packets,
         context=context,
@@ -378,11 +378,12 @@ def _build_payload(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
     )
+    user_text = _build_user_content(
+        packets, context, stream=stream, label_lookup=label_lookup,
+    )
     base: dict = {
-        "system_prompt": build_system_prompt(scene, include_home_profile=include_home_profile),
-        "user_content": _build_user_content(
-            packets, context, stream=stream, label_lookup=label_lookup,
-        ),
+        "system_prompt": build_system_prompt(scene, include_home_profile=include_home_profile, camera_prompt=context.camera_prompt),
+        "user_content": user_text,
         "crops": [],
     }
     if route == "audio":
@@ -402,7 +403,12 @@ def _build_payload(
 # =============================================================================
 
 
-def build_system_prompt(scene: SceneDescriptor, *, include_home_profile: bool = True) -> str:
+def build_system_prompt(
+    scene: SceneDescriptor,
+    *,
+    include_home_profile: bool = True,
+    camera_prompt: str | None = None,
+) -> str:
     """按场景装配 system prompt。
 
     结构：``角色 → 输出模式 → # 任务 → # 输出格式(schema) → # 字段说明 → # 提醒判定
@@ -443,6 +449,13 @@ def build_system_prompt(scene: SceneDescriptor, *, include_home_profile: bool = 
         home_profile = get_home_profile_prefix()
         if home_profile:
             parts.append(home_profile)
+    # camera_prompt — 低频变动，放在 system prompt 尾部 → prefix cache 能命中前面的共享前缀
+    note = camera_prompt.strip() if camera_prompt else ""
+    if note:
+        parts.append(
+            "## 本摄像头须知\n\n"
+            "以下是该机位的环境说明（要关注/忽略什么），请严格遵循以下指导进行感知描述——\n" + note
+        )
     return "\n\n".join(p for p in parts if p)
 
 

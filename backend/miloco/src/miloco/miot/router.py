@@ -25,6 +25,8 @@ from miloco.middleware import (
 from miloco.middleware.exceptions import HTTPException
 from miloco.miot.schema import (
     AuthorizeRequest,
+    CameraPromptClearRequest,
+    CameraPromptRequest,
     CameraToggleRequest,
     CameraVoiceToggleRequest,
     DeviceControlRequest,
@@ -537,6 +539,37 @@ async def toggle_scope_camera_voice(
     # 与相机启用开关的 refresh/sync/restart 逻辑正交,分开更清晰。
     data = await manager.miot_service.toggle_camera_voice(
         [{"did": i.did, "voice_in_use": i.voice_in_use} for i in request.items]
+    )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.put(
+    path="/scope/cameras/prompt",
+    summary="Batch set per-camera perception prompt (scene guidance)",
+    response_model=NormalResponse,
+)
+async def set_scope_camera_prompt(
+    request: CameraPromptRequest, current_user: str = Depends(verify_token)
+):
+    # 设置自定义感知 prompt：与启用/拾音开关正交，不重启感知引擎（引擎逐窗实时读 KV）。
+    # prompt 非空（空字符串在 schema 层被拒）。
+    data = await manager.miot_service.set_camera_prompt(
+        [{"did": i.did, "prompt": i.prompt} for i in request.items]
+    )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.delete(
+    path="/scope/cameras/prompt",
+    summary="Batch clear per-camera perception prompt",
+    response_model=NormalResponse,
+)
+async def clear_scope_camera_prompt(
+    request: CameraPromptClearRequest, current_user: str = Depends(verify_token)
+):
+    # 清除自定义感知 prompt：显式 DELETE，不需要传 prompt 字段。
+    data = await manager.miot_service.clear_camera_prompt(
+        [i.did for i in request.items]
     )
     return NormalResponse(code=0, message="ok", data=data)
 

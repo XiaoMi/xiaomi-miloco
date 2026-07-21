@@ -961,6 +961,7 @@ interface BackendScopeCamera {
   // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
   // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
   voice_in_use?: boolean;
+  perception_prompt?: string;
   connected: boolean;
   channel?: number;  // 通道号，用于多通道摄像头
   channel_count?: number;  // 通道总数；判多通道的权威信号（旧后端无则兜底 1）
@@ -980,6 +981,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     awake: c.awake ?? null,
     inUse: c.in_use,
     voiceInUse: c.voice_in_use ?? false,
+    perceptionPrompt: c.perception_prompt ?? "",
     connected: c.connected,
     channel: c.channel ?? 0,  // 传递通道号，默认为 0
     channelCount: c.channel_count ?? 1,  // 通道总数，判多通道用；旧后端兜底 1
@@ -1030,6 +1032,23 @@ export async function realToggleScopeCameraVoice(
     body: JSON.stringify({
       items: dids.map((did) => ({ did, voice_in_use: voiceInUse })),
     }),
+  });
+}
+
+export async function realSetScopeCameraPrompt(
+  did: string,
+  text: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/miot/scope/cameras/prompt", {
+    method: "PUT",
+    body: JSON.stringify({ items: [{ did, prompt: text }] }),
+  });
+}
+
+export async function realClearScopeCameraPrompt(did: string): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/miot/scope/cameras/prompt", {
+    method: "DELETE",
+    body: JSON.stringify({ items: [{ did }] }),
   });
 }
 

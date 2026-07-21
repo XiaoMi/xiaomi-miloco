@@ -309,6 +309,20 @@ export async function toggleScopeCameraVoice(
   return impl.realToggleScopeCameraVoice(dids, voiceInUse);
 }
 
+// 设置相机自定义感知须知 prompt（PUT /api/miot/scope/cameras/prompt）。
+// text 必须非空。给该机位补环境说明 / 关注 / 忽略，指导感知消解固定误识。
+export async function setScopeCameraPrompt(
+  did: string,
+  text: string,
+): Promise<void> {
+  return impl.realSetScopeCameraPrompt(did, text);
+}
+
+// 清除相机自定义感知须知（DELETE /api/miot/scope/cameras/prompt）。
+export async function clearScopeCameraPrompt(did: string): Promise<void> {
+  return impl.realClearScopeCameraPrompt(did);
+}
+
 export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> {
   if (!isPrimary(homeId)) {
     return [];

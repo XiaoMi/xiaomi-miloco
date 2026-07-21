@@ -13,6 +13,7 @@ from typing import Any, Literal
 from miot.types import MIoTCameraInfo, MIoTCameraStatus
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from miloco.miot.filter import MAX_CAMERA_PROMPT_LEN
 from miloco.utils.media import image_bytes_to_base64, image_manager
 
 
@@ -262,6 +263,49 @@ class CameraVoiceToggleRequest(BaseModel):
     """
 
     items: list[CameraVoiceToggleItem] = Field(..., min_length=1)
+
+
+class CameraPromptItem(BaseModel):
+    """单个相机的自定义「感知须知」prompt 设置。"""
+
+    did: str = Field(..., min_length=1, description="相机 did")
+    prompt: str = Field(
+        ...,
+        max_length=MAX_CAMERA_PROMPT_LEN,
+        description=(
+            "该机位专属感知指导（环境说明 / 关注 / 忽略）；逐窗注入 omni user content。"
+            f"非空，上限 {MAX_CAMERA_PROMPT_LEN} 字。"
+        ),
+    )
+
+    @field_validator("prompt", mode="after")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("感知须知不能为空（清除请用 DELETE 端点）")
+        return stripped
+
+
+class CameraPromptRequest(BaseModel):
+    """批量设置相机自定义感知 prompt。每项独立指定 did + prompt（非空）。
+
+    与拾音 / 启用开关正交：不从属感知开关，关着的相机也可预配（仅在被感知时注入生效）。
+    """
+
+    items: list[CameraPromptItem] = Field(..., min_length=1)
+
+
+class CameraPromptClearItem(BaseModel):
+    """单个相机的自定义「感知须知」清除操作。"""
+
+    did: str = Field(..., min_length=1, description="相机 did")
+
+
+class CameraPromptClearRequest(BaseModel):
+    """批量清除相机自定义感知 prompt。每项只需 did。"""
+
+    items: list[CameraPromptClearItem] = Field(..., min_length=1)
 
 
 class AuthorizeRequest(BaseModel):

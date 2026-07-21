@@ -17,6 +17,8 @@ import {
   refreshCameraOnline,
   pausePerception,
   resumePerception,
+  setScopeCameraPrompt,
+  clearScopeCameraPrompt,
   toggleScopeCamera,
   toggleScopeCameraVoice,
   switchScopeHome,
@@ -250,6 +252,22 @@ function MainApp() {
                 }
                 // 拾音开关只改 KV 偏好,不动投喂/流(音频在引擎入口按 KV 实时剥离),
                 // 只需 reload scopeCameras 拿新 voiceInUse。
+                scopeCameras.reload();
+              }}
+              onSetCameraPrompt={async (did, text) => {
+                try { await setScopeCameraPrompt(did, text); }
+                catch (e) {
+                  toast(e instanceof Error ? e.message : t("common.switchFailed"), "warn");
+                  throw e;
+                }
+                scopeCameras.reload();
+              }}
+              onClearCameraPrompt={async (did) => {
+                try { await clearScopeCameraPrompt(did); }
+                catch (e) {
+                  toast(e instanceof Error ? e.message : t("common.switchFailed"), "warn");
+                  throw e;
+                }
                 scopeCameras.reload();
               }}
               onRefresh={async () => {

@@ -2,12 +2,13 @@
 
 import click
 
-from miloco_cli.client import api_get, api_put
+from miloco_cli.client import api_delete, api_get, api_put
 from miloco_cli.output import print_result
 
 _HOMES_PATH = "/api/miot/scope/homes"
 _CAMERAS_PATH = "/api/miot/scope/cameras"
 _CAMERAS_VOICE_PATH = "/api/miot/scope/cameras/voice"
+_CAMERAS_PROMPT_PATH = "/api/miot/scope/cameras/prompt"
 
 
 def _compose_channel_dids(resp: dict) -> dict:
@@ -126,5 +127,37 @@ def scope_camera_mic_off(dids, pretty):
     result = api_put(
         _CAMERAS_VOICE_PATH,
         {"items": [{"did": d, "voice_in_use": False} for d in dids]},
+    )
+    print_result(result, pretty)
+
+
+# ── 每摄像头「感知须知」自定义 prompt：给该机位补环境说明 / 关注 / 忽略事项 ──
+#
+# 逐感知窗注入 omni user content（仅视频路由），指导模型消解该机位的固定误识
+# （如门口机位误把公共走廊电梯门当自家入户门）。与启用/拾音开关正交、不重启引擎，
+# 下一窗即生效。空文本 = 清除。上限见 backend（默认 500 字），超限由 backend 拒绝并透传。
+
+
+@scope_camera.command("prompt-set")
+@click.argument("did")
+@click.argument("text")
+@click.option("--pretty", is_flag=True)
+def scope_camera_prompt_set(did, text, pretty):
+    """设置某摄像头的感知须知（TEXT 建议加引号；含环境 / 关注 / 忽略，指导感知消解误识）。"""
+    result = api_put(
+        _CAMERAS_PROMPT_PATH,
+        {"items": [{"did": did, "prompt": text}]},
+    )
+    print_result(result, pretty)
+
+
+@scope_camera.command("prompt-clear")
+@click.argument("dids", nargs=-1, required=True)
+@click.option("--pretty", is_flag=True)
+def scope_camera_prompt_clear(dids, pretty):
+    """清除指定摄像头的感知须知（回到无自定义）。"""
+    result = api_delete(
+        _CAMERAS_PROMPT_PATH,
+        body={"items": [{"did": d} for d in dids]},
     )
     print_result(result, pretty)
