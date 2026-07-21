@@ -1797,7 +1797,6 @@ async def test_refresh_cameras_gap_fills_awake_for_current_home(_scope_proxy_env
 def test_camera_prompts_empty():
     kv = _FakeKV()
     assert miot_filter.camera_prompts(kv) == {}
-    assert miot_filter.get_camera_prompt(kv, "c1") is None
 
 
 def test_camera_prompts_with_values():
@@ -1805,8 +1804,7 @@ def test_camera_prompts_with_values():
         {ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "门口机位", "c2": "书房"})}
     )
     assert miot_filter.camera_prompts(kv) == {"c1": "门口机位", "c2": "书房"}
-    assert miot_filter.get_camera_prompt(kv, "c1") == "门口机位"
-    assert miot_filter.get_camera_prompt(kv, "ghost") is None
+    assert miot_filter.camera_prompts(kv).get("ghost") is None
 
 
 def test_camera_prompts_invalid_json_treated_as_empty(caplog):
@@ -1823,12 +1821,6 @@ def test_camera_prompts_filters_null_values():
     prompts = miot_filter.camera_prompts(kv)
     assert "c1" not in prompts  # null 被跳过
     assert prompts == {"c2": "ok"}
-
-
-def test_get_camera_prompt_strips_and_empties_to_none():
-    kv = _FakeKV({ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "  ", "c2": " hi "})})
-    assert miot_filter.get_camera_prompt(kv, "c1") is None  # 全空白 → None
-    assert miot_filter.get_camera_prompt(kv, "c2") == "hi"   # strip
 
 
 def test_filter_set_camera_prompt_writes_and_clears():
