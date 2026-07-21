@@ -333,15 +333,6 @@ def camera_prompts(kv_repo: KVRepo) -> dict[str, str]:
     return _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
 
 
-def get_camera_prompt(kv_repo: KVRepo, did: str) -> str | None:
-    """单台相机的自定义感知 prompt；未配置 / 空串返回 ``None``。"""
-    text = camera_prompts(kv_repo).get(did)
-    if text is None:
-        return None
-    text = text.strip()
-    return text or None
-
-
 def set_camera_prompt(kv_repo: KVRepo, did: str, prompt: str) -> tuple[dict[str, str], bool]:
     """设置 / 清除单台相机的自定义感知 prompt。
 
