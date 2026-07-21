@@ -46,6 +46,16 @@ def cleanup_agent_runs_table(conn: sqlite3.Connection, retention_days: int) -> i
     return cur.rowcount
 
 
+def cleanup_action_ledger_table(conn: sqlite3.Connection, retention_days: int) -> int:
+    """action_ledger 过期清理:value_json 含完整动作参数(包括 TTS 全文),
+    不清理会让 observability.db 无限增长、敏感文本无限期留存。"""
+    cur = conn.execute(
+        "DELETE FROM action_ledger WHERE timestamp < ?",
+        (_cutoff_ms(retention_days),),
+    )
+    return cur.rowcount
+
+
 _DIR_RE = re.compile(r"^\d{8}$")
 
 

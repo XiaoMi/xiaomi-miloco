@@ -98,6 +98,7 @@ def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
     """
     from miloco.manager import get_manager
     from miloco.miot.filter import voice_allowed_camera_dids
+    from miloco.perception.collect.camera_adapter import split_channel_did
 
     try:
         voice_allowed = voice_allowed_camera_dids(get_manager().kv_repo)
@@ -107,7 +108,10 @@ def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
     kept: list[Speech] = []
     for s in speeches:
         did = s.source_device_ids[0] if s.source_device_ids else None
-        if did is None or did not in voice_allowed:
+        # 白名单存物理 did（整台相机）；source_device_ids 是合成通道 did（多通道相机
+        # ``did:ch{n}``），比对前归一到物理 did，否则双摄开了拾音也会被这道兜底误丢。
+        physical = split_channel_did(did)[0] if did is not None else None
+        if physical is None or physical not in voice_allowed:
             logger.info(
                 "speech 被摄像头声音开关拦截丢弃(未开启拾音,不下发/不落库): did=%s device_name=%s content_len=%d",
                 did, s.device_name, len(s.content),
@@ -377,19 +381,17 @@ class PerceptionEngineProxy:
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎 proxy 失败 | %s", e)
 
-    async def rebuild(self) -> None:
-        """无条件销毁当前引擎实例并按最新配置重建（运行时改感知参数后生效用）。
+    async def apply_omni_fps(self, omni_fps: int) -> None:
+        """运行时热更 omni_fps（含其顶起的 tracker fps）到活跃引擎，不重建、不重载模型。
 
-        与 ``stop_to_unconfigured`` 不同：不依赖 key 被删的降级语义；与 ``try_reinit``
-        不同：不受 ``ready`` 守卫限制，``ready`` 态也强制重造。调用方须保证 settings
-        缓存已刷新（PUT config 已 ``reset_settings()``），使 ``_init_engine`` 读到新值
-        （omni_fps 等 cache 在 ``_create_engine`` 的配置）。
+        与 ``rebuild`` 不同：不销毁引擎实例，只原地更新 config + 刷新构造期派生缓存，
+        在途 track 状态全保留。持 ``_engine_lock`` 与在飞 perceive 互斥，避免推理线程
+        读到半更新状态。引擎未起（未配模型 / 降级态，``perception_engine is None``）时
+        no-op：settings 已由 PUT config 持久化，下次 ``_init_engine`` 自然读到新值。
         """
         async with self._engine_lock:
             if self.perception_engine is not None:
-                await self.close()
-                self.perception_engine = None
-            self._init_engine()
+                self.perception_engine.apply_omni_fps(omni_fps)
 
     async def stop_to_unconfigured(self) -> None:
         """软停引擎,回到「未配模型」态——与「启用→tick 自愈拉起」对称的反向操作。
@@ -857,6 +859,31 @@ class PerceptionEngineProxy:
 # ─── meaningful_events 后台持久化(异步,不阻塞 webhook 主路径)───────────
 
 
+def _collect_relevant_device_ids(result: RealtimePerceptionResult) -> list[str]:
+    """本行事件真正"有意义"的来源摄像头(去重,保序).
+
+    一次推理批次(processor.py 传入的 device_ids)可能包含全屋所有摄像头,但
+    matched_rules / suggestions / needs_response speech 各自的 source_device_ids
+    才是"引发这行事件"的那台/那几台摄像头(engine 逐设备跑 pipeline 时按
+    input_slice.device.did 精确注入,见 pipeline.py:_inject_source_meta)。
+    用于把展示的 clip 收窄到真正相关的摄像头,避免规则只绑玄关却带出书房画面。
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in (*result.matched_rules, *result.suggestions):
+        for did in item.source_device_ids:
+            if did not in seen:
+                seen.add(did)
+                ordered.append(did)
+    for s in result.speeches:
+        if s.needs_response and s.is_complete:
+            for did in s.source_device_ids:
+                if did not in seen:
+                    seen.add(did)
+                    ordered.append(did)
+    return ordered
+
+
 async def _persist_meaningful_event(
     *,
     result: RealtimePerceptionResult,
@@ -930,6 +957,20 @@ async def _persist_meaningful_event(
                     pass
 
         text = build_agent_text(result, rule_names=rule_names, rule_queries=rule_queries)
+
+        # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
+        # 否则 device_ids 和 artifacts.clips 必须同步收窄——两者分别驱动"日志展示哪些
+        # 摄像头"和"落盘哪些摄像头的 clip",不同步会导致不相关摄像头的 clip 被落盘、
+        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 文档的
+        # "0 ~ len(artifacts.clips)"不变量)。trace / gallery 不是按事件相关性归属的
+        # 产物,不参与收窄。
+        relevant_device_ids = _collect_relevant_device_ids(result)
+        if relevant_device_ids:
+            device_ids = [did for did in device_ids if did in relevant_device_ids]
+            artifacts.clips = {
+                did: payload for did, payload in artifacts.clips.items()
+                if did in relevant_device_ids
+            }
 
         insert_ok = dao.insert(
             event_id=event_id,

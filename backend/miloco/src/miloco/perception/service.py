@@ -66,34 +66,46 @@ class PerceptionService:
         async with self._lifecycle_lock:
             await self._pipeline.stop_to_unconfigured()
 
-    async def apply_config_restart(self, *, rebuild_engine: bool = True) -> bool:
-        """感知参数变更后重启使新值生效：停 runner →（按需重建引擎）→ 启 runner。
+    async def apply_config_restart(self) -> bool:
+        """window_size 变更后重启 runner 使新值生效：停 runner → 启 runner。
 
-        ``rebuild_engine`` 拆开「重建引擎」与「重启 runner」两件事，各自最小化：
-          - omni_fps 变 → 需 ``rebuild_engine=True``：omni_fps 是引擎构造时 cache 的，
-            必须 rebuild（close + _init_engine）才重读，代价含模型重载（秒级）。
-          - window_size 变（omni_fps 不变）→ ``rebuild_engine=False``：window_size 靠
-            runner.start() 重读即可（见 runner.start），只 stop→start，跳过模型重载。
-        无论哪种，只要 was_running 都要 stop→start：rebuild 后新引擎实例需靠 start 重挂
-        inference executor；window_size-only 时 stop→start 也让 runner 重读窗口。
+        window_size 靠 runner.start() 重读（见 runner.start），只需 stop→start，
+        不重建引擎、不重载模型。was_running 时才需重启（未跑时下次 start 自然读新值）。
         全程持 lifecycle 锁,避免与并发的 start_engine/stop_engine 交错。
 
-        返回重启是否成功。config 已由调用方写盘(不可回滚),重建失败(如磁盘满/
-        模型加载异常)时返 False 让调用方区分「已保存但重启失败」,不冒泡成 500——
-        否则前端会把「写盘成功+重启失败」误报成「保存失败」。
+        （omni_fps 变更不再走这里——改走 ``apply_omni_fps_live`` 运行时热更，见其注释。）
+
+        返回重启是否成功。config 已由调用方写盘(不可回滚),重启失败时返 False 让调用方
+        区分「已保存但重启失败」,不冒泡成 500——否则前端会把「写盘成功+重启失败」误报
+        成「保存失败」。
         """
         async with self._lifecycle_lock:
             try:
                 was_running = self._engine.is_running
                 if was_running:
                     await self._engine.stop()
-                if rebuild_engine:
-                    await self._pipeline.rebuild()
-                if was_running:
                     await self._engine.start()
                 return True
             except Exception as e:  # noqa: BLE001
                 logger.error("[service] 感知参数变更后重启失败(config 已写盘) | %s", e, exc_info=True)
+                return False
+
+    async def apply_omni_fps_live(self, omni_fps: int) -> bool:
+        """运行时热更 omni_fps（含其顶起的 tracker fps）：不停 runner、不重建引擎、
+        不重载模型、不丢在途 track 状态。
+
+        与 ``apply_config_restart`` 并列的轻量入口：只把新 omni_fps 原地推给活跃引擎
+        （PipelineProcessor.apply_omni_fps → proxy → engine.apply_omni_fps）。持 lifecycle
+        锁避免与 start/stop/restart 交错。引擎未起时 proxy 层 no-op（settings 已写盘）。
+
+        返回是否成功。config 已写盘(不可回滚),失败返 False 不冒泡 500（同 restart 语义）。
+        """
+        async with self._lifecycle_lock:
+            try:
+                await self._pipeline.apply_omni_fps(omni_fps)
+                return True
+            except Exception as e:  # noqa: BLE001
+                logger.error("[service] omni_fps 热更失败(config 已写盘) | %s", e, exc_info=True)
                 return False
 
     def engine_status(self) -> PerceptionEngineStatus:

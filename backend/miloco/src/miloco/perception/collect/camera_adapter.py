@@ -7,6 +7,13 @@ Subscribes to 2 decoded stream types per device via MiotProxy:
 
 Buffers fragments in a 2-track MultiTrackSyncBuffer per device. The sync
 buffer handles time-windowed A/V alignment automatically.
+
+Multi-channel cameras (dual-lens / NVR) expose each lens as a separate
+perception unit. A single-lens camera keeps its bare did; each extra channel
+gets a synthetic did ``{did}:ch{n}`` so downstream keying (device_results,
+tracking, identity) never collides across lenses. The synthetic did is the key
+that flows through discover / connect / disconnect / collect; the bare physical
+did is only used for the underlying SDK stream (sub/unsub) calls.
 """
 
 from __future__ import annotations
@@ -57,14 +64,34 @@ _CAMERA_TRACKS = ["decoded_video", "decoded_audio"]
 # 不节流会变成每秒一次重 SDK 调用 + 建连尝试。10s 足够让相机就绪后及时恢复。
 _ONDEMAND_REFRESH_MIN_INTERVAL_MS = 10_000
 
-# TODO: 多通道支持
+# 单通道相机的默认通道号（也是多通道相机 ch0）。
 DEFAULT_VIDEO_CHANNEL = 0
 DEFAULT_AUDIO_CHANNEL = 0
+
+# 合成 did 的通道后缀分隔符：``{physical_did}:ch{n}``。
+_CHANNEL_SEP = ":ch"
+
+
+def split_channel_did(did: str) -> tuple[str, int]:
+    """拆合成 did → (物理 did, 通道号)。
+
+    ``'cam1:ch1'`` → ``('cam1', 1)``；``'cam1'`` → ``('cam1', 0)``（单通道直通）。
+    """
+    if _CHANNEL_SEP in did:
+        physical, ch = did.rsplit(_CHANNEL_SEP, 1)
+        return physical, int(ch)
+    return did, DEFAULT_VIDEO_CHANNEL
 
 
 @dataclass
 class _CameraDeviceState:
-    """Per-camera stream state."""
+    """Per-channel stream state — one entry per camera lens.
+
+    Keyed by the synthetic did (``did``). For single-lens cameras that is the
+    bare did (channel 0); for multi-channel cameras it carries the ``:ch{n}``
+    suffix. The physical did / channel for SDK stream calls are derived from
+    ``did`` via :func:`split_channel_did` at the (dis)connect call sites.
+    """
 
     did: str
     sync_buffer: MultiTrackSyncBuffer = field(
@@ -128,11 +155,12 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         - did 在停用的相机集合里，或
         - （``apply_schedule=True`` 时）当前处于定时感知暂停窗口。
 
-        ``cap=True``（默认，连接/投喂路径）时最后按 did 升序确定性截断到
-        ``MAX_ENABLED_CAMERAS``：被动路径（登录/绑定后黑名单为空 → 家庭内全部相机均
-        通过 home filter）下，这是投喂上限的唯一兜底，与 ``service.toggle_camera`` 的
-        主动 enable 校验互补。不写 KV、不碰黑名单——只是少返回（从而少连接）超出上限
-        的相机；口径与 toggle_camera 自洽（同样只数通过 home filter + 未拉黑的相机）。
+        ``cap=True``（默认，连接/投喂路径）时最后按**流路数**（多通道相机一台算
+        ``channel_count`` 路）升序确定性截断到 ``MAX_ENABLED_CAMERAS``：被动路径
+        （登录/绑定后黑名单为空 → 家庭内全部相机均通过 home filter）下，这是投喂上限的
+        唯一兜底，与 ``service.toggle_camera`` 的主动 enable 校验互补。不写 KV、不碰黑
+        名单——只是少返回（从而少连接）超出上限的相机；口径与 toggle_camera 自洽（同样
+        只数通过 home filter + 未拉黑的相机的流路数）。
         ``cap=False`` 用于「列全集」语义（如 rule target 校验），不受投喂上限影响。
         ``apply_schedule=False`` 时列全集不受当前定时窗口影响（rule 目标校验等）。
         """
@@ -155,11 +183,15 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             apply_schedule=apply_schedule,
             awake_map=getattr(self._miot_proxy, "_camera_awake_cache", None),
         )
+        # ``select_active_camera_dids`` 已按通道展开、返回**合成 did**（单摄裸 did、多摄
+        # ``{did}:ch{n}``），并已做过 per-channel 黑名单 / per-lens 镜头门 / 上限截断。这里
+        # 只需按合成 did 建 PerceptionDevice;相机元数据按物理 did 从 cams 取。
         result: dict[str, PerceptionDevice] = {}
-        for did in active:
-            camera_info = CameraInfo.model_validate(cams[did].model_dump())
-            result[did] = PerceptionDevice(
-                did=did,
+        for syn_did in active:
+            physical_did, _ = split_channel_did(syn_did)
+            camera_info = CameraInfo.model_validate(cams[physical_did].model_dump())
+            result[syn_did] = PerceptionDevice(
+                did=syn_did,
                 name=camera_info.name,
                 device_type="camera",
                 room_id=camera_info.room_name,
@@ -211,6 +243,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         collect_cfg = get_settings().perception.collect
 
+        # did 是合成 did（多通道带 ``:ch{n}`` 后缀）；SDK 建流用物理 did + 通道号。
+        physical_did, channel = split_channel_did(did)
+
         state = _CameraDeviceState(
             did=did,
             sync_buffer=MultiTrackSyncBuffer(
@@ -227,7 +262,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # Subscribe decoded video frame stream (multi-reg)
         try:
             reg_id = await self._miot_proxy.start_camera_decode_video_stream(
-                did, DEFAULT_VIDEO_CHANNEL, self._make_decoded_video_callback(did)
+                physical_did, channel, self._make_decoded_video_callback(did)
             )
             state.decoded_video_reg_id = reg_id
         except Exception as e:
@@ -236,7 +271,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # Subscribe decoded audio frame stream (multi-reg)
         try:
             reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
-                did, DEFAULT_AUDIO_CHANNEL, self._make_decoded_audio_callback(did)
+                physical_did, channel, self._make_decoded_audio_callback(did)
             )
             state.decoded_audio_reg_id = reg_id
         except Exception as e:
@@ -260,10 +295,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         if not state:
             return
 
+        # did 是合成 did（多通道带 ``:ch{n}``）；SDK 停流用物理 did + 通道号。
+        physical_did, channel = split_channel_did(did)
+
         if state.decoded_video_reg_id >= 0:
             try:
                 await self._miot_proxy.stop_camera_decode_video_stream(
-                    did, DEFAULT_VIDEO_CHANNEL, state.decoded_video_reg_id
+                    physical_did, channel, state.decoded_video_reg_id
                 )
             except Exception as e:
                 logger.error("Failed to unsubscribe decoded video for %s: %s", did, e)
@@ -271,7 +309,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         if state.decoded_audio_reg_id >= 0:
             try:
                 await self._miot_proxy.stop_camera_decode_audio_stream(
-                    did, DEFAULT_AUDIO_CHANNEL, state.decoded_audio_reg_id
+                    physical_did, channel, state.decoded_audio_reg_id
                 )
             except Exception as e:
                 logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
@@ -340,9 +378,17 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         return 0
 
     def _current_source(self, did: str) -> PerceptionDevice:
-        """Build source metadata from MiotProxy's in-memory camera cache."""
+        """Build source metadata from MiotProxy's in-memory camera cache.
+
+        ``did`` may be a synthetic channel did (``physical:ch{n}``); camera info
+        is looked up by the physical did while the synthetic did is kept as the
+        device identity (so downstream keying stays per-channel).
+        """
+        physical_did, _ = split_channel_did(did)
         get_cached_camera = getattr(self._miot_proxy, "get_cached_camera", None)
-        camera_info = get_cached_camera(did) if get_cached_camera is not None else None
+        camera_info = (
+            get_cached_camera(physical_did) if get_cached_camera is not None else None
+        )
         if camera_info is None:
             return PerceptionDevice(
                 did=did, name=did, device_type="camera", room_name=did

@@ -89,7 +89,7 @@ describe("toTimestamp", () => {
 // ─── resolveNotifyTarget ────────────────────────────────────────────────────
 
 describe("resolveNotifyTarget", () => {
-  it("已配置 notifySessionKey 且有效 → needsBind: false", () => {
+  it("已配置 notifySessionKeys 且有效 → needsBind: false", () => {
     const store = {
       "wechat:abc": {
         lastChannel: "wechat",
@@ -100,10 +100,11 @@ describe("resolveNotifyTarget", () => {
     };
     const api = makeApi(store);
     getRuntimeConfigMock.mockReturnValue({ session: {} });
-    getPluginConfigMock.mockReturnValue({ notifySessionKey: "wechat:abc" });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
 
     const result = resolveNotifyTarget(api);
     expect(result.needsBind).toBe(false);
+    expect(result.targets).toHaveLength(1);
     expect(result.target).toEqual({
       channel: "wechat",
       to: "user123",
@@ -125,7 +126,7 @@ describe("resolveNotifyTarget", () => {
     };
     const api = makeApi(store);
     getRuntimeConfigMock.mockReturnValue({ session: {} });
-    getPluginConfigMock.mockReturnValue({ notifySessionKey: "wechat:abc" });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
 
     const result = resolveNotifyTarget(api);
     expect(result.needsBind).toBe(true);
@@ -145,7 +146,7 @@ describe("resolveNotifyTarget", () => {
     const api = makeApi(store);
     getRuntimeConfigMock.mockReturnValue({ session: {} });
     getPluginConfigMock.mockReturnValue({
-      notifySessionKey: "wechat:nonexist",
+      notifySessionKeys: ["wechat:nonexist"],
     });
 
     const result = resolveNotifyTarget(api);
@@ -293,7 +294,7 @@ describe("notifyOwner", () => {
     const subagent = makeSubagent();
     const api = makeApi(unboundStore, subagent);
     getRuntimeConfigMock.mockReturnValue({ session: {} });
-    getPluginConfigMock.mockReturnValue({ notifySessionKey: "gone:404" });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["gone:404"] });
 
     const result = await notifyOwner(api, "msg");
     expect(result.ok).toBe(false);
@@ -338,13 +339,14 @@ describe("notifyOwner", () => {
     const subagent = makeSubagent({ status: "ok" });
     const api = makeApi(boundStore, subagent);
     getRuntimeConfigMock.mockReturnValue({ session: {} });
-    getPluginConfigMock.mockReturnValue({ notifySessionKey: "wechat:abc" });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
 
     const result = await notifyOwner(api, "正文", {
       bindHint: "不应出现的引导语",
     });
     expect(result.ok).toBe(true);
     expect(result.channel).toBe("wechat");
+    expect(result.deliveredChannels).toEqual(["wechat"]);
     expect(result.fallback).toBeUndefined();
 
     const arg = subagent.run.mock.calls[0][0] as { message: string };
@@ -358,12 +360,32 @@ describe("notifyOwner", () => {
     const subagent = makeSubagent({ status: "error", error: "boom" });
     const api = makeApi(boundStore, subagent);
     getRuntimeConfigMock.mockReturnValue({ session: {} });
-    getPluginConfigMock.mockReturnValue({ notifySessionKey: "wechat:abc" });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
 
     const result = await notifyOwner(api, "正文");
     expect(result.ok).toBe(false);
     expect(result.error).toContain("subagent delivery failed");
     expect(result.error).toContain("boom");
+  });
+
+  it("多通道已绑定 → 向全部有效通道投递", async () => {
+    const subagent = makeSubagent({ status: "ok" });
+    const api = makeApi(
+      {
+        "wechat:abc": { lastChannel: "wechat", lastTo: "user123" },
+        "telegram:xyz": { lastChannel: "telegram", lastTo: "tg_user" },
+      },
+      subagent,
+    );
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({
+      notifySessionKeys: ["wechat:abc", "telegram:xyz"],
+    });
+
+    const result = await notifyOwner(api, "正文");
+    expect(result.ok).toBe(true);
+    expect(result.deliveredChannels).toEqual(["wechat", "telegram"]);
+    expect(subagent.run).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -377,7 +399,7 @@ describe("notifyOwner dedup", () => {
   function boundApi(subagent: SubagentMock) {
     const api = makeApi(boundStore, subagent);
     getRuntimeConfigMock.mockReturnValue({ session: {} });
-    getPluginConfigMock.mockReturnValue({ notifySessionKey: "wechat:abc" });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
     return api;
   }
 
@@ -415,7 +437,7 @@ describe("notifyOwner dedup", () => {
       subagent,
     );
     getRuntimeConfigMock.mockReturnValue({ session: {} });
-    getPluginConfigMock.mockReturnValue({ notifySessionKey: "telegram:xyz" });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["telegram:xyz"] });
     const r = await notifyOwner(api2, "共用文案");
     expect(r.deduped).toBeUndefined();
     expect(subagent.run).toHaveBeenCalledTimes(2);

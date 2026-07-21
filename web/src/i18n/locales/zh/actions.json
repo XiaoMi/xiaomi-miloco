@@ -1,0 +1,14 @@
+{
+  "actions": {
+    "filterEvents": "事件",
+    "filterActions": "动作",
+    "emptyFilter": "勾选「事件」或「动作」查看记录",
+    "resultSuccess": "成功",
+    "resultFailed": "失败",
+    "typeSetProperty": "设置属性",
+    "typeCallAction": "执行动作",
+    "typeSceneTrigger": "触发场景",
+    "typeUnknown": "未知动作",
+    "limitHint": "动作仅显示最近 500 条"
+  }
+}

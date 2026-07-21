@@ -1,6 +1,6 @@
 {
   "settings": {
-    "title": "感知设置",
+    "title": "设置",
     "videoShortEdge": "分辨率",
     "videoShortEdgeHint": "短边像素，保持原始宽高比",
     "omniFps": "帧率",
@@ -11,8 +11,13 @@
     "applying": "应用中…",
     "applySuccess": "设置已生效",
     "saveFailed": "保存失败",
+    "partialSaveFailed": "调度开关已保存，但感知设置保存失败，请重试",
     "restartFailed": "设置已保存，但引擎重启失败，请手动重启",
     "loadFailed": "加载设置失败",
-    "resetDefaults": "恢复默认设置"
+    "resetDefaults": "恢复默认设置",
+    "schedulerSaved": "已保存，agent 网关下次重启后生效",
+    "autoSchedule": "自动定时任务",
+    "autoScheduleHint": "开启后 miloco 自动创建并维护内置定时任务（感知摘要 / 家庭巡检 / 记忆整理 / 习惯洞察）；关闭后将清除这些任务且不再重建。改动在 agent 网关下次重启后生效。",
+    "autoScheduleUnavailable": "当前后端不支持此开关（可能版本过旧），暂不可配置"
   }
 }

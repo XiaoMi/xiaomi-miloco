@@ -80,6 +80,8 @@ export interface Device {
   online: boolean;
   // 概览状态文本（"开着" / "26°C 制冷" / "睡眠档"）
   statusText: string;
+  // 机器可读状态分类；UI 颜色/逻辑不要依赖本地化文案。
+  statusKind: "offline" | "locked" | "unlocked" | "on" | "off" | "connected";
   // 是否危险设备（门锁/燃气/烟雾），需要二次确认
   dangerous: boolean;
   // 主开关 prop（单按钮直控；为 null 时只能从 sheet 进）
@@ -95,7 +97,9 @@ export interface Scene {
 
 // ── 活动事件(meaningful_events)─────────────────────────────
 // 数据源:GET /api/events(perception/events_router).
-// 一次感知推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids 记录参与摄像头.
+// 一次感知推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids 记录本行真正相关的
+// 摄像头——有 rule/suggestion/asr 命中时收窄到其 source_device_ids,否则退化为本次
+// 推理中成功出图(可落盘)的全部摄像头.
 // `text` 字段是 agent webhook 收到的同一段聚合文本(单源真值,B2 约束).
 //
 // has_rule_hit / has_suggestion / has_asr 只用于诊断,**UI 不渲染 badge**(B14:
@@ -110,7 +114,7 @@ export interface ActivityEvent {
   /** 成功落 clip 的 device 数(0 ~ len(device_ids);每 device 1 个 mp4/m4a 文件);
    *  字段名沿用历史,语义现是 device 数而非帧数.0 表示 metadata-only(磁盘满 / 落盘失败) */
   snapshot_count: number;
-  /** 参与本次推理的 device_id 列表;clip URL 拼接用(eventClipUrl) */
+  /** 本次事件相关的 device_id 列表;clip URL 拼接用(eventClipUrl) */
   device_ids: string[];
   /** rule_id → rule_name 映射;UI 渲染规则提醒时把 [rule_id] 替换成 rule_name */
   rule_names?: Record<string, string>;
@@ -175,18 +179,24 @@ export interface HomeEntries {
 export interface PerceptionCamera {
   did: string;
   name: string;
-  channel: number;
   roomName?: string;
 }
 
 // ── 米家 scope 摄像头（含禁用 / 离线，控件配置用） ─────────────
 // 来源：GET /api/miot/scope/cameras（in_use=false 即停用该摄像头的感知）。
-// PerceptionCamera 是「当前 perception 在订阅」的子集（含 channel 用于播放），
+// PerceptionCamera 是「当前 perception 在订阅」的子集（did 为合成 did，通道号已编码其中，
+// 播放时由 splitChannelDid 拆出，无需单独 channel 字段），
 // ScopeCamera 是「米家账号下全集」（含已禁用 / 离线，用于显示开关）。
-// 渲染卡片时 ScopeCamera 是主列表，channel 通过 did 从 PerceptionCamera 字典查。
+// 多通道相机（双摄等）每条通道产出一条 ScopeCamera：did 相同（物理 did，启停按整台
+// 走），channel 区分通道号。渲染时用 (did, channel) 复合键区分两行、拼「通道 N」标签。
 export interface ScopeCamera {
   did: string;
   name: string;
+  // 通道号（多通道相机各条通道 0 / 1 / ...）；单通道相机恒为 0。用于播放取流、复合键去重。
+  channel: number;
+  // 该相机的通道总数（后端 channel_count）。判「多通道相机」的权威信号：channelCount>1 才
+  // 拼合成 did / 显镜头标签——与后端 select_active、CLI 同口径，不再用「同 did 出现几行」代理。
+  channelCount: number;
   // 米家分配的房间名（"客厅" / "卧室" / ...）。多摄像头家庭里 name 常是
   // "小米智能摄像机 2 代"等泛称，靠 roomName 才能区分。米家未分房间时为空。
   roomName?: string;
@@ -324,9 +334,47 @@ export interface OmniProfile extends OmniModelConfig {
   active: boolean;
 }
 
+/** omni 熔断器实时健康度（对齐后端 HealthSnapshot）。 */
+export interface OmniHealth {
+  /** ok=正常;warn=可恢复错(重试中);error=不可恢复错(配置无效,已软停)。 */
+  state: "ok" | "warn" | "error";
+  /** 错误机器码;state=ok 时为 null。 */
+  code:
+    | null
+    | "unreachable" | "timeout" | "http_error" | "rate_limited"
+    | "bad_key" | "not_found" | "rejected_authed" | "bad_response"
+    | "no_key" | "cancelled";
+  /** 本地化文案。 */
+  message: string;
+  /** 当前非 ok 状态起始时间;ok 时为 0。 */
+  since_ms: number;
+  /** 累计连续失败次数;每次熔断关闭时清零。 */
+  consecutive_failures: number;
+  /** 下次自动探测时刻(unix ms);仅 warn 状态非空。 */
+  next_probe_at_ms: number | null;
+  /** 下次自动探测的剩余秒数(monotonic 差算,不受两端时钟偏差影响);仅 warn 状态非空。
+   *  前端倒计时应吃这个字段,不再算 next_probe_at_ms - Date.now()。 */
+  next_probe_in_seconds: number | null;
+  /** 最近一次探测时刻(unix ms)。 */
+  last_probe_at_ms: number | null;
+  /** 最近一次探测结果。 */
+  last_probe_result: "ok" | "fail" | null;
+  /** 「立即重试」按钮的本地冷却时长(秒),与后端 retry 端点冷却期同源。 */
+  retry_cooldown_sec: number;
+  /** 距离下次可以真发 retry probe 的剩余秒数(monotonic 差算,不受时钟偏差影响)。
+   *  按钮置灰用这个而不是本地 Date.now() 锚点,避免前端锚点早于后端 last_probe_at
+   *  记录点导致「按钮可点但后端仍在冷却期」的静默拒。 */
+  retry_available_in_seconds: number | null;
+}
+
+/** active 字段扩展:附带熔断器的 health snapshot。 */
+export interface OmniActiveConfig extends OmniModelConfig {
+  health: OmniHealth;
+}
+
 /** GET /omni-config 返回：当前生效 active + 已存档案 profiles。 */
 export interface OmniConfigState {
-  active: OmniModelConfig;
+  active: OmniActiveConfig;
   profiles: OmniProfile[];
 }
 
@@ -361,7 +409,9 @@ export interface OmniConfigUpdate {
 /** 测试连接结果：ok=true 即连通；否则 message 给出原因（Key 无效 / 不可达 / 模型不存在等）。 */
 export interface OmniTestResult {
   ok: boolean;
-  /** 机器码,前端按它本地化(ok/bad_key/not_found/rejected_authed/unreachable/no_key/http_error);缺省回退 message。 */
+  /** 机器码,前端按它本地化;缺省回退 message。与 error_classifier.CODES 一致:
+   *  ok / bad_key / no_key / not_found / rejected_authed / unreachable / timeout /
+   *  http_error / rate_limited / bad_response / cancelled。 */
   code?: string;
   status?: number;
   latency_ms?: number;
@@ -620,8 +670,8 @@ export interface TaskRecordSummary {
   derived: Record<string, unknown>;
 }
 
-// 驱动规则摘要 / 关联：后端 summary 接口（GET /api/tasks/summary）返回的
-// TaskSummaryView 继承 TaskFullView，本就带 rule_briefs / links，故随列表一并
+// 驱动规则摘要：后端 summary 接口（GET /api/tasks/summary）返回的
+// TaskSummaryView 继承 TaskFullView，本就带 rule_briefs，故随列表一并
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 export interface TaskRuleBrief {
   ruleId: string;
@@ -631,12 +681,7 @@ export interface TaskRuleBrief {
   actionsDesc: string[];
 }
 
-export interface TaskLinkEntry {
-  kind: "rule" | "cron";
-  ref: string;
-}
-
-// 任务视图 = 基础字段 + record 进度摘要 + 驱动规则/关联，一次 summary 请求全拿到。
+// 任务视图 = 基础字段 + record 进度摘要 + 驱动规则，一次 summary 请求全拿到。
 export interface Task {
   taskId: string;
   description: string;
@@ -644,7 +689,6 @@ export interface Task {
   pausedAt: string | null;
   createdAt: string;
   record: TaskRecordSummary | null;
-  // 详情抽屉「有价值的详情」：驱动规则与关联，随 summary 一并返回。
+  // 详情抽屉「有价值的详情」：驱动规则，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
-  links: TaskLinkEntry[];
 }

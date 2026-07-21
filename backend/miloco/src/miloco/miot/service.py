@@ -6,7 +6,10 @@ MiOT service module
 """
 
 import asyncio
+import json
 import logging
+import time
+import uuid
 from datetime import datetime
 
 from miot.types import (
@@ -36,19 +39,24 @@ from miloco.miot.filter import (
     camera_schedule_for,
     camera_schedule_paused,
     denied_camera_dids,
+    denied_channels_of,
     filter_by_home,
+    is_camera_channel_denied,
     is_home_allowed,
     load_schedule_map,
     next_camera_schedule_change_at,
+    physical_camera_did,
     select_active_camera_dids,
     set_camera_schedule,
-    set_cameras_in_use,
+    set_cameras_channels_in_use,
     set_cameras_voice_in_use,
     set_homes_in_use,
+    synthetic_camera_did,
     voice_allowed_camera_dids,
 )
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
+from miloco.miot.result_codes import summarize_results
 from miloco.miot.schema import (
     CameraChannel,
     CameraImgSeq,
@@ -90,6 +98,127 @@ def _parse_action_iid(iid: str) -> tuple[int, int]:
         return int(parts[1]), int(parts[2])
     except ValueError as e:
         raise ValidationException(f"Invalid iid numbers in '{iid}'") from e
+
+
+def _truncate_value_len(value_json: str | None) -> int:
+    """日志用:value_json 长度(不记内容,防 TTS 全文 / secrets 落日志)。"""
+    return len(value_json) if value_json else 0
+
+
+def _request_value_json(request: "DeviceControlRequest") -> str | None:
+    """把控制请求的尝试参数归一成 value_json(成功/异常路径共用)。
+
+    失败动作是排查时最有价值的场景——异常路径的台账也必须能看到 agent 当时
+    具体试图设置什么值 / 播什么 TTS / 调用什么参数,不能只落 error。
+    """
+    try:
+        if request.type == "set_property":
+            return json.dumps(request.value, ensure_ascii=False)
+        if request.type == "set_properties":
+            return json.dumps(
+                {p.iid: p.value for p in (request.properties or [])},
+                ensure_ascii=False,
+            )
+        return json.dumps(request.params or [], ensure_ascii=False)
+    except Exception:
+        return None  # 参数本身不可序列化时不反噬审计主体
+
+
+def _request_iid(request: "DeviceControlRequest") -> str | None:
+    """把控制请求归一成台账 iid 列(成功/异常路径共用)。
+
+    set_properties 不填顶层 iid(iid 在 properties 各项里),其台账行落逗号
+    拼接的复数 iid——异常路径若直接取 request.iid 会恒落 NULL,按 iid 检索
+    失败动作时就会漏行,故与成功路径同构地按 type 重建。
+    """
+    try:
+        if request.type == "set_properties":
+            return ",".join(p.iid for p in (request.properties or [])) or None
+        return request.iid
+    except Exception:
+        return None  # 与 value_json 同口径:归一失败不反噬审计主体
+
+
+async def _write_action_ledger(
+    miot_proxy: MiotProxy,
+    *,
+    action_type: str,
+    did: str,
+    iid: str | None,
+    value_json: str | None,
+    result_code: int | None,
+    result_msg: str | None,
+    success: bool,
+    error: str | None,
+    source: str = "cli",
+    source_id: str | None = None,
+    home_id: str | None = None,
+) -> None:
+    """落一行 action_ledger + 打一条 INFO 结果日志。**fail-open**:
+
+    ``source`` 区分触发源:``cli``(control_device 路径,含 manual CLI 与 agent-via-CLI,
+    后者由 trace_id 区分)/ ``rule``(RuleRunner 直控,``source_id`` 写 rule_id)。
+
+    整体裹 try/except,任何异常只 warning,绝不影响调用方的控制结果。
+    device_name / room 从内存 device cache 解析(便宜),解析失败留 None。
+    日志行不含 secrets:TTS / set 值只记 value_json 长度,全文只进 DB。
+    """
+    try:
+        from miloco.observability.metrics_client import get_metrics_client
+        from miloco.observability.types import ActionLedgerRecord
+
+        device_name: str | None = None
+        room: str | None = None
+        try:
+            dev = (await miot_proxy.get_devices()).get(did)
+            if dev is None and home_id is None:
+                # 摄像头只在 camera cache(control_device 的家庭校验同样两级查):
+                # 不回落会让摄像头动作 home_id=NULL,经查询侧 NULL 放行串到所有家。
+                # MIoTCameraInfo 继承 MIoTDeviceInfo,name/room_name/home_id 同字段。
+                # 仅在 home_id 未显式传入时才回落——get_cameras() cache miss 会触发
+                # 网络刷新,scene_trigger(did=scene_id、home 已传)不该为此买单。
+                dev = ((await miot_proxy.get_cameras()) or {}).get(did)
+            if dev is not None:
+                device_name = getattr(dev, "name", None)
+                room = getattr(dev, "room_name", None)
+                if home_id is None:
+                    # 未显式传入才从 cache 补。scene_trigger 的 did 是
+                    # scene_id,cache 必 miss——那条路径由调用方带场景所属家传入。
+                    home_id = getattr(dev, "home_id", None)
+        except Exception:
+            pass  # cache 解析失败不影响审计主体
+
+        client = get_metrics_client()
+        if client is not None:
+            client.record_action(
+                ActionLedgerRecord(
+                    id=str(uuid.uuid4()),
+                    timestamp=int(time.time() * 1000),
+                    action_type=action_type,
+                    did=did,
+                    device_name=device_name,
+                    room=room,
+                    iid=iid,
+                    value_json=value_json,
+                    result_code=result_code,
+                    result_msg=result_msg,
+                    success=success,
+                    error=error,
+                    source=source,
+                    source_id=source_id,
+                    home_id=home_id,
+                )
+            )
+
+        logger.info(
+            "action_ledger device=%s(did=%s room=%s) type=%s iid=%s success=%s "
+            "reason=%s value_len=%d",
+            device_name or "?", did, room or "?", action_type, iid, success,
+            (result_msg or error or "ok"),
+            _truncate_value_len(value_json),
+        )
+    except Exception as e:  # noqa: BLE001 —— 审计 fail-open,绝不拖垮控制调用
+        logger.warning("action_ledger write failed (did=%s): %s", did, e)
 
 
 class MiotService:
@@ -771,6 +900,9 @@ class MiotService:
 
     async def control_device(self, did: str, request: DeviceControlRequest) -> dict:
         """Control device: set_property / set_properties / call_action."""
+        # 尝试参数先归一好,成功/异常路径共用——SDK/网络抛异常时台账也能看到
+        # agent 当时试图设置什么值 / 播什么 TTS / 什么参数。
+        attempted_value_json = _request_value_json(request)
         try:
             await self._assert_did_in_allowed_home(did)
 
@@ -785,6 +917,15 @@ class MiotService:
                 ]
                 results = await self._miot_proxy.set_device_properties(params)
                 self._safe_lru_touch(did, [request.iid])
+                success, code, msg = summarize_results(results)
+                await _write_action_ledger(
+                    self._miot_proxy,
+                    action_type="set_property",
+                    did=did, iid=request.iid,
+                    value_json=attempted_value_json,
+                    result_code=code, result_msg=msg,
+                    success=success, error=None,
+                )
                 return {"results": results}
 
             if request.type == "set_properties":
@@ -802,6 +943,17 @@ class MiotService:
                     )
                 results = await self._miot_proxy.set_device_properties(params)
                 self._safe_lru_touch(did, [p.iid for p in request.properties])
+                success, code, msg = summarize_results(results)
+                await _write_action_ledger(
+                    self._miot_proxy,
+                    action_type="set_properties",
+                    # 复数 iid 逗号拼接;value_json 存 {iid: value} 全集
+                    iid=_request_iid(request),
+                    did=did,
+                    value_json=attempted_value_json,
+                    result_code=code, result_msg=msg,
+                    success=success, error=None,
+                )
                 return {"results": results}
 
             # call_action
@@ -813,6 +965,16 @@ class MiotService:
             )
             result = await self._miot_proxy.call_device_action(param)
             self._safe_lru_touch(did, [request.iid])
+            success, code, msg = summarize_results(result)
+            # call_action 的 in_params 存 value_json —— speaker play-text 的 TTS 全文落这里
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="call_action",
+                did=did, iid=request.iid,
+                value_json=attempted_value_json,
+                result_code=code, result_msg=msg,
+                success=success, error=None,
+            )
             return {"result": result}
 
         # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
@@ -821,6 +983,15 @@ class MiotService:
             raise
         except Exception as e:
             logger.error("Failed to control device %s: %s", did, e)
+            # 异常路径也落一行:success=0 + error + 尝试参数(失败审计完整性)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=getattr(request, "type", None) or "call_action",
+                did=did, iid=_request_iid(request),
+                value_json=attempted_value_json,
+                result_code=None, result_msg=None,
+                success=False, error=str(e),
+            )
             raise MiotServiceException(f"Failed to control device: {str(e)}") from e
 
     async def get_device_status(self, did: str, iids: list[str] | None) -> dict:
@@ -951,11 +1122,11 @@ class MiotService:
         openclaw 不可达 / 删除失败只 WARN、不上抛，绝不阻塞或打断切换本身。
         """
         async def _bg():
-            from miloco.dispatch.dispatcher import MILOCO_SESSION_KEYS
+            from miloco.dispatch.dispatcher import MILOCO_SESSION_ROUTES
             from miloco.utils.agent_client import reset_agent_sessions
 
             try:
-                await reset_agent_sessions(MILOCO_SESSION_KEYS)
+                await reset_agent_sessions(MILOCO_SESSION_ROUTES)
             except Exception as e:
                 logger.warning("reset agent sessions failed: %s", e)
 
@@ -1078,41 +1249,62 @@ class MiotService:
         for did, info in cameras.items():
             cloud_online = bool(getattr(info, "online", False))
             lan_reachable = bool(getattr(info, "lan_online", False))
+            channel_count = getattr(info, "channel_count", None) or 1
+            lens_awake = awake_map.get(did) or {}
             schedule = camera_schedule_for(self._kv_repo, did, schedules=schedule_map)
-            manually_allowed = did not in denied
-            schedule_paused = manually_allowed and camera_schedule_paused(schedule, now)
-            capped_out = (
-                did in cap_eligible_dids
-                and did not in feeding_dids
+            manually_allowed = not all(
+                is_camera_channel_denied(denied, did, ch, channel_count)
+                for ch in range(channel_count)
             )
+            schedule_paused = manually_allowed and camera_schedule_paused(schedule, now)
             next_change = (
                 next_camera_schedule_change_at(schedule, now, tz)
                 if manually_allowed
                 else None
             )
-            out.append(
-                {
-                    "did": did,
-                    "name": getattr(info, "name", None),
-                    "room_name": getattr(info, "room_name", None),
-                    "cloud_online": cloud_online,
-                    "lan_reachable": lan_reachable,
-                    "awake": awake_map.get(did),
-                    "is_online": cloud_online and lan_reachable,
-                    "in_use": did in active,
-                    "voice_in_use": did in voice_allowed,
-                    "effective_in_use": did in feeding_dids,
-                    "capped_out": capped_out,
-                    "schedule_paused": schedule_paused,
-                    "schedule": schedule,
-                    "next_schedule_change_at": (
-                        next_change.isoformat(timespec="seconds")
-                        if next_change
-                        else None
-                    ),
-                    "connected": did in connected,
-                }
-            )
+            # 全拆后每路是独立一等相机：``did`` 仍是物理 did（会话/拾音/定时按整台），
+            # ``channel`` 区分通道；``awake`` / ``in_use`` / ``connected`` 逐通道给。
+            base = {
+                "did": did,
+                "name": getattr(info, "name", None),
+                # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
+                # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
+                "room_name": getattr(info, "room_name", None),
+                # 通道总数：判「多通道相机」的权威信号（channel_count>1），前端/CLI 据此
+                # 决定是否拼合成 did、显镜头标签——与后端 select_active 同口径，别再用「行数」代理。
+                "channel_count": channel_count,
+                "cloud_online": cloud_online,
+                "lan_reachable": lan_reachable,
+                # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
+                "is_online": cloud_online and lan_reachable,
+                # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。拾音按整台存
+                # （只球机/ch0 有 mic），前端在无 mic 的通道上隐藏该开关。
+                "voice_in_use": did in voice_allowed,
+                # 定时按物理机：各通道共享同一份 schedule / paused / next change。
+                "schedule_paused": schedule_paused,
+                "schedule": schedule,
+                "next_schedule_change_at": (
+                    next_change.isoformat(timespec="seconds") if next_change else None
+                ),
+            }
+            for ch in range(channel_count):
+                syn_did = synthetic_camera_did(did, ch, channel_count)
+                capped_out = (
+                    syn_did in cap_eligible_dids and syn_did not in feeding_dids
+                )
+                out.append(
+                    {
+                        **base,
+                        "channel": ch,
+                        # per-lens 镜头态（None=未知/机型无开关）
+                        "awake": lens_awake.get(ch),
+                        # per-channel 启用（活跃集按合成 did）+ per-channel 真投喂
+                        "in_use": syn_did in active,
+                        "effective_in_use": syn_did in feeding_dids,
+                        "capped_out": capped_out,
+                        "connected": syn_did in connected,
+                    }
+                )
         return out
 
     async def set_camera_schedule(self, did: str, schedule: CameraSchedule) -> dict:
@@ -1138,101 +1330,136 @@ class MiotService:
         raise ResourceNotFoundException(f"Camera '{did}' not found")
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
-        """批量切换相机启用状态。每项 {"did": str, "in_use": bool}。
+        """批量切换相机**某通道**的启用状态。每项 {"did": str, "in_use": bool}。
 
-        全部校验通过后才一起写入。双向均校验未知 did 防 typo。
+        全拆语义：启停按**通道**走（每路一台独立相机）。``did`` 可为合成通道 did
+        （``cam:ch1``，前端逐路开关）或裸物理 did；裸 did 对多通道相机 = 该台所有通道一起，
+        对单摄 = 它自己。全部校验通过后按 did 整台重算+覆盖写黑名单（D3）。
         """
-        enable_dids = [i["did"] for i in items if i["in_use"]]
-        disable_dids = [i["did"] for i in items if not i["in_use"]]
-        all_dids = enable_dids + disable_dids
-
         cameras = await self._miot_proxy.get_cameras() or {}
-        unknown = [d for d in all_dids if d not in cameras]
+
+        def _cc(pdid: str) -> int:
+            return getattr(cameras.get(pdid), "channel_count", None) or 1
+
+        # 解析每项 → 物理 did + 通道集；聚成 updates[physical_did][channel] = in_use。
+        # 裸多通道 did 展成全通道；同一 (did,ch) 后到覆盖先到（矛盾输入以最后一项为准）。
+        # **后端是唯一执法点**（前端只发合法 did，CLI/API 直连全靠这里挡）：畸形合成 did
+        # （`:ch` 后为空/非数字）或**越界通道**（≥ channel_count）都当非法 did 拒——否则前者
+        # int() 崩 500、后者会把死条目写进黑名单（读侧只遍历 range(cc) 永远清不掉）。
+        updates: dict[str, dict[int, bool]] = {}
+        unknown: list[str] = []
+        bad_channel: list[str] = []
+        for it in items:
+            raw = it["did"]
+            pdid = physical_camera_did(raw)
+            if pdid not in cameras:
+                unknown.append(raw)
+                continue
+            cc = _cc(pdid)
+            if ":ch" in raw:
+                _, ch_str = raw.rsplit(":ch", 1)
+                try:
+                    ch = int(ch_str)
+                except ValueError:
+                    bad_channel.append(raw)
+                    continue
+                if not (0 <= ch < cc):
+                    bad_channel.append(raw)
+                    continue
+                chans = [ch]
+            else:
+                chans = list(range(cc))
+            in_use = bool(it["in_use"])
+            for c in chans:
+                updates.setdefault(pdid, {})[c] = in_use
         if unknown:
             raise ValidationException(
                 f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
             )
-
-        def _in_scope(did: str) -> bool:
-            return is_home_allowed(
-                self._kv_repo, getattr(cameras[did], "home_id", None)
+        if bad_channel:
+            raise ValidationException(
+                f"非法通道号（格式错误或越界）: {bad_channel}"
             )
 
-        if enable_dids:
-            in_scope = {d for d in cameras if _in_scope(d)}
-            # 三态门（后端唯一执法点：web 置灰只保护前端，CLI/API 绕过前端全靠这里）。
-            # 开启的相机必须 云端在线 && 局域网可达 && 镜头未关，任一坏都拒、给对应文案。
-            # awake 走**新鲜云读**（非 cache_only）——CLI/冷缓存下也能准确挡镜头关。
-            # 只拦「开启」；已启用的相机掉线/镜头关仍可被「关闭」(disable 不走这条)。
+        def _in_scope(pdid: str) -> bool:
+            return is_home_allowed(
+                self._kv_repo, getattr(cameras[pdid], "home_id", None)
+            )
+
+        def _cloud(pdid: str) -> bool:
+            return bool(getattr(cameras[pdid], "online", False))
+
+        def _lan(pdid: str) -> bool:
+            return bool(getattr(cameras[pdid], "lan_online", False))
+
+        enabling = [
+            (p, ch) for p, chs in updates.items() for ch, iu in chs.items() if iu
+        ]
+        if enabling:
+            in_scope = {p for p in cameras if _in_scope(p)}
+            # 三态门（后端唯一执法点）：开启的通道必须 云端在线 && 局域网可达 && **该路**镜头
+            # 未关。云端/局域网是相机级；镜头是 per-lens。awake 走新鲜云读（非 cache_only）。
             awake_map = await self._miot_proxy.read_cameras_awake(sorted(in_scope))
 
-            def _cloud(did: str) -> bool:
-                return bool(getattr(cameras[did], "online", False))
-
-            def _lan(did: str) -> bool:
-                return bool(getattr(cameras[did], "lan_online", False))
-
-            def _lens_ok(did: str) -> bool:
-                return awake_map.get(did) is not False  # None/True 放行,未知不误杀
-
-            cloud_offline = [d for d in enable_dids if not _cloud(d)]
+            cloud_offline = sorted({p for p, _ in enabling if not _cloud(p)})
             if cloud_offline:
                 raise ValidationException(
                     f"摄像头米家云端离线,无法开启（{cloud_offline}）;请待其上线后再启用"
                 )
-            lan_offline = [d for d in enable_dids if not _lan(d)]
+            lan_offline = sorted({p for p, _ in enabling if not _lan(p)})
             if lan_offline:
                 raise ValidationException(
                     f"摄像头局域网不可达,无法开启（{lan_offline}）;"
                     "请确认主机与相机在同一局域网后再启用"
                 )
-            lens_off = [d for d in enable_dids if not _lens_ok(d)]
+            lens_off = [
+                synthetic_camera_did(p, ch, _cc(p))
+                for p, ch in enabling
+                if (awake_map.get(p) or {}).get(ch) is False
+            ]
             if lens_off:
                 raise ValidationException(
                     f"摄像头镜头已关闭,无法开启感知（{lens_off}）;"
                     "请先在米家中打开该摄像头镜头后再启用"
                 )
 
-            # 上限检查：数「可用集」而非「意图集」——未拉黑 + 在当前家庭 + 三态好
-            # (云端+局域网+镜头开)。离线/局域网不可达/镜头关的相机**不占名额**（与前端
-            # activeCount 按 in_use=活跃集 计数同口径；也与 list/refresh 的 select_active
-            # 一致）。这样不会出现「面板显示有名额、点开启却被后端拒」的口径背离。
-            denied = denied_camera_dids(self._kv_repo)
-
-            def _usable(did: str) -> bool:
-                return _cloud(did) and _lan(did) and _lens_ok(did)
-
-            # 模拟本批操作后的启用集：现状未拉黑的，先去掉本批 disable，再并入本批
-            # enable（enable 最后并入 → 与写库顺序一致，矛盾输入 enable 胜出）。
-            # 上限数「可用集」；定时暂停不释放名额（不从 usable 剔除）。
-            intent_after = (
-                (in_scope - denied) - set(disable_dids)
-            ) | (set(enable_dids) & in_scope)
-            usable_after = {d for d in intent_after if _usable(d)}
-            if len(usable_after) > MAX_ENABLED_CAMERAS:
+            # 上限检查：数「操作后可用启用通道数」——每路独占一个名额。逐 in_scope 相机模拟
+            # 本批操作后的黑名单，统计 未拉黑 && 三态好(云端+局域网+该路镜头开) 的通道数。
+            # 镜头关/离线/局域网不可达的路不占名额（与 select_active / 前端 in_use 同口径）。
+            # 定时暂停不释放名额（此处不读 schedule）。
+            denied_now = denied_camera_dids(self._kv_repo)
+            streams_after = 0
+            for p in in_scope:
+                if not (_cloud(p) and _lan(p)):
+                    continue
+                cc = _cc(p)
+                lens = awake_map.get(p) or {}
+                disabled = denied_channels_of(denied_now, p, cc)
+                for ch, iu in updates.get(p, {}).items():
+                    disabled.discard(ch) if iu else disabled.add(ch)
+                for ch in range(cc):
+                    if ch in disabled or lens.get(ch) is False:
+                        continue
+                    streams_after += 1
+            if streams_after > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
-                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 台摄像头"
-                    f"（操作后将有 {len(usable_after)} 台），"
-                    f"请先禁用一台再启用新摄像头"
+                    f"最多同时启用 {MAX_ENABLED_CAMERAS} 条摄像头视频流"
+                    f"（操作后将有 {streams_after} 条），"
+                    f"请先禁用一路再启用新的"
                 )
 
-        changed = False
-        if disable_dids:
-            _, c = set_cameras_in_use(self._kv_repo, disable_dids, False)
-            changed = changed or c
-        if enable_dids:
-            _, c = set_cameras_in_use(self._kv_repo, enable_dids, True)
-            changed = changed or c
+        _, changed = set_cameras_channels_in_use(
+            self._kv_repo, updates, {p: _cc(p) for p in updates}
+        )
         if changed:
-            # 先 refresh_cameras：按新 KV(黑名单)建/销 camera manager——关掉的相机
-            # 销毁 manager，停掉 native PPCS 会话+解码线程，不再拉流。
-            # 再 _sync_camera_adapter：perception 按新 manager 集连/断订阅。顺序不可换,
-            # 否则 sync 先连上随后 manager 被销,会留 stale reg_id。
+            # 先 refresh_cameras：按新 KV(黑名单)建/销 camera manager——两路都关的相机
+            # 销毁 manager，停掉 native PPCS 会话+解码线程；仍有活跃路的保留。
+            # 再 _sync_camera_adapter：perception 按新集连/断订阅。顺序不可换。
             await self._miot_proxy.refresh_cameras()
             await self._sync_camera_adapter()
-        # 返回受影响的相机，结构与 list_cameras_with_state 一致
+        # 返回受影响的相机（按物理 did），结构与 list_cameras_with_state 一致。
         all_cameras = await self.list_cameras_with_state()
-        affected = [cam for cam in all_cameras if cam["did"] in set(all_dids)]
+        affected = [cam for cam in all_cameras if cam["did"] in set(updates)]
         return affected
 
     async def toggle_camera_voice(self, items: list[dict]) -> list[dict]:
@@ -1246,8 +1473,10 @@ class MiotService:
         _sync_camera_adapter / _restart_perception_engine——拾音黑名单在引擎入口与
         client.py dispatch 阶段实时读取(KVRepo.set 已同步更新进程内缓存),下一感知窗
         即生效,无需重建 manager 或重启。本地拉流不变(音频仍解码进缓冲,只是不被处理)。
+
+        拾音同样按**整台相机**走（拾音白名单存物理 did），合成 did（``did:ch{n}``）先归一。
         """
-        all_dids = [i["did"] for i in items]
+        all_dids = [physical_camera_did(i["did"]) for i in items]
 
         cameras = await self._miot_proxy.get_cameras() or {}
         unknown = [d for d in all_dids if d not in cameras]
@@ -1256,18 +1485,31 @@ class MiotService:
                 f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
             )
 
-        # 拾音从属于感知：感知已关闭(在黑名单)的相机不允许设置拾音。前端会把这类
-        # 相机的拾音开关置灰,这里再兜一道防脏请求。关相机不改写拾音黑名单——存储偏好
-        # 保留,相机重新启用后旧拾音设置自动生效(「自动关」是派生生效态,不落库)。
+        # 拾音从属于感知：感知**整台关闭**(所有通道都拉黑)的相机不允许设置拾音。前端会把这类
+        # 相机的拾音开关置灰,这里再兜一道防脏请求。关相机不改写拾音白名单——存储偏好保留,
+        # 相机重新启用后旧拾音设置自动生效(「自动关」是派生生效态,不落库)。拾音是相机级
+        # (mic 只在球机/ch0)，故按物理 did 判「整台是否全关」。
         denied = denied_camera_dids(self._kv_repo)
-        disabled = [d for d in all_dids if d in denied]
+
+        def _cc(pdid: str) -> int:
+            return getattr(cameras.get(pdid), "channel_count", None) or 1
+
+        disabled = [
+            d
+            for d in all_dids
+            if len(denied_channels_of(denied, d, _cc(d))) >= _cc(d)
+        ]
         if disabled:
             raise ValidationException(
                 f"摄像头感知已关闭，无法设置声音（{disabled}）；请先开启该摄像头感知"
             )
 
-        enable_dids = [i["did"] for i in items if i["voice_in_use"]]
-        disable_dids = [i["did"] for i in items if not i["voice_in_use"]]
+        enable_dids = [
+            physical_camera_did(i["did"]) for i in items if i["voice_in_use"]
+        ]
+        disable_dids = [
+            physical_camera_did(i["did"]) for i in items if not i["voice_in_use"]
+        ]
         if disable_dids:
             set_cameras_voice_in_use(self._kv_repo, disable_dids, False)
         if enable_dids:
@@ -1303,17 +1545,50 @@ class MiotService:
 
     async def trigger_scene(self, scene_id: str) -> bool:
         """Trigger a MIoT manual scene."""
+        scenes: dict = {}
+        # 异常路径也要能看到"当时想触发什么"(失败审计完整性)——scene_name
+        # 在校验通过后、执行前就归一好,成功/异常两路复用。
+        scene_value_json: str | None = None
         try:
-            scenes = await self._miot_proxy.get_all_scenes()
-            if not scenes or scene_id not in scenes:
+            scenes = (await self._miot_proxy.get_all_scenes()) or {}
+            if scene_id not in scenes:
                 raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
             if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
-            return await self._miot_proxy.execute_miot_scene(scene_id)
+            # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
+            # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
+            # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
+            scene_name = getattr(scenes[scene_id], "scene_name", None)
+            scene_value_json = json.dumps(
+                {"scene_name": scene_name}, ensure_ascii=False
+            )
+            ok = await self._miot_proxy.execute_miot_scene(scene_id)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="scene_trigger",
+                did=scene_id, iid=scene_id,
+                value_json=scene_value_json,
+                result_code=None,
+                result_msg=None if ok else "场景触发失败",
+                success=bool(ok), error=None,
+                home_id=getattr(scenes[scene_id], "home_id", None),
+            )
+            return ok
         except (ResourceNotFoundException, ValidationException):
             raise
         except Exception as e:
             logger.error("Failed to trigger scene %s: %s", scene_id, e)
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type="scene_trigger",
+                did=scene_id, iid=scene_id,
+                # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
+                value_json=scene_value_json,
+                result_code=None, result_msg=None,
+                success=False, error=str(e),
+                # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
+                home_id=getattr(scenes.get(scene_id), "home_id", None),
+            )
             raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e

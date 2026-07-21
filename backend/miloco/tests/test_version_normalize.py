@@ -64,3 +64,26 @@ def test_validate_rejects_illegal(bad: str) -> None:
 def test_validate_accepts_legal() -> None:
     assert _run("2026.6.17", "--validate").returncode == 0
     assert _run("2026.6.17-beta.3", "--validate").returncode == 0
+
+
+@pytest.mark.parametrize(
+    "pep,expected",
+    [
+        # 本地 dev（no-guess-dev + node-and-date）：post/dev 落 semver prerelease 段，
+        # local(+g<hash>[.d<date>]) 落 build metadata 段，base 保留真实 tag。
+        (
+            "2026.7.3.post1.dev117+ge88bd38de.d20260717",
+            "2026.7.3-post1.dev117+ge88bd38de.d20260717",  # dirty
+        ),
+        (
+            "2026.7.3.post1.dev117+ge88bd38de",
+            "2026.7.3-post1.dev117+ge88bd38de",  # clean
+        ),
+        ("2026.6.17", "2026.6.17"),  # 正式版：无后缀，原样
+        ("0.0.0", "0.0.0"),  # 无 tag fallback
+    ],
+)
+def test_pep2semver(pep: str, expected: str) -> None:
+    r = _run(pep, "--pep2semver")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == expected

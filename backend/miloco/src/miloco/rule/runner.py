@@ -59,6 +59,25 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
 
+_EMPTY_RESULT_MSG = "MIoT 返回为空/不可判定,无法确认执行结果"
+
+
+def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
+    """规则执行语义的结果归一:**空/不可判定返回 = 失败**。
+
+    summarize_results 对 ``[]`` / ``None`` / 非法形态按成功处理(CLI 展示场景的
+    宽松口径),但规则这里"成功"会写 cooldown、压掉后续真实动作——未确认的执行
+    不能算成功。故仅当返回体里有实际结果项时才复用 #394 的负码判定。
+    """
+    has_result = isinstance(obj, dict) or (
+        isinstance(obj, list) and any(isinstance(it, dict) for it in obj)
+    )
+    if not has_result:
+        return False, None, _EMPTY_RESULT_MSG
+    from miloco.miot.result_codes import summarize_results
+
+    return summarize_results(obj)
+
 
 def build_rule_callbacks_text(callbacks: list[RuleTriggerCallback]) -> str | None:
     """合并后的 rule DYNAMIC 回调列表 → 给 agent 的 message。
@@ -1348,7 +1367,23 @@ class RuleRunner:
                     action=action, result=True, skipped=True
                 )
 
-        # Execute
+        # Execute. rule static 直控不经 MiotService.control_device,故这里显式落 action_ledger
+        # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
+        import json as _json
+
+        from miloco.miot.service import _write_action_ledger
+
+        # 台账元组先归一好,成功/异常路径共用——SDK/网络抛异常时台账也要能看到
+        # 规则当时试图设置什么值 / 什么参数(失败审计完整性)。
+        _ltype = "set_property" if is_prop else "call_action"
+        try:
+            _lvalue = _json.dumps(
+                action.value if is_prop else (action.params or []),
+                ensure_ascii=False,
+            )
+        except Exception:
+            _lvalue = None  # 参数不可序列化时不反噬规则执行
+
         try:
             if is_prop:
                 params = [
@@ -1357,12 +1392,7 @@ class RuleRunner:
                     )
                 ]
                 results = await self._miot_proxy.set_device_properties(params)
-                success = bool(results and results[0].get("code", -1) == 0)
-                err: str | None = (
-                    None
-                    if success
-                    else f"miot_failed: {results[0] if results else 'no_result'}"
-                )
+                success, _lcode, _lmsg = _summarize_rule_result(results)
             else:
                 param = MIoTActionParam(
                     did=action.did,
@@ -1371,8 +1401,18 @@ class RuleRunner:
                     in_=action.params or [],
                 )
                 result = await self._miot_proxy.call_device_action(param)
-                success = bool(result and result.get("code", -1) == 0)
-                err = None if success else f"miot_failed: {result}"
+                success, _lcode, _lmsg = _summarize_rule_result(result)
+            # 有实际结果时与 control_device 同口径(负码即失败,镜像 #394,msg 是失败码
+            # 释义);空/不可判定返回按失败处理(见 _summarize_rule_result:未确认的执行
+            # 不能写 cooldown)。台账 result_msg 不再恒 NULL。
+            err: str | None = None if success else (_lmsg or "miot_failed")
+
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=_ltype, did=action.did, iid=action.iid,
+                value_json=_lvalue, result_code=_lcode, result_msg=_lmsg,
+                success=success, error=err, source="rule", source_id=rule_id,
+            )
 
             if success and not action.idempotent and action.cooldown_minutes:
                 self._ensure_state(rule_id).action_cooldown[
@@ -1384,6 +1424,13 @@ class RuleRunner:
             )
 
         except Exception as e:
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=_ltype,
+                did=action.did, iid=action.iid, value_json=_lvalue,
+                result_code=None, result_msg=None,
+                success=False, error=str(e), source="rule", source_id=rule_id,
+            )
             logger.error(
                 "Failed to execute action %s %s: %s",
                 action.did, action.iid, e,

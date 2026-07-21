@@ -27,6 +27,7 @@ import type { Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
+import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
 import { HeroNow } from "./components/HeroNow";
 import { DevicesByRoom } from "./components/DevicesByRoom";
@@ -162,6 +163,7 @@ function MainApp() {
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
   const [activeTab, setActiveTab] = useState<TabKey>("now");
+  // 活动 tab 现为单流(事件 + 动作合并);筛选 checkbox 在 ActivityFeed 内部,不占 App state。
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
     undefined,
   );
@@ -210,7 +212,6 @@ function MainApp() {
           <div className="space-y-6">
             <HeroNow
               persons={persons.data}
-              cameras={cameras.data}
               scopeCameras={scopeCameras.data}
               miotHasCamera={devices.data.some(
                 (d) => d.category === "camera",
@@ -382,20 +383,20 @@ function MainApp() {
           />
         );
       case "activity": {
-        if (activity.error) {
-          return (
-            <TabPanelError
-              message={t("app.tabActivityError", { msg: activity.error.message })}
-              onRetry={() => activity.reload()}
-            />
-          );
-        }
-        if (!activity.data) {
-          return <TabPanelLoading text={t("app.tabActivityLoading")} />;
-        }
+        // 单流:事件 + 动作合并,筛选 checkbox 在 ActivityFeed 内部。**无条件挂载**
+        // ActivityFeed——动作流走 /api/actions 组件内独立拉,不再被事件流(/api/events)的
+        // 加载/错误态阻断(修 Zirconi review:此前 gate 在 activity.data 上,事件慢/失败时
+        // 动作根本不请求)。事件的加载/失败以内联提示呈现在组件内,不挡动作流。
         return (
           <div className="space-y-6">
-            <ActivityFeed events={activity.data} homeId={homeId} />
+            <ActivityFeed
+              events={activity.data ?? []}
+              homeId={homeId}
+              activeHomeId={(scopeHomes.data ?? []).find((h) => h.inUse)?.homeId}
+              eventsLoading={activity.loading}
+              eventsError={activity.error}
+              onRetryEvents={() => activity.reload()}
+            />
           </div>
         );
       }
@@ -456,6 +457,9 @@ function MainApp() {
             window.location.reload();
           }}
         />
+
+        {/* omni 熔断器告警条(shrink-0):非 ok 时才渲染 */}
+        <OmniHealthBanner onGoToConfig={() => setActiveTab("usage")} />
 
         {/* 状态条(shrink-0) */}
         {status.data && (

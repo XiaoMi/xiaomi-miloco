@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from miloco.observability import agent_meta_poller as poller_mod
 from miloco.observability.agent_meta_poller import AgentMetaPoller
@@ -16,6 +16,19 @@ def _init_db(db_path):
     conn = connect(db_path)
     init_schema(conn)
     return conn
+
+
+def _mock_adapter(read_trace_meta=None):
+    """返回一个 mock adapter，read_trace_meta 返回指定值或 callable。"""
+    adapter = MagicMock()
+    adapter.name = "mock"
+    if callable(read_trace_meta):
+        adapter.read_trace_meta = AsyncMock(side_effect=read_trace_meta)
+    elif read_trace_meta is not None:
+        adapter.read_trace_meta = AsyncMock(return_value=read_trace_meta)
+    else:
+        adapter.read_trace_meta = AsyncMock(return_value=None)
+    return adapter
 
 
 def _publish_seed_trace(client, trace_id="t-1"):
@@ -46,18 +59,18 @@ async def test_poller_done_writes_agent_run(tmp_path):
     await poller.start()
     try:
         _publish_seed_trace(client, "t-done")
-        fake = {
-            "status": "done",
-            "runId": "r-1", "query": "q",
-            "durationMs": 555.0, "success": True,
-            "llmCallCount": 1, "toolCallCount": 0,
-            "llmTotalMs": 400.0, "toolTotalMs": 0.0,
-            "toolMaxMs": 0.0, "slowestToolName": None,
-            "errorCount": 0, "errorMsg": None, "jsonlPath": None,
-        }
+        from miloco.agent_platform.base import TraceMeta
+        fake_meta = TraceMeta(
+            run_id="r-1", query="q", duration_ms=555.0,
+            llm_call_count=1, tool_call_count=0,
+            llm_total_ms=400.0, tool_total_ms=0.0,
+            tool_max_ms=0.0, slowest_tool_name=None,
+            success=True, error_count=0, error_msg=None,
+            jsonl_path=None,
+        )
         with patch(
-            "miloco.observability.agent_meta_poller.call_agent_webhook",
-            new=AsyncMock(return_value=fake),
+            "miloco.observability.agent_meta_poller.get_adapter",
+            return_value=_mock_adapter(fake_meta),
         ):
             poller.enqueue("t-done", "r-1", "interaction", webhook_rtt_ms=12.0)
             await poller._queue.join()
@@ -82,7 +95,7 @@ async def test_poller_done_writes_agent_run(tmp_path):
 
 
 async def test_poller_in_progress_then_done(tmp_path, monkeypatch):
-    """先返回 in_progress 几次再返回 done,验证 backoff retry。"""
+    """先返回 None 几次再返回 meta,验证 backoff retry。"""
     monkeypatch.setattr(poller_mod, "_POLL_INTERVAL_S", 0.01)
 
     db = tmp_path / "obs.db"
@@ -93,25 +106,25 @@ async def test_poller_in_progress_then_done(tmp_path, monkeypatch):
     await poller.start()
     try:
         _publish_seed_trace(client, "t-retry")
+        from miloco.agent_platform.base import TraceMeta
         calls = {"n": 0}
 
-        async def fake_call(action, payload=None, *, timeout=5.0):
+        async def fake_read_trace_meta(run_id):
             calls["n"] += 1
             if calls["n"] < 3:
-                return {"status": "in_progress"}
-            return {
-                "status": "done",
-                "runId": "r-retry", "query": "q",
-                "durationMs": 100.0, "success": True,
-                "llmCallCount": 1, "toolCallCount": 0,
-                "llmTotalMs": 90.0, "toolTotalMs": 0.0,
-                "toolMaxMs": 0.0, "slowestToolName": None,
-                "errorCount": 0, "errorMsg": None, "jsonlPath": None,
-            }
+                return None
+            return TraceMeta(
+                run_id=run_id, query="q", duration_ms=100.0,
+                llm_call_count=1, tool_call_count=0,
+                llm_total_ms=90.0, tool_total_ms=0.0,
+                tool_max_ms=0.0, slowest_tool_name=None,
+                success=True, error_count=0, error_msg=None,
+                jsonl_path=None,
+            )
 
         with patch(
-            "miloco.observability.agent_meta_poller.call_agent_webhook",
-            new=fake_call,
+            "miloco.observability.agent_meta_poller.get_adapter",
+            return_value=_mock_adapter(fake_read_trace_meta),
         ):
             poller.enqueue("t-retry", "r-retry", "rule", webhook_rtt_ms=None)
             await poller._queue.join()
@@ -132,7 +145,10 @@ async def test_poller_in_progress_then_done(tmp_path, monkeypatch):
         await client.stop()
 
 
-async def test_poller_unknown_gives_up(tmp_path):
+async def test_poller_never_done_gives_up(tmp_path, monkeypatch):
+    """read_trace_meta 持续返回 None → 超时后不写 agent_runs。"""
+    monkeypatch.setattr(poller_mod, "_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(poller_mod, "_MAX_DEADLINE_S", 0.05)
     db = tmp_path / "obs.db"
     _init_db(db).close()
     client = MetricsClient(db_path=db)
@@ -140,12 +156,12 @@ async def test_poller_unknown_gives_up(tmp_path):
     poller = AgentMetaPoller(metrics_client=client)
     await poller.start()
     try:
-        _publish_seed_trace(client, "t-unknown")
+        _publish_seed_trace(client, "t-nope")
         with patch(
-            "miloco.observability.agent_meta_poller.call_agent_webhook",
-            new=AsyncMock(return_value={"status": "unknown"}),
+            "miloco.observability.agent_meta_poller.get_adapter",
+            return_value=_mock_adapter(None),  # always returns None
         ):
-            poller.enqueue("t-unknown", "r-nope", "suggestion", webhook_rtt_ms=8.0)
+            poller.enqueue("t-nope", "r-nope", "suggestion", webhook_rtt_ms=8.0)
             await poller._queue.join()
             await client.flush()
 
@@ -153,7 +169,7 @@ async def test_poller_unknown_gives_up(tmp_path):
         try:
             count = conn.execute(
                 "SELECT COUNT(*) FROM agent_runs WHERE trace_id=?",
-                ("t-unknown",),
+                ("t-nope",),
             ).fetchone()[0]
         finally:
             conn.close()

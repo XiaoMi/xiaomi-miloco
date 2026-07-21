@@ -65,6 +65,11 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "",
         "agent webhook 鉴权 Bearer 值",
     ),
+    "agent.platform": (
+        str,
+        "",
+        "Agent 平台名(hermes/openclaw)；空=webhook 模式,非空则加载 Adapter",
+    ),
     "model.omni.model": (str, "xiaomi/mimo-v2.5", "多模态模型标识"),
     "model.omni.base_url": (
         str,
@@ -72,6 +77,12 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "多模态模型服务 Base URL",
     ),
     "model.omni.api_key": (str, "", "多模态模型 API Key"),
+    "scheduler.enabled": (
+        bool,
+        True,
+        "是否由 miloco 自动管理内置定时任务（感知摘要 / 家庭巡检 / Dreaming / 习惯洞察）；"
+        "关闭后 agent 网关启动时会清除这些自动任务且不再重建",
+    ),
     "perception.engine.input.video_short_edge": (
         int,
         512,
@@ -98,14 +109,25 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
 
 
 def atomic_write(path: Path, data: dict) -> None:
-    """原子写：临时文件 + ``os.replace``。"""
+    """原子写：临时文件 + fsync + ``os.replace`` + 目录 fsync。
+
+    fsync 数据页与目录项后再 rename，掉电也不会留下改了名却没落盘的空/半文件
+    （与 backend ``home_profile/store.py::_atomic_write_text`` 同款持久化保证）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except BaseException:
         try:
             os.unlink(tmp)

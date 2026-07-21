@@ -45,15 +45,19 @@ function attachAuth(proxy: any) {
   });
 }
 
-// build 时注入发布版本（package.json 已被 build.sh stamp 成 tag 版本）；dev 用
-// git describe。用 vite 的 command 判别 build/serve——不能用 process.env.NODE_ENV，
-// vite 执行本配置文件时不会把它设成 "production"，build 下会误走 git 分支。
+// build 时注入界面版本；dev 用 git describe。用 vite 的 command 判别 build/serve——不能用
+// process.env.NODE_ENV，vite 执行本配置文件时不会把它设成 "production"，build 下会误走 git 分支。
 const __pkgVersion = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, "package.json"), "utf-8"),
 ).version as string;
 
 function resolveAppVersion(command: string): string {
-  if (command === "build") return __pkgVersion;
+  if (command === "build") {
+    // build.sh 经 MILOCO_APP_VERSION 注入 RESOLVED_PEP(与 CLI/Python 包权威版本同源一致)；
+    // 这才是界面该显示的版本。package.json 的 version 只是 npm 装配占位(非权威版本)，
+    // 仅当脱离 build.sh 直接 `pnpm build` 时兜底用它。
+    return process.env.MILOCO_APP_VERSION || __pkgVersion;
+  }
   try {
     return execSync("git describe --tags --always --dirty", {
       encoding: "utf-8",

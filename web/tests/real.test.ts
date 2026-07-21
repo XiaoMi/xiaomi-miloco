@@ -9,8 +9,10 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
+import i18n from "@/i18n";
 import {
   realListActivity,
+  realListDevices,
   realGetUsageStats,
   realGetOmniConfig,
   realUpdateOmniConfig,
@@ -30,6 +32,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
   vi.restoreAllMocks();
   globalThis.fetch = originalFetch;
+  i18n.changeLanguage("zh");
   _resetUsageStatsCache(); // 清掉用量请求级缓存，保证用例间隔离
 });
 
@@ -66,6 +69,54 @@ function mockFetch(events: unknown[]) {
     ),
   ) as unknown as typeof fetch;
 }
+
+describe("realListDevices — device status contract", () => {
+  it("maps lock warning state to statusKind independently from localized statusText", async () => {
+    mockFetchByUrl({
+      "/api/miot/home": {
+        code: 0,
+        message: "ok",
+        data: {
+          devices: [
+            {
+              did: "lock-1",
+              name: "Front Door",
+              online: true,
+              model: "lock.model",
+              room: "Entry",
+              category: "lock",
+              spec: {
+                "prop.2.1": {
+                  format: "uint8",
+                  type_name: "door-state",
+                  value_list: [
+                    { name: "Locked", value: 1 },
+                    { name: "Unlocked", value: 2 },
+                  ],
+                },
+              },
+            },
+          ],
+          areas: [],
+          scenes: [],
+          persons: [],
+        },
+      },
+      "/api/miot/devices/lock-1/status": {
+        code: 0,
+        message: "ok",
+        data: { properties: [{ iid: "prop.2.1", value: 2, code: 0 }] },
+      },
+    });
+
+    await i18n.changeLanguage("en");
+    const devices = await realListDevices();
+    expect(devices[0]).toMatchObject({
+      statusText: "Unlocked",
+      statusKind: "unlocked",
+    });
+  });
+});
 
 describe("realListActivity — /api/events 契约", () => {
   it("BackendMeaningfulEvent → ActivityEvent 字段映射", async () => {

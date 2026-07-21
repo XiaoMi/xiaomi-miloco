@@ -14,12 +14,15 @@ from datetime import datetime, timezone
 import click
 
 from miloco_cli.commands.account import account_group
+from miloco_cli.commands.actions import actions_group
 from miloco_cli.commands.admin import admin_group
 from miloco_cli.commands.config import config_group
+from miloco_cli.commands.cron import cron_group
 from miloco_cli.commands.dashboard import dashboard_cmd
 from miloco_cli.commands.debug import debug_group
 from miloco_cli.commands.device import device_group
 from miloco_cli.commands.doctor import doctor_cmd
+from miloco_cli.commands.habit import habit_group
 from miloco_cli.commands.home_profile import home_profile_group
 from miloco_cli.commands.identity import identity_group
 from miloco_cli.commands.monitor import monitor_group
@@ -72,14 +75,17 @@ def cli():
 # ─── 子命令组 ─────────────────────────────────────────────────────────────────
 
 cli.add_command(device_group)
+cli.add_command(actions_group)
 cli.add_command(account_group)
 cli.add_command(scene_group)
 cli.add_command(perceive_group)
 cli.add_command(rule_group)
+cli.add_command(cron_group)
 cli.add_command(task_group)
 cli.add_command(person_group)
 cli.add_command(identity_group)
 cli.add_command(home_profile_group)
+cli.add_command(habit_group)
 cli.add_command(admin_group)
 cli.add_command(service_group)
 cli.add_command(config_group)
