@@ -40,11 +40,14 @@ export function SettingsDrawer({ open, onClose }: Props) {
   useEscClose(open, onClose);
 
   useEffect(() => {
-    if (!open) {
-      setConfig(null);
-      return;
+    if (!open) return;
+    if (config) {
+      setVideoShortEdge(config.video_short_edge);
+      setOmniFps(config.omni_fps);
+      setWindowSize(config.window_size);
+    } else {
+      setLoading(true);
     }
-    setLoading(true);
     // 抽屉靠 `if (!open) return null` 隐藏而非卸载，state 会跨「关闭→重开」保留。
     // 每次重载先把调度值复位为 null：本次读不到就稳定退回 unavailable（disable 开关），
     // 不留用上次会话的旧值，与 e107541 的「读不到就禁用」保持一致。
