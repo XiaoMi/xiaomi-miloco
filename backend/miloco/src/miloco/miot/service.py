@@ -251,12 +251,29 @@ class MiotService:
             # list_homes 兜底会自动选第一个家庭，这里再调一次确保 KV 已更新
             await self.list_homes()
             allow = allowed_home_ids(self._kv_repo)
-        devices = await self._miot_proxy.get_devices()
+        devices_error: Exception | None = None
+        try:
+            devices = await self._miot_proxy.get_devices()
+        except Exception as e:
+            logger.warning("get_devices failed while validating did=%s: %s", did, e)
+            devices = {}
+            devices_error = e
         info = devices.get(did)
         if info is None:
-            cameras = await self._miot_proxy.get_cameras()
+            try:
+                cameras = await self._miot_proxy.get_cameras()
+            except Exception:
+                if devices_error is not None:
+                    raise MiotServiceException(
+                        f"Failed to validate device allowed home: {str(devices_error)}"
+                    ) from devices_error
+                raise
             info = cameras.get(did) if cameras else None
         if info is None:
+            if devices_error is not None:
+                raise MiotServiceException(
+                    f"Failed to validate device allowed home: {str(devices_error)}"
+                ) from devices_error
             raise ResourceNotFoundException(f"Device '{did}' not found")
         if not is_home_allowed(self._kv_repo, getattr(info, "home_id", None)):
             raise ValidationException(
@@ -435,8 +452,10 @@ class MiotService:
         try:
             result = await self._miot_proxy.refresh_devices()
             if not result:
-                raise MiotServiceException("Failed to refresh MiOT devices")
+                raise MiotServiceException("No MiOT devices found after refresh")
             return True
+        except MiotServiceException:
+            raise
         except Exception as e:
             logger.error("Failed to refresh MiOT devices: %s", e)
             raise MiotServiceException(
@@ -598,7 +617,7 @@ class MiotService:
                 str, MIoTDeviceInfo
             ] = await self._miot_proxy.get_devices()
             if not device_dict:
-                raise MiotServiceException("Failed to get MiOT device list")
+                raise MiotServiceException("No MiOT devices found")
             device_dict = filter_by_home(self._kv_repo, device_dict)
             device_list = []
             for device_info in device_dict.values():
@@ -795,23 +814,44 @@ class MiotService:
     async def get_home_info(self, *, refresh: bool = False) -> dict:
         """Get home info。refresh=True 时先刷新云端数据。"""
         try:
+            device_refresh_failed = False
             if refresh:
-                await asyncio.gather(
+                refresh_results = await asyncio.gather(
                     self._miot_proxy.refresh_devices(),
                     self._miot_proxy.refresh_scenes(),
                     self._miot_proxy.refresh_cameras(),
+                    return_exceptions=True,
                 )
+                for label, result in zip(
+                    ("devices", "scenes", "cameras"), refresh_results, strict=True
+                ):
+                    if isinstance(result, Exception):
+                        logger.warning(
+                            "refresh_%s failed in get_home_info: %s", label, result
+                        )
+                        if label == "devices":
+                            device_refresh_failed = True
             data = await self._miot_proxy.get_home_info_data()
 
             # 家庭过滤：data 内的 devices/scenes 不带 home_id，借助原始 dict 反查
             allow = allowed_home_ids(self._kv_repo)
             if allow:
+                if device_refresh_failed:
+                    raw_devices = getattr(self._miot_proxy, "_device_info_dict", {})
+                else:
+                    try:
+                        raw_devices = await self._miot_proxy.get_devices()
+                    except Exception as e:
+                        logger.warning(
+                            "get_devices failed in get_home_info filter: %s", e
+                        )
+                        raw_devices = {}
                 allowed_dids = set(
-                    filter_by_home(self._kv_repo, await self._miot_proxy.get_devices()).keys()
+                    filter_by_home(self._kv_repo, raw_devices or {}).keys()
                 )
                 allowed_scene_ids = set(
-                    filter_by_home(self._kv_repo,
-                        await self._miot_proxy.get_all_scenes() or {}
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_all_scenes() or {}
                     ).keys()
                 )
                 data["devices"] = [
@@ -824,7 +864,9 @@ class MiotService:
                 ]
                 data["areas"] = [
                     {"name": a}
-                    for a in sorted({d.get("room") for d in data["devices"] if d.get("room")})
+                    for a in sorted(
+                        {d.get("room") for d in data["devices"] if d.get("room")}
+                    )
                 ]
             else:
                 # 未选择家庭：清空 devices/scenes/areas
@@ -872,21 +914,27 @@ class MiotService:
 
     async def get_device_spec(self, did: str) -> dict:
         """Get single device spec (轻量，不刷新云端数据)。"""
-        dev = (await self._miot_proxy.get_devices()).get(did)
-        if dev is None:
-            raise ValidationException(f"did '{did}' not found")
-        sub_names = build_sub_device_names(dev)
-        spec = await self._miot_proxy._fetch_device_spec(dev.urn, sub_names) or {}
-        return {
-            "did": dev.did,
-            "name": dev.name,
-            "home": dev.home_name,
-            "model": dev.model,
-            "room": dev.room_name,
-            "online": dev.online,
-            "category": dev.urn.split(":")[3] if ":" in dev.urn else None,
-            "spec": spec,
-        }
+        try:
+            dev = (await self._miot_proxy.get_devices()).get(did)
+            if dev is None:
+                raise ValidationException(f"did '{did}' not found")
+            sub_names = build_sub_device_names(dev)
+            spec = await self._miot_proxy._fetch_device_spec(dev.urn, sub_names) or {}
+            return {
+                "did": dev.did,
+                "name": dev.name,
+                "home": dev.home_name,
+                "model": dev.model,
+                "room": dev.room_name,
+                "online": dev.online,
+                "category": dev.urn.split(":")[3] if ":" in dev.urn else None,
+                "spec": spec,
+            }
+        except (MiotServiceException, ValidationException):
+            raise
+        except Exception as e:
+            logger.error("Failed to get device spec for %s: %s", did, e)
+            raise MiotServiceException(f"Failed to get device spec: {str(e)}") from e
 
     async def control_device(self, did: str, request: DeviceControlRequest) -> dict:
         """Control device: set_property / set_properties / call_action."""
@@ -1194,63 +1242,71 @@ class MiotService:
         ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
         ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
         """
-        voice_allowed = voice_allowed_camera_dids(self._kv_repo)
-        connected = self._connected_camera_dids()
-        cameras = filter_by_home(
-            self._kv_repo, await self._miot_proxy.get_cameras() or {}
-        )
-        # 过滤已从账号删除的摄像头：_camera_info_dict 是内存缓存，
-        # 设备删除后不会自动清除，需要用 _device_info_dict 做交集校验。
-        devices = await self._miot_proxy.get_devices()
-        cameras = {did: info for did, info in cameras.items() if did in devices}
-        # awake：只读缓存（云读收在 refresh_camera_online_status，前端列表前必调）。
-        awake_map = await self._miot_proxy.read_cameras_awake(
-            list(cameras.keys()), cache_only=True
-        )
-        # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
-        active = set(
-            select_active_camera_dids(self._kv_repo, cameras, awake_map=awake_map)
-        )
-        out: list[dict] = []
-        for did, info in cameras.items():
-            cloud_online = bool(getattr(info, "online", False))
-            lan_reachable = bool(getattr(info, "lan_online", False))
-            channel_count = getattr(info, "channel_count", None) or 1
-            lens_awake = awake_map.get(did) or {}
-            # 全拆后每路是独立一等相机：``did`` 仍是物理 did（会话/拾音按整台），``channel``
-            # 区分通道；``awake`` / ``in_use`` / ``connected`` 逐通道给。单通道 channel=0、
-            # 各字段按裸 did，与旧行为一致，仅多带 channel。
-            base = {
-                "did": did,
-                "name": getattr(info, "name", None),
-                # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
-                # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
-                "room_name": getattr(info, "room_name", None),
-                # 通道总数：判「多通道相机」的权威信号（channel_count>1），前端/CLI 据此
-                # 决定是否拼合成 did、显镜头标签——与后端 select_active 同口径，别再用「行数」代理。
-                "channel_count": channel_count,
-                "cloud_online": cloud_online,
-                "lan_reachable": lan_reachable,
-                # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
-                "is_online": cloud_online and lan_reachable,
-                # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。拾音按整台存
-                # （只球机/ch0 有 mic），前端在无 mic 的通道上隐藏该开关。
-                "voice_in_use": did in voice_allowed,
-            }
-            for ch in range(channel_count):
-                syn_did = synthetic_camera_did(did, ch, channel_count)
-                out.append(
-                    {
-                        **base,
-                        "channel": ch,
-                        # per-lens 镜头态（None=未知/机型无开关）
-                        "awake": lens_awake.get(ch),
-                        # per-channel 启用（活跃集按合成 did）+ per-channel 真投喂
-                        "in_use": syn_did in active,
-                        "connected": syn_did in connected,
-                    }
-                )
-        return out
+        try:
+            voice_allowed = voice_allowed_camera_dids(self._kv_repo)
+            connected = self._connected_camera_dids()
+            cameras = filter_by_home(
+                self._kv_repo, await self._miot_proxy.get_cameras() or {}
+            )
+            # 过滤已从账号删除的摄像头：_camera_info_dict 是内存缓存，
+            # 设备删除后不会自动清除，需要用 _device_info_dict 做交集校验。
+            devices = await self._miot_proxy.get_devices()
+            cameras = {did: info for did, info in cameras.items() if did in devices}
+            # awake：只读缓存（云读收在 refresh_camera_online_status，前端列表前必调）。
+            awake_map = await self._miot_proxy.read_cameras_awake(
+                list(cameras.keys()), cache_only=True
+            )
+            # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
+            active = set(
+                select_active_camera_dids(self._kv_repo, cameras, awake_map=awake_map)
+            )
+            out: list[dict] = []
+            for did, info in cameras.items():
+                cloud_online = bool(getattr(info, "online", False))
+                lan_reachable = bool(getattr(info, "lan_online", False))
+                channel_count = getattr(info, "channel_count", None) or 1
+                lens_awake = awake_map.get(did) or {}
+                # 全拆后每路是独立一等相机：``did`` 仍是物理 did（会话/拾音按整台），``channel``
+                # 区分通道；``awake`` / ``in_use`` / ``connected`` 逐通道给。单通道 channel=0、
+                # 各字段按裸 did，与旧行为一致，仅多带 channel。
+                base = {
+                    "did": did,
+                    "name": getattr(info, "name", None),
+                    # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
+                    # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
+                    "room_name": getattr(info, "room_name", None),
+                    # 通道总数：判「多通道相机」的权威信号（channel_count>1），前端/CLI 据此
+                    # 决定是否拼合成 did、显镜头标签——与后端 select_active 同口径，别再用「行数」代理。
+                    "channel_count": channel_count,
+                    "cloud_online": cloud_online,
+                    "lan_reachable": lan_reachable,
+                    # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
+                    "is_online": cloud_online and lan_reachable,
+                    # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。拾音按整台存
+                    # （只球机/ch0 有 mic），前端在无 mic 的通道上隐藏该开关。
+                    "voice_in_use": did in voice_allowed,
+                }
+                for ch in range(channel_count):
+                    syn_did = synthetic_camera_did(did, ch, channel_count)
+                    out.append(
+                        {
+                            **base,
+                            "channel": ch,
+                            # per-lens 镜头态（None=未知/机型无开关）
+                            "awake": lens_awake.get(ch),
+                            # per-channel 启用（活跃集按合成 did）+ per-channel 真投喂
+                            "in_use": syn_did in active,
+                            "connected": syn_did in connected,
+                        }
+                    )
+            return out
+        except MiotServiceException:
+            raise
+        except Exception as e:
+            logger.error("Failed to list cameras with state: %s", e)
+            raise MiotServiceException(
+                f"Failed to list cameras with state: {str(e)}"
+            ) from e
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
         """批量切换相机**某通道**的启用状态。每项 {"did": str, "in_use": bool}。
