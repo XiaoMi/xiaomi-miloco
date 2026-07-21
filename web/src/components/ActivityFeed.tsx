@@ -263,10 +263,11 @@ export function ActivityFeed({
       });
   };
 
-  // M5/N2: prop 变(homeId 切换 / 父组件 reload)时同步 — 但仅当 filter 未激活.
-  // 不用 setEvents(initial) 直接抹掉 SSE 累积:filter 清空时 fetchPage({}) 主动拉一次,
-  // 让 backend 给出最新 + SSE merge 已 accumulated 的事件,避免清 filter 瞬间闪烁.
-  // useState(initial) 只首次生效,prop 后续变化由这里同步.
+  // M5/N2: prop 变(homeId 切换 / 父组件 reload)时同步 — 仅当 filter 未激活。
+  // 直接 setEvents(initial) 立即给出全量视图;SSE effect 因 appliedSince 变化重订阅,
+  // 其 onOpen reload 会再走一次 fetchPage 拉后端最新。
+  // 先 ++fetchGenRef 作废在途 filtered fetch,并手动 setLoading(false)
+  // (被作废的 fetch 其 finally 的 gen 守卫会 no-op,不会替我们收 loading)。
   useEffect(() => {
     if (!filterActive) {
       ++fetchGenRef.current; // 作废可能仍在途的 filtered fetch
