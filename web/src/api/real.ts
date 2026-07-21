@@ -319,6 +319,7 @@ interface BackendPet {
   name: string;
   species: string;
   avatar_ext?: string | null;
+  reference_crop_count?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -329,6 +330,7 @@ function mapBackendPet(p: BackendPet): Pet {
     name: p.name,
     species: p.species,
     avatarExt: p.avatar_ext ?? null,
+    referenceCropCount: p.reference_crop_count ?? 0,
     createdAt: p.created_at,
     updatedAt: p.updated_at,
   };

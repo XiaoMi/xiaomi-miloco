@@ -46,10 +46,6 @@
     "modelChecking": "Checking perception model…",
     "modelUnconfigured": "No perception model configured — set one in Model config first",
     "modelUnavailable": "Perception model unavailable: {{msg}}",
-    "cropTitle": "Adjust avatar",
-    "cropHint": "Drag to move · scroll or slider to zoom",
-    "cropZoom": "Zoom",
-    "cropConfirm": "Confirm",
     "save": "Save",
     "saving": "Saving…",
     "rename": "Rename",
@@ -66,6 +62,7 @@
     "experimentalBadge": "Experimental",
     "experimentalHint": "When on, pets can be registered as family members and named in scene descriptions; turning off only hides them, it does not delete recorded pets.",
     "edit": "Edit",
+    "referenceCount": "reference photos",
     "profilePetEmpty": "No profile info for {{name}} yet",
     "profilePetEmptyHint": "Upload a photo to auto-generate, or tap Edit to add"
   }

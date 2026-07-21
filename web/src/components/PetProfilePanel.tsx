@@ -55,10 +55,23 @@ export function PetProfilePanel({ pet, entries, loading, onEdit }: Props) {
               </span>
             )}
           </div>
-          {profile.length > 0 && (
+          {(profile.length > 0 || (pet.referenceCropCount ?? 0) > 0) && (
             <div className="text-caption text-text-tertiary mt-1.5">
-              <span className="num">{profile.length}</span>{" "}
-              {t("family.featureCount")}
+              {profile.length > 0 && (
+                <>
+                  <span className="num">{profile.length}</span>{" "}
+                  {t("family.featureCount")}
+                </>
+              )}
+              {profile.length > 0 && (pet.referenceCropCount ?? 0) > 0 && (
+                <span className="mx-1">·</span>
+              )}
+              {(pet.referenceCropCount ?? 0) > 0 && (
+                <>
+                  <span className="num">{pet.referenceCropCount}</span>{" "}
+                  {t("pet.referenceCount")}
+                </>
+              )}
             </div>
           )}
         </div>

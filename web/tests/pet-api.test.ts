@@ -39,6 +39,7 @@ describe("pet api client", () => {
         name: "小黑",
         species: "猫",
         avatarExt: "jpg",
+        referenceCropCount: 0,
         createdAt: undefined,
         updatedAt: undefined,
       },
