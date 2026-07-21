@@ -35,8 +35,9 @@
        --save-crops /tmp/ab12_pet --pretty
    ```
    → `crops_saved=[{index:0,path:/tmp/ab12_pet_0.jpg,score:0.36,...},{index:1,...}]`，
+     `montage_saved_to=/tmp/ab12_pet_montage.jpg`（2 张横向拼成一张，供发用户），
      `description.summary="黑色短毛猫，胸口一撮白，右耳尖有缺口"`，`warnings=[]`
-2. 用 `message` 发 `crops_saved` 里的候选图 + 文字：
+2. 用 `message` 发**这一张拼图 `montage_saved_to`**（不逐张发 `crops_saved`）+ 文字：
    > 观察好了：一只黑色短毛猫，胸口一撮白、右耳尖有缺口。我挑了 2 张不同姿态作识别参照（图）。确认给「小黑」入库？回"确认"。
 3. **本轮终止等待**。
 4. 用户："确认"
@@ -46,12 +47,13 @@
    miloco-cli pet reference-crops pet_xxx \
        --crops /tmp/ab12_pet_0.jpg --crops /tmp/ab12_pet_1.jpg \
        --scores 0.36,0.21 --mode replace --pretty
+   miloco-cli pet avatar pet_xxx --image /tmp/ab12_pet_avatar.jpg --pretty   # 默认头像（头部裁剪）
    # /tmp/ab12_persona.json = [{"op":"add","entry":{"type":"member_persona",
    #   "subject_id":"pet_xxx","subject_name":"小黑","content":"黑色短毛猫，胸口一撮白，右耳尖有缺口"}}]
    miloco-cli home-profile profile-write --ops-file /tmp/ab12_persona.json --user-edit --pretty
    miloco-cli home-profile commit --pretty
    ```
-6. 回复："已给「小黑」建好档案：记了 2 张识别参照 + 外观。"
+6. 回复："已给「小黑」建好档案：记了 2 张识别参照 + 外观 + 头像。"
 
 ---
 
@@ -63,7 +65,7 @@
    ```bash
    miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/cd34_pet --pretty
    ```
-2. 发候选图 + "一只柯基犬……挑了 3 张参照，确认给「豆豆」入库？"
+2. 发 `montage_saved_to` 拼图（3 张横向拼成一张）+ "一只柯基犬……挑了 3 张参照，确认给「豆豆」入库？"
 3. 等待 → 用户"确认" → `pet add --name 豆豆 --species 狗` + `reference-crops … --mode replace` + 写外观 + commit。
 
 ---
@@ -74,7 +76,7 @@
 
 1. `miloco-cli pet list` 确认"小黑"已存在 → pet_id=pet_xxx。
 2. observe（`--images`）→ 拿新候选 crop。
-3. 发图 + "给「小黑」补这几张作参照？"→ 等待 → 确认。
+3. 发 `montage_saved_to` 拼图 + "给「小黑」补这几张作参照？"→ 等待 → 确认。
 4. 落库（**append**，不 `pet add`）：
    ```bash
    miloco-cli pet reference-crops pet_xxx --crops /tmp/ef_pet_0.jpg --crops /tmp/ef_pet_1.jpg \
@@ -88,13 +90,13 @@
 
 用户："我想登记下我家的猫"（说了物种"猫"，但没名字、没外观、没附件）
 
-Agent（**接住已知的"猫"，只补问名字+外观**，两条路都给）：
-> 好嘞，这只猫要登记，两种方式任选：
-> - **描述一下它长什么样**（叫什么名字、毛色花纹/体型/有没有显著标记），我建个档；
-> - 或**发张照片/短视频**，我还能顺带建识别参照，让画面里也认得出它。
+Agent（**接住已知的"猫"，只补问名字+外观**，素材优先、文字兜底）：
+> 好嘞，这只猫要登记（顺便告诉我它叫什么），两种方式（效果从好到省事）：
+> - **发一段短视频，或 1~3 张、最好 3 张照片**，尽量拍全不同姿态/角度——认得最准，还能建识别参照让画面里也认出它；
+> - 或**只用文字描述它长什么样**（毛色花纹/体型/显著标记），我先建档，回头再补素材加识别参照。
 
 - **本轮终止等待**，不建空壳。用户补描述 → 场景 0（B）；补素材 → 场景 1/2（A）。
-- 若用户连物种都没说（"帮我登记个宠物"）→ 话术里把"猫还是狗"也一起问。
+- 若用户连物种都没说（"帮我登记个宠物"）→ 话术里把"是猫、狗还是别的宠物"也一起问。
 
 ---
 

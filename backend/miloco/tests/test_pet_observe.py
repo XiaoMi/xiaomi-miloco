@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from types import SimpleNamespace
 
@@ -125,6 +126,124 @@ def test_gate_select_dedups_and_caps_at_3():
     out = obs._gate_select(cands)
     assert len(out) <= 3
     assert all("gate_score" in c for c in out)  # 已打加权分
+
+
+# ── ReID 特征距离多样性选参考图 ───────────────────────────────────────────────
+
+
+class _FakeReID:
+    """按调用顺序吐预设 L2 归一嵌入的桩；None 表示该 crop 提取失败。"""
+
+    def __init__(self, embs):
+        self._embs = list(embs)
+        self._i = 0
+
+    def extract_feature(self, crop):
+        e = self._embs[self._i]
+        self._i += 1
+        return None if e is None else np.asarray(e, dtype=np.float32)
+
+
+def test_reid_diverse_topk_seed_then_farthest():
+    # 4 张按 gate_score 已降序；嵌入：c0 基准、c1≈c0(很像)、c2 正交、c3 反向。
+    # 贪心：种子 c0 → 最远 c3(cos -1) → 离 {c0,c3} 都最远的 c2 → [c0,c3,c2]
+    cands = [{"crop": _frame(60, 60), "tag": i} for i in range(4)]
+    fake = _FakeReID([[1.0, 0.0], [0.99, 0.141], [0.0, 1.0], [-1.0, 0.0]])
+    out = obs._reid_diverse_topk(cands, 3, fake)
+    assert [c["tag"] for c in out] == [0, 3, 2]
+
+
+def test_reid_diverse_topk_single_valid_returns_none():
+    # 有效嵌入 < 2（其余提取失败）→ None，交回上层走 dHash
+    cands = [{"crop": _frame(60, 60), "tag": i} for i in range(3)]
+    fake = _FakeReID([[1.0, 0.0], None, None])
+    assert obs._reid_diverse_topk(cands, 3, fake) is None
+
+
+def test_reid_diverse_topk_extractor_raises_returns_none():
+    class _Boom:
+        def extract_feature(self, crop):
+            raise RuntimeError("onnx 挂了")
+
+    cands = [{"crop": _frame(60, 60)} for _ in range(3)]
+    assert obs._reid_diverse_topk(cands, 3, _Boom()) is None
+
+
+def test_gate_select_uses_reid_when_available(monkeypatch):
+    monkeypatch.setattr(
+        obs,
+        "get_settings",
+        lambda: SimpleNamespace(features=SimpleNamespace(pet_reid_diverse=True)),
+    )
+    fake = _FakeReID([[1.0, 0.0], [0.99, 0.141], [0.0, 1.0], [-1.0, 0.0]])
+    monkeypatch.setattr(obs, "_get_pet_reid", lambda: fake)
+    # sharpness 递减 → gate_score 降序 = tag 0..3；reid 应选 [0,3,2]
+    cands = [
+        {"crop": _frame(60, 60), "conf": 0.9, "sharpness": 800.0 - i,
+         "area_ratio": 0.2, "class_id": Detection.CLASS_CAT,
+         "crowded": False, "size_ok": True, "tag": i}
+        for i in range(4)
+    ]
+    out = obs._gate_select(cands)
+    assert [c["tag"] for c in out] == [0, 3, 2]
+
+
+def test_gate_select_falls_back_to_dhash_when_reid_none(monkeypatch):
+    monkeypatch.setattr(
+        obs,
+        "get_settings",
+        lambda: SimpleNamespace(features=SimpleNamespace(pet_reid_diverse=True)),
+    )
+    monkeypatch.setattr(obs, "_get_pet_reid", lambda: None)  # 模型不可用
+    cands = [
+        {"crop": _frame(60, 60), "conf": 0.9, "sharpness": 800.0 + i,
+         "area_ratio": 0.2, "class_id": Detection.CLASS_CAT,
+         "crowded": False, "size_ok": True}
+        for i in range(5)
+    ]
+    out = obs._gate_select(cands)
+    assert len(out) <= 3
+    assert all("gate_score" in c for c in out)
+
+
+def test_gate_select_flag_off_skips_reid(monkeypatch):
+    monkeypatch.setattr(
+        obs,
+        "get_settings",
+        lambda: SimpleNamespace(features=SimpleNamespace(pet_reid_diverse=False)),
+    )
+
+    def _boom():
+        raise AssertionError("flag 关时不应调用 reid")
+
+    monkeypatch.setattr(obs, "_get_pet_reid", _boom)
+    cands = [
+        {"crop": _frame(60, 60), "conf": 0.9, "sharpness": 800.0 + i,
+         "area_ratio": 0.2, "class_id": Detection.CLASS_CAT,
+         "crowded": False, "size_ok": True}
+        for i in range(4)
+    ]
+    out = obs._gate_select(cands)
+    assert len(out) <= 3
+
+
+# ── 多姿态参考图横向拼图（montage）─────────────────────────────────────────────
+
+
+def test_montage_b64_unifies_height_and_hconcats():
+    # 两张不同尺寸 → 各等比缩放到高 384 → 横向拼接
+    a = _frame(100, 50)   # h100 w50 → 缩放后 w=192
+    b = _frame(200, 100)  # h200 w100 → 缩放后 w=192
+    b64 = obs._montage_b64([a, b])
+    assert b64
+    img = cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_COLOR)
+    assert img.shape[0] == 384          # 高度统一到 384
+    assert img.shape[1] == 192 + 192    # 横向拼接后宽 = 各等比缩放宽之和
+
+
+def test_montage_b64_empty_inputs_return_empty():
+    assert obs._montage_b64([]) == ""
+    assert obs._montage_b64([None]) == ""
 
 
 # ── omni 编排 ────────────────────────────────────────────────────────────────

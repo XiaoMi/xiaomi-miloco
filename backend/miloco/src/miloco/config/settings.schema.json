@@ -123,6 +123,11 @@
           "type": "boolean",
           "default": true,
           "description": "宠物本体定位子开关（默认开）：仅作用于检测器框不到猫/狗的回退路径——开启后由 omni 在整幅画面输出目标动物本体坐标、裁本体作参考 crop（兼容非猫狗物种）；关闭则回退路径不产参考 crop。仅在 pet_recognition 开启时有意义"
+        },
+        "pet_reid_diverse": {
+          "type": "boolean",
+          "default": true,
+          "description": "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 特征距离在同一只候选里贪心选最不相似的 ≤3 张多姿态（第 1 张取质量分最高，第 2/3 张依次选特征距离最远者）；关闭或模型不可用时回退感知哈希 dHash。仅在 pet_recognition 开启时有意义"
         }
       }
     },

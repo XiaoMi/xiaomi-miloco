@@ -144,7 +144,19 @@ def pet_observe(image_path, video_path, image_paths_multi, grounding, save_crops
             pp = f"{save_crops}_primary.jpg"
             Path(pp).write_bytes(base64.b64decode(d["primary_crop_b64"]))
             d["primary_saved_to"] = pp
+        # 默认头像（头部裁剪）——注册时喂 pet avatar，省去用户手动裁剪
+        if d.get("avatar_b64"):
+            ap = f"{save_crops}_avatar.jpg"
+            Path(ap).write_bytes(base64.b64decode(d["avatar_b64"]))
+            d["avatar_saved_to"] = ap
+        # 多姿态参考图横向拼图（高 384）——发用户看就发这一张，别逐张刷屏（个体 crop 仍留作落库）
+        if d.get("montage_b64"):
+            mp = f"{save_crops}_montage.jpg"
+            Path(mp).write_bytes(base64.b64decode(d["montage_b64"]))
+            d["montage_saved_to"] = mp
         d.pop("primary_crop_b64", None)
+        d.pop("avatar_b64", None)
+        d.pop("montage_b64", None)
         d["candidates"] = [
             {k: v for k, v in c.items() if k != "crop_b64"} for c in cands
         ]
@@ -185,4 +197,19 @@ def pet_reference_crops(pet_id, crop_paths, scores, mode, pretty):
             sys.exit(1)
 
     resp = api_post_multipart(f"/api/identity/pets/{pet_id}/reference-crops", files, data)
+    print_result(resp, pretty)
+
+
+@pet_group.command("avatar")
+@click.argument("pet_id")
+@click.option("--image", "image_path", type=click.Path(exists=True), required=True,
+              help="头像图片（jpg/jpeg/png/webp）；Agent 注册可用 observe --save-crops 存下的 <prefix>_avatar.jpg 作默认头像")
+@click.option("--pretty", is_flag=True)
+def pet_avatar(pet_id, image_path, pretty):
+    """设置宠物头像（上传一张图）。Agent 注册省去的是用户手动裁剪确认，仍应落一个默认头像。"""
+    from miloco_cli.client import api_post_multipart
+
+    ct = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+    files = [("image", (Path(image_path).name, Path(image_path).read_bytes(), ct))]
+    resp = api_post_multipart(f"/api/identity/pets/{pet_id}/avatar", files)
     print_result(resp, pretty)

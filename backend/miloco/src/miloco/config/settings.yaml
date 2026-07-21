@@ -124,3 +124,4 @@ features:
   pet_recognition: false       # 宠物识别（实验性）总开关；关闭时前端隐藏入口、后端不注入宠物命名规则，已录数据保留
   pet_head_grounding: true     # 宠物头像头部定位子开关（默认开）；关则用全身 crop，仅在 pet_recognition 开启时有意义
   pet_body_grounding: true     # 宠物本体定位子开关（默认开）；仅回退路径（框不到猫狗）用，裁本体作参考图，关则回退不产参考 crop
+  pet_reid_diverse: true       # 参考图多样性用人体 ReID 特征距离贪心选多姿态（默认开）；关或模型不可用回退 dHash，仅 pet_recognition 开时有意义
