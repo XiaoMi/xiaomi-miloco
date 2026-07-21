@@ -273,7 +273,7 @@ class CameraPromptItem(BaseModel):
         ...,
         max_length=MAX_CAMERA_PROMPT_LEN,
         description=(
-            "该机位专属感知指导（环境说明 / 关注 / 忽略）；逐窗注入 omni user content。"
+            "该机位专属感知指导（环境说明 / 关注 / 忽略）；逐窗注入 omni system prompt 尾部（video / audio 路由均注入）。"
             f"非空，上限 {MAX_CAMERA_PROMPT_LEN} 字。"
         ),
     )

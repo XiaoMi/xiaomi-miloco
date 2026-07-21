@@ -133,7 +133,7 @@ def scope_camera_mic_off(dids, pretty):
 
 # ── 每摄像头「感知须知」自定义 prompt：给该机位补环境说明 / 关注 / 忽略事项 ──
 #
-# 逐感知窗注入 omni user content（仅视频路由），指导模型消解该机位的固定误识
+# 逐感知窗注入 omni 的 system prompt 尾部（video / audio 路由均注入），指导模型消解该机位的固定误识
 # （如门口机位误把公共走廊电梯门当自家入户门）。与启用/拾音开关正交、不重启引擎，
 # 下一窗即生效。空文本 = 清除。上限见 backend（默认 500 字），超限由 backend 拒绝并透传。
 
