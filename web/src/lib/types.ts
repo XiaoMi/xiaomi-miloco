@@ -55,6 +55,7 @@ export interface Pet {
   name: string;
   species: string;
   avatarExt?: string | null; // 有头像时的文件后缀；null=无头像
+  referenceCropCount?: number; // 已录入的多姿态识别参照图张数（喂 ③ 识别）
   createdAt?: string;
   updatedAt?: string;
 }

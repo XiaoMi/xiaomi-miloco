@@ -46,10 +46,6 @@
     "modelChecking": "正在检测感知模型…",
     "modelUnconfigured": "未配置感知模型，请先在「模型配置」中设置感知模型",
     "modelUnavailable": "感知模型不可用：{{msg}}",
-    "cropTitle": "调整头像",
-    "cropHint": "拖动移动 · 滚轮或滑杆缩放",
-    "cropZoom": "缩放",
-    "cropConfirm": "确认",
     "save": "保存",
     "saving": "保存中…",
     "rename": "改名",
@@ -66,6 +62,7 @@
     "experimentalBadge": "实验性功能",
     "experimentalHint": "开启后可把宠物作为家庭成员登记，并在画面描述中称呼它们；关闭只隐藏、不删除已录入的宠物。",
     "edit": "编辑",
+    "referenceCount": "张参考",
     "profilePetEmpty": "还没有 {{name}} 的档案信息",
     "profilePetEmptyHint": "上传照片自动生成外观，或点「编辑」补充"
   }
