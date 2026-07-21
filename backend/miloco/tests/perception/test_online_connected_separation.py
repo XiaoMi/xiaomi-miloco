@@ -146,6 +146,9 @@ class TestDiscoverDevicesOnlineConnected:
             get=lambda key, default=None: store.get(key, default),
             set=lambda key, value: store.__setitem__(key, value) or True,
         )
+        # awake 缓存真身是普通 dict；显式给空 dict，别让 AsyncMock 自动生成协程属性
+        # （select_active 会读它做镜头门）。空 dict = 全部镜头态未知 → 不 gate。
+        proxy._camera_awake_cache = {}
         return CameraDeviceAdapter(miot_proxy=proxy)
 
     @pytest.mark.asyncio

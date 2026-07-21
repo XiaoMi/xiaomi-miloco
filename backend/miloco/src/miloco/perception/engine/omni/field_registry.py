@@ -90,6 +90,23 @@ PET_IDENTITIES = FieldSpec(
     requires_pets=True,
 )
 
+# 精简版 identity 字段：身份库为空（无任何注册成员）时用。此时"对上 gallery 成员"不可能，
+# 整套面部逐项核对规则都是死重（徒增 prompt token 与模型认知负担、并产出误导性的"无法与库中
+# 成员匹配"reason）。只保留 unknown↔no_person 这一判定——no_person（非人误检抑制）不依赖 gallery，
+# 是身份库为空时仍需保住的能力（name 仍走 <unknown|no_person>，下游 no_person 解析/落定链路不变）。
+IDENTITY_NO_MATCH = FieldSpec(
+    name="identities",
+    schema_literal='"identities":[{"track_id":<int>,"name":"<unknown|no_person>","confidence":0-1,"reason":"≤20字"}]',
+    spec_md="""## identities
+- 本轮无注册成员、不做成员匹配：只判每个"待识别 track"是「确有人体」还是「非人误检」，覆盖所有 track_id、不遗漏不新增
+- 确有人体（哪怕背影/侧身/局部/遮挡/模糊）→ name 填 "unknown"
+- 框内没有真实人体、只是家中非人物体被误框成人（如 3D 打印机、落地扇、衣帽架或搭挂/晾晒的衣物、落地绿植、纸箱行李堆 等外形易被误当成人的物体）→ name 填 "no_person"，纵使轮廓像人
+- 分不清是人还是物时倾向 unknown（别把真人误判成没人）
+- confidence = 对"是人 / 不是人"这一判断的把握；reason ≤20 字简述依据""",
+    requires_video=True,
+    requires_identity=True,
+)
+
 CAPTION = FieldSpec(
     name="caption",
     schema_literal='"caption":"详细描述"',
@@ -191,6 +208,9 @@ class SceneDescriptor:
         speeches 已被 requires_audio 剥掉，本标志无额外作用。
     has_pets     —— 家庭档案是否含「## 宠物」段（已登记宠物、且未被软关闭隐藏）。为真且
         video 路由时，在「# 字段说明」追加「## 宠物命名」纪律（宠物命名是视觉判断，故只 video）。
+    identity_match_disabled —— 身份库为空（无任何注册成员）时为 True：``identities`` 字段
+        改用精简版 ``IDENTITY_NO_MATCH``（只判 unknown↔no_person、不做成员匹配）。仅在
+        ``has_identity=True`` 时有意义；库非空时为 False，用完整匹配版 ``IDENTITY``。
     """
 
     route: Literal["video", "audio"]
@@ -199,6 +219,7 @@ class SceneDescriptor:
     has_audio: bool = True
     has_speech: bool = True
     has_pets: bool = False
+    identity_match_disabled: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL
@@ -212,7 +233,10 @@ class SceneDescriptor:
         if not self.has_pets:
             fields = [f for f in fields if not f.requires_pets]
         if self.has_identity:
-            fields = [_REGISTRY["identities"], *fields]
+            # 库空 → 精简版（不做成员匹配、只判 unknown/no_person）；两者 name 同为 "identities",
+            # 故 render_schema / render_field_spec / 解析层都无感。
+            ident = IDENTITY_NO_MATCH if self.identity_match_disabled else _REGISTRY["identities"]
+            fields = [ident, *fields]
         return fields
 
 

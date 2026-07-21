@@ -80,6 +80,18 @@ class TrackingService(ABC):
     def reset_session(self) -> None:
         """重置跟踪会话状态，子类可按需实现。"""
 
+    def set_fps(self, fps: int) -> None:
+        """运行时更新采样 fps：同步 ``_fps`` 并转调底层 tracker 的 set_fps。
+
+        默认实现覆盖 Real / DeepSort（都持 ``_tracker``）；Mock 无 tracker 时 no-op。
+        用于「改 omni_fps 顶起 tracker fps」的运行时热更，免重建引擎。
+        """
+        self._fps = fps
+        tracker = getattr(self, "_tracker", None)
+        # SortTracker / DeepSortTracker 均实现 set_fps；Mock 的 _tracker 为 None 由此短路。
+        if tracker is not None:
+            tracker.set_fps(fps)
+
 
 # =============================================================================
 # Mock Service

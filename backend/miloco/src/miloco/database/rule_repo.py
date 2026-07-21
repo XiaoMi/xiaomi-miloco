@@ -63,7 +63,7 @@ class RuleRepo:
         return Rule(
             id=data["id"],
             name=data["name"],
-            task_id=data["task_id"] if data.get("task_id") is not None else "",
+            task_id=data["task_id"],
             mode=RuleMode(data.get("mode") or RuleMode.EVENT.value),
             lifecycle=RuleLifecycle(
                 data.get("lifecycle") or RuleLifecycle.PERMANENT.value
@@ -94,12 +94,11 @@ class RuleRepo:
         )
 
     def create(self, rule: Rule) -> str | None:
-        """Create a new rule + auto-link task_link(kind='rule') in single transaction.
+        """Create a new rule (v2: rule.task_id NOT NULL + FK CASCADE).
 
-        方案 P 关键改造（spec §7.3）：``INSERT rule`` 与 ``INSERT task_link``
-        在同一笔 SQL 事务内完成；任一失败 ``ROLLBACK``，避免孤儿 rule / 孤儿
-        task_link。``rule.task_id`` 不存在时由 task_link FK 兜底（service 层
-        会在调用前先 404 检查）。
+        v2 后 task_link 表已 DROP, INSERT rule 只写 rule 表本身。task_id 空 /
+        不存在的可读校验由 RuleService.create_rule 应用层前置, DB NOT NULL + FK
+        是双保险最终防线。
         """
         try:
             rule_id = str(uuid.uuid4())
@@ -148,21 +147,7 @@ class RuleRepo:
                 current_time,
             )
 
-            with self.db_connector.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("BEGIN")
-                try:
-                    cursor.execute(sql, params)
-                    if rule.task_id:
-                        cursor.execute(
-                            "INSERT INTO task_link "
-                            "(task_id, link_kind, link_ref) VALUES (?, 'rule', ?)",
-                            (rule.task_id, rule_id),
-                        )
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    raise
+            self.db_connector.execute_update(sql, params)
 
             on_enter = (
                 "static" if rule.on_enter_actions
@@ -360,6 +345,31 @@ class RuleRepo:
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             logger.error("Error counting enabled rules: error=%s", e)
             return 0
+
+    def list_by_task(self, task_id: str) -> list[Rule]:
+        """List all rules under a task (v2: rule.task_id 是权威归属源).
+
+        取代老 task_link 路径 (`SELECT link_ref FROM task_link WHERE task_id=?
+        AND link_kind='rule'`)。走已有的 idx_rule_task_id 索引。
+        """
+        try:
+            results = self.db_connector.execute_query(
+                "SELECT * FROM rule WHERE task_id = ?", (task_id,)
+            )
+        except (ValueError, TypeError, KeyError, AttributeError) as e:
+            logger.error(
+                "Error listing rules by task_id=%s: %s", task_id, e
+            )
+            return []
+        rules: list[Rule] = []
+        for row in results:
+            try:
+                rules.append(self._dict_to_rule(row))
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "Skipping corrupted rule row id=%s: %s", row.get("id"), e
+                )
+        return rules
 
 
 class RuleLogRepo:

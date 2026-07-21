@@ -845,7 +845,7 @@ async def test_query_pipeline_downsamples_omni_to_omni_fps():
 
     def _capture(*, identity_packets, **kwargs):
         captured["packets"] = identity_packets
-        return {"messages": [], "video_fps": identity_packets[0].frame_info.fps}
+        return {"messages": []}
 
     with patch(
         "miloco.perception.engine.omni.prompt_builder.build_query_prompt",

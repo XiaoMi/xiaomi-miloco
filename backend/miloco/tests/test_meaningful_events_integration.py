@@ -35,6 +35,15 @@ def isolated_env(tmp_path, monkeypatch):
     manager_module.Manager._instance = None
     manager_module.manager_instance = None
 
+    # 拾音默认关(opt-in)后，speech 需相机在拾音白名单才落库/推 SSE：把测试相机加进白名单。
+    from miloco.database.kv_repo import KVRepo
+    from miloco.manager import get_manager
+    from miloco.miot.filter import set_cameras_voice_in_use
+
+    _mgr = get_manager()
+    _mgr._kv_repo = KVRepo()
+    set_cameras_voice_in_use(_mgr._kv_repo, ["cam_living_01"], True)
+
     yield tmp_path
 
     manager_module.Manager._instance = None
@@ -112,14 +121,22 @@ async def test_end_to_end_rule_hit(isolated_env, client):
 
 @pytest.mark.asyncio
 async def test_end_to_end_multi_camera(isolated_env, client):
-    """多摄像头同窗口 → 1 行 event + N device 各自 clip."""
+    """多摄像头同窗口 → 1 行 event(R10 核心不变量),但 device_ids/clip 只暴露
+    真正引发这行事件的摄像头(cam_living_01),同批次里无关的 cam_kitchen_01
+    不应该出现——否则会复现"规则只绑一个摄像头,日志却带出另一台画面"的 bug。
+    """
     from miloco.perception.client import _persist_meaningful_event
 
     result = RealtimePerceptionResult(
-        matched_rules=[MatchedRule(rule_id="r1", reason="x")],
+        matched_rules=[
+            MatchedRule(
+                rule_id="r1", reason="x", source_device_ids=["cam_living_01"],
+            )
+        ],
         speeches=[
             Speech(
-                needs_response=True, speaker="u", content="开灯", is_complete=True
+                needs_response=True, speaker="u", content="开灯", is_complete=True,
+                source_device_ids=["cam_living_01"],
             )
         ],
     )
@@ -139,16 +156,18 @@ async def test_end_to_end_multi_camera(isolated_env, client):
     e = events[0]
     assert e["has_rule_hit"] is True
     assert e["has_asr"] is True
-    assert set(e["device_ids"]) == {"cam_living_01", "cam_kitchen_01"}
-    # 2 device 各 1 个 clip → snapshot_count = 2
-    assert e["snapshot_count"] == 2
+    assert e["device_ids"] == ["cam_living_01"]
+    # 无关的 cam_kitchen_01 不落盘,snapshot_count 只算真正相关的 1 个
+    assert e["snapshot_count"] == 1
 
     eid = e["event_id"]
-    # 两个摄像头各自路径都能拉到
-    for did in ("cam_living_01", "cam_kitchen_01"):
-        r = client.get(f"/api/events/{eid}/clip/{did}")
-        assert r.status_code == 200
-        assert r.headers["content-type"] == "video/mp4"
+    r = client.get(f"/api/events/{eid}/clip/cam_living_01")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "video/mp4"
+
+    # 无关摄像头既不在 device_ids 里,也没有 clip 文件落盘 → 404
+    r = client.get(f"/api/events/{eid}/clip/cam_kitchen_01")
+    assert r.status_code == 404
 
 
 @pytest.mark.asyncio

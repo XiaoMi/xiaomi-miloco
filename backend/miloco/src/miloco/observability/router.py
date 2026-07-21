@@ -137,6 +137,57 @@ def list_agent_runs(
         conn.close()
 
 
+@router.get("/api/actions")
+def list_actions(
+    request: Request,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+    did: str | None = None,
+    action_type: str | None = None,
+    home_id: str | None = None,
+    failed_only: int | None = None,
+    limit: int = 50,
+):
+    """action_ledger 列表:agent 控制设备 / 播 TTS / 触发场景的持久审计,新到旧排序。
+
+    action_ledger 表落在 observability.db(与本 router 其余 endpoint 同库),故放这里。
+    limit 默认 50,上限 500(与 device/actions CLI 的分页节奏对齐,防一次拉全表)。
+    """
+    limit = max(1, min(limit, 500))
+    db_path = request.app.state.obs_db_path
+    conn = connect(db_path)
+    try:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since_ms is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since_ms)
+        if until_ms is not None:
+            clauses.append("timestamp <= ?")
+            params.append(until_ms)
+        if did:
+            clauses.append("did = ?")
+            params.append(did)
+        if action_type:
+            clauses.append("action_type = ?")
+            params.append(action_type)
+        if home_id:
+            # NULL 放行:v4 迁移前的老行 / device cache 解析失败的行没有 home 标,
+            # 严格等值会让历史台账在任何家的视图里都蒸发——宁可多显示不可丢审计。
+            clauses.append("(home_id = ? OR home_id IS NULL)")
+            params.append(home_id)
+        if failed_only:
+            clauses.append("success = 0")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM action_ledger {where} ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        cursor = conn.execute(sql, params)
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, r)) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
 @router.get("/api/events")
 def list_events(
     request: Request,

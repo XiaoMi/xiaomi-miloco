@@ -1,27 +1,19 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""task_record / task_link HTTP 路由（spec 2026-06-10 §5.2）。
+"""task_record HTTP 路由 (v2)。
 
-8 个 endpoint：
-- ``POST /tasks/{task_id}/link``                      cron 显式挂 task_link（方案 P 阶段 B）
-- ``POST /tasks/{task_id}/record``                    record 初始化（方案 P 阶段 A'）
-- ``GET  /tasks/{task_id}/record``                    读活跃 record + 子表 + derived
-- ``PATCH /tasks/{task_id}/record``                   白名单字段更新
-- ``POST /tasks/{task_id}/record/compute``            派生量（含历史日期 / 跨窗口）
-- ``POST /tasks/{task_id}/record/progress/increment`` progress mutate
-- ``POST /tasks/{task_id}/record/event/append``       event 子表 INSERT
-- ``POST /tasks/{task_id}/record/session/start``      duration session 起始
-- ``POST /tasks/{task_id}/record/session/end``        duration session 结束
+record 相关 endpoint (init / get / patch / compute / archives / progress / event / session)。
+task_link 相关的 attach_link (POST /tasks/{id}/link) 已在 v2 移除:
+rule 关联走 rule.task_id FK CASCADE, cron 关联走 /crons endpoint。
 
-router prefix 在 main.py 加 ``/api``，实际路径为 ``/api/tasks/...``。
+router prefix 在 main.py 加 ``/api``, 实际路径为 ``/api/tasks/...``。
 """
 
 import logging
 
 from fastapi import APIRouter, Depends, Query
 
-from miloco.database.task_repo import TaskLinkConflict, TaskRepo
 from miloco.middleware import verify_token
 from miloco.middleware.exceptions import (
     ConflictException,
@@ -35,7 +27,6 @@ from miloco.task_record.schema import (
     RecordInitRequest,
     RecordPatchRequest,
     SessionAtRequest,
-    TaskLinkRequest,
 )
 from miloco.task_record.service import (
     RecordAlreadyExistsError,
@@ -53,45 +44,6 @@ router = APIRouter(prefix="/tasks", tags=["TaskRecord"])
 
 def _service() -> TaskRecordService:
     return TaskRecordService()
-
-
-# ── link ─────────────────────────────────────────────────────────────────────
-
-
-@router.post("/{task_id}/link", summary="Attach cron link", response_model=NormalResponse)
-async def attach_link(
-    task_id: str,
-    req: TaskLinkRequest,
-    current_user: str = Depends(verify_token),
-):
-    """方案 P 阶段 B：agent 拿到 cron jobId 后显式挂 task_link。
-
-    ``rule`` kind 不允许走此 endpoint（rule create endpoint 自动写 task_link，
-    P4 改造）；P2-P4 之间若 caller 传 ``rule`` 走此 endpoint，统一返
-    ``wrong_kind``——避免双写孤儿。
-    """
-    logger.info(
-        "Attach link - User: %s, task_id: %s, kind: %s",
-        current_user,
-        task_id,
-        req.kind,
-    )
-    if req.kind != "cron":
-        raise ValidationException(
-            f"wrong_kind: /link 当前仅接受 cron，收到 {req.kind!r}"
-        )
-    try:
-        TaskRepo().add_link(task_id, req.kind, req.ref)
-    except TaskLinkConflict as e:
-        msg = str(e)
-        if "不存在" in msg or "FOREIGN KEY" in msg:
-            raise ResourceNotFoundException(
-                f"task_not_found: {task_id}"
-            ) from e
-        raise ConflictException(f"link_already_exists: {msg}") from e
-    return NormalResponse(
-        code=0, message="Link attached", data={"task_id": task_id, "kind": req.kind}
-    )
 
 
 # ── record CRUD ──────────────────────────────────────────────────────────────

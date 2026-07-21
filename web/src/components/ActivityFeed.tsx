@@ -9,21 +9,91 @@
  * 时间筛选:datetime-local 双输入(自 / 至),非法值守(NaN 不更新 state).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { eventClipUrl, listActivity, revealDir, submitEventFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
-import { smartTimeParts } from "@/lib/relativeTime";
 import type { ActivityEvent, HomeId } from "@/lib/types";
+import {
+  ACTIONS_LIMIT,
+  ActionRow,
+  fetchActions,
+  type BackendActionRow,
+} from "./ActionsFeed";
+import { TimeLabel } from "./TimeLabel";
 
 interface Props {
   events: ActivityEvent[];
   /** 当前作用域 home;切换时整个列表 + SSE 都要重建 */
   homeId: HomeId;
+  /** 真实的当前 in_use 家庭 id(来自 scope homes;HomeId 只是缓存 key 占位)。
+   *  传入后动作流带 home_id 过滤——多 home 下切家不再串入他家动作;
+   *  scope 未加载完时为 undefined → 先不过滤,到达后 reloadActions 依赖变化自动重拉。 */
+  activeHomeId?: string;
+  /** 事件初始页仍在加载。App 现无条件挂载本组件(让动作流独立于事件加载态),事件到达后
+   *  经 setEvents 合并;加载中在事件区顶部显一条内联提示,不阻断动作流。 */
+  eventsLoading?: boolean;
+  /** 事件初始页加载失败——内联提示 + 重试,同样不阻断动作流。 */
+  eventsError?: Error | null;
+  onRetryEvents?: () => void;
 }
 
 const PAGE_SIZE = 50;
 const FILTER_DEBOUNCE_MS = 300;
+// SSE 事件常成串到达(一次 agent 控制伴随多条事件),每条都全量重拉 500 行动作太重。
+// 合并突发:末条到达后 ~1.5s 才拉一次(trailing debounce)。mount / homeId 切换仍即时拉。
+const SSE_ACTIONS_DEBOUNCE_MS = 1500;
+
+/** 单流合并后的行:事件 or 动作(tagged union),供渲染层分派 ActivityRow / ActionRow。 */
+export type FeedRow =
+  | { kind: "event"; ts: number; event: ActivityEvent }
+  | { kind: "action"; ts: number; action: BackendActionRow };
+
+/** 事件流 + 动作流合并成单条时间倒序流。纯函数,导出供 tests 守 window + 交错顺序。
+ *
+ *  窗口规则(spec):动作一次拉全(limit=500),但只交错**落在当前展示事件时间窗内**的
+ *  动作,外加**比最新展示事件更新**的动作。合起来即:保留所有 ts >= 最旧展示事件 ts 的
+ *  动作(既覆盖"窗内",也覆盖"比最新更新"——后者 ts 天然 >= 最旧)。展示事件为空时
+ *  (events 关 / 事件列表空)动作不设下界,全部展示。
+ *
+ *  同 ts 时事件排在动作前(事件是"发生了什么"、动作是"因此做了什么",因果上事件在先)。
+ */
+export function mergeFeedRows(
+  events: ActivityEvent[],
+  actions: BackendActionRow[],
+  showEvents: boolean,
+  showActions: boolean,
+  sinceMs?: number,
+  beforeMs?: number,
+): FeedRow[] {
+  const rows: FeedRow[] = [];
+  if (showEvents) {
+    for (const e of events) rows.push({ kind: "event", ts: e.timestamp, event: e });
+  }
+  if (showActions) {
+    // 动作的时间窗与事件同段:显式筛选段(sinceMs/beforeMs)优先——它是权威下/上界,
+    // 即使没有事件也生效(修:事件为空时动作曾无下界、混入范围外历史动作)。未设筛选段时
+    // (全量视图)回落"最旧展示事件 ts"的分页启发式,裁掉尚未翻到的更早动作。
+    const lower =
+      sinceMs ??
+      (showEvents && events.length > 0
+        ? Math.min(...events.map((e) => e.timestamp))
+        : -Infinity);
+    const upper = beforeMs ?? Infinity;
+    for (const a of actions) {
+      if (a.timestamp >= lower && a.timestamp <= upper) {
+        rows.push({ kind: "action", ts: a.timestamp, action: a });
+      }
+    }
+  }
+  // ts DESC;同 ts 事件优先(event 在 action 前)。
+  rows.sort((x, y) => {
+    if (y.ts !== x.ts) return y.ts - x.ts;
+    if (x.kind === y.kind) return 0;
+    return x.kind === "event" ? -1 : 1;
+  });
+  return rows;
+}
 
 /** 合并两段 event 列表:by id dedup(后到的字段优先)+ timestamp DESC 排序.
  *
@@ -50,9 +120,25 @@ function todayStartMs(): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
 
-export function ActivityFeed({ events: initial, homeId }: Props) {
+export function ActivityFeed({
+  events: initial,
+  homeId,
+  activeHomeId,
+  eventsLoading,
+  eventsError,
+  onRetryEvents,
+}: Props) {
   const { t } = useTranslation();
   const [events, setEvents] = useState<ActivityEvent[]>(initial);
+  // App 现无条件挂载本组件(动作流独立于事件加载态),初始事件页在 loading→loaded 后才到达。
+  // initial 变化时按 id dedup 合并进 events(用 mergeAndSort,不 clobber 期间 SSE prepend 的新事件)。
+  const prevInitialRef = useRef(initial);
+  useEffect(() => {
+    if (initial !== prevInitialRef.current) {
+      prevInitialRef.current = initial;
+      if (initial.length > 0) setEvents((prev) => mergeAndSort(prev, initial));
+    }
+  }, [initial]);
   // since 默认今天 00:00,跟标题语义对齐;before 留空 → 后端取 now,允许"看到现在".
   // 用户改 since 看更早历史 / 设 before 卡截止 / 清 since 看全量.
   const [since, setSince] = useState<number | undefined>(todayStartMs);
@@ -73,6 +159,53 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
   const fetchGenRef = useRef(0);
   /** 全屏播放器(点开看大):null 关闭 */
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+
+  // ── 单流:事件 / 动作两个 checkbox 筛选(默认都勾),动作一次拉全后 merge ──
+  const [showEvents, setShowEvents] = useState(true);
+  const [showActions, setShowActions] = useState(true);
+  const [actions, setActions] = useState<BackendActionRow[]>([]);
+
+  /** 动作拉取的 generation token(N1 同款,镜像事件流的 fetchGenRef):首屏先发的
+   *  无 home 过滤请求 / 切家前旧请求若晚返回,不得覆盖已按新 home 过滤的结果。 */
+  const actionsGenRef = useRef(0);
+
+  /** 动作重拉:mount / homeId 切换 / 时间窗变化 / 手动 reload 时调,失败静默(不阻断事件流)。
+   *  带上当前应用的时间窗(appliedSince/appliedBefore),让动作与事件同段,不混入范围外记录;
+   *  带上 activeHomeId,切家后动作流只显当前家(依赖变化自动重拉,不再是空转)。
+   *  只允许最新一代请求 setActions——stale 响应直接丢弃。 */
+  const reloadActions = useCallback(() => {
+    const gen = ++actionsGenRef.current;
+    fetchActions(false, appliedSince, appliedBefore, activeHomeId)
+      .then((rows) => {
+        if (gen === actionsGenRef.current) setActions(rows);
+      })
+      .catch(() => {
+        /* 动作流失败不影响事件流;保留上次结果 */
+      });
+  }, [appliedSince, appliedBefore, activeHomeId]);
+
+  /** SSE 触发的动作重拉:trailing debounce 合并突发,避免每条事件都全量拉 500 行。 */
+  const sseReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedReloadActions = useCallback(() => {
+    if (sseReloadTimerRef.current) clearTimeout(sseReloadTimerRef.current);
+    sseReloadTimerRef.current = setTimeout(() => {
+      sseReloadTimerRef.current = null;
+      reloadActions();
+    }, SSE_ACTIONS_DEBOUNCE_MS);
+  }, [reloadActions]);
+
+  // 卸载时清掉悬挂的 debounce 定时器,避免 setState-after-unmount。
+  useEffect(
+    () => () => {
+      if (sseReloadTimerRef.current) clearTimeout(sseReloadTimerRef.current);
+    },
+    [],
+  );
+
+  // mount 时拉一次动作(homeId 变也重拉——切家后动作流应随之刷新)。即时,不 debounce。
+  useEffect(() => {
+    reloadActions();
+  }, [reloadActions, homeId]);
 
   const filterActive = appliedSince !== undefined || appliedBefore !== undefined;
 
@@ -171,6 +304,9 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       unsub = subscribeEvents(
         (e) => {
           if (!inRange(e.timestamp)) return; // 越界事件丢弃
+          // 新事件到达时顺带重拉动作——事件常伴随 agent 控制,让动作行跟上单流。
+          // debounce 合并突发:一串事件只在末条后拉一次,而非每条都全量拉 500 行。
+          debouncedReloadActions();
           setEvents((prev) => {
             const idx = prev.findIndex((x) => x.id === e.id);
             if (idx === -1) {
@@ -220,14 +356,29 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
       document.removeEventListener("visibilitychange", onVisibility);
       stop();
     };
+    // debouncedReloadActions 是稳定 useCallback,列入不 churn EventSource。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedSince, appliedBefore, homeId]);
+  }, [appliedSince, appliedBefore, homeId, debouncedReloadActions]);
 
   /** 触发翻页:offset += PAGE_SIZE,append 模式 */
   const loadMore = () => {
     if (loading || !hasMore) return;
     fetchPage({ append: true, pageOffset: offset });
   };
+
+  // 事件 + 动作合并成单条时间倒序流(见 mergeFeedRows 的窗口规则);带上当前应用的时间窗,
+  // 让动作与事件同段约束(即使无事件也按 since/before 卡界)。
+  const feedRows = useMemo(
+    () =>
+      mergeFeedRows(
+        events, actions, showEvents, showActions, appliedSince, appliedBefore,
+      ),
+    [events, actions, showEvents, showActions, appliedSince, appliedBefore],
+  );
+
+  const noneChecked = !showEvents && !showActions;
+  // "查看更早" 仅在展示事件时有意义(动作已一次拉全 500,无分页)。
+  const showLoadMore = showEvents && hasMore && events.length > 0;
 
   return (
     <section
@@ -241,33 +392,78 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
         >
           {t("activity.title")}
           <span className="text-caption-mono text-text-tertiary font-normal">
-            {/* 已加载 N 条 — 仅反映当前内存中加载/累积的数量;hasMore=true 时后端
-                还有更早的事件可拉,N 不等于"事件总数" */}
+            {/* 已加载 N 条 — 单流合并后的行数(事件 + 窗内动作);showEvents 且 hasMore
+                时后端还有更早事件可拉,N 不等于"总数" */}
             {t("activity.loadedCount", {
-              n: events.length,
-              more: hasMore ? "+" : "",
+              n: feedRows.length,
+              more: showLoadMore ? "+" : "",
             })}
           </span>
         </h2>
-        <TimeRangeFilter
-          since={since}
-          before={before}
-          onSinceChange={setSince}
-          onBeforeChange={setBefore}
-          onReset={() => {
-            // 恢复"今日实时"默认态:since=今天 00:00 + before=undefined → SSE inRange
-            // 不拦截后续新事件,Feed 继续实时刷新.
-            setSince(todayStartMs());
-            setBefore(undefined);
-          }}
-        />
+        <div className="inline-flex items-center gap-3 flex-wrap">
+          {/* 事件 / 动作 checkbox — 都默认勾选,仅组件内 state 不持久化 */}
+          <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showEvents}
+              onChange={(e) => setShowEvents(e.target.checked)}
+              className="accent-brand-primary w-[13px] h-[13px]"
+            />
+            {t("actions.filterEvents")}
+          </label>
+          <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showActions}
+              onChange={(e) => setShowActions(e.target.checked)}
+              className="accent-brand-primary w-[13px] h-[13px]"
+            />
+            {t("actions.filterActions")}
+          </label>
+          <TimeRangeFilter
+            since={since}
+            before={before}
+            onSinceChange={setSince}
+            onBeforeChange={setBefore}
+            onReset={() => {
+              // 恢复"今日实时"默认态:since=今天 00:00 + before=undefined → SSE inRange
+              // 不拦截后续新事件,Feed 继续实时刷新.
+              setSince(todayStartMs());
+              setBefore(undefined);
+            }}
+          />
+        </div>
       </div>
 
-      {loading && events.length === 0 ? (
+      {/* 事件初始页加载中 / 失败:内联提示,不阻断下方合流(动作已独立加载)。 */}
+      {(eventsError || eventsLoading) && (
+        <div className="mx-5 mb-2 px-3 py-2 rounded-lg bg-bg-primary border border-border text-caption text-text-secondary flex items-center justify-between gap-2">
+          <span>
+            {eventsError
+              ? t("activity.eventsBannerFailed", { msg: eventsError.message })
+              : t("activity.eventsBannerLoading")}
+          </span>
+          {eventsError && onRetryEvents && (
+            <button
+              type="button"
+              onClick={onRetryEvents}
+              className="shrink-0 px-2 py-0.5 rounded border border-border text-text-primary hover:border-border-strong"
+            >
+              {t("activity.retry")}
+            </button>
+          )}
+        </div>
+      )}
+
+      {noneChecked ? (
+        <div className="text-body text-center py-10 text-text-secondary">
+          {t("actions.emptyFilter")}
+        </div>
+      ) : loading && showEvents && events.length === 0 && feedRows.length === 0 ? (
         <div className="text-body text-center py-10 text-text-secondary">
           {t("activity.loading")}
         </div>
-      ) : events.length === 0 ? (
+      ) : feedRows.length === 0 ? (
         <div className="text-body text-center py-10 text-text-secondary">
           {filterActive
             ? t("activity.emptyFiltered")
@@ -275,23 +471,33 @@ export function ActivityFeed({ events: initial, homeId }: Props) {
         </div>
       ) : (
         <ul className="divide-y divide-border">
-          {events.map((e) => (
-            <ActivityRow
-              key={e.id}
-              event={e}
-              onOpenLightbox={setLightboxSrc}
-              feedbackSet={feedbackSet}
-              feedbackPacks={feedbackPacks}
-              onFeedbackSubmitted={(id, path, size) => {
-                setFeedbackSet(prev => new Set(prev).add(id));
-                setFeedbackPacks(prev => new Map(prev).set(id, { path, size }));
-              }}
-            />
-          ))}
+          {feedRows.map((r) =>
+            r.kind === "event" ? (
+              <ActivityRow
+                key={`e:${r.event.id}`}
+                event={r.event}
+                onOpenLightbox={setLightboxSrc}
+                feedbackSet={feedbackSet}
+                feedbackPacks={feedbackPacks}
+                onFeedbackSubmitted={(id, path, size) => {
+                  setFeedbackSet(prev => new Set(prev).add(id));
+                  setFeedbackPacks(prev => new Map(prev).set(id, { path, size }));
+                }}
+              />
+            ) : (
+              <ActionRow key={`a:${r.action.id}`} row={r.action} t={t} />
+            ),
+          )}
+          {/* 动作拉取达上限(500):最旧的动作被截断,底部给条弱提示告知只显最近 500 条。 */}
+          {showActions && actions.length === ACTIONS_LIMIT && (
+            <li className="px-5 py-2 text-caption text-text-tertiary text-center">
+              {t("actions.limitHint")}
+            </li>
+          )}
         </ul>
       )}
 
-      {hasMore && events.length > 0 && (
+      {showLoadMore && (
         <div className="px-5 py-3 border-t border-border flex justify-center">
           <button
             type="button"
@@ -471,26 +677,6 @@ function TimeRangeFilter({
           {t("activity.liveButton")}
         </button>
       )}
-    </div>
-  );
-}
-
-function TimeLabel({ timestamp }: { timestamp: number }) {
-  // 双行布局:第 1 行日期(YYYY/MM/DD 或"今天/昨天"),第 2 行时分秒.
-  // sm+(>=640px):父 grid 三列(70px / 1fr / auto),TimeLabel 在 70px 列内
-  // sm:justify-self-stretch 占满,两行 sm:text-center 各自居中(等宽字体下日期
-  // 10 字符撑满列宽,时间 8 字符居中显著).
-  // mobile(<640px):父 flex-col 纵向堆叠,TimeLabel 自然左对齐,不加 text-center
-  // 保持跟下方 text-body 文本同锚线(否则居中会让 feed 视觉节奏断裂).
-  const { time, date } = smartTimeParts(timestamp);
-  return (
-    <div className="sm:justify-self-stretch leading-tight">
-      <div className="text-caption-mono text-text-secondary whitespace-nowrap sm:text-center">
-        {date}
-      </div>
-      <div className="text-caption-mono text-text-tertiary whitespace-nowrap sm:text-center">
-        {time}
-      </div>
     </div>
   );
 }

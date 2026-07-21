@@ -1,6 +1,6 @@
 ---
 name: miloco-terminate-task
-description: 任务终止 —— 用户主动取消或任务到期时触发，调 `miloco-cli task delete --reason X` 一笔走完 backend（写 task_terminate_log + 删 rule + 删 task，FK CASCADE 清 task_link 与 task_record_* 主表/子表），顺序跑返回的 agent_pending 清 cron。
+description: 任务终止 —— 用户主动取消或任务到期时触发，调 `miloco-cli task delete --reason X` 一笔走完 backend（写 task_terminate_log + 删 task，FK CASCADE 同步清 rule / cron / task_record_* 主表/子表），顺序跑返回的 agent_pending 让 openclaw 老通路 external cron 一并下线。
 metadata:
   author: miloco
   version: "3.0"
@@ -15,8 +15,8 @@ metadata:
 任务终止 skill。整个流程 3 步：
 
 0. **（仅 user_cancel）反问用户确认永久删除**——执行 `task delete` 前先确认；自动触发场景（`termination_schedule` / `archive_maintenance` / `completed`）跳过此步直接执行。
-1. 调 `miloco-cli task delete <task_id> --reason {completed|expired|abandoned}`——backend 一笔事务写 `task_terminate_log`（30 天滚动审计）+ 按 task_link 反查删 rule + 删 task（FK CASCADE 同步清 task_link / task_record_* 主表/子表 / event 子表 / duration_session 子表）。
-2. 按响应的 `agent_pending` 顺序跑 OpenClaw cron tool `action=remove`（**仅 `kind:'cron'` 一种**，无其他类型）。
+1. 调 `miloco-cli task delete <task_id> --reason {completed|expired|abandoned}`——backend 一笔事务写 `task_terminate_log`（30 天滚动审计）+ 删 task（FK CASCADE 同步清 rule / cron / task_record_* 主表/子表 / event 子表 / duration_session 子表）。
+2. 按响应的 `agent_pending` 顺序跑 OpenClaw cron tool `action=remove`（**仅 `kind:'cron'` 一种**，来自 `dispatch_owner='external'` 的老 cron；`internal` 已在 backend 事务内一并清理）。
 
 ## 何时激活
 
@@ -80,8 +80,7 @@ backend 一笔事务：
 
 1. 写 `task_terminate_log`（kind / reason / description / final_snapshot / terminated_at）
 2. 滚动清 30 天外的 `task_terminate_log` 行
-3. 按 task_link 反查删 rule
-4. `DELETE FROM task WHERE task_id=?` —— FK CASCADE 同步清 task_link 全部行 + `task_record_*` 主表 + duration_session / event_entry 子表
+3. `DELETE FROM task WHERE task_id=?` —— FK CASCADE 同步清 rule / cron / `task_record_*` 主表 + duration_session / event_entry 子表
 
 返回结构：
 
@@ -89,12 +88,11 @@ backend 一笔事务：
 {
   "task_id": "...",
   "backend_synced": {
-    "rules_deleted": ["..."],
-    "task_link_rows_deleted": <N>
+    "rules_deleted": ["..."]
   },
   "agent_pending": [
-    { "kind": "cron", "ref": "<jobId>", "action": "remove" }
-    // 只可能是 cron kind
+    { "kind": "cron", "ref": "<cron_id>", "action": "remove", "source": "openclaw" }
+    // 只 external cron 会产 pending; internal 已在事务内一并清理
   ]
 }
 ```
@@ -120,7 +118,7 @@ backend 一笔事务：
   "status": "completed | partial | failed | disabled_instead | user_canceled",
   "final_reason": "abandoned | expired | completed | null",
   "operations": [
-    { "type": "task.delete", "rules_deleted": ["rule_xyz"], "task_link_rows_deleted": 2, "agent_pending_count": 2, "ok": true },
+    { "type": "task.delete", "rules_deleted": ["rule_xyz"], "agent_pending_count": 2, "ok": true },
     { "type": "cron.remove", "jobId": "job_aaa", "ok": true },
     { "type": "cron.remove", "jobId": "job_bbb", "ok": true }
   ],
@@ -153,7 +151,7 @@ backend 一笔事务：
 
 ## 关键约定
 
-1. `task delete` 单笔事务覆盖审计写入 + rule 删 + task 删 + record / task_link CASCADE 清，agent 不要拆步骤手工做
+1. `task delete` 单笔事务覆盖审计写入 + task 删（FK CASCADE 同步清 rule / cron / record），agent 不要拆步骤手工做
 2. 不要扫 cron list / rule list 按前缀过滤反查——`agent_pending` 已是权威清单
 3. `agent_pending` 仅 `kind:'cron'`，没有其他 kind；若遇其他 kind 视作 backend 异常 `failed`
 
@@ -179,8 +177,7 @@ task_id=drink_water
    {
      "task_id": "drink_water",
      "backend_synced": {
-       "rules_deleted": ["rule_xyz"],
-       "task_link_rows_deleted": 2
+       "rules_deleted": ["rule_xyz"]
      },
      "agent_pending": [
        { "kind": "cron", "ref": "job_aaa", "action": "remove" },

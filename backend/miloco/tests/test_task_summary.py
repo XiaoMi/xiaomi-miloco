@@ -42,7 +42,6 @@ def test_task_summary_view_inherits_full_view_fields():
         paused_at=None,
         created_at="2026-06-01T00:00:00+08:00",
         rule_briefs=[],
-        links=[],
         record=None,
     )
     assert view.record is None

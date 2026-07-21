@@ -2,7 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "rich>=13.0",
-#   "httpx>=0.27",
+#   "httpx[socks]>=0.27",
 #   "questionary>=2.1",
 # ]
 # [tool.uv]
@@ -30,12 +30,13 @@ import json
 import locale
 import os
 import platform as _platform
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NoReturn
 
@@ -253,8 +254,46 @@ class I18n:
 # ---------------------------------------------------------------------------
 
 
+def _force_asyncio_select_selector() -> None:
+    """把 asyncio 默认 event loop 从 KqueueSelector 换成 SelectSelector。
+
+    实测（Python 3.14.6 macOS）：即使 fd 0 是 tty character device，
+    ``KqueueSelector.register(0, EVENT_READ)`` 也稳定返回 ``[Errno 22]
+    Invalid argument``（无论 O_RDONLY / O_RDWR、无论 fd 号）。这是 3.14
+    asyncio KqueueSelector 对 tty fd 的回归。SelectSelector 用 ``select(2)``，
+    对 tty fd 无差别支持。
+
+    install.py 主流程只跑几个 questionary prompt + 下载器 httpx 调用，换
+    selector 对性能无感知影响。
+
+    ``asyncio.DefaultEventLoopPolicy`` / ``set_event_loop_policy`` 在 3.14 被
+    标记为 3.16 移除，但 3.14 目前没有稳定的无 warning API 能干预
+    ``asyncio.run()`` 内部创建的 loop 类型，暂静音 DeprecationWarning。
+    """
+    import asyncio
+    import selectors
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+
+        class _SelectPolicy(asyncio.DefaultEventLoopPolicy):
+            def new_event_loop(self):
+                return asyncio.SelectorEventLoop(selectors.SelectSelector())
+
+        asyncio.set_event_loop_policy(_SelectPolicy())
+
+
 def _try_tty_fallback() -> bool:
-    """Attempt /dev/tty fallback. Returns True if stdin is now interactive."""
+    """把 fd 0 换成 /dev/tty，让 curl|bash 场景下 questionary/prompt_toolkit 能读交互输入。
+
+    仅换 ``sys.stdin`` 对象（原 upstream 做法）不够 —— prompt_toolkit 从
+    ``sys.stdin.fileno()`` 拿 fd 交给 asyncio；macOS 上默认 KqueueSelector
+    对 tty fd 直接 EINVAL（见 ``_force_asyncio_select_selector`` docstring）。
+    双重修补：
+      1. ``os.dup2(tty_fd, 0)`` 把 fd 0 本身换成 tty character device
+      2. macOS 场景顺手把 asyncio selector 换成 SelectSelector 绕开 kqueue
+    """
     if sys.stdin.isatty():
         return True
     if sys.platform == "win32":
@@ -263,8 +302,14 @@ def _try_tty_fallback() -> bool:
     if not os.path.exists(tty_path):
         return False
     try:
-        tty_file = open(tty_path)  # noqa: SIM115
-        sys.stdin = tty_file
+        tty_fd = os.open(tty_path, os.O_RDONLY)
+        try:
+            os.dup2(tty_fd, 0)  # 让 fd 0 本身指向 tty，覆盖 pipe stdin
+        finally:
+            os.close(tty_fd)
+        sys.stdin = os.fdopen(0, "r", closefd=False)
+        if sys.platform == "darwin":
+            _force_asyncio_select_selector()
         return True
     except OSError:
         return False
@@ -555,6 +600,7 @@ class Installer:
         account_auth: str | None = None,
         miloco_home: Path,
         skip_openclaw: bool = False,
+        agent_platform: str = "",
     ) -> None:
         self.platform = plat
         self.ui = ui
@@ -564,6 +610,7 @@ class Installer:
         self.account_auth = account_auth
         self.miloco_home = miloco_home
         self.skip_openclaw = skip_openclaw
+        self.agent_platform = agent_platform
         self.script_dir = Path(__file__).parent
         # dev 安装源：仓库 dist/（build.sh 产物）；release 下为下载归档解压后的缓存目录。
         self.dist_dir = self.script_dir.parent / "dist"
@@ -576,13 +623,17 @@ class Installer:
         if self.dev:
             self._run_dev_build()
         self._service_started = False
+        # download 前置到 install 之后、service 之前：模型解压不依赖 service/account/model
+        # 配置，放在 service 之前才能保证服务启动时磁盘上已有模型；否则 service 先起来，
+        # 任何交互步骤（account/model）中止都会让模型未解压，落到"服务在跑但缺模型"的中间态。
         self._steps: list[tuple[str, Callable[[], None]]] = [
+            ("platform", self._step_choose_platform),
             ("env", self._step_check_deps),
             ("install", self._step_install),
+            ("download", self._step_download),
             ("service", self._step_init_service),
             ("account", self._step_account),
             ("model", self._step_configure),
-            ("download", self._step_download),
             ("plugin", self._step_plugin),
         ]
         self._total_steps = len(self._steps)
@@ -590,6 +641,28 @@ class Installer:
             self._current_step = i
             fn()
         self._print_summary()
+
+    def _step_choose_platform(self) -> None:
+        self._step_header("platform.title", "platform.subtitle")
+
+        if self.agent_platform:
+            self.ui.step_skip(self.ui.i18n.t("platform.already_set", self.agent_platform))
+            return
+
+        if not self.platform.is_interactive:
+            self.agent_platform = "openclaw"
+            self.ui.step_skip(self.ui.i18n.t("platform.skip_non_interactive"))
+            return
+
+        openclaw_label = self.ui.i18n.t("platform.openclaw_option")
+        hermes_label = self.ui.i18n.t("platform.hermes_option")
+        choice = self.ui.prompt_select(
+            self.ui.i18n.t("platform.ask"),
+            choices=[openclaw_label, hermes_label],
+            default=openclaw_label,
+        )
+        self.agent_platform = "hermes" if choice == hermes_label else "openclaw"
+        self.ui.step_ok(self.ui.i18n.t("platform.selected", self.agent_platform))
 
     def _step_header(self, title_key: str, subtitle_key: str) -> None:
         prefix = f"{self._current_step}/{self._total_steps}"
@@ -905,8 +978,11 @@ class Installer:
                 ]
                 _tarfile_extract_safe(tf, models_dest)
         except (tarfile.TarError, OSError) as exc:
-            self.ui.warn(f"Failed to extract {tarballs[0].name}: {exc}")
-            return 0
+            # tarball 损坏必须硬失败，warn+return 0 会被 _step_download 当作"没模型"
+            # 走 fail 路径，但 UI 上只显示"缺失模型文件"看不出是解压错，排查会走弯路。
+            self.ui.fail(
+                self.ui.i18n.t("download.extract_failed", tarballs[0].name, str(exc))
+            )
         return len(members)  # 仅本次归档内的模型成员数
 
     # ── Account ───────────────────────────────────────────
@@ -1150,11 +1226,12 @@ class Installer:
         self._step_header("download.title", "download.subtitle")
         models_dest = self.miloco_home / "models"
         self.ui.step(self.ui.i18n.t("download.extracting_models"))
+        # 缺模型是硬失败：dev 通道源码目录若无 .onnx、release 通道若打包漏 tarball，
+        # 都必须在此暴露而非静默 skip——服务后续依赖这些文件，跳过等于装了个空壳。
         count = self._extract_models(self._get_src_dir(), models_dest)
-        if count:
-            self.ui.step_ok(self.ui.i18n.t("download.models_verified", str(count)))
-        else:
-            self.ui.step_skip(self.ui.i18n.t("download.no_models"))
+        if not count:
+            self.ui.fail(self.ui.i18n.t("download.models_missing"))
+        self.ui.step_ok(self.ui.i18n.t("download.models_verified", str(count)))
 
     # ── Plugin ────────────────────────────────────────────
 
@@ -1192,10 +1269,17 @@ class Installer:
     def _step_plugin(self) -> None:
         self._step_header("plugin.title", "plugin.subtitle")
 
+        if self.agent_platform == "hermes":
+            self._step_plugin_hermes()
+            return
+
         if self.skip_openclaw:
             self.ui.step_skip(self.ui.i18n.t("plugin.skipped"))
             return
 
+        self._step_plugin_openclaw()
+
+    def _step_plugin_openclaw(self) -> None:
         self._ensure_openclaw()
 
         # dev 与 release 都从本地 .tgz 装（release 的来自下载归档解压后的缓存目录）。
@@ -1216,6 +1300,149 @@ class Installer:
 
         self._register_plugin_tools()
         self._enable_conversation_access()
+
+    def _step_plugin_hermes(self) -> None:
+        hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        if not shutil.which("hermes"):
+            self.ui.step_fail(self.ui.i18n.t("plugin.hermes_not_found"))
+            return
+
+        tarballs = _visible(self._get_src_dir().glob("miloco-hermes-plugin-*.tar.gz"))
+        if not tarballs:
+            self.ui.step_fail(self.ui.i18n.t("plugin.no_hermes_tarball"))
+            raise subprocess.CalledProcessError(
+                1, "install hermes plugin", stderr="no hermes plugin tarball found"
+            )
+
+        extract_dir = self.miloco_home / ".install-cache" / "hermes-plugin"
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tarballs[0]) as tf:
+            _tarfile_extract_safe(tf, extract_dir)
+
+        self._hermes_deploy_plugin(hermes_home, extract_dir)
+        self._hermes_deploy_adapter(extract_dir)
+
+        bearer = self._hermes_get_or_create_bearer(hermes_home)
+        webhook_url = f"http://127.0.0.1:{os.environ.get('ADAPTER_PORT', '18789')}/miloco/webhook"
+        try:
+            subprocess.run(
+                ["miloco-cli", "config", "set",
+                 "agent.webhook_url", webhook_url,
+                 "agent.auth_bearer", bearer,
+                 "agent.platform", "hermes"],
+                check=True, capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            self.ui.step_fail(self.ui.i18n.t("plugin.hermes_config_failed"))
+            return
+        self._hermes_patch_env(hermes_home, bearer)
+        try:
+            subprocess.run(
+                ["hermes", "plugins", "enable", "miloco"],
+                capture_output=True, text=True, check=True,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            self.ui.warn(self.ui.i18n.t("plugin.hermes_enable_failed"))
+        self._hermes_run_post_install(hermes_home, extract_dir)
+        self.ui.step_ok(self.ui.i18n.t("plugin.hermes_ok"))
+
+    def _hermes_run_post_install(self, hermes_home: Path, extract_dir: Path) -> None:
+        """调 install-hermes.sh --post-install 补齐 env 持久化 / cron / 收尾提示。
+
+        install.py step 8 已做的部分（plugin 分发 / adapter 部署 / config.json patch /
+        .env 写入 / hermes plugins enable），install-hermes.sh --post-install 的分工：
+
+          - **跳过**：step 3 (sync-skills) / step 4 (复制插件)——依赖 tarball 里没有的
+            scripts/ / skills/，只能整段跳，由 POST_INSTALL_SKIP guard 兜底
+          - **幂等重跑**：step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable)
+            —— 都是幂等的，重跑一遍保证状态收敛（代价是 step 7 会多一次 stop+3s+start）
+          - **本模式真正补齐**：1.6/1.75/1.9 env 持久化、4.7 ONNX 模型、8.5 disable 残留
+            清理、9 版本记录、10 cron reconcile、收尾 banner「hermes gateway restart」提示
+
+        install-hermes.sh 由 build.sh::build_hermes 打进 miloco-hermes-plugin tarball，
+        跟 miloco-plugin 平级。找不到就 warn 跳过（不阻塞主流程）。
+        """
+        script = extract_dir / "install-hermes.sh"
+        if not script.is_file():
+            self.ui.warn(self.ui.i18n.t("plugin.hermes_post_install_missing"))
+            return
+        env = os.environ.copy()
+        env["MILOCO_HOME"] = str(self.miloco_home)
+        env["HERMES_HOME"] = str(hermes_home)
+        try:
+            subprocess.run(
+                ["bash", str(script), "--post-install"],
+                check=True, env=env, stdin=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError as exc:
+            self.ui.warn(self.ui.i18n.t("plugin.hermes_post_install_failed", str(exc.returncode)))
+
+    def _hermes_deploy_plugin(self, hermes_home: Path, extract_dir: Path) -> None:
+        plugin_dir = hermes_home / "plugins" / "miloco" / "miloco-plugin"
+        if plugin_dir.exists():
+            shutil.rmtree(plugin_dir)
+        plugin_dir.parent.mkdir(parents=True, exist_ok=True)
+        src_plugin = extract_dir / "miloco-plugin"
+        if src_plugin.exists():
+            shutil.copytree(src_plugin, plugin_dir)
+
+        skills_dir = extract_dir / "miloco-plugin-skills"
+        target_skills = hermes_home / "skills"
+        if skills_dir.exists():
+            target_skills.mkdir(parents=True, exist_ok=True)
+            for skill in skills_dir.iterdir():
+                dest = target_skills / skill.name
+                if dest.exists():
+                    shutil.rmtree(dest)
+                if skill.is_dir():
+                    shutil.copytree(skill, dest)
+                else:
+                    shutil.copy2(skill, dest)
+
+    def _hermes_deploy_adapter(self, extract_dir: Path) -> None:
+        adapter_dir = self.miloco_home / "agent_platform" / "hermes"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        # adapter.py + __init__.py（hermes_adapter 目录内）
+        src_adapter = extract_dir / "miloco-plugin" / "hermes_adapter"
+        if src_adapter.exists():
+            for f in src_adapter.iterdir():
+                if f.suffix == ".py":
+                    shutil.copy2(f, adapter_dir / f.name)
+        # 适配器运行时依赖：跟 adapter.py 平铺同目录才被 submodule_search_locations 发现
+        src_plugin = extract_dir / "miloco-plugin"
+        for dep in ("context_injection.py", "catalog.py", "paths.py", "tools_habit.py"):
+            dep_path = src_plugin / dep
+            if dep_path.exists():
+                shutil.copy2(dep_path, adapter_dir / dep)
+
+    def _hermes_get_or_create_bearer(self, hermes_home: Path) -> str:
+        cfg = self.miloco_home / "config.json"
+        if cfg.exists():
+            try:
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                existing = (data.get("agent") or {}).get("auth_bearer")
+                if existing:
+                    return existing
+            except Exception:
+                pass
+        bearer = secrets.token_hex(32)
+        return bearer
+
+    def _hermes_patch_env(self, hermes_home: Path, bearer: str) -> None:
+        env_file = hermes_home / ".env"
+        existing = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
+        key_line = f"API_SERVER_KEY={bearer}"
+        if "API_SERVER_KEY=" in existing:
+            existing = "\n".join(
+                line if not line.startswith("API_SERVER_KEY=") else key_line
+                for line in existing.split("\n")
+            )
+        else:
+            existing = existing.rstrip("\n") + "\n" + key_line + "\n"
+        env_file.write_text(existing, encoding="utf-8")
 
     # plugin 注册到 OpenClaw 后还要把 builtin tool 名加进 tools.alsoAllow 白名单
     def _plugin_tools(self) -> list[str]:
@@ -1316,6 +1543,7 @@ class Installer:
         self._steps = [
             ("env", self._step_check_deps),
             ("install", self._step_install),
+            ("download", self._step_download),
             ("service", self._step_init_service),
         ]
         self._total_steps = len(self._steps)
@@ -1347,11 +1575,13 @@ class Installer:
         """Step 3: service init, configure account/model, download, plugin."""
         self._print_welcome()
         self._service_started = False
+        # download 前置到 service 之前：与 Installer.run 对齐；step1 已解压过时再解一次
+        # 幂等（tar 覆盖同名文件），代价 <1s，换来 step1 未跑到解压时的兜底补齐。
         self._steps = [
+            ("download", self._step_download),
             ("service", self._step_init_service),
             ("account", self._step_account),
             ("model", self._agent_step_configure_model),
-            ("download", self._step_download),
             ("plugin", self._step_plugin),
         ]
         self._omni_model = omni_model
@@ -1454,7 +1684,11 @@ class Installer:
         )
         self.ui.console.print()
         self.ui.console.print(f"[dim]{self.ui.i18n.t('summary.next_steps')}[/dim]")
-        if self.skip_openclaw:
+        if self.agent_platform == "hermes":
+            self.ui.console.print(
+                f"  [cyan]hermes gateway restart[/cyan]    {self.ui.i18n.t('summary.restart_hermes_desc')}"
+            )
+        elif self.skip_openclaw:
             self.ui.console.print(
                 f"  [cyan]miloco-cli service start[/cyan]    {self.ui.i18n.t('summary.start_service_desc')}"
             )
@@ -1464,6 +1698,10 @@ class Installer:
             )
         self.ui.console.print(
             f"  [cyan]miloco-cli --help[/cyan]           {self.ui.i18n.t('summary.help_desc')}"
+        )
+        self.ui.console.print()
+        self.ui.console.print(
+            f"[dim]{self.ui.i18n.t('summary.rc_hint')}[/dim]"
         )
         self.ui.console.print()
         self.ui.console.print(
@@ -1560,6 +1798,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-openclaw", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--agent-platform",
+        dest="agent_platform",
+        default="",
+        choices=["", "openclaw", "hermes"],
+        help="Agent platform to deploy the plugin for (default: openclaw)",
+    )
+    parser.add_argument(
         "--agent-prepare",
         dest="agent_prepare",
         action="store_true",
@@ -1586,17 +1831,60 @@ def _print_error_summary(ui: UI, _args: argparse.Namespace) -> None:
     ui.console.print()
 
 
+def _decide_agent_platform(
+    args: argparse.Namespace, plat: "Platform", ui: "UI"
+) -> str:
+    """决定 agent_platform：--agent-platform > 非交互 fallback openclaw > 交互 prompt。
+
+    必须在 miloco_home 计算之前跑，否则交互选 hermes 时 miloco_home 仍走 openclaw 默认。
+    非交互路径（agent-prepare/agent-finish/uninstall/no tty）不弹 prompt，直接 fallback。
+    """
+    if args.agent_platform:
+        return args.agent_platform
+    if (
+        args.agent_prepare
+        or args.agent_finish
+        or args.uninstall
+        or not plat.is_interactive
+    ):
+        return "openclaw"
+    openclaw_label = ui.i18n.t("platform.openclaw_option")
+    hermes_label = ui.i18n.t("platform.hermes_option")
+    choice = ui.prompt_select(
+        ui.i18n.t("platform.ask"),
+        choices=[openclaw_label, hermes_label],
+        default=openclaw_label,
+    )
+    return "hermes" if choice == hermes_label else "openclaw"
+
+
+def _default_miloco_home(agent_platform: str) -> Path:
+    """按 agent runtime 决定 MILOCO_HOME 默认路径。hermes → ~/.hermes/miloco，其余 → ~/.openclaw/miloco。"""
+    subdir = ".hermes" if agent_platform == "hermes" else ".openclaw"
+    return Path.home() / subdir / "miloco"
+
+
 def main() -> None:
     args = parse_args()
-
-    miloco_home = Path(
-        os.environ.get("MILOCO_HOME", Path.home() / ".openclaw" / "miloco")
-    )
-    miloco_home.mkdir(parents=True, exist_ok=True)
 
     plat = Platform.detect(lang_override=args.lang)
     i18n = I18n(plat.lang, Path(__file__).parent)
     ui = UI(i18n)
+
+    # curl|bash 场景 stdin 被 pipe 占用，Platform.detect() 拿到 is_interactive=False。
+    # 主动 open("/dev/tty") 抢回交互能力（下面还会再做一次严格 fallback + fatal 报错，
+    # 这里只是提前，让 _decide_agent_platform 的 platform prompt 能弹出来）。
+    if not plat.is_interactive and _try_tty_fallback():
+        plat = replace(plat, is_interactive=True)
+
+    agent_platform = _decide_agent_platform(args, plat, ui)
+    miloco_home = Path(
+        os.environ.get("MILOCO_HOME") or _default_miloco_home(agent_platform)
+    )
+    miloco_home.mkdir(parents=True, exist_ok=True)
+    # 关键：导出到 environ，让所有子进程 (miloco-cli / supervisord / backend / 打包 wheel
+    # 起的 miloco.main) 继承正确的 MILOCO_HOME，否则 backend fallback 到 ~/.openclaw/miloco。
+    os.environ["MILOCO_HOME"] = str(miloco_home)
 
     # Agent mode: --agent-prepare or --agent-finish implies non-interactive agent flow
     if args.agent_prepare or args.agent_finish:
@@ -1610,6 +1898,7 @@ def main() -> None:
             account_auth=args.account_auth,
             miloco_home=miloco_home,
             skip_openclaw=args.skip_openclaw,
+            agent_platform=agent_platform,
         )
         atexit.register(installer._stop_service)
         atexit.register(installer._cleanup_install_cache)
@@ -1658,6 +1947,7 @@ def main() -> None:
         account_auth=args.account_auth,
         miloco_home=miloco_home,
         skip_openclaw=args.skip_openclaw,
+        agent_platform=agent_platform,
     )
 
     atexit.register(installer._stop_service)

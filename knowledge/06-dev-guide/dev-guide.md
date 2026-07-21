@@ -66,11 +66,11 @@ cd backend && uv run task dev
 
 ### 配置来源与优先级
 
-配置统一由 `MilocoSettings`（`backend/miloco/src/miloco/config/settings.py`）管理，加载优先级从高到低：
+配置统一由 `MilocoSettings`（`config/settings.py`）管理，加载优先级从高到低：
 
 1. **环境变量**（`MILOCO_*`，嵌套用 `__` 分隔，如 `MILOCO_SERVER__PORT`）
 2. **用户配置文件**（`$MILOCO_HOME/config.json`）— 三端（backend / CLI / 插件）共享，用户日常调整的入口
-3. **后端默认 YAML**（`backend/miloco/src/miloco/config/settings.yaml`）— 后端打包时的默认值
+3. **后端默认 YAML**（`config/settings.yaml`）— 后端打包时的默认值
 4. **代码默认值**
 
 `settings.schema.json`（同目录）是 `config.json` 面向用户的 JSON Schema 契约，覆盖核心可配置段（`debug` / `server` / `agent` / `model`）的类型与语义描述。其余段（`perception` / `rule` / `camera` / `directories` 等）的完整字段定义以 `settings.yaml`（含注释）与 `settings.py` 的 pydantic 模型为准。
@@ -112,15 +112,27 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 3. 系统时区反查：`TZ` env → `/etc/timezone` → `/etc/localtime`（symlink 目标；普通文件则按字节内容反查 zoneinfo 数据库）
 4. 最后兜底 `Asia/Shanghai` + 一次性 warning（宿主完全不暴露 IANA 身份时；面向国内主流用户的保守选择，非国内部署请显式配置时区）
 
-配置方式：
+配置方式（按推荐顺序）：
 
-```bash
-miloco-cli config set timezone Asia/Shanghai   # IANA 名，非法名会被拦
-```
+1. **首选：设置宿主系统时区**——一次对齐所有组件（miloco backend / 插件、openclaw、日志时间戳、系统 cron 以及未来任何依赖）：
+
+   ```bash
+   sudo timedatectl set-timezone Asia/Shanghai   # 裸机 / 云主机
+   docker run -e TZ=Asia/Shanghai ...            # 容器
+   ```
+
+2. **Fallback：miloco 侧配置**（无法修改宿主时区、或临时测试时）：
+
+   ```bash
+   miloco-cli config set timezone Asia/Shanghai   # IANA 名，非法名会被拦
+   ```
 
 注意事项：
 
-- **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应显式配置 `timezone` 或给容器设 `TZ` 环境变量。
+- **两个独立的时区配置域，共享宿主作为回落**：miloco（backend + 插件）按上表顺序读 `MILOCO_TIMEZONE` / `config.json`；**openclaw 运行时**——即在 agent prompt 底部注入 `Current time` 行的那一方——读它自己的 `openclaw.json` → `agents.defaults.userTimezone`（openclaw `resolveUserTimezone`：配了且合法就用它，否则回落 `Intl` 宿主时区，再否则 `UTC`）。两个域互不读对方的配置，但**各自的显式配置为空时都回落到宿主系统时区**。（注意区分信道：**miloco 插件**虽运行在 openclaw 内，它自己的 `deployTimezone()` 读 miloco 配置，注入的「时间与时区」块因此正确；而 openclaw **运行时**那行 `Current time` 不经过插件、也不读 miloco 配置，由 `userTimezone` / 宿主决定。）
+- **为何首选改宿主**：宿主时区是这两个域**唯一共享的回落信道**——设好宿主、两边显式配置都留空，openclaw 与 miloco 便一起对齐，只需动一处。若偏好显式配置，须**同时**设 openclaw 的 `agents.defaults.userTimezone` 与 miloco 的 `config.json` `timezone`；只设一边会让另一边停在回落上。
+- **openclaw 侧没有"中国兜底"，这是历史 bug 的根源**：miloco 域在彻底无法解析时兜底 `Asia/Shanghai`，而 openclaw 域回落只到宿主时区（云主机通常 `Etc/UTC`）、无额外兜底。故 `userTimezone` 未设 + 宿主 UTC 时，openclaw 的 `Current time` 会显示 UTC——「上午 10 点被叙述成凌晨」正源于此。修法：设 `openclaw.json` 的 `userTimezone`（openclaw 原生机制），或设对宿主时区。
+- **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应优先给宿主 / 容器设置正确时区；确实无法修改宿主时再用 miloco 侧 `timezone` 配置（openclaw 侧的 `Current time` 另由其 `userTimezone` / 宿主回落决定，见上）。
 - `miloco-cli service start` 生成 supervisord.conf 时会把解析出的时区以 `TZ` + `MILOCO_TIMEZONE` 注入 backend 子进程环境（改配置后重启生效）。
 
 ### 配置修改后是否需要重启
@@ -237,7 +249,7 @@ miloco-cli rule logs --since 1h --pretty
 miloco-cli rule trigger <rule_id>
 ```
 
-规则 schema 定义在 `backend/miloco/src/miloco/rule/schema.py`，规则执行逻辑在 `rule/runner.py`（RuleRunner），规则设计原理见 [规则自动化](../03-features/rule-automation.md)。
+规则 schema 定义在 `rule/schema.py`，规则执行逻辑在 `rule/runner.py`（RuleRunner），规则设计原理见 [规则自动化](../03-features/rule-automation.md)。
 
 **注意**：condition.query 不能以"检测到/识别到/感知到"等断言性词汇开头，否则创建时会返回 `422`。
 
@@ -272,6 +284,8 @@ metadata:
       bins: ["miloco-cli"] # 依赖的命令行工具
       tools: # 依赖的 OpenClaw built-in tools（可选）
         - miloco_im_push
+        - miloco_notify_bind
+        - miloco_notify_unbind
 ---
 # Skill 正文（Markdown）
 ```
@@ -298,7 +312,8 @@ miloco-cli rule logs --since 1h
 
 # 任务管理（task：生命周期；record：行为统计）
 miloco-cli task create --task-id <id> --description "<desc>"
-miloco-cli task link --task <task_id> --kind cron --ref <jobId>       # 挂 cron（rule 由 rule create 自动 link）
+miloco-cli cron add --task-id <task_id> --kind at --at-iso <ISO> \
+  --name "[<task_id>] <desc>" --message "<意图>"                    # 挂 at 型定时（cron 用 --kind cron --cron-expr --tz；rule 由 rule create 自动挂）
 miloco-cli task delete <task_id> --reason completed|expired|abandoned  # 终止（写审计快照）
 miloco-cli task record init <task_id> --kind progress|duration|event  # 初始化记录
 miloco-cli task record progress-inc <task_id> [--delta N]             # 进度累加
@@ -322,7 +337,7 @@ CLI 会读取 `$MILOCO_HOME/config.json` 中的 `server.url`（后端 HTTP Base 
 4. 验证：`openclaw skills list | grep miloco-<name>`
 5. 在 Agent 对话中触发，观察日志 `$MILOCO_HOME/log/openclaw-plugin.log`
 
-Skill 正文中可以通过 `Bash` tool 调用 `miloco-cli` 任意子命令（含 `task record` 行为统计），或通过插件注册的 built-in tools（`miloco_im_push` 发通知、`miloco_notify_bind` 绑通知渠道、`miloco_habit_suggest` 习惯建议状态）操作。
+Skill 正文中可以通过 `Bash` tool 调用 `miloco-cli` 任意子命令（含 `task record` 行为统计），或通过插件注册的 built-in tools（`miloco_im_push` 发通知、`miloco_notify_bind` 绑通知渠道、`miloco_notify_unbind` 解绑定通知渠道、`miloco_habit_suggest` 习惯建议状态）操作。
 
 ### 场景四：直接调用 API 进行调试
 

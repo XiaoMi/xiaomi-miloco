@@ -239,11 +239,17 @@ class RuleService:
             )
 
     async def _get_valid_perceive_device_ids(self) -> list[str]:
-        """All valid perception device IDs (offline included)."""
+        """All valid perception device IDs (offline included).
+
+        多通道相机的感知 did 是合成 did（``cam1:ch0`` / ``cam1:ch1``）；rule 可以按
+        整台相机的物理 did（``cam1``）绑定，也可以精确到某条通道。两种粒度都收进合法集。
+        """
         from miloco.manager import get_manager
 
         devices = await get_manager().perception_service.get_devices(online_only=False)
-        return [device.did for device in devices]
+        valid = [device.did for device in devices]
+        physical = {d.rsplit(":ch", 1)[0] for d in valid if ":ch" in d}
+        return valid + sorted(physical - set(valid))
 
     async def _validate_perceive_device_ids(self, dids: list[str]) -> None:
         valid_dids = await self._get_valid_perceive_device_ids()
@@ -268,14 +274,16 @@ class RuleService:
     async def create_rule(self, rule: Rule) -> str:
         """Create a new rule with V3 validation matrix.
 
-        方案 P 关键约束（spec §7.3）：rule.task_id 必须对应已存在的 task，
-        否则返 404 ``task_not_found``。RuleRepo.create 内部一笔事务同时写
-        rule + task_link(kind='rule')，崩在中间整笔回滚不留孤儿。
+        v2 后 rule.task_id NOT NULL + FK CASCADE (DB 层硬拦), service 层前置校验
+        提供可读 400 (双保险)。
         """
+        if not rule.task_id:
+            raise ValidationException("rule.task_id required (v2: NOT NULL)")
+
         if self._repo.exists_by_name(rule.name):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
-        if rule.task_id and not self._task_repo.task_exists(rule.task_id):
+        if not self._task_repo.task_exists(rule.task_id):
             raise ResourceNotFoundException(
                 f"task_not_found: rule.task_id={rule.task_id!r} 对应 task 不存在"
             )
@@ -292,7 +300,7 @@ class RuleService:
 
         rule.id = rule_id
         self._runner.add_rule(rule)
-        logger.info("Rule created: %s (task_link auto-written)", rule_id)
+        logger.info("Rule created: %s", rule_id)
         return rule_id
 
     async def get_rule(self, rule_id: str) -> Rule:
@@ -463,8 +471,14 @@ class RuleService:
         if success:
             self._runner.remove_rule(rule_id)
             self._log_repo.delete_by_rule_id(rule_id)
-            self._task_repo.delete_link_by_ref("rule", rule_id)
         return success
+
+    def remove_rule_from_runner(self, rule_id: str) -> None:
+        """仅清 RuleRunner._rules 内存 dict, 不删 DB (供 TaskService.delete_task
+        在 FK CASCADE 已清 rule 表行后清内存态)。老 delete_rule 走 DB + 内存
+        双清, 但 task delete 场景 DB 由 CASCADE 走完, 只需清内存, 避免二次删表。
+        """
+        self._runner.remove_rule(rule_id)
 
     # ---- Trigger ----
 

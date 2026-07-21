@@ -99,6 +99,18 @@ class Detector:
         self.input_height = self.input_shape[2]
         self.input_width = self.input_shape[3]
 
+    def release(self):
+        """释放 ONNX session。
+
+        置 None 让 refcount 归零,触发底层 CoreML Execution 析构链清理其中间
+        模型文件(见 ort_utils);与 HumanReID.release 对齐,给高频重建路径一个
+        确定性的 teardown 入口,避免只靠 GC 时机不定。
+        """
+        self.session = None
+
+    def __del__(self):
+        self.release()
+
     def preprocess(self, image: np.ndarray) -> Tuple[np.ndarray, float, float, float]:
         """
         预处理图像

@@ -1,0 +1,23 @@
+{
+  "settings": {
+    "title": "Settings",
+    "videoShortEdge": "Resolution",
+    "videoShortEdgeHint": "Short edge pixels, keeps aspect ratio",
+    "omniFps": "Frame Rate",
+    "omniFpsHint": "Higher frame rate uses more resources",
+    "windowSize": "Perception Window",
+    "windowSizeUnit": "sec",
+    "apply": "Apply Settings",
+    "applying": "Applying…",
+    "applySuccess": "Settings applied",
+    "saveFailed": "Save failed",
+    "partialSaveFailed": "Scheduler toggle saved, but perception settings failed to save. Please retry.",
+    "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
+    "loadFailed": "Failed to load settings",
+    "resetDefaults": "Restore Defaults",
+    "schedulerSaved": "Saved. Takes effect after the next agent gateway restart.",
+    "autoSchedule": "Auto scheduled tasks",
+    "autoScheduleHint": "When on, miloco auto-creates and maintains its built-in scheduled tasks (perception digest / home patrol / memory dreaming / habit insights). When off, those tasks are removed and not recreated. Takes effect after the next agent gateway restart.",
+    "autoScheduleUnavailable": "This backend doesn't support this toggle (version may be too old); not configurable for now."
+  }
+}

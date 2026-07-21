@@ -1,6 +1,15 @@
-<h1 align="center">Xiaomi Miloco</h1>
+<div align="center">
 
-<p align="center"><a href="README.md">English</a> | 简体中文</p>
+# Xiaomi Miloco
+
+[English](README.md) | 简体中文
+
+[![最新版本](https://img.shields.io/github/v/release/XiaoMi/xiaomi-miloco?label=release)](https://github.com/XiaoMi/xiaomi-miloco/releases/latest)
+[![下载量](https://img.shields.io/github/downloads/XiaoMi/xiaomi-miloco/total)](https://github.com/XiaoMi/xiaomi-miloco/releases)
+[![Star 数](https://img.shields.io/github/stars/XiaoMi/xiaomi-miloco)](https://github.com/XiaoMi/xiaomi-miloco/stargazers)
+[![欢迎 PR](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/XiaoMi/xiaomi-miloco/pulls)
+
+</div>
 
 小米面向未来的全屋智能 AI 开源方案，以米家摄像头的画面与声音为全模态感知入口，以自研 MiMo 大模型为智能大脑，以 Agent 插件形式运行在 [OpenClaw](https://openclaw.ai) 之上，联动全屋设备带来主动智能体验。
 
@@ -10,6 +19,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 ## 最新动态
 
+- **2026-07-17** — 发布 v2026.7.17：新增 Hermes Agent 兼容层（可插拔 agent runtime）、双摄多通道双流感知、Omni 多模型支持与运行时帧率热更；并新增独立任务 Tab、相机级麦克风开关，以及时区 / 版本 / 安装加固。
 - **2026-07-03** — 发布 v2026.7.3：新增事件反馈打包，以及全新安装时主动发起的对话式初始化引导；并改进面板内模型配置管理、感知稳定性（非人误检防护）、相机生命周期与 CLI 诊断。
 - **2026-06-18** — Miloco 2.0 正式发布：重构为 OpenClaw 插件，新增通用常识、身份识别、家庭记忆、家庭任务、主动智能、家庭面板。详见下方[核心特性](#核心特性)。
 
@@ -29,6 +39,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 - **硬件**：建议内存 ≥ 4GB，存储 ≥ 256GB，7×24 常驻运行，推荐 Mac mini
 - **操作系统**：macOS / Linux（Windows 请在 WSL 中运行）
+- **OpenClaw** — Miloco 以插件形式运行其上，需先[安装](https://openclaw.ai)且版本 ≥ 2026.5.2
 - **小米账号** + 已接入米家的设备
 - **多模态大模型 API Key** — 推荐使用[小米 MiMo](https://platform.xiaomimimo.com)：感知用 MiMo-v2.5，Agent 用 MiMo-v2.5-pro（在 OpenClaw 中配置）
 
@@ -39,7 +50,7 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 ### 方式一：通过 Agent 安装（推荐）
 
-向 OpenClaw 发送以下指令即可自动完成安装：
+适用于 **OpenClaw** 和 **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** —— 向你的 Agent 发送以下指令：
 
 ```text
 帮我安装 Miloco 插件：https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/scripts/install-guide.md
@@ -49,6 +60,12 @@ Miloco 2.0 能感知家中发生的事件，能基于常识主动判断并操控
 
 ```bash
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash
+```
+
+默认为 OpenClaw。如果要装给 Hermes Agent，显式指定：
+
+```bash
+curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-platform=hermes
 ```
 
 ### 方式三：从源码构建

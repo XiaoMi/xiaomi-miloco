@@ -29,7 +29,7 @@ def _get_client(cfg: dict) -> httpx.Client:
     )
 
 
-def _handle_response(resp: httpx.Response) -> dict:
+def _handle_response(resp: httpx.Response) -> dict | list:
     """统一处理响应，业务错误 sys.exit(3)。"""
     try:
         data = resp.json()
@@ -50,7 +50,9 @@ def _handle_response(resp: httpx.Response) -> dict:
         print(json.dumps({"error": data}, ensure_ascii=False), file=sys.stderr)
         sys.exit(3)
 
-    if data.get("code", 0) != 0:
+    # observability 系列 endpoint（/api/actions、/api/traces 等）直接返回裸 list,
+    # 无 NormalResponse 信封;2xx 已判过,list 恒为成功,原样透传。
+    if isinstance(data, dict) and data.get("code", 0) != 0:
         print(json.dumps(data, ensure_ascii=False), file=sys.stderr)
         sys.exit(3)
 
@@ -73,7 +75,7 @@ def api_get(
     params: dict | list[tuple[str, str | int | float | None]] | None = None,
     *,
     timeout: float | None = None,
-) -> dict:
+) -> dict | list:
     cfg = load_config()
     try:
         with _get_client(cfg) as client:

@@ -26,6 +26,12 @@ export const IconCamera = (p: Props) => (
   </svg>
 );
 
+export const IconRefresh = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v5h-5" />
+  </svg>
+);
+
 export const IconLightbulb = (p: Props) => (
   <svg {...base(p)}>
     <path d="M9 18h6M10 21h4M12 3a6 6 0 0 1 4 10.5c-1 .8-1.5 1.7-1.5 2.5h-5c0-.8-.5-1.7-1.5-2.5A6 6 0 0 1 12 3z" />
@@ -136,6 +142,13 @@ export const IconAlert = (p: Props) => (
   <svg {...base(p)}>
     <path d="M12 9v4M12 17h.01" />
     <path d="M10.3 3.9L2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+  </svg>
+);
+
+export const IconHelp = (p: Props) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M9.5 9.2a2.5 2.5 0 0 1 4.9.8c0 1.7-2.4 2-2.4 3.5M12 17h.01" />
   </svg>
 );
 

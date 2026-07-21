@@ -21,8 +21,8 @@
 
 视觉口诀:**白面板 → 灰画布 → 白卡片**,层次靠灰白交替。
 
-- 左 Sidebar:`bg-bg-secondary`(白)
-- 中间 chrome + canvas:TopBar / StatusRibbon / 主区都用 `bg-bg-primary`(灰)
+- 左 Sidebar + TopBar:`bg-bg-secondary`(白,顶栏与左面板齐平)
+- StatusRibbon + 主区 canvas:`bg-bg-primary`(灰)
 - 内容卡片:`<section>` 用 `bg-bg-secondary`(白)浮在灰 canvas 上
 - panel 内的差异化元素:用 `bg-bg-primary`(灰,inset 视觉)或 `bg-bg-tertiary`(更深灰,hover 态)
 
@@ -30,7 +30,7 @@
 
 ### 2. 状态用点不用块
 
-**5px 圆点 + 5px 半透明光环** (`box-shadow: 0 0 0 3px var(--color-{tone}-bg)`) 替代色块 badge / chip。
+**5px 圆点 + 3px 半透明光环** (`box-shadow: 0 0 0 3px var(--color-{tone}-bg)`) 替代色块 badge / chip。
 
 色映射:`ok=success` / `info=info` / `warn=warning` / `danger=error` / `brand=brand-primary`。
 

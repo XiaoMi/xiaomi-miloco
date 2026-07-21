@@ -1,7 +1,7 @@
 """Agent turn meta 反向 poller。
 
 backend 发完 run_agent_turn 拿到 runId 后,enqueue 给 poller;
-poller 周期性调 openclaw webhook ``get_trace`` 查询,拿到 meta 后调
+poller 周期性读 trace meta,拿到 meta 后调
 ``MetricsClient.record_agent_run`` 写入 agent_runs 表。
 """
 from __future__ import annotations
@@ -10,13 +10,12 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
+from miloco.agent_platform import get_adapter
 from miloco.config import get_settings
-from miloco.middleware.exceptions import AgentWebhookException
 from miloco.observability.metrics_client import MetricsClient
 from miloco.observability.types import AgentRunRecord
-from miloco.utils.agent_client import call_agent_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -126,62 +125,73 @@ class AgentMetaPoller:
                 self._queue.task_done()
 
     async def _poll_one(self, job: _Job) -> None:
-        # deadline 在这里起算 — 真正轮到 poll 时才计 90s 预算,
-        # 入队等待 / sem 等待时间不被吃掉。
+        """用 Adapter.read_trace_meta 读 trace meta（adapter 内部处理 webhook fallback）。
+        """
         deadline = time.monotonic() + _MAX_DEADLINE_S
+        adapter = get_adapter()
         while time.monotonic() < deadline and not self._stop.is_set():
-            try:
-                data = await call_agent_webhook(
-                    "get_trace", {"runId": job.run_id}, timeout=5.0,
-                )
-            except AgentWebhookException as e:
-                logger.warning(
-                    "get_trace webhook failed: trace_id=%s err=%s",
-                    job.trace_id, e,
-                )
-                await asyncio.sleep(_POLL_INTERVAL_S)
-                continue
-            except Exception:
-                logger.exception("get_trace unexpected error")
-                await asyncio.sleep(_POLL_INTERVAL_S)
-                continue
-
-            status = (data or {}).get("status")
+            status, meta = await self._poll_once(job, adapter)
             if status == "done":
                 record = AgentRunRecord(
-                    run_id=data.get("runId") or job.run_id,
+                    run_id=getattr(meta, "run_id", None) or job.run_id,
                     trace_id=job.trace_id,
                     timestamp=int(time.time() * 1000),
                     source=job.source,
                     webhook_rtt_ms=job.webhook_rtt_ms,
-                    query=data.get("query") or "",
-                    duration_ms=float(data.get("durationMs") or 0.0),
-                    llm_call_count=int(data.get("llmCallCount") or 0),
-                    tool_call_count=int(data.get("toolCallCount") or 0),
-                    llm_total_ms=float(data.get("llmTotalMs") or 0.0),
-                    tool_total_ms=float(data.get("toolTotalMs") or 0.0),
-                    tool_max_ms=float(data.get("toolMaxMs") or 0.0),
-                    slowest_tool_name=data.get("slowestToolName"),
-                    success=bool(data.get("success")),
-                    error_count=int(data.get("errorCount") or 0),
-                    error_msg=data.get("errorMsg"),
-                    jsonl_path=data.get("jsonlPath"),
+                    query=getattr(meta, "query", "") or "",
+                    duration_ms=float(getattr(meta, "duration_ms", 0.0) or 0.0),
+                    llm_call_count=int(getattr(meta, "llm_call_count", 0) or 0),
+                    tool_call_count=int(getattr(meta, "tool_call_count", 0) or 0),
+                    llm_total_ms=float(getattr(meta, "llm_total_ms", 0.0) or 0.0),
+                    tool_total_ms=float(getattr(meta, "tool_total_ms", 0.0) or 0.0),
+                    tool_max_ms=float(getattr(meta, "tool_max_ms", 0.0) or 0.0),
+                    slowest_tool_name=getattr(meta, "slowest_tool_name", None),
+                    success=bool(getattr(meta, "success", False)),
+                    error_count=int(getattr(meta, "error_count", 0) or 0),
+                    error_msg=getattr(meta, "error_msg", None),
+                    jsonl_path=getattr(meta, "jsonl_path", None),
                 )
                 self._client.record_agent_run(record)
                 return
             if status == "unknown":
                 logger.info(
-                    "get_trace returned unknown for run_id=%s; giving up",
-                    job.run_id,
+                    "trace returned unknown for run_id=%s; giving up", job.run_id,
                 )
                 return
-            # in_progress / error → 继续轮询
+            if status == "error":
+                logger.warning(
+                    "trace read error run_id=%s err=%s", job.run_id, meta,
+                )
+                await asyncio.sleep(_POLL_INTERVAL_S)
+                continue
+            # in_progress → 继续轮询
             await asyncio.sleep(_POLL_INTERVAL_S)
 
         logger.warning(
             "agent_meta_poller timed out: trace_id=%s run_id=%s",
             job.trace_id, job.run_id,
         )
+
+    async def _poll_once(self, job: _Job, adapter: Any) -> tuple[str, Any]:
+        """单次读 trace meta。返回 ``(status, meta_or_data)``。
+
+        status 含义:
+        - ``"done"``: meta 读到
+        - ``"in_progress"``: meta 不存在(turn 还没 flush),等下次轮询
+        - ``"unknown"``: meta 不存在但超时
+        - ``"error"``: 出错
+        """
+        try:
+            meta = await adapter.read_trace_meta(job.run_id)
+            if meta is not None:
+                return ("done", meta)
+            return ("in_progress", None)
+        except Exception as exc:
+            logger.warning(
+                "adapter.read_trace_meta failed run_id=%s err=%s",
+                job.run_id, exc,
+            )
+            return ("error", str(exc))
 
 
 _singleton: AgentMetaPoller | None = None

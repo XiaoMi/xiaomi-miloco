@@ -18,6 +18,7 @@ from typing import Any
 from miloco.observability.context import get_trace_id
 from miloco.observability.metrics_db import connect, init_schema
 from miloco.observability.types import (
+    ActionLedgerRecord,
     AgentRunRecord,
     CycleTraceRecord,
     DeviceTraceRecord,
@@ -61,6 +62,11 @@ class _PublishTraceJob:
 @dataclass
 class _RecordAgentRunJob:
     record: AgentRunRecord
+
+
+@dataclass
+class _RecordActionJob:
+    record: ActionLedgerRecord
 
 
 @dataclass
@@ -123,6 +129,10 @@ class MetricsClient:
 
     def record_agent_run(self, record: AgentRunRecord) -> None:
         self._enqueue(_RecordAgentRunJob(record=record))
+
+    def record_action(self, record: ActionLedgerRecord) -> None:
+        """入队一行 action_ledger(设备控制 / TTS / 场景触发的持久审计)。"""
+        self._enqueue(_RecordActionJob(record=record))
 
     def publish_event(
         self,
@@ -259,6 +269,8 @@ class MetricsClient:
                 self._insert("traces_device", d.to_row())
         elif isinstance(job, _RecordAgentRunJob):
             self._insert("agent_runs", job.record.to_row())
+        elif isinstance(job, _RecordActionJob):
+            self._insert("action_ledger", job.record.to_row())
         elif isinstance(job, _PublishEventJob):
             self._conn.execute(
                 "INSERT INTO events (event_id, timestamp, event_type, trace_id, source, payload) "

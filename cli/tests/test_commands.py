@@ -565,6 +565,29 @@ def test_device_control_annotates_unknown_error_code(runner, fake_home_info):
     assert data["code"] == -999999999
 
 
+def test_device_control_positive_code_is_success(runner, fake_home_info):
+    """设备侧正数码（如 code:1，指令已执行生效）不可误判为失败——对齐"负值即失败"。
+
+    回归：某些开关 set_property 成功后仍返回 code:1。旧逻辑（非白名单即失败）把它
+    打成"失败：设备侧执行失败"，上层 agent 据此盲目重试 / 谎报失败。修复后正数码
+    不补失败释义、外层信封保持成功。
+    """
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {
+            "code": 0,
+            "message": "executed successfully",
+            "data": {"results": [{"code": 1}]},
+        }
+        result = runner.invoke(
+            cli, ["device", "control", "lamp_001", "prop.2.1", "true"]
+        )
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert "code_msg" not in data["data"]["results"][0]
+    assert data["code"] == 0
+    assert "失败" not in data["message"]
+
+
 def test_device_control_partial_failure_envelope(runner, fake_home_info):
     """多设备部分失败 → 外层 message 标"部分失败（n/total）"。"""
     with patch("miloco_cli.client.api_post") as mock:
@@ -668,7 +691,7 @@ def test_device_spec_default_table(runner, fake_home_info):
     assert "home=我的家" in text
     assert "device_name=台灯" in text
     assert "room=客厅" in text
-    assert "properties" in text
+    assert "[service 2]" in text  # 按 service 分组的标题行
     assert "prop.2.1" in text
     mock.assert_called_once_with("/api/miot/devices/lamp_001/spec")
 
@@ -705,6 +728,51 @@ def test_device_spec_multiple_partial_failure(runner, fake_home_info):
         result = runner.invoke(cli, ["device", "spec", "good", "bad"])
     assert result.exit_code == 0
     assert "did=good" in result.output
+
+
+def test_device_spec_groups_by_service_with_description(runner, fake_home_info):
+    """spec 按 service 分组：标题行带 service_type_name（service_description），
+    props/action 归到各自 service 小节下。"""
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {
+            "code": 0,
+            "data": {
+                "did": "lamp_001",
+                "name": "台灯",
+                "online": True,
+                "category": "light",
+                "spec": {
+                    "prop.2.1": {
+                        "type_name": "on", "format": "bool",
+                        "writeable": True, "readable": True,
+                        "service_type_name": "light",
+                        "service_description": "灯光",
+                    },
+                    "action.2.1": {
+                        "type_name": "toggle",
+                        "service_type_name": "light",
+                        "service_description": "灯光",
+                    },
+                    "prop.3.1": {
+                        "type_name": "on", "format": "bool",
+                        "writeable": True, "readable": True,
+                        "service_type_name": "indicator-light",
+                        "service_description": "指示灯",
+                    },
+                },
+            },
+        }
+        result = runner.invoke(cli, ["device", "spec", "lamp_001"])
+    assert result.exit_code == 0
+    text = result.output
+    # 两个 service 各成小节，标题带类型与中文描述
+    assert "[service 2] light（灯光）" in text
+    assert "[service 3] indicator-light（指示灯）" in text
+    # action 归到 service 2 下，且在 service 3 标题之前出现
+    assert text.index("action.2.1") < text.index("[service 3]")
+    # 无 properties:/actions: 小节标题，行不缩进（iid 顶格）
+    assert "properties:" not in text and "actions:" not in text
+    assert "\nprop.2.1  " in text and "\naction.2.1  " in text
 
 
 def test_device_props_annotates_spec_name(runner, fake_home_info):
@@ -1958,6 +2026,80 @@ def test_scope_home_switch(runner):
     mock_put.assert_called_once_with("/api/miot/scope/homes", {"home_id": "home_1"})
 
 
+# ─── scope camera enable/disable ─────────────────────────────────────────────
+
+
+def test_scope_camera_enable_batch(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "enable", "c1", "c2"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras",
+        {"items": [{"did": "c1", "in_use": True}, {"did": "c2", "in_use": True}]},
+    )
+
+
+def test_scope_camera_disable(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "disable", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras", {"items": [{"did": "c1", "in_use": False}]}
+    )
+
+
+# ─── scope camera mic-on / mic-off（拾音开关，走 voice 端点）──────────────────
+
+
+def test_scope_camera_mic_off(runner):
+    """mic-off → PUT voice 端点 voice_in_use=false。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "mic-off", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/voice",
+        {"items": [{"did": "c1", "voice_in_use": False}]},
+    )
+
+
+def test_scope_camera_mic_on_batch(runner):
+    """批量 did 语义与 enable/disable 同款。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "mic-on", "c1", "c2", "c3"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/voice",
+        {
+            "items": [
+                {"did": "c1", "voice_in_use": True},
+                {"did": "c2", "voice_in_use": True},
+                {"did": "c3", "voice_in_use": True},
+            ]
+        },
+    )
+
+
+def test_scope_camera_mic_requires_did(runner):
+    result = runner.invoke(cli, ["scope", "camera", "mic-off"])
+    assert result.exit_code != 0  # 缺 did 由 click 拒绝
+
+
+def test_scope_camera_mic_backend_rejection_passthrough(runner):
+    """backend 拒绝（未知 did / 感知已关闭不可设拾音）→ api_put 打错误并 exit 3，
+    CLI 不吞不改写（api_put 内部 sys.exit(3)，这里以 SystemExit 模拟其行为）。"""
+    with patch(
+        "miloco_cli.commands.scope.api_put",
+        side_effect=SystemExit(3),
+    ) as mock_put:
+        result = runner.invoke(cli, ["scope", "camera", "mic-off", "ghost"])
+    assert result.exit_code == 3
+    mock_put.assert_called_once()
+
+
 # ─── home-profile ───────────────────────────────────────────────────────────
 
 
@@ -2142,3 +2284,124 @@ def test_dashboard_not_running_hint(runner, monkeypatch):
     assert data["running"] is False
     assert data["opened"] is False  # 无头环境不开浏览器
     assert "hint" in data
+
+
+# ─── actions list ─────────────────────────────────────────────────────────────
+
+
+_ACTIONS_RESP = [
+    {
+        "id": "a1", "timestamp": 1_700_000_000_000,
+        "action_type": "set_property", "did": "lamp_001",
+        "device_name": "台灯", "room": "客厅", "iid": "prop.2.1",
+        "value_json": "true", "result_code": None, "result_msg": None,
+        "success": 1, "error": None, "trace_id": None,
+    },
+    {
+        "id": "a2", "timestamp": 1_700_000_100_000,
+        "action_type": "call_action", "did": "spk_001",
+        "device_name": "音箱", "room": "卧室", "iid": "action.5.1",
+        "value_json": "[\"你好\"]", "result_code": -704042011,
+        "result_msg": "设备离线", "success": 0, "error": None, "trace_id": None,
+    },
+]
+
+
+def test_actions_list_renders_tsv(runner):
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = _ACTIONS_RESP
+        result = runner.invoke(cli, ["actions", "list"])
+    assert result.exit_code == 0
+    lines = result.output.strip().splitlines()
+    # 头注释行 + 两行数据
+    assert lines[0].startswith("# ts|action_type|did")
+    assert len(lines) == 3
+    # 成功项:ok;失败项:fail + 中文 reason
+    assert "|set_property|lamp_001|台灯|客厅|prop.2.1|ok|ok|" in lines[1]
+    assert "|call_action|spk_001|音箱|卧室|action.5.1|fail|设备离线|" in lines[2]
+
+
+def test_actions_list_passes_filters(runner):
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = []
+        result = runner.invoke(
+            cli,
+            ["actions", "list", "--did", "lamp_001", "--failed-only",
+             "--since", "24h", "--limit", "10"],
+        )
+    assert result.exit_code == 0
+    path, kwargs = mock.call_args[0][0], mock.call_args[1]
+    assert path == "/api/actions"
+    params = dict(kwargs["params"])
+    assert params["did"] == "lamp_001"
+    assert params["failed_only"] == 1
+    assert params["limit"] == 10
+    assert "since_ms" in params  # 24h 已转 epoch ms
+
+
+def test_actions_list_value_json_truncated(runner):
+    long_val = "x" * 200
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = [{
+            "id": "a3", "timestamp": 1_700_000_000_000,
+            "action_type": "call_action", "did": "d", "device_name": None,
+            "room": None, "iid": "action.5.1", "value_json": long_val,
+            "result_code": None, "result_msg": None, "success": 1,
+            "error": None, "trace_id": None,
+        }]
+        result = runner.invoke(cli, ["actions", "list"])
+    assert result.exit_code == 0
+    data_line = result.output.strip().splitlines()[1]
+    # value 字段截断到 ~60 字符(含省略号),远短于 200
+    value_field = data_line.split("|")[-1]
+    assert len(value_field) <= 61
+    assert value_field.endswith("…")
+
+
+def test_actions_list_bad_since_errors(runner):
+    result = runner.invoke(cli, ["actions", "list", "--since", "notatime"])
+    assert result.exit_code == 1
+
+
+# ─── scope camera list：多通道合成 did 展示（A：仅展示层，不动 API）─────────────
+
+
+def test_compose_channel_dids_transforms_multi_only():
+    """多通道相机每行 did → 合成 did、去 channel 列；单摄保持裸 did、也去 channel 列。"""
+    from miloco_cli.commands.scope import _compose_channel_dids
+
+    resp = {
+        "code": 0,
+        "message": "ok",
+        "data": [
+            {"did": "solo", "name": "单摄", "channel_count": 1, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 1},
+        ],
+    }
+    out = _compose_channel_dids(resp)["data"]
+    # 单摄:裸 did；双摄:合成 did。channel / channel_count 都从展示里去掉。
+    assert out[0]["did"] == "solo"
+    assert out[1]["did"] == "dual:ch0"
+    assert out[2]["did"] == "dual:ch1"
+    for r in out:
+        assert "channel" not in r and "channel_count" not in r
+
+
+def test_scope_camera_list_shows_composite_did(runner):
+    """双摄两行 did 展示成 dual:ch0 / dual:ch1（不再是相同 did），单摄裸 did。"""
+    resp = {
+        "code": 0,
+        "message": "ok",
+        "data": [
+            {"did": "solo", "name": "单摄", "channel_count": 1, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 0},
+            {"did": "dual", "name": "双摄", "channel_count": 2, "channel": 1},
+        ],
+    }
+    with patch("miloco_cli.commands.scope.api_get", return_value=resp):
+        result = runner.invoke(cli, ["scope", "camera", "list", "--pretty"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)["data"]
+    assert [r["did"] for r in data] == ["solo", "dual:ch0", "dual:ch1"]
+    assert all("channel" not in r and "channel_count" not in r for r in data)

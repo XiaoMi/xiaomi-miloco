@@ -46,6 +46,7 @@ from miloco.observability.agent_meta_poller import (
     set_agent_meta_poller,
 )
 from miloco.observability.cleanup import (
+    cleanup_action_ledger_table,
     cleanup_agent_runs_table,
     cleanup_events_table,
     cleanup_trace_jsonl,
@@ -61,6 +62,8 @@ from miloco.perception.router import router as perception_router
 from miloco.person.router import router as person_router
 from miloco.pet.router import router as pet_router
 from miloco.rule.router import router as rule_router
+from miloco.schedule.router import router as schedule_router
+from miloco.schedule.runner import get_runner as get_schedule_runner
 from miloco.task.router import router as task_router
 from miloco.task_record.router import router as task_record_router
 from miloco.utils.common import escape_for_js_string
@@ -117,9 +120,13 @@ async def _log_cleanup_loop() -> None:
                     da = cleanup_agent_runs_table(
                         conn, settings.perf.retention.agent_runs_days
                     )
+                    dal = cleanup_action_ledger_table(
+                        conn, settings.perf.retention.action_ledger_days
+                    )
                     logger.info(
-                        "Observability cleanup: traces=%d, traces_device=%d, events=%d, agent_runs=%d",
-                        dt, dtd, de, da,
+                        "Observability cleanup: traces=%d, traces_device=%d, "
+                        "events=%d, agent_runs=%d, action_ledger=%d",
+                        dt, dtd, de, da, dal,
                     )
                     # auto_vacuum=INCREMENTAL 下,DELETE 把页标 free 但不还 OS。
                     # 这里集中触发 incremental_vacuum,每页 4KB × 10000 ≈ 40MB 回收上限。
@@ -297,6 +304,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize node event log
     settings = get_settings()
+    # 启动即并排打出三条 single-source-of-truth 路径。home（MILOCO_HOME）漂移、或 db 与
+    # identity_lib 被解耦时（samples 在盘但 SQL 空 → omni roster 渲染“暂无已注册成员”），
+    # 这一行能一眼判出后端实际读的是哪套存储、二者是否同锚。
+    try:
+        from miloco.perception.engine.identity.config_loader import resolve_library_root
+        logger.info(
+            "存储路径: workspace_dir=%s | database=%s | identity_lib=%s",
+            settings.directories.workspace_dir, settings.database_path, resolve_library_root(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("打印存储路径失败（忽略）", exc_info=True)
     log_dir = settings.directories.log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     event_log = NodeEventLog(str(log_dir / "node_events.log"))
@@ -313,6 +331,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await dispatcher.start()
     set_agent_dispatcher(dispatcher)
     _app.state.dispatcher = dispatcher
+
+    # ScheduleRunner: cron/at/every 定时器. kill switch (settings.schedule.enabled=false)
+    # 时完全跳过 start + rebuild, CRUD 端点降级为 DB-only。
+    # rebuild 失败 fail-fast: in-memory 空 = cron 全静默停跑, 依赖 systemd 拉起重试。
+    if settings.schedule.enabled:
+        schedule_runner = get_schedule_runner()
+        schedule_runner.start()
+        try:
+            schedule_runner.rebuild_from_db()
+        except Exception as e:
+            logger.error("rebuild_scheduler_from_db failed: %s", e)
+            raise
+        _app.state.schedule_runner = schedule_runner
+    else:
+        logger.warning(
+            "schedule kill switch active (settings.schedule.enabled=false); "
+            "scheduler not started, CRUD degraded to DB-only"
+        )
 
     try:
         await get_manager().initialize()
@@ -418,6 +454,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             logger.error("Failed to stop agent dispatcher: %s", e)
         set_agent_dispatcher(None)
 
+    if hasattr(_app.state, "schedule_runner"):
+        try:
+            _app.state.schedule_runner.shutdown()
+        except Exception as e:
+            logger.error("Failed to stop schedule runner: %s", e)
+
     if hasattr(_app.state, "agent_meta_poller"):
         try:
             await _app.state.agent_meta_poller.stop()
@@ -464,6 +506,7 @@ app.include_router(person_router, prefix="/api")
 app.include_router(pet_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")
 app.include_router(rule_router, prefix="/api")
+app.include_router(schedule_router, prefix="/api")
 app.include_router(task_router, prefix="/api")
 app.include_router(task_record_router, prefix="/api")
 app.include_router(perception_router, prefix="/api")

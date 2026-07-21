@@ -19,9 +19,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
 from miloco.node_monitor import Lifecycle, NodeName
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.engine.resource_validator import (
@@ -38,7 +40,8 @@ def _make_proxy(status: str, *, engine=None, message: str = "stale") -> Percepti
     p._status = status
     p._status_message = message
     p._last_captions = {}
-    p._executor = None
+    p._inference_worker = None
+    p._engine_lock = asyncio.Lock()
     return p
 
 
@@ -248,3 +251,31 @@ def test_pipeline_try_reinit_forwards_include_failed():
     proc.try_reinit_engine(include_failed=True)
 
     proxy.try_reinit.assert_called_once_with(include_failed=True)
+
+
+# ── proxy: apply_omni_fps 运行时热更(改 omni_fps 免重建/免重载模型) ──────────
+
+@pytest.mark.asyncio
+async def test_apply_omni_fps_forwards_to_live_engine():
+    """引擎在跑(ready)时:透传给 engine.apply_omni_fps(新值)，不 close、不重建实例。"""
+    engine = MagicMock()
+    engine.apply_omni_fps = MagicMock()
+    proxy = _make_proxy("ready", engine=engine, message="")
+
+    await proxy.apply_omni_fps(2)
+
+    engine.apply_omni_fps.assert_called_once_with(2)
+    # 引擎实例原样保留（热更不换实例、不丢 track）
+    assert proxy.perception_engine is engine
+
+
+@pytest.mark.asyncio
+async def test_apply_omni_fps_no_engine_is_noop():
+    """无引擎实例(未配 key/模型的降级态)时 apply_omni_fps no-op、不崩。
+    settings 已由 PUT config 持久化，下次 _init_engine 自然读到新 omni_fps。"""
+    proxy = _make_proxy("no_omni_api_key", engine=None)
+
+    # 不应抛 AttributeError（engine is None 时守卫跳过）
+    await proxy.apply_omni_fps(2)
+
+    assert proxy.perception_engine is None
