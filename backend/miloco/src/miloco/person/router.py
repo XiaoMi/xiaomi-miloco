@@ -31,7 +31,8 @@ from miloco.utils.paths import miloco_home
 _PERSON_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
-# 头像上传大小上限：前端裁剪产物恒 ~20-50KB，直连 API 兜底防超大文件读进内存。
+# 头像上传大小上限：前端裁剪产物恒 ~20-50KB；直连 API 时用 image.size 前置闸拦超大包
+# （不必先读进内存）、读后 len 兜底。
 _MAX_AVATAR_BYTES = 5 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
@@ -760,8 +761,11 @@ async def upload_person_avatar(
         raise HTTPException(status_code=400, detail="Invalid person_id format")
     if not manager.person_service.exists(person_id):
         raise HTTPException(status_code=404, detail="person 不存在")
+    # 前置闸：用 multipart 自带的字节数拦超大包，不必先读进内存（size 缺失时靠读后兜底）。
+    if image.size is not None and image.size > _MAX_AVATAR_BYTES:
+        raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
     data = await image.read()
-    if len(data) > _MAX_AVATAR_BYTES:
+    if len(data) > _MAX_AVATAR_BYTES:  # size 缺失时兜底
         raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
     # 先确认能解码（挡垃圾字节），再按魔数取真实格式作落盘扩展名——不信任文件名后缀，
     # 让 盘上后缀 / Content-Type / 真实字节 三者恒一致（同 enroll 口径用 cv2、不引新依赖）。
