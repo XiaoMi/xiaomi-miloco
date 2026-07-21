@@ -337,7 +337,7 @@ CLI 会读取 `$MILOCO_HOME/config.json` 中的 `server.url`（后端 HTTP Base 
 4. 验证：`openclaw skills list | grep miloco-<name>`
 5. 在 Agent 对话中触发，观察日志 `$MILOCO_HOME/log/openclaw-plugin.log`
 
-Skill 正文中可以通过 `Bash` tool 调用 `miloco-cli` 任意子命令（含 `task record` 行为统计），或通过插件注册的 built-in tools（`miloco_im_push` 发通知、`miloco_notify_bind` 绑通知渠道、`miloco_notify_unbind` 解绑定通知渠道、`miloco_habit_suggest` 习惯建议状态）操作。
+Skill 正文中可以通过 `Bash` tool 调用 `miloco-cli` 任意子命令（含 `task record` 行为统计、`habit` 习惯建议状态机），或通过插件注册的 built-in tools（`miloco_im_push` 发通知、`miloco_notify_bind` 绑通知渠道、`miloco_notify_unbind` 解绑定通知渠道）操作。
 
 ### 场景四：直接调用 API 进行调试
 

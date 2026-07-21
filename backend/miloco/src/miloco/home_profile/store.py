@@ -42,14 +42,14 @@ def profile_md_path() -> Path:
 
 
 def task_suggestions_path() -> Path:
-    """习惯建议候选库（plugin TS 端维护），与本目录其余文件同级、互不干扰。"""
+    """习惯建议候选库（miloco-cli habit 维护），与本目录其余文件同级、互不干扰。"""
     return home_profile_dir() / "task-suggestions.json"
 
 
 def load_task_created_item_ids() -> set[str]:
     """已建成任务（status=created）的源家庭档案条目 id 集合。
 
-    只读 TS 端 task-suggestions.json（temp→rename 原子落盘，无锁读安全）；
+    只读 miloco-cli 维护的 task-suggestions.json（temp→rename 原子落盘，无锁读安全）；
     文件缺失/损坏/字段缺失一律回落空集，渲染照常。
     """
     path = task_suggestions_path()

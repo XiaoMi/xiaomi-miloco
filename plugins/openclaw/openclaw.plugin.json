@@ -9,7 +9,7 @@
     "allowConversationAccess": true
   },
   "contracts": {
-    "tools": ["miloco_im_push", "miloco_notify_bind", "miloco_notify_unbind", "miloco_habit_suggest"]
+    "tools": ["miloco_im_push", "miloco_notify_bind", "miloco_notify_unbind"]
   },
   "skills": ["./skills"],
   "configSchema": {
