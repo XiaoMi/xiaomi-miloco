@@ -177,7 +177,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
 
         {/* body */}
         <div className="flex-1 overflow-y-auto px-5 py-6 space-y-7">
-          {loading || !config ? (
+          {loading ? (
             <div className="space-y-7 animate-pulse">
               <div className="space-y-2.5">
                 <div className="h-4 w-16 bg-border rounded" />
@@ -199,6 +199,14 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 <div className="h-4 w-20 bg-border rounded" />
                 <div className="h-2 bg-border rounded-full" />
               </div>
+              <div className="space-y-2.5">
+                <div className="h-4 w-20 bg-border rounded" />
+                <div className="h-6 w-11 bg-border rounded-full" />
+              </div>
+            </div>
+          ) : !config ? (
+            <div className="text-caption text-text-tertiary text-center py-8">
+              {t("settings.loadFailed")}
             </div>
           ) : (
             <>
