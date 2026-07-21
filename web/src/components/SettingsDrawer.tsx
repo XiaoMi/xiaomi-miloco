@@ -40,7 +40,10 @@ export function SettingsDrawer({ open, onClose }: Props) {
   useEscClose(open, onClose);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setConfig(null);
+      return;
+    }
     setLoading(true);
     // 抽屉靠 `if (!open) return null` 隐藏而非卸载，state 会跨「关闭→重开」保留。
     // 每次重载先把调度值复位为 null：本次读不到就稳定退回 unavailable（disable 开关），
@@ -174,7 +177,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
 
         {/* body */}
         <div className="flex-1 overflow-y-auto px-5 py-6 space-y-7">
-          {loading ? (
+          {loading || !config ? (
             <div className="text-caption text-text-tertiary text-center py-8">
               Loading…
             </div>
