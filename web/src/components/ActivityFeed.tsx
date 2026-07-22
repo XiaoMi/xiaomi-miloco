@@ -254,8 +254,9 @@ export function ActivityFeed({
   };
 
   // M5/N2: prop 变(homeId 切换 / 父组件 reload)时同步 — 仅当 filter 未激活。
-  // 直接 setEvents(initial) 立即给出全量视图;SSE effect 因 appliedSince 变化重订阅,
-  // 其 onOpen reload 会再走一次 fetchPage 拉后端最新。
+  // 直接 setEvents(initial) 立即给出全量视图。注意:这会 clobber 快照→resolve 之间
+  // SSE 刚推的事件;清 filter 那次过渡有 SSE 重订阅补偿,但已处于 !filterActive 时的
+  // 同 home retry 不触发重订阅——此窗口极窄且 SSE 后续推送会自愈(pre-existing)。
   // 先 ++fetchGenRef 作废在途 filtered fetch,并手动 setLoading(false)
   // (被作废的 fetch 其 finally 的 gen 守卫会 no-op,不会替我们收 loading)。
   useEffect(() => {
