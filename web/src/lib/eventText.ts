@@ -36,7 +36,11 @@ export function humanizeRulesInText(
         // 行内空白用 [^\S\n]* 而非 \s*：显示名退化成「仅前缀」时不吞掉换行、粘连下一行
         return section
           .replace(/任务名称：\[[^\]]+\][^\S\n]*/g, "任务名称：")
-          .replace(/触发规则：\[[^\]]+\][^\S\n]*/g, "触发规则：");
+          .replace(/触发规则：\[[^\]]+\][^\S\n]*/g, "触发规则：")
+          // 兼容旧数据：本 PR 前 query 空时「触发条件」会兜底成 [task_id] 规则名，一并 strip。
+          // 前缀限定 task_id 形态（ascii snake/kebab）——「触发条件」当前格式放的是自然语言
+          // query，若某条 query 以中文方括号 token 开头（如「[夜间]是否有人闯入」）不能被误 strip。
+          .replace(/触发条件：\[[A-Za-z0-9_-]+\][^\S\n]*/g, "触发条件：");
       }
 
       // --- 旧格式 v2：统一 `[感知引擎] 提醒:` 前缀 ---

@@ -28,6 +28,23 @@ describe("humanizeRulesInText 任务名称前缀 strip", () => {
     expect(humanizeRulesInText(text)).toContain("任务名称：厨房安全");
   });
 
+  it("旧数据：触发条件行兜底成 [task_id] 名时也 strip 前缀", () => {
+    // 本 PR 前 query 空时后端会写 触发条件：[task_id] 规则名，历史行需一并清洗
+    const text =
+      "[感知引擎]规则提醒：\n" +
+      "触发条件：[kitchen_safety] 厨房安全\n" +
+      "触发原因：检测到明火";
+    const out = humanizeRulesInText(text);
+    expect(out).toContain("触发条件：厨房安全");
+    expect(out).not.toContain("[kitchen_safety]");
+  });
+
+  it("触发条件里以中文方括号 token 开头的合法 query 不被误 strip", () => {
+    const text =
+      "[感知引擎]规则提醒：\n触发条件：[夜间]是否有人闯入\n触发原因：x";
+    expect(humanizeRulesInText(text)).toContain("触发条件：[夜间]是否有人闯入");
+  });
+
   it("显示名退化成仅前缀时，不吞换行、不粘连下一行", () => {
     // [^\S\n]* 而非 \s*：前缀后无中文名时不能把换行一起吃掉
     const text =
