@@ -41,6 +41,7 @@ from miloco.perception.schema import (
     PerceptionLatency,
     PerceptionLogEntry,
 )
+from miloco.perception.snapshot_context import OmniEventArtifacts
 from miloco.perception.types import OnDemandPerceptionResult
 
 logger = logging.getLogger("perf")
@@ -789,15 +790,13 @@ class PipelineProcessor:
 
     async def process_on_demand(
         self, dids: list[str] | None, query: str
-    ) -> "tuple[OnDemandPerceptionResult, OmniEventArtifacts] | None":
+    ) -> tuple[OnDemandPerceptionResult, OmniEventArtifacts] | None:
         """Active perception pipeline — multi-device batch query.
 
         1. Batch-collect specified devices via collector.collect_batch(dids)
         2. Run perception_engine_proxy.on_demand_perceive(batch, query) for fusion inference
         3. Return (result, artifacts) — artifacts contain clips + omni trace
         """
-        from miloco.perception.snapshot_context import OmniEventArtifacts
-
         async with get_monitor().track_async(NodeName.PROCESSOR, "on_demand") as _proc_h:
             # Peek without consuming — realtime pipeline still needs this data
             batch = self._collector.collect_batch(dids, drain=False)

@@ -1137,6 +1137,50 @@ export async function realListActivity(opts?: {
   );
 }
 
+// ── On-demand logs ──────────────────────────────────────────
+
+export async function realListOnDemandLogs(opts?: {
+  since?: number;
+  before?: number;
+  before_id?: string;
+  limit?: number;
+}): Promise<import("@/lib/types").OnDemandLogEntry[]> {
+  const params = new URLSearchParams();
+  if (opts?.since !== undefined) params.set("since", String(opts.since));
+  if (opts?.before !== undefined) params.set("before", String(opts.before));
+  if (opts?.before_id !== undefined) params.set("before_id", opts.before_id);
+  params.set("limit", String(opts?.limit ?? 50));
+  const qs = params.toString();
+  const resp = await apiFetch<
+    Normal<{ logs: import("@/lib/types").OnDemandLogEntry[]; count: number }>
+  >(qs ? `/api/perception/on-demand-logs?${qs}` : "/api/perception/on-demand-logs");
+  return resp.data.logs;
+}
+
+export function realOnDemandClipUrl(logId: string, deviceId: string): string {
+  const token = resolveToken();
+  const base = `/api/perception/on-demand-logs/${encodeURIComponent(logId)}/clip/${encodeURIComponent(deviceId)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+export async function realSubmitOnDemandFeedback(
+  logId: string,
+  errorTypes: string[],
+  feedbackText: string,
+): Promise<{ pack_path: string; pack_size_bytes: number }> {
+  const resp = await apiFetch<
+    Normal<{ log_id: string; pack_path: string; pack_size_bytes: number }>
+  >(`/api/perception/on-demand-logs/${encodeURIComponent(logId)}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      error_types: errorTypes,
+      feedback_text: feedbackText,
+    }),
+  });
+  return { pack_path: resp.data.pack_path, pack_size_bytes: resp.data.pack_size_bytes };
+}
+
 /**
  * 拼事件 clip mp4 URL,带 `?token=...` query 鉴权(<video> 无法设 Authorization header).
  * 后端 `verify_token_query_fallback` 支持 query token.

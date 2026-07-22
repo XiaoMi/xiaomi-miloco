@@ -45,6 +45,12 @@
     "feedbackReveal": "点击打开所在文件夹",
     "feedbackSubmitLink": "前往提交",
     "feedbackModify": "修改反馈信息",
+    "tabEvents": "事件",
+    "tabOnDemand": "主动查询",
+    "odLoaded": "已加载 {{n}} 条{{more}}",
+    "odEmpty": "还没有主动查询记录",
+    "odLoading": "加载中…",
+    "odRefresh": "刷新",
     "errorType": {
       "person": "人物识别错误",
       "pet": "宠物识别错误",
