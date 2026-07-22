@@ -30,7 +30,7 @@ from miloco.middleware.exceptions import (
     ValidationException,
 )
 from miloco.miot.client import MiotProxy
-from miloco.rule.runner import RuleRunner
+from miloco.rule.runner import RuleRunner, TriggerOutcome
 from miloco.rule.schema import (
     Rule,
     RuleExecuteResult,
@@ -506,16 +506,22 @@ class RuleService:
         caption: str = "",
         device_name: str = "",
         cycle_source_states: dict[str, bool] | None = None,
-    ) -> None:
+    ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
-        See :meth:`RuleRunner.update_state`.
+        See :meth:`RuleRunner.update_state`. Returns the触发结论（供住户日志展示）。
         """
-        await self._runner.update_state(
+        return await self._runner.update_state(
             rule_id, source_did, current_bool, context, trigger_room, trigger_dids,
             caption=caption, device_name=device_name,
             cycle_source_states=cycle_source_states,
         )
+
+    def get_source_outcome(
+        self, rule_id: str, source_did: str
+    ) -> TriggerOutcome | None:
+        """转发 RuleRunner.get_source_outcome：读最近一次触发结论。"""
+        return self._runner.get_source_outcome(rule_id, source_did)
 
     # ---- Logs ----
 

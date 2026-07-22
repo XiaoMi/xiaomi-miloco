@@ -100,6 +100,7 @@ def proxy_with_runner(mock_miot_proxy, mock_log_repo):
 
     fake_mgr = MagicMock()
     fake_mgr.rule_service.update_state = runner.update_state
+    fake_mgr.rule_service.get_source_outcome = runner.get_source_outcome
     fake_mgr.rule_service.get_enabled_rule_ids = lambda: [
         r.id for r in runner.get_enabled_rules()
     ]
@@ -166,6 +167,35 @@ async def test_e2e_single_cam_unchanged(proxy_with_runner, mock_miot_proxy):
     assert dids == ["enter-rule_X", "exit-rule_X"], (
         f"单摄像头 enter→exit 完整周期失败,实际 fire 列表 {dids}"
     )
+
+
+@pytest.mark.asyncio
+async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypatch):
+    """胶水层集成:命中 → update_state 记账 → client 循环后读回并聚合 → rule_statuses
+    透传给 persist。patch _persist_meaningful_event 只截获 rule_statuses,不拉起 DB/落盘。"""
+    proxy, runner, mgr_ctx = proxy_with_runner
+    runner.add_rule(_make_state_rule("rule_X", ["cam_A"]))
+
+    captured: dict = {}
+
+    async def _fake_persist(*, result, device_ids, artifacts, rule_statuses=None):
+        captured["rule_statuses"] = rule_statuses
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+
+    with mgr_ctx():
+        await proxy.handle_realtime_perception_result(
+            _result(matched=[("rule_X", ["cam_A"], "人来")],
+                    device_rule_map={"cam_A": ["rule_X"]}),
+            artifacts=object(),  # 非 None → 进 persist 分支（patch 后不真落库）
+        )
+        await asyncio.sleep(0.05)  # 让后台 persist task 跑起来
+
+    await runner.drain()
+    # ENTER fire → 该 rule 本周期结论 FIRED → 标签「已触发」
+    assert captured.get("rule_statuses") == {"rule_X": "已触发"}
 
 
 @pytest.mark.asyncio

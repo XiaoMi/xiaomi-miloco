@@ -99,7 +99,7 @@ def _strip_task_prefix(name: str) -> str:
 
 
 def _fmt_matched_rule(
-    r: MatchedRule, task_desc: str, rule_label: str, query: str = ""
+    r: MatchedRule, task_desc: str, rule_label: str, query: str = "", status: str = ""
 ) -> str:
     # 「规则」= [规则短名] + 触发条件 query 合并成一行；query 空则只留短名。
     # 规则短名退化为空（name 仅有 [task_id] 前缀）时不渲染空方括号，用 query 兜底。
@@ -110,6 +110,7 @@ def _fmt_matched_rule(
     return _build_lines(
         ("任务", task_desc),
         ("规则", rule_line),
+        ("触发状态", status),
         ("时间", _fmt_time_field(r.time_window)),
         ("来源", _fmt_source_field(r.room_name, r.device_name, r.source_device_ids or None)),
         ("画面描述", r.caption.rstrip("。.") if r.caption else ""),
@@ -151,6 +152,7 @@ def build_matched_rules_text(
     rule_names: dict[str, str] | None = None,
     rule_queries: dict[str, str] | None = None,
     task_descs: dict[str, str] | None = None,
+    rule_statuses: dict[str, str] | None = None,
 ) -> str | None:
     """拼接规则命中文本（仅入表用；client.py 的 matched_rules 推送走 rule_service.update_state，
     不经过本函数）。
@@ -158,6 +160,7 @@ def build_matched_rules_text(
     住户日志形态（后端即构造成住户可读形态，前端不再 strip）：
     - 「任务」= ``task_descs[rule_id]``（rule.task_id → task.description；缺省则省略该行）
     - 「规则」= ``[规则短名] query``（规则短名 = rule.name 去 [task_id] 前缀）
+    - 「触发状态」= ``rule_statuses[rule_id]``（已触发 / 未触发（…）；缺省则省略该行）
 
     Returns None 表示无 rule 命中。
     """
@@ -169,7 +172,8 @@ def build_matched_rules_text(
         rule_label = _strip_task_prefix(name)
         query = (rule_queries or {}).get(r.rule_id, "")
         task_desc = (task_descs or {}).get(r.rule_id, "")
-        blocks.append(_fmt_matched_rule(r, task_desc, rule_label, query))
+        status = (rule_statuses or {}).get(r.rule_id, "")
+        blocks.append(_fmt_matched_rule(r, task_desc, rule_label, query, status))
     return build_text(HEADER_MATCHED_RULE, blocks)
 
 
@@ -189,6 +193,7 @@ def build_agent_text(
     rule_names: dict[str, str] | None = None,
     rule_queries: dict[str, str] | None = None,
     task_descs: dict[str, str] | None = None,
+    rule_statuses: dict[str, str] | None = None,
 ) -> str:
     """拼接 meaningful_events.text 字段（聚合三类信息，顺序固定：指令 → 提醒 → 规则）。"""
     parts: list[str] = []
@@ -198,7 +203,7 @@ def build_agent_text(
         parts.append(sg)
     if mr := build_matched_rules_text(
         _with_caption(result.matched_rules, result.caption),
-        rule_names, rule_queries, task_descs,
+        rule_names, rule_queries, task_descs, rule_statuses,
     ):
         parts.append(mr)
     return "\n\n".join(parts) if parts else ""

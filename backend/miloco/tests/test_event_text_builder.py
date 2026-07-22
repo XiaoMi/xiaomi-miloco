@@ -203,6 +203,18 @@ class TestBuildMatchedRulesText:
         assert "规则：[厨房安全]" in text
         assert "kitchen_safety" not in text
 
+    def test_rule_with_status(self):
+        """rule_statuses 传入时渲染「触发状态」行。"""
+        r = MatchedRule(rule_id="rule-001", reason="炒菜")
+        text = build_matched_rules_text([r], rule_statuses={"rule-001": "已触发"})
+        assert "触发状态：已触发" in text
+
+    def test_rule_without_status(self):
+        """rule_statuses 缺省时不渲染「触发状态」行。"""
+        r = MatchedRule(rule_id="rule-001", reason="炒菜")
+        text = build_matched_rules_text([r])
+        assert "触发状态" not in text
+
     def test_rule_with_source_meta(self):
         """room_name + device_name 非空时按 key:value 渲染"来源"。"""
         r = MatchedRule(

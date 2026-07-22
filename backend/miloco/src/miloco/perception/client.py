@@ -732,22 +732,6 @@ class PerceptionEngineProxy:
         if result.skipped:
             return
 
-        # T6: meaningful_events 后台异步持久化 — 不阻塞下面 webhook 主路径(B4 / B11).
-        # 失败仅 log,不抛.classify / device_ids 空 / artifacts 空等所有
-        # 降级路径都在 _persist 内自处理.
-        # 任务必须挂 _PERSIST_BG_TASKS 强引用,否则 asyncio 弱引用模型下 GC 可能在
-        # 任务完成前回收 → 偶发"INSERT 没落库 / SSE 不推" 难复现.
-        if artifacts is not None:
-            task = asyncio.create_task(
-                _persist_meaningful_event(
-                    result=result,
-                    device_ids=device_ids or [],
-                    artifacts=artifacts,
-                )
-            )
-            _PERSIST_BG_TASKS.add(task)
-            task.add_done_callback(_PERSIST_BG_TASKS.discard)
-
         from miloco.manager import get_manager
 
         # handle matched rules via update_state (skip early-sent ones)
@@ -816,6 +800,44 @@ class PerceptionEngineProxy:
                     False,
                     cycle_source_states=cycle_source_states_by_rule.get(rule_id),
                 )
+
+        # T6: meaningful_events 后台异步持久化 — 不阻塞 webhook 主路径(B4/B11)。
+        # 挪到 update_state 两个循环之后:此时本 cycle 所有 matched 规则（早送路径
+        # _on_early_matched_rules + 上面主循环）的触发结论都已在 runner 记账，
+        # 可同步取快照随 event 落库。失败仅 log、不抛（降级路径都在 _persist 内自处理）。
+        # 任务挂 _PERSIST_BG_TASKS 强引用，防 asyncio 弱引用模型下 GC 在完成前回收。
+        # 注:为拿触发状态快照，persist 从「循环前 spawn」改到「循环后 spawn」，与其后的
+        # suggestion / speech dispatch 同处循环之后——即若 update_state 抛异常，本 cycle
+        # 的 persist 与 dispatch 会一并跳过。update_state 在热路径不 await fire、几乎不抛，
+        # 视为可接受权衡（原先 persist 领先于循环、异常时仍能落库的韧性不再保留）。
+        if artifacts is not None:
+            from miloco.rule.runner import TriggerOutcome, aggregate_outcomes
+
+            outcomes_by_rule: dict[str, list[TriggerOutcome]] = {}
+            for mr in result.matched_rules:
+                mr_did = (
+                    mr.source_device_ids[0] if mr.source_device_ids else "perception"
+                )
+                o = svc.get_source_outcome(mr.rule_id, mr_did)
+                if o is not None:
+                    outcomes_by_rule.setdefault(mr.rule_id, []).append(o)
+            # 同 rule 多摄像头取最强信号（FIRED > COUNTING > STILL_IN > NOT_FIRED）→ 中文标签
+            rule_statuses = {
+                rid: agg.label
+                for rid, outs in outcomes_by_rule.items()
+                if (agg := aggregate_outcomes(outs)) is not None
+            }
+
+            task = asyncio.create_task(
+                _persist_meaningful_event(
+                    result=result,
+                    device_ids=device_ids or [],
+                    artifacts=artifacts,
+                    rule_statuses=rule_statuses,
+                )
+            )
+            _PERSIST_BG_TASKS.add(task)
+            task.add_done_callback(_PERSIST_BG_TASKS.discard)
 
         # result.suggestions 含本窗全部「新链」（dump/上下文已完整）。per-omni 下这些新链
         # 已在 _on_early_suggestions 逐相机早送过（id 记入 early_sent_sugg_ids）——此处据此
@@ -889,6 +911,7 @@ async def _persist_meaningful_event(
     result: RealtimePerceptionResult,
     device_ids: list[str],
     artifacts: OmniEventArtifacts,
+    rule_statuses: dict[str, str] | None = None,
 ) -> None:
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
@@ -969,6 +992,7 @@ async def _persist_meaningful_event(
             rule_names=rule_names,
             rule_queries=rule_queries,
             task_descs=task_descs,
+            rule_statuses=rule_statuses,
         )
 
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
