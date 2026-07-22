@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 _DB_SCHEMA_VERSION = 2
 
 
+def incremental_vacuum(conn: sqlite3.Connection, max_pages: int = 10000) -> None:
+    """回收 auto_vacuum=INCREMENTAL 库里被 DELETE 标记为 free 的页，把空间还给 OS。
+
+    PRAGMA incremental_vacuum 靠消费结果集逐页驱动回收：不 fetch 时 Python sqlite3
+    只 step 一次、每轮仅回收 1 页，free page 会长期堆积；必须 fetchall 消费结果集才
+    真正逐页回收。max_pages 限单次回收上限（10000 页 ≈ 40MB），防清理尖峰。
+    """
+    conn.execute(f"PRAGMA incremental_vacuum({int(max_pages)})").fetchall()
+
+
 class SQLiteConnector:
     """SQLite database connector class"""
 
