@@ -116,11 +116,11 @@ def api_patch(path: str, body: dict | None = None) -> dict:
         _connect_error(cfg["server"]["url"])
 
 
-def api_delete(path: str, params: dict | None = None, body: dict | None = None) -> dict:
+def api_delete(path: str, params: dict | None = None) -> dict:
     cfg = load_config()
     try:
         with _get_client(cfg) as client:
-            resp = client.request("DELETE", path, params=params, json=body)
+            resp = client.delete(path, params=params)
             return _handle_response(resp)
     except httpx.RequestError:
         _connect_error(cfg["server"]["url"])

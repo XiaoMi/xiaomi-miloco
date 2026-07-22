@@ -135,7 +135,8 @@ def scope_camera_mic_off(dids, pretty):
 #
 # 逐感知窗注入 omni 的 system prompt 尾部（video / audio 路由均注入），指导模型消解该机位的固定误识
 # （如门口机位误把公共走廊电梯门当自家入户门）。与启用/拾音开关正交、不重启引擎，
-# 下一窗即生效。空文本 = 清除。上限见 backend（默认 500 字），超限由 backend 拒绝并透传。
+# 下一窗即生效。清除用 prompt-clear（设置空文本会被 backend 拒）。上限见 backend
+# （默认 500 字），超限由 backend 拒绝并透传。
 
 
 @scope_camera.command("prompt-set")
@@ -158,6 +159,6 @@ def scope_camera_prompt_clear(dids, pretty):
     """清除指定摄像头的感知须知（回到无自定义）。"""
     result = api_delete(
         _CAMERAS_PROMPT_PATH,
-        body={"items": [{"did": d} for d in dids]},
+        params={"did": list(dids)},
     )
     print_result(result, pretty)

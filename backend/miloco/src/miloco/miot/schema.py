@@ -296,16 +296,7 @@ class CameraPromptRequest(BaseModel):
     items: list[CameraPromptItem] = Field(..., min_length=1)
 
 
-class CameraPromptClearItem(BaseModel):
-    """单个相机的自定义「感知须知」清除操作。"""
-
-    did: str = Field(..., min_length=1, description="相机 did")
-
-
-class CameraPromptClearRequest(BaseModel):
-    """批量清除相机自定义感知 prompt。每项只需 did。"""
-
-    items: list[CameraPromptClearItem] = Field(..., min_length=1)
+# 清除走 DELETE + query 参数（?did=a&did=b），不带 body，故无对应 Request 模型。
 
 
 class AuthorizeRequest(BaseModel):

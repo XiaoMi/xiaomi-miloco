@@ -167,34 +167,18 @@ def test_api_delete_success():
     patcher, mock_client = _patch_client(resp)
     with patcher:
         result = api_delete("/api/resource/1")
-    mock_client.request.assert_called_once_with(
-        "DELETE", "/api/resource/1", params=None, json=None
-    )
+    mock_client.delete.assert_called_once_with("/api/resource/1", params=None)
     assert result["code"] == 0
 
 
 def test_api_delete_with_params():
-    """M12 修复：api_delete 支持 params 参数。"""
+    """M12 修复：api_delete 支持 params 参数（prompt-clear 等批量删除走 ?did=a&did=b）。"""
     resp = _make_response({"code": 0})
     patcher, mock_client = _patch_client(resp)
     with patcher:
         api_delete("/api/rules/logs", params={"keep_days": 7})
-    mock_client.request.assert_called_once_with(
-        "DELETE", "/api/rules/logs", params={"keep_days": 7}, json=None
-    )
-
-
-def test_api_delete_with_body():
-    """prompt-clear 等新端点：DELETE 带 JSON body。"""
-    resp = _make_response({"code": 0})
-    patcher, mock_client = _patch_client(resp)
-    with patcher:
-        api_delete("/api/miot/scope/cameras/prompt", body={"items": [{"did": "c1"}]})
-    mock_client.request.assert_called_once_with(
-        "DELETE",
-        "/api/miot/scope/cameras/prompt",
-        params=None,
-        json={"items": [{"did": "c1"}]},
+    mock_client.delete.assert_called_once_with(
+        "/api/rules/logs", params={"keep_days": 7}
     )
 
 

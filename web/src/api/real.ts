@@ -1046,9 +1046,10 @@ export async function realSetScopeCameraPrompt(
 }
 
 export async function realClearScopeCameraPrompt(did: string): Promise<void> {
-  await apiFetch<Normal<unknown>>("/api/miot/scope/cameras/prompt", {
+  // did 走 query（?did=…），不带 body：DELETE body 语义未定义、易被代理丢弃。
+  const qs = new URLSearchParams({ did }).toString();
+  await apiFetch<Normal<unknown>>(`/api/miot/scope/cameras/prompt?${qs}`, {
     method: "DELETE",
-    body: JSON.stringify({ items: [{ did }] }),
   });
 }
 

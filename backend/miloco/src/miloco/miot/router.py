@@ -25,7 +25,6 @@ from miloco.middleware import (
 from miloco.middleware.exceptions import HTTPException
 from miloco.miot.schema import (
     AuthorizeRequest,
-    CameraPromptClearRequest,
     CameraPromptRequest,
     CameraToggleRequest,
     CameraVoiceToggleRequest,
@@ -565,12 +564,14 @@ async def set_scope_camera_prompt(
     response_model=NormalResponse,
 )
 async def clear_scope_camera_prompt(
-    request: CameraPromptClearRequest, current_user: str = Depends(verify_token)
+    did: list[str] = Query(
+        ..., description="要清除的相机 did，可重复传多个批量清除（?did=a&did=b）"
+    ),
+    current_user: str = Depends(verify_token),
 ):
-    # 清除自定义感知 prompt：显式 DELETE，不需要传 prompt 字段。
-    data = await manager.miot_service.clear_camera_prompt(
-        [i.did for i in request.items]
-    )
+    # 清除自定义感知 prompt：显式 DELETE，did 走 query 参数、不带 body（DELETE body
+    # 语义未定义、易被代理丢弃）。与启用/拾音开关正交，不重启感知引擎。
+    data = await manager.miot_service.clear_camera_prompt(did)
     return NormalResponse(code=0, message="ok", data=data)
 
 

@@ -63,8 +63,8 @@ miloco-cli scope camera prompt-set <did> "<文本>" | prompt-clear <did>...
 - **家庭 `switch <id>`**：切换到该家庭（唯一启用），其余自动停用。只接受 1 个 id。
 - **摄像头 `enable/disable <did>...`**：视频感知批量启用/停用，可同时操作多个 did。
 - **摄像头 `mic-on/mic-off <did>...`**：声音批量开/关，同款批量 did 语义。`mic-off` = 该相机声音完全不被处理；仅感知已启用(in_use=true)的相机可设，感知已关闭时整批被拒。改动即时生效、无需重启。
-- **摄像头 `prompt-set <did> "<文本>"`**：给该机位设自定义「感知须知」（**文本务必加引号**）。`prompt-clear <did>...` 清除（可批量）。文本空 = 清除。上限 500 字，超限被后端拒。与启用/声音开关正交，不从属感知，改动下一窗即生效、不重启。
-- `list` 输出每项含 `in_use`（是否启用）；camera 额外带 `is_online`（设备在线）、`connected`（流已订阅）、`voice_in_use`（声音开关）和 `perception_prompt`（该机位自定义感知须知，"" = 无）。`in_use`/`is_online`/`connected` 三者都 true = 正常采集，任一 false 即某层未就位。`voice_in_use=false` = 该相机声音完全不被处理（不转写、不上云、听不到指令），视频照常感知。
+- **摄像头 `prompt-set <did> "<文本>"`**：给该机位设自定义「感知须知」（**文本务必加引号**）。`prompt-clear <did>...` 清除（可批量）。上限 500 字，超限被后端拒。与启用/声音开关正交，不从属感知，改动下一窗即生效、不重启。
+- `list` 输出每项含 `in_use`（是否启用）；camera 额外带 `is_online`（设备在线）、`connected`（流已订阅）、`voice_in_use`（声音开关）和 `perception_prompt`（该机位自定义感知须知）。`in_use`/`is_online`/`connected` 三者都 true = 正常采集，任一 false 即某层未就位。`voice_in_use=false` = 该相机声音完全不被处理（不转写、不上云、听不到指令），视频照常感知。
 
 ## "只用 X" 模式
 
