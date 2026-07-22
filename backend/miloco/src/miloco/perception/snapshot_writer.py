@@ -92,7 +92,7 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
         return True
 
 
-def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
+def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> list[str]:
     """落盘一次 omni 触发事件的所有产物(clip 字节 + omni trace).
 
     路径:
@@ -101,16 +101,16 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
 
     Args:
         event_id: 事件 UUID
-        artifacts: 含 clips dict 和 trace dict 的容器.两者都空时返 0 不落任何文件.
+        artifacts: 含 clips dict 和 trace dict 的容器.两者都空时返空列表.
 
     Returns:
-        成功落盘的 device clip 个数(0 ~ len(artifacts.clips));trace 不计入.
-        保持 MeaningfulEvent.snapshot_count 字段含义.
+        成功落盘的 device_id 列表;trace 不计入.
+        len(result) 等价于原 snapshot_count.
 
     Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 OSError 静默跳过.
     """
     if not artifacts.clips and artifacts.trace is None and not artifacts.gallery:
-        return 0
+        return []
 
     snapshot_root = get_snapshot_root()
     event_dir = snapshot_root / event_id
@@ -118,22 +118,26 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
         event_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.error("Failed to create event dir %s: %s", event_dir, e)
-        return 0
+        return []
 
-    clip_count = _save_clips(event_dir, artifacts.clips)
+    clip_dids = _save_clips(event_dir, artifacts.clips)
     if artifacts.trace is not None:
         _save_trace(event_dir, artifacts.trace)
     if artifacts.gallery:
         _save_gallery(event_dir, artifacts.gallery)
-    return clip_count
+    return clip_dids
 
 
 def _save_clips(
     event_dir: Path,
     clips: dict[str, tuple[bytes, ClipKind]],
-) -> int:
-    """落 per-device clip 字节到 event_dir.kind 非法 / 空字节 → 跳过该 device."""
-    count = 0
+) -> list[str]:
+    """落 per-device clip 字节到 event_dir.kind 非法 / 空字节 → 跳过该 device.
+
+    Returns:
+        成功落盘的 device_id 列表.
+    """
+    saved: list[str] = []
     for device_id, (clip_bytes, kind) in clips.items():
         if not clip_bytes:
             continue
@@ -149,11 +153,11 @@ def _save_clips(
         path = device_dir / f"clip.{kind}"
         try:
             path.write_bytes(clip_bytes)
-            count += 1
+            saved.append(device_id)
         except OSError as e:
             logger.error("Failed to write %s: %s", path, e)
             continue
-    return count
+    return saved
 
 
 def _save_trace(event_dir: Path, trace: dict[str, Any]) -> None:

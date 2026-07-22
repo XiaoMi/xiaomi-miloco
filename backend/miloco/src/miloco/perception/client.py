@@ -681,9 +681,14 @@ class PerceptionEngineProxy:
             )
 
     async def on_demand_perceive(
-        self, batch: PerceptionBatch, query: str
+        self, batch: PerceptionBatch, query: str,
+        artifacts: OmniEventArtifacts | None = None,
     ) -> OnDemandPerceptionResult | None:
-        """Run on-demand query pipeline — offloaded to inference thread."""
+        """Run on-demand query pipeline — offloaded to inference thread.
+
+        artifacts: 若非 None, omni 内部产出的 clip 字节和 trace 会写入
+        artifacts.clips / artifacts.trace（同 realtime_perceive 语义）。
+        """
         async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
@@ -705,9 +710,13 @@ class PerceptionEngineProxy:
                     _run_with_trace_id(
                         trace_id,
                         self._on_demand_perceive_impl(batched_snapshot, query),
+                        artifacts=artifacts,
                     )
                 )
 
+            if artifacts is not None:
+                with event_artifacts_scope(artifacts):
+                    return await self._on_demand_perceive_impl(batched_snapshot, query)
             return await self._on_demand_perceive_impl(batched_snapshot, query)
 
     async def handle_realtime_perception_result(
@@ -1005,7 +1014,8 @@ async def _persist_meaningful_event(
                 )
                 # count 留 0,继续走 publish
             else:
-                count = save_event_artifacts(event_id, artifacts)
+                clip_dids = save_event_artifacts(event_id, artifacts)
+                count = len(clip_dids)
                 if count > 0:
                     dao.update_snapshot_count(event_id, count)
         else:

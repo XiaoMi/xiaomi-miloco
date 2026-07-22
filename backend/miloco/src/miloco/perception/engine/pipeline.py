@@ -853,15 +853,37 @@ async def run_query_pipeline(
         if not room_identity_packets:
             return None
 
-        # Build query prompt from IdentityPackets and call Omni
-        payload = build_query_prompt(
-            identity_packets=room_identity_packets,
-            query=query,
-            last_caption=captions.get(room_name),
+        # Resolve the device whose video will be encoded by build_query_prompt.
+        # _encode_batch_video picks the first packet with all_frames; align here
+        # so push_clip_bytes falls under the correct device_id.
+        # Edge: if this packet's PyAV encode fails and a later one succeeds,
+        # clip bytes land under the wrong device_id — extremely rare.
+        primary_idx = next(
+            (i for i, ep in enumerate(room_identity_packets) if ep.all_frames),
+            0,
         )
-        raw_response = await call_omni(
-            payload, resolve_live_omni_config(config.omni), type="on_demand"
-        )
+        primary_did = snapshots[primary_idx].device.did if snapshots else "unknown"
+
+        # Set device context before build_query_prompt — push_clip_bytes is
+        # called during video encoding inside build_query_prompt, and
+        # push_omni_trace is called inside call_omni's finally block.
+        device_ctx_token = set_device_context(DeviceContext(
+            device_trace_id=str(uuid.uuid4()),
+            device_id=primary_did,
+            room_name=room_name,
+        ))
+        try:
+            payload = build_query_prompt(
+                identity_packets=room_identity_packets,
+                query=query,
+                last_caption=captions.get(room_name),
+            )
+            raw_response = await call_omni(
+                payload, resolve_live_omni_config(config.omni), type="on_demand"
+            )
+        finally:
+            reset_device_context(device_ctx_token)
+
         answer = parse_query_response(raw_response)
         if not answer:
             return None
@@ -870,7 +892,8 @@ async def run_query_pipeline(
     # 各 room 并发（与 run_batch_pipeline 同源：per-room omni 墙钟 Σ→max）。单房间查询
     # 无变化；多房间/全屋查询省 Σ。return_exceptions=True + _reraise_first 保持原"任一
     # room 失败即整体失败"语义（上层 on_demand_perceive 捕获→空答案）。query 路径不走
-    # fused、无 set_device_context，并发面比主路径更窄（run_identity 池写仍是原子同步段）。
+    # fused；set_device_context 在 _run_room_query 内部 per-room 设/重置，gather 的
+    # per-Task context copy 保证各 room 的 ContextVar 互不干扰。
     room_results = await asyncio.gather(
         *(_run_room_query(rn, snaps) for rn, snaps in batch.by_room().items()),
         return_exceptions=True,
