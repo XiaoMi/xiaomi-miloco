@@ -54,7 +54,10 @@ def mock_runner():
     runner._sync_devices_task = None
     runner._recovery_probe_task = None
     runner._auto_stopped = False
-    runner._cb_open_since = None
+    runner._auto_stopped_at = None
+    runner._auto_restart_cooldown_sec = 120.0
+    runner._cb_open_accumulated = 0.0
+    runner._cb_last_open_tick = None
     runner._window_ready = None
     runner._inference_worker = MagicMock()
     runner._inference_worker.is_running = False
@@ -101,21 +104,24 @@ async def test_auto_manage_disabled_by_config(mock_runner, cb, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_auto_manage_closed_resets_timer(mock_runner, cb, mock_settings):
-    """CLOSED state resets the OPEN timer."""
-    mock_runner._cb_open_accumulated = time.monotonic() - 100
+async def test_auto_manage_closed_stops_accumulating(mock_runner, cb, mock_settings):
+    """CLOSED state stops accumulating but preserves existing time."""
+    mock_runner._cb_open_accumulated = 30.0
+    mock_runner._cb_last_open_tick = time.monotonic()
     mock_runner._auto_stopped = False
 
     # cb is CLOSED by default
     await mock_runner._auto_manage_lifecycle()
 
-    assert mock_runner._cb_open_accumulated is None
+    # accumulated preserved, last_open_tick cleared
+    assert mock_runner._cb_open_accumulated == 30.0
+    assert mock_runner._cb_last_open_tick is None
     assert mock_runner._auto_stopped is False
 
 
 @pytest.mark.asyncio
-async def test_auto_manage_open_starts_timer(mock_runner, cb, mock_settings):
-    """OPEN_RECOVERABLE starts the timer on first detection."""
+async def test_auto_manage_open_accumulates_time(mock_runner, cb, mock_settings):
+    """OPEN_RECOVERABLE accumulates time."""
     from miloco.perception.engine.omni.error_classifier import (
         ClassifiedError,
         ErrorCategory,
@@ -127,11 +133,12 @@ async def test_auto_manage_open_starts_timer(mock_runner, cb, mock_settings):
         )
 
     assert cb.current_state == CircuitState.OPEN_RECOVERABLE
-    assert mock_runner._cb_open_accumulated is None
+    assert mock_runner._cb_open_accumulated == 0.0
 
     await mock_runner._auto_manage_lifecycle()
 
-    assert mock_runner._cb_open_accumulated is not None
+    # Should have started accumulating
+    assert mock_runner._cb_last_open_tick is not None
     assert mock_runner._auto_stopped is False
 
 
@@ -150,8 +157,9 @@ async def test_auto_manage_open_exceeds_threshold_stops_engine(
             ClassifiedError("unreachable", "test", ErrorCategory.RECOVERABLE)
         )
 
-    # Simulate timer started 100s ago
-    mock_runner._cb_open_accumulated = time.monotonic() - 100
+    # Simulate accumulated OPEN time exceeding threshold
+    mock_runner._cb_open_accumulated = 100.0  # > 60s threshold
+    mock_runner._cb_last_open_tick = time.monotonic()
 
     await mock_runner._auto_manage_lifecycle()
 
@@ -166,8 +174,9 @@ async def test_auto_manage_open_exceeds_threshold_stops_engine(
 async def test_auto_manage_auto_stopped_and_closed_restarts(
     mock_runner, cb, mock_settings
 ):
-    """When auto-stopped and circuit breaker is CLOSED, engine restarts."""
+    """When auto-stopped, circuit breaker CLOSED, and cooldown expired, engine restarts."""
     mock_runner._auto_stopped = True
+    mock_runner._auto_stopped_at = time.monotonic() - 200  # cooldown (120s) expired
 
     # cb is CLOSED by default
     await mock_runner._auto_manage_lifecycle()
@@ -221,6 +230,21 @@ async def test_auto_stop_does_not_shutdown_collector(mock_runner):
     # collector.shutdown should NOT be called
     mock_runner._collector.shutdown.assert_not_called()
     assert mock_runner._auto_stopped is True
+    assert mock_runner._auto_stopped_at is not None
+
+
+@pytest.mark.asyncio
+async def test_cooldown_prevents_immediate_restart(mock_runner, cb, mock_settings):
+    """CLOSED within cooldown period should NOT restart."""
+    mock_runner._auto_stopped = True
+    mock_runner._auto_stopped_at = time.monotonic() - 10  # only10s, cooldown is120s
+
+    # cb is CLOSED
+    await mock_runner._auto_manage_lifecycle()
+
+    # Should still be stopped (cooldown not expired)
+    assert mock_runner._auto_stopped is True
+    mock_runner._collector.resume_streams.assert_not_called()
 
 
 # ---- _auto_restart_engine tests ----
