@@ -6,7 +6,8 @@
  * spec B2 (DB.text == webhook) 仍守:DB 里依旧带前缀,这里只在 UI 渲染层 strip。
  *
  * 兼容四种格式:
- * - 当前格式(分类 header): `[感知引擎]规则提醒：` 规则行含 `触发条件：query。触发原因：reason。`（无需 strip）
+ * - 当前格式(分类 header): `[感知引擎]规则提醒：` 规则行含 `任务名称：[task_id] 规则名` +
+ *   `触发条件：query` + `触发原因：reason` → strip 任务名称行的 [task_id] 前缀
  * - 旧格式 v3(分类 header): 规则行含 `触发规则：[task_id] 规则名。` → strip [task_id]
  * - 旧格式 v2(统一 header): `[感知引擎] 提醒:` + `检测到：[task_id] 规则名。`
  * - 旧格式 v1(JSON 行): `1. {"rule_id":"...","reason":"..."}` → 反查 rule_names
@@ -32,10 +33,10 @@ export function humanizeRulesInText(
     .map((section) => {
       // --- 当前格式：分类 header ---
       if (PERCEPTION_HEADERS.some((h) => section.startsWith(h))) {
-        return section.replace(
-          /触发规则：\[[^\]]+\]\s*/g,
-          "触发规则：",
-        );
+        // 行内空白用 [^\S\n]* 而非 \s*：显示名退化成「仅前缀」时不吞掉换行、粘连下一行
+        return section
+          .replace(/任务名称：\[[^\]]+\][^\S\n]*/g, "任务名称：")
+          .replace(/触发规则：\[[^\]]+\][^\S\n]*/g, "触发规则：");
       }
 
       // --- 旧格式 v2：统一 `[感知引擎] 提醒:` 前缀 ---

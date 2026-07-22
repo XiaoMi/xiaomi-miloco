@@ -92,10 +92,11 @@ def _fmt_speech(s: Speech) -> str:
 
 def _fmt_matched_rule(r: MatchedRule, name: str, query: str = "") -> str:
     return _build_lines(
+        ("任务名称", name),
         ("时间", _fmt_time_field(r.time_window)),
         ("来源", _fmt_source_field(r.room_name, r.device_name, r.source_device_ids or None)),
         ("画面描述", r.caption.rstrip("。.") if r.caption else ""),
-        ("触发条件", query or name),
+        ("触发条件", query),
         ("触发原因", r.reason.rstrip("。.")),
     )
 
