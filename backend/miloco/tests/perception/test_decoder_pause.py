@@ -10,10 +10,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import threading
 import time
-
-import pytest
 
 from miot.decoder import MIoTMediaDecoder, MIoTMediaRingBuffer
 from miot.types import MIoTCameraCodec, MIoTCameraFrameData

@@ -24,7 +24,7 @@ from miloco.perception.runner import PerceptionRunner
 
 
 @pytest.fixture
-def mock_runner(monkeypatch):
+def mock_runner():
     """Create a PerceptionRunner with mocked dependencies."""
     collector = MagicMock()
     collector.pause_streams = MagicMock()
@@ -47,32 +47,22 @@ def mock_runner(monkeypatch):
     log_repo = MagicMock()
     log_repo.get_today_inference_count = MagicMock(return_value=0)
 
-    runner = PerceptionRunner(
-        collector=collector,
-        pipeline=pipeline,
-        log_repo=log_repo,
-    )
+    runner = PerceptionRunner.__new__(PerceptionRunner)
+    runner._collector = collector
+    runner._pipeline = pipeline
+    runner._log_repo = log_repo
+    runner._is_running = True
+    runner._perception_task = None
+    runner._sync_devices_task = None
+    runner._recovery_probe_task = None
+    runner._auto_stopped = False
+    runner._cb_open_since = None
+    runner._window_ready = None
     runner._inference_worker = MagicMock()
     runner._inference_worker.is_running = False
     runner._inference_worker.start = MagicMock()
 
     return runner
-
-
-@pytest.fixture
-def mock_cb(monkeypatch):
-    """Create a mock circuit breaker and patch get_omni_circuit_breaker."""
-    cb = OmniCircuitBreaker()
-    monkeypatch.setattr(
-        "miloco.perception.runner.get_omni_circuit_breaker",
-        lambda: cb,
-    )
-    # Also patch for _drive_recovery_probe's import
-    monkeypatch.setattr(
-        "miloco.perception.engine.omni.circuit_breaker.get_omni_circuit_breaker",
-        lambda: cb,
-    )
-    return cb
 
 
 @pytest.fixture
@@ -86,11 +76,23 @@ def mock_settings(monkeypatch):
     return settings
 
 
+@pytest.fixture
+def cb(monkeypatch):
+    """Create a real circuit breaker and patch it everywhere it's imported."""
+    real_cb = OmniCircuitBreaker()
+    # Patch at the source module so lazy imports resolve correctly
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.circuit_breaker._INSTANCE",
+        real_cb,
+    )
+    return real_cb
+
+
 # ---- _auto_manage_lifecycle tests ----
 
 
 @pytest.mark.asyncio
-async def test_auto_manage_disabled_by_config(mock_runner, mock_cb, monkeypatch):
+async def test_auto_manage_disabled_by_config(mock_runner, cb, monkeypatch):
     """When auto_stop_on_omni_failure=False, lifecycle management is skipped."""
     settings = MagicMock()
     settings.perception.collect.auto_stop_on_omni_failure = False
@@ -101,7 +103,7 @@ async def test_auto_manage_disabled_by_config(mock_runner, mock_cb, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_auto_manage_closed_resets_timer(mock_runner, mock_cb, mock_settings):
+async def test_auto_manage_closed_resets_timer(mock_runner, cb, mock_settings):
     """CLOSED state resets the OPEN timer."""
     mock_runner._cb_open_since = time.monotonic() - 100
     mock_runner._auto_stopped = False
@@ -114,20 +116,19 @@ async def test_auto_manage_closed_resets_timer(mock_runner, mock_cb, mock_settin
 
 
 @pytest.mark.asyncio
-async def test_auto_manage_open_starts_timer(mock_runner, mock_cb, mock_settings):
+async def test_auto_manage_open_starts_timer(mock_runner, cb, mock_settings):
     """OPEN_RECOVERABLE starts the timer on first detection."""
-    # Transition to OPEN_RECOVERABLE
     from miloco.perception.engine.omni.error_classifier import (
         ClassifiedError,
         ErrorCategory,
     )
 
     for _ in range(3):
-        await mock_cb.record_failure(
+        await cb.record_failure(
             ClassifiedError("unreachable", "test", ErrorCategory.RECOVERABLE)
         )
 
-    assert mock_cb.current_state == CircuitState.OPEN_RECOVERABLE
+    assert cb.current_state == CircuitState.OPEN_RECOVERABLE
     assert mock_runner._cb_open_since is None
 
     await mock_runner._auto_manage_lifecycle()
@@ -138,7 +139,7 @@ async def test_auto_manage_open_starts_timer(mock_runner, mock_cb, mock_settings
 
 @pytest.mark.asyncio
 async def test_auto_manage_open_exceeds_threshold_stops_engine(
-    mock_runner, mock_cb, mock_settings
+    mock_runner, cb, mock_settings
 ):
     """OPEN_RECOVERABLE persisting beyond threshold triggers auto-stop."""
     from miloco.perception.engine.omni.error_classifier import (
@@ -147,7 +148,7 @@ async def test_auto_manage_open_exceeds_threshold_stops_engine(
     )
 
     for _ in range(3):
-        await mock_cb.record_failure(
+        await cb.record_failure(
             ClassifiedError("unreachable", "test", ErrorCategory.RECOVERABLE)
         )
 
@@ -159,11 +160,13 @@ async def test_auto_manage_open_exceeds_threshold_stops_engine(
     assert mock_runner._auto_stopped is True
     mock_runner._collector.pause_streams.assert_called_once()
     mock_runner._pipeline.close.assert_called_once()
+    # collector.shutdown should NOT be called (fix for sync loop race)
+    mock_runner._collector.shutdown.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_auto_manage_auto_stopped_and_closed_restarts(
-    mock_runner, mock_cb, mock_settings
+    mock_runner, cb, mock_settings
 ):
     """When auto-stopped and circuit breaker is CLOSED, engine restarts."""
     mock_runner._auto_stopped = True
@@ -178,7 +181,7 @@ async def test_auto_manage_auto_stopped_and_closed_restarts(
 
 @pytest.mark.asyncio
 async def test_auto_manage_auto_stopped_and_open_drives_probe(
-    mock_runner, mock_cb, mock_settings, monkeypatch
+    mock_runner, cb, mock_settings, monkeypatch
 ):
     """When auto-stopped and circuit breaker is OPEN, drives recovery probe."""
     from miloco.perception.engine.omni.error_classifier import (
@@ -187,25 +190,24 @@ async def test_auto_manage_auto_stopped_and_open_drives_probe(
     )
 
     for _ in range(3):
-        await mock_cb.record_failure(
+        await cb.record_failure(
             ClassifiedError("unreachable", "test", ErrorCategory.RECOVERABLE)
         )
 
     mock_runner._auto_stopped = True
 
-    # Mock _run_omni_probe to avoid actual HTTP call
-    monkeypatch.setattr(
-        "miloco.perception.processor._run_omni_probe",
-        AsyncMock(),
-    )
+    # Force backoff expired so try_arm_probe returns True
+    cb._next_probe_at_monotonic = time.monotonic() - 1
 
-    # Manually arm probe (try_arm_probe checks backoff which may not be due)
-    mock_cb._next_probe_at_monotonic = time.monotonic() - 1
+    # Mock _run_omni_probe to avoid actual HTTP call
+    mock_probe = AsyncMock()
+    monkeypatch.setattr("miloco.perception.processor._run_omni_probe", mock_probe)
 
     await mock_runner._auto_manage_lifecycle()
 
-    # probe task should have been created (or at least attempted)
-    assert mock_runner._auto_stopped is True  # still stopped
+    # probe task should have been created
+    assert mock_runner._recovery_probe_task is not None
+    assert mock_runner._auto_stopped is True  # still stopped until probe succeeds
 
 
 # ---- _auto_stop_engine tests ----
@@ -214,8 +216,6 @@ async def test_auto_manage_auto_stopped_and_open_drives_probe(
 @pytest.mark.asyncio
 async def test_auto_stop_does_not_shutdown_collector(mock_runner):
     """Auto-stop pauses decoders but does NOT shutdown collector."""
-    mock_runner._is_running = True
-
     await mock_runner._auto_stop_engine()
 
     mock_runner._collector.pause_streams.assert_called_once()
@@ -254,27 +254,3 @@ async def test_auto_restart_failure_keeps_stopped(mock_runner):
     await mock_runner._auto_restart_engine()
 
     assert mock_runner._auto_stopped is True
-
-
-# ---- start() resets auto_stopped ----
-
-
-@pytest.mark.asyncio
-async def test_start_resets_auto_stopped(mock_runner):
-    """User manually starting the engine clears auto_stopped flag."""
-    mock_runner._auto_stopped = True
-    mock_runner._is_running = False
-
-    # Mock start dependencies
-    mock_runner._inference_worker.start = MagicMock()
-    mock_runner._pipeline.try_reinit_engine = MagicMock()
-    mock_runner._pipeline.set_inference_worker = MagicMock()
-    mock_runner._collector.sync_all_devices = AsyncMock()
-
-    with patch("miloco.perception.runner.PerceptionRunner.start", new=AsyncMock):
-        # Just test the flag reset logic
-        mock_runner._is_running = True
-        mock_runner._auto_stopped = False
-        mock_runner._cb_open_since = None
-
-    assert mock_runner._auto_stopped is False
