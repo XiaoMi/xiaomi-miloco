@@ -25,7 +25,10 @@ import {
   feedDid as synthFeedDid,
   lensLabelKey,
 } from "@/lib/cameraChannel";
-import { IconRefresh } from "@/lib/icons";
+import { IconRefresh, IconPencil } from "@/lib/icons";
+
+// 每摄像头「感知须知」prompt 长度上限（与 backend MAX_CAMERA_PROMPT_LEN 对齐）。
+const CAMERA_PROMPT_MAX_LEN = 500;
 
 // 「关声音」确认弹窗的「不再提醒」持久化标记（与 web:theme / web:lang 同命名空间）。
 // 复位说明：清除站点数据 / localStorage 即恢复弹窗；本分支不做设置项 UI——将来若加
@@ -68,6 +71,11 @@ interface Props {
    *  不被处理（mic-off：不转写、不上云）。从属于感知开关：仅当该相机 inUse=true 时
    *  可设，感知关时前端置灰。 */
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
+  /** 设置某摄像头自定义「感知须知」（PUT /api/miot/scope/cameras/prompt）。
+   *  给该机位补环境说明 / 关注 / 忽略，指导感知消解固定误识。 */
+  onSetCameraPrompt: (did: string, text: string) => void | Promise<void>;
+  /** 清除某摄像头自定义「感知须知」（DELETE /api/miot/scope/cameras/prompt）。 */
+  onClearCameraPrompt: (did: string) => void | Promise<void>;
   /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + await 列表重拉落地）。 */
   onRefresh?: () => void | Promise<void>;
 }
@@ -92,6 +100,8 @@ export function HeroNow({
   onJumpUsage,
   onToggleCameras,
   onToggleCameraVoice,
+  onSetCameraPrompt,
+  onClearCameraPrompt,
   onRefresh,
 }: Props) {
   const { t } = useTranslation();
@@ -188,6 +198,8 @@ export function HeroNow({
         miotHasCamera={miotHasCamera}
         onToggleCameras={onToggleCameras}
         onToggleCameraVoice={onToggleCameraVoice}
+        onSetCameraPrompt={onSetCameraPrompt}
+        onClearCameraPrompt={onClearCameraPrompt}
         onRefresh={onRefresh}
       />
     </section>
@@ -205,6 +217,8 @@ interface CameraSectionProps {
   miotHasCamera: boolean;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
+  onSetCameraPrompt: (did: string, text: string) => void | Promise<void>;
+  onClearCameraPrompt: (did: string) => void | Promise<void>;
   onRefresh?: () => void | Promise<void>;
 }
 
@@ -216,6 +230,8 @@ function CameraSection({
   miotHasCamera,
   onToggleCameras,
   onToggleCameraVoice,
+  onSetCameraPrompt,
+  onClearCameraPrompt,
   onRefresh,
 }: CameraSectionProps) {
   const { t } = useTranslation();
@@ -319,6 +335,41 @@ function CameraSection({
     }
   };
 
+  // ── 感知须知编辑 ──
+  const [promptEditing, setPromptEditing] = useState<{
+    did: string;
+    name: string;
+  } | null>(null);
+  const [promptDraft, setPromptDraft] = useState("");
+  const [promptSaving, setPromptSaving] = useState(false);
+  // 记录打开弹窗时该机位是否已有须知——用于区分「新建」和「编辑」
+  const [hadPrompt, setHadPrompt] = useState(false);
+  const openPromptEditor = (did: string, name: string, current: string) => {
+    setPromptDraft(current);
+    setHadPrompt(!!current);
+    setPromptEditing({ did, name });
+  };
+  const savePrompt = async () => {
+    if (!promptEditing || promptSaving) return;
+    const text = promptDraft.trim();
+    if (!text) {
+      // 清空了：如果原来有须知 → 走 DELETE；原来就没有 → 无操作
+      if (!hadPrompt) return;
+      return doClearPrompt();
+    }
+    setPromptSaving(true);
+    try { await onSetCameraPrompt(promptEditing.did, text); setPromptEditing(null); }
+    catch { /* error already toasted, keep modal open */ }
+    finally { setPromptSaving(false); }
+  };
+  const doClearPrompt = async () => {
+    if (!promptEditing || promptSaving) return;
+    setPromptSaving(true);
+    try { await onClearCameraPrompt(promptEditing.did); setPromptEditing(null); }
+    catch { /* error already toasted */ }
+    finally { setPromptSaving(false); }
+  };
+
   return (
     <>
       <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
@@ -400,6 +451,10 @@ function CameraSection({
                       singleBusyDids.has(feedDid)
                     }
                     onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
+                    hasPrompt={!!c.perceptionPrompt}
+                    onEditPrompt={() =>
+                      openPromptEditor(feedDid, channelLabelOf(c) ? `${c.name} · ${channelLabelOf(c)}` : c.name, c.perceptionPrompt)
+                    }
                   />
                 );
               })}
@@ -466,6 +521,10 @@ function CameraSection({
                         singleBusyDids.has(feedDid)
                       }
                       onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
+                      hasPrompt={!!c.perceptionPrompt}
+                      onEditPrompt={() =>
+                        openPromptEditor(feedDid, channelLabelOf(c) ? `${c.name} · ${channelLabelOf(c)}` : c.name, c.perceptionPrompt)
+                      }
                     />
                   );
                 })}
@@ -554,6 +613,67 @@ function CameraSection({
               >
                 {t("hero.voiceOnConfirmOk")}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 感知须知编辑弹窗：给该机位补环境说明 / 关注 / 忽略，指导感知消解固定误识。 */}
+      {promptEditing && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+          onClick={promptSaving ? undefined : () => setPromptEditing(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cam-prompt-title"
+            className="w-[90%] max-w-md bg-bg-secondary border border-border rounded-2xl shadow-lg p-6 anim-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="cam-prompt-title" className="text-title font-semibold text-text-primary mb-1">
+              {t("hero.camPromptTitle", { name: promptEditing.name })}
+            </h2>
+            <p className="text-body text-text-secondary mb-3">{t("hero.camPromptIntro")}</p>
+            <textarea
+              value={promptDraft}
+              onChange={(e) => setPromptDraft(e.target.value)}
+              maxLength={CAMERA_PROMPT_MAX_LEN}
+              rows={5}
+              disabled={promptSaving}
+              placeholder={t("hero.camPromptPlaceholder")}
+              className="w-full text-body rounded-lg bg-bg-primary border border-border text-text-primary p-3 resize-y focus:border-border-strong focus:outline-none disabled:opacity-60"
+            />
+            <div className="text-caption text-text-tertiary text-right mt-1 num">
+              {promptDraft.length} / {CAMERA_PROMPT_MAX_LEN}
+            </div>
+            <div className="flex justify-between items-center gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => void doClearPrompt()}
+                disabled={promptSaving || !promptDraft.trim()}
+                className="text-body px-3 py-2 rounded-lg text-error hover:bg-bg-primary disabled:opacity-40"
+              >
+                {t("hero.camPromptClear")}
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPromptEditing(null)}
+                  disabled={promptSaving}
+                  className="text-body px-4 py-2 rounded-lg bg-bg-primary border border-border text-text-primary hover:border-border-strong disabled:opacity-60"
+                >
+                  {t("hero.camPromptCancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void savePrompt()}
+                  disabled={promptSaving || (!hadPrompt && !promptDraft.trim())}
+                  className="text-body px-4 py-2 rounded-lg font-semibold bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
+                >
+                  {promptDraft.trim() ? t("hero.camPromptSave") : t("hero.camPromptClear")}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -660,6 +780,12 @@ function CamSwitch({
   );
 }
 
+// 共享胶囊样式：VoiceSwitch 与 PromptButton 共用。
+const CAPSULE =
+  "inline-flex items-center gap-1 h-[16px] pl-1 pr-1.5 rounded-full text-[10px] leading-none shadow-sm transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none";
+const CAPSULE_ON = "bg-brand-primary text-white";
+const CAPSULE_OFF = "bg-black/60 text-white/85";
+
 /** 拾音开关（mic-off：关闭后此摄像头的声音完全不被处理——不监听、不转写、不上云）。
  *  从属于感知开关：相机感知关(inUse=false)时置灰、显示为「关」
  *  (生效态 = inUse && voiceInUse)；感知开时反映并编辑存储偏好 voiceInUse。
@@ -691,9 +817,7 @@ function VoiceSwitch({
       }
       disabled={disabled}
       onClick={() => onToggle(!on)}
-      className={`inline-flex items-center gap-1 h-[16px] pl-1 pr-1.5 rounded-full text-[10px] leading-none shadow-sm transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:opacity-40 disabled:cursor-not-allowed ${
-        on ? "bg-brand-primary text-white" : "bg-black/60 text-white/85"
-      }`}
+      className={`${CAPSULE} disabled:opacity-40 disabled:cursor-not-allowed ${on ? CAPSULE_ON : CAPSULE_OFF}`}
     >
       <MicIcon muted={!on} />
       <span>{t("hero.voiceLabel")}</span>
@@ -722,6 +846,32 @@ function MicIcon({ muted }: { muted: boolean }) {
   );
 }
 
+/** 「感知须知」编辑入口。与拾音开关同款胶囊样式：小药丸，图标 + 文字标签。
+ *  「已配」= CAPSULE_ON，「未配」= CAPSULE_OFF。 */
+function PromptButton({
+  hasPrompt,
+  name,
+  onClick,
+}: {
+  hasPrompt: boolean;
+  name: string;
+  onClick: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={t("hero.camPromptAria", { name })}
+      title={t(hasPrompt ? "hero.camPromptEditTitle" : "hero.camPromptAddTitle")}
+      className={`${CAPSULE} ${hasPrompt ? CAPSULE_ON : CAPSULE_OFF}`}
+    >
+      <IconPencil width={10} height={10} />
+      <span>{t("hero.camPromptLabel")}</span>
+    </button>
+  );
+}
+
 interface CamCardProps {
   /** 一路通道(全拆后每路一张卡)。 */
   cam: ScopeCamera;
@@ -735,6 +885,8 @@ interface CamCardProps {
   /** 拾音开关置灰条件:拾音 PUT 或本路投喂 PUT in-flight（防两个 PUT 交叠竞态） */
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
+  hasPrompt: boolean;
+  onEditPrompt: () => void;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
@@ -748,6 +900,8 @@ function CamCardWithToggle({
   onToggle,
   voiceBusy,
   onToggleVoice,
+  hasPrompt,
+  onEditPrompt,
 }: CamCardProps) {
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
@@ -765,6 +919,11 @@ function CamCardWithToggle({
         {/* 全拆后每路一个独立开关 → 拾音 + 投喂开关回到画面内右上角(不再放画面外的卡头)。
             拾音仅有 mic 的通道(球机/ch0)显示。 */}
         <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          <PromptButton
+            hasPrompt={hasPrompt}
+            name={cam.name}
+            onClick={onEditPrompt}
+          />
           {showVoice && (
             <VoiceSwitch
               on={cam.inUse && cam.voiceInUse}
@@ -797,6 +956,8 @@ function BenchCamItem({
   onToggle,
   voiceBusy,
   onToggleVoice,
+  hasPrompt,
+  onEditPrompt,
 }: {
   cam: ScopeCamera;
   channelLabel?: string;
@@ -806,6 +967,8 @@ function BenchCamItem({
   onToggle: (next: boolean) => void;
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
+  hasPrompt: boolean;
+  onEditPrompt: () => void;
 }) {
   const available = cameraAvailable(cam);
   return (
@@ -835,9 +998,14 @@ function BenchCamItem({
         {/* 该路自己的三态灯（各路镜头 / 连通可能不同）。 */}
         <ChannelStateDots cam={cam} />
       </div>
-      {/* 拾音 + 投喂开关(各控本路;拾音相机级、仅有 mic 的通道显示)。拾音从属于感知:
+      {/* 须知 + 拾音 + 投喂开关(各控本路;拾音相机级、仅有 mic 的通道显示)。拾音从属于感知:
           相机未启用(inUse=false)时置灰、显示为关。 */}
       <div className="flex items-center gap-2 shrink-0">
+        <PromptButton
+          hasPrompt={hasPrompt}
+          name={cam.name}
+          onClick={onEditPrompt}
+        />
         {showVoice && (
           <VoiceSwitch
             on={cam.inUse && cam.voiceInUse}

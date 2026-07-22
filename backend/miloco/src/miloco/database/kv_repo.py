@@ -215,7 +215,8 @@ class DeviceInfoKeys:
 class ScopeConfigKeys:
     """miloco 接入范围限定（家庭启用集 / 摄像头停用集）。
 
-    值统一为 JSON array 字符串，``"[]"`` / ``NULL`` 都表示空集。
+    ``*_LIST_KEY`` 值统一为 JSON array 字符串（``"[]"`` / ``NULL`` 都表示空集）；
+    ``CAMERA_PROMPT_MAP_KEY`` 是唯一例外——JSON object（did→prompt），非集合。
     """
 
     HOME_WHITE_LIST_KEY = "HOME_WHITE_LIST_KEY"       # 已启用的家庭 home_id 列表
@@ -227,6 +228,13 @@ class ScopeConfigKeys:
     # 音频才会被处理（转写 / 语音派生 / 上云）；不在集内 = 引擎入口整批剥离音频。
     # KV 读取失败时按空集处理（fail-closed：宁可不处理，也不擅自开启未授权相机的音频）。
     CAMERA_VOICE_ALLOW_LIST_KEY = "CAMERA_VOICE_ALLOW_LIST_KEY"
+    # 每摄像头「感知须知」自定义 prompt 映射（did→文本）。JSON object，缺省 = 无自定义。
+    # 与上面几个集合类 key 结构不同（map 而非 list）：每台内容各异，需按 did 精确取值。
+    # 该 prompt 作为**场景指导**注入 omni 的 **system prompt 尾部**（低频变动放尾部，前面
+    # 共享前缀稳定、利于 prefix cache），video / audio 路由均注入；引擎每感知窗实时读取，
+    # 改动下一窗即生效、不重启。用途：给模型补充该机位的环境描述 / 关注点 / 忽略项，
+    # 消除固定误识（如门口机位把公共走廊电梯门误当自家入户门）。读取失败按「无自定义」处理。
+    CAMERA_PROMPT_MAP_KEY = "CAMERA_PROMPT_MAP_KEY"
 
 class OnboardingKeys:
     """主动 onboarding 邀请的一次性标记。

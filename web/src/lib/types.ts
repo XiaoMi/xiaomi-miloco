@@ -215,6 +215,11 @@ export interface ScopeCamera {
   // 声音完全不被处理（引擎入口剥离音频，不转写、不上云）。与 inUse 正交：
   // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
   voiceInUse: boolean;
+  // 每摄像头自定义「感知须知」prompt（PUT /api/miot/scope/cameras/prompt）。
+  // 该机位专属的环境说明 / 关注 / 忽略事项，逐感知窗注入 omni system prompt 尾部，指导模型
+  // 消解固定误识（如门口机位误把公共走廊电梯门当自家入户门）。"" = 无自定义。与 inUse /
+  // voiceInUse 正交：关着的相机也能预配，仅在被感知时注入生效。多通道相机按 channel 存取。
+  perceptionPrompt: string;
   connected: boolean;
 }
 

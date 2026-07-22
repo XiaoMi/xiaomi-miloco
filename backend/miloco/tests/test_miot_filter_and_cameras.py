@@ -1790,3 +1790,210 @@ async def test_refresh_cameras_gap_fills_awake_for_current_home(_scope_proxy_env
     assert proxy._camera_awake_cache.get("c1") == {0: True}   # 未被重复读、保持
     assert proxy._camera_awake_cache.get("c2") == {0: False}  # 缺失 → 补读(单摄→ch0 False)
     assert "c3" not in proxy._camera_awake_cache             # 别的家庭 → 不补
+
+
+# ─── 每摄像头感知须知 prompt（本 PR 新增）─────────────────────────────
+
+def test_camera_prompts_empty():
+    kv = _FakeKV()
+    assert miot_filter.camera_prompts(kv) == {}
+
+
+def test_camera_prompts_with_values():
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "门口机位", "c2": "书房"})}
+    )
+    assert miot_filter.camera_prompts(kv) == {"c1": "门口机位", "c2": "书房"}
+    assert miot_filter.camera_prompts(kv).get("ghost") is None
+
+
+def test_camera_prompts_invalid_json_treated_as_empty(caplog):
+    # 非 object（存了 list）→ 回落空 map，不炸。
+    kv = _FakeKV({ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps(["c1"])})
+    assert miot_filter.camera_prompts(kv) == {}
+
+
+def test_camera_prompts_filters_null_values():
+    """JSON null 值被过滤掉，不会变成字符串 "None"。"""
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": None, "c2": "ok"})}
+    )
+    prompts = miot_filter.camera_prompts(kv)
+    assert "c1" not in prompts  # null 被跳过
+    assert prompts == {"c2": "ok"}
+
+
+def test_filter_set_camera_prompt_writes_and_clears():
+    kv = _FakeKV()
+    new, changed = miot_filter.set_camera_prompt(kv, "c1", "  门口机位  ")
+    assert changed is True
+    assert new == {"c1": "门口机位"}  # strip 后写入
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)) == {"c1": "门口机位"}
+    # 空串 → 清除该条目
+    new, changed = miot_filter.set_camera_prompt(kv, "c1", "   ")
+    assert changed is True
+    assert new == {}
+    # 清除已不存在的 did → no-op
+    new, changed = miot_filter.set_camera_prompt(kv, "ghost", "")
+    assert changed is False
+
+
+def test_clear_camera_prompt_only_touches_target():
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "a", "c2": "b"})}
+    )
+    new, changed = miot_filter.clear_camera_prompt(kv, "c1")
+    assert changed is True
+    assert new == {"c2": "b"}  # 只删 c1，c2 保留
+
+
+def test_set_camera_prompt_no_op_skips_kv_write():
+    kv = _FakeKV({ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "x"})})
+    calls = {"n": 0}
+    original_set = kv.set
+
+    def counting_set(key, value):
+        calls["n"] += 1
+        return original_set(key, value)
+
+    kv.set = counting_set  # type: ignore[assignment]
+    # 写入与现状相同（strip 后仍是 "x"）→ 不写 KV
+    _, changed = miot_filter.set_camera_prompt(kv, "c1", " x ")
+    assert changed is False
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_prompt_field():
+    """perception_prompt 是存储偏好：有自定义即透出，无则 ""；与 in_use/voice 正交。"""
+    cameras = {"c1": _camera("c1"), "c2": _camera("c2")}
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "门口机位须知"}),
+    })
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["perception_prompt"] == "门口机位须知"
+    assert by_did["c2"]["perception_prompt"] == ""  # 无自定义
+
+
+@pytest.mark.asyncio
+async def test_set_camera_prompt_writes():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    res = await svc.set_camera_prompt([{"did": "c1", "prompt": "电梯门不是自家门"}])
+    assert any(c["did"] == "c1" and c["perception_prompt"] == "电梯门不是自家门" for c in res)
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)) == {
+        "c1": "电梯门不是自家门"
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_camera_prompt_dual_camera_per_channel():
+    """双摄：合成 did ``cam:chN`` 精确设某一路（按合成 did 存），越界通道被拒。"""
+    cam = _camera("dual", home_id="H1")
+    cam.channel_count = 2
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"dual": cam}, cameras={"dual": cam}, kv=kv)
+
+    # 合成 did 精确到 ch0，不影响 ch1
+    await svc.set_camera_prompt([{"did": "dual:ch0", "prompt": "球机须知"}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)) == {"dual:ch0": "球机须知"}
+
+    # 越界通道拒绝、不落库
+    with pytest.raises(ValidationException):
+        await svc.set_camera_prompt([{"did": "dual:ch9", "prompt": "x"}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)) == {"dual:ch0": "球机须知"}
+
+    # 裸物理 did → 展成全通道（两路都设）
+    await svc.set_camera_prompt([{"did": "dual", "prompt": "整台须知"}])
+    stored = json.loads(kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY))
+    assert stored == {"dual:ch0": "整台须知", "dual:ch1": "整台须知"}
+
+
+@pytest.mark.asyncio
+async def test_set_camera_prompt_rejects_empty():
+    """prompt 为空 → 被拒（schema 层的 field_validator _not_blank）。"""
+    from miloco.miot.schema import CameraPromptItem
+    from pydantic import ValidationError
+
+    # 空字符串
+    with pytest.raises(ValidationError, match="感知须知不能为空"):
+        CameraPromptItem(did="c1", prompt=" ")
+    # 纯空白
+    with pytest.raises(ValidationError, match="感知须知不能为空"):
+        CameraPromptItem(did="c1", prompt="  ")
+
+
+@pytest.mark.asyncio
+async def test_clear_camera_prompt_deletes():
+    """clear_camera_prompt 只需要 did 列表，不传 prompt，直接 del。"""
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "须知", "c2": "其他"}),
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1"), "c2": _camera("c2")},
+        cameras={"c1": _camera("c1"), "c2": _camera("c2")},
+        kv=kv,
+    )
+    res = await svc.clear_camera_prompt(["c1"])
+    assert any(c["did"] == "c1" and c["perception_prompt"] == "" for c in res)
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)) == {"c2": "其他"}
+
+
+@pytest.mark.asyncio
+async def test_set_camera_prompt_rejects_unknown():
+    svc = _make_service(cameras={"c1": _camera("c1")})
+    with pytest.raises(ValidationException):
+        await svc.set_camera_prompt([{"did": "ghost", "prompt": "x"}])
+
+
+@pytest.mark.asyncio
+async def test_set_camera_prompt_rejects_too_long():
+    from miloco.miot.filter import MAX_CAMERA_PROMPT_LEN
+
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    with pytest.raises(ValidationException, match="过长"):
+        await svc.set_camera_prompt(
+            [{"did": "c1", "prompt": "字" * (MAX_CAMERA_PROMPT_LEN + 1)}]
+        )
+    # 拒绝后不落库
+    assert kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_set_camera_prompt_allowed_when_camera_disabled():
+    """感知须知与感知开关正交：相机感知已关闭(在黑名单)也允许预配 prompt。"""
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),  # c1 感知已关闭
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    # 不抛：关着的相机也能预配
+    await svc.set_camera_prompt([{"did": "c1", "prompt": "预配须知"}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)) == {"c1": "预配须知"}
+
+
+@pytest.mark.asyncio
+async def test_set_camera_prompt_does_not_restart_or_refresh():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    svc._miot_proxy.refresh_cameras = AsyncMock()
+    svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
+    svc._restart_perception_engine = AsyncMock()  # type: ignore[assignment]
+    await svc.set_camera_prompt([{"did": "c1", "prompt": "x"}])
+    svc._miot_proxy.refresh_cameras.assert_not_awaited()
+    svc._sync_camera_adapter.assert_not_awaited()
+    svc._restart_perception_engine.assert_not_awaited()
+

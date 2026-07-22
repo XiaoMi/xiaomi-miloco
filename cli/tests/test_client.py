@@ -43,6 +43,7 @@ def _patch_client(resp: MagicMock):
     mock_client.put.return_value = resp
     mock_client.patch.return_value = resp
     mock_client.delete.return_value = resp
+    mock_client.request.return_value = resp
     return patch("miloco_cli.client.httpx.Client", return_value=mock_client), mock_client
 
 
@@ -171,12 +172,14 @@ def test_api_delete_success():
 
 
 def test_api_delete_with_params():
-    """M12 修复：api_delete 支持 params 参数。"""
+    """M12 修复：api_delete 支持 params 参数（prompt-clear 等批量删除走 ?did=a&did=b）。"""
     resp = _make_response({"code": 0})
     patcher, mock_client = _patch_client(resp)
     with patcher:
         api_delete("/api/rules/logs", params={"keep_days": 7})
-    mock_client.delete.assert_called_once_with("/api/rules/logs", params={"keep_days": 7})
+    mock_client.delete.assert_called_once_with(
+        "/api/rules/logs", params={"keep_days": 7}
+    )
 
 
 # ─── tls_verify ───────────────────────────────────────────────────────────────

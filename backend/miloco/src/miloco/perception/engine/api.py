@@ -99,6 +99,23 @@ def _voice_allowed_dids() -> set[str]:
         return set()
 
 
+def _camera_prompt_map() -> dict[str, str]:
+    """实时读全部相机自定义「感知须知」prompt（did→文本）。与 ``_voice_allowed_dids``
+    同构，自取 ``get_manager().kv_repo``（同一处 miloco.manager 延迟导入模式）。
+
+    读 KV（进程内缓存）失败时返回空 dict——无自定义 prompt 注入（fail-open：瞬时故障
+    只是少一段场景指导，不阻断感知，与 voice 的 fail-closed 相反，因本项只增益不涉隐私）。
+    """
+    from miloco.manager import get_manager
+    from miloco.miot.filter import camera_prompts
+
+    try:
+        return camera_prompts(get_manager().kv_repo)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("camera prompt map lookup failed, injecting none: %s", e)
+        return {}
+
+
 class PerceptionEngine(BasePerceptionEngine):
     """Real perception proxy backed by perception-engine batch pipeline.
 
@@ -963,6 +980,9 @@ class PerceptionEngine(BasePerceptionEngine):
         # 精确推退状态机桶(不再用 enabled_rule_ids 全集喂 False)。
         contexts: dict[str, OmniContext] = {}
         device_rule_map: dict[str, list[str]] = {}
+        # 每摄像头自定义「感知须知」prompt：整表读一次、循环内按 did 取（实时、改动下一窗
+        # 即生效、不重启；读失败 fail-open 注入空）。逐窗一次 KV 读，避免 per-device 重复。
+        prompt_map = _camera_prompt_map()
         for room_name, snapshots in batch.by_room().items():
             for snapshot in snapshots:
                 did = snapshot.device.did
@@ -985,11 +1005,14 @@ class PerceptionEngine(BasePerceptionEngine):
                 # last_caption / last_suggestions 不再注入 prompt（回灌模型自己的上轮结论
                 # 会形成回声室、强化幻觉）。caption 变化去重 + suggestion 事件链去重均下沉
                 # 到代码（_last_captions 比对、assign_id_and_update_link 语义匹配）。
+                # 空白串归一到 None（build_system_prompt 判空跳过注入）。
+                camera_prompt = (prompt_map.get(did) or "").strip() or None
                 contexts[did] = OmniContext(
                     rule_conditions=device_rules,
                     pending_speech=self._pending_speech.get(did),
                     current_time=_fmt_clock(snapshot.start_timestamp),
                     room_name=room_name,
+                    camera_prompt=camera_prompt,
                 )
 
         # Prepend audio tail from previous window (overlap to reduce boundary truncation)
