@@ -12,6 +12,7 @@ ensuring a unified data path.
 import asyncio
 import logging
 
+from miloco.database.on_demand_log_repo import OnDemandLogRepo
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.middleware.exceptions import BusinessException
 from miloco.perception.collect.collector import MultimodalCollector
@@ -37,11 +38,13 @@ class PerceptionService:
         pipeline: PipelineProcessor,
         perception_runner: PerceptionRunner,
         log_repo: PerceptionLogRepo,
+        on_demand_log_repo: OnDemandLogRepo | None = None,
     ):
         self._collector = collector
         self._pipeline = pipeline
         self._engine = perception_runner
         self._log_repo = log_repo
+        self._od_log_repo = on_demand_log_repo or OnDemandLogRepo()
         # 串行化引擎生命周期操作(start/stop/重建/降级)。这些操作都含多个 await
         # 让出点且改 runner._is_running,不加锁会在「应用设置重启」与用户手动
         # 启停/删模型交错时出现 executor 未重挂、孤儿 task 等状态错乱。
@@ -168,6 +171,10 @@ class PerceptionService:
         If the realtime engine is running, data comes from its existing stream
         subscriptions. If not running, the collector may have no data.
         """
+        import uuid
+
+        from miloco.perception.schema import OnDemandLogEntry
+
         active_sources = self._collector.get_all_active_sources()
 
         valid_dids: list[str] = []
@@ -186,19 +193,65 @@ class PerceptionService:
                 code=2011,
             )
 
-        # Single batch inference call — collector assembles batch, processor infers
-        result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        t_start = now_ms()
 
-        if not result:
+        # Single batch inference call — collector assembles batch, processor infers
+        pipeline_result = await self._pipeline.process_on_demand(valid_dids, request.query)
+
+        if not pipeline_result:
             raise BusinessException(
                 "Failed to perform on-demand perception.",
                 code=2012,
             )
 
+        result, artifacts = pipeline_result
+        t_end = now_ms()
+        log_id = str(uuid.uuid4())
+
+        # Save artifacts (clips + trace) to disk
+        clip_dids: list[str] = []
+        clip_kinds: dict[str, str] = {}
+        has_trace = False
+
+        if artifacts.clips or artifacts.trace:
+            from miloco.config.settings import get_settings
+            from miloco.perception.snapshot_writer import (
+                check_disk_space,
+                get_snapshot_root,
+                save_event_artifacts,
+            )
+
+            settings = get_settings()
+            snapshot_root = get_snapshot_root()
+            if check_disk_space(snapshot_root, settings.perception.snapshot_min_free_disk_mb):
+                clip_dids = save_event_artifacts(log_id, artifacts)
+                clip_kinds = {
+                    did: artifacts.clips[did][1]
+                    for did in clip_dids
+                    if did in artifacts.clips
+                }
+                has_trace = (snapshot_root / log_id / "omni_trace.json.gz").exists()
+
+        # Persist on-demand query log (with artifact metadata)
+        self._od_log_repo.append(
+            OnDemandLogEntry(
+                id=log_id,
+                timestamp=t_start,
+                query=request.query,
+                answer=result.answer,
+                sources=valid_dids,
+                latency_ms=t_end - t_start,
+                snapshot_count=len(clip_dids),
+                clip_dids=clip_dids,
+                clip_kinds=clip_kinds,
+                has_trace=has_trace,
+            )
+        )
+
         # Map inference results back to API response items
         return OnDemandPerceptionResultItem(
             answer=result.answer,
-            timestamp=ms_to_iso_local(now_ms()),
+            timestamp=ms_to_iso_local(t_end),
         )
 
     # ---- Perception logs ----
@@ -249,6 +302,37 @@ class PerceptionService:
     def cleanup_logs(self, keep_days: int) -> int:
         """清理过期感知日志。"""
         return self._log_repo.delete_before_days(keep_days)
+
+    # ---- On-demand logs ----
+
+    def query_on_demand_logs(
+        self,
+        since_ms: int | None = None,
+        before_ms: int | None = None,
+        before_id: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        """Query on-demand perception query logs.
+
+        Args:
+            since_ms: Unix ms lower bound (inclusive).
+            before_ms: Unix ms upper bound (exclusive).
+            before_id: Compound cursor tiebreaker (used with before_ms).
+            limit: Max entries to return.
+        """
+        logs, count = self._od_log_repo.query(
+            since_ms=since_ms, before_ms=before_ms, before_id=before_id, limit=limit
+        )
+
+        return {"logs": logs, "count": count}
+
+    def get_on_demand_log(self, log_id: str) -> dict | None:
+        """Get a single on-demand log entry by ID."""
+        return self._od_log_repo.get_by_id(log_id)
+
+    def cleanup_on_demand_logs(self, keep_days: int) -> int:
+        """清理过期主动查询日志。"""
+        return self._od_log_repo.delete_before_days(keep_days)
 
     # ---- Device management ----
 

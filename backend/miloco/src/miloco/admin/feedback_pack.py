@@ -243,3 +243,106 @@ def build_feedback_pack(
         "size_bytes": size_bytes,
         "components": components,
     }
+
+
+def build_on_demand_feedback_pack(
+    *,
+    log_id: str,
+    row: dict,
+    error_types: list[str],
+    feedback_text: str,
+) -> tuple[Path, int]:
+    """打包 on-demand query 反馈数据 -> tar.gz.
+
+    与 build_feedback_pack 结构一致,但数据来源是 on_demand_log 而非 meaningful_events.
+
+    Returns:
+        (pack_path, size_bytes)
+    """
+    snapshot_root = get_snapshot_root()
+    event_dir = snapshot_root / log_id
+
+    components: dict = {
+        "omni_trace_found": False,
+        "clips_found": [],
+        "clips_missing": [],
+    }
+
+    trace_path = event_dir / "omni_trace.json.gz"
+    sanitized_trace: bytes | None = None
+    if trace_path.exists():
+        sanitized_trace = _sanitize_trace(trace_path.read_bytes())
+    components["omni_trace_found"] = sanitized_trace is not None
+
+    device_ids: list[str] = row.get("sources", [])
+    for did in device_ids:
+        slug = region_slug(did)
+        clip_dir = event_dir / slug
+        found = False
+        for ext in ("mp4", "m4a"):
+            if (clip_dir / f"clip.{ext}").exists():
+                components["clips_found"].append(f"{slug}/clip.{ext}")
+                found = True
+                break
+        if not found:
+            components["clips_missing"].append(slug)
+
+    try:
+        miloco_version = _get_pkg_version("miloco")
+    except Exception:
+        miloco_version = "unknown"
+
+    metadata = {
+        "log_id": log_id,
+        "type": "on_demand",
+        "timestamp": row.get("timestamp"),
+        "query": _sanitize_pii(row.get("query", "")),
+        "answer": _sanitize_pii(row.get("answer", "")),
+        "sources": device_ids,
+        "latency_ms": row.get("latency_ms"),
+        "error_types": [_ERROR_TYPE_LABELS.get(k, k) for k in error_types],
+        "user_feedback": _sanitize_pii(feedback_text),
+        "created_at": ms_to_iso_local(now_ms()),
+        "miloco_version": miloco_version,
+        "omni_trace_found": components["omni_trace_found"],
+        "clips_found": components["clips_found"],
+        "clips_missing": components["clips_missing"],
+    }
+
+    packs_dir = _packs_dir()
+    packs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    short_id = _uuid.uuid4().hex[:6]
+    pack_dir = packs_dir / f"{stamp}-{short_id}"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    final_path = pack_dir / f"{_PACK_PREFIX}od-{log_id[:8]}-{stamp}{_PACK_SUFFIX}"
+
+    with tempfile.TemporaryDirectory() as tmp_root:
+        tmp_root_p = Path(tmp_root)
+        with tempfile.NamedTemporaryFile(
+            suffix=_PACK_SUFFIX, dir=tmp_root_p, delete=False
+        ) as tf:
+            tar_tmp = Path(tf.name)
+
+        with tarfile.open(tar_tmp, "w:gz") as tar:
+            meta_bytes = json.dumps(metadata, ensure_ascii=False, indent=2).encode()
+            info = tarfile.TarInfo(name="metadata.json")
+            info.size = len(meta_bytes)
+            tar.addfile(info, io.BytesIO(meta_bytes))
+
+            if sanitized_trace is not None:
+                info = tarfile.TarInfo(name="omni_trace.json.gz")
+                info.size = len(sanitized_trace)
+                tar.addfile(info, io.BytesIO(sanitized_trace))
+
+            for clip_rel in components["clips_found"]:
+                clip_path = event_dir / clip_rel
+                if clip_path.exists():
+                    tar.add(clip_path, arcname=f"clips/{clip_rel}")
+
+        shutil.move(str(tar_tmp), final_path)
+
+    size_bytes = final_path.stat().st_size
+    _cleanup_by_total_size(packs_dir)
+
+    return final_path, size_bytes

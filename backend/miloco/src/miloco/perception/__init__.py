@@ -5,6 +5,7 @@ Perception module — multimodal smart home perception engine.
 import asyncio
 import logging
 
+from miloco.database.on_demand_log_repo import OnDemandLogRepo
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.camera_adapter import CameraDeviceAdapter
@@ -25,6 +26,7 @@ async def init_perception_module(miot_proxy, kv_repo):
 
     # 1. 初始化基础依赖实例
     perception_log_repo = PerceptionLogRepo()
+    on_demand_log_repo = OnDemandLogRepo()
     perception_engine_proxy = PerceptionEngineProxy()
 
     # 2. 创建窗口就绪事件（回调从流线程触发，需 threadsafe 调度到事件循环）
@@ -61,6 +63,7 @@ async def init_perception_module(miot_proxy, kv_repo):
         pipeline=pipeline_processor,
         perception_runner=perception_runner,
         log_repo=perception_log_repo,
+        on_demand_log_repo=on_demand_log_repo,
     )
 
     # 7.1 把 omni 熔断器的状态变化桥接到 SSE(通过 PipelineProcessor._publish),

@@ -9,9 +9,11 @@ import logging
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from miloco.manager import get_manager
-from miloco.middleware import verify_token
+from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.middleware.exceptions import HTTPException
 from miloco.perception.engine_state import set_perception_enabled
 from miloco.perception.schema import OnDemandPerceptionRequest
@@ -117,6 +119,92 @@ async def query_logs(
         after=after, before=before, since=since, limit=limit
     )
     return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.get(
+    "/on-demand-logs",
+    summary="Query on-demand perception query logs",
+    dependencies=[Depends(verify_token)],
+)
+async def query_on_demand_logs(
+    limit: int | None = Query(None, ge=1, le=1000, description="Max entries; omit for unlimited"),
+    since: int | None = Query(None, description="Unix ms lower bound (inclusive)"),
+    before: int | None = Query(None, description="Unix ms upper bound (exclusive)"),
+    before_id: str | None = Query(None, description="Compound cursor tiebreaker (used with before)"),
+):
+    data = manager.perception_service.query_on_demand_logs(
+        since_ms=since, before_ms=before, before_id=before_id, limit=limit
+    )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.get(
+    "/on-demand-logs/{log_id}/clip/{device_id}",
+    summary="Get on-demand query clip (omni 看到的字节级 mp4/m4a)",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
+    """Serve the clip file for an on-demand query log entry."""
+    from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+
+    row = manager.perception_service.get_on_demand_log(log_id)
+    if row is None:
+        raise HTTPException(message="not found", status_code=404)
+    if device_id not in row["sources"]:
+        raise HTTPException(message="not found", status_code=404)
+
+    device_dir = get_snapshot_root() / log_id / region_slug(device_id)
+    for filename, media_type in [("clip.mp4", "video/mp4"), ("clip.m4a", "audio/mp4")]:
+        path = device_dir / filename
+        if path.exists():
+            from datetime import datetime
+
+            from miloco.utils.time_utils import deploy_timezone
+
+            local_dt = datetime.fromtimestamp(row["timestamp"] / 1000, tz=deploy_timezone())
+            download_name = f"clip-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.{filename.split('.')[1]}"
+            return FileResponse(
+                path=path, media_type=media_type,
+                filename=download_name, content_disposition_type="inline",
+            )
+    raise HTTPException(message="clip expired", status_code=410)
+
+
+class OnDemandFeedbackBody(BaseModel):
+    error_types: list[str] = Field(default_factory=list)
+    feedback_text: str = Field(default="")
+
+
+@router.post(
+    "/on-demand-logs/{log_id}/feedback",
+    summary="Submit feedback for an on-demand query",
+    dependencies=[Depends(verify_token)],
+)
+async def submit_on_demand_feedback(log_id: str, body: OnDemandFeedbackBody):
+    """Build a feedback pack for an on-demand query (trace + clips + user annotation)."""
+    import asyncio
+
+    from miloco.admin.feedback_pack import build_on_demand_feedback_pack
+
+    row = manager.perception_service.get_on_demand_log(log_id)
+    if row is None:
+        raise HTTPException(message="not found", status_code=404)
+
+    pack_path, pack_size = await asyncio.to_thread(
+        build_on_demand_feedback_pack,
+        log_id=log_id,
+        row=row,
+        error_types=body.error_types,
+        feedback_text=body.feedback_text,
+    )
+    return NormalResponse(
+        code=0, message="ok",
+        data={
+            "log_id": log_id,
+            "pack_path": str(pack_path),
+            "pack_size_bytes": pack_size,
+        },
+    )
 
 
 @router.get(
