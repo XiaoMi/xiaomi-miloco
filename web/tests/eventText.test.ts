@@ -27,4 +27,15 @@ describe("humanizeRulesInText 任务名称前缀 strip", () => {
     const text = "[感知引擎]规则提醒：\n任务名称：厨房安全\n触发原因：x";
     expect(humanizeRulesInText(text)).toContain("任务名称：厨房安全");
   });
+
+  it("显示名退化成仅前缀时，不吞换行、不粘连下一行", () => {
+    // [^\S\n]* 而非 \s*：前缀后无中文名时不能把换行一起吃掉
+    const text =
+      "[感知引擎]规则提醒：\n" +
+      "任务名称：[kitchen_safety]\n" +
+      "触发原因：检测到明火";
+    const out = humanizeRulesInText(text);
+    expect(out).toContain("任务名称：\n触发原因：检测到明火");
+    expect(out).not.toContain("任务名称：触发原因"); // 不粘连
+  });
 });
