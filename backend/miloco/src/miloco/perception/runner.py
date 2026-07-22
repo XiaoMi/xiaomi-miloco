@@ -46,10 +46,14 @@ class PerceptionRunner:
         self._sync_devices_task: asyncio.Task | None = None
         self._window_ready = window_ready_event
 
-        # 自动停止/恢复状态：omni 熔断器持续 OPEN 超过阈值时自动停引擎，
+        # 自动停止/恢复状态：omni 熔断器累计 OPEN 时间超过阈值时自动停引擎，
         # 恢复后自动重启。_auto_stopped=True 时 tick 只跑 probe 自愈，不跑 pipeline。
-        self._cb_open_since: float | None = None
+        # 用累计时间而非连续时间，防止 OPEN→probe→CLOSED 快速振荡时计时器反复被清零。
+        self._cb_open_accumulated: float = 0.0  # 累计 OPEN 时间（秒）
+        self._cb_last_open_tick: float | None = None  # 上一次 tick 时 OPEN 的时间点
         self._auto_stopped: bool = False
+        self._auto_stopped_at: float | None = None  # 自动停止时刻，用于冷却期
+        self._auto_restart_cooldown_sec: float = 120.0  # 自动停止后冷却期（秒）
         self._recovery_probe_task: asyncio.Task | None = None
 
         # Persistent worker thread with a durable event loop for inference.
@@ -97,7 +101,8 @@ class PerceptionRunner:
 
         self._is_running = True
         self._auto_stopped = False  # 用户手动启动时清除自动停止标记
-        self._cb_open_since = None
+        self._cb_open_accumulated = 0.0
+        self._cb_last_open_tick = None
 
         # 重启时重读窗口时长（config 可能在停止期间被改）——__init__ 只读一次，
         # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
@@ -152,7 +157,8 @@ class PerceptionRunner:
         self._sync_devices_task = None
         self._recovery_probe_task = None
         self._auto_stopped = False
-        self._cb_open_since = None
+        self._cb_open_accumulated = 0.0
+        self._cb_last_open_tick = None
 
         # 清理 in-flight probe task,防同进程再启 runner 时 _probe_in_flight 残留导致
         # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
@@ -261,30 +267,45 @@ class PerceptionRunner:
         if self._auto_stopped:
             # 已自动停止 → 检查是否该恢复
             if state == CircuitState.CLOSED:
-                logger.info("[runner] omni 恢复（熔断器 CLOSED），自动重启感知引擎")
-                await self._auto_restart_engine()
+                # 冷却期内不重启，防止 stop→restart 振荡
+                elapsed = time.monotonic() - self._auto_stopped_at if self._auto_stopped_at else 0
+                if elapsed < self._auto_restart_cooldown_sec:
+                    logger.debug(
+                        "[auto-lifecycle] CLOSED but in cooldown (%.0fs/%.0fs)",
+                        elapsed, self._auto_restart_cooldown_sec,
+                    )
+                else:
+                    logger.info("[runner] omni 恢复（熔断器 CLOSED），自动重启感知引擎")
+                    await self._auto_restart_engine()
             else:
                 # 继续驱动 probe（内部有退避节流，不会高频调用）
                 self._drive_recovery_probe()
             return
 
-        # 未自动停止 → 检查是否该停
+        # 未自动停止 → 累计 OPEN 时间，检查是否该停
         # OPEN_CONFIG（API key 错误/模型不存在）也会触发自动停止；
         # 但恢复时 _drive_recovery_probe 的 try_arm_probe 只认 OPEN_RECOVERABLE，
         # 所以 OPEN_CONFIG 停机后不会自动 probe，需要用户修正配置后手动重试。
-        if state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG):
-            if self._cb_open_since is None:
-                self._cb_open_since = time.monotonic()
-            elif time.monotonic() - self._cb_open_since > settings.auto_stop_threshold_sec:
+        now = time.monotonic()
+        is_open = state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG)
+
+        if is_open:
+            # 累计 OPEN 时间
+            if self._cb_last_open_tick is not None:
+                self._cb_open_accumulated += now - self._cb_last_open_tick
+            self._cb_last_open_tick = now
+
+            if self._cb_open_accumulated > settings.auto_stop_threshold_sec:
                 logger.warning(
-                    "[runner] omni 熔断器持续 OPEN %.0fs（阈值 %.0fs），自动停止感知引擎",
-                    time.monotonic() - self._cb_open_since,
+                    "[runner] omni 熔断器累计 OPEN %.0fs（阈值 %.0fs），自动停止感知引擎",
+                    self._cb_open_accumulated,
                     settings.auto_stop_threshold_sec,
                 )
+                self._cb_last_open_tick = None
                 await self._auto_stop_engine()
         else:
-            # CLOSED 或 HALF_OPEN → 重置计时
-            self._cb_open_since = None
+            # CLOSED 或 HALF_OPEN → 停止累计，但不清零（保留已累计的时间）
+            self._cb_last_open_tick = None
 
     async def _auto_stop_engine(self) -> None:
         """停止引擎但保留 tick 循环，为 probe 自愈留通道。
@@ -294,7 +315,9 @@ class PerceptionRunner:
         不产出解码帧，sync_buffer 自然不进数据，CPU 一样省。
         """
         self._auto_stopped = True
-        self._cb_open_since = None
+        self._auto_stopped_at = time.monotonic()
+        self._cb_open_accumulated = 0.0
+        self._cb_last_open_tick = None
         try:
             # 只暂停解码器 + 关引擎；不调 collector.shutdown()，避免被
             # _sync_devices_loop 在 ~1s 内 reconnect 所有设备（白做一轮 disconnect→reconnect）。

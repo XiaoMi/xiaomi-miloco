@@ -103,13 +103,13 @@ async def test_auto_manage_disabled_by_config(mock_runner, cb, monkeypatch):
 @pytest.mark.asyncio
 async def test_auto_manage_closed_resets_timer(mock_runner, cb, mock_settings):
     """CLOSED state resets the OPEN timer."""
-    mock_runner._cb_open_since = time.monotonic() - 100
+    mock_runner._cb_open_accumulated = time.monotonic() - 100
     mock_runner._auto_stopped = False
 
     # cb is CLOSED by default
     await mock_runner._auto_manage_lifecycle()
 
-    assert mock_runner._cb_open_since is None
+    assert mock_runner._cb_open_accumulated is None
     assert mock_runner._auto_stopped is False
 
 
@@ -127,11 +127,11 @@ async def test_auto_manage_open_starts_timer(mock_runner, cb, mock_settings):
         )
 
     assert cb.current_state == CircuitState.OPEN_RECOVERABLE
-    assert mock_runner._cb_open_since is None
+    assert mock_runner._cb_open_accumulated is None
 
     await mock_runner._auto_manage_lifecycle()
 
-    assert mock_runner._cb_open_since is not None
+    assert mock_runner._cb_open_accumulated is not None
     assert mock_runner._auto_stopped is False
 
 
@@ -151,7 +151,7 @@ async def test_auto_manage_open_exceeds_threshold_stops_engine(
         )
 
     # Simulate timer started 100s ago
-    mock_runner._cb_open_since = time.monotonic() - 100
+    mock_runner._cb_open_accumulated = time.monotonic() - 100
 
     await mock_runner._auto_manage_lifecycle()
 
