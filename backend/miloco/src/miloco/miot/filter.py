@@ -6,9 +6,6 @@
 数据落在 SQLite ``kv`` 表的 ``HOME_WHITE_LIST_KEY``（启用的家庭集合）、
 ``CAMERA_BLACK_LIST_KEY``（停用的相机集合）和 ``CAMERA_VOICE_ALLOW_LIST_KEY``
 （**开启**拾音的相机集合，opt-in / 默认关语义），JSON array 字符串，由 :class:`KVRepo` 缓存。
-
-另有 ``CAMERA_PROMPT_MAP_KEY``（每摄像头自定义「感知须知」prompt，did→文本）——
-唯一的 map 语义 key（JSON object，非集合），供逐设备注入 omni 场景指导。
 """
 
 from __future__ import annotations
@@ -26,10 +23,6 @@ T = TypeVar("T")
 # 同时投喂给 miloco 感知的摄像头数量上限（前端展示上限也以此为唯一来源，经
 # /api/miot/status 下发）。用户主动 enable 超限直接报错（service.toggle_camera 校验）。
 MAX_ENABLED_CAMERAS = 4
-
-# 每摄像头「感知须知」自定义 prompt 长度上限（字符数）。filter 层截断作为纵深防御，
-# service/schema 层已有校验。
-MAX_CAMERA_PROMPT_LEN = 500
 
 
 def _load_list(kv_repo: KVRepo, key: str) -> list[str]:
@@ -84,6 +77,14 @@ def voice_allowed_camera_dids(kv_repo: KVRepo) -> set[str]:
     改开关即时生效、不重启感知引擎。读 KV 失败时按空集处理（fail-closed）。
     """
     return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY))
+
+
+def denied_video_camera_dids(kv_repo: KVRepo) -> set[str]:
+    return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_VIDEO_BLACK_LIST_KEY))
+
+
+def denied_audio_camera_dids(kv_repo: KVRepo) -> set[str]:
+    return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_AUDIO_BLACK_LIST_KEY))
 
 
 def is_home_allowed(kv_repo: KVRepo, home_id: str | None) -> bool:
@@ -283,12 +284,29 @@ def set_cameras_voice_in_use(
     )
 
 
+def set_cameras_video_in_use(
+    kv_repo: KVRepo, dids: list[str], in_use: bool
+) -> tuple[list[str], bool]:
+    """批量切换相机视频感知开关。``in_use=False`` 加入视频黑名单（跳过视频流订阅）。"""
+    return _toggle_members(
+        kv_repo, ScopeConfigKeys.CAMERA_VIDEO_BLACK_LIST_KEY, dids, include=not in_use
+    )
+
+
+def set_cameras_audio_in_use(
+    kv_repo: KVRepo, dids: list[str], in_use: bool
+) -> tuple[list[str], bool]:
+    """批量切换相机音频感知开关。``in_use=False`` 加入音频黑名单（跳过音频流订阅）。"""
+    return _toggle_members(
+        kv_repo, ScopeConfigKeys.CAMERA_AUDIO_BLACK_LIST_KEY, dids, include=not in_use
+    )
+
+
 def _toggle_members(
     kv_repo: KVRepo, key: str, items: list[str], *, include: bool
 ) -> tuple[list[str], bool]:
     """批量版本的 _toggle_member；一次性写入，返回 ``(new_list, changed)``。"""
     current = _load_list(kv_repo, key)
-    # 去重，保持输入顺序
     seen: set[str] = set()
     ordered: list[str] = []
     for item in items:
@@ -311,53 +329,33 @@ def _toggle_members(
     return new, True
 
 
-def _load_str_map(kv_repo: KVRepo, key: str) -> dict[str, str]:
-    """读取存 JSON object（str→str）的 KV；缺省 / 非法 / 非 object 一律回落空 dict。
+def migrate_v1_blacklist(kv_repo) -> None:
+    """一次性 v1→v2 migration：把旧黑名单里的**裸 did**复制到 per-modality 双 key。
 
-    跳过 JSON ``null`` 值（避免 ``str(None) → "None"`` 注入业务逻辑）。
+    #439 全拆后 ``CAMERA_BLACK_LIST_KEY`` 同时存裸 did（单摄/旧 v1）和 ``:chN``
+    合成 did（#439 per-channel）。只迁移裸 did——``:chN`` 是 #439 的精细连接控制，
+    不应被放大成整台模态关闭。
     """
-    raw = kv_repo.get(key) or "{}"
     try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("KV %s 不是合法 JSON，视为空: %r", key, raw)
-        return {}
-    if isinstance(value, dict):
-        return {str(k): str(v) for k, v in value.items() if v is not None}
-    logger.warning("KV %s 不是 JSON object，视为空: %r", key, raw)
-    return {}
-
-
-def camera_prompts(kv_repo: KVRepo) -> dict[str, str]:
-    """全部摄像头「感知须知」自定义 prompt（did→文本）；空表示无任何自定义。"""
-    return _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
-
-
-def set_camera_prompt(kv_repo: KVRepo, did: str, prompt: str) -> tuple[dict[str, str], bool]:
-    """设置 / 清除单台相机的自定义感知 prompt。
-
-    超长截断：仅存储前 ``MAX_CAMERA_PROMPT_LEN`` 字符（service/schema 层已有校验，
-    此处防御直接调用 filter 的内部路径）。
-    """
-    current = _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
-    text = prompt.strip()[:MAX_CAMERA_PROMPT_LEN]
-    new = dict(current)
-    if text:
-        new[did] = text
-    else:
-        new.pop(did, None)
-    if new == current:
-        return current, False
-    kv_repo.set(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False))
-    return new, True
-
-
-def clear_camera_prompt(kv_repo: KVRepo, did: str) -> tuple[dict[str, str], bool]:
-    """清除单台相机的自定义感知 prompt（直接从 map 中 del）。"""
-    current = _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
-    if did not in current:
-        return current, False
-    new = dict(current)
-    del new[did]
-    kv_repo.set(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False))
-    return new, True
+        if not hasattr(kv_repo, "get"):
+            return
+        old_raw = kv_repo.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
+        if not old_raw or old_raw == "[]":
+            return
+        old_dids = json.loads(old_raw)
+        if not old_dids:
+            return
+        existing_v = denied_video_camera_dids(kv_repo)
+        existing_a = denied_audio_camera_dids(kv_repo)
+        if existing_v or existing_a:
+            return
+        # 只迁裸 did（真 v1 残余），跳过 #439 的 :chN 条目
+        legacy = sorted({d for d in old_dids if ":ch" not in d})
+        if not legacy:
+            return
+        physical = sorted({physical_camera_did(d) for d in legacy})
+        set_cameras_video_in_use(kv_repo, physical, False)
+        set_cameras_audio_in_use(kv_repo, physical, False)
+        logger.info("v1 blacklist migrated: %d dids → v2", len(physical))
+    except Exception:
+        logger.warning("v1 migration failed (non-fatal)", exc_info=True)

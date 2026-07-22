@@ -13,7 +13,6 @@ from typing import Any, Literal
 from miot.types import MIoTCameraInfo, MIoTCameraStatus
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from miloco.miot.filter import MAX_CAMERA_PROMPT_LEN
 from miloco.utils.media import image_bytes_to_base64, image_manager
 
 
@@ -229,11 +228,26 @@ class HomeSwitchRequest(BaseModel):
 
 
 class CameraToggleItem(BaseModel):
-    """单个相机的启用/停用操作。"""
+    """单个相机的感知开关操作（v2：per-camera × per-modality 矩阵）。
+
+    三个开关字段都可选（omitted = 不改）：
+    - ``in_use``：便捷别名，true=同时启用视频+音频感知；false=同时关闭两路
+    - ``video_enabled``：显式只改视频感知（优先级高于 in_use）
+    - ``audio_enabled``：显式只改音频感知（优先级高于 in_use）
+    """
 
     did: str = Field(..., min_length=1, description="相机 did")
-    in_use: bool = Field(
-        ..., description="true = 启用（恢复接入）；false = 停用（不接入）"
+    in_use: bool | None = Field(
+        default=None,
+        description="便捷别名：true=同时启用视频+音频感知；false=同时关闭两路。omitted = 不改。",
+    )
+    video_enabled: bool | None = Field(
+        default=None,
+        description="显式改视频感知开关。omitted = 不改。优先级高于 in_use。",
+    )
+    audio_enabled: bool | None = Field(
+        default=None,
+        description="显式改音频感知开关。omitted = 不改。优先级高于 in_use。",
     )
 
 
@@ -263,40 +277,6 @@ class CameraVoiceToggleRequest(BaseModel):
     """
 
     items: list[CameraVoiceToggleItem] = Field(..., min_length=1)
-
-
-class CameraPromptItem(BaseModel):
-    """单个相机的自定义「感知须知」prompt 设置。"""
-
-    did: str = Field(..., min_length=1, description="相机 did")
-    prompt: str = Field(
-        ...,
-        max_length=MAX_CAMERA_PROMPT_LEN,
-        description=(
-            "该机位专属感知指导（环境说明 / 关注 / 忽略）；逐窗注入 omni system prompt 尾部（video / audio 路由均注入）。"
-            f"非空，上限 {MAX_CAMERA_PROMPT_LEN} 字。"
-        ),
-    )
-
-    @field_validator("prompt", mode="after")
-    @classmethod
-    def _not_blank(cls, v: str) -> str:
-        stripped = v.strip()
-        if not stripped:
-            raise ValueError("感知须知不能为空（清除请用 DELETE 端点）")
-        return stripped
-
-
-class CameraPromptRequest(BaseModel):
-    """批量设置相机自定义感知 prompt。每项独立指定 did + prompt（非空）。
-
-    与拾音 / 启用开关正交：不从属感知开关，关着的相机也可预配（仅在被感知时注入生效）。
-    """
-
-    items: list[CameraPromptItem] = Field(..., min_length=1)
-
-
-# 清除走 DELETE + query 参数（?did=a&did=b），不带 body，故无对应 Request 模型。
 
 
 class AuthorizeRequest(BaseModel):

@@ -989,6 +989,8 @@ interface BackendScopeCamera {
   // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
   // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
   voice_in_use?: boolean;
+  video_enabled?: boolean;
+  audio_enabled?: boolean;
   perception_prompt?: string;
   connected: boolean;
   channel?: number;  // 通道号，用于多通道摄像头
@@ -1009,6 +1011,8 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     awake: c.awake ?? null,
     inUse: c.in_use,
     voiceInUse: c.voice_in_use ?? false,
+    videoEnabled: c.video_enabled ?? c.in_use ?? true,
+    audioEnabled: c.audio_enabled ?? c.in_use ?? true,
     perceptionPrompt: c.perception_prompt ?? "",
     connected: c.connected,
     channel: c.channel ?? 0,  // 传递通道号，默认为 0
@@ -1034,13 +1038,26 @@ export async function realRefreshCameraOnline(force = false): Promise<void> {
   await apiFetch<Normal<unknown>>("/api/miot/refresh_camera_online");
 }
 
+export interface CameraToggleItem {
+  did: string;
+  inUse?: boolean;
+  videoEnabled?: boolean;
+  audioEnabled?: boolean;
+}
+
 export async function realToggleScopeCamera(
-  dids: string[],
-  inUse: boolean,
+  items: CameraToggleItem[],
 ): Promise<void> {
   await apiFetch<Normal<unknown>>("/api/miot/scope/cameras", {
     method: "PUT",
-    body: JSON.stringify({ items: dids.map((did) => ({ did, in_use: inUse })) }),
+    body: JSON.stringify({
+      items: items.map((i) => ({
+        did: i.did,
+        in_use: i.inUse,
+        video_enabled: i.videoEnabled,
+        audio_enabled: i.audioEnabled,
+      })),
+    }),
   });
   // 写后立即 invalidate + 主动 prefetch homeCache(同 switchScopeHome 同款消 race)。
   invalidateMiotHomeCache();
@@ -1763,4 +1780,19 @@ export async function realUpdateTaskDescription(
       body: JSON.stringify({ description }),
     },
   );
+}
+
+interface PerceiveResult {
+  answer: string;
+}
+
+export async function realPerceiveQuery(
+  sources: string[],
+  query: string,
+): Promise<string> {
+  const r = await apiFetch<Normal<PerceiveResult>>("/api/perception/perceive", {
+    method: "POST",
+    body: JSON.stringify({ sources, query }),
+  });
+  return r.data.answer;
 }

@@ -25,7 +25,6 @@ from miloco.middleware import (
 from miloco.middleware.exceptions import HTTPException
 from miloco.miot.schema import (
     AuthorizeRequest,
-    CameraPromptRequest,
     CameraToggleRequest,
     CameraVoiceToggleRequest,
     DeviceControlRequest,
@@ -521,7 +520,15 @@ async def toggle_scope_camera(
     request: CameraToggleRequest, current_user: str = Depends(verify_token)
 ):
     data = await manager.miot_service.toggle_camera(
-        [{"did": i.did, "in_use": i.in_use} for i in request.items]
+        [
+            {k: v for k, v in {
+                "did": i.did,
+                "in_use": i.in_use,
+                "video_enabled": i.video_enabled,
+                "audio_enabled": i.audio_enabled,
+            }.items() if v is not None}
+            for i in request.items
+        ]
     )
     return NormalResponse(code=0, message="ok", data=data)
 
@@ -539,39 +546,6 @@ async def toggle_scope_camera_voice(
     data = await manager.miot_service.toggle_camera_voice(
         [{"did": i.did, "voice_in_use": i.voice_in_use} for i in request.items]
     )
-    return NormalResponse(code=0, message="ok", data=data)
-
-
-@router.put(
-    path="/scope/cameras/prompt",
-    summary="Batch set per-camera perception prompt (scene guidance)",
-    response_model=NormalResponse,
-)
-async def set_scope_camera_prompt(
-    request: CameraPromptRequest, current_user: str = Depends(verify_token)
-):
-    # 设置自定义感知 prompt：与启用/拾音开关正交，不重启感知引擎（引擎逐窗实时读 KV）。
-    # prompt 非空（空字符串在 schema 层被拒）。
-    data = await manager.miot_service.set_camera_prompt(
-        [{"did": i.did, "prompt": i.prompt} for i in request.items]
-    )
-    return NormalResponse(code=0, message="ok", data=data)
-
-
-@router.delete(
-    path="/scope/cameras/prompt",
-    summary="Batch clear per-camera perception prompt",
-    response_model=NormalResponse,
-)
-async def clear_scope_camera_prompt(
-    did: list[str] = Query(
-        ..., description="要清除的相机 did，可重复传多个批量清除（?did=a&did=b）"
-    ),
-    current_user: str = Depends(verify_token),
-):
-    # 清除自定义感知 prompt：显式 DELETE，did 走 query 参数、不带 body（DELETE body
-    # 语义未定义、易被代理丢弃）。与启用/拾音开关正交，不重启感知引擎。
-    data = await manager.miot_service.clear_camera_prompt(did)
     return NormalResponse(code=0, message="ok", data=data)
 
 
