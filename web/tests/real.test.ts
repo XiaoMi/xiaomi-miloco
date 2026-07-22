@@ -21,6 +21,7 @@ import {
   realListOmniModels,
   realTestOmniConfig,
   _resetUsageStatsCache,
+  realListScopeCameras,
 } from "@/api/real";
 
 // 这些用例直接覆写 globalThis.fetch(非 vi.spyOn),vi.restoreAllMocks() 只还原
@@ -171,6 +172,104 @@ describe("realListActivity — /api/events 契约", () => {
     expect(calls[0]).toContain("before=1780999999999");
     expect(calls[0]).toContain("limit=100");
     expect(calls[0]).toContain("offset=50");
+  });
+});
+
+describe("realListScopeCameras — schedule 字段映射", () => {
+  it("映射 effective/schedule 字段并保留手动 inUse", async () => {
+    mockFetchByUrl({
+      "/api/miot/scope/cameras": {
+        code: 0,
+        message: "ok",
+        data: [
+          {
+            did: "cam1",
+            name: "客厅",
+            room_name: "客厅",
+            is_online: true,
+            in_use: true,
+            effective_in_use: false,
+            schedule_paused: true,
+            schedule: {
+              enabled: true,
+              windows: [{ start: "08:00", end: "20:00" }],
+            },
+            next_schedule_change_at: "2026-06-22T08:00:00+08:00",
+            connected: false,
+          },
+        ],
+      },
+    });
+
+    const cameras = await realListScopeCameras();
+    expect(cameras[0]).toMatchObject({
+      did: "cam1",
+      roomName: "客厅",
+      inUse: true,
+      effectiveInUse: false,
+      schedulePaused: true,
+      nextScheduleChangeAt: "2026-06-22T08:00:00+08:00",
+      schedule: {
+        enabled: true,
+        weekdays: [0, 1, 2, 3, 4, 5, 6],
+        windows: [{ start: "08:00", end: "20:00" }],
+      },
+    });
+  });
+
+  it("映射 capped_out 字段", async () => {
+    mockFetchByUrl({
+      "/api/miot/scope/cameras": {
+        code: 0,
+        message: "ok",
+        data: [
+          {
+            did: "cam2",
+            name: "卧室",
+            is_online: true,
+            in_use: true,
+            effective_in_use: false,
+            capped_out: true,
+            schedule_paused: false,
+            schedule: { enabled: false, weekdays: [0, 1, 2, 3, 4, 5, 6], windows: [] },
+            connected: false,
+          },
+        ],
+      },
+    });
+
+    const cameras = await realListScopeCameras();
+    expect(cameras[0]).toMatchObject({
+      did: "cam2",
+      effectiveInUse: false,
+      cappedOut: true,
+    });
+  });
+
+  it("映射 schedule weekdays", async () => {
+    mockFetchByUrl({
+      "/api/miot/scope/cameras": {
+        code: 0,
+        message: "ok",
+        data: [
+          {
+            did: "cam1",
+            name: "客厅",
+            is_online: true,
+            in_use: true,
+            schedule: {
+              enabled: true,
+              weekdays: [0, 2],
+              windows: [{ start: "08:00", end: "20:00" }],
+            },
+            connected: false,
+          },
+        ],
+      },
+    });
+
+    const cameras = await realListScopeCameras();
+    expect(cameras[0].schedule.weekdays).toEqual([0, 2]);
   });
 });
 

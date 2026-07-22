@@ -2100,6 +2100,122 @@ def test_scope_camera_mic_backend_rejection_passthrough(runner):
     mock_put.assert_called_once()
 
 
+# ─── scope camera schedule ───────────────────────────────────────────────────
+
+
+def test_scope_camera_schedule_set_weekdays(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(
+            cli,
+            [
+                "scope",
+                "camera",
+                "schedule",
+                "set",
+                "cam_1",
+                "--weekday",
+                "mon",
+                "--weekday",
+                "周三",
+                "--window",
+                "08:00-20:00",
+            ],
+        )
+
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/cam_1/schedule",
+        {
+            "enabled": True,
+            "weekdays": [0, 2],
+            "windows": [{"start": "08:00", "end": "20:00"}],
+        },
+    )
+
+
+def test_scope_camera_schedule_set_defaults_to_all_weekdays(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(
+            cli,
+            [
+                "scope",
+                "camera",
+                "schedule",
+                "set",
+                "cam_1",
+                "--window",
+                "08:00-20:00",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert mock_put.call_args[0][1]["weekdays"] == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_scope_camera_schedule_set_zero_pads_hour(runner):
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(
+            cli,
+            [
+                "scope",
+                "camera",
+                "schedule",
+                "set",
+                "cam_1",
+                "--window",
+                "7:00-8:30",
+            ],
+        )
+
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/cam_1/schedule",
+        {
+            "enabled": True,
+            "weekdays": [0, 1, 2, 3, 4, 5, 6],
+            "windows": [{"start": "07:00", "end": "08:30"}],
+        },
+    )
+
+
+def test_scope_camera_schedule_off_keeps_weekdays(runner):
+    with (
+        patch("miloco_cli.commands.scope.api_get") as mock_get,
+        patch("miloco_cli.commands.scope.api_put") as mock_put,
+    ):
+        mock_get.return_value = {
+            "code": 0,
+            "data": [
+                {
+                    "did": "cam_1",
+                    "schedule": {
+                        "enabled": True,
+                        "weekdays": [0, 2],
+                        "windows": [{"start": "08:00", "end": "20:00"}],
+                    },
+                }
+            ],
+        }
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(
+            cli,
+            ["scope", "camera", "schedule", "off", "cam_1"],
+        )
+
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/cam_1/schedule",
+        {
+            "enabled": False,
+            "weekdays": [0, 2],
+            "windows": [{"start": "08:00", "end": "20:00"}],
+        },
+    )
+
+
 # ─── home-profile ───────────────────────────────────────────────────────────
 
 

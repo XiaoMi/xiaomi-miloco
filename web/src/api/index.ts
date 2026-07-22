@@ -44,6 +44,7 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  CameraSchedule,
 } from "@/lib/types";
 export type { ScopeHome };
 
@@ -311,6 +312,13 @@ export async function toggleScopeCamera(
   inUse: boolean,
 ): Promise<void> {
   return impl.realToggleScopeCamera(dids, inUse);
+}
+
+export async function setScopeCameraSchedule(
+  did: string,
+  schedule: CameraSchedule,
+): Promise<void> {
+  return impl.realSetScopeCameraSchedule(did, schedule);
 }
 
 // 切换相机拾音开关（PUT /api/miot/scope/cameras/voice；关闭 = 声音完全不被处理）。

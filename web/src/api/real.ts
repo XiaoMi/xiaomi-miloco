@@ -21,6 +21,7 @@ import type {
   PerceptionCamera,
   Person,
   Scene,
+  CameraSchedule,
   ScopeCamera,
   ScopeHome,
   Task,
@@ -986,6 +987,11 @@ interface BackendScopeCamera {
   awake?: boolean | null;
   is_online: boolean;
   in_use: boolean;
+  effective_in_use?: boolean;
+  capped_out?: boolean;
+  schedule_paused?: boolean;
+  schedule?: CameraSchedule;
+  next_schedule_change_at?: string | null;
   // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
   // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
   voice_in_use?: boolean;
@@ -993,6 +999,16 @@ interface BackendScopeCamera {
   connected: boolean;
   channel?: number;  // 通道号，用于多通道摄像头
   channel_count?: number;  // 通道总数；判多通道的权威信号（旧后端无则兜底 1）
+}
+
+const ALL_CAMERA_SCHEDULE_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+
+function normalizeCameraSchedule(schedule: CameraSchedule | undefined): CameraSchedule {
+  return {
+    enabled: schedule?.enabled ?? false,
+    weekdays: schedule?.weekdays ?? ALL_CAMERA_SCHEDULE_WEEKDAYS,
+    windows: schedule?.windows ?? [],
+  };
 }
 
 export async function realListScopeCameras(): Promise<ScopeCamera[]> {
@@ -1009,6 +1025,11 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     awake: c.awake ?? null,
     inUse: c.in_use,
     voiceInUse: c.voice_in_use ?? false,
+    effectiveInUse: c.effective_in_use ?? c.in_use,
+    cappedOut: c.capped_out ?? false,
+    schedulePaused: c.schedule_paused ?? false,
+    schedule: normalizeCameraSchedule(c.schedule),
+    nextScheduleChangeAt: c.next_schedule_change_at ?? undefined,
     perceptionPrompt: c.perception_prompt ?? "",
     connected: c.connected,
     channel: c.channel ?? 0,  // 传递通道号，默认为 0
@@ -1043,6 +1064,20 @@ export async function realToggleScopeCamera(
     body: JSON.stringify({ items: dids.map((did) => ({ did, in_use: inUse })) }),
   });
   // 写后立即 invalidate + 主动 prefetch homeCache(同 switchScopeHome 同款消 race)。
+  invalidateMiotHomeCache();
+}
+
+export async function realSetScopeCameraSchedule(
+  did: string,
+  schedule: CameraSchedule,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/miot/scope/cameras/${encodeURIComponent(did)}/schedule`,
+    {
+      method: "PUT",
+      body: JSON.stringify(schedule),
+    },
+  );
   invalidateMiotHomeCache();
 }
 

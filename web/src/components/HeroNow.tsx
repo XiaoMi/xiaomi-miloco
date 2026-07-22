@@ -6,6 +6,7 @@
  */
 
 import type {
+  CameraSchedule,
   Person,
   ScopeCamera,
   UsageStats,
@@ -25,7 +26,21 @@ import {
   feedDid as synthFeedDid,
   lensLabelKey,
 } from "@/lib/cameraChannel";
-import { IconRefresh, IconPencil } from "@/lib/icons";
+import {
+  isCrossMidnightWindow,
+  mergeScheduleWindows,
+  normalizeTimeValue,
+  scheduleWindowsEqual,
+  weekdaysEqual,
+} from "@/lib/cameraSchedule";
+import {
+  IconClock,
+  IconPencil,
+  IconPlus,
+  IconRefresh,
+  IconTrash,
+  IconX,
+} from "@/lib/icons";
 
 // 每摄像头「感知须知」prompt 长度上限（与 backend MAX_CAMERA_PROMPT_LEN 对齐）。
 const CAMERA_PROMPT_MAX_LEN = 500;
@@ -49,6 +64,64 @@ function setVoiceOnConfirmed(): void {
   } catch {
     /* 写不了就算了：本会话每次仍弹确认,不影响功能 */
   }
+}
+
+const CAMERA_SCHEDULE_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) =>
+  String(i).padStart(2, "0"),
+);
+const MINUTE_OPTIONS = Array.from({ length: 60 }, (_, i) =>
+  String(i).padStart(2, "0"),
+);
+
+function Time24Input({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  disabled?: boolean;
+  onChange: (next: string) => void;
+}) {
+  const { t } = useTranslation();
+  const normalized = normalizeTimeValue(value) || "00:00";
+  const [hour = "00", minute = "00"] = normalized.split(":");
+  return (
+    <div
+      className={`flex min-w-0 items-center gap-1 rounded-md border border-border bg-bg-primary px-2 py-1.5 ${
+        disabled ? "opacity-50" : ""
+      }`}
+    >
+      <select
+        aria-label={t("hero.scheduleHour")}
+        value={hour}
+        disabled={disabled}
+        onChange={(e) => onChange(`${e.currentTarget.value}:${minute}`)}
+        className="min-w-0 flex-1 appearance-none bg-transparent text-body text-text-primary outline-none disabled:cursor-not-allowed"
+      >
+        {HOUR_OPTIONS.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+      <span className="text-text-tertiary">:</span>
+      <select
+        aria-label={t("hero.scheduleMinute")}
+        value={minute}
+        disabled={disabled}
+        onChange={(e) => onChange(`${hour}:${e.currentTarget.value}`)}
+        className="min-w-0 flex-1 appearance-none bg-transparent text-body text-text-primary outline-none disabled:cursor-not-allowed"
+      >
+        {MINUTE_OPTIONS.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
 }
 
 interface Props {
@@ -78,6 +151,11 @@ interface Props {
   onClearCameraPrompt: (did: string) => void | Promise<void>;
   /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + await 列表重拉落地）。 */
   onRefresh?: () => void | Promise<void>;
+  /** 设置摄像头每日感知时间段（按物理 did）。 */
+  onSetCameraSchedule: (
+    did: string,
+    schedule: CameraSchedule,
+  ) => void | Promise<void>;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -103,6 +181,7 @@ export function HeroNow({
   onSetCameraPrompt,
   onClearCameraPrompt,
   onRefresh,
+  onSetCameraSchedule,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -201,6 +280,7 @@ export function HeroNow({
         onSetCameraPrompt={onSetCameraPrompt}
         onClearCameraPrompt={onClearCameraPrompt}
         onRefresh={onRefresh}
+        onSetCameraSchedule={onSetCameraSchedule}
       />
     </section>
   );
@@ -220,6 +300,10 @@ interface CameraSectionProps {
   onSetCameraPrompt: (did: string, text: string) => void | Promise<void>;
   onClearCameraPrompt: (did: string) => void | Promise<void>;
   onRefresh?: () => void | Promise<void>;
+  onSetCameraSchedule: (
+    did: string,
+    schedule: CameraSchedule,
+  ) => void | Promise<void>;
 }
 
 function CameraSection({
@@ -233,6 +317,7 @@ function CameraSection({
   onSetCameraPrompt,
   onClearCameraPrompt,
   onRefresh,
+  onSetCameraSchedule,
 }: CameraSectionProps) {
   const { t } = useTranslation();
   // 手动刷新未感知设备状态:in-flight 期间转圈 + disable 防连点(force 刷新本身绕过 8s 节流)。
@@ -332,6 +417,19 @@ function CameraSection({
     } else {
       setDontRemind(false); // 每次开框默认不勾
       setPendingVoiceOn({ did, name }); // 开启 → 知情提示
+    }
+  };
+
+  const [scheduleCam, setScheduleCam] = useState<ScopeCamera | null>(null);
+  const [scheduleBusyDid, setScheduleBusyDid] = useState<string | null>(null);
+  const saveSchedule = async (did: string, schedule: CameraSchedule) => {
+    if (scheduleBusyDid) return;
+    setScheduleBusyDid(did);
+    try {
+      await onSetCameraSchedule(did, schedule);
+      setScheduleCam(null);
+    } finally {
+      setScheduleBusyDid(null);
     }
   };
 
@@ -451,6 +549,7 @@ function CameraSection({
                       singleBusyDids.has(feedDid)
                     }
                     onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
+                    onSchedule={() => setScheduleCam(c)}
                     hasPrompt={!!c.perceptionPrompt}
                     onEditPrompt={() =>
                       openPromptEditor(feedDid, channelLabelOf(c) ? `${c.name} · ${channelLabelOf(c)}` : c.name, c.perceptionPrompt)
@@ -521,6 +620,7 @@ function CameraSection({
                         singleBusyDids.has(feedDid)
                       }
                       onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
+                      onSchedule={() => setScheduleCam(c)}
                       hasPrompt={!!c.perceptionPrompt}
                       onEditPrompt={() =>
                         openPromptEditor(feedDid, channelLabelOf(c) ? `${c.name} · ${channelLabelOf(c)}` : c.name, c.perceptionPrompt)
@@ -530,6 +630,14 @@ function CameraSection({
                 })}
               </ul>
             </div>
+          )}
+          {scheduleCam && (
+            <CameraScheduleDialog
+              cam={scheduleCam}
+              busy={scheduleBusyDid === scheduleCam.did}
+              onClose={() => setScheduleCam(null)}
+              onSave={(schedule) => saveSchedule(scheduleCam.did, schedule)}
+            />
           )}
         </>
       )}
@@ -846,6 +954,39 @@ function MicIcon({ muted }: { muted: boolean }) {
   );
 }
 
+function ScheduleButton({
+  active,
+  name,
+  onClick,
+  variant,
+}: {
+  active: boolean;
+  name: string;
+  onClick: () => void;
+  variant: "overlay" | "inline";
+}) {
+  const { t } = useTranslation();
+  const classes =
+    variant === "overlay"
+      ? `inline-flex h-[26px] w-[26px] items-center justify-center rounded-md bg-black/55 text-white hover:bg-black/70 focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+          active ? "text-brand-primary" : ""
+        }`
+      : `inline-flex h-[28px] w-[28px] items-center justify-center rounded-md border border-border bg-bg-primary text-text-tertiary hover:border-border-strong hover:text-text-primary focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+          active ? "text-brand-primary border-brand-primary/40" : ""
+        }`;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={t("hero.scheduleAria", { name })}
+      title={t("hero.scheduleTitle")}
+      className={classes}
+    >
+      <IconClock className="h-4 w-4" />
+    </button>
+  );
+}
+
 /** 「感知须知」编辑入口。与拾音开关同款胶囊样式：小药丸，图标 + 文字标签。
  *  「已配」= CAPSULE_ON，「未配」= CAPSULE_OFF。 */
 function PromptButton({
@@ -872,6 +1013,26 @@ function PromptButton({
   );
 }
 
+function ScheduleBadge({
+  tone,
+  children,
+}: {
+  tone: "brand" | "warning";
+  children: ReactNode;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] leading-none ${
+        tone === "brand"
+          ? "bg-brand-primary/15 text-brand-primary"
+          : "bg-warning-bg text-warning"
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
+
 interface CamCardProps {
   /** 一路通道(全拆后每路一张卡)。 */
   cam: ScopeCamera;
@@ -882,6 +1043,7 @@ interface CamCardProps {
   /** 父级 bulk 操作（全开/全关）正在进行——单卡 Switch 也得 disable 防交叠 PUT */
   bulkBusy: boolean;
   onToggle: (next: boolean) => void;
+  onSchedule: () => void;
   /** 拾音开关置灰条件:拾音 PUT 或本路投喂 PUT in-flight（防两个 PUT 交叠竞态） */
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
@@ -898,11 +1060,13 @@ function CamCardWithToggle({
   showVoice,
   bulkBusy,
   onToggle,
+  onSchedule,
   voiceBusy,
   onToggleVoice,
   hasPrompt,
   onEditPrompt,
 }: CamCardProps) {
+  const { t } = useTranslation();
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
       <div className="relative">
@@ -916,9 +1080,15 @@ function CamCardWithToggle({
         <span className="absolute top-2 left-2 max-w-[calc(100%-1rem)] truncate px-1.5 py-0.5 rounded-md bg-black/50 text-white text-caption pointer-events-none z-10">
           {channelLabel ? `${cam.name} · ${channelLabel}` : cam.name}
         </span>
-        {/* 全拆后每路一个独立开关 → 拾音 + 投喂开关回到画面内右上角(不再放画面外的卡头)。
+        {/* 全拆后每路一个独立开关 → 定时 + 拾音 + 投喂。定时按物理机共享。
             拾音仅有 mic 的通道(球机/ch0)显示。 */}
         <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          <ScheduleButton
+            active={cam.schedule.enabled}
+            name={cam.name}
+            onClick={onSchedule}
+            variant="overlay"
+          />
           <PromptButton
             hasPrompt={hasPrompt}
             name={cam.name}
@@ -939,6 +1109,20 @@ function CamCardWithToggle({
             onToggle={onToggle}
           />
         </div>
+        {(cam.schedulePaused || cam.cappedOut) && (
+          <div className="absolute bottom-2 left-2 flex flex-wrap gap-1.5">
+            {cam.schedulePaused && (
+              <ScheduleBadge tone="brand">
+                {t("hero.schedulePaused")}
+              </ScheduleBadge>
+            )}
+            {cam.cappedOut && (
+              <ScheduleBadge tone="warning">
+                {t("hero.scheduleCappedOut")}
+              </ScheduleBadge>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -956,6 +1140,7 @@ function BenchCamItem({
   onToggle,
   voiceBusy,
   onToggleVoice,
+  onSchedule,
   hasPrompt,
   onEditPrompt,
 }: {
@@ -967,9 +1152,11 @@ function BenchCamItem({
   onToggle: (next: boolean) => void;
   voiceBusy: boolean;
   onToggleVoice: (next: boolean) => void;
+  onSchedule: () => void;
   hasPrompt: boolean;
   onEditPrompt: () => void;
 }) {
+  const { t } = useTranslation();
   const available = cameraAvailable(cam);
   return (
     <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
@@ -995,12 +1182,27 @@ function BenchCamItem({
             </span>
           )}
         </div>
-        {/* 该路自己的三态灯（各路镜头 / 连通可能不同）。 */}
-        <ChannelStateDots cam={cam} />
+        {/* 该路自己的三态灯 + 定时/满额徽标。 */}
+        <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
+          <ChannelStateDots cam={cam} bare />
+          {cam.schedulePaused && (
+            <ScheduleBadge tone="brand">{t("hero.schedulePaused")}</ScheduleBadge>
+          )}
+          {cam.cappedOut && (
+            <ScheduleBadge tone="warning">
+              {t("hero.scheduleCappedOut")}
+            </ScheduleBadge>
+          )}
+        </div>
       </div>
-      {/* 须知 + 拾音 + 投喂开关(各控本路;拾音相机级、仅有 mic 的通道显示)。拾音从属于感知:
-          相机未启用(inUse=false)时置灰、显示为关。 */}
+      {/* 定时 + 须知 + 拾音 + 投喂。定时按物理机共享；须知按当前通道编辑。 */}
       <div className="flex items-center gap-2 shrink-0">
+        <ScheduleButton
+          active={cam.schedule.enabled}
+          name={cam.name}
+          onClick={onSchedule}
+          variant="inline"
+        />
         <PromptButton
           hasPrompt={hasPrompt}
           name={cam.name}
@@ -1026,12 +1228,334 @@ function BenchCamItem({
   );
 }
 
+function CameraScheduleDialog({
+  cam,
+  busy,
+  onClose,
+  onSave,
+}: {
+  cam: ScopeCamera;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (schedule: CameraSchedule) => void | Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const [enabled, setEnabled] = useState(cam.schedule.enabled);
+  const [weekdays, setWeekdays] = useState(
+    cam.schedule.weekdays.length > 0
+      ? [...cam.schedule.weekdays]
+      : [...CAMERA_SCHEDULE_WEEKDAYS],
+  );
+  const [windows, setWindows] = useState(
+    cam.schedule.windows.length > 0
+      ? cam.schedule.windows.map((w) => ({ ...w }))
+      : [{ start: "08:00", end: "20:00" }],
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const updateWindow = (
+    index: number,
+    key: "start" | "end",
+    value: string,
+  ) => {
+    setWindows((items) =>
+      items.map((item, i) =>
+        i === index ? { ...item, [key]: normalizeTimeValue(value) } : item,
+      ),
+    );
+  };
+  const removeWindow = (index: number) => {
+    setWindows((items) => items.filter((_, i) => i !== index));
+  };
+  const toggleWeekday = (weekday: number) => {
+    setWeekdays((items) =>
+      items.includes(weekday)
+        ? items.filter((item) => item !== weekday)
+        : [...items, weekday].sort((a, b) => a - b),
+    );
+  };
+  const applyWeekdayPreset = (preset: readonly number[]) => {
+    setWeekdays([...preset]);
+  };
+  const submit = async () => {
+    if (enabled && weekdays.length === 0) {
+      setError(t("hero.scheduleNeedWeekday"));
+      return;
+    }
+    if (enabled && windows.length === 0) {
+      setError(t("hero.scheduleNeedWindow"));
+      return;
+    }
+    if (enabled && windows.some((w) => !w.start || !w.end)) {
+      setError(t("hero.scheduleInvalid"));
+      return;
+    }
+    const normalizedWindows = windows.map((window) => ({
+      start: normalizeTimeValue(window.start),
+      end: normalizeTimeValue(window.end),
+    }));
+    // 重叠/相邻区间自动合并，用户只需关心「哪些时间要感知」
+    const mergedWindows = enabled
+      ? mergeScheduleWindows(normalizedWindows)
+      : normalizedWindows;
+    if (enabled && mergedWindows.length === 0) {
+      setError(t("hero.scheduleNeedWindow"));
+      return;
+    }
+    if (!scheduleWindowsEqual(mergedWindows, normalizedWindows)) {
+      setWindows(mergedWindows);
+    }
+    setError(null);
+    await onSave({
+      enabled: enabled && mergedWindows.length > 0,
+      weekdays,
+      windows: mergedWindows,
+    });
+  };
+
+  const weekdayPresets = [
+    {
+      id: "everyday",
+      days: CAMERA_SCHEDULE_WEEKDAYS,
+      label: t("hero.schedulePresetEveryday"),
+    },
+    {
+      id: "weekdays",
+      days: [0, 1, 2, 3, 4],
+      label: t("hero.schedulePresetWeekdays"),
+    },
+    {
+      id: "weekend",
+      days: [5, 6],
+      label: t("hero.schedulePresetWeekend"),
+    },
+  ] as const;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
+      <div className="w-full max-w-md rounded-xl border border-border bg-bg-secondary shadow-xl">
+        <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
+          <div className="min-w-0">
+            <h3 className="text-subtitle text-text-primary truncate">
+              {t("hero.scheduleDialogTitle")}
+            </h3>
+            <div className="text-caption text-text-tertiary truncate">
+              {cam.name}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("common.close")}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-text-tertiary hover:bg-bg-tertiary hover:text-text-primary focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none"
+          >
+            <IconX className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 px-5 py-4">
+          <label className="flex items-center justify-between gap-4">
+            <span className="text-body text-text-primary">
+              {t("hero.scheduleEnabled")}
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enabled}
+              onClick={() => setEnabled((v) => !v)}
+              className={`relative inline-flex h-[18px] w-[34px] shrink-0 rounded-full transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${
+                enabled ? "bg-brand-primary" : "bg-black/35"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                  enabled ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </label>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-caption text-text-tertiary">
+                {t("hero.scheduleWeekdays")}
+              </div>
+              <div className="flex flex-wrap justify-end gap-1">
+                {weekdayPresets.map((preset) => {
+                  const selected = weekdaysEqual(weekdays, preset.days);
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={!enabled}
+                      onClick={() => applyWeekdayPreset(preset.days)}
+                      className={`rounded-md border px-2 py-0.5 text-caption transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                        selected
+                          ? "border-brand-primary bg-brand-primary/10 text-brand-primary"
+                          : "border-border bg-bg-primary text-text-secondary hover:border-border-strong hover:text-text-primary"
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="grid grid-cols-7 gap-1.5">
+              {CAMERA_SCHEDULE_WEEKDAYS.map((weekday) => {
+                const selected = weekdays.includes(weekday);
+                return (
+                  <button
+                    key={weekday}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => toggleWeekday(weekday)}
+                    disabled={!enabled}
+                    className={`min-w-0 rounded-md border px-0 py-1.5 text-caption transition-colors focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 ${
+                      selected
+                        ? "border-brand-primary bg-brand-primary text-white"
+                        : "border-border bg-bg-primary text-text-secondary hover:border-border-strong hover:text-text-primary"
+                    }`}
+                  >
+                    {t(`hero.scheduleWeekdayShort.${weekday}`)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="space-y-2">
+            {windows.map((window, index) => {
+              const crossMidnight = isCrossMidnightWindow(window);
+              return (
+                <div
+                  key={`${index}-${window.start}-${window.end}`}
+                  className="space-y-1.5 rounded-md border border-border bg-bg-primary/40 p-2"
+                >
+                  <div className="grid grid-cols-[1fr_auto_1fr_auto] items-end gap-2">
+                    <div className="min-w-0 space-y-1">
+                      {crossMidnight && (
+                        <span className="inline-flex rounded bg-brand-primary/10 px-1.5 py-0.5 text-[11px] text-brand-primary">
+                          {t("hero.scheduleSameDay")}
+                        </span>
+                      )}
+                      <Time24Input
+                        value={window.start}
+                        disabled={!enabled}
+                        onChange={(next) => updateWindow(index, "start", next)}
+                      />
+                    </div>
+                    <span className="pb-2 text-text-tertiary">-</span>
+                    <div className="min-w-0 space-y-1">
+                      {crossMidnight && (
+                        <span className="inline-flex rounded bg-brand-primary/10 px-1.5 py-0.5 text-[11px] text-brand-primary">
+                          {t("hero.scheduleNextDay")}
+                        </span>
+                      )}
+                      <Time24Input
+                        value={window.end}
+                        disabled={!enabled}
+                        onChange={(next) => updateWindow(index, "end", next)}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeWindow(index)}
+                      disabled={!enabled || windows.length <= 1}
+                      aria-label={t("hero.scheduleRemoveWindow")}
+                      title={t("hero.scheduleRemoveWindow")}
+                      className="mb-0.5 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-text-tertiary hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <IconTrash className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {crossMidnight && (
+                    <div className="text-caption text-text-tertiary">
+                      {t("hero.scheduleCrossMidnightHint")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() =>
+                setWindows((items) => [
+                  ...items,
+                  { start: "08:00", end: "20:00" },
+                ])
+              }
+              disabled={!enabled}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-caption text-text-secondary hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <IconPlus className="h-4 w-4" />
+              {t("hero.scheduleAddWindow")}
+            </button>
+          </div>
+          {cam.schedulePaused && (
+            <div className="text-caption text-brand-primary">
+              {t("hero.schedulePausedDetail", {
+                time: formatScheduleTime(cam.nextScheduleChangeAt),
+              })}
+            </div>
+          )}
+          {enabled && !cam.inUse && (
+            <div className="text-caption text-text-tertiary">
+              {t("hero.scheduleMasterOffHint")}
+            </div>
+          )}
+          {error && <div className="text-caption text-warning">{error}</div>}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-2 text-body text-text-secondary hover:border-border-strong hover:text-text-primary"
+          >
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy}
+            className="rounded-md bg-brand-primary px-3 py-2 text-body text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? t("common.saving") : t("common.save")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatScheduleTime(value: string | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 /** 一路通道的三个并列可用性指标:云端在线 / 局域网可达 / 镜头开关。各自独立好坏,
  *  住户能一眼看出卡在哪一环。下区单摄行与多摄子行复用。 */
-function ChannelStateDots({ cam }: { cam: ScopeCamera }) {
+function ChannelStateDots({
+  cam,
+  bare = false,
+}: {
+  cam: ScopeCamera;
+  bare?: boolean;
+}) {
   const { t } = useTranslation();
   return (
-    <div className="text-caption flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
+    <div
+      className={
+        bare
+          ? "text-caption flex items-center flex-wrap gap-x-2 gap-y-0.5"
+          : "text-caption flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5"
+      }
+    >
       <StateDot
         ok={cam.cloudOnline}
         label={

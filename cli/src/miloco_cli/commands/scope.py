@@ -10,6 +10,84 @@ _CAMERAS_PATH = "/api/miot/scope/cameras"
 _CAMERAS_VOICE_PATH = "/api/miot/scope/cameras/voice"
 _CAMERAS_PROMPT_PATH = "/api/miot/scope/cameras/prompt"
 
+_ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]
+_WEEKDAY_ALIASES = {
+    "1": 0,
+    "mon": 0,
+    "monday": 0,
+    "周一": 0,
+    "星期一": 0,
+    "2": 1,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "周二": 1,
+    "星期二": 1,
+    "3": 2,
+    "wed": 2,
+    "wednesday": 2,
+    "周三": 2,
+    "星期三": 2,
+    "4": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "周四": 3,
+    "星期四": 3,
+    "5": 4,
+    "fri": 4,
+    "friday": 4,
+    "周五": 4,
+    "星期五": 4,
+    "6": 5,
+    "sat": 5,
+    "saturday": 5,
+    "周六": 5,
+    "星期六": 5,
+    "7": 6,
+    "sun": 6,
+    "sunday": 6,
+    "周日": 6,
+    "星期日": 6,
+    "周天": 6,
+    "星期天": 6,
+}
+
+
+def _parse_weekdays(values) -> list[int]:
+    if not values:
+        return list(_ALL_WEEKDAYS)
+
+    weekdays: set[int] = set()
+    for value in values:
+        key = value.strip().lower()
+        if key not in _WEEKDAY_ALIASES:
+            raise click.BadParameter(
+                "weekday must be mon..sun, 1..7, or 周一..周日",
+                param_hint="--weekday",
+            )
+        weekdays.add(_WEEKDAY_ALIASES[key])
+    return sorted(weekdays)
+
+
+def _normalize_window_time(value: str) -> str:
+    """Normalize HH:MM to zero-padded 24-hour form accepted by the backend."""
+    parts = value.strip().split(":", 1)
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        raise click.BadParameter(
+            "time must be HH:MM in 24-hour format",
+            param_hint="--window",
+        )
+    hour, minute = int(parts[0]), int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise click.BadParameter(
+            "time must be HH:MM in 24-hour format",
+            param_hint="--window",
+        )
+    return f"{hour:02d}:{minute:02d}"
+
+
 
 def _compose_channel_dids(resp: dict) -> dict:
     """CLI 展示层：把**多通道相机**每行的 ``did`` 显示成合成 did ``{did}:ch{n}``、去掉
@@ -127,6 +205,86 @@ def scope_camera_mic_off(dids, pretty):
     result = api_put(
         _CAMERAS_VOICE_PATH,
         {"items": [{"did": d, "voice_in_use": False} for d in dids]},
+    )
+    print_result(result, pretty)
+
+
+@scope_camera.group("schedule")
+def scope_camera_schedule():
+    """管理摄像头每日感知时间段。"""
+
+
+@scope_camera_schedule.command("get")
+@click.argument("did")
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_get(did, pretty):
+    """查看指定摄像头的定时感知配置。"""
+    result = api_get(_CAMERAS_PATH)
+    cameras = result.get("data") or []
+    for camera in cameras:
+        if camera.get("did") == did:
+            print_result({"code": 0, "message": "ok", "data": camera}, pretty)
+            return
+    raise click.ClickException(f"camera did not found: {did}")
+
+
+@scope_camera_schedule.command("set")
+@click.argument("did")
+@click.option(
+    "--window",
+    "windows",
+    multiple=True,
+    required=True,
+    help="允许感知时间段，格式 HH:MM-HH:MM（小时可省略前导零，如 7:00-08:00）；可重复传入。",
+)
+@click.option(
+    "--weekday",
+    "weekdays",
+    multiple=True,
+    help="允许感知星期，可重复传入；支持 mon..sun、1..7、周一..周日。不传表示每天。",
+)
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_set(did, windows, weekdays, pretty):
+    """设置指定摄像头的每日感知时间段。"""
+    parsed = []
+    for value in windows:
+        try:
+            start, end = value.split("-", 1)
+        except ValueError as exc:
+            raise click.BadParameter(
+                "window must be HH:MM-HH:MM",
+                param_hint="--window",
+            ) from exc
+        parsed.append(
+            {
+                "start": _normalize_window_time(start),
+                "end": _normalize_window_time(end),
+            }
+        )
+    result = api_put(
+        f"{_CAMERAS_PATH}/{did}/schedule",
+        {"enabled": True, "weekdays": _parse_weekdays(weekdays), "windows": parsed},
+    )
+    print_result(result, pretty)
+
+
+@scope_camera_schedule.command("off")
+@click.argument("did")
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_off(did, pretty):
+    """关闭指定摄像头的定时限制。"""
+    current = api_get(_CAMERAS_PATH)
+    weekdays = list(_ALL_WEEKDAYS)
+    windows = []
+    for camera in current.get("data") or []:
+        if camera.get("did") == did:
+            schedule = camera.get("schedule") or {}
+            weekdays = schedule.get("weekdays") or list(_ALL_WEEKDAYS)
+            windows = schedule.get("windows") or []
+            break
+    result = api_put(
+        f"{_CAMERAS_PATH}/{did}/schedule",
+        {"enabled": False, "weekdays": weekdays, "windows": windows},
     )
     print_result(result, pretty)
 

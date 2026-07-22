@@ -138,6 +138,13 @@ export const IconMoon = (p: Props) => (
   </svg>
 );
 
+export const IconClock = (p: Props) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="8" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+);
+
 export const IconAlert = (p: Props) => (
   <svg {...base(p)}>
     <path d="M12 9v4M12 17h.01" />

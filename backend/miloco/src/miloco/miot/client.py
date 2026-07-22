@@ -674,10 +674,6 @@ class MiotProxy:
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
                 # 启动/新设备补读 awake：对当前家庭、awake 缓存里还没有的相机读一次并回填。
-                # 重启后 refresh_cameras 在感知首轮 sync 就会跑 → 镜头态从启动即热，不依赖
-                # 开面板/上下线推送；select_active 的镜头门随即可用。只补"缺失的"→ 启动读
-                # 一遍、之后命中缓存不重复；后续新鲜度由 refresh_camera_online_status / 开启
-                # 校验 / 相机上下线推送刷新（属性变更订阅待后续补）。
                 try:
                     missing = [
                         did
@@ -691,16 +687,17 @@ class MiotProxy:
                         await self.read_cameras_awake(missing)
                 except Exception as e:
                     logger.warning("refresh_cameras awake gap-fill failed: %s", e)
-                # manager(native PPCS 会话+解码线程)的建/销与感知投喂**共用同一口径**
-                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线 + 镜头未关、按 did
-                # 截到上限。拉流集 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/镜头关/超额的
-                # 相机都不在 active 里 → 不建/已建则销，真正停掉 native 会话与解码。
+                # manager(native PPCS 会话+解码线程)的建/销服务 watch/live 实时观看。
                 # select_active 返回**合成 did**（每路一台）；manager / native 会话是
-                # **每物理相机一条**，故按物理 did 收敛做 ref-count：任一路在 active →
-                # 该物理相机会话该在；两路都不在 → 拆。
+                # **每物理相机一条**，故按物理 did 收敛做 ref-count。
+                # apply_schedule=False：定时暂停不拆 manager；感知投喂才在
+                # camera_adapter 侧叠加 apply_schedule=True 的定时门控。
                 active_channels = set(
                     select_active_camera_dids(
-                        self._kv_repo, cameras, awake_map=self._camera_awake_cache
+                        self._kv_repo,
+                        cameras,
+                        apply_schedule=False,
+                        awake_map=self._camera_awake_cache,
                     )
                 )
                 active = {physical_camera_did(d) for d in active_channels}
