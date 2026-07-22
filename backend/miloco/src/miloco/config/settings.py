@@ -308,6 +308,14 @@ class PerceptionCollectSettings(BaseModel):
     full_action: str = Field(
         default="clear", description="窗口满载处理策略（drop/clear/keep）"
     )
+    auto_stop_on_omni_failure: bool = Field(
+        default=True,
+        description="omni 熔断器持续 OPEN 超过阈值时自动停止整个感知引擎(gate+identity+omni)，释放 ONNX 模型内存和 CPU",
+    )
+    auto_stop_threshold_sec: float = Field(
+        default=60.0,
+        description="熔断器持续 OPEN 多少秒后触发自动停止（需 auto_stop_on_omni_failure=true）",
+    )
 
 
 class PerceptionSettings(BaseModel):

@@ -46,7 +46,7 @@ deep_sort:
   track_human_only: true
   # fast 模式(静止 track 跳过 ReID 推理,降 CPU)
   mode: "fast"                       # "normal" / "fast"
-  human_reid_skip_windows: 4         # CPU 紧张时调高(降 ReID 抽取频次)
+  human_reid_skip_windows: 8         # CPU 紧张时调高(降 ReID 抽取频次)
 
 # Pending State 置信度感知 commit + recheck hysteresis
 # 单次 omni 识别可能误判，按 best_conf 决定需要几次同答才 commit；

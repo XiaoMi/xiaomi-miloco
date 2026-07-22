@@ -162,3 +162,9 @@ class BaseDeviceAdapter(ABC):
                     did,
                     e,
                 )
+
+    def pause_streams(self) -> None:
+        """暂停设备数据流（解码器等）。默认 no-op，子类按需覆写。"""
+
+    def resume_streams(self) -> None:
+        """恢复设备数据流。默认 no-op，子类按需覆写。"""

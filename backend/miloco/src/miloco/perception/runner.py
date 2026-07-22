@@ -13,6 +13,7 @@ The perception loop reacts to two triggers:
 
 import asyncio
 import logging
+import time
 
 from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
@@ -44,6 +45,12 @@ class PerceptionRunner:
         self._perception_task: asyncio.Task | None = None
         self._sync_devices_task: asyncio.Task | None = None
         self._window_ready = window_ready_event
+
+        # 自动停止/恢复状态：omni 熔断器持续 OPEN 超过阈值时自动停引擎，
+        # 恢复后自动重启。_auto_stopped=True 时 tick 只跑 probe 自愈，不跑 pipeline。
+        self._cb_open_since: float | None = None
+        self._auto_stopped: bool = False
+        self._recovery_probe_task: asyncio.Task | None = None
 
         # Persistent worker thread with a durable event loop for inference.
         # Replaces the old ThreadPoolExecutor + asyncio.run() pattern that
@@ -89,6 +96,8 @@ class PerceptionRunner:
             return
 
         self._is_running = True
+        self._auto_stopped = False  # 用户手动启动时清除自动停止标记
+        self._cb_open_since = None
 
         # 重启时重读窗口时长（config 可能在停止期间被改）——__init__ 只读一次，
         # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
@@ -130,6 +139,7 @@ class PerceptionRunner:
         for task in (
             self._perception_task,
             self._sync_devices_task,
+            self._recovery_probe_task,
         ):
             if task and not task.done():
                 task.cancel()
@@ -140,6 +150,9 @@ class PerceptionRunner:
 
         self._perception_task = None
         self._sync_devices_task = None
+        self._recovery_probe_task = None
+        self._auto_stopped = False
+        self._cb_open_since = None
 
         # 清理 in-flight probe task,防同进程再启 runner 时 _probe_in_flight 残留导致
         # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
@@ -158,6 +171,13 @@ class PerceptionRunner:
 
     async def _tick(self) -> None:
         """Drain all ready windows and infer sequentially."""
+        # 自动生命周期管理：检查 omni 熔断器状态，决定是否自动停止/恢复引擎
+        await self._auto_manage_lifecycle()
+
+        # 自动停止后：只跑 probe 自愈，不跑 pipeline（节省 CPU + ONNX 内存）
+        if self._auto_stopped:
+            return
+
         # 每 tick 驱动一次 omni 熔断器自动探测:OPEN_RECOVERABLE + backoff 到期时 spawn
         # 一次后台 probe。无外部驱动时 probe_due 归零后状态永远不动,provider 恢复后感知
         # 也不会自愈,只能靠用户手动点「立即重试」。sync 判断 + 后台 spawn,tick 不阻塞。
@@ -217,6 +237,100 @@ class PerceptionRunner:
                 await self._wait_for_trigger()
             except asyncio.CancelledError:
                 break
+
+    # ---- 自动停止/恢复 ----------------------------------------------------------
+
+    async def _auto_manage_lifecycle(self) -> None:
+        """每 tick 检查 omni 熔断器状态，驱动自动停止/恢复。
+
+        自动停止条件：熔断器持续 OPEN_RECOVERABLE / OPEN_CONFIG 超过阈值秒数。
+        自动恢复条件：自动停止后，Runner 驱动 probe 探测成功（熔断器回到 CLOSED）。
+        """
+        settings = get_settings().perception.collect
+        if not settings.auto_stop_on_omni_failure:
+            return
+
+        from miloco.perception.engine.omni.circuit_breaker import (
+            CircuitState,
+            get_omni_circuit_breaker,
+        )
+
+        cb = get_omni_circuit_breaker()
+        state = cb.state_for_test()
+
+        if self._auto_stopped:
+            # 已自动停止 → 检查是否该恢复
+            if state == CircuitState.CLOSED:
+                logger.info("[runner] omni 恢复（熔断器 CLOSED），自动重启感知引擎")
+                await self._auto_restart_engine()
+            else:
+                # 继续驱动 probe（内部有退避节流，不会高频调用）
+                self._drive_recovery_probe()
+            return
+
+        # 未自动停止 → 检查是否该停
+        if state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG):
+            if self._cb_open_since is None:
+                self._cb_open_since = time.monotonic()
+            elif time.monotonic() - self._cb_open_since > settings.auto_stop_threshold_sec:
+                logger.warning(
+                    "[runner] omni 熔断器持续 OPEN %.0fs（阈值 %.0fs），自动停止感知引擎",
+                    time.monotonic() - self._cb_open_since,
+                    settings.auto_stop_threshold_sec,
+                )
+                await self._auto_stop_engine()
+        else:
+            # CLOSED 或 HALF_OPEN → 重置计时
+            self._cb_open_since = None
+
+    async def _auto_stop_engine(self) -> None:
+        """停止引擎但保留 tick 循环，为 probe 自愈留通道。
+
+        与 stop_engine 的区别：只关引擎实例 + 采集，不停 _perception_task（tick 继续跑）。
+        摄像头 P2P 连接保持，解码器暂停（帧直接丢弃，不走 H.264 解码）。
+        """
+        self._auto_stopped = True
+        self._cb_open_since = None
+        try:
+            # 先暂停解码器（P2P 保持，帧丢弃），再关引擎和采集
+            self._collector.pause_streams()
+            await self._pipeline.close()
+            await self._collector.shutdown()
+            logger.info("[runner] 感知引擎已自动停止（gate+identity+omni 全停，解码器已暂停），等待 omni 恢复")
+        except Exception as e:
+            logger.error("[runner] 自动停止引擎失败 | %s", e, exc_info=True)
+
+    async def _auto_restart_engine(self) -> None:
+        """probe 成功后自动重启引擎。"""
+        self._auto_stopped = False
+        self._recovery_probe_task = None
+        try:
+            # 先恢复解码器，再重建引擎和采集
+            self._collector.resume_streams()
+            await self._collector.sync_all_devices()
+            self._pipeline.try_reinit_engine(include_failed=True)
+            if not self._inference_worker.is_running:
+                self._inference_worker.start()
+            self._pipeline.set_inference_worker(self._inference_worker)
+            logger.info("[runner] 感知引擎自动重启成功")
+        except Exception as e:
+            logger.error("[runner] 自动重启引擎失败 | %s", e, exc_info=True)
+            self._auto_stopped = True  # 重启失败，保持停止态
+
+    def _drive_recovery_probe(self) -> None:
+        """引擎停止后，由 Runner 直接驱动熔断器 probe（复用 processor._run_omni_probe）。
+
+        熔断器内部的 try_arm_probe() 有退避节流：只有 OPEN_RECOVERABLE + backoff 到期
+        + 无 in-flight 时才放行，避免高频探测。
+        """
+        from miloco.perception.processor import _run_omni_probe
+
+        from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+
+        cb = get_omni_circuit_breaker()
+        if not cb.try_arm_probe():
+            return
+        self._recovery_probe_task = asyncio.create_task(_run_omni_probe())
 
     async def _sync_devices_loop(self) -> None:
         """Device sync loop — runs independently from perception ticks."""

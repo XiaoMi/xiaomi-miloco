@@ -78,12 +78,14 @@ perception:
     max_windows: 3           # 最大待处理窗口数
     settle_ms: 500           # 等待慢轨道的宽限期（毫秒）
     full_action: "clear"     # 窗口满载处理策略：drop | clear | keep
+    auto_stop_on_omni_failure: true   # omni 持续失败时自动停止整个感知引擎
+    auto_stop_threshold_sec: 60       # 熔断器 OPEN 多少秒后触发自动停止
   engine:
     input:
       # 帧率旋钮集中在此一处(对应 InputConfig):
       #   fps      —— 下发/pipeline 帧率 = tracker 帧率(下采后 tracker 逐帧消费全部)
       #   omni_fps —— 送 omni 的视频帧率, 与 fps 解耦; omni 已是瓶颈, 不随 tracker 提频涨
-      fps: 3
+      fps: 2
       omni_fps: 1
       video_short_edge: 512
     gate:
@@ -91,7 +93,7 @@ perception:
       # 也强制生成 packet 并打 hold 标志,保住 video 路由不被纯音频短路。
       # 0 = 关闭 hold。过长在画面间歇有变化的场景会持续续命窗口、期间静默窗也被
       # 拉起跑下游 omni,浪费调用;过短则人短暂静止时 video 路由会切走。
-      hold_duration_sec: 90
+      hold_duration_sec: 30
     identity:
       # mock | real | deep_sort —— v1.2 主动注册默认 deep_sort,DeepSORT 内置
       # ReID 关联,跟踪更稳;额外暴露 Track.features deque 给陌生人池零额外推理

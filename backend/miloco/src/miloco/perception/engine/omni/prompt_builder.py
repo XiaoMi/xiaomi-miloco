@@ -228,6 +228,7 @@ def build_fused_payload(
         system_prompt = build_system_prompt(scene, include_home_profile=False)
         ep = packets[0]
         # 获取配置的音频格式
+        from miloco.config import get_settings
         audio_format = get_settings().model.omni.audio_format or "m4a"
         audio_result = _encode_audio(ep.audio_clip, ep.sample_rate, audio_format)
         audio_b64 = audio_result[0] if audio_result else None

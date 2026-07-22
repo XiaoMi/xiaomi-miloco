@@ -310,6 +310,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         state.sync_buffer.clear()
 
+    def pause_streams(self) -> None:
+        """暂停摄像头解码器：P2P 连接保持，帧直接丢弃不走 H.264 解码。"""
+        self._miot_proxy.pause_all_decoders()
+
+    def resume_streams(self) -> None:
+        """恢复摄像头解码器。"""
+        self._miot_proxy.resume_all_decoders()
+
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
         """Collect multimodal data from the device's sync buffer.
 

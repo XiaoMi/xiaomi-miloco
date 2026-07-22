@@ -583,6 +583,26 @@ class MiotProxy:
             logger.error("Failed to stop decode audio frame stream: %s", e)
             raise
 
+    def pause_all_decoders(self) -> None:
+        """暂停所有摄像头的解码器：P2P 连接保持，帧直接丢弃不走 H.264 解码。"""
+        try:
+            camera_client = self._miot_client._camera_client
+            for did, instance in camera_client.camera_map.items():
+                instance.pause_decoders()
+            logger.info("Paused all camera decoders (%d cameras)", len(camera_client.camera_map))
+        except Exception as e:
+            logger.error("Failed to pause decoders: %s", e)
+
+    def resume_all_decoders(self) -> None:
+        """恢复所有摄像头的解码器。"""
+        try:
+            camera_client = self._miot_client._camera_client
+            for did, instance in camera_client.camera_map.items():
+                instance.resume_decoders()
+            logger.info("Resumed all camera decoders (%d cameras)", len(camera_client.camera_map))
+        except Exception as e:
+            logger.error("Failed to resume decoders: %s", e)
+
     async def _create_camera_img_manager(
         self,
         camera_info: MIoTCameraInfo,
