@@ -256,7 +256,7 @@ class PerceptionRunner:
         )
 
         cb = get_omni_circuit_breaker()
-        state = cb.state_for_test()
+        state = cb.current_state
 
         if self._auto_stopped:
             # 已自动停止 → 检查是否该恢复
@@ -269,6 +269,9 @@ class PerceptionRunner:
             return
 
         # 未自动停止 → 检查是否该停
+        # OPEN_CONFIG（API key 错误/模型不存在）也会触发自动停止；
+        # 但恢复时 _drive_recovery_probe 的 try_arm_probe 只认 OPEN_RECOVERABLE，
+        # 所以 OPEN_CONFIG 停机后不会自动 probe，需要用户修正配置后手动重试。
         if state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG):
             if self._cb_open_since is None:
                 self._cb_open_since = time.monotonic()
@@ -286,16 +289,17 @@ class PerceptionRunner:
     async def _auto_stop_engine(self) -> None:
         """停止引擎但保留 tick 循环，为 probe 自愈留通道。
 
-        与 stop_engine 的区别：只关引擎实例 + 采集，不停 _perception_task（tick 继续跑）。
-        摄像头 P2P 连接保持，解码器暂停（帧直接丢弃，不走 H.264 解码）。
+        与 stop_engine 的区别：只暂停解码器 + 关引擎实例，**不关采集器**。
+        设备保持连接（避免 _sync_devices_loop 反悔重连 churn），解码器暂停后
+        不产出解码帧，sync_buffer 自然不进数据，CPU 一样省。
         """
         self._auto_stopped = True
         self._cb_open_since = None
         try:
-            # 先暂停解码器（P2P 保持，帧丢弃），再关引擎和采集
+            # 只暂停解码器 + 关引擎；不调 collector.shutdown()，避免被
+            # _sync_devices_loop 在 ~1s 内 reconnect 所有设备（白做一轮 disconnect→reconnect）。
             self._collector.pause_streams()
             await self._pipeline.close()
-            await self._collector.shutdown()
             logger.info("[runner] 感知引擎已自动停止（gate+identity+omni 全停，解码器已暂停），等待 omni 恢复")
         except Exception as e:
             logger.error("[runner] 自动停止引擎失败 | %s", e, exc_info=True)

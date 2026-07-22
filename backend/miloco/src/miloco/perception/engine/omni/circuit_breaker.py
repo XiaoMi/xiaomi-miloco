@@ -329,6 +329,12 @@ class OmniCircuitBreaker:
                 retry_available_in_seconds=retry_avail_s,
             )
 
+    @property
+    def current_state(self) -> CircuitState:
+        """公共只读属性：当前熔断器状态。线程安全。"""
+        with self._lock:
+            return self._state
+
     def state_for_test(self) -> CircuitState:
         with self._lock:
             return self._state
