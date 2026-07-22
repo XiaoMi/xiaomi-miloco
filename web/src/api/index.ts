@@ -280,6 +280,27 @@ export function subscribeEvents(
   return impl.realSubscribeEvents(onEvent, onOpen);
 }
 
+// ── 主动查询日志 ──────────────────────────────────────────
+export async function listOnDemandLogs(
+  homeId?: HomeId,
+  opts?: { since?: number; before?: number; before_id?: string; limit?: number },
+): Promise<import("@/lib/types").OnDemandLogEntry[]> {
+  if (!isPrimary(homeId)) return [];
+  return impl.realListOnDemandLogs(opts);
+}
+
+export function onDemandClipUrl(logId: string, deviceId: string): string {
+  return impl.realOnDemandClipUrl(logId, deviceId);
+}
+
+export async function submitOnDemandFeedback(
+  logId: string,
+  errorTypes: string[],
+  feedbackText: string,
+): Promise<{ pack_path: string; pack_size_bytes: number }> {
+  return impl.realSubmitOnDemandFeedback(logId, errorTypes, feedbackText);
+}
+
 // ── 摄像头 ────────────────────────────────────────────────
 // ── 米家多家庭 ────────────────────────────────────────────
 export async function listScopeHomes(homeId?: HomeId): Promise<ScopeHome[]> {
