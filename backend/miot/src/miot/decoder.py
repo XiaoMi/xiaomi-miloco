@@ -292,7 +292,9 @@ class MIoTMediaDecoder(threading.Thread):
         if self._video_frame_callback and frames:
             for frame in frames:
                 try:
-                    bgr = frame.to_ndarray(format="bgr24").astype("uint8")
+                    # to_ndarray(bgr24) 已返回独立的 uint8 数组，再 .astype("uint8")
+                    # 默认 copy=True 会对每帧多做一次全量拷贝，纯浪费。
+                    bgr = frame.to_ndarray(format="bgr24")
                 except Exception as e:
                     _LOGGER.warning("Failed to convert frame to ndarray: %s", e)
                     continue

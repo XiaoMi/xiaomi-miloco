@@ -128,9 +128,11 @@ async def _log_cleanup_loop() -> None:
                         dt, dtd, de, da, dal,
                     )
                     # auto_vacuum=INCREMENTAL 下,DELETE 把页标 free 但不还 OS。
-                    # 这里集中触发 incremental_vacuum,每页 4KB × 10000 ≈ 40MB 回收上限。
+                    # incremental_vacuum 靠结果集逐页驱动回收,必须 fetchall 消费,
+                    # 否则只 step 一次、每次仅回收 1 页,free page 持续堆积。
+                    # 每页 4KB × 10000 ≈ 40MB 单次回收上限。
                     try:
-                        conn.execute("PRAGMA incremental_vacuum(10000)")
+                        conn.execute("PRAGMA incremental_vacuum(10000)").fetchall()
                     except Exception as e:
                         logger.error("incremental_vacuum failed: %s", e)
                 finally:
@@ -163,11 +165,12 @@ async def _log_cleanup_loop() -> None:
             logger.error("Snapshots cleanup failed: %s", e)
         # miloco.db 已 DELETE 旧 perception_log / rule_log / meaningful_events,
         # 走 incremental_vacuum 把 free pages 还 OS。
+        # fetchall 消费结果集才会真正逐页回收(见上方 observability 库同款说明)。
         try:
             from miloco.database.connector import get_db_connector
 
             with get_db_connector().get_connection() as conn:
-                conn.execute("PRAGMA incremental_vacuum(10000)")
+                conn.execute("PRAGMA incremental_vacuum(10000)").fetchall()
         except Exception as e:
             logger.error("Miloco DB incremental_vacuum failed: %s", e)
         await asyncio.sleep(86400)
