@@ -327,7 +327,9 @@ class PerceptionRunner:
         熔断器内部的 try_arm_probe() 有退避节流：只有 OPEN_RECOVERABLE + backoff 到期
         + 无 in-flight 时才放行，避免高频探测。
         """
-        from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
         from miloco.perception.processor import _run_omni_probe
 
         cb = get_omni_circuit_breaker()

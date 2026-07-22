@@ -14,7 +14,6 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from miloco.perception.engine.omni.circuit_breaker import (
     CircuitState,
     OmniCircuitBreaker,
