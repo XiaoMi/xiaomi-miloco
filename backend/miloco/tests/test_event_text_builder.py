@@ -160,26 +160,30 @@ class TestBuildMatchedRulesText:
         text = build_matched_rules_text([r])
         assert text is not None
         assert text.startswith("[感知引擎]规则提醒：")
-        assert "触发条件：rule-001" in text
+        # 无 rule_names / rule_queries 时任务名称 fallback 到 rule_id，触发条件行省略
+        assert "任务名称：rule-001" in text
+        assert "触发条件" not in text
         assert "触发原因：厨房有人在炒菜" in text
 
     def test_rule_with_name_lookup(self):
-        """rule_names dict 传入时用名称替代 rule_id(query 空则 fallback 到 name)."""
+        """rule_names dict 传入时任务名称用名称替代 rule_id."""
         r = MatchedRule(rule_id="rule-001", reason="炒菜")
         text = build_matched_rules_text([r], rule_names={"rule-001": "厨房安全"})
-        assert "触发条件：厨房安全" in text
+        assert "任务名称：厨房安全" in text
         assert "rule-001" not in text
+        # 有 name 无 query：触发条件行整条省略
+        assert "触发条件" not in text
 
     def test_rule_with_query(self):
-        """rule_queries dict 传入时 '触发条件' 渲染 query 而非 name."""
+        """query 与 name 分别渲染到 '触发条件' / '任务名称' 两行。"""
         r = MatchedRule(rule_id="rule-001", reason="检测到明火")
         text = build_matched_rules_text(
             [r],
             rule_names={"rule-001": "厨房安全"},
             rule_queries={"rule-001": "厨房是否有明火"},
         )
+        assert "任务名称：厨房安全" in text
         assert "触发条件：厨房是否有明火" in text
-        assert "厨房安全" not in text
 
     def test_rule_with_source_meta(self):
         """room_name + device_name 非空时按 key:value 渲染"来源"。"""
