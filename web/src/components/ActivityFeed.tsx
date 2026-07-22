@@ -134,7 +134,6 @@ export function ActivityFeed({
   // fetchPage(带 since)替换——即 "切 tab 闪一下旧日志再变空" 的 bug。
   // 正确路径:filterActive 时由 fetchPage 填充;!filterActive 时由 sync effect 填充。
   const [events, setEvents] = useState<ActivityEvent[]>([]);
-  const prevInitialRef = useRef(initial);
   // since 默认今天 00:00,跟标题语义对齐;before 留空 → 后端取 now,允许"看到现在".
   // 用户改 since 看更早历史 / 设 before 卡截止 / 清 since 看全量.
   const [since, setSince] = useState<number | undefined>(todayStartMs);
@@ -205,15 +204,6 @@ export function ActivityFeed({
   }, [reloadActions, homeId]);
 
   const filterActive = appliedSince !== undefined || appliedBefore !== undefined;
-
-  // initial 变化时合并(App useAsync resolve 后 loading→loaded):仅 !filterActive 时
-  // 才合入——filterActive 时 initial 是未过滤全量,合入会污染已过滤视图。
-  useEffect(() => {
-    if (initial !== prevInitialRef.current) {
-      prevInitialRef.current = initial;
-      if (initial.length > 0 && !filterActive) setEvents((prev) => mergeAndSort(prev, initial));
-    }
-  }, [initial, filterActive]);
 
   // N3: filter input 抖动 debounce 300ms 后才应用 → 触发 fetch + SSE 重建
   useEffect(() => {
