@@ -1,0 +1,38 @@
+{
+  "update": {
+    "newVersion": "New version {{version}} available",
+    "releaseNotes": "Release notes",
+    "upgrade": "Upgrade",
+    "dismiss": "Dismiss",
+    "confirmTitle": "Upgrade to {{version}}?",
+    "confirmBody": "Perception and automation will be briefly interrupted (a few minutes) during the upgrade; the page will reconnect automatically. Upgrade now?",
+    "cancel": "Cancel",
+    "confirm": "Upgrade",
+    "upgrading": "Upgrading to {{version}}…",
+    "upgradingHint": "Please keep this page open — it will refresh automatically when the upgrade completes.",
+    "slowHint": "A first-time upgrade downloads a large package and may take several minutes — please wait.",
+    "success": "Upgrade complete, refreshing…",
+    "runInBackground": "Move to background (reopen via the version in the sidebar)",
+    "refresh": "Refresh page",
+    "timeoutTitle": "Upgrade didn't finish in the expected time",
+    "timeoutHint": "The upgrade may still be running in the background, or it may not have succeeded. Refresh the page later to check; if it stays unavailable for a long time, please ask your administrator for help.",
+    "failedTitle": "Upgrade didn't succeed",
+    "failedHint": "This upgrade could not be completed and you're still running the current version. Refresh the page to confirm; you can retry the upgrade later, and if it keeps failing please ask your administrator for help.",
+    "failed": "Failed to start the upgrade: {{msg}}",
+    "step": {
+      "download": "Download update",
+      "install": "Install components",
+      "restart": "Restart service"
+    },
+    "versionLabel": "Version {{version}}",
+    "footerUpdateAria": "New version {{version}} available — click to upgrade",
+    "footerCheckAria": "Check for updates",
+    "checking": "Checking for updates…",
+    "checkTitle": "Check for updates",
+    "upToDate": "You're already on the latest version ({{version}})",
+    "devDeploy": "This is a git source deployment — run git pull and restart the service to update (one-click upgrade is for release deployments only)",
+    "checkFailed": "Couldn't check for updates right now (update server unreachable)",
+    "authError": "Authentication failed during the upgrade (your session may have expired). Refresh and sign in again to check the upgrade result.",
+    "gotIt": "Got it"
+  }
+}

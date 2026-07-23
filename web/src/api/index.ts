@@ -44,6 +44,8 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  UpgradeCheck,
+  UpgradeStatus,
 } from "@/lib/types";
 export type { ScopeHome };
 
@@ -60,7 +62,10 @@ export async function bindMiot(): Promise<{ oauthUrl: string }> {
   return impl.realBindMiot();
 }
 
-export async function authorizeMiot(code: string, state: string): Promise<void> {
+export async function authorizeMiot(
+  code: string,
+  state: string,
+): Promise<void> {
   return impl.realAuthorizeMiot(code, state);
 }
 
@@ -291,7 +296,9 @@ export async function switchScopeHome(homeId: string): Promise<void> {
   return impl.realSwitchScopeHome(homeId);
 }
 
-export async function listScopeCameras(homeId?: HomeId): Promise<ScopeCamera[]> {
+export async function listScopeCameras(
+  homeId?: HomeId,
+): Promise<ScopeCamera[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListScopeCameras();
 }
@@ -349,8 +356,18 @@ export async function submitEventFeedback(
   errorTypes: string[],
   feedbackText: string,
   includeGallery: boolean,
-): Promise<{ uploaded: boolean; upload_key?: string; pack_path: string; pack_size_bytes: number }> {
-  return impl.realSubmitEventFeedback(eventId, errorTypes, feedbackText, includeGallery);
+): Promise<{
+  uploaded: boolean;
+  upload_key?: string;
+  pack_path: string;
+  pack_size_bytes: number;
+}> {
+  return impl.realSubmitEventFeedback(
+    eventId,
+    errorTypes,
+    feedbackText,
+    includeGallery,
+  );
 }
 
 export async function revealDir(path: string): Promise<void> {
@@ -451,6 +468,23 @@ export function subscribeOmniHealth(
 // (backend 重启会断 SSE,重连意味着 config 可能已变)。
 export const OMNI_CONFIG_STALE_EVENT = "miloco:omni-config-stale";
 
+// ── 升级检测 / 一键升级 ────────────────────────────────
+export async function upgradeCheck(force = false): Promise<UpgradeCheck> {
+  return impl.realUpgradeCheck(force);
+}
+
+export async function triggerUpgrade(): Promise<void> {
+  return impl.realTriggerUpgrade();
+}
+
+export async function upgradeStatus(): Promise<UpgradeStatus> {
+  return impl.realUpgradeStatus();
+}
+
+export async function dismissUpgrade(version: string): Promise<void> {
+  return impl.realDismissUpgrade(version);
+}
+
 // ── 性能 tab（observability）────────────────────────────
 // backend observability/router.py 不走 Normal 包装,直接返回原始 JSON。
 
@@ -467,9 +501,7 @@ function windowToSince(w: PerfWindow): number {
 
 export async function getPerfSummary(w: PerfWindow): Promise<PerfSummary> {
   const since = windowToSince(w);
-  return apiFetch<PerfSummary>(
-    `/api/stats?metric=summary&since=${since}`,
-  );
+  return apiFetch<PerfSummary>(`/api/stats?metric=summary&since=${since}`);
 }
 
 export async function getPerfRtfSeries(
@@ -545,9 +577,7 @@ export async function listPerfTraces(
   limit: number = 100,
 ): Promise<PerfTraceRow[]> {
   const since = windowToSince(w);
-  return apiFetch<PerfTraceRow[]>(
-    `/api/traces?since=${since}&limit=${limit}`,
-  );
+  return apiFetch<PerfTraceRow[]>(`/api/traces?since=${since}&limit=${limit}`);
 }
 
 export async function listPerfAgentRuns(
