@@ -142,6 +142,21 @@ class TestPersistMeaningfulEvent:
         assert (event_dir / "cam_living_01" / "clip.mp4").read_bytes() == _clip_payload(1)[0]
         assert (event_dir / "cam_kitchen_01" / "clip.mp4").read_bytes() == _clip_payload(2)[0]
 
+    async def test_rule_status_rendered_in_text(self, isolated_db, dao):
+        """rule_statuses 透传到 build_agent_text，DB.text 含「触发状态」行。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload()}),
+            rule_statuses={"r1": "已触发"},
+        )
+        rows = dao.query()
+        assert len(rows) == 1
+        assert "触发状态：已触发" in rows[0]["text"]
+
     async def test_caption_only_does_not_insert(self, isolated_db, dao):
         """纯 caption(无 rule/suggestion/asr)→ 不入表(B5)."""
         from miloco.perception.types import CaptionEntry

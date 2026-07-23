@@ -18,7 +18,7 @@ from miloco.middleware.exceptions import (
     ResourceNotFoundException,
     ValidationException,
 )
-from miloco.rule.runner import RuleRunner
+from miloco.rule.runner import RuleRunner, TriggerOutcome, aggregate_outcomes
 from miloco.rule.schema import (
     Rule,
     RuleAction,
@@ -257,6 +257,111 @@ async def test_rule_action_exception_ledger_keeps_attempted_value(
     assert kw["success"] is False
     assert kw["action_type"] == "set_property"
     assert kw["value_json"] == "true"
+
+
+def _make_duration_rule(rule_id, duration_seconds):
+    """STATE duration 规则；on_enter_desc 让 slot 非空。sample_interval 默认 3s，
+    duration_seconds=3 → maxlen=1（首帧即达标 FIRED）；=6 → maxlen=2（首帧 COUNTING）。"""
+    return Rule(
+        id=rule_id,
+        name=_name(TASK_ID, rule_id),
+        task_id=TASK_ID,
+        mode=RuleMode.STATE,
+        lifecycle=RuleLifecycle.PERMANENT,
+        enabled=True,
+        condition=_make_condition(),
+        on_enter_desc="提醒一下",
+        duration_seconds=duration_seconds,
+        duration_ratio=1.0,
+        exit_debounce_seconds=0,
+    )
+
+
+class TestTriggerOutcome:
+    """update_state 返回 / 存储触发结论（供住户日志「触发状态」展示）。"""
+
+    @pytest.mark.asyncio
+    async def test_first_enter_returns_fired(self, runner):
+        out = await runner.update_state("rule-1", "cam-001", True)
+        await runner.drain()
+        assert out is TriggerOutcome.FIRED
+        assert runner.get_source_outcome("rule-1", "cam-001") is TriggerOutcome.FIRED
+
+    @pytest.mark.asyncio
+    async def test_still_in_returns_still_in(self, runner):
+        await runner.update_state("rule-1", "cam-001", True)  # ENTER → FIRED
+        out = await runner.update_state("rule-1", "cam-001", True)  # 持续
+        await runner.drain()
+        assert out is TriggerOutcome.STILL_IN
+
+    @pytest.mark.asyncio
+    async def test_flicker_absorbed_returns_still_in(self, runner):
+        await runner.update_state("rule-1", "cam-001", True)   # ENTER
+        await runner.update_state("rule-1", "cam-001", False)  # 单帧 False → pending_exit
+        out = await runner.update_state("rule-1", "cam-001", True)  # 抖动吸收
+        await runner.drain()
+        assert out is TriggerOutcome.STILL_IN
+
+    @pytest.mark.asyncio
+    async def test_absorbed_pending_exit_returns_still_in(self, runner):
+        """exit_debounce 期被 ENTER 打断（吸收伪退出）→ 规则持续在态 → STILL_IN
+        （与帧级抖动吸收同标签）。exit_debounce_seconds 设大，保证 debounce 不在本测试内 fire。"""
+        rule = _make_state_rule(
+            rule_id="st-absorb",
+            on_enter_actions=[_make_action()],
+            on_exit_actions=[_make_action()],
+            exit_debounce_seconds=60,
+        )
+        runner.add_rule(rule)
+        await runner.update_state("st-absorb", "cam-001", True)   # ENTER
+        await runner.update_state("st-absorb", "cam-001", False)  # 单帧 False → pending_exit
+        await runner.update_state("st-absorb", "cam-001", False)  # 确认 EXIT → 调度 debounce
+        await runner.update_state("st-absorb", "cam-001", True)   # debounce 期 1st true → 观察
+        out = await runner.update_state("st-absorb", "cam-001", True)  # 2nd true → 吸收 pending exit
+        await runner.drain()
+        assert out is TriggerOutcome.STILL_IN
+
+    @pytest.mark.asyncio
+    async def test_disabled_rule_returns_not_fired(self, runner):
+        runner.add_rule(_make_static_rule(rule_id="off-1", enabled=False))
+        out = await runner.update_state("off-1", "cam-001", True)
+        assert out is TriggerOutcome.NOT_FIRED
+
+    @pytest.mark.asyncio
+    async def test_duration_counting_when_window_not_full(self, runner):
+        runner.add_rule(_make_duration_rule("dur-count", duration_seconds=6))
+        out = await runner.update_state("dur-count", "cam-001", True)
+        await runner.drain()
+        assert out is TriggerOutcome.COUNTING
+
+    @pytest.mark.asyncio
+    async def test_duration_fired_when_window_met(self, runner):
+        # duration_seconds == sample_interval(3) → maxlen 1 → 首帧即达标
+        runner.add_rule(_make_duration_rule("dur-fire", duration_seconds=3))
+        out = await runner.update_state("dur-fire", "cam-001", True)
+        await runner.drain()
+        assert out is TriggerOutcome.FIRED
+
+    def test_aggregate_outcomes_priority(self):
+        assert aggregate_outcomes([]) is None
+        assert (
+            aggregate_outcomes([TriggerOutcome.STILL_IN, TriggerOutcome.FIRED])
+            is TriggerOutcome.FIRED
+        )
+        assert (
+            aggregate_outcomes([TriggerOutcome.NOT_FIRED, TriggerOutcome.STILL_IN])
+            is TriggerOutcome.STILL_IN
+        )
+        assert (
+            aggregate_outcomes([TriggerOutcome.COUNTING, TriggerOutcome.STILL_IN])
+            is TriggerOutcome.COUNTING
+        )
+
+    def test_outcome_labels(self):
+        assert TriggerOutcome.FIRED.label == "已触发"
+        assert TriggerOutcome.STILL_IN.label == "未触发（持续中）"
+        assert TriggerOutcome.COUNTING.label == "未触发（计时中）"
+        assert TriggerOutcome.NOT_FIRED.label == "未触发"
 
 
 @pytest.fixture

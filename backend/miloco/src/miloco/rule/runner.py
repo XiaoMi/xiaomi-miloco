@@ -32,7 +32,8 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Mapping
+from enum import Enum
+from typing import TYPE_CHECKING, Iterable, Literal, Mapping
 
 if TYPE_CHECKING:
     from miloco.task_record.service import TaskRecordService
@@ -60,6 +61,46 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 logger = logging.getLogger(__name__)
 
 _EMPTY_RESULT_MSG = "MIoT 返回为空/不可判定,无法确认执行结果"
+
+
+class TriggerOutcome(str, Enum):
+    """一次 ``update_state`` 判定的「触发结论」——供住户日志展示「本周期是否真触发」。
+
+    反映的是**状态机是否派发了一次触发**，不含 agent / 设备下游执行成败。
+    """
+
+    FIRED = "FIRED"          # 本周期到达 fire 决策点（ENTER 边沿 / 计时达标）
+    STILL_IN = "STILL_IN"    # 已在态内、条件持续满足，不重复触发（含吸收伪退出/抖动）
+    COUNTING = "COUNTING"    # duration 规则累积中，窗口未满 / 比例未达
+    NOT_FIRED = "NOT_FIRED"  # 抗抖观察 / 空 slot / 其它未触发
+
+    @property
+    def label(self) -> str:
+        return {
+            TriggerOutcome.FIRED: "已触发",
+            TriggerOutcome.STILL_IN: "未触发（持续中）",
+            TriggerOutcome.COUNTING: "未触发（计时中）",
+            TriggerOutcome.NOT_FIRED: "未触发",
+        }[self]
+
+    @property
+    def _priority(self) -> int:
+        return {
+            TriggerOutcome.FIRED: 3,
+            TriggerOutcome.COUNTING: 2,
+            TriggerOutcome.STILL_IN: 1,
+            TriggerOutcome.NOT_FIRED: 0,
+        }[self]
+
+
+def aggregate_outcomes(outcomes: Iterable[TriggerOutcome]) -> TriggerOutcome | None:
+    """同一 rule 本周期多摄像头的结论聚合：取「最强」信号
+    （FIRED > COUNTING > STILL_IN > NOT_FIRED）。空输入返回 None。"""
+    best: TriggerOutcome | None = None
+    for o in outcomes:
+        if best is None or o._priority > best._priority:
+            best = o
+    return best
 
 
 def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
@@ -164,6 +205,8 @@ class RuleRuntimeState:
     target_timer: "asyncio.Task | None" = None
     target_fired: bool = False
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
+    # 每 source 最近一次 update_state(True) 的触发结论（供日志展示）。随本 state 整条 pop 清理。
+    last_outcome_by_source: dict[str, TriggerOutcome] = field(default_factory=dict)
 
 
 class RuleRunner:
@@ -381,6 +424,16 @@ class RuleRunner:
     def get_enabled_rules(self) -> list[Rule]:
         return [r for r in self._rules.values() if r.enabled]
 
+    def get_source_outcome(
+        self, rule_id: str, source_did: str
+    ) -> TriggerOutcome | None:
+        """最近一次 ``update_state(True)`` 对 (rule, source) 记下的触发结论。
+        未记录（本 cycle 未命中该源 / 规则已重置）返回 None。"""
+        state = self._state.get(rule_id)
+        if state is None:
+            return None
+        return state.last_outcome_by_source.get(source_did)
+
     # ---- Main entry: per-frame, per-source state report ----
 
     async def update_state(
@@ -394,7 +447,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         cycle_source_states: Mapping[str, bool] | None = None,
-    ) -> None:
+    ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
         Aggregates across sources with OR, diffs against the previous tick,
@@ -411,12 +464,26 @@ class RuleRunner:
             rule = self._rules.get(rule_id)
             if rule is None:
                 logger.warning("update_state: rule %s not found", rule_id)
-                return
+                return TriggerOutcome.NOT_FIRED
             if not rule.enabled:
-                return
+                return TriggerOutcome.NOT_FIRED
 
             src = self._ensure_source(rule_id, source_did)
             prev = src.last_bool
+
+            # 触发结论记账：仅对 True（命中）调用写入 last_outcome_by_source，供住户日志
+            # 展示「本周期是否真触发」。out() 统一分流：duration 规则的结论完全由
+            # _evaluate_duration 决定（frame 路径对 duration 不 fire、只做状态维护），
+            # 非 duration 规则用 frame/diff 路径结论。
+            dur_outcome: TriggerOutcome | None = None
+
+            def record(outcome: TriggerOutcome) -> TriggerOutcome:
+                if current_bool:
+                    self._state[rule_id].last_outcome_by_source[source_did] = outcome
+                return outcome
+
+            def out(frame_outcome: TriggerOutcome) -> TriggerOutcome:
+                return record(dur_outcome if rule.duration_seconds else frame_outcome)
 
             # 丢帧。感知 client 会在同一 cycle 内传入已观测 source 的快照，避免
             # 多 source 同步翻 False 时先来的 source 仍读到后来的 source 上一帧 True。
@@ -430,7 +497,7 @@ class RuleRunner:
                     for did, s in rule_state.sources.items()
                     if did not in observed_states
                 )
-                self._evaluate_duration(
+                dur_outcome = self._evaluate_duration(
                     rule, effective_state, source_did, context, caption, device_name
                 )
 
@@ -444,14 +511,14 @@ class RuleRunner:
                             "rule %s source %s exit pending (1st false)",
                             rule_id, source_did,
                         )
-                        return
+                        return out(TriggerOutcome.NOT_FIRED)
                     src.pending_exit = False
                 elif src.pending_exit:
                     src.pending_exit = False
                     logger.info(
                         "rule %s source %s flicker absorbed", rule_id, source_did
                     )
-                    return
+                    return out(TriggerOutcome.STILL_IN)
             elif self._state[rule_id].exit_debounce_task is not None:
                 # 仅在 exit_debounce 阶段，对 False → True 加对称双帧抗抖：单帧 True
                 # 视为 LLM 单帧幻觉，留一帧观察。下一帧仍 True 才确认 ENTER 并 cancel
@@ -465,7 +532,7 @@ class RuleRunner:
                             "(1st true)",
                             rule_id, source_did,
                         )
-                        return
+                        return out(TriggerOutcome.NOT_FIRED)
                     src.pending_enter = False
                     logger.info(
                         "rule %s source %s enter confirmed (2 consecutive true) "
@@ -479,7 +546,7 @@ class RuleRunner:
                         "exit_debounce",
                         rule_id, source_did,
                     )
-                    return
+                    return out(TriggerOutcome.NOT_FIRED)
 
             src.last_bool = current_bool
 
@@ -489,14 +556,17 @@ class RuleRunner:
             rule_state.last_rule_state = new_rule_state
 
             if old_rule_state == new_rule_state:
-                return
+                return out(
+                    TriggerOutcome.STILL_IN if new_rule_state else TriggerOutcome.NOT_FIRED
+                )
 
             event = RuleEvent.ENTERED if new_rule_state else RuleEvent.EXITED
-            await self._dispatch_event(
+            dispatch_outcome = await self._dispatch_event(
                 rule, event, source_did, context, trigger_room, trigger_dids,
                 caption=caption, device_name=device_name,
             )
             h.add_output(1)
+            return out(dispatch_outcome)
 
     # ---- Debug / manual trigger ----
 
@@ -568,8 +638,11 @@ class RuleRunner:
         context: str,
         caption: str = "",
         device_name: str = "",
-    ) -> None:
+    ) -> TriggerOutcome:
         """每个采样周期采样一次 OR 聚合状态；窗口 True 比例达阈值即 fire。
+
+        返回触发结论：达标 fire → ``FIRED``；已 fire 过（STATE）→ ``STILL_IN``；
+        累积中（窗口未满 / 比例未达 / 同 round 去重）→ ``COUNTING``。
 
         - 同一采样周期内多 source 多次进入 → 通过 round_id 去重，只采一次。
         - 采样断流（round_id 不连续）：用 0 补齐 gap 让老样本自然衰减；
@@ -586,12 +659,12 @@ class RuleRunner:
         """
         state = self._ensure_state(rule.id)
         if rule.mode == RuleMode.STATE and state.state_duration_fired:
-            return
+            return TriggerOutcome.STILL_IN
 
         round_id = int(time.time() / self._sample_interval)
         last_round_id = state.last_duration_round
         if last_round_id == round_id:
-            return
+            return TriggerOutcome.COUNTING
 
         maxlen = max(1, int(rule.duration_seconds / self._sample_interval))
         win = state.duration_window
@@ -626,7 +699,7 @@ class RuleRunner:
             )
 
         if len(win) < maxlen:
-            return
+            return TriggerOutcome.COUNTING
 
         if sum(win) / maxlen >= rule.duration_ratio:
             # actual_started_at = 窗口里第一帧 true 的对齐时间（与 actual_exited_at 对称）。
@@ -670,6 +743,9 @@ class RuleRunner:
             )
             if rule.mode == RuleMode.STATE:
                 self._schedule_target_timer_if_needed(rule, sources, context)
+            return TriggerOutcome.FIRED
+
+        return TriggerOutcome.COUNTING
 
     # ---- Event dispatch ----
 
@@ -683,9 +759,13 @@ class RuleRunner:
         trigger_dids: list[str] | None = None,
         caption: str = "",
         device_name: str = "",
-    ) -> None:
+    ) -> TriggerOutcome:
         """Translate a diff event into an action-layer fire (with state-mode
-        debounce on EXITED)."""
+        debounce on EXITED).
+
+        Returns the触发结论 for the ENTERED path (``FIRED`` only when it actually
+        spawns a fire). EXITED / suppressed paths return ``NOT_FIRED`` — for
+        duration rules the caller ignores this and uses ``_evaluate_duration``."""
         state = self._ensure_state(rule.id)
         if event == RuleEvent.ENTERED:
             # 进入分支瞬间锚定 wall-clock 作为 actual_started_at —— 与 actual_exited_at
@@ -719,14 +799,16 @@ class RuleRunner:
 
             # exit_debounce 未完成就被 ENTER 打断 → state 从未真正离开 →
             # 不重复 fire on_enter。否则 omni 偶发漏识会让 on_enter 反复触发。
+            # 结论按 STILL_IN 上报（规则持续在态，只是吸收了一次伪退出）——与帧级
+            # 抖动吸收路径（update_state 里 pending_exit 吸收）同语义、同标签。
             if absorbed_pending_exit:
-                return
+                return TriggerOutcome.STILL_IN
 
             # duration_seconds 配置时：不在翻转那一刻 fire；fire 由
             # _evaluate_duration 在窗口达比例时触发（actual_started_at 走那条路径
             # 用滑窗里第一帧 true 的对齐时间，本路径取的 wall-clock 不用）。
             if rule.duration_seconds:
-                return
+                return TriggerOutcome.NOT_FIRED
 
             sources = self._sources_currently_true(rule.id) or [source_did]
             # Fire-and-forget: dynamic callback retry is up to 1+2+4=7s of sleep,
@@ -740,18 +822,18 @@ class RuleRunner:
                 caption=caption, device_name=device_name,
             )
             self._schedule_target_timer_if_needed(rule, sources, context)
-            return
+            return TriggerOutcome.FIRED
 
         # EXITED
         if rule.mode == RuleMode.EVENT:
-            return  # event mode does not handle exits
+            return TriggerOutcome.NOT_FIRED  # event mode does not handle exits
 
         # STATE + duration 但未 fire on_enter：进入态从未被确认 → 当这次 EXITED
         # 没发生过。不 fire on_exit（没配对的 ENTERED），不启动 debounce，也不清
         # 窗口——窗口靠后续 evaluate 持续 append 0 自然演化，符合 duration_ratio
         # 的间歇容忍设计（用户中途短暂离开仍允许后续凑齐）。
         if rule.duration_seconds and not state.state_duration_fired:
-            return
+            return TriggerOutcome.NOT_FIRED
 
         # state mode: cancel any existing debounce before scheduling a new one
         old = state.exit_debounce_task
@@ -780,6 +862,7 @@ class RuleRunner:
             "rule_exit_scheduled", rule.id,
             {"delay_seconds": delay, "fires_at_ts_ms": fires_at_ts_ms},
         )
+        return TriggerOutcome.NOT_FIRED
 
     async def _debounced_exit(
         self,
