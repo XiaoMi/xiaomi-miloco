@@ -1202,8 +1202,9 @@ class MiotService:
         ``in_use``=**当下真正开启**（= 该相机在 select_active 的活跃集里：默认开·未拉黑 +
         三态满足 + 上限≤4）——离线/不可达/镜头关的相机 in_use=false，不显示为开；超上限的
         也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
-        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
-         ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
+        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**）；
+        「生效态」= ``in_use and voice_in_use`` 由前端派生。通过 ``toggle_camera`` 的
+        ``audio_enabled`` / ``in_use`` 别名操作时同步写入拾音白名单，保持两路一致。
         """
         self._migrate_v1_blacklist_if_needed()
         voice_allowed = voice_allowed_camera_dids(self._kv_repo)
