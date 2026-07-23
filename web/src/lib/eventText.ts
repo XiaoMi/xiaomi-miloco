@@ -1,13 +1,13 @@
 /**
  * 清理事件 text 里规则相关内容残留的 `[task_id]` 工程指针前缀。
  *
- * 当前格式（所属任务 / 对应规则）后端已构造成住户可读形态、DB 里就不带 `[task_id]`，
+ * 当前格式（任务 / 规则）后端已构造成住户可读形态、DB 里就不带 `[task_id]`，
  * 前端原样渲染、无需处理。本函数只清理**同 header 的历史旧行**（触发规则 / 触发条件）
  * 以及旧 v1/v2 格式里残留的 `[task_id]` 前缀——那些旧数据 DB 里仍带前缀。
  *
  * 兼容格式:
- * - 当前格式(分类 header): `[感知引擎]规则提醒：` 块含 `所属任务：<任务描述>` +
- *   `对应规则：[规则短名] query` —— 后端已构造成住户可读形态（无 [task_id]），无需 strip。
+ * - 当前格式(分类 header): `[感知引擎]规则提醒：` 块含 `任务：<任务描述>` +
+ *   `规则：[规则短名] query` —— 后端已构造成住户可读形态（无 [task_id]），无需 strip。
  *   下面几条 strip 只清理**同 header 的旧行**里残留的 [task_id] 前缀（历史数据兼容）。
  * - 旧格式 v3(分类 header): 规则行含 `触发规则：[task_id] 规则名。` → strip [task_id]
  * - 旧数据(query 空时): `触发条件：[task_id] 规则名` → strip [task_id]（ascii 前缀，放过中文方括号 query）
@@ -35,7 +35,7 @@ export function humanizeRulesInText(
     .map((section) => {
       // --- 当前格式：分类 header ---
       if (PERCEPTION_HEADERS.some((h) => section.startsWith(h))) {
-        // 新格式（所属任务 / 对应规则）后端已 strip、无需处理；下面只清历史旧行的
+        // 新格式（任务 / 规则）后端已 strip、无需处理；下面只清历史旧行的
         // [task_id] 前缀。行内空白用 [^\S\n]* 而非 \s*：短名退化成「仅前缀」时不吞换行。
         return section
           .replace(/触发规则：\[[^\]]+\][^\S\n]*/g, "触发规则：")
