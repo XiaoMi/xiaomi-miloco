@@ -61,6 +61,15 @@ class TaskRepo:
             ).fetchone()
             return row is not None
 
+    def get_description(self, task_id: str) -> str | None:
+        """按 task_id 取任务描述（住户日志「所属任务」用）；无此行返回 None。
+        轻量单列查询，不联 cron/rule（与 get_full_view 区分）。"""
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT description FROM task WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return row["description"] if row else None
+
     def get_full_view(self, task_id: str) -> dict[str, Any] | None:
         """单 task 视图: task 元信息 + cron_refs (rule_briefs 由 service 层拼装)."""
         with self.db.get_connection() as conn:

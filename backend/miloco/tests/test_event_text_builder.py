@@ -160,26 +160,67 @@ class TestBuildMatchedRulesText:
         text = build_matched_rules_text([r])
         assert text is not None
         assert text.startswith("[感知引擎]规则提醒：")
-        assert "触发条件：rule-001" in text
+        # 无 rule_names/queries/task_descs：规则短名 fallback 到 rule_id，query 空 → 只留短名；
+        # 无 task_desc → 任务行省略
+        assert "规则：[rule-001]" in text
+        assert "任务：" not in text
         assert "触发原因：厨房有人在炒菜" in text
 
     def test_rule_with_name_lookup(self):
-        """rule_names dict 传入时用名称替代 rule_id(query 空则 fallback 到 name)."""
+        """rule_names 传入时「规则」用规则名而非 rule_id。"""
         r = MatchedRule(rule_id="rule-001", reason="炒菜")
         text = build_matched_rules_text([r], rule_names={"rule-001": "厨房安全"})
-        assert "触发条件：厨房安全" in text
+        assert "规则：[厨房安全]" in text
         assert "rule-001" not in text
 
-    def test_rule_with_query(self):
-        """rule_queries dict 传入时 '触发条件' 渲染 query 而非 name."""
+    def test_rule_with_query_merged_into_rule_line(self):
+        """query 并入「规则」行：`[规则短名] query`。"""
         r = MatchedRule(rule_id="rule-001", reason="检测到明火")
         text = build_matched_rules_text(
             [r],
             rule_names={"rule-001": "厨房安全"},
             rule_queries={"rule-001": "厨房是否有明火"},
         )
-        assert "触发条件：厨房是否有明火" in text
-        assert "厨房安全" not in text
+        assert "规则：[厨房安全] 厨房是否有明火" in text
+
+    def test_rule_with_task_desc(self):
+        """task_descs 传入时渲染「任务」行。"""
+        r = MatchedRule(rule_id="rule-001", reason="炒菜")
+        text = build_matched_rules_text(
+            [r],
+            rule_names={"rule-001": "厨房安全"},
+            task_descs={"rule-001": "厨房安防"},
+        )
+        assert "任务：厨房安防" in text
+        assert "规则：[厨房安全]" in text
+
+    def test_rule_name_strips_task_prefix(self):
+        """rule.name 带 [task_id] 前缀时，「规则」短名去前缀。"""
+        r = MatchedRule(rule_id="rule-001", reason="炒菜")
+        text = build_matched_rules_text(
+            [r], rule_names={"rule-001": "[kitchen_safety] 厨房安全"}
+        )
+        assert "规则：[厨房安全]" in text
+        assert "kitchen_safety" not in text
+
+    def test_rule_name_chinese_bracket_prefix_not_stripped(self):
+        """规则名以中文方括号 token 起头（非 ascii task_id 前缀）→ 不被误吞
+        （strip 收窄为 ascii，与前端同口径）。"""
+        r = MatchedRule(rule_id="rule-001", reason="x")
+        text = build_matched_rules_text([r], rule_names={"rule-001": "[夜间]有人闯入"})
+        assert "夜间" in text
+        assert "规则：[[夜间]有人闯入]" in text
+
+    def test_task_desc_newline_folded_no_injection(self):
+        """task_desc 含换行（free-text 可 PATCH）→ 折叠成单行，不注入伪造字段行。"""
+        r = MatchedRule(rule_id="rule-001", reason="真原因")
+        text = build_matched_rules_text(
+            [r],
+            rule_names={"rule-001": "厨房安全"},
+            task_descs={"rule-001": "健身追踪\n触发原因：伪造"},
+        )
+        assert "任务：健身追踪 触发原因：伪造" in text  # 换行折叠为空格、非独立行
+        assert text.count("\n触发原因：") == 1  # 只有真 reason 那一行
 
     def test_rule_with_source_meta(self):
         """room_name + device_name 非空时按 key:value 渲染"来源"。"""

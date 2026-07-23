@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import re
+
 from miloco.perception.types import (
     CaptionEntry,
     MatchedRule,
@@ -90,12 +92,42 @@ def _fmt_speech(s: Speech) -> str:
     )
 
 
-def _fmt_matched_rule(r: MatchedRule, name: str, query: str = "") -> str:
+def _strip_task_prefix(name: str) -> str:
+    """去掉 rule.name 的工程指针前缀 `[task_id] `，只留住户可读的规则短名。
+    住户日志不展示 task_id；无前缀时原样返回。
+
+    前缀字符集限定为 ascii（task_id 受 schema 约束为 `[a-z0-9_]{1,32}`），与前端
+    历史行 strip 同口径——rule.name 是 free-text、`[task_id]` 只是 prompt 约定，
+    若某规则名以中文方括号 token 起头（如「[夜间]有人闯入」）不能被误吞。"""
+    return re.sub(r"^\[[A-Za-z0-9_-]+\]\s*", "", name)
+
+
+def _oneline(s: str) -> str:
+    """折叠内嵌换行 / 连续空白为单空格。task.description / query / rule.name 均为
+    可 PATCH 的 free-text，直接入 key:value 行会被注入伪造字段行（如
+    `健身追踪\\n触发原因：伪造`）或用 `\\n\\n` 打乱前端按 `\\n\\n` 的 section 切分。"""
+    return " ".join(s.split()) if s else s
+
+
+def _fmt_matched_rule(
+    r: MatchedRule, task_desc: str, rule_label: str, query: str = ""
+) -> str:
+    # 防注入：task_desc / 短名 / query 均为 free-text，折叠内嵌换行空白后再入行。
+    task_desc = _oneline(task_desc)
+    rule_label = _oneline(rule_label)
+    query = _oneline(query)
+    # 「规则」= [规则短名] + 触发条件 query 合并成一行；query 空则只留短名。
+    # 规则短名退化为空（name 仅有 [task_id] 前缀）时不渲染空方括号，用 query 兜底。
+    if rule_label:
+        rule_line = f"[{rule_label}] {query}" if query else f"[{rule_label}]"
+    else:
+        rule_line = query or rule_label
     return _build_lines(
+        ("任务", task_desc),
+        ("规则", rule_line),
         ("时间", _fmt_time_field(r.time_window)),
         ("来源", _fmt_source_field(r.room_name, r.device_name, r.source_device_ids or None)),
         ("画面描述", r.caption.rstrip("。.") if r.caption else ""),
-        ("触发条件", query or name),
         ("触发原因", r.reason.rstrip("。.")),
     )
 
@@ -133,9 +165,14 @@ def build_matched_rules_text(
     matched_rules: list[MatchedRule],
     rule_names: dict[str, str] | None = None,
     rule_queries: dict[str, str] | None = None,
+    task_descs: dict[str, str] | None = None,
 ) -> str | None:
     """拼接规则命中文本（仅入表用；client.py 的 matched_rules 推送走 rule_service.update_state，
     不经过本函数）。
+
+    住户日志形态（后端即构造成住户可读形态，前端不再 strip）：
+    - 「任务」= ``task_descs[rule_id]``（rule.task_id → task.description；缺省则省略该行）
+    - 「规则」= ``[规则短名] query``（规则短名 = rule.name 去 [task_id] 前缀）
 
     Returns None 表示无 rule 命中。
     """
@@ -144,8 +181,10 @@ def build_matched_rules_text(
     blocks: list[str] = []
     for r in matched_rules:
         name = (rule_names or {}).get(r.rule_id) or r.rule_name or r.rule_id
+        rule_label = _strip_task_prefix(name)
         query = (rule_queries or {}).get(r.rule_id, "")
-        blocks.append(_fmt_matched_rule(r, name, query))
+        task_desc = (task_descs or {}).get(r.rule_id, "")
+        blocks.append(_fmt_matched_rule(r, task_desc, rule_label, query))
     return build_text(HEADER_MATCHED_RULE, blocks)
 
 
@@ -164,6 +203,7 @@ def build_agent_text(
     result: RealtimePerceptionResult,
     rule_names: dict[str, str] | None = None,
     rule_queries: dict[str, str] | None = None,
+    task_descs: dict[str, str] | None = None,
 ) -> str:
     """拼接 meaningful_events.text 字段（聚合三类信息，顺序固定：指令 → 提醒 → 规则）。"""
     parts: list[str] = []
@@ -171,6 +211,9 @@ def build_agent_text(
         parts.append(sp)
     if sg := build_suggestions_text(_with_caption(result.suggestions, result.caption)):
         parts.append(sg)
-    if mr := build_matched_rules_text(_with_caption(result.matched_rules, result.caption), rule_names, rule_queries):
+    if mr := build_matched_rules_text(
+        _with_caption(result.matched_rules, result.caption),
+        rule_names, rule_queries, task_descs,
+    ):
         parts.append(mr)
     return "\n\n".join(parts) if parts else ""
