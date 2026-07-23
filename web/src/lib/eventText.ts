@@ -48,8 +48,9 @@ export function humanizeRulesInText(
 
       // --- 旧格式 v2：统一 `[感知引擎] 提醒:` 前缀 ---
       if (section.startsWith("[感知引擎] 提醒:")) {
+        // 前缀限定 ascii，与其余三处 strip 同口径（不误吞中文方括号规则名）
         return section.replace(
-          /检测到：\[[^\]]+\]\s*/g,
+          /检测到：\[[A-Za-z0-9_-]+\]\s*/g,
           "检测到：",
         );
       }
