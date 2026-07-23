@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -58,14 +59,36 @@ from .home_profile_loader import get_home_profile_prefix, home_profile_has_pets
 from .pet_refs import build_pet_reference_content
 from .provider import LocalMediaInfo, OmniProviderAdapter
 
+# 【测试分支 test/pet-prompt-force 专用】首次强制注入时打一条 warning，避免回归结果被误读为生产行为。
+_pet_prompt_force_logged = False
+
 
 def _has_pets_for_scene() -> bool:
-    """宠物注入门：家庭档案有「## 宠物」段 **且** pet_recognition 开启。
+    """【测试分支 test/pet-prompt-force】默认**强制注入** pet prompt，供感知回归测试。
 
-    直接查 feature（不只靠档案渲染时序）——关功能后档案尚未重渲的窗口里也立即停注入，省 token。
-    统一驱动 caption/suggestions/matched_rules 命名纪律、参考图、pet_identities 的注入。
+    正常生产逻辑是「家庭档案有『## 宠物』段 且 pet_recognition 开启」才注入；本分支把它覆盖为
+    **无条件 True**，以测量「为宠物新增的 prompt（pet_identities 字段 + PET_NAMING_SPEC 命名纪律 +
+    参考图门）对 caption / 人物 identities / matched_rules / suggestions 等感知输出的影响」。
+    - 开箱即用：checkout + 部署即生效，无需任何 env / 配置。
+    - 同一 build 取「关闭基线」做 A/B：设 ``MILOCO_FORCE_PET_PROMPT=0`` → 退回生产 gating
+      （家庭档案有『## 宠物』段 且 pet_recognition 开启才注入；默认二者皆无 → 等价 pet prompt 关）。
+    ⚠️ 本改动仅供回归测试、不并入 main；生产逻辑见 git 主线（home_profile_has_pets() and pet_recognition）。
+
+    注：pet_identities 字段 + PET_NAMING_SPEC 文字**无条件注入**；但它们引用的「## 宠物」名单与参考图
+    是**数据依赖**（名单由 home_profile 渲染、图读 PetLibrary）——想测完整生产形态需先注册 1 只测试宠物，
+    否则只注入"指令文本"而无名单/图。详见 PET_PROMPT_FORCE_TEST.md。
     """
-    return home_profile_has_pets() and get_settings().features.pet_recognition
+    global _pet_prompt_force_logged
+    if os.environ.get("MILOCO_FORCE_PET_PROMPT") == "0":
+        # A/B 关闭基线：退回生产 gating（默认 pet_recognition 关 → 不注入，等价 main 行为）
+        return home_profile_has_pets() and get_settings().features.pet_recognition
+    if not _pet_prompt_force_logged:
+        logger.warning(
+            "【test/pet-prompt-force】pet prompt FORCED ON——无条件注入 pet_identities / "
+            "PET_NAMING_SPEC / 参考图门，仅供感知回归测试、非生产行为；设 MILOCO_FORCE_PET_PROMPT=0 可关"
+        )
+        _pet_prompt_force_logged = True
+    return True
 
 RouteType = Literal["video", "audio"]
 
