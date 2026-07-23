@@ -47,6 +47,13 @@ describe("humanizeRulesInText", () => {
     expect(humanizeRulesInText(text)).toContain("触发规则：[夜间]有人闯入");
   });
 
+  it("旧格式 v2：检测到 ascii [task_id] 前缀被 strip、中文方括号保留", () => {
+    const ascii = "[感知引擎] 提醒:\n检测到：[kitchen] 厨房安全";
+    expect(humanizeRulesInText(ascii)).toContain("检测到：厨房安全");
+    const cn = "[感知引擎] 提醒:\n检测到：[夜间]有人闯入";
+    expect(humanizeRulesInText(cn)).toContain("检测到：[夜间]有人闯入");
+  });
+
   it("旧格式 v1：rule_name ascii [task_id] 前缀被 strip、中文方括号保留", () => {
     const asciiPrefix =
       '[感知引擎] 命中以下规则:\n1. {"rule_id":"r1","rule_name":"[kitchen] 厨房安全","reason":"x"}';
