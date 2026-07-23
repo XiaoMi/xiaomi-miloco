@@ -1,0 +1,20 @@
+[
+  {
+    "name": "饼干",
+    "species": "猫",
+    "appearance": "一只黑白双色的短毛猫，面部黑白分明，背部为大面积黑色，胸腹及四肢为白色。",
+    "sheet": "猫/饼干_sheet.jpg"
+  },
+  {
+    "name": "芝麻",
+    "species": "猫",
+    "appearance": "黑白双色短毛猫，下巴至胸口有白色围脖状毛发，四爪为白色。",
+    "sheet": "猫/芝麻_sheet.jpg"
+  },
+  {
+    "name": "糯米",
+    "species": "狗",
+    "appearance": "一只灰白双色的长毛犬，尾巴蓬松，四肢为白色。",
+    "sheet": "狗/糯米_sheet.jpg"
+  }
+]

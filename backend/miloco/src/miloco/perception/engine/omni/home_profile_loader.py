@@ -10,24 +10,34 @@ import logging
 
 from miloco.home_profile.store import profile_md_path
 
+from ._pet_force_fixture import pet_samples_on, synthetic_pet_section
+
 logger = logging.getLogger(__name__)
 
 
 def get_home_profile_prefix() -> str:
-    """返回家庭背景信息（Home Profile）字符串，注入到 system prompt L1 层。"""
+    """返回家庭背景信息（Home Profile）字符串，注入到 system prompt L1 层。
+
+    【test/pet-prompt-force】``pet_samples_on()`` 时，把内嵌样本合成的「## 宠物」名单追加到末尾
+    （即便无真实 profile.md 也注入），供 pet_identities 有名单可对——仅本测试分支，生产见 git 主线。
+    """
     profile_file = profile_md_path()
-    if not profile_file.exists():
-        return ""
+    body = ""
+    if profile_file.exists():
+        try:
+            body = profile_file.read_text("utf-8").strip()
+        except Exception:
+            logger.warning("读取家庭档案失败: %s", profile_file, exc_info=True)
+            body = ""
 
-    try:
-        content = profile_file.read_text("utf-8")
-    except Exception:
-        logger.warning("读取家庭档案失败: %s", profile_file, exc_info=True)
-        return ""
-
-    body = content.strip()
-    if not body:
-        return ""
+    # pet_samples_on 且真实档案里**没有**「## 宠物」段时，才补合成名单
+    # （注册了真实宠物 → 用真实名单、不叠加合成，与 <pets> 的「真实优先」一致）。
+    if pet_samples_on() and not any(
+        line.strip() == "## 宠物" for line in body.splitlines()
+    ):
+        section = synthetic_pet_section()
+        if section:
+            body = f"{body}\n\n{section}".strip() if body else section
     return body
 
 

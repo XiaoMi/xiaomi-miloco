@@ -36,6 +36,7 @@ from miloco.perception.engine.identity.gallery_composite import (
 )
 from miloco.perception.engine.types import IdentityPacket, IdentityTarget, OmniContext
 
+from ._pet_force_fixture import pet_samples_on, synthetic_pets_content
 from .constants import (
     _COMMONSENSE,
     _COMMONSENSE_AUDIO,
@@ -89,6 +90,15 @@ def _has_pets_for_scene() -> bool:
         )
         _pet_prompt_force_logged = True
     return True
+
+
+def _pet_reference_content_forced(max_pets: int) -> list[dict]:
+    """【test/pet-prompt-force】真实 PetLibrary 有参考图就用真实；空且 pet_samples_on() → 用内嵌样本 <pets>。"""
+    real = build_pet_reference_content(max_pets=max_pets)
+    if real or not pet_samples_on():
+        return real
+    return synthetic_pets_content(max_pets)
+
 
 RouteType = Literal["video", "audio"]
 
@@ -757,7 +767,7 @@ def _build_fused_user_content(
     # 4.5. 已登记宠物多姿态参考图（P2）——仅 has_pets 时注入（用上游 scene 已算好的值，不重读盘）；
     # 读盘/编码失败或无图则空，退化为纯文字（PET_NAMING_SPEC + 档案「## 宠物」段仍在，不阻断识别）。
     if has_pets:
-        content.extend(build_pet_reference_content(max_pets=cfg.max_pet_refs))
+        content.extend(_pet_reference_content_forced(cfg.max_pet_refs))
 
     # 5. 主 video
     # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短
