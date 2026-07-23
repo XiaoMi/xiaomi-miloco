@@ -30,11 +30,20 @@ class EventEmbedder:
     def __init__(self, models_dir: str | Path):
         from tokenizers import Tokenizer  # 延迟导入：缺依赖时由调用方降级处理
 
+        from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
+
         models_dir = Path(models_dir)
         self._tok = Tokenizer.from_file(str(models_dir / _TOKENIZER_FILE))
         self._tok.enable_truncation(max_length=_MAX_TOKENS)
+        # 与 speech_vad 同款:这条 session 不走 make_session 工厂、强制 CPU EP(int8 算子
+        # CoreML 支持不全),故显式补 KleidiAI opt-out——ARM CPU EP 上 KleidiAI 也含 int8
+        # GEMM 微内核,与 issue #429 同源、同平台条件。1.27 已上游根治,此为防御,保持
+        # "所有自建 session 统一调 apply_kleidiai_opt_out"不变量(见其 docstring)。
+        opts = ort.SessionOptions()
+        apply_kleidiai_opt_out(opts)
         self._sess = ort.InferenceSession(
             str(models_dir / _MODEL_FILE),
+            sess_options=opts,
             providers=["CPUExecutionProvider"],
         )
         self._has_token_type = "token_type_ids" in {i.name for i in self._sess.get_inputs()}
