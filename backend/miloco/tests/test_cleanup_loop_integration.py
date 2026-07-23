@@ -1,7 +1,7 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""集成测试:_log_cleanup_loop 追加的两块清理(D3-T11).
+"""集成测试:_daily_maintenance_loop 追加的两块清理(D3-T11).
 
 直接跑一轮 cleanup 逻辑(不走 24h sleep),验证:
 - meaningful_events.delete_before_days 被调用
@@ -44,8 +44,8 @@ def isolated_env(tmp_path, monkeypatch):
 
 
 async def _run_one_cycle():
-    """运行 _log_cleanup_loop 的一轮 body(跳过初始 60s 与末尾 86400s 等待)."""
-    # 直接调 main.py 的 _log_cleanup_loop,但 patch 掉两个 sleep
+    """运行 _daily_maintenance_loop 的一轮 body(跳过初始 60s 与末尾 86400s 等待)."""
+    # 直接调 main.py 的 _daily_maintenance_loop,但 patch 掉两个 sleep
     from miloco import main as main_module
 
     real_sleep = asyncio.sleep
@@ -61,7 +61,7 @@ async def _run_one_cycle():
 
     with patch.object(asyncio, "sleep", side_effect=_short_sleep):
         try:
-            await main_module._log_cleanup_loop()
+            await main_module._daily_maintenance_loop()
         except asyncio.CancelledError:
             pass
 

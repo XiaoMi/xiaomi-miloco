@@ -8,7 +8,7 @@ recurring + 活跃行，按 ``window`` 边界（day/week/month）判断今天是
 到点则调 ``TaskRecordService.rollover_one`` 完成 archive + insert new。
 
 设计选择（偏离 plan §P3，原因记在 commit message）：
-- 不引入 ``apscheduler``——沿用 ``_log_cleanup_loop`` 的 ``asyncio.sleep`` 模式，
+- 不引入 ``apscheduler``——沿用 ``_daily_maintenance_loop`` 的 ``asyncio.sleep`` 模式，
   在 ``main.py`` lifespan 中 ``create_task`` 一个 daemon coroutine。
 - ``recurring_pattern`` 不做 cron-like 解析（plugin 端无此 parser，spec 也未
   约束格式）——只识别 ``{window: "day|week|month|longterm"}`` 这一种结构。

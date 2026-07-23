@@ -7,6 +7,7 @@ Provides FastAPI application setup, middleware configuration, and server startup
 """
 
 import asyncio
+import ctypes
 import functools
 import logging
 import os
@@ -77,9 +78,30 @@ logger = logging.getLogger(__name__)
 # add_done_callback 自清,确定性比"靠 generator frame 保活"强。
 _BG_TASKS: set[asyncio.Task[object]] = set()
 
+# glibc 独有的 malloc_trim:把各 arena 里 freed-but-not-returned 的内存还给 OS。
+# musl / macOS 的 libc 无此符号,探测失败置 None → _trim_malloc_arenas 变 no-op。
+# 用符号探测而非判发行版:platform.libc_ver() 在 musl 上不可靠。
+try:
+    _malloc_trim = ctypes.CDLL("libc.so.6", use_errno=True).malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _malloc_trim = None
 
-async def _log_cleanup_loop() -> None:
-    """Background task: clean up perception/rule logs + observability tables/files."""
+
+def _trim_malloc_arenas() -> None:
+    """把 glibc arena 里 freed-but-not-returned 的内存还给 OS;非 glibc 时 no-op。
+
+    decoder 每帧产 MB 级 BGR buffer,高频大块 malloc/free 在 glibc per-thread arena
+    里碎片化、freed 块留在 free-list 不还 OS,长跑 RSS 只涨不落(真机实测单次可吐
+    ~880MB)。supervisord 的 MALLOC_* 环境变量负责预防,这里周期回收残余。
+    """
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+
+
+async def _daily_maintenance_loop() -> None:
+    """每日进程维护:日志/DB/快照清理 + glibc arena 内存回收。"""
     settings = get_settings()
     mgr = get_manager()
     obs_db_path = settings.directories.workspace_dir / "observability.db"
@@ -170,6 +192,13 @@ async def _log_cleanup_loop() -> None:
                 conn.execute("PRAGMA incremental_vacuum(10000)")
         except Exception as e:
             logger.error("Miloco DB incremental_vacuum failed: %s", e)
+        # glibc arena 内存回收:与上面 incremental_vacuum 同理,把 freed 内存还 OS。
+        # to_thread:trim ~GB arena 可能耗时百 ms 级,别阻塞 event loop。
+        try:
+            await asyncio.to_thread(_trim_malloc_arenas)
+            logger.info("malloc_trim done")
+        except Exception as e:
+            logger.error("malloc_trim failed: %s", e)
         await asyncio.sleep(86400)
 
 
@@ -397,7 +426,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _BG_TASKS.add(_onboarding_task)
     _onboarding_task.add_done_callback(_BG_TASKS.discard)
 
-    cleanup_task = asyncio.create_task(_log_cleanup_loop())
+    maintenance_task = asyncio.create_task(_daily_maintenance_loop())
 
     rollover_task = asyncio.create_task(_rollover_daily_loop())
     _BG_TASKS.add(rollover_task)
@@ -412,9 +441,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     watchdog.enter_shutdown()
 
-    cleanup_task.cancel()
+    maintenance_task.cancel()
     try:
-        await cleanup_task
+        await maintenance_task
     except asyncio.CancelledError:
         pass
 
