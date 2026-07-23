@@ -38,14 +38,18 @@ from miloco.miot.filter import (
     allowed_home_ids,
     camera_prompts,
     clear_camera_prompt,
+    denied_audio_camera_dids,
     denied_camera_dids,
     denied_channels_of,
+    denied_video_camera_dids,
     filter_by_home,
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
     set_camera_prompt,
+    set_cameras_audio_in_use,
     set_cameras_channels_in_use,
+    set_cameras_video_in_use,
     set_cameras_voice_in_use,
     set_homes_in_use,
     synthetic_camera_did,
@@ -286,6 +290,8 @@ class MiotService:
         self._kv_repo.delete(ScopeConfigKeys.HOME_WHITE_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_VIDEO_BLACK_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_AUDIO_BLACK_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
         self._lru.clear()
 
@@ -1196,10 +1202,14 @@ class MiotService:
         ``in_use``=**当下真正开启**（= 该相机在 select_active 的活跃集里：默认开·未拉黑 +
         三态满足 + 上限≤4）——离线/不可达/镜头关的相机 in_use=false，不显示为开；超上限的
         也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
-        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
-        ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
+        ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**）；
+        「生效态」= ``in_use and voice_in_use`` 由前端派生。通过 ``toggle_camera`` 的
+        ``audio_enabled`` / ``in_use`` 别名操作时同步写入拾音白名单，保持两路一致。
         """
+        self._migrate_v1_blacklist_if_needed()
         voice_allowed = voice_allowed_camera_dids(self._kv_repo)
+        video_denied = denied_video_camera_dids(self._kv_repo)
+        audio_denied = denied_audio_camera_dids(self._kv_repo)
         prompt_map = camera_prompts(self._kv_repo)
         connected = self._connected_camera_dids()
         cameras = filter_by_home(
@@ -1242,6 +1252,9 @@ class MiotService:
                 # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。拾音按整台存
                 # （只球机/ch0 有 mic），前端在无 mic 的通道上隐藏该开关。
                 "voice_in_use": did in voice_allowed,
+                # v2 per-modality 感知开关（整台粒度，物理 did）：
+                "video_enabled": did not in video_denied,
+                "audio_enabled": did not in audio_denied,
             }
             for ch in range(channel_count):
                 syn_did = synthetic_camera_did(did, ch, channel_count)
@@ -1262,11 +1275,13 @@ class MiotService:
         return out
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
-        """批量切换相机**某通道**的启用状态。每项 {"did": str, "in_use": bool}。
+        """批量切换相机感知开关（全拆通道级 + v2 per-modality）。
 
-        全拆语义：启停按**通道**走（每路一台独立相机）。``did`` 可为合成通道 did
-        （``cam:ch1``，前端逐路开关）或裸物理 did；裸 did 对多通道相机 = 该台所有通道一起，
-        对单摄 = 它自己。全部校验通过后按 did 整台重算+覆盖写黑名单（D3）。
+        每项形如 ``{"did": str, "in_use"?: bool, "video_enabled"?: bool, "audio_enabled"?: bool}``。
+        - ``in_use``：控制该通道（合成 did / 裸 did → 整台全通道）的连接激活态（写 CAMERA_BLACK_LIST_KEY）
+        - ``video_enabled``：per-modality 视频感知开关（写 CAMERA_VIDEO_BLACK_LIST_KEY，整台粒度）
+        - ``audio_enabled``：per-modality 音频感知开关（写 CAMERA_AUDIO_BLACK_LIST_KEY，整台粒度）
+        三个字段都可选；omitted = 不改。全拆语义：启停按**通道**走（每路一台独立相机）。
         """
         cameras = await self._miot_proxy.get_cameras() or {}
 
@@ -1279,6 +1294,9 @@ class MiotService:
         # （`:ch` 后为空/非数字）或**越界通道**（≥ channel_count）都当非法 did 拒——否则前者
         # int() 崩 500、后者会把死条目写进黑名单（读侧只遍历 range(cc) 永远清不掉）。
         updates: dict[str, dict[int, bool]] = {}
+        video_updates: dict[str, bool] = {}
+        audio_updates: dict[str, bool] = {}
+        voice_updates: dict[str, bool] = {}
         unknown: list[str] = []
         bad_channel: list[str] = []
         for it in items:
@@ -1301,9 +1319,29 @@ class MiotService:
                 chans = [ch]
             else:
                 chans = list(range(cc))
-            in_use = bool(it["in_use"])
-            for c in chans:
-                updates.setdefault(pdid, {})[c] = in_use
+            if "in_use" in it:
+                in_use = bool(it["in_use"])
+                for c in chans:
+                    updates.setdefault(pdid, {})[c] = in_use
+                if "video_enabled" not in it:
+                    video_updates[pdid] = in_use
+                if "audio_enabled" not in it:
+                    audio_updates[pdid] = in_use
+                    voice_updates[pdid] = in_use
+            if "video_enabled" in it:
+                video = bool(it["video_enabled"])
+                video_updates[pdid] = video
+                # 开启视频感知时自动激活通道（否则相机不连接、无实时画面）
+                if video and "in_use" not in it:
+                    for c in chans:
+                        updates.setdefault(pdid, {})[c] = True
+            if "audio_enabled" in it:
+                audio = bool(it["audio_enabled"])
+                audio_updates[pdid] = audio
+                voice_updates[pdid] = audio
+                if audio and "in_use" not in it:
+                    for c in chans:
+                        updates.setdefault(pdid, {})[c] = True
         if unknown:
             raise ValidationException(
                 f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
@@ -1379,18 +1417,60 @@ class MiotService:
                     f"请先禁用一路再启用新的"
                 )
 
-        _, changed = set_cameras_channels_in_use(
-            self._kv_repo, updates, {p: _cc(p) for p in updates}
-        )
+        channels_changed = False
+        if updates:
+            _, channels_changed = set_cameras_channels_in_use(
+                self._kv_repo, updates, {p: _cc(p) for p in updates}
+            )
+        video_changed = False
+        if video_updates:
+            enable_v = [p for p, v in video_updates.items() if v]
+            disable_v = [p for p, v in video_updates.items() if not v]
+            if disable_v:
+                _, video_changed = set_cameras_video_in_use(self._kv_repo, disable_v, False)
+            if enable_v:
+                _, c = set_cameras_video_in_use(self._kv_repo, enable_v, True)
+                video_changed = video_changed or c
+        audio_changed = False
+        if audio_updates:
+            enable_a = [p for p, v in audio_updates.items() if v]
+            disable_a = [p for p, v in audio_updates.items() if not v]
+            if disable_a:
+                _, audio_changed = set_cameras_audio_in_use(self._kv_repo, disable_a, False)
+            if enable_a:
+                _, c = set_cameras_audio_in_use(self._kv_repo, enable_a, True)
+                audio_changed = audio_changed or c
+        if voice_updates:
+            enable_voice = [p for p, v in voice_updates.items() if v]
+            disable_voice = [p for p, v in voice_updates.items() if not v]
+            if disable_voice:
+                set_cameras_voice_in_use(self._kv_repo, disable_voice, False)
+            if enable_voice:
+                set_cameras_voice_in_use(self._kv_repo, enable_voice, True)
+        # 如果某摄像头两路感知都关了，自动停用通道（释放连接资源、预览消失）
+        all_affected = set(video_updates) | set(audio_updates)
+        if all_affected:
+            video_denied = denied_video_camera_dids(self._kv_repo)
+            audio_denied = denied_audio_camera_dids(self._kv_repo)
+            both_off = [p for p in all_affected if p in video_denied and p in audio_denied]
+            if both_off:
+                both_updates = {p: {c: False for c in range(_cc(p))} for p in both_off}
+                _, c = set_cameras_channels_in_use(
+                    self._kv_repo, both_updates, {p: _cc(p) for p in both_off}
+                )
+                channels_changed = channels_changed or c
+        changed = channels_changed or video_changed or audio_changed
         if changed:
-            # 先 refresh_cameras：按新 KV(黑名单)建/销 camera manager——两路都关的相机
-            # 销毁 manager，停掉 native PPCS 会话+解码线程；仍有活跃路的保留。
-            # 再 _sync_camera_adapter：perception 按新集连/断订阅。顺序不可换。
-            await self._miot_proxy.refresh_cameras()
+            if channels_changed:
+                # 先 refresh_cameras：按新 KV(黑名单)建/销 camera manager——两路都关的相机
+                # 销毁 manager，停掉 native PPCS 会话+解码线程；仍有活跃路的保留。
+                await self._miot_proxy.refresh_cameras()
+            # _sync_camera_adapter：perception 按新集连/断订阅 + resync per-modality 订阅。
             await self._sync_camera_adapter()
         # 返回受影响的相机（按物理 did），结构与 list_cameras_with_state 一致。
         all_cameras = await self.list_cameras_with_state()
-        affected = [cam for cam in all_cameras if cam["did"] in set(updates)]
+        affected_dids = set(updates) | set(video_updates) | set(audio_updates)
+        affected = [cam for cam in all_cameras if cam["did"] in affected_dids]
         return affected
 
     async def toggle_camera_voice(self, items: list[dict]) -> list[dict]:
@@ -1525,6 +1605,10 @@ class MiotService:
         affected = [cam for cam in all_cameras if cam["did"] in touched_physical]
         return affected
 
+    def _migrate_v1_blacklist_if_needed(self) -> None:
+        from miloco.miot.filter import migrate_v1_blacklist
+        migrate_v1_blacklist(self._kv_repo)
+
     def _camera_adapter(self):
         """Lazily fetch the perception camera adapter; returns None if unavailable."""
         try:
@@ -1540,12 +1624,14 @@ class MiotService:
         return set(adapter.get_connected_devices().keys()) if adapter else set()
 
     async def _sync_camera_adapter(self) -> None:
-        """Hot-sync camera connections after a scope change."""
+        """Hot-sync camera connections after a scope change (channel-level + per-modality)."""
+        self._migrate_v1_blacklist_if_needed()
         adapter = self._camera_adapter()
         if adapter is None:
             return
         try:
             await adapter.sync_devices()
+            await adapter.resync_subscriptions()
         except Exception as e:
             logger.warning("Camera adapter sync after scope change failed: %s", e)
 

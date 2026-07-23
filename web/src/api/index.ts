@@ -7,6 +7,8 @@
  */
 
 import * as realImpl from "./real";
+
+export type CameraToggleItem = realImpl.CameraToggleItem;
 import { apiFetch } from "./client";
 import type {
   ActivityEvent,
@@ -307,10 +309,9 @@ export async function refreshCameraOnline(
 }
 
 export async function toggleScopeCamera(
-  dids: string[],
-  inUse: boolean,
+  items: CameraToggleItem[],
 ): Promise<void> {
-  return impl.realToggleScopeCamera(dids, inUse);
+  return impl.realToggleScopeCamera(items);
 }
 
 // 切换相机拾音开关（PUT /api/miot/scope/cameras/voice；关闭 = 声音完全不被处理）。
@@ -648,4 +649,11 @@ export async function updateSchedulerConfig(
     { method: "PUT", body: JSON.stringify(input) },
   );
   return r.data;
+}
+
+export async function perceiveQuery(
+  sources: string[],
+  query: string,
+): Promise<string> {
+  return realImpl.realPerceiveQuery(sources, query);
 }

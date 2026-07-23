@@ -17,10 +17,6 @@ import {
   refreshCameraOnline,
   pausePerception,
   resumePerception,
-  setScopeCameraPrompt,
-  clearScopeCameraPrompt,
-  toggleScopeCamera,
-  toggleScopeCameraVoice,
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
@@ -224,58 +220,16 @@ function MainApp() {
                  不传 onPersonClick → PersonChip 降级成 div（无 hover/点击反馈）,
                  防住户看到可点 button 形态点了无反馈以为系统坏。 */
               onJumpUsage={() => setActiveTab("usage")}
-              onToggleCameras={async (dids, inUse) => {
-                try {
-                  await toggleScopeCamera(dids, inUse);
-                } catch (e) {
-                  toast(
-                    e instanceof Error ? e.message : t("common.switchFailed"),
-                    "warn",
-                  );
-                }
-                // 三个 reload —— LivePlayer iframe src 用 useRef 按 cameraDid 锁住,
+              // v2：PerceptionDeviceTable 内部自己调 toggleScopeCamera(per-modality),
+              // 这里只挂一个 reload trigger 给"用户改了感知状态后同步刷新"。
+              onToggleCameras={() => {
+                // LivePlayer iframe src 用 useRef 按 cameraDid 锁住,
                 // channelByDid useMemo + iframe React diff 双层防 src 变化触发
                 // iframe 重 mount,reload cameras 安全。新接入 cam 时 cameras.reload
                 // 才能拿到 channel,不 reload 会让多通道 cam 永远兜底 channel=0。
                 scopeCameras.reload();
                 cameras.reload();
                 status.reload();
-              }}
-              onToggleCameraVoice={async (did, voiceInUse) => {
-                try {
-                  await toggleScopeCameraVoice([did], voiceInUse);
-                } catch (e) {
-                  toast(
-                    e instanceof Error ? e.message : t("common.switchFailed"),
-                    "warn",
-                  );
-                }
-                // 拾音开关只改 KV 偏好,不动投喂/流(音频在引擎入口按 KV 实时剥离),
-                // 只需 reload scopeCameras 拿新 voiceInUse。
-                scopeCameras.reload();
-              }}
-              onSetCameraPrompt={async (did, text) => {
-                try { await setScopeCameraPrompt(did, text); }
-                catch (e) {
-                  toast(e instanceof Error ? e.message : t("common.switchFailed"), "warn");
-                  throw e;
-                }
-                scopeCameras.reload();
-              }}
-              onClearCameraPrompt={async (did) => {
-                try { await clearScopeCameraPrompt(did); }
-                catch (e) {
-                  toast(e instanceof Error ? e.message : t("common.switchFailed"), "warn");
-                  throw e;
-                }
-                scopeCameras.reload();
-              }}
-              onRefresh={async () => {
-                // 手动刷新:force 绕过 8s 节流打后端刷相机状态,再 await 列表重拉落地——
-                // reload() 的 Promise 在 listScopeCameras settle 后 resolve,故 onRefresh 完成
-                // = 列表已更新到位,刷新按钮转圈据此精确覆盖全程(不被其他 reload 借用)。
-                await refreshCameraOnline(homeId, true).catch(() => {});
-                await scopeCameras.reload();
               }}
             />
           </div>

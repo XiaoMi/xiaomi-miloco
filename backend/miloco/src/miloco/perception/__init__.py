@@ -75,6 +75,10 @@ async def init_perception_module(miot_proxy, kv_repo):
 
     get_omni_circuit_breaker().register_listener(_emit_omni_health)
 
+    # 7.2 v1→v2 黑名单迁移（必须跑在 engine start 之前）
+    from miloco.miot.filter import migrate_v1_blacklist
+    migrate_v1_blacklist(kv_repo)
+
     # 8. 启动引擎 —— 尊重用户「休息」意图：上次被手动暂停则不自动拉起，
     #    否则后台每次重启都会无视暂停、继续烧 token。
     from miloco.perception.engine_state import is_perception_enabled

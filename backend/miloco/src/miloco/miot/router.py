@@ -521,7 +521,15 @@ async def toggle_scope_camera(
     request: CameraToggleRequest, current_user: str = Depends(verify_token)
 ):
     data = await manager.miot_service.toggle_camera(
-        [{"did": i.did, "in_use": i.in_use} for i in request.items]
+        [
+            {k: v for k, v in {
+                "did": i.did,
+                "in_use": i.in_use,
+                "video_enabled": i.video_enabled,
+                "audio_enabled": i.audio_enabled,
+            }.items() if v is not None}
+            for i in request.items
+        ]
     )
     return NormalResponse(code=0, message="ok", data=data)
 
