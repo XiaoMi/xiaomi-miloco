@@ -41,4 +41,21 @@ describe("humanizeRulesInText", () => {
       "[感知引擎]规则提醒：\n触发条件：[夜间]是否有人闯入\n触发原因：x";
     expect(humanizeRulesInText(text)).toContain("触发条件：[夜间]是否有人闯入");
   });
+
+  it("旧数据 v3：触发规则中文方括号 token 不被误 strip（ascii 口径）", () => {
+    const text = "[感知引擎]规则提醒：\n触发规则：[夜间]有人闯入\n触发原因：x";
+    expect(humanizeRulesInText(text)).toContain("触发规则：[夜间]有人闯入");
+  });
+
+  it("旧格式 v1：rule_name ascii [task_id] 前缀被 strip、中文方括号保留", () => {
+    const asciiPrefix =
+      '[感知引擎] 命中以下规则:\n1. {"rule_id":"r1","rule_name":"[kitchen] 厨房安全","reason":"x"}';
+    const outAscii = humanizeRulesInText(asciiPrefix);
+    expect(outAscii).toContain("厨房安全");
+    expect(outAscii).not.toContain("kitchen");
+
+    const cnBracket =
+      '[感知引擎] 命中以下规则:\n1. {"rule_id":"r1","rule_name":"[夜间]有人闯入","reason":"x"}';
+    expect(humanizeRulesInText(cnBracket)).toContain("夜间");
+  });
 });

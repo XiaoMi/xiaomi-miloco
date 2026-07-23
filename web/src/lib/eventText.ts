@@ -15,7 +15,9 @@
  * - 旧格式 v1(JSON 行): `1. {"rule_id":"...","reason":"..."}` → 反查 rule_names
  */
 function stripTaskPrefix(name: string): string {
-  return name.replace(/^\[[^\]]+\]\s*/, "");
+  // 前缀限定 ascii（task_id 受后端 schema 约束为 [a-z0-9_]），与 Python
+  // _strip_task_prefix 同口径——不误吞以中文方括号 token 起头的规则名。
+  return name.replace(/^\[[A-Za-z0-9_-]+\]\s*/, "");
 }
 
 const PERCEPTION_HEADERS = [
@@ -38,7 +40,7 @@ export function humanizeRulesInText(
         // 新格式（任务 / 规则）后端已 strip、无需处理；下面只清历史旧行的
         // [task_id] 前缀。行内空白用 [^\S\n]* 而非 \s*：短名退化成「仅前缀」时不吞换行。
         return section
-          .replace(/触发规则：\[[^\]]+\][^\S\n]*/g, "触发规则：")
+          .replace(/触发规则：\[[A-Za-z0-9_-]+\][^\S\n]*/g, "触发规则：")
           // 旧数据：query 空时「触发条件」兜底成 [task_id] 规则名。前缀限定 task_id 形态
           // （ascii snake/kebab），放过以中文方括号 token 开头的合法 query（如「[夜间]…」）。
           .replace(/触发条件：\[[A-Za-z0-9_-]+\][^\S\n]*/g, "触发条件：");
