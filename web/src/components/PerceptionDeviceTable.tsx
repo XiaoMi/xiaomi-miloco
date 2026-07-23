@@ -115,7 +115,7 @@ export function PerceptionDeviceTable({ cameras, maxEnabledCameras, onChanged }:
   const requestMaster = (did: string, next: boolean) => {
     const cam = cameras.find((c) => c.did === did);
     if (!cam) return;
-    if (next && cam.audioEnabled === false && !isAudioOnConfirmed()) {
+    if (next && cam.voiceInUse === false && !isAudioOnConfirmed()) {
       setDontRemind(false);
       setPendingAudioOn({ name: cam.name, run: () => { void runMaster(did, true); } });
       return;
@@ -159,7 +159,7 @@ export function PerceptionDeviceTable({ cameras, maxEnabledCameras, onChanged }:
       toast(t("hero.table.atCapacityHint", { n: maxEnabledCameras }), "warn");
       return;
     }
-    if (enable && !isAudioOnConfirmed() && online.some((c) => !c.audioEnabled)) {
+    if (enable && !isAudioOnConfirmed() && online.some((c) => !c.voiceInUse)) {
       setDontRemind(false);
       setPendingAudioOn({ name: t("hero.bulkAllOn"), run: () => { void executeBulk(true); } });
       return;
