@@ -29,3 +29,37 @@ class TestEvaluateSpeechDegrade:
         cfg = GateConfig(speech_vad_enabled=True)
         has, prob = evaluate_speech(np.zeros(100, dtype=np.int16), cfg)
         assert has is False
+
+
+class TestVadSessionKleidiAIOptOut:
+    """主线 1:自建 VAD session(不走 make_session)也必须补 KleidiAI opt-out(#429 加固)。"""
+
+    def test_get_session_applies_kleidiai_opt_out(self, monkeypatch):
+        import onnxruntime as ort
+        import pytest
+
+        from miloco.config import get_settings
+        from miloco.perception.inference import ort_utils
+
+        model = get_settings().directories.models_dir / speech_vad._MODEL_FILENAME
+        if not model.is_file():
+            pytest.skip(f"silero VAD 模型缺失({model})")
+
+        # 重置单例强制重建(monkeypatch 会在测试后还原)
+        monkeypatch.setattr(speech_vad, "_session", None)
+        monkeypatch.setattr(speech_vad, "_load_failed", False)
+        # stub 真实 session 构建,避免加载开销
+        monkeypatch.setattr(ort, "InferenceSession", lambda *a, **k: object())
+        # spy 共享 helper:确认自建 session 路径确实调用了它
+        calls: list = []
+        real = ort_utils.apply_kleidiai_opt_out
+
+        def _spy(opts):
+            calls.append(opts)
+            return real(opts)
+
+        monkeypatch.setattr(ort_utils, "apply_kleidiai_opt_out", _spy)
+
+        sess = speech_vad._get_session()
+        assert sess is not None, "模型存在时应建成 session"
+        assert len(calls) == 1, "自建 VAD session 未调用 apply_kleidiai_opt_out"

@@ -141,3 +141,30 @@ def test_drain_single_window_no_skip_stats():
 
     buf.drain_ready()
     assert buf.consume_drop_stats() == (0, 0, 0, None)
+
+
+def test_keep_action_trims_drained_to_max_windows():
+    """keep 模式下 drain 也必须把 _drained 裁到 max_windows(issue #429 帧级泄漏加固)。
+
+    正向覆盖主线 2 的行为变更:此前裁剪只在 full_action != "keep" 分支,keep 下 _drained
+    永不收敛。用 max_windows=2 且 drain 5 个窗,确保真正走到 popleft(而非卡在
+    drain 数 == max_windows 的边界 no-op),断言裁到上界、最旧窗淘汰、最新窗仍在。
+    """
+    buf = MultiTrackSyncBuffer(
+        ["video"], window_ms=100, window_settle_ms=50,
+        max_windows=2, buffer_full_action="keep",
+    )
+    for w in range(6):                          # 窗口 0..5,0 是 partial first-window 被 skip
+        wall = w * 100 + 10
+        buf.put("video", f"v{w}".encode(), wall, wall)
+    buf.put("video", b"trigger", 1000, 1000)    # 把窗口 1..5 expire 成 ready
+
+    buf.drain_ready()                            # 5 个窗进 _drained → 必须裁到 2
+    assert len(buf._drained) == 2, "keep 模式 _drained 必须裁到 max_windows"
+
+    # 只保留最新两窗(v4/v5),更早的(v1~v3)已被 popleft
+    peeked = buf.peek_latest(duration_ms=10_000)
+    assert peeked is not None
+    got = {f.data for f in peeked["video"]}
+    assert b"v1" not in got, "最旧窗应已被裁"
+    assert b"v5" in got, "最新窗必须保留"
