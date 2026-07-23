@@ -89,15 +89,18 @@ except (OSError, AttributeError):
     _malloc_trim = None
 
 
-def _trim_malloc_arenas() -> None:
+def _trim_malloc_arenas() -> int | None:
     """把 glibc arena 里 freed-but-not-returned 的内存还给 OS;非 glibc 时 no-op。
 
     decoder 每帧产 MB 级 BGR buffer,高频大块 malloc/free 在 glibc per-thread arena
     里碎片化、freed 块留在 free-list 不还 OS,长跑 RSS 只涨不落(真机实测单次可吐
     ~880MB)。supervisord 的 MALLOC_* 环境变量负责预防,这里周期回收残余。
+
+    返回 malloc_trim 结果(1=有内存被释放,0=无);非 glibc(无此符号)返回 None。
     """
-    if _malloc_trim is not None:
-        _malloc_trim(0)
+    if _malloc_trim is None:
+        return None
+    return _malloc_trim(0)
 
 
 async def _daily_maintenance_loop() -> None:
@@ -195,8 +198,9 @@ async def _daily_maintenance_loop() -> None:
         # glibc arena 内存回收:与上面 incremental_vacuum 同理,把 freed 内存还 OS。
         # to_thread:trim ~GB arena 可能耗时百 ms 级,别阻塞 event loop。
         try:
-            await asyncio.to_thread(_trim_malloc_arenas)
-            logger.info("malloc_trim done")
+            released = await asyncio.to_thread(_trim_malloc_arenas)
+            if released is not None:  # None = 非 glibc no-op,不打误导日志
+                logger.info("malloc_trim done (released=%s)", released)
         except Exception as e:
             logger.error("malloc_trim failed: %s", e)
         await asyncio.sleep(86400)

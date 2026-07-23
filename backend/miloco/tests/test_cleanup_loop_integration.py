@@ -13,7 +13,7 @@ import asyncio
 import time
 import uuid
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -154,3 +154,21 @@ class TestCleanupLoop:
         ):
             # 不应抛 OSError
             await _run_one_cycle()
+
+    def test_trim_malloc_arenas_noop_when_symbol_unavailable(self):
+        """非 glibc(符号缺失):_trim_malloc_arenas 返回 None、不抛."""
+        from miloco import main as main_module
+
+        with patch.object(main_module, "_malloc_trim", None):
+            assert main_module._trim_malloc_arenas() is None
+
+    @pytest.mark.asyncio
+    async def test_malloc_trim_failure_does_not_block_loop(self, isolated_env):
+        """B9:malloc_trim 抛异常 → 维护循环不崩(异常被吞、不冒泡)."""
+        from miloco import main as main_module
+
+        boom = MagicMock(side_effect=RuntimeError("trim boom"))
+        with patch.object(main_module, "_malloc_trim", boom):
+            # 不应抛 RuntimeError
+            await _run_one_cycle()
+            assert boom.called
