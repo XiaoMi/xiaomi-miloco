@@ -262,6 +262,16 @@ def _generate_supervisor_conf(server_cmd: str) -> None:
     tz = _resolve_timezone()
     # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
     tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
+    # glibc(ptmalloc2)长跑内存调优:decoder 每帧 MB 级 buffer 高频 malloc/free,在
+    # per-thread arena 里碎片化、freed 不还 OS,RSS 只涨不落(真机实测 malloc_trim 可
+    # 吐 ~880MB)。MMAP_THRESHOLD_ 钉死 128KB 并关掉动态自增→大块永远 mmap、free 即
+    # 还 OS(主力);ARENA_MAX=6 封顶 arena 数(2~32 核通用,是上限非目标);
+    # TRIM_THRESHOLD_ 钉死→主 arena 堆顶更勤还 OS。musl/macOS 无视这些变量,注入无害。
+    malloc_env = (
+        ',MALLOC_ARENA_MAX="6"'
+        ',MALLOC_MMAP_THRESHOLD_="131072"'
+        ',MALLOC_TRIM_THRESHOLD_="131072"'
+    )
     conf = f"""\
 [supervisord]
 logfile={_supervisor_log()}
@@ -290,7 +300,7 @@ redirect_stderr=true
 stdout_logfile={log_dir}/miloco-backend.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=20
-environment=MILOCO_SUPERVISED="1",MILOCO_HOME="{miloco_home()}"{tz_env}
+environment=MILOCO_SUPERVISED="1",MILOCO_HOME="{miloco_home()}"{tz_env}{malloc_env}
 """
     if sup_conf_path.exists() and sup_conf_path.read_text() == conf:
         return

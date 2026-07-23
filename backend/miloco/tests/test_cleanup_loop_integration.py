@@ -1,7 +1,7 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""集成测试:_log_cleanup_loop 追加的两块清理(D3-T11).
+"""集成测试:_daily_maintenance_loop 追加的两块清理(D3-T11).
 
 直接跑一轮 cleanup 逻辑(不走 24h sleep),验证:
 - meaningful_events.delete_before_days 被调用
@@ -13,7 +13,7 @@ import asyncio
 import time
 import uuid
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -44,8 +44,8 @@ def isolated_env(tmp_path, monkeypatch):
 
 
 async def _run_one_cycle():
-    """运行 _log_cleanup_loop 的一轮 body(跳过初始 60s 与末尾 86400s 等待)."""
-    # 直接调 main.py 的 _log_cleanup_loop,但 patch 掉两个 sleep
+    """运行 _daily_maintenance_loop 的一轮 body(跳过初始 60s 与末尾 86400s 等待)."""
+    # 直接调 main.py 的 _daily_maintenance_loop,但 patch 掉两个 sleep
     from miloco import main as main_module
 
     real_sleep = asyncio.sleep
@@ -61,7 +61,7 @@ async def _run_one_cycle():
 
     with patch.object(asyncio, "sleep", side_effect=_short_sleep):
         try:
-            await main_module._log_cleanup_loop()
+            await main_module._daily_maintenance_loop()
         except asyncio.CancelledError:
             pass
 
@@ -154,3 +154,21 @@ class TestCleanupLoop:
         ):
             # 不应抛 OSError
             await _run_one_cycle()
+
+    def test_trim_malloc_arenas_noop_when_symbol_unavailable(self):
+        """非 glibc(符号缺失):_trim_malloc_arenas 返回 None、不抛."""
+        from miloco import main as main_module
+
+        with patch.object(main_module, "_malloc_trim", None):
+            assert main_module._trim_malloc_arenas() is None
+
+    @pytest.mark.asyncio
+    async def test_malloc_trim_failure_does_not_block_loop(self, isolated_env):
+        """B9:malloc_trim 抛异常 → 维护循环不崩(异常被吞、不冒泡)."""
+        from miloco import main as main_module
+
+        boom = MagicMock(side_effect=RuntimeError("trim boom"))
+        with patch.object(main_module, "_malloc_trim", boom):
+            # 不应抛 RuntimeError
+            await _run_one_cycle()
+            assert boom.called

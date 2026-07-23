@@ -310,7 +310,7 @@ class PerceptionSettings(BaseModel):
     event_ttl_days: int = Field(
         default=7,
         description=(
-            "meaningful_events 表保留天数;_log_cleanup_loop 24h 周期按 created_at 删旧行."
+            "meaningful_events 表保留天数;_daily_maintenance_loop 24h 周期按 created_at 删旧行."
             "产品决策:近 7 天数据足够回看,不保留更长元数据."
             "LRU 触发(磁盘满 5GB)时 clip 可能先于 row 被清,API 返 410,前端"
             "ClipPlayer/AudioClipPlayer onError 触发降级占位('🎬 已过期'/'🎤 音频已过期')."
