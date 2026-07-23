@@ -58,6 +58,13 @@ def _get_session():
             opts = ort.SessionOptions()
             opts.intra_op_num_threads = 1
             opts.inter_op_num_threads = 1
+            # 这条 session 不走 make_session(有意保留 CPU EP、不切 CoreML:silero 是有
+            # 状态小模型,CoreML 对其支持差、易逐算子回落)。但 silero 也含 conv,在 Apple
+            # Silicon CPU EP 上会命中 ArmKleidiAI——即 issue #429 同源的卷积 workspace
+            # 泄漏。复用工厂的单一 opt-out helper 补上(1.27 已上游根治,此为防御)。
+            from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
+
+            apply_kleidiai_opt_out(opts)
             _session = ort.InferenceSession(
                 str(path), sess_options=opts, providers=["CPUExecutionProvider"]
             )

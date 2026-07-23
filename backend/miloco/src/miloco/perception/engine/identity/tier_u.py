@@ -460,11 +460,13 @@ class TierUPool:
         self._fully_closed_clusters: set[str] = set()
         # centroid (cluster mean emb) 缓存: cluster_id → (signature, centroid)。
         # 省 _cluster_pairwise_union 跨 fetch 重复算 np.mean(K×crops×128)。
-        # **内容指纹式**而非主动删除式: signature = (member frozenset, 参与 mean 的
-        # emb 数), 簇内容一变 signature 自然对不上 → 自动失效, 无需在 push_crop /
-        # flush / merge / close / evict 等 6 条路径手动 invalidate。漏维护指纹最坏
-        # 退化成"多算一次"(性能), 而非主动删除式"漏删一处 → 用 stale centroid 误合
-        # 不同人 → 不可逆跨身份污染"。详见 _cluster_mean_embedding。
+        # **正确性**靠内容指纹: signature = (member frozenset, 参与 mean 的 emb 数),
+        # 簇内容一变 signature 对不上 → 自动重算, 无需在 push_crop / flush / merge /
+        # close 等路径手动 invalidate(漏维护最坏"多算一次", 不会用 stale centroid 误合)。
+        # **但内存回收指纹管不了**: cluster_id 被彻底弹掉(evict 最后一个成员 / merge 旧簇
+        # 被吸收)后永不再被查 → 其 cache 项既不会被指纹重算也不会被删 → 单调泄漏
+        # (issue #429)。故 _evict_entry / _merge_into_cluster 这两条"簇消失"路径
+        # 显式 pop 掉对应 cluster_id(只 pop 已消失的 id, 对存活簇零影响, 无误合风险)。
         self._centroid_cache: dict[str, tuple[tuple, NDArray[np.float32]]] = {}
 
     @_synchronized
@@ -883,6 +885,10 @@ class TierUPool:
         # 的 entry, old 已被弹 (set 里残留就是 stale)。
         self._fully_closed_clusters.discard(target_cluster_id)
         self._fully_closed_clusters.discard(old_cluster_id)
+        # old_cluster_id 已 dangling,其 _centroid_cache 项永不再被查(不会自愈)→
+        # 显式清,否则每次跨 cluster 合并泄漏一条 (issue #429)。target 的
+        # centroid 虽也变了但 member 指纹随之变 → _cluster_mean_embedding 自动重算,不用清。
+        self._centroid_cache.pop(old_cluster_id, None)
 
     # ----- 注册取数:fetch -----
 
@@ -1632,6 +1638,9 @@ class TierUPool:
                     # 不清的话 set 单调泄漏 (UUID 36 字节/条) + 跟 __init__ 注释
                     # "接新成员/被弹时移除"承诺不一致。
                     self._fully_closed_clusters.discard(entry.cluster_id)
+                    # 同理清 _centroid_cache:cluster 已弹、永不再被查 → 不清则每淘汰
+                    # 一簇泄漏一条 (issue #429 高 track churn 长跑最坏几百 MB)。
+                    self._centroid_cache.pop(entry.cluster_id, None)
 
     # ----- 状态查询(给 status 端点用) -----
 

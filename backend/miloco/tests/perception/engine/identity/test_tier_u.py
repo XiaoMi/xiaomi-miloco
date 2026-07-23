@@ -2228,3 +2228,79 @@ class TestTierUPoolThreadSafety:
         for t in threads:
             t.join()
         assert errors == [], f"并发访问抛异常: {errors}"
+
+
+# =============================================================================
+# 回归:issue #429 —— cluster 消失后 _centroid_cache 必须同步清
+# =============================================================================
+
+
+class TestCentroidCacheNoOrphan:
+    """cluster_id 被彻底弹掉后(evict 最后一个成员 / merge 旧簇被吸收),其
+    _centroid_cache 项永不再被查、不会被指纹自愈 → 必须显式 pop,否则单调泄漏。
+    不变量:``set(_centroid_cache) <= set(_clusters)``(不含任何已消失簇的孤儿)。
+    """
+
+    def _pool_one_cluster_with_cached_centroid(self):
+        """push→flush 造一个单例簇,并把其质心算进 _centroid_cache。返回 (pool, clk, cid)。"""
+        provider = _MockReIDProvider()
+        provider.set_embedding("cam-a", 1, np.array([1.0] + [0.0] * 127, dtype=np.float32))
+        clk = _clock()
+        pool = TierUPool(
+            config=TierUConfig(l1_capacity=2, ttl_inactive_sec=100.0),
+            reid_provider=provider,
+            now_fn=clk,
+        )
+        for f in range(2):
+            pool.push_crop(_make_crop("cam-a", 1, f, clk()))
+        pool.flush_if_due()
+        entry = pool._entries[("cam-a", 1)]
+        cid = entry.cluster_id
+        assert cid is not None, "flush 后单例应挂上 cluster_id"
+        # 主动算一次质心塞进 cache(模拟 fetch / pairwise_union 命中路径)
+        assert pool._cluster_mean_embedding(cid) is not None
+        assert cid in pool._centroid_cache
+        return pool, clk, cid
+
+    def test_ttl_eviction_pops_centroid_cache(self):
+        """TTL 过期 evict 最后一个成员 → cluster 消失 → centroid_cache 同步清。"""
+        pool, clk, cid = self._pool_one_cluster_with_cached_centroid()
+        clk.advance(1000)  # 远超 ttl_inactive_sec=100
+        pool.tick_ttl()
+        assert ("cam-a", 1) not in pool._entries
+        assert cid not in pool._clusters
+        assert cid not in pool._centroid_cache  # 修复前:残留 → 孤儿泄漏
+        assert set(pool._centroid_cache) <= set(pool._clusters)
+
+    def test_lru_eviction_pops_centroid_cache(self):
+        """内存超预算 LRU 兜底 evict → 同样清 centroid_cache。"""
+        pool, clk, cid = self._pool_one_cluster_with_cached_centroid()
+        pool.config.memory_budget_mb = 0  # 逼 LRU 立即清空
+        pool.gc_lru_if_over_budget()
+        assert ("cam-a", 1) not in pool._entries
+        assert cid not in pool._centroid_cache
+        assert set(pool._centroid_cache) <= set(pool._clusters)
+
+    def test_merge_pops_old_cluster_centroid_cache(self):
+        """跨 cluster 合并:旧簇被吸收后其 centroid_cache 必须清(白盒直驱 _merge_into_cluster)。"""
+        from miloco.perception.engine.identity.tier_u import EquivClass, TierUEntry
+
+        pool = TierUPool()
+        ka, kb = ("cam-a", 1), ("cam-a", 2)
+        ea = TierUEntry(cam_id="cam-a", track_id=1)
+        ea.cluster_id = "OLD"
+        eb = TierUEntry(cam_id="cam-a", track_id=2)
+        eb.cluster_id = "TGT"
+        pool._entries[ka] = ea
+        pool._entries[kb] = eb
+        pool._clusters["OLD"] = EquivClass(cluster_id="OLD", members={ka})
+        pool._clusters["TGT"] = EquivClass(cluster_id="TGT", members={kb})
+        z = np.zeros(128, dtype=np.float32)
+        pool._centroid_cache["OLD"] = ((frozenset({ka}), 1), z)
+        pool._centroid_cache["TGT"] = ((frozenset({kb}), 1), z)
+
+        pool._merge_into_cluster(ea, "TGT")
+
+        assert "OLD" not in pool._clusters
+        assert "OLD" not in pool._centroid_cache  # 修复前:残留 → 孤儿泄漏
+        assert set(pool._centroid_cache) <= set(pool._clusters)
