@@ -34,20 +34,25 @@ class TestEvaluateSpeechDegrade:
 class TestVadSessionKleidiAIOptOut:
     """主线 1:自建 VAD session(不走 make_session)也必须补 KleidiAI opt-out(#429 加固)。"""
 
-    def test_get_session_applies_kleidiai_opt_out(self, monkeypatch):
+    def test_get_session_applies_kleidiai_opt_out(self, monkeypatch, tmp_path):
+        import types
+
         import onnxruntime as ort
-        import pytest
-        from miloco.config import get_settings
         from miloco.perception.inference import ort_utils
 
-        model = get_settings().directories.models_dir / speech_vad._MODEL_FILENAME
-        if not model.is_file():
-            pytest.skip(f"silero VAD 模型缺失({model})")
-
+        # 不 skip:写个 0 字节 dummy 模型 + 把 models_dir 指过去,绕过 _get_session 的
+        # is_file() 早退;stub InferenceSession 避免真加载。这样 CI(无真实模型)也真跑,
+        # 强制守护"自建 session 必调 apply_kleidiai_opt_out"不变量(review 指出恒 skip 的缺口)。
+        (tmp_path / speech_vad._MODEL_FILENAME).write_bytes(b"")
+        monkeypatch.setattr(
+            "miloco.config.get_settings",
+            lambda: types.SimpleNamespace(
+                directories=types.SimpleNamespace(models_dir=tmp_path)
+            ),
+        )
         # 重置单例强制重建(monkeypatch 会在测试后还原)
         monkeypatch.setattr(speech_vad, "_session", None)
         monkeypatch.setattr(speech_vad, "_load_failed", False)
-        # stub 真实 session 构建,避免加载开销
         monkeypatch.setattr(ort, "InferenceSession", lambda *a, **k: object())
         # spy 共享 helper:确认自建 session 路径确实调用了它
         calls: list = []
@@ -60,5 +65,5 @@ class TestVadSessionKleidiAIOptOut:
         monkeypatch.setattr(ort_utils, "apply_kleidiai_opt_out", _spy)
 
         sess = speech_vad._get_session()
-        assert sess is not None, "模型存在时应建成 session"
+        assert sess is not None, "应建成(stub)session"
         assert len(calls) == 1, "自建 VAD session 未调用 apply_kleidiai_opt_out"

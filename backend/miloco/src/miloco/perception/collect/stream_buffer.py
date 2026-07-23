@@ -305,8 +305,9 @@ class MultiTrackSyncBuffer:
             # _drained 是「已 drain 供 peek 复用」的回看缓存,和 full_action 的 ready 队列
             # 背压语义无关——任何 action 都必须裁到 max_windows。此前只在 != "keep" 时裁,
             # 导致 keep 模式下 _drained 永不收敛、每 drain 一窗就永久堆一份整窗解码帧
-            # (issue #429 帧级无界泄漏,实测 120 窗→1.1GB)。peek_latest 只取最近
-            # duration_ms,max_windows 窗足够,收窄不影响回看语义。
+            # (仅 keep 模式)。**生产默认 full_action="clear",旧代码本就在此裁剪、put() 溢出也清,
+            # 故本修复对默认配置是 no-op、只在显式配成 keep 时才生效**。
+            # peek_latest 只取最近 duration_ms,max_windows 窗足够,收窄不影响回看语义。
             #
             # 隐性不变量:``max_windows`` 必须 ≥ peek_latest 的最大回看窗数
             # ``ceil(duration_ms / window_ms)``,否则 _drained 存不下所需历史、peek 会静默
