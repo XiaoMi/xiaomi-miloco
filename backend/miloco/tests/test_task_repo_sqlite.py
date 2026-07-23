@@ -160,3 +160,10 @@ def test_list_all_returns_all_tasks_with_cron_refs(repo):
     assert by_id["t2"]["cron_refs"] == [
         {"ref": "c2", "dispatch_owner": "internal"}
     ]
+
+
+def test_get_description(repo):
+    """get_description 轻量取 task.description（住户日志「所属任务」用）。"""
+    repo.create_task(task_id="t_desc", description="健身追踪")
+    assert repo.get_description("t_desc") == "健身追踪"
+    assert repo.get_description("nonexistent") is None

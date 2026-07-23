@@ -1,14 +1,16 @@
 /**
- * 把事件 text 里规则相关内容的 `[task_id] 规则名` 前缀 strip 为纯中文名。
+ * 清理事件 text 里规则相关内容残留的 `[task_id]` 工程指针前缀。
  *
- * miloco 强制 rule.name 带工程指针 `[task_id]`,task_id 是 Agent 任务模型的
- * 稳定 invariant,跟前端 UI 正交。展示给住户时统一去掉,只留中文。
- * spec B2 (DB.text == webhook) 仍守:DB 里依旧带前缀,这里只在 UI 渲染层 strip。
+ * 当前格式（所属任务 / 对应规则）后端已构造成住户可读形态、DB 里就不带 `[task_id]`，
+ * 前端原样渲染、无需处理。本函数只清理**同 header 的历史旧行**（触发规则 / 触发条件）
+ * 以及旧 v1/v2 格式里残留的 `[task_id]` 前缀——那些旧数据 DB 里仍带前缀。
  *
- * 兼容四种格式:
- * - 当前格式(分类 header): `[感知引擎]规则提醒：` 规则行含 `任务名称：[task_id] 规则名` +
- *   `触发条件：query` + `触发原因：reason` → strip 任务名称行的 [task_id] 前缀
+ * 兼容格式:
+ * - 当前格式(分类 header): `[感知引擎]规则提醒：` 块含 `所属任务：<任务描述>` +
+ *   `对应规则：[规则短名] query` —— 后端已构造成住户可读形态（无 [task_id]），无需 strip。
+ *   下面几条 strip 只清理**同 header 的旧行**里残留的 [task_id] 前缀（历史数据兼容）。
  * - 旧格式 v3(分类 header): 规则行含 `触发规则：[task_id] 规则名。` → strip [task_id]
+ * - 旧数据(query 空时): `触发条件：[task_id] 规则名` → strip [task_id]（ascii 前缀，放过中文方括号 query）
  * - 旧格式 v2(统一 header): `[感知引擎] 提醒:` + `检测到：[task_id] 规则名。`
  * - 旧格式 v1(JSON 行): `1. {"rule_id":"...","reason":"..."}` → 反查 rule_names
  */
@@ -33,13 +35,12 @@ export function humanizeRulesInText(
     .map((section) => {
       // --- 当前格式：分类 header ---
       if (PERCEPTION_HEADERS.some((h) => section.startsWith(h))) {
-        // 行内空白用 [^\S\n]* 而非 \s*：显示名退化成「仅前缀」时不吞掉换行、粘连下一行
+        // 新格式（所属任务 / 对应规则）后端已 strip、无需处理；下面只清历史旧行的
+        // [task_id] 前缀。行内空白用 [^\S\n]* 而非 \s*：短名退化成「仅前缀」时不吞换行。
         return section
-          .replace(/任务名称：\[[^\]]+\][^\S\n]*/g, "任务名称：")
           .replace(/触发规则：\[[^\]]+\][^\S\n]*/g, "触发规则：")
-          // 兼容旧数据：本 PR 前 query 空时「触发条件」会兜底成 [task_id] 规则名，一并 strip。
-          // 前缀限定 task_id 形态（ascii snake/kebab）——「触发条件」当前格式放的是自然语言
-          // query，若某条 query 以中文方括号 token 开头（如「[夜间]是否有人闯入」）不能被误 strip。
+          // 旧数据：query 空时「触发条件」兜底成 [task_id] 规则名。前缀限定 task_id 形态
+          // （ascii snake/kebab），放过以中文方括号 token 开头的合法 query（如「[夜间]…」）。
           .replace(/触发条件：\[[A-Za-z0-9_-]+\][^\S\n]*/g, "触发条件：");
       }
 
