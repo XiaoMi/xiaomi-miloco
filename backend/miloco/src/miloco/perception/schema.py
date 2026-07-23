@@ -480,13 +480,15 @@ class MeaningfulEvent(BaseModel):
 
     一次推理 = 一行 event;同窗口 N 摄像头合并 1 行,device_ids JSON 记录本行真正相关的摄像头
     (语义详见下方 device_ids 字段的 description).
-    `text` 字段与 agent webhook 收到的同一段聚合文本(B2 单源真值).
+    `text` 是聚合文本;语音 / 事件提醒段与 agent webhook 同源(B2 单源真值),但**规则段
+    另分叉**——住户日志走 build_matched_rules_text(任务 / 规则 / 触发原因),agent 实时回调
+    走 build_rule_callbacks_text(触发条件 + 意图段),两者不再逐字相同.
     响应不含 payload_json / schema_version / created_at(后端复盘用,API 不返).
     """
 
     event_id: str = Field(..., description="UUID,DB 主键")
     timestamp: int = Field(..., description="Millisecond Unix timestamp,感知窗口 start_ms")
-    text: str = Field(..., description="聚合 agent 视图文本(与 agent webhook 一字不差)")
+    text: str = Field(..., description="聚合住户日志文本(语音/事件段同 webhook;规则段分叉)")
     has_rule_hit: bool = Field(default=False, description="是否含规则命中")
     has_suggestion: bool = Field(default=False, description="是否含主动建议")
     has_asr: bool = Field(default=False, description="是否含 needs_response ASR")
