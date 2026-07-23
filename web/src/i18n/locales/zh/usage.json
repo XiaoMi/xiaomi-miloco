@@ -77,6 +77,8 @@
     "modelsFetching": "正在拉取模型列表…",
     "modelsCount": "共 {{n}} 个可选,可搜索或直接输入;请选支持视频/音频的多模态(omni)模型",
     "modelsHint": "填好 Base URL 和 API Key 后自动拉取,也可直接输入模型 id",
+    "audioFormatLabel": "音频格式",
+    "audioFormatHint": "m4a 适用于 MiMo/Qwen/Gemini；wav 适用于智谱/OpenAI；mp3 通用兼容",
     "saving": "保存中…",
     "save": "保存",
     "testing": "测试中…",
