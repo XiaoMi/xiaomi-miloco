@@ -25,6 +25,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot import filter as miot_filter
 from miloco.miot.service import MiotService
+from miot.types import MIoTCameraStatus
 
 
 class _FakeKV:
@@ -164,6 +165,18 @@ def test_select_active_require_lan_false_keeps_lan_stale():
     assert miot_filter.select_active_camera_dids(
         kv, cameras, require_lan=False
     ) == ["c1"]
+
+
+def test_select_active_connected_camera_reachable_despite_lan_offline():
+    """直连掐死同网段 OTU 保活令 lan_online=False，但 camera_status=CONNECTED
+    的相机仍必须被判定可达——这是 #420 被 #430 revert 的根因场景，
+    require_lan=True（默认，与 toggle_camera/list_cameras_with_state 同口径）
+    下必须靠 is_camera_connected 兜底放行，而不是被 lan_online=False 误杀。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    cam.camera_status = MIoTCameraStatus.CONNECTED
+    cameras = {"c1": cam}
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1"]
 
 
 def test_select_active_caps_by_did(monkeypatch):
@@ -886,6 +899,10 @@ def _scope_proxy_env(tmp_path, monkeypatch):
     miot_client = MagicMock()
     miot_client.register_lan_device_changed_async = AsyncMock()
     miot_client.unregister_lan_device_changed_async = AsyncMock()
+    miot_client.register_camera_status_changed_async = AsyncMock()
+    miot_client.unregister_camera_status_changed_async = AsyncMock()
+    miot_client.set_camera_connected = MagicMock()
+    miot_client.set_camera_dids = MagicMock()
     miot_client.create_camera_instance_async = AsyncMock()
     miot_client.get_cameras_async = AsyncMock(return_value={})
     proxy._miot_client = miot_client  # type: ignore[assignment]
@@ -1102,6 +1119,26 @@ async def test_refresh_cameras_no_destroy_when_scope_allows(_scope_proxy_env):
     handler.destroy.assert_not_awaited()
     miot_client.unregister_lan_device_changed_async.assert_not_awaited()
     assert "c1" in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_pushes_scoped_camera_dids_to_lan(_scope_proxy_env):
+    """refresh_cameras 必须把 select_active_camera_dids 算出的 scoped 集传给
+    MIoTLan.set_camera_dids，而不是账号下的全部相机——否则不在当前 scope 里的
+    相机（c_out，属于未启用的 H2）永远不会连上，MIoTLan 就永远判不出"全部相机
+    已连上"，探测暂停功能形同虚设。"""
+    proxy, kv, miot_client = _scope_proxy_env
+
+    cam_in = _camera("c_in", home_id="H1")
+    cam_out = _camera("c_out", home_id="H2")
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={"c_in": cam_in, "c_out": cam_out}
+    )
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    await proxy.refresh_cameras()
+
+    miot_client.set_camera_dids.assert_called_once_with({"c_in"})
 
 
 @pytest.mark.asyncio

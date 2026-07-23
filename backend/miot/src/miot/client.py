@@ -8,7 +8,7 @@ MIoT Client.
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
 
 from miot.error import MIoTClientError
 from miot.spec import MIoTSpecParser
@@ -576,7 +576,8 @@ class MIoTClient:
                 self._device_buffer[did].local_ip = lan_devices[did].ip
             else:
                 self._device_buffer[did].lan_online = False
-                self._device_buffer[did].local_ip = None
+                # Keep cloud local_ip — it serves as the unicast probe fallback
+                # for cross-subnet cameras that broadcast can't reach.
 
         return self._device_buffer
 
@@ -658,6 +659,14 @@ class MIoTClient:
             if did in lan_devices:
                 camera_info.lan_online = lan_devices[did].online
                 camera_info.local_ip = lan_devices[did].ip
+
+        # Sync unicast probe targets so cross-subnet cameras can also be
+        # reached via unicast UDP (broadcast is blocked by subnet boundary).
+        unicast_targets: Dict[str, str] = {}
+        for did, camera_info in self._cameras_buffer.items():
+            if camera_info.local_ip:
+                unicast_targets[did] = camera_info.local_ip
+        self._lan_client.set_unicast_targets(unicast_targets)
 
         return self._cameras_buffer
 
@@ -753,6 +762,25 @@ class MIoTClient:
             bool: Unregister result.
         """
         return await self._camera_client.unregister_status_changed_async(did=did)
+
+    def set_camera_connected(self, did: str, connected: bool) -> None:
+        """Tell the LAN prober whether a camera's native stream is connected.
+
+        Connected cameras are proven reachable, so MIoTLan skips probing
+        them (and pauses scanning entirely once every known camera is
+        connected). Call on every camera_status transition.
+        """
+        self._lan_client.set_camera_connected(did, connected)
+
+    def set_camera_dids(self, dids: Set[str]) -> None:
+        """Tell the LAN prober the current *scoped* (active) camera set.
+
+        MUST be the set of dids actually expected to connect (home-filtered,
+        not blacklisted, capped, etc.) — not every camera-class device on the
+        account — otherwise a camera outside the current scope would never
+        report connected and scanning would never pause.
+        """
+        self._lan_client.set_camera_dids(dids)
 
     # ------------------------------------------------------------------ mips
 

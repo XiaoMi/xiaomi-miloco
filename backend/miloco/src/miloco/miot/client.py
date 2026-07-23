@@ -20,6 +20,7 @@ from miot.spec import MIoTSpecTypeLevel
 from miot.types import (
     MIoTActionParam,
     MIoTCameraInfo,
+    MIoTCameraStatus,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
@@ -666,6 +667,13 @@ class MiotProxy:
             info.ip,
         )
 
+    async def _on_camera_status_changed(
+        self, did: str, status: MIoTCameraStatus
+    ) -> None:
+        # 反向同步给 MIoTLan：连上的相机可达性已证实，跳过探测；
+        # 全部连上时整个扫描暂停（见 lan.py set_camera_connected）。
+        self._miot_client.set_camera_connected(did, status == MIoTCameraStatus.CONNECTED)
+
     async def refresh_cameras(self) -> dict[str, MIoTCameraInfo] | None:
         async with self._refresh_cameras_lock:
             try:
@@ -704,6 +712,10 @@ class MiotProxy:
                     )
                 )
                 active = {physical_camera_did(d) for d in active_channels}
+                # MIoTLan 靠这个知道"全部相机是否都已连上"才能整体暂停探测——必须传
+                # 这个 scoped 后的 active 集，不能传账号下全部相机（不在当前 scope 里
+                # 的相机永远不会连上，会让"全连上"永远判不成立）。
+                self._miot_client.set_camera_dids(active)
                 logger.debug(
                     "Camera streaming set: channels=%s physical=%s managers=%s",
                     sorted(active_channels),
@@ -722,6 +734,10 @@ class MiotProxy:
                         if manager is not None:
                             await self._miot_client.register_lan_device_changed_async(
                                 did=camera_did, callback=self._on_lan_device_changed
+                            )
+                            await self._miot_client.register_camera_status_changed_async(
+                                did=camera_did,
+                                callback=self._on_camera_status_changed,
                             )
                             # 起停相机 native 会话直接影响相机有限的并发流名额，
                             # 用 WARNING 便于运维一眼追踪拉流生命周期。
@@ -748,8 +764,12 @@ class MiotProxy:
                         await self._miot_client.unregister_lan_device_changed_async(
                             did=camera_did
                         )
+                        await self._miot_client.unregister_camera_status_changed_async(
+                            did=camera_did
+                        )
                         await self._camera_img_managers[camera_did].destroy()
                         del self._camera_img_managers[camera_did]
+                        self._miot_client.set_camera_connected(camera_did, False)
                         logger.warning(
                             "Camera native stream stopped: %s", camera_did
                         )

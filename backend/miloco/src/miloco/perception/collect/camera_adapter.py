@@ -190,7 +190,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 device_type="camera",
                 room_id=camera_info.room_name,
                 room_name=camera_info.room_name,
-                online=camera_info.online and camera_info.lan_online,
+                # 已连上的相机即视为可达：直连掐死同网段 OTU 保活令 lan_online 掉 False，
+                # 但连都连上了、可达是显然的，不能因此把在拉流的相机标成 offline 停投喂。
+                online=camera_info.online
+                and (camera_info.lan_online or camera_info.connected),
             )
         return result
 
@@ -394,7 +397,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             device_type="camera",
             room_id=camera.room_name,
             room_name=camera.room_name,
-            online=camera.online and camera.lan_online,
+            # 已连上的相机即视为可达（直连掐死 OTU 保活令 lan_online 掉 False）。
+            online=camera.online and (camera.lan_online or camera.connected),
         )
 
     def _build_device_data(
