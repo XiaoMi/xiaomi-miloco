@@ -1,39 +1,36 @@
 /**
  * humanizeRulesInText 渲染层单测。
  *
- * 后端 meaningful_events.text 里规则提醒块新增「任务名称：[task_id] 规则名」行，
- * DB 存带前缀全名（spec B2: DB==webhook），UI 渲染时 strip 掉 [task_id] 前缀。
+ * 当前格式的「所属任务 / 对应规则」由后端构造成住户可读形态（无 [task_id]），
+ * 前端原样保留、不 strip；只清理同 header 旧行残留的 [task_id] 前缀（触发规则 / 触发条件）。
  */
 
 import { describe, it, expect } from "vitest";
 import { humanizeRulesInText } from "@/lib/eventText";
 
-describe("humanizeRulesInText 任务名称前缀 strip", () => {
-  it("strip 任务名称行的 [task_id] 前缀，只留中文名", () => {
+describe("humanizeRulesInText", () => {
+  it("新格式：所属任务 + 对应规则[短名] 原样保留（方括号短名不被误 strip）", () => {
     const text =
       "[感知引擎]规则提醒：\n" +
-      "任务名称：[kitchen_safety] 厨房安全\n" +
-      "触发条件：厨房是否有明火\n" +
-      "触发原因：检测到明火";
+      "所属任务：书房安防\n" +
+      "对应规则：[书桌前有人] 有人坐在书桌前面向屏幕\n" +
+      "触发原因：画面中有人";
     const out = humanizeRulesInText(text);
-    expect(out).toContain("任务名称：厨房安全");
-    expect(out).not.toContain("[kitchen_safety]");
-    // 其它行保持不变
-    expect(out).toContain("触发条件：厨房是否有明火");
-    expect(out).toContain("触发原因：检测到明火");
+    expect(out).toContain("所属任务：书房安防");
+    expect(out).toContain("对应规则：[书桌前有人] 有人坐在书桌前面向屏幕");
   });
 
-  it("任务名称不带前缀时原样保留", () => {
-    const text = "[感知引擎]规则提醒：\n任务名称：厨房安全\n触发原因：x";
-    expect(humanizeRulesInText(text)).toContain("任务名称：厨房安全");
-  });
-
-  it("旧数据：触发条件行兜底成 [task_id] 名时也 strip 前缀", () => {
-    // 本 PR 前 query 空时后端会写 触发条件：[task_id] 规则名，历史行需一并清洗
+  it("旧数据 v3：触发规则行 strip [task_id] 前缀", () => {
     const text =
-      "[感知引擎]规则提醒：\n" +
-      "触发条件：[kitchen_safety] 厨房安全\n" +
-      "触发原因：检测到明火";
+      "[感知引擎]规则提醒：\n触发规则：[kitchen_safety] 厨房安全\n触发原因：x";
+    const out = humanizeRulesInText(text);
+    expect(out).toContain("触发规则：厨房安全");
+    expect(out).not.toContain("[kitchen_safety]");
+  });
+
+  it("旧数据：触发条件兜底成 [task_id] 名时 strip 前缀", () => {
+    const text =
+      "[感知引擎]规则提醒：\n触发条件：[kitchen_safety] 厨房安全\n触发原因：x";
     const out = humanizeRulesInText(text);
     expect(out).toContain("触发条件：厨房安全");
     expect(out).not.toContain("[kitchen_safety]");
@@ -43,16 +40,5 @@ describe("humanizeRulesInText 任务名称前缀 strip", () => {
     const text =
       "[感知引擎]规则提醒：\n触发条件：[夜间]是否有人闯入\n触发原因：x";
     expect(humanizeRulesInText(text)).toContain("触发条件：[夜间]是否有人闯入");
-  });
-
-  it("显示名退化成仅前缀时，不吞换行、不粘连下一行", () => {
-    // [^\S\n]* 而非 \s*：前缀后无中文名时不能把换行一起吃掉
-    const text =
-      "[感知引擎]规则提醒：\n" +
-      "任务名称：[kitchen_safety]\n" +
-      "触发原因：检测到明火";
-    const out = humanizeRulesInText(text);
-    expect(out).toContain("任务名称：\n触发原因：检测到明火");
-    expect(out).not.toContain("任务名称：触发原因"); // 不粘连
   });
 });

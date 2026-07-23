@@ -57,6 +57,10 @@ class TaskService:
     def update_description(self, task_id: str, req: TaskUpdateRequest) -> bool:
         return self.repo.update_description(task_id, req.description)
 
+    def get_description(self, task_id: str) -> str | None:
+        """按 task_id 取任务描述（住户日志「所属任务」用）。"""
+        return self.repo.get_description(task_id)
+
     def get_full_view(self, task_id: str) -> TaskFullView | None:
         raw = self.repo.get_full_view(task_id)
         if raw is None:

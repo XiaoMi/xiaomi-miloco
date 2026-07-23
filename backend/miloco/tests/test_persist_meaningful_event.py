@@ -372,6 +372,60 @@ class TestPersistMeaningfulEvent:
         assert rows[0]["has_rule_hit"] is True
         assert "rule 已被删" in rows[0]["text"]
 
+    async def test_task_desc_wired_into_text(self, isolated_db, dao):
+        """client.py 接线：反查 rule → 按 rule.task_id 取 task.description → 以 rule_id 回填 →
+        落库 text 含「所属任务」+「对应规则」；同 task 多规则 get_description 只调一次（去重缓存）。"""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from miloco.manager import get_manager
+
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="r1", reason="炒菜", source_device_ids=["cam_k"]),
+                MatchedRule(rule_id="r2", reason="看火", source_device_ids=["cam_k"]),
+            ]
+        )
+        rules = {
+            "r1": SimpleNamespace(
+                name="[kitchen] 灶台有人", task_id="kitchen",
+                condition=SimpleNamespace(query="灶台前有人"),
+            ),
+            "r2": SimpleNamespace(
+                name="[kitchen] 明火", task_id="kitchen",
+                condition=SimpleNamespace(query="是否有明火"),
+            ),
+        }
+        get_desc = MagicMock(return_value="厨房安防")
+
+        mgr = get_manager()
+
+        class _FakeRuleService:
+            get_rule = AsyncMock(side_effect=lambda rid: rules.get(rid))
+
+        class _FakeTaskService:
+            get_description = get_desc
+
+        mgr._rule_service = _FakeRuleService()
+        mgr._task_service = _FakeTaskService()
+        try:
+            await _persist_meaningful_event(
+                result=result, device_ids=["cam_k"], artifacts=_artifacts({}),
+            )
+        finally:
+            for attr in ("_rule_service", "_task_service"):
+                if hasattr(mgr, attr):
+                    delattr(mgr, attr)
+
+        rows = dao.query()
+        assert len(rows) == 1
+        text = rows[0]["text"]
+        assert "所属任务：厨房安防" in text
+        assert "对应规则：[灶台有人] 灶台前有人" in text
+        assert "对应规则：[明火] 是否有明火" in text
+        # 同 task 两条规则 → description 只查一次（去重缓存生效）
+        assert get_desc.call_count == 1
+
     async def test_asr_from_mic_off_cam_stripped_not_persisted(self, isolated_db, dao):
         """默认关(opt-in):相机不在拾音白名单 → speech 在 _persist 内被
         _filter_voice_enabled 剥掉,speech-only 结果不入表。
