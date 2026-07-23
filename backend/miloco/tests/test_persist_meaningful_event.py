@@ -426,6 +426,61 @@ class TestPersistMeaningfulEvent:
         # 同 task 两条规则 → description 只查一次（去重缓存生效）
         assert get_desc.call_count == 1
 
+    async def test_task_desc_cross_task_attribution(self, isolated_db, dao):
+        """不同 task 的规则 → 各自 description 正确归属（不串行）；每个 task 各查一次。"""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from miloco.manager import get_manager
+
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="r1", reason="炒菜", source_device_ids=["cam_k"]),
+                MatchedRule(rule_id="r2", reason="躺床", source_device_ids=["cam_b"]),
+            ]
+        )
+        rules = {
+            "r1": SimpleNamespace(
+                name="[kitchen] 灶台有人", task_id="kitchen",
+                condition=SimpleNamespace(query=""),
+            ),
+            "r2": SimpleNamespace(
+                name="[bedroom] 有人躺床", task_id="bedroom",
+                condition=SimpleNamespace(query=""),
+            ),
+        }
+        descs = {"kitchen": "厨房安防", "bedroom": "卧室监控"}
+        get_desc = MagicMock(side_effect=lambda tid: descs.get(tid))
+
+        mgr = get_manager()
+
+        class _FakeRuleService:
+            get_rule = AsyncMock(side_effect=lambda rid: rules.get(rid))
+
+        class _FakeTaskService:
+            get_description = get_desc
+
+        mgr._rule_service = _FakeRuleService()
+        mgr._task_service = _FakeTaskService()
+        try:
+            await _persist_meaningful_event(
+                result=result, device_ids=["cam_k", "cam_b"], artifacts=_artifacts({}),
+            )
+        finally:
+            for attr in ("_rule_service", "_task_service"):
+                if hasattr(mgr, attr):
+                    delattr(mgr, attr)
+
+        text = dao.query()[0]["text"]
+        blocks = text.split("═══")
+        kb = next(b for b in blocks if "灶台有人" in b)
+        bb = next(b for b in blocks if "有人躺床" in b)
+        # 各自块内归属正确、不串行
+        assert "任务：厨房安防" in kb and "卧室监控" not in kb
+        assert "任务：卧室监控" in bb and "厨房安防" not in bb
+        # 两个不同 task → 各查一次
+        assert get_desc.call_count == 2
+
     async def test_asr_from_mic_off_cam_stripped_not_persisted(self, isolated_db, dao):
         """默认关(opt-in):相机不在拾音白名单 → speech 在 _persist 内被
         _filter_voice_enabled 剥掉,speech-only 结果不入表。

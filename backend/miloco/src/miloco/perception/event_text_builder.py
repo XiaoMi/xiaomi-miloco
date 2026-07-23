@@ -94,13 +94,28 @@ def _fmt_speech(s: Speech) -> str:
 
 def _strip_task_prefix(name: str) -> str:
     """去掉 rule.name 的工程指针前缀 `[task_id] `，只留住户可读的规则短名。
-    住户日志不展示 task_id；无前缀时原样返回。"""
-    return re.sub(r"^\[[^\]]+\]\s*", "", name)
+    住户日志不展示 task_id；无前缀时原样返回。
+
+    前缀字符集限定为 ascii（task_id 受 schema 约束为 `[a-z0-9_]{1,32}`），与前端
+    历史行 strip 同口径——rule.name 是 free-text、`[task_id]` 只是 prompt 约定，
+    若某规则名以中文方括号 token 起头（如「[夜间]有人闯入」）不能被误吞。"""
+    return re.sub(r"^\[[A-Za-z0-9_-]+\]\s*", "", name)
+
+
+def _oneline(s: str) -> str:
+    """折叠内嵌换行 / 连续空白为单空格。task.description / query / rule.name 均为
+    可 PATCH 的 free-text，直接入 key:value 行会被注入伪造字段行（如
+    `健身追踪\\n触发原因：伪造`）或用 `\\n\\n` 打乱前端按 `\\n\\n` 的 section 切分。"""
+    return " ".join(s.split()) if s else s
 
 
 def _fmt_matched_rule(
     r: MatchedRule, task_desc: str, rule_label: str, query: str = ""
 ) -> str:
+    # 防注入：task_desc / 短名 / query 均为 free-text，折叠内嵌换行空白后再入行。
+    task_desc = _oneline(task_desc)
+    rule_label = _oneline(rule_label)
+    query = _oneline(query)
     # 「规则」= [规则短名] + 触发条件 query 合并成一行；query 空则只留短名。
     # 规则短名退化为空（name 仅有 [task_id] 前缀）时不渲染空方括号，用 query 兜底。
     if rule_label:
