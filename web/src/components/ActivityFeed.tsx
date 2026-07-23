@@ -129,16 +129,11 @@ export function ActivityFeed({
   onRetryEvents,
 }: Props) {
   const { t } = useTranslation();
-  const [events, setEvents] = useState<ActivityEvent[]>(initial);
-  // App 现无条件挂载本组件(动作流独立于事件加载态),初始事件页在 loading→loaded 后才到达。
-  // initial 变化时按 id dedup 合并进 events(用 mergeAndSort,不 clobber 期间 SSE prepend 的新事件)。
-  const prevInitialRef = useRef(initial);
-  useEffect(() => {
-    if (initial !== prevInitialRef.current) {
-      prevInitialRef.current = initial;
-      if (initial.length > 0) setEvents((prev) => mergeAndSort(prev, initial));
-    }
-  }, [initial]);
+  // 初始为空:App 层 useAsync 不带 since 参数,拿到的是全时段事件;本组件默认
+  // since=todayStartMs(),若直接用 initial 初始化会在首帧闪现历史日志,随后被
+  // fetchPage(带 since)替换——即 "切 tab 闪一下旧日志再变空" 的 bug。
+  // 正确路径:filterActive 时由 fetchPage 填充;!filterActive 时由 sync effect 填充。
+  const [events, setEvents] = useState<ActivityEvent[]>([]);
   // since 默认今天 00:00,跟标题语义对齐;before 留空 → 后端取 now,允许"看到现在".
   // 用户改 since 看更早历史 / 设 before 卡截止 / 清 since 看全量.
   const [since, setSince] = useState<number | undefined>(todayStartMs);
@@ -147,7 +142,8 @@ export function ActivityFeed({
    *  每字符 onChange 触发 EventSource 频繁建/拆 (N3) + reload churn */
   const [appliedSince, setAppliedSince] = useState<number | undefined>(todayStartMs);
   const [appliedBefore, setAppliedBefore] = useState<number | undefined>();
-  const [loading, setLoading] = useState(false);
+  // 默认 filterActive=true → mount 即 fetchPage;起始 true 让首帧显"加载中"而非闪"暂无"。
+  const [loading, setLoading] = useState(true);
   const [feedbackSet, setFeedbackSet] = useState<Set<string>>(new Set());
   const [feedbackPacks, setFeedbackPacks] = useState<Map<string, { path: string; size: number }>>(new Map());
   /** 已拉取的 offset(下次"查看更早"从这开始).事件量动态变(SSE prepend),
@@ -257,15 +253,16 @@ export function ActivityFeed({
       });
   };
 
-  // M5/N2: prop 变(homeId 切换 / 父组件 reload)时同步 — 但仅当 filter 未激活.
-  // 不用 setEvents(initial) 直接抹掉 SSE 累积:filter 清空时 fetchPage({}) 主动拉一次,
-  // 让 backend 给出最新 + SSE merge 已 accumulated 的事件,避免清 filter 瞬间闪烁.
-  // useState(initial) 只首次生效,prop 后续变化由这里同步.
+  // M5/N2: prop 变(homeId 切换 / 父组件 reload)时同步 — 仅当 filter 未激活。
+  // 直接 setEvents(initial) 立即给出全量视图。注意:这会 clobber 快照→resolve 之间
+  // SSE 刚推的事件;清 filter 那次过渡有 SSE 重订阅补偿,但已处于 !filterActive 时的
+  // 同 home retry 不触发重订阅——此窗口极窄且 SSE 后续推送会自愈(pre-existing)。
+  // 先 ++fetchGenRef 作废在途 filtered fetch,并手动 setLoading(false)
+  // (被作废的 fetch 其 finally 的 gen 守卫会 no-op,不会替我们收 loading)。
   useEffect(() => {
     if (!filterActive) {
-      // 首次 mount 时 initial 跟 useState 一致,fetchPage 也能 idempotent 拿到一样数据.
-      // 但用 initial 直接 setEvents 跳过一次 round-trip,首屏更快;后续 homeId 变化
-      // 时 initial 已经是新 home 的数据(父组件 useAsync deps=[homeId] 已重拉).
+      ++fetchGenRef.current; // 作废可能仍在途的 filtered fetch
+      setLoading(false);
       setEvents(initial);
       setOffset(initial.length);
       setHasMore(initial.length === PAGE_SIZE);
