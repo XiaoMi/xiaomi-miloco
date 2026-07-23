@@ -94,6 +94,11 @@ async def _log_cleanup_loop() -> None:
         except Exception as e:
             logger.error("Perception log cleanup failed: %s", e)
         try:
+            deleted_od = mgr.perception_service.cleanup_on_demand_logs(settings.perception.log_ttl)
+            logger.info("On-demand log cleanup: deleted %d entries", deleted_od)
+        except Exception as e:
+            logger.error("On-demand log cleanup failed: %s", e)
+        try:
             deleted_r = await mgr.rule_service.cleanup_logs(settings.rule.log_ttl)
             logger.info("Rule log cleanup: deleted %d entries", deleted_r)
         except Exception as e:

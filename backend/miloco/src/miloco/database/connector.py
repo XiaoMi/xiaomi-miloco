@@ -168,11 +168,35 @@ class SQLiteConnector:
                             "task_terminate_log",
                             self._create_task_terminate_log_table,
                         ),
+                        (
+                            "on_demand_log",
+                            self._create_on_demand_log_table,
+                        ),
                     ):
                         if tbl not in existing_tables:
                             logger.info("%s table not found, creating...", tbl)
                             create_fn(conn)
                             tables_created.append(tbl)
+
+                    # on_demand_log: ensure new columns exist (for DBs created before artifact support)
+                    if "on_demand_log" in existing_tables:
+                        cols = {
+                            r["name"]
+                            for r in conn.execute(
+                                "PRAGMA table_info(on_demand_log)"
+                            ).fetchall()
+                        }
+                        for col, defn in [
+                            ("snapshot_count", "INTEGER NOT NULL DEFAULT 0"),
+                            ("clip_dids", "TEXT NOT NULL DEFAULT '[]'"),
+                            ("clip_kinds", "TEXT NOT NULL DEFAULT '{}'"),
+                            ("has_trace", "INTEGER NOT NULL DEFAULT 0"),
+                        ]:
+                            if col not in cols:
+                                conn.execute(
+                                    f"ALTER TABLE on_demand_log ADD COLUMN {col} {defn}"
+                                )
+                                logger.info("on_demand_log: added column %s", col)
 
                     # If new tables were created, commit transaction
                     if tables_created:
@@ -255,6 +279,7 @@ class SQLiteConnector:
         self._create_task_record_event_table(conn)
         self._create_task_record_event_entry_table(conn)
         self._create_task_terminate_log_table(conn)
+        self._create_on_demand_log_table(conn)
         conn.execute(f"PRAGMA user_version = {_DB_SCHEMA_VERSION}")
         conn.commit()
         logger.info("Database table structure created successfully")
@@ -342,6 +367,31 @@ class SQLiteConnector:
             "CREATE INDEX IF NOT EXISTS idx_perception_log_timestamp ON perception_log(timestamp)"
         )
         logger.info("Perception log table created successfully")
+
+    def _create_on_demand_log_table(self, conn: sqlite3.Connection) -> None:
+        """Create on-demand perception query log table."""
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS on_demand_log (
+                id              TEXT PRIMARY KEY,
+                timestamp       INTEGER NOT NULL,
+                query           TEXT NOT NULL,
+                answer          TEXT NOT NULL,
+                sources         TEXT NOT NULL,
+                latency_ms      INTEGER,
+                snapshot_count  INTEGER NOT NULL DEFAULT 0,
+                clip_dids       TEXT NOT NULL DEFAULT '[]',
+                clip_kinds      TEXT NOT NULL DEFAULT '{}',
+                has_trace       INTEGER NOT NULL DEFAULT 0,
+                created_at      INTEGER NOT NULL
+            )
+        """)
+
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_on_demand_log_timestamp ON on_demand_log(timestamp)"
+        )
+        logger.info("On-demand log table created successfully")
 
     def _create_meaningful_events_table(self, conn: sqlite3.Connection) -> None:
         """Create meaningful_events table.

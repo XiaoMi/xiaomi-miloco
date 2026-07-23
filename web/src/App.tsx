@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import {
   getHomeStatus,
   listActivity,
+  listOnDemandLogs,
   listCameras,
   listDevices,
   listHomeEntries,
@@ -149,6 +150,9 @@ function MainApp() {
   });
   const activity = useAsync(() => listActivity(homeId), [homeId], {
     errorLabel: t("app.loadActivityFail"),
+  });
+  const onDemandLogs = useAsync(() => listOnDemandLogs(homeId), [homeId], {
+    errorLabel: t("app.loadOnDemandLogsFail", "Failed to load on-demand logs"),
   });
   // 家庭档案（候选区 + 正式区记忆）——家庭 tab 用，成员抽屉与非人面板共享。
   const home = useAsync(() => listHomeEntries(homeId), [homeId], {
@@ -398,6 +402,10 @@ function MainApp() {
               eventsLoading={activity.loading}
               eventsError={activity.error}
               onRetryEvents={() => activity.reload()}
+              onDemandLogs={onDemandLogs.data ?? []}
+              deviceNames={Object.fromEntries(
+                (devices.data ?? []).map((d) => [d.did, d.name]),
+              )}
             />
           </div>
         );

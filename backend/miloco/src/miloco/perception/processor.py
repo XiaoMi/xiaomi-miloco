@@ -41,6 +41,7 @@ from miloco.perception.schema import (
     PerceptionLatency,
     PerceptionLogEntry,
 )
+from miloco.perception.snapshot_context import OmniEventArtifacts
 from miloco.perception.types import OnDemandPerceptionResult
 
 logger = logging.getLogger("perf")
@@ -789,12 +790,12 @@ class PipelineProcessor:
 
     async def process_on_demand(
         self, dids: list[str] | None, query: str
-    ) -> OnDemandPerceptionResult | None:
+    ) -> tuple[OnDemandPerceptionResult, OmniEventArtifacts] | None:
         """Active perception pipeline — multi-device batch query.
 
         1. Batch-collect specified devices via collector.collect_batch(dids)
         2. Run perception_engine_proxy.on_demand_perceive(batch, query) for fusion inference
-        3. Return answer dict mapping source key to answer string
+        3. Return (result, artifacts) — artifacts contain clips + omni trace
         """
         async with get_monitor().track_async(NodeName.PROCESSOR, "on_demand") as _proc_h:
             # Peek without consuming — realtime pipeline still needs this data
@@ -808,8 +809,24 @@ class PipelineProcessor:
             if batch.end_timestamp and batch.start_timestamp:
                 _proc_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
 
+            artifacts = OmniEventArtifacts()
+
             try:
-                return await self._perception_engine_proxy.on_demand_perceive(batch, query)
+                result = await self._perception_engine_proxy.on_demand_perceive(
+                    batch, query, artifacts=artifacts,
+                )
             except Exception as e:
                 logger.error("[processor] 主动查询感知失败 | %s", e, exc_info=True)
                 return None
+
+            if result is None:
+                return None
+
+            # Filter out empty clips (same as realtime path)
+            artifacts.clips = {
+                did: (clip_bytes, kind)
+                for did, (clip_bytes, kind) in artifacts.clips.items()
+                if clip_bytes
+            }
+
+            return result, artifacts

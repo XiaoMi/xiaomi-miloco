@@ -133,6 +133,20 @@ export interface ActivityEvent {
   feedback_pack_size?: number | null;
 }
 
+// ── 主动查询日志(on_demand_log)─────────────────────────────
+export interface OnDemandLogEntry {
+  id: string;
+  timestamp: number; // Unix ms
+  query: string;
+  answer: string;
+  sources: string[]; // device dids
+  latency_ms: number | null;
+  snapshot_count: number;
+  clip_dids: string[];
+  clip_kinds: Record<string, "mp4" | "m4a">;
+  has_trace: boolean;
+}
+
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────
 // 与 backend miloco/home_profile/schema.py::Entry 对齐。member_* 是与人绑定的
 // 个人记忆（按 subject_id 归到成员），family/space/device 是与人无关的家庭信息。

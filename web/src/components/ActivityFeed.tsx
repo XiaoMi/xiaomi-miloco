@@ -11,9 +11,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { eventClipUrl, listActivity, revealDir, submitEventFeedback, subscribeEvents } from "@/api";
+import { eventClipUrl, listActivity, listOnDemandLogs, onDemandClipUrl, revealDir, submitEventFeedback, submitOnDemandFeedback, subscribeEvents } from "@/api";
 import { humanizeRulesInText } from "@/lib/eventText";
-import type { ActivityEvent, HomeId } from "@/lib/types";
+import { smartTimeParts } from "@/lib/relativeTime";
+import type { ActivityEvent, HomeId, OnDemandLogEntry } from "@/lib/types";
 import {
   ACTIONS_LIMIT,
   ActionRow,
@@ -21,6 +22,8 @@ import {
   type BackendActionRow,
 } from "./ActionsFeed";
 import { TimeLabel } from "./TimeLabel";
+
+type ActivityTab = "events" | "queries";
 
 interface Props {
   events: ActivityEvent[];
@@ -36,6 +39,8 @@ interface Props {
   /** 事件初始页加载失败——内联提示 + 重试,同样不阻断动作流。 */
   eventsError?: Error | null;
   onRetryEvents?: () => void;
+  onDemandLogs?: OnDemandLogEntry[];
+  deviceNames?: Record<string, string>;
 }
 
 const PAGE_SIZE = 50;
@@ -127,8 +132,12 @@ export function ActivityFeed({
   eventsLoading,
   eventsError,
   onRetryEvents,
+  onDemandLogs: initialOdLogs,
+  deviceNames = {},
 }: Props) {
   const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState<ActivityTab>("events");
+  const [odCount, setOdCount] = useState((initialOdLogs ?? []).length);
   // 初始为空:App 层 useAsync 不带 since 参数,拿到的是全时段事件;本组件默认
   // since=todayStartMs(),若直接用 initial 初始化会在首帧闪现历史日志,随后被
   // fetchPage(带 since)替换——即 "切 tab 闪一下旧日志再变空" 的 bug。
@@ -389,15 +398,12 @@ export function ActivityFeed({
         >
           {t("activity.title")}
           <span className="text-caption-mono text-text-tertiary font-normal">
-            {/* 已加载 N 条 — 单流合并后的行数(事件 + 窗内动作);showEvents 且 hasMore
-                时后端还有更早事件可拉,N 不等于"总数" */}
-            {t("activity.loadedCount", {
-              n: feedRows.length,
-              more: showLoadMore ? "+" : "",
-            })}
+            {activeTab === "events"
+              ? t("activity.loadedCount", { n: feedRows.length, more: showLoadMore ? "+" : "" })
+              : t("activity.odLoaded", { n: odCount, more: "" })}
           </span>
         </h2>
-        <div className="inline-flex items-center gap-3 flex-wrap">
+        <div className="inline-flex items-center gap-3 flex-wrap" style={{ visibility: activeTab === "events" ? "visible" : "hidden" }}>
           {/* 事件 / 动作 checkbox — 都默认勾选,仅组件内 state 不持久化 */}
           <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
             <input
@@ -431,6 +437,18 @@ export function ActivityFeed({
           />
         </div>
       </div>
+
+      {/* Sub-tabs */}
+      <div className="flex gap-0 px-5 border-b border-border">
+        <SubTab active={activeTab === "events"} onClick={() => setActiveTab("events")} label={t("activity.tabEvents")} />
+        <SubTab active={activeTab === "queries"} onClick={() => setActiveTab("queries")} label={t("activity.tabOnDemand")} />
+      </div>
+
+      {/* Tab panels — grid overlay: both occupy same cell, taller sets height */}
+      <div className="grid [&>*]:col-start-1 [&>*]:row-start-1">
+
+      {/* Events panel */}
+      <div style={{ visibility: activeTab === "events" ? "visible" : "hidden" }}>
 
       {/* 事件初始页加载中 / 失败:内联提示,不阻断下方合流(动作已独立加载)。 */}
       {(eventsError || eventsLoading) && (
@@ -506,6 +524,15 @@ export function ActivityFeed({
           </button>
         </div>
       )}
+
+      </div>{/* end events panel */}
+
+      {/* On-demand queries panel */}
+      <div style={{ visibility: activeTab === "queries" ? "visible" : "hidden" }}>
+        <OnDemandLogList initial={initialOdLogs ?? []} homeId={homeId} deviceNames={deviceNames} onCountChange={setOdCount} />
+      </div>
+
+      </div>{/* end grid overlay */}
 
       {lightboxSrc && (
         <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
@@ -1080,6 +1107,339 @@ function AudioClipPlayer({
         className="flex-1 min-w-0 h-9"
         aria-label={`${device_id} audio clip`}
       />
+    </div>
+  );
+}
+
+/* ── Sub-tab button ── */
+
+function SubTab({ active, onClick, label }: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "px-4 py-2 text-body font-medium border-b-2 -mb-px transition-colors " +
+        (active
+          ? "text-brand-primary border-brand-primary font-semibold"
+          : "text-text-tertiary border-transparent hover:text-text-secondary")
+      }
+    >
+      {label}
+    </button>
+  );
+}
+
+/* ── On-demand log list ── */
+
+const OD_PAGE_SIZE = 50;
+
+function OnDemandLogList({ initial, homeId, deviceNames, onCountChange }: {
+  initial: OnDemandLogEntry[];
+  homeId: HomeId;
+  deviceNames: Record<string, string>;
+  onCountChange: (n: number) => void;
+}) {
+  const { t } = useTranslation();
+  const [logs, setLogs] = useState<OnDemandLogEntry[]>(initial);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [hasMore, setHasMore] = useState(initial.length === OD_PAGE_SIZE);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLogs(initial);
+    setHasMore(initial.length === OD_PAGE_SIZE);
+    onCountChange(initial.length);
+  }, [initial, homeId, onCountChange]);
+
+  const refresh = () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    listOnDemandLogs(homeId, { limit: OD_PAGE_SIZE })
+      .then((fresh) => {
+        setLogs(fresh);
+        setHasMore(fresh.length === OD_PAGE_SIZE);
+        onCountChange(fresh.length);
+      })
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
+  };
+
+  const loadMore = () => {
+    if (loading || !hasMore || logs.length === 0) return;
+    const oldest = logs[logs.length - 1];
+    setLoading(true);
+    listOnDemandLogs(homeId, { before: oldest.timestamp, before_id: oldest.id, limit: OD_PAGE_SIZE })
+      .then((older) => {
+        const next = [...logs, ...older];
+        setLogs(next);
+        setHasMore(older.length === OD_PAGE_SIZE);
+        onCountChange(next.length);
+      })
+      .catch(() => setHasMore(false))
+      .finally(() => setLoading(false));
+  };
+
+  if (loading && logs.length === 0) {
+    return (
+      <div className="text-body text-center py-10 text-text-secondary">
+        {t("activity.odLoading")}
+      </div>
+    );
+  }
+
+  if (logs.length === 0) {
+    return (
+      <div className="text-body text-center py-10 text-text-secondary">
+        {t("activity.odEmpty")}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="px-5 py-2 flex justify-end">
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={refreshing}
+          className="text-caption text-text-tertiary hover:text-text-primary transition-colors disabled:opacity-50"
+        >
+          {refreshing ? t("activity.odLoading") : t("activity.odRefresh")}
+        </button>
+      </div>
+      <ul className="divide-y divide-border">
+        {logs.map((log) => (
+          <OnDemandRow key={log.id} log={log} onOpenLightbox={setLightboxSrc} deviceNames={deviceNames} />
+        ))}
+      </ul>
+      {lightboxSrc && (
+        <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      )}
+      {hasMore && (
+        <div className="px-5 py-3 border-t border-border flex justify-center">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loading}
+            className="text-caption text-text-secondary hover:text-text-primary underline-offset-4 hover:underline transition-colors disabled:opacity-50"
+          >
+            {loading ? t("activity.odLoading") : t("activity.loadMore")}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
+  log: OnDemandLogEntry;
+  onOpenLightbox: (src: string) => void;
+  deviceNames: Record<string, string>;
+}) {
+  const { t } = useTranslation();
+  const { time, date } = smartTimeParts(log.timestamp);
+  const [expanded, setExpanded] = useState(false);
+  const [feedbackDone, setFeedbackDone] = useState(false);
+  const [feedbackPack, setFeedbackPack] = useState<{ path: string; size: number } | null>(null);
+  const hasClips = log.snapshot_count > 0;
+  const clipDids = log.clip_dids ?? log.sources.slice(0, log.snapshot_count);
+  const allAudioOnly = hasClips && clipDids.every((did) => (log.clip_kinds?.[did] ?? "mp4") === "m4a");
+
+  const trailing = expanded
+    ? t("activity.collapse")
+    : hasClips && !allAudioOnly
+      ? "🎬"
+      : "💬";
+
+  return (
+    <li
+      onClick={() => { if (!window.getSelection()?.toString()) setExpanded((x) => !x); }}
+      aria-expanded={expanded}
+      className="px-5 py-2.5 hover:bg-bg-tertiary transition-colors cursor-pointer list-none"
+    >
+      <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[70px_1fr_auto] sm:gap-x-3 sm:gap-y-1 sm:items-baseline">
+        <div className="sm:justify-self-stretch leading-tight">
+          <div className="text-caption-mono text-text-secondary whitespace-nowrap sm:text-center">{date}</div>
+          <div className="text-caption-mono text-text-tertiary whitespace-nowrap sm:text-center">{time}</div>
+        </div>
+        <div className="min-w-0 sm:order-2">
+          <div className="text-body text-text-primary font-semibold break-words">Q: {log.query}</div>
+          <div className="text-body text-text-secondary break-words mt-0.5">A: {log.answer}</div>
+          <div className="text-caption-mono text-text-tertiary mt-1">
+            {log.sources.map((did) => deviceNames[did] ? `${deviceNames[did]}(${did})` : did).join(", ")}
+          </div>
+        </div>
+        <span className="text-caption-mono text-text-tertiary whitespace-nowrap sm:order-last sm:justify-self-end" aria-hidden="true">
+          {trailing}
+        </span>
+      </div>
+
+      {expanded && hasClips && (
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]">
+          {clipDids.map((did) =>
+            (log.clip_kinds?.[did] ?? "mp4") === "m4a"
+              ? <OnDemandAudioPlayer key={did} logId={log.id} deviceId={did} />
+              : <OnDemandClipPlayer key={did} logId={log.id} deviceId={did} onOpenLightbox={onOpenLightbox} />,
+          )}
+        </div>
+      )}
+
+      {expanded && log.has_trace && (
+        <OnDemandFeedback
+          logId={log.id}
+          feedbackDone={feedbackDone}
+          feedbackPack={feedbackPack}
+          onSubmitted={(path, size) => { setFeedbackDone(true); setFeedbackPack({ path, size }); }}
+        />
+      )}
+    </li>
+  );
+}
+
+function OnDemandClipPlayer({ logId, deviceId, onOpenLightbox }: {
+  logId: string; deviceId: string; onOpenLightbox: (src: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [failed, setFailed] = useState(false);
+  const src = onDemandClipUrl(logId, deviceId);
+  if (failed) {
+    return (
+      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary">
+        {t("activity.clipExpired")}
+      </div>
+    );
+  }
+  return (
+    <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 relative group">
+      <video src={src} controls preload="metadata" onError={() => setFailed(true)} onClick={(e) => e.stopPropagation()} className="w-48 h-48 rounded bg-black border border-border object-contain" />
+      <button type="button" onClick={(e) => { e.stopPropagation(); onOpenLightbox(src); }} aria-label={t("activity.zoomPlay")}
+        className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+        ⛶
+      </button>
+    </div>
+  );
+}
+
+function OnDemandAudioPlayer({ logId, deviceId }: { logId: string; deviceId: string }) {
+  const { t } = useTranslation();
+  const [failed, setFailed] = useState(false);
+  const src = onDemandClipUrl(logId, deviceId);
+  if (failed) {
+    return (
+      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-full px-4 py-3 rounded bg-bg-primary border border-border text-caption-mono text-text-tertiary">
+        {t("activity.audioExpired")}
+      </div>
+    );
+  }
+  return (
+    <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-full px-4 py-3 rounded bg-bg-primary border border-border flex items-center gap-3">
+      <span className="text-caption-mono text-text-secondary whitespace-nowrap">{t("activity.audioOnly")}</span>
+      <audio src={src} controls preload="metadata" onError={() => setFailed(true)} className="flex-1 min-w-0 h-9" />
+    </div>
+  );
+}
+
+function OnDemandFeedback({ logId, feedbackDone, feedbackPack, onSubmitted }: {
+  logId: string; feedbackDone: boolean; feedbackPack: { path: string; size: number } | null;
+  onSubmitted: (path: string, size: number) => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [text, setText] = useState("");
+  const [status, setStatus] = useState<"idle" | "submitting" | "error">("idle");
+
+  if (!open && status === "idle") {
+    if (feedbackDone && feedbackPack) {
+      return (
+        <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg bg-info-bg text-caption" onClick={(e) => e.stopPropagation()}>
+          <span className="text-info">
+            ✓ {t("activity.feedbackSaved")}
+            {feedbackPack.path && <>，<button type="button" onClick={() => { const i = feedbackPack.path.lastIndexOf("/"); if (i > 0) revealDir(feedbackPack.path.substring(0, i)).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal")}</button></>}
+            ，<a href="https://mi.feishu.cn/share/base/form/shrcnUmo9ez8NwkcpvpJsKSOdgd" target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink")}</a>
+          </span>
+        </div>
+      );
+    }
+    return (
+      <div className="mt-2 sm:ml-[82px]">
+        <button type="button" onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+          className="inline-flex items-center gap-1 px-3 py-[5px] text-caption text-text-tertiary bg-transparent border border-border rounded-md hover:text-brand-primary hover:border-brand-primary hover:bg-brand-soft transition-colors">
+          <span className="text-[11px]">⚑</span> {t("activity.feedbackButton")}
+        </button>
+      </div>
+    );
+  }
+
+  if (status === "submitting") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px] flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-bg-tertiary text-caption text-text-secondary" onClick={(e) => e.stopPropagation()}>
+        <span className="inline-block w-3 h-3 border-2 border-border border-t-brand-primary rounded-full animate-spin" />
+        {t("activity.feedbackSubmitting")}
+      </div>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <div className="mt-2.5 sm:ml-[82px]" onClick={(e) => e.stopPropagation()}>
+        <div className="px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(220,38,38,.06)", color: "#DC2626" }}>
+          ✗ {t("activity.feedbackError")}
+        </div>
+        <button type="button" onClick={() => setStatus("idle")} className="mt-1.5 text-caption text-text-tertiary hover:text-text-secondary">
+          {t("activity.feedbackRetry")}
+        </button>
+      </div>
+    );
+  }
+
+  const handleSubmit = async () => {
+    setStatus("submitting");
+    try {
+      const result = await submitOnDemandFeedback(logId, [...selected], text);
+      onSubmitted(result.pack_path, result.pack_size_bytes);
+      setStatus("idle");
+      setOpen(false);
+    } catch {
+      setStatus("error");
+    }
+  };
+
+  return (
+    <div className="mt-2.5 sm:ml-[82px] p-3.5 rounded-[10px] bg-bg-primary border border-border" onClick={(e) => e.stopPropagation()}>
+      <div className="text-[13px] font-semibold text-text-primary mb-2.5">{t("activity.feedbackTitle")}</div>
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackErrorType")}</div>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {(["person","pet","action","envDevice","voice","other"] as const).map((k) => (
+          <button key={k} type="button"
+            onClick={() => setSelected((prev) => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; })}
+            className={`px-2.5 py-1 text-caption rounded-full border transition-colors ${selected.has(k) ? "text-brand-primary bg-brand-soft border-brand-primary" : "text-text-secondary bg-bg-secondary border-border hover:border-border-strong"}`}>
+            {t(`activity.errorType.${k}`)}
+          </button>
+        ))}
+      </div>
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackText")}</div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder={t("activity.feedbackPlaceholder")}
+        className="w-full h-[52px] px-2.5 py-2 border border-border rounded-lg text-[13px] bg-bg-secondary text-text-primary resize-none focus:outline-none focus:border-brand-primary transition-colors" />
+      <div className="mt-2 px-2.5 py-1.5 rounded-md text-[11px] text-text-tertiary" style={{ background: "rgba(217,119,6,.06)" }}>
+        ⚠ {t("activity.feedbackPrivacy")}
+      </div>
+      <div className="flex justify-end items-center gap-1.5 mt-2.5">
+        <button type="button" onClick={() => { setOpen(false); setSelected(new Set()); setText(""); }}
+          className="px-3.5 py-[5px] text-caption text-text-secondary rounded-md hover:bg-bg-tertiary transition-colors">
+          {t("activity.feedbackCancel")}
+        </button>
+        <button type="button" onClick={handleSubmit}
+          className="px-4 py-[5px] text-caption font-medium text-white bg-brand-primary rounded-md hover:bg-brand-accent transition-colors">
+          {t("activity.feedbackSubmit")}
+        </button>
+      </div>
     </div>
   );
 }

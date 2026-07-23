@@ -475,6 +475,21 @@ class PerceptionLogEntry(BaseModel):
     )
 
 
+class OnDemandLogEntry(BaseModel):
+    """On-demand perception query log entry stored in DB."""
+
+    id: str = Field(..., description="UUID")
+    timestamp: int = Field(..., description="Query time, millisecond Unix timestamp")
+    query: str = Field(..., description="User's natural language question")
+    answer: str = Field(..., description="VLM answer")
+    sources: list[str] = Field(default_factory=list, description="Device did list")
+    latency_ms: int | None = Field(default=None, description="Inference latency in ms")
+    snapshot_count: int = Field(default=0, description="Number of devices with clips on disk")
+    clip_dids: list[str] = Field(default_factory=list, description="Device IDs that have clips on disk")
+    clip_kinds: dict[str, Literal["mp4", "m4a"]] = Field(default_factory=dict, description="Per-device clip kind: {did: 'mp4'|'m4a'}")
+    has_trace: bool = Field(default=False, description="Whether omni_trace.json.gz exists")
+
+
 class MeaningfulEvent(BaseModel):
     """有意义事件(family-ui Activity tab 展示用).
 
