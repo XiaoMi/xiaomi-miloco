@@ -127,10 +127,12 @@ async def _log_cleanup_loop() -> None:
                         "events=%d, agent_runs=%d, action_ledger=%d",
                         dt, dtd, de, da, dal,
                     )
-                    # auto_vacuum=INCREMENTAL 下,DELETE 把页标 free 但不还 OS。
-                    # 这里集中触发 incremental_vacuum,每页 4KB × 10000 ≈ 40MB 回收上限。
+                    # DELETE 把页标 free 但不还 OS，逐页回收（含为何必须 fetchall）
+                    # 见 connector.incremental_vacuum。
                     try:
-                        conn.execute("PRAGMA incremental_vacuum(10000)")
+                        from miloco.database.connector import incremental_vacuum
+
+                        incremental_vacuum(conn)
                     except Exception as e:
                         logger.error("incremental_vacuum failed: %s", e)
                 finally:
@@ -164,10 +166,13 @@ async def _log_cleanup_loop() -> None:
         # miloco.db 已 DELETE 旧 perception_log / rule_log / meaningful_events,
         # 走 incremental_vacuum 把 free pages 还 OS。
         try:
-            from miloco.database.connector import get_db_connector
+            from miloco.database.connector import (
+                get_db_connector,
+                incremental_vacuum,
+            )
 
             with get_db_connector().get_connection() as conn:
-                conn.execute("PRAGMA incremental_vacuum(10000)")
+                incremental_vacuum(conn)
         except Exception as e:
             logger.error("Miloco DB incremental_vacuum failed: %s", e)
         await asyncio.sleep(86400)
