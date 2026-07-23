@@ -233,6 +233,7 @@ class ScopeConfigKeys:
     # 值统一为 JSON array of physical did（整台粒度，走物理 did，不对齐通道的 :chN）。
     CAMERA_VIDEO_BLACK_LIST_KEY = "CAMERA_VIDEO_BLACK_LIST_KEY"
     CAMERA_AUDIO_BLACK_LIST_KEY = "CAMERA_AUDIO_BLACK_LIST_KEY"
+    CAMERA_PROMPT_MAP_KEY = "CAMERA_PROMPT_MAP_KEY"
 
 class OnboardingKeys:
     """主动 onboarding 邀请的一次性标记。

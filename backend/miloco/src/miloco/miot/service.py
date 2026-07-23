@@ -33,8 +33,11 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy, build_sub_device_names
 from miloco.miot.filter import (
+    MAX_CAMERA_PROMPT_LEN,
     MAX_ENABLED_CAMERAS,
     allowed_home_ids,
+    camera_prompts,
+    clear_camera_prompt,
     denied_audio_camera_dids,
     denied_camera_dids,
     denied_channels_of,
@@ -43,6 +46,7 @@ from miloco.miot.filter import (
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
+    set_camera_prompt,
     set_cameras_audio_in_use,
     set_cameras_channels_in_use,
     set_cameras_video_in_use,
@@ -288,6 +292,7 @@ class MiotService:
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_VIDEO_BLACK_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_AUDIO_BLACK_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
         self._lru.clear()
 
     @property
@@ -1198,12 +1203,13 @@ class MiotService:
         三态满足 + 上限≤4）——离线/不可达/镜头关的相机 in_use=false，不显示为开；超上限的
         也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
         ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
-        ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
+         ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
         """
         self._migrate_v1_blacklist_if_needed()
         voice_allowed = voice_allowed_camera_dids(self._kv_repo)
         video_denied = denied_video_camera_dids(self._kv_repo)
         audio_denied = denied_audio_camera_dids(self._kv_repo)
+        prompt_map = camera_prompts(self._kv_repo)
         connected = self._connected_camera_dids()
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
@@ -1260,6 +1266,9 @@ class MiotService:
                         # per-channel 启用（活跃集按合成 did）+ per-channel 真投喂
                         "in_use": syn_did in active,
                         "connected": syn_did in connected,
+                        # 每摄像头的自定义「感知须知」prompt（无则 ""）。
+                        # 按合成 did 存取，双摄每路可有独立须知。
+                        "perception_prompt": prompt_map.get(syn_did, ""),
                     }
                 )
         return out
@@ -1520,8 +1529,82 @@ class MiotService:
         affected = [cam for cam in all_cameras if cam["did"] in set(all_dids)]
         return affected
 
+    def _resolve_prompt_target_dids(self, raw: str, cameras: dict) -> list[str]:
+        """把一个 raw did（合成通道 did ``cam:chN`` / 裸物理 did）解析成**存储用的合成
+        did 列表**——与 ``list_cameras_with_state`` / 感知注入侧的 key 口径一致。
+
+        - 未知物理 did → ValidationException（防 typo）。
+        - ``:chN`` 越界或格式非法 → ValidationException（后端唯一执法点，同 toggle_camera）。
+        - 裸多通道 did → 展成全部通道（该台各路设同一条须知）；单摄 → 裸 did（cc=1）。
+        """
+        pdid = physical_camera_did(raw)
+        if pdid not in cameras:
+            raise ValidationException(
+                f"Unknown camera did(s) ['{raw}']; valid: {sorted(cameras.keys())}"
+            )
+        cc = getattr(cameras.get(pdid), "channel_count", None) or 1
+        if ":ch" in raw:
+            _, ch_str = raw.rsplit(":ch", 1)
+            try:
+                ch = int(ch_str)
+            except ValueError:
+                raise ValidationException(f"非法通道号（格式错误）: {raw}")
+            if not (0 <= ch < cc):
+                raise ValidationException(f"非法通道号（越界）: {raw}")
+            chans = [ch]
+        else:
+            chans = list(range(cc))
+        return [synthetic_camera_did(pdid, c, cc) for c in chans]
+
+    async def set_camera_prompt(self, items: list[dict]) -> list[dict]:
+        """批量设置相机自定义「感知须知」prompt。每项 {"did": str, "prompt": str}。
+
+        ``did`` 可为合成通道 did（``cam:chN``，双摄逐路）或裸物理 did（多通道 = 全通道设
+        同一条，单摄 = 它自己）。``prompt`` strip 后须非空（空串在 schema 层已拒）。校验：
+        未知 did、越界通道、超 ``MAX_CAMERA_PROMPT_LEN`` 全部通过才写。
+
+        **不**从属于感知 / 拾音开关——关着的相机也可预配 prompt，只在被感知时逐窗注入生效。
+        不 refresh / _sync / _restart——引擎每感知窗按合成 did 实时读 KV。
+        """
+        cameras = await self._miot_proxy.get_cameras() or {}
+
+        too_long = [
+            i["did"] for i in items if len((i.get("prompt") or "").strip()) > MAX_CAMERA_PROMPT_LEN
+        ]
+        if too_long:
+            raise ValidationException(
+                f"感知须知过长（超过 {MAX_CAMERA_PROMPT_LEN} 字）：{too_long}"
+            )
+
+        # 先全解析 + 校验（任一非法整批不写），再统一落库。
+        resolved = [
+            (self._resolve_prompt_target_dids(i["did"], cameras), i.get("prompt") or "")
+            for i in items
+        ]
+        touched_physical = {physical_camera_did(i["did"]) for i in items}
+        for syn_dids, prompt in resolved:
+            for syn in syn_dids:
+                set_camera_prompt(self._kv_repo, syn, prompt)
+        all_cameras = await self.list_cameras_with_state()
+        affected = [cam for cam in all_cameras if cam["did"] in touched_physical]
+        return affected
+
+    async def clear_camera_prompt(self, dids: list[str]) -> list[dict]:
+        """批量清除相机自定义「感知须知」prompt。参数只传 did 列表（合成 / 裸物理均可）。
+
+        校验未知 did / 越界通道；裸多通道 did 清全部通道。不 refresh / _sync / _restart。
+        """
+        cameras = await self._miot_proxy.get_cameras() or {}
+        resolved = [self._resolve_prompt_target_dids(d, cameras) for d in dids]
+        touched_physical = {physical_camera_did(d) for d in dids}
+        for syn_dids in resolved:
+            for syn in syn_dids:
+                clear_camera_prompt(self._kv_repo, syn)
+        all_cameras = await self.list_cameras_with_state()
+        affected = [cam for cam in all_cameras if cam["did"] in touched_physical]
+        return affected
+
     def _migrate_v1_blacklist_if_needed(self) -> None:
-        """v1→v2 migration 委托给 filter.migrate_v1_blacklist。"""
         from miloco.miot.filter import migrate_v1_blacklist
         migrate_v1_blacklist(self._kv_repo)
 
