@@ -37,7 +37,6 @@ class TestVadSessionKleidiAIOptOut:
     def test_get_session_applies_kleidiai_opt_out(self, monkeypatch):
         import onnxruntime as ort
         import pytest
-
         from miloco.config import get_settings
         from miloco.perception.inference import ort_utils
 
