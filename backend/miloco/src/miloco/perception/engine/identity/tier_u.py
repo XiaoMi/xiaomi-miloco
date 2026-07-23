@@ -465,7 +465,7 @@ class TierUPool:
         # close 等路径手动 invalidate(漏维护最坏"多算一次", 不会用 stale centroid 误合)。
         # **但内存回收指纹管不了**: cluster_id 被彻底弹掉(evict 最后一个成员 / merge 旧簇
         # 被吸收)后永不再被查 → 其 cache 项既不会被指纹重算也不会被删 → 单调泄漏
-        # (issue #429 §4.2)。故 _evict_entry / _merge_into_cluster 这两条"簇消失"路径
+        # (issue #429)。故 _evict_entry / _merge_into_cluster 这两条"簇消失"路径
         # 显式 pop 掉对应 cluster_id(只 pop 已消失的 id, 对存活簇零影响, 无误合风险)。
         self._centroid_cache: dict[str, tuple[tuple, NDArray[np.float32]]] = {}
 
