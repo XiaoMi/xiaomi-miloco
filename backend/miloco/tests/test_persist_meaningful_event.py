@@ -374,7 +374,7 @@ class TestPersistMeaningfulEvent:
 
     async def test_task_desc_wired_into_text(self, isolated_db, dao):
         """client.py 接线：反查 rule → 按 rule.task_id 取 task.description → 以 rule_id 回填 →
-        落库 text 含「所属任务」+「对应规则」；同 task 多规则 get_description 只调一次（去重缓存）。"""
+        落库 text 含「任务」+「规则」；同 task 多规则 get_description 只调一次（去重缓存）。"""
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, MagicMock
 
@@ -420,9 +420,9 @@ class TestPersistMeaningfulEvent:
         rows = dao.query()
         assert len(rows) == 1
         text = rows[0]["text"]
-        assert "所属任务：厨房安防" in text
-        assert "对应规则：[灶台有人] 灶台前有人" in text
-        assert "对应规则：[明火] 是否有明火" in text
+        assert "任务：厨房安防" in text
+        assert "规则：[灶台有人] 灶台前有人" in text
+        assert "规则：[明火] 是否有明火" in text
         # 同 task 两条规则 → description 只查一次（去重缓存生效）
         assert get_desc.call_count == 1
 

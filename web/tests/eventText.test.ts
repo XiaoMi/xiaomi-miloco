@@ -9,15 +9,15 @@ import { describe, it, expect } from "vitest";
 import { humanizeRulesInText } from "@/lib/eventText";
 
 describe("humanizeRulesInText", () => {
-  it("新格式：所属任务 + 对应规则[短名] 原样保留（方括号短名不被误 strip）", () => {
+  it("新格式：任务 + 规则[短名] 原样保留（方括号短名不被误 strip）", () => {
     const text =
       "[感知引擎]规则提醒：\n" +
-      "所属任务：书房安防\n" +
-      "对应规则：[书桌前有人] 有人坐在书桌前面向屏幕\n" +
+      "任务：书房安防\n" +
+      "规则：[书桌前有人] 有人坐在书桌前面向屏幕\n" +
       "触发原因：画面中有人";
     const out = humanizeRulesInText(text);
-    expect(out).toContain("所属任务：书房安防");
-    expect(out).toContain("对应规则：[书桌前有人] 有人坐在书桌前面向屏幕");
+    expect(out).toContain("任务：书房安防");
+    expect(out).toContain("规则：[书桌前有人] 有人坐在书桌前面向屏幕");
   });
 
   it("旧数据 v3：触发规则行 strip [task_id] 前缀", () => {

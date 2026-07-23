@@ -161,46 +161,46 @@ class TestBuildMatchedRulesText:
         assert text is not None
         assert text.startswith("[感知引擎]规则提醒：")
         # 无 rule_names/queries/task_descs：规则短名 fallback 到 rule_id，query 空 → 只留短名；
-        # 无 task_desc → 所属任务行省略
-        assert "对应规则：[rule-001]" in text
-        assert "所属任务" not in text
+        # 无 task_desc → 任务行省略
+        assert "规则：[rule-001]" in text
+        assert "任务：" not in text
         assert "触发原因：厨房有人在炒菜" in text
 
     def test_rule_with_name_lookup(self):
-        """rule_names 传入时「对应规则」用规则名而非 rule_id。"""
+        """rule_names 传入时「规则」用规则名而非 rule_id。"""
         r = MatchedRule(rule_id="rule-001", reason="炒菜")
         text = build_matched_rules_text([r], rule_names={"rule-001": "厨房安全"})
-        assert "对应规则：[厨房安全]" in text
+        assert "规则：[厨房安全]" in text
         assert "rule-001" not in text
 
     def test_rule_with_query_merged_into_rule_line(self):
-        """query 并入「对应规则」行：`[规则短名] query`。"""
+        """query 并入「规则」行：`[规则短名] query`。"""
         r = MatchedRule(rule_id="rule-001", reason="检测到明火")
         text = build_matched_rules_text(
             [r],
             rule_names={"rule-001": "厨房安全"},
             rule_queries={"rule-001": "厨房是否有明火"},
         )
-        assert "对应规则：[厨房安全] 厨房是否有明火" in text
+        assert "规则：[厨房安全] 厨房是否有明火" in text
 
     def test_rule_with_task_desc(self):
-        """task_descs 传入时渲染「所属任务」行。"""
+        """task_descs 传入时渲染「任务」行。"""
         r = MatchedRule(rule_id="rule-001", reason="炒菜")
         text = build_matched_rules_text(
             [r],
             rule_names={"rule-001": "厨房安全"},
             task_descs={"rule-001": "厨房安防"},
         )
-        assert "所属任务：厨房安防" in text
-        assert "对应规则：[厨房安全]" in text
+        assert "任务：厨房安防" in text
+        assert "规则：[厨房安全]" in text
 
     def test_rule_name_strips_task_prefix(self):
-        """rule.name 带 [task_id] 前缀时，「对应规则」短名去前缀。"""
+        """rule.name 带 [task_id] 前缀时，「规则」短名去前缀。"""
         r = MatchedRule(rule_id="rule-001", reason="炒菜")
         text = build_matched_rules_text(
             [r], rule_names={"rule-001": "[kitchen_safety] 厨房安全"}
         )
-        assert "对应规则：[厨房安全]" in text
+        assert "规则：[厨房安全]" in text
         assert "kitchen_safety" not in text
 
     def test_rule_with_source_meta(self):

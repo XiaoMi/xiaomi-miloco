@@ -101,15 +101,15 @@ def _strip_task_prefix(name: str) -> str:
 def _fmt_matched_rule(
     r: MatchedRule, task_desc: str, rule_label: str, query: str = ""
 ) -> str:
-    # 「对应规则」= [规则短名] + 触发条件 query 合并成一行；query 空则只留短名。
+    # 「规则」= [规则短名] + 触发条件 query 合并成一行；query 空则只留短名。
     # 规则短名退化为空（name 仅有 [task_id] 前缀）时不渲染空方括号，用 query 兜底。
     if rule_label:
         rule_line = f"[{rule_label}] {query}" if query else f"[{rule_label}]"
     else:
         rule_line = query or rule_label
     return _build_lines(
-        ("所属任务", task_desc),
-        ("对应规则", rule_line),
+        ("任务", task_desc),
+        ("规则", rule_line),
         ("时间", _fmt_time_field(r.time_window)),
         ("来源", _fmt_source_field(r.room_name, r.device_name, r.source_device_ids or None)),
         ("画面描述", r.caption.rstrip("。.") if r.caption else ""),
@@ -156,8 +156,8 @@ def build_matched_rules_text(
     不经过本函数）。
 
     住户日志形态（后端即构造成住户可读形态，前端不再 strip）：
-    - 「所属任务」= ``task_descs[rule_id]``（rule.task_id → task.description；缺省则省略该行）
-    - 「对应规则」= ``[规则短名] query``（规则短名 = rule.name 去 [task_id] 前缀）
+    - 「任务」= ``task_descs[rule_id]``（rule.task_id → task.description；缺省则省略该行）
+    - 「规则」= ``[规则短名] query``（规则短名 = rule.name 去 [task_id] 前缀）
 
     Returns None 表示无 rule 命中。
     """
