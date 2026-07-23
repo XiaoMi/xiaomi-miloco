@@ -307,6 +307,12 @@ class MultiTrackSyncBuffer:
             # 导致 keep 模式下 _drained 永不收敛、每 drain 一窗就永久堆一份整窗解码帧
             # (issue #429 §4.1:帧级无界泄漏,实测 120 窗→1.1GB)。peek_latest 只取最近
             # duration_ms,max_windows 窗足够,收窄不影响回看语义。
+            #
+            # 隐性不变量:``max_windows`` 必须 ≥ peek_latest 的最大回看窗数
+            # ``ceil(duration_ms / window_ms)``,否则 _drained 存不下所需历史、peek 会静默
+            # 返回被截断的数据。当前生产 collect_ms == window_ms(1 窗)<< max_windows
+            # (默认 3),3× 余量;调小 max_windows 或加大 peek duration_ms 前须复核这条
+            # (peek_latest 入口有超限 debug 日志兜底)。
             while len(self._drained) > self._max_windows:
                 self._drained.popleft()
 
@@ -339,6 +345,18 @@ class MultiTrackSyncBuffer:
             if no windows exist.
         """
         target_ms = duration_ms if duration_ms is not None else self._window_ms
+
+        # 回看深度受 _drained 保留量约束:drain_ready 把 _drained 裁到 max_windows 个窗,
+        # 故最多回看 ~max_windows × window_ms。请求超出这个跨度时,更早的帧已被裁掉、
+        # 本次 peek 会静默截断——打一条 debug 兜底,提示调参踩到了这条隐性不变量
+        # (见 drain_ready 裁剪处注释)。生产 target_ms == window_ms << 上限,不会触发。
+        if target_ms > self._max_windows * self._window_ms:
+            logger.debug(
+                "[stream_buffer] peek duration_ms=%d 超过 _drained 回看上限 %d "
+                "(max_windows=%d × window_ms=%d),更早的帧已被裁剪,返回值可能截断",
+                target_ms, self._max_windows * self._window_ms,
+                self._max_windows, self._window_ms,
+            )
 
         with self._lock:
             if not self._windows:
