@@ -125,7 +125,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self,
         all_devices: dict | None = None,
         online_only: bool = True,
-        require_lan: bool = True,
+        require_lan: bool = False,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         if not self._miot_proxy.is_authenticated:
@@ -142,7 +142,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         all_devices: dict,
         *,
         online_only: bool = True,
-        require_lan: bool = True,
+        require_lan: bool = False,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         """Filter camera-type devices from a full device dict.
@@ -152,11 +152,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         - did 在停用的相机集合里。
 
         ``cap=True``（默认，连接/投喂路径）时最后按**流路数**（多通道相机一台算
-        ``channel_count`` 路）升序确定性截断到 ``MAX_ENABLED_CAMERAS``：被动路径
-        （登录/绑定后黑名单为空 → 家庭内全部相机均通过 home filter）下，这是投喂上限的
-        唯一兜底，与 ``service.toggle_camera`` 的主动 enable 校验互补。不写 KV、不碰黑
-        名单——只是少返回（从而少连接）超出上限的相机；口径与 toggle_camera 自洽（同样
-        只数通过 home filter + 未拉黑的相机的流路数）。
+        ``channel_count`` 路）确定性截断到 ``MAX_ENABLED_CAMERAS``，顺序按动态连接健康度
+        分档：已连接优先、普通候选其次、持续连接失败者最后，组内按合成 did 升序。健康度
+        按物理 did 记（会话整台一条），同一台的各路一起优先/一起让位。被动路径（登录/绑定后
+        黑名单为空 → 家庭内全部相机均通过 home filter）下，这是投喂上限的唯一兜底，与
+        ``service.toggle_camera`` 的主动 enable 校验互补。不写 KV、不碰黑名单——只是少返回
+        （从而少连接）超出上限的相机；口径与 toggle_camera 自洽（同样只数通过 home filter +
+        未拉黑的相机的流路数）。
         ``cap=False`` 用于「列全集」语义（如 rule target 校验），不受投喂上限影响。
         """
         from miloco.miot.filter import select_active_camera_dids
@@ -169,6 +171,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             for did, info in all_devices.items()
             if isinstance(info, MIoTCameraInfo)
         }
+        priority_dids = getattr(self._miot_proxy, "_camera_priority_dids", set())
+        if not isinstance(priority_dids, set):
+            priority_dids = set()
+        deprioritized_dids = getattr(
+            self._miot_proxy, "_camera_deprioritized_dids", set()
+        )
+        if not isinstance(deprioritized_dids, set):
+            deprioritized_dids = set()
         active = select_active_camera_dids(
             kv,
             cams,
@@ -176,6 +186,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             require_lan=require_lan,
             cap=cap,
             awake_map=getattr(self._miot_proxy, "_camera_awake_cache", None),
+            priority_dids=priority_dids,
+            deprioritized_dids=deprioritized_dids,
         )
         # ``select_active_camera_dids`` 已按通道展开、返回**合成 did**（单摄裸 did、多摄
         # ``{did}:ch{n}``），并已做过 per-channel 黑名单 / per-lens 镜头门 / 上限截断。这里
@@ -190,7 +202,11 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 device_type="camera",
                 room_id=camera_info.room_name,
                 room_name=camera_info.room_name,
-                online=camera_info.online and camera_info.lan_online,
+                # LAN discovery and PPCS are independent transports.  A
+                # cloud-online camera must be allowed to attempt PPCS even
+                # when the OT probe did not answer; actual frame delivery is
+                # the authoritative stream-health signal.
+                online=camera_info.online,
             )
         return result
 
@@ -199,11 +215,12 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         登录瞬间相机 LAN 未就绪时 `refresh_cameras` 建不成 camera_img_manager，
         之后无任何机制补建 → 永久不拉流（需重启进程）。这里在周期 sync 路径
-        （`all_devices is None`）检测到「scope 内应连相机数 > 已连数」时，先触发
-        一次 `refresh_cameras` 补建 manager 再交基类连接。应连数用
+        （`all_devices is None`）检测到「manager 缺失或 native/PPCS 尚未连接」时，先按
+        10 秒最小间隔触发一次 `refresh_cameras`，补建 manager、推进失败计数和超额轮换，
+        再交基类连接。应连数用
         `online_only=True, require_lan=False`：放过 lan_online 陈旧成 false 的卡死态
         相机（要救），但排除云端就离线的相机（救不活，避免它让判据永真致 refresh
-        空转）。scope 内相机要么已连、要么云端离线时不触发，零额外开销。
+        空转）。已连接相机不触发刷新；未连接相机最多每 10 秒检查一次。
         """
         if all_devices is None and self._miot_proxy.is_authenticated:
             try:
@@ -211,11 +228,21 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     online_only=True, require_lan=False
                 )
                 now_ms = _monotonic_ms()
-                if len(expected) > len(self._devices) and (
+                disconnected = [
+                    did
+                    for did in expected
+                    if not self._miot_proxy.is_camera_stream_connected(did)
+                ]
+                if (len(expected) > len(self._devices) or disconnected) and (
                     now_ms - self._last_ondemand_refresh_ms
                     >= _ONDEMAND_REFRESH_MIN_INTERVAL_MS
                 ):
                     self._last_ondemand_refresh_ms = now_ms
+                    if disconnected:
+                        logger.debug(
+                            "Refreshing disconnected camera managers: %s",
+                            sorted(disconnected),
+                        )
                     await self._miot_proxy.refresh_cameras()
             except Exception as e:  # noqa: BLE001
                 logger.warning("On-demand camera manager refresh failed: %s", e)
@@ -394,7 +421,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             device_type="camera",
             room_id=camera.room_name,
             room_name=camera.room_name,
-            online=camera.online and camera.lan_online,
+            online=camera.online,
         )
 
     def _build_device_data(

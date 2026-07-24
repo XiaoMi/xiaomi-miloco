@@ -265,12 +265,15 @@ function CameraSection({
   const activeCount = scopeCameras.filter((c) => c.inUse).length;
   const allOn = total > 0 && activeCount === total;
   const allOff = activeCount === 0;
-  // 满额判断按 inUse(=活跃集:未拉黑 + 三态好 + 上限内)计数,与后端 toggle_camera 的
-  // 上限校验同口径——后端也数「可用集」(离线/局域网不可达/镜头关的不占名额)。所以
+  // 满额判断按 inUse(=活跃集:未拉黑 + 云在线 + 镜头开 + 上限内)计数,与后端
+  // toggle_camera 的上限校验同口径——离线/镜头关不占名额，OT 未发现照常尝试。所以
   // 面板显示的名额 = 后端认的名额,不会出现「看着有位、点开启却被后端拒」。
   const atCapacity = activeCount >= maxStreamCams;
-  // 「全开」只能开「可用且未投喂」的**通道**——不可用(云端离线/局域网不可达/该路镜头关)
-  // 后端 toggle_camera 会整批拒绝。全拆按通道走：每路一个合成 did，各自独立(不去重物理 did)。
+  // 「全开」只能开「可用且未投喂」的**通道**——不可用(云端离线/该路镜头关)后端
+  // toggle_camera 会整批拒绝,若把它们塞进批量 enable,会连带可用的一起失败。
+  // 局域网不可达**不**算不可用：OT 未发现的相机照常尝试 direct-IP/PPCS，与后端同口径。
+  // 全拆按通道走：每路一个合成 did，各自独立(不去重物理 did)。
+  // 与下区单台开关「不可用不可开」同口径(cameraAvailable)。
   const enableableDids = scopeCameras
     .filter((c) => !c.inUse && cameraAvailable(c))
     .map(feedDidOf);
@@ -502,19 +505,17 @@ function CameraSection({
                       cam={c}
                       channelLabel={channelLabelOf(c)}
                       showVoice={hasMic(c)}
-                      // 瞬态忙才原生禁用;语义不可开(离线 / 该路镜头关 / 局域网不可达 / 满额)走
+                      // 瞬态忙才原生禁用;语义不可开(离线 / 该路镜头关 / 满额)走
                       // blockedReasonKey——置灰但可点,点击 toast、桌面悬停气泡说明原因。
+                      // 局域网不可达不再是不可开的理由(OT 未发现仍可走 PPCS)。
                       // awake 用**该路**的 per-lens 值(全拆后每行一路,不再整台 OR)。
                       busy={bulkBusy || singleBusyDids.has(feedDid)}
                       blockedReasonKey={switchBlockedReasonKey(
-                        {
-                          cloudOnline: c.cloudOnline,
-                          lanReachable: c.lanReachable,
-                          awake: c.awake,
-                        },
+                        { cloudOnline: c.cloudOnline, awake: c.awake },
                         { inUse: c.inUse, atCapacity },
                       )}
                       onToggle={(v) => runSingle(feedDid, v)}
+                      // 同上区卡:相机开关 in-flight 时拾音开关一并置灰,防交叠竞态。
                       voiceBusy={
                         voiceBusyDids.has(c.did) ||
                         bulkBusy ||
@@ -694,7 +695,7 @@ function CamSwitch({
   name: string;
   /** 瞬态忙（bulk / single 操作进行中）：真禁、忽略点击、不提示。 */
   busy: boolean;
-  /** 语义不可开（离线 / 镜头关 / 局域网不可达 / 满额，仅未启用时）：置灰但仍可点 → toast 理由；已启用为空。 */
+  /** 语义不可开（离线 / 镜头关 / 满额，仅未启用时）：置灰但仍可点 → toast 理由；已启用为空。 */
   blockedReasonKey?: string;
   onToggle: (next: boolean) => void;
 }) {
@@ -1026,8 +1027,11 @@ function BenchCamItem({
   );
 }
 
-/** 一路通道的三个并列可用性指标:云端在线 / 局域网可达 / 镜头开关。各自独立好坏,
- *  住户能一眼看出卡在哪一环。下区单摄行与多摄子行复用。 */
+/** 一路通道的三个并列可用性指标:云端在线 / 视频链路 / 镜头开关。各自独立好坏,
+ *  住户能一眼看出卡在哪一环。下区单摄行与多摄子行复用。
+ *  中间那盏灯只作诊断、不是开启硬门：区分「OT 已发现」/「PPCS 已连接」/「OT 未发现但
+ *  仍会尝试 PPCS」三态——最后一态是待尝试而非故障，故用 unknown(灰) 而非 warning(橙)。
+ *  云端在线/链路态是**相机级**（会话整台一条），镜头态才是 per-lens。 */
 function ChannelStateDots({ cam }: { cam: ScopeCamera }) {
   const { t } = useTranslation();
   return (
@@ -1041,9 +1045,13 @@ function ChannelStateDots({ cam }: { cam: ScopeCamera }) {
         }
       />
       <StateDot
-        ok={cam.lanReachable}
+        ok={cam.lanReachable ? true : "unknown"}
         label={
-          cam.lanReachable ? t("hero.stateLanOk") : t("hero.stateLanOffline")
+          cam.lanDetected
+            ? t("hero.stateLanDetected")
+            : cam.lanReachable
+              ? t("hero.statePpcsConnected")
+              : t("hero.statePpcsPending")
         }
       />
       <StateDot

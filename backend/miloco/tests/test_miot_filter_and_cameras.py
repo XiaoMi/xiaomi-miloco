@@ -48,13 +48,21 @@ def _home(home_id: str, name: str = "Home"):
     return SimpleNamespace(home_id=home_id, home_name=name)
 
 
-def _camera(did: str, home_id: str = "H1", *, online: bool = True, lan_online: bool = True):
+def _camera(
+    did: str,
+    home_id: str = "H1",
+    *,
+    online: bool = True,
+    lan_online: bool = True,
+    channel_count: int = 1,
+):
     return SimpleNamespace(
         did=did,
         home_id=home_id,
         name=f"cam-{did}",
         online=online,
         lan_online=lan_online,
+        channel_count=channel_count,
     )
 
 
@@ -182,6 +190,75 @@ def test_select_active_caps_by_did(monkeypatch):
         "c2",
         "c3",
     }
+
+
+def test_select_active_cap_prioritizes_connected_and_demotes_failed(monkeypatch):
+    """超额时 connected > 普通 > 持续失败；LAN/OT 不参与该排序。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {
+        "c1": _camera("c1", home_id="H1", lan_online=False),
+        "c2": _camera("c2", home_id="H1"),
+        "c3": _camera("c3", home_id="H1"),
+    }
+
+    selected = miot_filter.select_active_camera_dids(
+        kv,
+        cameras,
+        require_lan=False,
+        priority_dids={"c3"},
+        deprioritized_dids={"c1"},
+    )
+
+    assert selected == ["c3", "c2"]
+
+
+def test_select_active_health_order_does_not_drop_when_under_cap(monkeypatch):
+    """≤上限时失败摄像机仍保留，让 PPCS 自愈而不是被健康排序误杀。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 4)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {
+        "c1": _camera("c1", home_id="H1", lan_online=False),
+        "c2": _camera("c2", home_id="H1"),
+    }
+
+    assert miot_filter.select_active_camera_dids(
+        kv,
+        cameras,
+        require_lan=False,
+        deprioritized_dids={"c1"},
+    ) == ["c1", "c2"]
+
+
+def test_health_sets_are_keyed_by_physical_did_across_channels(monkeypatch):
+    """健康度按**物理 did** 记账：多通道相机的各路一起优先/一起让位。
+
+    native/PPCS 会话是整台相机一条，两路共享连通命运；若排序时拿合成 did 去查
+    健康集合就永远查不中，降权对多摄相机静默失效。
+    """
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cameras = {
+        "dual": _camera("dual", home_id="H1", channel_count=2),
+        "s1": _camera("s1", home_id="H1"),
+        "s2": _camera("s2", home_id="H1"),
+    }
+
+    # 双摄整台降权（按物理 did 给）→ 它的两路都排到最后，名额让给两台未尝试的单摄。
+    assert miot_filter.select_active_camera_dids(
+        kv,
+        cameras,
+        require_lan=False,
+        deprioritized_dids={"dual"},
+    ) == ["s1", "s2"]
+
+    # 反过来：双摄已连通 → 两路一起占满名额，单摄让位。
+    assert miot_filter.select_active_camera_dids(
+        kv,
+        cameras,
+        require_lan=False,
+        priority_dids={"dual"},
+    ) == ["dual:ch0", "dual:ch1"]
 
 
 # ─── filter.py: write helpers ────────────────────────────────────────────────
@@ -468,16 +545,53 @@ async def test_list_cameras_with_state_flags():
     assert by_did["c1"]["is_online"] is True  # 兼容字段 = cloud && lan
     assert by_did["c1"]["connected"] is False
 
-    # c2：未停用但局域网不可达 → 被可用性 gate 掉 → in_use=false
+    # c2：OT 探测未响应，但云端在线 → 仍进入活跃集尝试 PPCS；在 PPCS
+    # 真正连上之前保留 lan_reachable=false 诊断态。
     assert by_did["c2"]["cloud_online"] is True
     assert by_did["c2"]["lan_reachable"] is False
-    assert by_did["c2"]["in_use"] is False
+    assert by_did["c2"]["lan_detected"] is False
+    assert by_did["c2"]["in_use"] is True
     assert by_did["c2"]["is_online"] is False
 
     # c4：三态好 + 未停用 → 活跃 → in_use=true；awake 缓存空=未知(None)；connected 正交
     assert by_did["c4"]["in_use"] is True
     assert by_did["c4"]["awake"] is None
     assert by_did["c4"]["connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_camera_ppcs_connected_overrides_missing_ot_discovery():
+    """PPCS 已连接就是视频可达的强证据，不应继续显示“局域网不可达”。"""
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    cam.connected = True
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
+
+    out = await svc.list_cameras_with_state()
+
+    assert out[0]["lan_detected"] is False
+    assert out[0]["lan_reachable"] is True
+    assert out[0]["is_online"] is True
+    assert out[0]["in_use"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_camera_in_use_matches_dynamic_health_order(monkeypatch):
+    """Dashboard in_use 与 manager 的 connected > 普通 > 失败超额排序保持一致。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    cameras = {
+        did: _camera(did, home_id="H1") for did in ("c1", "c2", "c3")
+    }
+    svc = _make_service(devices=dict(cameras), cameras=cameras)
+    svc._miot_proxy._camera_priority_dids = {"c3"}
+    svc._miot_proxy._camera_deprioritized_dids = {"c1"}
+
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+
+    assert by_did["c3"]["in_use"] is True
+    assert by_did["c2"]["in_use"] is True
+    assert by_did["c1"]["in_use"] is False
 
 
 @pytest.mark.asyncio
@@ -1180,6 +1294,60 @@ async def test_refresh_cameras_destroys_overcap_existing_manager(_scope_proxy_en
 
 
 @pytest.mark.asyncio
+async def test_refresh_cameras_failed_manager_yields_slot_to_untried_camera(
+    _scope_proxy_env, monkeypatch
+):
+    """持续未连的 manager 超过宽限后，在 >cap 时让位给尚未尝试的摄像机。"""
+    monkeypatch.setattr("miloco.miot.filter.MAX_ENABLED_CAMERAS", 2)
+    monkeypatch.setattr("miloco.miot.client._CAMERA_CONNECT_FAILURE_THRESHOLD", 2)
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    failed = MagicMock()
+    failed.camera_info = SimpleNamespace(connected=False)
+    failed.update_camera_info = AsyncMock()
+    failed.destroy = AsyncMock()
+    healthy = MagicMock()
+    healthy.camera_info = SimpleNamespace(connected=True)
+    healthy.update_camera_info = AsyncMock()
+    healthy.destroy = AsyncMock()
+    proxy._camera_img_managers = {"c1": failed, "c2": healthy}
+
+    cameras = {
+        did: _camera(did, home_id="H1") for did in ("c1", "c2", "c3")
+    }
+    miot_client.get_cameras_async = AsyncMock(return_value=cameras)
+    # c3 的首次建连可以失败；关键是它获得了尝试机会，c1 不再永久占位。
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()  # c1 第 1 次未连接，仍在宽限期
+    assert set(proxy._camera_img_managers) == {"c1", "c2"}
+
+    await proxy.refresh_cameras()  # c1 第 2 次未连接，降权并让位给 c3
+
+    failed.destroy.assert_awaited_once()
+    assert "c1" not in proxy._camera_img_managers
+    miot_client.create_camera_instance_async.assert_awaited_once()
+    attempted = miot_client.create_camera_instance_async.await_args.args[0]
+    assert attempted.did == "c3"
+    assert proxy._camera_retry_cooldowns["c1"] > 0
+    assert proxy._camera_priority_dids == {"c2"}
+
+
+def test_camera_retry_cooldown_is_finite(_scope_proxy_env):
+    """降权不是永久拉黑：冷却刷新数耗尽后摄像机会重新进入普通候选。"""
+    proxy, _, _ = _scope_proxy_env
+    proxy._camera_retry_cooldowns["c1"] = 2
+
+    _, deprioritized = proxy._advance_camera_selection_health({"c1"})
+    assert deprioritized == {"c1"}
+
+    _, deprioritized = proxy._advance_camera_selection_health({"c1"})
+    assert deprioritized == set()
+    assert "c1" not in proxy._camera_retry_cooldowns
+
+
+@pytest.mark.asyncio
 async def test_refresh_cameras_destroy_failure_isolated(_scope_proxy_env):
     """批量销时某台 destroy 抛错不拖垮其余：失败的留在 dict 待重试，其余照常销。
 
@@ -1235,6 +1403,25 @@ async def test_refresh_cameras_offline_not_built(_scope_proxy_env):
 
     assert miot_client.create_camera_instance_async.call_count == 1  # 只为在线的 c1
     assert "c2" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_ot_undiscovered_still_builds_manager(
+    _scope_proxy_env,
+):
+    """OT 未发现不能阻止 manager 创建，否则 PPCS 永远没有握手机会。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={
+            "c1": _camera("c1", home_id="H1", online=True, lan_online=False),
+        }
+    )
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    miot_client.create_camera_instance_async.assert_awaited_once()
 
 
 # ─── service.toggle_*: 写完 KV 后驱动 MIoT manager 收敛 ──────────────────────
@@ -1700,13 +1887,16 @@ async def test_toggle_enable_rejected_cloud_offline():
 
 
 @pytest.mark.asyncio
-async def test_toggle_enable_rejected_lan_unreachable():
-    """开启局域网不可达（云端在线）的相机 → 拒绝，文案含「局域网不可达」。"""
+async def test_toggle_enable_allows_ot_undiscovered_camera_to_attempt_ppcs():
+    """OT 未发现但云端在线时允许开启，让 direct-IP/PPCS 有握手机会。"""
     cam = _camera("c1", home_id="H1", online=True, lan_online=False)
     kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
     svc = _make_service(devices={"c1": cam}, cameras={"c1": cam}, kv=kv)
-    with pytest.raises(ValidationException, match="局域网不可达"):
-        await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+    out = await svc.toggle_camera([{"did": "c1", "in_use": True}])
+
+    assert out[0]["did"] == "c1"
+    assert out[0]["in_use"] is True
 
 
 @pytest.mark.asyncio
