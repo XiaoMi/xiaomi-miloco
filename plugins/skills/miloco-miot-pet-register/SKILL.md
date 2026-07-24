@@ -59,7 +59,10 @@ metadata:
 - "我家那条狗"(**无名**) → **追问真名**("这只狗叫什么名字?我用它作标识")
 - 完整规则见 [references/species-name-parsing.md](./references/species-name-parsing.md)。
 
-**补充素材**:对**已在花名册**的宠物再传素材("给小黑再传几张") → 先 `miloco-cli pet list` 确认该名已存在 → A 素材通路 + 落库 `append`(第五步 5.3)。
+**🚨 重名前置查重**(拿到 `name` 后、observe / 落库**之前必做**):先 `miloco-cli pet list` 看该 `name` 是否已在花名册(后端按**精确名**判重,`pet add` 撞名直接 409)。按结果分流:
+- **名不存在** → 正常往下(A observe / B 回显)。
+- **名已存在 + 用户明确是"补充素材"**("给小黑再传几张") → A 素材通路 + 落库走 `append`(第五步 5.3),复用已有 pet_id,无需再问。
+- **名已存在 + 用户是"注册/登记"意图(非明确补充)** → **不要 observe、不要落库**,本轮停下问用户三选一(第五步 5.5),按回复再走;**严禁**自作主张直接 append / 覆盖。
 
 ## 第二步 · 通路判定
 
@@ -104,6 +107,8 @@ Agent: 好嘞,这只猫要登记(顺便告诉我它叫什么),两种方式(效�
 
 对上传的素材调 **一次** `pet observe`,拿候选参考 crop + 共性外观描述。
 
+🚨 **`<MediaPath>` 用消息给的真实路径**:即用户消息里 `[media attached: <绝对路径>]` / `MediaPath(s)` 提供的那个(通常形如 `~/.openclaw/workspace/media/inbound/openclaw-staged-…/….mp4`)。**绝不**拿 `message_id`(如 `om_x100…`)拼文件名、**绝不**猜 `/tmp/openclaw/media/inbound/…` 之类路径。
+
 单图 / 多图(≤3,单次批量)/ 视频(原文件,禁抽帧):
 ```bash
 miloco-cli pet observe --image <MediaPath> --save-crops /tmp/<uuid>_pet --pretty
@@ -125,7 +130,10 @@ miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/<uuid>_pet --pr
 - ❌ 每轮 `pet observe` **恰调一次**,不"再试 / 刷新一下"。结果不理想(检不到 / 大众脸)直接按结果发话让用户决定。
 - ❌ 视频**禁客户端抽帧**再 `--image`(丢多帧姿态,识别参照差);原文件交 `--video`,后端选帧。
 - ❌ 不给 CLI 加 `| jq` / `| grep` 管道(丢字段)。
-- 🚨 **发候选图必须用 `message` 工具显式上传**(飞书 DM `MEDIA:` 内联标记不渲染);发 **`montage_saved_to` 这一张拼图**(多姿态已横向拼好),**不要**把 `crops_saved` 逐张发(刷屏)。仅当无 `montage_saved_to`(如整幅回退)才退而发单张。
+- 🚨 **拼图用 `message` 工具发、只发图**:候选图必须用 `message(action=send, media=montage_saved_to)` 显式上传(飞书 DM `MEDIA:` 内联标记不渲染);发 **`montage_saved_to` 这一张**(多姿态已横向拼好),不逐张发 `crops_saved`(刷屏),无 montage 才退单张。**这条 `message` 的 `text` 留空、不写话术**——话术改用普通文字回复(见下条)。
+- 🚨 **发完拼图后,必须再用一句普通文字回复(assistant `content`)把确认话术说出来**——像平时聊天直接回文字、**不经任何工具**,内容用下方"首轮文字模板"。**别只调 `message` 发张图就收尾**。(即:图走 `message` 工具、话术走你的文字回复,两者分开。)
+- 🚨 **发完(拼图 + 文字确认),本轮到此为止**:进第四步**纯等待**——**严禁本轮落库**(`pet add` / `reference-crops`)。observe 与落库是两轮,落库须等用户下轮回"确认"。
+- 🚨 **别把用户的"注册/登记"当成对 observe 结果的认可**:那是**意图**;而这次具体**记成什么样**(外观、选哪几张图)得用户看过、回"确认"才算数。所以本轮只把结果给他看,落库是他点头后**下一轮**的事。
 
 **处理提示**(发用户时用自然语言转述;前三条是 `warnings[].type` 的取值,末条是顶层 `refs_inconsistent=true`):
 
@@ -136,8 +144,10 @@ miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/<uuid>_pet --pr
 | `warnings[].type = multiple_pets` | 画面里不止一只 | "画面里不止一只,本次先注册主体那只;其它的分别再各传一次" |
 | 顶层 `refs_inconsistent = true` | 多图疑似不是同一只 | "这几张看着可能不是同一只?确认都是{name}我再入库,或只留同一只的" |
 
-首轮文字模板(检出正常、有名):
-> 观察好了:这是一只{物种}{关键外观}。我挑了 N 张不同姿态作识别参照(图),外观记为"{summary}"。确认给「{name}」入库?回"确认"。
+首轮文字模板(作为你这轮的**普通文字回复(assistant `content`)** 直接说出来,不放进 `message`):
+> 观察好了:{summary}。我挑了 N 张不同姿态作识别参照(图),确认给「{name}」入库?回"确认"。
+
+（`{summary}` 是 observe 出的完整外观描述、已含物种,**外观只说这一次**,别再在句首另起"这是一只…"重复一遍。）
 
 无名时句尾追问:"这只{物种}叫什么名字?"
 
@@ -150,10 +160,11 @@ miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/<uuid>_pet --pr
 
 ## 第五步 · 次轮落库 / 取消
 
-**通用**:新宠物先建壳(花名册无该名时;先 `pet list` 查重):
+**通用**:新宠物先建壳(名不存在时——已按第一步"重名前置查重"确认):
 ```bash
 miloco-cli pet add --name <name> --species <猫/狗/其它> --pretty   # → 记下返回 id (pet_id)
 ```
+**若 `pet add` 返回 409(名已存在)**:说明前置查重漏了 → **停下走 5.5 问用户**(补充 / 覆盖 / 另一只),**别**自动改名硬塞、**别**静默 append / replace。
 **写外观**(两通路都做,**用户已确认才写**,member_persona,subject_id=pet_id)。含中文用 `--ops-file`:
 ```bash
 # /tmp/<uuid>_persona.json（op=add；entry 必填 type/subject_id/subject_name/content，
@@ -190,6 +201,15 @@ miloco-cli pet reference-crops <pet_id> --crops /tmp/<uuid>_pet_0.jpg --scores <
 
 ### 5.4 用户取消
 **不调任何落库命令**,回复:"好的,没有入库。要重新描述或发素材再看吗?"observe 无副作用,不需清理。
+
+### 5.5 重名(注册意图撞已有名)· 停下问 + 三分支
+第一步"重名前置查重"发现名已存在且是注册意图(或落库时 `pet add` 撞 409)→ **本轮只发一句问话、不 observe、不落库**:
+> 「{name}」已经在花名册里了。你是想:① 给它**补充**这次的素材,② **覆盖重登**(用这次的重新记),还是 ③ 这其实是**另一只**(那换个名)?回 1 / 2 / 3。
+
+发完**本轮终止等待**。用户回复后分支:
+- **① 补充**(复用已有 pet_id,**两轮**):本轮 `pet observe` 出新候选 → 发拼图(`message` 只发图) + 必须再用普通文字回复(content)一句"这次挑了 N 张,确认加进「{name}」的识别参照?回确认" → **停下等确认**(不落库);下一轮确认后走 5.3(`reference-crops … --mode append`),**不重发拼图**,回一句"已给「{name}」补充素材,识别参照已更新"。
+- **② 覆盖重登**(复用已有 pet_id,**两轮**):本轮 `pet observe` 出新候选 → 发拼图(`message` 只发图) + 必须再用普通文字回复(content)一句"这次挑了 N 张,确认用它们**覆盖**「{name}」旧档案?回确认" → **停下等确认**(不落库);下一轮确认后 `reference-crops <pet_id> … --mode replace`(整组替换旧参考图)+ 重写 member_persona + 重设默认头像(同 5.1),**不重发拼图**,回一句"已用新素材覆盖「{name}」的档案"。
+- **③ 另一只** → 请用户给**新名字**,拿到后按新宠物从第一步重走(`pet add` 新名)。
 
 > 头像:**A 素材通路已自动落默认头像**(observe 的头部裁剪,见 5.1);用户想换/精调去 **web 宠物页**(Agent 不做手动裁剪)。**B 文字通路**无素材 → 暂无头像(占位),可后续发张照片/去 web 设。
 
@@ -230,7 +250,7 @@ A 通路 `pet observe`(出候选)、B 通路(回显解析)→ **等待用户明�
 | `species_mismatch` / `refs_inconsistent` / `multiple_pets` | 见第三步处理表 | 同上表 |
 | 用户没给宠物名 | 追问 | "这只{物种}叫什么名字?我用它作标识。" |
 | 上传非图非视频 | 引导改发或改描述 | "只能用图片或视频建识别参照;要么重发一张照片/视频,要么直接描述它的样子。" |
-| pet 名已存在(且非补充素材意图) | 提示 | "「{name}」已在花名册里了。要给它**补充素材**,还是登记的是另一只?" |
+| pet 名已存在(且非补充素材意图) | **停下走 5.5** | 按 5.5 问三选一(①补充/②覆盖/③另一只),别用旧的两选一 |
 | CLI 非零 exit / 服务不可用 | 不抛 stack,人话告知 | "刚才没登记成功,稍后再试。" |
 | 用户要"从摄像头挑没登记的宠物" | 按总原则引导 | "宠物暂时只能靠你描述或发照片/视频登记,来一段吧。" |
 

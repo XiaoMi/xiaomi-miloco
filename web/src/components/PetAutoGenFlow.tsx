@@ -310,7 +310,7 @@ export function PetAutoGenFlow({
             ? t("pet.analyzing")
             : analyzed
               ? t("pet.reuploadMedia")
-              : t("pet.uploadMediaMulti")}
+              : t("pet.uploadMedia")}
         </button>
 
         {/* D5：候选选项卡（左）+ 选中项并排预览 [观测图 | 样本]（右）。全部候选都会作参考图（D6）。 */}
@@ -406,7 +406,12 @@ export function PetAutoGenFlow({
           </label>
         )}
 
-        {!isAppend && <InfoNote className="mt-3">{t("pet.poseGuide")}</InfoNote>}
+        {!isAppend && (
+          <div className="mt-3 pt-3 border-t border-border space-y-1.5">
+            <InfoNote>{t("pet.refBestPractice")}</InfoNote>
+            <InfoNote>{t("pet.poseGuide")}</InfoNote>
+          </div>
+        )}
 
         {analyzed && candidates.length > 0 && (
           <div
