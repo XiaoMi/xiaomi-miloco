@@ -574,6 +574,7 @@ export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   window_size: number;
+  transmission_mode: "video" | "screenshot";
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {
@@ -594,6 +595,38 @@ export async function updatePerceptionConfig(
 ): Promise<UpdatePerceptionConfigResult> {
   const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
     "/api/admin/perception-config",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+  return r.data;
+}
+
+// ─── Split Model Config（截图模式双模型配置）────────────────────────────
+
+export interface SplitModelItem {
+  model: string;
+  base_url: string;
+  has_key: boolean;
+  api_key_masked: string;
+}
+
+export interface SplitModelConfig {
+  vision_model: SplitModelItem | null;
+  audio_model: SplitModelItem | null;
+}
+
+export async function getSplitModelConfig(): Promise<SplitModelConfig> {
+  const r = await apiFetch<{ code: number; data: SplitModelConfig }>(
+    "/api/admin/split-model-config",
+  );
+  return r.data;
+}
+
+export async function updateSplitModelConfig(input: {
+  vision_model?: { model?: string; base_url?: string; api_key?: string };
+  audio_model?: { model?: string; base_url?: string; api_key?: string };
+}): Promise<SplitModelConfig> {
+  const r = await apiFetch<{ code: number; data: SplitModelConfig }>(
+    "/api/admin/split-model-config",
     { method: "PUT", body: JSON.stringify(input) },
   );
   return r.data;

@@ -11,10 +11,11 @@ import { useEscClose } from "@/hooks/useEscClose";
 import { toast } from "./Toast";
 
 // 与 backend settings.yaml perception.engine.input + perception.collect.window_size 对齐
-const DEFAULTS: PerceptionConfig = { video_short_edge: 512, omni_fps: 1, window_size: 4 };
+const DEFAULTS: PerceptionConfig = { video_short_edge: 512, omni_fps: 1, window_size: 4, transmission_mode: "video" };
 
 const SHORT_EDGE_OPTIONS = [360, 512, 768, 1080] as const;
 const FPS_OPTIONS = [1, 2, 3] as const;
+const TRANSMISSION_MODES = ["video", "screenshot"] as const;
 const WINDOW_MIN = 2;
 const WINDOW_MAX = 10;
 
@@ -32,6 +33,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [videoShortEdge, setVideoShortEdge] = useState(DEFAULTS.video_short_edge);
   const [omniFps, setOmniFps] = useState(DEFAULTS.omni_fps);
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
+  const [transmissionMode, setTransmissionMode] = useState<"video" | "screenshot">(DEFAULTS.transmission_mode);
 
   // 内置定时任务自动管理开关（scheduler.enabled）。缺省 true = 自动管理。
   const [schedulerLoaded, setSchedulerLoaded] = useState<boolean | null>(null);
@@ -54,6 +56,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setVideoShortEdge(c.video_short_edge);
         setOmniFps(c.omni_fps);
         setWindowSize(c.window_size);
+        setTransmissionMode(c.transmission_mode ?? "video");
       }),
       getSchedulerConfig().then((s) => {
         setSchedulerLoaded(s.enabled);
@@ -76,7 +79,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
     config != null &&
     (videoShortEdge !== config.video_short_edge ||
       omniFps !== config.omni_fps ||
-      windowSize !== config.window_size);
+      windowSize !== config.window_size ||
+      transmissionMode !== (config.transmission_mode ?? "video"));
   // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
   // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
   // 实则静默丢弃」的控件。
@@ -106,6 +110,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
           video_short_edge: videoShortEdge,
           omni_fps: omniFps,
           window_size: windowSize,
+          transmission_mode: transmissionMode,
         });
         setConfig(updated);
         if (updated.restart_ok === false) {
@@ -229,6 +234,32 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 </div>
                 <p className="text-caption text-text-tertiary">
                   {t("settings.omniFpsHint")}
+                </p>
+              </div>
+
+              {/* 传输模式 */}
+              <div className="space-y-2.5">
+                <label className="text-body font-medium text-text-primary block">
+                  {t("settings.transmissionMode", "传输模式")}
+                </label>
+                <div className="flex gap-2">
+                  {TRANSMISSION_MODES.map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => setTransmissionMode(v)}
+                      className={`flex-1 py-2.5 rounded-xl text-body transition-colors ${
+                        transmissionMode === v
+                          ? "bg-brand-primary text-white shadow-sm"
+                          : "bg-bg-primary border border-border text-text-primary hover:border-brand-primary"
+                      }`}
+                    >
+                      {v === "video" ? t("settings.tmVideo", "视频") : t("settings.tmScreenshot", "截图")}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-caption text-text-tertiary">
+                  {t("settings.transmissionModeHint", "截图模式跳过 H.264 编码，降低 CPU/内存占用；音频独立发送")}
                 </p>
               </div>
 

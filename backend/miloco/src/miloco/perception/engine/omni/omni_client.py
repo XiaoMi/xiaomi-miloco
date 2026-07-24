@@ -360,7 +360,17 @@ def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
 
     media_info = payload.get("media_info")
 
-    if payload.get("video_base64"):
+    if payload.get("screenshots_b64"):
+        # 截图模式：每张 JPEG 作为独立 image_url 块 + 独立音频块
+        for img_b64 in payload["screenshots_b64"]:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+            })
+        if payload.get("audio_base64"):
+            audio_format = payload.get("audio_format", "m4a")
+            content.append(adapter.build_audio_block(payload["audio_base64"], media_info, audio_format))
+    elif payload.get("video_base64"):
         content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
         audio_format = payload.get("audio_format", "m4a")

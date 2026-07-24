@@ -30,6 +30,7 @@ from miloco.miot.client import MiotProxy
 from miloco.miot.schema import CameraInfo
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.perception.collect.adapter_base import BaseDeviceAdapter
+from miloco.perception.collect.raw_stream_writer import RawStreamWriterManager
 from miloco.perception.collect.stream_buffer import (
     MultiTrackSyncBuffer,
     StreamFragment,
@@ -100,6 +101,8 @@ class _CameraDeviceState:
     # Registration IDs for multi-reg decoded frame callbacks
     decoded_video_reg_id: int = -1
     decoded_audio_reg_id: int = -1
+    # Raw stream mode: True when recording raw H.265 (no decode)
+    raw_stream_active: bool = False
     # Clock calibration: epoch_delta = unix_ms - monotonic_ms (locked on first frame)
     # Used to convert monotonic wall_ms to unix timestamps for display.
     epoch_delta: int | None = None
@@ -115,11 +118,23 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self,
         miot_proxy: MiotProxy,
         on_window_ready: Callable[[], None] | None = None,
+        engine_ready_fn: Callable[[], bool] | None = None,
     ):
         self._miot_proxy = miot_proxy
         self._on_window_ready = on_window_ready
+        self._engine_ready_fn = engine_ready_fn
         self._devices: dict[str, _CameraDeviceState] = {}
+
+    def set_engine_ready_fn(self, fn: Callable[[], bool]) -> None:
+        """Set the engine readiness check function (called after pipeline init)."""
+        self._engine_ready_fn = fn
         self._last_ondemand_refresh_ms = 0
+        # Raw stream writer manager — saves H.265 when perception engine not ready
+        collect_cfg = get_settings().perception.collect
+        self._raw_writers = RawStreamWriterManager(
+            save_dir=collect_cfg.raw_stream_save_dir,
+            segment_minutes=collect_cfg.raw_stream_segment_minutes,
+        )
 
     async def discover_devices(
         self,
@@ -253,30 +268,58 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         )
         self._devices[did] = state
 
-        # Subscribe decoded video frame stream (multi-reg)
-        try:
-            reg_id = await self._miot_proxy.start_camera_decode_video_stream(
-                physical_did, channel, self._make_decoded_video_callback(did)
-            )
-            state.decoded_video_reg_id = reg_id
-        except Exception as e:
-            logger.error("Failed to subscribe decoded video for %s: %s", did, e)
+        # 判断是否使用原始流录制模式（感知引擎未就绪 + 配置了录制目录）
+        use_raw_mode = (
+            self._raw_writers.enabled
+            and self._engine_ready_fn is not None
+            and not self._engine_ready_fn()
+        )
 
-        # Subscribe decoded audio frame stream (multi-reg)
-        try:
-            reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
-                physical_did, channel, self._make_decoded_audio_callback(did)
-            )
-            state.decoded_audio_reg_id = reg_id
-        except Exception as e:
-            logger.error("Failed to subscribe decoded audio for %s: %s", did, e)
+        if use_raw_mode:
+            # 原始流模式：注册 raw_video 回调，直接保存 H.265 数据，不解码
+            try:
+                device_name = source.name if source else did
+                writer = self._raw_writers.get_or_create(did, device_name)
+                if writer:
+                    def _raw_video_cb(did_str, data, ts, seq, ch):
+                        writer.write_frame(data, ts, seq)
 
-        # 两路流都没订上 = camera_img_manager 缺失（典型：登录时相机 LAN 未就绪，
-        # refresh_cameras 没建成 manager，start_*_stream 返回 -1 静默失败）。保留该
-        # device 只会让 active_sources 报「已连」假象，且 did 留在 _devices 使后续
-        # sync 早退、永不重试。剔除它，交给 sync_devices 的按需补建在下轮重连。
-        if state.decoded_video_reg_id < 0 and state.decoded_audio_reg_id < 0:
+                    await self._miot_proxy.register_raw_video_stream(
+                        physical_did, channel, _raw_video_cb
+                    )
+                    state.raw_stream_active = True
+                    logger.info(
+                        "[camera] %s connected in raw stream mode (saving H.265, no decode)",
+                        did,
+                    )
+            except Exception as e:
+                logger.error("Failed to register raw video stream for %s: %s", did, e)
+        else:
+            # 正常模式：订阅解码后的视频/音频帧
+            try:
+                reg_id = await self._miot_proxy.start_camera_decode_video_stream(
+                    physical_did, channel, self._make_decoded_video_callback(did)
+                )
+                state.decoded_video_reg_id = reg_id
+            except Exception as e:
+                logger.error("Failed to subscribe decoded video for %s: %s", did, e)
+
+            try:
+                reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
+                    physical_did, channel, self._make_decoded_audio_callback(did)
+                )
+                state.decoded_audio_reg_id = reg_id
+            except Exception as e:
+                logger.error("Failed to subscribe decoded audio for %s: %s", did, e)
+
+        # 两路流都没订上 = camera_img_manager 缺失
+        if (
+            not state.raw_stream_active
+            and state.decoded_video_reg_id < 0
+            and state.decoded_audio_reg_id < 0
+        ):
             self._devices.pop(did, None)
+            self._raw_writers.close_writer(did)
             logger.warning(
                 "Camera %s stream subscribe failed (manager missing?), "
                 "will retry on next sync",
@@ -292,21 +335,30 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # did 是合成 did（多通道带 ``:ch{n}``）；SDK 停流用物理 did + 通道号。
         physical_did, channel = split_channel_did(did)
 
-        if state.decoded_video_reg_id >= 0:
+        if state.raw_stream_active:
+            # 原始流模式：取消 raw_video 回调 + 关闭 writer
             try:
-                await self._miot_proxy.stop_camera_decode_video_stream(
-                    physical_did, channel, state.decoded_video_reg_id
-                )
+                await self._miot_proxy.unregister_raw_video_stream(physical_did, channel)
             except Exception as e:
-                logger.error("Failed to unsubscribe decoded video for %s: %s", did, e)
+                logger.error("Failed to unregister raw video stream for %s: %s", did, e)
+            self._raw_writers.close_writer(did)
+        else:
+            # 正常模式：取消解码回调
+            if state.decoded_video_reg_id >= 0:
+                try:
+                    await self._miot_proxy.stop_camera_decode_video_stream(
+                        physical_did, channel, state.decoded_video_reg_id
+                    )
+                except Exception as e:
+                    logger.error("Failed to unsubscribe decoded video for %s: %s", did, e)
 
-        if state.decoded_audio_reg_id >= 0:
-            try:
-                await self._miot_proxy.stop_camera_decode_audio_stream(
-                    physical_did, channel, state.decoded_audio_reg_id
-                )
-            except Exception as e:
-                logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
+            if state.decoded_audio_reg_id >= 0:
+                try:
+                    await self._miot_proxy.stop_camera_decode_audio_stream(
+                        physical_did, channel, state.decoded_audio_reg_id
+                    )
+                except Exception as e:
+                    logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
 
         state.sync_buffer.clear()
 
@@ -317,6 +369,24 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
     def resume_streams(self) -> None:
         """恢复摄像头解码器。"""
         self._miot_proxy.resume_all_decoders()
+
+    async def switch_to_decode_mode(self) -> None:
+        """感知引擎就绪后，从原始流模式切换到解码模式。
+
+        断开所有 raw_stream 设备，下一轮 sync_devices 会以解码模式重连。
+        """
+        raw_dids = [
+            did for did, state in self._devices.items() if state.raw_stream_active
+        ]
+        if not raw_dids:
+            return
+        logger.info(
+            "[camera] Switching %d cameras from raw mode to decode mode",
+            len(raw_dids),
+        )
+        for did in raw_dids:
+            await self.disconnect_device(did)
+        # 下一轮 sync_devices 会自动重连（此时 engine 已就绪 → 解码模式）
 
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
         """Collect multimodal data from the device's sync buffer.

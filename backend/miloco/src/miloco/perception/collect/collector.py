@@ -179,6 +179,12 @@ class MultimodalCollector:
         for adapter in self._adapters.values():
             adapter.resume_streams()
 
+    async def switch_to_decode_mode(self) -> None:
+        """感知引擎就绪后，切换所有设备到解码模式。"""
+        for adapter in self._adapters.values():
+            if hasattr(adapter, "switch_to_decode_mode"):
+                await adapter.switch_to_decode_mode()
+
     async def shutdown(self) -> None:
         """Shutdown all adapters — disconnect all devices."""
         for adapter in self._adapters.values():

@@ -80,6 +80,8 @@ perception:
     full_action: "clear"     # 窗口满载处理策略：drop | clear | keep
     auto_stop_on_omni_failure: true   # omni 持续失败时自动停止整个感知引擎
     auto_stop_threshold_sec: 60       # 熔断器 OPEN 多少秒后触发自动停止
+    raw_stream_save_dir: null         # 原始视频流保存目录（null=不录制）
+    raw_stream_segment_minutes: 60    # 分片时长（分钟）
   engine:
     input:
       # 帧率旋钮集中在此一处(对应 InputConfig):
@@ -88,6 +90,8 @@ perception:
       fps: 2
       omni_fps: 1
       video_short_edge: 512
+      # 传输模式: "video" = mp4(H.264+AAC)(默认); "screenshot" = JPEG 图片序列 + 独立音频(省 CPU/内存)
+      transmission_mode: "video"
     gate:
       # visual 滞回时长(秒)。visual 最近通过过、距今 <= 此值时,本窗 visual 不通过
       # 也强制生成 packet 并打 hold 标志,保住 video 路由不被纯音频短路。

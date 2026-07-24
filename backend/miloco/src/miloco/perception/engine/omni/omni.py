@@ -93,6 +93,12 @@ async def run_omni(
     edge_packet: IdentityPacket, context: OmniContext, config: OmniConfig
 ) -> OmniOutput:
     """Run Omni layer: build prompt → call model → parse response."""
+    # 截图模式双模型拆分
+    vision_cfg, audio_cfg = resolve_split_model_configs(config)
+    if vision_cfg and audio_cfg:
+        return await run_omni_split(
+            [edge_packet], context, vision_cfg, audio_cfg,
+        )
     payload = build_prompt(edge_packet, context)
     raw_response = await call_omni(payload, config)
     output = parse_omni_response(raw_response, _rule_name_to_id(context))
@@ -104,11 +110,177 @@ async def run_omni_batch(
     edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig
 ) -> OmniOutput:
     """Run Omni layer for multiple devices in the same room."""
+    # 截图模式双模型拆分
+    vision_cfg, audio_cfg = resolve_split_model_configs(config)
+    if vision_cfg and audio_cfg:
+        return await run_omni_split(
+            edge_packets, context, vision_cfg, audio_cfg,
+        )
     payload = build_batch_prompt(edge_packets, context)
     raw_response = await call_omni(payload, config)
     output = parse_omni_response(raw_response, _rule_name_to_id(context))
     output.usage = extract_usage(raw_response)
     return output
+
+
+# =============================================================================
+# 截图模式双模型拆分 —— vision + audio 并发调用
+# =============================================================================
+
+
+def resolve_split_model_configs(
+    base_config: OmniConfig,
+) -> tuple[OmniConfig | None, OmniConfig | None]:
+    """从当前 settings 解析 vision/audio 模型配置。
+
+    返回 ``(vision_config, audio_config)``；任一为 None 表示不启用拆分。
+    仅当 transmission_mode=screenshot 且两个 split model 都已配置时才返回非 None。
+    """
+    from dataclasses import replace
+
+    from miloco.config import get_settings
+    from miloco.perception.engine.config import OmniConfig
+
+    settings = get_settings()
+    engine_input = settings.perception.engine.get("input", {})
+    if engine_input.get("transmission_mode") != "screenshot":
+        return None, None
+
+    vision_s = settings.model.vision_model
+    audio_s = settings.model.audio_model
+    if vision_s is None or audio_s is None:
+        return None, None
+
+    # 构造 vision config：未配字段回退到 base_config（omni）
+    vision_cfg = replace(
+        base_config,
+        model=vision_s.model or base_config.model,
+        base_url=vision_s.base_url or base_config.base_url,
+        api_key=vision_s.api_key or base_config.api_key,
+    )
+    # 构造 audio config
+    audio_cfg = replace(
+        base_config,
+        model=audio_s.model or base_config.model,
+        base_url=audio_s.base_url or base_config.base_url,
+        api_key=audio_s.api_key or base_config.api_key,
+    )
+    return vision_cfg, audio_cfg
+
+
+def _merge_split_outputs(vision_out: OmniOutput, audio_out: OmniOutput) -> OmniOutput:
+    """合并 vision 和 audio 模型的输出。
+
+    规则：vision 取 caption/identities/matched_rules/suggestions，
+    audio 取 speeches/env_sounds。usage 合并。
+    """
+    merged = vision_out.model_copy()
+    merged.speeches = audio_out.speeches
+    merged.env_sounds = audio_out.env_sounds
+    # 合并 usage
+    if vision_out.usage or audio_out.usage:
+        v = vision_out.usage or {}
+        a = audio_out.usage or {}
+        merged.usage = {
+            "input_tokens": v.get("input_tokens", 0) + a.get("input_tokens", 0),
+            "output_tokens": v.get("output_tokens", 0) + a.get("output_tokens", 0),
+            "cached_tokens": v.get("cached_tokens", 0) + a.get("cached_tokens", 0),
+        }
+    return merged
+
+
+def _build_vision_only_payload(
+    edge_packets: list[IdentityPacket],
+    context: OmniContext,
+    stream: bool = False,
+    label_lookup: "dict[str, str] | None" = None,
+) -> dict:
+    """构建仅含视觉信息的 payload（剥离音频 schema 字段）。
+
+    与 _build_payload 的区别：SceneDescriptor 的 has_audio=False，
+    使 schema 剥离 speeches/env_sounds 字段（视觉模型不需要输出这些）。
+    """
+    from miloco.perception.engine.omni.field_registry import SceneDescriptor
+    from miloco.perception.engine.omni.prompt_builder import (
+        _build_user_content,
+        _encode_batch_screenshots,
+        _get_video_short_edge,
+        build_system_prompt,
+    )
+
+    short_edge = _get_video_short_edge()
+    screenshots_b64, media_info = _encode_batch_screenshots(edge_packets, short_edge=short_edge)
+    # 视觉专用：has_audio=False → schema 剥掉 speeches/env_sounds
+    scene = SceneDescriptor(
+        route="video", has_identity=False, stream=stream,
+        has_audio=False, has_speech=False,
+    )
+    return {
+        "system_prompt": build_system_prompt(scene, include_home_profile=True),
+        "user_content": _build_user_content(edge_packets, context, stream=stream, label_lookup=label_lookup),
+        "screenshots_b64": screenshots_b64,
+        "media_info": media_info,
+        "crops": [],
+    }
+
+
+def _build_audio_only_payload(
+    edge_packets: list[IdentityPacket],
+    context: OmniContext,
+) -> dict:
+    """构建仅含音频信息的 payload（复用 audio route 逻辑）。
+
+    与 audio route 完全一致：has_audio=True，schema 只含 speeches/env_sounds/suggestions。
+    """
+    from miloco.perception.engine.omni.field_registry import SceneDescriptor
+    from miloco.perception.engine.omni.prompt_builder import (
+        _build_user_content,
+        _encode_audio,
+        _audio_only_media_info,
+        build_system_prompt,
+    )
+    from miloco.config import get_settings
+
+    scene = SceneDescriptor(
+        route="audio", has_identity=False, stream=False,
+        has_audio=True, has_speech=True,
+    )
+    ep = edge_packets[0]
+    audio_format = get_settings().model.omni.audio_format or "m4a"
+    audio_result = _encode_audio(ep.audio_clip, ep.sample_rate, audio_format)
+    return {
+        "system_prompt": build_system_prompt(scene, include_home_profile=True),
+        "user_content": _build_user_content(edge_packets, context, stream=False),
+        "audio_base64": audio_result[0] if audio_result else None,
+        "audio_format": audio_result[1] if audio_result else audio_format,
+        "media_info": _audio_only_media_info(ep.sample_rate),
+        "crops": [],
+    }
+
+
+async def run_omni_split(
+    edge_packets: list[IdentityPacket],
+    context: OmniContext,
+    vision_config: OmniConfig,
+    audio_config: OmniConfig,
+    label_lookup: "dict[str, str] | None" = None,
+) -> OmniOutput:
+    """截图模式双模型拆分：并发调用 vision 和 audio 模型，合并结果。"""
+    vision_payload = _build_vision_only_payload(edge_packets, context, label_lookup=label_lookup)
+    audio_payload = _build_audio_only_payload(edge_packets, context)
+
+    vision_task = call_omni(vision_payload, vision_config)
+    audio_task = call_omni(audio_payload, audio_config)
+
+    vision_raw, audio_raw = await asyncio.gather(vision_task, audio_task)
+
+    vision_out = parse_omni_response(vision_raw, _rule_name_to_id(context))
+    vision_out.usage = extract_usage(vision_raw)
+
+    audio_out = parse_omni_response(audio_raw, _rule_name_to_id(context))
+    audio_out.usage = extract_usage(audio_raw)
+
+    return _merge_split_outputs(vision_out, audio_out)
 
 
 # =============================================================================
@@ -179,18 +351,42 @@ async def run_omni_fused(
     # 永远不会被 GC（_gc_dead_tracks 跳过 inflight）也不会被重新派发
     # （needs_omni_call 返回 False）。
     adapter = get_adapter(config.model)
+
+    # 截图模式双模型拆分检测
+    vision_cfg, audio_cfg = resolve_split_model_configs(config)
+    use_split = vision_cfg is not None and audio_cfg is not None
+
     try:
-        payload = build_fused_payload(
-            packets=edge_packets,
-            context=context,
-            candidates=candidates,
-            gallery_snapshot=gallery_snapshot,
-            config=fused_prompt_config,
-            label_lookup=name_lookup,
-            adapter=adapter,
-            matching_moot=person_lib_empty,
-        )
-        raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
+        if use_split:
+            # 双模型拆分：vision（fused，无音频 schema）+ audio（audio-only）并发
+            vision_payload = build_fused_payload(
+                packets=edge_packets,
+                context=context,
+                candidates=candidates,
+                gallery_snapshot=gallery_snapshot,
+                config=fused_prompt_config,
+                label_lookup=name_lookup,
+                adapter=adapter,
+                matching_moot=person_lib_empty,
+                force_no_audio=True,
+            )
+            audio_payload = _build_audio_only_payload(edge_packets, context)
+            vision_task = _call_omni_messages(vision_payload["messages"], config, adapter=adapter)
+            audio_task = call_omni(audio_payload, audio_cfg)
+            raw_response, audio_raw_response = await asyncio.gather(vision_task, audio_task)
+        else:
+            payload = build_fused_payload(
+                packets=edge_packets,
+                context=context,
+                candidates=candidates,
+                gallery_snapshot=gallery_snapshot,
+                config=fused_prompt_config,
+                label_lookup=name_lookup,
+                adapter=adapter,
+                matching_moot=person_lib_empty,
+            )
+            raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
+            audio_raw_response = None
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -210,6 +406,21 @@ async def run_omni_fused(
     try:
         omni_output = parse_omni_response(raw_response, _rule_name_to_id(context))
         omni_output.usage = extract_usage(raw_response)
+
+        # 双模型拆分：合并 audio 模型的 speeches/env_sounds
+        if use_split and audio_raw_response is not None:
+            audio_output = parse_omni_response(audio_raw_response, _rule_name_to_id(context))
+            omni_output.speeches = audio_output.speeches
+            omni_output.env_sounds = audio_output.env_sounds
+            audio_usage = extract_usage(audio_raw_response)
+            if omni_output.usage or audio_usage:
+                v = omni_output.usage or {}
+                a = audio_usage or {}
+                omni_output.usage = {
+                    "input_tokens": v.get("input_tokens", 0) + a.get("input_tokens", 0),
+                    "output_tokens": v.get("output_tokens", 0) + a.get("output_tokens", 0),
+                    "cached_tokens": v.get("cached_tokens", 0) + a.get("cached_tokens", 0),
+                }
 
         # 抽 identity_assignments 并写回 state（仅当有 candidate 才有意义）
         if candidates:

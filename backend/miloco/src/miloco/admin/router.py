@@ -1020,6 +1020,89 @@ async def omni_health_stream():
 
 
 # =============================================================================
+# 截图模式双模型配置（vision_model / audio_model）
+# =============================================================================
+
+
+class SplitModelItem(BaseModel):
+    """单个 split model 配置项（model + base_url + api_key）。
+
+    与 OmniModelSettings 对齐；为 None 的字段在 PUT 时不更新（保留旧值）。
+    """
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+class SplitModelConfigBody(BaseModel):
+    """双模型配置请求体。传哪个改哪个，不传则不动。"""
+    vision_model: SplitModelItem | None = None
+    audio_model: SplitModelItem | None = None
+
+
+def _split_model_payload() -> dict:
+    """构造返回给前端的 split model 配置（api_key 打码）。"""
+    s = get_settings()
+
+    def _mask(item):
+        if item is None:
+            return None
+        key = item.api_key or ""
+        return {
+            "model": item.model or "",
+            "base_url": item.base_url or "",
+            "has_key": bool(key),
+            "api_key_masked": (key[:4] + "****" + key[-4:]) if len(key) > 8 else ("****" if key else ""),
+        }
+
+    return {
+        "vision_model": _mask(s.model.vision_model),
+        "audio_model": _mask(s.model.audio_model),
+    }
+
+
+@router.get(
+    "/split-model-config",
+    summary="获取截图模式双模型配置",
+    response_model=NormalResponse,
+)
+def get_split_model_config(current_user: str = Depends(verify_token)):
+    return NormalResponse(code=0, message="ok", data=_split_model_payload())
+
+
+@router.put(
+    "/split-model-config",
+    summary="修改截图模式双模型配置（写 config.json，下个推理窗口自动生效）",
+    response_model=NormalResponse,
+)
+def put_split_model_config(body: SplitModelConfigBody, current_user: str = Depends(verify_token)):
+    update: dict = {}
+    if body.vision_model is not None:
+        vm: dict = {}
+        if body.vision_model.model is not None:
+            vm["model"] = body.vision_model.model
+        if body.vision_model.base_url is not None:
+            vm["base_url"] = body.vision_model.base_url
+        if body.vision_model.api_key is not None:
+            vm["api_key"] = body.vision_model.api_key
+        if vm:
+            update["vision_model"] = vm
+    if body.audio_model is not None:
+        am: dict = {}
+        if body.audio_model.model is not None:
+            am["model"] = body.audio_model.model
+        if body.audio_model.base_url is not None:
+            am["base_url"] = body.audio_model.base_url
+        if body.audio_model.api_key is not None:
+            am["api_key"] = body.audio_model.api_key
+        if am:
+            update["audio_model"] = am
+    if update:
+        update_shared_config(model=update)
+    return NormalResponse(code=0, message="ok", data=_split_model_payload())
+
+
+# =============================================================================
 # 感知参数配置
 # =============================================================================
 
@@ -1028,6 +1111,7 @@ class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
+    transmission_mode: str | None = Field(default=None, pattern="^(video|screenshot)$")
 
 
 def _perception_config_payload() -> dict:
@@ -1037,6 +1121,7 @@ def _perception_config_payload() -> dict:
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
+        "transmission_mode": inp.get("transmission_mode", "video"),
     }
 
 
@@ -1062,6 +1147,8 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if body.transmission_mode is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["transmission_mode"] = body.transmission_mode
     payload = _perception_config_payload()
     if update:
         # 三个参数生效路径各不同，按「新值 != 旧值」判断（前端 drawer 三字段一起 PUT）：
@@ -1072,6 +1159,7 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         #   - window_size：runner 构造时 cache，需 stop→start 重读（apply_config_restart）。
         omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
         window_changed = body.window_size is not None and body.window_size != payload["window_size"]
+        # transmission_mode 每帧实时读 settings（_get_transmission_mode），写盘即生效，无需重启
         update_shared_config(**update)
         payload = _perception_config_payload()
         # config 已写盘(不可回滚)；热更/重启失败仅带 restart_ok=False，不冒泡成 500——

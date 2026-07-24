@@ -603,6 +603,40 @@ class MiotProxy:
         except Exception as e:
             logger.error("Failed to resume decoders: %s", e)
 
+    async def register_raw_video_stream(
+        self,
+        camera_id: str,
+        channel: int,
+        callback,
+    ) -> int:
+        """注册原始视频流回调（不解码，直接收 H.265 编码数据）。"""
+        if camera_id not in self._camera_img_managers:
+            logger.warning("Camera %s not found in managers", camera_id)
+            return -1
+        instance = self._camera_img_managers[camera_id]
+        try:
+            await instance.register_raw_stream(callback, channel)
+            logger.info("Registered raw video stream for %s channel %d", camera_id, channel)
+            return 0
+        except Exception as e:
+            logger.error("Failed to register raw video stream: %s", e)
+            return -1
+
+    async def unregister_raw_video_stream(
+        self,
+        camera_id: str,
+        channel: int,
+    ) -> None:
+        """取消注册原始视频流回调。"""
+        if camera_id not in self._camera_img_managers:
+            return
+        instance = self._camera_img_managers[camera_id]
+        try:
+            await instance.unregister_raw_stream(channel)
+            logger.info("Unregistered raw video stream for %s channel %d", camera_id, channel)
+        except Exception as e:
+            logger.error("Failed to unregister raw video stream: %s", e)
+
     async def _create_camera_img_manager(
         self,
         camera_info: MIoTCameraInfo,

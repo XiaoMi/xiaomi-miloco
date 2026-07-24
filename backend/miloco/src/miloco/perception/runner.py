@@ -334,6 +334,7 @@ class PerceptionRunner:
         try:
             # 先恢复解码器，再重建引擎和采集
             self._collector.resume_streams()
+            await self._collector.switch_to_decode_mode()
             await self._collector.sync_all_devices()
             self._pipeline.try_reinit_engine(include_failed=True)
             if not self._inference_worker.is_running:
