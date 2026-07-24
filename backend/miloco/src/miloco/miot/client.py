@@ -583,6 +583,60 @@ class MiotProxy:
             logger.error("Failed to stop decode audio frame stream: %s", e)
             raise
 
+    def pause_all_decoders(self) -> None:
+        """暂停所有摄像头的解码器：P2P 连接保持，帧直接丢弃不走 H.264 解码。"""
+        try:
+            camera_client = self._miot_client._camera_client
+            for did, instance in camera_client.camera_map.items():
+                instance.pause_decoders()
+            logger.info("Paused all camera decoders (%d cameras)", len(camera_client.camera_map))
+        except Exception as e:
+            logger.error("Failed to pause decoders: %s", e)
+
+    def resume_all_decoders(self) -> None:
+        """恢复所有摄像头的解码器。"""
+        try:
+            camera_client = self._miot_client._camera_client
+            for did, instance in camera_client.camera_map.items():
+                instance.resume_decoders()
+            logger.info("Resumed all camera decoders (%d cameras)", len(camera_client.camera_map))
+        except Exception as e:
+            logger.error("Failed to resume decoders: %s", e)
+
+    async def register_raw_video_stream(
+        self,
+        camera_id: str,
+        channel: int,
+        callback,
+    ) -> int:
+        """注册原始视频流回调（不解码，直接收 H.265 编码数据）。"""
+        if camera_id not in self._camera_img_managers:
+            logger.warning("Camera %s not found in managers", camera_id)
+            return -1
+        instance = self._camera_img_managers[camera_id]
+        try:
+            await instance.register_raw_stream(callback, channel)
+            logger.info("Registered raw video stream for %s channel %d", camera_id, channel)
+            return 0
+        except Exception as e:
+            logger.error("Failed to register raw video stream: %s", e)
+            return -1
+
+    async def unregister_raw_video_stream(
+        self,
+        camera_id: str,
+        channel: int,
+    ) -> None:
+        """取消注册原始视频流回调。"""
+        if camera_id not in self._camera_img_managers:
+            return
+        instance = self._camera_img_managers[camera_id]
+        try:
+            await instance.unregister_raw_stream(channel)
+            logger.info("Unregistered raw video stream for %s channel %d", camera_id, channel)
+        except Exception as e:
+            logger.error("Failed to unregister raw video stream: %s", e)
+
     async def _create_camera_img_manager(
         self,
         camera_info: MIoTCameraInfo,

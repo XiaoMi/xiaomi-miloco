@@ -161,6 +161,13 @@ class OmniModelSettings(BaseModel):
         default="",
         description="多模态模型 API Key；为空时视为未配置，插件与后端启动前校验",
     )
+    audio_format: str = Field(
+        default="m4a",
+        description=(
+            "音频编码格式：m4a (AAC) / wav (PCM) / mp3。"
+            "MiMo/Qwen/Gemini 建议 m4a；智谱/OpenAI 建议 wav。"
+        ),
+    )
 
 
 class ModelSettings(BaseModel):
@@ -176,6 +183,22 @@ class ModelSettings(BaseModel):
             "已保存的 omni 配置档案列表（供 web 切换）。每项为一套 "
             "{label, base_url, api_key, model}；label 为唯一标识，"
             "当前生效的那套即 omni（按 label 匹配）。"
+        ),
+    )
+    vision_model: OmniModelSettings | None = Field(
+        default=None,
+        description=(
+            "截图模式专用视觉模型（可选）。仅 transmission_mode=screenshot 时生效；"
+            "配了 vision_model + audio_model 时自动拆分为双模型并发调用。"
+            "未配置的字段（base_url/api_key）回退到 omni 的值。"
+        ),
+    )
+    audio_model: OmniModelSettings | None = Field(
+        default=None,
+        description=(
+            "截图模式专用音频/ASR 模型（可选）。仅 transmission_mode=screenshot 时生效；"
+            "配了 vision_model + audio_model 时自动拆分为双模型并发调用。"
+            "未配置的字段（base_url/api_key）回退到 omni 的值。"
         ),
     )
 
@@ -300,6 +323,25 @@ class PerceptionCollectSettings(BaseModel):
     settle_ms: int = Field(default=500, description="等待慢轨道的宽限期（毫秒）")
     full_action: str = Field(
         default="clear", description="窗口满载处理策略（drop/clear/keep）"
+    )
+    auto_stop_on_omni_failure: bool = Field(
+        default=True,
+        description="omni 熔断器持续 OPEN 超过阈值时自动停止整个感知引擎(gate+identity+omni)，释放 ONNX 模型内存和 CPU",
+    )
+    auto_stop_threshold_sec: float = Field(
+        default=60.0,
+        description="熔断器持续 OPEN 多少秒后触发自动停止（需 auto_stop_on_omni_failure=true）",
+    )
+    raw_stream_save_dir: str | None = Field(
+        default=None,
+        description=(
+            "原始视频流保存目录（感知引擎未就绪时录制 H.265 流）。"
+            "null=不录制；路径支持 ~ 展开。按 {did}/{日期}/ 分目录，文件名=时间.hevc"
+        ),
+    )
+    raw_stream_segment_minutes: int = Field(
+        default=60,
+        description="原始视频流分片时长（分钟），每段时间生成一个 .hevc 文件",
     )
 
 

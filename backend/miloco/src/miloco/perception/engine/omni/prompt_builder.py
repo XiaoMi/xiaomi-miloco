@@ -56,7 +56,7 @@ from .field_registry import SceneDescriptor, render_field_spec, render_schema
 from .home_profile_loader import get_home_profile_prefix
 from .provider import LocalMediaInfo, OmniProviderAdapter
 
-RouteType = Literal["video", "audio"]
+RouteType = Literal["video", "audio", "screenshot"]
 
 if TYPE_CHECKING:
     from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
@@ -156,14 +156,33 @@ def build_query_prompt(
     if home_profile:
         parts.append(home_profile)
     short_edge = _get_video_short_edge()
-    video_b64, media_info = _encode_batch_video(identity_packets, short_edge=short_edge)
-    return {
-        "system_prompt": "\n\n".join(parts),
-        "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
-        "video_base64": video_b64,
-        "media_info": media_info,
-        "crops": [],
-    }
+    if _get_transmission_mode() == "screenshot":
+        screenshots_b64, media_info = _encode_batch_screenshots(identity_packets, short_edge=short_edge)
+        result: dict = {
+            "system_prompt": "\n\n".join(parts),
+            "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
+            "screenshots_b64": screenshots_b64,
+            "media_info": media_info,
+            "crops": [],
+        }
+        # 音频独立编码
+        ep = next((p for p in identity_packets if p.all_frames), identity_packets[0])
+        if _packet_audio_included(ep):
+            from miloco.config import get_settings
+            audio_format = get_settings().model.omni.audio_format or "m4a"
+            audio_result = _encode_audio(ep.audio_clip, ep.sample_rate, audio_format)
+            result["audio_base64"] = audio_result[0] if audio_result else None
+            result["audio_format"] = audio_result[1] if audio_result else audio_format
+        return result
+    else:
+        video_b64, media_info = _encode_batch_video(identity_packets, short_edge=short_edge)
+        return {
+            "system_prompt": "\n\n".join(parts),
+            "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
+            "video_base64": video_b64,
+            "media_info": media_info,
+            "crops": [],
+        }
 
 
 def build_fused_payload(
@@ -175,6 +194,7 @@ def build_fused_payload(
     label_lookup: "dict[str, str] | None" = None,
     adapter: OmniProviderAdapter | None = None,
     matching_moot: bool = False,
+    force_no_audio: bool = False,
 ) -> dict:
     """构造 fused 主调用的 payload（身份识别和场景理解合并到同一次 omni 调用）。
 
@@ -227,14 +247,19 @@ def build_fused_payload(
         scene = SceneDescriptor(route="audio", has_identity=False, stream=False)
         system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
         ep = packets[0]
-        audio_b64 = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
+        # 获取配置的音频格式
+        from miloco.config import get_settings
+        audio_format = get_settings().model.omni.audio_format or "m4a"
+        audio_result = _encode_audio(ep.audio_clip, ep.sample_rate, audio_format)
+        audio_b64 = audio_result[0] if audio_result else None
+        actual_format = audio_result[1] if audio_result else audio_format
         user_content: list[dict] = []
         if context.current_time:
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
         if context.room_name:
             user_content.append({"type": "text", "text": f"位置: {context.room_name}"})
         if audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
-            user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate)))
+            user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate), actual_format))
         elif audio_b64:
             logger.warning(
                 "event=fused_audio_b64_too_short size=%d (< %d), 跳过 input_audio 块, "
@@ -252,16 +277,38 @@ def build_fused_payload(
             "candidate_track_ids": [],
         }
 
+    route = _resolve_route(packets)
     short_edge = _get_video_short_edge()
-    video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
+
+    # 截图模式：编码 JPEG 列表 + 独立音频；视频模式：编码 mp4（含音频）
+    if route == "screenshot":
+        screenshots_b64, media_info = _encode_batch_screenshots(packets, short_edge=short_edge)
+        video_b64 = None
+        # 音频独立编码（force_no_audio 时跳过——双模型拆分 vision-only 调用）
+        ep = next((p for p in packets if p.all_frames), packets[0])
+        screenshot_audio_b64 = None
+        screenshot_audio_format = "m4a"
+        if not force_no_audio and _packet_audio_included(ep):
+            from miloco.config import get_settings
+            audio_format = get_settings().model.omni.audio_format or "m4a"
+            audio_result = _encode_audio(ep.audio_clip, ep.sample_rate, audio_format)
+            screenshot_audio_b64 = audio_result[0] if audio_result else None
+            screenshot_audio_format = audio_result[1] if audio_result else audio_format
+    else:
+        screenshots_b64 = None
+        screenshot_audio_b64 = None
+        screenshot_audio_format = "m4a"
+        video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
     # pending 半句不强行补全（否则模型会就着噪声脑补出一个完成句，正是要根除的幻觉）。
+    # force_no_audio 时 has_audio/has_speech 强制 False（双模型拆分 vision-only 用）。
+    scene_has_audio = False if force_no_audio else _batch_video_has_audio(packets)
+    scene_has_speech = False if force_no_audio else _batch_video_has_speech(packets)
     scene = SceneDescriptor(
         route="video", has_identity=bool(candidates), stream=False,
-        has_audio=_batch_video_has_audio(packets),
-        has_speech=_batch_video_has_speech(packets),
+        has_audio=scene_has_audio, has_speech=scene_has_speech,
         identity_match_disabled=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
@@ -276,6 +323,10 @@ def build_fused_payload(
         cfg=cfg,
         label_lookup=label_lookup,
         matching_moot=matching_moot,
+        screenshots_b64=screenshots_b64,
+        screenshot_audio_b64=screenshot_audio_b64,
+        screenshot_audio_format=screenshot_audio_format,
+        force_no_audio=force_no_audio,
     )
 
     messages = _assemble_fused_messages(
@@ -374,8 +425,11 @@ def _build_payload(
     # 拼接照常；本轮无人声 → 剥 speeches，挂着的 pending 半句不强行补全（否则模型会就着
     # 噪声脑补出完成句，正是要根除的幻觉）。
     has_speech = True if route == "audio" else _batch_video_has_speech(packets)
+    # SceneDescriptor.route 只有 "video" / "audio"（决定 prompt/schema）；
+    # screenshot 对 prompt/schema 等价于 video（有视觉信息）。
+    prompt_route: Literal["video", "audio"] = "audio" if route == "audio" else "video"
     scene = SceneDescriptor(
-        route=route, has_identity=False, stream=stream,
+        route=prompt_route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
     )
     user_text = _build_user_content(
@@ -388,8 +442,25 @@ def _build_payload(
     }
     if route == "audio":
         ep = packets[0]
-        base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
+        from miloco.config import get_settings
+        audio_format = get_settings().model.omni.audio_format or "m4a"
+        audio_result = _encode_audio(ep.audio_clip, ep.sample_rate, audio_format)
+        base["audio_base64"] = audio_result[0] if audio_result else None
+        base["audio_format"] = audio_result[1] if audio_result else audio_format
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
+    elif route == "screenshot":
+        short_edge = _get_video_short_edge()
+        screenshots_b64, media_info = _encode_batch_screenshots(packets, short_edge=short_edge)
+        base["screenshots_b64"] = screenshots_b64
+        base["media_info"] = media_info
+        # 截图模式下音频独立编码
+        ep = next((p for p in packets if p.all_frames), packets[0])
+        if _packet_audio_included(ep):
+            from miloco.config import get_settings
+            audio_format = get_settings().model.omni.audio_format or "m4a"
+            audio_result = _encode_audio(ep.audio_clip, ep.sample_rate, audio_format)
+            base["audio_base64"] = audio_result[0] if audio_result else None
+            base["audio_format"] = audio_result[1] if audio_result else audio_format
     else:
         short_edge = _get_video_short_edge()
         video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
@@ -569,7 +640,8 @@ def _build_user_content(
     # 非 fused 兜底路径：单条 user 文本，规则 + 历史 + 本轮事实内联（fused 路径才把它们
     # 拆成独立 message）。规则用新「# 待判断规则」格式，与 fused 一致。
     parts: list[str] = []
-    is_video = _resolve_route(packets) == "video"
+    route = _resolve_route(packets)
+    is_video = route in ("video", "screenshot")
     # matched_rules 仅 video 路由有（audio-only 剥离）→ audio 不下发「# 待判断规则」段
     if is_video:
         rule_conditions = _render_rule_conditions(context)
@@ -600,6 +672,10 @@ def _build_fused_user_content(
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
     matching_moot: bool = False,
+    screenshots_b64: list[str] | None = None,
+    screenshot_audio_b64: str | None = None,
+    screenshot_audio_format: str = "m4a",
+    force_no_audio: bool = False,
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
 
@@ -609,6 +685,8 @@ def _build_fused_user_content(
     ``matching_moot=True``（身份库为空）时整个 gallery 段不渲染——库空无成员可比对，
     identities 已由精简版 spec 指示"只判 unknown/no_person"（见 build_fused_payload），
     此处不再塞"<gallery>库为空…"这类无用文本。待识别 track 列表仍照常渲染（no_person 判定按 track 给结论）。
+
+    ``force_no_audio=True`` 时跳过音频块构建（双模型拆分的 vision-only 调用用）。
     """
     gallery_content: list[dict] = []
 
@@ -724,11 +802,28 @@ def _build_fused_user_content(
     # 4. gallery（候选成员参考图，紧邻 video 便于视觉比对）
     content.extend(gallery_content)
 
-    # 5. 主 video
-    # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短
-    # base64 串, 入 payload 会让 omni 服务端 400 Multimodal data is corrupted。
-    # 太短 → 跳过 video_url 块, 退化为"无视频窗口"(text + gallery 仍能识别)。
-    if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
+    # 5. 主视觉（video 或 screenshot）+ 音频
+    if screenshots_b64:
+        # 截图模式：每张 JPEG 作为独立 image_url 块
+        for i, img_b64 in enumerate(screenshots_b64):
+            if len(img_b64) >= _MIN_JPEG_BYTES:
+                content.append(_jpeg_block(base64.b64decode(img_b64)))
+            else:
+                logger.warning(
+                    "event=fused_screenshot_b64_too_short idx=%d size=%d (< %d), 跳过",
+                    i, len(img_b64), _MIN_JPEG_BYTES,
+                )
+        # 音频独立发送（force_no_audio 时跳过——双模型拆分的 vision-only 调用）
+        if not force_no_audio and screenshot_audio_b64 and len(screenshot_audio_b64) >= _MIN_AUDIO_B64_LEN:
+            content.append(adapter.build_audio_block(
+                screenshot_audio_b64, media_info, screenshot_audio_format,
+            ))
+        elif screenshot_audio_b64:
+            logger.warning(
+                "event=fused_screenshot_audio_b64_too_short size=%d (< %d), 跳过",
+                len(screenshot_audio_b64), _MIN_AUDIO_B64_LEN,
+            )
+    elif video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
         content.append(adapter.build_video_block(video_b64, media_info))
     elif video_b64:
         logger.warning(
@@ -1123,6 +1218,15 @@ def _get_video_short_edge() -> int:
         return get_settings().perception.engine.get("input", {}).get("video_short_edge", _VIDEO_SHORT_EDGE)
     except Exception:
         return _VIDEO_SHORT_EDGE
+
+
+def _get_transmission_mode() -> str:
+    """读取传输模式配置: "video"(默认) 或 "screenshot"。"""
+    try:
+        from miloco.config import get_settings
+        return get_settings().perception.engine.get("input", {}).get("transmission_mode", "video")
+    except Exception:
+        return "video"
 _CROP_SIZE = (512, 512)
 
 # 多模态 payload sanity check 下限 — 防"非 None 但实际损坏"的 bytes 入 payload
@@ -1299,6 +1403,63 @@ def _encode_video_mp4(
             os.unlink(tmp_path)
 
 
+def _encode_frames_jpeg(
+    frames: list[NDArray[np.uint8]],
+    short_edge: int = _VIDEO_SHORT_EDGE,
+    jpeg_quality: int = 80,
+) -> tuple[list[str], LocalMediaInfo]:
+    """将 BGR 帧编码为 JPEG base64 字符串列表（截图模式专用）。
+
+    与 _encode_video_mp4 的区别：跳过 H.264 编码，每帧独立编码为 JPEG，
+    无临时文件 I/O，CPU/内存占用显著降低。
+
+    Returns ``(list[base64_str], media_info)``。
+    """
+    if not frames:
+        return [], LocalMediaInfo(
+            video_width=0, video_height=0, fps=0, frame_count=0,
+            has_audio=False, audio_sample_rate=0,
+        )
+
+    h0, w0 = frames[0].shape[:2]
+    scale = short_edge / min(h0, w0)
+    target_w = int(w0 * scale) // 2 * 2
+    target_h = int(h0 * scale) // 2 * 2
+
+    encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+    result: list[str] = []
+    for frame_data in frames:
+        resized = cv2.resize(frame_data, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", resized, encode_params)
+        if ok:
+            result.append(base64.b64encode(buf.tobytes()).decode())
+
+    media_info = LocalMediaInfo(
+        video_width=target_w,
+        video_height=target_h,
+        fps=0,  # 截图模式无连续帧率概念
+        frame_count=len(result),
+        has_audio=False,
+        audio_sample_rate=0,
+    )
+    return result, media_info
+
+
+def _encode_batch_screenshots(
+    edge_packets: list[IdentityPacket],
+    short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[list[str], LocalMediaInfo]:
+    """从首个有 frames 的 device 编码截图列表。与 _encode_batch_video 口径一致。"""
+    for ep in edge_packets:
+        b64_list, media_info = _encode_frames_jpeg(ep.all_frames, short_edge=short_edge)
+        if b64_list:
+            return b64_list, media_info
+    return [], LocalMediaInfo(
+        video_width=0, video_height=0, fps=0, frame_count=0,
+        has_audio=False, audio_sample_rate=0,
+    )
+
+
 # =============================================================================
 # Crop encoding (tracker crop images)
 # =============================================================================
@@ -1343,12 +1504,17 @@ def _is_audio_only(packets: list[IdentityPacket]) -> bool:
 
 
 def _resolve_route(packets: list[IdentityPacket]) -> RouteType:
-    """决定本次调用走 video route 还是 audio route。
+    """决定本次调用走 video / audio / screenshot route。
 
     - audio：所有 packet 都满足 audio_active=True 且 visual_changed=False
+    - screenshot：配置为 screenshot 传输模式且非 audio-only
     - video：其他所有情况（含 batch 混合、trigger=None 兼容旧路径）
     """
-    return "audio" if _is_audio_only(packets) else "video"
+    if _is_audio_only(packets):
+        return "audio"
+    if _get_transmission_mode() == "screenshot":
+        return "screenshot"
+    return "video"
 
 
 def _encode_audio_only_mp4(
@@ -1365,34 +1531,71 @@ def _encode_audio_only_mp4(
     (跟 _encode_video_mp4 对称,UI 端用同一个 <video> 控件播放;m4a 容器虽然只
     有音频,HTML5 <video> 也能 render audio-only track).
     """
+    result = _encode_audio(audio_clip, sample_rate, "m4a")
+    return result[0] if result else None
+
+
+def _encode_audio(
+    audio_clip: NDArray[np.int16],
+    sample_rate: int,
+    audio_format: str = "m4a",
+) -> tuple[str, str] | None:
+    """编码音频为指定格式，返回 (base64_str, format_name)。
+
+    支持的格式：
+    - m4a: AAC 编码，ipod 容器（MiMo/Qwen/Gemini 推荐）
+    - wav: PCM s16le 编码（智谱/OpenAI 推荐）
+    - mp3: MP3 编码（通用兼容）
+
+    Args:
+        audio_clip: PCM 音频数据 (int16)
+        sample_rate: 采样率
+        audio_format: 目标格式 (m4a/wav/mp3)
+
+    Returns:
+        (base64_str, format_name) 元组，失败返回 None
+    """
     import os
     import tempfile
 
     from miloco.perception.snapshot_context import push_clip_bytes
 
-    _AAC_FRAME_SIZE = 1024
-    if audio_clip is None or audio_clip.size < _AAC_FRAME_SIZE:
+    _FRAME_SIZE = 1024
+    if audio_clip is None or audio_clip.size < _FRAME_SIZE:
         return None
 
-    with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp:
+    # 格式配置
+    format_config = {
+        "m4a": {"suffix": ".m4a", "container_format": "ipod", "codec": "aac"},
+        "wav": {"suffix": ".wav", "container_format": "wav", "codec": "pcm_s16le"},
+        "mp3": {"suffix": ".mp3", "container_format": "mp3", "codec": "mp3"},
+    }
+
+    if audio_format not in format_config:
+        logger.warning("event=unsupported_audio_format format=%s, fallback to m4a", audio_format)
+        audio_format = "m4a"
+
+    config = format_config[audio_format]
+
+    with tempfile.NamedTemporaryFile(suffix=config["suffix"], delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        container = av.open(tmp_path, "w", format="ipod")
-        a_stream = container.add_stream("aac", rate=sample_rate)
+        container = av.open(tmp_path, "w", format=config["container_format"])
+        a_stream = container.add_stream(config["codec"], rate=sample_rate)
         a_stream.layout = "mono"
 
         pts = 0
-        for i in range(0, audio_clip.size, _AAC_FRAME_SIZE):
-            chunk = audio_clip[i : i + _AAC_FRAME_SIZE]
-            if chunk.size < _AAC_FRAME_SIZE:
-                chunk = np.pad(chunk, (0, _AAC_FRAME_SIZE - chunk.size))
+        for i in range(0, audio_clip.size, _FRAME_SIZE):
+            chunk = audio_clip[i : i + _FRAME_SIZE]
+            if chunk.size < _FRAME_SIZE:
+                chunk = np.pad(chunk, (0, _FRAME_SIZE - chunk.size))
             audio_frame = av.AudioFrame.from_ndarray(
                 chunk.reshape(1, -1), format="s16", layout="mono"
             )
             audio_frame.sample_rate = sample_rate
             audio_frame.pts = pts
-            pts += _AAC_FRAME_SIZE
+            pts += _FRAME_SIZE
             for packet in a_stream.encode(audio_frame):
                 container.mux(packet)
         for packet in a_stream.encode():
@@ -1401,10 +1604,10 @@ def _encode_audio_only_mp4(
         container.close()
 
         with open(tmp_path, "rb") as f:
-            m4a_bytes = f.read()
-        # 旁路把 audio-only 的 m4a 字节 push 给 meaningful_events 复用(零重编)
-        push_clip_bytes(m4a_bytes, "m4a")
-        return base64.b64encode(m4a_bytes).decode()
+            audio_bytes = f.read()
+        # 旁路把音频字节 push 给 meaningful_events 复用
+        push_clip_bytes(audio_bytes, audio_format)
+        return base64.b64encode(audio_bytes).decode(), audio_format
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)

@@ -13,6 +13,7 @@ The perception loop reacts to two triggers:
 
 import asyncio
 import logging
+import time
 
 from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
@@ -44,6 +45,16 @@ class PerceptionRunner:
         self._perception_task: asyncio.Task | None = None
         self._sync_devices_task: asyncio.Task | None = None
         self._window_ready = window_ready_event
+
+        # 自动停止/恢复状态：omni 熔断器累计 OPEN 时间超过阈值时自动停引擎，
+        # 恢复后自动重启。_auto_stopped=True 时 tick 只跑 probe 自愈，不跑 pipeline。
+        # 用累计时间而非连续时间，防止 OPEN→probe→CLOSED 快速振荡时计时器反复被清零。
+        self._cb_open_accumulated: float = 0.0  # 累计 OPEN 时间（秒）
+        self._cb_last_open_tick: float | None = None  # 上一次 tick 时 OPEN 的时间点
+        self._auto_stopped: bool = False
+        self._auto_stopped_at: float | None = None  # 自动停止时刻，用于冷却期
+        self._auto_restart_cooldown_sec: float = 120.0  # 自动停止后冷却期（秒）
+        self._recovery_probe_task: asyncio.Task | None = None
 
         # Persistent worker thread with a durable event loop for inference.
         # Replaces the old ThreadPoolExecutor + asyncio.run() pattern that
@@ -89,6 +100,9 @@ class PerceptionRunner:
             return
 
         self._is_running = True
+        self._auto_stopped = False  # 用户手动启动时清除自动停止标记
+        self._cb_open_accumulated = 0.0
+        self._cb_last_open_tick = None
 
         # 重启时重读窗口时长（config 可能在停止期间被改）——__init__ 只读一次，
         # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
@@ -130,6 +144,7 @@ class PerceptionRunner:
         for task in (
             self._perception_task,
             self._sync_devices_task,
+            self._recovery_probe_task,
         ):
             if task and not task.done():
                 task.cancel()
@@ -140,6 +155,10 @@ class PerceptionRunner:
 
         self._perception_task = None
         self._sync_devices_task = None
+        self._recovery_probe_task = None
+        self._auto_stopped = False
+        self._cb_open_accumulated = 0.0
+        self._cb_last_open_tick = None
 
         # 清理 in-flight probe task,防同进程再启 runner 时 _probe_in_flight 残留导致
         # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
@@ -158,6 +177,13 @@ class PerceptionRunner:
 
     async def _tick(self) -> None:
         """Drain all ready windows and infer sequentially."""
+        # 自动生命周期管理：检查 omni 熔断器状态，决定是否自动停止/恢复引擎
+        await self._auto_manage_lifecycle()
+
+        # 自动停止后：只跑 probe 自愈，不跑 pipeline（节省 CPU + ONNX 内存）
+        if self._auto_stopped:
+            return
+
         # 每 tick 驱动一次 omni 熔断器自动探测:OPEN_RECOVERABLE + backoff 到期时 spawn
         # 一次后台 probe。无外部驱动时 probe_due 归零后状态永远不动,provider 恢复后感知
         # 也不会自愈,只能靠用户手动点「立即重试」。sync 判断 + 后台 spawn,tick 不阻塞。
@@ -217,6 +243,123 @@ class PerceptionRunner:
                 await self._wait_for_trigger()
             except asyncio.CancelledError:
                 break
+
+    # ---- 自动停止/恢复 ----------------------------------------------------------
+
+    async def _auto_manage_lifecycle(self) -> None:
+        """每 tick 检查 omni 熔断器状态，驱动自动停止/恢复。
+
+        自动停止条件：熔断器持续 OPEN_RECOVERABLE / OPEN_CONFIG 超过阈值秒数。
+        自动恢复条件：自动停止后，Runner 驱动 probe 探测成功（熔断器回到 CLOSED）。
+        """
+        settings = get_settings().perception.collect
+        if not settings.auto_stop_on_omni_failure:
+            return
+
+        from miloco.perception.engine.omni.circuit_breaker import (
+            CircuitState,
+            get_omni_circuit_breaker,
+        )
+
+        cb = get_omni_circuit_breaker()
+        state = cb.current_state
+
+        if self._auto_stopped:
+            # 已自动停止 → 检查是否该恢复
+            if state == CircuitState.CLOSED:
+                # 冷却期内不重启，防止 stop→restart 振荡
+                elapsed = time.monotonic() - self._auto_stopped_at if self._auto_stopped_at else 0
+                if elapsed < self._auto_restart_cooldown_sec:
+                    logger.debug(
+                        "[auto-lifecycle] CLOSED but in cooldown (%.0fs/%.0fs)",
+                        elapsed, self._auto_restart_cooldown_sec,
+                    )
+                else:
+                    logger.info("[runner] omni 恢复（熔断器 CLOSED），自动重启感知引擎")
+                    await self._auto_restart_engine()
+            else:
+                # 继续驱动 probe（内部有退避节流，不会高频调用）
+                self._drive_recovery_probe()
+            return
+
+        # 未自动停止 → 累计 OPEN 时间，检查是否该停
+        # OPEN_CONFIG（API key 错误/模型不存在）也会触发自动停止；
+        # 但恢复时 _drive_recovery_probe 的 try_arm_probe 只认 OPEN_RECOVERABLE，
+        # 所以 OPEN_CONFIG 停机后不会自动 probe，需要用户修正配置后手动重试。
+        now = time.monotonic()
+        is_open = state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG)
+
+        if is_open:
+            # 累计 OPEN 时间
+            if self._cb_last_open_tick is not None:
+                self._cb_open_accumulated += now - self._cb_last_open_tick
+            self._cb_last_open_tick = now
+
+            if self._cb_open_accumulated > settings.auto_stop_threshold_sec:
+                logger.warning(
+                    "[runner] omni 熔断器累计 OPEN %.0fs（阈值 %.0fs），自动停止感知引擎",
+                    self._cb_open_accumulated,
+                    settings.auto_stop_threshold_sec,
+                )
+                self._cb_last_open_tick = None
+                await self._auto_stop_engine()
+        else:
+            # CLOSED 或 HALF_OPEN → 停止累计，但不清零（保留已累计的时间）
+            self._cb_last_open_tick = None
+
+    async def _auto_stop_engine(self) -> None:
+        """停止引擎但保留 tick 循环，为 probe 自愈留通道。
+
+        与 stop_engine 的区别：只暂停解码器 + 关引擎实例，**不关采集器**。
+        设备保持连接（避免 _sync_devices_loop 反悔重连 churn），解码器暂停后
+        不产出解码帧，sync_buffer 自然不进数据，CPU 一样省。
+        """
+        self._auto_stopped = True
+        self._auto_stopped_at = time.monotonic()
+        self._cb_open_accumulated = 0.0
+        self._cb_last_open_tick = None
+        try:
+            # 只暂停解码器 + 关引擎；不调 collector.shutdown()，避免被
+            # _sync_devices_loop 在 ~1s 内 reconnect 所有设备（白做一轮 disconnect→reconnect）。
+            self._collector.pause_streams()
+            await self._pipeline.close()
+            logger.info("[runner] 感知引擎已自动停止（gate+identity+omni 全停，解码器已暂停），等待 omni 恢复")
+        except Exception as e:
+            logger.error("[runner] 自动停止引擎失败 | %s", e, exc_info=True)
+
+    async def _auto_restart_engine(self) -> None:
+        """probe 成功后自动重启引擎。"""
+        self._auto_stopped = False
+        self._recovery_probe_task = None
+        try:
+            # 先恢复解码器，再重建引擎和采集
+            self._collector.resume_streams()
+            await self._collector.switch_to_decode_mode()
+            await self._collector.sync_all_devices()
+            self._pipeline.try_reinit_engine(include_failed=True)
+            if not self._inference_worker.is_running:
+                self._inference_worker.start()
+            self._pipeline.set_inference_worker(self._inference_worker)
+            logger.info("[runner] 感知引擎自动重启成功")
+        except Exception as e:
+            logger.error("[runner] 自动重启引擎失败 | %s", e, exc_info=True)
+            self._auto_stopped = True  # 重启失败，保持停止态
+
+    def _drive_recovery_probe(self) -> None:
+        """引擎停止后，由 Runner 直接驱动熔断器 probe（复用 processor._run_omni_probe）。
+
+        熔断器内部的 try_arm_probe() 有退避节流：只有 OPEN_RECOVERABLE + backoff 到期
+        + 无 in-flight 时才放行，避免高频探测。
+        """
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+        from miloco.perception.processor import _run_omni_probe
+
+        cb = get_omni_circuit_breaker()
+        if not cb.try_arm_probe():
+            return
+        self._recovery_probe_task = asyncio.create_task(_run_omni_probe())
 
     async def _sync_devices_loop(self) -> None:
         """Device sync loop — runs independently from perception ticks."""

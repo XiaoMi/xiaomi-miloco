@@ -198,6 +198,31 @@ async def _run_with_trace_id(
         reset_trace_id(token)
 
 
+def _build_split_model_config(
+    omni_kwargs: dict,
+    split_settings: "OmniModelSettings | None",
+) -> "OmniConfig | None":
+    """从 omni 基础 kwargs + split model settings 构造独立 OmniConfig。
+
+    split_settings 中未配的字段回退到 omni 的值；split_settings 为 None 时返回 None
+    （不启用拆分）。
+    """
+    if split_settings is None:
+        return None
+    from miloco.perception.engine.config import OmniConfig
+    from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
+
+    merged = dict(omni_kwargs)
+    if split_settings.model:
+        merged["model"] = split_settings.model
+    if split_settings.base_url:
+        merged["base_url"] = split_settings.base_url
+    if split_settings.api_key:
+        merged["api_key"] = split_settings.api_key
+    merged["api_key"] = resolve_omni_api_key(merged.get("api_key", ""))
+    return OmniConfig(**merged)
+
+
 class PerceptionEngineProxy:
     """Real perception proxy backed by perception-engine pipeline.
 
@@ -341,11 +366,22 @@ class PerceptionEngineProxy:
             override=engine_cfg.get("identity_engine"),
         )
 
+        # 截图模式双模型拆分：从 settings.model.vision_model / audio_model 构造
+        # 独立 OmniConfig，未配的字段回退到 omni 值。
+        vision_omni_cfg = _build_split_model_config(
+            omni_kwargs, settings.model.vision_model
+        )
+        audio_omni_cfg = _build_split_model_config(
+            omni_kwargs, settings.model.audio_model
+        )
+
         config = PerceptionConfig(
             input=InputConfig(**engine_cfg.get("input", {})),
             gate=GateConfig(**engine_cfg.get("gate", {})),
             identity=IdentityConfig(**identity_kwargs),
             omni=OmniConfig(**omni_kwargs),
+            vision_omni=vision_omni_cfg,
+            audio_omni=audio_omni_cfg,
             identity_engine=identity_engine_cfg,
         )
 

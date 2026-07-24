@@ -169,6 +169,22 @@ class MultimodalCollector:
         """Get adapter for a specific device type."""
         return self._adapters.get(device_type)
 
+    def pause_streams(self) -> None:
+        """暂停所有设备的数据流（解码器等）。设备保持连接，数据直接丢弃。"""
+        for adapter in self._adapters.values():
+            adapter.pause_streams()
+
+    def resume_streams(self) -> None:
+        """恢复所有设备的数据流。"""
+        for adapter in self._adapters.values():
+            adapter.resume_streams()
+
+    async def switch_to_decode_mode(self) -> None:
+        """感知引擎就绪后，切换所有设备到解码模式。"""
+        for adapter in self._adapters.values():
+            if hasattr(adapter, "switch_to_decode_mode"):
+                await adapter.switch_to_decode_mode()
+
     async def shutdown(self) -> None:
         """Shutdown all adapters — disconnect all devices."""
         for adapter in self._adapters.values():

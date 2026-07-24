@@ -267,6 +267,16 @@ class MIoTCameraInstance:
 
         _LOGGER.info("camera stop, %s, %s", self._did, result)
 
+    def pause_decoders(self) -> None:
+        """暂停所有通道的解码器：P2P 连接保持，帧直接丢弃不走 H.264 解码。"""
+        for decoder in self._decoders:
+            decoder.pause()
+
+    def resume_decoders(self) -> None:
+        """恢复所有通道的解码器。"""
+        for decoder in self._decoders:
+            decoder.resume()
+
     async def get_status_async(self) -> MIoTCameraStatus:
         """Get camera status."""
         result: int = await self._main_loop.run_in_executor(

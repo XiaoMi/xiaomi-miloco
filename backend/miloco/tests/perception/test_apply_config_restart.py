@@ -179,6 +179,9 @@ async def test_runner_stop_cancels_inflight_omni_probe_tasks():
     runner._is_running = True
     runner._perception_task = None
     runner._sync_devices_task = None
+    runner._recovery_probe_task = None
+    runner._auto_stopped = False
+    runner._cb_open_since = None
     runner._inference_worker = MagicMock()
 
     # 起一个真的 fire-and-forget task,注册进 _OMNI_PROBE_TASKS (与 processor 同款)
