@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 import secrets
 import shutil
 import tempfile
@@ -37,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 # 参考 crop（③ 识别的多姿态参照图）存储上限
 _MAX_REF_CROPS = 3
+
+# pet_id 白名单（与 _avatar._SAFE_SUBJECT_ID 同口径）：拦 / . .. 空串等路径穿越字符
+_SAFE_PET_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class Pet(BaseModel):
@@ -113,7 +117,15 @@ class PetLibrary:
     # ── 路径 ──────────────────────────────────────────────────────────────
 
     def _pet_dir(self, pet_id: str) -> Path:
-        return self.pets_dir / pet_id
+        # 共享库层不盲信上层 _PET_ID_RE：白名单 + realpath/commonpath 包含校验
+        # （CodeQL 认可的 path-containment sanitizer，与 _avatar._avatar_file 同口径）。
+        if not _SAFE_PET_ID.fullmatch(pet_id or ""):
+            raise ValueError(f"非法 pet_id: {pet_id!r}")
+        p = self.pets_dir / pet_id
+        base = os.path.realpath(self.pets_dir)
+        if os.path.commonpath((base, os.path.realpath(p))) != base:
+            raise ValueError(f"非法 pet_id: {pet_id!r}")
+        return p
 
     def _meta_path(self, pet_id: str) -> Path:
         return self._pet_dir(pet_id) / "meta.json"
@@ -121,7 +133,10 @@ class PetLibrary:
     # ── 读 ────────────────────────────────────────────────────────────────
 
     def get(self, pet_id: str) -> Pet | None:
-        path = self._meta_path(pet_id)
+        try:
+            path = self._meta_path(pet_id)
+        except ValueError:
+            return None  # 非法 id（含 list() 遍历到的异常目录名）→ 视为不存在
         if not path.is_file():
             return None
         try:
@@ -169,7 +184,7 @@ class PetLibrary:
                 updated_at=now,
             )
             self._write_meta(pet)
-            logger.info("宠物已创建: id=%s name=%s", pet_id, name)
+            logger.info("宠物已创建: id=%s name=%r", pet_id, name)  # name=%r：转义控制字符，防日志注入
             return pet
 
     def update(
@@ -246,13 +261,20 @@ class PetLibrary:
         return [p for p in ordered[: pet.reference_crop_count] if p.is_file()]
 
     def reference_crop_scores(self, pet_id: str) -> list[float]:
-        """与 `reference_crop_paths` 对齐的绝对质量分（越界补 0）。"""
+        """与 `reference_crop_paths` 对齐的绝对质量分（越界补 0）。
+
+        按每张存活 crop 的**真实下标** `_ref_index` 取分，而非位置枚举——崩溃残留
+        使中间某号缺失（如 ref_crop_1）时，仍能让 score↔crop 正确对齐。
+        """
         pet = self.get(pet_id)
         if pet is None:
             return []
-        n = len(self.reference_crop_paths(pet_id))
         sc = list(pet.reference_crop_scores)
-        return [(sc[i] if i < len(sc) else 0.0) for i in range(n)]
+        out: list[float] = []
+        for p in self.reference_crop_paths(pet_id):
+            idx = _ref_index(p)
+            out.append(sc[idx] if idx is not None and 0 <= idx < len(sc) else 0.0)
+        return out
 
     def set_reference_crops(
         self, pet_id: str, crops: list[bytes], scores: list[float] | None = None

@@ -369,7 +369,9 @@ export function PetAutoGenFlow({
               </div>
             </div>
             <div className="text-caption text-text-tertiary mt-2">
-              {t("pet.candidatesHint", { count: candidates.length })}
+              {synthesized
+                ? t("pet.candidatesHintAvatarOnly")
+                : t("pet.candidatesHint", { count: candidates.length })}
             </div>
           </div>
         )}

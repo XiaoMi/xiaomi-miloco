@@ -41,6 +41,20 @@ def test_get_missing_returns_none(lib: PetLibrary) -> None:
     assert lib.list() == []
 
 
+@pytest.mark.parametrize("bad_id", ["../evil", "a/b", "..", ".", "", "pet id", "a.b"])
+def test_pet_dir_rejects_unsafe_id(lib: PetLibrary, bad_id: str) -> None:
+    # 共享库层白名单 + realpath/commonpath 包含校验：拦路径穿越 / 分隔符 / 空串
+    # （不盲信上层 router 的 _PET_ID_RE，路径构造处自兜底）
+    with pytest.raises(ValueError):
+        lib._pet_dir(bad_id)
+
+
+def test_get_swallows_unsafe_id(lib: PetLibrary) -> None:
+    # get() 对非法 id 返回 None（含 list() 遍历到异常目录名的场景），不向上冒泡
+    assert lib.get("../etc/passwd") is None
+    assert lib.get("") is None
+
+
 def test_create_duplicate_name_raises(lib: PetLibrary) -> None:
     lib.create(name="旺财", species="狗")
     with pytest.raises(PetNameConflict):
@@ -218,6 +232,17 @@ def test_count_authoritative_ignores_stale_high_index(lib: PetLibrary) -> None:
     lib.set_reference_crops(pet.id, [b"keep"], scores=[1])
     (lib._pet_dir(pet.id) / "ref_crop_1.jpg").write_bytes(b"stale")
     assert [p.name for p in lib.reference_crop_paths(pet.id)] == ["ref_crop_0.jpg"]
+
+
+def test_reference_crop_scores_aligned_on_middle_gap(lib: PetLibrary) -> None:
+    # 崩溃残留使中间某号缺失（ref_crop_1）：分数须按真实下标对齐、不按位置滑位
+    pet = lib.create(name="x", species="猫")
+    lib.set_reference_crops(pet.id, [b"c0", b"c1", b"c2"], scores=[0.9, 0.5, 0.7])
+    (lib._pet_dir(pet.id) / "ref_crop_1.jpg").unlink()  # 抹掉中间那张
+    paths = lib.reference_crop_paths(pet.id)
+    assert [p.name for p in paths] == ["ref_crop_0.jpg", "ref_crop_2.jpg"]
+    # crop_2 应拿真实下标分 s2(0.7)，而非滑位的 s1(0.5)
+    assert lib.reference_crop_scores(pet.id) == [0.9, 0.7]
 
 
 def test_set_reference_crops_empty_data_raises(lib: PetLibrary) -> None:

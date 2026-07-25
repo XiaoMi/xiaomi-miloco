@@ -30,7 +30,7 @@ from miloco.schema.common_schema import NormalResponse
 
 router = APIRouter(prefix="/identity", tags=["Pet"])
 
-_PET_ID_RE = re.compile(r"^pet_[0-9a-f]{12}$")
+_PET_ID_RE = re.compile(r"^pet_[0-9a-f]{12}\Z")  # \Z 而非 $：与 person 一致，禁尾随换行 id
 
 
 class PetCreate(BaseModel):

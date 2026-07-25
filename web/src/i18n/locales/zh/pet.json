@@ -27,6 +27,7 @@
     "noPetDetected": "未在媒体中检测到宠物，请换一张更清晰的",
     "multiPetHint": "检测到多只宠物，已描述最主要的一只",
     "candidatesHint": "已识别 {{count}} 张参考图，将全部保存（点选左侧设为头像主图）",
+    "candidatesHintAvatarOnly": "未生成识别参照，本张仅用作头像；想让画面里认得出它，换张更清晰、能看清整只的素材",
     "candidateNth": "候选 {{n}}",
     "primaryBadge": "主图",
     "refsInconsistentConfirm": "这几张差异较大、疑似不是同一只，我确认继续",

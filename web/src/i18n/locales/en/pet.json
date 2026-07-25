@@ -27,6 +27,7 @@
     "noPetDetected": "No pet detected in the media, try a clearer one",
     "multiPetHint": "Multiple pets detected; described the most prominent one",
     "candidatesHint": "Recognized {{count}} reference crop(s); all will be saved (tap left to set the avatar)",
+    "candidatesHintAvatarOnly": "No recognition reference generated; this shot is used only as the avatar. For the pet to be recognized in scenes, try a clearer photo showing the whole animal",
     "candidateNth": "Candidate {{n}}",
     "primaryBadge": "Main",
     "refsInconsistentConfirm": "These look quite different — I confirm they're the same pet",
