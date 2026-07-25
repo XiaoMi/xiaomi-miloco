@@ -167,6 +167,24 @@ async def test_post_bad_bytes_400(wired):
     assert ei.value.status_code == 400
 
 
+async def test_post_too_large_400(wired):
+    # 超大包、有 size：走前置闸（不读进内存）→ 400
+    big = _PNG + b"\x00" * (5 * 1024 * 1024)
+    up = UploadFile(filename="a.png", file=io.BytesIO(big), size=len(big))
+    with pytest.raises(HTTPException) as ei:
+        await upload_person_avatar(_PID, image=up, current_user="t")
+    assert ei.value.status_code == 400
+
+
+async def test_post_too_large_no_size_400(wired):
+    # size 缺失：走读后 len 兜底 → 仍 400
+    big = _PNG + b"\x00" * (5 * 1024 * 1024)
+    up = UploadFile(filename="a.png", file=io.BytesIO(big))  # size=None
+    with pytest.raises(HTTPException) as ei:
+        await upload_person_avatar(_PID, image=up, current_user="t")
+    assert ei.value.status_code == 400
+
+
 async def test_delete_clears(wired, lib):
     lib.set_person_avatar(_PID, data=b"x", ext="png")
     res = await delete_person_avatar(_PID, current_user="t")
