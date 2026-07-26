@@ -25,6 +25,10 @@ import {
 } from "@/api";
 import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
 import { IconX, IconEye, IconEyeOff } from "@/lib/icons";
+import {
+  findOmniProviderPreset,
+  OMNI_PROVIDER_PRESETS,
+} from "@/lib/omniPresets";
 import { toast } from "./Toast";
 
 const INPUT_CLS =
@@ -227,6 +231,18 @@ export function UsageOmniConfig() {
   const existing = profiles.find(
     (p) => p.base_url === baseUrl.trim() && p.model === model.trim(),
   );
+  const selectedPreset = findOmniProviderPreset(baseUrl);
+
+  function applyProviderPreset(id: string) {
+    const preset = OMNI_PROVIDER_PRESETS.find((item) => item.id === id);
+    setBaseUrl(preset?.baseUrl ?? "");
+    setModel(preset?.model ?? "");
+    setModels([]);
+    setModelsMsg(null);
+    setModelsErr(false);
+    setModelsErrCode(null);
+    setTestResult(null);
+  }
 
   function startAdd() {
     setAdding(true);
@@ -670,6 +686,20 @@ export function UsageOmniConfig() {
                   <div className="md:col-span-2 text-caption text-text-secondary">
                     {editing ? t("usage.editFormHint") : t("usage.addFormHint")}
                   </div>
+                  <Field label={t("usage.providerPresetLabel")} className="md:col-span-2">
+                    <select
+                      value={selectedPreset?.id ?? "custom"}
+                      onChange={(event) => applyProviderPreset(event.target.value)}
+                      className={INPUT_CLS}
+                    >
+                      <option value="custom">{t("usage.providerPresetCustom")}</option>
+                      {OMNI_PROVIDER_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
                   <Field label={t("usage.baseUrlLabel")} className="md:col-span-2">
                     <input
                       value={baseUrl}

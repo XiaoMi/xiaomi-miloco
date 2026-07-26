@@ -63,6 +63,8 @@
     "addModel": "新增模型",
     "addFormHint": "新增模型配置(同 模型 + Base URL 已存在则更新其 Key)",
     "editFormHint": "编辑模型配置(API Key 留空则沿用原 Key)",
+    "providerPresetLabel": "服务商预设",
+    "providerPresetCustom": "自定义",
     "baseUrlLabel": "Base URL",
     "baseUrlPlaceholder": "如:https://api.xiaomimimo.com/v1",
     "apiKeyLabel": "API Key",
