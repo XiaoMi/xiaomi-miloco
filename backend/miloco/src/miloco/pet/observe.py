@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import logging
 import os
@@ -203,33 +204,26 @@ def _dhash_diverse_topk(
     return out[:k]
 
 
-_pet_reid_singleton: Any = None
-_pet_reid_tried = False
-
-
+@functools.lru_cache(maxsize=1)
 def _get_pet_reid() -> Any:
     """惰性载入人体 ReID（仅用于参考图**多样性**打分，不接 IdentityEngine/gallery/person 表）。
 
-    与本模块检测器同源(get_settings().directories.models_dir，见 det_4C 载入)。载入失败缓存
-    None、不每次重试；模型不可用时上层回退 dHash 多样性。它给的是"外观相似度"，正好当"姿态
-    是否雷同"的距离用——不作身份判定。
+    与本模块检测器同源(get_settings().directories.models_dir，见 det_4C 载入)。lru_cache 保证
+    只尝试一次、载入失败缓存 None 不每次重试；模型不可用时上层回退 dHash 多样性。它给的是"外观
+    相似度"，正好当"姿态是否雷同"的距离用——不作身份判定。
     """
-    global _pet_reid_singleton, _pet_reid_tried
-    if _pet_reid_tried:
-        return _pet_reid_singleton
-    _pet_reid_tried = True
     try:
         from miloco.perception.engine.identity.tracker.human_reid import HumanReID
 
         path = str(get_settings().directories.models_dir / "human_body_reid_v2.onnx")
         inst = HumanReID(model_path=path, use_gpu=False)
-        _pet_reid_singleton = inst if inst.session is not None else None
-        if _pet_reid_singleton is None:
+        if inst.session is None:
             logger.warning("宠物参考图 ReID 初始化失败(session None)，回退 dHash: %s", path)
+            return None
+        return inst
     except Exception:  # noqa: BLE001 - 任意失败都回退 dHash，绝不影响注册
         logger.warning("宠物参考图 ReID 载入异常，回退 dHash", exc_info=True)
-        _pet_reid_singleton = None
-    return _pet_reid_singleton
+        return None
 
 
 def _reid_diverse_topk(
