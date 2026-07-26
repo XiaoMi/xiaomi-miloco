@@ -20,6 +20,21 @@ describe("omni provider presets", () => {
     );
   });
 
+  it("normalizes preset definitions before matching", () => {
+    const preset = {
+      id: "trailing-slash",
+      name: "Trailing slash",
+      baseUrl: "https://example.com/v1/",
+      model: "example/model",
+    };
+    OMNI_PROVIDER_PRESETS.push(preset);
+    try {
+      expect(findOmniProviderPreset("https://example.com/v1")).toBe(preset);
+    } finally {
+      OMNI_PROVIDER_PRESETS.pop();
+    }
+  });
+
   it("keeps unknown settings custom", () => {
     expect(findOmniProviderPreset("https://example.com/v1")).toBeUndefined();
   });

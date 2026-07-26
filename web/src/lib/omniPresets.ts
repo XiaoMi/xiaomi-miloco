@@ -23,8 +23,9 @@ export const OMNI_PROVIDER_PRESETS: OmniProviderPreset[] = [
 export function findOmniProviderPreset(
   baseUrl: string,
 ): OmniProviderPreset | undefined {
-  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+  const normalizeBaseUrl = (url: string) => url.trim().replace(/\/+$/, "");
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   return OMNI_PROVIDER_PRESETS.find(
-    (preset) => preset.baseUrl === normalizedBaseUrl,
+    (preset) => normalizeBaseUrl(preset.baseUrl) === normalizedBaseUrl,
   );
 }
