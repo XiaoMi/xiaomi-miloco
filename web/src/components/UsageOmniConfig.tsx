@@ -242,6 +242,7 @@ export function UsageOmniConfig() {
     setModelsErr(false);
     setModelsErrCode(null);
     setTestResult(null);
+    if (preset?.baseUrl) void fetchModels(preset.baseUrl, apiKey, editing);
   }
 
   function startAdd() {
