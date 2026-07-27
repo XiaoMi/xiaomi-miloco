@@ -22,10 +22,11 @@ export const OMNI_PROVIDER_PRESETS: OmniProviderPreset[] = [
 
 export function findOmniProviderPreset(
   baseUrl: string,
+  presets: readonly OmniProviderPreset[] = OMNI_PROVIDER_PRESETS,
 ): OmniProviderPreset | undefined {
   const normalizeBaseUrl = (url: string) => url.trim().replace(/\/+$/, "");
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
-  return OMNI_PROVIDER_PRESETS.find(
+  return presets.find(
     (preset) => normalizeBaseUrl(preset.baseUrl) === normalizedBaseUrl,
   );
 }

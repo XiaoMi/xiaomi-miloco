@@ -27,12 +27,9 @@ describe("omni provider presets", () => {
       baseUrl: "https://example.com/v1/",
       model: "example/model",
     };
-    OMNI_PROVIDER_PRESETS.push(preset);
-    try {
-      expect(findOmniProviderPreset("https://example.com/v1")).toBe(preset);
-    } finally {
-      OMNI_PROVIDER_PRESETS.pop();
-    }
+    expect(findOmniProviderPreset("https://example.com/v1", [preset])).toBe(
+      preset,
+    );
   });
 
   it("keeps unknown settings custom", () => {
