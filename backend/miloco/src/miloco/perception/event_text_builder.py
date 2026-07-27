@@ -181,7 +181,10 @@ def build_matched_rules_text(
     blocks: list[str] = []
     for r in matched_rules:
         name = (rule_names or {}).get(r.rule_id) or r.rule_name or r.rule_id
-        rule_label = _strip_task_prefix(name)
+        # 先折叠再 strip：name 若被 PATCH 成空白起头（" [task_id] 名" / "\n[task_id] 名"），
+        # _strip_task_prefix 的 `^\[` 锚点会匹配不上、漏删前缀 → task_id 泄漏 + 双括号。
+        # 折叠掉首部空白后 `^\[` 才对齐。
+        rule_label = _strip_task_prefix(_oneline(name))
         query = (rule_queries or {}).get(r.rule_id, "")
         task_desc = (task_descs or {}).get(r.rule_id, "")
         blocks.append(_fmt_matched_rule(r, task_desc, rule_label, query))

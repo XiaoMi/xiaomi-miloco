@@ -203,6 +203,14 @@ class TestBuildMatchedRulesText:
         assert "规则：[厨房安全]" in text
         assert "kitchen_safety" not in text
 
+    def test_rule_name_leading_whitespace_prefix_still_stripped(self):
+        """rule.name 被 PATCH 成空白起头 → 先折叠再 strip，[task_id] 不泄漏、无双括号。"""
+        for name in ("  [kitchen] 明火", "\n[kitchen] 明火", "\t[kitchen] 明火"):
+            r = MatchedRule(rule_id="rule-001", reason="x")
+            text = build_matched_rules_text([r], rule_names={"rule-001": name})
+            assert "规则：[明火]" in text, name
+            assert "kitchen" not in text, name
+
     def test_rule_name_chinese_bracket_prefix_not_stripped(self):
         """规则名以中文方括号 token 起头（非 ascii task_id 前缀）→ 不被误吞
         （strip 收窄为 ascii，与前端同口径）。"""
