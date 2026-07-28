@@ -9,6 +9,8 @@
 - 去抖保护：短时间内连续切换受 ``_min_switch_interval`` 限制
 - 每次 ``get_active()`` / failover 时动态从 settings 读取 provider 列表，
   确保 web 改 fallback 无需重启即可生效
+- active provider 按 label 身份追踪而非位置下标：管理员在故障期间拖拽重排
+  omni_fallbacks 不会导致静默错指到另一个 provider
 
 线程模型：
 - CB listener 回调可能来自任意线程（感知循环或 inference worker）
@@ -75,14 +77,27 @@ class OmniProviderPool:
       完整 OmniModelSettings；label 不存在于 profiles 中时自动跳过并告警。
     """
 
-    def __init__(self, main_loop: asyncio.AbstractEventLoop) -> None:
-        from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+    def __init__(
+        self,
+        main_loop: asyncio.AbstractEventLoop,
+        *,
+        min_switch_interval_sec: float = _MIN_SWITCH_INTERVAL_SEC,
+        recovery_probe_interval_sec: float = _RECOVERY_PROBE_INTERVAL_SEC,
+    ) -> None:
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
 
         self._loop = main_loop
         self._lock = threading.RLock()
 
-        # 运行时状态（provider 配置在每次 get_active / failover 时动态从 settings 读取）
-        self._active_index = 0  # 0 = primary, >=1 = fallbacks[idx-1]
+        # 可注入的时间常量（测试可设为 0 避免真实等待）
+        self._min_switch_interval_sec = min_switch_interval_sec
+        self._recovery_probe_interval_sec = recovery_probe_interval_sec
+
+        # 运行时状态：按 label 身份追踪 active provider（None = primary）
+        # 使用 label 而非位置下标，因为 omni_fallbacks 列表可能在运行时被修改
+        self._active_label: str | None = None
         self._failed_keys: set[str] = set()
         self._last_switch_monotonic: float = 0.0
 
@@ -108,34 +123,31 @@ class OmniProviderPool:
 
         每次调用时从 settings 动态读取 provider 列表，确保 web 改 fallback
         无需重启即可在下一推理周期生效。
+
+        按 label 身份追踪 active provider，而非位置下标——这样即使管理员在
+        故障期间拖拽重排 omni_fallbacks，也不会静默错指到另一个 provider。
         """
         with self._lock:
-            primary, fallbacks = self._resolve_providers_unlocked()
-            if self._active_index == 0:
-                return primary
-            idx = self._active_index - 1
-            if idx < len(fallbacks):
-                return fallbacks[idx]
-            # 兜底：如果 fallbacks 被删光了还指向了越界索引，回退 primary
-            logger.warning(
-                "[provider-pool] active_index=%d 越界（fallbacks 共 %d），回退 primary",
-                self._active_index,
-                len(fallbacks),
-            )
-            self._active_index = 0
-            return primary
+            return self._get_active_unlocked()
 
     def snapshot(self) -> PoolSnapshot:
         """返回池当前状态快照（供 admin API）。"""
         with self._lock:
             active = self._get_active_unlocked()
             _, fallbacks = self._resolve_providers_unlocked()
+            # 从 label 反查 active_index（兼容 admin API 快照字段）
+            active_index: int = 0
+            if self._active_label is not None:
+                for i, fb in enumerate(fallbacks):
+                    if fb.label == self._active_label:
+                        active_index = i + 1
+                        break
             return PoolSnapshot(
                 active_label=active.label,
                 active_model=active.model,
                 active_base_url=active.base_url,
-                active_is_primary=(self._active_index == 0),
-                active_index=self._active_index,
+                active_is_primary=(self._active_label is None),
+                active_index=active_index,
                 fallback_count=len(fallbacks),
                 failed_keys=sorted(self._failed_keys),
                 last_switch_at_ms=(
@@ -165,7 +177,8 @@ class OmniProviderPool:
         try:
             await self._recovery_task
         except asyncio.CancelledError:
-            pass
+            # cancel() 后 await task 会抛出 CancelledError，这是正常的停止流程。
+            logger.debug("[provider-pool] 恢复循环已取消")
         self._recovery_task = None
         logger.info("[provider-pool] 恢复循环已停止")
 
@@ -213,13 +226,24 @@ class OmniProviderPool:
         return primary, fallbacks
 
     def _get_active_unlocked(self) -> OmniModelSettings:
-        """获取 active provider（调用方已持锁）。"""
+        """获取 active provider（调用方已持锁）。
+
+        按 label 身份追踪：_active_label 为 None → primary，
+        否则在 fallbacks 中按 label 匹配。若 label 已不存在于列表中
+        （被管理员删除/改名），则回退 primary。
+        """
         primary, fallbacks = self._resolve_providers_unlocked()
-        if self._active_index == 0:
+        if self._active_label is None:
             return primary
-        idx = self._active_index - 1
-        if idx < len(fallbacks):
-            return fallbacks[idx]
+        for fb in fallbacks:
+            if fb.label == self._active_label:
+                return fb
+        # 当前 active label 已不在 fallback 列表中 → 回退 primary
+        logger.warning(
+            "[provider-pool] active label '%s' 已不在 fallbacks，回退 primary",
+            self._active_label,
+        )
+        self._active_label = None
         return primary
 
     async def _try_failover(self) -> bool:
@@ -240,10 +264,10 @@ class OmniProviderPool:
         with self._lock:
             # 去抖：限制切换频率
             now = time.monotonic()
-            if now - self._last_switch_monotonic < _MIN_SWITCH_INTERVAL_SEC:
+            if now - self._last_switch_monotonic < self._min_switch_interval_sec:
                 logger.debug(
                     "[provider-pool] 距上次切换不足 %.0fs，跳过 failover",
-                    _MIN_SWITCH_INTERVAL_SEC,
+                    self._min_switch_interval_sec,
                 )
                 return False
 
@@ -256,6 +280,7 @@ class OmniProviderPool:
             current = self._get_active_unlocked()
             current_key = _provider_key(current)
             self._failed_keys.add(current_key)
+            self._active_label = None  # 当前已 failed，状态重置待重新分配
             logger.info(
                 "[provider-pool] 当前 provider %s 已标记 failed",
                 current_key,
@@ -265,14 +290,13 @@ class OmniProviderPool:
             _primary, fallbacks = self._resolve_providers_unlocked()
 
             # 查找下一个健康备选
-            new_index: int | None = None
-            for i, fb in enumerate(fallbacks):
-                idx = i + 1  # fallback 索引 = 列表索引 + 1（0 是 primary）
+            selected_label: str | None = None
+            for fb in fallbacks:
                 if _provider_key(fb) not in self._failed_keys and fb.api_key:
-                    new_index = idx
+                    selected_label = fb.label
                     break
 
-            if new_index is None:
+            if selected_label is None:
                 # 所有备选都不可用 → 池耗尽
                 logger.error(
                     "[provider-pool] 所有 provider 已耗尽（failed=%s），感知引擎暂停",
@@ -282,13 +306,13 @@ class OmniProviderPool:
                 return False
 
             # 切换到新 provider
-            self._active_index = new_index
-            new_active = fallbacks[new_index - 1]
+            self._active_label = selected_label
+            new_active = self._get_active_unlocked()
             logger.warning(
-                "[provider-pool] failover: %s → %s (index=%d)",
+                "[provider-pool] failover: %s → %s (label=%s)",
                 current_key,
                 _provider_key(new_active),
-                new_index,
+                selected_label,
             )
             self._last_switch_monotonic = now
 
@@ -304,9 +328,6 @@ class OmniProviderPool:
         - fallback 恢复 → 从 failed 集中移除（后续可再被选中）
         """
         from miloco.perception.engine.omni import probe as _probe
-        from miloco.perception.engine.omni.circuit_breaker import (
-            get_omni_circuit_breaker,
-        )
 
         # 收集需要探测的 provider
         with self._lock:
@@ -365,11 +386,11 @@ class OmniProviderPool:
         )
 
         with self._lock:
-            if self._active_index == 0:
+            if self._active_label is None:
                 # 已经在 primary，无需切换
                 return
             old = self._get_active_unlocked()
-            self._active_index = 0
+            self._active_label = None
             logger.info(
                 "[provider-pool] 自动切回 primary: %s → %s",
                 _provider_key(old),
@@ -394,7 +415,7 @@ class OmniProviderPool:
                 try:
                     await asyncio.wait_for(
                         self._failover_event.wait(),
-                        timeout=_RECOVERY_PROBE_INTERVAL_SEC,
+                        timeout=self._recovery_probe_interval_sec,
                     )
                     # failover 事件触发
                     self._failover_event.clear()
@@ -422,11 +443,20 @@ class OmniProviderPool:
 _POOL: OmniProviderPool | None = None
 
 
-def init_pool(loop: asyncio.AbstractEventLoop) -> OmniProviderPool:
+def init_pool(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    min_switch_interval_sec: float = _MIN_SWITCH_INTERVAL_SEC,
+    recovery_probe_interval_sec: float = _RECOVERY_PROBE_INTERVAL_SEC,
+) -> OmniProviderPool:
     """初始化 provider pool（感知模块启动时调用一次）。幂等：重复调用返回已有实例。"""
     global _POOL
     if _POOL is None:
-        _POOL = OmniProviderPool(loop)
+        _POOL = OmniProviderPool(
+            loop,
+            min_switch_interval_sec=min_switch_interval_sec,
+            recovery_probe_interval_sec=recovery_probe_interval_sec,
+        )
     return _POOL
 
 

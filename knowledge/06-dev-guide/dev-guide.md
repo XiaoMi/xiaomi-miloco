@@ -77,21 +77,21 @@ cd backend && uv run task dev
 
 ### 配置分段与用途
 
-| 配置段        | 控制什么                                                                                                                                            |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server`      | 后端监听 host/port、访问 Bearer token、启动用 Python 路径、日志级别                                                                                 |
-| `agent`       | OpenClaw webhook 地址和认证凭据                                                                                                                     |
+| 配置段                 | 控制什么                                                                                                                                            |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server`               | 后端监听 host/port、访问 Bearer token、启动用 Python 路径、日志级别                                                                                 |
+| `agent`                | OpenClaw webhook 地址和认证凭据                                                                                                                     |
 | `model.omni`           | 多模态模型的 API Key、Base URL、模型标识；**感知必填项**                                                                                            |
-| `model.omni_fallbacks` | 备选 provider 的 label 列表（按优先级排序），主 provider 熔断时自动 failover；label 必须存在于 `omni_profiles` 中，修改后**无需重启**                 |
-| `model.omni_profiles`  | 存档的 omni 配置档案列表（label 唯一标识），供快速切换模型 + 作为 fallback 的来源池                                                                   |
-| `directories` | 工作目录（`storage`）、ONNX 模型目录；派生路径（log_dir / snapshot_dir 等）由此计算                                                                 |
-| `database`    | SQLite 连接参数                                                                                                                                     |
-| `miot`        | 小米云区域（`cn/de/i2/ru/sg/us`）                                                                                                                   |
-| `camera`      | 摄像头采集帧间隔和缓冲大小                                                                                                                          |
-| `rule`        | 规则日志保留天数；duration 窗口触发比例默认值                                                                                                       |
-| `perception`  | 感知日志 TTL、事件截图 TTL + 磁盘配额；子段：`perception.collect`（采集窗口）、`perception.engine`（识别 / VLM 等引擎子参数）、tier_u dump 调试开关 |
-| `perf`        | 可观测性总开关（`enabled`）、各表/文件保留天数；关闭后 observability.db 不建                                                                        |
-| `dispatcher`  | Agent 事件队列上限、单 turn 等待超时                                                                                                                |
+| `model.omni_fallbacks` | 备选 provider 的 label 列表（按优先级排序），主 provider 熔断时自动 failover；label 必须存在于 `omni_profiles` 中，修改后**无需重启**               |
+| `model.omni_profiles`  | 存档的 omni 配置档案列表（label 唯一标识），供快速切换模型 + 作为 fallback 的来源池                                                                 |
+| `directories`          | 工作目录（`storage`）、ONNX 模型目录；派生路径（log_dir / snapshot_dir 等）由此计算                                                                 |
+| `database`             | SQLite 连接参数                                                                                                                                     |
+| `miot`                 | 小米云区域（`cn/de/i2/ru/sg/us`）                                                                                                                   |
+| `camera`               | 摄像头采集帧间隔和缓冲大小                                                                                                                          |
+| `rule`                 | 规则日志保留天数；duration 窗口触发比例默认值                                                                                                       |
+| `perception`           | 感知日志 TTL、事件截图 TTL + 磁盘配额；子段：`perception.collect`（采集窗口）、`perception.engine`（识别 / VLM 等引擎子参数）、tier_u dump 调试开关 |
+| `perf`                 | 可观测性总开关（`enabled`）、各表/文件保留天数；关闭后 observability.db 不建                                                                        |
+| `dispatcher`           | Agent 事件队列上限、单 turn 等待超时                                                                                                                |
 
 ### 用户最常修改的配置项
 
