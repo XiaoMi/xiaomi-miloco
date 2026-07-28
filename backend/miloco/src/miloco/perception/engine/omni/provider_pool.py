@@ -171,16 +171,21 @@ class OmniProviderPool:
 
     async def stop(self) -> None:
         """停止后台恢复探测循环。幂等。"""
-        if self._recovery_task is None or self._recovery_task.done():
+        task = self._recovery_task
+        if task is None or task.done():
             return
-        self._recovery_task.cancel()
+
+        task.cancel()
         try:
-            await self._recovery_task
+            await task
         except asyncio.CancelledError:
-            # cancel() 后 await task 会抛出 CancelledError，这是正常的停止流程。
-            logger.debug("[provider-pool] 恢复循环已取消")
-        self._recovery_task = None
-        logger.info("[provider-pool] 恢复循环已停止")
+            pass  # cancel() 后的预期结果
+        except Exception:
+            logger.warning("[provider-pool] 恢复循环关闭时遇到未预期异常", exc_info=True)
+        finally:
+            if self._recovery_task is task:
+                self._recovery_task = None
+            logger.info("[provider-pool] 恢复循环已停止")
 
     # ── CB listener ───────────────────────────────────────────────────────
 
@@ -404,28 +409,29 @@ class OmniProviderPool:
     async def _recovery_loop(self) -> None:
         """后台恢复循环：监听 failover 事件 + 定期探测 failed provider。
 
-        两种触发方式：
-        1. CB 状态变化 → ``_failover_event`` 被 set → 立即尝试 failover
-        2. 定时器到期 → 探测所有 failed provider 是否恢复
+        每轮无条件尝试 failover（_try_failover 内部已自带 CB-ok 短路 + 去抖门控，
+        健康时是 no-op）。这样做是为了处理以下场景：备选 provider 因 CONFIG 错误
+        导致 CB 进入 OPEN_CONFIG，自此事件不再重发；若上一次 failover 被去抖跳过，
+        恢复循环再无机会重试，感知会「钉死」在坏 provider 上。每轮都调 _try_failover
+        保证无论事件触达与否，去抖窗口过后下一超时自然推进。
         """
         logger.info("[provider-pool] 恢复循环启动")
         while True:
             try:
-                # 等待 failover 事件或超时
                 try:
                     await asyncio.wait_for(
                         self._failover_event.wait(),
                         timeout=self._recovery_probe_interval_sec,
                     )
-                    # failover 事件触发
                     self._failover_event.clear()
-                    await self._try_failover()
                 except asyncio.TimeoutError:
-                    # 定时探测周期到
                     pass
 
-                # 探测 failed provider 是否恢复
+                # 每轮无条件尝试 failover：事件已触发或定时到达都可能推进
+                await self._try_failover()
                 await self._probe_failed_providers()
+                # 让出当前时间片，避免 interval=0 时在同一 tick 内高频空转
+                await asyncio.sleep(0)
 
             except asyncio.CancelledError:
                 logger.info("[provider-pool] 恢复循环被取消")
@@ -434,7 +440,6 @@ class OmniProviderPool:
                 logger.error(
                     "[provider-pool] 恢复循环异常", exc_info=True
                 )
-                # 异常后短暂休眠，防止错误风暴
                 await asyncio.sleep(5.0)
 
 
