@@ -369,12 +369,12 @@ def test_resolve_skips_missing_label(loop, monkeypatch):
 # ── test: start/stop 生命周期 ──────────────────────────────────────────────────
 
 
-async def test_start_idempotent(loop, monkeypatch):
+async def test_start_idempotent(monkeypatch):
     """重复调用 start() 不创建多余后台 task。"""
     primary = _omni(label="p", model="primary-model")
     _mock_settings(primary, [], [], monkeypatch)
 
-    pool = _build_pool(loop)
+    pool = _build_pool(asyncio.get_running_loop())
     await pool.start()
     assert pool._recovery_task is not None
     task1 = pool._recovery_task
@@ -386,12 +386,12 @@ async def test_start_idempotent(loop, monkeypatch):
     await pool.stop()
 
 
-async def test_stop_idempotent_and_cleans_up(loop, monkeypatch):
+async def test_stop_idempotent_and_cleans_up(monkeypatch):
     """stop() 幂等：已停止时 no-op；正常停止后 _recovery_task 置 None。"""
     primary = _omni(label="p", model="primary-model")
     _mock_settings(primary, [], [], monkeypatch)
 
-    pool = _build_pool(loop)
+    pool = _build_pool(asyncio.get_running_loop())
     await pool.start()
     await pool.stop()
     assert pool._recovery_task is None
@@ -493,6 +493,53 @@ async def test_switch_back_to_primary_when_already_primary(loop, monkeypatch):
     await pool._switch_back_to_primary()
     assert pool._active_label is None
     assert pool.get_active().model == "primary-model"
+
+
+# ── test: 恢复循环超时分支推进 failover（OPEN_CONFIG 钉死修复） ──────────────
+
+
+async def test_recovery_loop_failover_on_timeout(monkeypatch):
+    """恢复循环超时分支也能推进 failover，不依赖事件重发。
+
+    OPEN_CONFIG 下 failover 事件不再重发，去抖窗口内被跳过的 failover
+    会在下一超时被重试，确保健康备选最终被尝试（而非「钉死」在坏 provider 上）。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")  # 模拟 key 配错，会触发 CONFIG
+    fb_b = _omni(label="b", model="fb-b-model")  # 健康的备选
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = OmniProviderPool(asyncio.get_running_loop(), min_switch_interval_sec=0.0, recovery_probe_interval_sec=0.0)
+
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 第一步：primary 熔断 → failover 切到 A
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    assert await pool._try_failover()
+    assert pool.get_active().label == "a"
+    assert cb.snapshot().state == "ok"
+
+    # 第二步：A 的 key 配错 → CB 进 OPEN_CONFIG，_on_cb_change 设了 event
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    assert cb.snapshot().state == "error"
+
+    # 清除事件，模拟「事件已被消费但 failover 未成功」的场景 → 走超时分支
+    pool._failover_event.clear()
+
+    # 启动恢复循环（recovery_probe_interval_sec=0 → wait_for 立即超时）
+    await pool.start()
+    await asyncio.sleep(0.05)  # 给循环时间跑完至少一轮
+    await pool.stop()
+
+    # 超时分支应已调 _try_failover，切到健康备选 B
+    assert pool.get_active().label == "b"
+    assert _provider_key(fb_a) in pool._failed_keys
 
 
 def test_init_pool_creates_and_is_idempotent(loop, monkeypatch):
