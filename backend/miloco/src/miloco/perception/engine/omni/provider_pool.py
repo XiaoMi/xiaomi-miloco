@@ -24,6 +24,7 @@ import asyncio
 import logging
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -53,11 +54,11 @@ class PoolSnapshot:
     active_label: str
     active_model: str
     active_base_url: str
-    active_is_primary: bool  # 当前 active 是否是主 provider
+    active_is_primary: bool
     active_index: int  # 0 = primary, >=1 = fallback index
-    fallback_count: int  # 配置的备选 provider 总数
-    failed_keys: list[str]  # 当前标记为 failed 的 provider keys
-    last_switch_at_ms: int | None  # 上次切换的 monotonic 时间戳 (ms)
+    fallback_count: int
+    failed_keys: list[str]
+    last_switch_at_ms: int | None
     recovery_loop_running: bool
 
 
@@ -179,7 +180,7 @@ class OmniProviderPool:
         try:
             await task
         except asyncio.CancelledError:
-            pass  # cancel() 后的预期结果
+            pass # cancel() 后的预期结果
         except Exception:
             logger.warning("[provider-pool] 恢复循环关闭时遇到未预期异常", exc_info=True)
         finally:
@@ -196,7 +197,6 @@ class OmniProviderPool:
         """
         if snap.state == "ok":
             return
-        # call_soon_threadsafe 是线程安全的，即使当前在 inference worker 线程也能安全投递
         try:
             self._loop.call_soon_threadsafe(self._failover_event.set)
         except RuntimeError:
@@ -243,7 +243,6 @@ class OmniProviderPool:
         for fb in fallbacks:
             if fb.label == self._active_label:
                 return fb
-        # 当前 active label 已不在 fallback 列表中 → 回退 primary
         logger.warning(
             "[provider-pool] active label '%s' 已不在 fallbacks，回退 primary",
             self._active_label,
@@ -334,18 +333,14 @@ class OmniProviderPool:
         """
         from miloco.perception.engine.omni import probe as _probe
 
-        # 收集需要探测的 provider
         with self._lock:
             if not self._failed_keys:
                 return
             primary, fallbacks = self._resolve_providers_unlocked()
-            # 收集当前 failed 的 provider 信息（快照）
             to_probe: list[tuple[str, OmniModelSettings, bool]] = []
-            # primary
             pk = _provider_key(primary)
             if pk in self._failed_keys:
                 to_probe.append((pk, primary, True))
-            # fallbacks
             for fb in fallbacks:
                 fk = _provider_key(fb)
                 if fk in self._failed_keys:
@@ -375,7 +370,6 @@ class OmniProviderPool:
                 if is_primary:
                     primary_recovered = True
 
-        # 更新 failed 集合
         if recovered_keys:
             with self._lock:
                 self._failed_keys -= recovered_keys
@@ -403,7 +397,6 @@ class OmniProviderPool:
             )
             self._last_switch_monotonic = time.monotonic()
 
-        # 重置 CB 到 CLOSED
         await get_omni_circuit_breaker().reset_on_config_change()
 
     async def _recovery_loop(self) -> None:
@@ -418,14 +411,12 @@ class OmniProviderPool:
         logger.info("[provider-pool] 恢复循环启动")
         while True:
             try:
-                try:
+                with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(
                         self._failover_event.wait(),
                         timeout=self._recovery_probe_interval_sec,
                     )
                     self._failover_event.clear()
-                except asyncio.TimeoutError:
-                    pass
 
                 # 每轮无条件尝试 failover：事件已触发或定时到达都可能推进
                 await self._try_failover()

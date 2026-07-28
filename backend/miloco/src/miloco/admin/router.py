@@ -1034,7 +1034,7 @@ def put_omni_fallbacks(
     if skipped:
         logger = logging.getLogger(__name__)
         logger.warning(
-            "omni_fallbacks 中包含不存在的 label，已过滤: %s", skipped
+            "omni_fallbacks 中包含不存在的 label，已过滤: %r", skipped
         )
     update_shared_config(model={"omni_fallbacks": filtered})
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
