@@ -496,6 +496,51 @@ async def test_switch_back_to_primary_when_already_primary(loop, monkeypatch):
     assert pool.get_active().model == "primary-model"
 
 
+async def test_switch_back_on_pool_exhausted_primary_recovery(loop, monkeypatch):
+    """池耗尽后 primary 恢复：_switch_back_to_primary 必须 reset CB。
+
+    P+A 全 CONFIG 熔断 → 池耗尽（_active_label=None, CB OPEN_CONFIG）。
+    P 恢复后 _probe_failed_providers 调 _switch_back_to_primary，CB 必须
+    被 reset 回 CLOSED，否则感知永久暂停。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造池耗尽态：_active_label=None, CB OPEN_CONFIG, primary 在 failed_keys
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+        )
+    assert cb.snapshot().state == "error"
+    pool._active_label = None
+    pool._failed_keys.add(_provider_key(primary))
+
+    # mock probe：primary 恢复
+    async def _mock_probe(model, base_url, api_key):
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # primary 从 failed 移除，CB 被 reset 回 ok
+    assert _provider_key(primary) not in pool._failed_keys
+    assert cb.snapshot().state == "ok"
+    assert pool.get_active().model == "primary-model"
+
+
 # ── test: 恢复循环超时分支推进 failover（OPEN_CONFIG 钉死修复） ──────────────
 
 
