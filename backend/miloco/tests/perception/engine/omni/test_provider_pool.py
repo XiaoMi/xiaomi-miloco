@@ -342,12 +342,13 @@ def test_snapshot_reflects_runtime_state(loop, monkeypatch):
     pool._active_label = "a"
     pool._failed_keys.add(_provider_key(primary))
     pool._last_switch_monotonic = 1234.567
+    pool._last_switch_wall_ms = 1  # 任意非 None epoch ms，仅用于验证 snapshot 透传
     snap2 = pool.snapshot()
     assert not snap2.active_is_primary
     assert snap2.active_index == 1
     assert snap2.active_model == "fb-a-model"
     assert snap2.failed_keys == [_provider_key(primary)]
-    assert snap2.last_switch_at_ms == 1234567  # monotonic * 1000
+    assert snap2.last_switch_at_ms == 1
     assert snap2.fallback_count == 2
 
 
