@@ -122,7 +122,7 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 配置方式：通过 web「模型」页的 fallback 面板拖拽管理，或直接在 `config.json` 中设置 `model.omni_fallbacks`（label 列表，每个 label 必须是 `omni_profiles` 中已存档的档案名）。
 
-生命周期：`init_pool(loop)` 在感知模块启动时调用，`start()` 启动后台恢复循环，`stop()` 在 runner 关闭时调用。Admin API 可通过 `GET /omni-config` 返回的 `pool` 字段查看运行时快照（当前 active provider、failed 集合等），`PUT /omni-config/fallbacks` 保存 fallback 列表。
+生命周期：`init_pool(loop)` 在感知模块启动时调用，`start()` 启动后台恢复循环，`stop()` 仅在进程 shutdown（main.py lifespan 收尾）时调用一次，不随 runner 停启（池是进程级单例）。Admin API 可通过 `GET /omni-config` 返回的 `pool` 字段查看运行时快照（当前 active provider、failed 集合等），`PUT /omni-config/fallbacks` 保存 fallback 列表。
 
 **两种 route 语义**：Omni 层根据当前窗口是否有视觉变化选择 video 或 audio 路由。audio route 仅发送音频（无视频），省去视觉相关输出字段，降低 token 消耗。
 

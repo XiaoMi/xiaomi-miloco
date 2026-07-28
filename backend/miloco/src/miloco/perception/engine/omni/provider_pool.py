@@ -67,8 +67,9 @@ class OmniProviderPool:
 
     生命周期：
     - ``init_pool(loop)`` 创建并存储模块级实例
-    - ``start()`` 启动后台恢复循环
-    - ``stop()`` 停止恢复循环（runner 关闭时调用）
+    - ``start()`` 启动后台恢复循环（``init_perception_module`` 中调一次）
+    - ``stop()`` 停止恢复循环（仅在进程 shutdown，main.py lifespan 收尾时调一次；
+      不在 runner.stop() 中调——池是进程级单例，不绑定单代 runner 生命周期）
     - ``get_pool()`` 获取模块级单例（None = 未初始化）
 
     Provider 配置动态解析：
@@ -101,6 +102,7 @@ class OmniProviderPool:
         self._active_label: str | None = None
         self._failed_keys: set[str] = set()
         self._last_switch_monotonic: float = 0.0
+        self._last_switch_wall_ms: int | None = None  # time.time() epoch ms，对外暴露
 
         # 恢复循环控制
         self._recovery_task: asyncio.Task | None = None
@@ -151,11 +153,7 @@ class OmniProviderPool:
                 active_index=active_index,
                 fallback_count=len(fallbacks),
                 failed_keys=sorted(self._failed_keys),
-                last_switch_at_ms=(
-                    int(self._last_switch_monotonic * 1000)
-                    if self._last_switch_monotonic > 0
-                    else None
-                ),
+                last_switch_at_ms=self._last_switch_wall_ms,
                 recovery_loop_running=(
                     self._recovery_task is not None
                     and not self._recovery_task.done()
@@ -307,6 +305,7 @@ class OmniProviderPool:
                     self._failed_keys,
                 )
                 self._last_switch_monotonic = now
+                self._last_switch_wall_ms = int(time.time() * 1000)
                 return False
 
             # 切换到新 provider
@@ -319,6 +318,7 @@ class OmniProviderPool:
                 selected_label,
             )
             self._last_switch_monotonic = now
+            self._last_switch_wall_ms = int(time.time() * 1000)
 
         # 锁外 reset CB（reset_on_config_change 是 async，不能在锁内 await）
         # 新 provider 从头开始，CLOSED 状态
@@ -396,6 +396,7 @@ class OmniProviderPool:
                 _provider_key(self._get_active_unlocked()),
             )
             self._last_switch_monotonic = time.monotonic()
+            self._last_switch_wall_ms = int(time.time() * 1000)
 
         await get_omni_circuit_breaker().reset_on_config_change()
 
