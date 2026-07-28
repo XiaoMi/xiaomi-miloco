@@ -465,6 +465,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.error("Failed to stop perception engine: %s", e)
 
+    # 停止 provider pool 后台恢复循环（与 init_perception_module 中的 pool.start() 对称）。
+    # pool 是进程级单例，故只在 lifespan shutdown 时停一次，不在 runner.stop() 中停。
+    from miloco.perception.engine.omni.provider_pool import get_pool
+
+    pool = get_pool()
+    if pool is not None:
+        await pool.stop()
+
     # dispatcher 在 perception(producer)之后、poller(消费 track_agent_run)之前停,
     # 续上"生产者先于消费者"链路:producer → dispatcher → poller → metrics_client。
     if hasattr(_app.state, "dispatcher"):
