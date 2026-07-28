@@ -384,21 +384,26 @@ class OmniProviderPool:
             get_omni_circuit_breaker,
         )
 
+        cb = get_omni_circuit_breaker()
         with self._lock:
             if self._active_label is None:
-                # 已经在 primary，无需切换
-                return
-            old = self._get_active_unlocked()
-            self._active_label = None
-            logger.info(
-                "[provider-pool] 自动切回 primary: %s → %s",
-                _provider_key(old),
-                _provider_key(self._get_active_unlocked()),
-            )
-            self._last_switch_monotonic = time.monotonic()
-            self._last_switch_wall_ms = int(time.time() * 1000)
+                # 池耗尽后 primary 恢复：active 已指向 primary，但 CB 仍 OPEN，
+                # 必须 reset 让感知恢复，否则永久暂停。
+                need_reset = cb.snapshot().state != "ok"
+            else:
+                old = self._get_active_unlocked()
+                self._active_label = None
+                logger.info(
+                    "[provider-pool] 自动切回 primary: %s → %s",
+                    _provider_key(old),
+                    _provider_key(self._get_active_unlocked()),
+                )
+                self._last_switch_monotonic = time.monotonic()
+                self._last_switch_wall_ms = int(time.time() * 1000)
+                need_reset = True
 
-        await get_omni_circuit_breaker().reset_on_config_change()
+        if need_reset:
+            await cb.reset_on_config_change()
 
     async def _recovery_loop(self) -> None:
         """后台恢复循环：监听 failover 事件 + 定期探测 failed provider。
