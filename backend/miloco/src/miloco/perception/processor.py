@@ -82,7 +82,7 @@ def _resolve_active_omni_for_probe():
         if pool is not None:
             return pool.get_active()
     except Exception:
-        pass
+        logger.warning("[processor] ProviderPool 不可用，回退到 settings 主配置", exc_info=True)
     from miloco.config import get_settings
 
     return get_settings().model.omni
@@ -100,7 +100,6 @@ async def _run_omni_probe() -> None:
     上,位就残留了。finally 无条件清位保证下次 tick 还能再 arm(状态不动,如果
     task 已跑到 record_probe_result 位早就清了,再清一次也是 no-op)。
     """
-    from miloco.config import get_settings
     from miloco.perception.engine.omni import probe as _probe
     from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
     from miloco.perception.engine.omni.error_classifier import (

@@ -113,6 +113,7 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 设计动机：Omni 云 API 可能出现间歇性不可用（限流、服务降级、配额耗尽）。单 provider 场景下，一旦熔断器打开，感知引擎即暂停直到手动恢复——家庭 AI 沉默期间，可能错过重要事件。Provider Pool 通过在 `omni_profiles` 中预先配置多个 provider（如 MiMo 主 + 本地 LLM 备 + 千问备），自动完成故障转移和恢复切回。
 
 核心行为：
+
 - **自动 failover**：当主 provider（`model.omni`）熔断器打开（累计失败 ≥ 阈值），按 `omni_fallbacks` 列表顺序依次尝试备选 provider。每次 `get_active()` 调用动态从 settings 读取 provider 列表，**web 上改 fallback 无需重启即生效**。
 - **min_switch_interval 去抖**：两次 failover 之间最小间隔 30s，防止配置错误的多 provider 来回抖动。
 - **全部不可用时暂停**：所有 provider（主 + 全部 fallback）都不可用时，感知引擎暂停（保持最后的 `OPEN_CONFIG` 状态）。
@@ -157,19 +158,19 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 ### 如果我要修改感知相关功能
 
-| 修改目标                                | 去看哪个文件                                                                                 |
-| --------------------------------------- | -------------------------------------------------------------------------------------------- |
-| 修改 Gate 触发阈值                      | `perception/engine/gate/visual_gate.py`（视觉）、`gate/audio_gate.py`（音频）                |
-| 修改 VLM 输出字段定义（schema/说明）    | `perception/engine/omni/field_registry.py`（`FieldSpec` 单一来源）                           |
-| 修改 VLM prompt 组装逻辑                | `perception/engine/omni/prompt_builder.py`                                                   |
-| 修改/新增 VLM provider 适配             | `perception/engine/omni/provider.py`（`get_adapter` 路由 + Adapter 子类）                   |
-| 修改 provider 故障转移策略              | `perception/engine/omni/provider_pool.py`（`OmniProviderPool` failover + 恢复循环）         |
-| 修改 Omni API 调用客户端（HTTP/流式）   | `perception/engine/omni/omni_client.py`（`_build_messages` / `call_omni` / `call_omni_stream`）|
-| 修改家庭档案注入 Omni 的方式            | `perception/engine/omni/home_profile_loader.py`                                              |
-| 修改身份识别逻辑                        | `perception/engine/identity/engine.py`（识别状态机）、`tracking_service.py`（DeepSORT 跟踪） |
-| 修改感知结果后处理（规则上报/事件投递） | `perception/client.py`（`PerceptionEngineProxy`，`handle_realtime_perception_result`）       |
-| 修改感知调度/触发频率                   | `perception/runner.py`；配置在 `settings.yaml::perception.collect`                           |
-| 修改感知 API 端点                       | `perception/router.py`                                                                       |
+| 修改目标                                | 去看哪个文件                                                                                    |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 修改 Gate 触发阈值                      | `perception/engine/gate/visual_gate.py`（视觉）、`gate/audio_gate.py`（音频）                   |
+| 修改 VLM 输出字段定义（schema/说明）    | `perception/engine/omni/field_registry.py`（`FieldSpec` 单一来源）                              |
+| 修改 VLM prompt 组装逻辑                | `perception/engine/omni/prompt_builder.py`                                                      |
+| 修改/新增 VLM provider 适配             | `perception/engine/omni/provider.py`（`get_adapter` 路由 + Adapter 子类）                       |
+| 修改 provider 故障转移策略              | `perception/engine/omni/provider_pool.py`（`OmniProviderPool` failover + 恢复循环）             |
+| 修改 Omni API 调用客户端（HTTP/流式）   | `perception/engine/omni/omni_client.py`（`_build_messages` / `call_omni` / `call_omni_stream`） |
+| 修改家庭档案注入 Omni 的方式            | `perception/engine/omni/home_profile_loader.py`                                                 |
+| 修改身份识别逻辑                        | `perception/engine/identity/engine.py`（识别状态机）、`tracking_service.py`（DeepSORT 跟踪）    |
+| 修改感知结果后处理（规则上报/事件投递） | `perception/client.py`（`PerceptionEngineProxy`，`handle_realtime_perception_result`）          |
+| 修改感知调度/触发频率                   | `perception/runner.py`；配置在 `settings.yaml::perception.collect`                              |
+| 修改感知 API 端点                       | `perception/router.py`                                                                          |
 
 ### 感知相关 API 路径
 

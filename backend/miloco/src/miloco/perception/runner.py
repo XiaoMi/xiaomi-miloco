@@ -145,6 +145,13 @@ class PerceptionRunner:
         # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
         await omni_probe_registry.cancel_inflight()
 
+        # 停止 provider pool 后台恢复循环（取消 _recovery_task）
+        from miloco.perception.engine.omni.provider_pool import get_pool
+
+        pool = get_pool()
+        if pool is not None:
+            await pool.stop()
+
         self._inference_worker.shutdown(wait=False)
 
         # 关闭 perception engine（含 IdentityEngine dispatcher worker 等）

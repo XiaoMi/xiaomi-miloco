@@ -519,10 +519,6 @@ def _full_omni_payload() -> dict:
     m = get_settings().model
     active = m.omni
     fallback_labels: set[str] = set(m.omni_fallbacks)
-    # 保持 fallback 原始顺序
-    fallback_order: dict[str, int] = {
-        label: i for i, label in enumerate(m.omni_fallbacks)
-    }
     profiles = [
         {
             "label": p.label,
@@ -573,7 +569,8 @@ def _full_omni_payload() -> dict:
                 "recovery_loop_running": snap.recovery_loop_running,
             }
     except Exception:
-        pass
+        logger.warning("[omni-config] 获取 ProviderPool 快照失败，pool_snapshot 置为 None", exc_info=True)
+        pool_snapshot = None
 
     return {
         "active": {

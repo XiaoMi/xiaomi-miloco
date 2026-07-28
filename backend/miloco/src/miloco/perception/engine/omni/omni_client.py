@@ -148,7 +148,7 @@ def _get_active_omni_config():
         if pool is not None:
             return pool.get_active()
     except Exception:
-        pass
+        logger.warning("[omni-client] ProviderPool 不可用，回退到 settings 主配置", exc_info=True)
     return get_settings().model.omni
 
 
