@@ -50,7 +50,7 @@
       读事件目录 snapshots/{event_id}/：omni_trace.json.gz、{device_slug}/clip.*、gallery/
       → PII 脱敏（trace 文本 + 事件 text + 用户补充）
       → 写 metadata.json + omni_trace + clips(+可选 gallery) 到
-        $MILOCO_HOME/packs/{时间戳子目录}/feedback-{uid}-{event_id}-{时间戳}.tar.gz
+        $MILOCO_HOME/packs/{时间戳子目录}/feedback-{uid}-{event_id(完整 UUID)}-{时间戳}.tar.gz
       → 按总大小清理旧包
       → 返回 {path, size_bytes, components}
 
@@ -74,6 +74,9 @@
 | `MeaningfulEvent`（反馈相关字段）             | `perception/schema.py`                                  | 事件对外模型新增 `has_feedback` / `feedback_pack_path` / `feedback_pack_size`；`has_trace` 决定前端是否显示入口   |
 | `OmniEventArtifacts` / `save_event_artifacts` | `perception/snapshot_context.py` / `snapshot_writer.py` | 推理侧旁路收集 clip/trace/gallery 并落到事件目录——本模块打包的原料源（属感知流水线，非本模块产出）                |
 | `FeedbackSection`                             | `web/src/components/ActivityFeed.tsx`                   | 反馈面板 UI：错误类别多选、补充文本、画廊开关、已反馈态、飞书问卷链接、打开文件夹                                 |
+| `build_on_demand_feedback_pack`               | `admin/feedback_pack.py`                                | on-demand 查询反馈打包：取日志行 → 读 `snapshots/{log_id}/` artifacts → PII 脱敏 → tar.gz；`clips_missing_basis` 基于 `clip_dids` |
+| `submit_on_demand_feedback`                   | `perception/router.py`                                  | on-demand 反馈端点（POST `/api/perception/on-demand-logs/{log_id}/feedback`）；返回 path/size/components                        |
+| `OnDemandFeedback`                            | `web/src/components/ActivityFeed.tsx`                   | on-demand 查询反馈面板 UI，镜像 `FeedbackSection` 行为（含 `confirmedResubmit` 修改门控）                                       |
 
 ### 关键设计决策
 

@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from miloco.perception.schema import MeaningfulEvent
-from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+from miloco.perception.snapshot_writer import (
+    CLIP_CANDIDATES,
+    MEDIA_TYPE_BY_SUFFIX,
+    get_snapshot_root,
+    region_slug,
+)
 from miloco.utils.paths import miloco_home
 
 if TYPE_CHECKING:
@@ -27,11 +32,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SnapshotStatus = Literal["found", "gone", "not_found"]
-
-# 视频路径产物 clip.mp4 (H264+AAC);audio-only 路径产物 clip.m4a (仅 AAC,ipod muxer).
-# 探测顺序:先 mp4 后 m4a,先找到的优先返回。
-_CLIP_CANDIDATES = ("clip.mp4", "clip.m4a")
-_MEDIA_TYPE_BY_SUFFIX = {".mp4": "video/mp4", ".m4a": "audio/mp4"}
 
 
 class EventsService:
@@ -83,7 +83,7 @@ class EventsService:
         scrubber 的 seek.
 
         探测顺序:先 clip.mp4 (视频路径产物),后 clip.m4a (audio-only 路径产物).
-        对应 media_type 由 _MEDIA_TYPE_BY_SUFFIX 决定.
+        对应 media_type 由 MEDIA_TYPE_BY_SUFFIX 决定.
 
         Args:
             event_id: UUID
@@ -103,10 +103,10 @@ class EventsService:
             return ("not_found", None, None, None)
 
         device_dir = get_snapshot_root() / event_id / region_slug(device_id)
-        for filename in _CLIP_CANDIDATES:
+        for filename in CLIP_CANDIDATES:
             path = device_dir / filename
             if path.exists():
-                return ("found", path, _MEDIA_TYPE_BY_SUFFIX[path.suffix], row["timestamp"])
+                return ("found", path, MEDIA_TYPE_BY_SUFFIX[path.suffix], row["timestamp"])
         # event metadata 在表里,但文件已被 cleanup 清掉(或写前预检跳过没落)
         return ("gone", None, None, None)
 

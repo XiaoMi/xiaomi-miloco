@@ -57,6 +57,10 @@ def region_slug(s: str) -> str:
     return slug or "_"
 
 
+CLIP_CANDIDATES: tuple[str, ...] = ("clip.mp4", "clip.m4a")
+MEDIA_TYPE_BY_SUFFIX: dict[str, str] = {".mp4": "video/mp4", ".m4a": "audio/mp4"}
+
+
 def get_snapshot_root() -> Path:
     """返回截图根目录绝对路径.
 

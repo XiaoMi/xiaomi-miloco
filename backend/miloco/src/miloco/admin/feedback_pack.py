@@ -23,7 +23,11 @@ from datetime import datetime
 from importlib.metadata import version as _get_pkg_version
 from pathlib import Path
 
-from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+from miloco.perception.snapshot_writer import (
+    CLIP_CANDIDATES,
+    get_snapshot_root,
+    region_slug,
+)
 from miloco.utils.paths import miloco_home
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
@@ -163,9 +167,9 @@ def build_feedback_pack(
         slug = region_slug(did)
         clip_dir = event_dir / slug
         found = False
-        for ext in ("mp4", "m4a"):
-            if (clip_dir / f"clip.{ext}").exists():
-                components["clips_found"].append(f"{slug}/clip.{ext}")
+        for candidate in CLIP_CANDIDATES:
+            if (clip_dir / candidate).exists():
+                components["clips_found"].append(f"{slug}/{candidate}")
                 found = True
                 break
         if not found:
@@ -282,9 +286,9 @@ def build_on_demand_feedback_pack(
         slug = region_slug(did)
         clip_dir = event_dir / slug
         found = False
-        for ext in ("mp4", "m4a"):
-            if (clip_dir / f"clip.{ext}").exists():
-                components["clips_found"].append(f"{slug}/clip.{ext}")
+        for candidate in CLIP_CANDIDATES:
+            if (clip_dir / candidate).exists():
+                components["clips_found"].append(f"{slug}/{candidate}")
                 found = True
                 break
         if not found:
@@ -311,6 +315,7 @@ def build_on_demand_feedback_pack(
         "omni_trace_found": components["omni_trace_found"],
         "clips_found": components["clips_found"],
         "clips_missing": components["clips_missing"],
+        "clips_missing_basis": "clip_dids",
     }
 
     packs_dir = _packs_dir()

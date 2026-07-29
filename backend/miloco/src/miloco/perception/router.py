@@ -145,7 +145,12 @@ async def query_on_demand_logs(
 )
 async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
     """Serve the clip file for an on-demand query log entry."""
-    from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+    from miloco.perception.snapshot_writer import (
+        CLIP_CANDIDATES,
+        MEDIA_TYPE_BY_SUFFIX,
+        get_snapshot_root,
+        region_slug,
+    )
 
     row = manager.perception_service.get_on_demand_log(log_id)
     if row is None:
@@ -154,7 +159,7 @@ async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
         raise HTTPException(message="not found", status_code=404)
 
     device_dir = get_snapshot_root() / log_id / region_slug(device_id)
-    for filename, media_type in [("clip.mp4", "video/mp4"), ("clip.m4a", "audio/mp4")]:
+    for filename in CLIP_CANDIDATES:
         path = device_dir / filename
         if path.exists():
             from datetime import datetime
@@ -164,7 +169,7 @@ async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
             local_dt = datetime.fromtimestamp(row["timestamp"] / 1000, tz=deploy_timezone())
             download_name = f"clip-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.{filename.split('.')[1]}"
             return FileResponse(
-                path=path, media_type=media_type,
+                path=path, media_type=MEDIA_TYPE_BY_SUFFIX[path.suffix],
                 filename=download_name, content_disposition_type="inline",
             )
     raise HTTPException(message="clip expired", status_code=410)
