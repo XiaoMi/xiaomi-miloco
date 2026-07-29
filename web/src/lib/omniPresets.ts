@@ -16,6 +16,7 @@ export const OMNI_PROVIDER_PRESETS: OmniProviderPreset[] = [
     id: "atlas-cloud",
     name: "Atlas Cloud",
     baseUrl: "https://api.atlascloud.ai/v1",
+    // Atlas accepted MiMoAdapter's video and audio block extensions in live tests.
     model: "xiaomi/mimo-v2.5",
   },
 ];

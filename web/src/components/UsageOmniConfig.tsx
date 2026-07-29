@@ -192,6 +192,7 @@ export function UsageOmniConfig() {
   const [modelsMsg, setModelsMsg] = useState<string | null>(null);
   const [modelsErr, setModelsErr] = useState(false); // modelsMsg 是否为错误(决定红色突出)
   const [modelsErrCode, setModelsErrCode] = useState<string | null>(null); // 错误机器码(决定就近显示在哪个字段)
+  const modelsReqId = useRef(0); // 只允许最后发起的模型目录请求写回表单状态
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<OmniTestResult | null>(null);
@@ -235,8 +236,9 @@ export function UsageOmniConfig() {
 
   function applyProviderPreset(id: string) {
     const preset = OMNI_PROVIDER_PRESETS.find((item) => item.id === id);
+    modelsReqId.current += 1; // 使切换前由 blur 发起的请求立即失效
     setBaseUrl(preset?.baseUrl ?? "");
-    setModel(preset?.model ?? "");
+    if (preset) setModel(preset.model);
     setModels([]);
     setModelsMsg(null);
     setModelsErr(false);
@@ -279,6 +281,8 @@ export function UsageOmniConfig() {
   // 会回 bad_key,一打开编辑就误报红错)。
   async function fetchModels(bu: string, key: string, label?: string | null) {
     if (!bu.trim()) return;
+    const reqId = ++modelsReqId.current;
+    const isStale = () => reqId !== modelsReqId.current;
     setModelsLoading(true);
     setModelsMsg(null);
     setModelsErr(false);
@@ -289,6 +293,7 @@ export function UsageOmniConfig() {
         api_key: key.trim() || undefined,
         label: label || undefined,
       });
+      if (isStale()) return;
       if (res.ok) {
         setModels(res.models);
         if (!res.models.length) setModelsMsg(t("usage.modelsEmptyResult"));
@@ -300,12 +305,13 @@ export function UsageOmniConfig() {
         setModelsErrCode(res.code ?? null);
       }
     } catch (e) {
+      if (isStale()) return;
       setModels([]);
       setModelsMsg(e instanceof Error ? e.message : t("usage.modelsFetchFailed"));
       setModelsErr(true);
       setModelsErrCode("unreachable"); // 网络/解析异常归为 Base URL 不可达
     } finally {
-      setModelsLoading(false);
+      if (!isStale()) setModelsLoading(false);
     }
   }
 
