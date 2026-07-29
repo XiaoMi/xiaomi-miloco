@@ -446,7 +446,7 @@ export function ActivityFeed({
       </div>
 
       {/* Sub-tabs */}
-      <div className="flex gap-0 px-5 border-b border-border">
+      <div className="flex gap-0 px-5 border-b border-border" role="tablist" aria-label={t("activity.title")}>
         <SubTab active={activeTab === "events"} onClick={() => setActiveTab("events")} label={t("activity.tabEvents")} />
         <SubTab active={activeTab === "queries"} onClick={() => setActiveTab("queries")} label={t("activity.tabOnDemand")} />
       </div>
@@ -1131,6 +1131,8 @@ function SubTab({ active, onClick, label }: {
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
       className={
         "px-4 py-2 text-body font-medium border-b-2 -mb-px transition-colors " +
