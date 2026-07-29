@@ -51,6 +51,7 @@
     "odEmpty": "No on-demand queries yet",
     "odLoading": "Loading…",
     "odRefresh": "Refresh",
+    "odNoAnswer": "Inference failed, no answer",
     "errorType": {
       "person": "Person identification error",
       "pet": "Pet identification error",

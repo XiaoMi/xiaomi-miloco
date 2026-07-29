@@ -214,7 +214,12 @@ class PerceptionService:
         has_trace = False
 
         if not result.answer:
-            artifacts.clips = {}
+            omni_responded = any(
+                call.get("error") is None
+                for call in (artifacts.trace or {}).get("calls", [])
+            )
+            if not omni_responded:
+                artifacts.clips = {}
 
         if artifacts.clips or artifacts.trace:
             from miloco.config.settings import get_settings
