@@ -94,7 +94,8 @@ def _trim_malloc_arenas() -> int | None:
 
     decoder 每帧产 MB 级 BGR buffer,高频大块 malloc/free 在 glibc per-thread arena
     里碎片化、freed 块留在 free-list 不还 OS,长跑 RSS 只涨不落(真机实测单次可吐
-    ~880MB)。supervisord 的 MALLOC_* 环境变量负责预防,这里周期回收残余。
+    ~880MB)。supervisord 的 MALLOC_ARENA_MAX 只封顶 arena 数(限制碎片乘数),碎片
+    回收靠这里的周期 malloc_trim——是主力,不是兜底。
 
     返回 malloc_trim 结果(1=有内存被释放,0=无);非 glibc(无此符号)返回 None。
     """

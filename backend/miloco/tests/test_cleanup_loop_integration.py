@@ -44,47 +44,40 @@ def isolated_env(tmp_path, monkeypatch):
     reset_settings()
 
 
-async def _run_one_cycle():
-    """运行 _daily_maintenance_loop 的一轮 body(跳过初始 60s 与末尾 86400s 等待)."""
-    # 直接调 main.py 的 _daily_maintenance_loop,但 patch 掉两个 sleep
-    from miloco import main as main_module
+async def _run_loop_until_second_sleep(loop_coro_factory):
+    """跑一轮 loop body:第一次 sleep 立即放行,第二次抛 Cancel 顶出 while True。
 
+    维护/trim 两条循环结构相同(首个 sleep 是启动延迟、之后 sleep 是周期等待),
+    共用此驱动,避免两份 patch 逻辑各自漂移。
+    """
     real_sleep = asyncio.sleep
     call_count = [0]
 
     async def _short_sleep(secs):
         call_count[0] += 1
         if call_count[0] >= 2:
-            # 第二次 sleep(末尾 86400)→ 抛 CancelledError 退出 while True
             raise asyncio.CancelledError()
-        # 第一次 sleep(开头 60)→ 立即返回
         await real_sleep(0)
 
     with patch.object(asyncio, "sleep", side_effect=_short_sleep):
         try:
-            await main_module._daily_maintenance_loop()
+            await loop_coro_factory()
         except asyncio.CancelledError:
             pass
+
+
+async def _run_one_cycle():
+    """运行 _daily_maintenance_loop 的一轮 body(跳过初始 60s 与末尾 86400s 等待)."""
+    from miloco import main as main_module
+
+    await _run_loop_until_second_sleep(main_module._daily_maintenance_loop)
 
 
 async def _run_trim_once():
-    """运行 _malloc_trim_loop 的一轮 body(第一次 sleep 放行,第二次抛 Cancel 退出)."""
+    """运行 _malloc_trim_loop 的一轮 body(跳过 6h 等待)."""
     from miloco import main as main_module
 
-    real_sleep = asyncio.sleep
-    call_count = [0]
-
-    async def _short_sleep(secs):
-        call_count[0] += 1
-        if call_count[0] >= 2:
-            raise asyncio.CancelledError()
-        await real_sleep(0)
-
-    with patch.object(asyncio, "sleep", side_effect=_short_sleep):
-        try:
-            await main_module._malloc_trim_loop()
-        except asyncio.CancelledError:
-            pass
+    await _run_loop_until_second_sleep(main_module._malloc_trim_loop)
 
 
 class TestCleanupLoop:
