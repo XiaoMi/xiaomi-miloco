@@ -77,6 +77,8 @@
     "modelsFetching": "Fetching model list…",
     "modelsCount": "{{n}} available, search or type directly; please pick a multimodal (omni) model supporting video/audio",
     "modelsHint": "Auto-fetched after filling Base URL and API Key, or type a model id directly",
+    "audioFormatLabel": "Audio format",
+    "audioFormatHint": "m4a for MiMo/Qwen/Gemini; wav for 智谱/OpenAI; mp3 for general compatibility",
     "saving": "Saving…",
     "save": "Save",
     "testing": "Testing…",

@@ -137,7 +137,7 @@ def _save_clips(
     for device_id, (clip_bytes, kind) in clips.items():
         if not clip_bytes:
             continue
-        if kind not in ("mp4", "m4a"):
+        if kind not in ("mp4", "m4a", "wav", "mp3"):
             logger.error("Unknown clip kind %r for %s; skipping", kind, device_id)
             continue
         device_dir = event_dir / region_slug(device_id)

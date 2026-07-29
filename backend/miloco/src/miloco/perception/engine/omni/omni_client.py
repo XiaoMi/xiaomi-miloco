@@ -363,7 +363,8 @@ def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
     if payload.get("video_base64"):
         content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
-        content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
+        audio_format = payload.get("audio_format", "m4a")
+        content.append(adapter.build_audio_block(payload["audio_base64"], media_info, audio_format))
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):

@@ -68,10 +68,20 @@ class TestMiMoAdapter:
         assert block["media_resolution"] == "max"
         assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
 
-    def test_audio_block(self):
+    def test_audio_block_default_m4a(self):
         block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
         assert block["type"] == "input_audio"
         assert block["input_audio"]["data"].startswith("data:audio/m4a;base64,")
+
+    def test_audio_block_wav(self):
+        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA, "wav")
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["data"].startswith("data:audio/wav;base64,")
+
+    def test_audio_block_mp3(self):
+        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA, "mp3")
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["data"].startswith("data:audio/mpeg;base64,")
 
     def test_request_body_non_stream(self):
         body = self.adapter.build_request_body(
@@ -102,10 +112,22 @@ class TestQwenOmniAdapter:
         assert "media_resolution" not in block
         assert block["video_url"]["url"].startswith("data:;base64,")
 
-    def test_audio_block_has_format(self):
+    def test_audio_block_default_m4a(self):
         block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
         assert block["type"] == "input_audio"
         assert block["input_audio"]["format"] == "m4a"
+        assert block["input_audio"]["data"].startswith("data:;base64,")
+
+    def test_audio_block_wav(self):
+        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA, "wav")
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["format"] == "wav"
+        assert block["input_audio"]["data"].startswith("data:;base64,")
+
+    def test_audio_block_mp3(self):
+        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA, "mp3")
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["format"] == "mp3"
         assert block["input_audio"]["data"].startswith("data:;base64,")
 
     def test_request_body_forces_stream(self):
@@ -253,6 +275,21 @@ class TestGeminiAdapter:
         parts = body["contents"][0]["parts"]
         assert parts[0]["inline_data"] == {"mime_type": "image/png", "data": "IMG"}
         assert parts[1]["inline_data"] == {"mime_type": "audio/mp4", "data": "AUD"}
+
+    def test_audio_block_default_m4a(self):
+        block = self.adapter.build_audio_block("AUD", _AUDIO_MEDIA)
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["data"].startswith("data:audio/mp4;base64,")
+
+    def test_audio_block_wav(self):
+        block = self.adapter.build_audio_block("AUD", _AUDIO_MEDIA, "wav")
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["data"].startswith("data:audio/wav;base64,")
+
+    def test_audio_block_mp3(self):
+        block = self.adapter.build_audio_block("AUD", _AUDIO_MEDIA, "mp3")
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["data"].startswith("data:audio/mpeg;base64,")
 
     def test_parse_response_to_openai_shape(self):
         raw = {

@@ -161,6 +161,13 @@ class OmniModelSettings(BaseModel):
         default="",
         description="多模态模型 API Key；为空时视为未配置，插件与后端启动前校验",
     )
+    audio_format: str = Field(
+        default="m4a",
+        description=(
+            "音频编码格式：m4a (AAC) / wav (PCM) / mp3。"
+            "MiMo/Qwen/Gemini 建议 m4a；智谱/OpenAI 建议 wav。"
+        ),
+    )
 
 
 class ModelSettings(BaseModel):
