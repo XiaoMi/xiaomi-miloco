@@ -1323,14 +1323,16 @@ function OnDemandClipPlayer({ logId, deviceId, onOpenLightbox }: {
   const src = onDemandClipUrl(logId, deviceId);
   if (failed) {
     return (
-      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary">
+      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary"
+        aria-label={t("activity.clipExpiredAria")}>
         {t("activity.clipExpired")}
       </div>
     );
   }
   return (
     <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 relative group">
-      <video src={src} controls preload="metadata" onError={() => setFailed(true)} onClick={(e) => e.stopPropagation()} className="w-48 h-48 rounded bg-black border border-border object-contain" />
+      <video src={src} controls preload="metadata" onError={() => setFailed(true)} onClick={(e) => e.stopPropagation()} className="w-48 h-48 rounded bg-black border border-border object-contain"
+        aria-label={`${deviceId} clip`} />
       <button type="button" onClick={(e) => { e.stopPropagation(); onOpenLightbox(src); }} aria-label={t("activity.zoomPlay")}
         className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
         ⛶
@@ -1345,7 +1347,8 @@ function OnDemandAudioPlayer({ logId, deviceId }: { logId: string; deviceId: str
   const src = onDemandClipUrl(logId, deviceId);
   if (failed) {
     return (
-      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-full px-4 py-3 rounded bg-bg-primary border border-border text-caption-mono text-text-tertiary">
+      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-full px-4 py-3 rounded bg-bg-primary border border-border text-caption-mono text-text-tertiary"
+        aria-label={t("activity.audioExpiredAria")}>
         {t("activity.audioExpired")}
       </div>
     );
@@ -1353,7 +1356,8 @@ function OnDemandAudioPlayer({ logId, deviceId }: { logId: string; deviceId: str
   return (
     <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 w-full px-4 py-3 rounded bg-bg-primary border border-border flex items-center gap-3">
       <span className="text-caption-mono text-text-secondary whitespace-nowrap">{t("activity.audioOnly")}</span>
-      <audio src={src} controls preload="metadata" onError={() => setFailed(true)} className="flex-1 min-w-0 h-9" />
+      <audio src={src} controls preload="metadata" onError={() => setFailed(true)} className="flex-1 min-w-0 h-9"
+        aria-label={`${deviceId} audio clip`} />
     </div>
   );
 }
