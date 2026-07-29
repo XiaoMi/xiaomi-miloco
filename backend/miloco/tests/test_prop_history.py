@@ -200,3 +200,109 @@ async def test_poller_extra_watchlist_and_invalid_entries(monkeypatch, dao):
     params = proxy._miot_client.http_client.get_props_async.await_args.args[0]
     keys = {(p.did, p.siid, p.piid) for p in params}
     assert keys == {("d1", 2, 1), ("d1", 4, 1), ("d9", 5, 2)}
+
+
+# ------------------------------------------- push path: spec 分类 + 节流落库
+#
+# 这一段守的是 2026-07-29 实测暴露的两个真实问题:
+# 1. 推送 topic 带 /{siid}/{piid} 两级,订阅与 decoder 都必须覆盖(否则静默丢弃);
+# 2. 遥测属性秒级刷屏(一台空调 30 分钟 858 条),必须在落库前节流。
+
+
+def _proxy_with_spec(spec: dict, *, urn: str = "urn:x:ac"):
+    """Bare MiotProxy carrying just what _classify_prop reads."""
+    from miloco.miot.client import MiotProxy
+
+    proxy = MiotProxy.__new__(MiotProxy)
+    proxy._device_info_dict = {"ac": SimpleNamespace(urn=urn)}
+    proxy._spec_cache = {urn: spec}
+    return proxy
+
+
+def test_classify_prop_reads_spec_semantics():
+    from miloco.miot.prop_throttle import DISCRETE, TELEMETRY
+
+    proxy = _proxy_with_spec(
+        {
+            "prop.2.1": {"format": "bool", "writeable": True},          # 开关
+            "prop.2.2": {"format": "uint8", "value_list": [{"value": 2}]},  # 模式
+            "prop.2.4": {"format": "float", "unit": "celsius",           # 设定温度
+                         "writeable": True, "value_range": [16, 31, 0.5]},
+            "prop.4.9": {"format": "uint8", "unit": "percentage",        # 环境湿度
+                         "writeable": False, "value_range": [0, 100, 1]},
+        }
+    )
+    assert proxy._classify_prop("ac", 2, 1) == (DISCRETE, None)
+    assert proxy._classify_prop("ac", 2, 2) == (DISCRETE, None)
+    # 可写 > 有单位:设定温度是用户意图,不能因 unit=celsius 被当成遥测
+    assert proxy._classify_prop("ac", 2, 4) == (DISCRETE, None)
+    # 只读 + 量程 → 遥测,并带回满量程跨度供幅度判定
+    assert proxy._classify_prop("ac", 4, 9) == (TELEMETRY, 100.0)
+
+
+def test_classify_prop_unknown_device_or_cold_cache():
+    proxy = _proxy_with_spec({"prop.2.1": {"format": "bool"}})
+    assert proxy._classify_prop("missing-did", 2, 1) is None
+    proxy._spec_cache = {}                      # 缓存冷 → 交给频率启发式
+    assert proxy._classify_prop("ac", 2, 1) is None
+
+
+def test_classify_prop_vendor_slot_absent_from_spec():
+    """厂商私有槽位(实测空调 prop.12.*)按最严格遥测处理,而不是放行。"""
+    from miloco.miot.prop_throttle import TELEMETRY
+
+    proxy = _proxy_with_spec({"prop.2.1": {"format": "bool"}})
+    assert proxy._classify_prop("ac", 12, 3) == (TELEMETRY, None)
+
+
+def test_push_handler_throttles_before_persisting(monkeypatch, dao):
+    """整包重发里的同值条目不落库,开关变化必须落库。"""
+    from miloco.miot.client import MiotProxy
+    from miloco.miot.prop_throttle import PropChangeThrottle
+
+    monkeypatch.setattr(
+        "miloco.manager.get_manager",
+        lambda: SimpleNamespace(device_prop_history_dao=dao),
+    )
+    proxy = MiotProxy.__new__(MiotProxy)
+    proxy._prop_throttle = PropChangeThrottle(classify=None)
+    proxy._prop_throttle_log_countdown = 10_000
+
+    def push(changes, ts):
+        proxy._on_device_prop_changed_event(
+            SimpleNamespace(
+                did="ac",
+                timestamp_ms=ts,
+                changes=[SimpleNamespace(siid=s, piid=p, value=v) for s, p, v in changes],
+            )
+        )
+
+    base = _now()
+    push([(2, 1, True)], base)
+    push([(2, 1, True)], base + 1_000)   # 整包重发,同值 → 不落库
+    push([(2, 1, False)], base + 2_000)
+    rows = dao.query("ac", siid=2, piid=1, limit=10)
+    assert [r["value"] for r in rows] == [False, True]
+
+
+def test_push_handler_without_throttle_persists_everything(monkeypatch, dao):
+    """节流关闭时行为不变(排障用的逃生开关)。"""
+    from miloco.miot.client import MiotProxy
+
+    monkeypatch.setattr(
+        "miloco.manager.get_manager",
+        lambda: SimpleNamespace(device_prop_history_dao=dao),
+    )
+    proxy = MiotProxy.__new__(MiotProxy)
+    proxy._prop_throttle = None
+    proxy._prop_throttle_log_countdown = 10_000
+    base = _now()
+    for ts in (base, base + 1_000, base + 2_000):
+        proxy._on_device_prop_changed_event(
+            SimpleNamespace(
+                did="ac",
+                timestamp_ms=ts,
+                changes=[SimpleNamespace(siid=12, piid=3, value=1140)],
+            )
+        )
+    assert len(dao.query("ac", siid=12, piid=3, limit=10)) == 3

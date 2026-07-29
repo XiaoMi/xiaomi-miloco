@@ -49,10 +49,21 @@ from miloco.miot.mips_listeners import (
     DeviceMetaEventListener,
     SceneEventListener,
 )
+from miloco.miot.prop_throttle import DISCRETE, TELEMETRY, PropChangeThrottle
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
+
+# Consecutive properties_changed SUBACK rejections before a did stops being
+# retried on every refresh_devices. The broker normally grants the subtree, so
+# a rejection means transient ACL flap (reconnect window) — worth retrying a
+# few times, not worth replaying ERROR forever.
+_PROP_SUB_MAX_REJECTS = 3
+
+# 每处理这么多次属性推送打一条节流统计。可观测性用:落库/丢弃比例失衡
+# (例如全被丢)一眼可见,而不必开 DEBUG。
+_PROP_THROTTLE_LOG_EVERY = 500
 
 
 def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
@@ -191,16 +202,20 @@ class MiotProxy:
         # _sync_camera_state_subscriptions.
         self._subscribed_state_dids: set[str] = set()
 
-        # Dids whose device/{did}/up/properties_changed topics this proxy
+        # Dids whose device/{did}/up/properties_changed/# topics this proxy
         # intends to subscribe. Mirrors _subscribed_meta_dids; drives the diff
         # in _sync_prop_subscriptions. Empty set when prop history is disabled.
         self._subscribed_prop_dids: set[str] = set()
-        # Dids whose properties_changed SUBACK came back 0x87 Not authorized —
-        # the broker ACL for this app_id does not open the up/ topics (实测
-        # 2026-07-29 全量被拒)。Permanently excluded from retry, so每次
-        # refresh_devices 不会重放 70+ 条 ERROR;property history 由
-        # DevicePropPoller 轮询兜底。ACL 将来放开时重启后自动恢复推送路径。
-        self._prop_sub_rejected: set[str] = set()
+        # Consecutive SUBACK rejections per did. The broker DOES grant the
+        # properties_changed subtree for this app_id (实测 2026-07-29:72/72
+        # 台全部 0x00),所以 0x87 现在是异常而非常态——多为重连期 ACL 抖动,
+        # 重试即恢复。因此不做永久排除:连续被拒 _PROP_SUB_MAX_REJECTS 次后
+        # 才停止重试(避免每次 refresh_devices 重放 ERROR),一次成功即清零。
+        self._prop_sub_rejects: dict[str, int] = {}
+        # 属性推送落库前的节流器(见 prop_throttle)。init() 里按当前配置重建,
+        # 配置关闭时为 None(全量落库)。
+        self._prop_throttle: PropChangeThrottle | None = None
+        self._prop_throttle_log_countdown = _PROP_THROTTLE_LOG_EVERY
 
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
@@ -316,8 +331,24 @@ class MiotProxy:
 
         self._token_refresh_task = asyncio.create_task(self._start_token_refresh_task())
 
-        # Property-history poller — the polling fallback while the broker ACL
-        # rejects properties_changed pushes (see _sync_prop_subscriptions).
+        # Property-history throttle — rebuilt per init so a config change takes
+        # effect on rebind without a restart (state is a pure in-memory cache).
+        _mio = get_settings().miot
+        self._prop_throttle = (
+            PropChangeThrottle(
+                window_sec=_mio.prop_history_throttle_window_sec,
+                burst=_mio.prop_history_throttle_burst,
+                min_interval_sec=_mio.prop_history_throttle_min_interval_sec,
+                rel_delta=_mio.prop_history_throttle_rel_delta,
+                classify=self._classify_prop,
+            )
+            if _mio.prop_history_throttle_enabled
+            else None
+        )
+
+        # Property-history poller — safety net beneath the push path: covers
+        # dids whose subscribe was rejected, gaps while mips is disconnected,
+        # and properties the device never pushes (see _sync_prop_subscriptions).
         if self._prop_poller_task:
             self._prop_poller_task.cancel()
             self._prop_poller_task = None
@@ -377,6 +408,10 @@ class MiotProxy:
         self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
         self._subscribed_prop_dids = set()
+        self._prop_sub_rejects = {}
+        # 节流器状态是纯内存基线,换账号后必须丢弃:否则新账号首条推送会拿
+        # 旧账号的 last_value 做 diff。init() 会按当时的配置重建。
+        self._prop_throttle = None
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
         # otherwise a re-bind of the same did within WELCOME_DEDUP_SEC after an
@@ -1020,13 +1055,16 @@ class MiotProxy:
         are torn down (target = empty set) so a config flip fully converges
         without a restart. Dids containing '/' (Huami/Zepp-bridged
         sub-devices) are skipped — same topic/ACL rationale as
-        _sync_meta_subscriptions.
+        _sync_meta_subscriptions. Dids that hit _PROP_SUB_MAX_REJECTS
+        consecutive rejections drop out until the next successful subscribe
+        resets their counter (see _prop_sub_rejects).
         """
         if get_settings().miot.prop_history_enabled:
             target = {
                 did
                 for did in self._device_info_dict
-                if "/" not in did and did not in self._prop_sub_rejected
+                if "/" not in did
+                and self._prop_sub_rejects.get(did, 0) < _PROP_SUB_MAX_REJECTS
             }
         else:
             target = set()
@@ -1038,12 +1076,29 @@ class MiotProxy:
         async def _sub(did: str) -> str | None:
             try:
                 await self._miot_client.sub_device_prop_async(did)
+                self._prop_sub_rejects.pop(did, None)
                 return did
             except MipsSubscribeRejectedError as e:
-                # ACL 永久拒绝(0x87 等):不再重试,避免每次设备刷新重放全量
-                # ERROR。轮询兜底仍在,DEBUG 留痕即可。
-                self._prop_sub_rejected.add(did)
-                logger.debug("device-prop subscribe rejected did=%s: %s", did, e)
+                # 0x87 现在属异常(ACL 正常放行整棵 properties_changed 子树),
+                # 多为重连期抖动。计数重试,连续 _PROP_SUB_MAX_REJECTS 次后
+                # 才放弃该 did,期间轮询兜底仍覆盖。
+                n = self._prop_sub_rejects.get(did, 0) + 1
+                self._prop_sub_rejects[did] = n
+                if n >= _PROP_SUB_MAX_REJECTS:
+                    logger.warning(
+                        "device-prop subscribe rejected %d×, giving up did=%s: %s",
+                        n,
+                        did,
+                        e,
+                    )
+                else:
+                    logger.debug(
+                        "device-prop subscribe rejected (%d/%d) did=%s: %s",
+                        n,
+                        _PROP_SUB_MAX_REJECTS,
+                        did,
+                        e,
+                    )
                 return None
             except Exception as e:
                 logger.error("subscribe device-prop failed did=%s: %s", did, e)
@@ -1060,7 +1115,7 @@ class MiotProxy:
         removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
         self._subscribed_prop_dids |= {d for d in added if d}
         self._subscribed_prop_dids -= {d for d in removed if d}
-        rejected = len([d for d in to_add if d in self._prop_sub_rejected])
+        rejected = len([d for d in to_add if d in self._prop_sub_rejects])
         logger.info(
             "device-prop subscriptions synced: +%d -%d rejected=%d (total=%d)",
             len([d for d in added if d]),
@@ -1070,9 +1125,10 @@ class MiotProxy:
         )
         if rejected and not self._subscribed_prop_dids:
             logger.warning(
-                "device-prop push fully rejected by broker ACL (%d dids); "
-                "property history relies on the poller fallback",
-                len(self._prop_sub_rejected),
+                "device-prop push rejected for all %d did(s) — expected 0x00 "
+                "for the properties_changed subtree, check broker ACL / topic "
+                "filter; property history falls back to the poller",
+                rejected,
             )
 
     async def _sync_camera_state_subscriptions(self) -> None:
@@ -1138,8 +1194,61 @@ class MiotProxy:
         """
         await self._scene_listener.on_event(msg)
 
+    def _classify_prop(
+        self, did: str, siid: int, piid: int
+    ) -> tuple[str, float | None] | None:
+        """Classify a property as discrete / telemetry from its miot-spec entry.
+
+        返回 ``(kind, span)``;span 是 value-range 的量程跨度(max-min),供节流器
+        按满量程比例判定幅度,未知给 None。判不出返回 None。
+
+        推送回调是同步的,所以只读**已缓存**的 spec(_spec_cache,按 urn 缓存,
+        由 catalog / home-info 构建时填充);缓存未命中返回 None,节流器退回频率
+        启发式,spec 后续补上后下一条推送即用上正确分类——不在热路径触发解析。
+
+        判据(miot-spec 语义,与厂商无关),按优先级:
+
+        1. ``value-list`` / ``format=bool`` → 枚举或开关 = 离散;
+        2. ``writeable`` → 用户可设的目标值(设定温度/亮度/目标湿度)= 离散。
+           **这条必须排在 unit 之前**:空调设定温度带 ``unit=celsius``,只看
+           单位会被误判成遥测,而它恰恰是「几点把温度调到 26 度」要的信号;
+        3. ``value-range`` 或带物理单位,且只读 → 传感器读数 = 遥测。
+        """
+        dev = self._device_info_dict.get(did)
+        if dev is None or not dev.urn:
+            return None
+        spec = self._spec_cache.get(dev.urn)
+        if not spec:
+            return None
+        entry = spec.get(f"prop.{siid}.{piid}")
+        if not entry:
+            # spec 已加载但没有这条属性:厂商私有槽位(实测空调把功率/电压/电流
+            # 挂在 spec 之外的 prop.12.*,推送里占比最高)。**不能直接丢**——个别
+            # 设备把温湿度放在非标 piid 上(见 _build_home_info 的注释),但也不该
+            # 按「低频用户操作」放行,故按最严格的遥测档处理:只有跨过最小间隔或
+            # 大幅跳变才落库。
+            return (TELEMETRY, None)
+        if entry.get("value_list") or entry.get("format") == "bool":
+            return (DISCRETE, None)
+        if entry.get("writeable"):
+            return (DISCRETE, None)
+        if entry.get("value_range") or entry.get("unit"):
+            vr = entry.get("value_range")
+            span: float | None = None
+            if isinstance(vr, (list, tuple)) and len(vr) >= 2:
+                try:
+                    span = abs(float(vr[1]) - float(vr[0])) or None
+                except (TypeError, ValueError):
+                    span = None
+            return (TELEMETRY, span)
+        return None
+
     def _on_device_prop_changed_event(self, msg: MIoTDevicePropChangedEvent) -> None:
         """Persist one property push batch to device_prop_history.
+
+        推送是逐属性、秒级的,遥测类属性会刷屏(实测一台空调的功率属性 1–2s
+        一条),所以先过 PropChangeThrottle:同值重发丢弃、离散属性无条件保留、
+        高频数值按最小间隔+相对幅度去抖。整批被滤空时不落库。
 
         同步回调:单条 executemany 写 WAL 库微秒级,不值得 to_thread。DAO 内部
         吞异常(丢一行历史不冒泡),这里只兜 manager 未就绪的启动窗口。
@@ -1147,10 +1256,22 @@ class MiotProxy:
         try:
             from miloco.manager import get_manager
 
+            changes = [(c.siid, c.piid, c.value) for c in msg.changes]
+            throttle = self._prop_throttle
+            if throttle is not None:
+                changes = [
+                    c
+                    for c in changes
+                    if throttle.allow(msg.did, c[0], c[1], c[2], msg.timestamp_ms)
+                ]
+                self._prop_throttle_log_countdown -= 1
+                if self._prop_throttle_log_countdown <= 0:
+                    self._prop_throttle_log_countdown = _PROP_THROTTLE_LOG_EVERY
+                    logger.info("device-prop throttle stats: %s", throttle.stats())
+            if not changes:
+                return
             get_manager().device_prop_history_dao.insert_changes(
-                msg.did,
-                [(c.siid, c.piid, c.value) for c in msg.changes],
-                msg.timestamp_ms,
+                msg.did, changes, msg.timestamp_ms
             )
         except Exception as e:
             logger.warning("persist device prop push failed did=%s: %s", msg.did, e)

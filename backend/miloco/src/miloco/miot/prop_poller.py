@@ -2,19 +2,25 @@
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
 """
-Device property poller — polling fallback for property history.
+Device property poller — 属性历史的兜底采样源(**主链路是 mips 推送**)。
 
-mips `device/{did}/up/properties_changed` 推送对本 app_id 被 broker ACL 全量拒绝
-(0x87,实测 2026-07-29),属性历史退而求其次用批量轮询:每周期一次
-`/app/v2/miotspec/prop/get`(单请求上限 150 条,整屋 70+ 设备 × 主开关 1 条 =
-1 次 HTTP 调用),diff 内存中的上次值,变化才落 device_prop_history。
+推送覆盖不到的三种情况由本轮询补上:
+
+1. 订阅被 broker 拒(0x87)的设备——正常情况下不会发生(实测 2026-07-29:72 台
+   设备的 ``properties_changed`` 子树全部 0x00 放行),但重连窗口存在 ACL 抖动;
+2. mips 断连窗口内发生的变化——推送不补发,轮询下一周期能发现;
+3. 设备**根本不推送**的属性——推送是设备侧行为,不是所有属性都上报。
+
+实现:每周期一次 `/app/v2/miotspec/prop/get`(单请求上限 150 条,整屋 70+ 设备 ×
+主开关 1 条 = 1 次 HTTP 调用),diff 内存中的上次值,变化才落 device_prop_history。
 
 Watchlist 免配置自筛选:对全部设备读 ``prop.2.1``(miot-spec 惯例的主开关 /
 occupancy-status 槽位);没有该属性的设备云端返回无 value 条目,当次跳过,零成本。
 额外属性用 ``miot.prop_history_poll_extra``(形如 ``did:prop.S.P``)配置。
 
 轮询语义与推送不同:只能保证「变化被发现的时间 ≤ 实际变化时间 + 周期」,行里
-ts 是发现时刻。周期默认 60s——对「几点开的空调」这类问题分钟级足够。
+ts 是发现时刻。周期默认 300s——推送转正后轮询只是安全网,不必再按秒级采样;
+推送路径本身是**事件时刻**,精度不受这个周期影响。
 """
 
 from __future__ import annotations

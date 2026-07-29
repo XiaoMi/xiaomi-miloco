@@ -248,9 +248,34 @@ class MiotSettings(BaseModel):
         default=30, description="属性历史保留天数;写路径顺带清理过期行。"
     )
     prop_history_poll_interval_sec: int = Field(
-        default=60,
-        description="属性历史轮询周期(秒)。mips 推送被 broker ACL 拒绝时的兜底"
-        "采样源,一周期一次批量 prop/get。",
+        default=300,
+        description="属性历史轮询周期(秒)。推送为主链路,轮询只做兜底采样:"
+        "覆盖订阅被拒的设备、mips 断连窗口,以及设备根本不推送的属性。"
+        "一周期一次批量 prop/get。",
+    )
+    prop_history_throttle_enabled: bool = Field(
+        default=True,
+        description="属性推送落库前做节流。关闭后遥测类属性(功率/电压等秒级"
+        "推送)会全量落库,库体积增长极快,仅排障时临时关闭。",
+    )
+    prop_history_throttle_window_sec: int = Field(
+        default=600,
+        description="节流的频率判定窗口(秒):窗口内变化次数达到 burst 才按"
+        "高频遥测去抖,低频数值变化(设定温度/档位)不受影响。",
+    )
+    prop_history_throttle_burst: int = Field(
+        default=5,
+        description="判定为高频遥测的窗口内变化次数阈值。",
+    )
+    prop_history_throttle_min_interval_sec: int = Field(
+        default=900,
+        description="高频遥测属性的最小落库间隔(秒);距上次落库超过该间隔的"
+        "变化无条件落库,保证长期趋势不丢。",
+    )
+    prop_history_throttle_rel_delta: float = Field(
+        default=0.3,
+        description="高频遥测属性的相对幅度阈值:相对上次**落库值**变化达到该"
+        "比例即落库(不等最小间隔)。0.2 = 20%。",
     )
     prop_history_poll_extra: list[str] = Field(
         default_factory=list,
