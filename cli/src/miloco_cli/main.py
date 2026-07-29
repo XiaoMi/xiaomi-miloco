@@ -13,29 +13,39 @@ from datetime import datetime, timezone
 
 import click
 
-from miloco_cli.commands.account import account_group
-from miloco_cli.commands.actions import actions_group
-from miloco_cli.commands.admin import admin_group
-from miloco_cli.commands.config import config_group
-from miloco_cli.commands.cron import cron_group
-from miloco_cli.commands.dashboard import dashboard_cmd
-from miloco_cli.commands.debug import debug_group
-from miloco_cli.commands.device import device_group
-from miloco_cli.commands.doctor import doctor_cmd
-from miloco_cli.commands.habit import habit_group
-from miloco_cli.commands.home_profile import home_profile_group
-from miloco_cli.commands.identity import identity_group
-from miloco_cli.commands.monitor import monitor_group
-from miloco_cli.commands.notify import notify_group
-from miloco_cli.commands.perceive import perceive_group
-from miloco_cli.commands.person import person_group
-from miloco_cli.commands.pet import pet_group
-from miloco_cli.commands.rule import rule_group
-from miloco_cli.commands.scene import scene_group
-from miloco_cli.commands.scope import scope_group
-from miloco_cli.commands.service import service_group
-from miloco_cli.commands.task import task_group
-from miloco_cli.commands.time_compute import time_compute_cmd
+# 必须在任何命令模块 import 之前执行:它们各自现构造 httpx client,而 client
+# 在构造时读一次代理环境。此前这个副作用挂在 commands/scope.py 的模块级
+# `from miloco_cli.client import ...` 上——全仓 18 个命令模块里唯一一个那么写
+# 的,把它改成惰性 import(一次纯粹的一致性清理)就会让整条链路静默失效,
+# 退化表现正是本修复要消灭的 502。钉在声明的入口点上,不依赖任何模块的
+# import 顺序。
+from miloco_cli.client import ensure_no_proxy_for_local
+
+ensure_no_proxy_for_local()
+
+from miloco_cli.commands.account import account_group  # noqa: E402
+from miloco_cli.commands.actions import actions_group  # noqa: E402
+from miloco_cli.commands.admin import admin_group  # noqa: E402
+from miloco_cli.commands.config import config_group  # noqa: E402
+from miloco_cli.commands.cron import cron_group  # noqa: E402
+from miloco_cli.commands.dashboard import dashboard_cmd  # noqa: E402
+from miloco_cli.commands.debug import debug_group  # noqa: E402
+from miloco_cli.commands.device import device_group  # noqa: E402
+from miloco_cli.commands.doctor import doctor_cmd  # noqa: E402
+from miloco_cli.commands.habit import habit_group  # noqa: E402
+from miloco_cli.commands.home_profile import home_profile_group  # noqa: E402
+from miloco_cli.commands.identity import identity_group  # noqa: E402
+from miloco_cli.commands.monitor import monitor_group  # noqa: E402
+from miloco_cli.commands.notify import notify_group  # noqa: E402
+from miloco_cli.commands.perceive import perceive_group  # noqa: E402
+from miloco_cli.commands.person import person_group  # noqa: E402
+from miloco_cli.commands.pet import pet_group  # noqa: E402
+from miloco_cli.commands.rule import rule_group  # noqa: E402
+from miloco_cli.commands.scene import scene_group  # noqa: E402
+from miloco_cli.commands.scope import scope_group  # noqa: E402
+from miloco_cli.commands.service import service_group  # noqa: E402
+from miloco_cli.commands.task import task_group  # noqa: E402
+from miloco_cli.commands.time_compute import time_compute_cmd  # noqa: E402
 
 
 @functools.lru_cache(maxsize=1)

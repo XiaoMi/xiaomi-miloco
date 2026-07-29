@@ -6,12 +6,74 @@
 """
 
 import json
+import os
 import sys
+import urllib.request
 from typing import NoReturn
 
 import httpx
 
 from miloco_cli.config import load_config
+
+# httpx 的 get_environment_proxies 遍历的三个键(all = 全协议出口,常见于 SOCKS)。
+_PROXY_SCHEMES = ("http", "https", "all")
+
+
+def _system_proxies() -> dict[str, str]:
+    """只读系统代理设置,绕开 getproxies() 的 env 短路(裸 NO_PROXY 也会短路它)。"""
+    for name in ("getproxies_macosx_sysconf", "getproxies_registry"):
+        fn = getattr(urllib.request, name, None)
+        if fn is None:
+            continue
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            return {}
+    return {}
+
+
+def ensure_no_proxy_for_local() -> None:
+    """把回环并入 NO_PROXY,防系统代理劫持 CLI→后端(127.0.0.1:1810)的调用。
+
+    与 backend 的 ``main._ensure_no_proxy_for_local`` 同口径(先快照、快照本身防
+    env 短路、守门看三个 scheme 且判**存在性**而非真值、两个大小写写同值、
+    不列 CIDR),详见那边 docstring 的完整推理。
+    两个包互不依赖故各留一份;本函数刻意包成函数而非模块级裸语句——模块级
+    ``for`` 在 Python 里不是块作用域,循环变量会挂在模块命名空间上,且无法在
+    测试里重复调用。
+    """
+    try:
+        snapshot = urllib.request.getproxies()
+        if not any(snapshot.get(k) for k in _PROXY_SCHEMES):
+            snapshot = {**_system_proxies(), **snapshot}
+    except Exception:  # noqa: BLE001
+        snapshot = {}
+    user_configured = any(
+        f"{s}_proxy" in os.environ or f"{s.upper()}_PROXY" in os.environ
+        for s in _PROXY_SCHEMES
+    )
+    if not user_configured:
+        # 导出只做 http/https:平台函数的键集里没有 all(macOS _scproxy 给
+        # http/https/ftp/gopher/socks,Windows 注册表给协议名),唯一能产出 all 的是
+        # getproxies_environment(),而那种情况 user_configured 已为真、走不到这里。
+        for scheme in ("http", "https"):
+            proxied = snapshot.get(scheme)
+            if proxied:
+                os.environ[f"{scheme}_proxy"] = proxied
+                os.environ[f"{scheme.upper()}_PROXY"] = proxied
+
+    merged: list[str] = []
+    for var in ("NO_PROXY", "no_proxy"):
+        for entry in os.environ.get(var, "").split(","):
+            entry = entry.strip()
+            if entry and entry not in merged:
+                merged.append(entry)
+    merged += [e for e in ("localhost", "127.0.0.1", "::1") if e not in merged]
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(merged)
+
+
+# 调用点在 miloco_cli.main(声明的入口点),不在这里自动执行——依赖 import
+# 副作用会让「谁 import 了本模块」变成隐式契约。
 
 
 def _get_client(cfg: dict) -> httpx.Client:
