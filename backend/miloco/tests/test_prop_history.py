@@ -104,6 +104,7 @@ def _make_poller(monkeypatch, dao, *, devices, results, extra=None):
     settings = SimpleNamespace(
         miot=SimpleNamespace(
             prop_history_enabled=True,
+            prop_history_poll_enabled=True,
             prop_history_poll_interval_sec=60,
             prop_history_poll_extra=extra or [],
             prop_history_retention_days=30,
@@ -327,3 +328,56 @@ def test_prop_history_endpoint_rejects_malformed_iid():
         asyncio.run(get_prop_history(did="d1", iid="不是iid", current_user="t"))
     assert ei.value.http_status == 400
     assert "prop.S.P" in str(ei.value.message)
+
+
+# --------------------------------------------- 推送与轮询共存：轮询必须让位
+
+
+@pytest.mark.asyncio
+async def test_poller_defers_to_push_persisted_change(monkeypatch, dao):
+    """推送已落库的变化，轮询不得再写一行。
+
+    推送落库不会更新轮询的进程内 `_last`，若轮询只信 `_last`，每次真实变化都会
+    被"再发现一遍"：22:00:00 的关机会同时留下 false@22:00:00（推送，事件时刻）
+    和 false@22:04:10（轮询，发现时刻），而 `ORDER BY ts DESC LIMIT 1` 恰好取到
+    偏晚且不准的那行。以 DB 为两条通道的唯一真相即可消除。
+    """
+    results = [{"did": "d1", "siid": 2, "piid": 1, "value": True}]
+    poller, _ = _make_poller(monkeypatch, dao, devices={"d1": True}, results=results)
+    await poller._poll_once()                       # 建立基线 True
+    assert len(dao.query("d1", siid=2, piid=1, limit=10)) == 1
+
+    # 推送先落库一条 False（事件时刻），轮询的 _last 仍是 True
+    dao.insert_changes("d1", [(2, 1, False)], _now())
+    results[:] = [{"did": "d1", "siid": 2, "piid": 1, "value": False}]
+
+    await poller._poll_once()
+    rows = dao.query("d1", siid=2, piid=1, limit=10)
+    assert [r["value"] for r in rows] == [False, True], "轮询重复写入了推送已记的变化"
+
+
+@pytest.mark.asyncio
+async def test_poller_still_writes_change_push_missed(monkeypatch, dao):
+    """推送漏掉的变化（断连窗口 / 设备不上报）轮询仍要补上。"""
+    results = [{"did": "d1", "siid": 2, "piid": 1, "value": True}]
+    poller, _ = _make_poller(monkeypatch, dao, devices={"d1": True}, results=results)
+    await poller._poll_once()
+
+    results[:] = [{"did": "d1", "siid": 2, "piid": 1, "value": False}]
+    await poller._poll_once()
+    assert [r["value"] for r in dao.query("d1", siid=2, piid=1, limit=10)] == [
+        False,
+        True,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_poller_respects_poll_enabled_switch(monkeypatch, dao):
+    """轮询开关独立于总开关：关掉只停兜底采样，推送不受影响。"""
+    results = [{"did": "d1", "siid": 2, "piid": 1, "value": True}]
+    poller, _ = _make_poller(monkeypatch, dao, devices={"d1": True}, results=results)
+    import miloco.miot.prop_poller as poller_mod
+
+    poller_mod.get_settings().miot.prop_history_poll_enabled = False
+    await poller._poll_once()
+    assert dao.query("d1", siid=2, piid=1, limit=10) == []

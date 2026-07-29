@@ -50,7 +50,7 @@ TELEMETRY = "telemetry"
 PropClassifier = Callable[[str, int, int], Optional[tuple[str, Optional[float]]]]
 
 
-def _same_value(a: Any, b: Any) -> bool:
+def same_value(a: Any, b: Any) -> bool:
     """类型敏感的相等判断。
 
     Python 里 ``True == 1``、``False == 0``，直接用 ``==`` 会把 bool 开关与
@@ -111,14 +111,16 @@ class PropChangeThrottle:
         st = self._state.get(key)
         if st is None:
             st = self._state[key] = _KeyState()
-            self._evict_if_needed()
 
-        if st.has_value and _same_value(value, st.last_value):
+        if st.has_value and same_value(value, st.last_value):
             # 整包重发 / 设备重复上报：不是一次真实变化。
             self.dropped_same_value += 1
             return False
 
         st.seen.append(ts_ms)
+        # 淘汰放在 seen 记录**之后**:排序键取 seen[-1],刚新建的 key 若在记录前
+        # 参与排序会退化到 last_kept_ms=0 而被立刻淘汰——正好淘汰掉最新的那个。
+        self._evict_if_needed()
         cutoff = ts_ms - self._window_ms
         while st.seen and st.seen[0] < cutoff:
             st.seen.popleft()

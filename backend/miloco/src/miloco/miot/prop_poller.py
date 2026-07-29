@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from miot.types import MIoTGetPropertyParam
 
 from miloco.config import get_settings
+from miloco.miot.prop_throttle import same_value
 
 if TYPE_CHECKING:
     from miloco.miot.client import MiotProxy
@@ -52,9 +53,12 @@ class DevicePropPoller:
         self._last: dict[tuple[str, int, int], Any] = {}
 
     async def run(self) -> None:
-        """Poll loop. Cancelled by MiotProxy.deinit()."""
-        interval = max(10, get_settings().miot.prop_history_poll_interval_sec)
-        logger.info("device-prop poller started (interval=%ds)", interval)
+        """Poll loop. Cancelled by MiotProxy.deinit().
+
+        任务**常驻**(即使启动时开关是关的):周期与开关每轮重读,配置改了
+        下一轮即生效,不必重启后端。_poll_once 在关闭时直接返回。
+        """
+        logger.info("device-prop poller task started")
         while True:
             try:
                 await self._poll_once()
@@ -63,7 +67,9 @@ class DevicePropPoller:
             except Exception as e:
                 # 单周期失败(云端限频/网络抖动)只记 log,下周期自愈。
                 logger.warning("device-prop poll cycle failed: %s", e)
-            await asyncio.sleep(interval)
+            await asyncio.sleep(
+                max(10, get_settings().miot.prop_history_poll_interval_sec)
+            )
 
     def _watch_params(self) -> list[MIoTGetPropertyParam]:
         params = [
@@ -88,7 +94,10 @@ class DevicePropPoller:
         return params
 
     async def _poll_once(self) -> None:
-        if not get_settings().miot.prop_history_enabled:
+        mio = get_settings().miot
+        # 两个开关分开判:prop_history_enabled 管整个能力,poll_enabled 只管
+        # 这条兜底通道——推送已是主链路,用户可以只关轮询而保留推送。
+        if not mio.prop_history_enabled or not mio.prop_history_poll_enabled:
             return
         client = self._proxy._miot_client
         if client is None or not self._proxy.is_authenticated:
@@ -116,18 +125,21 @@ class DevicePropPoller:
             except (KeyError, TypeError, ValueError):
                 continue
             value = r["value"]
-            if key in self._last:
-                if self._last[key] != value:
-                    changed_by_did.setdefault(key[0], []).append(
-                        (key[1], key[2], value)
-                    )
-                self._last[key] = value
-                continue
-            # 首见:对 DB 最新行 diff——重启后值未变则不写基线行,
-            # 值变了(停机窗口内发生的变化)补一行,历史时间线保持连续。
+            if key in self._last and same_value(self._last[key], value):
+                continue  # 同值:零成本跳过,不查库不写库
             self._last[key] = value
+            # 值与进程内基线不同 → **一律再对 DB 最新行确认一次**。
+            #
+            # 这一步是推送与轮询共存的关键:推送落库不会更新轮询的 _last,
+            # 若只信 _last,每次真实变化都会被轮询"再发现一遍"——22:00:00 的
+            # 关机会在库里同时留下 false@22:00:00(推送,事件时刻)和
+            # false@22:04:10(轮询,发现时刻),而 `ORDER BY ts DESC LIMIT 1`
+            # 恰好取到偏晚且不准的那行。以 DB 为两条通道的唯一真相即可消除。
+            #
+            # 同一逻辑天然覆盖「重启后首见」:值没变不写基线行,停机窗口内变了
+            # 补一行,时间线保持连续。
             latest = dao.query(key[0], siid=key[1], piid=key[2], limit=1)
-            if not latest or latest[0]["value"] != value:
+            if not latest or not same_value(latest[0]["value"], value):
                 changed_by_did.setdefault(key[0], []).append((key[1], key[2], value))
         for did, changes in changed_by_did.items():
             dao.insert_changes(did, changes, ts)

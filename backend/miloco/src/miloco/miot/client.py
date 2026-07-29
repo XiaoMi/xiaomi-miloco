@@ -322,7 +322,7 @@ class MiotProxy:
         # disconnect window may have caused us to miss events. Registered AFTER
         # init_async on purpose: the first connect during setup should not
         # pre-empt the initial full refresh done by refresh_miot_info below.
-        self._miot_client.register_mips_connect_callback(self.refresh_devices)
+        self._miot_client.register_mips_connect_callback(self._on_mips_reconnect)
         await self.refresh_miot_info()
 
         if self._token_refresh_task:
@@ -349,13 +349,14 @@ class MiotProxy:
         # Property-history poller — safety net beneath the push path: covers
         # dids whose subscribe was rejected, gaps while mips is disconnected,
         # and properties the device never pushes (see _sync_prop_subscriptions).
+        # 任务无条件常驻:开关与周期由 poller 每轮重读,配置改了下一轮生效,
+        # 不必重启后端(与订阅 sync 的收敛方式一致)。关闭时循环体直接返回。
         if self._prop_poller_task:
             self._prop_poller_task.cancel()
             self._prop_poller_task = None
-        if get_settings().miot.prop_history_enabled:
-            from miloco.miot.prop_poller import DevicePropPoller
+        from miloco.miot.prop_poller import DevicePropPoller
 
-            self._prop_poller_task = asyncio.create_task(DevicePropPoller(self).run())
+        self._prop_poller_task = asyncio.create_task(DevicePropPoller(self).run())
 
     async def deinit(self):
         """Deinit MIoT proxy: cancel tasks, destroy cameras, close client, clear all state."""
@@ -1193,6 +1194,22 @@ class MiotProxy:
         thin shim, mirroring ``_on_user_bind_event``.
         """
         await self._scene_listener.on_event(msg)
+
+    async def _on_mips_reconnect(self) -> dict[str, MIoTDeviceInfo] | None:
+        """MQTT (重)连后的收口:清空属性订阅被拒计数,再全量刷设备。
+
+        `_prop_sub_rejects` 记的是**连续**失败,但只在订阅成功时清零——若某 did
+        永远失败,计数就退化成"累计",一次跨天的偶发抖动攒够 3 次也会让它被永久
+        放弃。重连意味着 broker 换了一份 ACL 快照,此前的失败不再有参考价值,
+        这里清零让每条新连接都是一次干净的重试机会。
+        """
+        if self._prop_sub_rejects:
+            logger.info(
+                "mips reconnected, clearing %d device-prop reject counter(s)",
+                len(self._prop_sub_rejects),
+            )
+            self._prop_sub_rejects.clear()
+        return await self.refresh_devices()
 
     def _classify_prop(
         self, did: str, siid: int, piid: int

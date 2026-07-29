@@ -247,6 +247,11 @@ class MiotSettings(BaseModel):
     prop_history_retention_days: int = Field(
         default=30, description="属性历史保留天数;写路径顺带清理过期行。"
     )
+    prop_history_poll_enabled: bool = Field(
+        default=True,
+        description="是否启用属性历史的轮询兜底通道。推送是主链路,本开关只管"
+        "兜底采样;关掉后仅保留推送(设备不上报的属性将不再有历史)。",
+    )
     prop_history_poll_interval_sec: int = Field(
         default=300,
         description="属性历史轮询周期(秒)。推送为主链路,轮询只做兜底采样:"
@@ -274,8 +279,9 @@ class MiotSettings(BaseModel):
     )
     prop_history_throttle_rel_delta: float = Field(
         default=0.3,
-        description="高频遥测属性的相对幅度阈值:相对上次**落库值**变化达到该"
-        "比例即落库(不等最小间隔)。0.2 = 20%。",
+        description="高频遥测属性的幅度阈值。spec 有 value-range 时按**满量程**"
+        "比例判定(0–100 的湿度设 0.3 = 变化 30 个百分点才落库);无量程时退化为"
+        "相对上次落库值的比例。0.3 = 30%。",
     )
     prop_history_poll_extra: list[str] = Field(
         default_factory=list,

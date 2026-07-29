@@ -217,3 +217,17 @@ def test_stats_accounting():
     assert s["dropped_same_value"] == 1
     assert s["dropped_throttled"] >= 1
     assert s["kept"] >= 2
+
+
+def test_eviction_does_not_drop_the_key_being_recorded():
+    """淘汰不能把刚新建的 key 当成最冷的一个丢掉。
+
+    排序键取 `seen[-1]`；若在 seen 记录**之前**淘汰，新 key 的排序键退化到
+    `last_kept_ms=0`，必然排在最前——每次超限都恰好淘汰掉最新的那个，
+    热 key 反而永远建不起来。
+    """
+    t = _t(max_keys=1000)
+    for i in range(1100):
+        t.allow(f"d{i}", 2, 1, True, i)
+    # 最后写入的 key 必须还在（未被自己的插入触发的淘汰清掉）
+    assert ("d1099", 2, 1) in t._state
