@@ -256,14 +256,14 @@ def build_on_demand_feedback_pack(
     error_types: list[str],
     feedback_text: str,
     uid: str = "",
-) -> tuple[Path, int, dict]:
+) -> dict:
     """打包 on-demand query 反馈数据 -> tar.gz.
 
     与 build_feedback_pack 结构一致,但数据来源是 on_demand_log 而非 meaningful_events;
     查询路径不产画廊,故 components 无 gallery_included 键.
 
     Returns:
-        (pack_path, size_bytes, components) — components 是完整性记录
+        {path, size_bytes, components}
         {omni_trace_found, clips_found, clips_missing},端点需原样回给前端.
     """
     snapshot_root = get_snapshot_root()
@@ -355,4 +355,8 @@ def build_on_demand_feedback_pack(
     size_bytes = final_path.stat().st_size
     _cleanup_by_total_size(packs_dir)
 
-    return final_path, size_bytes, components
+    return {
+        "path": final_path.as_posix(),
+        "size_bytes": size_bytes,
+        "components": components,
+    }

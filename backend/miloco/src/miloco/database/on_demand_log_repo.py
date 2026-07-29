@@ -36,6 +36,9 @@ class OnDemandLogRepo:
         clip_dids = row.get("clip_dids", "[]")
         if isinstance(clip_dids, str):
             clip_dids = json.loads(clip_dids)
+        clip_kinds = row.get("clip_kinds", "{}")
+        if isinstance(clip_kinds, str):
+            clip_kinds = json.loads(clip_kinds)
         return {
             "id": row["id"],
             "timestamp": row["timestamp"],
@@ -45,7 +48,7 @@ class OnDemandLogRepo:
             "latency_ms": row["latency_ms"],
             "snapshot_count": row.get("snapshot_count", 0),
             "clip_dids": clip_dids,
-            "clip_kinds": json.loads(row.get("clip_kinds", "{}")),
+            "clip_kinds": clip_kinds,
             "has_trace": bool(row.get("has_trace", 0)),
         }
 

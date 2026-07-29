@@ -206,7 +206,7 @@ async def submit_on_demand_feedback(log_id: str, body: OnDemandFeedbackBody):
             "falling back to anonymous"
         )
 
-    pack_path, pack_size, components = await asyncio.to_thread(
+    result = await asyncio.to_thread(
         build_on_demand_feedback_pack,
         log_id=log_id,
         row=row,
@@ -218,11 +218,11 @@ async def submit_on_demand_feedback(log_id: str, body: OnDemandFeedbackBody):
         code=0, message="ok",
         data={
             "log_id": log_id,
-            "pack_path": str(pack_path),
-            "pack_size_bytes": pack_size,
+            "pack_path": result["path"],
+            "pack_size_bytes": result["size_bytes"],
             "uploaded": False,
             "upload_key": None,
-            "components": components,
+            "components": result["components"],
         },
     )
 
