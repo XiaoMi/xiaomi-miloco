@@ -57,6 +57,9 @@ def region_slug(s: str) -> str:
     return slug or "_"
 
 
+# 视频路径产物 clip.mp4 (H264+AAC);audio-only 路径产物 clip.m4a (仅 AAC,ipod muxer).
+# 探测顺序:先 mp4 后 m4a,先找到的优先返回。
+# 落盘/事件 clip 端点/主动查询 clip 端点/反馈打包四处同源;加新容器改这里 + ClipKind。
 CLIP_CANDIDATES: tuple[str, ...] = ("clip.mp4", "clip.m4a")
 MEDIA_TYPE_BY_SUFFIX: dict[str, str] = {".mp4": "video/mp4", ".m4a": "audio/mp4"}
 
@@ -145,7 +148,7 @@ def _save_clips(
     for device_id, (clip_bytes, kind) in clips.items():
         if not clip_bytes:
             continue
-        if kind not in ("mp4", "m4a"):
+        if f"clip.{kind}" not in CLIP_CANDIDATES:
             logger.error("Unknown clip kind %r for %s; skipping", kind, device_id)
             continue
         device_dir = event_dir / region_slug(device_id)

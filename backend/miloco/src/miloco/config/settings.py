@@ -322,7 +322,11 @@ class PerceptionSettings(BaseModel):
     )
     snapshot_max_disk_mb: int = Field(
         default=5000,
-        description="截图磁盘配额上限(MB);超出按 mtime 升序 LRU 删",
+        description=(
+            "snapshot 目录总大小上限(MB),超限按 mtime LRU 淘汰最旧事件目录。"
+            "注意实时事件 clip 与主动查询 clip 共享这一份配额:主动查询目录总是最新的,"
+            "永远排在存活侧,高频查询会把历史事件 clip 提前挤出配额"
+        ),
     )
     snapshot_min_free_disk_mb: int = Field(
         default=500,

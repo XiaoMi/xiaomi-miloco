@@ -125,20 +125,24 @@ class EventsService:
             return None
         for did in device_ids:
             device_dir = snapshot_root / event_id / region_slug(did)
-            for filename, kind in (("clip.mp4", "mp4"), ("clip.m4a", "m4a")):
-                if (device_dir / filename).exists():
-                    return kind
+            for filename in CLIP_CANDIDATES:
+                path = device_dir / filename
+                if path.exists():
+                    return path.suffix[1:]
         return None
 
     _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
     @staticmethod
     def _build_feedback_index() -> dict[str, tuple[str, int]]:
-        """一次扫描 packs 目录,建 event_id → (path, size) 索引.
+        """一次扫描 packs 目录,建 event_id / log_id → (path, size) 索引.
 
-        文件名格式: feedback-{uid}-{event_id}-{YYYYMMDD-HHMMSS}.tar.gz
-        通过 UUID 正则匹配 event_id,兼容有无 uid 前缀.
-        同一 event_id 有多个 pack 时取最新(mtime 最大).
+        两种包名共用本索引:
+        - 事件包     feedback-{uid}-{event_id}-{YYYYMMDD-HHMMSS}.tar.gz
+        - 主动查询包 feedback-{uid}-od-{log_id}-{YYYYMMDD-HHMMSS}.tar.gz
+        取 UUID 正则 findall 的最后一个匹配,故 uid/字面量 od/时间戳都不会被误命中.
+        调用方: EventsService.list_events 与 PerceptionService.query_on_demand_logs.
+        同一 id 有多个 pack 时取最新(mtime 最大).
         """
         packs_dir = miloco_home() / "packs"
         if not packs_dir.exists():

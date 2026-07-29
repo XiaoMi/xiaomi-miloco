@@ -51,13 +51,17 @@
       → PII 脱敏（trace 文本 + 事件 text + 用户补充）
       → 写 metadata.json + omni_trace + clips(+可选 gallery) 到
         $MILOCO_HOME/packs/{时间戳子目录}/feedback-{uid}-{event_id(完整 UUID)}-{时间戳}.tar.gz
+        主动查询包同目录、多一个 od 段:feedback-{uid}-od-{log_id(完整 UUID)}-{时间戳}.tar.gz
+        _build_feedback_index 的 UUID 正则取 findall 的最后一个匹配,故两种格式共用一份索引
       → 按总大小清理旧包
       → 返回 {path, size_bytes, components}
 
-已反馈态（列表侧,与打包解耦）：
+已反馈态（列表侧,与打包解耦；两条链路共用一份索引）：
   GET 事件列表 → EventsService.list_events（perception/events_service.py）
-      _build_feedback_index 扫 packs 目录,UUID 正则回捞 event_id → (path,size)
-      → MeaningfulEvent.has_feedback / feedback_pack_path / feedback_pack_size
+  GET 主动查询列表 → PerceptionService.query_on_demand_logs（perception/service.py，
+      跨模块直调 EventsService._build_feedback_index）
+      → 扫 packs 目录,UUID 正则回捞 event_id / log_id → (path,size)
+      → MeaningfulEvent / OnDemandLogEntry 的 has_feedback / feedback_pack_path / feedback_pack_size
 
 打开文件夹：
   已反馈态点「打开所在文件夹」→ revealDir → POST /api/admin/reveal-dir
@@ -66,17 +70,17 @@
 
 ### 核心模块
 
-| 类 / 符号                                     | 文件                                                    | 职责                                                                                                              |
-| --------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `build_feedback_pack`                         | `admin/feedback_pack.py`                                | 打包核心：取事件 → 读事件目录 artifacts → PII 脱敏 → 写 tar.gz → 总大小清理；返回 path/size/components 完整性记录 |
-| `submit_event_feedback` / `reveal_dir`        | `admin/router.py`                                       | 反馈提交端点（解析 uid、线程化打包、映射 404/500）；打开文件夹端点（限 packs 根，跨平台 open）                    |
-| `EventsService._build_feedback_index`         | `perception/events_service.py`                          | 扫 packs 目录建 `event_id → (path,size)` 索引，把「已反馈态」注入事件列表（同一事件多包取最新）                   |
-| `MeaningfulEvent`（反馈相关字段）             | `perception/schema.py`                                  | 事件对外模型新增 `has_feedback` / `feedback_pack_path` / `feedback_pack_size`；`has_trace` 决定前端是否显示入口   |
-| `OmniEventArtifacts` / `save_event_artifacts` | `perception/snapshot_context.py` / `snapshot_writer.py` | 推理侧旁路收集 clip/trace/gallery 并落到事件目录——本模块打包的原料源（属感知流水线，非本模块产出）                |
-| `FeedbackSection`                             | `web/src/components/ActivityFeed.tsx`                   | 反馈面板 UI：错误类别多选、补充文本、画廊开关、已反馈态、飞书问卷链接、打开文件夹                                 |
+| 类 / 符号                                     | 文件                                                    | 职责                                                                                                                              |
+| --------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `build_feedback_pack`                         | `admin/feedback_pack.py`                                | 打包核心：取事件 → 读事件目录 artifacts → PII 脱敏 → 写 tar.gz → 总大小清理；返回 path/size/components 完整性记录                 |
+| `submit_event_feedback` / `reveal_dir`        | `admin/router.py`                                       | 反馈提交端点（解析 uid、线程化打包、映射 404/500）；打开文件夹端点（限 packs 根，跨平台 open）                                    |
+| `EventsService._build_feedback_index`         | `perception/events_service.py`                          | 扫 packs 目录建 `event_id → (path,size)` 索引，把「已反馈态」注入事件列表（同一事件多包取最新）                                   |
+| `MeaningfulEvent`（反馈相关字段）             | `perception/schema.py`                                  | 事件对外模型新增 `has_feedback` / `feedback_pack_path` / `feedback_pack_size`；`has_trace` 决定前端是否显示入口                   |
+| `OmniEventArtifacts` / `save_event_artifacts` | `perception/snapshot_context.py` / `snapshot_writer.py` | 推理侧旁路收集 clip/trace/gallery 并落到事件目录——本模块打包的原料源（属感知流水线，非本模块产出）                                |
+| `FeedbackSection`                             | `web/src/components/ActivityFeed.tsx`                   | 反馈面板 UI：错误类别多选、补充文本、画廊开关、已反馈态、飞书问卷链接、打开文件夹                                                 |
 | `build_on_demand_feedback_pack`               | `admin/feedback_pack.py`                                | on-demand 查询反馈打包：取日志行 → 读 `snapshots/{log_id}/` artifacts → PII 脱敏 → tar.gz；`clips_missing_basis` 基于 `clip_dids` |
-| `submit_on_demand_feedback`                   | `perception/router.py`                                  | on-demand 反馈端点（POST `/api/perception/on-demand-logs/{log_id}/feedback`）；返回 path/size/components                        |
-| `OnDemandFeedback`                            | `web/src/components/ActivityFeed.tsx`                   | on-demand 查询反馈面板 UI，镜像 `FeedbackSection` 行为（含 `confirmedResubmit` 修改门控）                                       |
+| `submit_on_demand_feedback`                   | `perception/router.py`                                  | on-demand 反馈端点（POST `/api/perception/on-demand-logs/{log_id}/feedback`）；返回 path/size/components                          |
+| `OnDemandFeedback`                            | `web/src/components/ActivityFeed.tsx`                   | on-demand 查询反馈面板 UI，镜像 `FeedbackSection` 行为（含 `confirmedResubmit` 修改门控）                                         |
 
 ### 关键设计决策
 
@@ -98,6 +102,7 @@
 
 - **`POST /api/admin/events/feedback`**：入参 `event_id` + 错误类别 + 补充文本 + 是否含画廊；返回 `pack_path` / `pack_size_bytes` / `uploaded`(当前恒 false) / `upload_key`(当前 null) / `components`。`components` 逐项标注 trace 是否找到、哪些 device 的 clip 找到 / 缺失、画廊是否含入——即使部分缺失也成功返回。事件不存在返回 404。
 - **`POST /api/admin/reveal-dir`**：入参 `path`（须在 packs 根内），在系统文件管理器打开该目录；越界 403、不存在 404。
+- **`POST /api/perception/on-demand-logs/{log_id}/feedback`**：主动查询版，入参 `error_types` + `feedback_text`（无画廊开关——查询路径不产画廊）；返回形状与事件版一致，但 `components` 只有 `omni_trace_found` / `clips_found` / `clips_missing` 三键，没有 `gallery_included`。`clips_missing` 的基准是 `on_demand_log.clip_dids`（真正落过 clip 的设备），与事件版按 `device_ids` 遍历不同，故包内 `metadata.json` 额外带 `clips_missing_basis` 字段标注基准。日志行不存在返回 404。
 - **事件模型的反馈字段**：`has_feedback`（是否已有包）、`feedback_pack_path` / `feedback_pack_size`（最近一次包的本地路径与大小）；`has_trace` 供前端决定是否显示反馈入口。字段定义见 `perception/schema.py::MeaningfulEvent`。
 
 ### 如果我要改事件反馈相关功能
