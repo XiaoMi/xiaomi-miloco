@@ -857,6 +857,9 @@ const ERROR_TYPE_KEYS = [
   "other",
 ] as const;
 
+// 主动查询不经过规则匹配/建议生成,排除 ruleFalse;其余类别与事件侧同源。
+const OD_ERROR_TYPE_KEYS = ERROR_TYPE_KEYS.filter((k) => k !== "ruleFalse");
+
 function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
   eventId: string;
   hasFeedback?: boolean;
@@ -1438,7 +1441,7 @@ function OnDemandFeedback({ logId, feedbackDone, feedbackPack, onSubmitted }: {
       <div className="text-[13px] font-semibold text-text-primary mb-2.5">{t("activity.feedbackTitle")}</div>
       <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackErrorType")}</div>
       <div className="flex flex-wrap gap-1.5 mb-3">
-        {(["person","pet","action","envDevice","voice","other"] as const).map((k) => (
+        {OD_ERROR_TYPE_KEYS.map((k) => (
           <button key={k} type="button"
             onClick={() => setSelected((prev) => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; })}
             className={`px-2.5 py-1 text-caption rounded-full border transition-colors ${selected.has(k) ? "text-brand-primary bg-brand-soft border-brand-primary" : "text-text-secondary bg-bg-secondary border-border hover:border-border-strong"}`}>

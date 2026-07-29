@@ -476,7 +476,13 @@ class PerceptionLogEntry(BaseModel):
 
 
 class OnDemandLogEntry(BaseModel):
-    """On-demand perception query log entry stored in DB."""
+    """On-demand perception query log — 写库入参 DTO,不是列表 API 的响应模型.
+
+    列表响应形状由 OnDemandLogRepo._row_to_dict + PerceptionService.
+    query_on_demand_logs 就地注入的 has_feedback / feedback_pack_path /
+    feedback_pack_size 决定;加对外字段要同时改那两处与
+    web/src/lib/types.ts::OnDemandLogEntry.
+    """
 
     id: str = Field(..., description="UUID")
     timestamp: int = Field(..., description="Query time, millisecond Unix timestamp")
@@ -491,9 +497,6 @@ class OnDemandLogEntry(BaseModel):
         default=False,
         description="omni_trace.json.gz on disk (list API overrides DB column with live stat)",
     )
-    has_feedback: bool = Field(default=False, description="Derived from packs dir scan, not a DB column")
-    feedback_pack_path: str | None = Field(default=None, description="Latest feedback pack local path")
-    feedback_pack_size: int | None = Field(default=None, description="Latest feedback pack bytes")
 
 
 class MeaningfulEvent(BaseModel):
