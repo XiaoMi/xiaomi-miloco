@@ -263,14 +263,21 @@ def _generate_supervisor_conf(server_cmd: str) -> None:
     # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
     tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
     # glibc(ptmalloc2)长跑内存调优:decoder 每帧 MB 级 buffer 高频 malloc/free,在
-    # per-thread arena 里碎片化、freed 不还 OS,RSS 只涨不落。ARENA_MAX=6 封顶 arena
-    # 数(2~32 核通用,限制碎片乘数;不同于 MMAP 每帧 sys 税,它不在分配热路径加每帧开
-    # 销,唯一理论代价是 arena 变少致多线程 malloc 锁争用略增、本场景线程数下可忽略、未
-    # 单独实测)。不钉 MMAP_THRESHOLD_:钉死会让每帧
-    # 大块走 mmap、free 即还,虽稳住 RSS 但每帧付 mmap+缺页的 sys CPU 税;放开后帧走
-    # arena 复用免此税,碎片改由 backend 的 _malloc_trim_loop 周期 malloc_trim 回收。
-    # musl/macOS 无视此变量,注入无害。
-    malloc_env = ',MALLOC_ARENA_MAX="6"'
+    # per-thread arena 里碎片化、freed 不还 OS,RSS 只涨不落(真机实测 malloc_trim 可
+    # 吐 ~880MB)。MMAP_THRESHOLD_ 钉死 128KB 并关掉动态自增→大块永远 mmap、free 即
+    # 还 OS(主力,真机实测显著压低 RSS 水平值);ARENA_MAX=6 封顶 arena 数(2~32 核通用,
+    # 是上限非目标);TRIM_THRESHOLD_ 钉死→主 arena 堆顶更勤还 OS。musl/macOS 无视这些
+    # 变量,注入无害。
+    #
+    # 曾担心"每帧大块走 mmap 付 sys 税"而一度去掉钉死,后实测证伪:那个 sys 税只在
+    # 单块 malloc/free 紧循环里成立(默认态白捡 arena 复用→钉死打掉它才暴涨)。真实解码
+    # 路径每帧产两块 6.2MB buffer(to_ndarray + astype),默认态本就复用不上、已在缺页,
+    # 钉死增量仅 +0.1~0.2ms/帧,单摄像头 15fps 平摊 ~0.2% 单核,可忽略。故保留钉死。
+    malloc_env = (
+        ',MALLOC_ARENA_MAX="6"'
+        ',MALLOC_MMAP_THRESHOLD_="131072"'
+        ',MALLOC_TRIM_THRESHOLD_="131072"'
+    )
     conf = f"""\
 [supervisord]
 logfile={_supervisor_log()}

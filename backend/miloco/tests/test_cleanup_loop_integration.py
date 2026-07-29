@@ -1,13 +1,12 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""集成测试:_daily_maintenance_loop 清理逻辑 + _malloc_trim_loop 内存回收.
+"""集成测试:_daily_maintenance_loop 追加的两块清理(D3-T11).
 
-直接跑一轮 loop body(不走真实 sleep),验证:
+直接跑一轮 cleanup 逻辑(不走 24h sleep),验证:
 - meaningful_events.delete_before_days 被调用
 - cleanup_snapshots 被调用
 - 任一块失败不阻塞其它块(B9 强约束)
-- _malloc_trim_loop:非 glibc 直接退出、正常调 trim、trim 失败不崩
 """
 
 import asyncio
@@ -47,8 +46,7 @@ def isolated_env(tmp_path, monkeypatch):
 async def _run_loop_until_second_sleep(loop_coro_factory):
     """跑一轮 loop body:第一次 sleep 立即放行,第二次抛 Cancel 顶出 while True。
 
-    维护/trim 两条循环结构相同(首个 sleep 是启动延迟、之后 sleep 是周期等待),
-    共用此驱动,避免两份 patch 逻辑各自漂移。
+    首个 sleep 是启动延迟、之后 sleep 是周期等待,用此驱动跳过两段等待只跑一轮 body。
     """
     real_sleep = asyncio.sleep
     call_count = [0]
@@ -72,12 +70,6 @@ async def _run_one_cycle():
 
     await _run_loop_until_second_sleep(main_module._daily_maintenance_loop)
 
-
-async def _run_trim_once():
-    """运行 _malloc_trim_loop 的一轮 body(跳过 6h 等待)."""
-    from miloco import main as main_module
-
-    await _run_loop_until_second_sleep(main_module._malloc_trim_loop)
 
 
 class TestCleanupLoop:
@@ -177,37 +169,12 @@ class TestCleanupLoop:
             assert main_module._trim_malloc_arenas() is None
 
     @pytest.mark.asyncio
-    async def test_malloc_trim_loop_exits_when_non_glibc(self):
-        """非 glibc(_malloc_trim 为 None):_malloc_trim_loop 立即返回,不进循环."""
-        from miloco import main as main_module
-
-        with patch.object(main_module, "_malloc_trim", None):
-            # 未进 while 应瞬时返回;若进了循环会卡在真实 sleep,超时即回归
-            await asyncio.wait_for(main_module._malloc_trim_loop(), timeout=1)
-
-    @pytest.mark.asyncio
-    async def test_malloc_trim_loop_invokes_trim(self):
-        """正常路径:_malloc_trim_loop 一轮里调用 _trim_malloc_arenas."""
-        from miloco import main as main_module
-
-        trim = MagicMock(return_value=1)
-        with (
-            patch.object(main_module, "_trim_malloc_arenas", trim),
-            patch.object(main_module, "_malloc_trim", MagicMock()),
-        ):
-            await _run_trim_once()
-            assert trim.called
-
-    @pytest.mark.asyncio
-    async def test_malloc_trim_loop_failure_does_not_block(self):
-        """B9:malloc_trim 抛异常 → trim 循环不崩(异常被吞、不冒泡)."""
+    async def test_malloc_trim_failure_does_not_block_loop(self, isolated_env):
+        """B9:malloc_trim 抛异常 → 维护循环不崩(异常被吞、不冒泡)."""
         from miloco import main as main_module
 
         boom = MagicMock(side_effect=RuntimeError("trim boom"))
-        with (
-            patch.object(main_module, "_trim_malloc_arenas", boom),
-            patch.object(main_module, "_malloc_trim", MagicMock()),
-        ):
+        with patch.object(main_module, "_malloc_trim", boom):
             # 不应抛 RuntimeError
-            await _run_trim_once()
+            await _run_one_cycle()
             assert boom.called
