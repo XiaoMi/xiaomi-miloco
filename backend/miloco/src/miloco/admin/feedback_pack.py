@@ -277,8 +277,8 @@ def build_on_demand_feedback_pack(
         sanitized_trace = _sanitize_trace(trace_path.read_bytes())
     components["omni_trace_found"] = sanitized_trace is not None
 
-    device_ids: list[str] = row.get("sources", [])
-    for did in device_ids:
+    clip_dids: list[str] = row.get("clip_dids", [])
+    for did in clip_dids:
         slug = region_slug(did)
         clip_dir = event_dir / slug
         found = False
@@ -302,7 +302,7 @@ def build_on_demand_feedback_pack(
         "timestamp": row.get("timestamp"),
         "query": _sanitize_pii(row.get("query", "")),
         "answer": _sanitize_pii(row.get("answer", "")),
-        "sources": device_ids,
+        "sources": row.get("sources", []),
         "latency_ms": row.get("latency_ms"),
         "error_types": [_ERROR_TYPE_LABELS.get(k, k) for k in error_types],
         "user_feedback": _sanitize_pii(feedback_text),

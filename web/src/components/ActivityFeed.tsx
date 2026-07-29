@@ -1198,7 +1198,15 @@ function OnDemandLogList({ initial, homeId, deviceNames, onCountChange }: {
   if (logs.length === 0) {
     return (
       <div className="text-body text-center py-10 text-text-secondary">
-        {t("activity.odEmpty")}
+        <div>{t("activity.odEmpty")}</div>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={refreshing}
+          className="mt-3 text-caption text-text-tertiary hover:text-text-primary transition-colors disabled:opacity-50"
+        >
+          {refreshing ? t("activity.odLoading") : t("activity.odRefresh")}
+        </button>
       </div>
     );
   }
@@ -1356,19 +1364,28 @@ function OnDemandFeedback({ logId, feedbackDone, feedbackPack, onSubmitted }: {
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [confirmedResubmit, setConfirmedResubmit] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [text, setText] = useState("");
   const [status, setStatus] = useState<"idle" | "submitting" | "error">("idle");
 
   if (!open && status === "idle") {
-    if (feedbackDone && feedbackPack) {
+    if (feedbackDone && !confirmedResubmit) {
       return (
         <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg bg-info-bg text-caption" onClick={(e) => e.stopPropagation()}>
-          <span className="text-info">
-            ✓ {t("activity.feedbackSaved")}
-            {feedbackPack.path && <>，<button type="button" onClick={() => { const i = feedbackPack.path.lastIndexOf("/"); if (i > 0) revealDir(feedbackPack.path.substring(0, i)).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal")}</button></>}
-            ，<a href={FEEDBACK_FORM_URL} target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink")}</a>
-          </span>
+          <div className="flex items-baseline justify-between">
+            <span className="text-info">
+              ✓ {t("activity.feedbackSaved")}
+              {feedbackPack?.path && <>，<button type="button" onClick={() => { const i = feedbackPack.path.lastIndexOf("/"); if (i > 0) revealDir(feedbackPack.path.substring(0, i)).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal")}</button></>}
+              ，<a href={FEEDBACK_FORM_URL} target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink")}</a>
+            </span>
+            <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
+              {t("activity.feedbackModify", "修改反馈信息")}
+            </button>
+          </div>
+          {feedbackPack?.path && (
+            <div className="mt-1.5 text-[10px] text-text-tertiary font-mono truncate" title={feedbackPack.path}>{feedbackPack.path}</div>
+          )}
         </div>
       );
     }
@@ -1409,8 +1426,11 @@ function OnDemandFeedback({ logId, feedbackDone, feedbackPack, onSubmitted }: {
     try {
       const result = await submitOnDemandFeedback(logId, [...selected], text);
       onSubmitted(result.pack_path, result.pack_size_bytes);
+      setConfirmedResubmit(false);
       setStatus("idle");
       setOpen(false);
+      setSelected(new Set());
+      setText("");
     } catch {
       setStatus("error");
     }
@@ -1436,7 +1456,7 @@ function OnDemandFeedback({ logId, feedbackDone, feedbackPack, onSubmitted }: {
         ⚠ {t("activity.feedbackPrivacy")}
       </div>
       <div className="flex justify-end items-center gap-1.5 mt-2.5">
-        <button type="button" onClick={() => { setOpen(false); setSelected(new Set()); setText(""); }}
+        <button type="button" onClick={() => { setOpen(false); setConfirmedResubmit(false); setSelected(new Set()); setText(""); }}
           className="px-3.5 py-[5px] text-caption text-text-secondary rounded-md hover:bg-bg-tertiary transition-colors">
           {t("activity.feedbackCancel")}
         </button>
