@@ -123,8 +123,10 @@ export interface ActivityEvent {
   /** clip 容器类型,服务端 stat 落盘文件后缀计算:
    *   "mp4" = 视频路径(H264+AAC,UI 显 🎬)
    *   "m4a" = audio-only 路径(纯 AAC,UI 显 🎤 音频)
+   *   "wav" = audio-only 路径(PCM,UI 显 🎤 音频)
+   *   "mp3" = audio-only 路径(MP3,UI 显 🎤 音频)
    *   undefined / null = 未落盘(老 event / metadata-only / 已被 cleanup 清掉) */
-  clip_kind?: "mp4" | "m4a" | null;
+  clip_kind?: "mp4" | "m4a" | "wav" | "mp3" | null;
   /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
   has_trace?: boolean;
   /** 该事件是否已有反馈打包 */
@@ -318,6 +320,8 @@ export interface OmniModelConfig {
   api_key_masked: string;
   /** 是否已配置 api_key。 */
   has_key: boolean;
+  /** 音频编码格式：m4a / wav / mp3，默认 m4a。 */
+  audio_format?: string;
 }
 
 /** 已保存的配置档案（label 为唯一标识），active 标记是否为当前生效。 */
@@ -395,6 +399,8 @@ export interface OmniConfigUpdate {
   original_label?: string;
   /** 是否同时设为当前生效；省略=后端默认 true。「保存」传 false（激活走列表的「启用」）。 */
   activate?: boolean;
+  /** 音频编码格式：m4a / wav / mp3，默认 m4a。 */
+  audio_format?: string;
 }
 
 /** 测试连接结果：ok=true 即连通；否则 message 给出原因（Key 无效 / 不可达 / 模型不存在等）。 */

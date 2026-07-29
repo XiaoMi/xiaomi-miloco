@@ -17,6 +17,7 @@ import { UsageTodayOverview } from "./UsageTodayOverview";
 import { UsageTimelineChart } from "./UsageTimelineChart";
 import { UsageBreakdownTable } from "./UsageBreakdownTable";
 import { UsageOmniConfig } from "./UsageOmniConfig";
+import { SplitModelConfig } from "./SplitModelConfig";
 import { PerfInline } from "./PerfInline";
 
 export function UsagePage() {
@@ -36,6 +37,9 @@ export function UsagePage() {
     <div className="space-y-6">
       {/* 模型配置卡置顶、可折叠;独立于用量加载(用量请求失败也能在此修配置自救) */}
       <UsageOmniConfig />
+
+      {/* 截图模式双模型配置（可选，配了则截图模式下自动拆分） */}
+      <SplitModelConfig />
 
       <section className="rounded-xl bg-bg-secondary border border-border shadow-sm p-5 md:p-6">
         <h2 className="text-section-title mb-4">{t("usage.tokenUsageTitle")}</h2>

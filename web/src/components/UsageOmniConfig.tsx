@@ -183,6 +183,7 @@ export function UsageOmniConfig() {
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false); // API Key 明文/密文切换(末端眼睛图标)
   const [model, setModel] = useState("");
+  const [audioFormat, setAudioFormat] = useState("m4a"); // 音频编码格式
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsMsg, setModelsMsg] = useState<string | null>(null);
@@ -235,6 +236,7 @@ export function UsageOmniConfig() {
     setApiKey("");
     setShowKey(false);
     setModel("");
+    setAudioFormat("m4a");
     setModels([]);
     setModelsMsg(null);
     setModelsErr(false);
@@ -250,6 +252,7 @@ export function UsageOmniConfig() {
     setApiKey("");
     setShowKey(false);
     setModel(p.model);
+    setAudioFormat(p.audio_format || "m4a");
     setModels([]);
     setModelsMsg(null);
     setModelsErr(false);
@@ -315,6 +318,7 @@ export function UsageOmniConfig() {
         api_key: apiKey.trim() || undefined,
         original_label: target,
         activate: false, // 只入列表;启用由模型列表的「启用」负责
+        audio_format: audioFormat,
       });
       setState(s);
       setAdding(false);
@@ -750,6 +754,20 @@ export function UsageOmniConfig() {
                             : models.length
                               ? t("usage.modelsCount", { n: models.length })
                               : t("usage.modelsHint")}
+                    </span>
+                  </Field>
+                  <Field label={t("usage.audioFormatLabel")}>
+                    <select
+                      value={audioFormat}
+                      onChange={(e) => setAudioFormat(e.target.value)}
+                      className={INPUT_CLS}
+                    >
+                      <option value="m4a">m4a (AAC) — MiMo/Qwen/Gemini</option>
+                      <option value="wav">wav — 智谱/OpenAI</option>
+                      <option value="mp3">mp3 — 通用兼容</option>
+                    </select>
+                    <span className="text-caption mt-1 block text-text-tertiary">
+                      {t("usage.audioFormatHint")}
                     </span>
                   </Field>
                   <div className="md:col-span-2 pt-1 flex items-center gap-3 flex-wrap">

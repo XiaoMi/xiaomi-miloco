@@ -28,6 +28,10 @@ class InputConfig:
     # 实测:小目标清晰度主要由输入像素分辨率(video_short_edge)决定,本档位只控每帧 token 预算,
     # 故默认 low;identity 等细节敏感场景可经 CLI 切 high。运行时由 GeminiAdapter 实时读 settings。
     media_resolution: str = ""
+    # 传输模式: "video" = 编码为 mp4(H.264+AAC) 发送(默认,兼容性最好);
+    # "screenshot" = 编码为 JPEG 图片序列 + 独立音频发送(跳过 H.264 编码, CPU/内存占用显著降低)。
+    # 截图模式复用 omni_fps 控制帧率。音频始终独立编码为 m4a/wav/mp3。
+    transmission_mode: str = "video"
 
 
 @dataclass
@@ -356,6 +360,10 @@ class PerceptionConfig:
     gate: GateConfig = field(default_factory=GateConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
     omni: OmniConfig = field(default_factory=OmniConfig)
+    # 截图模式双模型拆分（可选）：配了则 screenshot 模式下并发调用两个专用模型。
+    # 未配时 screenshot 模式仍用单 omni 模型发图片+音频。
+    vision_omni: OmniConfig | None = None
+    audio_omni: OmniConfig | None = None
     identity_engine: IdentityEngineConfig = field(default_factory=IdentityEngineConfig)
 
 

@@ -1094,8 +1094,8 @@ interface BackendMeaningfulEvent {
   snapshot_count: number;
   device_ids: string[];
   rule_names?: Record<string, string>;
-  /** 服务端根据落盘文件后缀计算:"mp4" 视频路径 / "m4a" audio-only / null 未落盘. */
-  clip_kind?: "mp4" | "m4a" | null;
+  /** 服务端根据落盘文件后缀计算:"mp4" 视频路径 / "m4a"|"wav"|"mp3" audio-only / null 未落盘. */
+  clip_kind?: "mp4" | "m4a" | "wav" | "mp3" | null;
   has_trace?: boolean;
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
@@ -1518,6 +1518,7 @@ export async function realUpdateOmniConfig(
   if (input.api_key) body.api_key = input.api_key;
   if (input.original_label !== undefined) body.original_label = input.original_label;
   if (input.activate !== undefined) body.activate = input.activate;
+  if (input.audio_format) body.audio_format = input.audio_format;
   const r = await apiFetch<Normal<OmniConfigState>>("/api/admin/omni-config", {
     method: "PUT",
     body: JSON.stringify(body),

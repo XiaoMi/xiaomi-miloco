@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # clip 字节的容器/codec 类型,持久化层据此选 filename 与 Content-Type.
 # 主流 UI <video> 控件对两者都能渲染,但浏览器 / 一些播放器靠扩展名 sniff 容器,
 # 所以扩展名要跟实际容器一致(M4A 不能伪装成 .mp4).
-ClipKind = Literal["mp4", "m4a"]
+ClipKind = Literal["mp4", "m4a", "wav", "mp3"]
 
 
 @dataclass

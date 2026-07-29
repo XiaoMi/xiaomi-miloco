@@ -29,9 +29,15 @@ logger = logging.getLogger(__name__)
 SnapshotStatus = Literal["found", "gone", "not_found"]
 
 # 视频路径产物 clip.mp4 (H264+AAC);audio-only 路径产物 clip.m4a (仅 AAC,ipod muxer).
-# 探测顺序:先 mp4 后 m4a,先找到的优先返回。
-_CLIP_CANDIDATES = ("clip.mp4", "clip.m4a")
-_MEDIA_TYPE_BY_SUFFIX = {".mp4": "video/mp4", ".m4a": "audio/mp4"}
+# 音频格式支持: m4a (AAC), wav (PCM), mp3 (MP3).
+# 探测顺序:先 mp4 后 m4a/wav/mp3,先找到的优先返回。
+_CLIP_CANDIDATES = ("clip.mp4", "clip.m4a", "clip.wav", "clip.mp3")
+_MEDIA_TYPE_BY_SUFFIX = {
+    ".mp4": "video/mp4",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+}
 
 
 class EventsService:
@@ -119,13 +125,18 @@ class EventsService:
         共识 — 见 prompt_builder._is_audio_only;所以多 device 间 kind 一致,
         取第一个有效结果即可).
 
-        Returns: "mp4" / "m4a" / None(未落盘 / 已被 cleanup 清掉).
+        Returns: "mp4" / "m4a" / "wav" / "mp3" / None(未落盘 / 已被 cleanup 清掉).
         """
         if not device_ids:
             return None
         for did in device_ids:
             device_dir = snapshot_root / event_id / region_slug(did)
-            for filename, kind in (("clip.mp4", "mp4"), ("clip.m4a", "m4a")):
+            for filename, kind in (
+                ("clip.mp4", "mp4"),
+                ("clip.m4a", "m4a"),
+                ("clip.wav", "wav"),
+                ("clip.mp3", "mp3"),
+            ):
                 if (device_dir / filename).exists():
                     return kind
         return None

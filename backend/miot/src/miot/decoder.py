@@ -143,6 +143,17 @@ class MIoTMediaRingBuffer:
         if frame_data:
             on_frame(frame_data)
 
+    def drain_one(self) -> bool:
+        """Pop and discard one frame. Returns True if a frame was drained."""
+        with self._cond:
+            if self._video_buffer:
+                self._video_buffer.popleft()
+                return True
+            if self._audio_buffer:
+                self._audio_buffer.popleft()
+                return True
+            return False
+
     def stop(self):
         del self._cond
         self._video_buffer.clear()
@@ -154,6 +165,7 @@ class MIoTMediaDecoder(threading.Thread):
 
     _main_loop: asyncio.AbstractEventLoop
     _running: bool
+    _paused: bool
     _frame_interval: int
     _enable_hw_accel: bool
     _enable_audio: bool
@@ -201,6 +213,7 @@ class MIoTMediaDecoder(threading.Thread):
         super().__init__()
         self._main_loop = main_loop or asyncio.get_running_loop()
         self._running = False
+        self._paused = False
         self._frame_interval = frame_interval
         self._enable_hw_accel = enable_hw_accel
         self._enable_audio = enable_audio
@@ -228,19 +241,45 @@ class MIoTMediaDecoder(threading.Thread):
         self._running = True
         while self._running:
             try:
-                self._queue.step(
-                    on_video_frame=self._on_video_callback,
-                    on_audio_frame=self._on_audio_callback,
-                )
+                if self._paused:
+                    # 暂停模式：pop 帧但不 decode，避免队列堆积导致 P2P 阻塞。
+                    # 无帧时短暂 sleep 避免 busy-spin（step 的 0.2s wait 被跳过）。
+                    if not self._queue.drain_one():
+                        time.sleep(0.05)
+                else:
+                    self._queue.step(
+                        on_video_frame=self._on_video_callback,
+                        on_audio_frame=self._on_audio_callback,
+                    )
             except Exception as e:
                 _LOGGER.error("frame data handle error, %s", e)
                 if self._main_loop.is_closed():
                     break
         _LOGGER.info("decoder stopped")
 
+    def pause(self) -> None:
+        """暂停解码：P2P 连接保持，帧继续收但直接丢弃，不走 H.264 解码。"""
+        if not self._paused:
+            self._paused = True
+            # 释放 queue 的 condition wait，让 run() 循环立即进入 paused 分支
+            with self._queue._cond:
+                self._queue._cond.notify()
+            _LOGGER.info("decoder paused (frames will be dropped)")
+
+    def resume(self) -> None:
+        """恢复解码。"""
+        if self._paused:
+            self._paused = False
+            _LOGGER.info("decoder resumed")
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
     def stop(self) -> None:
         """Stop the decoder."""
         self._running = False
+        self._paused = False
         self._queue.stop()
         self._video_decoder = None
         self._audio_decoder = None

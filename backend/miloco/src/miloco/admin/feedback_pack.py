@@ -163,7 +163,7 @@ def build_feedback_pack(
         slug = region_slug(did)
         clip_dir = event_dir / slug
         found = False
-        for ext in ("mp4", "m4a"):
+        for ext in ("mp4", "m4a", "wav", "mp3"):
             if (clip_dir / f"clip.{ext}").exists():
                 components["clips_found"].append(f"{slug}/clip.{ext}")
                 found = True

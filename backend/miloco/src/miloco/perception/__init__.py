@@ -47,6 +47,9 @@ async def init_perception_module(miot_proxy, kv_repo):
         log_repo=perception_log_repo,
     )
 
+    # 5.1 将引擎就绪检查注入 camera_adapter（用于原始流录制模式判断）
+    camera_adapter.set_engine_ready_fn(lambda: pipeline_processor.engine_ready)
+
     # 6. 初始化实时感知引擎
     perception_runner = PerceptionRunner(
         collector=multimodal_collector,
