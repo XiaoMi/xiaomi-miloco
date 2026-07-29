@@ -263,15 +263,12 @@ def _generate_supervisor_conf(server_cmd: str) -> None:
     # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
     tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
     # glibc(ptmalloc2)长跑内存调优:decoder 每帧 MB 级 buffer 高频 malloc/free,在
-    # per-thread arena 里碎片化、freed 不还 OS,RSS 只涨不落(真机实测 malloc_trim 可
-    # 吐 ~880MB)。MMAP_THRESHOLD_ 钉死 128KB 并关掉动态自增→大块永远 mmap、free 即
-    # 还 OS(主力);ARENA_MAX=6 封顶 arena 数(2~32 核通用,是上限非目标);
-    # TRIM_THRESHOLD_ 钉死→主 arena 堆顶更勤还 OS。musl/macOS 无视这些变量,注入无害。
-    malloc_env = (
-        ',MALLOC_ARENA_MAX="6"'
-        ',MALLOC_MMAP_THRESHOLD_="131072"'
-        ',MALLOC_TRIM_THRESHOLD_="131072"'
-    )
+    # per-thread arena 里碎片化、freed 不还 OS,RSS 只涨不落。ARENA_MAX=6 封顶 arena
+    # 数(2~32 核通用,限制碎片乘数,无 CPU 成本)。不钉 MMAP_THRESHOLD_:钉死会让每帧
+    # 大块走 mmap、free 即还,虽稳住 RSS 但每帧付 mmap+缺页的 sys CPU 税;放开后帧走
+    # arena 复用免此税,碎片改由 backend 的 _malloc_trim_loop 周期 malloc_trim 回收。
+    # musl/macOS 无视此变量,注入无害。
+    malloc_env = ',MALLOC_ARENA_MAX="6"'
     conf = f"""\
 [supervisord]
 logfile={_supervisor_log()}

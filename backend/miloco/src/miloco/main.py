@@ -104,7 +104,7 @@ def _trim_malloc_arenas() -> int | None:
 
 
 async def _daily_maintenance_loop() -> None:
-    """每日进程维护:日志/DB/快照清理 + glibc arena 内存回收。"""
+    """每日进程维护:日志/DB/快照清理。"""
     settings = get_settings()
     mgr = get_manager()
     obs_db_path = settings.directories.workspace_dir / "observability.db"
@@ -195,15 +195,27 @@ async def _daily_maintenance_loop() -> None:
                 conn.execute("PRAGMA incremental_vacuum(10000)")
         except Exception as e:
             logger.error("Miloco DB incremental_vacuum failed: %s", e)
-        # glibc arena 内存回收:与上面 incremental_vacuum 同理,把 freed 内存还 OS。
-        # to_thread:trim ~GB arena 可能耗时百 ms 级,别阻塞 event loop。
+        await asyncio.sleep(86400)
+
+
+async def _malloc_trim_loop() -> None:
+    """周期性 malloc_trim 回收 glibc arena 碎片,避免长跑 RSS 只涨不落。
+
+    decoder 每帧产 MB 级 buffer,高频大块 malloc/free 在 arena 里碎片化、freed 块
+    留 free-list 不还 OS。周期 malloc_trim(0) 主动把这些空闲页 madvise 还 OS。
+    实测:有碎片时单次 ~25ms 可吐数百 MB,稳态无可收时 ~0.1ms 空转,故无条件周期
+    执行即可,无需 RSS 水位判断。非 glibc(_malloc_trim 为 None)时直接退出。
+    to_thread:trim 可能耗时几十 ms,别阻塞 event loop。
+    """
+    if _malloc_trim is None:
+        return
+    while True:
+        await asyncio.sleep(21600)  # 6h
         try:
             released = await asyncio.to_thread(_trim_malloc_arenas)
-            if released is not None:  # None = 非 glibc no-op,不打误导日志
-                logger.info("malloc_trim done (released=%s)", released)
+            logger.info("malloc_trim done (released=%s)", released)
         except Exception as e:
             logger.error("malloc_trim failed: %s", e)
-        await asyncio.sleep(86400)
 
 
 async def _rollover_daily_loop() -> None:
@@ -432,6 +444,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     maintenance_task = asyncio.create_task(_daily_maintenance_loop())
 
+    trim_task = asyncio.create_task(_malloc_trim_loop())
+
     rollover_task = asyncio.create_task(_rollover_daily_loop())
     _BG_TASKS.add(rollover_task)
     rollover_task.add_done_callback(_BG_TASKS.discard)
@@ -448,6 +462,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     maintenance_task.cancel()
     try:
         await maintenance_task
+    except asyncio.CancelledError:
+        pass
+
+    trim_task.cancel()
+    try:
+        await trim_task
     except asyncio.CancelledError:
         pass
 
