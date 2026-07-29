@@ -47,7 +47,9 @@ from .const import (
 )
 from .types import (
     MIoTDeviceBindEvent,
+    MIoTDevicePropChangedEvent,
     MIoTDeviceStateEvent,
+    MIoTPropChange,
     MIoTSceneChangedEvent,
     MipsConnectionError,
     MipsSubscribeRejectedError,
@@ -109,6 +111,14 @@ _TOPIC_DEVICE_STATE = re.compile(
     r"^device/([^/]+)/state/(" + "|".join(_DEVICE_STATE_OPS) + r")$"
 )
 
+# Device-level property push: `device/{did}/up/properties_changed`.
+# did = group(1). Exact leaf topic (no wildcard), matching the HA
+# `xiaomi_home` MIPS convention. Payload (per that convention):
+# `{"id":..,"method":"properties_changed","params":[{"did":..,"siid":..,
+# "piid":..,"value":..},...]}` — entries missing siid/piid are skipped by the
+# decoder, the raw payload is kept verbatim on the event for forensics.
+_TOPIC_DEVICE_PROP = re.compile(r"^device/([^/]+)/up/properties_changed$")
+
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
 # decoded message object and may be sync or async — both are dispatched on the
@@ -116,6 +126,9 @@ _TOPIC_DEVICE_STATE = re.compile(
 BindHandler = Callable[[MIoTDeviceBindEvent], Union[None, Awaitable[None]]]
 SceneChangedHandler = Callable[[MIoTSceneChangedEvent], Union[None, Awaitable[None]]]
 DeviceStateHandler = Callable[[MIoTDeviceStateEvent], Union[None, Awaitable[None]]]
+PropChangedHandler = Callable[
+    [MIoTDevicePropChangedEvent], Union[None, Awaitable[None]]
+]
 MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe (no awaiter, e.g. the reconnect-time
 # re-issue in _on_connect) fails. Arg tuple = (topic, reason_code,
@@ -501,6 +514,23 @@ class MIoTMipsCloud:
         for op in _DEVICE_STATE_OPS:
             await self._unsubscribe_async(f"device/{did}/state/{op}")
 
+    async def sub_device_prop_async(
+        self, did: str, handler: PropChangedHandler
+    ) -> None:
+        """Subscribe a device's property push topic:
+        `device/{did}/up/properties_changed`.
+
+        Exact leaf topic — same ACL rationale as the other per-device subs.
+        SUBACK rejection raises MipsSubscribeRejectedError.
+        """
+        decoder = self._make_prop_decoder()
+        await self._subscribe_async(
+            f"device/{did}/up/properties_changed", handler, decoder
+        )
+
+    async def unsub_device_prop_async(self, did: str) -> None:
+        await self._unsubscribe_async(f"device/{did}/up/properties_changed")
+
     # ------------------------------------------------------- subscribe core
 
     async def _subscribe_async(
@@ -866,6 +896,64 @@ class MIoTMipsCloud:
                 did=did,
                 event=op,  # type: ignore[arg-type]  # op ∈ {online,offline}
                 raw=raw if isinstance(raw, dict) else {},
+                timestamp_ms=_now_ms(),
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_prop_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDevicePropChangedEvent]
+    ]:
+        # `device/{did}/up/properties_changed`: did comes from the topic. The
+        # payload follows the HA `xiaomi_home` convention — a `params` list of
+        # `{did,siid,piid,value}` dicts — but is not formally documented for
+        # this broker, so decoding is defensive: a bare dict payload with
+        # siid/piid is accepted as a single entry, entries without integer
+        # siid+piid are skipped, and a message that yields zero entries decodes
+        # to None (dropped) with the raw payload logged at DEBUG.
+        def decode(
+            topic: str, payload: bytes
+        ) -> Optional[MIoTDevicePropChangedEvent]:
+            m = _TOPIC_DEVICE_PROP.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            raw = _parse_json_payload(payload)
+            if not isinstance(raw, dict):
+                _LOGGER.debug(
+                    "properties_changed non-dict payload dropped: did=%s", did
+                )
+                return None
+            params = raw.get("params")
+            if isinstance(params, dict):
+                params = [params]
+            elif not isinstance(params, list):
+                # Some pushes may put the entry at the top level.
+                params = [raw] if "siid" in raw else []
+            changes: list[MIoTPropChange] = []
+            for entry in params:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    siid = int(entry["siid"])
+                    piid = int(entry["piid"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                changes.append(
+                    MIoTPropChange(siid=siid, piid=piid, value=entry.get("value"))
+                )
+            if not changes:
+                _LOGGER.debug(
+                    "properties_changed with no decodable entries: did=%s raw=%r",
+                    did,
+                    raw,
+                )
+                return None
+            return MIoTDevicePropChangedEvent(
+                did=did,
+                changes=changes,
+                raw=raw,
                 timestamp_ms=_now_ms(),
             )
 

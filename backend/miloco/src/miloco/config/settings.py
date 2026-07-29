@@ -239,6 +239,24 @@ class MiotSettings(BaseModel):
     cloud_server: str = Field(
         default="cn", description="MIoT 云区域（cn/de/i2/ru/sg/us）"
     )
+    prop_history_enabled: bool = Field(
+        default=True,
+        description="订阅全部设备的 mips 属性推送并落库(device_prop_history),"
+        "供「某设备几点开的」类历史查询。",
+    )
+    prop_history_retention_days: int = Field(
+        default=30, description="属性历史保留天数;写路径顺带清理过期行。"
+    )
+    prop_history_poll_interval_sec: int = Field(
+        default=60,
+        description="属性历史轮询周期(秒)。mips 推送被 broker ACL 拒绝时的兜底"
+        "采样源,一周期一次批量 prop/get。",
+    )
+    prop_history_poll_extra: list[str] = Field(
+        default_factory=list,
+        description="默认 watchlist(全设备 prop.2.1)之外要轮询的属性,"
+        "形如 'did:prop.4.1'。",
+    )
 
 
 class NotifySettings(BaseModel):

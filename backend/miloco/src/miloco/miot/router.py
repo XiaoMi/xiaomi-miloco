@@ -296,6 +296,46 @@ async def get_device_history(current_user: str = Depends(verify_token)):
 
 
 @router.get(
+    path="/prop-history",
+    summary="Query mips property-push history (device_prop_history table)",
+    response_model=NormalResponse,
+)
+async def get_prop_history(
+    did: str,
+    iid: str | None = Query(
+        default=None,
+        description="属性 iid,形如 prop.2.1 或 2.1;不传返回整设备时间线",
+    ),
+    since: int | None = Query(default=None, description="起始时间戳(ms,含)"),
+    until: int | None = Query(default=None, description="结束时间戳(ms,含)"),
+    limit: int = Query(default=100, ge=1, le=1000),
+    current_user: str = Depends(verify_token),
+):
+    """按设备(可选按单属性)查询属性变化历史,新→旧排序。
+
+    数据来自 mips `properties_changed` 推送落库(``miot.prop_history_enabled``,
+    默认开)。只包含订阅生效期间设备**主动上报**的变化——backend 停机窗口、
+    不上报的属性、订阅前的历史都不在库里。
+    """
+    siid: int | None = None
+    piid: int | None = None
+    if iid:
+        parts = iid.removeprefix("prop.").split(".")
+        try:
+            siid, piid = int(parts[0]), int(parts[1])
+        except (IndexError, ValueError):
+            raise HTTPException(
+                status_code=400, detail=f"iid 格式非法(期望 prop.S.P): {iid!r}"
+            )
+    rows = manager.device_prop_history_dao.query(
+        did, siid=siid, piid=piid, since_ms=since, until_ms=until, limit=limit
+    )
+    return NormalResponse(
+        code=0, message="ok", data={"did": did, "count": len(rows), "items": rows}
+    )
+
+
+@router.get(
     path="/devices/{did}/status",
     summary="Get device property status",
     response_model=NormalResponse,

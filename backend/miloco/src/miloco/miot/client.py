@@ -22,6 +22,7 @@ from miot.types import (
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropChangedEvent,
     MIoTDeviceStateEvent,
     MIoTGetPropertyParam,
     MIoTLanDeviceInfo,
@@ -30,6 +31,7 @@ from miot.types import (
     MIoTSceneChangedEvent,
     MIoTSetPropertyParam,
     MIoTUserInfo,
+    MipsSubscribeRejectedError,
 )
 from pydantic_core import to_jsonable_python
 
@@ -102,6 +104,7 @@ class MiotProxy:
         self.init_miot_info_dict()
         self._camera_img_managers: dict[str, CameraVisionHandler] = {}
         self._token_refresh_task: asyncio.Task | None = None
+        self._prop_poller_task: asyncio.Task | None = None
         # Serialize refresh_devices: multiple entries (MQTT reconnect,
         # bind-debounce, device refresh, lazy load) can fire concurrently
         # and would otherwise race on _device_info_dict / KV / diff log.
@@ -188,6 +191,17 @@ class MiotProxy:
         # _sync_camera_state_subscriptions.
         self._subscribed_state_dids: set[str] = set()
 
+        # Dids whose device/{did}/up/properties_changed topics this proxy
+        # intends to subscribe. Mirrors _subscribed_meta_dids; drives the diff
+        # in _sync_prop_subscriptions. Empty set when prop history is disabled.
+        self._subscribed_prop_dids: set[str] = set()
+        # Dids whose properties_changed SUBACK came back 0x87 Not authorized —
+        # the broker ACL for this app_id does not open the up/ topics (实测
+        # 2026-07-29 全量被拒)。Permanently excluded from retry, so每次
+        # refresh_devices 不会重放 70+ 条 ERROR;property history 由
+        # DevicePropPoller 轮询兜底。ACL 将来放开时重启后自动恢复推送路径。
+        self._prop_sub_rejected: set[str] = set()
+
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
 
@@ -266,6 +280,7 @@ class MiotProxy:
             refresh_camera_online_status=self.refresh_camera_online_status
         )
         self._subscribed_state_dids = set()
+        self._subscribed_prop_dids = set()
         self._miot_client.register_user_bind_callback(self._on_user_bind_event)
         # Device meta change (rename/hr_change): refresh the list so the new
         # name/room/home propagates. Kept off the bind welcome path.
@@ -280,6 +295,11 @@ class MiotProxy:
         )
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
+        # Device property push (properties_changed): persist to
+        # device_prop_history so "几点开的空调"类历史查询有数据源。
+        self._miot_client.register_device_prop_changed_callback(
+            self._on_device_prop_changed_event
+        )
 
         await self._miot_client.init_async()
 
@@ -296,12 +316,25 @@ class MiotProxy:
 
         self._token_refresh_task = asyncio.create_task(self._start_token_refresh_task())
 
+        # Property-history poller — the polling fallback while the broker ACL
+        # rejects properties_changed pushes (see _sync_prop_subscriptions).
+        if self._prop_poller_task:
+            self._prop_poller_task.cancel()
+            self._prop_poller_task = None
+        if get_settings().miot.prop_history_enabled:
+            from miloco.miot.prop_poller import DevicePropPoller
+
+            self._prop_poller_task = asyncio.create_task(DevicePropPoller(self).run())
+
     async def deinit(self):
         """Deinit MIoT proxy: cancel tasks, destroy cameras, close client, clear all state."""
         # 1. Cancel token refresh background task
         if self._token_refresh_task:
             self._token_refresh_task.cancel()
             self._token_refresh_task = None
+        if self._prop_poller_task:
+            self._prop_poller_task.cancel()
+            self._prop_poller_task = None
 
         # 1b. Cancel any pending bind/rename-event debounce timers — otherwise
         # they might fire during teardown and try to call refresh_devices on a
@@ -343,6 +376,7 @@ class MiotProxy:
         self._subscribed_meta_dids = set()
         self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
+        self._subscribed_prop_dids = set()
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
         # otherwise a re-bind of the same did within WELCOME_DEDUP_SEC after an
@@ -809,6 +843,7 @@ class MiotProxy:
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
                 await self._sync_scene_subscriptions()
+                await self._sync_prop_subscriptions()
                 return devices
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
@@ -973,6 +1008,73 @@ class MiotProxy:
             len(self._subscribed_meta_dids),
         )
 
+    async def _sync_prop_subscriptions(self) -> None:
+        """Reconcile per-device property push subs to the device list.
+
+        Called at the tail of refresh_devices (under _refresh_devices_lock,
+        same race-free contract as _sync_meta_subscriptions). Account-wide,
+        all devices — a property history is as useful for an out-of-scope
+        device as for a managed one, and per-device volume is trivial.
+
+        Gated by ``miot.prop_history_enabled``; when disabled, existing subs
+        are torn down (target = empty set) so a config flip fully converges
+        without a restart. Dids containing '/' (Huami/Zepp-bridged
+        sub-devices) are skipped — same topic/ACL rationale as
+        _sync_meta_subscriptions.
+        """
+        if get_settings().miot.prop_history_enabled:
+            target = {
+                did
+                for did in self._device_info_dict
+                if "/" not in did and did not in self._prop_sub_rejected
+            }
+        else:
+            target = set()
+        to_add = target - self._subscribed_prop_dids
+        to_remove = self._subscribed_prop_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            try:
+                await self._miot_client.sub_device_prop_async(did)
+                return did
+            except MipsSubscribeRejectedError as e:
+                # ACL 永久拒绝(0x87 等):不再重试,避免每次设备刷新重放全量
+                # ERROR。轮询兜底仍在,DEBUG 留痕即可。
+                self._prop_sub_rejected.add(did)
+                logger.debug("device-prop subscribe rejected did=%s: %s", did, e)
+                return None
+            except Exception as e:
+                logger.error("subscribe device-prop failed did=%s: %s", did, e)
+                return None
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_prop_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-prop failed did=%s: %s", did, e)
+            return did
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        self._subscribed_prop_dids |= {d for d in added if d}
+        self._subscribed_prop_dids -= {d for d in removed if d}
+        rejected = len([d for d in to_add if d in self._prop_sub_rejected])
+        logger.info(
+            "device-prop subscriptions synced: +%d -%d rejected=%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            rejected,
+            len(self._subscribed_prop_dids),
+        )
+        if rejected and not self._subscribed_prop_dids:
+            logger.warning(
+                "device-prop push fully rejected by broker ACL (%d dids); "
+                "property history relies on the poller fallback",
+                len(self._prop_sub_rejected),
+            )
+
     async def _sync_camera_state_subscriptions(self) -> None:
         """Reconcile per-device cloud state (online/offline) subs to the
         camera list.
@@ -1035,6 +1137,23 @@ class MiotProxy:
         thin shim, mirroring ``_on_user_bind_event``.
         """
         await self._scene_listener.on_event(msg)
+
+    def _on_device_prop_changed_event(self, msg: MIoTDevicePropChangedEvent) -> None:
+        """Persist one property push batch to device_prop_history.
+
+        同步回调:单条 executemany 写 WAL 库微秒级,不值得 to_thread。DAO 内部
+        吞异常(丢一行历史不冒泡),这里只兜 manager 未就绪的启动窗口。
+        """
+        try:
+            from miloco.manager import get_manager
+
+            get_manager().device_prop_history_dao.insert_changes(
+                msg.did,
+                [(c.siid, c.piid, c.value) for c in msg.changes],
+                msg.timestamp_ms,
+            )
+        except Exception as e:
+            logger.warning("persist device prop push failed did=%s: %s", msg.did, e)
 
     def _collect_home_ids(self) -> set[str]:
         """Union of home_ids across cached devices / cameras / scenes.
