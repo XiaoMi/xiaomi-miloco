@@ -19,6 +19,34 @@ from urllib.parse import parse_qsl, urlencode
 
 import uvicorn
 from dotenv import load_dotenv
+
+
+def _ensure_no_proxy_for_local() -> None:
+    """把回环 + 私网段并入 NO_PROXY,防系统代理劫持本地/局域网调用。
+
+    macOS 上 urllib.getproxies() 会读**系统级代理设置**(不只环境变量),Clash
+    Verge 等开启系统代理后,httpx(trust_env 默认 True)会把打 localhost:8080
+    (本地推理)、192.168.x(手机节点)的请求也送进代理,代理回连失败返 502 →
+    感知全灭(2026-07-29 实锅:15:07 起 local-gemma/local-qwen 全部 502)。
+    httpx 的 NO_PROXY 支持 hostname / IP / CIDR;云端(openrouter 等)不在列表,
+    照常走代理——在墙内访问云 API 恰恰需要它。setdefault 语义:尊重用户已设
+    条目,只追加缺失项。必须在任何 httpx client 创建前执行(import 早期)。
+    """
+    local_entries = [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+    ]
+    for var in ("NO_PROXY", "no_proxy"):
+        existing = [e.strip() for e in os.environ.get(var, "").split(",") if e.strip()]
+        merged = existing + [e for e in local_entries if e not in existing]
+        os.environ[var] = ",".join(merged)
+
+
+_ensure_no_proxy_for_local()
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import (
     FileResponse,

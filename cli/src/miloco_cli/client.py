@@ -6,12 +6,21 @@
 """
 
 import json
+import os
 import sys
 from typing import NoReturn
 
 import httpx
 
 from miloco_cli.config import load_config
+
+# 后端在 127.0.0.1:1810——macOS 上 httpx 会读**系统级代理设置**(urllib.getproxies),
+# Clash 等开系统代理后 CLI 打本机后端也被送进代理返 502。回环/私网并入 NO_PROXY
+# (httpx 支持 CIDR),与 backend main._ensure_no_proxy_for_local 同口径。
+for _var in ("NO_PROXY", "no_proxy"):
+    _existing = [e.strip() for e in os.environ.get(_var, "").split(",") if e.strip()]
+    _local = ["localhost", "127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    os.environ[_var] = ",".join(_existing + [e for e in _local if e not in _existing])
 
 
 def _get_client(cfg: dict) -> httpx.Client:
