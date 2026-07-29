@@ -140,6 +140,11 @@ export function ActivityFeed({
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<ActivityTab>("events");
   const [odCount, setOdCount] = useState((initialOdLogs ?? EMPTY_OD_LOGS).length);
+  const [odHasMore, setOdHasMore] = useState((initialOdLogs ?? EMPTY_OD_LOGS).length === OD_PAGE_SIZE);
+  const handleOdCount = useCallback((n: number, hasMore: boolean) => {
+    setOdCount(n);
+    setOdHasMore(hasMore);
+  }, []);
   // 初始为空:App 层 useAsync 不带 since 参数,拿到的是全时段事件;本组件默认
   // since=todayStartMs(),若直接用 initial 初始化会在首帧闪现历史日志,随后被
   // fetchPage(带 since)替换——即 "切 tab 闪一下旧日志再变空" 的 bug。
@@ -402,7 +407,7 @@ export function ActivityFeed({
           <span className="text-caption-mono text-text-tertiary font-normal">
             {activeTab === "events"
               ? t("activity.loadedCount", { n: feedRows.length, more: showLoadMore ? "+" : "" })
-              : t("activity.odLoaded", { n: odCount, more: "" })}
+              : t("activity.odLoaded", { n: odCount, more: odHasMore ? "+" : "" })}
           </span>
         </h2>
         <div className="inline-flex items-center gap-3 flex-wrap" style={{ visibility: activeTab === "events" ? "visible" : "hidden" }}>
@@ -531,7 +536,7 @@ export function ActivityFeed({
 
       {/* On-demand queries panel */}
       <div hidden={activeTab !== "queries"}>
-        <OnDemandLogList initial={initialOdLogs ?? EMPTY_OD_LOGS} homeId={homeId} deviceNames={deviceNames} onCountChange={setOdCount} />
+        <OnDemandLogList initial={initialOdLogs ?? EMPTY_OD_LOGS} homeId={homeId} deviceNames={deviceNames} onCountChange={handleOdCount} />
       </div>
 
       </div>{/* end tab panels */}
@@ -1144,7 +1149,7 @@ function OnDemandLogList({ initial, homeId, deviceNames, onCountChange }: {
   initial: OnDemandLogEntry[];
   homeId: HomeId;
   deviceNames: Record<string, string>;
-  onCountChange: (n: number) => void;
+  onCountChange: (n: number, hasMore: boolean) => void;
 }) {
   const { t } = useTranslation();
   const [logs, setLogs] = useState<OnDemandLogEntry[]>(initial);
@@ -1156,7 +1161,7 @@ function OnDemandLogList({ initial, homeId, deviceNames, onCountChange }: {
   useEffect(() => {
     setLogs(initial);
     setHasMore(initial.length === OD_PAGE_SIZE);
-    onCountChange(initial.length);
+    onCountChange(initial.length, initial.length === OD_PAGE_SIZE);
   }, [initial, homeId, onCountChange]);
 
   const refresh = () => {
@@ -1166,7 +1171,7 @@ function OnDemandLogList({ initial, homeId, deviceNames, onCountChange }: {
       .then((fresh) => {
         setLogs(fresh);
         setHasMore(fresh.length === OD_PAGE_SIZE);
-        onCountChange(fresh.length);
+        onCountChange(fresh.length, fresh.length === OD_PAGE_SIZE);
       })
       .catch(() => {})
       .finally(() => setRefreshing(false));
@@ -1181,19 +1186,11 @@ function OnDemandLogList({ initial, homeId, deviceNames, onCountChange }: {
         const next = [...logs, ...older];
         setLogs(next);
         setHasMore(older.length === OD_PAGE_SIZE);
-        onCountChange(next.length);
+        onCountChange(next.length, older.length === OD_PAGE_SIZE);
       })
       .catch(() => setHasMore(false))
       .finally(() => setLoading(false));
   };
-
-  if (loading && logs.length === 0) {
-    return (
-      <div className="text-body text-center py-10 text-text-secondary">
-        {t("activity.odLoading")}
-      </div>
-    );
-  }
 
   if (logs.length === 0) {
     return (
@@ -1282,8 +1279,8 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
           <div className="text-caption-mono text-text-tertiary whitespace-nowrap sm:text-center">{time}</div>
         </div>
         <div className="min-w-0 sm:order-2">
-          <div className="text-body text-text-primary font-semibold break-words">Q: {log.query}</div>
-          <div className="text-body text-text-secondary break-words mt-0.5">A: {log.answer}</div>
+          <div className="text-body text-text-primary font-semibold break-words whitespace-pre-line">Q: {log.query}</div>
+          <div className="text-body text-text-secondary break-words whitespace-pre-line mt-0.5">A: {log.answer || <span className="text-text-tertiary italic">{t("activity.odNoAnswer", "推理失败，无答案")}</span>}</div>
           <div className="text-caption-mono text-text-tertiary mt-1">
             {log.sources.map((did) => deviceNames[did] ? `${deviceNames[did]}(${did})` : did).join(", ")}
           </div>

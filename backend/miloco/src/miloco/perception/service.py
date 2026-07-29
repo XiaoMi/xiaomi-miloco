@@ -213,6 +213,9 @@ class PerceptionService:
         clip_kinds: dict[str, str] = {}
         has_trace = False
 
+        if not result.answer:
+            artifacts.clips = {}
+
         if artifacts.clips or artifacts.trace:
             from miloco.config.settings import get_settings
             from miloco.perception.snapshot_writer import (
