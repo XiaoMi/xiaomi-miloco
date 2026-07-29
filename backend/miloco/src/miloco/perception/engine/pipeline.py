@@ -854,10 +854,12 @@ async def run_query_pipeline(
             return None
 
         # Resolve the device whose video will be encoded by build_query_prompt.
-        # _encode_batch_video picks the first packet with all_frames; align here
-        # so push_clip_bytes falls under the correct device_id.
-        # Edge: if this packet's PyAV encode fails and a later one succeeds,
-        # clip bytes land under the wrong device_id — extremely rare.
+        # _encode_batch_video picks the first packet with all_frames (prompt_builder.py:1418)
+        # and push_clip_bytes fires only after a successful encode (:1287), so this is the
+        # same predicate evaluated twice — attribution is exact, not best-effort.
+        # Note: _encode_batch_video has no try/except, so a PyAV failure on THIS packet
+        # propagates out of build_query_prompt → room task raises → _reraise_first
+        # (:901) → the whole (possibly multi-room) query degrades to answer="".
         primary_idx = next(
             (i for i, ep in enumerate(room_identity_packets) if ep.all_frames),
             0,

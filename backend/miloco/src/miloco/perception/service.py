@@ -11,6 +11,7 @@ ensuring a unified data path.
 
 import asyncio
 import logging
+import shutil
 
 from miloco.database.on_demand_log_repo import OnDemandLogRepo
 from miloco.database.perception_repo import PerceptionLogRepo
@@ -240,8 +241,10 @@ class PerceptionService:
                 }
                 has_trace = (snapshot_root / log_id / "omni_trace.json.gz").exists()
 
-        # Persist on-demand query log (with artifact metadata)
-        self._od_log_repo.append(
+        # Persist on-demand query log (with artifact metadata).
+        # 行写失败必须回滚已落盘的产物:读端点都先过库(router.py:155/194),
+        # 行不在 → clip 永远不可达,而 mtime 最新、LRU 最后淘汰,白占共享配额。
+        inserted = self._od_log_repo.append(
             OnDemandLogEntry(
                 id=log_id,
                 timestamp=t_start,
@@ -255,6 +258,13 @@ class PerceptionService:
                 has_trace=has_trace,
             )
         )
+        if not inserted:
+            logger.error(
+                "on_demand_log insert failed for %s; discarding orphaned artifacts",
+                log_id,
+            )
+            if clip_dids or has_trace:
+                shutil.rmtree(get_snapshot_root() / log_id, ignore_errors=True)
 
         # Map inference results back to API response items
         return OnDemandPerceptionResultItem(
@@ -331,6 +341,8 @@ class PerceptionService:
         logs, count = self._od_log_repo.query(
             since_ms=since_ms, before_ms=before_ms, before_id=before_id, limit=limit
         )
+        if not logs:
+            return {"logs": logs, "count": count}
 
         from miloco.perception.events_service import EventsService
         from miloco.perception.snapshot_writer import get_snapshot_root

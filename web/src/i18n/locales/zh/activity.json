@@ -49,6 +49,7 @@
     "tabOnDemand": "主动查询",
     "odLoaded": "已加载 {{n}} 条{{more}}",
     "odEmpty": "还没有主动查询记录",
+    "odLoadFailed": "加载主动查询失败：{{msg}}",
     "odLoading": "加载中…",
     "odRefresh": "刷新",
     "odNoAnswer": "推理失败，无答案",

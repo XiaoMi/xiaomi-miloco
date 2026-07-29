@@ -49,6 +49,7 @@
     "tabOnDemand": "Queries",
     "odLoaded": "{{n}} loaded{{more}}",
     "odEmpty": "No on-demand queries yet",
+    "odLoadFailed": "Failed to load on-demand queries: {{msg}}",
     "odLoading": "Loading…",
     "odRefresh": "Refresh",
     "odNoAnswer": "Inference failed, no answer",

@@ -403,6 +403,8 @@ function MainApp() {
               eventsError={activity.error}
               onRetryEvents={() => activity.reload()}
               onDemandLogs={onDemandLogs.data}
+              onDemandLoading={onDemandLogs.loading}
+              onDemandError={onDemandLogs.error}
               deviceNames={Object.fromEntries(
                 (devices.data ?? []).map((d) => [d.did, d.name]),
               )}

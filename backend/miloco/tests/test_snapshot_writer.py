@@ -130,7 +130,7 @@ class TestSaveEventArtifacts:
         monkeypatch.setattr(snapshot_writer, "get_snapshot_root", lambda: tmp_path)
         self.root = tmp_path
 
-    def test_empty_artifacts_returns_zero(self):
+    def test_empty_artifacts_returns_empty_list(self):
         """clips 和 trace 都空 → 不创建任何文件,返空列表."""
         assert save_event_artifacts("event-1", OmniEventArtifacts()) == []
         assert not (self.root / "event-1").exists()

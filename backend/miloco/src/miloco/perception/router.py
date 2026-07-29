@@ -127,7 +127,7 @@ async def query_logs(
     dependencies=[Depends(verify_token)],
 )
 async def query_on_demand_logs(
-    limit: int | None = Query(None, ge=1, le=1000, description="Max entries; omit for unlimited"),
+    limit: int = Query(50, ge=1, le=200, description="每页条数,上限 200"),
     since: int | None = Query(None, description="Unix ms lower bound (inclusive)"),
     before: int | None = Query(None, description="Unix ms upper bound (exclusive)"),
     before_id: str | None = Query(None, description="Compound cursor tiebreaker (used with before)"),

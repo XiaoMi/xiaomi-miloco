@@ -970,8 +970,8 @@ async def _persist_meaningful_event(
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
         # 否则 device_ids 和 artifacts.clips 必须同步收窄——两者分别驱动"日志展示哪些
         # 摄像头"和"落盘哪些摄像头的 clip",不同步会导致不相关摄像头的 clip 被落盘、
-        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 文档的
-        # "0 ~ len(artifacts.clips)"不变量)。trace / gallery 不是按事件相关性归属的
+        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 返回的
+        # clip_dids 必是 artifacts.clips 的子集,见 snapshot_writer.py 的 Returns)。trace / gallery 不是按事件相关性归属的
         # 产物,不参与收窄。
         relevant_device_ids = _collect_relevant_device_ids(result)
         if relevant_device_ids:
