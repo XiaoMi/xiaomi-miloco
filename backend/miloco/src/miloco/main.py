@@ -463,18 +463,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         await maintenance_task
     except asyncio.CancelledError:
+        # cancel() 后 await 抛 CancelledError 是预期的正常退出信号,吞掉即可
         pass
 
     trim_task.cancel()
     try:
         await trim_task
     except asyncio.CancelledError:
+        # cancel() 后 await 抛 CancelledError 是预期的正常退出信号,吞掉即可
         pass
 
     rollover_task.cancel()
     try:
         await rollover_task
     except asyncio.CancelledError:
+        # cancel() 后 await 抛 CancelledError 是预期的正常退出信号,吞掉即可
         pass
 
     # 关闭顺序遵循"生产者先于消费者":
