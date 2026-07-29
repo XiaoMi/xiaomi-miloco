@@ -476,6 +476,58 @@ def device_status(did, iids, pretty):
     print_result(data, pretty)
 
 
+@device_group.command("history")
+@click.argument("did")
+@click.argument("iid", required=False)
+@click.option(
+    "--since",
+    default="24h",
+    help="相对时长,支持 h/m/s/d 单位及组合(1h、30m、7d、2h30m),默认 24h。",
+)
+@click.option("--limit", default=100, type=int, help="最大返回条数(默认 100,上限 1000)。")
+@click.option("--pretty", is_flag=True)
+def device_history(did, iid, since, limit, pretty):
+    """查询设备属性变化历史(mips 推送落库,新→旧)。
+
+    \b
+    IID 可选:形如 prop.2.1(也接受 2.1)或 spec_name(如 on@空调);
+    不传返回整设备的属性时间线。
+      miloco-cli device history 436264078 prop.2.1 --since 2d
+    """
+    import re as _re
+    import time
+
+    from miloco_cli.client import api_get
+
+    m = _re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", since.strip())
+    if not m or not any(m.groups()):
+        print(json.dumps({"error": f"--since 格式非法: {since!r}"}), file=sys.stderr)
+        sys.exit(1)
+    d, h, mi, s = (int(g or 0) for g in m.groups())
+    since_ms = int(time.time() * 1000) - ((d * 86400 + h * 3600 + mi * 60 + s) * 1000)
+
+    params: dict = {"did": did, "since": since_ms, "limit": limit}
+    if iid:
+        if _re.fullmatch(r"(?:prop\.)?\d+\.\d+", iid):
+            params["iid"] = iid
+        else:
+            # spec_name 形态(on@空调)→ 借 home_info 解析成 prop.S.P
+            from miloco_cli.home_info import (
+                ValidationError,
+                get_home_info,
+                lookup_iid_by_key,
+            )
+
+            try:
+                params["iid"] = lookup_iid_by_key(did, iid, get_home_info())
+            except ValidationError as e:
+                print(json.dumps({"error": str(e)}), file=sys.stderr)
+                sys.exit(1)
+
+    data = api_get("/api/miot/prop-history", params)
+    print_result(data, pretty)
+
+
 # ─── device action ────────────────────────────────────────────────────────────
 
 

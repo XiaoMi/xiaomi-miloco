@@ -161,6 +161,24 @@ class Manager:
         return dao
 
     @property
+    def device_prop_history_dao(self):
+        """device_prop_history DAO 懒加载单例(mips 属性推送时间序列).
+
+        写方是 MiotProxy 的属性推送回调,读方是 miot router 的查询端点,
+        共用同一实例以共享 prune 计数.
+        """
+        dao = getattr(self, "_device_prop_history_dao", None)
+        if dao is None:
+            from miloco.config.settings import get_settings
+            from miloco.database.prop_history_dao import DevicePropHistoryDao
+
+            dao = DevicePropHistoryDao(
+                retention_days=get_settings().miot.prop_history_retention_days
+            )
+            self._device_prop_history_dao = dao
+        return dao
+
+    @property
     def events_service(self):
         """events_service 懒加载单例;复用 self.meaningful_events_dao."""
         svc = getattr(self, "_events_service", None)

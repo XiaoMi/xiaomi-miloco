@@ -37,6 +37,7 @@ from .types import (
     MIoTCameraStatus,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropChangedEvent,
     MIoTDeviceStateEvent,
     MIoTHomeInfo,
     MIoTLanDeviceInfo,
@@ -109,6 +110,14 @@ class MIoTClient:
     # (intended to be) subscribed. Same ownership/replay model as
     # _meta_sub_dids.
     _state_sub_dids: set
+    # Device-level property push handler (`properties_changed`). Fires with
+    # the decoded per-device change batch; the consumer persists / reacts.
+    _callback_device_prop_changed: Optional[
+        Callable[[MIoTDevicePropChangedEvent], Any]
+    ]
+    # Dids whose `device/{did}/up/properties_changed` topic is (intended to
+    # be) subscribed. Same ownership/replay model as _meta_sub_dids.
+    _prop_sub_dids: set
     # Home ids whose `home/{home_id}/scene/#` topic is (intended to be)
     # subscribed. Same ownership model as _meta_sub_dids, but per home.
     _scene_sub_home_ids: set
@@ -174,6 +183,8 @@ class MIoTClient:
         self._meta_sub_dids = set()
         self._state_sub_dids = set()
         self._scene_sub_home_ids = set()
+        self._callback_device_prop_changed = None
+        self._prop_sub_dids = set()
         self._callback_scene_changed = None
         self._callback_mips_connect: Optional[Callable[[], Any]] = None
 
@@ -427,9 +438,11 @@ class MIoTClient:
             self._callback_user_bind = None
             self._callback_device_meta_changed = None
             self._callback_device_state_changed = None
+            self._callback_device_prop_changed = None
             self._meta_sub_dids = set()
             self._state_sub_dids = set()
             self._scene_sub_home_ids = set()
+            self._prop_sub_dids = set()
             self._callback_scene_changed = None
             self._callback_mips_connect = None
             self._init_done = False
@@ -928,6 +941,27 @@ class MIoTClient:
                 len(dids),
             )
 
+        # Same replay for per-device property push subs.
+        if self._prop_sub_dids:
+            dids = sorted(self._prop_sub_dids)
+            self._prop_sub_dids = set()
+            ok = 0
+            for did in dids:
+                try:
+                    await self.sub_device_prop_async(did)
+                    ok += 1
+                except Exception as e:
+                    _LOGGER.error(
+                        "mips_cloud re-subscribe device-prop FAILED did=%s: %s",
+                        did,
+                        e,
+                    )
+            _LOGGER.info(
+                "mips_cloud re-subscribed device-prop for %d/%d devices",
+                ok,
+                len(dids),
+            )
+
     def register_user_bind_callback(
         self, callback: Optional[Callable[[MIoTDeviceBindEvent], Any]]
     ) -> None:
@@ -1044,6 +1078,50 @@ class MIoTClient:
         if mips is None:
             return
         await mips.unsub_device_state_async(did)
+
+    def register_device_prop_changed_callback(
+        self, callback: Optional[Callable[[MIoTDevicePropChangedEvent], Any]]
+    ) -> None:
+        """Register the single property-push handler.
+
+        Fires once per `properties_changed` message of every subscribed
+        device, with the decoded change batch. Pass None to clear.
+        """
+        self._callback_device_prop_changed = callback
+
+    def _on_device_prop_msg(self, msg: MIoTDevicePropChangedEvent) -> None:
+        cb = self._callback_device_prop_changed
+        if cb is None:
+            return
+        ret = cb(msg)
+        if asyncio.iscoroutine(ret):
+            asyncio.ensure_future(ret)
+
+    async def sub_device_prop_async(self, did: str) -> None:
+        """Subscribe one device's `device/{did}/up/properties_changed` topic
+        (idempotent).
+
+        Same ownership/replay contract as sub_device_meta_async: failed
+        SUBACK propagates WITHOUT recording the did (so the proxy diff
+        retries it); if mips is not connected yet only the intent is
+        recorded and the actual subscribe happens at the next setup.
+        """
+        if did in self._prop_sub_dids:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._prop_sub_dids.add(did)
+            return
+        await mips.sub_device_prop_async(did, self._on_device_prop_msg)
+        self._prop_sub_dids.add(did)
+
+    async def unsub_device_prop_async(self, did: str) -> None:
+        """Unsubscribe one device's property push topic."""
+        self._prop_sub_dids.discard(did)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_prop_async(did)
 
     def register_scene_changed_callback(
         self, callback: Optional[Callable[[MIoTSceneChangedEvent], Any]]

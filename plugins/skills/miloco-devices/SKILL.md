@@ -1,6 +1,6 @@
 ---
 name: miloco-devices
-description: 查询与控制米家智能家居设备。查询能力包括设备开关状态、运行状态、电量、设定温度、当前温湿度、PM2.5 等环境与设备数据；控制能力包括开关灯、调节空调温度/模式/风速、控制窗帘开合、启动或停止扫地机器人、开关摄像头等设备操作；场景能力包括触发已有米家场景，如回家、离家、睡眠等智能场景；以及刷新设备列表缓存。
+description: 查询与控制米家智能家居设备。查询能力包括设备开关状态、运行状态、电量、设定温度、当前温湿度、PM2.5 等环境与设备数据，以及设备状态的**历史变化时间线**（"空调几点开的""传感器什么时候检测到人""灯今天开过几次"）；控制能力包括开关灯、调节空调温度/模式/风速、控制窗帘开合、启动或停止扫地机器人、开关摄像头等设备操作；场景能力包括触发已有米家场景，如回家、离家、睡眠等智能场景；以及刷新设备列表缓存。
 metadata:
   author: miloco
   version: "1.7"
@@ -20,6 +20,7 @@ metadata:
 | ----------------- | --------------------------------------------------- |
 | **control**       | "打开灯" "空调调到26度" "把窗帘拉上" "扫地"         |
 | **query**         | "灯开着吗" "空调设定的温度" "客厅多少度" "湿度多少" |
+| **history**       | "空调几点开的" "灯什么时候关的" "今天开过几次" "上次有人是啥时候" |
 | **scene_trigger** | "执行回家模式" "触发离家场景"                       |
 | **refresh**       | "刷新设备列表" "更新设备信息" "重新拉一遍"           |
 
@@ -71,7 +72,8 @@ metadata:
 | access | 用途 | 命令 |
 | --------- | ---- | ---- |
 | `w` | 控制属性 | 单属性 `device control <did> <spec_name> <value>`；多属性 `device control <did> --set <spec_name> <v> --set <spec_name> <v>` |
-| `r` | 查询属性 | `device props <did> [spec_name ...]` |
+| `r` | 查询**当前值** | `device props <did> [spec_name ...]` |
+| `r` | 查询**历史变化**(何时变的) | `device history <did> [<iid>] --since 24h` |
 | `x` | 执行动作 | `device action <did> <spec_name> [<值1> <值2>…]`（**只传值，不传参数名**） |
 
 **4.2 参数检查**
@@ -207,6 +209,9 @@ miloco-cli device control 4912 --set brightness 30 --set on true ; miloco-cli de
 | "关客厅灯"（设 on 本身，灯的开关就是 `on`） | `device control 4912 on false` |
 | "空调设定的温度"（查询） | `device props 4962 target-temperature` → 26 |
 | "客厅多少度"（环境数据，同样走 props） | `device props ht01 temperature` → 24.5 |
+| "空调几点开的"（**历史**：问的是"何时变的"，不是当前值） | `device history 4962 on@空调 --since 24h` → `true@08:12` |
+| "今天灯开过几次"（历史，数变化次数） | `device history 4912 on --since 24h` |
+| "上次有人是啥时候"（人在传感器，历史） | `device history 2033601557 --since 24h` |
 | "家里有几盏灯"（集合 → grep 每轮重查） | `device list \| grep -E '灯\|light'` |
 | "扫地机回去充电"（access=x → action 只传值） | `device action 4981 start-charge` |
 

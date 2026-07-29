@@ -47,6 +47,7 @@ def _bare_client(mips: _FakeMips | None) -> MIoTClient:
     client._meta_sub_dids = set()
     client._scene_sub_home_ids = set()
     client._state_sub_dids = set()
+    client._prop_sub_dids = set()
     client._mips_cloud = mips
     client._callback_device_meta_changed = None
     client._callback_scene_changed = None
@@ -170,6 +171,7 @@ class _SetupFakeMips:
         self.sub_device_meta_changed_async = AsyncMock(side_effect=self._meta)
         self.sub_home_scene_changed_async = AsyncMock()
         self.sub_device_state_async = AsyncMock(side_effect=self._state)
+        self.sub_device_prop_async = AsyncMock()
 
     async def _meta(self, did: str, handler) -> None:
         if did in self._fail_meta_dids:
@@ -185,7 +187,7 @@ class _SetupFakeMips:
 
 
 def _setup_client(
-    monkeypatch, fake, *, meta_dids, scene_home_ids, state_dids=()
+    monkeypatch, fake, *, meta_dids, scene_home_ids, state_dids=(), prop_dids=()
 ) -> MIoTClient:
     monkeypatch.setattr(client_mod, "MIoTMipsCloud", lambda **kw: fake)
     client = MIoTClient.__new__(MIoTClient)
@@ -200,9 +202,11 @@ def _setup_client(
     client._meta_sub_dids = set(meta_dids)
     client._scene_sub_home_ids = set(scene_home_ids)
     client._state_sub_dids = set(state_dids)
+    client._prop_sub_dids = set(prop_dids)
     client._callback_device_meta_changed = None
     client._callback_scene_changed = None
     client._callback_device_state_changed = None
+    client._callback_device_prop_changed = None
     return client
 
 
@@ -409,3 +413,29 @@ def test_home_scene_subscribe_results_do_not_touch_user_error():
     client._mips_user_sub_error = "stale user error"
     client._on_mips_subscribe_success("home/h1/scene/edit")
     assert client._mips_user_sub_error == "stale user error"
+
+
+@pytest.mark.asyncio
+async def test_setup_replays_prop_subscriptions(monkeypatch):
+    """属性推送订阅同样要在 re-OAuth / fresh setup 后重放。
+
+    _setup_mips_async 会新建 mips 实例（老实例的 _subs 全丢），已跟踪的
+    did 必须逐个重新订阅——漏了的话该设备的属性历史会静默断流，直到下一次
+    refresh_devices 的 diff 才补上。
+    """
+    fake = _SetupFakeMips()
+    client = _setup_client(
+        monkeypatch,
+        fake,
+        meta_dids=set(),
+        scene_home_ids=set(),
+        prop_dids={"dev-1", "dev-2"},
+    )
+
+    await client._setup_mips_async()
+
+    assert {c.args[0] for c in fake.sub_device_prop_async.await_args_list} == {
+        "dev-1",
+        "dev-2",
+    }
+    assert client._prop_sub_dids == {"dev-1", "dev-2"}

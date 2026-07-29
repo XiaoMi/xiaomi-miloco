@@ -297,6 +297,59 @@ async def get_device_history(current_user: str = Depends(verify_token)):
 
 
 @router.get(
+    path="/prop-history",
+    summary="Query mips property-push history (device_prop_history table)",
+    response_model=NormalResponse,
+)
+async def get_prop_history(
+    did: str,
+    iid: str | None = Query(
+        default=None,
+        description="属性 iid,形如 prop.2.1 或 2.1;不传返回整设备时间线",
+    ),
+    since: int | None = Query(default=None, description="起始时间戳(ms,含)"),
+    until: int | None = Query(default=None, description="结束时间戳(ms,含)"),
+    limit: int = Query(default=100, ge=1, le=1000),
+    current_user: str = Depends(verify_token),
+):
+    """按设备(可选按单属性)查询属性变化历史,新→旧排序。
+
+    数据来自两条通道(均受 ``miot.prop_history_enabled`` 管,默认开):
+
+    * **mips `properties_changed` 推送**——主链路,行内 ``ts`` 是事件时刻(秒级);
+    * **批量轮询兜底**(``prop_history_poll_interval_sec``,默认 300s)——覆盖推送
+      够不到的部分:订阅被拒的设备、mips 断连窗口、以及设备根本不上报的属性。
+      轮询补的行 ``ts`` 是**发现时刻**,最多晚于真实变化一个周期。
+
+    两点会影响读数,查询方需知晓:
+
+    * **落库前有节流**(``prop_history_throttle_enabled``,默认开)。开关、模式、
+      占用等离散属性变化即落库、一条不丢;而只读的数值遥测(功率/湿度/PM2.5…)
+      按满量程幅度与最小间隔去抖,时间线上会有最长 ``throttle_min_interval_sec``
+      (默认 900s)的空洞——**这类属性不适合用来还原连续曲线**。
+    * 订阅生效之前的历史不在库里(无回填)。
+    """
+    siid: int | None = None
+    piid: int | None = None
+    if iid:
+        parts = iid.removeprefix("prop.").split(".")
+        try:
+            siid, piid = int(parts[0]), int(parts[1])
+        except (IndexError, ValueError):
+            # 本仓库的 HTTPException 签名是 (message, status_code)，不是 FastAPI 的
+            # (status_code, detail) —— 写成后者会在这里抛 TypeError 而不是返回 400。
+            raise HTTPException(
+                message=f"iid 格式非法(期望 prop.S.P): {iid!r}", status_code=400
+            ) from None
+    rows = manager.device_prop_history_dao.query(
+        did, siid=siid, piid=piid, since_ms=since, until_ms=until, limit=limit
+    )
+    return NormalResponse(
+        code=0, message="ok", data={"did": did, "count": len(rows), "items": rows}
+    )
+
+
+@router.get(
     path="/devices/{did}/status",
     summary="Get device property status",
     response_model=NormalResponse,

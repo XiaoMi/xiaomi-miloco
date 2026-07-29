@@ -239,6 +239,55 @@ class MiotSettings(BaseModel):
     cloud_server: str = Field(
         default="cn", description="MIoT 云区域（cn/de/i2/ru/sg/us）"
     )
+    prop_history_enabled: bool = Field(
+        default=True,
+        description="订阅全部设备的 mips 属性推送并落库(device_prop_history),"
+        "供「某设备几点开的」类历史查询。",
+    )
+    prop_history_retention_days: int = Field(
+        default=30, description="属性历史保留天数;写路径顺带清理过期行。"
+    )
+    prop_history_poll_enabled: bool = Field(
+        default=True,
+        description="是否启用属性历史的轮询兜底通道。推送是主链路,本开关只管"
+        "兜底采样;关掉后仅保留推送(设备不上报的属性将不再有历史)。",
+    )
+    prop_history_poll_interval_sec: int = Field(
+        default=300,
+        description="属性历史轮询周期(秒)。推送为主链路,轮询只做兜底采样:"
+        "覆盖订阅被拒的设备、mips 断连窗口,以及设备根本不推送的属性。"
+        "一周期一次批量 prop/get。",
+    )
+    prop_history_throttle_enabled: bool = Field(
+        default=True,
+        description="属性推送落库前做节流。关闭后遥测类属性(功率/电压等秒级"
+        "推送)会全量落库,库体积增长极快,仅排障时临时关闭。",
+    )
+    prop_history_throttle_window_sec: int = Field(
+        default=600,
+        description="节流的频率判定窗口(秒):窗口内变化次数达到 burst 才按"
+        "高频遥测去抖,低频数值变化(设定温度/档位)不受影响。",
+    )
+    prop_history_throttle_burst: int = Field(
+        default=5,
+        description="判定为高频遥测的窗口内变化次数阈值。",
+    )
+    prop_history_throttle_min_interval_sec: int = Field(
+        default=900,
+        description="高频遥测属性的最小落库间隔(秒);距上次落库超过该间隔的"
+        "变化无条件落库,保证长期趋势不丢。",
+    )
+    prop_history_throttle_rel_delta: float = Field(
+        default=0.3,
+        description="高频遥测属性的幅度阈值。spec 有 value-range 时按**满量程**"
+        "比例判定(0–100 的湿度设 0.3 = 变化 30 个百分点才落库);无量程时退化为"
+        "相对上次落库值的比例。0.3 = 30%。",
+    )
+    prop_history_poll_extra: list[str] = Field(
+        default_factory=list,
+        description="默认 watchlist(全设备 prop.2.1)之外要轮询的属性,"
+        "形如 'did:prop.4.1'。",
+    )
 
 
 class NotifySettings(BaseModel):

@@ -429,6 +429,36 @@ class MIoTDeviceStateEvent(BaseModel):
     timestamp_ms: int = Field(default=0)
 
 
+class MIoTPropChange(BaseModel):
+    """One property change entry inside a `properties_changed` push."""
+
+    siid: int = Field(description="Service instance id")
+    piid: int = Field(description="Property instance id")
+    value: Any = Field(default=None, description="New property value")
+
+
+class MIoTDevicePropChangedEvent(BaseModel):
+    """Decoded `device/{did}/up/properties_changed` payload.
+
+    Per-device property push. One MQTT message may carry several property
+    entries (`params` list) — they are kept together in `changes` so the
+    handler can persist them under one timestamp. `did` comes from the topic;
+    the full payload is kept verbatim in `raw` for forensics (broker payload
+    schema follows the HA `xiaomi_home` MIPS convention but is not formally
+    documented for this broker).
+    """
+
+    did: str = Field(description="Device id")
+    changes: List[MIoTPropChange] = Field(
+        default_factory=list, description="Decoded property entries"
+    )
+    raw: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Raw decoded payload (broker schema is undocumented)",
+    )
+    timestamp_ms: int = Field(default=0)
+
+
 class MipsConnectionError(Exception):
     """MIPS cloud client failed to connect."""
 

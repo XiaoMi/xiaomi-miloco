@@ -168,11 +168,19 @@ class SQLiteConnector:
                             "task_terminate_log",
                             self._create_task_terminate_log_table,
                         ),
+                        (
+                            "device_prop_history",
+                            self._create_device_prop_history_table,
+                        ),
                     ):
                         if tbl not in existing_tables:
                             logger.info("%s table not found, creating...", tbl)
                             create_fn(conn)
                             tables_created.append(tbl)
+
+                    # 建表分支只在缺表时跑,已有该表的库拿不到后补的索引。索引
+                    # 全是 IF NOT EXISTS,这里无条件补一次,让老库也能受益。
+                    self._ensure_prop_history_indices(conn)
 
                     # If new tables were created, commit transaction
                     if tables_created:
@@ -255,6 +263,7 @@ class SQLiteConnector:
         self._create_task_record_event_table(conn)
         self._create_task_record_event_entry_table(conn)
         self._create_task_terminate_log_table(conn)
+        self._create_device_prop_history_table(conn)
         conn.execute(f"PRAGMA user_version = {_DB_SCHEMA_VERSION}")
         conn.commit()
         logger.info("Database table structure created successfully")
@@ -542,6 +551,52 @@ class SQLiteConnector:
             "ON device_lru(did, touched_at DESC)"
         )
         logger.info("device_lru table created successfully")
+
+    def _create_device_prop_history_table(self, conn: sqlite3.Connection) -> None:
+        """Create device_prop_history table — mips property-push time series.
+
+        One row per property entry of a `properties_changed` push (a push
+        carrying N entries → N rows sharing ts_ms). value stored as JSON so
+        bool/number/string/null all round-trip. Retention is enforced by the
+        DAO (config `miot.prop_history_retention_days`), not by the schema.
+        """
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS device_prop_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                did TEXT NOT NULL,
+                siid INTEGER NOT NULL,
+                piid INTEGER NOT NULL,
+                value_json TEXT NOT NULL,
+                ts_ms INTEGER NOT NULL
+            )
+        """)
+        self._ensure_prop_history_indices(conn)
+        logger.info("device_prop_history table created successfully")
+
+    @staticmethod
+    def _ensure_prop_history_indices(conn: sqlite3.Connection) -> None:
+        """Create device_prop_history indices (idempotent).
+
+        建表分支只在缺表时执行,所以索引单独抽出来、在 init 里无条件跑一次,
+        已存在该表的库才能拿到后补的索引。
+        """
+        cursor = conn.cursor()
+        # 查询形态只有两种:整设备时间线 / 单属性时间线,都带时间范围倒序。
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prop_history_did_ts "
+            "ON device_prop_history(did, ts_ms DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prop_history_prop_ts "
+            "ON device_prop_history(did, siid, piid, ts_ms DESC)"
+        )
+        # 上面两条都以 did 打头,保留期清理的 `WHERE ts_ms < ?` 用不上,会退化成
+        # 全表扫——而它跑在写路径(即事件循环)上。补一条纯时间索引。
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prop_history_ts "
+            "ON device_prop_history(ts_ms)"
+        )
 
     def _create_token_usage_table(self, conn: sqlite3.Connection) -> None:
         """Create token_usage table for per-API-call token usage events (last 3 days).
