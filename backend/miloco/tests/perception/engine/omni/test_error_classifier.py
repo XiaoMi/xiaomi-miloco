@@ -83,12 +83,16 @@ def test_404_is_not_found_config():
 
 
 def test_400_is_rejected_authed():
+    # 400/422 归 RECOVERABLE 而非 CONFIG:运行时语境下绝大多数是单次请求体
+    # 问题(坏帧/媒体编码/缺字段),该走 backoff 自动探测;归 CONFIG 会进
+    # OPEN_CONFIG 且永不自动重试(2026-07-29 感知停摆 2.5h 的放大器)。
     r = classify_response(_resp(400))
-    assert r.code == "rejected_authed" and r.category == ErrorCategory.CONFIG
+    assert r.code == "rejected_authed" and r.category == ErrorCategory.RECOVERABLE
 
 
 def test_422_is_rejected_authed():
-    assert classify_response(_resp(422)).code == "rejected_authed"
+    r = classify_response(_resp(422))
+    assert r.code == "rejected_authed" and r.category == ErrorCategory.RECOVERABLE
 
 
 def test_429_is_rate_limited_recoverable():

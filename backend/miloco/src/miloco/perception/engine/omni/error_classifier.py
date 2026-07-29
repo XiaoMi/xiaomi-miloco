@@ -51,7 +51,7 @@ _MESSAGES: dict[str, str] = {
     "bad_key": "API Key 无效或无权限",
     "no_key": "未配置 API Key",
     "not_found": "模型或地址不存在",
-    "rejected_authed": "已连接，但请求被拒绝（模型名或 API Key 可能有误）",
+    "rejected_authed": "已连接，但请求被拒绝（请求体/媒体数据、模型名或 API Key 可能有误）",
     "bad_response": "omni 响应格式异常",
     "cancelled": "重试被中断",
 }
@@ -88,8 +88,13 @@ def classify_response(resp: httpx.Response) -> ClassifiedError | None:
             "not_found", _MESSAGES["not_found"], ErrorCategory.CONFIG
         )
     if s in (400, 422):
+        # 运行时语境的 400/422 绝大多数是**单次请求体问题**(坏帧、媒体编码、缺字段
+        # ——2026-07-29 实锅:audio 路由 input_audio 缺 format 字段打本地 mlx server
+        # 422×3 → OPEN_CONFIG 黑洞,感知停摆 2.5h)。归 RECOVERABLE 让熔断走
+        # backoff+自动探测(probe 是极简文本 ping,配置真有问题探测自己会失败);
+        # 真·key/模型名错误主要走 401/403/404 分支,不依赖这里。
         return ClassifiedError(
-            "rejected_authed", _MESSAGES["rejected_authed"], ErrorCategory.CONFIG
+            "rejected_authed", _MESSAGES["rejected_authed"], ErrorCategory.RECOVERABLE
         )
     if s == 429:
         retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
