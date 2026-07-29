@@ -324,9 +324,11 @@ async def get_prop_history(
         try:
             siid, piid = int(parts[0]), int(parts[1])
         except (IndexError, ValueError):
+            # 本仓库的 HTTPException 签名是 (message, status_code)，不是 FastAPI 的
+            # (status_code, detail) —— 写成后者会在这里抛 TypeError 而不是返回 400。
             raise HTTPException(
-                status_code=400, detail=f"iid 格式非法(期望 prop.S.P): {iid!r}"
-            )
+                message=f"iid 格式非法(期望 prop.S.P): {iid!r}", status_code=400
+            ) from None
     rows = manager.device_prop_history_dao.query(
         did, siid=siid, piid=piid, since_ms=since, until_ms=until, limit=limit
     )

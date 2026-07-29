@@ -306,3 +306,24 @@ def test_push_handler_without_throttle_persists_everything(monkeypatch, dao):
             )
         )
     assert len(dao.query("ac", siid=12, piid=3, limit=10)) == 3
+
+
+# ---------------------------------------------------------------- API 参数校验
+
+
+def test_prop_history_endpoint_rejects_malformed_iid():
+    """非法 iid 必须返回 400，而不是把 TypeError 冒到 500。
+
+    本仓库的 HTTPException 签名是 ``(message, status_code)``，与 FastAPI 的
+    ``(status_code, detail)`` 不同；按后者写会在构造异常时就 TypeError，用户
+    拿到的是 500 而非参数错误。这条守住调用签名。
+    """
+    import asyncio
+
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.miot.router import get_prop_history
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(get_prop_history(did="d1", iid="不是iid", current_user="t"))
+    assert ei.value.http_status == 400
+    assert "prop.S.P" in str(ei.value.message)
