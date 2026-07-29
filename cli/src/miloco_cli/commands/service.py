@@ -269,10 +269,13 @@ def _generate_supervisor_conf(server_cmd: str) -> None:
     # 是上限非目标);TRIM_THRESHOLD_ 钉死→主 arena 堆顶更勤还 OS。musl/macOS 无视这些
     # 变量,注入无害。
     #
-    # 曾担心"每帧大块走 mmap 付 sys 税"而一度去掉钉死,后实测证伪:那个 sys 税只在
-    # 单块 malloc/free 紧循环里成立(默认态白捡 arena 复用→钉死打掉它才暴涨)。真实解码
-    # 路径每帧产两块 6.2MB buffer(to_ndarray + astype),默认态本就复用不上、已在缺页,
-    # 钉死增量仅 +0.1~0.2ms/帧,单摄像头 15fps 平摊 ~0.2% 单核,可忽略。故保留钉死。
+    # MMAP 钉死的 CPU 代价:曾担心"每帧大块走 mmap 付 sys 税"而一度去掉,后实测证伪——
+    # 那个 sys 税只在单块 malloc/free 紧循环里成立(默认态白捡 arena 复用→钉死打掉它才
+    # 暴涨)。真实解码路径每帧产两块 6.2MB buffer(to_ndarray + astype),默认态本就复用不
+    # 上、已在缺页,钉死增量仅 +0.1~0.2ms/帧(x86+RK3588 实测,后者需 numpy>=2.2),单摄
+    # 像头 15fps 平摊 ~0.2% 单核,可忽略。
+    # ARENA_MAX=6 的代价另算:arena 变少理论上增多线程(多摄像头 = 多解码线程)malloc 锁
+    # 争用,本场景线程数下预期可忽略但未单独实测;若解码线程数上去,关注帧延迟 p99。
     malloc_env = (
         ',MALLOC_ARENA_MAX="6"'
         ',MALLOC_MMAP_THRESHOLD_="131072"'

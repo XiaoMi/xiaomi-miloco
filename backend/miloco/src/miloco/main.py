@@ -433,6 +433,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _onboarding_task.add_done_callback(_BG_TASKS.discard)
 
     maintenance_task = asyncio.create_task(_daily_maintenance_loop())
+    _BG_TASKS.add(maintenance_task)
+    maintenance_task.add_done_callback(_BG_TASKS.discard)
 
     rollover_task = asyncio.create_task(_rollover_daily_loop())
     _BG_TASKS.add(rollover_task)

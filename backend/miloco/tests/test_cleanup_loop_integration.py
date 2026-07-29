@@ -43,11 +43,14 @@ def isolated_env(tmp_path, monkeypatch):
     reset_settings()
 
 
-async def _run_loop_until_second_sleep(loop_coro_factory):
-    """跑一轮 loop body:第一次 sleep 立即放行,第二次抛 Cancel 顶出 while True。
+async def _run_one_cycle():
+    """跑一轮 _daily_maintenance_loop body(跳过开头 60s 与末尾 86400s 等待)。
 
-    首个 sleep 是启动延迟、之后 sleep 是周期等待,用此驱动跳过两段等待只跑一轮 body。
+    patch 掉 asyncio.sleep:第一次(开头 60s)立即放行,第二次(末尾 86400s)抛
+    CancelledError 顶出 while True,body 恰好执行一轮。
     """
+    from miloco import main as main_module
+
     real_sleep = asyncio.sleep
     call_count = [0]
 
@@ -59,17 +62,9 @@ async def _run_loop_until_second_sleep(loop_coro_factory):
 
     with patch.object(asyncio, "sleep", side_effect=_short_sleep):
         try:
-            await loop_coro_factory()
+            await main_module._daily_maintenance_loop()
         except asyncio.CancelledError:
             pass
-
-
-async def _run_one_cycle():
-    """运行 _daily_maintenance_loop 的一轮 body(跳过初始 60s 与末尾 86400s 等待)."""
-    from miloco import main as main_module
-
-    await _run_loop_until_second_sleep(main_module._daily_maintenance_loop)
-
 
 
 class TestCleanupLoop:

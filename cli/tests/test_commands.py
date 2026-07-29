@@ -1955,6 +1955,17 @@ def test_generate_supervisor_conf_omits_timezone_when_unset(runner, tmp_path, mo
     assert 'MILOCO_SUPERVISED="1"' in conf
 
 
+def test_generate_supervisor_conf_always_injects_malloc_tunables(runner, tmp_path, monkeypatch):
+    """三个 MALLOC_* 无条件注入(glibc arena 碎片调优),与 TZ 是否解析到无关。"""
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    conf = svc_mod._supervisor_conf().read_text()
+    assert 'MALLOC_ARENA_MAX="6"' in conf
+    assert 'MALLOC_MMAP_THRESHOLD_="131072"' in conf
+    assert 'MALLOC_TRIM_THRESHOLD_="131072"' in conf
+
+
 def test_service_logs_dir_not_found(runner, tmp_path, monkeypatch):
     """日志目录不存在时，logs 以非零退出。"""
     # 切换 MILOCO_HOME 到一个不存在 log/ 子目录的临时目录
