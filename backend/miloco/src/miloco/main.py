@@ -69,7 +69,132 @@ from miloco.task_record.router import router as task_record_router
 from miloco.utils.common import escape_for_js_string
 from miloco.utils.paths import miloco_home
 
+# httpx 的 get_environment_proxies 遍历的三个键(all = 全协议出口,常见于 SOCKS)。
+_PROXY_SCHEMES = ("http", "https", "all")
+
+
+def _system_proxies() -> dict[str, str]:
+    """只读**系统**代理设置,绕开 getproxies() 的 env 短路。
+
+    平台专用函数(macOS 的 getproxies_macosx_sysconf / Windows 的
+    getproxies_registry)不看环境变量,正是 getproxies() 里 `or` 右侧那一半。
+    其它平台(Linux)本就只有 env 一个来源,返回空 dict 即可。
+    """
+    import urllib.request
+
+    for name in ("getproxies_macosx_sysconf", "getproxies_registry"):
+        fn = getattr(urllib.request, name, None)
+        if fn is None:
+            continue
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001 - 平台 API 失败退回无代理
+            return {}
+    return {}
+
+
+def _ensure_no_proxy_for_local() -> None:
+    """把回环地址并入 NO_PROXY,防系统代理劫持本机调用。
+
+    macOS 上 urllib.getproxies() 会读**系统级代理设置**(不只环境变量),Clash
+    Verge 等开启系统代理后,httpx(trust_env 默认 True)会把打 localhost:8080
+    (本地推理)的请求也送进代理,代理回连失败返 502 → 感知全灭
+    (2026-07-29 实锅:15:07 起 local-gemma/local-qwen 全部 502)。
+
+    **写入前必须先把当前可见的代理快照导出到 env**:CPython 的 getproxies() 是
+    ``getproxies_environment() or getproxies_macosx_sysconf()``(Windows 同构走
+    注册表)——只要环境里存在任何 ``*_proxy`` 变量,前者返回非空 dict 并短路掉
+    系统代理查询。若不先快照就写 NO_PROXY,系统代理会被整体"影子化",云端 API
+    (openrouter 等)从此直连、墙内不可达。
+
+    **两个大小写必须写成同一个值**:CPython 把所有 ``*_proxy`` 折叠成一个 dict
+    时分两遍扫描,第二遍只认字面小写并覆盖第一遍(源码注释:"in order to prefer
+    lowercase variables, process environment in two passes"),故 httpx 最终只认
+    小写 ``no_proxy``。若两份各读各的现有值再各写各的,只设了大写 ``NO_PROXY``
+    的用户(Docker / K8s / 企业代理文档的通行写法)其排除项会被静默丢弃。这里
+    取两份的并集,再把同一个结果写回两份。
+
+    只列回环地址(localhost / 127.0.0.1 / ::1),**不列 RFC1918 网段**:
+    httpx(0.28.1)的 NO_PROXY 没有子网匹配——``192.168.0.0/16`` 会被转成 mount
+    key ``all://192.168.0.0/16``,URLPattern 解析后 host 精确匹配
+    ``192.168.0.0``、path ``/16`` 直接丢弃(httpx 自己的 tests/test_utils.py
+    固化了这个转换),只有字面等于 ``192.168.0.0`` 的目标才 bypass。局域网设备
+    (vLLM / Tailscale / 手机节点)的直连交给代理软件自己的 DIRECT 规则;若要在
+    miloco 内强制,得在 client 构造点按目标地址给 ``trust_env=False``。
+
+    三条已知边界(都不在本函数职责内,记在这里免得排障时抓瞎):
+
+    - **快照只在 import 期取一次**。backend 起来之后才打开系统代理的话,env 里
+      没有代理、NO_PROXY 又已写入,云端调用会静默直连,须重启 backend 才恢复。
+    - **对"env 里本就有裸 NO_PROXY"的用户,这是新开启代理**。改动前
+      getproxies() 被那个 NO_PROXY 短路,httpx 拿不到任何代理 → 云端直连;
+      改动后 _system_proxies() 兜回系统代理并落进 env → 云端改走代理。这正是
+      本 PR 想要的(墙内访问云 API 需要代理),但对"故意设 NO_PROXY 来禁用代理"
+      的用户是行为反转——他们应改用 no_proxy 精确列目标,或显式设空的
+      http_proxy/https_proxy 表达"不要代理"。
+    - **快照会扩大代理的作用范围,不止子进程**。系统代理只有"系统感知"的库
+      (urllib / httpx)会读;落地成 env 后,凡是认 ``*_proxy`` 的都会开始走代理:
+      ① backend spawn 的子进程(git、升级脚本里的 curl / uv);② **同进程**内经
+      ctypes 加载的原生库——如摄像头 SDK 内含的 libcurl,它读的是本进程 env,
+      其云侧出口会从直连变成走代理。排查「版本检查/自动升级/相机云端接口突然
+      连不上」时记得这一条。
+    """
+    import urllib.request
+
+    # 先快照——顺序不能反,理由见 docstring。
+    try:
+        snapshot = urllib.request.getproxies()
+        # getproxies() 自己也会被 env 短路:**裸 NO_PROXY 也是 *_proxy**,
+        # 折叠成 `no` 键即让 dict 非空。用户 .zshrc 里 `export NO_PROXY=...`、
+        # 或 .env 经 load_dotenv() 注入(它跑在本函数之前)时,快照会静默取空,
+        # 系统代理照旧被影子化。所以拿不到 http/https 时直接问系统设置一次。
+        if not any(snapshot.get(k) for k in _PROXY_SCHEMES):
+            snapshot = {**_system_proxies(), **snapshot}
+    except Exception:  # noqa: BLE001 - 取不到代理不该拖垮启动
+        snapshot = {}
+    # 判**存在**而非真值:空值是 curl / CPython 生态里"显式取消该 scheme 代理"
+    # 的通行约定(getproxies_environment 第二遍扫描对空值走 proxies.pop),
+    # 用真值判断会把 `export https_proxy=` 当成"没配"、反手把系统代理写上去,
+    # 恰好打掉 docstring 给出的那条退出办法。
+    # 用户已显式配过任一出口就整体不插手:只配了 ALL_PROXY 的纯 SOCKS 出口
+    # (v2ray / Clash / ssh -D 的通行写法,httpx 的 get_environment_proxies
+    # 遍历 http/https/all 三个键)若只查 http/https,会被系统代理顶掉 http/https
+    # 出口——与"只追加缺失项"相反。
+    user_configured = any(
+        f"{s}_proxy" in os.environ or f"{s.upper()}_PROXY" in os.environ
+        for s in _PROXY_SCHEMES
+    )
+    if not user_configured:
+        # 导出只做 http/https:平台函数的键集里没有 all(macOS _scproxy 给
+        # http/https/ftp/gopher/socks,Windows 注册表给协议名),唯一能产出 all 的是
+        # getproxies_environment(),而那种情况 user_configured 已为真、走不到这里。
+        for scheme in ("http", "https"):
+            proxied = snapshot.get(scheme)
+            if proxied:
+                os.environ[f"{scheme}_proxy"] = proxied
+                os.environ[f"{scheme.upper()}_PROXY"] = proxied
+
+    local_entries = ["localhost", "127.0.0.1", "::1"]
+    # 先并集再统一写回:保序去重(用户已设条目在前),两份大小写内容一致。
+    merged: list[str] = []
+    for var in ("NO_PROXY", "no_proxy"):
+        for entry in os.environ.get(var, "").split(","):
+            entry = entry.strip()
+            if entry and entry not in merged:
+                merged.append(entry)
+    merged += [e for e in local_entries if e not in merged]
+    value = ",".join(merged)
+    os.environ["NO_PROXY"] = value
+    os.environ["no_proxy"] = value
+
+
 load_dotenv()
+# 模块级调用,不要挪进 lifespan/函数:感知与 agent 的 httpx client 在首次
+# 请求时惰性构造,而 client 构造时读一次代理环境——必须在那之前生效。
+# 被重构掉时的退化表现是本机调用重新被系统代理劫持返 502,
+# tests/test_no_proxy_local.py::test_module_import_applies_no_proxy_end_to_end
+# 开子进程钉住这条链路。
+_ensure_no_proxy_for_local()
 
 logger = logging.getLogger(__name__)
 
