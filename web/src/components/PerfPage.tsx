@@ -18,6 +18,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  getCpuSeries,
   getMemorySeries,
   getMemorySnapshot,
   getUname,
@@ -46,6 +47,7 @@ function avgWindowDuration(rows: PerfTraceRow[]): number | undefined {
   return vals.reduce((s, v) => s + v, 0) / vals.length;
 }
 import { PerfAgentList } from "./PerfAgentList";
+import { PerfCpuChart } from "./PerfCpuChart";
 import { PerfKpiCards } from "./PerfKpiCards";
 import { PerfMemoryChart } from "./PerfMemoryChart";
 import { PerfOmniErrorChart } from "./PerfOmniErrorChart";
@@ -131,6 +133,11 @@ export function PerfPage() {
     [windowKey, bucket],
     { errorLabel: t("perf.errMemSeries") },
   );
+  const cpuSeries = useAsync(
+    () => getCpuSeries(windowKey, bucket),
+    [windowKey, bucket],
+    { errorLabel: t("perf.errCpuSeries") },
+  );
   // uname 是进程级静态信息，api 层模块级缓存，整 app 仅请求一次
   const [uname, setUname] = useState<string | undefined>();
   useEffect(() => {
@@ -150,6 +157,7 @@ export function PerfPage() {
     agentRuns.reload();
     memSnapshot.reload();
     memSeries.reload();
+    cpuSeries.reload();
   };
 
   // 30s 自动刷新。窗口切换会重置 timer。
@@ -217,6 +225,9 @@ export function PerfPage() {
 
       {/* 6. 阶段耗时分布 */}
       <PerfStageTable state={stages} />
+
+      {/* 6.4 进程 CPU 占用时序，与 perf 因果链解耦的运行时观察项 */}
+      <PerfCpuChart seriesState={cpuSeries} bucket={bucket} windowMs={windowMs} />
 
       {/* 6.5 进程内存（smaps + py_heap），与 perf 因果链解耦的运行时观察项 */}
       <PerfMemoryChart

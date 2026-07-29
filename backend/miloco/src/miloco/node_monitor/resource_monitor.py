@@ -18,11 +18,14 @@ logger = logging.getLogger(__name__)
 
 RESOURCE_MONITOR_INTERVAL = 60
 MEMORY_RING_MAXLEN = 3 * 24 * 60  # 3d @ 60s
+CPU_RING_MAXLEN = 3 * 24 * 60  # 3d @ 60s
 SMAPS_PATH = "/proc/self/smaps"
 TASK_DIR = "/proc/self/task"
 
 # (ts, rss_kb, py_objects, py_size_kb)
 MemoryPoint = tuple[float, int, int, int]
+# (ts, cpu_pct)  —— 进程 CPU 占用百分比，多核可 > 100
+CpuPoint = tuple[float, float]
 
 
 def _sample_mem() -> MemSnapshot:
@@ -51,6 +54,10 @@ class ResourceMonitor:
         self._py_heap_latest: PyHeapSnapshot | None = None
         self._memory_lock = threading.Lock()
         self._mem_available = True
+        self._cpu_ring: collections.deque[CpuPoint] = collections.deque(
+            maxlen=CPU_RING_MAXLEN
+        )
+        self._cpu_lock = threading.Lock()
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -91,8 +98,10 @@ class ResourceMonitor:
         snapshot: dict = {"ts": time.time()}
 
         proc = self._psutil_proc
+        cpu_pct: float | None = None
         try:
-            snapshot["cpu_pct"] = proc.cpu_percent(interval=0)
+            cpu_pct = proc.cpu_percent(interval=0)
+            snapshot["cpu_pct"] = cpu_pct
         except Exception:
             pass
         try:
@@ -125,6 +134,11 @@ class ResourceMonitor:
 
         with self._lock:
             self._data = snapshot
+
+        # CPU 时序独立入环：不受下面内存 region 采集 early-return 影响
+        if cpu_pct is not None:
+            with self._cpu_lock:
+                self._cpu_ring.append((snapshot["ts"], cpu_pct))
 
         # 内存 region + py_heap 采集（两路独立 try，互不影响）
         mem_snap: MemSnapshot | None = None
@@ -213,6 +227,36 @@ class ResourceMonitor:
                 "py_objects": sum(v[1] for v in vs) // len(vs),
                 "py_size_kb": sum(v[2] for v in vs) // len(vs),
             }
+            for key, vs in sorted(buckets.items())
+        ]
+        return {
+            "ts_start": points[0]["ts"],
+            "ts_end": points[-1]["ts"],
+            "interval_s": bucket_s,
+            "points": points,
+        }
+
+    def get_cpu_series(self, window_seconds: int, bucket_seconds: int) -> dict:
+        """CPU 占用时序，按 bucket_seconds 墙钟对齐 + 平均聚合。"""
+        cutoff = time.time() - window_seconds
+        with self._cpu_lock:
+            raw = [(ts, pct) for ts, pct in self._cpu_ring if ts >= cutoff]
+        if not raw:
+            return {
+                "ts_start": None,
+                "ts_end": None,
+                "interval_s": bucket_seconds,
+                "points": [],
+            }
+
+        bucket_s = max(bucket_seconds, RESOURCE_MONITOR_INTERVAL)
+        buckets: dict[int, list[float]] = {}
+        for ts, pct in raw:
+            key = int(ts // bucket_s) * bucket_s
+            buckets.setdefault(key, []).append(pct)
+
+        points = [
+            {"ts": float(key), "cpu_pct": round(sum(vs) / len(vs), 1)}
             for key, vs in sorted(buckets.items())
         ]
         return {

@@ -23,6 +23,7 @@
     "errAgentRuns": "Couldn't load agent run list",
     "errMemSnapshot": "Couldn't load memory snapshot",
     "errMemSeries": "Couldn't load memory time series",
+    "errCpuSeries": "Couldn't load CPU time series",
 
     "loading": "Loading…",
     "noData": "No data in the selected period.",
@@ -87,6 +88,13 @@
     "kpiOmniRtfP95Hint": "successful omni calls only",
     "kpiAgentCall": "Agent calls",
     "kpiAgentCallHint": "times agent triggered",
+
+    "cpuTitle": "Process CPU",
+    "cpuHeaderCur": "Current {{pct}}%",
+    "cpuHeaderPeak": "Peak {{pct}}%",
+    "cpuHeaderEmpty": "No data",
+    "cpuEmptySeries": "No CPU time series in the selected window.",
+    "cpuAria": "CPU usage time series",
 
     "memTitle": "Process memory",
     "memHeaderRss": "RSS {{mb}} MB",
