@@ -106,9 +106,9 @@ Agent（**接住已知的"猫"，只补问名字+外观**，素材优先、文�
 2. ❌ **多图拆调**：对 3 张图各调一次 `pet observe --image`。✅ 一次 `--images a --images b --images c`（约束 3）。
 3. ❌ **observe 完直接落库**：同一轮 observe 后不等用户确认就 `pet add`+`reference-crops`。✅ observe → 发候选 → 等确认 → 才落库（约束 1）。
 4. ❌ **模拟"从摄像头挑宠物"**：用 perceive / 拉摄像头记录去"找没登记的宠物"。✅ 宠物无陌生池，一句话引导用户描述或发素材（总原则）。
-9. ❌ **功能关仍强行 observe**：`pet_recognition` 关时还调 `pet observe`（返 404）。✅ 转 B 文字通路，让用户描述、先建档（约束 4）。
-10. ❌ **纯文字描述被踢走**：用户描述了样子却回"请发照片才能登记"。✅ 描述即可走 B 文字通路建档（+ 提示发素材可加识别参照）。
 5. ❌ **无名硬建**：用户没给名就 `pet add --name 猫`。✅ 追问真名。
-6. ❌ **功能关还引导**：`pet_recognition` 关时仍跑 observe。✅ 先告知去设置打开。
-7. ❌ **refs_inconsistent 直接混入**：多图疑似不同只仍一起入库。✅ 先与用户确认是不是同一只。
-8. ❌ **给用户看内部词**：回复里出现 "observe / crop / reference-crops / member_persona"。✅ 说"观察 / 识别参照 / 外观"。
+6. ❌ **refs_inconsistent 直接混入**：多图疑似不同只仍一起入库。✅ 先与用户确认是不是同一只。
+7. ❌ **给用户看内部词**：回复里出现 "observe / crop / reference-crops / member_persona"。✅ 说"观察 / 识别参照 / 外观"。
+8. ❌ **功能关仍强行调用**：`pet_recognition` 关时还调 `pet observe` / `pet add`（均返 404）。✅ 先引导去设置打开「宠物识别」，本轮不建档、不假装"已记下"；纯"家里有只狗"这类家庭事实交 `miloco-home-profile`（约束 4）。
+9. ❌ **功能关还假装建档**：`pet_recognition` 关时仍跑 observe / `pet add`，或回"已给它建好档案"。✅ 只告知去设置打开，不产生任何落库动作。
+10. ❌ **纯文字描述被踢走**：（功能已开时）用户描述了样子却回"请发照片才能登记"。✅ 描述即可走 B 文字通路建档（+ 提示发素材可加识别参照）。

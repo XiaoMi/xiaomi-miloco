@@ -32,6 +32,7 @@ from miloco.schema.common_schema import NormalResponse
 router = APIRouter(prefix="/identity", tags=["Pet"])
 
 _PET_ID_RE = re.compile(r"^pet_[0-9a-f]{12}\Z")  # \Z 而非 $：与 person 一致，禁尾随换行 id
+_MAX_REF_CROPS = 3  # 参考图上传张数上限（与 pet_library._MAX_REF_CROPS 同口径）
 
 
 class PetCreate(BaseModel):
@@ -252,11 +253,20 @@ async def upload_pet_reference_crops(
         raise HTTPException(status_code=400, detail="mode 只能是 replace 或 append")
     if not crops:
         raise HTTPException(status_code=400, detail="no reference crops")
-    data = [await c.read() for c in crops]
-    if any(not d for d in data):
-        raise HTTPException(status_code=400, detail="empty reference crop")
-    if mode == "replace" and len(data) > 3:  # 存储层也会 cap，这里给更友好的 400
+    # 张数 / 体积在读盘前卡（含 append）——存储层反正只留 top-3，一次传 >3 或超大无语义，
+    # 避免把将被 400 的请求整批 materialize 进内存（同 avatar / observe 闸门顺序）。
+    if len(crops) > _MAX_REF_CROPS:
         raise HTTPException(status_code=400, detail="最多 3 张参考 crop")
+    if any(c.size is not None and c.size > _avatar.AVATAR_MAX_BYTES for c in crops):
+        raise HTTPException(status_code=400, detail="参考图过大（单张上限 5 MB）")
+    data: list[bytes] = []
+    for c in crops:
+        raw = await c.read()
+        if len(raw) > _avatar.AVATAR_MAX_BYTES:  # size 缺失时兜底
+            raise HTTPException(status_code=400, detail="参考图过大（单张上限 5 MB）")
+        if not raw:
+            raise HTTPException(status_code=400, detail="empty reference crop")
+        data.append(raw)
     lib = get_pet_library()
     fn = lib.append_reference_crops if mode == "append" else lib.set_reference_crops
     try:

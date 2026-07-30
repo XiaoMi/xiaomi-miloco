@@ -878,6 +878,7 @@ class FeaturesUpdateBody(BaseModel):
     pet_recognition: bool | None = None
     pet_head_grounding: bool | None = None
     pet_body_grounding: bool | None = None
+    pet_reid_diverse: bool | None = None
 
 
 def _features_state() -> dict:
@@ -886,6 +887,7 @@ def _features_state() -> dict:
         "pet_recognition": f.pet_recognition,
         "pet_head_grounding": f.pet_head_grounding,
         "pet_body_grounding": f.pet_body_grounding,
+        "pet_reid_diverse": f.pet_reid_diverse,
     }
 
 
@@ -913,8 +915,17 @@ def set_features(body: FeaturesUpdateBody, current_user: str = Depends(verify_to
         update["pet_head_grounding"] = body.pet_head_grounding
     if body.pet_body_grounding is not None:
         update["pet_body_grounding"] = body.pet_body_grounding
+    if body.pet_reid_diverse is not None:
+        update["pet_reid_diverse"] = body.pet_reid_diverse
     if update:
         update_shared_config(features=update)
+        # 拨动 pet_recognition 后立即重渲一次家庭档案，否则关掉后 profile.md 仍含「## 宠物」段、
+        # 继续随每帧感知注入（而称呼纪律 / pet_identities 已停），把最易误认的输入留下、护栏撤了。
+        if "pet_recognition" in update:
+            try:
+                get_manager().home_profile_service.commit()
+            except Exception:  # noqa: BLE001 - 重渲失败不该让开关写入回滚，下次 commit 自愈
+                logger.warning("features 变更后重渲家庭档案失败", exc_info=True)
     return NormalResponse(code=0, message="ok", data=_features_state())
 
 

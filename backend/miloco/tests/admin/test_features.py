@@ -3,6 +3,8 @@
 隔离 $MILOCO_HOME；删 MILOCO_FEATURES__* 环境变量（env 优先级高会盖过 config.json）。
 """
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,6 +19,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("MILOCO_FEATURES__PET_RECOGNITION", raising=False)
     monkeypatch.delenv("MILOCO_FEATURES__PET_HEAD_GROUNDING", raising=False)
     reset_settings()
+    # 拨动 pet_recognition 会触发家庭档案重渲；测试里桩掉 commit，避免碰真实 home。
+    monkeypatch.setattr(
+        "miloco.admin.router.get_manager",
+        lambda: SimpleNamespace(home_profile_service=SimpleNamespace(commit=lambda: {})),
+    )
     app = FastAPI()
     app.include_router(router, prefix="/api")
     yield TestClient(app)
@@ -30,6 +37,7 @@ def test_features_default_off(client):
         "pet_recognition": False,
         "pet_head_grounding": True,
         "pet_body_grounding": True,
+        "pet_reid_diverse": True,
     }
 
 
@@ -52,6 +60,7 @@ def test_features_partial_update_keeps_others(client):
         "pet_recognition": True,
         "pet_head_grounding": True,
         "pet_body_grounding": True,
+        "pet_reid_diverse": True,
     }
 
 
@@ -61,3 +70,12 @@ def test_features_soft_close_toggle_off(client):
         "/api/admin/features", json={"pet_recognition": False}
     ).json()["data"]
     assert out["pet_recognition"] is False
+
+
+def test_features_reid_diverse_via_admin(client):
+    # pet_reid_diverse 也经 admin 端点暴露（默认开）、可改——与 CLI / backend 口径一致
+    assert client.get("/api/admin/features").json()["data"]["pet_reid_diverse"] is True
+    out = client.post(
+        "/api/admin/features", json={"pet_reid_diverse": False}
+    ).json()["data"]
+    assert out["pet_reid_diverse"] is False

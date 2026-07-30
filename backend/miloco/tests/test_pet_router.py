@@ -409,3 +409,19 @@ def test_avatar_bad_bytes_400(client):
         files={"image": ("a.png", b"not-an-image", "image/png")},
     )
     assert r.status_code == 400
+
+
+def test_reference_crops_append_over3_400(client):
+    # append 现也在读盘前卡张数（此前只 replace 卡、append 无上限）
+    pet = _create(client)
+    r = _upload_refs(
+        client, pet["id"], [b"a", b"b", b"c", b"d"], [1, 2, 3, 4], mode="append"
+    )
+    assert r.status_code == 400
+
+
+def test_reference_crops_oversized_400(client):
+    # 单张 > 5MB → 400（读盘前 size 前置闸 / 读后 len 兜底）
+    pet = _create(client)
+    big = b"\x00" * (5 * 1024 * 1024 + 1)
+    assert _upload_refs(client, pet["id"], [big], [1]).status_code == 400
