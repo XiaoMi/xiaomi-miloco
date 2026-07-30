@@ -234,6 +234,14 @@ export async function updateTaskDescription(
   return impl.realUpdateTaskDescription(taskId, description);
 }
 
+// 改驱动规则的触发条件文本（任务详情里就地编辑）。
+export async function updateRuleQuery(
+  ruleId: string,
+  query: string,
+): Promise<void> {
+  return impl.realUpdateRuleQuery(ruleId, query);
+}
+
 // ── 设备 ──────────────────────────────────────────────────
 export async function listDevices(homeId?: HomeId): Promise<Device[]> {
   if (!isPrimary(homeId)) return [];

@@ -8,25 +8,33 @@
  *  - 任务行：描述 + 进度摘要 + 启停开关；整行点击打开详情抽屉。
  *  - 详情抽屉：复用列表已加载的 summary 数据（含驱动规则 / 关联 / 进度），无需再拉
  *    单条全量视图。驱动规则在前（触发条件 / 执行动作结构化展示），进度可视化（进度条 /
- *    计时 / 计数），创建时间作次要信息。支持就地编辑任务描述与删除；规则与推送由 Agent
- *    管理，此处只读。
+ *    计时 / 计数），创建时间作次要信息。支持就地编辑任务描述、就地编辑每条规则的触发
+ *    条件文本（PATCH /api/rules/{id}，落库后 backend 会重新装载进 RuleRunner）与删除；
+ *    执行动作与推送仍由 Agent 接线，此处只读。
  */
 
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { deleteTask, setTaskEnabled, updateTaskDescription } from "@/api";
+import {
+  deleteTask,
+  setTaskEnabled,
+  updateRuleQuery,
+  updateTaskDescription,
+} from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
-import type { Task, TaskRecordSummary } from "@/lib/types";
+import type { Task, TaskRecordSummary, TaskRuleBrief } from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
 import { toast } from "./Toast";
 
 interface Props {
   tasks: Task[] | undefined;
   loading: boolean;
-  onChanged: () => void;
+  // 返回 Promise 时（App 传的 tasks.reload()）抽屉会 await 到列表真落地再退出编辑态，
+  // 避免"保存成功但卡片还显示旧文案"的一拍闪回。
+  onChanged: () => void | Promise<void>;
 }
 
 type TFn = ReturnType<typeof useTranslation>["t"];
@@ -239,7 +247,122 @@ function Section({
   );
 }
 
-// 详情抽屉：驱动规则在前，进度可视化，创建时间作次要信息；就地改描述 / 删除。
+// 单条驱动规则卡片：触发条件（住户可就地改文本）+ 执行动作（只读，由 Agent 接线）。
+// editing / draft / busy 由外层抽屉持有：ESC 与遮罩点击要按「先退编辑态、再关抽屉」
+// 的顺序响应，且同一时刻只允许一处在编辑，故状态不下沉到卡片自己。
+function RuleBriefCard({
+  rule,
+  t,
+  editing,
+  draft,
+  busy,
+  onDraftChange,
+  onStartEdit,
+  onCancelEdit,
+  onSave,
+}: {
+  rule: TaskRuleBrief;
+  t: TFn;
+  editing: boolean;
+  draft: string;
+  busy: boolean;
+  onDraftChange: (value: string) => void;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSave: () => void;
+}) {
+  const actions = splitActions(rule.actionsDesc);
+  return (
+    <div className="rounded-xl bg-bg-primary border border-border overflow-hidden">
+      <div className="px-3.5 py-3 border-b border-border">
+        <div className="flex items-start justify-between gap-2 mb-1">
+          <div className="text-caption text-text-tertiary">
+            {t("tasks.triggerCondition")}
+          </div>
+          {!editing && (
+            <button
+              type="button"
+              onClick={onStartEdit}
+              // busy 期间（另一处正在保存）不给开新编辑：否则保存 resolve 时的
+              // setEditingRuleId(null) 会把刚打开的编辑框顺手关掉。
+              disabled={busy}
+              aria-label={t("tasks.editTrigger")}
+              title={t("tasks.editTrigger")}
+              className="shrink-0 -mr-1 -mt-0.5 p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-tertiary transition-colors disabled:opacity-50"
+            >
+              <IconPencil width={14} height={14} />
+            </button>
+          )}
+        </div>
+        {editing ? (
+          <div className="space-y-2">
+            <textarea
+              value={draft}
+              onChange={(e) => onDraftChange(e.target.value)}
+              rows={2}
+              maxLength={200}
+              autoFocus
+              placeholder={t("tasks.triggerPlaceholder")}
+              className="w-full resize-none rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
+            />
+            {/* 措辞提示：backend _validate_query_phrasing 会挡「检测到」这类断言性开头
+                （感知模型会当成已发生的事实 → 连续误触发）。校验仍以 backend 为单一
+                真源，这里只前置引导，不在前端复制那份前缀表。 */}
+            <p className="text-caption text-text-tertiary leading-relaxed">
+              {t("tasks.triggerPhrasingHint")}
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={onCancelEdit}
+                disabled={busy}
+                className="h-8 px-3 rounded-lg text-caption text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors disabled:opacity-60"
+              >
+                {t("family.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={busy}
+                className="h-8 px-3 rounded-lg text-caption font-semibold bg-brand-primary text-white hover:bg-brand-accent transition-colors disabled:opacity-60"
+              >
+                {busy ? t("family.saving") : t("family.save")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="text-body text-text-primary leading-relaxed break-words">
+            {rule.query}
+          </div>
+        )}
+      </div>
+      <div className="px-3.5 py-3">
+        <div className="text-caption text-text-tertiary mb-1.5">
+          {t("tasks.ruleActions")}
+        </div>
+        {actions.length > 0 ? (
+          <ul className="space-y-1.5">
+            {actions.map((a, i) => (
+              <li
+                key={i}
+                className="flex gap-2 text-body text-text-secondary leading-relaxed"
+              >
+                <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-brand-primary shrink-0" />
+                <span className="break-words">{a}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="text-caption text-text-tertiary">
+            {t("tasks.ruleActionsEmpty")}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 详情抽屉：驱动规则在前，进度可视化，创建时间作次要信息；就地改描述 / 改触发条件 / 删除。
 function TaskDetailSheet({
   task,
   onClose,
@@ -247,16 +370,20 @@ function TaskDetailSheet({
 }: {
   task: Task;
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.description);
+  // 正在编辑触发条件的规则 id（null = 无）；与描述编辑互斥，一次只开一处。
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+  const [ruleDraft, setRuleDraft] = useState("");
   const [confirmDel, setConfirmDel] = useState(false);
   const [busy, setBusy] = useState(false);
   // 编辑 / 删除确认态下，ESC 先退回浏览态而非关整个抽屉。
   useEscClose(true, () => {
     if (editing) setEditing(false);
+    else if (editingRuleId) setEditingRuleId(null);
     else if (confirmDel) setConfirmDel(false);
     else onClose();
   });
@@ -274,9 +401,29 @@ function TaskDetailSheet({
     try {
       await updateTaskDescription(task.taskId, next);
       toast(t("tasks.descUpdated"), "ok");
+      // 先等列表重拉落地再退编辑态：抽屉的 task 由列表数据派生，否则会闪一拍旧文案。
+      await onChanged();
       setEditing(false);
-      onChanged();
-      onClose();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("family.operationFail"), "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 改触发条件：只 PATCH condition.query，感知设备（perceive_device_ids）保持原样。
+  const saveRuleQuery = async (rule: TaskRuleBrief) => {
+    const next = ruleDraft.trim();
+    if (!next || next === rule.query) {
+      setEditingRuleId(null);
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateRuleQuery(rule.ruleId, next);
+      toast(t("tasks.triggerUpdated"), "ok");
+      await onChanged();
+      setEditingRuleId(null);
     } catch (e) {
       toast(e instanceof Error ? e.message : t("family.operationFail"), "warn");
     } finally {
@@ -289,7 +436,7 @@ function TaskDetailSheet({
     try {
       await deleteTask(task.taskId);
       toast(t("tasks.deleted"), "ok");
-      onChanged();
+      await onChanged();
       onClose();
     } catch (e) {
       toast(e instanceof Error ? e.message : t("family.operationFail"), "warn");
@@ -371,46 +518,24 @@ function TaskDetailSheet({
           <Section title={t("tasks.rulesTitle")}>
             {task.ruleBriefs.length > 0 ? (
               <div className="space-y-3">
-                {task.ruleBriefs.map((r) => {
-                  const actions = splitActions(r.actionsDesc);
-                  return (
-                    <div
-                      key={r.ruleId}
-                      className="rounded-xl bg-bg-primary border border-border overflow-hidden"
-                    >
-                      <div className="px-3.5 py-3 border-b border-border">
-                        <div className="text-caption text-text-tertiary mb-1">
-                          {t("tasks.triggerCondition")}
-                        </div>
-                        <div className="text-body text-text-primary leading-relaxed break-words">
-                          {r.query}
-                        </div>
-                      </div>
-                      <div className="px-3.5 py-3">
-                        <div className="text-caption text-text-tertiary mb-1.5">
-                          {t("tasks.ruleActions")}
-                        </div>
-                        {actions.length > 0 ? (
-                          <ul className="space-y-1.5">
-                            {actions.map((a, i) => (
-                              <li
-                                key={i}
-                                className="flex gap-2 text-body text-text-secondary leading-relaxed"
-                              >
-                                <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-brand-primary shrink-0" />
-                                <span className="break-words">{a}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <div className="text-caption text-text-tertiary">
-                            {t("tasks.ruleActionsEmpty")}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                {task.ruleBriefs.map((r) => (
+                  <RuleBriefCard
+                    key={r.ruleId}
+                    rule={r}
+                    t={t}
+                    editing={editingRuleId === r.ruleId}
+                    draft={ruleDraft}
+                    busy={busy}
+                    onDraftChange={setRuleDraft}
+                    onStartEdit={() => {
+                      setEditing(false);
+                      setRuleDraft(r.query);
+                      setEditingRuleId(r.ruleId);
+                    }}
+                    onCancelEdit={() => setEditingRuleId(null)}
+                    onSave={() => saveRuleQuery(r)}
+                  />
+                ))}
                 <p className="text-caption text-text-tertiary">
                   {t("tasks.rulesManagedHint")}
                 </p>
@@ -490,7 +615,8 @@ function TaskDetailSheet({
               <button
                 type="button"
                 onClick={() => setConfirmDel(true)}
-                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-caption text-text-tertiary hover:text-error hover:bg-error-bg transition-colors"
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-caption text-text-tertiary hover:text-error hover:bg-error-bg transition-colors disabled:opacity-60"
               >
                 <IconTrash width={15} height={15} />
                 {t("tasks.delete")}
@@ -498,10 +624,13 @@ function TaskDetailSheet({
               <button
                 type="button"
                 onClick={() => {
+                  // 与规则触发条件编辑互斥：开描述编辑就把规则编辑收起来。
+                  setEditingRuleId(null);
                   setDraft(task.description);
                   setEditing(true);
                 }}
-                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-caption font-semibold bg-bg-secondary border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-caption font-semibold bg-bg-secondary border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors disabled:opacity-60"
               >
                 <IconPencil width={15} height={15} />
                 {t("tasks.editDescription")}
@@ -517,7 +646,10 @@ function TaskDetailSheet({
 export function TasksPage({ tasks, loading, onChanged }: Props) {
   const { t } = useTranslation();
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<Task | null>(null);
+  // 只记 id、渲染时回列表取最新一条：抽屉里改完描述 / 触发条件后 onChanged 重拉，
+  // 抽屉能直接看到新值（存 Task 快照会定死在打开那一刻）。任务被删/消失 → 派生成
+  // null，抽屉自然收起。useAsync 重拉期间保留旧 data，故加载中不会闪空。
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
 
   const run = async (taskId: string, fn: () => Promise<void>, okMsg: string) => {
@@ -535,6 +667,9 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
 
   const list = tasks ?? [];
   const empty = !loading && list.length === 0;
+  const detail = detailId
+    ? (list.find((x) => x.taskId === detailId) ?? null)
+    : null;
 
   return (
     <div className="space-y-6">
@@ -601,7 +736,7 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
                 <div key={task.taskId} className="group flex items-center gap-3 py-3">
                   <button
                     type="button"
-                    onClick={() => setDetail(task)}
+                    onClick={() => setDetailId(task.taskId)}
                     className="min-w-0 flex-1 text-left rounded-md -mx-2 px-2 py-1 hover:bg-bg-tertiary/50 transition-colors"
                   >
                     <div className="flex items-center gap-2 min-w-0">
@@ -646,8 +781,9 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
 
       {detail && (
         <TaskDetailSheet
+          key={detail.taskId}
           task={detail}
-          onClose={() => setDetail(null)}
+          onClose={() => setDetailId(null)}
           onChanged={onChanged}
         />
       )}

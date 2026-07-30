@@ -1764,3 +1764,21 @@ export async function realUpdateTaskDescription(
     },
   );
 }
+
+// 改规则触发条件文本（PATCH /api/rules/{id}）。
+// condition 走部分更新：只带 query，perceive_device_ids（感知设备）由 backend
+// 保留原值——住户在 Web 上只改"什么情况算命中"，不动看哪几个摄像头。
+// backend patch_rule 落库成功后会重新 add_rule 进 RuleRunner，新条件即时生效。
+export async function realUpdateRuleQuery(
+  ruleId: string,
+  query: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/rules/${encodeURIComponent(ruleId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ condition: { query } }),
+    },
+  );
+}
