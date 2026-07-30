@@ -2476,3 +2476,121 @@ class TestMatchCacheStaleOnCropAccumulation:
             "crop 累积后真实 centroid 已过阈值,旧低分不应继续挡住 merge"
         )
         assert len(pool._clusters) == 1
+
+
+class TestMatchCacheStaleOnFetchBackfill:
+    """fetch **读取侧**的两处 emb 回填同样改 centroid,也必须清 pair sim。
+
+    此前 4a/4b 只覆盖写入侧(攒 crop / 晋级 / 合并 / 淘汰)。fetch 路上还有两处会
+    就地改写 CropEntry 的 emb 字段 —— "某 crop 从无 emb 变有 emb"会让参与 mean 的
+    条数 +1,centroid 随之变:
+
+    1. ``_cluster_candidate_for`` 给缺 emb 的 L1/L2 crop 回填 entry 级快照。它跑在
+       ``_cluster_pairwise_union`` **之后**(fetch 步骤 3→4),所以本次 fetch 刚写入
+       cache 的 sim 当场就与新 centroid 不一致,下次 fetch 命中即误判。号码图翻页
+       靠 agent 拿 next_offset 重发 fetch 实现,用户回一句"更多"就是秒级内的第二次
+       全局 fetch —— 不依赖任何竞态。
+    2. fetch 第 4 道防线的现场抽 emb 回写。它后面只跟一次 intra-cam dedup,**只有
+       真发生 merge** 才顺带清 cache;分数没过阈值就留下"质心已变、cache 未清"。
+    """
+
+    E1 = np.array([1.0] + [0.0] * 127, dtype=np.float32)
+    E2 = np.array([0.0, 1.0] + [0.0] * 126, dtype=np.float32)
+    E3 = np.array([0.0, 0.0, 1.0] + [0.0] * 125, dtype=np.float32)
+    # 与 E1 夹角余弦恰好 0.9(> 0.85 阈值),作 A 簇回填前的 centroid
+    A_REP = np.array([0.9, float(np.sqrt(1.0 - 0.81))] + [0.0] * 126, dtype=np.float32)
+
+    @staticmethod
+    def _add_entry(pool, key, cid, *, entry_emb, l2_embs=(), l1_embs=(), ts=1_700_000_000.0):
+        """白盒造 entry + cluster。``*_embs`` 里的 None 表示"该 crop 没 emb"。"""
+        from miloco.perception.engine.identity.tier_u import EquivClass, TierUEntry
+        entry = TierUEntry(cam_id=key[0], track_id=key[1])
+        entry.cluster_id = cid
+        entry.reid_embedding = entry_emb
+        entry.last_l1_push_ts = ts
+        for i, emb in enumerate(l2_embs):
+            crop = _make_crop(key[0], key[1], i, ts)
+            crop.reid_embedding = emb
+            entry.crops_l2.append(crop)
+        for i, emb in enumerate(l1_embs):
+            crop = _make_crop(key[0], key[1], 100 + i, ts)
+            crop.reid_embedding = emb
+            entry.crops_l1.append(crop)
+        pool._entries[key] = entry
+        cluster = pool._clusters.get(cid)
+        if cluster is None:
+            pool._clusters[cid] = EquivClass(cluster_id=cid, members={key})
+        else:
+            cluster.members.add(key)
+        return entry
+
+    def test_candidate_backfill_invalidates_before_next_page_fetch(self):
+        """号码图翻页复现路径(假阳性,最危险):第 1 页把 0.9 写进 cache 但因"单次只合
+        最高分一对"没合;打包候选时的回填把真实余弦压到 0.53;第 2 页必须按新分数不合。
+        """
+        pool = TierUPool(config=TierUConfig(), reid_provider=_MockReIDProvider())
+        ka, kb = ("cam-a", 1), ("cam-b", 2)
+        kc, kd = ("cam-c", 3), ("cam-d", 4)
+        # A:一张有 emb(= A_REP)、一张缺 emb;entry 级快照是另一姿态(E2)→ 回填即漂移
+        self._add_entry(pool, ka, "CID-A", entry_emb=self.E2, l2_embs=(self.A_REP, None))
+        self._add_entry(pool, kb, "CID-B", entry_emb=self.E1, l2_embs=(self.E1,))
+        # C/D 真实 sim=1.0 > (A,B) 的 0.9 → 本轮 best_pair 是 (C,D),(A,B) 只进 cache
+        self._add_entry(pool, kc, "CID-C", entry_emb=self.E3, l2_embs=(self.E3,))
+        self._add_entry(pool, kd, "CID-D", entry_emb=self.E3, l2_embs=(self.E3,))
+        entries = list(pool._entries.values())
+        pair_ab = frozenset({"CID-A", "CID-B"})
+
+        # --- 第 1 页 fetch:步骤 3 两两比对 ---
+        pool._cluster_pairwise_union(entries)
+        assert pool._match_cache.get(pair_ab) == pytest.approx(0.9, abs=1e-4), (
+            "(A,B)=0.9 应进 cache"
+        )
+        assert pool._entries[ka].cluster_id != pool._entries[kb].cluster_id, (
+            "单次调用只合最高分一对 (C,D),(A,B) 本轮不该合"
+        )
+        assert pool._entries[kc].cluster_id == pool._entries[kd].cluster_id
+
+        # --- 同一次 fetch 的步骤 4:打包候选 → 给缺 emb 的 crop 回填 entry 级快照 ---
+        pool._build_cluster_candidates(entries)
+        assert pool._entries[ka].crops_l2[1].reid_embedding is not None, "回填应已发生"
+        rep_a = pool._cluster_mean_embedding(pool._entries[ka].cluster_id)
+        real_sim = float(rep_a @ self.E1)
+        assert real_sim < pool.config.reid_threshold_cross_cam, (
+            f"回填后真实余弦应掉到阈值下,实际 {real_sim:.4f}"
+        )
+
+        # --- 用户回"更多"→ 第 2 页 fetch(秒级内,无新 crop 入池)---
+        pool._cluster_pairwise_union(list(pool._entries.values()))
+
+        assert pool._entries[ka].cluster_id != pool._entries[kb].cluster_id, (
+            "回填已让真实质心不再相近,不得复用旧 0.9 把两个人错合(身份合并不可逆)"
+        )
+
+    def test_fourth_defense_backfill_invalidates_stale_high_sim(self):
+        """第 4 道防线现场抽 emb 回写后,同一次 fetch 的两两比对不得再命中旧高分。
+
+        走真实 ``fetch(reid_extractor=...)``。A 跨 cam 于 B,intra-cam dedup 不会
+        merge → 修复前**没有任何**路径会清掉 seed 的 0.99。
+        """
+        clk = _clock()
+        pool = TierUPool(config=TierUConfig(), reid_provider=_MockReIDProvider(), now_fn=clk)
+        ka, kb = ("cam-a", 1), ("cam-b", 2)
+        # A:entry 级 emb 仍为 None(provider 整条 track 返 None)、L1 crop 也没 emb
+        # → 命中第 4 道防线;真实身份 E2 与 B 的 E1 正交
+        self._add_entry(pool, ka, "CID-A", entry_emb=None, l1_embs=(None,), ts=clk())
+        self._add_entry(pool, kb, "CID-B", entry_emb=self.E1, l2_embs=(self.E1,), ts=clk())
+        pool._match_cache[frozenset({"CID-A", "CID-B"})] = 0.99
+
+        class _FakeExtractor:
+            calls = 0
+            def extract_feature(self, body_crop):
+                _FakeExtractor.calls += 1
+                return TestMatchCacheStaleOnFetchBackfill.E2.copy()
+
+        pool.fetch(reid_extractor=_FakeExtractor())
+
+        assert _FakeExtractor.calls >= 1, "应命中第 4 道防线现场抽 emb"
+        assert pool._entries[ka].reid_embedding is not None, "回写应已发生"
+        assert pool._entries[ka].cluster_id != pool._entries[kb].cluster_id, (
+            "现场抽出的 emb 与 B 正交,不得复用 stale 0.99 错合"
+        )

@@ -1027,6 +1027,12 @@ class TierUPool:
                 # 顺手给那张 best crop 也带上 emb,下游 BodySample → .npy 链路省一次抽取
                 if best.reid_embedding is None:
                     best.reid_embedding = emb
+                # entry 级快照与 L1 crop emb 都在 _cluster_mean_embedding 的三级
+                # fallback 里 → centroid 变。下面的 _intra_cam_dedup_tick 只在**真发生
+                # merge** 时才顺带清 cache,分数没过阈值就会留下"质心已变、cache 未清"。
+                # 本段在步骤 3 之前跑,于是紧随其后的 _cluster_pairwise_union 会直接
+                # 命中此前几轮 fetch 写入的旧分数,把这里刚补出来的新 centroid 白算掉。
+                self._invalidate_match_cache_for_entry(e)
             # 跑一次 dedup tick,让刚补 emb 的 entry 跟现有 cluster 比对合并
             self._intra_cam_dedup_tick()
 
@@ -1322,6 +1328,10 @@ class TierUPool:
         all_l1: list[CropEntry] = []
         per_cam_rep: dict[str, CropEntry] = {}
         for e in group_entries:
+            # 本 entry 这轮是否发生过 emb 回填(L1/L2 任一)。回填让"原本无 emb 的
+            # crop"进了 _cluster_mean_embedding 的收集范围 → 参与 mean 的条数变 →
+            # centroid 变,必须清 _match_cache。详见循环末尾的说明。
+            emb_backfilled = False
             for c in e.crops_l2:
                 # 兜底:L2 crop 在 flush 时通常会拉 emb,但若 flush 那刻 provider 暂时
                 # 拿不到(mode=fast/skip_windows 偶发空 deque),crop.reid_embedding 留
@@ -1330,6 +1340,7 @@ class TierUPool:
                 # ReID 没出产"边缘场景。
                 if c.reid_embedding is None and e.reid_embedding is not None:
                     c.reid_embedding = e.reid_embedding
+                    emb_backfilled = True
                 all_l2.append(c)
                 cur = per_cam_rep.get(e.cam_id)
                 if cur is None or c.sharpness > cur.sharpness:
@@ -1343,7 +1354,19 @@ class TierUPool:
                 # fallback 写出来的 tier_a 样本也带 ReID emb。
                 if c.reid_embedding is None and e.reid_embedding is not None:
                     c.reid_embedding = e.reid_embedding
+                    emb_backfilled = True
                 all_l1.append(c)
+            # 回填改的是 entry 持有的 CropEntry 对象本身(不是副本),而
+            # _cluster_mean_embedding 收的正是 crop.reid_embedding —— 某 crop 从
+            # None 变成有值会让参与 mean 的条数 +1 → centroid 变。_centroid_cache
+            # 靠 (members, len(embs)) 指纹自愈,_match_cache 不带指纹必须显式清。
+            # **本函数跑在 _cluster_pairwise_union 之后**(fetch 步骤 3→4),不清则
+            # 本次 fetch 刚写入的 sim 当场就与新 centroid 不一致;下次 fetch 命中即
+            # 误判 —— 号码图翻页是靠 agent 拿 next_offset 重发 fetch 实现的,用户回
+            # 一句"更多"就是秒级内的第二次全局 fetch,不依赖任何竞态。
+            # 后果与 4a/4b 同类:旧高分→不可逆身份错合;旧低分→同人长期分裂。
+            if emb_backfilled:
+                self._invalidate_match_cache_for_entry(e)
         # L2 + L1 都为空才真的没数据;只有 L1 时 representative 取 L1 最锐(用户
         # 刚出现在镜头前,L1 还没满 flush 时也能让 fetch 看到候选)
         if not all_l2 and not all_l1:
@@ -1518,13 +1541,25 @@ class TierUPool:
         **不变量**:任何改变该 cluster **centroid** 的路径都必须调本函数 —— 口径是
         centroid 而非"成员集合",后者小一圈:``_cluster_mean_embedding`` 收的是**全体
         成员的所有 crop emb**(L2 优先,空则 L1,再空则 entry 级快照),所以成员集合不
-        变、只是某成员攒 / 吐一张 crop 也会改 centroid。两类路径:
+        变、只是某成员攒 / 吐一张 crop、甚至只是给某张 crop **回填** emb(参与 mean 的
+        条数 +1)也会改 centroid。
 
-        - 成员集合变:_merge_into_cluster / split_cluster / close_write_gate /
-          _evict_entry(含只淘汰部分成员)。
-        - 成员内部 crop / emb 变:push_crop 的 L1 累积、flush_if_due 的 L2
-          popleft/append + L1 清空 + entry 级 emb 刷新(经
-          ``_invalidate_match_cache_for_entry``)。
+        下面按写入 / 读取两侧列已知调用点。**这张清单不宣称穷举** —— 判据是上面那条
+        centroid 不变量,新增路径请照不变量自查、并把自己加进来。历史上这里两次因为
+        "声明清单完整"而漏路径:928da26 写成"成员集合变"漏了 crop 累积(8033ea6 补),
+        8033ea6 只列写入侧漏了下面 fetch 读取侧两条。
+
+        - 写入侧 · 成员集合变:_merge_into_cluster / split_cluster /
+          close_write_gate / _evict_entry(含只淘汰部分成员)。
+        - 写入侧 · 成员内部 crop / emb 变:push_crop 的 L1 累积、flush_if_due 的 L2
+          popleft/append + L1 清空 + entry 级 emb 刷新。
+        - **读取侧(fetch)· emb 回填**:fetch 第 4 道防线的现场抽 emb 回写、
+          _cluster_candidate_for 给缺 emb 的 L1/L2 crop 回填 entry 级快照。后者跑在
+          ``_cluster_pairwise_union`` **之后**,不清则本次 fetch 刚写入的 sim 当场就与
+          新 centroid 不一致,下次 fetch(号码图翻页 = 秒级内重发一次全局 fetch)命中
+          即误判。
+
+        后三类均经 ``_invalidate_match_cache_for_entry``。
 
         _match_cache 的键只有 ``frozenset({cid_a, cid_b})``、**不带内容指纹**,不像
         _centroid_cache 那样能靠指纹自愈,所以漏一处就会长期复用错的 sim(旧低分让同
