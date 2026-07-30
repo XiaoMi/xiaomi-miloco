@@ -2114,8 +2114,10 @@ class TestFullyClosedClustersSet:
 
 
 class TestCentroidCache:
-    """_cluster_mean_embedding 的内容指纹式缓存: signature=(member frozenset, emb 数),
-    簇内容变 → 指纹变 → 自动重算 (不靠写路径手动 invalidate, 规避漏删用 stale)。
+    """_cluster_mean_embedding 的内容指纹式缓存: 簇内容变 → 指纹变 → 自动重算
+    (不靠写路径手动 invalidate, 规避漏删用 stale)。
+
+    指纹里"emb 数"之外的每成员 (层级, 内容) 分量见 TestCentroidCacheFingerprintContent。
     """
 
     def _push_with_emb(self, pool: TierUPool, provider: _MockReIDProvider,
@@ -2594,3 +2596,130 @@ class TestMatchCacheStaleOnFetchBackfill:
         assert pool._entries[ka].cluster_id != pool._entries[kb].cluster_id, (
             "现场抽出的 emb 与 B 正交,不得复用 stale 0.99 错合"
         )
+
+
+class TestCentroidCacheFingerprintContent:
+    """_centroid_cache 的内容指纹必须钉住"具体是哪一批 emb",而不只是 emb **条数**。
+
+    历史指纹 ``(members, len(embs))`` 有三类"条数不变但换了 emb"的碰撞,命中即返回旧
+    centroid。其中**层级切换**那类最毒:它让 ``_invalidate_match_cache_for_entry``
+    退化成空操作 —— pair sim 清了,但这里返回旧 centroid,于是 ``_cluster_pairwise_union``
+    把同一个旧分数原样写回,而且指纹在该成员下次晋级前不会再变(人走出画面就一直留到 TTL)。
+    """
+
+    E1 = np.array([1.0] + [0.0] * 127, dtype=np.float32)
+    E2 = np.array([0.0, 1.0] + [0.0] * 126, dtype=np.float32)
+
+    @staticmethod
+    def _entry_in_cluster(pool, key, cid, *, entry_emb=None, l2=(), l1=(),
+                          ts: float = 1_700_000_000.0):
+        """白盒造 entry + cluster。``l2`` / ``l1`` 是 (frame_index, emb) 序列,emb 可为 None。"""
+        from miloco.perception.engine.identity.tier_u import EquivClass, TierUEntry
+
+        entry = TierUEntry(cam_id=key[0], track_id=key[1])
+        entry.cluster_id = cid
+        entry.reid_embedding = entry_emb
+        entry.last_l1_push_ts = ts
+        for frame, emb in l2:
+            crop = _make_crop(key[0], key[1], frame, ts)
+            crop.reid_embedding = emb
+            entry.crops_l2.append(crop)
+        for frame, emb in l1:
+            crop = _make_crop(key[0], key[1], frame, ts)
+            crop.reid_embedding = emb
+            entry.crops_l1.append(crop)
+        pool._entries[key] = entry
+        pool._clusters[cid] = EquivClass(cluster_id=cid, members={key})
+        return entry
+
+    def test_tier_switch_with_unchanged_count_recomputes(self):
+        """成员从 L1 换到 L2 收(条数恰好不变)→ 必须重算。
+
+        修复前指纹 = (members, 1) 两次相同 → 返回旧 centroid,4c 刚清掉的 pair sim
+        下一次就被同一个旧分数原样写回。
+        """
+        pool = TierUPool(config=TierUConfig())
+        key = ("cam-a", 1)
+        # L2 有一张但没 emb → 走 L1 fallback,centroid = E1
+        entry = self._entry_in_cluster(
+            pool, key, "CID-A", entry_emb=self.E1, l2=((0, None),), l1=((100, self.E1),),
+        )
+        np.testing.assert_allclose(pool._cluster_mean_embedding("CID-A"), self.E1, atol=1e-6)
+
+        # 模拟 _cluster_candidate_for 的回填:L2 那张拿到 emb(正交的 E2)
+        # → 该成员改从 L2 收,参与 mean 的条数仍是 1
+        entry.crops_l2[0].reid_embedding = self.E2
+
+        c2 = pool._cluster_mean_embedding("CID-A")
+        np.testing.assert_allclose(c2, self.E2, atol=1e-6)
+
+    def test_l2_fifo_replacement_recomputes(self):
+        """L2 满时 flush 先 popleft 再 append:条数恒 = l2_capacity,但换了一张。
+
+        走真实 push_crop + flush_if_due,不手工动 deque。旧注释断言的"flush 只移动
+        不替换"漏了 popleft 这侧。
+        """
+        provider = _MockReIDProvider()
+        provider.set_embedding("cam-a", 1, self.E1)
+        clk = _clock()
+        pool = TierUPool(
+            config=TierUConfig(l1_capacity=2, l2_capacity=2),
+            reid_provider=provider,
+            now_fn=clk,
+        )
+
+        def _flush_round(base_frame: int) -> None:
+            for f in range(2):
+                pool.push_crop(_make_crop("cam-a", 1, base_frame + f, clk()))
+            pool.flush_if_due()
+
+        _flush_round(0)
+        _flush_round(10)
+        cid = pool._entries[("cam-a", 1)].cluster_id
+        assert cid is not None
+        assert len(pool._entries[("cam-a", 1)].crops_l2) == 2, "L2 应已填满"
+        np.testing.assert_allclose(pool._cluster_mean_embedding(cid), self.E1, atol=1e-6)
+
+        # 第 3 轮换成正交身份 → popleft 一张 E1、append 一张 E2,条数仍是 2
+        provider.set_embedding("cam-a", 1, self.E2)
+        _flush_round(20)
+        l2 = pool._entries[("cam-a", 1)].crops_l2
+        assert len(l2) == 2, "FIFO 应保持容量不变(这正是碰撞前提)"
+        assert [bool(np.allclose(c.reid_embedding, self.E2)) for c in l2] == [False, True], (
+            "应只换掉最旧那张(popleft + append)"
+        )
+
+        # mean(E1, E2) 归一 ≈ [0.707, 0.707, 0...]
+        c2 = pool._cluster_mean_embedding(cid)
+        assert c2 is not None
+        np.testing.assert_allclose(c2[:2], [0.7071, 0.7071], atol=1e-3)
+
+    def test_entry_snapshot_replacement_recomputes(self):
+        """L1/L2 都没 emb 时靠 entry 级兜底,而它会被 embedding_dirty 重算替换。
+
+        条数不变、值变 —— 旧注释把这条列为"唯一窄碰撞、可接受",现由
+        embedding_snapshot_ts 进指纹覆盖。
+        """
+        pool = TierUPool(config=TierUConfig())
+        key = ("cam-a", 1)
+        entry = self._entry_in_cluster(
+            pool, key, "CID-A", entry_emb=self.E1, l2=((0, None),), l1=((100, None),),
+        )
+        entry.embedding_snapshot_ts = 1.0
+        np.testing.assert_allclose(pool._cluster_mean_embedding("CID-A"), self.E1, atol=1e-6)
+
+        entry.reid_embedding = self.E2
+        entry.embedding_snapshot_ts = 2.0
+
+        np.testing.assert_allclose(pool._cluster_mean_embedding("CID-A"), self.E2, atol=1e-6)
+
+    def test_unchanged_content_still_hits_cache(self):
+        """内容没变时仍必须命中缓存(指纹变严不能把 np.mean 变成每次重算)。"""
+        pool = TierUPool(config=TierUConfig())
+        self._entry_in_cluster(
+            pool, ("cam-a", 1), "CID-A", entry_emb=self.E1, l2=((0, self.E1), (1, self.E1)),
+        )
+        c1 = pool._cluster_mean_embedding("CID-A")
+        c2 = pool._cluster_mean_embedding("CID-A")
+        assert c1 is not None
+        assert c1 is c2  # 同一缓存对象,未重算
