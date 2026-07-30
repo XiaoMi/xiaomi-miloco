@@ -919,6 +919,7 @@ async def _persist_meaningful_event(
     from miloco.manager import get_manager
     from miloco.perception.event_classifier import classify
     from miloco.perception.event_text_builder import build_agent_text
+    from miloco.perception.events_service import probe_has_ref
     from miloco.perception.snapshot_writer import (
         check_disk_space,
         get_snapshot_root,
@@ -979,16 +980,23 @@ async def _persist_meaningful_event(
         )
 
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
-        # 否则 device_ids 和 artifacts.clips 必须同步收窄——两者分别驱动"日志展示哪些
-        # 摄像头"和"落盘哪些摄像头的 clip",不同步会导致不相关摄像头的 clip 被落盘、
-        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 返回的 clip_dids
-        # 必是 artifacts.clips 的子集)。trace / gallery 不是按事件相关性归属的
-        # 产物,不参与收窄。
+        # 否则 device_ids、artifacts.clips 与 artifacts.ref_frames 必须同步收窄——都是
+        # 按 device 归属的产物:device_ids 驱动"日志展示哪些摄像头",clips 驱动"落盘哪些
+        # 摄像头的 clip",ref_frames 驱动"落盘哪些摄像头的全景参考帧"。不同步会导致不相关
+        # 摄像头的 clip / ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → ref 经
+        # locate_ref 的 device_ids 校验取不到(404)、也不进 feedback pack,纯占
+        # snapshot_max_disk_mb 配额;snapshot_count 亦与 device_ids 长度对不上
+        # (save_event_artifacts 返回的 clip_dids 必是 artifacts.clips 的子集)。
+        # trace / gallery / crop_meta 不是按事件相关性归属的产物,不参与收窄。
         relevant_device_ids = _collect_relevant_device_ids(result)
         if relevant_device_ids:
             device_ids = [did for did in device_ids if did in relevant_device_ids]
             artifacts.clips = {
                 did: payload for did, payload in artifacts.clips.items()
+                if did in relevant_device_ids
+            }
+            artifacts.ref_frames = {
+                did: jpeg for did, jpeg in artifacts.ref_frames.items()
                 if did in relevant_device_ids
             }
 
@@ -1012,7 +1020,12 @@ async def _persist_meaningful_event(
         # 此时 count 保持 0;不论哪种降级,row 都已 INSERT,SSE 应该推(否则前端
         # 实时收不到 metadata-only 事件).
         count = 0
-        if artifacts.clips or artifacts.trace is not None or artifacts.gallery:
+        if (
+            artifacts.clips
+            or artifacts.trace is not None
+            or artifacts.gallery
+            or artifacts.ref_frames
+        ):
             settings = get_settings()
             snapshot_root = get_snapshot_root()
             if not check_disk_space(
@@ -1042,7 +1055,10 @@ async def _persist_meaningful_event(
 
         # B13 SSE 推送:只要 row 入表了就推,不论 count==0 还是 >0.
         # 落盘完成后 publish,snapshot_count 是真实值,clip_kind 帮 UI 区分 🎬/🎤.
+        # has_ref 与 list 通路(events_service._row_to_event)同用 probe_has_ref,
+        # 口径一致 —— 否则实时插入的 Smart Crop 事件在刷新前 has_ref 恒 false.
         has_trace = (get_snapshot_root() / event_id / "omni_trace.json.gz").exists()
+        has_ref = probe_has_ref(get_snapshot_root(), event_id, device_ids)
 
         try:
             _publish_meaningful_event(
@@ -1057,6 +1073,7 @@ async def _persist_meaningful_event(
                 rule_names=rule_names,
                 clip_kind=clip_kind,
                 has_trace=has_trace,
+                has_ref=has_ref,
             )
         except Exception as e:  # noqa: BLE001
             logger.error("SSE publish failed for event %s: %s", event_id, e)
@@ -1078,6 +1095,7 @@ def _publish_meaningful_event(
     rule_names: dict[str, str] | None = None,
     clip_kind: str | None = None,
     has_trace: bool = False,
+    has_ref: bool = False,
 ) -> None:
     """通过 processor._publish 推送 meaningful_event SSE 帧.
 
@@ -1105,5 +1123,6 @@ def _publish_meaningful_event(
         "rule_names": rule_names or {},
         "clip_kind": clip_kind,
         "has_trace": has_trace,
+        "has_ref": has_ref,
     }
     processor._publish("meaningful_event", payload)

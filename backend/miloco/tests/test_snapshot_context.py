@@ -156,8 +156,13 @@ def test_push_omni_trace_error_path():
     assert call["error"] == {"code": "TimeoutError", "msg": "deadline exceeded"}
 
 
-def test_push_omni_trace_fused_no_device_context():
-    """fused 路径(batch 级单次调用)未 set device_context → device_id 记 null."""
+def test_push_omni_trace_without_device_context_records_null():
+    """未 set device_context 的路径(scope 有效但无 device_ctx)→ device_id 记 null.
+
+    生产 fused batch pipeline (_process_device) 在 omni call 期间已 set device_context,
+    正常记 device_id;此测试覆盖"scope 内但无 device_ctx"这一 reader 据以识别
+    '整批共享一次推理'的降级形态.
+    """
     artifacts = OmniEventArtifacts()
     with event_artifacts_scope(artifacts):
         push_omni_trace(

@@ -38,6 +38,17 @@ SnapshotStatus = Literal["found", "gone", "not_found"]
 _REF_FILENAME = "ref.jpg"
 
 
+def probe_has_ref(snapshot_root: Path, event_id: str, device_ids: list[str]) -> bool:
+    """任一 device 目录下有 ref.jpg → True(该事件走了 Smart Crop,有全景参考帧).
+
+    模块级公开:list 通路(_row_to_event)与 SSE 实时通路(client._persist_meaningful_event)
+    都据此填 has_ref,两条通路口径必须一致(payload 字段与 /api/events list 元素同形).
+    """
+    for did in device_ids:
+        if (snapshot_root / event_id / region_slug(did) / _REF_FILENAME).exists():
+            return True
+    return False
+
 
 class EventsService:
     """有意义事件读取 Service.
@@ -138,14 +149,6 @@ class EventsService:
         return ("gone", None)
 
     @staticmethod
-    def _probe_has_ref(snapshot_root: Path, event_id: str, device_ids: list[str]) -> bool:
-        """任一 device 目录下有 ref.jpg → True(该事件走了 Smart Crop,有全景参考帧)."""
-        for did in device_ids:
-            if (snapshot_root / event_id / region_slug(did) / _REF_FILENAME).exists():
-                return True
-        return False
-
-    @staticmethod
     def _probe_clip_kind(snapshot_root: Path, event_id: str, device_ids: list[str]) -> str | None:
         """Stat 落盘文件后缀,推断 clip 容器类型.
 
@@ -211,7 +214,7 @@ class EventsService:
         device_ids = row["device_ids"]
         event_id = row["id"]
         clip_kind = EventsService._probe_clip_kind(snapshot_root, event_id, device_ids)
-        has_ref = EventsService._probe_has_ref(snapshot_root, event_id, device_ids)
+        has_ref = probe_has_ref(snapshot_root, event_id, device_ids)
         has_trace = (snapshot_root / event_id / "omni_trace.json.gz").exists()
         fb = feedback_index.get(event_id)
         has_feedback = fb is not None
