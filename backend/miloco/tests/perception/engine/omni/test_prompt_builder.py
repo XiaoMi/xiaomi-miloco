@@ -1394,3 +1394,131 @@ class TestIdentityMatchDisabled:
         assert self._TASK_MATCH_MARKER in full
         assert self._EXAMPLE_A_MARKER in full
         assert self._MATCH_ONLY_MARKER in full
+
+
+def _adaptive_packet(
+    *, person_id: str = "none", bbox_xyxy_norm: tuple[int, int, int, int] | None = None
+) -> IdentityPacket:
+    """640x480 噪声帧(保证 crop 视频编码后过 size gate)+ 一个小 human_body 框(crop 面积达标)。
+
+    默认 target 是 none(不进名册);传 confirmed pid + bbox_xyxy_norm 可让它以
+    ``名[bbox=...]`` 进名册,用于验证 crop 生效时 bbox 坐标系说明的指向。
+    """
+    np.random.seed(1234)
+    frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8) for _ in range(5)]
+    return IdentityPacket(
+        packet_id="ep-adaptive",
+        room_name="study-room",
+        timestamp=1000.0,
+        frame_info=FrameInfo(start_timestamp=0, end_timestamp=3000, fps=1),
+        targets=[
+            IdentityTarget(
+                type=ObjectType.HUMAN_BODY,
+                person_id=person_id,
+                track_id=1,
+                needs_omni_verify=False,
+                bbox_xyxy_norm=bbox_xyxy_norm,
+                box_info=[TrackingBoxInfo(frame_index=0, boxes={"human_body": (100, 100, 80, 120)})],
+            ),
+        ],
+        scene_motion=MotionState.STATIC,
+        frames=[SelectedFrame(frame_index=0, image=frames[0], resolution=FrameResolution.HIGH, crops=[])],
+        all_frames=frames,
+        audio_clip=np.zeros(100, dtype=np.int16),
+        audio_analysis=AudioAnalysis(type=AudioType.SILENCE, is_urgent=False, energy_level=0.0),
+    )
+
+
+class TestAdaptiveResolution:
+    """自适应分辨率(Smart Crop)在 fused 路径的接线。"""
+
+    def _patches(self, *, short_edge: int, enabled: bool):
+        from miloco.perception.engine.config import CropEnhanceConfig
+
+        return (
+            patch(
+                "miloco.perception.engine.omni.prompt_builder._get_video_short_edge",
+                return_value=short_edge,
+            ),
+            patch(
+                "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
+                return_value=CropEnhanceConfig(enabled=enabled),
+            ),
+        )
+
+    def _content(self, packet=None, **kwargs):
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        fused = build_fused_payload(
+            packets=[packet or _adaptive_packet()], context=OmniContext(),
+            gallery_snapshot={}, **kwargs,
+        )
+        return _multimodal_user_content(fused["messages"])
+
+    def _has_ref(self, content) -> bool:
+        return any(
+            b.get("type") == "text" and "全景场景参考" in b.get("text", "")
+            for b in content
+        )
+
+    def _bbox_note(self, content) -> str:
+        return next(
+            (b["text"] for b in content
+             if b.get("type") == "text" and "bbox=(x1, y1, x2, y2)" in b.get("text", "")),
+            "",
+        )
+
+    def test_on_adds_ref_before_video(self):
+        p1, p2 = self._patches(short_edge=0, enabled=True)
+        with p1, p2:
+            content = self._content(candidates=[])
+        assert self._has_ref(content)
+        img_idx = next(
+            i for i, b in enumerate(content)
+            if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+        )
+        vid_idx = next(i for i, b in enumerate(content) if b.get("type") == "video_url")
+        assert img_idx < vid_idx  # 全景参考帧在 crop 视频之前
+
+    def test_skipped_when_candidates_present(self):
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        p1, p2 = self._patches(short_edge=0, enabled=True)
+        with p1, p2:
+            content = self._content(candidates=[IdentityQueryItem(track_id=1)])
+        assert not self._has_ref(content)  # 有身份候选 → 不 crop(bbox 锚定全景)
+
+    def test_off_when_not_sentinel(self):
+        p1, p2 = self._patches(short_edge=512, enabled=True)  # 固定分辨率,非哨兵 → 不激活
+        with p1, p2:
+            content = self._content(candidates=[])
+        assert not self._has_ref(content)
+
+    def test_off_when_config_disabled(self):
+        p1, p2 = self._patches(short_edge=0, enabled=False)  # 哨兵但后端总闸关
+        with p1, p2:
+            content = self._content(candidates=[])
+        assert not self._has_ref(content)
+
+    def test_bbox_note_points_to_panorama_ref_when_cropped(self):
+        # crop 生效(无候选)+ 名册含 confirmed 成员 bbox → bbox 说明应指向全景参考图,不指 crop 视频
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
+        p1, p2 = self._patches(short_edge=0, enabled=True)
+        with p1, p2:
+            content = self._content(packet=member, candidates=[])
+        assert self._has_ref(content)  # 确认本窗确实 crop 了
+        note = self._bbox_note(content)
+        assert "[bbox=(400, 300, 600, 900)]" in "".join(
+            b.get("text", "") for b in content if b.get("type") == "text"
+        )  # 名册确实渲染了 bbox → note 会触发
+        assert "全景参考图" in note and "视频里的人" not in note
+
+    def test_bbox_note_points_to_video_when_not_cropped(self):
+        # 固定分辨率(非哨兵)不 crop → 同一名册 bbox 说明维持指向视频(零回归)
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
+        p1, p2 = self._patches(short_edge=512, enabled=True)
+        with p1, p2:
+            content = self._content(packet=member, candidates=[])
+        assert not self._has_ref(content)
+        note = self._bbox_note(content)
+        assert "视频里的人" in note and "全景参考图" not in note

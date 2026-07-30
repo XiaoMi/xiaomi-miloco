@@ -31,6 +31,31 @@ class InputConfig:
 
 
 @dataclass
+class CropEnhanceConfig:
+    """自适应分辨率(Smart Crop)配置。
+
+    默认值来自离线评测结论(eval/CONCLUSION.md)。与 InputConfig 不同,本配置**不**注册进
+    PerceptionConfig / _create_engine——那样会在建引擎时缓存、失去热更新;运行时由
+    crop_enhance.crop_enhance_config_from_settings() 每窗口热读 settings 字典
+    (perception.engine.crop_enhance),同 video_short_edge 的模式,改配置免重启。
+
+    激活条件:用户侧「分辨率=自适应」(video_short_edge==0 哨兵) **且** enabled=True。
+    """
+
+    enabled: bool = False  # 后端总闸/灰度开关;test bench 验证前保持 dark
+    expand_ratio_h: float = 0.40  # crop 区域水平扩展比(适应人形竖长 + 16:9)
+    expand_ratio_v: float = 0.30  # 垂直扩展比
+    motion_diff_threshold: int = 40  # 帧差分二值化阈值
+    motion_min_block_ratio: float = 0.005  # 运动块面积占比下限(<则丢,点状噪声)
+    motion_min_fill_ratio: float = 0.20  # 紧凑度 fill_ratio 下限(<则丢,条纹噪声)
+    motion_global_drift_ratio: float = 0.50  # 整帧变化占比 >此值 → 全局漂移,丢弃全部运动块
+    crop_min_area_ratio: float = 0.10  # crop 面积下限(防小目标过度放大截断主体)
+    crop_max_area_ratio: float = 0.49  # crop 面积上限 ≈(360/512)²;超过则回退全景
+    crop_short_edge: int = 360  # crop 视频短边(只缩不放)
+    crop_fps: int = 1  # crop 视频帧率
+
+
+@dataclass
 class GateConfig:
     check_fps: int = 1
     change_threshold: float = 0.005

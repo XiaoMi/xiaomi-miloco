@@ -16,7 +16,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, field_validator
 from sse_starlette.sse import EventSourceResponse
 
 from miloco.admin import log_pack as _log_pack_mod
@@ -1016,16 +1016,26 @@ async def omni_health_stream():
 
 
 class PerceptionConfigBody(BaseModel):
-    video_short_edge: int | None = Field(default=None, ge=64, le=2160)
+    # 0 = 「自适应」分辨率哨兵(Smart Crop);64..2160 = 固定短边;1..63 无意义,拒绝。
+    video_short_edge: int | None = Field(default=None, ge=0, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
+
+    @field_validator("video_short_edge")
+    @classmethod
+    def _validate_short_edge(cls, v: int | None) -> int | None:
+        if v is not None and 0 < v < 64:
+            raise ValueError("video_short_edge 须为 0(自适应)或 64..2160")
+        return v
 
 
 def _perception_config_payload() -> dict:
     s = get_settings()
     inp = s.perception.engine.get("input", {})
+    ve = inp.get("video_short_edge", 512)
     return {
-        "video_short_edge": inp.get("video_short_edge", 512),
+        "video_short_edge": ve,
+        "resolution_mode": "adaptive" if ve == 0 else "fixed",
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
     }

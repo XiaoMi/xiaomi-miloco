@@ -29,6 +29,7 @@ from numpy.typing import NDArray
 from miloco.perception.engine.identity.gallery_composite import (
     build_body_composite_png,
     build_face_composite_png,
+    encode_jpeg_bytes,
     encode_png_bytes,
     hstack_to_height,
 )
@@ -155,8 +156,11 @@ def build_query_prompt(
     home_profile = get_home_profile_prefix()
     if home_profile:
         parts.append(home_profile)
-    short_edge = _get_video_short_edge()
-    video_b64, media_info = _encode_batch_video(identity_packets, short_edge=short_edge)
+    # query 不接 crop(v1 范围外);但须把「自适应」哨兵(0)折成默认短边,否则 _encode_video_mp4
+    # 会算出 scale=0 崩掉按需查询。
+    video_b64, media_info = _encode_batch_video(
+        identity_packets, short_edge=_effective_panorama_short_edge()
+    )
     return {
         "system_prompt": "\n\n".join(parts),
         "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
@@ -252,8 +256,17 @@ def build_fused_payload(
             "candidate_track_ids": [],
         }
 
-    short_edge = _get_video_short_edge()
-    video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
+    video_b64, media_info = _encode_batch_video(
+        packets, short_edge=_effective_panorama_short_edge()
+    )
+    # 自适应分辨率(Smart Crop):仅当本窗口无身份候选时才 crop —— 有候选时 fused prompt 的
+    # bbox=[0,1000] 锚定全景做身份分配,换成 crop 视频会错位(方案 v1 身份门)。任何失败回退全景。
+    ref_image_jpeg: bytes | None = None
+    if not candidates:
+        adaptive = _maybe_encode_adaptive(packets)
+        if adaptive is not None:
+            video_b64, media_info = adaptive.video_b64, adaptive.media_info
+            ref_image_jpeg = adaptive.ref_image_jpeg
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
@@ -272,6 +285,7 @@ def build_fused_payload(
         gallery_snapshot=gallery_snapshot,
         video_b64=video_b64,
         media_info=media_info,
+        ref_image_jpeg=ref_image_jpeg,
         adapter=adapter,
         cfg=cfg,
         label_lookup=label_lookup,
@@ -391,10 +405,22 @@ def _build_payload(
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
     else:
-        short_edge = _get_video_short_edge()
-        video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
-        base["video_base64"] = video_b64
-        base["media_info"] = media_info
+        # 自适应分辨率(Smart Crop)。此路(非 fused/legacy) has_identity 恒 False、不注入
+        # 身份 bbox,无需身份门;参考帧走 crops 通道(_build_messages 尾部渲染为 image_url)。
+        adaptive = _maybe_encode_adaptive(packets)
+        if adaptive is not None:
+            base["video_base64"] = adaptive.video_b64
+            base["media_info"] = adaptive.media_info
+            base["crops"] = [{
+                "media_type": "image/jpeg",
+                "data": base64.b64encode(adaptive.ref_image_jpeg).decode(),
+            }]
+        else:
+            video_b64, media_info = _encode_batch_video(
+                packets, short_edge=_effective_panorama_short_edge()
+            )
+            base["video_base64"] = video_b64
+            base["media_info"] = media_info
     return base
 
 
@@ -596,6 +622,7 @@ def _build_fused_user_content(
     gallery_snapshot: dict[str, "GallerySamples"],
     video_b64: str | None,
     media_info: LocalMediaInfo | None,
+    ref_image_jpeg: bytes | None = None,
     adapter: OmniProviderAdapter,
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
@@ -716,13 +743,27 @@ def _build_fused_user_content(
 
     # 已识别人物/陌生人 + 待识别 track 共用一句 bbox 坐标系说明（二者同一 [0,1000] 约定，去重）
     if any("[bbox=" in ln for ln in roster_lines) or candidates:
+        # crop 生效时(必无候选)主视频是局部放大,bbox 仍是全景整帧坐标 → 指向全景参考图(bbox 归一化
+        # 基准正是这张整帧)而非 crop 视频,避免坐标系错配把姓名贴错人。
+        bbox_anchor = "下方第一张全景参考图" if ref_image_jpeg is not None else "视频"
         content.append({"type": "text", "text": (
             "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为画面归一化到 [0, 1000] 区间的位置"
-            "（左上 0,0；右下 1000,1000），用于把姓名 / track_id 对应到视频里的人。"
+            f"（左上 0,0；右下 1000,1000），用于把姓名 / track_id 对应到{bbox_anchor}里的人。"
         )})
 
     # 4. gallery（候选成员参考图，紧邻 video 便于视觉比对）
     content.extend(gallery_content)
+
+    # 4.5 自适应分辨率:全景参考帧(置于 video 前,「全景图在前、活动区域放大视频在后」)
+    if ref_image_jpeg is not None:
+        content.append({"type": "text", "text": (
+            "下方第一张图为全景场景参考，随后的视频是画面中活动区域的放大——"
+            "请结合两者理解场景与细节。"
+        )})
+        try:
+            content.append(_jpeg_block(ref_image_jpeg))
+        except ValueError:
+            logger.warning("event=adaptive_ref_jpeg_bad 跳过参考帧块")
 
     # 5. 主 video
     # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短
@@ -1431,6 +1472,120 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
     for ep in edge_packets:
         crops.extend(_encode_crops(ep))
     return crops
+
+
+# =============================================================================
+# 自适应分辨率(Smart Crop): 推理前定向裁切活动区域 → crop 视频 + 全景参考帧
+# =============================================================================
+
+_ADAPTIVE_SENTINEL = 0  # video_short_edge == 0 → 用户侧「分辨率=自适应」
+
+
+def _is_adaptive_mode() -> bool:
+    return _get_video_short_edge() == _ADAPTIVE_SENTINEL
+
+
+def _effective_panorama_short_edge() -> int:
+    """回退全景/非自适应时的视频短边:自适应哨兵(0)→ 512 默认;否则用户设定值。
+
+    保证哨兵 0 永不流到 _encode_video_mp4(那会算出 scale=0)。
+    """
+    se = _get_video_short_edge()
+    return _VIDEO_SHORT_EDGE if se == _ADAPTIVE_SENTINEL else se
+
+
+def _resize_short_edge(frame: NDArray[np.uint8], short_edge: int) -> NDArray[np.uint8]:
+    """等比缩放到目标短边(只缩不放)。"""
+    h, w = frame.shape[:2]
+    m = min(h, w)
+    if m == 0 or m <= short_edge:
+        return frame
+    scale = short_edge / m
+    return cv2.resize(
+        frame, (max(1, int(w * scale)), max(1, int(h * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
+@dataclass
+class _AdaptiveResult:
+    video_b64: str
+    media_info: "LocalMediaInfo | None"
+    ref_image_jpeg: bytes  # 全景首帧 JPEG(短边 512),作场景上下文参考
+
+
+def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | None":
+    """自适应模式下算 crop 区域、编码 crop 视频 + 全景参考帧。
+
+    返回 None = 回退全景(既有路径)。触发 None 的情形:非自适应模式、crop_enhance.enabled=false、
+    无帧、无 crop 依据、面积超上限、crop/编码/JPEG 失败或产物过短。all_frames 只读不改。
+    """
+    if not _is_adaptive_mode():
+        return None
+    from .crop_enhance import (
+        _body_boxes,
+        compute_crop_region,
+        compute_motion_blocks,
+        crop_enhance_config_from_settings,
+        crop_frames,
+    )
+
+    cfg = crop_enhance_config_from_settings()
+    if not cfg.enabled:
+        return None
+    ep = next((p for p in packets if p.all_frames), None)  # 同 _encode_batch_video:首个有帧设备
+    if ep is None:
+        return None
+    frames = ep.all_frames
+    try:
+        # det_boxes / motion_blocks 只算一次,既喂 compute_crop_region 又用于诊断日志(免重复算 CV)
+        det_boxes = _body_boxes(ep.targets)
+        motion_blocks = compute_motion_blocks(frames, cfg)
+        n_det, n_motion = len(det_boxes), len(motion_blocks)
+        region = compute_crop_region(
+            ep.targets, frames, cfg, det_boxes=det_boxes, motion_blocks=motion_blocks
+        )
+        if region is None:
+            # 灰度诊断:无依据(无框无运动) vs 有依据但面积超上限被拒
+            logger.info(
+                "event=adaptive_crop_fallback reason=%s n_det=%d n_motion=%d",
+                "no_activity" if not det_boxes and not motion_blocks else "area_rejected",
+                n_det, n_motion,
+            )
+            return None
+        cropped = crop_frames(frames, region)
+        if not cropped or cropped[0].size == 0:
+            logger.info("event=adaptive_crop_fallback reason=crop_empty region=%s", region)
+            return None
+        ch, cw = cropped[0].shape[:2]
+        cse = min(min(ch, cw), cfg.crop_short_edge)
+        audio = (
+            ep.audio_clip
+            if _packet_audio_included(ep)
+            else np.empty(0, dtype=np.int16)
+        )
+        video_b64, media_info = _encode_video_mp4(
+            cropped, audio, ep.sample_rate, fps=cfg.crop_fps, short_edge=cse,
+        )
+        if not video_b64 or len(video_b64) < _MIN_VIDEO_B64_LEN:
+            logger.info("event=adaptive_crop_fallback reason=video_too_short region=%s", region)
+            return None
+        ref_jpeg = encode_jpeg_bytes(_resize_short_edge(frames[0], _VIDEO_SHORT_EDGE))
+        if not ref_jpeg or len(ref_jpeg) < _MIN_JPEG_BYTES:
+            logger.info("event=adaptive_crop_fallback reason=jpeg_too_short region=%s", region)
+            return None
+        fh, fw = frames[0].shape[:2]
+        logger.info(
+            "event=adaptive_crop region=%s crop_ratio=%.3f short_edge=%d n_det=%d n_motion=%d",
+            region,
+            ((region[2] - region[0]) * (region[3] - region[1])) / (fw * fh),
+            cse,
+            n_det, n_motion,
+        )
+        return _AdaptiveResult(video_b64, media_info, ref_jpeg)
+    except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理
+        logger.warning("event=adaptive_crop_fail 回退全景", exc_info=True)
+        return None
 
 
 # =============================================================================
