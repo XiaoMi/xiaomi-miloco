@@ -96,34 +96,63 @@ def test_unchanged_omni_fps_is_noop(client):
     svc.apply_config_restart.assert_not_awaited()
 
 
-def test_video_short_edge_zero_is_adaptive_sentinel(client):
-    """0 = 「自适应」哨兵（Smart Crop）：校验器放行、热读免重启（既不热更也不重启），
-    GET 派生 resolution_mode=adaptive。"""
-    c, svc = client
-    resp = c.put("/api/admin/perception-config", json={"video_short_edge": 0})
-    assert resp.status_code == 200
-    svc.apply_omni_fps_live.assert_not_awaited()
-    svc.apply_config_restart.assert_not_awaited()
-    got = c.get("/api/admin/perception-config")
-    assert got.status_code == 200
-    data = got.json()["data"]
-    assert data["video_short_edge"] == 0
-    assert data["resolution_mode"] == "adaptive"
-
-
-@pytest.mark.parametrize("bad", [1, 32, 63])
-def test_video_short_edge_1_to_63_rejected(client, bad):
-    """1..63 无意义（既非 0 哨兵、又低于 64 固定下限）→ 校验器 422。"""
+@pytest.mark.parametrize("bad", [0, 1, 32, 63])
+def test_video_short_edge_below_64_rejected(client, bad):
+    """短边下限 64。0 曾是「自适应」哨兵，Smart Crop 改走 smart_crop_enabled 独立开关后
+    这个哨兵作废——0 会让 _encode_video_mp4 算出 scale=0，必须在 API 层就挡掉。"""
     c, _svc = client
     resp = c.put("/api/admin/perception-config", json={"video_short_edge": bad})
     assert resp.status_code == 422
 
 
-def test_video_short_edge_fixed_mode(client):
-    """非 0 固定短边 → resolution_mode=fixed。"""
-    c, _svc = client
+def test_video_short_edge_fixed_value_roundtrip(client):
+    """固定短边写盘 + 回读；热读免重启（既不热更也不重启）。"""
+    c, svc = client
     resp = c.put("/api/admin/perception-config", json={"video_short_edge": 720})
     assert resp.status_code == 200
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
     data = c.get("/api/admin/perception-config").json()["data"]
     assert data["video_short_edge"] == 720
-    assert data["resolution_mode"] == "fixed"
+    assert "resolution_mode" not in data  # 哨兵派生字段已随哨兵一并移除
+
+
+def test_smart_crop_switch_roundtrip(client):
+    """smart_crop_enabled 写进 crop_enhance.user_enabled，GET 回读；热读免重启。
+
+    与 video_short_edge 正交：开裁切不动分辨率，二者各自独立回读。
+    """
+    c, svc = client
+    data = c.get("/api/admin/perception-config").json()["data"]
+    assert data["smart_crop_enabled"] is False  # settings.yaml 默认
+
+    resp = c.put(
+        "/api/admin/perception-config",
+        json={"smart_crop_enabled": True, "video_short_edge": 768},
+    )
+    assert resp.status_code == 200
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
+    data = resp.json()["data"]
+    assert data["smart_crop_enabled"] is True
+    assert data["video_short_edge"] == 768
+
+    data = c.get("/api/admin/perception-config").json()["data"]
+    assert data["smart_crop_enabled"] is True
+    assert data["video_short_edge"] == 768
+
+
+def test_smart_crop_available_reflects_ops_gate(client):
+    """smart_crop_available 暴露 ops 灰度闸 crop_enhance.enabled（API 不可写）。
+
+    前端据此置灰开关——available=false 时用户开关即便为 true 后端也不裁，
+    必须让前端能如实提示，否则就是「开关开着但没生效」的静默失效。
+    """
+    c, _svc = client
+    data = c.get("/api/admin/perception-config").json()["data"]
+    assert data["smart_crop_available"] is False  # settings.yaml 默认 dark
+
+    # ops 闸不接受 API 写入：多余字段被 pydantic 忽略，不会渗进配置
+    resp = c.put("/api/admin/perception-config", json={"smart_crop_available": True})
+    assert resp.status_code == 200
+    assert c.get("/api/admin/perception-config").json()["data"]["smart_crop_available"] is False

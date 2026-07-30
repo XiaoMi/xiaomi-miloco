@@ -564,6 +564,33 @@ class MeaningfulEvent(BaseModel):
     )
 
 
+class EventCropMeta(BaseModel):
+    """GET /api/events/{event_id}/crop/{device_id} 响应 data 字段(Smart Crop 事件).
+
+    坐标全在 **全景帧像素空间**(与 ref.jpg 同一空间,ref.jpg 只是等比缩放过).
+    前端据此在参考帧缩略图上画 crop 框:svg viewBox="0 0 W H" + preserveAspectRatio,
+    由浏览器做 letterbox 缩放,不用 JS 算坐标.
+    """
+
+    # 长度定死:trace 是历史产物(schema 演进 / 写入被截断),半截数组透到前端只会画出
+    # 一个坐标错位的框。这里拒掉,读侧(read_crop_meta)把校验失败折成 410「拿不到」。
+    region_xyxy: list[int] = Field(
+        ...,
+        min_length=4,
+        max_length=4,
+        description="crop 区域 [x1, y1, x2, y2],全景帧像素坐标",
+    )
+    frame_size_wh: list[int] = Field(
+        ...,
+        min_length=2,
+        max_length=2,
+        description="全景帧尺寸 [w, h];region 的坐标基准,前端拿它当 svg viewBox",
+    )
+    crop_short_edge: int = Field(
+        ..., description="crop 视频编码短边 = omni 实际所见分辨率上限"
+    )
+
+
 class EventListResponse(BaseModel):
     """GET /api/events 响应 data 字段."""
 

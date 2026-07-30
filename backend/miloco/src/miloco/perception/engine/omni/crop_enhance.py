@@ -3,9 +3,10 @@
 在 OMNI 推理前定向裁切「活动区域」,给模型更高等效分辨率的局部视频。crop 区域 =
 union(主体检测框, 帧差分运动块) → 非对称扩展 → 最小/最大面积约束。
 
-算法从离线原型 PORT(eval/exp_motion_filter.py::compute_motion_blocks + filter_characteristic,
-eval/pilot_smart_crop.py::compute_smart_crop_region),用**最终参数**(见 eval/CONCLUSION.md):
-非对称扩展 h40%/v30%、最小面积 10%、最大面积 ≈49% 回退、characteristic 运动过滤(面积+紧凑度)。
+算法从离线评测原型 PORT(原型脚本与调参结论**未入库**,产物含真实场景抽帧,只在本地留档;
+函数级出处见下方各 docstring 的 "PORT of ..." 行)。落地的**最终参数**:非对称扩展 h40%/v30%、
+最小面积 10%、最大面积 ≈49% 回退、characteristic 运动过滤(面积+紧凑度);各参数的取值依据
+写在下方对应实现处,不依赖仓外文件也能读懂。
 
 与原型差异:生产 tracker 每 target 只出 1 个 last-frame body box(tracking_service._build_response),
 不做逐帧累积;窗口内的时序范围由运动块补齐。故检测框取末帧、运动块跨帧累积。

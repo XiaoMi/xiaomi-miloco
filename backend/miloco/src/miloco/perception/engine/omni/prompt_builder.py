@@ -60,6 +60,7 @@ from .provider import LocalMediaInfo, OmniProviderAdapter
 RouteType = Literal["video", "audio"]
 
 if TYPE_CHECKING:
+    from miloco.perception.engine.config import CropEnhanceConfig
     from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
     from miloco.perception.engine.identity.library import GallerySamples
 
@@ -156,8 +157,8 @@ def build_query_prompt(
     home_profile = get_home_profile_prefix()
     if home_profile:
         parts.append(home_profile)
-    # query 不接 crop(v1 范围外);但须把「自适应」哨兵(0)折成默认短边,否则 _encode_video_mp4
-    # 会算出 scale=0 崩掉按需查询。
+    # query 不接 crop(v1 范围外);走 _effective_panorama_short_edge() 兜掉历史 config.json 里
+    # 可能残留的 0(早期哨兵),否则 _encode_video_mp4 会算出 scale=0 崩掉按需查询。
     video_b64, media_info = _encode_batch_video(
         identity_packets, short_edge=_effective_panorama_short_edge()
     )
@@ -1476,20 +1477,25 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 # 自适应分辨率(Smart Crop): 推理前定向裁切活动区域 → crop 视频 + 全景参考帧
 # =============================================================================
 
-_ADAPTIVE_SENTINEL = 0  # video_short_edge == 0 → 用户侧「分辨率=自适应」
-
-
-def _is_adaptive_mode() -> bool:
-    return _get_video_short_edge() == _ADAPTIVE_SENTINEL
-
-
 def _effective_panorama_short_edge() -> int:
-    """回退全景/非自适应时的视频短边:自适应哨兵(0)→ 512 默认;否则用户设定值。
+    """全景视频短边 = 用户设定值;非正值兜回 512 默认。
 
-    保证哨兵 0 永不流到 _encode_video_mp4(那会算出 scale=0)。
+    Smart Crop 与本值 **正交**(裁不裁看 crop_enhance 的双 key,不再看这里),所以用户选的
+    768/1080 在 crop 回退全景时依然生效。非正值兜底纯属防御:admin API 已拒 <64,但历史
+    config.json 可能残留过 0(早期「自适应」哨兵),0 会让 _encode_video_mp4 算出 scale=0 崩掉。
     """
     se = _get_video_short_edge()
-    return _VIDEO_SHORT_EDGE if se == _ADAPTIVE_SENTINEL else se
+    return _VIDEO_SHORT_EDGE if se <= 0 else se
+
+
+def _crop_short_edge_budget(cfg: "CropEnhanceConfig", panorama_short_edge: int) -> int:
+    """crop 视频短边预算,按用户分辨率档等比缩放(360p→253 / 512p→360 / 768p→540 / 1080p→759)。
+
+    cfg.crop_short_edge(默认 360)是 **512 档下的基准**,不是固定值。按比例跟随保住
+    「crop 模式像素开销 ≈ 同档全景」这个不变量,也让 crop_max_area_ratio=0.49≈(360/512)²
+    的推导在任何档位都成立 —— 固定 360 配 1080 档会让该上限失效,且用户升档对 crop 无效。
+    """
+    return max(1, round(panorama_short_edge * cfg.crop_short_edge / _VIDEO_SHORT_EDGE))
 
 
 def _resize_short_edge(frame: NDArray[np.uint8], short_edge: int) -> NDArray[np.uint8]:
@@ -1509,17 +1515,17 @@ def _resize_short_edge(frame: NDArray[np.uint8], short_edge: int) -> NDArray[np.
 class _AdaptiveResult:
     video_b64: str
     media_info: "LocalMediaInfo | None"
-    ref_image_jpeg: bytes  # 全景末帧 JPEG(短边 512),作场景上下文参考(帧序见下方注释)
+    ref_image_jpeg: bytes  # 全景末帧 JPEG(短边=用户分辨率档),作场景上下文参考(帧序见下方注释)
 
 
 def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | None":
-    """自适应模式下算 crop 区域、编码 crop 视频 + 全景参考帧。
+    """Smart Crop 开启时算 crop 区域、编码 crop 视频 + 全景参考帧。
 
-    返回 None = 回退全景(既有路径)。触发 None 的情形:非自适应模式、crop_enhance.enabled=false、
-    无帧、无 crop 依据、面积超上限、crop/编码/JPEG 失败或产物过短。all_frames 只读不改。
+    返回 None = 回退全景(既有路径)。触发 None 的情形:双闸任一为 false(ops 闸 enabled /
+    用户开关 user_enabled)、无帧、无 crop 依据、面积超上限、crop/编码/JPEG 失败或产物过短。
+    crop 视频与参考帧的短边都跟随用户分辨率档(见 _crop_short_edge_budget),与「裁不裁」正交。
+    all_frames 只读不改。
     """
-    if not _is_adaptive_mode():
-        return None
     from .crop_enhance import (
         _body_boxes,
         compute_crop_region,
@@ -1529,7 +1535,8 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
     )
 
     cfg = crop_enhance_config_from_settings()
-    if not cfg.enabled:
+    # 双闸:ops 灰度闸 AND 用户开关。任一为 false → 回退全景(字节等同未接本特性前)。
+    if not (cfg.enabled and cfg.user_enabled):
         return None
     ep = next((p for p in packets if p.all_frames), None)  # 同 _encode_batch_video:首个有帧设备
     if ep is None:
@@ -1557,7 +1564,8 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
             logger.info("event=adaptive_crop_fallback reason=crop_empty region=%s", region)
             return None
         ch, cw = cropped[0].shape[:2]
-        cse = min(min(ch, cw), cfg.crop_short_edge)
+        pano_se = _effective_panorama_short_edge()
+        cse = min(min(ch, cw), _crop_short_edge_budget(cfg, pano_se))
         audio = (
             ep.audio_clip
             if _packet_audio_included(ep)
@@ -1573,7 +1581,8 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
             return None
         # 参考帧取末帧:名册 bbox 是末帧坐标(engine._normalize_bbox_to_1000(…, latest_frame)),
         # 参考图必须同帧,否则窗内有人移动时模型按 bbox 会把姓名贴到首帧里的另一个人身上。
-        ref_jpeg = encode_jpeg_bytes(_resize_short_edge(frames[-1], _VIDEO_SHORT_EDGE))
+        # 短边跟用户分辨率档(不是硬编码 512):参考帧承载全局 bbox 定位,档位升高时它也该更清楚。
+        ref_jpeg = encode_jpeg_bytes(_resize_short_edge(frames[-1], pano_se))
         if not ref_jpeg or len(ref_jpeg) < _MIN_JPEG_BYTES:
             logger.info("event=adaptive_crop_fallback reason=jpeg_too_short region=%s", region)
             return None

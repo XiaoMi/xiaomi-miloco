@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 from miloco.perception.engine.omni.prompt_builder import (
     _batch_video_has_audio,
     _encode_video,
@@ -1402,12 +1403,15 @@ def _adaptive_packet(
     bbox_xyxy_norm: tuple[int, int, int, int] | None = None,
     frames: list[np.ndarray] | None = None,
     fps: int = 1,
+    body_box: tuple[int, int, int, int] = (100, 100, 80, 120),
 ) -> IdentityPacket:
     """640x480 噪声帧(保证 crop 视频编码后过 size gate)+ 一个小 human_body 框(crop 面积达标)。
 
     默认 target 是 none(不进名册);传 confirmed pid + bbox_xyxy_norm 可让它以
     ``名[bbox=...]`` 进名册,用于验证 crop 生效时 bbox 坐标系说明的指向。
     frames / fps 可覆盖:验参考帧取末帧、crop 视频帧率跟随 frame_info.fps。
+    body_box(像素 xywh)可覆盖:换大帧时默认框离画面角太近,_enforce_min_area 绕中心放大会
+    被 clamp 截断而达不到 crop_min_area_ratio → 回退全景;此时需给一个居中的框。
     """
     if frames is None:
         np.random.seed(1234)
@@ -1424,7 +1428,7 @@ def _adaptive_packet(
                 track_id=1,
                 needs_omni_verify=False,
                 bbox_xyxy_norm=bbox_xyxy_norm,
-                box_info=[TrackingBoxInfo(frame_index=0, boxes={"human_body": (100, 100, 80, 120)})],
+                box_info=[TrackingBoxInfo(frame_index=0, boxes={"human_body": body_box})],
             ),
         ],
         scene_motion=MotionState.STATIC,
@@ -1436,9 +1440,13 @@ def _adaptive_packet(
 
 
 class TestAdaptiveResolution:
-    """自适应分辨率(Smart Crop)在 fused 路径的接线。"""
+    """Smart Crop(智能裁切增强)在 fused 路径的接线。
 
-    def _patches(self, *, short_edge: int, enabled: bool):
+    激活看 crop_enhance 双闸(enabled=ops 灰度闸 AND user_enabled=用户开关),**与
+    video_short_edge 正交** —— 分辨率档只决定编码短边(全景 / crop / 参考帧),不再决定裁不裁。
+    """
+
+    def _patches(self, *, short_edge: int = 512, enabled: bool = True, user_enabled: bool = True):
         from miloco.perception.engine.config import CropEnhanceConfig
 
         return (
@@ -1448,7 +1456,7 @@ class TestAdaptiveResolution:
             ),
             patch(
                 "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
-                return_value=CropEnhanceConfig(enabled=enabled),
+                return_value=CropEnhanceConfig(enabled=enabled, user_enabled=user_enabled),
             ),
         )
 
@@ -1475,7 +1483,7 @@ class TestAdaptiveResolution:
         )
 
     def test_on_adds_ref_before_video(self):
-        p1, p2 = self._patches(short_edge=0, enabled=True)
+        p1, p2 = self._patches()
         with p1, p2:
             content = self._content(candidates=[])
         assert self._has_ref(content)
@@ -1489,27 +1497,35 @@ class TestAdaptiveResolution:
     def test_skipped_when_candidates_present(self):
         from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
 
-        p1, p2 = self._patches(short_edge=0, enabled=True)
+        p1, p2 = self._patches()
         with p1, p2:
             content = self._content(candidates=[IdentityQueryItem(track_id=1)])
         assert not self._has_ref(content)  # 有身份候选 → 不 crop(bbox 锚定全景)
 
-    def test_off_when_not_sentinel(self):
-        p1, p2 = self._patches(short_edge=512, enabled=True)  # 固定分辨率,非哨兵 → 不激活
+    def test_off_when_user_switch_off(self):
+        p1, p2 = self._patches(user_enabled=False)  # ops 闸开、用户开关关
         with p1, p2:
             content = self._content(candidates=[])
         assert not self._has_ref(content)
 
-    def test_off_when_config_disabled(self):
-        p1, p2 = self._patches(short_edge=0, enabled=False)  # 哨兵但后端总闸关
+    def test_off_when_ops_gate_off(self):
+        p1, p2 = self._patches(enabled=False)  # 用户开关开,但 ops 灰度闸压死
         with p1, p2:
             content = self._content(candidates=[])
         assert not self._has_ref(content)
+
+    @pytest.mark.parametrize("short_edge", [360, 512, 768, 1080])
+    def test_on_at_any_resolution(self, short_edge):
+        # 与 video_short_edge 正交:任何分辨率档下双闸开都要裁(旧哨兵设计只有 0 档才裁)。
+        p1, p2 = self._patches(short_edge=short_edge)
+        with p1, p2:
+            content = self._content(candidates=[])
+        assert self._has_ref(content)
 
     def test_bbox_note_points_to_panorama_ref_when_cropped(self):
         # crop 生效(无候选)+ 名册含 confirmed 成员 bbox → bbox 说明应指向全景参考图,不指 crop 视频
         member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
-        p1, p2 = self._patches(short_edge=0, enabled=True)
+        p1, p2 = self._patches()
         with p1, p2:
             content = self._content(packet=member, candidates=[])
         assert self._has_ref(content)  # 确认本窗确实 crop 了
@@ -1520,41 +1536,102 @@ class TestAdaptiveResolution:
         assert "全景参考图" in note and "视频里的人" not in note
 
     def test_bbox_note_points_to_video_when_not_cropped(self):
-        # 固定分辨率(非哨兵)不 crop → 同一名册 bbox 说明维持指向视频(零回归)
+        # 用户开关关 → 不 crop → 同一名册 bbox 说明维持指向视频(零回归)
         member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
-        p1, p2 = self._patches(short_edge=512, enabled=True)
+        p1, p2 = self._patches(user_enabled=False)
         with p1, p2:
             content = self._content(packet=member, candidates=[])
         assert not self._has_ref(content)
         note = self._bbox_note(content)
         assert "视频里的人" in note and "全景参考图" not in note
 
-    def test_ref_frame_is_last_not_first(self):
-        # 参考帧必须取末帧:名册 bbox 是末帧坐标,窗内有人移动时首帧参考图会把姓名贴错人。
+    def _ref_bytes(self, content) -> bytes:
         import base64
 
+        return base64.b64decode(
+            next(
+                b["image_url"]["url"].split(",", 1)[1]
+                for b in content
+                if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+            )
+        )
+
+    def test_ref_frame_is_last_not_first(self):
+        # 参考帧必须取末帧:名册 bbox 是末帧坐标,窗内有人移动时首帧参考图会把姓名贴错人。
         from miloco.perception.engine.identity.gallery_composite import (
             encode_jpeg_bytes,
         )
-        from miloco.perception.engine.omni.prompt_builder import (
-            _VIDEO_SHORT_EDGE,
-            _resize_short_edge,
-        )
+        from miloco.perception.engine.omni.prompt_builder import _resize_short_edge
 
         np.random.seed(7)
         frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8) for _ in range(5)]
         pkt = _adaptive_packet(frames=frames)  # 首末帧为不同随机帧 → 编码可区分
-        p1, p2 = self._patches(short_edge=0, enabled=True)
+        p1, p2 = self._patches(short_edge=512)
         with p1, p2:
             content = self._content(packet=pkt, candidates=[])
-        ref_b64 = next(
-            b["image_url"]["url"].split(",", 1)[1]
-            for b in content
-            if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+        ref_bytes = self._ref_bytes(content)
+        assert ref_bytes == encode_jpeg_bytes(_resize_short_edge(frames[-1], 512))
+        assert ref_bytes != encode_jpeg_bytes(_resize_short_edge(frames[0], 512))
+
+    def test_ref_frame_short_edge_follows_resolution(self):
+        # 参考帧短边跟用户分辨率档,不是硬编码 512 —— 否则用户降档也省不下参考帧的字节。
+        from miloco.perception.engine.identity.gallery_composite import (
+            encode_jpeg_bytes,
         )
-        ref_bytes = base64.b64decode(ref_b64)
-        assert ref_bytes == encode_jpeg_bytes(_resize_short_edge(frames[-1], _VIDEO_SHORT_EDGE))
-        assert ref_bytes != encode_jpeg_bytes(_resize_short_edge(frames[0], _VIDEO_SHORT_EDGE))
+        from miloco.perception.engine.omni.prompt_builder import _resize_short_edge
+
+        np.random.seed(11)
+        frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8) for _ in range(5)]
+        pkt = _adaptive_packet(frames=frames)
+        p1, p2 = self._patches(short_edge=256)  # 480 短边 → 会被缩到 256(512 档下不缩)
+        with p1, p2:
+            content = self._content(packet=pkt, candidates=[])
+        ref_bytes = self._ref_bytes(content)
+        assert ref_bytes == encode_jpeg_bytes(_resize_short_edge(frames[-1], 256))
+        assert ref_bytes != encode_jpeg_bytes(frames[-1])  # 旧行为(硬编码 512 → 不缩)已改
+
+    def test_crop_short_edge_budget_scales_with_resolution(self):
+        # crop 短边预算 = 分辨率档 × 360/512(用户档的 70%),保住「像素开销 ≈ 同档全景」不变量;
+        # 512 档必须精确落回 360,与本特性接入前的评测口径字节一致。
+        from miloco.perception.engine.config import CropEnhanceConfig
+        from miloco.perception.engine.omni.prompt_builder import _crop_short_edge_budget
+
+        cfg = CropEnhanceConfig()
+        assert [_crop_short_edge_budget(cfg, se) for se in (360, 512, 768, 1080)] == [
+            253, 360, 540, 759,
+        ]
+        # (crop_se / pano_se)² 恒 ≈ crop_max_area_ratio(0.49),与档位无关
+        for se in (360, 512, 768, 1080):
+            assert abs((_crop_short_edge_budget(cfg, se) / se) ** 2 - 0.494) < 0.01
+
+    def test_crop_video_short_edge_capped_by_budget(self):
+        # 集成:1080 档下 crop 编码短边 = min(crop 区域原短边, 759),不再被固定 360 压死。
+        from unittest.mock import patch as _patch
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        # 1080p 帧 + 居中 500x500 框 → 扩展后区域 900x800(占 34.7%,过面积双限),
+        # 短边 800 > 预算 759 → 预算成为实际生效的上限。
+        np.random.seed(13)
+        frames = [np.random.randint(0, 256, (1080, 1920, 3), dtype=np.uint8) for _ in range(5)]
+        pkt = _adaptive_packet(frames=frames, body_box=(710, 290, 500, 500))
+        p1, p2 = self._patches(short_edge=1080)
+        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+            content = self._content(packet=pkt, candidates=[])
+        assert self._has_ref(content)  # 确认确实走了 crop 分支
+        assert spy.call_args_list[-1].kwargs["short_edge"] == 759
+
+    def test_crop_video_short_edge_capped_by_region_when_region_smaller(self):
+        # 反向:crop 区域本身比预算小(512 档默认小框 → 区域短边约 148)→ 取区域原尺寸,只缩不放。
+        from unittest.mock import patch as _patch
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        p1, p2 = self._patches(short_edge=512)
+        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+            content = self._content(candidates=[])
+        assert self._has_ref(content)
+        assert spy.call_args_list[-1].kwargs["short_edge"] < 360  # 未被放大到预算值
 
     def test_crop_video_uses_frame_info_fps(self):
         # crop 视频帧率必须跟随 frame_info.fps(下采样后真实间隔),不是硬编码——否则调 omni_fps 就慢放。
@@ -1563,7 +1640,7 @@ class TestAdaptiveResolution:
         import miloco.perception.engine.omni.prompt_builder as pb
 
         pkt = _adaptive_packet(fps=2)
-        p1, p2 = self._patches(short_edge=0, enabled=True)
+        p1, p2 = self._patches()
         with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
             self._content(packet=pkt, candidates=[])
         # reorder 后裁切命中则只编 crop 一次(全景不再预编);该次必须用 frame_info.fps=2
@@ -1574,7 +1651,7 @@ class TestAdaptiveResolution:
         # 非 fused/legacy 路径不接 crop:即便 adaptive 全开,也恒走全景、crops 为空(零回归)。
         from miloco.perception.engine.omni.prompt_builder import build_batch_prompt
 
-        p1, p2 = self._patches(short_edge=0, enabled=True)
+        p1, p2 = self._patches()
         with p1, p2:
             payload = build_batch_prompt([_adaptive_packet()], OmniContext())
         assert payload["crops"] == []

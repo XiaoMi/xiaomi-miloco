@@ -335,6 +335,142 @@ class TestLocateRef:
 
 
 @pytest.mark.asyncio
+class TestReadCropMeta:
+    """read_crop_meta 三态:从 omni_trace 里投影出 Smart Crop 的 crop 区域坐标.
+
+    坐标不另落盘,已随 trace 持久化(push_crop_meta → calls[].crop),这里只做读侧投影.
+    """
+
+    @staticmethod
+    def _save_trace(eid: str, calls: list[dict]) -> None:
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(trace={"schema_version": 1, "calls": calls}),
+        )
+
+    async def test_event_not_found(self, svc):
+        status, crop = await svc.read_crop_meta("does-not-exist", "cam_a")
+        assert status == "not_found"
+        assert crop is None
+
+    async def test_device_not_in_event(self, svc, dao):
+        eid = _insert(dao, device_ids=["cam_a"])
+        status, crop = await svc.read_crop_meta(eid, "cam_b")
+        assert status == "not_found"
+        assert crop is None
+
+    async def test_no_trace_file_returns_gone(self, svc, dao):
+        """trace 未落盘 / 已被 cleanup 清 → gone(前端静默不画框)."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "gone"
+        assert crop is None
+
+    async def test_trace_without_crop_key_returns_gone(self, svc, dao):
+        """非 Smart Crop 事件:trace 有 call 记录但没有 crop 键 → gone."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        self._save_trace(eid, [{"device_id": "cam_a", "model": "m"}])
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "gone"
+        assert crop is None
+
+    async def test_found(self, svc, dao):
+        eid = _insert(dao, device_ids=["cam_a"])
+        meta = {
+            "region_xyxy": [430, 122, 590, 318],
+            "frame_size_wh": [640, 360],
+            "crop_short_edge": 360,
+        }
+        self._save_trace(eid, [{"device_id": "cam_a", "crop": meta}])
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "found"
+        assert crop is not None
+        assert crop.model_dump() == meta
+
+    async def test_picks_matching_device_not_first_call(self, svc, dao):
+        """多摄像头同事件:各自的 crop 不能串台(按 device_id 匹配,不取第一条)."""
+        eid = _insert(dao, device_ids=["cam_a", "cam_b"])
+        meta_a = {
+            "region_xyxy": [0, 0, 10, 10],
+            "frame_size_wh": [640, 360],
+            "crop_short_edge": 360,
+        }
+        meta_b = {
+            "region_xyxy": [100, 100, 200, 200],
+            "frame_size_wh": [640, 360],
+            "crop_short_edge": 360,
+        }
+        self._save_trace(
+            eid,
+            [
+                {"device_id": "cam_a", "crop": meta_a},
+                {"device_id": "cam_b", "crop": meta_b},
+            ],
+        )
+        _, crop = await svc.read_crop_meta(eid, "cam_b")
+        assert crop is not None
+        assert crop.model_dump() == meta_b
+
+    async def test_picks_last_matching_call(self, svc, dao):
+        """同 device 多条 call(stream / 重试追加)→ 以最后一次实际上送的为准."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        old = {
+            "region_xyxy": [0, 0, 10, 10],
+            "frame_size_wh": [640, 360],
+            "crop_short_edge": 360,
+        }
+        new = {
+            "region_xyxy": [50, 60, 300, 200],
+            "frame_size_wh": [640, 360],
+            "crop_short_edge": 360,
+        }
+        self._save_trace(
+            eid,
+            [{"device_id": "cam_a", "crop": old}, {"device_id": "cam_a", "crop": new}],
+        )
+        _, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert crop is not None
+        assert crop.model_dump() == new
+
+    @pytest.mark.parametrize(
+        "bad_crop",
+        [
+            {"region_xyxy": [10, 10], "frame_size_wh": [640, 360], "crop_short_edge": 360},
+            {"region_xyxy": [0, 0, 10, 10], "frame_size_wh": [640], "crop_short_edge": 360},
+            {"region_xyxy": [0, 0, 10, 10], "frame_size_wh": [640, 360]},
+            {"region_xyxy": "0,0,10,10", "frame_size_wh": [640, 360], "crop_short_edge": 360},
+        ],
+        ids=["region-truncated", "frame-truncated", "missing-short-edge", "region-not-list"],
+    )
+    async def test_malformed_crop_returns_gone_not_raise(self, svc, dao, bad_crop):
+        """crop 字段形状不合法(schema 演进 / 写入被截断)→ gone,不让 ValidationError 冒成 500.
+
+        校验刻意放在 service 而非 router:router 里现构 EventCropMeta 会把半截 dict
+        变成 500,与「拿不到就 410」的契约自相矛盾.
+        """
+        eid = _insert(dao, device_ids=["cam_a"])
+        self._save_trace(eid, [{"device_id": "cam_a", "crop": bad_crop}])
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "gone"
+        assert crop is None
+
+    async def test_corrupt_trace_returns_gone_not_raise(self, svc, dao):
+        """trace 不是合法 gzip/JSON → gone,不抛 500(画框是装饰,不该拖垮参考卡)."""
+        from miloco.perception.snapshot_writer import get_snapshot_root
+
+        eid = _insert(dao, device_ids=["cam_a"])
+        event_dir = get_snapshot_root() / eid
+        event_dir.mkdir(parents=True, exist_ok=True)
+        (event_dir / "omni_trace.json.gz").write_bytes(b"not-gzip-at-all")
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "gone"
+        assert crop is None
+
+
+@pytest.mark.asyncio
 class TestBuildFeedbackIndex:
     def test_parses_uuid_with_uid_prefix(self, tmp_path, monkeypatch):
         eid = "12345678-1234-1234-1234-123456789abc"

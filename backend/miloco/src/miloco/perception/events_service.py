@@ -7,17 +7,23 @@
 对接两个 endpoint:
 - `GET /api/events`         → list_events
 - `GET /api/events/{event_id}/clip/{device_id}` → locate_clip → FileResponse
+- `GET /api/events/{event_id}/ref/{device_id}`  → locate_ref → FileResponse
+- `GET /api/events/{event_id}/crop/{device_id}` → read_crop_meta → JSON
 """
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
 import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from miloco.perception.schema import MeaningfulEvent
+from pydantic import ValidationError
+
+from miloco.perception.schema import EventCropMeta, MeaningfulEvent
 from miloco.perception.snapshot_writer import (
     CLIP_CANDIDATES,
     get_snapshot_root,
@@ -36,6 +42,10 @@ SnapshotStatus = Literal["found", "gone", "not_found"]
 # Smart Crop 模式下与 crop 视频同附上送 LLM 的全景参考帧(整帧 JPEG,字节级 = omni 所见).
 # 非 crop 事件无此文件 —— 前端据 list 的 has_ref 决定是否请求.
 _REF_FILENAME = "ref.jpg"
+
+# 事件级 omni trace(gzip JSON).Smart Crop 的 crop 坐标挂在其 calls[].crop 下,
+# read_crop_meta 从这里读 —— 不为画框另加 sidecar 文件.
+_TRACE_FILENAME = "omni_trace.json.gz"
 
 
 def probe_has_ref(snapshot_root: Path, event_id: str, device_ids: list[str]) -> bool:
@@ -146,6 +156,61 @@ class EventsService:
         path = get_snapshot_root() / event_id / region_slug(device_id) / _REF_FILENAME
         if path.exists():
             return ("found", path)
+        return ("gone", None)
+
+    async def read_crop_meta(
+        self, event_id: str, device_id: str
+    ) -> tuple[SnapshotStatus, EventCropMeta | None]:
+        """从事件级 omni_trace 里取该 device 的 Smart Crop 元数据(region / 帧尺寸 / 短边).
+
+        不另落盘 —— crop 坐标已随 omni_trace.json.gz 持久化(snapshot_context.push_crop_meta
+        挂在 call 记录的 "crop" 键下),这里只做「解压 + 挑出对应 device 的最后一条」的读侧投影,
+        免得为一个画框需求再加一份 sidecar 文件.
+
+        取 **最后一条**匹配 call:同 device 同事件正常只一次 omni 调用,但 stream/重试路径
+        可能追加多条,以最后一次实际上送的为准.
+
+        与 locate_ref 同款状态语义:
+        - ("found", EventCropMeta):trace 里有该 device 的 crop 记录且字段合法
+        - ("gone", None):event/device 合法但没有(非 crop 事件 / trace 已被 cleanup 清 /
+          trace 损坏 / crop 字段形状不合法)
+        - ("not_found", None):event 不存在 / device_id 不在 device_ids 内
+
+        解析与校验失败一律按 "gone" 处理而非 500:画框是装饰,坏一个 trace 不该让参考卡整张挂掉.
+        校验放在这里而不是 router 里 EventCropMeta(**crop) —— 那样半截 dict(schema 演进 /
+        写入被截断)会抛 ValidationError 变成 500,与「拿不到就 410」的契约自相矛盾.
+        """
+        row = self._dao.get_by_id(event_id)
+        if row is None:
+            return ("not_found", None)
+        if device_id not in row["device_ids"]:
+            return ("not_found", None)
+        path = get_snapshot_root() / event_id / _TRACE_FILENAME
+        if not path.exists():
+            return ("gone", None)
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                trace = json.load(f)
+            calls = trace.get("calls") or []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("read_crop_meta failed to parse trace %s: %s", path, e)
+            return ("gone", None)
+        for call in reversed(calls):
+            if call.get("device_id") != device_id:
+                continue
+            crop = call.get("crop")
+            if not crop:
+                continue
+            try:
+                return ("found", EventCropMeta(**crop))
+            except (TypeError, ValidationError) as e:
+                logger.warning(
+                    "read_crop_meta bad crop meta event_id=%s device_id=%s: %s",
+                    event_id,
+                    device_id,
+                    e,
+                )
+                return ("gone", None)
         return ("gone", None)
 
     @staticmethod

@@ -16,7 +16,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, StrictBool, field_validator
+from pydantic import BaseModel, Field, StrictBool
 from sse_starlette.sse import EventSourceResponse
 
 from miloco.admin import log_pack as _log_pack_mod
@@ -1016,28 +1016,26 @@ async def omni_health_stream():
 
 
 class PerceptionConfigBody(BaseModel):
-    # 0 = 「自适应」分辨率哨兵(Smart Crop);64..2160 = 固定短边;1..63 无意义,拒绝。
-    video_short_edge: int | None = Field(default=None, ge=0, le=2160)
+    video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
-
-    @field_validator("video_short_edge")
-    @classmethod
-    def _validate_short_edge(cls, v: int | None) -> int | None:
-        if v is not None and 0 < v < 64:
-            raise ValueError("video_short_edge 须为 0(自适应)或 64..2160")
-        return v
+    # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
+    # 写进 perception.engine.crop_enhance.user_enabled;ops 灰度闸 enabled 不由 API 写。
+    smart_crop_enabled: bool | None = None
 
 
 def _perception_config_payload() -> dict:
     s = get_settings()
     inp = s.perception.engine.get("input", {})
-    ve = inp.get("video_short_edge", 512)
+    ce = s.perception.engine.get("crop_enhance", {}) or {}
     return {
-        "video_short_edge": ve,
-        "resolution_mode": "adaptive" if ve == 0 else "fixed",
+        "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
+        # 双闸分开暴露:enabled 用户态(开关位置)vs available(ops 灰度闸,决定开关能不能点)。
+        # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但后端不裁"的静默失效。
+        "smart_crop_enabled": bool(ce.get("user_enabled", False)),
+        "smart_crop_available": bool(ce.get("enabled", False)),
     }
 
 
@@ -1063,10 +1061,15 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if body.smart_crop_enabled is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
+            "user_enabled"
+        ] = body.smart_crop_enabled
     payload = _perception_config_payload()
     if update:
-        # 三个参数生效路径各不同，按「新值 != 旧值」判断（前端 drawer 三字段一起 PUT）：
+        # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：
         #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
+        #   - smart_crop_enabled：同上，crop_enhance_config_from_settings 每窗口热读，无需重启。
         #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
         #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live
         #     运行时热更（原地刷 _config + 缓存），免重建引擎 / 免模型重载 / 不丢 track。
