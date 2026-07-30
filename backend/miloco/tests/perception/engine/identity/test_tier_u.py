@@ -2304,3 +2304,75 @@ class TestCentroidCacheNoOrphan:
         assert "OLD" not in pool._clusters
         assert "OLD" not in pool._centroid_cache  # 修复前:残留 → 孤儿泄漏
         assert set(pool._centroid_cache) <= set(pool._clusters)
+
+
+class TestMatchCacheStaleOnPartialEviction:
+    """TTL/LRU 只淘汰 cluster 的**部分**成员时,_match_cache 里的旧 pair sim 必须失效。
+
+    _match_cache 的键只有 frozenset({cid_a, cid_b}),不含成员指纹(不同于
+    _centroid_cache 的内容指纹自愈)。成员被淘汰后 cluster 仍存在 → pair 键不变,
+    _cluster_pairwise_union 会继续复用旧 sim:旧低分造成假阴性(漏 merge),旧高分
+    造成假阳性(错合两个已不相近的簇,身份合并不可逆,危害更大)。
+    """
+
+    @staticmethod
+    def _two_clusters(pool, sim_seed: float | None = None):
+        """A 簇 2 成员(e1/e2)+ B 簇 1 成员(e1);可选预置 (A,B) 的 stale sim。
+
+        返回 (ka1, ka2, kb):ka1 是把 A 的 centroid 拽向 B 的那个成员,淘汰它之后
+        A 的真实 centroid(e2)与 B(e1)正交 → 真实 sim=0,远低于 0.85 阈值。
+        """
+        from miloco.perception.engine.identity.tier_u import EquivClass, TierUEntry
+
+        e1 = np.array([1.0] + [0.0] * 127, dtype=np.float32)
+        e2 = np.array([0.0, 1.0] + [0.0] * 126, dtype=np.float32)
+        ka1, ka2, kb = ("cam-a", 1), ("cam-a", 2), ("cam-b", 3)
+        for key, cid, emb in ((ka1, "CID-A", e1), (ka2, "CID-A", e2), (kb, "CID-B", e1)):
+            entry = TierUEntry(cam_id=key[0], track_id=key[1])
+            entry.cluster_id = cid
+            entry.reid_embedding = emb  # 让 _entry_dedup_embedding / centroid 有料
+            entry.last_l1_push_ts = 1_700_000_000.0
+            pool._entries[key] = entry
+        pool._clusters["CID-A"] = EquivClass(cluster_id="CID-A", members={ka1, ka2})
+        pool._clusters["CID-B"] = EquivClass(cluster_id="CID-B", members={kb})
+        if sim_seed is not None:
+            pool._match_cache[frozenset({"CID-A", "CID-B"})] = sim_seed
+        return ka1, ka2, kb
+
+    def test_partial_eviction_invalidates_match_cache(self):
+        """淘汰 A 的一个成员(A 仍非空)→ 含 A 的 pair sim 必须清掉。"""
+        pool = TierUPool()
+        ka1, ka2, _kb = self._two_clusters(pool, sim_seed=0.99)
+
+        pool._evict_entry(ka1)
+
+        assert pool._clusters["CID-A"].members == {ka2}, "A 应仍存在、只少一个成员"
+        # 修复前:cluster 非空 → 不 invalidate → stale 0.99 继续留在 cache 里
+        assert frozenset({"CID-A", "CID-B"}) not in pool._match_cache
+
+    def test_stale_high_sim_does_not_cause_false_merge(self):
+        """行为断言:淘汰成员后真实 centroid 已正交,stale 高分不得再触发错误合并。"""
+        pool = TierUPool()
+        ka1, ka2, kb = self._two_clusters(pool, sim_seed=0.99)  # 0.99 >= 0.85 阈值
+
+        pool._evict_entry(ka1)
+        pool._cluster_pairwise_union(list(pool._entries.values()))
+
+        # 修复前:命中 stale 0.99 → best_pair=(A,B) → _merge_into_cluster 把两簇错合
+        assert pool._entries[ka2].cluster_id == "CID-A"
+        assert pool._entries[kb].cluster_id == "CID-B"
+        assert set(pool._clusters) == {"CID-A", "CID-B"}, "正交的两簇不该被合并"
+
+    def test_recomputed_sim_replaces_stale_low_score(self):
+        """反向:stale 低分不得挡掉本该发生的 merge —— 清缓存后按真实 sim 重算。"""
+        pool = TierUPool()
+        ka1, _ka2, kb = self._two_clusters(pool, sim_seed=0.0)  # stale 低分挡 merge
+
+        # 淘汰 ka2(e2)→ A 只剩 ka1(e1),与 B(e1)真实 sim=1.0 > 0.85 应当合并
+        pool._evict_entry(("cam-a", 2))
+        pool._cluster_pairwise_union(list(pool._entries.values()))
+
+        assert pool._entries[ka1].cluster_id == pool._entries[kb].cluster_id, (
+            "真实 centroid 已同一身份,stale 低分不应继续阻止 merge"
+        )
+        assert len(pool._clusters) == 1

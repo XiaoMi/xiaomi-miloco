@@ -1500,6 +1500,15 @@ class TierUPool:
         return closed
 
     def _invalidate_match_cache_for_cluster(self, cluster_id: str) -> None:
+        """清掉所有含 ``cluster_id`` 的 pair sim。
+
+        **不变量**:任何改动某 cluster 成员集合的路径,都必须对该 cluster 调本函数
+        (成员变→centroid 变→旧 sim 失真)。_match_cache 的键只有
+        ``frozenset({cid_a, cid_b})``、**不带成员指纹**,不像 _centroid_cache 那样能靠
+        内容指纹自愈,所以漏一处就会长期复用错的 sim(旧高分错合两簇尤其危险,身份
+        合并不可逆)。现有调用点:_merge_into_cluster / split_cluster /
+        close_write_gate / L2 FIFO 弹出 / _evict_entry。
+        """
         stale = [k for k in self._match_cache if cluster_id in k]
         for k in stale:
             self._match_cache.pop(k, None)
@@ -1630,9 +1639,23 @@ class TierUPool:
             cluster = self._clusters.get(entry.cluster_id)
             if cluster is not None:
                 cluster.members.discard(key)
+                # 成员集合一变 centroid 就变 → 立刻清所有含该 cluster 的 pair sim,
+                # **不能等 cluster 被删空**:_match_cache 的键只有
+                # frozenset({cid_a, cid_b})、不含成员指纹(不同于 _centroid_cache
+                # 的内容指纹自愈),TTL/LRU 只淘汰部分成员时 pair 键不变,
+                # _cluster_pairwise_union 会继续复用旧 sim:
+                #   - 假阴性:旧低分挡掉本该发生的 merge;
+                #   - 假阳性:旧高分把"成员淘汰后已不再相近"的两簇错合 —— 身份合并
+                #     不可逆,危害更大。
+                # 其余改成员的路径(_merge_into_cluster / split_cluster /
+                # close_write_gate / L2 FIFO 弹出)本就各自清过,这里补齐最后一处,
+                # 让"成员变即清 cache"在所有路径上成立。
+                # (_centroid_cache 此处无需动:member frozenset 进了签名,下次
+                #  _cluster_mean_embedding 自动重算;只有下面 cluster 整个消失、
+                #  永不再被查的情形才必须显式 pop。)
+                self._invalidate_match_cache_for_cluster(entry.cluster_id)
                 if not cluster.members:
                     self._clusters.pop(entry.cluster_id, None)
-                    self._invalidate_match_cache_for_cluster(entry.cluster_id)
                     # cluster 整个被弹 (TTL/LRU 清掉最后一个成员) → set 里残留就是
                     # stale, 跟 _merge_into_cluster 跨 cluster 合并 old 被弹同语义。
                     # 不清的话 set 单调泄漏 (UUID 36 字节/条) + 跟 __init__ 注释
