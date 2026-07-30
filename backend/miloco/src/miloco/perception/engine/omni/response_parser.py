@@ -273,8 +273,11 @@ def _build_output(
 ) -> OmniOutput:
     caption = _parse_caption(parsed.get("caption"))
     # pet_identities 是 prompt 侧的宠物称呼唯一真源（caption / suggestions / matched_rules 据其
-    # 派生），**不入 OmniOutput、不进 IdentityEngine / person 表**（红线）。这里只做两件事：
-    # ① 落审计日志，便于事后核「叫了谁、凭什么」；② 供 matched_rules 后置兜底（见下）。
+    # 派生），**不入 OmniOutput、不进 IdentityEngine / person 表**（红线）。这里只落审计日志，
+    # 便于事后核「叫了谁、凭什么」——**不据此改变任何下游行为**。
+    # PET_NAMING_SPEC「规则点名宠物须 conf=high」的代码侧强制留待后续：可靠判定「某条规则是否
+    # 在点名某只宠物」需要结构化信息，靠「宠物名是规则名子串」会误吞无关规则（宠物叫「宝宝」时
+    # 连「宝宝独处提醒」这类人身安全规则一起丢），代价高于收益。
     pet_high, pet_mid = _parse_pet_identities(parsed.get("pet_identities"))
     if pet_high or pet_mid:
         logger.info(
@@ -282,9 +285,7 @@ def _build_output(
             sorted(_sanitize_for_log(n) for n in pet_high),
             sorted(_sanitize_for_log(n) for n in pet_mid),
         )
-    matched_rules = _parse_matched_rules(
-        parsed.get("matched_rules"), rule_name_to_id, mid_conf_pets=pet_mid
-    )
+    matched_rules = _parse_matched_rules(parsed.get("matched_rules"), rule_name_to_id)
     speeches = _parse_speeches(parsed.get("speeches"))
     env_sounds = _parse_env_sounds(parsed.get("env_sounds"))
     suggestions = _parse_suggestions(parsed.get("suggestions"))
@@ -327,7 +328,8 @@ def _sanitize_for_log(s: str) -> str:
 def _parse_pet_identities(raw: Any) -> tuple[set[str], set[str]]:
     """``pet_identities`` → ``(high 名单, mid 名单)``。
 
-    仅供审计日志 + ``matched_rules`` 后置兜底；不入 OmniOutput、不进 IdentityEngine / person 表。
+    **仅供审计日志**；不入 OmniOutput、不进 IdentityEngine / person 表，也不改变下游行为
+    （名字直接来自模型输出、未与花名册核对，不足以作过滤依据）。
     """
     if not isinstance(raw, list):
         return set(), set()
@@ -346,8 +348,6 @@ def _parse_pet_identities(raw: Any) -> tuple[set[str], set[str]]:
 def _parse_matched_rules(
     raw: Any,
     rule_name_to_id: "dict[str, str] | None" = None,
-    *,
-    mid_conf_pets: "set[str] | None" = None,
 ) -> list[MatchedRule]:
     if not isinstance(raw, list):
         return []
@@ -367,16 +367,6 @@ def _parse_matched_rules(
             logger.error(
                 "omni 输出了不在「# 待判断规则」列表中的 rule_name=%r，判定为幻觉，丢弃不触发",
                 name,
-            )
-            continue
-        # PET_NAMING_SPEC「规则点名宠物须该宠物本轮以 conf=high 列入 pet_identities 才可 hit=true」
-        # 的代码侧兜底：本轮只判到 mid 的宠物被规则点名 → 不触发（宁漏不误触发，规则命中会发通知）。
-        # 「宠物**未列入**却被点名」那半需花名册进解析层，留 P3-b。
-        if mid_conf_pets and (hit_mid := [p for p in mid_conf_pets if p in name]):
-            logger.warning(
-                "event=pet_rule_suppressed rule=%s pets=%s conf=mid 未达 high，丢弃不触发",
-                _sanitize_for_log(name),
-                sorted(_sanitize_for_log(p) for p in hit_mid),
             )
             continue
         result.append(

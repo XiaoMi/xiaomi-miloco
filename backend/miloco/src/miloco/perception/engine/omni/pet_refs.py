@@ -140,7 +140,12 @@ def build_pet_reference_content(max_pets: int = 3) -> list[dict]:
                 )
                 paths = []
             entries.append((pet, paths))
-            sig_parts.append((pet.id, tuple(_crop_stat(p) for p in paths)))
+            # 签名须覆盖**所有进入 content 的输入**：除 crop 文件 stat，还有渲染标签用的
+            # name / species——改名只重写 meta.json、一个 ref_crop_*.jpg 都不碰，只收 stat
+            # 会让缓存假命中、逐帧注入写着旧名字的参考图（与档案「## 宠物」名单打架）。
+            sig_parts.append(
+                (pet.id, pet.name, pet.species, tuple(_crop_stat(p) for p in paths))
+            )
         sig = (max_pets, tuple(sig_parts))
         if sig == _cache["sig"]:
             return _cache["content"]

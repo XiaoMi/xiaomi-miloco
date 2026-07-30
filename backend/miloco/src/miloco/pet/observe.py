@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import json
@@ -49,6 +50,14 @@ from miloco.perception.engine.omni.omni_client import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MediaDecodeError(ValueError):
+    """上传的字节一张都解不出来（HEIC / AVIF / 截断损坏）。
+
+    与「画面里确实没有动物」**必须区分**：前者要引导住户换格式，后者要引导换素材；
+    混成同一个 detected=False 会让 Agent / Web 给出误导性话术（让人反复换同格式的图）。
+    """
 
 
 class OmniDescribeError(RuntimeError):
@@ -676,6 +685,57 @@ def _montage_b64(crops: list[np.ndarray]) -> str:
     return _jpeg_b64(montage) if montage is not None else ""
 
 
+def _prepare_crops(
+    medias: list[bytes], *, is_video: bool, max_frames: int
+) -> tuple[list[dict], int, np.ndarray | None, list[dict]]:
+    """纯同步的选帧 / 检测 / 门控段（解码 + YOLO + ReID，无 await）。
+
+    单独抽出来供 ``observe_pet`` 用 ``asyncio.to_thread`` 调：主 backend 同进程还跑着
+    live transcode / record_clip / MQTT 感知，最多 60 帧串行 ONNX 推理（``use_gpu=False``）
+    若占着事件循环会把它们全饿死（同 ``person/router.extract_samples`` 的处理）。
+
+    返回 ``(selected, n_coincident, fallback_frame, extra_warnings)``；**一张都解不出**
+    → 抛 ``MediaDecodeError``（与「画面确无动物」区分），部分解不出 → 出一条 warning。
+    """
+    detector = default_detector()
+    if is_video:  # 视频恒单个
+        sampled, fps = _decode_and_sample(medias[0], max_frames)
+        if not sampled:
+            raise MediaDecodeError("无法解码上传的视频（仅支持常见 mp4/webm/mov 等格式）")
+        selected, n_coincident = _select_video_crops(sampled, detector, int(fps) or 1)
+        return selected, n_coincident, _sharpest_frame(sampled), []
+
+    # 图 1~3 张，每张各取最大 crop 过单图硬门槛
+    selected: list[dict] = []
+    n_coincident = 0
+    n_decoded = 0
+    batch = medias[:_MAX_SELECT]
+    for m in batch:
+        img = cv2.imdecode(np.frombuffer(m, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:  # HEIC / AVIF / 截断损坏
+            continue
+        n_decoded += 1
+        one, n_in_frame = _largest_pet_crop_with_count(img, detector)
+        if one is not None:
+            selected.append(one)
+        # 取各图**最大值**而非求和：多图注册是「同一只多角度」，两张各一只不是两只；
+        # 只有单张图内 ≥2 只才算同帧共现（与视频 n_coincident 同口径）。跨图不同宠由
+        # refs_inconsistent 兜。
+        n_coincident = max(n_coincident, n_in_frame)
+    if n_decoded == 0:
+        raise MediaDecodeError("无法解码上传的图片（仅支持常见 jpg/png/webp 格式）")
+    extra: list[dict] = []
+    if n_decoded < len(batch):  # 部分解不出：别静默丢（同 D8 口径）
+        extra.append(
+            {
+                "type": "partial_decode_failed",
+                "level": "warn",
+                "message": f"有 {len(batch) - n_decoded} 张图无法解码，已跳过。",
+            }
+        )
+    return selected, n_coincident, _first_decodable(medias), extra
+
+
 def _empty_result() -> dict:
     return {
         "detected": False,
@@ -708,26 +768,9 @@ async def observe_pet(
     仓鼠等非猫狗物种）。回退路径 ``body_grounding=True`` 时让 omni 框出本体、裁本体作**一张参考 crop**
     （决策 D7）；关或框不出则不产参考 crop（candidates=[]）。仅当 omni 判画面确无动物时 detected=False。
     """
-    detector = default_detector()
-    if is_video:  # 视频恒单个
-        sampled, fps = _decode_and_sample(medias[0], max_frames)
-        selected, n_coincident = _select_video_crops(sampled, detector, int(fps) or 1)
-        fallback_frame = _sharpest_frame(sampled)
-    else:  # 图 1~3 张，每张各取最大 crop 过单图硬门槛
-        selected = []
-        n_coincident = 0
-        for m in medias[:_MAX_SELECT]:
-            img = cv2.imdecode(np.frombuffer(m, dtype=np.uint8), cv2.IMREAD_COLOR)
-            one, n_in_frame = (
-                _largest_pet_crop_with_count(img, detector) if img is not None else (None, 0)
-            )
-            if one is not None:
-                selected.append(one)
-            # 取各图**最大值**而非求和：多图注册是「同一只多角度」，两张各一只不是两只；
-            # 只有单张图内 ≥2 只才算同帧共现（与视频 n_coincident 同口径）。跨图不同宠由
-            # refs_inconsistent 兜。
-            n_coincident = max(n_coincident, n_in_frame)
-        fallback_frame = _first_decodable(medias)
+    selected, n_coincident, fallback_frame, extra_warnings = await asyncio.to_thread(
+        _prepare_crops, medias, is_video=is_video, max_frames=max_frames
+    )
 
     # 检测器框到并过门槛 → 一次性把 ≤3 张 crop 送 omni 出共性描述（主路径不做本体 grounding）
     if selected:
@@ -758,7 +801,8 @@ async def observe_pet(
             "refs_inconsistent": refs_inconsistent,
             "warnings": _build_warnings(
                 description, selected, refs_inconsistent, n_coincident
-            ),
+            )
+            + extra_warnings,
         }
 
     # 回退：检测器没框到猫/狗 / 门控全灭 → 让 omni 看整幅画面（并按 D7 尝试框本体）。
@@ -803,7 +847,8 @@ async def observe_pet(
             "candidates": [_candidate_out(cand, head_bbox=None)],
             "refs_inconsistent": None,
             # 视频多 track 但主体被门控全灭而落到回退时，仍要透出 multiple_pets（别静默丢，决策 D8）
-            "warnings": _build_warnings(description, [], None, n_coincident),
+            "warnings": _build_warnings(description, [], None, n_coincident)
+            + extra_warnings,
         }
     # 未开本体 grounding / omni 框不出 → 回传整幅画面，由前端裁剪器手动收窄，不产参考 crop
     return {
@@ -817,5 +862,5 @@ async def observe_pet(
         "primary_index": 0,
         "candidates": [],
         "refs_inconsistent": None,
-        "warnings": _build_warnings(description, [], None, n_coincident),
+        "warnings": _build_warnings(description, [], None, n_coincident) + extra_warnings,
     }

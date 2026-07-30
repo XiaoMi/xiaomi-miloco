@@ -1,12 +1,12 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""pet_identities 的审计日志 + matched_rules 后置兜底。
+"""pet_identities 的审计日志（**纯 additive、零行为改动**）。
 
-PET_NAMING_SPEC 要求「规则点名某只宠物时，须该宠物本轮以 conf=high 列入 pet_identities 才可
-hit=true」。该字段不入 OmniOutput（红线：不进 IdentityEngine / person 表），故这里验证两件事：
-① 解析出的名单落审计日志，便于事后核「叫了谁、凭什么」；② 只判到 mid 的宠物被规则点名 → 丢弃
-不触发（规则命中会发通知，宁漏不误触发）。
+该字段不入 OmniOutput（红线：不进 IdentityEngine / person 表），只落审计日志便于事后核「叫了谁、
+凭什么」。故这里验证两件事：① high/mid 名单进日志；② **无论 conf 取值、字段是否畸形，都不影响
+matched_rules 等下游行为**——PET_NAMING_SPEC「规则点名须 conf=high」的代码侧强制留待后续，因为
+靠「宠物名是规则名子串」判定会误吞无关规则（宠物叫「宝宝」时连「宝宝独处提醒」一起丢）。
 """
 
 import json
@@ -37,18 +37,33 @@ def _payload(pet_conf: str | None, *, with_rule: bool = True) -> dict:
     return data
 
 
-def test_rule_naming_mid_conf_pet_is_suppressed(caplog):
-    # conf=mid → 规则点名该宠物不得触发（护栏的代码侧兜底）
-    with caplog.at_level(logging.WARNING):
-        out = parse_omni_response(_wrap(json.dumps(_payload("mid"))), _MAPPING)
-    assert out.matched_rules == []
-    assert "event=pet_rule_suppressed" in caplog.text
+def test_mid_conf_pet_does_not_affect_matched_rules():
+    # 关键回归：conf=mid **不得**影响规则命中——曾用「宠物名是规则名子串」抑制，会误吞与宠物
+    # 无关的规则（宠物叫「宝宝」时连「宝宝独处提醒」这类人身安全规则一起丢），已撤掉。
+    out = parse_omni_response(_wrap(json.dumps(_payload("mid"))), _MAPPING)
+    assert [r.rule_id for r in out.matched_rules] == ["rule-uuid-1"]
 
 
-def test_rule_naming_high_conf_pet_passes():
-    # conf=high → 规则照常命中（护栏只拦 mid，不改变正常路径）
+def test_high_conf_pet_does_not_affect_matched_rules():
     out = parse_omni_response(_wrap(json.dumps(_payload("high"))), _MAPPING)
     assert [r.rule_id for r in out.matched_rules] == ["rule-uuid-1"]
+
+
+def test_unrelated_rule_not_dropped_by_pet_name_collision():
+    # 宠物名与人身安全规则撞名（「宝宝」）：规则必须照常命中
+    data = {
+        "caption": "宝宝一个人在客厅",
+        "matched_rules": [
+            {"rule_name": "[t123] 宝宝独处超过 10 分钟提醒", "reason": "独处", "hit": True}
+        ],
+        "speeches": [],
+        "suggestions": [],
+        "pet_identities": [{"name": "宝宝", "conf": "mid", "reason": "花色像"}],
+    }
+    out = parse_omni_response(
+        _wrap(json.dumps(data)), {"[t123] 宝宝独处超过 10 分钟提醒": "rule-uuid-9"}
+    )
+    assert [r.rule_id for r in out.matched_rules] == ["rule-uuid-9"]
 
 
 def test_pet_identities_logged_for_audit(caplog):

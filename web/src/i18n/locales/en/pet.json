@@ -35,6 +35,7 @@
     "addMaterialHint": "Add more photos/video from different poses/angles to enrich the recognition references",
     "useMaterial": "Add references",
     "materialAppended": "Added {{count}} reference crop(s)",
+    "noRefCropsToAppend": "No recognition reference was generated from this media (no cat/dog detected), so there is nothing to add — try a clearer photo showing the whole animal",
     "useDescriptionMulti": "Use",
     "warn": {
       "species_mismatch": "Detected species differs from the description — please double-check",

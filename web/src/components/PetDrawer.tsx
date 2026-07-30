@@ -128,7 +128,13 @@ export function PetDrawer({
   // 补充素材（D3）：存量宠物追加参考图——即时以 append 落库（不动描述/头像）。
   const onAppendMaterial = async (result: AutoGenDoneResult) => {
     setAutoGen(false);
-    if (!pet || result.referenceCrops.length === 0) return;
+    if (!pet) return;
+    // 整幅回退（检测器框不到猫狗，如兔/鸟）不产参考 crop → 这里没东西可 append。
+    // 必须给提示：否则弹层一关、什么都没发生，住户会以为素材已加上。
+    if (result.referenceCrops.length === 0) {
+      toast(t("pet.noRefCropsToAppend"), "warn");
+      return;
+    }
     setBusy(true);
     try {
       await uploadPetReferenceCrops(

@@ -90,7 +90,7 @@ async def observe_pet_media(
     总开关 ``pet_recognition`` 关闭时该端点不可用；``grounding`` 缺省取
     ``features.pet_head_grounding``。**向后兼容**：单个走 ``media``、多图走 ``medias``，两者取其一。
     """
-    from miloco.pet.observe import OmniDescribeError, observe_pet
+    from miloco.pet.observe import MediaDecodeError, OmniDescribeError, observe_pet
 
     settings = get_settings()
     _require_pet_enabled()
@@ -134,6 +134,8 @@ async def observe_pet_media(
             grounding=use_grounding,
             body_grounding=settings.features.pet_body_grounding,
         )
+    except MediaDecodeError as e:  # 字节一张都解不出（HEIC/AVIF/损坏）→ 400，与「无动物」区分
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except OmniDescribeError as e:  # 模型没给可解析 JSON → 502 + 可读原因（前端直接展示）
         raise HTTPException(status_code=502, detail=str(e)) from e
     return NormalResponse(code=0, message="OK", data=result)

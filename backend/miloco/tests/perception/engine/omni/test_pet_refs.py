@@ -125,6 +125,33 @@ def test_cache_invalidated_on_append(tmp_path, monkeypatch):
     assert _imgs(c2)[0]["image_url"]["url"] != u1  # composite 变了（2 姿态）
 
 
+def test_cache_invalidated_on_rename(tmp_path, monkeypatch):
+    # 回归：改名只重写 meta.json、不动 ref_crop_*.jpg，若签名只收文件 stat 会假命中 →
+    # 逐帧注入写着旧名字的标签，与档案「## 宠物」名单打架（模型要么召回掉 0、要么用旧名字）
+    lib = PetLibrary(root_dir=tmp_path)
+    p = lib.create(name="小黑", species="猫")
+    lib.set_reference_crops(p.id, [_JPEG], scores=[1.0])
+    _use_lib(monkeypatch, lib)
+    before = pet_refs.build_pet_reference_content()
+    assert any("小黑" in str(b) for b in before)
+    lib.update(p.id, name="大黑")
+    after = pet_refs.build_pet_reference_content()
+    assert any("大黑" in str(b) for b in after)
+    assert not any("小黑" in str(b) for b in after)
+
+
+def test_cache_invalidated_on_species_change(tmp_path, monkeypatch):
+    # 物种同理进标签（【名】（物种）），改物种也须换签名
+    lib = PetLibrary(root_dir=tmp_path)
+    p = lib.create(name="旺财", species="狗")
+    lib.set_reference_crops(p.id, [_JPEG], scores=[1.0])
+    _use_lib(monkeypatch, lib)
+    assert any("狗" in str(b) for b in pet_refs.build_pet_reference_content())
+    lib.update(p.id, species="猫")
+    after = pet_refs.build_pet_reference_content()
+    assert any("猫" in str(b) for b in after)
+
+
 def test_cache_invalidated_on_inplace_same_count_replace(tmp_path, monkeypatch):
     # 回归（对抗验证 #1）：同张数原地整组替换成不同 bytes → 缓存必须失效（stat 签名捕获）
     lib = PetLibrary(root_dir=tmp_path)

@@ -35,6 +35,7 @@
     "addMaterialHint": "为该宠物追加不同姿态/角度的照片或视频，丰富识别参照",
     "useMaterial": "补充参考图",
     "materialAppended": "已补充 {{count}} 张参考图",
+    "noRefCropsToAppend": "这次素材没能生成识别参照（画面里没框出猫/狗），没有可补充的内容——换张更清晰、能看清整只的照片再试",
     "useDescriptionMulti": "使用",
     "warn": {
       "species_mismatch": "检测物种与描述物种不一致，请核对物种",

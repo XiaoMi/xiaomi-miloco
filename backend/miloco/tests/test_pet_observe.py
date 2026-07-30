@@ -719,6 +719,40 @@ async def test_observe_two_images_one_pet_each_no_multiple_pets(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_observe_undecodable_image_raises(monkeypatch):
+    # HEIC / AVIF / 损坏字节：一张都解不出 → MediaDecodeError（路由转 400），
+    # **不能**退化成 detected=False（那会让 Agent/Web 劝住户换同格式的图，无限循环）
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
+    )
+    monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: None)
+    with pytest.raises(obs.MediaDecodeError):
+        await obs.observe_pet([b"heic-bytes"], is_video=False, grounding=False)
+
+
+@pytest.mark.asyncio
+async def test_observe_partial_decode_failure_warns(monkeypatch):
+    # 3 张里 1 张解不出 → 其余照常处理，但要出 partial_decode_failed（别静默丢，D8 口径）
+    _stub_omni(monkeypatch)
+    monkeypatch.setattr(
+        obs,
+        "default_detector",
+        lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
+    )
+    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
+    calls = {"n": 0}
+
+    def _imdecode(*a, **k):
+        calls["n"] += 1
+        return None if calls["n"] == 2 else _frame(200, 200)  # 第 2 张解不出
+
+    monkeypatch.setattr(cv2, "imdecode", _imdecode)
+    res = await obs.observe_pet([b"i1", b"i2", b"i3"], is_video=False, grounding=False)
+    assert "partial_decode_failed" in {w["type"] for w in res["warnings"]}
+    assert len(res["candidates"]) == 2  # 两张可解的照常出候选
+
+
+@pytest.mark.asyncio
 async def test_omni_describe_raises_on_non_json(monkeypatch):
     # 模型拒答 / 被 max tokens 截断 → 非 JSON：抛 OmniDescribeError（由路由转 502），不降级成空描述
     async def _fake(payload, config, type="realtime"):
