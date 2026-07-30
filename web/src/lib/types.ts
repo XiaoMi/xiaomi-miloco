@@ -127,6 +127,8 @@ export interface ActivityEvent {
   clip_kind?: "mp4" | "m4a" | null;
   /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
   has_trace?: boolean;
+  /** 是否有全景参考帧 ref.jpg(= 本事件走了 Smart Crop);前端据此决定是否请求 /ref/ 并渲染参考卡 */
+  has_ref?: boolean;
   /** 该事件是否已有反馈打包 */
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
@@ -148,6 +150,15 @@ export interface OnDemandLogEntry {
   has_feedback: boolean;
   feedback_pack_path: string | null;
   feedback_pack_size: number | null;
+}
+
+// Smart Crop 事件的裁切区域元数据(GET /api/events/{id}/crop/{device_id}).
+// 坐标在全景帧像素空间,与 ref.jpg 同一空间(ref.jpg 只是等比缩放过)——
+// 所以画框只需 svg viewBox="0 0 W H",letterbox 缩放交给浏览器,前端不算坐标.
+export interface EventCropMeta {
+  region_xyxy: [number, number, number, number];
+  frame_size_wh: [number, number];
+  crop_short_edge: number;
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────

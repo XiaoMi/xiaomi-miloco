@@ -5,7 +5,7 @@
  * 与 mock 对齐返回类型（types.ts），让 src/api/index.ts 能透明切换。
  */
 
-import { apiFetch, resolveToken } from "./client";
+import { ApiError, apiFetch, resolveToken } from "./client";
 import { authHeaders } from "./register";
 import i18n from "@/i18n";
 import type {
@@ -13,6 +13,7 @@ import type {
   Device,
   DeviceCategory,
   DeviceProperty,
+  EventCropMeta,
   HomeEntries,
   HomeEntry,
   HomeEntrySource,
@@ -1097,6 +1098,8 @@ interface BackendMeaningfulEvent {
   /** 服务端根据落盘文件后缀计算:"mp4" 视频路径 / "m4a" audio-only / null 未落盘. */
   clip_kind?: "mp4" | "m4a" | null;
   has_trace?: boolean;
+  /** 任一 device 目录下有 ref.jpg → 本事件走了 Smart Crop,有全景参考帧可取. */
+  has_ref?: boolean;
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
   feedback_pack_size?: number | null;
@@ -1130,6 +1133,7 @@ export async function realListActivity(opts?: {
       rule_names: e.rule_names,
       clip_kind: e.clip_kind,
       has_trace: e.has_trace,
+      has_ref: e.has_ref,
       has_feedback: e.has_feedback,
       feedback_pack_path: e.feedback_pack_path,
       feedback_pack_size: e.feedback_pack_size,
@@ -1199,6 +1203,45 @@ export function realEventClipUrl(
 }
 
 /**
+ * 拼事件全景参考帧 ref.jpg URL(同款 `?token=...` query 鉴权,<img> 也不能设 header).
+ *
+ * 仅 Smart Crop 事件有:该模式下送 LLM 的是裁切放大的局部视频 + 这张整帧参考图.
+ * 调用方应先看 `event.has_ref` 再请求;非 crop 事件后端返 410.
+ */
+export function realEventRefUrl(
+  event_id: string,
+  device_id: string,
+): string {
+  const token = resolveToken();
+  const base = `/api/events/${encodeURIComponent(event_id)}/ref/${encodeURIComponent(device_id)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * 拉 Smart Crop 裁切区域坐标,用于在参考帧上画框.
+ *
+ * 后端从 omni_trace 里投影出来.410 = 「这台 device 这次没裁切」(非 crop 事件 /
+ * trace 已被 cleanup 清 / trace 损坏),这是**预期结果不是错误**,所以在这里就折成
+ * `null`,调用方拿 null 即可判定「无 crop」而不必 import ApiError 去认状态码
+ * (组件层一律只依赖 `@/api` 门面).其余错误(网络抖动 / 5xx)照旧 reject,
+ * 让调用方区分「确定没有」和「暂时没拿到」——前者隐藏参考卡,后者只是不画框.
+ */
+export async function realEventCropMeta(
+  event_id: string,
+  device_id: string,
+): Promise<EventCropMeta | null> {
+  try {
+    const resp = await apiFetch<{ data: EventCropMeta }>(
+      `/api/events/${encodeURIComponent(event_id)}/crop/${encodeURIComponent(device_id)}`,
+    );
+    return resp.data;
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 410) return null;
+    throw e;
+  }
+}
+
+/**
  * 订阅 `/api/events/stream` SSE,新事件来时 callback `(ActivityEvent)`.
  * 返回 unsubscribe 函数.
  *
@@ -1245,6 +1288,7 @@ export function realSubscribeEvents(
         rule_names: payload.rule_names,
         clip_kind: payload.clip_kind,
         has_trace: payload.has_trace,
+        has_ref: payload.has_ref,
         has_feedback: payload.has_feedback,
         feedback_pack_path: payload.feedback_pack_path,
         feedback_pack_size: payload.feedback_pack_size,

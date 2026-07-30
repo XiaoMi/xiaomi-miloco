@@ -11,6 +11,7 @@ import { apiFetch } from "./client";
 import type {
   ActivityEvent,
   Device,
+  EventCropMeta,
   HomeEntries,
   HomeEntryType,
   HomeId,
@@ -270,6 +271,24 @@ export async function listActivity(
 /** 事件 clip mp4 URL,含 ?token=... query 鉴权(<video> 无法设 Authorization). */
 export function eventClipUrl(event_id: string, device_id: string): string {
   return impl.realEventClipUrl(event_id, device_id);
+}
+
+/** 事件全景参考帧 ref.jpg URL(仅 Smart Crop 事件有,先看 event.has_ref). */
+export function eventRefUrl(event_id: string, device_id: string): string {
+  return impl.realEventRefUrl(event_id, device_id);
+}
+
+/**
+ * Smart Crop 裁切区域坐标(画框用).
+ *
+ * `null` = 后端明确说这台 device 这次没裁切(410);reject = 没问出来(网络 / 5xx).
+ * 二者调用方要区别对待:前者不该渲染参考卡,后者只是画不了框.
+ */
+export async function eventCropMeta(
+  event_id: string,
+  device_id: string,
+): Promise<EventCropMeta | null> {
+  return impl.realEventCropMeta(event_id, device_id);
 }
 
 /** 订阅 /api/events/stream SSE;返回 unsubscribe. onOpen 重连成功时触发(可选). */
@@ -622,6 +641,13 @@ export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   window_size: number;
+  /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
+   *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */
+  smart_crop_enabled?: boolean;
+  /** ops 灰度闸(backend crop_enhance.enabled)的只读投影,**PUT 不可写**。
+   *  false = 服务端还没放开这个能力,用户开关即便为 true 也不裁 → 前端置灰 + 提示,
+   *  避免"开关开着但后端不裁"的静默失效。老后端不返此字段 → undefined,同样置灰。 */
+  smart_crop_available?: boolean;
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {
@@ -637,8 +663,10 @@ export type UpdatePerceptionConfigResult = PerceptionConfig & {
   restart_ok?: boolean;
 };
 
+// smart_crop_available 从入参里 Omit 掉:它是 ops 灰度闸的只读投影,后端 PUT 也不收,
+// 在类型上挡住比让它静默被忽略更好。
 export async function updatePerceptionConfig(
-  input: Partial<PerceptionConfig>,
+  input: Partial<Omit<PerceptionConfig, "smart_crop_available">>,
 ): Promise<UpdatePerceptionConfigResult> {
   const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
     "/api/admin/perception-config",
