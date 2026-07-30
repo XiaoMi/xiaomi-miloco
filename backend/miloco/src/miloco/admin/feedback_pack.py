@@ -263,8 +263,9 @@ def build_on_demand_feedback_pack(
     查询路径不产画廊,故 components 无 gallery_included 键.
 
     Returns:
-        {path, size_bytes, components}
-        {omni_trace_found, clips_found, clips_missing},端点需原样回给前端.
+        {path, size_bytes, components} — 与 build_feedback_pack 同形状;
+        components 是完整性记录 {omni_trace_found, clips_found, clips_missing},
+        端点(perception/router.py::submit_on_demand_feedback)需原样回给前端.
     """
     snapshot_root = get_snapshot_root()
     event_dir = snapshot_root / log_id

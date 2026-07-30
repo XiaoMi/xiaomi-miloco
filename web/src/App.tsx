@@ -405,6 +405,7 @@ function MainApp() {
               onDemandLogs={onDemandLogs.data}
               onDemandLoading={onDemandLogs.loading}
               onDemandError={onDemandLogs.error}
+              onRetryOnDemand={() => onDemandLogs.reload()}
               deviceNames={Object.fromEntries(
                 (devices.data ?? []).map((d) => [d.did, d.name]),
               )}

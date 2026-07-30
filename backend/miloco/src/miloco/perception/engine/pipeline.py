@@ -854,12 +854,15 @@ async def run_query_pipeline(
             return None
 
         # Resolve the device whose video will be encoded by build_query_prompt.
-        # _encode_batch_video picks the first packet with all_frames (prompt_builder.py:1418)
-        # and push_clip_bytes fires only after a successful encode (:1287), so this is the
-        # same predicate evaluated twice — attribution is exact, not best-effort.
-        # Note: _encode_batch_video has no try/except, so a PyAV failure on THIS packet
-        # propagates out of build_query_prompt → room task raises → _reraise_first
-        # (:901) → the whole (possibly multi-room) query degrades to answer="".
+        # _encode_batch_video loops edge_packets and returns the first one _encode_video
+        # can encode — and _encode_video bails with (None, None) only when all_frames is
+        # empty, while push_clip_bytes fires at the tail of _encode_video_mp4 after a
+        # successful encode. So this is the same predicate evaluated twice: attribution
+        # is exact, not best-effort.
+        # Note: neither _encode_batch_video nor _encode_video_mp4 has an except clause
+        # (only try/finally to unlink the temp file), so a PyAV failure on THIS packet
+        # propagates out of build_query_prompt → room task raises → _reraise_first below
+        # → the whole (possibly multi-room) query degrades to answer="".
         primary_idx = next(
             (i for i, ep in enumerate(room_identity_packets) if ep.all_frames),
             0,

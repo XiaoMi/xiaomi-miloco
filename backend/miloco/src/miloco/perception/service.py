@@ -175,6 +175,7 @@ class PerceptionService:
         import uuid
 
         from miloco.perception.schema import OnDemandLogEntry
+        from miloco.perception.snapshot_writer import get_snapshot_root
 
         active_sources = self._collector.get_all_active_sources()
 
@@ -226,7 +227,6 @@ class PerceptionService:
             from miloco.config.settings import get_settings
             from miloco.perception.snapshot_writer import (
                 check_disk_space,
-                get_snapshot_root,
                 save_event_artifacts,
             )
 

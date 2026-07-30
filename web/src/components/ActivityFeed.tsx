@@ -42,6 +42,7 @@ interface Props {
   onDemandLogs?: OnDemandLogEntry[];
   onDemandLoading?: boolean;
   onDemandError?: Error | null;
+  onRetryOnDemand: () => void;
   deviceNames?: Record<string, string>;
 }
 
@@ -139,6 +140,7 @@ export function ActivityFeed({
   onDemandLogs: initialOdLogs,
   onDemandLoading,
   onDemandError,
+  onRetryOnDemand,
   deviceNames = {},
 }: Props) {
   const { t } = useTranslation();
@@ -540,7 +542,7 @@ export function ActivityFeed({
 
       {/* On-demand queries panel */}
       <div hidden={activeTab !== "queries"}>
-        <OnDemandLogList initial={initialOdLogs ?? EMPTY_OD_LOGS} initialLoading={onDemandLoading ?? false} initialError={onDemandError ?? null} homeId={homeId} deviceNames={deviceNames} onCountChange={handleOdCount} />
+        <OnDemandLogList initial={initialOdLogs ?? EMPTY_OD_LOGS} initialLoading={onDemandLoading ?? false} initialError={onDemandError ?? null} onRetryInitial={onRetryOnDemand} homeId={homeId} deviceNames={deviceNames} onCountChange={handleOdCount} />
       </div>
 
       </div>{/* end tab panels */}
@@ -1154,10 +1156,11 @@ function SubTab({ active, onClick, label }: {
 
 const OD_PAGE_SIZE = 50;
 
-function OnDemandLogList({ initial, initialLoading, initialError, homeId, deviceNames, onCountChange }: {
+function OnDemandLogList({ initial, initialLoading, initialError, onRetryInitial, homeId, deviceNames, onCountChange }: {
   initial: OnDemandLogEntry[];
   initialLoading: boolean;
   initialError: Error | null;
+  onRetryInitial: () => void;
   homeId: HomeId;
   deviceNames: Record<string, string>;
   onCountChange: (n: number, hasMore: boolean) => void;
@@ -1216,11 +1219,11 @@ function OnDemandLogList({ initial, initialLoading, initialError, homeId, device
         <div>{t("activity.odLoadFailed", { msg: initialError.message })}</div>
         <button
           type="button"
-          onClick={refresh}
-          disabled={refreshing}
+          onClick={onRetryInitial}
+          disabled={initialLoading}
           className="mt-3 text-caption text-text-tertiary hover:text-text-primary transition-colors disabled:opacity-50"
         >
-          {refreshing ? t("activity.odLoading") : t("activity.retry")}
+          {initialLoading ? t("activity.odLoading") : t("activity.retry")}
         </button>
       </div>
     );
