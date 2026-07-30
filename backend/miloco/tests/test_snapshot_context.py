@@ -30,7 +30,9 @@ from miloco.perception.snapshot_context import (
     _strip_base64,
     event_artifacts_scope,
     push_clip_bytes,
+    push_crop_meta,
     push_omni_trace,
+    push_ref_frame,
 )
 
 
@@ -187,6 +189,79 @@ def test_push_omni_trace_multi_device_keeps_per_call_attribution():
                 reset_device_context(t)
     calls = artifacts.trace["calls"]
     assert [c["device_id"] for c in calls] == ["cam_a", "cam_b", "cam_c"]
+
+
+def test_push_ref_frame_per_device():
+    """Smart Crop:scope + device_ctx 下 push_ref_frame 按 device_id 写入 ref_frames."""
+    artifacts = OmniEventArtifacts()
+    with event_artifacts_scope(artifacts):
+        t = set_device_context(
+            DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r")
+        )
+        try:
+            push_ref_frame(b"jpeg-bytes")
+        finally:
+            reset_device_context(t)
+    assert artifacts.ref_frames == {"cam_a": b"jpeg-bytes"}
+
+
+def test_push_ref_frame_noop_without_scope_or_ctx():
+    """无 scope / 有 scope 无 device_ctx → push_ref_frame 静默 no-op."""
+    # 无 scope(但有 device_ctx)
+    t = set_device_context(
+        DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r")
+    )
+    try:
+        push_ref_frame(b"x")  # 不应抛
+    finally:
+        reset_device_context(t)
+    # 有 scope 无 device_ctx
+    artifacts = OmniEventArtifacts()
+    with event_artifacts_scope(artifacts):
+        push_ref_frame(b"x")
+    assert artifacts.ref_frames == {}
+
+
+def test_push_crop_meta_attaches_to_trace():
+    """push_crop_meta 暂存的 crop 元数据,在 push_omni_trace 时挂到同 device 的 call 记录."""
+    artifacts = OmniEventArtifacts()
+    raw = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+    t = set_device_context(
+        DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r")
+    )
+    try:
+        with event_artifacts_scope(artifacts):
+            push_crop_meta(region=(10, 20, 110, 220), frame_size=(640, 480), short_edge=360)
+            push_omni_trace(
+                request_messages=[], response_raw=raw,
+                latency_ms=1.0, error=None, model="mimo-vl",
+            )
+    finally:
+        reset_device_context(t)
+    call = artifacts.trace["calls"][0]
+    assert call["crop"] == {
+        "region_xyxy": [10, 20, 110, 220],
+        "frame_size_wh": [640, 480],
+        "crop_short_edge": 360,
+    }
+
+
+def test_trace_has_no_crop_key_when_not_cropped():
+    """非 crop(未 push_crop_meta)→ call 记录不含 'crop' key,不污染全景事件 trace."""
+    artifacts = OmniEventArtifacts()
+    raw = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+    t = set_device_context(
+        DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r")
+    )
+    try:
+        with event_artifacts_scope(artifacts):
+            push_omni_trace(
+                request_messages=[], response_raw=raw,
+                latency_ms=1.0, error=None, model="mimo-vl",
+            )
+    finally:
+        reset_device_context(t)
+    assert "crop" not in artifacts.trace["calls"][0]
 
 
 def test_strip_base64_keeps_text_drops_payload():

@@ -9,6 +9,7 @@
 Endpoints:
 - `GET /api/events`                              — list_events
 - `GET /api/events/{event_id}/clip/{device_id}`  — locate_clip + FileResponse(Range/206)
+- `GET /api/events/{event_id}/ref/{device_id}`   — locate_ref + FileResponse(全景参考帧)
 - `GET /api/events/stream`                       — SSE
 """
 
@@ -113,6 +114,39 @@ async def get_event_clip(
         )
     if status == "gone":
         raise HTTPException(message="clip expired", status_code=410)
+    raise HTTPException(message="not found", status_code=404)
+
+
+@router.get(
+    "/{event_id}/ref/{device_id}",
+    summary="Get event 全景参考帧(Smart Crop:crop 视频同附的整帧上下文)",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_event_ref(
+    event_id: str,
+    device_id: str,
+    svc: EventsService = Depends(get_events_service),
+) -> FileResponse:
+    """拉取指定 event × device 的全景参考帧 ref.jpg(image/jpeg,inline 展示).
+
+    仅 Smart Crop 事件落有此文件(字节级 = omni 收到的参考帧);前端应据 list 的
+    has_ref 门控请求.用 FileResponse 走 sendfile,不把 JPEG 读进内存.
+
+    返回:
+    - 200:ref.jpg 存在
+    - 404:event 不存在 / device_id 不在 device_ids 内
+    - 410:event 合法但无 ref.jpg(非 crop 事件 / 已被 cleanup 清)
+    """
+    status, path = await svc.locate_ref(event_id, device_id)
+    if status == "found":
+        assert path is not None
+        return FileResponse(
+            path=path,
+            media_type="image/jpeg",
+            content_disposition_type="inline",
+        )
+    if status == "gone":
+        raise HTTPException(message="ref frame not available", status_code=410)
     raise HTTPException(message="not found", status_code=404)
 
 

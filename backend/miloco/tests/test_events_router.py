@@ -282,3 +282,40 @@ class TestGetClipEndpoint:
             "%Y-%m-%d-%H-%M-%S"
         )
         assert f"clip-{expected_time}.mp4" in cd
+
+
+class TestGetRefEndpoint:
+    """GET /events/{id}/ref/{device_id} — Smart Crop 全景参考帧."""
+
+    def test_event_not_found_404(self, client):
+        resp = client.get("/api/events/nonexistent/ref/cam_a")
+        assert resp.status_code == 404
+
+    def test_device_not_in_event_404(self, client, dao):
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        resp = client.get(f"/api/events/{eid}/ref/cam_kitchen_01")
+        assert resp.status_code == 404
+
+    def test_event_exists_but_no_ref_410(self, client, dao):
+        """event 合法但无 ref.jpg(非 crop 事件)→ 410 Gone."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        resp = client.get(f"/api/events/{eid}/ref/cam_living_01")
+        assert resp.status_code == 410
+
+    def test_found_returns_jpeg(self, client, dao):
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 200
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                clips={"cam_living_01": (b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200, "mp4")},
+                ref_frames={"cam_living_01": jpg},
+            ),
+        )
+        resp = client.get(f"/api/events/{eid}/ref/cam_living_01")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert resp.content == jpg

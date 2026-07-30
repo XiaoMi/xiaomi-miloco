@@ -1509,7 +1509,7 @@ def _resize_short_edge(frame: NDArray[np.uint8], short_edge: int) -> NDArray[np.
 class _AdaptiveResult:
     video_b64: str
     media_info: "LocalMediaInfo | None"
-    ref_image_jpeg: bytes  # 全景首帧 JPEG(短边 512),作场景上下文参考
+    ref_image_jpeg: bytes  # 全景末帧 JPEG(短边 512),作场景上下文参考(帧序见下方注释)
 
 
 def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | None":
@@ -1585,6 +1585,12 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
             cse,
             n_det, n_motion,
         )
+        # 旁路落盘:参考帧字节 + crop 元数据(坐标进 trace),供 badcase 复盘对照。
+        # 无 active scope / device_ctx 时静默 no-op,不影响推理主流程。
+        from miloco.perception.snapshot_context import push_crop_meta, push_ref_frame
+
+        push_ref_frame(ref_jpeg)
+        push_crop_meta(region=region, frame_size=(fw, fh), short_edge=cse)
         return _AdaptiveResult(video_b64, media_info, ref_jpeg)
     except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理
         # 统一 event 名(adaptive_crop_fallback),灰度期按单一 event grep 不漏异常回退

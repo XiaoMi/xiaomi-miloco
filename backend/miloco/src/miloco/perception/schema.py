@@ -555,6 +555,13 @@ class MeaningfulEvent(BaseModel):
             "全 device kind 一致(见 prompt_builder._is_audio_only),取第一个 device 即可."
         ),
     )
+    has_ref: bool = Field(
+        default=False,
+        description=(
+            "该事件是否落有全景参考帧 ref.jpg(仅 Smart Crop 模式:crop 视频同附的整帧上下文)."
+            "前端据此在 crop 视频旁展示参考缩略图;经 GET /events/{id}/ref/{device_id} 拉取."
+        ),
+    )
 
 
 class EventListResponse(BaseModel):

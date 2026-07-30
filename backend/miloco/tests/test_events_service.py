@@ -272,6 +272,69 @@ class TestLocateClip:
 
 
 @pytest.mark.asyncio
+class TestLocateRef:
+    """locate_ref 三态 + has_ref 列表标记(Smart Crop 全景参考帧)."""
+
+    async def test_event_not_found(self, svc):
+        status, path = await svc.locate_ref("does-not-exist", "cam_a")
+        assert status == "not_found"
+        assert path is None
+
+    async def test_device_not_in_event(self, svc, dao):
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        status, path = await svc.locate_ref(eid, "cam_kitchen_01")
+        assert status == "not_found"
+        assert path is None
+
+    async def test_no_ref_file_returns_gone(self, svc, dao):
+        """event 合法但无 ref.jpg(非 crop 事件 / 已清)→ gone."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        status, path = await svc.locate_ref(eid, "cam_living_01")
+        assert status == "gone"
+        assert path is None
+
+    async def test_found(self, svc, dao):
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                clips={"cam_living_01": (b"crop-video", "mp4")},
+                ref_frames={"cam_living_01": jpg},
+            ),
+        )
+        status, path = await svc.locate_ref(eid, "cam_living_01")
+        assert status == "found"
+        assert path is not None
+        assert path.name == "ref.jpg"
+        assert path.read_bytes() == jpg
+
+    async def test_has_ref_false_without_ref(self, svc, dao):
+        _insert(dao, device_ids=["cam_a"])
+        events = await svc.list_events()
+        assert events[0].has_ref is False
+
+    async def test_has_ref_true_with_ref(self, svc, dao):
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        eid = _insert(dao, device_ids=["cam_a"])
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                clips={"cam_a": (b"\x00\x00\x00\x20ftypisom" + b"\x00" * 200, "mp4")},
+                ref_frames={"cam_a": b"\xff\xd8\xff\xe0" + b"\x00" * 100},
+            ),
+        )
+        events = await svc.list_events()
+        assert events[0].event_id == eid
+        assert events[0].has_ref is True
+
+
+@pytest.mark.asyncio
 class TestBuildFeedbackIndex:
     def test_parses_uuid_with_uid_prefix(self, tmp_path, monkeypatch):
         eid = "12345678-1234-1234-1234-123456789abc"

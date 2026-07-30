@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 SnapshotStatus = Literal["found", "gone", "not_found"]
 
+# Smart Crop 模式下与 crop 视频同附上送 LLM 的全景参考帧(整帧 JPEG,字节级 = omni 所见).
+# 非 crop 事件无此文件 —— 前端据 list 的 has_ref 决定是否请求.
+_REF_FILENAME = "ref.jpg"
+
+
 
 class EventsService:
     """有意义事件读取 Service.
@@ -109,6 +114,37 @@ class EventsService:
             return ("found", path, media_type, row["timestamp"])
         return ("gone", None, None, None)
 
+    async def locate_ref(
+        self, event_id: str, device_id: str
+    ) -> tuple[SnapshotStatus, Path | None]:
+        """定位指定 event × device 的全景参考帧 ref.jpg(仅 Smart Crop 事件有).
+
+        与 locate_clip 同款状态语义:
+        - ("found", Path):ref.jpg 存在 → 路由层 FileResponse(image/jpeg)
+        - ("gone", None):event 存在且 device_id 合法,但无 ref.jpg(非 crop 事件 / 已被 cleanup 清)
+        - ("not_found", None):event 不存在 / device_id 不在 device_ids 内
+
+        非 crop 事件本就无参考帧 → 返 "gone";前端应据 list 的 has_ref 门控请求,
+        误请求时降级即可(不当错误).
+        """
+        row = self._dao.get_by_id(event_id)
+        if row is None:
+            return ("not_found", None)
+        if device_id not in row["device_ids"]:
+            return ("not_found", None)
+        path = get_snapshot_root() / event_id / region_slug(device_id) / _REF_FILENAME
+        if path.exists():
+            return ("found", path)
+        return ("gone", None)
+
+    @staticmethod
+    def _probe_has_ref(snapshot_root: Path, event_id: str, device_ids: list[str]) -> bool:
+        """任一 device 目录下有 ref.jpg → True(该事件走了 Smart Crop,有全景参考帧)."""
+        for did in device_ids:
+            if (snapshot_root / event_id / region_slug(did) / _REF_FILENAME).exists():
+                return True
+        return False
+
     @staticmethod
     def _probe_clip_kind(snapshot_root: Path, event_id: str, device_ids: list[str]) -> str | None:
         """Stat 落盘文件后缀,推断 clip 容器类型.
@@ -175,6 +211,7 @@ class EventsService:
         device_ids = row["device_ids"]
         event_id = row["id"]
         clip_kind = EventsService._probe_clip_kind(snapshot_root, event_id, device_ids)
+        has_ref = EventsService._probe_has_ref(snapshot_root, event_id, device_ids)
         has_trace = (snapshot_root / event_id / "omni_trace.json.gz").exists()
         fb = feedback_index.get(event_id)
         has_feedback = fb is not None
@@ -195,4 +232,5 @@ class EventsService:
             feedback_pack_path=feedback_pack_path,
             feedback_pack_size=feedback_pack_size,
             clip_kind=clip_kind,
+            has_ref=has_ref,
         )
