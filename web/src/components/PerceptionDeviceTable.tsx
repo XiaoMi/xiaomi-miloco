@@ -235,10 +235,10 @@ export function PerceptionDeviceTable({ cameras, maxEnabledCameras, onChanged }:
           <table className="w-full text-body">
             <thead>
               <tr className="text-caption text-text-tertiary border-b border-border">
-                <th className="text-left font-normal px-5 py-2">{t("hero.table.headerDevice")}</th>
+                <th className="text-left font-normal px-4 py-2">{t("hero.table.headerDevice")}</th>
                 <th className="text-center font-normal px-3 py-2">{t("hero.table.headerVideo")}</th>
                 <th className="text-center font-normal px-3 py-2">{t("hero.table.headerAudio")}</th>
-                <th className="text-right font-normal px-5 py-2">{t("hero.table.headerActions")}</th>
+                <th className="text-right font-normal px-4 py-2">{t("hero.table.headerActions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -250,11 +250,11 @@ export function PerceptionDeviceTable({ cameras, maxEnabledCameras, onChanged }:
                     on ? "bg-brand-primary" : "bg-black/60"
                   } ${(offline||busy) ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`;
                 return (
-                  <tr key={c.did} className={`border-b border-border last:border-b-0 ${offline ? "opacity-50" : ""}`}>
-                    <td className="px-5 py-3">
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-text-primary truncate">{c.name}</span>
-                        {c.roomName && <span className="text-caption text-text-tertiary truncate">· {c.roomName}</span>}
+                  <tr key={c.did} className={`border-b border-border last:border-b-0 hover:bg-bg-tertiary transition-colors ${offline ? "opacity-50" : ""}`}>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className={`text-body truncate ${offline ? "text-text-tertiary" : "text-text-primary"}`}>{c.name}</span>
+                        {c.roomName && <span className="shrink-0 text-caption text-text-tertiary border border-border rounded px-1.5 py-0.5 leading-none">{c.roomName}</span>}
                       </div>
                       {offline && <div className="text-caption text-warning mt-0.5">{t("hero.table.offlineHint")}</div>}
                     </td>
@@ -274,7 +274,7 @@ export function PerceptionDeviceTable({ cameras, maxEnabledCameras, onChanged }:
                           c.audioEnabled ? "translate-x-[12px]" : "translate-x-0"}`} />
                       </button>
                     </td>
-                    <td className="px-5 py-3 text-right">
+                    <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button type="button" role="switch"
                           aria-checked={c.videoEnabled && c.audioEnabled}
