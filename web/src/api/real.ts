@@ -508,6 +508,7 @@ interface BackendFeatures {
   pet_recognition: boolean;
   pet_head_grounding: boolean;
   pet_body_grounding: boolean;
+  pet_reid_diverse: boolean;
 }
 
 function mapFeatures(f: BackendFeatures): Features {
@@ -515,6 +516,7 @@ function mapFeatures(f: BackendFeatures): Features {
     petRecognition: f.pet_recognition,
     petHeadGrounding: f.pet_head_grounding,
     petBodyGrounding: f.pet_body_grounding,
+    petReidDiverse: f.pet_reid_diverse,
   };
 }
 
@@ -530,6 +532,8 @@ export async function realSetFeatures(patch: Partial<Features>): Promise<Feature
     body.pet_head_grounding = patch.petHeadGrounding;
   if (patch.petBodyGrounding !== undefined)
     body.pet_body_grounding = patch.petBodyGrounding;
+  if (patch.petReidDiverse !== undefined)
+    body.pet_reid_diverse = patch.petReidDiverse;
   const r = await apiFetch<Normal<BackendFeatures>>("/api/admin/features", {
     method: "POST",
     body: JSON.stringify(body),

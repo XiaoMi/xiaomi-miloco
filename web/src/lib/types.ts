@@ -65,6 +65,7 @@ export interface Features {
   petRecognition: boolean;
   petHeadGrounding: boolean;
   petBodyGrounding: boolean; // 回退路径（框不到猫狗）裁本体作参考图；默认开
+  petReidDiverse: boolean; // 参考图多样性用人体 ReID 特征距离选多姿态；关或模型不可用回退 dHash
 }
 
 // observe 建议类不阻断提示（后端算）：species_mismatch / generic_look / refs_inconsistent / multiple_pets
