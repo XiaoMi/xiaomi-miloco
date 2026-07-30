@@ -185,6 +185,7 @@ def build_feedback_pack(
 
     metadata = {
         "event_id": event_id,
+        "type": "event",
         "uid": uid,
         "timestamp": event.get("timestamp"),
         "text": _sanitize_pii(event.get("text", "")),

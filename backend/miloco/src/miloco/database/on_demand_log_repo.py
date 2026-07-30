@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -66,7 +65,7 @@ class OnDemandLogRepo:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             params = (
-                entry.id or str(uuid.uuid4()),
+                entry.id,
                 entry.timestamp,
                 entry.query,
                 entry.answer,
@@ -92,7 +91,6 @@ class OnDemandLogRepo:
 
     def query(
         self,
-        after_ms: int | None = None,
         before_ms: int | None = None,
         before_id: str | None = None,
         since_ms: int | None = None,
@@ -103,10 +101,7 @@ class OnDemandLogRepo:
             conditions: list[str] = []
             params: list[Any] = []
 
-            if after_ms is not None:
-                conditions.append("timestamp > ?")
-                params.append(after_ms)
-            elif since_ms is not None:
+            if since_ms is not None:
                 conditions.append("timestamp >= ?")
                 params.append(since_ms)
 

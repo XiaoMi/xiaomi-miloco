@@ -61,7 +61,9 @@
   GET 主动查询列表 → PerceptionService.query_on_demand_logs（perception/service.py，
       跨模块直调 EventsService.build_feedback_index）
       → 扫 packs 目录,UUID 正则回捞 event_id / log_id → (path,size)
-      → MeaningfulEvent / OnDemandLogEntry 的 has_feedback / feedback_pack_path / feedback_pack_size
+      → MeaningfulEvent 的 has_feedback / feedback_pack_path / feedback_pack_size（模型字段）；
+        主动查询侧这三个键由 query_on_demand_logs 就地注入到响应 dict 上，
+        后端 OnDemandLogEntry 是写库入参 DTO 不含它们（对外形状见 web/src/lib/types.ts）
 
 打开文件夹：
   已反馈态点「打开所在文件夹」→ revealDir → POST /api/admin/reveal-dir

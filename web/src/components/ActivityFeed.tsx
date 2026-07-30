@@ -21,6 +21,7 @@ import {
   type BackendActionRow,
 } from "./ActionsFeed";
 import { TimeLabel } from "./TimeLabel";
+import { toast } from "./Toast";
 
 type ActivityTab = "events" | "queries";
 
@@ -416,7 +417,7 @@ export function ActivityFeed({
               : t("activity.odLoaded", { n: odCount, more: odHasMore ? "+" : "" })}
           </span>
         </h2>
-        <div className="inline-flex items-center gap-3 flex-wrap" style={{ visibility: activeTab === "events" ? "visible" : "hidden" }}>
+        <div className={"inline-flex items-center gap-3 flex-wrap" + (activeTab === "events" ? "" : " invisible")}>
           {/* 事件 / 动作 checkbox — 都默认勾选,仅组件内 state 不持久化 */}
           <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
             <input
@@ -1189,7 +1190,9 @@ function OnDemandLogList({ initial, initialLoading, initialError, onRetryInitial
         setHasMore(fresh.length === OD_PAGE_SIZE);
         onCountChange(fresh.length, fresh.length === OD_PAGE_SIZE);
       })
-      .catch(() => {})
+      .catch(() => {
+        toast(t("activity.odLoadFailed", { msg: "" }), "warn");
+      })
       .finally(() => setRefreshing(false));
   };
 

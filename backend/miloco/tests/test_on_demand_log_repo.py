@@ -151,15 +151,6 @@ class TestCompoundCursorPagination:
 
 
 class TestQueryFilters:
-    def test_after_ms_exclusive(self, repo):
-        base = int(time.time() * 1000)
-        repo.append(_make_entry(base, entry_id="at"))
-        repo.append(_make_entry(base + 1000, entry_id="after"))
-
-        logs = repo.query(after_ms=base)
-        assert len(logs) == 1
-        assert logs[0]["id"] == "after"
-
     def test_since_ms_inclusive(self, repo):
         base = int(time.time() * 1000)
         repo.append(_make_entry(base - 1000, entry_id="before"))
