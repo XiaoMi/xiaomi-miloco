@@ -1294,7 +1294,7 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
   const packPath = feedbackPack?.path ?? log.feedback_pack_path ?? null;
   const packSize = feedbackPack?.size ?? log.feedback_pack_size ?? null;
   const hasClips = log.snapshot_count > 0;
-  const clipDids = log.clip_dids ?? log.sources.slice(0, log.snapshot_count);
+  const clipDids = log.clip_dids ?? [];
   const allAudioOnly = hasClips && clipDids.every((did) => (log.clip_kinds?.[did] ?? "mp4") === "m4a");
 
   const trailing = expanded

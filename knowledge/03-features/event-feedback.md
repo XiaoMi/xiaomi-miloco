@@ -74,7 +74,7 @@
 | --------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `build_feedback_pack`                         | `admin/feedback_pack.py`                                | 打包核心：取事件 → 读事件目录 artifacts → PII 脱敏 → 写 tar.gz → 总大小清理；返回 path/size/components 完整性记录                 |
 | `submit_event_feedback` / `reveal_dir`        | `admin/router.py`                                       | 反馈提交端点（解析 uid、线程化打包、映射 404/500）；打开文件夹端点（限 packs 根，跨平台 open）                                    |
-| `EventsService.build_feedback_index`         | `perception/events_service.py`                          | 扫 packs 目录建 `event_id → (path,size)` 索引，把「已反馈态」注入事件列表（同一事件多包取最新）                                   |
+| `EventsService.build_feedback_index`          | `perception/events_service.py`                          | 扫 packs 目录建 `event_id → (path,size)` 索引，把「已反馈态」注入事件列表（同一事件多包取最新）                                   |
 | `MeaningfulEvent`（反馈相关字段）             | `perception/schema.py`                                  | 事件对外模型新增 `has_feedback` / `feedback_pack_path` / `feedback_pack_size`；`has_trace` 决定前端是否显示入口                   |
 | `OmniEventArtifacts` / `save_event_artifacts` | `perception/snapshot_context.py` / `snapshot_writer.py` | 推理侧旁路收集 clip/trace/gallery 并落到事件目录——本模块打包的原料源（属感知流水线，非本模块产出）                                |
 | `FeedbackSection`                             | `web/src/components/ActivityFeed.tsx`                   | 反馈面板 UI：错误类别多选、补充文本、画廊开关、已反馈态、飞书问卷链接、打开文件夹                                                 |
@@ -113,7 +113,7 @@
 | 打包目录总大小上限 / 清理策略      | `admin/feedback_pack.py`（`_cleanup_by_total_size`）                   |
 | 提交端点入参 / 上传通道接入        | `admin/router.py`（`submit_event_feedback`）                           |
 | 打开文件夹的路径限制 / 平台命令    | `admin/router.py`（`reveal_dir`）                                      |
-| 已反馈态如何算出 / 多包取哪个      | `perception/events_service.py`（`build_feedback_index`）              |
+| 已反馈态如何算出 / 多包取哪个      | `perception/events_service.py`（`build_feedback_index`）               |
 | 事件模型的反馈字段                 | `perception/schema.py`（`MeaningfulEvent`）                            |
 | clip / trace / 画廊的产生与落盘    | `perception/snapshot_context.py`、`snapshot_writer.py`（属感知流水线） |
 | 反馈面板 UI / 错误类别 / 问卷链接  | `web/src/components/ActivityFeed.tsx`（`FeedbackSection`）             |
