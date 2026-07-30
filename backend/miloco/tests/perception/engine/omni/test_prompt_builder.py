@@ -1397,20 +1397,26 @@ class TestIdentityMatchDisabled:
 
 
 def _adaptive_packet(
-    *, person_id: str = "none", bbox_xyxy_norm: tuple[int, int, int, int] | None = None
+    *,
+    person_id: str = "none",
+    bbox_xyxy_norm: tuple[int, int, int, int] | None = None,
+    frames: list[np.ndarray] | None = None,
+    fps: int = 1,
 ) -> IdentityPacket:
     """640x480 噪声帧(保证 crop 视频编码后过 size gate)+ 一个小 human_body 框(crop 面积达标)。
 
     默认 target 是 none(不进名册);传 confirmed pid + bbox_xyxy_norm 可让它以
     ``名[bbox=...]`` 进名册,用于验证 crop 生效时 bbox 坐标系说明的指向。
+    frames / fps 可覆盖:验参考帧取末帧、crop 视频帧率跟随 frame_info.fps。
     """
-    np.random.seed(1234)
-    frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8) for _ in range(5)]
+    if frames is None:
+        np.random.seed(1234)
+        frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8) for _ in range(5)]
     return IdentityPacket(
         packet_id="ep-adaptive",
         room_name="study-room",
         timestamp=1000.0,
-        frame_info=FrameInfo(start_timestamp=0, end_timestamp=3000, fps=1),
+        frame_info=FrameInfo(start_timestamp=0, end_timestamp=3000, fps=fps),
         targets=[
             IdentityTarget(
                 type=ObjectType.HUMAN_BODY,
@@ -1522,3 +1528,54 @@ class TestAdaptiveResolution:
         assert not self._has_ref(content)
         note = self._bbox_note(content)
         assert "视频里的人" in note and "全景参考图" not in note
+
+    def test_ref_frame_is_last_not_first(self):
+        # 参考帧必须取末帧:名册 bbox 是末帧坐标,窗内有人移动时首帧参考图会把姓名贴错人。
+        import base64
+
+        from miloco.perception.engine.identity.gallery_composite import (
+            encode_jpeg_bytes,
+        )
+        from miloco.perception.engine.omni.prompt_builder import (
+            _VIDEO_SHORT_EDGE,
+            _resize_short_edge,
+        )
+
+        np.random.seed(7)
+        frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8) for _ in range(5)]
+        pkt = _adaptive_packet(frames=frames)  # 首末帧为不同随机帧 → 编码可区分
+        p1, p2 = self._patches(short_edge=0, enabled=True)
+        with p1, p2:
+            content = self._content(packet=pkt, candidates=[])
+        ref_b64 = next(
+            b["image_url"]["url"].split(",", 1)[1]
+            for b in content
+            if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+        )
+        ref_bytes = base64.b64decode(ref_b64)
+        assert ref_bytes == encode_jpeg_bytes(_resize_short_edge(frames[-1], _VIDEO_SHORT_EDGE))
+        assert ref_bytes != encode_jpeg_bytes(_resize_short_edge(frames[0], _VIDEO_SHORT_EDGE))
+
+    def test_crop_video_uses_frame_info_fps(self):
+        # crop 视频帧率必须跟随 frame_info.fps(下采样后真实间隔),不是硬编码——否则调 omni_fps 就慢放。
+        from unittest.mock import patch as _patch
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        pkt = _adaptive_packet(fps=2)
+        p1, p2 = self._patches(short_edge=0, enabled=True)
+        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+            self._content(packet=pkt, candidates=[])
+        # reorder 后裁切命中则只编 crop 一次(全景不再预编);该次必须用 frame_info.fps=2
+        assert spy.call_count >= 1
+        assert all(c.kwargs.get("fps") == 2 for c in spy.call_args_list)
+
+    def test_non_fused_never_crops(self):
+        # 非 fused/legacy 路径不接 crop:即便 adaptive 全开,也恒走全景、crops 为空(零回归)。
+        from miloco.perception.engine.omni.prompt_builder import build_batch_prompt
+
+        p1, p2 = self._patches(short_edge=0, enabled=True)
+        with p1, p2:
+            payload = build_batch_prompt([_adaptive_packet()], OmniContext())
+        assert payload["crops"] == []
+        assert payload.get("video_base64")

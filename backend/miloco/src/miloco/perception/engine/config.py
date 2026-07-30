@@ -52,7 +52,8 @@ class CropEnhanceConfig:
     crop_min_area_ratio: float = 0.10  # crop 面积下限(防小目标过度放大截断主体)
     crop_max_area_ratio: float = 0.49  # crop 面积上限 ≈(360/512)²;超过则回退全景
     crop_short_edge: int = 360  # crop 视频短边(只缩不放)
-    crop_fps: int = 1  # crop 视频帧率
+    # 注:crop 视频帧率不设独立配置——crop 逐帧裁切、不抽帧,时序与全景视频完全一致,
+    # 编码必须沿用 packet.frame_info.fps(下采样后真实间隔),否则时长/音画错位。
 
 
 @dataclass

@@ -184,11 +184,16 @@ def compute_crop_region(
     # 最小面积
     region = _enforce_min_area(region, w, h, cfg.crop_min_area_ratio)
 
-    # 最大面积:超过则 crop 缩到 crop_short_edge 后等效分辨率反低于全景 → 回退全景
     rx1, ry1, rx2, ry2 = region
     if (rx2 - rx1) <= 0 or (ry2 - ry1) <= 0:
         return None
-    if ((rx2 - rx1) * (ry2 - ry1)) / (w * h) > cfg.crop_max_area_ratio:
+    area_ratio = ((rx2 - rx1) * (ry2 - ry1)) / (w * h)
+    # 最大面积:超过则 crop 缩到 crop_short_edge 后等效分辨率反低于全景 → 回退全景
+    if area_ratio > cfg.crop_max_area_ratio:
+        return None
+    # 最小面积复检:目标紧贴画面边缘时 _enforce_min_area 绕中心放大会被 clamp 截断、
+    # 达不到下限,此时裁切等效分辨率无收益 → 回退全景(_enforce_min_area 只尽力、不保证)。
+    if area_ratio < cfg.crop_min_area_ratio:
         return None
     return region
 

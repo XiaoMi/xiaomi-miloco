@@ -94,3 +94,36 @@ def test_unchanged_omni_fps_is_noop(client):
     assert resp.status_code == 200
     svc.apply_omni_fps_live.assert_not_awaited()
     svc.apply_config_restart.assert_not_awaited()
+
+
+def test_video_short_edge_zero_is_adaptive_sentinel(client):
+    """0 = 「自适应」哨兵（Smart Crop）：校验器放行、热读免重启（既不热更也不重启），
+    GET 派生 resolution_mode=adaptive。"""
+    c, svc = client
+    resp = c.put("/api/admin/perception-config", json={"video_short_edge": 0})
+    assert resp.status_code == 200
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
+    got = c.get("/api/admin/perception-config")
+    assert got.status_code == 200
+    data = got.json()["data"]
+    assert data["video_short_edge"] == 0
+    assert data["resolution_mode"] == "adaptive"
+
+
+@pytest.mark.parametrize("bad", [1, 32, 63])
+def test_video_short_edge_1_to_63_rejected(client, bad):
+    """1..63 无意义（既非 0 哨兵、又低于 64 固定下限）→ 校验器 422。"""
+    c, _svc = client
+    resp = c.put("/api/admin/perception-config", json={"video_short_edge": bad})
+    assert resp.status_code == 422
+
+
+def test_video_short_edge_fixed_mode(client):
+    """非 0 固定短边 → resolution_mode=fixed。"""
+    c, _svc = client
+    resp = c.put("/api/admin/perception-config", json={"video_short_edge": 720})
+    assert resp.status_code == 200
+    data = c.get("/api/admin/perception-config").json()["data"]
+    assert data["video_short_edge"] == 720
+    assert data["resolution_mode"] == "fixed"

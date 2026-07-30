@@ -113,6 +113,15 @@ class TestCropRegion:
         assert area_ratio >= CFG.crop_min_area_ratio - 1e-6
         assert area_ratio <= CFG.crop_max_area_ratio
 
+    def test_edge_hugging_small_box_falls_back(self):
+        # 紧贴画面角的极小框:_enforce_min_area 绕中心放大被 clamp 截断、达不到下限 →
+        # 复检兜底返回 None(或至少面积 >= 下限),不放行等效分辨率无收益的裁切。
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        region = compute_crop_region([_target({"human_body": (0, 0, 4, 4)})], frames, CFG)
+        if region is not None:
+            x1, y1, x2, y2 = region
+            assert (x2 - x1) * (y2 - y1) / (100 * 100) >= CFG.crop_min_area_ratio - 1e-6
+
     def test_pet_body_included(self):
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
         region = compute_crop_region([_target({"pet_body": (20, 20, 15, 15)})], frames, CFG)

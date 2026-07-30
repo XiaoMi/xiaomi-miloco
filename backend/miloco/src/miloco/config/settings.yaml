@@ -100,7 +100,6 @@ perception:
       crop_min_area_ratio: 0.10
       crop_max_area_ratio: 0.49
       crop_short_edge: 360
-      crop_fps: 1
     gate:
       # visual 滞回时长(秒)。visual 最近通过过、距今 <= 此值时,本窗 visual 不通过
       # 也强制生成 packet 并打 hold 标志,保住 video 路由不被纯音频短路。

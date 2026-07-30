@@ -256,17 +256,22 @@ def build_fused_payload(
             "candidate_track_ids": [],
         }
 
-    video_b64, media_info = _encode_batch_video(
-        packets, short_edge=_effective_panorama_short_edge()
-    )
     # 自适应分辨率(Smart Crop):仅当本窗口无身份候选时才 crop —— 有候选时 fused prompt 的
     # bbox=[0,1000] 锚定全景做身份分配,换成 crop 视频会错位(方案 v1 身份门)。任何失败回退全景。
+    # 先试裁切、失败才编全景:免掉裁切命中时白编一遍全景的浪费;且回退时全景字节最后 push,
+    # 与模型实际所见一致(避免 clip 存 crop、模型看全景的产物不一致,见 snapshot_context)。
+    video_b64: str | None = None
+    media_info: "LocalMediaInfo | None" = None
     ref_image_jpeg: bytes | None = None
     if not candidates:
         adaptive = _maybe_encode_adaptive(packets)
         if adaptive is not None:
             video_b64, media_info = adaptive.video_b64, adaptive.media_info
             ref_image_jpeg = adaptive.ref_image_jpeg
+    if video_b64 is None:
+        video_b64, media_info = _encode_batch_video(
+            packets, short_edge=_effective_panorama_short_edge()
+        )
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
@@ -405,22 +410,15 @@ def _build_payload(
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
     else:
-        # 自适应分辨率(Smart Crop)。此路(非 fused/legacy) has_identity 恒 False、不注入
-        # 身份 bbox,无需身份门;参考帧走 crops 通道(_build_messages 尾部渲染为 image_url)。
-        adaptive = _maybe_encode_adaptive(packets)
-        if adaptive is not None:
-            base["video_base64"] = adaptive.video_b64
-            base["media_info"] = adaptive.media_info
-            base["crops"] = [{
-                "media_type": "image/jpeg",
-                "data": base64.b64encode(adaptive.ref_image_jpeg).decode(),
-            }]
-        else:
-            video_b64, media_info = _encode_batch_video(
-                packets, short_edge=_effective_panorama_short_edge()
-            )
-            base["video_base64"] = video_b64
-            base["media_info"] = media_info
+        # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:
+        # crops 通道把参考图渲染在 video 之后且无说明文字,模型会把局部裁切当整个房间描述
+        # (反而比不接更糟)。非生产路径不值得为它复刻 fused 的「参考图在前+说明」结构,
+        # 恒走全景 = 字节等同本 PR 之前的行为(零回归)。
+        video_b64, media_info = _encode_batch_video(
+            packets, short_edge=_effective_panorama_short_edge()
+        )
+        base["video_base64"] = video_b64
+        base["media_info"] = media_info
     return base
 
 
@@ -1535,6 +1533,7 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         return None
     ep = next((p for p in packets if p.all_frames), None)  # 同 _encode_batch_video:首个有帧设备
     if ep is None:
+        logger.info("event=adaptive_crop_fallback reason=no_frames")
         return None
     frames = ep.all_frames
     try:
@@ -1564,13 +1563,17 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
             if _packet_audio_included(ep)
             else np.empty(0, dtype=np.int16)
         )
+        # fps 沿用 frame_info.fps(下采样后真实帧间隔),与全景视频一致——crop 逐帧不抽帧,
+        # 用独立帧率会让视频时长/音画错位(全景用的正是这个 fps)。
         video_b64, media_info = _encode_video_mp4(
-            cropped, audio, ep.sample_rate, fps=cfg.crop_fps, short_edge=cse,
+            cropped, audio, ep.sample_rate, fps=ep.frame_info.fps, short_edge=cse,
         )
         if not video_b64 or len(video_b64) < _MIN_VIDEO_B64_LEN:
             logger.info("event=adaptive_crop_fallback reason=video_too_short region=%s", region)
             return None
-        ref_jpeg = encode_jpeg_bytes(_resize_short_edge(frames[0], _VIDEO_SHORT_EDGE))
+        # 参考帧取末帧:名册 bbox 是末帧坐标(engine._normalize_bbox_to_1000(…, latest_frame)),
+        # 参考图必须同帧,否则窗内有人移动时模型按 bbox 会把姓名贴到首帧里的另一个人身上。
+        ref_jpeg = encode_jpeg_bytes(_resize_short_edge(frames[-1], _VIDEO_SHORT_EDGE))
         if not ref_jpeg or len(ref_jpeg) < _MIN_JPEG_BYTES:
             logger.info("event=adaptive_crop_fallback reason=jpeg_too_short region=%s", region)
             return None
@@ -1584,7 +1587,8 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         )
         return _AdaptiveResult(video_b64, media_info, ref_jpeg)
     except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理
-        logger.warning("event=adaptive_crop_fail 回退全景", exc_info=True)
+        # 统一 event 名(adaptive_crop_fallback),灰度期按单一 event grep 不漏异常回退
+        logger.warning("event=adaptive_crop_fallback reason=exception 回退全景", exc_info=True)
         return None
 
 
