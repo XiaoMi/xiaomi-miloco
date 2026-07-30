@@ -100,7 +100,9 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 
 **before_prompt_build Hook（`hooks/prompt.ts`，唯一一处）**
 
-每次 Agent turn 前按会话 profile（`resolveProfile` 分 full / rule / suggestion / minimal）装配系统上下文，分 prepend 指令块（人设 / 能力 / 感知格式 / 通知与输出约定）与 append 数据块（今日感知日志、待回应习惯建议、设备目录 catalog）两部分。今日感知日志由 `buildPerceptionLogBlock` 读工作区 `memory/<date>-miloco-perception.md`；家庭档案改由 agent 用 `home-profile list` 按需自取，不再注入。关键设计决策：isolated cron 走 minimal——剥掉家庭记忆等块与全部 append 数据，避免定时任务继承主 agent 人格。各块装配见 `hooks/prompt.ts`。
+每次 Agent turn 前按会话 profile（`resolveProfile` 分 full / rule / suggestion / minimal）装配系统上下文，分 prepend 指令块（身份与家庭能力 / 能力概览 / 感知格式 / 通知与输出约定）与 append 数据块（今日感知日志、待回应习惯建议、设备目录 catalog）两部分。今日感知日志由 `buildPerceptionLogBlock` 读工作区 `memory/<date>-miloco-perception.md`；家庭档案改由 agent 用 `home-profile list` 按需自取，不再注入。关键设计决策：isolated cron 走 minimal——剥掉家庭记忆等块与全部 append 数据，避免定时任务继承主 agent 人格。各块装配见 `hooks/prompt.ts`。
+
+**插件只赋能力、不赋身份（`B_IDENTITY`）**：本块逐轮 prepend 进宿主 agent 的系统上下文，早期写死「你是经验丰富的家庭智能管家 Miloco」，会盖掉宿主自己的人设——用户把 agent 设成"华人牌智能手机傻妞"，装上插件后再问"你是谁"就答成"家庭智能管家 Miloco"。现改为能力叙述 + 显式身份保全：名字 / 人设 / 语气一律沿用宿主既有设定。刻意不写「宿主没设身份就当管家」的兜底——那是宿主自己该管的事（openclaw 本就会引导用户去做身份设定），插件不该趁虚塞一个人格进去。Hermes 侧 `context_injection.B_IDENTITY` 与本块 1:1 同步（该文本还会进 `<system>` 消息，覆盖面更强）。
 
 **trace Hook**：监听 7 个 agent 生命周期事件，turn 结束后计算 meta（LLM 调用次数、工具调用次数、各类耗时、错误统计）；debug 模式下写 JSONL 到 `$MILOCO_HOME/trace/agent/`；在内存中保留 meta 供后端轮询后消费（幂等消费，消费后即清除）。
 
