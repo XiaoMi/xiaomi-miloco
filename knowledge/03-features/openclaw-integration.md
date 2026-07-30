@@ -104,9 +104,9 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 
 **插件只赋能力、不赋身份（`B_IDENTITY`）**：本块逐轮 prepend 进宿主 agent 的系统上下文，早期写死「你是经验丰富的家庭智能管家 Miloco」，会盖掉宿主自己的人设——用户把 agent 设成"华人牌智能手机傻妞"，装上插件后再问"你是谁"就答成"家庭智能管家 Miloco"。现改为能力叙述 + 显式身份保全：名字 / 人设 / 语气一律沿用宿主既有设定。刻意不写「宿主没设身份就当管家」的兜底——那是宿主自己该管的事（openclaw 本就会引导用户去做身份设定），插件不该趁虚塞一个人格进去。Hermes 侧 `context_injection.B_IDENTITY` 与本块 1:1 同步（该文本还会进 `<system>` 消息，覆盖面更强）。
 
-这条不变量对**后端发给 agent 的事件正文**、以及**会在宿主会话里加载的 skill 正文**同样成立：它们与 `B_IDENTITY` 同一轮进上下文，若要求 agent 对用户自称 miloco / 写死"你是 X"，就是两条硬指令打架——要么顶掉宿主人设（等于这条路径上白修），要么模型服从 `B_IDENTITY` 而让该文本自己的要求静默落空、且无任何日志可查。故 `welcome_service._format_message`（新设备接入播报，`bind` 事件固定路由到 `agent:main:miloco` 的 full 会话）、`onboarding_trigger._INSTRUCTION`（首装邀请）与 `miloco-habit-suggest/SKILL.md`（路径 B 由用户 IM 回应触发，在真实对话里加载）里让 agent 转述给用户的部分一律用不指名的第一人称。
+这条不变量对**后端发给 agent 的事件正文**、以及**会在宿主会话里加载的 skill 正文**同样成立：它们与 `B_IDENTITY` 同一轮进上下文，若要求 agent 对用户自称 miloco / 写死"你是 X"，就是两条硬指令打架——要么顶掉宿主人设（等于这条路径上白修），要么模型服从 `B_IDENTITY` 而让该文本自己的要求静默落空、且无任何日志可查。故 `welcome_service._format_message`（新设备接入播报，`bind` 事件固定路由到 `agent:main:miloco` 的 full 会话）、`onboarding_trigger._INSTRUCTION`（首装邀请）、`miloco-habit-suggest/SKILL.md`（路径 B 由用户 IM 回应触发，在真实对话里加载）与 `miloco-onboarding/SKILL.md` 的示范对话（首邀被接受后加载，示范里的开场白会被 agent 直接照抄）里让 agent 转述给用户的部分一律用不指名的第一人称——**既不写死「你是 X」，也不在话术里自称 miloco**。
 
-**豁免判据是「能否在带宿主人设的会话里被加载」，不是「是不是 skill 文件」**：`miloco-home-patrol` / `miloco-perception-digest` 只在各自 cron 任务里激活（frontmatter 写明"仅由该任务调用"、正文引言写明"不单独使用"），isolated cron 会话本就没有宿主人设可顶，故保留 `你是这个家的……` 原样。新增此类文本时按此判据办理；该判据有门禁：`plugins/openclaw/tests/skill-identity.test.ts` 扫 `plugins/skills/**/*.md`，禁止行首「你是……」式断言，豁免名单同时要求名单项自己仍声明是 cron-only（豁免不能悄悄过期）。
+**豁免判据是「能否在带宿主人设的会话里被加载」，不是「是不是 skill 文件」**：`miloco-home-patrol` / `miloco-perception-digest` 只在各自 cron 任务里激活（frontmatter 写明"仅由该任务调用"、正文引言写明"不单独使用"），isolated cron 会话本就没有宿主人设可顶，故保留 `你是这个家的……` 原样。新增此类文本时按此判据办理；该判据有门禁：`plugins/openclaw/tests/skill-identity.test.ts` 扫 `plugins/skills/**/*.md`，禁止行首「你是……」式断言与整行的「我是 / 我叫 miloco（或管家）」式自称两种形状，豁免名单同时要求名单项自己仍声明是 cron-only（豁免不能悄悄过期）。
 
 miloco 字样在两种位置仍要保留，不是无差别清洗：**指代系统本身**（"检测到 miloco 已完成米家授权"）与**工具 / skill 名**（`miloco-notify`、`miloco-cli`）——要清的只是 agent 对用户的自称。
 
