@@ -188,29 +188,36 @@ class EventsService:
         path = get_snapshot_root() / event_id / _TRACE_FILENAME
         if not path.exists():
             return ("gone", None)
+        # 遍历也包在 try 里:trace 损坏不止"crop 数组半截"一种形态,calls 本身可能不是 list
+        # (`reversed(123)` → TypeError)、元素可能不是 dict(`call.get` → AttributeError).
+        # 这些若漏在 try 外就会冒成 500,把上面 docstring 承诺的「一律折成 410」打穿.
         try:
             with gzip.open(path, "rt", encoding="utf-8") as f:
                 trace = json.load(f)
             calls = trace.get("calls") or []
+            if not isinstance(calls, list):
+                raise TypeError(f"calls is {type(calls).__name__}, expected list")
+            for call in reversed(calls):
+                if not isinstance(call, dict):
+                    continue  # 坏元素跳过即可,别让整个事件的画框都拿不到
+                if call.get("device_id") != device_id:
+                    continue
+                crop = call.get("crop")
+                if not crop:
+                    continue
+                try:
+                    return ("found", EventCropMeta(**crop))
+                except (TypeError, ValidationError) as e:
+                    logger.warning(
+                        "read_crop_meta bad crop meta event_id=%s device_id=%s: %s",
+                        event_id,
+                        device_id,
+                        e,
+                    )
+                    return ("gone", None)
         except Exception as e:  # noqa: BLE001
             logger.warning("read_crop_meta failed to parse trace %s: %s", path, e)
             return ("gone", None)
-        for call in reversed(calls):
-            if call.get("device_id") != device_id:
-                continue
-            crop = call.get("crop")
-            if not crop:
-                continue
-            try:
-                return ("found", EventCropMeta(**crop))
-            except (TypeError, ValidationError) as e:
-                logger.warning(
-                    "read_crop_meta bad crop meta event_id=%s device_id=%s: %s",
-                    event_id,
-                    device_id,
-                    e,
-                )
-                return ("gone", None)
         return ("gone", None)
 
     @staticmethod

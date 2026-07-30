@@ -21,13 +21,19 @@ def _black(h=300, w=300):
     return np.zeros((h, w, 3), dtype=np.uint8)
 
 
-def _target(boxes: dict[str, tuple[int, int, int, int]]) -> IdentityTarget:
+def _target(
+    boxes: dict[str, tuple[int, int, int, int]],
+    *,
+    person_id: str = "p",
+    no_person: bool = False,
+) -> IdentityTarget:
     return IdentityTarget(
         type=ObjectType.HUMAN_BODY,
-        person_id="p",
+        person_id=person_id,
         track_id=1,
         needs_omni_verify=False,
         box_info=[TrackingBoxInfo(frame_index=0, boxes=boxes)],
+        no_person=no_person,
     )
 
 
@@ -91,6 +97,29 @@ class TestCropRegion:
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)] * 2
         assert _body_boxes([_target({"human_face": (10, 10, 20, 20)})]) == []
         assert compute_crop_region([_target({"human_face": (10, 10, 20, 20)})], frames, CFG) is None
+
+    def test_no_person_box_excluded(self):
+        # 已落定 no_person 的静物误检框不进并集(否则位置固定的误检会把区域撑过面积上限,
+        # 让整个房间永久回退全景)。
+        t = _target({"human_body": (10, 10, 20, 20)}, person_id="none", no_person=True)
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)] * 2
+        assert _body_boxes([t]) == []
+        assert compute_crop_region([t], frames, CFG) is None
+
+    def test_unrecognized_person_box_kept(self):
+        # person_id == "none" 但**不是** no_person(有人、只是没识别出身份)→ 框照常参与,
+        # 证明排除的是状态位而非 "none" 这个渲染值(陌生人不能被一起排掉)。
+        t = _target({"human_body": (10, 10, 20, 20)}, person_id="none")
+        assert _body_boxes([t]) == [(10, 10, 30, 30)]
+
+    def test_no_person_does_not_hide_real_target(self):
+        # 一真一误检:并集只按真人框算,与单独给真人框的结果一致。
+        real = _target({"human_body": (10, 10, 20, 20)})
+        ghost = _target({"human_body": (80, 80, 15, 15)}, person_id="none", no_person=True)
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        assert compute_crop_region([real, ghost], frames, CFG) == compute_crop_region(
+            [real], frames, CFG
+        )
 
     def test_no_boxes_no_motion_none(self):
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)] * 2
@@ -159,3 +188,111 @@ class TestCropFrames:
         out = crop_frames(frames, (0, 0, 10, 10))
         out[0][:] = 255
         assert frames[0].sum() == 0  # 原帧不受影响
+
+
+# ---------------- crop_enhance_config_from_settings ----------------
+
+class TestConfigFromSettings:
+    """yaml 键名 ↔ dataclass 字段的契约锚点。
+
+    这是生产里唯一读 `perception.engine.crop_enhance` 的地方,也是
+    「settings.yaml 键名 ↔ CropEnhanceConfig 字段 ↔ admin 写入路径」三方的唯一交汇点:
+    整个能力开不开全压在它身上。此前测试都绕开了它(算法测试直接构 cfg、
+    prompt_builder 测试把它整个 patch 掉、admin 测试只走读写不走这里),
+    结果是把 yaml 里的 `crop_enhance:` 改个名字全套测试仍全绿,而生产静默 dark。
+    """
+
+    @staticmethod
+    def _with_engine_config(tmp_path, monkeypatch, crop_enhance: dict) -> None:
+        import json
+
+        from miloco.config.settings import reset_settings
+
+        monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+        monkeypatch.delenv("MILOCO_DIRECTORIES__STORAGE", raising=False)
+        (tmp_path / "config.json").write_text(
+            json.dumps({"perception": {"engine": {"crop_enhance": crop_enhance}}}),
+            encoding="utf-8",
+        )
+        reset_settings()
+
+    def test_reads_both_gates_and_ratios(self, tmp_path, monkeypatch):
+        from miloco.config.settings import reset_settings
+        from miloco.perception.engine.omni.crop_enhance import (
+            crop_enhance_config_from_settings,
+        )
+
+        self._with_engine_config(
+            tmp_path,
+            monkeypatch,
+            {"enabled": True, "user_enabled": True, "expand_ratio_h": 0.25},
+        )
+        try:
+            cfg = crop_enhance_config_from_settings()
+            assert cfg.enabled is True
+            assert cfg.user_enabled is True
+            assert cfg.expand_ratio_h == 0.25
+            # 未给的键仍取默认
+            assert cfg.crop_short_edge == CropEnhanceConfig().crop_short_edge
+        finally:
+            reset_settings()
+
+    def test_unknown_key_ignored_not_raised(self, tmp_path, monkeypatch):
+        """schema 演进 / 手写错键不该让整块配置作废(只过滤该键)。"""
+        from miloco.config.settings import reset_settings
+        from miloco.perception.engine.omni.crop_enhance import (
+            crop_enhance_config_from_settings,
+        )
+
+        self._with_engine_config(
+            tmp_path, monkeypatch, {"enabled": True, "no_such_key": 1}
+        )
+        try:
+            assert crop_enhance_config_from_settings().enabled is True
+        finally:
+            reset_settings()
+
+    def test_missing_block_falls_back_to_disabled(self, tmp_path, monkeypatch):
+        """整块缺失(老配置)→ 默认全默认值,即双闸皆关:失效方向是「不裁」而非「乱裁」。"""
+        import json
+
+        from miloco.config.settings import reset_settings
+        from miloco.perception.engine.omni.crop_enhance import (
+            crop_enhance_config_from_settings,
+        )
+
+        monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+        monkeypatch.delenv("MILOCO_DIRECTORIES__STORAGE", raising=False)
+        (tmp_path / "config.json").write_text(
+            json.dumps({"perception": {"engine": {"input": {"omni_fps": 1}}}}),
+            encoding="utf-8",
+        )
+        reset_settings()
+        try:
+            cfg = crop_enhance_config_from_settings()
+            assert cfg.enabled is False
+            assert cfg.user_enabled is False
+        finally:
+            reset_settings()
+
+    def test_shipped_settings_yaml_keys_match_dataclass(self):
+        """随包 settings.yaml 里 crop_enhance 的每个键都必须是 dataclass 字段。
+
+        否则运维照着 yaml 改参数,值被 __dataclass_fields__ 过滤掉、静默不生效。
+        """
+        from pathlib import Path
+
+        import yaml
+
+        import miloco
+
+        raw = yaml.safe_load(
+            (Path(miloco.__file__).parent / "config" / "settings.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        block = raw["perception"]["engine"]["crop_enhance"]
+        unknown = set(block) - set(CropEnhanceConfig.__dataclass_fields__)
+        assert not unknown, f"settings.yaml 里这些键不会被读到: {unknown}"
+        assert block["enabled"] is False  # ops 灰度闸默认压死
+        assert block["user_enabled"] is False

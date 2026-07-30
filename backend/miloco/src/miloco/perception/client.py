@@ -905,8 +905,9 @@ async def _persist_meaningful_event(
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
       3. INSERT meaningful_events(snapshot_count=0)
-      4. 落盘 artifacts(clip + omni_trace,写前预检磁盘 < snapshot_min_free_disk_mb 跳过)→
-         update_snapshot_count(成功 device 数,trace 不计入)
+      4. 落盘 artifacts(clip + omni_trace + gallery + Smart Crop 参考帧 ref.jpg,
+         写前预检磁盘 < snapshot_min_free_disk_mb 跳过)→
+         update_snapshot_count(成功 clip 的 device 数;trace / gallery / ref 均不计入)
       5. _publish_meaningful_event(B13:metadata-only 也推 SSE)
 
     clip 字节是 omni 内部 push 出来的字节级 mp4(零重编),video 路径 H264+AAC,

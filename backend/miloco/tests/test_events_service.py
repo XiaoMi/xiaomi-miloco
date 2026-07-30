@@ -342,7 +342,8 @@ class TestReadCropMeta:
     """
 
     @staticmethod
-    def _save_trace(eid: str, calls: list[dict]) -> None:
+    def _save_trace(eid: str, calls: object) -> None:
+        """落一份 omni_trace.用 object 而非 list[dict]:损坏形态用例要能塞进非 list 的 calls."""
         from miloco.perception.snapshot_context import OmniEventArtifacts
         from miloco.perception.snapshot_writer import save_event_artifacts
 
@@ -456,6 +457,46 @@ class TestReadCropMeta:
         status, crop = await svc.read_crop_meta(eid, "cam_a")
         assert status == "gone"
         assert crop is None
+
+    @pytest.mark.parametrize(
+        "calls",
+        [None, 123, "abc", [None], ["garbage"], [[1, 2]], [{"device_id": "cam_a"}, 7]],
+        ids=[
+            "calls-none",
+            "calls-int",
+            "calls-str",
+            "element-none",
+            "element-str",
+            "element-list",
+            "element-int-after-good",
+        ],
+    )
+    async def test_malformed_calls_container_returns_gone(self, svc, dao, calls):
+        """calls 本身或其元素形状不对也要折成 gone —— 不只有 crop 数组半截一种损坏形态.
+
+        `reversed(123)` 抛 TypeError、`call.get` 在非 dict 上抛 AttributeError,
+        这些若漏在 try 外就会变成 500,与「拿不到就 410」的契约冲突.
+        """
+        eid = _insert(dao, device_ids=["cam_a"])
+        self._save_trace(eid, calls)
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "gone"
+        assert crop is None
+
+    async def test_bad_element_does_not_hide_later_good_call(self, svc, dao):
+        """坏元素只跳过,不该把同一 trace 里合法的那条 crop 一起废掉."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        good = {
+            "region_xyxy": [10, 20, 110, 140],
+            "frame_size_wh": [640, 360],
+            "crop_short_edge": 360,
+        }
+        # 坏元素放末尾:reversed 先撞上它,再取到合法的那条
+        self._save_trace(eid, [{"device_id": "cam_a", "crop": good}, None])
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "found"
+        assert crop is not None
+        assert crop.region_xyxy == [10, 20, 110, 140]
 
     async def test_corrupt_trace_returns_gone_not_raise(self, svc, dao):
         """trace 不是合法 gzip/JSON → gone,不抛 500(画框是装饰,不该拖垮参考卡)."""

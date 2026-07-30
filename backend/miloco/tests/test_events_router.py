@@ -348,6 +348,18 @@ class TestGetCropMetaEndpoint:
         resp = client.get(f"/api/events/{eid}/crop/cam_living_01")
         assert resp.status_code == 410
 
+    def test_calls_not_a_list_410_not_500(self, client, dao):
+        """trace 损坏不止一种形态:calls 不是 list 时也必须 410,不能让 TypeError 冒成 500."""
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        save_event_artifacts(
+            eid, OmniEventArtifacts(trace={"schema_version": 1, "calls": 123})
+        )
+        resp = client.get(f"/api/events/{eid}/crop/cam_living_01")
+        assert resp.status_code == 410
+
     def test_found_returns_region(self, client, dao):
         eid = _insert(dao, device_ids=["cam_living_01"])
         self._save_trace(

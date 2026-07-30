@@ -16,7 +16,7 @@
 - `region_slug(s)` — URL-safe 化 device_id / 区域名
 - `get_snapshot_root()` — 优先 settings.perception.snapshot_root,fallback DirectorySettings.snapshot_dir
 - `check_disk_space(root, min_free_mb)` — 写前预检(B6a)
-- `save_event_artifacts(event_id, artifacts)` — 落盘核心(clip + trace 一次完成)
+- `save_event_artifacts(event_id, artifacts)` — 落盘核心(clip + trace + gallery + 参考帧一次完成)
 - `cleanup_snapshots(ttl_days, max_disk_mb)` — 24h cleanup loop 调用(目录结构不变,
   老 jpeg 路径下的事件也能正常按 mtime 清理)
 """

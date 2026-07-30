@@ -96,9 +96,17 @@ def _body_boxes(targets: list[IdentityTarget]) -> list[Region]:
     """从 targets 取主体检测框(human_body / pet_body 末帧),xywh → xyxy,排除 face。
 
     用像素 box_info(与 all_frames 同像素空间),不用 bbox_xyxy_norm(有损、coasting/引擎关时 None)。
+
+    跳过已落定 no_person 的 track:这些是检测器把静物(衣帽架 / 落地灯)误报成人体、
+    已被身份侧投票压掉的框。裁切区域是**并集**,一个位置固定的误检就能把区域撑过
+    crop_max_area_ratio 上限,让整个房间的 Smart Crop 永久回退全景,而日志只说
+    "面积超限"、看不出根因。不能用 `person_id == "none"` 代替 —— no_person 与
+    "有人但没识别出身份"都渲染成 "none"(state.get_face_id_value),那样会把陌生人一起排掉。
     """
     boxes: list[Region] = []
     for t in targets:
+        if t.no_person:
+            continue
         if not t.box_info:
             continue
         last = t.box_info[-1]

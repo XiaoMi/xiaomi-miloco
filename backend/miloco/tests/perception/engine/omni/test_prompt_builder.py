@@ -1590,6 +1590,29 @@ class TestAdaptiveResolution:
         assert ref_bytes == encode_jpeg_bytes(_resize_short_edge(frames[-1], 256))
         assert ref_bytes != encode_jpeg_bytes(frames[-1])  # 旧行为(硬编码 512 → 不缩)已改
 
+    def test_pushes_crop_meta_with_wh_order(self):
+        """写侧 frame_size 必须是 (w, h)。
+
+        numpy shape 是 (h, w),这里最容易写反;而读侧 `frame_size_wh` 直接被前端当
+        svg viewBox 用 —— 传成 (h, w) 时框还在、只是位置和缩放整体错位,是最难靠肉眼
+        发现的那类 bug。写侧此前完全没有断言,顺序写反全套测试仍全绿。
+        """
+        seen: dict = {}
+        frames = [np.zeros((360, 640, 3), dtype=np.uint8) for _ in range(3)]
+        pkt = _adaptive_packet(frames=frames)  # 360 高 × 640 宽,非正方形才能验出顺序
+        p1, p2 = self._patches()
+        with p1, p2, patch(
+            "miloco.perception.snapshot_context.push_crop_meta",
+            side_effect=lambda **kw: seen.update(kw),
+        ):
+            self._content(packet=pkt, candidates=[])
+        assert seen, "crop 生效时必须 push 一次 crop 元数据"
+        assert seen["frame_size"] == (640, 360)  # (w, h) 而非 shape 的 (360, 640)
+        x1, y1, x2, y2 = seen["region"]
+        assert 0 <= x1 < x2 <= 640
+        assert 0 <= y1 < y2 <= 360
+        assert seen["short_edge"] > 0
+
     def test_crop_short_edge_budget_scales_with_resolution(self):
         # crop 短边预算 = 分辨率档 × 360/512(用户档的 70%),保住「像素开销 ≈ 同档全景」不变量;
         # 512 档必须精确落回 360,与本特性接入前的评测口径字节一致。
