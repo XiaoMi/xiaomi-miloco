@@ -130,6 +130,62 @@ async def test_early_matched_rules_meta_passed_to_update_state(proxy):
     assert seen == [{"trigger_room": "客厅", "trigger_dids": ["cam-001"], "caption": "", "device_name": "小米摄像机"}]
 
 
+async def test_early_send_registers_pair_even_if_update_state_raises(proxy):
+    """早送登记必须无条件、排在 update_state 之前（守住 _on_early_matched_rules 那条 invariant）。
+
+    early_sent_rule_ids 除了去重，还兼职「抑制终态推退」——pair 并进 matched_pairs 后，
+    终态「未命中喂 False」循环才会放过它。若 update_state 抛异常（生产上 = on_target 规则
+    _schedule_target_timer_if_needed 里那处裸 DB 读，被 pipeline 整窗保护
+    吞掉）时 pair 漏登记，那条循环就会给刚 ENTER 真 fire 的 source 喂一帧 False、置起
+    pending_exit、白吃掉单帧抗抖预算（下次真离开只需一帧就确认 EXIT）。这条 invariant 曾被
+    「把登记挪到 update_state 之后」这一个改动静默破坏一整轮而全量测试无感——本用例就是针对
+    那种改法的哨兵：把 _on_early_matched_rules 里 `early_sent_rule_ids[...] = None` 那行删掉
+    或挪到 await 之后，本用例应转红。
+    """
+    main_loop = asyncio.get_running_loop()
+
+    async def engine_realtime(*args, **kwargs):
+        # 模拟 pipeline 整窗保护：吞掉单相机异常，本窗照常返回
+        try:
+            await kwargs["on_early_matched_rules"]([
+                MatchedRule(rule_id="r1", reason="x",
+                            source_device_ids=["cam-001"])
+            ])
+        except Exception:
+            pass
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    async def boom(*a, **k):
+        raise RuntimeError("read_duration_target_state boom")
+
+    fake_mgr = MagicMock()
+    fake_mgr.rule_service.update_state = boom
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-infer")
+    try:
+        with patch("miloco.manager.get_manager", return_value=fake_mgr):
+            _, _, early_sent_rule_ids, _ = await main_loop.run_in_executor(
+                executor,
+                lambda: asyncio.run(
+                    proxy._realtime_perceive_impl(
+                        _stub_snapshot(), [], 0, 0.0, main_loop, [],
+                    )
+                ),
+            )
+    finally:
+        executor.shutdown(wait=True)
+
+    assert ("r1", "cam-001") in early_sent_rule_ids, (
+        "早送 update_state 抛异常后 pair 漏登记：终态未命中循环会给刚 ENTER 的 source "
+        "喂一帧 False、白吃单帧抗抖预算（见 _on_early_matched_rules 注释）"
+    )
+    # value 停在 None（异常前占位、update_state 抛异常没写回结论）→ 该 rule 记入
+    # incomplete_rule_ids、展示层标「未知」，不回落旧值
+    assert early_sent_rule_ids[("r1", "cam-001")] is None
+
+
 async def test_final_matched_rules_meta_passed_to_update_state(proxy):
     """全量路径（handle_realtime_perception_result）：meta 同样透传。"""
     seen: list[dict] = []
