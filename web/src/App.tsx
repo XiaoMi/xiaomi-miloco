@@ -2,7 +2,7 @@
  * 主框架：左 Sidebar + 主区按 tab 切换。mobile 下 Sidebar 折叠为底部 nav。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   getHomeStatus,
   listActivity,
@@ -154,6 +154,10 @@ function MainApp() {
   const onDemandLogs = useAsync(() => listOnDemandLogs(homeId), [homeId], {
     errorLabel: t("app.loadOnDemandLogsFail", "Failed to load on-demand logs"),
   });
+  const deviceNames = useMemo(
+    () => Object.fromEntries((devices.data ?? []).map((d) => [d.did, d.name])),
+    [devices.data],
+  );
   // 家庭档案（候选区 + 正式区记忆）——家庭 tab 用，成员抽屉与非人面板共享。
   const home = useAsync(() => listHomeEntries(homeId), [homeId], {
     errorLabel: t("app.loadHomeEntriesFail"),
@@ -406,9 +410,7 @@ function MainApp() {
               onDemandLoading={onDemandLogs.loading}
               onDemandError={onDemandLogs.error}
               onRetryOnDemand={() => onDemandLogs.reload()}
-              deviceNames={Object.fromEntries(
-                (devices.data ?? []).map((d) => [d.did, d.name]),
-              )}
+              deviceNames={deviceNames}
             />
           </div>
         );
