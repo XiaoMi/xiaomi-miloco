@@ -33,6 +33,10 @@ router = APIRouter(prefix="/identity", tags=["Pet"])
 
 _PET_ID_RE = re.compile(r"^pet_[0-9a-f]{12}\Z")  # \Z 而非 $：与 person 一致，禁尾随换行 id
 _MAX_REF_CROPS = 3  # 参考图上传张数上限（与 pet_library._MAX_REF_CROPS 同口径）
+# observe 收的是**未裁剪原图 / 原视频**（非头像那种客户端裁好的 20-50KB 产物），故不复用
+# _avatar.AVATAR_MAX_BYTES：高像素手机照可达 10-25MB，卡 5MB 会误拒真实照片。
+_OBSERVE_IMAGE_MAX_BYTES = 15 * 1024 * 1024  # 单张图上限
+_OBSERVE_VIDEO_MAX_BYTES = 100 * 1024 * 1024  # 视频上限（≤15s 4K 手机片仍放过，拦「传整部电影」）
 
 
 class PetCreate(BaseModel):
@@ -51,8 +55,10 @@ def _require_pet_id(pet_id: str) -> None:
 
 
 def _require_pet_enabled() -> None:
-    # 总开关关闭时，宠物「注册」链路整体不可用（建花名册 / 头像 / 参考图 / observe）——
-    # 与 observe 端点同门控；纯家庭事实由 miloco-home-profile 走 subject_id 留空记录。
+    # 总开关关闭时，宠物「注册」链路整体不可用（建花名册 / 头像 / 参考图 / observe）；
+    # 纯家庭事实由 miloco-home-profile 走 subject_id 留空记录。
+    # 门控口径（**刻意**）：只卡「新增 / 写入注册数据」。读取（list / get / 头像 / 参考图）
+    # 与存量管理（update / delete）不门控——关掉开关后仍要能查看、改名、删除已录宠物并联动清档案。
     if not get_settings().features.pet_recognition:
         raise HTTPException(status_code=404, detail="pet recognition 未启用")
 
@@ -84,17 +90,16 @@ async def observe_pet_media(
     总开关 ``pet_recognition`` 关闭时该端点不可用；``grounding`` 缺省取
     ``features.pet_head_grounding``。**向后兼容**：单个走 ``media``、多图走 ``medias``，两者取其一。
     """
-    from miloco.pet.observe import observe_pet
+    from miloco.pet.observe import OmniDescribeError, observe_pet
 
     settings = get_settings()
-    if not settings.features.pet_recognition:
-        raise HTTPException(status_code=404, detail="pet recognition 未启用")
+    _require_pet_enabled()
     # 多图优先走 medias；两者都传时 medias 胜（单个 media 仅为旧前端兼容）。
     uploads = [u for u in (medias or []) if u is not None] or ([media] if media else [])
     if not uploads:
         raise HTTPException(status_code=400, detail="no media")
-    # 先按头部（content_type/filename）判形，超量/混传在**读盘前**就拒，
-    # 避免把将被 400 的超量请求整批读进内存（multipart 最多 1000 个文件片，无单片大小上限）。
+    # 先按头部（content_type/filename）判形，超量 / 混传 / 超大在**读盘前**就拒，
+    # 避免把将被 400 的请求整批读进内存（multipart 最多 1000 个文件片，无单片大小上限）。
     any_video = any(_is_video_upload(u) for u in uploads)
     if any_video:
         if len(uploads) != 1:
@@ -104,9 +109,17 @@ async def observe_pet_media(
         if len(uploads) > 3:
             raise HTTPException(status_code=400, detail="最多 3 张图片")
         is_video = False
+    # 体积闸（判形之后，图 / 视频各用各的阈值）：前置看 multipart 自带字节数，读后 len 兜底
+    # （size 缺失时），同 avatar / reference-crops 口径。
+    cap = _OBSERVE_VIDEO_MAX_BYTES if is_video else _OBSERVE_IMAGE_MAX_BYTES
+    too_big = "视频过大（上限 100 MB）" if is_video else "图片过大（单张上限 15 MB）"
+    if any(u.size is not None and u.size > cap for u in uploads):
+        raise HTTPException(status_code=400, detail=too_big)
     raws: list[bytes] = []
     for u in uploads:
         raw = await u.read()
+        if len(raw) > cap:  # size 缺失时兜底
+            raise HTTPException(status_code=400, detail=too_big)
         if not raw:
             raise HTTPException(status_code=400, detail="empty file")
         raws.append(raw)
@@ -114,12 +127,15 @@ async def observe_pet_media(
         settings.features.pet_head_grounding if grounding is None else grounding
     )
     # body_grounding（D7）仅影响回退路径（框不到猫狗时裁本体作参考图），取 feature 开关。
-    result = await observe_pet(
-        raws,
-        is_video=is_video,
-        grounding=use_grounding,
-        body_grounding=settings.features.pet_body_grounding,
-    )
+    try:
+        result = await observe_pet(
+            raws,
+            is_video=is_video,
+            grounding=use_grounding,
+            body_grounding=settings.features.pet_body_grounding,
+        )
+    except OmniDescribeError as e:  # 模型没给可解析 JSON → 502 + 可读原因（前端直接展示）
+        raise HTTPException(status_code=502, detail=str(e)) from e
     return NormalResponse(code=0, message="OK", data=result)
 
 
@@ -156,6 +172,7 @@ async def get_pet(pet_id: str, current_user: str = Depends(verify_token)):
 async def update_pet(
     pet_id: str, body: PetUpdate, current_user: str = Depends(verify_token)
 ):
+    """改名 / 改物种。**不受总开关门控**：属存量管理，关掉 pet_recognition 后仍允许整理已录数据。"""
     _require_pet_id(pet_id)
     try:
         pet = get_pet_library().update(pet_id, name=body.name, species=body.species)
@@ -170,6 +187,7 @@ async def update_pet(
 
 @router.delete("/pets/{pet_id}", summary="Delete Pet", response_model=NormalResponse)
 async def delete_pet(pet_id: str, current_user: str = Depends(verify_token)):
+    """删除宠物并联动清理家庭档案绑定。**不受总开关门控**：关掉 pet_recognition 后正是要能清存量。"""
     _require_pet_id(pet_id)
     removed = get_pet_library().delete(pet_id)
     # 联动清理家庭档案中绑定该宠物的条目；用 managed service（含 person_service），

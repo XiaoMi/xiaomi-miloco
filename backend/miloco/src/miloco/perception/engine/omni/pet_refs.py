@@ -28,6 +28,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from miloco.config.settings import register_reset_hook
 from miloco.perception.engine.identity.gallery_composite import hstack_to_height
 
 logger = logging.getLogger(__name__)
@@ -150,3 +151,15 @@ def build_pet_reference_content(max_pets: int = 3) -> list[dict]:
     except Exception:  # noqa: BLE001 — 逐帧热路径：任何失败退纯文字，绝不抛
         logger.warning("event=pet_refs_build_fail", exc_info=True)
         return []
+
+
+def _reset_cache() -> None:
+    """清参考图缓存（**原地 mutate**，别 rebind：测试替身 dict 也要能被清）。"""
+    _cache["sig"] = None
+    _cache["content"] = []
+
+
+# settings 重载（bootstrap 改 library_root / 测试）时清：签名只含文件名 + stat、**不含库根**，
+# 换根后同名同 stat 的库拷贝（cp -p / rsync -a）会假命中并继续注入旧 composite。
+# 与 pet_library.get_pet_library 同惯例。
+register_reset_hook("pet_refs.build_pet_reference_content", _reset_cache)

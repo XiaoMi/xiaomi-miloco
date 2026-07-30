@@ -425,3 +425,58 @@ def test_reference_crops_oversized_400(client):
     pet = _create(client)
     big = b"\x00" * (5 * 1024 * 1024 + 1)
     assert _upload_refs(client, pet["id"], [big], [1]).status_code == 400
+
+
+# ── observe 端点：单文件体积闸（图 / 视频各用各的阈值）+ 模型输出不可解析 → 502 ──────
+
+def test_observe_image_oversized_400(client, monkeypatch):
+    # 单张图 > 15MB → 400，且**读盘前**就拒（observe_pet 不该被调用）
+    called = []
+    monkeypatch.setattr(
+        "miloco.pet.observe.observe_pet", lambda *a, **k: called.append(1)
+    )
+    big = b"\x00" * (15 * 1024 * 1024 + 1)
+    r = client.post(
+        "/api/identity/pets:observe", files={"media": ("c.jpg", big, "image/jpeg")}
+    )
+    assert r.status_code == 400
+    assert called == []
+
+
+def test_observe_video_oversized_400(client, monkeypatch):
+    # 视频走独立阈值：把上限调小再传超过它的包 → 400（不真造 100MB body）
+    monkeypatch.setattr("miloco.pet.router._OBSERVE_VIDEO_MAX_BYTES", 1024)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files={"media": ("v.mp4", b"\x00" * 2048, "video/mp4")},
+    )
+    assert r.status_code == 400
+
+
+def test_observe_video_not_capped_by_image_limit(client, monkeypatch):
+    # 守住「闸门在判形之后」：6MB 视频 > 图片阈值但 < 视频阈值 → 不被误杀
+    monkeypatch.setattr("miloco.pet.router._OBSERVE_IMAGE_MAX_BYTES", 1024)
+    holder = _stub_observe_capture(monkeypatch)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files={"media": ("v.mp4", b"\x00" * 4096, "video/mp4")},
+    )
+    assert r.status_code == 200, r.text
+    assert holder["is_video"] is True
+
+
+def test_observe_unparsable_model_output_502(client, monkeypatch):
+    # 模型没给可解析 JSON → OmniDescribeError → 502 + 可读原因（前端直接展示 message）
+    from miloco.pet.observe import OmniDescribeError
+
+    async def _boom(*a, **k):
+        raise OmniDescribeError("模型未返回可解析的外观描述，请重试")
+
+    monkeypatch.setattr("miloco.pet.observe.observe_pet", _boom)
+    r = client.post(
+        "/api/identity/pets:observe", files={"media": ("c.jpg", b"x", "image/jpeg")}
+    )
+    assert r.status_code == 502
+    body = r.json()
+    # 生产经全局 exception_handler 落在 message；裸 FastAPI（本测试 app）落在 detail
+    assert "外观描述" in (body.get("message") or body.get("detail") or "")

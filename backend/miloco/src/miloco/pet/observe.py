@@ -50,6 +50,14 @@ from miloco.perception.engine.omni.omni_client import (
 
 logger = logging.getLogger(__name__)
 
+
+class OmniDescribeError(RuntimeError):
+    """omni 未返回可解析的 JSON 对象（拒答 / 被 max tokens 截断 / 顶层非对象）。
+
+    由路由层转 502 + 可读原因；**不静默降级成空描述**——描述是本端点唯一产物，
+    降级会让主路径返回"检出但无描述"、回退路径谎报"画面无动物"。
+    """
+
 _PET_CLASS_IDS = (Detection.CLASS_CAT, Detection.CLASS_DOG)
 _SPECIES_BY_CLASS = {Detection.CLASS_CAT: "猫", Detection.CLASS_DOG: "狗"}
 _PADDING_RATIO = 0.05
@@ -267,6 +275,10 @@ def _reid_diverse_topk(
 def _gate_select(cands: list[dict]) -> list[dict]:
     """主体 track 候选池 → 硬排除 → 加权分 → dHash 多样性 → 同一只的 ≤3 张多姿态。
 
+    **入参契约（唯一调用点 ``_select_video_crops``）**：仅接视频 track 池候选——必带
+    ``size_ok`` / ``crowded`` 且 ``conf`` 非 None。单图候选（``_largest_pet_crop``，尺寸与
+    拥挤门已在其内部判掉）与 D7 回退候选（``conf=None``）**不进本函数**，勿改调用点。
+
     决策4：硬排除后为空 → 返回 ``[]``（退纯描述），**绝不放宽**（勿抄 eval 的 pool=ok or raw）。
     """
     ok = [
@@ -296,18 +308,22 @@ def _gate_select(cands: list[dict]) -> list[dict]:
     return _dhash_diverse_topk(ok, _MAX_SELECT)
 
 
-def _largest_pet_crop(frame: np.ndarray, detector: Any) -> dict | None:
+def _largest_pet_crop_with_count(
+    frame: np.ndarray, detector: Any
+) -> tuple[dict | None, int]:
     """单图：取面积最大的 CAT/DOG 框、扩边 5% 裁出，过单图硬门槛。
 
-    返回候选 dict（含 P0 质量分 + ``crowded``）或 ``None``（无宠 / 裁空 / 硬门槛未过 → 退回整幅描述）。
+    返回 ``(候选 dict | None, 本图同帧宠物检测数)``——第二项与视频侧 ``n_coincident`` 同口径
+    （判 multiple_pets 用）；**即便本图被硬门槛全灭（返 None）只数也照实回传**，否则"画面里
+    不止一只"的提示会静默丢（决策 D8，同视频回退分支透传 n_coincident 的理由）。
     """
     dets = [d for d in detector.detect_pets(frame) if d.class_id in _PET_CLASS_IDS]
     if not dets:
-        return None
+        return None, 0
     best = max(dets, key=lambda d: d.w * d.h)
     crop = _crop_with_padding(frame, (best.x, best.y, best.w, best.h), _PADDING_RATIO)
     if crop is None or crop.size == 0:
-        return None
+        return None, len(dets)
     fh, fw = frame.shape[:2]
     area_ratio = float(best.w * best.h) / float(max(fw * fh, 1))
     crowded = _box_crowded(
@@ -315,7 +331,10 @@ def _largest_pet_crop(frame: np.ndarray, detector: Any) -> dict | None:
     )
     # A3 单图硬门槛：尺寸不够（短边/绝对面积/线性占比）或多只同框无法择一 → 退回整幅描述（不产参考 crop）
     if crowded or not _size_gate_ok(best.w, best.h, fw, fh):
-        return None
+        return None, len(dets)
+    # 单图**有意不设** PET_GATE_SHARP_MIN（那道绝对清晰度阈只服务视频 _gate_select「从几十帧里挑」）：
+    # 图是用户主动挑的、一次最多 3 张，糊也是他手上最好的素材；卡掉只会落到整幅回退，而回退的
+    # body crop（D7）同样不过清晰度门 → 白丢一张更贴身的 crop。sharpness 仍如实进 candidates 契约。
     return {
         "track_id": None,
         "class_id": best.class_id,
@@ -327,7 +346,12 @@ def _largest_pet_crop(frame: np.ndarray, detector: Any) -> dict | None:
         "bbox": (best.x, best.y, best.w, best.h),
         "frame_idx": None,  # 单图无帧序号
         "crowded": crowded,
-    }
+    }, len(dets)
+
+
+def _largest_pet_crop(frame: np.ndarray, detector: Any) -> dict | None:
+    """薄封装：只取候选（丢弃同帧只数，供直接测试 / 复用）。"""
+    return _largest_pet_crop_with_count(frame, detector)[0]
 
 
 def _select_video_crops(
@@ -463,7 +487,15 @@ async def _omni_describe(
     config = _omni_config_for(len(crops))
     raw = await call_omni(payload, config, type="on_demand")
     content = response_parser.parse_query_response(raw)
-    data = json.loads(response_parser.extract_json(content))
+    try:
+        data = json.loads(response_parser.extract_json(content))
+    except json.JSONDecodeError as e:
+        # 拒答 / 思考泄漏 / 被 max_completion_tokens 截断 → 非 JSON。%r 转义模型自由文本（防日志注入）
+        logger.warning("omni 外观描述返回非 JSON（截断/拒答）: %r", content[:200])
+        raise OmniDescribeError("模型未返回可解析的外观描述，请重试") from e
+    if not isinstance(data, dict):  # 顶层标量数组会让下面的 data.pop 抛 TypeError
+        logger.warning("omni 外观描述顶层非对象: %r", str(data)[:200])
+        raise OmniDescribeError("模型未返回可解析的外观描述，请重试")
     refs_inconsistent = (
         bool(data.pop("refs_inconsistent", False)) if multi else None
     )
@@ -683,12 +715,18 @@ async def observe_pet(
         fallback_frame = _sharpest_frame(sampled)
     else:  # 图 1~3 张，每张各取最大 crop 过单图硬门槛
         selected = []
+        n_coincident = 0
         for m in medias[:_MAX_SELECT]:
             img = cv2.imdecode(np.frombuffer(m, dtype=np.uint8), cv2.IMREAD_COLOR)
-            one = _largest_pet_crop(img, detector) if img is not None else None
+            one, n_in_frame = (
+                _largest_pet_crop_with_count(img, detector) if img is not None else (None, 0)
+            )
             if one is not None:
                 selected.append(one)
-        n_coincident = 0
+            # 取各图**最大值**而非求和：多图注册是「同一只多角度」，两张各一只不是两只；
+            # 只有单张图内 ≥2 只才算同帧共现（与视频 n_coincident 同口径）。跨图不同宠由
+            # refs_inconsistent 兜。
+            n_coincident = max(n_coincident, n_in_frame)
         fallback_frame = _first_decodable(medias)
 
     # 检测器框到并过门槛 → 一次性把 ≤3 张 crop 送 omni 出共性描述（主路径不做本体 grounding）

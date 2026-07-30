@@ -462,6 +462,8 @@ class HomeProfileService:
         # 成员改名 subject_name 纠偏（只取 name）；宠物旧数据（#298 留空 subject_id）按名收敛
         # 到 pet_id **仅 pet_recognition 开启时**执行——关闭时保持旧数据为普通家庭事实、不回溯
         # 归类成宠物（否则会被下方软关闭一并隐藏；回归 main 一直可见的行为，见 PR #460 review）。
+        # 已知碰撞（legacy 回填过渡，接受）：与宠物同名、subject_id 为空的**人类**成员条目也会被
+        # 写成 pet_id。
         pet_enabled = get_settings().features.pet_recognition
         for index in (profile.entries, candidates.entries):
             for e in index:

@@ -26,7 +26,7 @@ export function PetAvatar({ pet, size = 34 }: Props) {
     let objectUrl: string | null = null;
     (async () => {
       try {
-        const r = await fetch(`/api/identity/pets/${pet.id}/avatar`, {
+        const r = await fetch(`/api/identity/pets/${encodeURIComponent(pet.id)}/avatar`, {
           cache: "no-store",
           headers: authHeaders(),
         });

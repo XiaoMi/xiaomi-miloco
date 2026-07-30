@@ -103,8 +103,9 @@ class FusedPromptConfig:
     max_gallery_persons: int = 10
     # 宠物参考图上限（P2 / C-D1）：最多注入几只宠物（每只带其已存的 ≤3 张多姿态参考图）。
     # 家庭多 1-3 只覆盖 99%，仿人 gallery 上限保护；仅 has_pets（video route）时注入。
-    # ⚠️ token 预算：最坏 max_pet_refs×3 张 crop（3×3=9 张），每张 ~数 KB base64；上线前须按 A5
-    # 实测 prompt token/延迟涨幅（决策 C-D4），必要时下调本值或改每只只注入 top-scored 1-2 张。
+    # token 已实测（mimo-v2.5，composite 高 320px）：每只 ≈ +194 prompt tokens（3 只上限 ≈ +582），
+    # 相对 fused 视频主体（数 K+）为小增量；注入形态 = 最多 3 只 × 每只 1 张 composite（≤3 姿态横拼）。
+    # 待补：端到端延迟 / 成本（需真视频跑完整 fused，随默认开启前的实机验收一起量）。
     max_pet_refs: int = 3
 
 

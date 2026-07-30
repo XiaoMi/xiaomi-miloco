@@ -674,6 +674,73 @@ def test_build_warnings_generic_suppressed_by_breed_or_accessories():
 
 
 @pytest.mark.asyncio
+async def test_observe_image_multiple_pets_surfaced(monkeypatch):
+    # 单图内两只不重叠 → 取最大那只作候选，但必须透出 multiple_pets（别静默丢，决策 D8）
+    _stub_omni(monkeypatch)
+    dets = [_det(10, 10, 80, 80), _det(150, 150, 40, 40)]  # 不重叠：大的过门槛、小的被丢
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: dets)
+    )
+    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
+    monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
+    res = await obs.observe_pet([b"img"], is_video=False, grounding=False)
+    assert len(res["candidates"]) == 1  # 只留最大那只
+    assert "multiple_pets" in {w["type"] for w in res["warnings"]}
+
+
+@pytest.mark.asyncio
+async def test_observe_image_multiple_pets_surfaced_when_gated_out(monkeypatch):
+    # 单图两只且都被硬门槛灭掉（尺寸太小）→ 落整幅回退，仍要透出 multiple_pets
+    _stub_omni(monkeypatch)
+    dets = [_det(10, 10, 6, 6), _det(150, 150, 6, 6)]  # 都过不了尺寸门
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: dets)
+    )
+    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
+    monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
+    res = await obs.observe_pet([b"img"], is_video=False, grounding=False)
+    assert res["candidates"] == []  # 门控全灭 → 无参考 crop
+    assert "multiple_pets" in {w["type"] for w in res["warnings"]}  # 只数照实透出
+
+
+@pytest.mark.asyncio
+async def test_observe_two_images_one_pet_each_no_multiple_pets(monkeypatch):
+    # 锁死「取各图最大值而非求和」：两张图各一只 = 同一只多角度，**不是**两只
+    _stub_omni(monkeypatch)
+    monkeypatch.setattr(
+        obs,
+        "default_detector",
+        lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
+    )
+    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
+    monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
+    res = await obs.observe_pet([b"i1", b"i2"], is_video=False, grounding=False)
+    assert "multiple_pets" not in {w["type"] for w in res["warnings"]}
+
+
+@pytest.mark.asyncio
+async def test_omni_describe_raises_on_non_json(monkeypatch):
+    # 模型拒答 / 被 max tokens 截断 → 非 JSON：抛 OmniDescribeError（由路由转 502），不降级成空描述
+    async def _fake(payload, config, type="realtime"):
+        return {"choices": [{"message": {"content": "抱歉，我无法识别这张图片。"}}]}
+
+    monkeypatch.setattr(obs, "call_omni", _fake)
+    with pytest.raises(obs.OmniDescribeError):
+        await obs._omni_describe([_frame()], grounding=False)
+
+
+@pytest.mark.asyncio
+async def test_omni_describe_raises_on_non_object(monkeypatch):
+    # 顶层是标量数组（无对象可剥）→ 会让 data.pop 抛 TypeError，须先被 isinstance 挡下
+    async def _fake(payload, config, type="realtime"):
+        return {"choices": [{"message": {"content": "[1,2,3]"}}]}
+
+    monkeypatch.setattr(obs, "call_omni", _fake)
+    with pytest.raises(obs.OmniDescribeError):
+        await obs._omni_describe([_frame()], grounding=False)
+
+
+@pytest.mark.asyncio
 async def test_observe_video_multiple_pets_surfaced_when_gated_out(monkeypatch):
     # 回归：视频多 track（n=2）但主体被门控全灭 → 落回退，仍要透出 multiple_pets（别静默丢）
     _stub_omni(monkeypatch)  # omni 回填物种 → has_animal

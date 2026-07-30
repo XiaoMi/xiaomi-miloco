@@ -90,6 +90,8 @@ def render_profile_markdown(
     def _is_pet(e: ProfileEntry) -> bool:
         # 宠物主体判定：subject_id 命中花名册，或（旧数据）subject_id 空且 subject_name
         # 命中宠物名。pets 为空时恒 False（无花名册 → 不分宠物段，回退原行为）。
+        # 已知碰撞（legacy 回填过渡，接受）：与宠物同名、且 subject_id 为空的**人类**成员条目
+        # 会被归进「## 宠物」段；生产路径上这类条目已由 service.commit 的按名回填先写成 pet_id。
         return bool(e.subject_id and e.subject_id in pets_by_id) or (
             not e.subject_id and e.subject_name in pet_names
         )

@@ -502,6 +502,8 @@ async def catch_all_exceptions_middleware(request: Request, call_next):
 
 app.include_router(admin_router, prefix="/api")
 app.include_router(miot_router, prefix="/api")
+# person_router 与 pet_router 共用 prefix="/identity"：路径首段互斥（/persons* vs /pets*）、
+# 两侧都无首段通配路由，故注册顺序无关；新增路由须维持这一互斥，否则先注册者会遮蔽后者。
 app.include_router(person_router, prefix="/api")
 app.include_router(pet_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")

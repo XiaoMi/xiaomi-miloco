@@ -249,16 +249,7 @@ class PetLibrary:
         被切掉、不喂识别（评审 §H A2）；再 `is_file()` 过滤自愈 meta↔实体不齐。
         """
         pet = self.get(pet_id)
-        if pet is None:
-            return []
-        d = self._pet_dir(pet_id)
-        if not d.is_dir():
-            return []
-        ordered = sorted(
-            (p for p in d.glob("ref_crop_*.jpg") if _ref_index(p) is not None),
-            key=lambda p: _ref_index(p) or 0,
-        )
-        return [p for p in ordered[: pet.reference_crop_count] if p.is_file()]
+        return [] if pet is None else self._ref_paths(pet_id, pet)
 
     def reference_crop_scores(self, pet_id: str) -> list[float]:
         """与 `reference_crop_paths` 对齐的绝对质量分（越界补 0）。
@@ -269,9 +260,23 @@ class PetLibrary:
         pet = self.get(pet_id)
         if pet is None:
             return []
+        return self._ref_scores(pet, self._ref_paths(pet_id, pet))
+
+    # ── 内部：接**已加载**的 Pet，同一次调用内不重复读 / 解析 meta.json ──────────
+    def _ref_paths(self, pet_id: str, pet: Pet) -> list[Path]:
+        d = self._pet_dir(pet_id)
+        if not d.is_dir():
+            return []
+        ordered = sorted(
+            (p for p in d.glob("ref_crop_*.jpg") if _ref_index(p) is not None),
+            key=lambda p: _ref_index(p) or 0,
+        )
+        return [p for p in ordered[: pet.reference_crop_count] if p.is_file()]
+
+    def _ref_scores(self, pet: Pet, paths: list[Path]) -> list[float]:
         sc = list(pet.reference_crop_scores)
         out: list[float] = []
-        for p in self.reference_crop_paths(pet_id):
+        for p in paths:
             idx = _ref_index(p)
             out.append(sc[idx] if idx is not None and 0 <= idx < len(sc) else 0.0)
         return out
@@ -292,8 +297,11 @@ class PetLibrary:
             return self._rewrite_ref_crops(pet_id, merged[:_MAX_REF_CROPS])
 
     def _read_ref_items(self, pet_id: str) -> list[tuple[bytes, float]]:
-        paths = self.reference_crop_paths(pet_id)
-        scores = self.reference_crop_scores(pet_id)
+        pet = self.get(pet_id)  # 读一次 meta：路径与分数共用同一快照（原先 3 次解析）
+        if pet is None:
+            return []
+        paths = self._ref_paths(pet_id, pet)
+        scores = self._ref_scores(pet, paths)
         return [(p.read_bytes(), scores[i]) for i, p in enumerate(paths)]
 
     def _rewrite_ref_crops(

@@ -357,15 +357,18 @@ export async function realUpdatePet(
   petId: string,
   payload: { name?: string; species?: string },
 ): Promise<Pet> {
-  const r = await apiFetch<Normal<BackendPet>>(`/api/identity/pets/${petId}`, {
-    method: "PATCH",
-    body: JSON.stringify(payload),
-  });
+  const r = await apiFetch<Normal<BackendPet>>(
+    `/api/identity/pets/${encodeURIComponent(petId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
   return mapBackendPet(r.data);
 }
 
 export async function realDeletePet(petId: string): Promise<void> {
-  await apiFetch<Normal<unknown>>(`/api/identity/pets/${petId}`, {
+  await apiFetch<Normal<unknown>>(`/api/identity/pets/${encodeURIComponent(petId)}`, {
     method: "DELETE",
   });
 }
@@ -438,7 +441,7 @@ export async function realUploadPetAvatar(
 ): Promise<Pet> {
   const form = new FormData();
   form.append("image", image, filename);
-  const resp = await fetch(`/api/identity/pets/${petId}/avatar`, {
+  const resp = await fetch(`/api/identity/pets/${encodeURIComponent(petId)}/avatar`, {
     method: "POST",
     body: form,
     headers: authHeaders(),
@@ -490,11 +493,14 @@ export async function realUploadPetReferenceCrops(
   crops.forEach((c, i) => form.append("crops", c.blob, `ref_${i}.jpg`));
   crops.forEach((c) => form.append("scores", String(c.score ?? 0)));
   form.append("mode", mode);
-  const resp = await fetch(`/api/identity/pets/${petId}/reference-crops`, {
-    method: "POST",
-    body: form,
-    headers: authHeaders(),
-  });
+  const resp = await fetch(
+    `/api/identity/pets/${encodeURIComponent(petId)}/reference-crops`,
+    {
+      method: "POST",
+      body: form,
+      headers: authHeaders(),
+    },
+  );
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
     throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);

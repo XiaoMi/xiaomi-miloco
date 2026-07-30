@@ -18,6 +18,9 @@ import { toast } from "./Toast";
 
 const MAX_IMAGES = 3;
 const VIDEO_RE = /\.(mp4|webm|mov|avi|mkv)$/i;
+// 首帧提取硬超时：视频能解码但 seek 不产生 seeked 事件时（onerror 也不来）兜底，
+// 否则 Promise 永挂 → busy 永为 true → ESC / 遮罩 / 关闭按钮三个出口全被禁用，只能刷新。
+const FRAME_TIMEOUT_MS = 5000;
 const isVideoFile = (f: File) => f.type.startsWith("video") || VIDEO_RE.test(f.name);
 
 /** 候选的绝对质量分（conf×sharpness×area_ratio），供后端 append 按分留 top-3。 */
@@ -36,7 +39,9 @@ function firstFrameDataUrl(file: File): Promise<string> {
     video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: string | null, err?: Error) => {
+      if (timer !== undefined) clearTimeout(timer);
       URL.revokeObjectURL(url);
       result ? resolve(result) : reject(err ?? new Error("frame extract failed"));
     };
@@ -44,7 +49,7 @@ function firstFrameDataUrl(file: File): Promise<string> {
       try {
         video.currentTime = Math.min(0.1, (video.duration || 1) / 2);
       } catch {
-        /* seek 不支持则等 onseeked/loadeddata 不触发，由 onerror 兜底 */
+        /* seek 不支持：onseeked 不会来、onerror 也不一定来，由下面的超时兜底 */
       }
     };
     video.onseeked = () => {
@@ -61,6 +66,12 @@ function firstFrameDataUrl(file: File): Promise<string> {
       }
     };
     video.onerror = () => finish(null, new Error("video decode failed"));
+    // Promise 必须有终点：调用方在 busy=true 下 await 它，超时后走既有降级（不显示观测图，
+    // 仅显示后端返回的 crop），observe 流程不受影响。
+    timer = setTimeout(
+      () => finish(null, new Error("frame extract timeout")),
+      FRAME_TIMEOUT_MS,
+    );
     video.src = url;
   });
 }
