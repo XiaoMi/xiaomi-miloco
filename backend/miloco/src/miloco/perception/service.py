@@ -350,6 +350,8 @@ class PerceptionService:
         snapshot_root = get_snapshot_root()
         fb_index = EventsService.build_feedback_index()
         for row in logs:
+            # has_trace 从磁盘派生（trace 可被 TTL/LRU 清掉）；clip_dids 留 DB 值，
+            # 缺失时 clip 端点返 410 降级——两者有意不对称。
             row["has_trace"] = (
                 snapshot_root / row["id"] / "omni_trace.json.gz"
             ).exists()

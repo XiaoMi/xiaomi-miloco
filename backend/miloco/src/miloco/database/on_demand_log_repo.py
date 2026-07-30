@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from miloco.database.connector import get_db_connector
@@ -167,7 +166,7 @@ class OnDemandLogRepo:
             Number of deleted rows.
         """
         try:
-            cutoff_ms = int((datetime.now().timestamp() - days * 86400) * 1000)
+            cutoff_ms = now_ms() - days * 86_400_000
             sql = "DELETE FROM on_demand_log WHERE timestamp < ?"
             return self.db_connector.execute_update(sql, (cutoff_ms,))
         except Exception as e:
