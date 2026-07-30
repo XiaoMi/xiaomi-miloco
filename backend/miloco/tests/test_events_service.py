@@ -280,7 +280,7 @@ class TestBuildFeedbackIndex:
         (packs / f"feedback-user123-{eid}-20260701-143025.tar.gz").write_bytes(b"x")
         monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
         from miloco.perception.events_service import EventsService
-        idx = EventsService._build_feedback_index()
+        idx = EventsService.build_feedback_index()
         assert eid in idx
         assert idx[eid][0].endswith(".tar.gz")
 
@@ -291,7 +291,7 @@ class TestBuildFeedbackIndex:
         (packs / f"feedback-{eid}-20260701-143025.tar.gz").write_bytes(b"x")
         monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
         from miloco.perception.events_service import EventsService
-        idx = EventsService._build_feedback_index()
+        idx = EventsService.build_feedback_index()
         assert eid in idx
 
     def test_picks_latest_by_mtime(self, tmp_path, monkeypatch):
@@ -307,7 +307,7 @@ class TestBuildFeedbackIndex:
         os.utime(new, (2000, 2000))
         monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
         from miloco.perception.events_service import EventsService
-        idx = EventsService._build_feedback_index()
+        idx = EventsService.build_feedback_index()
         assert idx[eid][0] == new.as_posix()
 
     def test_empty_packs_dir(self, tmp_path, monkeypatch):
@@ -315,13 +315,13 @@ class TestBuildFeedbackIndex:
         packs.mkdir()
         monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
         from miloco.perception.events_service import EventsService
-        idx = EventsService._build_feedback_index()
+        idx = EventsService.build_feedback_index()
         assert idx == {}
 
     def test_no_packs_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
         from miloco.perception.events_service import EventsService
-        idx = EventsService._build_feedback_index()
+        idx = EventsService.build_feedback_index()
         assert idx == {}
 
     def test_finds_pack_in_timestamp_subdir(self, tmp_path, monkeypatch):
@@ -332,9 +332,20 @@ class TestBuildFeedbackIndex:
         (subdir / f"feedback-user123-{eid}-20260701-143025.tar.gz").write_bytes(b"x")
         monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
         from miloco.perception.events_service import EventsService
-        idx = EventsService._build_feedback_index()
+        idx = EventsService.build_feedback_index()
         assert eid in idx
         assert "20260701-143025" in idx[eid][0]
+
+    def test_parses_on_demand_pack_name(self, tmp_path, monkeypatch):
+        """主动查询包多一个字面量 od 段,findall 取最后一个匹配才不会误命中。"""
+        log_id = "aaaaaaaa-1111-2222-3333-444444444444"
+        packs = tmp_path / "packs"
+        packs.mkdir()
+        (packs / f"feedback-user123-od-{log_id}-20260701-143025.tar.gz").write_bytes(b"x")
+        monkeypatch.setattr("miloco.perception.events_service.miloco_home", lambda: tmp_path)
+        from miloco.perception.events_service import EventsService
+        idx = EventsService.build_feedback_index()
+        assert log_id in idx
 
 
 class TestManagerSingleton:
