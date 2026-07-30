@@ -12,8 +12,9 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
+import cv2
+import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -46,6 +47,13 @@ class PetUpdate(BaseModel):
 def _require_pet_id(pet_id: str) -> None:
     if not _PET_ID_RE.match(pet_id):
         raise HTTPException(status_code=400, detail="Invalid pet_id format")
+
+
+def _require_pet_enabled() -> None:
+    # 总开关关闭时，宠物「注册」链路整体不可用（建花名册 / 头像 / 参考图 / observe）——
+    # 与 observe 端点同门控；纯家庭事实由 miloco-home-profile 走 subject_id 留空记录。
+    if not get_settings().features.pet_recognition:
+        raise HTTPException(status_code=404, detail="pet recognition 未启用")
 
 
 _VIDEO_EXTS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
@@ -124,6 +132,7 @@ async def list_pets(current_user: str = Depends(verify_token)):
 
 @router.post("/pets", summary="Create Pet", response_model=NormalResponse)
 async def create_pet(body: PetCreate, current_user: str = Depends(verify_token)):
+    _require_pet_enabled()
     try:
         pet = get_pet_library().create(name=body.name, species=body.species)
     except PetNameConflict as e:
@@ -190,11 +199,25 @@ async def upload_pet_avatar(
     image: UploadFile = File(..., description="头像图片（jpg/jpeg/png/webp）"),
     current_user: str = Depends(verify_token),
 ):
+    # 闸门顺序与 person 端点对齐：功能门 → 存在性(先于 read) → 体积前置闸 → 读 → 读后兜底
+    # → cv2 验真 → 按魔数取真实 ext（不信任文件名后缀，维持 盘上后缀/Content-Type/真实字节 一致）。
     _require_pet_id(pet_id)
+    _require_pet_enabled()
+    lib = get_pet_library()
+    if lib.get(pet_id) is None:  # 先查存在，别为不存在的 id 读满内存
+        raise HTTPException(status_code=404, detail=f"Pet '{pet_id}' not found")
+    if image.size is not None and image.size > _avatar.AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
     data = await image.read()
-    ext = Path(image.filename or "").suffix.lstrip(".").lower()
+    if len(data) > _avatar.AVATAR_MAX_BYTES:  # size 缺失时兜底
+        raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
+    if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
+        raise HTTPException(status_code=400, detail="无法识别的图片")
+    ext = _avatar.sniff_image_ext(data)
+    if ext is None:
+        raise HTTPException(status_code=400, detail="不支持的图片格式（仅 jpg/png/webp）")
     try:
-        pet = get_pet_library().set_avatar(pet_id, data=data, ext=ext)
+        pet = lib.set_avatar(pet_id, data=data, ext=ext)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=f"Pet '{pet_id}' not found") from e
     except ValueError as e:
@@ -224,6 +247,7 @@ async def upload_pet_reference_crops(
     按绝对质量分降序留 top-3（决策5(b)）。``scores`` 与 ``crops`` 对齐、缺省补 0。
     """
     _require_pet_id(pet_id)
+    _require_pet_enabled()
     if mode not in ("replace", "append"):
         raise HTTPException(status_code=400, detail="mode 只能是 replace 或 append")
     if not crops:

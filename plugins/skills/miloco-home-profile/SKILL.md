@@ -92,11 +92,11 @@ entry 字段：
 
 `family` 只指"全家共同遵守的规则/约定"，**不是**家庭相关信息的兜底类。以下两类常被误塞进 family，各有归处：
 
-**宠物** — 视为非人成员主体，在**宠物花名册**里有独立身份（不进人身份库、不走人脸识别）：
-- 提到**新宠物**先建花名册：`miloco-cli pet add --name <宠物名> --species <猫/狗/其他>`，拿到 `pet_id`（形如 `pet_xxx`）。
-- 宠物各维度按 `member_*` 类型写入，`subject_id` = 该 `pet_id`、`subject_name` = 宠物名（留空仅作旧数据兼容，commit 时按名收敛回 pet_id）：
-  - "养了只小狗旺财" → `pet add --name 旺财 --species 狗` → `member_persona`（subject_id=<pet_id>，subject_name="旺财"）
-  - "旺财每天傍晚要遛" → `member_routine`（subject_id/subject_name 同上）
+**宠物** — 视为非人成员主体（不进人身份库、不走人脸识别）。**先查开关** `miloco-cli config get features.pet_recognition`，按开 / 关分流：
+- **开** → 提到**新宠物**先建花名册 `miloco-cli pet add --name <宠物名> --species <猫/狗/其他>` 拿 `pet_id`；各维度按 `member_*` 写入，`subject_id` = 该 `pet_id`、`subject_name` = 宠物名。
+- **关** → 花名册端点不可用，**不建花名册**；宠物事实照记：`member_*`、`subject_id` **留空**、`subject_name` = 宠物名（纯家庭事实、一直可见；日后开启并注册后 commit 会按名收敛回 pet_id）。
+  - "养了只小狗旺财" → `member_persona`（开：subject_id=<pet_id> / 关：subject_id 留空，subject_name="旺财"）
+  - "旺财每天傍晚要遛" → `member_routine`（subject_id / subject_name 同上）
 - **外观**写 `member_persona`：按「物种 → 体型 → 主毛色/花纹 → 毛长 → 显著标记」凝成一句（如"中等体型的黑色短毛英短猫，尾巴尖一撮白毛"），供感知在画面中区分与称呼；把握不大的维度（如品种）宁可不写。
   - 用户想**专门登记这只宠物**（**描述它的样子** 或 **附照片/视频**）→ 走 `miloco-miot-pet-register` skill（对话端到端注册：文字通路建壳+外观 / 素材通路再加识别参照，均确认后落库），或引导 web「宠物」页「自动生成」。本 skill 处理的是**泛档案里顺带提到的宠物事实**（作息/习惯/健康 + 首次提及建壳）——顺带遇到的纯文字外观也可直接写 `member_persona`。
 

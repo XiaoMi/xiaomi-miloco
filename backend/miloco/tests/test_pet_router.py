@@ -11,9 +11,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import cv2
+import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+# 真·PNG 字节（cv2 可解码）：头像端点会 imdecode 验真 + 按魔数取真实格式，假字节被 400。
+_PNG = cv2.imencode(".png", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
 
 
 @pytest.fixture
@@ -25,6 +30,15 @@ def client(tmp_path, monkeypatch):
     reset_settings()
     from miloco.pet.router import router
 
+    # 宠物端点默认在 pet_recognition 开启下测试；功能门本身由专门用例覆盖（关→404）。
+    monkeypatch.setattr(
+        "miloco.pet.router.get_settings",
+        lambda: SimpleNamespace(
+            features=SimpleNamespace(
+                pet_recognition=True, pet_head_grounding=False, pet_body_grounding=True
+            )
+        ),
+    )
     app = FastAPI()
     app.include_router(router, prefix="/api")
     yield TestClient(app)
@@ -113,17 +127,16 @@ def test_avatar_upload_and_get(client):
     pet = _create(client)
     assert client.get(f"/api/identity/pets/{pet['id']}/avatar").status_code == 404
 
-    img = b"\x89PNG\r\n\x1a\n_fake_png_bytes"
     r = client.post(
         f"/api/identity/pets/{pet['id']}/avatar",
-        files={"image": ("cat.png", img, "image/png")},
+        files={"image": ("cat.png", _PNG, "image/png")},
     )
     assert r.status_code == 200
     assert r.json()["data"]["avatar_ext"] == "png"
 
     got = client.get(f"/api/identity/pets/{pet['id']}/avatar")
     assert got.status_code == 200
-    assert got.content == img
+    assert got.content == _PNG
     assert got.headers["content-type"].startswith("image/png")
 
 
@@ -338,3 +351,61 @@ def test_reference_crops_get_out_of_range_404(client):
     pet = _create(client)
     _upload_refs(client, pet["id"], [b"c0"], [1])
     assert client.get(f"/api/identity/pets/{pet['id']}/reference-crops/5").status_code == 404
+
+
+# ── 功能门：pet_recognition 关 → 注册类端点（建 / 头像 / 参考图）一律 404 ──────
+
+def test_register_endpoints_404_when_disabled(client, monkeypatch):
+    _stub_settings(monkeypatch, recognition=False)
+    assert (
+        client.post("/api/identity/pets", json={"name": "x", "species": "猫"}).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/identity/pets/pet_000000000000/avatar",
+            files={"image": ("a.png", _PNG, "image/png")},
+        ).status_code
+        == 404
+    )
+    assert _upload_refs(client, "pet_000000000000", [_PNG], [1]).status_code == 404
+
+
+# ── 头像加固：与 person 端点对齐（体积上限 / 存在性前置 / 按魔数取真实格式）──────
+
+def test_avatar_oversized_400(client):
+    pet = _create(client)
+    big = _PNG + b"\x00" * (5 * 1024 * 1024)
+    r = client.post(
+        f"/api/identity/pets/{pet['id']}/avatar",
+        files={"image": ("a.png", big, "image/png")},
+    )
+    assert r.status_code == 400
+
+
+def test_avatar_nonexistent_pet_404(client):
+    r = client.post(
+        "/api/identity/pets/pet_000000000000/avatar",
+        files={"image": ("a.png", _PNG, "image/png")},
+    )
+    assert r.status_code == 404
+
+
+def test_avatar_ext_from_content_not_filename(client):
+    # 真 PNG 命名 x.jpg → 落盘扩展名按内容(魔数)取 png，不信文件名后缀
+    pet = _create(client)
+    r = client.post(
+        f"/api/identity/pets/{pet['id']}/avatar",
+        files={"image": ("x.jpg", _PNG, "image/jpeg")},
+    )
+    assert r.status_code == 200 and r.json()["data"]["avatar_ext"] == "png"
+
+
+def test_avatar_bad_bytes_400(client):
+    # 后缀合法、内容不可解码 → 400
+    pet = _create(client)
+    r = client.post(
+        f"/api/identity/pets/{pet['id']}/avatar",
+        files={"image": ("a.png", b"not-an-image", "image/png")},
+    )
+    assert r.status_code == 400

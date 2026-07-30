@@ -806,3 +806,24 @@ def test_commit_backfills_legacy_pet_subject_id(tmp_path, monkeypatch):
     svc.commit()
     e = next(x for x in store.load_profile().entries if x.id == "p_legacy")
     assert e.subject_id == pet.id  # 已收敛回 pet_id
+
+
+def test_commit_keeps_legacy_pet_text_as_member_when_disabled(tmp_path, monkeypatch):
+    # 关闭 + 花名册有同名行 + 旧数据 subject_id 空：不回溯归类成宠物、不隐藏，外观以普通家庭
+    # 成员身份仍进 md（回归 main 行为，收口 PR #460 review ③）。显式花名册宠物才随开关隐藏。
+    from miloco.perception.engine.identity.pet_library import PetLibrary
+
+    lib = PetLibrary(root_dir=tmp_path / "petlib")
+    lib.create(name="小黑", species="猫")  # 花名册存在同名行
+    svc = HomeProfileService(person_service=None, pet_library=lib)
+    svc.import_data(
+        ImportBody(profile=[_pet_entry("p_legacy", None, "小黑", "黑色短毛猫")], candidates=[])
+    )
+    _stub_pet_flag(monkeypatch, False)
+    svc.commit()
+    md = store.read_rendered_md()
+    assert "## 宠物" not in md  # 关闭：无独立宠物段
+    assert "黑色短毛猫" in md  # 外观仍在（回落家庭成员段，不被回溯隐藏）
+    assert "\n### 小黑\n" in md  # 以成员分组渲染
+    e = next(x for x in store.load_profile().entries if x.id == "p_legacy")
+    assert e.subject_id is None  # 关闭时不回填，旧数据保持普通家庭事实

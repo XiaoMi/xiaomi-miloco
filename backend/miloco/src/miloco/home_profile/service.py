@@ -459,27 +459,26 @@ class HomeProfileService:
         pet_id_by_name = {
             p["name"]: p["id"] for p in pets if p.get("name") and p.get("id")
         }
-        # 成员 / 宠物改名后 subject_name 自动纠偏（只取 name，不取 role）；宠物旧数据
-        # （#298 留空 subject_id）按名收敛到 pet_id。属数据维护，无论 pet_recognition
-        # 是否开启都执行，保证再次开启时数据一致；person_service / 花名册不可用时保留原值。
+        # 成员改名 subject_name 纠偏（只取 name）；宠物旧数据（#298 留空 subject_id）按名收敛
+        # 到 pet_id **仅 pet_recognition 开启时**执行——关闭时保持旧数据为普通家庭事实、不回溯
+        # 归类成宠物（否则会被下方软关闭一并隐藏；回归 main 一直可见的行为，见 PR #460 review）。
+        pet_enabled = get_settings().features.pet_recognition
         for index in (profile.entries, candidates.entries):
             for e in index:
                 if e.subject_id and e.subject_id in members_by_id:
                     e.subject_name = members_by_id[e.subject_id].get("name") or e.subject_name
                 elif e.subject_id and e.subject_id in pets_by_id:
                     e.subject_name = pets_by_id[e.subject_id].get("name") or e.subject_name
-                elif not e.subject_id and e.subject_name in pet_id_by_name:
+                elif pet_enabled and not e.subject_id and e.subject_name in pet_id_by_name:
                     e.subject_id = pet_id_by_name[e.subject_name]
 
-        # pet_recognition 关闭时：宠物条目从渲染中剔除（隐藏、json 数据保留），实现 D4
-        # 「软关闭」——与下面「已建任务源条目剔除」同机制（仅过滤渲染、不动存储）。
-        pet_enabled = get_settings().features.pet_recognition
+        # pet_recognition 关闭时：**显式花名册宠物**（subject_id=pet_id）从渲染剔除（隐藏、json
+        # 数据保留），实现 D4「软关闭」；subject_id 留空的宠物事实按普通家庭成员照常渲染（同 main，
+        # 不因识别关而回溯隐藏——与「关闭时仍可经 home-profile 记家庭事实」口径一致）。
         render_pets = pets if pet_enabled else []
 
         def _is_pet_entry(e) -> bool:
-            return bool(e.subject_id and e.subject_id in pet_ids) or (
-                not e.subject_id and e.subject_name in pet_id_by_name
-            )
+            return bool(e.subject_id and e.subject_id in pet_ids)
 
         # 已建成任务的源条目从渲染中剔除：习惯已被显式任务接管，不再当习惯重复展示。
         # 必须在二分查找前就排除（而非 render 内部过滤），否则前缀 token 漏算——参见
