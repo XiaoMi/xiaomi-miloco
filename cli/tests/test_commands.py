@@ -219,6 +219,23 @@ def test_config_get_value_only_empty_for_unset_string(runner, isolated_config):
     assert result.output.rstrip("\n") == ""
 
 
+def test_config_features_paths_available(runner, isolated_config):
+    """features.* 已进 CLI 白名单：home-profile skill 靠 config get 判分支，默认(关)必须能读到
+    False（此前不在白名单 → KeyError exit 1，分流立不住）。默认值对齐 backend FeaturesSettings。"""
+    from miloco_cli.config import get_value, set_value
+
+    assert get_value("features.pet_recognition") is False
+    assert get_value("features.pet_head_grounding") is True
+    assert get_value("features.pet_body_grounding") is True
+    assert get_value("features.pet_reid_diverse") is True
+    # config get --value-only → 裸 True/False（skill 直接判，无需解 JSON）
+    r = runner.invoke(cli, ["config", "get", "features.pet_recognition", "--value-only"])
+    assert r.exit_code == 0 and r.output.rstrip("\n") == "False"
+    # 可用 CLI 开启（此前 set 被拒为 unknown config path）；set_value 收 CLI 原始字符串、内部 _coerce
+    set_value("features.pet_recognition", "true")
+    assert get_value("features.pet_recognition") is True
+
+
 def test_config_set_multi_pair_atomic(runner, isolated_config):
     """``config set`` 支持一次提交多组 (path, value), 避免中途被 Ctrl+C 留下半更新。"""
     result = runner.invoke(

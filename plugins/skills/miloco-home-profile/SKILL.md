@@ -92,7 +92,7 @@ entry 字段：
 
 `family` 只指"全家共同遵守的规则/约定"，**不是**家庭相关信息的兜底类。以下两类常被误塞进 family，各有归处：
 
-**宠物** — 视为非人成员主体（不进人身份库、不走人脸识别）。**先查开关** `miloco-cli config get features.pet_recognition`，按开 / 关分流：
+**宠物** — 视为非人成员主体（不进人身份库、不走人脸识别）。**先查开关** `miloco-cli config get features.pet_recognition --value-only`（输出 `True` / `False`），按开 / 关分流：
 - **开** → 提到**新宠物**先建花名册 `miloco-cli pet add --name <宠物名> --species <猫/狗/其他>` 拿 `pet_id`；各维度按 `member_*` 写入，`subject_id` = 该 `pet_id`、`subject_name` = 宠物名。
 - **关** → 花名册端点不可用，**不建花名册**；宠物事实照记：`member_*`、`subject_id` **留空**、`subject_name` = 宠物名（纯家庭事实、一直可见；日后开启并注册后 commit 会按名收敛回 pet_id）。
   - "养了只小狗旺财" → `member_persona`（开：subject_id=<pet_id> / 关：subject_id 留空，subject_name="旺财"）
