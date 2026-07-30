@@ -635,16 +635,22 @@ function Lightbox({
         ✕
       </button>
       {kind === "image" ? (
-        // 外层 flex 容器只为把尺寸收紧到 <img> 实际渲染大小,好让 svg 覆盖层
-        // (absolute inset-0)贴着图而不是贴着整块半透明背景.
-        <div
-          className="relative flex max-w-full max-h-full"
-          onClick={(e) => e.stopPropagation()}
-        >
+        // 与 RefFrameCard 缩略卡同款:容器给**确定**尺寸,<img> 在其中 object-contain,
+        // svg 覆盖层用同一个盒子 + preserveAspectRatio 做同样的 letterbox → 必然对齐.
+        //
+        // 不能让容器 shrink-to-fit(如 `flex max-w-full max-h-full`):那样容器高度是 auto,
+        // <img> 的 `max-h-full` 百分比无从解析 → 高度不受约束,图溢出被切;同时容器按
+        // max-content(帧原始宽)定宽,比图实际渲染宽,覆盖层跟着变宽,框整体横向错位.
+        // 16:9 桌面最大化(可用高 < 可用宽 × 9/16)必然命中,而放大就是为了核对裁切位置.
+        //
+        // 代价:rounded/shadow 落在元素盒(= 整个可用区)而非可见图上,已去掉;
+        // 也不再 stopPropagation —— 容器铺满后拦掉就等于废掉背景点击关闭,
+        // 而静态图没有 <video> 那种需要保护的控件,点任意处关闭正合 cursor-zoom-out.
+        <div className="relative w-full h-full">
           <img
             src={src}
             alt={t("activity.refFrame")}
-            className="max-w-full max-h-full rounded shadow-lg cursor-default bg-black"
+            className="w-full h-full object-contain"
           />
           {crop && <CropBoxOverlay crop={crop} />}
         </div>
@@ -1164,9 +1170,11 @@ function ClipPlayer({
  *    任一 device 目录有 ref.jpg 就置 true),而本卡是**按 device 渲染**的:多摄像头事件
  *    里完全可能 A 机裁了、B 机回退全景,此时 B 机的卡若照渲就会显示一个假的"参考帧已过期".
  *    这里用 crop 坐标的有无重新按 device 门控一次.
- *    (不改成 per-device has_ref 是因为要连带动 SSE 写侧 / list API / 类型 / 测试;
- *    而 cleanup 是整个 event 目录 rmtree,trace 与 ref.jpg 必然同生同灭,拿 crop 坐标
- *    当 ref 存在性的代理不会丢信息.)
+ *    (不改成 per-device has_ref 是因为要连带动 SSE 写侧 / list API / 类型 / 测试.)
+ *    已知取舍:后端 410 有四种成因,「没裁过」与「trace 被 cleanup 清」时 ref.jpg 本来就
+ *    不在盘上(cleanup 是整个 event 目录 rmtree,trace 与 ref.jpg 同生同灭),隐藏无损;
+ *    但「trace 损坏 / crop 字段不合法」时 ref.jpg 其实还在,这里也一并隐藏了 ——
+ *    宁可少显一张图,也不给一个假的「参考帧已过期」.要区分得让后端把成因带回来(未做).
  *  - crop 请求失败(网络抖动 / 5xx)→ 保留卡,只是不画框.区别于上面:那是"确定没有",
  *    这是"暂时没问出来",不该把用户本来能看的参考帧藏掉.
  *  - ref.jpg 本身 404/410(cleanup 清掉)→ 显"已过期"占位,与 ClipPlayer.failed 对称. */
