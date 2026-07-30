@@ -571,6 +571,12 @@ class TierUPool:
                 # emb 拉到才收手——拉不到下窗口按 retry_gap 节流重试
                 te.did_first_dedup = True
 
+        # 本次 push 往 L1 加了一张(可能还刷了 entry 级 emb 快照)→ 该 cluster 的
+        # centroid 可能漂移。不清的话 _cluster_pairwise_union 会命中旧 sim、把刚算好的
+        # 新 centroid 丢掉:旧低分让同人在池里长期分裂,旧高分导致不可逆错合。
+        # 放在函数末尾:一次覆盖 L1 append 与 G 方案的 entry 级 emb 刷新两种变动。
+        self._invalidate_match_cache_for_entry(te)
+
     @_synchronized
     def flush_if_due(self) -> list[str]:
         """对所有 entry 检查 L1 是否累积到 l1_capacity,达标则晋级。
@@ -594,6 +600,8 @@ class TierUPool:
             if best is None:
                 # 全部不合格 → 清 L1 重新累积(不强行写)
                 te.crops_l1.clear()
+                # 清空 L1 同样改 centroid(该成员此前若无 L2 emb, 正是靠 L1 mean 贡献)
+                self._invalidate_match_cache_for_entry(te)
                 continue
 
             # 2) 给入 L2 的 crop 拉 per-crop emb 快照(零额外推理,读跟踪侧 deque
@@ -606,9 +614,6 @@ class TierUPool:
             # 3) 推入 L2(FIFO 满则弹最旧)
             while len(te.crops_l2) >= self.config.l2_capacity:
                 te.crops_l2.popleft()
-                # 顺手清匹配 cache(该 cluster 的代表帧可能变了——保守清)
-                if te.cluster_id is not None:
-                    self._invalidate_match_cache_for_cluster(te.cluster_id)
             te.crops_l2.append(best)
             te.crops_l1.clear()
             te.last_l1_push_ts = now
@@ -625,6 +630,14 @@ class TierUPool:
                     te.embedding_snapshot_ts = now
                     te.embedding_sharpness = best.sharpness
                     te.embedding_dirty = True
+
+            # 本轮 flush 动过该 entry 的 L2 popleft / L2 append / L1 清空 / entry 级 emb
+            # 刷新 —— 四者都改 centroid,放在循环体末尾一次覆盖。
+            # 此前只在上面 popleft 分支清,于是 L2 未满的"填充期"(每成员前 l2_capacity
+            # 次 flush)的 centroid 漂移对 _match_cache 完全不可见:pairwise union 会一直
+            # 复用第一次算的分数,catch-up 合并对 crop 累积型漂移失效(旧低分→同人长期
+            # 分裂;早期 noisy crop 的旧高分→不可逆错合)。
+            self._invalidate_match_cache_for_entry(te)
 
         # 4) 跑入库去重(脏标记驱动,intra_cam 内)
         promoted_clusters = self._intra_cam_dedup_tick()
@@ -1502,16 +1515,38 @@ class TierUPool:
     def _invalidate_match_cache_for_cluster(self, cluster_id: str) -> None:
         """清掉所有含 ``cluster_id`` 的 pair sim。
 
-        **不变量**:任何改动某 cluster 成员集合的路径,都必须对该 cluster 调本函数
-        (成员变→centroid 变→旧 sim 失真)。_match_cache 的键只有
-        ``frozenset({cid_a, cid_b})``、**不带成员指纹**,不像 _centroid_cache 那样能靠
-        内容指纹自愈,所以漏一处就会长期复用错的 sim(旧高分错合两簇尤其危险,身份
-        合并不可逆)。现有调用点:_merge_into_cluster / split_cluster /
-        close_write_gate / L2 FIFO 弹出 / _evict_entry。
+        **不变量**:任何改变该 cluster **centroid** 的路径都必须调本函数 —— 口径是
+        centroid 而非"成员集合",后者小一圈:``_cluster_mean_embedding`` 收的是**全体
+        成员的所有 crop emb**(L2 优先,空则 L1,再空则 entry 级快照),所以成员集合不
+        变、只是某成员攒 / 吐一张 crop 也会改 centroid。两类路径:
+
+        - 成员集合变:_merge_into_cluster / split_cluster / close_write_gate /
+          _evict_entry(含只淘汰部分成员)。
+        - 成员内部 crop / emb 变:push_crop 的 L1 累积、flush_if_due 的 L2
+          popleft/append + L1 清空 + entry 级 emb 刷新(经
+          ``_invalidate_match_cache_for_entry``)。
+
+        _match_cache 的键只有 ``frozenset({cid_a, cid_b})``、**不带内容指纹**,不像
+        _centroid_cache 那样能靠指纹自愈,所以漏一处就会长期复用错的 sim(旧低分让同
+        人长期分裂;旧高分错合两簇尤其危险,身份合并不可逆)。
         """
         stale = [k for k in self._match_cache if cluster_id in k]
         for k in stale:
             self._match_cache.pop(k, None)
+
+    def _invalidate_match_cache_for_entry(self, entry: TierUEntry) -> None:
+        """某 entry 的 crop / emb 变动 → 其所属 cluster 的 centroid 可能漂移 → 清 pair sim。
+
+        **保守清**:不判断这次变动是否真的改到了 centroid(取决于该成员当前靠 L2 /
+        L1 / entry 级哪一层贡献,判据易随 _cluster_mean_embedding 改动而失配)。代价
+        不对称——多清 = 下次 fetch 多算一次 128 维 cosine;漏清 = 长期复用错的 sim。
+
+        副作用是活跃 cluster 的 pair sim 基本每帧失效。这是可接受的:_match_cache 只
+        在 fetch 里的 _cluster_pairwise_union 被读写(~1-2 次/天),被清掉的正是"正在
+        长 crop、分数必然过时"的那些 cluster;闲置 cluster 的 pair 仍跨 fetch 复用。
+        """
+        if entry.cluster_id is not None:
+            self._invalidate_match_cache_for_cluster(entry.cluster_id)
 
     # ----- M10:cluster 拆分(commit 前的"误合并修正"接口) -----
 

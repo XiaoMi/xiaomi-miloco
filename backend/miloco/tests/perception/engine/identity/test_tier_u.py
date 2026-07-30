@@ -2376,3 +2376,103 @@ class TestMatchCacheStaleOnPartialEviction:
             "真实 centroid 已同一身份,stale 低分不应继续阻止 merge"
         )
         assert len(pool._clusters) == 1
+
+
+class TestMatchCacheStaleOnCropAccumulation:
+    """成员集合**不变**、只是 crop 累积导致 centroid 漂移时,pair sim 也必须失效。
+
+    _cluster_mean_embedding 收的是全体成员的**所有 crop emb**,所以"同一成员多攒一张
+    crop"同样改 centroid。此前只有 L2 FIFO **弹出**那侧清了 cache,塞入侧没清 →
+    L2 未满的填充期(每成员前 l2_capacity 次 flush)漂移对 _match_cache 完全不可见。
+    """
+
+    E1 = np.array([1.0] + [0.0] * 127, dtype=np.float32)
+    E2 = np.array([0.0, 1.0] + [0.0] * 126, dtype=np.float32)
+
+    def _pool_with_cluster(self, emb):
+        """push→flush 造一个已挂 cluster 的单例 entry。返回 (pool, provider, clk, cid)。"""
+        provider = _MockReIDProvider()
+        provider.set_embedding("cam-a", 1, emb)
+        clk = _clock()
+        pool = TierUPool(
+            config=TierUConfig(l1_capacity=2),
+            reid_provider=provider,
+            now_fn=clk,
+        )
+        for f in range(2):
+            pool.push_crop(_make_crop("cam-a", 1, f, clk()))
+        pool.flush_if_due()
+        cid = pool._entries[("cam-a", 1)].cluster_id
+        assert cid is not None
+        return pool, provider, clk, cid
+
+    def test_push_crop_invalidates_match_cache(self):
+        """L1 累积(L2 为空时直接就是 centroid 来源)→ 清 pair sim。"""
+        pool, _prov, clk, cid = self._pool_with_cluster(self.E1)
+        pool._match_cache[frozenset({cid, "OTHER"})] = 0.42
+
+        pool.push_crop(_make_crop("cam-a", 1, 99, clk()))
+
+        assert frozenset({cid, "OTHER"}) not in pool._match_cache
+
+    def test_l2_append_invalidates_match_cache_without_popleft(self):
+        """L2 未满(走不到 popleft 分支)的塞入侧也要清 —— 修复前这里完全不可见。"""
+        pool, _prov, clk, cid = self._pool_with_cluster(self.E1)
+        entry = pool._entries[("cam-a", 1)]
+        assert len(entry.crops_l2) < pool.config.l2_capacity, "须停在填充期"
+        # 先把 L1 攒满,再 seed —— 避免 seed 被 push_crop 侧的清理提前拿走,
+        # 这样断言只可能由 flush 的 L2 塞入侧满足。
+        for f in range(2):
+            pool.push_crop(_make_crop("cam-a", 1, 100 + f, clk()))
+        pool._match_cache[frozenset({cid, "OTHER"})] = 0.42
+
+        pool.flush_if_due()
+
+        assert len(entry.crops_l2) == 2, "本轮应只 append、不 popleft"
+        assert frozenset({cid, "OTHER"}) not in pool._match_cache
+
+    def test_stale_low_sim_from_earlier_fetch_no_longer_blocks_merge(self):
+        """行为断言:走 review 给的数值链路 —— fetch#1 算出低分入缓存,之后 crop 累积
+        让真实 centroid 升到阈值之上,fetch#2 必须按新分数合并(而非复用旧低分)。
+
+        缓存全程由真实路径 (_cluster_pairwise_union) 写入,不手工 seed。
+        """
+        provider = _MockReIDProvider()
+        provider.set_embedding("cam-a", 1, self.E2)   # A:初始外观
+        provider.set_embedding("cam-b", 2, self.E1)   # B:目标身份
+        clk = _clock()
+        pool = TierUPool(
+            config=TierUConfig(l1_capacity=2), reid_provider=provider, now_fn=clk,
+        )
+
+        def _flush_round(cam: str, tid: int, base_frame: int) -> None:
+            for f in range(2):
+                pool.push_crop(_make_crop(cam, tid, base_frame + f, clk()))
+            pool.flush_if_due()
+
+        _flush_round("cam-a", 1, 0)     # A:L2 = [E2]
+        _flush_round("cam-b", 2, 0)     # B:L2 = [E1]
+        ka, kb = ("cam-a", 1), ("cam-b", 2)
+        cid_a, cid_b = pool._entries[ka].cluster_id, pool._entries[kb].cluster_id
+        assert cid_a != cid_b, "正交外观不该在此时合并"
+
+        # fetch #1:真实 sim=0(正交)→ 不合并,低分写进 _match_cache
+        pool._cluster_pairwise_union(list(pool._entries.values()))
+        assert pool._match_cache.get(frozenset({cid_a, cid_b})) == pytest.approx(0.0)
+
+        # A 的外观向 B 收敛:再攒 2 张 E1 crop → L2=[E2,E1,E1],与 E1 真实
+        # cos = 2/sqrt(5) ≈ 0.894 > 0.85 阈值(L2 仍未满 → 走不到 popleft 分支)
+        provider.set_embedding("cam-a", 1, self.E1)
+        _flush_round("cam-a", 1, 10)
+        _flush_round("cam-a", 1, 20)
+        assert len(pool._entries[ka].crops_l2) == 3
+        rep_a = pool._cluster_mean_embedding(pool._entries[ka].cluster_id)
+        assert float(rep_a @ self.E1) > pool.config.reid_threshold_cross_cam
+
+        # fetch #2:修复前命中 stale 0.0 → 永不合并(同人长期分裂)
+        pool._cluster_pairwise_union(list(pool._entries.values()))
+
+        assert pool._entries[ka].cluster_id == pool._entries[kb].cluster_id, (
+            "crop 累积后真实 centroid 已过阈值,旧低分不应继续挡住 merge"
+        )
+        assert len(pool._clusters) == 1
