@@ -122,7 +122,14 @@ class DeviceWelcomeService:
 
     @staticmethod
     def _format_message(dev: MIoTDeviceInfo) -> str:
-        """Build the structured welcome message sent to the agent."""
+        """Build the structured welcome message sent to the agent.
+
+        本文本进的是 ``agent:main:miloco`` 的 full 会话（dispatcher 把 bind 事件固定
+        路由到那里），也就是与插件的 ``B_IDENTITY`` 同一轮上下文。该块已明令 agent
+        「不要改口自称 Miloco」，故这里也不能要求它对用户自称 miloco——否则两条硬
+        指令在同一轮里打架：要么播报出"miloco 发现…"顶掉宿主人设，要么模型服从
+        B_IDENTITY 而让本模板的要求静默落空。改用不指名的第一人称，语义不变。
+        """
         room = dev.room_name or "未知房间"
         name = dev.name or "未知设备"
         home = dev.home_name or "未知家庭"
@@ -131,8 +138,8 @@ class DeviceWelcomeService:
         return (
             f"[新设备接入] 检测到米家账户新增设备「{name}」。\n"
             f"设备信息：设备id「{did}」，型号「{model}」，位于「{home}」-「{room}」。\n"
-            f"根据以上信息，用符合人设的口吻生成一段给用户的欢迎播报："
-            f"1. 告知\"miloco发现{room}新加入了{name}\"。"
-            f"2. 按型号判断设备品类，把它视为 miloco 的能力延伸，说清 miloco 接入它后能多为用户主动做什么、带来哪些个性化的好处。\n"
+            f"根据以上信息，用你自己的人设口吻生成一段给用户的欢迎播报（不要自称 miloco）："
+            f"1. 告知你发现「{room}」新加入了「{name}」。"
+            f"2. 按型号判断设备品类，把它视为你自身能力的延伸，说清接入它后你能多为用户主动做什么、带来哪些个性化的好处。\n"
             f"然后通过 miloco-notify skill 播报这段内容。"
         )

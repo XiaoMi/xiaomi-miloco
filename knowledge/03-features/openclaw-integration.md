@@ -104,6 +104,8 @@ before_prompt_build Hook（plugins/openclaw/src/hooks/prompt.ts）
 
 **插件只赋能力、不赋身份（`B_IDENTITY`）**：本块逐轮 prepend 进宿主 agent 的系统上下文，早期写死「你是经验丰富的家庭智能管家 Miloco」，会盖掉宿主自己的人设——用户把 agent 设成"华人牌智能手机傻妞"，装上插件后再问"你是谁"就答成"家庭智能管家 Miloco"。现改为能力叙述 + 显式身份保全：名字 / 人设 / 语气一律沿用宿主既有设定。刻意不写「宿主没设身份就当管家」的兜底——那是宿主自己该管的事（openclaw 本就会引导用户去做身份设定），插件不该趁虚塞一个人格进去。Hermes 侧 `context_injection.B_IDENTITY` 与本块 1:1 同步（该文本还会进 `<system>` 消息，覆盖面更强）。
 
+这条不变量对**后端发给 agent 的事件正文同样成立**：那些文本与 `B_IDENTITY` 同一轮进上下文，若要求 agent 对用户自称 miloco 就是两条硬指令打架（要么顶掉宿主人设，要么模型服从 `B_IDENTITY` 而让事件正文的要求静默落空）。故 `welcome_service._format_message`（新设备接入播报）与 `onboarding_trigger._INSTRUCTION`（首装邀请）里让 agent 转述给用户的部分一律用不指名的第一人称；只有"系统已完成米家授权"这类**指代系统本身**的说法才保留 miloco 字样。新增此类事件正文时照此办理。
+
 **trace Hook**：监听 7 个 agent 生命周期事件，turn 结束后计算 meta（LLM 调用次数、工具调用次数、各类耗时、错误统计）；debug 模式下写 JSONL 到 `$MILOCO_HOME/trace/agent/`；在内存中保留 meta 供后端轮询后消费（幂等消费，消费后即清除）。
 
 ### Webhook 通信机制
