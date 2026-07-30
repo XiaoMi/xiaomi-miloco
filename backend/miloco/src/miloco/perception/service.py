@@ -348,7 +348,7 @@ class PerceptionService:
         from miloco.perception.snapshot_writer import get_snapshot_root
 
         snapshot_root = get_snapshot_root()
-        fb_index = EventsService._build_feedback_index()
+        fb_index = EventsService.build_feedback_index()
         for row in logs:
             row["has_trace"] = (
                 snapshot_root / row["id"] / "omni_trace.json.gz"

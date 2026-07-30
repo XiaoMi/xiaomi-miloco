@@ -70,7 +70,7 @@ class EventsService:
             since_ms=since, before_ms=before, limit=limit, offset=offset
         )
         snapshot_root = get_snapshot_root()
-        feedback_index = self._build_feedback_index()
+        feedback_index = self.build_feedback_index()
         return [self._row_to_event(row, snapshot_root, feedback_index) for row in rows]
 
     async def locate_clip(
@@ -134,7 +134,7 @@ class EventsService:
     _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
     @staticmethod
-    def _build_feedback_index() -> dict[str, tuple[str, int]]:
+    def build_feedback_index() -> dict[str, tuple[str, int]]:
         """一次扫描 packs 目录,建 event_id / log_id → (path, size) 索引.
 
         两种包名共用本索引:

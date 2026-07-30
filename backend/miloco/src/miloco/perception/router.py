@@ -155,7 +155,7 @@ async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
     row = manager.perception_service.get_on_demand_log(log_id)
     if row is None:
         raise HTTPException(message="not found", status_code=404)
-    if device_id not in row["sources"]:
+    if device_id not in row.get("clip_dids", []):
         raise HTTPException(message="not found", status_code=404)
 
     device_dir = get_snapshot_root() / log_id / region_slug(device_id)
