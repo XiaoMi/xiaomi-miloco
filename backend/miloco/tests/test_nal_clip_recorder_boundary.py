@@ -94,7 +94,7 @@ async def test_first_frame_inits_encoder_and_anchors_start_ts():
 async def test_init_encoder_pins_thread_count():
     # 不桩 _init_encoder——要验的就是真实实现里那行 thread_count 赋值还在。
     # 其余用例把 _init_encoder 整个桩掉了,删掉那行也照样绿;此用例守住线程数。
-    from miot.decoder import ENCODE_THREADS
+    from miot.tuning import ENCODE_THREADS
 
     rec = NalClipRecorder(duration_ms=1000)
     try:
@@ -104,4 +104,7 @@ async def test_init_encoder_pins_thread_count():
         # 从 codec_context 读回才是底层真实值。
         assert rec._stream.codec_context.thread_count == ENCODE_THREADS
     finally:
+        # _init_encoder 真开了一个 mp4 输出容器,连它一起收(先容器后线程池)。
+        if rec._container is not None:
+            rec._container.close()
         rec._executor.shutdown(wait=False)

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Literal
 import av
 import cv2
 import numpy as np
-from miot.decoder import ENCODE_THREADS
+from miot.tuning import ENCODE_THREADS
 from numpy.typing import NDArray
 
 from miloco.perception.engine.identity.gallery_composite import (

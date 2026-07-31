@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from miloco.perception.engine.config import GateConfig
+from miloco.perception.inference.ort_utils import TINY_MODEL_THREADS
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +46,11 @@ def _get_session():
 
             from miloco.config import get_settings
 
-            # 惰性 import 是有意的:守护测试靠 monkeypatch ort_utils 模块属性验证
-            # 「自建 session 必调 apply_kleidiai_opt_out」,模块级 from-import 会让
-            # patch 失效(见 test_speech_vad.py)。
-            from miloco.perception.inference.ort_utils import (
-                TINY_MODEL_THREADS,
-                apply_kleidiai_opt_out,
-            )
+            # 惰性 import 仅针对本 helper:守护测试靠 monkeypatch ort_utils 模块属性
+            # 验证「自建 session 必调 apply_kleidiai_opt_out」,模块级 from-import 会在
+            # patch 之前绑死函数对象、让 spy 收不到调用(见 test_speech_vad.py)。
+            # TINY_MODEL_THREADS 是整数、无此约束,与 dedup_embedder 对齐走模块级 import。
+            from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
 
             path = get_settings().directories.models_dir / _MODEL_FILENAME
             if not path.is_file():

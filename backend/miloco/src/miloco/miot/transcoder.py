@@ -21,7 +21,7 @@ from typing import Optional
 
 import av
 import numpy as np
-from miot.decoder import ENCODE_THREADS, SWSCALE_THREADS
+from miot.tuning import ENCODE_THREADS, SWSCALE_THREADS
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -77,13 +77,13 @@ class H264LiveEncoder:
         #                          covers up to 1080p@30 / 720p@60 — fits
         #                          IPC streams comfortably and is universally
         #                          supported by browser/hardware decoders
-        # threads=1 + sliced-threads=0 forces libx264 to emit one NAL slice
-        # per frame. The default ultrafast preset on multi-core hosts uses
-        # slice-based threading (multiple IDR slices per access unit) which
-        # browsers' hardware H.264 decoders — particularly Chrome on Linux —
-        # silently reject with OperationError, even though the codec string
-        # is technically valid. We have our own per-camera encoder thread
-        # already, so libx264 internal threading buys us nothing.
+        # thread_count=ENCODE_THREADS(=1) + sliced-threads=0 forces libx264 to
+        # emit one NAL slice per frame. The default ultrafast preset on
+        # multi-core hosts uses slice-based threading (multiple IDR slices per
+        # access unit) which browsers' hardware H.264 decoders — particularly
+        # Chrome on Linux — silently reject with OperationError, even though the
+        # codec string is technically valid. Keeping it at 1 is also what makes
+        # tune=zerolatency real (frame-level threading would buffer N frames).
         codec.thread_count = ENCODE_THREADS
         codec.options = {
             "preset": "ultrafast",

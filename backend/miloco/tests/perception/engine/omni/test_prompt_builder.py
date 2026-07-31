@@ -1402,7 +1402,7 @@ def test_encode_video_pins_libx264_thread_count(monkeypatch):
     删掉 prompt_builder 里那行 thread_count 赋值,本用例会失败;其余 _encode_video
     用例只验产物(有无音轨),抓不到线程数回退。
     """
-    from miot.decoder import ENCODE_THREADS
+    from miot.tuning import ENCODE_THREADS
 
     class _CapturingContainer:
         def __init__(self, real):

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import av
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketState
-from miot.decoder import ENCODE_THREADS
+from miot.tuning import ENCODE_THREADS
 from miot.types import MIoTCameraCodec
 
 from miloco.manager import get_manager
