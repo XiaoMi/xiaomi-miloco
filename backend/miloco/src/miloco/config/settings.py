@@ -668,6 +668,7 @@ class MilocoSettings(BaseSettings):
             "model": self.model.omni.model,
             "base_url": self.model.omni.base_url,
             "api_key": self.model.omni.api_key,
+            "extra_headers": dict(self.model.omni.extra_headers),
         }
         if merged != existing:
             new_engine = {**self.perception.engine, "omni": merged}
