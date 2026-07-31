@@ -13,10 +13,10 @@ import onnxruntime as ort
 
 _LOGGER = logging.getLogger(__name__)
 
-# 固定线程数控尾延迟。实测 2 线程已够:再往上无吞吐/尾延迟收益,反受调度抖动拖累
-# (synthetic bench 上更高线程更快,但真实帧上 8 线程 avg 62ms/max 410ms,远差于低
-# 线程 avg 48ms/max 58ms)。detector/reid 走此值;dedup/vad 用 TINY_MODEL_THREADS。
-_DEFAULT_NUM_THREADS = 2
+# 固定线程数控尾延迟。实测(真实帧):8 线程 avg 62ms/max 410ms,远差于 4 线程的
+# avg 48ms/max 58ms——synthetic bench 上更高线程更快,但真实帧受调度抖动拖累。
+# detector/reid 走此值;dedup/vad 用 TINY_MODEL_THREADS。
+_DEFAULT_NUM_THREADS = 4
 
 # dedup(句向量,~10ms/短句、低频)/ vad(silero,单帧 <1ms、逐帧高频):模型极小,
 # 单线程最优,多线程 fork-join 开销 > 收益。

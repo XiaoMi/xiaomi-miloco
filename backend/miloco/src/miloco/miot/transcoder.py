@@ -23,6 +23,8 @@ import av
 import numpy as np
 from numpy.typing import NDArray
 
+from miot.decoder import SWSCALE_THREADS
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,7 +141,9 @@ class H264LiveEncoder:
             return []
 
         frame = av.VideoFrame.from_ndarray(bgr, format="bgr24")
-        frame = frame.reformat(format="yuv420p")
+        # 与 miot/decoder.py 同口径:swscale 默认 threads=0(auto=核数),单帧
+        # bgr24→yuv420p 用不上;不传则开预览时每帧按核起一遍 slice 线程。
+        frame = frame.reformat(format="yuv420p", threads=SWSCALE_THREADS)
         # 不用摄像头侧 pts_ms(见 __init__ 注释:哨兵值会撑爆 int64 setter)。本地计数器
         # × 33ms 贴合 codec.time_base=1/1000 + framerate=30(每帧约进 33ms)。这个 PTS
         # **只供 libx264 内部码率核算,不进 wire、不影响浏览器播放**——浏览器的播放时序来自

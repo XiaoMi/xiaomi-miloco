@@ -17,7 +17,10 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-from miloco.perception.inference.ort_utils import TINY_MODEL_THREADS
+from miloco.perception.inference.ort_utils import (
+    TINY_MODEL_THREADS,
+    apply_kleidiai_opt_out,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +34,6 @@ class EventEmbedder:
 
     def __init__(self, models_dir: str | Path):
         from tokenizers import Tokenizer  # 延迟导入：缺依赖时由调用方降级处理
-
-        from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
 
         models_dir = Path(models_dir)
         self._tok = Tokenizer.from_file(str(models_dir / _TOKENIZER_FILE))

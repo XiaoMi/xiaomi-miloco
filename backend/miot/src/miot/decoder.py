@@ -28,6 +28,11 @@ from .types import MIoTCameraCodec, MIoTCameraFrameData
 
 _LOGGER = logging.getLogger(__name__)
 
+# 单路实时解码/像素转换远用不满满核线程池,统一钉死上限(改一处即可)。
+# transcoder.py 的预览编码路径也引用 SWSCALE_THREADS,保持三处 swscale 同口径。
+DECODE_THREADS = 4  # FFmpeg 解码器 slice 线程,含余量
+SWSCALE_THREADS = 2  # swscale 像素转换:1 已够,留 1 压单帧尖峰
+
 
 # H.264 NAL unit types that contain an IDR coded slice.
 _H264_IDR_NAL_TYPE = 5
@@ -283,8 +288,8 @@ class MIoTMediaDecoder(threading.Thread):
                 _LOGGER.error("unsupported video codec: %s, skipping frame", frame_data.codec_id)
                 return
             # 限解码线程数:默认 auto 按 CPU 核数开满,单路实时解码远用不满,多出来的
-            # 全是 idle worker。钉死为 4(含余量)。
-            self._video_decoder.thread_count = 4
+            # 全是 idle worker。见 DECODE_THREADS。
+            self._video_decoder.thread_count = DECODE_THREADS
             _LOGGER.info("video decoder created, %s", frame_data.codec_id)
         pkt = Packet(frame_data.data)
         frames: List[VideoFrame] = self._video_decoder.decode(pkt)  # type: ignore
@@ -296,8 +301,10 @@ class MIoTMediaDecoder(threading.Thread):
             for frame in frames:
                 try:
                     # 像素转换(swscale)默认按 CPU 核数开满 slice 线程池,单帧转换用
-                    # 不上,满核全是 idle。钉死 2:1 已够,留 1 个余量压单帧尖峰。
-                    bgr = frame.to_ndarray(format="bgr24", threads=2).astype("uint8")
+                    # 不上,满核全是 idle。见 SWSCALE_THREADS。
+                    bgr = frame.to_ndarray(
+                        format="bgr24", threads=SWSCALE_THREADS
+                    ).astype("uint8")
                 except Exception as e:
                     _LOGGER.warning("Failed to convert frame to ndarray: %s", e)
                     continue
@@ -323,7 +330,7 @@ class MIoTMediaDecoder(threading.Thread):
                 self._last_jpeg_ts = now_ts
                 return
             frame = frames[0]
-            rgb_frame: VideoFrame = frame.to_rgb(threads=2)  # 同上:swscale 钉死 2
+            rgb_frame: VideoFrame = frame.to_rgb(threads=SWSCALE_THREADS)  # 同上
             img: Image.Image = rgb_frame.to_image()
             buf: BytesIO = BytesIO()
             img.save(buf, format="JPEG", quality=90)
