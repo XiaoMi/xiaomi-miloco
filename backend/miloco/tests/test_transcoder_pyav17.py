@@ -1,6 +1,6 @@
-"""``H264LiveEncoder`` 的 PyAV 17 兼容性回归测试。
+"""``H264LiveEncoder`` 的回归测试。
 
-固化两个曾在 PyAV 17 下崩的点(见 wiki transcoder-pyav17-bugs):
+前三条固化两个曾在 PyAV 17 下崩的点(见 wiki transcoder-pyav17-bugs):
 
 - Bug #1: PyAV 17 移除了 ``VideoCodecContext.close()``,旧代码在 rebuild/close 路径
   调它会抛 AttributeError,每次 toggle/断开泄漏一组 codec context + 编码线程。
@@ -8,7 +8,11 @@
   ``frame.pts`` 是 signed int64,直接赋值会 OverflowError 丢帧;PPCS 重连窗口内
   集中爆发刷几十条 error + 画面卡顿。
 
-这两条都不连真 SDK / 摄像头,只起真 libx264 编码器(本机 PyAV 自带),够轻。
+第四条与 PyAV 版本无关,守的是预览链 libx264 线程数这条硬约束(>1 → Chrome on
+Linux 硬解 OperationError 拒流 + 破 tune=zerolatency)。**清理 PyAV 17 兼容性
+用例时不要连它一起删。**
+
+这些都不连真 SDK / 摄像头,只起真 libx264 编码器(本机 PyAV 自带),够轻。
 """
 
 from __future__ import annotations
@@ -70,20 +74,28 @@ def test_pts_counter_resets_on_resolution_rebuild():
 
 
 def test_open_encoder_pins_libx264_thread_count():
-    """预览链的 thread_count 必须钉死 ENCODE_THREADS。
+    """预览链的 thread_count 必须是 1——硬约束,不是调参值。
 
-    这条链的 1 是硬约束(见 miot/tuning.py 的 ⚠):>1 会退到 slice/帧级并行,
-    Chrome on Linux 的硬解会 OperationError 拒流,且破 tune=zerolatency 的零攒帧。
-    另两条编码链已各有守护用例,这条风险最高的此前反而没有。
+    >1 会退到 slice/帧级并行:Chrome on Linux 的硬解 OperationError 拒流、网页预览
+    黑屏,且破 tune=zerolatency 的零攒帧。故这里断言字面量 1 而非 ``ENCODE_THREADS``
+    ——共享常量被调大时本用例必须红,而不是跟着一起变绿。要给别的编码链调大,请按
+    miot/tuning.py 的 ⚠ 先把预览链摘出独立常量,连带改这条断言。
     """
     from miot.tuning import ENCODE_THREADS
+
+    preview_hard_limit = 1
+    # 共享常量还没分家时两者必须一致,否则预览链已经悄悄拿到 >1 的值
+    assert ENCODE_THREADS == preview_hard_limit, (
+        f"ENCODE_THREADS={ENCODE_THREADS} 被调大了:预览链的 1 是硬约束,"
+        "请先按 miot/tuning.py 的 ⚠ 把预览链摘出独立常量再调"
+    )
 
     async def go():
         enc = H264LiveEncoder()
         await enc.encode(_bgr(), pts_ms=0)  # 触发 _open_encoder + codec.open()
         assert enc._codec is not None
         # 读 open 之后的值:libx264 若把线程数改回去,这里能抓到(同 omni 那条口径)。
-        assert enc._codec.thread_count == ENCODE_THREADS
+        assert enc._codec.thread_count == preview_hard_limit
         await enc.close()
 
     asyncio.run(go())
