@@ -3,8 +3,8 @@ name: miloco-notify
 description: 在 miloco 后台会话（感知引擎 / 定时任务 / 规则或任务事件触发、回复对用户不可见）里需要触达家庭成员时使用——感知告警、危险预警、任务到期、定时播报、设备异常、关怀提醒等场景。负责决策：通知给谁 → 走哪个渠道（音箱 TTS / IM / 米家推送）→ 写什么文案 → 交付执行。用户正在和你对话、你的回复本身就能到他眼前时**不要**加载本 skill（包括汇报他刚让你做的设备操作结果），直接回复即可。用户想配置 / 绑定 / 解绑通知接收渠道时走本 skill（见 references/channel-config.md）。
 metadata:
   author: miloco
-  version: "3.1"
-  date: "2026-06-16"
+  version: "3.2"
+  date: "2026-07-31"
   openclaw:
     requires:
       bins: ["miloco-cli"]
