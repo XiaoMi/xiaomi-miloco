@@ -4,9 +4,11 @@
 以及 person router 检测器单例在 settings reset 后失效。均为纯逻辑,不建真实
 CoreML session(不依赖 CoreML EP / 真实模型推理)。
 """
+
 from __future__ import annotations
 
 import threading
+from unittest.mock import Mock
 
 import pytest
 from miloco.perception.inference import ort_utils
@@ -103,3 +105,88 @@ def test_reset_hook_invalidates_detector_singleton(iso_home, monkeypatch):
     reset_settings()  # 触发 register_reset_hook 注册的 cache_clear
     d3 = router._load_detector()
     assert d3 is not d1  # reset 后单例失效,重新构造
+
+
+def test_make_session_prefers_openvino_gpu(monkeypatch):
+    session = object()
+    inference_session = Mock(return_value=session)
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["OpenVINOExecutionProvider", "CPUExecutionProvider"],
+    )
+    monkeypatch.setattr(ort_utils.ort, "InferenceSession", inference_session)
+
+    result = ort_utils.make_session("det.onnx", use_gpu=True, num_threads=2)
+
+    assert result is session
+    assert inference_session.call_args.kwargs["providers"] == [
+        ("OpenVINOExecutionProvider", {"device_type": "GPU"}),
+        "CPUExecutionProvider",
+    ]
+    opts = inference_session.call_args.kwargs["sess_options"]
+    assert opts.intra_op_num_threads == 2
+    assert opts.inter_op_num_threads == 2
+
+
+def test_make_session_openvino_gpu_falls_back_to_cuda(monkeypatch):
+    session = object()
+    inference_session = Mock(side_effect=[RuntimeError("GPU unavailable"), session])
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: [
+            "OpenVINOExecutionProvider",
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ],
+    )
+    monkeypatch.setattr(ort_utils.ort, "InferenceSession", inference_session)
+
+    result = ort_utils.make_session("reid.onnx", use_gpu=True)
+
+    assert result is session
+    assert inference_session.call_count == 2
+    assert inference_session.call_args_list[0].kwargs["providers"] == [
+        ("OpenVINOExecutionProvider", {"device_type": "GPU"}),
+        "CPUExecutionProvider",
+    ]
+    assert inference_session.call_args_list[1].kwargs["providers"] == [
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+
+
+def test_make_session_openvino_gpu_falls_back_to_cpu(monkeypatch):
+    session = object()
+    inference_session = Mock(side_effect=[RuntimeError("GPU unavailable"), session])
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["OpenVINOExecutionProvider", "CPUExecutionProvider"],
+    )
+    monkeypatch.setattr(ort_utils.ort, "InferenceSession", inference_session)
+
+    result = ort_utils.make_session("reid.onnx", use_gpu=True)
+
+    assert result is session
+    assert inference_session.call_args_list[1].kwargs["providers"] == [
+        "CPUExecutionProvider"
+    ]
+
+
+def test_make_session_does_not_use_openvino_when_gpu_disabled(monkeypatch):
+    session = object()
+    inference_session = Mock(return_value=session)
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["OpenVINOExecutionProvider", "CPUExecutionProvider"],
+    )
+    monkeypatch.setattr(ort_utils.ort, "InferenceSession", inference_session)
+    monkeypatch.setattr(ort_utils, "_IS_APPLE_SILICON", False)
+
+    result = ort_utils.make_session("det.onnx", use_gpu=False)
+
+    assert result is session
+    assert inference_session.call_args.kwargs["providers"] == ["CPUExecutionProvider"]
