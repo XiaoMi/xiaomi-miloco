@@ -218,14 +218,19 @@ export function PetDrawer({
             "replace",
           );
         }
-        if (appearance.trim() && !apprAdded) {
-          await addHomeEntry({
-            type: "member_persona",
-            content: appearance.trim(),
-            subjectId: petId,
-            subjectName: name.trim(),
-          });
-          setApprAdded(true);
+        if (appearance.trim()) {
+          // 幂等标记只兜「条目已插入」这一步；commit **每次都跑**（它本身幂等）。
+          // 标记若设在 commit 之前，commit 单独失败时重试会连它一起跳过 → 外观只留在
+          // profile.json、感知读的 profile.md 永远拿不到，而重试却报成功。
+          if (!apprAdded) {
+            await addHomeEntry({
+              type: "member_persona",
+              content: appearance.trim(),
+              subjectId: petId,
+              subjectName: name.trim(),
+            });
+            setApprAdded(true);
+          }
           await commitHomeProfile();
         }
       } else {

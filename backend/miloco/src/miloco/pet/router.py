@@ -57,6 +57,20 @@ def _require_pet_id(pet_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid pet_id format")
 
 
+def _resync_home_profile(action: str, pet_id: str) -> None:
+    """花名册变更后重渲家庭档案，让 prompt 里的宠物名单与花名册同步。
+
+    识别门（``home_profile_has_pets``）以花名册为判据、**立即**生效，而 prompt 里的名单来自
+    ``profile.md``（commit 产物）。建档 / 改名后不重渲，就会出现「门开了而名单缺失或还是旧名字」。
+    与 delete 的联动清理、admin ``set_features`` 的重渲同一范式；失败只告警——花名册已经写成功，
+    不能因为展示层重渲失败就把 2xx 变 5xx（下次任何 commit 会自愈）。
+    """
+    try:
+        get_manager().home_profile_service.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning("宠物%s后重渲家庭档案失败: pet_id=%s", action, pet_id, exc_info=True)
+
+
 def _require_pet_enabled() -> None:
     # 总开关关闭时，宠物「注册」链路整体不可用（建花名册 / 头像 / 参考图 / observe）；
     # 纯家庭事实由 miloco-home-profile 走 subject_id 留空记录。
@@ -161,6 +175,7 @@ async def create_pet(body: PetCreate, current_user: str = Depends(verify_token))
         raise HTTPException(status_code=409, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    _resync_home_profile("建档", pet.id)
     return NormalResponse(code=0, message="Pet created", data=pet.model_dump())
 
 
@@ -187,6 +202,7 @@ async def update_pet(
         raise HTTPException(status_code=409, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    _resync_home_profile("改名/改物种", pet_id)  # 改名后 md 里的 subject_name 才会纠偏
     return NormalResponse(code=0, message="Pet updated", data=pet.model_dump())
 
 
@@ -332,7 +348,8 @@ async def get_pet_reference_crop(
     # 否则把「盘上后缀 / Content-Type / 真实字节」的不一致从入口挪到出口。
     p = paths[idx]
     try:
-        ext = _avatar.sniff_image_ext(p.read_bytes()[:16]) or "jpg"
+        with p.open("rb") as f:  # 只读前 16 字节嗅魔数，别把整张图（最大 5MB）读进内存
+            ext = _avatar.sniff_image_ext(f.read(16)) or "jpg"
     except OSError:
         ext = "jpg"
     return FileResponse(str(p), media_type=_avatar.media_type(ext))

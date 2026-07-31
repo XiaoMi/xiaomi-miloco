@@ -29,7 +29,7 @@ class FieldSpec:
         但 VAD 判无人声（键鼠 / 底噪）时剥离本字段，根除模型在低信息音频上脑补"像指令的话"
         （实测：留着 speeches 字段就幻觉，剥掉即 0）。env_sounds 不挂此项，无人声仍保留。
     requires_identity —— 仅本轮有身份候选时输出。
-    requires_pets —— 仅本轮 has_pets（家庭档案有「## 宠物」段且 pet_recognition 开启）时输出。
+    requires_pets —— 仅本轮 has_pets（``pet_recognition`` 开启且**花名册非空**）时输出。
     spec_md_audio —— audio-only 路由专用「字段说明」变体（纯音频无画面，视觉语言全部剔除）；
         为 None 时 audio 路由沿用 video 版（与视觉无关的字段，如 env_sounds）。
     """
@@ -211,7 +211,8 @@ class SceneDescriptor:
     has_speech   —— 本轮 VAD 是否判出有真人声。音频过 gate（has_audio=True）但 VAD 判无
         人声（键鼠 / 底噪）时为 False → 只剥 speeches、保留 env_sounds。has_audio=False 时
         speeches 已被 requires_audio 剥掉，本标志无额外作用。
-    has_pets     —— 家庭档案是否含「## 宠物」段（已登记宠物、且未被软关闭隐藏）。为真且
+    has_pets     —— ``pet_recognition`` 开启且花名册非空（判据见 home_profile_loader，
+        **不**看 profile.md 的「## 宠物」标题：那段会被 token 预算归档等路径抹掉）。为真且
         video 路由时，在「# 字段说明」追加「## 宠物命名」纪律（宠物命名是视觉判断，故只 video）。
     identity_match_disabled —— 身份库为空（无任何注册成员）时为 True：``identities`` 字段
         改用精简版 ``IDENTITY_NO_MATCH``（只判 unknown↔no_person、不做成员匹配）。仅在
