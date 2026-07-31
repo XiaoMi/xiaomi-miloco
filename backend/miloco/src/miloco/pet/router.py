@@ -64,6 +64,9 @@ def _resync_home_profile(action: str, pet_id: str) -> None:
     ``profile.md``（commit 产物）。建档 / 改名后不重渲，就会出现「门开了而名单缺失或还是旧名字」。
     与 delete 的联动清理、admin ``set_features`` 的重渲同一范式；失败只告警——花名册已经写成功，
     不能因为展示层重渲失败就把 2xx 变 5xx（下次任何 commit 会自愈）。
+
+    ``pet_id`` 只进日志。调用方须传服务端生成的 id，或已过 ``_require_pet_id`` 白名单
+    （``^pet_[0-9a-f]{12}\\Z``）——否则那行 warning 就成了日志注入的落点。
     """
     try:
         get_manager().home_profile_service.commit()
