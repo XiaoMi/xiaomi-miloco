@@ -8,6 +8,7 @@ Hermes 设计上 ``pre_llm_call`` 只能往 **user message** 注入 ``{"context"
 ``prependSystemContext`` / ``appendSystemContext`` 两段，这里合并成单个 context
 块：先指令块（identity/capabilities/perception/memory/notify/language），再数据块
 （home-profile / pending-suggestions / device-catalog），用分隔线隔开。
+其中 notify 块只注入 miloco 后台会话（见 :func:`is_miloco_background_session`）。
 
 profile 判定（与 TS 端 ``resolveProfile`` 对齐）：
 - ``platform == "cron"`` 或 session_id 含 ``":cron:"`` / ``"miloco:cron:"`` → minimal
@@ -61,6 +62,41 @@ def resolve_profile(
     if "miloco-suggest" in key:
         return "suggestion"
     return "full"
+
+
+# cron 消息头：openclaw 把 cron turn 的消息改写成 ``[cron:<jobId> <jobName>] …``，
+# backend schedule runner 则写成 ``[cron:<name>] …``。取方括号内整段做归属判断。
+_CRON_HEADER_RE = re.compile(r"^\[cron:([^\]]*)\]")
+
+# 受管 job 都叫 ``miloco-<name>``，要求 ``miloco-`` 出现在词首（方括号起首、或 jobId 后的
+# 空格 / 冒号之后）。不做裸 substring 匹配：否则用户自建的「巡检 miloco 日志」这类 job 名
+# 会被认领成后台会话。严格程度与 session_id 段判定对齐。
+_MILOCO_JOB_RE = re.compile(r"(?:^|[\s:])miloco-")
+
+
+def is_miloco_background_session(
+    session_id: Optional[str],
+    user_message: Optional[str] = None,
+) -> bool:
+    """与 TS 端 ``isMilocoBackgroundSession(sessionKey, {prompt})`` 等价。
+
+    判断本轮是不是「miloco 后台会话」——由感知引擎 / miloco 定时任务 / 规则与任务事件
+    拉起、turn 跑在后台、**回复对用户不可见**，只能按 miloco-notify skill 主动推送才算
+    送达，故需注入 :data:`B_NOTIFY`；其余会话（用户 IM、常规 cron、CLI 主会话）不注入。
+
+    两条线索任一命中即算：
+
+    - session_id 有 miloco 段：backend dispatcher ``_ROUTE`` 写死
+      ``agent:main:miloco{,-rule,-suggest}``、schedule runner 写死
+      ``miloco-schedule:<cron_id>``，hermes 侧形如 ``miloco:cron:…`` / ``miloco-rule-<id>``。
+    - cron 头带 miloco：isolated cron 的 session_id 是 ``agent:<id>:cron:<jobId>:run:<runId>``，
+      jobId 随机、看不出归属，只能从消息头里的 job 名认领（miloco 自管的 job 都叫 ``miloco-*``）。
+    """
+    key = session_id or ""
+    if any(seg == "miloco" or seg.startswith("miloco-") for seg in key.split(":")):
+        return True
+    m = _CRON_HEADER_RE.match((user_message or "").lstrip())
+    return bool(m) and bool(_MILOCO_JOB_RE.search(m.group(1)))
 
 
 # ---------------------------------------------------------------------------
@@ -187,11 +223,16 @@ B_MEMORY = """## 家庭记忆
 B_RULE_EXEC = ""
 B_CONSTRAINTS = ""
 
+# 只注入 miloco 后台会话（见 is_miloco_background_session）。既然作用域已由注入侧收敛，
+# 正文就不再写「当面回答用户提问除外」这类例外——那句在语音 lane 反而是错的：语音提问的
+# 答复同样得经 TTS 推回去。作用域交给 gate，正文只讲这类会话里该怎么做。
+# 同理不提「用户要配置通知渠道」：配渠道必然发生在用户自己说话的会话里，而那种会话已经
+# 不注入本块，写在这儿只会让模型以为后台也会有人来配。该入口交给 miloco-notify 的 skill
+# description 兜（那是普通对话里唯一的加载触发器）。
 B_NOTIFY = """## 通知用户
-**要主动找人时——而不是当面回答用户此刻的提问——动手前必须先读 `miloco-notify` skill。** 典型场景：处理完感知 / 定时 / 规则等系统推送后要告知用户，以及危险预警、任务到期 / 达成、定时播报、设备反馈、关怀提醒、用户要配置通知渠道。
-为什么是硬性前置、不能跳过：
-- **处理系统推送时你的回话对用户不可见**——光把结论写进回复，没有任何人收到，等于没通知。必须经本 skill 决策并交付渠道才算送达。
-- 通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 `miloco_im_push` / `miloco-cli notify push` / TTS，否则容易选错人、选错渠道、说错话。"""
+本轮由 miloco 后台触发（感知引擎 / 定时任务 / 规则或任务事件），会话不在用户面前——**你写进回复里的话没有任何人看得到**。
+- 本轮**只要有信息要传达给家庭成员**（回应语音提问、危险预警、任务到期 / 达成、定时播报、设备异常、关怀提醒），**动手前必须先读 `miloco-notify` skill**：通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 `miloco_im_push` / `miloco-cli notify push` / TTS，否则容易选错人、选错渠道、说错话。
+- 本轮**不需要告知任何人**（只是归档、巡检、写记忆、改设备状态）→ 不必读本 skill，做完即止，别为了"有个交代"硬发一条。"""
 
 B_LANGUAGE = "## 输出语言\n用用户使用的语言回复用户（设备名、人名、专有名词保持原样）。"
 
@@ -270,7 +311,11 @@ def build_pending_suggestion_block() -> str:
 # 装配
 # ---------------------------------------------------------------------------
 
-def _build_prepend(profile: Profile) -> str:
+def _build_prepend(
+    profile: Profile,
+    session_id: Optional[str] = None,
+    user_message: Optional[str] = None,
+) -> str:
     """指令块，按 prompt.ts §3 序。"""
     parts: List[str] = [B_IDENTITY, _build_timezone_block()]
     if profile == "full":
@@ -283,7 +328,11 @@ def _build_prepend(profile: Profile) -> str:
         parts.append(B_MEMORY)
     if B_CONSTRAINTS:
         parts.append(B_CONSTRAINTS)
-    parts.append(B_NOTIFY)
+    # B_NOTIFY 只给 miloco 后台会话：那里回复对用户不可见，不主动推就等于没通知。
+    # 用户 IM / 常规 cron 也注入的话，会把"回答用户此刻的提问""汇报刚做完的设备操作"
+    # 一并误判成通知场景——白绕一次 skill，常规 cron 里还曾把一次汇报拖到 120s 超时。
+    if is_miloco_background_session(session_id, user_message):
+        parts.append(B_NOTIFY)
     parts.append(B_LANGUAGE)
     return "\n\n".join(parts)
 
@@ -330,7 +379,7 @@ def inject_context(
     """
     try:
         profile = resolve_profile(session_id, platform, user_message)
-        prepend = _build_prepend(profile)
+        prepend = _build_prepend(profile, session_id, user_message)
         append = _build_append(profile)
 
         sections = [prepend] if prepend else []

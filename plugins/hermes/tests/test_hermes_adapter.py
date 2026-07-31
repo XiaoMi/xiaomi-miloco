@@ -6,6 +6,7 @@
 - _looks_like_overflow best-effort 关键词检测
 - _extract_error_text 兼容 OpenAI-style envelope
 - build_system(profile) 通过 _build_prepend/_build_append 拼装 system msg
+- B_NOTIFY 注入范围门控(send_turn → build_system 是 hermes 侧唯一生效路径)
 - resolve_notify_target 3 级 fallback(state.json → scan ~/.hermes → needsBind)
 - _map_session session_key → hermes session_id 映射
 
@@ -488,3 +489,116 @@ def _fake_ctx(text: str, trace_id: str = "tr-test", lane: str = "miloco-interact
     ctx.profile = "minimal"
     ctx.extra = {}
     return ctx
+
+
+# ---------------------------------------------------------------------------
+# B_NOTIFY 注入范围（生效路径回归）
+#
+# hermes 侧的 pre_llm_call 钩子是 noop（miloco-plugin/__init__.py:70），
+# context_injection.inject_context 在 hermes 上根本不会被调用——
+# send_turn → build_system → _build_prepend 才是唯一的生效路径。
+# 只测 inject_context 兜不住这里：门控接错线时那边全绿、生产上通知块整片消失。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def notify_env(tmp_path, monkeypatch):
+    """临时 MILOCO_HOME + 屏蔽 catalog 子进程（build_system 会起 miloco-cli）。"""
+    from miloco_plugin_pkg import context_injection as ci
+
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+    monkeypatch.setattr(ci, "get_catalog", lambda: "")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "session_key,expected",
+    [
+        # dispatcher `_ROUTE` 的后台 lane：回复没人接收，得主动推
+        ("agent:main:miloco", True),
+        ("agent:main:miloco-rule", True),
+        ("agent:main:miloco-suggest", True),
+        # 用户 IM / 无归属：回复本身就到人，不注入
+        ("agent:main:telegram:dm:123", False),
+        ("wechat:s1", False),
+        (None, False),
+    ],
+)
+def test_build_system_scopes_notify_block(notify_env, session_key, expected):
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+
+    out = Adapter().build_system("full", {}, session_key, "客厅有人跌倒")
+    assert ("## 通知用户" in out) is expected
+    # 其余块不受门控影响
+    assert "## 能力概览" in out
+
+
+def test_build_system_rejects_hermes_session_id(notify_env):
+    """传 hermes 的 session_id 会让门控恒真——用它当判据等于没判。
+
+    ``_map_session`` 给每个 id 都加了 ``miloco:`` 前缀，按段切必然命中；
+    本测试把这一点钉死，防止有人「顺手」把 send_turn 改回传 session_id。
+    """
+    from miloco_plugin_pkg import context_injection as ci
+    from miloco_plugin_pkg.hermes_adapter.adapter import _map_session
+
+    mapped = _map_session("agent:main:telegram:dm:123", "miloco-interactive")
+    assert mapped.startswith("miloco:")
+    assert ci.is_miloco_background_session(mapped) is True  # 恒真 → 不可作判据
+    assert ci.is_miloco_background_session("agent:main:telegram:dm:123") is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "session_key,delivery,expected",
+    [
+        # 后台 lane（interaction / rule / suggestion）：deliver 为假 → 注入
+        ("agent:main:miloco", {}, True),
+        ("agent:main:miloco-rule", {}, True),
+        # owner-channel 投递（onboarding）：整轮回复经 hermes send 推到车主 IM，
+        # 用户看得见 → 不注入，与 openclaw 改写 sessionKey 后的行为一致
+        (
+            "agent:main:miloco",
+            {"resolve_target": "owner-channel", "deliver": True},
+            False,
+        ),
+    ],
+)
+async def test_send_turn_passes_notify_scope_to_build_system(
+    notify_env, monkeypatch, anyio_backend, session_key, delivery, expected
+):
+    """回归：send_turn 必须把 session_key / 本轮文本透给 build_system。
+
+    漏传 → 门控恒判 False → 后台 lane 的「## 通知用户」整片消失，
+    「客厅有人跌倒」这类告警会被写进一条没人收得到的回复里。
+    """
+    import httpx
+    from miloco_plugin_pkg.hermes_adapter import adapter as ad
+
+    monkeypatch.setattr(
+        ad, "_resolve_owner_session", lambda: ("agent:main:telegram:dm:9", "telegram")
+    )
+
+    captured: dict = {}
+
+    async def fake_post(self, url, **kw):
+        captured["body"] = kw.get("json")
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        return resp
+
+    async def fake_aclose(self):
+        return None
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", fake_aclose)
+
+    ctx = _fake_ctx("[感知引擎] 客厅有人跌倒，15 秒未起身")
+    ctx.session_key = session_key
+    ctx.profile = "full"
+    ctx.extra = {"delivery": delivery}
+    await ad.Adapter().send_turn(ctx)
+
+    messages = captured["body"]["messages"]
+    assert messages[0]["role"] == "system"
+    assert ("## 通知用户" in messages[0]["content"]) is expected
