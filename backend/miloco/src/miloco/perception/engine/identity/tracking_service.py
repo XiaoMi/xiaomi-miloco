@@ -80,6 +80,15 @@ class TrackingService(ABC):
     def reset_session(self) -> None:
         """重置跟踪会话状态，子类可按需实现。"""
 
+    def release(self) -> None:
+        """Release camera-local wrappers around shared model resources."""
+        tracker = getattr(self, "_tracker", None)
+        if tracker is not None and hasattr(tracker, "release"):
+            tracker.release()
+        detector = getattr(self, "_detector", None)
+        if detector is not None and hasattr(detector, "release"):
+            detector.release()
+
     def set_fps(self, fps: int) -> None:
         """运行时更新采样 fps：同步 ``_fps`` 并转调底层 tracker 的 set_fps。
 
@@ -125,6 +134,7 @@ class RealTrackingService(TrackingService):
         input_height: int = 720,
         sort_config=None,
         fps: int = 1,
+        model_resources=None,
     ):
         from miloco.perception.engine.identity.sort import SortConfig, SortTracker
         from miloco.perception.engine.identity.tracker.detector import Detector
@@ -134,7 +144,16 @@ class RealTrackingService(TrackingService):
         self._fps = fps
 
         det_path = self._resolve_model_path(model_dir, "det_4C.onnx")
-        self._detector = Detector(model_path=det_path, use_gpu=use_gpu)
+        det_session = (
+            model_resources.get_session(det_path)
+            if model_resources is not None
+            else None
+        )
+        self._detector = Detector(
+            model_path=det_path,
+            use_gpu=use_gpu,
+            session=det_session,
+        )
         # SortTracker 需要 fps 来把 SortConfig.max_age_sec 换算成 max_age_frames
         self._tracker = SortTracker(
             config=sort_config or SortConfig(),
@@ -198,6 +217,7 @@ class DeepSortTrackingService(TrackingService):
         input_height: int = 720,
         deep_sort_config=None,
         fps: int = 1,
+        model_resources=None,
     ):
         from miloco.perception.engine.config import DeepSortConfigDC
         from miloco.perception.engine.identity.deep_sort import DeepSortTracker
@@ -208,12 +228,30 @@ class DeepSortTrackingService(TrackingService):
         self._fps = fps
 
         det_path = RealTrackingService._resolve_model_path(model_dir, "det_4C.onnx")
-        self._detector = Detector(model_path=det_path, use_gpu=use_gpu)
+        det_session = (
+            model_resources.get_session(det_path)
+            if model_resources is not None
+            else None
+        )
+        self._detector = Detector(
+            model_path=det_path,
+            use_gpu=use_gpu,
+            session=det_session,
+        )
 
         cfg = deep_sort_config or DeepSortConfigDC()
         reid_path = (
             RealTrackingService._resolve_model_path(model_dir, "human_body_reid_v2.onnx")
             if model_dir else None
+        )
+        shared_reid_path = reid_path or RealTrackingService._resolve_model_path(
+            None,
+            "human_body_reid_v2.onnx",
+        )
+        reid_session = (
+            model_resources.get_session(shared_reid_path)
+            if model_resources is not None
+            else None
         )
         self._tracker = DeepSortTracker(
             detector=self._detector,
@@ -221,6 +259,7 @@ class DeepSortTrackingService(TrackingService):
             fps=fps,
             reid_model_path=reid_path,
             use_gpu=use_gpu,
+            reid_session=reid_session,
         )
 
     def analyze(self, frames: list[NDArray[np.uint8]], fps: int = 2) -> TrackingResponse:
