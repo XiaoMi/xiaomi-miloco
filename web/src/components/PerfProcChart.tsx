@@ -1,8 +1,11 @@
 /**
  * 进程 CPU 占用 + 线程数图表。
  *
- * 双折线时序:CPU%(左 Y 轴,brand 实线,另叠淡色桶内峰值包络)+ 线程数
- * (右 Y 轴,warning 虚线),hover 弹 tooltip 看时间点 + CPU 均值/桶内峰值/线程数。
+ * 双折线时序:CPU%(左 Y 轴,brand 橙实线,另叠淡色桶内峰值包络)+ 线程数
+ * (右 Y 轴,info 蓝虚线),hover 弹 tooltip 看时间点 + CPU 均值/桶内峰值/线程数。
+ * 线程数用 info 蓝而非 warning:warning(#D97706/#F59E0B)与 brand(#FF6700/#FF8533)
+ * 同属橙色系、色相只差十几度,细线上分不开——左轴量程改自适应后两条线会在图上
+ * 交叠,必须用对比色。
  * 数据来自 /monitor/proc/series。CPU 原始值取自 psutil Process.cpu_percent
  * (多核可 > 100),除以 core_count 归一化成「占整机 CPU 百分比」;tooltip 括号内
  * 保留原始绝对值(满核百分比)。左轴量程按数据挑档而非钉死 100(见
@@ -62,7 +65,7 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
             {t("perf.procLegendCpu")}
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="inline-block w-2.5 h-2.5 rounded-full bg-warning" />
+            <span className="inline-block w-2.5 h-2.5 rounded-full bg-info" />
             {t("perf.procLegendThreads")}
           </span>
           <span>{headerLine}</span>
@@ -178,7 +181,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
 
         <path
           d={threadPath}
-          className="stroke-warning"
+          className="stroke-info"
           strokeWidth="1.5"
           fill="none"
           strokeLinejoin="round"
@@ -249,7 +252,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
       {threadTicks.map((v) => (
         <div
           key={`th-${v}`}
-          className="text-caption num absolute pointer-events-none text-warning"
+          className="text-caption num absolute pointer-events-none text-info"
           style={{ top: yThreadPxAt(v) - 7, right: 0, width: PAD_R - 6, textAlign: "left" }}
         >
           {v.toFixed(0)}
