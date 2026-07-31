@@ -167,6 +167,10 @@ class GlmAdapter(MiMoAdapter):
     GLM-4.6V 请求体与 MiMoAdapter 完全同构（video_url + fps + media_resolution、
     input_audio、thinking:disabled 均接受，实测兼容），唯一差异是智谱网关要求
     携带 ``X-Title`` 头（不带会被 429 余额不足拦截），故只覆写 auth_headers。
+
+    注意：``X-Title: 4.5V MCP Local`` 是智谱 GLM Coding Plan 的 MCP 流量标识，
+    使用 Coding Plan 签发的 API Key 时必须携带，否则网关按普通资源包计费并
+    返回 429 余额不足。非 Coding Plan 的 GLM 视觉 Key 是否要求该头未验证。
     """
 
     def auth_headers(self, api_key: str) -> dict[str, str]:
