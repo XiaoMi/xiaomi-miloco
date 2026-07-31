@@ -67,3 +67,23 @@ def test_pts_counter_resets_on_resolution_rebuild():
         await enc.close()
 
     asyncio.run(go())
+
+
+def test_open_encoder_pins_libx264_thread_count():
+    """预览链的 thread_count 必须钉死 ENCODE_THREADS。
+
+    这条链的 1 是硬约束(见 miot/tuning.py 的 ⚠):>1 会退到 slice/帧级并行,
+    Chrome on Linux 的硬解会 OperationError 拒流,且破 tune=zerolatency 的零攒帧。
+    另两条编码链已各有守护用例,这条风险最高的此前反而没有。
+    """
+    from miot.tuning import ENCODE_THREADS
+
+    async def go():
+        enc = H264LiveEncoder()
+        await enc.encode(_bgr(), pts_ms=0)  # 触发 _open_encoder + codec.open()
+        assert enc._codec is not None
+        # 读 open 之后的值:libx264 若把线程数改回去,这里能抓到(同 omni 那条口径)。
+        assert enc._codec.thread_count == ENCODE_THREADS
+        await enc.close()
+
+    asyncio.run(go())
