@@ -1283,10 +1283,11 @@ def _encode_video_mp4(
         # LANCZOS4 是离线对照里实测的那一个(与 CUBIC 统计上无法区分 p=0.63,取被测过的)。
         #
         # 注意 scale **没有钳到 1.0**,本函数被全景 / query / legacy / crop 四条路径共用,
-        # 所以「相机源短边 < 目标短边」时它们同样走放大分支 —— 相机 LOW 码流只给 720p、
-        # 用户选 768/1080 档就命中(scale=1.07 / 1.50),是常见配置而非边角。这条路径本来
-        # 就在放大,只是此前用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,
-        # 落盘 clip.mp4 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
+        # 所以「源短边 < 目标短边」时它们同样走放大分支 —— miloco 恒定拉相机子码流(LOW,
+        # 见「全链分辨率」表②),其像素数由机型决定;离线实测到 720p,此时用户选 768/1080
+        # 档就命中(scale=1.07 / 1.50),是常见配置而非边角。这条路径本来就在放大,只是此前
+        # 用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,落盘 clip.mp4
+        # 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
         interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
         v_stream = container.add_stream("h264", rate=fps)
         v_stream.width = target_w
@@ -1486,6 +1487,46 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 # =============================================================================
 # 自适应分辨率(Smart Crop): 推理前定向裁切活动区域 → crop 视频 + 全景参考帧
 # =============================================================================
+#
+# 全链分辨率的来源与转换 —— 读本节前先过这张表,免得把中途某一档当成"源分辨率"。
+# 每条都已对着当前代码核过,行号随代码漂移,按符号名找。
+#
+# ① 相机拍摄分辨率:本仓库**完全不参与**,也没有任何配置项表达它。
+# ② 拉流档位:miot/client.py 里 `camera_instance.start_async(enable_reconnect=True,
+#    enable_audio=True)` **没传 qualities**,取 SDK 默认 MIoTCameraVideoQuality.LOW
+#    (枚举只有 LOW=1 / HIGH=3,见 miot 包 types.py)。即恒定拉**子码流**,且当前没有
+#    任何旋钮能改。LOW 对应多少像素由相机固件/机型决定(在 native libmiot_camera 里,
+#    本仓库看不到);离线对照里实测到 720p,那是**观测值不是代码保证**,别当常量用。
+# ③ 解码:SDK decoder.py 只做 `frame.to_ndarray(format="bgr24")`,不缩放;
+#    perception/collect/ 与 pipeline.py 全程无 resize —— 所以 packet.all_frames 就是
+#    ②的原生尺寸,是全链唯一的"源"。任何消费者都不得原地改它。
+# ④ 中途消费者各自缩放,互不影响、也不回写 all_frames:
+#    - 视觉门 gate/visual_gate.py `_preprocess` → 448x448 灰度(只用来算帧差比例)
+#    - 人形检测 tracker/detector.py `preprocess` → 等比缩到 **ONNX 自带的 416x416**
+#      + letterbox 填 114;postprocess 按 scale/pad 还原,故 box_info 是**原生像素
+#      坐标**(crop 因此不需要再换算)。注意 IdentityConfig.perception_input_width/
+#      height(1280/720)是**死配置**:传进 RealTrackingService 存成 _input_width/
+#      _input_height 后再没人读,真正决定输入尺寸的是模型的 416x416;engine/api.py
+#      还把它当调试信息暴露出去,容易被读成"感知输入分辨率"。
+#    - ReID tracker/human_reid.py `preprocess` → 人体 crop 缩到 192x96
+#    - 身份 crop 进 omni:本文件 _CROP_SIZE = (512,512)
+# ⑤ omni 推理分辨率 = `video_short_edge`(**本 PR 前后都只有这一个旋钮**):
+#    settings.yaml 默认 512、UI 档位 [360,512,768,1080]、admin API 收 64..2160。
+#    _encode_video_mp4 里 `scale = short_edge / min(h0,w0)` **没有钳到 1.0**,所以
+#    「源短边 < 用户档」时**本 PR 之前就已经在放大**了,只是用了为缩小设计的
+#    INTER_AREA(放大退化成近似最近邻);本 PR 只改了放大时用哪个重采样核。target
+#    还要 //2*2 取偶(h264 yuv420p),故实际编码短边可能比档位低 1-2px。该函数被
+#    fused 全景 / query / legacy / crop **四条路径共用**。
+# ⑥ crop 分辨率(本 PR 新增)= min(预算, cap_se):预算按用户档等比跟随(见
+#    _crop_short_edge_budget),cap_se 见 _maybe_encode_adaptive。它**可以 > 区域原生
+#    短边**,即放大。而同附的参考帧走 _resize_short_edge、是**钳死只缩不放**的 ——
+#    720p 源 + 1080 档时 crop 视频放大到 759、参考帧仍停在原生 720,两者口径不一致
+#    (有意:参考帧只承载全局 bbox 定位,放大它不增加可定位性)。
+# ⑦ provider 端还有第二层"分辨率",按 **token** 不按像素、与①~⑥独立:MiMo adapter
+#    硬编码 media_resolution="max";Gemini 读 input.media_resolution(""/low=66 tok
+#    每帧、high=264);Qwen 不传、从 mp4 自读。见 omni/provider.py。
+#    ⑥ 那个 +7.8pp 的收益,机制推测正落在这一层(像素网格大小 → 模型给主体分配多少
+#    token,而非信息量),所以它**是 provider 相关的**,换模型/adapter 可能蒸发。
 
 def _effective_panorama_short_edge() -> int:
     """全景视频短边 = 用户设定值;非正值兜回 512 默认。
