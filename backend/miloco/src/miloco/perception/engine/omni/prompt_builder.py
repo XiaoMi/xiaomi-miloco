@@ -1242,6 +1242,11 @@ def _encode_video_mp4(
         v_stream.width = target_w
         v_stream.height = target_h
         v_stream.pix_fmt = "yuv420p"
+        # 与 ws.py / transcoder.py 同口径:omni 编码已串行跑在 perception-infer 线程里,
+        # libx264 内部满核线程(PyAV 默认 thread_count=0=auto)买不到吞吐;单窗只有个位数帧,
+        # 起一遍线程池的成本反而占大头。设 1 顺带把 encode 内部那次 bgr24→yuv420p 的
+        # swscale 也收敛到 1——它取的就是 codec.thread_count。
+        v_stream.thread_count = 1
 
         # Audio stream (if enough samples for AAC)
         _AAC_FRAME_SIZE = 1024

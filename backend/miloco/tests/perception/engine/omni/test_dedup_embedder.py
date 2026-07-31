@@ -42,3 +42,6 @@ class TestEmbedderKleidiAIOptOut:
 
         dedup_embedder.EventEmbedder("/nonexistent-models-dir")
         assert len(calls) == 1, "EventEmbedder 自建 session 未调用 apply_kleidiai_opt_out"
+        # 极小模型固定单线程:满核 fork-join 开销 > 收益(见 TINY_MODEL_THREADS)
+        assert calls[0].intra_op_num_threads == ort_utils.TINY_MODEL_THREADS
+        assert calls[0].inter_op_num_threads == ort_utils.TINY_MODEL_THREADS

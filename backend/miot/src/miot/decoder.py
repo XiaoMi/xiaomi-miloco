@@ -30,8 +30,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # 单路实时解码/像素转换远用不满满核线程池,统一钉死上限(改一处即可)。
 # 引用 SWSCALE_THREADS 的 swscale 有三处:解码后 to_ndarray、预览 to_rgb、
-# transcoder.py 的预览编码 reformat。ws.py 抓片段编码链另有一条 encode 内部
-# swscale,随其 codec thread_count=1 收敛,不走此常量。
+# transcoder.py 的预览编码 reformat。另有两条 encode 内部 swscale 不走此常量,
+# 各随其 codec thread_count 收敛:ws.py 抓片段、prompt_builder.py 的 omni mp4。
 DECODE_THREADS = 4  # FFmpeg 解码器 slice 线程,含余量
 SWSCALE_THREADS = 2  # swscale 像素转换:1 已够,留 1 压单帧尖峰
 

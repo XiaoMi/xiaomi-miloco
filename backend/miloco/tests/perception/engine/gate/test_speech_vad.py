@@ -67,3 +67,6 @@ class TestVadSessionKleidiAIOptOut:
         sess = speech_vad._get_session()
         assert sess is not None, "应建成(stub)session"
         assert len(calls) == 1, "自建 VAD session 未调用 apply_kleidiai_opt_out"
+        # 极小模型固定单线程(见 TINY_MODEL_THREADS)
+        assert calls[0].intra_op_num_threads == ort_utils.TINY_MODEL_THREADS
+        assert calls[0].inter_op_num_threads == ort_utils.TINY_MODEL_THREADS
