@@ -161,6 +161,20 @@ class MiMoAdapter(OpenAICompatAdapter):
         return body
 
 
+class GlmAdapter(MiMoAdapter):
+    """GLM-4.6V API adapter（智谱大模型开放平台，OpenAI 兼容协议）。
+
+    GLM-4.6V 请求体与 MiMoAdapter 完全同构（video_url + fps + media_resolution、
+    input_audio、thinking:disabled 均接受，实测兼容），唯一差异是智谱网关要求
+    携带 ``X-Title`` 头（不带会被 429 余额不足拦截），故只覆写 auth_headers。
+    """
+
+    def auth_headers(self, api_key: str) -> dict[str, str]:
+        headers = super().auth_headers(api_key)
+        headers["X-Title"] = "4.5V MCP Local"
+        return headers
+
+
 class QwenOmniAdapter(OpenAICompatAdapter):
     """Qwen3.5-Omni 系列 API adapter（qwen3.5-omni-plus / qwen3.5-omni-flash）。
 
@@ -461,6 +475,7 @@ def adjust_fps_for_omni(fps: int, omni_fps: int) -> int:
 
 
 _DEFAULT_ADAPTER = MiMoAdapter()
+_GLM_ADAPTER = GlmAdapter()
 _QWEN_ADAPTER = QwenOmniAdapter()
 _GEMINI_ADAPTER = GeminiAdapter()
 
@@ -471,6 +486,9 @@ def get_adapter(model: str) -> OmniProviderAdapter:
     Qwen 侧仅支持 Qwen3.5-Omni 系列（qwen3.5-omni-plus / qwen3.5-omni-flash），
     旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
 
+    GLM 走 OpenAI 兼容协议（glm-4.6v 等），请求体与 MiMo 同构，
+    仅鉴权头差异由 GlmAdapter 处理。
+
     Gemini 走原生 generateContent 协议（OpenAI 兼容端点不支持视频输入）。
     """
     name = model.lower()
@@ -478,4 +496,6 @@ def get_adapter(model: str) -> OmniProviderAdapter:
         return _QWEN_ADAPTER
     if "gemini" in name:
         return _GEMINI_ADAPTER
+    if "glm" in name:
+        return _GLM_ADAPTER
     return _DEFAULT_ADAPTER
