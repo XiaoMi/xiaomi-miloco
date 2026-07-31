@@ -218,8 +218,8 @@ export function PetDrawer({
     try {
       if (isNew) {
         // 新增是多步串行写入，中途失败要能**就地重试**：记住已建档的 id，重试时不再 createPet
-        // （否则必撞 409「宠物名已存在」），改用 updatePet 同步可能改过的名字/物种；档案条目
-        // 也用 apprAdded 兜幂等，避免重复插入。
+        // （否则必撞 409「宠物名已存在」），改用 updatePet 同步可能改过的名字/物种；外观条目的
+        // 幂等由 writeAppearance 记 apprEntryId 兜住，参考图靠 mode=replace 兜住。
         let petId = createdId;
         if (petId === null) {
           const created = await createPet({

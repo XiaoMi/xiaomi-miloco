@@ -662,14 +662,15 @@ def test_video_dominant_track_survives_pool_cap(monkeypatch):
 
     def _dets(_f):
         calls["n"] += 1
-        out = [_det(20, 20, 80, 80, cls=Detection.CLASS_CAT)]
-        if calls["n"] <= n_dog:  # 狗只在前 n_dog 帧出现
-            out.append(_det(300, 300, 80, 80, cls=Detection.CLASS_DOG))
+        out = [_det(20, 20, 80, 80, cls=Detection.CLASS_CAT)]  # 猫：小框（远）
+        if calls["n"] <= n_dog:  # 狗只在前 n_dog 帧出现，但框更大（离镜头近）
+            out.append(_det(220, 220, 140, 140, cls=Detection.CLASS_DOG))
         return out
 
-    # 狗的 crop 更"清晰"（模拟离镜头近）：旧实现平手后靠这个胜出
+    # 按 crop 尺寸区分清晰度：大框（狗）更清晰。两个框尺寸必须**不同**，否则替身对两者
+    # 返回同值 → 退化成平手场景，旧实现（len(pool) 平手 + 累计 sharpness 决胜）也能过。
     monkeypatch.setattr(
-        obs, "compute_sharpness", lambda c: 9000.0 if c.shape[0] > 90 else 200.0
+        obs, "compute_sharpness", lambda c: 9000.0 if c.shape[0] > 100 else 200.0
     )
     frames = [(i, _frame(400, 400)) for i in range(n_cat)]
     selected, _n = obs._select_video_crops(frames, SimpleNamespace(detect_pets=_dets), fps=1)

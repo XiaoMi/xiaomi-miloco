@@ -79,11 +79,15 @@ export function isPetSubject(entry: HomeEntry): boolean {
   return Boolean(entry.subjectId?.startsWith("pet_"));
 }
 
-/** 该条目是否由「宠物档案卡」承载（→ 家庭档案面板不再重复展示）。
+/** 该条目是否由「宠物档案卡」独占承载（→ 家庭档案面板不再重复展示）。
+ *  **只认外观（member_persona）**：它在宠物档案卡右上「编辑」→ PetDrawer 里有改的入口，排除掉不会
+ *  失去写回路径。其余宠物条目（作息/健康…）一律留在家庭档案面板——宠物档案卡是只读展示，把它们也
+ *  排除等于让 Agent 写进去的事实在 Web 上既改不了也删不掉。代价是这些条目两处可见（卡内只读、
+ *  面板内可编），比丢掉唯一的改/删入口划算。
  *  前缀 + 花名册命中（与后端 service 的 _is_pet_entry 同口径）；花名册还没到（undefined）时
  *  按前缀先当宠物，避免宠物外观在「共享信息」里闪现一帧。 */
 export function hostedByPetCard(entry: HomeEntry, pets?: { id: string }[]): boolean {
-  if (!isPetSubject(entry)) return false;
+  if (entry.type !== "member_persona" || !isPetSubject(entry)) return false;
   return pets === undefined || pets.some((p) => p.id === entry.subjectId);
 }
 
