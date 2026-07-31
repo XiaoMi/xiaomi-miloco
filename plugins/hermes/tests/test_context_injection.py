@@ -32,6 +32,42 @@ def test_profile_full(tmp_miloco_home):
     assert ci.resolve_profile("anything-else") == "full"
 
 
+# ---------- is_miloco_background_session ----------
+
+@pytest.mark.parametrize(
+    "session_id,expected",
+    [
+        # miloco 后台 lane / 定时任务（backend dispatcher `_ROUTE` + schedule runner）
+        ("agent:main:miloco", True),
+        ("agent:main:miloco-rule", True),
+        ("agent:main:miloco-suggest", True),
+        ("miloco-schedule:abc123", True),
+        # hermes 侧 session_id 形态
+        ("miloco:cron:digest", True),
+        ("miloco-rule-abc", True),
+        # 非 miloco：常规 cron / 用户 IM / CLI 主会话
+        ("agent:main:cron:[t1]:run:abc", False),
+        ("agent:main:telegram:dm:123", False),
+        ("wechat:s1", False),
+        ("agent:main", False),
+        (None, False),
+    ],
+)
+def test_is_miloco_background_session(tmp_miloco_home, session_id, expected):
+    assert ci.is_miloco_background_session(session_id) is expected
+
+
+def test_is_miloco_background_session_cron_header(tmp_miloco_home):
+    """isolated cron 的 session_id 看不出归属，只能认消息头里的 job 名。"""
+    key = "agent:main:cron:[t1]:run:abc"
+    assert ci.is_miloco_background_session(key, "[cron:job1 miloco-home-patrol] 执行巡检。")
+    assert not ci.is_miloco_background_session(key, "[cron:job2 PTM 汇报] 汇总进展。")
+    # 正文提到 miloco 不算数——只认方括号内的 cron 头
+    assert not ci.is_miloco_background_session(
+        "agent:main:telegram:dm:1", "帮我看看 miloco 是怎么工作的"
+    )
+
+
 # ---------- inject_context ----------
 
 def test_full_includes_catalog_and_capabilities(tmp_miloco_home, monkeypatch):
@@ -46,15 +82,33 @@ def test_full_includes_catalog_and_capabilities(tmp_miloco_home, monkeypatch):
 
 
 def test_minimal_includes_identity_notify_timezone(tmp_miloco_home, monkeypatch):
-    """minimal profile 注入 identity + timezone + notify + language（对齐 OpenClaw）。"""
+    """miloco 定时任务（minimal）注入 identity + timezone + notify + language（对齐 OpenClaw）。"""
     monkeypatch.setattr(ci, "get_catalog", lambda: "# devices catalog\nx")
     out = ci.inject_context(session_id="miloco:cron:digest", platform="cron")
     assert out is not None
     ctx = out["context"]
     assert "Miloco" in ctx  # B_IDENTITY
     assert "时区" in ctx  # B_TIMEZONE
-    assert "通知用户" in ctx  # B_NOTIFY
+    assert "通知用户" in ctx  # B_NOTIFY —— miloco 后台会话，回复不可见，必须主动推
     assert "输出语言" in ctx  # B_LANGUAGE
+
+
+def test_non_miloco_sessions_omit_notify(tmp_miloco_home, monkeypatch):
+    """常规 cron 与用户 IM 会话不注入 B_NOTIFY：回复本身就能到人。"""
+    monkeypatch.setattr(ci, "get_catalog", lambda: "")
+    cron = ci.inject_context(
+        session_id="agent:main:cron:[t1]:run:abc",
+        user_message="[cron:job2 PTM 汇报] 汇总今天的进展。",
+        platform="cron",
+    )
+    assert cron is not None
+    assert "通知用户" not in cron["context"]
+    assert "miloco-notify" not in cron["context"]
+
+    im = ci.inject_context(session_id="agent:main:telegram:dm:123", user_message="把客厅灯打开")
+    assert im is not None
+    assert "通知用户" not in im["context"]
+    assert "## 能力概览" in im["context"]  # full profile 的其余块不受影响
 
 
 def test_empty_catalog_omitted(tmp_miloco_home, monkeypatch):

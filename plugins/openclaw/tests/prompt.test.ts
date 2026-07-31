@@ -6,7 +6,11 @@ import {
   readOnboardingState,
   writeOnboardingInviteState,
 } from "../src/home-profile/onboarding_state.js";
-import { registerBeforePromptBuildHook, resolveProfile } from "../src/hooks/prompt.js";
+import {
+  isMilocoBackgroundSession,
+  registerBeforePromptBuildHook,
+  resolveProfile,
+} from "../src/hooks/prompt.js";
 import { toLocalParts } from "../src/utils/time.js";
 
 // 感知日志文件名日期取部署时区；测试固定 tz 后按同一逻辑算出某个偏移日的文件名。
@@ -84,6 +88,55 @@ describe("resolveProfile", () => {
 
   it("trigger=cron → minimal", () => {
     expect(resolveProfile("agent:main:miloco", { trigger: "cron" })).toBe("minimal");
+  });
+});
+
+describe("isMilocoBackgroundSession", () => {
+  it.each([
+    // miloco 后台 lane（backend dispatcher `_ROUTE`）
+    ["agent:main:miloco", true],
+    ["agent:main:miloco-rule", true],
+    ["agent:main:miloco-suggest", true],
+    // backend schedule runner：`miloco-schedule:<cron_id>`
+    ["miloco-schedule:abc123", true],
+    // hermes 侧 session_id 形态
+    ["miloco:cron:digest", true],
+    ["miloco-rule-abc", true],
+    // 非 miloco：常规 cron / 用户 IM / CLI 主会话
+    ["agent:main:cron:[t1]:run:abc", false],
+    ["agent:main:telegram:dm:123", false],
+    ["wechat:s1", false],
+    ["agent:main:main", false],
+    ["agent:main", false],
+    [undefined, false],
+  ])("%s → %s", (key, expected) => {
+    expect(isMilocoBackgroundSession(key as string | undefined)).toBe(expected);
+  });
+
+  // isolated cron 的 sessionKey 看不出归属，只能从 `[cron:<jobId> <jobName>]` 里的 job 名认领。
+  it("miloco 自管 cron（job 名带 miloco）→ true", () => {
+    expect(
+      isMilocoBackgroundSession("agent:main:cron:[t1]:run:abc", {
+        prompt: "[cron:job1 miloco-home-patrol] 执行家庭巡检。",
+      }),
+    ).toBe(true);
+  });
+
+  it("用户自建 cron（job 名不含 miloco）→ false", () => {
+    expect(
+      isMilocoBackgroundSession("agent:main:cron:[t1]:run:abc", {
+        prompt: "[cron:job2 PTM 汇报] 汇总今天的 PTM 进展。",
+      }),
+    ).toBe(false);
+  });
+
+  // 消息正文里出现 miloco 不算数——只认方括号内的 cron 头。
+  it("正文提到 miloco 但无 cron 头 → false", () => {
+    expect(
+      isMilocoBackgroundSession("agent:main:telegram:dm:1", {
+        prompt: "帮我看看 miloco 是怎么工作的",
+      }),
+    ).toBe(false);
   });
 });
 
@@ -212,17 +265,68 @@ describe("before_prompt_build 组装", () => {
     expect(r.prependSystemContext).not.toContain("语音指令");
   });
 
-  it("minimal(cron)：仅身份+通知+语言，无感知/能力/记忆，append 为空", async () => {
+  it("minimal(常规 cron)：仅身份+语言，无通知/感知/能力/记忆，append 为空", async () => {
     const { api, run } = makeApi();
     registerBeforePromptBuildHook(api, {} as any);
     const r = await run("agent:main:cron:[t1]:run:abc");
     expect(r.prependSystemContext).toContain("Miloco");
-    expect(r.prependSystemContext).toContain("miloco-notify");
     expect(r.prependSystemContext).toContain("## 输出语言");
+    // 非 miloco 会话不注入通知块——回复本身就能到人，注入反而诱导它绕 skill。
+    expect(r.prependSystemContext).not.toContain("## 通知用户");
+    expect(r.prependSystemContext).not.toContain("miloco-notify");
     expect(r.prependSystemContext).not.toContain("## 感知");
     expect(r.prependSystemContext).not.toContain("## 能力概览");
     expect(r.prependSystemContext).not.toContain("## 家庭记忆");
     expect(r.appendSystemContext).toBeUndefined();
+  });
+
+  it("用户 IM 会话（full）不注入通知块，但保留能力/记忆", async () => {
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    const r = await run("agent:main:telegram:dm:123", {
+      prompt: "帮我把客厅灯打开",
+      workspaceDir: tmpWorkspace,
+    });
+    expect(r.prependSystemContext).not.toContain("## 通知用户");
+    expect(r.prependSystemContext).not.toContain("miloco-notify");
+    expect(r.prependSystemContext).toContain("## 能力概览");
+    expect(r.prependSystemContext).toContain("## 家庭记忆");
+  });
+
+  it("miloco 后台 lane（rule / suggest）仍注入通知块", async () => {
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    for (const key of ["agent:main:miloco-rule", "agent:main:miloco-suggest"]) {
+      const r = await run(key);
+      expect(r.prependSystemContext, key).toContain("## 通知用户");
+      expect(r.prependSystemContext, key).toContain("miloco-notify");
+    }
+  });
+
+  // backend schedule runner 的 session key 是 `miloco-schedule:<cron_id>`、消息带 `[cron:` 头，
+  // 因此 profile 落在 minimal——但它正是"到点主动播报"的场景，通知块不能跟着 minimal 一起砍掉。
+  it("miloco 定时任务（minimal）仍注入通知块", async () => {
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    const r = await run("miloco-schedule:c1", { prompt: "[cron:早安播报] 播报今天的天气。" });
+    expect(r.prependSystemContext).toContain("## 通知用户");
+    expect(r.prependSystemContext).not.toContain("## 能力概览");
+  });
+
+  // isolated cron 的 sessionKey 不带 miloco，靠消息头里的 job 名认领。
+  it("miloco 自管 cron（job 名带 miloco）仍注入通知块，用户自建 cron 不注入", async () => {
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+
+    const mine = await run("agent:main:cron:[t1]:run:abc", {
+      prompt: "[cron:job1 miloco-habit-suggest] 执行每日习惯洞察。",
+    });
+    expect(mine.prependSystemContext).toContain("## 通知用户");
+
+    const theirs = await run("agent:main:cron:[t2]:run:xyz", {
+      prompt: "[cron:job2 PTM 汇报] 汇总今天的 PTM 进展。",
+    });
+    expect(theirs.prependSystemContext).not.toContain("## 通知用户");
   });
 
   it("isolated cron（sessionKey 像交互式，但消息带 [cron: 前缀）→ minimal", async () => {
