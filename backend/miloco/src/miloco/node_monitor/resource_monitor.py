@@ -81,9 +81,11 @@ class ResourceMonitor:
             return dict(self._data)
 
     def _run(self) -> None:
-        # psutil.cpu_percent(interval=0) returns 0.0 on the very first call
-        # (it has no prior baseline). Discard that reading so the first
-        # _collect() exposes a real percentage rather than a misleading zero.
+        # cpu_percent(interval=0) 首次调用恒返 0.0（没有上一次的基准可比），这次预热
+        # 就是为了烧掉那个 0，让 _collect() 拿到的是真正的差值。但它并不能让第一拍
+        # 变得可信：两次调用之间只隔了下面那段内存探测的几十毫秒，远小于 psutil 要求
+        # 的 0.1s，算出来虚高。故 _collect() 仍用 _proc_first_sample 把第一拍挡在时序
+        # 队列外，见 __init__ 里的对应注释。
         try:
             self._psutil_proc.cpu_percent(interval=0)
         except Exception:

@@ -241,7 +241,11 @@ class TestProcSeriesEndpoint:
 
 
 class TestResourcesEndpointUnaffected:
-    """回归保护：/monitor/resources 仍只返原 5 字段。"""
+    """回归保护：/monitor/resources 只返进程级资源字段，不混入内存监控明细。
+
+    字段可以增加（如 num_threads），但 memory monitor 的 categories /
+    python_heap / total_rss_kb 必须留在 /monitor/memory 那一侧。
+    """
 
     def test_resources_endpoint_no_memory_fields(self, client, rm):
         with (

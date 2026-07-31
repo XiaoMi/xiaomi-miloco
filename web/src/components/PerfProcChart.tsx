@@ -70,7 +70,7 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
           </span>
           <span>{headerLine}</span>
           {/* 核数即 CPU% 的归一化分母，摆出来才能由百分比反推绝对占用 */}
-          {series && <span>{t("perf.procHeaderCores", { n: series.core_count })}</span>}
+          {series && <span>{t("perf.procHeaderCores", { n: coreCount })}</span>}
         </div>
       </div>
 
@@ -244,7 +244,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
           className="text-caption num absolute pointer-events-none text-text-tertiary"
           style={{ top: yCpuPxAt(v) - 7, left: 0, width: PAD_L - 6, textAlign: "right" }}
         >
-          {v.toFixed(0)}
+          {v.toFixed(0)}%
         </div>
       ))}
 
