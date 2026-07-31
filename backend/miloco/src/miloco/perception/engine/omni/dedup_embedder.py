@@ -17,6 +17,8 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
+from miloco.perception.inference.ort_utils import TINY_MODEL_THREADS
+
 logger = logging.getLogger(__name__)
 
 _MODEL_FILE = "bge-small-zh-v1.5-int8.onnx"
@@ -35,11 +37,13 @@ class EventEmbedder:
         models_dir = Path(models_dir)
         self._tok = Tokenizer.from_file(str(models_dir / _TOKENIZER_FILE))
         self._tok.enable_truncation(max_length=_MAX_TOKENS)
-        # 与 speech_vad 同款:这条 session 不走 make_session 工厂、强制 CPU EP(int8 算子
-        # CoreML 支持不全),故显式补 KleidiAI opt-out——ARM CPU EP 上 KleidiAI 也含 int8
-        # GEMM 微内核,与 issue #429 同源、同平台条件。1.27 已上游根治,此为防御,保持
-        # "所有自建 session 统一调 apply_kleidiai_opt_out"不变量(见其 docstring)。
+        # 强制 CPU EP(不走 make_session):int8 算子 CoreML 支持不全。模型极小、短句
+        # ~10ms、低频(suggestion 去重),线程限到 TINY(满核纯浪费)。ARM CPU EP 上
+        # KleidiAI 含 int8 GEMM 微内核(issue #429 同源),补 opt-out(1.27 已上游根治,
+        # 此为防御,保持"所有自建 session 统一调 apply_kleidiai_opt_out"不变量)。
         opts = ort.SessionOptions()
+        opts.intra_op_num_threads = TINY_MODEL_THREADS
+        opts.inter_op_num_threads = TINY_MODEL_THREADS
         apply_kleidiai_opt_out(opts)
         self._sess = ort.InferenceSession(
             str(models_dir / _MODEL_FILE),

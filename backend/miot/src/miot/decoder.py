@@ -282,6 +282,9 @@ class MIoTMediaDecoder(threading.Thread):
             else:
                 _LOGGER.error("unsupported video codec: %s, skipping frame", frame_data.codec_id)
                 return
+            # 限解码线程数:默认 auto 按 CPU 核数开满,单路实时解码远用不满,多出来的
+            # 全是 idle worker。钉死为 4(含余量)。
+            self._video_decoder.thread_count = 4
             _LOGGER.info("video decoder created, %s", frame_data.codec_id)
         pkt = Packet(frame_data.data)
         frames: List[VideoFrame] = self._video_decoder.decode(pkt)  # type: ignore
@@ -292,7 +295,9 @@ class MIoTMediaDecoder(threading.Thread):
         if self._video_frame_callback and frames:
             for frame in frames:
                 try:
-                    bgr = frame.to_ndarray(format="bgr24").astype("uint8")
+                    # 像素转换(swscale)默认按 CPU 核数开满 slice 线程池,单帧转换用
+                    # 不上,满核全是 idle。钉死 2:1 已够,留 1 个余量压单帧尖峰。
+                    bgr = frame.to_ndarray(format="bgr24", threads=2).astype("uint8")
                 except Exception as e:
                     _LOGGER.warning("Failed to convert frame to ndarray: %s", e)
                     continue
@@ -318,7 +323,7 @@ class MIoTMediaDecoder(threading.Thread):
                 self._last_jpeg_ts = now_ts
                 return
             frame = frames[0]
-            rgb_frame: VideoFrame = frame.to_rgb()
+            rgb_frame: VideoFrame = frame.to_rgb(threads=2)  # 同上:swscale 钉死 2
             img: Image.Image = rgb_frame.to_image()
             buf: BytesIO = BytesIO()
             img.save(buf, format="JPEG", quality=90)

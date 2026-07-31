@@ -44,6 +44,7 @@ def _get_session():
             import onnxruntime as ort
 
             from miloco.config import get_settings
+            from miloco.perception.inference.ort_utils import TINY_MODEL_THREADS
 
             path = get_settings().directories.models_dir / _MODEL_FILENAME
             if not path.is_file():
@@ -56,8 +57,8 @@ def _get_session():
             # silero 是小型有状态模型(单帧 <1ms)，直接走 CPU EP：CoreML 对其有状态算子
             # 支持差、易逐算子回落，CPU 已足够且与离线验证口径一致。
             opts = ort.SessionOptions()
-            opts.intra_op_num_threads = 1
-            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = TINY_MODEL_THREADS
+            opts.inter_op_num_threads = TINY_MODEL_THREADS
             # 这条 session 不走 make_session(有意保留 CPU EP、不切 CoreML:silero 是有
             # 状态小模型,CoreML 对其支持差、易逐算子回落)。但 silero 也含 conv,在 Apple
             # Silicon CPU EP 上会命中 ArmKleidiAI——即 issue #429 同源的卷积 workspace

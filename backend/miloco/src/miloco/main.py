@@ -722,6 +722,13 @@ def start_server():
 
     bootstrap("server")
 
+    # opencv 默认线程池 = CPU 核数(实测占 ~15 线程/进程),miloco 只做小图
+    # resize/imencode 用不满;钉死为 4。砍的是纯 idle 线程,图进程线程数干净,
+    # 非 CPU/RSS 优化(idle 线程不占 CPU;arena 数由 MALLOC_ARENA_MAX=2 独立钉死)。
+    import cv2
+
+    cv2.setNumThreads(4)
+
     uv_config = get_uvicorn_config()
 
     # 强约束 workers=1:miloco 后端是住户家用单实例服务,横向扩展应在反代层做
