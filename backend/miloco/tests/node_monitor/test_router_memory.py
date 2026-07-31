@@ -4,6 +4,7 @@
 verify_token 在 settings.server.token="" 时 bypass（默认值）。
 """
 
+import time
 from unittest.mock import patch
 
 import pytest
@@ -17,9 +18,9 @@ from miloco.node_monitor.router import router as monitor_router
 from miloco.node_monitor.router import set_resource_monitor
 
 
-def _make_smaps() -> MemSnapshot:
+def _make_smaps(ts: float = 12345.0) -> MemSnapshot:
     return MemSnapshot(
-        ts=12345.0,
+        ts=ts,
         total_rss_kb=600_000,
         categories=[
             CategoryStats("[heap]", 250_000, 1),
@@ -30,9 +31,9 @@ def _make_smaps() -> MemSnapshot:
     )
 
 
-def _make_py() -> PyHeapSnapshot:
+def _make_py(ts: float = 12345.0) -> PyHeapSnapshot:
     return PyHeapSnapshot(
-        ts=12345.0,
+        ts=ts,
         total_objects=100_000,
         total_size_kb=50_000,
         types=[PyTypeStats("builtins.dict", 30_000, 25_000)],
@@ -144,14 +145,18 @@ class TestMemorySeriesEndpoint:
         assert resp.status_code == 503
 
     def test_200_default_window_and_bucket(self, client, rm):
+        # 入环 ts 取自快照(见 resource_monitor 的 ts_val),必须给真实时间:
+        # get_memory_series 按 cutoff=now-window 过滤,默认的 12345.0 会被整点滤掉,
+        # points 恒为空、下面的字段断言就永远跑不到。
+        now = time.time()
         with (
             patch(
                 "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                return_value=_make_smaps(ts=now),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
-                return_value=_make_py(),
+                return_value=_make_py(ts=now),
             ),
         ):
             rm._collect()
@@ -159,14 +164,13 @@ class TestMemorySeriesEndpoint:
         resp = client.get("/api/monitor/memory/series")
         assert resp.status_code == 200
         data = resp.json()
-        assert "points" in data
         # bucket=1m default → interval_s 至少 60（路由有 max(bucket, 60) 钳制）
         assert data["interval_s"] >= 60
-        if data["points"]:
-            p = data["points"][0]
-            assert "rss_kb" in p
-            assert "py_objects" in p
-            assert "py_size_kb" in p
+        assert data["points"], "采了一次窗口内的快照后必须有点,空数组说明入环坏了"
+        p = data["points"][0]
+        assert "rss_kb" in p
+        assert "py_objects" in p
+        assert "py_size_kb" in p
 
     def test_200_various_window_bucket_combinations(self, client, rm):
         set_resource_monitor(rm, 0.0)
@@ -206,11 +210,11 @@ class TestProcSeriesEndpoint:
         data = resp.json()
         assert data["core_count"] >= 1
         assert data["interval_s"] >= 60
-        if data["points"]:
-            p = data["points"][0]
-            assert "cpu_pct" in p
-            assert "cpu_pct_max" in p
-            assert "num_threads" in p
+        assert data["points"], "跑了两次 _collect 后必须有点,空数组说明入环坏了"
+        p = data["points"][0]
+        assert "cpu_pct" in p
+        assert "cpu_pct_max" in p
+        assert "num_threads" in p
 
     def test_200_various_window_bucket_combinations(self, client, rm):
         set_resource_monitor(rm, 0.0)

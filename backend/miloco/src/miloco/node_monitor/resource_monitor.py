@@ -58,6 +58,8 @@ class ResourceMonitor:
             maxlen=PROC_RING_MAXLEN
         )
         self._proc_lock = threading.Lock()
+        # 线程数 latest：与入环时机解耦，首采样(跳过入环)采到的值也能给后续失败兜底。
+        self._num_threads_latest: int | None = None
         # 首次 cpu_percent 的测量窗口只有启动探测那几十毫秒（psutil 要求两次调用
         # 至少隔 0.1s 才准），读数虚高。跳过入环，避免假尖峰在 3d 环形缓冲里钉满
         # 3 天、污染前端「峰值」。真实基准从第二次采样（60s 后）起。
@@ -116,10 +118,10 @@ class ResourceMonitor:
             snapshot["fd"] = proc.num_fds()
         except Exception:
             logger.debug("collect fd failed", exc_info=True)
-        num_threads: int | None = None
         try:
             num_threads = proc.num_threads()
             snapshot["num_threads"] = num_threads
+            self._num_threads_latest = num_threads
         except Exception:
             logger.debug("collect num_threads failed", exc_info=True)
 
@@ -147,15 +149,16 @@ class ResourceMonitor:
 
         # CPU 时序独立入环：不受下面内存 region 采集 early-return 影响。
         # 首次采样读数虚高（见 __init__ 注释），跳过入环。线程数取不到时沿用
-        # 上一个已知值，避免曲线假性归零（与内存段「上次 latest 兜底」同策略）。
+        # _num_threads_latest（首采样也会更新它），避免曲线假性归零（与内存段
+        # 「上次 latest 兜底」同策略）。
         if cpu_pct is not None:
             if self._proc_first_sample:
                 self._proc_first_sample = False
             else:
                 with self._proc_lock:
-                    if num_threads is None:
-                        num_threads = self._proc_ring[-1][2] if self._proc_ring else 0
-                    self._proc_ring.append((snapshot["ts"], cpu_pct, num_threads))
+                    self._proc_ring.append(
+                        (snapshot["ts"], cpu_pct, self._num_threads_latest or 0)
+                    )
 
         # 内存 region + py_heap 采集（两路独立 try，互不影响）
         mem_snap: MemSnapshot | None = None

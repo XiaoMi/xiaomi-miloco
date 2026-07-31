@@ -348,6 +348,18 @@ class TestProcCollect:
             rm._collect()
         assert rm._proc_ring[-1][2] == prev
 
+    def test_num_threads_fallback_on_first_ringed_sample(self, tmp_db, tmp_log_dir):
+        """首采样已观测到线程数;紧接着的第 2 次失败时应沿用它,而非写 0。"""
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        rm._collect()  # 首次:成功采到线程数,但跳过入环
+        observed = rm.get_data()["num_threads"]
+        assert observed > 0
+        with patch.object(
+            rm._psutil_proc, "num_threads", side_effect=OSError("boom")
+        ):
+            rm._collect()  # 第二次:入环,但线程数取不到
+        assert rm._proc_ring[-1][2] == observed
+
     def test_proc_series_bucket_aggregation(self, tmp_db, tmp_log_dir):
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         base = int(time.time() // 180) * 180 - 540
