@@ -395,4 +395,4 @@ async def probe_omni(
             "status": r.status_code,
             "message": f"服务返回异常（HTTP {r.status_code}）",
         }
-    return await probe_chat(model, base, api_key)
+    return await probe_chat(model, base, api_key, extra_headers)

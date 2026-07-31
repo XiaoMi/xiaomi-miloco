@@ -522,6 +522,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
             "active": p.label == active.label,
+            "extra_headers": dict(p.extra_headers or {}),
         }
         for p in m.omni_profiles
     ]
@@ -535,6 +536,7 @@ def _full_omni_payload() -> dict:
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
                 "active": True,
+                "extra_headers": dict(active.extra_headers or {}),
             },
         )
     health = asdict(get_omni_circuit_breaker().snapshot())
@@ -546,6 +548,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
             "health": health,
+            "extra_headers": dict(active.extra_headers or {}),
         },
         "profiles": profiles,
     }
@@ -558,6 +561,7 @@ def _profiles_as_dicts() -> list[dict]:
             "model": p.model,
             "base_url": p.base_url,
             "api_key": p.api_key,
+            "extra_headers": dict(p.extra_headers or {}),
         }
         for p in get_settings().model.omni_profiles
     ]
@@ -700,6 +704,7 @@ async def activate_omni_config(
                         "model": p.model,
                         "base_url": p.base_url,
                         "api_key": p.api_key,
+                        "extra_headers": dict(p.extra_headers or {}),
                     }
                 }
             )
