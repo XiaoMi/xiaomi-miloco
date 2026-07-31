@@ -85,7 +85,7 @@ class ResourceMonitor:
         try:
             self._psutil_proc.cpu_percent(interval=0)
         except Exception:
-            pass
+            logger.debug("initial cpu_percent probe failed", exc_info=True)
         # 启动探测内存 region 采集：失败标记不可用，后续 _collect 跳过该段
         try:
             _sample_mem()
@@ -107,21 +107,21 @@ class ResourceMonitor:
             cpu_pct = proc.cpu_percent(interval=0)
             snapshot["cpu_pct"] = cpu_pct
         except Exception:
-            pass
+            logger.debug("collect cpu_pct failed", exc_info=True)
         try:
             snapshot["rss_mb"] = round(proc.memory_info().rss / (1024 * 1024), 1)
         except Exception:
-            pass
+            logger.debug("collect rss_mb failed", exc_info=True)
         try:
             snapshot["fd"] = proc.num_fds()
         except Exception:
-            pass
+            logger.debug("collect fd failed", exc_info=True)
         num_threads: int | None = None
         try:
             num_threads = proc.num_threads()
             snapshot["num_threads"] = num_threads
         except Exception:
-            pass
+            logger.debug("collect num_threads failed", exc_info=True)
 
         try:
             if os.path.exists(self._db_path):
@@ -129,7 +129,7 @@ class ResourceMonitor:
                     os.path.getsize(self._db_path) / (1024 * 1024), 2
                 )
         except Exception:
-            pass
+            logger.debug("collect db_size_mb failed", exc_info=True)
 
         try:
             total_log = 0
@@ -140,7 +140,7 @@ class ResourceMonitor:
                         total_log += os.path.getsize(fp)
             snapshot["log_size_mb"] = round(total_log / (1024 * 1024), 2)
         except Exception:
-            pass
+            logger.debug("collect log_size_mb failed", exc_info=True)
 
         with self._lock:
             self._data = snapshot
