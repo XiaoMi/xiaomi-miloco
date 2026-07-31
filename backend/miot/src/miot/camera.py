@@ -260,10 +260,24 @@ class MIoTCameraInstance:
         result: int = await self._main_loop.run_in_executor(
             None, self._lib_miot_camera.miot_camera_stop, self._c_instance
         )
-        # Stop decoders
-        for decoder in self._decoders:
-            decoder.stop()
+        # decoder.stop() 内部 join(timeout=5.0) 是阻塞调用,不能占着事件循环跑
+        # ——与上面 miot_camera_stop 走 run_in_executor 同一个理由。
+        # gather 并发停 N 路:最坏总耗时 5s,而非串行的 N × 5s。
+        stop_results = await asyncio.gather(
+            *(
+                self._main_loop.run_in_executor(None, decoder.stop)
+                for decoder in self._decoders
+            )
+        )
         self._decoders.clear()
+        if not all(stop_results):
+            _LOGGER.error(
+                "camera stop: %d/%d decoder threads outlived join timeout, "
+                "codec/worker still alive, %s",
+                stop_results.count(False),
+                len(stop_results),
+                self._did,
+            )
 
         _LOGGER.info("camera stop, %s, %s", self._did, result)
 
