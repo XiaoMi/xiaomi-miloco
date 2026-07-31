@@ -58,6 +58,10 @@ class ResourceMonitor:
             maxlen=PROC_RING_MAXLEN
         )
         self._proc_lock = threading.Lock()
+        # 首次 cpu_percent 的测量窗口只有启动探测那几十毫秒（psutil 要求两次调用
+        # 至少隔 0.1s 才准），读数虚高。跳过入环，避免假尖峰在 3d 环形缓冲里钉满
+        # 3 天、污染前端「峰值」。真实基准从第二次采样（60s 后）起。
+        self._proc_first_sample = True
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -112,7 +116,7 @@ class ResourceMonitor:
             snapshot["fd"] = proc.num_fds()
         except Exception:
             pass
-        num_threads = 0
+        num_threads: int | None = None
         try:
             num_threads = proc.num_threads()
             snapshot["num_threads"] = num_threads
@@ -141,10 +145,17 @@ class ResourceMonitor:
         with self._lock:
             self._data = snapshot
 
-        # CPU 时序独立入环：不受下面内存 region 采集 early-return 影响
+        # CPU 时序独立入环：不受下面内存 region 采集 early-return 影响。
+        # 首次采样读数虚高（见 __init__ 注释），跳过入环。线程数取不到时沿用
+        # 上一个已知值，避免曲线假性归零（与内存段「上次 latest 兜底」同策略）。
         if cpu_pct is not None:
-            with self._proc_lock:
-                self._proc_ring.append((snapshot["ts"], cpu_pct, num_threads))
+            if self._proc_first_sample:
+                self._proc_first_sample = False
+            else:
+                with self._proc_lock:
+                    if num_threads is None:
+                        num_threads = self._proc_ring[-1][2] if self._proc_ring else 0
+                    self._proc_ring.append((snapshot["ts"], cpu_pct, num_threads))
 
         # 内存 region + py_heap 采集（两路独立 try，互不影响）
         mem_snap: MemSnapshot | None = None
@@ -273,6 +284,9 @@ class ResourceMonitor:
             {
                 "ts": float(key),
                 "cpu_pct": round(sum(v[0] for v in vs) / len(vs), 1),
+                # 桶内峰值单列：桶粗到 1h 时（24h/3d 视图）均值会把 1min 级的满核
+                # 尖峰抹掉几十倍，前端 header 的「峰值」必须读这个而非均值序列的 max。
+                "cpu_pct_max": round(max(v[0] for v in vs), 1),
                 "num_threads": round(sum(v[1] for v in vs) / len(vs)),
             }
             for key, vs in sorted(buckets.items())

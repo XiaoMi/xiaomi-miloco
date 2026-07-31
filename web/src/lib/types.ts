@@ -656,6 +656,7 @@ export interface MemorySeries {
 export interface ProcPoint {
   ts: number;
   cpu_pct: number;
+  cpu_pct_max: number;
   num_threads: number;
 }
 

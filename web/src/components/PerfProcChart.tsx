@@ -32,7 +32,8 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
   const headerLine = (() => {
     if (points.length > 0) {
       const last = points[points.length - 1];
-      const peak = Math.max(...points.map((p) => p.cpu_pct));
+      // 峰值读桶内 max：桶粗到 1h 时(24h/3d 视图)cpu_pct 均值会抹平 1min 级尖峰。
+      const peak = Math.max(...points.map((p) => p.cpu_pct_max));
       return [
         t("perf.cpuHeaderCur", { pct: (last.cpu_pct / coreCount).toFixed(1) }),
         t("perf.cpuHeaderPeak", { pct: (peak / coreCount).toFixed(1) }),
@@ -280,11 +281,12 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
   );
 }
 
-/** 线程数语义的 Y 轴刻度。最小 top 钉在 20,避免线程数少时曲线噪声被放大。 */
+/** 线程数语义的 Y 轴刻度。整数量纲,档位取 4 的倍数保证均分后刻度无小数;
+ *  最小 top 钉在 20,避免线程数少时曲线噪声被放大。 */
 function chooseThreadYTicks(dataMax: number): number[] {
   const niceTop = (() => {
     if (dataMax <= 20) return 20;
-    if (dataMax <= 50) return 50;
+    if (dataMax <= 40) return 40;
     if (dataMax <= 100) return 100;
     if (dataMax <= 200) return 200;
     if (dataMax <= 500) return Math.ceil(dataMax / 100) * 100;

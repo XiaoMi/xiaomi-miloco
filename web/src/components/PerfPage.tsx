@@ -8,6 +8,8 @@
  *   4. Omni 错误时序(PerfOmniErrorChart)— omni_error_series
  *   5. 窗口丢弃数(PerfDropChart)        — drop_series
  *   6. 阶段耗时分布(PerfStageTable)     — stage_percentiles
+ *   6.4 进程 CPU/线程数(PerfProcChart)  — /api/monitor/proc/series
+ *   6.5 进程内存(PerfMemoryChart)       — /api/monitor/memory + /series
  *   7. 最近 Agent 调用(PerfAgentList)    — /api/traces?has_agent=1
  *   8. 近期处理耗时(PerfTraceTimingChart)— latency_percentiles
  *   9. 原始 trace 列表(PerfTraceList)   — /api/traces
@@ -133,7 +135,7 @@ export function PerfPage() {
     [windowKey, bucket],
     { errorLabel: t("perf.errMemSeries") },
   );
-  const cpuSeries = useAsync(
+  const procSeries = useAsync(
     () => getProcSeries(windowKey, bucket),
     [windowKey, bucket],
     { errorLabel: t("perf.errCpuSeries") },
@@ -157,7 +159,7 @@ export function PerfPage() {
     agentRuns.reload();
     memSnapshot.reload();
     memSeries.reload();
-    cpuSeries.reload();
+    procSeries.reload();
   };
 
   // 30s 自动刷新。窗口切换会重置 timer。
@@ -227,7 +229,7 @@ export function PerfPage() {
       <PerfStageTable state={stages} />
 
       {/* 6.4 进程 CPU 占用 + 线程数时序，与 perf 因果链解耦的运行时观察项 */}
-      <PerfProcChart seriesState={cpuSeries} bucket={bucket} windowMs={windowMs} />
+      <PerfProcChart seriesState={procSeries} bucket={bucket} windowMs={windowMs} />
 
       {/* 6.5 进程内存（smaps + py_heap），与 perf 因果链解耦的运行时观察项 */}
       <PerfMemoryChart

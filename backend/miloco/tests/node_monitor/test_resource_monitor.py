@@ -7,6 +7,7 @@ from miloco.node_monitor.monitor import NodeMonitor, get_monitor
 from miloco.node_monitor.py_heap import PyHeapSnapshot, PyTypeStats
 from miloco.node_monitor.resource_monitor import (
     MEMORY_RING_MAXLEN,
+    PROC_RING_MAXLEN,
     ResourceMonitor,
 )
 
@@ -284,3 +285,86 @@ class TestMemoryCollect:
         assert "categories" not in data
         assert "python_heap" not in data
         assert "total_rss_kb" not in data
+
+
+class TestProcCollect:
+    def test_first_sample_skips_ring(self, tmp_db, tmp_log_dir):
+        """首次采样测量窗口仅启动探测那几十毫秒，读数虚高，不入环。"""
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        rm._collect()
+        assert len(rm._proc_ring) == 0
+        rm._collect()
+        assert len(rm._proc_ring) == 1
+        ts, pct, nthreads = rm._proc_ring[0]
+        assert isinstance(pct, float)
+        assert nthreads > 0
+
+    def test_proc_ring_survives_memory_failure(self, tmp_db, tmp_log_dir):
+        """内存两路全挂时 _collect 会 early-return，CPU 仍须已入环。"""
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        with (
+            patch(
+                "miloco.node_monitor.resource_monitor.parse_smaps",
+                side_effect=OSError(),
+            ),
+            patch(
+                "miloco.node_monitor.resource_monitor.sample_py_heap",
+                side_effect=RuntimeError(),
+            ),
+        ):
+            rm._collect()  # 首次：CPU 跳过入环，内存两路失败
+            rm._collect()  # 第二次：CPU 入环，内存 early-return 不入 memory_ring
+        assert len(rm._memory_ring) == 0
+        assert len(rm._proc_ring) == 1
+
+    def test_proc_ring_caps_at_maxlen(self, tmp_db, tmp_log_dir):
+        # patch 掉内存采集(smaps 全读 + 遍历 Python 堆)，否则跑满环长要几千次真实
+        # 采集，慢到超时。CPU 段仍真实调用，本测试只验证 deque maxlen 截断。
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        with (
+            patch(
+                "miloco.node_monitor.resource_monitor.parse_smaps",
+                return_value=_make_smaps(),
+            ),
+            patch(
+                "miloco.node_monitor.resource_monitor.sample_py_heap",
+                return_value=_make_py(),
+            ),
+        ):
+            for _ in range(PROC_RING_MAXLEN + 2):
+                rm._collect()
+        assert len(rm._proc_ring) == PROC_RING_MAXLEN
+
+    def test_num_threads_fallback_keeps_last_value(self, tmp_db, tmp_log_dir):
+        """线程数取不到时沿用上一个已知值，不写 0（避免曲线假性归零）。"""
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        rm._collect()  # 首次跳过
+        rm._collect()  # 入环一个正常值
+        prev = rm._proc_ring[-1][2]
+        assert prev > 0
+        with patch.object(
+            rm._psutil_proc, "num_threads", side_effect=OSError("boom")
+        ):
+            rm._collect()
+        assert rm._proc_ring[-1][2] == prev
+
+    def test_proc_series_bucket_aggregation(self, tmp_db, tmp_log_dir):
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        base = int(time.time() // 180) * 180 - 540
+        for i in range(6):
+            rm._proc_ring.append((float(base + i * 60), 10.0 * (i + 1), 20 + i))
+        window = int(time.time() - base + 100)
+        series = rm.get_proc_series(window_seconds=window, bucket_seconds=180)
+        assert len(series["points"]) == 2
+        assert series["points"][0]["cpu_pct"] == 20.0  # (10+20+30)/3
+        assert series["points"][0]["cpu_pct_max"] == 30.0  # max(10,20,30)
+        assert series["points"][1]["cpu_pct"] == 50.0  # (40+50+60)/3
+        assert series["points"][1]["cpu_pct_max"] == 60.0
+        assert series["points"][0]["num_threads"] == 21  # round((20+21+22)/3)
+
+    def test_proc_series_empty_still_returns_core_count(self, tmp_db, tmp_log_dir):
+        """空环也必须带 core_count：前端拿它当除数，缺了就 NaN。"""
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        series = rm.get_proc_series(window_seconds=3600, bucket_seconds=60)
+        assert series["points"] == []
+        assert series["core_count"] >= 1

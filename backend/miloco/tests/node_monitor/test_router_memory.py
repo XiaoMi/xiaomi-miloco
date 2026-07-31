@@ -1,4 +1,4 @@
-"""Integration tests for /monitor/memory + /monitor/memory/series.
+"""Integration tests for /monitor/memory + /monitor/memory/series + /monitor/proc/series.
 
 用 TestClient 直接挂 monitor router，不拉起完整 lifespan / database / 感知。
 verify_token 在 settings.server.token="" 时 bypass（默认值）。
@@ -189,6 +189,45 @@ class TestMemorySeriesEndpoint:
     def test_invalid_bucket_returns_422(self, client, rm):
         set_resource_monitor(rm, 0.0)
         resp = client.get("/api/monitor/memory/series?window=1h&bucket=999s")
+        assert resp.status_code == 422
+
+
+class TestProcSeriesEndpoint:
+    def test_503_when_monitor_not_initialized(self, client):
+        resp = client.get("/api/monitor/proc/series")
+        assert resp.status_code == 503
+
+    def test_200_shape(self, client, rm):
+        rm._collect()
+        rm._collect()  # 首次采样跳过入环，第二次才有点
+        set_resource_monitor(rm, 0.0)
+        resp = client.get("/api/monitor/proc/series")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["core_count"] >= 1
+        assert data["interval_s"] >= 60
+        if data["points"]:
+            p = data["points"][0]
+            assert "cpu_pct" in p
+            assert "cpu_pct_max" in p
+            assert "num_threads" in p
+
+    def test_200_various_window_bucket_combinations(self, client, rm):
+        set_resource_monitor(rm, 0.0)
+        for window, bucket in [
+            ("1h", "1m"),
+            ("6h", "5m"),
+            ("24h", "1h"),
+            ("3d", "1h"),
+        ]:
+            resp = client.get(
+                f"/api/monitor/proc/series?window={window}&bucket={bucket}"
+            )
+            assert resp.status_code == 200, f"failed for {window}/{bucket}"
+
+    def test_invalid_window_returns_422(self, client, rm):
+        set_resource_monitor(rm, 0.0)
+        resp = client.get("/api/monitor/proc/series?window=999h")
         assert resp.status_code == 422
 
 
