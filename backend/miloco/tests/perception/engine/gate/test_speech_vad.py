@@ -38,7 +38,7 @@ class TestVadSessionKleidiAIOptOut:
         import types
 
         import onnxruntime as ort
-        from miloco.perception.inference import ort_utils
+        from miloco.perception.inference import ort_utils, tuning
 
         # 不 skip:写个 0 字节 dummy 模型 + 把 models_dir 指过去,绕过 _get_session 的
         # is_file() 早退;stub InferenceSession 避免真加载。这样 CI(无真实模型)也真跑,
@@ -68,5 +68,5 @@ class TestVadSessionKleidiAIOptOut:
         assert sess is not None, "应建成(stub)session"
         assert len(calls) == 1, "自建 VAD session 未调用 apply_kleidiai_opt_out"
         # 极小模型固定单线程(见 TINY_MODEL_THREADS)
-        assert calls[0].intra_op_num_threads == ort_utils.TINY_MODEL_THREADS
-        assert calls[0].inter_op_num_threads == ort_utils.TINY_MODEL_THREADS
+        assert calls[0].intra_op_num_threads == tuning.TINY_MODEL_THREADS
+        assert calls[0].inter_op_num_threads == tuning.TINY_MODEL_THREADS

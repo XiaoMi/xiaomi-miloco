@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-from miloco.perception.inference.ort_utils import TINY_MODEL_THREADS
+from miloco.perception.inference.tuning import TINY_MODEL_THREADS
 
 logger = logging.getLogger(__name__)
 

@@ -296,8 +296,9 @@ class MIoTMediaDecoder(threading.Thread):
         if self._video_frame_callback and frames:
             for frame in frames:
                 try:
-                    # 像素转换(swscale)默认按 CPU 核数开满 slice 线程池,单帧转换用
-                    # 不上,满核全是 idle。见 SWSCALE_THREADS。
+                    # 像素转换(swscale)默认按 CPU 核数开满 slice 线程池,而上下文每帧
+                    # 新建一次(reformatter 挂在 frame 上),等于每帧按核起一遍。单帧小图
+                    # 转换用不上。见 SWSCALE_THREADS。
                     bgr = frame.to_ndarray(
                         format="bgr24", threads=SWSCALE_THREADS
                     ).astype("uint8")
