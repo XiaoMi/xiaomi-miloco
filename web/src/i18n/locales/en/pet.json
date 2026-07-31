@@ -55,6 +55,7 @@
     "saveFail": "Couldn't save, please try again later",
     "deleteFail": "Couldn't delete, please try again later",
     "observeFail": "Generation failed, please retry",
+    "observeTimeout": "Generation timed out — the media is large or the hub is busy. Try again later, or use smaller media",
     "memberTitle": "Pet members",
     "experimentalBadge": "Experimental",
     "experimentalHint": "When on, pets can be registered as family members and named in scene descriptions; turning off only hides them, it does not delete recorded pets.",

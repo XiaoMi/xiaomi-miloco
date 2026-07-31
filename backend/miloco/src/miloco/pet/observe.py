@@ -166,12 +166,36 @@ def _box_crowded(
     return False
 
 
+def _passes_video_gate(c: dict) -> bool:
+    """视频候选硬门槛（**单一真源**：``_push_bounded`` 淘汰键与 ``_gate_select`` 硬排除共用）。
+
+    ⚠️ 只服务视频 track 池。单图候选（``_largest_pet_crop_with_count``）**有意**不过
+    ``PET_GATE_SHARP_MIN``——图是住户自己挑的、一次最多 3 张，卡掉只会落进整幅回退，而回退的
+    body crop 同样不过清晰度门。**勿把本函数套到单图路径**（会把那条刻意的决策悄悄回退）。
+    """
+    return (
+        (not c["crowded"])
+        and c["size_ok"]  # 尺寸硬门槛（短边/绝对面积/线性占比，见 _size_gate_ok）
+        and c["sharpness"] >= PET_GATE_SHARP_MIN
+    )
+
+
 def _push_bounded(pool: list[dict], cand: dict, cap: int) -> None:
-    """把候选压入池；超上限则按初步质量分（conf×sharpness×area）保留 top-cap。"""
+    """把候选压入池；超上限则先保**过硬门槛者**，组内再按初步质量分（conf×sharpness×area）留 top-cap。
+
+    分层的理由：淘汰键若只看质量分，会对 ``crowded`` 这条硬门槛完全无感——同框多只时的候选往往
+    离镜头更近、分更高，能把 cap 个名额全占满，而它们随后在 ``_gate_select`` 里被整批枪毙 →
+    整段视频白跑、落回整幅回退（实测：20 张同框高分挤满池 → 门控返回 0 张）。
+    入参契约同 ``_gate_select``（必带 crowded / size_ok / sharpness）。
+    """
     pool.append(cand)
     if len(pool) > cap:
         pool.sort(
-            key=lambda c: c["conf"] * c["sharpness"] * c["area_ratio"], reverse=True
+            key=lambda c: (
+                _passes_video_gate(c),
+                c["conf"] * c["sharpness"] * c["area_ratio"],
+            ),
+            reverse=True,
         )
         del pool[cap:]
 
@@ -290,13 +314,7 @@ def _gate_select(cands: list[dict]) -> list[dict]:
 
     决策4：硬排除后为空 → 返回 ``[]``（退纯描述），**绝不放宽**（勿抄 eval 的 pool=ok or raw）。
     """
-    ok = [
-        c
-        for c in cands
-        if (not c["crowded"])
-        and c["size_ok"]  # 尺寸硬门槛（短边/绝对面积/线性占比，见 _size_gate_ok）
-        and c["sharpness"] >= PET_GATE_SHARP_MIN
-    ]
+    ok = [c for c in cands if _passes_video_gate(c)]
     if not ok:
         return []
     for key in ("conf", "sharpness", "area_ratio"):
@@ -385,6 +403,8 @@ def _select_video_crops(
         fps=max(1, fps),
     )
     pool: dict[int, list[dict]] = {}
+    # track_id → 真实匹配帧数（**不受 POOL_CAP_PER_TRACK 截断**，见下方 primary_tid 的理由）
+    seen: dict[int, int] = {}
     n_coincident = 0  # 同帧真检测匹配宠物数的跨帧最大值（= 最多同时有几只入镜）
     for _idx, frame in frames:
         fh, fw = frame.shape[:2]
@@ -402,6 +422,8 @@ def _select_video_crops(
         matched_ids = {t["id"] for t in tracks if t.get("time_since_update", 0) == 0}
         n_coincident = max(n_coincident, len(matched_ids))
         for tr in tracks:
+            if tr["id"] not in matched_ids:
+                continue  # 只认本帧真匹配（与上方 matched_ids 同口径，兼容将来回预测框的路径）
             crop = _crop_with_padding(frame, tr["bbox"], _PADDING_RATIO)
             if crop is None or crop.size == 0:
                 continue
@@ -425,13 +447,18 @@ def _select_video_crops(
                 # 尺寸门在此算好（有帧尺寸），_gate_select 直接读（短边/绝对面积/线性占比）
                 "size_ok": _size_gate_ok(bw, bh, fw, fh),
             }
+            seen[tr["id"]] = seen.get(tr["id"], 0) + 1
             _push_bounded(pool.setdefault(tr["id"], []), cand, POOL_CAP_PER_TRACK)
     if not pool:
         return [], 0
-    # 主体（dominant）track = 被注册那一只：匹配帧数最多，平手取累计 sharpness 最大。
+    # 主体（dominant）track = 被注册那一只：**真实匹配帧数**最多，平手取累计 sharpness 最大。
+    # 帧数必须用 seen 而**不是** len(pool[t])：_push_bounded 把池硬截到 POOL_CAP_PER_TRACK，
+    # 任何出现 ≥cap 帧的 track 的 len 都等于 cap、一律平手 → 60 帧口径下主判据形同虚设，
+    # 全程在镜的自家宠物会输给只路过十几帧、但离镜头近清晰度高的另一只（实测可复现）。
     # 多只【同帧】入镜时只取主体，由 observe_pet 出 multiple_pets 提示（别静默丢，决策 D8）。
     primary_tid = max(
-        pool, key=lambda t: (len(pool[t]), sum(c["sharpness"] for c in pool[t]))
+        pool,
+        key=lambda t: (seen.get(t, len(pool[t])), sum(c["sharpness"] for c in pool[t])),
     )
     return _gate_select(pool[primary_tid]), n_coincident
 

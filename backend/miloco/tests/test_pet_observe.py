@@ -652,6 +652,55 @@ def test_video_dominant_track_is_longer_lived():
     assert {c["class_id"] for c in selected} == {Detection.CLASS_CAT}  # 主体=猫
 
 
+def test_video_dominant_track_survives_pool_cap(monkeypatch):
+    # 回归：主体判据曾用 len(pool[t])，而池被硬截到 POOL_CAP_PER_TRACK → 出现 ≥cap 帧的 track
+    # 一律平手，实际由累计 sharpness 决胜 → 全程在镜的猫会输给只路过十几帧、但离镜头近更清晰的狗。
+    # 现在用真实匹配帧数（seen），长命轨必胜。
+    cap = obs.POOL_CAP_PER_TRACK
+    n_cat, n_dog = cap + 8, cap + 2  # 两者都超 cap（旧实现下 len 平手）
+    calls = {"n": 0}
+
+    def _dets(_f):
+        calls["n"] += 1
+        out = [_det(20, 20, 80, 80, cls=Detection.CLASS_CAT)]
+        if calls["n"] <= n_dog:  # 狗只在前 n_dog 帧出现
+            out.append(_det(300, 300, 80, 80, cls=Detection.CLASS_DOG))
+        return out
+
+    # 狗的 crop 更"清晰"（模拟离镜头近）：旧实现平手后靠这个胜出
+    monkeypatch.setattr(
+        obs, "compute_sharpness", lambda c: 9000.0 if c.shape[0] > 90 else 200.0
+    )
+    frames = [(i, _frame(400, 400)) for i in range(n_cat)]
+    selected, _n = obs._select_video_crops(frames, SimpleNamespace(detect_pets=_dets), fps=1)
+    assert selected
+    assert {c["class_id"] for c in selected} == {Detection.CLASS_CAT}  # 主体=在镜更久的猫
+
+
+def test_push_bounded_keeps_gate_passing_candidates():
+    # 回归：淘汰键曾只看 conf×sharpness×area、对 crowded 无感 → 同框高分候选能占满池，
+    # 随后在 _gate_select 里被整批枪毙 → 整段视频白跑。现在先保过硬门槛者。
+    cap = 12
+
+    def _cand(*, crowded: bool, sharp: float, area: float) -> dict:
+        return {
+            "crowded": crowded,
+            "size_ok": True,
+            "sharpness": sharp,
+            "conf": 0.9,
+            "area_ratio": area,
+        }
+
+    pool: list[dict] = []
+    for _ in range(20):  # 同框但高分（旧实现会让它们占满池）
+        obs._push_bounded(pool, _cand(crowded=True, sharp=900.0, area=0.30), cap)
+    for _ in range(20):  # 合格但低分
+        obs._push_bounded(pool, _cand(crowded=False, sharp=120.0, area=0.04), cap)
+    assert len(pool) == cap
+    # 池里全是能过硬门槛的 → _gate_select 不会整批枪毙（门控全灭那条路被堵住）
+    assert all(obs._passes_video_gate(c) for c in pool)
+
+
 def test_build_warnings_dog_alias_and_cross_mismatch():
     dog = [{"class_id": Detection.CLASS_DOG}]
     for sp in ("犬类", "狗狗", "犬"):  # 归一化 == 狗 → 不误报

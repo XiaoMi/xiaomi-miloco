@@ -407,6 +407,9 @@ function MainApp() {
             <HomeKnowledgePanel
               data={home.data}
               persons={persons.data}
+              // 传花名册：宠物条目由上方「宠物档案卡」独占，本面板要排除掉（否则重复展示，
+              // 且能从这里把宠物条目改派给家人、把宠物卡清空）
+              pets={pets.data}
               loading={home.loading}
               onChanged={() => home.reload()}
             />

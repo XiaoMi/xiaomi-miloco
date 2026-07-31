@@ -376,16 +376,20 @@ export async function realDeletePet(petId: string): Promise<void> {
 export async function realObservePet(
   files: File[],
   grounding?: boolean,
+  signal?: AbortSignal,
 ): Promise<PetObserveResult> {
   const form = new FormData();
   // 多图走 medias（视频恒单个也走 medias，后端按内容判定）；向后兼容仍接单个 media 键
   for (const f of files) form.append("medias", f, f.name);
   if (grounding !== undefined) form.append("grounding", String(grounding));
   // 直接 fetch，避免 apiFetch 设上 Content-Type: application/json
+  // signal：调用方给客户端超时——本请求耗时长（上传 + 60 帧 CPU 推理 + omni），
+  // 而 UI 在 busy 期间会禁掉所有出口，没有超时就只能刷新页面。
   const resp = await fetch("/api/identity/pets:observe", {
     method: "POST",
     body: form,
     headers: authHeaders(),
+    signal,
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
@@ -570,7 +574,7 @@ interface BackendHomeEntries {
   ready_to_promote?: string[];
 }
 
-interface HomeOpResult {
+export interface HomeOpResult {
   op: string;
   id: string;
   ok: boolean;
@@ -655,7 +659,7 @@ export async function realListHomeEntries(
 export async function realProfileWrite(
   ops: HomeProfileOp[],
   userEdit = true,
-): Promise<void> {
+): Promise<HomeOpResult[]> {
   const r = await apiFetch<Normal<HomeOpResult[]>>(
     "/api/home-profile/profile:write",
     {
@@ -664,6 +668,7 @@ export async function realProfileWrite(
     },
   );
   assertOpsOk(r.data);
+  return r.data;  // add op 回新条目 id，供调用方做「失败重试改走 update」的续做
 }
 
 export async function realCandidateWrite(ops: HomeCandidateOp[]): Promise<void> {

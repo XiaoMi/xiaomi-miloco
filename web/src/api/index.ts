@@ -154,8 +154,9 @@ export async function deletePet(id: string): Promise<void> {
 export async function observePet(
   files: File[],
   grounding?: boolean,
+  signal?: AbortSignal,
 ): Promise<PetObserveResult> {
-  return impl.realObservePet(files, grounding);
+  return impl.realObservePet(files, grounding, signal);
 }
 
 export async function uploadPetAvatar(
@@ -205,8 +206,10 @@ export async function addHomeEntry(input: {
   content: string;
   subjectId?: string | null;
   subjectName?: string | null;
-}): Promise<void> {
-  return impl.realProfileWrite([
+}): Promise<string> {
+  // 返回新条目 id：多步写入（如宠物注册）中途失败时，调用方靠它把重试改走 update，
+  // 既不重复插条目、也不丢住户重试前改过的内容（见 PetDrawer.writeAppearance）。
+  const [res] = await impl.realProfileWrite([
     {
       op: "add",
       entry: {
@@ -219,6 +222,7 @@ export async function addHomeEntry(input: {
       },
     },
   ]);
+  return res?.id ?? "";
 }
 
 // 住户直编正式记忆（仅覆盖显式提供的字段）。
@@ -232,7 +236,7 @@ export async function updateHomeEntry(
     subjectName?: string | null;
   },
 ): Promise<void> {
-  return impl.realProfileWrite([
+  await impl.realProfileWrite([
     {
       op: "update",
       id,
@@ -249,12 +253,12 @@ export async function updateHomeEntry(
 }
 
 export async function deleteHomeEntry(id: string): Promise<void> {
-  return impl.realProfileWrite([{ op: "delete", id }]);
+  await impl.realProfileWrite([{ op: "delete", id }]);
 }
 
 // 确认候选 → 提升为正式（backend 自动从候选区移除该条）。
 export async function confirmCandidate(candidateId: string): Promise<void> {
-  return impl.realProfileWrite([{ op: "add", from: candidateId }]);
+  await impl.realProfileWrite([{ op: "add", from: candidateId }]);
 }
 
 // 忽略候选 → 直接从候选区删除。

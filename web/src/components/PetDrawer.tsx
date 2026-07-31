@@ -67,9 +67,9 @@ export function PetDrawer({
   const [appearance, setAppearance] = useState("");
   // 存量宠物外观所在的 member_persona 条目 id（保存时更新它）；null = 尚无外观条目。
   const [apprEntryId, setApprEntryId] = useState<string | null>(null);
-  // 新增多步写入的续做进度（失败后就地重试用）：已建档的 pet id / 外观条目是否已落。
+  // 新增多步写入的续做进度（失败后就地重试用）：已建档的 pet id。
+  // 外观条目的续做靠 apprEntryId（记 id、重试走 update），不用布尔标记——见 writeAppearance。
   const [createdId, setCreatedId] = useState<string | null>(null);
-  const [apprAdded, setApprAdded] = useState(false);
   const [confirmingDel, setConfirmingDel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [autoGen, setAutoGen] = useState<false | "register" | "append">(false);
@@ -106,9 +106,8 @@ export function PetDrawer({
       setAvatarBlob(null);
       setAvatarName("avatar.jpg");
       // 重试续做用的进度标记必须随抽屉重开清零，否则新增下一只时会复用上一只的 id
-      // （症状：以为在新增，实际改了上一只的名字）。
+      // （症状：以为在新增，实际改了上一只的名字）。apprEntryId 由上方按 pet 回填/置空。
       setCreatedId(null);
-      setApprAdded(false);
     } else {
       // 关闭即清头像暂存（趁抽屉渲染 null、屏幕不可见时清）——否则编辑宠物 A 裁图后取消、
       // 再开 B 会先闪现 A 上次裁的图一帧。
@@ -189,6 +188,30 @@ export function PetDrawer({
     setCrop({ source: { file }, initialBox: null });
   };
 
+  // 外观条目写入（新增 / 编辑**共用**）。记的是「已落条目的 id」而非「插过了」这个布尔：
+  // commit 失败时抽屉留着让住户就地重试，期间他很可能把描述改细——只记布尔会让重试整步跳过，
+  // 改过的文字没有任何写回路径却报保存成功；记 id 后重试走 update，内容每次都写回、也不会重复插。
+  // commit 每次都跑（本身幂等），否则外观只留在 profile.json、感知读的 profile.md 拿不到。
+  const writeAppearance = async (petId: string) => {
+    const appr = appearance.trim();
+    if (!appr) return; // canSave 已保证非空；保留一道门，杜绝写入空条目
+    if (apprEntryId) {
+      await updateHomeEntry(apprEntryId, {
+        content: appr,
+        subjectName: name.trim(), // 同步展示名，防改名后陈旧
+      });
+    } else {
+      const id = await addHomeEntry({
+        type: "member_persona",
+        content: appr,
+        subjectId: petId,
+        subjectName: name.trim(),
+      });
+      if (id) setApprEntryId(id); // 记下来：本轮失败后重试走上面的 update 分支
+    }
+    await commitHomeProfile();
+  };
+
   const submit = async () => {
     if (!canSave) return;
     setBusy(true);
@@ -218,42 +241,11 @@ export function PetDrawer({
             "replace",
           );
         }
-        if (appearance.trim()) {
-          // 幂等标记只兜「条目已插入」这一步；commit **每次都跑**（它本身幂等）。
-          // 标记若设在 commit 之前，commit 单独失败时重试会连它一起跳过 → 外观只留在
-          // profile.json、感知读的 profile.md 永远拿不到，而重试却报成功。
-          if (!apprAdded) {
-            await addHomeEntry({
-              type: "member_persona",
-              content: appearance.trim(),
-              subjectId: petId,
-              subjectName: name.trim(),
-            });
-            setApprAdded(true);
-          }
-          await commitHomeProfile();
-        }
+        await writeAppearance(petId);
       } else {
         await updatePet(pet.id, { name: name.trim(), species: species.trim() });
         if (avatarBlob) await uploadPetAvatar(pet.id, avatarBlob, avatarName);
-        // 外观：更新已有 member_persona 条目（同步 subjectName 以防改名后展示名陈旧），
-        // 无则新增；随后 commit 让「## 宠物」段重渲染。
-        const appr = appearance.trim();
-        if (apprEntryId) {
-          await updateHomeEntry(apprEntryId, {
-            content: appr,
-            subjectName: name.trim(),
-          });
-          await commitHomeProfile();
-        } else if (appr) {
-          await addHomeEntry({
-            type: "member_persona",
-            content: appr,
-            subjectId: pet.id,
-            subjectName: name.trim(),
-          });
-          await commitHomeProfile();
-        }
+        await writeAppearance(pet.id);
       }
       onChanged();
       onClose();

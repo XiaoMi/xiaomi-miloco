@@ -21,6 +21,10 @@ const VIDEO_RE = /\.(mp4|webm|mov|avi|mkv)$/i;
 // 首帧提取硬超时：视频能解码但 seek 不产生 seeked 事件时（onerror 也不来）兜底，
 // 否则 Promise 永挂 → busy 永为 true → ESC / 遮罩 / 关闭按钮三个出口全被禁用，只能刷新。
 const FRAME_TIMEOUT_MS = 5000;
+// observe 请求硬超时：上传（≤100MB）+ 60 帧 CPU 推理（use_gpu=False）+ 一次 omni 调用（~30s），
+// 正常最坏在 1 分钟量级，给 2 分钟余量。没有它的话——busy 期间 ESC / 遮罩 / 关闭三个出口全禁用，
+// 后端卡住住户只能刷新页面。
+const OBSERVE_TIMEOUT_MS = 120_000;
 const isVideoFile = (f: File) => f.type.startsWith("video") || VIDEO_RE.test(f.name);
 
 /** 候选的绝对质量分（conf×sharpness×area_ratio），供后端 append 按分留 top-3。 */
@@ -206,8 +210,11 @@ export function PetAutoGenFlow({
       files.map((f) => (isVideoFile(f) ? firstFrameDataUrl(f) : imageDataUrl(f))),
     ).catch(() => files.map(() => ""));
     setSrcPreviews(previews);
+    // 客户端硬超时：本地预览已 await 完（上面），这里只给网络+后端计时
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), OBSERVE_TIMEOUT_MS);
     try {
-      const r = await observePet(files, grounding);
+      const r = await observePet(files, grounding, ac.signal);
       if (!r.detected) {
         resetResult();
         // resetResult 清的是**上一轮**候选/描述；本轮的 warnings 要立刻补回：
@@ -241,8 +248,16 @@ export function PetAutoGenFlow({
       setAnalyzed(true);
     } catch (e) {
       resetResult();
-      toast(e instanceof Error ? e.message : t("pet.observeFail"), "warn");
+      toast(
+        ac.signal.aborted
+          ? t("pet.observeTimeout")
+          : e instanceof Error
+            ? e.message
+            : t("pet.observeFail"),
+        "warn",
+      );
     } finally {
+      clearTimeout(timer);
       setBusy(false);
     }
   };
