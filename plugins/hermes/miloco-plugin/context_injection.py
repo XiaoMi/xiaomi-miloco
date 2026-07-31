@@ -68,6 +68,11 @@ def resolve_profile(
 # backend schedule runner 则写成 ``[cron:<name>] …``。取方括号内整段做归属判断。
 _CRON_HEADER_RE = re.compile(r"^\[cron:([^\]]*)\]")
 
+# 受管 job 都叫 ``miloco-<name>``，要求 ``miloco-`` 出现在词首（方括号起首、或 jobId 后的
+# 空格 / 冒号之后）。不做裸 substring 匹配：否则用户自建的「巡检 miloco 日志」这类 job 名
+# 会被认领成后台会话。严格程度与 session_id 段判定对齐。
+_MILOCO_JOB_RE = re.compile(r"(?:^|[\s:])miloco-")
+
 
 def is_miloco_background_session(
     session_id: Optional[str],
@@ -91,7 +96,7 @@ def is_miloco_background_session(
     if any(seg == "miloco" or seg.startswith("miloco-") for seg in key.split(":")):
         return True
     m = _CRON_HEADER_RE.match((user_message or "").lstrip())
-    return bool(m) and "miloco" in m.group(1)
+    return bool(m) and bool(_MILOCO_JOB_RE.search(m.group(1)))
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +226,12 @@ B_CONSTRAINTS = ""
 # 只注入 miloco 后台会话（见 is_miloco_background_session）。既然作用域已由注入侧收敛，
 # 正文就不再写「当面回答用户提问除外」这类例外——那句在语音 lane 反而是错的：语音提问的
 # 答复同样得经 TTS 推回去。作用域交给 gate，正文只讲这类会话里该怎么做。
+# 同理不提「用户要配置通知渠道」：配渠道必然发生在用户自己说话的会话里，而那种会话已经
+# 不注入本块，写在这儿只会让模型以为后台也会有人来配。该入口交给 miloco-notify 的 skill
+# description 兜（那是普通对话里唯一的加载触发器）。
 B_NOTIFY = """## 通知用户
 本轮由 miloco 后台触发（感知引擎 / 定时任务 / 规则或任务事件），会话不在用户面前——**你写进回复里的话没有任何人看得到**。
-- 本轮**只要有信息要传达给家庭成员**（回应语音提问、危险预警、任务到期 / 达成、定时播报、设备异常、关怀提醒，以及用户要配置通知渠道），**动手前必须先读 `miloco-notify` skill**：通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 `miloco_im_push` / `miloco-cli notify push` / TTS，否则容易选错人、选错渠道、说错话。
+- 本轮**只要有信息要传达给家庭成员**（回应语音提问、危险预警、任务到期 / 达成、定时播报、设备异常、关怀提醒），**动手前必须先读 `miloco-notify` skill**：通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 `miloco_im_push` / `miloco-cli notify push` / TTS，否则容易选错人、选错渠道、说错话。
 - 本轮**不需要告知任何人**（只是归档、巡检、写记忆、改设备状态）→ 不必读本 skill，做完即止，别为了"有个交代"硬发一条。"""
 
 B_LANGUAGE = "## 输出语言\n用用户使用的语言回复用户（设备名、人名、专有名词保持原样）。"

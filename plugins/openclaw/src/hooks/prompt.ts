@@ -41,6 +41,12 @@ export function resolveProfile(
 // backend schedule runner 则写成 `[cron:<name>] …`。取方括号内整段做归属判断。
 const CRON_HEADER_RE = /^\[cron:([^\]]*)\]/;
 
+// 受管 job 都叫 `miloco-<name>`，要求 `miloco-` 出现在词首（方括号起首、或 jobId 后的
+// 空格 / 冒号之后）。不做裸 substring 匹配：否则用户自建的「巡检 miloco 日志」这类 job
+// 名会被认领成后台会话，又吃回本次要摘掉的那条硬前置。严格程度与上面 sessionKey 段判
+// 定（`=== "miloco"` / `startsWith("miloco-")`）对齐。
+const MILOCO_JOB_RE = /(?:^|[\s:])miloco-/;
+
 // B_NOTIFY 的注入范围判定：本轮是不是「miloco 后台会话」。
 // 这类会话由感知引擎 / miloco 定时任务 / 规则与任务事件拉起，turn 跑在后台（deliver=false），
 // **回复对用户不可见**，只能按 miloco-notify skill 主动推送才算送达，故必须注入 B_NOTIFY；
@@ -65,7 +71,7 @@ export function isMilocoBackgroundSession(
     .some((seg) => seg === "miloco" || seg.startsWith("miloco-"));
   if (hasMilocoSegment) return true;
   const cronHeader = CRON_HEADER_RE.exec(opts?.prompt?.trimStart() ?? "")?.[1];
-  return cronHeader?.includes("miloco") ?? false;
+  return MILOCO_JOB_RE.test(cronHeader ?? "");
 }
 
 // ===== prepend 指令块（静态） =====
@@ -149,9 +155,12 @@ const B_CONSTRAINTS = "";
 // 只注入 miloco 后台会话（见 isMilocoBackgroundSession）。既然作用域已由注入侧收敛，
 // 正文就不再写「当面回答用户提问除外」这类例外——那句在语音 lane 反而是错的：语音提问的
 // 答复同样得经 TTS 推回去。作用域交给 gate，正文只讲这类会话里该怎么做。
+// 同理不提「用户要配置通知渠道」：配渠道必然发生在用户自己说话的会话里，而那种会话已经
+// 不注入本块，写在这儿只会让模型以为后台也会有人来配、白绕一次 channel-config。该入口交
+// 给 miloco-notify 的 skill description 兜（那是普通对话里唯一的加载触发器）。
 const B_NOTIFY = `## 通知用户
 本轮由 miloco 后台触发（感知引擎 / 定时任务 / 规则或任务事件），会话不在用户面前——**你写进回复里的话没有任何人看得到**。
-- 本轮**只要有信息要传达给家庭成员**（回应语音提问、危险预警、任务到期 / 达成、定时播报、设备异常、关怀提醒，以及用户要配置通知渠道），**动手前必须先读 \`miloco-notify\` skill**：通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 \`miloco_im_push\` / \`miloco-cli notify push\` / TTS，否则容易选错人、选错渠道、说错话。
+- 本轮**只要有信息要传达给家庭成员**（回应语音提问、危险预警、任务到期 / 达成、定时播报、设备异常、关怀提醒），**动手前必须先读 \`miloco-notify\` skill**：通知要决策「给谁 → 走哪个渠道（TTS / IM / 米家推送）→ 说什么」，这套判断只在 skill 里；别绕过它直接裸调 \`miloco_im_push\` / \`miloco-cli notify push\` / TTS，否则容易选错人、选错渠道、说错话。
 - 本轮**不需要告知任何人**（只是归档、巡检、写记忆、改设备状态）→ 不必读本 skill，做完即止，别为了"有个交代"硬发一条。`;
 
 function buildOnboardingSessionBlock(

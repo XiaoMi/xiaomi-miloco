@@ -68,6 +68,25 @@ def test_is_miloco_background_session_cron_header(tmp_miloco_home):
     )
 
 
+@pytest.mark.parametrize(
+    "prompt,expected",
+    [
+        # 受管 job 都叫 miloco-<name>，词首出现才算
+        ("[cron:job1 miloco-home-patrol] 巡检", True),
+        ("[cron:miloco-habit-suggest] 跑建议", True),
+        # 用户自建 job 名里顺口提到 miloco 不该被认领
+        ("[cron:job7 巡检 miloco 日志] 看看日志", False),
+        ("[cron:job8 milocoish-report] 汇报", False),
+        ("[cron:job9 同步 miloco] 同步", False),
+    ],
+)
+def test_is_miloco_background_session_cron_header_word_boundary(
+    tmp_miloco_home, prompt, expected
+):
+    key = "agent:main:cron:[t1]:run:abc"
+    assert ci.is_miloco_background_session(key, prompt) is expected
+
+
 # ---------- inject_context ----------
 
 def test_full_includes_catalog_and_capabilities(tmp_miloco_home, monkeypatch):

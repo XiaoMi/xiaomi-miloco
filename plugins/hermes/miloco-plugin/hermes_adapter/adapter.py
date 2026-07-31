@@ -214,20 +214,38 @@ class Adapter:
 
     # ---- build_system --------------------------------------------------
 
-    def build_system(self, profile: str, extra: dict[str, Any]) -> str:
+    def build_system(
+        self,
+        profile: str,
+        extra: dict[str, Any],
+        session_key: Optional[str] = None,
+        user_message: Optional[str] = None,
+    ) -> str:
         """组装 OpenAI ``<system>`` 消息文本。
 
         对齐 doc §五 #2: 硬约束 + 工具索引 + 感知格式 + 数据源 + (按 profile)档案/目录。
 
         实现要点: 从 plugin 侧 ``context_injection`` 模块复用 ``_build_prepend`` /
         ``_build_append``(都是 module-private,这里直接 import 或 inline)。
+
+        ``session_key`` / ``user_message`` 供 ``_build_prepend`` 判 B_NOTIFY 的注入范围
+        (见 ``context_injection.is_miloco_background_session``)。
+
+        注意传的是 **miloco 侧的 session_key**(``agent:main:miloco`` 这种),不是 hermes
+        的 session_id——后者由 ``_map_session`` 统一加了 ``miloco:`` 前缀,按段一切必然
+        命中,gate 会恒为真等于没判。调用方(``send_turn``)负责在 owner-channel 投递时
+        传 None,见那里的注释。
+
+        两个参数留默认值只为兼容 duck-typed 契约里 ``build_system(profile, extra)``
+        的老签名——但**生产路径必须显式传**,否则 gate 恒判 False、后台 lane 的通知块
+        会被整片摘掉。
         """
         from .context_injection import (
             _build_append,
             _build_prepend,
         )
 
-        prepend = _build_prepend(profile)
+        prepend = _build_prepend(profile, session_key, user_message)
         append = _build_append(profile)
         sections = [prepend] if prepend else []
         if append:
@@ -280,12 +298,27 @@ class Adapter:
             )
         timeout_s = max(wait_timeout_ms / 1000.0, 1.0) + _HTTP_BUFFER_S
 
+        # B_NOTIFY 的注入范围判据（对齐 openclaw webhooks/agent.ts 的 effectiveSessionKey
+        # 语义）：看**本轮回复用户能不能看见**。
+        # - 常规后台 lane（interaction / bind / rule / suggestion）：deliver 为假，回复没有
+        #   任何人接收 → 按 miloco 侧 session_key 判，命中 agent:main:miloco{,-rule,-suggest}
+        #   → 注入「## 通知用户」，让 agent 知道要主动推。
+        # - owner-channel 投递（onboarding）：turn 虽跑在新会话，但整轮回复会经 hermes send
+        #   推到车主 IM，用户看得见 → 传 None 让 gate 判 False，与 openclaw 侧把 sessionKey
+        #   改写成车主 IM 会话后不注入的行为一致。
+        # 别拿 hermes 的 session_id 当判据：_map_session 给每个 id 都加了 `miloco:` 前缀，
+        # 按段一切必然命中 miloco，gate 会恒为真、等于没判。
+        notify_session_key = None if delivery.get("deliver") else session_key
+
         # 组装 messages: <system>(可选) + <user>
-        # build_system 内部可能走 subprocess（catalog CLI），丢线程池避免阻塞事件循环
+        # build_system 内部可能走 subprocess（catalog CLI），丢线程池避免阻塞事件循环。
+        # 后两个参数必须透传：漏传会让「## 通知用户」整片消失、后台告警静默丢失。
         if profile != "minimal":
             import asyncio as _asyncio
             loop = _asyncio.get_running_loop()
-            system_text = await loop.run_in_executor(None, self.build_system, profile, extra)
+            system_text = await loop.run_in_executor(
+                None, self.build_system, profile, extra, notify_session_key, text
+            )
         else:
             system_text = ""
         messages: list[dict[str, str]] = []

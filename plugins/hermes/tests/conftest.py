@@ -51,3 +51,27 @@ def _load_single(alias: str, file: Path) -> None:
 
 # 插件：作为包 miloco_plugin_pkg 装载（context_injection/tools_* 间有相对导入）
 _load_pkg("miloco_plugin_pkg", _PLUGIN_DIR)
+
+
+def _alias_flat_adapter_deps() -> None:
+    """复刻 install-hermes.sh 的摊平部署布局，让 adapter 的相对导入能解析。
+
+    生产里 install-hermes.sh（见 :615-680）把 ``hermes_adapter/{__init__,adapter}.py``
+    和 ``{context_injection,catalog,paths,tools_habit}.py`` 一起拷进
+    ``$MILOCO_HOME/agent_platform/hermes/``——adapter.py 与这几个模块同级，所以它写的是
+    ``from .context_injection import ...``。仓库布局里 hermes_adapter/ 只有 adapter.py，
+    相对导入解析不到，``build_system`` 这条**生效路径**就没法在单测里跑。
+
+    这里按生产布局补上 sys.modules 别名（同一个模块对象，monkeypatch 两边同时生效）。
+    """
+    import importlib
+
+    parent = "miloco_plugin_pkg.hermes_adapter"
+    importlib.import_module(parent)
+    for name in ("context_injection", "catalog", "paths", "tools_habit"):
+        alias = f"{parent}.{name}"
+        if alias not in sys.modules:
+            sys.modules[alias] = importlib.import_module(f"miloco_plugin_pkg.{name}")
+
+
+_alias_flat_adapter_deps()

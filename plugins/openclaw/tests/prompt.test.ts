@@ -138,6 +138,20 @@ describe("isMilocoBackgroundSession", () => {
       }),
     ).toBe(false);
   });
+
+  // cron 头只认词首的 `miloco-`：受管 job 都叫 miloco-<name>，用户 job 名里顺口提到
+  // miloco 不该被认领——否则又给它套回本次要摘掉的那条硬前置。
+  it.each([
+    ["[cron:job1 miloco-home-patrol] 巡检", true],
+    ["[cron:miloco-habit-suggest] 跑建议", true],
+    ["[cron:job7 巡检 miloco 日志] 看看日志", false],
+    ["[cron:job8 milocoish-report] 汇报", false],
+    ["[cron:job9 同步 miloco] 同步", false],
+  ])("cron 头 %s → %s", (prompt, expected) => {
+    expect(isMilocoBackgroundSession("agent:main:cron:[t1]:run:abc", { prompt })).toBe(
+      expected,
+    );
+  });
 });
 
 describe("before_prompt_build 组装", () => {
