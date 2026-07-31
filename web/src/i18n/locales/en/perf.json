@@ -96,6 +96,7 @@
     "procEmptySeries": "No CPU time series in the selected window.",
     "procAria": "Process CPU usage and thread count time series, dual-axis line chart",
     "procHeaderThreads": "Threads {{n}}",
+    "procHeaderCores": "{{n}} cores",
     "procLegendCpu": "CPU",
     "procLegendThreads": "Threads",
     "procTooltipPeak": "Bucket peak",

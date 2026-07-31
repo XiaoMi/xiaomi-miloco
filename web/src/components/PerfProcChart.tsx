@@ -1,11 +1,13 @@
 /**
  * 进程 CPU 占用 + 线程数图表。
  *
- * 双折线时序:CPU%(左 Y 轴 0-100%,brand 实线,另叠淡色桶内峰值包络)+ 线程数
+ * 双折线时序:CPU%(左 Y 轴,brand 实线,另叠淡色桶内峰值包络)+ 线程数
  * (右 Y 轴,warning 虚线),hover 弹 tooltip 看时间点 + CPU 均值/桶内峰值/线程数。
  * 数据来自 /monitor/proc/series。CPU 原始值取自 psutil Process.cpu_percent
- * (多核可 > 100),除以 core_count 归一化到 0-100%;tooltip 括号内保留原始绝对值
- * (满核百分比)。粗桶(24h/3d 视图 1h 桶)下均值线会抹平尖峰,峰值包络与 tooltip
+ * (多核可 > 100),除以 core_count 归一化成「占整机 CPU 百分比」;tooltip 括号内
+ * 保留原始绝对值(满核百分比)。左轴量程按数据挑档而非钉死 100(见
+ * chooseCpuYTicks),跨机器可比性由 tooltip/header 的归一化数字承担,曲线只负责
+ * 显示形状。粗桶(24h/3d 视图 1h 桶)下均值线会抹平尖峰,峰值包络与 tooltip
  * 峰值行让尖峰仍可定位、与 header「峰值」对得上。
  *
  * SVG 骨架与 PerfMemoryChart 同款:viewBox 横向自适应 + HTML 浮层放轴标签和
@@ -64,6 +66,8 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
             {t("perf.procLegendThreads")}
           </span>
           <span>{headerLine}</span>
+          {/* 核数即 CPU% 的归一化分母，摆出来才能由百分比反推绝对占用 */}
+          {series && <span>{t("perf.procHeaderCores", { n: series.core_count })}</span>}
         </div>
       </div>
 
@@ -105,11 +109,11 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
   const PAD_B = 28;
   const SVG_W = 1000;
 
-  // 左轴:CPU% 归一化 = cpu_pct / 总核数,Y 轴钉死 [0,100]
+  // 左轴:CPU% 归一化 = cpu_pct / 总核数,量程按峰值包络挑档(见 chooseCpuYTicks)
   const cpuVals = points.map((p) => p.cpu_pct / coreCount);
   const cpuMaxVals = points.map((p) => p.cpu_pct_max / coreCount);
-  const CPU_TICKS = [0, 25, 50, 75, 100];
-  const yCpuMax = 100;
+  const cpuTicks = chooseCpuYTicks(Math.max(0, ...cpuMaxVals));
+  const yCpuMax = cpuTicks[cpuTicks.length - 1];
 
   // 右轴:线程数
   const threadVals = points.map((p) => p.num_threads);
@@ -159,7 +163,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
         role="img"
         aria-label={t("perf.procAria")}
       >
-        {CPU_TICKS.map((v) => (
+        {cpuTicks.map((v) => (
           <line
             key={v}
             x1={PAD_L}
@@ -230,8 +234,8 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
         })}
       </svg>
 
-      {/* 左 Y 轴:CPU% 归一化 0-100 */}
-      {CPU_TICKS.map((v) => (
+      {/* 左 Y 轴:CPU% 归一化 */}
+      {cpuTicks.map((v) => (
         <div
           key={v}
           className="text-caption num absolute pointer-events-none text-text-tertiary"
@@ -303,6 +307,25 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
       )}
     </div>
   );
+}
+
+/** CPU% 语义的 Y 轴刻度。归一化后的常态值远低于 100%:进程受 GIL 约束多在单核
+ *  以内,而单核满跑在 8 核机上只有 12.5%、16 核机上只有 6.25%,量程钉死 100 会把
+ *  日常波动压成一条贴底直线。故按数据挑档,档位都能被 4 整除保证刻度是整数;
+ *  最小 top 钉在 4%,避免进程空闲时把采样噪声放大成剧烈波动。
+ *  挑档依据是峰值包络而非均值线,保证包络不被 clamp 成贴顶直线。
+ *
+ *  20% 以下按 4 递进(4/8/12/16/20),这是 GIL 进程的常驻区间,档位密则数据变化时
+ *  轴只微调、不会成倍跳;20% 以上按 20 递进(40/60/80/100),那已是异常状态,量程
+ *  精度不重要。 */
+function chooseCpuYTicks(dataMax: number): number[] {
+  const niceTop = (() => {
+    if (dataMax <= 20) return Math.max(4, Math.ceil(dataMax / 4) * 4);
+    if (dataMax <= 100) return Math.ceil(dataMax / 20) * 20;
+    return 100;
+  })();
+  const step = niceTop / 4;
+  return [0, step, step * 2, step * 3, niceTop];
 }
 
 /** 线程数语义的 Y 轴刻度。整数量纲,档位取 4 的倍数保证均分后刻度无小数;

@@ -96,6 +96,7 @@
     "procEmptySeries": "所选窗口内无 CPU 时序数据。",
     "procAria": "进程 CPU 占用与线程数时间序列，双 Y 轴折线图",
     "procHeaderThreads": "线程 {{n}}",
+    "procHeaderCores": "{{n}} 核",
     "procLegendCpu": "CPU",
     "procLegendThreads": "线程数",
     "procTooltipPeak": "桶内峰值",
