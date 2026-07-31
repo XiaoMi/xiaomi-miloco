@@ -552,6 +552,21 @@ class TestBuildMessagesContentBlocks:
         audio_block = next(b for b in user_blocks if b["type"] == "input_audio")
         assert audio_block["input_audio"]["data"].startswith("data:audio/m4a;base64,")
 
+    def test_audio_route_glm_drops_audio_block(self):
+        """GLM 不支持 input_audio：audio-only 窗口降级为 text-only，不发音频块。"""
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import GlmAdapter
+
+        ep = _audio_only_packet()
+        payload = build_prompt(ep, OmniContext())
+        messages = _build_messages(payload, GlmAdapter())
+        user_blocks = messages[1]["content"]
+        types = [b["type"] for b in user_blocks]
+
+        assert "input_audio" not in types
+        assert "video_url" not in types
+        assert any(b["type"] == "text" for b in user_blocks)
+
     def test_video_route_emits_video_url_block(self):
         from miloco.perception.engine.omni.omni_client import _build_messages
         from miloco.perception.engine.omni.provider import MiMoAdapter

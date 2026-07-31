@@ -83,11 +83,19 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
     is_gemini = (
         (urlparse(base).hostname or "").lower() == "generativelanguage.googleapis.com"
     )
+    # 智谱 GLM（open.bigmodel.cn / api.z.ai）需带 X-Title 头（Coding Plan MCP 流量
+    # 标识，不带被 429 拦截），与 adapter.auth_headers 保持一致。
+    is_glm = (urlparse(base).hostname or "").lower() in (
+        "open.bigmodel.cn",
+        "api.z.ai",
+    )
     headers = (
         {"x-goog-api-key": api_key}
         if is_gemini
         else {"Authorization": f"Bearer {api_key}"}
     )
+    if is_glm:
+        headers["X-Title"] = "4.5V MCP Local"
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(f"{base}/models", headers=headers)
@@ -352,10 +360,14 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
 
     if not isinstance(get_adapter(model), OpenAICompatAdapter):
         return await probe_chat(model, base, api_key)
+    headers = {"Authorization": f"Bearer {api_key}"}
+    # 智谱 GLM 需带 X-Title 头（Coding Plan MCP 流量标识），与 adapter 一致。
+    if (urlparse(base).hostname or "").lower() in ("open.bigmodel.cn", "api.z.ai"):
+        headers["X-Title"] = "4.5V MCP Local"
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(
-                f"{base}/models", headers={"Authorization": f"Bearer {api_key}"}
+                f"{base}/models", headers=headers
             )
     except Exception as e:  # noqa: BLE001
         return {

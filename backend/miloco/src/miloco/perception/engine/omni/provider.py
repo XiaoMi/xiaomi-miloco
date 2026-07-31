@@ -12,7 +12,7 @@ adapter 职责：
   - parse_response / parse_stream_chunk —— 把 provider 响应反解析回 OpenAI 形态
     ``{choices:[{message:{content}}], usage:{...}}``。
 
-OpenAI 兼容族（MiMo / Qwen）继承 ``OpenAICompatAdapter``，协议方法走默认实现，只覆写各自
+OpenAI 兼容族（MiMo / Qwen / GLM）继承 ``OpenAICompatAdapter``，协议方法走默认实现，只覆写各自
 的 block / body 差异。Gemini 走原生 ``generateContent`` 协议（OpenAI 兼容端点不支持视频输入）。
 """
 
@@ -43,6 +43,12 @@ class LocalMediaInfo:
 
 
 class OmniProviderAdapter(ABC):
+    """provider 是否接受 ``input_audio`` 块。``False`` 时 audio-only 窗口降级为
+    text-only、不发音频块（见 prompt_builder 的 audio route / omni_client 的
+    on_demand 路径）。MiMo / Qwen / Gemini 默认支持，GLM 关闭。
+    """
+
+    supports_audio_input: bool = True
 
     @abstractmethod
     def build_video_block(self, video_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
@@ -164,14 +170,19 @@ class MiMoAdapter(OpenAICompatAdapter):
 class GlmAdapter(MiMoAdapter):
     """GLM-4.6V API adapter（智谱大模型开放平台，OpenAI 兼容协议）。
 
-    GLM-4.6V 请求体与 MiMoAdapter 完全同构（video_url + fps + media_resolution、
-    input_audio、thinking:disabled 均接受，实测兼容），唯一差异是智谱网关要求
-    携带 ``X-Title`` 头（不带会被 429 余额不足拦截），故只覆写 auth_headers。
+    GLM-4.6V 请求体与 MiMoAdapter 基本同构（video_url + fps + media_resolution
+    实测兼容），但**不支持音频输入**——GLM-4.6V 是纯视觉语言模型（输入模态为
+    文本/图片/视频/文件），``input_audio`` 属于 GLM-4-Voice / GLM-Realtime 线，
+    发给 4.6V 会被 400 拒。故 ``supports_audio_input = False``，audio-only 窗口
+    由 prompt_builder 降级为 text-only。
 
-    注意：``X-Title: 4.5V MCP Local`` 是智谱 GLM Coding Plan 的 MCP 流量标识，
-    使用 Coding Plan 签发的 API Key 时必须携带，否则网关按普通资源包计费并
-    返回 429 余额不足。非 Coding Plan 的 GLM 视觉 Key 是否要求该头未验证。
+    鉴权差异：智谱网关要求携带 ``X-Title`` 头（不带会被 429 余额不足拦截），
+    故覆写 auth_headers。该头是智谱 GLM Coding Plan 的 MCP 流量标识，使用
+    Coding Plan 签发的 API Key 时必须携带，否则网关按普通资源包计费并返回
+    429 余额不足。非 Coding Plan 的 GLM 视觉 Key 是否要求该头未验证。
     """
+
+    supports_audio_input = False
 
     def auth_headers(self, api_key: str) -> dict[str, str]:
         headers = super().auth_headers(api_key)

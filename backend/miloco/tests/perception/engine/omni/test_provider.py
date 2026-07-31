@@ -64,7 +64,7 @@ class TestGetAdapter:
         assert get_adapter("xiaomi/mimo-v2.5") is get_adapter("xiaomi/mimo-v2.5")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
-        assert get_adapter("glm-4.6v") is get_adapter("glm-4.6v")
+        assert get_adapter("glm-4.6v") is get_adapter("glm-4.6v-flash")
 
 
 class TestMiMoAdapter:
@@ -123,6 +123,11 @@ class TestGlmAdapter:
         headers = self.adapter.auth_headers("sk-test")
         assert headers["Authorization"] == "Bearer sk-test"
         assert headers["X-Title"] == "4.5V MCP Local"
+
+    def test_supports_audio_input_false(self):
+        # GLM-4.6V 是纯视觉模型（文本/图片/视频/文件），input_audio 属于
+        # GLM-4-Voice / GLM-Realtime 线，audio-only 窗口必须降级 text-only。
+        assert self.adapter.supports_audio_input is False
 
 
 class TestQwenOmniAdapter:

@@ -233,7 +233,13 @@ def build_fused_payload(
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
         if context.room_name:
             user_content.append({"type": "text", "text": f"位置: {context.room_name}"})
-        if audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
+        if not adapter.supports_audio_input:
+            logger.warning(
+                "event=fused_audio_unsupported adapter=%s, provider 不支持 input_audio, "
+                "本窗口降级为 text-only",
+                type(adapter).__name__,
+            )
+        elif audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
             user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate)))
         elif audio_b64:
             logger.warning(
