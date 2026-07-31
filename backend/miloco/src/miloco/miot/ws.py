@@ -128,6 +128,10 @@ class NalClipRecorder:
         self._stream.width = width
         self._stream.height = height
         self._stream.pix_fmt = "yuv420p"
+        # 与 transcoder.py 同口径:抓片段串行跑在自己的 clip-enc 线程里,libx264 内部
+        # 满核线程(PyAV 默认 thread_count=0=auto)买不到吞吐。设 1 顺带把 encode 内部
+        # 那次 bgr24→yuv420p 的 swscale 也收敛到 1——它取的就是 codec.thread_count。
+        self._stream.thread_count = 1
         # ultrafast keeps encode at ~3-8ms/frame on Apple Silicon.
         self._stream.options = {
             "preset": "ultrafast",

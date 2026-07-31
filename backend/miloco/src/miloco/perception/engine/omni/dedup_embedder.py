@@ -17,10 +17,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-from miloco.perception.inference.ort_utils import (
-    TINY_MODEL_THREADS,
-    apply_kleidiai_opt_out,
-)
+from miloco.perception.inference.ort_utils import TINY_MODEL_THREADS
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +39,9 @@ class EventEmbedder:
         # ~10ms、低频(suggestion 去重),线程限到 TINY(满核纯浪费)。ARM CPU EP 上
         # KleidiAI 含 int8 GEMM 微内核(issue #429 同源),补 opt-out(1.27 已上游根治,
         # 此为防御,保持"所有自建 session 统一调 apply_kleidiai_opt_out"不变量)。
+        # 延迟导入(与 speech_vad 同款):运行时才从 ort_utils 取,便于测试 spy 该 helper。
+        from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
+
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = TINY_MODEL_THREADS
         opts.inter_op_num_threads = TINY_MODEL_THREADS

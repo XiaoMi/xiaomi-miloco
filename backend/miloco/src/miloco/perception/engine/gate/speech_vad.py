@@ -44,7 +44,14 @@ def _get_session():
             import onnxruntime as ort
 
             from miloco.config import get_settings
-            from miloco.perception.inference.ort_utils import TINY_MODEL_THREADS
+
+            # 惰性 import 是有意的:守护测试靠 monkeypatch ort_utils 模块属性验证
+            # 「自建 session 必调 apply_kleidiai_opt_out」,模块级 from-import 会让
+            # patch 失效(见 test_speech_vad.py)。
+            from miloco.perception.inference.ort_utils import (
+                TINY_MODEL_THREADS,
+                apply_kleidiai_opt_out,
+            )
 
             path = get_settings().directories.models_dir / _MODEL_FILENAME
             if not path.is_file():
@@ -63,8 +70,6 @@ def _get_session():
             # 状态小模型,CoreML 对其支持差、易逐算子回落)。但 silero 也含 conv,在 Apple
             # Silicon CPU EP 上会命中 ArmKleidiAI——即 issue #429 同源的卷积 workspace
             # 泄漏。复用工厂的单一 opt-out helper 补上(1.27 已上游根治,此为防御)。
-            from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
-
             apply_kleidiai_opt_out(opts)
             _session = ort.InferenceSession(
                 str(path), sess_options=opts, providers=["CPUExecutionProvider"]

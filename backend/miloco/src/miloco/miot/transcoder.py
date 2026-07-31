@@ -21,9 +21,8 @@ from typing import Optional
 
 import av
 import numpy as np
-from numpy.typing import NDArray
-
 from miot.decoder import SWSCALE_THREADS
+from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
