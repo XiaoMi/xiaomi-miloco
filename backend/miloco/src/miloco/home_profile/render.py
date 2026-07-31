@@ -135,20 +135,28 @@ def render_profile_markdown(
             md += "\n".join(f"- {e.content}" for e in items) + "\n\n"
 
     # ─── 宠物 ───
-    if pet_entries:
+    # 名单以**花名册**为脊（不是"有没有活跃档案条目"）：识别的门与参考图注入都以花名册为准
+    # （home_profile_has_pets / pet_refs 同源），若名单靠档案条目撑着，条目被 token 预算归档 /
+    # 住户删掉 / 只 pet add 未写外观时，名单会凭空消失 → 模型被要求"只列名单里的宠物"却拿到空
+    # 名单。软关闭时调用方已把 pets 置空（service.commit 的 render_pets），故关闭态不出本段。
+    resolved_pets = [(_resolve_pet_subject(e, pets_by_id), e) for e in pet_entries]
+    roster = [p["name"] for p in (pets or []) if p.get("name")]
+    # 花名册顺序在前、legacy（仅按名匹配、不在花名册）的排在后面；去重且保持稳定输出
+    pet_subjects: list[str] = []
+    for subj in roster + [s for s, _ in resolved_pets]:
+        if subj not in pet_subjects:
+            pet_subjects.append(subj)
+    if pet_subjects:
         md += "## 宠物\n\n"
-        resolved_pets = [(_resolve_pet_subject(e, pets_by_id), e) for e in pet_entries]
-        pet_subjects: list[str] = []
-        for subj, _ in resolved_pets:
-            if subj not in pet_subjects:
-                pet_subjects.append(subj)
         for subj in pet_subjects:
             md += f"### {subj}\n\n"
             items = sorted(
                 (e for s, e in resolved_pets if s == subj),
                 key=lambda e: _member_order(e.type),
             )
-            md += "\n".join(f"- {e.content}" for e in items) + "\n\n"
+            # 花名册里有、但没有（未归档的）档案条目的宠物：只出名字，作为可供识别称呼的名单项
+            if items:
+                md += "\n".join(f"- {e.content}" for e in items) + "\n\n"
 
     # ─── 家庭规则 ───
     if family_entries:

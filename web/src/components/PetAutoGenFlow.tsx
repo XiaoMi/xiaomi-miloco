@@ -210,6 +210,10 @@ export function PetAutoGenFlow({
       const r = await observePet(files, grounding);
       if (!r.detected) {
         resetResult();
+        // resetResult 清的是**上一轮**候选/描述；本轮的 warnings 要立刻补回：
+        // partial_decode_failed / low_sharpness 说的是「有图没被打开过」而非「画面里没动物」，
+        // 丢掉住户就会拿同格式的图反复重试（后端 _empty_result 专为此透传）。
+        setWarnings(r.warnings ?? []);
         setNote(t("pet.noPetDetected"));
         return;
       }

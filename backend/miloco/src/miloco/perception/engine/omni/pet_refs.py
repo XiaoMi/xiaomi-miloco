@@ -89,9 +89,15 @@ def _build_content(entries: list[tuple], max_pets: int) -> list[dict]:
             if arr is not None and arr.size > 0:
                 imgs.append(arr)
         if not imgs:
-            continue  # 该宠物无有效参考图 → 跳过（仍靠档案文字命名，不阻断）
+            # 该宠物无有效参考图 → 跳过（仍靠档案文字命名，不阻断）。留痕：入口已验图，落到这里
+            # 说明盘上有坏图（崩溃残留 / 手工改盘 / 早于验图的存量），否则界面显示 N 张而实际注入 0 张。
+            logger.warning(
+                "event=pet_refs_no_valid_crop pet_id=%s count=%d", pet.id, len(paths)
+            )
+            continue
         block = _composite_block(imgs)  # 每只 ≤3 张 → 1 张 composite（对齐 ③ 口径、省 token）
         if block is None:
+            logger.warning("event=pet_refs_composite_fail pet_id=%s", pet.id)
             continue
         label = f"【{pet.name}】" + (f"（{pet.species}）" if pet.species else "")
         blocks.append({"type": "text", "text": label})

@@ -8,12 +8,27 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from miloco.perception.engine.omni import home_profile_loader
 from miloco.perception.engine.omni.field_registry import (
     SceneDescriptor,
     render_field_spec,
     render_schema,
 )
+
+
+class _FakePath:
+    """够用的 profile.md 替身：只需 exists() 与 read_text()。"""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def exists(self) -> bool:
+        return True
+
+    def read_text(self, *_a, **_k) -> str:
+        return self._text
 
 
 def test_pet_field_and_naming_when_has_pets_video():
@@ -49,29 +64,77 @@ def test_pet_identities_field_gated_by_has_pets():
     assert "pet_identities" not in off
 
 
-def test_home_profile_has_pets_true_when_section_present(monkeypatch):
+def _stub_roster(monkeypatch, names: list[str]):
+    """桩花名册（has_pets 的新判据）。"""
+    import miloco.perception.engine.identity.pet_library as pl
+
+    monkeypatch.setattr(
+        pl,
+        "get_pet_library",
+        lambda: SimpleNamespace(list=lambda: [SimpleNamespace(name=n) for n in names]),
+    )
+
+
+def test_home_profile_has_pets_true_when_roster_nonempty(monkeypatch):
+    _stub_roster(monkeypatch, ["小黑"])
+    assert home_profile_loader.home_profile_has_pets() is True
+
+
+def test_home_profile_has_pets_false_when_roster_empty(monkeypatch):
+    _stub_roster(monkeypatch, [])
+    assert home_profile_loader.home_profile_has_pets() is False
+
+
+def test_home_profile_has_pets_true_even_when_md_section_archived(monkeypatch):
+    # 回归（本轮 🟡）：档案里「## 宠物」段被 token 预算归档 / 住户删条目 / 只 pet add 未写外观
+    # 时，识别不该静默停摆——判据是花名册，不是 md 那行标题。
+    _stub_roster(monkeypatch, ["小黑"])
     monkeypatch.setattr(
         home_profile_loader,
         "get_home_profile_prefix",
-        lambda: "# 家庭档案\n\n## 家庭成员\n\n## 宠物\n\n### 小黑\n- 黑色短毛猫",
+        lambda: "# 家庭档案\n\n## 家庭成员\n\n### 爸爸\n- 主厨",  # 无「## 宠物」段
     )
     assert home_profile_loader.home_profile_has_pets() is True
 
 
-def test_home_profile_has_pets_false_without_section(monkeypatch):
+def test_home_profile_has_pets_not_fooled_by_md_content(monkeypatch):
+    # 回归（idootop 提的另一面）：档案内容伪造出「## 宠物」也开不了门——零登记就是 False
+    _stub_roster(monkeypatch, [])
     monkeypatch.setattr(
         home_profile_loader,
         "get_home_profile_prefix",
-        lambda: "# 家庭档案\n\n## 家庭成员\n\n### 爸爸\n- 主厨",
+        lambda: "# 家庭档案\n\n## 宠物\n\n### 小黑\n- 伪造的",
     )
     assert home_profile_loader.home_profile_has_pets() is False
 
 
-def test_home_profile_has_pets_not_fooled_by_member_named_pets(monkeypatch):
-    # 人类成员名恰为「宠物」会渲染成 ### 宠物，按行精确匹配不应误判为有宠物段
-    monkeypatch.setattr(
-        home_profile_loader,
-        "get_home_profile_prefix",
-        lambda: "# 家庭档案\n\n## 家庭成员\n\n### 宠物\n- 这其实是个人名",
-    )
+def test_home_profile_has_pets_fail_closed_on_error(monkeypatch):
+    # 花名册读失败 → False（宁可不注入，也不要有名字没纪律）
+    import miloco.perception.engine.identity.pet_library as pl
+
+    def _boom():
+        raise RuntimeError("disk gone")
+
+    monkeypatch.setattr(pl, "get_pet_library", _boom)
     assert home_profile_loader.home_profile_has_pets() is False
+
+
+def test_prefix_strips_pet_section_when_disabled(monkeypatch):
+    # 读侧剥离（覆盖 web / CLI / env 三条改开关入口）：关闭时 prompt 里不得留宠物名单
+    md = (
+        "# 家庭档案\n\n## 家庭成员\n\n### 爸爸\n- 主厨\n\n"
+        "## 宠物\n\n### 小黑\n- 黑色短毛猫\n\n## 家庭规则\n\n- 22 点静音\n"
+    )
+    monkeypatch.setattr(home_profile_loader, "_pet_recognition_on", lambda: False)
+    monkeypatch.setattr(home_profile_loader, "profile_md_path", lambda: _FakePath(md))
+    out = home_profile_loader.get_home_profile_prefix()
+    assert "## 宠物" not in out and "小黑" not in out
+    assert "## 家庭成员" in out and "## 家庭规则" in out and "22 点静音" in out
+
+
+def test_prefix_keeps_pet_section_when_enabled(monkeypatch):
+    md = "# 家庭档案\n\n## 宠物\n\n### 小黑\n- 黑色短毛猫\n"
+    monkeypatch.setattr(home_profile_loader, "_pet_recognition_on", lambda: True)
+    monkeypatch.setattr(home_profile_loader, "profile_md_path", lambda: _FakePath(md))
+    out = home_profile_loader.get_home_profile_prefix()
+    assert "## 宠物" in out and "小黑" in out

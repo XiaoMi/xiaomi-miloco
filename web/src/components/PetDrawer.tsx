@@ -67,6 +67,9 @@ export function PetDrawer({
   const [appearance, setAppearance] = useState("");
   // 存量宠物外观所在的 member_persona 条目 id（保存时更新它）；null = 尚无外观条目。
   const [apprEntryId, setApprEntryId] = useState<string | null>(null);
+  // 新增多步写入的续做进度（失败后就地重试用）：已建档的 pet id / 外观条目是否已落。
+  const [createdId, setCreatedId] = useState<string | null>(null);
+  const [apprAdded, setApprAdded] = useState(false);
   const [confirmingDel, setConfirmingDel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [autoGen, setAutoGen] = useState<false | "register" | "append">(false);
@@ -102,6 +105,10 @@ export function PetDrawer({
       setCrop(null);
       setAvatarBlob(null);
       setAvatarName("avatar.jpg");
+      // 重试续做用的进度标记必须随抽屉重开清零，否则新增下一只时会复用上一只的 id
+      // （症状：以为在新增，实际改了上一只的名字）。
+      setCreatedId(null);
+      setApprAdded(false);
     } else {
       // 关闭即清头像暂存（趁抽屉渲染 null、屏幕不可见时清）——否则编辑宠物 A 裁图后取消、
       // 再开 B 会先闪现 A 上次裁的图一帧。
@@ -187,26 +194,38 @@ export function PetDrawer({
     setBusy(true);
     try {
       if (isNew) {
-        const created = await createPet({
-          name: name.trim(),
-          species: species.trim(),
-        });
-        if (avatarBlob) await uploadPetAvatar(created.id, avatarBlob, avatarName);
+        // 新增是多步串行写入，中途失败要能**就地重试**：记住已建档的 id，重试时不再 createPet
+        // （否则必撞 409「宠物名已存在」），改用 updatePet 同步可能改过的名字/物种；档案条目
+        // 也用 apprAdded 兜幂等，避免重复插入。
+        let petId = createdId;
+        if (petId === null) {
+          const created = await createPet({
+            name: name.trim(),
+            species: species.trim(),
+          });
+          petId = created.id;
+          setCreatedId(petId);
+        } else {
+          await updatePet(petId, { name: name.trim(), species: species.trim() });
+        }
+        if (avatarBlob) await uploadPetAvatar(petId, avatarBlob, avatarName);
         // D6：注册时把 observe 选出的候选全集整组落库为参考图（③ 多姿态参照图）
+        // mode=replace → 重试幂等（整组替换，不会越传越多）
         if (refCrops.length > 0) {
           await uploadPetReferenceCrops(
-            created.id,
+            petId,
             refCrops.map((c) => ({ blob: b64ToBlob(c.cropB64), score: c.score })),
             "replace",
           );
         }
-        if (appearance.trim()) {
+        if (appearance.trim() && !apprAdded) {
           await addHomeEntry({
             type: "member_persona",
             content: appearance.trim(),
-            subjectId: created.id,
+            subjectId: petId,
             subjectName: name.trim(),
           });
+          setApprAdded(true);
           await commitHomeProfile();
         }
       } else {

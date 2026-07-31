@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 import cv2
@@ -28,6 +29,8 @@ from miloco.perception.engine.identity.pet_library import (
     get_pet_library,
 )
 from miloco.schema.common_schema import NormalResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/identity", tags=["Pet"])
 
@@ -194,7 +197,13 @@ async def delete_pet(pet_id: str, current_user: str = Depends(verify_token)):
     removed = get_pet_library().delete(pet_id)
     # 联动清理家庭档案中绑定该宠物的条目；用 managed service（含 person_service），
     # 以便其内部 re-render 仍正确保留人类成员名册。
-    cleanup = get_manager().home_profile_service.remove_subject(pet_id)
+    # 包 try（同 person/router.py 的删除端点）：本体已 rmtree、不可回滚，此处再抛只会让客户端
+    # 收到 500 以为整删失败，而重试是 no-op、绑定条目再也清不掉。
+    cleanup: dict = {}
+    try:
+        cleanup = get_manager().home_profile_service.remove_subject(pet_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("宠物删除后清理家庭档案失败: pet_id=%s", pet_id, exc_info=True)
     return NormalResponse(
         code=0,
         message="Pet deleted" if removed else "Pet not found (no-op)",
@@ -279,6 +288,9 @@ async def upload_pet_reference_crops(
         raise HTTPException(status_code=400, detail="最多 3 张参考 crop")
     if any(c.size is not None and c.size > _avatar.AVATAR_MAX_BYTES for c in crops):
         raise HTTPException(status_code=400, detail="参考图过大（单张上限 5 MB）")
+    lib = get_pet_library()
+    if lib.get(pet_id) is None:  # 存在性前置闸（同 avatar）：别为不存在的 id 读满内存
+        raise HTTPException(status_code=404, detail=f"Pet '{pet_id}' not found")
     data: list[bytes] = []
     for c in crops:
         raw = await c.read()
@@ -286,8 +298,15 @@ async def upload_pet_reference_crops(
             raise HTTPException(status_code=400, detail="参考图过大（单张上限 5 MB）")
         if not raw:
             raise HTTPException(status_code=400, detail="empty reference crop")
+        # 验真（同 avatar 口径）：不验图的话任意字节都能存成 ref_crop_*.jpg 并**计入张数**，
+        # 识别侧再静默跳过 → 界面显示「3 张参考图」而实际注入 0 张。
+        if cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR) is None:
+            raise HTTPException(status_code=400, detail="无法识别的参考图")
+        if _avatar.sniff_image_ext(raw) is None:
+            raise HTTPException(
+                status_code=400, detail="不支持的参考图格式（仅 jpg/png/webp）"
+            )
         data.append(raw)
-    lib = get_pet_library()
     fn = lib.append_reference_crops if mode == "append" else lib.set_reference_crops
     try:
         pet = fn(pet_id, data, scores=scores or None)
@@ -309,4 +328,11 @@ async def get_pet_reference_crop(
     paths = get_pet_library().reference_crop_paths(pet_id)
     if idx < 0 or idx >= len(paths):
         raise HTTPException(status_code=404, detail="reference crop 不存在")
-    return FileResponse(str(paths[idx]), media_type="image/jpeg")
+    # 入口按魔数放过 jpg/png/webp（同 avatar 口径），故出口也按真实字节出 Content-Type——
+    # 否则把「盘上后缀 / Content-Type / 真实字节」的不一致从入口挪到出口。
+    p = paths[idx]
+    try:
+        ext = _avatar.sniff_image_ext(p.read_bytes()[:16]) or "jpg"
+    except OSError:
+        ext = "jpg"
+    return FileResponse(str(p), media_type=_avatar.media_type(ext))

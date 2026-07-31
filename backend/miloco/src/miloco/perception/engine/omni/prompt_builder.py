@@ -60,12 +60,14 @@ from .provider import LocalMediaInfo, OmniProviderAdapter
 
 
 def _has_pets_for_scene() -> bool:
-    """宠物注入门：家庭档案有「## 宠物」段 **且** pet_recognition 开启。
+    """宠物注入门：``pet_recognition`` 开启 **且** 花名册非空。
 
-    直接查 feature（不只靠档案渲染时序）——关功能后档案尚未重渲的窗口里也立即停注入，省 token。
+    先查 feature 再探花名册（短路：关闭时连磁盘都不碰）。判据是**花名册**而非档案渲染出的
+    「## 宠物」段——后者会被 token 预算归档 / 删条目 / 直接 ``pet add`` 抹掉，造成花名册与
+    参考图都在而识别静默停摆（见 home_profile_has_pets 的 docstring）。
     统一驱动 caption/suggestions/matched_rules 命名纪律、参考图、pet_identities 的注入。
     """
-    return home_profile_has_pets() and get_settings().features.pet_recognition
+    return get_settings().features.pet_recognition and home_profile_has_pets()
 
 RouteType = Literal["video", "audio"]
 

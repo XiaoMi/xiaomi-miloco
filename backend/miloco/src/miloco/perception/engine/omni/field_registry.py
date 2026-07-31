@@ -186,10 +186,15 @@ SUGGESTIONS = FieldSpec(
 )
 
 
-# 常规字段顺序（identities 不在内，由 has_identity 时单独 prepend）。pet_identities 置于 caption
-# 之前（先判身份再描述，与人 identities 同理），由 requires_pets 在无宠物时剥离。
+# 常规字段顺序（identities 不在内，由 has_identity 时单独 prepend）：按**逻辑依赖**排——
+# pet_identities 置于 caption 之前（先判身份再描述，与人 identities 同理），由 requires_pets
+# 在无宠物时剥离。
 _ORDER_NORMAL = ["pet_identities", "caption", "speeches", "env_sounds", "matched_rules", "suggestions"]
-_ORDER_STREAM = ["pet_identities", "speeches", "env_sounds", "matched_rules", "suggestions", "caption"]
+# 流式顺序：按**抢延迟**排——speeches 必须第一（先出先播，这是本表存在的唯一理由）。
+# pet_identities 不放表头（会把 speeches 挤到第二、抵消该收益），但仍须先于它的三个派生消费方
+# （matched_rules / suggestions / caption 的宠物称呼都从它派生，PET_NAMING_SPEC 的 conf=high
+# 前置门控目前只靠这个生成顺序兜着），故插在 env_sounds 之后、matched_rules 之前。
+_ORDER_STREAM = ["speeches", "env_sounds", "pet_identities", "matched_rules", "suggestions", "caption"]
 
 _REGISTRY = {f.name: f for f in (IDENTITY, PET_IDENTITIES, CAPTION, SPEECHES, ENV_SOUNDS, MATCHED_RULES, SUGGESTIONS)}
 

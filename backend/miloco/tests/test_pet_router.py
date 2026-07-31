@@ -19,6 +19,9 @@ from fastapi.testclient import TestClient
 
 # 真·PNG 字节（cv2 可解码）：头像端点会 imdecode 验真 + 按魔数取真实格式，假字节被 400。
 _PNG = cv2.imencode(".png", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
+# 真·JPEG：参考图端点同样验真（客户端本就传裁好的 JPEG）；两张内容不同以便区分 crop 顺序。
+_JPEG = cv2.imencode(".jpg", np.zeros((8, 8, 3), np.uint8))[1].tobytes()
+_JPEG2 = cv2.imencode(".jpg", np.full((12, 12, 3), 255, np.uint8))[1].tobytes()
 
 
 @pytest.fixture
@@ -309,20 +312,20 @@ def _upload_refs(client, pet_id, crops, scores, mode="replace"):
 
 def test_reference_crops_set_and_get(client):
     pet = _create(client)
-    r = _upload_refs(client, pet["id"], [b"c0", b"c1"], [10.0, 20.0])
+    r = _upload_refs(client, pet["id"], [_JPEG, _JPEG2], [10.0, 20.0])
     assert r.status_code == 200, r.text
     data = r.json()["data"]
     assert data["reference_crop_count"] == 2
     assert data["reference_crop_scores"] == [10.0, 20.0]
     got = client.get(f"/api/identity/pets/{pet['id']}/reference-crops/0")
-    assert got.status_code == 200 and got.content == b"c0"
+    assert got.status_code == 200 and got.content == _JPEG
     assert got.headers["content-type"].startswith("image/jpeg")
 
 
 def test_reference_crops_append_top3_by_score(client):
     pet = _create(client)
-    _upload_refs(client, pet["id"], [b"lo1", b"lo2"], [1.0, 2.0])
-    r = _upload_refs(client, pet["id"], [b"hi1", b"hi2"], [9.0, 8.0], mode="append")
+    _upload_refs(client, pet["id"], [_JPEG, _JPEG2], [1.0, 2.0])
+    r = _upload_refs(client, pet["id"], [_JPEG2, _JPEG], [9.0, 8.0], mode="append")
     assert r.status_code == 200
     assert r.json()["data"]["reference_crop_count"] == 3
     assert r.json()["data"]["reference_crop_scores"] == [9.0, 8.0, 2.0]  # 绝对分 top-3
@@ -349,7 +352,7 @@ def test_reference_crops_unknown_pet_404(client):
 
 def test_reference_crops_get_out_of_range_404(client):
     pet = _create(client)
-    _upload_refs(client, pet["id"], [b"c0"], [1])
+    assert _upload_refs(client, pet["id"], [_JPEG], [1]).status_code == 200
     assert client.get(f"/api/identity/pets/{pet['id']}/reference-crops/5").status_code == 404
 
 
@@ -418,6 +421,17 @@ def test_reference_crops_append_over3_400(client):
         client, pet["id"], [b"a", b"b", b"c", b"d"], [1, 2, 3, 4], mode="append"
     )
     assert r.status_code == 400
+
+
+def test_reference_crops_reject_non_image(client):
+    # 回归：不验图的话任意字节都能存成 ref_crop_*.jpg 并**计入张数**，识别侧再静默跳过 →
+    # 界面显示「N 张参考图」而实际注入 0 张。同头像端点口径：imdecode 验真 + 魔数白名单。
+    pet = _create(client)
+    assert _upload_refs(client, pet["id"], [b"not-an-image"], [1]).status_code == 400
+    # 存量未被污染：一张都没落
+    assert client.get(f"/api/identity/pets/{pet['id']}").json()["data"][
+        "reference_crop_count"
+    ] == 0
 
 
 def test_reference_crops_oversized_400(client):
