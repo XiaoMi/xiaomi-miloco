@@ -140,6 +140,10 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 **用户「休息」暂停的持久化**：用户在 web 上「让它休息 / 唤醒」的意图会落盘到 KV（`perception/engine_state.py`，缺省视为开启，老部署 / 新装行为不变）。系统自动拉起的两条路径——开机 init 与重新授权后 restart——在 start 前先查该意图，被暂停则跳过、不自动拉起。为什么要持久化：早先暂停仅为内存态，后台一旦重启（崩溃自愈 / 手动重启 / 重新授权）就无条件把引擎拉起、继续调云端 VLM 烧 token，用户额度被静默耗光；落盘 + 开机门控根治这一静默复位。持久化只挂在「唤醒 / 让它休息」两个用户 endpoint 上，机制层的引擎启停底层方法、软停、优雅关停、切家一律不碰，显式唤醒仍必然 start。落盘失败时 endpoint fail-loud（返回 `500`、不执行启停），让用户如实感知可重试，而非静默返回成功却在重启后复位。
 
+**摄像头的两级身份：物理 did 与合成通道 did**：双摄/球机全拆后，「一路镜头」才是感知的一等身份，但 native/PPCS 会话仍是**每台相机一条**。于是同一台相机在系统里有两个 id：物理 did（`cam`）与合成通道 did（`cam:ch0` / `cam:ch1`），归一函数是 `miot/filter.py` 的 `physical_camera_did` / `synthetic_camera_did`。分界线是**这件事按镜头算还是按会话算**——按镜头的（投喂集、订阅、黑名单、镜头开关、名额计数）用合成 did；按会话/整台的（manager 字典、拉流健康度、拾音白名单、启停写库）用物理 did。跨界时必须显式归一。
+
+为什么值得单独记一条：这两个 id 在单摄场景**恰好相等**（`channel_count<=1` 时合成 did 就是裸 did），所以拿合成 did 去查物理 did 键的字典时，单摄一切正常、多摄静默失配——不抛异常、不打日志，只是恒查不中，表现为「已连上的双摄被判成断流」「降权对双摄不生效」这类似是而非的行为。同一条不变量在一个 PR 内被踩中两次（活跃集健康排序、拉流健康查询），且单摄用例全绿。新增涉及相机 did 的跨层调用时，先问一句「这个 did 从哪来、要查的容器按哪级建键」；写测试时单摄用例不构成覆盖，必须补 `channel_count>1` 的用例。
+
 ### 如果我要修改感知相关功能
 
 | 修改目标                                | 去看哪个文件                                                                                 |
@@ -150,6 +154,7 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 | 修改家庭档案注入 Omni 的方式            | `perception/engine/omni/home_profile_loader.py`                                              |
 | 修改身份识别逻辑                        | `perception/engine/identity/engine.py`（识别状态机）、`tracking_service.py`（DeepSORT 跟踪） |
 | 修改感知结果后处理（规则上报/事件投递） | `perception/client.py`（`PerceptionEngineProxy`，`handle_realtime_perception_result`）       |
+| 修改摄像头投喂集 / 拉流名额口径         | `miot/filter.py`（`select_active_camera_dids` 单一口径）；did 归一见上「两级身份」           |
 | 修改感知调度/触发频率                   | `perception/runner.py`；配置在 `settings.yaml::perception.collect`                           |
 | 修改感知 API 端点                       | `perception/router.py`                                                                       |
 

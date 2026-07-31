@@ -76,11 +76,68 @@ class TestSyncDevicesOnDemandRefresh:
         proxy = MagicMock()
         proxy.is_authenticated = True
         proxy.refresh_cameras = AsyncMock()
+        proxy.is_camera_stream_connected = MagicMock(return_value=True)
         proxy.get_cached_camera = MagicMock(return_value=None)
         adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
         adapter._devices["cam1"] = _CameraDeviceState(did="cam1")  # 已连 1 台
         monkeypatch.setattr(
             adapter, "discover_devices", AsyncMock(return_value={"cam1": _source()})
+        )
+
+        asyncio.run(adapter.sync_devices())
+
+        proxy.refresh_cameras.assert_not_awaited()
+
+    def test_refresh_when_manager_exists_but_ppcs_is_disconnected(self, monkeypatch):
+        """订阅已登记不代表 native/PPCS 已连；断流也应推进 refresh/降权计数。"""
+        proxy = MagicMock()
+        proxy.is_authenticated = True
+        proxy.refresh_cameras = AsyncMock()
+        proxy.is_camera_stream_connected = MagicMock(return_value=False)
+        proxy.get_cached_camera = MagicMock(return_value=None)
+        adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
+        adapter._devices["cam1"] = _CameraDeviceState(did="cam1")
+        monkeypatch.setattr(
+            adapter, "discover_devices", AsyncMock(return_value={"cam1": _source()})
+        )
+
+        asyncio.run(adapter.sync_devices())
+
+        proxy.refresh_cameras.assert_awaited_once()
+
+    def test_no_refresh_for_connected_multi_channel_camera(self, monkeypatch):
+        """多摄相机：合成 did 必须能查中物理 did 键的 manager，否则健康的双摄
+        每 10 秒空转一次 refresh_cameras。
+
+        这里**不 mock** ``is_camera_stream_connected``——真实实现里的合成→物理
+        归一正是被测对象；上面几条用例都是单摄（裸 did 恰好等于物理 did），
+        测不到这条分叉。
+        """
+        from miloco.miot.client import MiotProxy
+
+        manager = MagicMock()
+        manager.camera_info.connected = True
+        proxy = MagicMock()
+        proxy.is_authenticated = True
+        proxy.refresh_cameras = AsyncMock()
+        proxy.get_cached_camera = MagicMock(return_value=None)
+        # manager 字典按**物理 did** 建键，与 client.py 写入处一致。
+        proxy._camera_img_managers = {"dual": manager}
+        proxy.is_camera_stream_connected = (
+            lambda did: MiotProxy.is_camera_stream_connected(proxy, did)
+        )
+        adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
+        adapter._devices["dual:ch0"] = _CameraDeviceState(did="dual:ch0")
+        adapter._devices["dual:ch1"] = _CameraDeviceState(did="dual:ch1")
+        monkeypatch.setattr(
+            adapter,
+            "discover_devices",
+            AsyncMock(
+                return_value={
+                    "dual:ch0": _source("dual:ch0"),
+                    "dual:ch1": _source("dual:ch1"),
+                }
+            ),
         )
 
         asyncio.run(adapter.sync_devices())

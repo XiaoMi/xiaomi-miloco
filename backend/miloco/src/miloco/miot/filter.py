@@ -129,6 +129,8 @@ def select_active_camera_dids(
     require_lan: bool = True,
     cap: bool = True,
     awake_map: dict[str, dict[int, bool | None]] | None = None,
+    priority_dids: set[str] | None = None,
+    deprioritized_dids: set[str] | None = None,
 ) -> list[str]:
     """决定「哪些相机通道该投喂/拉流」的**单一口径**——感知投喂(camera_adapter)与 native
     会话建销(refresh_cameras)共用此函数，避免两套判定漂移。
@@ -136,15 +138,23 @@ def select_active_camera_dids(
     **全拆后返回合成 did（通道粒度）**：单摄裸 did、多摄每路 ``{did}:ch{n}``。过滤按
     「相机级」（家庭 / 在线）+「通道级」（黑名单 per-channel / 镜头 per-lens）两层：
     在启用家庭内、（``online_only`` 时）在线（``require_lan=True`` 看 ``online and lan_online``、
-    ``False`` 只看云端 ``online``）；再对每路——未被拉黑（``is_camera_channel_denied``：合成 did
-    或裸 did 在黑名单皆停）、该路镜头未关（``awake_map[did][channel]`` 明确 ``False`` 才排除；
-    ``None``/缺失/``True`` 放行，未知不误杀）。
+    ``False`` 只看云端 ``online``——放过 OT 未发现但云端在线、仍可走 direct-IP/PPCS 的相机）；
+    再对每路——未被拉黑（``is_camera_channel_denied``：合成 did 或裸 did 在黑名单皆停）、
+    该路镜头未关（``awake_map[did][channel]`` 明确 ``False`` 才排除；``None``/缺失/``True``
+    放行，未知不误杀）。
 
     ``cap=True`` 时上限按**启用通道数**（= 返回的合成 did 数）确定性截断到
-    ``MAX_ENABLED_CAMERAS``——每路独立占一个名额，超限按合成 did 升序 ``[:MAX]``，**允许在
-    一台多摄相机中间切开**（会话已为在选的路起、另一路只少一条解码线程）。``cap=False`` 用于
-    「列全集」语义（如 rule target 校验）。会话/manager 生命周期由调用方（refresh_cameras）
-    对返回集取物理 did 收敛：任一路在→会话在、两路都不在→拆。
+    ``MAX_ENABLED_CAMERAS``——每路独立占一个名额，**允许在一台多摄相机中间切开**（会话已为
+    在选的路起、另一路只少一条解码线程）。截断顺序按健康度分三档：已连通的
+    ``priority_dids`` 优先、普通候选其次、超过连接宽限期的 ``deprioritized_dids`` 最后，
+    组内仍按合成 did 升序（同一账号每轮选同一批）。两个健康集合按**物理 did** 给出——
+    native/PPCS 会话是整台相机一条，同一台的各路共享连通命运——排序时把合成 did 归一回
+    物理 did 再查。它们仅影响超额排序，不改变 scope / online / awake 过滤，因此
+    ≤``MAX_ENABLED_CAMERAS`` 时谁都不淘汰，真正连不上的相机只在名额紧张时临时让位。
+    这是投喂/拉流上限的唯一兜底，与 ``service.toggle_camera`` 的主动 enable 校验互补；
+    不写 KV、不碰黑名单。``cap=False`` 用于「列全集」语义（如 rule target 校验）。
+    会话/manager 生命周期由调用方（refresh_cameras）对返回集取物理 did 收敛：
+    任一路在→会话在、两路都不在→拆。
 
     ``cameras`` 的 value 需带 ``home_id`` / ``online`` / ``lan_online``（及可选
     ``channel_count``）属性。``awake_map`` 是 per-lens 的 ``{did: {channel: bool|None}}``。
@@ -170,8 +180,21 @@ def select_active_camera_dids(
             result.append(synthetic_camera_did(did, ch, channel_count))
     if not cap or len(result) <= MAX_ENABLED_CAMERAS:
         return result
-    # 超限：按合成 did 升序确定性截断（同一账号每轮选同一批），每路独占一个名额、可拦半台。
-    return sorted(result)[:MAX_ENABLED_CAMERAS]
+    # 超限：已连通 > 普通 > 持续失败/冷却；组内按合成 did 升序稳定排序（同一账号每轮选
+    # 同一批），每路独占一个名额、可拦半台。健康集合按物理 did 记（会话是整台一条），
+    # 故合成 did 先归一再查——同一台的两路一起优先/一起让位。
+    priority = priority_dids or set()
+    deprioritized = deprioritized_dids or set()
+
+    def _rank(did: str) -> tuple[int, str]:
+        physical = physical_camera_did(did)
+        if physical in priority:
+            return (0, did)
+        if physical in deprioritized:
+            return (2, did)
+        return (1, did)
+
+    return sorted(result, key=_rank)[:MAX_ENABLED_CAMERAS]
 
 
 def filter_by_home(kv_repo: KVRepo, items: dict[str, T]) -> dict[str, T]:

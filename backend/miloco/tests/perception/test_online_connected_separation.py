@@ -169,22 +169,41 @@ class TestDiscoverDevicesOnlineConnected:
         assert result["cam1"].online is True
 
     @pytest.mark.asyncio
-    async def test_online_but_not_on_lan_filtered_out(self, adapter):
-        """Cloud-online but NOT LAN-reachable should be filtered."""
-        cam = _make_camera_info(did="cam1", online=True, lan_online=False)
+    async def test_online_but_not_ot_discovered_still_attempts_ppcs(self, adapter):
+        """OT discovery failure must not prevent a PPCS connection attempt."""
+        cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
+            update={"home_id": "H1"}
+        )
         adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
 
         result = await adapter.discover_devices(online_only=True)
 
-        assert "cam1" not in result
+        assert "cam1" in result
+        assert result["cam1"].online is True
 
     @pytest.mark.asyncio
-    async def test_online_lan_none_filtered_out(self, adapter):
-        """Cloud-online but lan_online=None should be filtered."""
-        cam = _make_camera_info(did="cam1", online=True, lan_online=None)
+    async def test_online_lan_unknown_still_attempts_ppcs(self, adapter):
+        """Unknown OT status must not prevent a PPCS connection attempt."""
+        cam = _make_camera_info(did="cam1", online=True, lan_online=None).model_copy(
+            update={"home_id": "H1"}
+        )
         adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
 
         result = await adapter.discover_devices(online_only=True)
+
+        assert "cam1" in result
+
+    @pytest.mark.asyncio
+    async def test_require_lan_true_retains_strict_ot_filter(self, adapter):
+        """Callers explicitly requesting OT discovery can still use the strict gate."""
+        cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
+            update={"home_id": "H1"}
+        )
+        adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
+
+        result = await adapter.discover_devices(
+            online_only=True, require_lan=True
+        )
 
         assert "cam1" not in result
 
@@ -254,15 +273,15 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_filter_cameras_from_all_no_lan(self, adapter):
-        """_filter_cameras_from_all filters when lan_online is False."""
+        """默认投喂口径不以 OT/LAN 发现为硬门。"""
         cam = _make_camera_info(
             did="cam1", online=True, lan_online=False,
-        )
+        ).model_copy(update={"home_id": "H1"})
         result = adapter._filter_cameras_from_all(
             {"cam1": cam},
             online_only=True,
         )
-        assert "cam1" not in result
+        assert "cam1" in result
 
     @pytest.mark.asyncio
     async def test_filter_cameras_drops_disallowed_home(self, adapter):
@@ -318,5 +337,3 @@ class TestCameraInfoLanStatus:
         ci = CameraInfo.model_validate(cam.model_dump())
         assert ci.lan_online is False
         assert ci.local_ip is None
-
-

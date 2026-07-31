@@ -205,6 +205,8 @@ pnpm test                      # 单元测试（vitest）
 pnpm typecheck                 # 类型检查
 ```
 
+**改完先验证「测试真的在测东西」**：全绿不等于有覆盖。最常见的两种假绿——① 用例把**被测对象本身**给 mock 掉了（如断言"断流才刷新"却 mock 了判断是否断流的那个方法）；② 用例只覆盖了退化场景，而 bug 只在非退化场景出现（如相机只测单摄，恰好绕开合成 did ≠ 物理 did 的分叉）。判定成本很低：把你刚修的那行**故意改回错的**，跑新增用例，确认它失败，再改回来。没失败就说明这条用例锁不住这个 bug，得重写而不是补一条。
+
 **Skill 修改**：`plugins/skills/` 是唯一源，修改 `SKILL.md` 后须重新 `pnpm run build` + `openclaw plugins install`。
 
 **家庭面板修改**：修改 `web/src/` 后 `pnpm build` 产出到 `web/dist/`，再手动复制到 `$MILOCO_HOME/static/`，或重跑 `install.sh` 自动同步。开发期用 `pnpm dev` + Vite proxy 直接对接 backend，无需额外部署步骤。
