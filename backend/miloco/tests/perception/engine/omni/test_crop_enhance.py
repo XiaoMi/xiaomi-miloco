@@ -49,6 +49,23 @@ class TestMotionBlocks:
         for x1, y1, x2, y2 in blocks:
             assert 0 <= x1 < x2 <= 300 and 0 <= y1 < y2 <= 300
 
+    def test_block_axis_order_is_x_then_y(self):
+        """锁死 (x1,y1,x2,y2) 轴序:x 取 CC_STAT_LEFT、y 取 CC_STAT_TOP。
+
+        上面那条用例是 300x300 **正方形**帧 + 对角线对称的方块,把实现里的
+        blocks.append((bx,by,...)) 转置成 (by,bx,...) 也照样绿——轴序写反会让 crop 区域
+        整体跑到镜像位置,却没有任何测试会响。这里用非方形帧 + 不对称位置钉住。
+        """
+        f0, f1 = _black(h=240, w=400), _black(h=240, w=400)
+        f0[20:70, 300:370] = 255     # 右上
+        f1[150:200, 40:110] = 255    # 移到左下(不重叠)
+        blocks = compute_motion_blocks([f0, f1], CFG)
+        assert len(blocks) >= 1
+        for x1, y1, x2, y2 in blocks:
+            assert 0 <= x1 < x2 <= 400 and 0 <= y1 < y2 <= 240
+        # 右上方块的 x 落在 300 附近;若 x/y 转置则最大 x1 只有 150,断言失败
+        assert any(x1 >= 250 for x1, _, _, _ in blocks)
+
     def test_tiny_mover_filtered_by_area(self):
         # 4x4 方块面积占比 16/90000 ≈ 0.018% < 0.5% → 被点状噪声过滤
         f0, f1 = _black(), _black()
@@ -91,6 +108,21 @@ class TestCropRegion:
         assert region is not None
         x1, y1, x2, y2 = region
         assert x1 == 2 and y1 == 4 and x2 == 38 and y2 == 36
+
+    def test_expand_clamped_to_frame_upper_bound(self):
+        """真正触发 _clamp 的 min(w,x2)/min(h,y2) 上界。
+
+        上面那条用例名字带 clamp,但区域 (2,4,38,36) 在帧内、压根没截断:把 _clamp 的
+        min(w,x2)/min(h,y2) 退回裸 x2,y2 它照样绿。越界坐标会写进 trace,前端按
+        frame_size_wh 当 viewBox 画框会画到图外,所以这个上界必须有测试守住。
+
+        100x100 帧,human_body xywh=(60,60,39,39) → xyxy(60,60,99,99);uw=uh=39 →
+        ex=int(39*0.4)=15, ey=int(39*0.3)=11 → 扩展后 (45,49,114,110) 越界 → 截回
+        (45,49,100,100)(面积 28% 在 [10%,49%] 内,不再被最小/最大面积改动)。
+        """
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        region = compute_crop_region([_target({"human_body": (60, 60, 39, 39)})], frames, CFG)
+        assert region == (45, 49, 100, 100)
 
     def test_face_excluded(self):
         # 只有 human_face 框 + 静态帧 → 无主体框、无运动 → None(face 不参与 crop)
@@ -234,6 +266,71 @@ class TestConfigFromSettings:
             assert cfg.expand_ratio_h == 0.25
             # 未给的键仍取默认
             assert cfg.crop_short_edge == CropEnhanceConfig().crop_short_edge
+        finally:
+            reset_settings()
+
+    def test_non_bool_gate_does_not_fail_open(self, tmp_path, monkeypatch):
+        """字符串 "false" 不能把 ops 灰度闸绕开。
+
+        dataclass 不校验值类型,`enabled: "false"`(yaml 里加了引号就是这个)会得到非空
+        字符串 → truthy → 双闸判定通过、继续裁切,而运维以为已经压死;admin GET 还会把它
+        投影成 smart_crop_available=true 让前端开关可点。闸是 enabled=true 发版后唯一的
+        止损手段,必须只认真 bool。
+        """
+        from miloco.config.settings import reset_settings
+        from miloco.perception.engine.omni.crop_enhance import (
+            crop_enhance_config_from_settings,
+        )
+
+        for bad in ("false", "no", "0", 1, "true"):
+            self._with_engine_config(
+                tmp_path, monkeypatch, {"enabled": bad, "user_enabled": True}
+            )
+            try:
+                cfg = crop_enhance_config_from_settings()
+                # 退默认(enabled=False/user_enabled=False)→ 双闸相与必然不裁
+                assert not (cfg.enabled and cfg.user_enabled), f"闸被 {bad!r} 绕开"
+            finally:
+                reset_settings()
+
+    def test_non_numeric_ratio_falls_back_to_defaults(self, tmp_path, monkeypatch):
+        """数值字段写成字符串 → 退默认,而不是等到窗口内比较时抛 TypeError。
+
+        否则会被主流程的宽 except 吞成 reason=exception,日志里看不出是配置写错了。
+        """
+        from miloco.config.settings import reset_settings
+        from miloco.perception.engine.omni.crop_enhance import (
+            crop_enhance_config_from_settings,
+        )
+
+        self._with_engine_config(
+            tmp_path,
+            monkeypatch,
+            {"enabled": True, "user_enabled": True, "crop_min_area_ratio": "0.1"},
+        )
+        try:
+            cfg = crop_enhance_config_from_settings()
+            assert cfg.crop_min_area_ratio == CropEnhanceConfig().crop_min_area_ratio
+            assert not (cfg.enabled and cfg.user_enabled)
+        finally:
+            reset_settings()
+
+    def test_inverted_area_ratios_fall_back_to_defaults(self, tmp_path, monkeypatch):
+        """min > max 的矛盾配置:每窗静默回退、日志只说 area_rejected,查不出根因。"""
+        from miloco.config.settings import reset_settings
+        from miloco.perception.engine.omni.crop_enhance import (
+            crop_enhance_config_from_settings,
+        )
+
+        self._with_engine_config(
+            tmp_path,
+            monkeypatch,
+            {"enabled": True, "crop_min_area_ratio": 0.6, "crop_max_area_ratio": 0.2},
+        )
+        try:
+            cfg = crop_enhance_config_from_settings()
+            assert cfg.crop_min_area_ratio == CropEnhanceConfig().crop_min_area_ratio
+            assert cfg.crop_max_area_ratio == CropEnhanceConfig().crop_max_area_ratio
         finally:
             reset_settings()
 

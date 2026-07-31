@@ -137,26 +137,28 @@ class EventsService:
 
     async def locate_ref(
         self, event_id: str, device_id: str
-    ) -> tuple[SnapshotStatus, Path | None]:
+    ) -> tuple[SnapshotStatus, Path | None, int | None]:
         """定位指定 event × device 的全景参考帧 ref.jpg(仅 Smart Crop 事件有).
 
         与 locate_clip 同款状态语义:
-        - ("found", Path):ref.jpg 存在 → 路由层 FileResponse(image/jpeg)
-        - ("gone", None):event 存在且 device_id 合法,但无 ref.jpg(非 crop 事件 / 已被 cleanup 清)
-        - ("not_found", None):event 不存在 / device_id 不在 device_ids 内
+        - ("found", Path, timestamp_ms):ref.jpg 存在 → 路由层 FileResponse(image/jpeg);
+          timestamp_ms 是 meaningful_events.timestamp,用途同 locate_clip —— 路由层拼按
+          事件时间命名的下载文件名(否则"另存为"拿到的是 URL 末段 device_id、还没后缀)
+        - ("gone", None, None):event 存在且 device_id 合法,但无 ref.jpg(非 crop 事件 / 已被 cleanup 清)
+        - ("not_found", None, None):event 不存在 / device_id 不在 device_ids 内
 
         非 crop 事件本就无参考帧 → 返 "gone";前端应据 list 的 has_ref 门控请求,
         误请求时降级即可(不当错误).
         """
         row = self._dao.get_by_id(event_id)
         if row is None:
-            return ("not_found", None)
+            return ("not_found", None, None)
         if device_id not in row["device_ids"]:
-            return ("not_found", None)
+            return ("not_found", None, None)
         path = get_snapshot_root() / event_id / region_slug(device_id) / _REF_FILENAME
         if path.exists():
-            return ("found", path)
-        return ("gone", None)
+            return ("found", path, row["timestamp"])
+        return ("gone", None, None)
 
     async def read_crop_meta(
         self, event_id: str, device_id: str

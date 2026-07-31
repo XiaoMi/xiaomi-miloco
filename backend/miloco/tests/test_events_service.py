@@ -276,20 +276,20 @@ class TestLocateRef:
     """locate_ref 三态 + has_ref 列表标记(Smart Crop 全景参考帧)."""
 
     async def test_event_not_found(self, svc):
-        status, path = await svc.locate_ref("does-not-exist", "cam_a")
+        status, path, ts = await svc.locate_ref("does-not-exist", "cam_a")
         assert status == "not_found"
         assert path is None
 
     async def test_device_not_in_event(self, svc, dao):
         eid = _insert(dao, device_ids=["cam_living_01"])
-        status, path = await svc.locate_ref(eid, "cam_kitchen_01")
+        status, path, ts = await svc.locate_ref(eid, "cam_kitchen_01")
         assert status == "not_found"
         assert path is None
 
     async def test_no_ref_file_returns_gone(self, svc, dao):
         """event 合法但无 ref.jpg(非 crop 事件 / 已清)→ gone."""
         eid = _insert(dao, device_ids=["cam_living_01"])
-        status, path = await svc.locate_ref(eid, "cam_living_01")
+        status, path, ts = await svc.locate_ref(eid, "cam_living_01")
         assert status == "gone"
         assert path is None
 
@@ -298,7 +298,7 @@ class TestLocateRef:
         from miloco.perception.snapshot_writer import save_event_artifacts
 
         jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 100
-        eid = _insert(dao, device_ids=["cam_living_01"])
+        eid = _insert(dao, device_ids=["cam_living_01"], timestamp=1751000000000)
         save_event_artifacts(
             eid,
             OmniEventArtifacts(
@@ -306,11 +306,13 @@ class TestLocateRef:
                 ref_frames={"cam_living_01": jpg},
             ),
         )
-        status, path = await svc.locate_ref(eid, "cam_living_01")
+        status, path, ts = await svc.locate_ref(eid, "cam_living_01")
         assert status == "found"
         assert path is not None
         assert path.name == "ref.jpg"
         assert path.read_bytes() == jpg
+        # 事件时间随 found 一起返回:路由层据它拼「另存为」文件名(同 locate_clip)
+        assert ts == 1751000000000
 
     async def test_has_ref_false_without_ref(self, svc, dao):
         _insert(dao, device_ids=["cam_a"])

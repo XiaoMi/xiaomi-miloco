@@ -1281,7 +1281,12 @@ def _encode_video_mp4(
         # 缩小用 INTER_AREA(区域平均,抗锯齿最好);放大时 INTER_AREA 会退化成近似最近邻
         # (它按源像素落到的目标格子做平均,放大时每格只摊到一个源像素),必须换重采样核。
         # LANCZOS4 是离线对照里实测的那一个(与 CUBIC 统计上无法区分 p=0.63,取被测过的)。
-        # 全景路径只缩不放,走的仍是 INTER_AREA,画质不受本分支影响。
+        #
+        # 注意 scale **没有钳到 1.0**,本函数被全景 / query / legacy / crop 四条路径共用,
+        # 所以「相机源短边 < 目标短边」时它们同样走放大分支 —— 相机 LOW 码流只给 720p、
+        # 用户选 768/1080 档就命中(scale=1.07 / 1.50),是常见配置而非边角。这条路径本来
+        # 就在放大,只是此前用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,
+        # 落盘 clip.mp4 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
         interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
         v_stream = container.add_stream("h264", rate=fps)
         v_stream.width = target_w
@@ -1496,9 +1501,12 @@ def _effective_panorama_short_edge() -> int:
 def _crop_short_edge_budget(cfg: "CropEnhanceConfig", panorama_short_edge: int) -> int:
     """crop 视频短边预算,按用户分辨率档等比缩放(360p→253 / 512p→360 / 768p→540 / 1080p→759)。
 
-    cfg.crop_short_edge(默认 360)是 **512 档下的基准**,不是固定值。按比例跟随保住
-    「crop 模式像素开销 ≈ 同档全景」这个不变量,也让 crop_max_area_ratio=0.49≈(360/512)²
-    的推导在任何档位都成立 —— 固定 360 配 1080 档会让该上限失效,且用户升档对 crop 无效。
+    cfg.crop_short_edge(默认 360)是 **512 档下的基准**,不是固定值:按比例跟随才能让用户
+    升档对 crop 同样生效(固定 360 配 1080 档等于把升档吞掉)。
+
+    注意:短边不足预算时会放大到预算后,编码像素 = 预算² × 区域长宽比、与区域面积无关,
+    所以 crop_max_area_ratio=0.49≈(360/512)² 已**不再**保证「像素开销 ≈ 同档全景」——
+    扁长区域最坏可达同档全景的 1.48 倍。详见 CropEnhanceConfig.crop_short_edge 的注释。
     """
     return max(1, round(panorama_short_edge * cfg.crop_short_edge / _VIDEO_SHORT_EDGE))
 
@@ -1577,9 +1585,15 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         # (两种插值核互比无差异 p=0.63,若靠恢复细节则更锐的核该更好)——因此它是 provider
         # 相关的,换模型/adapter 可能失效,别当成图像本身的性质。
         #
-        # 上限:放大后长边不超过 crop 前原图长边——只占画面一部分的区域,其像素网格没有理由
-        # 比整帧被采集时还大。超限按上限回压短边(部分放大),不整体回退。因区域必在帧内
-        # (max(ch,cw) <= max(fh,fw)),cap_se 恒 >= 原生短边,故本上限只会限制放大、绝不引入缩小。
+        # 上限:放大后**长边**不超过 crop 前原图长边。因区域必在帧内(max(ch,cw) <=
+        # max(fh,fw)),cap_se 恒 >= 原生短边,故本上限只会限制放大、绝不引入缩小(261 个真实
+        # 区域上验过 0 反例)。超限按上限回压短边(部分放大),不整体回退。
+        #
+        # 它约束的**只有长边**,不是逐轴:基准取 max(fh,fw) 而不分区域朝向,所以竖长区域落在
+        # 横向帧里时,是拿帧宽去限制 crop 的高 —— 帧 1920x1080、区域 377w×553h、1080 档会编出
+        # 758x1112,高度 1112 已超过帧高 1080。别把本上限读成「像素网格不超过整帧」。
+        # 改成逐轴(min(fw/cw, fh/ch))更保守,但在真实数据上会从生效 1/261 变成 34/261、压低
+        # 33 个窗口的短边,且全是竖长人形区域 —— 而 +7.8pp 正是在无逐轴上限下测的,故未改。
         cap_se = max(1, int(max(fh, fw) * min(ch, cw) / max(ch, cw)))
         cse = min(_crop_short_edge_budget(cfg, pano_se), cap_se)
         audio = (
@@ -1617,6 +1631,8 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         from miloco.perception.snapshot_context import push_crop_meta, push_ref_frame
 
         push_ref_frame(ref_jpeg)
+        # short_edge 记的是**目标**短边;实际编码值会被 _encode_video_mp4 的 //2*2 取偶
+        # (以及浮点截断)下调 1-2px,按它反算送模型的像素网格会有这点误差。
         push_crop_meta(region=region, frame_size=(fw, fh), short_edge=cse)
         return _AdaptiveResult(video_b64, media_info, ref_jpeg)
     except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理

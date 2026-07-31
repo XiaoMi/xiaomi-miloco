@@ -226,7 +226,37 @@ def crop_enhance_config_from_settings() -> CropEnhanceConfig:
     known = CropEnhanceConfig.__dataclass_fields__.keys()
     filtered = {k: v for k, v in raw.items() if k in known}
     try:
-        return CropEnhanceConfig(**filtered)
+        cfg = CropEnhanceConfig(**filtered)
     except (TypeError, ValueError):
         logger.warning("event=crop_enhance_config_bad 回退默认 raw=%s", raw)
         return CropEnhanceConfig()
+    # dataclass 不校验值类型(上面的 except 只在**字段名**不匹配时触发),所以必须自己查:
+    # yaml 里 `enabled: "false"` 加了引号会变成非空字符串 → truthy → ops 灰度闸静默
+    # fail-open(运维以为压死了,实际还在裁,admin GET 还把它投影成 smart_crop_available
+    # =true 让前端开关可点)。闸只认真 bool,其余一律当配置错误退禁用。
+    if not isinstance(cfg.enabled, bool) or not isinstance(cfg.user_enabled, bool):
+        logger.warning(
+            "event=crop_enhance_config_bad reason=gate_not_bool enabled=%r user_enabled=%r 退禁用",
+            cfg.enabled, cfg.user_enabled,
+        )
+        return CropEnhanceConfig()
+    # 数值字段写成字符串时,dataclass 同样放行,后续比较才抛 TypeError → 被主流程的宽
+    # except 吞成 reason=exception,日志里看不出是配置写错。在这里就报出来。
+    for name in (
+        "expand_ratio_h", "expand_ratio_v", "motion_diff_threshold",
+        "motion_min_block_ratio", "motion_min_fill_ratio", "motion_global_drift_ratio",
+        "crop_min_area_ratio", "crop_max_area_ratio", "crop_short_edge",
+    ):
+        if isinstance(getattr(cfg, name), bool) or not isinstance(getattr(cfg, name), (int, float)):
+            logger.warning(
+                "event=crop_enhance_config_bad reason=not_number field=%s value=%r 退默认",
+                name, getattr(cfg, name),
+            )
+            return CropEnhanceConfig()
+    if cfg.crop_min_area_ratio > cfg.crop_max_area_ratio:
+        logger.warning(
+            "event=crop_enhance_config_bad reason=area_ratio_inverted min=%s max=%s 退默认",
+            cfg.crop_min_area_ratio, cfg.crop_max_area_ratio,
+        )
+        return CropEnhanceConfig()
+    return cfg

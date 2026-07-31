@@ -10,6 +10,7 @@
 verify_token 在 settings.server.token="" 时自动 bypass(默认值,测试无需鉴权).
 """
 
+import re
 import time
 import uuid
 
@@ -319,6 +320,11 @@ class TestGetRefEndpoint:
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/jpeg"
         assert resp.content == jpg
+        # inline 保证页面内直接显示;filename 按事件本地时间命名(同 clip 端点)——
+        # 不设时"另存为"会拿 URL 末段 device_id 当名字且无后缀。
+        cd = resp.headers["content-disposition"]
+        assert cd.startswith("inline")
+        assert re.search(r'filename="ref-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.jpg"', cd), cd
 
 
 class TestGetCropMetaEndpoint:

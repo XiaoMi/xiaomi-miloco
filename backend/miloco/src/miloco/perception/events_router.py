@@ -138,12 +138,19 @@ async def get_event_ref(
     - 404:event 不存在 / device_id 不在 device_ids 内
     - 410:event 合法但无 ref.jpg(非 crop 事件 / 已被 cleanup 清)
     """
-    status, path = await svc.locate_ref(event_id, device_id)
+    status, path, timestamp_ms = await svc.locate_ref(event_id, device_id)
     if status == "found":
-        assert path is not None
+        assert path is not None and timestamp_ms is not None
+        # filename 与 clip 端点同源同格式(见 get_event_clip 注释):不设时"另存为"会拿
+        # URL 末段 device_id 当名字、且没后缀;设了才能一眼看出是哪天哪个事件的参考帧。
+        from datetime import datetime
+
+        from miloco.utils.time_utils import deploy_timezone
+        local_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=deploy_timezone())
         return FileResponse(
             path=path,
             media_type="image/jpeg",
+            filename=f"ref-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.jpg",
             content_disposition_type="inline",
         )
     if status == "gone":
