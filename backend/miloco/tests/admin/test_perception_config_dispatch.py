@@ -150,9 +150,10 @@ def test_smart_crop_available_reflects_ops_gate(client):
     """
     c, _svc = client
     data = c.get("/api/admin/perception-config").json()["data"]
-    assert data["smart_crop_available"] is False  # settings.yaml 默认 dark
+    assert data["smart_crop_available"] is True  # settings.yaml 里 ops 闸已放开
 
-    # ops 闸不接受 API 写入：多余字段被 pydantic 忽略，不会渗进配置
-    resp = c.put("/api/admin/perception-config", json={"smart_crop_available": True})
+    # ops 闸不接受 API 写入：多余字段被 pydantic 忽略，不会渗进配置。
+    # 用 False 来验（写入方向与当前值相反，否则「没变」和「写进去了」不可区分）。
+    resp = c.put("/api/admin/perception-config", json={"smart_crop_available": False})
     assert resp.status_code == 200
-    assert c.get("/api/admin/perception-config").json()["data"]["smart_crop_available"] is False
+    assert c.get("/api/admin/perception-config").json()["data"]["smart_crop_available"] is True

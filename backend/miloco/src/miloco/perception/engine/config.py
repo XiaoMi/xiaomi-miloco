@@ -47,7 +47,10 @@ class CropEnhanceConfig:
     768/1080 在回退全景时静默降到 512,已废弃)。
     """
 
-    enabled: bool = False  # ops 灰度闸;test bench 验证前保持 dark,置 false 时用户开关也不生效
+    # ops 灰度闸,置 false 时用户开关也不生效。**产品默认值在随包 settings.yaml(已放开为
+    # true),不在这里** —— yaml 是合并的基础层,用户 config.json 缺这一块时继承的是 yaml 的
+    # true。此处的 False 只在连 yaml 都缺 key 时兜底(理论路径),别拿它当"默认关"的依据。
+    enabled: bool = False
     user_enabled: bool = False  # 用户开关(UI「智能裁切增强」,admin API 可写)
     expand_ratio_h: float = 0.40  # crop 区域水平扩展比(适应人形竖长 + 16:9)
     expand_ratio_v: float = 0.30  # 垂直扩展比
@@ -60,7 +63,8 @@ class CropEnhanceConfig:
     # crop 视频短边基准,**以 512 档为参照**:实际短边 = round(video_short_edge × 360/512),
     # 即用户档的 70%。按比例跟随而非固定值,才能保住「crop 模式像素开销 ≈ 同档全景」这个
     # 不变量 —— crop_max_area_ratio=0.49≈(360/512)² 的推导正建立在这个比例上,固定 360
-    # 配 1080 档会让上限推导失效。只缩不放(crop 区域本身更小时取其原尺寸)。
+    # 配 1080 档会让上限推导失效。区域短边不足预算时**放大**到预算(离线实测:720p 源下
+    # 该情形占 57% 窗口,原生裁切 +0.6pp、放大后 +7.8pp),放大后长边不超过原图长边。
     crop_short_edge: int = 360
     # 注:crop 视频帧率不设独立配置——crop 逐帧裁切、不抽帧,时序与全景视频完全一致,
     # 编码必须沿用 packet.frame_info.fps(下采样后真实间隔),否则时长/音画错位。

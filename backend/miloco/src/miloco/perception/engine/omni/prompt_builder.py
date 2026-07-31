@@ -1278,6 +1278,11 @@ def _encode_video_mp4(
         scale = short_edge / min(h0, w0)
         target_w = int(w0 * scale) // 2 * 2
         target_h = int(h0 * scale) // 2 * 2
+        # 缩小用 INTER_AREA(区域平均,抗锯齿最好);放大时 INTER_AREA 会退化成近似最近邻
+        # (它按源像素落到的目标格子做平均,放大时每格只摊到一个源像素),必须换重采样核。
+        # LANCZOS4 是离线对照里实测的那一个(与 CUBIC 统计上无法区分 p=0.63,取被测过的)。
+        # 全景路径只缩不放,走的仍是 INTER_AREA,画质不受本分支影响。
+        interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
         v_stream = container.add_stream("h264", rate=fps)
         v_stream.width = target_w
         v_stream.height = target_h
@@ -1296,7 +1301,7 @@ def _encode_video_mp4(
 
         for frame_data in frames:
             resized = cv2.resize(
-                frame_data, (target_w, target_h), interpolation=cv2.INTER_AREA,
+                frame_data, (target_w, target_h), interpolation=interp,
             )
             frame = av.VideoFrame.from_ndarray(resized, format="bgr24")
             for packet in v_stream.encode(frame):
@@ -1564,8 +1569,19 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
             logger.info("event=adaptive_crop_fallback reason=crop_empty region=%s", region)
             return None
         ch, cw = cropped[0].shape[:2]
+        fh, fw = frames[0].shape[:2]
         pano_se = _effective_panorama_short_edge()
-        cse = min(min(ch, cw), _crop_short_edge_budget(cfg, pano_se))
+        # 短边不足预算时**放大**到预算(不再只缩不放)。离线对照:720p 源下裁出区域短边中位
+        # 283、够不上 360 预算的窗口占 57%,这批窗口原生裁切只有 +0.6pp(p=1.0),插值放大到
+        # 预算后 +7.8pp。机制疑在送进视觉 encoder 的像素网格尺寸决定主体分到多少 token
+        # (两种插值核互比无差异 p=0.63,若靠恢复细节则更锐的核该更好)——因此它是 provider
+        # 相关的,换模型/adapter 可能失效,别当成图像本身的性质。
+        #
+        # 上限:放大后长边不超过 crop 前原图长边——只占画面一部分的区域,其像素网格没有理由
+        # 比整帧被采集时还大。超限按上限回压短边(部分放大),不整体回退。因区域必在帧内
+        # (max(ch,cw) <= max(fh,fw)),cap_se 恒 >= 原生短边,故本上限只会限制放大、绝不引入缩小。
+        cap_se = max(1, int(max(fh, fw) * min(ch, cw) / max(ch, cw)))
+        cse = min(_crop_short_edge_budget(cfg, pano_se), cap_se)
         audio = (
             ep.audio_clip
             if _packet_audio_included(ep)
@@ -1586,12 +1602,14 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         if not ref_jpeg or len(ref_jpeg) < _MIN_JPEG_BYTES:
             logger.info("event=adaptive_crop_fallback reason=jpeg_too_short region=%s", region)
             return None
-        fh, fw = frames[0].shape[:2]
         logger.info(
-            "event=adaptive_crop region=%s crop_ratio=%.3f short_edge=%d n_det=%d n_motion=%d",
+            "event=adaptive_crop region=%s crop_ratio=%.3f short_edge=%d upscale=%.2f "
+            "n_det=%d n_motion=%d",
             region,
             ((region[2] - region[0]) * (region[3] - region[1])) / (fw * fh),
             cse,
+            # 灰度期要能从日志看出放大倍率的真实分布(>1 即放大,离线实测中位 1.27、max 2.02)
+            cse / max(1, min(ch, cw)),
             n_det, n_motion,
         )
         # 旁路落盘:参考帧字节 + crop 元数据(坐标进 trace),供 badcase 复盘对照。

@@ -252,8 +252,16 @@ class TestConfigFromSettings:
         finally:
             reset_settings()
 
-    def test_missing_block_falls_back_to_disabled(self, tmp_path, monkeypatch):
-        """整块缺失(老配置)→ 默认全默认值,即双闸皆关:失效方向是「不裁」而非「乱裁」。"""
+    def test_missing_block_inherits_shipped_defaults_and_still_does_not_crop(
+        self, tmp_path, monkeypatch
+    ):
+        """整块缺失(老配置)→ 继承随包 settings.yaml 的默认值,而非 dataclass 默认值。
+
+        随包 yaml 是合并的基础层,所以 ops 闸拿到的是产品默认 enabled=true(不是 dataclass
+        的 False —— 后者只在 yaml 自身缺 key 时才生效,而我们随包就带着它)。真正保护老用户
+        的是 user_enabled=false:**双闸相与,所以不裁**。断言落在这个行为不变量上,
+        它不随 ops 闸的灰度策略变动。
+        """
         import json
 
         from miloco.config.settings import reset_settings
@@ -270,8 +278,8 @@ class TestConfigFromSettings:
         reset_settings()
         try:
             cfg = crop_enhance_config_from_settings()
-            assert cfg.enabled is False
             assert cfg.user_enabled is False
+            assert not (cfg.enabled and cfg.user_enabled)  # 双闸相与 → 老配置不会突然开始裁
         finally:
             reset_settings()
 
@@ -294,5 +302,6 @@ class TestConfigFromSettings:
         block = raw["perception"]["engine"]["crop_enhance"]
         unknown = set(block) - set(CropEnhanceConfig.__dataclass_fields__)
         assert not unknown, f"settings.yaml 里这些键不会被读到: {unknown}"
-        assert block["enabled"] is False  # ops 灰度闸默认压死
+        assert block["enabled"] is True  # ops 闸已放开(团队决定)
+        # 用户开关仍默认关:随包配置本身不能让任何存量用户开始裁切,必须由 UI/admin API 显式打开。
         assert block["user_enabled"] is False

@@ -89,11 +89,12 @@ perception:
     # Smart Crop(智能裁切增强): 推理前定向裁切活动区域, 送更高等效分辨率的局部视频 + 全景参考帧。
     # 与 video_short_edge 正交 —— 裁不裁看这里, 多清晰看 video_short_edge; crop 视频/参考帧的
     # 短边按用户档等比跟随(512 档→360, 见 crop_short_edge)。热读、免重启。
-    # 默认 enabled:false —— test bench 规则触发回归验证通过前保持 dark。
     crop_enhance:
-      # 双闸:enabled = ops 灰度闸(验证前压死整个能力,前端开关随之置灰);
+      # 双闸:enabled = ops 灰度闸(压死整个能力,前端开关随之置灰);
       #       user_enabled = 用户开关(UI「智能裁切增强」,admin API 可写)。两个都为 true 才裁。
-      enabled: false
+      # enabled:true(团队决定放开 ops 闸)。user_enabled 仍为 false —— 未动 UI 开关的用户
+      # 行为字节等同未接本特性前。test bench 规则触发回归尚未跑。
+      enabled: true
       user_enabled: false
       expand_ratio_h: 0.40
       expand_ratio_v: 0.30

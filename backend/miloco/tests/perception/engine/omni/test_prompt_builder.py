@@ -1644,8 +1644,9 @@ class TestAdaptiveResolution:
         assert self._has_ref(content)  # 确认确实走了 crop 分支
         assert spy.call_args_list[-1].kwargs["short_edge"] == 759
 
-    def test_crop_video_short_edge_capped_by_region_when_region_smaller(self):
-        # 反向:crop 区域本身比预算小(512 档默认小框 → 区域短边约 148)→ 取区域原尺寸,只缩不放。
+    def test_crop_video_upscaled_to_budget_when_region_smaller(self):
+        # 区域比预算小(512 档默认小框 → 区域短边约 148)→ **放大**到预算 360,不再只缩不放。
+        # 离线对照:720p 源下这类窗口占 57%,原生裁切 +0.6pp、放大到预算 +7.8pp。
         from unittest.mock import patch as _patch
 
         import miloco.perception.engine.omni.prompt_builder as pb
@@ -1654,7 +1655,46 @@ class TestAdaptiveResolution:
         with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
             content = self._content(candidates=[])
         assert self._has_ref(content)
-        assert spy.call_args_list[-1].kwargs["short_edge"] < 360  # 未被放大到预算值
+        assert spy.call_args_list[-1].kwargs["short_edge"] == 360
+
+    def test_upscale_capped_by_original_frame_long_edge(self):
+        # 放大上限:放大后长边 ≤ crop 前原图长边。造一个极扁区域(长宽比 > 帧长边/预算),
+        # 使预算不再是生效上限 —— 此时短边应被回压到 frame_long × short/long。
+        from unittest.mock import patch as _patch
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        # 640x360 帧(长边 640)+ 很扁的框 → 扩展后区域长宽比约 5:1。放大到预算 360 会让
+        # 长边达 1800 ≫ 640,故上限生效。
+        np.random.seed(29)
+        frames = [np.random.randint(0, 256, (360, 640, 3), dtype=np.uint8) for _ in range(5)]
+        pkt = _adaptive_packet(frames=frames, body_box=(120, 160, 400, 40))
+        p1, p2 = self._patches(short_edge=512)
+        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+            content = self._content(packet=pkt, candidates=[])
+        assert self._has_ref(content)
+        cropped = spy.call_args_list[-1].args[0]
+        ch, cw = cropped[0].shape[:2]
+        se = spy.call_args_list[-1].kwargs["short_edge"]
+        long_after = max(ch, cw) * se / min(ch, cw)
+        assert long_after <= max(frames[0].shape[:2]) + 1  # 取整误差留 1px
+        assert se < 360  # 确认是上限而非预算在起作用
+        assert se >= min(ch, cw)  # 上限只限制放大,绝不反过来引入缩小
+
+    def test_upscale_uses_lanczos_downscale_keeps_area(self):
+        # 放大/缩小走不同重采样核:INTER_AREA 是区域平均,放大时退化成近似最近邻,故只用于缩小。
+        from unittest.mock import patch as _patch
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        frames = [np.random.randint(0, 256, (100, 200, 3), dtype=np.uint8) for _ in range(3)]
+        audio = np.zeros(0, dtype=np.int16)
+        with _patch.object(pb.cv2, "resize", wraps=pb.cv2.resize) as spy:
+            pb._encode_video_mp4(frames, audio, 16000, fps=1, short_edge=200)  # 放大 2x
+            assert all(c.kwargs["interpolation"] == pb.cv2.INTER_LANCZOS4 for c in spy.call_args_list)
+        with _patch.object(pb.cv2, "resize", wraps=pb.cv2.resize) as spy:
+            pb._encode_video_mp4(frames, audio, 16000, fps=1, short_edge=50)  # 缩小 0.5x
+            assert all(c.kwargs["interpolation"] == pb.cv2.INTER_AREA for c in spy.call_args_list)
 
     def test_crop_video_uses_frame_info_fps(self):
         # crop 视频帧率必须跟随 frame_info.fps(下采样后真实间隔),不是硬编码——否则调 omni_fps 就慢放。
