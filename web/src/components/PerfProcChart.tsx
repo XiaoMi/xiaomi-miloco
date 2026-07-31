@@ -30,25 +30,29 @@ interface Props {
   windowMs: number;
 }
 
-export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props) {
+export function PerfProcChart({ seriesState, bucket, windowMs }: Props) {
   const { t } = useTranslation();
   const series = seriesState.data;
   const points = series?.points ?? [];
   const coreCount = series?.core_count ?? 1;
 
-  // header 的数字全部取自 series,与曲线同源:1h 视图桶长 = 采样间隔 60s,末桶只装一个
-  // 采样点、「当前」就是瞬时值;6h 及以上桶更粗,「当前」实为末桶均值。没有另拉
-  // /monitor/resources 快照换真瞬时值——那样 header 与曲线画的就不是同一个数,矛盾只是
-  // 从「切窗口数字会变」挪到「卡片内两个数对不上」。
+  // header 的数字全部取自 series,与曲线同源,所以文案如实标出桶粒度而不写「当前」:
+  // 1h 视图桶长 = 采样间隔 60s、末桶只装一个采样点,但 6h 及以上桶更粗,末桶是均值,
+  // 24h/3d 的 1h 桶更会把 1min 级满核尖峰抹掉几十倍。没有另拉 /monitor/resources 快照
+  // 换真瞬时值——那样 header 与曲线画的就不是同一个数,矛盾只是从「切窗口数字会变」挪到
+  // 「卡片内两个数对不上」。
   const headerLine = (() => {
     if (points.length > 0) {
       const last = points[points.length - 1];
       // 峰值读桶内 max：桶粗到 1h 时(24h/3d 视图)cpu_pct 均值会抹平 1min 级尖峰。
       const peak = Math.max(...points.map((p) => p.cpu_pct_max));
       return [
-        t("perf.procHeaderCur", { pct: (last.cpu_pct / coreCount).toFixed(1) }),
+        t("perf.procHeaderRecent", {
+          bucket,
+          pct: (last.cpu_pct / coreCount).toFixed(1),
+        }),
         t("perf.procHeaderPeak", { pct: (peak / coreCount).toFixed(1) }),
-        t("perf.procHeaderThreads", { n: last.num_threads }),
+        t("perf.procHeaderThreads", { bucket, n: last.num_threads }),
       ].join(" · ");
     }
     return seriesState.loading ? t("perf.loading") : t("perf.procHeaderEmpty");
