@@ -242,9 +242,13 @@ class MIoTMediaDecoder(threading.Thread):
         """Stop the decoder."""
         self._running = False
         self._queue.stop()
+        # 先 join 再置 None:join 期间 run 仍可能重建 codec,先释放会泄漏 worker
+        self.join(timeout=5.0)
+        if self.is_alive():
+            _LOGGER.error("decoder thread failed to stop within timeout")
+            return
         self._video_decoder = None
         self._audio_decoder = None
-        self.join()
 
     def push_video_frame(self, frame_data: MIoTCameraFrameData) -> None:
         self._queue.put_video(frame_data)
