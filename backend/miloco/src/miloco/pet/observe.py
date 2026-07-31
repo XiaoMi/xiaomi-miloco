@@ -355,6 +355,9 @@ def _largest_pet_crop_with_count(
         "bbox": (best.x, best.y, best.w, best.h),
         "frame_idx": None,  # 单图无帧序号
         "crowded": crowded,
+        # 尺寸门已在上方 _size_gate_ok 判过 → 如实置 True，与视频候选契约对齐（防日后加筛选时 KeyError）。
+        # 注意：本候选**有意**不过 PET_GATE_SHARP_MIN，仍不应直接喂 _gate_select（见该函数 docstring）。
+        "size_ok": True,
     }, len(dets)
 
 
@@ -733,10 +736,25 @@ def _prepare_crops(
                 "message": f"有 {len(batch) - n_decoded} 张图无法解码，已跳过。",
             }
         )
+    # 单图有意不卡 PET_GATE_SHARP_MIN（见 _largest_pet_crop_with_count 注释）→ 不硬拒，只给软提示，
+    # 让住户知道参考图质量会打折（识别召回/误识两头都吃这个）。
+    if any(c["sharpness"] < PET_GATE_SHARP_MIN for c in selected):
+        extra.append(
+            {
+                "type": "low_sharpness",
+                "level": "warn",
+                "message": "有素材画面偏糊，识别参照效果可能变差，建议换更清晰的照片。",
+            }
+        )
     return selected, n_coincident, _first_decodable(medias), extra
 
 
-def _empty_result() -> dict:
+def _empty_result(warnings: list[dict] | None = None) -> dict:
+    """空结果（未检出 / 确无动物）。
+
+    ``warnings`` 须透传——否则「有图没解出」这类提示会在空结果分支被丢掉，住户又只看到
+    「没检测到宠物」（D8 口径：别静默丢）。
+    """
     return {
         "detected": False,
         "description": None,
@@ -747,7 +765,7 @@ def _empty_result() -> dict:
         "primary_index": 0,
         "candidates": [],
         "refs_inconsistent": None,
-        "warnings": [],
+        "warnings": list(warnings or []),
     }
 
 
@@ -807,7 +825,7 @@ async def observe_pet(
 
     # 回退：检测器没框到猫/狗 / 门控全灭 → 让 omni 看整幅画面（并按 D7 尝试框本体）。
     if fallback_frame is None or fallback_frame.size == 0:
-        return _empty_result()
+        return _empty_result(extra_warnings)
     description, head_bboxes, _, body_bbox = await _omni_describe(
         [fallback_frame], grounding=grounding, whole_frame=True, body_grounding=body_grounding
     )
@@ -816,7 +834,9 @@ async def observe_pet(
         or str(description.get("summary") or "").strip()
     )
     if not has_animal:
-        return _empty_result()  # omni 确认画面无动物
+        # 空结果也要带上 partial_decode_failed / low_sharpness：否则住户只看到「没检测到宠物」，
+        # 不知道有图没解出来（D8 口径）
+        return _empty_result(extra_warnings)  # omni 确认画面无动物
     # D7：omni 框出了本体 → 裁本体作唯一参考 crop（非猫狗物种也能有参考图）
     body_crop, body_px = _crop_from_norm_bbox(fallback_frame, body_bbox)
     if body_crop is not None:

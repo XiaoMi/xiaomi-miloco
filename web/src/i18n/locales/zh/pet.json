@@ -1,7 +1,5 @@
 {
   "pet": {
-    "stripTitle": "家庭宠物",
-    "stripCount": "共 {{count}} 只",
     "addPet": "添加宠物",
     "useDescription": "使用此描述",
     "drawerName": "名字",
@@ -10,7 +8,6 @@
     "drawerSpeciesPlaceholder": "如：猫 / 狗",
     "drawerAppearance": "外观描述",
     "drawerAppearancePlaceholder": "如：中等体型的黑色短毛英短猫，尾巴尖有一撮白毛",
-    "drawerAvatar": "头像",
     "changeAvatar": "更换头像",
     "autoGenTitle": "自动生成外观描述",
     "autoGenHint": "上传清晰的宠物照片或视频，自动生成外观描述",
@@ -25,7 +22,6 @@
     "analyzing": "分析中…",
     "descriptionGenerated": "已生成外观描述，可编辑后保存",
     "noPetDetected": "未在媒体中检测到宠物，请换一张更清晰的",
-    "multiPetHint": "检测到多只宠物，已描述最主要的一只",
     "candidatesHint": "已识别 {{count}} 张参考图，将全部保存（点选左侧设为头像主图）",
     "candidatesHintAvatarOnly": "未生成识别参照，本张仅用作头像；想让画面里认得出它，换张更清晰、能看清整只的素材",
     "candidateNth": "候选 {{n}}",
@@ -36,12 +32,13 @@
     "useMaterial": "补充参考图",
     "materialAppended": "已补充 {{count}} 张参考图",
     "noRefCropsToAppend": "这次素材没能生成识别参照（画面里没框出猫/狗），没有可补充的内容——换张更清晰、能看清整只的照片再试",
-    "useDescriptionMulti": "使用",
     "warn": {
       "species_mismatch": "检测物种与描述物种不一致，请核对物种",
       "generic_look": "未发现明显区分特征（花纹/品种/配饰），可能与同类难以区分，建议补充更具特征或更清晰的素材",
       "refs_inconsistent": "上传的几张图差异较大，疑似不是同一只宠物",
-      "multiple_pets": "画面中检测到多只宠物，已自动选择主体；如需注册其它只请单独上传该只素材"
+      "multiple_pets": "画面中检测到多只宠物，已自动选择主体；如需注册其它只请单独上传该只素材",
+      "partial_decode_failed": "有部分图片无法解码，已跳过（仅支持 jpg/png/webp）",
+      "low_sharpness": "素材画面偏糊，识别参照效果可能变差，建议换更清晰的照片"
     },
     "previewSource": "上传画面",
     "previewDetected": "识别到的宠物",
@@ -50,7 +47,6 @@
     "modelUnavailable": "感知模型不可用：{{msg}}",
     "save": "保存",
     "saving": "保存中…",
-    "rename": "改名",
     "delete": "删除",
     "cancel": "取消",
     "confirmDelete": "确认删除",
@@ -59,7 +55,6 @@
     "saveFail": "保存失败，稍后再试",
     "deleteFail": "删除失败，稍后再试",
     "observeFail": "生成失败，请重试",
-    "uploadAvatarFail": "头像上传失败",
     "memberTitle": "宠物成员",
     "experimentalBadge": "实验性功能",
     "experimentalHint": "开启后可把宠物作为家庭成员登记，并在画面描述中称呼它们；关闭只隐藏、不删除已录入的宠物。",

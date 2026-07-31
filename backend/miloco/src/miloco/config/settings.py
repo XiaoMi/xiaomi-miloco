@@ -430,7 +430,7 @@ class FeaturesSettings(BaseModel):
         description=(
             "宠物头像头部定位子开关（默认开）：开启后注册时让 omni 输出宠物头部区域"
             "坐标作为头像默认裁剪框；关闭时用全身 crop 作头像、不在观察 prompt 中加入"
-            "grounding 段。仅在 pet_recognition 开启时有意义。"
+            "grounding 段。仅在 pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
         ),
     )
     pet_body_grounding: bool = Field(
@@ -439,7 +439,7 @@ class FeaturesSettings(BaseModel):
             "宠物本体定位子开关（默认开）：仅作用于「检测器框不到猫/狗」的回退路径"
             "——开启后让 omni 在整幅画面中输出目标动物本体坐标，裁本体作参考 crop"
             "（兼容兔/鸟/仓鼠等非猫狗物种也能有参考图）；关闭时回退路径不产参考 crop。"
-            "仅在 pet_recognition 开启时有意义。"
+            "仅在 pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
         ),
     )
     pet_reid_diverse: bool = Field(
@@ -448,7 +448,7 @@ class FeaturesSettings(BaseModel):
             "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 嵌入的特征距离，在同一只"
             "候选里贪心选出最不相似的 ≤3 张多姿态参考图（第 1 张仍取质量分最高，第 2/3 张依次"
             "选特征距离最远者）；关闭或模型不可用时回退感知哈希（dHash）多样性。仅在 "
-            "pet_recognition 开启时有意义。"
+            "pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
         ),
     )
 

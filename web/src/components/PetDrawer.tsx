@@ -234,6 +234,9 @@ export function PetDrawer({
       onChanged();
       onClose();
     } catch (e) {
+      // 部分失败也刷新（同 PersonDrawer）：新建是多步串行写入，createPet 成功而后续步骤失败时
+      // 不刷新列表，住户看不到已建好的宠物、就地重试还会撞 409。
+      onChanged();
       toast(e instanceof Error ? e.message : t("pet.saveFail"), "warn");
     } finally {
       setBusy(false);

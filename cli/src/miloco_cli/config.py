@@ -114,19 +114,19 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         bool,
         True,
         "宠物头像头部定位子开关（默认开）：开则注册时由 omni 输出头部坐标作头像裁剪框，"
-        "关则用全身 crop。仅在 pet_recognition 开启时有意义",
+        "关则用全身 crop。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
     ),
     "features.pet_body_grounding": (
         bool,
         True,
         "宠物本体定位子开关（默认开）：仅作用于检测器框不到猫/狗的回退路径，开则裁本体作"
-        "参考图（兼容非猫狗物种），关则回退路径不产参考图。仅在 pet_recognition 开启时有意义",
+        "参考图（兼容非猫狗物种），关则回退路径不产参考图。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
     ),
     "features.pet_reid_diverse": (
         bool,
         True,
         "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 特征距离贪心选最不相似的 ≤3 张"
-        "多姿态；关或模型不可用时回退感知哈希 dHash。仅在 pet_recognition 开启时有意义",
+        "多姿态；关或模型不可用时回退感知哈希 dHash。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
     ),
 }
 

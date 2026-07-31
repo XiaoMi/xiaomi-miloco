@@ -753,6 +753,46 @@ async def test_observe_partial_decode_failure_warns(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_observe_low_sharpness_soft_warning(monkeypatch):
+    # 图片路径有意不硬拒糊图（见 _largest_pet_crop_with_count 注释），但要出软提示
+    _stub_omni(monkeypatch)
+    monkeypatch.setattr(
+        obs,
+        "default_detector",
+        lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
+    )
+    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
+    monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
+    monkeypatch.setattr(obs, "compute_sharpness", lambda c: 1.0)  # 远低于 PET_GATE_SHARP_MIN
+    res = await obs.observe_pet([b"blurry"], is_video=False, grounding=False)
+    assert len(res["candidates"]) == 1  # 不硬拒
+    assert "low_sharpness" in {w["type"] for w in res["warnings"]}
+
+
+@pytest.mark.asyncio
+async def test_partial_decode_warning_survives_empty_result(monkeypatch):
+    # 部分解不出 + 其余都没检出动物 → 走空结果分支，partial_decode_failed 仍须透出（D8）
+    async def _no_animal(payload, config, type="realtime"):
+        return {"choices": [{"message": {"content": '{"species":"","summary":""}'}}]}
+
+    monkeypatch.setattr(obs, "call_omni", _no_animal)
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
+    )
+    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
+    calls = {"n": 0}
+
+    def _imdecode(*a, **k):
+        calls["n"] += 1
+        return None if calls["n"] == 2 else _frame(200, 200)
+
+    monkeypatch.setattr(cv2, "imdecode", _imdecode)
+    res = await obs.observe_pet([b"i1", b"i2"], is_video=False, grounding=False)
+    assert res["detected"] is False
+    assert "partial_decode_failed" in {w["type"] for w in res["warnings"]}
+
+
+@pytest.mark.asyncio
 async def test_omni_describe_raises_on_non_json(monkeypatch):
     # 模型拒答 / 被 max tokens 截断 → 非 JSON：抛 OmniDescribeError（由路由转 502），不降级成空描述
     async def _fake(payload, config, type="realtime"):

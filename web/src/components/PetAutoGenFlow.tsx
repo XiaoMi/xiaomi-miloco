@@ -144,8 +144,13 @@ export function PetAutoGenFlow({
           setCheck("unconfigured");
           return;
         }
+        // active.label 可能为空（env / 手改 config.json 直填 key，未走 web 档案流程）；后端按空
+        // label 取不到已存 key 会返 no_key，把可用配置误判为不可用、锁死整个自动生成。用列表里那条
+        // active 档案的 label（后端已按 model @ base_url 合成，非空）定位其已存 key。
+        const activeLabel =
+          cfg.profiles.find((p) => p.active)?.label ?? cfg.active.label;
         const res = await testOmniConfig({
-          label: cfg.active.label,
+          label: activeLabel,
           model: cfg.active.model,
           base_url: cfg.active.base_url,
         });
@@ -166,6 +171,20 @@ export function PetAutoGenFlow({
       alive = false;
     };
   }, []);
+
+  // 失败 / 未检出时清掉上一次识别结果：否则旧候选会与本次上传的新原图并排展示，且 canConfirm
+  // 仍为 true——点确认落库的是**上一批**素材的外观 / 参考图。
+  const resetResult = () => {
+    setAnalyzed(false);
+    setCandidates([]);
+    setSynthesized(false);
+    setSel(0);
+    setAppearance("");
+    setSpecies("");
+    setWarnings([]);
+    setRefsInconsistent(false);
+    setRefsAck(false);
+  };
 
   const onPick = async (fileList: FileList | null) => {
     const files = fileList ? Array.from(fileList) : [];
@@ -190,8 +209,7 @@ export function PetAutoGenFlow({
     try {
       const r = await observePet(files, grounding);
       if (!r.detected) {
-        setAnalyzed(false);
-        setCandidates([]);
+        resetResult();
         setNote(t("pet.noPetDetected"));
         return;
       }
@@ -218,6 +236,7 @@ export function PetAutoGenFlow({
       setRefsAck(false);
       setAnalyzed(true);
     } catch (e) {
+      resetResult();
       toast(e instanceof Error ? e.message : t("pet.observeFail"), "warn");
     } finally {
       setBusy(false);

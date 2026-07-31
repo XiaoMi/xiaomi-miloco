@@ -37,6 +37,7 @@ metadata:
 宠物识别是实验性功能,总开关 `pet_recognition` 控制。**关闭时,注册所有端点(建花名册 / 头像 / 参考图 / observe)一律返 404 → A 素材通路与 B 文字通路都走不了**:
 - 用户想登记宠物却功能没开 → **引导去设置打开**:"宠物识别功能没开,现在还没法给它建档——去设置里打开「宠物识别」,打开后我就能帮它建档、在画面里认出它。"
 - **别在关闭时假装建档 / 承诺"已记下"**;纯"家里有只狗"这类家庭事实由 `miloco-home-profile` skill 记录(与识别无关、不受此门控)。
+- **怎么判开关**:`miloco-cli config get features.pet_recognition --value-only`(输出 `True` / `False`,与 `miloco-home-profile` 同口径)。注意 `pet list` **不受门控**(关闭时也正常返回存量花名册),**不能**拿它的成功/失败反推开关状态。
 
 ## 核心工作流
 
@@ -68,7 +69,8 @@ metadata:
 
 ```
 收到用户消息:
-  if pet_recognition 关:                     → 引导去设置打开(见异常表),本轮结束;纯家庭事实交 miloco-home-profile
+  if pet_recognition 关(`config get features.pet_recognition --value-only` → `False`):
+                                             → 引导去设置打开(见异常表),本轮结束;纯家庭事实交 miloco-home-profile
   elif 含图/视频附件:                         → 2.2 A 素材通路
   elif 有文字外观描述(无附件):               → 2.1 B 文字通路
   else:  # 既没描述也没素材                   → 2.4 引导:给描述 或 发素材,本轮结束等回复
@@ -124,7 +126,7 @@ miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/<uuid>_pet --pr
 - `avatar_saved_to` — 默认头像本地路径(observe 已按头部框裁好;第五步喂 `pet avatar` 作注册默认头像)
 - `candidates` — 候选元数据(已清 base64)
 - `warnings` — **数组** `[{type, level, message}]`(type 见下表,level 多为 `warn`,message 是人话);逐条转述给用户
-- `refs_inconsistent` — **顶层布尔字段**(不在 warnings 数组里):多图时 omni 疑似"不是同一只"
+- `refs_inconsistent` — **顶层布尔字段**:多图时 omni 疑似"不是同一只";**同一件事也会在 `warnings` 里出现一条 `type = refs_inconsistent`——两处是同一个信号,跟住户只说一遍**
 
 **本步硬约束**:
 - ❌ 每轮 `pet observe` **恰调一次**,不"再试 / 刷新一下"。结果不理想(检不到 / 大众脸)直接按结果发话让用户决定。
@@ -135,13 +137,15 @@ miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/<uuid>_pet --pr
 - 🚨 **发完(拼图 + 文字确认),本轮到此为止**:进第四步**纯等待**——**严禁本轮落库**(`pet add` / `reference-crops`)。observe 与落库是两轮,落库须等用户下轮回"确认"。
 - 🚨 **别把用户的"注册/登记"当成对 observe 结果的认可**:那是**意图**;而这次具体**记成什么样**(外观、选哪几张图)得用户看过、回"确认"才算数。所以本轮只把结果给他看,落库是他点头后**下一轮**的事。
 
-**处理提示**(发用户时用自然语言转述;前三条是 `warnings[].type` 的取值,末条是顶层 `refs_inconsistent=true`):
+**处理提示**(发用户时用自然语言转述;前五条是 `warnings[].type` 的取值;末条的顶层 `refs_inconsistent` 与 `warnings` 里的同名条目是**同一件事**,合并成一句说、别转述两遍):
 
 | 信号 | 含义 | 首轮话术处理 |
 |---|---|---|
 | `warnings[].type = species_mismatch` | 检出物种与用户说的不符 | "我看着更像{检出物种},你确认是{用户物种}吗?" |
 | `warnings[].type = generic_look` | 大众花色/脸,难独一区分 | 照常注册,但提示"这只花色比较常见,后续多补不同姿态识别更稳" |
 | `warnings[].type = multiple_pets` | 画面里不止一只 | "画面里不止一只,本次先注册主体那只;其它的分别再各传一次" |
+| `warnings[].type = partial_decode_failed` | 有图没解出来(HEIC/AVIF/损坏),已跳过 | "其中有张我没打开(格式不支持),这次用剩下的看的;想把那张也算上就换成 jpg/png 再发一次" |
+| `warnings[].type = low_sharpness` | 素材偏糊(不硬拒,只是参照会打折) | 照常注册,但提示"这几张有点糊,识别参照效果会差些;有更清晰的可以再补" |
 | 顶层 `refs_inconsistent = true` | 多图疑似不是同一只 | "这几张看着可能不是同一只?确认都是{name}我再入库,或只留同一只的" |
 
 首轮文字模板(作为你这轮的**普通文字回复(assistant `content`)** 直接说出来,不放进 `message`):
