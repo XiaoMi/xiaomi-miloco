@@ -1,10 +1,12 @@
 /**
  * 进程 CPU 占用 + 线程数图表。
  *
- * 双折线时序:CPU%(左 Y 轴 0-100%,brand 实线)+ 线程数(右 Y 轴,warning 虚线),
- * hover 弹 tooltip 看时间点 + 两个值。数据来自 /monitor/proc/series。CPU 原始值
- * 取自 psutil Process.cpu_percent(多核可 > 100),除以 core_count 归一化到 0-100%;
- * tooltip 括号内保留原始绝对值(满核百分比)。
+ * 双折线时序:CPU%(左 Y 轴 0-100%,brand 实线,另叠淡色桶内峰值包络)+ 线程数
+ * (右 Y 轴,warning 虚线),hover 弹 tooltip 看时间点 + CPU 均值/桶内峰值/线程数。
+ * 数据来自 /monitor/proc/series。CPU 原始值取自 psutil Process.cpu_percent
+ * (多核可 > 100),除以 core_count 归一化到 0-100%;tooltip 括号内保留原始绝对值
+ * (满核百分比)。粗桶(24h/3d 视图 1h 桶)下均值线会抹平尖峰,峰值包络与 tooltip
+ * 峰值行让尖峰仍可定位、与 header「峰值」对得上。
  *
  * SVG 骨架与 PerfMemoryChart 同款:viewBox 横向自适应 + HTML 浮层放轴标签和
  * tooltip,避免 SVG preserveAspectRatio 拉伸字号。
@@ -35,12 +37,12 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
       // 峰值读桶内 max：桶粗到 1h 时(24h/3d 视图)cpu_pct 均值会抹平 1min 级尖峰。
       const peak = Math.max(...points.map((p) => p.cpu_pct_max));
       return [
-        t("perf.cpuHeaderCur", { pct: (last.cpu_pct / coreCount).toFixed(1) }),
-        t("perf.cpuHeaderPeak", { pct: (peak / coreCount).toFixed(1) }),
-        t("perf.cpuHeaderThreads", { n: last.num_threads }),
+        t("perf.procHeaderCur", { pct: (last.cpu_pct / coreCount).toFixed(1) }),
+        t("perf.procHeaderPeak", { pct: (peak / coreCount).toFixed(1) }),
+        t("perf.procHeaderThreads", { n: last.num_threads }),
       ].join(" · ");
     }
-    return seriesState.loading ? t("perf.loading") : t("perf.cpuHeaderEmpty");
+    return seriesState.loading ? t("perf.loading") : t("perf.procHeaderEmpty");
   })();
 
   return (
@@ -50,16 +52,16 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
     >
       <div className="flex items-baseline justify-between flex-wrap gap-3 mb-4">
         <h2 id="perf-proc-title" className="text-title">
-          {t("perf.cpuTitle")}
+          {t("perf.procTitle")}
         </h2>
         <div className="flex items-center gap-3 text-caption text-text-tertiary flex-wrap">
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-brand-primary" />
-            {t("perf.cpuLegendCpu")}
+            {t("perf.procLegendCpu")}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-warning" />
-            {t("perf.cpuLegendThreads")}
+            {t("perf.procLegendThreads")}
           </span>
           <span>{headerLine}</span>
         </div>
@@ -75,7 +77,7 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
         </div>
       ) : points.length === 0 ? (
         <div className="h-48 flex items-center justify-center text-text-secondary">
-          {t("perf.cpuEmptySeries")}
+          {t("perf.procEmptySeries")}
         </div>
       ) : (
         <ProcChart points={points} coreCount={coreCount} spanMs={windowMs} t={t} />
@@ -105,6 +107,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
 
   // 左轴:CPU% 归一化 = cpu_pct / 总核数,Y 轴钉死 [0,100]
   const cpuVals = points.map((p) => p.cpu_pct / coreCount);
+  const cpuMaxVals = points.map((p) => p.cpu_pct_max / coreCount);
   const CPU_TICKS = [0, 25, 50, 75, 100];
   const yCpuMax = 100;
 
@@ -140,6 +143,9 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
   const cpuPath = cpuVals
     .map((v, i) => `${i === 0 ? "M" : "L"}${xSvgAt(i).toFixed(1)},${yCpuPxAt(v).toFixed(1)}`)
     .join("");
+  const cpuMaxPath = cpuMaxVals
+    .map((v, i) => `${i === 0 ? "M" : "L"}${xSvgAt(i).toFixed(1)},${yCpuPxAt(v).toFixed(1)}`)
+    .join("");
   const threadPath = threadVals
     .map((v, i) => `${i === 0 ? "M" : "L"}${xSvgAt(i).toFixed(1)},${yThreadPxAt(v).toFixed(1)}`)
     .join("");
@@ -151,7 +157,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
         className="w-full h-full"
         preserveAspectRatio="none"
         role="img"
-        aria-label={t("perf.cpuAria")}
+        aria-label={t("perf.procAria")}
       >
         {CPU_TICKS.map((v) => (
           <line
@@ -173,6 +179,15 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
           fill="none"
           strokeLinejoin="round"
           strokeDasharray="4 3"
+          vectorEffect="non-scaling-stroke"
+        />
+        {/* 桶内峰值包络:桶粗到 1h 时均值线看不见尖峰,用淡色线标出上界 */}
+        <path
+          d={cpuMaxPath}
+          className="stroke-brand-primary opacity-30"
+          strokeWidth="1.2"
+          fill="none"
+          strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
         />
         <path
@@ -261,7 +276,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
             {formatPerfTs(points[hoverIdx].ts * 1000, { spanMs })}
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-text-secondary">{t("perf.cpuLegendCpu")}</span>
+            <span className="text-text-secondary">{t("perf.procLegendCpu")}</span>
             <span className="num text-text-primary ml-auto">
               {(points[hoverIdx].cpu_pct / coreCount).toFixed(1)}%
               <span className="text-text-tertiary ml-1">
@@ -270,7 +285,16 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
             </span>
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-text-secondary">{t("perf.cpuLegendThreads")}</span>
+            <span className="text-text-secondary">{t("perf.procTooltipPeak")}</span>
+            <span className="num text-text-primary ml-auto">
+              {(points[hoverIdx].cpu_pct_max / coreCount).toFixed(1)}%
+              <span className="text-text-tertiary ml-1">
+                ({points[hoverIdx].cpu_pct_max.toFixed(0)}%)
+              </span>
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-text-secondary">{t("perf.procLegendThreads")}</span>
             <span className="num text-text-primary ml-auto">
               {points[hoverIdx].num_threads}
             </span>

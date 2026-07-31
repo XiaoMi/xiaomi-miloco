@@ -138,7 +138,7 @@ export function PerfPage() {
   const procSeries = useAsync(
     () => getProcSeries(windowKey, bucket),
     [windowKey, bucket],
-    { errorLabel: t("perf.errCpuSeries") },
+    { errorLabel: t("perf.errProcSeries") },
   );
   // uname 是进程级静态信息，api 层模块级缓存，整 app 仅请求一次
   const [uname, setUname] = useState<string | undefined>();
