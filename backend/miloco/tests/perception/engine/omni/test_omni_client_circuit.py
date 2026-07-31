@@ -84,6 +84,62 @@ def _payload() -> dict:
     return {"system_prompt": "sys", "user_content": "u"}
 
 
+def _capture_client(captured: dict):
+    """捕获请求头/body 的 fake AsyncClient。"""
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None, **k):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            captured["json"] = json or {}
+            return _FakeResp(200, {"choices": [], "usage": {}})
+
+    return _C
+
+
+async def test_call_omni_sends_extra_headers(monkeypatch):
+    """model.omni.extra_headers 应合并进每个请求头（GLM Coding Plan X-Title 用例）。"""
+    import miloco.perception.engine.omni.omni_client as oc
+
+    captured: dict = {}
+    monkeypatch.setattr(oc.httpx, "AsyncClient", _capture_client(captured))
+    cfg = OmniConfig(
+        model="glm-4.6v",
+        base_url="https://open.bigmodel.cn/api/paas/v4",
+        api_key="sk-glm",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=1,
+        timeout=1.0,
+        extra_headers={"X-Title": "4.5V MCP Local"},
+    )
+    await oc.call_omni(_payload(), cfg)
+
+    assert captured["headers"]["Authorization"] == "Bearer sk-glm"
+    assert captured["headers"]["X-Title"] == "4.5V MCP Local"
+
+
+async def test_call_omni_no_extra_headers_by_default(monkeypatch):
+    """未配置 extra_headers 时请求头不含额外自定义头。"""
+    import miloco.perception.engine.omni.omni_client as oc
+
+    captured: dict = {}
+    monkeypatch.setattr(oc.httpx, "AsyncClient", _capture_client(captured))
+    await oc.call_omni(_payload(), _cfg())
+
+    assert captured["headers"]["Authorization"] == "Bearer sk-1"
+    assert "X-Title" not in captured["headers"]
+
+
 # ─── call_omni × 熔断 ───────────────────────────────────────────────────────
 
 

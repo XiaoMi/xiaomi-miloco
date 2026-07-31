@@ -217,6 +217,7 @@ async def call_omni(
         "Content-Type": "application/json",
         **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
+        **(config.extra_headers or {}),
     }
     try:
         await cb.before_call()  # 熔断 OPEN → 直接抛 CircuitOpenError
@@ -435,6 +436,7 @@ async def call_omni_stream(
         "Content-Type": "application/json",
         **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
+        **(config.extra_headers or {}),
     }
     url = adapter.endpoint(config.base_url, config.model, stream=True)
 

@@ -101,43 +101,49 @@ def build_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build the prompt payload for the omni model (single device).
 
     Args:
         label_lookup: person_id (UUID) → 姓名/标签 反查表，渲染 "已识别人物" 段时把
                       UUID 替换为人名。None 时直接渲染 person_id 字段值（与旧行为兼容）。
+        adapter: 感知 provider adapter；听不见音频的 provider（如 GLM）会把
+                 audio 路由退回 video 路由，且 prompt 不声称本轮有音频。
 
     Returns dict with keys: system_prompt, user_content, video_base64, media_info, crops.
     """
-    return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup)
+    return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_batch_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build the prompt payload for multi-device omni inference (same room)."""
-    return _build_payload(identity_packets, context, stream=False, label_lookup=label_lookup)
+    return _build_payload(identity_packets, context, stream=False, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_stream_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build prompt payload for streaming omni call (single device, speeches first)."""
-    return _build_payload([identity_packet], context, stream=True, label_lookup=label_lookup)
+    return _build_payload([identity_packet], context, stream=True, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_batch_stream_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build prompt payload for streaming omni call (multi-device, speeches first)."""
-    return _build_payload(identity_packets, context, stream=True, label_lookup=label_lookup)
+    return _build_payload(identity_packets, context, stream=True, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_query_prompt(
@@ -223,7 +229,9 @@ def build_fused_payload(
     # audio route：无视觉信息，候选作废。与 video 同款 message 隔离（待判断规则/只读历史
     # 各自独立 user 消息）；本轮事实只放"当前时间 + 音频"——audio 无视频，不渲染名册/gallery/
     # 待识别 track（名册的 bbox 是为"把姓名对应到视频里的人"，audio 场景无意义）。
-    if _resolve_route(packets) == "audio":
+    # provider 听不见音频（如 GLM 纯视觉模型）时退回 video 路由：帧本来就在（只是没变化），
+    # 至少还有画面这份真证据，且 prompt 不会声称"本轮有音频"。
+    if _resolve_route(packets) == "audio" and _adapter_hears_audio(adapter):
         scene = SceneDescriptor(route="audio", has_identity=False, stream=False)
         system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
         ep = packets[0]
@@ -233,13 +241,7 @@ def build_fused_payload(
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
         if context.room_name:
             user_content.append({"type": "text", "text": f"位置: {context.room_name}"})
-        if not adapter.supports_audio_input:
-            logger.warning(
-                "event=fused_audio_unsupported adapter=%s, provider 不支持 input_audio, "
-                "本窗口降级为 text-only",
-                type(adapter).__name__,
-            )
-        elif audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
+        if audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
             user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate)))
         elif audio_b64:
             logger.warning(
@@ -264,10 +266,13 @@ def build_fused_payload(
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
     # pending 半句不强行补全（否则模型会就着噪声脑补出一个完成句，正是要根除的幻觉）。
+    # provider 听不见音频时 has_audio/has_speech 一并置 False：prompt 不声称本轮有音频，
+    # 既有机制会把 speeches / env_sounds 从 schema 和任务清单里剥掉。
+    _hears = _adapter_hears_audio(adapter)
     scene = SceneDescriptor(
         route="video", has_identity=bool(candidates), stream=False,
-        has_audio=_batch_video_has_audio(packets),
-        has_speech=_batch_video_has_speech(packets),
+        has_audio=_batch_video_has_audio(packets) and _hears,
+        has_speech=_batch_video_has_speech(packets) and _hears,
         identity_match_disabled=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
@@ -370,16 +375,22 @@ def _build_payload(
     stream: bool,
     label_lookup: "dict[str, str] | None" = None,
     include_home_profile: bool = True,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     route = _resolve_route(packets)
+    # provider 听不见音频（如 GLM 纯视觉模型）时，audio 路由退回 video 路由：
+    # 帧本来就在（只是没变化），至少还有画面这份真证据，且 prompt 不会声称"本轮有音频"。
+    if route == "audio" and not _adapter_hears_audio(adapter):
+        route = "video"
     # has_audio：video 路由下音频未过 gate 时为 False → schema 剥掉 speeches/env_sounds，
     # 避免模型就着画面脑补人声。audio 路由恒有音频。
     # has_speech：video 路由下 VAD 判无人声时为 False → 只剥 speeches、保留 env_sounds。
-    has_audio = True if route == "audio" else _batch_video_has_audio(packets)
+    _hears = _adapter_hears_audio(adapter)
+    has_audio = True if route == "audio" else (_batch_video_has_audio(packets) and _hears)
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 拼接照常；本轮无人声 → 剥 speeches，挂着的 pending 半句不强行补全（否则模型会就着
     # 噪声脑补出完成句，正是要根除的幻觉）。
-    has_speech = True if route == "audio" else _batch_video_has_speech(packets)
+    has_speech = True if route == "audio" else (_batch_video_has_speech(packets) and _hears)
     scene = SceneDescriptor(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
@@ -1121,6 +1132,16 @@ def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
         video_width=0, video_height=0, fps=0, frame_count=0,
         has_audio=True, audio_sample_rate=sample_rate,
     )
+
+
+def _adapter_hears_audio(adapter: "OmniProviderAdapter | None") -> bool:
+    """provider 能不能听见音频。
+
+    决定的是「prompt 敢不敢声称本轮有音频」，比 supports_audio_input（只管
+    input_audio 块发不发）覆盖面更广：video 路由的 mp4 音轨同样听不见。
+    adapter 为 None（旧调用路径）时按支持处理，保持行为不变。
+    """
+    return adapter is None or adapter.supports_audio_input
 
 
 def _get_video_short_edge() -> int:

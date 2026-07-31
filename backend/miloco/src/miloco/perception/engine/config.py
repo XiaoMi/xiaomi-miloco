@@ -348,6 +348,9 @@ class OmniConfig:
     top_p: float = 0.95
     timeout: float = 30.0
     stream: bool = False
+    # 附加请求头（可选）。部分网关要求携带自定义头才走特定通道/计费口径
+    # （如智谱 GLM Coding Plan 的 X-Title MCP 流量标识）；默认空。
+    extra_headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -119,10 +119,12 @@ class TestGlmAdapter:
         assert body["thinking"] == {"type": "disabled"}
         assert body["stream"] is False
 
-    def test_auth_headers_include_x_title(self):
+    def test_auth_headers_plain_bearer(self):
+        # GLM 鉴权就是标准 Bearer；X-Title 这类额外头由用户经
+        # model.omni.extra_headers 配置，adapter 不硬编码。
         headers = self.adapter.auth_headers("sk-test")
         assert headers["Authorization"] == "Bearer sk-test"
-        assert headers["X-Title"] == "4.5V MCP Local"
+        assert "X-Title" not in headers
 
     def test_supports_audio_input_false(self):
         # GLM-4.6V 是纯视觉模型（文本/图片/视频/文件），input_audio 属于
