@@ -651,18 +651,20 @@ export interface MemorySeries {
   points: MemoryPoint[];
 }
 
-// === CPU monitor (/monitor/cpu/series) ===
+// === Proc monitor (/monitor/proc/series) ===
 
-export interface CpuPoint {
+export interface ProcPoint {
   ts: number;
   cpu_pct: number;
+  num_threads: number;
 }
 
-export interface CpuSeries {
+export interface ProcSeries {
   ts_start: number | null;
   ts_end: number | null;
   interval_s: number;
-  points: CpuPoint[];
+  points: ProcPoint[];
+  core_count: number;
 }
 
 // === Monitor meta (/monitor/) ===

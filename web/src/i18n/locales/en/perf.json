@@ -95,6 +95,9 @@
     "cpuHeaderEmpty": "No data",
     "cpuEmptySeries": "No CPU time series in the selected window.",
     "cpuAria": "CPU usage time series",
+    "cpuHeaderThreads": "Threads {{n}}",
+    "cpuLegendCpu": "CPU",
+    "cpuLegendThreads": "Threads",
 
     "memTitle": "Process memory",
     "memHeaderRss": "RSS {{mb}} MB",

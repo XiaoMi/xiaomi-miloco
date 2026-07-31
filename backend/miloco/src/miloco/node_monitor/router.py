@@ -127,18 +127,18 @@ async def get_memory_series(
     )
 
 
-@router.get("/cpu/series", dependencies=[Depends(verify_token)])
-async def get_cpu_series(
+@router.get("/proc/series", dependencies=[Depends(verify_token)])
+async def get_proc_series(
     window: WindowKey = Query("1h"),
     bucket: BucketKey = Query("1m"),
 ):
-    """3d 内进程 CPU 占用时序，按 bucket 平均聚合。"""
+    """3d 内进程 CPU 占用 + 线程数时序，按 bucket 平均聚合。"""
     if _resource_monitor is None:
         return JSONResponse(
             status_code=503,
             content={"error": "resource monitor not initialized"},
         )
-    return _resource_monitor.get_cpu_series(
+    return _resource_monitor.get_proc_series(
         window_seconds=_WINDOW_SECONDS[window],
         bucket_seconds=_BUCKET_SECONDS[bucket],
     )

@@ -18,14 +18,14 @@ logger = logging.getLogger(__name__)
 
 RESOURCE_MONITOR_INTERVAL = 60
 MEMORY_RING_MAXLEN = 3 * 24 * 60  # 3d @ 60s
-CPU_RING_MAXLEN = 3 * 24 * 60  # 3d @ 60s
+PROC_RING_MAXLEN = 3 * 24 * 60  # 3d @ 60s
 SMAPS_PATH = "/proc/self/smaps"
 TASK_DIR = "/proc/self/task"
 
 # (ts, rss_kb, py_objects, py_size_kb)
 MemoryPoint = tuple[float, int, int, int]
-# (ts, cpu_pct)  —— 进程 CPU 占用百分比，多核可 > 100
-CpuPoint = tuple[float, float]
+# (ts, cpu_pct, num_threads)  —— CPU 占用百分比(多核可 > 100) + 进程线程数
+ProcPoint = tuple[float, float, int]
 
 
 def _sample_mem() -> MemSnapshot:
@@ -54,10 +54,10 @@ class ResourceMonitor:
         self._py_heap_latest: PyHeapSnapshot | None = None
         self._memory_lock = threading.Lock()
         self._mem_available = True
-        self._cpu_ring: collections.deque[CpuPoint] = collections.deque(
-            maxlen=CPU_RING_MAXLEN
+        self._proc_ring: collections.deque[ProcPoint] = collections.deque(
+            maxlen=PROC_RING_MAXLEN
         )
-        self._cpu_lock = threading.Lock()
+        self._proc_lock = threading.Lock()
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -112,6 +112,12 @@ class ResourceMonitor:
             snapshot["fd"] = proc.num_fds()
         except Exception:
             pass
+        num_threads = 0
+        try:
+            num_threads = proc.num_threads()
+            snapshot["num_threads"] = num_threads
+        except Exception:
+            pass
 
         try:
             if os.path.exists(self._db_path):
@@ -137,8 +143,8 @@ class ResourceMonitor:
 
         # CPU 时序独立入环：不受下面内存 region 采集 early-return 影响
         if cpu_pct is not None:
-            with self._cpu_lock:
-                self._cpu_ring.append((snapshot["ts"], cpu_pct))
+            with self._proc_lock:
+                self._proc_ring.append((snapshot["ts"], cpu_pct, num_threads))
 
         # 内存 region + py_heap 采集（两路独立 try，互不影响）
         mem_snap: MemSnapshot | None = None
@@ -236,27 +242,39 @@ class ResourceMonitor:
             "points": points,
         }
 
-    def get_cpu_series(self, window_seconds: int, bucket_seconds: int) -> dict:
-        """CPU 占用时序，按 bucket_seconds 墙钟对齐 + 平均聚合。"""
+    def get_proc_series(self, window_seconds: int, bucket_seconds: int) -> dict:
+        """进程 CPU 占用 + 线程数时序，按 bucket_seconds 墙钟对齐 + 平均聚合。
+
+        core_count = os.cpu_count()，供前端把多核 cpu_pct 归一化到 0-100%。
+        """
         cutoff = time.time() - window_seconds
-        with self._cpu_lock:
-            raw = [(ts, pct) for ts, pct in self._cpu_ring if ts >= cutoff]
+        with self._proc_lock:
+            raw = [
+                (ts, pct, nthreads)
+                for ts, pct, nthreads in self._proc_ring
+                if ts >= cutoff
+            ]
         if not raw:
             return {
                 "ts_start": None,
                 "ts_end": None,
                 "interval_s": bucket_seconds,
                 "points": [],
+                "core_count": os.cpu_count() or 1,
             }
 
         bucket_s = max(bucket_seconds, RESOURCE_MONITOR_INTERVAL)
-        buckets: dict[int, list[float]] = {}
-        for ts, pct in raw:
+        buckets: dict[int, list[tuple[float, int]]] = {}
+        for ts, pct, nthreads in raw:
             key = int(ts // bucket_s) * bucket_s
-            buckets.setdefault(key, []).append(pct)
+            buckets.setdefault(key, []).append((pct, nthreads))
 
         points = [
-            {"ts": float(key), "cpu_pct": round(sum(vs) / len(vs), 1)}
+            {
+                "ts": float(key),
+                "cpu_pct": round(sum(v[0] for v in vs) / len(vs), 1),
+                "num_threads": round(sum(v[1] for v in vs) / len(vs)),
+            }
             for key, vs in sorted(buckets.items())
         ]
         return {
@@ -264,6 +282,7 @@ class ResourceMonitor:
             "ts_end": points[-1]["ts"],
             "interval_s": bucket_s,
             "points": points,
+            "core_count": os.cpu_count() or 1,
         }
 
     def is_memory_available(self) -> bool:

@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  getCpuSeries,
+  getProcSeries,
   getMemorySeries,
   getMemorySnapshot,
   getUname,
@@ -47,7 +47,7 @@ function avgWindowDuration(rows: PerfTraceRow[]): number | undefined {
   return vals.reduce((s, v) => s + v, 0) / vals.length;
 }
 import { PerfAgentList } from "./PerfAgentList";
-import { PerfCpuChart } from "./PerfCpuChart";
+import { PerfProcChart } from "./PerfProcChart";
 import { PerfKpiCards } from "./PerfKpiCards";
 import { PerfMemoryChart } from "./PerfMemoryChart";
 import { PerfOmniErrorChart } from "./PerfOmniErrorChart";
@@ -134,7 +134,7 @@ export function PerfPage() {
     { errorLabel: t("perf.errMemSeries") },
   );
   const cpuSeries = useAsync(
-    () => getCpuSeries(windowKey, bucket),
+    () => getProcSeries(windowKey, bucket),
     [windowKey, bucket],
     { errorLabel: t("perf.errCpuSeries") },
   );
@@ -226,8 +226,8 @@ export function PerfPage() {
       {/* 6. 阶段耗时分布 */}
       <PerfStageTable state={stages} />
 
-      {/* 6.4 进程 CPU 占用时序，与 perf 因果链解耦的运行时观察项 */}
-      <PerfCpuChart seriesState={cpuSeries} bucket={bucket} windowMs={windowMs} />
+      {/* 6.4 进程 CPU 占用 + 线程数时序，与 perf 因果链解耦的运行时观察项 */}
+      <PerfProcChart seriesState={cpuSeries} bucket={bucket} windowMs={windowMs} />
 
       {/* 6.5 进程内存（smaps + py_heap），与 perf 因果链解耦的运行时观察项 */}
       <PerfMemoryChart

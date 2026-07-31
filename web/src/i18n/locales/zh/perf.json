@@ -95,6 +95,9 @@
     "cpuHeaderEmpty": "无数据",
     "cpuEmptySeries": "所选窗口内无 CPU 时序数据。",
     "cpuAria": "CPU 占用时间序列",
+    "cpuHeaderThreads": "线程 {{n}}",
+    "cpuLegendCpu": "CPU",
+    "cpuLegendThreads": "线程数",
 
     "memTitle": "进程内存",
     "memHeaderRss": "RSS {{mb}} MB",
