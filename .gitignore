@@ -5,6 +5,23 @@ node_modules
 .pnp
 .pnp.js
 
+# 非 pnpm 的锁文件：web/ 与 plugins/openclaw/ 两个 JS 项目都用 pnpm，pnpm-lock.yaml
+# 才是唯一锁文件。这类文件在本地是**预期产物**——没装 pnpm 时安装器会走 npm 回退
+# (plugins/hermes/install-hermes.sh 里 pnpm 优先、npm 兜底)——但不该进仓：同一目录下两份
+# 互相独立的依赖锁，会让本地 npm ci 与 CI 的 pnpm install --frozen-lockfile 解析出不同的
+# 传递依赖版本，出「我这儿是好的」类问题时极难定位；顺带也让走 npm 回退的贡献者不再因为
+# 它被 dependency-guard 拦下而困惑(package-lock.json 本就在那份 LOCKFILES 里)。
+# 放根目录而非各子项目：单点声明、不留「两份规则要同步」的隐性 invariant；根目录本身
+# 不是 npm 项目，无误伤。
+# 注：只有 package-lock.json 有实际出现记录；其余名字本仓库从未出现、也无对应工具链，
+# 一并列入只是零成本的宽度。bun 两个名字都写：bun.lock(1.2+ 文本格式，当前默认)与
+# bun.lockb(旧二进制)。
+package-lock.json
+npm-shrinkwrap.json
+yarn.lock
+bun.lock
+bun.lockb
+
 # Local env files
 .env
 .env.local
