@@ -157,6 +157,7 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
         model=o.model,
         base_url=o.base_url,
         api_key=o.api_key or base.api_key,
+        extra_headers=dict(o.extra_headers),
     )
     _maybe_reset_breaker_on_config_change(resolved)
     return resolved

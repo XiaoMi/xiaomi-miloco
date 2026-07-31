@@ -45,9 +45,13 @@ class LocalMediaInfo:
 class OmniProviderAdapter(ABC):
     """各 provider 协议适配的抽象基类（见模块 docstring 的 adapter 职责清单）。"""
 
-    # provider 是否接受 ``input_audio`` 块。``False`` 时 audio-only 窗口降级为
-    # text-only、不发音频块（见 prompt_builder 的 audio route / omni_client 的
-    # on_demand 路径）。MiMo / Qwen / Gemini 默认支持，GLM 关闭。
+    # provider 是否接受 ``input_audio`` 块。``False`` 时：
+    #   1. audio-only 窗口退回 video 路由——帧本来就在（只是没变化），改送画面
+    #      而非降级为 text-only（见 prompt_builder._build_payload / build_fused_payload）；
+    #   2. video 路由下 has_audio / has_speech 一并置 False，schema 剥掉
+    #      speeches / env_sounds，prompt 不声称本轮有音频；
+    #   3. messages 组装层兜底不拼 audio 块（omni_client._build_messages）。
+    # MiMo / Qwen / Gemini 默认支持，GLM 关闭。
     supports_audio_input: bool = True
 
     @abstractmethod
@@ -174,7 +178,7 @@ class GlmAdapter(MiMoAdapter):
     thinking:disabled 实测兼容）；**不支持音频输入**——GLM-4.6V 是纯视觉语言
     模型（输入模态为文本/图片/视频/文件），``input_audio`` 属于 GLM-4-Voice /
     GLM-Realtime 线，发给 4.6V 会被 400 拒。故 ``supports_audio_input = False``，
-    audio-only 窗口由 prompt_builder 降级为 text-only。
+    audio-only 窗口退回 video 路由（帧本来就在，改送画面而非降级为 text-only）。
 
     若使用智谱 GLM Coding Plan 签发的 Key，需要携带 ``X-Title`` MCP 流量标识头
     （否则网关按普通资源包计费并返回 429 余额不足）——请通过配置的
@@ -495,8 +499,9 @@ def get_adapter(model: str) -> OmniProviderAdapter:
     Qwen 侧仅支持 Qwen3.5-Omni 系列（qwen3.5-omni-plus / qwen3.5-omni-flash），
     旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
 
-    GLM 走 OpenAI 兼容协议（glm-4.6v 等），请求体与 MiMo 同构，
-    仅鉴权头差异由 GlmAdapter 处理。
+    GLM 走 OpenAI 兼容协议（glm-4.6v 等），请求体与 MiMo 同构，鉴权头亦相同
+    （均为标准 Bearer）；唯一差异是 ``supports_audio_input = False``
+    （GLM-4.6V 是纯视觉模型，不接受音频输入）。
 
     Gemini 走原生 generateContent 协议（OpenAI 兼容端点不支持视频输入）。
     """

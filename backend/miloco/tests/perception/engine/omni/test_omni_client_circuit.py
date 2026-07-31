@@ -288,6 +288,7 @@ async def test_resolve_live_config_change_resets_breaker(monkeypatch):
         model = "m1"
         base_url = "https://x/v1"
         api_key = "sk-NEW"
+        extra_headers: dict[str, str] = {}
 
     class _M:
         omni = _Mo()

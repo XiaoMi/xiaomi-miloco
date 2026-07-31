@@ -261,7 +261,9 @@ def build_fused_payload(
         }
 
     short_edge = _get_video_short_edge()
-    video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
+    video_b64, media_info = _encode_batch_video(
+        packets, short_edge=short_edge, adapter=adapter
+    )
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
@@ -271,7 +273,7 @@ def build_fused_payload(
     _hears = _adapter_hears_audio(adapter)
     scene = SceneDescriptor(
         route="video", has_identity=bool(candidates), stream=False,
-        has_audio=_batch_video_has_audio(packets) and _hears,
+        has_audio=_batch_video_has_audio(packets, adapter) and _hears,
         has_speech=_batch_video_has_speech(packets) and _hears,
         identity_match_disabled=matching_moot,
     )
@@ -386,7 +388,7 @@ def _build_payload(
     # 避免模型就着画面脑补人声。audio 路由恒有音频。
     # has_speech：video 路由下 VAD 判无人声时为 False → 只剥 speeches、保留 env_sounds。
     _hears = _adapter_hears_audio(adapter)
-    has_audio = True if route == "audio" else (_batch_video_has_audio(packets) and _hears)
+    has_audio = True if route == "audio" else (_batch_video_has_audio(packets, adapter) and _hears)
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 拼接照常；本轮无人声 → 剥 speeches，挂着的 pending 半句不强行补全（否则模型会就着
     # 噪声脑补出完成句，正是要根除的幻觉）。
@@ -409,7 +411,9 @@ def _build_payload(
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
     else:
         short_edge = _get_video_short_edge()
-        video_b64, media_info = _encode_batch_video(packets, short_edge=short_edge)
+        video_b64, media_info = _encode_batch_video(
+            packets, short_edge=short_edge, adapter=adapter
+        )
         base["video_base64"] = video_b64
         base["media_info"] = media_info
     return base
@@ -1169,14 +1173,24 @@ _MIN_AUDIO_B64_LEN = 500
 _AUDIO_ONLY_ENABLED = True
 
 
-def _packet_audio_included(ep: IdentityPacket) -> bool:
+def _packet_audio_included(
+    ep: IdentityPacket,
+    adapter: "OmniProviderAdapter | None" = None,
+) -> bool:
     """该 packet 的音频是否会被合成进 mp4：audio gate 通过即带（trigger=None 视为通过，
-    兼容主动查询 / 旧路径）。speeches / env_sounds 字段的取舍与此一致——没喂音频就别问。"""
+    兼容主动查询 / 旧路径）。speeches / env_sounds 字段的取舍与此一致——没喂音频就别问。
+    provider 听不见音频（如 GLM 纯视觉模型）时不合成音轨：mp4 里混一段模型解码不了的
+    AAC 是白花的带宽和 token 前处理开销，且与 prompt 里 has_audio=False 自相矛盾。"""
+    if not _adapter_hears_audio(adapter):
+        return False
     trig = ep.trigger
     return trig is None or trig.audio_active
 
 
-def _batch_video_has_audio(packets: list[IdentityPacket]) -> bool:
+def _batch_video_has_audio(
+    packets: list[IdentityPacket],
+    adapter: "OmniProviderAdapter | None" = None,
+) -> bool:
     """video 路由最终合进 mp4 的音频是否存在。
 
     与 ``_encode_batch_video`` 选设备口径一致（首个有 frames 的 device），据该 device 的
@@ -1185,7 +1199,7 @@ def _batch_video_has_audio(packets: list[IdentityPacket]) -> bool:
     """
     for ep in packets:
         if ep.all_frames:
-            return _packet_audio_included(ep)
+            return _packet_audio_included(ep, adapter)
     return False
 
 
@@ -1208,6 +1222,7 @@ def _batch_video_has_speech(packets: list[IdentityPacket]) -> bool:
 def _encode_video(
     identity_packet: IdentityPacket,
     short_edge: int = _VIDEO_SHORT_EDGE,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> tuple[str | None, LocalMediaInfo | None]:
     """Encode all frames + audio into mp4 video, return ``(base64, media_info)``。"""
     frames = identity_packet.all_frames
@@ -1216,7 +1231,7 @@ def _encode_video(
 
     audio = (
         identity_packet.audio_clip
-        if _packet_audio_included(identity_packet)
+        if _packet_audio_included(identity_packet, adapter)
         else np.empty(0, dtype=np.int16)
     )
     return _encode_video_mp4(
@@ -1440,6 +1455,7 @@ def _encode_audio_only_mp4(
 def _encode_batch_video(
     edge_packets: list[IdentityPacket],
     short_edge: int = _VIDEO_SHORT_EDGE,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> tuple[str | None, LocalMediaInfo | None]:
     """Encode video from the first device that has frames.
 
@@ -1447,7 +1463,7 @@ def _encode_batch_video(
     返回 ``(base64_str, media_info)``。
     """
     for ep in edge_packets:
-        b64, media_info = _encode_video(ep, short_edge=short_edge)
+        b64, media_info = _encode_video(ep, short_edge=short_edge, adapter=adapter)
         if b64 is not None:
             return b64, media_info
     return None, None

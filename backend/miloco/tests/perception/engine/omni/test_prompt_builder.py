@@ -1409,3 +1409,57 @@ class TestIdentityMatchDisabled:
         assert self._TASK_MATCH_MARKER in full
         assert self._EXAMPLE_A_MARKER in full
         assert self._MATCH_ONLY_MARKER in full
+
+
+class TestGlmAudioFallback:
+    """GLM（纯视觉，不支持 input_audio）的音频路降级行为。
+
+    锁的是第三轮 review 指出的核心行为：GLM 在 audio-only 窗口应退回 video 路由
+    （送画面而非降级为 text-only），has_audio/has_speech 压 False，fused 路径同样降级。
+    """
+
+    def test_audio_only_falls_back_to_video_for_glm(self):
+        from miloco.perception.engine.omni.prompt_builder import _build_payload
+        from miloco.perception.engine.omni.provider import GlmAdapter
+
+        payload = _build_payload(
+            [_audio_only_packet()], OmniContext(), stream=False, adapter=GlmAdapter()
+        )
+        assert "audio_base64" not in payload  # 不再走音频路
+        assert payload["video_base64"]  # 改送视频帧
+        assert "speeches" not in payload["system_prompt"]  # 音频字段已剥掉
+
+    def test_audio_only_keeps_audio_route_for_mimo(self):
+        from miloco.perception.engine.omni.prompt_builder import _build_payload
+        from miloco.perception.engine.omni.provider import MiMoAdapter
+
+        payload = _build_payload(
+            [_audio_only_packet()], OmniContext(), stream=False, adapter=MiMoAdapter()
+        )
+        assert "audio_base64" in payload  # MiMo 照常走音频路
+        assert "video_base64" not in payload
+
+    def test_fused_audio_falls_back_to_video_for_glm(self):
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.engine.omni.provider import GlmAdapter
+
+        payload = build_fused_payload(
+            packets=[_audio_only_packet()], context=OmniContext(),
+            candidates=[], gallery_snapshot={}, adapter=GlmAdapter(),
+        )
+        user_blocks = payload["messages"][-1]["content"]
+        assert all(b["type"] != "input_audio" for b in user_blocks)
+        # fused 降级后同样送视频帧
+        assert any(b["type"] == "video_url" for b in user_blocks)
+
+    def test_video_route_glm_strips_audio_fields(self):
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.engine.omni.provider import GlmAdapter
+
+        payload = build_fused_payload(
+            packets=[_video_route_packet()], context=OmniContext(),
+            candidates=[], gallery_snapshot={}, adapter=GlmAdapter(),
+        )
+        # video 路由 + GLM：prompt 不声称本轮有音频
+        system_prompt = payload["messages"][0]["content"]
+        assert "speeches" not in system_prompt
