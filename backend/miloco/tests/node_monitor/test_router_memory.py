@@ -234,6 +234,11 @@ class TestProcSeriesEndpoint:
         resp = client.get("/api/monitor/proc/series?window=999h")
         assert resp.status_code == 422
 
+    def test_invalid_bucket_returns_422(self, client, rm):
+        set_resource_monitor(rm, 0.0)
+        resp = client.get("/api/monitor/proc/series?window=1h&bucket=999s")
+        assert resp.status_code == 422
+
 
 class TestResourcesEndpointUnaffected:
     """回归保护：/monitor/resources 仍只返原 5 字段。"""
