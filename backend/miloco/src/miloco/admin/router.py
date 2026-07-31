@@ -822,8 +822,18 @@ async def test_omni_config(
             message="ok",
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
+    # 取匹配档案（或当前 active）的 extra_headers，探测链路与推理链路保持同一配置。
+    label = (body.label or "").strip()
+    extra_headers: dict[str, str] = {}
+    if label:
+        for p in get_settings().model.omni_profiles:
+            if p.label == label:
+                extra_headers = dict(p.extra_headers or {})
+                break
+    if not extra_headers:
+        extra_headers = dict(omni.extra_headers or {})
     result = await _probe.probe_omni(
-        model, base_url, api_key, extra_headers=dict(omni.extra_headers or {})
+        model, base_url, api_key, extra_headers=extra_headers
     )
     # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
     # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
