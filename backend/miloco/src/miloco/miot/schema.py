@@ -229,11 +229,26 @@ class HomeSwitchRequest(BaseModel):
 
 
 class CameraToggleItem(BaseModel):
-    """单个相机的启用/停用操作。"""
+    """单个相机的感知开关操作（v2：per-camera × per-modality 矩阵）。
+
+    三个开关字段都可选（omitted = 不改）：
+    - ``in_use``：便捷别名，true=同时启用视频+音频感知；false=同时关闭两路
+    - ``video_enabled``：显式只改视频感知（优先级高于 in_use）
+    - ``audio_enabled``：显式只改音频感知（优先级高于 in_use）
+    """
 
     did: str = Field(..., min_length=1, description="相机 did")
-    in_use: bool = Field(
-        ..., description="true = 启用（恢复接入）；false = 停用（不接入）"
+    in_use: bool | None = Field(
+        default=None,
+        description="便捷别名：true=同时启用视频+音频感知；false=同时关闭两路。omitted = 不改。",
+    )
+    video_enabled: bool | None = Field(
+        default=None,
+        description="显式改视频感知开关。omitted = 不改。优先级高于 in_use。",
+    )
+    audio_enabled: bool | None = Field(
+        default=None,
+        description="显式改音频感知开关。omitted = 不改。优先级高于 in_use。",
     )
 
 

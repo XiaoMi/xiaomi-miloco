@@ -253,36 +253,65 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         )
         self._devices[did] = state
 
-        # Subscribe decoded video frame stream (multi-reg)
-        try:
-            reg_id = await self._miot_proxy.start_camera_decode_video_stream(
-                physical_did, channel, self._make_decoded_video_callback(did)
-            )
-            state.decoded_video_reg_id = reg_id
-        except Exception as e:
-            logger.error("Failed to subscribe decoded video for %s: %s", did, e)
+        # v2 per-modality gate：读 KV 决定是否订阅视频/音频流
+        video_enabled = self._video_enabled_for(physical_did)
+        audio_enabled = self._audio_enabled_for(physical_did)
 
-        # Subscribe decoded audio frame stream (multi-reg)
-        try:
-            reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
-                physical_did, channel, self._make_decoded_audio_callback(did)
+        if video_enabled:
+            try:
+                reg_id = await self._miot_proxy.start_camera_decode_video_stream(
+                    physical_did, channel, self._make_decoded_video_callback(did)
+                )
+                state.decoded_video_reg_id = reg_id
+            except Exception as e:
+                logger.error("Failed to subscribe decoded video for %s: %s", did, e)
+        else:
+            logger.info(
+                "Skipping decoded_video subscribe for %s (video_enabled=false)", did
             )
-            state.decoded_audio_reg_id = reg_id
-        except Exception as e:
-            logger.error("Failed to subscribe decoded audio for %s: %s", did, e)
 
-        # 两路流都没订上 = camera_img_manager 缺失（典型：登录时相机 LAN 未就绪，
-        # refresh_cameras 没建成 manager，start_*_stream 返回 -1 静默失败）。保留该
-        # device 只会让 active_sources 报「已连」假象，且 did 留在 _devices 使后续
-        # sync 早退、永不重试。剔除它，交给 sync_devices 的按需补建在下轮重连。
-        if state.decoded_video_reg_id < 0 and state.decoded_audio_reg_id < 0:
+        if audio_enabled:
+            try:
+                reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
+                    physical_did, channel, self._make_decoded_audio_callback(did)
+                )
+                state.decoded_audio_reg_id = reg_id
+            except Exception as e:
+                logger.error("Failed to subscribe decoded audio for %s: %s", did, e)
+        else:
+            logger.info(
+                "Skipping decoded_audio subscribe for %s (audio_enabled=false)", did
+            )
+
+        has_active = (video_enabled and state.decoded_video_reg_id >= 0) or (
+            audio_enabled and state.decoded_audio_reg_id >= 0
+        )
+        if not has_active:
             self._devices.pop(did, None)
             logger.warning(
-                "Camera %s stream subscribe failed (manager missing?), "
-                "will retry on next sync",
-                did,
+                "Camera %s no active stream (video=%s reg=%d, audio=%s reg=%d), will retry on next sync",
+                did, video_enabled, state.decoded_video_reg_id,
+                audio_enabled, state.decoded_audio_reg_id,
             )
             return
+
+    def _video_enabled_for(self, physical_did: str) -> bool:
+        try:
+            from miloco.miot.filter import denied_video_camera_dids
+            kv = self._miot_proxy._kv_repo
+            return physical_did not in denied_video_camera_dids(kv)
+        except Exception as e:
+            logger.warning("Video-enabled lookup failed for %s (defaulting to enabled): %s", physical_did, e)
+            return True
+
+    def _audio_enabled_for(self, physical_did: str) -> bool:
+        try:
+            from miloco.miot.filter import denied_audio_camera_dids
+            kv = self._miot_proxy._kv_repo
+            return physical_did not in denied_audio_camera_dids(kv)
+        except Exception as e:
+            logger.warning("Audio-enabled lookup failed for %s (defaulting to enabled): %s", physical_did, e)
+            return True
 
     async def disconnect_device(self, did: str) -> None:
         state = self._devices.pop(did, None)
@@ -309,6 +338,59 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
 
         state.sync_buffer.clear()
+
+    async def resync_subscriptions(self) -> None:
+        """按最新 KV 开关重算已连接设备的视频/音频订阅。
+
+        toggle_camera 后调用此方法使 per-modality 开关即时生效(无需等待设备离线重连)。
+        对每台已连设备比对 want/has 状态:缺的补订,多的退订。
+        """
+        for did, state in list(self._devices.items()):
+            physical_did, channel = split_channel_did(did)
+            want_video = self._video_enabled_for(physical_did)
+            want_audio = self._audio_enabled_for(physical_did)
+            has_video = state.decoded_video_reg_id >= 0
+            has_audio = state.decoded_audio_reg_id >= 0
+
+            if want_video and not has_video:
+                try:
+                    state.decoded_video_reg_id = (
+                        await self._miot_proxy.start_camera_decode_video_stream(
+                            physical_did, channel, self._make_decoded_video_callback(did)
+                        )
+                    )
+                except Exception as e:
+                    logger.error("resync video subscribe failed for %s: %s", did, e)
+            elif not want_video and has_video:
+                try:
+                    await self._miot_proxy.stop_camera_decode_video_stream(
+                        physical_did, channel, state.decoded_video_reg_id
+                    )
+                    state.decoded_video_reg_id = -1
+                except Exception as e:
+                    logger.error("resync video unsubscribe failed for %s: %s", did, e)
+
+            if want_audio and not has_audio:
+                try:
+                    state.decoded_audio_reg_id = (
+                        await self._miot_proxy.start_camera_decode_audio_stream(
+                            physical_did, channel, self._make_decoded_audio_callback(did)
+                        )
+                    )
+                except Exception as e:
+                    logger.error("resync audio subscribe failed for %s: %s", did, e)
+            elif not want_audio and has_audio:
+                try:
+                    await self._miot_proxy.stop_camera_decode_audio_stream(
+                        physical_did, channel, state.decoded_audio_reg_id
+                    )
+                    state.decoded_audio_reg_id = -1
+                except Exception as e:
+                    logger.error("resync audio unsubscribe failed for %s: %s", did, e)
+
+            if not want_video and not want_audio:
+                self._devices.pop(did, None)
+                logger.info("Camera %s both modalities disabled, removed", did)
 
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
         """Collect multimodal data from the device's sync buffer.
