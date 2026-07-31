@@ -60,6 +60,7 @@ class TestCollect:
     def test_collect_populates_process_fields(self, tmp_db, tmp_log_dir):
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         rm._collect()
+        rm._collect()  # 首拍的 cpu_pct 虚高被跳过，第二拍才写进快照
         d = rm.get_data()
         assert "ts" in d
         assert "rss_mb" in d and d["rss_mb"] > 0
@@ -279,6 +280,7 @@ class TestMemoryCollect:
             ),
         ):
             rm._collect()
+            rm._collect()  # 首拍的 cpu_pct 虚高被跳过，第二拍才写进快照
         data = rm.get_data()
         assert "rss_mb" in data and "cpu_pct" in data and "fd" in data
         assert "db_size_mb" in data and "log_size_mb" in data
@@ -298,6 +300,27 @@ class TestProcCollect:
         ts, pct, nthreads = rm._proc_ring[0]
         assert isinstance(pct, float)
         assert nthreads > 0
+
+    def test_first_sample_skips_snapshot_cpu_pct(self, tmp_db, tmp_log_dir):
+        """首拍虚高值同样不写快照 dict，否则 /monitor/resources 与图表结论相反。"""
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        rm._collect()
+        assert "cpu_pct" not in rm.get_data()
+        # 同一拍里其他字段照常写入，跳过的只是 cpu_pct
+        assert "rss_mb" in rm.get_data()
+        rm._collect()
+        assert "cpu_pct" in rm.get_data()
+
+    def test_first_sample_failure_keeps_next_reading(self, tmp_db, tmp_log_dir):
+        """第一拍失败也消费标志位：第二拍那个已跨采样间隔的有效读数不该被连带丢掉。"""
+        rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
+        with patch.object(
+            rm._psutil_proc, "cpu_percent", side_effect=OSError()
+        ):
+            rm._collect()
+        assert len(rm._proc_ring) == 0
+        rm._collect()  # 第一拍已消费标志位，这拍的有效读数直接入环
+        assert len(rm._proc_ring) == 1
 
     def test_proc_ring_survives_memory_failure(self, tmp_db, tmp_log_dir):
         """内存两路全挂时 _collect 会 early-return，CPU 仍须已入环。"""

@@ -258,7 +258,8 @@ class TestResourcesEndpointUnaffected:
                 return_value=_make_py(),
             ),
         ):
-            rm._collect()
+            rm._collect()  # 首拍：cpu_pct 虚高被跳过，不写快照
+            rm._collect()  # 第二拍：跨过采样间隔，cpu_pct 才可信
         set_resource_monitor(rm, 0.0)
         resp = client.get("/api/monitor/resources")
         assert resp.status_code == 200

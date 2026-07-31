@@ -36,6 +36,10 @@ export function PerfProcChart({ seriesState, bucket: _bucket, windowMs }: Props)
   const points = series?.points ?? [];
   const coreCount = series?.core_count ?? 1;
 
+  // header 的数字全部取自 series,与曲线同源:1h 视图桶长 = 采样间隔 60s,末桶只装一个
+  // 采样点、「当前」就是瞬时值;6h 及以上桶更粗,「当前」实为末桶均值。没有另拉
+  // /monitor/resources 快照换真瞬时值——那样 header 与曲线画的就不是同一个数,矛盾只是
+  // 从「切窗口数字会变」挪到「卡片内两个数对不上」。
   const headerLine = (() => {
     if (points.length > 0) {
       const last = points[points.length - 1];
