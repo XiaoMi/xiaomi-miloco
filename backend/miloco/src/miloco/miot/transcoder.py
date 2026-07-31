@@ -21,7 +21,7 @@ from typing import Optional
 
 import av
 import numpy as np
-from miot.decoder import SWSCALE_THREADS
+from miot.decoder import ENCODE_THREADS, SWSCALE_THREADS
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,7 @@ class H264LiveEncoder:
         # silently reject with OperationError, even though the codec string
         # is technically valid. We have our own per-camera encoder thread
         # already, so libx264 internal threading buys us nothing.
-        codec.thread_count = 1
+        codec.thread_count = ENCODE_THREADS
         codec.options = {
             "preset": "ultrafast",
             "tune": "zerolatency",

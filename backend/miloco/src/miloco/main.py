@@ -727,7 +727,8 @@ def start_server():
     # 非 CPU/RSS 优化(idle 线程不占 CPU)。
     import cv2
 
-    cv2.setNumThreads(4)
+    _OPENCV_THREADS = 4  # 与 DECODE_THREADS 的 4 无关:此为 OpenCV 全局池上限
+    cv2.setNumThreads(_OPENCV_THREADS)
 
     uv_config = get_uvicorn_config()
 

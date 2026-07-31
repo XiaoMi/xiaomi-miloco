@@ -28,12 +28,14 @@ from .types import MIoTCameraCodec, MIoTCameraFrameData
 
 _LOGGER = logging.getLogger(__name__)
 
-# 单路实时解码/像素转换远用不满满核线程池,统一钉死上限(改一处即可)。
-# 引用 SWSCALE_THREADS 的 swscale 有三处:解码后 to_ndarray、预览 to_rgb、
-# transcoder.py 的预览编码 reformat。另有两条 encode 内部 swscale 不走此常量,
-# 各随其 codec thread_count 收敛:ws.py 抓片段、prompt_builder.py 的 omni mp4。
-DECODE_THREADS = 4  # FFmpeg 解码器 slice 线程,含余量
-SWSCALE_THREADS = 2  # swscale 像素转换:1 已够,留 1 压单帧尖峰
+# 单路实时解码/像素转换/串行编码都远用不满满核线程池,统一钉死上限。
+# 想知道某个值用在哪,grep 常量名即可——不在此维护站点清单(清单会过期)。
+DECODE_THREADS = 4   # FFmpeg 解码器 slice 线程,含余量
+SWSCALE_THREADS = 2  # 独立 swscale 像素转换:1 已够,留 1 压单帧尖峰
+ENCODE_THREADS = 1   # libx264:每条 BGR→H.264 链各自已串行跑在专属线程里,内部并行
+                     # 买不到吞吐。设它也顺带把 encode 内部那次 bgr24→yuv420p 的
+                     # swscale 收敛到 1——PyAV 取的就是 codec.thread_count
+                     # (av/video/codeccontext.py:95)。
 
 
 # H.264 NAL unit types that contain an IDR coded slice.

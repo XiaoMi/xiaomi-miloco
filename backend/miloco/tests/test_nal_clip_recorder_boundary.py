@@ -89,3 +89,19 @@ async def test_first_frame_inits_encoder_and_anchors_start_ts():
     assert rec._start_ts == 500
     assert rec._state == "RECORDING"
     assert len(encoded) == 1
+
+
+async def test_init_encoder_pins_thread_count():
+    # 不桩 _init_encoder——要验的就是真实实现里那行 thread_count 赋值还在。
+    # 其余用例把 _init_encoder 整个桩掉了,删掉那行也照样绿;此用例守住线程数。
+    from miot.decoder import ENCODE_THREADS
+
+    rec = NalClipRecorder(duration_ms=1000)
+    try:
+        rec._init_encoder(64, 64)
+        assert rec._stream is not None
+        # Stream 上的 thread_count 转发到 codec context(av/stream.py:152-154),
+        # 从 codec_context 读回才是底层真实值。
+        assert rec._stream.codec_context.thread_count == ENCODE_THREADS
+    finally:
+        rec._executor.shutdown(wait=False)
