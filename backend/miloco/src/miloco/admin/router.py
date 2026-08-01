@@ -1092,8 +1092,8 @@ class PerceptionBackendBody(BaseModel):
 def _local_vision_payload() -> dict:
     """当前后端选择 + 本地边车的连通性快照。
 
-    健康探测每次现查(一次廉价 HTTP):用户切过去之前就该知道边车在不在,
-    而不是切完发现感知不动再回来排查。
+    健康探测每次现查:用户切过去之前就该知道边车在不在,而不是切完发现感知不动
+    再回来排查。探测是同步 HTTP(短超时),调用方须放到线程里跑,别占事件循环。
     """
     from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
 
@@ -1102,9 +1102,11 @@ def _local_vision_payload() -> dict:
     health: dict | None = None
     error: str | None = None
     try:
-        health = LocalVisionClient(cfg.base_url, cfg.token, timeout=8.0).health_sync()
-    except LocalVisionError as e:
-        error = str(e)
+        health = LocalVisionClient(cfg.base_url, cfg.token).health_sync()
+    except LocalVisionError:
+        # 只回一个粗粒度标记,不回 httpx 的原始异常文本 —— base_url 是用户可填的,
+        # 原文里的目标地址 / 状态码 / 异常类型合起来就是一个可用的内网端口探针。
+        error = "unreachable"
     return {
         "backend": s.engine_backend,
         "local_vision": {
@@ -1131,7 +1133,9 @@ def _local_vision_payload() -> dict:
     response_model=NormalResponse,
 )
 async def get_perception_backend(current_user: str = Depends(verify_token)):
-    return NormalResponse(code=0, message="ok", data=_local_vision_payload())
+    # 探测是同步 HTTP —— 丢线程里跑,别把 API 的事件循环占住。
+    data = await asyncio.to_thread(_local_vision_payload)
+    return NormalResponse(code=0, message="ok", data=data)
 
 
 @router.post(
@@ -1146,6 +1150,7 @@ async def set_perception_backend(
     不让用户切到一个不工作的后端上,否则感知会静默停摆。"""
     from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
 
+    cur = get_settings().perception.local_vision
     update: dict = {"engine_backend": body.backend}
     lv: dict = {}
     if body.base_url is not None:
@@ -1153,14 +1158,22 @@ async def set_perception_backend(
     if body.token is not None:
         lv["token"] = body.token.strip()
 
+    # 凭证只能配合它当初被存进来的那个地址用。改了 base_url 又没给新 token,
+    # 就把存档 token 清掉,而不是把它带去新地址 —— 与 _key_by_label 同一条立场:
+    # 拿到 admin token 的人不该能把已存凭证(以及随后每一帧家里的画面)
+    # 定向发到自己控制的地址上。
+    if "base_url" in lv and lv["base_url"] != cur.base_url and "token" not in lv:
+        lv["token"] = ""
+
     if body.backend == "local":
-        cur = get_settings().perception.local_vision
         base_url = lv.get("base_url", cur.base_url)
         token = lv.get("token", cur.token)
         try:
-            health = LocalVisionClient(base_url, token, timeout=10.0).health_sync()
-        except LocalVisionError as e:
-            raise HTTPException(status_code=400, detail=f"本地视觉服务不可达:{e}")
+            health = await asyncio.to_thread(
+                LocalVisionClient(base_url, token).health_sync
+            )
+        except LocalVisionError:
+            raise HTTPException(status_code=400, detail="本地视觉服务不可达")
         if not health.get("model_loaded"):
             raise HTTPException(status_code=400, detail="本地视觉服务正在加载模型,稍后再试")
 
@@ -1168,13 +1181,15 @@ async def set_perception_backend(
         update["local_vision"] = lv
     update_shared_config(perception=update)
 
-    # 立即重建引擎,让切换在下一个推理周期就生效(与 omni 激活同样的即时性)。
-    manager = get_manager()
-    proxy = getattr(manager, "perception_engine_proxy", None)
-    if proxy is not None:
-        try:
-            await proxy.stop_to_unconfigured()
-        except Exception as e:  # noqa: BLE001 —— 重建失败不该让配置写入回滚
-            logger.warning("切换感知后端后重建引擎失败(将由 tick 自愈): %s", e)
+    # 立即软停当前引擎,让切换在下一个推理周期就生效(与 omni 激活/停用同一条路径:
+    # stop_to_unconfigured 关掉在跑的实例并降回等待态,tick 自愈按新配置重建)。
+    # 不做这一步的话,已 ready 的引擎不满足 try_reinit 的放行条件,会一直用旧后端跑下去
+    # ——界面显示已切换、实际仍在调原来的后端(切走云端时还会继续计费)。
+    try:
+        await get_manager().perception_service.stop_to_unconfigured()
+    except Exception as e:  # noqa: BLE001 —— 重建失败不该让配置写入回滚
+        logger.warning("切换感知后端后软停引擎失败(将由 tick 自愈): %s", e)
 
-    return NormalResponse(code=0, message="ok", data=_local_vision_payload())
+    return NormalResponse(
+        code=0, message="ok", data=await asyncio.to_thread(_local_vision_payload)
+    )

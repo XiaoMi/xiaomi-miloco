@@ -327,6 +327,14 @@ class LocalVisionSettings(BaseModel):
         description="H.264 编码质量(越大体积越小);边车只在 16x16 patch 粒度看运动/残差,不需要高画质",
     )
     max_new_tokens: int = Field(default=256, ge=16, le=1024, description="单次生成上限")
+    max_frames: int = Field(
+        default=32, gt=0,
+        description="单窗口送出的最大帧数(均匀抽);边车无论如何只用得到这么多",
+    )
+    video_short_edge: int = Field(
+        default=512, gt=0,
+        description="编码前按短边缩放的上限;模型只在 16x16 patch 粒度看运动/残差,原生分辨率是浪费",
+    )
     gate_threshold: float = Field(
         default=0.0, ge=0.0, le=1.0,
         description=(

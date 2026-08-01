@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -55,7 +56,8 @@ def require_token(request: Request) -> None:
     if not expected:
         return
     got = request.headers.get("authorization", "")
-    if got != f"Bearer {expected}":
+    # 常数时间比较:普通 != 会因短路而泄漏前缀匹配长度。
+    if not hmac.compare_digest(got, f"Bearer {expected}"):
         raise HTTPException(status_code=401, detail="invalid or missing token")
 
 

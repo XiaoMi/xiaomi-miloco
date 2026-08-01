@@ -47,6 +47,17 @@ def _physical_did(did: str) -> str:
     return did.rsplit(":ch", 1)[0] if ":ch" in did else did
 
 
+def _as_float(v: object) -> float | None:
+    """把边车回的 gate_p 归一成 float。契约对第三方实现开放,拿到字符串或
+    null 都不该让整轮感知抛异常 —— 归一失败就当作"没有门控概率"。"""
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        return float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _rules_for_device(rules: list[dict], did: str) -> list[dict]:
     """按 ``condition.perceive_device_ids`` 筛出该设备该判的规则(空 = 广播)。"""
     return [
@@ -67,10 +78,14 @@ class LocalVisionEngine(BasePerceptionEngine):
         max_new_tokens: int = 256,
         gate_threshold: float = 0.0,
         scene_ask: str | None = None,
+        max_frames: int = 32,
+        short_edge: int = 512,
     ) -> None:
         self._client = client
         self._fps = fps
         self._crf = crf
+        self._max_frames = max_frames
+        self._short_edge = short_edge
         self._max_new_tokens = max_new_tokens
         # 门控默认 0.0 = 从不据此跳过。参考实现的门控在体育解说数据上训练,
         # 家庭场景属分布外 —— 默认只观测(把 gate_p 记进 timing 供比对),
@@ -89,8 +104,9 @@ class LocalVisionEngine(BasePerceptionEngine):
         """
         return True
 
-    async def close(self) -> None:
-        return None
+    # close / set_main_loop / set_tierc_frame_provider / apply_omni_fps /
+    # get_input_config 全部继承 BasePerceptionEngine 的无害默认实现:本通路没有
+    # 常驻资源、没有跨线程回调、没有身份识别、也不消费 omni 抽帧率。
 
     # ── 感知 ─────────────────────────────────────────────────────────────
 
@@ -98,7 +114,10 @@ class LocalVisionEngine(BasePerceptionEngine):
         """单设备一次感知。任一环节失败 → 返回 None(该设备本窗口跳过)。"""
         did = snapshot.device.did
         try:
-            video = encode_snapshot_to_h264(snapshot, fps=self._fps, crf=self._crf)
+            video = encode_snapshot_to_h264(
+                snapshot, fps=self._fps, crf=self._crf,
+                max_frames=self._max_frames, short_edge=self._short_edge,
+            )
         except EncodeError as e:
             logger.warning("[local-vision] encode failed did=%s: %s", did, e)
             return None
@@ -139,9 +158,13 @@ class LocalVisionEngine(BasePerceptionEngine):
             return None
 
         t0 = time.monotonic()
-        results = await asyncio.gather(
-            *[self._perceive_device(s, rules) for s in batch.snapshots if s.has_video]
-        )
+        with_video = [s for s in batch.snapshots if s.has_video]
+        if not with_video:
+            # 本轮没有带画面的设备 —— 什么都没失败,只是没得看。标 skipped 但
+            # **不填 error_code**,否则这一轮会被记成一次推理错误、污染错误率。
+            return RealtimePerceptionResult(skipped=True)
+
+        results = await asyncio.gather(*[self._perceive_device(s, rules) for s in with_video])
         ok = [r for r in results if r]
         if not ok:
             # 全设备失败:标 skipped 让上层按「本轮无结论」处理,不产空事件。
@@ -153,22 +176,64 @@ class LocalVisionEngine(BasePerceptionEngine):
         matched: list[MatchedRule] = []
         gates: dict[str, float] = {}
         backends: set[str] = set()
+        # did → 本轮实际判过的 rule_id。**必须**填:上层用它给"下发了但没命中"的
+        # (rule_id, did) 喂 update_state(False),而规则状态机是边沿触发的 ——
+        # 不喂 False,规则命中一次后 last_state 永远停在 True,同一条规则此后再也
+        # 不会触发(state 模式也永远不 EXIT、duration 滑窗只进不出)。
+        # 只登记**推理成功**的设备:边车失败的设备没有证据,登记了等于凭空推退。
+        device_rule_map: dict[str, list[str]] = {}
 
         for item in ok:
             did, snapshot, dispatched, out = (
                 item["did"], item["snapshot"], item["dispatched"], item["out"]
             )
             room = snapshot.room_name or ""
-            gate_p = out.get("gate_p")
+            device_name = getattr(snapshot.device, "name", "") or ""
+            gate_p = _as_float(out.get("gate_p"))
             if gate_p is not None:
                 gates[did] = gate_p
             if out.get("backend"):
-                backends.add(out["backend"])
+                backends.add(str(out["backend"]))
 
-            # 门控:阈值 > 0 时才据此跳过;默认只观测不决策(见 __init__ 注释)。
+            # 本设备的规则确实判过了(下面照常解析命中),登记进 map 让上层能把
+            # 未命中的那些推退。**门控只压制叙述,不影响规则判定** —— 判定已经算
+            # 出来了,丢掉它只会让状态机断供、规则卡死在上一态。
+            device_rule_map[did] = [r["id"] for r in dispatched]
+
+            # 规则命中:按名字回填 rule_id。名字在同设备内唯一(miloco 侧保证),
+            # 顺序也一一对应,双保险按索引兜底。
+            hits = out.get("rule_hits") or []
+            for idx, hit in enumerate(hits):
+                if not isinstance(hit, dict) or not hit.get("hit"):
+                    continue
+                rule = dispatched[idx] if idx < len(dispatched) else None
+                if rule is None or (hit.get("name") and hit["name"] != rule.get("name")):
+                    # 名字对不上就按名字找;**找不到就丢弃这条命中**,绝不回落到
+                    # 索引位那条规则 —— 契约是对外开放的,一个只回命中项、且 name
+                    # 留空的第三方边车会让"厨房明火"背上"有人跌倒"的判定,触发的
+                    # 是完全无关的规则与动作。宁可漏报。
+                    rule = next(
+                        (r for r in dispatched if r.get("name") == hit.get("name")), None
+                    )
+                if rule is None:
+                    logger.warning(
+                        "[local-vision] dropping unmatched rule hit did=%s name=%r",
+                        did, hit.get("name"),
+                    )
+                    continue
+                matched.append(MatchedRule(
+                    rule_id=rule["id"],
+                    rule_name=rule.get("name", ""),
+                    reason=hit.get("reason", "") or "本地视觉模型判定命中",
+                    room_name=room,
+                    source_device_ids=[did],
+                    device_name=device_name,
+                ))
+
+            # 门控:阈值 > 0 时压制本设备的场景叙述(规则判定已在上面照常处理)。
             if self._gate_threshold > 0 and gate_p is not None and gate_p < self._gate_threshold:
                 logger.info(
-                    "[local-vision] gate skip did=%s p=%.2f < %.2f",
+                    "[local-vision] gate suppressed caption did=%s p=%.2f < %.2f",
                     did, gate_p, self._gate_threshold,
                 )
                 continue
@@ -179,38 +244,17 @@ class LocalVisionEngine(BasePerceptionEngine):
                     description=caption,
                     room_name=room,
                     source_device_ids=[did],
-                    device_name=getattr(snapshot.device, "name", "") or "",
+                    device_name=device_name,
                 ))
 
-            # 规则命中:按名字回填 rule_id。名字在同设备内唯一(miloco 侧保证),
-            # 顺序也一一对应,双保险按索引兜底。
-            hits = out.get("rule_hits") or []
-            for idx, hit in enumerate(hits):
-                if not hit.get("hit"):
-                    continue
-                rule = None
-                if idx < len(dispatched):
-                    rule = dispatched[idx]
-                if rule is None or (hit.get("name") and hit["name"] != rule.get("name")):
-                    rule = next(
-                        (r for r in dispatched if r.get("name") == hit.get("name")), rule
-                    )
-                if rule is None:
-                    continue
-                matched.append(MatchedRule(
-                    rule_id=rule["id"],
-                    rule_name=rule.get("name", ""),
-                    reason=hit.get("reason", "") or "本地视觉模型判定命中",
-                    room_name=room,
-                    source_device_ids=[did],
-                ))
-
+        # '_' 前缀的键按约定不参与耗时统计,用来装 per-device 元数据。
+        # devices / gate_p / backend 都不是毫秒数,必须走下划线区,否则会被
+        # 当成阶段耗时混进面板的延迟明细里。
         timing = {
             "total": round((time.monotonic() - t0) * 1000, 1),
-            "devices": len(ok),
+            "_devices": len(ok),
         }
-        # 门控概率一律记进 timing 的下划线区(约定:'_' 前缀不参与耗时统计),
-        # 即使当前不据此决策也留痕,方便用户在自家数据上先观察再决定阈值。
+        # 门控概率即使当前不据此决策也留痕,方便用户在自家数据上先观察再定阈值。
         for did, p in gates.items():
             timing[f"_gate_p_{did}"] = round(p, 4)
         if backends:
@@ -223,6 +267,7 @@ class LocalVisionEngine(BasePerceptionEngine):
             env_sounds=[],    # 同上
             suggestions=[],   # 主动建议交给 agent
             skipped=not captions and not matched,
+            device_rule_map=device_rule_map,
             timing=timing,
         )
 
@@ -236,10 +281,12 @@ class LocalVisionEngine(BasePerceptionEngine):
         if not snaps:
             return None
 
-        answers: list[str] = []
-        for snapshot in snaps:
+        async def _ask(snapshot) -> str | None:
             try:
-                video = encode_snapshot_to_h264(snapshot, fps=self._fps, crf=self._crf)
+                video = encode_snapshot_to_h264(
+                    snapshot, fps=self._fps, crf=self._crf,
+                    max_frames=self._max_frames, short_edge=self._short_edge,
+                )
                 out = await self._client.perceive(
                     video, rules=[], scene_ask=query,
                     max_new_tokens=self._max_new_tokens, want_gate=False,
@@ -248,11 +295,16 @@ class LocalVisionEngine(BasePerceptionEngine):
                 logger.warning(
                     "[local-vision] on-demand failed did=%s: %s", snapshot.device.did, e
                 )
-                continue
+                return None
             text = (out.get("caption") or "").strip()
-            if text:
-                room = snapshot.room_name or snapshot.device.did
-                answers.append(f"{room}: {text}" if len(snaps) > 1 else text)
+            if not text:
+                return None
+            room = snapshot.room_name or snapshot.device.did
+            return f"{room}: {text}" if len(snaps) > 1 else text
+
+        # 并发问,别串行 —— 串行时 N 台相机遇上卡住的边车,一次主动查询要等
+        # N x timeout(默认 60s),agent 那头就是干等几分钟。
+        answers = [a for a in await asyncio.gather(*[_ask(s) for s in snaps]) if a]
 
         if not answers:
             return None

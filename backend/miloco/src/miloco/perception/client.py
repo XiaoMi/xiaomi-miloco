@@ -327,6 +327,8 @@ class PerceptionEngineProxy:
             max_new_tokens=cfg.max_new_tokens,
             gate_threshold=cfg.gate_threshold,
             scene_ask=cfg.scene_ask or None,
+            max_frames=cfg.max_frames,
+            short_edge=cfg.video_short_edge,
         )
         self._status = "ready"
         self._status_message = ""

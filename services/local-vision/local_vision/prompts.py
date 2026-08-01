@@ -26,7 +26,10 @@ _LEADING_NUM_RE = re.compile(r"^\s*\d+[.、]\s*")
 # 事件文案与 agent 上下文里,必须剥掉。
 _CAPTION_TAG_RE = re.compile(r"^(?:描述|场景描述|描述内容)\s*[:：]\s*")
 
-# 判定词。未命中侧必须先查:「不成立」同时含「成立」,顺序反了会误判。
+# 判定词。子串匹配天然危险:多数否定词内含肯定词(「不是」含「是」、「不成立」含
+# 「成立」),所以否定必须先判、且必须显式覆盖否定前缀 —— 只靠 _MISS_WORDS 会漏掉
+# 「不是」这个中文里最自然的否定说法,把它读成命中(fail-closed 承诺就此破功)。
+_NEG_CHARS = ("不", "非", "未", "没", "无")
 _MISS_WORDS = ("否", "不成立", "未命中", "没有", "无", "no", "false")
 _HIT_WORDS = ("是", "成立", "命中", "yes", "true")
 
@@ -79,8 +82,10 @@ def _verdict(body: str) -> tuple[bool, str]:
         if sep in text:
             head, _, reason = text.partition(sep)
             break
+    # 只在**判定头**(分隔符之前)里找判定词。依据部分不参与判断,否则
+    # 「是 - 有人,不过看不清脸」会被里面的「不」拖成未命中。
     head_l = head.strip().lower()[:12]
-    if any(w in head_l for w in _MISS_WORDS):
+    if any(c in head_l for c in _NEG_CHARS) or any(w in head_l for w in _MISS_WORDS):
         hit = False
     elif any(w in head_l for w in _HIT_WORDS):
         hit = True
@@ -135,7 +140,12 @@ def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
         if s:
             prose.append(s)
 
-    caption = " ".join(prose).strip() or raw.strip()
+    # 只有在**完全没识别出规则行**时才把整段原文当描述。若已经解析到规则行,
+    # 说明模型只回了判定、没写描述 —— 此时兜底回原文会把「规则1: 否 - …」这种
+    # 机器格式一路带进事件文案与 agent 上下文,宁可留空。
+    caption = " ".join(prose).strip()
+    if not caption and not seen_rule:
+        caption = raw.strip()
 
     hits = []
     for i, r in enumerate(rules, 1):

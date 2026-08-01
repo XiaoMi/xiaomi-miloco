@@ -31,53 +31,86 @@ def encode_snapshot_to_h264(
     snapshot: DeviceSnapshot,
     fps: int = 4,
     crf: int = 28,
+    max_frames: int = 32,
+    short_edge: int = 512,
 ) -> bytes:
     """把一台设备本窗口的视频帧编码成 mp4(H.264)字节。
 
     fps 只影响容器时基,不改变送进模型的帧内容;取小值让同样帧数覆盖更长的
     时间跨度,更贴合「一段监控」的语义。crf 偏高(画质换体积)是刻意的 ——
     边车最终只在 16x16 patch 粒度上看运动/残差,过高画质纯属浪费带宽。
+    max_frames / short_edge 是**载荷预算**:云端通路在送模型前会两次降采样并限
+    短边,本通路必须有对应的约束,否则一台 2K 相机的一个窗口会把上百帧原生画面
+    base64 进一个 JSON body。
     """
     frames = list(snapshot.video.frames) if snapshot.has_video else []
     if len(frames) < _MIN_USEFUL_FRAMES:
         raise EncodeError(f"snapshot has {len(frames)} video frames, nothing to encode")
 
-    import av
-    import numpy as np
+    # 抽帧到预算之内。不设上限时一个窗口可能有上百帧原生分辨率画面,base64 塞进
+    # 一个 JSON body 里发走 —— 而边车侧无论如何只会用到 num_frames 张。均匀抽,
+    # 保住时间跨度。
+    if max_frames > 0 and len(frames) > max_frames:
+        step = len(frames) / max_frames
+        frames = [frames[min(int(i * step), len(frames) - 1)] for i in range(max_frames)]
 
-    h, w = frames[0].data.shape[:2]
-    if h <= 0 or w <= 0:
-        raise EncodeError(f"invalid frame size {w}x{h}")
-    # H.264 要求偶数边长;监控源偶尔给奇数分辨率,这里向下取偶避免编码器报错。
-    w -= w % 2
-    h -= h % 2
-
-    buf = io.BytesIO()
-    container = av.open(buf, mode="w", format="mp4")
-    stream = container.add_stream("libx264", rate=fps)
-    stream.width = w
-    stream.height = h
-    stream.pix_fmt = "yuv420p"
-    stream.options = {"crf": str(crf), "preset": "veryfast", "tune": "zerolatency"}
-
+    container = None
     try:
+        import av
+        import numpy as np
+
+        h, w = frames[0].data.shape[:2]
+        if h <= 0 or w <= 0:
+            raise EncodeError(f"invalid frame size {w}x{h}")
+        # 按短边缩放:模型只在 16x16 patch 粒度上看运动/残差,原生 2K 纯属浪费
+        # 带宽与编码时间。与云端通路的 video_short_edge 是同一个取舍。
+        scale = 1.0
+        if short_edge > 0 and min(w, h) > short_edge:
+            scale = short_edge / float(min(w, h))
+            w, h = int(w * scale), int(h * scale)
+        # H.264 要求偶数边长;监控源偶尔给奇数分辨率,这里向下取偶避免编码器报错。
+        w -= w % 2
+        h -= h % 2
+        if w <= 0 or h <= 0:
+            raise EncodeError("frame too small after scaling")
+
+        buf = io.BytesIO()
+        container = av.open(buf, mode="w", format="mp4")
+        stream = container.add_stream("libx264", rate=fps)
+        stream.width = w
+        stream.height = h
+        stream.pix_fmt = "yuv420p"
+        stream.options = {"crf": str(crf), "preset": "veryfast", "tune": "zerolatency"}
+
         for f in frames:
             arr = f.data
-            if arr.shape[0] != h or arr.shape[1] != w:
-                arr = arr[:h, :w]
             if arr.ndim != 3 or arr.shape[2] != 3:
                 continue
+            if scale != 1.0 or arr.shape[0] != h or arr.shape[1] != w:
+                arr = _resize_bgr(arr, w, h)
             vf = av.VideoFrame.from_ndarray(np.ascontiguousarray(arr), format="bgr24")
             for packet in stream.encode(vf):
                 container.mux(packet)
         for packet in stream.encode():  # flush
             container.mux(packet)
-    except Exception as e:  # noqa: BLE001
-        raise EncodeError(f"h264 encode failed: {e}") from e
+    except EncodeError:
+        raise
+    except Exception as e:  # noqa: BLE001 —— 含 av 缺失 / 无 libx264 等构建问题
+        # 必须收敛成 EncodeError:调用方只捕获它,漏出去的原始异常会穿透
+        # per-device 降级、让整轮感知失败。
+        raise EncodeError(f"h264 encode failed: {type(e).__name__}: {e}") from e
     finally:
-        container.close()
+        if container is not None:
+            container.close()
 
     data = buf.getvalue()
     if not data:
         raise EncodeError("encoder produced no output")
     return data
+
+
+def _resize_bgr(arr, w: int, h: int):
+    """缩放到 (w, h)。cv2 已是感知链路的既有依赖。"""
+    import cv2
+
+    return cv2.resize(arr, (w, h), interpolation=cv2.INTER_AREA)

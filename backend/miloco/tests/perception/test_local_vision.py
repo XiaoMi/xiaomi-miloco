@@ -280,3 +280,109 @@ def test_local_backend_setting_routes_to_local_init():
             patch.object(PerceptionEngineProxy, "_init_local_engine") as local_init:
         PerceptionEngineProxy()
     local_init.assert_called_once()
+
+
+# ── 状态机供给(规则不能命中一次就哑掉) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_device_rule_map_lists_judged_rules_per_device():
+    """必须回填 device_rule_map:上层靠它给"下发了但没命中"的组合喂 False。
+    不填的话规则状态机是边沿触发的,命中一次后 last_state 永远停在 True,
+    同一条规则此后再也不会触发。"""
+    rules = [
+        {"id": "r1", "name": "A", "condition": {"query": "qa", "perceive_device_ids": []}},
+        {"id": "r2", "name": "B", "condition": {"query": "qb", "perceive_device_ids": ["cam1"]}},
+    ]
+    client = _FakeClient([{
+        "caption": "x",
+        "rule_hits": [{"name": "A", "hit": True, "reason": "r"}],
+        "gate_p": None, "backend": "codec",
+    }])
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    assert res.device_rule_map == {"cam1": ["r1", "r2"]}
+
+
+@pytest.mark.asyncio
+async def test_failed_device_absent_from_device_rule_map():
+    """边车失败的设备没有任何证据 —— 登记进去等于凭空把它的规则推退成未命中。"""
+    res = await _engine(_FakeClient(fail=True)).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]),
+        [{"id": "r1", "name": "A", "condition": {"query": "q", "perceive_device_ids": []}}],
+    )
+    assert res.device_rule_map == {}
+
+
+@pytest.mark.asyncio
+async def test_gate_suppresses_caption_but_still_judges_rules():
+    """门控只压制叙述。判定已经算出来了,连同 device_rule_map 一起丢会让
+    状态机断供 —— 规则卡死在上一态。"""
+    rules = [{"id": "r1", "name": "A", "condition": {"query": "q", "perceive_device_ids": []}}]
+    client = _FakeClient([{
+        "caption": "安静的客厅",
+        "rule_hits": [{"name": "A", "hit": True, "reason": "成立"}],
+        "gate_p": 0.1, "backend": "codec",
+    }])
+    res = await _engine(client, gate_threshold=0.5).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    assert res.caption == []                        # 叙述被压制
+    assert [m.rule_id for m in res.matched_rules] == ["r1"]  # 判定照常
+    assert res.device_rule_map == {"cam1": ["r1"]}          # 状态机照常供给
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_hit_is_dropped_not_credited_to_index_rule():
+    """名字对不上又找不到时必须丢弃。回落到索引位那条规则会让「厨房明火」
+    背上「有人跌倒」的判定,触发完全无关的动作 —— 宁可漏报。"""
+    rules = [
+        {"id": "r-fire", "name": "厨房明火", "condition": {"query": "q1", "perceive_device_ids": []}},
+        {"id": "r-fall", "name": "有人跌倒", "condition": {"query": "q2", "perceive_device_ids": []}},
+    ]
+    client = _FakeClient([{
+        "caption": "x",
+        "rule_hits": [{"name": "第三方边车的陌生名字", "hit": True, "reason": "?"}],
+        "gate_p": None, "backend": "codec",
+    }])
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    assert res.matched_rules == []
+
+
+# ── 与 proxy 的接口兼容 ────────────────────────────────────────────────────
+
+
+def test_engine_supports_the_lifecycle_calls_the_proxy_makes():
+    """proxy / processor 会无条件调这些方法。ABC 只声明了两个抽象方法,
+    漏掉任何一个都会让后端在启动或首次推理时 AttributeError —— 而只直接调用
+    两个抽象方法的单测完全看不出来。"""
+    import asyncio as _asyncio
+
+    e = _engine(_FakeClient())
+    e.set_main_loop(object())
+    e.set_tierc_frame_provider(lambda did: None)
+    e.apply_omni_fps(2)
+    assert e.get_input_config() is None
+    _asyncio.get_event_loop_policy().new_event_loop().run_until_complete(e.close())
+
+
+@pytest.mark.asyncio
+async def test_no_video_devices_is_not_recorded_as_an_error():
+    """一轮里没有带画面的设备 —— 什么都没失败。填 error_code 会把它记成
+    一次推理错误、污染错误率面板。"""
+    # 只有音频轨的设备(如音箱):batch 非空,但没有画面可看。
+    from miloco.perception.types import AudioFrame, AudioStream
+
+    snap = _snapshot("spk1")
+    snap.video = None
+    snap.audio = AudioStream(
+        frames=[AudioFrame(data=np.zeros(160, dtype=np.int16), timestamp=0.0)]
+    )
+    res = await _engine(_FakeClient()).realtime_perceive(
+        BatchedSnapshot(snapshots=[snap]), []
+    )
+    assert res.skipped is True
+    assert res.error_code is None

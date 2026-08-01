@@ -125,3 +125,11 @@ def test_following_line_lookahead_stops_at_next_rule():
     assert hits[0]["hit"] is False
     assert hits[0]["reason"] == NO_VERDICT_REASON
     assert hits[1]["hit"] is True
+
+
+def test_caption_stays_empty_when_model_only_answered_rules():
+    """模型只回了判定、没写描述时,caption 必须留空 —— 兜底回原文会把
+    「规则1: 否」这种机器格式一路带进事件文案和 agent 上下文。"""
+    cap, hits = parse_response("规则1: 否 - 沙发上没有人", RULES[:1])
+    assert cap == ""
+    assert hits[0]["hit"] is False

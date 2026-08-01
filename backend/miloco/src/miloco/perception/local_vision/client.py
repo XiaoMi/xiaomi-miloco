@@ -25,6 +25,9 @@ _HEALTH_FIELDS = (
     "status", "model_loaded", "gate_available", "gate_error", "device", "backend",
 )
 _HEALTH_ERROR_MAXLEN = 300
+# 探活超时刻意远小于推理超时:它在 tick 自愈里被高频调用,长超时会卡住调用线程。
+_HEALTH_TIMEOUT = 3.0
+_HEALTH_CONNECT_TIMEOUT = 1.5
 
 
 def _sanitize_health(raw: object) -> dict:
@@ -53,22 +56,19 @@ class LocalVisionClient:
 
     def health_sync(self) -> dict:
         """同步探活。引擎在 ``__init__``(同步上下文)里判就绪,不能 await;
-        这里用同步客户端而不是临时起 event loop,免得和调用方的 loop 打架。"""
+        这里用同步客户端而不是临时起 event loop,免得和调用方的 loop 打架。
+
+        **超时必须短**:本方法会被 tick 自愈每个感知周期(默认 4s)调一次,而
+        同步 httpx 会占住调用线程。边车地址若被防火墙 DROP(或远端 GPU 机休眠),
+        长超时会把主事件循环按秒级卡住 —— 相机取帧、SSE、HTTP API 全部跟着停。
+        连接阶段给 1.5s 足够判定"起没起",整体也只给 ``_HEALTH_TIMEOUT``。
+        """
+        timeout = httpx.Timeout(_HEALTH_TIMEOUT, connect=_HEALTH_CONNECT_TIMEOUT)
         try:
-            with httpx.Client(timeout=min(self.timeout, 10.0)) as c:
+            with httpx.Client(timeout=timeout) as c:
                 r = c.get(f"{self.base_url}/health")
                 r.raise_for_status()
                 return _sanitize_health(r.json())
-        except Exception as e:  # noqa: BLE001
-            raise LocalVisionError(f"health check failed: {e}") from e
-
-    async def health(self) -> dict:
-        """探活。供「测试连接」与引擎就绪判定使用;不需要 token。"""
-        try:
-            async with httpx.AsyncClient(timeout=min(self.timeout, 10.0)) as c:
-                r = await c.get(f"{self.base_url}/health")
-                r.raise_for_status()
-                return r.json()
         except Exception as e:  # noqa: BLE001
             raise LocalVisionError(f"health check failed: {e}") from e
 
