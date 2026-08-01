@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from miloco.perception.local_vision.engine import (
     LocalVisionEngine,
     _physical_did,
