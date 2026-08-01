@@ -70,7 +70,7 @@ class LocalVisionEngine(BasePerceptionEngine):
         event_gate_threshold: float = 0.0,
         scene_ask: str | None = None,
         max_frames: int = 32,
-        short_edge: int = 512,
+        short_edge: int | None = None,
     ) -> None:
         self._client = client
         self._container_fps = container_fps

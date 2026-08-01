@@ -73,7 +73,10 @@ app = FastAPI(title="miloco local-vision", version="0.1.0", lifespan=lifespan)
 # 每窗把所有相机并发发过来,上限低于相机数时**同一批**相机每次都抢不到槽位、
 # 每窗 503,它们上的规则于是永久不被评估,而且静默。GPU 锁本来就串行化推理,
 # 这个上限只是给排队封顶(4 × ~1.5s 远小于客户端 60s 超时)。
-_MAX_INFLIGHT = int(os.environ.get("LOCAL_VISION_MAX_INFLIGHT", "4"))
+# 默认 5 = 相机上限(4)+ 1 —— 多出来的那个留给主动查询。miloco 的主动查询同样会
+# 把所有相机并发发过来,如果上限正好等于相机数,一次用户提问只要撞上一个正在进行的
+# 实时窗口就会全部 503,agent 那头拿到空答案。
+_MAX_INFLIGHT = int(os.environ.get("LOCAL_VISION_MAX_INFLIGHT", "5"))
 _inflight = threading.Semaphore(_MAX_INFLIGHT)
 
 
@@ -166,13 +169,18 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
     finally:
         _inflight.release()
         if path is not None:
-            path.unlink(missing_ok=True)
-            # codec 通路会在临时文件旁留下 cv-preinfer 的中间产物,一并清掉。
-            for leftover in path.parent.glob(f"{path.stem}*"):
-                if leftover != path:
-                    try:
-                        leftover.unlink()
-                    except OSError:
-                        pass
+            # 整段清理裹起来:/tmp 变只读或目录消失时,不该让一次**已经成功**的
+            # 推理以未捕获异常收场。
+            try:
+                path.unlink(missing_ok=True)
+                # codec 通路会在临时文件旁留下 cv-preinfer 的中间产物,一并清掉。
+                for leftover in path.parent.glob(f"{path.stem}*"):
+                    if leftover != path:
+                        try:
+                            leftover.unlink()
+                        except OSError:
+                            pass
+            except OSError as e:
+                logger.warning("temp cleanup failed for %s: %s", path, e)
 
     return PerceiveResponse(**out)

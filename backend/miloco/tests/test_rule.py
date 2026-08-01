@@ -34,6 +34,20 @@ from miloco.rule.schema import (
 )
 from miloco.rule.service import RuleService
 
+
+@pytest.fixture(autouse=True)
+def _default_cloud_backend(monkeypatch):
+    """本模块默认按**云端后端**跑。
+
+    规则执行方式依赖当前感知后端(本地通路下 STATIC 动作改由 agent 决策),而
+    该判断读的是运行时配置 —— 开发机上跑着的 config.json 可能正好切在 local,
+    那样这些用例会随环境时绿时红。显式钉死默认值,想验本地语义的用例自己覆盖。
+    """
+    import miloco.rule.runner as _runner
+
+    monkeypatch.setattr(_runner, "_local_backend_active", lambda: False)
+
+
 # ---- Helpers ----
 
 TASK_ID = "test_task"

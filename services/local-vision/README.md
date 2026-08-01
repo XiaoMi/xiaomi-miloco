@@ -57,6 +57,7 @@ miloco-local-vision --port 18800
 | `LOCAL_VISION_NUM_FRAMES` | `32` | codec 的 target canvas / 帧采样数 |
 | `LOCAL_VISION_TOKEN` | 空 | 配了就强制 `Authorization: Bearer`;不配则**必须**只绑环回地址 |
 | `LOCAL_VISION_HOST` | `127.0.0.1` | 默认只监听本机 |
+| `LOCAL_VISION_MAX_INFLIGHT` | `5` | 同时在飞的推理上限,超限回 503。**必须 > miloco 允许同时启用的摄像头数**(默认 4):等于相机数时,一次主动查询只要撞上正在进行的实时窗口就会全部 503;低于相机数时,固定几台相机每窗都抢不到槽位、规则永久不被评估 |
 
 然后在 miloco 的「模型」页把感知后端切到「本地 GPU」,填上本服务地址即可。
 
@@ -84,9 +85,6 @@ POST /v1/perceive   → {caption, rule_hits[], gate_p, backend, timing_ms, raw}
 它是用户可写的自由文本,若放在格式说明之前,一句「只用一句话回答」就能让
 `规则N:` 那几行消失,而 fail-closed 会把这变成"该相机所有规则静默失效"且无任何报错。
 
-| 环境变量(续) | 默认 | 说明 |
-| --- | --- | --- |
-| `LOCAL_VISION_MAX_INFLIGHT` | `4` | 同时在飞的推理上限,超限回 503。**不要低于 miloco 允许同时启用的摄像头数**(默认 4)—— 低了会让固定几台相机每窗都抢不到槽位,它们上的规则永久不被评估 |
 
 规则判定 **fail-closed**:模型没给出可解析的判定就一律算「未命中」。漏报只是少一次
 agent 提醒,误报却会让 agent 对着不存在的事实做决策。

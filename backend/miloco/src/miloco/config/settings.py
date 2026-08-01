@@ -339,7 +339,7 @@ class LocalVisionSettings(BaseModel):
         description="单窗口送出的最大帧数(均匀抽);边车无论如何只用得到这么多",
     )
     video_short_edge: int | None = Field(
-        default=None,
+        default=None, ge=64,
         description=(
             "编码前按短边缩放的上限。**默认 None = 复用 perception.engine.input.video_short_edge**"
             "——那是项目里既有的同义参数,已经有界面与 /api/admin/perception-config 可调;"

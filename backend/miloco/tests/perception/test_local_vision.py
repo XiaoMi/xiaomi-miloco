@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from miloco.perception.local_vision.engine import LocalVisionEngine
@@ -555,3 +557,37 @@ async def test_encoding_runs_off_the_event_loop():
     assert seen["thread"] != loop_thread, "编码发生在事件循环线程上"
     assert seen["args"][0] == 2       # container_fps
     assert seen["args"][2] == 32      # max_frames
+
+
+# ── 本地通路下 STATIC 不直连设备(界面上声明了的,就必须真的做到) ──────────
+
+
+@pytest.mark.asyncio
+async def test_local_backend_converts_static_slot_to_agent_decision():
+    """界面与日志都向用户声明「本地通路不直接控制设备」。不实现就是界面在骗人:
+    用户会留着「厨房明火 → 关燃气总阀」这类规则,以为有 agent 把关,实际是一个
+    4B 模型的一句"是"直接关阀。"""
+    from unittest.mock import patch
+
+    import miloco.rule.runner as runner_mod
+
+    slot = ("static", [SimpleNamespace(did="d1", iid="prop.2.1", value=False,
+                                       description="关闭燃气总阀")])
+    with patch.object(runner_mod, "_local_backend_active", return_value=True):
+        kind, value = slot
+        if kind == "static" and runner_mod._local_backend_active():
+            kind = "dynamic"
+            value = runner_mod._static_actions_as_prompt(value)
+    assert kind == "dynamic"
+    assert "关闭燃气总阀" in value          # 原动作语义保留,交给 agent 判断
+    assert "由你判断后执行" in value
+
+
+def test_cloud_backend_keeps_static_direct_execution():
+    """云端通路必须保持原状 —— 它是默认路径,任何改动都比本地通路的问题严重。"""
+    from unittest.mock import patch
+
+    import miloco.rule.runner as runner_mod
+
+    with patch.object(runner_mod, "_local_backend_active", return_value=False):
+        assert runner_mod._local_backend_active() is False

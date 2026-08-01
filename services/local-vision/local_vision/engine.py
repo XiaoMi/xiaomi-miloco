@@ -17,7 +17,12 @@ import threading
 import time
 from pathlib import Path
 
-from local_vision.prompts import DEFAULT_SCENE_ASK, build_prompt, parse_response
+from local_vision.prompts import (
+    DEFAULT_SCENE_ASK,
+    build_prompt,
+    count_unparsed,
+    parse_response,
+)
 from local_vision.video import pick_backend, probe_frame_count, sample_frames
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,8 @@ logger = logging.getLogger(__name__)
 # 病态重复,不影响正常措辞。
 _REPETITION_PENALTY = 1.05
 _NO_REPEAT_NGRAM = 12
+# 有规则时用的更大 n:必须显著长于任何规则 query,否则模型复述条件会被硬禁掐断。
+_NO_REPEAT_NGRAM_WITH_RULES = 32
 
 
 class MageVLEngine:
@@ -213,19 +220,21 @@ class MageVLEngine:
                     # token 上限 —— 既污染 caption,又让生成耗时翻倍。参考实现用
                     # max_new_tokens=80 靠截断掩盖了这个问题,我们要更长的描述,
                     # 就必须显式抑制重复。
-                    # **只在没有规则时施加**。transformers 的这两个处理器把
-                    # prompt 一并计入 n-gram / 词频,而带规则的 prompt 里逐字写着
-                    # 每条规则的 query;模型复述条件(「规则1: 是 - 有人在厨房灶台前」)
-                    # 时会被强制打断,判定依据就此变成一句被截断的怪话,而它会进
-                    # agent 上下文和用户可见的事件文案。实测到的复读也正是发生在
-                    # 无规则的纯描述场景,那里才需要这层抑制。
-                    **(
-                        {}
-                        if rules
-                        else {
-                            "repetition_penalty": _REPETITION_PENALTY,
-                            "no_repeat_ngram_size": _NO_REPEAT_NGRAM,
-                        }
+                    # 复读是**解码器属性**,不是提示词属性 —— 有规则时也照样会
+                    # 发生,而且后果更重:复读吃光 token 预算,一行「规则N:」都没
+                    # 输出,于是全部规则落未判定、被推成 False,静默失效。所以
+                    # 抑制不能整个关掉。
+                    #
+                    # 但两个处理器都会把 prompt 一并计入,而带规则的 prompt 里逐字
+                    # 写着每条规则的 query。区别在于:
+                    # - repetition_penalty 只是重新加权,压不出 EOS、也截不断句子,
+                    #   一直开着是安全的;
+                    # - no_repeat_ngram_size 是**硬禁**,n 取小了会在模型复述规则
+                    #   条件时把它掐断,判定依据变成半句怪话。所以有规则时把 n 放大
+                    #   到远超任何规则 query 的长度,只封死"整段照抄"这种病态重复。
+                    repetition_penalty=_REPETITION_PENALTY,
+                    no_repeat_ngram_size=(
+                        _NO_REPEAT_NGRAM_WITH_RULES if rules else _NO_REPEAT_NGRAM
                     ),
                 )
             t_gen = (time.time() - t1) * 1000
@@ -234,9 +243,17 @@ class MageVLEngine:
             ).strip()
 
         caption, hits = parse_response(raw, rules)
+        unparsed = count_unparsed(hits)
+        if unparsed:
+            logger.warning(
+                "%d/%d 条规则未解析出判定(复读吃光 token / 输出格式被带偏?);"
+                "原始输出前 200 字: %s",
+                unparsed, len(hits), raw[:200],
+            )
         return {
             "caption": caption,
             "rule_hits": hits,
+            "unparsed_rules": unparsed,
             "gate_p": gate_p,
             "raw": raw,
             "backend": backend,

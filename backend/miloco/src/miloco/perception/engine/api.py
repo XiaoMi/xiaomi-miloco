@@ -105,7 +105,9 @@ def _voice_allowed_dids() -> set[str]:
 
 
 # 同上,与本地视觉通路共用(见 perception/rule_scope)。
-_camera_prompt_map = camera_prompt_map
+def _camera_prompt_map() -> dict[str, str]:
+    # 同 _physical_did:真委托,不用快照赋值(否则 patch 一处不影响另一处)。
+    return camera_prompt_map()
 
 
 class PerceptionEngine(BasePerceptionEngine):
