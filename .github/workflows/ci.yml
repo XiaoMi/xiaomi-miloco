@@ -114,6 +114,6 @@ jobs:
         # 且会按各自 pyproject 解析配置（cli 未把 ruff 列为依赖，故不能 cd cli && uv run ruff）。
         run: |
           cd backend && uv sync --all-packages
-          uv run ruff check . "$GITHUB_WORKSPACE/cli"
+          uv run ruff check . "$GITHUB_WORKSPACE/cli" "$GITHUB_WORKSPACE/services/local-vision"
       - name: 类型检查（openclaw 插件，tsc --noEmit）
         run: cd plugins/openclaw && pnpm install --frozen-lockfile && pnpm check

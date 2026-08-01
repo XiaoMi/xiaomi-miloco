@@ -55,9 +55,24 @@ def runner():
     )
 
 
+async def _drain(runner) -> None:
+    """fire 是 spawn 出去的 task(update_state 跑在感知热路径上,不能被它拖住)。
+    等它们跑完再断言 —— 否则测的只是"调度了没有",而不是"做了什么"。"""
+    import asyncio
+
+    pending = [t for t in getattr(runner, "_fire_tasks", set()) if not t.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    else:
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+
 def _backend(monkeypatch, kind: str) -> None:
+    # 打在**定义处**:runner 里那是函数内导入(顶层导入会把 cv2/av/numpy 拖进
+    # 规则引擎),所以 runner 模块上没有这个名字可打。
     monkeypatch.setattr(
-        "miloco.rule.runner.perception_executes_device_actions",
+        "miloco.perception.capabilities.perception_executes_device_actions",
         lambda: kind != "local",
     )
 
@@ -204,3 +219,48 @@ async def test_manual_trigger_is_not_blocked_by_the_gate(runner, monkeypatch):
     res = await runner.trigger_rule("r-gas", "用户在界面上点了触发")
     assert res is not None
     assert len(executed) == 1, "人工触发被那道感知闸挡住了"
+
+
+# ── 走真实入口:感知上报 → 状态机 → fire ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_gate_holds_on_the_path_production_actually_takes(runner, monkeypatch):
+    """经 ``update_state``(感知引擎每帧调的那个)驱动一次命中。
+
+    此前所有闸测试都直接调 ``_fire``,于是依赖的是那个参数的**默认值**。把感知
+    调用点改成 ``perception_driven=False``——燃气阀于是每次命中都会开——2885 条
+    测试全绿。整条特性最要紧的安全属性,没有任何一条测试走过它真实的路径。
+    """
+    _backend(monkeypatch, "local")
+    execute = AsyncMock()
+    monkeypatch.setattr(runner, "_execute_action", execute)
+
+    await runner.update_state("r-gas", "cam1", True, context="厨房检测到明火")
+    await _drain(runner)
+
+    execute.assert_not_called()
+    kinds = [c.args[0].kind for c in runner._log_repo.create.call_args_list]
+    assert kinds == [RuleLogKind.RULE_TRIGGER_FAILURE], kinds
+    errors = [c.args[0].execute_result.error for c in runner._log_repo.create.call_args_list]
+    assert "不执行设备动作" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_cloud_backend_still_drives_devices_on_the_same_path(runner, monkeypatch):
+    """同一条真实路径上,云端通路必须照常执行 —— 否则这道闸就把所有人都拦了。"""
+    _backend(monkeypatch, "cloud")
+    executed: list = []
+
+    async def _exec(rule_id, action):
+        executed.append(action)
+        return RuleActionExecuteResult(action=action, result=True)
+
+    monkeypatch.setattr(runner, "_execute_action", _exec)
+
+    await runner.update_state("r-gas", "cam1", True, context="厨房检测到明火")
+    await _drain(runner)
+
+    assert len(executed) == 1
+    kinds = [c.args[0].kind for c in runner._log_repo.create.call_args_list]
+    assert kinds == [RuleLogKind.RULE_TRIGGER_SUCCESS], kinds

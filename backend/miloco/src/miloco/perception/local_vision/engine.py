@@ -129,9 +129,29 @@ class LocalVisionEngine(BasePerceptionEngine):
 
     # ── 能力声明 ─────────────────────────────────────────────────────────
 
-    # close / set_main_loop / set_tierc_frame_provider / apply_omni_fps /
-    # get_input_config 全部继承 BasePerceptionEngine 的无害默认实现:本通路没有
-    # 常驻资源、没有跨线程回调、没有身份识别、也不消费 omni 抽帧率。
+    # proxy / processor 会**无条件**调用下面这几个方法。刻意在这里各写一遍,而不是
+    # 去给 ABC 加无害默认值 —— 那样云端引擎哪天把 close() 改了名,proxy 会静默地
+    # 什么都不做(身份引擎的线程于是泄漏),而不是报错。契约留在 ABC 上是严格的,
+    # 这条通路"不需要"什么,由这条通路自己声明。
+
+    async def close(self) -> None:
+        """释放常驻 HTTP 连接池。除此之外本通路没有需要收的资源。"""
+        client = self._client
+        aclose = getattr(client, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    def set_main_loop(self, loop) -> None:  # noqa: ANN001
+        """本通路没有跨线程回调,不需要主循环句柄。"""
+        return None
+
+    def set_tierc_frame_provider(self, provider) -> None:  # noqa: ANN001
+        """tier_c 是身份识别的清理钩子;本通路不做身份识别。"""
+        return None
+
+    def apply_omni_fps(self, omni_fps: int) -> None:
+        """omni 抽帧率是云端通路的概念,本通路不消费它(见 get_input_config)。"""
+        return None
 
     # ── 感知 ─────────────────────────────────────────────────────────────
 

@@ -117,9 +117,11 @@ describe("isReachable", () => {
   });
 
   it("模型还在加载时不算可达", () => {
+    // 断言字面值,不是"与实现一致"—— 后者是把实现抄一遍,任何实现都成立。
+    // 此刻后端会以 400「正在加载模型」拒绝切换,按钮却显示绿色可达是自相矛盾。
     const s = state({ health: { ...healthy, model_loaded: false, status: "loading" } });
-    // model_loaded=false 时后端不会给出 ok 的探活行,按钮也不该显示可达。
-    expect(isReachable(s)).toBe(healthLine(s).kind === "ok");
+    expect(isReachable(s)).toBe(false);
+    expect(healthLine(s).kind).toBe("loading");
   });
 
   it("一切正常时可达", () => {

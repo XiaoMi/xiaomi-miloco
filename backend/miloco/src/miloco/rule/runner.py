@@ -44,7 +44,6 @@ from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
-from miloco.perception.capabilities import perception_executes_device_actions
 from miloco.rule.schema import (
     Rule,
     RuleAction,
@@ -1223,6 +1222,12 @@ class RuleRunner:
         # 这里选择**不执行也不改写**:改写会丢掉 cooldown_minutes / idempotent(schema
         # 里唯一的限流)和台账里 source=rule 的归属。所以只拒绝,并且大声说出来 ——
         # 界面上同一批规则也会被列出来(见 admin 的 blocking_static_rules)。
+        # 函数内导入:放在模块顶层会把整个 perception 包(cv2 / av / numpy,
+        # 实测 +0.36s)拖进规则引擎,而上游的 rule/runner.py 一个感知顶层导入都没有
+        # (它唯一的感知依赖 event_text_builder 同样是函数内导入)。这条依赖箭头
+        # 本来就该是单向的:perception 用 rule,rule 不用 perception。
+        from miloco.perception.capabilities import perception_executes_device_actions
+
         refused = (
             kind == "static"
             and perception_driven

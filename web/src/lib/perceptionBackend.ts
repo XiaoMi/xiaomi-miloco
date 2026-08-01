@@ -1,9 +1,9 @@
 /**
  * 感知后端卡片的判定逻辑。
  *
- * 抽出来是为了能测:仓库的前端测试跑在 node 环境(没有 jsdom),渲染断言做不了,
- * 而这两处判定恰恰是错了就有实际后果的地方 —— 一个会悄悄清掉用户已存的凭证,
- * 另一个会在边车拒绝凭证时仍然显示绿灯。留在 JSX 里就等于永远没有覆盖。
+ * 抽出来是为了能测:仓库的前端测试跑在 node 环境(没有 jsdom),渲染断言做不了。
+ * 这两处判定错了都有实际后果 —— 一个会悄悄清掉用户已存的凭证,另一个会在边车
+ * 拒绝凭证时仍然显示绿灯。
  */
 
 import type { PerceptionBackendState } from "./types";
@@ -39,6 +39,7 @@ export function buildSwitchPayload(
 export type HealthLine =
   | { kind: "unreachable" }
   | { kind: "auth-rejected" }
+  | { kind: "loading" }
   | { kind: "ok"; device: string; backend: string; gateOff: boolean }
   | { kind: "none" };
 
@@ -52,8 +53,8 @@ export type HealthLine =
 /**
  * 本地 GPU 按钮上那个「可达」角标。
  *
- * 必须与 {@link healthLine} 同源。分开算过一次,结果是凭证被拒时按钮显示绿色
- * 「可达」、紧邻的一行显示「✗ 边车拒绝当前凭证」—— 同一屏上自相矛盾。
+ * 必须与 {@link healthLine} 同源,否则同一屏上会出现按钮显示绿色「可达」、
+ * 紧邻的一行显示「✗ 边车拒绝当前凭证」这种自相矛盾。
  */
 export function isReachable(state: PerceptionBackendState): boolean {
   return healthLine(state).kind === "ok";
@@ -64,6 +65,9 @@ export function healthLine(state: PerceptionBackendState): HealthLine {
   const h = state.health;
   if (!h) return { kind: "none" };
   if (h.auth_required && !h.auth_ok) return { kind: "auth-rejected" };
+  // 模型还在加载:后端此刻会以 400「正在加载模型,稍后再试」拒绝切换。这里若报
+  // 「可达」,用户看到的就是绿灯 + 点了被拒,两处自相矛盾。
+  if (!h.model_loaded) return { kind: "loading" };
   return {
     kind: "ok",
     device: h.device ?? "",

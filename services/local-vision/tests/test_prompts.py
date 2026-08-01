@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import pytest
-
 from local_vision.prompts import (
     _RULE_LINE_RE,
     NO_VERDICT_REASON,

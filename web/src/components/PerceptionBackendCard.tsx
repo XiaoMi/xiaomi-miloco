@@ -202,6 +202,8 @@ export function PerceptionBackendCard() {
             <span className="text-error">✗ {t("perceptionBackend.unreachable")}</span>
           ) : line.kind === "auth-rejected" ? (
             <span className="text-error">✗ {t("perceptionBackend.authBad")}</span>
+          ) : line.kind === "loading" ? (
+            <span className="text-text-secondary">{t("perceptionBackend.loadingModel")}</span>
           ) : line.kind === "ok" ? (
             <span className="text-success num">
               ✓ {line.device} · {line.backend}
@@ -230,15 +232,13 @@ export function PerceptionBackendCard() {
         )}
       </ul>
 
-      {/* 这批规则在两种状态下都要显示,措辞不同:
-          - 还在云端:它们会挡住切换(后端 400),先预告;
-          - 已在本地:它们的设备动作**正在被拒绝执行**——恰恰是最该看见的时候。
-          早先只在 !isLocal 时渲染,等于在唯一要紧的状态下把证据藏了起来。 */}
-      {state.blocking_static_rules.length > 0 && (
+      {/* 只在已切到本地时显示:此刻这些规则的设备动作正在被拒绝执行,是要紧且
+          可行动的信息。还在云端时不显示 —— 直连设备规则是本产品最常见的自动化,
+          在那儿常驻一条橙色警告等于给不会切过去的用户天天报警;切换被拒时后端的
+          400 本来就会把它们逐条列出来。 */}
+      {isLocal && state.blocking_static_rules.length > 0 && (
         <div className="mt-3 text-caption text-warning bg-warning-bg rounded-lg px-3 py-2">
-          {t(isLocal
-            ? "perceptionBackend.blockingRulesLocal"
-            : "perceptionBackend.blockingRules")}
+          {t("perceptionBackend.blockingRulesLocal")}
           <span className="num"> {state.blocking_static_rules.join("、")}</span>
         </div>
       )}

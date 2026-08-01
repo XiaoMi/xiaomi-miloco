@@ -61,6 +61,21 @@ class LocalVisionClient:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        # 连接池复用一份。每次推理新建再销毁的话,4 台相机 × 4 秒窗 = 每秒一次
+        # TCP 握手,永远拿不到 keep-alive。惰性建:探活(health_sync)是同步的,
+        # 构造期不该顺手创建一个属于别的事件循环的 async client。
+        self._async_client: httpx.AsyncClient | None = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._async_client is None or self._async_client.is_closed:
+            self._async_client = httpx.AsyncClient(timeout=self.timeout)
+        return self._async_client
+
+    async def aclose(self) -> None:
+        """引擎 close() 时释放连接池。"""
+        if self._async_client is not None and not self._async_client.is_closed:
+            await self._async_client.aclose()
+        self._async_client = None
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
@@ -110,12 +125,11 @@ class LocalVisionClient:
             # 独立字段传:塞进 scene_ask 会顶掉任务提问本身,且会落在格式约定之前。
             payload["camera_note"] = camera_note
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as c:
-                r = await c.post(
-                    f"{self.base_url}/v1/perceive", json=payload, headers=self._headers()
-                )
-                r.raise_for_status()
-                return r.json()
+            r = await self._client().post(
+                f"{self.base_url}/v1/perceive", json=payload, headers=self._headers()
+            )
+            r.raise_for_status()
+            return r.json()
         except httpx.HTTPStatusError as e:
             detail = ""
             try:

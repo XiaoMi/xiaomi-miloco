@@ -469,6 +469,24 @@ async def test_blank_name_hit_is_dropped_not_index_matched():
     )
     assert res.matched_rules == []
 
+    # 上面那半其实是名字查找失败的兜底(规则都有名字,查不到自然丢弃)。守卫真正
+    # 起作用的是**规则自己也没有名字**的时候 —— 此时按索引兜底就会把第一条规则
+    # 认成命中。规则的 name 是可空的(engine 里取的是 r.get("name", "")),所以
+    # 这不是构造出来的假想情形。
+    nameless = [
+        {"id": "r-fire", "name": "", "condition": {"query": "q1", "perceive_device_ids": []}},
+        {"id": "r-fall", "name": "", "condition": {"query": "q2", "perceive_device_ids": []}},
+    ]
+    client2 = _FakeClient([{
+        "caption": "x",
+        "rule_hits": [{"name": "", "hit": True, "reason": "有人倒在地上"}],
+        "gate_p": None, "backend": "codec",
+    }])
+    res2 = await _engine(client2).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), nameless
+    )
+    assert res2.matched_rules == [], "空名判定按索引认领了一条规则"
+
 
 # ── 与 proxy 的接口兼容 ────────────────────────────────────────────────────
 
@@ -478,7 +496,6 @@ def test_engine_supports_the_lifecycle_calls_the_proxy_makes():
     漏掉任何一个都会让后端在启动或首次推理时 AttributeError —— 而只直接调用
     两个抽象方法的单测完全看不出来。"""
     import asyncio as _asyncio
-    import inspect
 
     from miloco.perception.engine_base import BasePerceptionEngine
 
@@ -505,7 +522,7 @@ def test_engine_supports_the_lifecycle_calls_the_proxy_makes():
     # 反过来,proxy/processor 无条件调用的那几个必须存在(继承来的也算)。
     for name in ("close", "set_main_loop", "set_tierc_frame_provider", "apply_omni_fps"):
         assert callable(getattr(e, name)), name
-    assert inspect.isabstract(BasePerceptionEngine) or True
+
 
     loop = _asyncio.new_event_loop()
     try:
@@ -1149,3 +1166,45 @@ async def test_token_budget_is_capped_at_the_sidecar_limit():
         BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
     )
     assert client.calls[0]["max_new_tokens"] == _MAX_NEW_TOKENS_CEILING
+    # 字面值也钉住:两侧各测各的话,任一侧单独改动都不会红,而后果是每一窗 422。
+    # 边车侧有一条对称的测试(1025 必须被拒),两条一起才构成契约。
+    assert _MAX_NEW_TOKENS_CEILING == 1024
+
+
+@pytest.mark.asyncio
+async def test_http_connection_pool_is_reused_across_windows():
+    """每次推理新建再销毁连接池的话,4 台相机 × 4 秒窗 = 每秒一次 TCP 握手,
+    对边车永远拿不到 keep-alive。"""
+    import httpx
+    from miloco.perception.local_vision import LocalVisionClient
+
+    def _h(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"caption": "ok", "rule_hits": []})
+
+    real, patched = _mock_transport(_h)
+    httpx.AsyncClient = patched
+    try:
+        c = LocalVisionClient("http://s:1")
+        await c.perceive(b"A", rules=[])
+        first = c._async_client
+        await c.perceive(b"B", rules=[])
+        assert c._async_client is first, "每次推理都新建了连接池"
+        assert not first.is_closed
+
+        await c.aclose()
+        assert first.is_closed, "close 之后连接池没有被释放"
+    finally:
+        httpx.AsyncClient = real
+
+
+@pytest.mark.asyncio
+async def test_engine_close_releases_the_connection_pool():
+    """proxy 在停引擎时会调 close();不接上的话连接池会跟着旧引擎实例泄漏。"""
+    closed: list = []
+
+    class _C(_FakeClient):
+        async def aclose(self):
+            closed.append(True)
+
+    await _engine(_C()).close()
+    assert closed == [True]

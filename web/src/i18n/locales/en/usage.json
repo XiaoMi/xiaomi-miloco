@@ -130,13 +130,13 @@
     "capNoAudio": "Vision only: no speech commands or ambient-sound conclusions (use the cloud path if you need audio).",
     "capNoIdentity": "No identity recognition — scene description and rule judgment only.",
     "capNoStatic": "The local path performs no device actions. If rules with direct device control are enabled, switching is refused and they are listed — disable them or convert them to agent-decided dynamic rules first.",
-    "blockingRules": "These enabled rules drive devices directly and must be disabled before switching to local:",
     "tokenLabel": "Access token",
     "tokenPlaceholder": "leave empty if not required",
     "tokenSaved": "saved — leave empty to keep",
     "authBad": "sidecar rejected the token",
     "blockingRulesLocal": "These enabled rules carry direct device actions; on this path they will not run (a hit is recorded as a failed trigger):",
     "capNoSuggestions": "No proactive suggestions: it produces scene descriptions and rule verdicts only.",
-    "backendConfigured": "(configured at startup; the effective path is chosen per request)"
+    "backendConfigured": "(configured at startup; the effective path is chosen per request)",
+    "loadingModel": "The sidecar is still loading its model; try switching shortly"
   }
 }

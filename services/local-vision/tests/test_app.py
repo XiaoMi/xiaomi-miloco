@@ -12,7 +12,6 @@ import base64
 
 import pytest
 from fastapi.testclient import TestClient
-
 from local_vision import app as app_mod
 
 
@@ -208,3 +207,19 @@ def test_stub_engine_signature_matches_the_real_one():
     stub = [p.name for p in inspect.signature(_StubEngine.perceive).parameters.values()]
     assert stub[:2] == real[:2], f"位置参数不一致: {stub[:2]} vs {real[:2]}"
     assert real[0] == "self" and real[1] == "video_path"
+
+
+def test_max_new_tokens_bound_matches_the_miloco_side_ceiling():
+    """边车接受的上限与 miloco 侧的 _MAX_NEW_TOKENS_CEILING 必须一致。
+
+    两者分属独立部署的构件,各测各的话任一侧单独收紧都不会红 —— 而后果是规则一多
+    每一窗就 422,在 miloco 的日志里与其它边车故障长得一模一样。
+    """
+    import pytest as _pytest
+    from local_vision.app import PerceiveRequest
+    from pydantic import ValidationError
+
+    ok = PerceiveRequest(video_b64="", max_new_tokens=1024)
+    assert ok.max_new_tokens == 1024
+    with _pytest.raises(ValidationError):
+        PerceiveRequest(video_b64="", max_new_tokens=1025)

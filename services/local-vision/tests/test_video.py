@@ -16,7 +16,10 @@ from local_vision.video import (
 
 
 def test_short_segments_fall_back_to_frames():
-    """miloco 默认 4s 感知窗只产 ~4 帧,恰好落在 codec 分组下限之下。"""
+    """段被截短(相机刚上线、窗口被打断)时凑不齐一组,必须优雅回退。
+
+    注意这是**边缘情形**:默认路径是 codec(实测连续 246 个窗口全部走 codec)。
+    """
     assert pick_backend("codec", MIN_CODEC_FRAMES - 1) == "frames"
     assert pick_backend("codec", 0) == "frames"
 

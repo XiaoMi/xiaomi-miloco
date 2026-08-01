@@ -52,6 +52,18 @@ def _make_proxy(status: str, *, engine=None, message: str = "stale") -> Percepti
     return p
 
 
+def test_fake_proxy_carries_every_field_the_real_one_has():
+    """替身少一个字段,被测代码在它上面跑得好好的,换成真对象就 AttributeError,
+    而整套测试仍然全绿。手写清单靠人盯,这条把它变成自动的。"""
+    from unittest.mock import patch
+
+    with patch.object(PerceptionEngineProxy, "_init_engine"):
+        real = PerceptionEngineProxy()
+    fake = _make_proxy("ready")
+    missing = set(vars(real)) - set(vars(fake))
+    assert missing == set(), f"替身缺少真实对象的字段: {sorted(missing)}"
+
+
 def _ready() -> ValidationResult:
     return ValidationResult(status=EngineReadiness.READY)
 

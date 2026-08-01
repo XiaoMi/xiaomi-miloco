@@ -63,15 +63,6 @@ MAX_EID: int = 999
 SUGG_SIM_THRESHOLD: float = 0.70
 
 
-# 与本地视觉通路共用同一份实现(见 perception/rule_scope):两条通路对同一条规则的
-# 下发范围必须完全一致,各写一份迟早漂移。
-def _physical_did(did: str) -> str:
-    # 真委托而非快照赋值:赋值会让 patch api._physical_did 不影响规则下发
-    # (那条走 rules_for_device → rule_scope.physical_did),反之亦然 —— 给后来
-    # 写测试的人埋坑。
-    return physical_did(did)
-
-
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
@@ -102,12 +93,6 @@ def _voice_allowed_dids() -> set[str]:
             "voice allow-list lookup failed, stripping audio for all cameras (fail-closed): %s", e
         )
         return set()
-
-
-# 同上,与本地视觉通路共用(见 perception/rule_scope)。
-def _camera_prompt_map() -> dict[str, str]:
-    # 同 _physical_did:真委托,不用快照赋值(否则 patch 一处不影响另一处)。
-    return camera_prompt_map()
 
 
 class PerceptionEngine(BasePerceptionEngine):
@@ -926,7 +911,7 @@ class PerceptionEngine(BasePerceptionEngine):
             # ``did:ch{n}``），故白名单命中判定与日志去重都按物理 did（否则双摄开了拾音也
             # 会因 ``cam:ch0`` ∉ ``{cam}`` 被误剥）。音频剥离与跨窗残留清理仍按合成 did
             # ——那几个 dict 是每通道独立状态。
-            physical = _physical_did(did)
+            physical = physical_did(did)
             if physical in allowed:
                 continue
             if physical not in self._mic_off_logged:
@@ -976,7 +961,7 @@ class PerceptionEngine(BasePerceptionEngine):
         device_rule_map: dict[str, list[str]] = {}
         # 每摄像头自定义「感知须知」prompt：整表读一次、循环内按 did 取（实时、改动下一窗
         # 即生效、不重启；读失败 fail-open 注入空）。逐窗一次 KV 读，避免 per-device 重复。
-        prompt_map = _camera_prompt_map()
+        prompt_map = camera_prompt_map()
         for room_name, snapshots in batch.by_room().items():
             for snapshot in snapshots:
                 did = snapshot.device.did

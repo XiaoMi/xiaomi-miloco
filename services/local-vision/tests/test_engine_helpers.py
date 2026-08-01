@@ -101,11 +101,9 @@ def test_codec_branch_bounds_the_visual_budget():
 
 
 def test_frames_branch_bounds_the_visual_budget_too(monkeypatch):
-    """段太短时会降级到 frames —— 而那正是 miloco 默认 4s 窗口的**常态**落点。
-
-    这条分支不限像素的话,同一台相机切到降级通路就会突然按原始分辨率铺 patch:
-    token 数与显存跟着跳变,而两条通路的视觉预算本该同源。
-    """
+    """段太短时会降级到 frames。虽是边缘情形,预算也必须与 codec 分支同源 ——
+    否则同一台相机一旦落到降级通路,就会突然按原始分辨率铺 patch,token 数与
+    显存跟着跳变。"""
     import local_vision.engine as eng
 
     monkeypatch.setattr(eng, "sample_frames", lambda video, n: ["F"] * n)

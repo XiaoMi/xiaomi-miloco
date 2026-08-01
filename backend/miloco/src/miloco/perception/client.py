@@ -83,6 +83,10 @@ _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 # 而 tick 每 4s 就会调一次;没有冷却时一个被防火墙 DROP 的地址会把事件循环
 # 按秒级反复冻住。冷却只影响"多久发现边车起来了",不改变任何语义。
 _LOCAL_PROBE_COOLDOWN_SEC = 30.0
+#: 边车「正在加载模型」时的重探间隔。加载通常几十秒,所以压得比失败冷却短得多;
+#: 但加载失败会让它永远停在 loading(见边车 app.py:_load_engine 刻意不崩进程),
+#: 完全不压就是无限轮询。
+_LOADING_PROBE_COOLDOWN_SEC = 5.0
 
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
@@ -422,15 +426,22 @@ class PerceptionEngineProxy:
         try:
             self._local_probe = client.health_sync()
             self._local_probe_error = None
-            # 「模型还在加载」会自己好,所以不设冷却、下个 tick 就再看一眼;
             # 「凭证被拒」不会自己好,不设冷却就是每 4 秒一次、一天两万多次的空转。
             # 用户改对凭证时 key 会变,冷却随之作废,恢复照样是即时的。
-            self._local_probe_not_before = (
-                time.monotonic() + _LOCAL_PROBE_COOLDOWN_SEC
-                if self._local_probe.get("auth_required")
-                and not self._local_probe.get("auth_ok")
-                else 0.0
-            )
+            # 「模型还在加载」通常几十秒就好,所以只压一个短冷却让它尽快转 ready;
+            # 但边车加载失败时会**永远**停在 loading(它刻意不崩进程),不压的话
+            # 同样是无限轮询 —— 短冷却两头都照顾到。
+            probe = self._local_probe
+            if probe.get("auth_required") and not probe.get("auth_ok"):
+                self._local_probe_not_before = (
+                    time.monotonic() + _LOCAL_PROBE_COOLDOWN_SEC
+                )
+            elif not probe.get("model_loaded"):
+                self._local_probe_not_before = (
+                    time.monotonic() + _LOADING_PROBE_COOLDOWN_SEC
+                )
+            else:
+                self._local_probe_not_before = 0.0
         except LocalVisionError as e:
             self._local_probe = None
             self._local_probe_error = f"本地视觉服务不可达({cfg.base_url}): {e}"

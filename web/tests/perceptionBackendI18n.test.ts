@@ -13,7 +13,10 @@ const root = fileURLToPath(new URL("../src/", import.meta.url));
 
 function usedKeys(): string[] {
   const src = readFileSync(`${root}components/PerceptionBackendCard.tsx`, "utf8");
-  return [...src.matchAll(/t\("perceptionBackend\.([A-Za-z0-9_]+)"\)/g)].map((m) => m[1]);
+  // 不能只匹配 t("...") 这一种形态:卡片里有 t(cond ? "a" : "b") 这样的动态用法,
+  // 只认前者的话,新加的那两个 key 全部漏检 —— 实测把其中一个拼错,271 条前端
+  // 测试仍然全绿,而页面上会直接显示原始 key。改成匹配文件里所有该前缀的字面量。
+  return [...src.matchAll(/"perceptionBackend\.([A-Za-z0-9_]+)"/g)].map((m) => m[1]);
 }
 
 function definedKeys(locale: string): Set<string> {

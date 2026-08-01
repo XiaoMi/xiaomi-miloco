@@ -187,6 +187,24 @@ async def test_probe_is_a_noop_on_the_cloud_backend(local_cfg):
 # ── 配置到引擎的透传 ──────────────────────────────────────────────────────
 
 
+def test_every_configured_field_reaches_the_engine(local_cfg):
+    """七个设置项逐一核对。此前只有 short_edge 被测过,其余六项在构造时写死
+    都不会让任何测试变红 —— 用户在面板上改了却毫无效果,而且无从察觉。"""
+    lv = local_cfg.perception.local_vision
+    lv.container_fps, lv.crf, lv.max_new_tokens = 6, 31, 320
+    lv.max_frames, lv.event_gate_threshold = 24, 0.4
+    lv.scene_ask, lv.video_short_edge = "只描述有没有人", 288
+
+    e = _build(local_cfg).perception_engine
+    assert e._container_fps == 6
+    assert e._crf == 31
+    assert e._max_new_tokens == 320
+    assert e._max_frames == 24
+    assert e._gate_threshold == 0.4
+    assert e._scene_ask == "只描述有没有人"
+    assert e._short_edge_override == 288
+
+
 def test_short_edge_none_is_passed_through_so_it_can_follow_the_shared_setting(local_cfg):
     """构造期把 None 换成具体值的话,面板上调分辨率对本通路就永久失效了 ——
     而该设置的契约是"写盘后下一帧即生效"。"""
@@ -208,10 +226,15 @@ def test_rejected_credentials_arm_a_cooldown(local_cfg):
     assert p._local_probe_not_before > time.monotonic()
 
 
-def test_model_loading_does_not_arm_a_cooldown(local_cfg):
-    """加载中会自己好 —— 压上冷却只会让就绪白白晚半分钟。"""
+def test_model_loading_arms_only_a_short_cooldown(local_cfg):
+    """加载通常几十秒就好,不该压满 30 秒;但加载**失败**时边车会永远停在
+    loading(它刻意不崩进程),完全不压就是无限轮询。短冷却两头都照顾到。"""
+    import miloco.perception.client as pc
+
     p = _build(local_cfg, health={**HEALTHY, "model_loaded": False, "status": "loading"})
-    assert p._local_probe_not_before == 0.0
+    wait = p._local_probe_not_before - time.monotonic()
+    assert 0 < wait <= pc._LOADING_PROBE_COOLDOWN_SEC
+    assert pc._LOADING_PROBE_COOLDOWN_SEC < pc._LOCAL_PROBE_COOLDOWN_SEC
 
 
 @pytest.mark.asyncio
@@ -288,17 +311,60 @@ def test_construction_may_probe_synchronously(local_cfg):
 
 
 @pytest.mark.asyncio
+async def test_processor_refresh_delegates_to_the_proxy():
+    """processor 那一层不是转发就是断链 —— 而 tick 只认识它。
+
+    把它的方法体换成 return,整条"主循环不做同步 HTTP"的设计就死了:tick 照常
+    await 一个 no-op,重建路径于是自己去同步探活。实测这样改动 1316 条测试全绿。
+    """
+    from miloco.perception.processor import PipelineProcessor
+
+    calls: list = []
+
+    class _Proxy:
+        async def refresh_local_probe(self):
+            calls.append("refresh")
+
+    proc = PipelineProcessor.__new__(PipelineProcessor)
+    proc._perception_engine_proxy = _Proxy()
+    await proc.refresh_local_probe()
+    assert calls == ["refresh"], "processor 没有把探活刷新转发给 proxy"
+
+
+@pytest.mark.asyncio
 async def test_tick_refreshes_the_probe_before_attempting_a_rebuild():
     """整条"主循环不做同步 HTTP"的设计,全靠 tick 里这个先后顺序撑着。
 
-    删掉 tick 里那次 await,重建路径就会退回到自己去探活 —— 而它是同步的。
-    这条不测的话,那次删除不会让任何测试变红。
+    观察**调用顺序**,不是源码里的字符串位置:后者在无害的重构(把调用挪进一个
+    小函数)下会假红,又会在"调用被换成别的含同名标识符的东西"时保持绿。
     """
-    import inspect
+    from miloco.perception.runner import PerceptionRunner
 
-    from miloco.perception import runner as rn
+    order: list = []
 
-    src = inspect.getsource(rn.PerceptionRunner._tick)
-    assert "refresh_local_probe" in src, "tick 不再刷新探活缓存"
-    assert src.index("refresh_local_probe") < src.index("try_reinit_engine"), \
-        "探活刷新必须排在重建之前,否则重建会在主循环上自己去探"
+    class _Proc:
+        async def refresh_local_probe(self):
+            order.append("refresh")
+
+        def try_reinit_engine(self, **kw):
+            order.append("reinit")
+            return False
+
+    class _Pipeline(_Proc):
+        def drive_omni_probe(self):
+            pass
+
+        async def process_realtime(self):
+            return None
+
+    class _Collector:
+        def get_all_active_sources(self):
+            return ["cam1"]
+
+    runner = PerceptionRunner.__new__(PerceptionRunner)
+    runner._pipeline = _Pipeline()
+    runner._collector = _Collector()
+    runner._is_running = True
+    await runner._tick()
+
+    assert order[:2] == ["refresh", "reinit"], f"tick 的先后顺序不对: {order}"
