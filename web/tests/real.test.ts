@@ -20,6 +20,8 @@ import {
   realDeleteOmniConfig,
   realListOmniModels,
   realTestOmniConfig,
+  realGetPerceptionBackend,
+  realSetPerceptionBackend,
   _resetUsageStatsCache,
 } from "@/api/real";
 
@@ -449,5 +451,112 @@ describe("omni 配置契约 — 多档案", () => {
     expect(res.ok).toBe(true);
     expect(res.status).toBe(200);
     expect(res.message).toBe("连接正常");
+  });
+});
+
+describe("apiFetch — 结构化错误 detail", () => {
+  it("解包 detail 对象,而不是把它 String 成 [object Object]", async () => {
+    // FastAPI 的 detail 既可能是字符串也可能是对象。不解包的话用户看到的literally
+    // 是「[object Object]」—— omni 的 PUT(detail={"code":"no_key",…})早就走在
+    // 这条路上,这个洞不是本特性新引入的。
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ detail: { code: "auth_rejected", message: "凭证不被接受" } }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      ),
+    ) as unknown as typeof fetch;
+
+    const { apiFetch, ApiError } = await import("@/api/client");
+    await expect(apiFetch("/api/x")).rejects.toSatisfy((e: unknown) => {
+      expect(e).toBeInstanceOf(ApiError);
+      const err = e as InstanceType<typeof ApiError>;
+      expect(err.message).toBe("凭证不被接受");
+      expect(err.code).toBe("auth_rejected");
+      return true;
+    });
+  });
+
+  it("字符串 detail 保持原样", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ detail: "普通错误" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+    const { apiFetch } = await import("@/api/client");
+    await expect(apiFetch("/api/x")).rejects.toThrow("普通错误");
+  });
+});
+
+
+// ── /api/admin/perception-backend 契约 ────────────────────────────────────
+// 这两条是界面与后端之间唯一的通道,而它们此前没有覆盖。功能已经因为一次字段
+// 改名整体 500 过一次 —— URL、方法、以及从 NormalResponse 里取 .data,任何一样
+// 写错都会让整张卡片变成"加载失败",而类型检查与其它测试全绿。
+const PB_PAYLOAD = {
+  backend: "local",
+  local_vision: { base_url: "http://127.0.0.1:18800", has_token: true },
+  health: {
+    status: "ok", model_loaded: true, gate_available: false,
+    gate_error: "mamba_ssm missing", device: "cuda:0", backend: "codec",
+    auth_required: true, auth_ok: true,
+  },
+  error: null,
+  blocking_static_rules: ["厨房明火关阀"],
+  cloud_hint: "",
+  local_capabilities: {
+    needs_api_key: false, audio: false, identity: false,
+    suggestions: false, static_rule_execution: false,
+  },
+};
+
+function mockPb(status = 200, body: unknown = { code: 0, message: "ok", data: PB_PAYLOAD }) {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+  return calls;
+}
+
+describe("realGetPerceptionBackend", () => {
+  it("打到正确的端点并解开 NormalResponse", async () => {
+    const calls = mockPb();
+    const s = await realGetPerceptionBackend();
+    expect(calls[0].url).toContain("/api/admin/perception-backend");
+    expect(s.backend).toBe("local");
+    // 卡片上每一处判定都依赖这些字段真的被带过来。
+    expect(s.health?.auth_ok).toBe(true);
+    expect(s.health?.gate_available).toBe(false);
+    expect(s.blocking_static_rules).toEqual(["厨房明火关阀"]);
+    expect(s.local_capabilities.static_rule_execution).toBe(false);
+  });
+});
+
+describe("realSetPerceptionBackend", () => {
+  it("以 POST 发出请求体,并回传新状态", async () => {
+    const calls = mockPb();
+    const s = await realSetPerceptionBackend({
+      backend: "local",
+      base_url: "http://gpu:18800",
+      token: "secret",
+    });
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      backend: "local",
+      base_url: "http://gpu:18800",
+      token: "secret",
+    });
+    expect(s.backend).toBe("local");
+  });
+
+  it("后端拒绝时抛出,且带上原因 —— 卡片靠它给用户看 toast", async () => {
+    mockPb(400, { detail: "以下规则会在感知层直接控制设备…厨房明火关阀" });
+    await expect(
+      realSetPerceptionBackend({ backend: "local", base_url: "http://gpu:18800" }),
+    ).rejects.toThrow(/厨房明火关阀/);
   });
 });

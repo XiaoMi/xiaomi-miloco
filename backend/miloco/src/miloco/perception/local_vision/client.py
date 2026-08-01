@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 
@@ -66,10 +67,29 @@ class LocalVisionClient:
         # TCP 握手,永远拿不到 keep-alive。惰性建:探活(health_sync)是同步的,
         # 构造期不该顺手创建一个属于别的事件循环的 async client。
         self._async_client: httpx.AsyncClient | None = None
+        self._async_client_loop: asyncio.AbstractEventLoop | None = None
 
     def _client(self) -> httpx.AsyncClient:
-        if self._async_client is None or self._async_client.is_closed:
-            self._async_client = httpx.AsyncClient(timeout=self.timeout)
+        """取连接池,**按 event loop 缓存**。
+
+        AsyncClient 绑定到创建时所在的 loop;那个 loop 关闭后继续用会抛
+        "Event loop is closed"。而 InferenceWorker 每次 start() 都建一个新 loop —— 
+        仓库为同一件事写过 _get_fused_http_client(omni/omni.py),这里照同一条来。
+        此前只靠 close() 在换代之前把它置空,那是一条隔着三个模块的不变量,不是
+        这个类自己的性质。
+        """
+        loop = asyncio.get_running_loop()
+        if (
+            self._async_client is None
+            or self._async_client_loop is not loop
+            or self._async_client.is_closed
+        ):
+            self._async_client = httpx.AsyncClient(
+                timeout=self.timeout,
+                # 与 fused 通路同档:相机数上限 4,留一点余量给主动查询。
+                limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+            )
+            self._async_client_loop = loop
         return self._async_client
 
     async def aclose(self) -> None:
@@ -77,6 +97,7 @@ class LocalVisionClient:
         if self._async_client is not None and not self._async_client.is_closed:
             await self._async_client.aclose()
         self._async_client = None
+        self._async_client_loop = None
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}

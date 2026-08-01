@@ -22,6 +22,17 @@ import { toast } from "./Toast";
  *  提示 —— 两块卡挨着显示,不联动的话切完会一个说本地生效、另一个说云端生效。 */
 export const PERCEPTION_BACKEND_CHANGED = "miloco:perception-backend-changed";
 
+/** 后端错误码 → 本地化文案。与 UsageOmniConfig 的 OMNI_CODE_KEY 同构:backend
+ *  message 是硬编码中文,直接注入会污染英文界面。 */
+const PB_CODE_KEY: Record<string, string> = {
+  unreachable: "perceptionBackend.codes.unreachable",
+  auth_rejected: "perceptionBackend.codes.auth_rejected",
+  loading: "perceptionBackend.codes.loading",
+  load_failed: "perceptionBackend.codes.load_failed",
+  blocking_rules: "perceptionBackend.codes.blocking_rules",
+  bad_url: "perceptionBackend.codes.bad_url",
+};
+
 const INPUT_CLS =
   "w-full px-3 py-2 rounded-lg bg-bg-primary border border-border " +
   "focus:border-brand-primary focus:outline-none text-text-primary num";
@@ -40,7 +51,7 @@ export function PerceptionBackendCard() {
 
   async function load() {
     try {
-      const s = await getPerceptionBackend();
+      const s = await getPerceptionBackend({ probe: true });
       setState(s);
       setBaseUrl(s.local_vision.base_url);
       setLoadErr(null);
@@ -66,7 +77,18 @@ export function PerceptionBackendCard() {
         "ok",
       );
     } catch (e) {
-      toast(e instanceof Error ? e.message : t("perceptionBackend.switchFailed"), "danger");
+      // 优先按 code 查本地化文案;后端那句中文只在没有 code 时兜底。
+      const code = (e as { code?: string } | null)?.code;
+      const key = code ? PB_CODE_KEY[code] : undefined;
+      const detail = (e as { message?: string } | null)?.message;
+      toast(
+        key
+          ? [t(key), code === "load_failed" || code === "blocking_rules" ? detail : ""]
+              .filter(Boolean)
+              .join(":")
+          : (detail ?? t("perceptionBackend.switchFailed")),
+        "danger",
+      );
     } finally {
       setSwitching(null);
     }

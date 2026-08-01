@@ -1,0 +1,38 @@
+{
+  "perceptionBackend": {
+    "title": "Perception backend",
+    "subtitle": "Choose which path runs video perception. The two are mutually exclusive and switching takes effect immediately.",
+    "cloudTitle": "Cloud API",
+    "cloudDesc": "Uses the multimodal model configured below. Requires an API key and bills per token; supports audio and identity.",
+    "localTitle": "Local GPU",
+    "localDesc": "Uses a vision model service on this machine or LAN. No key, no token cost, footage never leaves home.",
+    "baseUrlLabel": "Local service URL",
+    "reachable": "Service reachable",
+    "unreachable": "Service unreachable",
+    "gateOff": "event gate off",
+    "switchedCloud": "Switched to the cloud API path",
+    "switchedLocal": "Switched to the local GPU path",
+    "switchFailed": "Switch failed",
+    "capNoKey": "The local path needs no model-provider API key.",
+    "capNoAudio": "Vision only: no speech commands or ambient-sound conclusions (use the cloud path if you need audio).",
+    "capNoIdentity": "No identity recognition — scene description and rule judgment only.",
+    "capNoStatic": "The local path performs no device actions. If rules with direct device control are enabled, switching is refused and they are listed — disable them or convert them to agent-decided dynamic rules first.",
+    "tokenLabel": "Access token",
+    "tokenPlaceholder": "leave empty if not required",
+    "tokenSaved": "saved — leave empty to keep",
+    "authBad": "sidecar rejected the token",
+    "blockingRulesLocal": "These enabled rules carry direct device actions; on this path they will not run (a hit is recorded as a failed trigger):",
+    "capNoSuggestions": "No proactive suggestions: it produces scene descriptions and rule verdicts only.",
+    "backendConfigured": "(configured at startup; the effective path is chosen per request)",
+    "loadingModel": "The sidecar is still loading its model; try switching shortly",
+    "setupHint": "Requires running the sidecar yourself — see services/local-vision/README.md in the repo",
+    "codes": {
+      "unreachable": "Sidecar unreachable — check it is running and the URL is right",
+      "auth_rejected": "The sidecar rejected the access token",
+      "loading": "The sidecar is still loading its model; try again shortly",
+      "load_failed": "The sidecar failed to load its model",
+      "blocking_rules": "Enabled rules drive devices directly; disable them first",
+      "bad_url": "That service URL is not valid"
+    }
+  }
+}

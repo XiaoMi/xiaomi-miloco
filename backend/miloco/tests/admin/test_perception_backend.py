@@ -102,7 +102,7 @@ def test_get_defaults_to_cloud_and_reports_capabilities(client, health):
 def test_get_reports_unreachable_without_leaking_probe_detail(client, health):
     """边车不可达时只回粗粒度标记 —— base_url 用户可填,回显原始异常等于内网探针。"""
     health.down("[Errno 111] Connection refused to 10.0.0.7:22")
-    d = client.get("/api/admin/perception-backend").json()["data"]
+    d = client.get("/api/admin/perception-backend?probe=1").json()["data"]
     assert d["error"] == "unreachable"
     assert d["health"] is None
     assert "10.0.0.7" not in json.dumps(d)
@@ -110,7 +110,7 @@ def test_get_reports_unreachable_without_leaking_probe_detail(client, health):
 
 def test_get_carries_cloud_hint_when_cloud_path_is_not_ready(client, health):
     """没配 Key 时,切回云端不会被拒绝,但必须提前说明它同样起不来。"""
-    d = client.get("/api/admin/perception-backend").json()["data"]
+    d = client.get("/api/admin/perception-backend?probe=1").json()["data"]
     assert "API Key" in d["cloud_hint"]
 
 
@@ -134,7 +134,7 @@ def test_switch_to_local_refused_while_model_still_loading(client, health):
     health.set(model_loaded=False, status="loading")
     r = client.post("/api/admin/perception-backend", json={"backend": "local"})
     assert r.status_code == 400
-    assert "加载" in r.json()["detail"]
+    assert r.json()["detail"]["code"] == "loading"
 
 
 def test_switch_to_local_refused_when_credentials_are_rejected(client, health):
@@ -142,7 +142,7 @@ def test_switch_to_local_refused_when_credentials_are_rejected(client, health):
     health.set(auth_required=True, auth_ok=False)
     r = client.post("/api/admin/perception-backend", json={"backend": "local"})
     assert r.status_code == 400
-    assert "凭证" in r.json()["detail"]
+    assert r.json()["detail"]["code"] == "auth_rejected"
 
 
 def test_switch_to_local_refused_by_direct_device_rules(client, health, monkeypatch):
@@ -152,7 +152,7 @@ def test_switch_to_local_refused_by_direct_device_rules(client, health, monkeypa
     )
     r = client.post("/api/admin/perception-backend", json={"backend": "local"})
     assert r.status_code == 400
-    assert "厨房明火关阀" in r.json()["detail"]
+    assert r.json()["detail"]["rules"] == ["厨房明火关阀"]
 
 
 def test_refusal_works_through_the_real_rule_lookup(client, health, monkeypatch):
@@ -178,10 +178,10 @@ def test_refusal_works_through_the_real_rule_lookup(client, health, monkeypatch)
 
     r = client.post("/api/admin/perception-backend", json={"backend": "local"})
     assert r.status_code == 400
-    assert "厨房明火关阀" in r.json()["detail"]
+    assert r.json()["detail"]["rules"] == ["厨房明火关阀"]
 
     # 同一条链路也要能在规则列表里看到它 —— 卡片就是靠这个字段提前预告的。
-    d = client.get("/api/admin/perception-backend").json()["data"]
+    d = client.get("/api/admin/perception-backend?probe=1").json()["data"]
     assert d["blocking_static_rules"] == ["厨房明火关阀"]
 
 
@@ -239,14 +239,14 @@ def test_base_url_with_query_or_fragment_is_rejected(client, health):
         r = client.post("/api/admin/perception-backend",
                         json={"backend": "cloud", "base_url": bad})
         assert r.status_code == 400, bad
-        assert "?" in r.json()["detail"] or "#" in r.json()["detail"]
+        assert r.json()["detail"]["code"] == "bad_url"
 
 
 def test_base_url_must_be_http_or_https(client, health):
     r = client.post("/api/admin/perception-backend",
                     json={"backend": "cloud", "base_url": "file:///etc/passwd"})
     assert r.status_code == 400
-    assert "http" in r.json()["detail"]
+    assert r.json()["detail"]["code"] == "bad_url"
 
 
 def test_load_failure_is_reported_instead_of_asking_the_user_to_wait(client, health):
@@ -256,5 +256,37 @@ def test_load_failure_is_reported_instead_of_asking_the_user_to_wait(client, hea
                load_error="FileNotFoundError: 权重目录不存在: /no/such/dir")
     r = client.post("/api/admin/perception-backend", json={"backend": "local"})
     assert r.status_code == 400
-    assert "加载模型失败" in r.json()["detail"]
-    assert "/no/such/dir" in r.json()["detail"]
+    d = r.json()["detail"]
+    assert d["code"] == "load_failed"
+    assert "/no/such/dir" in d["detail"]
+
+
+def test_default_get_is_a_pure_config_read(client, health):
+    """默认 GET 不打网络、不查规则库、不摸文件系统。
+
+    仓库把"读配置"和"探活"分成两件事(get_omni_config 零 IO)。「模型」页挂载时
+    有两个组件各调一次这个接口,默认探活的话每次进页面就是两次最长 3s 的同步
+    HTTP + 两次规则库全表扫描,而其中一个组件只需要知道当前选的是哪条通路。
+    """
+    from miloco.perception.local_vision import client as lv
+
+    probes: list = []
+    monkeypatch_target = lv.LocalVisionClient.health_sync
+
+    def _spy(self):
+        probes.append(self.base_url)
+        return monkeypatch_target(self)
+
+    lv.LocalVisionClient.health_sync = _spy
+    try:
+        d = client.get("/api/admin/perception-backend").json()["data"]
+    finally:
+        lv.LocalVisionClient.health_sync = monkeypatch_target
+
+    assert probes == [], f"纯读的 GET 仍然探活了: {probes}"
+    assert d["backend"] == "cloud"
+    assert d["health"] is None and d["error"] is None
+    assert d["blocking_static_rules"] == []
+    assert d["cloud_hint"] == ""
+    # 能力声明是静态的,纯读也要给全(卡片靠它渲染那几行"会失去什么")。
+    assert d["local_capabilities"]["static_rule_execution"] is False

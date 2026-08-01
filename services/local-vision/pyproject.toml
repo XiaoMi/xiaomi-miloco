@@ -35,6 +35,14 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 miloco-local-vision = "local_vision.__main__:main"
 
+[tool.ruff]
+[tool.ruff.lint]
+# 与 backend / cli 同一套。不写的话本目录没有可继承的配置,ruff 退回默认规则:
+# 没有 I(isort),F403 反而被打开 —— CI 里那行 `ruff check … services/local-vision`
+# 看着是覆盖了,实际执行的规则比别处弱。
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

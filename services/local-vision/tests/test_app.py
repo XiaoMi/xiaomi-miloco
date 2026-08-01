@@ -12,6 +12,7 @@ import base64
 
 import pytest
 from fastapi.testclient import TestClient
+
 from local_vision import app as app_mod
 
 
@@ -217,8 +218,9 @@ def test_max_new_tokens_bound_matches_the_miloco_side_ceiling():
     每一窗就 422,在 miloco 的日志里与其它边车故障长得一模一样。
     """
     import pytest as _pytest
-    from local_vision.app import PerceiveRequest
     from pydantic import ValidationError
+
+    from local_vision.app import PerceiveRequest
 
     ok = PerceiveRequest(video_b64="", max_new_tokens=1024)
     assert ok.max_new_tokens == 1024

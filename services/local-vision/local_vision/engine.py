@@ -117,7 +117,21 @@ class MageVLEngine:
 
     # ── 推理 ─────────────────────────────────────────────────────────────
 
-    def _build_inputs(self, video_path: str, prompt: str, backend: str):
+    #: codec 处理器的分组常量(取自模型自带 CodecConfig 的默认值)。所需源帧数是
+    #: ``(target_canvas / images_per_group) * group_size`` —— 也就是说 target_canvas
+    #: 是**画布数**,不是帧数。把它当帧数填(填 32)会要求 256 帧源视频,而 miloco
+    #: 一个 4s 窗最多给 32 帧,于是每次推理都打一条 "yields ~4 canvases instead of
+    #: the requested 32" 的警告,请求本身是不自洽的。
+    _CODEC_GROUP_SIZE = 32
+    _CODEC_IMAGES_PER_GROUP = 4
+
+    def _codec_target_canvas(self, frame_count: int) -> int:
+        """按实际帧数算出能填满的画布数(向下取整,至少一组)。"""
+        groups = max(1, frame_count // self._CODEC_GROUP_SIZE)
+        return groups * self._CODEC_IMAGES_PER_GROUP
+
+    def _build_inputs(self, video_path: str, prompt: str, backend: str,
+                      frame_count: int = -1):
         messages = [{"role": "user", "content": [
             {"type": "video"}, {"type": "text", "text": prompt},
         ]}]
@@ -130,11 +144,14 @@ class MageVLEngine:
                 videos=[video_path],
                 video_backend="codec",
                 max_pixels=self.max_pixels,
-                # engine=hevc 是「传统编解码」通路(对 H.264/HEVC 都走这条);
-                # patch=16 与 Mage-ViT 的 16x16 预测块对齐,不可随意改。
+                # engine=hevc 是「传统编解码」通路(对 H.264/HEVC 都走这条)。
                 codec_config={
                     "engine": "hevc",
-                    "target_canvas": self.num_frames,
+                    # 按实际帧数算,而不是拿 num_frames 顶替 —— 两者单位不同。
+                    "target_canvas": self._codec_target_canvas(frame_count),
+                    "group_size": self._CODEC_GROUP_SIZE,
+                    "images_per_group": self._CODEC_IMAGES_PER_GROUP,
+                    # patch=16 与 Mage-ViT 的 16x16 预测块对齐,不可随意改。
                     "patch": 16,
                 },
                 return_tensors="pt",
@@ -206,13 +223,16 @@ class MageVLEngine:
         rules = rules or []
         prompt = build_prompt(scene_ask or DEFAULT_SCENE_ASK, rules, camera_note)
         # 段太短时 codec 分组凑不齐,先探帧数决定实际后端(降级而非报错)。
-        backend = pick_backend(self.video_backend, probe_frame_count(video_path))
+        frame_count = probe_frame_count(video_path)
+        backend = pick_backend(self.video_backend, frame_count)
 
         import torch
 
         with self._lock:
             t0 = time.time()
-            inputs = self._to_device(self._build_inputs(video_path, prompt, backend))
+            inputs = self._to_device(
+                self._build_inputs(video_path, prompt, backend, frame_count)
+            )
             t_prep = (time.time() - t0) * 1000
 
             gate_p = self._gate_probability(inputs) if want_gate else None

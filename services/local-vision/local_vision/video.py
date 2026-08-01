@@ -22,6 +22,34 @@ logger = logging.getLogger(__name__)
 MIN_CODEC_FRAMES = 8
 
 
+#: 启动时清扫多久以前的残留段。请求侧超时 60s,所以这个年龄的文件绝不可能还在飞;
+#: 取足够大的值是为了不误删**另一个实例**正在用的段(一机多卡跑两个边车是合理部署)。
+_STALE_SEGMENT_AGE_SEC = 3600.0
+
+
+def sweep_stale_segments(older_than: float = _STALE_SEGMENT_AGE_SEC) -> int:
+    """清掉上一次进程遗留的视频段,返回清掉的个数。
+
+    单次请求的清理写在 ``finally`` 里,进程被 SIGKILL / 掉电打断时不会执行,于是
+    每被中断一次就在 /tmp 里留下一段几百 KB 的视频 —— 一台长期运行、偶尔重启的
+    机器上会慢慢堆起来,而且那是**家里的画面**,不该无限期留在磁盘上。
+    """
+    import time
+
+    cutoff = time.time() - older_than
+    removed = 0
+    for p in Path(tempfile.gettempdir()).glob("lv-seg-*"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                removed += 1
+        except OSError:  # 竞态或权限:跳过即可,清扫是尽力而为
+            continue
+    if removed:
+        logger.info("swept %d stale segment file(s) from previous runs", removed)
+    return removed
+
+
 def write_temp_video(data: bytes, suffix: str = ".mp4") -> Path:
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="lv-seg-")
     with os.fdopen(fd, "wb") as f:

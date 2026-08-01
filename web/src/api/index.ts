@@ -672,8 +672,10 @@ export async function updateSchedulerConfig(
   return r.data;
 }
 
-export async function getPerceptionBackend(): Promise<PerceptionBackendState> {
-  return impl.realGetPerceptionBackend();
+export async function getPerceptionBackend(
+  opts?: { probe?: boolean },
+): Promise<PerceptionBackendState> {
+  return impl.realGetPerceptionBackend(opts);
 }
 
 export async function setPerceptionBackend(input: {

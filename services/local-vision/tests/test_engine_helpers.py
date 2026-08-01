@@ -95,9 +95,8 @@ def test_codec_branch_bounds_the_visual_budget():
     e._build_inputs("/tmp/seg.mp4", "描述一下", "codec")
     assert e._processor.kw["max_pixels"] == 1234
     # patch=16 与 Mage-ViT 的预测块对齐,不可随意改;target_canvas 走 num_frames。
-    assert e._processor.kw["codec_config"] == {
-        "engine": "hevc", "target_canvas": 7, "patch": 16,
-    }
+    assert e._processor.kw["codec_config"]["engine"] == "hevc"
+    assert e._processor.kw["codec_config"]["patch"] == 16
 
 
 def test_frames_branch_bounds_the_visual_budget_too(monkeypatch):
@@ -111,3 +110,38 @@ def test_frames_branch_bounds_the_visual_budget_too(monkeypatch):
     e._build_inputs("/tmp/seg.mp4", "描述一下", "frames")
     assert e._processor.kw["max_pixels"] == 1234
     assert e._processor.kw["videos"] == [["F"] * 7]
+
+
+# ── codec 的画布数必须按实际帧数算 ────────────────────────────────────────
+
+
+def test_target_canvas_is_derived_from_the_real_frame_count():
+    """target_canvas 是**画布数**,不是帧数:所需源帧 = (tc/ipg)*gs。
+
+    把 num_frames(32)直接填进去等于要求 256 帧源视频,而 miloco 一个 4s 窗最多
+    给 32 帧 —— 于是每一次推理都打一条 "yields ~4 canvases instead of the
+    requested 32",请求本身不自洽。实测修正后该警告归零、输出质量不变。
+    """
+    from local_vision.engine import MageVLEngine
+
+    e = MageVLEngine(checkpoint="x")
+    gs, ipg = e._CODEC_GROUP_SIZE, e._CODEC_IMAGES_PER_GROUP
+    for frames in (1, 8, 31, 32, 64, 256):
+        tc = e._codec_target_canvas(frames)
+        assert tc % ipg == 0, "target_canvas 必须能被 images_per_group 整除"
+        assert tc >= ipg, "至少要有一组"
+        required = (tc // ipg) * gs
+        assert required <= max(frames, gs), (
+            f"{frames} 帧却要求 {required} 帧:又在超额索取"
+        )
+
+
+def test_codec_config_carries_the_derived_canvas(monkeypatch):
+    """真正送进处理器的那份 codec_config 要带上算出来的值,而不是 num_frames。"""
+    e = _engine_with_stub_processor("codec")
+    e._build_inputs("/tmp/seg.mp4", "描述一下", "codec", frame_count=32)
+    cfg = e._processor.kw["codec_config"]
+    assert cfg["target_canvas"] == e._codec_target_canvas(32)
+    assert cfg["group_size"] == e._CODEC_GROUP_SIZE
+    assert cfg["images_per_group"] == e._CODEC_IMAGES_PER_GROUP
+    assert cfg["patch"] == 16

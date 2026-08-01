@@ -111,33 +111,5 @@
     "modelsEmptyResult": "该地址未返回模型列表",
     "modelsFetchFailed": "拉取模型失败",
     "notUsedByLocalPerception": "感知后端当前为「本地 GPU」,下列模型不参与视频感知。要让它们重新承担感知,请在上方切回「云端 API」。"
-  },
-  "perceptionBackend": {
-    "title": "感知后端",
-    "subtitle": "选择用哪条通路做视频感知。两条通路互斥,切换即时生效。",
-    "cloudTitle": "云端 API",
-    "cloudDesc": "使用下方配置的多模态大模型。需要 API Key,按 token 计费;支持音频与身份识别。",
-    "localTitle": "本地 GPU",
-    "localDesc": "使用本机/局域网的视觉模型服务。免 Key、零 token 成本、画面不出本地。",
-    "baseUrlLabel": "本地服务地址",
-    "reachable": "服务可用",
-    "unreachable": "服务不可达",
-    "gateOff": "事件门未启用",
-    "switchedCloud": "已切换到云端 API 通路",
-    "switchedLocal": "已切换到本地 GPU 通路",
-    "switchFailed": "切换失败",
-    "capNoKey": "本地通路不需要任何模型厂商 API Key。",
-    "capNoAudio": "纯视觉:不产生语音指令与环境音结论(需要音频能力请用云端通路)。",
-    "capNoIdentity": "不做身份识别,只描述场景与判断规则。",
-    "capNoStatic": "本地通路不执行任何设备动作。若有启用中的「直连设备」规则,切换会被拒绝并列出它们 —— 请先停用或改成由 agent 决策的动态规则。",
-    "tokenLabel": "访问凭证",
-    "tokenPlaceholder": "留空表示不需要",
-    "tokenSaved": "已保存,留空则沿用",
-    "authBad": "边车拒绝当前凭证",
-    "blockingRulesLocal": "以下启用中的规则含直连设备动作,在本通路下不会执行(命中会记为一次失败触发):",
-    "capNoSuggestions": "不产主动建议:只给场景描述与规则判定,不从画面里生成建议。",
-    "backendConfigured": "(启动配置值;实际通路每次推理现选)",
-    "loadingModel": "边车正在加载模型,稍后可切换",
-    "setupHint": "需要先自行部署边车服务,见仓库 services/local-vision/README.md"
   }
 }

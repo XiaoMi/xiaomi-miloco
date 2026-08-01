@@ -46,6 +46,12 @@ async def lifespan(app: FastAPI):
     # 权重加载要几十秒。放后台线程,让服务立刻开始应答 —— 否则 /health 在加载
     # 期间根本连不上,miloco 侧那条"正在加载模型"的等待态永远走不到,用户冷启动
     # 时只会看到"服务不可达",分不清是没装好还是在加载。
+    # 上一次进程若被中途杀掉,/tmp 里会留下它正在用的视频段(清理在 finally 里,
+    # SIGKILL 时不执行)。开机扫一次 —— 那是家里的画面,不该无限期留在磁盘上。
+    from local_vision.video import sweep_stale_segments
+
+    sweep_stale_segments()
+
     threading.Thread(target=_load_engine, name="lv-load", daemon=True).start()
     yield
     _engine = None

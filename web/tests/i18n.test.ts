@@ -102,3 +102,38 @@ describe("UsageOmniConfig 引用的 usage.* key 均存在", () => {
     expect(enKeys.has(`usage.${key}`), `en 缺 usage.${key}`).toBe(true);
   });
 });
+
+
+describe("感知后端卡片的文案", () => {
+  // 与本文件既有的「UsageOmniConfig 引用的 usage.* key 均存在」同一条约定:
+  // 组件里还有 t(cond ? "a" : "b") 这种动态用法,只匹配 t("...") 会漏掉它们 ——
+  // 实测把其中一个 key 拼错,前端测试仍然全绿,而页面上显示的是原始标识符。
+  const src = readFileSync(
+    fileURLToPath(new URL("../src/components/PerceptionBackendCard.tsx", import.meta.url)),
+    "utf8",
+  );
+  const used = [...src.matchAll(/"perceptionBackend\.([A-Za-z0-9_.]+)"/g)].map((m) => m[1]);
+
+  it("组件里确实引用了文案(正则失效时要能发现)", () => {
+    expect(used.length).toBeGreaterThan(5);
+  });
+
+  it.each(["zh", "en"])("%s 文案齐全", (locale) => {
+    const json = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL(`../src/i18n/locales/${locale}/perceptionBackend.json`, import.meta.url)),
+        "utf8",
+      ),
+    );
+    const missing = used.filter((k) => {
+      const parts = k.split(".");
+      let cur: unknown = json.perceptionBackend;
+      for (const p of parts) {
+        if (typeof cur !== "object" || cur === null) return true;
+        cur = (cur as Record<string, unknown>)[p];
+      }
+      return cur === undefined;
+    });
+    expect(missing).toEqual([]);
+  });
+});

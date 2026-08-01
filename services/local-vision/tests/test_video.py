@@ -59,3 +59,44 @@ def test_write_temp_video_roundtrips_and_uses_an_mp4_suffix():
         assert path.read_bytes() == b"\x00\x01payload"
     finally:
         path.unlink(missing_ok=True)
+
+
+# ── 上一次进程留下的残段 ──────────────────────────────────────────────────
+
+
+def test_sweep_removes_only_old_segments(tmp_path, monkeypatch):
+    """单次请求的清理写在 finally 里,进程被 SIGKILL 时不会执行 —— 每被中断一次
+    就留下一段几百 KB 的**家里画面**。开机扫一次,但只扫足够老的:一机多卡跑两个
+    边车是合理部署,不能误删另一个实例正在用的段。"""
+    import os
+    import time
+
+    from local_vision import video as v
+
+    monkeypatch.setattr(v.tempfile, "gettempdir", lambda: str(tmp_path))
+    old = tmp_path / "lv-seg-old.mp4"
+    fresh = tmp_path / "lv-seg-fresh.mp4"
+    other = tmp_path / "someone-elses.mp4"
+    for p in (old, fresh, other):
+        p.write_bytes(b"x")
+    os.utime(old, (time.time() - 7200, time.time() - 7200))
+
+    assert v.sweep_stale_segments() == 1
+    assert not old.exists()
+    assert fresh.exists(), "刚写的段可能正在飞,不能删"
+    assert other.exists(), "只清自己的前缀"
+
+
+def test_sweep_survives_unremovable_files(tmp_path, monkeypatch):
+    """清扫是尽力而为:一个删不掉的文件不该让服务起不来。"""
+    import time
+
+    from local_vision import video as v
+
+    monkeypatch.setattr(v.tempfile, "gettempdir", lambda: str(tmp_path))
+    p = tmp_path / "lv-seg-locked.mp4"
+    p.write_bytes(b"x")
+    import os
+    os.utime(p, (time.time() - 7200, time.time() - 7200))
+    monkeypatch.setattr(v.Path, "unlink", lambda self, **kw: (_ for _ in ()).throw(OSError("nope")))
+    assert v.sweep_stale_segments() == 0

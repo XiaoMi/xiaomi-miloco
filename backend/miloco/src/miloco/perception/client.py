@@ -467,8 +467,21 @@ class PerceptionEngineProxy:
         settings = get_settings()
         if settings.perception.engine_backend != "local":
             return
-        if self.perception_engine is not None:  # 已就绪,无需再探
-            return
+        engine = self.perception_engine
+        if engine is not None:
+            if not getattr(engine, "sustained_failure", False):
+                return  # 引擎在跑且边车有回应,无需再探
+            # 边车持续不可达:把引擎降回「等前置条件」态。不降的话 _status 永远
+            # 是 ready,try_reinit 因此 no-op,状态条也不显示任何东西 —— 用户唯一
+            # 的信号只剩"事件不再出现",而那要过很久才会被注意到。
+            logger.warning("本地视觉边车持续不可达,降级为等待态并重新探活")
+            self.perception_engine = None
+            self._status = "local_vision_unreachable"
+            self._status_message = "本地视觉服务持续不可达"
+            get_monitor().set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            self._invalidate_local_probe()
 
         from miloco.perception.local_vision import LocalVisionClient
 

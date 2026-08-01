@@ -368,3 +368,52 @@ async def test_tick_refreshes_the_probe_before_attempting_a_rebuild():
     await runner._tick()
 
     assert order[:2] == ["refresh", "reinit"], f"tick 的先后顺序不对: {order}"
+
+
+# ── 边车中途死掉:引擎必须降级,好让既有的失败提示接手 ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sustained_sidecar_failure_demotes_the_engine(local_cfg):
+    """边车挂掉后引擎若一直停在 ready,用户在界面上看不到任何异常。
+
+    云端通路挂掉有全局红条 + 「立即重试」;本地此前什么都没有,唯一的信号是
+    "事件不再出现",而那要过很久才会被注意到。降回等待态之后,既有那套
+    (PREREQ_MISSING → 状态条 → tick 自愈)就能原样接手。
+    """
+    from unittest.mock import patch
+
+    p = _build(local_cfg)
+    assert p._status == "ready" and p.perception_engine is not None
+
+    engine = p.perception_engine
+    engine._consecutive_failures = 99   # 模拟连续多窗完全不可达
+    assert engine.sustained_failure is True
+
+    with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
+            patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync",
+                  lambda self: (_ for _ in ()).throw(LocalVisionError("down"))):
+        await p.refresh_local_probe()
+
+    assert p.perception_engine is None, "引擎没有被降级,界面上仍然显示一切正常"
+    assert p._status == "local_vision_unreachable"
+    assert p._status in PerceptionEngineProxy._TICK_RECOVERABLE, "降级后必须能自愈"
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_engine_is_never_demoted(local_cfg):
+    """短暂抖动由退避吸收 —— 一次失败就降级会让界面无谓地闪"感知不可用"。"""
+    from unittest.mock import patch
+
+    p = _build(local_cfg)
+    p.perception_engine._consecutive_failures = 1
+    calls: list = []
+
+    with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
+            patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync",
+                  lambda self: calls.append(1) or dict(HEALTHY)):
+        await p.refresh_local_probe()
+
+    assert p.perception_engine is not None
+    assert p._status == "ready"
+    assert calls == [], "引擎还在跑就不该去探活"

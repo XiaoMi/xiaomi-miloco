@@ -23,6 +23,9 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** 后端给的机器可读错误码(detail 为对象时的 `code`)。
+     *  按它查本地化文案 —— backend message 是硬编码中文,直接注入会污染英文界面。 */
+    public code?: string,
   ) {
     super(message);
   }
@@ -42,13 +45,24 @@ export async function apiFetch<T>(
   const resp = await fetch(path, { ...init, headers });
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
+    let code: string | undefined;
     try {
       const body = await resp.json();
-      msg = body.message ?? body.detail ?? msg;
+      // FastAPI 的 detail 既可能是字符串,也可能是结构化对象
+      // (`HTTPException(400, detail={"code":…, "message":…})`,见 admin/router)。
+      // 不解包的话,对象会被 String() 成 "[object Object]" 塞进 Error.message ——
+      // 用户看到的就是这七个字。omni 的 PUT 早就走在这条路上。
+      const detail = body.detail;
+      if (detail && typeof detail === "object") {
+        code = typeof detail.code === "string" ? detail.code : undefined;
+        msg = typeof detail.message === "string" ? detail.message : msg;
+      } else {
+        msg = body.message ?? detail ?? msg;
+      }
     } catch {
       // ignore
     }
-    throw new ApiError(resp.status, msg);
+    throw new ApiError(resp.status, msg, code);
   }
   // backend NormalResponse 业务错(HTTP 200 但 body.code != 0)也当错处理。
   // 当前 backend 全走 HTTPException → handle_exception → 4xx,没用 200+code != 0

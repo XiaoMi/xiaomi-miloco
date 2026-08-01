@@ -1208,3 +1208,82 @@ async def test_engine_close_releases_the_connection_pool():
 
     await _engine(_C()).close()
     assert closed == [True]
+
+
+# ── 边车整体不可达时的退避 ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_repeated_total_failure_backs_off_instead_of_burning_cpu(monkeypatch):
+    """引擎已建好时 tick 的探活会 no-op,于是边车挂掉后每个窗口仍然照常给每台相机
+    做一次 libx264 编码(同步 CPU 活)再去连一个死掉的端口 —— 4 台相机就是每 4 秒
+    4 次白烧。实机观察到的正是这个。云端通路对同类情形有熔断器。"""
+    import miloco.perception.local_vision.engine as eng
+
+    encodes: list = []
+    monkeypatch.setattr(
+        eng, "encode_snapshot_to_h264",
+        lambda *a, **k: (encodes.append(1), b"V")[1],
+    )
+    e = _engine(_FakeClient(fail=True))
+    batch = BatchedSnapshot(snapshots=[_snapshot("cam1")])
+
+    for _ in range(3):
+        res = await e.realtime_perceive(batch, [])
+        assert res.skipped is True
+    assert len(encodes) == 3, "退避之前每窗都该照常试"
+
+    # 第 4 窗起进入退避:不再编码,也不再发请求。
+    before = len(encodes)
+    res = await e.realtime_perceive(batch, [])
+    assert res.skipped is True
+    assert res.error_code == "local_vision_unavailable"
+    assert len(encodes) == before, "退避窗口内仍在编码"
+
+
+@pytest.mark.asyncio
+async def test_backoff_clears_as_soon_as_the_sidecar_answers(monkeypatch):
+    """边车重启一般十几秒就好。恢复必须是即时的 —— 一次成功就把退避清零。"""
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+    e = _engine(_FakeClient(fail=True))
+    batch = BatchedSnapshot(snapshots=[_snapshot("cam1")])
+    for _ in range(3):
+        await e.realtime_perceive(batch, [])
+    assert e._backoff_until > 0
+
+    e._backoff_until = 0.0            # 模拟退避到点,放一窗过去试探
+    e._client = _FakeClient([{"caption": "客厅有人", "rule_hits": [],
+                              "gate_p": None, "backend": "codec"}])
+    res = await e.realtime_perceive(batch, [])
+    assert res.skipped is False
+    assert e._consecutive_failures == 0 and e._backoff_until == 0.0
+
+
+@pytest.mark.asyncio
+async def test_connection_pool_is_rebuilt_when_the_event_loop_changes():
+    """AsyncClient 绑定到创建时所在的 loop;那个 loop 关闭后继续用会抛
+    "Event loop is closed"。而 InferenceWorker 每次 start() 都建一个新 loop。
+
+    此前只靠 close() 在换代之前把它置空 —— 一条隔着三个模块的不变量,不是这个类
+    自己的性质。仓库为同一件事写过 _get_fused_http_client。
+    """
+    import asyncio as _asyncio
+
+    from miloco.perception.local_vision import LocalVisionClient
+
+    c = LocalVisionClient("http://s:1")
+    first = c._client()
+    assert c._client() is first, "同一个 loop 内应复用"
+
+    # 换一个 loop:必须重建,而不是把绑在旧 loop 上的那个接着用。
+    # asyncio.run 不能在已有 loop 里调,所以放到线程里跑一个独立的 loop。
+    import concurrent.futures
+
+    async def _second():
+        return c._client()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        second = pool.submit(lambda: _asyncio.run(_second())).result()
+    assert second is not first, "换了 event loop 却仍在用绑定到旧 loop 的连接池"

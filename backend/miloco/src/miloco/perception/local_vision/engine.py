@@ -68,6 +68,14 @@ def _as_float(v: object) -> float | None:
         return None
 
 
+#: 边车整体不可达后,连续多少窗才开始退避。1~2 窗的抖动很常见(边车正在重启),
+#: 不该一有失败就停摆。
+_BACKOFF_AFTER_FAILURES = 3
+#: 退避时长上限(秒)。到点后放一窗过去试探,成功即清零。
+_BACKOFF_MAX_SEC = 30.0
+#: 连续多少窗完全不可达后,把引擎降回「等前置条件」态。比退避阈值大一档:短暂抖动
+#: 由退避吸收,真的挂了才降级(降级会让界面显示"感知不可用",不该被一次抖动触发)。
+_DEMOTE_AFTER_FAILURES = 5
 #: 每条规则判定行的 token 开销(「规则N:是/否,依据…」),用于放大生成预算。
 _TOKENS_PER_VERDICT = 24
 #: 生成预算的上限。必须与边车 ``PerceiveRequest.max_new_tokens`` 的 ``le`` 一致 ——
@@ -126,6 +134,22 @@ class LocalVisionEngine(BasePerceptionEngine):
         # 不让它决定丢不丢事件。用户确认阈值在自家可靠后再调高。
         self._gate_threshold = event_gate_threshold
         self._scene_ask = scene_ask
+        # 边车整体不可达时的退避。没有它的话:引擎已经建好,tick 的探活会 no-op,
+        # 于是每个窗口仍然照常给每台相机做一次 libx264 编码(同步 CPU 活),再去连
+        # 一个死掉的端口 —— 4 台相机就是每 4 秒 4 次白烧,而且日志被刷满。云端通路
+        # 对同类情形有熔断器,这条通路此前什么都没有。
+        self._consecutive_failures = 0
+        self._backoff_until = 0.0
+
+    @property
+    def sustained_failure(self) -> bool:
+        """边车已经连续多窗完全不可达。
+
+        上层据此把引擎降回「等前置条件」态,好让既有那套(状态条提示 + tick 自愈)
+        接手 —— 否则引擎会永远停在 ready,而用户在界面上看不到任何异常:云端通路
+        挂掉有全局红条,本地通路此前什么都没有。
+        """
+        return self._consecutive_failures >= _DEMOTE_AFTER_FAILURES
 
     # ── 能力声明 ─────────────────────────────────────────────────────────
 
@@ -294,6 +318,13 @@ class LocalVisionEngine(BasePerceptionEngine):
             return RealtimePerceptionResult(skipped=True)
 
         # 逐窗读一次「感知须知」表(实时,改动下一窗即生效),避免 per-device 重复读 KV。
+        if time.monotonic() < self._backoff_until:
+            # 退避窗口内:直接判本窗无结论,连编码都不做。与"边车失败"落在同一档
+            # 语义上(上层按无结论跳过),区别只是不再白烧 CPU。
+            return RealtimePerceptionResult(
+                skipped=True, error_code="local_vision_unavailable"
+            )
+
         prompt_map = camera_prompt_map()
         results = await asyncio.gather(
             *[self._perceive_device(s, rules, prompt_map) for s in with_video]
@@ -307,10 +338,26 @@ class LocalVisionEngine(BasePerceptionEngine):
         if not ok:
             # 全设备失败:标 skipped 让上层按「本轮无结论」处理,不产空事件。
             # 逐设备原因照样带上 —— 全灭和"某一台一直灭"要能区分开。
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= _BACKOFF_AFTER_FAILURES:
+                # 指数退避,封顶 30s:边车重启一般十几秒就好,退避太久会让恢复
+                # 明显变慢;而封顶之后每 30s 试探一次,代价可以忽略。
+                step = 2 ** (self._consecutive_failures - _BACKOFF_AFTER_FAILURES)
+                wait = min(_BACKOFF_MAX_SEC, 4.0 * step)
+                self._backoff_until = time.monotonic() + wait
+                logger.warning(
+                    "[local-vision] 边车连续 %d 窗不可达,退避 %.0fs 后再试"
+                    "(期间不再编码,本轮按无结论处理)",
+                    self._consecutive_failures, wait,
+                )
             return RealtimePerceptionResult(
                 skipped=True, error_code="local_vision_unavailable",
                 timing={f"_omni_error_{d}": c for d, c in errors.items()},
             )
+
+        # 有任何一台成功 = 边车活着,清掉退避。
+        self._consecutive_failures = 0
+        self._backoff_until = 0.0
 
         captions: list[CaptionEntry] = []
         matched: list[MatchedRule] = []

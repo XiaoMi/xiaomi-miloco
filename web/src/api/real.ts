@@ -1811,9 +1811,14 @@ export async function realUpdateTaskDescription(
 }
 
 // 读取感知后端选择(cloud/local)与本地边车连通性快照。
-export async function realGetPerceptionBackend(): Promise<PerceptionBackendState> {
+export async function realGetPerceptionBackend(
+  opts?: { probe?: boolean },
+): Promise<PerceptionBackendState> {
+  // probe 默认关:这个接口被两个组件各调一次,而其中一个只需要知道当前选的是
+  // 哪条通路。探活是最长 3s 的同步 HTTP,不该白跑。
+  const q = opts?.probe ? "?probe=1" : "";
   const r = await apiFetch<Normal<PerceptionBackendState>>(
-    "/api/admin/perception-backend",
+    `/api/admin/perception-backend${q}`,
   );
   return r.data;
 }
