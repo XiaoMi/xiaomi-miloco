@@ -740,11 +740,32 @@ def _build_fused_user_content(
         for cand in candidates:
             content.append({"type": "text", "text": _format_track_line(cand)})
 
+    # 参考帧图块必须**先于**下面的 bbox 说明构建:bbox 措辞与 4.5 的引导语都要按「这张图最终是否
+    # 真的进了 content」措辞,而不是按「ref_image_jpeg 是否非空」。否则 _jpeg_block 抛错时会留下两处
+    # 悬空指代 —— 更糟的是主视频此时是局部 crop、bbox 却仍是全景 [0,1000] 坐标,正是身份门要防的
+    # 坐标系错配(把姓名贴错人)。
+    # 注:唯一调用方 build_fused_payload 侧的 _maybe_encode_adaptive 已用同一条件
+    # (len >= _MIN_JPEG_BYTES)校验过,故 except 分支当前不可达;此处是契约防御,不是在修线上 bug。
+    # 防御范围仅限本函数产出的 prompt content:旁路落盘的 ref.jpg / has_ref 在
+    # _maybe_encode_adaptive 里就已 push_ref_frame,不随这里的降级回滚 —— 真走到该分支时,
+    # 复盘页仍会展示一张模型其实没看进 prompt 的参考图(要对齐得把落盘挪到 prompt 之后)。
+    ref_block: dict | None = None
+    if ref_image_jpeg is not None:
+        try:
+            ref_block = _jpeg_block(ref_image_jpeg)
+        except ValueError:
+            logger.warning("event=adaptive_ref_jpeg_bad 跳过参考帧块(bbox 坐标系说明同步整句不发)")
+
     # 已识别人物/陌生人 + 待识别 track 共用一句 bbox 坐标系说明（二者同一 [0,1000] 约定，去重）
-    if any("[bbox=" in ln for ln in roster_lines) or candidates:
+    # crop 生效(ref_image_jpeg 非 None ⟺ 主视频已被换成 crop 视频)但参考图块没进 content 时,
+    # 整句不发:bbox 是全景整帧坐标,锚到"全景参考图"图不存在、锚到"视频"则是拿全景坐标读局部画面
+    # (方向性错误,会把姓名贴到 crop 中央那个人身上)。不给坐标系约定、让模型退回纯视觉观察,
+    # 是此处唯一不主动误导的降级。
+    bbox_note_unanchored = ref_image_jpeg is not None and ref_block is None
+    if (any("[bbox=" in ln for ln in roster_lines) or candidates) and not bbox_note_unanchored:
         # crop 生效时(必无候选)主视频是局部放大,bbox 仍是全景整帧坐标 → 指向全景参考图(bbox 归一化
         # 基准正是这张整帧)而非 crop 视频,避免坐标系错配把姓名贴错人。
-        bbox_anchor = "下方第一张全景参考图" if ref_image_jpeg is not None else "视频"
+        bbox_anchor = "下方第一张全景参考图" if ref_block is not None else "视频"
         content.append({"type": "text", "text": (
             "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为画面归一化到 [0, 1000] 区间的位置"
             f"（左上 0,0；右下 1000,1000），用于把姓名 / track_id 对应到{bbox_anchor}里的人。"
@@ -754,15 +775,13 @@ def _build_fused_user_content(
     content.extend(gallery_content)
 
     # 4.5 自适应分辨率:全景参考帧(置于 video 前,「全景图在前、活动区域放大视频在后」)
-    if ref_image_jpeg is not None:
+    # 引导语与图块同进同退(ref_block 在上方 bbox 说明之前已构建),避免只留文字不留图。
+    if ref_block is not None:
         content.append({"type": "text", "text": (
             "下方第一张图为全景场景参考，随后的视频是画面中活动区域的放大——"
             "请结合两者理解场景与细节。"
         )})
-        try:
-            content.append(_jpeg_block(ref_image_jpeg))
-        except ValueError:
-            logger.warning("event=adaptive_ref_jpeg_bad 跳过参考帧块")
+        content.append(ref_block)
 
     # 5. 主 video
     # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短

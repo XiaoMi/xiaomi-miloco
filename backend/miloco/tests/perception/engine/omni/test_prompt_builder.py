@@ -1545,6 +1545,32 @@ class TestAdaptiveResolution:
         note = self._bbox_note(content)
         assert "视频里的人" in note and "全景参考图" not in note
 
+    def test_ref_block_failure_drops_text_and_bbox_anchor_together(self):
+        # 契约防御:_jpeg_block 抛错时,引导语、图块、bbox 锚点必须**同进同退**。
+        # 只掉图块的话,prompt 里会留下指向"下方第一张全景参考图"的 bbox 说明 + 一个局部
+        # crop 视频 —— 全景 [0,1000] 坐标配 crop 画面,正是身份门要防的错配。
+        # (调用方 _maybe_encode_adaptive 已用同一条件校验过 ref jpeg,故实际不可达。)
+        from unittest.mock import patch as _patch
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
+        p1, p2 = self._patches()
+        with p1, p2, _patch.object(pb, "_jpeg_block", side_effect=ValueError("too small")):
+            content = self._content(packet=member, candidates=[])
+        assert not self._has_ref(content)  # 引导语不能单独留下
+        assert not any(
+            b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+            for b in content
+        )
+        # 名册确实渲染了 bbox(否则这条说明本来就不会发,断言无意义)
+        assert "[bbox=(400, 300, 600, 900)]" in "".join(
+            b.get("text", "") for b in content if b.get("type") == "text"
+        )
+        # 无图可锚 → 整句坐标系说明不发(锚"视频"是拿全景坐标读局部画面,方向性错误)
+        assert self._bbox_note(content) == ""
+        assert any(b.get("type") == "video_url" for b in content)  # 视频仍在,不整窗失败
+
     def _ref_bytes(self, content) -> bytes:
         import base64
 
