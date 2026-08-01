@@ -390,6 +390,17 @@ async def test_sustained_sidecar_failure_demotes_the_engine(local_cfg):
     engine._consecutive_failures = 99   # 模拟连续多窗完全不可达
     assert engine.sustained_failure is True
 
+    closed: list = []
+    orig_close = engine.close
+
+    async def _spy_close():
+        # 拆卸必须在锁内发生 —— 在这里断言,比事后看状态更能钉住顺序。
+        assert p._engine_lock.locked(), "close() 发生在 _engine_lock 之外"
+        closed.append(True)
+        await orig_close()
+
+    engine.close = _spy_close
+
     with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
             patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync",
                   lambda self: (_ for _ in ()).throw(LocalVisionError("down"))):
@@ -398,6 +409,11 @@ async def test_sustained_sidecar_failure_demotes_the_engine(local_cfg):
     assert p.perception_engine is None, "引擎没有被降级,界面上仍然显示一切正常"
     assert p._status == "local_vision_unreachable"
     assert p._status in PerceptionEngineProxy._TICK_RECOVERABLE, "降级后必须能自愈"
+    # 拆卸的两条不变量才是重点(邻居 stop_to_unconfigured 明写着):
+    #  - 必须 await close():引擎持有常驻 httpx 连接池,直接置空就是每轮漏一个;
+    #  - 必须在 _engine_lock 里做:否则会在主动查询跑到一半时把引擎抽走。
+    assert closed == [True], "降级没有 close() 引擎,连接池漏了"
+    assert not p._engine_lock.locked(), "降级结束后锁没释放"
 
 
 @pytest.mark.asyncio
@@ -417,3 +433,76 @@ async def test_a_healthy_engine_is_never_demoted(local_cfg):
     assert p.perception_engine is not None
     assert p._status == "ready"
     assert calls == [], "引擎还在跑就不该去探活"
+
+
+@pytest.mark.asyncio
+async def test_demotion_does_not_flap_when_health_is_green(local_cfg):
+    """边车 /health 绿、但每次推理都失败 —— 降级不能被下一个 tick 立刻撤销。
+
+    没有重建冷却时会这样循环:降级 → 探活通过 → 重建 → 再失败 → 再降级。界面上
+    那条提示每轮闪一下,httpx 连接池每轮换一个,而用户什么也做不了。
+    """
+    from unittest.mock import patch
+
+    p = _build(local_cfg)
+    p.perception_engine._consecutive_failures = 99
+
+    with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
+            patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync",
+                  lambda self: dict(HEALTHY)):
+        await p.refresh_local_probe()          # 触发降级
+        assert p.perception_engine is None
+        assert p._local_rebuild_not_before > time.monotonic()
+
+        # 紧接着的 tick 会调 try_reinit —— 它必须**不**把引擎立刻建回来。
+        p.try_reinit()
+        assert p.perception_engine is None, "降级在同一轮就被撤销了(抖动)"
+        assert p._status == "local_vision_unreachable"
+
+        # 冷却过后允许重建。
+        p._local_rebuild_not_before = 0.0
+        await p.refresh_local_probe()
+        p.try_reinit()
+    assert p.perception_engine is not None, "冷却结束后应当能恢复"
+
+
+@pytest.mark.asyncio
+async def test_local_encode_failure_is_not_blamed_on_the_sidecar(local_cfg):
+    """本地编码失败(PyAV 没编进 libx264)一次网络都没发过。
+
+    把它算成"边车不可达"会做两件错事:把用户指向网络和边车,以及拆掉引擎 ——
+    而拆引擎对一个本地编码问题毫无帮助。
+    """
+    import miloco.perception.local_vision.engine as eng
+    import numpy as np
+    from miloco.perception.local_vision.encode import EncodeError
+    from miloco.perception.types import (
+        BatchedSnapshot,
+        DeviceSnapshot,
+        PerceptionDevice,
+        VideoFrame,
+        VideoStream,
+    )
+
+    p = _build(local_cfg)
+    e = p.perception_engine
+    orig = eng.encode_snapshot_to_h264
+    eng.encode_snapshot_to_h264 = lambda *a, **k: (_ for _ in ()).throw(
+        EncodeError("Unknown encoder 'libx264'")
+    )
+    try:
+        frames = [VideoFrame(data=np.zeros((32, 32, 3), dtype=np.uint8), timestamp=float(i))
+                  for i in range(4)]
+        batch = BatchedSnapshot(snapshots=[DeviceSnapshot(
+            device=PerceptionDevice(did="cam1", name="x", device_type="camera", room_name="书房"),
+            video=VideoStream(frames=frames, width=32, height=32), audio=None,
+            start_timestamp=0.0, end_timestamp=4000.0)])
+        for _ in range(8):
+            res = await e.realtime_perceive(batch, [])
+            assert res.skipped is True
+    finally:
+        eng.encode_snapshot_to_h264 = orig
+
+    assert e._consecutive_failures == 0, "本地编码失败被算成了边车不可达"
+    assert e.sustained_failure is False, "会因此拆掉引擎 —— 而拆引擎救不了编码问题"
+    assert res.timing.get("_omni_error_cam1") == "encode_failed"

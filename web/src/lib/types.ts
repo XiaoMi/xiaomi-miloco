@@ -728,6 +728,8 @@ export interface PerceptionBackendState {
     device: string | null;
     backend: string | null;
     /** 边车用与推理同一套比较回的鉴权结论 —— 探活绿灯但凭证不对时靠它区分。 */
+    /** 非空 = 模型加载**失败**(不会自己好);为空且 model_loaded=false 才是"还在加载"。 */
+    load_error?: string | null;
     auth_required?: boolean;
     auth_ok?: boolean;
   } | null;

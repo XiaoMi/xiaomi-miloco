@@ -83,8 +83,9 @@ class _RecordingProcessor:
 def _engine_with_stub_processor(backend: str):
     from local_vision.engine import MageVLEngine
 
-    # num_frames 取个不常见的值:与断言里的字面量撞车的话,把 target_canvas 写死
-    # 也照样绿。
+    # num_frames 取个不常见的值:与断言里的字面量撞车的话,把它写死也照样绿。
+    # 注意 codec 分支**不**用 num_frames 定画布数(那是按实际帧数推导的),
+    # 它只用于 frames 分支的抽帧。
     e = MageVLEngine(checkpoint="x", video_backend=backend, num_frames=7, max_pixels=1234)
     e._processor = _RecordingProcessor()
     return e
@@ -95,8 +96,12 @@ def test_codec_branch_bounds_the_visual_budget():
     e._build_inputs("/tmp/seg.mp4", "描述一下", "codec")
     assert e._processor.kw["max_pixels"] == 1234
     # patch=16 与 Mage-ViT 的预测块对齐,不可随意改;target_canvas 走 num_frames。
-    assert e._processor.kw["codec_config"]["engine"] == "hevc"
-    assert e._processor.kw["codec_config"]["patch"] == 16
+    cfg = e._processor.kw["codec_config"]
+    assert cfg["engine"] == "hevc"
+    assert cfg["patch"] == 16
+    # 画布数必须随帧数变。只断言 engine/patch 的话,把推导换成常量照样绿。
+    e._build_inputs("/tmp/seg.mp4", "描述一下", "codec", frame_count=256)
+    assert e._processor.kw["codec_config"]["target_canvas"] > cfg["target_canvas"]
 
 
 def test_frames_branch_bounds_the_visual_budget_too(monkeypatch):
@@ -126,6 +131,9 @@ def test_target_canvas_is_derived_from_the_real_frame_count():
 
     e = MageVLEngine(checkpoint="x")
     gs, ipg = e._CODEC_GROUP_SIZE, e._CODEC_IMAGES_PER_GROUP
+    # 先钉住"会变":常量实现能满足下面所有的整除/上界断言,唯独过不了这一条。
+    assert len({e._codec_target_canvas(n) for n in (32, 128, 256)}) == 3
+
     for frames in (1, 8, 31, 32, 64, 256):
         tc = e._codec_target_canvas(frames)
         assert tc % ipg == 0, "target_canvas 必须能被 images_per_group 整除"
@@ -145,3 +153,22 @@ def test_codec_config_carries_the_derived_canvas(monkeypatch):
     assert cfg["group_size"] == e._CODEC_GROUP_SIZE
     assert cfg["images_per_group"] == e._CODEC_IMAGES_PER_GROUP
     assert cfg["patch"] == 16
+
+
+def test_checkpoint_is_resolved_in_load_not_in_the_constructor(tmp_path):
+    """路径写错时必须落进 load_error 经 /health 说出来,而不是让进程起不来。
+
+    在构造期解析的话,一个写错的目录会让 lifespan 抛异常 —— 服务根本起不来,于是
+    连 /health 都没有,用户看到的只有"连不上",而真正的原因(目录不存在)只在终端
+    里一闪而过。
+    """
+    import pytest as _pytest
+
+    from local_vision.engine import MageVLEngine
+
+    bad = str(tmp_path / "no-such-dir")
+    e = MageVLEngine(checkpoint=bad)      # 构造期不该抛
+    assert e.checkpoint == bad
+
+    with _pytest.raises(FileNotFoundError):
+        e.load()                          # 抛在 load 里,由加载线程接住并写 load_error

@@ -231,6 +231,11 @@ export function PerceptionBackendCard() {
             <span className="text-error">✗ {t("perceptionBackend.unreachable")}</span>
           ) : line.kind === "auth-rejected" ? (
             <span className="text-error">✗ {t("perceptionBackend.authBad")}</span>
+          ) : line.kind === "load-failed" ? (
+            <span className="text-error">
+              ✗ {t("perceptionBackend.codes.load_failed")}
+              <span className="num"> {line.detail}</span>
+            </span>
           ) : line.kind === "loading" ? (
             <span className="text-text-secondary">{t("perceptionBackend.loadingModel")}</span>
           ) : line.kind === "ok" ? (

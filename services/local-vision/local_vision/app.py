@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from local_vision.engine import MageVLEngine, resolve_checkpoint
+from local_vision.engine import MageVLEngine
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,11 @@ def _env(name: str, default: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _engine
+    # checkpoint 解析放进构造参数里算,但它可能抛(路径写错)—— 那时不能让进程
+    # 起不来:起不来就没有 /health,用户看到的是"连不上",而真正的原因
+    # (目录不存在)只在终端里一闪而过。交给加载线程去撞,落进 load_error。
     _engine = MageVLEngine(
-        checkpoint=resolve_checkpoint(_env("LOCAL_VISION_CHECKPOINT", "microsoft/Mage-VL")),
+        checkpoint=_env("LOCAL_VISION_CHECKPOINT", "microsoft/Mage-VL"),
         device=_env("LOCAL_VISION_DEVICE", "cuda:0"),
         video_backend=_env("LOCAL_VISION_BACKEND", "codec"),
         num_frames=int(_env("LOCAL_VISION_NUM_FRAMES", "32")),
@@ -150,11 +153,13 @@ class PerceiveRequest(BaseModel):
 class RuleHit(BaseModel):
     """一条规则的判定结果。
 
-    契约的关键在于**调用方怎么把它认回自己的规则**:miloco 先按 ``name`` 查,
-    查不到才退回按下标对齐请求里的 ``rules``。所以第三方实现必须做到两点:
-    - 逐条返回,顺序与请求的 ``rules`` 一致(可以全返,包括未命中的);
-    - ``name`` 原样回填。留空的话调用方会**丢弃**这条判定,而不是按下标猜 ——
-      猜错的后果是"厨房明火"背上"有人跌倒"的结论。
+    契约的关键在于**调用方怎么把它认回自己的规则**:miloco 按 ``name`` 查;
+    ``name`` 为空、或查不到对应规则时,这条判定会被**丢弃**。没有下标兜底 ——
+    按位置猜的后果是"厨房明火"背上"有人跌倒"的结论,宁可丢掉。
+
+    所以第三方实现必须做到:``name`` 原样回填请求里的 ``rules[i].name``。
+    顺序不必严格保证(按名字查),但建议逐条返回(含未命中的),这样调用方能把
+    "模型说不" 与 "模型没给判定" 区分开。
     """
 
     name: str = Field(default="", description="与请求 rules[i].name 一致;留空会被丢弃")

@@ -87,6 +87,10 @@ _LOCAL_PROBE_COOLDOWN_SEC = 30.0
 #: 但加载失败会让它永远停在 loading(见边车 app.py:_load_engine 刻意不崩进程),
 #: 完全不压就是无限轮询。
 _LOADING_PROBE_COOLDOWN_SEC = 5.0
+#: 因"推理持续失败"降级后,多久之内不重建。取值明显大于一次退避循环(最长 30s),
+#: 这样"降级 → 重建 → 再失败"不会退化成每分钟好几轮的抖动;边车真修好了也只
+#: 多等这一会儿。
+_LOCAL_REBUILD_COOLDOWN_SEC = 60.0
 
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
@@ -240,6 +244,10 @@ class PerceptionEngineProxy:
         # tick 自愈)都跑在主事件循环上,同步 HTTP 会把相机取帧 / SSE / API 一起
         # 卡住最多 3 秒。缓存空就落等待态,由 refresh_local_probe 在线程里补。
         self._allow_sync_probe = True
+        # 因"推理持续失败"被降级后,禁止立刻重建的截止时刻。没有它会抖:边车
+        # /health 是绿的但每次推理都失败时,降级 → 探活通过 → 下个 tick 重建 →
+        # 再失败 → 再降级,无限循环;界面上那条提示每轮闪一下,连接池每轮换一个。
+        self._local_rebuild_not_before: float = 0.0
 
         self._init_engine()
         self._allow_sync_probe = False
@@ -261,6 +269,11 @@ class PerceptionEngineProxy:
         # 本地视觉通路:整条路不碰云端 API Key,也不用 ONNX 检测/ReID 模型,
         # 故两项前置校验都不适用 —— 换成校验边车可达性(在 _init_local_engine 内)。
         if settings.perception.engine_backend == "local":
+            if time.monotonic() < self._local_rebuild_not_before:
+                # 刚因推理持续失败被降级,冷却期内不重建(见 _local_rebuild_not_before)。
+                self._status = "local_vision_unreachable"
+                self._status_message = "本地视觉服务持续不可用,稍后自动重试"
+                return
             self._init_local_engine(settings)
             return
 
@@ -490,6 +503,11 @@ class PerceptionEngineProxy:
                     NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
                 )
                 self._invalidate_local_probe()
+                # 拆完就锁一段时间,否则下一个 tick 立刻把它重建回来(探活是绿的)
+                # —— 那样降级只是在原地空转,用户看到的是一条闪烁的提示。
+                self._local_rebuild_not_before = (
+                    time.monotonic() + _LOCAL_REBUILD_COOLDOWN_SEC
+                )
 
         from miloco.perception.local_vision import LocalVisionClient
 

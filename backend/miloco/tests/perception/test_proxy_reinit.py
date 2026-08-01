@@ -49,6 +49,7 @@ def _make_proxy(status: str, *, engine=None, message: str = "stale") -> Percepti
     p._local_probe_not_before = 0.0
     p._local_probe_key = None
     p._allow_sync_probe = False
+    p._local_rebuild_not_before = 0.0
     return p
 
 

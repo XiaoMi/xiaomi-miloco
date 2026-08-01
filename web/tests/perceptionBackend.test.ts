@@ -128,3 +128,22 @@ describe("isReachable", () => {
     expect(isReachable(state({ health: healthy }))).toBe(true);
   });
 });
+
+describe("加载失败 ≠ 还在加载", () => {
+  it("有 load_error 时必须报失败,而不是劝人再等", () => {
+    // 权重路径写错时边车会**永远**停在 loading(它刻意不崩进程)。显示成
+    // 「稍后再试」等于让用户一直等下去,而真正的原因就在 load_error 里。
+    const s = state({
+      health: { ...healthy, model_loaded: false, load_error: "FileNotFoundError: /no/such/dir" },
+    });
+    const line = healthLine(s);
+    expect(line.kind).toBe("load-failed");
+    expect(line.kind === "load-failed" && line.detail).toContain("/no/such/dir");
+    expect(isReachable(s)).toBe(false);
+  });
+
+  it("没有 load_error 才是真的在加载", () => {
+    const s = state({ health: { ...healthy, model_loaded: false } });
+    expect(healthLine(s).kind).toBe("loading");
+  });
+});

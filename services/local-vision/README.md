@@ -91,7 +91,7 @@ miloco-local-vision --port 18800
 | `LOCAL_VISION_CHECKPOINT` | `microsoft/Mage-VL` | 本地权重目录或 HF repo id |
 | `LOCAL_VISION_DEVICE` | `cuda:0` | 放哪张卡 |
 | `LOCAL_VISION_BACKEND` | `codec` | `codec`(推荐)或 `frames` |
-| `LOCAL_VISION_NUM_FRAMES` | `32` | codec 的 target canvas / 帧采样数 |
+| `LOCAL_VISION_NUM_FRAMES` | `32` | **frames 后端**的抽帧数。codec 后端不用它:那边的画布数按实际帧数推导(填 32 会要求 256 帧源视频,而一个 4s 窗最多 32 帧) |
 | `LOCAL_VISION_TOKEN` | 空 | 配了就强制 `Authorization: Bearer`;不配则**必须**只绑环回地址 |
 | `LOCAL_VISION_MAX_PIXELS` | `150000` | 单帧视觉预算(像素)。两条通路共用;下方实测数字就是按这个默认值测的 |
 | `LOCAL_VISION_ATTN` | `sdpa` | transformers 的 attention 实现 |
@@ -111,8 +111,8 @@ miloco-local-vision --port 18800
 ## 接口
 
 ```
-GET  /health        → {status, model_loaded, gate_available, gate_error, device, backend,
-                       auth_required, auth_ok}
+GET  /health        → {status, model_loaded, gate_available, gate_error, load_error,
+                       device, backend, auth_required, auth_ok}
 POST /v1/perceive   → {caption, rule_hits[], unparsed_rules, truncated, gate_p, backend,
                        timing_ms, raw}
 ```
@@ -124,11 +124,13 @@ POST /v1/perceive   → {caption, rule_hits[], unparsed_rules, truncated, gate_p
 | `auth_required` / `auth_ok` | 凭证校验**fail-open**:miloco 读不到就当作"不需要鉴权",于是配错 token 的部署探活全绿、每一窗推理 401,感知静默停摆 |
 | `unparsed_rules` | 「模型确实说不」与「输出被复读/截断吃掉」变得无法区分,后者会把该相机的规则整体推成未命中 |
 | `truncated` | 同上,且描述会从句子中间断掉后原样交给 agent |
+| `load_error` | 加载**失败**与"还在加载"变得无法区分。前者永远不会好(多半是权重路径写错),而界面会一直劝用户"稍后再试" |
 | `rule_hits[].name` | 调用方先按 `name` 认领判定,认不出来就**丢弃**这一条(不按下标猜——猜错会让「厨房明火」背上「有人跌倒」的结论)。请逐条返回、顺序与请求里的 `rules` 一致,`name` 原样回填 |
 | `rule_hits[].hit` / `.reason` | `hit` 是判定本身;`reason` 是依据,会进事件文本给 agent 看 |
 
 请求侧的上限:`rules` 最多 64 条,`scene_ask` ≤ 4000 字符,`camera_note` / 规则
-`query` ≤ 2000 字符,视频段解码后 ≤ 64 MiB。超限一律 422(视频超限为 413)。
+`query` ≤ 2000 字符,视频段 ≤ 64 MiB。超限一律 **422**(字段长度由 pydantic 先挡);
+`413` 只在极少数绕过该校验的情形下出现。
 
 状态码:`401` 凭证缺失或不匹配;`413` 视频段超过 64 MiB;`422` 请求体不合法
 (base64 坏了、空载荷、字段越界);`503` 模型未就绪(`engine not ready`)或在飞请求

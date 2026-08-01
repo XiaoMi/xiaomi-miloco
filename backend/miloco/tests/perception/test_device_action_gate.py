@@ -296,10 +296,21 @@ def test_capability_prefers_the_live_engine_over_config(monkeypatch):
 def test_active_engine_attribute_chain_matches_the_real_types():
     """`_active_engine` 走的是一串私有属性。任何一环改名,它会静默返回 None 并
     回落到读配置 —— 也就是悄悄退回上面那个窗口。用真实类型钉住这条链路。"""
+    # 直接对着 _active_engine 的源码取属性名,再逐个到真实类型上验证 —— 只列
+    # 三个常量的话,改了 _active_engine 而没改这里,测试照样绿。
+    import inspect
+    import re as _re
+
+    from miloco.perception.capabilities import _active_engine
     from miloco.perception.client import PerceptionEngineProxy
     from miloco.perception.processor import PipelineProcessor
     from miloco.perception.service import PerceptionService
 
-    assert "_pipeline" in PerceptionService.__init__.__code__.co_names
-    assert "_perception_engine_proxy" in PipelineProcessor.__init__.__code__.co_names
-    assert "perception_engine" in PerceptionEngineProxy.__init__.__code__.co_names
+    chain = _re.findall(r"\.(_[a-z_]+|perception_engine)\b",
+                        inspect.getsource(_active_engine))
+    assert "perception_engine" in chain, f"_active_engine 不再取引擎? {chain}"
+    for attr, owner in (("_pipeline", PerceptionService),
+                        ("_perception_engine_proxy", PipelineProcessor),
+                        ("perception_engine", PerceptionEngineProxy)):
+        assert attr in chain, f"_active_engine 不再走 {attr},这条测试已失效"
+        assert attr in owner.__init__.__code__.co_names, f"{owner.__name__} 上没有 {attr}"

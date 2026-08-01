@@ -69,6 +69,10 @@ class MageVLEngine:
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
     def load(self) -> None:
+        # 在这里解析而不是构造期:路径写错时要落进 load_error 经 /health 说出来,
+        # 而不是让进程直接起不来(那样连 /health 都没有,用户只看到"连不上")。
+        self.checkpoint = resolve_checkpoint(self.checkpoint)
+
         import torch
         from transformers import AutoModelForCausalLM, AutoProcessor
 

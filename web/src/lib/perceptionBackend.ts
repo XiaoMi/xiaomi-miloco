@@ -40,6 +40,7 @@ export type HealthLine =
   | { kind: "unreachable" }
   | { kind: "auth-rejected" }
   | { kind: "loading" }
+  | { kind: "load-failed"; detail: string }
   | { kind: "ok"; device: string; backend: string; gateOff: boolean }
   | { kind: "none" };
 
@@ -65,8 +66,11 @@ export function healthLine(state: PerceptionBackendState): HealthLine {
   const h = state.health;
   if (!h) return { kind: "none" };
   if (h.auth_required && !h.auth_ok) return { kind: "auth-rejected" };
-  // 模型还在加载:后端此刻会以 400「正在加载模型,稍后再试」拒绝切换。这里若报
-  // 「可达」,用户看到的就是绿灯 + 点了被拒,两处自相矛盾。
+  // 加载**失败**与"还在加载"必须分开:前者永远不会好(多半是权重路径写错),
+  // 把它显示成"稍后再试"等于劝用户一直等下去。边车用 load_error 区分二者。
+  if (!h.model_loaded && h.load_error) {
+    return { kind: "load-failed", detail: h.load_error };
+  }
   if (!h.model_loaded) return { kind: "loading" };
   return {
     kind: "ok",

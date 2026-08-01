@@ -73,6 +73,10 @@ def _as_float(v: object) -> float | None:
 _BACKOFF_AFTER_FAILURES = 3
 #: 退避时长上限(秒)。到点后放一窗过去试探,成功即清零。
 _BACKOFF_MAX_SEC = 30.0
+#: 哪些逐设备失败该算进"边车不可达"。encode_failed 是本地编码问题(PyAV 缺
+#: libx264、帧不是三通道),一次网络都没发过 —— 把它算进去会让用户被指向网络,
+#: 而拆掉引擎对它毫无帮助。malformed_response 保留:边车确实答了,但答得不对。
+_SIDECAR_ATTRIBUTABLE = frozenset({"LocalVisionError", "malformed_response"})
 #: 连续多少窗完全不可达后,把引擎降回「等前置条件」态。比退避阈值大一档:短暂抖动
 #: 由退避吸收,真的挂了才降级(降级会让界面显示"感知不可用",不该被一次抖动触发)。
 _DEMOTE_AFTER_FAILURES = 5
@@ -324,7 +328,6 @@ class LocalVisionEngine(BasePerceptionEngine):
             # **不填 error_code**,否则这一轮会被记成一次推理错误、污染错误率。
             return RealtimePerceptionResult(skipped=True)
 
-        # 逐窗读一次「感知须知」表(实时,改动下一窗即生效),避免 per-device 重复读 KV。
         if time.monotonic() < self._backoff_until:
             # 退避窗口内:直接判本窗无结论,连编码都不做。与"边车失败"落在同一档
             # 语义上(上层按无结论跳过),区别只是不再白烧 CPU。
@@ -332,10 +335,11 @@ class LocalVisionEngine(BasePerceptionEngine):
                 skipped=True, error_code="local_vision_unavailable"
             )
 
+        # 逐窗读一次「感知须知」表(实时,改动下一窗即生效),避免 per-device 重复读 KV。
         prompt_map = camera_prompt_map()
-        # 与下面 timing["total"] 用的 t0 分开:那个量的是"送检到拿回结论"的推理
-        # 耗时(要能和云端的口径对比),这个量的是整窗墙钟(含编码、并发等待),
-        # 因为"追不追得上感知周期"比的就是墙钟。
+        # 与下面 timing["total"] 用的 t0 分开量。t_start 从这里起算,覆盖编码 +
+        # 并发等待 + 推理,也就是这一窗真正占掉的墙钟 —— "追不追得上感知周期"
+        # 比的正是它。t0 起算得更晚、只覆盖汇总阶段,用于和云端的耗时口径对齐。
         t_start = time.monotonic()
         results = await asyncio.gather(
             *[self._perceive_device(s, rules, prompt_map) for s in with_video]
@@ -349,8 +353,16 @@ class LocalVisionEngine(BasePerceptionEngine):
         if not ok:
             # 全设备失败:标 skipped 让上层按「本轮无结论」处理,不产空事件。
             # 逐设备原因照样带上 —— 全灭和"某一台一直灭"要能区分开。
-            self._consecutive_failures += 1
-            if self._consecutive_failures >= _BACKOFF_AFTER_FAILURES:
+            #
+            # 但只有**边车归因**的失败才算进"边车不可达"。本地编码失败(PyAV 没编进
+            # libx264、帧不是三通道)一次网络都没发,拆掉引擎既救不了它,还会把用户
+            # 指向网络和边车 —— 真正的原因只在另一行 WARNING 里。
+            if any(c in _SIDECAR_ATTRIBUTABLE for c in errors.values()):
+                self._consecutive_failures += 1
+            if (
+                self._consecutive_failures
+                and self._consecutive_failures >= _BACKOFF_AFTER_FAILURES
+            ):
                 # 指数退避,封顶 30s:边车重启一般十几秒就好,退避太久会让恢复
                 # 明显变慢;而封顶之后每 30s 试探一次,代价可以忽略。
                 step = 2 ** (self._consecutive_failures - _BACKOFF_AFTER_FAILURES)
