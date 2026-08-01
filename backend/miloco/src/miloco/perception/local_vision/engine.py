@@ -65,16 +65,16 @@ class LocalVisionEngine(BasePerceptionEngine):
         self,
         client: LocalVisionClient,
         *,
-        fps: int = 4,
+        container_fps: int = 4,
         crf: int = 28,
         max_new_tokens: int = 256,
-        gate_threshold: float = 0.0,
+        event_gate_threshold: float = 0.0,
         scene_ask: str | None = None,
         max_frames: int = 32,
         short_edge: int = 512,
     ) -> None:
         self._client = client
-        self._fps = fps
+        self._container_fps = container_fps
         self._crf = crf
         self._max_frames = max_frames
         self._short_edge = short_edge
@@ -82,7 +82,7 @@ class LocalVisionEngine(BasePerceptionEngine):
         # 门控默认 0.0 = 从不据此跳过。参考实现的门控在体育解说数据上训练,
         # 家庭场景属分布外 —— 默认只观测(把 gate_p 记进 timing 供比对),
         # 不让它决定丢不丢事件。用户确认阈值在自家可靠后再调高。
-        self._gate_threshold = gate_threshold
+        self._gate_threshold = event_gate_threshold
         self._scene_ask = scene_ask
 
     # ── 能力声明 ─────────────────────────────────────────────────────────
@@ -112,9 +112,13 @@ class LocalVisionEngine(BasePerceptionEngine):
         """单设备一次感知。任一环节失败 → 返回 None(该设备本窗口跳过)。"""
         did = snapshot.device.did
         try:
-            video = encode_snapshot_to_h264(
-                snapshot, fps=self._fps, crf=self._crf,
-                max_frames=self._max_frames, short_edge=self._short_edge,
+            # libx264 是同步 CPU 活,必须丢线程 —— 直接在协程里编码会占住所在
+            # 事件循环(主动查询走的就是主循环)。项目里 miot/transcoder.py 为同一
+            # 个理由专门建了执行器,这里遵循同一条约定。
+            video = await asyncio.to_thread(
+                encode_snapshot_to_h264,
+                snapshot, self._container_fps, self._crf,
+                self._max_frames, self._short_edge,
             )
         except EncodeError as e:
             logger.warning("[local-vision] encode failed did=%s: %s", did, e)
@@ -292,9 +296,10 @@ class LocalVisionEngine(BasePerceptionEngine):
 
         async def _ask(snapshot) -> str | None:
             try:
-                video = encode_snapshot_to_h264(
-                    snapshot, fps=self._fps, crf=self._crf,
-                    max_frames=self._max_frames, short_edge=self._short_edge,
+                video = await asyncio.to_thread(
+                    encode_snapshot_to_h264,
+                    snapshot, self._container_fps, self._crf,
+                    self._max_frames, self._short_edge,
                 )
                 out = await self._client.perceive(
                     video, rules=[], scene_ask=query,

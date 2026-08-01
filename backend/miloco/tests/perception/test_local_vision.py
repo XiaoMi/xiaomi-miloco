@@ -59,7 +59,7 @@ class _FakeClient:
 
 
 def _engine(client, **kw) -> LocalVisionEngine:
-    return LocalVisionEngine(client, fps=2, **kw)
+    return LocalVisionEngine(client, container_fps=2, **kw)
 
 
 # ── 规则定向 ──────────────────────────────────────────────────────────────
@@ -181,7 +181,7 @@ async def test_gate_skips_when_threshold_configured():
     client = _FakeClient([{
         "caption": "静止的客厅", "rule_hits": [], "gate_p": 0.1, "backend": "codec",
     }])
-    res = await _engine(client, gate_threshold=0.5).realtime_perceive(
+    res = await _engine(client, event_gate_threshold=0.5).realtime_perceive(
         BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
     )
     assert res.caption == []
@@ -330,7 +330,7 @@ async def test_gate_suppresses_caption_but_still_judges_rules():
         "rule_hits": [{"name": "A", "hit": True, "reason": "成立"}],
         "gate_p": 0.1, "backend": "codec",
     }])
-    res = await _engine(client, gate_threshold=0.5).realtime_perceive(
+    res = await _engine(client, event_gate_threshold=0.5).realtime_perceive(
         BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
     )
     assert res.caption == []                        # 叙述被压制
@@ -421,7 +421,7 @@ async def test_gate_suppressed_and_no_hit_still_reports_evidence():
         "rule_hits": [{"name": "A", "hit": False, "reason": "不成立"}],
         "gate_p": 0.05, "backend": "codec",
     }])
-    res = await _engine(client, gate_threshold=0.5).realtime_perceive(
+    res = await _engine(client, event_gate_threshold=0.5).realtime_perceive(
         BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
     )
     assert res.caption == []
@@ -482,3 +482,33 @@ def test_short_edge_none_falls_back_to_shared_setting():
         PerceptionEngineProxy()
 
     assert captured["short_edge"] == 640   # 跟随共享值,不是 None
+
+
+@pytest.mark.asyncio
+async def test_encoding_runs_off_the_event_loop():
+    """libx264 是同步 CPU 活,必须在线程里跑。直接在协程里编码会占住所在事件
+    循环 —— 主动查询走的正是主循环。项目的 miot/transcoder.py 为同一理由专门
+    建了执行器,这里必须遵循同一约定。"""
+    import asyncio as _asyncio
+    import threading
+
+    loop_thread = threading.get_ident()
+    seen: dict = {}
+
+    def _fake_encode(snapshot, fps, crf, max_frames, short_edge):
+        seen["thread"] = threading.get_ident()
+        return b"VIDEO"
+
+    import miloco.perception.local_vision.engine as eng
+
+    orig = eng.encode_snapshot_to_h264
+    eng.encode_snapshot_to_h264 = _fake_encode
+    try:
+        client = _FakeClient([{"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}])
+        await _engine(client).realtime_perceive(
+            BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+        )
+    finally:
+        eng.encode_snapshot_to_h264 = orig
+    assert seen["thread"] != loop_thread, "编码发生在事件循环线程上"
+    assert _asyncio.get_event_loop_policy() is not None

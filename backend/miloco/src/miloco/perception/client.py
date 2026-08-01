@@ -339,10 +339,10 @@ class PerceptionEngineProxy:
         try:
             self.perception_engine = LocalVisionEngine(
                 client,
-                fps=cfg.fps,
+                container_fps=cfg.container_fps,
                 crf=cfg.crf,
                 max_new_tokens=cfg.max_new_tokens,
-                gate_threshold=cfg.gate_threshold,
+                event_gate_threshold=cfg.event_gate_threshold,
                 scene_ask=cfg.scene_ask or None,
                 max_frames=cfg.max_frames,
                 # 短边默认跟随共享的感知参数(界面 / perception-config 可调),

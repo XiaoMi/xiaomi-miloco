@@ -321,7 +321,14 @@ class LocalVisionSettings(BaseModel):
         description="边车鉴权 token;边车未配则留空。本通路不需要任何模型厂商 API Key",
     )
     timeout_sec: float = Field(default=60.0, gt=0, description="单次感知请求超时(秒)")
-    fps: int = Field(default=4, gt=0, description="窗口帧编码成视频时的容器帧率")
+    container_fps: int = Field(
+        default=4, gt=0,
+        description=(
+            "窗口帧封装成 mp4 时写进**容器时基**的帧率,不改变送模型的帧内容。"
+            "刻意不叫 fps:感知链路里已有 engine.input.fps(下发/跟踪帧率)与 omni_fps"
+            "(送模型的抽帧率),再来一个 fps 会被读成第三种采样率"
+        ),
+    )
     crf: int = Field(
         default=28, ge=0, le=51,
         description="H.264 编码质量(越大体积越小);边车只在 16x16 patch 粒度看运动/残差,不需要高画质",
@@ -340,10 +347,13 @@ class LocalVisionSettings(BaseModel):
             "只有确需给本地通路单独设值时才填。"
         ),
     )
-    gate_threshold: float = Field(
+    event_gate_threshold: float = Field(
         default=0.0, ge=0.0, le=1.0,
         description=(
-            "事件门阈值:低于此概率的窗口直接跳过。默认 0 = 只观测不决策 —— "
+            "**流式事件门**阈值:低于此概率的窗口不产场景叙述(规则判定照常)。"
+            "刻意不叫 gate_threshold:感知里已有一个 gate(帧差+音频能量,阈值叫 "
+            "change_threshold),两个同名的「门」会让人分不清在调哪个。"
+            "默认 0 = 只观测不决策 —— "
             "参考实现的门控在体育解说数据上训练,家庭场景属分布外,"
             "先在自家数据上观察 timing._gate_p_* 再决定是否调高"
         ),
