@@ -221,3 +221,25 @@ async def test_on_demand_uses_query_as_scene_ask():
     assert out.answer == "有两个人在看电视"
     assert client.calls[0]["scene_ask"] == "现在有人吗?"
     assert client.calls[0]["rules"] == []
+
+
+# ── 健康响应回显面 ─────────────────────────────────────────────────────────
+
+
+def test_health_sanitizer_drops_unknown_fields():
+    """base_url 用户可填、health 会经 admin 端点回显 —— 只放行已知字段,
+    否则这个端点就成了能读任意 URL 响应体的探针。"""
+    from miloco.perception.local_vision.client import _sanitize_health
+
+    out = _sanitize_health({
+        "status": "ok", "model_loaded": True, "device": "cuda:0",
+        "secret": "AKIA-should-not-leak", "nested": {"a": 1}, "count": 42,
+    })
+    assert out == {"status": "ok", "model_loaded": True, "device": "cuda:0"}
+
+
+def test_health_sanitizer_handles_non_dict_and_truncates():
+    from miloco.perception.local_vision.client import _sanitize_health
+
+    assert _sanitize_health(["not", "a", "dict"]) == {}
+    assert len(_sanitize_health({"gate_error": "x" * 900})["gate_error"]) == 300

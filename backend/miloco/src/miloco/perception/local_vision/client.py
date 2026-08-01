@@ -18,6 +18,30 @@ class LocalVisionError(RuntimeError):
     """边车不可达 / 返回异常。调用方按「本窗口感知失败」处理。"""
 
 
+# /health 的响应会经 admin 端点回显给调用方,而 base_url 是用户可填的 —— 若原样
+# 回显整个 body,这个端点就成了一个能读任意 URL 响应体的探针(SSRF 回显)。只放行
+# 已知字段,把回显面钉死成固定形状。
+_HEALTH_FIELDS = (
+    "status", "model_loaded", "gate_available", "gate_error", "device", "backend",
+)
+_HEALTH_ERROR_MAXLEN = 300
+
+
+def _sanitize_health(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for k in _HEALTH_FIELDS:
+        if k not in raw:
+            continue
+        v = raw[k]
+        if isinstance(v, bool) or v is None:
+            out[k] = v
+        elif isinstance(v, str):
+            out[k] = v[:_HEALTH_ERROR_MAXLEN]
+    return out
+
+
 class LocalVisionClient:
     def __init__(self, base_url: str, token: str = "", timeout: float = 60.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -34,7 +58,7 @@ class LocalVisionClient:
             with httpx.Client(timeout=min(self.timeout, 10.0)) as c:
                 r = c.get(f"{self.base_url}/health")
                 r.raise_for_status()
-                return r.json()
+                return _sanitize_health(r.json())
         except Exception as e:  # noqa: BLE001
             raise LocalVisionError(f"health check failed: {e}") from e
 
