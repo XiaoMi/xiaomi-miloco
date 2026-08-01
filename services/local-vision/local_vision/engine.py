@@ -22,6 +22,12 @@ from local_vision.video import pick_backend, probe_frame_count, sample_frames
 
 logger = logging.getLogger(__name__)
 
+# 复读抑制。penalty 取偏保守的 1.05:中文描述里「房间的」「上面放着」这类词组
+# 本来就会合理复现,压太狠会让句子变生硬。n-gram 取 12 只封死"整句照抄"这种
+# 病态重复,不影响正常措辞。
+_REPETITION_PENALTY = 1.05
+_NO_REPEAT_NGRAM = 12
+
 
 class MageVLEngine:
     """加载一次、串行复用的 Mage-VL 推理器。
@@ -198,7 +204,16 @@ class MageVLEngine:
             t1 = time.time()
             with torch.inference_mode():
                 out = self._model.generate(
-                    **inputs, max_new_tokens=max_new_tokens, do_sample=False
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    # 贪心解码在这个模型上会复读:实测家庭画面里出现过
+                    # 「房间的角落里还有一个白色的物体」连续重复十余遍,一路顶到
+                    # token 上限 —— 既污染 caption,又让生成耗时翻倍。参考实现用
+                    # max_new_tokens=80 靠截断掩盖了这个问题,我们要更长的描述,
+                    # 就必须显式抑制重复。
+                    repetition_penalty=_REPETITION_PENALTY,
+                    no_repeat_ngram_size=_NO_REPEAT_NGRAM,
                 )
             t_gen = (time.time() - t1) * 1000
             raw = self._processor.tokenizer.decode(

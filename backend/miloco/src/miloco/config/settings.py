@@ -331,9 +331,14 @@ class LocalVisionSettings(BaseModel):
         default=32, gt=0,
         description="单窗口送出的最大帧数(均匀抽);边车无论如何只用得到这么多",
     )
-    video_short_edge: int = Field(
-        default=512, gt=0,
-        description="编码前按短边缩放的上限;模型只在 16x16 patch 粒度看运动/残差,原生分辨率是浪费",
+    video_short_edge: int | None = Field(
+        default=None,
+        description=(
+            "编码前按短边缩放的上限。**默认 None = 复用 perception.engine.input.video_short_edge**"
+            "——那是项目里既有的同义参数,已经有界面与 /api/admin/perception-config 可调;"
+            "本通路再存一份只会造成两边漂移(用户在界面上调了分辨率,本地通路却纹丝不动)。"
+            "只有确需给本地通路单独设值时才填。"
+        ),
     )
     gate_threshold: float = Field(
         default=0.0, ge=0.0, le=1.0,

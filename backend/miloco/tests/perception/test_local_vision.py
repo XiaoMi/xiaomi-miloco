@@ -14,11 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from miloco.perception.local_vision.engine import (
-    LocalVisionEngine,
-    _physical_did,
-    _rules_for_device,
-)
+from miloco.perception.local_vision.engine import LocalVisionEngine
+from miloco.perception.rule_scope import physical_did, rules_for_device
 from miloco.perception.types import (
     BatchedSnapshot,
     DeviceSnapshot,
@@ -69,8 +66,8 @@ def _engine(client, **kw) -> LocalVisionEngine:
 
 
 def test_physical_did_strips_channel():
-    assert _physical_did("cam1:ch0") == "cam1"
-    assert _physical_did("cam1") == "cam1"
+    assert physical_did("cam1:ch0") == "cam1"
+    assert physical_did("cam1") == "cam1"
 
 
 def test_rules_for_device_broadcast_and_targeted():
@@ -79,9 +76,9 @@ def test_rules_for_device_broadcast_and_targeted():
         {"id": "r2", "name": "仅A", "condition": {"query": "q", "perceive_device_ids": ["camA"]}},
         {"id": "r3", "name": "绑物理机", "condition": {"query": "q", "perceive_device_ids": ["camB"]}},
     ]
-    assert [r["id"] for r in _rules_for_device(rules, "camA")] == ["r1", "r2"]
+    assert [r["id"] for r in rules_for_device(rules, "camA")] == ["r1", "r2"]
     # 规则绑整台相机的物理 did 时,该机任一通道都要命中
-    assert [r["id"] for r in _rules_for_device(rules, "camB:ch1")] == ["r1", "r3"]
+    assert [r["id"] for r in rules_for_device(rules, "camB:ch1")] == ["r1", "r3"]
 
 
 # ── 纯视觉不变量 ──────────────────────────────────────────────────────────
@@ -262,7 +259,14 @@ def test_default_backend_is_cloud_and_local_path_not_taken():
 
     assert PerceptionSettings().engine_backend == "cloud"
 
-    with patch.object(PerceptionEngineProxy, "_init_local_engine") as local_init, \
+    from miloco.config.settings import get_settings
+
+    # 必须用**代码默认值**构造的 settings,不能读环境里那份 —— 开发机上跑着的
+    # config.json 可能已经切到 local,那样这条测试就会随环境时绿时红。
+    cfg = get_settings().model_copy(deep=True)
+    cfg.perception.engine_backend = PerceptionSettings().engine_backend
+    with patch("miloco.perception.client.get_settings", return_value=cfg), \
+            patch.object(PerceptionEngineProxy, "_init_local_engine") as local_init, \
             patch.object(PerceptionEngineProxy, "_create_engine", return_value=object()):
         PerceptionEngineProxy()
     local_init.assert_not_called()
@@ -449,3 +453,32 @@ def test_frame_budget_keeps_the_last_frame():
     finally:
         enc._resize_bgr = orig_resize
     assert len(picked) == 8
+
+
+def test_short_edge_none_falls_back_to_shared_setting():
+    """local_vision.video_short_edge 默认 None = 跟随共享的感知参数。
+    真机上这条没接好时,None 会一路传到编码器里跟 int 比较,每一窗都 TypeError ——
+    单测只造引擎、不走 proxy,所以完全看不出来。"""
+    from unittest.mock import patch
+
+    from miloco.config.settings import get_settings
+    from miloco.perception.client import PerceptionEngineProxy
+
+    cfg = get_settings().model_copy(deep=True)
+    cfg.perception.engine_backend = "local"
+    cfg.perception.local_vision.video_short_edge = None
+    cfg.perception.engine = {"input": {"video_short_edge": 640}}
+
+    captured = {}
+
+    class _Eng:
+        def __init__(self, client, **kw):
+            captured.update(kw)
+
+    with patch("miloco.perception.client.get_settings", return_value=cfg), \
+            patch("miloco.perception.local_vision.LocalVisionClient") as C, \
+            patch("miloco.perception.local_vision.LocalVisionEngine", _Eng):
+        C.return_value.health_sync.return_value = {"model_loaded": True}
+        PerceptionEngineProxy()
+
+    assert captured["short_edge"] == 640   # 跟随共享值,不是 None

@@ -28,6 +28,11 @@ import time
 from miloco.perception.engine_base import BasePerceptionEngine
 from miloco.perception.local_vision.client import LocalVisionClient, LocalVisionError
 from miloco.perception.local_vision.encode import EncodeError, encode_snapshot_to_h264
+from miloco.perception.rule_scope import (
+    camera_prompt_map,
+    physical_did,
+    rules_for_device,
+)
 from miloco.perception.types import (
     BatchedSnapshot,
     CaptionEntry,
@@ -39,14 +44,6 @@ from miloco.perception.types import (
 logger = logging.getLogger(__name__)
 
 
-def _physical_did(did: str) -> str:
-    """合成通道 did → 物理 did(``cam1:ch0`` → ``cam1``)。
-
-    与云端引擎同语义:规则可绑到整台相机的物理 did,匹配时两种粒度都要命中。
-    """
-    return did.rsplit(":ch", 1)[0] if ":ch" in did else did
-
-
 def _as_float(v: object) -> float | None:
     """把边车回的 gate_p 归一成 float。契约对第三方实现开放,拿到字符串或
     null 都不该让整轮感知抛异常 —— 归一失败就当作"没有门控概率"。"""
@@ -56,16 +53,6 @@ def _as_float(v: object) -> float | None:
         return float(v)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-
-
-def _rules_for_device(rules: list[dict], did: str) -> list[dict]:
-    """按 ``condition.perceive_device_ids`` 筛出该设备该判的规则(空 = 广播)。"""
-    return [
-        r for r in rules
-        if not r.get("condition", {}).get("perceive_device_ids")
-        or did in r["condition"]["perceive_device_ids"]
-        or _physical_did(did) in r["condition"]["perceive_device_ids"]
-    ]
 
 
 class LocalVisionEngine(BasePerceptionEngine):
@@ -106,7 +93,22 @@ class LocalVisionEngine(BasePerceptionEngine):
 
     # ── 感知 ─────────────────────────────────────────────────────────────
 
-    async def _perceive_device(self, snapshot, rules: list[dict]) -> dict | None:
+    def _scene_ask_for(self, did: str, prompt_map: dict[str, str]) -> str | None:
+        """拼出该摄像头本轮的场景提问 = 基础提问 + 用户给这台机位写的「感知须知」。
+
+        这段须知是用户在面板上逐台相机填的机位说明(如"这台对着门口,忽略窗外行人"),
+        云端通路一直会注入。本地通路必须同样注入 —— 否则同一台相机换条通路,用户
+        写的指导就悄悄失效了,而界面上完全看不出来。
+        """
+        extra = (prompt_map.get(did) or prompt_map.get(physical_did(did)) or "").strip()
+        base = self._scene_ask
+        if not extra:
+            return base
+        return f"{base}\n\n本机位补充说明:{extra}" if base else f"感知须知:{extra}"
+
+    async def _perceive_device(
+        self, snapshot, rules: list[dict], prompt_map: dict[str, str]
+    ) -> dict | None:
         """单设备一次感知。任一环节失败 → 返回 None(该设备本窗口跳过)。"""
         did = snapshot.device.did
         try:
@@ -118,7 +120,7 @@ class LocalVisionEngine(BasePerceptionEngine):
             logger.warning("[local-vision] encode failed did=%s: %s", did, e)
             return None
 
-        dispatched = _rules_for_device(rules, did)
+        dispatched = rules_for_device(rules, did)
         payload_rules = [
             {"name": r.get("name", ""), "query": r.get("condition", {}).get("query", "")}
             for r in dispatched
@@ -127,7 +129,7 @@ class LocalVisionEngine(BasePerceptionEngine):
             out = await self._client.perceive(
                 video,
                 rules=payload_rules,
-                scene_ask=self._scene_ask,
+                scene_ask=self._scene_ask_for(did, prompt_map),
                 max_new_tokens=self._max_new_tokens,
             )
         except LocalVisionError as e:
@@ -160,7 +162,11 @@ class LocalVisionEngine(BasePerceptionEngine):
             # **不填 error_code**,否则这一轮会被记成一次推理错误、污染错误率。
             return RealtimePerceptionResult(skipped=True)
 
-        results = await asyncio.gather(*[self._perceive_device(s, rules) for s in with_video])
+        # 逐窗读一次「感知须知」表(实时,改动下一窗即生效),避免 per-device 重复读 KV。
+        prompt_map = camera_prompt_map()
+        results = await asyncio.gather(
+            *[self._perceive_device(s, rules, prompt_map) for s in with_video]
+        )
         ok = [r for r in results if r]
         if not ok:
             # 全设备失败:标 skipped 让上层按「本轮无结论」处理,不产空事件。

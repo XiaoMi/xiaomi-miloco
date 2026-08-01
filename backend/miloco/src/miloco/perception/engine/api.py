@@ -19,6 +19,11 @@ from numpy.typing import NDArray
 
 from miloco.perception.engine.identity.tier_u import cam_id_from_device_id
 from miloco.perception.engine_base import BasePerceptionEngine
+from miloco.perception.rule_scope import (
+    camera_prompt_map,
+    physical_did,
+    rules_for_device,
+)
 from miloco.perception.types import (
     URGENCY_RANK,
     AudioFrame,
@@ -58,13 +63,9 @@ MAX_EID: int = 999
 SUGG_SIM_THRESHOLD: float = 0.70
 
 
-def _physical_did(did: str) -> str:
-    """合成通道 did → 物理 did：``'cam1:ch0'`` → ``'cam1'``；``'cam1'`` → ``'cam1'``。
-
-    感知按合成通道 did（``did:ch{n}``）运作，而 rule 可绑到整台相机的物理 did；匹配时
-    两种粒度都要能命中。
-    """
-    return did.rsplit(":ch", 1)[0] if ":ch" in did else did
+# 与本地视觉通路共用同一份实现(见 perception/rule_scope):两条通路对同一条规则的
+# 下发范围必须完全一致,各写一份迟早漂移。
+_physical_did = physical_did
 
 
 def _ms_since(start: float) -> float:
@@ -99,21 +100,8 @@ def _voice_allowed_dids() -> set[str]:
         return set()
 
 
-def _camera_prompt_map() -> dict[str, str]:
-    """实时读全部相机自定义「感知须知」prompt（did→文本）。与 ``_voice_allowed_dids``
-    同构，自取 ``get_manager().kv_repo``（同一处 miloco.manager 延迟导入模式）。
-
-    读 KV（进程内缓存）失败时返回空 dict——无自定义 prompt 注入（fail-open：瞬时故障
-    只是少一段场景指导，不阻断感知，与 voice 的 fail-closed 相反，因本项只增益不涉隐私）。
-    """
-    from miloco.manager import get_manager
-    from miloco.miot.filter import camera_prompts
-
-    try:
-        return camera_prompts(get_manager().kv_repo)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("camera prompt map lookup failed, injecting none: %s", e)
-        return {}
+# 同上,与本地视觉通路共用(见 perception/rule_scope)。
+_camera_prompt_map = camera_prompt_map
 
 
 class PerceptionEngine(BasePerceptionEngine):
@@ -986,13 +974,7 @@ class PerceptionEngine(BasePerceptionEngine):
         for room_name, snapshots in batch.by_room().items():
             for snapshot in snapshots:
                 did = snapshot.device.did
-                dispatched = [
-                    r for r in rules
-                    if not r.get("condition", {}).get("perceive_device_ids")
-                    or did in r["condition"]["perceive_device_ids"]
-                    # rule 绑物理 did（整台相机）时，命中该相机的任一通道。
-                    or _physical_did(did) in r["condition"]["perceive_device_ids"]
-                ]
+                dispatched = rules_for_device(rules, did)
                 device_rule_map[did] = [r["id"] for r in dispatched]
                 device_rules = [
                     RuleCondition(
