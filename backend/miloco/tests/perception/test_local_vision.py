@@ -243,3 +243,40 @@ def test_health_sanitizer_handles_non_dict_and_truncates():
 
     assert _sanitize_health(["not", "a", "dict"]) == {}
     assert len(_sanitize_health({"gate_error": "x" * 900})["gate_error"]) == 300
+
+
+# ── 默认不变式 ────────────────────────────────────────────────────────────
+
+
+def test_default_backend_is_cloud_and_local_path_not_taken():
+    """没主动切换的用户必须走原来的云端分支 —— 这是本特性对上游的核心承诺。
+
+    直接盯 _init_engine 的分派:默认配置下不得走进本地分支(否则所有存量部署
+    会在没配边车的情况下被判 PREREQ_MISSING,感知直接停摆)。
+    """
+    from unittest.mock import patch
+
+    from miloco.config.settings import PerceptionSettings
+    from miloco.perception.client import PerceptionEngineProxy
+
+    assert PerceptionSettings().engine_backend == "cloud"
+
+    with patch.object(PerceptionEngineProxy, "_init_local_engine") as local_init, \
+            patch.object(PerceptionEngineProxy, "_create_engine", return_value=object()):
+        PerceptionEngineProxy()
+    local_init.assert_not_called()
+
+
+def test_local_backend_setting_routes_to_local_init():
+    """反向:配了 local 就必须走本地分支(不能悄悄回落到云端要 Key)。"""
+    from unittest.mock import patch
+
+    from miloco.config.settings import get_settings
+    from miloco.perception.client import PerceptionEngineProxy
+
+    cfg = get_settings().model_copy(deep=True)
+    cfg.perception.engine_backend = "local"
+    with patch("miloco.perception.client.get_settings", return_value=cfg), \
+            patch.object(PerceptionEngineProxy, "_init_local_engine") as local_init:
+        PerceptionEngineProxy()
+    local_init.assert_called_once()
