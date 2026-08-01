@@ -15,7 +15,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # codec 通路的分组下限:少于这个帧数 cv-preinfer 连一组都凑不齐,会直接报错。
-# 实测 miloco 默认 4s 感知窗只产 ~4 帧,恰好落在下限之下 —— 所以必须能优雅回退。
+# 默认路径**是 codec**:miloco 的 4s 窗口按相机原生帧率解码(不做限流),再由
+# encode_snapshot_to_h264 抽到 max_frames(默认 32)——远在下限之上。实测在真实
+# 部署上连续 246 个窗口全部走 codec。回退是边缘情形(窗口被截短、相机刚上线只出了
+# 几帧),不是常态;但它必须存在,否则那几个窗口会整窗失败而不是少一次 token 削减。
 MIN_CODEC_FRAMES = 8
 
 

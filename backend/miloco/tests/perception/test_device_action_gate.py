@@ -20,6 +20,7 @@ from miloco.rule.schema import (
     RuleActionExecuteResult,
     RuleCondition,
     RuleEvent,
+    RuleLogKind,
     RuleMode,
 )
 
@@ -94,7 +95,12 @@ async def test_local_backend_refuses_to_drive_the_device(runner, monkeypatch):
         _gas_valve_rule(), RuleEvent.ENTERED, ["cam1"], "ctx", "exec-1",
     )
     execute.assert_not_called()
-    assert res is None
+    # 不是 None:再往下就是执行记录落库。提前返回会让这条规则在界面上的执行历史
+    # 一片空白 —— 用户只看到自动化不响了,没有任何地方说得出为什么。
+    assert res is not None
+    assert res.action_results == []
+    assert res.dynamic_rule_event_sent is False
+    assert "不执行设备动作" in res.error
 
 
 @pytest.mark.asyncio
@@ -126,8 +132,15 @@ async def test_refusal_is_announced_not_silent(runner, monkeypatch, caplog):
         await runner._fire(_gas_valve_rule(), RuleEvent.ENTERED, ["cam1"], "c", "e")
 
     assert any("厨房明火关阀" in r.getMessage() for r in caplog.records), "拒绝没有写进日志"
-    assert [e[0] for e in events] == ["rule_action_refused"]
+    # 被拒绝的执行不该同时再发一条 rule_fire —— 那会把它计进「触发了多少次」。
+    assert [e[0] for e in events] == ["rule_action_refused"], (
+        f"实际发出的事件: {[e[0] for e in events]}"
+    )
     assert events[0][2]["reason"] == "perception_backend_no_device_actions"
+
+    # 落库的必须是一条**失败**记录,而不是没有记录。
+    kinds = [c.args[0].kind for c in runner._log_repo.create.call_args_list]
+    assert kinds == [RuleLogKind.RULE_TRIGGER_FAILURE], kinds
 
 
 # ── 能力声明与实际执行必须是同一个事实 ────────────────────────────────────
@@ -146,6 +159,13 @@ def test_capability_declaration_matches_what_the_rule_path_enforces(monkeypatch)
     monkeypatch.setattr("miloco.perception.capabilities.get_settings", lambda: cfg)
     assert perception_executes_device_actions() is LocalVisionEngine.STATIC_RULE_EXECUTION
 
+    # 断言"两个值恰好相等"是同义反复:把 capabilities 写死成 return False 也照样过。
+    # 要钉住的是**联动** —— 事实只写在引擎的类属性上,改它就必须改变结论。
+    monkeypatch.setattr(LocalVisionEngine, "STATIC_RULE_EXECUTION", True)
+    assert perception_executes_device_actions() is True, "结论没有跟着引擎的能力声明走"
+    monkeypatch.setattr(LocalVisionEngine, "STATIC_RULE_EXECUTION", False)
+    assert perception_executes_device_actions() is False
+
     cfg.perception.engine_backend = "cloud"
     assert perception_executes_device_actions() is True
     # 缺省就是云端 —— 存量部署不受这道门影响。
@@ -161,3 +181,26 @@ def test_unreadable_config_falls_back_to_existing_cloud_behaviour(monkeypatch):
 
     monkeypatch.setattr("miloco.perception.capabilities.get_settings", _boom)
     assert perception_executes_device_actions() is True
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_is_not_blocked_by_the_gate(runner, monkeypatch):
+    """人工 / agent 经 `POST /api/rules/{id}/trigger` 显式触发不受这道闸约束。
+
+    闸约束的是**感知通路自己**去驱动设备(纯视觉模型没有音频佐证、没有身份识别)。
+    这里发起的正是那个被授权做决定的角色 —— 挡住它是过度拦截,而且端点会把
+    `None` 翻译成"规则不存在或未启用",一条彻头彻尾的错误信息。
+    """
+    _backend(monkeypatch, "local")
+    executed: list = []
+
+    async def _exec(rule_id, action):
+        executed.append(action)
+        return RuleActionExecuteResult(action=action, result=True)
+
+    monkeypatch.setattr(runner, "_execute_action", _exec)
+    monkeypatch.setattr(runner, "_sources_currently_true", lambda rid: ["manual"])
+
+    res = await runner.trigger_rule("r-gas", "用户在界面上点了触发")
+    assert res is not None
+    assert len(executed) == 1, "人工触发被那道感知闸挡住了"

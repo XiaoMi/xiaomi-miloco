@@ -232,8 +232,13 @@ class PerceptionEngineProxy:
         # 刚在界面上把地址改对,却要先干等一整个冷却窗口感知才恢复,而这段时间里
         # 界面显示的是"已切到本地"。
         self._local_probe_key: tuple[str, str] | None = None
+        # 只有构造期允许同步探活。此后一切重建路径(admin 切换、「重启感知」、
+        # tick 自愈)都跑在主事件循环上,同步 HTTP 会把相机取帧 / SSE / API 一起
+        # 卡住最多 3 秒。缓存空就落等待态,由 refresh_local_probe 在线程里补。
+        self._allow_sync_probe = True
 
         self._init_engine()
+        self._allow_sync_probe = False
 
     def _init_engine(self) -> None:
         """校验资源(key / 模型) + 创建引擎。``__init__`` 与 ``try_reinit()`` 共用。
@@ -320,18 +325,20 @@ class PerceptionEngineProxy:
         # 在线程里刷新,这里只读缓存。缓存为空(进程刚起、tick 还没跑过)时做一次
         # 阻塞探活是可接受的——只发生在构造期。
         if self._local_probe_key not in (None, (cfg.base_url, cfg.token)):
-            # 地址/凭证刚被改过。**不在这里补探活**:本方法会被 admin 的切换处理器
-            # 经 stop_to_unconfigured 同步调到,而同步 HTTP 会把主事件循环按秒级
-            # 卡住(相机取帧 / SSE / API 全停)。丢掉旧结论、落等待态,由 tick 的
-            # refresh_local_probe 在线程里补上 —— 最多晚一个感知周期。
+            # 地址/凭证刚被改过,旧结论作废。
             self._invalidate_local_probe()
-            self._status = "local_vision_unreachable"
-            self._status_message = f"本地视觉服务待探活({cfg.base_url})"
-            mon.set_lifecycle(
-                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
-            )
-            return
         if self._local_probe is None and self._local_probe_error is None:
+            if not self._allow_sync_probe:
+                # **不在这里探活**:本方法被 admin 切换处理器(经 stop_to_unconfigured)
+                # 和「重启感知」按钮同步调到,两者都跑在主事件循环上 —— 同步 HTTP
+                # 会把相机取帧 / SSE / 整个 API 卡住最多 3 秒。落等待态,由 tick 的
+                # refresh_local_probe 在线程里补上,最多晚一个感知周期。
+                self._status = "local_vision_unreachable"
+                self._status_message = f"本地视觉服务待探活({cfg.base_url})"
+                mon.set_lifecycle(
+                    NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+                )
+                return
             self._refresh_local_probe_sync(client, cfg)
 
         if self._local_probe_error is not None:
@@ -393,8 +400,9 @@ class PerceptionEngineProxy:
         # 显式告知能力边界。直连设备的规则不会走到这里(切换那一步就被拒了),
         # 但音频与身份这两项缺失是静默的,必须在日志里留一行。
         logger.warning(
-            "感知已切到本地视觉通路(%s):纯视觉 —— 无音频结论、无身份识别;"
-            "规则命中只上报,设备动作一律交 agent 决策执行。",
+            "感知正在使用本地视觉通路(%s):纯视觉 —— 无音频结论、无身份识别、"
+            "不产主动建议;"
+            "规则命中只作为观察结论上报;规则里配置的设备动作会被拒绝执行。",
             cfg.base_url,
         )
         mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
@@ -484,9 +492,12 @@ class PerceptionEngineProxy:
         只认 ``STOPPED`` 不会帮翻,故必须在创建路径里显式置(``_init_engine`` 已做)。
         返回是否「本次转入 ready」。
         """
-        if include_failed:
+        if include_failed and self._local_probe_error is not None:
             # 显式「重启感知」要能穿透探活冷却。否则边车其实已经好了,而用户按下
             # 按钮却是个 no-op —— 冷却是给自动轮询设的节流阀,不该管住用户的手。
+            # 只作废**失败的**那份结论,**不在这里补探活**(这条路径在主事件循环
+            # 上);下一个 tick 的线程化探活会立刻重来,因为冷却也一并清了。
+            # 有一份成功的缓存时不能丢:丢了就又落回"待探活",按钮反而更没用。
             self._invalidate_local_probe()
         allowed = self._RESTART_RECOVERABLE if include_failed else self._TICK_RECOVERABLE
         if self._status not in allowed:

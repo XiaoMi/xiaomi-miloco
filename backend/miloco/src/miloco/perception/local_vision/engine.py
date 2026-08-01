@@ -10,13 +10,16 @@
    模型去填这两个字段,只会得到凭画面脑补的人声与环境音(项目内已有实测结论,
    见 ``omni/field_registry.py`` 的 ``requires_audio``)。要音频能力就配云端通路。
 
-2. **本地不执行任何设备动作**。规则命中只作为"观察结论"上报,一律经
-   AgentDispatcher 交给 agent 决策与执行 —— 即本地通路下所有规则都按 DYNAMIC
-   语义处理。STATIC 规则的"感知层直连设备"低延迟路径在本通路下不启用,
-   ``STATIC_RULE_EXECUTION`` 把这件事声明给 admin 接口与界面,而不是让规则悄悄失灵。
+2. **本地不执行任何设备动作**。规则命中只作为"观察结论"上报,**不含**规则里
+   配置好的那些设备动作 —— 它们会被直接拒绝执行并记为一次 ``RULE_TRIGGER_FAILURE``,
+   既不改写成 DYNAMIC、也不换条路替用户做掉(改写会丢掉 ``cooldown_minutes`` /
+   ``idempotent`` 和台账里 ``source=rule`` 的归属)。要不要动设备、动哪个,由 agent
+   自己判断。两道门:切换时拒绝(转移检查)+ 执行时拒绝(状态不变量)。
+   人工 / agent 经 ``POST /api/rules/{id}/trigger`` 显式触发**不受此限**——那是
+   被授权做决定的角色主动发起,不是感知通路自作主张。
 
 3. **suggestions 不由本地模型产**。主动建议依赖跨模态与长上下文推理,4B 级
-   视觉模型给不出可用质量;这部分能力上移给 agent。
+   视觉模型给不出可用质量;本通路的 ``suggestions`` 恒为空,不做替代实现。
 """
 
 from __future__ import annotations
@@ -92,7 +95,7 @@ class _InputConfig:
 
 
 class LocalVisionEngine(BasePerceptionEngine):
-    #: 本通路不执行任何设备动作 —— 规则命中一律交 agent 决策执行,STATIC 规则的
+    #: 本通路不执行任何设备动作 —— 规则命中只作为观察结论上报,STATIC 规则的
     #: 感知层直连不生效。做成类属性是为了让 admin 接口能直接读它去告知用户,
     #: 而不是在别处再硬编码一份同样的事实(两处一旦漂移,用户看到的就是错的)。
     STATIC_RULE_EXECUTION = False

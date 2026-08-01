@@ -56,9 +56,12 @@ miloco-local-vision --port 18800
 | `LOCAL_VISION_BACKEND` | `codec` | `codec`(推荐)或 `frames` |
 | `LOCAL_VISION_NUM_FRAMES` | `32` | codec 的 target canvas / 帧采样数 |
 | `LOCAL_VISION_TOKEN` | 空 | 配了就强制 `Authorization: Bearer`;不配则**必须**只绑环回地址 |
-
+| `LOCAL_VISION_MAX_PIXELS` | `150000` | 单帧视觉预算(像素)。两条通路共用;下方实测数字就是按这个默认值测的 |
+| `LOCAL_VISION_ATTN` | `sdpa` | transformers 的 attention 实现 |
 | `LOCAL_VISION_HOST` | `127.0.0.1` | 默认只监听本机 |
-| `LOCAL_VISION_MAX_INFLIGHT` | `5` | 同时在飞的推理上限,超限回 503。**必须 > miloco 允许同时启用的摄像头数**(默认 4):等于相机数时,一次主动查询只要撞上正在进行的实时窗口就会全部 503;低于相机数时,固定几台相机每窗都抢不到槽位、规则永久不被评估 |
+| `LOCAL_VISION_PORT` | `18800` | 等价于 `--port` |
+| `CV_PREINFER_BIN` | 自动定位 | codec 通路依赖的外部二进制;不在 PATH 上时用它显式指定 |
+| `LOCAL_VISION_MAX_INFLIGHT` | `5` | 同时在飞的推理上限,超限回 503。**必须 > miloco 允许同时启用的摄像头数**(默认 4):等于相机数时,一次主动查询只要撞上正在进行的实时窗口就会全部 503;低于相机数时,固定几台相机每窗都抢不到槽位、规则永久不被评估。注意默认值 5 仍不足以让"实时窗口 + 主动查询"两批各 4 台完全并行(4+4>5),此时主动查询会有相机拿不到答案(静默略过该相机);相机多且常用主动查询的部署请调高 |
 
 然后在 miloco 的「模型」页把感知后端切到「本地 GPU」,填上本服务地址即可。
 
@@ -71,9 +74,19 @@ miloco-local-vision --port 18800
 ## 接口
 
 ```
-GET  /health        → {status, model_loaded, gate_available, gate_error, device, backend}
-POST /v1/perceive   → {caption, rule_hits[], gate_p, backend, timing_ms, raw}
+GET  /health        → {status, model_loaded, gate_available, gate_error, device, backend,
+                       auth_required, auth_ok}
+POST /v1/perceive   → {caption, rule_hits[], unparsed_rules, truncated, gate_p, backend,
+                       timing_ms, raw}
 ```
+
+自行实现本契约时,下面几个字段**必须**返回,否则 miloco 侧的安全判定会退化:
+
+| 字段 | 不返回的后果 |
+| --- | --- |
+| `auth_required` / `auth_ok` | 凭证校验**fail-open**:miloco 读不到就当作"不需要鉴权",于是配错 token 的部署探活全绿、每一窗推理 401,感知静默停摆 |
+| `unparsed_rules` | 「模型确实说不」与「输出被复读/截断吃掉」变得无法区分,后者会把该相机的规则整体推成未命中 |
+| `truncated` | 同上,且描述会从句子中间断掉后原样交给 agent |
 
 `/v1/perceive` 请求体:
 
@@ -87,6 +100,10 @@ POST /v1/perceive   → {caption, rule_hits[], gate_p, backend, timing_ms, raw}
   "want_gate": true
 }
 ```
+
+`/health` 里的 `backend` 是**启动时配置**的值。实际用哪条通路是每次请求现算的
+(段太短或缺 ffprobe 会退到 `frames`),真实值在 `/v1/perceive` 响应的 `backend`
+字段里 —— miloco 把它记进感知耗时的 `_video_backend`。
 
 `camera_note` 是该机位的自定义说明。它作为**补充**渲染在输出格式约定**之后** ——
 它是用户可写的自由文本,若放在格式说明之前,一句「只用一句话回答」就能让
@@ -127,8 +144,12 @@ agent 提醒,误报却会让 agent 对着不存在的事实做决策。
   是常态占用的,规划功耗时按这个算。
 - **纯视觉**。无音频输入,因此不产语音指令与环境音结论。这是刻意的:让看不见音频的
   模型填这些字段只会得到凭画面脑补的结果。需要音频能力请用云端通路。
+- **不产主动建议**。云端通路会从画面里生成 suggestion 推给 agent;本通路只产描述与
+  规则判定,`suggestions` 恒为空。
 - **无身份识别**。本通路只描述场景与判断规则,不识别家庭成员。
-- **不执行设备动作**。规则命中一律上报给 agent 决策执行。
+- **不执行设备动作**。命中只作为观察结论上报给 agent(不含规则里配置的动作)。
+  带直连设备动作的规则会被拒绝切换到本通路;若已在本通路,这类动作会被拒绝执行
+  并在规则执行历史里记为一次失败触发。
 - **事件门在 Blackwell(sm_120)上不可用**。StreamMind 门控依赖 `mamba_ssm`,而它需要
   用 CUDA ≥ 12.8 的工具链编译才能产出 sm_120 kernel;用 CUDA 12.0 编出来的会在运行时
   报 `no kernel image is available for execution on the device`。服务会自动熄灯门控并在

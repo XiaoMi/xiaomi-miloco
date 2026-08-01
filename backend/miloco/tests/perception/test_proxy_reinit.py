@@ -42,6 +42,13 @@ def _make_proxy(status: str, *, engine=None, message: str = "stale") -> Percepti
     p._last_captions = {}
     p._inference_worker = None
     p._engine_lock = asyncio.Lock()
+    # 绕过 __init__ 的替身也必须带上真实对象有的字段:少一个,被测代码在替身上
+    # 跑得好好的,换成真对象就 AttributeError,而整套测试仍然全绿。
+    p._local_probe = None
+    p._local_probe_error = None
+    p._local_probe_not_before = 0.0
+    p._local_probe_key = None
+    p._allow_sync_probe = False
     return p
 
 

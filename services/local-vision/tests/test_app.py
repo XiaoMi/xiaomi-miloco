@@ -156,6 +156,25 @@ def test_unparsed_and_truncated_survive_the_response_model(client, monkeypatch):
     assert d["gate_p"] == pytest.approx(0.31)
 
 
+def test_every_kwarg_the_app_sends_is_one_the_real_engine_accepts(client, engine):
+    """替身用 **kw 全盘接收,所以光比位置参数抓不到关键字改名。
+
+    实测过:把 MageVLEngine.perceive 的 want_gate 改个名,边车 71 条测试全绿,
+    而线上每个 /v1/perceive 都会 TypeError → 被兜底 except 变成 500。这里拿真
+    签名去 bind 一次实际发出的调用,改名和多传一个参数都会立刻红。
+    """
+    import inspect
+
+    from local_vision.engine import MageVLEngine
+
+    client.post("/v1/perceive", json=_body(
+        scene_ask="门关了吗?", camera_note="对着门口",
+        rules=[{"name": "A", "query": "B"}],
+        max_new_tokens=300, ngram_guard=32, want_gate=False,
+    ))
+    inspect.signature(MageVLEngine.perceive).bind(None, "/tmp/x.mp4", **engine.calls[0])
+
+
 def test_request_fields_reach_the_engine_unchanged(client, engine):
     client.post("/v1/perceive", json=_body(
         scene_ask="门关了吗?", camera_note="这台对着门口",
@@ -188,7 +207,4 @@ def test_stub_engine_signature_matches_the_real_one():
     real = [p.name for p in inspect.signature(MageVLEngine.perceive).parameters.values()]
     stub = [p.name for p in inspect.signature(_StubEngine.perceive).parameters.values()]
     assert stub[:2] == real[:2], f"位置参数不一致: {stub[:2]} vs {real[:2]}"
-    assert "kw" in stub, "替身应以 **kw 接收其余参数"
-    # 真引擎的每个关键字参数都必须真的被 app 传下来(见上一条 passthrough 测试),
-    # 这里只保证替身不会因为多/少一个位置参数而与真引擎脱节。
     assert real[0] == "self" and real[1] == "video_path"

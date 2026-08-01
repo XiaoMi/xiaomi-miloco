@@ -197,3 +197,108 @@ def test_short_edge_none_is_passed_through_so_it_can_follow_the_shared_setting(l
     local_cfg.perception.local_vision.video_short_edge = 256
     p2 = _build(local_cfg)
     assert p2.perception_engine._short_edge_override == 256
+
+
+# ── 探活冷却的两种语义:会自愈的等,不会自愈的退避 ────────────────────────
+
+
+def test_rejected_credentials_arm_a_cooldown(local_cfg):
+    """凭证被拒不会自己好。不设冷却就是每 4s 一次、一天两万多次的空转。"""
+    p = _build(local_cfg, health={**HEALTHY, "auth_required": True, "auth_ok": False})
+    assert p._local_probe_not_before > time.monotonic()
+
+
+def test_model_loading_does_not_arm_a_cooldown(local_cfg):
+    """加载中会自己好 —— 压上冷却只会让就绪白白晚半分钟。"""
+    p = _build(local_cfg, health={**HEALTHY, "model_loaded": False, "status": "loading"})
+    assert p._local_probe_not_before == 0.0
+
+
+@pytest.mark.asyncio
+async def test_explicit_restart_recovers_inside_the_cooldown_window(local_cfg):
+    """冷却是给自动轮询设的节流阀,不该管住用户的手。
+
+    没有这条,边车其实已经恢复了,而用户按「重启感知」是个 no-op —— 还得再干等
+    冷却走完,期间界面显示"已切到本地"而感知完全停摆。
+    """
+    p = _build(local_cfg, exc="down")
+    assert p._status == "local_vision_unreachable"
+    assert p._local_probe_not_before > time.monotonic()  # 冷却生效中
+
+    with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
+            patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync",
+                  lambda self: dict(HEALTHY)):
+        p.try_reinit(include_failed=True)   # 只作废缓存,不在这里探活
+        assert p._local_probe_not_before == 0.0, "冷却没被显式重启清掉"
+        await p.refresh_local_probe()       # tick 的线程化探活
+        p.try_reinit(include_failed=True)
+
+    assert p._status == "ready"
+    assert p.perception_engine is not None
+
+
+# ── 主事件循环上永远不做同步 HTTP ─────────────────────────────────────────
+
+
+def test_rebuild_after_a_config_change_does_not_probe_inline(local_cfg):
+    """admin 切换与「重启感知」都经这条路,而两者都跑在主事件循环上。
+
+    这里同步探活的话,边车地址被防火墙 DROP 时,相机取帧 / SSE / 整个 API 会被
+    卡住最多 3 秒 —— 而这个文件周围的注释三次声称"同步路径永远不碰网络"。
+    """
+    p = _build(local_cfg)
+    assert p._status == "ready"
+
+    calls: list = []
+
+    def _health(self):
+        calls.append(self.base_url)
+        return dict(HEALTHY)
+
+    local_cfg.perception.local_vision.base_url = "http://moved:18800"
+    with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
+            patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync", _health):
+        p.perception_engine = None
+        p._init_engine()
+
+    assert calls == [], f"在主事件循环上做了同步探活: {calls}"
+    assert p._status == "local_vision_unreachable"
+    assert "待探活" in p._status_message
+
+
+def test_explicit_restart_does_not_probe_inline_either(local_cfg):
+    p = _build(local_cfg, exc="down")
+    calls: list = []
+
+    def _health(self):
+        calls.append(1)
+        return dict(HEALTHY)
+
+    with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
+            patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync", _health):
+        p.try_reinit(include_failed=True)
+    assert calls == []
+
+
+def test_construction_may_probe_synchronously(local_cfg):
+    """构造期是唯一的例外(还没有事件循环在跑),否则冷启动会先报一次假故障。"""
+    p = _build(local_cfg)
+    assert p._status == "ready"
+    assert p._allow_sync_probe is False, "构造完必须关掉同步探活的口子"
+
+
+@pytest.mark.asyncio
+async def test_tick_refreshes_the_probe_before_attempting_a_rebuild():
+    """整条"主循环不做同步 HTTP"的设计,全靠 tick 里这个先后顺序撑着。
+
+    删掉 tick 里那次 await,重建路径就会退回到自己去探活 —— 而它是同步的。
+    这条不测的话,那次删除不会让任何测试变红。
+    """
+    import inspect
+
+    from miloco.perception import runner as rn
+
+    src = inspect.getsource(rn.PerceptionRunner._tick)
+    assert "refresh_local_probe" in src, "tick 不再刷新探活缓存"
+    assert src.index("refresh_local_probe") < src.index("try_reinit_engine"), \
+        "探活刷新必须排在重建之前,否则重建会在主循环上自己去探"

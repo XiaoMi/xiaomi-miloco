@@ -49,6 +49,16 @@ export type HealthLine =
  * 只看 health 是否存在就会一路绿灯,而每一窗推理都在 401 —— 感知静默停摆,
  * 界面上却什么都看不出来。
  */
+/**
+ * 本地 GPU 按钮上那个「可达」角标。
+ *
+ * 必须与 {@link healthLine} 同源。分开算过一次,结果是凭证被拒时按钮显示绿色
+ * 「可达」、紧邻的一行显示「✗ 边车拒绝当前凭证」—— 同一屏上自相矛盾。
+ */
+export function isReachable(state: PerceptionBackendState): boolean {
+  return healthLine(state).kind === "ok";
+}
+
 export function healthLine(state: PerceptionBackendState): HealthLine {
   if (state.error) return { kind: "unreachable" };
   const h = state.health;

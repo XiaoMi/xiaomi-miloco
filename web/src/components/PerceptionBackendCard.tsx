@@ -4,7 +4,7 @@
  * 两条并列通路,二选一:
  * - **云端 API** —— 现状默认。用下方「模型列表」里配好的多模态模型,需要 API Key。
  * - **本地 GPU** —— 画面不出本地、零 token 成本、延迟低;但纯视觉:无音频结论、
- *   无身份识别,且不直接执行设备动作(规则命中一律交 agent 决策)。
+ *   无身份识别,且不执行任何设备动作(命中只上报,配置好的动作会被拒绝)。
  *
  * 切到本地前后端会先探活,不通直接拒绝 —— 与「启用云端模型前先测连接」同一条
  * 不变量:不让用户切到一个不工作的后端上,否则感知会静默停摆。
@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getPerceptionBackend, setPerceptionBackend } from "@/api";
-import { buildSwitchPayload, healthLine } from "@/lib/perceptionBackend";
+import { buildSwitchPayload, healthLine, isReachable } from "@/lib/perceptionBackend";
 import type { PerceptionBackendState } from "@/lib/types";
 import { toast } from "./Toast";
 
@@ -89,9 +89,7 @@ export function PerceptionBackendCard() {
 
   const isLocal = state.backend === "local";
   const line = healthLine(state);
-  // 「可达」必须和下面那行探活结论用同一个判定。分开算的话,凭证被拒时会出现
-  // 按钮显示绿色「可达」、紧邻的一行显示「✗ 边车拒绝当前凭证」的自相矛盾。
-  const reachable = line.kind === "ok";
+  const reachable = isReachable(state);
 
   return (
     <section
@@ -207,6 +205,10 @@ export function PerceptionBackendCard() {
           ) : line.kind === "ok" ? (
             <span className="text-success num">
               ✓ {line.device} · {line.backend}
+              <span className="text-text-tertiary">
+                {" "}
+                {t("perceptionBackend.backendConfigured")}
+              </span>
               {line.gateOff ? ` · ${t("perceptionBackend.gateOff")}` : ""}
             </span>
           ) : null}
@@ -215,18 +217,28 @@ export function PerceptionBackendCard() {
 
       {/* 能力差异:切到本地会失去什么,必须在切之前就看得到 */}
       <ul className="mt-4 text-caption text-text-secondary space-y-1">
-        <li>• {t("perceptionBackend.capNoKey")}</li>
+        {!state.local_capabilities.needs_api_key && (
+          <li>• {t("perceptionBackend.capNoKey")}</li>
+        )}
         {!state.local_capabilities.audio && <li>• {t("perceptionBackend.capNoAudio")}</li>}
         {!state.local_capabilities.identity && <li>• {t("perceptionBackend.capNoIdentity")}</li>}
+        {!state.local_capabilities.suggestions && (
+          <li>• {t("perceptionBackend.capNoSuggestions")}</li>
+        )}
         {!state.local_capabilities.static_rule_execution && (
           <li className="text-warning">• {t("perceptionBackend.capNoStatic")}</li>
         )}
       </ul>
 
-      {/* 会挡住切换的规则先列出来,免得用户点了才知道 —— 后端会以 400 拒绝。 */}
-      {!isLocal && state.blocking_static_rules.length > 0 && (
+      {/* 这批规则在两种状态下都要显示,措辞不同:
+          - 还在云端:它们会挡住切换(后端 400),先预告;
+          - 已在本地:它们的设备动作**正在被拒绝执行**——恰恰是最该看见的时候。
+          早先只在 !isLocal 时渲染,等于在唯一要紧的状态下把证据藏了起来。 */}
+      {state.blocking_static_rules.length > 0 && (
         <div className="mt-3 text-caption text-warning bg-warning-bg rounded-lg px-3 py-2">
-          {t("perceptionBackend.blockingRules")}
+          {t(isLocal
+            ? "perceptionBackend.blockingRulesLocal"
+            : "perceptionBackend.blockingRules")}
           <span className="num"> {state.blocking_static_rules.join("、")}</span>
         </div>
       )}

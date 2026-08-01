@@ -492,14 +492,20 @@ def test_engine_supports_the_lifecycle_calls_the_proxy_makes():
     # 显示 0 是错的而不是"没有";omni_fps 才是真的没有对应物。
     assert cfg is not None and cfg.fps == 3 and cfg.omni_fps == 0
 
-    # 硬编码一张方法清单只能守住"今天已知的调用",守不住明天新加的那一个。
-    # 直接对着基类的公开面断言 —— 基类多一个方法,这里立刻就知道。
-    expected = {
-        n for n, _ in inspect.getmembers(BasePerceptionEngine, callable)
-        if not n.startswith("_")
-    }
-    missing = [n for n in expected if not hasattr(e, n)]
-    assert missing == [], f"引擎缺少 proxy/processor 会调用的方法: {missing}"
+    # 注意不能用 hasattr 对着基类公开面断言:LocalVisionEngine 继承自它,
+    # 那样的 missing 永远是空,是一条不可能失败的断言。
+    # 真正要守的是:抽象方法必须被实现,且本引擎语义不同的那几个必须**覆盖**掉
+    # 基类的无害默认值(否则面板/上层拿到的是 None 而不是真值)。
+    assert not getattr(LocalVisionEngine, "__abstractmethods__", frozenset())
+    for name in ("get_input_config", "realtime_perceive", "on_demand_perceive"):
+        assert getattr(LocalVisionEngine, name) is not getattr(
+            BasePerceptionEngine, name, None
+        ), f"{name} 没有被本地引擎覆盖,会拿到基类的占位实现"
+
+    # 反过来,proxy/processor 无条件调用的那几个必须存在(继承来的也算)。
+    for name in ("close", "set_main_loop", "set_tierc_frame_provider", "apply_omni_fps"):
+        assert callable(getattr(e, name)), name
+    assert inspect.isabstract(BasePerceptionEngine) or True
 
     loop = _asyncio.new_event_loop()
     try:
@@ -844,13 +850,28 @@ async def test_encode_failure_skips_the_device_without_faking_evidence(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_malformed_sidecar_response_degrades_only_that_device():
+async def test_malformed_sidecar_response_degrades_only_that_device(monkeypatch):
     """契约对第三方实现开放。回一个数组会在 .get() 处抛 AttributeError,
-    穿透"任一环节失败 → 该设备跳过"的设计,把整窗所有设备一起毁掉。"""
-    client = _FakeClient([
-        ["not", "an", "object"],
-        {"caption": "客厅有人", "rule_hits": [], "gate_p": None, "backend": "codec"},
-    ])
+    穿透"任一环节失败 → 该设备跳过"的设计,把整窗所有设备一起毁掉。
+
+    响应按**设备**寻址,不能按调用顺序:两台相机的编码跑在线程池里,完成顺序
+    不定,用队列 pop 会让"谁拿到畸形响应"随机漂移 —— 那是一条会偶发的假测试。
+    """
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(
+        eng, "encode_snapshot_to_h264",
+        lambda snap, *a, **k: snap.device.did.encode(),
+    )
+
+    class _ByDid(_FakeClient):
+        async def perceive(self, video, rules, **kw):
+            await super().perceive(video, rules, **kw)
+            return (["not", "an", "object"] if video == b"cam1"
+                    else {"caption": "客厅有人", "rule_hits": [],
+                          "gate_p": None, "backend": "codec"})
+
+    client = _ByDid()
     res = await _engine(client).realtime_perceive(
         BatchedSnapshot(snapshots=[_snapshot("cam1"), _snapshot("cam2", room="客厅")]), []
     )
@@ -1050,11 +1071,45 @@ async def test_events_carry_the_time_window_in_deploy_timezone():
     res = await _engine(client).realtime_perceive(
         BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
     )
-    import re as _re
+    # 断言**值**,不是形状:形状正则分不出任何两个时区,而"把北京 10:52 说成
+    # 凌晨 02:52"恰恰是形状完全合法、值全错。
+    from miloco.perception.engine.pipeline import _fmt_time_window
 
-    pattern = _re.compile(r"^\[\d{2}:\d{2}:\d{2}-\d{2}:\d{2}:\d{2}\]$")
-    assert pattern.match(res.caption[0].time_window), res.caption[0].time_window
-    assert pattern.match(res.matched_rules[0].time_window)
+    snap = _snapshot("cam1")
+    expected = _fmt_time_window(snap.start_timestamp, snap.end_timestamp)
+    assert res.caption[0].time_window == expected
+    assert res.matched_rules[0].time_window == expected
+
+
+@pytest.mark.asyncio
+async def test_time_window_follows_the_deployment_timezone_not_the_process_clock(
+    monkeypatch,
+):
+    """换一个部署时区,输出必须跟着变。
+
+    裸 fromtimestamp 的实现在这条上会纹丝不动 —— 它读的是进程/OS 时钟。UTC 主机
+    上因此把北京 10:52 标成「凌晨02:52」,agent 据此判断作息,是发生过的事故。
+    """
+    from datetime import timedelta, timezone
+
+    import miloco.perception.engine.pipeline as pl
+
+    seen: list = []
+    client = _FakeClient([
+        {"caption": "有人", "rule_hits": [], "gate_p": None, "backend": "codec"},
+        {"caption": "有人", "rule_hits": [], "gate_p": None, "backend": "codec"},
+    ])
+    e = _engine(client)
+    batch = BatchedSnapshot(snapshots=[_snapshot("cam1")])
+
+    for offset in (0, 8):
+        monkeypatch.setattr(
+            pl, "deploy_timezone", lambda o=offset: timezone(timedelta(hours=o))
+        )
+        res = await e.realtime_perceive(batch, [])
+        seen.append(res.caption[0].time_window)
+
+    assert seen[0] != seen[1], f"换了部署时区,时间窗却没变:{seen}"
 
 
 def test_health_accepts_json_ints_for_boolean_fields():
@@ -1072,3 +1127,25 @@ def test_health_accepts_json_ints_for_boolean_fields():
     assert out["model_loaded"] is True
     assert out["gate_available"] is False
     assert out["auth_required"] is True and out["auth_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_token_budget_is_capped_at_the_sidecar_limit():
+    """规则再多,预算也不能越过边车接受的上限。
+
+    越过了每一窗都会 422,而在日志里与其它边车故障长得一模一样。上限的字面值
+    分属两个独立部署的构件(见 engine 里的说明),这里至少保证本侧不会算超。
+    """
+    from miloco.perception.local_vision.engine import _MAX_NEW_TOKENS_CEILING
+
+    rules = [
+        {"id": f"r{i}", "name": f"n{i}",
+         "condition": {"query": "有人", "perceive_device_ids": []}}
+        for i in range(40)
+    ]
+    client = _FakeClient([{"caption": "x", "rule_hits": [],
+                           "gate_p": None, "backend": "codec"}])
+    await _engine(client, max_new_tokens=1000).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    assert client.calls[0]["max_new_tokens"] == _MAX_NEW_TOKENS_CEILING

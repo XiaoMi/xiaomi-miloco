@@ -134,6 +134,9 @@
     "tokenLabel": "Access token",
     "tokenPlaceholder": "leave empty if not required",
     "tokenSaved": "saved — leave empty to keep",
-    "authBad": "sidecar rejected the token"
+    "authBad": "sidecar rejected the token",
+    "blockingRulesLocal": "These enabled rules carry direct device actions; on this path they will not run (a hit is recorded as a failed trigger):",
+    "capNoSuggestions": "No proactive suggestions: it produces scene descriptions and rule verdicts only.",
+    "backendConfigured": "(configured at startup; the effective path is chosen per request)"
   }
 }

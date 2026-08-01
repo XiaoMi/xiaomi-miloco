@@ -34,6 +34,18 @@ def test_finds_the_tool_next_to_the_interpreter(tmp_path, monkeypatch):
     assert os.environ["CV_PREINFER_BIN"] == found
 
 
+def test_tool_already_on_path_is_used_as_is(tmp_path, monkeypatch):
+    """最常见的情形(激活了 venv 再起服务)反而最容易漏测。"""
+    monkeypatch.delenv("CV_PREINFER_BIN", raising=False)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    tool = bindir / "cv-preinfer"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    assert ensure_codec_tool_on_path() == str(tool)
+
+
 def test_missing_tool_returns_none_rather_than_raising(tmp_path, monkeypatch):
     """返回 None 让调用方降级到 frames;抛异常会让整个服务起不来。"""
     monkeypatch.delenv("CV_PREINFER_BIN", raising=False)
@@ -71,7 +83,9 @@ class _RecordingProcessor:
 def _engine_with_stub_processor(backend: str):
     from local_vision.engine import MageVLEngine
 
-    e = MageVLEngine(checkpoint="x", video_backend=backend, num_frames=8, max_pixels=1234)
+    # num_frames 取个不常见的值:与断言里的字面量撞车的话,把 target_canvas 写死
+    # 也照样绿。
+    e = MageVLEngine(checkpoint="x", video_backend=backend, num_frames=7, max_pixels=1234)
     e._processor = _RecordingProcessor()
     return e
 
@@ -82,7 +96,7 @@ def test_codec_branch_bounds_the_visual_budget():
     assert e._processor.kw["max_pixels"] == 1234
     # patch=16 与 Mage-ViT 的预测块对齐,不可随意改;target_canvas 走 num_frames。
     assert e._processor.kw["codec_config"] == {
-        "engine": "hevc", "target_canvas": 8, "patch": 16,
+        "engine": "hevc", "target_canvas": 7, "patch": 16,
     }
 
 
@@ -98,4 +112,4 @@ def test_frames_branch_bounds_the_visual_budget_too(monkeypatch):
     e = _engine_with_stub_processor("frames")
     e._build_inputs("/tmp/seg.mp4", "描述一下", "frames")
     assert e._processor.kw["max_pixels"] == 1234
-    assert e._processor.kw["videos"] == [["F"] * 8]
+    assert e._processor.kw["videos"] == [["F"] * 7]

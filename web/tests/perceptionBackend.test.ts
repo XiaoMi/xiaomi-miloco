@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSwitchPayload, healthLine } from "@/lib/perceptionBackend";
+import { buildSwitchPayload, healthLine, isReachable } from "@/lib/perceptionBackend";
 import type { PerceptionBackendState } from "@/lib/types";
 
 function state(over: Partial<PerceptionBackendState> = {}): PerceptionBackendState {
@@ -102,5 +102,27 @@ describe("边界形状", () => {
       backend: "",
       gateOff: true,
     });
+  });
+});
+
+describe("isReachable", () => {
+  it("与探活结论同源:凭证被拒时不算可达", () => {
+    // 曾经分开算过:按钮显示绿色「可达」,紧邻一行显示「✗ 边车拒绝当前凭证」。
+    const s = state({ health: { ...healthy, auth_required: true, auth_ok: false } });
+    expect(isReachable(s)).toBe(false);
+  });
+
+  it("不可达时不算可达,哪怕 health 还留着上一次的快照", () => {
+    expect(isReachable(state({ error: "unreachable", health: healthy }))).toBe(false);
+  });
+
+  it("模型还在加载时不算可达", () => {
+    const s = state({ health: { ...healthy, model_loaded: false, status: "loading" } });
+    // model_loaded=false 时后端不会给出 ok 的探活行,按钮也不该显示可达。
+    expect(isReachable(s)).toBe(healthLine(s).kind === "ok");
+  });
+
+  it("一切正常时可达", () => {
+    expect(isReachable(state({ health: healthy }))).toBe(true);
   });
 });
