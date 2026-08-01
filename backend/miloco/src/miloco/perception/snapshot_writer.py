@@ -74,13 +74,15 @@ def locate_clip_file(device_dir: Path) -> tuple[Path, str] | None:
     return None
 
 
-def clip_download_name(timestamp_ms: int, suffix: str) -> str:
+def clip_download_name(timestamp_ms: int, suffix: str, prefix: str = "clip") -> str:
+    # prefix 参数化是为让参考帧端点(ref-*.jpg)复用同一时间格式,而不是各写一份 strftime
+    # ——两处下载名要么一起改、要么一起不改,不能只改一处让用户导出的 clip 与 ref 名字错开。
     from datetime import datetime
 
     from miloco.utils.time_utils import deploy_timezone
 
     local_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=deploy_timezone())
-    return f"clip-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.{suffix}"
+    return f"{prefix}-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.{suffix}"
 
 
 def get_snapshot_root() -> Path:

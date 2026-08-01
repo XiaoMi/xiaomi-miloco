@@ -141,16 +141,15 @@ async def get_event_ref(
     status, path, timestamp_ms = await svc.locate_ref(event_id, device_id)
     if status == "found":
         assert path is not None and timestamp_ms is not None
-        # filename 与 clip 端点同源同格式(见 get_event_clip 注释):不设时"另存为"会拿
-        # URL 末段 device_id 当名字、且没后缀;设了才能一眼看出是哪天哪个事件的参考帧。
-        from datetime import datetime
+        # filename 与 clip 端点**共用同一个** clip_download_name(只换前缀),不是各写一份
+        # strftime:不设时"另存为"会拿 URL 末段 device_id 当名字、且没后缀;设了才能一眼
+        # 看出是哪天哪个事件的参考帧。
+        from miloco.perception.snapshot_writer import clip_download_name
 
-        from miloco.utils.time_utils import deploy_timezone
-        local_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=deploy_timezone())
         return FileResponse(
             path=path,
             media_type="image/jpeg",
-            filename=f"ref-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.jpg",
+            filename=clip_download_name(timestamp_ms, "jpg", prefix="ref"),
             content_disposition_type="inline",
         )
     if status == "gone":

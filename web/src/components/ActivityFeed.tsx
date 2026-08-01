@@ -624,7 +624,9 @@ function Lightbox({
       onClick={onClose}
       className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 cursor-zoom-out anim-in"
       role="dialog"
-      aria-label={t("activity.playback")}
+      // 必须跟着 kind 走:label 写在 kind 分叉之前,读屏会把参考帧对话框念成"事件回放"
+      // ——与屏上内容不符,而读屏用户没有画面可以纠正这句描述。
+      aria-label={kind === "image" ? t("activity.refFrame") : t("activity.playback")}
     >
       <button
         type="button"
