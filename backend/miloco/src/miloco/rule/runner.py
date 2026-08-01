@@ -59,41 +59,6 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
 
-
-def _local_backend_active() -> bool:
-    """当前感知后端是否为本地视觉通路。
-
-    读配置而非注入依赖:规则引擎与感知引擎没有直接引用关系,而这条判断必须与
-    界面上声明的能力保持一致。读失败按 False(云端语义)处理 —— 保持既有行为。
-    """
-    try:
-        from miloco.config import get_settings
-
-        return get_settings().perception.engine_backend == "local"
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _static_actions_as_prompt(actions) -> str:
-    """把 STATIC 动作列表转成给 agent 的自然语言意图。
-
-    保留用户原本配置的动作语义,由 agent 结合当时上下文决定是否/如何执行。
-    """
-    lines = []
-    for i, a in enumerate(actions or [], 1):
-        desc = getattr(a, "description", None) or ""
-        if not desc:
-            did = getattr(a, "did", "") or ""
-            iid = getattr(a, "iid", "") or ""
-            val = getattr(a, "value", None)
-            desc = f"对设备 {did} 设置 {iid} = {val}" if did else str(a)
-        lines.append(f"{i}. {desc}")
-    body = "\n".join(lines) if lines else "(未配置具体动作)"
-    return (
-        "该规则原本配置了直接执行的设备动作,但当前感知走本地视觉通路,"
-        "动作改由你判断后执行。请结合当前家庭状态决定是否执行以下动作:\n" + body
-    )
-
 _EMPTY_RESULT_MSG = "MIoT 返回为空/不可判定,无法确认执行结果"
 
 
@@ -1237,19 +1202,6 @@ class RuleRunner:
 
         start_time = int(time.time() * 1000)
         kind, value = slot
-
-        # 本地视觉通路下,STATIC 的「感知层直连设备」不生效:命中一律改为交 agent
-        # 决策执行。这不是可选的谨慎 —— 界面与日志都向用户声明了这条(切换卡片上
-        # 那句"本地通路不直接控制设备"),不实现就是界面在骗人:用户会留着
-        # 「厨房明火 → 关燃气总阀」这类规则,以为有 agent 把关,实际是一个 4B 模型
-        # 的一句"是"直接关阀。
-        # 只改执行方式、不改命中语义:规则照常判定、照常记录,只是动作交给 agent。
-        if kind == "static" and _local_backend_active():
-            kind = "dynamic"
-            value = _static_actions_as_prompt(value)
-            logger.info(
-                "rule %s: 本地视觉通路下 STATIC 动作改由 agent 决策执行", rule.id,
-            )
 
         logger.info(
             "FIRE: rule=%s name=%s event=%s mode=%s slot=%s sources=%s execute_id=%s",

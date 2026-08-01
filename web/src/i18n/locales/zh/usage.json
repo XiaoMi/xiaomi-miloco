@@ -110,7 +110,7 @@
     "deleteFailed": "删除失败",
     "modelsEmptyResult": "该地址未返回模型列表",
     "modelsFetchFailed": "拉取模型失败",
-    "notUsedByLocalPerception": "感知后端当前为「本地 GPU」,下列模型不参与视频感知(仍用于主动查询之外的其它调用)。要让它们重新承担感知,请在上方切回「云端 API」。"
+    "notUsedByLocalPerception": "感知后端当前为「本地 GPU」,下列模型不参与视频感知。要让它们重新承担感知,请在上方切回「云端 API」。"
   },
   "perceptionBackend": {
     "title": "感知后端",

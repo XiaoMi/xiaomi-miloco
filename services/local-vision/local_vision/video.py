@@ -44,7 +44,12 @@ def pick_backend(preferred: str, frame_count: int) -> str:
     """段太短时把 codec 降级成 frames,而不是让整次感知失败。"""
     if preferred != "codec":
         return preferred
-    if 0 <= frame_count < MIN_CODEC_FRAMES:
+    if frame_count < 0:
+        # 探不出帧数(多半是没有 ffprobe)。codec 通路同样依赖外部工具,这时候
+        # 硬走 codec 会每一窗 500;按文档承诺的"保守选择"退到帧采样。
+        logger.warning("frame count probe failed; falling back to frames backend")
+        return "frames"
+    if frame_count < MIN_CODEC_FRAMES:
         logger.info(
             "segment has %d frames (< %d): falling back to frames backend",
             frame_count, MIN_CODEC_FRAMES,

@@ -25,6 +25,7 @@ import {
   testOmniConfig,
 } from "@/api";
 import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
+import { PERCEPTION_BACKEND_CHANGED } from "./PerceptionBackendCard";
 import { IconX, IconEye, IconEyeOff } from "@/lib/icons";
 import { toast } from "./Toast";
 
@@ -208,14 +209,22 @@ export function UsageOmniConfig() {
 
   useEffect(() => {
     void load();
-    void getPerceptionBackend()
-      .then((b) => setPerceptionLocal(b.backend === "local"))
-      .catch(() => {});
+    const syncBackend = () =>
+      void getPerceptionBackend()
+        .then((b) => setPerceptionLocal(b.backend === "local"))
+        .catch(() => {});
+    syncBackend();
+    // 同页上方切换后端后必须重取:否则切到本地时这张表仍标着「生效中」而无提示,
+    // 切回云端时提示又赖着不走 —— 两种都在骗人,只有刷新页面才对。
+    window.addEventListener(PERCEPTION_BACKEND_CHANGED, syncBackend);
     // OmniHealthBanner 的 SSE 重连(backend 重启后)会 dispatch 此事件,
     // 让当前页面同步 refetch 最新 config,避免视觉与实际状态错位。
     const onStale = () => void load();
     window.addEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
-    return () => window.removeEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
+    return () => {
+      window.removeEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
+      window.removeEventListener(PERCEPTION_BACKEND_CHANGED, syncBackend);
+    };
   }, []);
 
   async function load() {

@@ -76,7 +76,7 @@ app = FastAPI(title="miloco local-vision", version="0.1.0", lifespan=lifespan)
 # 默认 5 = 相机上限(4)+ 1 —— 多出来的那个留给主动查询。miloco 的主动查询同样会
 # 把所有相机并发发过来,如果上限正好等于相机数,一次用户提问只要撞上一个正在进行的
 # 实时窗口就会全部 503,agent 那头拿到空答案。
-_MAX_INFLIGHT = int(os.environ.get("LOCAL_VISION_MAX_INFLIGHT", "5"))
+_MAX_INFLIGHT = max(1, int(os.environ.get("LOCAL_VISION_MAX_INFLIGHT", "5")))
 _inflight = threading.Semaphore(_MAX_INFLIGHT)
 
 
@@ -87,7 +87,9 @@ def require_token(request: Request) -> None:
         return
     got = request.headers.get("authorization", "")
     # 常数时间比较:普通 != 会因短路而泄漏前缀匹配长度。
-    if not hmac.compare_digest(got, f"Bearer {expected}"):
+    # 必须先 encode:compare_digest 对非 ASCII str 抛 TypeError —— token 里带一个
+    # 中文字符就会让每次鉴权变成未捕获 500,而 /health 仍报 ok,排查时完全对不上。
+    if not hmac.compare_digest(got.encode("utf-8"), f"Bearer {expected}".encode()):
         raise HTTPException(status_code=401, detail="invalid or missing token")
 
 
@@ -108,6 +110,10 @@ class PerceiveRequest(BaseModel):
 class PerceiveResponse(BaseModel):
     caption: str
     rule_hits: list[dict]
+    # 必须声明,否则 pydantic 默认 extra="ignore" 会把它在边界上丢掉 ——
+    # "模型输出被复读吃光/格式被带偏"就与"模型确实说不"变得无法区分,而前者会让
+    # 该相机的规则被整体推成未命中(state 规则甚至会因此触发 on_exit 动作)。
+    unparsed_rules: int = 0
     gate_p: float | None
     backend: str
     timing_ms: dict

@@ -17,6 +17,10 @@ import { getPerceptionBackend, setPerceptionBackend } from "@/api";
 import type { PerceptionBackendState } from "@/lib/types";
 import { toast } from "./Toast";
 
+/** 后端切换完成事件。同页的「模型配置」表要据此刷新它的"云端模型是否在被调用"
+ *  提示 —— 两块卡挨着显示,不联动的话切完会一个说本地生效、另一个说云端生效。 */
+export const PERCEPTION_BACKEND_CHANGED = "miloco:perception-backend-changed";
+
 const INPUT_CLS =
   "w-full px-3 py-2 rounded-lg bg-bg-primary border border-border " +
   "focus:border-brand-primary focus:outline-none text-text-primary num";
@@ -51,6 +55,7 @@ export function PerceptionBackendCard() {
         backend === "local" ? { backend, base_url: baseUrl.trim() } : { backend },
       );
       setState(s);
+      window.dispatchEvent(new Event(PERCEPTION_BACKEND_CHANGED));
       toast(
         backend === "local"
           ? t("perceptionBackend.switchedLocal")
@@ -170,7 +175,7 @@ export function PerceptionBackendCard() {
         </label>
         <div className="text-caption pt-6">
           {state.error ? (
-            <span className="text-error">✗ {state.error}</span>
+            <span className="text-error">✗ {t("perceptionBackend.unreachable")}</span>
           ) : health ? (
             <span className="text-success num">
               ✓ {health.device ?? ""} · {health.backend ?? ""}

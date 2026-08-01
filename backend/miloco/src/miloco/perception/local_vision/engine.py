@@ -159,6 +159,16 @@ class LocalVisionEngine(BasePerceptionEngine):
             logger.warning("[local-vision] sidecar failed did=%s: %s", did, e)
             return None
 
+        if not isinstance(out, dict):
+            # 契约对第三方实现开放。返回一个数组之类的东西会在下面 .get() 处抛
+            # AttributeError,穿透"任一环节失败 → 该设备跳过"的降级设计,毁掉整窗
+            # 所有设备。
+            logger.warning(
+                "[local-vision] sidecar returned %s, expected object did=%s",
+                type(out).__name__, did,
+            )
+            return None
+
         return {"did": did, "snapshot": snapshot, "dispatched": dispatched, "out": out}
 
     async def realtime_perceive(

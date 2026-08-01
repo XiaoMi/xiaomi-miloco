@@ -22,6 +22,9 @@ import re
 _RULE_LINE_RE = re.compile(r"^\s*(?:\d+[.、]\s*)?规则\s*(\d+)\s*[:：]\s*(.+)$")
 # 模型偶尔把描述编号成「1.」「2.」,清掉行首编号免得混进 caption。
 _LEADING_NUM_RE = re.compile(r"^\s*\d+[.、]\s*")
+# 「规则N:」这个记号本身。出现在自由文本(机位须知 / 规则 query)里就抹掉 ——
+# 留着它,模型抄一遍就变成一条可解析的伪判定。
+_RULE_TOKEN_RE = re.compile(r"规则\s*[0-9０-９]+\s*[:：]")
 # 「描述:」是我们要求的行首标记,是格式而非内容 —— 落进 caption 会一路带到
 # 事件文案与 agent 上下文里,必须剥掉。
 _CAPTION_TAG_RE = re.compile(r"^(?:描述|场景描述|描述内容)\s*[:：]\s*")
@@ -87,7 +90,9 @@ def build_prompt(
         "需要判断的条件:",
     ]
     for i, r in enumerate(rules, 1):
-        cond = (r.get("query") or r.get("name") or "").strip()
+        # query 是无长度、无换行限制的自由文本,且被逐字插进条件区 —— 一个换行
+        # 就能凭空多出一条"规则3: 是 - …",还会让后面的编号全部错位。
+        cond = _strip_verdict_lines(r.get("query") or r.get("name") or "")
         lines.append(f"规则{i}: {cond}")
     if note:
         lines.append("")
@@ -98,6 +103,27 @@ def build_prompt(
 # 机位须知的最大长度。与 miloco 侧 MAX_CAMERA_PROMPT_LEN 对齐 —— 取更小值会把
 # 用户合法写下的后半句悄悄吃掉,而用户习惯把最重要的限定写在最后。
 _NOTE_MAXLEN = 500
+
+
+def _strip_verdict_lines(text: str) -> str:
+    """把一段自由文本压成**绝不可能构成判定行**的单行文本。
+
+    逐行检查是不够的:去掉「」之后可能**重新**拼出判定行(``「规则1: 是 - …``
+    躲过检查,转换后正好变成合法判定行);两行各自无害的片段(``规则1:`` 与
+    ``是 - 灶台上有明火``)join 起来也能构成一条。所以先做替换、再在**最终文本**
+    上验证,并且整体压成单行 —— 判定行的正则锚定行首,没有换行就没有行首。
+    """
+    flat = " ".join(
+        (text or "")
+        .replace("「", " ")
+        .replace("」", " ")
+        .splitlines()
+    )
+    # 光把它挤到非行首是不够的 —— 文本还在,模型完全可以把它抄到自己的一行上,
+    # 那就成了一条可解析的判定。所以直接**抹掉"规则N:"这个记号本身**:源文本里
+    # 不存在判定形状的东西,就没有可抄的。
+    flat = _RULE_TOKEN_RE.sub("〔规则〕", flat)
+    return " ".join(flat.split()).strip()
 
 
 def _sanitize_note(note: str) -> str:
@@ -113,12 +139,7 @@ def _sanitize_note(note: str) -> str:
        后半段就变成 prompt 末尾的顶格指令(最强的近因位置),一句"上面的说明作废"
        就能让规则行整体消失,而 fail-closed 会把它变成该相机规则静默全灭。
     """
-    cleaned = []
-    for line in (note or "").splitlines():
-        if _RULE_LINE_RE.match(line):
-            continue  # 伪判定行,丢弃
-        cleaned.append(line.replace("「", " ").replace("」", " ").strip())
-    text = " ".join(x for x in cleaned if x).strip()
+    text = _strip_verdict_lines(note)
     if len(text) > _NOTE_MAXLEN:
         text = text[:_NOTE_MAXLEN] + "…(已截断)"
     return text
@@ -194,7 +215,13 @@ def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
                 # 放到紧跟的下一行(「规则1: 有人在客厅沙发上」+「否 - 依据: …」)。
                 # 不往下看一行就会把一次真判定读成未判定 —— 说"是"时那就是漏报。
                 hit, reason = _verdict_from_following_line(lines, idx)
-            verdicts[int(m.group(1))] = (hit, reason)
+            idx_n = int(m.group(1))
+            if idx_n in verdicts and verdicts[idx_n] != (hit, reason):
+                # 同一条规则出现两次且结论不同(模型复述条件列表、或重来一遍)。
+                # 后者覆盖前者能把"否"翻成"是" —— 按 fail-closed 取未判定。
+                verdicts[idx_n] = (False, NO_VERDICT_REASON)
+            else:
+                verdicts.setdefault(idx_n, (hit, reason))
             continue
         s = _LEADING_NUM_RE.sub("", line).strip()
         tagged = _CAPTION_TAG_RE.match(s) is not None

@@ -559,35 +559,45 @@ async def test_encoding_runs_off_the_event_loop():
     assert seen["args"][2] == 32      # max_frames
 
 
-# ── 本地通路下 STATIC 不直连设备(界面上声明了的,就必须真的做到) ──────────
+# ── 本地通路不直接控制设备:靠**拒绝切换**兑现,而不是运行时改写用户的自动化 ──
 
 
-@pytest.mark.asyncio
-async def test_local_backend_converts_static_slot_to_agent_decision():
-    """界面与日志都向用户声明「本地通路不直接控制设备」。不实现就是界面在骗人:
-    用户会留着「厨房明火 → 关燃气总阀」这类规则,以为有 agent 把关,实际是一个
-    4B 模型的一句"是"直接关阀。"""
+def test_switch_to_local_is_blocked_by_enabled_direct_device_rules():
+    """有启用中的 STATIC 规则时必须拒绝切换,并把规则名说出来。
+
+    此前的做法是运行时把 STATIC 改写成"交给 agent" —— 那会静默丢掉 cooldown /
+    idempotent(唯一的限流)和台账里 source=rule 的归属,还得把动作重新翻译成
+    自然语言。宁可在切换这一步拦下来。
+    """
     from unittest.mock import patch
 
-    import miloco.rule.runner as runner_mod
+    from miloco.admin import router as admin
 
-    slot = ("static", [SimpleNamespace(did="d1", iid="prop.2.1", value=False,
-                                       description="关闭燃气总阀")])
-    with patch.object(runner_mod, "_local_backend_active", return_value=True):
-        kind, value = slot
-        if kind == "static" and runner_mod._local_backend_active():
-            kind = "dynamic"
-            value = runner_mod._static_actions_as_prompt(value)
-    assert kind == "dynamic"
-    assert "关闭燃气总阀" in value          # 原动作语义保留,交给 agent 判断
-    assert "由你判断后执行" in value
+    fake = [SimpleNamespace(id="r1", name="厨房明火关阀", actions=[object()],
+                            on_enter_actions=[], on_exit_actions=[])]
+    with patch.object(admin, "_rules_with_direct_device_actions", return_value=["厨房明火关阀"]):
+        names = admin._rules_with_direct_device_actions()
+    assert names == ["厨房明火关阀"]
+
+    # 真实实现:只挑出带动作的启用规则
+    class _Repo:
+        def get_all(self, enabled_only=False):
+            return fake + [SimpleNamespace(id="r2", name="纯动态", actions=[],
+                                           on_enter_actions=[], on_exit_actions=[])]
+
+    with patch("miloco.database.rule_repo.RuleRepo", _Repo):
+        assert admin._rules_with_direct_device_actions() == ["厨房明火关阀"]
 
 
-def test_cloud_backend_keeps_static_direct_execution():
-    """云端通路必须保持原状 —— 它是默认路径,任何改动都比本地通路的问题严重。"""
+def test_rule_lookup_failure_does_not_block_switching():
+    """附带检查本身出问题时不该挡住切换 —— 它是保护,不是闸门。"""
     from unittest.mock import patch
 
-    import miloco.rule.runner as runner_mod
+    from miloco.admin import router as admin
 
-    with patch.object(runner_mod, "_local_backend_active", return_value=False):
-        assert runner_mod._local_backend_active() is False
+    class _Boom:
+        def get_all(self, enabled_only=False):
+            raise RuntimeError("db down")
+
+    with patch("miloco.database.rule_repo.RuleRepo", _Boom):
+        assert admin._rules_with_direct_device_actions() == []

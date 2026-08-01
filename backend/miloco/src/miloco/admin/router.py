@@ -1089,6 +1089,39 @@ class PerceptionBackendBody(BaseModel):
     token: str | None = None
 
 
+
+def _rules_with_direct_device_actions() -> list[str]:
+    """列出当前**启用中、且会在感知层直连设备**的规则名(STATIC 动作)。
+
+    本地视觉通路不执行任何设备动作。此前的做法是把这类规则在运行时改写成"交给
+    agent 决策",但那会静默丢掉两样东西:``cooldown_minutes`` / ``idempotent``
+    (schema 对非幂等动作强制要求的唯一限流,丢了就是 TTS 风暴),以及动作台账里
+    ``source=rule`` 的归属(改走 agent 后变成 source=cli,规则与它引发的设备变更
+    再也对不上)。改写还得把动作重新翻译成自然语言,一旦译错,agent 执行的就不是
+    用户配置的东西。
+
+    与其在运行时悄悄改变用户已配置的自动化,不如**在切换时就拦下来**:明确告诉
+    用户哪几条规则会失效,由他自己决定是停用还是不切。行为可预测、可测试,
+    也不需要动共享的规则引擎。
+    """
+    try:
+        from miloco.database.rule_repo import RuleRepo
+
+        rules = RuleRepo().get_all(enabled_only=True)
+    except Exception as e:  # noqa: BLE001 —— 查不到就不拦(不因为附带检查挡住切换)
+        logger.warning("检查直连设备规则失败,跳过该拦截: %s", e)
+        return []
+    names = []
+    for r in rules:
+        if (
+            getattr(r, "actions", None)
+            or getattr(r, "on_enter_actions", None)
+            or getattr(r, "on_exit_actions", None)
+        ):
+            names.append(r.name or r.id)
+    return names
+
+
 def _local_vision_payload() -> dict:
     """当前后端选择 + 本地边车的连通性快照。
 
@@ -1116,6 +1149,9 @@ def _local_vision_payload() -> dict:
         },
         "health": health,
         "error": error,
+        # 启用中、会在感知层直连设备的规则 —— 切到本地通路会拒绝,这里先给前端
+        # 预览,免得用户点了才知道。
+        "blocking_static_rules": _rules_with_direct_device_actions(),
         # 能力差异摆在接口里,前端直接渲染,不必各端各写一份说明。
         "local_capabilities": {
             "needs_api_key": False,
@@ -1181,6 +1217,21 @@ async def set_perception_backend(
             raise HTTPException(status_code=400, detail="本地视觉服务不可达")
         if body.backend == "local" and not health.get("model_loaded"):
             raise HTTPException(status_code=400, detail="本地视觉服务正在加载模型,稍后再试")
+
+    if body.backend == "local":
+        blocking = _rules_with_direct_device_actions()
+        if blocking:
+            # 不静默改写用户的自动化,也不让它们悄悄失效 —— 拦在切换这一步,
+            # 把受影响的规则名直接说出来。
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "以下规则会在感知层直接控制设备,本地视觉通路不执行设备动作。"
+                    "请先停用它们(或改成由 agent 决策的动态规则)再切换:"
+                    + "、".join(blocking[:10])
+                    + ("…" if len(blocking) > 10 else "")
+                ),
+            )
 
     if lv:
         update["local_vision"] = lv
