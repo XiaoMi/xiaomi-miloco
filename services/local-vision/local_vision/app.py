@@ -57,7 +57,11 @@ def _load_engine() -> None:
         return
     try:
         e.load()
-    except Exception:  # noqa: BLE001 —— 加载失败只让服务停在 loading 态,不崩进程
+    except Exception as err:  # noqa: BLE001 —— 加载失败只让服务停在 loading 态,不崩进程
+        # 但必须把原因挂到 /health 上。不挂的话,"权重路径打错了"与"还在加载"
+        # 在接口上完全同形,而前者永远不会好:miloco 会一直显示「正在加载模型,
+        # 稍后再试」,用户就照做——等一辈子。
+        e.load_error = f"{type(err).__name__}: {err}"[:300]
         logger.exception("model load failed; service stays unready")
 
 
@@ -98,8 +102,20 @@ class RuleSpec(BaseModel):
     query: str = ""
 
 
+#: 单次请求视频段的字节上限(解码后)。miloco 默认 4s 窗、CRF 28、短边 512,
+#: 实测每段几十 KB;给到 64 MiB 已是三个数量级的余量。
+#: 不设上限的话:pydantic 会先把整个 body 收进内存,base64 解码再复制一份,而这
+#: 两步都发生在并发闸(_inflight)**之前** —— perceive 是同步 def,跑在 anyio 的
+#: 线程池里(默认 40 个),几十个超大 body 可以同时驻留,与 _MAX_INFLIGHT 无关;
+#: 随后 write_temp_video 还会把它落盘,连磁盘一起打满。
+MAX_VIDEO_BYTES = 64 * 1024 * 1024
+_MAX_VIDEO_B64_CHARS = (MAX_VIDEO_BYTES * 4) // 3 + 8
+
+
 class PerceiveRequest(BaseModel):
-    video_b64: str = Field(description="视频段(mp4/h264)的 base64")
+    video_b64: str = Field(
+        description="视频段(mp4/h264)的 base64", max_length=_MAX_VIDEO_B64_CHARS
+    )
     scene_ask: str | None = Field(default=None, description="场景描述的提问;缺省用内置中文提问")
     rules: list[RuleSpec] = Field(default_factory=list, description="要逐条判定的规则")
     camera_note: str = Field(default="", description="该机位的自定义说明;作为补充,不取代任务提问")
@@ -152,6 +168,8 @@ def health(request: Request) -> dict:
         # 门控熄灯的原因(如缺 mamba_ssm)直接暴露出来,免得排查时对着
         # gate_p=null 猜半天。
         "gate_error": e.gate_error if e else None,
+        # 加载失败的原因。非空 = 这个"loading"永远不会变成 ready,别再等了。
+        "load_error": e.load_error if e else None,
         "device": e.device if e else None,
         "backend": e.video_backend if e else None,
     }
@@ -168,6 +186,11 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
         raise HTTPException(status_code=422, detail=f"video_b64 is not valid base64: {err}") from err
     if not data:
         raise HTTPException(status_code=422, detail="empty video payload")
+    if len(data) > MAX_VIDEO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"video payload exceeds {MAX_VIDEO_BYTES} bytes",
+        )
 
     if not _inflight.acquire(blocking=False):
         raise HTTPException(

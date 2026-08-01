@@ -1122,6 +1122,24 @@ def _rules_with_direct_device_actions() -> list[str]:
     return names
 
 
+def _validated_base_url(url: str) -> str:
+    """边车地址的最低校验。
+
+    只放行 http/https,并拒绝带 ``?`` / ``#`` 的地址 —— 客户端拼的是
+    ``f"{base_url}/health"``,一个尾随的 ``?`` 或 ``#`` 会让后面那段被当成查询串或
+    锚点,于是攻击者可以完全控制最终请求的路径(实测 ``http://host/admin#`` 会
+    打到 ``/admin``)。这不是要做内网黑名单(上游在 omni probe 里明确不做,理由是
+    "禁内网 = 禁自建"),只是不让一个配置项变成任意路径构造器。
+    """
+    if not url:
+        return url
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="本地视觉服务地址必须以 http:// 或 https:// 开头")
+    if "?" in url or "#" in url:
+        raise HTTPException(status_code=400, detail="本地视觉服务地址不能包含 ? 或 #")
+    return url
+
+
 def _cloud_readiness_hint() -> str:
     """云端通路当前是否具备工作条件;具备则空串。"""
     from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
@@ -1219,7 +1237,7 @@ async def set_perception_backend(
     update: dict = {"engine_backend": body.backend}
     lv: dict = {}
     if body.base_url is not None:
-        lv["base_url"] = body.base_url.strip()
+        lv["base_url"] = _validated_base_url(body.base_url.strip())
     if body.token is not None:
         lv["token"] = body.token.strip()
 
@@ -1252,7 +1270,14 @@ async def set_perception_backend(
                 detail="本地视觉服务要求访问凭证,当前凭证不被接受 —— 请填写正确的 token",
             )
         if body.backend == "local" and not health.get("model_loaded"):
-            raise HTTPException(status_code=400, detail="本地视觉服务正在加载模型,稍后再试")
+            # 区分"还在加载"与"加载失败了":后者永远不会好,让人"稍后再试"
+            # 等于让他等一辈子(权重路径打错是最常见的首次部署翻车点)。
+            load_error = health.get("load_error")
+            raise HTTPException(
+                status_code=400,
+                detail=(f"本地视觉服务加载模型失败:{load_error}" if load_error
+                        else "本地视觉服务正在加载模型,稍后再试"),
+            )
 
     if body.backend == "local":
         blocking = _rules_with_direct_device_actions()

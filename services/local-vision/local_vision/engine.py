@@ -62,6 +62,9 @@ class MageVLEngine:
         self._processor = None
         self._gate_ok = False
         self._gate_error: str | None = None
+        #: 权重加载失败的原因。由 app 的加载线程写入,经 /health 暴露 —— 否则
+        #: "路径打错了"与"还在加载"在接口上同形,而前者永远不会好。
+        self.load_error: str | None = None
 
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
@@ -304,6 +307,17 @@ def ensure_codec_tool_on_path() -> str | None:
 
 
 def resolve_checkpoint(path: str) -> str:
-    """本地目录直接用;否则当成 HF repo id 交给 transformers 自己解析。"""
+    """本地目录直接用;否则当成 HF repo id 交给 transformers 自己解析。
+
+    看得出是路径(以 ``/`` ``~`` ``.`` 开头)却不存在时直接报错,而不是把它当成
+    repo id 递下去 —— 那样用户会收到一句"Repo id must be in the form
+    'namespace/name'",与"我明明填的是个目录"完全对不上,是最常见的首次部署翻车点。
+    """
     p = Path(path).expanduser()
-    return str(p) if p.is_dir() else path
+    if p.is_dir():
+        return str(p)
+    if path.startswith(("/", "~", ".")):
+        raise FileNotFoundError(
+            f"权重目录不存在: {p} —— 若想用 HF repo id,请写成 'namespace/name' 的形式"
+        )
+    return path

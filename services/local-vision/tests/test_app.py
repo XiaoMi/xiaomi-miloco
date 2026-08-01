@@ -29,6 +29,7 @@ class _StubEngine:
         self.ready = True
         self.gate_available = True
         self.gate_error = None
+        self.load_error = None
         self.device = "cuda:0"
         self.video_backend = "codec"
 
@@ -223,3 +224,60 @@ def test_max_new_tokens_bound_matches_the_miloco_side_ceiling():
     assert ok.max_new_tokens == 1024
     with _pytest.raises(ValidationError):
         PerceiveRequest(video_b64="", max_new_tokens=1025)
+
+
+# ── 启动前的绑定检查 ──────────────────────────────────────────────────────
+
+
+def test_non_loopback_bind_without_a_token_is_refused():
+    """README 一直写着"不配 token 则必须只绑环回",而它同时又建议把边车放到另一台
+    带显卡的机器上 —— 两句合起来,最自然的做法恰好是 --host 0.0.0.0 且不配 token,
+    于是局域网里任何人都能无鉴权调用推理接口。这条承诺必须由代码兑现。"""
+    from local_vision.__main__ import unsafe_bind_reason
+
+    for host in ("0.0.0.0", "192.168.1.10", "::", "gpu-box.lan"):
+        assert unsafe_bind_reason(host, ""), f"{host} 未配 token 却被放行"
+
+
+def test_loopback_or_token_is_allowed():
+    from local_vision.__main__ import unsafe_bind_reason
+
+    assert unsafe_bind_reason("127.0.0.1", "") == ""
+    assert unsafe_bind_reason("::1", "") == ""
+    assert unsafe_bind_reason("localhost", "") == ""
+    # 配了 token 就可以对外监听 —— 那正是"跑在另一台带显卡的机器上"的正当用法。
+    assert unsafe_bind_reason("0.0.0.0", "secret") == ""
+
+
+def test_oversized_payload_is_rejected_before_inference(client, engine):
+    """限流闸管不到这一段:body 的收取与 base64 解码都发生在拿槽位之前,而
+    perceive 是同步 def,跑在 anyio 线程池里(默认 40 个)—— 几十个超大 body 能
+    同时驻留,与 _MAX_INFLIGHT 无关,随后还会被落盘。"""
+    import base64 as _b64
+
+    from local_vision.app import MAX_VIDEO_BYTES
+
+    body = {"video_b64": _b64.b64encode(b"\x00" * (MAX_VIDEO_BYTES + 1)).decode()}
+    r = client.post("/v1/perceive", json=body)
+    assert r.status_code in (413, 422), r.status_code
+    assert engine.calls == [], "超限的请求仍然进了推理"
+
+
+def test_stub_engine_exposes_every_attribute_health_reads(client, engine):
+    """/health 读的每个引擎属性,替身都必须有。
+
+    少一个的话,被测代码在替身上跑得好好的,真引擎那边直接 AttributeError ——
+    而这个端点正是 miloco 判断"边车能不能用"的唯一依据。
+    """
+    from local_vision.engine import MageVLEngine
+
+    body = client.get("/health").json()
+    for key in ("model_loaded", "gate_available", "gate_error", "load_error",
+                "device", "backend"):
+        assert key in body, f"/health 少了字段 {key}"
+
+    # 真引擎(不加载权重)也要能被同一个端点读完,不能只有替身能用。
+    real = MageVLEngine(checkpoint="x")
+    for attr in ("ready", "gate_available", "gate_error", "load_error",
+                 "device", "video_backend"):
+        getattr(real, attr)

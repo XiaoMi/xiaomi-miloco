@@ -22,7 +22,8 @@ class LocalVisionError(RuntimeError):
 # 回显整个 body,这个端点就成了一个能读任意 URL 响应体的探针(SSRF 回显)。只放行
 # 已知字段,把回显面钉死成固定形状。
 _HEALTH_FIELDS = (
-    "status", "model_loaded", "gate_available", "gate_error", "device", "backend",
+    "status", "model_loaded", "gate_available", "gate_error", "load_error",
+    "device", "backend",
     # 边车侧用与推理同一套比较得出的鉴权结论。凭证不对时 /health 仍返 200,
     # 靠这两个字段区分「服务没起来」和「起来了但 token 不匹配」——后者若不看,
     # 探活会一路绿灯而每一窗推理 401,感知静默停摆。

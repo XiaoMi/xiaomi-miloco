@@ -226,3 +226,35 @@ def test_switch_back_to_cloud_is_never_blocked(client, health, monkeypatch):
     r = client.post("/api/admin/perception-backend", json={"backend": "cloud"})
     assert r.status_code == 200, r.text
     assert r.json()["data"]["backend"] == "cloud"
+
+
+# ── 地址的最低校验 ────────────────────────────────────────────────────────
+
+
+def test_base_url_with_query_or_fragment_is_rejected(client, health):
+    """客户端拼的是 f"{base_url}/health";尾随的 ? 或 # 会让后面那段变成查询串或
+    锚点,于是这个配置项变成了任意路径构造器(实测 http://host/admin# 会打到
+    /admin)。不做内网黑名单,但也不能让它变成路径构造器。"""
+    for bad in ("http://127.0.0.1:18800/admin#", "http://127.0.0.1:18800/?x=1"):
+        r = client.post("/api/admin/perception-backend",
+                        json={"backend": "cloud", "base_url": bad})
+        assert r.status_code == 400, bad
+        assert "?" in r.json()["detail"] or "#" in r.json()["detail"]
+
+
+def test_base_url_must_be_http_or_https(client, health):
+    r = client.post("/api/admin/perception-backend",
+                    json={"backend": "cloud", "base_url": "file:///etc/passwd"})
+    assert r.status_code == 400
+    assert "http" in r.json()["detail"]
+
+
+def test_load_failure_is_reported_instead_of_asking_the_user_to_wait(client, health):
+    """权重路径打错是最常见的首次部署翻车点。边车会永远停在 loading,
+    让用户"稍后再试"等于让他等一辈子。"""
+    health.set(model_loaded=False, status="loading",
+               load_error="FileNotFoundError: 权重目录不存在: /no/such/dir")
+    r = client.post("/api/admin/perception-backend", json={"backend": "local"})
+    assert r.status_code == 400
+    assert "加载模型失败" in r.json()["detail"]
+    assert "/no/such/dir" in r.json()["detail"]

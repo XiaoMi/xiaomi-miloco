@@ -137,6 +137,7 @@
     "blockingRulesLocal": "These enabled rules carry direct device actions; on this path they will not run (a hit is recorded as a failed trigger):",
     "capNoSuggestions": "No proactive suggestions: it produces scene descriptions and rule verdicts only.",
     "backendConfigured": "(configured at startup; the effective path is chosen per request)",
-    "loadingModel": "The sidecar is still loading its model; try switching shortly"
+    "loadingModel": "The sidecar is still loading its model; try switching shortly",
+    "setupHint": "Requires running the sidecar yourself — see services/local-vision/README.md in the repo"
   }
 }

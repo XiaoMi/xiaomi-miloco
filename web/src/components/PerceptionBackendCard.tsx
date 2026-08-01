@@ -165,6 +165,13 @@ export function PerceptionBackendCard() {
           <p className="text-caption text-text-secondary mt-1">
             {t("perceptionBackend.localDesc")}
           </p>
+          {/* 边车要用户自己部署。不写这句的话,点下去只会得到「服务不可达」——
+              准确,但是个死胡同:从没有人告诉过他那是什么服务、去哪儿拿。 */}
+          {!isLocal && (
+            <p className="text-caption text-text-tertiary mt-1">
+              {t("perceptionBackend.setupHint")}
+            </p>
+          )}
         </button>
       </div>
 

@@ -370,7 +370,12 @@ class PerceptionEngineProxy:
 
         if not probe.get("model_loaded"):
             self._status = "local_vision_unreachable"
-            self._status_message = f"本地视觉服务正在加载模型({cfg.base_url})"
+            load_error = probe.get("load_error")
+            self._status_message = (
+                f"本地视觉服务加载模型失败({cfg.base_url}): {load_error}"
+                if load_error
+                else f"本地视觉服务正在加载模型({cfg.base_url})"
+            )
             mon.set_lifecycle(
                 NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
             )
@@ -444,7 +449,12 @@ class PerceptionEngineProxy:
                 self._local_probe_not_before = 0.0
         except LocalVisionError as e:
             self._local_probe = None
-            self._local_probe_error = f"本地视觉服务不可达({cfg.base_url}): {e}"
+            # 只留粗粒度原因。这条消息会经 GET /api/perception/engine/status 原样
+            # 发布出去,而 admin 端点刻意把同一个错误压成 "unreachable" —— 原始
+            # httpx 异常文本(目标地址 + 状态码 + 异常类)合起来就是一个内网探针,
+            # 两处口径必须一致。完整异常只进本地日志。
+            logger.debug("本地视觉探活失败 %s: %s", cfg.base_url, e)
+            self._local_probe_error = f"本地视觉服务不可达({cfg.base_url})"
             self._local_probe_not_before = time.monotonic() + _LOCAL_PROBE_COOLDOWN_SEC
 
     async def refresh_local_probe(self) -> None:

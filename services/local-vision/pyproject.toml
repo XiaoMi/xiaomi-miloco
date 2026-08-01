@@ -2,7 +2,11 @@
 name = "miloco-local-vision"
 version = "0.1.0"
 description = "Local GPU vision sidecar for Miloco perception (reference impl: Mage-VL)"
-requires-python = ">=3.10"
+# 上界不是保守起见:codec-video-prep 只发 Linux 的 cp39–cp312 wheel、且没有 sdist,
+# 它又要求 numpy<2.0,而符合该约束的最新 numpy(1.26.4)同样只到 cp312。在 3.13/3.14
+# 上 `pip install -e .` 会直接失败(或退化成源码编译 numpy,需要一整套编译工具链)。
+# 与其让人装到一半撞墙,不如在这里说清楚。
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -14,12 +18,19 @@ dependencies = [
     "opencv-python-headless>=4.9",
     # 传统编解码通路(H.264/HEVC 运动矢量 + 残差)需要 cv-preinfer 可执行文件,
     # 它由本包提供;缺失时引擎会自动降级到帧采样后端。
-    "codec-video-prep>=0.1",
+    # 上界:0.3 起的 API 未经验证,而它是解析攻击者可控视频的原生二进制,
+    # 版本浮动不是这里该省的事。
+    "codec-video-prep>=0.2,<0.3",
 ]
 
 # torch 刻意不写进 dependencies:必须由部署者按自己的 CUDA 版本安装对应 wheel
 # (例:RTX 50 系 Blackwell 需要 cu128 及以上)。写死版本只会装错。
 # 见 README「安装」一节。
+
+[project.optional-dependencies]
+# README 写着 `pytest tests/`,但 pytest 既不在依赖里也不在任何 extra 里 ——
+# 照文档做会得到 command not found。
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 miloco-local-vision = "local_vision.__main__:main"

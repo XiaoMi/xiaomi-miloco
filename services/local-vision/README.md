@@ -19,18 +19,38 @@ miloco 侧不需要改一行代码。
   (见模型自带 `inference.py::run_online`),既拿不到 codec-native 的 token 削减,
   也拿不到流式门控。本服务走进程内 offline API,两者都保住。
 
+## 环境要求
+
+| | 要求 | 为什么 |
+| --- | --- | --- |
+| 操作系统 | Linux x86_64 / aarch64 | `codec-video-prep` 只发 Linux wheel(无 sdist);macOS 装不上 |
+| Python | 3.10 – 3.12 | 同上,且它要求 `numpy<2.0`,而符合该约束的最新 numpy 也只到 cp312 |
+| GPU | NVIDIA,显存 ≥ 16 GB | 实测 4B 模型峰值 12 GB |
+| 系统工具 | `ffmpeg` / `ffprobe` | codec 通路用它们探帧与抽运动矢量 |
+
+在 3.13/3.14 上 `pip install -e .` 会直接失败(或退化成源码编译 numpy,需要一整套
+编译工具链)—— 请用 3.12 及以下建 venv。
+
 ## 安装
 
 ```bash
+# 从仓库根目录开始
 cd services/local-vision
-python -m venv .venv && . .venv/bin/activate
+python3.12 -m venv .venv && . .venv/bin/activate
 
 # torch 必须按自己的 CUDA 版本装,不在依赖里写死。
 # 例:RTX 50 系(Blackwell, sm_120)需要 cu128 及以上
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 pip install -e .
+
+# 想跑测试再加 dev extra(pytest 不在运行依赖里)
+pip install -e '.[dev]'
 ```
+
+**装的顺序有讲究**:`accelerate` 依赖 `torch`,所以**必须先**按上面那行装好对应 CUDA
+版本的 torch,再 `pip install -e .`。反过来的话,pip 会静默装上 PyPI 的通用 torch,
+在 RTX 50 系上跑起来是错的,而症状要到推理时才以「no kernel image」之类的形式出现。
 
 另需系统上有 `ffmpeg` / `ffprobe`(codec 通路要用它们探帧与抽运动矢量)。
 
@@ -48,6 +68,23 @@ LOCAL_VISION_DEVICE=cuda:0 \
 LOCAL_VISION_BACKEND=codec \
 miloco-local-vision --port 18800
 ```
+
+命令行参数 `--checkpoint` / `--device` / `--backend` / `--port` 会覆盖对应环境变量。
+
+**跑在另一台机器上**时必须配访问凭证 —— 未配 token 时服务会**拒绝**绑定非环回地址
+(那等于把家里画面的推理接口无鉴权地放到局域网上):
+
+```bash
+LOCAL_VISION_TOKEN=$(openssl rand -hex 16) \
+LOCAL_VISION_HOST=0.0.0.0 \
+LOCAL_VISION_CHECKPOINT=~/data/mage-vl/Mage-VL \
+miloco-local-vision --port 18800
+```
+
+然后在 miloco 的「模型」页把同一个 token 填进「访问凭证」。
+
+> 本服务用 `trust_remote_code=True` 加载模型,也就是会执行随权重一起下载的代码。
+> 这是 Mage-VL 这类自定义架构的常规要求,但把它指向自家摄像头之前值得知道这件事。
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -88,6 +125,10 @@ POST /v1/perceive   → {caption, rule_hits[], unparsed_rules, truncated, gate_p
 | `unparsed_rules` | 「模型确实说不」与「输出被复读/截断吃掉」变得无法区分,后者会把该相机的规则整体推成未命中 |
 | `truncated` | 同上,且描述会从句子中间断掉后原样交给 agent |
 
+状态码:`401` 凭证缺失或不匹配;`413` 视频段超过 64 MiB;`422` 请求体不合法
+(base64 坏了、空载荷、字段越界);`503` 模型未就绪(`engine not ready`)或在飞请求
+已达上限(`busy: …`,调用方应把这一窗当作无结论跳过);`500` 推理本身失败。
+
 `/v1/perceive` 请求体:
 
 ```json
@@ -97,7 +138,8 @@ POST /v1/perceive   → {caption, rule_hits[], unparsed_rules, truncated, gate_p
   "rules": [{"name": "沙发有人", "query": "有人在客厅沙发上"}],
   "camera_note": "这台对着门口,忽略窗外行人",
   "max_new_tokens": 256,
-  "want_gate": true
+  "want_gate": true,
+  "ngram_guard": 32
 }
 ```
 
@@ -136,6 +178,15 @@ agent 提醒,误报却会让 agent 对着不存在的事实做决策。
   该规则正确判否 —— 位置区分是有效的,不是瞎猜
 - 带规则提问时,场景描述反而比纯描述提问更准(具体问题改善了视觉接地)
 
+## 排查
+
+| 症状 | 多半是 |
+| --- | --- |
+| `/health` 一直 `"status":"loading"` | 看 `load_error` 字段:非空说明加载**失败**(权重路径打错最常见),不会自己好;为空才是真的在加载 |
+| 每次响应都是 `"backend":"frames"` | 缺 `ffprobe`,或段太短(< 8 帧)。前者会让 token 削减完全失效,值得先查 |
+| `gate_available` 起初为 true、之后变 false | 门控要到第一次推理才真正跑起来;失败原因见 `gate_error` |
+| miloco 侧显示「边车拒绝当前凭证」 | 两边的 `LOCAL_VISION_TOKEN` 与「访问凭证」不一致 |
+
 ## 已知限制
 
 - **没有画面变化门控**。云端通路有一层帧差/音量门,静止画面直接跳过不调模型;
@@ -164,7 +215,8 @@ agent 提醒,误报却会让 agent 对着不存在的事实做决策。
 ## 测试
 
 ```bash
-pytest tests/
+pip install -e '.[dev]'   # pytest 不在运行依赖里
+pytest tests/             # 在 services/local-vision 目录下
 ```
 
 单测覆盖提示词构建与响应解析,样本全部取自模型在真实家庭片段上的**实际输出**
