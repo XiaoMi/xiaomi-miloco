@@ -52,7 +52,7 @@ jobs:
       # (判定读错就会让 agent 对着不存在的事实动作)。不装 torch:整个包在
       # uv workspace 之外,推理依赖由部署者按自己的 CUDA 版本安装。
       - name: local-vision 边车测试
-        run: uv run --with pytest --with pydantic python -m pytest services/local-vision/tests/ -v
+        run: cd services/local-vision && uv run --with pytest --with pydantic python -m pytest tests/ -v
 
   cli-test:
     runs-on: ubuntu-latest

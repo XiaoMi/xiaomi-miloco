@@ -26,12 +26,24 @@ _LEADING_NUM_RE = re.compile(r"^\s*\d+[.、]\s*")
 # 事件文案与 agent 上下文里,必须剥掉。
 _CAPTION_TAG_RE = re.compile(r"^(?:描述|场景描述|描述内容)\s*[:：]\s*")
 
-# 判定词。子串匹配天然危险:多数否定词内含肯定词(「不是」含「是」、「不成立」含
-# 「成立」),所以否定必须先判、且必须显式覆盖否定前缀 —— 只靠 _MISS_WORDS 会漏掉
-# 「不是」这个中文里最自然的否定说法,把它读成命中(fail-closed 承诺就此破功)。
-_NEG_CHARS = ("不", "非", "未", "没", "无")
-_MISS_WORDS = ("否", "不成立", "未命中", "没有", "无", "no", "false")
-_HIT_WORDS = ("是", "成立", "命中", "yes", "true")
+# 判定词**只在行首成词时才算判定**,绝不做「整句里含不含某个字」的子串匹配。
+#
+# 子串匹配在中文里是错的,而且错的方向要命:随便一句散文里的「但是 / 于是 / 总是」
+# 都含「是」,于是「画面中看到一个人影,但是不能确定」会被读成命中 —— 得到一条
+# hit=True 而依据恰好在说反话的记录,正是 fail-closed 要杜绝的东西。
+# 改成锚定行首:读不出判定就落未判定(未命中),宁可漏报。
+_VERDICT_RE = re.compile(
+    r"^\s*(?:"
+    # 「是否…」是模型在复述问句,不是回答 —— 必须先于肯定分支拦掉。
+    r"(?P<question>是否)"
+    # 否定侧刻意宽松、不要求词边界:多认一个否定只会漏报,方向是安全的。
+    r"|(?P<neg>不是|不成立|未命中|不满足|未满足|没有|不|否|无|非|未|not|no|false)"
+    # 肯定侧必须**成词收尾**(后面是行尾或标点/分隔符),否则「有人在客厅沙发上,
+    # 但是现在已经不在了」这种复述条件的句子会因为以「有」开头被判成命中。
+    r"|(?P<pos>(?:是的|是|成立|满足|命中|有|yes|true)(?=$|[\s,，。、;；:：!！?？\-—]))"
+    r")",
+    re.IGNORECASE,
+)
 
 DEFAULT_SCENE_ASK = (
     "请用中文详细描述这个家庭监控画面里的场景:有没有人、在做什么、"
@@ -82,19 +94,17 @@ def _verdict(body: str) -> tuple[bool, str]:
         if sep in text:
             head, _, reason = text.partition(sep)
             break
-    # 只在**判定头**(分隔符之前)里找判定词。依据部分不参与判断,否则
-    # 「是 - 有人,不过看不清脸」会被里面的「不」拖成未命中。
-    head_l = head.strip().lower()[:12]
-    if any(c in head_l for c in _NEG_CHARS) or any(w in head_l for w in _MISS_WORDS):
-        hit = False
-    elif any(w in head_l for w in _HIT_WORDS):
-        hit = True
-    else:
+    # 判定必须**成词出现在判定头的开头**。整句扫描会让散文里的「但是」变成命中。
+    m = _VERDICT_RE.match(head)
+    if m is None or m.group("question"):
         # fail-closed。此处**不能**把 head 当依据回填 —— 模型有时干脆复述条件原文
         # (实测:「规则1: 有人在客厅沙发上」),那样会得到一条 hit=False 却写着
         # 「有人在客厅沙发上」的记录,读的人会正好读反。统一落未判定标记。
         return False, NO_VERDICT_REASON
-    return hit, reason.strip() or head.strip()
+    hit = m.group("neg") is None
+    # 依据:优先分隔符之后的部分;没有分隔符时取判定词之后的余下文字。
+    tail = reason.strip() or head[m.end():].strip(" ,,。、:：-—")
+    return hit, tail or head.strip()
 
 
 def _verdict_from_following_line(lines: list[str], idx: int) -> tuple[bool, str]:

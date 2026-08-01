@@ -51,8 +51,16 @@ def encode_snapshot_to_h264(
     # 一个 JSON body 里发走 —— 而边车侧无论如何只会用到 num_frames 张。均匀抽,
     # 保住时间跨度。
     if max_frames > 0 and len(frames) > max_frames:
-        step = len(frames) / max_frames
-        frames = [frames[min(int(i * step), len(frames) - 1)] for i in range(max_frames)]
+        # 端点包含式均匀采样:必须取到最后一帧。用 len/max 步长的 floor 采样永远
+        # 落不到 n-1,等于把窗口最末尾(最可能含事件的那段)整段丢掉,而
+        # end_timestamp 还宣称覆盖了整个窗口。
+        n = len(frames)
+        if max_frames == 1:
+            frames = [frames[-1]]  # 只要一帧就要最新那帧,不是最旧的
+        else:
+            frames = [
+                frames[round(i * (n - 1) / (max_frames - 1))] for i in range(max_frames)
+            ]
 
     container = None
     try:

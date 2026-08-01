@@ -133,3 +133,45 @@ def test_caption_stays_empty_when_model_only_answered_rules():
     cap, hits = parse_response("规则1: 否 - 沙发上没有人", RULES[:1])
     assert cap == ""
     assert hits[0]["hit"] is False
+
+
+# ── 判定必须成词出现在行首(整句扫描会把散文读成命中) ──────────────────
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "画面中看到一个人影,但是不能确定是否在沙发上",   # 「但是」含「是」
+        "有人在客厅沙发上,但是现在已经不在了",           # 以「有」开头的条件复述
+        "是否有人在沙发上",                              # 复述问句,不是回答
+        "判定如下\n画面中是一位老人坐在沙发上看电视",     # 下一行是散文,不是判定
+        "判定\n总的来说这是一个安静的下午",
+        "部分成立",
+        "不确定",
+        "看不出来",
+    ],
+)
+def test_prose_is_never_read_as_a_hit(body):
+    """危险方向:非命中被读成命中,会让 agent 对着不存在的事实动作。
+    这些用例全部来自对真实模型输出的对抗性构造。"""
+    _, hits = parse_response(f"描述: x\n规则1: {body}", RULES[:1])
+    assert hits[0]["hit"] is False
+
+
+@pytest.mark.parametrize(
+    "body,reason_contains",
+    [
+        ("是", ""),
+        ("是的,有人在沙发上,不过背对镜头", "背对镜头"),   # 依据里的「不」不能拖垮判定
+        ("是 - 有人躺着", "有人躺着"),
+        ("是。沙发上躺着一个人", "沙发上躺着一个人"),
+        ("成立", ""),
+        ("yes - someone is there", "someone"),
+        ("是否有人在沙发上\n是 - 有人在看书", "有人在看书"),  # 复述问句后下一行才是判定
+    ],
+)
+def test_genuine_hits_are_not_dropped(body, reason_contains):
+    _, hits = parse_response(f"描述: x\n规则1: {body}", RULES[:1])
+    assert hits[0]["hit"] is True
+    if reason_contains:
+        assert reason_contains in hits[0]["reason"]

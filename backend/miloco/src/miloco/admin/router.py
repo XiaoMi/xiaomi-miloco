@@ -1096,6 +1096,7 @@ def _local_vision_payload() -> dict:
     再回来排查。探测是同步 HTTP(短超时),调用方须放到线程里跑,别占事件循环。
     """
     from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+    from miloco.perception.local_vision.engine import LocalVisionEngine
 
     s = get_settings().perception
     cfg = s.local_vision
@@ -1122,7 +1123,8 @@ def _local_vision_payload() -> dict:
             "audio": False,       # 纯视觉:不产 speeches / env_sounds
             "identity": False,    # 不做身份识别
             "suggestions": False,  # 主动建议交给 agent
-            "static_rule_execution": False,  # 规则命中一律交 agent 决策执行
+            # 直接读引擎的能力声明,不在这里再硬编码一份(两处漂移 = 界面骗人)
+            "static_rule_execution": LocalVisionEngine.STATIC_RULE_EXECUTION,
         },
     }
 

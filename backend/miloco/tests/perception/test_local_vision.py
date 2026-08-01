@@ -110,10 +110,10 @@ async def test_vision_only_never_emits_audio_or_suggestions():
     assert res.caption[0].description == "客厅有人在看书"
 
 
-@pytest.mark.asyncio
-async def test_static_rules_disabled_is_declared():
-    """本通路不执行设备动作,必须显式声明,供上层告知用户。"""
-    assert _engine(_FakeClient()).static_rules_disabled is True
+def test_static_rule_execution_is_declared_false():
+    """本通路不执行设备动作。声明做成类属性,admin 接口直接读它告知用户 ——
+    别处再硬编码一份,两处一漂移界面就在骗人。"""
+    assert LocalVisionEngine.STATIC_RULE_EXECUTION is False
 
 
 # ── 命中回填 ──────────────────────────────────────────────────────────────
@@ -188,6 +188,7 @@ async def test_gate_skips_when_threshold_configured():
         BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
     )
     assert res.caption == []
+    # 一条规则都没下发 + 叙述被压制 = 真的无事发生
     assert res.skipped is True
 
 
@@ -386,3 +387,65 @@ async def test_no_video_devices_is_not_recorded_as_an_error():
     )
     assert res.skipped is True
     assert res.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_result_not_skipped_when_rules_were_judged_without_hits():
+    """有设备成功判过规则 = 本轮**有证据**,不能标 skipped —— 上层在 skipped 时
+    直接 return,连 device_rule_map 都不看,状态机就又断供了。
+    触发场景很常见:模型只回判定不写描述(caption 空)且这轮无命中。"""
+    rules = [{"id": "r1", "name": "A", "condition": {"query": "q", "perceive_device_ids": []}}]
+    client = _FakeClient([{
+        "caption": "",   # 模型只回了判定,没写描述
+        "rule_hits": [{"name": "A", "hit": False, "reason": "不成立"}],
+        "gate_p": None, "backend": "codec",
+    }])
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    assert res.skipped is False          # 有证据 → 必须交给上层消费
+    assert res.device_rule_map == {"cam1": ["r1"]}
+    assert res.matched_rules == []
+
+
+@pytest.mark.asyncio
+async def test_gate_suppressed_and_no_hit_still_reports_evidence():
+    """门控压制叙述 + 本轮无命中 —— 规则依然判过了,证据必须交上去。"""
+    rules = [{"id": "r1", "name": "A", "condition": {"query": "q", "perceive_device_ids": []}}]
+    client = _FakeClient([{
+        "caption": "安静的客厅",
+        "rule_hits": [{"name": "A", "hit": False, "reason": "不成立"}],
+        "gate_p": 0.05, "backend": "codec",
+    }])
+    res = await _engine(client, gate_threshold=0.5).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    assert res.caption == []
+    assert res.skipped is False
+    assert res.device_rule_map == {"cam1": ["r1"]}
+
+
+def test_frame_budget_keeps_the_last_frame():
+    """均匀 floor 采样永远取不到最后一帧,等于把窗口末尾(最可能含事件的一段)
+    整段丢掉,而 end_timestamp 还宣称覆盖了整个窗口。"""
+    from miloco.perception.local_vision.encode import encode_snapshot_to_h264
+
+    snap = _snapshot("cam1", frames=100)
+    # 给最后一帧打上可识别的亮度,编码后仍应存在(此处只验采样索引,不解码)
+    picked: list = []
+    real = encode_snapshot_to_h264
+
+    import miloco.perception.local_vision.encode as enc
+
+    orig_resize = enc._resize_bgr
+
+    def _spy(arr, w, h):
+        picked.append(arr)
+        return orig_resize(arr, w, h)
+
+    enc._resize_bgr = _spy
+    try:
+        real(snap, fps=2, max_frames=8, short_edge=32)
+    finally:
+        enc._resize_bgr = orig_resize
+    assert len(picked) == 8

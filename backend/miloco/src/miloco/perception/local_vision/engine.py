@@ -13,7 +13,7 @@
 2. **本地不执行任何设备动作**。规则命中只作为"观察结论"上报,一律经
    AgentDispatcher 交给 agent 决策与执行 —— 即本地通路下所有规则都按 DYNAMIC
    语义处理。STATIC 规则的"感知层直连设备"低延迟路径在本通路下不启用,
-   ``static_rules_disabled`` 会把这件事显式告诉调用方,而不是让规则悄悄失灵。
+   ``STATIC_RULE_EXECUTION`` 把这件事声明给 admin 接口与界面,而不是让规则悄悄失灵。
 
 3. **suggestions 不由本地模型产**。主动建议依赖跨模态与长上下文推理,4B 级
    视觉模型给不出可用质量;这部分能力上移给 agent。
@@ -69,6 +69,11 @@ def _rules_for_device(rules: list[dict], did: str) -> list[dict]:
 
 
 class LocalVisionEngine(BasePerceptionEngine):
+    #: 本通路不执行任何设备动作 —— 规则命中一律交 agent 决策执行,STATIC 规则的
+    #: 感知层直连不生效。做成类属性是为了让 admin 接口能直接读它去告知用户,
+    #: 而不是在别处再硬编码一份同样的事实(两处一旦漂移,用户看到的就是错的)。
+    STATIC_RULE_EXECUTION = False
+
     def __init__(
         self,
         client: LocalVisionClient,
@@ -94,15 +99,6 @@ class LocalVisionEngine(BasePerceptionEngine):
         self._scene_ask = scene_ask
 
     # ── 能力声明 ─────────────────────────────────────────────────────────
-
-    @property
-    def static_rules_disabled(self) -> bool:
-        """本通路不执行设备动作,STATIC 规则的直连执行不生效。
-
-        供上层在日志与界面上显式告知用户 —— 已配了 STATIC 规则的人必须知道
-        切到本地通路后它们不再直接控设备,而是改由 agent 决策。
-        """
-        return True
 
     # close / set_main_loop / set_tierc_frame_provider / apply_omni_fps /
     # get_input_config 全部继承 BasePerceptionEngine 的无害默认实现:本通路没有
@@ -266,7 +262,14 @@ class LocalVisionEngine(BasePerceptionEngine):
             speeches=[],      # 纯视觉:恒空,不给模型脑补音频的机会
             env_sounds=[],    # 同上
             suggestions=[],   # 主动建议交给 agent
-            skipped=not captions and not matched,
+            # skipped 的语义是「本轮没有证据」,不是「没什么可叙述」—— 上层在
+            # skipped 时直接 return,连 device_rule_map 都不看。只要有设备成功判过
+            # 规则(map 非空),这一轮就有证据必须交上去,否则未命中的规则拿不到
+            # False、状态机再次断供,规则又会卡死在上一态(这正是本文件要修的病)。
+            # 典型触发:模型只回判定不写描述 → caption 空;或门控压制了叙述。
+            # 注意是 any(values()) 而不是 map 本身非空:一台设备一条规则都没下发时
+            # map 里是 {did: []},没有任何状态机需要供给,那才是真的"无事发生"。
+            skipped=not captions and not matched and not any(device_rule_map.values()),
             device_rule_map=device_rule_map,
             timing=timing,
         )

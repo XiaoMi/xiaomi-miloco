@@ -79,6 +79,11 @@ logger = logging.getLogger(__name__)
 # 任务运行中被 GC 回收(CPython 文档明确警告).done_callback 在任务结束时自动 discard.
 _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 
+# 本地视觉边车探活失败后的重试冷却(秒)。探活是同步 HTTP、跑在主事件循环上,
+# 而 tick 每 4s 就会调一次;没有冷却时一个被防火墙 DROP 的地址会把事件循环
+# 按秒级反复冻住。冷却只影响"多久发现边车起来了",不改变任何语义。
+_LOCAL_PROBE_COOLDOWN_SEC = 30.0
+
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
     """按摄像头「拾音白名单」过滤 speech：``source_device_ids[0]``(相机 did)在
@@ -216,6 +221,8 @@ class PerceptionEngineProxy:
         # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
         # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
         self._engine_lock = asyncio.Lock()
+        # 本地边车探活失败后的下次可探时刻(monotonic 秒);0 = 立刻可探。
+        self._local_probe_not_before: float = 0.0
 
         self._init_engine()
 
@@ -300,9 +307,21 @@ class PerceptionEngineProxy:
             base_url=cfg.base_url, token=cfg.token, timeout=cfg.timeout_sec
         )
 
+        # 探活是同步 HTTP,而本方法会被 tick 自愈**每个感知周期**(默认 4s)调到。
+        # 边车地址若被防火墙 DROP,每次探活都会把主事件循环卡住一个连接超时 ——
+        # 相机取帧、SSE、HTTP API 全部跟着停。失败后加冷却:边车没起来时不再每
+        # tick 去撞,只在冷却到期后重试一次。(冷却期内保持等待态,不改变语义。)
+        now = time.monotonic()
+        if now < self._local_probe_not_before:
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
+
         try:
             health = client.health_sync()
         except LocalVisionError as e:
+            self._local_probe_not_before = now + _LOCAL_PROBE_COOLDOWN_SEC
             self._status = "local_vision_unreachable"
             self._status_message = f"本地视觉服务不可达({cfg.base_url}): {e}"
             logger.warning("感知引擎不可用: %s", self._status_message)
@@ -310,6 +329,7 @@ class PerceptionEngineProxy:
                 NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
             )
             return
+        self._local_probe_not_before = 0.0
 
         if not health.get("model_loaded"):
             self._status = "local_vision_unreachable"
@@ -320,16 +340,26 @@ class PerceptionEngineProxy:
             return
 
         mon.set_lifecycle(NodeName.ENGINE, Lifecycle.STARTING)
-        self.perception_engine = LocalVisionEngine(
-            client,
-            fps=cfg.fps,
-            crf=cfg.crf,
-            max_new_tokens=cfg.max_new_tokens,
-            gate_threshold=cfg.gate_threshold,
-            scene_ask=cfg.scene_ask or None,
-            max_frames=cfg.max_frames,
-            short_edge=cfg.video_short_edge,
-        )
+        try:
+            self.perception_engine = LocalVisionEngine(
+                client,
+                fps=cfg.fps,
+                crf=cfg.crf,
+                max_new_tokens=cfg.max_new_tokens,
+                gate_threshold=cfg.gate_threshold,
+                scene_ask=cfg.scene_ask or None,
+                max_frames=cfg.max_frames,
+                short_edge=cfg.video_short_edge,
+            )
+        except Exception as e:  # noqa: BLE001 —— 与云端分支对称
+            # 不加这层的话构造异常会冒泡出去,留下 _status="ready" 而 engine=None
+            # 的死态:ready 属性恒 False、try_reinit 又因"已 ready"拒绝重建,
+            # 感知永久停摆且没有任何一条自愈路径能救回来。
+            self._status = "engine_init_failed"
+            self._status_message = f"本地视觉引擎创建异常: {e}"
+            logger.error("感知引擎创建失败: %s", e)
+            mon.set_lifecycle(NodeName.ENGINE, Lifecycle.FAILED, error=str(e))
+            return
         self._status = "ready"
         self._status_message = ""
         # 显式告知能力边界:已配 STATIC 规则的用户必须知道本通路下它们不再直连
