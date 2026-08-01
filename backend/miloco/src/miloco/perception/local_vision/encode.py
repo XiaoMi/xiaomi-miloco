@@ -18,8 +18,9 @@ from miloco.perception.types import DeviceSnapshot
 
 logger = logging.getLogger(__name__)
 
-# 边车侧另有 MIN_CODEC_FRAMES=8 决定走不走 codec;这里只保证"至少有一帧可编码"。低于此帧数边车会自动降级到帧采样后端,
-# 这里不拦 —— 少量帧仍能出可用的场景描述,只是拿不到 codec 的省 token 收益。
+# 本侧只保证"至少有一帧可编码" —— 一帧都没有就无从生成视频段。
+# 注意这**不是** codec 的门槛:走不走 codec 由边车按 MIN_CODEC_FRAMES=8 另行判定,
+# 两者不是一回事。少量帧这里照样放行,只是拿不到 codec 的省 token 收益。
 _MIN_USEFUL_FRAMES = 1
 
 

@@ -103,9 +103,14 @@ def require_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing token")
 
 
+#: 单次请求允许的规则条数。生成预算按条数放大并封顶,条数过多时末尾的判定会被
+#: 截断,而 fail-closed 会把它们变成静默的未命中。请求侧先挡住,好过事后追查。
+MAX_RULES = 64
+
+
 class RuleSpec(BaseModel):
-    name: str = ""
-    query: str = ""
+    name: str = Field(default="", max_length=200)
+    query: str = Field(default="", max_length=2000)
 
 
 #: 单次请求视频段的字节上限(解码后)。miloco 默认 4s 窗、CRF 28、短边 512,
@@ -122,9 +127,18 @@ class PerceiveRequest(BaseModel):
     video_b64: str = Field(
         description="视频段(mp4/h264)的 base64", max_length=_MAX_VIDEO_B64_CHARS
     )
-    scene_ask: str | None = Field(default=None, description="场景描述的提问;缺省用内置中文提问")
-    rules: list[RuleSpec] = Field(default_factory=list, description="要逐条判定的规则")
-    camera_note: str = Field(default="", description="该机位的自定义说明;作为补充,不取代任务提问")
+    scene_ask: str | None = Field(
+        default=None, max_length=4000, description="场景描述的提问;缺省用内置中文提问"
+    )
+    rules: list[RuleSpec] = Field(
+        default_factory=list, description="要逐条判定的规则", max_length=MAX_RULES
+    )
+    # 这几项与 video_b64 同在一个 body 里,同样在并发闸**之前**被收取与解析 ——
+    # 只给视频封顶而放任它们无界,分析和防护就对不上了。
+    camera_note: str = Field(
+        default="", max_length=2000,
+        description="该机位的自定义说明;作为补充,不取代任务提问",
+    )
     max_new_tokens: int = Field(default=256, ge=16, le=1024)
     want_gate: bool = Field(default=True, description="是否计算 StreamMind 门控概率")
     # 复读硬禁的 n。默认按"有无规则"自适应(见 engine),但主动查询这条路上提问是
@@ -133,9 +147,24 @@ class PerceiveRequest(BaseModel):
     ngram_guard: int | None = Field(default=None, ge=0, le=128)
 
 
+class RuleHit(BaseModel):
+    """一条规则的判定结果。
+
+    契约的关键在于**调用方怎么把它认回自己的规则**:miloco 先按 ``name`` 查,
+    查不到才退回按下标对齐请求里的 ``rules``。所以第三方实现必须做到两点:
+    - 逐条返回,顺序与请求的 ``rules`` 一致(可以全返,包括未命中的);
+    - ``name`` 原样回填。留空的话调用方会**丢弃**这条判定,而不是按下标猜 ——
+      猜错的后果是"厨房明火"背上"有人跌倒"的结论。
+    """
+
+    name: str = Field(default="", description="与请求 rules[i].name 一致;留空会被丢弃")
+    hit: bool = Field(default=False, description="是否命中")
+    reason: str = Field(default="", description="判定依据,进事件文本给 agent 看")
+
+
 class PerceiveResponse(BaseModel):
     caption: str
-    rule_hits: list[dict]
+    rule_hits: list[RuleHit]
     # 必须声明,否则 pydantic 默认 extra="ignore" 会把它在边界上丢掉 ——
     # "模型输出被复读吃光/格式被带偏"就与"模型确实说不"变得无法区分,而前者会让
     # 该相机的规则被整体推成未命中(state 规则甚至会因此触发 on_exit 动作)。

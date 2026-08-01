@@ -1287,3 +1287,38 @@ async def test_connection_pool_is_rebuilt_when_the_event_loop_changes():
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         second = pool.submit(lambda: _asyncio.run(_second())).result()
     assert second is not first, "换了 event loop 却仍在用绑定到旧 loop 的连接池"
+
+
+@pytest.mark.asyncio
+async def test_warns_once_when_a_window_outruns_the_perception_period(monkeypatch, caplog):
+    """边车用一把锁串行推理,所以窗口耗时约等于各相机之和 —— 相机一多就追不上
+    周期,而症状是"事件变稀疏"这种很难联想到原因的表现。
+
+    只提示一次:这是个容量结论,不是每窗都要重复的事件。
+    """
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+
+    class _Slow(_FakeClient):
+        async def perceive(self, video, rules, **kw):
+            import asyncio as _a
+            await _a.sleep(0.02)
+            return {"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}
+
+    # 不去 patch time.monotonic:那是 time 模块本身的属性,事件循环也用它 ——
+    # 冻住它会让 asyncio.sleep 永远不返回(我第一版就是这么挂死的)。改成把感知
+    # 周期设成极小值,任何真实耗时都会超过它。
+    e = _engine(_Slow())
+    monkeypatch.setattr(
+        e, "get_input_config", lambda: SimpleNamespace(fps=4, omni_fps=0, period_sec=0.001)
+    )
+    batch = BatchedSnapshot(snapshots=[_snapshot("cam1")])
+
+    with caplog.at_level("WARNING"):
+        await e.realtime_perceive(batch, [])
+        await e.realtime_perceive(batch, [])
+
+    hits = [r for r in caplog.records if "超过感知周期" in r.getMessage()]
+    assert len(hits) == 1, f"应当只提示一次,实际 {len(hits)} 次"
+    assert "相机" in hits[0].getMessage()

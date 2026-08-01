@@ -283,3 +283,51 @@ def test_stub_engine_exposes_every_attribute_health_reads(client, engine):
     for attr in ("ready", "gate_available", "gate_error", "load_error",
                  "device", "video_backend"):
         getattr(real, attr)
+
+
+# ── 契约:第三方要能照着重新实现 ──────────────────────────────────────────
+
+
+def test_rule_hits_is_a_typed_contract_not_a_free_dict(client, monkeypatch):
+    """整个特性的立意是"任何实现同一契约的服务都能替换参考实现"。
+
+    rule_hits 此前是 list[dict],而调用方对它有三条硬要求(逐条返回、顺序与请求
+    一致、name 原样回填),第三方无从得知 —— 而 name 留空的后果是判定被丢弃。
+    """
+    from local_vision.app import RuleHit
+
+    monkeypatch.setattr(app_mod, "_engine", _StubEngine({
+        "caption": "x",
+        "rule_hits": [{"name": "沙发有人", "hit": True, "reason": "有人躺着"}],
+        "unparsed_rules": 0, "truncated": False, "gate_p": None,
+        "backend": "codec", "timing_ms": {"total": 1.0}, "raw": "",
+    }))
+    d = client.post("/v1/perceive", json=_body()).json()
+    assert d["rule_hits"] == [{"name": "沙发有人", "hit": True, "reason": "有人躺着"}]
+
+    # 缺省值齐全:第三方只回 name+hit 也能被反序列化,而不是 500。
+    assert RuleHit(name="A").model_dump() == {"name": "A", "hit": False, "reason": ""}
+
+    # 类型化的意义在**归一化**:引擎少给字段要补齐,多给的杂项要丢掉。
+    # 声明成 list[dict] 的话这两件事都不会发生,而调用方读 hit.get("reason") 就会
+    # 拿到 None 并把它当作依据写进事件文本。
+    monkeypatch.setattr(app_mod, "_engine", _StubEngine({
+        "caption": "x",
+        "rule_hits": [{"name": "A", "hit": True, "internal_debug": {"logits": [1, 2]}}],
+        "unparsed_rules": 0, "truncated": False, "gate_p": None,
+        "backend": "codec", "timing_ms": {"total": 1.0}, "raw": "",
+    }))
+    d2 = client.post("/v1/perceive", json=_body()).json()
+    assert d2["rule_hits"] == [{"name": "A", "hit": True, "reason": ""}], d2["rule_hits"]
+
+
+def test_oversized_rule_list_and_free_text_are_rejected(client, engine):
+    """这些字段与 video_b64 同在一个 body 里,同样在并发闸之前被收取解析。
+    只给视频封顶而放任它们无界,分析和防护就对不上了。"""
+    from local_vision.app import MAX_RULES
+
+    too_many = [{"name": f"r{i}", "query": "q"} for i in range(MAX_RULES + 1)]
+    assert client.post("/v1/perceive", json=_body(rules=too_many)).status_code == 422
+    assert client.post("/v1/perceive", json=_body(scene_ask="x" * 5000)).status_code == 422
+    assert client.post("/v1/perceive", json=_body(camera_note="x" * 3000)).status_code == 422
+    assert engine.calls == []

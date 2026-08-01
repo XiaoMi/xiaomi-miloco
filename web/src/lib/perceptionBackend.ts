@@ -44,13 +44,6 @@ export type HealthLine =
   | { kind: "none" };
 
 /**
- * 探活那一行显示什么。
- *
- * 「凭证被拒」必须是独立的一档:边车在凭证不对时仍然回 200 + model_loaded,
- * 只看 health 是否存在就会一路绿灯,而每一窗推理都在 401 —— 感知静默停摆,
- * 界面上却什么都看不出来。
- */
-/**
  * 本地 GPU 按钮上那个「可达」角标。
  *
  * 必须与 {@link healthLine} 同源,否则同一屏上会出现按钮显示绿色「可达」、
@@ -60,6 +53,13 @@ export function isReachable(state: PerceptionBackendState): boolean {
   return healthLine(state).kind === "ok";
 }
 
+/**
+ * 探活那一行显示什么。
+ *
+ * 「凭证被拒」必须是独立的一档:边车在凭证不对时仍然回 200 + model_loaded,
+ * 只看 health 是否存在就会一路绿灯,而每一窗推理都在 401 —— 感知静默停摆,
+ * 界面上却什么都看不出来。
+ */
 export function healthLine(state: PerceptionBackendState): HealthLine {
   if (state.error) return { kind: "unreachable" };
   const h = state.health;

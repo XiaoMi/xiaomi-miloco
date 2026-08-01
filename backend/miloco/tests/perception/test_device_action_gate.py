@@ -264,3 +264,42 @@ async def test_cloud_backend_still_drives_devices_on_the_same_path(runner, monke
     assert len(executed) == 1
     kinds = [c.args[0].kind for c in runner._log_repo.create.call_args_list]
     assert kinds == [RuleLogKind.RULE_TRIGGER_SUCCESS], kinds
+
+
+# ── 能力判定优先问活引擎 ──────────────────────────────────────────────────
+
+
+def test_capability_prefers_the_live_engine_over_config(monkeypatch):
+    """只读配置有一个真实窗口:切回云端时配置先落盘,而随后的软停是 best-effort
+    (失败仅告警)—— 那段时间里配置说 cloud、实际仍是本地引擎在感知,闸会放行
+    设备动作。而这正是这道闸存在的理由。
+    """
+    from types import SimpleNamespace
+
+    from miloco.config.settings import get_settings
+    from miloco.perception import capabilities as cap
+
+    cfg = get_settings().model_copy(deep=True)
+    cfg.perception.engine_backend = "cloud"          # 配置已经切回云端
+    monkeypatch.setattr(cap, "get_settings", lambda: cfg)
+
+    local_engine = SimpleNamespace(STATIC_RULE_EXECUTION=False)  # 但引擎还是本地的
+    monkeypatch.setattr(cap, "_active_engine", lambda: local_engine)
+    assert cap.perception_executes_device_actions() is False, (
+        "配置抢在引擎前面被信了 —— 软停失败的那段窗口里设备动作会被放行"
+    )
+
+    monkeypatch.setattr(cap, "_active_engine", lambda: SimpleNamespace())
+    assert cap.perception_executes_device_actions() is True, "云端引擎没有该属性,应按执行处理"
+
+
+def test_active_engine_attribute_chain_matches_the_real_types():
+    """`_active_engine` 走的是一串私有属性。任何一环改名,它会静默返回 None 并
+    回落到读配置 —— 也就是悄悄退回上面那个窗口。用真实类型钉住这条链路。"""
+    from miloco.perception.client import PerceptionEngineProxy
+    from miloco.perception.processor import PipelineProcessor
+    from miloco.perception.service import PerceptionService
+
+    assert "_pipeline" in PerceptionService.__init__.__code__.co_names
+    assert "_perception_engine_proxy" in PipelineProcessor.__init__.__code__.co_names
+    assert "perception_engine" in PerceptionEngineProxy.__init__.__code__.co_names

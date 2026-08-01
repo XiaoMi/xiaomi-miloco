@@ -83,6 +83,9 @@ _TOKENS_PER_VERDICT = 24
 #: 与其它边车故障长得一模一样。有意保持这个字面值成对出现,改一处必须改另一处。
 _MAX_NEW_TOKENS_CEILING = 1024
 #: 主动查询这类自由问答用的复读硬禁 n —— 显著放宽,见调用处说明。
+#: 这个值是边车侧 ``_NO_REPEAT_NGRAM_WITH_RULES`` 的镜像(同为 32):两边分属独立
+#: 部署的构件,改一边而不改另一边,主动查询的回答就会被按定时描述的力度掐断。
+#: 与 ``_MAX_NEW_TOKENS_CEILING`` 同一类跨仓库配对,两侧各有一条测试钉住字面值。
 _NGRAM_GUARD_FREEFORM = 32
 
 
@@ -140,6 +143,9 @@ class LocalVisionEngine(BasePerceptionEngine):
         # 对同类情形有熔断器,这条通路此前什么都没有。
         self._consecutive_failures = 0
         self._backoff_until = 0.0
+        #: 「一个窗口追不上感知周期」只提示一次 —— 它是个容量结论,不是每窗都要
+        #: 重复的事件。
+        self._warned_over_budget = False
 
     @property
     def sustained_failure(self) -> bool:
@@ -160,8 +166,9 @@ class LocalVisionEngine(BasePerceptionEngine):
 
     async def close(self) -> None:
         """释放常驻 HTTP 连接池。除此之外本通路没有需要收的资源。"""
-        client = self._client
-        aclose = getattr(client, "aclose", None)
+        # getattr 而不是直接调:契约允许注入任何满足 perceive 的客户端(测试替身、
+        # 第三方实现),它们不一定持有连接池。有就关,没有就不关。
+        aclose = getattr(self._client, "aclose", None)
         if aclose is not None:
             await aclose()
 
@@ -326,6 +333,10 @@ class LocalVisionEngine(BasePerceptionEngine):
             )
 
         prompt_map = camera_prompt_map()
+        # 与下面 timing["total"] 用的 t0 分开:那个量的是"送检到拿回结论"的推理
+        # 耗时(要能和云端的口径对比),这个量的是整窗墙钟(含编码、并发等待),
+        # 因为"追不追得上感知周期"比的就是墙钟。
+        t_start = time.monotonic()
         results = await asyncio.gather(
             *[self._perceive_device(s, rules, prompt_map) for s in with_video]
         )
@@ -358,6 +369,26 @@ class LocalVisionEngine(BasePerceptionEngine):
         # 有任何一台成功 = 边车活着,清掉退避。
         self._consecutive_failures = 0
         self._backoff_until = 0.0
+
+        # 容量提示:边车用一把锁串行推理(单卡单模型),所以一个窗口的耗时约等于
+        # 各相机推理耗时之和 —— 相机数一多就会追不上感知周期,而症状是"事件变稀疏"
+        # 这种很难联想到原因的表现。用仓库既有的 RTF 口径(耗时/窗口时长)判,
+        # 并且**只提示一次**,免得每窗刷屏。
+        # 除数必须是用户**真正配的**感知周期。此前写的是
+        # getattr(batch, "window_duration_ms", …) —— BatchedSnapshot 上根本没有这个
+        # 字段(只有 snapshots / captured_at),于是永远落到硬编码的 4000:period_sec
+        # 调到 8 就每窗误报,调到 2 就该报的时候不报。get_input_config 早就会读它。
+        window_ms = self.get_input_config().period_sec * 1000.0
+        elapsed_ms = (time.monotonic() - t_start) * 1000
+        if elapsed_ms > window_ms and not self._warned_over_budget:
+            self._warned_over_budget = True
+            logger.warning(
+                "[local-vision] 一个窗口耗时 %.0fms 已超过感知周期 %.0fms"
+                "(%d 台相机;边车串行推理,耗时随相机数累加)。"
+                "可减少同时启用的相机、调大 perception.engine.input.period_sec,"
+                "或把 max_new_tokens / video_short_edge 调小。",
+                elapsed_ms, window_ms, len(ok),
+            )
 
         captions: list[CaptionEntry] = []
         matched: list[MatchedRule] = []

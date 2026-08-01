@@ -475,13 +475,21 @@ class PerceptionEngineProxy:
             # 是 ready,try_reinit 因此 no-op,状态条也不显示任何东西 —— 用户唯一
             # 的信号只剩"事件不再出现",而那要过很久才会被注意到。
             logger.warning("本地视觉边车持续不可达,降级为等待态并重新探活")
-            self.perception_engine = None
-            self._status = "local_vision_unreachable"
-            self._status_message = "本地视觉服务持续不可达"
-            get_monitor().set_lifecycle(
-                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
-            )
-            self._invalidate_local_probe()
+            # 与 stop_to_unconfigured 同一套拆卸不变量,一条都不能省:
+            #  - 拿 _engine_lock:teardown 必等在飞的推理完成,否则会在
+            #    on_demand_perceive 跑到一半时把引擎置空(use-after-close);
+            #  - 先 await close():引擎持有常驻 httpx 连接池,直接置空等于每次
+            #    降级→重建都漏一个池子。
+            async with self._engine_lock:
+                if self.perception_engine is not None:
+                    await self.close()
+                    self.perception_engine = None
+                self._status = "local_vision_unreachable"
+                self._status_message = "本地视觉服务持续不可达"
+                get_monitor().set_lifecycle(
+                    NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+                )
+                self._invalidate_local_probe()
 
         from miloco.perception.local_vision import LocalVisionClient
 

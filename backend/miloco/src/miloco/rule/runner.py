@@ -1201,6 +1201,11 @@ class RuleRunner:
 
         ``perception_driven=False`` 表示这次执行由人工 / agent 经 API 显式发起,
         不受"当前感知通路是否直连设备"那道闸约束(见下)。
+
+        **默认 True 是刻意的**:除了 ``trigger_rule``,其余入口(边沿触发、跨天
+        重放、duration 达标定时器)最终都源于感知建立起来的规则状态 —— 即使那一次
+        fire 是时钟发起的,它判断的依据仍然来自纯视觉模型。默认放行会让新加的调用
+        点静默绕过这道闸,所以这里选默认拒绝;要豁免必须显式写出来。
         """
         slot = self._select_slot(rule, event)
         if slot is None:
