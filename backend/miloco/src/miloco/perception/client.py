@@ -228,6 +228,10 @@ class PerceptionEngineProxy:
         self._local_probe: dict | None = None      # 成功时的 health 快照
         self._local_probe_error: str | None = None  # 失败原因
         self._local_probe_not_before: float = 0.0   # 失败后的重探冷却(monotonic 秒)
+        # 上次探活对应的配置。地址/凭证一变,旧结论和旧冷却都得作废 —— 否则用户
+        # 刚在界面上把地址改对,却要先干等一整个冷却窗口感知才恢复,而这段时间里
+        # 界面显示的是"已切到本地"。
+        self._local_probe_key: tuple[str, str] | None = None
 
         self._init_engine()
 
@@ -315,6 +319,8 @@ class PerceptionEngineProxy:
         # 事件循环(相机取帧 / SSE / API 全停)。探活结果由 refresh_local_probe()
         # 在线程里刷新,这里只读缓存。缓存为空(进程刚起、tick 还没跑过)时做一次
         # 阻塞探活是可接受的——只发生在构造期。
+        if self._local_probe_key not in (None, (cfg.base_url, cfg.token)):
+            self._invalidate_local_probe()
         if self._local_probe is None and self._local_probe_error is None:
             self._refresh_local_probe_sync(client, cfg)
 
@@ -327,7 +333,21 @@ class PerceptionEngineProxy:
             )
             return
 
-        if not (self._local_probe or {}).get("model_loaded"):
+        probe = self._local_probe or {}
+        if probe.get("auth_required") and not probe.get("auth_ok"):
+            # 探活能通但凭证不被接受:引擎起来也只会每窗 401。落到与"边车没起来"
+            # 同一档等待态,由 tick 自愈在用户改对 token 后自动转 ready。
+            self._status = "local_vision_unreachable"
+            self._status_message = f"本地视觉服务拒绝当前访问凭证({cfg.base_url})"
+            # 与紧邻的"正在加载"分支一致地**不打日志**:这是个每 tick 都会重入的
+            # 等外部条件态,状态已经进 lifecycle 并在界面上可见;再打一行 WARNING
+            # 就是每 4 秒一条、能刷上几天的噪声。
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
+
+        if not probe.get("model_loaded"):
             self._status = "local_vision_unreachable"
             self._status_message = f"本地视觉服务正在加载模型({cfg.base_url})"
             mon.set_lifecycle(
@@ -360,19 +380,27 @@ class PerceptionEngineProxy:
             return
         self._status = "ready"
         self._status_message = ""
-        # 显式告知能力边界:已配 STATIC 规则的用户必须知道本通路下它们不再直连
-        # 设备(改由 agent 决策执行),否则规则会「悄悄失灵」而无人察觉。
+        # 显式告知能力边界。直连设备的规则不会走到这里(切换那一步就被拒了),
+        # 但音频与身份这两项缺失是静默的,必须在日志里留一行。
         logger.warning(
             "感知已切到本地视觉通路(%s):纯视觉 —— 无音频结论、无身份识别;"
-            "规则命中一律交 agent 决策执行,STATIC 规则的直连设备执行不生效。",
+            "规则命中只上报,设备动作一律交 agent 决策执行。",
             cfg.base_url,
         )
         mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
+
+    def _invalidate_local_probe(self) -> None:
+        """丢弃探活缓存与冷却。配置一变就调,让下一次探活立刻重来。"""
+        self._local_probe = None
+        self._local_probe_error = None
+        self._local_probe_not_before = 0.0
+        self._local_probe_key = None
 
     def _refresh_local_probe_sync(self, client, cfg) -> None:
         """真正打一次探活并写缓存。**阻塞**,只允许在线程里或构造期调用。"""
         from miloco.perception.local_vision import LocalVisionError
 
+        self._local_probe_key = (cfg.base_url, cfg.token)
         try:
             self._local_probe = client.health_sync()
             self._local_probe_error = None
@@ -394,12 +422,17 @@ class PerceptionEngineProxy:
             return
         if self.perception_engine is not None:  # 已就绪,无需再探
             return
-        if time.monotonic() < self._local_probe_not_before:
-            return
 
         from miloco.perception.local_vision import LocalVisionClient
 
         cfg = settings.perception.local_vision
+        # 冷却是绑在**那一份配置**上的。用户改了地址或凭证之后还压着上一份配置的
+        # 冷却不放,等于让一次已经修好的配置继续瞎等 30 秒。
+        if self._local_probe_key not in (None, (cfg.base_url, cfg.token)):
+            self._invalidate_local_probe()
+        elif time.monotonic() < self._local_probe_not_before:
+            return
+
         client = LocalVisionClient(
             base_url=cfg.base_url, token=cfg.token, timeout=cfg.timeout_sec
         )

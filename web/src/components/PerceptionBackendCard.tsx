@@ -14,6 +14,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getPerceptionBackend, setPerceptionBackend } from "@/api";
+import { buildSwitchPayload, healthLine } from "@/lib/perceptionBackend";
 import type { PerceptionBackendState } from "@/lib/types";
 import { toast } from "./Toast";
 
@@ -29,6 +30,7 @@ export function PerceptionBackendCard() {
   const { t } = useTranslation();
   const [state, setState] = useState<PerceptionBackendState | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
+  const [token, setToken] = useState("");
   const [switching, setSwitching] = useState<"cloud" | "local" | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
@@ -52,9 +54,10 @@ export function PerceptionBackendCard() {
     setSwitching(backend);
     try {
       const s = await setPerceptionBackend(
-        backend === "local" ? { backend, base_url: baseUrl.trim() } : { backend },
+        buildSwitchPayload(backend, baseUrl, token),
       );
       setState(s);
+      setToken("");
       window.dispatchEvent(new Event(PERCEPTION_BACKEND_CHANGED));
       toast(
         backend === "local"
@@ -87,6 +90,7 @@ export function PerceptionBackendCard() {
   const isLocal = state.backend === "local";
   const health = state.health;
   const reachable = !!health?.model_loaded;
+  const line = healthLine(state);
 
   return (
     <section
@@ -126,6 +130,11 @@ export function PerceptionBackendCard() {
           <p className="text-caption text-text-secondary mt-1">
             {t("perceptionBackend.cloudDesc")}
           </p>
+          {/* 缺 Key / 模型没下完时切回云端同样起不来。不拒绝(云端是退路,挡住
+              就把用户关在坏掉的后端里),但必须让它成为知情的选择。 */}
+          {isLocal && state.cloud_hint && (
+            <p className="text-caption text-warning mt-2">{state.cloud_hint}</p>
+          )}
         </button>
 
         {/* 本地 GPU */}
@@ -173,13 +182,31 @@ export function PerceptionBackendCard() {
             className={INPUT_CLS}
           />
         </label>
-        <div className="text-caption pt-6">
-          {state.error ? (
+        <label className="block">
+          <span className="text-caption text-text-secondary mb-1 block">
+            {t("perceptionBackend.tokenLabel")}
+          </span>
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder={
+              state.local_vision.has_token
+                ? t("perceptionBackend.tokenSaved")
+                : t("perceptionBackend.tokenPlaceholder")
+            }
+            className={INPUT_CLS}
+          />
+        </label>
+        <div className="text-caption md:col-span-2">
+          {line.kind === "unreachable" ? (
             <span className="text-error">✗ {t("perceptionBackend.unreachable")}</span>
-          ) : health ? (
+          ) : line.kind === "auth-rejected" ? (
+            <span className="text-error">✗ {t("perceptionBackend.authBad")}</span>
+          ) : line.kind === "ok" ? (
             <span className="text-success num">
-              ✓ {health.device ?? ""} · {health.backend ?? ""}
-              {health.gate_available ? "" : ` · ${t("perceptionBackend.gateOff")}`}
+              ✓ {line.device} · {line.backend}
+              {line.gateOff ? ` · ${t("perceptionBackend.gateOff")}` : ""}
             </span>
           ) : null}
         </div>
@@ -194,6 +221,14 @@ export function PerceptionBackendCard() {
           <li className="text-warning">• {t("perceptionBackend.capNoStatic")}</li>
         )}
       </ul>
+
+      {/* 会挡住切换的规则先列出来,免得用户点了才知道 —— 后端会以 400 拒绝。 */}
+      {!isLocal && state.blocking_static_rules.length > 0 && (
+        <div className="mt-3 text-caption text-warning bg-warning-bg rounded-lg px-3 py-2">
+          {t("perceptionBackend.blockingRules")}
+          <span className="num"> {state.blocking_static_rules.join("、")}</span>
+        </div>
+      )}
     </section>
   );
 }

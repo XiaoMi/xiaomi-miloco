@@ -727,7 +727,14 @@ export interface PerceptionBackendState {
     gate_error: string | null;
     device: string | null;
     backend: string | null;
+    /** 边车用与推理同一套比较回的鉴权结论 —— 探活绿灯但凭证不对时靠它区分。 */
+    auth_required?: boolean;
+    auth_ok?: boolean;
   } | null;
   error: string | null;
+  /** 启用中、会在感知层直连设备的规则名 —— 切到本地会被拒绝,先在界面上预告。 */
+  blocking_static_rules: string[];
+  /** 云端通路当前不具备工作条件时的说明;具备则空串。切回云端永不拒绝,只提示。 */
+  cloud_hint: string;
   local_capabilities: LocalVisionCapabilities;
 }

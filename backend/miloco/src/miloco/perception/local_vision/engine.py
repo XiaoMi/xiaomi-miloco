@@ -54,6 +54,12 @@ def _as_float(v: object) -> float | None:
         return None
 
 
+#: 每条规则判定行的 token 开销(「规则N:是/否,依据…」),用于放大生成预算。
+_TOKENS_PER_VERDICT = 24
+#: 主动查询这类自由问答用的复读硬禁 n —— 显著放宽,见调用处说明。
+_NGRAM_GUARD_FREEFORM = 32
+
+
 class LocalVisionEngine(BasePerceptionEngine):
     #: 本通路不执行任何设备动作 —— 规则命中一律交 agent 决策执行,STATIC 规则的
     #: 感知层直连不生效。做成类属性是为了让 admin 接口能直接读它去告知用户,
@@ -124,6 +130,16 @@ class LocalVisionEngine(BasePerceptionEngine):
         # rule_scope 的存在意义正是消灭这类差异。
         return (prompt_map.get(did) or "").strip()
 
+    def _token_budget(self, rule_count: int) -> int:
+        """描述预算之外,按规则条数追加判定行的开销。
+
+        配置里的 max_new_tokens 是给**场景描述**定的。判定行是额外产出:每条约
+        「规则N:是/否,依据…」二十来个 token。不追加的话,规则一多就必然截断在
+        判定块中间 —— 而截断后的缺失判定会被 fail-closed 读成"未命中",于是
+        「规则越多、越靠后的规则越容易静默失效」,且没有任何报错。
+        """
+        return min(1024, self._max_new_tokens + _TOKENS_PER_VERDICT * max(0, rule_count))
+
     async def _perceive_device(
         self, snapshot, rules: list[dict], prompt_map: dict[str, str]
     ) -> dict | None:
@@ -153,7 +169,7 @@ class LocalVisionEngine(BasePerceptionEngine):
                 rules=payload_rules,
                 scene_ask=self._scene_ask,
                 camera_note=self._camera_note_for(did, prompt_map),
-                max_new_tokens=self._max_new_tokens,
+                max_new_tokens=self._token_budget(len(payload_rules)),
             )
         except LocalVisionError as e:
             logger.warning("[local-vision] sidecar failed did=%s: %s", did, e)
@@ -234,6 +250,24 @@ class LocalVisionEngine(BasePerceptionEngine):
             # 未命中的那些推退。**门控只压制叙述,不影响规则判定** —— 判定已经算
             # 出来了,丢掉它只会让状态机断供、规则卡死在上一态。
             device_rule_map[did] = [r["id"] for r in dispatched]
+
+            # fail-closed 把"没解析出判定"和"模型说不"变成同一个结果:规则未命中,
+            # 状态规则还会因此走 on_exit。差别只在日志里 —— 不打出来的话,一台
+            # 相机的规则可能整天都在被推退,而任何一层都看不出异常。
+            unparsed = out.get("unparsed_rules") or 0
+            if unparsed and dispatched:
+                logger.warning(
+                    "[local-vision] did=%s %s/%d 条规则未判出结论%s,本窗按未命中处理",
+                    did, unparsed, len(dispatched),
+                    "(生成被 token 上限截断)" if out.get("truncated") else "",
+                )
+            elif out.get("truncated"):
+                # 没有规则时截断同样要报:描述会从句子中间断掉,然后原样交给 agent。
+                # 只在有规则时才看这个标志的话,这种情况永远不会有人发现。
+                logger.warning(
+                    "[local-vision] did=%s 描述被 max_new_tokens 截断,可调高 "
+                    "perception.local_vision.max_new_tokens", did,
+                )
 
             # 规则命中:按名字回填 rule_id。名字在同设备内唯一(miloco 侧保证),
             # 顺序也一一对应,双保险按索引兜底。
@@ -342,6 +376,11 @@ class LocalVisionEngine(BasePerceptionEngine):
                 out = await self._client.perceive(
                     video, rules=[], scene_ask=query,
                     max_new_tokens=self._max_new_tokens, want_gate=False,
+                    # 主动查询的提问是 agent 现编的自由文本,答案里合理重复一个
+                    # 短句的可能性远高于定时描述(「是的,门是关着的;门是关着的
+                    # 状态已持续…」)。默认那个为定时描述调出来的 12-gram 硬禁
+                    # 会把这类回答掐断,故这里放宽到与带规则时同档。
+                    ngram_guard=_NGRAM_GUARD_FREEFORM,
                 )
             except (EncodeError, LocalVisionError) as e:
                 logger.warning(

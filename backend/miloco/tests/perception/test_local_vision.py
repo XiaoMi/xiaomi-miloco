@@ -50,12 +50,13 @@ class _FakeClient:
         self.calls: list[dict] = []
 
     async def perceive(self, video, rules, scene_ask=None, camera_note="",
-                       max_new_tokens=256, want_gate=True):
+                       max_new_tokens=256, want_gate=True, ngram_guard=None):
         from miloco.perception.local_vision.client import LocalVisionError
 
         self.calls.append({
             "rules": rules, "scene_ask": scene_ask,
             "camera_note": camera_note, "bytes": len(video),
+            "max_new_tokens": max_new_tokens, "ngram_guard": ngram_guard,
         })
         if self.fail:
             raise LocalVisionError("sidecar down")
@@ -66,6 +67,72 @@ class _FakeClient:
 
 def _engine(client, **kw) -> LocalVisionEngine:
     return LocalVisionEngine(client, container_fps=2, **kw)
+
+
+def test_fake_client_signature_matches_the_real_one():
+    """替身的 perceive 签名必须与真客户端逐字一致。
+
+    这条看着像形式主义,但它守的是一个真实事故:替身多/少一个参数时,被测代码
+    在替身上跑得好好的,换成真客户端就 TypeError —— 而整套测试仍然全绿。签名是
+    这两者之间**唯一**的契约,漂移必须在这里就红,不能等到线上那一窗。
+    """
+    import inspect
+
+    from miloco.perception.local_vision.client import LocalVisionClient
+
+    real = inspect.signature(LocalVisionClient.perceive)
+    fake = inspect.signature(_FakeClient.perceive)
+    assert [p.name for p in real.parameters.values()] == [
+        p.name for p in fake.parameters.values()
+    ]
+    assert {n: p.default for n, p in real.parameters.items() if p.default is not p.empty} == {
+        n: p.default for n, p in fake.parameters.items() if p.default is not p.empty
+    }
+
+
+@pytest.mark.asyncio
+async def test_token_budget_grows_with_rule_count():
+    """生成预算必须随规则条数放大。
+
+    配置里的 max_new_tokens 是给场景描述定的;每条规则还要额外产出一行判定。
+    不放大的话,规则一多就必然截断在判定块中间,而缺失的判定会被 fail-closed
+    读成「未命中」—— 表现为"规则越多、越靠后的越容易静默失效",且无任何报错。
+    """
+    rules = [
+        {"id": f"r{i}", "name": f"名字{i}",
+         "condition": {"query": "有人", "perceive_device_ids": []}}
+        for i in range(5)
+    ]
+    client = _FakeClient([{"caption": "x", "rule_hits": [],
+                           "gate_p": None, "backend": "codec"}])
+    await _engine(client, max_new_tokens=200).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    call = client.calls[0]
+    assert len(call["rules"]) == 5
+    assert call["max_new_tokens"] > 200, "预算没随规则数放大,末尾规则会被截断吃掉"
+
+
+@pytest.mark.asyncio
+async def test_on_demand_relaxes_the_repetition_guard():
+    """主动查询要放宽复读硬禁。
+
+    默认那个 n 是为定时场景描述调出来的;主动查询的提问由 agent 现编,答案里
+    合理复现一个短句很常见,沿用严格值会把正常回答掐断。
+    """
+    client = _FakeClient([{"caption": "门是关着的", "rule_hits": [],
+                           "gate_p": None, "backend": "frames"}])
+    await _engine(client).on_demand_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), "门关了吗?"
+    )
+    assert client.calls[0]["ngram_guard"] == 32
+    # 定时通路保持默认(由边车按有无规则自适应),不被这条覆盖。
+    client2 = _FakeClient([{"caption": "x", "rule_hits": [],
+                            "gate_p": None, "backend": "codec"}])
+    await _engine(client2).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+    )
+    assert client2.calls[0]["ngram_guard"] is None
 
 
 @pytest.mark.asyncio
@@ -601,3 +668,62 @@ def test_rule_lookup_failure_does_not_block_switching():
 
     with patch("miloco.database.rule_repo.RuleRepo", _Boom):
         assert admin._rules_with_direct_device_actions() == []
+
+
+def test_health_probe_sends_the_configured_credentials():
+    """探活不带凭证的话,边车回的 auth_ok 恒为 false —— 任何配了 token 的部署都会
+    被判成"凭证不被接受"而永远切不过去。这条曾真的发生过,且只有实机能发现:
+    上层测试把 health_sync 整个 mock 掉了,看不到它到底发了什么。"""
+    import httpx
+    from miloco.perception.local_vision import LocalVisionClient
+
+    seen: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"status": "ok", "model_loaded": True,
+                                         "auth_required": True, "auth_ok": True})
+
+    transport = httpx.MockTransport(_handler)
+    real_client = httpx.Client
+
+    class _Patched(real_client):  # type: ignore[misc,valid-type]
+        def __init__(self, *a, **kw):
+            kw["transport"] = transport
+            super().__init__(*a, **kw)
+
+    httpx.Client = _Patched
+    try:
+        out = LocalVisionClient("http://sidecar:18800", token="secret").health_sync()
+    finally:
+        httpx.Client = real_client
+
+    assert seen["auth"] == "Bearer secret"
+    assert out["auth_ok"] is True
+
+
+def test_health_probe_sends_no_auth_header_when_no_token_configured():
+    import httpx
+    from miloco.perception.local_vision import LocalVisionClient
+
+    seen: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"status": "ok", "model_loaded": True})
+
+    transport = httpx.MockTransport(_handler)
+    real_client = httpx.Client
+
+    class _Patched(real_client):  # type: ignore[misc,valid-type]
+        def __init__(self, *a, **kw):
+            kw["transport"] = transport
+            super().__init__(*a, **kw)
+
+    httpx.Client = _Patched
+    try:
+        LocalVisionClient("http://sidecar:18800").health_sync()
+    finally:
+        httpx.Client = real_client
+
+    assert seen["auth"] is None

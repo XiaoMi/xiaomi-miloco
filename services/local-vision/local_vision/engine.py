@@ -140,6 +140,10 @@ class MageVLEngine:
         return self._processor(
             text=[text],
             videos=[sample_frames(video_path, self.num_frames)],
+            # codec 分支限了像素预算,frames 分支不限的话同一台相机换到降级通路
+            # 就会突然按原始分辨率铺 patch:token 数与显存跟着跳变,而这条恰恰是
+            # 段太短时的**默认**落点。两条通路的视觉预算必须同源。
+            max_pixels=self.max_pixels,
             return_tensors="pt",
             padding=True,
         )
@@ -191,6 +195,7 @@ class MageVLEngine:
         camera_note: str = "",
         max_new_tokens: int = 256,
         want_gate: bool = True,
+        ngram_guard: int | None = None,
     ) -> dict:
         """对一段视频做一次感知,返回 caption + 逐条规则判定 + 门控概率。"""
         if not self.ready:
@@ -234,10 +239,15 @@ class MageVLEngine:
                     #   到远超任何规则 query 的长度,只封死"整段照抄"这种病态重复。
                     repetition_penalty=_REPETITION_PENALTY,
                     no_repeat_ngram_size=(
-                        _NO_REPEAT_NGRAM_WITH_RULES if rules else _NO_REPEAT_NGRAM
+                        ngram_guard
+                        if ngram_guard is not None
+                        else (_NO_REPEAT_NGRAM_WITH_RULES if rules else _NO_REPEAT_NGRAM)
                     ),
                 )
             t_gen = (time.time() - t1) * 1000
+            # 顶到上限 = 被截断。末尾的「规则N:」很可能整段没写出来,而 fail-closed
+            # 会把它读成"全部未命中" —— 调用方必须能把这种情况和真正的否定分开。
+            truncated = bool(out.shape[1] - inputs["input_ids"].shape[1] >= max_new_tokens)
             raw = self._processor.tokenizer.decode(
                 out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True
             ).strip()
@@ -246,14 +256,16 @@ class MageVLEngine:
         unparsed = count_unparsed(hits)
         if unparsed:
             logger.warning(
-                "%d/%d 条规则未解析出判定(复读吃光 token / 输出格式被带偏?);"
-                "原始输出前 200 字: %s",
-                unparsed, len(hits), raw[:200],
+                "%d/%d 条规则未解析出判定(%s);原始输出前 200 字: %s",
+                unparsed, len(hits),
+                "生成被 max_new_tokens 截断" if truncated else "输出格式被带偏?",
+                raw[:200],
             )
         return {
             "caption": caption,
             "rule_hits": hits,
             "unparsed_rules": unparsed,
+            "truncated": truncated,
             "gate_p": gate_p,
             "raw": raw,
             "backend": backend,

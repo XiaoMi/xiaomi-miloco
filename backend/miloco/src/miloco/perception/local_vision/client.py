@@ -23,6 +23,10 @@ class LocalVisionError(RuntimeError):
 # 已知字段,把回显面钉死成固定形状。
 _HEALTH_FIELDS = (
     "status", "model_loaded", "gate_available", "gate_error", "device", "backend",
+    # 边车侧用与推理同一套比较得出的鉴权结论。凭证不对时 /health 仍返 200,
+    # 靠这两个字段区分「服务没起来」和「起来了但 token 不匹配」——后者若不看,
+    # 探活会一路绿灯而每一窗推理 401,感知静默停摆。
+    "auth_required", "auth_ok",
 )
 _HEALTH_ERROR_MAXLEN = 300
 # 探活超时刻意远小于推理超时:它在 tick 自愈里被高频调用,长超时会卡住调用线程。
@@ -66,7 +70,10 @@ class LocalVisionClient:
         timeout = httpx.Timeout(_HEALTH_TIMEOUT, connect=_HEALTH_CONNECT_TIMEOUT)
         try:
             with httpx.Client(timeout=timeout) as c:
-                r = c.get(f"{self.base_url}/health")
+                # 必须带上凭证:边车会用它回 auth_ok,调用方据此在**切换那一刻**
+                # 就发现 token 配错,而不是等每一窗推理 401。不带的话,任何配了
+                # 凭证的部署都会被判成"凭证不被接受"。
+                r = c.get(f"{self.base_url}/health", headers=self._headers())
                 r.raise_for_status()
                 return _sanitize_health(r.json())
         except Exception as e:  # noqa: BLE001
@@ -80,6 +87,7 @@ class LocalVisionClient:
         camera_note: str = "",
         max_new_tokens: int = 256,
         want_gate: bool = True,
+        ngram_guard: int | None = None,
     ) -> dict:
         payload = {
             "video_b64": base64.b64encode(video).decode("ascii"),
@@ -87,6 +95,8 @@ class LocalVisionClient:
             "max_new_tokens": max_new_tokens,
             "want_gate": want_gate,
         }
+        if ngram_guard is not None:
+            payload["ngram_guard"] = ngram_guard
         if scene_ask:
             payload["scene_ask"] = scene_ask
         if camera_note:

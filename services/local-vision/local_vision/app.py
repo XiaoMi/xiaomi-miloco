@@ -105,6 +105,10 @@ class PerceiveRequest(BaseModel):
     camera_note: str = Field(default="", description="该机位的自定义说明;作为补充,不取代任务提问")
     max_new_tokens: int = Field(default=256, ge=16, le=1024)
     want_gate: bool = Field(default=True, description="是否计算 StreamMind 门控概率")
+    # 复读硬禁的 n。默认按"有无规则"自适应(见 engine),但主动查询这条路上提问是
+    # agent 现编的自由文本,答案里合理重复一个短句的可能性高得多 —— 让调用方能
+    # 按用途放宽,而不是被一个为定时描述调出来的值管着。
+    ngram_guard: int | None = Field(default=None, ge=0, le=128)
 
 
 class PerceiveResponse(BaseModel):
@@ -114,6 +118,9 @@ class PerceiveResponse(BaseModel):
     # "模型输出被复读吃光/格式被带偏"就与"模型确实说不"变得无法区分,而前者会让
     # 该相机的规则被整体推成未命中(state 规则甚至会因此触发 on_exit 动作)。
     unparsed_rules: int = 0
+    # 生成是否顶到 max_new_tokens 上限。截断会把末尾的「规则N:」整段吃掉,而
+    # fail-closed 会把它变成"全部未命中" —— 与"模型确实说不"同形。必须报出来。
+    truncated: bool = False
     gate_p: float | None
     backend: str
     timing_ms: dict
@@ -121,10 +128,24 @@ class PerceiveResponse(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict:
-    """无需鉴权,供 miloco 探活与「测试连接」使用。"""
+def health(request: Request) -> dict:
+    """无需鉴权,供 miloco 探活与「测试连接」使用。
+
+    但**要把鉴权结论报出来**。探活不校验凭证的话,配错 token 的部署会一路绿灯:
+    /health 通过 → miloco 判定就绪 → 每一窗推理 401 → 感知静默停摆,而界面上
+    那行探活始终是绿的。所以这里用与 require_token 相同的比较得出 auth_ok,
+    让调用方能在**切换那一刻**就拒绝,而不是等第一次推理失败。
+    仍不返 401:探活得能区分「服务没起来」和「起来了但凭证不对」。
+    """
     e = _engine
+    expected = os.environ.get("LOCAL_VISION_TOKEN", "")
+    auth_ok = True
+    if expected:
+        got = request.headers.get("authorization", "")
+        auth_ok = hmac.compare_digest(got.encode("utf-8"), f"Bearer {expected}".encode())
     return {
+        "auth_required": bool(expected),
+        "auth_ok": auth_ok,
         "status": "ok" if (e and e.ready) else "loading",
         "model_loaded": bool(e and e.ready),
         "gate_available": bool(e and e.gate_available),
@@ -168,6 +189,7 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
             camera_note=body.camera_note,
             max_new_tokens=body.max_new_tokens,
             want_gate=body.want_gate,
+            ngram_guard=body.ngram_guard,
         )
     except Exception as err:  # noqa: BLE001 —— 单次推理失败不该拖垮常驻服务
         logger.exception("perceive failed")

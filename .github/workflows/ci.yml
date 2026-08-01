@@ -58,6 +58,7 @@ jobs:
         run: |
           cd services/local-vision
           PYTHONPATH=. uv run --no-project --with pytest --with pydantic \
+            --with fastapi --with httpx \
             python -m pytest tests/ -v
 
   cli-test:

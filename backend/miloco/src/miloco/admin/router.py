@@ -1122,6 +1122,30 @@ def _rules_with_direct_device_actions() -> list[str]:
     return names
 
 
+def _cloud_readiness_hint() -> str:
+    """云端通路当前是否具备工作条件;具备则空串。"""
+    from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
+    from miloco.perception.engine.resource_validator import (
+        EngineReadiness,
+        validate_resources,
+    )
+
+    try:
+        s = get_settings()
+        omni = dict(s.perception.engine.get("omni", {}))
+        models_dir = dict(s.perception.engine.get("identity", {})).get(
+            "perception_model_dir"
+        ) or str(s.directories.models_dir)
+        v = validate_resources(resolve_omni_api_key(omni.get("api_key", "")), models_dir)
+        if v.status == EngineReadiness.NOT_CONFIGURED:
+            return "云端通路当前未配置多模态大模型 API Key,切过去后感知不会立即恢复。"
+        if v.status == EngineReadiness.MODELS_MISSING:
+            return f"云端通路的本地模型尚未就绪:{v.message}"
+    except Exception as e:  # noqa: BLE001 —— 只是提示,算不出来就不提示
+        logger.warning("云端就绪度提示计算失败: %s", e)
+    return ""
+
+
 def _local_vision_payload() -> dict:
     """当前后端选择 + 本地边车的连通性快照。
 
@@ -1149,6 +1173,10 @@ def _local_vision_payload() -> dict:
         },
         "health": health,
         "error": error,
+        # 切回云端**永远不拒绝** —— 它是本地通路出问题时的退路,挡住就把用户
+        # 关在了一个不工作的后端里。但缺 Key / 模型没下完时切过去感知同样起不来,
+        # 所以提前把这件事说清楚,让它成为一次知情的选择而不是一次静默的停摆。
+        "cloud_hint": _cloud_readiness_hint(),
         # 启用中、会在感知层直连设备的规则 —— 切到本地通路会拒绝,这里先给前端
         # 预览,免得用户点了才知道。
         "blocking_static_rules": _rules_with_direct_device_actions(),
@@ -1215,6 +1243,14 @@ async def set_perception_backend(
             )
         except LocalVisionError:
             raise HTTPException(status_code=400, detail="本地视觉服务不可达")
+        # 边车用与推理同一套比较回的鉴权结论。不看这个的话,token 配错的部署
+        # 会一路绿灯:探活过 → 判定就绪 → 每一窗推理 401 → 感知静默停摆,而
+        # 界面上那行探活始终是绿的。
+        if health.get("auth_required") and not health.get("auth_ok"):
+            raise HTTPException(
+                status_code=400,
+                detail="本地视觉服务要求访问凭证,当前凭证不被接受 —— 请填写正确的 token",
+            )
         if body.backend == "local" and not health.get("model_loaded"):
             raise HTTPException(status_code=400, detail="本地视觉服务正在加载模型,稍后再试")
 
