@@ -221,8 +221,13 @@ class PerceptionEngineProxy:
         # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
         # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
         self._engine_lock = asyncio.Lock()
-        # 本地边车探活失败后的下次可探时刻(monotonic 秒);0 = 立刻可探。
-        self._local_probe_not_before: float = 0.0
+        # 本地边车探活缓存。同步重建路径(_init_local_engine)**只读这里,不做 IO**——
+        # 它会被每个感知 tick 调到,而探活是同步 HTTP,直接在主事件循环上做会把
+        # 相机取帧 / SSE / API 一起卡住。真正的探活由 refresh_local_probe() 在
+        # 线程里完成(见 runner._tick)。
+        self._local_probe: dict | None = None      # 成功时的 health 快照
+        self._local_probe_error: str | None = None  # 失败原因
+        self._local_probe_not_before: float = 0.0   # 失败后的重探冷却(monotonic 秒)
 
         self._init_engine()
 
@@ -298,7 +303,6 @@ class PerceptionEngineProxy:
         from miloco.perception.local_vision import (
             LocalVisionClient,
             LocalVisionEngine,
-            LocalVisionError,
         )
 
         cfg = settings.perception.local_vision
@@ -307,31 +311,23 @@ class PerceptionEngineProxy:
             base_url=cfg.base_url, token=cfg.token, timeout=cfg.timeout_sec
         )
 
-        # 探活是同步 HTTP,而本方法会被 tick 自愈**每个感知周期**(默认 4s)调到。
-        # 边车地址若被防火墙 DROP,每次探活都会把主事件循环卡住一个连接超时 ——
-        # 相机取帧、SSE、HTTP API 全部跟着停。失败后加冷却:边车没起来时不再每
-        # tick 去撞,只在冷却到期后重试一次。(冷却期内保持等待态,不改变语义。)
-        now = time.monotonic()
-        if now < self._local_probe_not_before:
-            mon.set_lifecycle(
-                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
-            )
-            return
+        # **本方法不做任何网络 IO**:它被每个感知 tick 调到,同步 HTTP 会卡住主
+        # 事件循环(相机取帧 / SSE / API 全停)。探活结果由 refresh_local_probe()
+        # 在线程里刷新,这里只读缓存。缓存为空(进程刚起、tick 还没跑过)时做一次
+        # 阻塞探活是可接受的——只发生在构造期。
+        if self._local_probe is None and self._local_probe_error is None:
+            self._refresh_local_probe_sync(client, cfg)
 
-        try:
-            health = client.health_sync()
-        except LocalVisionError as e:
-            self._local_probe_not_before = now + _LOCAL_PROBE_COOLDOWN_SEC
+        if self._local_probe_error is not None:
             self._status = "local_vision_unreachable"
-            self._status_message = f"本地视觉服务不可达({cfg.base_url}): {e}"
+            self._status_message = self._local_probe_error
             logger.warning("感知引擎不可用: %s", self._status_message)
             mon.set_lifecycle(
                 NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
             )
             return
-        self._local_probe_not_before = 0.0
 
-        if not health.get("model_loaded"):
+        if not (self._local_probe or {}).get("model_loaded"):
             self._status = "local_vision_unreachable"
             self._status_message = f"本地视觉服务正在加载模型({cfg.base_url})"
             mon.set_lifecycle(
@@ -370,6 +366,42 @@ class PerceptionEngineProxy:
             cfg.base_url,
         )
         mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
+
+    def _refresh_local_probe_sync(self, client, cfg) -> None:
+        """真正打一次探活并写缓存。**阻塞**,只允许在线程里或构造期调用。"""
+        from miloco.perception.local_vision import LocalVisionError
+
+        try:
+            self._local_probe = client.health_sync()
+            self._local_probe_error = None
+            self._local_probe_not_before = 0.0
+        except LocalVisionError as e:
+            self._local_probe = None
+            self._local_probe_error = f"本地视觉服务不可达({cfg.base_url}): {e}"
+            self._local_probe_not_before = time.monotonic() + _LOCAL_PROBE_COOLDOWN_SEC
+
+    async def refresh_local_probe(self) -> None:
+        """在线程里刷新本地边车探活缓存;非本地后端 / 引擎已就绪时是零开销 no-op。
+
+        由 ``runner._tick`` 在 ``try_reinit_engine`` 之前 await 一次。这样同步的
+        重建路径永远不碰网络,主事件循环也就不会被一个不可达的边车地址卡住。
+        失败后有冷却,边车长时间不在时不会每 tick 都去撞。
+        """
+        settings = get_settings()
+        if settings.perception.engine_backend != "local":
+            return
+        if self.perception_engine is not None:  # 已就绪,无需再探
+            return
+        if time.monotonic() < self._local_probe_not_before:
+            return
+
+        from miloco.perception.local_vision import LocalVisionClient
+
+        cfg = settings.perception.local_vision
+        client = LocalVisionClient(
+            base_url=cfg.base_url, token=cfg.token, timeout=cfg.timeout_sec
+        )
+        await asyncio.to_thread(self._refresh_local_probe_sync, client, cfg)
 
     # tick-driven 自愈放行的"等外部条件"态:validate 廉价(缺 key 零 IO、缺模型仅
     # stat),失败回到同一 PREREQ_MISSING、_init_engine 不翻 lifecycle → 每 tick 零

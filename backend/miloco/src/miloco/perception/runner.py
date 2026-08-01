@@ -173,6 +173,9 @@ class PerceptionRunner:
         # ready,与 omni_client.resolve_live_omni_config 注释承诺的"下个推理周期热生效"
         # 对齐。只放行廉价"等外部条件"态(缺 key/模型),engine_init_failed 不在此重试
         # (见 try_reinit);配合 STARTING 后移,未满足前置条件时零开销、零 event_log 噪声。
+        # 本地视觉后端的探活先在线程里刷一次,再走同步重建 —— 同步路径因此永远
+        # 不碰网络,一个不可达的边车地址不会把主事件循环卡住(相机取帧/SSE/API)。
+        await self._pipeline.refresh_local_probe()
         self._pipeline.try_reinit_engine()
 
         result = await self._pipeline.process_realtime()

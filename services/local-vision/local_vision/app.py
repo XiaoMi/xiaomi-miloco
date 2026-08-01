@@ -15,6 +15,7 @@ import binascii
 import hmac
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -42,12 +43,34 @@ async def lifespan(app: FastAPI):
         max_pixels=int(_env("LOCAL_VISION_MAX_PIXELS", "150000")),
         attn_impl=_env("LOCAL_VISION_ATTN", "sdpa"),
     )
-    _engine.load()
+    # 权重加载要几十秒。放后台线程,让服务立刻开始应答 —— 否则 /health 在加载
+    # 期间根本连不上,miloco 侧那条"正在加载模型"的等待态永远走不到,用户冷启动
+    # 时只会看到"服务不可达",分不清是没装好还是在加载。
+    threading.Thread(target=_load_engine, name="lv-load", daemon=True).start()
     yield
     _engine = None
 
 
+def _load_engine() -> None:
+    e = _engine
+    if e is None:
+        return
+    try:
+        e.load()
+    except Exception:  # noqa: BLE001 —— 加载失败只让服务停在 loading 态,不崩进程
+        logger.exception("model load failed; service stays unready")
+
+
 app = FastAPI(title="miloco local-vision", version="0.1.0", lifespan=lifespan)
+
+# 同时在飞的推理请求上限。单卡串行推理,排队本身没问题 —— 但 miloco 是**每台相机
+# 每个窗口各发一个请求**,多相机部署下窗口比推理快时队列会无限涨:请求全都占着
+# FastAPI 的线程池等 GPU 锁,池子占满后连 /health 都开始超时,miloco 于是判定
+# 边车挂了、切进重连循环 —— 一个纯粹由排队引起的假故障。
+# 超限直接回 503:让 miloco 把这一窗当"本轮没结论"跳过(它本来就会这么处理),
+# 比让它等一个已经过期的答案好。
+_MAX_INFLIGHT = int(os.environ.get("LOCAL_VISION_MAX_INFLIGHT", "2"))
+_inflight = threading.Semaphore(_MAX_INFLIGHT)
 
 
 def require_token(request: Request) -> None:
@@ -111,6 +134,12 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
     if not data:
         raise HTTPException(status_code=422, detail="empty video payload")
 
+    if not _inflight.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="busy: too many in-flight inferences, retry next window",
+        )
+
     from local_vision.video import write_temp_video
 
     path = write_temp_video(data)
@@ -126,6 +155,7 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
         logger.exception("perceive failed")
         raise HTTPException(status_code=500, detail=f"inference failed: {err}") from err
     finally:
+        _inflight.release()
         path.unlink(missing_ok=True)
         # codec 通路会在临时文件旁留下 cv-preinfer 的中间产物,一并清掉。
         for leftover in path.parent.glob(f"{path.stem}*"):

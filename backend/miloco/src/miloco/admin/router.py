@@ -1167,7 +1167,11 @@ async def set_perception_backend(
     if "base_url" in lv and lv["base_url"] != cur.base_url and "token" not in lv:
         lv["token"] = ""
 
-    if body.backend == "local":
+    # 只要动了 base_url 就必须先探活再落盘,与切到 local 时同一条校验 ——
+    # 否则 backend="cloud" 这条分支等于一个"任意地址免校验写入口",而 GET 之后
+    # 又会去探它。地址写进配置这件事本身就要能证明是个真边车。
+    must_probe = body.backend == "local" or "base_url" in lv
+    if must_probe:
         base_url = lv.get("base_url", cur.base_url)
         token = lv.get("token", cur.token)
         try:
@@ -1176,7 +1180,7 @@ async def set_perception_backend(
             )
         except LocalVisionError:
             raise HTTPException(status_code=400, detail="本地视觉服务不可达")
-        if not health.get("model_loaded"):
+        if body.backend == "local" and not health.get("model_loaded"):
             raise HTTPException(status_code=400, detail="本地视觉服务正在加载模型,稍后再试")
 
     if lv:

@@ -128,6 +128,7 @@ def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
     """
     verdicts: dict[int, tuple[bool, str]] = {}
     prose: list[str] = []
+    trailing: list[str] = []  # 规则区之后、显式带「描述:」标记的行
     seen_rule = False
     lines = raw.splitlines()
 
@@ -143,17 +144,24 @@ def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
                 hit, reason = _verdict_from_following_line(lines, idx)
             verdicts[int(m.group(1))] = (hit, reason)
             continue
-        if seen_rule:
-            continue  # 规则区之后的补充说明不进 caption
         s = _LEADING_NUM_RE.sub("", line).strip()
+        tagged = _CAPTION_TAG_RE.match(s) is not None
         s = _CAPTION_TAG_RE.sub("", s, count=1).strip()
-        if s:
-            prose.append(s)
+        if not s:
+            continue
+        if seen_rule:
+            # 规则区之后的行默认是补充说明,不进 caption —— 除非它显式带了
+            # 「描述:」标记。有些回答把描述写在判定后面,一律丢弃会让 caption 空掉
+            # 且无从恢复。
+            if tagged:
+                trailing.append(s)
+            continue
+        prose.append(s)
 
     # 只有在**完全没识别出规则行**时才把整段原文当描述。若已经解析到规则行,
     # 说明模型只回了判定、没写描述 —— 此时兜底回原文会把「规则1: 否 - …」这种
     # 机器格式一路带进事件文案与 agent 上下文,宁可留空。
-    caption = " ".join(prose).strip()
+    caption = " ".join(prose).strip() or " ".join(trailing).strip()
     if not caption and not seen_rule:
         caption = raw.strip()
 

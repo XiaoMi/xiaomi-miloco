@@ -213,6 +213,10 @@ class PipelineProcessor:
         settings = get_settings()
         self._perf_enabled: bool = settings.perf.enabled
 
+    async def refresh_local_probe(self) -> None:
+        """刷新本地视觉边车的探活缓存(在线程里做,不占事件循环)。透传 proxy。"""
+        await self._perception_engine_proxy.refresh_local_probe()
+
     def try_reinit_engine(self, *, include_failed: bool = False) -> None:
         """补完前置条件后热重建引擎;非可恢复态幂等 no-op。
 
