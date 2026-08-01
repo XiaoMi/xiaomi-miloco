@@ -74,10 +74,19 @@ POST /v1/perceive   → {caption, rule_hits[], gate_p, backend, timing_ms, raw}
   "video_b64": "<mp4 段的 base64>",
   "scene_ask": "请用中文描述这个家庭监控画面…",
   "rules": [{"name": "沙发有人", "query": "有人在客厅沙发上"}],
+  "camera_note": "这台对着门口,忽略窗外行人",
   "max_new_tokens": 256,
   "want_gate": true
 }
 ```
+
+`camera_note` 是该机位的自定义说明。它作为**补充**渲染在输出格式约定**之后** ——
+它是用户可写的自由文本,若放在格式说明之前,一句「只用一句话回答」就能让
+`规则N:` 那几行消失,而 fail-closed 会把这变成"该相机所有规则静默失效"且无任何报错。
+
+| 环境变量(续) | 默认 | 说明 |
+| --- | --- | --- |
+| `LOCAL_VISION_MAX_INFLIGHT` | `4` | 同时在飞的推理上限,超限回 503。**不要低于 miloco 允许同时启用的摄像头数**(默认 4)—— 低了会让固定几台相机每窗都抢不到槽位,它们上的规则永久不被评估 |
 
 规则判定 **fail-closed**:模型没给出可解析的判定就一律算「未命中」。漏报只是少一次
 agent 提醒,误报却会让 agent 对着不存在的事实做决策。
@@ -117,7 +126,7 @@ agent 提醒,误报却会让 agent 对着不存在的事实做决策。
   `/health` 的 `gate_error` 里说明原因,caption 与规则判定不受影响。要启用:装 CUDA ≥12.8
   工具链后 `TORCH_CUDA_ARCH_LIST=12.0 pip install --no-build-isolation --force-reinstall mamba-ssm`。
 - **门控的域外风险**。参考实现的门控在体育解说数据(SoccerNet)上训练,家庭场景属分布外。
-  因此 miloco 侧的 `gate_threshold` 默认为 `0`(只把概率记进 `timing._gate_p_*` 供观察,
+  因此 miloco 侧的 `event_gate_threshold` 默认为 `0`(只把概率记进 `timing._gate_p_*` 供观察,
   不据此丢弃任何窗口)。在自家数据上确认可靠后再调高。
 - **段太短会自动降级**。codec 分组要求 ≥8 帧,不足时自动回退到帧采样后端(仍可用,
   只是拿不到 token 削减)。

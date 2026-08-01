@@ -345,17 +345,9 @@ class PerceptionEngineProxy:
                 event_gate_threshold=cfg.event_gate_threshold,
                 scene_ask=cfg.scene_ask or None,
                 max_frames=cfg.max_frames,
-                # 短边默认跟随共享的感知参数(界面 / perception-config 可调),
-                # 只有 local_vision 显式设了值才覆盖 —— 单一事实源,免得两处漂移。
-                short_edge=(
-                    cfg.video_short_edge
-                    if cfg.video_short_edge is not None
-                    else int(
-                        settings.perception.engine.get("input", {}).get(
-                            "video_short_edge", 512
-                        )
-                    )
-                ),
+                # None 表示"每窗跟随共享的 video_short_edge",由引擎实时解析 ——
+                # 在这里定死会让面板上调分辨率对本通路失效(该设置的契约是即时生效)。
+                short_edge=cfg.video_short_edge,
             )
         except Exception as e:  # noqa: BLE001 —— 与云端分支对称
             # 不加这层的话构造异常会冒泡出去,留下 _status="ready" 而 engine=None

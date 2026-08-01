@@ -30,7 +30,6 @@ from miloco.perception.local_vision.client import LocalVisionClient, LocalVision
 from miloco.perception.local_vision.encode import EncodeError, encode_snapshot_to_h264
 from miloco.perception.rule_scope import (
     camera_prompt_map,
-    physical_did,
     rules_for_device,
 )
 from miloco.perception.types import (
@@ -77,7 +76,10 @@ class LocalVisionEngine(BasePerceptionEngine):
         self._container_fps = container_fps
         self._crf = crf
         self._max_frames = max_frames
-        self._short_edge = short_edge
+        # None = 每窗实时跟随共享的 perception.engine.input.video_short_edge。
+        # 该设置的既有契约是「写盘后下一帧即生效、无需重启」(见 admin/router 的
+        # perception-config),构造期定死会让面板上调分辨率对本通路无效。
+        self._short_edge_override = short_edge
         self._max_new_tokens = max_new_tokens
         # 门控默认 0.0 = 从不据此跳过。参考实现的门控在体育解说数据上训练,
         # 家庭场景属分布外 —— 默认只观测(把 gate_p 记进 timing 供比对),
@@ -93,18 +95,34 @@ class LocalVisionEngine(BasePerceptionEngine):
 
     # ── 感知 ─────────────────────────────────────────────────────────────
 
-    def _scene_ask_for(self, did: str, prompt_map: dict[str, str]) -> str | None:
-        """拼出该摄像头本轮的场景提问 = 基础提问 + 用户给这台机位写的「感知须知」。
+    def _resolve_short_edge(self) -> int:
+        """每次取用时解析短边上限,而不是构造期定死。"""
+        if self._short_edge_override is not None:
+            return self._short_edge_override
+        from miloco.config import get_settings
 
-        这段须知是用户在面板上逐台相机填的机位说明(如"这台对着门口,忽略窗外行人"),
-        云端通路一直会注入。本地通路必须同样注入 —— 否则同一台相机换条通路,用户
-        写的指导就悄悄失效了,而界面上完全看不出来。
+        try:
+            return int(
+                get_settings().perception.engine.get("input", {}).get(
+                    "video_short_edge", 512
+                )
+            )
+        except Exception:  # noqa: BLE001 —— 读配置失败不该中断感知
+            return 512
+
+    def _camera_note_for(self, did: str, prompt_map: dict[str, str]) -> str:
+        """取该机位的「感知须知」。
+
+        以**独立字段**送出,绝不拼进 scene_ask —— 拼进去会有两个后果:默认配置下
+        scene_ask 为空,拼接结果里就只剩用户那句话,任务提问整个消失;而且它会落在
+        输出格式约定之前,一句「只用一句话回答」就能让规则行不再出现,fail-closed
+        随后把它变成"该相机所有规则静默失效"。云端通路的做法同样是把它作为一个
+        独立小节附加在完整任务提示之上,而不是取代。
         """
-        extra = (prompt_map.get(did) or prompt_map.get(physical_did(did)) or "").strip()
-        base = self._scene_ask
-        if not extra:
-            return base
-        return f"{base}\n\n本机位补充说明:{extra}" if base else f"感知须知:{extra}"
+        # 与云端一致地只按合成 did 查(prompt 就是按合成 did 存的)。此处曾多一层
+        # 物理 did 兜底 —— 是死代码,但会让两条通路出现无人知晓的行为差异,而
+        # rule_scope 的存在意义正是消灭这类差异。
+        return (prompt_map.get(did) or "").strip()
 
     async def _perceive_device(
         self, snapshot, rules: list[dict], prompt_map: dict[str, str]
@@ -118,7 +136,7 @@ class LocalVisionEngine(BasePerceptionEngine):
             video = await asyncio.to_thread(
                 encode_snapshot_to_h264,
                 snapshot, self._container_fps, self._crf,
-                self._max_frames, self._short_edge,
+                self._max_frames, self._resolve_short_edge(),
             )
         except EncodeError as e:
             logger.warning("[local-vision] encode failed did=%s: %s", did, e)
@@ -133,7 +151,8 @@ class LocalVisionEngine(BasePerceptionEngine):
             out = await self._client.perceive(
                 video,
                 rules=payload_rules,
-                scene_ask=self._scene_ask_for(did, prompt_map),
+                scene_ask=self._scene_ask,
+                camera_note=self._camera_note_for(did, prompt_map),
                 max_new_tokens=self._max_new_tokens,
             )
         except LocalVisionError as e:
@@ -212,14 +231,23 @@ class LocalVisionEngine(BasePerceptionEngine):
             for idx, hit in enumerate(hits):
                 if not isinstance(hit, dict) or not hit.get("hit"):
                     continue
+                name = (hit.get("name") or "").strip()
+                if not name:
+                    # 空 name 不能落到索引兜底:一个只回命中项的第三方边车会让
+                    # 「厨房明火」背上「有人跌倒」的判定 —— 正是下面那段注释警告的
+                    # 情形。按既定的「宁可漏报」直接丢弃。
+                    logger.warning(
+                        "[local-vision] dropping rule hit with empty name did=%s", did
+                    )
+                    continue
                 rule = dispatched[idx] if idx < len(dispatched) else None
-                if rule is None or (hit.get("name") and hit["name"] != rule.get("name")):
+                if rule is None or name != rule.get("name"):
                     # 名字对不上就按名字找;**找不到就丢弃这条命中**,绝不回落到
                     # 索引位那条规则 —— 契约是对外开放的,一个只回命中项、且 name
                     # 留空的第三方边车会让"厨房明火"背上"有人跌倒"的判定,触发的
                     # 是完全无关的规则与动作。宁可漏报。
                     rule = next(
-                        (r for r in dispatched if r.get("name") == hit.get("name")), None
+                        (r for r in dispatched if r.get("name") == name), None
                     )
                 if rule is None:
                     logger.warning(
@@ -299,7 +327,7 @@ class LocalVisionEngine(BasePerceptionEngine):
                 video = await asyncio.to_thread(
                     encode_snapshot_to_h264,
                     snapshot, self._container_fps, self._crf,
-                    self._max_frames, self._short_edge,
+                    self._max_frames, self._resolve_short_edge(),
                 )
                 out = await self._client.perceive(
                     video, rules=[], scene_ask=query,

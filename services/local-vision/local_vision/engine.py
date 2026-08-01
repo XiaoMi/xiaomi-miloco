@@ -181,6 +181,7 @@ class MageVLEngine:
         video_path: str,
         rules: list[dict] | None = None,
         scene_ask: str | None = None,
+        camera_note: str = "",
         max_new_tokens: int = 256,
         want_gate: bool = True,
     ) -> dict:
@@ -188,7 +189,7 @@ class MageVLEngine:
         if not self.ready:
             raise RuntimeError("engine not loaded")
         rules = rules or []
-        prompt = build_prompt(scene_ask or DEFAULT_SCENE_ASK, rules)
+        prompt = build_prompt(scene_ask or DEFAULT_SCENE_ASK, rules, camera_note)
         # 段太短时 codec 分组凑不齐,先探帧数决定实际后端(降级而非报错)。
         backend = pick_backend(self.video_backend, probe_frame_count(video_path))
 
@@ -212,8 +213,20 @@ class MageVLEngine:
                     # token 上限 —— 既污染 caption,又让生成耗时翻倍。参考实现用
                     # max_new_tokens=80 靠截断掩盖了这个问题,我们要更长的描述,
                     # 就必须显式抑制重复。
-                    repetition_penalty=_REPETITION_PENALTY,
-                    no_repeat_ngram_size=_NO_REPEAT_NGRAM,
+                    # **只在没有规则时施加**。transformers 的这两个处理器把
+                    # prompt 一并计入 n-gram / 词频,而带规则的 prompt 里逐字写着
+                    # 每条规则的 query;模型复述条件(「规则1: 是 - 有人在厨房灶台前」)
+                    # 时会被强制打断,判定依据就此变成一句被截断的怪话,而它会进
+                    # agent 上下文和用户可见的事件文案。实测到的复读也正是发生在
+                    # 无规则的纯描述场景,那里才需要这层抑制。
+                    **(
+                        {}
+                        if rules
+                        else {
+                            "repetition_penalty": _REPETITION_PENALTY,
+                            "no_repeat_ngram_size": _NO_REPEAT_NGRAM,
+                        }
+                    ),
                 )
             t_gen = (time.time() - t1) * 1000
             raw = self._processor.tokenizer.decode(

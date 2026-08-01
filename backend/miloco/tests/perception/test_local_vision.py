@@ -47,10 +47,14 @@ class _FakeClient:
         self.fail = fail
         self.calls: list[dict] = []
 
-    async def perceive(self, video, rules, scene_ask=None, max_new_tokens=256, want_gate=True):
+    async def perceive(self, video, rules, scene_ask=None, camera_note="",
+                       max_new_tokens=256, want_gate=True):
         from miloco.perception.local_vision.client import LocalVisionError
 
-        self.calls.append({"rules": rules, "scene_ask": scene_ask, "bytes": len(video)})
+        self.calls.append({
+            "rules": rules, "scene_ask": scene_ask,
+            "camera_note": camera_note, "bytes": len(video),
+        })
         if self.fail:
             raise LocalVisionError("sidecar down")
         if not self.responses:
@@ -60,6 +64,25 @@ class _FakeClient:
 
 def _engine(client, **kw) -> LocalVisionEngine:
     return LocalVisionEngine(client, container_fps=2, **kw)
+
+
+@pytest.mark.asyncio
+async def test_camera_note_is_sent_separately_not_folded_into_scene_ask(monkeypatch):
+    """机位须知必须走独立字段。折进 scene_ask 有两个后果:默认配置下 scene_ask 为空,
+    折出来只剩用户那句话、任务提问整个消失;而且它会落在输出格式约定之前,一句
+    「只用一句话回答」就能让规则行不再出现,fail-closed 随后把它变成"该相机所有
+    规则静默失效"。"""
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "camera_prompt_map", lambda: {"cam1": "这台对着门口"})
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+    client = _FakeClient([{"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}])
+    await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+    )
+    call = client.calls[0]
+    assert call["camera_note"] == "这台对着门口"
+    assert call["scene_ask"] is None        # 未被须知顶替
 
 
 # ── 规则定向 ──────────────────────────────────────────────────────────────
@@ -357,6 +380,25 @@ async def test_unresolvable_hit_is_dropped_not_credited_to_index_rule():
     assert res.matched_rules == []
 
 
+@pytest.mark.asyncio
+async def test_blank_name_hit_is_dropped_not_index_matched():
+    """空 name 不能落到索引兜底 —— 只回命中项的第三方边车会让「厨房明火」背上
+    「有人跌倒」的判定,正是注释里警告的那个灾难。"""
+    rules = [
+        {"id": "r-fire", "name": "厨房明火", "condition": {"query": "q1", "perceive_device_ids": []}},
+        {"id": "r-fall", "name": "有人跌倒", "condition": {"query": "q2", "perceive_device_ids": []}},
+    ]
+    client = _FakeClient([{
+        "caption": "x",
+        "rule_hits": [{"name": "", "hit": True, "reason": "有人倒在地上"}],
+        "gate_p": None, "backend": "codec",
+    }])
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    assert res.matched_rules == []
+
+
 # ── 与 proxy 的接口兼容 ────────────────────────────────────────────────────
 
 
@@ -455,33 +497,31 @@ def test_frame_budget_keeps_the_last_frame():
     assert len(picked) == 8
 
 
-def test_short_edge_none_falls_back_to_shared_setting():
-    """local_vision.video_short_edge 默认 None = 跟随共享的感知参数。
-    真机上这条没接好时,None 会一路传到编码器里跟 int 比较,每一窗都 TypeError ——
-    单测只造引擎、不走 proxy,所以完全看不出来。"""
+def test_short_edge_none_follows_shared_setting_live():
+    """local_vision.video_short_edge 默认 None = **每窗**跟随共享的感知参数。
+
+    必须实时解析、不能构造期定死:该设置的既有契约是「写盘后下一帧即生效、无需
+    重启」,面板上拖分辨率时本地通路也得跟上。而且 None 一旦漏到编码器,会跟 int
+    比较直接 TypeError —— 单测只造引擎、不走这条路的话完全看不见。
+    """
     from unittest.mock import patch
 
     from miloco.config.settings import get_settings
-    from miloco.perception.client import PerceptionEngineProxy
 
     cfg = get_settings().model_copy(deep=True)
-    cfg.perception.engine_backend = "local"
-    cfg.perception.local_vision.video_short_edge = None
     cfg.perception.engine = {"input": {"video_short_edge": 640}}
+    e = LocalVisionEngine(_FakeClient(), container_fps=2, short_edge=None)
+    with patch("miloco.config.get_settings", return_value=cfg):
+        assert e._resolve_short_edge() == 640
 
-    captured = {}
+    cfg.perception.engine = {"input": {"video_short_edge": 320}}
+    with patch("miloco.config.get_settings", return_value=cfg):
+        assert e._resolve_short_edge() == 320   # 改了就跟着变,不需要重建引擎
 
-    class _Eng:
-        def __init__(self, client, **kw):
-            captured.update(kw)
-
-    with patch("miloco.perception.client.get_settings", return_value=cfg), \
-            patch("miloco.perception.local_vision.LocalVisionClient") as C, \
-            patch("miloco.perception.local_vision.LocalVisionEngine", _Eng):
-        C.return_value.health_sync.return_value = {"model_loaded": True}
-        PerceptionEngineProxy()
-
-    assert captured["short_edge"] == 640   # 跟随共享值,不是 None
+    # 显式覆盖时不跟随
+    e2 = LocalVisionEngine(_FakeClient(), container_fps=2, short_edge=256)
+    with patch("miloco.config.get_settings", return_value=cfg):
+        assert e2._resolve_short_edge() == 256
 
 
 @pytest.mark.asyncio
@@ -489,7 +529,6 @@ async def test_encoding_runs_off_the_event_loop():
     """libx264 是同步 CPU 活,必须在线程里跑。直接在协程里编码会占住所在事件
     循环 —— 主动查询走的正是主循环。项目的 miot/transcoder.py 为同一理由专门
     建了执行器,这里必须遵循同一约定。"""
-    import asyncio as _asyncio
     import threading
 
     loop_thread = threading.get_ident()
@@ -497,6 +536,9 @@ async def test_encoding_runs_off_the_event_loop():
 
     def _fake_encode(snapshot, fps, crf, max_frames, short_edge):
         seen["thread"] = threading.get_ident()
+        # 顺带钉住位置参数顺序:这几个是按位置传的,顺序错了不会报错,
+        # 只会静默地把分辨率/画质设成别的值。
+        seen["args"] = (fps, crf, max_frames, short_edge)
         return b"VIDEO"
 
     import miloco.perception.local_vision.engine as eng
@@ -511,4 +553,5 @@ async def test_encoding_runs_off_the_event_loop():
     finally:
         eng.encode_snapshot_to_h264 = orig
     assert seen["thread"] != loop_thread, "编码发生在事件循环线程上"
-    assert _asyncio.get_event_loop_policy() is not None
+    assert seen["args"][0] == 2       # container_fps
+    assert seen["args"][2] == 32      # max_frames

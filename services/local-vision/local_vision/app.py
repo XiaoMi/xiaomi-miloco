@@ -69,7 +69,11 @@ app = FastAPI(title="miloco local-vision", version="0.1.0", lifespan=lifespan)
 # 边车挂了、切进重连循环 —— 一个纯粹由排队引起的假故障。
 # 超限直接回 503:让 miloco 把这一窗当"本轮没结论"跳过(它本来就会这么处理),
 # 比让它等一个已经过期的答案好。
-_MAX_INFLIGHT = int(os.environ.get("LOCAL_VISION_MAX_INFLIGHT", "2"))
+# 默认值必须 >= miloco 允许同时启用的摄像头数(MAX_ENABLED_CAMERAS=4)——miloco
+# 每窗把所有相机并发发过来,上限低于相机数时**同一批**相机每次都抢不到槽位、
+# 每窗 503,它们上的规则于是永久不被评估,而且静默。GPU 锁本来就串行化推理,
+# 这个上限只是给排队封顶(4 × ~1.5s 远小于客户端 60s 超时)。
+_MAX_INFLIGHT = int(os.environ.get("LOCAL_VISION_MAX_INFLIGHT", "4"))
 _inflight = threading.Semaphore(_MAX_INFLIGHT)
 
 
@@ -93,6 +97,7 @@ class PerceiveRequest(BaseModel):
     video_b64: str = Field(description="视频段(mp4/h264)的 base64")
     scene_ask: str | None = Field(default=None, description="场景描述的提问;缺省用内置中文提问")
     rules: list[RuleSpec] = Field(default_factory=list, description="要逐条判定的规则")
+    camera_note: str = Field(default="", description="该机位的自定义说明;作为补充,不取代任务提问")
     max_new_tokens: int = Field(default=256, ge=16, le=1024)
     want_gate: bool = Field(default=True, description="是否计算 StreamMind 门控概率")
 
@@ -140,14 +145,18 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
             detail="busy: too many in-flight inferences, retry next window",
         )
 
-    from local_vision.video import write_temp_video
-
-    path = write_temp_video(data)
+    # acquire 之后的一切都必须在 try 里:临时文件写失败(磁盘满 / /tmp 只读)
+    # 若发生在 try 之外,槽位就永远收不回来,几次之后服务永久回 503,只能重启。
+    path = None
     try:
+        from local_vision.video import write_temp_video
+
+        path = write_temp_video(data)
         out = e.perceive(
             str(path),
             rules=[r.model_dump() for r in body.rules],
             scene_ask=body.scene_ask,
+            camera_note=body.camera_note,
             max_new_tokens=body.max_new_tokens,
             want_gate=body.want_gate,
         )
@@ -156,13 +165,14 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
         raise HTTPException(status_code=500, detail=f"inference failed: {err}") from err
     finally:
         _inflight.release()
-        path.unlink(missing_ok=True)
-        # codec 通路会在临时文件旁留下 cv-preinfer 的中间产物,一并清掉。
-        for leftover in path.parent.glob(f"{path.stem}*"):
-            if leftover != path:
-                try:
-                    leftover.unlink()
-                except OSError:
-                    pass
+        if path is not None:
+            path.unlink(missing_ok=True)
+            # codec 通路会在临时文件旁留下 cv-preinfer 的中间产物,一并清掉。
+            for leftover in path.parent.glob(f"{path.stem}*"):
+                if leftover != path:
+                    try:
+                        leftover.unlink()
+                    except OSError:
+                        pass
 
     return PerceiveResponse(**out)

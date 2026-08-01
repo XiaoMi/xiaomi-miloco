@@ -1113,7 +1113,6 @@ def _local_vision_payload() -> dict:
         "local_vision": {
             "base_url": cfg.base_url,
             "has_token": bool(cfg.token),
-            "gate_threshold": cfg.gate_threshold,
         },
         "health": health,
         "error": error,

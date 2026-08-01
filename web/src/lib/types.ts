@@ -718,7 +718,6 @@ export interface PerceptionBackendState {
   local_vision: {
     base_url: string;
     has_token: boolean;
-    gate_threshold: number;
   };
   /** 边车 /health 快照;不可达时为 null,原因见 error。 */
   health: {

@@ -65,7 +65,11 @@ SUGG_SIM_THRESHOLD: float = 0.70
 
 # 与本地视觉通路共用同一份实现(见 perception/rule_scope):两条通路对同一条规则的
 # 下发范围必须完全一致,各写一份迟早漂移。
-_physical_did = physical_did
+def _physical_did(did: str) -> str:
+    # 真委托而非快照赋值:赋值会让 patch api._physical_did 不影响规则下发
+    # (那条走 rules_for_device → rule_scope.physical_did),反之亦然 —— 给后来
+    # 写测试的人埋坑。
+    return physical_did(did)
 
 
 def _ms_since(start: float) -> float:

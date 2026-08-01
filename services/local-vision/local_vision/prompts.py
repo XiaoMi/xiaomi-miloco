@@ -51,15 +51,26 @@ DEFAULT_SCENE_ASK = (
 )
 
 
-def build_prompt(scene_ask: str, rules: list[dict]) -> str:
-    """拼出一次推理的提问:场景描述 +(可选)逐条规则判定。
+def build_prompt(
+    scene_ask: str, rules: list[dict], camera_note: str = ""
+) -> str:
+    """拼出一次推理的提问:场景描述 +(可选)逐条规则判定 +(可选)机位须知。
 
     rules 每项形如 ``{"name": ..., "query": ...}``;query 是规则的自然语言条件
     (miloco 侧已强制它写成进行时状态描述,不能是「检测到…」这类断言句)。
+
+    ``camera_note`` 是用户在面板上给这台相机写的机位说明。它**必须**:
+    - 作为**补充**,而不是取代任务提问 —— 否则整个提问会退化成一句用户指令,
+      模型连"描述场景"这个任务都不知道;
+    - 渲染在格式约定**之后**的受限区块里 —— 它是用户/agent 可写的自由文本,
+      放在格式说明之前的话,一句「只用一句话回答」「用 JSON 输出」就能让
+      ``规则N:`` 那几行消失,而 fail-closed 会把这变成"该相机所有规则静默失效",
+      没有任何报错。放在后面并明确它不改变输出格式,风险小得多。
     """
     ask = scene_ask.strip() or DEFAULT_SCENE_ASK
+    note = (camera_note or "").strip()
     if not rules:
-        return ask
+        return f"{ask}\n\n{_note_block(note)}" if note else ask
 
     # 「描述:」这个前缀是模型自发使用的(实测),顺着它写比强推自定义标记稳。
     # 同时必须显式要求描述**独立于**规则 —— 否则模型会把描述写成规则判定的复述
@@ -78,7 +89,23 @@ def build_prompt(scene_ask: str, rules: list[dict]) -> str:
     for i, r in enumerate(rules, 1):
         cond = (r.get("query") or r.get("name") or "").strip()
         lines.append(f"规则{i}: {cond}")
+    if note:
+        lines.append("")
+        lines.append(_note_block(note))
     return "\n".join(lines)
+
+
+# 机位须知的最大长度。用户/agent 可写,过长会淹没任务提问本身。
+_NOTE_MAXLEN = 400
+
+
+def _note_block(note: str) -> str:
+    """把机位须知包成一个明确不改变输出格式的区块。"""
+    return (
+        "以下是这台摄像头的机位说明,仅供你理解画面时参考,"
+        "**不改变上面要求的回答格式**:\n"
+        f"「{note[:_NOTE_MAXLEN]}」"
+    )
 
 
 NO_VERDICT_REASON = "模型未给出判定"

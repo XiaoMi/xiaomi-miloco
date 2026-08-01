@@ -77,6 +77,7 @@ class LocalVisionClient:
         video: bytes,
         rules: list[dict],
         scene_ask: str | None = None,
+        camera_note: str = "",
         max_new_tokens: int = 256,
         want_gate: bool = True,
     ) -> dict:
@@ -88,6 +89,9 @@ class LocalVisionClient:
         }
         if scene_ask:
             payload["scene_ask"] = scene_ask
+        if camera_note:
+            # 独立字段传:塞进 scene_ask 会顶掉任务提问本身,且会落在格式约定之前。
+            payload["camera_note"] = camera_note
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as c:
                 r = await c.post(
