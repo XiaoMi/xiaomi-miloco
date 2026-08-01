@@ -66,6 +66,9 @@ def build_prompt(scene_ask: str, rules: list[dict]) -> str:
     return "\n".join(lines)
 
 
+NO_VERDICT_REASON = "模型未给出判定"
+
+
 def _verdict(body: str) -> tuple[bool, str]:
     """把「是 - 沙发上有人」这类判定体拆成 (命中?, 依据)。"""
     text = body.strip()
@@ -82,8 +85,25 @@ def _verdict(body: str) -> tuple[bool, str]:
     elif any(w in head_l for w in _HIT_WORDS):
         hit = True
     else:
-        hit = False  # fail-closed:读不懂就不算命中
+        # fail-closed。此处**不能**把 head 当依据回填 —— 模型有时干脆复述条件原文
+        # (实测:「规则1: 有人在客厅沙发上」),那样会得到一条 hit=False 却写着
+        # 「有人在客厅沙发上」的记录,读的人会正好读反。统一落未判定标记。
+        return False, NO_VERDICT_REASON
     return hit, reason.strip() or head.strip()
+
+
+def _verdict_from_following_line(lines: list[str], idx: int) -> tuple[bool, str]:
+    """规则行本身没给判定时,往下找紧邻的一行判定(跳过空行)。
+
+    只看到下一条规则行为止 —— 越过它就会把别人的判定安到自己头上。
+    """
+    for nxt in lines[idx + 1:]:
+        if not nxt.strip():
+            continue
+        if _RULE_LINE_RE.match(nxt):
+            break
+        return _verdict(nxt)
+    return False, NO_VERDICT_REASON
 
 
 def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
@@ -94,12 +114,19 @@ def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
     verdicts: dict[int, tuple[bool, str]] = {}
     prose: list[str] = []
     seen_rule = False
+    lines = raw.splitlines()
 
-    for line in raw.splitlines():
+    for idx, line in enumerate(lines):
         m = _RULE_LINE_RE.match(line)
         if m:
             seen_rule = True
-            verdicts[int(m.group(1))] = _verdict(m.group(2))
+            hit, reason = _verdict(m.group(2))
+            if reason == NO_VERDICT_REASON:
+                # 实测的第四种变体:模型在「规则N:」行**复述条件原文**,把判定
+                # 放到紧跟的下一行(「规则1: 有人在客厅沙发上」+「否 - 依据: …」)。
+                # 不往下看一行就会把一次真判定读成未判定 —— 说"是"时那就是漏报。
+                hit, reason = _verdict_from_following_line(lines, idx)
+            verdicts[int(m.group(1))] = (hit, reason)
             continue
         if seen_rule:
             continue  # 规则区之后的补充说明不进 caption
@@ -112,6 +139,6 @@ def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
 
     hits = []
     for i, r in enumerate(rules, 1):
-        hit, reason = verdicts.get(i, (False, "模型未给出判定"))
+        hit, reason = verdicts.get(i, (False, NO_VERDICT_REASON))
         hits.append({"name": r.get("name", ""), "hit": hit, "reason": reason})
     return caption, hits

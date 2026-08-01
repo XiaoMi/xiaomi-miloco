@@ -92,3 +92,36 @@ def test_missing_rule_line_is_not_a_hit():
     """只回了一条判定时,其余规则必须落未命中,而不是继承上一条。"""
     _, hits = parse_response("描述: x\n规则1: 是 - 有人", RULES)
     assert [h["hit"] for h in hits] == [True, False, False]
+
+
+def test_condition_restated_without_verdict_is_not_a_hit_and_says_so():
+    """实测:模型有时干脆复述条件原文而不给是/否。必须落未命中,且依据不能写成
+    条件原文 —— 否则记录会读成「有人在沙发上」却标未命中,正好读反。"""
+    from local_vision.prompts import NO_VERDICT_REASON
+
+    _, hits = parse_response("描述: 客厅空着。\n规则1: 有人在客厅沙发上", RULES[:1])
+    assert hits[0]["hit"] is False
+    assert hits[0]["reason"] == NO_VERDICT_REASON
+
+
+def test_verdict_on_following_line_is_read():
+    """实测第四种变体:规则行复述条件,判定在下一行。必须读到,否则模型说"是"时漏报。"""
+    raw = (
+        "描述: 客厅里有人躺在沙发上。\n\n"
+        "规则1: 有人在客厅沙发上\n"
+        "是 - 依据: 沙发上躺着一个人。"
+    )
+    _, hits = parse_response(raw, RULES[:1])
+    assert hits[0]["hit"] is True
+    assert "沙发上躺着一个人" in hits[0]["reason"]
+
+
+def test_following_line_lookahead_stops_at_next_rule():
+    """下一行已经是别人的规则行时,不能把别人的判定安到自己头上。"""
+    from local_vision.prompts import NO_VERDICT_REASON
+
+    raw = "描述: x\n规则1: 有人在客厅沙发上\n规则2: 是 - 有宠物"
+    _, hits = parse_response(raw, RULES[:2])
+    assert hits[0]["hit"] is False
+    assert hits[0]["reason"] == NO_VERDICT_REASON
+    assert hits[1]["hit"] is True
