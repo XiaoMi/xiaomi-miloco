@@ -19,7 +19,10 @@ from __future__ import annotations
 import re
 
 # 「规则N: <判定><分隔><依据>」。分隔符可有可无(- / 。/ 空),依据可缺省。
-_RULE_LINE_RE = re.compile(r"^\s*(?:\d+[.、]\s*)?规则\s*(\d+)\s*[:：]\s*(.+)$")
+# 冒号后允许为空:模型有时把「规则1:」单独成行、判定写在下一行。要求至少一个
+# 字符的话,这一行既不被当成规则行(下一行的判定于是无人认领,fail-closed 推成
+# 未命中),又会作为散文漏进描述里 —— 一个格式记号出现在给用户看的场景描述中。
+_RULE_LINE_RE = re.compile(r"^\s*(?:\d+[.、]\s*)?规则\s*(\d+)\s*[:：]\s*(.*)$")
 # 模型偶尔把描述编号成「1.」「2.」,清掉行首编号免得混进 caption。
 _LEADING_NUM_RE = re.compile(r"^\s*\d+[.、]\s*")
 # 「规则N:」这个记号本身。出现在自由文本(机位须知 / 规则 query)里就抹掉 ——
@@ -209,16 +212,18 @@ def parse_response(raw: str, rules: list[dict]) -> tuple[str, list[dict]]:
         m = _RULE_LINE_RE.match(line)
         if m:
             seen_rule = True
-            hit, reason = _verdict(m.group(2))
+            hit, reason = _verdict(m.group(2) or "")
             if reason == NO_VERDICT_REASON:
                 # 实测的第四种变体:模型在「规则N:」行**复述条件原文**,把判定
                 # 放到紧跟的下一行(「规则1: 有人在客厅沙发上」+「否 - 依据: …」)。
                 # 不往下看一行就会把一次真判定读成未判定 —— 说"是"时那就是漏报。
                 hit, reason = _verdict_from_following_line(lines, idx)
             idx_n = int(m.group(1))
-            if idx_n in verdicts and verdicts[idx_n] != (hit, reason):
-                # 同一条规则出现两次且结论不同(模型复述条件列表、或重来一遍)。
+            if idx_n in verdicts and verdicts[idx_n][0] != hit:
+                # 同一条规则出现两次且**结论**不同(模型复述条件列表、或重来一遍)。
                 # 后者覆盖前者能把"否"翻成"是" —— 按 fail-closed 取未判定。
+                # 只比结论,不比依据:同样说"是"、措辞略有出入是很常见的,把它也
+                # 当成冲突会白白吞掉一次真判定。
                 verdicts[idx_n] = (False, NO_VERDICT_REASON)
             else:
                 verdicts.setdefault(idx_n, (hit, reason))

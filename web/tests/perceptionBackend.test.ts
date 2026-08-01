@@ -83,3 +83,24 @@ describe("healthLine", () => {
     expect(healthLine(state()).kind).toBe("none");
   });
 });
+
+describe("边界形状", () => {
+  it("切回云端不带地址 —— 带上会触发强制探活,把唯一的退路也堵死", () => {
+    const p = buildSwitchPayload("cloud", "http://typed-but-unsaved", "tok");
+    expect(p).toEqual({ backend: "cloud" });
+  });
+
+  it("边车只回了最小字段时不崩,也不假装门控可用", () => {
+    // _sanitize_health 只拷贝边车真的返回了的键,所以一个最小实现会让这四个
+    // 字段全部缺席。契约对第三方实现开放,这种形状必须能正常渲染。
+    const s = state({
+      health: { status: "ok", model_loaded: true } as never,
+    });
+    expect(healthLine(s)).toEqual({
+      kind: "ok",
+      device: "",
+      backend: "",
+      gateOff: true,
+    });
+  });
+});

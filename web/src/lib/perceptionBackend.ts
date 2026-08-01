@@ -28,6 +28,9 @@ export function buildSwitchPayload(
   baseUrl: string,
   token: string,
 ): SwitchPayload {
+  // 切回云端时**刻意**不带地址与凭证:写 base_url 会触发后端的强制探活,而边车
+  // 此刻很可能正是坏的 —— 那样切回云端就会被 400 挡住,把用户关在一个不工作的
+  // 后端里,而这个端点是唯一的出口。地址仍留在输入框里,下次切本地时再提交。
   if (backend !== "local") return { backend };
   const tok = token.trim();
   return { backend, base_url: baseUrl.trim(), ...(tok ? { token: tok } : {}) };

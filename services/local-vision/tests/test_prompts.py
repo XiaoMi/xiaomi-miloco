@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from local_vision.prompts import _RULE_LINE_RE, build_prompt, parse_response
+from local_vision.prompts import (
+    _RULE_LINE_RE,
+    NO_VERDICT_REASON,
+    build_prompt,
+    parse_response,
+)
 
 RULES = [
     {"name": "沙发有人", "query": "有人在客厅沙发上"},
@@ -272,3 +277,32 @@ def test_no_forged_verdict_line_survives_in_final_prompt():
             )
         ]
         assert forged == [], (evil, forged)
+
+
+# ── fail-closed 的两条边界:错了就会让 agent 对着不存在的事实动作 ────────────
+
+
+def test_conflicting_duplicate_verdicts_fall_back_to_no_verdict():
+    """同一条规则被判了两次且结论相反时,一律按未命中处理。
+
+    「后者胜出」这种写法会把「否」翻成「是」—— 正是这套 fail-closed 要防的方向:
+    漏报只是少一次提醒,误报会让 agent 对着一件没发生的事去动设备。
+    """
+    rules = [{"name": "沙发有人", "query": "有人在客厅沙发上"}]
+    caption, hits = parse_response("规则1: 否 - 沙发是空的\n规则1: 是 - 好像有人", rules)
+    assert hits[0]["hit"] is False
+    assert hits[0]["reason"] == NO_VERDICT_REASON
+
+
+def test_agreeing_duplicate_verdicts_are_not_treated_as_conflict():
+    rules = [{"name": "沙发有人", "query": "有人在客厅沙发上"}]
+    _, hits = parse_response("规则1: 是 - 有人躺着\n规则1: 是 - 确实有人", rules)
+    assert hits[0]["hit"] is True
+
+
+def test_verdict_on_the_line_after_a_blank_line_is_still_found():
+    """模型经常在「规则1:」和判定之间空一行。不跳空行的话,这条规则会被判成
+    未解析 → fail-closed → 未命中,而模型其实明确说了「是」。"""
+    rules = [{"name": "沙发有人", "query": "有人在客厅沙发上"}]
+    _, hits = parse_response("规则1:\n\n是 - 沙发上躺着一个人", rules)
+    assert hits[0]["hit"] is True

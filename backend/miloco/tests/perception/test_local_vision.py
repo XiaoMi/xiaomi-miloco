@@ -28,10 +28,12 @@ from miloco.perception.types import (
 
 
 def _snapshot(did: str, room: str = "客厅", frames: int = 4) -> DeviceSnapshot:
-    imgs = [
-        VideoFrame(data=np.zeros((64, 64, 3), dtype=np.uint8), timestamp=float(i * 1000))
-        for i in range(frames)
-    ]
+    imgs = []
+    for i in range(frames):
+        data = np.zeros((64, 64, 3), dtype=np.uint8)
+        # 每帧带自己的序号:采样是否真取到首末帧,只有帧可区分时才谈得上断言。
+        data[0, 0, 0] = i % 256
+        imgs.append(VideoFrame(data=data, timestamp=float(i * 1000)))
     return DeviceSnapshot(
         device=PerceptionDevice(did=did, name=f"cam-{did}", device_type="camera", room_name=room),
         video=VideoStream(frames=imgs, width=64, height=64),
@@ -476,13 +478,34 @@ def test_engine_supports_the_lifecycle_calls_the_proxy_makes():
     漏掉任何一个都会让后端在启动或首次推理时 AttributeError —— 而只直接调用
     两个抽象方法的单测完全看不出来。"""
     import asyncio as _asyncio
+    import inspect
 
-    e = _engine(_FakeClient())
+    from miloco.perception.engine_base import BasePerceptionEngine
+
+    e = LocalVisionEngine(_FakeClient(), container_fps=3)
     e.set_main_loop(object())
     e.set_tierc_frame_provider(lambda did: None)
     e.apply_omni_fps(2)
-    assert e.get_input_config() is None
-    _asyncio.get_event_loop_policy().new_event_loop().run_until_complete(e.close())
+
+    cfg = e.get_input_config()
+    # 返回 None 会让面板把三层帧率都显示成 0fps。本通路确有一个真实的送检帧率,
+    # 显示 0 是错的而不是"没有";omni_fps 才是真的没有对应物。
+    assert cfg is not None and cfg.fps == 3 and cfg.omni_fps == 0
+
+    # 硬编码一张方法清单只能守住"今天已知的调用",守不住明天新加的那一个。
+    # 直接对着基类的公开面断言 —— 基类多一个方法,这里立刻就知道。
+    expected = {
+        n for n, _ in inspect.getmembers(BasePerceptionEngine, callable)
+        if not n.startswith("_")
+    }
+    missing = [n for n in expected if not hasattr(e, n)]
+    assert missing == [], f"引擎缺少 proxy/processor 会调用的方法: {missing}"
+
+    loop = _asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(e.close())
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio
@@ -564,6 +587,26 @@ def test_frame_budget_keeps_the_last_frame():
     finally:
         enc._resize_bgr = orig_resize
     assert len(picked) == 8
+    # 只断言数量的话,把端点包含式采样换回 floor 采样(永远取不到 n-1)也照样绿。
+    # 首末两帧才是这条不变量本身。
+    assert picked[0][0, 0, 0] == 0, "丢掉了窗口的第一帧"
+    assert picked[-1][0, 0, 0] == 99, "丢掉了窗口的最后一帧 —— floor 采样的典型症状"
+
+
+def test_frame_budget_of_one_takes_the_newest_frame():
+    """预算只有一帧时要最新那帧。取 frames[0] 会把一个 4 秒窗口压成它开始的瞬间。"""
+    import miloco.perception.local_vision.encode as enc
+    from miloco.perception.local_vision.encode import encode_snapshot_to_h264
+
+    picked: list = []
+    orig = enc._resize_bgr
+    enc._resize_bgr = lambda a, w, h: (picked.append(a), orig(a, w, h))[1]
+    try:
+        encode_snapshot_to_h264(_snapshot("cam1", frames=100), fps=2,
+                                max_frames=1, short_edge=32)
+    finally:
+        enc._resize_bgr = orig
+    assert [p[0, 0, 0] for p in picked] == [99]
 
 
 def test_short_edge_none_follows_shared_setting_live():
@@ -616,14 +659,48 @@ async def test_encoding_runs_off_the_event_loop():
     eng.encode_snapshot_to_h264 = _fake_encode
     try:
         client = _FakeClient([{"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}])
-        await _engine(client).realtime_perceive(
+        await _engine(client, crf=30, max_frames=16, short_edge=384).realtime_perceive(
             BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
         )
     finally:
         eng.encode_snapshot_to_h264 = orig
     assert seen["thread"] != loop_thread, "编码发生在事件循环线程上"
-    assert seen["args"][0] == 2       # container_fps
-    assert seen["args"][2] == 32      # max_frames
+    # 整条元组一起断言。只断言其中两个的话,把 crf 和 short_edge 对调(正是这段
+    # 注释警告的那种错)照样绿 —— 而后果是画质与分辨率被静默换成对方的值。
+    assert seen["args"] == (2, 30, 16, 384)
+
+
+@pytest.mark.asyncio
+async def test_short_edge_follows_the_shared_setting_through_the_real_call(monkeypatch):
+    """不止解析函数要对,**送到编码器的那个值**也要每窗重新解析。
+
+    只测 _resolve_short_edge 的话,把它的返回值在构造期定死(文档明确禁止的做法)
+    照样绿 —— 而面板上调分辨率就对本通路永久失效了。
+    """
+    import miloco.perception.local_vision.engine as eng
+    from miloco.config.settings import get_settings
+
+    seen: list = []
+    monkeypatch.setattr(
+        eng, "encode_snapshot_to_h264",
+        lambda snap, fps, crf, mf, se: (seen.append(se), b"V")[1],
+    )
+    cfg = get_settings().model_copy(deep=True)
+    cfg.perception.engine.setdefault("input", {})["video_short_edge"] = 320
+    monkeypatch.setattr("miloco.config.get_settings", lambda: cfg)
+
+    e = _engine(_FakeClient([
+        {"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"},
+        {"caption": "y", "rule_hits": [], "gate_p": None, "backend": "codec"},
+    ]), short_edge=None)
+    batch = BatchedSnapshot(snapshots=[_snapshot("cam1")])
+    await e.realtime_perceive(batch, [])
+
+    # 面板上改了分辨率,下一窗就该跟着变 —— 无需重启引擎。
+    cfg.perception.engine["input"]["video_short_edge"] = 640
+    await e.realtime_perceive(batch, [])
+
+    assert seen == [320, 640]
 
 
 # ── 本地通路不直接控制设备:靠**拒绝切换**兑现,而不是运行时改写用户的自动化 ──
@@ -640,20 +717,34 @@ def test_switch_to_local_is_blocked_by_enabled_direct_device_rules():
 
     from miloco.admin import router as admin
 
-    fake = [SimpleNamespace(id="r1", name="厨房明火关阀", actions=[object()],
-                            on_enter_actions=[], on_exit_actions=[])]
-    with patch.object(admin, "_rules_with_direct_device_actions", return_value=["厨房明火关阀"]):
-        names = admin._rules_with_direct_device_actions()
-    assert names == ["厨房明火关阀"]
+    def _r(rid, name, enabled, **kw):
+        return SimpleNamespace(
+            id=rid, name=name, enabled=enabled,
+            actions=kw.get("actions", []),
+            on_enter_actions=kw.get("on_enter_actions", []),
+            on_exit_actions=kw.get("on_exit_actions", []),
+        )
 
-    # 真实实现:只挑出带动作的启用规则
+    all_rules = [
+        _r("r1", "厨房明火关阀", True, actions=[object()]),
+        _r("r2", "纯动态", True),                                   # 没有动作
+        _r("r3", "夜间关灯", True, on_exit_actions=[object()]),      # 状态规则的退出动作
+        _r("r4", "已停用的直连", False, actions=[object()]),          # 停用的不该拦
+    ]
+
     class _Repo:
+        """按 enabled_only 真正过滤 —— 这个参数曾经在测试里被忽略,于是
+        「只看启用中的规则」这半条契约完全没有被验证:一条**停用**的直连规则
+        会平白挡住切换,而没有任何测试会红。"""
+
         def get_all(self, enabled_only=False):
-            return fake + [SimpleNamespace(id="r2", name="纯动态", actions=[],
-                                           on_enter_actions=[], on_exit_actions=[])]
+            return [r for r in all_rules if r.enabled or not enabled_only]
 
     with patch("miloco.database.rule_repo.RuleRepo", _Repo):
-        assert admin._rules_with_direct_device_actions() == ["厨房明火关阀"]
+        names = admin._rules_with_direct_device_actions()
+    assert names == ["厨房明火关阀", "夜间关灯"]
+    assert "纯动态" not in names, "没有直连动作的规则不该挡住切换"
+    assert "已停用的直连" not in names, "停用的规则不该挡住切换"
 
 
 def test_rule_lookup_failure_does_not_block_switching():
@@ -727,3 +818,257 @@ def test_health_probe_sends_no_auth_header_when_no_token_configured():
         httpx.Client = real_client
 
     assert seen["auth"] is None
+
+
+# ── 降级路径:每一条"该设备本窗跳过"都要真的被走过 ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_encode_failure_skips_the_device_without_faking_evidence(monkeypatch):
+    """编码失败(磁盘/编码器问题)不该变成一条"什么都没看到"的事件。"""
+    import miloco.perception.local_vision.engine as eng
+    from miloco.perception.local_vision.encode import EncodeError
+
+    def _boom(*a, **k):
+        raise EncodeError("libx264 unavailable")
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", _boom)
+    client = _FakeClient()
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+    )
+    assert client.calls == [], "编码都失败了却还发了推理请求"
+    assert res is not None and res.skipped is True
+    assert res.device_rule_map == {}
+    assert res.timing.get("_omni_error_cam1") == "encode_failed"
+
+
+@pytest.mark.asyncio
+async def test_malformed_sidecar_response_degrades_only_that_device():
+    """契约对第三方实现开放。回一个数组会在 .get() 处抛 AttributeError,
+    穿透"任一环节失败 → 该设备跳过"的设计,把整窗所有设备一起毁掉。"""
+    client = _FakeClient([
+        ["not", "an", "object"],
+        {"caption": "客厅有人", "rule_hits": [], "gate_p": None, "backend": "codec"},
+    ])
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1"), _snapshot("cam2", room="客厅")]), []
+    )
+    assert res is not None and res.skipped is False
+    assert [c.description for c in res.caption] == ["客厅有人"]
+    assert res.timing.get("_omni_error_cam1") == "malformed_response"
+
+
+@pytest.mark.asyncio
+async def test_per_device_sidecar_failure_is_recorded_not_swallowed():
+    """一台相机每窗都失败时,必须在 timing 里留下痕迹 —— 否则观测面板显示
+    "零错误",而它上面的规则从此不再被评估,没有任何人会发现。"""
+    client = _FakeClient(fail=True)
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+    )
+    assert res.skipped is True
+    assert res.timing.get("_omni_error_cam1") == "LocalVisionError"
+
+
+@pytest.mark.asyncio
+async def test_clip_bytes_are_attached_to_the_event(monkeypatch):
+    """云端在 omni 内部挂片段;本地绕过了 omni。不补的话日志页里每条事件都只剩
+    文字、没有视频,而这个缺失既不在能力声明里也没有任何报错。"""
+    import miloco.perception.local_vision.engine as eng
+    from miloco.perception.snapshot_context import (
+        OmniEventArtifacts,
+        event_artifacts_scope,
+    )
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"VIDEOBYTES")
+    client = _FakeClient([{"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}])
+    artifacts = OmniEventArtifacts()
+    with event_artifacts_scope(artifacts):
+        await _engine(client).realtime_perceive(
+            BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+        )
+    assert artifacts.clips.get("cam1") == (b"VIDEOBYTES", "mp4")
+
+
+# ── 主动查询的降级路径 ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_on_demand_returns_none_when_the_sidecar_fails():
+    out = await _engine(_FakeClient(fail=True)).on_demand_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), "现在有人吗?"
+    )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_on_demand_returns_none_on_an_empty_batch():
+    assert await _engine(_FakeClient()).on_demand_perceive(
+        BatchedSnapshot(snapshots=[]), "有人吗?"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_on_demand_returns_none_when_every_answer_is_blank():
+    """空答案比没有答案更糟:agent 会把它当成"确实什么都没有"。"""
+    out = await _engine(_FakeClient([
+        {"caption": "   ", "rule_hits": [], "gate_p": None, "backend": "codec"},
+    ])).on_demand_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), "有人吗?")
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_on_demand_labels_answers_by_room_when_multiple_cameras():
+    """多相机时不标房间的话,agent 拿到两句互相矛盾的描述,无从判断说的是哪儿。"""
+    client = _FakeClient([
+        {"caption": "有人在看电视", "rule_hits": [], "gate_p": None, "backend": "codec"},
+        {"caption": "没有人", "rule_hits": [], "gate_p": None, "backend": "codec"},
+    ])
+    out = await _engine(client).on_demand_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1", room="客厅"),
+                                   _snapshot("cam2", room="书房")]), "有人吗?"
+    )
+    assert "客厅" in out.answer and "书房" in out.answer
+
+
+# ── 客户端本体(替身平时顶替的那个真东西) ────────────────────────────────
+
+
+def _mock_transport(handler):
+    """把 httpx.AsyncClient 换成走 MockTransport 的版本。"""
+    import httpx
+
+    real = httpx.AsyncClient
+
+    class _Patched(real):  # type: ignore[misc,valid-type]
+        def __init__(self, *a, **kw):
+            kw["transport"] = httpx.MockTransport(handler)
+            super().__init__(*a, **kw)
+
+    return real, _Patched
+
+
+@pytest.mark.asyncio
+async def test_client_encodes_video_and_omits_empty_optionals():
+    import httpx
+    from miloco.perception.local_vision import LocalVisionClient
+
+    seen: dict = {}
+
+    def _h(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        seen.update(_json.loads(request.content))
+        return httpx.Response(200, json={"caption": "ok", "rule_hits": []})
+
+    real, patched = _mock_transport(_h)
+    httpx.AsyncClient = patched
+    try:
+        await LocalVisionClient("http://s:1").perceive(b"BYTES", rules=[])
+    finally:
+        httpx.AsyncClient = real
+
+    import base64 as _b64
+    assert _b64.b64decode(seen["video_b64"]) == b"BYTES"
+    # 空的可选字段不该出现:边车侧对 scene_ask=None 有自己的默认提问,送一个
+    # 空串过去会把那个默认顶掉。
+    assert "scene_ask" not in seen and "camera_note" not in seen
+    assert "ngram_guard" not in seen
+
+
+@pytest.mark.asyncio
+async def test_client_turns_http_errors_into_local_vision_error():
+    """异常若原样冒出去,会穿透"该设备跳过"的降级设计,毁掉整窗。"""
+    import httpx
+    from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+
+    def _h(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"detail": "busy: too many in-flight"})
+
+    real, patched = _mock_transport(_h)
+    httpx.AsyncClient = patched
+    try:
+        with pytest.raises(LocalVisionError) as ei:
+            await LocalVisionClient("http://s:1").perceive(b"B", rules=[])
+    finally:
+        httpx.AsyncClient = real
+    assert "503" in str(ei.value) and "busy" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_client_turns_transport_errors_into_local_vision_error():
+    import httpx
+    from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+
+    def _h(request: httpx.Request):
+        raise httpx.ConnectError("no route to host")
+
+    real, patched = _mock_transport(_h)
+    httpx.AsyncClient = patched
+    try:
+        with pytest.raises(LocalVisionError):
+            await LocalVisionClient("http://s:1").perceive(b"B", rules=[])
+    finally:
+        httpx.AsyncClient = real
+
+
+def test_health_sync_turns_failures_into_local_vision_error():
+    import httpx
+    from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+
+    real = httpx.Client
+
+    class _Patched(real):  # type: ignore[misc,valid-type]
+        def __init__(self, *a, **kw):
+            kw["transport"] = httpx.MockTransport(
+                lambda r: (_ for _ in ()).throw(httpx.ConnectError("refused"))
+            )
+            super().__init__(*a, **kw)
+
+    httpx.Client = _Patched
+    try:
+        with pytest.raises(LocalVisionError):
+            LocalVisionClient("http://s:1").health_sync()
+    finally:
+        httpx.Client = real
+
+
+@pytest.mark.asyncio
+async def test_events_carry_the_time_window_in_deploy_timezone():
+    """事件文本里的「时间」字段取自 time_window。不填的话每条本地事件都少一行时间,
+    而 agent 判断作息、判断"刚才"是何时全靠它。
+
+    格式化必须复用云端那一份(走 deploy_timezone),不能自己再写一遍 —— 用裸
+    fromtimestamp 会在 UTC 主机上把北京 10:52 说成「凌晨02:52」,这是发生过的事故。
+    """
+    rules = [{"id": "r1", "name": "有人", "condition": {"query": "有人", "perceive_device_ids": []}}]
+    client = _FakeClient([{
+        "caption": "有人在看书",
+        "rule_hits": [{"name": "有人", "hit": True, "reason": "有人"}],
+        "gate_p": None, "backend": "codec",
+    }])
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules
+    )
+    import re as _re
+
+    pattern = _re.compile(r"^\[\d{2}:\d{2}:\d{2}-\d{2}:\d{2}:\d{2}\]$")
+    assert pattern.match(res.caption[0].time_window), res.caption[0].time_window
+    assert pattern.match(res.matched_rules[0].time_window)
+
+
+def test_health_accepts_json_ints_for_boolean_fields():
+    """契约对第三方实现开放,而 JSON 里用 0/1 表示布尔是完全自然的写法。
+
+    丢掉它会让 auth_ok=0 变成"字段缺失",而缺失被读作"不需要鉴权" —— 一个
+    fail-open 的判定,恰是这套字段存在意义的反面。
+    """
+    from miloco.perception.local_vision.client import _sanitize_health
+
+    out = _sanitize_health({
+        "status": "ok", "model_loaded": 1, "gate_available": 0,
+        "auth_required": 1, "auth_ok": 0,
+    })
+    assert out["model_loaded"] is True
+    assert out["gate_available"] is False
+    assert out["auth_required"] is True and out["auth_ok"] is False

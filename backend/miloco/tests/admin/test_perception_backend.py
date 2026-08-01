@@ -13,6 +13,9 @@ import json
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+# 在任何 fixture 打补丁之前留住真实实现 —— 有一条测试要把它换回来真跑一遍。
+from miloco.admin.router import _rules_with_direct_device_actions as _REAL_RULE_LOOKUP
 from miloco.admin.router import router
 
 
@@ -32,18 +35,19 @@ def client(tmp_path, monkeypatch):
     reset_settings()
 
 
+class _NoRestartSvc:
+    async def stop_to_unconfigured(self):
+        return None
+
+
+class _NoRestartMgr:
+    perception_service = _NoRestartSvc()
+
+
 @pytest.fixture(autouse=True)
 def _no_engine_restart(monkeypatch):
     """切换成功后会去软停引擎。测试里没有 manager,拦掉它。"""
-
-    class _Svc:
-        async def stop_to_unconfigured(self):
-            return None
-
-    class _Mgr:
-        perception_service = _Svc()
-
-    monkeypatch.setattr("miloco.admin.router.get_manager", lambda: _Mgr())
+    monkeypatch.setattr("miloco.admin.router.get_manager", lambda: _NoRestartMgr())
 
 
 @pytest.fixture
@@ -149,6 +153,36 @@ def test_switch_to_local_refused_by_direct_device_rules(client, health, monkeypa
     r = client.post("/api/admin/perception-backend", json={"backend": "local"})
     assert r.status_code == 400
     assert "厨房明火关阀" in r.json()["detail"]
+
+
+def test_refusal_works_through_the_real_rule_lookup(client, health, monkeypatch):
+    """不 mock 那个 helper,让端点真的去查规则。
+
+    其余用例为了隔离都把 helper 换掉了 —— 全都换掉的话,「查规则 → 拒绝」这条
+    实际链路就一次都没被走过,helper 里一个拼写错误可以让整道闸静默失效。
+    """
+    from types import SimpleNamespace
+
+    class _Repo:
+        def get_all(self, enabled_only=False):
+            return [SimpleNamespace(id="r1", name="厨房明火关阀", enabled=True,
+                                    actions=[object()], on_enter_actions=[],
+                                    on_exit_actions=[])]
+
+    # 只把 helper 换回真实实现;monkeypatch.undo() 会连 client / health 两个
+    # fixture 的补丁一起撤掉(同一测试里它们共用一个 monkeypatch 实例)。
+    monkeypatch.setattr(
+        "miloco.admin.router._rules_with_direct_device_actions", _REAL_RULE_LOOKUP
+    )
+    monkeypatch.setattr("miloco.database.rule_repo.RuleRepo", _Repo)
+
+    r = client.post("/api/admin/perception-backend", json={"backend": "local"})
+    assert r.status_code == 400
+    assert "厨房明火关阀" in r.json()["detail"]
+
+    # 同一条链路也要能在规则列表里看到它 —— 卡片就是靠这个字段提前预告的。
+    d = client.get("/api/admin/perception-backend").json()["data"]
+    assert d["blocking_static_rules"] == ["厨房明火关阀"]
 
 
 # ── POST:凭证与地址的绑定关系 ────────────────────────────────────────────

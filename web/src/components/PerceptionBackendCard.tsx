@@ -88,9 +88,10 @@ export function PerceptionBackendCard() {
   }
 
   const isLocal = state.backend === "local";
-  const health = state.health;
-  const reachable = !!health?.model_loaded;
   const line = healthLine(state);
+  // 「可达」必须和下面那行探活结论用同一个判定。分开算的话,凭证被拒时会出现
+  // 按钮显示绿色「可达」、紧邻的一行显示「✗ 边车拒绝当前凭证」的自相矛盾。
+  const reachable = line.kind === "ok";
 
   return (
     <section

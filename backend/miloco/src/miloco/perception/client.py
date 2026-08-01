@@ -320,7 +320,17 @@ class PerceptionEngineProxy:
         # 在线程里刷新,这里只读缓存。缓存为空(进程刚起、tick 还没跑过)时做一次
         # 阻塞探活是可接受的——只发生在构造期。
         if self._local_probe_key not in (None, (cfg.base_url, cfg.token)):
+            # 地址/凭证刚被改过。**不在这里补探活**:本方法会被 admin 的切换处理器
+            # 经 stop_to_unconfigured 同步调到,而同步 HTTP 会把主事件循环按秒级
+            # 卡住(相机取帧 / SSE / API 全停)。丢掉旧结论、落等待态,由 tick 的
+            # refresh_local_probe 在线程里补上 —— 最多晚一个感知周期。
             self._invalidate_local_probe()
+            self._status = "local_vision_unreachable"
+            self._status_message = f"本地视觉服务待探活({cfg.base_url})"
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
         if self._local_probe is None and self._local_probe_error is None:
             self._refresh_local_probe_sync(client, cfg)
 
@@ -404,7 +414,15 @@ class PerceptionEngineProxy:
         try:
             self._local_probe = client.health_sync()
             self._local_probe_error = None
-            self._local_probe_not_before = 0.0
+            # 「模型还在加载」会自己好,所以不设冷却、下个 tick 就再看一眼;
+            # 「凭证被拒」不会自己好,不设冷却就是每 4 秒一次、一天两万多次的空转。
+            # 用户改对凭证时 key 会变,冷却随之作废,恢复照样是即时的。
+            self._local_probe_not_before = (
+                time.monotonic() + _LOCAL_PROBE_COOLDOWN_SEC
+                if self._local_probe.get("auth_required")
+                and not self._local_probe.get("auth_ok")
+                else 0.0
+            )
         except LocalVisionError as e:
             self._local_probe = None
             self._local_probe_error = f"本地视觉服务不可达({cfg.base_url}): {e}"
@@ -466,6 +484,10 @@ class PerceptionEngineProxy:
         只认 ``STOPPED`` 不会帮翻,故必须在创建路径里显式置(``_init_engine`` 已做)。
         返回是否「本次转入 ready」。
         """
+        if include_failed:
+            # 显式「重启感知」要能穿透探活冷却。否则边车其实已经好了,而用户按下
+            # 按钮却是个 no-op —— 冷却是给自动轮询设的节流阀,不该管住用户的手。
+            self._invalidate_local_probe()
         allowed = self._RESTART_RECOVERABLE if include_failed else self._TICK_RECOVERABLE
         if self._status not in allowed:
             return False

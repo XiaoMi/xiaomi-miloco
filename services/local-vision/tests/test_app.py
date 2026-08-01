@@ -33,7 +33,7 @@ class _StubEngine:
         self.device = "cuda:0"
         self.video_backend = "codec"
 
-    def perceive(self, path, **kw):
+    def perceive(self, video_path, **kw):
         self.calls.append(kw)
         if self.boom:
             raise RuntimeError("inference exploded")
@@ -174,3 +174,21 @@ def test_request_fields_reach_the_engine_unchanged(client, engine):
 def test_ngram_guard_defaults_to_none_so_the_engine_decides(client, engine):
     client.post("/v1/perceive", json=_body())
     assert engine.calls[0]["ngram_guard"] is None
+
+
+def test_stub_engine_signature_matches_the_real_one():
+    """替身吞掉 **kw 的话,真引擎改个参数名它照样绿 —— 而线上每个请求 500。
+
+    miloco 侧对客户端替身用的是同一条检查;两边的替身都必须钉住签名。
+    """
+    import inspect
+
+    from local_vision.engine import MageVLEngine
+
+    real = [p.name for p in inspect.signature(MageVLEngine.perceive).parameters.values()]
+    stub = [p.name for p in inspect.signature(_StubEngine.perceive).parameters.values()]
+    assert stub[:2] == real[:2], f"位置参数不一致: {stub[:2]} vs {real[:2]}"
+    assert "kw" in stub, "替身应以 **kw 接收其余参数"
+    # 真引擎的每个关键字参数都必须真的被 app 传下来(见上一条 passthrough 测试),
+    # 这里只保证替身不会因为多/少一个位置参数而与真引擎脱节。
+    assert real[0] == "self" and real[1] == "video_path"

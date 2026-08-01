@@ -44,6 +44,7 @@ from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
+from miloco.perception.capabilities import perception_executes_device_actions
 from miloco.rule.schema import (
     Rule,
     RuleAction,
@@ -1202,6 +1203,29 @@ class RuleRunner:
 
         start_time = int(time.time() * 1000)
         kind, value = slot
+
+        # 感知通路若声明「不直接控制设备」,静态动作一律不执行。
+        #
+        # 切换后端时已经拦过一次带直连动作的规则,但那是**转移**上的检查,而这是一条
+        # **状态**不变量:切过去之后新建规则、把已有规则改成带动作、任务激活时批量
+        # 启用、直接改 config.json —— 每一条都能把系统带回被禁止的状态,而 fire 这条
+        # 路上没有任何一处知道后端是谁。差别是实打实的:纯视觉模型没有音频佐证也没有
+        # 身份识别,不该由它自己去关燃气阀。
+        # 这里选择**不执行也不改写**:改写会丢掉 cooldown_minutes / idempotent(schema
+        # 里唯一的限流)和台账里 source=rule 的归属。所以只拒绝,并且大声说出来 ——
+        # 界面上同一批规则也会被列出来(见 admin 的 blocking_static_rules)。
+        if kind == "static" and not perception_executes_device_actions():
+            logger.error(
+                "拒绝执行规则 %s(%s)的设备动作:当前感知通路不直接控制设备。"
+                "请在「模型」页切回云端通路,或把该规则改成由 agent 决策的动态规则。",
+                rule.id, rule.name,
+            )
+            self._publish_rule_event(
+                "rule_action_refused", rule.id,
+                {"event": event.value, "reason": "perception_backend_no_device_actions",
+                 "execute_id": execute_id},
+            )
+            return None
 
         logger.info(
             "FIRE: rule=%s name=%s event=%s mode=%s slot=%s sources=%s execute_id=%s",

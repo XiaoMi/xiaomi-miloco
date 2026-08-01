@@ -28,6 +28,8 @@ _HEALTH_FIELDS = (
     # 探活会一路绿灯而每一窗推理 401,感知静默停摆。
     "auth_required", "auth_ok",
 )
+#: 这几个字段语义上是布尔,允许边车用 JSON int 表达。
+_BOOLEAN_FIELDS = ("model_loaded", "gate_available", "auth_required", "auth_ok")
 _HEALTH_ERROR_MAXLEN = 300
 # 探活超时刻意远小于推理超时:它在 tick 自愈里被高频调用,长超时会卡住调用线程。
 _HEALTH_TIMEOUT = 3.0
@@ -44,6 +46,11 @@ def _sanitize_health(raw: object) -> dict:
         v = raw[k]
         if isinstance(v, bool) or v is None:
             out[k] = v
+        elif isinstance(v, int) and k in _BOOLEAN_FIELDS:
+            # JSON 里 0/1 表示布尔是完全自然的写法,而契约对第三方实现开放。
+            # 丢掉它会让 auth_ok=0 变成"字段缺失",而缺失被读作"不需要鉴权" ——
+            # 一个 fail-open 的判定,恰恰是这套字段存在的意义的反面。
+            out[k] = bool(v)
         elif isinstance(v, str):
             out[k] = v[:_HEALTH_ERROR_MAXLEN]
     return out

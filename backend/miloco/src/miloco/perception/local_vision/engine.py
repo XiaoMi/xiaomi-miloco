@@ -25,6 +25,16 @@ import asyncio
 import logging
 import time
 
+from miloco.observability.context import (
+    DeviceContext,
+    reset_device_context,
+    set_device_context,
+)
+
+# 复用云端那一份时间窗格式化:它走 deploy_timezone(),而不是进程时钟 —— 这条
+# 差别有过实际事故(UTC 主机把北京 10:52 说成「凌晨02:52」,agent 据此判断作息)。
+# 自己再写一份就等于把那个 bug 重新引进来一次。
+from miloco.perception.engine.pipeline import _fmt_time_window
 from miloco.perception.engine_base import BasePerceptionEngine
 from miloco.perception.local_vision.client import LocalVisionClient, LocalVisionError
 from miloco.perception.local_vision.encode import EncodeError, encode_snapshot_to_h264
@@ -32,6 +42,7 @@ from miloco.perception.rule_scope import (
     camera_prompt_map,
     rules_for_device,
 )
+from miloco.perception.snapshot_context import push_clip_bytes
 from miloco.perception.types import (
     BatchedSnapshot,
     CaptionEntry,
@@ -56,8 +67,28 @@ def _as_float(v: object) -> float | None:
 
 #: 每条规则判定行的 token 开销(「规则N:是/否,依据…」),用于放大生成预算。
 _TOKENS_PER_VERDICT = 24
+#: 生成预算的上限。必须与边车 ``PerceiveRequest.max_new_tokens`` 的 ``le`` 一致 ——
+#: 两者是分开部署的构件,这里放得比那边宽的话,每一窗都会 422,而在 miloco 的日志里
+#: 与其它边车故障长得一模一样。有意保持这个字面值成对出现,改一处必须改另一处。
+_MAX_NEW_TOKENS_CEILING = 1024
 #: 主动查询这类自由问答用的复读硬禁 n —— 显著放宽,见调用处说明。
 _NGRAM_GUARD_FREEFORM = 32
+
+
+class _InputConfig:
+    """面板上「各层帧率」那一行要读的东西。
+
+    返回 None 会让 processor 把三层都显示成 0fps —— 本通路确实有一个真实的送检
+    帧率(容器帧率),显示 0 是错的而不是"没有"。omni_fps 则如实为 0:本通路
+    不做 omni 抽帧,那个旋钮在这里没有对应物。
+    """
+
+    __slots__ = ("fps", "omni_fps", "period_sec")
+
+    def __init__(self, fps: int, period_sec: float) -> None:
+        self.fps = fps
+        self.omni_fps = 0
+        self.period_sec = period_sec
 
 
 class LocalVisionEngine(BasePerceptionEngine):
@@ -101,6 +132,18 @@ class LocalVisionEngine(BasePerceptionEngine):
 
     # ── 感知 ─────────────────────────────────────────────────────────────
 
+    def get_input_config(self):
+        """本通路的送检帧率。基类默认返回 None,会让面板把各层都显示成 0fps。"""
+        from miloco.config import get_settings
+
+        try:
+            period = float(
+                get_settings().perception.engine.get("input", {}).get("period_sec", 4)
+            )
+        except Exception:  # noqa: BLE001
+            period = 4.0
+        return _InputConfig(self._container_fps, period)
+
     def _resolve_short_edge(self) -> int:
         """每次取用时解析短边上限,而不是构造期定死。"""
         if self._short_edge_override is not None:
@@ -138,7 +181,10 @@ class LocalVisionEngine(BasePerceptionEngine):
         判定块中间 —— 而截断后的缺失判定会被 fail-closed 读成"未命中",于是
         「规则越多、越靠后的规则越容易静默失效」,且没有任何报错。
         """
-        return min(1024, self._max_new_tokens + _TOKENS_PER_VERDICT * max(0, rule_count))
+        return min(
+            _MAX_NEW_TOKENS_CEILING,
+            self._max_new_tokens + _TOKENS_PER_VERDICT * max(0, rule_count),
+        )
 
     async def _perceive_device(
         self, snapshot, rules: list[dict], prompt_map: dict[str, str]
@@ -156,7 +202,20 @@ class LocalVisionEngine(BasePerceptionEngine):
             )
         except EncodeError as e:
             logger.warning("[local-vision] encode failed did=%s: %s", did, e)
-            return None
+            return {"did": did, "error": "encode_failed"}
+
+        # 把送去推理的那段字节挂到当前事件上。云端通路是在 omni 内部 push 的
+        # (prompt_builder),本地这条路绕过了 omni,不补这一下的话
+        # artifacts.clips 恒空 —— 日志页里每一条事件都只剩文字、没有视频,
+        # 而这个缺失既不在能力声明里、也没有任何报错。
+        token = set_device_context(
+            DeviceContext(device_trace_id="", device_id=did,
+                          room_name=snapshot.room_name or "")
+        )
+        try:
+            push_clip_bytes(video, "mp4")
+        finally:
+            reset_device_context(token)
 
         dispatched = rules_for_device(rules, did)
         payload_rules = [
@@ -173,7 +232,7 @@ class LocalVisionEngine(BasePerceptionEngine):
             )
         except LocalVisionError as e:
             logger.warning("[local-vision] sidecar failed did=%s: %s", did, e)
-            return None
+            return {"did": did, "error": type(e).__name__}
 
         if not isinstance(out, dict):
             # 契约对第三方实现开放。返回一个数组之类的东西会在下面 .get() 处抛
@@ -183,7 +242,7 @@ class LocalVisionEngine(BasePerceptionEngine):
                 "[local-vision] sidecar returned %s, expected object did=%s",
                 type(out).__name__, did,
             )
-            return None
+            return {"did": did, "error": "malformed_response"}
 
         return {"did": did, "snapshot": snapshot, "dispatched": dispatched, "out": out}
 
@@ -216,11 +275,18 @@ class LocalVisionEngine(BasePerceptionEngine):
         results = await asyncio.gather(
             *[self._perceive_device(s, rules, prompt_map) for s in with_video]
         )
-        ok = [r for r in results if r]
+        # 失败的设备也带回来了(只带 did + error),分开:成功的进汇总,失败的
+        # 进 timing。云端通路用 _omni_error_{did} 记录逐设备失败,观测面板据此
+        # 统计 —— 本地这条路不写的话,一台相机每一窗都 503 也永远显示"零错误",
+        # 而它上面的规则从此不再被评估。
+        errors = {r["did"]: r["error"] for r in results if r and "error" in r}
+        ok = [r for r in results if r and "error" not in r]
         if not ok:
             # 全设备失败:标 skipped 让上层按「本轮无结论」处理,不产空事件。
+            # 逐设备原因照样带上 —— 全灭和"某一台一直灭"要能区分开。
             return RealtimePerceptionResult(
-                skipped=True, error_code="local_vision_unavailable"
+                skipped=True, error_code="local_vision_unavailable",
+                timing={f"_omni_error_{d}": c for d, c in errors.items()},
             )
 
         captions: list[CaptionEntry] = []
@@ -240,6 +306,11 @@ class LocalVisionEngine(BasePerceptionEngine):
             )
             room = snapshot.room_name or ""
             device_name = getattr(snapshot.device, "name", "") or ""
+            # 事件文本里的「时间」字段就取这个。不填的话每条本地事件都少一行时间,
+            # 而 agent 判断作息、判断"刚才"指的是何时,全靠它。
+            time_window = _fmt_time_window(
+                snapshot.start_timestamp, snapshot.end_timestamp
+            )
             gate_p = _as_float(out.get("gate_p"))
             if gate_p is not None:
                 gates[did] = gate_p
@@ -264,9 +335,12 @@ class LocalVisionEngine(BasePerceptionEngine):
             elif out.get("truncated"):
                 # 没有规则时截断同样要报:描述会从句子中间断掉,然后原样交给 agent。
                 # 只在有规则时才看这个标志的话,这种情况永远不会有人发现。
+                budget = self._token_budget(len(dispatched))
                 logger.warning(
-                    "[local-vision] did=%s 描述被 max_new_tokens 截断,可调高 "
-                    "perception.local_vision.max_new_tokens", did,
+                    "[local-vision] did=%s 描述被截断(本窗预算 %d token)%s",
+                    did, budget,
+                    "" if budget >= _MAX_NEW_TOKENS_CEILING
+                    else ";可调高 perception.local_vision.max_new_tokens",
                 )
 
             # 规则命中:按名字回填 rule_id。名字在同设备内唯一(miloco 侧保证),
@@ -306,6 +380,7 @@ class LocalVisionEngine(BasePerceptionEngine):
                     room_name=room,
                     source_device_ids=[did],
                     device_name=device_name,
+                    time_window=time_window,
                 ))
 
             # 门控:阈值 > 0 时压制本设备的场景叙述(规则判定已在上面照常处理)。
@@ -323,12 +398,14 @@ class LocalVisionEngine(BasePerceptionEngine):
                     room_name=room,
                     source_device_ids=[did],
                     device_name=device_name,
+                    time_window=time_window,
                 ))
 
         # '_' 前缀的键按约定不参与耗时统计,用来装 per-device 元数据。
         # devices / gate_p / backend 都不是毫秒数,必须走下划线区,否则会被
         # 当成阶段耗时混进面板的延迟明细里。
         timing = {
+            **{f"_omni_error_{d}": code for d, code in errors.items()},
             "total": round((time.monotonic() - t0) * 1000, 1),
             "_devices": len(ok),
         }
