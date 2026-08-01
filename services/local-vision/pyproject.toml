@@ -1,0 +1,32 @@
+[project]
+name = "miloco-local-vision"
+version = "0.1.0"
+description = "Local GPU vision sidecar for Miloco perception (reference impl: Mage-VL)"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "transformers>=4.56",
+    "accelerate>=0.34",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    # 传统编解码通路(H.264/HEVC 运动矢量 + 残差)需要 cv-preinfer 可执行文件,
+    # 它由本包提供;缺失时引擎会自动降级到帧采样后端。
+    "codec-video-prep>=0.1",
+]
+
+# torch 刻意不写进 dependencies:必须由部署者按自己的 CUDA 版本安装对应 wheel
+# (例:RTX 50 系 Blackwell 需要 cu128 及以上)。写死版本只会装错。
+# 见 README「安装」一节。
+
+[project.scripts]
+miloco-local-vision = "local_vision.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["local_vision"]

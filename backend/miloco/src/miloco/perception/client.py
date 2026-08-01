@@ -233,6 +233,12 @@ class PerceptionEngineProxy:
         settings = get_settings()
         engine_cfg = settings.perception.engine
 
+        # 本地视觉通路:整条路不碰云端 API Key,也不用 ONNX 检测/ReID 模型,
+        # 故两项前置校验都不适用 —— 换成校验边车可达性(在 _init_local_engine 内)。
+        if settings.perception.engine_backend == "local":
+            self._init_local_engine(settings)
+            return
+
         omni_kwargs = dict(engine_cfg.get("omni", {}))
         omni_api_key = resolve_omni_api_key(omni_kwargs.get("api_key", ""))
 
@@ -276,10 +282,69 @@ class PerceptionEngineProxy:
             logger.error("感知引擎创建失败: %s", e)
             mon.set_lifecycle(NodeName.ENGINE, Lifecycle.FAILED, error=str(e))
 
+    def _init_local_engine(self, settings) -> None:
+        """创建本地视觉引擎。前置条件只有一个:边车可达。
+
+        不阻塞启动 —— 边车不可达时落 PREREQ_MISSING(与「缺 key」同一档语义),
+        由 tick 自愈在边车起来后自动转 ready,和云端通路的体验保持一致。
+        """
+        from miloco.perception.local_vision import (
+            LocalVisionClient,
+            LocalVisionEngine,
+            LocalVisionError,
+        )
+
+        cfg = settings.perception.local_vision
+        mon = get_monitor()
+        client = LocalVisionClient(
+            base_url=cfg.base_url, token=cfg.token, timeout=cfg.timeout_sec
+        )
+
+        try:
+            health = client.health_sync()
+        except LocalVisionError as e:
+            self._status = "local_vision_unreachable"
+            self._status_message = f"本地视觉服务不可达({cfg.base_url}): {e}"
+            logger.warning("感知引擎不可用: %s", self._status_message)
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
+
+        if not health.get("model_loaded"):
+            self._status = "local_vision_unreachable"
+            self._status_message = f"本地视觉服务正在加载模型({cfg.base_url})"
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
+
+        mon.set_lifecycle(NodeName.ENGINE, Lifecycle.STARTING)
+        self.perception_engine = LocalVisionEngine(
+            client,
+            fps=cfg.fps,
+            crf=cfg.crf,
+            max_new_tokens=cfg.max_new_tokens,
+            gate_threshold=cfg.gate_threshold,
+            scene_ask=cfg.scene_ask or None,
+        )
+        self._status = "ready"
+        self._status_message = ""
+        # 显式告知能力边界:已配 STATIC 规则的用户必须知道本通路下它们不再直连
+        # 设备(改由 agent 决策执行),否则规则会「悄悄失灵」而无人察觉。
+        logger.warning(
+            "感知已切到本地视觉通路(%s):纯视觉 —— 无音频结论、无身份识别;"
+            "规则命中一律交 agent 决策执行,STATIC 规则的直连设备执行不生效。",
+            cfg.base_url,
+        )
+        mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
+
     # tick-driven 自愈放行的"等外部条件"态:validate 廉价(缺 key 零 IO、缺模型仅
     # stat),失败回到同一 PREREQ_MISSING、_init_engine 不翻 lifecycle → 每 tick 零
     # event_log 噪声,可安全地每个推理 tick 轮询。
-    _TICK_RECOVERABLE = ("no_omni_api_key", "models_missing")
+    # local_vision_unreachable 同属"等外部条件"态:边车还没起/还在加载模型,
+    # 探活是一次廉价 HTTP,失败不翻 lifecycle,边车就绪后下个推理周期自动转 ready。
+    _TICK_RECOVERABLE = ("no_omni_api_key", "models_missing", "local_vision_unreachable")
     # 显式重启(runner.start)额外放行 engine_init_failed:构造失败原因不可 cheap 判定,
     # validate 会通过而每 tick 重跑重型 _create_engine 会阻塞 event loop,故不纳入 tick
     # 自愈,只靠「重启感知」按钮重建一次。

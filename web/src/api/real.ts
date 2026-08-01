@@ -9,6 +9,7 @@ import { apiFetch, resolveToken } from "./client";
 import { authHeaders } from "./register";
 import i18n from "@/i18n";
 import type {
+  PerceptionBackendState,
   ActivityEvent,
   Device,
   DeviceCategory,
@@ -1807,4 +1808,25 @@ export async function realUpdateTaskDescription(
       body: JSON.stringify({ description }),
     },
   );
+}
+
+// 读取感知后端选择(cloud/local)与本地边车连通性快照。
+export async function realGetPerceptionBackend(): Promise<PerceptionBackendState> {
+  const r = await apiFetch<Normal<PerceptionBackendState>>(
+    "/api/admin/perception-backend",
+  );
+  return r.data;
+}
+
+// 切换感知后端。切到 local 时后端会先探活,不通直接 400(不让用户切到坏后端上)。
+export async function realSetPerceptionBackend(input: {
+  backend: "cloud" | "local";
+  base_url?: string;
+  token?: string;
+}): Promise<PerceptionBackendState> {
+  const r = await apiFetch<Normal<PerceptionBackendState>>(
+    "/api/admin/perception-backend",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return r.data;
 }

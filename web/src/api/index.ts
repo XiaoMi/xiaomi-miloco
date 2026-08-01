@@ -9,6 +9,7 @@
 import * as realImpl from "./real";
 import { apiFetch } from "./client";
 import type {
+  PerceptionBackendState,
   ActivityEvent,
   Device,
   HomeEntries,
@@ -669,4 +670,16 @@ export async function updateSchedulerConfig(
     { method: "PUT", body: JSON.stringify(input) },
   );
   return r.data;
+}
+
+export async function getPerceptionBackend(): Promise<PerceptionBackendState> {
+  return impl.realGetPerceptionBackend();
+}
+
+export async function setPerceptionBackend(input: {
+  backend: "cloud" | "local";
+  base_url?: string;
+  token?: string;
+}): Promise<PerceptionBackendState> {
+  return impl.realSetPerceptionBackend(input);
 }

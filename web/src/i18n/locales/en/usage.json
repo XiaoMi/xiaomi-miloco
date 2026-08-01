@@ -110,5 +110,24 @@
     "deleteFailed": "Couldn't delete",
     "modelsEmptyResult": "This address returned no model list",
     "modelsFetchFailed": "Couldn't fetch models"
+  },
+  "perceptionBackend": {
+    "title": "Perception backend",
+    "subtitle": "Choose which path runs video perception. The two are mutually exclusive and switching takes effect immediately.",
+    "cloudTitle": "Cloud API",
+    "cloudDesc": "Uses the multimodal model configured below. Requires an API key and bills per token; supports audio and identity.",
+    "localTitle": "Local GPU",
+    "localDesc": "Uses a vision model service on this machine or LAN. No key, no token cost, footage never leaves home.",
+    "baseUrlLabel": "Local service URL",
+    "reachable": "Service reachable",
+    "unreachable": "Service unreachable",
+    "gateOff": "event gate off",
+    "switchedCloud": "Switched to the cloud API path",
+    "switchedLocal": "Switched to the local GPU path",
+    "switchFailed": "Switch failed",
+    "capNoKey": "The local path needs no model-provider API key.",
+    "capNoAudio": "Vision only: no speech commands or ambient-sound conclusions (use the cloud path if you need audio).",
+    "capNoIdentity": "No identity recognition — scene description and rule judgment only.",
+    "capNoStatic": "The local path never drives devices directly: rule hits always go to the agent, so STATIC rules' direct execution is inactive."
   }
 }

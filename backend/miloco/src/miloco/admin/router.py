@@ -16,6 +16,8 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Literal
+
 from pydantic import BaseModel, Field, StrictBool
 from sse_starlette.sse import EventSourceResponse
 
@@ -1075,3 +1077,105 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         if omni_fps_changed or window_changed:
             payload["restart_ok"] = restart_ok
     return NormalResponse(code=0, message="ok", data=payload)
+
+
+# ─── 感知后端选择(「模型」页顶部:云端 API / 本地 GPU) ─────────────────────────
+
+
+class PerceptionBackendBody(BaseModel):
+    """切换感知后端。local 分支同时可改边车地址(其余参数走 config.json)。"""
+
+    backend: Literal["cloud", "local"]
+    base_url: str | None = None
+    token: str | None = None
+
+
+def _local_vision_payload() -> dict:
+    """当前后端选择 + 本地边车的连通性快照。
+
+    健康探测每次现查(一次廉价 HTTP):用户切过去之前就该知道边车在不在,
+    而不是切完发现感知不动再回来排查。
+    """
+    from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+
+    s = get_settings().perception
+    cfg = s.local_vision
+    health: dict | None = None
+    error: str | None = None
+    try:
+        health = LocalVisionClient(cfg.base_url, cfg.token, timeout=8.0).health_sync()
+    except LocalVisionError as e:
+        error = str(e)
+    return {
+        "backend": s.engine_backend,
+        "local_vision": {
+            "base_url": cfg.base_url,
+            "has_token": bool(cfg.token),
+            "gate_threshold": cfg.gate_threshold,
+        },
+        "health": health,
+        "error": error,
+        # 能力差异摆在接口里,前端直接渲染,不必各端各写一份说明。
+        "local_capabilities": {
+            "needs_api_key": False,
+            "audio": False,       # 纯视觉:不产 speeches / env_sounds
+            "identity": False,    # 不做身份识别
+            "suggestions": False,  # 主动建议交给 agent
+            "static_rule_execution": False,  # 规则命中一律交 agent 决策执行
+        },
+    }
+
+
+@router.get(
+    "/perception-backend",
+    summary="读取感知后端选择(cloud/local)与本地边车连通性",
+    response_model=NormalResponse,
+)
+async def get_perception_backend(current_user: str = Depends(verify_token)):
+    return NormalResponse(code=0, message="ok", data=_local_vision_payload())
+
+
+@router.post(
+    "/perception-backend",
+    summary="切换感知后端;切到 local 前先探活,不通则拒绝",
+    response_model=NormalResponse,
+)
+async def set_perception_backend(
+    body: PerceptionBackendBody, current_user: str = Depends(verify_token)
+):
+    """切到 local 前必须探活通过 —— 与「启用云端模型前先测连接」同一条不变量:
+    不让用户切到一个不工作的后端上,否则感知会静默停摆。"""
+    from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+
+    update: dict = {"engine_backend": body.backend}
+    lv: dict = {}
+    if body.base_url is not None:
+        lv["base_url"] = body.base_url.strip()
+    if body.token is not None:
+        lv["token"] = body.token.strip()
+
+    if body.backend == "local":
+        cur = get_settings().perception.local_vision
+        base_url = lv.get("base_url", cur.base_url)
+        token = lv.get("token", cur.token)
+        try:
+            health = LocalVisionClient(base_url, token, timeout=10.0).health_sync()
+        except LocalVisionError as e:
+            raise HTTPException(status_code=400, detail=f"本地视觉服务不可达:{e}")
+        if not health.get("model_loaded"):
+            raise HTTPException(status_code=400, detail="本地视觉服务正在加载模型,稍后再试")
+
+    if lv:
+        update["local_vision"] = lv
+    update_shared_config(perception=update)
+
+    # 立即重建引擎,让切换在下一个推理周期就生效(与 omni 激活同样的即时性)。
+    manager = get_manager()
+    proxy = getattr(manager, "perception_engine_proxy", None)
+    if proxy is not None:
+        try:
+            await proxy.stop_to_unconfigured()
+        except Exception as e:  # noqa: BLE001 —— 重建失败不该让配置写入回滚
+            logger.warning("切换感知后端后重建引擎失败(将由 tick 自愈): %s", e)
+
+    return NormalResponse(code=0, message="ok", data=_local_vision_payload())

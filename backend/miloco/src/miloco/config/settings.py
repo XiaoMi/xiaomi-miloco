@@ -17,7 +17,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
@@ -303,9 +303,59 @@ class PerceptionCollectSettings(BaseModel):
     )
 
 
+class LocalVisionSettings(BaseModel):
+    """本地视觉感知边车(local-vision)的连接与推理参数。
+
+    仅当 ``perception.engine_backend == "local"`` 时生效。边车是独立进程/独立
+    机器上的 GPU 服务,miloco 只通过 HTTP 认识它 —— 本项目不下载权重、不拉起也
+    不重启推理进程(模型进程的生命周期一旦由 miloco 接管,故障面就扩散到显卡直通、
+    驱动、容器等环境问题,既超出项目边界也难以支持)。
+    """
+
+    base_url: str = Field(
+        default="http://127.0.0.1:18800",
+        description="local-vision 边车地址(OpenAI 协议无关,见 services/local-vision)",
+    )
+    token: str = Field(
+        default="",
+        description="边车鉴权 token;边车未配则留空。本通路不需要任何模型厂商 API Key",
+    )
+    timeout_sec: float = Field(default=60.0, gt=0, description="单次感知请求超时(秒)")
+    fps: int = Field(default=4, gt=0, description="窗口帧编码成视频时的容器帧率")
+    crf: int = Field(
+        default=28, ge=0, le=51,
+        description="H.264 编码质量(越大体积越小);边车只在 16x16 patch 粒度看运动/残差,不需要高画质",
+    )
+    max_new_tokens: int = Field(default=256, ge=16, le=1024, description="单次生成上限")
+    gate_threshold: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description=(
+            "事件门阈值:低于此概率的窗口直接跳过。默认 0 = 只观测不决策 —— "
+            "参考实现的门控在体育解说数据上训练,家庭场景属分布外,"
+            "先在自家数据上观察 timing._gate_p_* 再决定是否调高"
+        ),
+    )
+    scene_ask: str = Field(
+        default="",
+        description="覆盖默认的中文场景提问;留空用边车内置提问",
+    )
+
+
 class PerceptionSettings(BaseModel):
     """感知管线相关配置。"""
 
+    engine_backend: Literal["cloud", "local"] = Field(
+        default="cloud",
+        description=(
+            "感知引擎后端。cloud=云端多模态大模型(默认,需 API Key);"
+            "local=本地 GPU 视觉模型边车(免 Key、零 token 成本、画面不出本地,"
+            "但纯视觉:无音频结论、无身份识别,且不直接执行设备动作)"
+        ),
+    )
+    local_vision: LocalVisionSettings = Field(
+        default_factory=LocalVisionSettings,
+        description="engine_backend=local 时的边车配置",
+    )
     log_ttl: int = Field(default=30, description="感知日志保留天数")
     event_ttl_days: int = Field(
         default=7,

@@ -110,5 +110,24 @@
     "deleteFailed": "删除失败",
     "modelsEmptyResult": "该地址未返回模型列表",
     "modelsFetchFailed": "拉取模型失败"
+  },
+  "perceptionBackend": {
+    "title": "感知后端",
+    "subtitle": "选择用哪条通路做视频感知。两条通路互斥,切换即时生效。",
+    "cloudTitle": "云端 API",
+    "cloudDesc": "使用下方配置的多模态大模型。需要 API Key,按 token 计费;支持音频与身份识别。",
+    "localTitle": "本地 GPU",
+    "localDesc": "使用本机/局域网的视觉模型服务。免 Key、零 token 成本、画面不出本地。",
+    "baseUrlLabel": "本地服务地址",
+    "reachable": "服务可用",
+    "unreachable": "服务不可达",
+    "gateOff": "事件门未启用",
+    "switchedCloud": "已切换到云端 API 通路",
+    "switchedLocal": "已切换到本地 GPU 通路",
+    "switchFailed": "切换失败",
+    "capNoKey": "本地通路不需要任何模型厂商 API Key。",
+    "capNoAudio": "纯视觉:不产生语音指令与环境音结论(需要音频能力请用云端通路)。",
+    "capNoIdentity": "不做身份识别,只描述场景与判断规则。",
+    "capNoStatic": "本地通路不直接控制设备:规则命中一律交给 agent 决策执行,STATIC 规则的直连执行不生效。"
   }
 }

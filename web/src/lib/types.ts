@@ -700,3 +700,35 @@ export interface Task {
   // 详情抽屉「有价值的详情」：驱动规则，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
 }
+
+/** 感知后端选择:云端多模态大模型 vs 本地 GPU 视觉边车。 */
+export type PerceptionBackendKind = "cloud" | "local";
+
+/** 本地通路相对云端缺失的能力(由后端声明,前端直接渲染,避免各端各写一份)。 */
+export interface LocalVisionCapabilities {
+  needs_api_key: boolean;
+  audio: boolean;
+  identity: boolean;
+  suggestions: boolean;
+  static_rule_execution: boolean;
+}
+
+export interface PerceptionBackendState {
+  backend: PerceptionBackendKind;
+  local_vision: {
+    base_url: string;
+    has_token: boolean;
+    gate_threshold: number;
+  };
+  /** 边车 /health 快照;不可达时为 null,原因见 error。 */
+  health: {
+    status: string;
+    model_loaded: boolean;
+    gate_available: boolean;
+    gate_error: string | null;
+    device: string | null;
+    backend: string | null;
+  } | null;
+  error: string | null;
+  local_capabilities: LocalVisionCapabilities;
+}
