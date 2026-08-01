@@ -1,5 +1,6 @@
 """Tests for Omni Layer — Prompt Builder."""
 
+import contextlib
 from unittest.mock import patch
 
 import numpy as np
@@ -1522,53 +1523,167 @@ class TestAdaptiveResolution:
             content = self._content(candidates=[])
         assert self._has_ref(content)
 
-    def test_bbox_note_points_to_panorama_ref_when_cropped(self):
-        # crop 生效(无候选)+ 名册含 confirmed 成员 bbox → bbox 说明应指向全景参考图,不指 crop 视频
-        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
+    # 与 _adaptive_packet 默认 body_box=(100,100,80,120)(xywh)自洽的名册 bbox:
+    # xyxy=(100,100,180,220) 按 640x480 帧走 identity.engine._normalize_bbox_to_1000
+    # (round(v*1000/dim))→ (156, 208, 281, 458)。生产里这两者同源(都读
+    # box_info[-1].boxes["human_body"]),测试数据也必须自洽,否则 remap 会正确地判定
+    # "框在 crop 区域外"而退化为纯名,断言就测不到换算本身。
+    _SELF_CONSISTENT_BBOX = (156, 208, 281, 458)
+
+    def _roster_text(self, content) -> str:
+        return "".join(b.get("text", "") for b in content if b.get("type") == "text")
+
+    def test_bbox_remapped_into_crop_coords_when_cropped(self):
+        # crop 生效时名册 bbox 必须换算进 crop 坐标系 —— 不换算就是拿全景坐标读局部画面
+        # (方向性错误,会把姓名贴到 crop 中央那个人身上)。
+        # 固定 region 以便硬编码期望值,避免"用被测代码算期望值"的同义反复;几何精度本身
+        # 由 test_crop_enhance 的纯函数测试坐实,这里验的是 region/frame_size 的**接线**。
+        from unittest.mock import patch as _patch
+
+        # region=(50,50,350,350) → 300x300;帧 640x480。
+        # x: 156*640/1000=99.84 →(-50)/300*1000 → 166;281*640/1000=179.84 → 433
+        # y: 208*480/1000=99.84 →(-50)/300*1000 → 166;458*480/1000=219.84 → 566
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
         p1, p2 = self._patches()
-        with p1, p2:
+        with p1, p2, _patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
+            return_value=(50, 50, 350, 350),
+        ):
             content = self._content(packet=member, candidates=[])
         assert self._has_ref(content)  # 确认本窗确实 crop 了
-        note = self._bbox_note(content)
-        assert "[bbox=(400, 300, 600, 900)]" in "".join(
-            b.get("text", "") for b in content if b.get("type") == "text"
-        )  # 名册确实渲染了 bbox → note 会触发
-        assert "全景参考图" in note and "视频里的人" not in note
+        roster = self._roster_text(content)
+        assert "[bbox=(166, 166, 433, 566)]" in roster  # 换算后的 crop 坐标
+        assert "[bbox=(156, 208, 281, 458)]" not in roster  # 全景原坐标不得残留
+        # 括注是唯一一句「上文坐标读视频、别读这张全景图」的防混淆措辞。反面断言在
+        # test_bbox_dropped_when_outside_crop_region;正面这条不补的话,把 anchor_hint
+        # 恒置空的改动不会让任何测试变红。
+        guide = next(b["text"] for b in content
+                     if b.get("type") == "text" and "全景场景参考" in b.get("text", ""))
+        assert "上文 bbox 对应放大后的视频" in guide
 
-    def test_bbox_note_points_to_video_when_not_cropped(self):
-        # 用户开关关 → 不 crop → 同一名册 bbox 说明维持指向视频(零回归)
-        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
-        p1, p2 = self._patches(user_enabled=False)
-        with p1, p2:
+    def test_bbox_dropped_when_outside_crop_region(self):
+        # 框落在 crop 区域外(理论上不该发生:区域是这些框的并集;但 identity 侧有一条
+        # boxes.get("human") 回退键不在 _MAIN_BOX_TYPES 里)→ 退化为纯名。
+        # 宁可只给姓名不给位置,也不能输出与画面错配的坐标。
+        from unittest.mock import patch as _patch
+
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        p1, p2 = self._patches()
+        with p1, p2, _patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
+            return_value=(400, 300, 640, 480),  # 与 bbox 像素范围(100-180, 100-220)无交集
+        ):
             content = self._content(packet=member, candidates=[])
-        assert not self._has_ref(content)
-        note = self._bbox_note(content)
-        assert "视频里的人" in note and "全景参考图" not in note
+        roster = self._roster_text(content)
+        assert "已识别人物：p-alice" in roster
+        assert "[bbox=" not in roster  # 坐标整个撤掉,不留错值
+        assert self._bbox_note(content) == ""  # 名册无 bbox 且无候选 → 说明句也不发
+        # 参考图引导语还在(图块本身没失败),但不得指一个 prompt 里不存在的「上文 bbox」
+        guide = next(b["text"] for b in content
+                     if b.get("type") == "text" and "全景场景参考" in b.get("text", ""))
+        assert "上文 bbox" not in guide
 
-    def test_ref_block_failure_drops_text_and_bbox_anchor_together(self):
-        # 契约防御:_jpeg_block 抛错时,引导语、图块、bbox 锚点必须**同进同退**。
-        # 只掉图块的话,prompt 里会留下指向"下方第一张全景参考图"的 bbox 说明 + 一个局部
-        # crop 视频 —— 全景 [0,1000] 坐标配 crop 画面,正是身份门要防的错配。
+    def test_remap_disabled_for_multi_packet(self):
+        # crop 区域只属于「首个有帧设备」,套到设备 2..N 的名册上是跨设备错坐标。
+        # 当前 fused 恒单 packet,故这是防御:多 packet 时整体弃用换算、退化为纯名。
+        from unittest.mock import patch as _patch
+
+        from miloco.perception.engine.omni.prompt_builder import _build_device_header
+
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        called: list[tuple] = []
+
+        def _remap(b):
+            called.append(b)
+            return (1, 2, 3, 4)
+
+        single = _build_device_header([member], bbox_remap=_remap)
+        assert "[bbox=(1, 2, 3, 4)]" in "".join(single)  # 单设备:换算照常生效
+        assert called == [self._SELF_CONSISTENT_BBOX]
+
+        called.clear()
+        with _patch.object(_pb_mod.logger, "warning") as warn:
+            multi = _build_device_header([member, member], bbox_remap=_remap)
+        assert called == []  # 多设备:换算回调根本不该被调用
+        joined = "".join(multi)
+        # bbox 必须整个撤掉。特别是**不能**回落到全景原值 (156, 208, 281, 458) —— 走到这里
+        # 说明 crop 已生效、主视频是局部画面,全景坐标配 crop 画面正是要根除的错配。
+        assert "[bbox=(156, 208, 281, 458)]" not in joined
+        assert "[bbox=(1, 2, 3, 4)]" not in joined
+        assert "已识别人物：p-alice" in joined
+        assert warn.call_args and "roster_bbox_remap_multi_packet" in warn.call_args[0][0]
+
+    def test_bbox_note_anchors_video_last_frame_both_paths(self):
+        # bbox 恒锚**视频最后一帧**:crop 时坐标已换算成 crop 坐标系,不 crop 时视频本就是
+        # 全景 —— 两条路径同一句话。「最后一帧」必须写明:bbox 只标末帧位置而视频跨整个
+        # 窗口,不说清模型会拿它去读中间帧(该模糊在接 Smart Crop 之前就存在)。
+        from unittest.mock import patch as _patch
+
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        for user_enabled, region_patch in (
+            (True, _patch(
+                "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
+                return_value=(50, 50, 350, 350),
+            )),
+            (False, contextlib.nullcontext()),
+        ):
+            p1, p2 = self._patches(user_enabled=user_enabled)
+            with p1, p2, region_patch:
+                content = self._content(packet=member, candidates=[])
+            assert self._has_ref(content) is user_enabled  # crop 与否符合预期
+            roster = self._roster_text(content)
+            if user_enabled:
+                assert "[bbox=(166, 166, 433, 566)]" in roster  # 换算进 crop 坐标系
+            else:
+                # 零回归:不裁切时坐标必须原样保留。crop 关闭是双闸灰度下绝大多数用户
+                # 所在的路径,措辞断言对"坐标有没有被动过"零敏感,必须单独钉住。
+                assert "[bbox=(156, 208, 281, 458)]" in roster
+            note = self._bbox_note(content)
+            assert "最后一帧" in note
+            assert "视频里的人" in note
+            assert "全景参考图" not in note  # 参考图不再充当 bbox 锚点
+
+    def test_bbox_note_emitted_for_candidate_only_bbox(self):
+        # 名册一个 bbox 都没有、但「待识别 track」行带 bbox 时,坐标系说明句仍必须发 ——
+        # 否则模型拿到一串坐标却没有 [0,1000] / 末帧的口径说明。这条钉住 bbox_note_emitted
+        # 里的 `or bool(candidates)` 项:名册扫的是 "[bbox="(带方括号),而 track 行由
+        # _format_track_line 渲染成 "bbox="(无方括号)扫不到,少了该项就会漏发。
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        # 有候选 → 身份门本就关掉 crop,故不需要 _patches。
+        content = self._content(
+            candidates=[IdentityQueryItem(track_id=1, bbox_xyxy_norm=(100, 200, 300, 400))]
+        )
+        roster = self._roster_text(content)
+        assert "已识别人物：无" in roster
+        assert "[bbox=" not in roster  # 名册侧确实一个 bbox 都没有
+        assert "bbox=(100, 200, 300, 400)" in roster  # track 行带 bbox
+        assert "最后一帧" in self._bbox_note(content)  # 说明句照发
+
+    def test_ref_block_failure_drops_guidance_but_keeps_bbox(self):
+        # 契约防御:_jpeg_block 抛错时,引导语与图块**同进同退**,不留悬空指代。
+        # 但 bbox 说明**不受影响** —— 坐标已换算进 crop 坐标系、锚的是视频而非参考图,
+        # 参考图在不在都不改变它的正确性。这正是换算方案相对"锚全景参考图"的净简化。
         # (调用方 _maybe_encode_adaptive 已用同一条件校验过 ref jpeg,故实际不可达。)
         from unittest.mock import patch as _patch
 
         import miloco.perception.engine.omni.prompt_builder as pb
 
-        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=(400, 300, 600, 900))
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
         p1, p2 = self._patches()
-        with p1, p2, _patch.object(pb, "_jpeg_block", side_effect=ValueError("too small")):
+        with p1, p2, _patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
+            return_value=(50, 50, 350, 350),
+        ), _patch.object(pb, "_jpeg_block", side_effect=ValueError("too small")):
             content = self._content(packet=member, candidates=[])
         assert not self._has_ref(content)  # 引导语不能单独留下
         assert not any(
             b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
             for b in content
         )
-        # 名册确实渲染了 bbox(否则这条说明本来就不会发,断言无意义)
-        assert "[bbox=(400, 300, 600, 900)]" in "".join(
-            b.get("text", "") for b in content if b.get("type") == "text"
-        )
-        # 无图可锚 → 整句坐标系说明不发(锚"视频"是拿全景坐标读局部画面,方向性错误)
-        assert self._bbox_note(content) == ""
+        # bbox 仍是换算后的 crop 坐标,说明句照发(锚视频,与参考图无关)
+        assert "[bbox=(166, 166, 433, 566)]" in self._roster_text(content)
+        assert "最后一帧" in self._bbox_note(content)
         assert any(b.get("type") == "video_url" for b in content)  # 视频仍在,不整窗失败
 
     def _ref_bytes(self, content) -> bytes:
@@ -1583,7 +1698,8 @@ class TestAdaptiveResolution:
         )
 
     def test_ref_frame_is_last_not_first(self):
-        # 参考帧必须取末帧:名册 bbox 是末帧坐标,窗内有人移动时首帧参考图会把姓名贴错人。
+        # 参考帧必须取末帧:它与 crop 视频的末帧同一时刻,「全景 → 放大」的对照才成立;
+        # 取首帧会在窗内有人移动时让两张画面错开。(bbox 不再锚这张图,已换算进 crop 坐标系。)
         from miloco.perception.engine.identity.gallery_composite import (
             encode_jpeg_bytes,
         )

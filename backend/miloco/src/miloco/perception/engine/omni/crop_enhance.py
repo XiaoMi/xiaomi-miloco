@@ -215,6 +215,51 @@ def crop_frames(
     return [f[y1:y2, x1:x2].copy() for f in frames]
 
 
+def remap_bbox_norm_to_crop(
+    bbox_norm: tuple[int, int, int, int],
+    region: Region,
+    frame_size: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    """把全景帧的 [0,1000] 归一化 bbox 换算成 crop 区域内的 [0,1000] 坐标。
+
+    crop 生效时主视频是局部放大画面,而名册 bbox 由
+    ``identity.engine._normalize_bbox_to_1000(…, all_frames[-1])`` 按**全景整帧**归一化——
+    两者坐标系不同。不换算就直接锚到视频,等于拿全景坐标读局部画面,会把姓名贴到
+    crop 中央那个人身上(方向性错误,不是精度损失)。
+
+    换算链:归一化 → 全景像素 → 减 region 原点 → 按 crop 尺寸重新归一化。
+    ``frame_size`` 是 ``(w, h)``,与 ``region`` 同一像素空间(即 ``all_frames`` 的原生尺寸)。
+
+    区域**通常**包含每个名册 bbox:二者同源于 ``box_info[-1].boxes["human_body"]``
+    (``_body_boxes`` 与 ``identity._to_tracking_dicts``),而区域 = 并集 → 扩展 → 只放大的
+    最小面积约束。但不当作前置条件依赖:``identity._to_tracking_dicts`` 有一条
+    ``boxes.get("human")`` 回退键不在 ``_MAIN_BOX_TYPES`` 里(只可能来自已废弃的
+    ``tracking_service.convert_response``,生产 ``_build_response`` 只写 BoxType 枚举值),
+    且检测框可能溢出帧外。故此处一律 clamp,换算后退化(宽或高 <= 0,即框完全落在区域外)
+    返回 None —— 调用方据此退化为"只给姓名不给位置",不输出错坐标。
+    """
+    fw, fh = frame_size
+    rx1, ry1, rx2, ry2 = region
+    cw, ch = rx2 - rx1, ry2 - ry1
+    if fw <= 0 or fh <= 0 or cw <= 0 or ch <= 0:
+        return None
+
+    # 归一化 → 全景像素(round 与 _normalize_bbox_to_1000 的取整方向一致)
+    px1, px2 = bbox_norm[0] * fw / 1000, bbox_norm[2] * fw / 1000
+    py1, py2 = bbox_norm[1] * fh / 1000, bbox_norm[3] * fh / 1000
+
+    # 平移到 crop 原点 → 按 crop 尺寸重新归一化 → clamp 回 [0,1000]
+    out = (
+        max(0, min(1000, round((px1 - rx1) * 1000 / cw))),
+        max(0, min(1000, round((py1 - ry1) * 1000 / ch))),
+        max(0, min(1000, round((px2 - rx1) * 1000 / cw))),
+        max(0, min(1000, round((py2 - ry1) * 1000 / ch))),
+    )
+    if out[2] - out[0] <= 0 or out[3] - out[1] <= 0:
+        return None  # 框完全落在 crop 区域外(或被 clamp 压成零宽/零高)
+    return out
+
+
 def crop_enhance_config_from_settings() -> CropEnhanceConfig:
     """热读 settings 的 perception.engine.crop_enhance,过滤未知键,缺省补默认(免重启)。"""
     try:

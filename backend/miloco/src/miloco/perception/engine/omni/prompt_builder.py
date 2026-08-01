@@ -60,6 +60,8 @@ from .provider import LocalMediaInfo, OmniProviderAdapter
 RouteType = Literal["video", "audio"]
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from miloco.perception.engine.config import CropEnhanceConfig
     from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
     from miloco.perception.engine.identity.library import GallerySamples
@@ -264,11 +266,21 @@ def build_fused_payload(
     video_b64: str | None = None
     media_info: "LocalMediaInfo | None" = None
     ref_image_jpeg: bytes | None = None
+    # 「crop 生效」与「名册 bbox 会被换算进 crop 坐标系」必须同进同退:在此处一起构好回调,
+    # 而不是把 region / frame_size 当两个独立可选参数往下传。漏传一个的后果是静默错配
+    # (bbox 是全景坐标、视频却是 crop 画面,把姓名贴到 crop 中央那个人身上),且不会有测试变红。
+    bbox_remap: "Callable[[tuple[int, int, int, int]], tuple[int, int, int, int] | None] | None" = None
     if not candidates:
         adaptive = _maybe_encode_adaptive(packets)
         if adaptive is not None:
+            from .crop_enhance import remap_bbox_norm_to_crop
+
             video_b64, media_info = adaptive.video_b64, adaptive.media_info
             ref_image_jpeg = adaptive.ref_image_jpeg
+            _region, _frame_size = adaptive.region, adaptive.frame_size
+
+            def bbox_remap(b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+                return remap_bbox_norm_to_crop(b, _region, _frame_size)
     if video_b64 is None:
         video_b64, media_info = _encode_batch_video(
             packets, short_edge=_effective_panorama_short_edge()
@@ -292,6 +304,7 @@ def build_fused_payload(
         video_b64=video_b64,
         media_info=media_info,
         ref_image_jpeg=ref_image_jpeg,
+        bbox_remap=bbox_remap,
         adapter=adapter,
         cfg=cfg,
         label_lookup=label_lookup,
@@ -622,6 +635,7 @@ def _build_fused_user_content(
     video_b64: str | None,
     media_info: LocalMediaInfo | None,
     ref_image_jpeg: bytes | None = None,
+    bbox_remap: "Callable[[tuple[int, int, int, int]], tuple[int, int, int, int] | None] | None" = None,
     adapter: OmniProviderAdapter,
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
@@ -727,9 +741,17 @@ def _build_fused_user_content(
         content.append({"type": "text", "text": f"位置: {context.room_name}"})
 
     # 2. 已识别人物 / 陌生人 名册（含 bbox；进入"待识别 track"的 track 从名册剔除，去先验+去冗余）
+    #
+    # bbox_remap 非 None ⟺ Smart Crop 生效(由 build_fused_payload 与 crop 视频一起构好)。
+    # 此时主视频是局部放大画面,而 bbox 由 identity 侧按**全景整帧**归一化
+    # (engine._normalize_bbox_to_1000(…, all_frames[-1])),必须换算进 crop 坐标系 —— 否则
+    # 拿全景坐标读局部画面是方向性错误(会把姓名贴到 crop 中央那个人身上),不是精度损失。
+    # 换算失败(框落在区域外)由 _render_roster_entry 退化为纯名。
+    # candidates 侧不需要同等处理:身份门(build_fused_payload)保证有候选就不裁切。
     candidate_tids = {c.track_id for c in candidates}
     roster_lines = _build_device_header(
         packets, label_lookup=label_lookup, candidate_tids=candidate_tids, emit_bbox_note=False,
+        bbox_remap=bbox_remap,
     )
     for line in roster_lines:
         content.append({"type": "text", "text": line})
@@ -740,10 +762,27 @@ def _build_fused_user_content(
         for cand in candidates:
             content.append({"type": "text", "text": _format_track_line(cand)})
 
-    # 参考帧图块必须**先于**下面的 bbox 说明构建:bbox 措辞与 4.5 的引导语都要按「这张图最终是否
-    # 真的进了 content」措辞,而不是按「ref_image_jpeg 是否非空」。否则 _jpeg_block 抛错时会留下两处
-    # 悬空指代 —— 更糟的是主视频此时是局部 crop、bbox 却仍是全景 [0,1000] 坐标,正是身份门要防的
-    # 坐标系错配(把姓名贴错人)。
+    # 已识别人物/陌生人 + 待识别 track 共用一句 bbox 坐标系说明（二者同一 [0,1000] 约定，去重）
+    #
+    # 恒锚**视频末帧**,crop 与否都一样:crop 生效时 bbox 已在上面换算进 crop 坐标系
+    # (bbox_remap),与视频画面同坐标系;不 crop 时视频本就是全景。所以参考图块建不建得出来
+    # 不再影响这句话的正确性 —— 这是换算相对"锚全景参考图"方案的净简化。
+    #
+    # 「末帧」必须写明:bbox 只标末帧位置(engine._normalize_bbox_to_1000(…, all_frames[-1])),
+    # 而视频跨整个窗口。窗内有人走动时不说清是哪一帧,模型可能拿它去读中间帧、贴错人。
+    # 这个模糊在接 Smart Crop 之前就存在(全景视频同样跨整窗),crop 只是把它放大了
+    # (视野变窄后同样的位移在画面里占比更大)。
+    # 记下这句到底发没发,供 4.5 的括注复用 —— 两处条件不能各写各的,否则名册 bbox 全被撤掉
+    # (换算失败 / 全员 coasting 无框)时,括注会去指一个 prompt 里并不存在的「上文 bbox」。
+    bbox_note_emitted = any("[bbox=" in ln for ln in roster_lines) or bool(candidates)
+    if bbox_note_emitted:
+        content.append({"type": "text", "text": (
+            "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为视频**最后一帧**中"
+            "归一化到 [0, 1000] 区间的位置（左上 0,0；右下 1000,1000），"
+            "用于把姓名 / track_id 对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+        )})
+
+    # 参考帧图块:引导语与图块同进同退,避免只留文字不留图。
     # 注:唯一调用方 build_fused_payload 侧的 _maybe_encode_adaptive 已用同一条件
     # (len >= _MIN_JPEG_BYTES)校验过,故 except 分支当前不可达;此处是契约防御,不是在修线上 bug。
     # 防御范围仅限本函数产出的 prompt content:旁路落盘的 ref.jpg / has_ref 在
@@ -754,32 +793,20 @@ def _build_fused_user_content(
         try:
             ref_block = _jpeg_block(ref_image_jpeg)
         except ValueError:
-            logger.warning("event=adaptive_ref_jpeg_bad 跳过参考帧块(bbox 坐标系说明同步整句不发)")
-
-    # 已识别人物/陌生人 + 待识别 track 共用一句 bbox 坐标系说明（二者同一 [0,1000] 约定，去重）
-    # crop 生效(ref_image_jpeg 非 None ⟺ 主视频已被换成 crop 视频)但参考图块没进 content 时,
-    # 整句不发:bbox 是全景整帧坐标,锚到"全景参考图"图不存在、锚到"视频"则是拿全景坐标读局部画面
-    # (方向性错误,会把姓名贴到 crop 中央那个人身上)。不给坐标系约定、让模型退回纯视觉观察,
-    # 是此处唯一不主动误导的降级。
-    bbox_note_unanchored = ref_image_jpeg is not None and ref_block is None
-    if (any("[bbox=" in ln for ln in roster_lines) or candidates) and not bbox_note_unanchored:
-        # crop 生效时(必无候选)主视频是局部放大,bbox 仍是全景整帧坐标 → 指向全景参考图(bbox 归一化
-        # 基准正是这张整帧)而非 crop 视频,避免坐标系错配把姓名贴错人。
-        bbox_anchor = "下方第一张全景参考图" if ref_block is not None else "视频"
-        content.append({"type": "text", "text": (
-            "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为画面归一化到 [0, 1000] 区间的位置"
-            f"（左上 0,0；右下 1000,1000），用于把姓名 / track_id 对应到{bbox_anchor}里的人。"
-        )})
+            logger.warning("event=adaptive_ref_jpeg_bad 跳过参考帧块(引导语同步不发;bbox 已换算进 crop 坐标系,不受影响)")
 
     # 4. gallery（候选成员参考图，紧邻 video 便于视觉比对）
     content.extend(gallery_content)
 
-    # 4.5 自适应分辨率:全景参考帧(置于 video 前,「全景图在前、活动区域放大视频在后」)
-    # 引导语与图块同进同退(ref_block 在上方 bbox 说明之前已构建),避免只留文字不留图。
+    # 4.5 自适应分辨率:全景参考帧(置于 video 前,「全景图在前、活动区域放大视频在后」)。
+    # 它只补全局场景上下文(裁切丢掉的视野),**不**再充当 bbox 锚点 —— bbox 已换算进 crop
+    # 坐标系、直接锚视频,措辞不能再把模型往这张图上引。
     if ref_block is not None:
+        # 括注只在上文真有 bbox 时才发,否则是悬空指代(与引导语/图块同进同退同一条原则)
+        anchor_hint = "（上文 bbox 对应放大后的视频，不是这张全景图）" if bbox_note_emitted else ""
         content.append({"type": "text", "text": (
             "下方第一张图为全景场景参考，随后的视频是画面中活动区域的放大——"
-            "请结合两者理解场景与细节。"
+            f"请结合两者理解场景与细节{anchor_hint}。"
         )})
         content.append(ref_block)
 
@@ -812,11 +839,33 @@ def _is_confirmed_member_pid(pid: str) -> bool:
     return not _is_stranger_pid(pid)
 
 
-def _render_roster_entry(t: IdentityTarget, label_lookup: "dict[str, str] | None") -> str:
-    """名册单项：``名[bbox=(x1, y1, x2, y2)]``；无 bbox（coasting 本帧未检测）退化为纯名。"""
+def _drop_bbox(_b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+    """恒撤掉 bbox 的 remap 回调：crop 已生效、但换算基准不适用于当前 packet 时用。
+
+    **不能用 ``None`` 代替** —— ``None`` 在 :func:`_render_roster_entry` 里表示"不必换算"、
+    会原样渲染全景坐标；而需要本回调的场景恰恰是 crop 已生效、主视频是局部画面，那正是
+    要根除的错配。宁可只给姓名不给位置。
+    """
+    return None
+
+
+def _render_roster_entry(
+    t: IdentityTarget,
+    label_lookup: "dict[str, str] | None",
+    bbox_remap: "Callable[[tuple[int, int, int, int]], tuple[int, int, int, int] | None] | None" = None,
+) -> str:
+    """名册单项：``名[bbox=(x1, y1, x2, y2)]``；无 bbox（coasting 本帧未检测）退化为纯名。
+
+    ``bbox_remap`` 非 None 时（Smart Crop 生效），先把全景 [0,1000] 坐标换算进 crop
+    坐标系；换算失败（框落在 crop 区域外）同样退化为纯名——宁可只给姓名不给位置，
+    也不能输出与画面错配的坐标。
+    """
     label = _format_target(t, label_lookup)
-    if t.bbox_xyxy_norm is not None:
-        x1, y1, x2, y2 = t.bbox_xyxy_norm
+    bbox = t.bbox_xyxy_norm
+    if bbox is not None and bbox_remap is not None:
+        bbox = bbox_remap(bbox)
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
         return f"{label}[bbox=({x1}, {y1}, {x2}, {y2})]"
     return label
 
@@ -826,6 +875,7 @@ def _build_device_header(
     label_lookup: "dict[str, str] | None" = None,
     candidate_tids: "set[int] | frozenset[int]" = frozenset(),
     emit_bbox_note: bool = True,
+    bbox_remap: "Callable[[tuple[int, int, int, int]], tuple[int, int, int, int] | None] | None" = None,
 ) -> list[str]:
     """渲染人物名册段，按身份状态分桶（只放"已定身份"的 track，含归一化位置）：
 
@@ -841,7 +891,23 @@ def _build_device_header(
 
     ``suppress_as_prior=True`` 的 target（翻身份黏旧名期 track）同样剔除——它本窗若 coasting
     未派发就不在 candidate_tids 里，靠此标记兜住，防黏住的旧名当先验把翻转翻不动。
+
+    ``bbox_remap``（Smart Crop 生效时把全景 bbox 换算进 crop 坐标系）**只对单 packet 成立**：
+    回调闭包里的 region / frame_size 取自 ``_maybe_encode_adaptive`` 选中的「首个有帧设备」，
+    套到设备 2..N 的名册上会吐出跨设备的错坐标（或被判「落在区域外」而静默丢掉位置）。
+    当前 fused 恒单 packet（``run_omni_fused`` 传 ``[omni_packet]``）；多 packet 时主动弃用
+    换算、退化为纯名——宁可只给姓名不给位置。
     """
+    if bbox_remap is not None and len(packets) > 1:
+        logger.warning(
+            "event=roster_bbox_remap_multi_packet n_packets=%d "
+            "crop 区域只属于首个设备,整体撤掉 bbox 退化为纯名",
+            len(packets),
+        )
+        # 注意不能置 None —— 那会让 _render_roster_entry 回落到**全景原坐标**,而主视频
+        # 此时是 crop 视频,正是本次改动要根除的错配。改挂恒撤掉 bbox 的哨兵回调。
+        bbox_remap = _drop_bbox
+
     def _bucket(ep: IdentityPacket) -> tuple[list[str], list[str]]:
         members: list[str] = []
         strangers: list[str] = []
@@ -851,9 +917,9 @@ def _build_device_header(
             if t.track_id in candidate_tids or t.suppress_as_prior:
                 continue
             if _is_confirmed_member_pid(t.person_id):
-                members.append(_render_roster_entry(t, label_lookup))
+                members.append(_render_roster_entry(t, label_lookup, bbox_remap))
             elif _is_stranger_pid(t.person_id):
-                strangers.append(_render_roster_entry(t, label_lookup))
+                strangers.append(_render_roster_entry(t, label_lookup, bbox_remap))
             # none / pending / pending:<id> → 不进名册
         return members, strangers
 
@@ -874,10 +940,13 @@ def _build_device_header(
 
     # 名册含位置时附一句坐标系说明（非 fused 路径用）；fused 路径传 emit_bbox_note=False，
     # 由 _build_fused_user_content 统一出一句覆盖名册 + 待识别 track，避免两处重复。
+    # 「最后一帧」与 fused 侧同口径:bbox 只标末帧位置(engine._normalize_bbox_to_1000 按
+    # all_frames[-1] 归一化),视频却跨整个窗口,不写明会让模型拿它去读中间帧。
+    # 此路(非 fused/legacy)恒走全景、不接 Smart Crop,故无需坐标换算。
     if emit_bbox_note and any("[bbox=" in ln for ln in lines):
         lines.append(
-            "上方已识别人物、陌生人中 [bbox=(x1, y1, x2, y2)] 为该人在画面中归一化到 [0, 1000] 区间的位置"
-            "（左上 0,0；右下 1000,1000），用于把姓名对应到视频里的人。"
+            "上方已识别人物、陌生人中 [bbox=(x1, y1, x2, y2)] 为该人在视频**最后一帧**中归一化到 [0, 1000] 区间的位置"
+            "（左上 0,0；右下 1000,1000），用于把姓名对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
         )
     return lines
 
@@ -1540,7 +1609,10 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 #    _crop_short_edge_budget),cap_se 见 _maybe_encode_adaptive。它**可以 > 区域原生
 #    短边**,即放大。而同附的参考帧走 _resize_short_edge、是**钳死只缩不放**的 ——
 #    720p 源 + 1080 档时 crop 视频放大到 759、参考帧仍停在原生 720,两者口径不一致
-#    (有意:参考帧只承载全局 bbox 定位,放大它不增加可定位性)。
+#    (有意:参考帧只补裁切丢掉的全局视野、不承载坐标定位。不跟着放大是**成本**考量、
+#     不是"放大无用"—— 按⑦的机制,放大它同样会抬高它分到的 token,但那份 token 花在
+#     一张静态全局图上收益从未实测,不如留给 crop 视频里的主体;
+#     bbox 已换算进 crop 坐标系锚视频,不读这张图)。
 # ⑦ provider 端还有第二层"分辨率",按 **token** 不按像素、与①~⑥独立:MiMo adapter
 #    硬编码 media_resolution="max";Gemini 读 input.media_resolution(""/low=66 tok
 #    每帧、high=264);Qwen 不传、从 mp4 自读。见 omni/provider.py。
@@ -1589,6 +1661,10 @@ class _AdaptiveResult:
     video_b64: str
     media_info: "LocalMediaInfo | None"
     ref_image_jpeg: bytes  # 全景末帧 JPEG(短边=用户分辨率档),作场景上下文参考(帧序见下方注释)
+    # crop 区域(全景像素 xyxy)与全景帧尺寸 (w, h) —— 供 prompt 层把名册 bbox 从全景
+    # [0,1000] 换算进 crop 坐标系(remap_bbox_norm_to_crop),否则坐标与画面错配。
+    region: tuple[int, int, int, int]
+    frame_size: tuple[int, int]
 
 
 def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | None":
@@ -1669,9 +1745,11 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         if not video_b64 or len(video_b64) < _MIN_VIDEO_B64_LEN:
             logger.info("event=adaptive_crop_fallback reason=video_too_short region=%s", region)
             return None
-        # 参考帧取末帧:名册 bbox 是末帧坐标(engine._normalize_bbox_to_1000(…, latest_frame)),
-        # 参考图必须同帧,否则窗内有人移动时模型按 bbox 会把姓名贴到首帧里的另一个人身上。
-        # 短边跟用户分辨率档(不是硬编码 512):参考帧承载全局 bbox 定位,档位升高时它也该更清楚。
+        # 参考帧取末帧:与 crop 视频的时间轴对齐(视频末帧正是这一帧的裁切结果),模型对照
+        # 「全景 → 放大」时看到的是同一时刻的场景,不会被窗内位移错开。
+        # 注:它**不**是 bbox 的坐标基准 —— bbox 已由 remap_bbox_norm_to_crop 换算进 crop
+        # 坐标系、直接锚视频(见 build_fused_payload 的 bbox_remap)。
+        # 短边跟用户分辨率档(不是硬编码 512):档位升高时全局场景上下文也该更清楚。
         ref_jpeg = encode_jpeg_bytes(_resize_short_edge(frames[-1], pano_se))
         if not ref_jpeg or len(ref_jpeg) < _MIN_JPEG_BYTES:
             logger.info("event=adaptive_crop_fallback reason=jpeg_too_short region=%s", region)
@@ -1694,7 +1772,7 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         # short_edge 记的是**目标**短边;实际编码值会被 _encode_video_mp4 的 //2*2 取偶
         # (以及浮点截断)下调 1-2px,按它反算送模型的像素网格会有这点误差。
         push_crop_meta(region=region, frame_size=(fw, fh), short_edge=cse)
-        return _AdaptiveResult(video_b64, media_info, ref_jpeg)
+        return _AdaptiveResult(video_b64, media_info, ref_jpeg, region, (fw, fh))
     except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理
         # 统一 event 名(adaptive_crop_fallback),灰度期按单一 event grep 不漏异常回退
         logger.warning("event=adaptive_crop_fallback reason=exception 回退全景", exc_info=True)

@@ -7,6 +7,7 @@ from miloco.perception.engine.omni.crop_enhance import (
     compute_crop_region,
     compute_motion_blocks,
     crop_frames,
+    remap_bbox_norm_to_crop,
 )
 from miloco.perception.engine.types import (
     IdentityTarget,
@@ -220,6 +221,71 @@ class TestCropFrames:
         out = crop_frames(frames, (0, 0, 10, 10))
         out[0][:] = 255
         assert frames[0].sum() == 0  # 原帧不受影响
+
+
+# ---------------- remap_bbox_norm_to_crop ----------------
+
+class TestRemapBbox:
+    """全景 [0,1000] bbox → crop 坐标系 [0,1000]。
+
+    crop 生效时主视频是局部放大画面,而名册 bbox 按全景整帧归一化。不换算就直接锚视频
+    是**方向性错误**(会把姓名贴到 crop 中央那个人身上),不是精度损失。
+    """
+
+    def test_half_frame_region_doubles_coords(self):
+        # 帧 1000x1000、区域取左上 1/4(500x500):区域内的框归一化值翻倍
+        assert remap_bbox_norm_to_crop((100, 100, 200, 200), (0, 0, 500, 500), (1000, 1000)) == (
+            200, 200, 400, 400,
+        )
+
+    def test_offset_region_subtracts_origin(self):
+        # 区域原点非 0:先平移再按区域尺寸归一化
+        # px 300..500 → -200 → /400*1000 = 250..750
+        assert remap_bbox_norm_to_crop((300, 300, 500, 500), (200, 200, 600, 600), (1000, 1000)) == (
+            250, 250, 750, 750,
+        )
+
+    def test_full_frame_region_is_identity(self):
+        # 区域=整帧 → 换算应为恒等(取整误差不得引入偏移)。
+        # 用 640x480 非方形帧,顺带盯住 x 用宽、y 用高(轴搞反这条会挂)。
+        assert remap_bbox_norm_to_crop((156, 208, 281, 458), (0, 0, 640, 480), (640, 480)) == (
+            156, 208, 281, 458,
+        )
+
+    def test_box_outside_region_returns_none(self):
+        # 框与区域无交集 → clamp 后零宽 → None(调用方退化为"只给姓名不给位置")
+        assert remap_bbox_norm_to_crop((100, 100, 200, 200), (500, 500, 1000, 1000), (1000, 1000)) is None
+
+    def test_partial_overflow_is_clamped(self):
+        # 框超出区域右下 → 夹到 1000,不吐出 >1000 的坐标
+        out = remap_bbox_norm_to_crop((100, 100, 800, 800), (0, 0, 500, 500), (1000, 1000))
+        assert out == (200, 200, 1000, 1000)
+
+    def test_degenerate_inputs_return_none(self):
+        assert remap_bbox_norm_to_crop((0, 0, 100, 100), (100, 100, 100, 300), (500, 500)) is None  # 零宽区域
+        assert remap_bbox_norm_to_crop((0, 0, 100, 100), (0, 0, 100, 100), (0, 0)) is None  # 零尺寸帧
+
+    def test_real_region_contains_its_own_det_box(self):
+        """契约锚点:compute_crop_region 由检测框并集算出 → 该框换算后必不退化。
+
+        生产里名册 bbox 与 crop 区域同源(都读 box_info[-1].boxes["human_body"]),所以
+        remap 正常不该返回 None。这条把"同源 ⇒ 包含"钉住:若哪天 _body_boxes 的取框口径
+        与 identity 侧漂移,这里先挂。
+        """
+        frames = [_black(480, 640) for _ in range(2)]
+        box_xywh = (100, 100, 80, 120)  # xyxy = (100, 100, 180, 220)
+        region = compute_crop_region([_target({"human_body": box_xywh})], frames, CFG)
+        assert region is not None
+        # 直接调 identity 侧的归一化,而不是手抄它的公式 —— 这条测试的立意就是跨模块契约,
+        # 抄公式会让口径漂移(如 round 改成截断)时它仍然绿灯,守不住自称要守的东西。
+        from miloco.perception.engine.identity.engine import _normalize_bbox_to_1000
+
+        bbox_norm = _normalize_bbox_to_1000((100, 100, 180, 220), frames[-1])
+        assert bbox_norm is not None
+        out = remap_bbox_norm_to_crop(bbox_norm, region, (640, 480))
+        assert out is not None
+        assert all(0 <= v <= 1000 for v in out)
+        assert out[2] > out[0] and out[3] > out[1]
 
 
 # ---------------- crop_enhance_config_from_settings ----------------
