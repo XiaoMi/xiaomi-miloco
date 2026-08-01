@@ -109,7 +109,8 @@
     "deleteSuccess": "Deleted",
     "deleteFailed": "Couldn't delete",
     "modelsEmptyResult": "This address returned no model list",
-    "modelsFetchFailed": "Couldn't fetch models"
+    "modelsFetchFailed": "Couldn't fetch models",
+    "notUsedByLocalPerception": "The perception backend is currently Local GPU, so the models below are not used for video perception. Switch back to Cloud API above to have them serve perception again."
   },
   "perceptionBackend": {
     "title": "Perception backend",

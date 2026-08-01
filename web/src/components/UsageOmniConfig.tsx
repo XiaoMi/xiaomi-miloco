@@ -16,6 +16,7 @@ import { useTranslation } from "react-i18next";
 import {
   OMNI_CONFIG_STALE_EVENT,
   getOmniConfig,
+  getPerceptionBackend,
   updateOmniConfig,
   activateOmniConfig,
   deactivateOmniConfig,
@@ -173,6 +174,9 @@ function ComboBox({
 export function UsageOmniConfig() {
   const { t } = useTranslation();
   const [state, setState] = useState<OmniConfigState | null>(null);
+  // 感知后端切到本地时,这张表里的「生效中」指的是"云端配置生效",而**感知并不
+  // 调用它** —— 同一页两个「生效中」含义不同会误导,所以要显式说明。
+  const [perceptionLocal, setPerceptionLocal] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false); // 默认展开
 
@@ -204,6 +208,9 @@ export function UsageOmniConfig() {
 
   useEffect(() => {
     void load();
+    void getPerceptionBackend()
+      .then((b) => setPerceptionLocal(b.backend === "local"))
+      .catch(() => {});
     // OmniHealthBanner 的 SSE 重连(backend 重启后)会 dispatch 此事件,
     // 让当前页面同步 refetch 最新 config,避免视觉与实际状态错位。
     const onStale = () => void load();
@@ -514,6 +521,14 @@ export function UsageOmniConfig() {
             <div className="text-text-secondary text-center py-6">{t("usage.loading")}</div>
           ) : (
             <>
+              {/* 感知走本地通路时,这张表里的模型不参与感知 —— 不说明的话
+                  用户会以为标着「生效中」的模型正在被调用。 */}
+              {perceptionLocal && (
+                <div className="text-caption text-text-secondary bg-bg-primary rounded-lg px-3 py-2 mb-3">
+                  {t("usage.notUsedByLocalPerception")}
+                </div>
+              )}
+
               {/* 未配 key 才给警告;当前生效在列表里用橙色行 + 「当前模型」标记,不再单开字段 */}
               {!hasKey && (
                 <div className="text-caption text-warning bg-warning-bg rounded-lg px-3 py-2 mb-3">
