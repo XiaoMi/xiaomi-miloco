@@ -14,10 +14,9 @@ import subprocess
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-
-from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Literal
 
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool
 from sse_starlette.sse import EventSourceResponse
 
