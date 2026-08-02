@@ -495,7 +495,15 @@ describe("apiFetch — 结构化错误 detail", () => {
 // 写错都会让整张卡片变成"加载失败",而类型检查与其它测试全绿。
 const PB_PAYLOAD = {
   backend: "local",
-  local_vision: { base_url: "http://127.0.0.1:18800", has_token: true },
+  local_vision: {
+    base_url: "http://127.0.0.1:18800",
+    has_token: true,
+    window_size: 12,
+    container_fps: 20,
+    video_short_edge: null,
+    codec_target_canvas: 28,
+    cloud: { window_size: 4, video_short_edge: 512, omni_fps: 1 },
+  },
   health: {
     status: "ok", model_loaded: true, gate_available: false,
     gate_error: "mamba_ssm missing", device: "cuda:0", backend: "codec",

@@ -132,6 +132,7 @@ class LocalVisionClient:
         max_new_tokens: int = 256,
         want_gate: bool = True,
         ngram_guard: int | None = None,
+        codec_target_canvas: int | None = None,
     ) -> dict:
         payload = {
             "video_b64": base64.b64encode(video).decode("ascii"),
@@ -141,6 +142,8 @@ class LocalVisionClient:
         }
         if ngram_guard is not None:
             payload["ngram_guard"] = ngram_guard
+        if codec_target_canvas is not None:
+            payload["codec_target_canvas"] = codec_target_canvas
         if scene_ask:
             payload["scene_ask"] = scene_ask
         if camera_note:

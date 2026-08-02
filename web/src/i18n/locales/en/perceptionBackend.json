@@ -33,6 +33,26 @@
       "load_failed": "The sidecar failed to load its model",
       "blocking_rules": "Enabled rules drive devices directly; disable them first",
       "bad_url": "That service URL is not valid"
-    }
+    },
+    "inputTitle": "Input settings",
+    "inputWhy": "Tuned opposite to the cloud path: there every extra frame and pixel costs tokens, here cost is capped by the token budget below and frames are nearly free. So: high frame rate, moderate resolution.",
+    "fpsLabel": "Frame rate",
+    "fpsHint": "Match the camera's actual rate (measured ≈20fps)",
+    "shortEdgeLabel": "Resolution (short edge)",
+    "shortEdgeHint": "Official: beyond 384px gains are marginal; raising it only makes each canvas costlier",
+    "canvasLabel": "Token budget (canvases)",
+    "canvasHint": "Official tiers: 8 latency / 16 balanced / 32 max; needs 8× this many frames",
+    "inputSaved": "Saved — takes effect next perception cycle",
+    "inputWhyLocal": "Local path: cost is capped by the token budget, so frames are nearly free — but the window must be long enough to fill that budget (the codec yields one canvas per 8 frames).",
+    "inputWhyCloud": "Cloud path: every extra frame and pixel costs tokens, hence short window, low frame rate, limited resolution.",
+    "windowLabel": "Perception window",
+    "windowHintLocal": "12s × 20fps = 240 frames = 28 canvases (the official tier needs 256)",
+    "windowHintCloud": "Billed per window — a longer one costs more",
+    "shortEdgeHintLocal": "Empty = no downscale. The model already picks salient regions from full-resolution frames; pre-scaling destroys that detail first",
+    "omniFpsLabel": "Frames sent to model",
+    "unitSec": "s",
+    "unitFps": "fps",
+    "unitPx": "px",
+    "unitCanvas": ""
   }
 }

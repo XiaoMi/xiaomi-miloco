@@ -60,13 +60,17 @@ export function PerceptionBackendCard() {
     }
   }
 
-  async function onSwitch(backend: "cloud" | "local") {
+  async function onSwitch(
+    backend: "cloud" | "local",
+    extra?: Record<string, number>,
+  ) {
     if (!state || switching) return;
     setSwitching(backend);
     try {
-      const s = await setPerceptionBackend(
-        buildSwitchPayload(backend, baseUrl, token),
-      );
+      const s = await setPerceptionBackend({
+        ...buildSwitchPayload(backend, baseUrl, token),
+        ...(extra ?? {}),
+      });
       setState(s);
       setToken("");
       window.dispatchEvent(new Event(PERCEPTION_BACKEND_CHANGED));
@@ -265,6 +269,77 @@ export function PerceptionBackendCard() {
           <li className="text-warning">• {t("perceptionBackend.capNoStatic")}</li>
         )}
       </ul>
+
+      {/* 输入参数:先选通路,再显示那条通路自己的那组。
+          两条通路的成本结构相反(云端每帧每像素都要付 token 钱;本地由 token 预算
+          封顶、帧数几乎免费),摆在一起会让人以为调一个就够了。 */}
+      <div className="mt-4 rounded-lg border border-border p-4">
+        <div className="text-body font-medium text-text-primary">
+          {t("perceptionBackend.inputTitle")}
+        </div>
+        <p className="text-caption text-text-secondary mt-1">
+          {t(isLocal
+            ? "perceptionBackend.inputWhyLocal"
+            : "perceptionBackend.inputWhyCloud")}
+        </p>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-4">
+          {(isLocal
+            ? ([
+                ["window_size", "windowLabel", "windowHintLocal", "unitSec", 1, 60],
+                ["container_fps", "fpsLabel", "fpsHint", "unitFps", 1, 120],
+                ["codec_target_canvas", "canvasLabel", "canvasHint", "unitCanvas", 4, 64],
+                ["video_short_edge", "shortEdgeLabel", "shortEdgeHintLocal", "unitPx", 64, 2160],
+              ] as const)
+            : ([] as const)
+          ).map(([field, label, hint, unit, min, max]) => (
+            <label key={field} className="block">
+              <span className="text-caption text-text-secondary mb-1 block">
+                {t(`perceptionBackend.${label}`)}
+                <span className="text-text-tertiary"> ({t(`perceptionBackend.${unit}`)})</span>
+              </span>
+              <input
+                type="number"
+                min={min}
+                max={max}
+                defaultValue={state.local_vision[field] ?? ""}
+                placeholder={field === "video_short_edge" ? "—" : undefined}
+                onBlur={(e) => {
+                  const raw = e.target.value.trim();
+                  if (raw === "") return;
+                  const v = Number(raw);
+                  if (!Number.isFinite(v) || v < min || v > max) return;
+                  if (v === state.local_vision[field]) return;
+                  void onSwitch("local", { [field]: v });
+                }}
+                className={INPUT_CLS}
+              />
+              <span className="text-caption text-text-tertiary mt-1 block">
+                {t(`perceptionBackend.${hint}`)}
+              </span>
+            </label>
+          ))}
+          {/* 云端那组只读展示 —— 它归设置页管,这里只是让人看清两边不是一套值。 */}
+          {!isLocal && (
+            <>
+              {([
+                ["window_size", "windowLabel", "unitSec"],
+                ["omni_fps", "omniFpsLabel", "unitFps"],
+                ["video_short_edge", "shortEdgeLabel", "unitPx"],
+              ] as const).map(([field, label, unit]) => (
+                <div key={field}>
+                  <span className="text-caption text-text-secondary mb-1 block">
+                    {t(`perceptionBackend.${label}`)}
+                    <span className="text-text-tertiary"> ({t(`perceptionBackend.${unit}`)})</span>
+                  </span>
+                  <div className="text-body text-text-primary num">
+                    {state.local_vision.cloud[field]}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
 
       {/* 只在已切到本地时显示:此刻这些规则的设备动作正在被拒绝执行,是要紧且
           可行动的信息。还在云端时不显示 —— 直连设备规则是本产品最常见的自动化,

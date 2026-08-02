@@ -314,3 +314,55 @@ def test_active_engine_attribute_chain_matches_the_real_types():
                         ("perception_engine", PerceptionEngineProxy)):
         assert attr in chain, f"_active_engine 不再走 {attr},这条测试已失效"
         assert attr in owner.__init__.__code__.co_names, f"{owner.__name__} 上没有 {attr}"
+
+
+# ── 窗口跟着当前通路走 ────────────────────────────────────────────────────
+
+
+def test_window_size_follows_the_active_backend(monkeypatch):
+    """两条通路同一时刻只开一条,窗口就该跟着那条走。
+
+    云端 4 秒是因为每帧都要付 token 钱;本地 12 秒是因为 codec 每 8 帧才产出
+    1 张画布,窗口短了就喂不饱模型。各存一份再让用户手动对齐,迟早会忘。
+    """
+    from miloco.config.settings import get_settings
+    from miloco.perception import capabilities as cap
+
+    cfg = get_settings().model_copy(deep=True)
+    cfg.perception.collect.window_size = 4
+    cfg.perception.local_vision.window_size = 12
+    monkeypatch.setattr(cap, "get_settings", lambda: cfg)
+
+    cfg.perception.engine_backend = "cloud"
+    assert cap.active_window_size_sec() == 4
+    cfg.perception.engine_backend = "local"
+    assert cap.active_window_size_sec() == 12, "切到本地窗口没跟着变"
+
+
+def test_window_size_falls_back_when_config_is_unreadable(monkeypatch):
+    """读不到配置时按云端既有默认,不能让采集停摆。"""
+    from miloco.perception import capabilities as cap
+
+    def _boom():
+        raise RuntimeError("no config")
+
+    monkeypatch.setattr(cap, "get_settings", _boom)
+    assert cap.active_window_size_sec() == 4
+
+
+def test_window_is_consistent_with_the_canvas_budget():
+    """窗口、帧率、画布数是一条约束链,不是三个独立旋钮 —— 默认值必须自洽。
+
+    画布数 = 源帧 / 8(group_size=32 产出 4 张),所以 N 张画布需要 8N 帧,
+    而源帧 = 窗口 × 帧率。默认值若不自洽,模型会自己降档并每窗报一次警告。
+    """
+    from miloco.config.settings import LocalVisionSettings
+
+    d = LocalVisionSettings()
+    frames = d.window_size * d.container_fps
+    assert frames >= d.codec_target_canvas * 8, (
+        f"{d.window_size}s × {d.container_fps}fps = {frames} 帧,"
+        f"喂不饱 {d.codec_target_canvas} 张画布(需 {d.codec_target_canvas * 8} 帧)"
+    )
+    assert d.codec_target_canvas % 4 == 0, "画布数必须能被 images_per_group=4 整除"
+    assert d.max_frames >= frames, "max_frames 比一个窗口的帧数还小,等于主动丢画布"

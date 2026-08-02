@@ -194,6 +194,7 @@ def test_every_configured_field_reaches_the_engine(local_cfg):
     lv.container_fps, lv.crf, lv.max_new_tokens = 6, 31, 320
     lv.max_frames, lv.event_gate_threshold = 24, 0.4
     lv.scene_ask, lv.video_short_edge = "只描述有没有人", 288
+    lv.codec_target_canvas = 16
 
     e = _build(local_cfg).perception_engine
     assert e._container_fps == 6
@@ -202,19 +203,23 @@ def test_every_configured_field_reaches_the_engine(local_cfg):
     assert e._max_frames == 24
     assert e._gate_threshold == 0.4
     assert e._scene_ask == "只描述有没有人"
-    assert e._short_edge_override == 288
+    assert e._short_edge == 288
+    assert e._codec_target_canvas == 16
 
 
-def test_short_edge_none_is_passed_through_so_it_can_follow_the_shared_setting(local_cfg):
-    """构造期把 None 换成具体值的话,面板上调分辨率对本通路就永久失效了 ——
-    而该设置的契约是"写盘后下一帧即生效"。"""
-    local_cfg.perception.local_vision.video_short_edge = None
+def test_local_resolution_is_independent_of_the_cloud_setting(local_cfg):
+    """本通路的分辨率**不再**跟随 perception.engine.input.video_short_edge。
+
+    两条通路的成本结构相反:云端按 token 计费,分辨率和帧数都得省;本通路的成本由
+    codec 的 token 预算封顶,分辨率给高了只让每个 canvas 更贵而收益递减。共用一个
+    旋钮会逼两条通路往相反方向调同一个值。
+    """
+    local_cfg.perception.engine.setdefault("input", {})["video_short_edge"] = 1080
+    local_cfg.perception.local_vision.video_short_edge = 384
     p = _build(local_cfg)
-    assert p.perception_engine._short_edge_override is None
-
-    local_cfg.perception.local_vision.video_short_edge = 256
-    p2 = _build(local_cfg)
-    assert p2.perception_engine._short_edge_override == 256
+    e = p.perception_engine
+    assert e._short_edge == 384
+    assert e._resolve_short_edge() == 384, "本通路又去读云端那个值了"
 
 
 # ── 探活冷却的两种语义:会自愈的等,不会自愈的退避 ────────────────────────

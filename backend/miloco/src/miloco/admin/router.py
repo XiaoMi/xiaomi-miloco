@@ -1082,11 +1082,22 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
 
 
 class PerceptionBackendBody(BaseModel):
-    """切换感知后端。local 分支同时可改边车地址(其余参数走 config.json)。"""
+    """切换感知后端,并可同时调本通路自己的输入参数。
+
+    ``container_fps`` / ``video_short_edge`` / ``codec_target_canvas`` 与云端那组
+    (``engine.input.*``)刻意分开:两条通路的成本结构相反 —— 云端每多一帧、每多一个
+    像素都要付 token 钱,所以要压低;本通路的成本由 codec 的 token 预算封顶,帧数
+    几乎免费,该把预算花在帧率上而不是分辨率上。共用一个值会逼两边往相反方向调。
+    """
 
     backend: Literal["cloud", "local"]
     base_url: str | None = None
     token: str | None = None
+    # 上限与 LocalVisionSettings 对齐;不填则不动。
+    window_size: int | None = Field(default=None, ge=1, le=60)
+    container_fps: int | None = Field(default=None, gt=0, le=120)
+    video_short_edge: int | None = Field(default=None, ge=64, le=2160)
+    codec_target_canvas: int | None = Field(default=None, ge=4, le=64)
 
 
 
@@ -1211,6 +1222,19 @@ def _local_vision_payload(*, probe: bool = True) -> dict:
         "local_vision": {
             "base_url": cfg.base_url,
             "has_token": bool(cfg.token),
+            # 本通路自己的输入参数。与云端那组(engine.input.*)刻意分开:两条通路的
+            # 成本结构相反,共用一个值会逼它们往相反方向调。
+            "window_size": cfg.window_size,
+            "container_fps": cfg.container_fps,
+            "video_short_edge": cfg.video_short_edge,
+            "codec_target_canvas": cfg.codec_target_canvas,
+            # 云端那一组,一并给出来 —— 卡片上按"当前选哪条就显示哪组"渲染,
+            # 两组值必须来自同一个响应,否则切换时会闪一下旧值。
+            "cloud": {
+                "window_size": s.collect.window_size,
+                "video_short_edge": s.engine.get("input", {}).get("video_short_edge", 512),
+                "omni_fps": s.engine.get("input", {}).get("omni_fps", 1),
+            },
         },
         "health": health,
         "error": error,
@@ -1264,6 +1288,11 @@ async def set_perception_backend(
         lv["base_url"] = _validated_base_url(body.base_url.strip())
     if body.token is not None:
         lv["token"] = body.token.strip()
+    for field in ("window_size", "container_fps", "video_short_edge",
+                  "codec_target_canvas"):
+        v = getattr(body, field)
+        if v is not None:
+            lv[field] = v
 
     # 凭证只能配合它当初被存进来的那个地址用。改了 base_url 又没给新 token,
     # 就把存档 token 清掉,而不是把它带去新地址 —— 与 _key_by_label 同一条立场:

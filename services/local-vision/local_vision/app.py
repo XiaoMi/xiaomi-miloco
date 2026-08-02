@@ -148,6 +148,9 @@ class PerceiveRequest(BaseModel):
     # agent 现编的自由文本,答案里合理重复一个短句的可能性高得多 —— 让调用方能
     # 按用途放宽,而不是被一个为定时描述调出来的值管着。
     ngram_guard: int | None = Field(default=None, ge=0, le=128)
+    # codec 的 token 预算(画布数)。调用方按自己的成本取舍决定,边车不替它猜 ——
+    # 缺省时按实际帧数能填满的档位来。
+    codec_target_canvas: int | None = Field(default=None, ge=4, le=64)
 
 
 class RuleHit(BaseModel):
@@ -253,6 +256,7 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
             max_new_tokens=body.max_new_tokens,
             want_gate=body.want_gate,
             ngram_guard=body.ngram_guard,
+            codec_target_canvas=body.codec_target_canvas,
         )
     except Exception as err:  # noqa: BLE001 —— 单次推理失败不该拖垮常驻服务
         logger.exception("perceive failed")

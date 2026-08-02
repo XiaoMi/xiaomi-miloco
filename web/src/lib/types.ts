@@ -718,6 +718,14 @@ export interface PerceptionBackendState {
   local_vision: {
     base_url: string;
     has_token: boolean;
+    /** 本通路自己的输入参数,与云端的 engine.input.* 刻意分开(成本结构相反)。 */
+    window_size: number;
+    container_fps: number;
+    /** null = 不缩放(把原始画面交给模型自己降维)。 */
+    video_short_edge: number | null;
+    codec_target_canvas: number;
+    /** 云端那一组,一并返回 —— 切换时不会闪旧值。 */
+    cloud: { window_size: number; video_short_edge: number; omni_fps: number };
   };
   /** 边车 /health 快照;不可达时为 null,原因见 error。 */
   health: {

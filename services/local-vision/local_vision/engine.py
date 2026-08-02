@@ -135,7 +135,7 @@ class MageVLEngine:
         return groups * self._CODEC_IMAGES_PER_GROUP
 
     def _build_inputs(self, video_path: str, prompt: str, backend: str,
-                      frame_count: int = -1):
+                      frame_count: int = -1, target_canvas: int | None = None):
         messages = [{"role": "user", "content": [
             {"type": "video"}, {"type": "text", "text": prompt},
         ]}]
@@ -152,7 +152,12 @@ class MageVLEngine:
                 codec_config={
                     "engine": "hevc",
                     # 按实际帧数算,而不是拿 num_frames 顶替 —— 两者单位不同。
-                    "target_canvas": self._codec_target_canvas(frame_count),
+                    # 调用方给了就用它(那是它的成本取舍);没给才按帧数推。
+                    # 但不能超过帧数能填满的档位,否则模型每次都警告"给不到你要的"。
+                    "target_canvas": min(
+                        target_canvas or self._codec_target_canvas(frame_count),
+                        self._codec_target_canvas(frame_count),
+                    ),
                     "group_size": self._CODEC_GROUP_SIZE,
                     "images_per_group": self._CODEC_IMAGES_PER_GROUP,
                     # patch=16 与 Mage-ViT 的 16x16 预测块对齐,不可随意改。
@@ -220,6 +225,7 @@ class MageVLEngine:
         max_new_tokens: int = 256,
         want_gate: bool = True,
         ngram_guard: int | None = None,
+        codec_target_canvas: int | None = None,
     ) -> dict:
         """对一段视频做一次感知,返回 caption + 逐条规则判定 + 门控概率。"""
         if not self.ready:
@@ -235,7 +241,8 @@ class MageVLEngine:
         with self._lock:
             t0 = time.time()
             inputs = self._to_device(
-                self._build_inputs(video_path, prompt, backend, frame_count)
+                self._build_inputs(video_path, prompt, backend, frame_count,
+                                   codec_target_canvas)
             )
             t_prep = (time.time() - t0) * 1000
 

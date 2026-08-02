@@ -1825,6 +1825,10 @@ export async function realGetPerceptionBackend(
 
 // 切换感知后端。切到 local 时后端会先探活,不通直接 400(不让用户切到坏后端上)。
 export async function realSetPerceptionBackend(input: {
+  window_size?: number;
+  container_fps?: number;
+  video_short_edge?: number;
+  codec_target_canvas?: number;
   backend: "cloud" | "local";
   base_url?: string;
   token?: string;

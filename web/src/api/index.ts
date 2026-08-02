@@ -682,6 +682,10 @@ export async function setPerceptionBackend(input: {
   backend: "cloud" | "local";
   base_url?: string;
   token?: string;
+  window_size?: number;
+  container_fps?: number;
+  video_short_edge?: number;
+  codec_target_canvas?: number;
 }): Promise<PerceptionBackendState> {
   return impl.realSetPerceptionBackend(input);
 }

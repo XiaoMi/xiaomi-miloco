@@ -52,13 +52,15 @@ class _FakeClient:
         self.calls: list[dict] = []
 
     async def perceive(self, video, rules, scene_ask=None, camera_note="",
-                       max_new_tokens=256, want_gate=True, ngram_guard=None):
+                       max_new_tokens=256, want_gate=True, ngram_guard=None,
+                       codec_target_canvas=None):
         from miloco.perception.local_vision.client import LocalVisionError
 
         self.calls.append({
             "rules": rules, "scene_ask": scene_ask,
             "camera_note": camera_note, "bytes": len(video),
             "max_new_tokens": max_new_tokens, "ngram_guard": ngram_guard,
+            "codec_target_canvas": codec_target_canvas,
         })
         if self.fail:
             raise LocalVisionError("sidecar down")
@@ -632,31 +634,11 @@ def test_frame_budget_of_one_takes_the_newest_frame():
     assert [p[0, 0, 0] for p in picked] == [99]
 
 
-def test_short_edge_none_follows_shared_setting_live():
-    """local_vision.video_short_edge 默认 None = **每窗**跟随共享的感知参数。
-
-    必须实时解析、不能构造期定死:该设置的既有契约是「写盘后下一帧即生效、无需
-    重启」,面板上拖分辨率时本地通路也得跟上。而且 None 一旦漏到编码器,会跟 int
-    比较直接 TypeError —— 单测只造引擎、不走这条路的话完全看不见。
-    """
-    from unittest.mock import patch
-
-    from miloco.config.settings import get_settings
-
-    cfg = get_settings().model_copy(deep=True)
-    cfg.perception.engine = {"input": {"video_short_edge": 640}}
-    e = LocalVisionEngine(_FakeClient(), container_fps=2, short_edge=None)
-    with patch("miloco.config.get_settings", return_value=cfg):
-        assert e._resolve_short_edge() == 640
-
-    cfg.perception.engine = {"input": {"video_short_edge": 320}}
-    with patch("miloco.config.get_settings", return_value=cfg):
-        assert e._resolve_short_edge() == 320   # 改了就跟着变,不需要重建引擎
-
-    # 显式覆盖时不跟随
-    e2 = LocalVisionEngine(_FakeClient(), container_fps=2, short_edge=256)
-    with patch("miloco.config.get_settings", return_value=cfg):
-        assert e2._resolve_short_edge() == 256
+def test_local_resolution_is_configured_not_inherited():
+    """本通路的短边来自 local_vision.video_short_edge,不再复用云端那个同名参数。"""
+    e = _engine(_FakeClient(), short_edge=384)
+    assert e._resolve_short_edge() == 384
+    assert _engine(_FakeClient(), short_edge=256)._resolve_short_edge() == 256
 
 
 @pytest.mark.asyncio
@@ -694,11 +676,12 @@ async def test_encoding_runs_off_the_event_loop():
 
 
 @pytest.mark.asyncio
-async def test_short_edge_follows_the_shared_setting_through_the_real_call(monkeypatch):
-    """不止解析函数要对,**送到编码器的那个值**也要每窗重新解析。
+async def test_local_resolution_ignores_the_cloud_setting_end_to_end(monkeypatch):
+    """送到编码器的那个值,必须来自本通路自己的设置,而不是云端那个同名参数。
 
-    只测 _resolve_short_edge 的话,把它的返回值在构造期定死(文档明确禁止的做法)
-    照样绿 —— 而面板上调分辨率就对本通路永久失效了。
+    两条通路的成本结构相反:云端每多一帧、每多一个像素都要付 token 费用;本通路
+    的成本由 codec 的 token 预算封顶,分辨率高了只让每个 canvas 更贵而收益递减。
+    共用一个旋钮会逼两边往相反方向调同一个值。
     """
     import miloco.perception.local_vision.engine as eng
     from miloco.config.settings import get_settings
@@ -709,21 +692,15 @@ async def test_short_edge_follows_the_shared_setting_through_the_real_call(monke
         lambda snap, fps, crf, mf, se: (seen.append(se), b"V")[1],
     )
     cfg = get_settings().model_copy(deep=True)
-    cfg.perception.engine.setdefault("input", {})["video_short_edge"] = 320
+    cfg.perception.engine.setdefault("input", {})["video_short_edge"] = 1080
     monkeypatch.setattr("miloco.config.get_settings", lambda: cfg)
 
     e = _engine(_FakeClient([
         {"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"},
-        {"caption": "y", "rule_hits": [], "gate_p": None, "backend": "codec"},
-    ]), short_edge=None)
-    batch = BatchedSnapshot(snapshots=[_snapshot("cam1")])
-    await e.realtime_perceive(batch, [])
+    ]), short_edge=384)
+    await e.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), [])
 
-    # 面板上改了分辨率,下一窗就该跟着变 —— 无需重启引擎。
-    cfg.perception.engine["input"]["video_short_edge"] = 640
-    await e.realtime_perceive(batch, [])
-
-    assert seen == [320, 640]
+    assert seen == [384], f"本通路跟着云端的分辨率走了: {seen}"
 
 
 # ── 本地通路不直接控制设备:靠**拒绝切换**兑现,而不是运行时改写用户的自动化 ──
@@ -1320,5 +1297,39 @@ async def test_warns_once_when_a_window_outruns_the_perception_period(monkeypatc
         await e.realtime_perceive(batch, [])
 
     hits = [r for r in caplog.records if "超过感知周期" in r.getMessage()]
-    assert len(hits) == 1, f"应当只提示一次,实际 {len(hits)} 次"
+    assert len(hits) == 1, f"同样的相机台数应当只提示一次,实际 {len(hits)} 次"
     assert "相机" in hits[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_adding_a_camera_re_arms_the_capacity_warning(monkeypatch, caplog):
+    """相机台数变了就要重新提示。
+
+    实测撞到过:冷启动时单相机偶尔超一次,把"只提示一次"的额度用掉;之后用户
+    加了一台相机——一个全新的、而且是稳定的容量问题——反而一声不吭。
+    """
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+
+    class _Slow(_FakeClient):
+        async def perceive(self, video, rules, **kw):
+            import asyncio as _a
+            await _a.sleep(0.02)
+            return {"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}
+
+    e = _engine(_Slow())
+    monkeypatch.setattr(
+        e, "get_input_config", lambda: SimpleNamespace(fps=4, omni_fps=0, period_sec=0.001)
+    )
+    one = BatchedSnapshot(snapshots=[_snapshot("cam1")])
+    two = BatchedSnapshot(snapshots=[_snapshot("cam1"), _snapshot("cam2", room="次卧")])
+
+    with caplog.at_level("WARNING"):
+        await e.realtime_perceive(one, [])
+        await e.realtime_perceive(one, [])   # 同样台数,不再提示
+        await e.realtime_perceive(two, [])   # 台数变了,必须重新提示
+
+    hits = [r for r in caplog.records if "超过感知周期" in r.getMessage()]
+    assert len(hits) == 2, f"加相机后没有重新提示(实际 {len(hits)} 条)"
+    assert "1 台" in hits[0].getMessage() and "2 台" in hits[1].getMessage()

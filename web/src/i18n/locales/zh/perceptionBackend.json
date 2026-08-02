@@ -33,6 +33,26 @@
       "load_failed": "边车加载模型失败",
       "blocking_rules": "有启用中的规则会在感知层直接控制设备,请先停用",
       "bad_url": "服务地址格式不正确"
-    }
+    },
+    "inputTitle": "输入参数",
+    "inputWhy": "与云端反着调:云端每多一帧、每多一个像素都要付 token 钱;本通路的成本由下面的「token 预算」封顶,帧数几乎免费。所以这里该给高帧率、中等分辨率。",
+    "fpsLabel": "帧率",
+    "fpsHint": "与相机实际出帧率一致即可(实测约 20fps)",
+    "shortEdgeLabel": "分辨率(短边)",
+    "shortEdgeHint": "官方:超过 384 像素只有边际收益;调高只会让每个画布更贵",
+    "canvasLabel": "token 预算(画布数)",
+    "canvasHint": "官方三档 8 优先延迟 / 16 均衡 / 32 最大;需 8×该值 帧才能喂饱",
+    "inputSaved": "已保存,下个感知周期生效",
+    "inputWhyLocal": "本地通路:成本由「token 预算」封顶,帧数几乎免费。窗口必须够长才能喂饱预算——codec 每 8 帧才产出 1 张画布。",
+    "inputWhyCloud": "云端通路:每多一帧、每多一个像素都要付 token 钱,所以窗口短、帧率低、分辨率有限。",
+    "windowLabel": "感知窗口",
+    "windowHintLocal": "12 秒 × 20fps = 240 帧 = 28 张画布(官方默认档需 256 帧)",
+    "windowHintCloud": "云端按窗口计费,拉长直接变贵",
+    "shortEdgeHintLocal": "留空 = 不缩放。模型自带从原始帧挑重要区域的机制,提前缩放等于先毁掉细节",
+    "omniFpsLabel": "送模型抽帧率",
+    "unitSec": "秒",
+    "unitFps": "fps",
+    "unitPx": "px",
+    "unitCanvas": "张"
   }
 }

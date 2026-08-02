@@ -5,7 +5,15 @@ import type { PerceptionBackendState } from "@/lib/types";
 function state(over: Partial<PerceptionBackendState> = {}): PerceptionBackendState {
   return {
     backend: "cloud",
-    local_vision: { base_url: "http://127.0.0.1:18800", has_token: false },
+    local_vision: {
+      base_url: "http://127.0.0.1:18800",
+      has_token: false,
+      window_size: 12,
+      container_fps: 20,
+      video_short_edge: null,
+      codec_target_canvas: 28,
+      cloud: { window_size: 4, video_short_edge: 512, omni_fps: 1 },
+    },
     health: null,
     error: null,
     blocking_static_rules: [],

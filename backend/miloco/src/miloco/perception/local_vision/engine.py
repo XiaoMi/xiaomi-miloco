@@ -126,16 +126,17 @@ class LocalVisionEngine(BasePerceptionEngine):
         scene_ask: str | None = None,
         max_frames: int = 32,
         short_edge: int | None = None,
+        codec_target_canvas: int = 8,
     ) -> None:
         self._client = client
         self._container_fps = container_fps
         self._crf = crf
         self._max_frames = max_frames
-        # None = 每窗实时跟随共享的 perception.engine.input.video_short_edge。
-        # 该设置的既有契约是「写盘后下一帧即生效、无需重启」(见 admin/router 的
-        # perception-config),构造期定死会让面板上调分辨率对本通路无效。
-        self._short_edge_override = short_edge
+        self._short_edge = short_edge
         self._max_new_tokens = max_new_tokens
+        # codec 的 token 预算 —— 本通路真正的成本旋钮(prompt token ≈ 223×它)。
+        # 帧数与分辨率对成本影响都很小,所以这个值单独配、单独送给边车。
+        self._codec_target_canvas = codec_target_canvas
         # 门控默认 0.0 = 从不据此跳过。参考实现的门控在体育解说数据上训练,
         # 家庭场景属分布外 —— 默认只观测(把 gate_p 记进 timing 供比对),
         # 不让它决定丢不丢事件。用户确认阈值在自家可靠后再调高。
@@ -147,9 +148,10 @@ class LocalVisionEngine(BasePerceptionEngine):
         # 对同类情形有熔断器,这条通路此前什么都没有。
         self._consecutive_failures = 0
         self._backoff_until = 0.0
-        #: 「一个窗口追不上感知周期」只提示一次 —— 它是个容量结论,不是每窗都要
-        #: 重复的事件。
-        self._warned_over_budget = False
+        #: 已经就哪些「相机台数」提示过容量不足。按台数记而不是记一个布尔:实测
+        #: 发现冷启动时单相机偶尔会超一次,把唯一那次额度用掉,之后用户**加了一台
+        #: 相机**——一个全新的、稳定的容量问题——反而不再提示了。
+        self._over_budget_warned_for: set[int] = set()
 
     @property
     def sustained_failure(self) -> bool:
@@ -202,20 +204,16 @@ class LocalVisionEngine(BasePerceptionEngine):
             period = 4.0
         return _InputConfig(self._container_fps, period)
 
-    def _resolve_short_edge(self) -> int:
-        """每次取用时解析短边上限,而不是构造期定死。"""
-        if self._short_edge_override is not None:
-            return self._short_edge_override
-        from miloco.config import get_settings
+    def _resolve_short_edge(self) -> int | None:
+        """本通路自己的短边上限。
 
-        try:
-            return int(
-                get_settings().perception.engine.get("input", {}).get(
-                    "video_short_edge", 512
-                )
-            )
-        except Exception:  # noqa: BLE001 —— 读配置失败不该中断感知
-            return 512
+        **刻意不再复用 perception.engine.input.video_short_edge**:两条通路的成本
+        结构是相反的。云端按 token 计费,分辨率和帧数都得省;本通路的成本由 codec
+        的 token 预算封顶,分辨率给高了只让每个 canvas 更贵而收益递减(论文:超过
+        384 像素只有边际收益),不如把预算换成更高帧率。共用一个旋钮会逼两条通路
+        往相反方向调同一个值。
+        """
+        return self._short_edge  # None = 不缩放,原始画面直接交给模型
 
     def _camera_note_for(self, did: str, prompt_map: dict[str, str]) -> str:
         """取该机位的「感知须知」。
@@ -287,6 +285,7 @@ class LocalVisionEngine(BasePerceptionEngine):
                 scene_ask=self._scene_ask,
                 camera_note=self._camera_note_for(did, prompt_map),
                 max_new_tokens=self._token_budget(len(payload_rules)),
+                codec_target_canvas=self._codec_target_canvas,
             )
         except LocalVisionError as e:
             logger.warning("[local-vision] sidecar failed did=%s: %s", did, e)
@@ -302,7 +301,10 @@ class LocalVisionEngine(BasePerceptionEngine):
             )
             return {"did": did, "error": "malformed_response"}
 
-        return {"did": did, "snapshot": snapshot, "dispatched": dispatched, "out": out}
+        return {"did": did, "snapshot": snapshot, "dispatched": dispatched, "out": out,
+                # 本窗实际拿到多少源帧 —— 判断"画布喂饱了没有"的唯一依据:
+                # 画布数 = 源帧数 / 8(group_size=32 产出 4 张),喂不够就只能拿到更少。
+                "src_frames": len(snapshot.video.frames) if snapshot.video else 0}
 
     async def realtime_perceive(
         self,
@@ -392,8 +394,8 @@ class LocalVisionEngine(BasePerceptionEngine):
         # 调到 8 就每窗误报,调到 2 就该报的时候不报。get_input_config 早就会读它。
         window_ms = self.get_input_config().period_sec * 1000.0
         elapsed_ms = (time.monotonic() - t_start) * 1000
-        if elapsed_ms > window_ms and not self._warned_over_budget:
-            self._warned_over_budget = True
+        if elapsed_ms > window_ms and len(ok) not in self._over_budget_warned_for:
+            self._over_budget_warned_for.add(len(ok))
             logger.warning(
                 "[local-vision] 一个窗口耗时 %.0fms 已超过感知周期 %.0fms"
                 "(%d 台相机;边车串行推理,耗时随相机数累加)。"
@@ -519,6 +521,7 @@ class LocalVisionEngine(BasePerceptionEngine):
         # 当成阶段耗时混进面板的延迟明细里。
         timing = {
             **{f"_omni_error_{d}": code for d, code in errors.items()},
+            **{f"_src_frames_{r['did']}": r["src_frames"] for r in ok},
             "total": round((time.monotonic() - t0) * 1000, 1),
             "_devices": len(ok),
         }

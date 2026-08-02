@@ -28,6 +28,23 @@ def _active_engine():
         return None
 
 
+def active_window_size_sec() -> int:
+    """当前生效那条感知通路的窗口长度(秒)。
+
+    两条通路同一时刻只会开一条,所以窗口不需要各存一份再手动对齐 —— 直接跟着
+    当前那条走:切到本地是 12 秒(喂饱 codec 的画布),切回云端自动变回 4 秒
+    (它每帧都要付 token 钱,窗口长了直接变贵)。用户不用记得手动改回来。
+    """
+    try:
+        s = get_settings().perception
+        if s.engine_backend == "local":
+            return int(s.local_vision.window_size)
+        return int(s.collect.window_size)
+    except Exception:  # noqa: BLE001 —— 读不到就按云端既有默认
+        logger.warning("窗口长度解析失败,回落到云端设置", exc_info=True)
+        return 4
+
+
 def perception_executes_device_actions() -> bool:
     """感知层命中规则后是否会**直接**执行设备动作。
 

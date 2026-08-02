@@ -213,6 +213,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
             <>
               {/* 分辨率 */}
               <div className="space-y-2.5">
+                {/* 这两项只管云端通路。不写清楚的话会被读成"对本地 GPU 也生效",
+                    而两条通路的成本结构是相反的(云端每帧每像素都要 token 钱,
+                    本地的成本由 codec 的 token 预算封顶)。 */}
+                <p className="text-caption text-text-tertiary mb-2">
+                  {t("settings.cloudOnlyHint")}
+                </p>
                 <label className="text-body font-medium text-text-primary block">
                   {t("settings.videoShortEdge")}
                 </label>

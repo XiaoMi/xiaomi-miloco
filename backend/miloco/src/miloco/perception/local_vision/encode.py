@@ -33,7 +33,7 @@ def encode_snapshot_to_h264(
     fps: int = 4,
     crf: int = 28,
     max_frames: int = 32,
-    short_edge: int = 512,
+    short_edge: int | None = None,
 ) -> bytes:
     """把一台设备本窗口的视频帧编码成 mp4(H.264)字节。
 
@@ -74,7 +74,10 @@ def encode_snapshot_to_h264(
         # 按短边缩放:模型只在 16x16 patch 粒度上看运动/残差,原生 2K 纯属浪费
         # 带宽与编码时间。与云端通路的 video_short_edge 是同一个取舍。
         scale = 1.0
-        if short_edge > 0 and min(w, h) > short_edge:
+        # None / 0 = 不缩放。默认就是不缩放:这条通路的降维由模型自己做(codec 从
+        # 原始帧挑 16×16 patch,每张画布的像素预算是边车的 max_pixels)。在这里先缩
+        # 一道等于把它要挑的细节毁掉,再让它在残缺素材上分配预算。
+        if short_edge and min(w, h) > short_edge:
             scale = short_edge / float(min(w, h))
             w, h = int(w * scale), int(h * scale)
         # H.264 要求偶数边长;监控源偶尔给奇数分辨率,这里向下取偶避免编码器报错。
