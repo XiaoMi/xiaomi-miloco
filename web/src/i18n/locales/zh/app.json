@@ -29,6 +29,7 @@
     "engineStoppedWakeManually": "引擎已停下，请手动唤醒：{{msg}}",
     "engineStoppedWakeManuallyNoMsg": "引擎已停下，请手动唤醒",
     "stopFail": "停止失败，稍后再试",
-    "miotBound": "米家已绑定"
+    "miotBound": "米家已绑定",
+    "loadOnDemandLogsFail": "加载主动查询日志失败"
   }
 }

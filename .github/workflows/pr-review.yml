@@ -23,7 +23,7 @@ jobs:
     # 审所有非草稿 PR（pull_request_target 下 fork 也可用 secrets）
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     container:
       image: ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie
       credentials:

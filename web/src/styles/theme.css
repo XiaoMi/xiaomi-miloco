@@ -56,7 +56,6 @@
   --color-brand-secondary: #FF8533;
   --color-brand-accent: #FF5C00;
   --color-brand-soft: rgba(255, 103, 0, 0.08);
-  --color-brand-soft-strong: rgba(255, 103, 0, 0.14);
   --color-brand-ring: rgba(255, 103, 0, 0.20);
 
   /* 边框 - mi.com hairline */
@@ -179,7 +178,6 @@
   --color-brand-secondary: #FFA86B;
   --color-brand-accent: #FF6700;
   --color-brand-soft: rgba(255, 133, 51, 0.10);
-  --color-brand-soft-strong: rgba(255, 133, 51, 0.18);
   --color-brand-ring: rgba(255, 133, 51, 0.24);
 
   --color-border: #2A2A2A;
@@ -221,7 +219,6 @@
     --color-brand-secondary: #FFA86B;
     --color-brand-accent: #FF6700;
     --color-brand-soft: rgba(255, 133, 51, 0.10);
-    --color-brand-soft-strong: rgba(255, 133, 51, 0.18);
     --color-brand-ring: rgba(255, 133, 51, 0.24);
 
     --color-border: #2A2A2A;

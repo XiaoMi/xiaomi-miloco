@@ -26,7 +26,7 @@ interface Props {
 export function SettingsDrawer({ open, onClose }: Props) {
   const { t } = useTranslation();
   const [config, setConfig] = useState<PerceptionConfig | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const [videoShortEdge, setVideoShortEdge] = useState(DEFAULTS.video_short_edge);
@@ -40,7 +40,11 @@ export function SettingsDrawer({ open, onClose }: Props) {
   useEscClose(open, onClose);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setConfig(null);
+      setLoading(true);
+      return;
+    }
     setLoading(true);
     // 抽屉靠 `if (!open) return null` 隐藏而非卸载，state 会跨「关闭→重开」保留。
     // 每次重载先把调度值复位为 null：本次读不到就稳定退回 unavailable（disable 开关），
@@ -175,8 +179,35 @@ export function SettingsDrawer({ open, onClose }: Props) {
         {/* body */}
         <div className="flex-1 overflow-y-auto px-5 py-6 space-y-7">
           {loading ? (
+            <div className="space-y-7 animate-pulse">
+              <div className="space-y-2.5">
+                <div className="h-4 w-16 bg-border rounded" />
+                <div className="flex gap-2">
+                  {Array.from({ length: 4 }, (_, i) => (
+                    <div key={i} className="flex-1 h-11 bg-border rounded-xl" />
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2.5">
+                <div className="h-4 w-12 bg-border rounded" />
+                <div className="flex gap-2">
+                  {Array.from({ length: 3 }, (_, i) => (
+                    <div key={i} className="flex-1 h-11 bg-border rounded-xl" />
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2.5">
+                <div className="h-4 w-20 bg-border rounded" />
+                <div className="h-2 bg-border rounded-full" />
+              </div>
+              <div className="space-y-2.5">
+                <div className="h-4 w-20 bg-border rounded" />
+                <div className="h-6 w-11 bg-border rounded-full" />
+              </div>
+            </div>
+          ) : !config ? (
             <div className="text-caption text-text-tertiary text-center py-8">
-              Loading…
+              {t("settings.loadFailed")}
             </div>
           ) : (
             <>

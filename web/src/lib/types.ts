@@ -45,6 +45,8 @@ export interface Person {
   voiceEnrolled: boolean;
   // 头像底色（personPalette 选）
   avatarHue: number; // 0..5
+  // 手动上传的显式头像后缀（avatars/persons/<id>.<ext>）；无则回落 tier_a face[0] / 占位
+  avatarExt?: string | null;
 }
 
 // ── 设备 ────────────────────────────────────────────────────
@@ -80,6 +82,8 @@ export interface Device {
   online: boolean;
   // 概览状态文本（"开着" / "26°C 制冷" / "睡眠档"）
   statusText: string;
+  // 机器可读状态分类；UI 颜色/逻辑不要依赖本地化文案。
+  statusKind: "offline" | "locked" | "unlocked" | "on" | "off" | "connected";
   // 是否危险设备（门锁/燃气/烟雾），需要二次确认
   dangerous: boolean;
   // 主开关 prop（单按钮直控；为 null 时只能从 sheet 进）
@@ -127,6 +131,23 @@ export interface ActivityEvent {
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
   feedback_pack_size?: number | null;
+}
+
+// ── 主动查询日志(on_demand_log)─────────────────────────────
+export interface OnDemandLogEntry {
+  id: string;
+  timestamp: number; // Unix ms
+  query: string;
+  answer: string;
+  sources: string[]; // device dids
+  latency_ms: number | null;
+  snapshot_count: number;
+  clip_dids: string[];
+  clip_kinds: Record<string, "mp4" | "m4a">;
+  has_trace: boolean;
+  has_feedback: boolean;
+  feedback_pack_path: string | null;
+  feedback_pack_size: number | null;
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────
@@ -211,6 +232,11 @@ export interface ScopeCamera {
   // 声音完全不被处理（引擎入口剥离音频，不转写、不上云）。与 inUse 正交：
   // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
   voiceInUse: boolean;
+  // 每摄像头自定义「感知须知」prompt（PUT /api/miot/scope/cameras/prompt）。
+  // 该机位专属的环境说明 / 关注 / 忽略事项，逐感知窗注入 omni system prompt 尾部，指导模型
+  // 消解固定误识（如门口机位误把公共走廊电梯门当自家入户门）。"" = 无自定义。与 inUse /
+  // voiceInUse 正交：关着的相机也能预配，仅在被感知时注入生效。多通道相机按 channel 存取。
+  perceptionPrompt: string;
   connected: boolean;
 }
 

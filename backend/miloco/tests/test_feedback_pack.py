@@ -5,7 +5,11 @@ import json
 import tarfile
 from unittest.mock import MagicMock, patch
 
-from miloco.admin.feedback_pack import _sanitize_pii, build_feedback_pack
+from miloco.admin.feedback_pack import (
+    _sanitize_pii,
+    build_feedback_pack,
+    build_on_demand_feedback_pack,
+)
 
 
 def test_sanitize_pii_masks_phone():
@@ -172,3 +176,66 @@ def test_build_pack_with_gallery(tmp_path, monkeypatch):
     with tarfile.open(result["path"], "r:gz") as tar:
         names = tar.getnames()
         assert any("gallery/" in n for n in names)
+
+
+# ─── build_on_demand_feedback_pack 集成测试 ──────────────────────────
+
+
+def test_on_demand_pack_roundtrip(tmp_path, monkeypatch):
+    """on-demand 反馈包：metadata.type == 'on_demand' + clips_missing_basis + 包名含完整 UUID."""
+    log_id = "aaaaaaaa-bbbb-cccc-dddd-111111111111"
+
+    snapshot_root = tmp_path / "snapshots"
+    event_dir = snapshot_root / log_id
+    event_dir.mkdir(parents=True)
+
+    trace_data = {"schema_version": 1, "calls": [{"note": "13800138000"}]}
+    (event_dir / "omni_trace.json.gz").write_bytes(
+        gzip.compress(json.dumps(trace_data).encode())
+    )
+
+    clip_dir = event_dir / "cam1"
+    clip_dir.mkdir()
+    (clip_dir / "clip.mp4").write_bytes(b"fake-mp4")
+
+    monkeypatch.setattr("miloco.admin.feedback_pack.get_snapshot_root", lambda: snapshot_root)
+    monkeypatch.setattr("miloco.admin.feedback_pack.miloco_home", lambda: tmp_path)
+
+    result = build_on_demand_feedback_pack(
+        log_id=log_id,
+        row={
+            "timestamp": 1234567890000,
+            "query": "谁在客厅?",
+            "answer": "没人",
+            "sources": ["cam1"],
+            "latency_ms": 150,
+            "clip_dids": ["cam1"],
+        },
+        error_types=["person"],
+        feedback_text="认错人了",
+        uid="test_user",
+    )
+
+    assert result["size_bytes"] > 0
+    assert result["components"]["omni_trace_found"] is True
+    assert "cam1/clip.mp4" in result["components"]["clips_found"]
+    assert result["components"]["clips_missing"] == []
+
+    assert f"-od-{log_id}-" in result["path"]
+
+    with tarfile.open(result["path"], "r:gz") as tar:
+        names = tar.getnames()
+        assert "metadata.json" in names
+        assert "omni_trace.json.gz" in names
+        assert "clips/cam1/clip.mp4" in names
+        assert not any("gallery/" in n for n in names)
+
+        meta = json.loads(tar.extractfile("metadata.json").read())
+        assert meta["type"] == "on_demand"
+        assert meta["log_id"] == log_id
+        assert meta["clips_missing_basis"] == "clip_dids"
+        assert meta["error_types"] == ["人物识别错误"]
+
+        trace_raw = gzip.decompress(tar.extractfile("omni_trace.json.gz").read())
+        assert "13800138000" not in trace_raw.decode()
+        assert "***" in trace_raw.decode()

@@ -681,9 +681,14 @@ class PerceptionEngineProxy:
             )
 
     async def on_demand_perceive(
-        self, batch: PerceptionBatch, query: str
+        self, batch: PerceptionBatch, query: str,
+        artifacts: OmniEventArtifacts,
     ) -> OnDemandPerceptionResult | None:
-        """Run on-demand query pipeline — offloaded to inference thread."""
+        """Run on-demand query pipeline — offloaded to inference thread.
+
+        artifacts: omni 内部产出的 clip 字节和 trace 会写入
+        artifacts.clips / artifacts.trace（同 realtime_perceive 语义）。
+        """
         async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
@@ -705,10 +710,12 @@ class PerceptionEngineProxy:
                     _run_with_trace_id(
                         trace_id,
                         self._on_demand_perceive_impl(batched_snapshot, query),
+                        artifacts=artifacts,
                     )
                 )
 
-            return await self._on_demand_perceive_impl(batched_snapshot, query)
+            with event_artifacts_scope(artifacts):
+                return await self._on_demand_perceive_impl(batched_snapshot, query)
 
     async def handle_realtime_perception_result(
         self,
@@ -945,6 +952,8 @@ async def _persist_meaningful_event(
         # (没找到 rule_name 时 fallback 用 rule_id).
         rule_names: dict[str, str] = {}
         rule_queries: dict[str, str] = {}
+        task_descs: dict[str, str] = {}  # rule_id → 所属任务 task.description
+        _desc_cache: dict[str, str | None] = {}  # task_id → description（同任务去重查询）
         if result.matched_rules:
             for mr in result.matched_rules:
                 try:
@@ -953,16 +962,27 @@ async def _persist_meaningful_event(
                         if rule.name:
                             rule_names[mr.rule_id] = rule.name
                         rule_queries[mr.rule_id] = rule.condition.query
+                        tid = rule.task_id
+                        if tid:
+                            if tid not in _desc_cache:
+                                _desc_cache[tid] = mgr.task_service.get_description(tid)
+                            if _desc_cache[tid]:
+                                task_descs[mr.rule_id] = _desc_cache[tid]
                 except Exception:  # noqa: BLE001
                     pass
 
-        text = build_agent_text(result, rule_names=rule_names, rule_queries=rule_queries)
+        text = build_agent_text(
+            result,
+            rule_names=rule_names,
+            rule_queries=rule_queries,
+            task_descs=task_descs,
+        )
 
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
         # 否则 device_ids 和 artifacts.clips 必须同步收窄——两者分别驱动"日志展示哪些
         # 摄像头"和"落盘哪些摄像头的 clip",不同步会导致不相关摄像头的 clip 被落盘、
-        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 文档的
-        # "0 ~ len(artifacts.clips)"不变量)。trace / gallery 不是按事件相关性归属的
+        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 返回的 clip_dids
+        # 必是 artifacts.clips 的子集)。trace / gallery 不是按事件相关性归属的
         # 产物,不参与收窄。
         relevant_device_ids = _collect_relevant_device_ids(result)
         if relevant_device_ids:
@@ -1005,7 +1025,8 @@ async def _persist_meaningful_event(
                 )
                 # count 留 0,继续走 publish
             else:
-                count = save_event_artifacts(event_id, artifacts)
+                clip_dids = save_event_artifacts(event_id, artifacts)
+                count = len(clip_dids)
                 if count > 0:
                     dao.update_snapshot_count(event_id, count)
         else:

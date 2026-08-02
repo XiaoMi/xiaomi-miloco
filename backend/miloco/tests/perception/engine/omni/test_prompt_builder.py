@@ -11,6 +11,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_prompt,
     build_query_prompt,
     build_stream_prompt,
+    build_system_prompt,
     build_tier_c_verify_payload,
 )
 from miloco.perception.engine.types import (
@@ -82,6 +83,50 @@ class TestBuildPrompt:
         assert "读书开灯" in payload["user_content"]  # 规则按 rule_name 渲染（# 待判断规则）
         assert payload["video_base64"] is not None
         assert payload["media_info"] is not None
+
+    def test_camera_prompt_in_system_prompt(self):
+        """camera_prompt 注入 system prompt 尾部，不在 user_content。"""
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            room_name="门口",
+            camera_prompt="画面右侧是公共走廊电梯门，与本户无关；只有正中木色入户门才是本户。",
+        )
+        payload = build_prompt(ep, ctx)
+        sp = payload["system_prompt"]
+        assert "本摄像头须知" in sp  # 段头在 system prompt
+        assert "公共走廊电梯门" in sp  # 用户自定义文本
+        uc = payload["user_content"]
+        assert "本摄像头须知" not in uc  # 不再出现在 user_content
+
+    def test_no_camera_prompt_no_note(self):
+        """未配置 camera_prompt → system prompt 不出现须知段。"""
+        ep = _mock_edge_packet()
+        payload = build_prompt(ep, OmniContext(room_name="门口"))
+        assert "本摄像头须知" not in payload["system_prompt"]
+        assert "本摄像头须知" not in payload["user_content"]
+
+    def test_blank_camera_prompt_stripped_to_none(self):
+        """空白 camera_prompt → strip 后为空 → 不注入 system prompt。"""
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+
+        sp = build_system_prompt(
+            SceneDescriptor(route="video", has_identity=False, stream=False),
+            camera_prompt="   ",
+            include_home_profile=False,
+        )
+        assert "本摄像头须知" not in sp
+
+    def test_build_system_prompt_with_camera_prompt(self):
+        """build_system_prompt 直接传 camera_prompt → 尾部带 ## 本摄像头须知 段。"""
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+
+        sp = build_system_prompt(
+            SceneDescriptor(route="video", has_identity=False, stream=False),
+            camera_prompt="忽略窗外马路",
+            include_home_profile=False,
+        )
+        assert "## 本摄像头须知" in sp
+        assert "忽略窗外马路" in sp
 
     def test_rule_rendered_by_name_without_evidence_suffix(self):
         """规则按 rule_name 渲染进「# 待判断规则」，不带已删除的 ｜允许证据= 后缀。"""

@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from miloco.perception.schema import MeaningfulEvent
-from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+from miloco.perception.snapshot_writer import (
+    CLIP_CANDIDATES,
+    get_snapshot_root,
+    locate_clip_file,
+    region_slug,
+)
 from miloco.utils.paths import miloco_home
 
 if TYPE_CHECKING:
@@ -27,11 +32,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SnapshotStatus = Literal["found", "gone", "not_found"]
-
-# 视频路径产物 clip.mp4 (H264+AAC);audio-only 路径产物 clip.m4a (仅 AAC,ipod muxer).
-# 探测顺序:先 mp4 后 m4a,先找到的优先返回。
-_CLIP_CANDIDATES = ("clip.mp4", "clip.m4a")
-_MEDIA_TYPE_BY_SUFFIX = {".mp4": "video/mp4", ".m4a": "audio/mp4"}
 
 
 class EventsService:
@@ -70,7 +70,7 @@ class EventsService:
             since_ms=since, before_ms=before, limit=limit, offset=offset
         )
         snapshot_root = get_snapshot_root()
-        feedback_index = self._build_feedback_index()
+        feedback_index = self.build_feedback_index()
         return [self._row_to_event(row, snapshot_root, feedback_index) for row in rows]
 
     async def locate_clip(
@@ -83,7 +83,7 @@ class EventsService:
         scrubber 的 seek.
 
         探测顺序:先 clip.mp4 (视频路径产物),后 clip.m4a (audio-only 路径产物).
-        对应 media_type 由 _MEDIA_TYPE_BY_SUFFIX 决定.
+        对应 media_type 由 MEDIA_TYPE_BY_SUFFIX 决定.
 
         Args:
             event_id: UUID
@@ -103,11 +103,10 @@ class EventsService:
             return ("not_found", None, None, None)
 
         device_dir = get_snapshot_root() / event_id / region_slug(device_id)
-        for filename in _CLIP_CANDIDATES:
-            path = device_dir / filename
-            if path.exists():
-                return ("found", path, _MEDIA_TYPE_BY_SUFFIX[path.suffix], row["timestamp"])
-        # event metadata 在表里,但文件已被 cleanup 清掉(或写前预检跳过没落)
+        result = locate_clip_file(device_dir)
+        if result is not None:
+            path, media_type = result
+            return ("found", path, media_type, row["timestamp"])
         return ("gone", None, None, None)
 
     @staticmethod
@@ -125,20 +124,24 @@ class EventsService:
             return None
         for did in device_ids:
             device_dir = snapshot_root / event_id / region_slug(did)
-            for filename, kind in (("clip.mp4", "mp4"), ("clip.m4a", "m4a")):
-                if (device_dir / filename).exists():
-                    return kind
+            for filename in CLIP_CANDIDATES:
+                path = device_dir / filename
+                if path.exists():
+                    return path.suffix[1:]
         return None
 
     _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
     @staticmethod
-    def _build_feedback_index() -> dict[str, tuple[str, int]]:
-        """一次扫描 packs 目录,建 event_id → (path, size) 索引.
+    def build_feedback_index() -> dict[str, tuple[str, int]]:
+        """一次扫描 packs 目录,建 event_id / log_id → (path, size) 索引.
 
-        文件名格式: feedback-{uid}-{event_id}-{YYYYMMDD-HHMMSS}.tar.gz
-        通过 UUID 正则匹配 event_id,兼容有无 uid 前缀.
-        同一 event_id 有多个 pack 时取最新(mtime 最大).
+        两种包名共用本索引:
+        - 事件包     feedback-{uid}-{event_id}-{YYYYMMDD-HHMMSS}.tar.gz
+        - 主动查询包 feedback-{uid}-od-{log_id}-{YYYYMMDD-HHMMSS}.tar.gz
+        取 UUID 正则 findall 的最后一个匹配,故 uid/字面量 od/时间戳都不会被误命中.
+        调用方: EventsService.list_events 与 PerceptionService.query_on_demand_logs.
+        同一 id 有多个 pack 时取最新(mtime 最大).
         """
         packs_dir = miloco_home() / "packs"
         if not packs_dir.exists():

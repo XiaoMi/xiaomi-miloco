@@ -18,6 +18,7 @@ from miloco.config import get_settings, register_reset_hook
 from miloco.database.person_repo import UNSET
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
+from miloco.perception.engine.identity import _avatar
 from miloco.perception.engine.identity.config_loader import resolve_library_root
 from miloco.perception.engine.identity.library import IdentityLibrary, _list_crop_files
 from miloco.person.schema import PersonCreate, PersonUpdate, _normalize_optional_str
@@ -25,9 +26,14 @@ from miloco.schema.common_schema import NormalResponse
 from miloco.utils.paths import miloco_home
 
 # 严格 UUID4 白名单：拒绝路径分隔符、`..` 等可构造路径穿越的字符
+# 用 \Z（而非 $）严格锚定串尾：$ 会放过结尾一个换行（re.match 下 "uuid\n" 也 match），
+# \Z 不会——杜绝带尾随换行的 id 混入。
 _PERSON_ID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
+# 头像上传大小上限：前端裁剪产物恒 ~20-50KB；直连 API 时用 image.size 前置闸拦超大包
+# （不必先读进内存）、读后 len 兜底。
+_MAX_AVATAR_BYTES = 5 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +50,16 @@ async def list_persons(current_user: str = Depends(verify_token)):
     logger.info("List persons - user: %s", current_user)
     persons = manager.person_service.list_persons()
     # PersonRef 索引化:避免 N×M scan
+    refs: dict = {}
+    avatar_exts: dict = {}
     try:
-        refs = {r.person_id: r for r in _get_identity_library().list_persons()}
+        lib = _get_identity_library()
+        refs = {r.person_id: r for r in lib.list_persons()}
+        # 显式头像扩展名（<root>/avatars/persons/<id>.<ext>）一次扫描批量取，供前端
+        # 决定头像取自"显式头像"还是回落 face[0]。
+        avatar_exts = lib.list_person_avatar_exts()
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_persons: 读 identity_lib 失败,sample 计数归零: %s", exc)
-        refs = {}
     data = []
     for p in persons:
         d = p.model_dump()
@@ -56,6 +67,7 @@ async def list_persons(current_user: str = Depends(verify_token)):
         d["num_tier_a_body"] = r.num_tier_a_body if r else 0
         d["num_tier_c"] = r.num_tier_c if r else 0
         d["has_tier_a"] = bool(r and r.has_tier_a)
+        d["avatar_ext"] = avatar_exts.get(p.id)
         data.append(d)
     return NormalResponse(
         code=0,
@@ -131,9 +143,12 @@ async def delete_person(person_id: str, current_user: str = Depends(verify_token
         raise HTTPException(status_code=400, detail="Invalid person_id format")
     manager.person_service.delete_person(person_id)
     # 级联删 identity_lib 文件——否则 list_persons / gallery 仍含此人，
-    # omni 会继续把画面中的人识别为已删除成员
+    # omni 会继续把画面中的人识别为已删除成员。顺带清 <root>/avatars/persons/<id>.*
+    # （显式头像在 avatars/ 树、不在 persons/<id>/ 内，rmtree 清不到，须显式删）。
     try:
-        _get_identity_library().delete_person(person_id)
+        lib = _get_identity_library()
+        lib.delete_person(person_id)
+        lib.clear_person_avatar(person_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("级联删除 identity_lib 失败 person_id=%s: %s", person_id, e)
     # 级联清家庭档案：移除该成员绑定的候选+正式条目并重渲染 md，
@@ -712,6 +727,98 @@ async def read_tier_sample(
     # 落盘格式 jpg→png 迁移后, Content-Type 随实际后缀走, 否则浏览器按 jpeg 解析 png 字节会坏图
     media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     return FileResponse(str(path), media_type=media_type)
+
+
+# =============================================================================
+# 显式头像（手动上传，展示层）——落 <root>/avatars/persons/<id>.<ext>，与识别样本分离。
+# 不建 persons/<id>/ 目录，故给"没录入的人"设头像也不扰动 IdentityEngine 快照。
+# 读取优先级：显式头像 > 回落 tier_a face[0]（旧行为）> 404（前端显示占位色块）。
+# =============================================================================
+
+
+def _sniff_image_ext(data: bytes) -> str | None:
+    """按文件头魔数判定真实图片格式（jpg/png/webp），不看文件名后缀——杜绝「后缀与
+    内容不符」，让盘上后缀 / Content-Type / 真实字节恒一致；不在白名单则 None。
+    （不引 imghdr——3.13 已移除；也不引 Pillow 新依赖。）"""
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+@router.post(
+    "/persons/{person_id}/avatar", summary="Upload Person Avatar", response_model=NormalResponse
+)
+async def upload_person_avatar(
+    person_id: str,
+    image: UploadFile = File(..., description="头像图片（jpg/jpeg/png/webp）"),
+    current_user: str = Depends(verify_token),
+):
+    if not _PERSON_ID_RE.match(person_id):
+        raise HTTPException(status_code=400, detail="Invalid person_id format")
+    if not manager.person_service.exists(person_id):
+        raise HTTPException(status_code=404, detail="person 不存在")
+    # 前置闸：用 multipart 自带的字节数拦超大包，不必先读进内存（size 缺失时靠读后兜底）。
+    if image.size is not None and image.size > _MAX_AVATAR_BYTES:
+        raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
+    data = await image.read()
+    if len(data) > _MAX_AVATAR_BYTES:  # size 缺失时兜底
+        raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
+    # 先确认能解码（挡垃圾字节），再按魔数取真实格式作落盘扩展名——不信任文件名后缀，
+    # 让 盘上后缀 / Content-Type / 真实字节 三者恒一致（同 enroll 口径用 cv2、不引新依赖）。
+    if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
+        raise HTTPException(status_code=400, detail="无法识别的图片")
+    ext = _sniff_image_ext(data)
+    if ext is None:
+        raise HTTPException(status_code=400, detail="不支持的图片格式（仅 jpg/png/webp）")
+    try:
+        norm = _get_identity_library().set_person_avatar(person_id, data=data, ext=ext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return NormalResponse(
+        code=0, message="Avatar updated", data={"id": person_id, "avatar_ext": norm}
+    )
+
+
+@router.get(
+    "/persons/{person_id}/avatar",
+    summary="Get Person Avatar（显式头像，无则回落 tier_a face[0]）",
+)
+async def get_person_avatar(person_id: str, current_user: str = Depends(verify_token)):
+    if not _PERSON_ID_RE.match(person_id):
+        raise HTTPException(status_code=400, detail="Invalid person_id format")
+    library = _get_identity_library()
+    # 1) 显式头像优先
+    path = library.person_avatar_path(person_id)
+    if path is not None:
+        return FileResponse(
+            str(path), media_type=_avatar.media_type(path.suffix.lstrip(".").lower())
+        )
+    # 2) 回落 tier_a face[0]（字母序首张，旧 PersonAvatar 行为）
+    _body, face = _list_tier_a_files_dict(person_id)
+    if face:
+        fpath = library.persons_dir / person_id / "tier_a" / face[0]["filename"]
+        if fpath.is_file():
+            media = "image/png" if fpath.suffix.lower() == ".png" else "image/jpeg"
+            return FileResponse(str(fpath), media_type=media)
+    raise HTTPException(status_code=404, detail="avatar 不存在")
+
+
+@router.delete(
+    "/persons/{person_id}/avatar",
+    summary="Delete Person Avatar（清显式头像，恢复默认 face[0]）",
+    response_model=NormalResponse,
+)
+async def delete_person_avatar(person_id: str, current_user: str = Depends(verify_token)):
+    if not _PERSON_ID_RE.match(person_id):
+        raise HTTPException(status_code=400, detail="Invalid person_id format")
+    _get_identity_library().clear_person_avatar(person_id)
+    return NormalResponse(
+        code=0, message="Avatar cleared", data={"id": person_id, "avatar_ext": None}
+    )
 
 
 @router.get(

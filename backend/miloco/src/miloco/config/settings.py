@@ -310,7 +310,8 @@ class PerceptionSettings(BaseModel):
     event_ttl_days: int = Field(
         default=7,
         description=(
-            "meaningful_events 表保留天数;_log_cleanup_loop 24h 周期按 created_at 删旧行."
+            "meaningful_events / on_demand_log 表保留天数;"
+            "_log_cleanup_loop 24h 周期按 created_at / timestamp 删旧行."
             "产品决策:近 7 天数据足够回看,不保留更长元数据."
             "LRU 触发(磁盘满 5GB)时 clip 可能先于 row 被清,API 返 410,前端"
             "ClipPlayer/AudioClipPlayer onError 触发降级占位('🎬 已过期'/'🎤 音频已过期')."
@@ -322,7 +323,11 @@ class PerceptionSettings(BaseModel):
     )
     snapshot_max_disk_mb: int = Field(
         default=5000,
-        description="截图磁盘配额上限(MB);超出按 mtime 升序 LRU 删",
+        description=(
+            "snapshot 目录总大小上限(MB),超限按 mtime LRU 淘汰最旧事件目录。"
+            "注意实时事件 clip 与主动查询 clip 共享这一份配额:主动查询目录总是最新的,"
+            "永远排在存活侧,高频查询会把历史事件 clip 提前挤出配额"
+        ),
     )
     snapshot_min_free_disk_mb: int = Field(
         default=500,
@@ -361,6 +366,10 @@ class PerfRetentionSettings(BaseModel):
     events_days: int = Field(default=7, description="events 表保留天数")
     agent_runs_days: int = Field(default=7, description="agent_runs 表保留天数")
     trace_jsonl_days: int = Field(default=7, description="agent jsonl.gz 文件保留天数")
+    action_ledger_days: int = Field(
+        default=7,
+        description="action_ledger 表保留天数(value_json 含 TTS 全文等敏感文本)",
+    )
     omni_log_days: int = Field(default=7, description="omni 交互 log 保留天数")
 
 

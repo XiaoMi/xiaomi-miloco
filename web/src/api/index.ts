@@ -111,6 +111,19 @@ export async function enrollPersonSample(
   return impl.realEnrollPersonSample(personId, imageBase64);
 }
 
+// 手动头像：上传显式头像 / 清除（恢复默认→回落 tier_a face[0]）
+export async function uploadPersonAvatar(
+  personId: string,
+  image: Blob,
+  filename: string,
+): Promise<void> {
+  return impl.realUploadPersonAvatar(personId, image, filename);
+}
+
+export async function deletePersonAvatar(personId: string): Promise<void> {
+  return impl.realDeletePersonAvatar(personId);
+}
+
 // ── 家庭档案（home_profile）────────────────────────────────
 // UI 只调这组语义函数；snake_case 的 op 构造全收在 real.ts，组件不碰。
 function today(): string {
@@ -267,6 +280,27 @@ export function subscribeEvents(
   return impl.realSubscribeEvents(onEvent, onOpen);
 }
 
+// ── 主动查询日志 ──────────────────────────────────────────
+export async function listOnDemandLogs(
+  homeId?: HomeId,
+  opts?: { since?: number; before?: number; before_id?: string; limit?: number },
+): Promise<import("@/lib/types").OnDemandLogEntry[]> {
+  if (!isPrimary(homeId)) return [];
+  return impl.realListOnDemandLogs(opts);
+}
+
+export function onDemandClipUrl(logId: string, deviceId: string): string {
+  return impl.realOnDemandClipUrl(logId, deviceId);
+}
+
+export async function submitOnDemandFeedback(
+  logId: string,
+  errorTypes: string[],
+  feedbackText: string,
+): Promise<{ pack_path: string; pack_size_bytes: number }> {
+  return impl.realSubmitOnDemandFeedback(logId, errorTypes, feedbackText);
+}
+
 // ── 摄像头 ────────────────────────────────────────────────
 // ── 米家多家庭 ────────────────────────────────────────────
 export async function listScopeHomes(homeId?: HomeId): Promise<ScopeHome[]> {
@@ -307,6 +341,20 @@ export async function toggleScopeCameraVoice(
   voiceInUse: boolean,
 ): Promise<void> {
   return impl.realToggleScopeCameraVoice(dids, voiceInUse);
+}
+
+// 设置相机自定义感知须知 prompt（PUT /api/miot/scope/cameras/prompt）。
+// text 必须非空。给该机位补环境说明 / 关注 / 忽略，指导感知消解固定误识。
+export async function setScopeCameraPrompt(
+  did: string,
+  text: string,
+): Promise<void> {
+  return impl.realSetScopeCameraPrompt(did, text);
+}
+
+// 清除相机自定义感知须知（DELETE /api/miot/scope/cameras/prompt）。
+export async function clearScopeCameraPrompt(did: string): Promise<void> {
+  return impl.realClearScopeCameraPrompt(did);
 }
 
 export async function listCameras(homeId?: HomeId): Promise<PerceptionCamera[]> {

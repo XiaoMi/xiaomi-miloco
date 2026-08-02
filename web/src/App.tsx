@@ -2,10 +2,11 @@
  * 主框架：左 Sidebar + 主区按 tab 切换。mobile 下 Sidebar 折叠为底部 nav。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   getHomeStatus,
   listActivity,
+  listOnDemandLogs,
   listCameras,
   listDevices,
   listHomeEntries,
@@ -17,6 +18,8 @@ import {
   refreshCameraOnline,
   pausePerception,
   resumePerception,
+  setScopeCameraPrompt,
+  clearScopeCameraPrompt,
   toggleScopeCamera,
   toggleScopeCameraVoice,
   switchScopeHome,
@@ -148,6 +151,13 @@ function MainApp() {
   const activity = useAsync(() => listActivity(homeId), [homeId], {
     errorLabel: t("app.loadActivityFail"),
   });
+  const onDemandLogs = useAsync(() => listOnDemandLogs(homeId), [homeId], {
+    errorLabel: t("app.loadOnDemandLogsFail", "Failed to load on-demand logs"),
+  });
+  const deviceNames = useMemo(
+    () => Object.fromEntries((devices.data ?? []).map((d) => [d.did, d.name])),
+    [devices.data],
+  );
   // 家庭档案（候选区 + 正式区记忆）——家庭 tab 用，成员抽屉与非人面板共享。
   const home = useAsync(() => listHomeEntries(homeId), [homeId], {
     errorLabel: t("app.loadHomeEntriesFail"),
@@ -162,6 +172,7 @@ function MainApp() {
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
   const [activeTab, setActiveTab] = useState<TabKey>("now");
+  // 活动 tab 现为单流(事件 + 动作合并);筛选 checkbox 在 ActivityFeed 内部,不占 App state。
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
     undefined,
   );
@@ -249,6 +260,22 @@ function MainApp() {
                 }
                 // 拾音开关只改 KV 偏好,不动投喂/流(音频在引擎入口按 KV 实时剥离),
                 // 只需 reload scopeCameras 拿新 voiceInUse。
+                scopeCameras.reload();
+              }}
+              onSetCameraPrompt={async (did, text) => {
+                try { await setScopeCameraPrompt(did, text); }
+                catch (e) {
+                  toast(e instanceof Error ? e.message : t("common.switchFailed"), "warn");
+                  throw e;
+                }
+                scopeCameras.reload();
+              }}
+              onClearCameraPrompt={async (did) => {
+                try { await clearScopeCameraPrompt(did); }
+                catch (e) {
+                  toast(e instanceof Error ? e.message : t("common.switchFailed"), "warn");
+                  throw e;
+                }
                 scopeCameras.reload();
               }}
               onRefresh={async () => {
@@ -366,20 +393,25 @@ function MainApp() {
           />
         );
       case "activity": {
-        if (activity.error) {
-          return (
-            <TabPanelError
-              message={t("app.tabActivityError", { msg: activity.error.message })}
-              onRetry={() => activity.reload()}
-            />
-          );
-        }
-        if (!activity.data) {
-          return <TabPanelLoading text={t("app.tabActivityLoading")} />;
-        }
+        // 单流:事件 + 动作合并,筛选 checkbox 在 ActivityFeed 内部。**无条件挂载**
+        // ActivityFeed——动作流走 /api/actions 组件内独立拉,不再被事件流(/api/events)的
+        // 加载/错误态阻断(修 Zirconi review:此前 gate 在 activity.data 上,事件慢/失败时
+        // 动作根本不请求)。事件的加载/失败以内联提示呈现在组件内,不挡动作流。
         return (
           <div className="space-y-6">
-            <ActivityFeed events={activity.data} homeId={homeId} />
+            <ActivityFeed
+              events={activity.data ?? []}
+              homeId={homeId}
+              activeHomeId={(scopeHomes.data ?? []).find((h) => h.inUse)?.homeId}
+              eventsLoading={activity.loading}
+              eventsError={activity.error}
+              onRetryEvents={() => activity.reload()}
+              onDemandLogs={onDemandLogs.data}
+              onDemandLoading={onDemandLogs.loading}
+              onDemandError={onDemandLogs.error}
+              onRetryOnDemand={() => onDemandLogs.reload()}
+              deviceNames={deviceNames}
+            />
           </div>
         );
       }

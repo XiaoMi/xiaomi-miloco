@@ -168,6 +168,8 @@ interface BackendPerson {
   num_tier_a_body?: number;
   num_tier_c?: number;
   has_tier_a?: boolean;
+  // 手动上传的显式头像后缀（avatars/persons/<id>.<ext>）；无则 null
+  avatar_ext?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -238,6 +240,7 @@ export async function realListPersons(): Promise<Person[]> {
       faceEnrolled: p.has_tier_a ?? p.face_enrolled,
       voiceEnrolled: p.voice_enrolled,
       avatarHue: i % 6,
+      avatarExt: p.avatar_ext ?? null,
     };
   });
 }
@@ -306,6 +309,31 @@ export async function realEnrollPersonSample(
     const body = await resp.json().catch(() => ({}));
     throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
   }
+}
+
+export async function realUploadPersonAvatar(
+  personId: string,
+  image: Blob,
+  filename: string,
+): Promise<void> {
+  const form = new FormData();
+  form.append("image", image, filename);
+  const resp = await fetch(`/api/identity/persons/${personId}/avatar`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+}
+
+// 清显式头像（恢复默认→读取回落 tier_a face[0]）
+export async function realDeletePersonAvatar(personId: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(`/api/identity/persons/${personId}/avatar`, {
+    method: "DELETE",
+  });
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────
@@ -674,6 +702,7 @@ export async function realListDevices(): Promise<Device[]> {
     const allProps: DeviceProperty[] = Object.entries(d.spec ?? {})
       .filter(([iid]) => iid.startsWith("prop."))
       .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
+    const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
 
     return {
       did: d.did,
@@ -681,7 +710,8 @@ export async function realListDevices(): Promise<Device[]> {
       category: cat,
       room: cleanRoom(d.room),
       online: d.online,
-      statusText: humanDeviceStatus(d, mainSwitch?.current, valueByIid),
+      statusText: humanDeviceStatus(d, valueByIid, statusKind),
+      statusKind,
       dangerous,
       mainSwitch,
       props: allProps,
@@ -791,34 +821,64 @@ const STATUS_TEXT: Record<string, StatusText> = {
   },
 };
 
-function humanDeviceStatus(
+function lockStatusKind(
+  d: BackendDevice,
+  values: Map<string, unknown>,
+): Device["statusKind"] {
+  const stateProp = Object.entries(d.spec ?? {}).find(([, spec]) => spec.type_name === "door-state");
+  if (stateProp) {
+    const [iid, spec] = stateProp;
+    const value = values.get(iid);
+    const optionName = spec.value_list?.find((item) => item.value === value)?.name;
+    if (optionName?.includes("Unlocked") || optionName?.includes("Ajar") || optionName?.includes("Not Close")) {
+      return "unlocked";
+    }
+    if (optionName?.includes("Locked") || optionName?.includes("Closed Properly")) {
+      return "locked";
+    }
+  }
+  const v = values.get("prop.2.1");
+  if (typeof v === "boolean") return v ? "locked" : "unlocked";
+  return "connected";
+}
+
+function deviceStatusKind(
   d: BackendDevice,
   mainOn: boolean | undefined,
   values: Map<string, unknown>,
+): Device["statusKind"] {
+  if (!d.online) return "offline";
+  if (mapCategory(d.category) === "lock") return lockStatusKind(d, values);
+  if (mainOn === undefined) return "connected";
+  return mainOn ? "on" : "off";
+}
+
+function humanDeviceStatus(
+  d: BackendDevice,
+  values: Map<string, unknown>,
+  kind: Device["statusKind"],
 ): string {
   const s = STATUS_TEXT[langKey()] ?? STATUS_TEXT.zh;
-  if (!d.online) return s.offline;
-  const cat = mapCategory(d.category);
+  if (kind === "offline") return s.offline;
+  if (kind === "locked") return s.locked;
+  if (kind === "unlocked") return s.unlocked;
+  if (kind === "connected") return s.connected;
 
-  if (cat === "lock") {
-    const v = values.get("prop.2.1");
-    return v ? s.locked : s.unlocked;
-  }
-  if (mainOn === undefined) return s.connected;
+  const cat = mapCategory(d.category);
   if (cat === "aircond") {
-    if (!mainOn) return s.off;
+    if (kind === "off") return s.off;
     const t = values.get("prop.2.5") ?? values.get("prop.2.4");
     if (typeof t === "number") return `${t}°C`;
     return s.running;
   }
   if (cat === "purifier") {
-    if (!mainOn) return s.off;
+    if (kind === "off") return s.off;
     const mode = values.get("prop.2.4");
     if (mode === 1) return s.sleepMode;
     if (mode === 0) return s.autoMode;
     return s.running;
   }
-  return mainOn ? s.on : s.off;
+  return kind === "on" ? s.on : s.off;
 }
 
 export async function realControlDeviceProp(
@@ -929,6 +989,7 @@ interface BackendScopeCamera {
   // 拾音存储偏好（在拾音白名单即 true，**默认 false**，opt-in）。false = 该相机声音
   // 完全不被处理。旧后端无此字段时兜底 false（默认关，与后端默认姿态一致）。
   voice_in_use?: boolean;
+  perception_prompt?: string;
   connected: boolean;
   channel?: number;  // 通道号，用于多通道摄像头
   channel_count?: number;  // 通道总数；判多通道的权威信号（旧后端无则兜底 1）
@@ -948,6 +1009,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     awake: c.awake ?? null,
     inUse: c.in_use,
     voiceInUse: c.voice_in_use ?? false,
+    perceptionPrompt: c.perception_prompt ?? "",
     connected: c.connected,
     channel: c.channel ?? 0,  // 传递通道号，默认为 0
     channelCount: c.channel_count ?? 1,  // 通道总数，判多通道用；旧后端兜底 1
@@ -998,6 +1060,24 @@ export async function realToggleScopeCameraVoice(
     body: JSON.stringify({
       items: dids.map((did) => ({ did, voice_in_use: voiceInUse })),
     }),
+  });
+}
+
+export async function realSetScopeCameraPrompt(
+  did: string,
+  text: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/miot/scope/cameras/prompt", {
+    method: "PUT",
+    body: JSON.stringify({ items: [{ did, prompt: text }] }),
+  });
+}
+
+export async function realClearScopeCameraPrompt(did: string): Promise<void> {
+  // did 走 query（?did=…），不带 body：DELETE body 语义未定义、易被代理丢弃。
+  const qs = new URLSearchParams({ did }).toString();
+  await apiFetch<Normal<unknown>>(`/api/miot/scope/cameras/prompt?${qs}`, {
+    method: "DELETE",
   });
 }
 
@@ -1055,6 +1135,50 @@ export async function realListActivity(opts?: {
       feedback_pack_size: e.feedback_pack_size,
     }),
   );
+}
+
+// ── On-demand logs ──────────────────────────────────────────
+
+export async function realListOnDemandLogs(opts?: {
+  since?: number;
+  before?: number;
+  before_id?: string;
+  limit?: number;
+}): Promise<import("@/lib/types").OnDemandLogEntry[]> {
+  const params = new URLSearchParams();
+  if (opts?.since !== undefined) params.set("since", String(opts.since));
+  if (opts?.before !== undefined) params.set("before", String(opts.before));
+  if (opts?.before_id !== undefined) params.set("before_id", opts.before_id);
+  params.set("limit", String(opts?.limit ?? 50));
+  const qs = params.toString();
+  const resp = await apiFetch<
+    Normal<{ logs: import("@/lib/types").OnDemandLogEntry[] }>
+  >(qs ? `/api/perception/on-demand-logs?${qs}` : "/api/perception/on-demand-logs");
+  return resp.data.logs;
+}
+
+export function realOnDemandClipUrl(logId: string, deviceId: string): string {
+  const token = resolveToken();
+  const base = `/api/perception/on-demand-logs/${encodeURIComponent(logId)}/clip/${encodeURIComponent(deviceId)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+export async function realSubmitOnDemandFeedback(
+  logId: string,
+  errorTypes: string[],
+  feedbackText: string,
+): Promise<{ pack_path: string; pack_size_bytes: number }> {
+  const resp = await apiFetch<
+    Normal<{ log_id: string; pack_path: string; pack_size_bytes: number }>
+  >(`/api/perception/on-demand-logs/${encodeURIComponent(logId)}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      error_types: errorTypes,
+      feedback_text: feedbackText,
+    }),
+  });
+  return { pack_path: resp.data.pack_path, pack_size_bytes: resp.data.pack_size_bytes };
 }
 
 /**

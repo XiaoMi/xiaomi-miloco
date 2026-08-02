@@ -75,8 +75,7 @@ profile.md（$MILOCO_HOME/home-profile/profile.md）
 
 - **`scheduler.ts`**：在 `gateway_start` Hook 中调用 OpenClaw Cron 服务的 `reconcile` 流程，以 `[miloco:home-profile]` 标签管理受管 cron 任务。插件重启后自动对齐到代码定义的最新状态，避免孤儿 cron 积累。
 - **`helpers.ts`**：`readFileSafe`（安全只读，缺失返回空串）+ `habitSuggestionsPath`；档案本身改由 agent 用 `home-profile list` 自取，插件不再读 `profile.md` 拼进 system prompt。
-- **`injection.ts`**：提供待回应习惯建议块（`buildPendingSuggestionBlock`），供注入 Hook 追加；内容取自 `suggestions.ts` 的待回应状态。
-- **`suggestions.ts`**：习惯建议状态库 + `miloco_habit_suggest` 工具。承接每日 `miloco-habit-suggest` cron 的「扫描家庭档案 → IM 推荐 → 用户认可后建任务」闭环，用持久状态把互不共享上下文的扫描会话与回应会话衔接起来；防骚扰闸门（限流、去重、拒绝后不再追问、超期自动作废）由工具裁定拒绝越界写入，不靠扫描 Agent 自觉。其状态库即下文「已成任务的习惯剔除渲染」所依赖的 `task-suggestions.json`（与 Python 端档案文件同目录、文件名独立）。任务创建侧见 [任务管理](task-management.md)。
+- **`injection.ts`**：**只读** reader——读 `task-suggestions.json` 生成待回应习惯建议块（`buildPendingSuggestionBlock`），供注入 Hook 追加；仅镜像与状态机一致的 7 天口径。习惯建议状态机（record / mark_asked / resolve / 过期）已移入 `miloco-cli habit`：它承接每日 `miloco-habit-suggest` cron 的「扫描家庭档案 → IM 推荐 → 用户认可后建任务」闭环，用持久状态把互不共享上下文的扫描会话与回应会话衔接起来；防骚扰闸门（限流、去重、拒绝后不再追问、超期自动作废）由命令裁定、拒绝越界写入，不靠扫描 Agent 自觉。其读写的 `task-suggestions.json` 即下文「已成任务的习惯剔除渲染」所依赖的候选库（与 Python 端档案文件同目录、文件名独立）。任务创建侧见 [任务管理](task-management.md)。
 
 > 系统上下文注入 Hook 本身在 `plugins/openclaw/src/hooks/prompt.ts`（不在 `home-profile/`）：唯一的 `before_prompt_build` Hook，每次 Agent turn 前装配系统上下文并追加「今日感知日志」块（`buildPerceptionLogBlock`），同时注入被动记录触发规则（用户提及家庭信息时 Agent 静默写入档案）。家庭档案不再随此 Hook 注入，改由 agent 按需 `home-profile list` 自取。
 
@@ -96,7 +95,7 @@ profile.md（$MILOCO_HOME/home-profile/profile.md）
 
 **权重与截断**：权重计算综合三个维度：时间衰减（不同条目类型的衰减速率不同）、来源加成（`user_told` 权重最高）、证据数量（多次观察证实的知识权重更高）。commit 时按权重降序排列再做 token 截断，确保最相关的知识排在前面。
 
-**已成任务的习惯剔除渲染**：习惯一旦被显式建成任务（TS 端 `task-suggestions.json` 记 `status=created`），其源档案条目在 commit 渲染 `profile.md` 时被剔除，避免与任务重复展示；条目本身仍完整保存在 `profile.json`。
+**已成任务的习惯剔除渲染**：习惯一旦被显式建成任务（`miloco-cli habit resolve --outcome created` 在 `task-suggestions.json` 记 `status=created`），其源档案条目在 commit 渲染 `profile.md` 时被剔除，避免与任务重复展示；条目本身仍完整保存在 `profile.json`。
 
 **档案取用双路**：档案渲染为 `profile.md` 后通过两条独立路径消费：① 主 agent 在对话中按需用 `home-profile list` 自取（主 agent 上下文改由 `before_prompt_build` Hook 注入「今日感知日志」）；② 每次感知推理时注入 Omni prompt 动态层。②形成感知→记忆→感知的正反馈闭环：档案越丰富，VLM 识别描述越精准。
 

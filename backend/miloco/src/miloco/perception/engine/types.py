@@ -255,6 +255,9 @@ class OmniContext:
     pending_speech: list[dict] | None = None  # [{"speaker": "xx", "content": "打开"}]
     current_time: str | None = None  # "HH:MM:SS" window start time (aligned with event text)
     room_name: str | None = None  # 设备所在房间名，作场景参考注入 U4（如"厨房""书房"）
+    # 该设备自定义「感知须知」prompt（用户/agent 配置，KV CAMERA_PROMPT_MAP_KEY 逐窗实时读取）。
+    # 注入 omni system prompt 尾部（video / audio 路由均注入），给模型补充机位环境 / 关注 / 忽略指导。
+    camera_prompt: str | None = None
 
 
 

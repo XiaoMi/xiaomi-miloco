@@ -6,6 +6,9 @@
 数据落在 SQLite ``kv`` 表的 ``HOME_WHITE_LIST_KEY``（启用的家庭集合）、
 ``CAMERA_BLACK_LIST_KEY``（停用的相机集合）和 ``CAMERA_VOICE_ALLOW_LIST_KEY``
 （**开启**拾音的相机集合，opt-in / 默认关语义），JSON array 字符串，由 :class:`KVRepo` 缓存。
+
+另有 ``CAMERA_PROMPT_MAP_KEY``（每摄像头自定义「感知须知」prompt，did→文本）——
+唯一的 map 语义 key（JSON object，非集合），供逐设备注入 omni 场景指导。
 """
 
 from __future__ import annotations
@@ -23,6 +26,10 @@ T = TypeVar("T")
 # 同时投喂给 miloco 感知的摄像头数量上限（前端展示上限也以此为唯一来源，经
 # /api/miot/status 下发）。用户主动 enable 超限直接报错（service.toggle_camera 校验）。
 MAX_ENABLED_CAMERAS = 4
+
+# 每摄像头「感知须知」自定义 prompt 长度上限（字符数）。filter 层截断作为纵深防御，
+# service/schema 层已有校验。
+MAX_CAMERA_PROMPT_LEN = 500
 
 
 def _load_list(kv_repo: KVRepo, key: str) -> list[str]:
@@ -301,4 +308,56 @@ def _toggle_members(
     if new == current:
         return current, False
     kv_repo.set(key, json.dumps(new, ensure_ascii=False))
+    return new, True
+
+
+def _load_str_map(kv_repo: KVRepo, key: str) -> dict[str, str]:
+    """读取存 JSON object（str→str）的 KV；缺省 / 非法 / 非 object 一律回落空 dict。
+
+    跳过 JSON ``null`` 值（避免 ``str(None) → "None"`` 注入业务逻辑）。
+    """
+    raw = kv_repo.get(key) or "{}"
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("KV %s 不是合法 JSON，视为空: %r", key, raw)
+        return {}
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items() if v is not None}
+    logger.warning("KV %s 不是 JSON object，视为空: %r", key, raw)
+    return {}
+
+
+def camera_prompts(kv_repo: KVRepo) -> dict[str, str]:
+    """全部摄像头「感知须知」自定义 prompt（did→文本）；空表示无任何自定义。"""
+    return _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
+
+
+def set_camera_prompt(kv_repo: KVRepo, did: str, prompt: str) -> tuple[dict[str, str], bool]:
+    """设置 / 清除单台相机的自定义感知 prompt。
+
+    超长截断：仅存储前 ``MAX_CAMERA_PROMPT_LEN`` 字符（service/schema 层已有校验，
+    此处防御直接调用 filter 的内部路径）。
+    """
+    current = _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
+    text = prompt.strip()[:MAX_CAMERA_PROMPT_LEN]
+    new = dict(current)
+    if text:
+        new[did] = text
+    else:
+        new.pop(did, None)
+    if new == current:
+        return current, False
+    kv_repo.set(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False))
+    return new, True
+
+
+def clear_camera_prompt(kv_repo: KVRepo, did: str) -> tuple[dict[str, str], bool]:
+    """清除单台相机的自定义感知 prompt（直接从 map 中 del）。"""
+    current = _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
+    if did not in current:
+        return current, False
+    new = dict(current)
+    del new[did]
+    kv_repo.set(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False))
     return new, True
