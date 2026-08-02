@@ -116,12 +116,28 @@ class RuleSpec(BaseModel):
     query: str = Field(default="", max_length=2000)
 
 
+class RosterEntry(BaseModel):
+    """调用方**已经认好**的一个人:名字 + 他在画面里的位置。
+
+    这不是让边车去认人 —— 认人由调用方自己完成(miloco 侧用 ReID 比对身份库)。
+    边车只把名字贴到位置上。契约对第三方实现开放:任何能给出「谁在哪」的上游都
+    可以填这个字段,边车不关心它是怎么算出来的。
+    """
+
+    name: str = Field(default="", max_length=64, description="人物姓名;留空的条目会被丢弃")
+    bbox: list[int] = Field(
+        default_factory=list,
+        description="(x1, y1, x2, y2),归一化到 [0,1000](左上 0,0)。非法框整条丢弃",
+    )
+
+
 #: 单次请求视频段的字节上限(解码后)。miloco 默认 4s 窗、CRF 28、短边 512,
 #: 实测每段几十 KB;给到 64 MiB 已是三个数量级的余量。
 #: 不设上限的话:pydantic 会先把整个 body 收进内存,base64 解码再复制一份,而这
 #: 两步都发生在并发闸(_inflight)**之前** —— perceive 是同步 def,跑在 anyio 的
 #: 线程池里(默认 40 个),几十个超大 body 可以同时驻留,与 _MAX_INFLIGHT 无关;
 #: 随后 write_temp_video 还会把它落盘,连磁盘一起打满。
+MAX_ROSTER = 16
 MAX_VIDEO_BYTES = 64 * 1024 * 1024
 _MAX_VIDEO_B64_CHARS = (MAX_VIDEO_BYTES * 4) // 3 + 8
 
@@ -151,6 +167,11 @@ class PerceiveRequest(BaseModel):
     # codec 的 token 预算(画布数)。调用方按自己的成本取舍决定,边车不替它猜 ——
     # 缺省时按实际帧数能填满的档位来。
     codec_target_canvas: int | None = Field(default=None, ge=4, le=64)
+    # 「谁在画面的哪个位置」。上限与 prompts._ROSTER_MAX_PERSONS 同量级 —— 与
+    # rules 同理,这也是个在并发闸之前就被收取解析的列表,不能无界。
+    roster: list[RosterEntry] = Field(
+        default_factory=list, max_length=MAX_ROSTER, description="调用方已认好的人物名册",
+    )
 
 
 class RuleHit(BaseModel):
@@ -257,6 +278,7 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
             want_gate=body.want_gate,
             ngram_guard=body.ngram_guard,
             codec_target_canvas=body.codec_target_canvas,
+            roster=[r.model_dump() for r in body.roster],
         )
     except Exception as err:  # noqa: BLE001 —— 单次推理失败不该拖垮常驻服务
         logger.exception("perceive failed")

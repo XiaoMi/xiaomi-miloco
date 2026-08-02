@@ -94,9 +94,26 @@ def test_get_defaults_to_cloud_and_reports_capabilities(client, health):
     caps = d["local_capabilities"]
     # 能力声明是界面上那几行"切过去会失去什么"的唯一来源,必须真出现在响应里。
     assert caps["audio"] is False
-    assert caps["identity"] is False
+    # 认人现在由本地 ReID 提供(不经过视觉大模型),默认开 —— 界面上不该再写
+    # "切过去会失去身份识别"。这一条跟着配置走,下一个用例钉住关掉后的表现。
+    assert caps["identity"] is True
     assert caps["static_rule_execution"] is False
     assert caps["needs_api_key"] is False
+
+
+def test_identity_capability_follows_the_setting(client, health, monkeypatch):
+    """用户关掉本地认人后,界面必须如实说没有这项能力。
+
+    能力声明与实际行为分家是最坏的一种错:界面说"能认人",而每一条描述里都是
+    「一名男子」—— 用户会去查身份库、查登记,而问题在一个开关上。
+    """
+    from miloco.config import get_settings
+
+    monkeypatch.setattr(
+        get_settings().perception.local_vision, "identity_enabled", False
+    )
+    d = client.get("/api/admin/perception-backend").json()["data"]
+    assert d["local_capabilities"]["identity"] is False
 
 
 def test_get_reports_unreachable_without_leaking_probe_detail(client, health):

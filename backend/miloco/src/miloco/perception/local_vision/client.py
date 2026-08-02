@@ -133,6 +133,7 @@ class LocalVisionClient:
         want_gate: bool = True,
         ngram_guard: int | None = None,
         codec_target_canvas: int | None = None,
+        roster: list[dict] | None = None,
     ) -> dict:
         payload = {
             "video_b64": base64.b64encode(video).decode("ascii"),
@@ -149,6 +150,10 @@ class LocalVisionClient:
         if camera_note:
             # 独立字段传:塞进 scene_ask 会顶掉任务提问本身,且会落在格式约定之前。
             payload["camera_note"] = camera_note
+        if roster:
+            # 空名册不发字段:老版本边车不认识这个键,而 pydantic 默认忽略未知字段,
+            # 发过去是无害的 —— 但少发一个恒为 [] 的键能让抓包与日志干净些。
+            payload["roster"] = roster
         try:
             r = await self._client().post(
                 f"{self.base_url}/v1/perceive", json=payload, headers=self._headers()

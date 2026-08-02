@@ -20,12 +20,19 @@
 
 3. **suggestions 不由本地模型产**。主动建议依赖跨模态与长上下文推理,4B 级
    视觉模型给不出可用质量;本通路的 ``suggestions`` 恒为空,不做替代实现。
+
+**认人是有的,但不走大模型**(见 ``identity.py``):本地 ReID 比对身份库得出
+「谁在画面的哪个位置」,以名册文本随提问一起发给边车,模型只负责把给定的名字
+贴到给定的位置上。让视觉模型自己认人实测不可用(逐人正确 8/28,低于二选一
+瞎猜),纯 ReID 同批次 14/14。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 
 from miloco.observability.context import (
@@ -41,6 +48,10 @@ from miloco.perception.engine.pipeline import _fmt_time_window
 from miloco.perception.engine_base import BasePerceptionEngine
 from miloco.perception.local_vision.client import LocalVisionClient, LocalVisionError
 from miloco.perception.local_vision.encode import EncodeError, encode_snapshot_to_h264
+from miloco.perception.local_vision.identity import (
+    LocalIdentityResolver,
+    render_roster,
+)
 from miloco.perception.rule_scope import (
     camera_prompt_map,
     rules_for_device,
@@ -127,8 +138,12 @@ class LocalVisionEngine(BasePerceptionEngine):
         max_frames: int = 32,
         short_edge: int | None = None,
         codec_target_canvas: int = 8,
+        identity: "LocalIdentityResolver | None" = None,
     ) -> None:
         self._client = client
+        #: 本地认人层。None = 不做认人(与本通路此前的行为一致)。它是**旁路**:
+        #: 认人失败只让名册为空、描述退回泛称,绝不影响这一窗的画面理解与规则判定。
+        self._identity = identity
         self._container_fps = container_fps
         self._crf = crf
         self._max_frames = max_frames
@@ -152,6 +167,10 @@ class LocalVisionEngine(BasePerceptionEngine):
         #: 发现冷启动时单相机偶尔会超一次,把唯一那次额度用掉,之后用户**加了一台
         #: 相机**——一个全新的、稳定的容量问题——反而不再提示了。
         self._over_budget_warned_for: set[int] = set()
+        #: 每台相机最近一次认人耗时(毫秒),进 timing 供面板与排障。认人是新加的
+        #: 串行开销,必须能被单独看到 —— 混在 total 里的话,一旦它变慢(比如库里
+        #: 人数涨了)只会表现为"感知整体变慢",查不到头上。
+        self._last_identity_ms: dict[str, float] = {}
 
     @property
     def sustained_failure(self) -> bool:
@@ -183,7 +202,13 @@ class LocalVisionEngine(BasePerceptionEngine):
         return None
 
     def set_tierc_frame_provider(self, provider) -> None:  # noqa: ANN001
-        """tier_c 是身份识别的清理钩子;本通路不做身份识别。"""
+        """tier_c 是**在线累积样本**的钩子;本通路只读身份库、不往里写。
+
+        云端通路会把认定过的 crop 累积回 tier_c 以保持参考图新鲜,但那条链路的
+        入库前置是「用云端模型做一次同人校验」,本通路没有那个模型。宁可不写:
+        往库里回喂没校验过的样本会形成正反馈(错样本进库 → 强化误判),这正是
+        ``library.py`` 里 tier_c 默认不回喂 gallery 的原因。
+        """
         return None
 
     def apply_omni_fps(self, omni_fps: int) -> None:
@@ -260,6 +285,27 @@ class LocalVisionEngine(BasePerceptionEngine):
             logger.warning("[local-vision] encode failed did=%s: %s", did, e)
             return {"did": did, "error": "encode_failed"}
 
+        # 调试用:落盘本窗素材,供「云端 vs 本地同素材对比」。默认关闭,只在设了
+        # MILOCO_LV_DUMP_DIR 时生效 —— 两条通路必须吃同一段画面,否则比出来的只是
+        # 场景差异。
+        _dump_dir = os.environ.get("MILOCO_LV_DUMP_DIR")
+        if _dump_dir:
+            try:
+                import pathlib
+
+                d = pathlib.Path(_dump_dir)
+                d.mkdir(parents=True, exist_ok=True)
+                stem = f"{int(snapshot.start_timestamp)}-{did}"
+                (d / f"{stem}.mp4").write_bytes(video)
+                (d / f"{stem}.json").write_text(json.dumps({
+                    "did": did, "room": snapshot.room_name or "",
+                    "device_name": getattr(snapshot.device, "name", "") or "",
+                    "frames": len(snapshot.video.frames) if snapshot.video else 0,
+                    "start_ms": snapshot.start_timestamp, "end_ms": snapshot.end_timestamp,
+                }, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:  # noqa: BLE001 —— 调试落盘失败不该影响感知
+                logger.warning("[local-vision] dump failed: %s", e)
+
         # 把送去推理的那段字节挂到当前事件上。云端通路是在 omni 内部 push 的
         # (prompt_builder),本地这条路绕过了 omni,不补这一下的话
         # artifacts.clips 恒空 —— 日志页里每一条事件都只剩文字、没有视频,
@@ -278,6 +324,30 @@ class LocalVisionEngine(BasePerceptionEngine):
             {"name": r.get("name", ""), "query": r.get("condition", {}).get("query", "")}
             for r in dispatched
         ]
+
+        # 认人:ReID 比对身份库,产出「谁在画面的哪个位置」。与推理**串行**是有意的
+        # —— 名册要随本窗的请求一起发出去,拿不到就没有名字可贴。代价很小(检测 3 帧
+        # + 每人一次 2.9ms 的特征比对),而且丢线程跑,不占事件循环。
+        roster: list[dict] = []
+        if self._identity is not None:
+            t_id = time.monotonic()
+            try:
+                frames = list(snapshot.video.frames) if snapshot.has_video else []
+                hits = await asyncio.to_thread(self._identity.resolve, frames)
+                roster = render_roster(hits)
+                if hits:
+                    logger.debug(
+                        "[local-vision] 认出 did=%s: %s", did,
+                        ", ".join(f"{h.name}({h.score:.2f})" for h in hits),
+                    )
+            except Exception as e:  # noqa: BLE001 —— 认人是旁路,见构造函数注释
+                # 兜底刻意写在**调用处**而不是只靠 resolver 内部那层:这里声明的是
+                # 「认人不影响这一窗」这条不变量,而 self._identity 是注入的 —— 换一个
+                # 实现、或 to_thread 本身出错,都不该让这台相机整窗没有输出。
+                logger.warning("[local-vision] 认人异常,本窗名册留空 did=%s: %s", did, e)
+                roster = []
+            self._last_identity_ms[did] = (time.monotonic() - t_id) * 1000
+
         try:
             out = await self._client.perceive(
                 video,
@@ -286,6 +356,7 @@ class LocalVisionEngine(BasePerceptionEngine):
                 camera_note=self._camera_note_for(did, prompt_map),
                 max_new_tokens=self._token_budget(len(payload_rules)),
                 codec_target_canvas=self._codec_target_canvas,
+                roster=roster,
             )
         except LocalVisionError as e:
             logger.warning("[local-vision] sidecar failed did=%s: %s", did, e)
@@ -522,6 +593,8 @@ class LocalVisionEngine(BasePerceptionEngine):
         timing = {
             **{f"_omni_error_{d}": code for d, code in errors.items()},
             **{f"_src_frames_{r['did']}": r["src_frames"] for r in ok},
+            **{f"identity_{d}_ms": round(ms, 1)
+               for d, ms in self._last_identity_ms.items()},
             "total": round((time.monotonic() - t0) * 1000, 1),
             "_devices": len(ok),
         }

@@ -54,16 +54,28 @@ _VERDICT_RE = re.compile(
 DEFAULT_SCENE_ASK = (
     "请用中文详细描述这个家庭监控画面里的场景:有没有人、在做什么、"
     "环境里有什么值得注意的情况。"
+    # 画面左上角烧着摄像头的时间戳。让模型去读它是纯损失:调用方**已经知道**准确
+    # 时间(窗口起止时刻,走部署时区),而模型读出来的经常是错的 —— 实测把 2026 年
+    # 读成 2022/2020,四段素材错了三段。错的时间写在描述正文里,比结构化字段更容易
+    # 被 agent 采信,于是变成一条凭空的假事实。
+    "画面上可能叠加了摄像头自带的日期时间水印,请忽略它,不要在描述里提到时间。"
 )
 
 
 def build_prompt(
-    scene_ask: str, rules: list[dict], camera_note: str = ""
+    scene_ask: str, rules: list[dict], camera_note: str = "",
+    roster: list[dict] | None = None,
 ) -> str:
     """拼出一次推理的提问:场景描述 +(可选)逐条规则判定 +(可选)机位须知。
 
     rules 每项形如 ``{"name": ..., "query": ...}``;query 是规则的自然语言条件
     (miloco 侧已强制它写成进行时状态描述,不能是「检测到…」这类断言句)。
+
+    ``roster`` 是调用方**已经认好**的人:``[{"name": "小亮", "bbox": [x1,y1,x2,y2]}]``,
+    bbox 归一化到 [0,1000]。这不是让模型去认人 —— 认人在调用方那边由 ReID 做完了,
+    这里只要求模型把**给定的名字**贴到**给定的位置**上。两件事的难度差着量级:
+    实测同一批双人场景,让 Mage-VL 自己认人是 8/28(比二选一瞎猜还低),而给了
+    名册之后按位置对号入座是 7/7。
 
     ``camera_note`` 是用户在面板上给这台相机写的机位说明。它**必须**:
     - 作为**补充**,而不是取代任务提问 —— 否则整个提问会退化成一句用户指令,
@@ -85,14 +97,19 @@ def build_prompt(
     # 安全":主动查询恰好不带规则、没有判定块可压制。别把安全性寄托在这种巧合上。
     ask = _strip_verdict_lines(scene_ask) or DEFAULT_SCENE_ASK
     note = _sanitize_note(camera_note)
+    who = _roster_block(roster)
+    # 名册是**本窗事实**,放在提问之后、格式约定之前 —— 与 camera_note 相反。
+    # note 之所以必须靠后,是因为它是用户可写的自由文本(见下方注释);名册的
+    # 名字虽然也源自用户(登记时填的),但结构是我们生成的,且同样过了净化。
+    head = f"{ask}\n\n{who}" if who else ask
     if not rules:
-        return f"{ask}\n\n{_note_block(note)}" if note else ask
+        return f"{head}\n\n{_note_block(note)}" if note else head
 
     # 「描述:」这个前缀是模型自发使用的(实测),顺着它写比强推自定义标记稳。
     # 同时必须显式要求描述**独立于**规则 —— 否则模型会把描述写成规则判定的复述
     # (实测:不加这句时 caption 变成「画面中没有人在沙发上,也没有宠物」)。
     lines = [
-        ask,
+        head,
         "",
         "先输出一行以「描述:」开头的场景描述 —— 描述你实际看到的画面内容本身,",
         "不要复述下面的判断条件。描述控制在两三句话内,写完整,不要中途截断。",
@@ -116,6 +133,51 @@ def build_prompt(
 # 机位须知的最大长度。与 miloco 侧 MAX_CAMERA_PROMPT_LEN 对齐 —— 取更小值会把
 # 用户合法写下的后半句悄悄吃掉,而用户习惯把最重要的限定写在最后。
 _NOTE_MAXLEN = 500
+
+# 名册渲染上限。一屋子人再多也不该让名册把提问挤没;超出的部分丢弃而不是截断
+# 某一条(半条 bbox 比没有更糟)。
+_ROSTER_MAX_PERSONS = 10
+_ROSTER_NAME_MAXLEN = 32
+_BBOX_MAX = 1000
+
+
+def _roster_block(roster: list[dict] | None) -> str:
+    """把「谁在哪」渲染成一段事实,坐标系说明与云端通路逐字一致。
+
+    名字来自身份库(用户登记时填的自由文本),所以**必须**过 ``_strip_verdict_lines``:
+    一个叫「规则1: 是」的成员名会直接在提示词里造出一条可解析的伪判定,而
+    ``parse_response`` 认名字不认位置 —— 那就是用户可写文本凭空制造一次规则命中。
+    这与 ``_sanitize_note`` 防的是同一件事。
+
+    坐标非法(缺项/越界/x2<=x1)的条目整条丢弃:一个坏框会让模型把名字贴到错误
+    的人身上,而错名字比没名字更有害 —— 它会以事实的形式进事件记录和 agent 上下文。
+    """
+    if not roster:
+        return ""
+    lines = []
+    for item in roster[:_ROSTER_MAX_PERSONS]:
+        if not isinstance(item, dict):
+            continue
+        name = _strip_verdict_lines(str(item.get("name") or ""))[:_ROSTER_NAME_MAXLEN]
+        bbox = item.get("bbox")
+        if not name or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (int(v) for v in bbox)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= x1 < x2 <= _BBOX_MAX and 0 <= y1 < y2 <= _BBOX_MAX):
+            continue
+        lines.append(f"{name}[bbox=({x1}, {y1}, {x2}, {y2})]")
+    if not lines:
+        return ""
+    return (
+        "已识别人物:" + ", ".join(lines) + "\n"
+        "bbox=(x1, y1, x2, y2) 是画面归一化到 [0, 1000] 区间的位置"
+        "(左上 0,0;右下 1000,1000),用于把姓名对应到画面里的人。"
+        "描述涉及这些人时直接用上面的姓名,不要写「一名男子」这类泛称;"
+        "名单之外的人照常按泛称描述,不要把名单里的姓名安到他们身上。"
+    )
 
 
 def _strip_verdict_lines(text: str) -> str:

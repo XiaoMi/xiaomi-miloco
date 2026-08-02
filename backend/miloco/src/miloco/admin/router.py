@@ -1178,7 +1178,9 @@ def _local_capabilities() -> dict:
     return {
         "needs_api_key": False,
         "audio": False,       # 纯视觉:不产 speeches / env_sounds
-        "identity": False,    # 不做身份识别
+        # 认人由本地 ReID 做(比对身份库),不经过视觉大模型。跟着**配置**走:
+        # 用户可以关掉它,关掉后界面必须如实显示没有这项能力。
+        "identity": bool(get_settings().perception.local_vision.identity_enabled),
         "suggestions": False,  # 主动建议交给 agent
         "static_rule_execution": LocalVisionEngine.STATIC_RULE_EXECUTION,
     }

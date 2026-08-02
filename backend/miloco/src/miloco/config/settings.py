@@ -405,6 +405,32 @@ class LocalVisionSettings(BaseModel):
         default="",
         description="覆盖默认的中文场景提问;留空用边车内置提问",
     )
+    identity_enabled: bool = Field(
+        default=True,
+        description=(
+            "本地认人:用 ReID 指纹比对身份库,把「谁在画面的哪个位置」以名册形式"
+            "随提问一起送给模型。**不经过大模型** —— 实测让本地视觉模型自己认人"
+            "(参考图+视频+bbox,与云端同构)逐人正确 8/28,低于二选一瞎猜;同一批"
+            "场景纯 ReID 是 14/14。身份库里一个成员都没登记时本项自动空转"
+        ),
+    )
+    identity_threshold: float = Field(
+        default=0.70, ge=0.0, le=1.0,
+        description=(
+            "判成员的余弦相似度下限。实测(同日库):真人 0.77~0.95,而**电视屏幕里"
+            "的人**(检测器会以 0.94 置信度把它当真人)只有 0.44~0.67 —— 0.70 把"
+            "8/8 电视误检挡掉且 0 误拒。往下调先放进来的是电视里的人,不是陌生人。"
+            "**这个阈值依赖身份库是新的**:参考图与当下衣着差得远时相似度整体塌陷"
+            "(旧库实测只有 8/19),此时该做的是重新登记,不是调低阈值"
+        ),
+    )
+    identity_sample_frames: int = Field(
+        default=3, ge=1, le=16,
+        description=(
+            "每窗抽几帧跑人体检测。名册的各个 bbox 取自**同一帧**(检出人数最多的"
+            "那帧)—— 跨帧混用会让位置互相矛盾,模型按坐标对号入座就会对错人"
+        ),
+    )
 
 
 class PerceptionSettings(BaseModel):
@@ -415,7 +441,8 @@ class PerceptionSettings(BaseModel):
         description=(
             "感知引擎后端。cloud=云端多模态大模型(默认,需 API Key);"
             "local=本地 GPU 视觉模型边车(免 Key、零 token 成本、画面不出本地,"
-            "但纯视觉:无音频结论、无身份识别,且不直接执行设备动作)"
+            "但纯视觉:无音频结论,且不直接执行设备动作。认人由本地 ReID 提供,"
+            "见 local_vision.identity_enabled)"
         ),
     )
     local_vision: LocalVisionSettings = Field(

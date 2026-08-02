@@ -226,12 +226,13 @@ class MageVLEngine:
         want_gate: bool = True,
         ngram_guard: int | None = None,
         codec_target_canvas: int | None = None,
+        roster: list[dict] | None = None,
     ) -> dict:
         """对一段视频做一次感知,返回 caption + 逐条规则判定 + 门控概率。"""
         if not self.ready:
             raise RuntimeError("engine not loaded")
         rules = rules or []
-        prompt = build_prompt(scene_ask or DEFAULT_SCENE_ASK, rules, camera_note)
+        prompt = build_prompt(scene_ask or DEFAULT_SCENE_ASK, rules, camera_note, roster)
         # 段太短时 codec 分组凑不齐,先探帧数决定实际后端(降级而非报错)。
         frame_count = probe_frame_count(video_path)
         backend = pick_backend(self.video_backend, frame_count)

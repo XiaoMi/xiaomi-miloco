@@ -51,16 +51,19 @@ class _FakeClient:
         self.fail = fail
         self.calls: list[dict] = []
 
+    # roster 是**必选**位置之外的具名参数,而不是 **kw 兜底:引擎无条件传它。
+    # 这是有意的 —— 只在名册非空时才传的话,一个没跟上契约的客户端会一直正常,
+    # 直到"家里真的走进来一个人"那一刻才炸,而那正是最需要它工作的时刻。
     async def perceive(self, video, rules, scene_ask=None, camera_note="",
                        max_new_tokens=256, want_gate=True, ngram_guard=None,
-                       codec_target_canvas=None):
+                       codec_target_canvas=None, roster=None):
         from miloco.perception.local_vision.client import LocalVisionError
 
         self.calls.append({
             "rules": rules, "scene_ask": scene_ask,
             "camera_note": camera_note, "bytes": len(video),
             "max_new_tokens": max_new_tokens, "ngram_guard": ngram_guard,
-            "codec_target_canvas": codec_target_canvas,
+            "codec_target_canvas": codec_target_canvas, "roster": roster,
         })
         if self.fail:
             raise LocalVisionError("sidecar down")
@@ -918,7 +921,7 @@ async def test_on_demand_returns_none_when_the_sidecar_fails():
 
 
 @pytest.mark.asyncio
-async def test_on_demand_returns_none_on_an_empty_batch():
+async def test_on_demand_returns_none_on_an_emptyBatchedSnapshot(snapshots=[_snapshot("cam1")]):
     assert await _engine(_FakeClient()).on_demand_perceive(
         BatchedSnapshot(snapshots=[]), "有人吗?"
     ) is None
@@ -1333,3 +1336,74 @@ async def test_adding_a_camera_re_arms_the_capacity_warning(monkeypatch, caplog)
     hits = [r for r in caplog.records if "超过感知周期" in r.getMessage()]
     assert len(hits) == 2, f"加相机后没有重新提示(实际 {len(hits)} 条)"
     assert "1 台" in hits[0].getMessage() and "2 台" in hits[1].getMessage()
+
+
+# ── 认人接线 ──────────────────────────────────────────────────────────────
+#
+# 上面 test_identity.py 测的是 resolver 自己算得对不对;这里测的是它**真的被接上了**
+# —— 名册有没有随请求发出去、失败时会不会把整窗拖下水。两者都错过的话,认人在单测
+# 里全绿而线上一个名字都出不来。
+
+
+class _StubIdentity:
+    def __init__(self, hits=None, boom: bool = False):
+        self._hits = hits or []
+        self._boom = boom
+        self.calls = 0
+
+    def resolve(self, frames):
+        self.calls += 1
+        if self._boom:
+            raise RuntimeError("reid exploded")
+        return self._hits
+
+
+def _hit(name: str, bbox=(1, 2, 3, 4), score: float = 0.9):
+    from miloco.perception.local_vision.identity import PersonHit
+
+    return PersonHit("pid-" + name, name, None, bbox, score)
+
+
+@pytest.mark.asyncio
+async def test_roster_reaches_the_sidecar_request():
+    client = _FakeClient([{"caption": "有人在看书", "rule_hits": [], "gate_p": None,
+                           "backend": "codec"}])
+    eng = _engine(client, identity=_StubIdentity([_hit("小亮", (357, 242, 467, 785))]))
+    await eng.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules=[])
+    assert client.calls[0]["roster"] == [{"name": "小亮", "bbox": [357, 242, 467, 785]}]
+
+
+@pytest.mark.asyncio
+async def test_identity_failure_does_not_lose_the_window():
+    """认人是旁路 —— 它炸了,这一窗的画面理解与规则判定必须照常产出。
+
+    反过来(异常冒泡)的后果是:身份库里出现一个坏文件,这台相机从此整个不工作,
+    而用户失去的本来只是"名字"这一项。
+    """
+    client = _FakeClient([{"caption": "有人在看书", "rule_hits": [], "gate_p": None,
+                           "backend": "codec"}])
+    eng = _engine(client, identity=_StubIdentity(boom=True))
+    res = await eng.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules=[])
+    assert res is not None and res.caption
+    assert client.calls[0]["roster"] == []
+
+
+@pytest.mark.asyncio
+async def test_no_identity_layer_sends_an_empty_roster_not_none():
+    """未开启认人时行为必须与改动前一致 —— 边车侧 roster=[] 与不传等价。"""
+    client = _FakeClient([{"caption": "空", "rule_hits": [], "gate_p": None,
+                           "backend": "codec"}])
+    eng = _engine(client, identity=None)
+    await eng.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules=[])
+    assert client.calls[0]["roster"] == []
+
+
+@pytest.mark.asyncio
+async def test_identity_cost_is_visible_in_timing():
+    """认人是新加的串行开销。混进 total 的话,它变慢只会表现为"感知整体变慢",
+    查不到头上 —— 面板上必须能单独看到这一项。"""
+    client = _FakeClient([{"caption": "有人", "rule_hits": [], "gate_p": None,
+                           "backend": "codec"}])
+    eng = _engine(client, identity=_StubIdentity([_hit("小亮")]))
+    res = await eng.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules=[])
+    assert any(k.startswith("identity_") and k.endswith("_ms") for k in res.timing)

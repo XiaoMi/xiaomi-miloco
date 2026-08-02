@@ -211,6 +211,40 @@ async def _run_with_trace_id(
         reset_trace_id(token)
 
 
+def _build_local_identity(cfg):
+    """给本地通路造认人层。造不出来就返回 None —— 感知照常跑,只是没有名字。
+
+    认人是**加分项**:它失败的正确表现是描述里写「一名男子」,而不是这台相机整个
+    不工作。所以这里把所有异常都吞掉并降级,与引擎构造那层的 try 是两件事(那层
+    失败会让感知彻底停摆,必须留下 engine_init_failed 状态)。
+    """
+    if not getattr(cfg, "identity_enabled", False):
+        return None
+    try:
+        from miloco.perception.engine.identity.config_loader import resolve_library_root
+        from miloco.perception.local_vision.identity import LocalIdentityResolver
+
+        # 必须走 resolve_library_root():它是库路径的 single source of truth,
+        # 绕开它(比如直接取 GalleryConfigDC 默认值)会让 settings 里的 override
+        # 失效,于是注册流程写到一个目录、认人读另一个目录 —— 表现为"登记了却永远
+        # 认不出",而两边都不报错。
+        root = resolve_library_root()
+        resolver = LocalIdentityResolver(
+            root,
+            threshold=cfg.identity_threshold,
+            sample_frames=cfg.identity_sample_frames,
+        )
+        # 启动时就把库读进来:一是让日志在启动阶段就说清楚"认得几个人",二是
+        # 库路径写错这类问题能立刻暴露,而不是等第一个人走进画面。
+        resolver.refresh_gallery()
+        if resolver.gallery_size == 0:
+            logger.info("本地认人已开启,但身份库里没有已登记成员 —— 本窗名册将为空")
+        return resolver
+    except Exception as e:  # noqa: BLE001 —— 见 docstring:认人失败不该拖垮感知
+        logger.warning("本地认人层创建失败,本通路将不产出人名: %s", e)
+        return None
+
+
 class PerceptionEngineProxy:
     """Real perception proxy backed by perception-engine pipeline.
 
@@ -406,6 +440,7 @@ class PerceptionEngineProxy:
                 max_frames=cfg.max_frames,
                 short_edge=cfg.video_short_edge,
                 codec_target_canvas=cfg.codec_target_canvas,
+                identity=_build_local_identity(cfg),
             )
         except Exception as e:  # noqa: BLE001 —— 与云端分支对称
             # 不加这层的话构造异常会冒泡出去,留下 _status="ready" 而 engine=None
