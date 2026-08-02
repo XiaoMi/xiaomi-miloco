@@ -12,6 +12,7 @@ from local_vision.prompts import (
     _RULE_LINE_RE,
     DEFAULT_SCENE_ASK,
     NO_VERDICT_REASON,
+    OSD_WATERMARK_GUARD,
     build_prompt,
     parse_response,
 )
@@ -405,3 +406,47 @@ def test_roster_sits_before_the_format_contract():
                      roster=[{"name": "小亮", "bbox": [1, 1, 10, 10]}],
                      camera_note="这是书房")
     assert p.index("小亮[bbox=") < p.index("规则N:") < p.index("这是书房")
+
+
+# ── 时间水印兜底 ──────────────────────────────────────────────────────────
+#
+# 相机把日期时间烧进画面像素时,模型会去读、而且读错:60 段实测,不加这句
+# 44/60(73.3%)的描述报出日期或时钟,年份只对 36%(2026 被读成 2022/2020/2024);
+# 加上之后 0/60。危害不是多一个错字段,是错时间会外溢成场景判断 ——
+# 14:04 被读成 04:04 之后,描述写「整个场景发生在一个安静的早晨」。
+
+
+def test_guard_is_off_by_default():
+    """**默认不挂**。这句话会压掉屋里真实存在的钟(挂钟/微波炉/闹钟):30 段配对,
+    不挂 8/30 会报出来,挂了只剩 1/30(McNemar p=0.039)。没水印的机位不该付这个代价。
+    """
+    assert OSD_WATERMARK_GUARD not in build_prompt("描述画面", [])
+
+
+def test_guard_is_added_when_the_camera_burns_in_a_timestamp():
+    assert OSD_WATERMARK_GUARD in build_prompt("描述画面", [], osd_watermark=True)
+
+
+def test_guard_survives_a_caller_supplied_question():
+    """主动查询通路用 agent 现编的提问顶掉 DEFAULT_SCENE_ASK。
+
+    此前这句话是并在 DEFAULT_SCENE_ASK 里的,于是那条路上它**整个消失** ——
+    定时通路受保护、主动查询裸奔,而两条路看的是同一个带水印的画面。
+    """
+    p = build_prompt("门口有人吗?", [], osd_watermark=True)
+    assert "门口有人吗?" in p
+    assert OSD_WATERMARK_GUARD in p
+
+
+def test_guard_sits_before_the_format_contract():
+    """它是任务提问的一部分,必须在格式约定之前 —— 落到后面会与「规则N:」抢近因位置。"""
+    p = build_prompt("描述画面", [{"name": "r", "query": "有人"}], osd_watermark=True)
+    assert p.index(OSD_WATERMARK_GUARD) < p.index("规则N:")
+
+
+def test_guard_does_not_disturb_rule_parsing():
+    """这句话本身不能被读成一条判定。"""
+    p = build_prompt("描述画面", [{"name": "明火", "query": "灶台上有明火"}],
+                     osd_watermark=True)
+    _, hits = parse_response(p, [{"name": "明火"}])
+    assert hits[0]["hit"] is False

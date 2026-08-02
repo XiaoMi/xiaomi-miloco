@@ -54,6 +54,7 @@ from miloco.perception.local_vision.identity import (
 )
 from miloco.perception.rule_scope import (
     camera_prompt_map,
+    physical_did,
     rules_for_device,
 )
 from miloco.perception.snapshot_context import push_clip_bytes
@@ -102,6 +103,9 @@ _MAX_NEW_TOKENS_CEILING = 1024
 #: 部署的构件,改一边而不改另一边,主动查询的回答就会被按定时描述的力度掐断。
 #: 与 ``_MAX_NEW_TOKENS_CEILING`` 同一类跨仓库配对,两侧各有一条测试钉住字面值。
 _NGRAM_GUARD_FREEFORM = 32
+#: MIoT ``camera-control:time-watermark`` 的属性 iid。各机型 siid/piid 未必一致 ——
+#: 读不到就当没有水印(见 ``_has_osd_watermark``),不做机型查表。
+_OSD_IID = "prop.2.5"
 
 
 class _InputConfig:
@@ -167,6 +171,11 @@ class LocalVisionEngine(BasePerceptionEngine):
         #: 发现冷启动时单相机偶尔会超一次,把唯一那次额度用掉,之后用户**加了一台
         #: 相机**——一个全新的、稳定的容量问题——反而不再提示了。
         self._over_budget_warned_for: set[int] = set()
+        #: did -> 该机位是否把时间烧进了画面。**按相机缓存,不每窗查**:这是用户在
+        #: 米家里设的配置项,不是状态,变一次要几周几个月;而每窗一次 MIoT 往返会给
+        #: 常驻感知平白加一次网络依赖。缓存到进程结束 —— 用户改了这个设置要重启
+        #: 才生效,这个代价是可接受的(对照:改错了的后果只是多/少挂一句提示词)。
+        self._osd_watermark: dict[str, bool] = {}
         #: 每台相机最近一次认人耗时(毫秒),进 timing 供面板与排障。认人是新加的
         #: 串行开销,必须能被单独看到 —— 混在 total 里的话,一旦它变慢(比如库里
         #: 人数涨了)只会表现为"感知整体变慢",查不到头上。
@@ -319,6 +328,7 @@ class LocalVisionEngine(BasePerceptionEngine):
         finally:
             reset_device_context(token)
 
+        osd = await self._has_osd_watermark(did)
         dispatched = rules_for_device(rules, did)
         payload_rules = [
             {"name": r.get("name", ""), "query": r.get("condition", {}).get("query", "")}
@@ -357,6 +367,7 @@ class LocalVisionEngine(BasePerceptionEngine):
                 max_new_tokens=self._token_budget(len(payload_rules)),
                 codec_target_canvas=self._codec_target_canvas,
                 roster=roster,
+                osd_watermark=osd,
             )
         except LocalVisionError as e:
             logger.warning("[local-vision] sidecar failed did=%s: %s", did, e)
@@ -376,6 +387,40 @@ class LocalVisionEngine(BasePerceptionEngine):
                 # 本窗实际拿到多少源帧 —— 判断"画布喂饱了没有"的唯一依据:
                 # 画布数 = 源帧数 / 8(group_size=32 产出 4 张),喂不够就只能拿到更少。
                 "src_frames": len(snapshot.video.frames) if snapshot.video else 0}
+
+    async def _has_osd_watermark(self, did: str) -> bool:
+        """该机位是否把日期时间烧进了画面(MIoT ``time-watermark``)。
+
+        **查不到就当没有(False)。** 这个方向是有依据的,不是随手选的保守值:挂上
+        那句提示的代价是**压掉屋里真实存在的钟** —— 实测 30 段配对,一个挂在墙上的
+        数字钟从 8/30 被报出来降到 1/30(McNemar p=0.039)。厨房微波炉、卧室闹钟、
+        客厅挂钟都是常见的。所以「不确定」时不该挂:漏挂只是退回本来就存在的
+        「模型可能读错水印」,误挂却会主动删掉画面里的真实信息。
+
+        取不到属性的情形很多:非小米相机、机型没这个属性、账号未绑定、网络抖动。
+        这些都不该让感知报错,所以整段吞异常。
+        """
+        if did in self._osd_watermark:
+            return self._osd_watermark[did]
+        val = False
+        try:
+            from miloco.manager import manager
+
+            phys = physical_did(did)
+            data = await manager.miot_service.get_device_status(phys, [_OSD_IID])
+            props = (data or {}).get("properties") or []
+            if props and props[0].get("code") == 0:
+                val = bool(props[0].get("value"))
+        except Exception as e:  # noqa: BLE001 —— 见 docstring:查不到就当没有
+            logger.debug("[local-vision] 读时间水印属性失败 did=%s: %s", did, e)
+        self._osd_watermark[did] = val
+        if val:
+            logger.info(
+                "[local-vision] did=%s 的画面烧着时间水印,提问里会挂一句让模型忽略它。"
+                "这只是兜底 —— 在相机上关掉水印才是真正的解决(米家:摄像机设置→时间水印)",
+                did,
+            )
+        return val
 
     async def realtime_perceive(
         self,

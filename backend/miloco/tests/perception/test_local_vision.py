@@ -56,7 +56,7 @@ class _FakeClient:
     # 直到"家里真的走进来一个人"那一刻才炸,而那正是最需要它工作的时刻。
     async def perceive(self, video, rules, scene_ask=None, camera_note="",
                        max_new_tokens=256, want_gate=True, ngram_guard=None,
-                       codec_target_canvas=None, roster=None):
+                       codec_target_canvas=None, roster=None, osd_watermark=False):
         from miloco.perception.local_vision.client import LocalVisionError
 
         self.calls.append({
@@ -64,6 +64,7 @@ class _FakeClient:
             "camera_note": camera_note, "bytes": len(video),
             "max_new_tokens": max_new_tokens, "ngram_guard": ngram_guard,
             "codec_target_canvas": codec_target_canvas, "roster": roster,
+            "osd_watermark": osd_watermark,
         })
         if self.fail:
             raise LocalVisionError("sidecar down")
@@ -1408,3 +1409,100 @@ async def test_identity_cost_is_visible_in_timing():
     eng = _engine(client, identity=_StubIdentity([_hit("小亮")]))
     res = await eng.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), rules=[])
     assert any(k.startswith("identity_") and k.endswith("_ms") for k in res.timing)
+
+
+# ── 时间水印开关 ──────────────────────────────────────────────────────────
+#
+# 挂上「忽略时间水印」这句话的代价是**压掉屋里真实存在的钟**(实测 30 段配对
+# 8/30 → 1/30,McNemar p=0.039)。所以"不确定时不挂"是有依据的方向,不是随手
+# 选的保守值:漏挂只是退回本来就存在的"模型可能读错水印",误挂却会主动删掉
+# 画面里的真实信息。
+
+
+@pytest.mark.asyncio
+async def test_watermark_flag_defaults_off_when_the_property_is_unreadable(monkeypatch):
+    """非小米相机、机型没这个属性、账号未绑定、网络抖动 —— 都该落在"当作没有"。"""
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+    client = _FakeClient([{"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}])
+    eng_obj = _engine(client)
+    # 读属性会因为没有 manager 而抛 —— 正是要覆盖的那条路
+    await eng_obj.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), [])
+    assert client.calls[0]["osd_watermark"] is False
+
+
+@pytest.mark.asyncio
+async def test_watermark_flag_is_cached_per_camera(monkeypatch):
+    """这是用户在米家里设的**配置项**,不是状态 —— 每窗一次 MIoT 往返会给常驻
+    感知平白加一次网络依赖。"""
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+    calls = []
+
+    async def _fake_status(did, iids):
+        calls.append(did)
+        return {"properties": [{"iid": "prop.2.5", "value": True, "code": 0}]}
+
+    eng_obj = _engine(_FakeClient([
+        {"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"},
+        {"caption": "y", "rule_hits": [], "gate_p": None, "backend": "codec"},
+    ]))
+    monkeypatch.setattr(eng_obj, "_has_osd_watermark", eng_obj._has_osd_watermark)
+    import miloco.manager as mgr
+    monkeypatch.setattr(
+        mgr, "manager",
+        SimpleNamespace(miot_service=SimpleNamespace(get_device_status=_fake_status)),
+        raising=False,
+    )
+    for _ in range(2):
+        await eng_obj.realtime_perceive(BatchedSnapshot(snapshots=[_snapshot("cam1")]), [])
+    assert len(calls) == 1, f"应只查一次,实际 {len(calls)} 次"
+
+
+@pytest.mark.asyncio
+async def test_watermark_flag_reaches_the_sidecar_when_the_camera_has_one(monkeypatch):
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+
+    async def _fake_status(did, iids):
+        return {"properties": [{"iid": "prop.2.5", "value": True, "code": 0}]}
+
+    import miloco.manager as mgr
+    monkeypatch.setattr(
+        mgr, "manager",
+        SimpleNamespace(miot_service=SimpleNamespace(get_device_status=_fake_status)),
+        raising=False,
+    )
+    client = _FakeClient([{"caption": "x", "rule_hits": [], "gate_p": None, "backend": "codec"}])
+    await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+    )
+    assert client.calls[0]["osd_watermark"] is True
+
+
+@pytest.mark.asyncio
+async def test_property_read_error_never_breaks_the_window(monkeypatch):
+    """读属性失败只该让开关落 False,不该让这台相机整窗没有输出。"""
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"V")
+
+    async def _boom(did, iids):
+        raise RuntimeError("miot down")
+
+    import miloco.manager as mgr
+    monkeypatch.setattr(
+        mgr, "manager",
+        SimpleNamespace(miot_service=SimpleNamespace(get_device_status=_boom)),
+        raising=False,
+    )
+    client = _FakeClient([{"caption": "有人在看书", "rule_hits": [], "gate_p": None,
+                           "backend": "codec"}])
+    res = await _engine(client).realtime_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), []
+    )
+    assert res is not None and res.caption
+    assert client.calls[0]["osd_watermark"] is False

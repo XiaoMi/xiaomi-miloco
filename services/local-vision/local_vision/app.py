@@ -172,6 +172,14 @@ class PerceiveRequest(BaseModel):
     roster: list[RosterEntry] = Field(
         default_factory=list, max_length=MAX_ROSTER, description="调用方已认好的人物名册",
     )
+    osd_watermark: bool = Field(
+        default=False,
+        description=(
+            "该机位是否把日期时间烧进了画面像素。True 时提问里挂一句「忽略时间水印」。"
+            "**默认 False 是有意的**:这句话会压掉屋里真实存在的钟(挂钟/微波炉/闹钟),"
+            "实测 30 段配对 8/30 → 1/30(McNemar p=0.039)。没水印的机位不该付这个代价"
+        ),
+    )
 
 
 class RuleHit(BaseModel):
@@ -279,6 +287,7 @@ def perceive(body: PerceiveRequest) -> PerceiveResponse:
             ngram_guard=body.ngram_guard,
             codec_target_canvas=body.codec_target_canvas,
             roster=[r.model_dump() for r in body.roster],
+            osd_watermark=body.osd_watermark,
         )
     except Exception as err:  # noqa: BLE001 —— 单次推理失败不该拖垮常驻服务
         logger.exception("perceive failed")
