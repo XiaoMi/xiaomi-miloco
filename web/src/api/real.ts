@@ -993,6 +993,7 @@ interface BackendScopeCamera {
   connected: boolean;
   channel?: number;  // 通道号，用于多通道摄像头
   channel_count?: number;  // 通道总数；判多通道的权威信号（旧后端无则兜底 1）
+  stream_error?: "cross_subnet_nat" | null;
 }
 
 export async function realListScopeCameras(): Promise<ScopeCamera[]> {
@@ -1013,6 +1014,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     connected: c.connected,
     channel: c.channel ?? 0,  // 传递通道号，默认为 0
     channelCount: c.channel_count ?? 1,  // 通道总数，判多通道用；旧后端兜底 1
+    streamError: c.stream_error ?? undefined,
   }));
 }
 

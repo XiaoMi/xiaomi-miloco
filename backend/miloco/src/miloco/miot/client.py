@@ -20,6 +20,7 @@ from miot.spec import MIoTSpecTypeLevel
 from miot.types import (
     MIoTActionParam,
     MIoTCameraInfo,
+    MIoTCameraStatus,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
@@ -91,6 +92,10 @@ def build_sub_device_names(device: MIoTDeviceInfo) -> dict[str, str]:
 class MiotProxy:
     """Xiaomi IoT proxy class responsible for handling MIoT device related operations."""
 
+    # 跨网段相机卡在 CONNECTING/RE_CONNECTING 超过这个时长（秒），判定为大概率被
+    # NAT 类型卡死（探测走通但拉流回包端口不固定，严格 conntrack 路由器会丢包）。
+    _STREAM_NAT_TIMEOUT: float = 60
+
     def __init__(
         self,
         uuid: str,
@@ -100,6 +105,9 @@ class MiotProxy:
     ):
         self._kv_repo = kv_repo
         self.init_miot_info_dict()
+        # did -> monotonic ts：相机进入 CONNECTING/RE_CONNECTING 的起始时间，用于判断
+        # 跨网段相机是否卡在"连接中"太久（见 stream_nat_blocked）。
+        self._camera_connect_since: dict[str, float] = {}
         self._camera_img_managers: dict[str, CameraVisionHandler] = {}
         self._token_refresh_task: asyncio.Task | None = None
         # Serialize refresh_devices: multiple entries (MQTT reconnect,
@@ -337,6 +345,7 @@ class MiotProxy:
         # 5. Clear in-memory state
         self._oauth_info = None
         self._camera_info_dict = {}
+        self._camera_connect_since = {}
         self._device_info_dict = {}
         self._scene_info_dict = {}
         self._user_info = None
@@ -659,12 +668,43 @@ class MiotProxy:
             return
         cam.lan_online = info.online
         cam.local_ip = info.ip
+        cam.cross_subnet = info.cross_subnet
         logger.debug(
             "Camera LAN status synced: did=%s, online=%s, ip=%s",
             did,
             info.online,
             info.ip,
         )
+
+    async def _on_camera_status_changed(
+        self, did: str, status: MIoTCameraStatus
+    ) -> None:
+        # 反向同步给 MIoTLan：连上的相机可达性已证实，跳过探测；
+        # 全部连上时整个扫描暂停（见 lan.py set_camera_connected）。
+        self._miot_client.set_camera_connected(did, status == MIoTCameraStatus.CONNECTED)
+        # 记录"进入连接中"的起始时间，供 stream_nat_blocked 判断是否卡住太久。
+        if status in (MIoTCameraStatus.CONNECTING, MIoTCameraStatus.RE_CONNECTING):
+            self._camera_connect_since.setdefault(did, time.monotonic())
+        else:
+            self._camera_connect_since.pop(did, None)
+
+    def stream_nat_blocked(self, did: str) -> bool:
+        """跨网段 + LAN 探测可达 + 拉流卡在连接中超过阈值 → 判定为 NAT 类型限制拉流。
+
+        用于给前端/CLI 一个明确的诊断提示，而不是让用户干等一个永远连不上的
+        "连接中"。判据完全基于已有的粗粒度状态（不依赖底层 miss errorcode）：
+        跨网段本身不是问题（同网段的跨网段判定为 False），真正卡住的是"探测通、
+        拉流一直连不上"这个组合。
+        """
+        cam = self._camera_info_dict.get(did)
+        if cam is None or not getattr(cam, "cross_subnet", False):
+            return False
+        if not getattr(cam, "lan_online", False):
+            return False
+        since = self._camera_connect_since.get(did)
+        if since is None:
+            return False
+        return (time.monotonic() - since) >= self._STREAM_NAT_TIMEOUT
 
     async def refresh_cameras(self) -> dict[str, MIoTCameraInfo] | None:
         async with self._refresh_cameras_lock:
@@ -704,6 +744,10 @@ class MiotProxy:
                     )
                 )
                 active = {physical_camera_did(d) for d in active_channels}
+                # MIoTLan 靠这个知道"全部相机是否都已连上"才能整体暂停探测——必须传
+                # 这个 scoped 后的 active 集，不能传账号下全部相机（不在当前 scope 里
+                # 的相机永远不会连上，会让"全连上"永远判不成立）。
+                self._miot_client.set_camera_dids(active)
                 logger.debug(
                     "Camera streaming set: channels=%s physical=%s managers=%s",
                     sorted(active_channels),
@@ -722,6 +766,10 @@ class MiotProxy:
                         if manager is not None:
                             await self._miot_client.register_lan_device_changed_async(
                                 did=camera_did, callback=self._on_lan_device_changed
+                            )
+                            await self._miot_client.register_camera_status_changed_async(
+                                did=camera_did,
+                                callback=self._on_camera_status_changed,
                             )
                             # 起停相机 native 会话直接影响相机有限的并发流名额，
                             # 用 WARNING 便于运维一眼追踪拉流生命周期。
@@ -748,8 +796,17 @@ class MiotProxy:
                         await self._miot_client.unregister_lan_device_changed_async(
                             did=camera_did
                         )
+                        await self._miot_client.unregister_camera_status_changed_async(
+                            did=camera_did
+                        )
                         await self._camera_img_managers[camera_did].destroy()
                         del self._camera_img_managers[camera_did]
+                        self._miot_client.set_camera_connected(camera_did, False)
+                        # 回调已注销，destroy 触发的 DISCONNECTED 送不到
+                        # _on_camera_status_changed，这里显式清掉连接起始时间戳——
+                        # 否则该相机重新启用后 setdefault 拿到旧时间戳，跨 NAT 诊断会
+                        # 立即误报（详见 stream_nat_blocked 判据）。
+                        self._camera_connect_since.pop(camera_did, None)
                         logger.warning(
                             "Camera native stream stopped: %s", camera_did
                         )

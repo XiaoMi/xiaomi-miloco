@@ -970,6 +970,7 @@ function BenchCamItem({
   hasPrompt: boolean;
   onEditPrompt: () => void;
 }) {
+  const { t } = useTranslation();
   const available = cameraAvailable(cam);
   return (
     <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
@@ -997,6 +998,13 @@ function BenchCamItem({
         </div>
         {/* 该路自己的三态灯（各路镜头 / 连通可能不同）。 */}
         <ChannelStateDots cam={cam} />
+        {/* 跨网段 + 探测可达 + 拉流一直连不上——给可执行的两个方向,而不是让住户干等
+            一个永远连不上的"连接中"（见 backend list_cameras_with_state 的 stream_error）。 */}
+        {cam.streamError === "cross_subnet_nat" && (
+          <p className="mt-1 text-caption text-warning max-w-md">
+            {t("hero.streamErrorCrossSubnetNat")}
+          </p>
+        )}
       </div>
       {/* 须知 + 拾音 + 投喂开关(各控本路;拾音相机级、仅有 mic 的通道显示)。拾音从属于感知:
           相机未启用(inUse=false)时置灰、显示为关。 */}
