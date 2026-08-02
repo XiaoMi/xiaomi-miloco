@@ -921,7 +921,7 @@ async def test_on_demand_returns_none_when_the_sidecar_fails():
 
 
 @pytest.mark.asyncio
-async def test_on_demand_returns_none_on_an_emptyBatchedSnapshot(snapshots=[_snapshot("cam1")]):
+async def test_on_demand_returns_none_on_an_empty_batch():
     assert await _engine(_FakeClient()).on_demand_perceive(
         BatchedSnapshot(snapshots=[]), "有人吗?"
     ) is None
@@ -1351,8 +1351,9 @@ class _StubIdentity:
         self._boom = boom
         self.calls = 0
 
-    def resolve(self, frames):
+    def resolve(self, frames, source=""):
         self.calls += 1
+        self.last_source = source
         if self._boom:
             raise RuntimeError("reid exploded")
         return self._hits

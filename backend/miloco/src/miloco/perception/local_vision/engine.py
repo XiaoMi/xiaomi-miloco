@@ -333,7 +333,7 @@ class LocalVisionEngine(BasePerceptionEngine):
             t_id = time.monotonic()
             try:
                 frames = list(snapshot.video.frames) if snapshot.has_video else []
-                hits = await asyncio.to_thread(self._identity.resolve, frames)
+                hits = await asyncio.to_thread(self._identity.resolve, frames, did)
                 roster = render_roster(hits)
                 if hits:
                     logger.debug(

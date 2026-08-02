@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,12 @@ _MIN_CROP_HEIGHT = 80
 
 #: "有人但都没认出来"的日志节流间隔(秒)。
 _MISS_LOG_INTERVAL_SEC = 300.0
+
+#: 超过多少天的身份库开始告警。人体 ReID 主要吃衣着,而衣着按季节和天气换 ——
+#: 14 天是"大概率已经换过一身"的量级。这个数**没有实测标定**,只有两个观测点
+#: (36 天的库 0/14、当天的库 14/14),取值偏保守:误报只是多一条 WARNING,
+#: 漏报是继续高置信度认错人。
+_STALE_LIBRARY_DAYS = 14.0
 
 #: bbox 归一化区间。与云端 prompt 的约定一致([0,1000],左上 0,0)——两条通路
 #: 说同一种坐标语言,提示词模板才能共用。
@@ -105,17 +112,23 @@ class LocalIdentityResolver:
         #: person_id -> (name, role, 特征矩阵 [N,128] L2 归一化)
         self._gallery: dict[str, tuple[str, str | None, NDArray[np.float32]]] = {}
         #: 身份库指纹快照,用于判断「用户重新登记过没有」
-        self._gallery_fp: tuple = ()
+        self._gallery_fp: tuple | None = None
         self._gallery_loaded_at: float = 0.0
         #: 加载失败的原因。要能从外面看到 —— 否则「库是空的」和「读库炸了」在
         #: 行为上同形(都是名册为空),而后者是故障。
         self.load_error: str | None = None
-        #: 本窗见过的最高相似度(不论是否过阈值)。**库过期时的表现是「什么都不说」**
-        #: —— 与「画面里没人」「认人没开」在日志上完全同形,而三者的处置南辕北辙。
-        self.last_best_score: float | None = None
-        #: 上次就"有人但一个都没认出来"打过日志的时刻。必须节流:这个情形一旦发生
-        #: 往往是**持续**的(库过期了),每窗一条会把日志刷没。
-        self._last_miss_log: float = 0.0
+        #: 身份库的"登记距今多少天"。库过期是唯一被证实的失效根因,而它此前在运行时
+        #: 完全不可见。取自登记**图**的 mtime,刻意不取 .npy —— 特征补算会重写 .npy,
+        #: 那样一个 36 天的旧库在补算之后会显示成"全新",把唯一可靠的信号废掉。
+        self.library_age_days: float | None = None
+        #: 上次就"有人但一个都没认出来"打过日志的时刻,**按相机分开**。
+        #: 共用一个的话:4 台相机库都过期时只有第一台打得出日志,另外 3 台永远无人报。
+        self._last_miss_log: dict[str, float] = {}
+        #: 懒加载两个 ONNX session 的锁。resolve 是从多个 per-device 协程经
+        #: asyncio.to_thread 并发进来的,check-then-act 实测会让 6 个并发窗构造出
+        #: 6 个 Detector(5 个立刻被丢弃),RSS 峰值 976MB —— 而这台机器上还跑着
+        #: 本地视觉模型的边车。
+        self._init_lock = threading.Lock()
 
     # ── 身份库 ────────────────────────────────────────────────────────────
 
@@ -126,56 +139,103 @@ class LocalIdentityResolver:
     def refresh_gallery(self) -> bool:
         """按需重载身份库。返回是否发生了重载。
 
-        用户在面板上重新登记之后,不重启也要能生效 —— 但每窗都扫一遍目录是浪费,
-        所以用 ``list_persons`` 给出的 tier_a 指纹(含文件 mtime)做变更检测。
+        变更检测**只盯这一层真正读的东西**:``meta.json``(姓名)与 ``tier_a/*.npy``
+        (特征向量)。此前盯的是 ``list_persons()`` 给出的 tier_a **图文件**指纹,
+        而这一层一张图都不读 —— 盯错输入实测出两条静默故障:
+
+        1. 用户在面板上把认错的名字改对(只动 meta.json),本进程生命周期内**永远**
+           继续用旧名字。刚刚叫错过名字的系统改不动名字,是最不能接受的一种。
+        2. 启动时 ``main.py`` 的 ``_backfill_tier_a_reid_embeddings`` 后台补算出来的
+           ``.npy``(只动 .npy)永远进不了库。它与这里的启动期 eager 加载是竞态,
+           resolver 先跑完的话,被补算的成员在整个进程生命周期里都不参与比对 ——
+           而按 ``_match`` 的取 argmax 语义,他们的检测框会被分给**别的成员**。
+
+        另注意 ``_gallery_fp`` 用 ``None`` 当"从未成功加载过"的哨兵,而不是拿
+        ``self._gallery`` 的真假来兼作判据:后者会让**合法的空库**(还没登记任何人,
+        也就是每个新装用户的初始状态)每窗重扫目录并打一条 INFO —— 约 7000 行/天/相机。
         """
+        try:
+            fp = _library_fingerprint(self.root)
+        except Exception as e:  # noqa: BLE001 —— 读不到库只该让名册为空
+            self.load_error = f"{type(e).__name__}: {e}"
+            logger.warning("[local-vision] 身份库指纹读取失败,本窗不做认人: %s", e)
+            # 哨兵置 None 而不是 ():目录恢复正常后必须能自愈,而 () 恰好是
+            # "库为空"的合法指纹 —— 撞上就再也不会重载了。
+            self._gallery, self._gallery_fp = {}, None
+            return False
+
+        if self._gallery_fp is not None and fp == self._gallery_fp:
+            return False
+
         try:
             from miloco.perception.engine.identity.library import IdentityLibrary
 
             persons = IdentityLibrary(self.root).list_persons()
-        except Exception as e:  # noqa: BLE001 —— 读不到库只该让名册为空
+        except Exception as e:  # noqa: BLE001
             self.load_error = f"{type(e).__name__}: {e}"
             logger.warning("[local-vision] 身份库读取失败,本窗不做认人: %s", e)
-            self._gallery, self._gallery_fp = {}, ()
-            return False
-
-        fp = tuple(sorted((p.person_id, p.tier_a_fingerprint) for p in persons))
-        if fp == self._gallery_fp and self._gallery:
+            self._gallery, self._gallery_fp = {}, None
             return False
 
         gallery: dict[str, tuple[str, str | None, NDArray[np.float32]]] = {}
+        skipped: list[str] = []
         for p in persons:
             if not p.name:
                 # 没名字的成员进了名册也只能显示成空字符串,不如不进。
                 continue
             embs = _load_embeddings(self.root / "persons" / p.person_id / "tier_a")
             if embs is None:
+                # **必须报出来**:没有特征的成员会静默地不参与比对,而他本人的检测框
+                # 随后被 argmax 分给别的成员 —— 表现是"叫错名字",而不是"认不出"。
+                skipped.append(p.name)
                 continue
             gallery[p.person_id] = (p.name, p.role, embs)
 
         self._gallery, self._gallery_fp = gallery, fp
         self._gallery_loaded_at = time.time()
+        self.library_age_days = _library_age_days(self.root)
         self.load_error = None
+        age = "未知" if self.library_age_days is None else f"{self.library_age_days:.0f} 天"
         logger.info(
-            "[local-vision] 身份库已加载:%d 名成员(%s)",
-            len(gallery), ", ".join(v[0] for v in gallery.values()) or "无",
+            "[local-vision] 身份库已加载:%d 名成员(%s),登记距今 %s%s",
+            len(gallery), ", ".join(v[0] for v in gallery.values()) or "无", age,
+            f";**已跳过无特征成员**:{', '.join(skipped)}" if skipped else "",
         )
+        if self.library_age_days is not None and self.library_age_days >= _STALE_LIBRARY_DAYS:
+            # 库过期是这套方案唯一被证实的失效根因,而且表现是**高置信度认错**,
+            # 不是认不出 —— 实测一份 36 天前、另一房间另一身衣服的库,14 个人体框
+            # 全部偏向同一个成员,逐人正确率 0/14。代码侧无解(margin 规则的正确/
+            # 错误分布完全重叠),所以只能把它喊出来。
+            logger.warning(
+                "[local-vision] 身份库登记距今已 %.0f 天。人体 ReID 主要依据衣着,"
+                "旧库会**高置信度认错人**(实测 36 天的库逐人正确率 0/14),"
+                "建议用当前画面重新登记", self.library_age_days,
+            )
         return True
 
     # ── 主流程 ────────────────────────────────────────────────────────────
 
-    def resolve(self, frames: list) -> list[PersonHit]:
-        """从一窗的帧里解析出名册。任何异常都收敛成空名册。"""
-        self.last_best_score = None
+    def resolve(self, frames: list, source: str = "") -> list[PersonHit]:
+        """从一窗的帧里解析出名册。任何异常都收敛成空名册。
+
+        ``source`` 是相机标识,只用于日志归属。给了默认值是因为这个对象是**注入**的:
+        只实现 ``resolve(frames)`` 的替身或第三方实现,加位置参数会 TypeError,
+        落进下面的兜底 → 名册恒空 —— 一个"改了个签名把认人静默关掉"的故障。
+        """
         try:
-            return self._resolve(frames)
+            return self._resolve(frames, source)
         except Exception as e:  # noqa: BLE001 —— 见模块文档:fail-open
-            logger.warning("[local-vision] 认人失败,本窗名册留空: %s", e, exc_info=True)
+            logger.warning("[local-vision] 认人失败,本窗名册留空 did=%s: %s",
+                           source or "-", e, exc_info=True)
             return []
 
-    def _resolve(self, frames: list) -> list[PersonHit]:
+    def _resolve(self, frames: list, source: str) -> list[PersonHit]:
         self.refresh_gallery()
-        if not self._gallery:
+        # **取一次快照,整窗只用它**。此前是直接读 self._gallery:_match 取到 pid
+        # 之后、用 pid 取姓名之前,另一台相机的协程可能刚好触发重载(或走进异常分支
+        # 把它清空),于是 KeyError → 兜底 → **整份名册被吞成空**。
+        gallery = self._gallery
+        if not gallery:
             # 一个成员都没登记 —— 比对不可能,也不必为此加载两个模型。
             return []
         if not frames:
@@ -190,8 +250,11 @@ class LocalIdentityResolver:
             return []
 
         reid = self._get_reid()
-        # person_id -> 该成员本窗最像的那个框
-        picked: dict[str, PersonHit] = {}
+        # 先把「每个框 vs 每个成员」的相似度全算出来,再统一裁决。
+        # 逐框独立取 argmax 是不行的:两个人可以同时最像同一个成员,于是一个人被安上
+        # 别人的名字、另一个人整个从名册里消失(线上实测发生过)。
+        rows: list[tuple[Any, dict[str, float]]] = []
+        best_score: float | None = None
         for d in dets:
             crop = _crop(best_frame, d)
             if crop is None:
@@ -199,40 +262,34 @@ class LocalIdentityResolver:
             feat = _embed(reid, crop)
             if feat is None:
                 continue
-            pid, score = self._match(feat)
-            if self.last_best_score is None or score > self.last_best_score:
-                self.last_best_score = score
-            if pid is None or score < self.threshold:
-                # 不够像就**不进名册**。刻意不产出「陌生人」条目:本通路的名册只
-                # 用来把真名贴到位置上,而凭空多一个"陌生人"会让模型在描述里写出
-                # 画面上并不存在的人(云端 prompt 对这条有专门的约束,本地不引入
-                # 这个风险面)。
-                continue
-            name, role, _ = self._gallery[pid]
-            hit = PersonHit(
-                person_id=pid, name=name, role=role,
-                bbox=_norm_bbox(d, w, h), score=score,
-            )
-            # 同名只留分最高的一个 —— 见模块文档。
-            if pid not in picked or score > picked[pid].score:
-                picked[pid] = hit
+            sims = {pid: float(np.max(embs @ feat)) for pid, (_, _, embs) in gallery.items()}
+            if sims:
+                top = max(sims.values())
+                best_score = top if best_score is None else max(best_score, top)
+            rows.append((d, sims))
 
-        if not picked and self.last_best_score is not None:
-            # 画面里明明有人,却一个都没认出来 —— 最常见的成因是**身份库过期**
-            # (参考图是几周前另一身衣着拍的,人体 ReID 主要吃衣着,相似度整体
-            # 塌到阈值以下)。不把这个数说出来的话,它与"屋里没人"在日志上完全
-            # 同形,而处置南辕北辙:一个该去重新登记,一个什么都不用做。
-            now = time.time()
-            if now - self._last_miss_log > _MISS_LOG_INTERVAL_SEC:
-                self._last_miss_log = now
-                logger.info(
-                    "[local-vision] 画面里有 %d 个人但都没认出来,最高相似度 %.3f "
-                    "(阈值 %.2f)。持续如此多半是身份库过期,建议用当前画面重新登记",
-                    len(dets), self.last_best_score, self.threshold,
-                )
+        picked = _assign(rows, gallery, self.threshold, w, h)
 
-        # 按 x 从左到右排,名册读起来与画面一致。
-        return sorted(picked.values(), key=lambda p: p.bbox[0])
+        if not picked and best_score is not None:
+            self._log_all_missed(source, len(dets), best_score)
+        return sorted(picked, key=lambda p: p.bbox[0])
+
+    def _log_all_missed(self, source: str, n_people: int, best: float) -> None:
+        """画面里明明有人却一个都没认出来 —— 把最高相似度喊出来。
+
+        不说的话,它与"屋里没人""认人没开"在日志上完全同形,而三者的处置南辕北辙。
+        按相机分开节流:共用一个计时器的话,多相机同时过期时只有第一台报得出来。
+        """
+        now = time.time()
+        if now - self._last_miss_log.get(source, 0.0) <= _MISS_LOG_INTERVAL_SEC:
+            return
+        self._last_miss_log[source] = now
+        age = "" if self.library_age_days is None else f",库已登记 {self.library_age_days:.0f} 天"
+        logger.info(
+            "[local-vision] did=%s 画面里有 %d 个人但都没认出来,最高相似度 %.3f"
+            "(阈值 %.2f)%s。持续如此多半是身份库过期,建议用当前画面重新登记",
+            source or "-", n_people, best, self.threshold, age,
+        )
 
     # ── 内部 ──────────────────────────────────────────────────────────────
 
@@ -259,20 +316,15 @@ class LocalIdentityResolver:
                 best, best_dets = img, humans
         return best, best_dets
 
-    def _match(self, feat: NDArray[np.float32]) -> tuple[str | None, float]:
-        """与库内每个成员的**最相似样本**比。
-
-        取 max 而不是 mean:同一个人在库里的 5 张样本可能横跨不同衣着/角度,平均
-        会把「这一张恰好高度吻合」稀释掉,而识别要的正是那一张。
-        """
-        best_pid, best = None, -1.0
-        for pid, (_, _, embs) in self._gallery.items():
-            s = float(np.max(embs @ feat))
-            if s > best:
-                best_pid, best = pid, s
-        return best_pid, best
-
     def _get_detector(self):
+        # 双重检查 + 锁:resolve 从多个 per-device 协程经 to_thread 并发进来,
+        # 裸的 check-then-act 实测让 6 个并发窗构造出 6 个 Detector。
+        if self._detector is None:
+            with self._init_lock:
+                return self._detector_locked()
+        return self._detector
+
+    def _detector_locked(self):
         if self._detector is None:
             from miloco.perception.engine.identity.tracker.detector import Detector
 
@@ -281,6 +333,12 @@ class LocalIdentityResolver:
         return self._detector
 
     def _get_reid(self):
+        if self._reid is None:
+            with self._init_lock:
+                return self._reid_locked()
+        return self._reid
+
+    def _reid_locked(self):
         if self._reid is None:
             from miloco.perception.engine.identity.tracker.human_reid import HumanReID
             from miloco.perception.engine.identity.tracking_service import (
@@ -384,3 +442,115 @@ def _norm_bbox(d, w: int, h: int) -> tuple[int, int, int, int]:
 def render_roster(hits: list[PersonHit]) -> list[dict]:
     """名册 → 边车契约里的 roster 载荷。"""
     return [{"name": h.name, "bbox": list(h.bbox)} for h in hits]
+
+
+def _assign(
+    rows: list, gallery: dict, threshold: float, w: int, h: int,
+) -> list[PersonHit]:
+    """把「框 × 成员」的相似度矩阵裁决成一份名册。
+
+    **顺序不能反,这是整件事里最容易写错的一处。**
+
+    正确顺序是:先用阈值把亚阈值格子封死 → 在剩下的矩阵上做一对一最优指派 →
+    逐对再验一次阈值。反过来(先指派再卡阈值)会**凭空制造错名字**:画面里
+    1 个真人 + 1 个电视误检时,指派被迫把两个成员都发出去,而电视框系统性地更像
+    某一个成员,于是那个名字被发给电视、真人被挤到另一个名字上;随后阈值把电视
+    那一对丢掉,**真人却留着错名字**。104 组实测 96/104 → 40/104。
+
+    一对一还把「同名只出现一次」从事后去重变成结构性保证。事后去重的老写法会在
+    两个人同时最像同一成员时,把另一个人整个从名册里删掉。
+
+    注意这一步把「画面里的人都是已登记成员」当前提,阈值是唯一的守卫,而它今天的
+    余量只有 0.03(电视 crop 最高 0.670 vs 阈值 0.70)。所以合入指派之后,阈值
+    **更不能往下调** —— 实测降到 0.65 是 96/104 → 47/104,降到 0.60 时电视框
+    104/104 全被安上姓名。
+    """
+    if not rows or not gallery:
+        return []
+    from scipy.optimize import linear_sum_assignment
+
+    pids = list(gallery.keys())
+    # 亚阈值格子直接封死(置 -1)。用 -1 而不是 0:余弦可以为 0,而被封死的格子
+    # 必须严格劣于任何可用格子,否则指派可能挑中它。
+    cost = np.full((len(rows), len(pids)), -1.0, dtype=np.float64)
+    for i, (_, sims) in enumerate(rows):
+        for j, pid in enumerate(pids):
+            v = sims.get(pid)
+            if v is not None and v >= threshold:
+                cost[i, j] = v
+    if not (cost >= threshold).any():
+        return []
+
+    out: list[PersonHit] = []
+    for i, j in zip(*linear_sum_assignment(cost, maximize=True)):
+        score = float(cost[i, j])
+        # 指派会把每一行都配出去(含被封死的格子),所以必须逐对再验一次。
+        if score < threshold:
+            continue
+        d = rows[i][0]
+        name, role, _ = gallery[pids[j]]
+        out.append(PersonHit(
+            person_id=pids[j], name=name, role=role,
+            bbox=_norm_bbox(d, w, h), score=score,
+        ))
+    return out
+
+
+def _library_fingerprint(root: Path) -> tuple:
+    """身份库的变更指纹 —— **只盯这一层真正读的东西**,而且盯的是内容不是 mtime。
+
+    读的是 ``meta.json``(姓名)与 ``tier_a/*.npy``(特征)。刻意**不含图文件**:
+    盯图会让"改名字"(只动 meta.json)和"补算特征"(只动 .npy)都察觉不到,
+    两者都实测复现过,而且失效方式都是静默的。
+
+    **为什么哈希内容而不是取 (mtime, size)**:实测这台机器上 ``st_mtime_ns`` 根本
+    没有纳秒精度 —— 相继两次写拿到完全相同的时间戳,连不同文件之间都一样。改名
+    「小亮」→「亮亮」字节数又恰好相同,于是 (mtime, size) 完全看不出变化。
+    数据量本来就极小(每人 meta ~40B + 5 个向量各 640B ≈ 3KB),读一遍再哈希
+    远比重跑 ``np.load`` + 归一化 + ``list_persons()`` 便宜,而且是**精确**的 ——
+    没有"granularity 够不够"这个问题。
+
+    同样刻意不用 ``IdentityLibrary.list_persons()`` 来取指纹 —— 它的构造函数会
+    ``_ensure_dirs()``,库路径配错时会把一个空库**悄悄物化出来**,抹掉"目录不存在"
+    这个最直接的排障信号。(注册侧各路径都自己 mkdir,不依赖这个副作用。)
+    """
+    import hashlib
+
+    persons = root / "persons"
+    if not persons.is_dir():
+        return ()
+    out: list[tuple] = []
+    for pdir in sorted(persons.iterdir()):
+        if not pdir.is_dir() or pdir.name.startswith("."):
+            continue
+        h = hashlib.blake2b(digest_size=16)
+        meta = pdir / "meta.json"
+        if meta.is_file():
+            h.update(meta.read_bytes())
+        for npy in sorted((pdir / "tier_a").glob("body_*.npy")):
+            h.update(npy.name.encode())
+            h.update(npy.read_bytes())
+        out.append((pdir.name, h.hexdigest()))
+    return tuple(out)
+
+
+def _library_age_days(root: Path) -> float | None:
+    """身份库里最新一张**登记图**距今多少天。库为空时返回 None。
+
+    取图而不取 ``.npy``:``main.py`` 的 ``_backfill_tier_a_reid_embeddings`` 会
+    重写每一个 .npy —— 若按 .npy 计龄,一个 36 天的过期库在补算之后会显示成"全新",
+    亲手把唯一可靠的过期信号废掉。图只在真的重新登记时才变。
+    """
+    persons = root / "persons"
+    if not persons.is_dir():
+        return None
+    newest: float | None = None
+    for img in persons.glob("*/tier_a/body_*.png"):
+        try:
+            m = img.stat().st_mtime
+        except OSError:
+            continue
+        newest = m if newest is None else max(newest, m)
+    if newest is None:
+        return None
+    return max(0.0, (time.time() - newest) / 86400.0)

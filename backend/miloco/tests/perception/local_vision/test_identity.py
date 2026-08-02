@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -314,3 +315,297 @@ def test_silence_when_nobody_is_in_frame(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         assert r.resolve([_Frame(_img())]) == []
     assert not [m for m in caplog.messages if "都没认出来" in m]
+
+
+# ── 一对一指派 ────────────────────────────────────────────────────────────
+#
+# 逐框独立取 argmax 会让两个人同时最像同一个成员:一个被安上别人的名字,另一个整个
+# 从名册里消失。线上真实发生过(男的判成阳阳 0.85、女的判成小亮 0.81)。
+
+
+def test_two_people_are_not_both_given_the_same_name(tmp_path):
+    """两个框都最像小亮时,不能都叫小亮,也不能把另一个人丢掉。
+
+    这是老实现的确切失效方式:argmax 让两框都指向小亮,随后"同名只留分高的"把
+    另一个人从名册里删掉 —— 画面里两个人,名册里一个。
+    """
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    _person(tmp_path, "p2", "阳阳", [_unit(0.9, 0.436)])   # 与小亮很像
+    a, b = _Det(100, 20, 50, 150), _Det(600, 20, 60, 200)
+    r = _resolver_with(tmp_path, [a, b], {
+        150 + 2 * 7: _unit(1.0),          # 更像小亮
+        200 + 2 * 10: _unit(0.97, 0.24),  # 也最像小亮,但没那么像
+    })
+    hits = r.resolve([_Frame(_img())])
+    assert len(hits) == 2, "两个人都该在名册里"
+    assert {h.name for h in hits} == {"小亮", "阳阳"}, "一个名字不能发两次"
+    # 分高的那个框拿到它最像的名字
+    assert next(h for h in hits if h.name == "小亮").bbox[0] < 200
+
+
+def test_threshold_is_applied_before_assignment_not_after(tmp_path):
+    """**顺序不能反。** 先指派再卡阈值会凭空制造错名字。
+
+    场景是本机位每窗都在发生的:1 个真人 + 1 个电视屏幕里的人。先指派的话,指派
+    被迫把两个成员都发出去,电视框系统性地更像某一个成员,于是真人被挤到另一个
+    名字上;随后阈值把电视那一对丢掉,**真人却留着错名字**。
+    """
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    _person(tmp_path, "p2", "阳阳", [_unit(0.0, 1.0)])
+    real, tv = _Det(100, 20, 50, 150), _Det(600, 20, 60, 200)
+    r = _resolver_with(tmp_path, [real, tv], {
+        150 + 2 * 7: _unit(1.0),                 # 真人,像小亮 1.00
+        200 + 2 * 10: _unit(0.55, 0.835),        # 电视,像阳阳 0.835 但像小亮只有 0.55
+    })
+    # 把阈值抬到电视那一对之上:阈值必须先把它封死,而不是等指派完再丢
+    r.threshold = 0.9
+    hits = r.resolve([_Frame(_img())])
+    assert [h.name for h in hits] == ["小亮"], "真人必须保住自己的名字"
+    assert hits[0].bbox[0] < 200
+
+
+def test_assignment_never_emits_a_below_threshold_pair(tmp_path):
+    """指派会把每一行都配出去(含被封死的格子),必须逐对再验一次阈值。"""
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    _person(tmp_path, "p2", "阳阳", [_unit(0.0, 1.0)])
+    a, b = _Det(100, 20, 50, 150), _Det(600, 20, 60, 200)
+    r = _resolver_with(tmp_path, [a, b], {
+        150 + 2 * 7: _unit(1.0),            # 过阈值
+        200 + 2 * 10: _unit(0.4, 0.4, 0.82),  # 对两个成员都只有 ~0.4,远低于阈值
+    })
+    hits = r.resolve([_Frame(_img())])
+    assert [h.name for h in hits] == ["小亮"]
+
+
+# ── 库变更检测 ────────────────────────────────────────────────────────────
+
+
+def test_renaming_a_person_takes_effect_without_restart(tmp_path):
+    """用户在面板上把认错的名字改对,必须立刻生效。
+
+    断言的是**用户可见的契约**,不是缓存实现 —— 老实现的指纹盯的是 tier_a 图文件,
+    而这一层一张图都不读,于是改名在本进程生命周期内永远不生效。
+    """
+    import json as _json
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    r = _resolver_with(tmp_path, [_Det(100, 20, 50, 150)], {150 + 2 * 7: _unit(1.0)})
+    assert [h.name for h in r.resolve([_Frame(_img())])] == ["小亮"]
+
+    (tmp_path / "persons" / "p1" / "meta.json").write_text(
+        _json.dumps({"name": "亮亮", "last_seen_ts": 0.0}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert [h.name for h in r.resolve([_Frame(_img())])] == ["亮亮"]
+
+
+def test_embeddings_written_after_startup_are_picked_up(tmp_path):
+    """启动时的特征补算(main.py::_backfill_tier_a_reid_embeddings)与这里的
+    eager 加载是竞态。补算只动 .npy —— 察觉不到的话,那个成员在整个进程生命周期里
+    都不参与比对,而他的检测框会被 argmax 分给**别的成员**。"""
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    d = tmp_path / "persons" / "p2" / "tier_a"
+    d.mkdir(parents=True)
+    (d / "body_001.png").write_bytes(b"")
+    import json as _json
+    (tmp_path / "persons" / "p2" / "meta.json").write_text(
+        _json.dumps({"name": "阳阳"}, ensure_ascii=False), encoding="utf-8")
+
+    r = LocalIdentityResolver(tmp_path)
+    r.refresh_gallery()
+    assert r.gallery_size == 1, "还没有特征,不该进库"
+
+    np.save(d / "body_001.npy", _unit(0.0, 1.0))   # 补算落盘
+    assert r.refresh_gallery() is True
+    assert r.gallery_size == 2
+
+
+def test_empty_library_does_not_rescan_every_window(tmp_path, caplog):
+    """identity_enabled 默认开,所以"还没登记任何人"是每个新装用户的初始状态。
+    每窗重扫 + 打一条 INFO ≈ 7000 行/天/相机。"""
+    import logging
+
+    (tmp_path / "persons").mkdir()
+    r = LocalIdentityResolver(tmp_path)
+    with caplog.at_level(logging.INFO):
+        assert r.refresh_gallery() is True      # 首次加载
+        for _ in range(5):
+            assert r.refresh_gallery() is False, "库没变不该重扫"
+    assert len([m for m in caplog.messages if "身份库已加载" in m]) == 1
+
+
+def test_unreadable_library_recovers_once_it_becomes_readable(tmp_path, monkeypatch):
+    """读库失败后必须能自愈。
+
+    哨兵若用 () 而不是 None,会与「库为空」的**合法**指纹撞上 —— 一次读盘失败之后
+    就再也不会重载了,而这个状态在日志上与"库本来就是空的"完全同形。
+    """
+    from miloco.perception.local_vision import identity as m
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    r = LocalIdentityResolver(tmp_path)
+    boom = {"on": True}
+    real = m._library_fingerprint
+
+    def flaky(root):
+        if boom["on"]:
+            raise OSError("transient io error")
+        return real(root)
+
+    monkeypatch.setattr(m, "_library_fingerprint", flaky)
+    assert r.refresh_gallery() is False
+    assert r.load_error is not None
+    boom["on"] = False
+    assert r.refresh_gallery() is True, "读盘恢复之后必须能重新加载"
+    assert r.gallery_size == 1 and r.load_error is None
+
+
+def test_missing_library_directory_is_an_empty_library_not_an_error(tmp_path):
+    """目录还不存在 = 用户还没登记任何人,不是故障 —— 不该往 load_error 里写东西。"""
+    r = LocalIdentityResolver(tmp_path / "not-yet")
+    r.refresh_gallery()
+    assert r.gallery_size == 0
+    assert r.load_error is None
+
+
+def test_member_without_embeddings_is_reported_not_silent(tmp_path, caplog):
+    """没有特征的成员会静默不参与比对,而他的框随后被分给别人 —— 表现是"叫错名字"。"""
+    import json as _json
+    import logging
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    d = tmp_path / "persons" / "p2" / "tier_a"
+    d.mkdir(parents=True)
+    (d / "body_001.png").write_bytes(b"")
+    (tmp_path / "persons" / "p2" / "meta.json").write_text(
+        _json.dumps({"name": "阳阳"}, ensure_ascii=False), encoding="utf-8")
+    r = LocalIdentityResolver(tmp_path)
+    with caplog.at_level(logging.INFO):
+        r.refresh_gallery()
+    assert any("阳阳" in m and "跳过" in m for m in caplog.messages)
+
+
+# ── 库龄 ──────────────────────────────────────────────────────────────────
+
+
+def test_stale_library_warns(tmp_path, caplog):
+    """库过期是唯一被证实的失效根因,而且表现是**高置信度认错**,不是认不出。
+    代码侧无解 —— 所以至少要喊出来。"""
+    import logging
+    import os
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    old = time.time() - 40 * 86400
+    for img in (tmp_path / "persons").glob("*/tier_a/body_*.png"):
+        os.utime(img, (old, old))
+    r = LocalIdentityResolver(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        r.refresh_gallery()
+    assert r.library_age_days is not None and r.library_age_days > 39
+    assert any("重新登记" in m for m in caplog.messages)
+
+
+def test_library_age_ignores_embedding_files(tmp_path):
+    """库龄必须取自登记**图**。取 .npy 的话,启动时的特征补算会重写每一个 .npy,
+    一个 36 天的旧库在补算之后显示成"全新" —— 亲手把唯一可靠的过期信号废掉。"""
+    import os
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    old = time.time() - 40 * 86400
+    for img in (tmp_path / "persons").glob("*/tier_a/body_*.png"):
+        os.utime(img, (old, old))
+    # .npy 刚被重写(模拟 backfill)
+    for npy in (tmp_path / "persons").glob("*/tier_a/body_*.npy"):
+        os.utime(npy, None)
+    r = LocalIdentityResolver(tmp_path)
+    r.refresh_gallery()
+    assert r.library_age_days > 39, "补算不该让库龄归零"
+
+
+# ── 并发 ──────────────────────────────────────────────────────────────────
+
+
+def test_lazy_init_builds_one_detector_under_concurrency(tmp_path):
+    """resolve 从多台相机的协程经 to_thread 并发进来。裸的 check-then-act 实测让
+    6 个并发窗构造出 6 个 Detector(5 个立刻丢弃),而这台机器上还跑着视觉边车。"""
+    import threading as _t
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    r = LocalIdentityResolver(tmp_path)
+    built = []
+
+    class _Slow:
+        def __init__(self):
+            built.append(1)
+            time.sleep(0.05)          # 放大竞态窗口
+        def detect(self, img):
+            return []
+
+    r._detector_locked = lambda: setattr(r, "_detector", r._detector or _Slow()) or r._detector
+    ts = [_t.Thread(target=r._get_detector) for _ in range(6)]
+    for t in ts: t.start()
+    for t in ts: t.join()
+    assert len(built) == 1, f"构造了 {len(built)} 个检测器"
+
+
+def test_miss_log_is_throttled_per_camera(tmp_path, caplog):
+    """共用一个计时器的话,多相机库都过期时只有第一台报得出来,其余永远静默。"""
+    import logging
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    r = _resolver_with(tmp_path, [_Det(100, 20, 50, 150)], {150 + 2 * 7: _unit(0.6, 0.8)})
+    with caplog.at_level(logging.INFO):
+        r.resolve([_Frame(_img())], source="cam1")
+        r.resolve([_Frame(_img())], source="cam2")
+        r.resolve([_Frame(_img())], source="cam1")   # 该被节流
+    msgs = [m for m in caplog.messages if "都没认出来" in m]
+    assert len(msgs) == 2
+    assert any("cam1" in m for m in msgs) and any("cam2" in m for m in msgs)
+
+
+def test_resolve_still_accepts_a_single_argument(tmp_path):
+    """resolver 是注入的。加位置参数会让只实现 resolve(frames) 的替身 TypeError,
+    落进兜底 → 名册恒空 —— 一个"改签名把认人静默关掉"的故障。"""
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    r = _resolver_with(tmp_path, [_Det(100, 20, 50, 150)], {150 + 2 * 7: _unit(1.0)})
+    assert [h.name for h in r.resolve([_Frame(_img())])] == ["小亮"]
+
+
+def test_change_detection_does_not_rely_on_mtime_resolution(tmp_path):
+    """两次改动落在同一个文件系统时间戳里,也必须被察觉。
+
+    这不是理论顾虑:实测这台机器上 st_mtime_ns 没有纳秒精度,相继两次写拿到**完全
+    相同**的时间戳;而「小亮」→「亮亮」字节数又恰好一样。(mtime, size) 那套
+    在这里是瞎的,所以指纹哈希的是内容。
+    """
+    import json as _json
+    import os
+
+    from miloco.perception.local_vision.identity import _library_fingerprint
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    meta = tmp_path / "persons" / "p1" / "meta.json"
+    fp1 = _library_fingerprint(tmp_path)
+    before = meta.stat()
+    meta.write_text(_json.dumps({"name": "亮亮", "last_seen_ts": 0.0}, ensure_ascii=False),
+                    encoding="utf-8")
+    os.utime(meta, ns=(before.st_atime_ns, before.st_mtime_ns))   # 时间戳强制不变
+    assert meta.stat().st_size == before.st_size, "构造前提:字节数也一样"
+    assert _library_fingerprint(tmp_path) != fp1, "内容变了就必须察觉"
+
+
+def test_recomputed_embeddings_are_detected(tmp_path):
+    """启动时的特征补算会把 .npy 重写成**不同的值、相同的大小**。
+    盯 (mtime, size) 会漏掉,而漏掉意味着该成员继续用旧向量比对。"""
+    import os
+
+    from miloco.perception.local_vision.identity import _library_fingerprint
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    npy = next((tmp_path / "persons" / "p1" / "tier_a").glob("body_*.npy"))
+    fp1 = _library_fingerprint(tmp_path)
+    before = npy.stat()
+    np.save(npy, _unit(0.0, 1.0).astype(np.float32))
+    os.utime(npy, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert npy.stat().st_size == before.st_size
+    assert _library_fingerprint(tmp_path) != fp1
