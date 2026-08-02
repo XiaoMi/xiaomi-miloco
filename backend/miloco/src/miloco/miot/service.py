@@ -1012,12 +1012,40 @@ class MiotService:
                 MIoTGetPropertyParam(did=did, siid=siid, piid=piid)
                 for siid, piid in (_parse_prop_iid(iid) for iid in iids)
             ]
-            results = await self._miot_proxy.get_device_properties(params)
+            # 定点查询读真机,全量冷查询读缓存。
+            #
+            # 分档线复用上面已有的 user_specified,不新发明概念,而它恰好把两侧的需求
+            # 分开了:传了 iid 的调用方是在**拿这个值当判据**(「灯开着吗?那我该不该
+            # 播报」),它需要知道读数是不是活的;不传 iid 的是面板那种全量冷查询,
+            # WebUI 一屏 30+ 台同时打,那边的注释已写明会撞上 MiOT 约 10 QPS 的限频。
+            #
+            # 这条分档线是有事故支撑的:一条「主卧灯还亮着就播报睡眠提醒」的定时任务,
+            # 因为灯离线后缓存永远停在 on=true,在 00:00~02:30 每 30 分钟播报一次。
+            # 它的日志行是 `did: 1112398686, iid: prop.2.1` —— 传了 iid,所以走这一档
+            # 之后判据自然为假,那条任务一个字都不用改。
+            #
+            # 代价实测(真实账号,每台 15 属性中位):在线 167~249ms vs 缓存 61ms;
+            # 离线 67~90ms —— **不慢**,云端凭在线注册表秒拒,不等超时。
+            results = await self._miot_proxy.get_device_properties(
+                params, datasource=2 if user_specified else 1
+            )
             properties = [
                 {
                     "iid": f"prop.{r['siid']}.{r['piid']}",
                     "value": r.get("value"),
                     "code": r.get("code", 0),
+                    # 云端每一行状态属性都自带 updateTime(epoch 秒)——「这个值上次被
+                    # 写入的时刻」。此前这里把它丢掉了,于是一个 182 天前的读数与一个
+                    # 刚读到的读数在响应里完全同形。
+                    #
+                    # 原样透传、不做换算、不做判断:它是云端字段,不是我们的结论。
+                    # 缺失给 None 而不是 0 —— siid=1 那组静态设备信息(厂商/型号/序列号)
+                    # 本来就没有这个字段,给 0 会让调用方算出 56 年的年龄。
+                    #
+                    # **它不是「设备还活着吗」**:实测在线设备的缓存读数也可以很老
+                    # (净饮机 25.1 小时、三开开关 22.3 小时)—— 一个开关属性长期不变
+                    # 本来就正常。所以它只能做 as-of 注解,不能单独当陈旧闸门。
+                    "updated_at": r.get("updateTime"),
                 }
                 for r in results
             ]

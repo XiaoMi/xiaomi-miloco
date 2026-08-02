@@ -176,7 +176,8 @@ miloco-cli device control 4912 --set brightness 30 --set on true ; miloco-cli de
 | ---- | ---- | ---- |
 | 设备不在目录 | `device list \| grep` 拉全量再搜（别省） | （静默） |
 | 设备未找到 | `device refresh` → 重试一次 | "没找到，正在刷新…" |
-| 设备离线 | **照常下命令**，CLI 返回体 `results[]`/`result` 的 `code_msg` 会标"设备离线" | "{设备名}离线了" |
+| 设备离线（**控制**） | **照常下命令**，CLI 返回体 `results[]`/`result` 的 `code_msg` 会标"设备离线" | "{设备名}离线了" |
+| **读到的属性值可能是旧的** | `props` 返回体每条带 `updated_at`（该值上次被写入的时刻）。**要把读数当事实告诉用户、或拿它当判断依据时，先看这个时间**——不能只看"没报错" | "灯的状态还是3天前的，现在读不到" |
 | 设备侧执行失败 | 看返回体 `results[]`/`result` 的 `code_msg` 中文原因（属性不可写 / 属性不存在 / 属性值不正确等）→ 据此回复或改对重发 | "{设备名}该属性不可写" |
 | 参数越界 | CLI 报 `out of range [min,max;step] <unit>` → 按范围改对 | "亮度范围1-100" |
 | 枚举值非法 | CLI 报 `not a valid enum; allowed: …` → 从列出的可选值里挑对的重发 | "风速可选 自动/1-8 档" |
@@ -190,7 +191,8 @@ miloco-cli device control 4912 --set brightness 30 --set on true ; miloco-cli de
 1. **`spec_name` / action `iid` 不硬编码**——以 catalog / `device spec` 为准（`@` 后缀、`play-text` 等因设备而异）。
 2. **安全设备控制必须二次确认**——门锁/摄像头/燃气阀/烟雾报警器（步骤5）。
 3. **控制非 on 属性强制补该设备实际开关 spec_name**（并入同一条 `--set`，可能 `on@空调`，非字面 `on`）——不查不分轮（步骤4）。
-4. **离线设备照常下命令**——由 CLI 兜底。
+4. **离线设备照常下命令**——由 CLI 兜底。**仅限控制路径**：`control` / `action` 发出去、由设备侧回执告诉你成不成。
+5. **读数不等于现状**——`device props` 对不可达的设备可能返回**最后已知值**且 `code: 0`。判据类查询（"灯还开着吗？那我要不要提醒"）必须看 `updated_at`，或先确认设备在线；单看"调用成功"会拿到一个几天前甚至几个月前的值当成现在。
 
 ## 边界
 

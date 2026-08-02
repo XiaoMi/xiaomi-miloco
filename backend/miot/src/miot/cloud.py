@@ -846,11 +846,37 @@ class MIoTHttpClient:
                 _LOGGER.error("unknown sub devices, %s, %s", did, parent_did)
         return results
 
-    async def get_props_async(self, params: List[MIoTGetPropertyParam]) -> List:
-        """Get props."""
+    async def get_props_async(
+        self, params: List[MIoTGetPropertyParam], datasource: int = 1
+    ) -> List:
+        """Get props.
+
+        ``datasource`` selects where the cloud reads from. It used to be hardcoded
+        to 1 with no comment; measured semantics:
+
+        - ``1`` — the cloud's cached copy. Cheap (~61ms regardless of how many
+          properties are asked for) but returns the last known value with
+          ``code: 0`` even when the device is unreachable, with nothing in the
+          response to say so. Observed ages on a real home: 25 hours for an
+          *online* water purifier, 182 days for an offline humidifier.
+        - ``2`` — read through to the device. The cloud answers offline devices
+          itself with ``-704042011`` instead of a stale value, and refreshes
+          ``updateTime`` for online ones.
+
+        Cost, measured on a real account (15 properties per device, median):
+        online 167–249ms vs 61ms for ``ds=1``; offline 67–90ms — *not* slower,
+        because the cloud rejects from its own registry rather than waiting for a
+        timeout. 30 devices concurrently: 290ms at ``ds=2`` vs 356ms at ``ds=1``,
+        no rate limiting hit.
+
+        Default stays 1 so existing callers are unchanged.
+        """
         res_obj = await self.__mihome_api_post_async(
             url_path="/app/v2/miotspec/prop/get",
-            data={"datasource": 1, "params": [param.model_dump() for param in params]},
+            data={
+                "datasource": datasource,
+                "params": [param.model_dump() for param in params],
+            },
         )
         if "result" not in res_obj:
             raise MIoTHttpError("invalid response result")

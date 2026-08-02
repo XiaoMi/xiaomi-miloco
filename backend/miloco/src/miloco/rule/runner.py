@@ -1331,10 +1331,21 @@ class RuleRunner:
         is_prop = action.iid.startswith("prop.")
 
         # Idempotent check: query current state, skip if already at target.
+        #
+        # **必须 datasource=2(读真机),不能读云端缓存。** 这里读到的值直接决定
+        # "要不要下发",而缓存对不可达的设备会返回**最后已知值 + code 0**,没有任何
+        # 标记可以分辨。最坏情况恰是最常见的:断电 → 缓存停在 on → 规则「开灯」
+        # 读到陈旧的 on → 判定"已在目标态" → 跳过。而这个 return 在**所有**
+        # _write_action_ledger 之前 —— 动作永久丢失,台账一行都不写,没有任何痕迹。
+        #
+        # 下面那句 `code == 0` 的判据**不需要改**:ds=2 下不可达设备由云端自己返回
+        # -704042011,条件不成立 → 照常下发 → 写失败正常落台账。单属性、离线秒拒
+        # (实测 +17ms),代价可忽略。
         if action.idempotent and is_prop and action.value is not None:
             try:
                 results = await self._miot_proxy.get_device_properties(
-                    [MIoTGetPropertyParam(did=action.did, siid=siid, piid=p_a_id)]
+                    [MIoTGetPropertyParam(did=action.did, siid=siid, piid=p_a_id)],
+                    datasource=2,
                 )
                 if results and results[0].get("code", -1) == 0:
                     if results[0].get("value") == action.value:

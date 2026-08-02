@@ -2405,3 +2405,44 @@ def test_scope_camera_list_shows_composite_did(runner):
     data = json.loads(result.output)["data"]
     assert [r["did"] for r in data] == ["solo", "dual:ch0", "dual:ch1"]
     assert all("channel" not in r and "channel_count" not in r for r in data)
+
+
+# ── 读数新鲜度 ────────────────────────────────────────────────────────────
+
+
+def test_device_props_reports_reading_age(runner, fake_home_info):
+    """agent 读 epoch 秒得不出任何结论,换算成"多少秒前"才有用。
+
+    这是事故的近因之一:调用方拿到一个自称成功的读数,而响应里没有任何线索
+    告诉它这个值可能是几天前的。
+    """
+    import time as _t
+
+    now = int(_t.time())
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {
+            "code": 0,
+            "data": {"properties": [
+                {"iid": "prop.2.1", "value": True, "code": 0, "updated_at": now - 3600},
+            ]},
+        }
+        result = runner.invoke(cli, ["device", "props", "lamp_001"])
+    assert result.exit_code == 0
+    p = json.loads(result.output)["data"]["properties"][0]
+    assert p["updated_at"] == now - 3600, "原字段必须保留,不做破坏性替换"
+    assert 3590 <= p["age_s"] <= 3610
+
+
+def test_device_props_omits_age_without_a_timestamp(runner, fake_home_info):
+    """siid=1 那组静态设备信息(厂商/型号/序列号)本来就没有这个字段。
+    补一个 age 会让它看起来像"56 年没更新过"。"""
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {
+            "code": 0,
+            "data": {"properties": [
+                {"iid": "prop.2.1", "value": "xiaomi", "code": 0, "updated_at": None},
+            ]},
+        }
+        result = runner.invoke(cli, ["device", "props", "lamp_001"])
+    assert result.exit_code == 0
+    assert "age_s" not in json.loads(result.output)["data"]["properties"][0]
