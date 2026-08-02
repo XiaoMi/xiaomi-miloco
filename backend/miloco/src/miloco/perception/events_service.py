@@ -48,6 +48,19 @@ _REF_FILENAME = "ref.jpg"
 _TRACE_FILENAME = "omni_trace.json.gz"
 
 
+def _safe_log(value: object) -> str:
+    """写日志前去掉 CR/LF,防 log injection(CodeQL py/log-injection).同 schedule/router._safe_log.
+
+    凡来自 URL path / query / 配置 / 模型输出的值,写进日志前都该过一遍 —— 即便调用点
+    当下有校验保证注不进换行,那是**调用方校验**给的安全,不是这行日志自己的;校验哪天
+    放宽,伪造整行就会直接落进日志,而这种回归不会有任何测试变红.
+
+    注意保留 `.replace("\\n", ...)` 的字面量形态:CodeQL 只认第一个实参是字面量
+    "\\n" / "\\r\\n" 的 replace 为 sanitizer,改成正则或变量会重新触发告警.
+    """
+    return str(value).replace("\r", "").replace("\n", " ")
+
+
 def probe_has_ref(snapshot_root: Path, event_id: str, device_ids: list[str]) -> bool:
     """任一 device 目录下有 ref.jpg → True(该事件走了 Smart Crop,有全景参考帧).
 
@@ -210,15 +223,21 @@ class EventsService:
                 try:
                     return ("found", EventCropMeta(**crop))
                 except (TypeError, ValidationError) as e:
+                    # 这两个值来自 URL path.走到这里它们其实已过两道校验(_dao.get_by_id
+                    # 查得到 + device_id 在 row["device_ids"] 内),即必然等于后端自己生成的
+                    # UUID / 设备号,当下注不进换行 —— 但那是调用方校验给的安全,不是这行
+                    # 日志自己的,所以照样过 _safe_log。
                     logger.warning(
                         "read_crop_meta bad crop meta event_id=%s device_id=%s: %s",
-                        event_id,
-                        device_id,
+                        _safe_log(event_id),
+                        _safe_log(device_id),
                         e,
                     )
                     return ("gone", None)
         except Exception as e:  # noqa: BLE001
-            logger.warning("read_crop_meta failed to parse trace %s: %s", path, e)
+            # path 里拼着 event_id,与上面那条同源 —— CodeQL 的 taint 没追进 Path 拼接
+            # 只报了上面两处,但只清洗被点名的那处、留下这处,防线就是漏的。
+            logger.warning("read_crop_meta failed to parse trace %s: %s", _safe_log(path), e)
             return ("gone", None)
         return ("gone", None)
 

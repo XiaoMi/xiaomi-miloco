@@ -9,6 +9,7 @@
 - Pydantic 序列化:不含 payload_json / schema_version / created_at
 """
 
+import logging
 import time
 import uuid
 
@@ -484,6 +485,36 @@ class TestReadCropMeta:
         status, crop = await svc.read_crop_meta(eid, "cam_a")
         assert status == "gone"
         assert crop is None
+
+    async def test_log_lines_carry_no_injected_newline(self, svc, dao, caplog):
+        """device_id 带 CR/LF 时,日志不得被撑成多行(CodeQL py/log-injection).
+
+        断言的是「这条日志路径清洗过」,不是 _safe_log 的 replace 本身 —— 后者是同义
+        反复。构造上借道既有的坏-crop 分支:crop 半截 → ValidationError → 正是那条
+        带 event_id / device_id 的 warning。
+        """
+        evil = "cam_a\r\n2026-01-01 00:00:00 CRITICAL 伪造的整行"
+        eid = _insert(dao, device_ids=[evil])
+        self._save_trace(eid, [{"device_id": evil, "crop": {"region_xyxy": [1, 2]}}])
+        with caplog.at_level(logging.WARNING, logger="miloco.perception.events_service"):
+            status, crop = await svc.read_crop_meta(eid, evil)
+        assert (status, crop) == ("gone", None)
+        # 收成 list 再断言非空,不用 next():这里的 "bad crop meta" 是对生产日志文案的字面量
+        # 耦合,文案一改就一条都匹配不到 —— 而 async 测试里 next() 抛的 StopIteration 会被
+        # coroutine 机制包成 `RuntimeError: coroutine raised StopIteration` + 一坨 asyncio
+        # 内栈,改文案的人第一反应会以为自己搞坏了事件循环,白付诊断成本。
+        recs = [r for r in caplog.records if "bad crop meta" in r.getMessage()]
+        assert recs, (
+            "没抓到 read_crop_meta 的 bad-crop warning —— 日志文案可能改了,匹配串要跟着更新;"
+            f"实际记录: {[r.getMessage()[:80] for r in caplog.records]}"
+        )
+        rec = recs[0]
+        # 只看首行:末尾那个 %s 是 pydantic 的 ValidationError,它本来就是多行格式,
+        # 断言整条 message 无换行会被它撑破 —— 那不是注入。event_id / device_id 都在
+        # 首行,清洗失效时 "\r\n" 会把伪造内容推到第二行,首行断言正好红。
+        head = rec.getMessage().split("\n", 1)[0]
+        assert "\r" not in head
+        assert "伪造的整行" in head  # 内容仍保留,只是折进同一行
 
     async def test_bad_element_does_not_hide_later_good_call(self, svc, dao):
         """坏元素只跳过,不该把同一 trace 里合法的那条 crop 一起废掉."""
