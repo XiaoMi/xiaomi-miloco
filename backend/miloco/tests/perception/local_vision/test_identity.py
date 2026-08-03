@@ -12,7 +12,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
 from miloco.perception.local_vision.identity import (
     LocalIdentityResolver,
     PersonHit,
@@ -537,14 +536,19 @@ def test_lazy_init_builds_one_detector_under_concurrency(tmp_path):
     class _Slow:
         def __init__(self):
             built.append(1)
-            time.sleep(0.05)          # 放大竞态窗口
+            time.sleep(0.05)  # 放大竞态窗口
+
         def detect(self, img):
             return []
 
-    r._detector_locked = lambda: setattr(r, "_detector", r._detector or _Slow()) or r._detector
+    r._detector_locked = (
+        lambda: setattr(r, "_detector", r._detector or _Slow()) or r._detector
+    )
     ts = [_t.Thread(target=r._get_detector) for _ in range(6)]
-    for t in ts: t.start()
-    for t in ts: t.join()
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
     assert len(built) == 1, f"构造了 {len(built)} 个检测器"
 
 
