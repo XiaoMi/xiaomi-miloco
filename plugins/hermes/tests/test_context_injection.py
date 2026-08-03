@@ -57,6 +57,29 @@ def test_minimal_includes_identity_notify_timezone(tmp_miloco_home, monkeypatch)
     assert "输出语言" in ctx  # B_LANGUAGE
 
 
+def test_identity_block_does_not_override_host_persona(tmp_miloco_home, monkeypatch):
+    """插件是能力层不是人格层：注入不得写死 agent 身份（对齐 OpenClaw）。
+
+    本块逐轮进宿主 agent 上下文（hermes 侧还会进 <system> 消息），写死
+    "你是……Miloco" 会顶掉用户给自己 agent 设的名字与人设。所有 profile 都要守住。
+    """
+    monkeypatch.setattr(ci, "get_catalog", lambda: "")
+    for sid, platform in (
+        ("agent:main:miloco", None),
+        ("miloco-rule-1", None),
+        ("miloco-suggest-1", None),
+        ("miloco:cron:digest", "cron"),
+    ):
+        out = ci.inject_context(session_id=sid, platform=platform)
+        assert out is not None
+        ctx = out["context"]
+        assert "你是经验丰富的家庭智能管家 Miloco" not in ctx, sid
+        assert "不是你的身份" in ctx, sid
+        assert "按你自己的设定回答" in ctx, sid
+        # 能力叙述本身保留，装了插件仍知道自己能干什么
+        assert "家庭管家的能力" in ctx, sid
+
+
 def test_empty_catalog_omitted(tmp_miloco_home, monkeypatch):
     """catalog 空但 full profile → prepend 仍有能力概览，context 不为 None。"""
     monkeypatch.setattr(ci, "get_catalog", lambda: "")
