@@ -14,6 +14,7 @@ import subprocess
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool
@@ -1079,6 +1080,13 @@ class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
+    min_suggestion_urgency: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description=(
+            "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃;"
+            "low=不过滤(默认),medium=丢弃 low,high=只保留 high"
+        ),
+    )
 
 
 def _perception_config_payload() -> dict:
@@ -1088,6 +1096,7 @@ def _perception_config_payload() -> dict:
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
+        "min_suggestion_urgency": s.perception.min_suggestion_urgency,
     }
 
 
@@ -1113,6 +1122,11 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if body.min_suggestion_urgency is not None:
+        # 阈值热读:client.py 的 _filter_suggestions_by_min_urgency 每次 dispatch 前
+        # get_settings() 现读,update_shared_config 已含 reset_settings,下个 cycle 即生效,
+        # 不参与下方 restart_ok(不需要重启引擎)。
+        update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
     payload = _perception_config_payload()
     if update:
         # 三个参数生效路径各不同，按「新值 != 旧值」判断（前端 drawer 三字段一起 PUT）：
