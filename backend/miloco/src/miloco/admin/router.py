@@ -1025,17 +1025,27 @@ class PerceptionConfigBody(BaseModel):
 
 
 def _perception_config_payload() -> dict:
+    from miloco.perception.engine.omni.crop_enhance import (
+        crop_enhance_config_from_settings,
+    )
+
     s = get_settings()
     inp = s.perception.engine.get("input", {})
-    ce = s.perception.engine.get("crop_enhance", {}) or {}
+    # 两个闸位不自己 bool(raw.get(...)),走运行时同一条读取路径:裸 bool() 会把
+    # `enabled: "false"` 判成 truthy → GET 报 available=true 而运行时不裁(推理见
+    # crop_enhance_config_from_settings 的注释)。
+    ce = crop_enhance_config_from_settings()
     return {
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
-        # 双闸分开暴露:enabled 用户态(开关位置)vs available(ops 灰度闸,决定开关能不能点)。
-        # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但后端不裁"的静默失效。
-        "smart_crop_enabled": bool(ce.get("user_enabled", False)),
-        "smart_crop_available": bool(ce.get("enabled", False)),
+        # 双闸分开暴露:enabled 用户态(开关位置)vs available(决定开关能不能点)。
+        # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但后端不裁"。
+        # 注意 available 不只反映 ops 闸:整份 crop_enhance 校验不过(数值字段写成字符串 /
+        # min>max)时运行时整份退默认,这里跟着报 false —— 此时那句提示归因是偏的,真因看
+        # 日志 event=crop_enhance_config_bad 的 reason。
+        "smart_crop_enabled": ce.user_enabled,
+        "smart_crop_available": ce.enabled,
     }
 
 

@@ -277,8 +277,8 @@ def crop_enhance_config_from_settings() -> CropEnhanceConfig:
         return CropEnhanceConfig()
     # dataclass 不校验值类型(上面的 except 只在**字段名**不匹配时触发),所以必须自己查:
     # yaml 里 `enabled: "false"` 加了引号会变成非空字符串 → truthy → ops 灰度闸静默
-    # fail-open(运维以为压死了,实际还在裁,admin GET 还把它投影成 smart_crop_available
-    # =true 让前端开关可点)。闸只认真 bool,其余一律当配置错误退禁用。
+    # fail-open(运维以为压死了,实际还在裁)。闸只认真 bool,其余一律当配置错误退禁用。
+    # admin GET 的 smart_crop_enabled / available 也从这里取值,两侧判定不会分裂。
     if not isinstance(cfg.enabled, bool) or not isinstance(cfg.user_enabled, bool):
         logger.warning(
             "event=crop_enhance_config_bad reason=gate_not_bool enabled=%r user_enabled=%r 退禁用",

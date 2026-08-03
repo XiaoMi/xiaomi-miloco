@@ -339,9 +339,12 @@ class TestConfigFromSettings:
         """字符串 "false" 不能把 ops 灰度闸绕开。
 
         dataclass 不校验值类型,`enabled: "false"`(yaml 里加了引号就是这个)会得到非空
-        字符串 → truthy → 双闸判定通过、继续裁切,而运维以为已经压死;admin GET 还会把它
-        投影成 smart_crop_available=true 让前端开关可点。闸是 enabled=true 发版后唯一的
-        止损手段,必须只认真 bool。
+        字符串 → truthy → 双闸判定通过、继续裁切,而运维以为已经压死。闸是 enabled=true
+        发版后唯一的止损手段,必须只认真 bool。
+
+        admin GET 的 smart_crop_available / smart_crop_enabled 也经本函数取值,故这里退
+        禁用 = GET 侧一起退,两侧不会分裂;端到端断言见
+        tests/admin/test_perception_config_dispatch.py::test_smart_crop_gates_non_bool_match_runtime。
         """
         from miloco.config.settings import reset_settings
         from miloco.perception.engine.omni.crop_enhance import (

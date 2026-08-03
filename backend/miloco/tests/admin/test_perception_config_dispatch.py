@@ -1,7 +1,7 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""PUT /api/admin/perception-config 的三档 dispatch 测试。
+"""PUT /api/admin/perception-config 的三档 dispatch 测试 + GET 投影语义测试。
 
 三个感知参数生效路径不同，端点据「新值 != 旧值」分派：
 - video_short_edge：每帧实时读 settings，写盘即生效 —— 既不热更也不重启。
@@ -9,6 +9,7 @@
 - window_size：runner 构造期 cache → ``apply_config_restart``（stop→start 重读）。
 
 本测试 mock service 层，只验证端点把哪个参数分派到哪个入口（含「都不变则都不调」）。
+另有若干用例不涉分派，只验 GET 投影的取值语义（分辨率档 roundtrip、Smart Crop 双闸）。
 """
 import json as _json
 from unittest.mock import AsyncMock, MagicMock
@@ -157,3 +158,38 @@ def test_smart_crop_available_reflects_ops_gate(client):
     resp = c.put("/api/admin/perception-config", json={"smart_crop_available": False})
     assert resp.status_code == 200
     assert c.get("/api/admin/perception-config").json()["data"]["smart_crop_available"] is True
+
+
+def test_smart_crop_gates_non_bool_match_runtime(client, tmp_path):
+    """闸位写成带引号的字符串时，GET 必须与运行时同判（退禁用），不能靠裸 bool() 判 truthy。
+
+    `enabled: "false"` 是非空字符串：裸 bool() 得 True，而运行时
+    ``crop_enhance_config_from_settings`` 的 isinstance(bool) 校验会整份退默认（=禁用）。
+    两侧一分裂，前端就拿到 available=true 不置灰、用户开了开关而后端永不裁切，且 admin 侧
+    看不到运行时那条 ``crop_enhance_config_bad`` 日志——正是 available 字段本身要防的静默失效。
+
+    user_enabled 这里是真 bool 仍读作 False：闸位不合法时运行时是整份 config 退默认，
+    GET 跟着一起退，才叫同源。
+    """
+    from miloco.config.settings import reset_settings
+
+    c, _svc = client
+    (tmp_path / "config.json").write_text(
+        _json.dumps(
+            {
+                "perception": {
+                    "engine": {
+                        "input": {"omni_fps": 1, "video_short_edge": 512},
+                        "crop_enhance": {"enabled": "false", "user_enabled": True},
+                    },
+                    "collect": {"window_size": 8},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    reset_settings()
+
+    data = c.get("/api/admin/perception-config").json()["data"]
+    assert data["smart_crop_available"] is False
+    assert data["smart_crop_enabled"] is False
