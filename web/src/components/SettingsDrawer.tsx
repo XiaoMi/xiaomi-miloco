@@ -16,7 +16,7 @@ const DEFAULTS: PerceptionConfig = {
   video_short_edge: 512,
   omni_fps: 1,
   window_size: 4,
-  smart_crop_enabled: false,
+  smart_crop_enabled: true,
 };
 
 const SHORT_EDGE_OPTIONS = [360, 512, 768, 1080] as const;
@@ -40,7 +40,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
   // Smart Crop 用户开关。与分辨率档正交（各自独立 dirty / 各自独立生效），
   // 不是第五个分辨率档 —— crop 视频的短边本身也按所选档等比跟随。
-  const [smartCrop, setSmartCrop] = useState(false);
+  const [smartCrop, setSmartCrop] = useState(DEFAULTS.smart_crop_enabled === true);
 
   // 内置定时任务自动管理开关（scheduler.enabled）。缺省 true = 自动管理。
   const [schedulerLoaded, setSchedulerLoaded] = useState<boolean | null>(null);

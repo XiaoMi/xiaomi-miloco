@@ -92,10 +92,12 @@ perception:
     crop_enhance:
       # 双闸:enabled = ops 灰度闸(压死整个能力,前端开关随之置灰);
       #       user_enabled = 用户开关(UI「智能裁切增强」,admin API 可写)。两个都为 true 才裁。
-      # enabled:true(团队决定放开 ops 闸)。user_enabled 仍为 false —— 未动 UI 开关的用户
-      # 行为字节等同未接本特性前。test bench 规则触发回归尚未跑。
+      # 两闸默认放开:未改过 config.json / 未动 UI 开关的用户默认启用 Smart Crop。
+      # 关闭任一闸即回退全景路径(不再裁切),但**不等于**字节回到未接本特性前 —— 全景与 crop
+      # 共用 _encode_video_mp4,其放大分支的重采样核已随本特性换成 LANCZOS4(源短边 < 用户档
+      # 时命中,如 720p 子码流 + 768/1080 档),故关闸后全景 clip 字节仍与接特性前不同。
       enabled: true
-      user_enabled: false
+      user_enabled: true
       expand_ratio_h: 0.40
       expand_ratio_v: 0.30
       motion_diff_threshold: 40

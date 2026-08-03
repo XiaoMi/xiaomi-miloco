@@ -125,21 +125,22 @@ def test_smart_crop_switch_roundtrip(client):
     """
     c, svc = client
     data = c.get("/api/admin/perception-config").json()["data"]
-    assert data["smart_crop_enabled"] is False  # settings.yaml 默认
+    assert data["smart_crop_enabled"] is True  # settings.yaml 默认两闸全开
 
+    # 往与当前值相反的方向写,否则「没变」和「写进去了」不可区分。
     resp = c.put(
         "/api/admin/perception-config",
-        json={"smart_crop_enabled": True, "video_short_edge": 768},
+        json={"smart_crop_enabled": False, "video_short_edge": 768},
     )
     assert resp.status_code == 200
     svc.apply_omni_fps_live.assert_not_awaited()
     svc.apply_config_restart.assert_not_awaited()
     data = resp.json()["data"]
-    assert data["smart_crop_enabled"] is True
+    assert data["smart_crop_enabled"] is False
     assert data["video_short_edge"] == 768
 
     data = c.get("/api/admin/perception-config").json()["data"]
-    assert data["smart_crop_enabled"] is True
+    assert data["smart_crop_enabled"] is False
     assert data["video_short_edge"] == 768
 
 

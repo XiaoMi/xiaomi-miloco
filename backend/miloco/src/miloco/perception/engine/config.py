@@ -41,16 +41,16 @@ class CropEnhanceConfig:
     (perception.engine.crop_enhance),同 video_short_edge 的模式,改配置免重启。
 
     激活条件:enabled(ops 灰度闸) **且** user_enabled(用户开关)。两个 key 而非一个:
-    ops 闸留给运维在 test bench 验证前把整个能力压死(此时前端开关置灰),用户开关归用户。
+    ops 闸是发版后的止损总开关(一关就压死整个能力、前端开关随之置灰),用户开关归用户。
     与 video_short_edge **正交** —— 裁不裁是本配置管,多清晰是 video_short_edge 管,
     互不作废(早期版本曾用 video_short_edge==0 哨兵表达「自适应」,会让用户选的
     768/1080 在回退全景时静默降到 512,已废弃)。
     """
 
-    # ops 灰度闸,置 false 时用户开关也不生效。**产品默认值在随包 settings.yaml(已放开为
-    # true),不在这里** —— yaml 是合并的基础层,用户 config.json 缺这一块时继承的是 yaml 的
-    # true。此处的 False 只在连 yaml 都缺 key 时兜底(理论路径),别拿它当"默认关"的依据。
-    enabled: bool = False
+    # 双闸的**产品默认值在随包 settings.yaml(两闸均已放开为 true),不在这里** —— yaml 是合并
+    # 的基础层,用户 config.json 缺这一块时继承的是 yaml 的 true。这里的 False 只在连 yaml 都
+    # 缺 key 时兜底(理论路径),别拿它当"默认关"的依据。
+    enabled: bool = False  # ops 灰度闸,置 false 时用户开关也不生效
     user_enabled: bool = False  # 用户开关(UI「智能裁切增强」,admin API 可写)
     expand_ratio_h: float = 0.40  # crop 区域水平扩展比(适应人形竖长 + 16:9)
     expand_ratio_v: float = 0.30  # 垂直扩展比

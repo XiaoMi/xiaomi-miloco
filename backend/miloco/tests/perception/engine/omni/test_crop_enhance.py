@@ -315,6 +315,11 @@ class TestConfigFromSettings:
         reset_settings()
 
     def test_reads_both_gates_and_ratios(self, tmp_path, monkeypatch):
+        """闸位与比例都从 config.json 读。
+
+        两闸故意写 **False**(与随包 yaml 的 true 相反):同向写会让断言恒真,config.json
+        这一层被整块忽略也照样绿。
+        """
         from miloco.config.settings import reset_settings
         from miloco.perception.engine.omni.crop_enhance import (
             crop_enhance_config_from_settings,
@@ -323,12 +328,12 @@ class TestConfigFromSettings:
         self._with_engine_config(
             tmp_path,
             monkeypatch,
-            {"enabled": True, "user_enabled": True, "expand_ratio_h": 0.25},
+            {"enabled": False, "user_enabled": False, "expand_ratio_h": 0.25},
         )
         try:
             cfg = crop_enhance_config_from_settings()
-            assert cfg.enabled is True
-            assert cfg.user_enabled is True
+            assert cfg.enabled is False
+            assert cfg.user_enabled is False
             assert cfg.expand_ratio_h == 0.25
             # 未给的键仍取默认
             assert cfg.crop_short_edge == CropEnhanceConfig().crop_short_edge
@@ -418,15 +423,15 @@ class TestConfigFromSettings:
         finally:
             reset_settings()
 
-    def test_missing_block_inherits_shipped_defaults_and_still_does_not_crop(
+    def test_missing_block_inherits_shipped_defaults_not_dataclass_defaults(
         self, tmp_path, monkeypatch
     ):
         """整块缺失(老配置)→ 继承随包 settings.yaml 的默认值,而非 dataclass 默认值。
 
-        随包 yaml 是合并的基础层,所以 ops 闸拿到的是产品默认 enabled=true(不是 dataclass
-        的 False —— 后者只在 yaml 自身缺 key 时才生效,而我们随包就带着它)。真正保护老用户
-        的是 user_enabled=false:**双闸相与,所以不裁**。断言落在这个行为不变量上,
-        它不随 ops 闸的灰度策略变动。
+        两处默认值方向相反,正好能把"读的是哪一层"钉死:dataclass 双闸都是 False,随包 yaml
+        双闸都是 true。yaml 是合并的基础层,所以没写过 crop_enhance 的老配置升级后**会**开始
+        裁切(产品决策:默认全开)。若哪天合并顺序反了、读到 dataclass 的 False,功能会静默失效
+        而不报错——本用例就是拦这个。
         """
         import json
 
@@ -444,8 +449,8 @@ class TestConfigFromSettings:
         reset_settings()
         try:
             cfg = crop_enhance_config_from_settings()
-            assert cfg.user_enabled is False
-            assert not (cfg.enabled and cfg.user_enabled)  # 双闸相与 → 老配置不会突然开始裁
+            assert cfg.enabled is True
+            assert cfg.user_enabled is True  # 继承 yaml 的 true,不是 dataclass 的 False
         finally:
             reset_settings()
 
@@ -468,6 +473,7 @@ class TestConfigFromSettings:
         block = raw["perception"]["engine"]["crop_enhance"]
         unknown = set(block) - set(CropEnhanceConfig.__dataclass_fields__)
         assert not unknown, f"settings.yaml 里这些键不会被读到: {unknown}"
-        assert block["enabled"] is True  # ops 闸已放开(团队决定)
-        # 用户开关仍默认关:随包配置本身不能让任何存量用户开始裁切,必须由 UI/admin API 显式打开。
-        assert block["user_enabled"] is False
+        # 双闸随包均放开(产品决策:默认全开)。钉住这两个值,是因为它俩一改就直接改变所有
+        # 存量用户的推理输入,不该在别的改动里被顺手动掉而没人注意。
+        assert block["enabled"] is True
+        assert block["user_enabled"] is True

@@ -1684,7 +1684,8 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
     )
 
     cfg = crop_enhance_config_from_settings()
-    # 双闸:ops 灰度闸 AND 用户开关。任一为 false → 回退全景(字节等同未接本特性前)。
+    # 双闸:ops 灰度闸 AND 用户开关。任一为 false → 回退全景路径(不裁切)。注意这不等于字节回到
+    # 接本特性前 —— 全景走的 _encode_video_mp4 放大分支已换重采样核,见该函数注释。
     if not (cfg.enabled and cfg.user_enabled):
         return None
     ep = next((p for p in packets if p.all_frames), None)  # 同 _encode_batch_video:首个有帧设备
