@@ -90,24 +90,30 @@ def pick_backend(preferred: str, frame_count: int) -> str:
 
 
 def sample_frames(video: str, num_frames: int):
-    """均匀抽帧(frames 后端用)。与模型自带 inference.py 的取帧方式保持一致。"""
+    """均匀抽帧(frames 后端用)。与模型自带 inference.py 的取帧方式保持一致。
+
+    整段裹在 try/finally 里。此前只在**已知的**两处 raise 之前手动 release,
+    而 ``cv2.cvtColor`` / ``Image.fromarray`` 同样会抛(通道数不对、尺寸异常),
+    那两条路径上 VideoCapture 就泄漏了。这是常驻通路 —— 每窗一次,泄漏会累积到
+    耗尽文件描述符,而症状是"跑了几小时之后突然什么都打不开",与这里毫无表面关联。
+    """
     import cv2
     import numpy as np
     from PIL import Image
 
     capture = cv2.VideoCapture(video)
-    total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total <= 0:
+    try:
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total <= 0:
+            raise ValueError(f"could not read video: {video}")
+        indices = np.linspace(0, total - 1, min(num_frames, total), dtype=int)
+        frames = []
+        for idx in indices:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ok, frame = capture.read()
+            if not ok:
+                raise ValueError(f"could not decode frame {idx} from: {video}")
+            frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+        return frames
+    finally:
         capture.release()
-        raise ValueError(f"could not read video: {video}")
-    indices = np.linspace(0, total - 1, min(num_frames, total), dtype=int)
-    frames = []
-    for idx in indices:
-        capture.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-        ok, frame = capture.read()
-        if not ok:
-            capture.release()
-            raise ValueError(f"could not decode frame {idx} from: {video}")
-        frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
-    capture.release()
-    return frames

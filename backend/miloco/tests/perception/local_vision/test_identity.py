@@ -613,3 +613,28 @@ def test_recomputed_embeddings_are_detected(tmp_path):
     os.utime(npy, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert npy.stat().st_size == before.st_size
     assert _library_fingerprint(tmp_path) != fp1
+
+
+def test_reading_the_library_never_creates_directories(tmp_path):
+    """读库**不该有副作用**。
+
+    此前是构造 IdentityLibrary 来列成员,而它的 __init__ 会 _ensure_dirs() ——
+    库路径配错时会在错误位置默默建出一副空目录骨架,把「目录不存在」这个最直接的
+    排障信号抹掉:用户以为路径对了,实际是我们刚给他造了个空的。
+    """
+    root = tmp_path / "typo-in-config"
+    r = LocalIdentityResolver(root)
+    r.refresh_gallery()
+    assert not root.exists(), f"读一次库就把 {root} 建出来了"
+    assert r.gallery_size == 0
+
+
+def test_a_corrupt_meta_does_not_hide_the_other_members(tmp_path):
+    """单个坏 meta.json 不该让整库读不出来。"""
+    _person(tmp_path, "p1", "小亮", [_unit(1.0)])
+    bad = tmp_path / "persons" / "p2"
+    (bad / "tier_a").mkdir(parents=True)
+    (bad / "meta.json").write_text("{ 这不是 json", encoding="utf-8")
+    r = LocalIdentityResolver(tmp_path)
+    r.refresh_gallery()
+    assert r.gallery_size == 1

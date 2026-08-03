@@ -59,15 +59,16 @@ function mockFetchByUrl(matches: Record<string, unknown>) {
 
 /** 单接口 events list 形状的 fetch mock(realListActivity 用). */
 function mockFetch(events: unknown[]) {
-  globalThis.fetch = vi.fn(async () =>
-    new Response(
-      JSON.stringify({
-        code: 0,
-        message: "ok",
-        data: { events },
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    ),
+  globalThis.fetch = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          code: 0,
+          message: "ok",
+          data: { events },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
   ) as unknown as typeof fetch;
 }
 
@@ -185,7 +186,15 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
   })();
 
   // 服务端桶行（都落在桶 0 = t0），结构对齐 /token-usage/buckets 返回
-  function bkt(type: string, calls: number, inp: number, out: number, cache: number, video: number, audio: number) {
+  function bkt(
+    type: string,
+    calls: number,
+    inp: number,
+    out: number,
+    cache: number,
+    video: number,
+    audio: number,
+  ) {
     return {
       bucket_ms: t0,
       model: "mimo-v2.5",
@@ -220,7 +229,13 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     expect(s.calls).toBe(3);
     // 总量 = Σ(input + output)
     expect(s.total_tokens).toBe(6000 + 800);
-    expect(s.totals).toEqual({ input: 6000, output: 800, cache: 1800, video: 2200, audio: 1700 });
+    expect(s.totals).toEqual({
+      input: 6000,
+      output: 800,
+      cache: 1800,
+      video: 2200,
+      audio: 1700,
+    });
 
     // by_type 按 tokens 降序：on_demand(3500) > realtime(3300)
     expect(s.by_type.map((g) => g.key)).toEqual(["on_demand", "realtime"]);
@@ -259,11 +274,15 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     expect(fine.timeline.length).toBeGreaterThanOrEqual(hourly.timeline.length);
 
     // 明细行：只有 realtime 数据，也要给该模型补一行 on_demand 0
-    const od = hourly.rows.find((r) => r.model === "mimo-v2.5" && r.type === "on_demand");
+    const od = hourly.rows.find(
+      (r) => r.model === "mimo-v2.5" && r.type === "on_demand",
+    );
     expect(od).toBeDefined();
     expect(od!.calls).toBe(0);
     expect(od!.tokens).toBe(0);
-    const rt = hourly.rows.find((r) => r.model === "mimo-v2.5" && r.type === "realtime");
+    const rt = hourly.rows.find(
+      (r) => r.model === "mimo-v2.5" && r.type === "realtime",
+    );
     expect(rt!.calls).toBe(2);
     // 不得重复：单模型只 2 行（realtime + on_demand），realtime 恰 1 行
     expect(hourly.rows).toHaveLength(2);
@@ -286,7 +305,10 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     // by_type 恒含 realtime + on_demand 两项（无数据则 0）
     expect(s.by_type).toHaveLength(2);
     expect(s.by_type.every((g) => g.tokens === 0 && g.calls === 0)).toBe(true);
-    expect([...s.by_type.map((g) => g.key)].sort()).toEqual(["on_demand", "realtime"]);
+    expect([...s.by_type.map((g) => g.key)].sort()).toEqual([
+      "on_demand",
+      "realtime",
+    ]);
     expect(s.rows).toEqual([]);
     expect(s.timeline.length).toBeGreaterThanOrEqual(1);
   });
@@ -308,8 +330,28 @@ describe("realGetUsageStats — week daily 折算契约", () => {
         message: "ok",
         data: {
           rows: [
-            { date, model: "mimo-v2.5", type: "realtime", calls: 100, input_tokens: 5000, output_tokens: 500, cache_tokens: 1500, video_tokens: 4000, audio_tokens: 200 },
-            { date, model: "mimo-v2.5", type: "on_demand", calls: 10, input_tokens: 2000, output_tokens: 800, cache_tokens: 800, video_tokens: 0, audio_tokens: 1200 },
+            {
+              date,
+              model: "mimo-v2.5",
+              type: "realtime",
+              calls: 100,
+              input_tokens: 5000,
+              output_tokens: 500,
+              cache_tokens: 1500,
+              video_tokens: 4000,
+              audio_tokens: 200,
+            },
+            {
+              date,
+              model: "mimo-v2.5",
+              type: "on_demand",
+              calls: 10,
+              input_tokens: 2000,
+              output_tokens: 800,
+              cache_tokens: 800,
+              video_tokens: 0,
+              audio_tokens: 1200,
+            },
           ],
           total: 2,
         },
@@ -341,8 +383,22 @@ describe("omni 配置契约 — 多档案", () => {
         has_key: true,
       },
       profiles: [
-        { label: "配置1", model: "m1", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, active: true },
-        { label: "配置2", model: "m2", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, active: false },
+        {
+          label: "配置1",
+          model: "m1",
+          base_url: "https://p/v1",
+          api_key_masked: "sk-…cdef",
+          has_key: true,
+          active: true,
+        },
+        {
+          label: "配置2",
+          model: "m2",
+          base_url: "https://p/v1",
+          api_key_masked: "sk-…cdef",
+          has_key: true,
+          active: false,
+        },
       ],
     },
   };
@@ -350,14 +406,16 @@ describe("omni 配置契约 — 多档案", () => {
   // 捕获请求(method+body)并返回 STATE
   function captureFetch() {
     const cap: { method?: string; body: unknown } = { body: null };
-    globalThis.fetch = vi.fn(async (_i: RequestInfo | URL, init?: RequestInit) => {
-      cap.method = init?.method;
-      cap.body = init?.body ? JSON.parse(init.body as string) : null;
-      return new Response(JSON.stringify(STATE), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(
+      async (_i: RequestInfo | URL, init?: RequestInit) => {
+        cap.method = init?.method;
+        cap.body = init?.body ? JSON.parse(init.body as string) : null;
+        return new Response(JSON.stringify(STATE), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    ) as unknown as typeof fetch;
     return cap;
   }
 
@@ -429,7 +487,10 @@ describe("omni 配置契约 — 多档案", () => {
         data: { ok: true, models: ["a", "b"] },
       },
     });
-    const res = await realListOmniModels({ base_url: "https://p/v1", api_key: "sk-x" });
+    const res = await realListOmniModels({
+      base_url: "https://p/v1",
+      api_key: "sk-x",
+    });
     expect(res.ok).toBe(true);
     expect(res.models).toEqual(["a", "b"]);
   });
@@ -459,11 +520,14 @@ describe("apiFetch — 结构化错误 detail", () => {
     // FastAPI 的 detail 既可能是字符串也可能是对象。不解包的话用户看到的literally
     // 是「[object Object]」—— omni 的 PUT(detail={"code":"no_key",…})早就走在
     // 这条路上,这个洞不是本特性新引入的。
-    globalThis.fetch = vi.fn(async () =>
-      new Response(
-        JSON.stringify({ detail: { code: "auth_rejected", message: "凭证不被接受" } }),
-        { status: 400, headers: { "Content-Type": "application/json" } },
-      ),
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            detail: { code: "auth_rejected", message: "凭证不被接受" },
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        ),
     ) as unknown as typeof fetch;
 
     const { apiFetch, ApiError } = await import("@/api/client");
@@ -477,17 +541,17 @@ describe("apiFetch — 结构化错误 detail", () => {
   });
 
   it("字符串 detail 保持原样", async () => {
-    globalThis.fetch = vi.fn(async () =>
-      new Response(JSON.stringify({ detail: "普通错误" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      }),
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ detail: "普通错误" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }),
     ) as unknown as typeof fetch;
     const { apiFetch } = await import("@/api/client");
     await expect(apiFetch("/api/x")).rejects.toThrow("普通错误");
   });
 });
-
 
 // ── /api/admin/perception-backend 契约 ────────────────────────────────────
 // 这两条是界面与后端之间唯一的通道,而它们此前没有覆盖。功能已经因为一次字段
@@ -505,20 +569,31 @@ const PB_PAYLOAD = {
     cloud: { window_size: 4, video_short_edge: 512, omni_fps: 1 },
   },
   health: {
-    status: "ok", model_loaded: true, gate_available: false,
-    gate_error: "mamba_ssm missing", device: "cuda:0", backend: "codec",
-    auth_required: true, auth_ok: true,
+    status: "ok",
+    model_loaded: true,
+    gate_available: false,
+    gate_error: "mamba_ssm missing",
+    device: "cuda:0",
+    backend: "codec",
+    auth_required: true,
+    auth_ok: true,
   },
   error: null,
   blocking_static_rules: ["厨房明火关阀"],
-  cloud_hint: "",
+  cloud_hint: null,
   local_capabilities: {
-    needs_api_key: false, audio: false, identity: false,
-    suggestions: false, static_rule_execution: false,
+    needs_api_key: false,
+    audio: false,
+    identity: false,
+    suggestions: false,
+    static_rule_execution: false,
   },
 };
 
-function mockPb(status = 200, body: unknown = { code: 0, message: "ok", data: PB_PAYLOAD }) {
+function mockPb(
+  status = 200,
+  body: unknown = { code: 0, message: "ok", data: PB_PAYLOAD },
+) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
     calls.push({ url: String(url), init });
@@ -564,7 +639,10 @@ describe("realSetPerceptionBackend", () => {
   it("后端拒绝时抛出,且带上原因 —— 卡片靠它给用户看 toast", async () => {
     mockPb(400, { detail: "以下规则会在感知层直接控制设备…厨房明火关阀" });
     await expect(
-      realSetPerceptionBackend({ backend: "local", base_url: "http://gpu:18800" }),
+      realSetPerceptionBackend({
+        backend: "local",
+        base_url: "http://gpu:18800",
+      }),
     ).rejects.toThrow(/厨房明火关阀/);
   });
 });

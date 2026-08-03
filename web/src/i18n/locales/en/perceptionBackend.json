@@ -55,7 +55,7 @@
     "unitSec": "s",
     "unitFps": "fps",
     "unitPx": "px",
-    "unitCanvas": "",
+    "unitCanvas": "canvases",
     "listSeparator": ", "
   }
 }

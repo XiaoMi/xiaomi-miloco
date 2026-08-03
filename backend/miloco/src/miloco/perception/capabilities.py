@@ -75,7 +75,17 @@ def perception_executes_device_actions() -> bool:
 
         return LocalVisionEngine.STATIC_RULE_EXECUTION
     except Exception:  # noqa: BLE001
-        # 读不到配置、或本地视觉模块导入失败时,按既有行为(云端)处理。
+        # **按安全方向回落:不执行设备动作。**
+        #
+        # 之前这里回落到 True(执行),理由是"按既有行为(云端)处理"。方向是错的:
+        # 这是一条**安全不变量**的兜底,而不变量的兜底只能朝拒绝的方向倒。两种误判
+        # 的代价完全不对称 —— 误拒只是一次规则没响(而且会记成一次 RULE_TRIGGER_FAILURE,
+        # 看得见);误放是让一个纯视觉模型去关燃气阀、开门锁。
+        #
+        # 这个窗口需要两个独立异常同时发生(引擎属性链读不到 **且** settings 也读不到),
+        # 极窄 —— 但"窄"不是把方向定反的理由,而且属性链是五层私有属性,任何一次重构
+        # 改了中间名字都会让第一层静默失效。
+        #
         # import 也要盖在里面:它冒出去会顺着 _fire 变成触发端点的 500。
-        logger.warning("感知能力判定失败,按云端通路处理", exc_info=True)
-        return True
+        logger.warning("感知能力判定失败,按安全方向处理(不执行设备动作)", exc_info=True)
+        return False

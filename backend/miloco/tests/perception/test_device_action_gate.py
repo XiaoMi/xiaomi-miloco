@@ -187,15 +187,30 @@ def test_capability_declaration_matches_what_the_rule_path_enforces(monkeypatch)
     assert PerceptionSettings().engine_backend == "cloud"
 
 
-def test_unreadable_config_falls_back_to_existing_cloud_behaviour(monkeypatch):
-    """读不到配置时不能把所有人的自动化都停掉。"""
+def test_unreadable_config_falls_back_to_refusing(monkeypatch):
+    """判定本身失败时**按拒绝处理**。
+
+    这条原来钉的是相反方向(回落到"执行"),理由是「读不到配置时不能把所有人的
+    自动化都停掉」。那个顾虑是真的,但方向仍然该翻,两点:
+
+    1. **代价不对称。** 误拒只是一次规则没响,而且会记成一次 RULE_TRIGGER_FAILURE
+       —— 看得见、查得到。误放是让一个纯视觉模型去关燃气阀、开门锁。安全不变量的
+       兜底只能朝拒绝的方向倒。
+    2. **那个顾虑的前提基本不成立。** ``get_settings()`` 是带缓存的全局;它抛异常
+       意味着进程已经坏得很深,此时感知本身也跑不起来 —— 不存在"配置读不到但自动化
+       在正常工作"这个状态。
+
+    触发窗口需要引擎属性链与 settings 同时读不到,极窄。但"窄"不是把方向定反的
+    理由:属性链是五层私有属性,任何一次重构改了中间名字都会让第一层静默失效。
+    """
     from miloco.perception.capabilities import perception_executes_device_actions
 
     def _boom():
         raise RuntimeError("config unavailable")
 
     monkeypatch.setattr("miloco.perception.capabilities.get_settings", _boom)
-    assert perception_executes_device_actions() is True
+    monkeypatch.setattr("miloco.perception.capabilities._active_engine", lambda: None)
+    assert perception_executes_device_actions() is False
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,13 @@ export class ApiError extends Error {
     /** 后端给的机器可读错误码(detail 为对象时的 `code`)。
      *  按它查本地化文案 —— backend message 是硬编码中文,直接注入会污染英文界面。 */
     public code?: string,
+    /** 结构化 detail 里除 code/message 之外的字段,原样带出。
+     *
+     *  只有 code 是不够的:有些错误要附带**数据**才说得清楚(如 blocking_rules
+     *  的 `rules` 数组是受影响的规则名)。而 message 是中文整句,拿它去拼就等于
+     *  把中文注进界面 —— 正是 code 这套机制要避免的。带上纯数据字段,调用方就能
+     *  用本地化的句子 + 后端的数据自己拼。 */
+    public data?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -46,6 +53,7 @@ export async function apiFetch<T>(
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
     let code: string | undefined;
+    let data: Record<string, unknown> | undefined;
     try {
       const body = await resp.json();
       // FastAPI 的 detail 既可能是字符串,也可能是结构化对象
@@ -56,13 +64,16 @@ export async function apiFetch<T>(
       if (detail && typeof detail === "object") {
         code = typeof detail.code === "string" ? detail.code : undefined;
         msg = typeof detail.message === "string" ? detail.message : msg;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { code: _c, message: _m, ...rest } = detail;
+        data = Object.keys(rest).length ? rest : undefined;
       } else {
         msg = body.message ?? detail ?? msg;
       }
     } catch {
       // ignore
     }
-    throw new ApiError(resp.status, msg, code);
+    throw new ApiError(resp.status, msg, code, data);
   }
   // backend NormalResponse 业务错(HTTP 200 但 body.code != 0)也当错处理。
   // 当前 backend 全走 HTTPException → handle_exception → 4xx,没用 200+code != 0
@@ -80,7 +91,10 @@ export async function apiFetch<T>(
   if (typeof body.code === "number" && body.code !== 0) {
     // `||` 而非 `??`：?? 只挡 null/undefined,空串 "" 也是合法 message,但住户看到
     // "" 跟"无错误"无法区分,需要用 ?code? 兜底让住户至少看到 code 编码。
-    throw new ApiError(resp.status, body.message || i18n.t("api.bizError", { code: body.code }));
+    throw new ApiError(
+      resp.status,
+      body.message || i18n.t("api.bizError", { code: body.code }),
+    );
   }
   return body as T;
 }

@@ -593,6 +593,12 @@ class PerceptionEngineProxy:
             # 上);下一个 tick 的线程化探活会立刻重来,因为冷却也一并清了。
             # 有一份成功的缓存时不能丢:丢了就又落回"待探活",按钮反而更没用。
             self._invalidate_local_probe()
+            # 重建冷却也要一并清。它是给**自动重试**设的节流阀(降级后 60 秒内不
+            # 重建,防降级↔重建来回抖),而用户按下「重启感知」是一次显式的、知情的
+            # 决定 —— 撞上冷却的话按钮是个静默空操作:界面没有任何反馈,用户只会
+            # 再按几次,然后以为功能坏了。节流阀不该管住用户的手,与上面作废探活
+            # 结论是同一条理由。
+            self._local_rebuild_not_before = 0.0
         allowed = self._RESTART_RECOVERABLE if include_failed else self._TICK_RECOVERABLE
         if self._status not in allowed:
             return False

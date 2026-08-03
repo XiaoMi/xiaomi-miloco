@@ -168,9 +168,11 @@ class LocalIdentityResolver:
             return False
 
         try:
-            from miloco.perception.engine.identity.library import IdentityLibrary
-
-            persons = IdentityLibrary(self.root).list_persons()
+            # **不构造 IdentityLibrary** —— 它的 __init__ 会 _ensure_dirs(),库路径
+            # 配错时会在错误位置默默建出一副空目录骨架,把「目录不存在」这个最直接的
+            # 排障信号抹掉:用户以为路径配对了,实际是我们刚给他造了个空的。
+            # 这一层只读,不该有任何副作用。
+            persons = _read_persons(self.root)
         except Exception as e:  # noqa: BLE001
             self.load_error = f"{type(e).__name__}: {e}"
             logger.warning("[local-vision] 身份库读取失败,本窗不做认人: %s", e)
@@ -493,6 +495,38 @@ def _assign(
             person_id=pids[j], name=name, role=role,
             bbox=_norm_bbox(d, w, h), score=score,
         ))
+    return out
+
+
+def _read_persons(root: Path) -> list:
+    """只读地列出成员(person_id / name / role)。
+
+    **刻意不构造 ``IdentityLibrary``** —— 它的 ``__init__`` 会 ``_ensure_dirs()``,
+    库路径配错时会在错误位置默默建出一副空目录骨架,把"目录不存在"这个最直接的
+    排障信号抹掉。而这一层只是读,不该有任何副作用。
+
+    返回一个带 ``person_id`` / ``name`` / ``role`` 的轻量对象列表,字段名与
+    ``IdentityLibrary.list_persons()`` 的 ``PersonRef`` 对齐,调用方无需分辨。
+    """
+    import json as _json
+    from types import SimpleNamespace
+
+    persons = root / "persons"
+    if not persons.is_dir():
+        return []
+    out = []
+    for pdir in sorted(persons.iterdir()):
+        if not pdir.is_dir() or pdir.name.startswith("."):
+            continue
+        name = role = None
+        meta = pdir / "meta.json"
+        if meta.is_file():
+            try:
+                m = _json.loads(meta.read_text(encoding="utf-8"))
+                name, role = m.get("name"), m.get("role")
+            except Exception as e:  # noqa: BLE001 —— 单个坏 meta 不该让整库读不出来
+                logger.warning("[local-vision] meta.json 解析失败 %s: %s", pdir.name, e)
+        out.append(SimpleNamespace(person_id=pdir.name, name=name, role=role))
     return out
 
 

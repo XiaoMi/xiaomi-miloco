@@ -113,14 +113,21 @@ export function PerceptionBackendCard() {
       const code = (e as { code?: string } | null)?.code;
       const key = code ? PB_CODE_KEY[code] : undefined;
       const detail = (e as { message?: string } | null)?.message;
+      // blocking_rules 的 message 是「一整句中文 + 规则名」,拼进 toast 会让英文
+      // 界面冒出中文 —— 与本文件 PB_CODE_KEY 上方那条注释自相矛盾。payload 里
+      // 本来就带 `rules` 数组(纯用户数据、不含任何文案),用它。
+      // load_failed 的 detail 是模型加载的异常原文:那是技术细节,本来就无从
+      // 本地化,照旧透传。
+      const rules = (e as { data?: { rules?: string[] } } | null)?.data?.rules;
+      const extra =
+        code === "blocking_rules"
+          ? rules?.join(t("perceptionBackend.listSeparator"))
+          : code === "load_failed"
+            ? detail
+            : "";
       toast(
         key
-          ? [
-              t(key),
-              code === "load_failed" || code === "blocking_rules" ? detail : "",
-            ]
-              .filter(Boolean)
-              .join(":")
+          ? [t(key), extra].filter(Boolean).join(":")
           : (detail ?? t("perceptionBackend.switchFailed")),
         "danger",
       );
