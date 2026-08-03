@@ -19,12 +19,17 @@
     "autoSchedule": "自动定时任务",
     "autoScheduleHint": "开启后 miloco 自动创建并维护内置定时任务（感知摘要 / 家庭巡检 / 记忆整理 / 习惯洞察）；关闭后将清除这些任务且不再重建。改动在 agent 网关下次重启后生效。",
     "autoScheduleUnavailable": "当前后端不支持此开关（可能版本过旧），暂不可配置",
-    "minUrgency": "Agent 干扰阈值",
-    "minUrgencyHint": "仅当 omni 判定的紧急度不低于该阈值时才提醒主 agent；被过滤的事件仍会写入感知记录，不影响 timeline",
-    "minUrgencyOption": {
-      "low": "全部",
-      "medium": "中 / 高",
-      "high": "仅高"
+    "minUrgency": "事件提醒过滤",
+    "minUrgencyHint": "被过滤的事件仍会显示在日志里，但不提醒主 Agent",
+    "minUrgencyTick": {
+      "low": "低",
+      "medium": "中",
+      "high": "高"
+    },
+    "minUrgencyStatus": {
+      "low": "接收所有事件",
+      "medium": "接收中高紧急事件",
+      "high": "仅接收高紧急事件"
     }
   }
 }
