@@ -90,3 +90,6 @@ eval/results/
 # 数据集抽样清单：不是"产物目录"却同样带标签（文件名里直接带被摄对象的性别与年龄段），
 # 只挡 results/ 会从这条缝里漏出去。
 eval/sampled_*.json
+
+# opengrep / semgrep 本地扫描产物（含全量命中片段与绝对路径），只在本地看，不入库。
+.opengrep-out/
