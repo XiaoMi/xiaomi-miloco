@@ -18,6 +18,13 @@
     "schedulerSaved": "Saved. Takes effect after the next agent gateway restart.",
     "autoSchedule": "Auto scheduled tasks",
     "autoScheduleHint": "When on, miloco auto-creates and maintains its built-in scheduled tasks (perception digest / home patrol / memory dreaming / habit insights). When off, those tasks are removed and not recreated. Takes effect after the next agent gateway restart.",
-    "autoScheduleUnavailable": "This backend doesn't support this toggle (version may be too old); not configurable for now."
+    "autoScheduleUnavailable": "This backend doesn't support this toggle (version may be too old); not configurable for now.",
+    "minUrgency": "Agent interruption threshold",
+    "minUrgencyHint": "Suggestions are sent to the main agent only when the omni-judged urgency is at or above this level. Filtered events still appear in the perception timeline.",
+    "minUrgencyOption": {
+      "low": "All",
+      "medium": "Medium & high",
+      "high": "High only"
+    }
   }
 }
