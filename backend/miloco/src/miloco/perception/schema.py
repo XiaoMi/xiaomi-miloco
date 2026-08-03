@@ -15,7 +15,7 @@ from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from miloco.perception.types import BatchedSnapshot, DeviceSnapshot, PerceptionDevice
 from miloco.perception.utils import snapshot_from_arrays
@@ -572,23 +572,51 @@ class EventCropMeta(BaseModel):
     由浏览器做 letterbox 缩放,不用 JS 算坐标.
     """
 
-    # 长度定死:trace 是历史产物(schema 演进 / 写入被截断),半截数组透到前端只会画出
-    # 一个坐标错位的框。这里拒掉,读侧(read_crop_meta)把校验失败折成 410「拿不到」。
+    # 长度与坐标值都定死:trace 是历史产物(schema 演进 / 写入被截断 / 手工改过),半截数组
+    # 或值退化的坐标(x2<=x1、越出帧外)透到前端只会画出一个错位框。这里一并拒掉,读侧
+    # (read_crop_meta)把校验失败折成 410「拿不到」,消费方拿到 200 即可直接用。
+    # 值域约束写进各字段 description:model_validator 不进 JSON Schema,只写在校验器里的话
+    # 从 OpenAPI 生成类型的消费方看不到,仍会各自再 guard 一遍 —— 正是这里想省掉的重复。
     region_xyxy: list[int] = Field(
         ...,
         min_length=4,
         max_length=4,
-        description="crop 区域 [x1, y1, x2, y2],全景帧像素坐标",
+        description=(
+            "crop 区域 [x1, y1, x2, y2],全景帧像素坐标;"
+            "服务端保证 x2>x1、y2>y1 且整框落在 frame_size_wh 内"
+        ),
     )
     frame_size_wh: list[int] = Field(
         ...,
         min_length=2,
         max_length=2,
-        description="全景帧尺寸 [w, h];region 的坐标基准,前端拿它当 svg viewBox",
+        description="全景帧尺寸 [w, h](均 >0);region 的坐标基准,前端拿它当 svg viewBox",
     )
     crop_short_edge: int = Field(
-        ..., description="crop 视频编码短边 = omni 实际所见分辨率上限"
+        ..., ge=1, description="crop 视频编码短边 = omni 实际所见分辨率上限"
     )
+
+    @model_validator(mode="after")
+    def _check_coords(self) -> "EventCropMeta":
+        """长度对但值退化的坐标也要拒:x2<=x1 / 非正帧尺寸 / 越出帧外画出来都是错位框。
+
+        前端 cropBoxGeometry 对前两类已返回 null(不画框),越界则画出一个贴边少两条边的
+        框(浏览器按 viewBox 裁掉超出部分),所以这不是线上 bug;补在这里是为了让「拒掉坏
+        数据」这条防线对未来的消费方(比如直接读 trace 画框的复盘工具)也成立,不必各自
+        重做 guard。读侧 read_crop_meta 已把 ValidationError 折成 410,不引入新的错误路径。
+
+        三条约束在写侧都恒成立(crop_enhance._clamp 把 region 钳在帧内、区域宽高恒 >0,
+        frame_size 与 region 取自同一帧),故不会把本来能返 200 的事件变成 410。
+        """
+        x1, y1, x2, y2 = self.region_xyxy
+        w, h = self.frame_size_wh
+        if w <= 0 or h <= 0:
+            raise ValueError("frame_size_wh 必须为正")
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("region_xyxy 必须满足 x2>x1, y2>y1")
+        if x1 < 0 or y1 < 0 or x2 > w or y2 > h:
+            raise ValueError("region_xyxy 必须落在 frame_size_wh 内")
+        return self
 
 
 class EventListResponse(BaseModel):

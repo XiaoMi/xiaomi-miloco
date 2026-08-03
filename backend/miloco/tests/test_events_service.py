@@ -446,14 +446,39 @@ class TestReadCropMeta:
             {"region_xyxy": [0, 0, 10, 10], "frame_size_wh": [640], "crop_short_edge": 360},
             {"region_xyxy": [0, 0, 10, 10], "frame_size_wh": [640, 360]},
             {"region_xyxy": "0,0,10,10", "frame_size_wh": [640, 360], "crop_short_edge": 360},
+            # 以下几条长度/类型都对,只是值退化 —— 画出来同样是错位框,也得拒。
+            # 宽为 0 / 高为 0 分开覆盖:_check_coords 里是 `w <= 0 or h <= 0` 一个分支,
+            # 将来被拆写漏掉一侧时,只有逐侧的用例才会亮。
+            {"region_xyxy": [500, 0, 100, 360], "frame_size_wh": [640, 360], "crop_short_edge": 360},
+            {"region_xyxy": [0, 500, 640, 100], "frame_size_wh": [640, 360], "crop_short_edge": 360},
+            {"region_xyxy": [0, 0, 10, 10], "frame_size_wh": [0, 360], "crop_short_edge": 360},
+            {"region_xyxy": [0, 0, 10, 10], "frame_size_wh": [640, 0], "crop_short_edge": 360},
+            {"region_xyxy": [0, 0, 10, 10], "frame_size_wh": [640, 360], "crop_short_edge": 0},
+            {"region_xyxy": [0, 0, 700, 360], "frame_size_wh": [640, 360], "crop_short_edge": 360},
+            {"region_xyxy": [-10, 0, 640, 360], "frame_size_wh": [640, 360], "crop_short_edge": 360},
         ],
-        ids=["region-truncated", "frame-truncated", "missing-short-edge", "region-not-list"],
+        ids=[
+            "region-truncated",
+            "frame-truncated",
+            "missing-short-edge",
+            "region-not-list",
+            "region-x-reversed",
+            "region-y-reversed",
+            "frame-width-zero",
+            "frame-height-zero",
+            "short-edge-zero",
+            "region-exceeds-frame",
+            "region-negative-origin",
+        ],
     )
     async def test_malformed_crop_returns_gone_not_raise(self, svc, dao, bad_crop):
-        """crop 字段形状不合法(schema 演进 / 写入被截断)→ gone,不让 ValidationError 冒成 500.
+        """crop 字段不合法(schema 演进 / 写入被截断)→ gone,不让 ValidationError 冒成 500.
 
         校验刻意放在 service 而非 router:router 里现构 EventCropMeta 会把半截 dict
         变成 500,与「拿不到就 410」的契约自相矛盾.
+
+        既覆盖形状不合法(长度/类型),也覆盖长度对但值退化(x2<=x1 / 帧尺寸非正 / 短边 0 /
+        框越出帧外)—— 后者靠 EventCropMeta._check_coords 与 crop_short_edge 的 ge=1 拦下.
         """
         eid = _insert(dao, device_ids=["cam_a"])
         self._save_trace(eid, [{"device_id": "cam_a", "crop": bad_crop}])

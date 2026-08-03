@@ -175,7 +175,8 @@ async def get_event_crop_meta(
     返回:
     - 200:{region_xyxy, frame_size_wh, crop_short_edge}
     - 404:event 不存在 / device_id 不在 device_ids 内
-    - 410:非 crop 事件 / trace 已被 cleanup 清 / trace 损坏 / crop 字段形状不合法 ——
+    - 410:非 crop 事件 / trace 已被 cleanup 清 / trace 损坏 / crop 字段形状或坐标值不合法
+      (长度、类型不对,或 x2<=x1 / y2<=y1 / 帧尺寸非正 / 框越出帧外)——
       前端把这台 device 视作「本次没裁切」,不渲染参考卡
     """
     status, crop = await svc.read_crop_meta(event_id, device_id)

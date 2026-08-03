@@ -188,7 +188,7 @@ class EventsService:
         与 locate_ref 同款状态语义:
         - ("found", EventCropMeta):trace 里有该 device 的 crop 记录且字段合法
         - ("gone", None):event/device 合法但没有(非 crop 事件 / trace 已被 cleanup 清 /
-          trace 损坏 / crop 字段形状不合法)
+          trace 损坏 / crop 字段形状或坐标值不合法)
         - ("not_found", None):event 不存在 / device_id 不在 device_ids 内
 
         解析与校验失败一律按 "gone" 处理而非 500:画框是装饰,坏一个 trace 不该让参考卡整张挂掉.
