@@ -237,6 +237,7 @@ export function UsageOmniConfig() {
   function applyProviderPreset(id: string) {
     const preset = OMNI_PROVIDER_PRESETS.find((item) => item.id === id);
     modelsReqId.current += 1; // 使切换前由 blur 发起的请求立即失效
+    setModelsLoading(false); // 自定义预设不发新请求，需在此结束旧请求的 loading 状态
     setBaseUrl(preset?.baseUrl ?? "");
     if (preset) setModel(preset.model);
     setModels([]);
@@ -248,6 +249,8 @@ export function UsageOmniConfig() {
   }
 
   function startAdd() {
+    modelsReqId.current += 1; // 防止上一个表单会话的请求回写新表单
+    setModelsLoading(false);
     setAdding(true);
     setEditing(null);
     setBaseUrl("");
