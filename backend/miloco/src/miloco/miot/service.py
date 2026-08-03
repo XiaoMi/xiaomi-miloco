@@ -509,6 +509,10 @@ class MiotService:
 
             async def _rebuild() -> None:
                 self._clear_account_scope_state()
+                # Account switch: delete the previous account's local cert and reset
+                # the virtual did (still the old uid here, before the new token is
+                # fetched) so the new account gets a clean central-hub identity.
+                await self._miot_proxy.reset_central_identity_async()
                 await self._miot_proxy.get_miot_auth_info(code=code, state=state)
                 # 建立启用集必须排在刷新和对齐之前：上一行把启用集删了，而
                 # is_home_allowed 对空启用集一律返回假 —— 这时候刷新，所有摄像头
@@ -718,6 +722,9 @@ class MiotService:
 
             async def _rebuild() -> None:
                 self._clear_account_scope_state()
+                # Logout: drop the local central-hub identity (cert + virtual did)
+                # before tearing down; the re-init below rebuilds with a fresh did.
+                await self._miot_proxy.reset_central_identity_async()
                 await self._miot_proxy.deinit()
                 # deinit 已清空 _camera_info_dict 和 token；init 重建 client 但无
                 # 有效 token，refresh_cameras 大概率静默失败（返回 None）。
@@ -1269,7 +1276,21 @@ class MiotService:
         homes, changed = await self._ensure_home_selected()
         if changed:
             self._schedule_agent_session_reset()
-            self._schedule_scope_reset(self._refresh_all_caches)
+
+            async def _rebuild() -> None:
+                # 启用家庭变了 → 刷新中枢 scope，让刚选中的家庭网关能连上（否则
+                # authorize_with_code 首登/换号时 _owned_group_ids 还停留在旧/空集，
+                # mDNS 发现的网关会被跳过，本地控制不生效直到手动切家或重启）。
+                try:
+                    await self._miot_proxy.refresh_central_hub_scope_async()
+                except Exception as e:
+                    logger.warning(
+                        "list_homes auto-select central hub scope refresh failed: %s",
+                        e,
+                    )
+                await self._refresh_all_caches()
+
+            self._schedule_scope_reset(_rebuild)
         return homes
 
     async def _ensure_home_selected(self) -> tuple[list[dict], bool]:
@@ -1400,7 +1421,19 @@ class MiotService:
         # 两件事都放后台：刷新和对齐都要打云端，让 HTTP 响应等它们会卡住几秒
         allow = allowed_home_ids(self._kv_repo)
         if allow != prev_allow:
-            self._schedule_scope_reset(self._refresh_all_caches)
+
+            async def _rebuild() -> None:
+                # 启用集变了才重置本地中枢：让它按新家庭重连（收口的归属过滤在
+                # 连接时按 live 白名单生效）。切家庭本就要重拉设备表，这里同类开销。
+                try:
+                    await self._miot_proxy.refresh_central_hub_scope_async()
+                except Exception as e:
+                    logger.warning(
+                        "switch_home central hub scope refresh failed: %s", e
+                    )
+                await self._refresh_all_caches()
+
+            self._schedule_scope_reset(_rebuild)
             self._schedule_agent_session_reset()
         else:
             # 前端家庭列表里当前那个家也是可点的，点它语义上什么都没换：作用域重置会为
