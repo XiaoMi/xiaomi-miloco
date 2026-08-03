@@ -104,7 +104,12 @@ async def _run_omni_probe() -> None:
                 ClassifiedError("no_key", "未配置 API Key", ErrorCategory.CONFIG),
             )
             return
-        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+        result = await _probe.probe_omni(
+            omni.model,
+            omni.base_url,
+            omni.api_key,
+            extra_headers=dict(omni.extra_headers or {}),
+        )
         if result.get("ok"):
             await cb.record_probe_result(True, None)
             return

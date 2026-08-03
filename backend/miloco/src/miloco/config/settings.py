@@ -161,6 +161,14 @@ class OmniModelSettings(BaseModel):
         default="",
         description="多模态模型 API Key；为空时视为未配置，插件与后端启动前校验",
     )
+    extra_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "附加请求头（可选）。部分网关要求携带自定义头才走特定通道或计费口径，"
+            "例如智谱 GLM Coding Plan 需要 {\"X-Title\": \"...\"} 才计入 MCP 通道；"
+            "默认空，是否携带由用户自行决定。"
+        ),
+    )
 
 
 class ModelSettings(BaseModel):
@@ -660,6 +668,7 @@ class MilocoSettings(BaseSettings):
             "model": self.model.omni.model,
             "base_url": self.model.omni.base_url,
             "api_key": self.model.omni.api_key,
+            "extra_headers": dict(self.model.omni.extra_headers),
         }
         if merged != existing:
             new_engine = {**self.perception.engine, "omni": merged}

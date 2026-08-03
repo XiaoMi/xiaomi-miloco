@@ -522,6 +522,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
             "active": p.label == active.label,
+            "extra_headers": dict(p.extra_headers or {}),
         }
         for p in m.omni_profiles
     ]
@@ -535,6 +536,7 @@ def _full_omni_payload() -> dict:
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
                 "active": True,
+                "extra_headers": dict(active.extra_headers or {}),
             },
         )
     health = asdict(get_omni_circuit_breaker().snapshot())
@@ -546,6 +548,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
             "health": health,
+            "extra_headers": dict(active.extra_headers or {}),
         },
         "profiles": profiles,
     }
@@ -558,6 +561,7 @@ def _profiles_as_dicts() -> list[dict]:
             "model": p.model,
             "base_url": p.base_url,
             "api_key": p.api_key,
+            "extra_headers": dict(p.extra_headers or {}),
         }
         for p in get_settings().model.omni_profiles
     ]
@@ -570,6 +574,13 @@ class OmniConfigBody(BaseModel):
     api_key: str | None = None  # 留空 = 沿用该档案原 key(不被打码值覆盖)
     original_label: str | None = None  # 正在编辑的档案原名(支持改名/定位);None=新增
     activate: bool = True  # True=同时设为当前生效;False=只入列表(激活由 /activate 负责)
+    extra_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "附加请求头（可选）。部分网关要求携带自定义头才走特定通道或计费口径，"
+            "例如智谱 GLM Coding Plan 需要 X-Title 才计入 MCP 通道。"
+        ),
+    )
 
 
 class OmniSelectBody(BaseModel):
@@ -622,7 +633,13 @@ async def put_omni_config(
         raise HTTPException(status_code=409, detail=f"档案名「{label}」已存在")
     # 传 base_url 让 _key_by_label 校验"URL 未变才沿用旧 key",防跨 URL 复用凭证。
     key = _key_by_label(orig or label, body.api_key, base_url=base_url)
-    entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
+    entry = {
+        "label": label,
+        "base_url": base_url,
+        "model": model,
+        "api_key": key,
+        "extra_headers": dict(body.extra_headers or {}),
+    }
     tgt = orig or label
     will_activate = body.activate or _label_is_active(tgt)
     if will_activate:
@@ -630,7 +647,9 @@ async def put_omni_config(
             raise HTTPException(
                 status_code=400, detail={"code": "no_key", "message": "未配置 API Key"}
             )
-        result = await _probe.probe_omni(model, base_url, key)
+        result = await _probe.probe_omni(
+            model, base_url, key, extra_headers=dict(body.extra_headers or {})
+        )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result)
     if target:
@@ -670,7 +689,12 @@ async def activate_omni_config(
                     status_code=400,
                     detail={"code": "no_key", "message": "未配置 API Key"},
                 )
-            result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
+            result = await _probe.probe_omni(
+                p.model,
+                p.base_url,
+                p.api_key,
+                extra_headers=dict(p.extra_headers or {}),
+            )
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
             update_shared_config(
@@ -680,6 +704,7 @@ async def activate_omni_config(
                         "model": p.model,
                         "base_url": p.base_url,
                         "api_key": p.api_key,
+                        "extra_headers": dict(p.extra_headers or {}),
                     }
                 }
             )
@@ -777,7 +802,7 @@ async def test_omni_config(
 ):
     """用表单值（缺省回退当前已保存配置）探测配置可用性。
 
-    OpenAI 兼容族（MiMo/Qwen）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
+    OpenAI 兼容族（MiMo/Qwen/GLM）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
     极简 chat 真正验证该模型可用；非 OpenAI 兼容族（Gemini 等原生协议）没有等价 GET /models
     预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
     返回 {ok, code, status, latency_ms, message}。"""
@@ -797,7 +822,19 @@ async def test_omni_config(
             message="ok",
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
-    result = await _probe.probe_omni(model, base_url, api_key)
+    # 取匹配档案（或当前 active）的 extra_headers，探测链路与推理链路保持同一配置。
+    label = (body.label or "").strip()
+    extra_headers: dict[str, str] = {}
+    if label:
+        for p in get_settings().model.omni_profiles:
+            if p.label == label:
+                extra_headers = dict(p.extra_headers or {})
+                break
+    if not extra_headers:
+        extra_headers = dict(omni.extra_headers or {})
+    result = await _probe.probe_omni(
+        model, base_url, api_key, extra_headers=extra_headers
+    )
     # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
     # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
     # OPEN_CONFIG 下 tick 不会自动探测(只探 OPEN_RECOVERABLE),不清则用户测通了红条仍不消失,
@@ -864,8 +901,22 @@ async def list_omni_models(
                 "message": "未配置 API Key",
             },
         )
+    # 取匹配档案（或当前 active）的 extra_headers，探测链路与推理链路保持同一配置。
+    label = (body.label or "").strip()
+    extra_headers: dict[str, str] = {}
+    if label:
+        for p in get_settings().model.omni_profiles:
+            if p.label == label:
+                extra_headers = dict(p.extra_headers or {})
+                break
+    if not extra_headers:
+        extra_headers = dict(get_settings().model.omni.extra_headers or {})
     return NormalResponse(
-        code=0, message="ok", data=await _probe.fetch_models(base_url, api_key)
+        code=0,
+        message="ok",
+        data=await _probe.fetch_models(
+            base_url, api_key, extra_headers=extra_headers
+        ),
     )
 
 
@@ -930,7 +981,12 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
     try:
-        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+        result = await _probe.probe_omni(
+            omni.model,
+            omni.base_url,
+            omni.api_key,
+            extra_headers=dict(omni.extra_headers or {}),
+        )
     except asyncio.CancelledError:
         # 客户端断开 HTTP(用户切页/关 tab/网络抖动)时 FastAPI 抛 CancelledError。
         # 此前 retry_now() 已把 state 置 HALF_OPEN,若不复位则 before_call 永久短路、

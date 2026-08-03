@@ -66,7 +66,9 @@ async def probe_reachable(base_url: str) -> dict | None:
     return {"code": "http_error", "message": f"服务返回异常（HTTP {r.status_code}）"}
 
 
-async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
+async def fetch_models(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> dict[str, Any]:
     """拉取 provider 模型列表(GET /models)。
 
     模型下拉在「选定 model 之前」拉取,没有 model 可路由 adapter,故按 base_url 判 provider:
@@ -88,6 +90,7 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
         if is_gemini
         else {"Authorization": f"Bearer {api_key}"}
     )
+    headers.update(extra_headers or {})
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(f"{base}/models", headers=headers)
@@ -179,7 +182,12 @@ async def _probe_stream_chat(
         return 500, 0, False, {}
 
 
-async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
+async def probe_chat(
+    model: str,
+    base_url: str,
+    api_key: str,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """极简 chat 探测(max_tokens=1)真校验模型是否可用。
 
     走 provider adapter 生成 body,兼容不同 provider 的强制要求(Qwen 强制
@@ -210,6 +218,7 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     headers = {
         **adapter.auth_headers(api_key),
         "Content-Type": "application/json",
+        **(extra_headers or {}),
     }
     t0 = time.monotonic()
     try:
@@ -330,7 +339,12 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     }
 
 
-async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
+async def probe_omni(
+    model: str,
+    base_url: str,
+    api_key: str,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """两阶段探测:GET /models 预检 → 极简 chat 真校验。
 
     - GET /models 网络错 → unreachable
@@ -351,11 +365,15 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     )
 
     if not isinstance(get_adapter(model), OpenAICompatAdapter):
-        return await probe_chat(model, base, api_key)
+        return await probe_chat(model, base, api_key, extra_headers)
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(
-                f"{base}/models", headers={"Authorization": f"Bearer {api_key}"}
+                f"{base}/models",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    **(extra_headers or {}),
+                },
             )
     except Exception as e:  # noqa: BLE001
         return {
@@ -377,4 +395,4 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
             "status": r.status_code,
             "message": f"服务返回异常（HTTP {r.status_code}）",
         }
-    return await probe_chat(model, base, api_key)
+    return await probe_chat(model, base, api_key, extra_headers)
