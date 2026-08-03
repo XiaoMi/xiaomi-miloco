@@ -4,6 +4,7 @@
  * 覆盖:
  * - realListActivity:GET /api/events(meaningful_events)字段映射 + 分页 query
  * - realGetUsageStats:GET /api/admin/token-usage/{buckets,daily} 折算
+ * - 任务详情写接口:PATCH /api/tasks/{id}(描述)、PATCH /api/rules/{id}(触发条件)
  *
  * 不连真 backend:vi 拦截 fetch,伪造 NormalResponse 形状;afterEach 还原原 fetch.
  */
@@ -20,6 +21,8 @@ import {
   realDeleteOmniConfig,
   realListOmniModels,
   realTestOmniConfig,
+  realUpdateRuleQuery,
+  realUpdateTaskDescription,
   _resetUsageStatsCache,
 } from "@/api/real";
 
@@ -449,5 +452,59 @@ describe("omni 配置契约 — 多档案", () => {
     expect(res.ok).toBe(true);
     expect(res.status).toBe(200);
     expect(res.message).toBe("连接正常");
+  });
+});
+
+describe("任务详情就地编辑 — 写接口契约", () => {
+  /** 捕获 url / method / body，回一个空 NormalResponse。 */
+  function captureFetch() {
+    const cap: { url?: string; method?: string; body: unknown } = { body: null };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      cap.url = typeof input === "string" ? input : input.toString();
+      cap.method = init?.method;
+      cap.body = init?.body ? JSON.parse(init.body as string) : null;
+      return new Response(JSON.stringify({ code: 0, message: "ok", data: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return cap;
+  }
+
+  it("改任务描述：PATCH /api/tasks/{id} {description}", async () => {
+    const cap = captureFetch();
+    await realUpdateTaskDescription("piano_practice", "每天练琴 30 分钟");
+    expect(cap.method).toBe("PATCH");
+    expect(cap.url).toBe("/api/tasks/piano_practice");
+    expect(cap.body).toEqual({ description: "每天练琴 30 分钟" });
+  });
+
+  it("改触发条件：PATCH /api/rules/{id} 只带 condition.query（不动感知设备）", async () => {
+    const cap = captureFetch();
+    await realUpdateRuleQuery("rule-1", "孩子在书桌前学习");
+    expect(cap.method).toBe("PATCH");
+    expect(cap.url).toBe("/api/rules/rule-1");
+    // 只提交 condition.query：backend patch_rule 按 model_fields_set 合并，
+    // 缺失的 perceive_device_ids 保留原值。多带字段会误改感知设备。
+    expect(cap.body).toEqual({ condition: { query: "孩子在书桌前学习" } });
+  });
+
+  it("id 走 encodeURIComponent，特殊字符不越界成新路径", async () => {
+    const cap = captureFetch();
+    await realUpdateRuleQuery("a/b?c", "x");
+    expect(cap.url).toBe("/api/rules/a%2Fb%3Fc");
+  });
+
+  it("backend 4xx → ApiError 带 message，调用方能 toast", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ message: "Rule 'nope' not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+    await expect(realUpdateRuleQuery("nope", "x")).rejects.toThrow(
+      "Rule 'nope' not found",
+    );
   });
 });
