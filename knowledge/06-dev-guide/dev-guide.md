@@ -133,7 +133,7 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 - **为何首选改宿主**：宿主时区是这两个域**唯一共享的回落信道**——设好宿主、两边显式配置都留空，openclaw 与 miloco 便一起对齐，只需动一处。若偏好显式配置，须**同时**设 openclaw 的 `agents.defaults.userTimezone` 与 miloco 的 `config.json` `timezone`；只设一边会让另一边停在回落上。
 - **openclaw 侧没有"中国兜底"，这是历史 bug 的根源**：miloco 域在彻底无法解析时兜底 `Asia/Shanghai`，而 openclaw 域回落只到宿主时区（云主机通常 `Etc/UTC`）、无额外兜底。故 `userTimezone` 未设 + 宿主 UTC 时，openclaw 的 `Current time` 会显示 UTC——「上午 10 点被叙述成凌晨」正源于此。修法：设 `openclaw.json` 的 `userTimezone`（openclaw 原生机制），或设对宿主时区。
 - **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应优先给宿主 / 容器设置正确时区；确实无法修改宿主时再用 miloco 侧 `timezone` 配置（openclaw 侧的 `Current time` 另由其 `userTimezone` / 宿主回落决定，见上）。
-- `miloco-cli service start` 生成 supervisord.conf 时会把解析出的时区以 `TZ` + `MILOCO_TIMEZONE` 注入 backend 子进程环境（改配置后重启生效）。
+- `miloco-cli service start` 会把解析出的时区以 `TZ` + `MILOCO_TIMEZONE` 注入 backend 子进程环境（Linux 写进 supervisord.conf 的 `environment=`，macOS 写进 LaunchAgent plist 的 `EnvironmentVariables`；改配置后重启生效）。macOS 侧 launchd 不继承登录 shell 环境，故 plist 还会按白名单快照 `MILOCO_*` 与代理 / 自定义 CA 变量，详见 [macOS LaunchAgent 与本地网络权限](../03-features/macos-launchagent-lnp.md)。
 
 ### 配置修改后是否需要重启
 
@@ -395,22 +395,22 @@ bash scripts/install.sh --dev
 
 ## 数据落盘约定
 
-| 路径                              | 用途                                                                                                        |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `~/.openclaw/miloco/`             | `$MILOCO_HOME` 默认根                                                                                       |
-| `config.json`                     | 三端共享配置                                                                                                |
-| `miloco.db`                       | SQLite 业务数据库                                                                                           |
-| `observability.db`                | 性能追踪数据库（`perf.enabled=true` 时建）                                                                  |
-| `data/identity_lib/persons/<id>/` | 身份库（tier_a / tier_c / meta.json）                                                                       |
-| `models/`                         | ONNX 模型（必需 det_4C / human_body_reid_v2，另有可选模型；清单见 `resource_validator.py`）                 |
-| `home-profile/`                   | 家庭档案（candidates.json / profile.json / profile.md）                                                     |
-| `static/`                         | 家庭面板前端静态资源（由 `install.sh` 从 `web/dist/` 同步）                                                 |
-| `log/`                            | 各组件日志（`miloco-backend.log` / `supervisord.log` 等）                                                   |
-| `supervisord.*`                   | supervisor 配置和 socket（service start 首次生成）                                                          |
-| `memory/`                         | Agent 工作区记忆（如 `_system/dynamic_failures.md`；任务行为统计已迁至 `miloco.db` 的 `task_record_*` 表）  |
-| `trace/agent/`                    | DYNAMIC rule trace jsonl（`debug_observability` flag 开时写）                                               |
-| `snapshots/<event_id>/`           | meaningful event 产物：per-device `clip.{mp4,m4a}` + 事件级 `omni_trace.json.gz`（TTL + 磁盘 LRU 同生共死） |
-| `packs/`                          | 日志打包产物（LRU 保留最新几个）                                                                            |
+| 路径                              | 用途                                                                                                                                                |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `~/.openclaw/miloco/`             | `$MILOCO_HOME` 默认根                                                                                                                               |
+| `config.json`                     | 三端共享配置                                                                                                                                        |
+| `miloco.db`                       | SQLite 业务数据库                                                                                                                                   |
+| `observability.db`                | 性能追踪数据库（`perf.enabled=true` 时建）                                                                                                          |
+| `data/identity_lib/persons/<id>/` | 身份库（tier_a / tier_c / meta.json）                                                                                                               |
+| `models/`                         | ONNX 模型（必需 det_4C / human_body_reid_v2，另有可选模型；清单见 `resource_validator.py`）                                                         |
+| `home-profile/`                   | 家庭档案（candidates.json / profile.json / profile.md）                                                                                             |
+| `static/`                         | 家庭面板前端静态资源（由 `install.sh` 从 `web/dist/` 同步）                                                                                         |
+| `log/`                            | 各组件日志（`miloco-backend.log` + 轮转的 `.1`…`.20`；Linux 另有 `supervisord.log`，macOS 另有 `launchd-stdio.log`）                                |
+| `supervisord.*`                   | supervisor 配置和 socket（**仅 Linux**；service start 首次生成。macOS 用 LaunchAgent，见 `~/Library/LaunchAgents/com.xiaomi.miloco.backend.plist`） |
+| `memory/`                         | Agent 工作区记忆（如 `_system/dynamic_failures.md`；任务行为统计已迁至 `miloco.db` 的 `task_record_*` 表）                                          |
+| `trace/agent/`                    | DYNAMIC rule trace jsonl（`debug_observability` flag 开时写）                                                                                       |
+| `snapshots/<event_id>/`           | meaningful event 产物：per-device `clip.{mp4,m4a}` + 事件级 `omni_trace.json.gz`（TTL + 磁盘 LRU 同生共死）                                         |
+| `packs/`                          | 日志打包产物（LRU 保留最新几个）                                                                                                                    |
 
 ---
 

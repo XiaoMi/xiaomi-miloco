@@ -90,3 +90,26 @@ async def test_list_homes_no_auto_select_no_scope_refresh():
     assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
     # 不刷新中枢 scope（家庭没变）
     proxy.refresh_central_hub_scope_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_homes_survives_scope_refresh_failure():
+    """scope 刷新失败不能反噬 list_homes 本身（fail-open 是刻意设计）。
+
+    只测成功路径的话，有人拆掉那圈 try/except，CI 全绿而首登会在刷新失败时整个
+    500 —— 用户连家庭列表都拿不到，比"本地控制暂时不生效"严重得多。
+    """
+    kv = _FakeKV()
+    svc, proxy, kv = _make_service(
+        kv=kv,
+        homes={"H1": SimpleNamespace(home_id="H1", home_name="home-1")},
+    )
+    proxy.refresh_central_hub_scope_async = AsyncMock(
+        side_effect=RuntimeError("cloud down")
+    )
+
+    res = await svc.list_homes()
+
+    assert res  # 家庭列表照常返回
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    proxy.refresh_central_hub_scope_async.assert_awaited_once()

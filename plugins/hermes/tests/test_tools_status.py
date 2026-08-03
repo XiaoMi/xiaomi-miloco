@@ -109,7 +109,7 @@ def test_status_state_json_target_set(tmp_path: Path):
     assert result["target"] == "feishu"
 
 
-def test_gather_status_returns_9_checks(tmp_path: Path):
+def test_gather_status_returns_10_checks(tmp_path: Path):
     ctx = _FakeCtx(tmp_path)
     out = ts.gather_status(ctx)
     assert "checks" in out
@@ -120,6 +120,7 @@ def test_gather_status_returns_9_checks(tmp_path: Path):
         "adapter_health",
         "cron_jobs",
         "miloco_backend",
+        "miloco_backend_managed",
         "skills_installed",
         "versions",
         "trace_hooks",
@@ -513,3 +514,64 @@ def test_adapter_health_import_error_returns_false():
     out = ts._check_adapter_health()
     assert out["ok"] is False
     assert "error" in out
+
+
+# ─── miloco_backend / miloco_backend_managed ────────────────────────────────
+
+
+def _fake_service_status(monkeypatch, *, stdout: str, returncode: int = 0):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/miloco-cli")
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _FakeProc())
+
+
+def test_miloco_backend_stopped_json_is_not_falsely_ok(monkeypatch):
+    """{"running": false} 必须判 ok=False —— 松 grep 找 "running" 子串会在这条
+    JSON 上恒命中（"running" 就在这串里），把死后端误报成健康。"""
+    _fake_service_status(monkeypatch, stdout='{"running": false}')
+    out = ts._check_miloco_backend()
+    assert out["ok"] is False
+    assert out["running"] is False
+    assert "fix" in out
+
+
+def test_miloco_backend_running_json_is_ok(monkeypatch):
+    _fake_service_status(monkeypatch, stdout='{"running": true, "pid": 123}')
+    out = ts._check_miloco_backend()
+    assert out["ok"] is True
+    assert out["running"] is True
+    assert out["pid"] == 123
+
+
+def test_miloco_backend_managed_ok_when_running_and_managed(monkeypatch):
+    _fake_service_status(
+        monkeypatch, stdout='{"running": true, "managed": true, "pid": 123}'
+    )
+    out = ts._check_miloco_backend_managed()
+    assert out["ok"] is True
+    assert out["managed"] is True
+
+
+def test_miloco_backend_managed_fails_when_running_unmanaged(monkeypatch):
+    """在跑但没被 launchd/supervisord 托管:与"没在跑"是两个不同问题,修复动作
+    也不同(restart 而非 start),必须单独报 fail + 单独的 fix。"""
+    _fake_service_status(
+        monkeypatch, stdout='{"running": true, "managed": false, "pid": 123}'
+    )
+    out = ts._check_miloco_backend_managed()
+    assert out["ok"] is False
+    assert "restart" in out["fix"]
+
+
+def test_miloco_backend_managed_not_double_flagged_when_stopped(monkeypatch):
+    """后端没在跑时,managed 检查不该跟着 fail——那是 miloco_backend 一项的
+    职责,压在一起会让 agent 把同一个根因当成两个不同问题去修。"""
+    _fake_service_status(monkeypatch, stdout='{"running": false}')
+    out = ts._check_miloco_backend_managed()
+    assert out["ok"] is True

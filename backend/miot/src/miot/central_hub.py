@@ -47,12 +47,24 @@ _LOGGER = logging.getLogger(__name__)
 # for this long and route straight to cloud. Bounds a flaky device to one
 # timeout per window instead of N; self-heals when the window lapses.
 _LOCAL_COOLDOWN_SEC = 30.0
+# Whole-gateway cooldown: armed when _GW_TIMEOUT_THRESHOLD distinct dids behind
+# one gateway time out within _GW_TIMEOUT_WINDOW_SEC. Threshold is 2 rather than
+# 1 so a single flaky device cannot demote the entire home to cloud; the cost of
+# detecting a genuinely wedged gateway is therefore 2 × the local RPC timeout,
+# instead of one timeout per device in the batch.
+_GW_COOLDOWN_SEC = 30.0
+_GW_TIMEOUT_WINDOW_SEC = 30.0
+_GW_TIMEOUT_THRESHOLD = 2
 
 # Minimum spacing between owned-group refetches triggered by discovering an
 # unowned gateway. Bounds the cloud calls when many neighbor gateways are on the
 # LAN; a genuinely new home still gets picked up within this window / on the
 # next periodic refresh.
 _OWNED_REFRESH_MIN_INTERVAL_SEC = 60.0
+# 拉取家庭列表失败后的重试退避。比上面的节流窗短:那个防的是"未拥有网关反复触发
+# 刷新打爆 API",而这里是我们**自己**还没拿到白名单、本地控制完全不可用,值得更快
+# 重试。由重连 sweep 驱动(每 _RECONNECT_SWEEP 一轮),不额外起定时器。
+_OWNED_REFRESH_RETRY_INTERVAL_SEC = 20.0
 
 # Periodically retry connecting to desired-but-unconnected gateways (static or
 # mDNS-discovered + owned). A single transient connect failure at discovery
@@ -112,10 +124,24 @@ class CentralHubManager:
         self._mdns: Optional[MdnsService] = None
         self._virtual_did: Optional[str] = None
         self._refresh_cert_timer: Optional[asyncio.TimerHandle] = None
+        self._refresh_cert_task: Optional[asyncio.Task] = None
 
         # did -> monotonic expiry: local path skipped (route cloud) for a did
         # whose recent local RPC failed/timed out, until the window lapses.
         self._local_cooldown: dict[str, float] = {}
+        # group_id -> monotonic expiry: whole-gateway cooldown. Armed once
+        # several *distinct* dids behind the same gateway time out in a window,
+        # which is the signature of the gateway itself being wedged rather than
+        # one flaky device. Without it a batch across N devices behind a dead
+        # gateway pays N × the local RPC timeout one device at a time (10 devices
+        # ⇒ ~50s, worse than the pure-cloud path this channel replaced).
+        self._gw_cooldown: dict[str, float] = {}
+        # group_id -> {did: monotonic expiry} — distinct dids that timed out
+        # recently, the evidence for arming the gateway-level cooldown above.
+        # Keyed by did (not a plain counter) on purpose: one device retrying and
+        # timing out repeatedly must NOT get the whole gateway demoted, or a
+        # single misbehaving plug would keep pushing the entire home to cloud.
+        self._gw_timeouts: dict[str, dict[str, float]] = {}
         # group_id -> live local MQTT client
         self._clients: dict[str, MipsLocalClient] = {}
         # did -> {group_id, online, specv2_access, push_available}
@@ -132,6 +158,22 @@ class CentralHubManager:
         # the same gateway (mDNS callback + 20s reconnect sweep) from racing,
         # both creating MipsLocalClient instances, and leaking the loser.
         self._ensure_locks: dict[str, asyncio.Lock] = {}
+        # Hosts with an in-flight __ensure_client_locked connect (init_async()
+        # hasn't returned yet, so self._clients doesn't see them). _ensure_locks
+        # is keyed by group_id, not host: the same physical gateway reachable
+        # both via mDNS (real group_id) and static config (synthetic
+        # "static:host") takes two *different* locks, so the two paths don't
+        # serialize against each other — without this set, both can pass the
+        # host-dedup loop below concurrently (it only checks self._clients,
+        # which is still empty for both), each build a MipsLocalClient with the
+        # same MQTT client_id (= the virtual did, independent of group_id), and
+        # the broker kicks the loser per MQTT v5 §3.1.4 — the kicked side
+        # auto-reconnects and kicks the other back, forever, ~every 6s.
+        self._connecting_hosts: set[str] = set()
+        # Serialises __refresh_cert. The per-group locks above do NOT cover it:
+        # two gateways hold two different locks, so their connect tasks can both
+        # enter the check-then-act key/cert flow and write a mismatched pair.
+        self._cert_refresh_lock = asyncio.Lock()
         # Static gateway group_ids that were connected and then dropped
         # because their home is not in the enabled set. Recorded so the
         # 20s reconnect sweep doesn't create a connect→drop infinite loop.
@@ -140,6 +182,11 @@ class CentralHubManager:
         # refetch triggered when an unowned gateway is discovered (a dense LAN
         # can surface many neighbor gateways, each otherwise a cloud round-trip).
         self._owned_refreshed_at: float = 0.0
+        # 上一次拉取家庭列表是否成功;失败时 _owned_retry_at 给出下次可重试的时刻。
+        # 分开记是因为"成功但为空"(用户确实没启用家庭)与"失败"(白名单未知)后果完全
+        # 不同:前者该按 60s 节流,后者必须尽快重试,否则本地控制永久不可用。
+        self._owned_refresh_ok: bool = False
+        self._owned_retry_at: float = 0.0
 
         self._on_dev_list_changed: Optional[DevListChangedHandler] = None
         self._reconnect_task: Optional[asyncio.Task] = None
@@ -237,6 +284,13 @@ class CentralHubManager:
         if self._refresh_cert_timer:
             self._refresh_cert_timer.cancel()
             self._refresh_cert_timer = None
+        if self._refresh_cert_task is not None:
+            # 只取消"还没到点的定时器"管不到"已经开跑、正卡在云端签发 await 上"
+            # 的任务 —— 它没有被别处持有引用、也不检查自己是否还该活着,拆卸落在
+            # 它的签发窗口内时会带着已拆卸的 self 跑完并自我续期,形成一条直到
+            # 进程退出都停不下来的僵尸链(还可能用旧 did 覆盖新实例刚签的证书)。
+            self._refresh_cert_task.cancel()
+            self._refresh_cert_task = None
         if self._mdns:
             try:
                 self._mdns.unsub_service_change("central_hub")
@@ -253,10 +307,15 @@ class CentralHubManager:
         self._dev_table.clear()
         # scope 切换(切家/自动选家)后这些状态都是旧家庭的残留,一并清掉:
         # _ensure_locks(过期的 per-group lock)、_auth_rejected(旧网关的"未授权"
-        # 抑制,切换后应重新允许告警)、_local_cooldown(旧 did 的冷却窗口)。
+        # 抑制,切换后应重新允许告警)、_local_cooldown(旧 did 的冷却窗口)、
+        # _gw_cooldown / _gw_timeouts(旧网关的降级状态与超时证据——group_id 换过
+        # 之后这些键再也匹配不上,留着只是内存垃圾)。
         self._ensure_locks.clear()
+        self._connecting_hosts.clear()
         self._auth_rejected.clear()
         self._local_cooldown.clear()
+        self._gw_cooldown.clear()
+        self._gw_timeouts.clear()
 
     async def refresh_scope_async(self) -> None:
         """Re-evaluate the connectable-home scope after a scope change (e.g. a
@@ -277,6 +336,16 @@ class CentralHubManager:
         _LOGGER.info("central hub: refreshing home scope (re-init)")
         self._static_rejected.clear()
         await self.deinit_async()
+        # 家庭范围确实变了:旧白名单不能留给 init_async 当 fail-open 的兜底值,否则
+        # 云端不可达时重连 sweep 会照着旧家庭的 group_id 把旧网关重新连回来(见
+        # __refresh_owned_group_ids 失败路径只置 _owned_refresh_ok=False、旧集合
+        # 原样保留 —— 那是关停/重启场景要的行为,但这里 scope 本身已经变了)。
+        # 注意只在这里清,不能塞进 deinit_async:它也服务于关停/重启,那些场景下
+        # 保留旧值恰恰是 fail-open 想要的。
+        self._owned_group_ids.clear()
+        self._did_group_map.clear()
+        self._owned_refresh_ok = False
+        self._owned_retry_at = 0.0
         await self.init_async()
 
     # ------------------------------------------------------------ routing API
@@ -310,7 +379,18 @@ class CentralHubManager:
         so a device that has gone flaky on the LAN stays controllable without
         paying the full RPC timeout on every call. Bounds a flaky device's batch
         to one timeout; self-heals when the window lapses.
+
+        Checked gateway-first: when the gateway as a whole is cooling down every
+        did behind it routes to cloud, so a batch does not pay one timeout per
+        device discovering the same dead gateway over and over.
         """
+        gw = self.__gateway_of(did)
+        if gw is not None:
+            expiry = self._gw_cooldown.get(gw)
+            if expiry is not None:
+                if time.monotonic() < expiry:
+                    return True
+                del self._gw_cooldown[gw]  # window lapsed
         expiry = self._local_cooldown.get(did)
         if expiry is None:
             return False
@@ -319,10 +399,45 @@ class CentralHubManager:
         del self._local_cooldown[did]  # window lapsed
         return False
 
+    def __gateway_of(self, did: str) -> Optional[str]:
+        """group_id of the gateway a did sits behind (None if not in the table)."""
+        info = self._dev_table.get(did)
+        return info.get("group_id") if info else None
+
     def note_local_failure(self, did: str) -> None:
-        """Arm the cooldown after a local RPC timeout → route the did to cloud
-        for a window (called only on timeout, not on fast failures)."""
-        self._local_cooldown[did] = time.monotonic() + _LOCAL_COOLDOWN_SEC
+        """Arm cooldowns after a local RPC timeout (called only on timeout, not
+        on fast failures) → route to cloud for a window.
+
+        Always cools the did. Additionally cools the **gateway** once
+        ``_GW_TIMEOUT_THRESHOLD`` distinct dids behind it have timed out inside
+        ``_GW_TIMEOUT_WINDOW_SEC``: a wedged gateway (busy process, half-open
+        MQTT whose keepalive has not fired yet, gateway restarting) makes every
+        device behind it time out separately, and the per-did cooldown alone
+        cannot stop a batch from paying that cost device by device.
+
+        Requiring more than one distinct did before demoting the gateway is
+        deliberate: it separates "this one plug is flaky" (stay local for the
+        rest of the home) from "the gateway is gone" (skip local wholesale). The
+        worst case becomes THRESHOLD × timeout instead of N_devices × timeout.
+        """
+        now = time.monotonic()
+        self._local_cooldown[did] = now + _LOCAL_COOLDOWN_SEC
+        gw = self.__gateway_of(did)
+        if gw is None:
+            return
+        seen = self._gw_timeouts.setdefault(gw, {})
+        for stale_did, expiry in list(seen.items()):  # drop lapsed evidence
+            if now >= expiry:
+                del seen[stale_did]
+        seen[did] = now + _GW_TIMEOUT_WINDOW_SEC
+        if len(seen) >= _GW_TIMEOUT_THRESHOLD:
+            _LOGGER.warning(
+                "central hub: %d distinct dids timed out behind gateway %s → "
+                "cooling down the whole gateway for %.0fs (routing to cloud)",
+                len(seen), gw, _GW_COOLDOWN_SEC,
+            )
+            self._gw_cooldown[gw] = now + _GW_COOLDOWN_SEC
+            seen.clear()  # evidence consumed; re-accumulate after the window
 
     async def set_prop_async(self, did: str, siid: int, piid: int, value: Any) -> dict:
         return await self.__client_for(did).set_prop_async(did, siid, piid, value)
@@ -349,67 +464,104 @@ class CentralHubManager:
 
         Reschedules itself ``MIHOME_CERT_EXPIRE_MARGIN`` before expiry. Returns
         True if a usable cert is in place.
+
+        **任何瞬态失败出口都必须排一次退避重试**,所以兜底收在这一层而不是只挡
+        ``except``:续签是一条自维持的链条,所有网关都稳定连接时 reconnect sweep 会
+        跳过已连网关、``__ensure_client_locked`` 永不执行,于是链一断就再没有任何
+        定时器指向这里 —— 证书在无人察觉下过期,已建立的 MQTT 会话还活着所以"看起来
+        一切正常",直到下一次断连才被 mTLS 拒绝,此后所有控制静默退回云端 RTT。
+        而 CA / 私钥 / 证书三处落盘失败走的是 ``return False`` 而**不是**抛异常
+        (存储层写失败即返回 False),性质与 except 挡的云端超时完全相同(磁盘临时写满、
+        目录权限被外部工具改动),只是走不到异常通道,此前正好掉进这个缺口。
         """
         if not self._enabled:
             return True
+        if not self._started:
+            # deinit_async 落在上一次 __refresh_cert_once 的云端签发 await 里时,
+            # 这个任务(create_task 出去、没人持有引用)会带着已拆卸的 self 继续
+            # 跑完并重新排期,形成一条到进程退出都停不下来的僵尸链——见 deinit_async
+            # 里 _refresh_cert_task.cancel() 那段注释。_started 由 deinit_async
+            # 落地时置 False,这里读它当生命周期闸门。
+            _LOGGER.debug("central hub: cert refresh skipped (already deinit-ed)")
+            return False
         if not self._virtual_did:
+            # 不是瞬态故障(身份缺失要靠 init / 换号流程补),无限重试没有意义。
             _LOGGER.error("central hub: no virtual did; cannot refresh cert")
             return False
+        ok = await self.__refresh_cert_once()
+        if not ok:
+            self.__schedule_cert_refresh(_CERT_REFRESH_RETRY_BACKOFF)
+        return ok
+
+    async def __refresh_cert_once(self) -> bool:
+        """``__refresh_cert`` 的主体。失败只返回 False,退避重试由调用方统一安排。"""
         try:
-            if not await self._cert.verify_ca_cert_async():
-                _LOGGER.error(
-                    "central hub: CA cert not ready (%s); local control disabled",
-                    self._cert.ca_file,
-                )
-                return False
-            # Pass the current did so a cert whose CN encodes a *different* did
-            # (e.g. the identity changed / migrated) is treated as expired and
-            # re-signed — the gateway rejects a client_id/CN mismatch.
-            refresh_time = (
-                await self._cert.user_cert_remaining_time_async(
-                    did=self._virtual_did
-                )
-                - MIHOME_CERT_EXPIRE_MARGIN
-            )
-            if refresh_time <= 60:
-                user_key = await self._cert.load_user_key_async()
-                if not user_key:
-                    user_key = self._cert.gen_user_key()
-                    if not await self._cert.update_user_key_async(user_key):
-                        _LOGGER.error("central hub: persist user key failed")
-                        return False
-                csr = self._cert.gen_user_csr(user_key, did=self._virtual_did)
-                crt = await self._http_client.get_central_cert_async(csr)
-                if not await self._cert.update_user_cert_async(crt):
-                    _LOGGER.error("central hub: persist user cert failed")
+            # 必须串行:函数体是 check-then-act(load key → 没有就生成并保存 → 组 CSR
+            # → 云端签发 → 保存 cert)。三个调用方里 __ensure_client_locked 那个只持
+            # **per-group** 锁,两台网关的应答通常同批到达 → 两个连接任务并发进来,
+            # 都 load 到 None、各自生成 kA/kB,key 与 cert 的保存都是"后写者赢",最终
+            # 可能 key=kB 而 cert=certA:公私钥不配对,mTLS 必失败。而且**没有自愈**
+            # —— user_cert_remaining_time_async 只看 subject/有效期,certA 本身合法、
+            # CN 也匹配,补签条件永不触发,本地控制死到手工删文件。锁内重新取一次剩余
+            # 时间即天然完成 double-check:先赢者已签好,后到者直接复用。
+            async with self._cert_refresh_lock:
+                if not await self._cert.verify_ca_cert_async():
+                    _LOGGER.error(
+                        "central hub: CA cert not ready (%s); local control disabled",
+                        self._cert.ca_file,
+                    )
                     return False
+                # Pass the current did so a cert whose CN encodes a *different*
+                # did (e.g. the identity changed / migrated) is treated as
+                # expired and re-signed — the gateway rejects a client_id/CN
+                # mismatch.
                 refresh_time = (
                     await self._cert.user_cert_remaining_time_async(
                         did=self._virtual_did
                     )
                     - MIHOME_CERT_EXPIRE_MARGIN
                 )
-                if refresh_time <= 0:
-                    _LOGGER.error("central hub: signed cert already near expiry")
-                    return False
-                _LOGGER.info("central hub: user cert signed/renewed")
-            self.__schedule_cert_refresh(refresh_time)
-            return True
+                if refresh_time <= 60:
+                    user_key = await self._cert.load_user_key_async()
+                    if not user_key:
+                        user_key = self._cert.gen_user_key()
+                        if not await self._cert.update_user_key_async(user_key):
+                            _LOGGER.error("central hub: persist user key failed")
+                            return False
+                    csr = self._cert.gen_user_csr(user_key, did=self._virtual_did)
+                    crt = await self._http_client.get_central_cert_async(csr)
+                    if not await self._cert.update_user_cert_async(crt):
+                        _LOGGER.error("central hub: persist user cert failed")
+                        return False
+                    refresh_time = (
+                        await self._cert.user_cert_remaining_time_async(
+                            did=self._virtual_did
+                        )
+                        - MIHOME_CERT_EXPIRE_MARGIN
+                    )
+                    if refresh_time <= 0:
+                        _LOGGER.error("central hub: signed cert already near expiry")
+                        return False
+                    _LOGGER.info("central hub: user cert signed/renewed")
+                self.__schedule_cert_refresh(refresh_time)
+                return True
         except Exception as e:
             _LOGGER.error("central hub: refresh cert failed: %s", e)
-            # 瞬态失败(云端超时/网络抖动)也要安排退避重试,否则续签链断了——所有
-            # 网关都稳定连接时 reconnect sweep 跳过已连网关,不会触发证书检查,
-            # 证书会在无人察觉下过期,新连接被 mTLS 拒绝。
-            self.__schedule_cert_refresh(_CERT_REFRESH_RETRY_BACKOFF)
+            # 退避重试由 __refresh_cert 统一排(它对本函数的每一条失败出口都排,
+            # 不只是异常这一条)——理由见那边的 docstring。
             return False
 
     def __schedule_cert_refresh(self, delay_sec: float) -> None:
         if self._refresh_cert_timer:
             self._refresh_cert_timer.cancel()
         self._refresh_cert_timer = self._main_loop.call_later(
-            max(delay_sec, 60),
-            lambda: self._main_loop.create_task(self.__refresh_cert()),
+            max(delay_sec, 60), self.__spawn_cert_refresh
         )
+
+    def __spawn_cert_refresh(self) -> None:
+        # 任务句柄记下来,拆卸时才有东西可 cancel——之前 create_task 的返回值直接
+        # 丢弃,deinit_async 只能取消"还没到点的定时器",管不到已经开跑的这个任务。
+        self._refresh_cert_task = self._main_loop.create_task(self.__refresh_cert())
 
     async def __refresh_owned_group_ids(self) -> None:
         """Fetch the group_ids of homes to connect to: homes this account owns,
@@ -448,13 +600,30 @@ class CentralHubManager:
                 len(self._owned_group_ids),
                 "" if enabled is None else f" (filtered to {len(enabled)} enabled)",
             )
+            self._owned_refresh_ok = True
         except Exception as e:
-            _LOGGER.error("central hub: fetch owned group_ids failed: %s", e)
+            # 失败必须与"成功但结果为空"区分开。历史实现在 finally 里无条件盖
+            # 时间戳,于是开机自启(launchd 早于网络就绪)那次拉取失败后:白名单为空
+            # + 时间戳"刚刷过" → mDNS 首次探到自家网关时被 60s 节流窗吃掉 → 而
+            # mDNS 按内容去重,IP/端口稳定的网关**一个进程只触发一次 ADDED** →
+            # 回调再也不来,重连 sweep 又全被 `not in _owned_group_ids` continue
+            # 掉且从不刷新 → 本地控制永久降级到云端,直到切家庭或重启进程。
+            # 现在:失败不盖成功时间戳,只记一个更短的退避点,让 sweep 能重试。
+            self._owned_refresh_ok = False
+            self._owned_retry_at = (
+                time.monotonic() + _OWNED_REFRESH_RETRY_INTERVAL_SEC
+            )
+            _LOGGER.error(
+                "central hub: fetch owned group_ids failed (will retry in %.0fs): %s",
+                _OWNED_REFRESH_RETRY_INTERVAL_SEC, e,
+            )
+            return
         finally:
-            # Stamp regardless of outcome so a persistent cloud failure doesn't
-            # let unowned-gateway discovery hammer the API (see the throttle in
-            # __on_service_change).
-            self._owned_refreshed_at = time.monotonic()
+            # 成功才盖节流时间戳——它的用途是防止"未拥有的网关"反复触发刷新打爆
+            # 云端 API(见 __on_service_change 的节流),失败路径用 _owned_retry_at
+            # 单独退避,两者不能共用一个戳。
+            if self._owned_refresh_ok:
+                self._owned_refreshed_at = time.monotonic()
 
     async def __on_service_change(
         self, group_id: str, state: MdnsServiceState, data: dict
@@ -467,9 +636,14 @@ class CentralHubManager:
         # may have been added after startup) — but throttled, so a LAN full of
         # neighbor gateways can't turn each discovery into a cloud round-trip.
         if group_id not in self._owned_group_ids:
-            if (
-                time.monotonic() - self._owned_refreshed_at
-                >= _OWNED_REFRESH_MIN_INTERVAL_SEC
+            now = time.monotonic()
+            # 失败退避也要在发现路径生效:__refresh_owned_group_ids 失败时只记
+            # _owned_retry_at、不盖成功戳,所以云端故障期间 _owned_refreshed_at 恒是
+            # 陈旧值(或初始 0.0),下面这个节流条件恒通过 —— 每发现一台未拥有的邻居
+            # 网关就再打一次 get_homes_async(最长 30s 超时)。开机自启撞上云不可达
+            # (本 PR 的重点场景)时,LAN 里每台邻居网关各触发一次。
+            if now - self._owned_refreshed_at >= _OWNED_REFRESH_MIN_INTERVAL_SEC and (
+                self._owned_refresh_ok or now >= self._owned_retry_at
             ):
                 await self.__refresh_owned_group_ids()
             if group_id not in self._owned_group_ids:
@@ -510,7 +684,11 @@ class CentralHubManager:
 
         # Dedup by host: the same physical gateway may be reached both via mDNS
         # (real group_id) and static config (synthetic "static:host"). Only one
-        # connection to a given broker.
+        # connection to a given broker. Note _ensure_locks is keyed by
+        # group_id, so the mDNS path and the static path do NOT serialize
+        # against each other — this loop alone is not enough, because an
+        # in-flight connect (init_async() hasn't returned) is invisible here:
+        # self._clients only gets the entry after the handshake completes.
         for gid, client in self._clients.items():
             if gid != group_id and client.host == host and client.is_connected:
                 _LOGGER.debug(
@@ -520,53 +698,85 @@ class CentralHubManager:
                     group_id,
                 )
                 return
-
-        if not self._virtual_did:
-            _LOGGER.error("central hub: no virtual did; cannot connect gateway")
-            return
-        # A cert may not have been ready at init; make sure it is now
-        # AND that its CN matches the current virtual did (identity may
-        # have been rotated — e.g. authorize_with_code → the old manager's
-        # 20s reconnect sweep can pick up a newly-signed cert whose CN
-        # encodes a different did, which the gateway rejects).
-        if (
-            await self._cert.user_cert_remaining_time_async(
-                did=self._virtual_did
-            )
-            <= 0
-        ):
-            if not await self.__refresh_cert():
-                _LOGGER.error(
-                    "central hub: cert unavailable, skip gateway %s", group_id
-                )
-                return
-
-        client = MipsLocalClient(
-            did=self._virtual_did,
-            host=host,
-            group_id=group_id,
-            ca_file=self._cert.ca_file,
-            cert_file=self._cert.cert_file,
-            key_file=self._cert.key_file,
-            port=port,
-            loop=self._main_loop,
-        )
-        client.on_dev_list_changed = self.__on_client_dev_list_changed
-        try:
-            await client.init_async()
-        except MipsConnectionError as e:
-            self.__log_connect_failure(group_id, e)
-            await self.__drop_client(client)
-            return
-        except Exception as e:
-            _LOGGER.error(
-                "central hub: unexpected error connecting gateway %s: %s",
+        if host in self._connecting_hosts:
+            # 另一条路径(mDNS 真实 group_id / 静态 "static:host")正在给同一个
+            # host 建连、还没跑完 init_async()——上面那段按 self._clients 去重的
+            # 循环看不见它。不拦的话两条路都会各建一个 MipsLocalClient,而 MQTT
+            # client_id 恒等于虚拟 did、与 group_id 无关(见 mips_local.py),broker
+            # 按 MQTT v5 §3.1.4 踢掉后到的会话,被踢的一方自动重连又把对方顶下线,
+            # 形成 ~6s 周期的永久互踢(can_control() 每几秒真假翻转)。
+            _LOGGER.debug(
+                "central hub: host %s connect already in flight, skip %s",
+                host,
                 group_id,
-                e,
             )
-            await self.__drop_client(client)
             return
-        self._clients[group_id] = client
+
+        self._connecting_hosts.add(host)
+        try:
+            if not self._virtual_did:
+                _LOGGER.error("central hub: no virtual did; cannot connect gateway")
+                return
+            # A cert may not have been ready at init; make sure it is now
+            # AND that its CN matches the current virtual did (identity may
+            # have been rotated — e.g. authorize_with_code → the old manager's
+            # 20s reconnect sweep can pick up a newly-signed cert whose CN
+            # encodes a different did, which the gateway rejects).
+            if (
+                await self._cert.user_cert_remaining_time_async(
+                    did=self._virtual_did
+                )
+                <= 0
+            ):
+                if not await self.__refresh_cert():
+                    _LOGGER.error(
+                        "central hub: cert unavailable, skip gateway %s", group_id
+                    )
+                    return
+
+            client = MipsLocalClient(
+                did=self._virtual_did,
+                host=host,
+                group_id=group_id,
+                ca_file=self._cert.ca_file,
+                cert_file=self._cert.cert_file,
+                key_file=self._cert.key_file,
+                port=port,
+                loop=self._main_loop,
+            )
+            client.on_dev_list_changed = self.__on_client_dev_list_changed
+            try:
+                await client.init_async()
+            except asyncio.CancelledError:
+                # 切家庭 / 进程退出的 deinit 会 cancel 本任务(mDNS 发现回调、20s 重连
+                # sweep)。cancel 通常落在 init_async 内部等 CONNACK 的那个 await 上 ——
+                # 此时 loop_start() 已经起了 paho 网络线程,而 client 还没进 _clients,
+                # 再没有任何人 deinit 它:线程会按 reconnect_delay_set(6, 60) 永久重连
+                # 用户网关。CancelledError 是 BaseException,下面两个 except 都接不住,
+                # 必须显式兜底。shield 保证清理不被同一轮 cancel 打断。
+                try:
+                    await asyncio.shield(self.__drop_client(client))
+                except asyncio.CancelledError:
+                    pass  # 清理已作为独立任务在跑,放原始 cancel 继续传播
+                raise
+            except MipsConnectionError as e:
+                self.__log_connect_failure(group_id, e)
+                await self.__drop_client(client)
+                return
+            except Exception as e:
+                _LOGGER.error(
+                    "central hub: unexpected error connecting gateway %s: %s",
+                    group_id,
+                    e,
+                )
+                await self.__drop_client(client)
+                return
+            self._clients[group_id] = client
+        finally:
+            # 一旦写进 self._clients(或任何 return/异常)就不再"在途",让 finally
+            # 而不是某个具体返回点来清,避免漏改某条出口就重新造出这个坑。写入
+            # 与这里之间没有 await,不存在"已清在途但还没进连接表"的空窗。
+            self._connecting_hosts.discard(host)
         self._auth_rejected.discard(group_id)  # recovered → allow a fresh warn
         _LOGGER.info("central hub: gateway %s connected (%s)", group_id, host)
         await self.__refresh_dev_list(client)
@@ -680,6 +890,13 @@ class CentralHubManager:
             raise
 
     async def __ensure_desired_connections(self) -> None:
+        # 兜底刷新白名单:上次拉取失败过且退避到点就重试一次。
+        # 这是"启动期云端不可达"能自愈的唯一途径——mDNS 按内容去重,IP/端口稳定的
+        # 网关一个进程只触发一次 ADDED,那唯一一次回调如果撞上空白名单就永远没有
+        # 第二次机会;而本方法下面两段都以 _owned_group_ids 为前提,自己从不刷新。
+        if not self._owned_refresh_ok and time.monotonic() >= self._owned_retry_at:
+            _LOGGER.info("central hub: retrying owned group_ids fetch")
+            await self.__refresh_owned_group_ids()
         # Static gateways (ownership is verified post-connect in __ensure_client).
         for host, port in self._static_gateways:
             group_id = f"static:{host}"

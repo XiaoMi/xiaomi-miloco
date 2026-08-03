@@ -91,3 +91,17 @@ def test_expired_entries_are_pruned() -> None:
     # A lookup past the window triggers prune of both stale entries.
     assert dep.is_duplicate("c") is False
     assert dep._recent == {}  # noqa: SLF001 — asserting the prune side effect
+
+
+def test_clear_forgets_recorded_keys() -> None:
+    """切号必须能清空：去重键是纯文案、不带账号维度，不清的话「A 刚发过同一句 →
+    切到 B → B 再发」会命中去重，send_notify 打一条 skipped 日志后正常返回，
+    调用方以为发成功了，用户永远收不到。"""
+    clock = _Clock()
+    d = MessageDeduper(window_sec=60, clock=clock)
+    d.record("我出门了")
+    assert d.is_duplicate("我出门了") is True
+
+    d.clear()
+
+    assert d.is_duplicate("我出门了") is False

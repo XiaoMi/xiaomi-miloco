@@ -288,6 +288,9 @@ class MiotService:
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
         self._lru.clear()
+        # 去重键是纯文案、不带账号维度:不清的话「A 刚发过同一句 → 切到 B → B 再发」
+        # 会命中去重,send_notify 打一条 skipped 日志后正常返回,用户永远收不到。
+        self._notify_deduper.clear()
 
     @property
     def miot_client(self):
@@ -307,7 +310,23 @@ class MiotService:
             # the virtual did (still the old uid here, before the new token is
             # fetched) so the new account gets a clean central-hub identity.
             await self._miot_proxy.reset_central_identity_async()
-            await self._miot_proxy.get_miot_auth_info(code=code, state=state)
+            try:
+                await self._miot_proxy.get_miot_auth_info(code=code, state=state)
+            except Exception:
+                # 换号失败(OAuth code 短时效:粘错/过期/token 交换网络抖动)而**旧账号
+                # 的 token 仍然有效**:上一句已经把旧账号的中枢协调器拆掉了,而能重建它
+                # 的路径只有"再次登录成功 / deinit+init / 进程重启"(token 刷新只更新
+                # token 不建 hub)。不补这一手,用户留在旧账号且云端一切正常,却
+                # can_control 恒 False —— 所有控制无限期走云端,日志里只有一条
+                # authorize 失败。与 Zirconi 那条首登不刷 scope 的 P1 同族。
+                try:
+                    await self._miot_proxy.miot_client.setup_central_hub_async()
+                except Exception as restore_err:
+                    logger.warning(
+                        "restore central hub after failed account switch: %s",
+                        restore_err,
+                    )
+                raise
 
             # 登录后 list_homes 兜底会自动选第一个家庭（如果启用集为空）。
             await self.list_homes()

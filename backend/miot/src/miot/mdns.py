@@ -115,7 +115,16 @@ class MipsServiceData:
         if not profile:
             raise MdnsServiceError("invalid service profile")
         self.profile = profile
-        self.profile_bin = base64.b64decode(profile)
+        # b64decode(validate=False) 只忽略字母表外字符,填充长度不对仍抛
+        # binascii.Error(如 profile="abc")。这里的输入是任何能往发现端口发 UDP 的
+        # 主机都能构造的字节流,而调用链的顶端是 add_reader 回调——异常逃出去只会
+        # 进事件循环的 exception handler,没有业务侧接收方,同一个包里排在后面的
+        # 网关条目会全部不被解析。就地转成本模块的领域异常,让外层 skip 分支接住,
+        # 这样一条坏记录只丢它自己。
+        try:
+            self.profile_bin = base64.b64decode(profile)
+        except (binascii.Error, ValueError) as e:
+            raise MdnsServiceError(f"invalid base64 profile: {profile!r}") from e
         addrs = sorted(a for a in (addresses or []) if a)
         if not addrs:
             raise MdnsServiceError("invalid addresses")
@@ -187,26 +196,48 @@ class MdnsService:
         # label -> (socket, broadcast_target_ip)
         self._socks: Dict[str, Tuple[socket.socket, str]] = {}
         self._poll_task: Optional[asyncio.Task] = None
+        # 拆卸标志:网卡变化回调是独立 task,deinit 之后仍可能被调度并重建 socket。
+        self._deinited: bool = False
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.deinit_async()
 
     async def init_async(self) -> None:
         """Open a send/recv socket per interface and start the poll loop."""
+        # 复位拆卸标志:当前调用方(central_hub)每次 init 都新建实例、deinit 即丢弃,
+        # 所以这行今天是防御性的;不写的话,将来有人改成复用同一实例,重建 socket 的
+        # 自愈能力会静默失效(表现为 IP 变化后再也发现不到网关)。
+        self._deinited = False
+        self.__bind_sockets()
+        self._poll_task = self._main_loop.create_task(self.__poll_loop())
+        # 订阅网卡变化,与 lan.py 的 "miot_lan" 订阅同源。socket 是 bind 到具体网卡
+        # IP 的,Wi-Fi 换频段 / DHCP 续租换地址 / 插拔网线之后,旧 socket 还绑在已经
+        # 不存在的地址上,每次 sendto 都 EADDRNOTAVAIL(macOS: Errno 49),而那两处失败
+        # 只打 debug、默认级别一行都看不到 —— 表现为新网关永远发现不到、掉线的永远
+        # 重连不上(重连扫描依赖发现结果),控制全量退回云端却没有任何可见症状,只有重启
+        # 后端才恢复。故变化时整批重建。
+        if self._network is not None:
+            try:
+                await self._network.register_info_changed_async(
+                    key="miot_mdns",
+                    handler=self.__on_network_info_change_async,
+                )
+            except Exception as e:
+                # 订阅不上不该让发现整体起不来:静态网关与首轮发现仍可用,只是失去
+                # IP 变化后的自愈能力。
+                _LOGGER.warning("mdns: subscribe network changes failed: %s", e)
+
+    def __bind_sockets(self) -> None:
+        """(重)建 per-NIC socket 并挂上 reader。"""
         self._socks = self.__open_interface_sockets()
         for sock, _target in self._socks.values():
             self._main_loop.add_reader(sock.fileno(), self.__on_readable, sock)
-        self._poll_task = self._main_loop.create_task(self.__poll_loop())
         _LOGGER.info(
             "mdns: legacy-unicast discovery started on: %s",
             ", ".join(self._socks.keys()) or "<none>",
         )
 
-    async def deinit_async(self) -> None:
-        """Stop discovery and clear state."""
-        if self._poll_task is not None:
-            self._poll_task.cancel()
-            self._poll_task = None
+    def __close_sockets(self) -> None:
         socks, self._socks = self._socks, {}
         for sock, _target in socks.values():
             try:
@@ -217,6 +248,38 @@ class MdnsService:
                 sock.close()
             except Exception:
                 pass  # socket may already be closed; best-effort cleanup
+
+    async def __on_network_info_change_async(self, *args: Any, **kwargs: Any) -> None:
+        """网卡增删 / IP 变化 → 整批重建 socket,绑到当前生效的地址上。
+
+        故意不做差量(只重建变化的那块):网卡标签与地址的对应关系本身就是这次变化的
+        内容,差量判断要依赖变化前的快照,而重建整批的代价只是几个 UDP socket。
+        发现结果 ``_services`` 保留不清:网关多半还在,清掉只会让 ADDED 白重放一轮。
+        """
+        if self._deinited:
+            # MIoTNetwork 用 create_task 分发回调,即本协程是**独立任务**入队的:
+            # 「网卡变化入队 → deinit 跑完(unregister 只是 dict pop,拦不住已入队的
+            # 任务)→ 本协程才被调度」时,下面两句会在拆卸之后重新打开每块网卡的
+            # socket 并挂回事件循环,fd 与 reader 永久泄漏。网络切换/睡眠唤醒紧接着
+            # 进程退出,在 LaunchAgent 场景正是典型组合。
+            _LOGGER.debug("mdns: network info changed after deinit, ignore")
+            return
+        _LOGGER.info("mdns: network info changed → rebinding per-NIC sockets")
+        self.__close_sockets()
+        self.__bind_sockets()
+
+    async def deinit_async(self) -> None:
+        """Stop discovery and clear state."""
+        self._deinited = True
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
+        if self._network is not None:
+            try:
+                await self._network.unregister_info_changed_async(key="miot_mdns")
+            except Exception:
+                pass  # 未订阅成功 / 无此 API：best-effort，不阻塞拆卸
+        self.__close_sockets()
         self._services = {}
         self._sub_list = {}
 
@@ -398,6 +461,14 @@ class MdnsService:
                 self.__ingest_service_data(service_data)
             except MdnsServiceError as e:
                 _LOGGER.debug("mdns: skip service %s: %s", svc.get("instance"), e)
+            except Exception as e:
+                # 这个循环跑在 add_reader 回调里:异常逃出去没有接收方,且会让同一
+                # 个包里后面的网关条目全部不被解析。兜住并继续下一条,防止将来新增
+                # 解析逻辑时再捅穿回调边界。
+                _LOGGER.warning(
+                    "mdns: unexpected error on service %s: %s",
+                    svc.get("instance"), e,
+                )
 
     def __ingest_service_data(self, service_data: "MipsServiceData") -> None:
         """Merge a resolved service into the table and fire ADDED/UPDATED.

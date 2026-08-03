@@ -265,3 +265,67 @@ def test_set_value_delegates_to_set_values(isolated_config):
     """set_value 现在是 set_values 的糖；保证返回单值语义不变。"""
     assert set_value("server.tls_verify", "true") is True
     assert set_value("server.url", "http://x:1810") == "http://x:1810"
+
+
+# ─── miot 中枢网关（619dd3b 后 CLI schema 漏同步的两个字段） ──────────────────
+
+
+def test_central_hub_enabled_readable_and_writable(isolated_config):
+    """回归：这两个路径此前不在 _SCHEMA_PATHS，config get 直接报 path not found。"""
+    assert get_value("miot.central_hub_enabled") is True  # 默认与 settings.yaml 一致
+    set_value("miot.central_hub_enabled", "false")
+    data = json.loads(isolated_config.read_text())
+    assert data["miot"]["central_hub_enabled"] is False
+    assert get_value("miot.central_hub_enabled") is False
+
+
+def test_central_hub_gateways_default_is_empty_list():
+    assert get_value("miot.central_hub_gateways") == []
+
+
+def test_central_hub_gateways_accepts_comma_separated(isolated_config):
+    value = set_value(
+        "miot.central_hub_gateways", "192.168.1.152, 192.168.1.153:8884"
+    )
+    assert value == ["192.168.1.152", "192.168.1.153:8884"]
+    data = json.loads(isolated_config.read_text())
+    assert data["miot"]["central_hub_gateways"] == [
+        "192.168.1.152",
+        "192.168.1.153:8884",
+    ]
+
+
+def test_central_hub_gateways_accepts_json_array(isolated_config):
+    assert set_value("miot.central_hub_gateways", '["192.168.1.152"]') == [
+        "192.168.1.152"
+    ]
+
+
+def test_central_hub_gateways_empty_clears(isolated_config):
+    """留空 = 清空（回到仅靠 mDNS 发现），而不是写入 ['']。"""
+    set_value("miot.central_hub_gateways", "192.168.1.152")
+    assert set_value("miot.central_hub_gateways", "") == []
+
+
+def test_central_hub_gateways_rejects_bad_port(isolated_config):
+    with pytest.raises(ValueError):
+        set_value("miot.central_hub_gateways", "192.168.1.152:abc")
+    with pytest.raises(ValueError):
+        set_value("miot.central_hub_gateways", "192.168.1.152:70000")
+
+
+def test_central_hub_gateways_rejects_missing_host(isolated_config):
+    with pytest.raises(ValueError):
+        set_value("miot.central_hub_gateways", ":8883")
+
+
+def test_central_hub_gateways_rejects_ipv6(isolated_config):
+    """后端 partition(':') 会把 IPv6 解析错并静默丢弃，CLI 提前拦住。"""
+    with pytest.raises(ValueError, match="IPv6"):
+        set_value("miot.central_hub_gateways", "fe80::1")
+
+
+def test_central_hub_gateways_in_known_paths():
+    paths = known_paths()
+    assert "miot.central_hub_enabled" in paths
+    assert "miot.central_hub_gateways" in paths

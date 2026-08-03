@@ -181,6 +181,19 @@ def _resolve_future(fut: "asyncio.Future", value: str) -> None:
         fut.set_result(value)
 
 
+def _discard_stale_connect(mqtt: Client) -> None:
+    """Close a client whose ``connect()`` outlived our TCP/TLS timeout.
+
+    Runs in an executor thread once the abandoned ``connect()`` finally returns
+    (or raises); best-effort by design — the client is already being thrown
+    away, only the fd matters.
+    """
+    try:
+        mqtt.disconnect()
+    except Exception as e:  # noqa: BLE001 - fd cleanup only, nothing to recover
+        _LOGGER.debug("mips_local discard stale connect raised: %s", e)
+
+
 def _complete_future(fut: "asyncio.Future", value: object = None) -> None:
     """Atomically complete *fut* on the event loop, tolerating both result
     and exception values. ``_resolve_future`` handles the result-only case
@@ -322,7 +335,11 @@ class MipsLocalClient:
         self._connect_future = self._main_loop.create_future()
 
         try:
-            await self._main_loop.run_in_executor(
+            # 必须套超时:网关 IP 静默丢包(真黑洞,交换机连 ARP 都不代答)时
+            # mqtt.connect 会阻塞到内核放弃 SYN 重试(Linux 默认 ~2 分钟),而
+            # __ensure_desired_connections 是逐网关串行 await —— 一台挂住就把其它
+            # 网关的重连和白名单补刷一起压住两分钟。
+            connect_fut = self._main_loop.run_in_executor(
                 None,
                 lambda: mqtt.connect(
                     host=self._host,
@@ -331,6 +348,21 @@ class MipsLocalClient:
                     clean_start=True,
                 ),
             )
+            await asyncio.wait_for(connect_fut, timeout=_CONNECT_TIMEOUT)
+        except asyncio.TimeoutError as e:
+            # executor 里的线程取消不掉,connect 迟早会返回或抛错。挂个回调在那一刻
+            # 收尾,否则黑洞网关每轮重连都漏一个已建立的 socket(此处没有
+            # loop_start,不存在网络线程,只是 fd)。
+            connect_fut.add_done_callback(
+                lambda _f: self._main_loop.run_in_executor(
+                    None, _discard_stale_connect, mqtt
+                )
+            )
+            self._connect_future = None
+            self._mqtt = None
+            raise MipsConnectionError(
+                f"mips_local({self._group_id}) TCP/TLS connect timeout"
+            ) from e
         except Exception as e:
             self._connect_future = None
             self._mqtt = None
@@ -384,13 +416,26 @@ class MipsLocalClient:
             for req in self._request_map.values():
                 if req.timer:
                     req.timer.cancel()
-                # done() 检查 + set_exception 原子(与 _fire_connect_future 同型竞态):
-                # 超时回调可能已先完成 future,这里排队的 set_exception 会落到
-                # 已完成的 future 上抛 InvalidStateError。
+                # 收尾成**与应答超时同形**的结果,而不是抛 MipsConnectionError。
+                # 理由:future 只在 __mips_publish 成功之后才进 _request_map(见
+                # __request_async 的 except 分支会把它摘掉),所以"在途"必然意味着
+                # 报文已经发给网关 —— 结果未知,不是"肯定没执行"。路由层把异常一律
+                # 当"明确未执行"转云端重发,若这里抛异常,连接被替换/拆除(切家庭、
+                # 切号、20s 重连 sweep 撞上 ≤5s 应答窗口)就会让非幂等动作走两遍。
+                # -10006 落进既有的"结果未知"分支:set/action 不重发 + 冷却,
+                # get 幂等仍走云端兜底。
+                # done() 检查 + 完成动作原子(与 _fire_connect_future 同型竞态):
+                # 超时回调可能已先完成 future,这里排队的完成会落到已完成的
+                # future 上抛 InvalidStateError。
                 self._main_loop.call_soon_threadsafe(
                     _complete_future,
                     req.future,
-                    MipsConnectionError("mips_local deinit during request"),
+                    {
+                        "error": {
+                            "code": MIoTErrorCode.CODE_TIMEOUT.value,
+                            "message": "mips_local deinit during request",
+                        }
+                    },
                 )
             self._request_map.clear()
         with self._broadcasts_lock:
@@ -435,18 +480,34 @@ class MipsLocalClient:
         result_obj = await self.__request_async(
             topic="proxy/rpcReq", payload=json.dumps(payload_obj), timeout_ms=timeout_ms
         )
-        if result_obj:
+        # 回包可能是任何合法 JSON(int / str / list / 结构不同的 dict)。守卫必须
+        # 逐层验型:任何一层不符就落到最后的 -10041,绝不允许抛异常或返回非 dict
+        # ——client.py 把异常和"非 dict / 无 code"都判成"肯定没执行"并云端重发,
+        # 而网关既然回了包,请求一定送到过。之前只挡了"是 dict 但没有 result/error
+        # 键"这一种畸形回包:result 是对象而非单元素数组会在下标访问处抛 KeyError,
+        # error 是字符串而非对象会原样返回字符串(client.py 里 isinstance 判 code
+        # 为 None),两条路都终结于云端重发——同一条非幂等指令在设备上执行两次。
+        if isinstance(result_obj, dict):
+            result = result_obj.get("result")
             if (
-                "result" in result_obj
-                and len(result_obj["result"]) == 1
-                and result_obj["result"][0].get("did") == did
-                and "code" in result_obj["result"][0]
+                isinstance(result, list)
+                and len(result) == 1
+                and isinstance(result[0], dict)
+                and result[0].get("did") == did
+                and "code" in result[0]
             ):
-                return result_obj["result"][0]
-            if "error" in result_obj:
-                return result_obj["error"]
+                return result[0]
+            error = result_obj.get("error")
+            if isinstance(error, dict) and "code" in error:
+                return error
+            # __request_async 自产的码(如 -10040 应答非合法 JSON)原样上抛,不要在
+            # 这里重新贴成 -10004:那会把"网关已回包"的事实抹掉,让上层误判成
+            # "肯定没执行"而重发云端。落到最后一行的是"回了包但结构不认识",同样
+            # 是结果未知。
+            if "code" in result_obj:
+                return result_obj
         return {
-            "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+            "code": MIoTErrorCode.CODE_MIPS_RESULT_UNKNOWN.value,
             "message": "Invalid result",
         }
 
@@ -468,7 +529,15 @@ class MipsLocalClient:
             return {"value": result_obj.get("value"), "code": result_obj.get("code", 0)}
         if isinstance(result_obj, dict) and "error" in result_obj:
             return result_obj["error"]
-        return {"code": MIoTErrorCode.CODE_INTERNAL_ERROR.value, "message": "Invalid result"}
+        # __request_async 自产的码(如 -10040 应答非合法 JSON)原样上抛,不要在这里
+        # 重新贴成 -10004:那会把"网关已回包"的事实抹掉,让上层误判成"肯定没执行"
+        # 而重发云端。落到最后一行的是"回了包但结构不认识",同样是结果未知。
+        if isinstance(result_obj, dict) and "code" in result_obj:
+            return result_obj
+        return {
+            "code": MIoTErrorCode.CODE_MIPS_RESULT_UNKNOWN.value,
+            "message": "Invalid result",
+        }
 
     async def action_async(
         self,
@@ -490,13 +559,25 @@ class MipsLocalClient:
         result_obj = await self.__request_async(
             topic="proxy/rpcReq", payload=json.dumps(payload_obj), timeout_ms=timeout_ms
         )
-        if result_obj:
-            if "result" in result_obj and "code" in result_obj["result"]:
-                return result_obj["result"]
-            if "error" in result_obj:
-                return result_obj["error"]
+        # 同 set_prop_async 的逐层验型理由:result 是非 dict(如整数)会在
+        # "code" in result_obj["result"] 处抛 TypeError,error 是字符串而非对象
+        # 会原样返回字符串,两条路都被上层判成"肯定没执行"而云端重发——累加型
+        # 动作(窗帘 +10% / 音量 +1)正是本模块反复强调最不能容忍双发的场景。
+        if isinstance(result_obj, dict):
+            result = result_obj.get("result")
+            if isinstance(result, dict) and "code" in result:
+                return result
+            error = result_obj.get("error")
+            if isinstance(error, dict) and "code" in error:
+                return error
+            # __request_async 自产的码(如 -10040 应答非合法 JSON)原样上抛,不要在
+            # 这里重新贴成 -10004:那会把"网关已回包"的事实抹掉,让上层误判成
+            # "肯定没执行"而重发云端。落到最后一行的是"回了包但结构不认识",同样
+            # 是结果未知。
+            if "code" in result_obj:
+                return result_obj
         return {
-            "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+            "code": MIoTErrorCode.CODE_MIPS_RESULT_UNKNOWN.value,
             "message": "Invalid result",
         }
 
@@ -612,7 +693,16 @@ class MipsLocalClient:
         packed = _MipsMessage.pack(
             mid=mid, payload=payload, msg_from="local", ret_topic=self._reply_topic
         )
-        mqtt.publish(topic.strip(), packed, qos=_MIPS_QOS)
+        info = mqtt.publish(topic.strip(), packed, qos=_MIPS_QOS)
+        # paho 2.x 对"未连接"不抛异常,只把 rc 置成 MQTT_ERR_NO_CONN 并丢弃报文。
+        # 不查 rc 的话:连接恰在 __request_async 的 _connected 检查与这里之间断掉时,
+        # 请求已入在途表且定时器已武装,调用方干等满 5s 拿 -10006,而路由层把 -10006
+        # 按"可能已送达"处置(set/action 不回落云端 + 冷却)—— 一条根本没出本机的
+        # 指令被当成结果未知,用户操作无声丢失。抛异常才是准确的"明确未发出"。
+        if info.rc != MQTTErrorCode.MQTT_ERR_SUCCESS:
+            raise MipsConnectionError(
+                f"mips_local({self._group_id}) publish failed, rc={info.rc}"
+            )
 
     async def __request_async(
         self, topic: str, payload: str, timeout_ms: Optional[int] = None

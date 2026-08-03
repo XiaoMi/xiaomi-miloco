@@ -17,6 +17,7 @@ from av.audio.frame import AudioFrame
 from av.video.frame import VideoFrame
 from miot.camera import MIoTCameraInstance
 from miot.client import MIoTClient
+from miot.const import MIPS_LOCAL_PORT_DEFAULT
 from miot.spec import MIoTSpecTypeLevel
 from miot.types import (
     MIoTActionParam,
@@ -276,8 +277,21 @@ class MiotProxy:
     def _parse_gateways(raw: list[str]) -> list[tuple[str, int]]:
         """Parse config 'ip' / 'ip:port' entries into (host, port) tuples.
 
-        Port defaults to 8883 (the central hub mTLS MQTT port). Malformed
-        entries are skipped with a warning.
+        Port defaults to ``MIPS_LOCAL_PORT_DEFAULT`` (the central hub mTLS MQTT
+        port), taken from the SDK constant rather than written as a literal:
+        mDNS-discovered gateways get their default from that same constant (via
+        ``MipsLocalClient.__init__``), so a literal here would silently diverge
+        if the hub firmware ever moves port — statically-configured gateways
+        written as a bare IP would keep dialling 8883 and fail with a plain
+        ConnectionRefusedError that says nothing about a port mismatch, while
+        auto-discovered ones kept working. Malformed entries are skipped with a
+        warning.
+
+        Port range is validated here as well as in the CLI
+        (``miloco_cli.config._validate_gateway``): the CLI only guards values
+        written through ``config set``, and a hand-edited ``config.json`` with
+        ``:0`` / ``:99999`` would otherwise reach the socket layer and fail with
+        an error that says nothing about the config being wrong.
         """
         out: list[tuple[str, int]] = []
         for item in raw or []:
@@ -289,9 +303,16 @@ class MiotProxy:
             if not host:
                 continue
             try:
-                p = int(port) if port.strip() else 8883
+                p = int(port) if port.strip() else MIPS_LOCAL_PORT_DEFAULT
             except ValueError:
                 logger.warning("invalid central_hub_gateways entry %r, skip", item)
+                continue
+            if not 1 <= p <= 65535:
+                # 与非整数端口同样处理(skip + warning),保持这个方法"脏项不致命"的契约。
+                logger.warning(
+                    "central_hub_gateways entry %r port out of range (1-65535), skip",
+                    item,
+                )
                 continue
             out.append((host, p))
         return out

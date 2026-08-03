@@ -12,6 +12,10 @@ import pytest
 from miloco.miot.result_codes import (
     _MIOT_OK_CODES,
     _MIOT_SPEC_CODES,
+    _UNKNOWN_FAIL_MSG,
+    _is_failure,
+    code_message,
+    is_result_unknown,
     summarize_results,
 )
 
@@ -114,3 +118,44 @@ def test_unknown_negative_code_gets_generic_msg():
 
 def test_none_input_is_success():
     assert summarize_results(None) == (True, None, None)
+
+
+def test_sdk_internal_codes_registered():
+    """本地中枢引入的 SDK 内部码必须有专属文案。
+
+    -10006 是"本地网关超时、指令可能已执行"——SDK 正因如此才不做云端重发。
+    若落到 _UNKNOWN_FAIL_MSG("设备侧执行失败"),agent 会照台账告诉用户"关灯
+    失败了",而用户看着已经关掉的灯;文案还会指引去查一张根本不含该码的表。
+    """
+    msg = code_message(-10006)
+    assert msg != _UNKNOWN_FAIL_MSG
+    assert "可能已执行" in msg
+    assert code_message(-10004) != _UNKNOWN_FAIL_MSG
+    # 仍应判为失败(负码),只是文案不同——语义是"结果未知",不能当成功。
+    assert _is_failure(-10006) is True
+    assert _is_failure(-10004) is True
+
+
+def test_result_unknown_codes_track_sdk_enum():
+    """守住"引用枚举而非抄裸数字":集合必须与 SDK 枚举一致。
+
+    这三个值的真源在 miot/error.py。若这里退回硬编码字面量、而 SDK 改了枚举值，
+    is_result_unknown 会静默失配 —— 规则层不再落冷却，SDK 层避开的双发就被重新
+    引入，且没有任何报错。
+    """
+    from miloco.miot.result_codes import _RESULT_UNKNOWN_CODES
+    from miot.error import MIoTErrorCode
+
+    assert _RESULT_UNKNOWN_CODES == {
+        MIoTErrorCode.CODE_TIMEOUT.value,
+        MIoTErrorCode.CODE_MIPS_RESULT_UNKNOWN.value,
+        MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,
+    }
+    # 这三个码在码表里都得有"可能已执行"的文案(否则 agent 会当失败去重试)
+    for code in _RESULT_UNKNOWN_CODES:
+        assert is_result_unknown(code) is True
+        assert "可能已执行" in code_message(code)
+    # 反例:普通设备失败码不是"结果未知"
+    assert is_result_unknown(-704030023) is False
+    assert is_result_unknown(None) is False  # 空返回/不可判定
+    assert is_result_unknown(0) is False

@@ -1977,6 +1977,78 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
         # 失败不得写 cooldown——否则空返回后真实动作被压掉
         assert not runner._ensure_state("rule-empty-res").action_cooldown
 
+    @pytest.mark.parametrize(
+        "unknown_code",
+        [
+            -10006,  # 网关未在超时内应答
+            -10041,  # 回包结构不认识
+            -10040,  # 回包不是合法 JSON
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_result_unknown_still_writes_cooldown(
+        self, runner, mock_miot_proxy, unknown_code
+    ):
+        """结果未知 → 仍算失败，但**必须**落 cooldown，否则非幂等动作会被执行两次。
+
+        这三个码的前提都是请求已经到过本地网关（超时 / 回包不可用），SDK 因此
+        刻意不做云端重发（client._LOCAL_AMBIGUOUS_CODES）。若规则层因为
+        success=False 而跳过 cooldown，人还在动、几秒后规则再触发就会把
+        「窗帘 +10%」又执行一遍 —— SDK 避开的那次双发被这一层重新引入。
+        """
+        mock_miot_proxy.set_device_properties = AsyncMock(
+            return_value=[{"did": "device-001", "code": unknown_code}]
+        )
+        action = _make_action(idempotent=False, cooldown=5)
+        rule = _make_static_rule(rule_id=f"rule-unk{unknown_code}", actions=[action])
+        runner.add_rule(rule)
+
+        result = await runner.trigger_rule(f"rule-unk{unknown_code}", "测试")
+
+        # 仍是失败：用户必须知道这次没拿到确认
+        assert result.action_results[0].result is False
+        # 但冷却已落，重复执行的窗口关上了
+        assert runner._ensure_state(f"rule-unk{unknown_code}").action_cooldown
+
+    @pytest.mark.asyncio
+    async def test_result_unknown_second_trigger_is_skipped(
+        self, runner, mock_miot_proxy
+    ):
+        """端到端：首轮结果未知后，紧接着的第二次触发必须被冷却挡住。"""
+        mock_miot_proxy.set_device_properties = AsyncMock(
+            return_value=[{"did": "device-001", "code": -10006}]
+        )
+        action = _make_action(idempotent=False, cooldown=5)
+        rule = _make_static_rule(rule_id="rule-unk-e2e", actions=[action])
+        runner.add_rule(rule)
+
+        await runner.trigger_rule("rule-unk-e2e", "测试")
+        mock_miot_proxy.set_device_properties.reset_mock()
+
+        second = await runner.trigger_rule("rule-unk-e2e", "测试")
+        assert second.action_results[0].skipped is True
+        # 关键：设备侧一次都没有被再下发
+        mock_miot_proxy.set_device_properties.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ordinary_device_failure_does_not_write_cooldown(
+        self, runner, mock_miot_proxy
+    ):
+        """对照：设备明确拒绝（普通 spec 失败码）不是"结果未知"，不该落 cooldown。
+
+        否则一次"属性不可写"就会把接下来 5 分钟的真实动作全压掉。
+        """
+        mock_miot_proxy.set_device_properties = AsyncMock(
+            return_value=[{"did": "device-001", "code": -704030023}]  # 属性不可写
+        )
+        action = _make_action(idempotent=False, cooldown=5)
+        rule = _make_static_rule(rule_id="rule-devfail", actions=[action])
+        runner.add_rule(rule)
+
+        result = await runner.trigger_rule("rule-devfail", "测试")
+        assert result.action_results[0].result is False
+        assert not runner._ensure_state("rule-devfail").action_cooldown
+
     @pytest.mark.asyncio
     async def test_call_action_none_result_is_failure(self, runner, mock_miot_proxy):
         """call_device_action 返回 None(不可判定)→ 失败,不按成功处理。"""

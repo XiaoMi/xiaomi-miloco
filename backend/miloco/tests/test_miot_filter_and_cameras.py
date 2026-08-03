@@ -840,6 +840,62 @@ async def test_authorize_with_code_clears_scope_before_token_exchange():
     assert miot_filter.allowed_home_ids(kv) == set()
 
 
+@pytest.mark.asyncio
+async def test_authorize_failure_rebuilds_central_hub():
+    """换号失败（OAuth code 过期/粘错/网络抖动）后必须重建旧账号的中枢协调器。
+
+    reset_central_identity_async 已经把 _central_hub 拆成 None；能重建它的路径只有
+    「再次登录成功 / deinit+init / 进程重启」（token 刷新只更新 token 不建 hub）。
+    不补这一手，用户留在旧账号、云端一切正常，却 can_control 恒 False —— 所有控制
+    无限期走云端，日志里只有一条 authorize 失败。与首登不刷 scope 那条 P1 同族。
+    """
+    kv = _FakeKV()
+    db_connector = MagicMock()
+    db_connector.execute_update = MagicMock(return_value=0)
+    db_connector.execute_query = MagicMock(return_value=[])
+    miot_client = SimpleNamespace(setup_central_hub_async=AsyncMock())
+    proxy = SimpleNamespace(
+        _kv_repo=SimpleNamespace(
+            db_connector=db_connector, get=kv.get, set=kv.set, delete=kv.delete
+        ),
+        get_miot_auth_info=AsyncMock(side_effect=RuntimeError("code expired")),
+        reset_central_identity_async=AsyncMock(),
+        miot_client=miot_client,
+    )
+    svc = MiotService(miot_proxy=proxy)
+
+    with pytest.raises(MiotServiceException):
+        await svc.authorize_with_code(code="bad", state="s")
+
+    proxy.reset_central_identity_async.assert_awaited_once()
+    miot_client.setup_central_hub_async.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_authorize_failure_hub_restore_error_does_not_mask_original():
+    """重建本身再失败也只能记日志：原始的 authorize 异常必须原样上抛，
+    否则用户看到的是"重建中枢失败"，真正的原因（code 过期）被吞掉。"""
+    kv = _FakeKV()
+    db_connector = MagicMock()
+    db_connector.execute_update = MagicMock(return_value=0)
+    db_connector.execute_query = MagicMock(return_value=[])
+    proxy = SimpleNamespace(
+        _kv_repo=SimpleNamespace(
+            db_connector=db_connector, get=kv.get, set=kv.set, delete=kv.delete
+        ),
+        get_miot_auth_info=AsyncMock(side_effect=RuntimeError("code expired")),
+        reset_central_identity_async=AsyncMock(),
+        miot_client=SimpleNamespace(
+            setup_central_hub_async=AsyncMock(side_effect=OSError("no network"))
+        ),
+    )
+    svc = MiotService(miot_proxy=proxy)
+
+    # 外层统一包成 MiotServiceException，但 message 必须还是原始原因
+    with pytest.raises(MiotServiceException, match="code expired"):
+        await svc.authorize_with_code(code="bad", state="s")
+
+
 # ─── MiotProxy: scope entry-filter (build gate + prune branch) ───────────────
 #
 # These tests cover the入口过滤 framing: `_create_camera_img_manager` is the

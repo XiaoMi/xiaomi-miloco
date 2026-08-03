@@ -19,6 +19,7 @@ import asyncio
 import binascii
 import hashlib
 import logging
+import os
 import traceback
 from datetime import datetime, timezone
 from typing import Optional
@@ -217,12 +218,46 @@ class MIoTCert:
         return data.decode("utf-8") if data else None
 
     async def update_user_key_async(self, key: str) -> bool:
-        """Persist the user private key."""
-        return await self._storage.save_file_async(
+        """Persist the user private key at 0600.
+
+        ``MIoTStorage.save_file_async`` writes with a bare ``open()``, so the new
+        file lands at ``0o666 & ~umask`` — 0644 under the default umask 022. This
+        key is what authenticates *this* client to the user's gateway over mTLS:
+        any local user who can read it can impersonate this Miloco instance and
+        issue device control commands. Same 0600 rule the rotated logs follow
+        (CodeQL #619), and the key deserves it more than the logs do.
+
+        The file is therefore **pre-created at 0600 before the content is
+        written**: chmod-after-write would leave the key world-readable for the
+        span of an executor round-trip plus an event-loop hop, which is exactly
+        long enough for a local attacker watching the directory (inotify /
+        fsevents) to read it — i.e. precisely the threat this docstring claims to
+        close. ``open(..., "wb")`` does not change the mode of an existing file,
+        so the pre-create also covers renewals.
+
+        Both permission steps are best-effort: on a filesystem without POSIX
+        permissions the write itself still succeeds, so a failure here must not
+        fail the whole cert flow — it is logged instead. The trailing chmod stays
+        as the belt-and-braces path for a key file that predates this fix (it
+        would already exist at 0644).
+        """
+        try:
+            os.makedirs(os.path.dirname(self.key_file), exist_ok=True)
+            fd = os.open(self.key_file, os.O_RDWR | os.O_CREAT, 0o600)
+            os.close(fd)
+        except OSError as e:
+            _LOGGER.warning("central cert: pre-create key at 0600 failed: %s", e)
+        ok = await self._storage.save_file_async(
             domain=self.CERT_DOMAIN,
             name_with_suffix=self._key_name,
             data=key.encode("utf-8"),
         )
+        if ok:
+            try:
+                os.chmod(self.key_file, 0o600)
+            except OSError as e:
+                _LOGGER.warning("central cert: chmod 0600 on key failed: %s", e)
+        return ok
 
     async def load_user_cert_async(self) -> Optional[str]:
         """Load the persisted user certificate."""

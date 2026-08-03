@@ -13,6 +13,7 @@ and key/cert removal keeping the CA.
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -144,3 +145,45 @@ async def test_remove_user_key_cert_keeps_ca():
     assert await c.load_user_cert_async() is None
     # CA still present / valid.
     assert await c.verify_ca_cert_async() is True
+
+
+@pytest.mark.asyncio
+async def test_user_key_is_not_world_readable(tmp_path):
+    """私钥必须 0600:它是本客户端连用户家网关的 mTLS 凭证,同机任何用户读到
+    就能冒充这台 miloco 实例下发设备控制指令。MIoTStorage 用裸 open 写文件,
+    默认 umask 022 下会落成 0644,所以必须显式收紧。"""
+    storage = MIoTStorage(str(tmp_path), loop=None)
+    cert = MIoTCert(storage, uid="u1", cloud_server="cn", loop=None)
+
+    assert await cert.update_user_key_async("-----BEGIN PRIVATE KEY-----\nx\n") is True
+
+    mode = os.stat(cert.key_file).st_mode & 0o777
+    assert mode == 0o600, f"私钥权限应为 0o600, 实际 {oct(mode)}"
+
+
+@pytest.mark.asyncio
+async def test_user_key_never_world_readable_even_mid_write(tmp_path, monkeypatch):
+    """0600 必须在**写入内容之前**就位,不能靠事后 chmod。
+
+    上一版是「裸 open 落 0644 → 回事件循环 → chmod 0600」,首次生成时这中间隔着一次
+    executor 往返 + 一次事件循环调度,私钥在这段窗口里是 world-readable —— 多用户主机
+    上盯着目录的本地攻击者(inotify/fsevents)刚好够读走它,正是 docstring 声称要防的
+    事,而只断言最终模式的测试测不出来。这里在 storage 写内容的那一刻抓一次快照。
+    """
+    storage = MIoTStorage(str(tmp_path), loop=None)
+    cert = MIoTCert(storage, uid="u1", cloud_server="cn", loop=None)
+
+    seen: list[int] = []
+    orig_save = storage.save_file_async
+
+    async def spy(*args, **kwargs):
+        # 进 save 时文件应已被预创建成 0600
+        if os.path.exists(cert.key_file):
+            seen.append(os.stat(cert.key_file).st_mode & 0o777)
+        return await orig_save(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "save_file_async", spy)
+
+    assert await cert.update_user_key_async("-----BEGIN PRIVATE KEY-----\nx\n") is True
+    assert seen == [0o600], f"写入前的权限快照应为 0o600, 实际 {[oct(m) for m in seen]}"
+    assert os.stat(cert.key_file).st_mode & 0o777 == 0o600
