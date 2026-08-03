@@ -90,7 +90,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # launcher 守卫要算 PR 改动集（对比 base 的 merge-base），需要完整历史
+          fetch-depth: 0
       - uses: ./.github/actions/setup-all
+      - name: launcher 守卫（vendored 启动器）
+        # 入库的 miloco.app 是手工重编后 vendored 的，"源码与二进制同步"没有机器约束。
+        # 硬失败只覆盖可确定性验证的部分（双架构 fat + plist 关键字段）；改了 src 却没
+        # 重编入库只告警 —— 纯注释改动重编后字节相同，硬失败会变成无法满足的红灯。
+        #
+        # 本 workflow 同时被 push(main) 触发，那时 github.base_ref 是空串：不显式分流
+        # 就会去跑 `git diff origin/...HEAD`（fatal，exit 128），只靠 bash 不带 pipefail
+        # 蒙混成绿灯，且 main 每次 push 都打一行 git 报错。
+        # pipefail：分流之后余下的失败（fetch 取不到 base / diff 报错）一律让本步直接红，
+        # 不再有"守卫静默跳过却显示通过"的形态。
+        run: |
+          set -o pipefail
+          # 先跑脚本自带的回归样本：判定逻辑被同一个失效模式咬过两次，都靠人眼才发现
+          # （见 launcher-guard.py 的 self_test docstring）
+          python3 .ci/launcher-guard.py --self-test
+          base="${{ github.base_ref }}"
+          if [ -z "$base" ]; then
+            # push(main)：没有 PR base，只跑硬校验（空 stdin → 漂移告警自动跳过）
+            python3 .ci/launcher-guard.py < /dev/null
+          else
+            git fetch --no-tags origin "$base"
+            git diff "origin/$base...HEAD" | python3 .ci/launcher-guard.py
+          fi
       - name: ruff（backend + cli）
         # 用 backend 环境的 ruff 一次扫两处：ruff 是纯静态分析无需装 cli 依赖，
         # 且会按各自 pyproject 解析配置（cli 未把 ruff 列为依赖，故不能 cd cli && uv run ruff）。

@@ -74,7 +74,8 @@ MIPS_LOCAL_RECONNECT_MAX_SEC: float = 60.0
 # RPC (rpcReq/get) reply timeout over the local broker. Healthy LAN round-trips
 # are ~30ms; a reply that has not arrived in a few seconds means the device is
 # unreachable, so fail fast and let the caller fall back to cloud rather than
-# stalling the batch. Paired with the per-did local cooldown in MiotProxy.
+# stalling the batch. Paired with the per-did local cooldown in CentralHubManager
+# (central_hub.py, ``_LOCAL_COOLDOWN_SEC``).
 MIPS_LOCAL_RPC_TIMEOUT: float = 5.0
 
 # User certificate is refreshed this many seconds before it actually expires.

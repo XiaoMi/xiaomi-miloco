@@ -156,6 +156,7 @@ knowledge/
   - [设备欢迎](03-features/device-welcome.md)
   - [事件反馈打包](03-features/event-feedback.md)
   - [一键升级](03-features/one-click-upgrade.md)
+  - [macOS LaunchAgent 与本地网络权限](03-features/macos-launchagent-lnp.md)
 - **04-testing** — [评测方法论](04-testing/README.md)
 - **05-external-deps**
   - [MiOT SDK](05-external-deps/sdk-miot.md)

@@ -251,6 +251,10 @@ class MiotSettings(BaseModel):
         description=(
             "静态中枢网关地址（mDNS 发现不到时用，如容器/跨网段隔离环境）。"
             "每项为 'ip' 或 'ip:port'，端口缺省 8883。"
+            "注意：经环境变量覆盖时必须用 JSON 数组形式"
+            '（MILOCO_MIOT__CENTRAL_HUB_GATEWAYS=\'["192.168.1.152"]\'），'
+            "pydantic-settings 对 list 字段只接受 JSON；逗号分隔仅 "
+            "`miloco-cli config set` 支持，用在 env 上会让后端启动即 SettingsError。"
         ),
     )
 

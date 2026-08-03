@@ -19,6 +19,8 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 hermes gateway restart
 ```
 
+> **macOS 用户**：安装完成后，打开 **系统设置 → 隐私与安全性 → 本地网络**，找到 **miloco** 并打开开关。否则 macOS 会拦截中枢网关连接（Errno 65）。跳过此步不影响其它功能，仅本地中枢不可用。
+
 > [PR合并前] 从 fork 装：`git clone https://github.com/n0tssss/xiaomi-miloco.git -b pr-hermes ~/xiaomi-miloco && cd ~/xiaomi-miloco && bash plugins/hermes/install-hermes.sh`
 
 装完跑验证：
@@ -59,9 +61,11 @@ bash plugins/hermes/install-hermes.sh
 **Step 1 完成后，agent 先自己绑定通知渠道。不要问用户，直接做：**
 
 如果当前对话来自 IM 平台（飞书/微信/Telegram），agent 用自己的平台名调 miloco_notify_bind：
+
 ```
 miloco_notify_bind action=switch target=<当前平台>
 ```
+
 CLI 终端对话则跳过这步。
 
 然后直接进 2.1。
@@ -73,6 +77,7 @@ CLI 终端对话则跳过这步。
 > **关键纪律：必须按 2.1 → 2.2 → 2.3 顺序逐项询问。每项完成（用户回复"好了"/"ok"/"继续"）才发下一项。禁止一次性贴出全部步骤。**
 
 agent 先跑：
+
 ```bash
 miloco-cli account status
 ```
@@ -80,6 +85,7 @@ miloco-cli account status
 根据输出判定：
 
 **已绑定（输出含 `"is_bound": true`）：**
+
 > 当前已绑定米家账号：{user_info.nickname 或 user_info.uid}
 > 是否继续使用当前账号？还是重新绑定？
 >
@@ -87,17 +93,20 @@ miloco-cli account status
 > - 重新绑定 → 给用户 {bind_url}
 
 **未绑定：**
+
 > Miloco 需要绑定小米账号才能控制智能设备。
 > 我先给你拿授权链接……
 
 agent 跑：
+
 ```bash
 miloco-cli account bind 2>&1 | grep -o 'https://[^ ]*'
 ```
 
 取到的 URL 发给用户：
+
 > 请在浏览器中打开这个链接登录小米账号授权：
-> 
+>
 > {链接}
 >
 > 授权完后，把页面上显示的**授权码（base64 字符串）复制给我**。
@@ -105,6 +114,7 @@ miloco-cli account bind 2>&1 | grep -o 'https://[^ ]*'
 > ⚠️ 授权码 5 分钟过期，请尽快操作。
 
 用户回复授权码后，agent 跑：
+
 ```bash
 miloco-cli account authorize "<用户给的授权码>"
 ```
@@ -114,6 +124,7 @@ miloco-cli account authorize "<用户给的授权码>"
 #### 2.2 Omni 模型
 
 agent 先跑：
+
 ```bash
 miloco-cli config get model.omni.api_key
 miloco-cli config get model.omni.model
@@ -123,23 +134,28 @@ miloco-cli config get model.omni.base_url
 根据输出判定：
 
 **三项都非空：**
+
 > 当前模型配置：
+>
 > - Model: {model.omni.model 的值}
 > - Base URL: {model.omni.base_url 的值}
 > - API Key: {前4位}****{后4位}
-> 
+>
 > 是否沿用当前配置？还是使用新的模型服务？
 >
 > - 沿用 → 进 2.3
 > - 重新配置 → 收集新信息
 
 **任一项为空，发：**
+
 > Miloco 感知引擎需要一个多模态大模型来看懂摄像头画面。
 > 默认推荐 **小米 MiMo**。
+>
 > - Model: `xiaomi/mimo-v2.5`
 > - Base URL: `https://api.xiaomimimo.com/v1`
-> 
+>
 > 你有 MiMo 的 API Key 吗？
+>
 > - **有**：直接发我 API Key，我帮你配好
 > - **没有**：去 https://platform.xiaomimimo.com 申请一个，拿到 Key 发我
 > - **用其他模型**（OpenAI / 自建 / 任何 OpenAI 兼容 API）：把 model 名、Base URL、API Key 一起发我
@@ -147,11 +163,13 @@ miloco-cli config get model.omni.base_url
 用户回复后，agent 一次性配置（避免逐条 config set 触发多次 restart 竞态）：
 
 **用户只发了 API Key：**
+
 ```bash
 miloco-cli config set model.omni.api_key "<key>"
 ```
 
 **用户指定了 model / base_url：**
+
 ```bash
 miloco-cli config set model.omni.api_key "<key>"
 miloco-cli config set model.omni.model "<model>"
@@ -165,6 +183,7 @@ miloco-cli config set model.omni.base_url "<url>"
 #### 2.3 重启 gateway
 
 agent 先跑确认：
+
 ```bash
 hermes cron list 2>&1 | grep -c miloco
 ```
@@ -172,24 +191,28 @@ hermes cron list 2>&1 | grep -c miloco
 **≥ 4 个 miloco cron：** → 后台插件已加载，进 Step 3。
 
 **否则发：**
+
 > 最后一步：重启 Hermes gateway 让新装的插件生效。
 > 你在终端跑一下（agent 不能代跑，会被防重启循环拦截）：
-> 
+>
 > ```bash
 > hermes gateway restart
 > ```
-> 
+>
 > 跑完告诉我"好了"。
 
 用户回复后 agent 验证：
+
 ```bash
 hermes cron list 2>&1 | grep -c miloco
 ```
+
 ≥ 4 → 进 Step 3。
 
 ### Step 3：验证 + 完成安装
 
 验证通过后，重启 backend 触发 onboarding（家庭初始化询问）：
+
 ```bash
 miloco-cli service restart
 ```
@@ -203,25 +226,26 @@ bash plugins/hermes/tests/test_acceptance.sh
 验证通过后告知用户：
 
 > 安装完成！miloco 已就绪 ✓
-> 
+>
 > 常用命令：
+>
 > - `miloco-cli service status` — 查看服务状态
 > - `miloco-cli device list` — 查看设备列表
 > - `miloco-cli config show` — 查看配置
 > - `hermes cron list` — 查看定时任务
-> 
+>
 > 试一下：`hermes chat -q "把客厅灯打开" -Q`
 
 ## 关键路径
 
-| 内容 | 路径 |
-|---|---|
-| 配置文件 | `~/.hermes/miloco/config.json` |
-| ONNX 模型 | `~/.hermes/miloco/models/` |
-| 插件 | `~/.hermes/plugins/miloco/miloco-plugin/` |
-| Adapter | `~/.hermes/miloco/agent_platform/hermes/adapter.py` |
-| Skills | `~/.hermes/skills/miloco-*` |
-| Backend 端口 | `127.0.0.1:1810` |
+| 内容         | 路径                                                |
+| ------------ | --------------------------------------------------- |
+| 配置文件     | `~/.hermes/miloco/config.json`                      |
+| ONNX 模型    | `~/.hermes/miloco/models/`                          |
+| 插件         | `~/.hermes/plugins/miloco/miloco-plugin/`           |
+| Adapter      | `~/.hermes/miloco/agent_platform/hermes/adapter.py` |
+| Skills       | `~/.hermes/skills/miloco-*`                         |
+| Backend 端口 | `127.0.0.1:1810`                                    |
 
 ## Agent 执行要点
 
@@ -234,11 +258,11 @@ bash plugins/hermes/tests/test_acceptance.sh
 
 ## 故障排除
 
-| 现象 | 修法 |
-|---|---|
-| `miloco-cli: command not found` | 跑 Step 1.2 的 install.sh |
-| backend 启动失败 | 看 `~/.hermes/miloco/log/miloco-backend.log` |
-| 感知引擎 `no_omni_api_key` | 配 `miloco-cli config set model.omni.api_key <key>` |
-| `hermes cron list` 崩溃 | 重跑 install-hermes.sh（cron deliver 修复） |
-| trace 找不到 | gateway 进程需设 `MILOCO_HOME=~/.hermes/miloco` 到 launchd plist |
-| im_push 报 needsBind | 在 Hermes 配 IM 后跑 `hermes gateway restart`，install-hermes.sh 会自动探测 |
+| 现象                            | 修法                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `miloco-cli: command not found` | 跑 Step 1.2 的 install.sh                                                   |
+| backend 启动失败                | 看 `~/.hermes/miloco/log/miloco-backend.log`                                |
+| 感知引擎 `no_omni_api_key`      | 配 `miloco-cli config set model.omni.api_key <key>`                         |
+| `hermes cron list` 崩溃         | 重跑 install-hermes.sh（cron deliver 修复）                                 |
+| trace 找不到                    | gateway 进程需设 `MILOCO_HOME=~/.hermes/miloco` 到 launchd plist            |
+| im_push 报 needsBind            | 在 Hermes 配 IM 后跑 `hermes gateway restart`，install-hermes.sh 会自动探测 |
