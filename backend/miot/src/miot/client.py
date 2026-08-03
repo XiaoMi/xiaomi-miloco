@@ -20,17 +20,20 @@ from .camera import (
     get_camera_extra_info,
     is_camera_model,
 )
+from .central_hub import CentralHubManager
 from .cloud import MIoTHttpClient, MIoTOAuth2Client
 from .const import (
     CLOUD_SERVER_DEFAULT,
     OAUTH2_CLIENT_ID,
     SYSTEM_LANGUAGE_DEFAULT,
 )
+from .error import MIoTErrorCode
 from .i18n import MIoTI18n
 from .lan import MIoTLan
 from .mips_cloud import MIoTMipsCloud
 from .network import MIoTNetwork
 from .types import (
+    MIoTActionParam,
     MIoTAppNotify,
     MIoTCameraExtraInfo,
     MIoTCameraInfo,
@@ -38,11 +41,13 @@ from .types import (
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
+    MIoTGetPropertyParam,
     MIoTHomeInfo,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
     MIoTOauthInfo,
     MIoTSceneChangedEvent,
+    MIoTSetPropertyParam,
     MIoTUserInfo,
     MipsConnectionError,
     MipsSubscribeRejectedError,
@@ -50,6 +55,35 @@ from .types import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Local (central hub) transport/RPC-layer failure codes — the local RPC did not
+# cleanly complete. A local failure is split into two classes by whether the
+# request could have already reached and run on the device:
+#
+# RPC reply timeout: ambiguous — the request may have been delivered and
+# executed. A non-idempotent set/action is therefore NOT retried on cloud
+# (avoids double-executing a maybe-delivered request); an idempotent read (get)
+# still falls back to cloud. Either way a timeout arms the per-did cooldown, so
+# subsequent requests for that did skip local for a window (a flaky device's
+# batch pays the timeout at most once).
+_LOCAL_TIMEOUT_CODE = MIoTErrorCode.CODE_TIMEOUT.value  # -10006
+# Local failures where the request definitely did NOT execute on the device
+# (gateway could not process / rejected before dispatch). Safe to retry on
+# cloud, and cheap (no timeout wait) so they do NOT arm the cooldown.
+_LOCAL_FALLBACK_CODES = frozenset(
+    {
+        MIoTErrorCode.CODE_INTERNAL_ERROR.value,  # -10004
+        MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,  # -10040
+        MIoTErrorCode.CODE_UNAVAILABLE.value,  # -10001
+    }
+)
+# Local success codes (shared by set/get/action routing; named *OK* not *SET*
+# because it also gates GET reads).
+_LOCAL_OK_CODES = frozenset({0, 1})
+# Sentinel distinguishing "local call never returned" (exception) from "local
+# call returned None" — a non-idempotent action returning None must NOT be
+# retried on cloud (double-fire).
+_UNSET = object()
 
 
 class MIoTClient:
@@ -125,6 +159,10 @@ class MIoTClient:
         lang: Optional[str] = None,
         oauth_info: Optional[MIoTOauthInfo | Dict] = None,
         cloud_server: Optional[str] = None,
+        central_hub_enabled: bool = True,
+        central_hub_gateways: Optional[list[tuple[str, int]]] = None,
+        central_hub_virtual_did: Optional[str] = None,
+        central_hub_home_ids_provider: Optional[Callable[[], set[str]]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         """MIoT Client init.
@@ -168,6 +206,20 @@ class MIoTClient:
         # mips_cloud state
         self._mips_cloud = None
         self._mips_user_sub_error = None
+        # Central hub gateway (local control) coordinator. Built lazily in
+        # _setup_mips_async once OAuth is done; stays None outside cn.
+        self._central_hub: Optional[CentralHubManager] = None
+        # Master switch: when False the central hub is never built (no cert /
+        # mDNS / gateway connection) and all control falls back to cloud.
+        self._central_hub_enabled = central_hub_enabled
+        # Optional static gateway endpoints [(host, port), ...] used in addition
+        # to mDNS discovery (for mDNS-isolated environments).
+        self._central_hub_gateways = list(central_hub_gateways or [])
+        # Optional injected virtual did (client identity). When absent the
+        # coordinator generates+persists its own (file-backed), keeping the SDK
+        # usable standalone.
+        self._central_hub_virtual_did = central_hub_virtual_did
+        self._central_hub_home_ids_provider = central_hub_home_ids_provider
         self._callback_user_bind = None
         self._callback_device_meta_changed = None
         self._callback_device_state_changed = None
@@ -232,6 +284,286 @@ class MIoTClient:
     def http_client(self) -> MIoTHttpClient:
         """HTTP client."""
         return self._http_client
+
+    @property
+    def central_hub(self) -> Optional[CentralHubManager]:
+        """Central hub gateway coordinator (None outside cn / before login)."""
+        return self._central_hub
+
+    @property
+    def central_hub_virtual_did(self) -> Optional[str]:
+        """The virtual did the central hub coordinator uses to sign its cert."""
+        return self._central_hub_virtual_did
+
+    @central_hub_virtual_did.setter
+    def central_hub_virtual_did(self, value: str) -> None:
+        self._central_hub_virtual_did = value
+
+    async def teardown_central_hub_async(self) -> None:
+        """Teardown the current coordinator so the next ``_setup_central_hub_async``
+        rebuilds it with fresh identity.
+
+        Needed when ``authorize_with_code`` rotates the account without
+        recreating the ``MIoTClient`` — the coordinator holds a stale uid and
+        virtual did from the old account.
+        """
+        hub = self._central_hub
+        if hub is None:
+            return
+        self._central_hub = None
+        try:
+            await hub.deinit_async()
+        except Exception as e:
+            _LOGGER.warning("central hub teardown failed: %s", e)
+
+    async def refresh_central_hub_scope_async(self) -> None:
+        """Re-evaluate the central hub's connectable-home scope (e.g. after a
+        home switch). No-op when the hub isn't built (outside cn / disabled)."""
+        ch = self._central_hub
+        if ch is not None:
+            await ch.refresh_scope_async()
+
+    # ---------------------------------------------------------- control routing
+    # Unified device control that routes per-did. Failures are classified by
+    # whether the request could already have run on the device (see the
+    # _LOCAL_* codes above):
+    #   - device NOT locally controllable (not behind a live gateway / offline /
+    #     no spec-v2 access) → cloud. Nothing is sent locally, so this is safe.
+    #   - device in a local-failure cooldown window → cloud (a recent local
+    #     timeout cooled the did down; skip local to avoid paying the timeout
+    #     again, and keep the device controllable via cloud).
+    #   - device locally controllable → try local, then:
+    #       * timeout → the set/action may have run; return the error WITHOUT a
+    #         cloud retry (avoid double-execution) and arm the cooldown. A get is
+    #         idempotent, so it still falls back to cloud (cooldown still armed).
+    #       * other local failure (transport error / non-timeout error code) →
+    #         the request clearly did not run; retry on cloud, no cooldown.
+    #       * success / device-level rejection → returned as-is (no cloud).
+    # Result shape matches the cloud API so callers are transport-agnostic.
+
+    async def set_props_async(
+        self, params: list[MIoTSetPropertyParam]
+    ) -> list:
+        """Set device properties. Local-controllable dids go local. On local
+        **timeout** the item is returned as an error and the did is cooled down
+        (no cloud retry — the set may have been delivered, avoid double-send);
+        on any **other** local failure (exception / non-timeout error code) the
+        item retries on cloud (it clearly did not execute), without cooldown.
+        Not locally-controllable dids go cloud."""
+        ch = self._central_hub
+        if not ch or not ch.enabled:
+            return await self._http_client.set_props_async(params)
+
+        results: list = [None] * len(params)
+        cloud_idx: list[int] = []
+        for i, p in enumerate(params):
+            if not ch.can_control(p.did):
+                cloud_idx.append(i)  # not locally controllable → cloud
+                continue
+            if ch.in_local_cooldown(p.did):  # recent local timeout → cloud during cooldown
+                cloud_idx.append(i)
+                continue
+            try:
+                r = await ch.set_prop_async(p.did, p.siid, p.piid, p.value)
+            except Exception as e:
+                # local call errored → clearly not delivered → retry cloud, no cooldown
+                _LOGGER.warning("local set_prop errored did=%s → cloud: %s", p.did, e)
+                cloud_idx.append(i)
+                continue
+            code = r.get("code") if isinstance(r, dict) else None
+            if code == _LOCAL_TIMEOUT_CODE:
+                # timeout — may have been delivered → no cloud retry, cool down
+                _LOGGER.info("local set_prop timeout did=%s (no cloud fallback)", p.did)
+                ch.note_local_failure(p.did)
+                results[i] = {
+                    "did": p.did, "siid": p.siid, "piid": p.piid,
+                    "code": code,
+                }
+                continue
+            if code is None or code in _LOCAL_FALLBACK_CODES:
+                # clearly did not execute → retry on cloud, no cooldown
+                _LOGGER.info("local set_prop failed did=%s code=%s → cloud", p.did, code)
+                cloud_idx.append(i)
+                continue
+            # success (0/1) or device-level result → return as-is
+            results[i] = {
+                "did": p.did, "siid": p.siid, "piid": p.piid,
+                "code": 0 if code in _LOCAL_OK_CODES else code,
+            }
+
+        if cloud_idx:
+            try:
+                cloud_res = await self._http_client.set_props_async(
+                    [params[i] for i in cloud_idx]
+                )
+            except Exception:
+                # Cloud batch failed. If every item was cloud-routed (nothing
+                # handled locally) preserve the cloud-only contract and raise;
+                # otherwise keep the items that already succeeded locally and
+                # report the cloud ones as errors.
+                if len(cloud_idx) == len(params):
+                    raise
+                _LOGGER.warning(
+                    "cloud set_props fallback failed; keeping %d local result(s)",
+                    len(params) - len(cloud_idx),
+                )
+                self._fill_cloud_error(params, cloud_idx, results)
+                return results
+            for j, i in enumerate(cloud_idx):
+                results[i] = (
+                    cloud_res[j]
+                    if j < len(cloud_res)
+                    else {
+                        "did": params[i].did,
+                        "siid": params[i].siid,
+                        "piid": params[i].piid,
+                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+                    }
+                )
+        return results
+
+    @staticmethod
+    def _fill_cloud_error(params: list, cloud_idx: list[int], results: list) -> None:
+        """Fill the cloud-routed slots with an internal-error result (used when
+        the cloud fallback batch itself raised but some local results must be
+        preserved)."""
+        for i in cloud_idx:
+            results[i] = {
+                "did": params[i].did,
+                "siid": params[i].siid,
+                "piid": params[i].piid,
+                "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+            }
+
+    async def get_props_async(
+        self, params: list[MIoTGetPropertyParam]
+    ) -> list:
+        """Get device properties. Local-controllable dids read local; a read is
+        idempotent, so on any local failure the item falls back to cloud
+        in-call. A local timeout additionally arms the did's cooldown, so its
+        subsequent requests read from cloud for a window. Not locally-
+        controllable dids read cloud."""
+        ch = self._central_hub
+        if not ch or not ch.enabled:
+            return await self._http_client.get_props_async(params)
+
+        results: list = [None] * len(params)
+        cloud_idx: list[int] = []
+        for i, p in enumerate(params):
+            if not ch.can_control(p.did):
+                cloud_idx.append(i)  # not locally controllable → cloud
+                continue
+            if ch.in_local_cooldown(p.did):  # recent local timeout → cloud during cooldown
+                cloud_idx.append(i)
+                continue
+            try:
+                r = await ch.get_prop_async(p.did, p.siid, p.piid)
+            except Exception as e:
+                # local read errored → cloud (reads are idempotent), no cooldown
+                _LOGGER.warning("local get_prop errored did=%s → cloud: %s", p.did, e)
+                cloud_idx.append(i)
+                continue
+            code = r.get("code") if isinstance(r, dict) else None
+            if code == _LOCAL_TIMEOUT_CODE:
+                # timeout — may have been delivered → cloud, cool down
+                _LOGGER.info("local get_prop timeout did=%s → cloud (cooldown)", p.did)
+                ch.note_local_failure(p.did)
+                cloud_idx.append(i)
+                continue
+            # get_prop_async 恒返回非 None code(成功 value/网关 error/兜底
+            # CODE_INTERNAL_ERROR);防御性 guard 防将来 SDK 改契约,不用 assert
+            # (-O 下会被剥离)。
+            if code is None:
+                _LOGGER.error("local get_prop returned no code did=%s → cloud", p.did)
+                cloud_idx.append(i)
+                continue
+            # fast error (gateway-level rejection, code != timeout) → cloud, no
+            # cooldown (request clearly didn't execute on the device)
+            if code not in _LOCAL_OK_CODES:
+                _LOGGER.info("local get_prop error did=%s code=%s → cloud", p.did, code)
+                cloud_idx.append(i)
+                continue
+            results[i] = {
+                "did": p.did, "siid": p.siid, "piid": p.piid,
+                "value": r.get("value"), "code": 0,
+            }
+
+        if cloud_idx:
+            try:
+                cloud_res = await self._http_client.get_props_async(
+                    [params[i] for i in cloud_idx]
+                )
+            except Exception:
+                # Cloud batch failed — see set_props_async for the rationale.
+                if len(cloud_idx) == len(params):
+                    raise
+                _LOGGER.warning(
+                    "cloud get_props fallback failed; keeping %d local result(s)",
+                    len(params) - len(cloud_idx),
+                )
+                self._fill_cloud_error(params, cloud_idx, results)
+                return results
+            for j, i in enumerate(cloud_idx):
+                results[i] = (
+                    cloud_res[j]
+                    if j < len(cloud_res)
+                    else {
+                        "did": params[i].did,
+                        "siid": params[i].siid,
+                        "piid": params[i].piid,
+                        "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+                    }
+                )
+        return results
+
+    async def action_async(self, param: MIoTActionParam) -> dict:
+        """Call a device action. Locally-controllable + not in cooldown → local.
+        On local **timeout** the action returns an error and the did is cooled
+        down (no cloud retry — the action may have executed, avoid double-run);
+        on any **other** local failure (exception / non-timeout error code) it
+        retries on cloud (it clearly did not run), without cooldown. Not
+        locally-controllable or in cooldown → cloud."""
+        ch = self._central_hub
+        if (
+            ch and ch.enabled and ch.can_control(param.did)
+            and not ch.in_local_cooldown(param.did)
+        ):
+            local_result = _UNSET
+            try:
+                local_result = await ch.action_async(
+                    param.did, param.siid, param.aiid, param.in_
+                )
+            except Exception as e:
+                # local call errored → clearly did not run → retry cloud, no cooldown
+                _LOGGER.warning("local action errored did=%s → cloud: %s", param.did, e)
+            if local_result is None:
+                # 非幂等 action 返回 None(网关内部吞了异常)——不明原因,绝不云端重发,
+                # 否则设备可能执行两次。报错并返回内部错误。
+                _LOGGER.error("local action returned None for did=%s (non-idempotent)", param.did)
+                return {
+                    "did": param.did, "siid": param.siid, "aiid": param.aiid,
+                    "code": MIoTErrorCode.CODE_INTERNAL_ERROR.value,
+                }
+            if local_result is not _UNSET:
+                code = local_result.get("code") if isinstance(local_result, dict) else None
+                if code == _LOCAL_TIMEOUT_CODE:
+                    # timeout — may have run → no cloud retry, cool down
+                    _LOGGER.info("local action timeout did=%s (no cloud fallback)", param.did)
+                    ch.note_local_failure(param.did)
+                    return {
+                        "did": param.did, "siid": param.siid, "aiid": param.aiid,
+                        "code": code,
+                    }
+                if code is not None and code not in _LOCAL_FALLBACK_CODES:
+                    return local_result  # success or device-level rejection → as-is
+                # non-timeout failure → fall through to cloud
+                _LOGGER.info("local action failed did=%s code=%s → cloud", param.did, code)
+        # not locally controllable / in cooldown / non-timeout local failure → cloud
+        try:
+            return await self._http_client.action_async(param)
+        except Exception as e:
+            _LOGGER.error("Failed to call device action: %s", e)
+            raise
 
     async def __on_lan_device_status_changed(
         self, did: str, info: MIoTLanDeviceInfo, ctx: Any = None
@@ -356,6 +688,14 @@ class MIoTClient:
         # cannot strand the instance in a half-torn-down state. A sub-client
         # may be None if init_async aborted before creating it.
         try:
+            # Central hub (LAN clients + mDNS + cert timer) first; independent
+            # of the cloud clients.
+            await _safe(
+                "central_hub",
+                lambda: (
+                    self._central_hub.deinit_async() if self._central_hub else None
+                ),
+            )
             # mips_cloud must be deinit-ed before oauth_client / http_client
             # so any in-flight subscribe futures see MipsConnectionError
             # rather than hanging on a closed http session.
@@ -424,6 +764,7 @@ class MIoTClient:
             self._callbacks_lan_device_status_changed = {}
             self._mips_cloud = None
             self._mips_user_sub_error = None
+            self._central_hub = None
             self._callback_user_bind = None
             self._callback_device_meta_changed = None
             self._callback_device_state_changed = None
@@ -772,6 +1113,88 @@ class MIoTClient:
         """
         return self._mips_user_sub_error
 
+    async def _setup_central_hub_async(self) -> None:
+        """Build the central hub gateway coordinator once (idempotent, cn-only).
+
+        Requires storage (for cert/virtual-did persistence) and a resolved uid.
+        The manager is region-gated internally, so this is a cheap no-op outside
+        ``SUPPORT_CENTRAL_GATEWAY_CTRL``. Access-token rotation does not affect
+        the already-signed mTLS clients, so we only build it the first time.
+
+        **Account-switch must call ``teardown_central_hub_async()`` first** —
+        the coordinator holds a uid and virtual did fixed at construction and
+        the idempotent guard here would otherwise skip the rebuild, leaving the
+        old identity in place.  Token rotation (same account) does not need this.
+        """
+        # Never let central hub setup break the (independent) cloud MQTT setup.
+        try:
+            if not getattr(self, "_central_hub_enabled", True):
+                _LOGGER.info("central hub disabled by config; skipping setup")
+                return
+            if getattr(self, "_central_hub", None) is not None:
+                return
+            storage = getattr(self, "_storage", None)
+            http_client = getattr(self, "_http_client", None)
+            if not storage:
+                _LOGGER.info("central hub skipped: no cache_path / storage")
+                return
+            uid = (
+                self._oauth_info.user_info.uid
+                if self._oauth_info and self._oauth_info.user_info
+                else None
+            )
+            if not uid or not http_client:
+                return
+            manager = CentralHubManager(
+                storage=storage,
+                http_client=http_client,
+                uid=uid,
+                cloud_server=self._cloud_server,
+                static_gateways=getattr(self, "_central_hub_gateways", None),
+                virtual_did=getattr(self, "_central_hub_virtual_did", None),
+                home_ids_provider=getattr(
+                    self, "_central_hub_home_ids_provider", None
+                ),
+                network=getattr(self, "_network_client", None),
+                loop=self._main_loop,
+            )
+            if not manager.enabled:
+                return
+            self._central_hub = manager
+            await manager.init_async()
+        except Exception as e:
+            _LOGGER.error("central hub setup failed: %s", e)
+
+    async def delete_central_cert_async(self) -> None:
+        """Delete the local central-hub client cert (private key + user cert) of
+        the currently-bound account; the shared CA is kept. No-op when uid or
+        storage is unavailable, or the files are absent. Called on logout /
+        account switch so the next account signs a fresh cert (its CN binds the
+        new uid), and stale key/cert of the old account do not linger on disk.
+        """
+        try:
+            storage = getattr(self, "_storage", None)
+            uid = (
+                self._oauth_info.user_info.uid
+                if self._oauth_info and self._oauth_info.user_info
+                else None
+            )
+            if not storage or not uid:
+                return
+            from .cert import MIoTCert
+
+            cert = MIoTCert(
+                storage=storage,
+                uid=uid,
+                cloud_server=self._cloud_server,
+                loop=self._main_loop,
+            )
+            await cert.remove_user_key_async()
+            await cert.remove_user_cert_async()
+            _LOGGER.info("central hub client cert removed for uid=%s", uid)
+        except Exception as e:
+            _LOGGER.error("delete central hub cert failed: %s", e)
+
     async def _setup_mips_async(self) -> None:
         """Build (or rebuild) the mips_cloud client and attempt user-level subs.
 
@@ -790,6 +1213,11 @@ class MIoTClient:
             # Should not happen — get_user_info_async populates user_info.
             _LOGGER.warning("mips setup skipped: no user uid")
             return
+
+        # Central hub gateway (LAN control) is independent of the cloud MQTT
+        # path — set it up first so a cloud-MQTT connect failure below does not
+        # disable local control. Idempotent + region-gated (no-op outside cn).
+        await self._setup_central_hub_async()
 
         # Tear down any pre-existing instance (re-OAuth scenario).
         if self._mips_cloud is not None:

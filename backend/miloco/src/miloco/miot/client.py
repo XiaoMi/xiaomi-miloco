@@ -9,6 +9,7 @@ import asyncio
 import copy
 import json
 import logging
+import secrets
 import time
 from collections.abc import Callable, Coroutine
 
@@ -34,9 +35,15 @@ from miot.types import (
 from pydantic_core import to_jsonable_python
 
 from miloco.config import get_settings
-from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
+from miloco.database.kv_repo import (
+    AuthConfigKeys,
+    DeviceInfoKeys,
+    KVRepo,
+    SystemConfigKeys,
+)
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
+    allowed_home_ids,
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
@@ -120,6 +127,17 @@ class MiotProxy:
         _settings = get_settings()
         self._frame_interval: int = _settings.camera.frame_interval
         self._max_cache_images: int = _settings.camera.max_cache_images
+        # Local central hub master switch + static gateway endpoints
+        # (mDNS-independent, for environments where multicast can't reach it).
+        self._central_hub_enabled: bool = _settings.miot.central_hub_enabled
+        self._central_hub_gateways: list[tuple[str, int]] = self._parse_gateways(
+            _settings.miot.central_hub_gateways
+        )
+        # Virtual did = this install's client identity for the local hub
+        # (MQTT client_id / cert CN / reply-push topic prefix). Persisted in the
+        # KV store (like the device uuid) and injected into the SDK, so it is
+        # stable across restarts and lives with Miloco's other identity state.
+        self._virtual_did: str = self._ensure_virtual_did()
 
         # two times cache ttl, at least 1 second
         # frame_interval * cache_max_size / 1000 * 2 = seconds
@@ -203,6 +221,81 @@ class MiotProxy:
             refresh_scenes=self.refresh_scenes,
         )
 
+    def _ensure_virtual_did(self) -> str:
+        """Load the persisted virtual did from KV, generating one on first use.
+
+        Kept in the KV store alongside the device uuid so it is stable across
+        restarts; injected into the SDK at construction.
+        """
+        did = self._kv_repo.get(SystemConfigKeys.MIOT_VIRTUAL_DID_KEY)
+        if did and did.strip():
+            return did.strip()
+        did = str(secrets.randbits(64))
+        self._kv_repo.set(SystemConfigKeys.MIOT_VIRTUAL_DID_KEY, did)
+        logger.info("generated central hub virtual did (persisted to KV)")
+        return did
+
+    async def delete_central_cert_async(self) -> None:
+        """Delete the current account's local central-hub client cert (SDK)."""
+        client = self._miot_client
+        if client is not None:
+            await client.delete_central_cert_async()
+
+    async def refresh_central_hub_scope_async(self) -> None:
+        """Re-evaluate the local central-hub connectable-home scope (SDK).
+
+        Called on home switch so the hub reconnects to only the newly-enabled
+        home(s). Thin delegate; no-op when the client/hub isn't up.
+        """
+        client = self._miot_client
+        if client is not None:
+            await client.refresh_central_hub_scope_async()
+
+    async def reset_central_identity_async(self) -> None:
+        """Drop the local central-hub identity so the next account starts
+        clean: delete the current client cert, regenerate the virtual did,
+        and teardown the live coordinator so ``_setup_central_hub_async``
+        rebuilds with fresh uid + did. Cloud identity (device uuid) is
+        untouched.
+        """
+        await self.delete_central_cert_async()
+        self._kv_repo.delete(SystemConfigKeys.MIOT_VIRTUAL_DID_KEY)
+        self._virtual_did = self._ensure_virtual_did()  # regenerate + persist
+        # Teardown the live coordinator: authorize_with_code does not
+        # recreate the MIoTClient, so the old hub (with stale uid/did)
+        # would otherwise survive and connect with wrong identity.
+        client = self._miot_client
+        if client is not None:
+            client.central_hub_virtual_did = self._virtual_did
+            await client.teardown_central_hub_async()
+        logger.info(
+            "central hub identity reset (cert removed, virtual did regenerated)"
+        )
+
+    @staticmethod
+    def _parse_gateways(raw: list[str]) -> list[tuple[str, int]]:
+        """Parse config 'ip' / 'ip:port' entries into (host, port) tuples.
+
+        Port defaults to 8883 (the central hub mTLS MQTT port). Malformed
+        entries are skipped with a warning.
+        """
+        out: list[tuple[str, int]] = []
+        for item in raw or []:
+            s = str(item).strip()
+            if not s:
+                continue
+            host, _, port = s.partition(":")
+            host = host.strip()
+            if not host:
+                continue
+            try:
+                p = int(port) if port.strip() else 8883
+            except ValueError:
+                logger.warning("invalid central_hub_gateways entry %r, skip", item)
+                continue
+            out.append((host, p))
+        return out
+
     def _create_miot_client(self) -> MIoTClient:
         """Create a new MIoTClient instance."""
         return MIoTClient(
@@ -211,6 +304,12 @@ class MiotProxy:
             cache_path=str(get_settings().directories.miot_cache_dir),
             oauth_info=self._oauth_info,
             cloud_server=self._cloud_server,
+            central_hub_enabled=self._central_hub_enabled,
+            central_hub_gateways=self._central_hub_gateways,
+            central_hub_virtual_did=self._virtual_did,
+            # Narrow central-hub connections to Miloco's enabled homes (evaluated
+            # live so runtime whitelist changes take effect on the next refresh).
+            central_hub_home_ids_provider=lambda: allowed_home_ids(self._kv_repo),
         )
 
     @property
@@ -804,6 +903,11 @@ class MiotProxy:
 
     async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:
         async with self._refresh_devices_lock:
+            # Attach the central hub device-list-change hook once it exists
+            # (the coordinator is built lazily during mips setup). Idempotent.
+            ch = getattr(self._miot_client, "central_hub", None)
+            if ch is not None and ch.on_dev_list_changed is None:
+                ch.on_dev_list_changed = self._on_central_hub_dev_list_changed
             try:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
@@ -813,6 +917,20 @@ class MiotProxy:
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
                 return None
+
+    async def _on_central_hub_dev_list_changed(
+        self, added: list, removed: list
+    ) -> None:
+        """Central hub reported a device-list change — mirror it into the same
+        refresh path the cloud bind/unbind events use (scope aligned with the
+        existing cloud subscriptions; property telemetry is not consumed here).
+        """
+        logger.info(
+            "central hub device list changed: +%d -%d; refreshing devices",
+            len(added),
+            len(removed),
+        )
+        await self.refresh_devices()
 
     @staticmethod
     def _log_device_diff(action: str, dev: MIoTDeviceInfo | None, did: str) -> None:
@@ -1255,20 +1373,15 @@ class MiotProxy:
                 await asyncio.sleep(60)  # Wait 1 minute after error before continuing
 
     async def set_device_properties(self, params: list[MIoTSetPropertyParam]) -> list:
-        """Set device properties via MIoT cloud API."""
-        try:
-            return await self.miot_client.http_client.set_props_async(params)
-        except Exception as e:
-            logger.error("Failed to set device properties: %s", e)
-            raise
+        """Set device properties. Local-vs-cloud routing (prefer local, fall
+        back to cloud on transport failure) lives in the SDK
+        (:meth:`MIoTClient.set_props_async`); this is a thin delegate."""
+        return await self.miot_client.set_props_async(params)
 
     async def get_device_properties(self, params: list[MIoTGetPropertyParam]) -> list:
-        """Get device properties via MIoT cloud API."""
-        try:
-            return await self.miot_client.http_client.get_props_async(params)
-        except Exception as e:
-            logger.error("Failed to get device properties: %s", e)
-            raise
+        """Get device properties. Local-vs-cloud routing lives in the SDK
+        (:meth:`MIoTClient.get_props_async`); this is a thin delegate."""
+        return await self.miot_client.get_props_async(params)
 
     async def get_readable_prop_iids(self, did: str) -> list[str]:
         """Return all readable prop iids for a device, derived from its spec."""
@@ -1407,12 +1520,11 @@ class MiotProxy:
         return result
 
     async def call_device_action(self, param: MIoTActionParam) -> dict:
-        """Call device action via MIoT cloud API."""
-        try:
-            return await self.miot_client.http_client.action_async(param)
-        except Exception as e:
-            logger.error("Failed to call device action: %s", e)
-            raise
+        """Call a device action. Local-vs-cloud routing (fall back to cloud only
+        on transport failure, never on a device-level rejection, so an action is
+        not executed twice) lives in the SDK (:meth:`MIoTClient.action_async`);
+        this is a thin delegate."""
+        return await self.miot_client.action_async(param)
 
     async def get_home_info_data(self) -> dict:
         """Build home info dict for CLI cache, including spec data fetched via spec_parser."""

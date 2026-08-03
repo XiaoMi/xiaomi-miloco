@@ -692,6 +692,7 @@ async def test_unbind_miot_clears_scope_config():
         refresh_cameras=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
+        reset_central_identity_async=AsyncMock(),
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
@@ -733,6 +734,7 @@ async def test_unbind_miot_clears_scope_config_when_keys_absent():
         refresh_cameras=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
+        reset_central_identity_async=AsyncMock(),
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
@@ -766,6 +768,7 @@ async def test_unbind_miot_scope_cleared_even_if_deinit_fails():
         init=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
+        reset_central_identity_async=AsyncMock(),
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
@@ -809,6 +812,7 @@ async def test_authorize_with_code_clears_scope_before_token_exchange():
         refresh_cameras=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
+        reset_central_identity_async=AsyncMock(),
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
@@ -1367,6 +1371,7 @@ async def test_authorize_with_code_auto_selects_first_home():
         refresh_cameras=AsyncMock(),
         get_devices=AsyncMock(return_value={"d1": _home("H1"), "d2": _home("H2")}),
         get_cameras=AsyncMock(return_value={}),
+        reset_central_identity_async=AsyncMock(),
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
