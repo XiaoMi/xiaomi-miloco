@@ -144,17 +144,17 @@ def test_smart_crop_switch_roundtrip(client):
     assert data["video_short_edge"] == 768
 
 
-def test_smart_crop_available_reflects_ops_gate(client):
-    """smart_crop_available 暴露 ops 灰度闸 crop_enhance.enabled（API 不可写）。
+def test_smart_crop_available_reflects_release_gate(client):
+    """smart_crop_available 暴露发版级开关 crop_enhance.enabled（API 不可写）。
 
     前端据此置灰开关——available=false 时用户开关即便为 true 后端也不裁，
     必须让前端能如实提示，否则就是「开关开着但没生效」的静默失效。
     """
     c, _svc = client
     data = c.get("/api/admin/perception-config").json()["data"]
-    assert data["smart_crop_available"] is True  # settings.yaml 里 ops 闸已放开
+    assert data["smart_crop_available"] is True  # settings.yaml 里发版级开关已放开
 
-    # ops 闸不接受 API 写入：多余字段被 pydantic 忽略，不会渗进配置。
+    # 发版级开关不接受 API 写入：多余字段被 pydantic 忽略，不会渗进配置。
     # 用 False 来验（写入方向与当前值相反，否则「没变」和「写进去了」不可区分）。
     resp = c.put("/api/admin/perception-config", json={"smart_crop_available": False})
     assert resp.status_code == 200

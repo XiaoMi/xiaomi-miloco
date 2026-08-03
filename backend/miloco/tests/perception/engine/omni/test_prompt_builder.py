@@ -1443,7 +1443,7 @@ def _adaptive_packet(
 class TestAdaptiveResolution:
     """Smart Crop(智能裁切增强)在 fused 路径的接线。
 
-    激活看 crop_enhance 双闸(enabled=ops 灰度闸 AND user_enabled=用户开关),**与
+    激活看 crop_enhance 双闸(enabled=发版级开关 AND user_enabled=单机用户开关),**与
     video_short_edge 正交** —— 分辨率档只决定编码短边(全景 / crop / 参考帧),不再决定裁不裁。
     """
 
@@ -1504,13 +1504,13 @@ class TestAdaptiveResolution:
         assert not self._has_ref(content)  # 有身份候选 → 不 crop(bbox 锚定全景)
 
     def test_off_when_user_switch_off(self):
-        p1, p2 = self._patches(user_enabled=False)  # ops 闸开、用户开关关
+        p1, p2 = self._patches(user_enabled=False)  # 发版级开关开、用户开关关
         with p1, p2:
             content = self._content(candidates=[])
         assert not self._has_ref(content)
 
-    def test_off_when_ops_gate_off(self):
-        p1, p2 = self._patches(enabled=False)  # 用户开关开,但 ops 灰度闸压死
+    def test_off_when_release_gate_off(self):
+        p1, p2 = self._patches(enabled=False)  # 用户开关开,但发版级开关关掉了整个能力
         with p1, p2:
             content = self._content(candidates=[])
         assert not self._has_ref(content)

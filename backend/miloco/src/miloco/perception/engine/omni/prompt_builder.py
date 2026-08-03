@@ -1670,8 +1670,8 @@ class _AdaptiveResult:
 def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | None":
     """Smart Crop 开启时算 crop 区域、编码 crop 视频 + 全景参考帧。
 
-    返回 None = 回退全景(既有路径)。触发 None 的情形:双闸任一为 false(ops 闸 enabled /
-    用户开关 user_enabled)、无帧、无 crop 依据、面积超上限、crop/编码/JPEG 失败或产物过短。
+    返回 None = 回退全景(既有路径)。触发 None 的情形:双闸任一为 false(发版级开关 enabled /
+    单机用户开关 user_enabled)、无帧、无 crop 依据、面积超上限、crop/编码/JPEG 失败或产物过短。
     crop 视频与参考帧的短边都跟随用户分辨率档(见 _crop_short_edge_budget),与「裁不裁」正交。
     all_frames 只读不改。
     """
@@ -1684,8 +1684,8 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
     )
 
     cfg = crop_enhance_config_from_settings()
-    # 双闸:ops 灰度闸 AND 用户开关。任一为 false → 回退全景路径(不裁切)。注意这不等于字节回到
-    # 接本特性前 —— 全景走的 _encode_video_mp4 放大分支已换重采样核,见该函数注释。
+    # 双闸:发版级开关 AND 单机用户开关。任一为 false → 回退全景路径(不裁切)。注意这不等于
+    # 字节回到接本特性前 —— 全景走的 _encode_video_mp4 放大分支已换重采样核,见该函数注释。
     if not (cfg.enabled and cfg.user_enabled):
         return None
     ep = next((p for p in packets if p.all_frames), None)  # 同 _encode_batch_video:首个有帧设备

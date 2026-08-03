@@ -86,7 +86,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
       .finally(() => setLoading(false));
   }, [open, t]);
 
-  // ops 灰度闸没放开时开关不可用（同 schedulerAvailable 的降级套路）：拨动不写盘，
+  // 发版级开关没放开时开关不可用（同 schedulerAvailable 的降级套路）：拨动不写盘，
   // 故置灰 + 换 hint，避免呈现「看着能动、实则后端不裁」的控件。
   // 老后端不返 smart_crop_available → undefined → 同样置灰。
   const smartCropAvailable = config?.smart_crop_available === true;
@@ -126,7 +126,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
           video_short_edge: videoShortEdge,
           omni_fps: omniFps,
           window_size: windowSize,
-          // 只在 ops 闸放开时才提交,不可用时不往后端写一个用户按不动的值
+          // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
           ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
         });
         setConfig(updated);
@@ -163,7 +163,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setVideoShortEdge(DEFAULTS.video_short_edge);
     setOmniFps(DEFAULTS.omni_fps);
     setWindowSize(DEFAULTS.window_size);
-    // 同 scheduler：不可用（ops 闸未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
+    // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
     if (smartCropAvailable) setSmartCrop(DEFAULTS.smart_crop_enabled === true);
     // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
     // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。

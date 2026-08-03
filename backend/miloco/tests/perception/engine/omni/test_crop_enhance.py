@@ -341,11 +341,11 @@ class TestConfigFromSettings:
             reset_settings()
 
     def test_non_bool_gate_does_not_fail_open(self, tmp_path, monkeypatch):
-        """字符串 "false" 不能把 ops 灰度闸绕开。
+        """字符串 "false" 不能把发版级开关绕开。
 
         dataclass 不校验值类型,`enabled: "false"`(yaml 里加了引号就是这个)会得到非空
-        字符串 → truthy → 双闸判定通过、继续裁切,而运维以为已经压死。闸是 enabled=true
-        发版后唯一的止损手段,必须只认真 bool。
+        字符串 → truthy → 双闸判定通过、继续裁切,而改配置的人以为已经关掉了。这个闸是
+        enabled=true 发版后唯一的止损手段,必须只认真 bool。
 
         admin GET 的 smart_crop_available / smart_crop_enabled 也经本函数取值,故这里退
         禁用 = GET 侧一起退,两侧不会分裂;端到端断言见

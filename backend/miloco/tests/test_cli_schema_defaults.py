@@ -8,7 +8,7 @@ CLI 不能 import backend,所以 ``cli/src/miloco_cli/config.py`` 手抄了一�
 对齐后端实际生效值——本测试用 ast 解析 CLI 源码(不 import,免执行副作用),把「手动同步」变成
 会失败的守卫,一处漏改立即红。backend-only 检出(无 cli/)时优雅跳过,同 test_result_codes.py。
 
-漏改的后果是**读到相反的值**:比如哪天把 Smart Crop 的 ops 闸改回 false 灰度却忘了同步这张表,
+漏改的后果是**读到相反的值**:比如哪天随包把 Smart Crop 的发版级开关改回 false 却忘了同步这张表,
 运维在没写这段的 config.json 上 `config get ...crop_enhance.enabled` 会拿到 true,而后端继承
 的是 yaml 的 false,排查「为什么没裁」时线索是反的,且这类漂移本身不会让任何测试变红。
 """

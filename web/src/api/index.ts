@@ -644,8 +644,8 @@ export interface PerceptionConfig {
   /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
    *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */
   smart_crop_enabled?: boolean;
-  /** ops 灰度闸(backend crop_enhance.enabled)的只读投影,**PUT 不可写**。
-   *  false = 服务端还没放开这个能力,用户开关即便为 true 也不裁 → 前端置灰 + 提示,
+  /** 发版级开关(backend crop_enhance.enabled)的只读投影,**PUT 不可写**。
+   *  false = 当前这一版没打开该能力,用户开关即便为 true 也不裁 → 前端置灰 + 提示,
    *  避免"开关开着但后端不裁"的静默失效。老后端不返此字段 → undefined,同样置灰。 */
   smart_crop_available?: boolean;
 }
@@ -663,7 +663,7 @@ export type UpdatePerceptionConfigResult = PerceptionConfig & {
   restart_ok?: boolean;
 };
 
-// smart_crop_available 从入参里 Omit 掉:它是 ops 灰度闸的只读投影,后端 PUT 也不收,
+// smart_crop_available 从入参里 Omit 掉:它是发版级开关的只读投影,后端 PUT 也不收,
 // 在类型上挡住比让它静默被忽略更好。
 export async function updatePerceptionConfig(
   input: Partial<Omit<PerceptionConfig, "smart_crop_available">>,

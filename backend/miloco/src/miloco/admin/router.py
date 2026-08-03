@@ -1020,7 +1020,7 @@ class PerceptionConfigBody(BaseModel):
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
-    # 写进 perception.engine.crop_enhance.user_enabled;ops 灰度闸 enabled 不由 API 写。
+    # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
     smart_crop_enabled: bool | None = None
 
 
@@ -1039,9 +1039,10 @@ def _perception_config_payload() -> dict:
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
-        # 双闸分开暴露:enabled 用户态(开关位置)vs available(决定开关能不能点)。
+        # 双闸分开暴露:smart_crop_enabled = 用户态(开关位置,取 user_enabled)vs
+        # smart_crop_available = 决定开关能不能点(取发版级开关 enabled)。
         # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但后端不裁"。
-        # 注意 available 不只反映 ops 闸:整份 crop_enhance 校验不过(数值字段写成字符串 /
+        # 注意 available 不只反映发版级开关:整份 crop_enhance 校验不过(数值字段写成字符串 /
         # min>max)时运行时整份退默认,这里跟着报 false —— 此时那句提示归因是偏的,真因看
         # 日志 event=crop_enhance_config_bad 的 reason。
         "smart_crop_enabled": ce.user_enabled,

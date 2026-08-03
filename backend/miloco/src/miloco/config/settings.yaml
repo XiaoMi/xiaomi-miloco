@@ -90,8 +90,11 @@ perception:
     # 与 video_short_edge 正交 —— 裁不裁看这里, 多清晰看 video_short_edge; crop 视频/参考帧的
     # 短边按用户档等比跟随(512 档→360, 见 crop_short_edge)。热读、免重启。
     crop_enhance:
-      # 双闸:enabled = ops 灰度闸(压死整个能力,前端开关随之置灰);
-      #       user_enabled = 用户开关(UI「智能裁切增强」,admin API 可写)。两个都为 true 才裁。
+      # 双闸:enabled = 发版级开关(本文件随包发布、不由 admin API 写,只能改文件;false 时
+      #       整个能力关掉、前端开关随之置灰);
+      #       user_enabled = 单机用户开关(UI「智能裁切增强」,admin API 写 config.json)。
+      #       两个都为 true 才裁。分两个 key 不是访问控制(本地部署拦不住),是配置层不同,
+      #       见 perception/engine/config.py::CropEnhanceConfig 的 docstring。
       # 两闸默认放开:未改过 config.json / 未动 UI 开关的用户默认启用 Smart Crop。
       # 关闭任一闸即回退全景路径(不再裁切),但**不等于**字节回到未接本特性前 —— 全景与 crop
       # 共用 _encode_video_mp4,其放大分支的重采样核已随本特性换成 LANCZOS4(源短边 < 用户档
