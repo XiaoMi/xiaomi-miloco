@@ -1506,3 +1506,26 @@ async def test_property_read_error_never_breaks_the_window(monkeypatch):
     )
     assert res is not None and res.caption
     assert client.calls[0]["osd_watermark"] is False
+
+
+@pytest.mark.asyncio
+async def test_on_demand_also_attaches_the_clip(monkeypatch):
+    """主动查询也要留下它看过的那段画面。
+
+    **云端通路是留的**(omni 在 prompt_builder 里 push)。本地不留的话,日志页上
+    这条主动查询只剩一句文字、没有可回看的素材 —— 而主动查询恰恰是最需要回看的
+    那一类("刚才门口是不是有人"),答案存疑时没有素材可核。这个差异不在能力
+    声明里、也不会报错。
+    """
+    import miloco.perception.local_vision.engine as eng
+
+    monkeypatch.setattr(eng, "encode_snapshot_to_h264", lambda *a, **k: b"CLIPBYTES")
+    pushed = []
+    monkeypatch.setattr(eng, "push_clip_bytes", lambda b, ext: pushed.append((b, ext)))
+    client = _FakeClient([{"caption": "门是关着的", "rule_hits": [], "gate_p": None,
+                           "backend": "codec"}])
+    out = await _engine(client).on_demand_perceive(
+        BatchedSnapshot(snapshots=[_snapshot("cam1")]), "门关了吗?"
+    )
+    assert out is not None
+    assert pushed == [(b"CLIPBYTES", "mp4")], "主动查询没把素材挂上去"

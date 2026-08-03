@@ -128,7 +128,27 @@ def test_get_reports_unreachable_without_leaking_probe_detail(client, health):
 def test_get_carries_cloud_hint_when_cloud_path_is_not_ready(client, health):
     """没配 Key 时,切回云端不会被拒绝,但必须提前说明它同样起不来。"""
     d = client.get("/api/admin/perception-backend?probe=1").json()["data"]
-    assert "API Key" in d["cloud_hint"]
+    assert d["cloud_hint"]["code"] == "cloud_no_api_key"
+
+
+def test_cloud_hint_is_structured_not_a_chinese_sentence(client, health):
+    """提示必须带 code,不能只有一句中文。
+
+    前端直出后端文案会让英文界面上冒出中文 —— 这条规矩本卡片早就立过
+    (``PB_CODE_KEY`` 的注释),切换失败那条路径已按 code 查表,``cloud_hint``
+    当时漏掉了。``message`` 保留是给日志和不认识该 code 的客户端兜底的。
+    """
+    hint = client.get("/api/admin/perception-backend?probe=1").json()["data"]["cloud_hint"]
+    assert set(hint) >= {"code", "message"}
+    assert hint["code"].isascii(), "code 是给前端查表的键,不能是中文"
+
+
+def test_cloud_hint_is_null_when_the_cloud_path_is_fine(client, health, monkeypatch):
+    """就绪时不给提示 —— 空 dict 和 None 在前端是两种渲染,必须是 None。"""
+    import miloco.admin.router as r
+
+    monkeypatch.setattr(r, "_cloud_readiness_hint", lambda: None)
+    assert client.get("/api/admin/perception-backend").json()["data"]["cloud_hint"] is None
 
 
 # ── POST:切到 local 的各道闸 ──────────────────────────────────────────────
@@ -304,6 +324,8 @@ def test_default_get_is_a_pure_config_read(client, health):
     assert d["backend"] == "cloud"
     assert d["health"] is None and d["error"] is None
     assert d["blocking_static_rules"] == []
-    assert d["cloud_hint"] == ""
+    # 纯读不算就绪度(那要读 API Key、扫模型目录)——给 None 而不是空 dict:
+    # 前端对 null 与 {} 是两种渲染。
+    assert d["cloud_hint"] is None
     # 能力声明是静态的,纯读也要给全(卡片靠它渲染那几行"会失去什么")。
     assert d["local_capabilities"]["static_rule_execution"] is False

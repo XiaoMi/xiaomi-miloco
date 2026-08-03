@@ -1147,8 +1147,19 @@ def _validated_base_url(url: str) -> str:
     return normalized
 
 
-def _cloud_readiness_hint() -> str:
-    """云端通路当前是否具备工作条件;具备则空串。"""
+def _cloud_readiness_hint() -> dict | None:
+    """云端通路当前是否具备工作条件;具备则 None。
+
+    返回 ``{"code": ..., "message": ...}`` 而不是一句中文。**这是同一个卡片里
+    已经立过的规矩**:``PerceptionBackendCard.tsx`` 的 ``PB_CODE_KEY`` 注释写着
+    「backend message 是硬编码中文,直接注入会污染英文界面」,切换错误那条路径
+    早已改成 code + 前端查表。``cloud_hint`` 当时漏掉了,前端 ``{state.cloud_hint}``
+    直出后端中文 —— 英文界面上会突然冒出一句中文。
+
+    ``message`` 保留是给日志与不认识该 code 的第三方客户端兜底的,前端认识 code
+    时不应使用它。``models_missing`` 的 message 含验证器给出的具体缺失项,前端把
+    它作为 detail 拼在本地化文案之后。
+    """
     from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
     from miloco.perception.engine.resource_validator import (
         EngineReadiness,
@@ -1163,12 +1174,19 @@ def _cloud_readiness_hint() -> str:
         ) or str(s.directories.models_dir)
         v = validate_resources(resolve_omni_api_key(omni.get("api_key", "")), models_dir)
         if v.status == EngineReadiness.NOT_CONFIGURED:
-            return "云端通路当前未配置多模态大模型 API Key,切过去后感知不会立即恢复。"
+            return {
+                "code": "cloud_no_api_key",
+                "message": "云端通路当前未配置多模态大模型 API Key,切过去后感知不会立即恢复。",
+            }
         if v.status == EngineReadiness.MODELS_MISSING:
-            return f"云端通路的本地模型尚未就绪:{v.message}"
+            return {
+                "code": "cloud_models_missing",
+                "message": f"云端通路的本地模型尚未就绪:{v.message}",
+                "detail": v.message,
+            }
     except Exception as e:  # noqa: BLE001 —— 只是提示,算不出来就不提示
         logger.warning("云端就绪度提示计算失败: %s", e)
-    return ""
+    return None
 
 
 def _local_capabilities() -> dict:
@@ -1209,7 +1227,7 @@ def _local_vision_payload(*, probe: bool = True) -> dict:
             "local_vision": {"base_url": cfg.base_url, "has_token": bool(cfg.token)},
             "health": None,
             "error": None,
-            "cloud_hint": "",
+            "cloud_hint": None,
             "blocking_static_rules": [],
             "local_capabilities": _local_capabilities(),
         }

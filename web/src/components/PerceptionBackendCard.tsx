@@ -14,13 +14,41 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getPerceptionBackend, setPerceptionBackend } from "@/api";
-import { buildSwitchPayload, healthLine, isReachable } from "@/lib/perceptionBackend";
+import {
+  buildSwitchPayload,
+  healthLine,
+  isReachable,
+} from "@/lib/perceptionBackend";
 import type { PerceptionBackendState } from "@/lib/types";
 import { toast } from "./Toast";
 
 /** 后端切换完成事件。同页的「模型配置」表要据此刷新它的"云端模型是否在被调用"
  *  提示 —— 两块卡挨着显示,不联动的话切完会一个说本地生效、另一个说云端生效。 */
 export const PERCEPTION_BACKEND_CHANGED = "miloco:perception-backend-changed";
+
+/** 云端就绪度提示 → 本地化文案。
+ *
+ *  与下面的 PB_CODE_KEY 同一条规矩:后端那句是硬编码中文,直出会污染英文界面。
+ *  切换失败那条路径早就改成了 code + 前端查表(见 PB_CODE_KEY),cloud_hint 当时
+ *  漏掉了 —— 这里补上。
+ *
+ *  认不出的 code 回落到后端的 message:契约对第三方/更新的后端开放,前端不认识
+ *  的新 code 也不该让提示整个消失。 */
+export function cloudHintText(
+  hint: PerceptionBackendState["cloud_hint"],
+  t: (k: string) => string,
+): string {
+  if (!hint) return "";
+  const key = CLOUD_HINT_KEY[hint.code];
+  if (!key) return hint.message ?? "";
+  // models_missing 的具体缺失项只有后端知道,拼在本地化文案之后。
+  return hint.detail ? `${t(key)}:${hint.detail}` : t(key);
+}
+
+const CLOUD_HINT_KEY: Record<string, string> = {
+  cloud_no_api_key: "perceptionBackend.codes.cloud_no_api_key",
+  cloud_models_missing: "perceptionBackend.codes.cloud_models_missing",
+};
 
 /** 后端错误码 → 本地化文案。与 UsageOmniConfig 的 OMNI_CODE_KEY 同构:backend
  *  message 是硬编码中文,直接注入会污染英文界面。 */
@@ -87,7 +115,10 @@ export function PerceptionBackendCard() {
       const detail = (e as { message?: string } | null)?.message;
       toast(
         key
-          ? [t(key), code === "load_failed" || code === "blocking_rules" ? detail : ""]
+          ? [
+              t(key),
+              code === "load_failed" || code === "blocking_rules" ? detail : "",
+            ]
               .filter(Boolean)
               .join(":")
           : (detail ?? t("perceptionBackend.switchFailed")),
@@ -108,7 +139,9 @@ export function PerceptionBackendCard() {
   if (!state) {
     return (
       <section className="rounded-xl bg-bg-secondary border border-border shadow-sm p-5 md:p-6">
-        <div className="text-text-secondary text-center py-4">{t("usage.loading")}</div>
+        <div className="text-text-secondary text-center py-4">
+          {t("usage.loading")}
+        </div>
       </section>
     );
   }
@@ -158,7 +191,9 @@ export function PerceptionBackendCard() {
           {/* 缺 Key / 模型没下完时切回云端同样起不来。不拒绝(云端是退路,挡住
               就把用户关在坏掉的后端里),但必须让它成为知情的选择。 */}
           {isLocal && state.cloud_hint && (
-            <p className="text-caption text-warning mt-2">{state.cloud_hint}</p>
+            <p className="text-caption text-warning mt-2">
+              {cloudHintText(state.cloud_hint, t)}
+            </p>
           )}
         </button>
 
@@ -183,8 +218,12 @@ export function PerceptionBackendCard() {
                 {t("usage.activeTag")}
               </span>
             ) : (
-              <span className={`text-caption ${reachable ? "text-success" : "text-text-tertiary"}`}>
-                {reachable ? t("perceptionBackend.reachable") : t("perceptionBackend.unreachable")}
+              <span
+                className={`text-caption ${reachable ? "text-success" : "text-text-tertiary"}`}
+              >
+                {reachable
+                  ? t("perceptionBackend.reachable")
+                  : t("perceptionBackend.unreachable")}
               </span>
             )}
           </div>
@@ -232,16 +271,22 @@ export function PerceptionBackendCard() {
         </label>
         <div className="text-caption md:col-span-2">
           {line.kind === "unreachable" ? (
-            <span className="text-error">✗ {t("perceptionBackend.unreachable")}</span>
+            <span className="text-error">
+              ✗ {t("perceptionBackend.unreachable")}
+            </span>
           ) : line.kind === "auth-rejected" ? (
-            <span className="text-error">✗ {t("perceptionBackend.authBad")}</span>
+            <span className="text-error">
+              ✗ {t("perceptionBackend.authBad")}
+            </span>
           ) : line.kind === "load-failed" ? (
             <span className="text-error">
               ✗ {t("perceptionBackend.codes.load_failed")}
               <span className="num"> {line.detail}</span>
             </span>
           ) : line.kind === "loading" ? (
-            <span className="text-text-secondary">{t("perceptionBackend.loadingModel")}</span>
+            <span className="text-text-secondary">
+              {t("perceptionBackend.loadingModel")}
+            </span>
           ) : line.kind === "ok" ? (
             <span className="text-success num">
               ✓ {line.device} · {line.backend}
@@ -260,13 +305,19 @@ export function PerceptionBackendCard() {
         {!state.local_capabilities.needs_api_key && (
           <li>• {t("perceptionBackend.capNoKey")}</li>
         )}
-        {!state.local_capabilities.audio && <li>• {t("perceptionBackend.capNoAudio")}</li>}
-        {!state.local_capabilities.identity && <li>• {t("perceptionBackend.capNoIdentity")}</li>}
+        {!state.local_capabilities.audio && (
+          <li>• {t("perceptionBackend.capNoAudio")}</li>
+        )}
+        {!state.local_capabilities.identity && (
+          <li>• {t("perceptionBackend.capNoIdentity")}</li>
+        )}
         {!state.local_capabilities.suggestions && (
           <li>• {t("perceptionBackend.capNoSuggestions")}</li>
         )}
         {!state.local_capabilities.static_rule_execution && (
-          <li className="text-warning">• {t("perceptionBackend.capNoStatic")}</li>
+          <li className="text-warning">
+            • {t("perceptionBackend.capNoStatic")}
+          </li>
         )}
       </ul>
 
@@ -278,24 +329,50 @@ export function PerceptionBackendCard() {
           {t("perceptionBackend.inputTitle")}
         </div>
         <p className="text-caption text-text-secondary mt-1">
-          {t(isLocal
-            ? "perceptionBackend.inputWhyLocal"
-            : "perceptionBackend.inputWhyCloud")}
+          {t(
+            isLocal
+              ? "perceptionBackend.inputWhyLocal"
+              : "perceptionBackend.inputWhyCloud",
+          )}
         </p>
         <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-4">
           {(isLocal
             ? ([
-                ["window_size", "windowLabel", "windowHintLocal", "unitSec", 1, 60],
+                [
+                  "window_size",
+                  "windowLabel",
+                  "windowHintLocal",
+                  "unitSec",
+                  1,
+                  60,
+                ],
                 ["container_fps", "fpsLabel", "fpsHint", "unitFps", 1, 120],
-                ["codec_target_canvas", "canvasLabel", "canvasHint", "unitCanvas", 4, 64],
-                ["video_short_edge", "shortEdgeLabel", "shortEdgeHintLocal", "unitPx", 64, 2160],
+                [
+                  "codec_target_canvas",
+                  "canvasLabel",
+                  "canvasHint",
+                  "unitCanvas",
+                  4,
+                  64,
+                ],
+                [
+                  "video_short_edge",
+                  "shortEdgeLabel",
+                  "shortEdgeHintLocal",
+                  "unitPx",
+                  64,
+                  2160,
+                ],
               ] as const)
             : ([] as const)
           ).map(([field, label, hint, unit, min, max]) => (
             <label key={field} className="block">
               <span className="text-caption text-text-secondary mb-1 block">
                 {t(`perceptionBackend.${label}`)}
-                <span className="text-text-tertiary"> ({t(`perceptionBackend.${unit}`)})</span>
+                <span className="text-text-tertiary">
+                  {" "}
+                  ({t(`perceptionBackend.${unit}`)})
+                </span>
               </span>
               <input
                 type="number"
@@ -321,15 +398,20 @@ export function PerceptionBackendCard() {
           {/* 云端那组只读展示 —— 它归设置页管,这里只是让人看清两边不是一套值。 */}
           {!isLocal && (
             <>
-              {([
-                ["window_size", "windowLabel", "unitSec"],
-                ["omni_fps", "omniFpsLabel", "unitFps"],
-                ["video_short_edge", "shortEdgeLabel", "unitPx"],
-              ] as const).map(([field, label, unit]) => (
+              {(
+                [
+                  ["window_size", "windowLabel", "unitSec"],
+                  ["omni_fps", "omniFpsLabel", "unitFps"],
+                  ["video_short_edge", "shortEdgeLabel", "unitPx"],
+                ] as const
+              ).map(([field, label, unit]) => (
                 <div key={field}>
                   <span className="text-caption text-text-secondary mb-1 block">
                     {t(`perceptionBackend.${label}`)}
-                    <span className="text-text-tertiary"> ({t(`perceptionBackend.${unit}`)})</span>
+                    <span className="text-text-tertiary">
+                      {" "}
+                      ({t(`perceptionBackend.${unit}`)})
+                    </span>
                   </span>
                   <div className="text-body text-text-primary num">
                     {state.local_vision.cloud[field]}
@@ -348,7 +430,12 @@ export function PerceptionBackendCard() {
       {isLocal && state.blocking_static_rules.length > 0 && (
         <div className="mt-3 text-caption text-warning bg-warning-bg rounded-lg px-3 py-2">
           {t("perceptionBackend.blockingRulesLocal")}
-          <span className="num"> {state.blocking_static_rules.join("、")}</span>
+          <span className="num">
+            {" "}
+            {state.blocking_static_rules.join(
+              t("perceptionBackend.listSeparator"),
+            )}
+          </span>
         </div>
       )}
     </section>

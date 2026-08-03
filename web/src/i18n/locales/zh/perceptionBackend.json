@@ -32,7 +32,9 @@
       "loading": "边车正在加载模型,稍后再试",
       "load_failed": "边车加载模型失败",
       "blocking_rules": "有启用中的规则会在感知层直接控制设备,请先停用",
-      "bad_url": "服务地址格式不正确"
+      "bad_url": "服务地址格式不正确",
+      "cloud_no_api_key": "云端通路当前未配置多模态大模型 API Key,切过去后感知不会立即恢复。",
+      "cloud_models_missing": "云端通路的本地模型尚未就绪"
     },
     "inputTitle": "输入参数",
     "inputWhy": "与云端反着调:云端每多一帧、每多一个像素都要付 token 钱;本通路的成本由下面的「token 预算」封顶,帧数几乎免费。所以这里该给高帧率、中等分辨率。",
@@ -53,6 +55,7 @@
     "unitSec": "秒",
     "unitFps": "fps",
     "unitPx": "px",
-    "unitCanvas": "张"
+    "unitCanvas": "张",
+    "listSeparator": "、"
   }
 }

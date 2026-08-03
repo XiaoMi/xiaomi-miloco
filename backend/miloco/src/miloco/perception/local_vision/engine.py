@@ -684,6 +684,19 @@ class LocalVisionEngine(BasePerceptionEngine):
                     snapshot, self._container_fps, self._crf,
                     self._max_frames, self._resolve_short_edge(),
                 )
+                # 主动查询也要留下它看过的那段画面。**云端通路是留的**(omni 在
+                # prompt_builder 里 push),不留会让本地通路的主动查询在日志页上
+                # 只剩一句文字、没有可回看的素材 —— 而主动查询恰恰是最需要回看的
+                # 那一类("刚才门口是不是有人"),答案存疑时没有素材可核。
+                # 这个差异不在能力声明里、也不会报错,只是悄悄少了东西。
+                token = set_device_context(
+                    DeviceContext(device_trace_id="", device_id=snapshot.device.did,
+                                  room_name=snapshot.room_name or "")
+                )
+                try:
+                    push_clip_bytes(video, "mp4")
+                finally:
+                    reset_device_context(token)
                 out = await self._client.perceive(
                     video, rules=[], scene_ask=query,
                     max_new_tokens=self._max_new_tokens, want_gate=False,

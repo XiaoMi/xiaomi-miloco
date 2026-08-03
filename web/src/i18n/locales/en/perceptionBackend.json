@@ -32,7 +32,9 @@
       "loading": "The sidecar is still loading its model; try again shortly",
       "load_failed": "The sidecar failed to load its model",
       "blocking_rules": "Enabled rules drive devices directly; disable them first",
-      "bad_url": "That service URL is not valid"
+      "bad_url": "That service URL is not valid",
+      "cloud_no_api_key": "The cloud path has no multimodal API key configured; switching to it will not restore perception.",
+      "cloud_models_missing": "The cloud path's local models are not ready"
     },
     "inputTitle": "Input settings",
     "inputWhy": "Tuned opposite to the cloud path: there every extra frame and pixel costs tokens, here cost is capped by the token budget below and frames are nearly free. So: high frame rate, moderate resolution.",
@@ -53,6 +55,7 @@
     "unitSec": "s",
     "unitFps": "fps",
     "unitPx": "px",
-    "unitCanvas": ""
+    "unitCanvas": "",
+    "listSeparator": ", "
   }
 }

@@ -349,9 +349,16 @@ export interface OmniHealth {
   /** 错误机器码;state=ok 时为 null。 */
   code:
     | null
-    | "unreachable" | "timeout" | "http_error" | "rate_limited"
-    | "bad_key" | "not_found" | "rejected_authed" | "bad_response"
-    | "no_key" | "cancelled";
+    | "unreachable"
+    | "timeout"
+    | "http_error"
+    | "rate_limited"
+    | "bad_key"
+    | "not_found"
+    | "rejected_authed"
+    | "bad_response"
+    | "no_key"
+    | "cancelled";
   /** 本地化文案。 */
   message: string;
   /** 当前非 ok 状态起始时间;ok 时为 0。 */
@@ -745,6 +752,8 @@ export interface PerceptionBackendState {
   /** 启用中、会在感知层直连设备的规则名 —— 切到本地会被拒绝,先在界面上预告。 */
   blocking_static_rules: string[];
   /** 云端通路当前不具备工作条件时的说明;具备则空串。切回云端永不拒绝,只提示。 */
-  cloud_hint: string;
+  /** 云端通路就绪度提示。**结构化而不是一句中文** —— 直出后端文案会污染英文界面
+   *  (同 PB_CODE_KEY 的理由)。前端按 code 查本地化文案,detail 拼在后面。 */
+  cloud_hint: { code: string; message?: string; detail?: string } | null;
   local_capabilities: LocalVisionCapabilities;
 }
