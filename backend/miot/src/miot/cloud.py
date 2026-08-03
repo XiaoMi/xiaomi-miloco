@@ -53,6 +53,30 @@ _LOGGER = logging.getLogger(__name__)
 
 TOKEN_EXPIRES_TS_RATIO = 0.7
 
+# ── datasource=2 的批量悬崖 ──────────────────────────────────────────────────
+#
+# ``datasource=2`` 是真正的设备侧读回,服务端有约 **4.2 秒**的截止时间,而且是
+# **全或无**:一次请求里的属性数超过该设备能在时限内答完的数量时,**整批**返回
+# ``-704220043``(码表里渲染成「属性值不正确」)且不带 ``updateTime`` —— 一台
+# 健康在线的设备会被整台报成"读不到"。
+#
+# 悬崖位置**因设备而异**、但对同一台设备是确定性的(重复扫边界结果一致):
+#
+#     空调    14 个 ok(369ms) → 15 个整批 -704220043(4374ms)
+#     净化器  16 个 ok(857ms) → 20 个整批 -704220043(4739ms)
+#     洗衣机  16 个 ok(368ms) → 20 个整批 -704220043(4179ms)
+#
+# 也就是说云端没有一个可以照抄的固定上限,只能取一个低于最慢设备的保守值。
+#
+# 取 8 —— 实测最低的那条悬崖(空调 15)的一半,给设备状态差时留余量。同一台空调
+# 42 个属性:一次问完 4198ms 后整批失败,按 8 分批则全部返回 ``code 0``
+# (实测 1.8~5.2s,视设备当时的响应速度)。分批比不分批**更快** —— 注定要失败的
+# 那次请求会把 4.2 秒的截止时间烧满。
+#
+# ``datasource=1`` 读的是云端缓存,不受此限(实测 15 个属性 61ms),所以**只有
+# 读真机这条路分批**;把批量拆细会白白拖慢面板那种全量冷查询。
+READ_THROUGH_MAX_PROPS_PER_REQ = 8
+
 
 class MIoTOAuth2Client:
     """OAuth2 agent url, default: product env."""
@@ -869,8 +893,33 @@ class MIoTHttpClient:
         timeout. 30 devices concurrently: 290ms at ``ds=2`` vs 356ms at ``ds=1``,
         no rate limiting hit.
 
+        ``ds=2`` is additionally sent in batches of
+        ``READ_THROUGH_MAX_PROPS_PER_REQ`` — see that constant for why. Results
+        are concatenated in request order, so callers can keep matching them up
+        positionally. ``ds=1`` is sent as a single request, unchanged.
+
         Default stays 1 so existing callers are unchanged.
         """
+        if datasource == 1 or len(params) <= READ_THROUGH_MAX_PROPS_PER_REQ:
+            return await self.__get_props_once_async(params, datasource)
+
+        # 顺序发,不并发。并发对同一台设备开 6 路读回既加重设备负担,也更容易撞上
+        # MiOT 约 10 QPS 的限频;而顺序分批本来就比"一次问完然后整批失败"更快。
+        #
+        # **一批失败不牵连其它批**:超时那批由云端自己回 -704220043,它是正常返回、
+        # 不抛异常,原样并进结果里 —— 不吞掉、也不改写(#394:只有云端真的返回过的
+        # 码才算失败)。传输层异常则照常上抛:那意味着"没读到",而这条路的全部意义
+        # 就是不让"没读到"打扮成一个读数;悄悄少几行比整体失败危险得多。
+        results: List = []
+        for i in range(0, len(params), READ_THROUGH_MAX_PROPS_PER_REQ):
+            chunk = params[i : i + READ_THROUGH_MAX_PROPS_PER_REQ]
+            results.extend(await self.__get_props_once_async(chunk, datasource))
+        return results
+
+    async def __get_props_once_async(
+        self, params: List[MIoTGetPropertyParam], datasource: int
+    ) -> List:
+        """One /miotspec/prop/get round trip. No batching, no retry."""
         res_obj = await self.__mihome_api_post_async(
             url_path="/app/v2/miotspec/prop/get",
             data={
