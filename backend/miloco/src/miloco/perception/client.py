@@ -375,9 +375,8 @@ class PerceptionEngineProxy:
         # 事件循环(相机取帧 / SSE / API 全停)。探活结果由 refresh_local_probe()
         # 在线程里刷新,这里只读缓存。缓存为空(进程刚起、tick 还没跑过)时做一次
         # 阻塞探活是可接受的——只发生在构造期。
-        if self._local_probe_key not in (None, (cfg.base_url, cfg.token)):
-            # 地址/凭证刚被改过,旧结论作废。
-            self._invalidate_local_probe()
+        # 地址/凭证刚被改过,旧结论作废。
+        self._drop_stale_local_conclusions(cfg)
         if self._local_probe is None and self._local_probe_error is None:
             if not self._allow_sync_probe:
                 # **不在这里探活**:本方法被 admin 切换处理器(经 stop_to_unconfigured)
@@ -430,6 +429,7 @@ class PerceptionEngineProxy:
 
         mon.set_lifecycle(NodeName.ENGINE, Lifecycle.STARTING)
         try:
+            identity = _build_local_identity(cfg)
             self.perception_engine = LocalVisionEngine(
                 client,
                 container_fps=cfg.container_fps,
@@ -440,7 +440,7 @@ class PerceptionEngineProxy:
                 max_frames=cfg.max_frames,
                 short_edge=cfg.video_short_edge,
                 codec_target_canvas=cfg.codec_target_canvas,
-                identity=_build_local_identity(cfg),
+                identity=identity,
             )
         except Exception as e:  # noqa: BLE001 —— 与云端分支对称
             # 不加这层的话构造异常会冒泡出去,留下 _status="ready" 而 engine=None
@@ -455,20 +455,50 @@ class PerceptionEngineProxy:
         self._status_message = ""
         # 显式告知能力边界。直连设备的规则不会走到这里(切换那一步就被拒了),
         # 但音频与身份这两项缺失是静默的,必须在日志里留一行。
+        #
+        # 身份那半句必须跟着**实际建出来的东西**走,不能写死。认人是可选项,四条
+        # 路都会退回 None(配置关着、库是空的、ONNX 模型缺失、构造抛异常),而
+        # 无条件写"无身份识别"的代价是双向的:认人开着时它谎报缺失,于是有人去查
+        # 一个不存在的故障;认人真的没建起来时这行字又和平时一模一样,反而看不出来。
         logger.warning(
-            "感知正在使用本地视觉通路(%s):纯视觉 —— 无音频结论、无身份识别、"
-            "不产主动建议;"
+            "感知正在使用本地视觉通路(%s):%s,无音频结论、不产主动建议;"
             "规则命中只作为观察结论上报;规则里配置的设备动作会被拒绝执行。",
             cfg.base_url,
+            (
+                f"已启用本地认人(库中 {identity.gallery_size} 人)"
+                if identity is not None
+                else "纯视觉,无身份识别"
+            ),
         )
         mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
 
     def _invalidate_local_probe(self) -> None:
-        """丢弃探活缓存与冷却。配置一变就调,让下一次探活立刻重来。"""
+        """丢弃探活缓存与冷却,让下一次探活立刻重来。"""
         self._local_probe = None
         self._local_probe_error = None
         self._local_probe_not_before = 0.0
         self._local_probe_key = None
+
+    def _drop_stale_local_conclusions(self, cfg) -> bool:
+        """地址/凭证变了就把**上一份配置挣来的**结论与节流阀全部作废。
+
+        返回配置是否真的变了(调用方据此决定要不要继续走冷却判断)。
+
+        两个冷却都是被上一份配置的失败挣来的证据:探活冷却来自"那个地址探不通",
+        重建冷却来自"那份配置的引擎推理一直失败"。用户把地址改对之后,这两份证据
+        对新配置都不成立,却还各自压着最多 30 / 60 秒 —— 表现为"我明明改对了,它
+        还是说连不上",而且没有任何提示说明还要再等。
+
+        **重建冷却只能在这里解开。** ``_init_local_engine`` 里那份一模一样的配置
+        检查位于冷却闸门(``_init_engine`` 开头)的**下游**:冷却期内那个分支直接
+        return,压根走不到检测配置那一行。这条路径(探活刷新)不在闸门后面,是唯一
+        够得着的地方。两处检查合并到这里,也是为了它们不会再各自漂移。
+        """
+        if self._local_probe_key in (None, (cfg.base_url, cfg.token)):
+            return False
+        self._invalidate_local_probe()
+        self._local_rebuild_not_before = 0.0
+        return True
 
     def _refresh_local_probe_sync(self, client, cfg) -> None:
         """真正打一次探活并写缓存。**阻塞**,只允许在线程里或构造期调用。"""
@@ -547,10 +577,10 @@ class PerceptionEngineProxy:
 
         cfg = settings.perception.local_vision
         # 冷却是绑在**那一份配置**上的。用户改了地址或凭证之后还压着上一份配置的
-        # 冷却不放,等于让一次已经修好的配置继续瞎等 30 秒。
-        if self._local_probe_key not in (None, (cfg.base_url, cfg.token)):
-            self._invalidate_local_probe()
-        elif time.monotonic() < self._local_probe_not_before:
+        # 冷却不放,等于让一次已经修好的配置继续瞎等。
+        if not self._drop_stale_local_conclusions(cfg) and (
+            time.monotonic() < self._local_probe_not_before
+        ):
             return
 
         client = LocalVisionClient(

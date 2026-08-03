@@ -7,6 +7,7 @@ regress 之后的表现都是同一个——感知安静地停摆,界面上看�
 
 from __future__ import annotations
 
+import logging
 import time
 from unittest.mock import patch
 
@@ -469,6 +470,75 @@ async def test_demotion_does_not_flap_when_health_is_green(local_cfg):
         await p.refresh_local_probe()
         p.try_reinit()
     assert p.perception_engine is not None, "冷却结束后应当能恢复"
+
+
+@pytest.mark.asyncio
+async def test_fixing_the_address_clears_the_rebuild_cooldown(local_cfg):
+    """把地址改对之后要立刻恢复,而不是再干等一轮重建冷却。
+
+    重建冷却是**上一份配置**挣来的证据("那份配置的引擎推理一直失败"),换了地址
+    之后它对新配置一点依据都没有。漏清的表现极难自查:用户改对了配置、探活也通过
+    了,界面却还写着"本地视觉服务持续不可用",最多 60 秒后自己好——中间没有任何
+    提示说明还要再等,大多数人会以为是自己改错了,回去又翻一遍配置。
+
+    另外注意这条只能从**探活**这条路验:``_init_local_engine`` 里那份同样的配置
+    检查位于冷却闸门的下游,冷却期内根本走不到,拿它测永远是绿的。
+    """
+    p = _build(local_cfg)
+    p.perception_engine._consecutive_failures = 99
+
+    with patch("miloco.perception.client.get_settings", return_value=local_cfg), \
+            patch("miloco.perception.local_vision.client.LocalVisionClient.health_sync",
+                  lambda self: dict(HEALTHY)):
+        await p.refresh_local_probe()                  # 推理持续失败 → 降级并上锁
+        assert p.perception_engine is None
+        assert p._local_rebuild_not_before > time.monotonic()
+
+        local_cfg.perception.local_vision.base_url = "http://fixed:18800"
+        await p.refresh_local_probe()                  # 下一个 tick 的线程化探活
+        assert p._local_rebuild_not_before == 0.0, "换了地址还压着上一份配置的重建冷却"
+        p.try_reinit()
+
+    assert p.perception_engine is not None, "地址改对之后应当立刻恢复,而不是再等冷却"
+    assert p._status == "ready"
+
+
+# ── 就绪日志必须说实话 ───────────────────────────────────────────────────────
+
+
+def _ready_line(caplog) -> str:
+    return next(r.getMessage() for r in caplog.records if "本地视觉通路" in r.getMessage())
+
+
+def test_ready_log_does_not_claim_identity_is_missing_when_it_is_on(local_cfg, caplog):
+    """认人开着时,日志不能还写"无身份识别"。
+
+    这行字是运维排查本地通路的第一落点。写死的话是双向撒谎:认人明明在跑却报缺失,
+    于是有人去查一个不存在的故障;而认人真的没建起来时,这行字和平时一模一样,真正
+    的缺失反倒看不出来——两种情况下它都在帮倒忙。
+    """
+
+    class _Resolver:
+        gallery_size = 3
+
+    with caplog.at_level(logging.WARNING, logger="miloco.perception.client"), \
+            patch("miloco.perception.client._build_local_identity", return_value=_Resolver()):
+        p = _build(local_cfg)
+
+    assert p._status == "ready"
+    line = _ready_line(caplog)
+    assert "无身份识别" not in line, f"认人开着却报缺失: {line}"
+    assert "库中 3 人" in line, f"没说清认得几个人: {line}"
+
+
+def test_ready_log_still_says_no_identity_when_it_really_is_off(local_cfg, caplog):
+    """反过来也要成立——否则上一条测试用一句话恒真就能骗过去。"""
+    with caplog.at_level(logging.WARNING, logger="miloco.perception.client"), \
+            patch("miloco.perception.client._build_local_identity", return_value=None):
+        p = _build(local_cfg)
+
+    assert p._status == "ready"
+    assert "无身份识别" in _ready_line(caplog)
 
 
 @pytest.mark.asyncio

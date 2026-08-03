@@ -37,11 +37,9 @@
       "cloud_models_missing": "云端通路的本地模型尚未就绪"
     },
     "inputTitle": "输入参数",
-    "inputWhy": "与云端反着调:云端每多一帧、每多一个像素都要付 token 钱;本通路的成本由下面的「token 预算」封顶,帧数几乎免费。所以这里该给高帧率、中等分辨率。",
     "fpsLabel": "帧率",
     "fpsHint": "与相机实际出帧率一致即可(实测约 20fps)",
     "shortEdgeLabel": "分辨率(短边)",
-    "shortEdgeHint": "官方:超过 384 像素只有边际收益;调高只会让每个画布更贵",
     "canvasLabel": "token 预算(画布数)",
     "canvasHint": "官方三档 8 优先延迟 / 16 均衡 / 32 最大;需 8×该值 帧才能喂饱",
     "inputSaved": "已保存,下个感知周期生效",
