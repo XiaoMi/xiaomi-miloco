@@ -618,7 +618,7 @@ async def put_omni_config(
     label = body.label.strip()
     if not label:
         raise HTTPException(status_code=400, detail="档案名不能为空")
-    base_url = body.base_url.strip()
+    base_url = _normalized_provider_url(body.base_url)
     model = body.model.strip()
     orig = (body.original_label or "").strip()
     profiles = _profiles_as_dicts()

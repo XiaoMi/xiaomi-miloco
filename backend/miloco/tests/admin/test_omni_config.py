@@ -1164,6 +1164,24 @@ def test_test_connection_ok_normalizes_base_url_trailing_slash(client):
     assert get_omni_circuit_breaker().snapshot().state == "ok"
 
 
+def test_put_normalizes_base_url_trailing_slashes(client):
+    response = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "image-model",
+            "model": "vision-model",
+            "base_url": "https://x/v1///",
+            "api_key": "sk-active",
+            "visual_mode": "frames",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["active"]["base_url"] == "https://x/v1"
+    assert data["profiles"][0]["base_url"] == "https://x/v1"
+
+
 def test_test_connection_ok_not_matching_active_leaves_breaker(client):
     """测通但三元组 ≠ 当前 active(测的是另一档案 / 未保存的新配置) → 熔断状态不变,
     防止「测别的档案通了」把 active 的熔断误清。"""

@@ -135,6 +135,12 @@ class TestOpenAICompatProtocol:
         assert self.adapter.endpoint("https://x/v1", "m", stream=False) == "https://x/v1/chat/completions"
         assert self.adapter.endpoint("https://x/v1", "m", stream=True) == "https://x/v1/chat/completions"
 
+    def test_endpoint_normalizes_trailing_slashes(self):
+        assert (
+            self.adapter.endpoint("https://x/v1///", "m", stream=True)
+            == "https://x/v1/chat/completions"
+        )
+
     def test_auth_headers_bearer(self):
         assert self.adapter.auth_headers("KEY") == {"Authorization": "Bearer KEY"}
 
@@ -173,6 +179,14 @@ class TestGeminiAdapter:
         assert (
             self.adapter.endpoint("https://g/v1beta", "gemini-3-flash", stream=True)
             == "https://g/v1beta/models/gemini-3-flash:streamGenerateContent?alt=sse"
+        )
+
+    def test_endpoint_normalizes_trailing_slashes(self):
+        assert (
+            self.adapter.endpoint(
+                "https://g/v1beta///", "gemini-3-flash", stream=False
+            )
+            == "https://g/v1beta/models/gemini-3-flash:generateContent"
         )
 
     def test_auth_headers_goog_key(self):
