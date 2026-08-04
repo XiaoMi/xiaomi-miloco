@@ -266,11 +266,12 @@ def _deploy_tz() -> Any:
 
     与 CLI ``habit_store.py`` 的写侧权威对齐：naive ISO 按部署时区解读，而非进程本地
     时区——部署时区配置在 ``$MILOCO_HOME/config.json``（``server.timezone`` 或顶层
-    ``timezone``），与 backend / CLI 的同一落盘来源。IANA 名（如 ``Asia/Shanghai``）
-    用 ``ZoneInfo`` 解析；无法解析的缩写 / 空串返回 ``None``，调用方按本地时区兜底。
+    ``timezone``），与 backend / CLI 的同一落盘来源。IANA 名（含 ``UTC``）统一用
+    ``ZoneInfo`` 解析，与 CLI ``deploy_timezone()`` 对显式 UTC 配置返回 ``ZoneInfo("UTC")``
+    完全一致；仅空串 / 无法解析的缩写返回 ``None``，调用方按本地时区兜底。
     """
     name = _deploy_timezone().strip()
-    if not name or name == "UTC":
+    if not name:
         return None
     try:
         return ZoneInfo(name)
