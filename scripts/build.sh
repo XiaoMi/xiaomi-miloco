@@ -326,9 +326,20 @@ pack_models() {
     if ! python3 "$PROJECT_ROOT/scripts/fetch_models.py" --strict; then
         # 硬失败而非跳过：空跳只会让下游 pack_platform_bundles 一起空跳、
         # install.py 收到"缺模型" fail，排查链路变长。直接在源头中止。
-        log "FATAL: 模型未就绪（$models_dir）"
+        log "FATAL: 模型未就绪（${models_dir}）"
         exit 1
     fi
+
+    # 上面的 --strict 已保证文件齐全，这里再点一次数：nullglob 下 glob 无匹配会展开为
+    # 空，否则 bash 把字面量 ./*.onnx 交给 tar，报的是 "Cannot stat: ./*.onnx" —— set -e
+    # 一样会中止构建，但排查的人得先反应过来那是没展开的 glob 而不是真有这么个文件。
+    local model_files
+    shopt -s nullglob
+    model_files=("$models_dir"/*.onnx "$models_dir"/*.json)
+    shopt -u nullglob
+    # ${} 不能省：macOS 自带 bash 3.2 会把紧跟变量的全角「）」首字节当成变量名的一部分，
+    # set -u 下报的是 "models_dir?: unbound variable"，比原本要说的话更难懂。
+    ((${#model_files[@]})) || die 1 "模型目录为空（${models_dir}），fetch_models.py --strict 本该已拦截"
 
     local tar_name="miloco-models-${RESOLVED_PEP}.tar.gz"
     log "打包模型: $tar_name ..."
