@@ -1570,6 +1570,17 @@ class TestAdaptiveResolution:
             "",
         )
 
+    def _fixed_region(self, region, reason: str = "ok"):
+        """钉住 crop 区域,便于硬编码 remap 期望值。
+
+        patch 的是 ``compute_crop_region_detail``(区域 + 拒因),不是薄封装
+        ``compute_crop_region`` —— 被测路径只调前者,patch 后者不会生效(测试静默失效)。
+        """
+        return patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region_detail",
+            return_value=(region, reason),
+        )
+
     def test_on_adds_ref_before_video(self):
         p1, p2 = self._patches()
         with p1, p2:
@@ -1617,13 +1628,106 @@ class TestAdaptiveResolution:
         )
         assert img_idxs[-1] == guide_idx + 1  # 引导语紧跟的那张,就是 video 前最后一张
 
-    def test_skipped_when_candidates_present(self):
+    def test_crops_with_candidates_when_bbox_remaps(self):
+        """有待识别候选时照样裁,候选行 bbox 换算进 crop 坐标系(与名册同一套换算)。
+
+        v1 的身份门(有候选就整窗不裁)已去掉:候选侧真正的要求是**锚点不丢**,而不是不裁 ——
+        换算成功时锚点仍在,同时吃到裁切的分辨率收益。此前恰恰是「新面孔待识别」这类窗口
+        (每窗都派候选)被身份门全部挡掉,而它们最需要放大。
+        """
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        cand = IdentityQueryItem(track_id=1, bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        p1, p2 = self._patches()
+        with p1, p2, self._fixed_region((50, 50, 350, 350)):
+            content = self._content(candidates=[cand])
+        assert self._has_ref(content)  # 确实裁了
+        roster = self._roster_text(content)
+        assert "bbox=(166, 166, 433, 566)" in roster  # 换算后的 crop 坐标
+        assert "bbox=(156, 208, 281, 458)" not in roster  # 全景原坐标不得残留
+
+    def test_candidate_bbox_outside_region_falls_back_whole_window(self):
+        """候选 bbox 换算不出来 → **整窗**回退全景(all-or-nothing)。
+
+        与名册 bbox 的处置有意不同:名册 bbox 是先验,撤掉退化成"只给姓名不给位置"仍正确;
+        候选 bbox 是模型把 track_id 对到画面里某个人的**唯一定位锚**,撤掉后多 track 场景
+        只能凭猜分配姓名 —— 错认代价比分辨率收益高一个量级。故不允许"裁了但候选无锚"的
+        中间态,宁可整窗不裁。
+        """
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        cand = IdentityQueryItem(track_id=1, bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        p1, p2 = self._patches()
+        # 区域与候选 bbox 的像素范围(x 100-180, y 100-220)无交集
+        with p1, p2, self._fixed_region((400, 300, 640, 480)):
+            content = self._content(candidates=[cand])
+        assert not self._has_ref(content)  # 整窗回退全景,不是"裁了但撤 bbox"
+        # 回退后视频即全景,坐标原样保留 —— 锚点没丢
+        assert "bbox=(156, 208, 281, 458)" in self._roster_text(content)
+
+    def test_one_unmappable_candidate_vetoes_the_window(self):
+        # 部分候选换算失败也整窗回退:留一个无锚候选正是 all-or-nothing 要防的中间态
+        # (模型看到 A 有坐标、B 没有,只能把 B 分配给"剩下那个人")。
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        ok = IdentityQueryItem(track_id=1, bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        # 像素 x 576-633 / y 432-475,落在 region 外
+        bad = IdentityQueryItem(track_id=2, bbox_xyxy_norm=(900, 900, 990, 990))
+        p1, p2 = self._patches()
+        with p1, p2, self._fixed_region((50, 50, 350, 350)):
+            content = self._content(candidates=[ok, bad])
+        assert not self._has_ref(content)
+
+    def test_candidate_without_bbox_does_not_block_crop(self):
+        # bbox 为 None 的候选在全景路径下本就没有锚点(coasting 已被上游剔除,剩下的是归一化
+        # 失败等边缘情形),裁切不会让它更差 → 不参与 all-or-nothing 判定。
         from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
 
         p1, p2 = self._patches()
-        with p1, p2:
+        with p1, p2, self._fixed_region((50, 50, 350, 350)):
             content = self._content(candidates=[IdentityQueryItem(track_id=1)])
-        assert not self._has_ref(content)  # 有身份候选 → 不 crop(bbox 锚定全景)
+        assert self._has_ref(content)
+
+    def test_veto_leaves_no_crop_artifacts(self):
+        """否决必须发生在编码/落盘**之前**:盘上不能留下模型没看过的 crop 产物。
+
+        region_ok 若挂在 _maybe_encode_adaptive 末尾(返回前),推理结果是对的(回退全景),
+        但 ref.jpg / crop_meta 已经写出去了 —— badcase 复盘时会拿着一张 crop 参考图去解释
+        一次全景推理,是纯误导。
+        """
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        cand = IdentityQueryItem(track_id=1, bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        p1, p2 = self._patches()
+        with p1, p2, self._fixed_region((400, 300, 640, 480)), patch(
+            "miloco.perception.snapshot_context.push_ref_frame"
+        ) as push_ref, patch(
+            "miloco.perception.snapshot_context.push_crop_meta"
+        ) as push_meta:
+            content = self._content(candidates=[cand])
+        assert not self._has_ref(content)
+        push_ref.assert_not_called()
+        push_meta.assert_not_called()
+
+    def test_multi_packet_with_candidates_falls_back(self):
+        """多 packet + 有候选 → 回退全景。
+
+        crop 区域只属于「首个有帧设备」,而候选来自哪个设备在 fused 这一层已无从区分:
+        套上另一台设备的区域就是跨设备错坐标。名册侧同款情形是撤 bbox 退纯名
+        (_build_device_header),候选侧按 all-or-nothing 整窗回退。当前 fused 恒单 packet,
+        这是防御。
+        """
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        cand = IdentityQueryItem(track_id=1, bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        p1, p2 = self._patches()
+        with p1, p2, self._fixed_region((50, 50, 350, 350)):
+            fused = build_fused_payload(
+                packets=[_adaptive_packet(), _adaptive_packet()],
+                context=OmniContext(), gallery_snapshot={}, candidates=[cand],
+            )
+        assert not self._has_ref(_multimodal_user_content(fused["messages"]))
 
     def test_off_when_user_switch_off(self):
         p1, p2 = self._patches(user_enabled=False)  # 发版级开关开、用户开关关
@@ -1660,17 +1764,12 @@ class TestAdaptiveResolution:
         # (方向性错误,会把姓名贴到 crop 中央那个人身上)。
         # 固定 region 以便硬编码期望值,避免"用被测代码算期望值"的同义反复;几何精度本身
         # 由 test_crop_enhance 的纯函数测试坐实,这里验的是 region/frame_size 的**接线**。
-        from unittest.mock import patch as _patch
-
         # region=(50,50,350,350) → 300x300;帧 640x480。
         # x: 156*640/1000=99.84 →(-50)/300*1000 → 166;281*640/1000=179.84 → 433
         # y: 208*480/1000=99.84 →(-50)/300*1000 → 166;458*480/1000=219.84 → 566
         member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
         p1, p2 = self._patches()
-        with p1, p2, _patch(
-            "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
-            return_value=(50, 50, 350, 350),
-        ):
+        with p1, p2, self._fixed_region((50, 50, 350, 350)):
             content = self._content(packet=member, candidates=[])
         assert self._has_ref(content)  # 确认本窗确实 crop 了
         roster = self._roster_text(content)
@@ -1687,14 +1786,10 @@ class TestAdaptiveResolution:
         # 框落在 crop 区域外(理论上不该发生:区域是这些框的并集;但 identity 侧有一条
         # boxes.get("human") 回退键不在 _MAIN_BOX_TYPES 里)→ 退化为纯名。
         # 宁可只给姓名不给位置,也不能输出与画面错配的坐标。
-        from unittest.mock import patch as _patch
-
         member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
         p1, p2 = self._patches()
-        with p1, p2, _patch(
-            "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
-            return_value=(400, 300, 640, 480),  # 与 bbox 像素范围(100-180, 100-220)无交集
-        ):
+        # 与 bbox 像素范围(100-180, 100-220)无交集
+        with p1, p2, self._fixed_region((400, 300, 640, 480)):
             content = self._content(packet=member, candidates=[])
         roster = self._roster_text(content)
         assert "已识别人物：p-alice" in roster
@@ -1739,14 +1834,9 @@ class TestAdaptiveResolution:
         # bbox 恒锚**视频最后一帧**:crop 时坐标已换算成 crop 坐标系,不 crop 时视频本就是
         # 全景 —— 两条路径同一句话。「最后一帧」必须写明:bbox 只标末帧位置而视频跨整个
         # 窗口,不说清模型会拿它去读中间帧(该模糊在接 Smart Crop 之前就存在)。
-        from unittest.mock import patch as _patch
-
         member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
         for user_enabled, region_patch in (
-            (True, _patch(
-                "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
-                return_value=(50, 50, 350, 350),
-            )),
+            (True, self._fixed_region((50, 50, 350, 350))),
             (False, contextlib.nullcontext()),
         ):
             p1, p2 = self._patches(user_enabled=user_enabled)
@@ -1772,10 +1862,13 @@ class TestAdaptiveResolution:
         # _format_track_line 渲染成 "bbox="(无方括号)扫不到,少了该项就会漏发。
         from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
 
-        # 有候选 → 身份门本就关掉 crop,故不需要 _patches。
-        content = self._content(
-            candidates=[IdentityQueryItem(track_id=1, bbox_xyxy_norm=(100, 200, 300, 400))]
-        )
+        # 显式关掉 crop:本条验的是说明句发不发,坐标要留在全景口径。身份门去掉后有候选
+        # 也可能裁切,不钉住开关的话这里的期望坐标会随 crop 区域换算而漂。
+        p1, p2 = self._patches(user_enabled=False)
+        with p1, p2:
+            content = self._content(
+                candidates=[IdentityQueryItem(track_id=1, bbox_xyxy_norm=(100, 200, 300, 400))]
+            )
         roster = self._roster_text(content)
         assert "已识别人物：无" in roster
         assert "[bbox=" not in roster  # 名册侧确实一个 bbox 都没有
@@ -1793,10 +1886,9 @@ class TestAdaptiveResolution:
 
         member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
         p1, p2 = self._patches()
-        with p1, p2, _patch(
-            "miloco.perception.engine.omni.crop_enhance.compute_crop_region",
-            return_value=(50, 50, 350, 350),
-        ), _patch.object(pb, "_jpeg_block", side_effect=ValueError("too small")):
+        with p1, p2, self._fixed_region((50, 50, 350, 350)), _patch.object(
+            pb, "_jpeg_block", side_effect=ValueError("too small")
+        ):
             content = self._content(packet=member, candidates=[])
         assert not self._has_ref(content)  # 引导语不能单独留下
         assert not any(

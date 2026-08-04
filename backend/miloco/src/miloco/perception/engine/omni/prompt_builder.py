@@ -278,28 +278,72 @@ def build_fused_payload(
             "candidate_track_ids": [],
         }
 
-    # 自适应分辨率(Smart Crop):仅当本窗口无身份候选时才 crop —— 有候选时 fused prompt 的
-    # bbox=[0,1000] 锚定全景做身份分配,换成 crop 视频会错位(方案 v1 身份门)。任何失败回退全景。
+    # 自适应分辨率(Smart Crop)。prompt 里所有 bbox 都按**全景整帧**归一化到 [0,1000],
+    # 裁切生效时一律经 bbox_remap 换算进 crop 坐标系;换算不出来时两侧处置不同:
+    #   - 名册 bbox(已定身份的成员/陌生人)是**先验**:退化成"只给姓名不给位置"仍然正确。
+    #   - 候选 bbox(待识别 track)是模型把 track_id 对到画面里某个人的**唯一定位锚**:
+    #     撤掉就没有锚点,多 track 场景下模型只能凭猜分配姓名 —— 错认代价比分辨率收益高
+    #     一个量级,所以候选侧取 all-or-nothing:每个带 bbox 的候选都必须换算得出(非 None),
+    #     任一失败整窗回退全景,绝不允许"部分候选无锚"的中间态。
+    #     判据就是 remap 的非 None,即"框与区域有交集";框大部分落在区域外时 remap 会 clamp
+    #     成贴边的小框、判定仍算通过。不额外设"锚点最小跨度"闸:那需要一个新阈值,而候选框与
+    #     算区域用的检测框来源不同(见 remap_bbox_norm_to_crop 的 docstring),真实分布未测。
+    # 校验挂在 _maybe_encode_adaptive 的 region_ok 回调上,在算出 region 之后、编码与
+    # ref.jpg/crop_meta 落盘之前执行 —— 否则回退时盘上已留下 crop 产物、与模型实际所见不一致。
+    #
     # 先试裁切、失败才编全景:免掉裁切命中时白编一遍全景的浪费;且回退时全景字节最后 push,
     # 与模型实际所见一致(避免 clip 存 crop、模型看全景的产物不一致,见 snapshot_context)。
     video_b64: str | None = None
     media_info: "LocalMediaInfo | None" = None
     ref_image_jpeg: bytes | None = None
-    # 「crop 生效」与「名册 bbox 会被换算进 crop 坐标系」必须同进同退:在此处一起构好回调,
+    # 「crop 生效」与「bbox 会被换算进 crop 坐标系」必须同进同退:在此处一起构好回调,
     # 而不是把 region / frame_size 当两个独立可选参数往下传。漏传一个的后果是静默错配
     # (bbox 是全景坐标、视频却是 crop 画面,把姓名贴到 crop 中央那个人身上),且不会有测试变红。
     bbox_remap: "Callable[[tuple[int, int, int, int]], tuple[int, int, int, int] | None] | None" = None
-    if not candidates:
-        adaptive = _maybe_encode_adaptive(packets)
-        if adaptive is not None:
-            from .crop_enhance import remap_bbox_norm_to_crop
+    from .crop_enhance import remap_bbox_norm_to_crop
 
-            video_b64, media_info = adaptive.video_b64, adaptive.media_info
-            ref_image_jpeg = adaptive.ref_image_jpeg
-            _region, _frame_size = adaptive.region, adaptive.frame_size
+    def _candidate_bbox_ok(
+        region: tuple[int, int, int, int], frame_size: tuple[int, int]
+    ) -> bool:
+        """候选侧 all-or-nothing 前置校验(见上方注释)。无候选时不设约束。"""
+        if not candidates:
+            return True
+        # 否决用的 event 名**不是** adaptive_crop_fallback:回退本身由 _maybe_encode_adaptive
+        # 统一打一条(reason=region_rejected),这里再打同名的就会让灰度期按单一 event 统计的
+        # 回退率翻倍、原因直方图两边各计一份。这里只补"是谁否决的"这层细节。
+        if len(packets) > 1:
+            # region 只属于 _maybe_encode_adaptive 选中的「首个有帧设备」,套到设备 2..N 的
+            # 候选上是跨设备错坐标。名册侧可以撤掉 bbox 退化为纯名(_build_device_header 的
+            # _drop_bbox),候选侧撤了就没有锚点 → 整窗回退全景。fused 当前恒单 packet,
+            # 这里是防御。
+            logger.warning(
+                "event=candidate_bbox_veto reason=multi_packet n_packets=%d", len(packets)
+            )
+            return False
+        # bbox 为 None 的候选不参与判定:它在全景路径下本就没有锚点(coasting 已被上游剔除,
+        # 剩下的是归一化失败等边缘情形),裁切不会让它更差。
+        # 逐个判而不是 all(...):否决时要能看出是哪个 track、框跑到哪去了 —— 这是灰度期
+        # 判断"要不要放宽区域"的唯一数据(只打第一个失败的,足够定位)。
+        for c in candidates:
+            if c.bbox_xyxy_norm is None:
+                continue
+            if remap_bbox_norm_to_crop(c.bbox_xyxy_norm, region, frame_size) is None:
+                logger.info(
+                    "event=candidate_bbox_veto reason=unmappable track_id=%s bbox=%s "
+                    "region=%s frame=%s",
+                    c.track_id, c.bbox_xyxy_norm, region, frame_size,
+                )
+                return False
+        return True
 
-            def bbox_remap(b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
-                return remap_bbox_norm_to_crop(b, _region, _frame_size)
+    adaptive = _maybe_encode_adaptive(packets, region_ok=_candidate_bbox_ok)
+    if adaptive is not None:
+        video_b64, media_info = adaptive.video_b64, adaptive.media_info
+        ref_image_jpeg = adaptive.ref_image_jpeg
+        _region, _frame_size = adaptive.region, adaptive.frame_size
+
+        def bbox_remap(b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+            return remap_bbox_norm_to_crop(b, _region, _frame_size)
     if video_b64 is None:
         video_b64, media_info = _encode_batch_video(
             packets, short_edge=_effective_panorama_short_edge()
@@ -770,7 +814,9 @@ def _build_fused_user_content(
     # (engine._normalize_bbox_to_1000(…, all_frames[-1])),必须换算进 crop 坐标系 —— 否则
     # 拿全景坐标读局部画面是方向性错误(会把姓名贴到 crop 中央那个人身上),不是精度损失。
     # 换算失败(框落在区域外)由 _render_roster_entry 退化为纯名。
-    # candidates 侧不需要同等处理:身份门(build_fused_payload)保证有候选就不裁切。
+    # candidates 侧走同一个回调,但语义更严:那是定位锚、不是先验,换算失败不允许退化 ——
+    # build_fused_payload 的 region_ok 已在裁切前保证「所有带 bbox 的候选都换算得出」,
+    # 否则整窗回退全景(此处因此不会出现候选无锚的中间态)。
     candidate_tids = {c.track_id for c in candidates}
     roster_lines = _build_device_header(
         packets, label_lookup=label_lookup, candidate_tids=candidate_tids, emit_bbox_note=False,
@@ -783,7 +829,9 @@ def _build_fused_user_content(
     if candidates:
         content.append({"type": "text", "text": "待识别 track："})
         for cand in candidates:
-            content.append({"type": "text", "text": _format_track_line(cand)})
+            content.append(
+                {"type": "text", "text": _format_track_line(cand, bbox_remap=bbox_remap)}
+            )
 
     # 已识别人物/陌生人 + 待识别 track 共用一句 bbox 坐标系说明（二者同一 [0,1000] 约定，去重）
     #
@@ -1071,7 +1119,10 @@ def _format_target(
     return label
 
 
-def _format_track_line(cand: "IdentityQueryItem") -> str:
+def _format_track_line(
+    cand: "IdentityQueryItem",
+    bbox_remap: "Callable[[tuple[int, int, int, int]], tuple[int, int, int, int] | None] | None" = None,
+) -> str:
     """渲染 fused 待识别 track 列表中单个 candidate（track_id + bbox + face_visible）。
 
     **不注入该 track 的当前/疑似身份**（去先验）：身份先验会锚定 omni 复读旧答案，
@@ -1081,10 +1132,25 @@ def _format_track_line(cand: "IdentityQueryItem") -> str:
 
     bbox 用 xyxy 格式 ``(x1, y1, x2, y2)``，已由 ``IdentityEngine.process``
     归一化到 mimo 标准的 [0, 1000] 整数区间，与发给 omni 的视频分辨率/宽高比解耦。
+
+    ``bbox_remap`` 非 None 时（Smart Crop 生效）把全景 [0,1000] 坐标换算进 crop 坐标系，
+    与主视频同坐标系。此处**不做**"换算失败就撤掉 bbox"的退化：候选 bbox 是定位锚，
+    撤掉等于让模型凭猜分配姓名。调用方(``build_fused_payload`` 的 region_ok)已保证裁切
+    生效时所有带 bbox 的候选都换算得出；真出现 None 说明两处判定分裂，打日志并撤框
+    （宁可无位置也不给错坐标），不静默吞掉。
     """
     parts = [f"  - track_id={cand.track_id}"]
-    if cand.bbox_xyxy_norm is not None:
-        x1, y1, x2, y2 = cand.bbox_xyxy_norm
+    bbox = cand.bbox_xyxy_norm
+    if bbox is not None and bbox_remap is not None:
+        bbox = bbox_remap(bbox)
+        if bbox is None:
+            logger.warning(
+                "event=candidate_bbox_remap_failed track_id=%s 撤掉 bbox"
+                "（region_ok 本应已挡住，两处判定分裂）",
+                cand.track_id,
+            )
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
         parts.append(f"bbox=({x1}, {y1}, {x2}, {y2})")
     # (tier_c 污染修复): face_visible 是系统几何关联得出的确定性事实
     # (非 omni 判断), 引导 omni 在无脸时压低置信。None = 未传入 face_dets, 不渲染。
@@ -1697,61 +1763,70 @@ class _AdaptiveResult:
     frame_size: tuple[int, int]
 
 
-def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | None":
+def _maybe_encode_adaptive(
+    packets: list[IdentityPacket],
+    *,
+    region_ok: "Callable[[tuple[int, int, int, int], tuple[int, int]], bool] | None" = None,
+) -> "_AdaptiveResult | None":
     """Smart Crop 开启时算 crop 区域、编码 crop 视频 + 全景参考帧。
 
     返回 None = 回退全景(既有路径)。触发 None 的情形:双闸任一为 false(发版级开关 enabled /
-    单机用户开关 user_enabled)、无帧、无 crop 依据、面积超上限、crop/编码/JPEG 失败或产物过短。
+    单机用户开关 user_enabled)、无帧、无 crop 依据、面积超上限、``region_ok`` 否决、
+    crop/编码/JPEG 失败或产物过短。
     crop 视频与参考帧的短边都跟随用户分辨率档(见 _crop_short_edge_budget),与「裁不裁」正交。
     all_frames 只读不改。
+
+    ``region_ok(region, (w, h))`` 是调用方的区域准入校验,在**算出 region 之后、编码与
+    ref.jpg/crop_meta 落盘之前**调用,返回 False 即回退全景。它必须在副作用之前:否则
+    否决时盘上已留下 crop 产物,与模型实际所见的全景不一致。当前唯一用途是 fused 侧
+    候选 bbox 的 all-or-nothing 换算校验(见 build_fused_payload)。
     """
     from .crop_enhance import (
-        compute_crop_region,
+        compute_crop_region_detail,
         compute_motion_blocks,
         crop_enhance_config_from_settings,
         crop_frames,
     )
 
-    cfg = crop_enhance_config_from_settings()
-    # 双闸:发版级开关 AND 单机用户开关。任一为 false → 回退全景路径(不裁切)。注意这不等于
-    # 字节回到接本特性前 —— 全景走的 _encode_video_mp4 放大分支已换重采样核,见该函数注释。
-    if not (cfg.enabled and cfg.user_enabled):
-        return None
-    ep = next((p for p in packets if p.all_frames), None)  # 同 _encode_batch_video:首个有帧设备
-    if ep is None:
-        logger.info("event=adaptive_crop_fallback reason=no_frames")
-        return None
-    frames = ep.all_frames
+    # 配置读取也在 try 内:crop_enhance 被写成非 mapping 时该函数已 fail-closed 退默认,
+    # 但它仍可能因 settings 层的其它意外抛错,而本函数是推理主路径上唯一的兜底点
+    # (调用方 build_fused_payload 没有 try,抛上去会被 omni.py 折成整相机 skipped)。
     try:
+        cfg = crop_enhance_config_from_settings()
+        # 双闸:发版级开关 AND 单机用户开关。任一为 false → 回退全景路径(不裁切)。注意这不等于
+        # 字节回到接本特性前 —— 全景走的 _encode_video_mp4 放大分支已换重采样核,见该函数注释。
+        if not (cfg.enabled and cfg.user_enabled):
+            return None
+        ep = next((p for p in packets if p.all_frames), None)  # 同 _encode_batch_video:首个有帧设备
+        if ep is None:
+            logger.info("event=adaptive_crop_fallback reason=no_frames")
+            return None
+        frames = ep.all_frames
         # 主体框取窗口内**每一抽帧**的 human/cat/dog 检测框(tracking 层累积、随 packet 透传):
         # 裁出的区域要包住窗口内出现过的一切,所以不能用 targets/box_info —— 那只有末帧一个框,
         # 且宠物永远不在其中(tracker 只对 HUMAN 建 track)。
-        # motion_blocks 只算一次,既喂 compute_crop_region 又用于诊断日志(免重复算 CV)。
+        # motion_blocks 只算一次,既喂 compute_crop_region_detail 又用于诊断日志(免重复算 CV)。
         det_boxes = list(ep.main_det_boxes)
         motion_blocks = compute_motion_blocks(frames, cfg)
         n_det, n_motion = len(det_boxes), len(motion_blocks)
-        region = compute_crop_region(
+        region, reason = compute_crop_region_detail(
             det_boxes, frames, cfg, motion_blocks=motion_blocks
         )
         if region is None:
             # 灰度诊断。区域是"包住一切"的并集,所以回退时要打出并集框本身:超上限时能看出是
             # 哪一侧把它撑开(远处误检 / 大幅走动 / 运动块),否则日志只说面积不合格、查不出根因。
-            # 面积有两条相反的回退路径,按并集面积二分成两个 reason —— 处置完全不同:
-            #   area_too_large 查是什么撑开了并集;area_too_small 是几何天花板(目标贴边、
-            #   绕中心放大被 clamp 截断后仍不足下限),裁了也没有等效分辨率收益,无需处置。
+            # reason 取自 compute_crop_region_detail —— **不能**在这里拿并集面积反推:真正
+            # 过闸的是扩展 + 最小面积放大之后的 region,其面积恒 ≥ 并集,据并集二分会把
+            # 「并集已达下限、扩展后超上限」这一整段(占默认配置扫描空间约 17%)误标成
+            # area_too_small,而两者处置正相反:area_too_large 要查是什么撑开了并集;
+            # area_too_small 是几何天花板(目标贴边、绕中心放大被 clamp 截断后仍不足下限),
+            # 裁了也没有等效分辨率收益,无需处置。
             all_boxes = det_boxes + motion_blocks
             union = (
                 (min(b[0] for b in all_boxes), min(b[1] for b in all_boxes),
                  max(b[2] for b in all_boxes), max(b[3] for b in all_boxes))
                 if all_boxes else None
             )
-            reason = "no_activity"
-            if union is not None:
-                h0, w0 = frames[0].shape[:2]
-                u_ratio = (union[2] - union[0]) * (union[3] - union[1]) / max(1, w0 * h0)
-                reason = (
-                    "area_too_large" if u_ratio > cfg.crop_max_area_ratio else "area_too_small"
-                )
             # n_det_boxes 是**框数**(逐帧累积,≈ 帧数 × 主体数),不是主体数 —— 与 n_frames
             # 一起看才有意义;旧字段名 n_det 曾是末帧主体数(0-3),别拿两版日志的数字直接比。
             logger.info(
@@ -1760,6 +1835,14 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
                 reason, n_det, len(frames), n_motion, union,
             )
             return None
+        # 区域准入校验:必须在 crop/编码/落盘之前(见函数 docstring)。
+        if region_ok is not None:
+            fh0, fw0 = frames[0].shape[:2]
+            if not region_ok(region, (fw0, fh0)):
+                logger.info(
+                    "event=adaptive_crop_fallback reason=region_rejected region=%s", region
+                )
+                return None
         cropped = crop_frames(frames, region)
         if not cropped or cropped[0].size == 0:
             logger.info("event=adaptive_crop_fallback reason=crop_empty region=%s", region)
