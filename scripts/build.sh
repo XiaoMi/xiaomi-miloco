@@ -317,17 +317,24 @@ print(f'  {len(tools)} 个工具, 版本 {manifest[\"version\"]}, 下载 tag v$r
 
 pack_models() {
     local models_dir="$PROJECT_ROOT/backend/miloco/src/miloco/perception/models"
-    if [ ! -d "$models_dir" ] || [ -z "$(ls -A "$models_dir"/*.onnx 2>/dev/null)" ]; then
-        # 硬失败而非跳过：源码目录缺 .onnx 是异常状态（正常 clone 该有），
-        # 空跳只会让下游 pack_platform_bundles 一起空跳、install.py 收到"缺模型" fail，
-        # 排查链路变长。直接在源头中止。
-        log "FATAL: $models_dir 缺 .onnx"
+
+    # 模型不在 git 里（见 scripts/models.lock.json）：缺什么就按 lock 的 sha256 从
+    # Release 拉。已就绪的文件只做一次 hash 校验、不联网，所以本步可以无条件跑。
+    # --strict：可选模型缺失也算失败 —— 终端用户拿到的归档必须是完整能力，
+    # 不能因为一次网络抖动就悄悄发出个少了 bge / VAD 的 tarball。
+    log "准备模型（scripts/fetch_models.py --strict）..."
+    if ! python3 "$PROJECT_ROOT/scripts/fetch_models.py" --strict; then
+        # 硬失败而非跳过：空跳只会让下游 pack_platform_bundles 一起空跳、
+        # install.py 收到"缺模型" fail，排查链路变长。直接在源头中止。
+        log "FATAL: 模型未就绪（$models_dir）"
         exit 1
     fi
 
     local tar_name="miloco-models-${RESOLVED_PEP}.tar.gz"
     log "打包模型: $tar_name ..."
-    tar -czf "$DIST_DIR/$tar_name" -C "$models_dir" .
+    # 只打 .onnx + .json（bge tokenizer），不打目录里的 README.md / *.part：
+    # 归档会被 install.py 解到 $MILOCO_HOME/models/，别掺无关文件。
+    (cd "$models_dir" && tar -czf "$DIST_DIR/$tar_name" ./*.onnx ./*.json)
     log "  $(du -h "$DIST_DIR/$tar_name" | cut -f1) $tar_name"
 }
 

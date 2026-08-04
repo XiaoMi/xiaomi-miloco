@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""感知 ONNX 模型下载器：从 GitHub Release 拉取 + sha256 校验（纯标准库）。
+
+模型不再进 git —— 78MB 二进制躺在历史里，每次 CI ``actions/checkout``（默认浅克隆）
+都要白付一遍流量，且以后每次换模型都在历史里永久叠一份。改为托管在固定 tag ``models``
+的 Release 资产，由本脚本按 ``scripts/models.lock.json`` 锁定的 sha256 拉取。
+
+**只用标准库**：本脚本被 ``scripts/build.sh``、CI、``plugins/hermes/install-hermes.sh``
+直接以 ``python3`` 调用，多一个第三方依赖就多一处装不上的可能。面向终端用户的大包下载
+仍走 ``scripts/install.py`` 的 httpx 实现（那边已在 uv 环境里），两者互不影响。
+
+用法:
+  python3 scripts/fetch_models.py                     # 下载缺失/损坏的模型到包内 models/
+  python3 scripts/fetch_models.py --check             # 只校验不下载（CI 门禁）
+  python3 scripts/fetch_models.py --dest DIR          # 下到指定目录（如 $MILOCO_HOME/models）
+  python3 scripts/fetch_models.py --only det_4C.onnx  # 只处理指定文件（可重复）
+  python3 scripts/fetch_models.py --required-only     # 跳过可选模型（省 ~25MB）
+  python3 scripts/fetch_models.py --force             # 无条件重下
+
+环境变量:
+  MILOCO_MODELS_BASE_URL  覆盖下载源（内网镜像 / 离线源），优先于 lock 的 base_url + mirrors
+  MILOCO_MODELS_DEST      覆盖下载目标目录（低于 --dest）。注意：只影响"下到哪"，
+                          不影响运行时模型解析口径（那是 directories.models /
+                          MILOCO_DIRECTORIES__MODELS，见 config/settings.py）
+
+退出码: 0 = 必需模型全部就绪 | 1 = 必需模型缺失或校验失败 | 2 = 用法 / lock 文件错误
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPTS_DIR.parent
+_DEFAULT_LOCK = _SCRIPTS_DIR / "models.lock.json"
+_DEFAULT_DEST = (
+    _PROJECT_ROOT / "backend" / "miloco" / "src" / "miloco" / "perception" / "models"
+)
+
+_CHUNK = 256 * 1024
+_MAX_RETRIES = 3
+_TIMEOUT = 30.0
+
+
+# ─── 小工具 ──────────────────────────────────────────────────────────────────
+
+
+def _log(msg: str, *, quiet: bool = False) -> None:
+    # 一律走 stderr：stdout 留给未来可能的机器可读输出，且不污染调用方的管道。
+    if not quiet:
+        print(msg, file=sys.stderr, flush=True)
+
+
+def _human(n: float) -> str:
+    for unit in ("B", "KiB", "MiB"):
+        if n < 1024:
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}GiB"
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _is_ready(path: Path, spec: dict[str, Any]) -> bool:
+    """文件已存在且内容正确。size 不符就不必算 hash（78MB 全量 hash 不便宜）。"""
+    if not path.is_file():
+        return False
+    if spec.get("size") and path.stat().st_size != spec["size"]:
+        return False
+    return _sha256(path) == spec["sha256"]
+
+
+def _sources(lock: dict[str, Any]) -> list[str]:
+    """下载源，按优先级：env 覆盖 → lock 的 base_url（GitHub 直连）→ mirrors（加速镜像）。
+
+    mirrors 与 ``scripts/manifest.json`` 的 ``download.sites`` 是同一批 GitHub 加速站
+    （终端用户下大包用那份，开发者/CI 下模型用这份），两边由 test_fetch_models.py 钉死一致。
+    """
+    env = os.environ.get("MILOCO_MODELS_BASE_URL", "").strip()
+    if env:
+        return [env.rstrip("/")]
+    urls = [lock.get("base_url", ""), *lock.get("mirrors", [])]
+    return [u.rstrip("/") for u in urls if u]
+
+
+# ─── 下载 ────────────────────────────────────────────────────────────────────
+
+
+def _stream(url: str, part: Path, expected_size: int | None, *, quiet: bool) -> None:
+    """流式下载到 ``part``；``part`` 已有内容时尝试 Range 续传（78MB 跨境链路值得）。
+
+    服务端不接 Range（返回 200）或 ``file://`` 这种无 Range 语义的源时整段重写。
+    续传拼出脏内容不怕：调用方一律以 sha256 判定，不符就删掉 part 从头再来。
+    """
+    offset = part.stat().st_size if part.is_file() else 0
+    if offset and expected_size and offset >= expected_size:
+        # 已有内容不小于目标 → 是脏文件（上次写坏 / 换了资产），从头下
+        part.unlink()
+        offset = 0
+
+    headers = {"User-Agent": "miloco-fetch-models"}
+    if offset and urllib.parse.urlparse(url).scheme in ("http", "https"):
+        headers["Range"] = f"bytes={offset}-"
+
+    # URL 由仓库内 lock 的 base_url/mirrors 拼出（或维护者显式给的 MILOCO_MODELS_BASE_URL），
+    # 不来自任何不可信输入；内容再经 sha256 比对，源被换掉也下不出错东西。
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        if getattr(resp, "status", 200) != 206:
+            offset = 0  # 没走成续传 → 整段重写
+        written = offset
+        total = expected_size or 0
+        show_pct = total > 0 and not quiet and sys.stderr.isatty()
+        last_pct = -5
+        with open(part, "ab" if offset else "wb") as f:
+            while True:
+                chunk = resp.read(_CHUNK)
+                if not chunk:
+                    break
+                f.write(chunk)
+                written += len(chunk)
+                if show_pct:
+                    pct = written * 100 // total
+                    if pct >= last_pct + 5:
+                        last_pct = pct
+                        print(
+                            f"\r      {pct:3d}%  {_human(written)}",
+                            end="",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+        if show_pct:
+            print("\r" + " " * 32 + "\r", end="", file=sys.stderr, flush=True)
+
+
+def _fetch_one(
+    spec: dict[str, Any],
+    dest_dir: Path,
+    urls: list[str],
+    *,
+    force: bool,
+    quiet: bool,
+) -> bool:
+    name = spec["name"]
+    path = dest_dir / name
+
+    if not force and _is_ready(path, spec):
+        _log(f"  ✓ {name}  {_human(spec.get('size', 0))}  已就绪", quiet=quiet)
+        return True
+
+    part = dest_dir / f"{name}.part"
+    for url in urls:
+        host = urllib.parse.urlparse(url).netloc or url
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                _log(
+                    f"  ↓ {name}  {_human(spec.get('size', 0))}  ← {host}"
+                    + (f"（第 {attempt}/{_MAX_RETRIES} 次）" if attempt > 1 else ""),
+                    quiet=quiet,
+                )
+                _stream(f"{url}/{name}", part, spec.get("size"), quiet=quiet)
+                got = _sha256(part)
+                if got == spec["sha256"]:
+                    part.replace(path)  # 原子改名：中断不会留下"看起来能用"的半个文件
+                    _log(f"  ✓ {name}  校验通过", quiet=quiet)
+                    return True
+                _log(
+                    f"  ! {name}  sha256 不符（期望 {spec['sha256'][:12]}…，"
+                    f"实得 {got[:12]}…），丢弃重下",
+                    quiet=quiet,
+                )
+                part.unlink(missing_ok=True)
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                _log(f"  ! {name}  下载失败（{attempt}/{_MAX_RETRIES}）：{exc}", quiet=quiet)
+            if attempt < _MAX_RETRIES:
+                time.sleep(2 ** (attempt - 1))
+
+    part.unlink(missing_ok=True)
+    return False
+
+
+# ─── 主流程 ──────────────────────────────────────────────────────────────────
+
+
+def _select(files: list[dict[str, Any]], only: list[str], required_only: bool) -> list[dict[str, Any]]:
+    specs = files
+    if only:
+        want = set(only)
+        unknown = want - {s["name"] for s in files}
+        if unknown:
+            raise KeyError(f"--only 指定了 lock 里没有的文件：{', '.join(sorted(unknown))}")
+        specs = [s for s in files if s["name"] in want]
+    if required_only:
+        specs = [s for s in specs if s.get("required")]
+    return specs
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="下载并校验感知 ONNX 模型（源与 sha256 见 scripts/models.lock.json）"
+    )
+    ap.add_argument("--dest", default=None, metavar="DIR", help="目标目录（默认包内 perception/models/）")
+    ap.add_argument("--lock", default=None, metavar="FILE", help="lock 文件路径（默认 scripts/models.lock.json）")
+    ap.add_argument("--only", action="append", default=[], metavar="NAME", help="只处理指定文件（可重复）")
+    ap.add_argument("--required-only", action="store_true", help="跳过可选模型")
+    ap.add_argument("--force", action="store_true", help="无条件重下（忽略本地已就绪的文件）")
+    ap.add_argument("--check", action="store_true", help="只校验不下载：缺任一必需模型即 exit 1")
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="可选模型缺失也算失败（打 release tarball 时用：终端用户要拿到完整能力）",
+    )
+    ap.add_argument("--quiet", action="store_true", help="静默（仍会打印错误）")
+    args = ap.parse_args(argv)
+
+    lock_path = Path(args.lock) if args.lock else _DEFAULT_LOCK
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        files: list[dict[str, Any]] = lock["files"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        print(f"lock 文件不可用（{lock_path}）：{exc}", file=sys.stderr)
+        return 2
+
+    try:
+        specs = _select(files, args.only, args.required_only)
+    except KeyError as exc:
+        print(str(exc).strip("'\""), file=sys.stderr)
+        return 2
+
+    dest = Path(args.dest or os.environ.get("MILOCO_MODELS_DEST") or _DEFAULT_DEST).expanduser()
+
+    if args.check:
+        _log(f"校验模型目录：{dest}", quiet=args.quiet)
+        bad_required, bad_optional = [], []
+        for spec in specs:
+            if _is_ready(dest / spec["name"], spec):
+                _log(f"  ✓ {spec['name']}", quiet=args.quiet)
+            else:
+                _log(f"  ✗ {spec['name']}  缺失或校验不通过", quiet=args.quiet)
+                (bad_required if spec.get("required") else bad_optional).append(spec["name"])
+        blocking = bad_required + (bad_optional if args.strict else [])
+        if blocking:
+            print(
+                f"缺少模型：{', '.join(blocking)}\n"
+                f"补齐：python3 scripts/fetch_models.py --dest {dest}",
+                file=sys.stderr,
+            )
+            return 1
+        if bad_optional:
+            _log(f"  可选模型缺失（对应功能降级，不阻塞）：{', '.join(bad_optional)}", quiet=args.quiet)
+        return 0
+
+    urls = _sources(lock)
+    if not urls:
+        print("lock 里没有可用下载源（base_url / mirrors 均为空）", file=sys.stderr)
+        return 2
+
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"目标目录不可写（{dest}）：{exc}", file=sys.stderr)
+        return 2
+
+    _log(f"准备感知模型 → {dest}", quiet=args.quiet)
+    failed_required, failed_optional = [], []
+    for spec in specs:
+        if not _fetch_one(spec, dest, urls, force=args.force, quiet=args.quiet):
+            (failed_required if spec.get("required") else failed_optional).append(spec["name"])
+
+    if failed_optional and not args.strict:
+        # 与 resource_validator 的降级语义一致：可选模型缺了只是对应能力降级，不阻塞。
+        _log(f"  可选模型未就绪（对应功能降级）：{', '.join(failed_optional)}", quiet=args.quiet)
+    if args.strict:
+        failed_required += failed_optional
+    if failed_required:
+        print(
+            f"必需模型未就绪：{', '.join(failed_required)}\n"
+            f"源：{' | '.join(urls)}（可用 MILOCO_MODELS_BASE_URL 换源，或手动放置到 {dest}）",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

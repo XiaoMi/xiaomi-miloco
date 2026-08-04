@@ -52,6 +52,11 @@ check_tools() {
 # ---- backend 全量测试 -------------------------------------------------------
 run_backend_tests() {
     info "backend 全量测试 (对齐 ci.yml backend-test)…"
+    # 模型不在 git 里（scripts/models.lock.json）：缺了 requires_models 那批用例会静默
+    # skip，本地覆盖率悄悄比 CI 低。这里只校验不下载（不拖慢 --quick），缺了给提示。
+    if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --quiet >/dev/null 2>&1; then
+        info "感知模型未就绪 → requires_models 用例会 skip；补齐：python3 scripts/fetch_models.py"
+    fi
     cd "$REPO_ROOT/backend"
     # 关键: 隔离本地 config.json（含 token），与 CI 干净环境对齐
     export MILOCO_CONFIG_SEARCH_PATH=/tmp/miloco-nonexistent-ci

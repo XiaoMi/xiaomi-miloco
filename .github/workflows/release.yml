@@ -76,6 +76,20 @@ jobs:
       - name: 校验版本号格式（CalVer YYYY.M.D，拒绝前导零/带 v/非法预发布）
         run: python3 scripts/version_normalize.py "${{ steps.ver.outputs.version }}" --validate
 
+      # 感知 ONNX 模型不在 git 里，托管在固定 tag `models` 的 Release（见 scripts/models.lock.json）。
+      # build.sh 的 pack_models 也会自动拉，这里显式加一步只为两件事：命中缓存后 0 流量，
+      # 以及模型下载失败时在 release 日志里是独立的失败点，不用去 build 长日志里翻。
+      - name: 缓存感知 ONNX 模型
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          # 只缓存模型文件本身，不缓存同目录里 git 跟踪的 README.md（理由见 ci.yml 同名步骤）
+          path: |
+            backend/miloco/src/miloco/perception/models/*.onnx
+            backend/miloco/src/miloco/perception/models/*.json
+          key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
+      - name: 下载感知 ONNX 模型（--strict：可选模型缺失也算失败）
+        run: python3 scripts/fetch_models.py --strict
+
       - name: 构建全部产物到 dist/（--version 统一 stamp + 平台归档 + manifest.bundles）
         run: bash scripts/build.sh --version "${{ steps.ver.outputs.version }}"
 

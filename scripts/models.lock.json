@@ -1,0 +1,46 @@
+{
+  "release_tag": "models",
+  "base_url": "https://github.com/XiaoMi/xiaomi-miloco/releases/download/models",
+  "mirrors": [
+    "https://gh-proxy.com/https://github.com/XiaoMi/xiaomi-miloco/releases/download/models",
+    "https://gh-proxy.org/https://github.com/XiaoMi/xiaomi-miloco/releases/download/models",
+    "https://gh.idayer.com/https://github.com/XiaoMi/xiaomi-miloco/releases/download/models"
+  ],
+  "files": [
+    {
+      "name": "det_4C.onnx",
+      "size": 44643491,
+      "sha256": "9cf73f24e22e3040af55d0a9ea676d9bdf486d6d2f43febacf24957ef05a09b9",
+      "required": true,
+      "desc": "目标检测"
+    },
+    {
+      "name": "human_body_reid_v2.onnx",
+      "size": 10474255,
+      "sha256": "dc70121835336bcd342be0d3f5baba350e94c605b8da886a6efd2f3357fa3f29",
+      "required": true,
+      "desc": "人体重识别 (v2)"
+    },
+    {
+      "name": "bge-small-zh-v1.5-int8.onnx",
+      "size": 23919084,
+      "sha256": "5f994d88aa50acc6218552cef84e8774e1a5991e1cb286a46af064ed491863f8",
+      "required": false,
+      "desc": "事件去重句向量 (bge-small-zh)"
+    },
+    {
+      "name": "bge-small-zh-v1.5-tokenizer.json",
+      "size": 439125,
+      "sha256": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26",
+      "required": false,
+      "desc": "bge tokenizer"
+    },
+    {
+      "name": "silero_vad.onnx",
+      "size": 2327524,
+      "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+      "required": false,
+      "desc": "语音活动检测 (silero VAD)"
+    }
+  ]
+}

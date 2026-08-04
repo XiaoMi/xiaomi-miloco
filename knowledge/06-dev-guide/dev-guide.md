@@ -379,6 +379,19 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:1810/api/monitor/nodes
 
 感知流水线依赖多个 ONNX 模型，存放在 `$MILOCO_HOME/models/`（包内 `perception/models/` 作兜底）：必需的 `det_4C.onnx`（检测）/ `human_body_reid_v2.onnx`（ReID），以及可选的 VAD、语义去重模型（清单见 `perception/engine/resource_validator.py`）。必需模型缺失才会导致引擎降级。
 
+模型（约 78MB）**不进 git**：托管在固定 tag `models` 的 GitHub Release，文件名 / 大小 / sha256 / 是否必需锁在 `scripts/models.lock.json`，由 `scripts/fetch_models.py`（纯标准库，不需要 uv）拉取并校验。`scripts/build.sh` 的 `pack_models` 与 CI 都会自动跑，正常开发流程无需手动执行。下载源为 lock 的 `base_url`（GitHub 直连）+ `mirrors`（gh-proxy 加速站，与 `scripts/manifest.json` 的 `download.sites` 同一批，测试钉死两边一致），直连失败自动降级到镜像。
+
+```bash
+python3 scripts/fetch_models.py            # 缺什么拉什么；已就绪的只校验 sha256、不联网
+python3 scripts/fetch_models.py --check    # 只校验不下载（退出码 1 = 必需模型缺失）
+python3 scripts/fetch_models.py --dest ~/.openclaw/miloco/models   # 直接补运行时目录
+
+# 内网 / 离线换源（优先于 lock 的 base_url + mirrors）
+MILOCO_MODELS_BASE_URL=https://mirror.example.com/miloco-models python3 scripts/fetch_models.py
+```
+
+维护者换模型：`bash scripts/publish_models.sh upload <目录>` 上传到 Release 并同步 lock（`models` 是固定 tag、资产可变，换完**必须**同步 lock，否则老 commit 锁的 sha256 对不上新资产）。
+
 ```bash
 # 检查感知引擎状态
 miloco-cli admin status  # 看 engine 节点 lifecycle

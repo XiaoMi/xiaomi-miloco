@@ -669,11 +669,13 @@ PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 # 对齐上游 install.sh --agent-finish 的"下载感知模型"步骤（见
 # upstream install-guide.md 第 131 行"下载感知模型"）。
 #
-# hermes fork 走的是"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑，
-# 但 fork 仓库的 backend/miloco/src/miloco/perception/models/ 目录里其实打包了
-# 同一份模型 — 直接 cp 即可（避免再下 80MB+）。
+# hermes fork 走的是"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑。
+# 三条取模型的路（按优先级）：
+#   1. 本地已有现成 .onnx（git checkout 或 miloco 包内）→ 直接 cp，不联网
+#   2. 都没有 → scripts/fetch_models.py 按 lock 的 sha256 从 Release 拉
+#   3. 连下载器也没有 / 下载失败 → warn 但不中断（感知降级，插件其余照装）
 #
-# 跳过条件：MILOCO_HOME/models/det_4C.onnx 已存在（用户已装）。
+# 跳过条件：MILOCO_HOME/models/*.onnx 已存在（用户已装）。
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
 
 # Release 装机场景 install.py step 7「准备感知模型」已经从 miloco-models-*.tar.gz
@@ -688,16 +690,21 @@ else
   # 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
   # 安装到 ~/.hermes/plugins/miloco/ 后 $HERE 不再指向 git checkout，
   # 但 pip install -e 的 miloco 包内 models/ 仍可达，以此兜底。
-  MODEL_SRC="$HERE/../../backend/miloco/src/miloco/perception/models"
-  if [ ! -d "$MODEL_SRC" ]; then
-    MODEL_SRC=$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)
-  fi
+  #
+  # 判据是"目录里真有 .onnx"而不是"目录存在"：模型已不进 git（改由
+  # scripts/fetch_models.py 按 scripts/models.lock.json 从 Release 拉），
+  # fork 新 clone 出来这个目录可能空着、只有一个 README。
+  MODEL_SRC=""
+  for cand in \
+    "$HERE/../../backend/miloco/src/miloco/perception/models" \
+    "$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)"; do
+    if [ -n "$cand" ] && compgen -G "$cand/*.onnx" >/dev/null 2>&1; then
+      MODEL_SRC="$cand"
+      break
+    fi
+  done
 fi
-if [ -n "$MODEL_SRC" ] && [ ! -d "$MODEL_SRC" ]; then
-  warn "找不到 ONNX 模型源目录（fork 仓库 & miloco 包内均无）"
-  warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-  warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
-elif [ -n "$MODEL_SRC" ]; then
+if [ -n "$MODEL_SRC" ]; then
   mkdir -p "$MILOCO_HOME/models"
   # 同步 .onnx + .json（bge tokenizer）；已存在的不覆盖（保留用户手动调整）
   synced=0
@@ -714,7 +721,24 @@ elif [ -n "$MODEL_SRC" ]; then
   done
   info "  同步 ONNX 模型：新增 $synced 个、跳过已存在 $skipped 个"
   info "  模型目录：$MILOCO_HOME/models/"
-
+elif ! compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
+  # 本地没有任何现成模型 → 直接按 lock 从 upstream Release 下载（sha256 校验）。
+  # 下载失败只 warn 不中断：感知会报 models_missing 降级，但插件其余部分照装。
+  FETCH_MODELS="$HERE/../../scripts/fetch_models.py"
+  if [ -f "$FETCH_MODELS" ]; then
+    info "  本地无现成模型，按 scripts/models.lock.json 下载 → $MILOCO_HOME/models/"
+    if ! "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models"; then
+      warn "感知模型下载失败（网络？）"
+      warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
+      warn "修法：重跑 $FETCH_MODELS --dest $MILOCO_HOME/models，或手动放置模型文件"
+    fi
+  else
+    warn "找不到 ONNX 模型（本地无现成文件，也没有 scripts/fetch_models.py 可用）"
+    warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
+    warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
+  fi
+fi
+if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
   # 在 config.json 写 models 字段（settings.models_dir 默认读这里）
   if [ -f "$MILOCO_HOME/config.json" ]; then
     "$PYTHON" - "$MILOCO_HOME" <<'PY' || true

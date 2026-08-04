@@ -38,6 +38,20 @@ jobs:
           cache-dependency-glob: backend/uv.lock
       - name: 安装系统依赖（音视频处理）
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # 感知 ONNX 模型不在 git 里（见 scripts/models.lock.json），显式下载而非任其缺失：
+      # tests/perception/engine/identity/test_deep_sort_v12.py 的 requires_models 用例
+      # 在模型缺失时会静默 skip —— 不下就等于偷偷少跑一批覆盖。
+      - name: 缓存感知 ONNX 模型
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          # 只缓存模型文件本身，不缓存同目录里那个 git 跟踪的 README.md ——
+          # 否则 cache key（只跟 lock 走）不变时会用旧缓存盖掉 checkout 出来的新 README。
+          path: |
+            backend/miloco/src/miloco/perception/models/*.onnx
+            backend/miloco/src/miloco/perception/models/*.json
+          key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
+      - name: 下载感知 ONNX 模型（缓存命中时只做 sha256 校验，不联网）
+        run: python3 scripts/fetch_models.py
       - name: backend miloco 测试
         run: cd backend && uv sync --all-packages && uv run pytest -v
 
