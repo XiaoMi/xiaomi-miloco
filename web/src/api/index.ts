@@ -689,10 +689,15 @@ export async function getMemorySeries(
 
 // ─── Perception Config ─────────────────────────────────────────────────
 
+export type MinSuggestionUrgency = "low" | "medium" | "high";
+
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   window_size: number;
+  // 老 backend(<0.10.x)不返此字段,前端在读取处 ?? DEFAULTS.min_suggestion_urgency 回退。
+  // 声明成可选是为了把这层运行时兼容语义显式化,别让未来维护者把 ?? 当成死代码删。
+  min_suggestion_urgency?: MinSuggestionUrgency;
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {

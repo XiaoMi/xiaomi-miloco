@@ -127,6 +127,25 @@ def test_set_value_rejects_bad_bool():
         set_value("server.tls_verify", "maybe")
 
 
+def test_min_suggestion_urgency_accepts_valid_values(isolated_config):
+    """low / medium / high 三档均可写入(大小写不敏感由 _coerce 归一)。"""
+    for v in ("low", "MEDIUM", "High"):
+        set_value("perception.min_suggestion_urgency", v)
+        data = json.loads(isolated_config.read_text())
+        assert data["perception"]["min_suggestion_urgency"] == v.lower()
+
+
+def test_min_suggestion_urgency_rejects_bogus():
+    with pytest.raises(ValueError, match="min_suggestion_urgency"):
+        set_value("perception.min_suggestion_urgency", "urgent")
+
+
+def test_min_suggestion_urgency_default_is_low():
+    """默认值 low = 不过滤,与 backend PerceptionSettings.Literal default 对齐。"""
+    cfg = load_config()
+    assert cfg["perception"]["min_suggestion_urgency"] == "low"
+
+
 def test_get_value_reads_persisted(isolated_config):
     set_value("model.omni.api_key", "sk-xxx")
     assert get_value("model.omni.api_key") == "sk-xxx"
