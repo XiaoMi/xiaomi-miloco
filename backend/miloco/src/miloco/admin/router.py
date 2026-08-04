@@ -14,6 +14,7 @@ import subprocess
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool
@@ -521,6 +522,7 @@ def _full_omni_payload() -> dict:
             "base_url": p.base_url,
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
+            "visual_mode": p.visual_mode,
             "active": p.label == active.label,
         }
         for p in m.omni_profiles
@@ -534,6 +536,7 @@ def _full_omni_payload() -> dict:
                 "base_url": active.base_url,
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
+                "visual_mode": active.visual_mode,
                 "active": True,
             },
         )
@@ -545,6 +548,7 @@ def _full_omni_payload() -> dict:
             "base_url": active.base_url,
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
+            "visual_mode": active.visual_mode,
             "health": health,
         },
         "profiles": profiles,
@@ -558,6 +562,7 @@ def _profiles_as_dicts() -> list[dict]:
             "model": p.model,
             "base_url": p.base_url,
             "api_key": p.api_key,
+            "visual_mode": p.visual_mode,
         }
         for p in get_settings().model.omni_profiles
     ]
@@ -570,6 +575,7 @@ class OmniConfigBody(BaseModel):
     api_key: str | None = None  # 留空 = 沿用该档案原 key(不被打码值覆盖)
     original_label: str | None = None  # 正在编辑的档案原名(支持改名/定位);None=新增
     activate: bool = True  # True=同时设为当前生效;False=只入列表(激活由 /activate 负责)
+    visual_mode: Literal["frames", "video"] | None = None
 
 
 class OmniSelectBody(BaseModel):
@@ -622,7 +628,16 @@ async def put_omni_config(
         raise HTTPException(status_code=409, detail=f"档案名「{label}」已存在")
     # 传 base_url 让 _key_by_label 校验"URL 未变才沿用旧 key",防跨 URL 复用凭证。
     key = _key_by_label(orig or label, body.api_key, base_url=base_url)
-    entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
+    visual_mode = body.visual_mode or (
+        target.get("visual_mode", "video") if target else "video"
+    )
+    entry = {
+        "label": label,
+        "base_url": base_url,
+        "model": model,
+        "api_key": key,
+        "visual_mode": visual_mode,
+    }
     tgt = orig or label
     will_activate = body.activate or _label_is_active(tgt)
     if will_activate:
@@ -630,7 +645,9 @@ async def put_omni_config(
             raise HTTPException(
                 status_code=400, detail={"code": "no_key", "message": "未配置 API Key"}
             )
-        result = await _probe.probe_omni(model, base_url, key)
+        result = await _probe.probe_omni(
+            model, base_url, key, visual_mode=visual_mode
+        )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result)
     if target:
@@ -670,7 +687,9 @@ async def activate_omni_config(
                     status_code=400,
                     detail={"code": "no_key", "message": "未配置 API Key"},
                 )
-            result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
+            result = await _probe.probe_omni(
+                p.model, p.base_url, p.api_key, visual_mode=p.visual_mode
+            )
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
             update_shared_config(
@@ -680,6 +699,7 @@ async def activate_omni_config(
                         "model": p.model,
                         "base_url": p.base_url,
                         "api_key": p.api_key,
+                        "visual_mode": p.visual_mode,
                     }
                 }
             )
@@ -765,6 +785,7 @@ class OmniTestBody(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     label: str | None = None
+    visual_mode: Literal["frames", "video"] | None = None
 
 
 @router.post(
@@ -797,7 +818,20 @@ async def test_omni_config(
             message="ok",
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
-    result = await _probe.probe_omni(model, base_url, api_key)
+    profile = next(
+        (
+            item
+            for item in get_settings().model.omni_profiles
+            if item.label == (body.label or "").strip()
+        ),
+        None,
+    )
+    visual_mode = body.visual_mode or (
+        profile.visual_mode if profile is not None else omni.visual_mode
+    )
+    result = await _probe.probe_omni(
+        model, base_url, api_key, visual_mode=visual_mode
+    )
     # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
     # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
     # OPEN_CONFIG 下 tick 不会自动探测(只探 OPEN_RECOVERABLE),不清则用户测通了红条仍不消失,
@@ -835,6 +869,7 @@ class OmniModelsImportBody(BaseModel):
     models: list[str] = Field(min_length=1, max_length=100)
     api_key: str | None = None
     label: str | None = None
+    visual_mode: Literal["frames", "video"] = "frames"
 
 
 def _normalized_provider_url(value: str) -> str:
@@ -978,6 +1013,7 @@ async def import_omni_models(
                 "base_url": base_url,
                 "model": model,
                 "api_key": api_key,
+                "visual_mode": body.visual_mode,
             }
         )
         added.append({"label": label, "model": model})
@@ -1058,7 +1094,12 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
     try:
-        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+        result = await _probe.probe_omni(
+            omni.model,
+            omni.base_url,
+            omni.api_key,
+            visual_mode=omni.visual_mode,
+        )
     except asyncio.CancelledError:
         # 客户端断开 HTTP(用户切页/关 tab/网络抖动)时 FastAPI 抛 CancelledError。
         # 此前 retry_now() 已把 state 置 HALF_OPEN,若不复位则 before_call 永久短路、

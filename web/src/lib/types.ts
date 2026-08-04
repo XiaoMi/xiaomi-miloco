@@ -343,6 +343,8 @@ export interface OmniModelConfig {
   api_key_masked: string;
   /** 是否已配置 api_key。 */
   has_key: boolean;
+  /** frames=5 张抽帧图片；video=MP4 视频。 */
+  visual_mode: "frames" | "video";
 }
 
 /** 已保存的配置档案（label 为唯一标识），active 标记是否为当前生效。 */
@@ -426,6 +428,8 @@ export interface OmniConfigUpdate {
   original_label?: string;
   /** 是否同时设为当前生效；省略=后端默认 true。「保存」传 false（激活走列表的「启用」）。 */
   activate?: boolean;
+  /** 模型接收的视觉输入类型。 */
+  visual_mode?: "frames" | "video";
 }
 
 /** 测试连接结果：ok=true 即连通；否则 message 给出原因（Key 无效 / 不可达 / 模型不存在等）。 */

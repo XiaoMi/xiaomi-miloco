@@ -1599,6 +1599,7 @@ export async function realUpdateOmniConfig(
   if (input.api_key) body.api_key = input.api_key;
   if (input.original_label !== undefined) body.original_label = input.original_label;
   if (input.activate !== undefined) body.activate = input.activate;
+  if (input.visual_mode !== undefined) body.visual_mode = input.visual_mode;
   const r = await apiFetch<Normal<OmniConfigState>>("/api/admin/omni-config", {
     method: "PUT",
     body: JSON.stringify(body),
@@ -1660,6 +1661,7 @@ export async function realImportOmniModels(input: {
   models: string[];
   api_key?: string;
   label?: string;
+  visual_mode?: "frames" | "video";
 }): Promise<OmniModelsImportResult> {
   const body: Record<string, string | string[]> = {
     base_url: input.base_url,
@@ -1667,6 +1669,7 @@ export async function realImportOmniModels(input: {
   };
   if (input.api_key) body.api_key = input.api_key;
   if (input.label) body.label = input.label;
+  if (input.visual_mode) body.visual_mode = input.visual_mode;
   const r = await apiFetch<Normal<OmniModelsImportResult>>(
     "/api/admin/omni-config/models/import",
     { method: "POST", body: JSON.stringify(body) },
@@ -1684,6 +1687,7 @@ export async function realTestOmniConfig(
     base_url: input.base_url,
   };
   if (input.api_key) body.api_key = input.api_key;
+  if (input.visual_mode) body.visual_mode = input.visual_mode;
   const r = await apiFetch<Normal<OmniTestResult>>(
     "/api/admin/omni-config/test",
     { method: "POST", body: JSON.stringify(body) },

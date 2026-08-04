@@ -128,6 +128,38 @@ async def test_probe_chat_ok(monkeypatch):
     assert "latency_ms" in r
 
 
+async def test_probe_chat_frames_mode_sends_image_content(monkeypatch):
+    request_body = None
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            nonlocal request_body
+            request_body = kwargs["json"]
+            return _FakeResp(200)
+
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _Client)
+
+    result = await probe.probe_chat(
+        "m1", "https://ok/v1", "sk-x", visual_mode="frames"
+    )
+
+    assert result["ok"] is True
+    content = request_body["messages"][0]["content"]
+    assert [block["type"] for block in content] == ["text", "image_url"]
+    assert content[1]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
+
+
 async def test_probe_chat_bad_key(monkeypatch):
     monkeypatch.setattr(
         probe.httpx, "AsyncClient", _fake_async_client(resp=_FakeResp(401))

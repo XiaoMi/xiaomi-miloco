@@ -289,6 +289,7 @@ export function UsageOmniConfig() {
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false); // API Key 明文/密文切换(末端眼睛图标)
   const [model, setModel] = useState("");
+  const [visualMode, setVisualMode] = useState<"frames" | "video">("frames");
   const [models, setModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const modelsRequestRef = useRef(0);
@@ -358,6 +359,7 @@ export function UsageOmniConfig() {
     setApiKey("");
     setShowKey(false);
     setModel("");
+    setVisualMode("frames");
     setTestResult(null);
   }
 
@@ -370,6 +372,7 @@ export function UsageOmniConfig() {
     setApiKey("");
     setShowKey(false);
     setModel(p.model);
+    setVisualMode(p.visual_mode ?? "video");
     setTestResult(null);
     void fetchModels(p.base_url, "", p.label);
   }
@@ -467,6 +470,7 @@ export function UsageOmniConfig() {
           api_key: apiKey.trim() || undefined,
           original_label: target,
           activate: false,
+          visual_mode: visualMode,
         });
         setState(s);
       } else {
@@ -475,6 +479,7 @@ export function UsageOmniConfig() {
           models: modelsToImport,
           api_key: apiKey.trim() || undefined,
           label: keyProfile?.label,
+          visual_mode: visualMode,
         });
         setState(result.config);
         toast(
@@ -533,6 +538,7 @@ export function UsageOmniConfig() {
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
+        visual_mode: visualMode,
       });
       setTestResult(res);
     } catch (e) {
@@ -551,7 +557,12 @@ export function UsageOmniConfig() {
       return next;
     });
     try {
-      const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
+      const res = await testOmniConfig({
+        label: p.label,
+        model: p.model,
+        base_url: p.base_url,
+        visual_mode: p.visual_mode ?? "video",
+      });
       setRowTestResults((m) => ({ ...m, [p.label]: res }));
       // 测通当前生效那套时,后端已主动清熔断,前端触发一次 refetch 刷新 health,
       // 让状态列从"熔断红/黄"变回"测试结果"。stale 事件复用配置变更通道。
@@ -573,7 +584,12 @@ export function UsageOmniConfig() {
   async function onActivate(p: OmniProfile) {
     setActivating(p.label);
     try {
-      const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
+      const res = await testOmniConfig({
+        label: p.label,
+        model: p.model,
+        base_url: p.base_url,
+        visual_mode: p.visual_mode ?? "video",
+      });
       setRowTestResults((m) => ({ ...m, [p.label]: res }));
       if (severityOf(res) !== "ok") {
         toast(`${t("usage.cannotEnable")}：${testReason(res)}`, severityOf(res) === "warn" ? "warn" : "danger");
@@ -743,6 +759,9 @@ export function UsageOmniConfig() {
                         >
                           <td className="px-5 md:px-6 py-2.5 num text-text-primary">
                             {p.model}
+                            <span className="ml-2 text-text-tertiary">
+                              · {t(p.visual_mode === "frames" ? "usage.visualModeFramesShort" : "usage.visualModeVideoShort")}
+                            </span>
                             {p.active && (
                               <span className="ml-2 align-middle inline-block rounded px-1.5 py-0.5 bg-brand-primary text-white text-caption">
                                 {t("usage.activeTag")}
@@ -1008,6 +1027,36 @@ export function UsageOmniConfig() {
                       </span>
                     </Field>
                   )}
+                  <Field label={t("usage.visualModeLabel")} className="md:col-span-2" group>
+                    <div
+                      className="inline-flex rounded-md border border-border overflow-hidden"
+                      role="radiogroup"
+                      aria-label={t("usage.visualModeLabel")}
+                    >
+                      {(["frames", "video"] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          role="radio"
+                          aria-checked={visualMode === mode}
+                          onClick={() => {
+                            setVisualMode(mode);
+                            setTestResult(null);
+                          }}
+                          className={`px-3 py-1.5 text-caption border-r border-border last:border-r-0 ${
+                            visualMode === mode
+                              ? "bg-brand-primary text-white"
+                              : "bg-bg-secondary text-text-secondary hover:text-text-primary"
+                          }`}
+                        >
+                          {t(mode === "frames" ? "usage.visualModeFrames" : "usage.visualModeVideo")}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-caption mt-1 block text-text-tertiary">
+                      {t(visualMode === "frames" ? "usage.visualModeFramesHint" : "usage.visualModeVideoHint")}
+                    </span>
+                  </Field>
                   <div className="md:col-span-2 pt-1 flex items-center gap-3 flex-wrap">
                     <button
                       type="button"

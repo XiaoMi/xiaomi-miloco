@@ -1,7 +1,9 @@
 """Tests for Omni Layer — Prompt Builder."""
 
+import base64
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 from miloco.perception.engine.omni.prompt_builder import (
     _batch_video_has_audio,
@@ -565,6 +567,67 @@ class TestBuildMessagesContentBlocks:
         assert "video_url" in types
         assert "input_audio" not in types
 
+    def test_frames_mode_emits_exactly_five_compressed_images(self):
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import MiMoAdapter
+
+        ep = _video_route_packet()
+        ep.all_frames = [
+            np.full((720, 1280, 3), value, dtype=np.uint8)
+            for value in range(9)
+        ]
+        payload = build_prompt(ep, OmniContext(), visual_mode="frames")
+
+        assert "video_base64" not in payload
+        assert "audio_base64" not in payload
+        assert [frame["frame_index"] for frame in payload["frame_images"]] == [
+            0, 2, 4, 6, 8,
+        ]
+
+        decoded_sizes = []
+        for frame in payload["frame_images"]:
+            raw = base64.b64decode(frame["data"])
+            assert raw.startswith(b"\xff\xd8") and raw.endswith(b"\xff\xd9")
+            decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+            decoded_sizes.append(decoded.shape[:2])
+        assert decoded_sizes == [
+            (512, 512), (256, 256), (256, 256), (256, 256), (512, 512),
+        ]
+
+        messages = _build_messages(payload, MiMoAdapter())
+        blocks = messages[1]["content"]
+        image_blocks = [block for block in blocks if block["type"] == "image_url"]
+        assert len(image_blocks) == 5
+        assert all(
+            block["image_url"]["url"].startswith("data:image/jpeg;base64,")
+            for block in image_blocks
+        )
+        assert not any(block["type"] == "video_url" for block in blocks)
+
+    def test_frames_mode_duplicates_short_windows_to_keep_five_images(self):
+        ep = _video_route_packet()
+        ep.all_frames = [
+            np.zeros((100, 100, 3), dtype=np.uint8),
+            np.full((100, 100, 3), 255, dtype=np.uint8),
+        ]
+
+        payload = build_prompt(ep, OmniContext(), visual_mode="frames")
+
+        assert len(payload["frame_images"]) == 5
+        assert [frame["frame_index"] for frame in payload["frame_images"]] == [
+            0, 0, 0, 1, 1,
+        ]
+
+    def test_frames_mode_disables_audio_only_route(self):
+        payload = build_prompt(
+            _audio_only_packet(), OmniContext(), visual_mode="frames"
+        )
+
+        assert len(payload["frame_images"]) == 5
+        assert "audio_base64" not in payload
+        assert "## speeches" not in payload["system_prompt"]
+        assert "## env_sounds" not in payload["system_prompt"]
+
 
 class TestFusedAudioRoute:
     """build_fused_payload 在 audio route 下的降级行为。"""
@@ -602,6 +665,28 @@ class TestFusedAudioRoute:
         types = [b["type"] for b in user_blocks]
         assert "video_url" in types
         assert "input_audio" not in types
+
+    def test_fused_frames_mode_emits_five_images_without_video(self):
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        ep = _video_route_packet()
+        ep.all_frames = [
+            np.full((100, 160, 3), value, dtype=np.uint8)
+            for value in range(7)
+        ]
+        fused = build_fused_payload(
+            packets=[ep],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+            visual_mode="frames",
+        )
+        user_blocks = _multimodal_user_content(fused["messages"])
+        types = [block["type"] for block in user_blocks]
+
+        assert types.count("image_url") == 5
+        assert "video_url" not in types
+        assert fused["visual_mode"] == "frames"
 
 
 class TestMultimodalSanityCheck:

@@ -17,7 +17,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
@@ -160,6 +160,13 @@ class OmniModelSettings(BaseModel):
     api_key: str = Field(
         default="",
         description="多模态模型 API Key；为空时视为未配置，插件与后端启动前校验",
+    )
+    visual_mode: Literal["frames", "video"] = Field(
+        default="video",
+        description=(
+            "视觉输入类型：frames 将感知窗口抽取为 5 张压缩 JPEG；"
+            "video 沿用 MP4 视频输入。"
+        ),
     )
 
 

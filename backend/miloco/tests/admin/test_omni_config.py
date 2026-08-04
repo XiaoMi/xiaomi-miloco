@@ -131,6 +131,39 @@ def test_import_selected_models_is_atomic_and_does_not_activate(client):
         "audio-fast",
     }
     assert all(profile["has_key"] for profile in data["config"]["profiles"])
+    assert all(
+        profile["visual_mode"] == "frames"
+        for profile in data["config"]["profiles"]
+    )
+
+
+def test_visual_mode_persists_and_activates(client):
+    created = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "图片模型",
+            "model": "vision-model",
+            "base_url": "https://vision.example/v1",
+            "api_key": "sk-vision-key",
+            "visual_mode": "frames",
+        },
+    ).json()["data"]
+
+    assert created["active"]["visual_mode"] == "frames"
+    assert created["profiles"][0]["visual_mode"] == "frames"
+
+    edited = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "图片模型",
+            "original_label": "图片模型",
+            "model": "vision-model-v2",
+            "base_url": "https://vision.example/v1",
+            "activate": False,
+        },
+    ).json()["data"]
+
+    assert edited["active"]["visual_mode"] == "frames"
 
 
 def test_import_models_deduplicates_request_and_existing_profiles(client):

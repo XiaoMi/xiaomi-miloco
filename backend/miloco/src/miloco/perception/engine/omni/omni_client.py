@@ -144,7 +144,7 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     ``reset_settings()`` 清缓存),即可让新模型在**下一个推理周期**自动生效,无需重启
     进程、不重建引擎。api_key 为空时退回快照值,最终调用点 ``resolve_api_key`` 仍会兜底环境变量。
 
-    副作用:三元组 (model, base_url, api_key) 变化时清熔断状态到 CLOSED。覆盖所有配置源
+    副作用:模型配置 (model, base_url, api_key, visual_mode) 变化时清熔断状态到 CLOSED。覆盖所有配置源
     (web PUT/activate / CLI set / env / 直接改 config.json)——只要 settings 变了就自动重置。
     """
     from dataclasses import replace
@@ -163,11 +163,18 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
 
 
 def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
-    """检测 (model, base_url, api_key) 三元组变化,变了就清熔断。跨调用状态保存在
+    """检测模型连接或视觉输入类型变化,变了就清熔断。跨调用状态保存在
     函数属性 ``._last_triple`` 上——比 module-level global 更内聚。"""
-    triple = (resolved.model, resolved.base_url, resolve_omni_api_key(resolved.api_key))
+    from miloco.config import get_settings
+
+    fingerprint = (
+        resolved.model,
+        resolved.base_url,
+        resolve_omni_api_key(resolved.api_key),
+        getattr(get_settings().model.omni, "visual_mode", "video"),
+    )
     prev = getattr(_maybe_reset_breaker_on_config_change, "_last_triple", None)
-    if prev is not None and prev != triple:
+    if prev is not None and prev != fingerprint:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -176,7 +183,7 @@ def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
             task = loop.create_task(get_omni_circuit_breaker().reset_on_config_change())
             _RESET_TASKS.add(task)
             task.add_done_callback(_RESET_TASKS.discard)
-    _maybe_reset_breaker_on_config_change._last_triple = triple  # type: ignore[attr-defined]
+    _maybe_reset_breaker_on_config_change._last_triple = fingerprint  # type: ignore[attr-defined]
 
 
 async def call_omni(
@@ -364,6 +371,21 @@ def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
         content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
         content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
+
+    for position, frame in enumerate(payload.get("frame_images", []), start=1):
+        content.append({
+            "type": "text",
+            "text": (
+                f"关键帧 {position}/{len(payload['frame_images'])} "
+                f"(frame_index={frame['frame_index']})"
+            ),
+        })
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{frame['media_type']};base64,{frame['data']}"
+            },
+        })
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):

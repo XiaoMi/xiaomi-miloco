@@ -472,6 +472,7 @@ export async function importOmniModels(input: {
   models: string[];
   api_key?: string;
   label?: string;
+  visual_mode?: "frames" | "video";
 }): Promise<OmniModelsImportResult> {
   return impl.realImportOmniModels(input);
 }
