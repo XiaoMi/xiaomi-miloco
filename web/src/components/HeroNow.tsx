@@ -35,6 +35,10 @@ import {
 
 // 每摄像头「感知须知」prompt 长度上限（与 backend MAX_CAMERA_PROMPT_LEN 对齐）。
 const CAMERA_PROMPT_MAX_LEN = 500;
+const RTSP_ADD_BUTTON_CLS =
+  "inline-flex h-9 items-center gap-1.5 px-3.5 rounded-md " +
+  "bg-brand-primary text-white text-caption font-semibold " +
+  "hover:bg-brand-accent transition-colors";
 
 // 「关声音」确认弹窗的「不再提醒」持久化标记（与 web:theme / web:lang 同命名空间）。
 // 复位说明：清除站点数据 / localStorage 即恢复弹窗；本分支不做设置项 UI——将来若加
@@ -403,17 +407,17 @@ function CameraSection({
 
   return (
     <>
-      <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
         <div className="flex items-baseline gap-2">
           <SectionLabel>{t("hero.liveLabel")}</SectionLabel>
         </div>
-        <div className="text-caption flex items-center gap-2 text-text-tertiary">
+        <div className="text-caption flex items-center gap-2 text-text-tertiary flex-wrap">
           <button
             type="button"
             onClick={() => setRtspDialogCamera(null)}
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-bg-primary border border-border hover:border-border-strong hover:text-text-primary transition-colors"
+            className={RTSP_ADD_BUTTON_CLS}
           >
-            <IconPlus width={14} height={14} />
+            <IconPlus width={16} height={16} />
             {t("hero.addRtsp")}
           </button>
           {total > 0 && (
@@ -453,18 +457,26 @@ function CameraSection({
       </div>
       {total === 0 ? (
         <div className="text-body rounded-lg bg-bg-primary border border-dashed border-border-strong text-text-secondary py-8 px-5 text-center">
-          {miotHasCamera ? (
-            <>
-              <div className="text-warning mb-1">
-                {t("hero.cameraOfflineTitle")}
-              </div>
-              <div>
-                {t("hero.cameraOfflineHint")}
-              </div>
-            </>
-          ) : (
-            <>{t("hero.cameraEmpty")}</>
-          )}
+          <div>
+            {miotHasCamera ? (
+              <>
+                <div className="text-warning mb-1">
+                  {t("hero.cameraOfflineTitle")}
+                </div>
+                <div>{t("hero.cameraOfflineHint")}</div>
+              </>
+            ) : (
+              <>{t("hero.cameraEmpty")}</>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setRtspDialogCamera(null)}
+            className={`${RTSP_ADD_BUTTON_CLS} mt-4`}
+          >
+            <IconPlus width={16} height={16} />
+            {t("hero.addRtsp")}
+          </button>
         </div>
       ) : (
         <>
