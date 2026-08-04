@@ -23,7 +23,11 @@ import {
   submitOnDemandFeedback,
   subscribeEvents,
 } from "@/api";
-import { humanizeRulesInText } from "@/lib/eventText";
+import {
+  humanizeRulesInText,
+  splitHumanizedSections,
+  type TriggerStatusKind,
+} from "@/lib/eventText";
 import type { ActivityEvent, EventCropMeta, HomeId, OnDemandLogEntry } from "@/lib/types";
 
 /** Lightbox 内容类型:clip 走 <video>,Smart Crop 参考帧走 <img>. */
@@ -782,6 +786,36 @@ function TimeRangeFilter({
   );
 }
 
+/**
+ * 折叠态的「触发状态」badge。
+ *
+ * 只在折叠态出现：那里每段裁 2 行且无 `pre-wrap`，而「触发状态」排在长度无上界的
+ * 任务 / 规则之后，常被裁掉 —— badge 定长、排最前，稳定可见。展开态仍读原文本行。
+ *
+ * 配色语义：**颜色承载「有没有触发」**（绿=已触发 / 灰=未触发 / 琥珀=判不出），
+ * 文字只说「为什么」。所以三种「未触发」共用灰色，短文案（持续中 / 计时中）单独看
+ * 略有歧义也不至于误解成「已触发」；精确全称在 title 悬停与展开态里。
+ */
+function TriggerStatusBadge({ kind }: { kind: TriggerStatusKind }) {
+  const { t } = useTranslation();
+  const tone =
+    kind === "fired"
+      ? "text-success bg-success-bg"
+      : kind === "unknown"
+        ? "text-warning bg-warning-bg"
+        : "text-text-tertiary bg-bg-tertiary";
+  const key = kind.charAt(0).toUpperCase() + kind.slice(1);
+  return (
+    <span
+      className={`inline-flex items-center gap-1 mr-1.5 px-2 rounded-full text-caption align-[2px] ${tone}`}
+      title={t(`activity.trigger${key}Hint`)}
+    >
+      <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0" aria-hidden="true" />
+      {t(`activity.trigger${key}`)}
+    </span>
+  );
+}
+
 function ActivityRow({
   event,
   onOpenLightbox,
@@ -809,10 +843,10 @@ function ActivityRow({
     () => humanizeRulesInText(event.text, event.rule_names),
     [event.text, event.rule_names],
   );
-  const sections = useMemo(
-    () => humanized.split(/\n\n/).filter((s) => s.trim()),
-    [humanized],
-  );
+  // 折叠态:抽出每段的「触发状态」渲染成 badge(见 splitHumanizedSections 注释——折叠态
+  // 无 pre-wrap + 裁 2 行,状态行排在长度无上界的任务/规则之后常被裁掉).展开态不用它、
+  // 仍渲染完整 humanized 原文(状态行照旧在「规则」之后).
+  const sections = useMemo(() => splitHumanizedSections(humanized), [humanized]);
 
   // 行尾标识:
   //   - 视频 clip → 🎬
@@ -850,7 +884,8 @@ function ActivityRow({
                   overflow: "hidden",
                 }}
               >
-                {s}
+                {s.status && <TriggerStatusBadge kind={s.status} />}
+                {s.text}
               </span>
             ))
           )}
