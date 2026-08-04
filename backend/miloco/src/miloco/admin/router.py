@@ -1093,16 +1093,37 @@ class PerceptionConfigBody(BaseModel):
 
 
 def _perception_config_payload() -> dict:
+    from miloco.perception.engine.config import CropEnhanceConfig
     from miloco.perception.engine.omni.crop_enhance import (
         crop_enhance_config_from_settings,
     )
 
     s = get_settings()
+    # perception.engine 是 dict[str, Any](值不过校验),input 这一块可能被写成非 mapping
+    # (env MILOCO_PERCEPTION__ENGINE__INPUT=512 / config.json 手写 "input": "512"),
+    # 此时下面的 inp.get 会抛 AttributeError。fail-closed 退默认:GET/PUT 都走本函数投影,
+    # 一抛就把「进 UI 把配置改回来」这条自救路堵死(PUT 的 update_shared_config 在投影之后)。
+    # 推理侧同款坏值不至于崩(_get_video_short_edge / _gemini_media_resolution 各自有 try,
+    # 回退默认档),所以这里是该坏值唯一的 500 来源。
     inp = s.perception.engine.get("input", {})
+    if not isinstance(inp, dict):
+        logger.warning(
+            "event=perception_config_bad field=input reason=not_mapping raw=%r 退默认", inp
+        )
+        inp = {}
     # 两个闸位不自己 bool(raw.get(...)),走运行时同一条读取路径:裸 bool() 会把
     # `enabled: "false"` 判成 truthy → GET 报 available=true 而运行时不裁(推理见
     # crop_enhance_config_from_settings 的注释)。
-    ce = crop_enhance_config_from_settings()
+    # 这次读取再单独兜一层:上面那类已知坏形状 crop_enhance_config_from_settings 内部已
+    # fail-closed,但 settings 层还可能有别的意外。读不到就报 available=false(前端置灰、
+    # 提示看日志),而不是让 GET/PUT 一起 500(理由同上)。
+    try:
+        ce = crop_enhance_config_from_settings()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "event=perception_config_crop_enhance_read_failed 报 available=false", exc_info=True
+        )
+        ce = CropEnhanceConfig()
     return {
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),

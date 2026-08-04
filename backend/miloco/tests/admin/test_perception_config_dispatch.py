@@ -199,6 +199,85 @@ def test_smart_crop_gates_non_bool_match_runtime(client, tmp_path):
     assert data["smart_crop_enabled"] is False
 
 
+@pytest.mark.parametrize("bad", ["false", True, 1, ["enabled"]])
+def test_crop_enhance_non_mapping_keeps_endpoint_alive(client, tmp_path, bad):
+    """``crop_enhance`` 整块被写成非 mapping 时,GET 仍须 200 + available=false。
+
+    `or {}` 只吞 falsy:env `MILOCO_PERCEPTION__ENGINE__CROP_ENHANCE=false` 得到的是字符串
+    "false"、手写 config.json 可能是 `true` —— 这类 truthy 非 dict 会原样进到 `.items()`
+    并抛 AttributeError。而本端点是「配置改错了改回来」的自救入口(PUT 也走同一个投影函数),
+    一起 500 就把自救路堵死了。故必须 fail-closed 退默认(=禁用)而不是抛。
+    """
+    from miloco.config.settings import reset_settings
+
+    c, _svc = client
+    (tmp_path / "config.json").write_text(
+        _json.dumps(
+            {
+                "perception": {
+                    "engine": {
+                        "input": {"omni_fps": 1, "video_short_edge": 512},
+                        "crop_enhance": bad,
+                    },
+                    "collect": {"window_size": 8},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    reset_settings()
+
+    resp = c.get("/api/admin/perception-config")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["smart_crop_available"] is False
+    assert data["smart_crop_enabled"] is False
+
+
+def test_input_block_non_mapping_keeps_endpoint_alive(client, tmp_path):
+    """``perception.engine.input`` 整块被写成非 mapping 时,GET 仍须 200 + 取默认档。
+
+    与上面 crop_enhance 同款坏值、同款连坐:`inp.get(...)` 会抛 AttributeError,而 PUT 先
+    投影响应、后 update_shared_config,一抛连写盘都到不了 —— 用户在 UI 里改不回来。
+    推理侧不至于崩(_get_video_short_edge 自带 try 回退 512),所以这里是唯一的 500 来源。
+    """
+    from miloco.config.settings import reset_settings
+
+    c, _svc = client
+    (tmp_path / "config.json").write_text(
+        _json.dumps(
+            {"perception": {"engine": {"input": "512"}, "collect": {"window_size": 8}}}
+        ),
+        encoding="utf-8",
+    )
+    reset_settings()
+
+    resp = c.get("/api/admin/perception-config")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["video_short_edge"] == 512  # 退默认档,不是 500
+    assert data["omni_fps"] == 1
+
+
+def test_crop_enhance_read_error_degrades_to_unavailable(client, monkeypatch):
+    """读取意外抛错(非上面那类已 fail-closed 的情形)→ 报 available=false,不让端点 500。
+
+    投影函数里只有这一步会去解析用户手写结构,单独兜底;GET/PUT 都靠它,500 会连带
+    把 PUT 的 deep_merge 自愈也堵掉。
+    """
+    import miloco.perception.engine.omni.crop_enhance as ce_mod
+
+    def _boom():
+        raise RuntimeError("settings exploded")
+
+    # 端点内是函数级 import,故 patch 源模块属性(patch router 模块属性不会生效)
+    monkeypatch.setattr(ce_mod, "crop_enhance_config_from_settings", _boom)
+    c, _svc = client
+    resp = c.get("/api/admin/perception-config")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["smart_crop_available"] is False
+
+
 def test_min_urgency_change_writes_config_no_restart(client):
     """min_suggestion_urgency 走热读路径:落盘即生效,不参与 restart 分派。"""
     c, svc = client

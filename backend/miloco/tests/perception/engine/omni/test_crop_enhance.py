@@ -4,6 +4,7 @@ import numpy as np
 from miloco.perception.engine.config import CropEnhanceConfig
 from miloco.perception.engine.omni.crop_enhance import (
     compute_crop_region,
+    compute_crop_region_detail,
     compute_motion_blocks,
     crop_frames,
     remap_bbox_norm_to_crop,
@@ -168,6 +169,59 @@ class TestCropRegion:
         assert compute_crop_region([], frames, CFG, motion_blocks=[]) is None
 
 
+# ---------------- compute_crop_region_detail(拒因分类) ----------------
+
+class TestCropRegionReason:
+    """拒因只能由本函数给出 —— 调用方拿并集面积反推会系统性错标(见函数 docstring)。"""
+
+    def test_reason_ok_carries_region(self):
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        region, reason = compute_crop_region_detail([(10, 10, 30, 30)], frames, CFG)
+        assert region == (2, 4, 38, 36) and reason == "ok"
+
+    def test_no_frames(self):
+        assert compute_crop_region_detail([(1, 1, 2, 2)], [], CFG) == (None, "no_frames")
+
+    def test_no_activity(self):
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)] * 2
+        assert compute_crop_region_detail([], frames, CFG, motion_blocks=[]) == (
+            None, "no_activity",
+        )
+
+    def test_union_inside_band_but_expanded_over_max_is_too_large(self):
+        """并集面积在 [10%, 49%] band 内、扩展后才超上限 → 必须报 area_too_large。
+
+        这是"据并集反推拒因"错得最系统的一格:并集 50x35/10000 = 17.5%,既不 > 49% 也不
+        < 10%,二分反推只能落到 area_too_small,而真因是扩展后 90x55 = 49.5% 超了上限。
+        两者运维处置相反(一个要查是什么撑开了并集,一个是几何天花板、无需处置)。
+        """
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        region, reason = compute_crop_region_detail([(25, 25, 75, 60)], frames, CFG)
+        assert region is None
+        assert reason == "area_too_large"
+
+    def test_degenerate_region(self):
+        # 零面积框:扩展量 int(0*ratio)=0,区域仍零宽高 → degenerate。顺带钉住闸序
+        # (degenerate 排在面积两闸之前,否则这里会得到 area_too_small)。
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        assert compute_crop_region_detail([(5, 5, 5, 5)], frames, CFG) == (None, "degenerate")
+
+    def test_edge_hugging_small_box_is_too_small(self):
+        # 贴角极小框:绕中心放大被 clamp 截断,复检仍不足下限 → area_too_small
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        region, reason = compute_crop_region_detail([(0, 0, 4, 4)], frames, CFG)
+        if region is None:
+            assert reason == "area_too_small"
+
+    def test_wrapper_matches_detail(self):
+        # 薄封装与 detail 同源:两者分叉时(例如只改了一边的闸)这里会红
+        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
+        for boxes in ([(10, 10, 30, 30)], [(25, 25, 75, 60)], []):
+            assert compute_crop_region(boxes, frames, CFG) == (
+                compute_crop_region_detail(boxes, frames, CFG)[0]
+            )
+
+
 # ---------------- crop_frames ----------------
 
 class TestCropFrames:
@@ -263,7 +317,9 @@ class TestConfigFromSettings:
     """
 
     @staticmethod
-    def _with_engine_config(tmp_path, monkeypatch, crop_enhance: dict) -> None:
+    # crop_enhance 不标 dict:有用例故意写成非 mapping(见
+    # test_non_mapping_block_falls_back_to_defaults)。
+    def _with_engine_config(tmp_path, monkeypatch, crop_enhance: object) -> None:
         import json
 
         from miloco.config.settings import reset_settings
@@ -326,6 +382,28 @@ class TestConfigFromSettings:
                 cfg = crop_enhance_config_from_settings()
                 # 退默认(enabled=False/user_enabled=False)→ 双闸相与必然不裁
                 assert not (cfg.enabled and cfg.user_enabled), f"闸被 {bad!r} 绕开"
+            finally:
+                reset_settings()
+
+    def test_non_mapping_block_falls_back_to_defaults(self, tmp_path, monkeypatch):
+        """整块 crop_enhance 被写成 truthy 非 dict → 退默认(=禁用),不抛 AttributeError。
+
+        `or {}` 只吞 falsy,"false" / true / 1 / 列表这些真值非结构会原样进到 .items()。
+        这里是唯一能钉住 isinstance(raw, dict) 那一闸的位置:admin 侧的同形用例被端点自己的
+        try/except 兜住(抓到 AttributeError 也报 available=false),推理侧被主流程的宽 except
+        兜成 reason=exception —— 两处都是"闸删了照样绿"。
+        """
+        from miloco.config.settings import reset_settings
+        from miloco.perception.engine.omni.crop_enhance import (
+            crop_enhance_config_from_settings,
+        )
+
+        for bad in ("false", True, 1, ["enabled"]):
+            self._with_engine_config(tmp_path, monkeypatch, bad)
+            try:
+                cfg = crop_enhance_config_from_settings()
+                assert cfg.enabled is False, bad
+                assert cfg.user_enabled is False, bad
             finally:
                 reset_settings()
 

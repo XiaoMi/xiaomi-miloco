@@ -142,18 +142,43 @@ def compute_crop_region(
     ``det_boxes`` 是窗口内**每一抽帧**的 human/cat/dog 框(``IdentityPacket.main_det_boxes``),
     由调用方给入 —— 本模块不从 ``targets``/``box_info`` 取框,那只有末帧且没有宠物。
     ``motion_blocks`` 可由调用方预算后传入(免重复算 CV,也便于打诊断日志),缺省时内部自算。
+
+    只要区域本身;需要区分"为什么没裁"时用 ``compute_crop_region_detail``。
+    """
+    return compute_crop_region_detail(
+        det_boxes, frames, cfg, motion_blocks=motion_blocks
+    )[0]
+
+
+def compute_crop_region_detail(
+    det_boxes: list[Region],
+    frames: list[NDArray[np.uint8]],
+    cfg: CropEnhanceConfig,
+    *,
+    motion_blocks: list[Region] | None = None,
+) -> tuple[Region | None, str]:
+    """同 ``compute_crop_region``,但一并返回拒因,供调用方打诊断日志。
+
+    返回 ``(region, reason)``;``region`` 非 None 时 ``reason == "ok"``。拒因取值:
+    ``no_frames`` / ``no_activity``(无框且无运动块) / ``degenerate``(区域退化成零宽高) /
+    ``area_too_large`` / ``area_too_small``。
+
+    拒因**必须由本函数给出**,调用方拿并集面积去反推会算错:并集只是入参,真正过闸的是
+    非对称扩展 + 最小面积放大之后的 region,后者面积恒 ≥ 并集(两步都只扩不缩)。据并集判
+    会把 ``并集面积 ∈ [min, max]`` 区间内的每一次拒绝(成因必为 area_too_large)误标成
+    area_too_small —— 而两者的运维处置正好相反。
     """
     if not frames:
-        return None
+        return None, "no_frames"
     h, w = frames[0].shape[:2]
     if w == 0 or h == 0:
-        return None
+        return None, "no_frames"
 
     if motion_blocks is None:
         motion_blocks = compute_motion_blocks(frames, cfg)
     all_boxes = list(det_boxes) + list(motion_blocks)
     if not all_boxes:
-        return None  # 无检测框且无显著运动块 → 无裁切依据
+        return None, "no_activity"  # 无检测框且无显著运动块 → 无裁切依据
 
     # 并集
     ux1 = min(b[0] for b in all_boxes)
@@ -172,16 +197,20 @@ def compute_crop_region(
 
     rx1, ry1, rx2, ry2 = region
     if (rx2 - rx1) <= 0 or (ry2 - ry1) <= 0:
-        return None
+        return None, "degenerate"
     area_ratio = ((rx2 - rx1) * (ry2 - ry1)) / (w * h)
-    # 最大面积:超过则 crop 缩到 crop_short_edge 后等效分辨率反低于全景 → 回退全景
+    # 最大面积:区域大到接近全景时裁切已没有意义(视野几乎没收窄,却多付一次编码)→ 回退全景。
+    # 它是**语义上限,不是像素预算**:接入"短边不足预算时放大"之后,编码像素被钉在
+    # 预算² × 区域长宽比上、与区域面积无关,所以本闸既不保证像素开销不涨、也不保证主体
+    # 像素密度高于同档全景(扁长区域可以面积远低于 0.49 而短边比反而更大)。详见
+    # CropEnhanceConfig.crop_short_edge 与 _crop_short_edge_budget 的注释。
     if area_ratio > cfg.crop_max_area_ratio:
-        return None
+        return None, "area_too_large"
     # 最小面积复检:目标紧贴画面边缘时 _enforce_min_area 绕中心放大会被 clamp 截断、
     # 达不到下限,此时裁切等效分辨率无收益 → 回退全景(_enforce_min_area 只尽力、不保证)。
     if area_ratio < cfg.crop_min_area_ratio:
-        return None
-    return region
+        return None, "area_too_small"
+    return region, "ok"
 
 
 def crop_frames(
@@ -211,8 +240,12 @@ def remap_bbox_norm_to_crop(
     抽帧主体框的并集(末帧那一帧也在其中) → 扩展 → 只放大的最小面积约束。但不当作前置条件
     依赖:两者取自不同来源(名册走 ``box_info``/``bbox_xyxy_norm``,区域走 ``main_det_boxes``),
     检测阈值边界上同一个人可能只进其中一边,且检测框可能溢出帧外。故此处一律 clamp,换算后
-    退化(宽或高 <= 0,即框完全落在区域外)返回 None —— 调用方据此退化为"只给姓名不给位置",
-    不输出错坐标。
+    退化(宽或高 <= 0,即框完全落在区域外)返回 None。
+
+    两个调用点据此的处置**不同**:名册 bbox 是先验,退化为"只给姓名不给位置"
+    (``_render_roster_entry``);候选 bbox 是模型分配身份的定位锚,不允许退化 ——
+    ``build_fused_payload`` 的 region_ok 在裁切前先跑一遍本函数,任一候选换不出就整窗
+    回退全景(``_candidate_bbox_ok``)。两者都不输出错坐标。
     """
     fw, fh = frame_size
     rx1, ry1, rx2, ry2 = region
@@ -243,6 +276,23 @@ def crop_enhance_config_from_settings() -> CropEnhanceConfig:
 
         raw = get_settings().perception.engine.get("crop_enhance", {}) or {}
     except Exception:  # noqa: BLE001 —— settings 不可用时退默认(=禁用)
+        return CropEnhanceConfig()
+    # raw 非 mapping 时 fail-closed 退默认(=禁用)。`or {}` 只吞 falsy,truthy 非 dict
+    # (如 env MILOCO_PERCEPTION__ENGINE__CROP_ENHANCE=false 得到的字符串 "false",或
+    # config.json 里手写 `"crop_enhance": true`)会原样留下,下面的 .items() 就抛
+    # AttributeError。两个生产调用点抛了都是坏事:推理主路径(_maybe_encode_adaptive)会折成
+    # reason=exception 的回退、admin GET/PUT(_perception_config_payload)会 500 —— 而 PUT
+    # 正是「把配置改回来」的自救入口,它先投影响应再 update_shared_config,一抛连写盘都到不了,
+    # deep_merge 自愈跑不起来。故在此就地拦住,与下面 gate_not_bool / not_number 同款。
+    # 注:CLI(`miloco config set`)不调本函数(它是独立进程,不 import miloco 后端),
+    # 有自己的 _validate_structure —— 对 perception.engine.crop_enhance 非 object 一律
+    # raise ValueError,本闸救不了那条路,只能手改 config.json(见 cli/src/miloco_cli/config.py)。
+    # 另注:env 注入的这一份 PUT 也盖不掉,env 优先级高于 config.json
+    # (config/settings.py 的 settings_customise_sources),得先去掉环境变量。
+    if not isinstance(raw, dict):
+        logger.warning(
+            "event=crop_enhance_config_bad reason=not_mapping raw=%r 退默认(禁用)", raw
+        )
         return CropEnhanceConfig()
     known = CropEnhanceConfig.__dataclass_fields__.keys()
     filtered = {k: v for k, v in raw.items() if k in known}
