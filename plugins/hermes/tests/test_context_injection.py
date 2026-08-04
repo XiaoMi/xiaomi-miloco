@@ -162,6 +162,14 @@ def _days_ago_iso(days):
     return (datetime.now().astimezone() - timedelta(days=days)).isoformat()
 
 
+# 固定时间戳（与 openclaw injection.test.ts 同款）：asked_at 用 +08:00 后缀，
+# 7 天边界用注入 now 精确验证，避免 buildPendingSuggestionBlock 内部真实 now 的
+# 毫秒级延迟把「恰好 7 天」的边界判定翻到另一侧（CI flaky 根因）。
+_ASKED_TS = "2026-06-06T10:00:00+08:00"
+_EXACTLY_7D_NOW = "2026-06-13T10:00:00+08:00"  # 恰好 7*86_400_000 ms → 含
+_JUST_OVER_7D_NOW = "2026-06-13T10:00:00.001+08:00"  # 超 1ms → 排除
+
+
 def test_pending_block_injects_open_question_and_uses_cli(tmp_miloco_home):
     """有未过期 asked 条目 → 注入块出现，且引导 agent 用 miloco-cli habit resolve（非旧 tool）。"""
     _write_suggestions(tmp_miloco_home, [
@@ -177,20 +185,28 @@ def test_pending_block_injects_open_question_and_uses_cli(tmp_miloco_home):
 
 
 def test_pending_block_ignores_non_asked_and_expired(tmp_miloco_home):
-    """非 asked 状态 / 超过 7 天 → 不注入（空串，静默）。"""
+    """非 asked 状态 / 已过 7 天 → 不注入（空串，静默）。"""
     _write_suggestions(tmp_miloco_home, [
         {"key": "pending_k", "title": "T", "suggestion": "S", "status": "pending", "asked_at": None},
-        {"key": "expired_k", "title": "T", "suggestion": "S", "status": "asked", "asked_at": _days_ago_iso(8)},
+        # 固定 2026-06-06 → 距今（测试运行时刻）远超 7 天，确定过期
+        {"key": "expired_k", "title": "T", "suggestion": "S", "status": "asked", "asked_at": _ASKED_TS},
     ])
     assert ci.build_pending_suggestion_block() == ""
 
 
-def test_pending_block_seven_day_boundary(tmp_miloco_home):
-    """恰好 7 天（== STALE_MS）仍视为未过期 → 注入；超过一天则作废。"""
+def test_load_open_questions_seven_day_boundary(tmp_miloco_home):
+    """7 天边界精确验证（注入 now，确定性）：恰好 7 天含，超 1ms 排除。
+
+    直接测 load_open_questions(now_iso)，用固定 asked_at + 固定 now 卡在
+    604800000 ms 两侧，消除真实 now 毫秒延迟导致的 flaky。
+    """
     _write_suggestions(tmp_miloco_home, [
-        {"key": "at7", "title": "T", "suggestion": "S", "status": "asked", "asked_at": _days_ago_iso(7)},
+        {"key": "wl_gym", "title": "健身", "suggestion": "放歌单", "status": "asked", "asked_at": _ASKED_TS},
     ])
-    assert "## 等用户回应的习惯建议" in ci.build_pending_suggestion_block()
+    # 恰好 7 天（== STALE_MS）→ 仍算未过期，含
+    assert len(ci.load_open_questions(now_iso=_EXACTLY_7D_NOW)) == 1
+    # 超 1ms → 排除
+    assert len(ci.load_open_questions(now_iso=_JUST_OVER_7D_NOW)) == 0
 
 
 def test_pending_block_missing_or_corrupt_file_is_empty(tmp_miloco_home):
