@@ -37,6 +37,7 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  OmniModelsImportResult,
 } from "@/lib/types";
 
 // backend NormalResponse 包装：{ code, message, data }
@@ -1649,6 +1650,25 @@ export async function realListOmniModels(input: {
   if (input.label) body.label = input.label;
   const r = await apiFetch<Normal<OmniModelsResult>>(
     "/api/admin/omni-config/models",
+    { method: "POST", body: JSON.stringify(body) },
+  );
+  return r.data;
+}
+
+export async function realImportOmniModels(input: {
+  base_url: string;
+  models: string[];
+  api_key?: string;
+  label?: string;
+}): Promise<OmniModelsImportResult> {
+  const body: Record<string, string | string[]> = {
+    base_url: input.base_url,
+    models: input.models,
+  };
+  if (input.api_key) body.api_key = input.api_key;
+  if (input.label) body.label = input.label;
+  const r = await apiFetch<Normal<OmniModelsImportResult>>(
+    "/api/admin/omni-config/models/import",
     { method: "POST", body: JSON.stringify(body) },
   );
   return r.data;

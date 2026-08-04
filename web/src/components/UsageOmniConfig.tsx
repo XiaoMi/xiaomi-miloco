@@ -4,10 +4,10 @@
  * 两块:
  * - 上:**当前模型** —— 当前生效配置(model / Base URL / 打码 key);未配 key 给警告。
  * - 下:**模型列表** —— 每行 模型 | Base URL | API Key(打码),可「启用」/「删除」;
- *   「＋ 新增」展开表单(Base URL → API Key → 模型组合框 + 测试连接 + 保存)。
+ *   「＋ 新增」从 provider 目录搜索并勾选模型后原子导入，编辑仍走单项表单。
  *
- * 档案名对用户隐藏:内部用 `model @ base_url` 作为后端 label(唯一 id)。重复添加同
- * (model, base_url) = 更新该配置的 key(等价编辑)。后端按 label activate/delete/upsert。
+ * 档案名对用户隐藏:内部用 `model @ base_url` 作为后端 label(唯一 id)。批量导入同
+ * (model, base_url) 会跳过；更新 Key / URL 走列表的单项编辑。
  * 保存写 config.json,感知下个推理周期热生效(免重启);api_key 打码、留空=沿用原 key。
  */
 
@@ -20,11 +20,12 @@ import {
   activateOmniConfig,
   deactivateOmniConfig,
   deleteOmniConfig,
+  importOmniModels,
   listOmniModels,
   testOmniConfig,
 } from "@/api";
 import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
-import { IconX, IconEye, IconEyeOff } from "@/lib/icons";
+import { IconX, IconEye, IconEyeOff, IconRefresh } from "@/lib/icons";
 import { toast } from "./Toast";
 
 const INPUT_CLS =
@@ -79,15 +80,35 @@ function hostOf(url: string): string {
   }
 }
 
+function normalizeProviderUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
 function Field({
   label,
   children,
   className = "",
+  group = false,
 }: {
   label: string;
   children: React.ReactNode;
   className?: string;
+  group?: boolean;
 }) {
+  if (group) {
+    return (
+      <div
+        className={`block ${className}`}
+        role="group"
+        aria-label={label}
+      >
+        <span className="text-caption text-text-secondary mb-1 block">
+          {label}
+        </span>
+        {children}
+      </div>
+    );
+  }
   return (
     <label className={`block ${className}`}>
       <span className="text-caption text-text-secondary mb-1 block">{label}</span>
@@ -170,6 +191,91 @@ function ComboBox({
   );
 }
 
+function ModelMultiSelect({
+  options,
+  selected,
+  onChange,
+}: {
+  options: string[];
+  selected: string[];
+  onChange: (models: string[]) => void;
+}) {
+  const { t } = useTranslation();
+  const [query, setQuery] = useState("");
+  const normalized = query.trim().toLowerCase();
+  const visible = normalized
+    ? options.filter((item) => item.toLowerCase().includes(normalized))
+    : options;
+  const selectedSet = new Set(selected);
+
+  const toggle = (model: string) => {
+    onChange(
+      selectedSet.has(model)
+        ? selected.filter((item) => item !== model)
+        : [...selected, model],
+    );
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-bg-secondary overflow-hidden">
+      <div className="flex items-center gap-2 p-2 border-b border-border flex-wrap">
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={t("usage.modelSearchPlaceholder")}
+          aria-label={t("usage.modelSearchPlaceholder")}
+          className="min-w-[12rem] flex-1 px-2.5 py-1.5 rounded-md bg-bg-primary border border-border focus:border-brand-primary focus:outline-none text-text-primary num"
+        />
+        <span className="text-caption text-text-tertiary num">
+          {t("usage.selectedCount", { n: selected.length })}
+        </span>
+        <button
+          type="button"
+          onClick={() =>
+            onChange([...new Set([...selected, ...visible])])
+          }
+          disabled={visible.length === 0}
+          className="text-caption text-brand-primary disabled:opacity-40"
+        >
+          {t("usage.selectVisible")}
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange([])}
+          disabled={selected.length === 0}
+          className="text-caption text-text-secondary disabled:opacity-40"
+        >
+          {t("usage.clearSelection")}
+        </button>
+      </div>
+      <div className="max-h-64 overflow-y-auto">
+        {visible.length === 0 ? (
+          <div className="px-3 py-6 text-center text-caption text-text-tertiary">
+            {t("usage.noMatchingModels")}
+          </div>
+        ) : (
+          visible.map((item) => (
+            <label
+              key={item}
+              className="flex items-start gap-2 px-3 py-2 border-b border-border last:border-b-0 hover:bg-bg-primary cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={selectedSet.has(item)}
+                onChange={() => toggle(item)}
+                className="mt-0.5"
+              />
+              <span className="min-w-0 break-all text-caption text-text-primary num">
+                {item}
+              </span>
+            </label>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function UsageOmniConfig() {
   const { t } = useTranslation();
   const [state, setState] = useState<OmniConfigState | null>(null);
@@ -184,6 +290,9 @@ export function UsageOmniConfig() {
   const [showKey, setShowKey] = useState(false); // API Key 明文/密文切换(末端眼睛图标)
   const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const modelsRequestRef = useRef(0);
+  const modelsSourceRef = useRef("");
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsMsg, setModelsMsg] = useState<string | null>(null);
   const [modelsErr, setModelsErr] = useState(false); // modelsMsg 是否为错误(决定红色突出)
@@ -223,37 +332,44 @@ export function UsageOmniConfig() {
   const profiles = state?.profiles ?? [];
   const active = state?.active;
   const hasKey = active?.has_key ?? false;
-  // 新增表单里同 (model, base_url) 是否已存(→ 改为更新该条)
+  // 新增表单里同 (model, normalized base_url) 是否已存，用于复用其凭据。
   const existing = profiles.find(
-    (p) => p.base_url === baseUrl.trim() && p.model === model.trim(),
+    (profile) =>
+      normalizeProviderUrl(profile.base_url) ===
+        normalizeProviderUrl(baseUrl) && profile.model === model.trim(),
   );
 
+  function resetModelCatalog() {
+    modelsRequestRef.current += 1;
+    modelsSourceRef.current = "";
+    setModels([]);
+    setSelectedModels([]);
+    setModelsLoading(false);
+    setModelsMsg(null);
+    setModelsErr(false);
+    setModelsErrCode(null);
+  }
+
   function startAdd() {
+    resetModelCatalog();
     setAdding(true);
     setEditing(null);
     setBaseUrl("");
     setApiKey("");
     setShowKey(false);
     setModel("");
-    setModels([]);
-    setModelsMsg(null);
-    setModelsErr(false);
-    setModelsErrCode(null);
     setTestResult(null);
   }
 
   // 编辑已有配置:预填 base_url / model,key 留空(占位提示「留空则不修改」),复用同一表单与 onSave 的 upsert。
   function startEdit(p: OmniProfile) {
+    resetModelCatalog();
     setAdding(true);
     setEditing(p.label);
     setBaseUrl(p.base_url);
     setApiKey("");
     setShowKey(false);
     setModel(p.model);
-    setModels([]);
-    setModelsMsg(null);
-    setModelsErr(false);
-    setModelsErrCode(null);
     setTestResult(null);
     void fetchModels(p.base_url, "", p.label);
   }
@@ -261,7 +377,22 @@ export function UsageOmniConfig() {
   // label 非空时:编辑态下未填新 key 也能让后端用该档案存档 key 拉模型(否则需 key 的厂商
   // 会回 bad_key,一打开编辑就误报红错)。
   async function fetchModels(bu: string, key: string, label?: string | null) {
-    if (!bu.trim()) return;
+    const requestId = ++modelsRequestRef.current;
+    if (!bu.trim()) {
+      setModels([]);
+      setSelectedModels([]);
+      setModelsLoading(false);
+      modelsSourceRef.current = "";
+      return;
+    }
+    const sourceUrl = normalizeProviderUrl(bu);
+    const credentialLabel =
+      label ||
+      profiles.find(
+        (profile) =>
+          profile.has_key &&
+          normalizeProviderUrl(profile.base_url) === sourceUrl,
+      )?.label;
     setModelsLoading(true);
     setModelsMsg(null);
     setModelsErr(false);
@@ -270,53 +401,90 @@ export function UsageOmniConfig() {
       const res = await listOmniModels({
         base_url: bu.trim(),
         api_key: key.trim() || undefined,
-        label: label || undefined,
+        label: credentialLabel,
       });
+      if (requestId !== modelsRequestRef.current) return;
       if (res.ok) {
         setModels(res.models);
+        setSelectedModels((current) =>
+          modelsSourceRef.current === sourceUrl
+            ? current.filter((item) => res.models.includes(item))
+            : [],
+        );
+        modelsSourceRef.current = sourceUrl;
         if (!res.models.length) setModelsMsg(t("usage.modelsEmptyResult"));
       } else {
         setModels([]);
+        setSelectedModels([]);
+        modelsSourceRef.current = sourceUrl;
         const k = res.code ? OMNI_CODE_KEY[res.code] : undefined;
         setModelsMsg(k ? t(k) : res.message || t("usage.modelsFetchFailed"));
         setModelsErr(true);
         setModelsErrCode(res.code ?? null);
       }
     } catch (e) {
+      if (requestId !== modelsRequestRef.current) return;
       setModels([]);
+      setSelectedModels([]);
+      modelsSourceRef.current = sourceUrl;
       setModelsMsg(e instanceof Error ? e.message : t("usage.modelsFetchFailed"));
       setModelsErr(true);
       setModelsErrCode("unreachable"); // 网络/解析异常归为 Base URL 不可达
     } finally {
-      setModelsLoading(false);
+      if (requestId === modelsRequestRef.current) setModelsLoading(false);
     }
   }
 
   async function onSave() {
     const bu = baseUrl.trim();
     const m = model.trim();
-    if (!bu || !m) {
-      toast(t("usage.baseUrlModelRequired"), "warn");
+    const modelsToImport = [
+      ...selectedModels,
+      ...(m && !selectedModels.includes(m) ? [m] : []),
+    ];
+    if (!bu || (editing ? !m : modelsToImport.length === 0)) {
+      toast(
+        editing
+          ? t("usage.baseUrlModelRequired")
+          : t("usage.selectModelRequired"),
+        "warn",
+      );
       return;
     }
-    // 目标条目:编辑态用被编辑的 label;否则按 (model, base_url) 命中已有(隐式 upsert)。
-    // 用 ||(非 ??)让空串落空 → 当作新增并生成 label,绝不把空 original_label 发给后端。
-    const target = editing || existing?.label || undefined;
-    if (!apiKey.trim() && !editTarget(target)?.has_key) {
+    // 编辑态按原 label 定位；新增态由批量导入端点生成稳定且无冲突的 label。
+    const target = editing || undefined;
+    if (!apiKey.trim() && !keyProfile?.has_key) {
       toast(t("usage.apiKeyRequired"), "warn");
       return;
     }
     setSaving(true);
     try {
-      const s = await updateOmniConfig({
-        label: target ?? `${m} @ ${bu}`,
-        model: m,
-        base_url: bu,
-        api_key: apiKey.trim() || undefined,
-        original_label: target,
-        activate: false, // 只入列表;启用由模型列表的「启用」负责
-      });
-      setState(s);
+      if (editing) {
+        const s = await updateOmniConfig({
+          label: target ?? `${m} @ ${bu}`,
+          model: m,
+          base_url: bu,
+          api_key: apiKey.trim() || undefined,
+          original_label: target,
+          activate: false,
+        });
+        setState(s);
+      } else {
+        const result = await importOmniModels({
+          base_url: bu,
+          models: modelsToImport,
+          api_key: apiKey.trim() || undefined,
+          label: keyProfile?.label,
+        });
+        setState(result.config);
+        toast(
+          t("usage.importSuccess", {
+            added: result.added.length,
+            skipped: result.skipped.length,
+          }),
+          "ok",
+        );
+      }
       setAdding(false);
       setEditing(null);
       // 保存后清掉该条旧的行内测试结果(key/model 可能已变,旧 ✓ 会误导)。
@@ -326,7 +494,7 @@ export function UsageOmniConfig() {
           delete next[target];
           return next;
         });
-      toast(t("usage.saveSuccess"), "ok");
+      if (editing) toast(t("usage.saveSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.saveFailed"), "danger");
     } finally {
@@ -341,13 +509,19 @@ export function UsageOmniConfig() {
 
   async function onTest() {
     const bu = baseUrl.trim();
-    const m = model.trim();
+    const m = model.trim() ||
+      (selectedModels.length === 1 ? selectedModels[0] : "");
     if (!bu || !m) {
-      toast(t("usage.baseUrlModelRequired"), "warn");
+      toast(
+        selectedModels.length > 1
+          ? t("usage.selectOneToTest")
+          : t("usage.baseUrlModelRequired"),
+        "warn",
+      );
       return;
     }
-    const target = editing || existing?.label || undefined;
-    if (!apiKey.trim() && !editTarget(target)?.has_key) {
+    const target = editing || undefined;
+    if (!apiKey.trim() && !keyProfile?.has_key) {
       toast(t("usage.apiKeyRequiredBeforeTest"), "warn");
       return;
     }
@@ -355,7 +529,7 @@ export function UsageOmniConfig() {
     setTestResult(null);
     try {
       const res = await testOmniConfig({
-        label: target ?? "",
+        label: target ?? keyProfile?.label ?? "",
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
@@ -473,7 +647,23 @@ export function UsageOmniConfig() {
   }
 
   // 表单内拉模型/测试错误的就近显示:解析当前编辑/命中条目 + 错误归属字段。
-  const keyProfile = editTarget(editing) ?? existing;
+  const editingProfile = editTarget(editing);
+  const editingKeyProfile =
+    editingProfile &&
+    normalizeProviderUrl(editingProfile.base_url) ===
+      normalizeProviderUrl(baseUrl)
+      ? editingProfile
+      : undefined;
+  const providerProfile = profiles.find(
+    (profile) =>
+      profile.has_key &&
+      normalizeProviderUrl(profile.base_url) === normalizeProviderUrl(baseUrl),
+  );
+  const keyProfile = editing
+    ? editingKeyProfile
+    : existing?.has_key
+      ? existing
+      : providerProfile;
   const errField = modelsErr ? errFieldOf(modelsErrCode) : null;
   const urlErrHere = errField === "url";
   const keyErrHere = errField === "key";
@@ -675,6 +865,7 @@ export function UsageOmniConfig() {
                       value={baseUrl}
                       onChange={(e) => {
                         setBaseUrl(e.target.value);
+                        resetModelCatalog();
                         setTestResult(null);
                       }}
                       onBlur={() => fetchModels(baseUrl, apiKey, editing)}
@@ -685,13 +876,18 @@ export function UsageOmniConfig() {
                       <span className="text-caption mt-1 block text-error">✗ {modelsMsg}</span>
                     )}
                   </Field>
-                  <Field label={t("usage.apiKeyLabel")}>
+                  <Field
+                    label={t("usage.apiKeyLabel")}
+                    className={editing ? "" : "md:col-span-2"}
+                    group
+                  >
                     <div className="relative">
                       <input
                         type={showKey ? "text" : "password"}
                         value={apiKey}
                         onChange={(e) => {
                           setApiKey(e.target.value);
+                          resetModelCatalog();
                           setTestResult(null);
                         }}
                         onBlur={() => fetchModels(baseUrl, apiKey, editing)}
@@ -701,6 +897,7 @@ export function UsageOmniConfig() {
                             : t("usage.apiKeyPlaceholderNew")
                         }
                         autoComplete="off"
+                        aria-label={t("usage.apiKeyLabel")}
                         className={INPUT_CLS + " pr-10"}
                       />
                       {/* 明文/密文切换:密文态睁眼(点击显示),明文态闭眼(点击隐藏) */}
@@ -720,22 +917,62 @@ export function UsageOmniConfig() {
                         {t("usage.apiKeyCurrentHint", { masked: keyProfile.api_key_masked })}
                       </span>
                     ) : null}
+                    <button
+                      type="button"
+                      onClick={() => fetchModels(baseUrl, apiKey, editing)}
+                      disabled={!baseUrl.trim() || modelsLoading}
+                      className="mt-2 inline-flex items-center gap-1.5 text-caption text-brand-primary disabled:opacity-40"
+                    >
+                      <IconRefresh width={14} height={14} />
+                      {modelsLoading
+                        ? t("usage.modelsFetching")
+                        : t("usage.fetchModelsAction")}
+                    </button>
                   </Field>
-                  <Field label={t("usage.modelLabel")}>
-                    <ComboBox
-                      value={model}
-                      onChange={(v) => {
-                        setModel(v);
-                        setTestResult(null);
-                      }}
-                      options={models}
-                      placeholder={
-                        modelsLoading
-                          ? t("usage.modelComboPlaceholderLoading")
-                          : t("usage.modelComboPlaceholder")
-                      }
-                      ariaLabel={t("usage.modelLabel")}
-                    />
+                  <Field
+                    label={
+                      editing
+                        ? t("usage.modelLabel")
+                        : t("usage.selectModelsLabel")
+                    }
+                    className={editing ? "" : "md:col-span-2"}
+                    group
+                  >
+                    {editing ? (
+                      <ComboBox
+                        value={model}
+                        onChange={(v) => {
+                          setModel(v);
+                          setTestResult(null);
+                        }}
+                        options={models}
+                        placeholder={
+                          modelsLoading
+                            ? t("usage.modelComboPlaceholderLoading")
+                            : t("usage.modelComboPlaceholder")
+                        }
+                        ariaLabel={t("usage.modelLabel")}
+                      />
+                    ) : models.length > 0 ? (
+                      <ModelMultiSelect
+                        options={models}
+                        selected={selectedModels}
+                        onChange={(items) => {
+                          setSelectedModels(items);
+                          setTestResult(null);
+                        }}
+                      />
+                    ) : (
+                      <input
+                        value={model}
+                        onChange={(event) => {
+                          setModel(event.target.value);
+                          setTestResult(null);
+                        }}
+                        placeholder={t("usage.modelComboPlaceholder")}
+                        className={INPUT_CLS}
+                      />
+                    )}
                     <span
                       className={`text-caption mt-1 block ${
                         modelErrHere ? "text-error" : "text-text-tertiary"
@@ -752,19 +989,49 @@ export function UsageOmniConfig() {
                               : t("usage.modelsHint")}
                     </span>
                   </Field>
+                  {!editing && models.length > 0 && (
+                    <Field
+                      label={t("usage.manualModelLabel")}
+                      className="md:col-span-2"
+                    >
+                      <input
+                        value={model}
+                        onChange={(event) => {
+                          setModel(event.target.value);
+                          setTestResult(null);
+                        }}
+                        placeholder={t("usage.manualModelPlaceholder")}
+                        className={INPUT_CLS}
+                      />
+                      <span className="text-caption mt-1 block text-text-tertiary">
+                        {t("usage.manualModelHint")}
+                      </span>
+                    </Field>
+                  )}
                   <div className="md:col-span-2 pt-1 flex items-center gap-3 flex-wrap">
                     <button
                       type="button"
                       onClick={onSave}
-                      disabled={saving || testing}
+                      disabled={saving || testing || modelsLoading}
                       className="text-caption px-3 py-1.5 rounded-lg bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
                     >
-                      {saving ? t("usage.saving") : t("usage.save")}
+                      {saving
+                        ? t("usage.saving")
+                        : editing
+                          ? t("usage.save")
+                          : t("usage.importSelected", {
+                              n:
+                                selectedModels.length +
+                                (model.trim() &&
+                                !selectedModels.includes(model.trim())
+                                  ? 1
+                                  : 0),
+                            })}
                     </button>
                     <button
                       type="button"
                       onClick={onTest}
-                      disabled={saving || testing}
+                      disabled={saving || testing || modelsLoading}
                       className="text-caption px-3 py-1.5 rounded-lg bg-bg-secondary border border-border text-text-primary hover:border-brand-primary disabled:opacity-60"
                     >
                       {testing ? t("usage.testing") : t("usage.testConnection")}
@@ -772,6 +1039,7 @@ export function UsageOmniConfig() {
                     <button
                       type="button"
                       onClick={() => {
+                        resetModelCatalog();
                         setAdding(false);
                         setEditing(null);
                         setTestResult(null);

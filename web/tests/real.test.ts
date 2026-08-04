@@ -18,6 +18,7 @@ import {
   realUpdateOmniConfig,
   realActivateOmniConfig,
   realDeleteOmniConfig,
+  realImportOmniModels,
   realListOmniModels,
   realTestOmniConfig,
   _resetUsageStatsCache,
@@ -430,6 +431,44 @@ describe("omni 配置契约 — 多档案", () => {
     const res = await realListOmniModels({ base_url: "https://p/v1", api_key: "sk-x" });
     expect(res.ok).toBe(true);
     expect(res.models).toEqual(["a", "b"]);
+  });
+
+  it("importModels：一次提交所选模型并解析新增/跳过结果", async () => {
+    let requestUrl = "";
+    let requestBody: unknown = null;
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        requestUrl = input.toString();
+        requestBody = JSON.parse(init?.body as string);
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            message: "ok",
+            data: {
+              config: STATE.data,
+              added: [{ label: "m3 @ https://p/v1", model: "m3" }],
+              skipped: [{ label: "配置1", model: "m1" }],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    ) as unknown as typeof fetch;
+
+    const result = await realImportOmniModels({
+      base_url: "https://p/v1",
+      api_key: "sk-x",
+      models: ["m1", "m3"],
+    });
+
+    expect(requestUrl).toBe("/api/admin/omni-config/models/import");
+    expect(requestBody).toEqual({
+      base_url: "https://p/v1",
+      api_key: "sk-x",
+      models: ["m1", "m3"],
+    });
+    expect(result.added.map((item) => item.model)).toEqual(["m3"]);
+    expect(result.skipped.map((item) => item.model)).toEqual(["m1"]);
   });
 
   it("测试连接：解析 {ok,status,latency_ms,message}", async () => {

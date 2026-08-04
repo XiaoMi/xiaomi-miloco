@@ -408,6 +408,12 @@ export interface OmniModelsResult {
   message?: string;
 }
 
+export interface OmniModelsImportResult {
+  config: OmniConfigState;
+  added: { label: string; model: string }[];
+  skipped: { label: string; model: string }[];
+}
+
 /** 提交给后端的 omni 配置(保存/测试)；档案名 label = 唯一 id。 */
 export interface OmniConfigUpdate {
   /** 档案名(唯一 id，非空)。 */

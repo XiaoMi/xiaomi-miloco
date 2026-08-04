@@ -45,6 +45,7 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  OmniModelsImportResult,
 } from "@/lib/types";
 export type { ScopeHome };
 
@@ -464,6 +465,15 @@ export async function listOmniModels(input: {
   label?: string;
 }): Promise<OmniModelsResult> {
   return impl.realListOmniModels(input);
+}
+
+export async function importOmniModels(input: {
+  base_url: string;
+  models: string[];
+  api_key?: string;
+  label?: string;
+}): Promise<OmniModelsImportResult> {
+  return impl.realImportOmniModels(input);
 }
 
 export async function testOmniConfig(

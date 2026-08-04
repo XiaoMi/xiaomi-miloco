@@ -828,6 +828,29 @@ class OmniModelsBody(BaseModel):
     label: str | None = None
 
 
+class OmniModelsImportBody(BaseModel):
+    """Atomically add selected models from one provider catalog."""
+
+    base_url: str
+    models: list[str] = Field(min_length=1, max_length=100)
+    api_key: str | None = None
+    label: str | None = None
+
+
+def _normalized_provider_url(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+def _unique_profile_label(model: str, base_url: str, used: set[str]) -> str:
+    base = f"{model} @ {base_url}"
+    if base not in used:
+        return base
+    suffix = 2
+    while f"{base} ({suffix})" in used:
+        suffix += 1
+    return f"{base} ({suffix})"
+
+
 @router.post(
     "/omni-config/models",
     summary="拉取某 Base URL 下可用模型列表(供模型下拉)",
@@ -866,6 +889,111 @@ async def list_omni_models(
         )
     return NormalResponse(
         code=0, message="ok", data=await _probe.fetch_models(base_url, api_key)
+    )
+
+
+@router.post(
+    "/omni-config/models/import",
+    summary="原子导入用户从 provider 目录中选择的模型",
+    response_model=NormalResponse,
+)
+async def import_omni_models(
+    body: OmniModelsImportBody, current_user: str = Depends(verify_token)
+):
+    """Add selected provider models as inactive profiles without changing runtime.
+
+    Identity is ``(normalized base_url, model)``. Existing entries are reported as
+    skipped, and all new entries are persisted in one config write. Credentials may
+    be supplied once or reused from any profile stored for the exact same URL.
+    """
+    base_url = _normalized_provider_url(body.base_url)
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Base URL 不能为空")
+
+    models: list[str] = []
+    seen_models: set[str] = set()
+    for raw in body.models:
+        model = raw.strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="模型 ID 不能为空")
+        if len(model) > 256:
+            raise HTTPException(status_code=400, detail=f"模型 ID 过长: {model[:32]}")
+        if model not in seen_models:
+            seen_models.add(model)
+            models.append(model)
+
+    profiles = _profiles_as_dicts()
+    api_key = _key_by_label((body.label or "").strip(), body.api_key, base_url=base_url)
+    if not api_key:
+        candidates = [get_settings().model.omni, *get_settings().model.omni_profiles]
+        api_key = next(
+            (
+                profile.api_key
+                for profile in candidates
+                if profile.api_key
+                and _normalized_provider_url(profile.base_url) == base_url
+            ),
+            "",
+        )
+
+    identities = {
+        (_normalized_provider_url(profile["base_url"]), profile["model"])
+        for profile in profiles
+    }
+    active = get_settings().model.omni
+    if active.api_key:
+        identities.add((_normalized_provider_url(active.base_url), active.model))
+
+    used_labels = {profile["label"] for profile in profiles}
+    added: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for model in models:
+        identity = (base_url, model)
+        if identity in identities:
+            existing = next(
+                (
+                    profile
+                    for profile in profiles
+                    if (
+                        _normalized_provider_url(profile["base_url"]),
+                        profile["model"],
+                    )
+                    == identity
+                ),
+                None,
+            )
+            skipped.append(
+                {
+                    "label": existing["label"] if existing else _active_display_label(),
+                    "model": model,
+                }
+            )
+            continue
+        label = _unique_profile_label(model, base_url, used_labels)
+        used_labels.add(label)
+        identities.add(identity)
+        profiles.append(
+            {
+                "label": label,
+                "base_url": base_url,
+                "model": model,
+                "api_key": api_key,
+            }
+        )
+        added.append({"label": label, "model": model})
+
+    if added and len(profiles) > 100:
+        raise HTTPException(status_code=400, detail="最多保存 100 个模型档案")
+    if added:
+        update_shared_config(model={"omni_profiles": profiles})
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data={
+            "config": _full_omni_payload(),
+            "added": added,
+            "skipped": skipped,
+        },
     )
 
 
