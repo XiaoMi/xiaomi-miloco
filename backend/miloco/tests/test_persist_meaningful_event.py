@@ -142,6 +142,46 @@ class TestPersistMeaningfulEvent:
         assert (event_dir / "cam_living_01" / "clip.mp4").read_bytes() == _clip_payload(1)[0]
         assert (event_dir / "cam_kitchen_01" / "clip.mp4").read_bytes() == _clip_payload(2)[0]
 
+    async def test_rule_status_rendered_in_text(self, isolated_db, dao):
+        """rule_statuses 透传到 build_agent_text，DB.text 含「触发状态」行。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        from miloco.rule.schema import TriggerOutcome
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload()}),
+            rule_statuses={"r1": TriggerOutcome.FIRED},
+        )
+        rows = dao.query()
+        assert len(rows) == 1
+        assert "触发状态：已触发" in rows[0]["text"]
+
+    async def test_incomplete_rule_rendered_as_unknown_in_text(self, isolated_db, dao):
+        """incomplete_rule_ids 透传到 build_agent_text，DB.text 标「未知」而非聚合值。
+
+        钉住 _persist_meaningful_event → build_agent_text 这一跳:删掉那个 kwarg 透传时,
+        住户看到的正是本 PR 要修的「确定但偏弱的假标签」,故必须有回归守着。
+        """
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        from miloco.rule.schema import TriggerOutcome
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload()}),
+            rule_statuses={"r1": TriggerOutcome.STILL_IN},  # 聚合值存在但证据残缺
+            incomplete_rule_ids={"r1"},
+        )
+        rows = dao.query()
+        assert len(rows) == 1
+        assert "触发状态：未知" in rows[0]["text"]
+        assert "未触发（持续中）" not in rows[0]["text"]
+
     async def test_caption_only_does_not_insert(self, isolated_db, dao):
         """纯 caption(无 rule/suggestion/asr)→ 不入表(B5)."""
         from miloco.perception.types import CaptionEntry
