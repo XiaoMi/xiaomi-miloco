@@ -6,11 +6,13 @@
   Author #2 收敛：硬约束 / 工具索引 / 感知格式 / 数据源 / 档案 / 目录 全部塞
   ``<system>`` 消息，缓存友好）。plugin 这边 ``pre_llm_call`` hook 注册为 noop
   （Hermes 要求 hook 名存在才认 plugin 加载成功）。
-- 三个 tool：``miloco_im_push``（通知投递，对齐 OpenClaw 版
+- 两个 tool：``miloco_im_push``（通知投递，对齐 OpenClaw 版
   ``subagent.run({deliver:true})`` 体验：装好就能用，cron 场景下也能直接
-  投递）、``miloco_habit_suggest``（习惯建议防骚扰状态机，移植自
-  ``home-profile/suggestions.ts``）、``miloco_notify_bind``
-  （IM 渠道切换：list/switch）。
+  投递）、``miloco_notify_bind``（IM 渠道切换：list/switch）。
+  注：``miloco_habit_suggest`` 防骚扰状态机已随 PR #419 迁入 ``miloco-cli habit``
+  命令组；本插件只保留 ``context_injection.py`` 里内嵌的只读注入 reader
+  （``build_pending_suggestion_block``，对齐 ``home-profile/injection.ts``），
+  不再注册 habit tool。
   注：早期版本有 ``miloco_status`` + ``miloco_test_push`` 两个调试工具，PR #279 收敛为
   外部脚本 ``plugins/hermes/scripts/miloco-status.sh``（确定性 wrapper，不走 LLM 推断）。
 - 启动时 reconcile 4 个受管 cron job（移植自 ``home-profile/scheduler.ts``）。
@@ -24,8 +26,8 @@
 - ``plugins/openclaw/src/hooks/prompt.ts``       → context_injection.py
 - ``plugins/openclaw/src/home-profile/helpers.ts`` → context_injection.py
 - ``plugins/openclaw/src/home-profile/injection.ts`` → context_injection.py
+  （只读注入 reader；状态机已迁入 ``miloco-cli habit``，见 PR #419）
 - ``plugins/openclaw/src/tools/notify.ts``       → tools_notify.py
-- ``plugins/openclaw/src/home-profile/suggestions.ts`` → tools_habit.py
 - ``plugins/openclaw/src/home-profile/scheduler.ts`` → cron_setup.py
 
 约束：Python 3.11+，标准库 + httpx（Hermes 依赖里已有）。所有调 Hermes ctx 的地方
@@ -37,10 +39,6 @@ from __future__ import annotations
 import logging
 
 from .cron_setup import reconcile_cron_jobs
-from .tools_habit import (
-    MILOCO_HABIT_SUGGEST_SCHEMA,
-    handle_habit_suggest,
-)
 from .tools_notify import (
     MILOCO_IM_PUSH_SCHEMA,
     MILOCO_NOTIFY_BIND_SCHEMA,
@@ -55,7 +53,7 @@ TOOLSET = "miloco"
 
 
 def register(ctx) -> None:
-    """注册 pre_llm_call 钩子 + trace hooks + 3 个 tool，并 reconcile 受管 cron。
+    """注册 pre_llm_call 钩子 + trace hooks + 2 个 tool，并 reconcile 受管 cron。
 
     每个注册独立 try/except：单个失败不影响其余功能，也绝不让插件加载崩掉 Hermes。
     """
@@ -89,16 +87,6 @@ def register(ctx) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("注册 miloco_im_push 失败: %s", exc)
-
-    try:
-        ctx.register_tool(
-            name="miloco_habit_suggest",
-            toolset=TOOLSET,
-            schema=MILOCO_HABIT_SUGGEST_SCHEMA,
-            handler=handle_habit_suggest,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("注册 miloco_habit_suggest 失败: %s", exc)
 
     # ── IM 渠道切换（list / switch target） ──────────────────────────────
     try:
