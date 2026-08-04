@@ -7,11 +7,13 @@
 
 import type {
   Person,
+  Pet,
   ScopeCamera,
   UsageStats,
 } from "@/lib/types";
 import { cameraAvailable } from "@/lib/types";
 import { PersonChip } from "./PersonChip";
+import { PetAvatar } from "@/components/PetAvatar";
 import { LivePlayerPlaceholder } from "./LivePlayerPlaceholder";
 import { getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
@@ -53,6 +55,10 @@ function setVoiceOnConfirmed(): void {
 
 interface Props {
   persons: Person[];
+  /** 宠物花名册；仅在 petsEnabled 为真时于「家人」后追加展示。 */
+  pets?: Pet[];
+  /** 宠物识别开关（features.petRecognition）——关闭时本页不展示宠物成员。 */
+  petsEnabled?: boolean;
   /** 米家全集（含被禁用 / 离线），用于渲染所有摄像头卡片 + Switch。多通道相机每条
    *  通道一条记录（did 相同、channel 区分），channel 直接带在每条上供播放 / 分行。 */
   scopeCameras: ScopeCamera[];
@@ -93,6 +99,8 @@ function sortPersons(ps: Person[]): Person[] {
 // 画面 / 状态仍按通道逐条展示。每组即一台相机的若干通道行。
 export function HeroNow({
   persons,
+  pets,
+  petsEnabled = false,
   scopeCameras,
   miotHasCamera,
   maxStreamCams,
@@ -187,6 +195,18 @@ export function HeroNow({
             />
           ))}
         </div>
+      )}
+
+      {/* 宠物成员——仅在宠物识别开关打开且有宠物时，于家人后追加展示（关闭即不显示）。 */}
+      {petsEnabled && (pets ?? []).length > 0 && (
+        <>
+          <SectionLabel>{t("hero.petsLabel")}</SectionLabel>
+          <div className="flex flex-wrap gap-2 mb-5">
+            {(pets ?? []).map((p) => (
+              <HeroPetChip key={p.id} pet={p} />
+            ))}
+          </div>
+        </>
       )}
 
       {/* 摄像头 */}
@@ -1023,6 +1043,24 @@ function BenchCamItem({
         />
       </div>
     </li>
+  );
+}
+
+/** 概览「家里此刻」里的宠物 chip——与 PersonChip 同款（圆头像 + 名 + 物种副行），
+ *  不可点（概览页不跳转，管理走「家庭」tab）。 */
+function HeroPetChip({ pet }: { pet: Pet }) {
+  return (
+    <div className="inline-flex items-center gap-2 pl-2 pr-4 py-1 rounded-full bg-bg-secondary border border-border">
+      <PetAvatar pet={pet} size={28} />
+      <span className="flex flex-col items-start leading-tight">
+        <span className="text-body text-text-primary leading-[18px]">
+          {pet.name}
+        </span>
+        {pet.species && (
+          <span className="text-caption text-text-tertiary">{pet.species}</span>
+        )}
+      </span>
+    </div>
   );
 }
 
