@@ -209,9 +209,8 @@ class TestCropRegionReason:
     def test_edge_hugging_small_box_is_too_small(self):
         # 贴角极小框:绕中心放大被 clamp 截断,复检仍不足下限 → area_too_small
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        region, reason = compute_crop_region_detail([(0, 0, 4, 4)], frames, CFG)
-        if region is None:
-            assert reason == "area_too_small"
+        # 断言不加条件:写成 `if region is None:` 时几何一变本条就静默变成空跑
+        assert compute_crop_region_detail([(0, 0, 4, 4)], frames, CFG) == (None, "area_too_small")
 
     def test_wrapper_matches_detail(self):
         # 薄封装与 detail 同源:两者分叉时(例如只改了一边的闸)这里会红
