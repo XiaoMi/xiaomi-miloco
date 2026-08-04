@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import time
+from typing import TYPE_CHECKING
 
 from miloco.observability.context import (
     DeviceContext,
@@ -48,10 +49,15 @@ from miloco.perception.engine.pipeline import _fmt_time_window
 from miloco.perception.engine_base import BasePerceptionEngine
 from miloco.perception.local_vision.client import LocalVisionClient, LocalVisionError
 from miloco.perception.local_vision.encode import EncodeError, encode_snapshot_to_h264
-from miloco.perception.local_vision.identity import (
-    LocalIdentityResolver,
-    render_roster,
-)
+from miloco.perception.local_vision.identity import render_roster
+
+if TYPE_CHECKING:
+    # 只在注解里出现(``identity`` 参数),运行时一次都用不到 —— 本文件开头有
+    # ``from __future__ import annotations``,注解全是惰性字符串。放在模块顶层
+    # 会被 CodeQL 记成 unused import(ruff 不报,它把字符串注解里的引用算作使用,
+    # 两边各自都没错,只是看的层面不同)。搬进来两边都满足:运行时不导入,类型
+    # 检查仍解析得到这个名字。
+    from miloco.perception.local_vision.identity import LocalIdentityResolver
 from miloco.perception.rule_scope import (
     camera_prompt_map,
     physical_did,
