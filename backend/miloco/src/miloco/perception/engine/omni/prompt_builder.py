@@ -1620,8 +1620,9 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 # ④ 中途消费者各自缩放,互不影响、也不回写 all_frames:
 #    - 视觉门 gate/visual_gate.py `_preprocess` → 448x448 灰度(只用来算帧差比例)
 #    - 人形检测 tracker/detector.py `preprocess` → 等比缩到 **ONNX 自带的 416x416**
-#      + letterbox 填 114;postprocess 按 scale/pad 还原,故 box_info 是**原生像素
-#      坐标**(crop 因此不需要再换算)。注意 IdentityConfig.perception_input_width/
+#      + letterbox 填 114;postprocess 按 scale/pad 还原,故 last_detections、由它逐帧
+#      累积的 main_det_boxes、以及 box_info 都是**原生像素坐标**(crop 读的是
+#      main_det_boxes,因此不需要再换算)。注意 IdentityConfig.perception_input_width/
 #      height(1280/720)是**死配置**:传进 RealTrackingService 存成 _input_width/
 #      _input_height 后再没人读,真正决定输入尺寸的是模型的 416x416;engine/api.py
 #      还把它当调试信息暴露出去,容易被读成"感知输入分辨率"。
@@ -1705,7 +1706,6 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
     all_frames 只读不改。
     """
     from .crop_enhance import (
-        _body_boxes,
         compute_crop_region,
         compute_motion_blocks,
         crop_enhance_config_from_settings,
@@ -1723,19 +1723,41 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
         return None
     frames = ep.all_frames
     try:
-        # det_boxes / motion_blocks 只算一次,既喂 compute_crop_region 又用于诊断日志(免重复算 CV)
-        det_boxes = _body_boxes(ep.targets)
+        # 主体框取窗口内**每一抽帧**的 human/cat/dog 检测框(tracking 层累积、随 packet 透传):
+        # 裁出的区域要包住窗口内出现过的一切,所以不能用 targets/box_info —— 那只有末帧一个框,
+        # 且宠物永远不在其中(tracker 只对 HUMAN 建 track)。
+        # motion_blocks 只算一次,既喂 compute_crop_region 又用于诊断日志(免重复算 CV)。
+        det_boxes = list(ep.main_det_boxes)
         motion_blocks = compute_motion_blocks(frames, cfg)
         n_det, n_motion = len(det_boxes), len(motion_blocks)
         region = compute_crop_region(
-            ep.targets, frames, cfg, det_boxes=det_boxes, motion_blocks=motion_blocks
+            det_boxes, frames, cfg, motion_blocks=motion_blocks
         )
         if region is None:
-            # 灰度诊断:无依据(无框无运动) vs 有依据但面积超上限被拒
+            # 灰度诊断。区域是"包住一切"的并集,所以回退时要打出并集框本身:超上限时能看出是
+            # 哪一侧把它撑开(远处误检 / 大幅走动 / 运动块),否则日志只说面积不合格、查不出根因。
+            # 面积有两条相反的回退路径,按并集面积二分成两个 reason —— 处置完全不同:
+            #   area_too_large 查是什么撑开了并集;area_too_small 是几何天花板(目标贴边、
+            #   绕中心放大被 clamp 截断后仍不足下限),裁了也没有等效分辨率收益,无需处置。
+            all_boxes = det_boxes + motion_blocks
+            union = (
+                (min(b[0] for b in all_boxes), min(b[1] for b in all_boxes),
+                 max(b[2] for b in all_boxes), max(b[3] for b in all_boxes))
+                if all_boxes else None
+            )
+            reason = "no_activity"
+            if union is not None:
+                h0, w0 = frames[0].shape[:2]
+                u_ratio = (union[2] - union[0]) * (union[3] - union[1]) / max(1, w0 * h0)
+                reason = (
+                    "area_too_large" if u_ratio > cfg.crop_max_area_ratio else "area_too_small"
+                )
+            # n_det_boxes 是**框数**(逐帧累积,≈ 帧数 × 主体数),不是主体数 —— 与 n_frames
+            # 一起看才有意义;旧字段名 n_det 曾是末帧主体数(0-3),别拿两版日志的数字直接比。
             logger.info(
-                "event=adaptive_crop_fallback reason=%s n_det=%d n_motion=%d",
-                "no_activity" if not det_boxes and not motion_blocks else "area_rejected",
-                n_det, n_motion,
+                "event=adaptive_crop_fallback reason=%s n_det_boxes=%d n_frames=%d "
+                "n_motion=%d union=%s",
+                reason, n_det, len(frames), n_motion, union,
             )
             return None
         cropped = crop_frames(frames, region)
@@ -1786,13 +1808,13 @@ def _maybe_encode_adaptive(packets: list[IdentityPacket]) -> "_AdaptiveResult | 
             return None
         logger.info(
             "event=adaptive_crop region=%s crop_ratio=%.3f short_edge=%d upscale=%.2f "
-            "n_det=%d n_motion=%d",
+            "n_det_boxes=%d n_frames=%d n_motion=%d",
             region,
             ((region[2] - region[0]) * (region[3] - region[1])) / (fw * fh),
             cse,
             # 灰度期要能从日志看出放大倍率的真实分布(>1 即放大,离线实测中位 1.27、max 2.02)
             cse / max(1, min(ch, cw)),
-            n_det, n_motion,
+            n_det, len(frames), n_motion,
         )
         # 旁路落盘:参考帧字节 + crop 元数据(坐标进 trace),供 badcase 复盘对照。
         # 无 active scope / device_ctx 时静默 no-op,不影响推理主流程。

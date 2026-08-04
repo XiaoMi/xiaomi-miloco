@@ -106,9 +106,6 @@ async def run_identity(
             box_info=obj.box_info,
             bbox_xyxy_norm=bbox_norm_map.get(obj.track_id),
             suppress_as_prior=st is not None and st.reverted_from_confirmed,
-            # 静物误检(已被身份侧投票压成 no_person)：person_id 也是 "none"，与"没识别出
-            # 身份的真人"无法区分，故直接带出状态位，供 Smart Crop 排除误检框。
-            no_person=st is not None and st.status == "no_person",
         ))
 
     # 暂不做位移分析，scene_motion 固定为 STATIC（旧 motion_analyzer 已停用）
@@ -127,6 +124,7 @@ async def run_identity(
         audio_analysis=AudioAnalysis(type=AudioType.SILENCE, is_urgent=False, energy_level=0.0),
         sample_rate=gate_packet.sample_rate,
         trigger=gate_packet.trigger,
+        main_det_boxes=tracking_resp.main_det_boxes,
     )
 
 

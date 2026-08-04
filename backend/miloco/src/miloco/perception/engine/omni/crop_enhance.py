@@ -8,8 +8,21 @@ union(主体检测框, 帧差分运动块) → 非对称扩展 → 最小/最大
 最小面积 10%、最大面积 ≈49% 回退、characteristic 运动过滤(面积+紧凑度);各参数的取值依据
 写在下方对应实现处,不依赖仓外文件也能读懂。
 
-与原型差异:生产 tracker 每 target 只出 1 个 last-frame body box(tracking_service._build_response),
-不做逐帧累积;窗口内的时序范围由运动块补齐。故检测框取末帧、运动块跨帧累积。
+不变量:裁出的区域必须包住窗口内检测到的一切主体(人 + 宠物)和所有变化区域 —— 包不住就
+不裁(面积超上限返回 None、回退全景,全景本就什么都看得见)。所以主体框由调用方从
+``IdentityPacket.main_det_boxes`` 给入:那是**每一抽帧**的 human/cat/dog 检测框,而不是
+``targets``/``box_info`` 的末帧快照(它只有末帧、且宠物永远不在其中,tracker 只跟 HUMAN)。
+
+与原型的两处已知差异(都不打算改,记在此免得被当成 bug 再"修"一遍):
+  1. 并集覆盖的帧比 omni 视频多。tracker 逐帧消费 ``input.fps``(默认 3)全帧、框按这些帧
+     累积,而送 omni 的视频由 ``pipeline._downsample_for_omni`` 抽到 ``omni_fps``(默认 1);
+     原型的并集与被编码的帧同源(离线脚本直接按 omni_fps 解码)。故生产的并集只会更宽 ——
+     方向保守(宁可回退全景,不会把该看的裁在画外),但 ``crop_max_area_ratio`` 是在原型的
+     窄并集上标定的,线上 area_rejected 触发率会略高于离线对照,别拿离线分布解释线上日志。
+  2. 不剔除静物误检框。det_4C 会把衣帽架/落地灯之类稳定误报成 human;身份侧对这类 track
+     有 no_person 抑制,但那只作用于 track 状态,``last_detections`` 里那个框照旧存在。
+     代价是这类房间的并集被一个固定误检长期撑开、可能持续 area_rejected 回退全景;
+     唯一诊断手段是回退日志里的 union 框(见 prompt_builder._maybe_encode_adaptive)。
 
 本模块不做 I/O、不调 OMNI;编码/参考帧由 prompt_builder 负责。
 """
@@ -24,16 +37,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..config import CropEnhanceConfig
-from ..types import BoxType, IdentityTarget
 
 logger = logging.getLogger(__name__)
 
 # crop 区域,帧像素坐标 (x1, y1, x2, y2)
 Region = tuple[int, int, int, int]
-
-# 主体类:human_body / pet_body 参与 crop;human_face(head/face 子部件)排除——
-# 子部件框分散,纳入并集会撑大 crop 区域。
-_MAIN_BOX_TYPES = (BoxType.HUMAN_BODY.value, BoxType.PET_BODY.value)
 
 _MORPH_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
 
@@ -92,35 +100,6 @@ def compute_motion_blocks(
     return blocks
 
 
-def _body_boxes(targets: list[IdentityTarget]) -> list[Region]:
-    """从 targets 取主体检测框(human_body / pet_body 末帧),xywh → xyxy,排除 face。
-
-    用像素 box_info(与 all_frames 同像素空间),不用 bbox_xyxy_norm(有损、coasting/引擎关时 None)。
-
-    跳过已落定 no_person 的 track:这些是检测器把静物(衣帽架 / 落地灯)误报成人体、
-    已被身份侧投票压掉的框。裁切区域是**并集**,一个位置固定的误检就能把区域撑过
-    crop_max_area_ratio 上限,让整个房间的 Smart Crop 永久回退全景,而日志只说
-    "面积超限"、看不出根因。不能用 `person_id == "none"` 代替 —— no_person 与
-    "有人但没识别出身份"都渲染成 "none"(state.get_face_id_value),那样会把陌生人一起排掉。
-    """
-    boxes: list[Region] = []
-    for t in targets:
-        if t.no_person:
-            continue
-        if not t.box_info:
-            continue
-        last = t.box_info[-1]
-        for btype in _MAIN_BOX_TYPES:
-            xywh = last.boxes.get(btype)
-            if not xywh:
-                continue
-            x, y, bw, bh = xywh
-            if bw <= 0 or bh <= 0:
-                continue
-            boxes.append((int(x), int(y), int(x + bw), int(y + bh)))
-    return boxes
-
-
 def _clamp(region: Region, w: int, h: int) -> Region:
     x1, y1, x2, y2 = region
     return (max(0, x1), max(0, y1), min(w, x2), min(h, y2))
@@ -152,17 +131,17 @@ def _enforce_min_area(region: Region, w: int, h: int, min_ratio: float) -> Regio
 
 
 def compute_crop_region(
-    targets: list[IdentityTarget],
+    det_boxes: list[Region],
     frames: list[NDArray[np.uint8]],
     cfg: CropEnhanceConfig,
     *,
-    det_boxes: list[Region] | None = None,
     motion_blocks: list[Region] | None = None,
 ) -> Region | None:
-    """综合检测框 + 运动块算 crop 区域;无依据或面积超上限 → None(回退全景)。
+    """综合主体检测框 + 运动块算 crop 区域;无依据或面积超上限 → None(回退全景)。
 
-    det_boxes / motion_blocks 可由调用方预算后传入(免重复算 CV,也便于打诊断日志);
-    缺省 None 时内部自算,老调用行为不变。
+    ``det_boxes`` 是窗口内**每一抽帧**的 human/cat/dog 框(``IdentityPacket.main_det_boxes``),
+    由调用方给入 —— 本模块不从 ``targets``/``box_info`` 取框,那只有末帧且没有宠物。
+    ``motion_blocks`` 可由调用方预算后传入(免重复算 CV,也便于打诊断日志),缺省时内部自算。
     """
     if not frames:
         return None
@@ -170,11 +149,9 @@ def compute_crop_region(
     if w == 0 or h == 0:
         return None
 
-    if det_boxes is None:
-        det_boxes = _body_boxes(targets)
     if motion_blocks is None:
         motion_blocks = compute_motion_blocks(frames, cfg)
-    all_boxes = det_boxes + motion_blocks
+    all_boxes = list(det_boxes) + list(motion_blocks)
     if not all_boxes:
         return None  # 无检测框且无显著运动块 → 无裁切依据
 
@@ -230,13 +207,12 @@ def remap_bbox_norm_to_crop(
     换算链:归一化 → 全景像素 → 减 region 原点 → 按 crop 尺寸重新归一化。
     ``frame_size`` 是 ``(w, h)``,与 ``region`` 同一像素空间(即 ``all_frames`` 的原生尺寸)。
 
-    区域**通常**包含每个名册 bbox:二者同源于 ``box_info[-1].boxes["human_body"]``
-    (``_body_boxes`` 与 ``identity._to_tracking_dicts``),而区域 = 并集 → 扩展 → 只放大的
-    最小面积约束。但不当作前置条件依赖:``identity._to_tracking_dicts`` 有一条
-    ``boxes.get("human")`` 回退键不在 ``_MAIN_BOX_TYPES`` 里(只可能来自已废弃的
-    ``tracking_service.convert_response``,生产 ``_build_response`` 只写 BoxType 枚举值),
-    且检测框可能溢出帧外。故此处一律 clamp,换算后退化(宽或高 <= 0,即框完全落在区域外)
-    返回 None —— 调用方据此退化为"只给姓名不给位置",不输出错坐标。
+    区域**通常**包含每个名册 bbox:名册 bbox 来自 track 末帧的人体框,而区域是窗口内所有
+    抽帧主体框的并集(末帧那一帧也在其中) → 扩展 → 只放大的最小面积约束。但不当作前置条件
+    依赖:两者取自不同来源(名册走 ``box_info``/``bbox_xyxy_norm``,区域走 ``main_det_boxes``),
+    检测阈值边界上同一个人可能只进其中一边,且检测框可能溢出帧外。故此处一律 clamp,换算后
+    退化(宽或高 <= 0,即框完全落在区域外)返回 None —— 调用方据此退化为"只给姓名不给位置",
+    不输出错坐标。
     """
     fw, fh = frame_size
     rx1, ry1, rx2, ry2 = region

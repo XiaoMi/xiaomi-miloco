@@ -1485,6 +1485,7 @@ def _adaptive_packet(
     frames: list[np.ndarray] | None = None,
     fps: int = 1,
     body_box: tuple[int, int, int, int] = (100, 100, 80, 120),
+    main_det_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> IdentityPacket:
     """640x480 噪声帧(保证 crop 视频编码后过 size gate)+ 一个小 human_body 框(crop 面积达标)。
 
@@ -1493,10 +1494,15 @@ def _adaptive_packet(
     frames / fps 可覆盖:验参考帧取末帧、crop 视频帧率跟随 frame_info.fps。
     body_box(像素 xywh)可覆盖:换大帧时默认框离画面角太近,_enforce_min_area 绕中心放大会
     被 clamp 截断而达不到 crop_min_area_ratio → 回退全景;此时需给一个居中的框。
+    main_det_boxes 缺省由 body_box 换算(xywh→xyxy)同步给出 —— crop 区域读的是这个字段,
+    不是 targets/box_info;显式传入可让两者分叉(验证 crop 只看前者)。
     """
     if frames is None:
         np.random.seed(1234)
         frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8) for _ in range(5)]
+    if main_det_boxes is None:
+        bx, by, bw, bh = body_box
+        main_det_boxes = [(bx, by, bx + bw, by + bh)]
     return IdentityPacket(
         packet_id="ep-adaptive",
         room_name="study-room",
@@ -1517,6 +1523,7 @@ def _adaptive_packet(
         all_frames=frames,
         audio_clip=np.zeros(100, dtype=np.int16),
         audio_analysis=AudioAnalysis(type=AudioType.SILENCE, is_urgent=False, energy_level=0.0),
+        main_det_boxes=main_det_boxes,
     )
 
 
@@ -1574,6 +1581,41 @@ class TestAdaptiveResolution:
         )
         vid_idx = next(i for i, b in enumerate(content) if b.get("type") == "video_url")
         assert img_idx < vid_idx  # 全景参考帧在 crop 视频之前
+
+    def test_ref_is_last_image_before_video_with_pet_refs(self):
+        """宠物参考图同时注入时,全景参考帧必须仍是 video 前的**最后**一张图。
+
+        引导语写的是「下方第一张图为全景场景参考,随后的视频是…」,中间再插图这话就不成立
+        (模型会把某只宠物的参考图当成全景)。上面那条 img_idx < vid_idx 只看"有图在视频前",
+        宠物图插在全景图之后也照样绿,所以这个顺序得单独钉。
+        """
+        from unittest.mock import patch as _patch
+
+        pet_blocks = [
+            {"type": "text", "text": "【豆豆】（cat）"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,UEVU"}},
+        ]
+        p1, p2 = self._patches()
+        with p1, p2, _patch(
+            "miloco.perception.engine.omni.prompt_builder._has_pets_for_scene",
+            return_value=True,
+        ), _patch(
+            "miloco.perception.engine.omni.prompt_builder.build_pet_reference_content",
+            return_value=pet_blocks,
+        ):
+            content = self._content(candidates=[])
+        assert self._has_ref(content)
+        vid_idx = next(i for i, b in enumerate(content) if b.get("type") == "video_url")
+        img_idxs = [
+            i for i, b in enumerate(content[:vid_idx])
+            if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+        ]
+        assert len(img_idxs) >= 2  # 宠物图 + 全景图都在
+        guide_idx = next(
+            i for i, b in enumerate(content)
+            if b.get("type") == "text" and "全景场景参考" in b.get("text", "")
+        )
+        assert img_idxs[-1] == guide_idx + 1  # 引导语紧跟的那张,就是 video 前最后一张
 
     def test_skipped_when_candidates_present(self):
         from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
@@ -1767,15 +1809,22 @@ class TestAdaptiveResolution:
         assert any(b.get("type") == "video_url" for b in content)  # 视频仍在,不整窗失败
 
     def _ref_bytes(self, content) -> bytes:
+        """取全景参考帧的字节 —— 锚在引导语之后的第一张图,不是 content 里的第一张图。
+
+        gallery / 宠物参考图同样是 image/jpeg 块且排在前面,按"第一张 image/jpeg"取会在这些
+        特性同时开启时静默取到别人的图,断言仍绿(比较对象也是它自己)。
+        """
         import base64
 
-        return base64.b64decode(
-            next(
-                b["image_url"]["url"].split(",", 1)[1]
-                for b in content
-                if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
-            )
+        start = next(
+            i for i, b in enumerate(content)
+            if b.get("type") == "text" and "全景场景参考" in b.get("text", "")
         )
+        block = next(
+            b for b in content[start + 1:]
+            if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+        )
+        return base64.b64decode(block["image_url"]["url"].split(",", 1)[1])
 
     def test_ref_frame_is_last_not_first(self):
         # 参考帧必须取末帧:它与 crop 视频的末帧同一时刻,「全景 → 放大」的对照才成立;
@@ -1834,6 +1883,74 @@ class TestAdaptiveResolution:
         assert 0 <= x1 < x2 <= 640
         assert 0 <= y1 < y2 <= 360
         assert seen["short_edge"] > 0
+
+    def test_region_comes_from_main_det_boxes_not_box_info(self):
+        """区域读 ``packet.main_det_boxes``,不读 ``targets[].box_info``。
+
+        两者语义不同:box_info 是末帧快照(且宠物永远不在其中),main_det_boxes 是窗口内每一
+        抽帧的 human/cat/dog 框 —— 区域必须包住后者。这条让两个字段指向画面两端,只有读对
+        了才能得出对应的区域;读错了区域会落在另一侧,断言直接挂。
+        """
+        seen: dict = {}
+        frames = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(3)]  # 静态帧 → 无运动块
+        pkt = _adaptive_packet(
+            frames=frames,
+            body_box=(20, 20, 40, 40),            # box_info 在左上角
+            main_det_boxes=[(400, 300, 480, 400)],  # 真正的依据在右下角
+        )
+        p1, p2 = self._patches()
+        with p1, p2, patch(
+            "miloco.perception.snapshot_context.push_crop_meta",
+            side_effect=lambda **kw: seen.update(kw),
+        ):
+            self._content(packet=pkt, candidates=[])
+        assert seen, "crop 应生效"
+        x1, y1, x2, y2 = seen["region"]
+        assert x1 >= 300 and y1 >= 200  # 落在 main_det_boxes 那侧;读 box_info 会得到左上角
+
+    def test_no_det_boxes_falls_back_to_panorama(self):
+        """``main_det_boxes`` 空 + 无运动 → 无裁切依据 → 回退全景。
+
+        钉住"通路真的接上了":若 crop 侧偷偷回退去读 box_info(packet 里仍有一个 body box),
+        这里会裁出区域、断言变红。
+        """
+        frames = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(3)]
+        pkt = _adaptive_packet(frames=frames, main_det_boxes=[])
+        p1, p2 = self._patches()
+        with p1, p2:
+            content = self._content(packet=pkt, candidates=[])
+        assert not self._has_ref(content)
+
+    def test_fallback_reason_distinguishes_the_two_area_paths(self, caplog):
+        """面积回退有两条相反成因,日志必须分开 —— 处置完全不同。
+
+        并集本身超上限 = 有东西把区域撑开(查误检/大幅走动);并集极小却仍被拒 = 目标贴边、
+        绕中心放大被 clamp 截断后仍不足下限,是几何天花板、无需处置。合成一个 reason 时
+        运维只能看到"面积不合格",没法分流,所以顺带把 union 框也打出来。
+        """
+        import logging
+
+        frames = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(3)]  # 静态 → 无运动块
+
+        def _reason(main_det_boxes):
+            caplog.clear()
+            pkt = _adaptive_packet(frames=frames, main_det_boxes=main_det_boxes)
+            p1, p2 = self._patches()
+            with caplog.at_level(
+                logging.INFO, logger="miloco.perception.engine.omni.prompt_builder"
+            ), p1, p2:
+                content = self._content(packet=pkt, candidates=[])
+            assert not self._has_ref(content)  # 三种情形都必须回退全景
+            line = next(m for m in caplog.messages if "event=adaptive_crop_fallback" in m)
+            return line
+
+        assert "reason=no_activity" in _reason([])
+        # 几乎整帧的框 → 扩展后远超 crop_max_area_ratio
+        big = _reason([(20, 20, 620, 460)])
+        assert "reason=area_too_large" in big
+        assert "union=(20, 20, 620, 460)" in big  # 并集框进日志,能看出是哪一侧被撑开
+        # 紧贴画面角的极小框 → 绕中心放大被 clamp 截断,达不到 crop_min_area_ratio
+        assert "reason=area_too_small" in _reason([(0, 0, 4, 4)])
 
     def test_crop_short_edge_budget_scales_with_resolution(self):
         # crop 短边预算 = 分辨率档 × 360/512(用户档的 70%),保住「像素开销 ≈ 同档全景」不变量;

@@ -3,16 +3,10 @@
 import numpy as np
 from miloco.perception.engine.config import CropEnhanceConfig
 from miloco.perception.engine.omni.crop_enhance import (
-    _body_boxes,
     compute_crop_region,
     compute_motion_blocks,
     crop_frames,
     remap_bbox_norm_to_crop,
-)
-from miloco.perception.engine.types import (
-    IdentityTarget,
-    ObjectType,
-    TrackingBoxInfo,
 )
 
 CFG = CropEnhanceConfig()
@@ -20,22 +14,6 @@ CFG = CropEnhanceConfig()
 
 def _black(h=300, w=300):
     return np.zeros((h, w, 3), dtype=np.uint8)
-
-
-def _target(
-    boxes: dict[str, tuple[int, int, int, int]],
-    *,
-    person_id: str = "p",
-    no_person: bool = False,
-) -> IdentityTarget:
-    return IdentityTarget(
-        type=ObjectType.HUMAN_BODY,
-        person_id=person_id,
-        track_id=1,
-        needs_omni_verify=False,
-        box_info=[TrackingBoxInfo(frame_index=0, boxes=boxes)],
-        no_person=no_person,
-    )
 
 
 # ---------------- compute_motion_blocks ----------------
@@ -98,14 +76,18 @@ class TestMotionBlocks:
         assert blocks == []
 
 
-# ---------------- _body_boxes / compute_crop_region ----------------
+# ---------------- compute_crop_region ----------------
+#
+# 主体框由调用方给入(``IdentityPacket.main_det_boxes``:窗口内每一抽帧的 human/cat/dog
+# 检测框),本模块只做几何。**类别过滤与逐帧累积的口径**不在这里,在
+# tests/perception/engine/identity/test_tracking_service_det_boxes.py。
 
 class TestCropRegion:
-    def test_body_box_expand_and_clamp(self):
-        # 100x100 帧,human_body xywh=(10,10,20,20) → xyxy(10,10,30,30)
+    def test_det_box_expand_and_clamp(self):
+        # 100x100 帧,det box xyxy=(10,10,30,30)
         # 扩展 h40%/v30%: uw=uh=20 → ex=8,ey=6 → (2,4,38,36),clamp 内
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        region = compute_crop_region([_target({"human_body": (10, 10, 20, 20)})], frames, CFG)
+        region = compute_crop_region([(10, 10, 30, 30)], frames, CFG)
         assert region is not None
         x1, y1, x2, y2 = region
         assert x1 == 2 and y1 == 4 and x2 == 38 and y2 == 36
@@ -117,58 +99,47 @@ class TestCropRegion:
         min(w,x2)/min(h,y2) 退回裸 x2,y2 它照样绿。越界坐标会写进 trace,前端按
         frame_size_wh 当 viewBox 画框会画到图外,所以这个上界必须有测试守住。
 
-        100x100 帧,human_body xywh=(60,60,39,39) → xyxy(60,60,99,99);uw=uh=39 →
+        100x100 帧,det box xyxy=(60,60,99,99);uw=uh=39 →
         ex=int(39*0.4)=15, ey=int(39*0.3)=11 → 扩展后 (45,49,114,110) 越界 → 截回
         (45,49,100,100)(面积 28% 在 [10%,49%] 内,不再被最小/最大面积改动)。
         """
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        region = compute_crop_region([_target({"human_body": (60, 60, 39, 39)})], frames, CFG)
+        region = compute_crop_region([(60, 60, 99, 99)], frames, CFG)
         assert region == (45, 49, 100, 100)
 
-    def test_face_excluded(self):
-        # 只有 human_face 框 + 静态帧 → 无主体框、无运动 → None(face 不参与 crop)
-        frames = [np.zeros((100, 100, 3), dtype=np.uint8)] * 2
-        assert _body_boxes([_target({"human_face": (10, 10, 20, 20)})]) == []
-        assert compute_crop_region([_target({"human_face": (10, 10, 20, 20)})], frames, CFG) is None
+    def test_union_covers_every_given_box(self):
+        """不变量:每一个给入的框都落在裁切区域内。
 
-    def test_no_person_box_excluded(self):
-        # 已落定 no_person 的静物误检框不进并集(否则位置固定的误检会把区域撑过面积上限,
-        # 让整个房间永久回退全景)。
-        t = _target({"human_body": (10, 10, 20, 20)}, person_id="none", no_person=True)
-        frames = [np.zeros((100, 100, 3), dtype=np.uint8)] * 2
-        assert _body_boxes([t]) == []
-        assert compute_crop_region([t], frames, CFG) is None
-
-    def test_unrecognized_person_box_kept(self):
-        # person_id == "none" 但**不是** no_person(有人、只是没识别出身份)→ 框照常参与,
-        # 证明排除的是状态位而非 "none" 这个渲染值(陌生人不能被一起排掉)。
-        t = _target({"human_body": (10, 10, 20, 20)}, person_id="none")
-        assert _body_boxes([t]) == [(10, 10, 30, 30)]
-
-    def test_no_person_does_not_hide_real_target(self):
-        # 一真一误检:并集只按真人框算,与单独给真人框的结果一致。
-        real = _target({"human_body": (10, 10, 20, 20)})
-        ghost = _target({"human_body": (80, 80, 15, 15)}, person_id="none", no_person=True)
-        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        assert compute_crop_region([real, ghost], frames, CFG) == compute_crop_region(
-            [real], frames, CFG
-        )
+        这是本能力的核心语义 —— 主体框来自窗口内**每一抽帧**、含宠物,区域必须把它们全包住,
+        包不住就不该裁(见 test_max_area_fallback_none)。只取其中一个框(例如末帧那个)会让
+        窗内走动过的人或另一侧的宠物被裁在画外,而模型看不出自己少看了东西。
+        """
+        frames = [_black(300, 300)]
+        boxes = [
+            (20, 30, 60, 90),      # 第 1 帧的人
+            (25, 34, 65, 95),      # 第 3 帧的同一人(走动了)
+            (100, 110, 140, 150),  # 趴在另一侧的宠物
+        ]
+        region = compute_crop_region(boxes, frames, CFG)
+        assert region is not None
+        rx1, ry1, rx2, ry2 = region
+        for bx1, by1, bx2, by2 in boxes:
+            assert rx1 <= bx1 and ry1 <= by1 and rx2 >= bx2 and ry2 >= by2
 
     def test_no_boxes_no_motion_none(self):
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)] * 2
-        assert compute_crop_region([_target({})], frames, CFG) is None
         assert compute_crop_region([], frames, CFG) is None
 
     def test_max_area_fallback_none(self):
         # 大主体框 → 扩展后面积 >49% → None(回退全景)
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        region = compute_crop_region([_target({"human_body": (10, 10, 80, 80)})], frames, CFG)
+        region = compute_crop_region([(10, 10, 90, 90)], frames, CFG)
         assert region is None
 
     def test_min_area_enlarged(self):
         # 极小主体框 → 应放大到 >= crop_min_area_ratio(10%)
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        region = compute_crop_region([_target({"human_body": (48, 48, 4, 4)})], frames, CFG)
+        region = compute_crop_region([(48, 48, 52, 52)], frames, CFG)
         assert region is not None
         x1, y1, x2, y2 = region
         area_ratio = (x2 - x1) * (y2 - y1) / (100 * 100)
@@ -179,31 +150,22 @@ class TestCropRegion:
         # 紧贴画面角的极小框:_enforce_min_area 绕中心放大被 clamp 截断、达不到下限 →
         # 复检兜底返回 None(或至少面积 >= 下限),不放行等效分辨率无收益的裁切。
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        region = compute_crop_region([_target({"human_body": (0, 0, 4, 4)})], frames, CFG)
+        region = compute_crop_region([(0, 0, 4, 4)], frames, CFG)
         if region is not None:
             x1, y1, x2, y2 = region
             assert (x2 - x1) * (y2 - y1) / (100 * 100) >= CFG.crop_min_area_ratio - 1e-6
 
-    def test_pet_body_included(self):
+    def test_precomputed_motion_blocks_passthrough(self):
+        # 预算 motion_blocks 传入 → 结果与内部自算一致(免重复算 CV 的诊断路径)
         frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        region = compute_crop_region([_target({"pet_body": (20, 20, 15, 15)})], frames, CFG)
-        assert region is not None
-
-    def test_precomputed_boxes_passthrough(self):
-        # 预算 det_boxes/motion_blocks 传入 → 结果与内部自算一致(免重复算 CV 的诊断路径)
-        frames = [np.zeros((100, 100, 3), dtype=np.uint8)]
-        targets = [_target({"human_body": (10, 10, 20, 20)})]
-        auto = compute_crop_region(targets, frames, CFG)
+        det_boxes = [(10, 10, 30, 30)]
+        auto = compute_crop_region(det_boxes, frames, CFG)
         passed = compute_crop_region(
-            targets, frames, CFG,
-            det_boxes=_body_boxes(targets),
-            motion_blocks=compute_motion_blocks(frames, CFG),
+            det_boxes, frames, CFG, motion_blocks=compute_motion_blocks(frames, CFG),
         )
         assert auto == passed
-        # 显式传空 → 无依据 → None(不回退到内部自算)
-        assert compute_crop_region(
-            targets, frames, CFG, det_boxes=[], motion_blocks=[]
-        ) is None
+        # 显式传空 motion_blocks + 无检测框 → 无依据 → None(不回退到内部自算)
+        assert compute_crop_region([], frames, CFG, motion_blocks=[]) is None
 
 
 # ---------------- crop_frames ----------------
@@ -268,13 +230,13 @@ class TestRemapBbox:
     def test_real_region_contains_its_own_det_box(self):
         """契约锚点:compute_crop_region 由检测框并集算出 → 该框换算后必不退化。
 
-        生产里名册 bbox 与 crop 区域同源(都读 box_info[-1].boxes["human_body"]),所以
-        remap 正常不该返回 None。这条把"同源 ⇒ 包含"钉住:若哪天 _body_boxes 的取框口径
-        与 identity 侧漂移,这里先挂。
+        名册 bbox 与 crop 区域**不同源**(名册走 box_info/bbox_xyxy_norm 的末帧快照,区域走
+        main_det_boxes 的逐帧检测框),但同一个人的末帧框必然也在逐帧集合里、因而必被区域包住,
+        所以 remap 正常不该返回 None。这条把"末帧框 ⇒ 被包含"钉住:若哪天区域侧的取框口径
+        与 identity 侧漂移到不再覆盖末帧位置,这里先挂。
         """
         frames = [_black(480, 640) for _ in range(2)]
-        box_xywh = (100, 100, 80, 120)  # xyxy = (100, 100, 180, 220)
-        region = compute_crop_region([_target({"human_body": box_xywh})], frames, CFG)
+        region = compute_crop_region([(100, 100, 180, 220)], frames, CFG)
         assert region is not None
         # 直接调 identity 侧的归一化,而不是手抄它的公式 —— 这条测试的立意就是跨模块契约,
         # 抄公式会让口径漂移(如 round 改成截断)时它仍然绿灯,守不住自称要守的东西。

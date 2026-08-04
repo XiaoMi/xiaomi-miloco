@@ -120,6 +120,13 @@ class TrackedObject:
 class TrackingResponse:
     frame_info: FrameInfo
     object_info: list[TrackedObject]
+    # 本窗口**每一抽帧**上的主体检测框(human / cat / dog),xyxy 像素,跨帧累积不去重。
+    # 与 object_info 是两套需求,故并列而非塞进 box_info:
+    #   - object_info/box_info 服务身份 —— 只关心 track 末帧那一个位置(贴名字、抽 ReID)
+    #   - 本字段服务 Smart Crop —— 要的是空间覆盖:裁出的区域必须包住窗口内出现过的一切,
+    #     所以需要逐帧、且需要不成 track 的类别(tracker 只跟 HUMAN,宠物永远进不了 box_info)
+    # 无 tracker 的实现(Mock)留空 → crop 侧退化为只用运动块。
+    main_det_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -160,10 +167,6 @@ class IdentityTarget:
     # 供 prompt 在"已识别人物/陌生人"名册里注入位置，多人时让 omni 把姓名挂到
     # 视频里的人。None = 本帧未被真实检测（coasting 纯预测残留），名册退化为纯名。
     bbox_xyxy_norm: tuple[int, int, int, int] | None = None
-    # 已落定 no_person 的 track（检测器把静物误报成人体，身份侧已投票压掉：停派发、身份不导出）。
-    # person_id 对这类 track 渲染成 "none"，与"有人但没识别出身份"**不可区分**，所以单独给一位。
-    # 目前只有 Smart Crop 的 _body_boxes 消费它（静物误检框会把裁切区域并集撑爆面积上限）。
-    no_person: bool = False
     # 翻身份黏旧名期(reverted_from_confirmed)的 track：显示仍黏旧成员名，但**不可作先验**进
     # 名册锚定 omni 重审（与 candidate_tids 同类去先验）。coasting（本窗未派发）时不在
     # candidate_tids 内，靠本标记兜住，防旧名先验把翻转翻不动。默认 False。
@@ -237,6 +240,9 @@ class IdentityPacket:
     audio_analysis: AudioAnalysis
     sample_rate: int = 16000
     trigger: GateTrigger | None = None  # 透传自 GatePacket，下游分流 audio-only 路径用
+    # 透传 TrackingResponse.main_det_boxes（窗口内每抽帧的 human/cat/dog 框，xyxy 像素），
+    # 供 Smart Crop 算裁切区域并集。见该字段注释：与 targets/box_info 是两套需求。
+    main_det_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 # =============================================================================
