@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -293,6 +294,29 @@ class RtspCameraService:
         except ResourceNotFoundException:
             return False
 
+    async def wait_until_online(
+        self,
+        did: str,
+        *,
+        timeout_s: float = 5.0,
+        poll_interval_s: float = 0.05,
+    ) -> bool:
+        """Wait briefly for the reader's first decoded frame.
+
+        Creating a reader only starts its background thread. Without this barrier,
+        the create/update response can report the camera offline before OpenCV has
+        completed the RTSP handshake and decoded the first keyframe.
+        """
+        reader = self.ensure_reader(did)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_s)
+        while not reader.online:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(max(0.0, poll_interval_s), remaining))
+        return True
+
     def _load(self) -> dict[str, RtspCameraRecord]:
         path = self._path
         if not path.exists():
@@ -363,8 +387,6 @@ async def record_rtsp_clip(
     timeout_s: float | None = None,
 ) -> bytes:
     """Encode the reader's latest BGR frames with the existing clip recorder."""
-    import asyncio
-
     if recorder_factory is None:
         from miloco.miot.ws import NalClipRecorder
 

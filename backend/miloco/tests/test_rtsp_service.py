@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 import numpy as np
 import pytest
@@ -77,6 +77,31 @@ def test_registry_crud_updates_reader(tmp_path, monkeypatch):
     service.delete(created.did)
     reader.stop.assert_called_once_with()
     assert service.list_records() == []
+
+
+@pytest.mark.asyncio
+async def test_wait_until_online_waits_for_first_decoded_frame(monkeypatch):
+    service = RtspCameraService()
+    reader = MagicMock()
+    type(reader).online = PropertyMock(side_effect=[False, False, True])
+    monkeypatch.setattr(service, "ensure_reader", MagicMock(return_value=reader))
+
+    online = await service.wait_until_online(
+        "rtsp:test", timeout_s=1, poll_interval_s=0
+    )
+
+    assert online is True
+    service.ensure_reader.assert_called_once_with("rtsp:test")
+
+
+@pytest.mark.asyncio
+async def test_wait_until_online_times_out_without_a_frame(monkeypatch):
+    service = RtspCameraService()
+    reader = MagicMock()
+    type(reader).online = PropertyMock(return_value=False)
+    monkeypatch.setattr(service, "ensure_reader", MagicMock(return_value=reader))
+
+    assert await service.wait_until_online("rtsp:test", timeout_s=0) is False
 
 
 @pytest.mark.asyncio

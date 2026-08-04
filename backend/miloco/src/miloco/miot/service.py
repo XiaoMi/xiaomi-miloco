@@ -1664,7 +1664,9 @@ class MiotService:
 
     async def create_rtsp_camera(self, payload: RtspCameraCreate) -> RtspCameraRecord:
         """Create an RTSP source and make it visible to perception immediately."""
-        record = get_rtsp_service().create(payload)
+        rtsp_service = get_rtsp_service()
+        record = rtsp_service.create(payload)
+        await rtsp_service.wait_until_online(record.did)
         await self._sync_camera_adapter()
         return record
 
@@ -1672,7 +1674,10 @@ class MiotService:
         self, did: str, payload: RtspCameraUpdate
     ) -> RtspCameraRecord:
         """Update an RTSP source and refresh its perception connection."""
-        record = get_rtsp_service().update(did, payload)
+        rtsp_service = get_rtsp_service()
+        record = rtsp_service.update(did, payload)
+        if payload.url is not None:
+            await rtsp_service.wait_until_online(record.did)
         await self._sync_camera_adapter()
         return record
 
