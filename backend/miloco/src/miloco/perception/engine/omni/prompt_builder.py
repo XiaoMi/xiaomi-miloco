@@ -1817,8 +1817,9 @@ def _maybe_encode_adaptive(
             # 哪一侧把它撑开(远处误检 / 大幅走动 / 运动块),否则日志只说面积不合格、查不出根因。
             # reason 取自 compute_crop_region_detail —— **不能**在这里拿并集面积反推:真正
             # 过闸的是扩展 + 最小面积放大之后的 region,其面积恒 ≥ 并集,据并集二分会把
-            # 「并集已达下限、扩展后超上限」这一整段(占默认配置扫描空间约 17%)误标成
-            # area_too_small,而两者处置正相反:area_too_large 要查是什么撑开了并集;
+            # 「并集已达下限、扩展后超上限」这一整段误标成 area_too_small(默认扩展比下并集
+            # 面积比 ≥ 0.49/(1.8×1.6) ≈ 0.17 起就可能落进这段),
+            # 而两者处置正相反:area_too_large 要查是什么撑开了并集;
             # area_too_small 是几何天花板(目标贴边、绕中心放大被 clamp 截断后仍不足下限),
             # 裁了也没有等效分辨率收益,无需处置。
             all_boxes = det_boxes + motion_blocks
