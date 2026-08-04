@@ -9,10 +9,12 @@ Handles Xiaomi IoT device login, authorization, and device management
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 
+import cv2
 from fastapi import APIRouter, Depends, Query, WebSocket
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.websockets import WebSocketDisconnect
 
 from miloco.config import get_settings
@@ -20,6 +22,7 @@ from miloco.manager import get_manager
 from miloco.middleware import (
     BusinessException,
     verify_token,
+    verify_token_query_fallback,
     verify_websocket_token,
 )
 from miloco.middleware.exceptions import HTTPException
@@ -38,6 +41,9 @@ from miloco.miot.ws import (
     miot_audio_stream_manager,
     miot_video_stream_manager,
 )
+from miloco.rtsp import get_rtsp_service
+from miloco.rtsp.schema import RtspCameraCreate, RtspCameraUpdate
+from miloco.rtsp.service import record_rtsp_clip
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.common import escape_for_js_string
 
@@ -93,24 +99,32 @@ async def _first_frame_watchdog(
     logger.warning(
         "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
-        camera_id, channel, _FIRST_FRAME_TIMEOUT_S,
+        camera_id,
+        channel,
+        _FIRST_FRAME_TIMEOUT_S,
     )
     try:
         # reason 是给将来按机器码分流预留的字段;前端 watch.html 当前只展示 message,
         # 不读 reason。两个都发,前端按需取。
         await websocket.send_text(
-            json.dumps({
-                "type": "error",
-                "reason": "camera_unreachable",
-                "message": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
-            })
+            json.dumps(
+                {
+                    "type": "error",
+                    "reason": "camera_unreachable",
+                    "message": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
+                }
+            )
         )
     except Exception as err:
         # send 失败基本意味着连接已被对端关掉——再 close 也是白搭,还会再抛一条
         # error 把"连接没了"这件正常事刷成两条 ERROR。直接收尾,主流程 finally 的
         # close_connection 负责清理。降到 info,不混进真 error。
-        logger.info("watchdog send skipped (conn likely gone), %s.%d: %s",
-                    camera_id, channel, err)
+        logger.info(
+            "watchdog send skipped (conn likely gone), %s.%d: %s",
+            camera_id,
+            channel,
+            err,
+        )
         return
     try:
         # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)
@@ -476,7 +490,6 @@ async def send_notify(
     return NormalResponse(code=0, message="Notification sent successfully", data=None)
 
 
-
 # ─── scope: 家庭 / 相机接入范围 ──────────────────────────────────────────────
 
 
@@ -524,6 +537,142 @@ async def toggle_scope_camera(
         [{"did": i.did, "in_use": i.in_use} for i in request.items]
     )
     return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.get(
+    path="/rtsp_cameras",
+    summary="List user-managed RTSP cameras",
+    response_model=NormalResponse,
+)
+async def list_rtsp_cameras(current_user: str = Depends(verify_token)):
+    cameras = await manager.miot_service.list_cameras_with_state()
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data=[camera for camera in cameras if camera.get("source") == "rtsp"],
+    )
+
+
+@router.post(
+    path="/rtsp_cameras",
+    summary="Add a user-managed RTSP camera",
+    response_model=NormalResponse,
+)
+async def create_rtsp_camera(
+    request: RtspCameraCreate, current_user: str = Depends(verify_token)
+):
+    record = await manager.miot_service.create_rtsp_camera(request)
+    cameras = await manager.miot_service.list_cameras_with_state()
+    data = next(camera for camera in cameras if camera["did"] == record.did)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.put(
+    path="/rtsp_cameras/{did}",
+    summary="Update a user-managed RTSP camera",
+    response_model=NormalResponse,
+)
+async def update_rtsp_camera(
+    did: str,
+    request: RtspCameraUpdate,
+    current_user: str = Depends(verify_token),
+):
+    record = await manager.miot_service.update_rtsp_camera(did, request)
+    cameras = await manager.miot_service.list_cameras_with_state()
+    data = next(camera for camera in cameras if camera["did"] == record.did)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.delete(
+    path="/rtsp_cameras/{did}",
+    summary="Delete a user-managed RTSP camera",
+    response_model=NormalResponse,
+)
+async def delete_rtsp_camera(did: str, current_user: str = Depends(verify_token)):
+    await manager.miot_service.delete_rtsp_camera(did)
+    return NormalResponse(code=0, message="ok", data=None)
+
+
+@router.get(
+    path="/rtsp_cameras/{did}/mjpeg",
+    summary="MJPEG preview stream for a user-managed RTSP camera",
+)
+async def rtsp_mjpeg_stream(
+    did: str,
+    current_user: str = Depends(verify_token_query_fallback),
+):
+    service = get_rtsp_service()
+    service.ensure_reader(did)
+
+    def _frames():
+        boundary = b"--frame\r\n"
+        while True:
+            frame = service.latest_frame(did)
+            if frame is None:
+                time.sleep(0.2)
+                continue
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ok:
+                time.sleep(0.2)
+                continue
+            jpg = buf.tobytes()
+            yield (
+                boundary
+                + b"Content-Type: image/jpeg\r\n"
+                + f"Content-Length: {len(jpg)}\r\n\r\n".encode("ascii")
+                + jpg
+                + b"\r\n"
+            )
+            time.sleep(0.15)
+
+    return StreamingResponse(
+        _frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post(
+    path="/rtsp_cameras/{did}/record_clip",
+    summary="Record N seconds from a user-managed RTSP camera and return mp4",
+)
+async def record_rtsp_camera_clip(
+    did: str,
+    duration_ms: int = Query(
+        15000, ge=2000, le=60000, description="Clip duration in ms (2–60s)"
+    ),
+    current_user: str = Depends(verify_token),
+) -> Response:
+    logger.info(
+        "RTSP record_clip API called, user=%s, camera=%s, duration_ms=%d",
+        current_user,
+        did,
+        duration_ms,
+    )
+    try:
+        mp4_bytes = await record_rtsp_clip(did, duration_ms=duration_ms)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            message=(
+                "RTSP recording timed out; camera produced no frame. "
+                "Check that the RTSP URL is reachable."
+            ),
+            status_code=504,
+        )
+    except BusinessException as e:
+        raise HTTPException(message=e.message, status_code=404)
+    if not mp4_bytes:
+        raise HTTPException(
+            message="RTSP recording returned an empty video.", status_code=504
+        )
+    return Response(
+        content=mp4_bytes,
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="clip_{did}_{duration_ms}ms.mp4"',
+        },
+    )
 
 
 @router.put(
@@ -612,12 +761,17 @@ async def record_clip(
     """
     logger.info(
         "record_clip API called, user: %s, camera: %s.%d, dur=%dms",
-        current_user, camera_id, channel, duration_ms,
+        current_user,
+        camera_id,
+        channel,
+        duration_ms,
     )
     recorder = NalClipRecorder(duration_ms=duration_ms)
     try:
         await miot_video_stream_manager.register_recorder(
-            camera_id, channel, recorder,
+            camera_id,
+            channel,
+            recorder,
         )
     except RuntimeError as e:
         # PPCS not handshaken / camera not bound — surface as 503 so the
@@ -632,7 +786,9 @@ async def record_clip(
         except asyncio.TimeoutError:
             logger.warning(
                 "record_clip timeout, %s.%d — no keyframe within %.1fs",
-                camera_id, channel, timeout_s,
+                camera_id,
+                channel,
+                timeout_s,
             )
             raise HTTPException(
                 message=(
@@ -644,12 +800,16 @@ async def record_clip(
     finally:
         recorder.cancel()
         await miot_video_stream_manager.unregister_recorder(
-            camera_id, channel, recorder,
+            camera_id,
+            channel,
+            recorder,
         )
 
     logger.info(
         "record_clip OK, %s.%d, %d bytes",
-        camera_id, channel, len(mp4_bytes),
+        camera_id,
+        channel,
+        len(mp4_bytes),
     )
     return Response(
         content=mp4_bytes,
@@ -658,8 +818,7 @@ async def record_clip(
             "Cache-Control": "no-store",
             # Suggested filename so the browser File API picks up a sensible
             # name if the blob is ever saved manually.
-            "Content-Disposition":
-                f'inline; filename="clip_{camera_id}_{channel}_{duration_ms}ms.mp4"',
+            "Content-Disposition": f'inline; filename="clip_{camera_id}_{channel}_{duration_ms}ms.mp4"',
         },
     )
 

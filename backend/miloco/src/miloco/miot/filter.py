@@ -200,6 +200,24 @@ def set_camera_in_use(
     )
 
 
+def set_cameras_in_use(
+    kv_repo: KVRepo, updates: dict[str, bool]
+) -> tuple[list[str], bool]:
+    """Batch toggle non-channel camera IDs while preserving list order."""
+    current = _load_list(kv_repo, ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
+    new = [did for did in current if did not in updates or updates[did]]
+    for did, in_use in updates.items():
+        if not in_use and did not in new:
+            new.append(did)
+    if new == current:
+        return current, False
+    kv_repo.set(
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY,
+        json.dumps(new, ensure_ascii=False),
+    )
+    return new, True
+
+
 def set_homes_in_use(
     kv_repo: KVRepo, home_ids: list[str], in_use: bool
 ) -> tuple[list[str], bool]:
@@ -333,7 +351,9 @@ def camera_prompts(kv_repo: KVRepo) -> dict[str, str]:
     return _load_str_map(kv_repo, ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
 
 
-def set_camera_prompt(kv_repo: KVRepo, did: str, prompt: str) -> tuple[dict[str, str], bool]:
+def set_camera_prompt(
+    kv_repo: KVRepo, did: str, prompt: str
+) -> tuple[dict[str, str], bool]:
     """设置 / 清除单台相机的自定义感知 prompt。
 
     超长截断：仅存储前 ``MAX_CAMERA_PROMPT_LEN`` 字符（service/schema 层已有校验，
@@ -348,7 +368,9 @@ def set_camera_prompt(kv_repo: KVRepo, did: str, prompt: str) -> tuple[dict[str,
         new.pop(did, None)
     if new == current:
         return current, False
-    kv_repo.set(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False))
+    kv_repo.set(
+        ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False)
+    )
     return new, True
 
 
@@ -359,5 +381,7 @@ def clear_camera_prompt(kv_repo: KVRepo, did: str) -> tuple[dict[str, str], bool
         return current, False
     new = dict(current)
     del new[did]
-    kv_repo.set(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False))
+    kv_repo.set(
+        ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY, json.dumps(new, ensure_ascii=False)
+    )
     return new, True

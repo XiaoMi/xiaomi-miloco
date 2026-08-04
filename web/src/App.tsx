@@ -4,6 +4,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  addRtspCamera,
+  deleteRtspCamera,
   getHomeStatus,
   listActivity,
   listOnDemandLogs,
@@ -22,6 +24,7 @@ import {
   clearScopeCameraPrompt,
   toggleScopeCamera,
   toggleScopeCameraVoice,
+  updateRtspCamera,
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
@@ -277,6 +280,44 @@ function MainApp() {
                   throw e;
                 }
                 scopeCameras.reload();
+              }}
+              onAddRtspCamera={async (input) => {
+                try {
+                  await addRtspCamera(input);
+                  toast(t("hero.rtspAdded"), "ok");
+                } catch (e) {
+                  toast(e instanceof Error ? e.message : t("hero.rtspAddFailed"), "warn");
+                  throw e;
+                }
+                await Promise.all([
+                  scopeCameras.reload(),
+                  cameras.reload(),
+                  status.reload(),
+                ]);
+              }}
+              onUpdateRtspCamera={async (did, input) => {
+                try {
+                  await updateRtspCamera(did, input);
+                  toast(t("hero.rtspUpdated"), "ok");
+                } catch (e) {
+                  toast(e instanceof Error ? e.message : t("hero.rtspUpdateFailed"), "warn");
+                  throw e;
+                }
+                await Promise.all([scopeCameras.reload(), cameras.reload()]);
+              }}
+              onDeleteRtspCamera={async (did) => {
+                try {
+                  await deleteRtspCamera(did);
+                  toast(t("hero.rtspDeleted"), "ok");
+                } catch (e) {
+                  toast(e instanceof Error ? e.message : t("hero.rtspDeleteFailed"), "warn");
+                  throw e;
+                }
+                await Promise.all([
+                  scopeCameras.reload(),
+                  cameras.reload(),
+                  status.reload(),
+                ]);
               }}
               onRefresh={async () => {
                 // 手动刷新:force 绕过 8s 节流打后端刷相机状态,再 await 列表重拉落地——

@@ -23,6 +23,7 @@ import type {
   Scene,
   ScopeCamera,
   ScopeHome,
+  RtspCameraInput,
   Task,
   TokenBreakdown,
   UsageCallType,
@@ -979,6 +980,8 @@ export async function realSwitchScopeHome(homeId: string): Promise<void> {
 interface BackendScopeCamera {
   did: string;
   name: string | null;
+  source?: "miot" | "rtsp";
+  url?: string;
   room_name?: string | null;
   // 三个正交可用性指标。旧后端只有 is_online 时用它兜底 cloud+lan。
   cloud_online?: boolean;
@@ -999,11 +1002,16 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
   const r = await apiFetch<Normal<BackendScopeCamera[]>>(
     "/api/miot/scope/cameras",
   );
-  return r.data.map((c) => ({
+  return r.data.map(mapScopeCamera);
+}
+
+function mapScopeCamera(c: BackendScopeCamera): ScopeCamera {
+  return {
     did: c.did,
     name: c.name ?? c.did,
+    source: c.source ?? "miot",
+    url: c.url,
     roomName: c.room_name ?? undefined,
-    // 旧后端无三指标时用 is_online 兜底：cloud/lan 都取 is_online、awake 未知。
     cloudOnline: c.cloud_online ?? c.is_online,
     lanReachable: c.lan_reachable ?? c.is_online,
     awake: c.awake ?? null,
@@ -1011,9 +1019,37 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     voiceInUse: c.voice_in_use ?? false,
     perceptionPrompt: c.perception_prompt ?? "",
     connected: c.connected,
-    channel: c.channel ?? 0,  // 传递通道号，默认为 0
-    channelCount: c.channel_count ?? 1,  // 通道总数，判多通道用；旧后端兜底 1
-  }));
+    channel: c.channel ?? 0,
+    channelCount: c.channel_count ?? 1,
+  };
+}
+
+export async function realAddRtspCamera(
+  input: RtspCameraInput,
+): Promise<ScopeCamera> {
+  const r = await apiFetch<Normal<BackendScopeCamera>>("/api/miot/rtsp_cameras", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return mapScopeCamera(r.data);
+}
+
+export async function realUpdateRtspCamera(
+  did: string,
+  input: RtspCameraInput,
+): Promise<ScopeCamera> {
+  const r = await apiFetch<Normal<BackendScopeCamera>>(
+    `/api/miot/rtsp_cameras/${encodeURIComponent(did)}`,
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+  return mapScopeCamera(r.data);
+}
+
+export async function realDeleteRtspCamera(did: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/miot/rtsp_cameras/${encodeURIComponent(did)}`,
+    { method: "DELETE" },
+  );
 }
 
 // 轻量刷新相机「云端 online」状态——list_cameras_with_state 只读内存缓存

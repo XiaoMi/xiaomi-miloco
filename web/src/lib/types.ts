@@ -211,6 +211,9 @@ export interface PerceptionCamera {
 export interface ScopeCamera {
   did: string;
   name: string;
+  source?: "miot" | "rtsp";
+  /** RTSP 管理时回填；米家摄像头无此字段。 */
+  url?: string;
   // 通道号（多通道相机各条通道 0 / 1 / ...）；单通道相机恒为 0。用于播放取流、复合键去重。
   channel: number;
   // 该相机的通道总数（后端 channel_count）。判「多通道相机」的权威信号：channelCount>1 才
@@ -238,6 +241,11 @@ export interface ScopeCamera {
   // voiceInUse 正交：关着的相机也能预配，仅在被感知时注入生效。多通道相机按 channel 存取。
   perceptionPrompt: string;
   connected: boolean;
+}
+
+export interface RtspCameraInput {
+  name: string;
+  url: string;
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。

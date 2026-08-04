@@ -35,6 +35,7 @@ import type {
   Scene,
   ScopeCamera,
   ScopeHome,
+  RtspCameraInput,
   Task,
   UsagePeriod,
   UsageStats,
@@ -315,6 +316,23 @@ export async function switchScopeHome(homeId: string): Promise<void> {
 export async function listScopeCameras(homeId?: HomeId): Promise<ScopeCamera[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListScopeCameras();
+}
+
+export async function addRtspCamera(
+  input: RtspCameraInput,
+): Promise<ScopeCamera> {
+  return impl.realAddRtspCamera(input);
+}
+
+export async function updateRtspCamera(
+  did: string,
+  input: RtspCameraInput,
+): Promise<ScopeCamera> {
+  return impl.realUpdateRtspCamera(did, input);
+}
+
+export async function deleteRtspCamera(did: string): Promise<void> {
+  return impl.realDeleteRtspCamera(did);
 }
 
 // 轻量触发 backend 刷新相机云端 online 状态(节流见 impl,不扰流)。「此刻」页加载

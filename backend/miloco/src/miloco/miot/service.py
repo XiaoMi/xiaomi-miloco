@@ -44,8 +44,10 @@ from miloco.miot.filter import (
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
+    set_camera_in_use,
     set_camera_prompt,
     set_cameras_channels_in_use,
+    set_cameras_in_use,
     set_cameras_voice_in_use,
     set_homes_in_use,
     synthetic_camera_did,
@@ -62,6 +64,8 @@ from miloco.miot.schema import (
     DeviceInfo,
     SceneInfo,
 )
+from miloco.rtsp import get_rtsp_service
+from miloco.rtsp.schema import RtspCameraCreate, RtspCameraRecord, RtspCameraUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +212,12 @@ async def _write_action_ledger(
         logger.info(
             "action_ledger device=%s(did=%s room=%s) type=%s iid=%s success=%s "
             "reason=%s value_len=%d",
-            device_name or "?", did, room or "?", action_type, iid, success,
+            device_name or "?",
+            did,
+            room or "?",
+            action_type,
+            iid,
+            success,
             (result_msg or error or "ok"),
             _truncate_value_len(value_json),
         )
@@ -263,9 +272,7 @@ class MiotService:
         if info is None:
             raise ResourceNotFoundException(f"Device '{did}' not found")
         if not is_home_allowed(self._kv_repo, getattr(info, "home_id", None)):
-            raise ValidationException(
-                f"Device '{did}' is not in an allowed home"
-            )
+            raise ValidationException(f"Device '{did}' is not in an allowed home")
 
     def _safe_lru_touch(self, did: str, iids: list[str]) -> None:
         """Best-effort LRU 写入；任何异常只 warning，不让控制返回受影响。
@@ -709,9 +716,7 @@ class MiotService:
         """
         key = notify.strip()
         if self._notify_deduper.is_duplicate(key):
-            logger.info(
-                "send_notify skipped: identical message within dedup window"
-            )
+            logger.info("send_notify skipped: identical message within dedup window")
             return
         try:
             notify_id = await self._miot_proxy.get_miot_app_notify_id(notify)
@@ -753,9 +758,7 @@ class MiotService:
         """Get detected audio codec for a camera channel."""
         return self._miot_proxy.get_audio_codec(camera_id, channel)
 
-    async def start_video_stream(
-        self, camera_id: str, channel: int, callback
-    ) -> int:
+    async def start_video_stream(self, camera_id: str, channel: int, callback) -> int:
         """Subscribe to *decoded* video frames for live transcode.
 
         Returns the SDK ``reg_id`` (needed by :meth:`stop_video_stream`).
@@ -766,7 +769,8 @@ class MiotService:
         try:
             logger.info(
                 "Starting decoded video stream: camera_id=%s, channel=%s",
-                camera_id, channel,
+                camera_id,
+                channel,
             )
             if callback is None:
                 logger.info(
@@ -781,14 +785,13 @@ class MiotService:
             logger.error("Failed to start video stream: %s", e)
             raise MiotServiceException(f"Failed to start video stream: {str(e)}") from e
 
-    async def stop_video_stream(
-        self, camera_id: str, channel: int, reg_id: int
-    ):
+    async def stop_video_stream(self, camera_id: str, channel: int, reg_id: int):
         """Unsubscribe from the decoded video stream (paired with start)."""
         try:
             logger.info(
                 "Stopping decoded video stream: camera_id=%s, reg_id=%d",
-                camera_id, reg_id,
+                camera_id,
+                reg_id,
             )
             await self._miot_proxy.stop_camera_decode_video_stream(
                 camera_id, channel, reg_id
@@ -812,11 +815,13 @@ class MiotService:
             allow = allowed_home_ids(self._kv_repo)
             if allow:
                 allowed_dids = set(
-                    filter_by_home(self._kv_repo, await self._miot_proxy.get_devices()).keys()
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_devices()
+                    ).keys()
                 )
                 allowed_scene_ids = set(
-                    filter_by_home(self._kv_repo,
-                        await self._miot_proxy.get_all_scenes() or {}
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_all_scenes() or {}
                     ).keys()
                 )
                 data["devices"] = [
@@ -829,7 +834,9 @@ class MiotService:
                 ]
                 data["areas"] = [
                     {"name": a}
-                    for a in sorted({d.get("room") for d in data["devices"] if d.get("room")})
+                    for a in sorted(
+                        {d.get("room") for d in data["devices"] if d.get("room")}
+                    )
                 ]
             else:
                 # 未选择家庭：清空 devices/scenes/areas
@@ -916,10 +923,13 @@ class MiotService:
                 await _write_action_ledger(
                     self._miot_proxy,
                     action_type="set_property",
-                    did=did, iid=request.iid,
+                    did=did,
+                    iid=request.iid,
                     value_json=attempted_value_json,
-                    result_code=code, result_msg=msg,
-                    success=success, error=None,
+                    result_code=code,
+                    result_msg=msg,
+                    success=success,
+                    error=None,
                 )
                 return {"results": results}
 
@@ -946,8 +956,10 @@ class MiotService:
                     iid=_request_iid(request),
                     did=did,
                     value_json=attempted_value_json,
-                    result_code=code, result_msg=msg,
-                    success=success, error=None,
+                    result_code=code,
+                    result_msg=msg,
+                    success=success,
+                    error=None,
                 )
                 return {"results": results}
 
@@ -965,10 +977,13 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type="call_action",
-                did=did, iid=request.iid,
+                did=did,
+                iid=request.iid,
                 value_json=attempted_value_json,
-                result_code=code, result_msg=msg,
-                success=success, error=None,
+                result_code=code,
+                result_msg=msg,
+                success=success,
+                error=None,
             )
             return {"result": result}
 
@@ -982,10 +997,13 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=getattr(request, "type", None) or "call_action",
-                did=did, iid=_request_iid(request),
+                did=did,
+                iid=_request_iid(request),
                 value_json=attempted_value_json,
-                result_code=None, result_msg=None,
-                success=False, error=str(e),
+                result_code=None,
+                result_msg=None,
+                success=False,
+                error=str(e),
             )
             raise MiotServiceException(f"Failed to control device: {str(e)}") from e
 
@@ -995,10 +1013,10 @@ class MiotService:
             devices = await self._miot_proxy.get_devices()
             if did not in devices:
                 raise ResourceNotFoundException(f"Device '{did}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(devices[did], "home_id", None)):
-                raise ValidationException(
-                    f"Device '{did}' is not in an allowed home"
-                )
+            if not is_home_allowed(
+                self._kv_repo, getattr(devices[did], "home_id", None)
+            ):
+                raise ValidationException(f"Device '{did}' is not in an allowed home")
 
             # 用户主动指定 iids = 「这次确实关心这些 prop」→ 写 LRU；
             # 不传 iids 走全量可读冷查询，不算"用过"，不写。
@@ -1116,6 +1134,7 @@ class MiotService:
         显式 `switch_home` 与 `list_homes` 兜底自动切换共用此入口。fire-and-forget：
         openclaw 不可达 / 删除失败只 WARN、不上抛，绝不阻塞或打断切换本身。
         """
+
         async def _bg():
             from miloco.dispatch.dispatcher import MILOCO_SESSION_ROUTES
             from miloco.utils.agent_client import reset_agent_sessions
@@ -1163,8 +1182,9 @@ class MiotService:
             )
             errors = [r for r in results if isinstance(r, Exception)]
             if errors:
-                logger.warning("switch_home background refresh partial failure: %s",
-                               errors)
+                logger.warning(
+                    "switch_home background refresh partial failure: %s", errors
+                )
             try:
                 await self._sync_camera_adapter()
             except Exception as e:
@@ -1200,23 +1220,41 @@ class MiotService:
         ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
         """
         voice_allowed = voice_allowed_camera_dids(self._kv_repo)
+        denied = denied_camera_dids(self._kv_repo)
         prompt_map = camera_prompts(self._kv_repo)
         connected = self._connected_camera_dids()
-        cameras = filter_by_home(
-            self._kv_repo, await self._miot_proxy.get_cameras() or {}
-        )
+        cameras = {}
+        if self._miot_authenticated():
+            cameras = filter_by_home(
+                self._kv_repo, await self._miot_proxy.get_cameras() or {}
+            )
         # 过滤已从账号删除的摄像头：_camera_info_dict 是内存缓存，
         # 设备删除后不会自动清除，需要用 _device_info_dict 做交集校验。
-        devices = await self._miot_proxy.get_devices()
+        devices = (
+            await self._miot_proxy.get_devices() if self._miot_authenticated() else {}
+        )
         cameras = {did: info for did, info in cameras.items() if did in devices}
         # awake：只读缓存（云读收在 refresh_camera_online_status，前端列表前必调）。
-        awake_map = await self._miot_proxy.read_cameras_awake(
-            list(cameras.keys()), cache_only=True
+        awake_map = (
+            await self._miot_proxy.read_cameras_awake(
+                list(cameras.keys()), cache_only=True
+            )
+            if cameras
+            else {}
         )
-        # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
-        active = set(
-            select_active_camera_dids(self._kv_repo, cameras, awake_map=awake_map)
+        # in_use = 活跃集：与拉流/投喂同一口径。RTSP 与米家相机共享全局上限，
+        # 排序后确定性截断，避免新增来源绕过 MAX_ENABLED_CAMERAS。
+        miot_active = select_active_camera_dids(
+            self._kv_repo, cameras, awake_map=awake_map, cap=False
         )
+        rtsp_service = get_rtsp_service()
+        rtsp_records = rtsp_service.list_records()
+        rtsp_active = [
+            record.did
+            for record in rtsp_records
+            if record.did not in denied and rtsp_service.is_online(record.did)
+        ]
+        active = set(sorted(miot_active + rtsp_active)[:MAX_ENABLED_CAMERAS])
         out: list[dict] = []
         for did, info in cameras.items():
             cloud_online = bool(getattr(info, "online", False))
@@ -1229,6 +1267,7 @@ class MiotService:
             base = {
                 "did": did,
                 "name": getattr(info, "name", None),
+                "source": "miot",
                 # 透 room_name 让前端能在多摄像头家庭显示"客厅 / 卧室"区分——
                 # 米家默认相机名常是"小米智能摄像机 2 代"等泛称，光看 name 难辨。
                 "room_name": getattr(info, "room_name", None),
@@ -1259,6 +1298,29 @@ class MiotService:
                         "perception_prompt": prompt_map.get(syn_did, ""),
                     }
                 )
+        for record in rtsp_records:
+            online = rtsp_service.is_online(record.did)
+            out.append(
+                {
+                    "did": record.did,
+                    "name": record.name,
+                    "url": record.url,
+                    "room_name": record.room_name,
+                    "created_at": record.created_at,
+                    "updated_at": record.updated_at,
+                    "channel_count": 1,
+                    "channel": 0,
+                    "source": "rtsp",
+                    "cloud_online": online,
+                    "lan_reachable": online,
+                    "is_online": online,
+                    "awake": None,
+                    "in_use": record.did in active,
+                    "voice_in_use": False,
+                    "perception_prompt": prompt_map.get(record.did, ""),
+                    "connected": record.did in connected,
+                }
+            )
         return out
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
@@ -1268,7 +1330,11 @@ class MiotService:
         （``cam:ch1``，前端逐路开关）或裸物理 did；裸 did 对多通道相机 = 该台所有通道一起，
         对单摄 = 它自己。全部校验通过后按 did 整台重算+覆盖写黑名单（D3）。
         """
-        cameras = await self._miot_proxy.get_cameras() or {}
+        cameras = (
+            await self._miot_proxy.get_cameras() if self._miot_authenticated() else {}
+        ) or {}
+        rtsp_service = get_rtsp_service()
+        rtsp_cameras = {record.did: record for record in rtsp_service.list_records()}
 
         def _cc(pdid: str) -> int:
             return getattr(cameras.get(pdid), "channel_count", None) or 1
@@ -1279,10 +1345,14 @@ class MiotService:
         # （`:ch` 后为空/非数字）或**越界通道**（≥ channel_count）都当非法 did 拒——否则前者
         # int() 崩 500、后者会把死条目写进黑名单（读侧只遍历 range(cc) 永远清不掉）。
         updates: dict[str, dict[int, bool]] = {}
+        rtsp_updates: dict[str, bool] = {}
         unknown: list[str] = []
         bad_channel: list[str] = []
         for it in items:
             raw = it["did"]
+            if raw in rtsp_cameras:
+                rtsp_updates[raw] = bool(it["in_use"])
+                continue
             pdid = physical_camera_did(raw)
             if pdid not in cameras:
                 unknown.append(raw)
@@ -1306,12 +1376,10 @@ class MiotService:
                 updates.setdefault(pdid, {})[c] = in_use
         if unknown:
             raise ValidationException(
-                f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
+                f"Unknown camera did(s) {unknown}; valid: {sorted(set(cameras) | set(rtsp_cameras))}"
             )
         if bad_channel:
-            raise ValidationException(
-                f"非法通道号（格式错误或越界）: {bad_channel}"
-            )
+            raise ValidationException(f"非法通道号（格式错误或越界）: {bad_channel}")
 
         def _in_scope(pdid: str) -> bool:
             return is_home_allowed(
@@ -1327,11 +1395,16 @@ class MiotService:
         enabling = [
             (p, ch) for p, chs in updates.items() for ch, iu in chs.items() if iu
         ]
-        if enabling:
+        rtsp_enabling = [did for did, in_use in rtsp_updates.items() if in_use]
+        if enabling or rtsp_enabling:
             in_scope = {p for p in cameras if _in_scope(p)}
             # 三态门（后端唯一执法点）：开启的通道必须 云端在线 && 局域网可达 && **该路**镜头
             # 未关。云端/局域网是相机级；镜头是 per-lens。awake 走新鲜云读（非 cache_only）。
-            awake_map = await self._miot_proxy.read_cameras_awake(sorted(in_scope))
+            awake_map = (
+                await self._miot_proxy.read_cameras_awake(sorted(in_scope))
+                if enabling
+                else getattr(self._miot_proxy, "_camera_awake_cache", {})
+            )
 
             cloud_offline = sorted({p for p, _ in enabling if not _cloud(p)})
             if cloud_offline:
@@ -1343,6 +1416,13 @@ class MiotService:
                 raise ValidationException(
                     f"摄像头局域网不可达,无法开启（{lan_offline}）;"
                     "请确认主机与相机在同一局域网后再启用"
+                )
+            rtsp_offline = sorted(
+                did for did in rtsp_enabling if not rtsp_service.is_online(did)
+            )
+            if rtsp_offline:
+                raise ValidationException(
+                    f"摄像头当前离线,无法开启投喂（{rtsp_offline}）;请待其上线后再启用"
                 )
             lens_off = [
                 synthetic_camera_did(p, ch, _cc(p))
@@ -1372,6 +1452,16 @@ class MiotService:
                     if ch in disabled or lens.get(ch) is False:
                         continue
                     streams_after += 1
+            denied_now = denied_camera_dids(self._kv_repo)
+            for record in rtsp_cameras.values():
+                if record.did in denied_now:
+                    enabled = False
+                else:
+                    enabled = rtsp_service.is_online(record.did)
+                if record.did in rtsp_updates:
+                    enabled = rtsp_updates[record.did]
+                if enabled:
+                    streams_after += 1
             if streams_after > MAX_ENABLED_CAMERAS:
                 raise ValidationException(
                     f"最多同时启用 {MAX_ENABLED_CAMERAS} 条摄像头视频流"
@@ -1379,18 +1469,31 @@ class MiotService:
                     f"请先禁用一路再启用新的"
                 )
 
-        _, changed = set_cameras_channels_in_use(
-            self._kv_repo, updates, {p: _cc(p) for p in updates}
+        _, miot_changed = (
+            set_cameras_channels_in_use(
+                self._kv_repo, updates, {p: _cc(p) for p in updates}
+            )
+            if updates
+            else ([], False)
         )
+        _, rtsp_changed = (
+            set_cameras_in_use(self._kv_repo, rtsp_updates)
+            if rtsp_updates
+            else ([], False)
+        )
+        changed = miot_changed or rtsp_changed
         if changed:
             # 先 refresh_cameras：按新 KV(黑名单)建/销 camera manager——两路都关的相机
             # 销毁 manager，停掉 native PPCS 会话+解码线程；仍有活跃路的保留。
             # 再 _sync_camera_adapter：perception 按新集连/断订阅。顺序不可换。
-            await self._miot_proxy.refresh_cameras()
+            if miot_changed:
+                await self._miot_proxy.refresh_cameras()
             await self._sync_camera_adapter()
         # 返回受影响的相机（按物理 did），结构与 list_cameras_with_state 一致。
         all_cameras = await self.list_cameras_with_state()
-        affected = [cam for cam in all_cameras if cam["did"] in set(updates)]
+        affected = [
+            cam for cam in all_cameras if cam["did"] in set(updates) | set(rtsp_updates)
+        ]
         return affected
 
     async def toggle_camera_voice(self, items: list[dict]) -> list[dict]:
@@ -1426,9 +1529,7 @@ class MiotService:
             return getattr(cameras.get(pdid), "channel_count", None) or 1
 
         disabled = [
-            d
-            for d in all_dids
-            if len(denied_channels_of(denied, d, _cc(d))) >= _cc(d)
+            d for d in all_dids if len(denied_channels_of(denied, d, _cc(d))) >= _cc(d)
         ]
         if disabled:
             raise ValidationException(
@@ -1459,6 +1560,12 @@ class MiotService:
         - 裸多通道 did → 展成全部通道（该台各路设同一条须知）；单摄 → 裸 did（cc=1）。
         """
         pdid = physical_camera_did(raw)
+        if get_rtsp_service().get(pdid) is not None:
+            if ":ch" in raw:
+                raise ValidationException(
+                    f"RTSP camera does not support channels: {raw}"
+                )
+            return [pdid]
         if pdid not in cameras:
             raise ValidationException(
                 f"Unknown camera did(s) ['{raw}']; valid: {sorted(cameras.keys())}"
@@ -1487,10 +1594,14 @@ class MiotService:
         **不**从属于感知 / 拾音开关——关着的相机也可预配 prompt，只在被感知时逐窗注入生效。
         不 refresh / _sync / _restart——引擎每感知窗按合成 did 实时读 KV。
         """
-        cameras = await self._miot_proxy.get_cameras() or {}
+        cameras = (
+            await self._miot_proxy.get_cameras() if self._miot_authenticated() else {}
+        ) or {}
 
         too_long = [
-            i["did"] for i in items if len((i.get("prompt") or "").strip()) > MAX_CAMERA_PROMPT_LEN
+            i["did"]
+            for i in items
+            if len((i.get("prompt") or "").strip()) > MAX_CAMERA_PROMPT_LEN
         ]
         if too_long:
             raise ValidationException(
@@ -1515,7 +1626,9 @@ class MiotService:
 
         校验未知 did / 越界通道；裸多通道 did 清全部通道。不 refresh / _sync / _restart。
         """
-        cameras = await self._miot_proxy.get_cameras() or {}
+        cameras = (
+            await self._miot_proxy.get_cameras() if self._miot_authenticated() else {}
+        ) or {}
         resolved = [self._resolve_prompt_target_dids(d, cameras) for d in dids]
         touched_physical = {physical_camera_did(d) for d in dids}
         for syn_dids in resolved:
@@ -1549,6 +1662,27 @@ class MiotService:
         except Exception as e:
             logger.warning("Camera adapter sync after scope change failed: %s", e)
 
+    async def create_rtsp_camera(self, payload: RtspCameraCreate) -> RtspCameraRecord:
+        """Create an RTSP source and make it visible to perception immediately."""
+        record = get_rtsp_service().create(payload)
+        await self._sync_camera_adapter()
+        return record
+
+    async def update_rtsp_camera(
+        self, did: str, payload: RtspCameraUpdate
+    ) -> RtspCameraRecord:
+        """Update an RTSP source and refresh its perception connection."""
+        record = get_rtsp_service().update(did, payload)
+        await self._sync_camera_adapter()
+        return record
+
+    async def delete_rtsp_camera(self, did: str) -> None:
+        """Delete an RTSP source and remove its scope metadata."""
+        get_rtsp_service().delete(did)
+        set_camera_in_use(self._kv_repo, did, True)
+        clear_camera_prompt(self._kv_repo, did)
+        await self._sync_camera_adapter()
+
     async def trigger_scene(self, scene_id: str) -> bool:
         """Trigger a MIoT manual scene."""
         scenes: dict = {}
@@ -1559,7 +1693,9 @@ class MiotService:
             scenes = (await self._miot_proxy.get_all_scenes()) or {}
             if scene_id not in scenes:
                 raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
+            if not is_home_allowed(
+                self._kv_repo, getattr(scenes[scene_id], "home_id", None)
+            ):
                 raise ValidationException(
                     f"Scene '{scene_id}' is not in an allowed home"
                 )
@@ -1574,11 +1710,13 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type="scene_trigger",
-                did=scene_id, iid=scene_id,
+                did=scene_id,
+                iid=scene_id,
                 value_json=scene_value_json,
                 result_code=None,
                 result_msg=None if ok else "场景触发失败",
-                success=bool(ok), error=None,
+                success=bool(ok),
+                error=None,
                 home_id=getattr(scenes[scene_id], "home_id", None),
             )
             return ok
@@ -1589,12 +1727,19 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type="scene_trigger",
-                did=scene_id, iid=scene_id,
+                did=scene_id,
+                iid=scene_id,
                 # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
                 value_json=scene_value_json,
-                result_code=None, result_msg=None,
-                success=False, error=str(e),
+                result_code=None,
+                result_msg=None,
+                success=False,
+                error=str(e),
                 # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
                 home_id=getattr(scenes.get(scene_id), "home_id", None),
             )
             raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e
+
+    def _miot_authenticated(self) -> bool:
+        """Treat legacy/test proxies without an auth flag as already bound."""
+        return bool(getattr(self._miot_proxy, "is_authenticated", True))

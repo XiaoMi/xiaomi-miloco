@@ -25,7 +25,13 @@ import {
   feedDid as synthFeedDid,
   lensLabelKey,
 } from "@/lib/cameraChannel";
-import { IconRefresh, IconPencil } from "@/lib/icons";
+import {
+  IconPlus,
+  IconRefresh,
+  IconPencil,
+  IconTrash,
+  IconX,
+} from "@/lib/icons";
 
 // 每摄像头「感知须知」prompt 长度上限（与 backend MAX_CAMERA_PROMPT_LEN 对齐）。
 const CAMERA_PROMPT_MAX_LEN = 500;
@@ -76,6 +82,12 @@ interface Props {
   onSetCameraPrompt: (did: string, text: string) => void | Promise<void>;
   /** 清除某摄像头自定义「感知须知」（DELETE /api/miot/scope/cameras/prompt）。 */
   onClearCameraPrompt: (did: string) => void | Promise<void>;
+  onAddRtspCamera: (input: { name: string; url: string }) => void | Promise<void>;
+  onUpdateRtspCamera: (
+    did: string,
+    input: { name: string; url: string },
+  ) => void | Promise<void>;
+  onDeleteRtspCamera: (did: string) => void | Promise<void>;
   /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + await 列表重拉落地）。 */
   onRefresh?: () => void | Promise<void>;
 }
@@ -102,6 +114,9 @@ export function HeroNow({
   onToggleCameraVoice,
   onSetCameraPrompt,
   onClearCameraPrompt,
+  onAddRtspCamera,
+  onUpdateRtspCamera,
+  onDeleteRtspCamera,
   onRefresh,
 }: Props) {
   const { t } = useTranslation();
@@ -200,6 +215,9 @@ export function HeroNow({
         onToggleCameraVoice={onToggleCameraVoice}
         onSetCameraPrompt={onSetCameraPrompt}
         onClearCameraPrompt={onClearCameraPrompt}
+        onAddRtspCamera={onAddRtspCamera}
+        onUpdateRtspCamera={onUpdateRtspCamera}
+        onDeleteRtspCamera={onDeleteRtspCamera}
         onRefresh={onRefresh}
       />
     </section>
@@ -219,6 +237,12 @@ interface CameraSectionProps {
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
   onSetCameraPrompt: (did: string, text: string) => void | Promise<void>;
   onClearCameraPrompt: (did: string) => void | Promise<void>;
+  onAddRtspCamera: (input: { name: string; url: string }) => void | Promise<void>;
+  onUpdateRtspCamera: (
+    did: string,
+    input: { name: string; url: string },
+  ) => void | Promise<void>;
+  onDeleteRtspCamera: (did: string) => void | Promise<void>;
   onRefresh?: () => void | Promise<void>;
 }
 
@@ -232,9 +256,16 @@ function CameraSection({
   onToggleCameraVoice,
   onSetCameraPrompt,
   onClearCameraPrompt,
+  onAddRtspCamera,
+  onUpdateRtspCamera,
+  onDeleteRtspCamera,
   onRefresh,
 }: CameraSectionProps) {
   const { t } = useTranslation();
+  // undefined=关闭，null=新增，ScopeCamera=编辑。
+  const [rtspDialogCamera, setRtspDialogCamera] = useState<
+    ScopeCamera | null | undefined
+  >(undefined);
   // 手动刷新未感知设备状态:in-flight 期间转圈 + disable 防连点(force 刷新本身绕过 8s 节流)。
   const [refreshing, setRefreshing] = useState(false);
   const runRefresh = async () => {
@@ -376,8 +407,17 @@ function CameraSection({
         <div className="flex items-baseline gap-2">
           <SectionLabel>{t("hero.liveLabel")}</SectionLabel>
         </div>
-        {total > 0 && (
-          <div className="text-caption flex items-center gap-2 text-text-tertiary">
+        <div className="text-caption flex items-center gap-2 text-text-tertiary">
+          <button
+            type="button"
+            onClick={() => setRtspDialogCamera(null)}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-bg-primary border border-border hover:border-border-strong hover:text-text-primary transition-colors"
+          >
+            <IconPlus width={14} height={14} />
+            {t("hero.addRtsp")}
+          </button>
+          {total > 0 && (
+            <>
             <span className="num">
               {t("hero.perceivingCount", { n: activeCount })}
             </span>
@@ -407,8 +447,9 @@ function CameraSection({
             >
               {t("hero.allOff")}
             </button>
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </div>
       {total === 0 ? (
         <div className="text-body rounded-lg bg-bg-primary border border-dashed border-border-strong text-text-secondary py-8 px-5 text-center">
@@ -440,7 +481,7 @@ function CameraSection({
                     cam={c}
                     channelLabel={channelLabelOf(c)}
                     // 拾音只在有 mic 的通道(球机/ch0)显示;枪机(ch1)永久无音频不给开关。
-                    showVoice={hasMic(c)}
+                    showVoice={c.source !== "rtsp" && hasMic(c)}
                     bulkBusy={bulkBusy || singleBusyDids.has(feedDid)}
                     onToggle={(v) => runSingle(feedDid, v)}
                     // 投喂开关 in-flight(按该路合成 did)时拾音也置灰,防交叠竞态。拾音是
@@ -454,6 +495,11 @@ function CameraSection({
                     hasPrompt={!!c.perceptionPrompt}
                     onEditPrompt={() =>
                       openPromptEditor(feedDid, channelLabelOf(c) ? `${c.name} · ${channelLabelOf(c)}` : c.name, c.perceptionPrompt)
+                    }
+                    onEditSource={
+                      c.source === "rtsp"
+                        ? () => setRtspDialogCamera(c)
+                        : undefined
                     }
                   />
                 );
@@ -501,7 +547,7 @@ function CameraSection({
                       key={feedDid}
                       cam={c}
                       channelLabel={channelLabelOf(c)}
-                      showVoice={hasMic(c)}
+                      showVoice={c.source !== "rtsp" && hasMic(c)}
                       // 瞬态忙才原生禁用;语义不可开(离线 / 该路镜头关 / 局域网不可达 / 满额)走
                       // blockedReasonKey——置灰但可点,点击 toast、桌面悬停气泡说明原因。
                       // awake 用**该路**的 per-lens 值(全拆后每行一路,不再整台 OR)。
@@ -525,6 +571,11 @@ function CameraSection({
                       onEditPrompt={() =>
                         openPromptEditor(feedDid, channelLabelOf(c) ? `${c.name} · ${channelLabelOf(c)}` : c.name, c.perceptionPrompt)
                       }
+                      onEditSource={
+                        c.source === "rtsp"
+                          ? () => setRtspDialogCamera(c)
+                          : undefined
+                      }
                     />
                   );
                 })}
@@ -532,6 +583,29 @@ function CameraSection({
             </div>
           )}
         </>
+      )}
+
+      {rtspDialogCamera !== undefined && (
+        <RtspCameraDialog
+          camera={rtspDialogCamera ?? undefined}
+          onClose={() => setRtspDialogCamera(undefined)}
+          onSubmit={async (input) => {
+            if (rtspDialogCamera) {
+              await onUpdateRtspCamera(rtspDialogCamera.did, input);
+            } else {
+              await onAddRtspCamera(input);
+            }
+            setRtspDialogCamera(undefined);
+          }}
+          onDelete={
+            rtspDialogCamera
+              ? async () => {
+                  await onDeleteRtspCamera(rtspDialogCamera.did);
+                  setRtspDialogCamera(undefined);
+                }
+              : undefined
+          }
+        />
       )}
 
       {/* 开声音知情提示：opt-in。讲清可能的问题 + 适用/不适用场景。复用居中弹窗形态。 */}
@@ -679,6 +753,143 @@ function CameraSection({
         </div>
       )}
     </>
+  );
+}
+
+function RtspCameraDialog({
+  camera,
+  onClose,
+  onSubmit,
+  onDelete,
+}: {
+  camera?: ScopeCamera;
+  onClose: () => void;
+  onSubmit: (input: { name: string; url: string }) => void | Promise<void>;
+  onDelete?: () => void | Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const [name, setName] = useState(camera?.name ?? "");
+  const [url, setUrl] = useState(camera?.url ?? "");
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const editing = camera !== undefined;
+  const canSubmit = name.trim() !== "" && url.trim() !== "" && !busy;
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-4"
+      onClick={busy ? undefined : onClose}
+    >
+      <form
+        className="w-full max-w-md rounded-lg border border-border bg-bg-secondary shadow-lg anim-in"
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (!canSubmit) return;
+          setBusy(true);
+          try {
+            await onSubmit({ name: name.trim(), url: url.trim() });
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+          <h2 className="text-title text-text-primary">
+            {t(editing ? "hero.rtspEditDialogTitle" : "hero.rtspDialogTitle")}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="ml-auto p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-primary disabled:opacity-40"
+            aria-label={t("devices.close")}
+          >
+            <IconX />
+          </button>
+        </div>
+        <div className="p-4 space-y-3">
+          <label className="block">
+            <span className="text-caption text-text-tertiary">
+              {t("hero.rtspNameLabel")}
+            </span>
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              maxLength={80}
+              disabled={busy}
+              autoFocus
+              className="mt-1 w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-body text-text-primary outline-none focus:border-brand-primary disabled:opacity-60"
+            />
+          </label>
+          <label className="block">
+            <span className="text-caption text-text-tertiary">
+              {t("hero.rtspUrlLabel")}
+            </span>
+            <input
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              maxLength={2048}
+              disabled={busy}
+              placeholder="rtsp://user:password@host:554/path"
+              spellCheck={false}
+              className="mt-1 w-full rounded-md border border-border bg-bg-primary px-3 py-2 text-body text-text-primary outline-none focus:border-brand-primary disabled:opacity-60"
+            />
+          </label>
+          <p className="text-caption text-text-tertiary">
+            {t("hero.rtspUrlHint")}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 px-4 py-3 border-t border-border">
+          {onDelete &&
+            (confirmDelete ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await onDelete();
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                className="px-3 py-1.5 rounded-md bg-error text-white text-body disabled:opacity-40"
+              >
+                {t("hero.rtspDeleteConfirm")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmDelete(true)}
+                aria-label={t("hero.rtspDelete")}
+                title={t("hero.rtspDelete")}
+                className="inline-flex items-center justify-center w-8 h-8 rounded-md text-error hover:bg-bg-primary disabled:opacity-40"
+              >
+                <IconTrash width={16} height={16} />
+              </button>
+            ))}
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="ml-auto px-3 py-1.5 rounded-md border border-border bg-bg-primary text-text-secondary hover:text-text-primary disabled:opacity-40"
+          >
+            {t("hero.rtspCancel")}
+          </button>
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="px-3 py-1.5 rounded-md bg-brand-primary text-white disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {busy
+              ? t(editing ? "hero.rtspUpdating" : "hero.rtspSaving")
+              : t(editing ? "hero.rtspUpdateSubmit" : "hero.rtspAddSubmit")}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -887,6 +1098,7 @@ interface CamCardProps {
   onToggleVoice: (next: boolean) => void;
   hasPrompt: boolean;
   onEditPrompt: () => void;
+  onEditSource?: () => void;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
@@ -902,7 +1114,9 @@ function CamCardWithToggle({
   onToggleVoice,
   hasPrompt,
   onEditPrompt,
+  onEditSource,
 }: CamCardProps) {
+  const { t } = useTranslation();
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
       <div className="relative">
@@ -911,14 +1125,27 @@ function CamCardWithToggle({
           roomName={cam.roomName}
           cameraDid={cam.did}
           channel={cam.channel}
+          source={cam.source}
         />
         {/* 画面左上角标相机名(单/多摄一致都显示);多摄再后缀镜头标签(移动/固定画面)区分同台两路。 */}
         <span className="absolute top-2 left-2 max-w-[calc(100%-1rem)] truncate px-1.5 py-0.5 rounded-md bg-black/50 text-white text-caption pointer-events-none z-10">
           {channelLabel ? `${cam.name} · ${channelLabel}` : cam.name}
+          {cam.source === "rtsp" ? " · RTSP" : ""}
         </span>
         {/* 全拆后每路一个独立开关 → 拾音 + 投喂开关回到画面内右上角(不再放画面外的卡头)。
             拾音仅有 mic 的通道(球机/ch0)显示。 */}
         <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          {onEditSource && (
+            <button
+              type="button"
+              onClick={onEditSource}
+              aria-label={t("hero.rtspEdit")}
+              title={t("hero.rtspEdit")}
+              className="inline-flex items-center justify-center h-[22px] w-[22px] rounded-full bg-black/60 text-white hover:bg-black/75"
+            >
+              <IconPencil width={12} height={12} />
+            </button>
+          )}
           <PromptButton
             hasPrompt={hasPrompt}
             name={cam.name}
@@ -958,6 +1185,7 @@ function BenchCamItem({
   onToggleVoice,
   hasPrompt,
   onEditPrompt,
+  onEditSource,
 }: {
   cam: ScopeCamera;
   channelLabel?: string;
@@ -969,7 +1197,9 @@ function BenchCamItem({
   onToggleVoice: (next: boolean) => void;
   hasPrompt: boolean;
   onEditPrompt: () => void;
+  onEditSource?: () => void;
 }) {
+  const { t } = useTranslation();
   const available = cameraAvailable(cam);
   return (
     <li className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-bg-tertiary transition-colors">
@@ -1001,6 +1231,16 @@ function BenchCamItem({
       {/* 须知 + 拾音 + 投喂开关(各控本路;拾音相机级、仅有 mic 的通道显示)。拾音从属于感知:
           相机未启用(inUse=false)时置灰、显示为关。 */}
       <div className="flex items-center gap-2 shrink-0">
+        {onEditSource && (
+          <button
+            type="button"
+            onClick={onEditSource}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-caption text-text-secondary hover:text-brand-primary hover:bg-bg-primary"
+          >
+            <IconPencil width={13} height={13} />
+            {t("hero.rtspEdit")}
+          </button>
+        )}
         <PromptButton
           hasPrompt={hasPrompt}
           name={cam.name}
@@ -1030,6 +1270,19 @@ function BenchCamItem({
  *  住户能一眼看出卡在哪一环。下区单摄行与多摄子行复用。 */
 function ChannelStateDots({ cam }: { cam: ScopeCamera }) {
   const { t } = useTranslation();
+  if (cam.source === "rtsp") {
+    return (
+      <div className="text-caption flex items-center gap-2 mt-0.5">
+        <span className="shrink-0 rounded px-1.5 py-0.5 leading-none border border-border text-text-tertiary">
+          RTSP
+        </span>
+        <StateDot
+          ok={cam.lanReachable}
+          label={t(cam.lanReachable ? "hero.rtspOnline" : "hero.rtspOffline")}
+        />
+      </div>
+    );
+  }
   return (
     <div className="text-caption flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
       <StateDot
