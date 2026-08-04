@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 from miloco.perception.engine.omni.prompt_builder import (
     _batch_video_has_audio,
@@ -602,6 +603,85 @@ class TestFusedAudioRoute:
         types = [b["type"] for b in user_blocks]
         assert "video_url" in types
         assert "input_audio" not in types
+
+
+class TestFusedPetRefs:
+    """P2：has_pets 时 fused 主 user content 注入已登记宠物参考图块。"""
+
+    # 真实可解码 JPEG（pet_refs 现会 imdecode 后 hstack 成 composite）
+    _JPEG = cv2.imencode(
+        ".jpg", np.random.default_rng(1).integers(0, 255, (48, 48, 3), dtype=np.uint8)
+    )[1].tobytes()
+
+    def test_pet_refs_injected_when_has_pets(self, tmp_path, monkeypatch):
+        from miloco.perception.engine.identity.pet_library import PetLibrary
+        from miloco.perception.engine.omni import pet_refs
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        lib = PetLibrary(root_dir=tmp_path)
+        p = lib.create(name="小黑", species="猫")
+        lib.set_reference_crops(p.id, [self._JPEG], scores=[1.0])
+        monkeypatch.setattr(pet_refs, "_cache", {"sig": None, "content": []})
+        monkeypatch.setattr(
+            "miloco.perception.engine.identity.pet_library.get_pet_library", lambda: lib
+        )
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder._has_pets_for_scene",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            lambda: "",
+        )
+        fused = build_fused_payload(
+            packets=[_video_route_packet()],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+        )
+        blocks = _multimodal_user_content(fused["messages"])
+        texts = [b["text"] for b in blocks if b["type"] == "text"]
+        assert any("<pets>" in t for t in texts)
+        assert any("【小黑】" in t for t in texts)
+        assert any(b["type"] == "image_url" for b in blocks)  # 宠物参考图注入
+
+    def test_pet_refs_absent_when_no_pets_flag(self, monkeypatch):
+        from miloco.perception.engine.omni import pet_refs
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        monkeypatch.setattr(pet_refs, "_cache", {"sig": None, "content": []})
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder._has_pets_for_scene",
+            lambda: False,
+        )
+        fused = build_fused_payload(
+            packets=[_video_route_packet()],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+        )
+        texts = [
+            b["text"]
+            for b in _multimodal_user_content(fused["messages"])
+            if b["type"] == "text"
+        ]
+        assert not any("<pets>" in t for t in texts)
+
+    def test_pet_gate_requires_feature_on(self, monkeypatch):
+        # 门控组合：档案有宠物段但 pet_recognition 关 → _has_pets_for_scene False → 不注入
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.home_profile_has_pets",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.get_settings",
+            lambda: SimpleNamespace(features=SimpleNamespace(pet_recognition=False)),
+        )
+        from miloco.perception.engine.omni.prompt_builder import _has_pets_for_scene
+
+        assert _has_pets_for_scene() is False  # 有宠物但功能关 → 不注入
 
 
 class TestMultimodalSanityCheck:

@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.config import get_settings
 from miloco.perception.engine.identity.gallery_composite import (
     build_body_composite_png,
     build_face_composite_png,
@@ -53,8 +54,20 @@ from .constants import (
     _USER_REF_BOUNDARY_AUDIO,
 )
 from .field_registry import SceneDescriptor, render_field_spec, render_schema
-from .home_profile_loader import get_home_profile_prefix
+from .home_profile_loader import get_home_profile_prefix, home_profile_has_pets
+from .pet_refs import build_pet_reference_content
 from .provider import LocalMediaInfo, OmniProviderAdapter
+
+
+def _has_pets_for_scene() -> bool:
+    """宠物注入门：``pet_recognition`` 开启 **且** 花名册非空。
+
+    先查 feature 再探花名册（短路：关闭时连磁盘都不碰）。判据是**花名册**而非档案渲染出的
+    「## 宠物」段——后者会被 token 预算归档 / 删条目 / 直接 ``pet add`` 抹掉，造成花名册与
+    参考图都在而识别静默停摆（见 home_profile_has_pets 的 docstring）。
+    统一驱动 caption/suggestions/matched_rules 命名纪律、参考图、pet_identities 的注入。
+    """
+    return get_settings().features.pet_recognition and home_profile_has_pets()
 
 RouteType = Literal["video", "audio"]
 
@@ -90,6 +103,12 @@ class FusedPromptConfig:
     # 单人 body+face composite 占约 20-40KB jpeg ≈ 60-120KB base64 ≈ 15-30K tokens；
     # >10 人 prompt 容易超出 omni token 预算，需在配置或上游 gallery_snapshot 处控制。
     max_gallery_persons: int = 10
+    # 宠物参考图上限（P2 / C-D1）：最多注入几只宠物（每只带其已存的 ≤3 张多姿态参考图）。
+    # 家庭多 1-3 只覆盖 99%，仿人 gallery 上限保护；仅 has_pets（video route）时注入。
+    # token 已实测（mimo-v2.5，composite 高 320px）：每只 ≈ +194 prompt tokens（3 只上限 ≈ +582），
+    # 相对 fused 视频主体（数 K+）为小增量；注入形态 = 最多 3 只 × 每只 1 张 composite（≤3 姿态横拼）。
+    # 待补：端到端延迟 / 成本（需真视频跑完整 fused，随默认开启前的实机验收一起量）。
+    max_pet_refs: int = 3
 
 
 # =============================================================================
@@ -262,6 +281,7 @@ def build_fused_payload(
         route="video", has_identity=bool(candidates), stream=False,
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
+        has_pets=_has_pets_for_scene(),
         identity_match_disabled=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
@@ -275,6 +295,7 @@ def build_fused_payload(
         adapter=adapter,
         cfg=cfg,
         label_lookup=label_lookup,
+        has_pets=scene.has_pets,  # 复用 scene 已算好的 has_pets，避免注入点再读一次 profile.md
         matching_moot=matching_moot,
     )
 
@@ -377,6 +398,7 @@ def _build_payload(
     scene = SceneDescriptor(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
+        has_pets=_has_pets_for_scene(),
     )
     user_text = _build_user_content(
         packets, context, stream=stream, label_lookup=label_lookup,
@@ -599,6 +621,7 @@ def _build_fused_user_content(
     adapter: OmniProviderAdapter,
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
+    has_pets: bool = False,
     matching_moot: bool = False,
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
@@ -723,6 +746,11 @@ def _build_fused_user_content(
 
     # 4. gallery（候选成员参考图，紧邻 video 便于视觉比对）
     content.extend(gallery_content)
+
+    # 4.5. 已登记宠物多姿态参考图（P2）——仅 has_pets 时注入（用上游 scene 已算好的值，不重读盘）；
+    # 读盘/编码失败或无图则空，退化为纯文字（PET_NAMING_SPEC + 档案「## 宠物」段仍在，不阻断识别）。
+    if has_pets:
+        content.extend(build_pet_reference_content(max_pets=cfg.max_pet_refs))
 
     # 5. 主 video
     # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短

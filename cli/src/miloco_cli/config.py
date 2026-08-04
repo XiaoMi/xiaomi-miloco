@@ -103,6 +103,31 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         4,
         "感知窗口时长（秒），重启生效",
     ),
+    # 实验性功能开关（与 backend FeaturesSettings 对齐；住户在 web 显式开启，也可用本命令）
+    "features.pet_recognition": (
+        bool,
+        False,
+        "宠物识别（实验性）总开关：开启后启用宠物注册与基于外观描述的命名识别；"
+        "默认关，关闭时前端隐藏入口、注册端点返 404、感知不注入宠物规则，已录数据保留",
+    ),
+    "features.pet_head_grounding": (
+        bool,
+        True,
+        "宠物头像头部定位子开关（默认开）：开则注册时由 omni 输出头部坐标作头像裁剪框，"
+        "关则用全身 crop。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
+    ),
+    "features.pet_body_grounding": (
+        bool,
+        True,
+        "宠物本体定位子开关（默认开）：仅作用于检测器框不到猫/狗的回退路径，开则裁本体作"
+        "参考图（兼容非猫狗物种），关则回退路径不产参考图。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
+    ),
+    "features.pet_reid_diverse": (
+        bool,
+        True,
+        "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 特征距离贪心选最不相似的 ≤3 张"
+        "多姿态；关或模型不可用时回退感知哈希 dHash。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
+    ),
 }
 
 # ─── 基础读写 ────────────────────────────────────────────────────────────────

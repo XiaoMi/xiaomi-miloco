@@ -419,6 +419,45 @@ _DEFAULT_PERF_FIELD_LABELS: dict[str, str] = {
 }
 
 
+class FeaturesSettings(BaseModel):
+    """产品级实验性功能开关（默认关，住户在 web 显式开启）。"""
+
+    pet_recognition: bool = Field(
+        default=False,
+        description=(
+            "宠物识别（实验性）总开关：开启后启用「宠物作为家庭成员」的注册与基于"
+            "外观描述的命名识别（注入 caption prompt）。默认关；关闭时前端隐藏宠物入口、"
+            "后端不注入宠物命名规则，已录入的宠物数据保留不删。"
+        ),
+    )
+    pet_head_grounding: bool = Field(
+        default=True,
+        description=(
+            "宠物头像头部定位子开关（默认开）：开启后注册时让 omni 输出宠物头部区域"
+            "坐标作为头像默认裁剪框；关闭时用全身 crop 作头像、不在观察 prompt 中加入"
+            "grounding 段。仅在 pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
+        ),
+    )
+    pet_body_grounding: bool = Field(
+        default=True,
+        description=(
+            "宠物本体定位子开关（默认开）：仅作用于「检测器框不到猫/狗」的回退路径"
+            "——开启后让 omni 在整幅画面中输出目标动物本体坐标，裁本体作参考 crop"
+            "（兼容兔/鸟/仓鼠等非猫狗物种也能有参考图）；关闭时回退路径不产参考 crop。"
+            "仅在 pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
+        ),
+    )
+    pet_reid_diverse: bool = Field(
+        default=True,
+        description=(
+            "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 嵌入的特征距离，在同一只"
+            "候选里贪心选出最不相似的 ≤3 张多姿态参考图（第 1 张仍取质量分最高，第 2/3 张依次"
+            "选特征距离最远者）；关闭或模型不可用时回退感知哈希（dHash）多样性。仅在 "
+            "pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
+        ),
+    )
+
+
 class DirectorySettings(BaseModel):
     """目录配置；派生路径均由 ``$MILOCO_HOME`` + ``storage`` 计算。"""
 
@@ -619,6 +658,10 @@ class MilocoSettings(BaseSettings):
         default_factory=PerfSettings,
         description="性能指标总开关与报告参数",
     )
+    features: FeaturesSettings = Field(
+        default_factory=FeaturesSettings,
+        description="产品级实验性功能开关（默认关）",
+    )
     schedule: ScheduleSettings = Field(
         default_factory=ScheduleSettings,
         description="cron 调度总开关与相关参数",
@@ -795,6 +838,7 @@ __all__ = [
     "DatabaseSettings",
     "DirectorySettings",
     "DispatcherSettings",
+    "FeaturesSettings",
     "MilocoSettings",
     "MiotSettings",
     "ModelSettings",

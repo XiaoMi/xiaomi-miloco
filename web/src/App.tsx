@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  getFeatures,
   getHomeStatus,
   listActivity,
   listOnDemandLogs,
@@ -11,6 +12,7 @@ import {
   listDevices,
   listHomeEntries,
   listPersons,
+  listPets,
   listScenes,
   listScopeCameras,
   listScopeHomes,
@@ -18,6 +20,7 @@ import {
   refreshCameraOnline,
   pausePerception,
   resumePerception,
+  setFeatures,
   setScopeCameraPrompt,
   clearScopeCameraPrompt,
   toggleScopeCamera,
@@ -25,7 +28,7 @@ import {
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
-import type { Person } from "./lib/types";
+import type { Pet, Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
@@ -36,6 +39,8 @@ import { DevicesByRoom } from "./components/DevicesByRoom";
 import { ActivityFeed } from "./components/ActivityFeed";
 import { FamilyStrip } from "./components/FamilyStrip";
 import { PersonDrawer } from "./components/PersonDrawer";
+import { PetDrawer } from "./components/PetDrawer";
+import { PetProfilePanel } from "./components/PetProfilePanel";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
 import { TasksPage } from "./components/TasksPage";
@@ -166,6 +171,13 @@ function MainApp() {
   const tasks = useAsync(() => listTasks(homeId), [homeId], {
     errorLabel: t("app.loadTasksFail"),
   });
+  // 宠物花名册（实验性，pet_recognition 开启才有意义）+ 功能开关状态。
+  const pets = useAsync(() => listPets(homeId), [homeId], {
+    errorLabel: t("app.loadPetsFail"),
+  });
+  const features = useAsync(() => getFeatures(), [], {
+    errorLabel: t("app.loadFeaturesFail"),
+  });
 
   // ── 字号 / 抽屉 / 弹层 ─────────────────────────
   // (原本有 now state + 30s setInterval 给 Sidebar 显示时间，现 Sidebar
@@ -181,6 +193,9 @@ function MainApp() {
   // 家庭 tab 当前选中的成员（chip 选择器）——存 id，从 persons.data 解析当前
   // Person；null 时回退到第一位。改名 / 删除后随 reload 自动同步。
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
+  // 宠物：选中项（下方展开档案卡，与人类互斥）+ 编辑抽屉（null=新增，Pet=编辑，undefined=关闭）。
+  const [selectedPetId, setSelectedPetId] = useState<string | null>(null);
+  const [editingPet, setEditingPet] = useState<Pet | null | undefined>(undefined);
   const [miotBindOpen, setMiotBindOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -221,6 +236,8 @@ function MainApp() {
           <div className="space-y-6">
             <HeroNow
               persons={persons.data}
+              pets={pets.data}
+              petsEnabled={features.data?.petRecognition ?? false}
               scopeCameras={scopeCameras.data}
               miotHasCamera={devices.data.some(
                 (d) => d.category === "camera",
@@ -330,19 +347,43 @@ function MainApp() {
         if (!persons.data) {
           return <TabPanelLoading text={t("app.tabFamilyLoading")} />;
         }
-        // 单页上下布局：chip 选择器默认选中第一位成员；选中某成员 → 同卡内就地展开
-        // 其档案（至少保持一个选中，不可取消）。下方依次是家庭档案、观察中聚合卡。
+        // 单页上下布局：点 chip 选中某成员 → 下方就地展开其档案；再点同一 chip 收起（toggle）。
+        // 人类成员与宠物成员的下方展开互斥（选一个清另一个），故各自显式选中才展开、无默认选中。
         const selectedPerson =
-          persons.data.find((p) => p.id === selectedPersonId) ??
-          persons.data[0] ??
-          null;
+          persons.data.find((p) => p.id === selectedPersonId) ?? null;
+        const selectedPet =
+          (pets.data ?? []).find((p) => p.id === selectedPetId) ?? null;
         return (
           <div className="space-y-6">
             <FamilyStrip
               persons={persons.data}
               selectedId={selectedPerson?.id ?? null}
-              onSelect={(p) => setSelectedPersonId(p.id)}
+              onSelect={(p) => {
+                setSelectedPersonId((cur) => (cur === p.id ? null : p.id));
+                setSelectedPetId(null);
+              }}
               onAddPerson={() => setEditingPerson(null)}
+              pets={pets.data}
+              petsEnabled={features.data?.petRecognition ?? false}
+              selectedPetId={selectedPetId}
+              onSelectPet={(p) => {
+                setSelectedPetId((cur) => (cur === p.id ? null : p.id));
+                setSelectedPersonId(null);
+              }}
+              onAddPet={() => setEditingPet(null)}
+              onTogglePets={async (enabled) => {
+                if (!enabled) setSelectedPetId(null); // 关闭功能即失去对宠物的聚焦，收起下方档案卡
+                try {
+                  await setFeatures({ petRecognition: enabled });
+                  features.reload();
+                  pets.reload();
+                } catch (e) {
+                  toast(
+                    e instanceof Error ? e.message : t("pet.saveFail"),
+                    "warn",
+                  );
+                }
+              }}
             />
             {selectedPerson && (
               <PersonProfilePanel
@@ -363,9 +404,20 @@ function MainApp() {
                 }}
               />
             )}
+            {selectedPet && (
+              <PetProfilePanel
+                pet={selectedPet}
+                entries={home.data}
+                loading={home.loading}
+                onEdit={() => setEditingPet(selectedPet)}
+              />
+            )}
             <HomeKnowledgePanel
               data={home.data}
               persons={persons.data}
+              // 传花名册：宠物条目由上方「宠物档案卡」独占，本面板要排除掉（否则重复展示，
+              // 且能从这里把宠物条目改派给家人、把宠物卡清空）
+              pets={pets.data}
               loading={home.loading}
               onChanged={() => home.reload()}
             />
@@ -569,6 +621,18 @@ function MainApp() {
         onChanged={() => {
           persons.reload();
           status.reload();
+          home.reload();
+        }}
+      />
+      <PetDrawer
+        pet={editingPet === undefined ? null : editingPet}
+        open={editingPet !== undefined}
+        grounding={features.data?.petHeadGrounding ?? false}
+        entries={home.data}
+        petCount={(pets.data ?? []).length}
+        onClose={() => setEditingPet(undefined)}
+        onChanged={() => {
+          pets.reload();
           home.reload();
         }}
       />

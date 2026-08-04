@@ -146,6 +146,7 @@ miloco 字样在两种位置仍要保留，不是无差别清洗：**指代系�
 |               | `miloco-miot-admin`             | 系统运维：连通性检查（MiOT / SQLite / 感知 / 规则引擎）、家庭信息摘要（设备 / 区域 / 场景 / 成员数量，只读）、感知成本统计（当前未实现）；不含设备缓存刷新（→ miloco-devices）                                             |
 | **身份管理**  | `miloco-miot-identity`          | 家庭成员档案 CRUD（创建/列出/重命名/删除成员）                                                                                                                                                                             |
 |               | `miloco-miot-identity-register` | 身份注册主流程：上传图/视频直接注册 tier_a，或从陌生人池选取升级                                                                                                                                                           |
+|               | `miloco-miot-pet-register`      | 宠物注册（实验性，受 `features.pet_recognition` 门控、关闭时端点 404）：两条通路——文字通路建花名册 + 写 member_persona 外观；素材通路再经 observe 出多姿态识别参照                                                         |
 | **通知**      | `miloco-notify`                 | 通知分发：选人 → 选通道（TTS/IM/米家推送）→ 生成文案 → 执行；也是通知渠道（IM channel）绑定的入口                                                                                                                          |
 
 ### Home Profile 调度机制（TS 侧）
