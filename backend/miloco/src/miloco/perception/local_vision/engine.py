@@ -52,11 +52,13 @@ from miloco.perception.local_vision.encode import EncodeError, encode_snapshot_t
 from miloco.perception.local_vision.identity import render_roster
 
 if TYPE_CHECKING:
-    # 只在注解里出现(``identity`` 参数),运行时一次都用不到 —— 本文件开头有
-    # ``from __future__ import annotations``,注解全是惰性字符串。放在模块顶层
-    # 会被 CodeQL 记成 unused import(ruff 不报,它把字符串注解里的引用算作使用,
-    # 两边各自都没错,只是看的层面不同)。搬进来两边都满足:运行时不导入,类型
-    # 检查仍解析得到这个名字。
+    # 只在 ``identity`` 参数的注解里出现,运行时一次都用不到 —— 本文件开头有
+    # ``from __future__ import annotations``,注解不会被求值。
+    #
+    # 注意注解本身**不能再加引号**。加引号时 CodeQL 判 unused import,而且把导入
+    # 搬进这个块也救不了:它不解析字符串字面量,于是无论导入放哪儿,那个名字看上去
+    # 都是零引用。去掉引号之后名字出现在注解的语法树里,静态分析才看得见 —— 而
+    # ``from __future__ import annotations`` 保证运行时仍然不去解析它。
     from miloco.perception.local_vision.identity import LocalIdentityResolver
 from miloco.perception.rule_scope import (
     camera_prompt_map,
@@ -148,7 +150,7 @@ class LocalVisionEngine(BasePerceptionEngine):
         max_frames: int = 32,
         short_edge: int | None = None,
         codec_target_canvas: int = 8,
-        identity: "LocalIdentityResolver | None" = None,
+        identity: LocalIdentityResolver | None = None,
     ) -> None:
         self._client = client
         #: 本地认人层。None = 不做认人(与本通路此前的行为一致)。它是**旁路**:
