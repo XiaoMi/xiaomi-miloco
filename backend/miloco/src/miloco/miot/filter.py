@@ -205,7 +205,10 @@ def set_cameras_in_use(
 ) -> tuple[list[str], bool]:
     """Batch toggle non-channel camera IDs while preserving list order."""
     current = _load_list(kv_repo, ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
-    new = [did for did in current if did not in updates or updates[did]]
+    # The stored list contains disabled cameras, so enabling removes an updated
+    # did while disabling keeps or appends it. This helper is used by RTSP
+    # cameras; MIoT channel-aware cameras use set_cameras_channels_in_use.
+    new = [did for did in current if did not in updates or not updates[did]]
     for did, in_use in updates.items():
         if not in_use and did not in new:
             new.append(did)
