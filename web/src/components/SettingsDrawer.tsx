@@ -15,8 +15,10 @@ import { toast } from "./Toast";
 // 但组件 state 需要确定值,单独拎一个具体类型的默认常量兜住:接口"可能没"、控件"永远有"。
 const DEFAULT_MIN_URGENCY: MinSuggestionUrgency = "low";
 
-// 与 backend settings.yaml perception.engine.input + perception.collect.window_size
-// + perception.engine.crop_enhance.user_enabled 对齐
+// 与 backend 默认值对齐：video_short_edge / omni_fps 见 settings.yaml 的
+// perception.engine.input，window_size 见 perception.collect，smart_crop_enabled 见
+// perception.engine.crop_enhance.user_enabled。min_suggestion_urgency 例外——它的默认值
+// 不在 yaml 里，只在 settings.py::PerceptionSettings 的 pydantic Field（照 yaml 找会找不到）。
 const DEFAULTS: PerceptionConfig = {
   video_short_edge: 512,
   omni_fps: 1,

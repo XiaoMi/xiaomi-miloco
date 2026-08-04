@@ -165,7 +165,8 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "low",
         "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃；"
         "值域 low|medium|high；low=不过滤（默认，向后兼容）。"
-        "result.suggestions 保留完整，仅 agent 派发受限；下个感知周期即生效",
+        "result.suggestions 保留完整，仅 agent 派发受限；重启生效"
+        "（在 UI 拨这个滑条走 admin API，则热更、下个感知周期生效）",
     ),
 }
 

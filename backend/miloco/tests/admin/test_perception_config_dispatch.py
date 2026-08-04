@@ -1,15 +1,18 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""PUT /api/admin/perception-config 的三档 dispatch 测试 + GET 投影语义测试。
+"""PUT /api/admin/perception-config 的 dispatch 测试 + GET 投影语义测试。
 
-三个感知参数生效路径不同，端点据「新值 != 旧值」分派：
+各参数生效路径不同，端点据「新值 != 旧值」分派：
 - video_short_edge：每帧实时读 settings，写盘即生效 —— 既不热更也不重启。
 - omni_fps：运行时热更 → ``apply_omni_fps_live``（免重建 / 免模型重载 / 不丢 track）。
 - window_size：runner 构造期 cache → ``apply_config_restart``（stop→start 重读）。
+- smart_crop_enabled / min_suggestion_urgency：均为热读，写盘 + reset_settings 即生效，
+  两者都不参与热更 / 重启分派。
 
 本测试 mock service 层，只验证端点把哪个参数分派到哪个入口（含「都不变则都不调」）。
-另有若干用例不涉分派，只验 GET 投影的取值语义（分辨率档 roundtrip、Smart Crop 双闸）。
+另有若干用例不涉分派，只验 GET 投影的取值语义（分辨率档 roundtrip、Smart Crop 双闸、
+min_suggestion_urgency 的默认值与 Literal 校验）。
 """
 import json as _json
 from unittest.mock import AsyncMock, MagicMock
