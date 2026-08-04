@@ -103,6 +103,38 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         4,
         "感知窗口时长（秒），重启生效",
     ),
+    # 实验性功能开关（与 backend FeaturesSettings 对齐；住户在 web 显式开启，也可用本命令）
+    "features.pet_recognition": (
+        bool,
+        False,
+        "宠物识别（实验性）总开关：开启后启用宠物注册与基于外观描述的命名识别；"
+        "默认关，关闭时前端隐藏入口、注册端点返 404、感知不注入宠物规则，已录数据保留",
+    ),
+    "features.pet_head_grounding": (
+        bool,
+        True,
+        "宠物头像头部定位子开关（默认开）：开则注册时由 omni 输出头部坐标作头像裁剪框，"
+        "关则用全身 crop。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
+    ),
+    "features.pet_body_grounding": (
+        bool,
+        True,
+        "宠物本体定位子开关（默认开）：仅作用于检测器框不到猫/狗的回退路径，开则裁本体作"
+        "参考图（兼容非猫狗物种），关则回退路径不产参考图。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
+    ),
+    "features.pet_reid_diverse": (
+        bool,
+        True,
+        "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 特征距离贪心选最不相似的 ≤3 张"
+        "多姿态；关或模型不可用时回退感知哈希 dHash。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
+    ),
+    "perception.min_suggestion_urgency": (
+        str,
+        "low",
+        "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃；"
+        "值域 low|medium|high；low=不过滤（默认，向后兼容）。"
+        "result.suggestions 保留完整，仅 agent 派发受限；下个感知周期即生效",
+    ),
 }
 
 # ─── 基础读写 ────────────────────────────────────────────────────────────────
@@ -266,6 +298,15 @@ def _coerce(path: str, raw: str) -> Any:
             raise ValueError(
                 f"{path} 仅支持 low / high（留空=默认 low），收到 {raw!r}。"
                 f"注：Gemini media_resolution 有效档位只有 low/high，medium 等同 low。"
+            )
+        return norm
+    # min_suggestion_urgency 与 backend PerceptionSettings 的 Literal 对齐——CLI 先兜住,
+    # 让脏值在写盘前就报错,不必等 backend 启动 ValidationError。
+    if path == "perception.min_suggestion_urgency":
+        norm = raw.strip().lower()
+        if norm not in ("low", "medium", "high"):
+            raise ValueError(
+                f"{path} 仅支持 low / medium / high，收到 {raw!r}"
             )
         return norm
     return raw  # str

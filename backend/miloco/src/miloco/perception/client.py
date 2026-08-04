@@ -44,6 +44,7 @@ from miloco.perception.snapshot_context import (
     event_artifacts_scope,
 )
 from miloco.perception.types import (
+    URGENCY_RANK,
     CaptionEntry,
     MatchedRule,
     OnDemandPerceptionResult,
@@ -68,6 +69,51 @@ def _publish_perception_event(event_type: str, source: str, payload: dict) -> No
     if client is None:
         return
     client.publish_event(event_type=event_type, source=source, payload=payload)
+
+
+def _filter_suggestions_by_min_urgency(
+    suggestions: list[Suggestion],
+) -> tuple[list[Suggestion], list[Suggestion], str]:
+    """按 ``settings.perception.min_suggestion_urgency`` 拆分 (kept, dropped, threshold)。
+
+    threshold=low(默认)时 dropped 恒空——URGENCY_RANK 里 low 是最低分,任何合法档位
+    都 >= 它,不引入过滤开销。settings 字段是 Literal["low","medium","high"],pydantic
+    ValidationError 已挡脏值,故 URGENCY_RANK[threshold] 直接下标;s.urgency 是 str
+    需保留 .get 兜底(模型偶发输出未定义档时退化为 low 分)。
+    result.suggestions 由调用方保留不动,本函数只切分派发对象。
+    """
+    threshold = get_settings().perception.min_suggestion_urgency
+    cutoff = URGENCY_RANK[threshold]
+    kept: list[Suggestion] = []
+    dropped: list[Suggestion] = []
+    for s in suggestions:
+        if URGENCY_RANK.get(s.urgency, 0) >= cutoff:
+            kept.append(s)
+        else:
+            dropped.append(s)
+    return kept, dropped, threshold
+
+
+def _log_dropped_suggestions(
+    dropped: list[Suggestion], threshold: str, phase: str
+) -> None:
+    """把本 cycle 被 min_urgency 拦下的 suggestion 汇总打一行 info log。
+
+    刻意不逐条打:threshold=high 时家庭场景每天可拦几千条 low,逐条会淹没其它 info。
+    汇总带前 5 条摘要,足够肉眼 grep 出分布;要看全量走 debug 或复现场景。
+    phase 区分早送(``early``)与合批(``merged``)路径。
+    """
+    if not dropped:
+        return
+    # event 是模型自由文本,理论上可能含换行——把换行折成空格保住"每 cycle 一行"grep 契约。
+    preview = ", ".join(
+        f"{s.event.replace(chr(10), ' ')}({s.urgency})" for s in dropped[:5]
+    )
+    more = f" (+{len(dropped) - 5} more)" if len(dropped) > 5 else ""
+    logger.info(
+        "[urgency-filter] dropped %d suggestion(s) phase=%s threshold=%s: %s%s",
+        len(dropped), phase, threshold, preview, more,
+    )
 
 
 if TYPE_CHECKING:
@@ -826,14 +872,23 @@ class PerceptionEngineProxy:
             # 剔除 engine 内部字段（id）后外发。
             for s in suggestions:
                 if s.id is not None:
-                    early_sent_sugg_ids.add(s.id)  # 终态 merge 会把同一新链保留进 result，发送侧据此跳过
+                    # early_sent_sugg_ids 记「已早处理」(不论是否过 min_urgency 过滤);
+                    # merged 路径据此跳过同一新链,避免对 Agent 重发或重复打拦截 log。
+                    early_sent_sugg_ids.add(s.id)
                 _publish_perception_event(
                     "suggestion", s.event, {"action": s.action},
                 )
+            # urgency 过滤只影响 agent 派发通路:_publish 与 early_sent_sugg_ids 已按
+            # 全量执行,dispatch_event 仅拿到 kept 子集,保证 result.suggestions 完整、
+            # timeline 不受影响。
+            kept, dropped, threshold = _filter_suggestions_by_min_urgency(suggestions)
+            _log_dropped_suggestions(dropped, threshold, phase="early")
+            if not kept:
+                return
             # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
             await dispatch_event(
-                "suggestion", suggestions, build_suggestions_text,
-                intra_priority=suggestion_intra_priority(suggestions),
+                "suggestion", kept, build_suggestions_text,
+                intra_priority=suggestion_intra_priority(kept),
             )
 
         # --- Pipeline timing ---
@@ -1164,11 +1219,19 @@ class PerceptionEngineProxy:
                 _publish_perception_event(
                     "suggestion", s.event, {"action": s.action},
                 )
-            # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
-            await dispatch_event(
-                "suggestion", pending_suggestions, build_suggestions_text,
-                intra_priority=suggestion_intra_priority(pending_suggestions),
+            # urgency 过滤:见 _on_early_suggestions 同名段落。batch 模式下这里是唯一
+            # 派发点;per-omni 模式下早送已把新链 id 记入 early_sent_sugg_ids,pending
+            # 通常为空,不会重复打拦截 log。
+            kept, dropped, threshold = _filter_suggestions_by_min_urgency(
+                pending_suggestions,
             )
+            _log_dropped_suggestions(dropped, threshold, phase="merged")
+            if kept:
+                # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
+                await dispatch_event(
+                    "suggestion", kept, build_suggestions_text,
+                    intra_priority=suggestion_intra_priority(kept),
+                )
 
         # handle speeches (skip those already sent via streaming early callback)
         speeches: list[Speech] = []

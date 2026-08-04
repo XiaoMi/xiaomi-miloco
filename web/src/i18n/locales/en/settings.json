@@ -19,6 +19,18 @@
     "autoSchedule": "Auto scheduled tasks",
     "autoScheduleHint": "When on, miloco auto-creates and maintains its built-in scheduled tasks (perception digest / home patrol / memory dreaming / habit insights). When off, those tasks are removed and not recreated. Takes effect after the next agent gateway restart.",
     "autoScheduleUnavailable": "This backend doesn't support this toggle (version may be too old); not configurable for now.",
-    "cloudOnlyHint": "These two apply to the cloud API path only. The local GPU path has its own settings (on the Models page) — the two paths have opposite cost structures, so one shared value would drag both."
+    "cloudOnlyHint": "These two apply to the cloud API path only. The local GPU path has its own settings (on the Models page) — the two paths have opposite cost structures, so one shared value would drag both.",
+    "minUrgency": "Alert filter",
+    "minUrgencyHint": "Filtered events still show up in the activity log; the main agent is not notified.",
+    "minUrgencyTick": {
+      "low": "Low",
+      "medium": "Med",
+      "high": "High"
+    },
+    "minUrgencyStatus": {
+      "low": "Receive all events",
+      "medium": "Receive medium & high urgency",
+      "high": "Receive high urgency only"
+    }
   }
 }

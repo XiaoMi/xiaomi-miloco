@@ -31,8 +31,11 @@ import type {
   PerfStagePercentiles,
   PerfSummary,
   PerfTraceRow,
+  Features,
   PerfWindow,
   Person,
+  Pet,
+  PetObserveResult,
   Scene,
   ScopeCamera,
   ScopeHome,
@@ -125,6 +128,63 @@ export async function deletePersonAvatar(personId: string): Promise<void> {
   return impl.realDeletePersonAvatar(personId);
 }
 
+// ── 宠物（非人家庭成员）────────────────────────────────────
+export async function listPets(homeId?: HomeId): Promise<Pet[]> {
+  if (!isPrimary(homeId)) return [];
+  return impl.realListPets();
+}
+
+export async function createPet(payload: {
+  name: string;
+  species?: string;
+}): Promise<Pet> {
+  return impl.realCreatePet(payload);
+}
+
+export async function updatePet(
+  id: string,
+  payload: { name?: string; species?: string },
+): Promise<Pet> {
+  return impl.realUpdatePet(id, payload);
+}
+
+export async function deletePet(id: string): Promise<void> {
+  return impl.realDeletePet(id);
+}
+
+export async function observePet(
+  files: File[],
+  grounding?: boolean,
+  signal?: AbortSignal,
+): Promise<PetObserveResult> {
+  return impl.realObservePet(files, grounding, signal);
+}
+
+export async function uploadPetAvatar(
+  petId: string,
+  image: Blob,
+  filename: string,
+): Promise<Pet> {
+  return impl.realUploadPetAvatar(petId, image, filename);
+}
+
+export async function uploadPetReferenceCrops(
+  petId: string,
+  crops: { blob: Blob; score?: number }[],
+  mode: "replace" | "append" = "replace",
+): Promise<Pet> {
+  return impl.realUploadPetReferenceCrops(petId, crops, mode);
+}
+
+// ── 实验性功能开关 ─────────────────────────────────────────
+export async function getFeatures(): Promise<Features> {
+  return impl.realGetFeatures();
+}
+
+export async function setFeatures(patch: Partial<Features>): Promise<Features> {
+  return impl.realSetFeatures(patch);
+}
+
 // ── 家庭档案（home_profile）────────────────────────────────
 // UI 只调这组语义函数；snake_case 的 op 构造全收在 real.ts，组件不碰。
 function today(): string {
@@ -147,8 +207,10 @@ export async function addHomeEntry(input: {
   content: string;
   subjectId?: string | null;
   subjectName?: string | null;
-}): Promise<void> {
-  return impl.realProfileWrite([
+}): Promise<string> {
+  // 返回新条目 id：多步写入（如宠物注册）中途失败时，调用方靠它把重试改走 update，
+  // 既不重复插条目、也不丢住户重试前改过的内容（见 PetDrawer.writeAppearance）。
+  const [res] = await impl.realProfileWrite([
     {
       op: "add",
       entry: {
@@ -161,6 +223,7 @@ export async function addHomeEntry(input: {
       },
     },
   ]);
+  return res?.id ?? "";
 }
 
 // 住户直编正式记忆（仅覆盖显式提供的字段）。
@@ -174,7 +237,7 @@ export async function updateHomeEntry(
     subjectName?: string | null;
   },
 ): Promise<void> {
-  return impl.realProfileWrite([
+  await impl.realProfileWrite([
     {
       op: "update",
       id,
@@ -191,12 +254,12 @@ export async function updateHomeEntry(
 }
 
 export async function deleteHomeEntry(id: string): Promise<void> {
-  return impl.realProfileWrite([{ op: "delete", id }]);
+  await impl.realProfileWrite([{ op: "delete", id }]);
 }
 
 // 确认候选 → 提升为正式（backend 自动从候选区移除该条）。
 export async function confirmCandidate(candidateId: string): Promise<void> {
-  return impl.realProfileWrite([{ op: "add", from: candidateId }]);
+  await impl.realProfileWrite([{ op: "add", from: candidateId }]);
 }
 
 // 忽略候选 → 直接从候选区删除。
@@ -233,6 +296,14 @@ export async function updateTaskDescription(
   description: string,
 ): Promise<void> {
   return impl.realUpdateTaskDescription(taskId, description);
+}
+
+// 改驱动规则的触发条件文本（任务详情里就地编辑）。
+export async function updateRuleQuery(
+  ruleId: string,
+  query: string,
+): Promise<void> {
+  return impl.realUpdateRuleQuery(ruleId, query);
 }
 
 // ── 设备 ──────────────────────────────────────────────────
@@ -619,10 +690,15 @@ export async function getMemorySeries(
 
 // ─── Perception Config ─────────────────────────────────────────────────
 
+export type MinSuggestionUrgency = "low" | "medium" | "high";
+
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   window_size: number;
+  // 老 backend(<0.10.x)不返此字段,前端在读取处 ?? DEFAULTS.min_suggestion_urgency 回退。
+  // 声明成可选是为了把这层运行时兼容语义显式化,别让未来维护者把 ?? 当成死代码删。
+  min_suggestion_urgency?: MinSuggestionUrgency;
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {

@@ -69,15 +69,39 @@ def _resolve_member_subject(entry: ProfileEntry, members_by_id: dict[str, dict])
     return "未知成员"
 
 
+def _resolve_pet_subject(entry: ProfileEntry, pets_by_id: dict[str, dict]) -> str:
+    """宠物条目的分组键：subject_id→花名册当前名 优先，回落 subject_name / '未知宠物'。"""
+    if entry.subject_id and entry.subject_id in pets_by_id:
+        return pets_by_id[entry.subject_id].get("name") or "未知宠物"
+    if entry.subject_name:
+        return entry.subject_name
+    return "未知宠物"
+
+
 def render_profile_markdown(
     entries: list[ProfileEntry],
     members: list[dict],
+    pets: list[dict] | None = None,
 ) -> str:
     members_by_id = {m["id"]: m for m in members if m.get("id")}
+    pets_by_id = {p["id"]: p for p in (pets or []) if p.get("id")}
+    pet_names = {p["name"] for p in (pets or []) if p.get("name")}
+
+    def _is_pet(e: ProfileEntry) -> bool:
+        # 宠物主体判定：subject_id 命中花名册，或（旧数据）subject_id 空且 subject_name
+        # 命中宠物名。pets 为空时恒 False（无花名册 → 不分宠物段，回退原行为）。
+        # 已知碰撞（legacy 回填过渡，接受）：与宠物同名、且 subject_id 为空的**人类**成员条目
+        # 会被归进「## 宠物」段；生产路径上这类条目已由 service.commit 的按名回填先写成 pet_id。
+        return bool(e.subject_id and e.subject_id in pets_by_id) or (
+            not e.subject_id and e.subject_name in pet_names
+        )
 
     # 仅渲染调用方传入的条目；archived 过滤由调用方负责，
     # 此处不再自行过滤，否则 token 二分查找会漏算前缀中已归档条目。
-    member_entries = [e for e in entries if e.type in _MEMBER_TYPES]
+    member_entries = [
+        e for e in entries if e.type in _MEMBER_TYPES and not _is_pet(e)
+    ]
+    pet_entries = [e for e in entries if e.type in _MEMBER_TYPES and _is_pet(e)]
     family_entries = [e for e in entries if e.type == "family"]
     space_entries = [e for e in entries if e.type == "space"]
     device_entries = [e for e in entries if e.type == "device"]
@@ -109,6 +133,30 @@ def render_profile_markdown(
                 key=lambda e: _member_order(e.type),
             )
             md += "\n".join(f"- {e.content}" for e in items) + "\n\n"
+
+    # ─── 宠物 ───
+    # 名单以**花名册**为脊（不是"有没有活跃档案条目"）：识别的门与参考图注入都以花名册为准
+    # （home_profile_has_pets / pet_refs 同源），若名单靠档案条目撑着，条目被 token 预算归档 /
+    # 住户删掉 / 只 pet add 未写外观时，名单会凭空消失 → 模型被要求"只列名单里的宠物"却拿到空
+    # 名单。软关闭时调用方已把 pets 置空（service.commit 的 render_pets），故关闭态不出本段。
+    resolved_pets = [(_resolve_pet_subject(e, pets_by_id), e) for e in pet_entries]
+    roster = [p["name"] for p in (pets or []) if p.get("name")]
+    # 花名册顺序在前、legacy（仅按名匹配、不在花名册）的排在后面；去重且保持稳定输出
+    pet_subjects: list[str] = []
+    for subj in roster + [s for s, _ in resolved_pets]:
+        if subj not in pet_subjects:
+            pet_subjects.append(subj)
+    if pet_subjects:
+        md += "## 宠物\n\n"
+        for subj in pet_subjects:
+            md += f"### {subj}\n\n"
+            items = sorted(
+                (e for s, e in resolved_pets if s == subj),
+                key=lambda e: _member_order(e.type),
+            )
+            # 花名册里有、但没有（未归档的）档案条目的宠物：只出名字，作为可供识别称呼的名单项
+            if items:
+                md += "\n".join(f"- {e.content}" for e in items) + "\n\n"
 
     # ─── 家庭规则 ───
     if family_entries:

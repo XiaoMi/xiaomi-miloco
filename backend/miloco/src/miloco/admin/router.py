@@ -870,6 +870,66 @@ async def list_omni_models(
     )
 
 
+# ── 实验性功能开关（features）─────────────────────────────────────────────────
+
+
+class FeaturesUpdateBody(BaseModel):
+    """部分更新：只改传了的字段。"""
+
+    pet_recognition: bool | None = None
+    pet_head_grounding: bool | None = None
+    pet_body_grounding: bool | None = None
+    pet_reid_diverse: bool | None = None
+
+
+def _features_state() -> dict:
+    f = get_settings().features
+    return {
+        "pet_recognition": f.pet_recognition,
+        "pet_head_grounding": f.pet_head_grounding,
+        "pet_body_grounding": f.pet_body_grounding,
+        "pet_reid_diverse": f.pet_reid_diverse,
+    }
+
+
+@router.get("/features", summary="实验性功能开关状态", response_model=NormalResponse)
+def get_features(current_user: str = Depends(verify_token)):
+    """返回产品级实验性功能开关（宠物识别总开关 + 头部 grounding 子开关）当前状态。"""
+    return NormalResponse(code=0, message="ok", data=_features_state())
+
+
+@router.post(
+    "/features",
+    summary="设置实验性功能开关（写 config.json,热生效）",
+    response_model=NormalResponse,
+)
+def set_features(body: FeaturesUpdateBody, current_user: str = Depends(verify_token)):
+    """部分更新宠物识别 / 头部 grounding 开关：写入 config.json 并热生效。
+
+    关闭 pet_recognition = 软关闭（前端隐藏宠物、感知不注入宠物段/规则），**不删数据**。
+    注:``MILOCO_FEATURES__*`` 环境变量优先级更高,若设置了 env 则本写入不生效（同 omni-config）。
+    """
+    update: dict = {}
+    if body.pet_recognition is not None:
+        update["pet_recognition"] = body.pet_recognition
+    if body.pet_head_grounding is not None:
+        update["pet_head_grounding"] = body.pet_head_grounding
+    if body.pet_body_grounding is not None:
+        update["pet_body_grounding"] = body.pet_body_grounding
+    if body.pet_reid_diverse is not None:
+        update["pet_reid_diverse"] = body.pet_reid_diverse
+    if update:
+        update_shared_config(features=update)
+        # 拨动 pet_recognition 后立即重渲一次家庭档案，否则关掉后 profile.md 仍含「## 宠物」段、
+        # 继续随每帧感知注入（而称呼纪律 / pet_identities 已停），把最易误认的输入留下、护栏撤了。
+        if "pet_recognition" in update:
+            try:
+                get_manager().home_profile_service.commit()
+            except Exception:  # noqa: BLE001 - 重渲失败不该让开关写入回滚，下次 commit 自愈
+                logger.warning("features 变更后重渲家庭档案失败", exc_info=True)
+    return NormalResponse(code=0, message="ok", data=_features_state())
+
+
 @router.post(
     "/omni-config/retry",
     summary="用户主动触发一次 omni 探测,跳过熔断剩余 backoff",
@@ -1020,6 +1080,13 @@ class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
+    min_suggestion_urgency: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description=(
+            "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃;"
+            "low=不过滤(默认),medium=丢弃 low,high=只保留 high"
+        ),
+    )
 
 
 def _perception_config_payload() -> dict:
@@ -1029,6 +1096,7 @@ def _perception_config_payload() -> dict:
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
+        "min_suggestion_urgency": s.perception.min_suggestion_urgency,
     }
 
 
@@ -1054,6 +1122,11 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if body.min_suggestion_urgency is not None:
+        # 阈值热读:client.py 的 _filter_suggestions_by_min_urgency 每次 dispatch 前
+        # get_settings() 现读,update_shared_config 已含 reset_settings,下个 cycle 即生效,
+        # 不参与下方 restart_ok(不需要重启引擎)。
+        update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
     payload = _perception_config_payload()
     if update:
         # 三个参数生效路径各不同，按「新值 != 旧值」判断（前端 drawer 三字段一起 PUT）：

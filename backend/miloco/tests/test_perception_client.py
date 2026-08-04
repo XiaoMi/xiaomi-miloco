@@ -300,6 +300,195 @@ async def test_handle_realtime_sends_all_when_no_early_sent(proxy):
     assert [s.id for s in disp.await_args.args[1]] == [1]
 
 
+# ─── min_suggestion_urgency 过滤(dispatch→agent 通路)─────────────────────────
+
+
+def _urgency_settings(min_urgency: str) -> MagicMock:
+    """构造一个只关心 perception.min_suggestion_urgency 的 settings mock。"""
+    s = MagicMock()
+    s.perception.min_suggestion_urgency = min_urgency
+    return s
+
+
+def test_filter_helper_splits_by_threshold():
+    """纯 helper:按阈值切分 kept/dropped/threshold,不依赖协程/引擎。"""
+    from miloco.perception.client import _filter_suggestions_by_min_urgency
+    from miloco.perception.types import Suggestion
+
+    s_low = Suggestion(event="水龙头没关", action="提醒", urgency="low", id=1)
+    s_med = Suggestion(event="有人敲门", action="查看", urgency="medium", id=2)
+    s_high = Suggestion(event="老人摔倒", action="紧急", urgency="high", id=3)
+
+    with patch(
+        "miloco.perception.client.get_settings",
+        return_value=_urgency_settings("medium"),
+    ):
+        kept, dropped, threshold = _filter_suggestions_by_min_urgency(
+            [s_low, s_med, s_high]
+        )
+    assert threshold == "medium"
+    assert [s.id for s in kept] == [2, 3]
+    assert [s.id for s in dropped] == [1]
+
+
+def test_filter_helper_low_threshold_is_noop():
+    """默认阈值 low:所有档位都 >= low,dropped 恒空(向后兼容:不引入过滤)。"""
+    from miloco.perception.client import _filter_suggestions_by_min_urgency
+    from miloco.perception.types import Suggestion
+
+    items = [
+        Suggestion(event="a", action="a", urgency="low"),
+        Suggestion(event="b", action="b", urgency="medium"),
+        Suggestion(event="c", action="c", urgency="high"),
+    ]
+    with patch(
+        "miloco.perception.client.get_settings",
+        return_value=_urgency_settings("low"),
+    ):
+        kept, dropped, threshold = _filter_suggestions_by_min_urgency(items)
+    assert threshold == "low"
+    assert len(kept) == 3
+    assert dropped == []
+
+
+async def test_handle_realtime_urgency_filter_drops_below_threshold(proxy):
+    """合批路径:threshold=medium 时 low 不进 dispatch;result.suggestions 保留完整。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Suggestion
+
+    result = RealtimePerceptionResult(
+        suggestions=[
+            Suggestion(event="水龙头没关", action="提醒", urgency="low", id=1),
+            Suggestion(event="有人敲门", action="查看", urgency="medium", id=2),
+            Suggestion(event="老人摔倒", action="紧急", urgency="high", id=3),
+        ],
+    )
+    fake_mgr = MagicMock()
+
+    async def _noop_update(*a, **k):
+        ...
+
+    fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr), \
+         patch("miloco.perception.client.dispatch_event",
+               new_callable=AsyncMock) as disp, \
+         patch("miloco.perception.client.get_settings",
+               return_value=_urgency_settings("medium")):
+        await proxy.handle_realtime_perception_result(result)
+
+    disp.assert_awaited_once()
+    # 只发 medium + high;low 被拦
+    assert [s.id for s in disp.await_args.args[1]] == [2, 3]
+    # result 保持完整,timeline / dump / 上下文不受影响
+    assert [s.id for s in result.suggestions] == [1, 2, 3]
+
+
+async def test_handle_realtime_urgency_filter_high_only(proxy):
+    """threshold=high 时仅 high 通过;若全部被拦则不 dispatch。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Suggestion
+
+    result = RealtimePerceptionResult(
+        suggestions=[
+            Suggestion(event="水龙头没关", action="提醒", urgency="low", id=1),
+            Suggestion(event="有人敲门", action="查看", urgency="medium", id=2),
+        ],
+    )
+    fake_mgr = MagicMock()
+
+    async def _noop_update(*a, **k):
+        ...
+
+    fake_mgr.rule_service.update_state = _noop_update
+    fake_mgr.rule_service.get_enabled_rule_ids = MagicMock(return_value=[])
+
+    with patch("miloco.manager.get_manager", return_value=fake_mgr), \
+         patch("miloco.perception.client.dispatch_event",
+               new_callable=AsyncMock) as disp, \
+         patch("miloco.perception.client.get_settings",
+               return_value=_urgency_settings("high")):
+        await proxy.handle_realtime_perception_result(result)
+
+    disp.assert_not_awaited()
+    assert [s.id for s in result.suggestions] == [1, 2]
+
+
+async def test_early_suggestions_urgency_filter(proxy):
+    """早出路径:_on_early_suggestions 内 dispatch 仅收到 >= 阈值的 kept 子集;
+    _publish 与 early_sent_sugg_ids 对全量执行(timeline / dedup 不受影响)。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Suggestion
+
+    main_loop = asyncio.get_running_loop()
+    published: list[tuple[str, str, dict]] = []
+
+    def _fake_publish(event_type, source, payload):
+        published.append((event_type, source, payload))
+
+    async def engine_realtime(*args, **kwargs):
+        await kwargs["on_early_suggestions"]([
+            Suggestion(event="水龙头没关", action="提醒", urgency="low", id=1),
+            Suggestion(event="有人敲门", action="查看", urgency="medium", id=2),
+            Suggestion(event="老人摔倒", action="紧急", urgency="high", id=3),
+        ])
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    with patch("miloco.perception.client.dispatch_event",
+               new_callable=AsyncMock) as disp, \
+         patch("miloco.perception.client._publish_perception_event",
+               side_effect=_fake_publish), \
+         patch("miloco.perception.client.get_settings",
+               return_value=_urgency_settings("medium")):
+        _, _, _, early_ids = await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, main_loop, [],
+        )
+
+    # dispatch 只见 medium + high
+    disp.assert_awaited_once()
+    assert [s.id for s in disp.await_args.args[1]] == [2, 3]
+    # _publish 对全量执行,timeline 全部见得到
+    assert [p[1] for p in published] == ["水龙头没关", "有人敲门", "老人摔倒"]
+    # early_sent_sugg_ids 含全部三个 id(不论过滤与否),让 merged 路径不重复处理
+    assert early_ids == {1, 2, 3}
+
+
+async def test_early_suggestions_default_low_is_noop(proxy):
+    """默认阈值 low:早出路径不引入过滤(向后兼容),全量 dispatch。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.types import Suggestion
+
+    main_loop = asyncio.get_running_loop()
+
+    async def engine_realtime(*args, **kwargs):
+        await kwargs["on_early_suggestions"]([
+            Suggestion(event="a", action="a", urgency="low", id=1),
+            Suggestion(event="b", action="b", urgency="medium", id=2),
+        ])
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    with patch("miloco.perception.client.dispatch_event",
+               new_callable=AsyncMock) as disp, \
+         patch("miloco.perception.client._publish_perception_event"), \
+         patch("miloco.perception.client.get_settings",
+               return_value=_urgency_settings("low")):
+        await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, main_loop, [],
+        )
+
+    disp.assert_awaited_once()
+    assert [s.id for s in disp.await_args.args[1]] == [1, 2]
+
+
 # test_unmatched_enabled_rules_get_false_each_cycle / test_unmatched_skips_early_sent_rules
 # 已迁移到 test_perception_client_rule_dispatch.py(per-device 状态机重构后,
 # false 广播改为按 device_rule_map 精确推退,旧 case 的全集 enabled rule 模型不再适用)。

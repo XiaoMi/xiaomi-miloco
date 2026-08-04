@@ -94,3 +94,51 @@ def test_unchanged_omni_fps_is_noop(client):
     assert resp.status_code == 200
     svc.apply_omni_fps_live.assert_not_awaited()
     svc.apply_config_restart.assert_not_awaited()
+
+
+def test_min_urgency_change_writes_config_no_restart(client):
+    """min_suggestion_urgency 走热读路径:落盘即生效,不参与 restart 分派。"""
+    c, svc = client
+    resp = c.put(
+        "/api/admin/perception-config",
+        json={"min_suggestion_urgency": "medium"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["min_suggestion_urgency"] == "medium"
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
+
+
+def test_min_urgency_get_returns_current(client):
+    c, _ = client
+    resp = c.get("/api/admin/perception-config")
+    assert resp.status_code == 200
+    # 默认值 low(与 backend Literal default 对齐,fixture 未写此字段)
+    assert resp.json()["data"]["min_suggestion_urgency"] == "low"
+
+
+def test_min_urgency_rejects_bogus_value(client):
+    """Literal 类型校验:非 low/medium/high 应被 pydantic 拒(422)。"""
+    c, _ = client
+    resp = c.put(
+        "/api/admin/perception-config",
+        json={"min_suggestion_urgency": "urgent"},
+    )
+    assert resp.status_code == 422
+
+
+def test_min_urgency_mixed_with_omni_fps(client):
+    """混合 PUT:同时改 omni_fps + min_urgency,前者走 hot-reload,后者走 hot-read,
+    互不干扰——apply_omni_fps_live 被调 1 次(omni_fps),apply_config_restart 不调。"""
+    c, svc = client
+    resp = c.put(
+        "/api/admin/perception-config",
+        json={"omni_fps": 2, "min_suggestion_urgency": "high"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["omni_fps"] == 2
+    assert data["min_suggestion_urgency"] == "high"
+    svc.apply_omni_fps_live.assert_awaited_once_with(2)
+    svc.apply_config_restart.assert_not_awaited()

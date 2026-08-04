@@ -14,8 +14,8 @@ const OUT = 256; // 输出方图边长（px）
 const MAX_ZOOM = 4;
 
 interface Props {
-  /** 源图：用户选的图片文件。 */
-  source: { file: File };
+  /** 源图：上传的图片文件 或 base64（宠物「自动生成外观」流传 crop 的 b64）。 */
+  source: { file: File } | { b64: string };
   /** 头部等归一化初始框 [x,y,w,h]（相对源图），用作默认裁剪范围。 */
   initialBox?: number[] | null;
   onCancel: () => void;
@@ -33,6 +33,11 @@ export function AvatarCropEditor({
   // 都 revoke 到对应的旧 URL，杜绝泄漏。
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
+    // b64 源（自动生成流）直接用 data URL，无需 revoke；file 源建 objectURL、卸载/换源时回收。
+    if ("b64" in source) {
+      setSrc(`data:image/jpeg;base64,${source.b64}`);
+      return;
+    }
     const url = URL.createObjectURL(source.file);
     setSrc(url);
     return () => URL.revokeObjectURL(url);

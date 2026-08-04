@@ -49,6 +49,58 @@ export interface Person {
   avatarExt?: string | null;
 }
 
+// 宠物（非人家庭成员）——独立花名册，不进人身份库
+export interface Pet {
+  id: string; // pet_XXXXXXXXXXXX
+  name: string;
+  species: string;
+  avatarExt?: string | null; // 有头像时的文件后缀；null=无头像
+  referenceCropCount?: number; // 已录入的多姿态识别参照图张数（喂 ③ 识别）
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// 实验性功能开关（后端 /api/admin/features）
+export interface Features {
+  petRecognition: boolean;
+  petHeadGrounding: boolean;
+  petBodyGrounding: boolean; // 回退路径（框不到猫狗）裁本体作参考图；默认开
+  petReidDiverse: boolean; // 参考图多样性用人体 ReID 特征距离选多姿态；关或模型不可用回退 dHash
+}
+
+// observe 建议类不阻断提示（后端算）：species_mismatch / generic_look / refs_inconsistent / multiple_pets
+export interface PetObserveWarning {
+  type: string;
+  level: string; // "warn"
+  message: string;
+}
+
+// observe 单个候选（一只宠物的一张姿态 crop）
+export interface PetObserveCandidate {
+  trackId: number | null;
+  speciesGuess: string;
+  cropB64: string;
+  headBbox?: number[] | null; // 该 crop 的头部归一化框（grounding 开时）
+  // P0 契约质量分（可选；门控/候选展示/落盘绝对分用）
+  conf?: number;
+  sharpness?: number;
+  areaRatio?: number;
+  bbox?: number[] | null; // [x, y, w, h]（相对来源帧像素）
+  frameIdx?: number | null;
+}
+
+// pet:observe 返回：门控选出的 ≤3 张同一只多姿态 crop + omni 一次成型共性描述
+export interface PetObserveResult {
+  detected: boolean;
+  description: Record<string, unknown> | null; // {species, breed, size_build, ..., summary}
+  headBbox: number[] | null; // primary crop 的头部归一化 [x,y,w,h]
+  primaryCropB64: string;
+  primaryIndex: number; // candidates 中主候选下标（默认头像/primary_crop 对应那张）
+  candidates: PetObserveCandidate[];
+  refsInconsistent: boolean | null; // 多图时 omni 判"疑似不是同一只"；单图/回退恒 null
+  warnings: PetObserveWarning[];
+}
+
 // ── 设备 ────────────────────────────────────────────────────
 export type DeviceCategory =
   | "light"
