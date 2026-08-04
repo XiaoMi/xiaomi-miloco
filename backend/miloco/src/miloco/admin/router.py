@@ -14,6 +14,7 @@ import subprocess
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool
@@ -1082,6 +1083,13 @@ class PerceptionConfigBody(BaseModel):
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
     smart_crop_enabled: bool | None = None
+    min_suggestion_urgency: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description=(
+            "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃;"
+            "low=不过滤(默认),medium=丢弃 low,high=只保留 high"
+        ),
+    )
 
 
 def _perception_config_payload() -> dict:
@@ -1107,6 +1115,7 @@ def _perception_config_payload() -> dict:
         # 日志 event=crop_enhance_config_bad 的 reason。
         "smart_crop_enabled": ce.user_enabled,
         "smart_crop_available": ce.enabled,
+        "min_suggestion_urgency": s.perception.min_suggestion_urgency,
     }
 
 
@@ -1136,6 +1145,11 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
             "user_enabled"
         ] = body.smart_crop_enabled
+    if body.min_suggestion_urgency is not None:
+        # 阈值热读:client.py 的 _filter_suggestions_by_min_urgency 每次 dispatch 前
+        # get_settings() 现读,update_shared_config 已含 reset_settings,下个 cycle 即生效,
+        # 不参与下方 restart_ok(不需要重启引擎)。
+        update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
     payload = _perception_config_payload()
     if update:
         # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：

@@ -708,6 +708,8 @@ export async function getMemorySeries(
 
 // ─── Perception Config ─────────────────────────────────────────────────
 
+export type MinSuggestionUrgency = "low" | "medium" | "high";
+
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
@@ -719,6 +721,9 @@ export interface PerceptionConfig {
    *  false = 当前这一版没打开该能力,用户开关即便为 true 也不裁 → 前端置灰 + 提示,
    *  避免"开关开着但后端不裁"的静默失效。老后端不返此字段 → undefined,同样置灰。 */
   smart_crop_available?: boolean;
+  // 老 backend(<0.10.x)不返此字段,前端在读取处 ?? DEFAULTS.min_suggestion_urgency 回退。
+  // 声明成可选是为了把这层运行时兼容语义显式化,别让未来维护者把 ?? 当成死代码删。
+  min_suggestion_urgency?: MinSuggestionUrgency;
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {

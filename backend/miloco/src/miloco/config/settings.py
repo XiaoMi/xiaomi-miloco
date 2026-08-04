@@ -17,7 +17,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
@@ -307,6 +307,14 @@ class PerceptionSettings(BaseModel):
     """感知管线相关配置。"""
 
     log_ttl: int = Field(default=30, description="感知日志保留天数")
+    min_suggestion_urgency: Literal["low", "medium", "high"] = Field(
+        default="low",
+        description=(
+            "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃;"
+            "low = 不过滤(默认,向后兼容),medium = 丢弃 low,high = 只保留 high。"
+            "result.suggestions 保留完整,timeline/dump/上下文不受影响,仅 agent 派发受限。"
+        ),
+    )
     event_ttl_days: int = Field(
         default=7,
         description=(

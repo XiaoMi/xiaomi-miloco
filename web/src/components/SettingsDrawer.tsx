@@ -5,10 +5,15 @@ import {
   getSchedulerConfig,
   updatePerceptionConfig,
   updateSchedulerConfig,
+  type MinSuggestionUrgency,
   type PerceptionConfig,
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
 import { toast } from "./Toast";
+
+// PerceptionConfig 里 min_suggestion_urgency 声明为可选(老 backend 不返此字段);
+// 但组件 state 需要确定值,单独拎一个具体类型的默认常量兜住:接口"可能没"、控件"永远有"。
+const DEFAULT_MIN_URGENCY: MinSuggestionUrgency = "low";
 
 // 与 backend settings.yaml perception.engine.input + perception.collect.window_size
 // + perception.engine.crop_enhance.user_enabled 对齐
@@ -17,12 +22,15 @@ const DEFAULTS: PerceptionConfig = {
   omni_fps: 1,
   window_size: 4,
   smart_crop_enabled: true,
+  min_suggestion_urgency: DEFAULT_MIN_URGENCY,
 };
 
 const SHORT_EDGE_OPTIONS = [360, 512, 768, 1080] as const;
 const FPS_OPTIONS = [1, 2, 3] as const;
 const WINDOW_MIN = 2;
 const WINDOW_MAX = 10;
+// slider 顺序即 URGENCY_RANK,index == pydantic Literal 顺序 → 双向 O(1) 映射。
+const URGENCY_LEVELS: readonly MinSuggestionUrgency[] = ["low", "medium", "high"] as const;
 
 interface Props {
   open: boolean;
@@ -41,6 +49,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
   // Smart Crop 用户开关。与分辨率档正交（各自独立 dirty / 各自独立生效），
   // 不是第五个分辨率档 —— crop 视频的短边本身也按所选档等比跟随。
   const [smartCrop, setSmartCrop] = useState(DEFAULTS.smart_crop_enabled === true);
+  const [minUrgency, setMinUrgency] = useState<MinSuggestionUrgency>(
+    DEFAULT_MIN_URGENCY,
+  );
 
   // 内置定时任务自动管理开关（scheduler.enabled）。缺省 true = 自动管理。
   const [schedulerLoaded, setSchedulerLoaded] = useState<boolean | null>(null);
@@ -68,6 +79,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setOmniFps(c.omni_fps);
         setWindowSize(c.window_size);
         setSmartCrop(c.smart_crop_enabled === true);
+        // 老 backend 若不返 min_suggestion_urgency 时回退到"不过滤"默认,与 backend 的
+        // Literal default 对齐,不误导用户以为拿到了远端值。
+        setMinUrgency(c.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY);
       }),
       getSchedulerConfig().then((s) => {
         setSchedulerLoaded(s.enabled);
@@ -96,7 +110,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
       omniFps !== config.omni_fps ||
       windowSize !== config.window_size ||
       // 不可用时恒 false：置灰的开关不该产出待保存改动
-      (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)));
+      (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)) ||
+      minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY));
   // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
   // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
   // 实则静默丢弃」的控件。
@@ -128,6 +143,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
           window_size: windowSize,
           // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
           ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
+          min_suggestion_urgency: minUrgency,
         });
         setConfig(updated);
         setSmartCrop(updated.smart_crop_enabled === true);
@@ -165,6 +181,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setWindowSize(DEFAULTS.window_size);
     // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
     if (smartCropAvailable) setSmartCrop(DEFAULTS.smart_crop_enabled === true);
+    setMinUrgency(DEFAULT_MIN_URGENCY);
     // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
     // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。
     if (schedulerAvailable) setSchedulerEnabled(true);
@@ -343,6 +360,46 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   <span>{WINDOW_MIN} {t("settings.windowSizeUnit")}</span>
                   <span>{WINDOW_MAX} {t("settings.windowSizeUnit")}</span>
                 </div>
+              </div>
+
+              {/* 事件提醒 —— urgency 过滤(3-stop slider,与感知窗口视觉对齐) */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-body font-medium text-text-primary">
+                    {t("settings.minUrgency")}
+                  </label>
+                  <span className="text-body text-text-primary font-semibold">
+                    {t(`settings.minUrgencyStatus.${minUrgency}`)}
+                  </span>
+                </div>
+                {(() => {
+                  const idx = URGENCY_LEVELS.indexOf(minUrgency);
+                  const pct = (idx / (URGENCY_LEVELS.length - 1)) * 100;
+                  return (
+                    <input
+                      type="range"
+                      min={0}
+                      max={URGENCY_LEVELS.length - 1}
+                      step={1}
+                      value={idx}
+                      onChange={(e) =>
+                        setMinUrgency(URGENCY_LEVELS[Number(e.target.value)])
+                      }
+                      className="settings-slider w-full"
+                      style={{
+                        background: `linear-gradient(to right, var(--color-brand-primary, #ff6900) ${pct}%, var(--color-border, #e5e5e5) ${pct}%)`,
+                      }}
+                    />
+                  );
+                })()}
+                <div className="flex justify-between text-caption text-text-tertiary">
+                  {URGENCY_LEVELS.map((v) => (
+                    <span key={v}>{t(`settings.minUrgencyTick.${v}`)}</span>
+                  ))}
+                </div>
+                <p className="text-caption text-text-tertiary">
+                  {t("settings.minUrgencyHint")}
+                </p>
               </div>
 
               {/* 内置定时任务自动管理开关 */}
