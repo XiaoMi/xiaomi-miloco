@@ -24,6 +24,7 @@ from av.video.frame import VideoFrame
 from PIL import Image
 
 from .error import MIoTMediaDecoderError
+from .tuning import DECODE_THREADS, SWSCALE_THREADS
 from .types import MIoTCameraCodec, MIoTCameraFrameData
 
 _LOGGER = logging.getLogger(__name__)
@@ -282,6 +283,9 @@ class MIoTMediaDecoder(threading.Thread):
             else:
                 _LOGGER.error("unsupported video codec: %s, skipping frame", frame_data.codec_id)
                 return
+            # 限解码线程数:默认 auto 按 CPU 核数开满,单路实时解码远用不满,多出来的
+            # 全是 idle worker。见 DECODE_THREADS。
+            self._video_decoder.thread_count = DECODE_THREADS
             _LOGGER.info("video decoder created, %s", frame_data.codec_id)
         pkt = Packet(frame_data.data)
         frames: List[VideoFrame] = self._video_decoder.decode(pkt)  # type: ignore
@@ -292,7 +296,12 @@ class MIoTMediaDecoder(threading.Thread):
         if self._video_frame_callback and frames:
             for frame in frames:
                 try:
-                    bgr = frame.to_ndarray(format="bgr24").astype("uint8")
+                    # 像素转换(swscale)默认按 CPU 核数开满 slice 线程池,而上下文每帧
+                    # 新建一次(reformatter 挂在 frame 上),等于每帧按核起一遍。单帧小图
+                    # 转换用不上。见 SWSCALE_THREADS。
+                    bgr = frame.to_ndarray(
+                        format="bgr24", threads=SWSCALE_THREADS
+                    ).astype("uint8")
                 except Exception as e:
                     _LOGGER.warning("Failed to convert frame to ndarray: %s", e)
                     continue
@@ -318,7 +327,7 @@ class MIoTMediaDecoder(threading.Thread):
                 self._last_jpeg_ts = now_ts
                 return
             frame = frames[0]
-            rgb_frame: VideoFrame = frame.to_rgb()
+            rgb_frame: VideoFrame = frame.to_rgb(threads=SWSCALE_THREADS)  # 同上
             img: Image.Image = rgb_frame.to_image()
             buf: BytesIO = BytesIO()
             img.save(buf, format="JPEG", quality=90)

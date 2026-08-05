@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Literal
 import av
 import cv2
 import numpy as np
+from miot.tuning import ENCODE_THREADS
 from numpy.typing import NDArray
 
 from miloco.config import get_settings
@@ -1476,6 +1477,10 @@ def _encode_video_mp4(
         v_stream.width = target_w
         v_stream.height = target_h
         v_stream.pix_fmt = "yuv420p"
+        # 单线程理由见 ENCODE_THREADS 定义处。omni 这条在感知窗口关键路径上(编完的
+        # base64 接着送模型),单线程代价仍可忽略:单窗只有 omni_fps×window_size≈4 帧、
+        # 短边 512,编码耗时远小于后续 omni 调用的秒级往返,不吃窗口预算。
+        v_stream.thread_count = ENCODE_THREADS
 
         # Audio stream (if enough samples for AAC)
         _AAC_FRAME_SIZE = 1024

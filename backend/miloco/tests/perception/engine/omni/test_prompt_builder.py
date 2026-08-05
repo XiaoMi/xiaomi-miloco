@@ -1478,6 +1478,51 @@ class TestIdentityMatchDisabled:
         assert self._MATCH_ONLY_MARKER in full
 
 
+def test_encode_video_pins_libx264_thread_count(monkeypatch):
+    """omni mp4 编码器必须钉死 ENCODE_THREADS(走真实 add_stream 路径,非桩)。
+
+    删掉 prompt_builder 里那行 thread_count 赋值,本用例会失败;其余 _encode_video
+    用例只验产物(有无音轨),抓不到线程数回退。
+    """
+    from miot.tuning import ENCODE_THREADS
+
+    class _CapturingContainer:
+        def __init__(self, real):
+            self._real = real
+            self._streams: list = []
+            self.h264_thread_counts: list[int] = []
+
+        def add_stream(self, codec, *a, **k):
+            stream = self._real.add_stream(codec, *a, **k)
+            self._streams.append((codec, stream))
+            return stream
+
+        def close(self):
+            # 在底层释放前快照:close 后读 codec context 可能已失效。
+            for codec, stream in self._streams:
+                if codec == "h264":
+                    self.h264_thread_counts.append(stream.thread_count)
+            return self._real.close()
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    containers: list = []
+    real_open = _pb_mod.av.open
+
+    def _spy_open(*a, **k):
+        cap = _CapturingContainer(real_open(*a, **k))
+        containers.append(cap)
+        return cap
+
+    monkeypatch.setattr(_pb_mod.av, "open", _spy_open)
+
+    b64, _info = _encode_video(_video_packet(audio_active=False))
+    assert b64 is not None
+    assert containers, "未捕获到 av.open"
+    assert containers[0].h264_thread_counts == [ENCODE_THREADS]
+
+
 def _adaptive_packet(
     *,
     person_id: str = "none",
