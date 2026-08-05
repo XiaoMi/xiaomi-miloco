@@ -239,13 +239,26 @@ class MIoTMediaDecoder(threading.Thread):
                     break
         _LOGGER.info("decoder stopped")
 
-    def stop(self) -> None:
-        """Stop the decoder."""
+    def stop(self) -> bool:
+        """Stop the decoder.
+
+        Returns:
+            True —— 线程已退出、codec 已释放。
+            False —— join 超时,线程与 codec 仍存活,调用方不要当成干净停止。
+        """
         self._running = False
         self._queue.stop()
+        # 先 join 再置 None:join 期间 run 仍可能重建 codec,先释放会泄漏 worker
+        self.join(timeout=5.0)
+        if self.is_alive():
+            # 超时不置 None:线程可能正卡在 self._video_decoder.decode(pkt) 里,
+            # 主线程丢掉最后一个引用等于在解码调用脚下抽掉对象,宁可等它自己退出后
+            # 由 GC 回收也不挂死。
+            _LOGGER.error("decoder thread failed to stop within timeout")
+            return False
         self._video_decoder = None
         self._audio_decoder = None
-        self.join()
+        return True
 
     def push_video_frame(self, frame_data: MIoTCameraFrameData) -> None:
         self._queue.put_video(frame_data)
