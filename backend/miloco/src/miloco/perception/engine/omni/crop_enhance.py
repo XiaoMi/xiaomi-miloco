@@ -200,12 +200,9 @@ def compute_crop_region_detail(
         return None, "degenerate"
     area_ratio = ((rx2 - rx1) * (ry2 - ry1)) / (w * h)
     # 最大面积:区域大到接近全景时裁切已没有意义(视野几乎没收窄,却多付一次编码)→ 回退全景。
-    # 它是**语义上限,不是像素预算**:接入"短边不足预算时放大"之后,编码像素被钉在
-    # 预算² × 区域长宽比上、与区域面积无关,所以本闸既不保证像素开销不涨、也不保证主体
-    # 像素密度高于同档全景(长宽比比帧更接近正方的区域,面积可以远低于 0.49 而短边反而更大:
-    # 16:9 帧里 800x800 的区域只占 31%,但短边 800 已超过 1080 档的 crop 短边预算 759,
-    # 裁完比全景更糊)。详见
-    # CropEnhanceConfig.crop_short_edge 与 _crop_short_edge_budget 的注释。
+    # 它是**语义上限,不是像素预算** —— 像素开销不靠本闸封:crop 视频等比放到逐轴贴住同档全景
+    # 画面,编码像素恒 <= 同档全景,主体像素密度也不低于同档全景(倍数 = 纯几何倍数
+    # min(w/区域宽, h/区域高) >= 1),与本值取多少无关。详见 _maybe_encode_adaptive 的注释。
     if area_ratio > cfg.crop_max_area_ratio:
         return None, "area_too_large"
     # 最小面积复检:目标紧贴画面边缘时 _enforce_min_area 绕中心放大会被 clamp 截断、
@@ -320,7 +317,7 @@ def crop_enhance_config_from_settings() -> CropEnhanceConfig:
     for name in (
         "expand_ratio_h", "expand_ratio_v", "motion_diff_threshold",
         "motion_min_block_ratio", "motion_min_fill_ratio", "motion_global_drift_ratio",
-        "crop_min_area_ratio", "crop_max_area_ratio", "crop_short_edge",
+        "crop_min_area_ratio", "crop_max_area_ratio",
     ):
         if isinstance(getattr(cfg, name), bool) or not isinstance(getattr(cfg, name), (int, float)):
             logger.warning(

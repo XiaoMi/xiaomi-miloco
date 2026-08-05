@@ -75,7 +75,6 @@ RouteType = Literal["video", "audio"]
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from miloco.perception.engine.config import CropEnhanceConfig
     from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
     from miloco.perception.engine.identity.library import GallerySamples
 
@@ -1424,6 +1423,16 @@ def _encode_video(
     )
 
 
+def _encode_target_wh(w0: int, h0: int, short_edge: int) -> tuple[int, int]:
+    """``_encode_video_mp4`` 编出来的像素网格,单独抽出来供 crop 上限复用。
+
+    crop 的逐轴上限要跟「同档全景画面」比,那个画面就是本函数在原生帧上的结果 ——
+    两处必须逐像素一致(含 //2*2 偶数对齐),所以共用一份实现而不是各算一遍。
+    """
+    scale = short_edge / min(h0, w0)
+    return int(w0 * scale) // 2 * 2, int(h0 * scale) // 2 * 2
+
+
 def _encode_video_mp4(
     frames: list[NDArray[np.uint8]],
     audio_clip: NDArray[np.int16],
@@ -1459,8 +1468,7 @@ def _encode_video_mp4(
 
         h0, w0 = frames[0].shape[:2]
         scale = short_edge / min(h0, w0)
-        target_w = int(w0 * scale) // 2 * 2
-        target_h = int(h0 * scale) // 2 * 2
+        target_w, target_h = _encode_target_wh(w0, h0, short_edge)
         # 缩小用 INTER_AREA(区域平均,抗锯齿最好);放大时 INTER_AREA 会退化成近似最近邻
         # (它按源像素落到的目标格子做平均,放大时每格只摊到一个源像素),必须换重采样核。
         # LANCZOS4 是离线对照里实测的那一个(与 CUBIC 统计上无法区分 p=0.63,取被测过的)。
@@ -1701,10 +1709,17 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 #    INTER_AREA(放大退化成近似最近邻);本 PR 只改了放大时用哪个重采样核。target
 #    还要 //2*2 取偶(h264 yuv420p),故实际编码短边可能比档位低 1-2px。该函数被
 #    fused 全景 / query / legacy / crop **四条路径共用**。
-# ⑥ crop 分辨率(本 PR 新增)= min(预算, cap_se):预算按用户档等比跟随(见
-#    _crop_short_edge_budget),cap_se 见 _maybe_encode_adaptive。它**可以 > 区域原生
-#    短边**,即放大。而同附的参考帧走 _resize_short_edge、是**钳死只缩不放**的 ——
-#    720p 源 + 1080 档时 crop 视频放大到 759、参考帧仍停在原生 720,两者口径不一致
+# ⑥ crop 分辨率(本 PR 新增):等比放大/缩小到**逐轴贴住「同档全景画面」**,即⑤那条
+#    _encode_target_wh(原生帧, video_short_edge) 算出的网格,不另设预算(见
+#    _maybe_encode_adaptive)。两条性质(与录制内容、与档位都无关)刻画了它:
+#    - 像素开销 ≤ 同档全景画面,等号仅在区域与帧等比时取到(逐轴也不超),不存在扁长
+#      区域反超的情形。
+#    - 主体放大倍数 = min(帧宽/区域宽, 帧高/区域高) ≥ 1,即纯几何放大倍数,故主体像素
+#      密度不低于同档全景 —— 取整后极扁区域会亏几个百分点,量级见 _maybe_encode_adaptive。
+#    它**可以 > 区域原生短边**(即放大);档位高于源短边时甚至可以 > 原生帧 ——
+#    因为⑤的全景本身就在放大,上限是跟那个放大后的画面比,不是跟原生帧比。
+#    而同附的参考帧走 _resize_short_edge、是**钳死只缩不放**的 —— 720p 源 + 1080 档、
+#    区域与帧等比时 crop 视频编到 1920x1080,参考帧仍停在原生 720,两者口径不一致
 #    (有意:参考帧只补裁切丢掉的全局视野、不承载坐标定位。不跟着放大是**成本**考量、
 #     不是"放大无用"—— 按⑦的机制,放大它同样会抬高它分到的 token,但那份 token 花在
 #     一张静态全局图上收益从未实测,不如留给 crop 视频里的主体;
@@ -1724,19 +1739,6 @@ def _effective_panorama_short_edge() -> int:
     """
     se = _get_video_short_edge()
     return _VIDEO_SHORT_EDGE if se <= 0 else se
-
-
-def _crop_short_edge_budget(cfg: "CropEnhanceConfig", panorama_short_edge: int) -> int:
-    """crop 视频短边预算,按用户分辨率档等比缩放(360p→253 / 512p→360 / 768p→540 / 1080p→759)。
-
-    cfg.crop_short_edge(默认 360)是 **512 档下的基准**,不是固定值:按比例跟随才能让用户
-    升档对 crop 同样生效(固定 360 配 1080 档等于把升档吞掉)。
-
-    注意:短边不足预算时会放大到预算后,编码像素 = 预算² × 区域长宽比、与区域面积无关,
-    所以 crop_max_area_ratio=0.49≈(360/512)² 已**不再**保证「像素开销 ≈ 同档全景」——
-    扁长区域最坏可达同档全景的 1.48 倍。详见 CropEnhanceConfig.crop_short_edge 的注释。
-    """
-    return max(1, round(panorama_short_edge * cfg.crop_short_edge / _VIDEO_SHORT_EDGE))
 
 
 def _resize_short_edge(frame: NDArray[np.uint8], short_edge: int) -> NDArray[np.uint8]:
@@ -1773,7 +1775,8 @@ def _maybe_encode_adaptive(
     返回 None = 回退全景(既有路径)。触发 None 的情形:双闸任一为 false(发版级开关 enabled /
     单机用户开关 user_enabled)、无帧、无 crop 依据、面积超上限、``region_ok`` 否决、
     crop/编码/JPEG 失败或产物过短。
-    crop 视频与参考帧的短边都跟随用户分辨率档(见 _crop_short_edge_budget),与「裁不裁」正交。
+    crop 视频与参考帧都跟随用户分辨率档,与「裁不裁」正交:crop 视频逐轴贴住同档全景画面
+    (含放大),参考帧走 _resize_short_edge 只缩不放 —— 口径差异见上方「全链分辨率」⑥。
     all_frames 只读不改。
 
     ``region_ok(region, (w, h))`` 是调用方的区域准入校验,在**算出 region 之后、编码与
@@ -1851,26 +1854,31 @@ def _maybe_encode_adaptive(
         ch, cw = cropped[0].shape[:2]
         fh, fw = frames[0].shape[:2]
         pano_se = _effective_panorama_short_edge()
-        # 短边不足预算时**放大**到预算(不再只缩不放)。离线对照:720p 源下裁出区域短边中位
-        # 283、够不上 360 预算的窗口占 57%,这批窗口原生裁切只有 +0.6pp(p=1.0),插值放大到
-        # 预算后 +7.8pp。机制疑在送进视觉 encoder 的像素网格尺寸决定主体分到多少 token
+        # 区域小于目标网格时**放大**(不再只缩不放)。离线对照:720p 源下裁出区域短边中位
+        # 283、够不上 360 的窗口占 57%,这批窗口原生裁切只有 +0.6pp(p=1.0),插值放大后
+        # +7.8pp。机制疑在送进视觉 encoder 的像素网格尺寸决定主体分到多少 token
         # (两种插值核互比无差异 p=0.63,若靠恢复细节则更锐的核该更好)——因此它是 provider
         # 相关的,换模型/adapter 可能失效,别当成图像本身的性质。
         #
-        # 上限:放大后的像素网格**逐轴**不超过 crop 前原图对应轴(宽 <= 帧宽 且 高 <= 帧高)。
-        # 因区域必在帧内(cw <= fw 且 ch <= fh),放大倍率上限 min(fw/cw, fh/ch) 恒 >= 1,
-        # 故本上限只会限制放大、绝不引入缩小。超限按上限回压短边(部分放大),不整体回退。
+        # 尺寸口径:等比缩放到**逐轴贴住「同档全景画面」**——即同一原生帧在同一 video_short_edge
+        # 档下会编出的那张网格(pano_w x pano_h,故必须复用 _encode_target_wh)。缩放比取两轴
+        # 倍率的较小者,于是(下述数字来自四种源 x 四档 x 89 万种区域尺寸的穷举核对):
+        # - 逐轴不超过画面:宽 <= pano_w 且 高 <= pano_h,且生效那一轴贴住画面(取整残差:间隙
+        #   中位 0.22%、最坏 2.8%)。取整除而不是向上取整正是为了让这条**可证**——换成向上
+        #   取整实测 21% 的组合会冲出画面。
+        # - 像素开销 <= 同档全景画面,等号仅在区域与帧等比时取到:不存在扁长区域反超的情形。
+        # - 主体不比同档全景更糊:理想算术下放大倍数(相对全景)= min(fw/cw, fh/ch) >= 1,即
+        #   纯几何倍数,与档位无关;区域越大倍数越小,直至等于帧时退化为 1(不放大)。落到整数
+        #   后被两处取整啃掉一点(cse 整除亏 <1px,按长宽比放大到长轴;//2*2 再亏 <2px),
+        #   实测最差 0.957、0.89% 的组合落在 1 以下,都是输出轴只有几十像素的极扁区域。
+        # 上限锚**同档全景画面**而不是原生帧:⑤的全景在 video_short_edge > 源短边时本就在放大
+        # (scale 未钳 1.0),此时 crop 同样可以 > 原生帧像素,与全景保持同一口径。
         #
-        # 早期版本只约束长边(基准取 max(fh,fw)、不分区域朝向),那会拿帧宽去限制竖长区域的高:
-        # 帧 1920x1080、区域 360w×720h、1080 档编出 759x1518,高度已是帧高的 1.4 倍。
-        # 逐轴后同一样本回压到 540x1080(编码取偶后再低 1-2px)。
-        #
-        # 代价落在**大竖长区域**:上限允许的倍率 = fh/ch,区域越高越紧。区域占满 2/3 帧高时
-        # 只剩 1.5x,而 1080 档预算要 2.11x → 像素数约减半。反过来小区域(ch 小)上限松、
-        # 仍能放到预算 —— +7.8pp 那批"区域短边中位 283、够不上预算"的窗口正落在这一侧,
-        # 故本上限不动它们。灰度期用 event=adaptive_crop 的 upscale 分布确认这个分界。
-        cap_se = max(1, int(min(ch, cw) * min(fw / cw, fh / ch)))
-        cse = min(_crop_short_edge_budget(cfg, pano_se), cap_se)
+        # 两轴必须各夹一次、不能只夹一轴:帧 1920x1080、区域 360w x 720h、1080 档下只夹宽会
+        # 编出 1920x3840(高是画面高的 3.6 倍),逐轴取 min 后回压到 540x1080。
+        pano_w, pano_h = _encode_target_wh(fw, fh, pano_se)
+        cm = min(ch, cw)
+        cse = max(1, min(cm * pano_w // cw, cm * pano_h // ch))
         audio = (
             ep.audio_clip
             if _packet_audio_included(ep)
@@ -1899,7 +1907,9 @@ def _maybe_encode_adaptive(
             region,
             ((region[2] - region[0]) * (region[3] - region[1])) / (fw * fh),
             cse,
-            # 灰度期要能从日志看出放大倍率的真实分布(>1 即放大,离线实测中位 1.27、max 2.02)
+            # 灰度期要能从日志看出放大倍率的真实分布(>1 即放大)。注意它是**相对区域原生像素**
+            # 的倍率 = 纯几何倍数 min(fw/cw,fh/ch) × 档位比 pano_se/源短边,所以档位低于源短边时
+            # 可以 <1(缩小);要看「相对同档全景是否更清楚」得看前一项,它 >=1(取整亏损见上)。
             cse / max(1, min(ch, cw)),
             n_det, len(frames), n_motion,
         )
