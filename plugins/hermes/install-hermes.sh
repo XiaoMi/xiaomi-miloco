@@ -628,7 +628,7 @@ mkdir -p "$ADAPTER_DEST"
 for f in __init__.py adapter.py; do
   cp -f "$HERE/miloco-plugin/hermes_adapter/$f" "$ADAPTER_DEST/$f"
 done
-for f in context_injection.py catalog.py paths.py tools_habit.py; do
+for f in context_injection.py catalog.py paths.py; do
   cp -f "$HERE/miloco-plugin/$f" "$ADAPTER_DEST/$f"
 done
 # 清旧的 adapter/ 目录残留(独立 aiohttp 进程栈,架构 #1+#2 后不再用)
