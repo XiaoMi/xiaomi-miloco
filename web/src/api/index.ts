@@ -16,6 +16,7 @@ import type {
   HomeEntryType,
   HomeId,
   HomeStatus,
+  ProcSeries,
   MemorySeries,
   MemorySnapshot,
   MonitorMeta,
@@ -734,6 +735,15 @@ export async function getMemorySeries(
 ): Promise<MemorySeries> {
   return apiFetch<MemorySeries>(
     `/api/monitor/memory/series?window=${w}&bucket=${bucket}`,
+  );
+}
+
+export async function getProcSeries(
+  w: PerfWindow,
+  bucket: PerfBucket,
+): Promise<ProcSeries> {
+  return apiFetch<ProcSeries>(
+    `/api/monitor/proc/series?window=${w}&bucket=${bucket}`,
   );
 }
 
