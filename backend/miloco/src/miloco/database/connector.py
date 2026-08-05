@@ -23,6 +23,64 @@ logger = logging.getLogger(__name__)
 _DB_SCHEMA_VERSION = 2
 
 
+def incremental_vacuum(
+    conn: sqlite3.Connection,
+    max_pages: int | None = 10000,
+    chunk_pages: int = 500,
+) -> None:
+    """回收 auto_vacuum=INCREMENTAL 库里被 DELETE 标记为 free 的页，把空间还给 OS。
+
+    PRAGMA incremental_vacuum 靠消费结果集逐页驱动回收：不 fetch 时 Python sqlite3
+    只 step 一次、每轮仅回收 1 页，free page 会长期堆积；必须 fetchall 消费结果集才
+    真正逐页回收。max_pages 限单次回收上限（10000 页 ≈ 40MB），防清理尖峰。
+
+    单条 PRAGMA 的写事务是语句级的（pragma.c 在语句开头一次 sqlite3BeginWriteOperation、
+    循环到上限才提交），一条语句搬满上限会把写锁独占到搬完为止；同库其他 writer
+    （事件循环线程上的感知日志 INSERT、metrics worker）会整段卡在 busy_timeout 上，
+    抵掉 to_thread 的收益。注意这些 writer 的 busy 退避是在事件循环线程里同步跑的
+    （metrics_client._flush_buffer 是普通 def、直接跑阻塞 sqlite3），所以撞锁不只丢
+    observability 行，还会把事件循环冻住"对方持锁的剩余时长"（上限 5s/语句）。
+    所以按 chunk_pages 切成多条短语句，把一个覆盖全程的写事务
+    降级为多个各持锁数十毫秒的写事务。注意批间无主动 sleep、语句间写锁空窗仅几十微秒，
+    等待方（SQLite 默认 busy handler 退避轮询、最长 100ms 一轮）未必命中：默认 10000 页
+    整段亚秒级无妨，但 max_pages=None 追赶积压时整段窗口达秒级以上，可能耗尽 obs 连接的
+    5s busy timeout（撞锁即丢 trace 行），故只在维护窗口调。每批前查 freelist_count，
+    为 0 即返回，不为 no-op 白开写事务。
+
+    max_pages=None：不限页数、分批搬到清空整个 freelist，供上线时一次性追赶历史
+    积压（会持续占写锁较久，别在正常提供请求时调）。传 <=0 的整数下钳到 1：
+    SQLite 原生把 <=0 当"不限"，与防尖峰语义相反，不让它从数值路径漏进来。
+
+    仅在库的 auto_vacuum=INCREMENTAL(2) 时有效：其他模式下这条 PRAGMA 静默 no-op、
+    freelist 不下降，max_pages=None 会变成无终止循环（且每轮 no-op 仍开一次写事务、
+    持续抖写锁）。auto_vacuum 只能在空库上设，老库（fresh-build 路径之前建的）会永久
+    停在 NONE，故这里先校验模式、打日志留线索后直接返回。注意裸跑一次 VACUUM 只回收
+    当次空闲页、不改模式（明天这条 warning 照旧打）；要一次性切到增量回收，需停服后在
+    同一连接上按顺序跑 `PRAGMA auto_vacuum=INCREMENTAL;` 再 `VACUUM;`（SQLite 只允许
+    在建库时或 VACUUM 过程中改这个模式），或直接重建库。
+    """
+    mode = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
+    if mode != 2:
+        logger.warning(
+            "Skip incremental_vacuum: auto_vacuum=%s (期望 2/INCREMENTAL)。该库建库时"
+            "未开增量回收。裸跑一次 VACUUM 只回收当次空闲页、模式仍留在 NONE(明天还会"
+            "打这条);要一次性切到增量回收,需停服后在同一连接上按顺序跑 "
+            "`PRAGMA auto_vacuum=INCREMENTAL;` 再 `VACUUM;`(SQLite 只允许在建库时或 "
+            "VACUUM 过程中改这个模式),或直接重建库。",
+            mode,
+        )
+        return
+    chunk = max(1, int(chunk_pages))
+    remaining = None if max_pages is None else max(1, int(max_pages))
+    while remaining is None or remaining > 0:
+        if conn.execute("PRAGMA freelist_count").fetchone()[0] == 0:
+            return
+        n = chunk if remaining is None else min(chunk, remaining)
+        conn.execute(f"PRAGMA incremental_vacuum({n})").fetchall()
+        if remaining is not None:
+            remaining -= n
+
+
 class SQLiteConnector:
     """SQLite database connector class"""
 
