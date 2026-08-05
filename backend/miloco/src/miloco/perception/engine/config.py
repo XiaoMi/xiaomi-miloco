@@ -31,6 +31,62 @@ class InputConfig:
 
 
 @dataclass
+class CropEnhanceConfig:
+    """自适应分辨率(Smart Crop)配置。
+
+    默认值来自离线评测结论(原始实验产物未入库,取值依据写在下方各字段注释里)。
+    与 InputConfig 不同,本配置**不**注册进
+    PerceptionConfig / _create_engine——那样会在建引擎时缓存、失去热更新;运行时由
+    crop_enhance.crop_enhance_config_from_settings() 每窗口热读 settings 字典
+    (perception.engine.crop_enhance),同 video_short_edge 的模式,改配置免重启。
+
+    激活条件:enabled **且** user_enabled。分两个 key 不是访问控制(本地部署,用户对两个
+    配置文件都有全权、拦不住),而是配置层与用途不同:
+      · enabled = 发版级开关(随包默认层 settings.yaml,不由 admin API 写)——团队随包关/开
+        整个能力、或线上出问题时发一版止损;false 时前端开关随之置灰。
+      · user_enabled = 单机用户开关(默认值同样来自随包 yaml;拨 UI「智能裁切增强」时经
+        admin API 写进 config.json 覆盖)。
+    两层是**按 key 深合并**的(pydantic-settings),所以用户拨过 UI 开关、config.json 里只多
+    出 user_enabled 这一个 key 时,enabled 仍继承随包 yaml —— 发版级开关对这些机器照样生效。
+    但 CLI 白名单里也有这条(`miloco-cli config set perception.engine.crop_enhance.enabled`),
+    它写的是 config.json:哪台机器执行过,之后就固定读 config.json 的值,发版改 yaml 对它无效。
+    与 video_short_edge **正交** —— 裁不裁是本配置管,多清晰是 video_short_edge 管,
+    互不作废(早期版本曾用 video_short_edge==0 哨兵表达「自适应」,会让用户选的
+    768/1080 在回退全景时静默降到 512,已废弃)。
+    """
+
+    # 双闸的**产品默认值在随包 settings.yaml(两闸均已放开为 true),不在这里** —— yaml 是合并
+    # 的基础层,用户 config.json 缺这一块时继承的是 yaml 的 true。这里的 False 只在连 yaml 都
+    # 缺 key 时兜底(理论路径),别拿它当"默认关"的依据。
+    enabled: bool = False  # 发版级开关,置 false 时用户开关也不生效
+    user_enabled: bool = False  # 单机用户开关(UI「智能裁切增强」,admin API 可写)
+    expand_ratio_h: float = 0.40  # crop 区域水平扩展比(适应人形竖长 + 16:9)
+    expand_ratio_v: float = 0.30  # 垂直扩展比
+    motion_diff_threshold: int = 40  # 帧差分二值化阈值
+    motion_min_block_ratio: float = 0.005  # 运动块面积占比下限(<则丢,点状噪声)
+    motion_min_fill_ratio: float = 0.20  # 紧凑度 fill_ratio 下限(<则丢,条纹噪声)
+    motion_global_drift_ratio: float = 0.50  # 整帧变化占比 >此值 → 全局漂移,丢弃全部运动块
+    crop_min_area_ratio: float = 0.10  # crop 面积下限(防小目标过度放大截断主体)
+    crop_max_area_ratio: float = 0.49  # crop 面积上限;超过则回退全景(≈(360/512)²,见下)
+    # crop 视频短边基准,**以 512 档为参照**:实际短边 = round(video_short_edge × 360/512),
+    # 即用户档的 70%。按比例跟随而非固定值,才能让用户升档对 crop 同样生效(固定 360 配
+    # 1080 档等于把升档吞掉)。
+    #
+    # 区域短边不足预算时**放大**到预算(离线实测:720p 源下该情形占 57% 窗口,原生裁切
+    # +0.6pp、放大后 +7.8pp),放大后长边不超过原图长边。
+    #
+    # 放大开启后,`crop_max_area_ratio=0.49≈(360/512)²` 这个推导**已不再约束像素开销**:
+    # 短边被钉在预算上,编码像素 = 预算² × 区域长宽比,与区域面积无关。扁长区域会反超同档
+    # 全景 —— 1920x1080/512 档下,区域 1120x210(只占画面 11.3%、双限之内必然放行)编码
+    # 691200px = 同档全景 465920px 的 1.48 倍。0.49 现在只是「区域超过半个画面就没必要裁」
+    # 的语义上限,不是像素预算。要真的封住开销得按长宽比折算像素上限,那会改变区域→编码的
+    # 映射、与 +7.8pp 的测量配置不一致,故未做。
+    crop_short_edge: int = 360
+    # 注:crop 视频帧率不设独立配置——crop 逐帧裁切、不抽帧,时序与全景视频完全一致,
+    # 编码必须沿用 packet.frame_info.fps(下采样后真实间隔),否则时长/音画错位。
+
+
+@dataclass
 class GateConfig:
     check_fps: int = 1
     change_threshold: float = 0.005

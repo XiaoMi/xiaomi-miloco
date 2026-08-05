@@ -9,15 +9,29 @@
  * 时间筛选:datetime-local 双输入(自 / 至),非法值守(NaN 不更新 state).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { eventClipUrl, listActivity, listOnDemandLogs, onDemandClipUrl, revealDir, submitEventFeedback, submitOnDemandFeedback, subscribeEvents } from "@/api";
+import {
+  eventClipUrl,
+  eventCropMeta,
+  eventRefUrl,
+  listActivity,
+  listOnDemandLogs,
+  onDemandClipUrl,
+  revealDir,
+  submitEventFeedback,
+  submitOnDemandFeedback,
+  subscribeEvents,
+} from "@/api";
 import {
   humanizeRulesInText,
   splitHumanizedSections,
   type TriggerStatusKind,
 } from "@/lib/eventText";
-import type { ActivityEvent, HomeId, OnDemandLogEntry } from "@/lib/types";
+import type { ActivityEvent, EventCropMeta, HomeId, OnDemandLogEntry } from "@/lib/types";
+
+/** Lightbox 内容类型:clip 走 <video>,Smart Crop 参考帧走 <img>. */
+type LightboxKind = "video" | "image";
 import {
   ACTIONS_LIMIT,
   ActionRow,
@@ -180,8 +194,13 @@ export function ActivityFeed({
   const [hasMore, setHasMore] = useState(false);
   /** Promise generation token — stale fetch resolve 时丢弃(N1) */
   const fetchGenRef = useRef(0);
-  /** 全屏播放器(点开看大):null 关闭 */
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  /** 全屏播放器(点开看大):null 关闭.kind 决定用 <video> 还是 <img>(参考帧是 JPEG);
+   *  crop 由参考帧卡透上来(它已经拉过坐标),放大后继续画框、不重复请求. */
+  const [lightbox, setLightbox] = useState<{
+    src: string;
+    kind: LightboxKind;
+    crop?: EventCropMeta | null;
+  } | null>(null);
 
   // ── 单流:事件 / 动作两个 checkbox 筛选(默认都勾),动作一次拉全后 merge ──
   const [showEvents, setShowEvents] = useState(true);
@@ -349,6 +368,7 @@ export function ActivityFeed({
               // bug(行尾错显 🎬 / 展开走 <video> 黑屏).
               clip_kind: e.clip_kind ?? prev[idx].clip_kind,
               has_trace: e.has_trace ?? prev[idx].has_trace,
+              has_ref: e.has_ref ?? prev[idx].has_ref,
               has_feedback: e.has_feedback ?? prev[idx].has_feedback,
               feedback_pack_path: e.feedback_pack_path ?? prev[idx].feedback_pack_path,
               feedback_pack_size: e.feedback_pack_size ?? prev[idx].feedback_pack_size,
@@ -509,7 +529,7 @@ export function ActivityFeed({
               <ActivityRow
                 key={`e:${r.event.id}`}
                 event={r.event}
-                onOpenLightbox={setLightboxSrc}
+                onOpenLightbox={(src, kind, crop) => setLightbox({ src, kind, crop })}
                 feedbackSet={feedbackSet}
                 feedbackPacks={feedbackPacks}
                 onFeedbackSubmitted={(id, path, size) => {
@@ -552,8 +572,13 @@ export function ActivityFeed({
 
       </div>{/* end tab panels */}
 
-      {lightboxSrc && (
-        <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      {lightbox && (
+        <Lightbox
+          src={lightbox.src}
+          kind={lightbox.kind}
+          crop={lightbox.crop}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </section>
   );
@@ -562,12 +587,26 @@ export function ActivityFeed({
 /** 全屏播放器 — 点 backdrop / Esc 关闭. mp4 走 <video controls>,audio-only m4a 同样
  *  用 <video>(浏览器对纯音频 mp4/m4a render 黑底 + 音轨).
  *
+ *  kind="image":Smart Crop 的全景参考帧 ref.jpg,走 <img> —— <video src=*.jpg>
+ *  渲染不出来,所以按 kind 分叉而不是靠嗅探 URL.
+ *
  *  M1: 不加 autoPlay — Chrome/Safari autoplay policy 会拦截带音轨自动播放(modal
  *      是 fresh element,不继承父点击的 user gesture);改让用户主动按 ▶,体验稳定.
  *  S2: 挂载时 pause 页面里所有其他 <video>,避免 inline ClipPlayer 跟 Lightbox 同时
  *      出声(用 querySelectorAll 一次性处理,避免 prop drill).
  *  S6: keydown 通过 useRef(onClose) 解耦,空 deps,避免父组件每次 render 都重绑. */
-function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+function Lightbox({
+  src,
+  kind = "video",
+  crop,
+  onClose,
+}: {
+  src: string;
+  kind?: LightboxKind;
+  /** 参考帧的 crop 框(仅 kind==="image").放大看正是为了核对裁切位置,这里不能丢框. */
+  crop?: EventCropMeta | null;
+  onClose: () => void;
+}) {
   const { t } = useTranslation();
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -589,7 +628,9 @@ function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
       onClick={onClose}
       className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 cursor-zoom-out anim-in"
       role="dialog"
-      aria-label={t("activity.playback")}
+      // 必须跟着 kind 走:label 写在 kind 分叉之前,读屏会把参考帧对话框念成"事件回放"
+      // ——与屏上内容不符,而读屏用户没有画面可以纠正这句描述。
+      aria-label={kind === "image" ? t("activity.refFrame") : t("activity.playback")}
     >
       <button
         type="button"
@@ -599,13 +640,35 @@ function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
       >
         ✕
       </button>
-      <video
-        ref={videoRef}
-        src={src}
-        controls
-        className="max-w-full max-h-full rounded shadow-lg cursor-default bg-black"
-        onClick={(e) => e.stopPropagation()}
-      />
+      {kind === "image" ? (
+        // 与 RefFrameCard 缩略卡同款:容器给**确定**尺寸,<img> 在其中 object-contain,
+        // svg 覆盖层用同一个盒子 + preserveAspectRatio 做同样的 letterbox → 必然对齐.
+        //
+        // 不能让容器 shrink-to-fit(如 `flex max-w-full max-h-full`):那样容器高度是 auto,
+        // <img> 的 `max-h-full` 百分比无从解析 → 高度不受约束,图溢出被切;同时容器按
+        // max-content(帧原始宽)定宽,比图实际渲染宽,覆盖层跟着变宽,框整体横向错位.
+        // 16:9 桌面最大化(可用高 < 可用宽 × 9/16)必然命中,而放大就是为了核对裁切位置.
+        //
+        // 代价:rounded/shadow 落在元素盒(= 整个可用区)而非可见图上,已去掉;
+        // 也不再 stopPropagation —— 容器铺满后拦掉就等于废掉背景点击关闭,
+        // 而静态图没有 <video> 那种需要保护的控件,点任意处关闭正合 cursor-zoom-out.
+        <div className="relative w-full h-full">
+          <img
+            src={src}
+            alt={t("activity.refFrame")}
+            className="w-full h-full object-contain"
+          />
+          {crop && <CropBoxOverlay crop={crop} />}
+        </div>
+      ) : (
+        <video
+          ref={videoRef}
+          src={src}
+          controls
+          className="max-w-full max-h-full rounded shadow-lg cursor-default bg-black"
+          onClick={(e) => e.stopPropagation()}
+        />
+      )}
     </div>
   );
 }
@@ -761,7 +824,7 @@ function ActivityRow({
   onFeedbackSubmitted,
 }: {
   event: ActivityEvent;
-  onOpenLightbox: (src: string) => void;
+  onOpenLightbox: (src: string, kind: LightboxKind, crop?: EventCropMeta | null) => void;
   feedbackSet: Set<string>;
   feedbackPacks: Map<string, { path: string; size: number }>;
   onFeedbackSubmitted: (eventId: string, path: string, size: number) => void;
@@ -841,12 +904,23 @@ function ActivityRow({
           aria-label={t("activity.videoPlayback")}
         >
           {event.device_ids.map((did) => (
-            <ClipPlayer
-              key={did}
-              event_id={event.id}
-              device_id={did}
-              onOpenLightbox={onOpenLightbox}
-            />
+            // Smart Crop 事件:clip 是裁切放大的局部视频,紧跟一张全景参考帧 ——
+            // 并排放才能一眼看出"模型盯的是全景里哪块"(参考帧上还画了 crop 框).
+            // 多摄像头时按 device 成对铺开,不把参考帧全挤到末尾.
+            <Fragment key={did}>
+              <ClipPlayer
+                event_id={event.id}
+                device_id={did}
+                onOpenLightbox={onOpenLightbox}
+              />
+              {event.has_ref && (
+                <RefFrameCard
+                  event_id={event.id}
+                  device_id={did}
+                  onOpenLightbox={onOpenLightbox}
+                />
+              )}
+            </Fragment>
           ))}
         </div>
       )}
@@ -1068,7 +1142,7 @@ function ClipPlayer({
 }: {
   event_id: string;
   device_id: string;
-  onOpenLightbox: (src: string) => void;
+  onOpenLightbox: (src: string, kind: LightboxKind, crop?: EventCropMeta | null) => void;
 }) {
   const { t } = useTranslation();
   const [failed, setFailed] = useState(false);
@@ -1106,7 +1180,7 @@ function ClipPlayer({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          onOpenLightbox(src);
+          onOpenLightbox(src, "video");
         }}
         aria-label={t("activity.zoomPlay")}
         className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
@@ -1114,6 +1188,164 @@ function ClipPlayer({
         ⛶
       </button>
     </div>
+  );
+}
+
+/** Smart Crop 全景参考帧卡:与 crop clip 并排的静态 <img>,叠一层 crop 框.
+ *
+ *  为什么要这张卡:crop 模式下送 LLM 的视频只是画面里的一小块,单看它无从判断"模型
+ *  是不是盯错了地方".参考帧就是同一次推理里一并上送的整帧上下文(字节级 = omni 所见),
+ *  加上框就能直接看出裁切位置对不对 —— badcase 复盘的主要抓手.
+ *
+ *  crop 框画法:绝对定位一层 `<svg viewBox="0 0 W H" preserveAspectRatio="xMidYMid meet">`
+ *  盖在 object-contain 的 <img> 上.W/H = 全景帧原始尺寸,region 坐标也在这个空间,
+ *  所以 letterbox 缩放交给浏览器做,前端一行坐标换算都不需要,窗口 resize 也自动跟随.
+ *
+ *  三种"拿不到"要分开处理,否则会给用户看假象:
+ *  - crop 坐标 = null(后端 410:这台 device 本次没裁切 —— 非 crop 事件 / 落到全景兜底 /
+ *    事件目录已被 cleanup 清)→ **整张卡不渲染**.因为列表里的 `has_ref` 是**事件级
+ *    any-device**(后端 probe 只要任一 device 目录有 ref.jpg 就置 true),而本卡是**按
+ *    device 渲染**的:多摄像头事件里完全可能 A 机裁了、B 机回退全景,此时 B 机的卡若照渲
+ *    就会显示一个假的"参考帧已过期".这里用 crop 坐标的有无重新按 device 门控一次.
+ *    (不改成 per-device has_ref 是因为要连带动 SSE 写侧 / list API / 类型 / 测试.)
+ *    这一档现在都以「盘上没有这台 device 的 ref.jpg」为前提 —— 后端返 410 前会 stat 一次
+ *    (events_service._no_box_status),所以隐藏整卡不会误伤;裁过但坐标读不出来的走下一档.
+ *  - crop 请求失败(网络抖动 / 5xx,含后端"裁过但 trace 读坏"的 500)→ 保留卡,
+ *    只是不画框.区别于上面:那是"确定没有",这是"没问出来" —— ref.jpg 还在盘上,
+ *    不该把用户本来能看的参考帧藏掉.
+ *  - ref.jpg 本身 404/410(cleanup 清掉)→ 显"已过期"占位,与 ClipPlayer.failed 对称. */
+function RefFrameCard({
+  event_id,
+  device_id,
+  onOpenLightbox,
+}: {
+  event_id: string;
+  device_id: string;
+  onOpenLightbox: (src: string, kind: LightboxKind, crop?: EventCropMeta | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [failed, setFailed] = useState(false);
+  const [crop, setCrop] = useState<EventCropMeta | null>(null);
+  /** 后端明确答"这台 device 没裁切"(410)→ 整卡不渲染,见组件 docstring. */
+  const [absent, setAbsent] = useState(false);
+  const src = eventRefUrl(event_id, device_id);
+
+  // 只在本卡挂载时拉一次 crop 坐标(父层已按 expanded + has_ref 门控,折叠的行不会请求).
+  useEffect(() => {
+    let alive = true;
+    setCrop(null);
+    setAbsent(false);
+    eventCropMeta(event_id, device_id)
+      .then((m) => {
+        if (!alive) return;
+        setCrop(m);
+        setAbsent(m === null);
+      })
+      .catch(() => {
+        // 网络 / 5xx:没问出来 ≠ 没有 → 保留卡,只是不画框
+      });
+    return () => {
+      alive = false;
+    };
+  }, [event_id, device_id]);
+
+  if (absent) return null;
+  if (failed) {
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex-shrink-0 w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary"
+        aria-label={t("activity.refExpiredAria")}
+      >
+        {t("activity.refExpired")}
+      </div>
+    );
+  }
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="flex-shrink-0 relative group"
+    >
+      <img
+        src={src}
+        alt={`${device_id} ${t("activity.refFrame")}`}
+        onError={() => setFailed(true)}
+        onClick={(e) => e.stopPropagation()}
+        className="w-48 h-48 rounded bg-black border border-border object-contain"
+      />
+      {crop && <CropBoxOverlay crop={crop} />}
+      <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-white text-caption-mono pointer-events-none">
+        {t("activity.refFrame")}
+      </span>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenLightbox(src, "image", crop);
+        }}
+        aria-label={t("activity.zoomRefFrame")}
+        className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+      >
+        ⛶
+      </button>
+    </div>
+  );
+}
+
+/** 把 crop 元数据换算成 svg 几何(viewBox + rect).坏数据返 null = 不画框.
+ *
+ *  坐标不做任何缩放 —— viewBox 用全景帧原始尺寸,rect 用原始 region 像素坐标,
+ *  letterbox 缩放交给浏览器(见 RefFrameCard 注释).
+ *  stroke 宽度按帧宽比例给(不是固定 px):viewBox 单位会随缩放一起变,固定 2 在
+ *  1920 宽的帧上细到看不见.
+ *
+ *  导出仅为单测(同 mergeAndSort);渲染入口是 CropBoxOverlay. */
+export function cropBoxGeometry(crop: EventCropMeta): {
+  viewBox: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  strokeWidth: number;
+} | null {
+  const [w, h] = crop.frame_size_wh ?? [];
+  const [x1, y1, x2, y2] = crop.region_xyxy ?? [];
+  // 后端理论上不会给出这些形状,但 trace 是历史产物(schema 演进 / 手工改过 / 截断),
+  // 宁可不画框也不要吐一个 NaN viewBox 让整张 svg 变成花屏.
+  if (![w, h, x1, y1, x2, y2].every((n) => Number.isFinite(n))) return null;
+  if (!(w > 0 && h > 0 && x2 > x1 && y2 > y1)) return null;
+  return {
+    viewBox: `0 0 ${w} ${h}`,
+    x: x1,
+    y: y1,
+    width: x2 - x1,
+    height: y2 - y1,
+    strokeWidth: Math.max(2, Math.round(w / 160)),
+  };
+}
+
+/** crop 框:覆盖在参考帧上的 svg.stroke="currentColor" 让描边跟随 text-brand-primary,
+ *  主题切换时不用另写一套色值. */
+function CropBoxOverlay({ crop }: { crop: EventCropMeta }) {
+  const geo = cropBoxGeometry(crop);
+  if (!geo) return null;
+  return (
+    <svg
+      viewBox={geo.viewBox}
+      preserveAspectRatio="xMidYMid meet"
+      className="absolute inset-0 w-full h-full pointer-events-none text-brand-primary"
+      aria-hidden="true"
+    >
+      <rect
+        x={geo.x}
+        y={geo.y}
+        width={geo.width}
+        height={geo.height}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={geo.strokeWidth}
+      />
+    </svg>
   );
 }
 

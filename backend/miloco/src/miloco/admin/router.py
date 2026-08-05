@@ -1080,6 +1080,9 @@ class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
+    # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
+    # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
+    smart_crop_enabled: bool | None = None
     min_suggestion_urgency: Literal["low", "medium", "high"] | None = Field(
         default=None,
         description=(
@@ -1090,12 +1093,49 @@ class PerceptionConfigBody(BaseModel):
 
 
 def _perception_config_payload() -> dict:
+    from miloco.perception.engine.config import CropEnhanceConfig
+    from miloco.perception.engine.omni.crop_enhance import (
+        crop_enhance_config_from_settings,
+    )
+
     s = get_settings()
+    # perception.engine 是 dict[str, Any](值不过校验),input 这一块可能被写成非 mapping
+    # (env MILOCO_PERCEPTION__ENGINE__INPUT=512 / config.json 手写 "input": "512"),
+    # 此时下面的 inp.get 会抛 AttributeError。fail-closed 退默认:GET/PUT 都走本函数投影,
+    # 一抛就把「进 UI 把配置改回来」这条自救路堵死(PUT 的 update_shared_config 在投影之后)。
+    # 推理侧同款坏值不至于崩(_get_video_short_edge / _gemini_media_resolution 各自有 try,
+    # 回退默认档),所以这里是该坏值唯一的 500 来源。
     inp = s.perception.engine.get("input", {})
+    if not isinstance(inp, dict):
+        logger.warning(
+            "event=perception_config_bad field=input reason=not_mapping raw=%r 退默认", inp
+        )
+        inp = {}
+    # 两个闸位不自己 bool(raw.get(...)),走运行时同一条读取路径:裸 bool() 会把
+    # `enabled: "false"` 判成 truthy → GET 报 available=true 而运行时不裁(推理见
+    # crop_enhance_config_from_settings 的注释)。
+    # 这次读取再单独兜一层:上面那类已知坏形状 crop_enhance_config_from_settings 内部已
+    # fail-closed,但 settings 层还可能有别的意外。读不到就报 available=false(前端置灰、
+    # 提示看日志),而不是让 GET/PUT 一起 500(理由同上)。
+    try:
+        ce = crop_enhance_config_from_settings()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "event=perception_config_crop_enhance_read_failed 报 available=false", exc_info=True
+        )
+        ce = CropEnhanceConfig()
     return {
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
+        # 双闸分开暴露:smart_crop_enabled = 用户态(开关位置,取 user_enabled)vs
+        # smart_crop_available = 决定开关能不能点(取发版级开关 enabled)。
+        # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但后端不裁"。
+        # 注意 available 不只反映发版级开关:整份 crop_enhance 校验不过(数值字段写成字符串 /
+        # min>max)时运行时整份退默认,这里跟着报 false —— 此时那句提示归因是偏的,真因看
+        # 日志 event=crop_enhance_config_bad 的 reason。
+        "smart_crop_enabled": ce.user_enabled,
+        "smart_crop_available": ce.enabled,
         "min_suggestion_urgency": s.perception.min_suggestion_urgency,
     }
 
@@ -1122,6 +1162,10 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if body.smart_crop_enabled is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
+            "user_enabled"
+        ] = body.smart_crop_enabled
     if body.min_suggestion_urgency is not None:
         # 阈值热读:client.py 的 _filter_suggestions_by_min_urgency 每次 dispatch 前
         # get_settings() 现读,update_shared_config 已含 reset_settings,下个 cycle 即生效,
@@ -1129,8 +1173,9 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
     payload = _perception_config_payload()
     if update:
-        # 三个参数生效路径各不同，按「新值 != 旧值」判断（前端 drawer 三字段一起 PUT）：
+        # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：
         #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
+        #   - smart_crop_enabled：同上，crop_enhance_config_from_settings 每窗口热读，无需重启。
         #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
         #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live
         #     运行时热更（原地刷 _config + 缓存），免重建引擎 / 免模型重载 / 不丢 track。
