@@ -2075,9 +2075,12 @@ class TestAdaptiveResolution:
         assert self._has_ref(content)  # 确认确实走了 crop 分支
         assert spy.call_args_list[-1].kwargs["short_edge"] == 759
 
-    def test_crop_video_upscaled_to_budget_when_region_smaller(self):
-        # 区域比预算小(512 档默认小框 → 区域短边约 148)→ **放大**到预算 360,不再只缩不放。
+    def test_crop_video_upscaled_toward_budget_when_region_smaller(self):
+        # 区域比预算小(512 档默认小框 → 区域 152x204)→ **放大**,不再只缩不放。
         # 离线对照:720p 源下这类窗口占 57%,原生裁切 +0.6pp、放大到预算 +7.8pp。
+        # 这里落到 357 而非预算 360:逐轴上限(高 480/204 = 2.35x)比预算要的 2.37x 略紧,
+        # 微压 3px。断言写成「显著放大且不超预算」而不是恒等于预算 —— 恒等于预算只在
+        # 逐轴上限不生效的区域成立(见 test_upscale_cap_is_per_axis_not_long_edge)。
         from unittest.mock import patch as _patch
 
         import miloco.perception.engine.omni.prompt_builder as pb
@@ -2086,17 +2089,22 @@ class TestAdaptiveResolution:
         with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
             content = self._content(candidates=[])
         assert self._has_ref(content)
-        assert spy.call_args_list[-1].kwargs["short_edge"] == 360
+        cropped = spy.call_args_list[-1].args[0]
+        ch, cw = cropped[0].shape[:2]
+        se = spy.call_args_list[-1].kwargs["short_edge"]
+        assert se == 357
+        assert se > min(ch, cw)  # 确实放大了(区域原生短边 152)
+        assert se <= 360  # 不越过预算
 
-    def test_upscale_capped_by_original_frame_long_edge(self):
-        # 放大上限:放大后长边 ≤ crop 前原图长边。造一个极扁区域(长宽比 > 帧长边/预算),
-        # 使预算不再是生效上限 —— 此时短边应被回压到 frame_long × short/long。
+    def test_upscale_capped_by_original_frame_axes(self):
+        # 放大上限:放大后逐轴都 ≤ crop 前原图对应轴。造一个极扁区域(长宽比 > 帧长宽比),
+        # 使预算不再是生效上限 —— 此时短边应被回压到上限。
         from unittest.mock import patch as _patch
 
         import miloco.perception.engine.omni.prompt_builder as pb
 
-        # 640x360 帧(长边 640)+ 很扁的框 → 扩展后区域长宽比约 5:1。放大到预算 360 会让
-        # 长边达 1800 ≫ 640,故上限生效。
+        # 640x360 帧 + 很扁的框 → 扩展后区域约 640x64(横向已占满整帧宽)。放大到预算 360
+        # 会让宽达 6400 ≫ 640,故上限生效、倍率被压回 1.0。
         np.random.seed(29)
         frames = [np.random.randint(0, 256, (360, 640, 3), dtype=np.uint8) for _ in range(5)]
         pkt = _adaptive_packet(frames=frames, body_box=(120, 160, 400, 40))
@@ -2107,10 +2115,37 @@ class TestAdaptiveResolution:
         cropped = spy.call_args_list[-1].args[0]
         ch, cw = cropped[0].shape[:2]
         se = spy.call_args_list[-1].kwargs["short_edge"]
-        long_after = max(ch, cw) * se / min(ch, cw)
-        assert long_after <= max(frames[0].shape[:2]) + 1  # 取整误差留 1px
+        fh, fw = frames[0].shape[:2]
+        scale = se / min(ch, cw)
+        assert cw * scale <= fw + 1  # 取整误差留 1px
+        assert ch * scale <= fh + 1
         assert se < 360  # 确认是上限而非预算在起作用
         assert se >= min(ch, cw)  # 上限只限制放大,绝不反过来引入缩小
+
+    def test_upscale_cap_is_per_axis_not_long_edge(self):
+        # 逐轴上限的存在理由:只约束长边时,竖长区域会拿**帧宽**去限制 crop 的高,编出比原帧
+        # 还高的画面。1920x1080 帧 + 360x720 区域、1080 档:
+        #   只约束长边 → cap = 1920 × 360/720 = 960 → 预算 759 生效 → 759x1518(高 1.4 倍帧高)
+        #   逐轴       → cap = 360 × min(1920/360, 1080/720) = 540 → 540x1080(贴住帧高)
+        from unittest.mock import patch as _patch
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        np.random.seed(31)
+        frames = [np.random.randint(0, 256, (1080, 1920, 3), dtype=np.uint8) for _ in range(5)]
+        # 居中竖长框 → 扩展后区域 360x720(占 12.5%,过面积双限)
+        pkt = _adaptive_packet(frames=frames, body_box=(900, 300, 200, 450))
+        p1, p2 = self._patches(short_edge=1080)
+        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+            content = self._content(packet=pkt, candidates=[])
+        assert self._has_ref(content)
+        cropped = spy.call_args_list[-1].args[0]
+        ch, cw = cropped[0].shape[:2]
+        se = spy.call_args_list[-1].kwargs["short_edge"]
+        assert (cw, ch) == (360, 720)
+        assert se == 540  # 只约束长边时这里会是预算 759
+        # 关键不变量:放大后的高不越过原帧高(旧行为会到 1518)
+        assert ch * se / min(ch, cw) <= frames[0].shape[0] + 1
 
     def test_upscale_uses_lanczos_downscale_keeps_area(self):
         # 放大/缩小走不同重采样核:INTER_AREA 是区域平均,放大时退化成近似最近邻,故只用于缩小。
