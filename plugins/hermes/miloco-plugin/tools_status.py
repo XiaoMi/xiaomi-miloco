@@ -10,8 +10,9 @@
 - ``miloco_notify_bind`` — IM 渠道切换：list 列出 state.json::candidates + 当前
   选中的；switch 切换 target。无需手动编辑 state.json。
 
-三个工具都是**纯加法**：不动已有 ``miloco_im_push`` / ``miloco_habit_suggest`` 行为，
+三个工具都是**纯加法**：不动已有 ``miloco_im_push`` / ``miloco_notify_bind`` 行为，
 不引入新依赖，handler 失败仅 log + 返回 ok:false。
+（注：``miloco_habit_suggest`` 防骚扰状态机已随 PR #419 迁入 ``miloco-cli habit`` 命令组。）
 """
 
 from __future__ import annotations

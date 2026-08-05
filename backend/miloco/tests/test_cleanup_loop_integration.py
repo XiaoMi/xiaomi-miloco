@@ -154,3 +154,88 @@ class TestCleanupLoop:
         ):
             # 不应抛 OSError
             await _run_one_cycle()
+
+    @pytest.mark.asyncio
+    async def test_obs_cleanup_owned_by_worker_thread(self, isolated_env):
+        """回归护栏:obs 连接必须在工作线程内建、内关,回收也在工作线程跑。
+
+        这是一条纯时序不变量,helper 的护栏一条都覆盖不到它(五条单测全跑在 miloco.db
+        上,碰不到 _cleanup_obs_db 的时序)。三种回归都能全绿逃过 CI,只有这条能 red:
+        - 把 obs_connect 挪回线程函数外(建在事件循环线程、只把语句放进 to_thread):
+          关服 cancel 撞上工作线程还在 fetch 搬页的窗口时,事件循环线程会 close 掉正
+          在用的连接,抛 "Cannot operate on a closed database"。
+        - 把 incremental_vacuum 挪回 await 之后:把最多 40MB 的阻塞 I/O 压回事件循环。
+        - 把 obs 那次 incremental_vacuum 整块删掉(它外面裹着一层 try/except,看起来
+          像可选的):obs.db 从此只 DELETE 不回收,退回本 PR 要修的 bug,而且是在两个
+          库里空闲页更多的那个上。
+        """
+        import threading
+
+        import miloco.database.connector as connector_module
+        import miloco.main as main_module
+        from miloco.observability.metrics_db import connect as real_connect
+
+        loop_tid = threading.get_ident()
+        connect_tids: list[int] = []
+        close_tids: list[int] = []
+        obs_vacuum_tids: list[int] = []
+        miloco_vacuum_tids: list[int] = []
+
+        # sqlite3.Connection 是 C 类型、无 __dict__,不能直接给实例赋 close,
+        # 用薄代理转发、只在 close 上挂记录。
+        class _TrackingConn:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                close_tids.append(threading.get_ident())
+                self._conn.close()
+
+        def _tracking_connect(path):
+            connect_tids.append(threading.get_ident())
+            return _TrackingConn(real_connect(path))
+
+        real_vacuum = connector_module.incremental_vacuum
+
+        def _tracking_vacuum(conn, *args, **kwargs):
+            # 一轮 loop body 里 incremental_vacuum 被调两次(obs 一次、miloco.db 一次)。
+            # 共用一个桶时,obs 那次被整块删掉后 miloco 那次仍能让断言全绿,护栏形同
+            # 虚设 —— obs 连接是 _TrackingConn、miloco 的是裸 sqlite3.Connection,
+            # 按这个天然判别标记分桶,两个调用点各断各的。
+            bucket = (
+                obs_vacuum_tids
+                if isinstance(conn, _TrackingConn)
+                else miloco_vacuum_tids
+            )
+            bucket.append(threading.get_ident())
+            return real_vacuum(conn, *args, **kwargs)
+
+        # incremental_vacuum 在 main.py 是函数内 import,patch 到 connector 模块属性上。
+        with (
+            patch.object(main_module, "obs_connect", side_effect=_tracking_connect),
+            patch.object(
+                connector_module, "incremental_vacuum", side_effect=_tracking_vacuum
+            ),
+        ):
+            await _run_one_cycle()
+
+        assert connect_tids, "obs cleanup 整段没跑到(perf.enabled 被关?)"
+        assert loop_tid not in connect_tids, (
+            f"obs 连接建在事件循环线程上了: {connect_tids} vs loop {loop_tid}"
+        )
+        assert connect_tids == close_tids, (
+            f"建连/关连不在同一线程: connect={connect_tids} close={close_tids}"
+        )
+        assert obs_vacuum_tids, "obs 回收没跑到(incremental_vacuum 调用被删?)"
+        assert loop_tid not in obs_vacuum_tids, (
+            f"obs 回收跑在事件循环线程上了: {obs_vacuum_tids} vs loop {loop_tid}"
+        )
+        assert obs_vacuum_tids == connect_tids, (
+            f"obs 回收不在建连的那个线程上: vacuum={obs_vacuum_tids} connect={connect_tids}"
+        )
+        assert miloco_vacuum_tids and loop_tid not in miloco_vacuum_tids, (
+            f"miloco.db 回收跑在事件循环线程上了: {miloco_vacuum_tids} vs loop {loop_tid}"
+        )

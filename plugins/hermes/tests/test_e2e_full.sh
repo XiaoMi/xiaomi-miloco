@@ -87,7 +87,7 @@ section "Phase 3: 文件完整性"
 S=$(ls "$HERMES_HOME/skills/miloco-"* 2>/dev/null | wc -l | tr -d ' ')
 [ "$S" -ge 16 ] && ok "$S skills" || no "skills: $S (<16)"
 
-for f in __init__.py adapter.py context_injection.py catalog.py paths.py tools_habit.py; do
+for f in __init__.py adapter.py context_injection.py catalog.py paths.py; do
   [ -f "$MILOCO_HOME/agent_platform/hermes/$f" ] && ok "agent_platform/$f" || no "agent_platform/$f 缺失"
 done
 

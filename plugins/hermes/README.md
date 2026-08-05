@@ -39,6 +39,8 @@ The plugin registers Miloco hooks and tools into Hermes, exposes an inbound webh
 | `miloco-miot-admin`             | System administration and cost stats                             |
 | `miloco-miot-scope`             | Permission scope management                                      |
 | `miloco-miot-identity-register` | Register new identity                                            |
+| `miloco-miot-pet-register`      | Register a pet: roster + appearance + reference crops (experimental) |
+| `miloco-onboarding`             | First-run onboarding interview: family members + profile         |
 | `miloco-create-task`            | Task lifecycle: create / list / logs / enable / disable / update |
 | `miloco-terminate-task`         | Task termination: audit log + cascade cleanup + cron pending     |
 | `miloco-notify`                 | Perception anomaly response: grading + push notification         |

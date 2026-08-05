@@ -11,6 +11,7 @@ import { apiFetch } from "./client";
 import type {
   ActivityEvent,
   Device,
+  EventCropMeta,
   HomeEntries,
   HomeEntryType,
   HomeId,
@@ -30,8 +31,11 @@ import type {
   PerfStagePercentiles,
   PerfSummary,
   PerfTraceRow,
+  Features,
   PerfWindow,
   Person,
+  Pet,
+  PetObserveResult,
   Scene,
   ScopeCamera,
   ScopeHome,
@@ -44,6 +48,8 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  UpgradeCheck,
+  UpgradeStatus,
 } from "@/lib/types";
 export type { ScopeHome };
 
@@ -60,7 +66,10 @@ export async function bindMiot(): Promise<{ oauthUrl: string }> {
   return impl.realBindMiot();
 }
 
-export async function authorizeMiot(code: string, state: string): Promise<void> {
+export async function authorizeMiot(
+  code: string,
+  state: string,
+): Promise<void> {
   return impl.realAuthorizeMiot(code, state);
 }
 
@@ -124,6 +133,63 @@ export async function deletePersonAvatar(personId: string): Promise<void> {
   return impl.realDeletePersonAvatar(personId);
 }
 
+// ── 宠物（非人家庭成员）────────────────────────────────────
+export async function listPets(homeId?: HomeId): Promise<Pet[]> {
+  if (!isPrimary(homeId)) return [];
+  return impl.realListPets();
+}
+
+export async function createPet(payload: {
+  name: string;
+  species?: string;
+}): Promise<Pet> {
+  return impl.realCreatePet(payload);
+}
+
+export async function updatePet(
+  id: string,
+  payload: { name?: string; species?: string },
+): Promise<Pet> {
+  return impl.realUpdatePet(id, payload);
+}
+
+export async function deletePet(id: string): Promise<void> {
+  return impl.realDeletePet(id);
+}
+
+export async function observePet(
+  files: File[],
+  grounding?: boolean,
+  signal?: AbortSignal,
+): Promise<PetObserveResult> {
+  return impl.realObservePet(files, grounding, signal);
+}
+
+export async function uploadPetAvatar(
+  petId: string,
+  image: Blob,
+  filename: string,
+): Promise<Pet> {
+  return impl.realUploadPetAvatar(petId, image, filename);
+}
+
+export async function uploadPetReferenceCrops(
+  petId: string,
+  crops: { blob: Blob; score?: number }[],
+  mode: "replace" | "append" = "replace",
+): Promise<Pet> {
+  return impl.realUploadPetReferenceCrops(petId, crops, mode);
+}
+
+// ── 实验性功能开关 ─────────────────────────────────────────
+export async function getFeatures(): Promise<Features> {
+  return impl.realGetFeatures();
+}
+
+export async function setFeatures(patch: Partial<Features>): Promise<Features> {
+  return impl.realSetFeatures(patch);
+}
+
 // ── 家庭档案（home_profile）────────────────────────────────
 // UI 只调这组语义函数；snake_case 的 op 构造全收在 real.ts，组件不碰。
 function today(): string {
@@ -146,8 +212,10 @@ export async function addHomeEntry(input: {
   content: string;
   subjectId?: string | null;
   subjectName?: string | null;
-}): Promise<void> {
-  return impl.realProfileWrite([
+}): Promise<string> {
+  // 返回新条目 id：多步写入（如宠物注册）中途失败时，调用方靠它把重试改走 update，
+  // 既不重复插条目、也不丢住户重试前改过的内容（见 PetDrawer.writeAppearance）。
+  const [res] = await impl.realProfileWrite([
     {
       op: "add",
       entry: {
@@ -160,6 +228,7 @@ export async function addHomeEntry(input: {
       },
     },
   ]);
+  return res?.id ?? "";
 }
 
 // 住户直编正式记忆（仅覆盖显式提供的字段）。
@@ -173,7 +242,7 @@ export async function updateHomeEntry(
     subjectName?: string | null;
   },
 ): Promise<void> {
-  return impl.realProfileWrite([
+  await impl.realProfileWrite([
     {
       op: "update",
       id,
@@ -190,12 +259,12 @@ export async function updateHomeEntry(
 }
 
 export async function deleteHomeEntry(id: string): Promise<void> {
-  return impl.realProfileWrite([{ op: "delete", id }]);
+  await impl.realProfileWrite([{ op: "delete", id }]);
 }
 
 // 确认候选 → 提升为正式（backend 自动从候选区移除该条）。
 export async function confirmCandidate(candidateId: string): Promise<void> {
-  return impl.realProfileWrite([{ op: "add", from: candidateId }]);
+  await impl.realProfileWrite([{ op: "add", from: candidateId }]);
 }
 
 // 忽略候选 → 直接从候选区删除。
@@ -234,6 +303,14 @@ export async function updateTaskDescription(
   return impl.realUpdateTaskDescription(taskId, description);
 }
 
+// 改驱动规则的触发条件文本（任务详情里就地编辑）。
+export async function updateRuleQuery(
+  ruleId: string,
+  query: string,
+): Promise<void> {
+  return impl.realUpdateRuleQuery(ruleId, query);
+}
+
 // ── 设备 ──────────────────────────────────────────────────
 export async function listDevices(homeId?: HomeId): Promise<Device[]> {
   if (!isPrimary(homeId)) return [];
@@ -270,6 +347,25 @@ export async function listActivity(
 /** 事件 clip mp4 URL,含 ?token=... query 鉴权(<video> 无法设 Authorization). */
 export function eventClipUrl(event_id: string, device_id: string): string {
   return impl.realEventClipUrl(event_id, device_id);
+}
+
+/** 事件全景参考帧 ref.jpg URL(仅 Smart Crop 事件有,先看 event.has_ref). */
+export function eventRefUrl(event_id: string, device_id: string): string {
+  return impl.realEventRefUrl(event_id, device_id);
+}
+
+/**
+ * Smart Crop 裁切区域坐标(画框用).
+ *
+ * `null` = 后端明确说这台 device 这次没裁切(410);reject = 没问出来(网络 / 5xx,
+ * 含"裁过但 trace 读坏"这一档).二者调用方要区别对待:前者不该渲染参考卡,
+ * 后者只是画不了框.
+ */
+export async function eventCropMeta(
+  event_id: string,
+  device_id: string,
+): Promise<EventCropMeta | null> {
+  return impl.realEventCropMeta(event_id, device_id);
 }
 
 /** 订阅 /api/events/stream SSE;返回 unsubscribe. onOpen 重连成功时触发(可选). */
@@ -312,7 +408,9 @@ export async function switchScopeHome(homeId: string): Promise<void> {
   return impl.realSwitchScopeHome(homeId);
 }
 
-export async function listScopeCameras(homeId?: HomeId): Promise<ScopeCamera[]> {
+export async function listScopeCameras(
+  homeId?: HomeId,
+): Promise<ScopeCamera[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListScopeCameras();
 }
@@ -370,8 +468,18 @@ export async function submitEventFeedback(
   errorTypes: string[],
   feedbackText: string,
   includeGallery: boolean,
-): Promise<{ uploaded: boolean; upload_key?: string; pack_path: string; pack_size_bytes: number }> {
-  return impl.realSubmitEventFeedback(eventId, errorTypes, feedbackText, includeGallery);
+): Promise<{
+  uploaded: boolean;
+  upload_key?: string;
+  pack_path: string;
+  pack_size_bytes: number;
+}> {
+  return impl.realSubmitEventFeedback(
+    eventId,
+    errorTypes,
+    feedbackText,
+    includeGallery,
+  );
 }
 
 export async function revealDir(path: string): Promise<void> {
@@ -472,6 +580,23 @@ export function subscribeOmniHealth(
 // (backend 重启会断 SSE,重连意味着 config 可能已变)。
 export const OMNI_CONFIG_STALE_EVENT = "miloco:omni-config-stale";
 
+// ── 升级检测 / 一键升级 ────────────────────────────────
+export async function upgradeCheck(force = false): Promise<UpgradeCheck> {
+  return impl.realUpgradeCheck(force);
+}
+
+export async function triggerUpgrade(): Promise<void> {
+  return impl.realTriggerUpgrade();
+}
+
+export async function upgradeStatus(): Promise<UpgradeStatus> {
+  return impl.realUpgradeStatus();
+}
+
+export async function dismissUpgrade(version: string): Promise<void> {
+  return impl.realDismissUpgrade(version);
+}
+
 // ── 性能 tab（observability）────────────────────────────
 // backend observability/router.py 不走 Normal 包装,直接返回原始 JSON。
 
@@ -488,9 +613,7 @@ function windowToSince(w: PerfWindow): number {
 
 export async function getPerfSummary(w: PerfWindow): Promise<PerfSummary> {
   const since = windowToSince(w);
-  return apiFetch<PerfSummary>(
-    `/api/stats?metric=summary&since=${since}`,
-  );
+  return apiFetch<PerfSummary>(`/api/stats?metric=summary&since=${since}`);
 }
 
 export async function getPerfRtfSeries(
@@ -566,9 +689,7 @@ export async function listPerfTraces(
   limit: number = 100,
 ): Promise<PerfTraceRow[]> {
   const since = windowToSince(w);
-  return apiFetch<PerfTraceRow[]>(
-    `/api/traces?since=${since}&limit=${limit}`,
-  );
+  return apiFetch<PerfTraceRow[]>(`/api/traces?since=${since}&limit=${limit}`);
 }
 
 export async function listPerfAgentRuns(
@@ -618,10 +739,22 @@ export async function getMemorySeries(
 
 // ─── Perception Config ─────────────────────────────────────────────────
 
+export type MinSuggestionUrgency = "low" | "medium" | "high";
+
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   window_size: number;
+  /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
+   *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */
+  smart_crop_enabled?: boolean;
+  /** 发版级开关(backend crop_enhance.enabled)的只读投影,**PUT 不可写**。
+   *  false = 当前这一版没打开该能力,用户开关即便为 true 也不裁 → 前端置灰 + 提示,
+   *  避免"开关开着但后端不裁"的静默失效。老后端不返此字段 → undefined,同样置灰。 */
+  smart_crop_available?: boolean;
+  // 老 backend(<0.10.x)不返此字段,前端在读取处 ?? DEFAULTS.min_suggestion_urgency 回退。
+  // 声明成可选是为了把这层运行时兼容语义显式化,别让未来维护者把 ?? 当成死代码删。
+  min_suggestion_urgency?: MinSuggestionUrgency;
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {
@@ -637,8 +770,10 @@ export type UpdatePerceptionConfigResult = PerceptionConfig & {
   restart_ok?: boolean;
 };
 
+// smart_crop_available 从入参里 Omit 掉:它是发版级开关的只读投影,后端 PUT 也不收,
+// 在类型上挡住比让它静默被忽略更好。
 export async function updatePerceptionConfig(
-  input: Partial<PerceptionConfig>,
+  input: Partial<Omit<PerceptionConfig, "smart_crop_available">>,
 ): Promise<UpdatePerceptionConfigResult> {
   const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
     "/api/admin/perception-config",

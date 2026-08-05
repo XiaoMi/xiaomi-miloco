@@ -212,6 +212,26 @@ describe("before_prompt_build 组装", () => {
     expect(r.prependSystemContext).not.toContain("语音指令");
   });
 
+  // 插件是能力层不是人格层：本块逐轮进宿主 agent 上下文，写死"你是……Miloco"会顶掉
+  // 用户给自己 agent 设的名字与人设。所有 profile 都要守住这条。
+  it("身份块只赋能力、不覆盖宿主人格（所有 profile）", async () => {
+    const { api, run } = makeApi();
+    registerBeforePromptBuildHook(api, {} as any);
+    for (const key of [
+      "agent:main:miloco",
+      "agent:main:miloco-rule",
+      "agent:main:miloco-suggest",
+      "agent:main:cron:[t1]:run:abc",
+    ]) {
+      const r = await run(key);
+      expect(r.prependSystemContext).not.toContain("你是经验丰富的家庭智能管家 Miloco");
+      expect(r.prependSystemContext).toContain("不是你的身份");
+      expect(r.prependSystemContext).toContain("按你自己的设定回答");
+      // 能力叙述本身保留，装了插件仍知道自己能干什么
+      expect(r.prependSystemContext).toContain("家庭管家的能力");
+    }
+  });
+
   it("minimal(cron)：仅身份+通知+语言，无感知/能力/记忆，append 为空", async () => {
     const { api, run } = makeApi();
     registerBeforePromptBuildHook(api, {} as any);

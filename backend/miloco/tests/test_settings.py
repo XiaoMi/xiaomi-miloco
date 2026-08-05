@@ -120,6 +120,24 @@ def test_tier_u_dump_enable_env_override(monkeypatch) -> None:
     assert get_settings().perception.tier_u_dump_enable is True
 
 
+def test_features_default_off() -> None:
+    """pet_recognition 默认关（住户需在 web 显式开）；grounding 子开关默认开。"""
+    s = get_settings()
+    assert s.features.pet_recognition is False
+    assert s.features.pet_head_grounding is True
+    assert s.features.pet_body_grounding is True
+
+
+def test_features_env_override(monkeypatch) -> None:
+    """支持 MILOCO_FEATURES__* 环境变量开启实验功能。"""
+    monkeypatch.setenv("MILOCO_FEATURES__PET_RECOGNITION", "true")
+    monkeypatch.setenv("MILOCO_FEATURES__PET_HEAD_GROUNDING", "true")
+    reset_settings()
+    s = get_settings()
+    assert s.features.pet_recognition is True
+    assert s.features.pet_head_grounding is True
+
+
 def test_notify_dedup_window_default() -> None:
     """通知去重窗口默认 60s。"""
     assert get_settings().notify.dedup_window_sec == 60.0

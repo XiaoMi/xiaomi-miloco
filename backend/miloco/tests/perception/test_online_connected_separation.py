@@ -236,6 +236,27 @@ class TestDiscoverDevicesOnlineConnected:
         assert "cam1" not in result
 
     @pytest.mark.asyncio
+    async def test_connected_camera_reachable_despite_lan_offline(self, adapter):
+        """直连掐死同网段 OTU 保活令 lan_online=False，但 camera_status=CONNECTED
+        的相机必须仍被判可达——这正是 #420 被 #430 revert 的根因场景：全部现有
+        lan_online=False 用例都用默认 DISCONNECTED 状态断言「被过滤」，没有一个
+        覆盖「已连上但 lan_online 掉 False」这一组合，回归网无法拦住这条兜底被
+        误删。require_lan 走默认 True，与 toggle_camera/list_cameras_with_state
+        的门槛口径一致。"""
+        cam = _make_camera_info(
+            did="cam1",
+            online=True,
+            camera_status=MIoTCameraStatus.CONNECTED,
+            lan_online=False,
+        ).model_copy(update={"home_id": "H1"})
+        adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
+
+        result = await adapter.discover_devices(online_only=True)
+
+        assert "cam1" in result
+        assert result["cam1"].online is True
+
+    @pytest.mark.asyncio
     async def test_filter_cameras_from_all(self, adapter):
         """_filter_cameras_from_all requires online AND lan_online."""
         cam = _make_camera_info(

@@ -7,7 +7,7 @@
  *
  * 兼容格式:
  * - 当前格式(分类 header): `[感知引擎]规则提醒：` 块含 `任务：<任务描述>` +
- *   `规则：[规则短名] query` —— 后端已构造成住户可读形态（无 [task_id]），无需 strip。
+ *   `规则：[规则短名] query` + `触发状态：<已触发 / 未触发…>` —— 后端已构造成住户可读形态（无 [task_id]），无需 strip。
  *   下面几条 strip 只清理**同 header 的旧行**里残留的 [task_id] 前缀（历史数据兼容）。
  * - 旧格式 v3(分类 header): 规则行含 `触发规则：[task_id] 规则名。` → strip [task_id]
  * - 旧数据(query 空时): `触发条件：[task_id] 规则名` → strip [task_id]（ascii 前缀，放过中文方括号 query）
@@ -25,6 +25,71 @@ const PERCEPTION_HEADERS = [
   "[感知引擎]事件提醒：",
   "[感知引擎]语音提醒：",
 ];
+
+/** 「触发状态」的五种取值（后端封闭集）。折叠态渲染成 badge，展开态仍读原文本行。 */
+export type TriggerStatusKind =
+  | "fired" // 已触发
+  | "stillIn" // 未触发（持续中）
+  | "counting" // 未触发（计时中）
+  | "notFired" // 未触发
+  | "unknown"; // 未知
+
+/**
+ * 后端中文文案 → 枚举 kind。**必须整值精确匹配**：「未触发」是「未触发（持续中）」
+ * 「未触发（计时中）」的真前缀，用 startsWith 会把后两者误判成 notFired。
+ * 认不出的值（后端将来加了新状态而前端未跟上）→ 不出 badge、原文本行保留，不猜。
+ */
+const STATUS_TEXT_TO_KIND: Record<string, TriggerStatusKind> = {
+  已触发: "fired",
+  "未触发（持续中）": "stillIn",
+  "未触发（计时中）": "counting",
+  未触发: "notFired",
+  未知: "unknown",
+};
+
+/** 规则块特有的字段行——用于区分「真规则块」与「老数据里带伪造状态行的其它块」。 */
+const RULE_BLOCK_FIELD = /^(?:任务|规则|触发原因)：/;
+
+/** 折叠态用的一段：正文 + 该段的触发状态（若有）。 */
+export interface HumanizedSection {
+  /** 段正文；识别出状态时已把「触发状态：…」整行摘掉（那行改由 badge 承载）。 */
+  text: string;
+  /** 识别出的触发状态；无该行 / 值认不出时为 undefined（不渲染 badge）。 */
+  status?: TriggerStatusKind;
+}
+
+/**
+ * 把 humanize 后的文本切成折叠态要渲染的段，并抽出每段的「触发状态」。
+ *
+ * 为什么要抽出来：折叠态每段被裁到 2 视觉行且**没有** `pre-wrap`（块内换行塌成空格），
+ * 而「触发状态」排在「任务 / 规则」之后——那两行长度无上界，状态常被裁掉，功能等于不可见。
+ * 抽成定长 badge 排在最前即可稳定可见。展开态不走本函数、仍显示完整原文。
+ *
+ * 状态是 **per 规则块**而非 per 事件：一条 event 可含多个规则块（后端 `═══` 分隔），
+ * 各自状态可以不同，故按段返回。
+ */
+export function splitHumanizedSections(humanized: string): HumanizedSection[] {
+  if (!humanized) return [];
+  return humanized
+    .split(/\n\n/)
+    .filter((s) => s.trim())
+    .map((section) => {
+      const lines = section.split("\n");
+      const idx = lines.findIndex((l) => l.startsWith("触发状态："));
+      if (idx === -1) return { text: section };
+      // 老数据兜底：折叠防线是后来才补的，DB 里旧行的「建议 / 语音指令」等模型直出字段
+      // 可能带未折叠的 `\n触发状态：已触发`（只需一个 \n，不需要 \n\n）。若不加限定，
+      // 那行伪造内容会从不起眼的正文**升级成 UI 里最显眼、住户最信任的 badge**。
+      // 故要求本段同时带规则块的其它字段行才认。前端做不出硬边界（伪造者可以把辅助特征
+      // 一起伪造），但对「fix 之前写入的老数据」有效——那时的伪造并未针对本判据。
+      if (!lines.some((l, i) => i !== idx && RULE_BLOCK_FIELD.test(l))) {
+        return { text: section };
+      }
+      const kind = STATUS_TEXT_TO_KIND[lines[idx].slice("触发状态：".length).trim()];
+      if (!kind) return { text: section }; // 认不出：保留原行，不出 badge
+      return { text: lines.filter((_, i) => i !== idx).join("\n"), status: kind };
+    });
+}
 
 export function humanizeRulesInText(
   text: string,
