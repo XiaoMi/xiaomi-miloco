@@ -319,8 +319,13 @@ def build_fused_payload(
                 "event=candidate_bbox_veto reason=multi_packet n_packets=%d", len(packets)
             )
             return False
-        # bbox 为 None 的候选不参与判定:它在全景路径下本就没有锚点(coasting 已被上游剔除,
-        # 剩下的是归一化失败等边缘情形),裁切不会让它更差。
+        # bbox 为 None 的候选不参与判定:它在全景路径下本就没有锚点(归一化失败等边缘情形),
+        # 裁切不会让它更差。
+        # 别把这条读成「coasting 已被上游剔除」:上游那道闸(identity/engine.py 的
+        # detected_this_frame)在出厂 deep_sort 配置下恒 True、实际不生效(issue #494),于是
+        # coasting track 带着纯 Kalman 幻影框走到下面的 remap 判定 —— 要么幻影框被 clamp 成
+        # 贴边框、当成该 track 的锚喂给模型,要么换不出来让整窗回退全景。本文件其余处凡假定
+        # 「coasting 不进候选 / 无 bbox」的注释同样以 #494 为准,修在那边、不在本函数。
         # 逐个判而不是 all(...):否决时要能看出是哪个 track、框跑到哪去了 —— 这是灰度期
         # 判断"要不要放宽区域"的唯一数据(只打第一个失败的,足够定位)。
         for c in candidates:
