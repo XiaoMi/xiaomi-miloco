@@ -175,9 +175,12 @@ async def get_event_crop_meta(
     返回:
     - 200:{region_xyxy, frame_size_wh, crop_short_edge}
     - 404:event 不存在 / device_id 不在 device_ids 内
-    - 410:非 crop 事件 / trace 已被 cleanup 清 / trace 损坏 / crop 字段形状或坐标值不合法
-      (长度、类型不对,或 x2<=x1 / y2<=y1 / 帧尺寸非正 / 框越出帧外)——
-      前端把这台 device 视作「本次没裁切」,不渲染参考卡
+    - 410:这台 device 确定没裁切(盘上无 ref.jpg:非 crop 事件 / 落到全景兜底 /
+      整个事件目录已被 cleanup 清)—— 前端据此不渲染参考卡
+    - 500:裁过(ref.jpg 在盘上)但坐标读不出来(trace 缺失 / 损坏 / crop 字段形状或坐标值
+      不合法:长度、类型不对,或 x2<=x1 / y2<=y1 / 帧尺寸非正 / 框越出帧外)——
+      前端保留参考卡、只是不画框.这一档**不能并进 410**:410 会让整张卡消失,
+      而 ref.jpg 明明在,丢的信息远多于少画一个框.
     """
     status, crop = await svc.read_crop_meta(event_id, device_id)
     if status == "found":
@@ -185,6 +188,9 @@ async def get_event_crop_meta(
         return NormalResponse(code=0, message="ok", data=crop)
     if status == "gone":
         raise HTTPException(message="crop meta not available", status_code=410)
+    if status == "unreadable":
+        # 不是 503:trace 已经落盘、内容坏了,重试不会变好,不该让前端/网关按瞬时故障退避重试.
+        raise HTTPException(message="crop meta unreadable", status_code=500)
     raise HTTPException(message="not found", status_code=404)
 
 

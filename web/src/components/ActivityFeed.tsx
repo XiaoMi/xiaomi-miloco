@@ -1202,18 +1202,17 @@ function ClipPlayer({
  *  所以 letterbox 缩放交给浏览器做,前端一行坐标换算都不需要,窗口 resize 也自动跟随.
  *
  *  三种"拿不到"要分开处理,否则会给用户看假象:
- *  - crop 坐标 = null(后端 410:这台 device 本次没裁切 / trace 已清 / trace 损坏)→
- *    **整张卡不渲染**.因为列表里的 `has_ref` 是**事件级 any-device**(后端 probe 只要
- *    任一 device 目录有 ref.jpg 就置 true),而本卡是**按 device 渲染**的:多摄像头事件
- *    里完全可能 A 机裁了、B 机回退全景,此时 B 机的卡若照渲就会显示一个假的"参考帧已过期".
- *    这里用 crop 坐标的有无重新按 device 门控一次.
+ *  - crop 坐标 = null(后端 410:这台 device 本次没裁切 —— 非 crop 事件 / 落到全景兜底 /
+ *    事件目录已被 cleanup 清)→ **整张卡不渲染**.因为列表里的 `has_ref` 是**事件级
+ *    any-device**(后端 probe 只要任一 device 目录有 ref.jpg 就置 true),而本卡是**按
+ *    device 渲染**的:多摄像头事件里完全可能 A 机裁了、B 机回退全景,此时 B 机的卡若照渲
+ *    就会显示一个假的"参考帧已过期".这里用 crop 坐标的有无重新按 device 门控一次.
  *    (不改成 per-device has_ref 是因为要连带动 SSE 写侧 / list API / 类型 / 测试.)
- *    已知取舍:后端 410 有四种成因,「没裁过」与「trace 被 cleanup 清」时 ref.jpg 本来就
- *    不在盘上(cleanup 是整个 event 目录 rmtree,trace 与 ref.jpg 同生同灭),隐藏无损;
- *    但「trace 损坏 / crop 字段不合法」时 ref.jpg 其实还在,这里也一并隐藏了 ——
- *    宁可少显一张图,也不给一个假的「参考帧已过期」.要区分得让后端把成因带回来(未做).
- *  - crop 请求失败(网络抖动 / 5xx)→ 保留卡,只是不画框.区别于上面:那是"确定没有",
- *    这是"暂时没问出来",不该把用户本来能看的参考帧藏掉.
+ *    这一档现在都以「盘上没有这台 device 的 ref.jpg」为前提 —— 后端返 410 前会 stat 一次
+ *    (events_service._no_box_status),所以隐藏整卡不会误伤;裁过但坐标读不出来的走下一档.
+ *  - crop 请求失败(网络抖动 / 5xx,含后端"裁过但 trace 读坏"的 500)→ 保留卡,
+ *    只是不画框.区别于上面:那是"确定没有",这是"没问出来" —— ref.jpg 还在盘上,
+ *    不该把用户本来能看的参考帧藏掉.
  *  - ref.jpg 本身 404/410(cleanup 清掉)→ 显"已过期"占位,与 ClipPlayer.failed 对称. */
 function RefFrameCard({
   event_id,

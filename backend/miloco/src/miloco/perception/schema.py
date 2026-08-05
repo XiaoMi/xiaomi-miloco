@@ -576,7 +576,7 @@ class EventCropMeta(BaseModel):
 
     # 长度与坐标值都定死:trace 是历史产物(schema 演进 / 写入被截断 / 手工改过),半截数组
     # 或值退化的坐标(x2<=x1、越出帧外)透到前端只会画出一个错位框。这里一并拒掉,读侧
-    # (read_crop_meta)把校验失败折成 410「拿不到」,消费方拿到 200 即可直接用。
+    # (read_crop_meta)把校验失败折成 410/500 两档「拿不到」,消费方拿到 200 即可直接用。
     # 值域约束写进各字段 description:model_validator 不进 JSON Schema,只写在校验器里的话
     # 从 OpenAPI 生成类型的消费方看不到,仍会各自再 guard 一遍 —— 正是这里想省掉的重复。
     region_xyxy: list[int] = Field(
@@ -605,10 +605,10 @@ class EventCropMeta(BaseModel):
         前端 cropBoxGeometry 对前两类已返回 null(不画框),越界则画出一个贴边少两条边的
         框(浏览器按 viewBox 裁掉超出部分),所以这不是线上 bug;补在这里是为了让「拒掉坏
         数据」这条防线对未来的消费方(比如直接读 trace 画框的复盘工具)也成立,不必各自
-        重做 guard。读侧 read_crop_meta 已把 ValidationError 折成 410,不引入新的错误路径。
+        重做 guard。读侧 read_crop_meta 已把 ValidationError 折成状态码,不引入新的错误路径。
 
         三条约束在写侧都恒成立(crop_enhance._clamp 把 region 钳在帧内、区域宽高恒 >0,
-        frame_size 与 region 取自同一帧),故不会把本来能返 200 的事件变成 410。
+        frame_size 与 region 取自同一帧),故不会把本来能返 200 的事件变成错误码。
         """
         x1, y1, x2, y2 = self.region_xyxy
         w, h = self.frame_size_wh

@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 SnapshotStatus = Literal["found", "gone", "not_found"]
 
+# read_crop_meta 专用:比 SnapshotStatus 多一个 "unreadable" —— crop 坐标必须把
+# 「确定没裁切」和「裁了但坐标读不出来」分开,前端对二者的处置相反(隐藏整卡 / 保留卡不画框).
+# 见 EventsService._no_box_status.
+CropMetaStatus = Literal["found", "gone", "unreadable", "not_found"]
+
 # Smart Crop 模式下与 crop 视频同附上送 LLM 的全景参考帧(整帧 JPEG,字节级 = omni 所见).
 # 非 crop 事件无此文件 —— 前端据 list 的 has_ref 决定是否请求.
 _REF_FILENAME = "ref.jpg"
@@ -175,7 +180,7 @@ class EventsService:
 
     async def read_crop_meta(
         self, event_id: str, device_id: str
-    ) -> tuple[SnapshotStatus, EventCropMeta | None]:
+    ) -> tuple[CropMetaStatus, EventCropMeta | None]:
         """从事件级 omni_trace 里取该 device 的 Smart Crop 元数据(region / 帧尺寸 / 短边).
 
         不另落盘 —— crop 坐标已随 omni_trace.json.gz 持久化(snapshot_context.push_crop_meta
@@ -185,15 +190,18 @@ class EventsService:
         取 **最后一条**匹配 call:同 device 同事件正常只一次 omni 调用,但 stream/重试路径
         可能追加多条,以最后一次实际上送的为准.
 
-        与 locate_ref 同款状态语义:
+        状态语义(比 locate_ref 多一档 "unreadable",分档判据见 _no_box_status):
         - ("found", EventCropMeta):trace 里有该 device 的 crop 记录且字段合法
-        - ("gone", None):event/device 合法但没有(非 crop 事件 / trace 已被 cleanup 清 /
-          trace 损坏 / crop 字段形状或坐标值不合法)
+        - ("gone", None):这台 device 确定没裁切(该 device 目录下无 ref.jpg)→ 路由层 410
+        - ("unreadable", None):裁过(ref.jpg 在盘上),但坐标读不出来(trace 被清 / 损坏 /
+          crop 字段形状或坐标值不合法)→ 路由层 500
         - ("not_found", None):event 不存在 / device_id 不在 device_ids 内
 
-        解析与校验失败一律按 "gone" 处理而非 500:画框是装饰,坏一个 trace 不该让参考卡整张挂掉.
-        校验放在这里而不是 router 里 EventCropMeta(**crop) —— 那样半截 dict(schema 演进 /
-        写入被截断)会抛 ValidationError 变成 500,与「拿不到就 410」的契约自相矛盾.
+        解析与校验失败折成状态码而非让异常冒成 500,是为了让「读不出来」也带确定语义:
+        校验若留在 router 里做 EventCropMeta(**crop),半截 dict(schema 演进 / 写入被截断)
+        抛的 ValidationError 会和真正的服务端 bug 混在同一个 500 里,分不出是数据坏还是代码坏.
+        但**不能因此把它折成 410** —— 410 是前端隐藏整张参考帧卡的信号,盘上明明有 ref.jpg
+        却因为 trace 读坏而整卡消失,丢的信息远多于少画一个框.
         """
         row = self._dao.get_by_id(event_id)
         if row is None:
@@ -202,10 +210,11 @@ class EventsService:
             return ("not_found", None)
         path = get_snapshot_root() / event_id / _TRACE_FILENAME
         if not path.exists():
-            return ("gone", None)
+            return (self._no_box_status(event_id, device_id), None)
         # 遍历也包在 try 里:trace 损坏不止"crop 数组半截"一种形态,calls 本身可能不是 list
         # (`reversed(123)` → TypeError)、元素可能不是 dict(`call.get` → AttributeError).
-        # 这些若漏在 try 外就会冒成 500,把上面 docstring 承诺的「一律折成 410」打穿.
+        # 这些若漏在 try 外就会裸冒成 500 —— 状态码看着和 "unreadable" 那档一样,但少了
+        # _no_box_status 的分档:该返 410 的(压根没裁切)也会变 500,前端反而多留一张空卡.
         try:
             with gzip.open(path, "rt", encoding="utf-8") as f:
                 trace = json.load(f)
@@ -233,13 +242,35 @@ class EventsService:
                         _safe_log(device_id),
                         e,
                     )
-                    return ("gone", None)
+                    return (self._no_box_status(event_id, device_id), None)
         except Exception as e:  # noqa: BLE001
             # path 里拼着 event_id,与上面那条同源 —— CodeQL 的 taint 没追进 Path 拼接
             # 只报了上面两处,但只清洗被点名的那处、留下这处,防线就是漏的。
             logger.warning("read_crop_meta failed to parse trace %s: %s", _safe_log(path), e)
-            return ("gone", None)
-        return ("gone", None)
+            return (self._no_box_status(event_id, device_id), None)
+        return (self._no_box_status(event_id, device_id), None)
+
+    @staticmethod
+    def _no_box_status(event_id: str, device_id: str) -> Literal["gone", "unreadable"]:
+        """拿不到 crop 坐标时,区分「这台 device 本次没裁切」与「裁了但坐标读不出来」.
+
+        判据是 ref.jpg 在不在,而不是 trace 在不在:两者由同一段代码一并产出 ——
+        prompt_builder._maybe_encode_adaptive 末尾紧挨着调 push_ref_frame(参考帧字节)
+        和 push_crop_meta(坐标,随后由 call_omni finally 里的 push_omni_trace 挂进 trace),
+        中间没有提前 return;且 ref.jpg 是**按 device** 落的 —— trace 是事件级、还兼着
+        crop 之外的用途,拿它判"这台 device 走没走过 Smart Crop"口径不对.
+
+        - ref.jpg 不存在 → "gone":确定没裁切(非 crop 事件 / 本 device 落到全景兜底 /
+          整个事件目录已被 cleanup 清).前端据此隐藏整张参考帧卡是对的.
+        - ref.jpg 存在   → "unreadable":裁过、参考帧还在盘上,只是框画不出来.此时必须让
+          前端保留卡片(只是不画框),所以不能复用 "gone".
+
+        cleanup_snapshots 是整个事件目录 rmtree,不会留下 ref.jpg 而单独清掉 trace;
+        所以"ref.jpg 在、trace 没了"实际只出现在盘被外部动过的场合,归到 "unreadable"
+        (数据不自洽)比归到 "gone"(确定没裁切)更贴事实.
+        """
+        ref = get_snapshot_root() / event_id / region_slug(device_id) / _REF_FILENAME
+        return "unreadable" if ref.exists() else "gone"
 
     @staticmethod
     def _probe_clip_kind(snapshot_root: Path, event_id: str, device_ids: list[str]) -> str | None:

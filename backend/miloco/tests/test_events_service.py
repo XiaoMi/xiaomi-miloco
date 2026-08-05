@@ -337,11 +337,34 @@ class TestLocateRef:
         assert events[0].has_ref is True
 
 
+def _corrupt_trace(eid: str) -> None:
+    """把该事件的 trace 写成非 gzip 垃圾(模拟写入被截断 / 盘上被动过)."""
+    from miloco.perception.snapshot_writer import get_snapshot_root
+
+    event_dir = get_snapshot_root() / eid
+    event_dir.mkdir(parents=True, exist_ok=True)
+    (event_dir / "omni_trace.json.gz").write_bytes(b"not-gzip-at-all")
+
+
+def _save_ref(eid: str, device_id: str) -> None:
+    """给该 device 落一张 ref.jpg —— read_crop_meta 判「这台裁过」的唯一依据."""
+    from miloco.perception.snapshot_context import OmniEventArtifacts
+    from miloco.perception.snapshot_writer import save_event_artifacts
+
+    save_event_artifacts(
+        eid, OmniEventArtifacts(ref_frames={device_id: b"\xff\xd8\xff\xe0" + b"\x00" * 100})
+    )
+
+
 @pytest.mark.asyncio
 class TestReadCropMeta:
-    """read_crop_meta 三态:从 omni_trace 里投影出 Smart Crop 的 crop 区域坐标.
+    """read_crop_meta 四态:从 omni_trace 里投影出 Smart Crop 的 crop 区域坐标.
 
     坐标不另落盘,已随 trace 持久化(push_crop_meta → calls[].crop),这里只做读侧投影.
+
+    本类的用例默认**不落 ref.jpg**,所以"拿不到坐标"一律落到 "gone"(=确定没裁切);
+    落了 ref.jpg 的对照组在 TestReadCropMetaUnreadable —— 同样的坏 trace 必须变
+    "unreadable",别让整张参考帧卡跟着消失.
     """
 
     @staticmethod
@@ -367,7 +390,7 @@ class TestReadCropMeta:
         assert crop is None
 
     async def test_no_trace_file_returns_gone(self, svc, dao):
-        """trace 未落盘 / 已被 cleanup 清 → gone(前端静默不画框)."""
+        """trace 未落盘 / 已被 cleanup 清,且无 ref.jpg → gone(前端静默不渲染参考卡)."""
         eid = _insert(dao, device_ids=["cam_a"])
         status, crop = await svc.read_crop_meta(eid, "cam_a")
         assert status == "gone"
@@ -472,10 +495,13 @@ class TestReadCropMeta:
         ],
     )
     async def test_malformed_crop_returns_gone_not_raise(self, svc, dao, bad_crop):
-        """crop 字段不合法(schema 演进 / 写入被截断)→ gone,不让 ValidationError 冒成 500.
+        """crop 字段不合法(schema 演进 / 写入被截断)→ 折成状态码,不让 ValidationError 裸冒.
 
-        校验刻意放在 service 而非 router:router 里现构 EventCropMeta 会把半截 dict
-        变成 500,与「拿不到就 410」的契约自相矛盾.
+        校验刻意放在 service 而非 router:router 里现构 EventCropMeta 抛的 ValidationError
+        会和真正的服务端 bug 混进同一个 500,分不出是数据坏还是代码坏.
+
+        这里无 ref.jpg 故落 "gone";有 ref.jpg 时同样的坏数据要落 "unreadable"
+        (见 TestReadCropMetaUnreadable.test_malformed_crop_with_ref_is_unreadable).
 
         既覆盖形状不合法(长度/类型),也覆盖长度对但值退化(x2<=x1 / 帧尺寸非正 / 短边 0 /
         框越出帧外)—— 后者靠 EventCropMeta._check_coords 与 crop_short_edge 的 ge=1 拦下.
@@ -500,10 +526,10 @@ class TestReadCropMeta:
         ],
     )
     async def test_malformed_calls_container_returns_gone(self, svc, dao, calls):
-        """calls 本身或其元素形状不对也要折成 gone —— 不只有 crop 数组半截一种损坏形态.
+        """calls 本身或其元素形状不对也要折成状态码 —— 不只有 crop 数组半截一种损坏形态.
 
         `reversed(123)` 抛 TypeError、`call.get` 在非 dict 上抛 AttributeError,
-        这些若漏在 try 外就会变成 500,与「拿不到就 410」的契约冲突.
+        这些若漏在 try 外就会裸冒成 500、和代码 bug 混在一起.
         """
         eid = _insert(dao, device_ids=["cam_a"])
         self._save_trace(eid, calls)
@@ -557,16 +583,90 @@ class TestReadCropMeta:
         assert crop.region_xyxy == [10, 20, 110, 140]
 
     async def test_corrupt_trace_returns_gone_not_raise(self, svc, dao):
-        """trace 不是合法 gzip/JSON → gone,不抛 500(画框是装饰,不该拖垮参考卡)."""
-        from miloco.perception.snapshot_writer import get_snapshot_root
-
+        """trace 不是合法 gzip/JSON、且无 ref.jpg → gone,不让 gzip/JSON 的异常裸冒."""
         eid = _insert(dao, device_ids=["cam_a"])
-        event_dir = get_snapshot_root() / eid
-        event_dir.mkdir(parents=True, exist_ok=True)
-        (event_dir / "omni_trace.json.gz").write_bytes(b"not-gzip-at-all")
+        _corrupt_trace(eid)
         status, crop = await svc.read_crop_meta(eid, "cam_a")
         assert status == "gone"
         assert crop is None
+
+
+@pytest.mark.asyncio
+class TestReadCropMetaUnreadable:
+    """ref.jpg 在盘上但坐标拿不到 → "unreadable"(路由层 500),不能并进 "gone".
+
+    为什么必须分开:"gone" 是前端隐藏整张参考帧卡的信号.ref.jpg 存在说明这台 device
+    确实走过 Smart Crop、参考帧就在盘上,此时若也返 "gone",一个读坏的 trace 会把整张
+    卡连全景帧一起吞掉 —— 丢的信息远多于少画一个框.
+
+    与 TestReadCropMeta 是同数据不同前置的对照组:每个用例的坏 trace 形态那边都有一条
+    等价的、只差 ref.jpg 的 "gone" 版本.
+    """
+
+    async def test_corrupt_trace_with_ref_is_unreadable(self, svc, dao):
+        eid = _insert(dao, device_ids=["cam_a"])
+        _save_ref(eid, "cam_a")
+        _corrupt_trace(eid)
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "unreadable"
+        assert crop is None
+
+    async def test_missing_trace_with_ref_is_unreadable(self, svc, dao):
+        """ref.jpg 在、trace 没了:cleanup 是整目录 rmtree 不会造出这种状态,
+        所以它意味着盘被外部动过 —— 归到数据不自洽,而不是"确定没裁切"."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        _save_ref(eid, "cam_a")
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "unreadable"
+        assert crop is None
+
+    async def test_malformed_crop_with_ref_is_unreadable(self, svc, dao):
+        eid = _insert(dao, device_ids=["cam_a"])
+        _save_ref(eid, "cam_a")
+        TestReadCropMeta._save_trace(
+            eid, [{"device_id": "cam_a", "crop": {"region_xyxy": [10, 10]}}]
+        )
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "unreadable"
+        assert crop is None
+
+    async def test_no_crop_record_with_ref_is_unreadable(self, svc, dao):
+        """trace 解得开、却没有这台 device 的 crop 记录,而 ref.jpg 在 —— 两份产物由
+        _maybe_encode_adaptive 末尾同一段代码一并产出,只剩一份即为不自洽,
+        不该当"没裁切"糊过去."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        _save_ref(eid, "cam_a")
+        TestReadCropMeta._save_trace(eid, [{"device_id": "cam_a", "model": "m"}])
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "unreadable"
+        assert crop is None
+
+    async def test_other_device_ref_does_not_leak(self, svc, dao):
+        """判据必须按 device 取:cam_b 裁了不代表 cam_a 裁了.
+
+        取值若误用事件级信号(比如 probe_has_ref / trace 在不在),cam_a 会跟着 cam_b
+        变成 "unreadable",前端就会给一台压根没裁切的 device 留一张空参考卡.
+        """
+        eid = _insert(dao, device_ids=["cam_a", "cam_b"])
+        _save_ref(eid, "cam_b")
+        _corrupt_trace(eid)
+        assert (await svc.read_crop_meta(eid, "cam_a"))[0] == "gone"
+        assert (await svc.read_crop_meta(eid, "cam_b"))[0] == "unreadable"
+
+    async def test_ref_present_and_crop_good_still_found(self, svc, dao):
+        """正常路径(两份产物都在)不受新分档影响 —— 仍是 found,不是 unreadable."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        _save_ref(eid, "cam_a")
+        meta = {
+            "region_xyxy": [430, 122, 590, 318],
+            "frame_size_wh": [640, 360],
+            "crop_short_edge": 360,
+        }
+        TestReadCropMeta._save_trace(eid, [{"device_id": "cam_a", "crop": meta}])
+        status, crop = await svc.read_crop_meta(eid, "cam_a")
+        assert status == "found"
+        assert crop is not None
+        assert crop.model_dump() == meta
 
 
 @pytest.mark.asyncio

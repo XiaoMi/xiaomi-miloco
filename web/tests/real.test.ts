@@ -267,6 +267,21 @@ describe("Smart Crop 参考帧契约 — realEventRefUrl / realEventCropMeta", (
     await expect(realEventCropMeta("e1", "cam_1")).rejects.toBeInstanceOf(ApiError);
   });
 
+  it("500 crop meta unreadable(裁过但 trace 读坏)→ reject,不折成 null", async () => {
+    // 后端刻意用 500 而非 410 表达这一档:ref.jpg 还在盘上,折成 null 会让
+    // RefFrameCard 把整张参考卡藏掉,丢的信息远多于少画一个框。
+    // 与上一条的区别只在 message —— 单独立一条是为了钉住这个后端契约:
+    // 哪天有人把它改回 410 图省事,这里会红。
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 1, message: "crop meta unreadable" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+
+    await expect(realEventCropMeta("e1", "cam_1")).rejects.toBeInstanceOf(ApiError);
+  });
+
   it("404(event/device 不存在)也 reject,不折成 null", async () => {
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify({ code: 1, message: "not found" }), {

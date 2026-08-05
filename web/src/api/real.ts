@@ -1437,10 +1437,14 @@ export function realEventRefUrl(
  * 拉 Smart Crop 裁切区域坐标,用于在参考帧上画框.
  *
  * 后端从 omni_trace 里投影出来.410 = 「这台 device 这次没裁切」(非 crop 事件 /
- * trace 已被 cleanup 清 / trace 损坏),这是**预期结果不是错误**,所以在这里就折成
+ * 落到全景兜底 / 事件目录已被 cleanup 清),这是**预期结果不是错误**,所以在这里就折成
  * `null`,调用方拿 null 即可判定「无 crop」而不必 import ApiError 去认状态码
  * (组件层一律只依赖 `@/api` 门面).其余错误(网络抖动 / 5xx)照旧 reject,
  * 让调用方区分「确定没有」和「暂时没拿到」——前者隐藏参考卡,后者只是不画框.
+ *
+ * trace 读坏(裁过但坐标解不出来)后端走的是 500 而**不是** 410,正是为了落进后一档:
+ * 参考帧还在盘上,不该因为少一个框就把整张卡藏掉.所以这里的 410 判定不能放宽成
+ * `e.status >= 400`.
  */
 export async function realEventCropMeta(
   event_id: string,

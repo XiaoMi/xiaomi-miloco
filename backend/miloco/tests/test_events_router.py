@@ -328,7 +328,12 @@ class TestGetRefEndpoint:
 
 
 class TestGetCropMetaEndpoint:
-    """GET /events/{id}/crop/{device_id} — crop 区域坐标(前端在参考帧上画框用)."""
+    """GET /events/{id}/crop/{device_id} — crop 区域坐标(前端在参考帧上画框用).
+
+    410 与 500 分档:410 = 这台 device 确定没裁切(盘上无 ref.jpg),前端隐藏整张参考卡;
+    500 = 裁过但坐标读不出来,前端保留卡片只是不画框.本类多数用例不落 ref.jpg 故走 410,
+    落了 ref.jpg 的在 test_unreadable_* 里.
+    """
 
     @staticmethod
     def _save_trace(eid: str, calls: list[dict]) -> None:
@@ -337,6 +342,15 @@ class TestGetCropMetaEndpoint:
 
         save_event_artifacts(
             eid, OmniEventArtifacts(trace={"schema_version": 1, "calls": calls})
+        )
+
+    @staticmethod
+    def _save_ref(eid: str, device_id: str) -> None:
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        save_event_artifacts(
+            eid, OmniEventArtifacts(ref_frames={device_id: b"\xff\xd8\xff\xe0" + b"\x00" * 100})
         )
 
     def test_event_not_found_404(self, client):
@@ -349,13 +363,13 @@ class TestGetCropMetaEndpoint:
         assert resp.status_code == 404
 
     def test_no_crop_meta_410(self, client, dao):
-        """非 crop 事件 / trace 已清 → 410;前端据此静默不画框,参考帧照常展示."""
+        """非 crop 事件(无 ref.jpg 也无 trace)→ 410;前端据此不渲染参考卡."""
         eid = _insert(dao, device_ids=["cam_living_01"])
         resp = client.get(f"/api/events/{eid}/crop/cam_living_01")
         assert resp.status_code == 410
 
     def test_calls_not_a_list_410_not_500(self, client, dao):
-        """trace 损坏不止一种形态:calls 不是 list 时也必须 410,不能让 TypeError 冒成 500."""
+        """trace 损坏不止一种形态:calls 不是 list、且没裁过时也必须 410 而非 TypeError 裸冒."""
         from miloco.perception.snapshot_context import OmniEventArtifacts
         from miloco.perception.snapshot_writer import save_event_artifacts
 
@@ -389,9 +403,9 @@ class TestGetCropMetaEndpoint:
         assert data["crop_short_edge"] == 360
 
     def test_malformed_crop_410_not_500(self, client, dao):
-        """trace 里的 crop 半截(schema 演进 / 写入被截断)→ 410,不是 500.
+        """trace 里的 crop 半截、且这台没裁过(无 ref.jpg)→ 410.
 
-        画框是装饰:坏一条历史 trace 只该让这台 device 不画框,不该让接口 5xx.
+        没裁过就没有参考卡可保,坏 trace 与"本来就没裁"在前端表现一致.
         """
         eid = _insert(dao, device_ids=["cam_living_01"])
         self._save_trace(
@@ -405,3 +419,54 @@ class TestGetCropMetaEndpoint:
         )
         resp = client.get(f"/api/events/{eid}/crop/cam_living_01")
         assert resp.status_code == 410
+
+    def test_unreadable_corrupt_trace_with_ref_500_not_410(self, client, dao):
+        """裁过(ref.jpg 在盘上)但 trace 读不开 → 500.
+
+        断言的是"不是 410":410 会让前端连全景参考帧一起隐藏,而那张图明明还在.
+        走 500 前端 fetch 抛错被吞,卡片保留、只是不画框.
+        """
+        from miloco.perception.snapshot_writer import get_snapshot_root
+
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        self._save_ref(eid, "cam_living_01")
+        (get_snapshot_root() / eid / "omni_trace.json.gz").write_bytes(b"not-gzip-at-all")
+        resp = client.get(f"/api/events/{eid}/crop/cam_living_01")
+        assert resp.status_code == 500
+
+    def test_unreadable_malformed_crop_with_ref_500(self, client, dao):
+        """同一份半截 crop:有 ref.jpg 时从 410 变 500(与上面 410 用例成对照)."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        self._save_ref(eid, "cam_living_01")
+        self._save_trace(
+            eid,
+            [
+                {
+                    "device_id": "cam_living_01",
+                    "crop": {"region_xyxy": [430, 122], "frame_size_wh": [640, 360]},
+                }
+            ],
+        )
+        resp = client.get(f"/api/events/{eid}/crop/cam_living_01")
+        assert resp.status_code == 500
+
+    def test_ref_present_with_good_crop_still_200(self, client, dao):
+        """正常 Smart Crop 事件(ref.jpg + 合法 crop)不受新分档影响,仍 200."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        self._save_ref(eid, "cam_living_01")
+        self._save_trace(
+            eid,
+            [
+                {
+                    "device_id": "cam_living_01",
+                    "crop": {
+                        "region_xyxy": [430, 122, 590, 318],
+                        "frame_size_wh": [640, 360],
+                        "crop_short_edge": 360,
+                    },
+                }
+            ],
+        )
+        resp = client.get(f"/api/events/{eid}/crop/cam_living_01")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["region_xyxy"] == [430, 122, 590, 318]

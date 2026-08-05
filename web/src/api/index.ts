@@ -352,8 +352,9 @@ export function eventRefUrl(event_id: string, device_id: string): string {
 /**
  * Smart Crop 裁切区域坐标(画框用).
  *
- * `null` = 后端明确说这台 device 这次没裁切(410);reject = 没问出来(网络 / 5xx).
- * 二者调用方要区别对待:前者不该渲染参考卡,后者只是画不了框.
+ * `null` = 后端明确说这台 device 这次没裁切(410);reject = 没问出来(网络 / 5xx,
+ * 含"裁过但 trace 读坏"这一档).二者调用方要区别对待:前者不该渲染参考卡,
+ * 后者只是画不了框.
  */
 export async function eventCropMeta(
   event_id: string,
