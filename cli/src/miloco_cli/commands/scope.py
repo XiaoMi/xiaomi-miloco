@@ -78,7 +78,9 @@ def scope_camera_list(pretty):
     lan_reachable(局域网可达)/awake(镜头开关:true=开/false=关/null=未知)，connected=视频流已连接。
     多通道相机(双摄)每路一行，did 显示为合成 did did:chN(单摄保持裸 did)——该 did 可直接复制给
     enable/disable 精确到某一路；mic-on/off 是相机级(拾音只在球机/ch0，:chN 会被归一到整台，
-    不精确到路)。"""
+    不精确到路)。stream_error="cross_subnet_nat" 表示该相机跨网段且局域网探测可达，但拉流长期
+    连不上，大概率是路由器 NAT 类型限制——需把相机与主机放同一局域网，或将路由器 NAT 改为宽松/
+    全锥模式；null 表示无此诊断。"""
     print_result(_compose_channel_dids(api_get(_CAMERAS_PATH)), pretty)
 
 
