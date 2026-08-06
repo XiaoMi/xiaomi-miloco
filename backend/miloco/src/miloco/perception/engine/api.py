@@ -155,6 +155,7 @@ class PerceptionEngine(BasePerceptionEngine):
 
         # ============ tracking_service 构造参数缓存（懒加载 factory 复用）============
         self._tracking_mode = self._config.identity.tracking_service_mode
+        self._tracking_model_resources = None
         # 把 IdentityEngineConfig.sort 转成 sort.py 的 SortConfig（duck typing：字段同名）
         # 让 SortTracker 拿到 yaml 里的 max_age_sec / n_init / 等用户层配置
         from miloco.perception.engine.identity.sort import (
@@ -179,12 +180,20 @@ class PerceptionEngine(BasePerceptionEngine):
         if self._tracking_mode == "mock":
             self._tracking_service_kwargs = {}
         else:
+            from miloco.perception.engine.identity.model_resources import (
+                TrackingModelResources,
+            )
+
+            self._tracking_model_resources = TrackingModelResources(
+                use_gpu=self._config.identity.perception_use_gpu,
+            )
             common_kwargs = {
                 "model_dir": self._config.identity.perception_model_dir or None,
                 "use_gpu": self._config.identity.perception_use_gpu,
                 "input_width": self._config.identity.perception_input_width,
                 "input_height": self._config.identity.perception_input_height,
                 "fps": self._config.input.fps,   # SortTracker 用 fps 算 max_age_sec → 帧数
+                "model_resources": self._tracking_model_resources,
             }
             if self._tracking_mode == "deep_sort":
                 self._tracking_service_kwargs = {
@@ -396,7 +405,17 @@ class PerceptionEngine(BasePerceptionEngine):
                     self._config.identity.perception_model_dir or None,
                     "human_body_reid_v2.onnx",
                 )
-                inst = HumanReID(model_path=reid_path, use_gpu=False)
+                model_resources = getattr(self, "_tracking_model_resources", None)
+                reid_session = (
+                    model_resources.get_session(reid_path)
+                    if model_resources is not None
+                    else None
+                )
+                inst = HumanReID(
+                    model_path=reid_path,
+                    use_gpu=self._config.identity.perception_use_gpu,
+                    session=reid_session,
+                )
                 if inst.session is None:
                     # init() 内部已 catch+log 具体异常; 这里不缓存坏实例, 直接返 None
                     logger.warning(
@@ -699,6 +718,17 @@ class PerceptionEngine(BasePerceptionEngine):
                 await eng.close()
             except Exception as e:  # noqa: BLE001
                 logger.error("IdentityEngine.close for device=%s 失败：%s", did, e)
+        for svc in self._tracking_services.values():
+            svc.release()
+        self._tracking_services.clear()
+        self._deep_sort_trackers.clear()
+        fallback = self._fallback_human_reid
+        release_fallback = getattr(fallback, "release", None)
+        if callable(release_fallback):
+            release_fallback()
+        self._fallback_human_reid = None
+        if self._tracking_model_resources is not None:
+            self._tracking_model_resources.release()
 
     # ------------------------------------------------------------------
     # Suggestion 事件链表 / cooldown 管理
