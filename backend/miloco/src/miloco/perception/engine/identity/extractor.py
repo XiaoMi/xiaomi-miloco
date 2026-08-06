@@ -439,6 +439,15 @@ def extract_from_video(
             for tr in tracking_results:
                 if tr.get("class_id") != Detection.CLASS_HUMAN:
                     continue
+                # coasting(本帧 bbox 是纯 Kalman 预测残留)不裁图: 那个位置上已经不是
+                # 本人, 裁出的背景/他人图会进该 track 的 top-K 候选、经注册写进身份库。
+                # 下面的质量门拦不住它——置信度取的是最后一次真匹配的值(通常过阈值),
+                # 背景裁图清晰度也不低; 打分公式同样没有"本帧是否真匹配"这一项。
+                # 与 IdentityEngine 各消费闸同口径。本路径 tracker 按 fps=1 建、
+                # max_age 换算后只容忍 1 帧 miss, 故每个关联缺口最多少 1 张候选——
+                # 少掉的正是幻影框那张。缺字段按真检测兜底(同全链路 fail-open 口径)。
+                if not tr.get("detected_this_frame", True):
+                    continue
                 tid = int(tr["id"])
                 bbox_xywh = tr["bbox"]
                 bbox_xyxy = tr["xyxy"]

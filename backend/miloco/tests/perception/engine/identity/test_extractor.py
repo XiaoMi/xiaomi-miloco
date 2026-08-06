@@ -437,6 +437,83 @@ class TestExtractFromVideoDeepSort:
                 f"可能 fps fix 被改回硬编码 0.1 s/帧 (会让 60fps 视频间隔 ≈ 0.1s)"
             )
 
+    @staticmethod
+    def _write_tiny_mp4(path: str, n_frames: int = 6, fps: int = 1) -> None:
+        import cv2
+        h, w = 720, 1280
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        for _ in range(n_frames):
+            writer.write(_make_frame(h, w))
+        writer.release()
+
+    @staticmethod
+    def _track_dict(tid: int, **extra) -> dict:
+        d = {
+            "id": tid, "class_id": _MockDet.CLASS_HUMAN,
+            "bbox": (200, 100, 300, 600), "xyxy": (200, 100, 500, 700),
+            "confidence": 0.9, "hits": 5, "age": 5, "time_since_update": 0,
+        }
+        d.update(extra)
+        return d
+
+    def test_coasting_track_excluded_detected_track_kept(self, tmp_path):
+        """coasting(纯 Kalman 预测残留)的 track 不产出候选,同窗真检测的 track 照常。
+
+        残留框裁出的是背景/他人图,质量门拦不住(置信度沿用最后一次真匹配的值、
+        背景裁图清晰度也不低),会进 top-K 并经注册写进身份库。
+        """
+        video_path = str(tmp_path / "coasting.mp4")
+        self._write_tiny_mp4(video_path)
+
+        body_det = _MockDet(x=200, y=100, w=300, h=600, confidence=0.9,
+                            class_id=_MockDet.CLASS_HUMAN)
+        det = _mock_detector([body_det])
+
+        mock_tracker = MagicMock()
+        mock_tracker.update = MagicMock()
+        mock_tracker.get_tracking_results = MagicMock(return_value=[
+            self._track_dict(42, detected_this_frame=True),
+            # 跟丢后靠预测续命的 track:time_since_update>0、bbox 是预测位置
+            self._track_dict(99, detected_this_frame=False, time_since_update=1),
+        ])
+        mock_tracker.get_track_embedding = MagicMock(
+            return_value=np.ones(128, dtype=np.float32) / np.sqrt(128))
+
+        out = extract_from_video(
+            video_path, detector=det,
+            deep_sort_tracker_factory=lambda: mock_tracker,
+            max_frames=4, min_track_hits=2,
+        )
+        assert 42 in out, "真检测的 track 应照常产出候选"
+        assert 99 not in out, "coasting track 的幻影框裁图不应进候选"
+
+    def test_missing_flag_defaults_to_detected(self, tmp_path):
+        """tracker 输出不带该字段时按真检测兜底(全链路 fail-open 同口径)。
+
+        取 fail-closed 会让任何漏填该字段的 tracker 实现产不出任何候选,
+        注册整条路径静默失效——比放宽是更坏的失败模式。
+        """
+        video_path = str(tmp_path / "nofield.mp4")
+        self._write_tiny_mp4(video_path)
+
+        body_det = _MockDet(x=200, y=100, w=300, h=600, confidence=0.9,
+                            class_id=_MockDet.CLASS_HUMAN)
+        det = _mock_detector([body_det])
+
+        mock_tracker = MagicMock()
+        mock_tracker.update = MagicMock()
+        # 刻意不带 detected_this_frame
+        mock_tracker.get_tracking_results = MagicMock(return_value=[self._track_dict(7)])
+        mock_tracker.get_track_embedding = MagicMock(
+            return_value=np.ones(128, dtype=np.float32) / np.sqrt(128))
+
+        out = extract_from_video(
+            video_path, detector=det,
+            deep_sort_tracker_factory=lambda: mock_tracker,
+            max_frames=4, min_track_hits=2,
+        )
+        assert 7 in out
+
     def test_same_frame_face_crop_recorded_when_face_associated(self, tmp_path):
         """方案 A: extract_from_video 入池时, 同帧关联到的 face crop 写入
         ScoredCandidate.same_frame_face_crop 字段, 给 V6b helper 后续判 frontal +
