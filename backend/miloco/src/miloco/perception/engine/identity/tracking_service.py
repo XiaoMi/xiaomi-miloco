@@ -59,6 +59,10 @@ def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingRes
             face_id="none",
             track_id=r["id"],
             box_info=box_info,
+            # tracker 的两个逐帧字段必须穿过本层：下游各 coasting 闸与 tier_u 质量门
+            # 直接消费，丢掉不会报错、只会静默退化成"恒真检测 / 恒满置信"。
+            detected_this_frame=bool(r.get("detected_this_frame", True)),
+            detector_confidence=float(r.get("confidence", 1.0)),
         ))
     return TrackingResponse(
         frame_info=FrameInfo(

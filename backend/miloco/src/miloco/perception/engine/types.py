@@ -114,6 +114,15 @@ class TrackedObject:
     face_id: str
     track_id: int
     box_info: list[TrackingBoxInfo]
+    # True ⟺ 本帧 Kalman update 真匹配到 detection；False = 纯预测残留(coasting)。
+    # IdentityEngine 的抗遮挡 IoA / omni 候选 / 名册位置 / no_person 抑制区 / tier_c
+    # 入队各闸都靠它拒"人已离开或跟丢"产生的残留框，必须由 tracker 一路透传到 engine。
+    # 默认 True：mock 与旧 convert_response 路径不产生 coasting track，其输出的每个
+    # 对象都对应一次真实检测。
+    detected_this_frame: bool = True
+    # 检测器对该 track 本帧框的置信度。tier_u 质量门(detector_conf_min)与候选打分
+    # (det_norm 一项)消费；同样必须透传，否则两处退化成"恒满置信"。默认 1.0 同上。
+    detector_confidence: float = 1.0
 
 
 @dataclass

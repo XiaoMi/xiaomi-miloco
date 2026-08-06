@@ -444,8 +444,8 @@ class SortTracker:
                 "hits": trk.hits,
                 "age": trk.age,
                 "time_since_update": trk.time_since_update,
-                # SortTracker 在 L419 已 pre-filter time_since_update >= 1，此处
-                # 永远为 True；保留字段是为消费端代码统一（DeepSORT 路径会变）。
+                # 本方法开头已 pre-filter time_since_update >= 1，此处永远为 True；
+                # 保留字段是为消费端代码统一（DeepSORT 路径会变）。
                 "detected_this_frame": True,
             })
         return results
