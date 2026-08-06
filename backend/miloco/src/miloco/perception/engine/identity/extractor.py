@@ -442,7 +442,10 @@ def extract_from_video(
                 tid = int(tr["id"])
                 bbox_xywh = tr["bbox"]
                 bbox_xyxy = tr["xyxy"]
-                conf = float(tr.get("confidence", 0.0))
+                # 缺 confidence 按满置信兜底,口径同 IdentityEngine 侧:tracker 决定
+                # 维持该 track 即已过检测阈值,"未知"不等于"零信";取 0.0 会被下面的
+                # 质量门全数拒掉。
+                conf = float(tr.get("confidence", 1.0))
                 crop = _crop_with_padding(frame, bbox_xywh)
                 if crop is None:
                     continue

@@ -1236,7 +1236,11 @@ class IdentityEngine:
                 face_crop=face_crop,
                 sharpness=_compute_sharpness(body_crop),
                 bbox_xyxy=tuple(tr["xyxy"]),  # type: ignore[arg-type]
-                detector_conf=float(tr.get("confidence", 0.0)),
+                # 缺 confidence 时按满置信兜底(与接缝另一侧同口径): tracker 决定维持
+                # 这个 track, 说明检测已过 detector_conf_threshold, "未知"不等于"零信"。
+                # 取 0.0 会让该路径的候选被 tier_u 质量门(detector_conf_min)全数静默
+                # 拒光——功能整体失效, 比放宽是更坏的失败模式。
+                detector_conf=float(tr.get("confidence", 1.0)),
             )
             self.tier_u_pool.push_crop(crop_entry)
 

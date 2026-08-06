@@ -61,6 +61,10 @@ def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingRes
             box_info=box_info,
             # tracker 的两个逐帧字段必须穿过本层：下游各 coasting 闸与 tier_u 质量门
             # 直接消费，丢掉不会报错、只会静默退化成"恒真检测 / 恒满置信"。
+            # 两个 fallback 都取"乐观值"，与接缝另一侧(IdentityEngine / extractor)同
+            # 口径：tracker 肯输出这个 track，说明检测已过 detector_conf_threshold，
+            # 缺字段是"未知"而非"否定"。反过来取 fail-closed 值会让缺字段的路径整条
+            # 失效(无 track 进候选 / 候选被质量门拒光)，是更坏的失败模式。
             detected_this_frame=bool(r.get("detected_this_frame", True)),
             detector_confidence=float(r.get("confidence", 1.0)),
         ))
