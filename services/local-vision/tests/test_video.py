@@ -7,6 +7,11 @@
 
 from __future__ import annotations
 
+import io
+import tempfile
+
+import pytest
+
 from local_vision.video import (
     MIN_CODEC_FRAMES,
     pick_backend,
@@ -59,6 +64,34 @@ def test_write_temp_video_roundtrips_and_uses_an_mp4_suffix():
         assert path.read_bytes() == b"\x00\x01payload"
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_write_temp_video_cleans_up_when_the_write_fails(monkeypatch, tmp_path):
+    """写失败时不能把空壳留在盘上——那条路径还没交给调用方,没人能清理它。
+
+    最现实的触发是磁盘满,而磁盘满会让**每一个窗口**都走这条路:一小时能攒下几百
+    个残留(sweep 的兜底年龄是 1 小时),还都堆在那块已经满了的盘上。
+    """
+    import os
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    real_fdopen = os.fdopen
+
+    class _Boom(io.RawIOBase):
+        def __init__(self, fd):
+            self._f = real_fdopen(fd, "wb")
+
+        def write(self, _data):  # noqa: D102
+            raise OSError(28, "No space left on device")
+
+        def close(self):
+            self._f.close()
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, mode: _Boom(fd))
+    with pytest.raises(OSError):
+        write_temp_video(b"payload")
+
+    assert list(tmp_path.glob("lv-seg-*")) == [], "写失败后把空壳留在磁盘上了"
 
 
 # ── 上一次进程留下的残段 ──────────────────────────────────────────────────

@@ -51,9 +51,24 @@ def sweep_stale_segments(older_than: float = _STALE_SEGMENT_AGE_SEC) -> int:
 
 
 def write_temp_video(data: bytes, suffix: str = ".mp4") -> Path:
+    """把请求体落成临时文件。**写失败时自己收拾干净再往上抛。**
+
+    ``mkstemp`` 一返回,文件就已经在磁盘上了;写入失败(磁盘满是最现实的一种)
+    时路径还没交给调用方,那个空壳就再也没人认领 —— 调用方的 ``finally`` 清理
+    拿不到路径,只能等 ``sweep_stale_segments`` 一小时后兜底。而磁盘满恰恰会让
+    每一个窗口都走这条路,一小时能攒下几百个残留,还都在同一块已经满了的盘上。
+    """
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="lv-seg-")
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except BaseException:
+        # 用 BaseException:KeyboardInterrupt / CancelledError 同样会留下空壳。
+        try:
+            os.unlink(path)
+        except OSError:  # 清理是尽力而为,不能把原始异常盖掉
+            pass
+        raise
     return Path(path)
 
 

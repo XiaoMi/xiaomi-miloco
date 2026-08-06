@@ -521,6 +521,39 @@ def test_library_age_ignores_embedding_files(tmp_path):
     assert r.library_age_days > 39, "补算不该让库龄归零"
 
 
+def test_stale_library_warns_for_legacy_jpg_registrations(tmp_path, caplog):
+    """历史库的登记图是 .jpg/.jpeg,计龄必须认得出来。
+
+    这条挡的失效方向恰好是反的:只 glob ``.png`` 时,jpg 老库一张图都匹配不上,
+    ``_library_age_days`` 返回 None,于是调用处那句 ``is not None`` 落空,过期告警
+    **永不触发**;日志里只会写一句"登记距今 未知",没有任何异常样子。而越老的库
+    越可能是 jpg 时代留下的 —— 最需要这条告警的那一类,恰恰拿不到,表现是无声地
+    高置信度认错人。
+
+    仓库明确保留了对历史 jpg 的读取(``engine/identity/library.py`` 的目录图注与
+    ``body_*.jpg`` 补算扫描、``person/router.py`` 的文件名白名单),所以这不是一个
+    假想的输入形状。
+    """
+    import logging
+    import os
+
+    _person(tmp_path, "p1", "小亮", [_unit(1.0), _unit(0.9, 0.1)])
+    # 换成历史格式,两种扩展名各覆盖一个
+    for i, img in enumerate(sorted((tmp_path / "persons").glob("*/tier_a/body_*.png"))):
+        img.rename(img.with_suffix(".jpg" if i % 2 == 0 else ".jpeg"))
+    old = time.time() - 40 * 86400
+    for img in (tmp_path / "persons").glob("*/tier_a/body_*.jp*g"):
+        os.utime(img, (old, old))
+
+    r = LocalIdentityResolver(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        r.refresh_gallery()
+
+    assert r.library_age_days is not None, "jpg 老库被当成「库龄未知」,过期告警会整个哑掉"
+    assert r.library_age_days > 39
+    assert any("重新登记" in m for m in caplog.messages)
+
+
 # ── 并发 ──────────────────────────────────────────────────────────────────
 
 

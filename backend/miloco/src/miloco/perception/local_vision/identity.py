@@ -64,6 +64,12 @@ _MISS_LOG_INTERVAL_SEC = 300.0
 #: 漏报是继续高置信度认错人。
 _STALE_LIBRARY_DAYS = 14.0
 
+#: 登记图的扩展名。新登记一律写 .png(无损),但历史库里是 .jpg/.jpeg,仓库对它们
+#: 保持可读(见 ``engine/identity/library.py`` 的目录图注、``_backfill`` 的
+#: ``body_*.jpg`` 扫描,以及 ``person/router.py`` 的文件名白名单)。计龄必须认全,
+#: 否则老库一张都匹配不上,而老库正是最需要过期告警的那一类。
+_REGISTRATION_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
+
 #: bbox 归一化区间。与云端 prompt 的约定一致([0,1000],左上 0,0)——两条通路
 #: 说同一种坐标语言,提示词模板才能共用。
 _NORM = 1000
@@ -579,7 +585,18 @@ def _library_age_days(root: Path) -> float | None:
     if not persons.is_dir():
         return None
     newest: float | None = None
-    for img in persons.glob("*/tier_a/body_*.png"):
+    for img in persons.glob("*/tier_a/body_*"):
+        # **必须认全三种扩展名。** 新登记写 .png,但历史库是 .jpg/.jpeg,而仓库明确
+        # 保留了对它们的读取(见 library.py 的目录图注与 _backfill 里的 body_*.jpg
+        # 扫描、person/router.py 的文件名白名单)。只 glob .png 的话,jpg 老库会一张
+        # 图都匹配不到 → 返回 None → 上面那条 `is not None` 判断落空 → 过期告警
+        # 永不触发。方向恰好是反的:越老的库越可能是 jpg 时代留下的,也就越需要
+        # 这条告警,而它偏偏在这些库上静默失效。
+        #
+        # 反过来,.npy / .json 必须排除掉,理由见本函数开头 —— 按 .npy 计龄会被
+        # backfill 重写成"全新"。所以这里用后缀白名单,而不是"排除已知的几种"。
+        if img.suffix.lower() not in _REGISTRATION_IMAGE_SUFFIXES:
+            continue
         try:
             m = img.stat().st_mtime
         except OSError:
