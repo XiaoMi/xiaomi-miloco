@@ -584,7 +584,8 @@ class IdentityEngine:
         # IoA = 交集面积 / 当前框面积; 取当前 track 与其他 active track 的最大值, ≥ 阈值标记。
         # 写入闸在 _enqueue_tier_c_candidate 消费 (查 True 早退, 不入库不走 omni)。
         # 只纳入本帧真有检测命中的框: 与 omni 候选收集 (step 2 的 detected_this_frame 跳过)
-        # 同口径——coasting 纯 Kalman 残留框不对应本帧真人, 算进去会造成"假遮挡"误杀。
+        # 同口径——coasting 框停在上一次真匹配的位置、不对应本帧真人, 算进去会造成
+        # "假遮挡"误杀。
         self._overlap_other_person.clear()
         if len(active_track_ids) >= 2:
             boxes = {

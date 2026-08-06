@@ -457,7 +457,7 @@ class TestExtractFromVideoDeepSort:
         return d
 
     def test_coasting_track_excluded_detected_track_kept(self, tmp_path):
-        """coasting(纯 Kalman 预测残留)的 track 不产出候选,同窗真检测的 track 照常。
+        """coasting(本帧未命中,框停在上一次真匹配位置)的 track 不产出候选,同窗真检测的照常。
 
         残留框裁出的是背景/他人图,质量门拦不住(置信度沿用最后一次真匹配的值、
         背景裁图清晰度也不低),会进 top-K 并经注册写进身份库。

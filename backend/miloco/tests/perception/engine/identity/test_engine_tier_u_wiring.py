@@ -90,7 +90,7 @@ class TestPushUnknownToPool:
 
     @pytest.mark.asyncio
     async def test_coasting_track_not_pushed_to_pool(self, lib, frame):
-        """coasting（纯 Kalman 预测残留）不进池——bbox 已不对应本帧真人，裁出的
+        """coasting（本帧未命中，框停在上一次真匹配位置）不进池——已不对应本帧真人，裁出的
         背景图会污染聚类，还能经 from-cluster 注册间接写进身份库。"""
         pool = TierUPool(config=TierUConfig(l1_capacity=30))
         engine = _make_engine(lib, pool=pool)
@@ -139,7 +139,7 @@ class TestPushUnknownToPool:
 
     @pytest.mark.asyncio
     async def test_process_omits_bbox_for_coasting(self, lib, frame):
-        """coasting（纯 Kalman 预测残留，本帧未检测）不注入幻影位置 → bbox_norm 无该 track。"""
+        """coasting（本帧未命中，框停在上一次真匹配位置）不注入过期位置 → bbox_norm 无该 track。"""
         engine = _make_engine(lib)
         tr = _make_tracking_result(7)
         tr["detected_this_frame"] = False

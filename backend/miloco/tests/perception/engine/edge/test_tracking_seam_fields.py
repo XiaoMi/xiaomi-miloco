@@ -6,9 +6,10 @@
 (恒 True / 恒 1.0)让对应的闸静默失效，所以在接缝上钉死。
 
 历史问题：``TrackedObject`` 早期装不下这两个字段，DeepSORT 路径输出的 coasting
-(人已离开或跟丢后的纯 Kalman 预测残留)track 到 engine 时一律变成"本帧真检测到"，
-抗遮挡 / omni 候选 / 名册位置 / no_person / tier_c 入队各闸全部空转；``confidence``
-被硬编码成 1.0 则让 tier_u 的 ``detector_conf_min`` 质量门永不拒。
+(人已离开或跟丢后仍存活的 track，其框停在上一次真匹配的位置)到 engine 时一律变成
+"本帧真检测到"，抗遮挡 / omni 候选 / 名册位置 / no_person / tier_u 推图 / tier_c
+入队各闸全部空转；``confidence`` 被硬编码成 1.0 则让 tier_u 候选打分里权重最大的
+那一维退化成常数。
 """
 
 from __future__ import annotations
