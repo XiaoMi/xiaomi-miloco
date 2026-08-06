@@ -9,6 +9,7 @@ import { ApiError, apiFetch, resolveToken } from "./client";
 import { authHeaders } from "./register";
 import i18n from "@/i18n";
 import type {
+  PerceptionBackendState,
   ActivityEvent,
   Device,
   DeviceCategory,
@@ -2127,6 +2128,36 @@ export async function realUpdateTaskDescription(
       body: JSON.stringify({ description }),
     },
   );
+}
+
+// 读取感知后端选择(cloud/local)与本地边车连通性快照。
+export async function realGetPerceptionBackend(
+  opts?: { probe?: boolean },
+): Promise<PerceptionBackendState> {
+  // probe 默认关:这个接口被两个组件各调一次,而其中一个只需要知道当前选的是
+  // 哪条通路。探活是最长 3s 的同步 HTTP,不该白跑。
+  const q = opts?.probe ? "?probe=1" : "";
+  const r = await apiFetch<Normal<PerceptionBackendState>>(
+    `/api/admin/perception-backend${q}`,
+  );
+  return r.data;
+}
+
+// 切换感知后端。切到 local 时后端会先探活,不通直接 400(不让用户切到坏后端上)。
+export async function realSetPerceptionBackend(input: {
+  window_size?: number;
+  container_fps?: number;
+  video_short_edge?: number;
+  codec_target_canvas?: number;
+  backend: "cloud" | "local";
+  base_url?: string;
+  token?: string;
+}): Promise<PerceptionBackendState> {
+  const r = await apiFetch<Normal<PerceptionBackendState>>(
+    "/api/admin/perception-backend",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return r.data;
 }
 
 // 改规则触发条件文本（PATCH /api/rules/{id}）。

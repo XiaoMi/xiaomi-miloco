@@ -40,6 +40,13 @@ def _normalize_base_url(base_url: str) -> tuple[str | None, str | None]:
         )
     if not parsed.netloc:
         return None, "Base URL 缺少主机名"
+    if "?" in base_url or "#" in base_url:
+        # 调用方拼的是 f"{base}/models" / f"{base}/health";尾随的 ? 或 # 会把后面
+        # 那段变成查询串或锚点,于是这个配置项变成了任意路径构造器
+        # (实测 http://host/admin# 会打到 /admin)。
+        # 查原始字符而不是 parsed.query/fragment:末尾一个裸 "#" 解析出来是空
+        # fragment,却照样会把路径截断。
+        return None, "Base URL 不能包含 ? 或 #"
     return base_url.rstrip("/"), None
 
 

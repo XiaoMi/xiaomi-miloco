@@ -213,6 +213,10 @@ class PipelineProcessor:
         settings = get_settings()
         self._perf_enabled: bool = settings.perf.enabled
 
+    async def refresh_local_probe(self) -> None:
+        """刷新本地视觉边车的探活缓存(在线程里做,不占事件循环)。透传 proxy。"""
+        await self._perception_engine_proxy.refresh_local_probe()
+
     def try_reinit_engine(self, *, include_failed: bool = False) -> None:
         """补完前置条件后热重建引擎;非可恢复态幂等 no-op。
 
@@ -339,8 +343,19 @@ class PipelineProcessor:
         await self._perception_engine_proxy.close()
 
     async def stop_to_unconfigured(self) -> None:
-        """软停底层引擎(删当前生效模型→回未配态),保留 tick 自愈循环。透传 proxy。"""
+        """软停底层引擎(删当前生效模型 / 切换感知后端),保留 tick 自愈循环。透传 proxy。
+
+        软停内部会按当前配置重判一次:若前置条件已满足(如切到一台正在跑的本地
+        视觉边车),会**当场重建成 ready**,而不是落到等待态。这种情况下 tick 的
+        ``try_reinit_engine`` 不会放行(它只处理非 ready 态),重挂 tier_c frame
+        provider 的那一步就永远不会执行 —— 新引擎从此拿不到「按 did 取最近一帧」,
+        gate 关停时的 live 检测取帧静默失效。故此处无条件重挂一次(proxy 侧在
+        engine 为 None 时是 no-op,重复调用无副作用)。
+        """
         await self._perception_engine_proxy.stop_to_unconfigured()
+        self._perception_engine_proxy.set_tierc_frame_provider(
+            self._collector.peek_latest_frame
+        )
 
     async def apply_omni_fps(self, omni_fps: int) -> None:
         """运行时热更 omni_fps（含顶起的 tracker fps），免重建引擎。透传 proxy。"""

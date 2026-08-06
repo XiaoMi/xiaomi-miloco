@@ -14,9 +14,9 @@ The perception loop reacts to two triggers:
 import asyncio
 import logging
 
-from miloco.config import get_settings
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.perception import omni_probe_registry
+from miloco.perception.capabilities import active_window_size_sec
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.processor import PipelineProcessor
@@ -39,7 +39,7 @@ class PerceptionRunner:
         self._pipeline = pipeline
         self._log_repo = log_repo
 
-        self._collect_interval = get_settings().perception.collect.window_size
+        self._collect_interval = active_window_size_sec()
         self._is_running = False
         self._perception_task: asyncio.Task | None = None
         self._sync_devices_task: asyncio.Task | None = None
@@ -92,7 +92,7 @@ class PerceptionRunner:
 
         # 重启时重读窗口时长（config 可能在停止期间被改）——__init__ 只读一次，
         # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
-        self._collect_interval = get_settings().perception.collect.window_size
+        self._collect_interval = active_window_size_sec()
 
         # Restart worker if it was stopped by a previous stop(). Safe even
         # if that previous generation's thread hasn't exited yet (it may
@@ -173,6 +173,9 @@ class PerceptionRunner:
         # ready,与 omni_client.resolve_live_omni_config 注释承诺的"下个推理周期热生效"
         # 对齐。只放行廉价"等外部条件"态(缺 key/模型),engine_init_failed 不在此重试
         # (见 try_reinit);配合 STARTING 后移,未满足前置条件时零开销、零 event_log 噪声。
+        # 本地视觉后端的探活先在线程里刷一次,再走同步重建 —— 同步路径因此永远
+        # 不碰网络,一个不可达的边车地址不会把主事件循环卡住(相机取帧/SSE/API)。
+        await self._pipeline.refresh_local_probe()
         self._pipeline.try_reinit_engine()
 
         result = await self._pipeline.process_realtime()

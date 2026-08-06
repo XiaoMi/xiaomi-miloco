@@ -9,6 +9,7 @@
 import * as realImpl from "./real";
 import { apiFetch } from "./client";
 import type {
+  PerceptionBackendState,
   ActivityEvent,
   Device,
   EventCropMeta,
@@ -814,4 +815,22 @@ export async function updateSchedulerConfig(
     { method: "PUT", body: JSON.stringify(input) },
   );
   return r.data;
+}
+
+export async function getPerceptionBackend(
+  opts?: { probe?: boolean },
+): Promise<PerceptionBackendState> {
+  return impl.realGetPerceptionBackend(opts);
+}
+
+export async function setPerceptionBackend(input: {
+  backend: "cloud" | "local";
+  base_url?: string;
+  token?: string;
+  window_size?: number;
+  container_fps?: number;
+  video_short_edge?: number;
+  codec_target_canvas?: number;
+}): Promise<PerceptionBackendState> {
+  return impl.realSetPerceptionBackend(input);
 }

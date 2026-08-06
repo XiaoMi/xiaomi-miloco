@@ -599,8 +599,12 @@ class RuleRunner:
         self._clear_pending_source_enter(rule.id)
 
         sources = self._sources_currently_true(rule_id) or [source_did]
+        # 人工 / agent 经 API 显式触发。设备动作那道闸约束的是**感知通路自己**去
+        # 驱动设备(纯视觉模型没有音频佐证也没有身份识别),而这里发起的正是那个
+        # 被授权做决定的角色 —— 挡住它是过度拦截。
         return await self._fire(
-            rule, RuleEvent.ENTERED, sources, context, str(uuid.uuid4())
+            rule, RuleEvent.ENTERED, sources, context, str(uuid.uuid4()),
+            perception_driven=False,
         )
 
     # ---- EVENT duration sliding-window evaluator ----
@@ -1250,8 +1254,18 @@ class RuleRunner:
         actual_exited_at: str | None = None,
         caption: str = "",
         device_name: str = "",
+        perception_driven: bool = True,
     ) -> RuleExecuteResult | None:
-        """Pick the slot for (mode, event), execute, write log."""
+        """Pick the slot for (mode, event), execute, write log.
+
+        ``perception_driven=False`` 表示这次执行由人工 / agent 经 API 显式发起,
+        不受"当前感知通路是否直连设备"那道闸约束(见下)。
+
+        **默认 True 是刻意的**:除了 ``trigger_rule``,其余入口(边沿触发、跨天
+        重放、duration 达标定时器)最终都源于感知建立起来的规则状态 —— 即使那一次
+        fire 是时钟发起的,它判断的依据仍然来自纯视觉模型。默认放行会让新加的调用
+        点静默绕过这道闸,所以这里选默认拒绝;要豁免必须显式写出来。
+        """
         slot = self._select_slot(rule, event)
         if slot is None:
             logger.debug(
@@ -1262,22 +1276,68 @@ class RuleRunner:
         start_time = int(time.time() * 1000)
         kind, value = slot
 
-        logger.info(
-            "FIRE: rule=%s name=%s event=%s mode=%s slot=%s sources=%s execute_id=%s",
-            rule.id, rule.name, event.value, rule.mode.value, kind, sources, execute_id,
-        )
-        self._publish_rule_event(
-            "rule_fire", rule.id,
-            {
-                "event": event.value,
-                "mode": rule.mode.value,
-                "slot": kind,
-                "sources": sources,
-                "execute_id": execute_id,
-            },
-        )
+        # 感知通路若声明「不直接控制设备」,静态动作一律不执行。
+        #
+        # 切换后端时已经拦过一次带直连动作的规则,但那是**转移**上的检查,而这是一条
+        # **状态**不变量:切过去之后新建规则、把已有规则改成带动作、任务激活时批量
+        # 启用、直接改 config.json —— 每一条都能把系统带回被禁止的状态,而 fire 这条
+        # 路上没有任何一处知道后端是谁。差别是实打实的:纯视觉模型没有音频佐证也没有
+        # 身份识别,不该由它自己去关燃气阀。
+        # 这里选择**不执行也不改写**:改写会丢掉 cooldown_minutes / idempotent(schema
+        # 里唯一的限流)和台账里 source=rule 的归属。所以只拒绝,并且大声说出来 ——
+        # 界面上同一批规则也会被列出来(见 admin 的 blocking_static_rules)。
+        # 函数内导入:放在模块顶层会把整个 perception 包(cv2 / av / numpy,
+        # 实测 +0.36s)拖进规则引擎,而上游的 rule/runner.py 一个感知顶层导入都没有
+        # (它唯一的感知依赖 event_text_builder 同样是函数内导入)。这条依赖箭头
+        # 本来就该是单向的:perception 用 rule,rule 不用 perception。
+        from miloco.perception.capabilities import perception_executes_device_actions
 
-        if kind == "static":
+        refused = (
+            kind == "static"
+            and perception_driven
+            and not perception_executes_device_actions()
+        )
+        if refused:
+            logger.error(
+                "拒绝执行规则 %s(%s)的设备动作:当前感知通路不直接控制设备。"
+                "请在「模型」页切回云端通路,或把该规则改成由 agent 决策的动态规则。",
+                rule.id, rule.name,
+            )
+            self._publish_rule_event(
+                "rule_action_refused", rule.id,
+                {"event": event.value, "reason": "perception_backend_no_device_actions",
+                 "execute_id": execute_id},
+            )
+
+        if not refused:
+            # 被拒绝的那次执行并没有发生 —— 再打一行 FIRE 会把它计进"触发了多少次"。
+            logger.info(
+                "FIRE: rule=%s name=%s event=%s mode=%s slot=%s sources=%s execute_id=%s",
+                rule.id, rule.name, event.value, rule.mode.value, kind, sources, execute_id,
+            )
+            self._publish_rule_event(
+                "rule_fire", rule.id,
+                {
+                    "event": event.value,
+                    "mode": rule.mode.value,
+                    "slot": kind,
+                    "sources": sources,
+                    "execute_id": execute_id,
+                },
+            )
+
+        if refused:
+            # **不能提前 return**:再往下是规则执行记录的落库。提前返回的话,这条
+            # 规则在界面上的执行历史是一片空白 —— 用户只看到自动化不响了,而没有
+            # 任何一处说得出为什么。记成一次失败的触发,理由写进日志行。
+            ok_all = False
+            exec_result = RuleExecuteResult(
+                event=event,
+                action_results=[],
+                dynamic_rule_event_sent=False,
+                error="当前感知通路不执行设备动作(本地视觉),该规则的设备动作已被拒绝",
+            )
+        elif kind == "static":
             action_results = [await self._execute_action(rule.id, a) for a in value]
             ok_all = all(r.result for r in action_results)
             exec_result = RuleExecuteResult(

@@ -1120,7 +1120,7 @@ async def _soft_stop_best_effort(action: str) -> None:
     """重置当前生效配置后软停感知:关引擎 + 降回 no_omni_api_key,保留 tick 自愈循环。
     best-effort —— 配置落盘是主操作,软停失败仅告警(下次后端重启生效),不阻断整体。"""
     try:
-        await manager.perception_service.stop_to_unconfigured()
+        await get_manager().perception_service.stop_to_unconfigured()
     except Exception as e:  # noqa: BLE001
         logger.warning("%s当前生效模型后软停感知失败(将于重启后生效): %s", action, e)
 
@@ -1604,3 +1604,330 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         if omni_fps_changed or window_changed:
             payload["restart_ok"] = restart_ok
     return NormalResponse(code=0, message="ok", data=payload)
+
+
+# ─── 感知后端选择(「模型」页顶部:云端 API / 本地 GPU) ─────────────────────────
+
+
+class PerceptionBackendBody(BaseModel):
+    """切换感知后端,并可同时调本通路自己的输入参数。
+
+    ``container_fps`` / ``video_short_edge`` / ``codec_target_canvas`` 与云端那组
+    (``engine.input.*``)刻意分开:两条通路的成本结构相反 —— 云端每多一帧、每多一个
+    像素都要付 token 钱,所以要压低;本通路的成本由 codec 的 token 预算封顶,帧数
+    几乎免费,该把预算花在帧率上而不是分辨率上。共用一个值会逼两边往相反方向调。
+    """
+
+    backend: Literal["cloud", "local"]
+    base_url: str | None = None
+    token: str | None = None
+    # 上限与 LocalVisionSettings 对齐;不填则不动。
+    window_size: int | None = Field(default=None, ge=1, le=60)
+    container_fps: int | None = Field(default=None, gt=0, le=120)
+    video_short_edge: int | None = Field(default=None, ge=64, le=2160)
+    codec_target_canvas: int | None = Field(default=None, ge=4, le=64)
+
+
+
+def _rules_with_direct_device_actions() -> list[str]:
+    """列出当前**启用中、且会在感知层直连设备**的规则名(STATIC 动作)。
+
+    本地视觉通路不执行任何设备动作。此前的做法是把这类规则在运行时改写成"交给
+    agent 决策",但那会静默丢掉两样东西:``cooldown_minutes`` / ``idempotent``
+    (schema 对非幂等动作强制要求的唯一限流,丢了就是 TTS 风暴),以及动作台账里
+    ``source=rule`` 的归属(改走 agent 后变成 source=cli,规则与它引发的设备变更
+    再也对不上)。改写还得把动作重新翻译成自然语言,一旦译错,agent 执行的就不是
+    用户配置的东西。
+
+    与其在运行时悄悄改变用户已配置的自动化,不如**在切换时就拦下来**:明确告诉
+    用户哪几条规则会失效,由他自己决定是停用还是不切。行为可预测、可测试,
+    也不需要动共享的规则引擎。
+    """
+    try:
+        from miloco.database.rule_repo import RuleRepo
+
+        rules = RuleRepo().get_all(enabled_only=True)
+    except Exception as e:  # noqa: BLE001 —— 查不到就不拦(不因为附带检查挡住切换)
+        logger.warning("检查直连设备规则失败,跳过该拦截: %s", e)
+        return []
+    names = []
+    for r in rules:
+        if (
+            getattr(r, "actions", None)
+            or getattr(r, "on_enter_actions", None)
+            or getattr(r, "on_exit_actions", None)
+        ):
+            names.append(r.name or r.id)
+    return names
+
+
+def _validated_base_url(url: str) -> str:
+    """边车地址的校验 —— 直接复用云端那份 ``_normalize_base_url``。
+
+    两处都是"用户可填的外部服务地址",各写一份校验迟早漂移:本函数最初自己写了一遍
+    startswith 检查,结果比既有那份**弱**(不校验主机名,``http:///health`` 能过)。
+    """
+    if not url:
+        return url
+    normalized, err = _probe._normalize_base_url(url)
+    if err:
+        raise HTTPException(status_code=400, detail={"code": "bad_url", "message": err})
+    return normalized
+
+
+def _cloud_readiness_hint() -> dict | None:
+    """云端通路当前是否具备工作条件;具备则 None。
+
+    返回 ``{"code": ..., "message": ...}`` 而不是一句中文。**这是同一个卡片里
+    已经立过的规矩**:``PerceptionBackendCard.tsx`` 的 ``PB_CODE_KEY`` 注释写着
+    「backend message 是硬编码中文,直接注入会污染英文界面」,切换错误那条路径
+    早已改成 code + 前端查表。``cloud_hint`` 当时漏掉了,前端 ``{state.cloud_hint}``
+    直出后端中文 —— 英文界面上会突然冒出一句中文。
+
+    ``message`` 保留是给日志与不认识该 code 的第三方客户端兜底的,前端认识 code
+    时不应使用它。``models_missing`` 的 message 含验证器给出的具体缺失项,前端把
+    它作为 detail 拼在本地化文案之后。
+    """
+    from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
+    from miloco.perception.engine.resource_validator import (
+        EngineReadiness,
+        validate_resources,
+    )
+
+    try:
+        s = get_settings()
+        omni = dict(s.perception.engine.get("omni", {}))
+        models_dir = dict(s.perception.engine.get("identity", {})).get(
+            "perception_model_dir"
+        ) or str(s.directories.models_dir)
+        v = validate_resources(resolve_omni_api_key(omni.get("api_key", "")), models_dir)
+        if v.status == EngineReadiness.NOT_CONFIGURED:
+            return {
+                "code": "cloud_no_api_key",
+                "message": "云端通路当前未配置多模态大模型 API Key,切过去后感知不会立即恢复。",
+            }
+        if v.status == EngineReadiness.MODELS_MISSING:
+            return {
+                "code": "cloud_models_missing",
+                "message": f"云端通路的本地模型尚未就绪:{v.message}",
+                "detail": v.message,
+            }
+    except Exception as e:  # noqa: BLE001 —— 只是提示,算不出来就不提示
+        logger.warning("云端就绪度提示计算失败: %s", e)
+    return None
+
+
+def _local_capabilities() -> dict:
+    """本地通路的能力声明。直接读引擎的类属性,不在别处再硬编码一份。"""
+    from miloco.perception.local_vision.engine import LocalVisionEngine
+
+    return {
+        "needs_api_key": False,
+        "audio": False,       # 纯视觉:不产 speeches / env_sounds
+        # 认人由本地 ReID 做(比对身份库),不经过视觉大模型。跟着**配置**走:
+        # 用户可以关掉它,关掉后界面必须如实显示没有这项能力。
+        "identity": bool(get_settings().perception.local_vision.identity_enabled),
+        "suggestions": False,  # 主动建议交给 agent
+        "static_rule_execution": LocalVisionEngine.STATIC_RULE_EXECUTION,
+    }
+
+
+def _local_vision_payload(*, probe: bool = True) -> dict:
+    """当前后端选择 + 本地边车的连通性快照。
+
+    健康探测每次现查:用户切过去之前就该知道边车在不在,而不是切完发现感知不动
+    再回来排查。探测是同步 HTTP(短超时),调用方须放到线程里跑,别占事件循环。
+    """
+    from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+
+    s = get_settings().perception
+    cfg = s.local_vision
+    health: dict | None = None
+    error: str | None = None
+    if not probe:
+        # 纯读:不打网络、不查规则库、不摸文件系统。仓库把"读配置"和"探活"分成
+        # 两件事(get_omni_config 零 IO,探活是显式的 POST /omni-config/test);
+        # 这里此前每次 GET 都要做一次最长 3s 的 health_sync + 一次规则库全表 +
+        # 一次 validate_resources(它还会 mkdir),而「模型」页一挂载就有两个组件
+        # 各调一次。
+        return {
+            "backend": s.engine_backend,
+            "local_vision": {"base_url": cfg.base_url, "has_token": bool(cfg.token)},
+            "health": None,
+            "error": None,
+            "cloud_hint": None,
+            "blocking_static_rules": [],
+            "local_capabilities": _local_capabilities(),
+        }
+    try:
+        health = LocalVisionClient(cfg.base_url, cfg.token).health_sync()
+    except LocalVisionError:
+        # 只回一个粗粒度标记,不回 httpx 的原始异常文本 —— base_url 是用户可填的,
+        # 原文里的目标地址 / 状态码 / 异常类型合起来就是一个可用的内网端口探针。
+        error = "unreachable"
+    return {
+        "backend": s.engine_backend,
+        "local_vision": {
+            "base_url": cfg.base_url,
+            "has_token": bool(cfg.token),
+            # 本通路自己的输入参数。与云端那组(engine.input.*)刻意分开:两条通路的
+            # 成本结构相反,共用一个值会逼它们往相反方向调。
+            "window_size": cfg.window_size,
+            "container_fps": cfg.container_fps,
+            "video_short_edge": cfg.video_short_edge,
+            "codec_target_canvas": cfg.codec_target_canvas,
+            # 云端那一组,一并给出来 —— 卡片上按"当前选哪条就显示哪组"渲染,
+            # 两组值必须来自同一个响应,否则切换时会闪一下旧值。
+            "cloud": {
+                "window_size": s.collect.window_size,
+                "video_short_edge": s.engine.get("input", {}).get("video_short_edge", 512),
+                "omni_fps": s.engine.get("input", {}).get("omni_fps", 1),
+            },
+        },
+        "health": health,
+        "error": error,
+        # 切回云端**永远不拒绝** —— 它是本地通路出问题时的退路,挡住就把用户
+        # 关在了一个不工作的后端里。但缺 Key / 模型没下完时切过去感知同样起不来,
+        # 所以提前把这件事说清楚,让它成为一次知情的选择而不是一次静默的停摆。
+        "cloud_hint": _cloud_readiness_hint(),
+        # 启用中、会在感知层直连设备的规则 —— 切到本地通路会拒绝,这里先给前端
+        # 预览,免得用户点了才知道。
+        "blocking_static_rules": _rules_with_direct_device_actions(),
+        # 能力差异摆在接口里,前端直接渲染,不必各端各写一份说明。
+        "local_capabilities": _local_capabilities(),
+    }
+
+
+@router.get(
+    "/perception-backend",
+    summary="读取感知后端选择(cloud/local)与本地边车连通性",
+    response_model=NormalResponse,
+)
+async def get_perception_backend(
+    probe: bool = False, current_user: str = Depends(verify_token)
+):
+    """默认纯读配置(零 IO)。``?probe=1`` 才去探边车。
+
+    与 ``get_omni_config`` 同一条口径:读配置和探活是两件事。「模型」页挂载时有
+    两个组件各调一次这个接口,默认探活的话每次进页面就是两次最长 3s 的同步 HTTP,
+    外加两次规则库全表扫描 —— 而其中一个组件只需要知道当前选的是哪条通路。
+    """
+    # 探测是同步 HTTP —— 丢线程里跑,别把 API 的事件循环占住。
+    data = await asyncio.to_thread(_local_vision_payload, probe=probe)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.post(
+    "/perception-backend",
+    summary="切换感知后端;切到 local 前先探活,不通则拒绝",
+    response_model=NormalResponse,
+)
+async def set_perception_backend(
+    body: PerceptionBackendBody, current_user: str = Depends(verify_token)
+):
+    """切到 local 前必须探活通过 —— 与「启用云端模型前先测连接」同一条不变量:
+    不让用户切到一个不工作的后端上,否则感知会静默停摆。"""
+    from miloco.perception.local_vision import LocalVisionClient, LocalVisionError
+
+    cur = get_settings().perception.local_vision
+    update: dict = {"engine_backend": body.backend}
+    lv: dict = {}
+    if body.base_url is not None:
+        lv["base_url"] = _validated_base_url(body.base_url.strip())
+    if body.token is not None:
+        lv["token"] = body.token.strip()
+    for field in ("window_size", "container_fps", "video_short_edge",
+                  "codec_target_canvas"):
+        v = getattr(body, field)
+        if v is not None:
+            lv[field] = v
+
+    # 凭证只能配合它当初被存进来的那个地址用。改了 base_url 又没给新 token,
+    # 就把存档 token 清掉,而不是把它带去新地址 —— 与 _key_by_label 同一条立场:
+    # 拿到 admin token 的人不该能把已存凭证(以及随后每一帧家里的画面)
+    # 定向发到自己控制的地址上。
+    # 与 _key_by_label::_url_matches 同一个比较口径(去尾斜杠)。裸字符串比的话,
+    # "http://h:18800/" 与 "http://h:18800" 会被当成换了地址,把一个仍然有效的
+    # 凭证白白清掉。
+    if (
+        "base_url" in lv
+        and lv["base_url"].rstrip("/") != (cur.base_url or "").rstrip("/")
+        and "token" not in lv
+    ):
+        lv["token"] = ""
+
+    # 只要动了 base_url 就必须先探活再落盘,与切到 local 时同一条校验 ——
+    # 否则 backend="cloud" 这条分支等于一个"任意地址免校验写入口",而 GET 之后
+    # 又会去探它。地址写进配置这件事本身就要能证明是个真边车。
+    must_probe = body.backend == "local" or "base_url" in lv
+    if must_probe:
+        base_url = lv.get("base_url", cur.base_url)
+        token = lv.get("token", cur.token)
+        try:
+            health = await asyncio.to_thread(
+                LocalVisionClient(base_url, token).health_sync
+            )
+        except LocalVisionError:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "unreachable", "message": "本地视觉服务不可达"},
+            )
+        # 边车用与推理同一套比较回的鉴权结论。不看这个的话,token 配错的部署
+        # 会一路绿灯:探活过 → 判定就绪 → 每一窗推理 401 → 感知静默停摆,而
+        # 界面上那行探活始终是绿的。
+        if health.get("auth_required") and not health.get("auth_ok"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "auth_rejected",
+                    "message": "本地视觉服务要求访问凭证,当前凭证不被接受 —— 请填写正确的 token",
+                },
+            )
+        if body.backend == "local" and not health.get("model_loaded"):
+            # 区分"还在加载"与"加载失败了":后者永远不会好,让人"稍后再试"
+            # 等于让他等一辈子(权重路径打错是最常见的首次部署翻车点)。
+            load_error = health.get("load_error")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "load_failed" if load_error else "loading",
+                    "message": (f"本地视觉服务加载模型失败:{load_error}" if load_error
+                                else "本地视觉服务正在加载模型,稍后再试"),
+                    # 加载失败的具体原因是边车给的自由文本,没法本地化,但它正是
+                    # 用户最需要看到的那一句(多半是权重路径打错)。
+                    "detail": load_error or "",
+                },
+            )
+
+    if body.backend == "local":
+        blocking = _rules_with_direct_device_actions()
+        if blocking:
+            # 不静默改写用户的自动化,也不让它们悄悄失效 —— 拦在切换这一步,
+            # 把受影响的规则名直接说出来。
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "blocking_rules",
+                    "message": (
+                        "以下规则会在感知层直接控制设备,本地视觉通路不执行设备动作。"
+                        "请先停用它们(或改成由 agent 决策的动态规则)再切换:"
+                        + "、".join(blocking[:10])
+                        + ("…" if len(blocking) > 10 else "")
+                    ),
+                    "rules": blocking[:10],
+                },
+            )
+
+    if lv:
+        update["local_vision"] = lv
+    update_shared_config(perception=update)
+
+    # 立即软停当前引擎,让切换在下一个推理周期就生效(与 omni 激活/停用同一条路径:
+    # stop_to_unconfigured 关掉在跑的实例并降回等待态,tick 自愈按新配置重建)。
+    # 不做这一步的话,已 ready 的引擎不满足 try_reinit 的放行条件,会一直用旧后端跑下去
+    # ——界面显示已切换、实际仍在调原来的后端(切走云端时还会继续计费)。
+    await _soft_stop_best_effort("切换感知后端")
+
+    return NormalResponse(
+        code=0, message="ok", data=await asyncio.to_thread(_local_vision_payload)
+    )
