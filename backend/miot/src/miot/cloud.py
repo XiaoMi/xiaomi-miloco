@@ -450,6 +450,25 @@ class MIoTHttpClient:
         # _LOGGER.debug("mihome api post, %s%s, %s -> %s", self._base_url, url_path, data, res_obj)
         return res_obj
 
+    async def get_central_cert_async(self, csr: str) -> str:
+        """Submit a CSR and get a central-hub-gateway client cert signed by cloud.
+
+        Used for the local mTLS connection to the central hub gateway. Only
+        meaningful in regions listed in ``SUPPORT_CENTRAL_GATEWAY_CTRL``.
+        """
+        if not isinstance(csr, str):
+            raise MIoTHttpError("invalid params")
+        res_obj: Dict = await self.__mihome_api_post_async(
+            url_path="/app/v2/ha/oauth/get_central_crt",
+            data={"csr": str(base64.b64encode(csr.encode("utf-8")), "utf-8")},
+        )
+        if "result" not in res_obj:
+            raise MIoTHttpError("invalid response result")
+        cert: str = res_obj["result"].get("cert", None)
+        if not isinstance(cert, str):
+            raise MIoTHttpError("invalid cert")
+        return cert
+
     async def get_user_info_async(self) -> MIoTUserInfo:
         """Get user info."""
         http_res = await self._ensure_session().get(
@@ -729,7 +748,7 @@ class MIoTHttpClient:
                 voice_ctrl=device.get("voice_ctrl", 0),
                 rssi=device.get("rssi", None),
                 pid=device.get("pid", None),
-                local_ip=device.get("local_ip", None),
+                local_ip=device.get("localip", None),
                 ssid=device.get("ssid", None),
                 bssid=device.get("bssid", None),
                 order_time=device.get("orderTime", 0),

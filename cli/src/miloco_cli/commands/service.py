@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import plistlib
 import shlex
 import shutil
 import signal
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 import click
@@ -342,15 +344,18 @@ def _resolve_backend_pid(cfg: dict, timeout: float = 8.0) -> int | None:
     return _find_pid_by_port(cfg["server"]["url"])
 
 
-def _wait_for_health(cfg: dict, pretty: bool) -> None:
-    """轮询 /health，超时 30 秒。检测 FATAL 状态提前退出。"""
+def _wait_for_health(
+    cfg: dict, pretty: bool, fatal_check: Callable[[], bool] | None = None
+) -> None:
+    """轮询 /health，超时 30 秒。``fatal_check`` 返回 True 时判定启动失败提前退出
+    （supervisord 传 FATAL 检测；launchd 传 crashloop 检测，见
+    ``_launchd_crashloop_check``）。"""
     import httpx
 
     health_url = cfg["server"]["url"].rstrip("/") + "/health"
     deadline = time.time() + 30
     while time.time() < deadline:
-        status = _supervisorctl("status", _PROGRAM_NAME).stdout
-        if "FATAL" in status:
+        if fatal_check and fatal_check():
             print_result({"error": "process failed to start, check logs"}, pretty)
             sys.exit(1)
         try:
@@ -363,6 +368,434 @@ def _wait_for_health(cfg: dict, pretty: bool) -> None:
         {"error": "service did not become ready within 30s, check logs"}, pretty
     )
     sys.exit(1)
+
+
+def _supervisor_fatal() -> bool:
+    return "FATAL" in _supervisorctl("status", _PROGRAM_NAME).stdout
+
+
+# ─── launchd (macOS) ─────────────────────────────────────────────────────────
+#
+# macOS 上以用户态(euid 501)跑的后端直连 LAN 网关会被 Local Network Privacy(LNP)
+# 拦。绕过它的正道:让 python 作为"有独立签名身份的 app"的子进程运行,LNP 把子进程的
+# 本地网络访问归属到该 app、授权一次即通。故 darwin 不用 supervisord(双 fork 会丢 gui
+# 会话归属),改用 launchd:
+#   launchd(gui/uid) → miloco.app 签名启动器 → python -m miloco.main(子进程)
+# 启动器是随包 vendored 的签名 stub,只负责 posix_spawn 其参数指定的子进程。
+
+_LAUNCHD_LABEL = "com.xiaomi.miloco.backend"
+
+
+def _use_launchd() -> bool:
+    return sys.platform == "darwin"
+
+
+def _launchagent_plist() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{_LAUNCHD_LABEL}.plist"
+
+
+def _launcher_bin() -> Path:
+    """vendored 签名启动器可执行文件(部署时落到 miloco_home()/miloco.app)。"""
+    return miloco_home() / "miloco.app" / "Contents" / "MacOS" / "miloco"
+
+
+def _launchd_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def _launchd_target() -> str:
+    return f"{_launchd_domain()}/{_LAUNCHD_LABEL}"
+
+
+def _launchctl(*args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["launchctl", *args], capture_output=True, text=True, timeout=15
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args, returncode=1, stdout="", stderr="timeout"
+        )
+
+
+def _launchd_is_loaded() -> bool:
+    return _launchctl("print", _launchd_target()).returncode == 0
+
+
+def _launchd_backend_pid() -> int | None:
+    """从 ``launchctl print`` 输出解析 backend PID(未运行/未加载则 None)。"""
+    result = _launchctl("print", _launchd_target())
+    if result.returncode != 0:
+        return None
+    import re
+
+    m = re.search(r"\bpid = (\d+)", result.stdout)
+    return int(m.group(1)) if m else None
+
+
+def _generate_launchagent_plist(cmd: list[str]) -> None:
+    """写 ``~/Library/LaunchAgents/com.xiaomi.miloco.backend.plist``(内容变才写,idempotent)。
+
+    ProgramArguments = 签名启动器 + cmd(=[python_bin, -m, miloco.main]);
+    EnvironmentVariables 复刻 supervisord 的 ``environment=`` 并补 launchd 默认不给的
+    ``HOME`` / ``PATH``(含 homebrew,后端要 shell 调裸 ffmpeg)。
+    """
+    log_dir = _log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = _launchagent_plist()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = str(log_dir / "miloco-backend.log")
+
+    env = {
+        "MILOCO_SUPERVISED": "1",
+        "MILOCO_HOME": str(miloco_home()),
+        "HOME": str(Path.home()),
+        # launchd 只给最小 PATH;补 homebrew(arm64 /opt/homebrew、intel /usr/local)
+        # 供后端 shell 调裸 ffmpeg,并补 ~/.local/bin(uv 工具所在),避免丢失继承。
+        "PATH": (
+            f"/opt/homebrew/bin:/usr/local/bin:{Path.home()}/.local/bin"
+            ":/usr/bin:/bin:/usr/sbin:/sbin"
+        ),
+    }
+    tz = _resolve_timezone()
+    if tz:
+        env["TZ"] = tz
+        env["MILOCO_TIMEZONE"] = tz
+
+    plist = {
+        "Label": _LAUNCHD_LABEL,
+        "ProgramArguments": [str(_launcher_bin()), *cmd],
+        "EnvironmentVariables": env,
+        "RunAtLoad": True,
+        # 对齐 supervisord autorestart=true:非 0 退出码 或 信号崩溃 都重拉,
+        # clean exit(0)不拉。信号崩溃依赖启动器如实透传 WIFSIGNALED(见
+        # miloco_launcher.c),否则这条路匹配不上。
+        # launchd 内建 ~10s ThrottleInterval 防紧循环;"放弃"语义由 CLI 侧
+        # _launchd_crashloop_check 在健康探测窗口内补。
+        "KeepAlive": {"SuccessfulExit": False},
+        "StandardOutPath": log_file,
+        "StandardErrorPath": log_file,
+        "WorkingDirectory": str(miloco_home()),
+    }
+    data = plistlib.dumps(plist)
+    if plist_path.exists() and plist_path.read_bytes() == data:
+        return
+    # 原子写入:先写 .tmp 再 os.replace,避免中途 crash/断电留下损坏的 plist
+    # (launchd 会尝试加载损坏文件)。
+    tmp = plist_path.with_name(plist_path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, plist_path)
+
+
+def _launchd_reload() -> tuple[bool, str]:
+    """bootout(容错)+ 等 launchd 拆卸完成 + bootstrap 重新加载（picks up 重写后的 plist）。
+
+    直接 bootout 后立刻 bootstrap 会撞 launchd 拆卸竞态,报
+    ``Bootstrap failed: 5: Input/output error``。故 bootout 后轮询到 job 真正从
+    launchd 消失再 bootstrap,并对该竞态做有限重试。
+    """
+    target = _launchd_target()
+    _launchctl("bootout", target)  # 未加载时报错,忽略
+    # 等 job 从 launchd 完全消失(最多 ~8s),避免 bootstrap 撞拆卸竞态
+    deadline = time.time() + 8
+    while time.time() < deadline and _launchd_is_loaded():
+        time.sleep(0.3)
+    err = ""
+    for _ in range(5):
+        result = _launchctl("bootstrap", _launchd_domain(), str(_launchagent_plist()))
+        if result.returncode == 0:
+            return True, ""
+        err = (result.stderr or result.stdout).strip()
+        # 竞态下 bootstrap 可能报错但实际已加载 → 视作成功
+        if _launchd_is_loaded():
+            return True, ""
+        time.sleep(0.6)
+    return False, err
+
+
+def _check_lnp_blocked(pretty: bool) -> None:
+    """后端已起，但若近期日志里有 Errno 65 则说明 macOS LNP 仍拦着中枢连接——给用户
+    一条可操作的提示，告诉他们去哪打开授权开关。只读最近 15s 的日志行，不阻塞。"""
+    log_dir = _log_dir()
+    log_file = log_dir / "miloco-backend.log"
+    if not log_file.exists():
+        return
+    try:
+        cutoff = time.time() - 15
+        hits = [
+            ln
+            for ln in _tail_lines(log_file, 400)
+            if "Errno 65" in ln and _extract_log_ts(ln) >= cutoff
+        ]
+    except Exception:
+        return
+    if not hits:
+        return
+    print(
+        "\n"
+        + "┌" + "─" * 61 + "┐\n"
+        "│  macOS LNP 正在拦截中枢连接 (Errno 65)" + " " * 18 + "│\n"
+        "│" + " " * 61 + "│\n"
+        "│  → 系统设置 → 隐私与安全性 → 本地网络" + " " * 21 + "│\n"
+        "│     找到 miloco 并打开开关" + " " * 36 + "│\n"
+        "└" + "─" * 61 + "┘",
+    )
+
+
+def _tail_lines(path: Path, n: int, block: int = 65536) -> list[str]:
+    """读文件末尾 ~n 行,只 seek 尾部若干块,不读全量(避免大日志 OOM)。"""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            buf = b""
+            pos = size
+            while pos > 0 and buf.count(b"\n") <= n:
+                step = min(block, pos)
+                pos -= step
+                f.seek(pos)
+                buf = f.read(step) + buf
+        return buf.decode("utf-8", errors="replace").splitlines()[-n:]
+    except Exception:
+        return []
+
+
+def _extract_log_ts(line: str) -> float:
+    """从 ``2026-07-30 12:00:00`` 格式日志行提取 unix epoch，失败返回 0。
+    日志时间戳是**本地时区**，故用 ``time.mktime`` 而非 ``calendar.timegm``。"""
+    try:
+        ts_str = line.split(" - ")[0].strip()
+        dt = time.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        return time.mktime(dt)
+    except Exception:
+        return 0.0
+
+
+def _launchd_crashloop_check() -> Callable[[], bool]:
+    """给 ``_wait_for_health`` 用的 fatal_check：检测后端反复重生(crashloop)。
+
+    launchd `KeepAlive={SuccessfulExit:false}` 没有 supervisord `startretries→FATAL` 的
+    "放弃"态,持续崩溃会每 ~10s 无限重拉。这里在健康探测窗口内跟踪 backend pid:
+    正常启动 pid 恒定;若窗口内见到 ≥3 个不同 pid(即崩溃重生 ≥2 次),判定 crashloop,
+    **bootout 停掉**(不再无限重生)并让 `_wait_for_health` 报失败退出——对齐 FATAL 语义。
+    单次重启(2 个 pid)容忍,不误判慢启动。
+    """
+    seen: set[int] = set()
+
+    def check() -> bool:
+        pid = _launchd_backend_pid()
+        if pid:
+            seen.add(pid)
+        if len(seen) >= 3:
+            _launchctl("bootout", _launchd_target())  # 放弃:停止无限重生
+            return True
+        return False
+
+    return check
+
+
+def _is_miloco_backend_proc(pid: int) -> bool:
+    """判断进程是不是 miloco backend(命令行含 ``-m miloco.main``)。
+
+    用于启动前按端口清理：只允许杀可证明属于 miloco 的残留进程，绝不误杀
+    用户其它服务占用了同一端口的情况。token 级匹配(``-m`` + ``miloco.main``
+    词边界),避免命中 vim/grep miloco.main.py 等无关进程。
+    """
+    import re
+
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return bool(re.search(r"-m\s+miloco\.main\b", out.stdout))
+
+
+def _reap_legacy_supervisord() -> list[int]:
+    """darwin 升级迁移:老版本后端由 supervisord 托管,切到 launchd 前必须把残留的
+    supervisord 守护进程收拾掉——否则它 autorestart 的 backend 占着端口,新 launchd
+    实例起不来 / 撞端口。reap 全部 supervisord(其 shutdown 连带停子 backend)并清掉
+    老运行时文件(conf/pid/sock)。无残留时是 no-op,可反复安全调用。"""
+    reaped: list[int] = []
+    for pid in _find_supervisord_pids():
+        _terminate(pid)
+        reaped.append(pid)
+    if reaped:
+        for f in (_supervisor_sock(), _supervisor_pid_file(), _supervisor_conf()):
+            f.unlink(missing_ok=True)
+    return reaped
+
+
+def _launcher_ready_or_exit(pretty: bool) -> None:
+    launcher = _launcher_bin()
+    if not launcher.exists() or not os.access(launcher, os.X_OK):
+        print_result(
+            {
+                "error": f"签名启动器缺失或不可执行: {launcher}",
+                "hint": "部署应把 miloco.app 落到 miloco_home()/miloco.app（scripts/sync-to-remote.sh 负责）",
+            },
+            pretty,
+        )
+        sys.exit(1)
+
+
+def _launchd_start(cfg: dict, pretty: bool) -> None:
+    pid = _launchd_backend_pid()
+    if pid:
+        print_result({"code": 1, "message": f"already running (pid={pid})"}, pretty)
+        sys.exit(1)
+    _reap_legacy_supervisord()  # 老 supervisord 版升级迁移:先清残留再起 launchd
+    # 兜底：supervisord 被 SIGKILL 后其子 backend 可能仍占端口。只清理可证明
+    # 属于 miloco 的残留进程(命令行含 -m miloco.main)，绝不碰任意用户进程。
+    port_pid = _find_pid_by_port(cfg["server"]["url"])
+    if port_pid and _is_miloco_backend_proc(port_pid):
+        _terminate(port_pid)
+    if _is_port_in_use(cfg["server"]["url"]):
+        print_result(
+            {"code": 1, "message": f"port already in use: {cfg['server']['url']}"},
+            pretty,
+        )
+        sys.exit(1)
+    _launcher_ready_or_exit(pretty)
+    cmd = _server_cmd_or_exit(pretty)
+    _generate_launchagent_plist(cmd)
+    ok, err = _launchd_reload()
+    if not ok:
+        print_result({"error": f"launchctl bootstrap failed: {err}"}, pretty)
+        sys.exit(1)
+    _wait_for_health(cfg, pretty, fatal_check=_launchd_crashloop_check())
+    print_result(
+        {"code": 0, "message": "started", "pid": _launchd_backend_pid()}, pretty
+    )
+    _check_lnp_blocked(pretty)
+
+
+def _launchd_stop(cfg: dict, pretty: bool, quiet: bool = False) -> None:
+    backend_pid = _launchd_backend_pid() or _find_pid_by_port(cfg["server"]["url"])
+    legacy = _reap_legacy_supervisord()  # 混合态:连带停掉残留的老 supervisord
+    acted = _launchd_is_loaded() or backend_pid is not None or bool(legacy)
+    _launchctl("bootout", _launchd_target())  # 未加载时报错,忽略
+    # 兜底:bootout 后仍在监听端口的残留进程——只清理可证明属于 miloco 的
+    # (命令行含 -m miloco.main),绝不误杀用户其它服务(与 _launchd_start 一致)。
+    port_pid = _find_pid_by_port(cfg["server"]["url"])
+    if port_pid and _is_miloco_backend_proc(port_pid):
+        _terminate(port_pid)
+    if _is_port_in_use(cfg["server"]["url"]) and not _has_port_lookup_tool():
+        print_result(
+            {
+                "error": f"端口仍被占用，且系统无 lsof / ss 可定位残留进程: {cfg['server']['url']}",
+                "hint": "请安装 lsof 后重试，或手动 kill 占用该端口的进程",
+            },
+            pretty,
+        )
+        sys.exit(1)
+    if not quiet:
+        print_result(
+            {
+                "code": 0,
+                "message": "stopped" if acted else "not running",
+                "pid": backend_pid,
+            },
+            pretty,
+        )
+
+
+def _launchd_restart(cfg: dict, pretty: bool) -> None:
+    _reap_legacy_supervisord()  # 升级迁移:先清残留 supervisord,免其 backend 占端口
+    _launcher_ready_or_exit(pretty)
+    cmd = _server_cmd_or_exit(pretty)
+    _generate_launchagent_plist(cmd)
+    ok, err = _launchd_reload()
+    if not ok:
+        print_result({"error": f"launchctl bootstrap failed: {err}"}, pretty)
+        sys.exit(1)
+    _wait_for_health(cfg, pretty, fatal_check=_launchd_crashloop_check())
+    print_result(
+        {"code": 0, "message": "restarted", "pid": _launchd_backend_pid()}, pretty
+    )
+    _check_lnp_blocked(pretty)
+
+
+def _launchd_status(cfg: dict, pretty: bool) -> None:
+    if _launchd_is_loaded():
+        pid = _launchd_backend_pid()
+        if pid:
+            print_result(
+                {
+                    "running": True,
+                    "managed": True,
+                    "pid": pid,
+                    "uptime_seconds": _process_uptime_seconds(pid),
+                    "log_file": _find_latest_log_str(),
+                    "server": {"url": cfg["server"]["url"]},
+                },
+                pretty,
+            )
+            return
+        print_result(
+            {"running": False, "managed": True, "log_file": _find_latest_log_str()},
+            pretty,
+        )
+        return
+    pid = _find_pid_by_port(cfg["server"]["url"])
+    if not pid:
+        print_result({"running": False}, pretty)
+        return
+    print_result(
+        {
+            "running": True,
+            "managed": False,
+            "pid": pid,
+            "uptime_seconds": _process_uptime_seconds(pid),
+            "log_file": _find_latest_log_str(),
+            "server": {"url": cfg["server"]["url"]},
+        },
+        pretty,
+    )
+
+
+def _launchd_kill(cfg: dict, pretty: bool) -> None:
+    _launchctl("bootout", _launchd_target())
+    killed_supervisord = _reap_legacy_supervisord()  # 逃生舱:残留老 supervisord 也清
+    killed_backend: list[int] = []
+    port_pid = _find_pid_by_port(cfg["server"]["url"])
+    if port_pid and _is_miloco_backend_proc(port_pid):  # 只杀 miloco,不误杀用户进程
+        _terminate(port_pid)
+        killed_backend.append(port_pid)
+    if _is_port_in_use(cfg["server"]["url"]):
+        leftover = _find_pid_by_port(cfg["server"]["url"])
+        if leftover and not _is_miloco_backend_proc(leftover):
+            # 端口被非 miloco 进程占用:不误杀,明确提示(与 _launchd_start 口径一致)
+            print_result(
+                {
+                    "error": f"端口 {cfg['server']['url']} 仍被非 miloco 进程占用 (pid={leftover})",
+                    "hint": "该进程不是 miloco backend，未动它；请自行处理后重试",
+                },
+                pretty,
+            )
+            sys.exit(1)
+        if not _has_port_lookup_tool():
+            print_result(
+                {
+                    "error": f"端口仍被占用，且系统无 lsof / ss 可定位残留进程: {cfg['server']['url']}",
+                    "hint": "请安装 lsof 后重试，或手动 kill 占用该端口的进程",
+                },
+                pretty,
+            )
+            sys.exit(1)
+    print_result(
+        {
+            "code": 0,
+            "message": "cleaned",
+            "killed_backend": killed_backend,
+            "killed_supervisord": killed_supervisord,
+        },
+        pretty,
+    )
 
 
 # ─── 命令定义 ────────────────────────────────────────────────────────────────
@@ -378,6 +811,14 @@ def service_group():
 @click.option("--pretty", is_flag=True)
 def service_start(foreground, pretty):
     """启动 Miloco Backend 服务。"""
+    # macOS: 走 launchd（签名启动器绕过 LNP）。--foreground 仍直接 execvp 便于调试，
+    # 但此时 python 以 euid 501 直跑、受 LNP 限，本地中枢连接不可用（仅供本地排障）。
+    if _use_launchd() and not foreground:
+        from miloco_cli.config import load_config
+
+        _launchd_start(load_config(), pretty)
+        return
+
     # 检查 supervisor 托管的进程是否已在运行
     if _supervisord_is_running():
         backend_pid = _get_backend_pid_from_supervisor()
@@ -432,7 +873,7 @@ def service_start(foreground, pretty):
                 print_result({"error": f"supervisord failed to start: {e}"}, pretty)
                 sys.exit(1)
 
-        _wait_for_health(cfg, pretty)
+        _wait_for_health(cfg, pretty, fatal_check=_supervisor_fatal)
         backend_pid = _resolve_backend_pid(cfg)
         print_result({"code": 0, "message": "started", "pid": backend_pid}, pretty)
 
@@ -449,6 +890,10 @@ def _do_stop(pretty: bool, quiet: bool = False) -> None:
     from miloco_cli.config import load_config
 
     cfg = load_config()
+
+    if _use_launchd():
+        _launchd_stop(cfg, pretty, quiet)
+        return
 
     # reap 前先快照：是否有可停对象 + backend pid（reap 会连带停 backend，事后无从得知）
     control_up = _supervisord_is_running()
@@ -505,6 +950,12 @@ def _do_stop(pretty: bool, quiet: bool = False) -> None:
 @click.pass_context
 def service_restart(ctx, pretty):
     """重启 Miloco Backend 服务。"""
+    if _use_launchd():
+        from miloco_cli.config import load_config
+
+        _launchd_restart(load_config(), pretty)
+        return
+
     if _supervisord_is_running():
         cmd = _server_cmd_or_exit(pretty)
         _generate_supervisor_conf(shlex.join(cmd))
@@ -521,7 +972,7 @@ def service_restart(ctx, pretty):
         from miloco_cli.config import load_config
 
         cfg = load_config()
-        _wait_for_health(cfg, pretty)
+        _wait_for_health(cfg, pretty, fatal_check=_supervisor_fatal)
         backend_pid = _resolve_backend_pid(cfg)
         print_result({"code": 0, "message": "restarted", "pid": backend_pid}, pretty)
     else:
@@ -536,6 +987,10 @@ def service_status(pretty):
     from miloco_cli.config import load_config
 
     cfg = load_config()
+
+    if _use_launchd():
+        _launchd_status(cfg, pretty)
+        return
 
     # 优先从 supervisor 查询
     if _supervisord_is_running():
@@ -609,6 +1064,11 @@ def service_kill(pretty):
     from miloco_cli.config import load_config
 
     cfg = load_config()
+
+    if _use_launchd():
+        _launchd_kill(cfg, pretty)
+        return
+
     killed_supervisord: list[int] = []
     killed_backend: list[int] = []
 

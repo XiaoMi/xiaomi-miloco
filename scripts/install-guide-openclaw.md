@@ -33,6 +33,8 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare
 ```
 
+> **macOS 用户**：安装完成后，打开 **系统设置 → 隐私与安全性 → 本地网络**，找到 **miloco** 并打开开关。否则 macOS 会拦截中枢网关连接（Errno 65）。跳过此步不影响其它功能，仅本地中枢不可用。
+
 ### 1.2 解析输出
 
 脚本会输出包裹在 `--- AGENT_JSON_START ---` / `--- AGENT_JSON_END ---` 之间的 JSON：
@@ -82,6 +84,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 根据 `account.is_bound`：
 
 **已绑定：**
+
 > 当前已绑定米家账号：{account.user}
 > 是否继续使用当前账号？还是重新绑定？
 
@@ -89,6 +92,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 - 重新绑定 → 给用户 `account.bind_url`，等用户完成授权后提供授权码
 
 **未绑定：**
+
 > Miloco 需要绑定小米账号才能控制智能设备。
 > 请在浏览器中打开以下链接完成授权：
 >
@@ -103,7 +107,9 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 根据 `model.configured`：
 
 **已配置：**
+
 > 当前模型配置：
+>
 > - Model: {model.model}
 > - Base URL: {model.base_url}
 > - API Key: {model.api_key_masked}
@@ -114,10 +120,12 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 - 重新配置 → 收集新的 API Key（及可选的 model/base_url）
 
 **未配置：**
+
 > Miloco 的感知引擎需要一个多模态大模型（Omni Model）来理解摄像头画面。
 > 默认推荐 **小米 MiMo** 模型。
 >
 > 请提供：
+>
 > 1. **API Key** — 从 https://platform.xiaomimimo.com 获取
 > 2. **Model 名称**（可选，默认 `xiaomi/mimo-v2.5`）
 > 3. **Base URL**（可选，默认 `https://api.xiaomimimo.com/v1`）
@@ -144,13 +152,13 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 
 **参数说明：**
 
-| 参数 | 必需 | 说明 |
-|------|------|------|
-| `--account-auth` | 仅新绑定时 | 用户提供的 base64 授权码 |
-| `--omni-api-key` | 仅需配置模型时 | API Key |
-| `--omni-model` | 否 | 模型名，默认 `xiaomi/mimo-v2.5` |
-| `--omni-base-url` | 否 | Base URL，默认 `https://api.xiaomimimo.com/v1` |
-| `--skip-openclaw` | 否 | 跳过 OpenClaw 插件安装 |
+| 参数              | 必需           | 说明                                           |
+| ----------------- | -------------- | ---------------------------------------------- |
+| `--account-auth`  | 仅新绑定时     | 用户提供的 base64 授权码                       |
+| `--omni-api-key`  | 仅需配置模型时 | API Key                                        |
+| `--omni-model`    | 否             | 模型名，默认 `xiaomi/mimo-v2.5`                |
+| `--omni-base-url` | 否             | Base URL，默认 `https://api.xiaomimimo.com/v1` |
+| `--skip-openclaw` | 否             | 跳过 OpenClaw 插件安装                         |
 
 - 如果用户选择沿用已有账号，省略 `--account-auth`
 - 如果用户选择沿用已有模型配置，省略所有 `--omni-*` 参数
@@ -162,6 +170,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 > 安装完成！执行 `openclaw gateway restart` 重启网关即可使用。
 >
 > 常用命令：
+>
 > - `miloco-cli service status` — 查看服务状态
 > - `miloco-cli service logs -f` — 实时日志
 > - `miloco-cli device list` — 查看设备列表
@@ -171,15 +180,15 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 
 ## 故障排除
 
-| 问题 | 解法 |
-|------|------|
-| `uv` 未找到 | `curl -LsSf https://astral.sh/uv/install.sh \| sh && export PATH="$HOME/.local/bin:$PATH"` |
-| Python 版本不满足 | `uv python install 3.14` |
-| miloco-cli 未找到 | 确认 `~/.local/bin` 在 PATH 中 |
-| 服务启动失败 | `miloco-cli service logs` 查看日志 |
-| 账号绑定失败 | 确认服务正在运行：`miloco-cli service status` |
-| 模型下载失败 | 检查网络，可设置 `MILOCO_DOWNLOAD_URL` 指定镜像 |
-| openclaw 未安装或版本过低 | 需 >= 2026.5.2，参考 https://openclaw.ai 安装 |
+| 问题                      | 解法                                                                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------ |
+| `uv` 未找到               | `curl -LsSf https://astral.sh/uv/install.sh \| sh && export PATH="$HOME/.local/bin:$PATH"` |
+| Python 版本不满足         | `uv python install 3.14`                                                                   |
+| miloco-cli 未找到         | 确认 `~/.local/bin` 在 PATH 中                                                             |
+| 服务启动失败              | `miloco-cli service logs` 查看日志                                                         |
+| 账号绑定失败              | 确认服务正在运行：`miloco-cli service status`                                              |
+| 模型下载失败              | 检查网络，可设置 `MILOCO_DOWNLOAD_URL` 指定镜像                                            |
+| openclaw 未安装或版本过低 | 需 >= 2026.5.2，参考 https://openclaw.ai 安装                                              |
 
 ---
 

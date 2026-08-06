@@ -10,12 +10,14 @@
 #   --install-only       不 rsync 不构建, 仅在远端触发安装 (复用远端已有 dist/)
 #
 # 构建包 (传给 build.sh, 不指定则全量):
-#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw 任意子集
+#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw,web,hermes,launcher 任意子集
+#                        launcher = macOS 签名启动器（部署到 darwin 时必需）
 #
 # 安装组件 (远端, 逗号分隔):
-#   --install <list>     miloco | miloco-cli | openclaw | supervisor
+#   --install <list>     miloco | miloco-cli | openclaw | supervisor | launcher
 #                        all (默认) | none
 #                        miloco 自动带 miloco-miot wheel
+#                        launcher = macOS 签名启动器 miloco.app（仅 darwin 生效）
 #
 # 其他:
 #   -h, --help
@@ -25,7 +27,7 @@
 
 set -euo pipefail
 
-usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; }
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; }
 
 # ─── 参数解析 ──────────────────────────────────────────────────────────────
 
@@ -59,7 +61,7 @@ REMOTE_PATH="${REMOTE_PATH:-~/miloco-plugin}"
 LOCAL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$INSTALL_LIST" in
-    all)  INSTALL_LIST="miloco,miloco-cli,openclaw,supervisor" ;;
+    all)  INSTALL_LIST="miloco,miloco-cli,openclaw,supervisor,launcher" ;;
     none) INSTALL_LIST="" ;;
 esac
 
@@ -185,7 +187,28 @@ if [[ -n "$INSTALL_LIST" ]]; then
         uv tool install "$CLI_WHEEL" --force
     fi
 
-    if want supervisor; then
+    # macOS: 落地签名启动器（miloco.app）到 miloco_home，让 backend 作为其子进程
+    # 绕过 Local Network Privacy（见 cli service.py 的 launchd 分支）。启动器是 miloco
+    # 在 mac 运行的硬依赖，故装 miloco 即隐式带上（也支持显式 --install launcher）。
+    if [[ "$(uname -s)" == Darwin ]] && { want miloco || want launcher; }; then
+        LAUNCHER_TGZ=$(ls "$DIST"/miloco-launcher-darwin*.tar.gz 2>/dev/null | head -1)
+        if [[ -z "$LAUNCHER_TGZ" ]]; then
+            echo "[remote] 缺 miloco-launcher-darwin tar（--packages 含 launcher?）" >&2; exit 1
+        fi
+        MH="${MILOCO_HOME:-$HOME/.openclaw/miloco}"
+        echo "[remote] 安装 macOS 签名启动器 → $MH/miloco.app"
+        mkdir -p "$MH"
+        rm -rf "$MH/miloco.app"
+        tar -C "$MH" -xzf "$LAUNCHER_TGZ"          # 保留签名字节（cdhash 稳定）
+        chmod +x "$MH/miloco.app/Contents/MacOS/miloco"
+        codesign -v "$MH/miloco.app" 2>/dev/null \
+            && echo "[remote]   签名校验 OK" \
+            || echo "[remote]   WARN: 签名校验失败，LNP 授权可能需重新打勾"
+    fi
+
+    # macOS 用 launchd、不用 supervisord（见 cli service.py），darwin 跳过安装
+    # （与 install.py 的 darwin 分支一致，避免装个用不上的 supervisor）。
+    if want supervisor && [[ "$(uname -s)" != Darwin ]]; then
         echo "[remote] uv tool install supervisor --force"
         uv tool install supervisor --force
     fi

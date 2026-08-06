@@ -714,9 +714,35 @@ class Installer:
     def _step_install(self) -> None:
         self._step_header("install.title", "install.subtitle")
         # dev 装本地 dist/；release 装下载归档解压后的缓存目录（见 _get_src_dir）。
-        self._install_from_dir(self._get_src_dir(), reinstall=self.dev)
-        self._install_supervisor()
+        src_dir = self._get_src_dir()
+        self._install_from_dir(src_dir, reinstall=self.dev)
+        if sys.platform == "darwin":
+            # macOS 不用 supervisord：装 vendored 签名启动器 miloco.app，backend 由
+            # launchd → 启动器 → python 拉起以绕过 Local Network Privacy
+            # （见 cli service.py 的 launchd 分支）。
+            self._install_launcher(src_dir)
+        else:
+            self._install_supervisor()
         self._configure_python_bin()
+
+    def _install_launcher(self, src_dir: Path) -> None:
+        tgz = _visible(src_dir.glob("miloco-launcher-darwin*.tar.gz"))
+        if not tgz:
+            self.ui.warn(self.ui.i18n.t("install.launcher_missing"))
+            return
+        app_dir = self.miloco_home / "miloco.app"
+        shutil.rmtree(app_dir, ignore_errors=True)
+        self.miloco_home.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tgz[0]) as tf:
+            _tarfile_extract_safe(tf, self.miloco_home)  # 保留签名字节
+        exe = app_dir / "Contents" / "MacOS" / "miloco"
+        try:
+            exe.chmod(0o755)
+        except OSError:
+            pass
+        self.ui.step_ok(self.ui.i18n.t("install.launcher_ok", str(app_dir)))
+        # macOS 用 launchd 启动器绕过 LNP:首次启动后在系统设置里打开本地网络开关。
+        self.ui.warn(self.ui.i18n.t("install.lnp_hint"))
 
     def _install_from_dir(self, src_dir: Path, *, reinstall: bool) -> None:
         if not src_dir.is_dir():

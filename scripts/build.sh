@@ -7,7 +7,7 @@
 #
 # 选项:
 #   --version <ver>     覆盖所有包的版本号
-#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web）
+#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web,hermes,launcher）
 #   -h, --help          显示帮助
 #
 # 注：每次构建前会默认清空 dist/
@@ -26,7 +26,7 @@ export COPYFILE_DISABLE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$PROJECT_ROOT/dist"
-ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web,hermes"
+ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web,hermes,launcher"
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────
 
@@ -177,6 +177,22 @@ build_miloco_miot() {
 build_miloco() {
     log "构建 miloco ..."
     (cd "$PROJECT_ROOT/backend/miloco" && uv build --out-dir "$DIST_DIR")
+}
+
+build_miloco_launcher() {
+    # macOS 签名启动器：随包分发 vendored 的 miloco.app（预编译的通用二进制 +
+    # adhoc 签名，见 launcher/），部署时落到 mac 让后端作为其子进程绕过 LNP。
+    # 只是把已签好的 app 打成 tar（保留签名字节，cdhash 稳定），不编译——
+    # Linux 构建端也能做，且不能改动其字节。通用二进制 arm64+x86_64 一包通吃 darwin。
+    log "打包 macOS 签名启动器 (miloco.app) ..."
+    local app_dir="$PROJECT_ROOT/launcher/darwin/miloco.app"
+    if [[ ! -f "$app_dir/Contents/MacOS/miloco" ]]; then
+        log "  WARN: 未找到 vendored 启动器 $app_dir，跳过"
+        return 0
+    fi
+    tar -C "$PROJECT_ROOT/launcher/darwin" -czf \
+        "$DIST_DIR/miloco-launcher-darwin.tar.gz" miloco.app
+    log "  -> miloco-launcher-darwin.tar.gz"
 }
 
 build_miloco_cli() {
@@ -381,6 +397,17 @@ pack_platform_bundles() {
         local stage="$tmp_root/$key"
         mkdir -p "$stage"
         cp "$miloco_whl" "$cli_whl" "$miot_whl" "$tgz" "$models_tar" "$stage/"
+        # macOS 签名启动器（仅 darwin 归档需要）：release 安装时 install.py 从 bundle 里取,
+        # backend 在 mac 由 launchd→启动器→python 起以绕过 LNP。缺失则该 mac 归档起不了 backend。
+        if [[ "$key" == darwin-* ]]; then
+            local launcher_tgz
+            launcher_tgz=$(ls "$DIST_DIR"/miloco-launcher-darwin*.tar.gz 2>/dev/null | head -1)
+            if [[ -n "$launcher_tgz" ]]; then
+                cp "$launcher_tgz" "$stage/"
+            else
+                log "  WARN: 缺 macOS 签名启动器 tar，$key 归档在 mac 无法起 backend（LNP）"
+            fi
+        fi
         # Hermes 插件 tarball（可选；缺失时只 warn，不阻塞其余平台归档）
         local hermes_tgz
         hermes_tgz=$(ls "$DIST_DIR"/miloco-hermes-plugin-*.tar.gz 2>/dev/null | head -1)
@@ -543,6 +570,7 @@ main() {
     if should_build "miloco-cli";  then build_miloco_cli; fi
     if should_build "openclaw";    then build_openclaw; fi
     if should_build "hermes";     then build_hermes; fi
+    if should_build "launcher";   then build_miloco_launcher; fi
 
     # 更新 manifest
     update_manifest

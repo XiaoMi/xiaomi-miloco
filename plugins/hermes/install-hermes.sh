@@ -7,7 +7,7 @@
 #   3. 复制 miloco 插件到 ~/.hermes/plugins/miloco/（架构 #1+#2 后不再复制独立 adapter 进程,入站走 backend AgentPlatformAdapter）
 #   4. 自动 patch ${MILOCO_HOME}/config.json 的 agent 段（webhook_url + auth_bearer，备份原文件）
 #   5. 自动给 ~/.hermes/.env 补 API_SERVER_KEY（如缺失则生成；存在则复用）
-#   6. 重启 miloco-backend（supervisord 管理），确保适配器收敛到 backend AgentPlatformAdapter
+#   6. 重启 miloco-backend（进程管理器托管：Linux=supervisord / macOS=launchd），确保适配器收敛到 backend AgentPlatformAdapter
 #   7. 打印终态：后端 PID / 日志路径 / 后续唯一要做的步骤
 #
 # 幂等：再跑一次不会破坏现有配置，会重启 backend 保留同一 Bearer。
@@ -207,26 +207,21 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
     diag "plugin enabled" 0 "找不到 hermes CLI"
   fi
 
-  # 10. miloco-backend 在跑（supervisord 管理）
-  # 架构 #1+#2 后适配器收敛到 backend AgentPlatformAdapter，
-  # 不再需要独立 adapter 进程。
-  sv_running=0
-  if pgrep -f "supervisord.*$MILOCO_HOME" >/dev/null 2>&1; then
-    sv_running=1
+  # 10. miloco-backend 由进程管理器托管（Linux=supervisord / macOS=launchd）
+  # 架构 #1+#2 后适配器收敛到 backend AgentPlatformAdapter，不再需要独立 adapter 进程。
+  # 不直接探 supervisord（macOS 走 launchd、没有 supervisord），统一用
+  # miloco-cli service status 的 managed+running（跨平台，与真实管理器一致）。
+  backend_managed=0
+  if command -v miloco-cli >/dev/null 2>&1; then
+    backend_managed="$(miloco-cli service status 2>/dev/null | "$PY" -c 'import sys,json
+r=sys.stdin.read().strip()
+d=json.loads(r) if r[:1]=="{" else {}
+print("1" if d.get("running") and d.get("managed") else "0")' 2>/dev/null || echo 0)"
   fi
-  backend_running=0
-  if [ "$sv_running" -eq 1 ] && command -v supervisorctl >/dev/null 2>&1; then
-    st="$(SKIP_PLUGIN_CHECK=0 supervisorctl -c "$MILOCO_HOME/supervisord.conf" status miloco-backend 2>/dev/null || echo "")"
-    if [[ "$st" == *RUNNING* ]]; then
-      backend_running=1
-    fi
-  fi
-  if [ "$backend_running" -eq 1 ]; then
-    diag "miloco-backend (supervisord)" 1 "RUNNING"
-  elif [ "$sv_running" -eq 1 ]; then
-    diag "miloco-backend (supervisord)" 0 "supervisord 在跑但 miloco-backend 未启动 → 重跑 install-hermes.sh"
+  if [ "$backend_managed" = "1" ]; then
+    diag "miloco-backend 托管中" 1 "RUNNING"
   else
-    diag "miloco-backend (supervisord)" 0 "supervisord 未在跑 → 重跑 install-hermes.sh"
+    diag "miloco-backend 托管中" 0 "未由进程管理器托管 → miloco-cli service restart（macOS=launchd / Linux=supervisord）"
   fi
 
   # 11. 检查旧 launchd adapter 是否残留（旧架构遗留）
