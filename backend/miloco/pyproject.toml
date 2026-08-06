@@ -14,6 +14,11 @@ dependencies = [
   "numpy>=2.2.0",
   "opencv-python-headless>=4.13.0.92",
   "onnxruntime>=1.27.0",
+  # HEIC/HEIF 解码（iPhone 相机默认格式）。选 pi-heif 而非 pillow-heif：两者同作者、同样封装
+  # libheif，但 pi-heif 只带解码器（libde265），不捆绑 x265 编码器，PyPI 分类器因此是 LGPLv3
+  # 而非 GPLv2；我们只需要解码。ffmpeg 走不通——它把 HEIC 的 tile grid 当成几十条独立
+  # 512x512 视频流暴露、不做拼接，拿到的是瓦片而非整图。
+  "pi-heif>=1.4.0",
   "Pillow>=12.2.0",
   "psutil>=7.2.2",
   "pydantic>=2.13.4",

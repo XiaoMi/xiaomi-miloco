@@ -21,8 +21,8 @@ from miloco.person.router import (
 )
 
 _PID = "33333333-3333-4333-8333-333333333333"
-# 真·PNG / BMP 字节（cv2 可解码），供端点用例：PNG 是白名单格式；BMP 用于「可解码但
-# 非白名单格式」→ 400 的用例。
+# 真·PNG / BMP 字节（cv2 可解码），供端点用例：PNG 可原字节直通落盘；BMP 用于「可解码但
+# 不能直通」→ 归一化成 webp 的用例。
 _PNG = cv2.imencode(".png", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
 _BMP = cv2.imencode(".bmp", np.zeros((4, 4, 3), np.uint8))[1].tobytes()
 
@@ -143,12 +143,14 @@ async def test_post_404_no_person(monkeypatch, lib):
     assert ei.value.status_code == 404
 
 
-async def test_post_unsupported_format_400(wired):
-    # 内容可解码但非白名单格式（BMP）→ 400（格式由内容定，不看文件名后缀）
+async def test_post_non_passthrough_format_normalized(wired, lib):
+    # 行为变更（HEIC 支持一并带来）：可解码但不能原字节落盘的格式（BMP/TIFF/GIF/AVIF/HEIC）
+    # 不再 400，而是解码后重编成无损 webp 落盘。原先「只放 jpg/png/webp」造成 observe 能传、
+    # 头像被拒的不对称，正是本轮要消掉的裂缝。
     up = UploadFile(filename="a.png", file=io.BytesIO(_BMP))
-    with pytest.raises(HTTPException) as ei:
-        await upload_person_avatar(_PID, image=up, current_user="t")
-    assert ei.value.status_code == 400
+    res = await upload_person_avatar(_PID, image=up, current_user="t")
+    assert res.data["avatar_ext"] == "webp"
+    assert lib.person_avatar_path(_PID).suffix == ".webp"
 
 
 async def test_post_ext_from_content_not_filename(wired, lib):
