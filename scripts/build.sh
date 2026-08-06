@@ -599,7 +599,8 @@ main() {
     # 别收紧成 is_full_build：模型 tar 的消费方不止平台归档，还有 install.py 的
     # dev 通道（直接 glob 仓库 dist/），一旦子集构建整段跳过，「--packages <子集>
     # 再 install.sh --dev」会在 wheel 全装完之后才 fail，前面几分钟白跑。
-    # 而 --help 里印的那行包列表恰好漏了 hermes，照抄就是一次子集构建。
+    # 注意 is_full_build 是**字面全等**（"$PACKAGES" == "$ALL_PACKAGES"）：照抄
+    # --help 那行（已含全部 6 个包）能过，但少写一个、或只是换个顺序，都算子集。
     if should_build "miloco"; then
         pack_models
     else

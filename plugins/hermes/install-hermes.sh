@@ -675,16 +675,35 @@ PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 #   2. 都没有 → scripts/fetch_models.py 按 lock 的 sha256 从 Release 拉
 #   3. 连下载器也没有 / 下载失败 → warn 但不中断（感知降级，插件其余照装）
 #
-# 跳过条件：MILOCO_HOME/models/*.onnx 已存在（用户已装）。
+# 跳过条件：MILOCO_HOME/models/ 已按 scripts/models.lock.json 齐全（用户已装）。
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
+
+# 判「齐不齐」的工具先就位：下面的短路和最后那道门禁用的是同一个判据。
+# --check --strict 不联网、只比本地文件与 lock 的 size+sha256，缺任何一个（含可选）
+# 都判不齐 —— 可选模型缺了也该补，否则 bge 去重 / VAD 会静默降级。
+FETCH_MODELS="$HERE/../../scripts/fetch_models.py"
+# 装到 $HERMES_PLUGINS_DIR 之后 $HERE 旁边没有 scripts/，退回旧的弱判据。
+[ -f "$FETCH_MODELS" ] || FETCH_MODELS=""
+models_ready() {
+  if [ -n "$FETCH_MODELS" ]; then
+    "$PYTHON" "$FETCH_MODELS" --check --strict --quiet --dest "$MILOCO_HOME/models" >/dev/null 2>&1
+  else
+    compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1
+  fi
+}
 
 # Release 装机场景 install.py step 7「准备感知模型」已经从 miloco-models-*.tar.gz
 # 解压 5 个 ONNX 到 $MILOCO_HOME/models/。本步只是 dev/fork 场景的兜底（从 git
-# checkout 或 miloco 包内 cp），已经有模型就跳过 fork/pkg 搜索，避免误报
+# checkout 或 miloco 包内 cp），已经齐了就跳过 fork/pkg 搜索，避免误报
 # 「找不到 ONNX 模型源目录」。
-if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
-  onnx_count=$(ls "$MILOCO_HOME/models"/*.onnx 2>/dev/null | wc -l | tr -d ' ')
-  info "  $MILOCO_HOME/models/ 已有 $onnx_count 个 ONNX 模型（install.py step 7 已解压 release tarball），跳过 fork/pkg 兜底"
+#
+# 短路判据必须是「齐不齐」而不是「有没有」：按「有没有」的话，目标目录里躺着 1 个
+# silero_vad.onnx（上次下到一半断网 / 手工拷过一个）就会跳过整段 cp，而下面那道
+# 门禁照样判不齐，于是从 Release 联网下 ~75MB —— 那 4 个文件此刻就在旁边的 checkout
+# 里，一次 cp 就够。断网时更糟：下载失败只 warn 不中断，安装报成功，首次 perceive
+# 直接 models_missing，而完整的本地副本从头到尾都在一个目录之外。
+if models_ready; then
+  info "  $MILOCO_HOME/models/ 已按 lock 齐全，跳过 fork/pkg 兜底"
   MODEL_SRC=""
 else
   # 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
@@ -723,24 +742,13 @@ if [ -n "$MODEL_SRC" ]; then
   info "  模型目录：$MILOCO_HOME/models/"
 fi
 
-# 兜底判据独立于上面的 cp（不能再挂 elif）：cp 只保证"源目录里有的都过来了"，
+# 复判一次，且独立于上面的 cp（不能挂 elif）：cp 只保证"源目录里有的都过来了"，
 # 不保证齐。模型不再进 git 之后源目录改由 fetch_models.py 填充，而它部分失败时是
 # "成功的已落地 + exit 1" —— 一次失败的构建就能留下只有 1 个 .onnx 的源目录。
 # 旧判据「一个 onnx 都没有才下载」在 cp 完之后恒为假，于是"新增 1 个 → 零 warn →
-# 安装成功 → 首次 perceive 就 MODELS_MISSING"。改成按 lock 逐个比字节。
-#
-# --check --strict 不联网、只比本地文件与 lock 的 size+sha256，缺任何一个（含可选）
-# 都判不齐 —— 可选模型缺了也该补，否则 bge 去重/VAD 会静默降级。
-FETCH_MODELS="$HERE/../../scripts/fetch_models.py"
+# 安装成功 → 首次 perceive 就 MODELS_MISSING"。
 models_ok=0
-if [ -f "$FETCH_MODELS" ]; then
-  "$PYTHON" "$FETCH_MODELS" --check --strict --quiet --dest "$MILOCO_HOME/models" >/dev/null 2>&1 \
-    && models_ok=1
-else
-  # 装到 $HERMES_PLUGINS_DIR 之后 $HERE 旁边没有 scripts/，退回旧的弱判据：有 .onnx 就算数。
-  FETCH_MODELS=""
-  compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1 && models_ok=1
-fi
+models_ready && models_ok=1
 
 if [ "$models_ok" -eq 1 ]; then
   : # 齐了，什么都不用做

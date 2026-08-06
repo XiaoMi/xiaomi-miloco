@@ -185,8 +185,16 @@ cmd_upload() {
 cmd_verify() {
     need_gh
     local assets
-    assets="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, size, digest}]')" \
-        || die "读不到 $REPO 的 Release '$TAG' 资产清单（tag 不存在？gh 无权限？）"
+    if ! assets="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, size, digest}]')"; then
+        # 用 return 而不是 die：die 是 exit，在函数里退的是整个 shell，cmd_upload 那句
+        # `if ! cmd_verify` 接不住。而那次对账是**故意**设计成非致命的 —— 跑到那儿资产
+        # 已经推上 Release、lock 也已落盘，一次 API 抖动不该把「别忘了提交 lock」那行
+        # 一起吞掉：维护者看到 FATAL + 退出码 1，会读成「上传失败」，于是要么重跑一遍
+        # upload，要么干脆没提交刷新后的 lock，把 CI 的对账门禁留给下一个人踩。
+        # 直接跑 verify 时退出码不变：case 分支拿到 1，set -e 照样让脚本以 1 退出。
+        log "对账失败: 读不到 $REPO 的 Release '$TAG' 资产清单（tag 不存在？gh 无权限？网络抖动？）"
+        return 1
+    fi
 
     # 走环境变量而不是 stdin：stdin 已经被 python3 - 的 heredoc 占了。
     MILOCO_ASSETS_JSON="$assets" python3 - "$LOCK" "$REPO" "$TAG" <<'PY'
