@@ -17,12 +17,7 @@ import pytest
 from miot.camera import MIoTCameraInstance
 from miot.client import MIoTClient
 from miot.storage import MIoTStorage
-from miot.types import (
-    MIoTCameraVideoQuality,
-    MIoTDeviceInfo,
-    MIoTOauthInfo,
-    MIoTUserInfo,
-)
+from miot.types import MIoTCameraVideoQuality, MIoTOauthInfo, MIoTUserInfo
 from pydantic_core import to_jsonable_python
 
 _LOGGER = logging.getLogger(__name__)
@@ -508,56 +503,3 @@ async def test_miot_camera_async(
     await camera_ins.unregister_raw_stream_async()
 
     await miot_client.deinit_async()
-
-
-# ---------------------------------------------------------------------------
-# LAN 状态合并（纯单元，无需凭据 / 网络）
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-async def test_get_devices_async_merges_cross_subnet():
-    """回归钉：``cross_subnet`` 必须与 ``lan_online`` 一起从 LAN 表搬进设备 buffer。
-
-    上层 ``_camera_info_dict`` / ``_device_info_dict`` 是本 buffer 的 deepcopy、
-    每次 refresh 全量重建。若这里漏搬 ``cross_subnet``，它就只剩上层 LAN 变化回调
-    一个增量写入点，而那个回调只在在线状态**翻转**时触发——refresh 一旦把它抹回
-    None 就再也不会恢复，令 ``stream_nat_blocked`` 恒 False、跨 NAT 诊断永不触发。
-    """
-    from unittest.mock import AsyncMock
-
-    from miot.types import MIoTLanDeviceInfo
-
-    device = MIoTDeviceInfo(
-        did="d1",
-        name="Cam",
-        uid="u1",
-        urn="urn:x",
-        model="chuangmi.camera.81ac1",
-        manufacturer="chuangmi",
-        connect_type=0,
-        pid=0,
-        token="t",
-        online=True,
-        voice_ctrl=0,
-        order_time=0,
-    )
-
-    client = MIoTClient.__new__(MIoTClient)  # 跳过重量级 __init__
-    client._device_buffer = None
-    client._http_client = AsyncMock()
-    client._http_client.get_devices_async = AsyncMock(return_value={"d1": device})
-    client._lan_client = AsyncMock()
-    client._lan_client.get_devices_async = AsyncMock(
-        return_value={
-            "d1": MIoTLanDeviceInfo(
-                did="d1", online=True, ip="10.9.9.9", cross_subnet=True
-            )
-        }
-    )
-
-    devices = await client.get_devices_async()
-
-    assert devices["d1"].lan_online is True
-    assert devices["d1"].local_ip == "10.9.9.9"
-    assert devices["d1"].cross_subnet is True

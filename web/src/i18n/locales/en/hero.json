@@ -32,7 +32,6 @@
     "disabledLanHint": "Camera isn't reachable on the LAN (it may be on a different network from the miloco host); make sure the host and camera are on the same LAN before enabling.",
     "disabledLensHint": "Camera lens is closed; open the lens in Xiaomi Home before enabling.",
     "disabledCapacityHint": "Reached the max cameras enabled at once; turn one off first.",
-    "streamErrorCrossSubnetNat": "Cross-subnet streaming failed. Try putting the camera and host on the same network, or set the router to Full Cone / Open NAT",
     "refreshCamerasAria": "Refresh camera status",
     "refreshCamerasTitle": "Refresh",
     "toggleAriaInUse": "Disable {{name}}",
