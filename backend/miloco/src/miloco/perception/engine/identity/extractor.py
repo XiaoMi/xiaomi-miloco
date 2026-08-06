@@ -439,10 +439,25 @@ def extract_from_video(
             for tr in tracking_results:
                 if tr.get("class_id") != Detection.CLASS_HUMAN:
                     continue
+                # coasting(本帧未匹配, bbox 停在上一次真匹配的位置)不裁图: 人已经不在
+                # 那儿了, 裁出的背景/他人图会进该 track 的 top-K 候选、经注册写进身份库。
+                # 下面的质量门拦不住它——置信度同样停在最后一次真匹配的值(通常过阈值),
+                # 背景裁图清晰度也不低; 打分公式同样没有"本帧是否真匹配"这一项。
+                # 与 IdentityEngine 各消费闸同口径。
+                # 召回代价有界, 但上界跟随配置而非代码常量: 本路径 tracker 按 fps=1 建,
+                # 每个关联缺口最多少 sec_to_frames(deep_sort.max_age_sec, 1) 张候选
+                # (当前 yaml 配 2.0 → 2 张), 少掉的正是幻影框那些。调大该 yaml 项会
+                # 同比放宽这个上界, 需连同 min_track_hits 的下限一起评估。
+                # 缺字段按真检测兜底(同全链路 fail-open 口径)。
+                if not tr.get("detected_this_frame", True):
+                    continue
                 tid = int(tr["id"])
                 bbox_xywh = tr["bbox"]
                 bbox_xyxy = tr["xyxy"]
-                conf = float(tr.get("confidence", 0.0))
+                # 缺 confidence 按满置信兜底,口径同 IdentityEngine 侧:tracker 决定
+                # 维持该 track 即已过检测阈值,"未知"不等于"零信";取 0.0 会被下面的
+                # 质量门全数拒掉。
+                conf = float(tr.get("confidence", 1.0))
                 crop = _crop_with_padding(frame, bbox_xywh)
                 if crop is None:
                     continue

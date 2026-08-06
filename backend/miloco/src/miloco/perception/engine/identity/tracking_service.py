@@ -8,8 +8,16 @@
     提供 ReID embedding 复用入口。
 
 mode 取值：``"mock" | "real" | "deep_sort"``。fast/detect_only 档位已取消。
-灰度策略：default_config.yaml::tracking_service_mode 先保持 "real",PR 2 上线后切
-"deep_sort" 灰度 1 周再放大。
+灰度已完成：出厂值由 ``config/settings.yaml`` 的
+``perception.engine.identity.tracking_service_mode`` 给出,自 2.0 起即为 ``"deep_sort"``;
+回退路径是把该项改回 ``"real"``。
+
+⚠️ 两条真实路径的 coasting 语义不同,这是下游各闸有没有作用的分水岭：
+``DeepSortTrackingService`` 会继续输出人已离开/跟丢后的 track(``detected_this_frame``
+为 False),其 bbox 是**上一次真匹配时的检测框、原地冻结**——Kalman 只推进
+mean/covariance 供关联门控用,不回写输出框,所以残留框不会外推移动、只是越来越旧;
+``RealTrackingService``(``SortTracker``) 在输出前已 pre-filter 掉这类 track、只给本帧
+真匹配到的框。故 IdentityEngine 侧各 coasting 闸只在 ``"deep_sort"`` 模式下真正起作用。
 """
 
 from __future__ import annotations
@@ -83,6 +91,14 @@ def _build_response(
             face_id="none",
             track_id=r["id"],
             box_info=box_info,
+            # tracker 的两个逐帧字段必须穿过本层：下游各 coasting 闸与 tier_u 质量门
+            # 直接消费，丢掉不会报错、只会静默退化成"恒真检测 / 恒满置信"。
+            # 两个 fallback 都取"乐观值"，与接缝另一侧(IdentityEngine / extractor)同
+            # 口径：tracker 肯输出这个 track，说明检测已过 detector_conf_threshold，
+            # 缺字段是"未知"而非"否定"。反过来取 fail-closed 值会让缺字段的路径整条
+            # 失效(无 track 进候选 / 候选被质量门拒光)，是更坏的失败模式。
+            detected_this_frame=bool(r.get("detected_this_frame", True)),
+            detector_confidence=float(r.get("confidence", 1.0)),
         ))
     return TrackingResponse(
         frame_info=FrameInfo(

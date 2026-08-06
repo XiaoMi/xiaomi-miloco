@@ -1278,7 +1278,8 @@ async def register_preview(
             mdir = str(get_settings().directories.models_dir)
             # 用 yaml-resolved DeepSortConfigDC,跟主流程 tracking_service 共享同一份
             # 配置(尤其 max_age_sec)。硬编码 ``DeepSortConfigDC()`` 默认 max_age_sec=1.0
-            # 会让视频注册路径只容忍 1 帧 miss,而主流程已被 yaml 调到 3.0;边界帧
+            # 会让视频注册路径只容忍 1 帧 miss,而 yaml 实配 2.0(见 identity/
+            # default_config.yaml::deep_sort.max_age_sec);边界帧
             # confidence 抖动时 track 过早杀死、分裂为多 track,误触发号码图分支。
             return DeepSortTracker(
                 detector=_load_detector(),
