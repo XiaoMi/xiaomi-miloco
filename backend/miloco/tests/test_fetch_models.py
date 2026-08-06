@@ -417,8 +417,66 @@ def test_truncated_response_keeps_part_for_resume(tmp_path: Path) -> None:
     assert r.returncode == 1
     assert "提前关闭" in r.stderr, r.stderr
     assert "sha256 不符" not in r.stderr, "截断被误报成 hash 不符"
-    # 重试期间 .part 必须留着（最后一轮放弃时才清理），否则续传无从谈起
+    # .part 必须留着，否则续传无从谈起（进程退出后也不清，见下一条测试）
     assert "待续传" in r.stderr
+
+
+def test_part_survives_process_exit_so_next_run_resumes(tmp_path: Path) -> None:
+    """所有源试完仍失败时，稳定名 `.part` 必须活过进程退出 —— 下一次调用接着下。
+
+    这是 `_open_part` 那把 flock 换来的东西：它专门为了"稳定名可跨轮续传"付了复杂度，
+    收尾若无条件 unlink，跨调用续传就只在 Ctrl-C 时有效（KeyboardInterrupt 不在那个
+    except 里、也走不到收尾那行）。而真正需要它的场景——限速链路每次断在同一位置——
+    反而每次从 0 重来，表现成"重跑多少次都不涨"。
+
+    这里把那个症状直接跑出来：服务端每次只发 1024 字节就撒手，body 4096。单源 3 次
+    重试各续 1024 → 第一次调用停在 3072、退 1；保住 .part 的话第二次调用只需再补
+    1024 就能凑满并通过 sha256。删了 .part 的实现在第二次调用只能再走一遍 0→3072，
+    永远退 1。
+    """
+    body = b"x" * 4096
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _make_truncating_handler(body, sent=1024)
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        lock = tmp_path / "models.lock.json"
+        lock.write_text(
+            json.dumps(
+                {
+                    "base_url": f"http://127.0.0.1:{server.server_address[1]}",
+                    "mirrors": [],
+                    "files": [
+                        {
+                            "name": "resume.onnx",
+                            "size": len(body),
+                            "sha256": _sha(body),
+                            "required": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        dest = tmp_path / "dest"
+
+        first = _run("--lock", str(lock), "--dest", str(dest))
+        part = dest / "resume.onnx.part"
+        assert first.returncode == 1
+        # 3 次重试各续 1024：进程内续传本来就有，这里确认它没在收尾被抹掉
+        assert part.is_file(), "稳定名 .part 被删了，下一次只能从 0 重来"
+        assert part.stat().st_size == 3072, part.stat().st_size
+        assert not (dest / "resume.onnx").exists()
+
+        second = _run("--lock", str(lock), "--dest", str(dest))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # 第二次只需再补 1024 —— 这一段正是"跨调用续传"，.part 被删就永远走不到
+    assert second.returncode == 0, second.stderr
+    assert (dest / "resume.onnx").read_bytes() == body
+    assert list(dest.glob("*.part")) == [], "成功后不许留下 .part"
 
 
 def test_empty_source_list_is_usage_error(tmp_path: Path) -> None:

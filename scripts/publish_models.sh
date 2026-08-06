@@ -234,6 +234,13 @@ if errors:
         "lock 是对的就把 Release 改回去。",
         file=sys.stderr,
     )
+    # 两条修法都要仓库 write 权限。这一步在没改 lock 的 PR 上是非阻塞告警（见
+    # ci.yml 的 verify_gate），但日志里照样是一片红字，不写清归属每个贡献者都要困惑一次。
+    print(
+        "  （不是维护者的话：这条与你的改动无关 —— models Release 的资产和仓库 lock "
+        "暂时不一致，两条修法都要仓库写权限。at 一下维护者刷 lock 即可，别去动你自己的 PR。）",
+        file=sys.stderr,
+    )
     raise SystemExit(1)
 
 print(f"✓ Release '{tag}' 的 {len(have)} 个资产与 lock 全等（name/size/sha256）", file=sys.stderr)

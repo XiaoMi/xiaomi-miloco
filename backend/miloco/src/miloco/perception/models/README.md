@@ -41,8 +41,15 @@ MILOCO_MODELS_BASE_URL=https://mirror.example.com/miloco-models python3 scripts/
 ## 终端用户不用管这些
 
 release 安装包里已经带了模型（`miloco-models-{ver}.tar.gz`），`install.sh` 会解压到
-`$MILOCO_HOME/models/`。运行时读的是 `directories.models` 配置（默认 `$MILOCO_HOME/models`），
-不是本目录 —— 本目录只是源码树里的开发/打包用暂存位。
+`$MILOCO_HOME/models/`。
+
+运行时路径是**两段式**解析：配了 `directories.models`（默认 `$MILOCO_HOME/models`）就用它，
+生产链路上 `perception/client.py` 总会把它填进 `perception_model_dir`；**没配时**才回退到
+本目录（`tracking_service._resolve_model_path` 与 `detector._DEFAULT_MODEL_PATH` 都从
+`__file__` 上溯到这儿）。所以本目录主要是源码树里的开发 / 打包暂存位，但那条回退不是死代码
+—— 直接构造感知引擎且不填 `perception_model_dir` 的场景（测试、临时脚本）走的正是它，
+别当死代码删。注意装成 wheel 后本目录必然是空的（`pyproject.toml` 的 hatch exclude 不打
+onnx），那种部署形态下只能靠 `directories.models` 指到 `$MILOCO_HOME/models`。
 
 ## 维护者：换模型怎么办
 

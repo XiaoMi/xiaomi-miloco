@@ -125,6 +125,10 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    # 顶层只给了 contents: read；对账门禁那步要列 PR 改了哪些文件，补一个 pull-requests: read
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: ./.github/actions/setup-all
@@ -141,7 +145,33 @@ jobs:
       # 现象（命中缓存 → 旧字节比旧 lock → 通过 → 零请求；缓存被逐出 → 下到新资产 →
       # sha256 不符 → 红）。这里一次 API 调用就能把它变成确定性的失败点。
       # 顺带也抓 Release 上残留的换代前旧资产（upload 只 --clobber 同名的、不删旧的）。
+      #
+      # 判红范围收在"能修的人"身上：那个 tag 可变，换代必然存在一段窗口——资产已经换
+      # 上去、而刷过 lock 的 commit 还没合 main。窗口内每个开放 PR 都会红，红的原因与
+      # 它的改动毫无关系，而 verify 打出的两条修法（refresh-lock / 把 Release 改回去）
+      # 都要仓库 write 权限，外部贡献者一条都执行不了，只能干等。
+      # 但**改了 lock 的 PR 仍然强制**：那正是换代 PR 本身，作者手上有全部修法，也是
+      # "lock 写错"唯一能在合入前被挡住的地方——一并降级等于把最该拦的那次放过去。
+      - name: 判定对账门禁强度（push 与改 lock 的 PR 强制，其余 PR 降级为告警）
+        id: verify_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != 'pull_request' ]; then
+            echo "enforce=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 不用 `gh api | grep -q`：grep -q 命中即退，gh 吃到 SIGPIPE 退 141，而
+          # GitHub 默认 shell 带 -o pipefail，会把"命中"读成失败、恰好反判成不强制。
+          files=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename')
+          case $'\n'"$files"$'\n' in
+            *$'\n'scripts/models.lock.json$'\n'*) echo "enforce=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                                    echo "enforce=false" >> "$GITHUB_OUTPUT" ;;
+          esac
       - name: 对账 models Release 资产与 lock（不下载）
+        continue-on-error: ${{ steps.verify_gate.outputs.enforce != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/publish_models.sh verify

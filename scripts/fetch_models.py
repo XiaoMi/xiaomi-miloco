@@ -281,7 +281,20 @@ def _fetch_one(
                 if attempt < _MAX_RETRIES:
                     time.sleep(2 ** (attempt - 1))
 
-        part.unlink(missing_ok=True)
+        # 所有源都试完仍未就绪：稳定名的 .part **不删** —— 它正是下一次调用带 Range
+        # 续传的起点，而这恰恰是本文件为之付了 flock 复杂度的那条路径。删掉的话
+        # "跨调用续传"就只在 Ctrl-C 时有效（KeyboardInterrupt 不在上面那个 except 里，
+        # 也走不到这儿），而真正需要它的场景——限速链路每次断在同一位置——反而每次
+        # 从 0 重来，表现成"重跑多少次都不涨"。
+        # "内容确定是错的"那条路径（sha256 不符）上面已经自己删过了，不会攒垃圾。
+        # pid 名的那份本轮就注定不参与续传（见 _open_part），删掉免得越攒越多。
+        left = part.stat().st_size if part.is_file() else 0
+        if part.name == f"{name}.part" and left:
+            _log(f"  · {name}  已保留 {_human(left)} 待续传（{part.name}）", quiet=quiet)
+        else:
+            # 空文件没有续传价值（_open_part 用 "a+b" 开稳定名，即便一个字节都没下到
+            # 也会留下 0 字节的壳），一并清掉。
+            part.unlink(missing_ok=True)
         return False
     finally:
         if lock_fh is not None:

@@ -7,7 +7,7 @@
 #
 # 选项:
 #   --version <ver>     覆盖所有包的版本号
-#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web）
+#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web,hermes）
 #   -h, --help          显示帮助
 #
 # 注：每次构建前会默认清空 dist/
@@ -60,9 +60,13 @@ should_build() {
     [[ ",$PACKAGES," == *",$1,"* ]]
 }
 
-# 只有全量构建才产模型 tar 与平台归档。两者共用一个谓词而不是各写一遍条件：
-# models tar 的唯一消费链是 pack_models → pack_platform_bundles → 平台归档 →
-# install.py，条件一旦分家就会出现"下了 78MB、却没人接"或反过来"归档缺模型"。
+# 平台归档只在全量构建下产出（缺任一包就拼不出一体归档）。注意这是**字面全等**，
+# 同一集合换个顺序也算子集——既有行为，此处只是把它从 pack_platform_bundles 里抽出来
+# 命名，没改语义。
+#
+# 别拿它去卡 pack_models：模型 tar 除了平台归档还有第二个消费方 install.py 的 dev
+# 通道（src_dir 直接就是仓库 dist/，第 6 步 glob 不到 miloco-models-*.tar.gz 就 fail），
+# 卡上去会让「build.sh --packages <子集> 再 install.sh --dev」这条既有流程硬失败。
 is_full_build() {
     [[ "$PACKAGES" == "$ALL_PACKAGES" ]]
 }
@@ -586,17 +590,23 @@ main() {
     # 打包模型 + 按平台打「代码 + 模型」一体归档（后者回填 manifest.bundles，
     # 须在自包含脚本前，让 pack_install_scripts 嵌入含 bundles 的完整 manifest）
     #
-    # 子集构建整段跳过。模型移出 git 之后 pack_models 的第一件事变成了跑
-    # fetch_models.py --strict，于是「新 clone 里 --packages miloco-cli，只想要个
-    # CLI wheel」会先被拖去下 ~78MB —— 而 --strict 之下连可选的 bge / VAD 都不能少，
-    # 网络不通直接 exit 1，把本来几秒就能出的 wheel 一起带走。产出的 tar 在子集
-    # 构建下还没人接（pack_platform_bundles 本就只在全量下产出），纯粹是白等。
-    if is_full_build; then
+    # 模型 tar 跟着 miloco（后端）走，不是跟着「全量」走。模型移出 git 之后
+    # pack_models 的第一件事变成了跑 fetch_models.py --strict，于是「新 clone 里
+    # --packages miloco-cli，只想要个 CLI wheel」会先被拖去下 ~78MB —— 而 --strict
+    # 之下连可选的 bge / VAD 都不能少，网络不通直接 exit 1，把本来几秒就能出的
+    # wheel 一起带走。用 should_build "miloco" 卡住这条就够了。
+    #
+    # 别收紧成 is_full_build：模型 tar 的消费方不止平台归档，还有 install.py 的
+    # dev 通道（直接 glob 仓库 dist/），一旦子集构建整段跳过，「--packages <子集>
+    # 再 install.sh --dev」会在 wheel 全装完之后才 fail，前面几分钟白跑。
+    # 而 --help 里印的那行包列表恰好漏了 hermes，照抄就是一次子集构建。
+    if should_build "miloco"; then
         pack_models
-        pack_platform_bundles
     else
-        log "子集构建（--packages=$PACKAGES），跳过模型打包与平台归档"
+        log "构建集不含 miloco（--packages=$PACKAGES），跳过模型打包"
     fi
+    # 内部已有 is_full_build 门禁，外面不必再包一层
+    pack_platform_bundles
 
     # 自包含安装脚本
     pack_install_scripts
