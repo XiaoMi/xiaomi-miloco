@@ -29,6 +29,7 @@ class FieldSpec:
         但 VAD 判无人声（键鼠 / 底噪）时剥离本字段，根除模型在低信息音频上脑补"像指令的话"
         （实测：留着 speeches 字段就幻觉，剥掉即 0）。env_sounds 不挂此项，无人声仍保留。
     requires_identity —— 仅本轮有身份候选时输出。
+    requires_pets —— 仅本轮 has_pets（``pet_recognition`` 开启且**花名册非空**）时输出。
     spec_md_audio —— audio-only 路由专用「字段说明」变体（纯音频无画面，视觉语言全部剔除）；
         为 None 时 audio 路由沿用 video 版（与视觉无关的字段，如 env_sounds）。
     """
@@ -40,6 +41,7 @@ class FieldSpec:
     requires_audio: bool = False
     requires_speech: bool = False
     requires_identity: bool = False
+    requires_pets: bool = False
     spec_md_audio: str | None = None
 
     def spec_for(self, route: str) -> str:
@@ -72,6 +74,20 @@ IDENTITY = FieldSpec(
 - no_person vs unknown：框内没有真实人体、只是家中非人物体被误框（如 3D 打印机、落地扇、衣帽架或搭挂/晾晒的衣物、落地绿植、纸箱行李堆 等外形易被误当成人的物体）→ "no_person"，纵使轮廓像人；确有人体（哪怕背影/侧身/局部/遮挡/模糊）→ "unknown"；分不清是人还是物时才倾向 unknown（别把真人误判成没人）""",
     requires_video=True,
     requires_identity=True,
+)
+
+PET_IDENTITIES = FieldSpec(
+    name="pet_identities",
+    schema_literal='"pet_identities":[{"name":"<名单里的宠物名>","conf":"mid|high","reason":"用到的区分性特征"}]',
+    spec_md="""## pet_identities
+- 只列出你【确认】是「# 家庭档案」「## 宠物」名单里某一只本尊的个体；先定 name+conf、reason 只事后交代所用区分特征，不得先编"吻合"叙事把自己说服进匹配；画面没有明确对上名单的宠物就输出 "pet_identities":[]
+- 是「本尊正向吻合」不是「相对最像 / 排除法」：必须该只的区分性特征确与某只登记宠物吻合才写；即便名单里只剩它一只同物种候选，也不能因"排除了其他 / 最接近"就安名——对不上本尊就不列
+- 区分性特征要「全项吻合」而非「部分吻合」：逐项核对独有花纹走向 / 花色分布 / 特殊标记（尾尖白、耳缺口、面部不对称色块等）；任一关键区分项明显不同或看不清 → 判不同、不列；宁因一项不符漏认，不因几项泛相似错认
+- 大众花色不算区分特征："黑白双色猫" "橘猫" "三花" "浅金短毛狗" 这类是常见花色、不构成身份证据；只靠这类泛特征"像" → 一律不列
+- 家里可能出现没登记的同品种 / 同花色宠物（陌生同类）：只要存在"可能是没登记的另一只"的空间、或名单里有第二只同样像 → 不列，不要写进 pet_identities
+- conf 按"能否在名单里把这只【独一无二】地认出"打分：high=独有区分特征清晰吻合且不与名单其它宠物混淆；mid=主区分特征已对上但有一处看不清 / 尚不能完全排除相似的另一只（把握中等）；两者都够不上 → 不列（不用低把握凑数）""",
+    requires_video=True,
+    requires_pets=True,
 )
 
 # 精简版 identity 字段：身份库为空（无任何注册成员）时用。此时"对上 gallery 成员"不可能，
@@ -170,11 +186,17 @@ SUGGESTIONS = FieldSpec(
 )
 
 
-# 常规字段顺序（identities 不在内，由 has_identity 时单独 prepend）。
-_ORDER_NORMAL = ["caption", "speeches", "env_sounds", "matched_rules", "suggestions"]
-_ORDER_STREAM = ["speeches", "env_sounds", "matched_rules", "suggestions", "caption"]
+# 常规字段顺序（identities 不在内，由 has_identity 时单独 prepend）：按**逻辑依赖**排——
+# pet_identities 置于 caption 之前（先判身份再描述，与人 identities 同理），由 requires_pets
+# 在无宠物时剥离。
+_ORDER_NORMAL = ["pet_identities", "caption", "speeches", "env_sounds", "matched_rules", "suggestions"]
+# 流式顺序：按**抢延迟**排——speeches 必须第一（先出先播，这是本表存在的唯一理由）。
+# pet_identities 不放表头（会把 speeches 挤到第二、抵消该收益），但仍须先于它的三个派生消费方
+# （matched_rules / suggestions / caption 的宠物称呼都从它派生，PET_NAMING_SPEC 的 conf=high
+# 前置门控目前只靠这个生成顺序兜着），故插在 env_sounds 之后、matched_rules 之前。
+_ORDER_STREAM = ["speeches", "env_sounds", "pet_identities", "matched_rules", "suggestions", "caption"]
 
-_REGISTRY = {f.name: f for f in (IDENTITY, CAPTION, SPEECHES, ENV_SOUNDS, MATCHED_RULES, SUGGESTIONS)}
+_REGISTRY = {f.name: f for f in (IDENTITY, PET_IDENTITIES, CAPTION, SPEECHES, ENV_SOUNDS, MATCHED_RULES, SUGGESTIONS)}
 
 
 @dataclass(frozen=True)
@@ -189,6 +211,9 @@ class SceneDescriptor:
     has_speech   —— 本轮 VAD 是否判出有真人声。音频过 gate（has_audio=True）但 VAD 判无
         人声（键鼠 / 底噪）时为 False → 只剥 speeches、保留 env_sounds。has_audio=False 时
         speeches 已被 requires_audio 剥掉，本标志无额外作用。
+    has_pets     —— ``pet_recognition`` 开启且花名册非空（判据见 home_profile_loader，
+        **不**看 profile.md 的「## 宠物」标题：那段会被 token 预算归档等路径抹掉）。为真且
+        video 路由时，在「# 字段说明」追加「## 宠物命名」纪律（宠物命名是视觉判断，故只 video）。
     identity_match_disabled —— 身份库为空（无任何注册成员）时为 True：``identities`` 字段
         改用精简版 ``IDENTITY_NO_MATCH``（只判 unknown↔no_person、不做成员匹配）。仅在
         ``has_identity=True`` 时有意义；库非空时为 False，用完整匹配版 ``IDENTITY``。
@@ -199,6 +224,7 @@ class SceneDescriptor:
     stream: bool = False
     has_audio: bool = True
     has_speech: bool = True
+    has_pets: bool = False
     identity_match_disabled: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
@@ -210,6 +236,8 @@ class SceneDescriptor:
             fields = [f for f in fields if not f.requires_audio]
         if not self.has_speech:
             fields = [f for f in fields if not f.requires_speech]
+        if not self.has_pets:
+            fields = [f for f in fields if not f.requires_pets]
         if self.has_identity:
             # 库空 → 精简版（不做成员匹配、只判 unknown/no_person）；两者 name 同为 "identities",
             # 故 render_schema / render_field_spec / 解析层都无感。
@@ -223,6 +251,22 @@ def render_schema(scene: SceneDescriptor) -> str:
     return "{" + ",".join(f.schema_literal for f in scene.selected_fields()) + "}"
 
 
+# 宠物称呼派生规则：不是新输出字段，而是让 caption / suggestions / matched_rules 统一从
+# pet_identities（唯一真源，弃权纪律见该字段 spec）派生称呼——避免"结构化字段 + 各出口再各带
+# 一套命名纪律"两套打架（D1）。仅 has_pets 且 video 路由时追加进「# 字段说明」。
+PET_NAMING_SPEC = """## 宠物称呼（据 pet_identities 派生）
+- caption / suggestions / matched_rules 里提及宠物，一律按本轮 pet_identities 的判定称呼：conf=high → 直呼其名（如"小黑在沙发上"）；conf=mid → 用"疑似<名>"；未列入 pet_identities（含空数组）→ 用泛称（"一只黑猫" / "一只卷毛狗"），不从家庭档案给没判出的宠物硬安名字（与对人「不从 gallery / 家庭档案取名安到没识别出的主体」一致）
+- matched_rules：规则点名某只宠物时，须该宠物本轮以 conf=high 列入 pet_identities 才可 hit=true；仅 mid 或未列入 → 该（点名宠物的）规则 hit=false（宁漏不误触发）
+- suggestions：event / action 指称宠物同上（high 直呼 / mid 疑似 / 否则泛称）；涉及"某只宠物的约定或禁忌"（家庭档案显式记录）须该宠物以 high 列入 pet_identities 确认在场才成立"""
+
+
 def render_field_spec(scene: SceneDescriptor) -> str:
-    """按场景拼出「# 字段说明」正文（各字段 ``## 字段名`` 块；audio 路由取 audio 变体）。"""
-    return "\n\n".join(f.spec_for(scene.route) for f in scene.selected_fields())
+    """按场景拼出「# 字段说明」正文（各字段 ``## 字段名`` 块；audio 路由取 audio 变体）。
+
+    ``has_pets`` 且 video 路由时追加「## 宠物命名」纪律（约束 caption / suggestions /
+    matched_rules 对宠物的称呼，集中一处维护，见 ``PET_NAMING_SPEC``）。
+    """
+    blocks = [f.spec_for(scene.route) for f in scene.selected_fields()]
+    if scene.has_pets and scene.route == "video":
+        blocks.append(PET_NAMING_SPEC)
+    return "\n\n".join(blocks)

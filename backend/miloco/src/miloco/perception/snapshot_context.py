@@ -78,6 +78,10 @@ class OmniEventArtifacts:
     - clips: per-device 视频/音频字节(omni 上传给 LLM 的原始字节,零重编)
     - trace: prompt + response 文本结构(便于复盘 LLM 决策)
     - gallery: per-person 画廊合成图(body/face JPEG,omni 推理时实际参考的样本)
+    - ref_frames: per-device 全景参考帧 JPEG(仅 Smart Crop 模式;crop 视频送模型时
+      同附的整帧上下文,字节级 = omni 所见).非 crop 模式为空.
+    - crop_meta: per-device crop 元数据(region 坐标/全景帧尺寸/编码短边),不独立落盘,
+      在 push_omni_trace 时挂到对应 device 的 call 记录里进 trace,供 badcase 复现.
 
     扩展方式:在 dataclass 加新字段、snapshot_writer.save_event_artifacts 加分支即可.
     """
@@ -85,6 +89,8 @@ class OmniEventArtifacts:
     clips: dict[str, tuple[bytes, ClipKind]] = field(default_factory=dict)
     trace: dict[str, Any] | None = None
     gallery: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    ref_frames: dict[str, bytes] = field(default_factory=dict)
+    crop_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 _artifacts: ContextVar[OmniEventArtifacts | None] = ContextVar(
@@ -129,6 +135,52 @@ def push_clip_bytes(clip_bytes: bytes, kind: ClipKind) -> None:
     artifacts.clips[ctx.device_id] = (clip_bytes, kind)
 
 
+def push_ref_frame(image_bytes: bytes) -> None:
+    """omni prompt 构建阶段(Smart Crop):把当前 device 的全景参考帧 JPEG 存到 artifacts.ref_frames.
+
+    device_id 自 observability.DeviceContext 取(pipeline 在 omni call 期间已 set,含 fused
+    单 device 路径).任一缺失(无 active scope / 无 device_ctx)时静默 no-op.
+
+    image_bytes 是 crop 模式下与 crop 视频一并上送 LLM 的整帧 JPEG(字节级 = omni 所见),
+    落盘 ref.jpg 供 badcase 复盘对照「模型看到的全景上下文」.仅 crop 路径调用.
+    """
+    artifacts = _artifacts.get()
+    if artifacts is None:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    artifacts.ref_frames[ctx.device_id] = image_bytes
+
+
+def push_crop_meta(
+    *, region: tuple[int, int, int, int], frame_size: tuple[int, int], short_edge: int
+) -> None:
+    """omni prompt 构建阶段(Smart Crop):暂存当前 device 的 crop 元数据,供 trace 挂载.
+
+    Args:
+        region: crop 区域像素坐标 (x1, y1, x2, y2),相对全景帧(未缩放的 all_frames 空间).
+        frame_size: 全景帧尺寸 (w, h),复现时据此把 region 归一/映射回参考帧.
+        short_edge: crop 视频编码短边(降采样目标),记录 omni 实际所见的分辨率上限.
+
+    不独立落盘 —— 在 push_omni_trace 里按 device_id 取出挂到 call 记录("crop"),随
+    omni_trace.json.gz 一起持久化.device_id / active scope 缺失时静默 no-op.
+    """
+    artifacts = _artifacts.get()
+    if artifacts is None:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    x1, y1, x2, y2 = region
+    w, h = frame_size
+    artifacts.crop_meta[ctx.device_id] = {
+        "region_xyxy": [int(x1), int(y1), int(x2), int(y2)],
+        "frame_size_wh": [int(w), int(h)],
+        "crop_short_edge": int(short_edge),
+    }
+
+
 def push_gallery_image(person_id: str, kind: str, image_bytes: bytes) -> None:
     """omni prompt 构建阶段:缓存当前事件使用的画廊合成图.
 
@@ -170,8 +222,10 @@ def push_omni_trace(
             供复现时可直接铺进请求体还原完整 API call.
 
     device_id 从 ContextVar(DeviceContext)取并写入 call 记录,让多摄像头 batch
-    的多条 call 能跟 artifacts.clips 的 device 维度对齐.fused 路径(batch 级单次
-    调用)未 set device_context → 记 null,reader 据此识别"整批共享一次推理".
+    的多条 call 能跟 artifacts.clips 的 device 维度对齐.生产 batch pipeline
+    (_process_device)在 omni call 期间已 set device_context → 正常记 device_id
+    (Smart Crop 的 crop_meta 亦据此挂载);未 set device_context 的路径记 null,
+    reader 据此识别"整批共享一次推理".
 
     无 active scope 时静默 no-op.内部任何异常吞掉 + logger.error,不影响 omni 主流程.
     """
@@ -192,6 +246,12 @@ def push_omni_trace(
         }
         if inference_params:
             call_record["inference_params"] = inference_params
+        # Smart Crop:该 device 本次走了裁切 → 把 crop 坐标/尺寸挂进 call 记录,
+        # 让 trace 能复现「模型看到的是全景哪块」(非 crop 无此 key).
+        if ctx is not None:
+            crop = artifacts.crop_meta.get(ctx.device_id)
+            if crop:
+                call_record["crop"] = crop
         artifacts.trace["calls"].append(call_record)
     except Exception as e:  # noqa: BLE001
         logger.error("push_omni_trace failed: %s", e)

@@ -18,11 +18,14 @@ logger = logging.getLogger(__name__)
 
 RESOURCE_MONITOR_INTERVAL = 60
 MEMORY_RING_MAXLEN = 3 * 24 * 60  # 3d @ 60s
+PROC_RING_MAXLEN = 3 * 24 * 60  # 3d @ 60s
 SMAPS_PATH = "/proc/self/smaps"
 TASK_DIR = "/proc/self/task"
 
 # (ts, rss_kb, py_objects, py_size_kb)
 MemoryPoint = tuple[float, int, int, int]
+# (ts, cpu_pct, num_threads)  —— CPU 占用百分比(多核可 > 100) + 进程线程数
+ProcPoint = tuple[float, float, int]
 
 
 def _sample_mem() -> MemSnapshot:
@@ -51,6 +54,18 @@ class ResourceMonitor:
         self._py_heap_latest: PyHeapSnapshot | None = None
         self._memory_lock = threading.Lock()
         self._mem_available = True
+        self._proc_ring: collections.deque[ProcPoint] = collections.deque(
+            maxlen=PROC_RING_MAXLEN
+        )
+        self._proc_lock = threading.Lock()
+        # 线程数 latest：与入环时机解耦，首采样(跳过入环)采到的值也能给后续失败兜底。
+        self._num_threads_latest: int | None = None
+        # 首次 cpu_percent 的测量窗口只有启动探测那几十毫秒（psutil 要求两次调用
+        # 至少隔 0.1s 才准），读数虚高。时序队列和 /monitor/resources 快照两侧都跳过
+        # 这一拍：假尖峰进了 3d 环形缓冲会钉满 3 天、污染前端「峰值」，而写进快照会让
+        # CLI 在头 60s 给空闲进程报出一个 98%，与图表的「无数据」相互打架。真实基准
+        # 从第二次采样（60s 后）起。
+        self._proc_first_sample = True
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -68,13 +83,15 @@ class ResourceMonitor:
             return dict(self._data)
 
     def _run(self) -> None:
-        # psutil.cpu_percent(interval=0) returns 0.0 on the very first call
-        # (it has no prior baseline). Discard that reading so the first
-        # _collect() exposes a real percentage rather than a misleading zero.
+        # cpu_percent(interval=0) 首次调用恒返 0.0（没有上一次的基准可比），这次预热
+        # 就是为了烧掉那个 0，让 _collect() 拿到的是真正的差值。但它并不能让第一拍
+        # 变得可信：两次调用之间只隔了下面那段内存探测的几十毫秒，远小于 psutil 要求
+        # 的 0.1s，算出来虚高。故 _collect() 仍用 _proc_first_sample 把第一拍挡在时序
+        # 队列外，见 __init__ 里的对应注释。
         try:
             self._psutil_proc.cpu_percent(interval=0)
         except Exception:
-            pass
+            logger.debug("initial cpu_percent probe failed", exc_info=True)
         # 启动探测内存 region 采集：失败标记不可用，后续 _collect 跳过该段
         try:
             _sample_mem()
@@ -91,18 +108,34 @@ class ResourceMonitor:
         snapshot: dict = {"ts": time.time()}
 
         proc = self._psutil_proc
+        cpu_pct: float | None = None
+        # 第一拍虚高不可信（见 __init__ 注释），时序队列与快照两侧一致地跳过。标志位无论
+        # 这次 psutil 调用成不成功都在本拍消费掉：调用抛异常时这一拍根本没产生读数，而下
+        # 一拍距预热调用已经隔了一个完整采样间隔、测量窗口够长，采到的是有效值，不该再被
+        # 当成「第一拍」丢掉。
+        is_first_sample = self._proc_first_sample
+        self._proc_first_sample = False
         try:
-            snapshot["cpu_pct"] = proc.cpu_percent(interval=0)
+            sampled = proc.cpu_percent(interval=0)
+            if not is_first_sample:
+                cpu_pct = sampled
+                snapshot["cpu_pct"] = cpu_pct
         except Exception:
-            pass
+            logger.debug("collect cpu_pct failed", exc_info=True)
         try:
             snapshot["rss_mb"] = round(proc.memory_info().rss / (1024 * 1024), 1)
         except Exception:
-            pass
+            logger.debug("collect rss_mb failed", exc_info=True)
         try:
             snapshot["fd"] = proc.num_fds()
         except Exception:
-            pass
+            logger.debug("collect fd failed", exc_info=True)
+        try:
+            num_threads = proc.num_threads()
+            snapshot["num_threads"] = num_threads
+            self._num_threads_latest = num_threads
+        except Exception:
+            logger.debug("collect num_threads failed", exc_info=True)
 
         try:
             if os.path.exists(self._db_path):
@@ -110,7 +143,7 @@ class ResourceMonitor:
                     os.path.getsize(self._db_path) / (1024 * 1024), 2
                 )
         except Exception:
-            pass
+            logger.debug("collect db_size_mb failed", exc_info=True)
 
         try:
             total_log = 0
@@ -121,10 +154,20 @@ class ResourceMonitor:
                         total_log += os.path.getsize(fp)
             snapshot["log_size_mb"] = round(total_log / (1024 * 1024), 2)
         except Exception:
-            pass
+            logger.debug("collect log_size_mb failed", exc_info=True)
 
         with self._lock:
             self._data = snapshot
+
+        # CPU 时序独立入环：不受下面内存 region 采集 early-return 影响。cpu_pct 为
+        # None 的两种情形（psutil 抛异常 / 首拍被跳过）都不入环，见上面的采集段。
+        # 线程数取不到时沿用 _num_threads_latest（首采样也会更新它），避免曲线假性
+        # 归零（与内存段「上次 latest 兜底」同策略）。
+        if cpu_pct is not None:
+            with self._proc_lock:
+                self._proc_ring.append(
+                    (snapshot["ts"], cpu_pct, self._num_threads_latest or 0)
+                )
 
         # 内存 region + py_heap 采集（两路独立 try，互不影响）
         mem_snap: MemSnapshot | None = None
@@ -220,6 +263,52 @@ class ResourceMonitor:
             "ts_end": points[-1]["ts"],
             "interval_s": bucket_s,
             "points": points,
+        }
+
+    def get_proc_series(self, window_seconds: int, bucket_seconds: int) -> dict:
+        """进程 CPU 占用 + 线程数时序，按 bucket_seconds 墙钟对齐 + 平均聚合。
+
+        core_count = os.cpu_count()，供前端把多核 cpu_pct 归一化到 0-100%。
+        """
+        cutoff = time.time() - window_seconds
+        with self._proc_lock:
+            raw = [
+                (ts, pct, nthreads)
+                for ts, pct, nthreads in self._proc_ring
+                if ts >= cutoff
+            ]
+        if not raw:
+            return {
+                "ts_start": None,
+                "ts_end": None,
+                "interval_s": bucket_seconds,
+                "points": [],
+                "core_count": os.cpu_count() or 1,
+            }
+
+        bucket_s = max(bucket_seconds, RESOURCE_MONITOR_INTERVAL)
+        buckets: dict[int, list[tuple[float, int]]] = {}
+        for ts, pct, nthreads in raw:
+            key = int(ts // bucket_s) * bucket_s
+            buckets.setdefault(key, []).append((pct, nthreads))
+
+        points = [
+            {
+                "ts": float(key),
+                "cpu_pct": round(sum(v[0] for v in vs) / len(vs), 1),
+                # 桶内峰值单列：桶粗到 1h 时（24h/3d 视图）均值会把 1min 级的满核
+                # 尖峰抹掉几十倍，前端 header 的「峰值」必须读这个而非均值序列的 max。
+                "cpu_pct_max": round(max(v[0] for v in vs), 1),
+                "num_threads": round(sum(v[1] for v in vs) / len(vs)),
+            }
+            for key, vs in sorted(buckets.items())
+        ]
+        return {
+            "ts_start": points[0]["ts"],
+            "ts_end": points[-1]["ts"],
+            "interval_s": bucket_s,
+            "points": points,
+            "core_count": os.cpu_count() or 1,
         }
 
     def is_memory_available(self) -> bool:

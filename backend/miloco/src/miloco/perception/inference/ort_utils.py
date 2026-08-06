@@ -13,10 +13,10 @@ import onnxruntime as ort
 
 _LOGGER = logging.getLogger(__name__)
 
-# Empirically tested: 4 threads gives the best balance of throughput and
-# tail-latency stability on real workloads.  Higher counts look faster on
-# synthetic benchmarks but suffer from scheduling jitter on real frames
-# (e.g. 8 threads: avg 62ms but max 410ms vs 4 threads: avg 48ms, max 58ms).
+# 固定线程数控尾延迟。实测(真实帧):8 线程 avg 62ms/max 410ms,远差于 4 线程的
+# avg 48ms/max 58ms——synthetic bench 上更高线程更快,但真实帧受调度抖动拖累。
+# detector/reid 走此值;dedup/vad 用 TINY_MODEL_THREADS(见 perception/inference/tuning.py,
+# 特意不放这里:本模块 module 级 import onnxruntime,只放常量会拖着 ORT 一起被引)。
 _DEFAULT_NUM_THREADS = 4
 
 # Apple Silicon 上 CPU EP 默认走 ArmKleidiAI::MlasConv,每次 Conv 推理分配

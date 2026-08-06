@@ -10,6 +10,8 @@
     "loadActivityFail": "Couldn't load today's events",
     "loadHomeEntriesFail": "Couldn't load home profile",
     "loadTasksFail": "Couldn't load family tasks",
+    "loadPetsFail": "Couldn't load pet list",
+    "loadFeaturesFail": "Couldn't load feature flags",
     "tabHomeError": "Couldn't load home: {{msg}}",
     "tabHomeLoading": "Checking on your home…",
     "tabDevicesError": "Couldn't load devices: {{msg}}",

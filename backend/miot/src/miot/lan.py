@@ -90,6 +90,33 @@ class _MIoTLanDevice:
         if changed:
             self.__broadcast_info_changed()
 
+    def mark_reachable(self, start_grace: bool) -> None:
+        """把设备标为在线——依据是**带外可达证明**(native miss 拉流正在进行,
+        或刚被主动关闭),而非 LAN 探测响应。
+
+        正在拉流的相机可达性已被证实,但跨网段相机在 connected 期间会被单播探测
+        跳过(见 ``_probe_unicast_targets``),没有任何东西刷新它的 keep-alive,
+        于是会在拉流中途误判离线、并在**主动关流的瞬间闪一下 offline**。此方法
+        用拉流状态兜底,避免这两种误判。
+
+        - ``start_grace=False``:拉流进行中——保持在线并**取消离线定时器**
+          (连接本身就是活性证明)。
+        - ``start_grace=True``:拉流刚停止——仍标为在线,但**重新武装一个
+          keep-alive 宽限窗**,让恢复后的扫描去复核;可自愈(若真不可达,宽限窗内
+          收不到探测响应 → 超时后正常翻离线)。
+        """
+        if self._online is False:
+            self._online = True
+            _LOGGER.info("device online (stream), %s, %s", self.did, self._ip)
+            self.__broadcast_info_changed()
+        if self._ka_timer:
+            self._ka_timer.cancel()
+            self._ka_timer = None
+        if start_grace:
+            self._ka_timer = self._manager.internal_loop.call_later(
+                self._KA_TIMEOUT, self.__switch_offline
+            )
+
     @property
     def online(self) -> bool:
         """Device online status."""
@@ -129,7 +156,12 @@ class _MIoTLanDevice:
     def __broadcast_info_changed(self):
         self._manager.broadcast_device_info_changed(
             did=self.did,
-            info=MIoTLanDeviceInfo(did=self.did, online=self._online, ip=self._ip),
+            info=MIoTLanDeviceInfo(
+                did=self.did,
+                online=self._online,
+                ip=self._ip,
+                cross_subnet=self._manager.is_cross_subnet(self._ip),
+            ),
         )
 
 
@@ -158,10 +190,20 @@ class MIoTLan:
 
     _available_net_ifs: Set[str]
     _broadcast_socks: Dict[str, socket.socket]
+    # 专用单播 socket：不绑网卡，sendto 到确定的目标 IP 由系统路由选出口，同一 socket
+    # 收回包。单播不复用广播那些 IP_BOUND_IF 钉网卡的 socket——否则发送失败
+    # (EHOSTUNREACH 等) 会在共享 socket 上留下 pending error，毒害广播的接收。
+    _unicast_sock: Optional[socket.socket]
     _local_port: Optional[int]
     _scan_timer: Optional[asyncio.TimerHandle]
     _last_scan_interval: Optional[float]
     _callbacks_device_status_changed: Dict[str, _MIoTLanRegDeviceData]
+    _unicast_targets: Dict[str, str]
+    # 已知的相机 did 全集（不止有单播目标的那些）与已连上的 did 集合——
+    # 已连上的相机可达性已经证实，探测（广播+单播）没必要再打；全部连上时
+    # 整个扫描定时器都停掉，直到有相机掉线/新相机加入才重新拉起。
+    _camera_dids: Set[str]
+    _connected_dids: Set[str]
 
     _init_lock: asyncio.Lock
     _init_done: bool
@@ -194,10 +236,14 @@ class MIoTLan:
 
         self._available_net_ifs = set()
         self._broadcast_socks = {}
+        self._unicast_sock = None
         self._local_port = None
         self._scan_timer = None
         self._last_scan_interval = None
         self._callbacks_device_status_changed = {}
+        self._unicast_targets = {}
+        self._camera_dids = set()
+        self._connected_dids = set()
 
         self._init_lock = asyncio.Lock()
         self._init_done = False
@@ -254,9 +300,13 @@ class MIoTLan:
                 # the instance even if the thread/loop teardown above raised.
                 self._lan_devices = {}
                 self._broadcast_socks = {}
+                self._unicast_sock = None
                 self._local_port = None
                 self._scan_timer = None
                 self._last_scan_interval = None
+                self._unicast_targets = {}
+                self._camera_dids = set()
+                self._connected_dids = set()
                 # 注意：故意不清空 _callbacks_device_status_changed。
                 # __on_network_info_change_external_async 会在网卡变化时主动 deinit→init，
                 # 复位会让用户在 init_async 后注册的回调在第一次网络抖动时丢失。
@@ -347,6 +397,174 @@ class MIoTLan:
             port=self.OT_PORT,
         )
 
+    def set_unicast_targets(self, targets: Dict[str, str]) -> None:
+        """Set unicast probe targets (did → ip).
+
+        These IPs will be probed via unicast UDP in every scan cycle,
+        in addition to the normal broadcast.  Useful when cameras are on
+        a different subnet that is still routable — broadcast won't cross
+        the subnet boundary, but unicast will.
+
+        Call with an empty dict to clear all targets.
+        Safe to call when not initialized (no-op).
+        """
+        if not self._init_done:
+            return
+        try:
+            self._internal_loop.call_soon_threadsafe(
+                self.__set_unicast_targets, dict(targets)
+            )
+        except RuntimeError as e:
+            # Event loop may already be stopped during deinit; silently skip.
+            _LOGGER.debug(
+                "set_unicast_targets skipped: internal loop unavailable: %s", e
+            )
+
+    def __set_unicast_targets(self, targets: Dict[str, str]) -> None:
+        """Internal: replace unicast targets (runs on internal loop thread)."""
+        self._unicast_targets = targets
+
+    def set_camera_dids(self, dids: Set[str]) -> None:
+        """Set the full set of known camera dids (not just those with a
+        unicast target).
+
+        This is what lets the LAN layer tell "every camera is connected"
+        (→ scanning pauses, see ``__scan_devices``) from "one is still
+        missing". A newly-appeared camera did resumes a paused scan.
+
+        Must be the **scoped active set**, not every camera on the account:
+        a camera outside the current scope never connects, so including it
+        would make "all connected" permanently unreachable and the pause
+        would never engage. Safe to call when not initialized (no-op).
+        """
+        if not self._init_done:
+            return
+        try:
+            self._internal_loop.call_soon_threadsafe(
+                self.__set_camera_dids, set(dids)
+            )
+        except RuntimeError as e:
+            _LOGGER.debug("set_camera_dids skipped: internal loop unavailable: %s", e)
+
+    def __set_camera_dids(self, dids: Set[str]) -> None:
+        self._camera_dids = dids
+        self.__maybe_resume_scan()
+
+    def set_camera_connected(self, did: str, connected: bool) -> None:
+        """Mark a camera did as connected (native miss stream up) or not.
+
+        A connected camera is proven reachable, so ``_probe_unicast_targets``
+        skips it per-target; once **every** known camera is connected the
+        scan loop stops entirely (see ``__scan_devices``) and only restarts
+        when one disconnects or a new camera appears. Safe to call when not
+        initialized (no-op).
+        """
+        if not self._init_done:
+            return
+        try:
+            self._internal_loop.call_soon_threadsafe(
+                self.__set_camera_connected, did, connected
+            )
+        except RuntimeError as e:
+            _LOGGER.debug(
+                "set_camera_connected skipped: internal loop unavailable: %s", e
+            )
+
+    def __set_camera_connected(self, did: str, connected: bool) -> None:
+        if connected:
+            self._connected_dids.add(did)
+            # 拉流建立即可达性证明:保持在线、取消离线定时器,避免跨网段相机在
+            # connected 期间(被单播探测跳过)误判离线。
+            device = self._lan_devices.get(did)
+            if device is not None:
+                device.mark_reachable(start_grace=False)
+        else:
+            self._connected_dids.discard(did)
+            # 主动关流不代表设备不可达——它刚刚还在拉流。标为本地可达并给一个
+            # keep-alive 宽限窗,避免瞬时闪 offline;恢复扫描后由真实探测复核。
+            device = self._lan_devices.get(did)
+            if device is not None:
+                device.mark_reachable(start_grace=True)
+            self.__maybe_resume_scan()
+
+    def __all_cameras_connected(self) -> bool:
+        """已知相机集非空且全部处于已连接状态。
+
+        空集返回 False——「一台相机都还不知道」不该被当成「全都连上了」而暂停扫描。
+        """
+        return bool(self._camera_dids) and self._camera_dids <= self._connected_dids
+
+    def __maybe_resume_scan(self) -> None:
+        """扫描此前因「相机全连上」而暂停、现在条件不再成立时，重新拉起扫描循环。
+
+        ``_scan_timer is not None`` 表示扫描仍在正常排期（未暂停），无需干预——
+        也避免重复排一个定时器。
+        """
+        if self._scan_timer is not None or self.__all_cameras_connected():
+            return
+        self._last_scan_interval = None
+        self._scan_timer = self._internal_loop.call_later(0, self.__scan_devices)
+
+    def _probe_unicast_targets(self) -> None:
+        """给已知目标 IP 发单播 OTU 探测。
+
+        单播只对**跨网段**目标有意义——同网段目标已经被广播覆盖。跳过同网段目标
+        不只是省一次冗余探测，还规避了 macOS 上一个确定性的坑：
+
+        macOS 15+ 的 Local Network Privacy 按**进程的启动上下文**决定是否放行本地
+        网络访问（Apple TN3179：launchd daemon / root / 从 Terminal 或 SSH 启动的
+        进程及其子进程自动豁免；launchd **agent** 不豁免）。以 launchd agent 形态
+        启动的 miloco，对**同网段**目标的 UDP 单播会被内核在发送前直接拦掉、返回
+        errno 65 EHOSTUNREACH，而 route/ARP 全程正常、包根本没上过线。判定维度只有
+        启动上下文——与代码、uid、ARP、IFSCOPE、socket 复用方式全都无关（2026-07-24
+        实测坐实：同一二进制、同一 config、同一用户，仅改启动方式，SSH 启动 100%
+        成功、launchd agent 启动 100% errno 65）。
+
+        实测的拦截边界：拦 = 同网段 UDP 单播、全局广播 255.255.255.255、多播 224.x；
+        放行 = 定向子网广播（192.168.1.255）与 TCP——这正是广播发现与 miss 拉流在
+        宿主机仍能工作、只有同网段单播失效的原因。根治办法是换部署形态（跑 Linux
+        容器，或改成 launchd daemon），不在本进程代码内。这里跳过同网段目标，是让
+        代码不去撞这条必然失败的路径。
+
+        目标 IP 确定时——用**专用的、不绑网卡的普通 socket** 直接 sendto，出口网卡
+        交给系统路由决定；回包由该 socket 的 add_reader 收。不复用广播那些
+        IP_BOUND_IF 钉网卡的 socket，避免往到不了目标的网卡盲发，并让单播的发送
+        失败不会影响广播 socket 的接收路径。
+        """
+        if not self._unicast_targets or self._unicast_sock is None:
+            return
+        for did, ip in self._unicast_targets.items():
+            if not ip or self.__is_local_subnet(ip) or did in self._connected_dids:
+                continue
+            try:
+                self._unicast_sock.sendto(
+                    self._probe_msg, socket.MSG_DONTWAIT, (ip, self.OT_PORT)
+                )
+            except OSError as e:
+                # 无路由/不可达等：记 debug 不刷屏，不影响其它目标与广播。
+                _LOGGER.debug("unicast probe to %s failed: %s", ip, e)
+
+    def __is_local_subnet(self, ip: str) -> bool:
+        """目标 IP 是否与本机某网卡同网段（即已被广播覆盖，无需单播）。"""
+        try:
+            target = ipaddress.IPv4Address(ip)
+        except ValueError:
+            return False
+        for info in self._network.network_info.values():
+            try:
+                net = ipaddress.IPv4Network(f"{info.ip}/{info.netmask}", strict=False)
+            except (ValueError, TypeError):
+                continue
+            if target in net:
+                return True
+        return False
+
+    def is_cross_subnet(self, ip: Optional[str]) -> Optional[bool]:
+        """ip 是否跨网段（与本机所有网卡都不同网段）。ip 未知时返回 None。"""
+        if not ip:
+            return None
+        return not self.__is_local_subnet(ip)
+
     def broadcast_device_info_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         """Broadcast device info changed."""
         for handler in self._callbacks_device_status_changed.values():
@@ -363,6 +581,9 @@ class MIoTLan:
         for device in self._lan_devices.values():
             device.on_delete()
         self._lan_devices.clear()
+        self._unicast_targets.clear()
+        self._camera_dids.clear()
+        self._connected_dids.clear()
         self.__deinit_socket()
         self._internal_loop.stop()
 
@@ -381,6 +602,20 @@ class MIoTLan:
             if if_name not in self._available_net_ifs:
                 continue
             self.__create_socket(if_name=if_name)
+        self.__create_unicast_socket()
+
+    def __create_unicast_socket(self) -> None:
+        # 专用单播 socket：不绑网卡，交给系统路由。不显式 bind——sendto() 时内核
+        # 会隐式绑到 wildcard+临时端口，效果一样，但不留 CodeQL 会标的显式绑定调用。
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            self._internal_loop.add_reader(
+                sock.fileno(), self.__socket_read_handler, ("unicast", sock)
+            )
+            self._unicast_sock = sock
+            _LOGGER.info("created unicast socket")
+        except Exception as err:
+            _LOGGER.error("create unicast socket error, %s", err)
 
     def __on_network_info_change(self, data: _MIoTLanNetworkUpdateData) -> None:
         if data.status == InterfaceStatus.ADD:
@@ -426,6 +661,13 @@ class MIoTLan:
         for if_name in list(self._broadcast_socks.keys()):
             self.__destroy_socket(if_name)
         self._broadcast_socks.clear()
+        if self._unicast_sock is not None:
+            try:
+                self._internal_loop.remove_reader(self._unicast_sock.fileno())
+                self._unicast_sock.close()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("close unicast socket error: %s", err)
+            self._unicast_sock = None
 
     def __destroy_socket(self, if_name: str) -> None:
         sock = self._broadcast_socks.pop(if_name, None)
@@ -446,6 +688,10 @@ class MIoTLan:
                 return
             if addr[1] != self.OT_PORT:
                 # Not ot msg
+                return
+            if ctx[0] == "unicast" and addr[0] not in self._unicast_targets.values():
+                # 单播 socket 不绑网卡，局域网内任意主机都能往这个端口发包；
+                # 只信任当前正在探测的目标 IP。
                 return
             self.__raw_message_handler(
                 self._read_buffer[:data_len], data_len, addr[0], ctx[0]
@@ -519,9 +765,24 @@ class MIoTLan:
         if self._scan_timer:
             self._scan_timer.cancel()
             self._scan_timer = None
+        if self.__all_cameras_connected():
+            # 全部已知相机都已连上：可达性已由拉流本身证实（连上时 mark_reachable
+            # 直接标在线并取消离线定时器），广播与单播探测都不再产生任何被消费的
+            # 结果，故整个扫描停表，等 set_camera_connected（掉线）或 set_camera_dids
+            # （新相机）经 __maybe_resume_scan 重新拉起。
+            #
+            # ⚠️ 隐性 invariant：停的是**全局共享**的广播发现，非相机设备的
+            # lan_online 会在 _KA_TIMEOUT 后陆续翻 False、期间新上线的非相机设备也
+            # 发现不了。当前无害——lan_online 的**决策**读点全在相机路径
+            # （filter/service/camera_adapter/doctor），非相机侧只有一行日志。
+            # 将来若有非相机功能拿 lan_online 当硬门，必须先回来重新评估这里。
+            _LOGGER.debug("all cameras connected, scan paused")
+            return
         try:
-            # Scan devices
+            # Scan devices — broadcast
             self.ping_internal()
+            # Additionally probe known unicast targets (cross-subnet cameras)
+            self._probe_unicast_targets()
         except Exception as err:
             # Ignore any exceptions to avoid blocking the loop
             _LOGGER.error("ping device error, %s", err)
@@ -580,6 +841,9 @@ class MIoTLan:
         devices = {}
         for did, lan_device in self._lan_devices.items():
             devices[did] = MIoTLanDeviceInfo(
-                did=lan_device.did, online=lan_device.online, ip=lan_device.ip
+                did=lan_device.did,
+                online=lan_device.online,
+                ip=lan_device.ip,
+                cross_subnet=self.is_cross_subnet(lan_device.ip),
             )
         return devices

@@ -81,7 +81,7 @@ _MIOT_CAMERA_ON_RAW_DATA = CFUNCTYPE(
 class _MIoTCameraInfoC(Structure):
     """MIoT Camera Info C."""
 
-    _fields_ = [("did", c_char_p), ("model", c_char_p), ("channel_count", c_uint8)]
+    _fields_ = [("did", c_char_p), ("model", c_char_p), ("ip", c_char_p), ("channel_count", c_uint8)]
 
 
 class _MIoTCameraConfigC(Structure):
@@ -157,11 +157,13 @@ class MIoTCameraInstance:
 
         model: str = camera_info.model
         channel_count: int = camera_info.channel_count
+        local_ip: Optional[str] = camera_info.local_ip
         self._c_instance = self._lib_miot_camera.miot_camera_new(
             byref(
                 _MIoTCameraInfoC(
                     camera_info.did.encode("utf-8"),
                     model.encode("utf-8"),
+                    local_ip.encode("utf-8") if local_ip else None,
                     channel_count,
                 )
             )
@@ -260,10 +262,35 @@ class MIoTCameraInstance:
         result: int = await self._main_loop.run_in_executor(
             None, self._lib_miot_camera.miot_camera_stop, self._c_instance
         )
-        # Stop decoders
-        for decoder in self._decoders:
-            decoder.stop()
+        # decoder.stop() 内部 join(timeout=5.0) 是阻塞调用,不能占着事件循环跑
+        # ——与上面 miot_camera_stop 走 run_in_executor 同一个理由。
+        # gather 并发停 N 路:最坏总耗时 5s,而非串行的 N × 5s。
+        # return_exceptions=True:任一路抛错(如线程从未 start 成功 → join 抛
+        # RuntimeError)不能中断后续清理,否则 destroy_async 的 miot_camera_free
+        # 不执行,native 相机实例泄漏。
+        stop_results = await asyncio.gather(
+            *(
+                self._main_loop.run_in_executor(None, decoder.stop)
+                for decoder in self._decoders
+            ),
+            return_exceptions=True,
+        )
         self._decoders.clear()
+        # gather 结果保序:第 i 项对应 channel i。
+        stuck_channels = [
+            (channel, result)
+            for channel, result in enumerate(stop_results)
+            if result is not True
+        ]
+        if stuck_channels:
+            _LOGGER.error(
+                "camera stop: %d/%d decoders not cleanly stopped, "
+                "codec/worker may still be alive, %s, %s",
+                len(stuck_channels),
+                len(stop_results),
+                stuck_channels,
+                self._did,
+            )
 
         _LOGGER.info("camera stop, %s, %s", self._did, result)
 

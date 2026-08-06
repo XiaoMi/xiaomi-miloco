@@ -1413,7 +1413,7 @@ class Installer:
                     shutil.copy2(f, adapter_dir / f.name)
         # 适配器运行时依赖：跟 adapter.py 平铺同目录才被 submodule_search_locations 发现
         src_plugin = extract_dir / "miloco-plugin"
-        for dep in ("context_injection.py", "catalog.py", "paths.py", "tools_habit.py"):
+        for dep in ("context_injection.py", "catalog.py", "paths.py"):
             dep_path = src_plugin / dep
             if dep_path.exists():
                 shutil.copy2(dep_path, adapter_dir / dep)
