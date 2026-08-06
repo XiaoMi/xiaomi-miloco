@@ -353,7 +353,7 @@ class TestConfigFromSettings:
             assert cfg.user_enabled is False
             assert cfg.expand_ratio_h == 0.25
             # 未给的键仍取默认
-            assert cfg.crop_short_edge == CropEnhanceConfig().crop_short_edge
+            assert cfg.expand_ratio_v == CropEnhanceConfig().expand_ratio_v
         finally:
             reset_settings()
 
