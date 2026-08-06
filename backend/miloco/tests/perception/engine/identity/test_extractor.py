@@ -341,14 +341,8 @@ class TestExtractFromVideoDeepSort:
         构造 mock tracker 暴露 update / get_tracking_results / get_track_embedding;
         视频用一个最小的 mp4 文件占位(逐帧 mock detector 控制结果)。
         """
-        import cv2
-        # 写一个 3 帧的小 mp4
         video_path = str(tmp_path / "tiny.mp4")
-        h, w = 720, 1280
-        writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), 1, (w, h))
-        for _ in range(6):
-            writer.write(_make_frame(h, w))
-        writer.release()
+        self._write_tiny_mp4(video_path)
 
         body_det = _MockDet(x=200, y=100, w=300, h=600, confidence=0.9,
                              class_id=_MockDet.CLASS_HUMAN)
@@ -390,17 +384,10 @@ class TestExtractFromVideoDeepSort:
         同人相邻帧通过去重 → topk 选出来"看着差不多"。本测试锁定 fps fix
         行为, 防未来被改回硬编码。
         """
-        import cv2
         # 写 6 帧 60 fps mp4 → 真实时间间隔 ≈ 0.0167s
         video_path = str(tmp_path / "60fps.mp4")
-        h, w = 720, 1280
         target_fps = 60
-        writer = cv2.VideoWriter(
-            video_path, cv2.VideoWriter_fourcc(*"mp4v"), target_fps, (w, h),
-        )
-        for _ in range(6):
-            writer.write(_make_frame(h, w))
-        writer.release()
+        self._write_tiny_mp4(video_path, fps=target_fps)
 
         body_det = _MockDet(x=200, y=100, w=300, h=600, confidence=0.9,
                              class_id=_MockDet.CLASS_HUMAN)
@@ -522,15 +509,8 @@ class TestExtractFromVideoDeepSort:
         构造: 每帧 detector 同时返 1 个 body + 1 个 face (跟 body 重叠), 关联成功
         → cand.same_frame_face_crop 应为非 None ndarray。
         """
-        import cv2
         video_path = str(tmp_path / "with_face.mp4")
-        h, w = 720, 1280
-        writer = cv2.VideoWriter(
-            video_path, cv2.VideoWriter_fourcc(*"mp4v"), 1, (w, h),
-        )
-        for _ in range(6):
-            writer.write(_make_frame(h, w))
-        writer.release()
+        self._write_tiny_mp4(video_path)
 
         # body + face 都返, face bbox 在 body 内 (IoA ≥ 0.5 关联成功)
         body_det = _MockDet(x=200, y=100, w=300, h=600, confidence=0.9,
