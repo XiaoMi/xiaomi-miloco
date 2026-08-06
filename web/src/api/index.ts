@@ -12,10 +12,12 @@ import type {
   PerceptionBackendState,
   ActivityEvent,
   Device,
+  EventCropMeta,
   HomeEntries,
   HomeEntryType,
   HomeId,
   HomeStatus,
+  ProcSeries,
   MemorySeries,
   MemorySnapshot,
   MonitorMeta,
@@ -48,6 +50,8 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  UpgradeCheck,
+  UpgradeStatus,
 } from "@/lib/types";
 export type { ScopeHome };
 
@@ -64,7 +68,10 @@ export async function bindMiot(): Promise<{ oauthUrl: string }> {
   return impl.realBindMiot();
 }
 
-export async function authorizeMiot(code: string, state: string): Promise<void> {
+export async function authorizeMiot(
+  code: string,
+  state: string,
+): Promise<void> {
   return impl.realAuthorizeMiot(code, state);
 }
 
@@ -344,6 +351,25 @@ export function eventClipUrl(event_id: string, device_id: string): string {
   return impl.realEventClipUrl(event_id, device_id);
 }
 
+/** 事件全景参考帧 ref.jpg URL(仅 Smart Crop 事件有,先看 event.has_ref). */
+export function eventRefUrl(event_id: string, device_id: string): string {
+  return impl.realEventRefUrl(event_id, device_id);
+}
+
+/**
+ * Smart Crop 裁切区域坐标(画框用).
+ *
+ * `null` = 后端明确说这台 device 这次没裁切(410);reject = 没问出来(网络 / 5xx,
+ * 含"裁过但 trace 读坏"这一档).二者调用方要区别对待:前者不该渲染参考卡,
+ * 后者只是画不了框.
+ */
+export async function eventCropMeta(
+  event_id: string,
+  device_id: string,
+): Promise<EventCropMeta | null> {
+  return impl.realEventCropMeta(event_id, device_id);
+}
+
 /** 订阅 /api/events/stream SSE;返回 unsubscribe. onOpen 重连成功时触发(可选). */
 export function subscribeEvents(
   onEvent: (e: ActivityEvent) => void,
@@ -384,7 +410,9 @@ export async function switchScopeHome(homeId: string): Promise<void> {
   return impl.realSwitchScopeHome(homeId);
 }
 
-export async function listScopeCameras(homeId?: HomeId): Promise<ScopeCamera[]> {
+export async function listScopeCameras(
+  homeId?: HomeId,
+): Promise<ScopeCamera[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListScopeCameras();
 }
@@ -442,8 +470,18 @@ export async function submitEventFeedback(
   errorTypes: string[],
   feedbackText: string,
   includeGallery: boolean,
-): Promise<{ uploaded: boolean; upload_key?: string; pack_path: string; pack_size_bytes: number }> {
-  return impl.realSubmitEventFeedback(eventId, errorTypes, feedbackText, includeGallery);
+): Promise<{
+  uploaded: boolean;
+  upload_key?: string;
+  pack_path: string;
+  pack_size_bytes: number;
+}> {
+  return impl.realSubmitEventFeedback(
+    eventId,
+    errorTypes,
+    feedbackText,
+    includeGallery,
+  );
 }
 
 export async function revealDir(path: string): Promise<void> {
@@ -544,6 +582,23 @@ export function subscribeOmniHealth(
 // (backend 重启会断 SSE,重连意味着 config 可能已变)。
 export const OMNI_CONFIG_STALE_EVENT = "miloco:omni-config-stale";
 
+// ── 升级检测 / 一键升级 ────────────────────────────────
+export async function upgradeCheck(force = false): Promise<UpgradeCheck> {
+  return impl.realUpgradeCheck(force);
+}
+
+export async function triggerUpgrade(): Promise<void> {
+  return impl.realTriggerUpgrade();
+}
+
+export async function upgradeStatus(): Promise<UpgradeStatus> {
+  return impl.realUpgradeStatus();
+}
+
+export async function dismissUpgrade(version: string): Promise<void> {
+  return impl.realDismissUpgrade(version);
+}
+
 // ── 性能 tab（observability）────────────────────────────
 // backend observability/router.py 不走 Normal 包装,直接返回原始 JSON。
 
@@ -560,9 +615,7 @@ function windowToSince(w: PerfWindow): number {
 
 export async function getPerfSummary(w: PerfWindow): Promise<PerfSummary> {
   const since = windowToSince(w);
-  return apiFetch<PerfSummary>(
-    `/api/stats?metric=summary&since=${since}`,
-  );
+  return apiFetch<PerfSummary>(`/api/stats?metric=summary&since=${since}`);
 }
 
 export async function getPerfRtfSeries(
@@ -638,9 +691,7 @@ export async function listPerfTraces(
   limit: number = 100,
 ): Promise<PerfTraceRow[]> {
   const since = windowToSince(w);
-  return apiFetch<PerfTraceRow[]>(
-    `/api/traces?since=${since}&limit=${limit}`,
-  );
+  return apiFetch<PerfTraceRow[]>(`/api/traces?since=${since}&limit=${limit}`);
 }
 
 export async function listPerfAgentRuns(
@@ -688,6 +739,15 @@ export async function getMemorySeries(
   );
 }
 
+export async function getProcSeries(
+  w: PerfWindow,
+  bucket: PerfBucket,
+): Promise<ProcSeries> {
+  return apiFetch<ProcSeries>(
+    `/api/monitor/proc/series?window=${w}&bucket=${bucket}`,
+  );
+}
+
 // ─── Perception Config ─────────────────────────────────────────────────
 
 export type MinSuggestionUrgency = "low" | "medium" | "high";
@@ -696,6 +756,13 @@ export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   window_size: number;
+  /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
+   *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */
+  smart_crop_enabled?: boolean;
+  /** 发版级开关(backend crop_enhance.enabled)的只读投影,**PUT 不可写**。
+   *  false = 当前这一版没打开该能力,用户开关即便为 true 也不裁 → 前端置灰 + 提示,
+   *  避免"开关开着但后端不裁"的静默失效。老后端不返此字段 → undefined,同样置灰。 */
+  smart_crop_available?: boolean;
   // 老 backend(<0.10.x)不返此字段,前端在读取处 ?? DEFAULTS.min_suggestion_urgency 回退。
   // 声明成可选是为了把这层运行时兼容语义显式化,别让未来维护者把 ?? 当成死代码删。
   min_suggestion_urgency?: MinSuggestionUrgency;
@@ -714,8 +781,10 @@ export type UpdatePerceptionConfigResult = PerceptionConfig & {
   restart_ok?: boolean;
 };
 
+// smart_crop_available 从入参里 Omit 掉:它是发版级开关的只读投影,后端 PUT 也不收,
+// 在类型上挡住比让它静默被忽略更好。
 export async function updatePerceptionConfig(
-  input: Partial<PerceptionConfig>,
+  input: Partial<Omit<PerceptionConfig, "smart_crop_available">>,
 ): Promise<UpdatePerceptionConfigResult> {
   const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
     "/api/admin/perception-config",

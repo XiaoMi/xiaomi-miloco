@@ -23,6 +23,7 @@
     "errAgentRuns": "Agent 调用列表加载失败",
     "errMemSnapshot": "内存快照加载失败",
     "errMemSeries": "内存时序加载失败",
+    "errProcSeries": "进程 CPU / 线程数时序加载失败",
 
     "loading": "加载中…",
     "noData": "所选时间内无数据。",
@@ -87,6 +88,18 @@
     "kpiOmniRtfP95Hint": "仅 omni 成功",
     "kpiAgentCall": "Agent 调用",
     "kpiAgentCallHint": "触发 Agent 次数",
+
+    "procTitle": "进程 CPU / 线程数",
+    "procHeaderRecent": "最近 {{bucket}} 均值 {{pct}}%",
+    "procHeaderPeak": "峰值 {{pct}}%",
+    "procHeaderEmpty": "无数据",
+    "procEmptySeries": "所选窗口内无进程 CPU / 线程数时序数据。",
+    "procAria": "进程 CPU 占用与线程数时间序列，双 Y 轴折线图",
+    "procHeaderThreads": "线程 {{n}}（{{bucket}} 均值）",
+    "procHeaderCores": "核数 {{n}}",
+    "procLegendCpu": "CPU",
+    "procLegendThreads": "线程数",
+    "procTooltipPeak": "桶内峰值",
 
     "memTitle": "进程内存",
     "memHeaderRss": "RSS {{mb}} MB",

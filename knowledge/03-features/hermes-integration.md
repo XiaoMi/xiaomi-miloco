@@ -50,12 +50,12 @@ miloco 原本只通过 OpenClaw 插件（`plugins/openclaw/`）接入小米内�
 `register(ctx)` 注册：
 
 1. **`pre_llm_call` 钩子**（注册为 noop——上下文组装改由 backend 侧 adapter.build_system 在 send_turn 内完成，以 `<system>` 消息注入，缓存友好）。
-2. **3 个 tool**：`miloco_im_push`（通知分发，两段式）、`miloco_notify_bind`（绑定通知目标）、`miloco_habit_suggest`（习惯建议状态机）。
+2. **2 个 tool**：`miloco_im_push`（通知分发，两段式）、`miloco_notify_bind`（绑定通知目标）。注：`miloco_habit_suggest` 防骚扰状态机已随 PR #419 迁入 `miloco-cli habit` 命令组，本插件只在 context_injection 保留只读注入（见 [家庭记忆](home-profile.md) 的「习惯建议状态机」）。
 3. **受管 cron reconcile**（`cron_setup.py::reconcile_cron_jobs`）—— 启动时按 `[miloco:home-profile]` 标签对齐 4 个任务，deliver="local"（cron 输出静默，agent 主动调 `miloco_im_push` 才通知）。
 
 ### Adapter（`plugins/hermes/miloco-plugin/hermes_adapter/adapter.py`）
 
-**非独立进程**。backend 启动时由 `agent_platform/loader.py` 按 `agent.platform=hermes` 动态加载 adapter adapter.py，存放在 `$MILOCO_HOME/agent_platform/hermes/` 目录下（连同 context_injection/catalog/paths/tools_habit 等依赖文件，loader 以 `submodule_search_locations` 按目录加载）。
+**非独立进程**。backend 启动时由 `agent_platform/loader.py` 按 `agent.platform=hermes` 动态加载 adapter adapter.py，存放在 `$MILOCO_HOME/agent_platform/hermes/` 目录下（连同 context_injection/catalog/paths 等依赖文件，loader 以 `submodule_search_locations` 按目录加载）。
 
 对外暴露三个方法（满足 AgentPlatformAdapter duck-typed 契约）：
 

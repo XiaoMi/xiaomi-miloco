@@ -26,9 +26,11 @@ from miloco.perception.types import (
 )
 
 
-def _artifacts(clips: dict | None = None) -> OmniEventArtifacts:
-    """造 OmniEventArtifacts 实例,只填 clips,trace 留 None."""
-    return OmniEventArtifacts(clips=clips or {})
+def _artifacts(
+    clips: dict | None = None, ref_frames: dict | None = None
+) -> OmniEventArtifacts:
+    """造 OmniEventArtifacts 实例,填 clips(+ 可选 ref_frames),trace 留 None."""
+    return OmniEventArtifacts(clips=clips or {}, ref_frames=ref_frames or {})
 
 
 @pytest.fixture
@@ -141,6 +143,46 @@ class TestPersistMeaningfulEvent:
         assert event_dir.exists()
         assert (event_dir / "cam_living_01" / "clip.mp4").read_bytes() == _clip_payload(1)[0]
         assert (event_dir / "cam_kitchen_01" / "clip.mp4").read_bytes() == _clip_payload(2)[0]
+
+    async def test_rule_status_rendered_in_text(self, isolated_db, dao):
+        """rule_statuses 透传到 build_agent_text，DB.text 含「触发状态」行。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        from miloco.rule.schema import TriggerOutcome
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload()}),
+            rule_statuses={"r1": TriggerOutcome.FIRED},
+        )
+        rows = dao.query()
+        assert len(rows) == 1
+        assert "触发状态：已触发" in rows[0]["text"]
+
+    async def test_incomplete_rule_rendered_as_unknown_in_text(self, isolated_db, dao):
+        """incomplete_rule_ids 透传到 build_agent_text，DB.text 标「未知」而非聚合值。
+
+        钉住 _persist_meaningful_event → build_agent_text 这一跳:删掉那个 kwarg 透传时,
+        住户看到的正是本 PR 要修的「确定但偏弱的假标签」,故必须有回归守着。
+        """
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        from miloco.rule.schema import TriggerOutcome
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload()}),
+            rule_statuses={"r1": TriggerOutcome.STILL_IN},  # 聚合值存在但证据残缺
+            incomplete_rule_ids={"r1"},
+        )
+        rows = dao.query()
+        assert len(rows) == 1
+        assert "触发状态：未知" in rows[0]["text"]
+        assert "未触发（持续中）" not in rows[0]["text"]
 
     async def test_caption_only_does_not_insert(self, isolated_db, dao):
         """纯 caption(无 rule/suggestion/asr)→ 不入表(B5)."""
@@ -575,6 +617,44 @@ class TestPersistMeaningfulEvent:
         event_dir = get_snapshot_root() / rows[0]["id"]
         assert (event_dir / "cam_entrance" / "clip.mp4").exists()
         assert not (event_dir / "cam_study").exists()
+
+    async def test_ref_frames_narrowed_to_rule_source(self, isolated_db, dao):
+        """Smart Crop 多摄像头:规则只命中玄关,书房也产出了 crop 视频 + ref 参考帧,
+        但 ref_frames 应与 clips / device_ids 同步收窄——只落玄关的 ref.jpg,书房的
+        ref 不落盘(否则其 device_id 已不在 device_ids 内,ref 经 locate_ref 校验取不到、
+        也不进 feedback pack,纯占 snapshot 配额)。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="陌生人进入玄关",
+                    source_device_ids=["cam_entrance"],
+                )
+            ]
+        )
+        clips_by_device = {
+            "cam_entrance": _clip_payload(1),
+            "cam_study": _clip_payload(2),
+        }
+        ref_frames = {
+            "cam_entrance": b"\xff\xd8\xff\xe0ref-entrance",
+            "cam_study": b"\xff\xd8\xff\xe0ref-study",
+        }
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_entrance", "cam_study"],
+            artifacts=_artifacts(clips_by_device, ref_frames=ref_frames),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_entrance"]
+
+        from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+
+        event_dir = get_snapshot_root() / rows[0]["id"]
+        assert (event_dir / region_slug("cam_entrance") / "ref.jpg").exists()
+        assert not (event_dir / region_slug("cam_study")).exists()
 
     async def test_device_ids_union_across_rules_and_asr(self, isolated_db, dao):
         """同一行事件里规则命中书房、语音指令来自客厅(拾音白名单相机)→ device_ids

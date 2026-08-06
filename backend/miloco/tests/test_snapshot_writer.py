@@ -217,6 +217,32 @@ class TestSaveEventArtifacts:
         assert (self.root / "event-both" / "cam_b" / "clip.m4a").exists()
         assert (self.root / "event-both" / "omni_trace.json.gz").exists()
 
+    def test_ref_frame_saved_alongside_clip(self):
+        """Smart Crop:ref_frames → 落 {device}/ref.jpg,与 clip 同目录;返回值只计 clip."""
+        jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        artifacts = OmniEventArtifacts(
+            clips={"cam_a": (b"crop-video", "mp4")},
+            ref_frames={"cam_a": jpg},
+        )
+        clip_dids = save_event_artifacts("event-ref", artifacts)
+        assert clip_dids == ["cam_a"]  # ref 不进 clip_dids
+        assert (self.root / "event-ref" / "cam_a" / "clip.mp4").exists()
+        assert (self.root / "event-ref" / "cam_a" / "ref.jpg").read_bytes() == jpg
+
+    def test_ref_frame_only(self):
+        """只有 ref_frames(无 clip/trace/gallery)→ 仍落 ref.jpg,不因空 guard 早退."""
+        jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 50
+        artifacts = OmniEventArtifacts(ref_frames={"cam_a": jpg})
+        clip_dids = save_event_artifacts("event-ref-only", artifacts)
+        assert clip_dids == []
+        assert (self.root / "event-ref-only" / "cam_a" / "ref.jpg").read_bytes() == jpg
+
+    def test_ref_frame_empty_bytes_skipped(self):
+        """ref 字节为空 → 跳过,不落空文件."""
+        artifacts = OmniEventArtifacts(ref_frames={"cam_a": b""})
+        save_event_artifacts("event-ref-empty", artifacts)
+        assert not (self.root / "event-ref-empty" / "cam_a" / "ref.jpg").exists()
+
 
 # ─── _save_gallery ─────────────────────────────────────────────────────────
 

@@ -179,6 +179,8 @@ export interface ActivityEvent {
   clip_kind?: "mp4" | "m4a" | null;
   /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
   has_trace?: boolean;
+  /** 是否有全景参考帧 ref.jpg(= 本事件走了 Smart Crop);前端据此决定是否请求 /ref/ 并渲染参考卡 */
+  has_ref?: boolean;
   /** 该事件是否已有反馈打包 */
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
@@ -200,6 +202,15 @@ export interface OnDemandLogEntry {
   has_feedback: boolean;
   feedback_pack_path: string | null;
   feedback_pack_size: number | null;
+}
+
+// Smart Crop 事件的裁切区域元数据(GET /api/events/{id}/crop/{device_id}).
+// 坐标在全景帧像素空间,与 ref.jpg 同一空间(ref.jpg 只是等比缩放过)——
+// 所以画框只需 svg viewBox="0 0 W H",letterbox 缩放交给浏览器,前端不算坐标.
+export interface EventCropMeta {
+  region_xyxy: [number, number, number, number];
+  frame_size_wh: [number, number];
+  crop_short_edge: number;
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────
@@ -290,6 +301,9 @@ export interface ScopeCamera {
   // voiceInUse 正交：关着的相机也能预配，仅在被感知时注入生效。多通道相机按 channel 存取。
   perceptionPrompt: string;
   connected: boolean;
+  // 附加诊断信息（默认 undefined）。目前仅 "cross_subnet_nat"：跨网段 + 探测可达 +
+  // 拉流长期卡在连接中——大概率是路由器 NAT 类型限制拉流，不是暂时抖动。
+  streamError?: "cross_subnet_nat";
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。
@@ -710,6 +724,23 @@ export interface MemorySeries {
   points: MemoryPoint[];
 }
 
+// === Proc monitor (/monitor/proc/series) ===
+
+export interface ProcPoint {
+  ts: number;
+  cpu_pct: number;
+  cpu_pct_max: number;
+  num_threads: number;
+}
+
+export interface ProcSeries {
+  ts_start: number | null;
+  ts_end: number | null;
+  interval_s: number;
+  points: ProcPoint[];
+  core_count: number;
+}
+
 // === Monitor meta (/monitor/) ===
 
 export interface MonitorMeta {
@@ -808,4 +839,22 @@ export interface PerceptionBackendState {
    *  (同 PB_CODE_KEY 的理由)。前端按 code 查本地化文案,detail 拼在后面。 */
   cloud_hint: { code: string; message?: string; detail?: string } | null;
   local_capabilities: LocalVisionCapabilities;
+}
+
+// ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──
+export interface UpgradeCheck {
+  current: string;
+  latest: string | null;
+  has_update: boolean;
+  deploy_kind: "release" | "dev";
+  release_url: string | null;
+  reachable: boolean;
+  checked_at: number;
+  /** 后端持久化的「已确认版本」；banner 在 latest === dismissed 时不显（存后端，非浏览器）。 */
+  dismissed: string | null;
+}
+
+export interface UpgradeStatus {
+  /** idle | starting | downloading | installing | done | failed —— 前端据此点亮步骤 / 判完成。 */
+  phase: string;
 }

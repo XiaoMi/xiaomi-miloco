@@ -223,7 +223,7 @@ Miloco 的感知流水线每次调 VLM（Omni）都会消耗 token。为了让�
 
 ## 横切关注点
 
-**节点监控**（`node_monitor/`）：进程级单例注册表（`NodeMonitor`），追踪多个关键节点（camera / collector / processor / engine / rule / miot_proxy 等）的 lifecycle 和运行指标。节点有两类终态：`prereq_missing`（预期等待态，如 Omni API Key 未配置，不触发 503）和 `stalled/failed`（触发 `/health` 503）。配套两个后台守护线程：`WatchdogTask` 周期扫描各节点、把长时间无进展者判为 `stalled`；`ResourceMonitor` 定期采样进程内存 / 资源占用（供排查内存增长）。节点详情通过 `/api/monitor/nodes` 查询、内存/资源采样通过 `/api/monitor/memory` 系列端点查询（均需鉴权）。
+**节点监控**（`node_monitor/`）：进程级单例注册表（`NodeMonitor`），追踪多个关键节点（camera / collector / processor / engine / rule / miot_proxy 等）的 lifecycle 和运行指标。节点有两类终态：`prereq_missing`（预期等待态，如 Omni API Key 未配置，不触发 503）和 `stalled/failed`（触发 `/health` 503）。配套两个后台守护线程：`WatchdogTask` 周期扫描各节点、把长时间无进展者判为 `stalled`；`ResourceMonitor` 定期采样进程内存 / CPU 占用 / 线程数（供排查内存增长与 CPU 毛刺），内存与 CPU 时序各存一份 3 天环形缓冲。节点详情通过 `/api/monitor/nodes` 查询、内存采样通过 `/api/monitor/memory` 系列端点、CPU 与线程数时序通过 `/api/monitor/proc/series` 查询（均需鉴权）。
 
 **事件调度**（`dispatch/dispatcher.py`，`AgentDispatcher`）：所有后端 → Agent 投递的统一收口。保证同一 session_key 单飞、同类批量合并、队列超长时按优先级淘汰。五类事件分三条 session 路由（交互、绑定、onboarding 共用主会话，规则、建议各一条），按合并类型各自单飞、互不混入同一 turn；详见 [Agent 集成](../03-features/openclaw-integration.md)。
 

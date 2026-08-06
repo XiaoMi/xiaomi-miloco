@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta
+
 import pytest
 from miloco_plugin_pkg import context_injection as ci
 
@@ -144,3 +147,77 @@ def test_inject_never_raises(tmp_miloco_home, monkeypatch):
     out = ci.inject_context(session_id="agent:main")
     # 钩子绝不抛：catalog 异常时应降级返回（仍含指令块）或 None，不能上抛
     assert out is None or "context" in out
+
+
+# ---------- 待回应习惯建议只读注入（状态机已迁入 miloco-cli，此处为只读镜像） ----------
+
+def _write_suggestions(tmp_miloco_home, entries):
+    """把 entries 写入 $MILOCO_HOME/home-profile/task-suggestions.json。"""
+    path = ci.miloco_home() / "home-profile" / "task-suggestions.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "entries": entries}, ensure_ascii=False), encoding="utf-8")
+
+
+def _days_ago_iso(days):
+    return (datetime.now().astimezone() - timedelta(days=days)).isoformat()
+
+
+# 固定时间戳（与 openclaw injection.test.ts 同款）：asked_at 用 +08:00 后缀，
+# 7 天边界用注入 now 精确验证，避免 buildPendingSuggestionBlock 内部真实 now 的
+# 毫秒级延迟把「恰好 7 天」的边界判定翻到另一侧（CI flaky 根因）。
+_ASKED_TS = "2026-06-06T10:00:00+08:00"
+_EXACTLY_7D_NOW = "2026-06-13T10:00:00+08:00"  # 恰好 7*86_400_000 ms → 含
+_JUST_OVER_7D_NOW = "2026-06-13T10:00:00.001+08:00"  # 超 1ms → 排除
+
+
+def test_pending_block_injects_open_question_and_uses_cli(tmp_miloco_home):
+    """有未过期 asked 条目 → 注入块出现，且引导 agent 用 miloco-cli habit resolve（非旧 tool）。"""
+    _write_suggestions(tmp_miloco_home, [
+        {"key": "wanglei_sleep_dim_light", "title": "睡觉调暗灯", "suggestion": "睡觉时把台灯调暗",
+         "status": "asked", "asked_at": _days_ago_iso(1)},
+    ])
+    block = ci.build_pending_suggestion_block()
+    assert "## 等用户回应的习惯建议" in block
+    assert "- [wanglei_sleep_dim_light] 睡觉调暗灯：睡觉时把台灯调暗" in block
+    # 文本引导改为 CLI 命令，不得再引用已删除的 miloco_habit_suggest tool
+    assert "miloco-cli habit resolve" in block
+    assert "miloco_habit_suggest(" not in block
+
+
+def test_pending_block_ignores_non_asked_and_expired(tmp_miloco_home):
+    """非 asked 状态 / 已过 7 天 → 不注入（空串，静默）。"""
+    _write_suggestions(tmp_miloco_home, [
+        {"key": "pending_k", "title": "T", "suggestion": "S", "status": "pending", "asked_at": None},
+        # 固定 2026-06-06 → 距今（测试运行时刻）远超 7 天，确定过期
+        {"key": "expired_k", "title": "T", "suggestion": "S", "status": "asked", "asked_at": _ASKED_TS},
+    ])
+    assert ci.build_pending_suggestion_block() == ""
+
+
+def test_load_open_questions_seven_day_boundary(tmp_miloco_home):
+    """7 天边界精确验证（注入 now，确定性）：恰好 7 天含，超 1ms 排除。
+
+    直接测 load_open_questions(now_iso)，用固定 asked_at + 固定 now 卡在
+    604800000 ms 两侧，消除真实 now 毫秒延迟导致的 flaky。
+    """
+    _write_suggestions(tmp_miloco_home, [
+        {"key": "wl_gym", "title": "健身", "suggestion": "放歌单", "status": "asked", "asked_at": _ASKED_TS},
+    ])
+    # 恰好 7 天（== STALE_MS）→ 仍算未过期，含
+    assert len(ci.load_open_questions(now_iso=_EXACTLY_7D_NOW)) == 1
+    # 超 1ms → 排除
+    assert len(ci.load_open_questions(now_iso=_JUST_OVER_7D_NOW)) == 0
+
+
+def test_pending_block_missing_or_corrupt_file_is_empty(tmp_miloco_home):
+    """文件缺失 / JSON 损坏 / 空结构 → 空串，不抛错。"""
+    # 缺失
+    assert ci.build_pending_suggestion_block() == ""
+    # 损坏
+    path = ci.miloco_home() / "home-profile" / "task-suggestions.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    assert ci.build_pending_suggestion_block() == ""
+    # 空结构
+    path.write_text(json.dumps({"version": 1, "entries": []}, ensure_ascii=False), encoding="utf-8")
+    assert ci.build_pending_suggestion_block() == ""
