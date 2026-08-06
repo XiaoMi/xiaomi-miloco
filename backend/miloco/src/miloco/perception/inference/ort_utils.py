@@ -159,13 +159,24 @@ def make_session(
 
     Args:
         model_path: Path to the ONNX model file.
-        use_gpu: Whether to prefer CUDA execution provider.
+        use_gpu: Whether to prefer a GPU execution provider.  OpenVINO GPU is
+            preferred when available (Intel iGPU), followed by CUDA.
         num_threads: Number of intra/inter-op threads. ``None`` uses the
             module default (4).
     """
     providers = ["CPUExecutionProvider"]
     available = ort.get_available_providers()
-    if use_gpu and "CUDAExecutionProvider" in available:
+    openvino_gpu = False
+    if use_gpu and "OpenVINOExecutionProvider" in available:
+        # Do not use bare OpenVINOExecutionProvider here: its default device is
+        # CPU.  The explicit option is what moves detector/ReID inference onto
+        # Intel graphics exposed through /dev/dri.
+        providers = [
+            ("OpenVINOExecutionProvider", {"device_type": "GPU"}),
+            "CPUExecutionProvider",
+        ]
+        openvino_gpu = True
+    elif use_gpu and "CUDAExecutionProvider" in available:
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     # Apple Silicon 即使 use_gpu=False 也走 CoreML — 主要目的是绕开 CPU EP
     # 上 ArmKleidiAI 的 workspace 内存泄漏 (不是为性能,顺带也快)。
@@ -218,4 +229,35 @@ def make_session(
     apply_kleidiai_opt_out(opts)
 
     _LOGGER.info("ORT session providers=%s for %s", providers, model_path)
-    return ort.InferenceSession(model_path, sess_options=opts, providers=providers)
+    try:
+        return ort.InferenceSession(
+            model_path,
+            sess_options=opts,
+            providers=providers,
+        )
+    except Exception:
+        if not openvino_gpu:
+            raise
+
+        # The OpenVINO wheel can advertise its EP even when the guest has no
+        # usable Intel GPU (missing /dev/dri permission, driver/firmware
+        # mismatch, unsupported virtual GPU, etc.).  Keep Miloco available and
+        # retry once with the next safe provider instead of failing engine
+        # startup.
+        fallback_providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if "CUDAExecutionProvider" in available
+            else ["CPUExecutionProvider"]
+        )
+        _LOGGER.warning(
+            "OpenVINO GPU session initialization failed for %s; "
+            "falling back to providers=%s",
+            model_path,
+            fallback_providers,
+            exc_info=True,
+        )
+        return ort.InferenceSession(
+            model_path,
+            sess_options=opts,
+            providers=fallback_providers,
+        )

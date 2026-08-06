@@ -120,6 +120,9 @@ perception:
       # ReID 关联,跟踪更稳;额外暴露 Track.features deque 给陌生人池零额外推理
       # 取 emb。回退路径:切 "real" 启用纯 SORT(陌生人池退化为"只累积、不去重")。
       tracking_service_mode: "deep_sort"
+      # 显式开启 GPU provider。Linux x86 优先 OpenVINO GPU(Intel /dev/dri)，
+      # 初始化失败自动退 CUDA/CPU；默认关闭，避免无 GPU 主机启动时额外探测。
+      perception_use_gpu: false
     omni:
       timeout: 30.0 # 请求超时（秒）
 
