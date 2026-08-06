@@ -96,7 +96,7 @@ class OpenAICompatAdapter(OmniProviderAdapter):
     """
 
     def endpoint(self, base_url: str, model: str, *, stream: bool) -> str:
-        return f"{base_url}/chat/completions"
+        return f"{base_url.rstrip('/')}/chat/completions"
 
     def auth_headers(self, api_key: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {api_key}"}
@@ -425,7 +425,7 @@ class GeminiAdapter(OmniProviderAdapter):
 
     def endpoint(self, base_url: str, model: str, *, stream: bool) -> str:
         verb = "streamGenerateContent?alt=sse" if stream else "generateContent"
-        return f"{base_url}/models/{model}:{verb}"
+        return f"{base_url.rstrip('/')}/models/{model}:{verb}"
 
     def auth_headers(self, api_key: str) -> dict[str, str]:
         return {"x-goog-api-key": api_key}

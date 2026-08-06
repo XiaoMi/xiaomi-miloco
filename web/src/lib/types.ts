@@ -274,6 +274,9 @@ export interface PerceptionCamera {
 export interface ScopeCamera {
   did: string;
   name: string;
+  source?: "miot" | "rtsp";
+  /** RTSP 管理时回填；米家摄像头无此字段。 */
+  url?: string;
   // 通道号（多通道相机各条通道 0 / 1 / ...）；单通道相机恒为 0。用于播放取流、复合键去重。
   channel: number;
   // 该相机的通道总数（后端 channel_count）。判「多通道相机」的权威信号：channelCount>1 才
@@ -304,6 +307,11 @@ export interface ScopeCamera {
   // 附加诊断信息（默认 undefined）。目前仅 "cross_subnet_nat"：跨网段 + 探测可达 +
   // 拉流长期卡在连接中——大概率是路由器 NAT 类型限制拉流，不是暂时抖动。
   streamError?: "cross_subnet_nat";
+}
+
+export interface RtspCameraInput {
+  name: string;
+  url: string;
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。
@@ -401,6 +409,8 @@ export interface OmniModelConfig {
   api_key_masked: string;
   /** 是否已配置 api_key。 */
   has_key: boolean;
+  /** frames=5 张抽帧图片；video=MP4 视频。 */
+  visual_mode: "frames" | "video";
 }
 
 /** 已保存的配置档案（label 为唯一标识），active 标记是否为当前生效。 */
@@ -466,6 +476,12 @@ export interface OmniModelsResult {
   message?: string;
 }
 
+export interface OmniModelsImportResult {
+  config: OmniConfigState;
+  added: { label: string; model: string }[];
+  skipped: { label: string; model: string }[];
+}
+
 /** 提交给后端的 omni 配置(保存/测试)；档案名 label = 唯一 id。 */
 export interface OmniConfigUpdate {
   /** 档案名(唯一 id，非空)。 */
@@ -478,6 +494,8 @@ export interface OmniConfigUpdate {
   original_label?: string;
   /** 是否同时设为当前生效；省略=后端默认 true。「保存」传 false（激活走列表的「启用」）。 */
   activate?: boolean;
+  /** 模型接收的视觉输入类型。 */
+  visual_mode?: "frames" | "video";
 }
 
 /** 测试连接结果：ok=true 即连通；否则 message 给出原因（Key 无效 / 不可达 / 模型不存在等）。 */

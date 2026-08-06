@@ -161,6 +161,13 @@ class OmniModelSettings(BaseModel):
         default="",
         description="多模态模型 API Key；为空时视为未配置，插件与后端启动前校验",
     )
+    visual_mode: Literal["frames", "video"] = Field(
+        default="video",
+        description=(
+            "视觉输入类型：frames 将感知窗口抽取为 5 张压缩 JPEG；"
+            "video 沿用 MP4 视频输入。"
+        ),
+    )
 
 
 class ModelSettings(BaseModel):

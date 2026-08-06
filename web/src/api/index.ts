@@ -40,6 +40,7 @@ import type {
   Scene,
   ScopeCamera,
   ScopeHome,
+  RtspCameraInput,
   Task,
   UsagePeriod,
   UsageStats,
@@ -49,6 +50,7 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  OmniModelsImportResult,
   UpgradeCheck,
   UpgradeStatus,
 } from "@/lib/types";
@@ -416,6 +418,23 @@ export async function listScopeCameras(
   return impl.realListScopeCameras();
 }
 
+export async function addRtspCamera(
+  input: RtspCameraInput,
+): Promise<ScopeCamera> {
+  return impl.realAddRtspCamera(input);
+}
+
+export async function updateRtspCamera(
+  did: string,
+  input: RtspCameraInput,
+): Promise<ScopeCamera> {
+  return impl.realUpdateRtspCamera(did, input);
+}
+
+export async function deleteRtspCamera(did: string): Promise<void> {
+  return impl.realDeleteRtspCamera(did);
+}
+
 // 轻量触发 backend 刷新相机云端 online 状态(节流见 impl,不扰流)。「此刻」页加载
 // 相机前调,让"已离线/在线"判断不读陈旧缓存。非主家庭(mock)直接 no-op。
 export async function refreshCameraOnline(
@@ -555,6 +574,16 @@ export async function listOmniModels(input: {
   label?: string;
 }): Promise<OmniModelsResult> {
   return impl.realListOmniModels(input);
+}
+
+export async function importOmniModels(input: {
+  base_url: string;
+  models: string[];
+  api_key?: string;
+  label?: string;
+  visual_mode?: "frames" | "video";
+}): Promise<OmniModelsImportResult> {
+  return impl.realImportOmniModels(input);
 }
 
 export async function testOmniConfig(

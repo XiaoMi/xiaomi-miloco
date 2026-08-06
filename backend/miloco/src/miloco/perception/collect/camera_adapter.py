@@ -27,6 +27,7 @@ from miot.types import MIoTCameraInfo
 
 from miloco.config import get_settings
 from miloco.miot.client import MiotProxy
+from miloco.miot.filter import MAX_ENABLED_CAMERAS, denied_camera_dids
 from miloco.miot.schema import CameraInfo
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.perception.collect.adapter_base import BaseDeviceAdapter
@@ -40,6 +41,7 @@ from miloco.perception.schema import (
     DeviceData,
 )
 from miloco.perception.types import PerceptionDevice
+from miloco.rtsp import get_rtsp_service
 
 if TYPE_CHECKING:
     import numpy as np
@@ -128,14 +130,26 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         require_lan: bool = True,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
-        if not self._miot_proxy.is_authenticated:
-            return {}
-        return self._filter_cameras_from_all(
-            all_devices if all_devices else await self._miot_proxy.get_cameras(),
-            online_only=online_only,
-            require_lan=require_lan,
-            cap=cap,
-        )
+        result: dict[str, PerceptionDevice] = {}
+        if self._miot_proxy.is_authenticated:
+            cameras = (
+                all_devices
+                if all_devices is not None
+                else await self._miot_proxy.get_cameras()
+            )
+            result.update(
+                self._filter_cameras_from_all(
+                    cameras,
+                    online_only=online_only,
+                    require_lan=require_lan,
+                    cap=False,
+                )
+            )
+        result.update(self._rtsp_devices(online_only=online_only))
+        if not cap or len(result) <= MAX_ENABLED_CAMERAS:
+            return result
+        kept = sorted(result)[:MAX_ENABLED_CAMERAS]
+        return {did: result[did] for did in kept}
 
     def _filter_cameras_from_all(
         self,
@@ -197,6 +211,26 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             )
         return result
 
+    def _rtsp_devices(self, *, online_only: bool) -> dict[str, PerceptionDevice]:
+        service = get_rtsp_service()
+        denied = denied_camera_dids(self._miot_proxy._kv_repo)
+        result: dict[str, PerceptionDevice] = {}
+        for camera in service.list_records():
+            if camera.did in denied:
+                continue
+            online = service.is_online(camera.did)
+            if online_only and not online:
+                continue
+            result[camera.did] = PerceptionDevice(
+                did=camera.did,
+                name=camera.name,
+                device_type="camera",
+                room_id=camera.room_name,
+                room_name=camera.room_name,
+                online=online,
+            )
+        return result
+
     async def sync_devices(self, all_devices: dict | None = None) -> None:
         """周期 sync 入口：先做「按需补建」，再走基类热插拔同步。
 
@@ -239,6 +273,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 return
 
         collect_cfg = get_settings().perception.collect
+        rtsp_camera = get_rtsp_service().get(did)
 
         # did 是合成 did（多通道带 ``:ch{n}`` 后缀）；SDK 建流用物理 did + 通道号。
         physical_did, channel = split_channel_did(did)
@@ -255,6 +290,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             ),
         )
         self._devices[did] = state
+
+        if rtsp_camera is not None:
+            get_rtsp_service().add_frame_callback(
+                did,
+                f"perception:{id(self)}",
+                self._make_rtsp_video_callback(did),
+            )
+            return
 
         # Subscribe decoded video frame stream (multi-reg)
         try:
@@ -290,6 +333,11 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
     async def disconnect_device(self, did: str) -> None:
         state = self._devices.pop(did, None)
         if not state:
+            return
+
+        if did.startswith("rtsp:"):
+            get_rtsp_service().remove_frame_callback(did, f"perception:{id(self)}")
+            state.sync_buffer.clear()
             return
 
         # did 是合成 did（多通道带 ``:ch{n}``）；SDK 停流用物理 did + 通道号。
@@ -350,7 +398,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 return None
             return self._build_device_data(state, tracks)
 
-    def peek_latest_frame(self, did: str, *, window_ms: int = 2000) -> "NDArray[np.uint8] | None":
+    def peek_latest_frame(
+        self, did: str, *, window_ms: int = 2000
+    ) -> "NDArray[np.uint8] | None":
         """非破坏性取该相机最近一帧解码图(numpy BGR);无缓存返 None。
 
         供 tier_c 闲时定期清的 live 检测用——gate 关停时正常 pipeline 不取帧,
@@ -381,6 +431,17 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         is looked up by the physical did while the synthetic did is kept as the
         device identity (so downstream keying stays per-channel).
         """
+        rtsp_camera = get_rtsp_service().get(did)
+        if rtsp_camera is not None:
+            return PerceptionDevice(
+                did=did,
+                name=rtsp_camera.name,
+                device_type="camera",
+                room_id=rtsp_camera.room_name,
+                room_name=rtsp_camera.room_name,
+                online=get_rtsp_service().is_online(did),
+            )
+
         physical_did, _ = split_channel_did(did)
         get_cached_camera = getattr(self._miot_proxy, "get_cached_camera", None)
         camera_info = (
@@ -556,6 +617,43 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 )
 
         return _on_decoded_video
+
+    def _make_rtsp_video_callback(self, did: str):
+        """Feed frames decoded by the RTSP reader into the camera buffer."""
+
+        def _on_frame(
+            did_: str,
+            frame: NDArray[np.uint8],
+            wall_ms: int,
+            recv_unix_ms: int,
+            decoded_unix_ms: int,
+        ) -> None:
+            with get_monitor().track(NodeName.CAMERA, "decode_video") as handle:
+                state = self._devices.get(did)
+                if state is None:
+                    handle.skip_rolling()
+                    return
+                if state.epoch_delta is None:
+                    state.epoch_delta = recv_unix_ms - wall_ms
+                decoded = DecodedVideoFrame(
+                    frame=frame.copy(),
+                    stream_ts=wall_ms,
+                    wall_ms=wall_ms,
+                    unix_ms=wall_ms + state.epoch_delta,
+                    recv_unix_ms=recv_unix_ms,
+                    decoded_unix_ms=decoded_unix_ms,
+                    decode_latency_ms=self._compute_decode_latency(
+                        recv_unix_ms, decoded_unix_ms
+                    ),
+                )
+                state.sync_buffer.put(
+                    "decoded_video",
+                    decoded,
+                    stream_ts=wall_ms,
+                    wall_ms=wall_ms,
+                )
+
+        return _on_frame
 
     def _make_decoded_audio_callback(self, did: str):
         """Decoded audio frame callback: feeds decoded_audio track in sync buffer.

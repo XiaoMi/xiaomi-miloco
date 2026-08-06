@@ -932,6 +932,7 @@ def _full_omni_payload() -> dict:
             "base_url": p.base_url,
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
+            "visual_mode": p.visual_mode,
             "active": p.label == active.label,
         }
         for p in m.omni_profiles
@@ -945,6 +946,7 @@ def _full_omni_payload() -> dict:
                 "base_url": active.base_url,
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
+                "visual_mode": active.visual_mode,
                 "active": True,
             },
         )
@@ -956,6 +958,7 @@ def _full_omni_payload() -> dict:
             "base_url": active.base_url,
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
+            "visual_mode": active.visual_mode,
             "health": health,
         },
         "profiles": profiles,
@@ -969,6 +972,7 @@ def _profiles_as_dicts() -> list[dict]:
             "model": p.model,
             "base_url": p.base_url,
             "api_key": p.api_key,
+            "visual_mode": p.visual_mode,
         }
         for p in get_settings().model.omni_profiles
     ]
@@ -981,6 +985,7 @@ class OmniConfigBody(BaseModel):
     api_key: str | None = None  # 留空 = 沿用该档案原 key(不被打码值覆盖)
     original_label: str | None = None  # 正在编辑的档案原名(支持改名/定位);None=新增
     activate: bool = True  # True=同时设为当前生效;False=只入列表(激活由 /activate 负责)
+    visual_mode: Literal["frames", "video"] | None = None
 
 
 class OmniSelectBody(BaseModel):
@@ -1023,7 +1028,7 @@ async def put_omni_config(
     label = body.label.strip()
     if not label:
         raise HTTPException(status_code=400, detail="档案名不能为空")
-    base_url = body.base_url.strip()
+    base_url = _normalized_provider_url(body.base_url)
     model = body.model.strip()
     orig = (body.original_label or "").strip()
     profiles = _profiles_as_dicts()
@@ -1033,7 +1038,16 @@ async def put_omni_config(
         raise HTTPException(status_code=409, detail=f"档案名「{label}」已存在")
     # 传 base_url 让 _key_by_label 校验"URL 未变才沿用旧 key",防跨 URL 复用凭证。
     key = _key_by_label(orig or label, body.api_key, base_url=base_url)
-    entry = {"label": label, "base_url": base_url, "model": model, "api_key": key}
+    visual_mode = body.visual_mode or (
+        target.get("visual_mode", "video") if target else "video"
+    )
+    entry = {
+        "label": label,
+        "base_url": base_url,
+        "model": model,
+        "api_key": key,
+        "visual_mode": visual_mode,
+    }
     tgt = orig or label
     will_activate = body.activate or _label_is_active(tgt)
     if will_activate:
@@ -1041,7 +1055,9 @@ async def put_omni_config(
             raise HTTPException(
                 status_code=400, detail={"code": "no_key", "message": "未配置 API Key"}
             )
-        result = await _probe.probe_omni(model, base_url, key)
+        result = await _probe.probe_omni(
+            model, base_url, key, visual_mode=visual_mode
+        )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result)
     if target:
@@ -1081,7 +1097,9 @@ async def activate_omni_config(
                     status_code=400,
                     detail={"code": "no_key", "message": "未配置 API Key"},
                 )
-            result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
+            result = await _probe.probe_omni(
+                p.model, p.base_url, p.api_key, visual_mode=p.visual_mode
+            )
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
             update_shared_config(
@@ -1091,6 +1109,7 @@ async def activate_omni_config(
                         "model": p.model,
                         "base_url": p.base_url,
                         "api_key": p.api_key,
+                        "visual_mode": p.visual_mode,
                     }
                 }
             )
@@ -1176,6 +1195,7 @@ class OmniTestBody(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     label: str | None = None
+    visual_mode: Literal["frames", "video"] | None = None
 
 
 @router.post(
@@ -1208,7 +1228,20 @@ async def test_omni_config(
             message="ok",
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
-    result = await _probe.probe_omni(model, base_url, api_key)
+    profile = next(
+        (
+            item
+            for item in get_settings().model.omni_profiles
+            if item.label == (body.label or "").strip()
+        ),
+        None,
+    )
+    visual_mode = body.visual_mode or (
+        profile.visual_mode if profile is not None else omni.visual_mode
+    )
+    result = await _probe.probe_omni(
+        model, base_url, api_key, visual_mode=visual_mode
+    )
     # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
     # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
     # OPEN_CONFIG 下 tick 不会自动探测(只探 OPEN_RECOVERABLE),不清则用户测通了红条仍不消失,
@@ -1237,6 +1270,30 @@ class OmniModelsBody(BaseModel):
     base_url: str
     api_key: str | None = None
     label: str | None = None
+
+
+class OmniModelsImportBody(BaseModel):
+    """Atomically add selected models from one provider catalog."""
+
+    base_url: str
+    models: list[str] = Field(min_length=1, max_length=100)
+    api_key: str | None = None
+    label: str | None = None
+    visual_mode: Literal["frames", "video"] = "frames"
+
+
+def _normalized_provider_url(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+def _unique_profile_label(model: str, base_url: str, used: set[str]) -> str:
+    base = f"{model} @ {base_url}"
+    if base not in used:
+        return base
+    suffix = 2
+    while f"{base} ({suffix})" in used:
+        suffix += 1
+    return f"{base} ({suffix})"
 
 
 @router.post(
@@ -1341,6 +1398,112 @@ def set_features(body: FeaturesUpdateBody, current_user: str = Depends(verify_to
 
 
 @router.post(
+    "/omni-config/models/import",
+    summary="原子导入用户从 provider 目录中选择的模型",
+    response_model=NormalResponse,
+)
+async def import_omni_models(
+    body: OmniModelsImportBody, current_user: str = Depends(verify_token)
+):
+    """Add selected provider models as inactive profiles without changing runtime.
+
+    Identity is ``(normalized base_url, model)``. Existing entries are reported as
+    skipped, and all new entries are persisted in one config write. Credentials may
+    be supplied once or reused from any profile stored for the exact same URL.
+    """
+    base_url = _normalized_provider_url(body.base_url)
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Base URL 不能为空")
+
+    models: list[str] = []
+    seen_models: set[str] = set()
+    for raw in body.models:
+        model = raw.strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="模型 ID 不能为空")
+        if len(model) > 256:
+            raise HTTPException(status_code=400, detail=f"模型 ID 过长: {model[:32]}")
+        if model not in seen_models:
+            seen_models.add(model)
+            models.append(model)
+
+    profiles = _profiles_as_dicts()
+    api_key = _key_by_label((body.label or "").strip(), body.api_key, base_url=base_url)
+    if not api_key:
+        candidates = [get_settings().model.omni, *get_settings().model.omni_profiles]
+        api_key = next(
+            (
+                profile.api_key
+                for profile in candidates
+                if profile.api_key
+                and _normalized_provider_url(profile.base_url) == base_url
+            ),
+            "",
+        )
+
+    identities = {
+        (_normalized_provider_url(profile["base_url"]), profile["model"])
+        for profile in profiles
+    }
+    active = get_settings().model.omni
+    if active.api_key:
+        identities.add((_normalized_provider_url(active.base_url), active.model))
+
+    used_labels = {profile["label"] for profile in profiles}
+    added: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for model in models:
+        identity = (base_url, model)
+        if identity in identities:
+            existing = next(
+                (
+                    profile
+                    for profile in profiles
+                    if (
+                        _normalized_provider_url(profile["base_url"]),
+                        profile["model"],
+                    )
+                    == identity
+                ),
+                None,
+            )
+            skipped.append(
+                {
+                    "label": existing["label"] if existing else _active_display_label(),
+                    "model": model,
+                }
+            )
+            continue
+        label = _unique_profile_label(model, base_url, used_labels)
+        used_labels.add(label)
+        identities.add(identity)
+        profiles.append(
+            {
+                "label": label,
+                "base_url": base_url,
+                "model": model,
+                "api_key": api_key,
+                "visual_mode": body.visual_mode,
+            }
+        )
+        added.append({"label": label, "model": model})
+
+    if added and len(profiles) > 100:
+        raise HTTPException(status_code=400, detail="最多保存 100 个模型档案")
+    if added:
+        update_shared_config(model={"omni_profiles": profiles})
+    return NormalResponse(
+        code=0,
+        message="ok",
+        data={
+            "config": _full_omni_payload(),
+            "added": added,
+            "skipped": skipped,
+        },
+    )
+
+
+@router.post(
     "/omni-config/retry",
     summary="用户主动触发一次 omni 探测,跳过熔断剩余 backoff",
     response_model=NormalResponse,
@@ -1401,7 +1564,12 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
         return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
     try:
-        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+        result = await _probe.probe_omni(
+            omni.model,
+            omni.base_url,
+            omni.api_key,
+            visual_mode=omni.visual_mode,
+        )
     except asyncio.CancelledError:
         # 客户端断开 HTTP(用户切页/关 tab/网络抖动)时 FastAPI 抛 CancelledError。
         # 此前 retry_now() 已把 state 置 HALF_OPEN,若不复位则 before_call 永久短路、

@@ -222,6 +222,36 @@ def test_set_camera_in_use_inverts_disabled():
     assert miot_filter.set_camera_in_use(kv, "ghost", True) == (["c2"], False)
 
 
+def test_set_cameras_in_use_batch_inverts_disabled_and_preserves_other_entries():
+    kv = _FakeKV(
+        {
+            ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(
+                ["miot:disabled", "rtsp:disabled"]
+            )
+        }
+    )
+
+    # Enabling an RTSP camera removes it from the disabled list without
+    # disturbing unrelated entries.
+    assert miot_filter.set_cameras_in_use(kv, {"rtsp:disabled": True}) == (
+        ["miot:disabled"],
+        True,
+    )
+    # Disabling another RTSP camera appends it; repeating either state is a no-op.
+    assert miot_filter.set_cameras_in_use(kv, {"rtsp:enabled": False}) == (
+        ["miot:disabled", "rtsp:enabled"],
+        True,
+    )
+    assert miot_filter.set_cameras_in_use(kv, {"rtsp:enabled": False}) == (
+        ["miot:disabled", "rtsp:enabled"],
+        False,
+    )
+    assert miot_filter.set_cameras_in_use(kv, {"rtsp:missing": True}) == (
+        ["miot:disabled", "rtsp:enabled"],
+        False,
+    )
+
+
 def test_set_camera_voice_in_use_writes_allowlist():
     kv = _FakeKV()
     # voice_in_use=True adds to voice allow list
@@ -290,6 +320,37 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
     svc._sync_camera_adapter = _noop  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
     return svc
+
+
+@pytest.mark.asyncio
+async def test_toggle_online_rtsp_camera_removes_it_from_disabled_list(monkeypatch):
+    did = "rtsp:test"
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps([did, "other:disabled"])}
+    )
+    svc = _make_service(kv=kv)
+    record = SimpleNamespace(
+        did=did,
+        name="RTSP test",
+        url="rtsp://camera/live",
+        room_name="RTSP",
+        created_at=1,
+        updated_at=1,
+    )
+    rtsp_service = SimpleNamespace(
+        list_records=lambda: [record],
+        is_online=lambda camera_did: camera_did == did,
+    )
+    monkeypatch.setattr(
+        "miloco.miot.service.get_rtsp_service", lambda: rtsp_service
+    )
+
+    result = await svc.toggle_camera([{"did": did, "in_use": True}])
+
+    assert miot_filter.denied_camera_dids(kv) == {"other:disabled"}
+    assert len(result) == 1
+    assert result[0]["did"] == did
+    assert result[0]["in_use"] is True
 
 
 @pytest.mark.asyncio
@@ -2036,4 +2097,3 @@ async def test_set_camera_prompt_does_not_restart_or_refresh():
     svc._miot_proxy.refresh_cameras.assert_not_awaited()
     svc._sync_camera_adapter.assert_not_awaited()
     svc._restart_perception_engine.assert_not_awaited()
-
