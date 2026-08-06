@@ -182,8 +182,12 @@ cmd_upload() {
 # 资产被换而某分支的 lock 没跟着 refresh 时，构建能不能过取决于 actions/cache 有没有
 # 命中 —— 命中就拿旧字节比旧 lock（通过，零请求），缓存一被逐出就下到新资产、sha256
 # 不符（红）。同一个 commit 今天绿下周红，且看日志完全看不出为什么。
+# 前置检查刻意留给调用方（cmd_upload 在 :136 已查过，直接跑 verify 由 case 分派处查）：
+# need_gh 里的 die 也是 exit，摆在这儿会和下面那处一样打穿 cmd_upload 的非致命分支，
+# 而且更隐蔽 —— gh auth status 不是纯本地检查，它要发一次请求验 token；从 :136 那次
+# 检查到这里隔着 78MiB 上传 + 78MiB 重算 hash，通常好几分钟，token 过期或网络抖一下
+# 就够了。搬出去之后这个函数体内再没有任何能 exit 的语句。
 cmd_verify() {
-    need_gh
     local assets
     if ! assets="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, size, digest}]')"; then
         # 用 return 而不是 die：die 是 exit，在函数里退的是整个 shell，cmd_upload 那句
@@ -274,7 +278,7 @@ cmd_refresh_lock() {
 case "${1:-}" in
     upload)       shift; cmd_upload "$@" ;;
     refresh-lock) shift; cmd_refresh_lock "$@" ;;
-    verify)       cmd_verify ;;
+    verify)       need_gh; cmd_verify ;;
     # 从第 5 行打到抬头注释块结束（第一个非 # 行），不写死结束行号：写死的话，往抬头
     # 补一条说明就会把 --help 的尾巴无声截掉，而没人会为此跑一次 --help。
     -h|--help|"") awk 'NR<5{next} !/^#/{exit} {sub(/^#[[:space:]]?/,""); print}' "${BASH_SOURCE[0]}" >&2 ;;

@@ -261,6 +261,76 @@ def test_upload_aborts_before_touching_release_on_fileset_drift(
     assert not sandbox.wrote_to_release(), f"护栏开火前已经写了 Release: {sandbox.gh_calls()}"
 
 
+def test_upload_survives_any_gh_failure_in_trailing_verify(tmp_path: Path) -> None:
+    """upload 收尾那次对账是**故意**非致命的，任何失败都不许打穿它。
+
+    跑到那儿资产已经推上 Release、lock 也已改写落盘，两件事都撤不回来；此时唯一还
+    有用的输出就是最后那句「别忘了提交 lock」。它一旦被吞掉，维护者看到的是 FATAL
+    + 退出码 1，会读成"上传失败"，于是要么重跑一遍 upload，要么干脆没提交刷新后的
+    lock，把 CI 的对账门禁留给下一个人踩。
+
+    钉的是"cmd_verify 函数体内不许有 exit"这个**性质**，而不是某一处具体的 die：
+    exit 在函数里退的是整个 shell，调用方那句 `if ! cmd_verify` 根本没有接的机会。
+    同一个函数已经在 `gh api` 和 `need_gh` 两处先后踩过，所以这里让假 gh 在收尾阶段
+    对 auth 和 api **两条路径同时**失败，把它们一起焊死。
+
+    auth 第一次放行是必须的：cmd_upload 开头自己要查一次 gh 在不在、登录没登录。
+    模拟的是"78MiB 上传 + 78MiB 重算 hash"那几分钟里 token 过期 —— gh auth status
+    不是纯本地检查，它要发一次请求验 token。
+    """
+    names = ["a.onnx", "b.onnx"]
+    sandbox = _Sandbox(tmp_path, _tiny_lock(names))
+    d = _models_dir(tmp_path, names)
+
+    counter = tmp_path / "auth_calls"
+    counter.write_text("0", encoding="utf-8")
+    gh = sandbox.bin / "gh"
+    gh.write_text(
+        """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GH_CALLS"
+case "$1" in
+  auth)
+    n=$(cat "$GH_AUTH_N"); echo $((n + 1)) > "$GH_AUTH_N"
+    if [ "$n" -eq 0 ]; then exit 0; fi          # cmd_upload 开头那次：放行
+    echo "The token in keyring is invalid." >&2; exit 1 ;;
+  api)     echo "gh: 502 Bad Gateway" >&2; exit 1 ;;
+  release) exit 0 ;;
+  *)       exit 1 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+
+    r = sandbox.run("upload", str(d), GH_AUTH_N=str(counter))
+
+    assert sandbox.wrote_to_release(), f"没走到上传: {sandbox.gh_calls()}\n{r.stderr}"
+    assert "别忘了提交" in r.stderr, (
+        f"收尾对账失败把提交提醒一起吞了 —— cmd_verify 里又混进 exit 了？\n{r.stderr}"
+    )
+    assert r.returncode == 0, f"收尾对账被当成致命错误: rc={r.returncode}\n{r.stderr}"
+
+
+def test_verify_subcommand_still_hard_fails_without_gh(tmp_path: Path) -> None:
+    """把 need_gh 从 cmd_verify 挪到 case 分派之后，直接跑 verify 的门禁强度不能变。
+
+    CI 的 lint job 跑的就是 `publish_models.sh verify`，它必须仍以非 0 退出，
+    否则那道对账门禁等于被静默摘掉。
+    """
+    sandbox = _Sandbox(tmp_path, _tiny_lock(["a.onnx"]))
+    gh = sandbox.bin / "gh"
+    gh.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$GH_CALLS"\n'
+        'echo "gh: not logged in" >&2; exit 1\n',
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+
+    r = sandbox.run("verify")
+
+    assert r.returncode != 0, f"gh 不可用时 verify 却判绿:\n{r.stderr}"
+
+
 def test_upload_proceeds_when_fileset_matches_lock(tmp_path: Path) -> None:
     """文件集一致时不该被护栏拦下 —— 否则常规的"重传同一批模型"就用不了了。"""
     names = ["a.onnx", "b.onnx"]
