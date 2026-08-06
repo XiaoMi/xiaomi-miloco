@@ -19,6 +19,7 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 
 ## What's New
 
+- **2026-08-06** — Release v2026.8.6: hotfix for v2026.8.5 — reverts camera IP direct-connect, whose bundled native library could crash the camera process with SIGSEGV on some older camera models; everything else from v2026.8.5 stays, plus Smart Crop scaling reworked to fit the same-tier panorama frame per axis.
 - **2026-08-05** — Release v2026.8.5: adds experimental pet recognition with a full registration and roster workflow, Smart Crop adaptive resolution that crops the active region before omni inference, and one-click self-upgrade from the dashboard; plus camera IP direct-connect with cross-NAT streaming diagnostics, an agent action ledger, process CPU / thread-count charts on the Perf page, and leaner default thread pools.
 - **2026-07-17** — Release v2026.7.17: adds a Hermes Agent compatibility layer for pluggable agent runtimes, dual-camera multi-channel dual-stream perception, and omni multi-model support with runtime FPS hot-reload; plus a dedicated Tasks tab, per-camera mic toggle, and timezone / version / install hardening.
 - **2026-07-03** — Release v2026.7.3: adds event-feedback packaging and a conversational first-run setup, proactively initiated on fresh installs; plus improvements to in-dashboard model-config management, perception stability (false-"person" detection guarding), camera lifecycle, and CLI diagnostics.
