@@ -1187,6 +1187,7 @@ class IdentityEngine:
         """对当前 unknown/pending track 累积 crop 到陌生人池。
 
         confirmed track 不 push——它们已经识别成功,样本会走 tier_c 累积路径而非池。
+        coasting(本帧无检测命中)的 track 也不 push——bbox 不对应本帧真人。
 
         face_detections 不为 None 时,对每个 body track 关联本帧 face_dets(IoU
         最大且过阈值的那个),把 face crop 跟 body 一起塞进 CropEntry。后续
@@ -1207,6 +1208,14 @@ class IdentityEngine:
             # 已 confirmed 的 track 不进池——它们走 tier_c 累积路径。
             # no_person（非人误检）也不进池——杂物 crop 进陌生人池会污染聚类。
             if state.status in ("confirmed", "no_person"):
+                continue
+            # coasting(本帧无检测命中, bbox 是纯 Kalman 预测残留)也不进池: 那个位置上
+            # 已经不是本人(可能是背景/家具/旁边另一个人)。裁出来的图既污染聚类, 又能
+            # 经 from-cluster 注册间接写进身份库 —— 与 tier_c 入队门 D 拒"幻影框裁图"
+            # 同口径, 只是终点从直接写库变成间接写库。
+            # 注: 池内 phash/embedding 去重拦不住这类图 —— 它跟真人 crop 本来就不像,
+            # 反而会被当成"多样性样本"留下。
+            if not self._detected_this_frame.get(tid, False):
                 continue
             tr = tr_by_id.get(tid)
             if tr is None:

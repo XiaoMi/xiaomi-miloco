@@ -89,6 +89,41 @@ class TestPushUnknownToPool:
         assert len(pool._entries[key].crops_l1) == 1
 
     @pytest.mark.asyncio
+    async def test_coasting_track_not_pushed_to_pool(self, lib, frame):
+        """coasting（纯 Kalman 预测残留）不进池——bbox 已不对应本帧真人，裁出的
+        背景图会污染聚类，还能经 from-cluster 注册间接写进身份库。"""
+        pool = TierUPool(config=TierUConfig(l1_capacity=30))
+        engine = _make_engine(lib, pool=pool)
+
+        tr = _make_tracking_result(7)
+        tr["detected_this_frame"] = False
+        await engine.process(
+            tracking_results=[tr], latest_frame=frame, frame_index=1, now_ts=1.0,
+        )
+        assert ("cam-test", 7) not in pool._entries
+
+    @pytest.mark.asyncio
+    async def test_coasting_window_adds_no_crop_to_existing_entry(self, lib, frame):
+        """生产时序：同一 track 先真检测（推图）后 coasting（不推）——池里 crop
+        数不随 coasting 窗增长，track 本身照常存活。"""
+        pool = TierUPool(config=TierUConfig(l1_capacity=30))
+        engine = _make_engine(lib, pool=pool)
+        key = ("cam-test", 7)
+
+        await engine.process(
+            tracking_results=[_make_tracking_result(7)],
+            latest_frame=frame, frame_index=1, now_ts=1.0,
+        )
+        assert len(pool._entries[key].crops_l1) == 1
+
+        tr = _make_tracking_result(7)
+        tr["detected_this_frame"] = False
+        await engine.process(
+            tracking_results=[tr], latest_frame=frame, frame_index=2, now_ts=2.0,
+        )
+        assert len(pool._entries[key].crops_l1) == 1
+
+    @pytest.mark.asyncio
     async def test_process_returns_bbox_norm_for_detected(self, lib, frame):
         """process() 返回 (face_id_map, bbox_norm)；本帧检测到的 track 带归一化 bbox。"""
         engine = _make_engine(lib)
