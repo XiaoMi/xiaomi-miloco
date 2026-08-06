@@ -54,7 +54,10 @@ run_backend_tests() {
     info "backend 全量测试 (对齐 ci.yml backend-test)…"
     # 模型不在 git 里（scripts/models.lock.json）：缺了 requires_models 那批用例会静默
     # skip，本地覆盖率悄悄比 CI 低。这里只校验不下载（不拖慢 --quick），缺了给提示。
-    if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --quiet >/dev/null 2>&1; then
+    # --dest 显式给包内目录：不给的话 MILOCO_MODELS_DEST 一旦在环境里，校验的就不是
+    # 下面 pytest 真正加载的那个目录，"就绪"提示会与实际情况脱节。
+    local models_dir="$REPO_ROOT/backend/miloco/src/miloco/perception/models"
+    if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --quiet --dest "$models_dir" >/dev/null 2>&1; then
         info "感知模型未就绪 → requires_models 用例会 skip；补齐：python3 scripts/fetch_models.py"
     fi
     cd "$REPO_ROOT/backend"

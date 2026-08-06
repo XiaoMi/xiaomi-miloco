@@ -322,30 +322,41 @@ pack_models() {
     # Release 拉。已就绪的文件只做一次 hash 校验、不联网，所以本步可以无条件跑。
     # --strict：可选模型缺失也算失败 —— 终端用户拿到的归档必须是完整能力，
     # 不能因为一次网络抖动就悄悄发出个少了 bge / VAD 的 tarball。
-    log "准备模型（scripts/fetch_models.py --strict）..."
-    if ! python3 "$PROJECT_ROOT/scripts/fetch_models.py" --strict; then
+    # --dest 必须显式传：fetch_models.py 的目标目录会回退到 MILOCO_MODELS_DEST，
+    # 而下面 tar 打的是 $models_dir。不传的话，环境里 export 过那个变量时，"校验的
+    # 目录"和"打包的目录"就分家了 —— 轻则 --strict 在别处判通过、这里再报"本该已拦截"
+    # 把排查方向带反；重则 $models_dir 里留着与 lock 不符的旧 .onnx 也照样过关，
+    # 脏模型进 tarball 还被 bundle sha 背书（install.py 收到后不再逐文件校验）。
+    log "准备模型（scripts/fetch_models.py --strict --dest ${models_dir}）..."
+    if ! python3 "$PROJECT_ROOT/scripts/fetch_models.py" --strict --dest "$models_dir"; then
         # 硬失败而非跳过：空跳只会让下游 pack_platform_bundles 一起空跳、
         # install.py 收到"缺模型" fail，排查链路变长。直接在源头中止。
         log "FATAL: 模型未就绪（${models_dir}）"
         exit 1
     fi
 
-    # 上面的 --strict 已保证文件齐全，这里再点一次数：nullglob 下 glob 无匹配会展开为
-    # 空，否则 bash 把字面量 ./*.onnx 交给 tar，报的是 "Cannot stat: ./*.onnx" —— set -e
-    # 一样会中止构建，但排查的人得先反应过来那是没展开的 glob 而不是真有这么个文件。
-    local model_files
-    shopt -s nullglob
-    model_files=("$models_dir"/*.onnx "$models_dir"/*.json)
-    shopt -u nullglob
-    # ${} 不能省：macOS 自带 bash 3.2 会把紧跟变量的全角「）」首字节当成变量名的一部分，
-    # set -u 下报的是 "models_dir?: unbound variable"，比原本要说的话更难懂。
-    ((${#model_files[@]})) || die 1 "模型目录为空（${models_dir}），fetch_models.py --strict 本该已拦截"
+    # 打包清单按 lock 逐条点名，不 glob 整个目录：`models` 是固定且可变的 tag，
+    # Release 上可能残留换代前的旧资产（publish_models.sh upload 只 --clobber 同名的、
+    # 不删旧的），glob 会把它们一并打进安装包 —— 包变胖是小事，某个模型若因质量 /
+    # 许可 / 安全原因下线却继续随包分发是大事。顺带也不用再防 README.md、*.part
+    # 和 nullglob 未展开的字面量了。
+    local model_files=()
+    local n
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        # ${} 不能省：macOS 自带 bash 3.2 会把紧跟变量的全角「）」首字节当成变量名的
+        # 一部分，set -u 下报的是 "models_dir?: unbound variable"，比原本要说的话更难懂。
+        [ -f "$models_dir/$n" ] || die 1 "模型缺失: ${models_dir}/${n}（fetch_models.py --strict 本该已拦截）"
+        model_files+=("./$n")
+    done < <(python3 -c \
+        'import json,sys;print("\n".join(f["name"] for f in json.load(open(sys.argv[1]))["files"]))' \
+        "$PROJECT_ROOT/scripts/models.lock.json")
+    ((${#model_files[@]})) || die 1 "scripts/models.lock.json 里没有任何模型条目"
 
     local tar_name="miloco-models-${RESOLVED_PEP}.tar.gz"
-    log "打包模型: $tar_name ..."
-    # 只打 .onnx + .json（bge tokenizer），不打目录里的 README.md / *.part：
-    # 归档会被 install.py 解到 $MILOCO_HOME/models/，别掺无关文件。
-    (cd "$models_dir" && tar -czf "$DIST_DIR/$tar_name" ./*.onnx ./*.json)
+    log "打包模型: $tar_name （${#model_files[@]} 个，按 lock 点名）..."
+    # 归档会被 install.py 解到 $MILOCO_HOME/models/，只放 lock 里列的那几个文件。
+    (cd "$models_dir" && tar -czf "$DIST_DIR/$tar_name" "${model_files[@]}")
     log "  $(du -h "$DIST_DIR/$tar_name" | cut -f1) $tar_name"
 }
 

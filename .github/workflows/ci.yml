@@ -30,6 +30,8 @@ jobs:
 
   backend-test:
     runs-on: ubuntu-latest
+    env:
+      MODELS_DIR: backend/miloco/src/miloco/perception/models
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
@@ -41,17 +43,40 @@ jobs:
       # 感知 ONNX 模型不在 git 里（见 scripts/models.lock.json），显式下载而非任其缺失：
       # tests/perception/engine/identity/test_deep_sort_v12.py 的 requires_models 用例
       # 在模型缺失时会静默 skip —— 不下就等于偷偷少跑一批覆盖。
-      - name: 缓存感知 ONNX 模型
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      #
+      # 缓存拆成 restore + save 两步（而不是一个 actions/cache）：cache 的 post 步骤
+      # 不看 job 成败，一次只下到 4/5 的运行照样会把残缺目录存进
+      # miloco-models-<lock hash>，而 primary key 命中即跳过 save —— 这个 lock 版本
+      # 的缓存从此再也盖不掉，只能等 lock 变更或 LRU 逐出。改成"完整性校验通过才
+      # save"，残缺状态就进不了缓存。
+      - name: 恢复感知 ONNX 模型缓存
+        id: models-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           # 只缓存模型文件本身，不缓存同目录里那个 git 跟踪的 README.md ——
           # 否则 cache key（只跟 lock 走）不变时会用旧缓存盖掉 checkout 出来的新 README。
           path: |
-            backend/miloco/src/miloco/perception/models/*.onnx
-            backend/miloco/src/miloco/perception/models/*.json
+            ${{ env.MODELS_DIR }}/*.onnx
+            ${{ env.MODELS_DIR }}/*.json
           key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
+      # --dest 显式给：fetch_models.py 的目标目录会回退到 MILOCO_MODELS_DEST，
+      # 而缓存 path 是上面写死的那个目录，两边必须是同一个。
       - name: 下载感知 ONNX 模型（缓存命中时只做 sha256 校验，不联网）
-        run: python3 scripts/fetch_models.py
+        run: python3 scripts/fetch_models.py --dest "$MODELS_DIR"
+      # 上一步是非 strict 的：可选模型拉不到只打一行日志就 return 0，不让第三方加速站
+      # 抖动直接把 CI 判红。但残缺状态不许过门 —— 这一步不联网、只比本地字节，缺任何
+      # 一个（含可选）就红。今天 requires_models 只看两个必选模型，可一旦给 bge 去重
+      # 或 VAD 加一条 model-gated 用例，本 PR 要消灭的静默 skip 就复活了。
+      - name: 校验模型完整（--check --strict，不联网）
+        run: python3 scripts/fetch_models.py --check --strict --dest "$MODELS_DIR"
+      - name: 保存感知 ONNX 模型缓存（完整性校验通过后才存）
+        if: steps.models-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.MODELS_DIR }}/*.onnx
+            ${{ env.MODELS_DIR }}/*.json
+          key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
       - name: backend miloco 测试
         run: cd backend && uv sync --all-packages && uv run pytest -v
 
@@ -111,3 +136,12 @@ jobs:
           uv run ruff check . "$GITHUB_WORKSPACE/cli"
       - name: 类型检查（openclaw 插件，tsc --noEmit）
         run: cd plugins/openclaw && pnpm install --frozen-lockfile && pnpm check
+      # 零下载的资产对账：`models` 是固定且**可变**的 tag，资产被换而某分支的 lock 未
+      # refresh 时，构建失败会被 actions/cache 变成"同一 commit 今天绿、下周红"的间歇
+      # 现象（命中缓存 → 旧字节比旧 lock → 通过 → 零请求；缓存被逐出 → 下到新资产 →
+      # sha256 不符 → 红）。这里一次 API 调用就能把它变成确定性的失败点。
+      # 顺带也抓 Release 上残留的换代前旧资产（upload 只 --clobber 同名的、不删旧的）。
+      - name: 对账 models Release 资产与 lock（不下载）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish_models.sh verify

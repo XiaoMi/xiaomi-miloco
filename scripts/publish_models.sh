@@ -11,6 +11,7 @@
 #   scripts/publish_models.sh upload <dir>     # 把 <dir> 下的模型上传到 models Release（覆盖同名），再按本地文件刷新 lock
 #   scripts/publish_models.sh refresh-lock     # 从 Release 拉回当前资产、重算 hash 刷新 lock（网页手动换过资产后用这个）
 #   scripts/publish_models.sh refresh-lock <dir>  # 按本地目录重算 lock，不联网
+#   scripts/publish_models.sh verify           # 零下载对账：Release 资产清单 vs lock（CI lint job 跑的就是它）
 #
 # 注意:
 #   · `models` 这个 tag / Release 是可变的：换掉资产后老 commit 里的 lock hash 就对不上、
@@ -18,6 +19,9 @@
 #     并同步更新 lock 的 release_tag / base_url。
 #   · required / desc 字段沿用旧 lock 里同名文件的取值；新增文件默认 required=false，
 #     需要的话手工改 lock（口径要与 perception/engine/resource_validator.py 对齐）。
+#   · upload / refresh-lock 发现"文件集与旧 lock 不同"会直接失败，防的是静默缩表：
+#     拿只含 2 个模型的目录跑一次，lock 就悄悄少 3 项、线上从此不再下发它们。
+#     确属换代（真要增删模型）时 MILOCO_MODELS_ALLOW_LOCK_DRIFT=1 重跑。
 
 set -euo pipefail
 
@@ -39,7 +43,7 @@ need_gh() {
 refresh_lock_from_dir() {
     local dir="$1"
     python3 - "$LOCK" "$dir" <<'PY'
-import hashlib, json, sys
+import hashlib, json, os, sys
 from pathlib import Path
 
 lock_path, src = Path(sys.argv[1]), Path(sys.argv[2])
@@ -52,6 +56,22 @@ files = sorted(
 )
 if not files:
     raise SystemExit(f"::error:: {src} 下没有 .onnx / .json 模型文件")
+
+# 文件集必须与旧 lock 全等，否则拒绝改表。两个方向都危险，且都不会报错：
+#   少了 —— 目录里只有 2 个模型（下载中断 / 手动挑了几个上传）时，lock 被无声缩到 2 项，
+#           剩下 3 个从此不再下发；线上表现是"某天起某功能悄悄降级"，没有任何失败点。
+#   多了 —— 目录/Release 上有 lock 之外的文件（换代残留、误传），会被以 required=false
+#           默默收编进 lock，desc 空白，谁也不知道它是干嘛的、还该不该在。
+names = {p.name for p in files}
+if names != set(old) and os.environ.get("MILOCO_MODELS_ALLOW_LOCK_DRIFT") != "1":
+    detail = [f"  - 旧 lock 有、{src} 里没有：{n}（继续会把它从 lock 删掉）" for n in sorted(set(old) - names)]
+    detail += [f"  + {src} 里有、旧 lock 没有：{n}（继续会以 required=false 收进 lock）" for n in sorted(names - set(old))]
+    raise SystemExit(
+        "::error:: 文件集与旧 lock 不一致，拒绝静默改表：\n"
+        + "\n".join(detail)
+        + "\n确认这就是你要的（真在增删模型）后，用 MILOCO_MODELS_ALLOW_LOCK_DRIFT=1 重跑。"
+        + "\n新增项记得手工把 required / desc 与 perception/engine/resource_validator.py 对齐。"
+    )
 
 out = []
 for p in files:
@@ -107,7 +127,82 @@ cmd_upload() {
 
     log "刷新 lock ..."
     refresh_lock_from_dir "$dir"
+
+    # upload 只 --clobber 同名资产，从不删除 Release 上已有的其它文件。换代改名
+    # （det_4C.onnx → det_5C.onnx）后旧资产会一直挂在那儿：本地看不见、lock 里没有，
+    # 但下次 refresh-lock（不带 dir，从 Release 拉全量）会把它重新收进 lock。
+    # 这里立刻对一次账，把这种残留摆到上传者面前，而不是留给几个月后的人。
+    log ""
+    log "对账 Release 资产与刷新后的 lock ..."
+    if ! cmd_verify; then
+        log ""
+        log "警告: 资产已上传、lock 已刷新，但 Release 上仍有与 lock 不符的东西（见上）。"
+        log "      CI 的对账门禁会红 —— 请按提示清理后再提交 lock。"
+    fi
     log "完成。别忘了提交 scripts/models.lock.json。"
+}
+
+# 零下载对账：只调一次 GitHub API 拿资产清单（name/size/digest），与 lock 逐项比。
+# 存在的意义是把一类**间歇性**失败变成确定性的失败点：`models` 是固定且可变的 tag，
+# 资产被换而某分支的 lock 没跟着 refresh 时，构建能不能过取决于 actions/cache 有没有
+# 命中 —— 命中就拿旧字节比旧 lock（通过，零请求），缓存一被逐出就下到新资产、sha256
+# 不符（红）。同一个 commit 今天绿下周红，且看日志完全看不出为什么。
+cmd_verify() {
+    need_gh
+    local assets
+    assets="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, size, digest}]')" \
+        || die "读不到 $REPO 的 Release '$TAG' 资产清单（tag 不存在？gh 无权限？）"
+
+    # 走环境变量而不是 stdin：stdin 已经被 python3 - 的 heredoc 占了。
+    MILOCO_ASSETS_JSON="$assets" python3 - "$LOCK" "$REPO" "$TAG" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+lock_path, repo, tag = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+want = {f["name"]: f for f in json.loads(lock_path.read_text(encoding="utf-8")).get("files", [])}
+have = {a["name"]: a for a in json.loads(os.environ["MILOCO_ASSETS_JSON"])}
+
+errors, warns = [], []
+
+for name in sorted(set(want) - set(have)):
+    errors.append(f"{name}: lock 里有、Release 上没有 —— 所有构建都会在这个文件上 404")
+for name in sorted(set(have) - set(want)):
+    # upload 不删旧资产，换代改名后老文件会一直留着，且会被 refresh-lock 重新收编。
+    errors.append(
+        f"{name}: Release 上有、lock 里没有 —— 换代残留？确认无用后删除："
+        f"\n      gh release delete-asset {tag} {name} --repo {repo}"
+    )
+
+for name in sorted(set(want) & set(have)):
+    w, h = want[name], have[name]
+    if int(w["size"]) != int(h["size"]):
+        # size 就不同，sha256 必然也不同，不再重复报一遍
+        errors.append(f"{name}: size 不符 —— lock={w['size']} release={h['size']}")
+        continue
+    algo, _, hexdigest = (h.get("digest") or "").partition(":")
+    if not hexdigest:
+        # digest 是 GitHub 后加的字段，上传较早的资产可能没有；退化成只比 size。
+        warns.append(f"{name}: Release 未给出 digest（老资产），本次只比对了 size")
+    elif algo != "sha256":
+        warns.append(f"{name}: Release digest 是 {algo}，无法与 lock 的 sha256 比对，只比对了 size")
+    elif hexdigest.lower() != str(w["sha256"]).lower():
+        errors.append(f"{name}: sha256 不符 —— lock={w['sha256'][:16]}… release={hexdigest[:16]}…")
+
+for w in warns:
+    print(f"::warning:: {w}", file=sys.stderr)
+if errors:
+    print(f"::error:: Release '{tag}'（{repo}）的资产与 scripts/models.lock.json 不一致：", file=sys.stderr)
+    for e in errors:
+        print(f"    · {e}", file=sys.stderr)
+    print(
+        "  修法二选一：资产是对的就 scripts/publish_models.sh refresh-lock 刷新 lock；"
+        "lock 是对的就把 Release 改回去。",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+print(f"✓ Release '{tag}' 的 {len(have)} 个资产与 lock 全等（name/size/sha256）", file=sys.stderr)
+PY
 }
 
 cmd_refresh_lock() {
@@ -129,7 +224,9 @@ cmd_refresh_lock() {
 case "${1:-}" in
     upload)       shift; cmd_upload "$@" ;;
     refresh-lock) shift; cmd_refresh_lock "$@" ;;
-    # -E 而非 build.sh 里的 's/^# \?//'：BSD sed（macOS）不认 BRE 的 \?，会原样输出 '#'
-    -h|--help|"") sed -n '5,20p' "${BASH_SOURCE[0]}" | sed -E 's/^#[[:space:]]?//' >&2 ;;
-    *)            die "未知子命令: $1（支持 upload | refresh-lock）" ;;
+    verify)       cmd_verify ;;
+    # 从第 5 行打到抬头注释块结束（第一个非 # 行），不写死结束行号：写死的话，往抬头
+    # 补一条说明就会把 --help 的尾巴无声截掉，而没人会为此跑一次 --help。
+    -h|--help|"") awk 'NR<5{next} !/^#/{exit} {sub(/^#[[:space:]]?/,""); print}' "${BASH_SOURCE[0]}" >&2 ;;
+    *)            die "未知子命令: $1（支持 upload | refresh-lock | verify）" ;;
 esac

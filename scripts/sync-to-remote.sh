@@ -22,10 +22,13 @@
 #
 # 默认远端路径: ~/miloco-plugin
 # 注：backend 重启由 openclaw gateway restart 自动带起，本脚本不再单独重启 backend。
+# 注：感知 ONNX 模型（~78MB）不参与 rsync，远端 build.sh 自己按 scripts/models.lock.json
+#     拉。远端出网受限时，本地 export MILOCO_MODELS_BASE_URL=<内网源> 会一并透传过去。
 
 set -euo pipefail
 
-usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; }
+# -E 而非 's/^# \?//'：BSD sed（macOS）不认 BRE 的 \?，会把 '#' 原样打出来。
+usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed -E 's/^#[[:space:]]?//'; }
 
 # ─── 参数解析 ──────────────────────────────────────────────────────────────
 
@@ -86,6 +89,11 @@ COMMON_EXCLUDES=(
     --exclude '.pytest_cache/'
     --exclude '.ruff_cache/'
     --exclude '.DS_Store'
+    # 感知 ONNX 不在 git 里（scripts/models.lock.json），本地这个目录合法地可能只剩
+    # README。--remote-build 走的是 rsync --delete-after：不排除的话，本地空目录会把
+    # 远端上一轮下好的 5 个模型删掉，逼远端 build.sh 的 --strict 重拉 ~78MB —— 而远端
+    # 往往正是网络最差那台。远端模型自己按 lock 管理（build.sh 会 fetch），不归 rsync。
+    --exclude 'backend/miloco/src/miloco/perception/models/'
 )
 
 case "$BUILD_MODE" in
@@ -118,9 +126,13 @@ fi
 
 echo "[sync] 远端: build=$BUILD_MODE install=[${INSTALL_LIST:-none}]"
 
+# MILOCO_MODELS_BASE_URL 一并透传：远端 build.sh 要自己按 lock 拉 ~78MB 模型，
+# 而远端常在内网 / 出口受限，换源逃生口不传过去就等于没有。空值也照传，远端
+# fetch_models.py 对空串按"未设置"处理（见其 _sources）。
 ssh "$HOST" \
     "REMOTE_PATH='$REMOTE_PATH' BUILD_MODE='$BUILD_MODE' \
      PACKAGES='$PACKAGES' INSTALL_LIST='$INSTALL_LIST' \
+     MILOCO_MODELS_BASE_URL='${MILOCO_MODELS_BASE_URL:-}' \
      bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"

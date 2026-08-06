@@ -18,7 +18,9 @@
   python3 scripts/fetch_models.py --force             # 无条件重下
 
 环境变量:
-  MILOCO_MODELS_BASE_URL  覆盖下载源（内网镜像 / 离线源），优先于 lock 的 base_url + mirrors
+  MILOCO_MODELS_BASE_URL  覆盖下载源（内网镜像 / 离线源）。是**独占替换**而非"排在前面"：
+                          设了它就只用它，lock 的 base_url + mirrors 全部不再兜底。
+                          允许 http:// 与 file://（内网/离线场景），内容仍按 sha256 校验。
   MILOCO_MODELS_DEST      覆盖下载目标目录（低于 --dest）。注意：只影响"下到哪"，
                           不影响运行时模型解析口径（那是 directories.models /
                           MILOCO_DIRECTORIES__MODELS，见 config/settings.py）
@@ -86,8 +88,30 @@ def _is_ready(path: Path, spec: dict[str, Any]) -> bool:
     return _sha256(path) == spec["sha256"]
 
 
+def _required(spec: dict[str, Any]) -> bool:
+    """缺 ``required`` 键时 fail-closed 当必需。
+
+    fail-open 的话，lock 少写一个键就把必需模型悄悄降级成"缺了也算成功"，
+    而这条链路上所有硬失败（build 的 --strict、CI 门禁）都是靠 required 判的。
+    """
+    return bool(spec.get("required", True))
+
+
+def _check_name(name: str) -> None:
+    """模型名要直接拼进 URL 和 dest 路径，不许带路径分隔符。
+
+    信任边界本是"lock 在仓库里"，但 ``--lock`` 可以指任意文件，而
+    ``Path(dest) / "../../evil"`` 会静静逃出 dest。多一句守卫比多一次事故便宜。
+    """
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        raise ValueError(f"lock 里的文件名不合法（不能为空 / 含路径分隔符 / 以点开头）：{name!r}")
+
+
 def _sources(lock: dict[str, Any]) -> list[str]:
-    """下载源，按优先级：env 覆盖 → lock 的 base_url（GitHub 直连）→ mirrors（加速镜像）。
+    """下载源：env 独占替换，否则 lock 的 base_url（GitHub 直连）+ mirrors（加速镜像）。
+
+    ``MILOCO_MODELS_BASE_URL`` 是**独占**的 —— 设了它就只用它，不再拼 lock 里的源。
+    内网/离线场景要的正是"别再去碰外网"，"优先 + 兜底"会把请求漏到公网去。
 
     mirrors 与 ``scripts/manifest.json`` 的 ``download.sites`` 是同一批 GitHub 加速站
     （终端用户下大包用那份，开发者/CI 下模型用这份），两边由 test_fetch_models.py 钉死一致。
@@ -102,11 +126,64 @@ def _sources(lock: dict[str, Any]) -> list[str]:
 # ─── 下载 ────────────────────────────────────────────────────────────────────
 
 
+def _declared_length(resp: Any) -> int | None:
+    """本次响应体应有的字节数（206 时是本段长度，非整文件长度）。
+
+    chunked 传输 / 老式代理不给 Content-Length，此时返回 None（无从判断截断，
+    只能退回 sha256 兜底）。
+
+    走 ``.headers`` 而不是 ``.getheader()``：后者只有 ``HTTPResponse`` 有，
+    ``file://`` 拿到的 ``addinfourl`` 没有，用了会 AttributeError。
+    """
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("Content-Length") if headers is not None else None
+    if raw is None:
+        return None
+    try:
+        n = int(raw.strip())
+    except (AttributeError, ValueError):
+        return None
+    return n if n >= 0 else None
+
+
+def _open_part(dest_dir: Path, name: str) -> tuple[Path, Any]:
+    """选定 ``.part`` 路径并尽量独占它，返回 (路径, 需要保活的锁句柄或 None)。
+
+    稳定的 ``{name}.part`` 是 Range 续传的载体，但多进程共享同一 dest
+    （self-hosted 共享 workspace、``install-hermes.sh --post-install`` 与 build 并行）
+    会互相截断。这里用 flock 抢：抢到就用稳定名（可跨轮续传），抢不到就退到
+    ``{name}.{pid}.part`` —— 本轮不续传，但绝不踩别人的字节。
+    直接用 pid 名会更简单，代价是永久放弃续传，而续传正是 78MB 跨境链路的关键。
+    """
+    stable = dest_dir / f"{name}.part"
+    try:
+        import fcntl  # Windows 上没有；拿不到就退化成"无锁但仍可续传"的旧行为
+    except ImportError:
+        return stable, None
+
+    fh = None
+    try:
+        fh = open(stable, "a+b")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if fh is not None:
+            fh.close()
+        return dest_dir / f"{name}.{os.getpid()}.part", None
+    return stable, fh
+
+
 def _stream(url: str, part: Path, expected_size: int | None, *, quiet: bool) -> None:
     """流式下载到 ``part``；``part`` 已有内容时尝试 Range 续传（78MB 跨境链路值得）。
 
     服务端不接 Range（返回 200）或 ``file://`` 这种无 Range 语义的源时整段重写。
     续传拼出脏内容不怕：调用方一律以 sha256 判定，不符就删掉 part 从头再来。
+
+    收尾会比对实际写入量与响应自报的 ``Content-Length``：``http.client`` 对"没读满就
+    EOF"是静默返回 ``b""``（HTTPS 下 ``suppress_ragged_eofs`` 同理），不比就会把干净
+    FIN 截断误报成"sha256 不符" —— 而那条路径会删掉 part、下一次不带 Range 从 0 重来，
+    跨境链路上每次断在同一位置就成了永远下不完、还把诊断指向"镜像被投毒"。
+    比的是响应头而不是 lock 的 ``expected_size``：lock 陈旧时实收会**大于**期望值，
+    拿 lock 比会打出反向误导并留下超长 part。
     """
     offset = part.stat().st_size if part.is_file() else 0
     if offset and expected_size and offset >= expected_size:
@@ -124,6 +201,8 @@ def _stream(url: str, part: Path, expected_size: int | None, *, quiet: bool) -> 
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         if getattr(resp, "status", 200) != 206:
             offset = 0  # 没走成续传 → 整段重写
+        declared = _declared_length(resp)
+        start = offset
         written = offset
         total = expected_size or 0
         show_pct = total > 0 and not quiet and sys.stderr.isatty()
@@ -148,6 +227,14 @@ def _stream(url: str, part: Path, expected_size: int | None, *, quiet: bool) -> 
         if show_pct:
             print("\r" + " " * 32 + "\r", end="", file=sys.stderr, flush=True)
 
+        if declared is not None and written - start != declared:
+            # 抛异常而不是 return：调用方的 except 分支只记日志、不删 part，
+            # 已落地的字节因此得以保留，下一次才真的能带 Range 接着下。
+            raise OSError(
+                f"连接提前关闭：本段收到 {written - start} 字节，"
+                f"响应自报 {declared} 字节（已保留 {written} 字节待续传）"
+            )
+
 
 def _fetch_one(
     spec: dict[str, Any],
@@ -164,35 +251,41 @@ def _fetch_one(
         _log(f"  ✓ {name}  {_human(spec.get('size', 0))}  已就绪", quiet=quiet)
         return True
 
-    part = dest_dir / f"{name}.part"
-    for url in urls:
-        host = urllib.parse.urlparse(url).netloc or url
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                _log(
-                    f"  ↓ {name}  {_human(spec.get('size', 0))}  ← {host}"
-                    + (f"（第 {attempt}/{_MAX_RETRIES} 次）" if attempt > 1 else ""),
-                    quiet=quiet,
-                )
-                _stream(f"{url}/{name}", part, spec.get("size"), quiet=quiet)
-                got = _sha256(part)
-                if got == spec["sha256"]:
-                    part.replace(path)  # 原子改名：中断不会留下"看起来能用"的半个文件
-                    _log(f"  ✓ {name}  校验通过", quiet=quiet)
-                    return True
-                _log(
-                    f"  ! {name}  sha256 不符（期望 {spec['sha256'][:12]}…，"
-                    f"实得 {got[:12]}…），丢弃重下",
-                    quiet=quiet,
-                )
-                part.unlink(missing_ok=True)
-            except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                _log(f"  ! {name}  下载失败（{attempt}/{_MAX_RETRIES}）：{exc}", quiet=quiet)
-            if attempt < _MAX_RETRIES:
-                time.sleep(2 ** (attempt - 1))
+    part, lock_fh = _open_part(dest_dir, name)
+    quoted = urllib.parse.quote(name)
+    try:
+        for url in urls:
+            host = urllib.parse.urlparse(url).netloc or url
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    _log(
+                        f"  ↓ {name}  {_human(spec.get('size', 0))}  ← {host}"
+                        + (f"（第 {attempt}/{_MAX_RETRIES} 次）" if attempt > 1 else ""),
+                        quiet=quiet,
+                    )
+                    _stream(f"{url}/{quoted}", part, spec.get("size"), quiet=quiet)
+                    got = _sha256(part)
+                    if got == spec["sha256"]:
+                        part.replace(path)  # 原子改名：中断不会留下"看起来能用"的半个文件
+                        _log(f"  ✓ {name}  校验通过", quiet=quiet)
+                        return True
+                    _log(
+                        f"  ! {name}  sha256 不符（期望 {spec['sha256'][:12]}…，"
+                        f"实得 {got[:12]}…），丢弃重下",
+                        quiet=quiet,
+                    )
+                    part.unlink(missing_ok=True)
+                except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                    # 故意不删 part：截断/超时留下的字节是下一轮 Range 续传的起点。
+                    _log(f"  ! {name}  下载失败（{attempt}/{_MAX_RETRIES}）：{exc}", quiet=quiet)
+                if attempt < _MAX_RETRIES:
+                    time.sleep(2 ** (attempt - 1))
 
-    part.unlink(missing_ok=True)
-    return False
+        part.unlink(missing_ok=True)
+        return False
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
 
 
 # ─── 主流程 ──────────────────────────────────────────────────────────────────
@@ -204,10 +297,14 @@ def _select(files: list[dict[str, Any]], only: list[str], required_only: bool) -
         want = set(only)
         unknown = want - {s["name"] for s in files}
         if unknown:
-            raise KeyError(f"--only 指定了 lock 里没有的文件：{', '.join(sorted(unknown))}")
+            raise ValueError(f"--only 指定了 lock 里没有的文件：{', '.join(sorted(unknown))}")
         specs = [s for s in files if s["name"] in want]
     if required_only:
-        specs = [s for s in specs if s.get("required")]
+        specs = [s for s in specs if _required(s)]
+    if not specs:
+        # `--only <可选模型> --required-only` 会选出空集，空循环再 exit 0 就是
+        # "什么都没做却报成功"——CI 用它当门禁时等于门禁被静默摘掉。
+        raise ValueError("选出的文件集为空（--only 与 --required-only 无交集？），无事可做")
     return specs
 
 
@@ -233,14 +330,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
         files: list[dict[str, Any]] = lock["files"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        for spec in files:
+            _check_name(spec["name"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         print(f"lock 文件不可用（{lock_path}）：{exc}", file=sys.stderr)
         return 2
 
     try:
         specs = _select(files, args.only, args.required_only)
-    except KeyError as exc:
-        print(str(exc).strip("'\""), file=sys.stderr)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 2
 
     dest = Path(args.dest or os.environ.get("MILOCO_MODELS_DEST") or _DEFAULT_DEST).expanduser()
@@ -253,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"  ✓ {spec['name']}", quiet=args.quiet)
             else:
                 _log(f"  ✗ {spec['name']}  缺失或校验不通过", quiet=args.quiet)
-                (bad_required if spec.get("required") else bad_optional).append(spec["name"])
+                (bad_required if _required(spec) else bad_optional).append(spec["name"])
         blocking = bad_required + (bad_optional if args.strict else [])
         if blocking:
             print(
@@ -281,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     failed_required, failed_optional = [], []
     for spec in specs:
         if not _fetch_one(spec, dest, urls, force=args.force, quiet=args.quiet):
-            (failed_required if spec.get("required") else failed_optional).append(spec["name"])
+            (failed_required if _required(spec) else failed_optional).append(spec["name"])
 
     if failed_optional and not args.strict:
         # 与 resource_validator 的降级语义一致：可选模型缺了只是对应能力降级，不阻塞。

@@ -721,25 +721,53 @@ if [ -n "$MODEL_SRC" ]; then
   done
   info "  同步 ONNX 模型：新增 $synced 个、跳过已存在 $skipped 个"
   info "  模型目录：$MILOCO_HOME/models/"
-elif ! compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
-  # 本地没有任何现成模型 → 直接按 lock 从 upstream Release 下载（sha256 校验）。
+fi
+
+# 兜底判据独立于上面的 cp（不能再挂 elif）：cp 只保证"源目录里有的都过来了"，
+# 不保证齐。模型不再进 git 之后源目录改由 fetch_models.py 填充，而它部分失败时是
+# "成功的已落地 + exit 1" —— 一次失败的构建就能留下只有 1 个 .onnx 的源目录。
+# 旧判据「一个 onnx 都没有才下载」在 cp 完之后恒为假，于是"新增 1 个 → 零 warn →
+# 安装成功 → 首次 perceive 就 MODELS_MISSING"。改成按 lock 逐个比字节。
+#
+# --check --strict 不联网、只比本地文件与 lock 的 size+sha256，缺任何一个（含可选）
+# 都判不齐 —— 可选模型缺了也该补，否则 bge 去重/VAD 会静默降级。
+FETCH_MODELS="$HERE/../../scripts/fetch_models.py"
+models_ok=0
+if [ -f "$FETCH_MODELS" ]; then
+  "$PYTHON" "$FETCH_MODELS" --check --strict --quiet --dest "$MILOCO_HOME/models" >/dev/null 2>&1 \
+    && models_ok=1
+else
+  # 装到 $HERMES_PLUGINS_DIR 之后 $HERE 旁边没有 scripts/，退回旧的弱判据：有 .onnx 就算数。
+  FETCH_MODELS=""
+  compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1 && models_ok=1
+fi
+
+if [ "$models_ok" -eq 1 ]; then
+  : # 齐了，什么都不用做
+elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
+  # --post-install 是"幂等补齐收尾"的轻量重跑，不该在这里静默拉 78MB：
+  # 上面的 cp（本地、秒级）照做，联网下载留给用户显式触发。
+  warn "感知模型不齐，但 --post-install 模式不做下载（可能 ~78MB）"
+  warn "补齐：$PYTHON ${FETCH_MODELS:-scripts/fetch_models.py} --dest $MILOCO_HOME/models"
+elif [ -n "$FETCH_MODELS" ]; then
+  # 按 lock 从 upstream Release 下载（sha256 校验）。已齐的文件会被跳过，只补缺的。
   # 下载失败只 warn 不中断：感知会报 models_missing 降级，但插件其余部分照装。
-  FETCH_MODELS="$HERE/../../scripts/fetch_models.py"
-  if [ -f "$FETCH_MODELS" ]; then
-    info "  本地无现成模型，按 scripts/models.lock.json 下载 → $MILOCO_HOME/models/"
-    if ! "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models"; then
-      warn "感知模型下载失败（网络？）"
-      warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-      warn "修法：重跑 $FETCH_MODELS --dest $MILOCO_HOME/models，或手动放置模型文件"
-    fi
-  else
-    warn "找不到 ONNX 模型（本地无现成文件，也没有 scripts/fetch_models.py 可用）"
+  info "  感知模型不齐，按 scripts/models.lock.json 补齐 → $MILOCO_HOME/models/"
+  if ! "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models"; then
+    warn "感知模型下载失败（网络？）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-    warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
+    warn "修法：重跑 $FETCH_MODELS --dest $MILOCO_HOME/models，或手动放置模型文件"
   fi
+else
+  warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"
+  warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
+  warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
 fi
 if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
-  # 在 config.json 写 models 字段（settings.models_dir 默认读这里）
+  # 把模型目录钉进 config.json。键是 directories.models（MilocoSettings.directories →
+  # DirectorySettings.models → models_dir）；写顶层 cfg["models"] 是死键 ——
+  # MilocoSettings 的 model_config 是 extra="ignore"，多出来的顶层键连报错都没有，
+  # 静默丢弃，全仓无消费者。
   if [ -f "$MILOCO_HOME/config.json" ]; then
     "$PYTHON" - "$MILOCO_HOME" <<'PY' || true
 import json, sys
@@ -749,9 +777,16 @@ try:
     cfg = json.load(open(p, encoding="utf-8"))
 except Exception:
     cfg = {}
-cfg["models"] = f"{home}/models"
+if not isinstance(cfg, dict):
+    cfg = {}
+# 已有的 directories.* 子键（static / storage）要留着，别整段盖掉
+d = cfg.get("directories")
+if not isinstance(d, dict):
+    d = {}
+d["models"] = f"{home}/models"
+cfg["directories"] = d
 json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
-print(f"  config.json::models = {home}/models")
+print(f"  config.json::directories.models = {home}/models")
 PY
   fi
 fi

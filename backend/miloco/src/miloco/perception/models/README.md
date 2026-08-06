@@ -31,9 +31,9 @@ MILOCO_MODELS_BASE_URL=https://mirror.example.com/miloco-models python3 scripts/
 | --- | --- | --- |
 | `det_4C.onnx` | 是 | 人体/宠物检测 |
 | `human_body_reid_v2.onnx` | 是 | 人体 ReID（跨帧同一人） |
-| `bge-small-zh-v1.5-int8.onnx` | 否 | 中文文本向量（语义检索，缺则降级为关键词） |
+| `bge-small-zh-v1.5-int8.onnx` | 否 | suggestion 事件链去重的句向量（缺则退回精确文本匹配，措辞一漂就认不出同一桩事、反复开新链） |
 | `bge-small-zh-v1.5-tokenizer.json` | 否 | 上者的 tokenizer |
-| `silero_vad.onnx` | 否 | 语音活动检测（缺则不做 VAD 切分） |
+| `silero_vad.onnx` | 否 | `speeches` 字段的人声门控（缺则门控停用、退回纯能量 gate 行为） |
 
 必需模型缺失时感知引擎会报 `models_missing`（见 `perception/engine/resource_validator.py`）；
 可选模型缺失只降级对应能力，不阻塞启动。

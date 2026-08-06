@@ -12,10 +12,12 @@
 """
 
 import hashlib
+import http.server
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -35,12 +37,55 @@ def _sha(b: bytes) -> str:
 
 
 def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """跑 fetch_models.py，并先把继承来的 MILOCO_MODELS_* 剥干净。
+
+    不剥的话，内网/离线开发者按 models/README.md 与 dev-guide 的建议 export 了
+    MILOCO_MODELS_BASE_URL 之后，这一批测试会全线翻车：该变量对下载源是**独占替换**，
+    fixture 那个 file:// 假 Release 会被整体顶掉，测试转而真的去打公司镜像 ——
+    既违反本文件"不联网"的契约，`test_empty_source_list_is_usage_error`
+    这类断言退出码的用例语义还会直接反转。
+    """
+    base = {k: v for k, v in os.environ.items() if not k.startswith("MILOCO_MODELS_")}
     return subprocess.run(
         [sys.executable, str(_SCRIPT), *args],
         capture_output=True,
         text=True,
-        env={**os.environ, **(env or {})},
+        env={**base, **(env or {})},
     )
+
+
+def _make_truncating_handler(
+    body: bytes, *, sent: int
+) -> type[http.server.BaseHTTPRequestHandler]:
+    """造一个"声明 Content-Length 却只发一部分就关连接"的服务端。
+
+    这是跨境链路上最常见的失败形态（干净 FIN 截断），也是 file:// 假 Release 造不出来的
+    唯一一类 —— 所以这一条测试破例起个真 HTTP 服务，仍然只绑 127.0.0.1、不出本机。
+    """
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler 的约定命名
+            start = 0
+            rng = self.headers.get("Range", "")
+            if rng.startswith("bytes="):
+                start = int(rng.removeprefix("bytes=").split("-")[0] or 0)
+            chunk = body[start:]
+            self.send_response(206 if start else 200)
+            self.send_header("Content-Length", str(len(chunk)))
+            if start:
+                self.send_header(
+                    "Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}"
+                )
+            self.end_headers()
+            self.wfile.write(chunk[:sent])  # 少发一截就撒手
+            self.close_connection = True
+
+        def log_message(self, *_args: object) -> None:
+            pass  # 别把请求日志喷进 pytest 输出
+
+    return Handler
 
 
 @pytest.fixture
@@ -149,6 +194,26 @@ def test_dest_env_is_honored(fake_release: tuple[Path, Path, Path]) -> None:
     assert (dest / "req.onnx").is_file()
 
 
+def test_dest_flag_beats_dest_env(
+    fake_release: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    """--dest 必须压过 MILOCO_MODELS_DEST。
+
+    这条分支一旦回归，build.sh / CI 那些显式传 --dest 的调用就会把模型写到 env 指的
+    地方去：校验的目录与打包的目录悄悄分家，而源码里那个 models/ 已被 gitignore，
+    git status 也看不见写歪的文件。
+    """
+    lock, _src, dest = fake_release
+    decoy = tmp_path / "decoy"
+
+    r = _run(
+        "--lock", str(lock), "--dest", str(dest), env={"MILOCO_MODELS_DEST": str(decoy)}
+    )
+    assert r.returncode == 0, r.stderr
+    assert (dest / "req.onnx").is_file()
+    assert not decoy.exists(), "--dest 被 MILOCO_MODELS_DEST 顶掉了"
+
+
 # ─── 失败语义：必需 vs 可选、strict ──────────────────────────────────────────
 
 
@@ -247,6 +312,115 @@ def test_bad_lock_is_usage_error(tmp_path: Path) -> None:
     assert _run("--lock", str(tmp_path / "missing.json")).returncode == 2
 
 
+def test_empty_selection_is_usage_error(fake_release: tuple[Path, Path, Path]) -> None:
+    """`--only <可选> --required-only` 选出空集时要报错，不能"空循环 → exit 0"。
+
+    CI / build 拿退出码当门禁，"什么都没做却说成功"等于门禁被静默摘掉。
+    """
+    lock, _src, dest = fake_release
+    r = _run(
+        "--lock", str(lock), "--dest", str(dest), "--only", "opt.onnx", "--required-only"
+    )
+    assert r.returncode == 2
+    assert not dest.exists()
+
+
+def test_missing_required_key_is_treated_as_required(tmp_path: Path) -> None:
+    """lock 条目漏写 required 时 fail-closed 当必需，而不是悄悄降级成可选。"""
+    src = tmp_path / "release"
+    src.mkdir()
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "base_url": src.as_uri(),
+                "mirrors": [],
+                # 故意不写 required
+                "files": [{"name": "gone.onnx", "size": 3, "sha256": _sha(b"abc")}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = _run("--lock", str(lock), "--dest", str(tmp_path / "d"))
+    assert r.returncode == 1, r.stderr
+    assert "必需模型未就绪" in r.stderr
+
+
+def test_path_traversal_in_lock_name_is_rejected(tmp_path: Path) -> None:
+    """lock 里的文件名直接拼进 dest 路径和 URL，不许含路径分隔符。
+
+    信任边界本是"lock 在仓库里"，但 --lock 可指任意文件，`dest / "../../evil"`
+    会静静逃出 dest。
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "base_url": outside.as_uri(),
+                "mirrors": [],
+                "files": [
+                    {
+                        "name": "../../evil.onnx",
+                        "size": 3,
+                        "sha256": _sha(b"abc"),
+                        "required": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = _run("--lock", str(lock), "--dest", str(tmp_path / "d" / "e"))
+    assert r.returncode == 2
+    assert not (tmp_path / "evil.onnx").exists()
+
+
+def test_truncated_response_keeps_part_for_resume(tmp_path: Path) -> None:
+    """连接在 Content-Length 未满时被干净关闭 → 报"提前关闭"并保住 .part。
+
+    http.client 对这种截断是静默返回 b""。不比对长度的话它会被误报成"sha256 不符"，
+    而那条路径会删掉 .part，下一轮不带 Range 从 0 重来 —— 跨境链路上每次断在同一
+    位置就成了永远下不完，诊断还被指向"镜像被投毒"。
+    """
+    body = b"x" * 4096
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _make_truncating_handler(body, sent=1024)
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        lock = tmp_path / "models.lock.json"
+        lock.write_text(
+            json.dumps(
+                {
+                    "base_url": f"http://127.0.0.1:{server.server_address[1]}",
+                    "mirrors": [],
+                    "files": [
+                        {
+                            "name": "trunc.onnx",
+                            "size": len(body),
+                            "sha256": _sha(body),
+                            "required": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        dest = tmp_path / "dest"
+        r = _run("--lock", str(lock), "--dest", str(dest))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert r.returncode == 1
+    assert "提前关闭" in r.stderr, r.stderr
+    assert "sha256 不符" not in r.stderr, "截断被误报成 hash 不符"
+    # 重试期间 .part 必须留着（最后一轮放弃时才清理），否则续传无从谈起
+    assert "待续传" in r.stderr
+
+
 def test_empty_source_list_is_usage_error(tmp_path: Path) -> None:
     """lock 没有可用源时要明确报错，而不是"0 个文件全部就绪"式的假成功。"""
     lock = tmp_path / "models.lock.json"
@@ -288,6 +462,22 @@ def test_real_lock_is_wellformed() -> None:
     required = {s["name"] for s in lock["files"] if s["required"]}
     # 这两个是感知主链路（检测 + ReID）的硬依赖，见 perception/engine/resource_validator.py
     assert {"det_4C.onnx", "human_body_reid_v2.onnx"} <= required
+
+
+def test_lock_matches_resource_validator_models() -> None:
+    """lock 与 resource_validator.MODELS 必须**双向**等价（文件名 + 必需性）。
+
+    lock 决定"下什么"，MODELS 决定"缺什么算降级/算 MODELS_MISSING"。两边各自都对、
+    合起来错的姿势有两种：lock 少一条 → 运行时按 MODELS 判缺、报 models_missing；
+    lock 多一条 → 白下一个没人读的文件，还被打进 release tarball。
+    publish_models.sh 的 refresh-lock 是全量重写 lock 的，这条断言就是它的安全网。
+    """
+    from miloco.perception.engine.resource_validator import MODELS
+
+    lock = json.loads(_REAL_LOCK.read_text(encoding="utf-8"))
+    assert {(f["name"], bool(f["required"])) for f in lock["files"]} == {
+        (m.name, not m.optional) for m in MODELS
+    }, "scripts/models.lock.json 与 resource_validator.MODELS 不一致（文件名或必需性）"
 
 
 def test_lock_sources_match_manifest_sites() -> None:

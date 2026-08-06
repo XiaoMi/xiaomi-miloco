@@ -45,6 +45,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+    env:
+      # 缓存 path、fetch --dest、build.sh 的 pack_models 三处必须指同一个目录，
+      # 在这里给出唯一定义（build.sh 内部的默认目标目录与此一致）。
+      MODELS_DIR: backend/miloco/src/miloco/perception/models
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -79,16 +83,29 @@ jobs:
       # 感知 ONNX 模型不在 git 里，托管在固定 tag `models` 的 Release（见 scripts/models.lock.json）。
       # build.sh 的 pack_models 也会自动拉，这里显式加一步只为两件事：命中缓存后 0 流量，
       # 以及模型下载失败时在 release 日志里是独立的失败点，不用去 build 长日志里翻。
-      - name: 缓存感知 ONNX 模型
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      # restore + save 拆开的理由同 ci.yml：一体的 actions/cache 会在 job 失败时照样把
+      # 残缺目录存进缓存，而那个 key 此后再也盖不掉。
+      - name: 恢复感知 ONNX 模型缓存
+        id: models-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           # 只缓存模型文件本身，不缓存同目录里 git 跟踪的 README.md（理由见 ci.yml 同名步骤）
           path: |
-            backend/miloco/src/miloco/perception/models/*.onnx
-            backend/miloco/src/miloco/perception/models/*.json
+            ${{ env.MODELS_DIR }}/*.onnx
+            ${{ env.MODELS_DIR }}/*.json
           key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
+      # --dest 显式给：默认目标目录会回退到 MILOCO_MODELS_DEST，而缓存 path 与 build.sh
+      # 打包读的都是上面这个目录，三者必须指同一处。
       - name: 下载感知 ONNX 模型（--strict：可选模型缺失也算失败）
-        run: python3 scripts/fetch_models.py --strict
+        run: python3 scripts/fetch_models.py --strict --dest "$MODELS_DIR"
+      - name: 保存感知 ONNX 模型缓存（--strict 通过后才存）
+        if: steps.models-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.MODELS_DIR }}/*.onnx
+            ${{ env.MODELS_DIR }}/*.json
+          key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
 
       - name: 构建全部产物到 dist/（--version 统一 stamp + 平台归档 + manifest.bundles）
         run: bash scripts/build.sh --version "${{ steps.ver.outputs.version }}"
