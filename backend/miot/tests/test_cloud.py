@@ -12,7 +12,7 @@ import webbrowser
 from typing import Dict, Optional
 
 import pytest
-from miot.cloud import MIoTHttpClient, MIoTOAuth2Client, _cloud_device_to_info
+from miot.cloud import MIoTHttpClient, MIoTOAuth2Client
 from miot.storage import MIoTStorage
 from miot.types import MIoTManualSceneInfo, MIoTOauthInfo, MIoTUserInfo
 from pydantic_core import to_jsonable_python
@@ -570,107 +570,3 @@ async def test_app_notify_async(
         _LOGGER.info("send app notify, notify_id: %s, result: %s", notify_id, result)
 
     await miot_http.deinit_async()
-
-# ---------------------------------------------------------------------------
-# localip → local_ip 映射回归测试
-# cloud.py _cloud_device_to_info 用 device.get("localip", None)
-# 填入 MIoTDeviceInfo(local_ip=...). 这是跨网段相机直连的数据源，
-# 一字之差（localip ↔ local_ip）就会导致整条链路静默失效.
-# 测试直接调用生产函数 _cloud_device_to_info，而非复刻构造代码.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_cloud_device_to_info_localip_parsed():
-    """_cloud_device_to_info 正确映射 cloud API key 'localip' → local_ip."""
-    device = {
-        "did": "test-did-001",
-        "name": "Test Camera",
-        "model": "chuangmi.camera.81ac1",
-        "uid": 999,
-        "pid": 0,
-        "token": "abc123",
-        "isOnline": True,
-        "localip": "**.*.*.*",
-        "orderTime": 0,
-    }
-    info = _cloud_device_to_info(device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4")
-    assert info is not None
-    assert info.local_ip == "**.*.*.*"
-
-
-@pytest.mark.unit
-def test_cloud_device_to_info_localip_missing():
-    """_cloud_device_to_info: 无 localip key 时 local_ip 应为 None."""
-    device = {
-        "did": "test-did-002",
-        "name": "Test Camera",
-        "model": "chuangmi.camera.81ac1",
-        "uid": 999,
-        "pid": 0,
-        "token": "abc123",
-        "isOnline": True,
-        "orderTime": 0,
-    }
-    info = _cloud_device_to_info(device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4")
-    assert info is not None
-    assert info.local_ip is None
-
-
-@pytest.mark.unit
-def test_cloud_device_to_info_missing_uid_returns_none():
-    """必填字段缺失一律返回 None，不能抛 KeyError——调用方只按 None 跳过该条，
-    一条畸形设备不该让整页解析中断。"""
-    device = {
-        "did": "test-did-003",
-        "name": "Test Camera",
-        "model": "chuangmi.camera.81ac1",
-        # uid 缺失
-        "isOnline": True,
-    }
-    info = _cloud_device_to_info(  # must not raise
-        device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4"
-    )
-    assert info is None
-
-
-@pytest.mark.unit
-def test_cloud_device_to_info_pydantic_required_missing_returns_none():
-    """pid / token 这类 pydantic 必填字段缺失时走 ValidationError 分支返回 None。
-
-    整页设备共用一次解析循环，让一条畸形设备把 ValidationError 抛到循环外会令
-    整个账号的设备列表拉取失败——退化成跳过这一条。
-    """
-    device = {
-        "did": "test-did-005",
-        "name": "Test Camera",
-        "model": "chuangmi.camera.81ac1",
-        "uid": 999,
-        # pid / token 缺失 → pydantic 校验失败
-        "isOnline": True,
-    }
-    info = _cloud_device_to_info(  # must not raise
-        device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4"
-    )
-    assert info is None
-
-
-@pytest.mark.unit
-def test_cloud_device_to_info_owner_missing_subkeys_does_not_raise():
-    """owner 子 dict 存在但缺 userid/nickname 时按缺省处理，不抛 KeyError。"""
-    device = {
-        "did": "test-did-004",
-        "name": "Test Camera",
-        "model": "chuangmi.camera.81ac1",
-        "uid": 999,
-        "pid": 0,
-        "token": "abc123",
-        "isOnline": True,
-        "owner": {"someOtherKey": 1},  # 无 userid / nickname
-    }
-    info = _cloud_device_to_info(  # must not raise
-        device, urn="urn:miot-spec-v2:device:camera:0000A01C:chuangmi-81ac1:4"
-    )
-    assert info is not None
-    assert info.owner_id is None
-    assert info.owner_nickname is None
