@@ -443,9 +443,12 @@ def extract_from_video(
                 # 本人, 裁出的背景/他人图会进该 track 的 top-K 候选、经注册写进身份库。
                 # 下面的质量门拦不住它——置信度取的是最后一次真匹配的值(通常过阈值),
                 # 背景裁图清晰度也不低; 打分公式同样没有"本帧是否真匹配"这一项。
-                # 与 IdentityEngine 各消费闸同口径。本路径 tracker 按 fps=1 建、
-                # max_age 换算后只容忍 1 帧 miss, 故每个关联缺口最多少 1 张候选——
-                # 少掉的正是幻影框那张。缺字段按真检测兜底(同全链路 fail-open 口径)。
+                # 与 IdentityEngine 各消费闸同口径。
+                # 召回代价有界, 但上界跟随配置而非代码常量: 本路径 tracker 按 fps=1 建,
+                # 每个关联缺口最多少 sec_to_frames(deep_sort.max_age_sec, 1) 张候选
+                # (当前 yaml 配 2.0 → 2 张), 少掉的正是幻影框那些。调大该 yaml 项会
+                # 同比放宽这个上界, 需连同 min_track_hits 的下限一起评估。
+                # 缺字段按真检测兜底(同全链路 fail-open 口径)。
                 if not tr.get("detected_this_frame", True):
                     continue
                 tid = int(tr["id"])
