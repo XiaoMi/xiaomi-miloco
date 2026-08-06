@@ -8,8 +8,15 @@
     提供 ReID embedding 复用入口。
 
 mode 取值：``"mock" | "real" | "deep_sort"``。fast/detect_only 档位已取消。
-灰度策略：default_config.yaml::tracking_service_mode 先保持 "real",PR 2 上线后切
-"deep_sort" 灰度 1 周再放大。
+灰度已完成：出厂值由 ``config/settings.yaml`` 的
+``perception.engine.identity.tracking_service_mode`` 给出,自 2.0 起即为 ``"deep_sort"``;
+回退路径是把该项改回 ``"real"``。
+
+⚠️ 两条真实路径的 coasting 语义不同,这是下游各闸有没有作用的分水岭：
+``DeepSortTrackingService`` 会输出人已离开/跟丢后的纯 Kalman 预测残留框
+(``detected_this_frame`` 为 False);``RealTrackingService``(``SortTracker``) 在输出前
+已 pre-filter 掉残留框、只给本帧真匹配到的框。故 IdentityEngine 侧各 coasting 闸
+只在 ``"deep_sort"`` 模式下真正起作用。
 """
 
 from __future__ import annotations
