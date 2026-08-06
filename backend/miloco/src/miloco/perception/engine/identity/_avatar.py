@@ -24,6 +24,10 @@ import re
 import tempfile
 from pathlib import Path
 
+import cv2
+
+from miloco.perception.engine.identity._image_utils import decode_image
+
 logger = logging.getLogger(__name__)
 
 # subject_id 白名单：人的 UUID 与宠物 pet_<hex> 都只含这些字符。用作路径/日志前一律
@@ -64,9 +68,13 @@ AVATAR_MAX_BYTES = 5 * 1024 * 1024
 
 
 def sniff_image_ext(data: bytes) -> str | None:
-    """按文件头魔数判定真实图片格式（jpg/png/webp），不看文件名后缀——杜绝「后缀与
-    内容不符」，让盘上后缀 / Content-Type / 真实字节恒一致；不在白名单则 None。
-    （不引 imghdr——3.13 已移除；也不引 Pillow 新依赖。）"""
+    """按文件头魔数判定「可直接落盘」的图片格式（jpg/png/webp），不看文件名后缀——杜绝
+    「后缀与内容不符」，让盘上后缀 / Content-Type / 真实字节恒一致；不在此集合则 None。
+
+    注意语义：``None`` **不等于**「不支持的格式」。HEIC/BMP/TIFF/GIF/AVIF 都能被
+    ``decode_image`` 解开，只是不能原字节落盘（浏览器渲染不了 HEIC、且盘上格式集合要收敛），
+    由 ``normalize_for_storage`` 解码后重编。判「支不支持」看后者的返回值，别看本函数。
+    （不引 imghdr——3.13 已移除。）"""
     if data[:3] == b"\xff\xd8\xff":
         return "jpg"
     if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -74,6 +82,44 @@ def sniff_image_ext(data: bytes) -> str | None:
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
     return None
+
+
+# WebP 的容器上限：边长 >16383 时 cv2.imencode 返回 ok=False 且只往 stderr 打一行，
+# 不抛异常——不判 ok 就会把空 buf 当图落盘。超限时退 JPEG（上限 65535）。
+_WEBP_MAX_SIDE = 16383
+
+
+def normalize_for_storage(
+    data: bytes, *, prefer: str = "webp"
+) -> tuple[bytes, str] | None:
+    """上传字节 →（可落盘字节, 扩展名）；解不出返回 ``None``。
+
+    白名单内（jpg/png/webp）**原字节直通**，与本函数引入前逐字节一致——不重编、不缩放，
+    保住「存储层零转码」这条既有承诺。其余容器（HEIC/HEIF/BMP/TIFF/GIF/AVIF）解码后重编：
+
+    - ``prefer="webp"``：无损 WebP。用于头像——它会被 web 直接展示，无损可避免在原本已经
+      有损的源（HEIC 本身是有损的）上再叠一代。
+    - ``prefer="jpg"``：JPEG q90。用于宠物参考图——其唯一消费者是 omni，而 ``pet_refs``
+      拼图时恒重编成 JPEG q85，存 WebP 只是多一道转换；且 ``ref_crop_N.jpg`` 这个硬编码
+      文件名牵动 glob / 下标解析等多处逻辑，让盘上后缀与内容脱钩不划算。
+    """
+    ext = sniff_image_ext(data)
+    if ext:
+        return data, ext
+    img = decode_image(data)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if prefer == "webp" and max(h, w) <= _WEBP_MAX_SIDE:
+        ok, buf = cv2.imencode(".webp", img, [cv2.IMWRITE_WEBP_QUALITY, 101])  # >100 = 无损
+        if ok:
+            return buf.tobytes(), "webp"
+        logger.warning("event=webp_encode_failed h=%s w=%s 退 JPEG", h, w)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        logger.warning("event=jpeg_encode_failed h=%s w=%s", h, w)
+        return None
+    return buf.tobytes(), "jpg"
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

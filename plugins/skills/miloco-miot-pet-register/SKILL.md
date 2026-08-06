@@ -144,7 +144,7 @@ miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/<uuid>_pet --pr
 | `warnings[].type = species_mismatch` | 检出物种与用户说的不符 | "我看着更像{检出物种},你确认是{用户物种}吗?" |
 | `warnings[].type = generic_look` | 大众花色/脸,难独一区分 | 照常注册,但提示"这只花色比较常见,后续多补不同姿态识别更稳" |
 | `warnings[].type = multiple_pets` | 画面里不止一只 | "画面里不止一只,本次先注册主体那只;其它的分别再各传一次" |
-| `warnings[].type = partial_decode_failed` | 有图没解出来(HEIC/AVIF/损坏),已跳过 | "其中有张我没打开(格式不支持),这次用剩下的看的;想把那张也算上就换成 jpg/png 再发一次" |
+| `warnings[].type = partial_decode_failed` | 有图没解出来(截断/损坏/不是图片),已跳过 | "其中有张我没打开(文件像是损坏了),这次用剩下的看的;想把那张也算上就重新发一次" |
 | `warnings[].type = low_sharpness` | 素材偏糊(不硬拒,只是参照会打折) | 照常注册,但提示"这几张有点糊,识别参照效果会差些;有更清晰的可以再补" |
 | 顶层 `refs_inconsistent = true` | 多图疑似不是同一只 | "这几张看着可能不是同一只?确认都是{name}我再入库,或只留同一只的" |
 

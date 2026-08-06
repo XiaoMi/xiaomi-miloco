@@ -6,14 +6,104 @@
 ``engine`` 版有完整 defensive 处理)。``_phash`` 也已有 ``tier_u`` 跨模块 import extractor
 的"自觉是 duplication"hack。本模块统一作为单一权威来源,消除分裂风险。
 
-模块名以 ``_`` 开头表示包内私有 helper;外部调用方应去其它公开入口,不要直接 import 本模块。
+模块名以 ``_`` 开头表示包内私有 helper。例外:``decode_image`` 是「用户上传字节 → BGR」的
+单一入口,pet / person 两侧 router 与 observe 都要用,因此允许跨包 import(否则每个入口各写
+一遍 cv2/Pillow 双路径,必然分裂)。
 """
 
 from __future__ import annotations
 
+import io
+import logging
+
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+logger = logging.getLogger(__name__)
+
+# HEIC/HEIF 解码器注册:进程级全局,放 import 期做一次。pi_heif 只接管 .heic/.heif,
+# 不动 Pillow 12 自带的 AVIF 插件(已验证注册后 .avif 仍映射到原生 AVIF)。
+try:
+    import pi_heif
+
+    pi_heif.register_heif_opener()
+    _HEIF_OK = True
+except Exception:  # noqa: BLE001 — 缺失/加载失败不该让整个后端起不来
+    _HEIF_OK = False
+    logger.warning("event=heif_decoder_unavailable 上传的 HEIC/HEIF 将无法解码", exc_info=True)
+
+# 解码后像素数上限。字节闸挡不住这个:HEIF 的网格容器、PNG 的高压缩比都能让 1MB 文件
+# 解出上亿像素(BGR 三通道 → 每像素 3 字节)。1.2 亿像素 ≈ 360MB,已远超任何真实相机
+# (12MP iPhone = 0.12 亿),留足余量的同时挡住解码炸弹。
+_MAX_DECODE_PIXELS = 120_000_000
+
+
+# ISO BMFF（``ftyp`` 盒）里属于**静态图片**的品牌。HEIF / AVIF 与 mp4/mov 共用同一套容器
+# 结构，只靠「字节 4..8 == ftyp」判不出图与视频——而这个误判有实际后果：ffmpeg 会把 HEIC 的
+# tile grid 当成几十条独立的 512x512 视频流暴露、不做拼接，于是「按视频处理一张 HEIC」会
+# 静默拿到一块瓦片当整帧，全链路零报错地在错素材上跑。
+_HEIF_BRANDS = frozenset(
+    {
+        b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs",
+        b"mif1", b"msf1", b"miaf", b"mia1",
+        b"avif", b"avis",
+    }
+)
+
+
+def is_still_image_container(head: bytes) -> bool:
+    """文件头看起来是「ISO BMFF 静态图片」（HEIF / AVIF 家族）→ True。
+
+    给「判图还是判视频」的分叉点用：命中即**不得**送进视频抽帧路径。取头部 16 字节即可
+    （``ftyp`` 盒在最前，紧跟 4 字节 major brand）。不是 ISO BMFF、或 brand 是 mp4/mov/qt
+    这类真视频 → False，由调用方按原逻辑继续判。
+    """
+    return len(head) >= 12 and head[4:8] == b"ftyp" and head[8:12] in _HEIF_BRANDS
+
+
+def decode_image(data: bytes) -> NDArray[np.uint8] | None:
+    """用户上传字节 → BGR ndarray;解不出返回 ``None``(不抛)。
+
+    两级:
+      1. ``cv2.imdecode`` 快路径——覆盖 jpg/png/webp/bmp/tiff/gif/avif,零拷贝、无 PIL 往返。
+      2. Pillow 回退——只有 cv2 认不出的容器才走到,实际上就是 HEIC/HEIF(iPhone 默认格式)。
+
+    方向:cv2(``IMREAD_COLOR``)对 jpg/png/webp/tiff 会应用 EXIF Orientation;HEIF 侧由
+    libheif 读取时按 ``irot`` 转好(实测 iPhone HEIC 出来即为竖图)。``exif_transpose`` 留着
+    只为覆盖将来可能新增的非 HEIF 回退输入——pi_heif 会把 EXIF tag 274 无条件重置为 1
+    (真值挪到 ``info["original_orientation"]``),所以它对 HEIF 恒是 no-op。
+
+    **不要**改用 ``original_orientation`` 自己转:该键即便在 libheif 已应用 ``irot`` 时也仍带
+    着原值,拿它转会把已经正过来的图再转一次(实测 iPhone 竖拍 HEIC 因此变成横图)。代价是
+    「只用 EXIF 记方向、无 irot」的非苹果 HEIF 会歪——无法与「已转好」区分,取舍上宁可保住
+    绝对多数的苹果 HEIC。
+
+    已知限制:cv2 能解 AVIF 但**不**应用 AVIF 的 EXIF Orientation(实测 4.13),故 AVIF 竖拍
+    仍可能歪——属既有行为,本函数不改快路径判据以免动到所有既有格式的解码结果。
+    """
+    if not data:
+        return None
+    img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is not None and img.size > 0:
+        return img
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            n_px = (im.width or 0) * (im.height or 0)
+            if n_px <= 0 or n_px > _MAX_DECODE_PIXELS:
+                logger.warning("event=decode_reject_pixels w=%s h=%s", im.width, im.height)
+                return None
+            im = ImageOps.exif_transpose(im)  # 非 HEIF 容器(如将来放开截断 JPEG)才用得上
+            arr = np.asarray(im.convert("RGB"))
+    except (UnidentifiedImageError, OSError, ValueError, MemoryError):
+        return None
+    except Exception:  # noqa: BLE001 — 第三方解码器的任意异常都不该穿到端点变 500
+        logger.warning("event=decode_fallback_failed", exc_info=True)
+        return None
+    if arr.size == 0:
+        return None
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
 def compute_sharpness(crop: NDArray[np.uint8]) -> float:

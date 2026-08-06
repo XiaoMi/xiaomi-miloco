@@ -19,6 +19,10 @@ from miloco.database.person_repo import UNSET
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.perception.engine.identity import _avatar
+from miloco.perception.engine.identity._image_utils import (
+    decode_image,
+    is_still_image_container,
+)
 from miloco.perception.engine.identity.config_loader import resolve_library_root
 from miloco.perception.engine.identity.library import IdentityLibrary, _list_crop_files
 from miloco.person.schema import PersonCreate, PersonUpdate, _normalize_optional_str
@@ -314,12 +318,11 @@ async def register_sample(
 
 
 async def _decode_image_upload(upload: UploadFile) -> "np.ndarray | None":
-    """读 UploadFile 并 cv2.imdecode；失败返回 None。"""
+    """读 UploadFile 并解码；失败返回 None。走 ``decode_image``（含 HEIC/HEIF 回退）。"""
     raw = await upload.read()
     if not raw:
         return None
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = decode_image(raw)
     if img is None or img.size == 0:
         return None
     return img
@@ -355,8 +358,7 @@ def _decode_b64_image(b64: str) -> "np.ndarray | None":
         return None
     if not raw:
         return None
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = decode_image(raw)
     if img is None or img.size == 0:
         return None
     return img
@@ -598,10 +600,9 @@ async def extract_samples(
             except OSError:
                 pass
     else:
-        arr = np.frombuffer(raw, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = decode_image(raw)
         if img is None or img.size == 0:
-            raise HTTPException(status_code=400, detail="image decode failed")
+            raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
         frames = [(0, img)]
 
     if not frames:
@@ -737,7 +738,9 @@ async def read_tier_sample(
 )
 async def upload_person_avatar(
     person_id: str,
-    image: UploadFile = File(..., description="头像图片（jpg/jpeg/png/webp）"),
+    image: UploadFile = File(
+        ..., description="头像图片（常见格式均可，含 iPhone 的 HEIC）"
+    ),
     current_user: str = Depends(verify_token),
 ):
     if not _PERSON_ID_RE.match(person_id):
@@ -750,13 +753,15 @@ async def upload_person_avatar(
     data = await image.read()
     if len(data) > _avatar.AVATAR_MAX_BYTES:  # size 缺失时兜底
         raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
-    # 先确认能解码（挡垃圾字节），再按魔数取真实格式作落盘扩展名——不信任文件名后缀，
-    # 让 盘上后缀 / Content-Type / 真实字节 三者恒一致（同 enroll 口径用 cv2、不引新依赖）。
-    if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
-        raise HTTPException(status_code=400, detail="无法识别的图片")
-    ext = _avatar.sniff_image_ext(data)
-    if ext is None:
-        raise HTTPException(status_code=400, detail="不支持的图片格式（仅 jpg/png/webp）")
+    # 归一化：解码验真（挡垃圾字节）+ 定落盘扩展名。jpg/png/webp 原字节直通；HEIC 等
+    # 浏览器渲染不了的容器解码后重编无损 webp，让 盘上后缀 / Content-Type / 真实字节 恒一致。
+    # 体积闸卡的是**上传**字节；无损重编后可能超过它，这是有意的（闸拦请求体，不约束盘上物件）。
+    normalized = _avatar.normalize_for_storage(data, prefer="webp")
+    if normalized is None:
+        raise HTTPException(
+            status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）"
+        )
+    data, ext = normalized
     try:
         norm = _get_identity_library().set_person_avatar(person_id, data=data, ext=ext)
     except ValueError as e:
@@ -1176,6 +1181,21 @@ async def register_preview(
         extract_from_video,
     )
 
+    # media_kind 由客户端自报、服务端原先不复核。HEIF/AVIF 与 mp4/mov 共用 ISO BMFF 容器，
+    # 一张被报成 "video" 的 HEIC 会进 extract_from_video → ffmpeg 不拼 HEIC 的 tile grid、
+    # 只暴露 512x512 瓦片 → DeepSORT 在一块瓦片上跑 → 200 "no valid subject"，零提示。
+    # 这条路今天真实可达（CLI 的 ftyp 判据把 HEIC 判成视频、报错文案又引导 agent 改用
+    # --video）。按 brand 掰回图片路径，两处读 media_kind 的地方（本处 dispatch 与下方
+    # select_fn 的 is_video）一并覆盖。
+    if body.media_b64 and body.media_kind == "video":
+        try:
+            _head = base64.b64decode(body.media_b64[:64])
+        except Exception:  # noqa: BLE001 — 非法 base64 交给下游按原逻辑报错
+            _head = b""
+        if is_still_image_container(_head):
+            logger.info("event=register_preview_still_image_declared_as_video 已按图片处理")
+            body.media_kind = "image"
+
     candidates = []
     source = "from_media"
     # video_per_track 仅在 video 分支生成(extract_from_video 输出 ``{track_id: list}``);
@@ -1221,8 +1241,7 @@ async def register_preview(
         merged: list = []
         for i, b64 in enumerate(body.media_b64_list):
             raw = base64.b64decode(b64)
-            arr = np.frombuffer(raw, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            img = decode_image(raw)
             if img is None or img.size == 0:
                 # 单张解码失败不阻断整批——记 warning,跳过这张继续。
                 logger.warning("register/preview: media_b64_list[%d] decode failed,跳过", i)
@@ -1247,10 +1266,9 @@ async def register_preview(
         source = "from_media_batch"
     elif body.media_b64 and body.media_kind == "image":
         raw = base64.b64decode(body.media_b64)
-        arr = np.frombuffer(raw, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = decode_image(raw)
         if img is None or img.size == 0:
-            raise HTTPException(status_code=400, detail="image decode failed")
+            raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
         # 图像路径没有 DeepSORT 关联预算好的 emb,这里现场抽:借 perception_service
         # 共享的 HumanReID 实例(随便挑一个活动 tracker 的);摄像头未启动时返 None,
         # ScoredCandidate.reid_embedding 留 None,下游 add_tier_a_samples_batch 还有
@@ -1651,10 +1669,9 @@ async def extract_endpoint(
             status_code=400, detail="本期 extract 端点仅支持 media_kind='image'",
         )
     raw = base64.b64decode(body.media_b64)
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = decode_image(raw)
     if img is None or img.size == 0:
-        raise HTTPException(status_code=400, detail="image decode failed")
+        raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
     candidates = await asyncio.to_thread(
         extract_from_image,
         img, detector=_load_detector(),
@@ -2189,8 +2206,7 @@ async def select_endpoint(
     for d in body.candidates:
         b64 = d.get("image_jpeg_b64") or ""
         if b64:
-            arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
-            crop = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            crop = decode_image(base64.b64decode(b64))
         else:
             crop = np.zeros((1, 1, 3), dtype=np.uint8)
         scored.append(ScoredCandidate(
