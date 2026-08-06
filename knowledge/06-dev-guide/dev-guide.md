@@ -379,7 +379,9 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:1810/api/monitor/nodes
 
 感知流水线依赖多个 ONNX 模型：必需的 `det_4C.onnx`（检测）/ `human_body_reid_v2.onnx`（ReID），以及可选的 VAD、语义去重模型（清单见 `perception/engine/resource_validator.py`）。必需模型缺失才会导致引擎降级。
 
-运行时路径是**两段式**解析：配了 `directories.models_dir`（默认 `$MILOCO_HOME/models/`）就用它，生产链路上 `perception/client.py` 总会把它填进 `perception_model_dir`；没配时回退到包内 `perception/models/`（`RealTrackingService._resolve_model_path` 与 `detector._DEFAULT_MODEL_PATH` 都从 `__file__` 上溯到那里）。这条兜底平时不触发，但直接构造感知引擎且不填该字段的场景——测试、临时脚本——走的正是它，别当死代码删。
+运行时路径是**两段式**解析：配了 `directories.models`（对应环境变量 `MILOCO_DIRECTORIES__MODELS`，留空时派生属性 `directories.models_dir` 回落到 `$MILOCO_HOME/models/`）就用它，生产链路上 `perception/client.py` 总会把它填进 `perception_model_dir`；没配时回退到包内 `perception/models/`（`RealTrackingService._resolve_model_path` 与 `detector._DEFAULT_MODEL_PATH` 都从 `__file__` 上溯到那里）。这条兜底平时不触发，但直接构造感知引擎且不填该字段的场景——测试、临时脚本——走的正是它，别当死代码删。
+
+> 可配置的键是 `directories.models`；`models_dir` 是它的 `@computed_field` 派生属性，**只读、不可配置**——写进 config.json 会被 `DirectorySettings`（pydantic 默认 `extra="ignore"`）静默丢弃，路径仍回落到 `$MILOCO_HOME/models/`，最后以 `MODELS_MISSING` 收场且不给任何警告。代码里读 `models_dir` 是对的，那是解析后的绝对路径。
 
 包内 `perception/models/` 同时还是构建期的暂存目录：CI / `build.sh` 把模型下到这里，标了 `requires_models` 的用例也按这个路径判断要不要 skip。注意装成 wheel 后它必然是空的（`backend/miloco/pyproject.toml` 的 `[tool.hatch.build] exclude` 不打 onnx），此时只能靠 `models_dir` 指到 `$MILOCO_HOME/models` —— `person/router.py` 的载入点特意注明「走 `models_dir` 而非 `__file__` 相对」就是踩过这个坑。
 

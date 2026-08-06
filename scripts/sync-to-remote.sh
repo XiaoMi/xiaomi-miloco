@@ -9,8 +9,9 @@
 #   --local-build        本地跑 scripts/build.sh, 仅 rsync dist/ + scripts/
 #   --install-only       不 rsync 不构建, 仅在远端触发安装 (复用远端已有 dist/)
 #
-# 构建包 (传给 build.sh, 不指定则全量):
-#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw 任意子集
+# 构建包 (原样透传给远端 build.sh, 本脚本不校验; 不指定则全量):
+#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw,web,hermes 任意子集
+#                        注：不是全部 6 个（含顺序）时按子集构建，远端不产平台一体归档
 #
 # 安装组件 (远端, 逗号分隔):
 #   --install <list>     miloco | miloco-cli | openclaw | supervisor

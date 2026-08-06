@@ -63,10 +63,12 @@ jobs:
       # 而缓存 path 是上面写死的那个目录，两边必须是同一个。
       - name: 下载感知 ONNX 模型（缓存命中时只做 sha256 校验，不联网）
         run: python3 scripts/fetch_models.py --dest "$MODELS_DIR"
-      # 上一步是非 strict 的：可选模型拉不到只打一行日志就 return 0，不让第三方加速站
-      # 抖动直接把 CI 判红。但残缺状态不许过门 —— 这一步不联网、只比本地字节，缺任何
-      # 一个（含可选）就红。今天 requires_models 只看两个必选模型，可一旦给 bge 去重
-      # 或 VAD 加一条 model-gated 用例，本 PR 要消灭的静默 skip 就复活了。
+      # 上一步不加 --strict，不是为了放过什么：最终策略仍是全严格（下一步缺任何一个、
+      # 含可选，都判红）。拆两步买到的是另外两件事 ——
+      #   1. 失败归因分得开：上一步红 = 拉不到（网络 / 镜像抖动），这一步红 = 拿到的不齐 / 不对；
+      #   2. 残缺状态进不了缓存（cache save 步在这道门禁之后）。
+      # 这一步不联网、只比本地字节。今天 requires_models 只看两个必选模型，可一旦给 bge
+      # 去重或 VAD 加一条 model-gated 用例，本 PR 要消灭的静默 skip 就复活了。
       - name: 校验模型完整（--check --strict，不联网）
         run: python3 scripts/fetch_models.py --check --strict --dest "$MODELS_DIR"
       - name: 保存感知 ONNX 模型缓存（完整性校验通过后才存）

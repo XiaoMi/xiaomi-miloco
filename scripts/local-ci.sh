@@ -57,7 +57,10 @@ run_backend_tests() {
     # --dest 显式给包内目录：不给的话 MILOCO_MODELS_DEST 一旦在环境里，校验的就不是
     # 下面 pytest 真正加载的那个目录，"就绪"提示会与实际情况脱节。
     local models_dir="$REPO_ROOT/backend/miloco/src/miloco/perception/models"
-    if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --quiet --dest "$models_dir" >/dev/null 2>&1; then
+    # --strict：与 ci.yml 的门禁同强度。不加的话可选模型（bge / VAD）缺失走"只降级不
+    # 阻塞"分支、退出码 0，本地一声不吭，而 CI 那边 5 个模型齐全跑的是 EventEmbedder
+    # 真实向量那条路径——两边测的不是同一个东西，"已对齐 CI"的判断就是假的。
+    if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --strict --quiet --dest "$models_dir" >/dev/null 2>&1; then
         info "感知模型未就绪 → requires_models 用例会 skip；补齐：python3 scripts/fetch_models.py"
     fi
     cd "$REPO_ROOT/backend"
