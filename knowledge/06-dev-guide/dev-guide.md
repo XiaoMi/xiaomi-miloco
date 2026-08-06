@@ -424,5 +424,9 @@ bash scripts/install.sh --dev
 
 - **Python**：Ruff（lint + format），配置在 `backend/pyproject.toml`
 - **TypeScript**：Biome，配置在 `plugins/openclaw/`
+- **Shell**：`set -euo pipefail`；变量后面紧跟非 ASCII 字符（中文 / emoji / 带音标字母都算）
+  时一律写 `${VAR}` 而非裸 `$VAR` —— macOS 自带的 bash 3.2 在 UTF-8 locale 下会把那个字符的
+  首字节并进变量名：开了 `set -u` 就直接炸成 `unbound variable`，没开则不报错但静默输出乱码
+  （变量取空、后随字符首字节被吞）（`backend/miloco/tests/test_shell_var_braces.py` 兜底）
 - **测试**：pytest / vitest
 - **Commit**：遵循项目 git log 中的提交风格

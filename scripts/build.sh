@@ -263,7 +263,7 @@ build_web() {
     # watch.html 也是必需真文件(从 web/dist 落,缺了 /watch 页 503),这里硬校验防漏拷。
     if [[ ! -f "$web_static/index.html" || ! -d "$web_static/assets" \
           || ! -d "$web_static/fonts" || ! -f "$web_static/watch.html" ]]; then
-        die 5 "web build 产物缺失（$web_static），wheel 会带上残缺 web"
+        die 5 "web build 产物缺失（${web_static}），wheel 会带上残缺 web"
     fi
 }
 
@@ -346,7 +346,7 @@ pack_platform_bundles() {
     # 否则 sync-to-remote.sh --packages <子集> 这类 dev 工作流会被 set -e 中断。
     # 全量构建（默认 / CI）时缺文件仍走硬失败，暴露 CI 打包异常。
     if [[ "$PACKAGES" != "$ALL_PACKAGES" ]]; then
-        log "子集构建（--packages=$PACKAGES），跳过平台归档打包"
+        log "子集构建（--packages=${PACKAGES}），跳过平台归档打包"
         return
     fi
 
