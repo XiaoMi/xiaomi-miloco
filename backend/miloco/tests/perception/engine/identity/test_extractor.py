@@ -473,7 +473,7 @@ class TestExtractFromVideoDeepSort:
         mock_tracker.update = MagicMock()
         mock_tracker.get_tracking_results = MagicMock(return_value=[
             self._track_dict(42, detected_this_frame=True),
-            # 跟丢后靠预测续命的 track:time_since_update>0、bbox 是预测位置
+            # 跟丢后仍存活的 track:time_since_update>0、bbox 停在上一次真匹配位置
             self._track_dict(99, detected_this_frame=False, time_since_update=1),
         ])
         mock_tracker.get_track_embedding = MagicMock(
