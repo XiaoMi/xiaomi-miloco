@@ -156,6 +156,44 @@ async def test_open_config_refreshes_code_on_subsequent_config_error(cb):
     assert cb.snapshot().code == "not_found"
 
 
+# ─── OPEN_CONFIG 逃生通道(慢速自动探测)───────────────────────────────────────
+#
+# 这三条守护本 PR 的核心新增:OPEN_CONFIG 不再是永久黑洞。缺了它们,谁把
+# probe_due / try_arm_probe 里的 OPEN_CONFIG 分支删掉都不会有测试变红——
+# 上方 test_try_arm_probe_false_when_open_config 仍会因"周期未到"而 pass。
+# cb fixture 未传 config_probe_interval_sec,走默认 300s。
+
+
+async def test_open_config_probe_due_after_interval(cb, frozen_time):
+    """OPEN_CONFIG 慢速自动探测:config_probe_interval_sec 到期后 probe_due 返 True。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.probe_due() is False  # 刚进 OPEN_CONFIG,300s 未到
+    frozen_time.tick(301)
+    assert cb.probe_due() is True
+
+
+async def test_open_config_try_arm_probe_after_interval(cb, frozen_time):
+    """逃生通道生效:周期到期后 tick 能 arm 到探测,不再永久卡死。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.try_arm_probe() is False
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+
+
+async def test_open_config_snapshot_shows_next_probe(cb):
+    """OPEN_CONFIG snapshot 携带 next_probe 字段,前端能显示"下次自动重试"倒计时。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    snap = cb.snapshot()
+    assert snap.state == "error"
+    assert snap.next_probe_at_ms is not None
+    assert snap.next_probe_in_seconds is not None
+    assert 299 <= snap.next_probe_in_seconds <= 300
+
+
 # ─── 指数退避 ───────────────────────────────────────────────────────────────
 
 
@@ -360,6 +398,8 @@ async def test_try_arm_probe_false_when_closed(cb):
 
 
 async def test_try_arm_probe_false_when_open_config(cb):
+    """刚进 OPEN_CONFIG 时 arm 不到——原因是慢速探测周期未到,**不是**
+    OPEN_CONFIG 本身阻塞 arm(周期到期后能 arm,见下方逃生通道用例)。"""
     for _ in range(3):
         await cb.record_failure(_cfg("bad_key"))
     assert cb.try_arm_probe() is False
