@@ -68,8 +68,15 @@ def _repo_shell_scripts() -> list[Path]:
             return found
     except (OSError, subprocess.SubprocessError):
         pass
+    # 后缀要和上面的 ls-files 一致：兜底只扫 *.sh 的话，将来有人加 foo.bash 会在源码包
+    # 场景下静默逃过门禁（不像"一个文件都没扫到"会被 test_shell_scripts_found 报红）。
+    # 比对 parts 前先 relative_to：否则 _ROOT 自身的祖先目录名也参与匹配，仓库 checkout
+    # 在某个叫 build/ 的目录下就会把一切都跳过。
     return sorted(
-        p for p in _ROOT.rglob("*.sh") if not _SKIP_PARTS.intersection(p.parts)
+        p
+        for pat in ("*.sh", "*.bash")
+        for p in _ROOT.rglob(pat)
+        if not _SKIP_PARTS.intersection(p.relative_to(_ROOT).parts)
     )
 
 
