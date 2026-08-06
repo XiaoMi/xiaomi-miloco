@@ -60,6 +60,13 @@ should_build() {
     [[ ",$PACKAGES," == *",$1,"* ]]
 }
 
+# 只有全量构建才产模型 tar 与平台归档。两者共用一个谓词而不是各写一遍条件：
+# models tar 的唯一消费链是 pack_models → pack_platform_bundles → 平台归档 →
+# install.py，条件一旦分家就会出现"下了 78MB、却没人接"或反过来"归档缺模型"。
+is_full_build() {
+    [[ "$PACKAGES" == "$ALL_PACKAGES" ]]
+}
+
 # ─── 前置检查 ──────────────────────────────────────────────────────────────
 
 check_prerequisites() {
@@ -374,7 +381,7 @@ pack_platform_bundles() {
     # 子集构建（--packages 只构建部分包）本就产不出完整平台归档：跳过而非硬失败，
     # 否则 sync-to-remote.sh --packages <子集> 这类 dev 工作流会被 set -e 中断。
     # 全量构建（默认 / CI）时缺文件仍走硬失败，暴露 CI 打包异常。
-    if [[ "$PACKAGES" != "$ALL_PACKAGES" ]]; then
+    if ! is_full_build; then
         log "子集构建（--packages=$PACKAGES），跳过平台归档打包"
         return
     fi
@@ -576,12 +583,20 @@ main() {
     # 更新 manifest
     update_manifest
 
-    # 打包模型
-    pack_models
-
-    # 按平台打「代码 + 模型」一体归档，并回填 manifest.bundles（须在自包含脚本前，
-    # 让 pack_install_scripts 嵌入含 bundles 的完整 manifest）
-    pack_platform_bundles
+    # 打包模型 + 按平台打「代码 + 模型」一体归档（后者回填 manifest.bundles，
+    # 须在自包含脚本前，让 pack_install_scripts 嵌入含 bundles 的完整 manifest）
+    #
+    # 子集构建整段跳过。模型移出 git 之后 pack_models 的第一件事变成了跑
+    # fetch_models.py --strict，于是「新 clone 里 --packages miloco-cli，只想要个
+    # CLI wheel」会先被拖去下 ~78MB —— 而 --strict 之下连可选的 bge / VAD 都不能少，
+    # 网络不通直接 exit 1，把本来几秒就能出的 wheel 一起带走。产出的 tar 在子集
+    # 构建下还没人接（pack_platform_bundles 本就只在全量下产出），纯粹是白等。
+    if is_full_build; then
+        pack_models
+        pack_platform_bundles
+    else
+        log "子集构建（--packages=$PACKAGES），跳过模型打包与平台归档"
+    fi
 
     # 自包含安装脚本
     pack_install_scripts

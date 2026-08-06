@@ -377,7 +377,11 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:1810/api/monitor/nodes
 
 ## 感知模型管理
 
-感知流水线依赖多个 ONNX 模型，运行时一律从 `directories.models_dir`（默认 `$MILOCO_HOME/models/`）加载：必需的 `det_4C.onnx`（检测）/ `human_body_reid_v2.onnx`（ReID），以及可选的 VAD、语义去重模型（清单见 `perception/engine/resource_validator.py`）。必需模型缺失才会导致引擎降级。包内 `perception/models/` 只是构建期的暂存目录，运行时没有任何代码回退到它。
+感知流水线依赖多个 ONNX 模型：必需的 `det_4C.onnx`（检测）/ `human_body_reid_v2.onnx`（ReID），以及可选的 VAD、语义去重模型（清单见 `perception/engine/resource_validator.py`）。必需模型缺失才会导致引擎降级。
+
+运行时路径是**两段式**解析：配了 `directories.models_dir`（默认 `$MILOCO_HOME/models/`）就用它，生产链路上 `perception/client.py` 总会把它填进 `perception_model_dir`；没配时回退到包内 `perception/models/`（`RealTrackingService._resolve_model_path` 与 `detector._DEFAULT_MODEL_PATH` 都从 `__file__` 上溯到那里）。这条兜底平时不触发，但直接构造感知引擎且不填该字段的场景——测试、临时脚本——走的正是它，别当死代码删。
+
+包内 `perception/models/` 同时还是构建期的暂存目录：CI / `build.sh` 把模型下到这里，标了 `requires_models` 的用例也按这个路径判断要不要 skip。注意装成 wheel 后它必然是空的（`backend/miloco/pyproject.toml` 的 `[tool.hatch.build] exclude` 不打 onnx），此时只能靠 `models_dir` 指到 `$MILOCO_HOME/models` —— `person/router.py` 的载入点特意注明「走 `models_dir` 而非 `__file__` 相对」就是踩过这个坑。
 
 模型（约 78MB）**不进 git**：托管在固定 tag `models` 的 GitHub Release，文件名 / 大小 / sha256 / 是否必需锁在 `scripts/models.lock.json`，由 `scripts/fetch_models.py`（纯标准库，不需要 uv）拉取并校验。`scripts/build.sh` 的 `pack_models` 与 CI 都会自动跑，正常开发流程无需手动执行。下载源为 lock 的 `base_url`（GitHub 直连）+ `mirrors`（gh-proxy 加速站，与 `scripts/manifest.json` 的 `download.sites` 同一批，测试钉死两边一致），直连失败自动降级到镜像。
 

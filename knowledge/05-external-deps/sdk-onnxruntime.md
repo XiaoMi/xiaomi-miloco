@@ -19,7 +19,7 @@ ONNX Runtime 是微软开源的跨平台推理引擎，支持运行 ONNX 格式�
 
 必需模型缺失则引擎进入 `PREREQ_MISSING` 降级；可选模型缺失只让对应子能力（语音门控 / 语义去重）退化，引擎主链路仍可运行（校验清单见 `perception/engine/resource_validator.py`）。
 
-感知的重推理（检测 / ReID）在专用 `ThreadPoolExecutor`（`perception-infer` 线程）中执行，与主事件循环解耦；VAD / bge 这类可选轻量模型各自内联创建 CPU session。运行时模型一律从 `directories.models_dir`（默认 `$MILOCO_HOME/models/`）加载 —— 没有"包内 `perception/models/` 兜底"这回事，`person/router.py` 的载入点特意注明了不走 `__file__` 相对路径。模型文件本身不进 git —— 托管在固定 tag `models` 的 GitHub Release，sha256 锁在 `scripts/models.lock.json`，由 `scripts/fetch_models.py` 拉取（构建 / CI 自动跑，细节见 dev-guide「感知模型管理」）。
+感知的重推理（检测 / ReID）在专用 `ThreadPoolExecutor`（`perception-infer` 线程）中执行，与主事件循环解耦；VAD / bge 这类可选轻量模型各自内联创建 CPU session。运行时模型路径两段式解析：配了 `directories.models_dir`（默认 `$MILOCO_HOME/models/`，生产链路上 `perception/client.py` 总会把它填进 `perception_model_dir`）就用它，没配时 `RealTrackingService._resolve_model_path` / `detector._DEFAULT_MODEL_PATH` 回退到包内 `perception/models/`。注意 wheel 不打 onnx（`pyproject.toml` 的 hatch exclude），装成 wheel 后包内那条路径必然为空 —— `person/router.py` 的载入点特意注明要走 `models_dir` 而非 `__file__` 相对路径，就是为了绕开这个坑。模型文件本身不进 git —— 托管在固定 tag `models` 的 GitHub Release，sha256 锁在 `scripts/models.lock.json`，由 `scripts/fetch_models.py` 拉取（构建 / CI 自动跑，细节见 dev-guide「感知模型管理」）。
 
 ### Session 创建与平台适配
 

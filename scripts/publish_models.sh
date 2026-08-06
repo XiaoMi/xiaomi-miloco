@@ -38,6 +38,36 @@ need_gh() {
     gh auth status >/dev/null 2>&1 || die "gh 未登录（gh auth login）"
 }
 
+# 只比文件集、不算 hash、不写 lock —— 供 upload 在动线上资产之前预检。
+# 判定与 refresh_lock_from_dir 里那份是同一套，但必须早于 gh release upload：
+# 护栏只放在上传之后的话，拒绝改表时资产已经躺在公开 Release 上、lock 还是旧的，
+# 从这一刻起所有人的 PR 和 main 都会被对账门禁判红，且红的原因跟他们的改动无关；
+# 而脚本连"去 delete-asset"都来不及说 —— SystemExit 撞上 set -e 当场中止，
+# cmd_upload 里那段善后提示根本执行不到。
+#
+# 收的是即将上传的那批文件名本身，不是重新扫一遍目录：要保证的是"我马上要推上去的
+# 这批东西和 lock 一致"，重扫一次的话两次结果之间还能再漂一回。
+check_fileset_against_lock() {
+    python3 - "$LOCK" "$@" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+lock_path, names = Path(sys.argv[1]), {Path(a).name for a in sys.argv[2:]}
+old = {f["name"] for f in json.loads(lock_path.read_text(encoding="utf-8")).get("files", [])}
+
+if names != old and os.environ.get("MILOCO_MODELS_ALLOW_LOCK_DRIFT") != "1":
+    detail = [f"  - 旧 lock 有、这次没传：{n}" for n in sorted(old - names)]
+    detail += [f"  + 这次要传、旧 lock 没有：{n}" for n in sorted(names - old)]
+    raise SystemExit(
+        "::error:: 待上传的文件集与旧 lock 不一致，已在上传前中止（线上资产未被改动）：\n"
+        + "\n".join(detail)
+        + "\n确认这就是你要的（真在增删模型）后，用 MILOCO_MODELS_ALLOW_LOCK_DRIFT=1 重跑。"
+        + "\n换代改名时记得同时删掉 Release 上的旧资产（gh release delete-asset），"
+        "否则 CI 的对账门禁会红。"
+    )
+PY
+}
+
 # 按目录内的实际文件重写 lock：保留旧 lock 的 release_tag / base_url / mirrors，
 # 以及同名文件的 required / desc；size + sha256 全部重算。
 refresh_lock_from_dir() {
@@ -113,6 +143,11 @@ cmd_upload() {
 
     log "将上传到 $REPO 的 Release '$TAG'（同名资产覆盖）:"
     for f in "${files[@]}"; do log "  $(du -h "$f" | cut -f1)  $(basename "$f")"; done
+
+    # 上传是不可逆的（资产一旦推上公开 Release，只能手工 delete-asset 才撤得掉），
+    # 所以文件集比对必须发生在这之前。refresh_lock_from_dir 里那道同样的护栏留着
+    # 不动：refresh-lock 子命令走的是它，那条路径上并不会先动线上资产。
+    check_fileset_against_lock "${files[@]}"
 
     if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
         gh release upload "$TAG" "${files[@]}" --clobber --repo "$REPO"
