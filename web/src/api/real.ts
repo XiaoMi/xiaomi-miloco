@@ -5,7 +5,7 @@
  * 与 mock 对齐返回类型（types.ts），让 src/api/index.ts 能透明切换。
  */
 
-import { apiFetch, resolveToken } from "./client";
+import { ApiError, apiFetch, resolveToken } from "./client";
 import { authHeaders } from "./register";
 import i18n from "@/i18n";
 import type {
@@ -13,13 +13,17 @@ import type {
   Device,
   DeviceCategory,
   DeviceProperty,
+  EventCropMeta,
   HomeEntries,
   HomeEntry,
   HomeEntrySource,
   HomeEntryType,
   HomeStatus,
+  Features,
   PerceptionCamera,
   Person,
+  Pet,
+  PetObserveResult,
   Scene,
   ScopeCamera,
   ScopeHome,
@@ -36,6 +40,8 @@ import type {
   OmniProfileRef,
   OmniTestResult,
   OmniModelsResult,
+  UpgradeCheck,
+  UpgradeStatus,
 } from "@/lib/types";
 
 // backend NormalResponse 包装：{ code, message, data }
@@ -297,18 +303,159 @@ export async function realEnrollPersonSample(
   form.append("source", "family_ui");
 
   // 直接 fetch，不走 apiFetch（避免被设上 Content-Type: application/json）
-  const resp = await fetch(
-    `/api/identity/persons/${personId}/samples`,
-    {
-      method: "POST",
-      body: form,
-      headers: authHeaders(),
-    },
-  );
+  const resp = await fetch(`/api/identity/persons/${personId}/samples`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
     throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
   }
+}
+
+// ── 宠物（非人家庭成员）──────────────────────────────────────
+interface BackendPet {
+  id: string;
+  name: string;
+  species: string;
+  avatar_ext?: string | null;
+  reference_crop_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+function mapBackendPet(p: BackendPet): Pet {
+  return {
+    id: p.id,
+    name: p.name,
+    species: p.species,
+    avatarExt: p.avatar_ext ?? null,
+    referenceCropCount: p.reference_crop_count ?? 0,
+    createdAt: p.created_at,
+    updatedAt: p.updated_at,
+  };
+}
+
+export async function realListPets(): Promise<Pet[]> {
+  const r = await apiFetch<Normal<{ pets: BackendPet[] }>>("/api/identity/pets");
+  return r.data.pets.map(mapBackendPet);
+}
+
+export async function realCreatePet(payload: {
+  name: string;
+  species?: string;
+}): Promise<Pet> {
+  const r = await apiFetch<Normal<BackendPet>>("/api/identity/pets", {
+    method: "POST",
+    body: JSON.stringify({ name: payload.name, species: payload.species ?? "" }),
+  });
+  return mapBackendPet(r.data);
+}
+
+export async function realUpdatePet(
+  petId: string,
+  payload: { name?: string; species?: string },
+): Promise<Pet> {
+  const r = await apiFetch<Normal<BackendPet>>(
+    `/api/identity/pets/${encodeURIComponent(petId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+  return mapBackendPet(r.data);
+}
+
+export async function realDeletePet(petId: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(`/api/identity/pets/${encodeURIComponent(petId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function realObservePet(
+  files: File[],
+  grounding?: boolean,
+  signal?: AbortSignal,
+): Promise<PetObserveResult> {
+  const form = new FormData();
+  // 多图走 medias（视频恒单个也走 medias，后端按内容判定）；向后兼容仍接单个 media 键
+  for (const f of files) form.append("medias", f, f.name);
+  if (grounding !== undefined) form.append("grounding", String(grounding));
+  // 直接 fetch，避免 apiFetch 设上 Content-Type: application/json
+  // signal：调用方给客户端超时——本请求耗时长（上传 + 60 帧 CPU 推理 + omni），
+  // 而 UI 在 busy 期间会禁掉所有出口，没有超时就只能刷新页面。
+  const resp = await fetch("/api/identity/pets:observe", {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+    signal,
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+  const r = (await resp.json()) as Normal<{
+    detected: boolean;
+    description: Record<string, unknown> | null;
+    head_bbox: number[] | null;
+    primary_crop_b64: string;
+    primary_index?: number;
+    refs_inconsistent?: boolean | null;
+    warnings?: { type: string; level: string; message: string }[];
+    candidates: {
+      track_id: number | null;
+      species_guess: string;
+      crop_b64: string;
+      head_bbox?: number[] | null;
+      conf?: number;
+      sharpness?: number;
+      area_ratio?: number;
+      bbox?: number[] | null;
+      frame_idx?: number | null;
+    }[];
+  }>;
+  const d = r.data;
+  return {
+    detected: d.detected,
+    description: d.description,
+    headBbox: d.head_bbox,
+    primaryCropB64: d.primary_crop_b64,
+    primaryIndex: d.primary_index ?? 0,
+    refsInconsistent: d.refs_inconsistent ?? null,
+    warnings: d.warnings ?? [],
+    candidates: (d.candidates ?? []).map((c) => ({
+      trackId: c.track_id,
+      speciesGuess: c.species_guess,
+      cropB64: c.crop_b64,
+      headBbox: c.head_bbox,
+      conf: c.conf,
+      sharpness: c.sharpness,
+      areaRatio: c.area_ratio,
+      bbox: c.bbox,
+      frameIdx: c.frame_idx,
+    })),
+  };
+}
+
+export async function realUploadPetAvatar(
+  petId: string,
+  image: Blob,
+  filename: string,
+): Promise<Pet> {
+  const form = new FormData();
+  form.append("image", image, filename);
+  const resp = await fetch(`/api/identity/pets/${encodeURIComponent(petId)}/avatar`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+  const r = (await resp.json()) as Normal<BackendPet>;
+  return mapBackendPet(r.data);
 }
 
 export async function realUploadPersonAvatar(
@@ -336,6 +483,74 @@ export async function realDeletePersonAvatar(personId: string): Promise<void> {
   });
 }
 
+/**
+ * 上传客户端已裁好的参考 crop（③ 多姿态参照图）。服务端只存不裁（同 avatar 范式）。
+ * mode=replace 整组替换（注册一次性写 ≤3）；append 追加（后端按绝对分留 top-3）。
+ * scores 与 crops 对齐（绝对质量分 conf×sharpness×area_ratio），缺省补 0。
+ */
+export async function realUploadPetReferenceCrops(
+  petId: string,
+  crops: { blob: Blob; score?: number }[],
+  mode: "replace" | "append" = "replace",
+): Promise<Pet> {
+  const form = new FormData();
+  crops.forEach((c, i) => form.append("crops", c.blob, `ref_${i}.jpg`));
+  crops.forEach((c) => form.append("scores", String(c.score ?? 0)));
+  form.append("mode", mode);
+  const resp = await fetch(
+    `/api/identity/pets/${encodeURIComponent(petId)}/reference-crops`,
+    {
+      method: "POST",
+      body: form,
+      headers: authHeaders(),
+    },
+  );
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+  }
+  const r = (await resp.json()) as Normal<BackendPet>;
+  return mapBackendPet(r.data);
+}
+
+// ── 实验性功能开关 ───────────────────────────────────────────
+interface BackendFeatures {
+  pet_recognition: boolean;
+  pet_head_grounding: boolean;
+  pet_body_grounding: boolean;
+  pet_reid_diverse: boolean;
+}
+
+function mapFeatures(f: BackendFeatures): Features {
+  return {
+    petRecognition: f.pet_recognition,
+    petHeadGrounding: f.pet_head_grounding,
+    petBodyGrounding: f.pet_body_grounding,
+    petReidDiverse: f.pet_reid_diverse,
+  };
+}
+
+export async function realGetFeatures(): Promise<Features> {
+  const r = await apiFetch<Normal<BackendFeatures>>("/api/admin/features");
+  return mapFeatures(r.data);
+}
+
+export async function realSetFeatures(patch: Partial<Features>): Promise<Features> {
+  const body: Record<string, boolean> = {};
+  if (patch.petRecognition !== undefined) body.pet_recognition = patch.petRecognition;
+  if (patch.petHeadGrounding !== undefined)
+    body.pet_head_grounding = patch.petHeadGrounding;
+  if (patch.petBodyGrounding !== undefined)
+    body.pet_body_grounding = patch.petBodyGrounding;
+  if (patch.petReidDiverse !== undefined)
+    body.pet_reid_diverse = patch.petReidDiverse;
+  const r = await apiFetch<Normal<BackendFeatures>>("/api/admin/features", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return mapFeatures(r.data);
+}
+
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────
 // backend Entry 走 snake_case + 兜底字段；前端 HomeEntry 是 camelCase。
 interface BackendHomeEntry {
@@ -359,7 +574,7 @@ interface BackendHomeEntries {
   ready_to_promote?: string[];
 }
 
-interface HomeOpResult {
+export interface HomeOpResult {
   op: string;
   id: string;
   ok: boolean;
@@ -425,7 +640,8 @@ function langKey(): string {
 // 避免「请求 200 但条目没动」的静默失败。
 function assertOpsOk(results: HomeOpResult[]): void {
   const failed = results.find((r) => !r.ok);
-  if (failed) throw new Error(failed.message ?? i18n.t("miot.opFail", { op: failed.op }));
+  if (failed)
+    throw new Error(failed.message ?? i18n.t("miot.opFail", { op: failed.op }));
 }
 
 export async function realListHomeEntries(
@@ -444,7 +660,7 @@ export async function realListHomeEntries(
 export async function realProfileWrite(
   ops: HomeProfileOp[],
   userEdit = true,
-): Promise<void> {
+): Promise<HomeOpResult[]> {
   const r = await apiFetch<Normal<HomeOpResult[]>>(
     "/api/home-profile/profile:write",
     {
@@ -453,9 +669,12 @@ export async function realProfileWrite(
     },
   );
   assertOpsOk(r.data);
+  return r.data;  // add op 回新条目 id，供调用方做「失败重试改走 update」的续做
 }
 
-export async function realCandidateWrite(ops: HomeCandidateOp[]): Promise<void> {
+export async function realCandidateWrite(
+  ops: HomeCandidateOp[],
+): Promise<void> {
   const r = await apiFetch<Normal<HomeOpResult[]>>(
     "/api/home-profile/candidates:write",
     {
@@ -1040,7 +1259,9 @@ export async function realToggleScopeCamera(
 ): Promise<void> {
   await apiFetch<Normal<unknown>>("/api/miot/scope/cameras", {
     method: "PUT",
-    body: JSON.stringify({ items: dids.map((did) => ({ did, in_use: inUse })) }),
+    body: JSON.stringify({
+      items: dids.map((did) => ({ did, in_use: inUse })),
+    }),
   });
   // 写后立即 invalidate + 主动 prefetch homeCache(同 switchScopeHome 同款消 race)。
   invalidateMiotHomeCache();
@@ -1097,6 +1318,8 @@ interface BackendMeaningfulEvent {
   /** 服务端根据落盘文件后缀计算:"mp4" 视频路径 / "m4a" audio-only / null 未落盘. */
   clip_kind?: "mp4" | "m4a" | null;
   has_trace?: boolean;
+  /** 任一 device 目录下有 ref.jpg → 本事件走了 Smart Crop,有全景参考帧可取. */
+  has_ref?: boolean;
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
   feedback_pack_size?: number | null;
@@ -1130,6 +1353,7 @@ export async function realListActivity(opts?: {
       rule_names: e.rule_names,
       clip_kind: e.clip_kind,
       has_trace: e.has_trace,
+      has_ref: e.has_ref,
       has_feedback: e.has_feedback,
       feedback_pack_path: e.feedback_pack_path,
       feedback_pack_size: e.feedback_pack_size,
@@ -1189,13 +1413,53 @@ export async function realSubmitOnDemandFeedback(
  * - 视频路径:含 H264 + AAC
  * - audio-only 路径:仅 AAC(浏览器 <video> 控件能 render audio-only track)
  */
-export function realEventClipUrl(
+export function realEventClipUrl(event_id: string, device_id: string): string {
+  const token = resolveToken();
+  const base = `/api/events/${encodeURIComponent(event_id)}/clip/${encodeURIComponent(device_id)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * 拼事件全景参考帧 ref.jpg URL(同款 `?token=...` query 鉴权,<img> 也不能设 header).
+ *
+ * 仅 Smart Crop 事件有:该模式下送 LLM 的是裁切放大的局部视频 + 这张整帧参考图.
+ * 调用方应先看 `event.has_ref` 再请求;非 crop 事件后端返 410.
+ */
+export function realEventRefUrl(
   event_id: string,
   device_id: string,
 ): string {
   const token = resolveToken();
-  const base = `/api/events/${encodeURIComponent(event_id)}/clip/${encodeURIComponent(device_id)}`;
+  const base = `/api/events/${encodeURIComponent(event_id)}/ref/${encodeURIComponent(device_id)}`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * 拉 Smart Crop 裁切区域坐标,用于在参考帧上画框.
+ *
+ * 后端从 omni_trace 里投影出来.410 = 「这台 device 这次没裁切」(非 crop 事件 /
+ * 落到全景兜底 / 事件目录已被 cleanup 清),这是**预期结果不是错误**,所以在这里就折成
+ * `null`,调用方拿 null 即可判定「无 crop」而不必 import ApiError 去认状态码
+ * (组件层一律只依赖 `@/api` 门面).其余错误(网络抖动 / 5xx)照旧 reject,
+ * 让调用方区分「确定没有」和「暂时没拿到」——前者隐藏参考卡,后者只是不画框.
+ *
+ * trace 读坏(裁过但坐标解不出来)后端走的是 500 而**不是** 410,正是为了落进后一档:
+ * 参考帧还在盘上,不该因为少一个框就把整张卡藏掉.所以这里的 410 判定不能放宽成
+ * `e.status >= 400`.
+ */
+export async function realEventCropMeta(
+  event_id: string,
+  device_id: string,
+): Promise<EventCropMeta | null> {
+  try {
+    const resp = await apiFetch<{ data: EventCropMeta }>(
+      `/api/events/${encodeURIComponent(event_id)}/crop/${encodeURIComponent(device_id)}`,
+    );
+    return resp.data;
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 410) return null;
+    throw e;
+  }
 }
 
 /**
@@ -1232,7 +1496,9 @@ export function realSubscribeEvents(
   }
   es.addEventListener("new_event", (ev) => {
     try {
-      const payload = JSON.parse((ev as MessageEvent).data) as BackendMeaningfulEvent;
+      const payload = JSON.parse(
+        (ev as MessageEvent).data,
+      ) as BackendMeaningfulEvent;
       onEvent({
         id: payload.event_id,
         timestamp: payload.timestamp,
@@ -1245,6 +1511,7 @@ export function realSubscribeEvents(
         rule_names: payload.rule_names,
         clip_kind: payload.clip_kind,
         has_trace: payload.has_trace,
+        has_ref: payload.has_ref,
         has_feedback: payload.has_feedback,
         feedback_pack_path: payload.feedback_pack_path,
         feedback_pack_size: payload.feedback_pack_size,
@@ -1262,9 +1529,20 @@ export async function realSubmitEventFeedback(
   errorTypes: string[],
   feedbackText: string,
   includeGallery: boolean,
-): Promise<{ uploaded: boolean; upload_key?: string; pack_path: string; pack_size_bytes: number }> {
+): Promise<{
+  uploaded: boolean;
+  upload_key?: string;
+  pack_path: string;
+  pack_size_bytes: number;
+}> {
   const resp = await apiFetch<
-    Normal<{ event_id: string; pack_path: string; pack_size_bytes: number; uploaded: boolean; upload_key: string | null }>
+    Normal<{
+      event_id: string;
+      pack_path: string;
+      pack_size_bytes: number;
+      uploaded: boolean;
+      upload_key: string | null;
+    }>
   >("/api/admin/events/feedback", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1435,8 +1713,14 @@ function unitsToStats(
   let calls = 0;
   // 预置两种调用类型，保证 realtime / on_demand 都恒显示（无数据则为 0）。
   const byType = new Map<UsageCallType, UsageGroup>([
-    ["realtime", { key: "realtime", calls: 0, tokens: 0, breakdown: emptyBreakdown() }],
-    ["on_demand", { key: "on_demand", calls: 0, tokens: 0, breakdown: emptyBreakdown() }],
+    [
+      "realtime",
+      { key: "realtime", calls: 0, tokens: 0, breakdown: emptyBreakdown() },
+    ],
+    [
+      "on_demand",
+      { key: "on_demand", calls: 0, tokens: 0, breakdown: emptyBreakdown() },
+    ],
   ]);
   const rowMap = new Map<string, UsageRow>();
 
@@ -1560,7 +1844,8 @@ export async function realUpdateOmniConfig(
     base_url: input.base_url,
   };
   if (input.api_key) body.api_key = input.api_key;
-  if (input.original_label !== undefined) body.original_label = input.original_label;
+  if (input.original_label !== undefined)
+    body.original_label = input.original_label;
   if (input.activate !== undefined) body.activate = input.activate;
   const r = await apiFetch<Normal<OmniConfigState>>("/api/admin/omni-config", {
     method: "PUT",
@@ -1600,6 +1885,38 @@ export async function realDeactivateOmniConfig(
     { method: "POST", body: JSON.stringify(ref) },
   );
   return r.data;
+}
+
+// ── 升级检测 / 一键升级 ──────────────────────────────────────────────
+// check：打开页面查一次（后端缓存数小时，GitHub 不可达时 reachable=false，不报错）。
+export async function realUpgradeCheck(force = false): Promise<UpgradeCheck> {
+  // force=true：用户手动「检查更新」，后端跳过服务端缓存现查一次。
+  const r = await apiFetch<Normal<UpgradeCheck>>(
+    `/api/admin/upgrade/check${force ? "?force=true" : ""}`,
+  );
+  return r.data;
+}
+
+// run：仅 release 部署可用；后端 detached 起官方 install.sh 覆盖安装并重启服务。
+// 返回值前端不消费（进度靠轮询 /upgrade/status 判定），故 void。
+export async function realTriggerUpgrade(): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/admin/upgrade/run", {
+    method: "POST",
+  });
+}
+
+// 升级中轮询：解析 upgrade.log 得到当前阶段 / 终态（done/failed）。
+export async function realUpgradeStatus(): Promise<UpgradeStatus> {
+  const r = await apiFetch<Normal<UpgradeStatus>>("/api/admin/upgrade/status");
+  return r.data;
+}
+
+// 关闭 banner = 把该版本记为「已确认」，持久化到后端（不放浏览器）。之后该版本 banner 不再出现。
+export async function realDismissUpgrade(version: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/admin/upgrade/dismiss?version=${encodeURIComponent(version)}`,
+    { method: "POST" },
+  );
 }
 
 // 拉取某 Base URL 下可用模型列表（供模型下拉）。api_key 留空则用同 base_url 已存 key。
@@ -1696,7 +2013,11 @@ async function fetchUsageStats(
         `&since=${startMs}&until=${startMs + ONE_DAY_MS}`,
     );
     const rows = r.data.rows ?? [];
-    return unitsToStats(period, rows.map(bucketToUnit), bucketTimeline(rows, binMinutes));
+    return unitsToStats(
+      period,
+      rows.map(bucketToUnit),
+      bucketTimeline(rows, binMinutes),
+    );
   }
 
   // week / month：滚动近 N 天（含今天）的 daily 聚合
@@ -1711,7 +2032,6 @@ async function fetchUsageStats(
   const rows = r.data.rows ?? [];
   return unitsToStats(period, rows.map(rowToUnit), dailyTimeline(rows, days));
 }
-
 
 // ── 任务（task）─────────────────────────────────────────────
 // summary 视图 = task 基础字段 + record 进度摘要（window=day：progress 走 snapshot，
@@ -1805,6 +2125,24 @@ export async function realUpdateTaskDescription(
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ description }),
+    },
+  );
+}
+
+// 改规则触发条件文本（PATCH /api/rules/{id}）。
+// condition 走部分更新：只带 query，perceive_device_ids（感知设备）由 backend
+// 保留原值——住户在 Web 上只改"什么情况算命中"，不动看哪几个摄像头。
+// backend patch_rule 落库成功后会重新 add_rule 进 RuleRunner，新条件即时生效。
+export async function realUpdateRuleQuery(
+  ruleId: string,
+  query: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/rules/${encodeURIComponent(ruleId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ condition: { query } }),
     },
   );
 }

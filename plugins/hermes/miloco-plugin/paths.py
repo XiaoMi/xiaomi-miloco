@@ -1,7 +1,7 @@
 """MILOCO_HOME 路径解析。
 
-本模块只在 Hermes runtime 里被加载（context_injection / trace / adapter /
-tools_habit 等 hermes plugin 内部文件调用），跟 openclaw runtime 隔离。所以默认
+本模块只在 Hermes runtime 里被加载（context_injection / trace / adapter
+等 hermes plugin 内部文件调用），跟 openclaw runtime 隔离。所以默认
 路径也对齐 hermes runtime 的默认（``~/.hermes/miloco``）——env 传递失败时不去
 误读 openclaw 数据，避免 split-brain。
 

@@ -3,6 +3,9 @@
     "title": "设置",
     "videoShortEdge": "分辨率",
     "videoShortEdgeHint": "短边像素，保持原始宽高比",
+    "smartCrop": "智能裁切增强",
+    "smartCropHint": "开启后自动裁切画面中的活动区域送去识别，在同一分辨率下让人和物看得更清；同时附一张全景参考帧。识别不到活动区域时自动回退整幅画面。",
+    "smartCropUnavailable": "此功能尚未在服务端开放，暂不可配置",
     "omniFps": "帧率",
     "omniFpsHint": "帧率越高，资源占用越多",
     "windowSize": "感知窗口",
@@ -18,6 +21,18 @@
     "schedulerSaved": "已保存，agent 网关下次重启后生效",
     "autoSchedule": "自动定时任务",
     "autoScheduleHint": "开启后 miloco 自动创建并维护内置定时任务（感知摘要 / 家庭巡检 / 记忆整理 / 习惯洞察）；关闭后将清除这些任务且不再重建。改动在 agent 网关下次重启后生效。",
-    "autoScheduleUnavailable": "当前后端不支持此开关（可能版本过旧），暂不可配置"
+    "autoScheduleUnavailable": "当前后端不支持此开关（可能版本过旧），暂不可配置",
+    "minUrgency": "事件提醒过滤",
+    "minUrgencyHint": "被过滤的事件仍会显示在日志里，但不提醒主 Agent",
+    "minUrgencyTick": {
+      "low": "低",
+      "medium": "中",
+      "high": "高"
+    },
+    "minUrgencyStatus": {
+      "low": "接收所有事件",
+      "medium": "接收中高紧急事件",
+      "high": "仅接收高紧急事件"
+    }
   }
 }

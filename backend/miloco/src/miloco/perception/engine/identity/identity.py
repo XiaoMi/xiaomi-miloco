@@ -124,6 +124,7 @@ async def run_identity(
         audio_analysis=AudioAnalysis(type=AudioType.SILENCE, is_urgent=False, energy_level=0.0),
         sample_rate=gate_packet.sample_rate,
         trigger=gate_packet.trigger,
+        main_det_boxes=tracking_resp.main_det_boxes,
     )
 
 

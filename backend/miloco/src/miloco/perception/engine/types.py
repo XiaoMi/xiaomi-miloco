@@ -133,6 +133,13 @@ class TrackedObject:
 class TrackingResponse:
     frame_info: FrameInfo
     object_info: list[TrackedObject]
+    # 本窗口**每一抽帧**上的主体检测框(human / cat / dog),xyxy 像素,跨帧累积不去重。
+    # 与 object_info 是两套需求,故并列而非塞进 box_info:
+    #   - object_info/box_info 服务身份 —— 只关心 track 末帧那一个位置(贴名字、抽 ReID)
+    #   - 本字段服务 Smart Crop —— 要的是空间覆盖:裁出的区域必须包住窗口内出现过的一切,
+    #     所以需要逐帧、且需要不成 track 的类别(tracker 只跟 HUMAN,宠物永远进不了 box_info)
+    # 无 tracker 的实现(Mock)留空 → crop 侧退化为只用运动块。
+    main_det_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -247,6 +254,9 @@ class IdentityPacket:
     audio_analysis: AudioAnalysis
     sample_rate: int = 16000
     trigger: GateTrigger | None = None  # 透传自 GatePacket，下游分流 audio-only 路径用
+    # 透传 TrackingResponse.main_det_boxes（窗口内每抽帧的 human/cat/dog 框，xyxy 像素），
+    # 供 Smart Crop 算裁切区域并集。见该字段注释：与 targets/box_info 是两套需求。
+    main_det_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 # =============================================================================

@@ -87,6 +87,17 @@ async def test_fresh_install_fires_once_and_sets_flag(monkeypatch):
     assert kv.get(OnboardingKeys.ONBOARDING_PROMPTED_KEY)
 
 
+def test_instruction_does_not_ask_agent_to_self_name_miloco():
+    """让 agent 转述给用户的部分不得自称 miloco（同 welcome_service）。
+
+    首邀正文与插件 B_IDENTITY 同一轮进上下文，该块明令"不要改口自称 Miloco"。
+    首句"检测到 miloco 已完成米家授权"说的是系统状态而非 agent 自称，故保留。
+    """
+    assert "miloco 会更懂这家人" not in ot._INSTRUCTION
+    assert "你会更懂这家人" in ot._INSTRUCTION
+    assert "检测到 miloco 已完成米家授权" in ot._INSTRUCTION
+
+
 @pytest.mark.asyncio
 async def test_persons_nonempty_stays_silent(monkeypatch):
     mock = _patch_dispatch(monkeypatch)

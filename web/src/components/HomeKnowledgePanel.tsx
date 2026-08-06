@@ -17,6 +17,7 @@ import {
   bindEntryActions,
   EntryDetailSheet,
   EntryRow,
+  hostedByPetCard,
   isGenericSubject,
   NON_MEMBER_TYPE_ORDER,
   ownerOf,
@@ -28,6 +29,8 @@ import i18n from "@/i18n";
 interface Props {
   data: HomeEntries | undefined;
   persons: Person[];
+  /** 花名册：用于把宠物条目排除出本面板（它们由「宠物档案卡」独占展示）。 */
+  pets?: { id: string }[];
   loading: boolean;
   onChanged: () => void;
 }
@@ -58,6 +61,7 @@ type Section =
 export function HomeKnowledgePanel({
   data,
   persons,
+  pets,
   loading,
   onChanged,
 }: Props) {
@@ -68,9 +72,11 @@ export function HomeKnowledgePanel({
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   const { sections, total } = useMemo(() => {
-    // 归本面板 = ownerOf 解析不到已知家人的条目（含未匹配到人的 member_*）。
+    // 归本面板 = ownerOf 解析不到已知家人的条目（含未匹配到人的 member_*）；
+    // 宠物条目由「宠物档案卡」独占，排除掉——否则同一条外观在两处重复出现，
+    // 且从这里能「改派给家人」把宠物档案卡清空。
     const profile = (data?.profile ?? []).filter(
-      (e) => ownerOf(e, persons) === null,
+      (e) => ownerOf(e, persons) === null && !hostedByPetCard(e, pets),
     );
 
     const sections: Section[] = [];
@@ -119,7 +125,7 @@ export function HomeKnowledgePanel({
       total: profile.length,
     };
     // i18n.language 入 deps：切语言时重算 section 标题（typeLabel/subjectLabel 经 i18n 解析）。
-  }, [data, persons, t, i18n.language]);
+  }, [data, persons, pets, t, i18n.language]);
 
   const empty = !loading && total === 0;
   const isOpen = (key: string) => !(collapsed[key] ?? false);

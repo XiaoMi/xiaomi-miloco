@@ -39,7 +39,31 @@ from miloco.perception.engine.types import (
 )
 
 
-def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingResponse:
+def _main_det_boxes(tracker: Any) -> list[tuple[int, int, int, int]]:
+    """取 tracker 本帧检测里的主体框(human / cat / dog),xyxy 像素。
+
+    给 Smart Crop 用:裁切区域要包住窗口内出现过的一切,所以逐帧调、跨帧累积(见 analyze)。
+    直接读 ``last_detections``(tracker 每帧 detect 后写),**不重跑推理** —— 也因此沿用
+    detector 自身的 conf 阈值(默认 0.5),与离线原型的 0.35 有差异:换阈值就得另跑一次检测,
+    或改动喂给 tracker 的那份 detections(会连带改身份行为),两者都不在本改动范围内。
+
+    排除 head / face 子部件:它们散布范围大,纳入并集会把区域撑满全图。
+    宠物(cat/dog)只在这里拿得到 —— tracker 只对 HUMAN 建 track(``track_human_only`` /
+    ``_update_core`` 的 human 过滤),宠物永远不进 ``box_info``。
+    """
+    from miloco.perception.engine.identity.tracker.detector import Detection
+
+    dets = getattr(tracker, "last_detections", None) or []
+    main = (Detection.CLASS_HUMAN, Detection.CLASS_CAT, Detection.CLASS_DOG)
+    return [d.xyxy for d in dets if d.class_id in main]
+
+
+def _build_response(
+    results: list[dict],
+    n_frames: int,
+    fps: int,
+    main_det_boxes: list[tuple[int, int, int, int]] | None = None,
+) -> TrackingResponse:
     """将 tracker.get_tracking_results() 转为 TrackingResponse。"""
     from miloco.perception.engine.identity.tracker.detector import Detection
 
@@ -83,6 +107,7 @@ def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingRes
             fps=fps,
         ),
         object_info=object_info,
+        main_det_boxes=list(main_det_boxes or []),
     )
 
 
@@ -165,9 +190,15 @@ class RealTrackingService(TrackingService):
                 frame_info=FrameInfo(start_timestamp=now, end_timestamp=now, fps=fps),
                 object_info=[],
             )
+        # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
+        # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
+        main_boxes: list[tuple[int, int, int, int]] = []
         for frame in frames:
             self._tracker.update(frame)
-        return _build_response(self._tracker.get_tracking_results(), len(frames), fps)
+            main_boxes.extend(_main_det_boxes(self._tracker))
+        return _build_response(
+            self._tracker.get_tracking_results(), len(frames), fps, main_boxes
+        )
 
     def reset_session(self) -> None:
         """重置 SortTracker（清空 tracks + _next_track_id 归零）。
@@ -246,9 +277,15 @@ class DeepSortTrackingService(TrackingService):
                 frame_info=FrameInfo(start_timestamp=now, end_timestamp=now, fps=fps),
                 object_info=[],
             )
+        # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
+        # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
+        main_boxes: list[tuple[int, int, int, int]] = []
         for frame in frames:
             self._tracker.update(frame)
-        return _build_response(self._tracker.get_tracking_results(), len(frames), fps)
+            main_boxes.extend(_main_det_boxes(self._tracker))
+        return _build_response(
+            self._tracker.get_tracking_results(), len(frames), fps, main_boxes
+        )
 
     def reset_session(self) -> None:
         self._tracker.reset()
