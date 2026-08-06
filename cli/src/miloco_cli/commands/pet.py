@@ -203,7 +203,7 @@ def pet_reference_crops(pet_id, crop_paths, scores, mode, pretty):
 @pet_group.command("avatar")
 @click.argument("pet_id")
 @click.option("--image", "image_path", type=click.Path(exists=True), required=True,
-              help="头像图片（jpg/jpeg/png/webp）；Agent 注册可用 observe --save-crops 存下的 <prefix>_avatar.jpg 作默认头像")
+              help="头像图片（常见格式均可，含 iPhone 的 HEIC）；Agent 注册可用 observe --save-crops 存下的 <prefix>_avatar.jpg 作默认头像")
 @click.option("--pretty", is_flag=True)
 def pet_avatar(pet_id, image_path, pretty):
     """设置宠物头像（上传一张图）。Agent 注册省去的是用户手动裁剪确认，仍应落一个默认头像。"""

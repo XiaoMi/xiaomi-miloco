@@ -36,7 +36,9 @@ except Exception:  # noqa: BLE001 — 缺失/加载失败不该让整个后端�
 
 # 解码后像素数上限。字节闸挡不住这个:HEIF 的网格容器、PNG 的高压缩比都能让 1MB 文件
 # 解出上亿像素(BGR 三通道 → 每像素 3 字节)。1.2 亿像素 ≈ 360MB,已远超任何真实相机
-# (12MP iPhone = 0.12 亿),留足余量的同时挡住解码炸弹。
+# (12MP iPhone = 0.12 亿),留足余量的同时**挡住炸弹进入下游**。
+# 口径说明:回退路径靠 PIL 懒加载能在解码**前**拒;cv2 快路径无懒加载,只能解完再拒——
+# 那一次分配躲不掉,拦的是它继续进 YOLO / omni / 编码链路被反复复制放大。
 _MAX_DECODE_PIXELS = 120_000_000
 
 
@@ -87,7 +89,20 @@ def decode_image(data: bytes) -> NDArray[np.uint8] | None:
         return None
     img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is not None and img.size > 0:
+        # cv2 无懒加载，这一次解码的内存分配躲不掉；此闸的作用是**别让它进下游**——
+        # YOLO / omni / 编码链路每一步还要再复制放大。PNG 的高压缩比同样能造炸弹，
+        # 所以快路径也得卡，不能只卡回退分支。
+        if img.shape[0] * img.shape[1] > _MAX_DECODE_PIXELS:
+            logger.warning(
+                "event=decode_reject_pixels w=%s h=%s", img.shape[1], img.shape[0]
+            )
+            return None
         return img
+    if not _HEIF_OK and is_still_image_container(data[:16]):
+        # 传的是 HEIC/HEIF 而解码器在 import 期就没装上：在**失败现场**点明原因，别让排查的人
+        # 只拿到一句笼统的「打不开」、再去翻可能早已滚走的启动日志。
+        logger.warning("event=heif_upload_without_decoder 缺 pi-heif，无法解码 HEIC/HEIF")
+        return None
     try:
         with Image.open(io.BytesIO(data)) as im:
             n_px = (im.width or 0) * (im.height or 0)

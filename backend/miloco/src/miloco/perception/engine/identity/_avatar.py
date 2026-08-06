@@ -103,12 +103,17 @@ def normalize_for_storage(
       拼图时恒重编成 JPEG q85，存 WebP 只是多一道转换；且 ``ref_crop_N.jpg`` 这个硬编码
       文件名牵动 glob / 下标解析等多处逻辑，让盘上后缀与内容脱钩不划算。
     """
-    ext = sniff_image_ext(data)
-    if ext:
-        return data, ext
+    # 验真**先行**：白名单格式也必须能完整解码才允许直通。只查魔数不够——``b"\xff\xd8\xff"``
+    # 后面接一堆垃圾（传输截断、拷了一半的照片）同样命中前 3 字节，直通落盘后识别侧解不出、
+    # 静默跳过，于是界面显示「3 张参考图」而实际注入 0 张（参考图端点的注释点名要防这个）。
+    # 改前三个落盘端点本来就先 cv2.imdecode 验真，所以这次解码不是新增成本；非直通格式复用
+    # 这一次解码结果去重编，全程只解一次。
     img = decode_image(data)
     if img is None:
         return None
+    ext = sniff_image_ext(data)
+    if ext:
+        return data, ext
     h, w = img.shape[:2]
     if prefer == "webp" and max(h, w) <= _WEBP_MAX_SIDE:
         ok, buf = cv2.imencode(".webp", img, [cv2.IMWRITE_WEBP_QUALITY, 101])  # >100 = 无损

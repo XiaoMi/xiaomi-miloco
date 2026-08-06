@@ -572,6 +572,12 @@ async def extract_samples(
     ct = (media.content_type or "").lower()
     fname = (media.filename or "").lower()
     is_video = ct.startswith("video/") or fname.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
+    # 字节级复核（同 pet observe / register_preview 口径）：HEIF/AVIF 与 mp4/mov 共用 ISO BMFF
+    # 容器，一张被报成 video/* 或命名成 .mov 的 HEIC 若按视频抽帧，ffmpeg 不拼 tile grid、只
+    # 暴露 512x512 瓦片 → 全链路零报错地在一块瓦片上跑完。三个端点必须同口径，缺一处就留一个洞。
+    if is_video and is_still_image_container(raw[:16]):
+        logger.info("event=extract_samples_still_image_declared_as_video 已按图片处理")
+        is_video = False
 
     detector = _load_detector()
     reid_extractor = manager.perception_service.get_reid_extractor()

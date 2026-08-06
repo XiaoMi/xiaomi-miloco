@@ -69,12 +69,43 @@ def test_decode_rejects_garbage(data):
     assert decode_image(data) is None
 
 
-def test_decode_rejects_pixel_bomb(monkeypatch):
-    """字节闸挡不住解码后的像素量：小文件也能声明上亿像素。回退路径先看尺寸再决定解不解。"""
+def test_heic_without_decoder_logs_at_failure_site(monkeypatch, caplog):
+    """pi-heif 缺失时，HEIC 上传要在**失败现场**留一条可定位的日志，而不是只在启动期打一次
+    （那条很可能早已滚走）。这也是 _HEIF_OK 这个标志位存在的意义。"""
+    import logging
+
+    import miloco.perception.engine.identity._image_utils as iu
+
+    monkeypatch.setattr(iu, "_HEIF_OK", False)
+    with caplog.at_level(logging.WARNING, logger=iu.__name__):
+        assert iu.decode_image(HEIC_BYTES) is None
+    assert "heif_upload_without_decoder" in caplog.text
+
+
+def test_non_heif_unaffected_when_decoder_missing(monkeypatch):
+    """解码器缺失只该影响 HEIF 家族；既有格式仍走 cv2 快路径，不受牵连。"""
+    import miloco.perception.engine.identity._image_utils as iu
+
+    monkeypatch.setattr(iu, "_HEIF_OK", False)
+    assert iu.decode_image(_img("PNG")) is not None
+
+
+def test_decode_rejects_pixel_bomb_on_fallback_path(monkeypatch):
+    """回退路径（HEIF）：PIL 懒加载，能在解码**前**按声明尺寸拒掉。"""
     import miloco.perception.engine.identity._image_utils as iu
 
     monkeypatch.setattr(iu, "_MAX_DECODE_PIXELS", 100)  # 32*24=768 > 100 → 应被拒
     assert iu.decode_image(HEIC_BYTES) is None
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "WEBP"])
+def test_decode_rejects_pixel_bomb_on_cv2_fast_path(monkeypatch, fmt):
+    """快路径也必须卡：注释点名的 PNG 炸弹走的正是 cv2，只卡回退分支等于没卡。
+    cv2 无懒加载，那一次分配躲不掉；此闸拦的是它继续进 YOLO / omni / 编码链路被反复复制。"""
+    import miloco.perception.engine.identity._image_utils as iu
+
+    monkeypatch.setattr(iu, "_MAX_DECODE_PIXELS", 1000)  # 64*48=3072 > 1000 → 应被拒
+    assert iu.decode_image(_img(fmt)) is None
 
 
 # ── normalize_for_storage ─────────────────────────────────────────────────
@@ -116,13 +147,46 @@ def test_normalize_returns_none_on_undecodable():
     assert normalize_for_storage(b"nope") is None
 
 
-def test_normalize_falls_back_to_jpeg_when_webp_encode_fails():
-    """WebP 边长上限 16383，超了 cv2.imencode 返回 ok=False 且只往 stderr 打——不判 ok 就会
-    把空 buf 当图落盘。此处用超宽图触发真实失败路径（不 mock），确认退到 JPEG。"""
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"\xff\xd8\xff" + b"garbage" * 40,                 # 合法 JPEG 魔数 + 坏 body
+        b"\x89PNG\r\n\x1a\n" + b"garbage" * 40,          # 合法 PNG 魔数 + 坏 body
+        b"RIFF\x00\x00\x00\x00WEBP" + b"garbage" * 40,    # 合法 WebP 魔数 + 坏 body
+    ],
+)
+def test_normalize_rejects_valid_magic_with_broken_body(data):
+    """**回归钉子**：只查魔数不足以验真。传输截断 / 拷了一半的照片同样命中前几字节，
+    若直通落盘，识别侧解不出会静默跳过 → 界面显示「3 张参考图」而实际注入 0 张，
+    正是参考图端点注释点名要防的失败模式。所以白名单也必须先完整解码。"""
+    assert normalize_for_storage(data) is None
+
+
+def test_normalize_skips_webp_when_side_exceeds_limit():
+    """验的是**尺寸预检闸**：边长 >16383（WebP 容器上限）时不走 webp、直接退 JPEG。
+    注意这条走不到 cv2.imencode(".webp")，`ok=False` 那条分支由下一个用例覆盖。"""
     wide = np.zeros((8, 20000, 3), np.uint8)
     ok, buf = cv2.imencode(".bmp", wide)  # BMP 非直通格式 → 必走重编
     assert ok
     got, ext = normalize_for_storage(buf.tobytes(), prefer="webp")
+    assert ext == "jpg" and got[:3] == b"\xff\xd8\xff"
+
+
+def test_normalize_falls_back_to_jpeg_when_webp_encode_returns_not_ok():
+    """钉住 `ok=False` 分支：cv2.imencode 写 WebP 失败时只往 stderr 打一行、不抛异常，
+    不判 ok 就会把空 buf 当图落盘。尺寸没超限时只能靠 mock 触发。"""
+    import miloco.perception.engine.identity._avatar as av
+
+    real = cv2.imencode
+
+    def _fake(ext, img, *a, **k):
+        if ext == ".webp":
+            return False, np.zeros((0,), np.uint8)
+        return real(ext, img, *a, **k)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(av.cv2, "imencode", _fake)
+        got, ext = normalize_for_storage(_img("BMP"), prefer="webp")
     assert ext == "jpg" and got[:3] == b"\xff\xd8\xff"
 
 
