@@ -13,10 +13,11 @@ mode 取值：``"mock" | "real" | "deep_sort"``。fast/detect_only 档位已取�
 回退路径是把该项改回 ``"real"``。
 
 ⚠️ 两条真实路径的 coasting 语义不同,这是下游各闸有没有作用的分水岭：
-``DeepSortTrackingService`` 会输出人已离开/跟丢后的纯 Kalman 预测残留框
-(``detected_this_frame`` 为 False);``RealTrackingService``(``SortTracker``) 在输出前
-已 pre-filter 掉残留框、只给本帧真匹配到的框。故 IdentityEngine 侧各 coasting 闸
-只在 ``"deep_sort"`` 模式下真正起作用。
+``DeepSortTrackingService`` 会继续输出人已离开/跟丢后的 track(``detected_this_frame``
+为 False),其 bbox 是**上一次真匹配时的检测框、原地冻结**——Kalman 只推进
+mean/covariance 供关联门控用,不回写输出框,所以残留框不会外推移动、只是越来越旧;
+``RealTrackingService``(``SortTracker``) 在输出前已 pre-filter 掉这类 track、只给本帧
+真匹配到的框。故 IdentityEngine 侧各 coasting 闸只在 ``"deep_sort"`` 模式下真正起作用。
 """
 
 from __future__ import annotations

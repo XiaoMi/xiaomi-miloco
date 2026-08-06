@@ -439,9 +439,9 @@ def extract_from_video(
             for tr in tracking_results:
                 if tr.get("class_id") != Detection.CLASS_HUMAN:
                     continue
-                # coasting(本帧 bbox 是纯 Kalman 预测残留)不裁图: 那个位置上已经不是
-                # 本人, 裁出的背景/他人图会进该 track 的 top-K 候选、经注册写进身份库。
-                # 下面的质量门拦不住它——置信度取的是最后一次真匹配的值(通常过阈值),
+                # coasting(本帧未匹配, bbox 停在上一次真匹配的位置)不裁图: 人已经不在
+                # 那儿了, 裁出的背景/他人图会进该 track 的 top-K 候选、经注册写进身份库。
+                # 下面的质量门拦不住它——置信度同样停在最后一次真匹配的值(通常过阈值),
                 # 背景裁图清晰度也不低; 打分公式同样没有"本帧是否真匹配"这一项。
                 # 与 IdentityEngine 各消费闸同口径。
                 # 召回代价有界, 但上界跟随配置而非代码常量: 本路径 tracker 按 fps=1 建,

@@ -359,9 +359,11 @@ class IdentityEngine:
         # 计数, 确定性、按窗口走; worker 写盘时读它作冷却锚点。
         self._cur_frame_index: int = 0
         self._latest_bbox: dict[int, tuple[int, int, int, int]] = {}  # track_id → xyxy
-        # 每窗口同步：True ⟺ tracking_results 里这个 track 本帧真有检测命中
-        # （非 coasting / 纯 Kalman 预测残留）。消费点：omni 候选收集 + tier_c
-        # 写入入口；为 False 时这两处直接早退，避免残留框污染 tier_c 与 omni。
+        # 每窗口同步：True ⟺ tracking_results 里这个 track 本帧真有检测命中；False =
+        # coasting（框是上一次真匹配时的检测框、原地冻结，不对应本帧画面）。
+        # 消费点共 7 处：抗遮挡 IoA / omni 候选收集 / 名册 bbox_norm / no_person 抑制区
+        # 解除 / no_person 预标 / tier_u 陌生人池推图 / tier_c 入队门；为 False 时各处
+        # 早退，避免残留框污染候选、名册与身份库。
         self._detected_this_frame: dict[int, bool] = {}
         # face 在场写库门 + prompt face 标签 + 陌生人池 face_crop 三处共用源
         # (tier_c 污染修复): 每窗口 process() 早期 face 几何关联算一次, 存 track →
@@ -513,7 +515,7 @@ class IdentityEngine:
             tid = int(tr["id"])
             active_track_ids.add(tid)
 
-            # 缓存最新 bbox + 本帧检测命中标志（tier_c / omni 两处消费点用）
+            # 缓存最新 bbox + 本帧检测命中标志（本类内 7 处闸消费，清单见 __init__ 处声明）
             self._latest_bbox[tid] = tuple(tr["xyxy"])  # type: ignore[arg-type]
             self._detected_this_frame[tid] = bool(tr.get("detected_this_frame", True))
             self._last_seen_frame[tid] = frame_index
@@ -532,7 +534,7 @@ class IdentityEngine:
             # 打回 0 → 移动的真本人写库资格几乎永远攒不满(只有静止的人能写)。已移除该清零: 顶替
             # 由"重审矛盾清零(计数级)+ 写库前 omni 同人校验拿实际 crop 比对 tier_a 否决(crop 级)"
             # 双重兜底, coasting 清零是会误杀真本人的冗余代理; 入队检测门(D)仍不收 coasting 窗的
-            # 帧、不会写 Kalman 幻影框。
+            # 帧、不会写 coasting 那张过期框。
             if state.status == "confirmed" and (
                 frame_index < state.tier_c_cooldown_until_frame
                 or state.in_flight_tier_c
@@ -627,7 +629,7 @@ class IdentityEngine:
                 gallery_empty=gallery_empty,
             ):
                 continue
-            # coasting（人离开/跟丢后纯 Kalman 预测残留）的 track 当窗口不进 omni
+            # coasting（人离开/跟丢后仍存活、框停在上一次真匹配位置）的 track 不进 omni
             # 候选：bbox 已不对应本帧真人，让 omni 看到只会催生背景误判。track
             # 本身仍在 _states 里存活，不影响 ID/face_id/tier_u 连续性。
             if not self._detected_this_frame.get(tid, False):
@@ -706,7 +708,7 @@ class IdentityEngine:
         self._gc_dead_tracks(active_track_ids, frame_index)
 
         # ----- 5. 返回当前 face_id 映射 + 末帧归一化 bbox -----
-        # bbox_norm 只对本帧真实检测到的 track 填（coasting 纯预测残留不填，避免给
+        # bbox_norm 只对本帧真实检测到的 track 填（coasting 的过期框不填，避免给
         # 名册注入幻影位置）；与 candidates 的 bbox 同源同坐标系（_latest_bbox +
         # _normalize_bbox_to_1000），供上层挂到 IdentityTarget 给名册渲染 (名, bbox)。
         out: dict[int, str] = {}
@@ -1209,8 +1211,8 @@ class IdentityEngine:
             # no_person（非人误检）也不进池——杂物 crop 进陌生人池会污染聚类。
             if state.status in ("confirmed", "no_person"):
                 continue
-            # coasting(本帧无检测命中, bbox 是纯 Kalman 预测残留)也不进池: 那个位置上
-            # 已经不是本人(可能是背景/家具/旁边另一个人)。裁出来的图既污染聚类, 又能
+            # coasting(本帧无检测命中, bbox 停在上一次真匹配的位置)也不进池: 人已经
+            # 不在那儿了(裁到的是背景/家具/旁边另一个人)。裁出来的图既污染聚类, 又能
             # 经 from-cluster 注册间接写进身份库 —— 与 tier_c 入队门 D 拒"幻影框裁图"
             # 同口径, 只是终点从直接写库变成间接写库。
             # 注: 池内 phash/embedding 去重拦不住这类图 —— 它跟真人 crop 本来就不像,

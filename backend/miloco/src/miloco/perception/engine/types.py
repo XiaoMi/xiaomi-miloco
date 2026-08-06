@@ -114,14 +114,18 @@ class TrackedObject:
     face_id: str
     track_id: int
     box_info: list[TrackingBoxInfo]
-    # True ⟺ 本帧 Kalman update 真匹配到 detection；False = 纯预测残留(coasting)。
-    # IdentityEngine 的抗遮挡 IoA / omni 候选 / 名册位置 / no_person 抑制区 / tier_c
-    # 入队各闸都靠它拒"人已离开或跟丢"产生的残留框，必须由 tracker 一路透传到 engine。
+    # True ⟺ 本帧 Kalman update 真匹配到 detection；False = 本帧未匹配(coasting)，
+    # 此时框是上一次真匹配时的检测框、原地冻结（不随 Kalman 外推移动，只是越来越旧）。
+    # IdentityEngine 内 7 处闸靠它拒"人已离开或跟丢"产生的残留框：抗遮挡 IoA / omni
+    # 候选 / 名册位置 / no_person 抑制区解除 / no_person 预标 / tier_u 陌生人池推图 /
+    # tier_c 入队；离线视频抽样本路径(identity/extractor.py)另有一处同口径的闸。
+    # 必须由 tracker 一路透传到 engine。
     # 默认 True：mock 与旧 convert_response 路径不产生 coasting track，其输出的每个
     # 对象都对应一次真实检测。
     detected_this_frame: bool = True
-    # 检测器对该 track 本帧框的置信度。tier_u 质量门(detector_conf_min)与候选打分
-    # (det_norm 一项)消费；同样必须透传，否则两处退化成"恒满置信"。默认 1.0 同上。
+    # 检测器在该 track **最近一次真匹配**时给出的置信度（coasting 帧上不刷新，同 bbox）。
+    # tier_u 候选打分(det_norm，权重最大的一项)与质量门(detector_conf_min)消费；
+    # 必须透传，否则打分里这一维退化成常数。默认 1.0 同上。
     detector_confidence: float = 1.0
 
 
@@ -167,7 +171,8 @@ class IdentityTarget:
     box_info: list[TrackingBoxInfo]
     # 末帧归一化 [0,1000] bbox (x1,y1,x2,y2)，与 IdentityQueryItem 同源同坐标系；
     # 供 prompt 在"已识别人物/陌生人"名册里注入位置，多人时让 omni 把姓名挂到
-    # 视频里的人。None = 本帧未被真实检测（coasting 纯预测残留），名册退化为纯名。
+    # 视频里的人。None = 本帧未被真实检测（coasting，框是上一次真匹配时的检测框），
+    # 名册退化为纯名。
     bbox_xyxy_norm: tuple[int, int, int, int] | None = None
     # 翻身份黏旧名期(reverted_from_confirmed)的 track：显示仍黏旧成员名，但**不可作先验**进
     # 名册锚定 omni 重审（与 candidate_tids 同类去先验）。coasting（本窗未派发）时不在
