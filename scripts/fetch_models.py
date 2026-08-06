@@ -209,6 +209,9 @@ def _stream(url: str, part: Path, expected_size: int | None, *, quiet: bool) -> 
         # 截断而非删除：见 _discard_part（删了会让本进程的 flock 脱靶）。这条路径
         # 尤其要紧——目录里留着一份换代后的超长 .part 就会命中，不需要任何 sha 不符，
         # 整轮调用从第一次 _stream 起就在无锁状态下跑。
+        # 只挡 offset >= lock size 这一侧：lock 比实际资产长时，落在
+        # [实际长度, lock size) 窗口里的 .part 会让 Range 起点越界，由 _fetch_one
+        # 的 416 分支归零（那里拿得到服务端的回答，这里只有 lock 的一面之词）。
         _discard_part(part)
         offset = 0
 
@@ -299,8 +302,28 @@ def _fetch_one(
                     # 里别的进程会新建同名 inode 并抢锁成功，两边交错写同一个 .part。
                     _discard_part(part)
                 except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                    # 故意不删 part：截断/超时留下的字节是下一轮 Range 续传的起点。
-                    _log(f"  ! {name}  下载失败（{attempt}/{_MAX_RETRIES}）：{exc}", quiet=quiet)
+                    if isinstance(exc, urllib.error.HTTPError) and exc.code == 416:
+                        # 416 = 续传起点越过了资产末尾。这是**我们自己攒下的状态**造成的
+                        # 失败，和下面那些外部原因不同：保住 part 只会让每次重试、每个源、
+                        # 以及之后每一次调用都从同一个偏移量原样复现同一个 416，永不自愈，
+                        # 而日志还会打出"已保留 X 待续传"，把人指向"网络/镜像有问题"——
+                        # 和唯一的解法（把这截字节丢掉）正好反向。
+                        # 触发条件：lock 记的 size 比线上资产大（换代后没 refresh），且目录里
+                        # 恰好留着一份落在 [实际长度, lock size) 窗口里的 .part —— 开头那道
+                        # 脏文件守卫只挡 offset >= lock size 的一侧，挡不住这个窗口。
+                        # 处置与 sha256 不符那条同构（都是"本地这截不能要了"）：截断归零，
+                        # 同一个源的下一次重试就不带 Range 从 0 重下。
+                        _log(
+                            f"  ! {name}  续传起点越界（HTTP 416），丢弃已下字节从头重下",
+                            quiet=quiet,
+                        )
+                        _discard_part(part)
+                    else:
+                        # 故意不删 part：截断/超时留下的字节是下一轮 Range 续传的起点。
+                        _log(
+                            f"  ! {name}  下载失败（{attempt}/{_MAX_RETRIES}）：{exc}",
+                            quiet=quiet,
+                        )
                 if attempt < _MAX_RETRIES:
                     time.sleep(2 ** (attempt - 1))
 

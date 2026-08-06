@@ -481,6 +481,101 @@ def test_part_survives_process_exit_so_next_run_resumes(tmp_path: Path) -> None:
     assert list(dest.glob("*.part")) == [], "成功后不许留下 .part"
 
 
+def _make_range_rejecting_handler(
+    body: bytes,
+) -> type[http.server.BaseHTTPRequestHandler]:
+    """按 RFC 行事的服务端：Range 起点越过资产末尾时回 416，不带 Range 则整段发。
+
+    GitHub 就是这么回的。造它是为了钉住"续传起点非法"这第三类失败——它既不是
+    "源内容变了"（sha 不符），也不是"连接断了"（截断），处置和后者正好相反。
+    """
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler 的约定命名
+            rng = self.headers.get("Range", "")
+            if rng.startswith("bytes="):
+                start = int(rng.removeprefix("bytes=").split("-")[0] or 0)
+                if start >= len(body):
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{len(body)}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                chunk = body[start:]
+                self.send_response(206)
+                self.send_header("Content-Length", str(len(chunk)))
+                self.send_header(
+                    "Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}"
+                )
+                self.end_headers()
+                self.wfile.write(chunk)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    return Handler
+
+
+def test_range_start_past_asset_end_discards_part_instead_of_looping(
+    tmp_path: Path,
+) -> None:
+    """续传起点越界（HTTP 416）必须归零重下，不能当成"连接断了"保住 .part。
+
+    416 是**我们自己攒下的状态**造成的失败：保住 .part 意味着每次重试、每个源、
+    以及之后每一次调用都从同一个偏移量原样复现同一个 416，永不自愈；日志还会打
+    "已保留 X 待续传"，把人指向"网络/镜像有问题"——和唯一的解法正好反向。
+
+    触发条件在这里如实搭出来：lock 记 2327（换代后没 refresh），线上资产实际 2000，
+    目录里留着一份 2100 字节的 .part —— 落在 [2000, 2327) 这个窗口里，_stream 开头
+    那道脏文件守卫（offset >= lock size 才截断）挡不住。
+    """
+    body = b"x" * 2000
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _make_range_rejecting_handler(body)
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        lock = tmp_path / "models.lock.json"
+        lock.write_text(
+            json.dumps(
+                {
+                    "base_url": f"http://127.0.0.1:{server.server_address[1]}",
+                    "mirrors": [],
+                    "files": [
+                        {
+                            "name": "stale.onnx",
+                            "size": 2327,  # 比线上资产长：换代后 lock 没跟着刷
+                            "sha256": _sha(body),
+                            "required": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        (dest / "stale.onnx.part").write_bytes(b"x" * 2100)
+
+        r = _run("--lock", str(lock), "--dest", str(dest))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert r.returncode == 0, f"416 没自愈，卡死在同一个偏移量：\n{r.stderr}"
+    assert (dest / "stale.onnx").read_bytes() == body
+    assert list(dest.glob("*.part")) == [], "成功后不许留下 .part"
+    assert "416" in r.stderr, f"没把 416 单独认出来:\n{r.stderr}"
+    assert "待续传" not in r.stderr, "416 被当成截断，日志把人指向网络问题"
+
+
 # ─── 共享 dest：.part 的 flock 与 inode ─────────────────────────────────────
 
 
