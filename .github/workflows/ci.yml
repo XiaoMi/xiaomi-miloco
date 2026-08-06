@@ -165,9 +165,17 @@ jobs:
           fi
           # 不用 `gh api | grep -q`：grep -q 命中即退，gh 吃到 SIGPIPE 退 141，而
           # GitHub 默认 shell 带 -o pipefail，会把"命中"读成失败、恰好反判成不强制。
-          files=$(gh api --paginate \
+          # 取不到文件列表（二级速率限制 / 5xx / 网络抖动）时按最宽松的一档兜底：
+          # 这一步自己没有 continue-on-error（降级只保护了下面的对账步），默认 shell
+          # 带 -e，硬失败会让一个只改前端、跟模型毫无关系的 PR 整个 lint 变红，报的还是
+          # "判定对账门禁强度"失败——贡献者既看不懂也修不了，正是这套分级想避免的结果。
+          if ! files=$(gh api --paginate \
             "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --jq '.[].filename')
+            --jq '.[].filename'); then
+            echo "::warning::列 PR 改动文件失败，对账门禁降级为告警"
+            echo "enforce=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case $'\n'"$files"$'\n' in
             *$'\n'scripts/models.lock.json$'\n'*) echo "enforce=true"  >> "$GITHUB_OUTPUT" ;;
             *)                                    echo "enforce=false" >> "$GITHUB_OUTPUT" ;;

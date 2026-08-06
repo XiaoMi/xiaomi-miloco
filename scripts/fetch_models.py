@@ -172,6 +172,24 @@ def _open_part(dest_dir: Path, name: str) -> tuple[Path, Any]:
     return stable, fh
 
 
+def _discard_part(part: Path) -> None:
+    """丢弃 ``part`` 已有内容，但**保留 inode**（因而也保留 _open_part 拿到的 flock）。
+
+    不能用 unlink：flock 锁的是 inode 而非路径。删掉目录项后锁就挂在一个没有名字的
+    inode 上，别的进程在 ``_open_part`` 里会在同一路径新建 inode 并成功抢到锁——两边
+    于是都往同一个 ``.part`` 写自己的字节流（正是 ``_open_part`` docstring 点名要防的
+    共享 dest 场景）。交错出来的内容永远校验不过，表现成"重跑多少次都是 sha256 不符"，
+    把诊断指向"镜像被投毒"，而网络和镜像其实都是好的。
+
+    截断到 0 与删除对下游完全等价：``_stream`` 下一轮 ``stat`` 得 0 → 不带 Range、
+    以 ``"wb"`` 整段重写。
+    """
+    try:
+        os.truncate(part, 0)
+    except FileNotFoundError:
+        pass
+
+
 def _stream(url: str, part: Path, expected_size: int | None, *, quiet: bool) -> None:
     """流式下载到 ``part``；``part`` 已有内容时尝试 Range 续传（78MB 跨境链路值得）。
 
@@ -187,8 +205,11 @@ def _stream(url: str, part: Path, expected_size: int | None, *, quiet: bool) -> 
     """
     offset = part.stat().st_size if part.is_file() else 0
     if offset and expected_size and offset >= expected_size:
-        # 已有内容不小于目标 → 是脏文件（上次写坏 / 换了资产），从头下
-        part.unlink()
+        # 已有内容不小于目标 → 是脏文件（上次写坏 / 换了资产），从头下。
+        # 截断而非删除：见 _discard_part（删了会让本进程的 flock 脱靶）。这条路径
+        # 尤其要紧——目录里留着一份换代后的超长 .part 就会命中，不需要任何 sha 不符，
+        # 整轮调用从第一次 _stream 起就在无锁状态下跑。
+        _discard_part(part)
         offset = 0
 
     headers = {"User-Agent": "miloco-fetch-models"}
@@ -274,7 +295,9 @@ def _fetch_one(
                         f"实得 {got[:12]}…），丢弃重下",
                         quiet=quiet,
                     )
-                    part.unlink(missing_ok=True)
+                    # 截断而非删除：删掉目录项后 flock 就脱靶，退避 sleep 的这 1-2s
+                    # 里别的进程会新建同名 inode 并抢锁成功，两边交错写同一个 .part。
+                    _discard_part(part)
                 except (urllib.error.URLError, OSError, TimeoutError) as exc:
                     # 故意不删 part：截断/超时留下的字节是下一轮 Range 续传的起点。
                     _log(f"  ! {name}  下载失败（{attempt}/{_MAX_RETRIES}）：{exc}", quiet=quiet)

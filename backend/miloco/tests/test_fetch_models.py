@@ -13,12 +13,14 @@
 
 import hashlib
 import http.server
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -477,6 +479,77 @@ def test_part_survives_process_exit_so_next_run_resumes(tmp_path: Path) -> None:
     assert second.returncode == 0, second.stderr
     assert (dest / "resume.onnx").read_bytes() == body
     assert list(dest.glob("*.part")) == [], "成功后不许留下 .part"
+
+
+# ─── 共享 dest：.part 的 flock 与 inode ─────────────────────────────────────
+
+
+def _load_script_module() -> Any:
+    """把脚本当模块导进来。
+
+    本文件其余用例一律走 subprocess（见模块 docstring），这一条是例外：
+    "丢弃 .part 之后锁还在不在"是个 inode 级的性质，跨进程断言只能靠时序去撞，
+    必然 flaky。直接调函数把性质钉死。
+    """
+    spec = importlib.util.spec_from_file_location("_fetch_models_under_test", _SCRIPT)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_discarding_part_keeps_inode_so_flock_still_guards_it(tmp_path: Path) -> None:
+    """丢弃 .part 内容必须保留 inode —— flock 锁的是 inode，不是路径。
+
+    换成 unlink 的话：目录项没了，锁挂在一个没有名字的 inode 上，别的进程在
+    _open_part 里于同一路径新建 inode 就能抢锁成功。两边于是同时往同一个 .part 写，
+    交错出来的字节永远校验不过，而报出来的是"sha256 不符"——诊断被指向"镜像被投毒"，
+    实际网络和镜像都是好的（_stream docstring 明确想避免的那种误导）。
+    """
+    fcntl = pytest.importorskip("fcntl", reason="Windows 上 _open_part 本就退化成无锁")
+    mod = _load_script_module()
+
+    part = tmp_path / "det_4C.onnx.part"
+    part.write_bytes(b"stale oversized junk" * 64)
+    holder = open(part, "a+b")  # 模拟 _open_part 抢到稳定名
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    ino_before = part.stat().st_ino
+    try:
+        mod._discard_part(part)
+
+        # 内容清空（下一轮 _stream stat 得 0 → "wb" 整段重写），但还是同一个 inode
+        assert part.is_file()
+        assert part.stat().st_size == 0
+        assert part.stat().st_ino == ino_before
+
+        # 关键断言：锁仍然守得住这个路径，"另一个进程"抢不到
+        rival = open(part, "a+b")
+        try:
+            with pytest.raises(OSError):
+                fcntl.flock(rival.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            rival.close()
+    finally:
+        holder.close()
+
+    # 文件已不在时不许抛：重试路径上它可能已被别处清掉
+    mod._discard_part(tmp_path / "never-existed.part")
+
+
+def test_sha_mismatch_still_leaves_no_part_behind(
+    fake_release: tuple[Path, Path, Path],
+) -> None:
+    """截断代替删除之后，收尾仍不许留下 .part 垃圾。
+
+    _discard_part 把文件留在原地（0 字节），靠 _fetch_one 收尾那段"空文件没有续传
+    价值"把壳清掉。这条是防回归：别为了保住锁而攒下一地 0 字节 .part。
+    """
+    lock, src, dest = fake_release
+    (src / "req.onnx").write_bytes(b"wrong bytes")
+
+    r = _run("--lock", str(lock), "--dest", str(dest), "--only", "req.onnx")
+    assert r.returncode == 1
+    assert list(dest.glob("*.part")) == [], "sha 不符收尾后不许留下 .part"
 
 
 def test_empty_source_list_is_usage_error(tmp_path: Path) -> None:

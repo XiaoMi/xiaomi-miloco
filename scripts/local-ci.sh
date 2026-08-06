@@ -61,7 +61,12 @@ run_backend_tests() {
     # 阻塞"分支、退出码 0，本地一声不吭，而 CI 那边 5 个模型齐全跑的是 EventEmbedder
     # 真实向量那条路径——两边测的不是同一个东西，"已对齐 CI"的判断就是假的。
     if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --strict --quiet --dest "$models_dir" >/dev/null 2>&1; then
-        info "感知模型未就绪 → requires_models 用例会 skip；补齐：python3 scripts/fetch_models.py"
+        # 文案要覆盖 --strict 实际命中的两种情况：只说 requires_models 的话，"只缺
+        # 可选模型"时这条会打出来、而 test_deep_sort_v12 一条没 skip，读的人就把它
+        # 归档成噪音，下次必需模型真缺时也拦不住人了。
+        info "感知模型未按 lock 就绪（--strict，可选模型也算）：缺必需模型 → requires_models 那批整批 skip；"
+        info "  只缺可选模型（bge / VAD）→ 用例照跑但走降级分支，与 CI 测的不是同一条路径"
+        info "  两种都用这条补齐：python3 scripts/fetch_models.py"
     fi
     cd "$REPO_ROOT/backend"
     # 关键: 隔离本地 config.json（含 token），与 CI 干净环境对齐
