@@ -41,9 +41,9 @@ die() { log "FATAL: $*"; exit 1; }
 # 唯一的自动消费方是 CI 那句 `run:`，只看零/非零，为此另立一套码段没有收益）。
 #
 # 三个子命令一律先过这道校验，**不**按"用不用得上 TAG"分叉。refresh-lock <dir> 确实用
-# 不到 tag，但 refresh_lock_from_dir 里同样要 json.loads 这份 lock（见下面 :85 那行），
-# 按需分叉的话恰好是它绕开校验、traceback 原样还在 —— 而"合并完先跑一次 refresh-lock"
-# 正是最容易撞上冲突标记的那条路。
+# 不到 tag，但 refresh_lock_from_dir 里同样要 json.loads 这份 lock（那段 Python 的头一
+# 句就是），按需分叉的话恰好是它绕开校验、traceback 原样还在 —— 而"合并完先跑一次
+# refresh-lock"正是最容易撞上冲突标记的那条路。
 #
 # 走 argv 而不是把 $LOCK 插进 Python 源码串（与本文件另外三处调 python3 的写法一致）：
 # 插进去的话，clone 到含单引号或反斜杠的路径下（/home/o'brien/miloco、Git Bash 的路径）
@@ -144,7 +144,8 @@ for p in files:
         # 个键」这种漂移，于是下一次 upload 就把它写成可选。翻面之后 install-hermes.sh
         # 那趟不带 --strict 的补齐从退 1 变成退 0：三条 warn 一条不打、安装报成功，
         # 用户第一次 perceive 才拿到 models_missing；而 lock 说可选、resource_validator
-        # 里仍是硬编码必需，恰好是 :106 点名要人工对齐的那个字段自己分了家。
+        # 里仍是硬编码必需 —— 恰好是护栏那句「新增项记得手工把 required / desc 与
+        # resource_validator.py 对齐」点名的那个字段，自己分了家。
         # 真正新增的文件仍默认 false —— 那条路径已由护栏显式放行并要求人工对齐。
         "required": bool(prev.get("required", True)) if prev is not None else False,
         "desc": (prev or {}).get("desc", ""),
@@ -214,11 +215,11 @@ cmd_upload() {
 # 资产被换而某分支的 lock 没跟着 refresh 时，构建能不能过取决于 actions/cache 有没有
 # 命中 —— 命中就拿旧字节比旧 lock（通过，零请求），缓存一被逐出就下到新资产、sha256
 # 不符（红）。同一个 commit 今天绿下周红，且看日志完全看不出为什么。
-# 前置检查刻意留给调用方（cmd_upload 在 :136 已查过，直接跑 verify 由 case 分派处查）：
-# need_gh 里的 die 也是 exit，摆在这儿会和下面那处一样打穿 cmd_upload 的非致命分支，
-# 而且更隐蔽 —— gh auth status 不是纯本地检查，它要发一次请求验 token；从 :136 那次
-# 检查到这里隔着 78MiB 上传 + 78MiB 重算 hash，通常好几分钟，token 过期或网络抖一下
-# 就够了。搬出去之后这个函数体内再没有任何能 exit 的语句。
+# 前置检查刻意留给调用方（cmd_upload 开头那句 need_gh 已查过，直接跑 verify 由 case
+# 分派处查）：need_gh 里的 die 也是 exit，摆在这儿会和下面那处一样打穿 cmd_upload 的
+# 非致命分支，而且更隐蔽 —— gh auth status 不是纯本地检查，它要发一次请求验 token；
+# 从 cmd_upload 那次 need_gh 到这里隔着 78MiB 上传 + 78MiB 重算 hash，通常好几分钟，
+# token 过期或网络抖一下就够了。搬出去之后这个函数体内再没有任何能 exit 的语句。
 cmd_verify() {
     local assets
     if ! assets="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, size, digest}]')"; then
