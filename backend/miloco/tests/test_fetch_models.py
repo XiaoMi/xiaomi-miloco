@@ -673,6 +673,57 @@ def test_discarding_part_keeps_inode_so_flock_still_guards_it(tmp_path: Path) ->
     mod._discard_part(tmp_path / "never-existed.part")
 
 
+def test_local_source_failure_retries_without_backing_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """file:// 源上取不到文件时不许干等 —— 重试照留，退避必须跳过。
+
+    "等一会儿再试"能改变结果的前提是失败来自链路抖动；本地源上读不到就是读不到，
+    退避是纯粹的白等。而唯一会撞上它的调用方恰好是静默的：install-hermes.sh 拿旁边
+    那份 checkout 当 file:// 源跑同步，源目录只有一部分模型是常态（fork 的 checkout
+    本就如此），缺的每个文件白等 1s+2s —— 5 个里缺 4 个就是 12s 零输出，卡在两条 info
+    之间，看起来像脚本挂了，而这 12s 对结果毫无贡献（那几个本来就由后面联网那趟去补）。
+
+    这条和 test_discarding_part_keeps_inode… 一样走进程内：跨进程只能拿墙钟去撞
+    "有没有 sleep 满 3 秒"，阈值定多少都是在赌 CI 的负载。直接看 sleep 有没有被调。
+    """
+    mod = _load_script_module()
+
+    slept: list[float] = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+
+    src = tmp_path / "checkout"  # 空源目录：lock 里的名字一个都取不到
+    src.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    spec = {"name": "det_4C.onnx", "size": 3, "sha256": _sha(b"abc"), "required": True}
+
+    ok = mod._fetch_one(spec, dest, [src.resolve().as_uri()], force=False, quiet=True)
+
+    assert ok is False, "文件本就不存在，不该报成功"
+    assert slept == [], f"file:// 源上不该退避，实际睡了 {slept}"
+
+    # 退避跳了，重试没跳：本地源也可能撞上 EIO / 半路被换掉，那时重试仍有意义。
+    slept.clear()
+    attempts = 0
+    real_stream = mod._stream
+
+    def counting_stream(url: str, *a: Any, **kw: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        real_stream(url, *a, **kw)
+
+    monkeypatch.setattr(mod, "_stream", counting_stream)
+    mod._fetch_one(spec, dest, [src.resolve().as_uri()], force=False, quiet=True)
+    assert attempts == mod._MAX_RETRIES, f"重试次数不该变，实际 {attempts}"
+    assert slept == []
+
+    # 反过来，网络源上退避必须照旧 —— 别为了修上面那条把重试打成无退避连打。
+    slept.clear()
+    mod._fetch_one(spec, dest, ["http://127.0.0.1:1/nope"], force=False, quiet=True)
+    assert slept == [1, 2], f"http 源仍须 1s/2s 退避，实际 {slept}"
+
+
 def test_sha_mismatch_still_leaves_no_part_behind(
     fake_release: tuple[Path, Path, Path],
 ) -> None:

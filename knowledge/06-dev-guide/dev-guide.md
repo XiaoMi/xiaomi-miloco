@@ -398,7 +398,7 @@ python3 scripts/fetch_models.py --dest ~/.openclaw/miloco/models   # 直接补�
 MILOCO_MODELS_BASE_URL=https://mirror.example.com/miloco-models python3 scripts/fetch_models.py
 ```
 
-模型目录已进 `.gitignore`（`backend/miloco/src/miloco/perception/models/*`），所以 `git clean -xdf` 会把它清空、`git worktree add` 出来的新工作区也是空的 —— 两种情况下都要重新 fetch 一次（约 78MB）。想省这一趟：从另一个 checkout 直接 `cp` 过来即可，`fetch_models.py` 对已符合 lock（size + sha256）的文件只校验不下载，补齐后再跑一次是零流量的。注意 `MILOCO_MODELS_DEST` 帮不上忙 —— build.sh / CI / install-hermes 都显式传 `--dest`，优先级高于该环境变量，它只对手敲的裸 `fetch_models.py` 生效。
+模型目录已进 `.gitignore`（`backend/miloco/src/miloco/perception/models/*`），所以 `git clean -xdf` 会把它清空、`git worktree add` 出来的新工作区也是空的 —— 两种情况下都要重新 fetch 一次（约 78MB）。想省这一趟：从另一个 checkout 直接 `cp` 过来即可，`fetch_models.py` 对 sha256 与 lock 一致的文件只校验不下载，补齐后再跑一次是零流量的（但不是零成本：就绪判据只认 sha256，与下载落地那次校验同源，所以每次都要把这几十 MB 全量 hash 一遍；lock 里的 `size` 不参与就绪判定，由 `publish_models.sh verify` 拿线上资产的真实大小去对）。注意 `MILOCO_MODELS_DEST` 帮不上忙 —— build.sh / CI / install-hermes 都显式传 `--dest`，优先级高于该环境变量，它只对手敲的裸 `fetch_models.py` 生效。
 
 维护者换模型：`bash scripts/publish_models.sh upload <目录>` 上传到 Release 并同步 lock（`models` 是固定 tag、资产可变，换完**必须**同步 lock，否则老 commit 锁的 sha256 对不上新资产）。`bash scripts/publish_models.sh verify` 做零下载对账（比对 Release 资产的 name/size/sha256 与 lock 是否全等），CI 的 lint job 跑的就是它 —— 资产被换而 lock 没跟上时，它把"随缓存年龄漂移的间歇失败"变成一个确定的失败点。
 

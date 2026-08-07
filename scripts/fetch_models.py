@@ -289,7 +289,12 @@ def _fetch_one(
     quoted = urllib.parse.quote(name)
     try:
         for url in urls:
-            host = urllib.parse.urlparse(url).netloc or url
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.netloc or url
+            # 只有网络源值得退避——"等一会儿再试"能改变结果的前提是失败来自链路抖动。
+            # file:// 上读不到就是读不到，退避纯属白等，判据与 _stream 里那条
+            # Range 只发给 http/https 的守卫同源。
+            backoff = parsed.scheme in ("http", "https")
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     _log(
@@ -334,7 +339,13 @@ def _fetch_one(
                             f"  ! {name}  下载失败（{attempt}/{_MAX_RETRIES}）：{exc}",
                             quiet=quiet,
                         )
-                if attempt < _MAX_RETRIES:
+                # 重试本身照留（本地源也可能撞上 EIO / 半路被换掉），只是不再干等：
+                # install-hermes.sh 拿旁边的 checkout 当 file:// 源跑同步时，源目录缺
+                # 几个模型是常态（fork 的 checkout 本就可能只有一部分），而那条路径是
+                # 静默的 —— 每个缺失文件白等 1s+2s，表现成安装器在两条 info 之间无声
+                # 卡住十几秒，还恰好卡在"看起来像挂了"的位置。缺的那几个本来就该由
+                # 后面的门禁和联网那一趟去补、去说。
+                if attempt < _MAX_RETRIES and backoff:
                     time.sleep(2 ** (attempt - 1))
 
         # 所有源都试完仍未就绪：稳定名的 .part **不删** —— 它正是下一次调用带 Range

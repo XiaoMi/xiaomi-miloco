@@ -679,8 +679,10 @@ PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
 
 # 判「齐不齐」的工具先就位：下面的短路和最后那道门禁用的是同一个判据。
-# --check --strict 不联网、只比本地文件与 lock 的 size+sha256，缺任何一个（含可选）
-# 都判不齐 —— 可选模型缺了也该补，否则 bge 去重 / VAD 会静默降级。
+# --check --strict 不联网、只比本地文件与 lock 的 sha256（判据与下载落地那次校验同源，
+# 见 fetch_models.py 的 _is_ready；lock 里的 size 不参与就绪判定，由 publish_models.sh
+# verify 拿线上资产的真实大小去对），缺任何一个（含可选）都判不齐 —— 可选模型缺了也
+# 该补，否则 bge 去重 / VAD 会静默降级。
 FETCH_MODELS="$HERE/../../scripts/fetch_models.py"
 # 装到 $HERMES_PLUGINS_DIR 之后 $HERE 旁边没有 scripts/，退回旧的弱判据。
 [ -f "$FETCH_MODELS" ] || FETCH_MODELS=""
