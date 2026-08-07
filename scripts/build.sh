@@ -47,7 +47,16 @@ while [[ $# -gt 0 ]]; do
         --version)   VERSION="$2"; shift 2 ;;
         --packages)  PACKAGES="$2"; shift 2 ;;
         -h|--help)
-            sed -n '5,15p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+            # 打到抬头注释块结束（第一个非 # 行），不写死结束行号 —— 与
+            # publish_models.sh / sync-to-remote.sh 同一写法。写死的话，往选项列表里插一
+            # 行就会把帮助的尾巴（「退出码: ...」那行）无声截掉：不报错、仍退 0，只是少一
+            # 行，而没人会为此专门跑一次 --help 去比对。本 PR 自己就改过这段抬头（--packages
+            # 那行加了 hermes）。
+            #
+            # 顺带修掉一个 macOS 上一直存在的显示 bug：原来那截 `sed 's/^# \?//'` 里的 \?
+            # 是 GNU 扩展，BSD sed 把它当字面问号，于是只有 "# ?" 开头的行会被剥，实际表现
+            # 是 macOS 上 `build.sh --help` 每一行都还挂着 "# "。awk 用的是 ERE，两边一致。
+            awk 'NR<5{next} !/^#/{exit} {sub(/^#[[:space:]]?/,""); print}' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *) die 4 "未知参数: $1" ;;

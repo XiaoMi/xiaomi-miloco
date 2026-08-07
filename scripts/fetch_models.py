@@ -119,6 +119,41 @@ def _check_name(name: str) -> None:
         raise ValueError(f"lock 里的文件名不合法（不能为空 / 含路径分隔符 / 以点开头）：{name!r}")
 
 
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _check_spec(spec: dict[str, Any]) -> None:
+    """把一条 lock 记录里"下载器真正依赖的键"在启动时一次校验掉。
+
+    调用点在 main 读 lock 的那个 try 里，所以这里抛什么都会被收敛成"一行中文 + 退 2"。
+    不在这儿拦的键会带着 KeyError / TypeError 穿到下载中途才炸，那时退的是 **1** ——
+    而 1 在本脚本的契约里是"必需模型缺失"，install-hermes.sh 的四分支门禁会照这个含义
+    提示用户"没下到模型、稍后重试"。用户重试多少次都没用：坏的是本地这份 lock。
+    lock 既会被 refresh-lock 重生成，也会被人手编辑，手滑是常态。
+    """
+    _check_name(spec["name"])
+
+    # sha256 是判"就位"的唯一依据（size 不参与），缺了会在第一次校验就 KeyError。
+    # CI 缓存命中那条路最容易撞上：文件都在本地，一次网络请求都还没发就炸了。
+    # 顺带钉死长度和字符集 —— 粘贴截断的摘要不会匹配上任何文件，落到用户眼前是
+    # "每次都说校验不通过、重下还是不通过"，比直接说 lock 坏了难查得多。
+    digest = spec.get("sha256")
+    if not isinstance(digest, str) or len(digest) != 64 or not _HEX.issuperset(digest):
+        raise ValueError(f"{spec['name']}: sha256 要是 64 位十六进制字符串，实得 {digest!r}")
+    # 统一转小写：比对的是 hexdigest() 的小写输出 + ``==``，lock 里写成大写（Windows 的
+    # `certutil -hashfile` 输出就是大写）会让每个文件都判"校验不通过"，表现成永远下不完
+    # 的重下循环，而每一步单看都正常。
+    spec["sha256"] = digest.lower()
+
+    # size 是可选键，但给了就得能参与算术：_human() 与续传的越界判断都直接拿它比大小，
+    # 字符串会 TypeError。放在这儿而不是下载那步，是因为校验流程本身压根不读 size：
+    # 没有这道拦截，CI 那道 `--check --strict` 门禁会对着一份坏 lock 照常亮绿，等真正
+    # 下载时才炸 —— 而那时退的是 1，含义又被 install-hermes.sh 读成"重试一下就好"。
+    size = spec.get("size")
+    if size is not None and (not isinstance(size, int) or size < 0):
+        raise ValueError(f"{spec['name']}: size 要是非负整数，实得 {size!r}")
+
+
 _OK_SCHEMES = ("http", "https", "file")
 
 
@@ -452,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
         files: list[dict[str, Any]] = lock["files"]
         for spec in files:
-            _check_name(spec["name"])
+            _check_spec(spec)
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         print(f"lock 文件不可用（{lock_path}）：{exc}", file=sys.stderr)
         return 2

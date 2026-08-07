@@ -422,6 +422,71 @@ def test_bad_lock_is_usage_error(tmp_path: Path) -> None:
     assert _run("--lock", str(tmp_path / "missing.json")).returncode == 2
 
 
+def _one_file_lock(tmp_path: Path, spec: dict) -> Path:
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps({"base_url": (tmp_path / "release").as_uri(), "mirrors": [], "files": [spec]}),
+        encoding="utf-8",
+    )
+    return lock
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        pytest.param({"name": "a.onnx", "size": 5}, id="sha256-缺失"),
+        pytest.param({"name": "a.onnx", "size": 5, "sha256": 12345}, id="sha256-不是字符串"),
+        pytest.param({"name": "a.onnx", "size": 5, "sha256": ""}, id="sha256-空串"),
+        pytest.param({"name": "a.onnx", "size": 5, "sha256": _sha(b"x")[:20]}, id="sha256-截断"),
+        pytest.param({"name": "a.onnx", "size": 5, "sha256": "z" * 64}, id="sha256-非十六进制"),
+        pytest.param({"name": "a.onnx", "size": "5", "sha256": _sha(b"x")}, id="size-是字符串"),
+        pytest.param({"name": "a.onnx", "size": -1, "sha256": _sha(b"x")}, id="size-负数"),
+    ],
+)
+def test_structurally_valid_lock_with_a_bad_key_is_usage_error(
+    tmp_path: Path, spec: dict
+) -> None:
+    """lock 能解析、但下载器依赖的键坏了 —— 必须是"一行中文 + 退 2"，不许 traceback。
+
+    退出码这一轴是要害，不只是"别难看"：本脚本的 1 表示"必需模型缺失"，
+    install-hermes.sh 的四分支门禁照这个含义提示用户"没下到、稍后重试"，而重试
+    多少次都没用，坏的是本地这份 lock。把校验从 main 那个 try 里挪走即变红。
+
+    size 那两条单独有意义：--check 压根不碰 size，所以 CI 的 `--check --strict`
+    门禁会照常绿，等真正下载那步才炸 —— 一绿一红出现在紧挨着的两个 step 上。
+    这里刻意不带 --check，走的就是会炸的那条路径。
+    """
+    (tmp_path / "release").mkdir()
+    dest = tmp_path / "d"
+    dest.mkdir()
+    # 文件按 lock 的名字放在 dest 里：让"本地已就绪"这条最早的路径（_is_ready）先跑到，
+    # 这也是 CI 缓存命中时的形态 —— 一次网络请求都还没发就炸了。
+    (dest / "a.onnx").write_bytes(b"hello")
+
+    r = _run("--lock", str(_one_file_lock(tmp_path, spec)), "--dest", str(dest))
+    assert r.returncode == 2, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "lock" in r.stderr
+
+
+def test_uppercase_sha256_in_lock_still_matches(tmp_path: Path) -> None:
+    """lock 里的摘要写成大写要照常认，不能判成"校验不通过"。
+
+    比对用的是 hexdigest() 的小写输出加 `==`，而 Windows 的 `certutil -hashfile`
+    输出就是大写 —— 不归一化的话每个文件都判不通过，表现成"永远下不完"的重下循环
+    （每次重下都成功、每次校验都失败），而单看每一步都很正常。
+    """
+    (tmp_path / "release").mkdir()
+    dest = tmp_path / "d"
+    dest.mkdir()
+    (dest / "a.onnx").write_bytes(b"hello")
+    spec = {"name": "a.onnx", "size": 5, "sha256": _sha(b"hello").upper()}
+
+    r = _run("--lock", str(_one_file_lock(tmp_path, spec)), "--dest", str(dest))
+    assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+    assert "已就绪" in r.stderr  # 进度都走 _log → stderr
+
+
 def test_empty_selection_is_usage_error(fake_release: tuple[Path, Path, Path]) -> None:
     """`--only <可选> --required-only` 选出空集时要报错，不能"空循环 → exit 0"。
 
