@@ -145,10 +145,26 @@ def _check_spec(spec: dict[str, Any]) -> None:
     # 的重下循环，而每一步单看都正常。
     spec["sha256"] = digest.lower()
 
-    # size 是可选键，但给了就得能参与算术：_human() 与续传的越界判断都直接拿它比大小，
-    # 字符串会 TypeError。放在这儿而不是下载那步，是因为校验流程本身压根不读 size：
-    # 没有这道拦截，CI 那道 `--check --strict` 门禁会对着一份坏 lock 照常亮绿，等真正
-    # 下载时才炸 —— 而那时退的是 1，含义又被 install-hermes.sh 读成"重试一下就好"。
+    # 可选键写成 null 必须与"整条不写"同义。这不是洁癖：``.get(key, default)`` 的默认值
+    # 只在**键不存在**时生效，键在、值是 None 时原样返回 None，于是每个可选键都从为它
+    # 设计的那道判据下面绕过去，而两个键漏下去的后果还完全不同 ——
+    #   size:     下游 spec.get("size", 0) 拿到 None → _human() 拿它比大小 → TypeError
+    #             → traceback + 退 1。--quiet 也救不了：f-string 的参数在调用 _log 之前
+    #             就已经求值了。
+    #   required: _required() 里 bool(None) 是 False → 必需模型被静默降级成可选。build 的
+    #             --strict、CI 门禁、install-hermes 的就绪判据全照 required 判，于是少一个
+    #             必需模型的包能一路退 0 发出去 —— 比炸掉更糟，因为没有任何人收到信号。
+    #             这正好是 _required() 那句 fail-closed 契约的反面：漏写键它兜得住，写成
+    #             null 反而兜不住。
+    # 手写 lock 时先占位、回头再填是很自然的写法，两个键都撞得上。
+    for key in ("size", "required"):
+        if key in spec and spec[key] is None:
+            del spec[key]
+
+    # size 给了就得能参与算术：_human() 与续传的越界判断都直接拿它比大小，字符串会
+    # TypeError。放在这儿而不是下载那步，是因为校验流程本身压根不读 size：没有这道拦截，
+    # CI 那道 `--check --strict` 门禁会对着一份坏 lock 照常亮绿，等真正下载时才炸 ——
+    # 而那时退的是 1，含义又被 install-hermes.sh 读成"重试一下就好"。
     size = spec.get("size")
     if size is not None and (not isinstance(size, int) or size < 0):
         raise ValueError(f"{spec['name']}: size 要是非负整数，实得 {size!r}")

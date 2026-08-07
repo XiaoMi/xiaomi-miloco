@@ -521,6 +521,55 @@ def test_missing_required_key_is_treated_as_required(tmp_path: Path) -> None:
     assert "必需模型未就绪" in r.stderr
 
 
+def test_null_required_is_treated_as_required(tmp_path: Path) -> None:
+    """`"required": null` 要跟上面"漏写 required"同一个结论：必需。
+
+    比漏写更险 —— `.get("required", True)` 的默认值只在**键不存在**时生效，键在、
+    值是 None 时原样返回 None，`bool(None)` 即 False，必需模型就被静默降级成可选。
+    而 build 的 --strict、CI 门禁、install-hermes 的就绪判据全照 required 判，
+    于是少一个必需模型的包能一路退 0 发出去：没有 traceback、没有红，没人收到信号。
+    """
+    src = tmp_path / "release"
+    src.mkdir()
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "base_url": src.as_uri(),
+                "mirrors": [],
+                "files": [
+                    {"name": "gone.onnx", "size": 3, "sha256": _sha(b"abc"), "required": None}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = _run("--lock", str(lock), "--dest", str(tmp_path / "d"))
+    assert r.returncode == 1, f"rc={r.returncode}（0 = 被当成可选放行了）\n{r.stderr}"
+    assert "必需模型未就绪" in r.stderr
+
+
+def test_null_size_behaves_like_a_missing_size_key(tmp_path: Path) -> None:
+    """`"size": null` 要跟"整条不写 size"同义，不能炸成 traceback。
+
+    size 按设计就是可选键（不写只是不显示百分比），但下游取值是
+    `spec.get("size", 0)`，默认值只在键缺失时生效 —— null 会原样漏进 `_human()`
+    比大小 → TypeError → 退 **1**，而 1 在本脚本契约里是"必需模型缺失"，
+    install-hermes.sh 会照这个含义提示"稍后重试"，重试多少次都没用。
+    `--quiet` 也救不了：f-string 的参数在调用 `_log` 之前就已经求值了。
+    """
+    (tmp_path / "release").mkdir()
+    dest = tmp_path / "d"
+    dest.mkdir()
+    (dest / "a.onnx").write_bytes(b"hello")
+    spec = {"name": "a.onnx", "size": None, "sha256": _sha(b"hello")}
+
+    r = _run("--lock", str(_one_file_lock(tmp_path, spec)), "--dest", str(dest))
+    assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "已就绪" in r.stderr
+
+
 def test_path_traversal_in_lock_name_is_rejected(tmp_path: Path) -> None:
     """lock 里的文件名直接拼进 dest 路径和 URL，不许含路径分隔符。
 

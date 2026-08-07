@@ -787,7 +787,11 @@ elif [ -n "$FETCH_MODELS" ]; then
   if ! "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models"; then
     warn "感知模型下载失败（网络？）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-    warn "修法：重跑 $FETCH_MODELS --dest $MILOCO_HOME/models，或手动放置模型文件"
+    # 带上解释器：本文件在 git 里是 100644、没有可执行位，裸路径原样粘贴会 Permission
+    # denied（退 126），而这个新错误跟刚才的下载失败毫无关系，只会把人往"权限 / 文件
+    # 损坏"的方向带偏。用户此刻正处在失败状态，这行是他手上唯一的线索，大概率整行复制。
+    # 与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
+    warn "修法：重跑 $PYTHON $FETCH_MODELS --dest $MILOCO_HOME/models，或手动放置模型文件"
   fi
 else
   warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"
