@@ -779,7 +779,20 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
   # --post-install 是"幂等补齐收尾"的轻量重跑，不该在这里静默拉 78MB：
   # 上面的 cp（本地、秒级）照做，联网下载留给用户显式触发。
   warn "感知模型不齐，但 --post-install 模式不做下载（可能 ~78MB）"
-  warn "补齐：$PYTHON ${FETCH_MODELS:-scripts/fetch_models.py} --dest $MILOCO_HOME/models"
+  if [ -n "$FETCH_MODELS" ]; then
+    warn "补齐：$PYTHON $FETCH_MODELS --dest $MILOCO_HOME/models"
+  else
+    # 不能拿 ${FETCH_MODELS:-scripts/fetch_models.py} 兜底：`:-` 只在变量为空时取用，
+    # 而变量为空的充要条件就是"本脚本旁边没有 checkout"（见上面 FETCH_MODELS 的探测）
+    # —— 也就是相对路径 scripts/fetch_models.py 必然解析不到的那种处境，兜底值只在它
+    # 必然错的时候才出场。而 --post-install 的唯一调用方 install.py 正是从 tarball 解出
+    # 来的目录调的，那儿只有本脚本和插件目录，没有 scripts/。用户照抄会得到
+    # "can't open file .../scripts/fetch_models.py"，跟"模型不齐"毫无关系，只会把人往
+    # "文件损坏 / 路径写错"带偏 —— 正是下面 790 那段注释刚论证过要避免的事。
+    # 同理不提 scripts/models.lock.json：这个处境下那个文件同样不在手边。
+    warn "补齐：重跑 install.sh（安装包自带模型 tar，会解到 $MILOCO_HOME/models/）"
+    warn "  或在 git checkout 目录里跑：$PYTHON scripts/fetch_models.py --dest $MILOCO_HOME/models"
+  fi
 elif [ -n "$FETCH_MODELS" ]; then
   # 按 lock 从 upstream Release 下载（sha256 校验）。已齐的文件会被跳过，只补缺的。
   # 下载失败只 warn 不中断：感知会报 models_missing 降级，但插件其余部分照装。
