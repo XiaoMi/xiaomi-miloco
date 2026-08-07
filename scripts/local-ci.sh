@@ -56,7 +56,10 @@ run_backend_tests() {
     # skip，本地覆盖率悄悄比 CI 低。这里只校验不下载（不拖慢 --quick），缺了给提示。
     # --dest 显式给包内目录：不给的话 MILOCO_MODELS_DEST 一旦在环境里，校验的就不是
     # 下面 pytest 真正加载的那个目录，"就绪"提示会与实际情况脱节。
-    local models_dir="$REPO_ROOT/backend/miloco/src/miloco/perception/models"
+    # 相对路径写一次、绝对路径由它派生，校验与下面印出来的补齐命令因此不可能再指向两个
+    # 地方（下面那条注释说的就是这两处一旦分家会怎样）。
+    local models_rel="backend/miloco/src/miloco/perception/models"
+    local models_dir="$REPO_ROOT/$models_rel"
     # --strict：与 ci.yml 的门禁同强度。不加的话可选模型（bge / VAD）缺失走"只降级不
     # 阻塞"分支、退出码 0，本地一声不吭，而 CI 那边 5 个模型齐全跑的是 EventEmbedder
     # 真实向量那条路径——两边测的不是同一个东西，"已对齐 CI"的判断就是假的。
@@ -66,7 +69,15 @@ run_backend_tests() {
         # 归档成噪音，下次必需模型真缺时也拦不住人了。
         info "感知模型未按 lock 就绪（--strict，可选模型也算）：缺必需模型 → requires_models 那批整批 skip；"
         info "  只缺可选模型（bge / VAD）→ 用例照跑但走降级分支，与 CI 测的不是同一条路径"
-        info "  两种都用这条补齐：python3 scripts/fetch_models.py"
+        # --dest 必须跟着印出来，且必须是上面那次校验用的同一个目录：裸命令的目标目录会
+        # 回退到 MILOCO_MODELS_DEST，而把模型放仓库外共享给多个 worktree 的人往往在
+        # profile 里长期 export 它。那种环境下照抄一条不带 --dest 的命令，78MB 落到
+        # $MILOCO_MODELS_DEST，这条告警下次一字不差地再来一遍，requires_models 那批也照
+        # 旧整批 skip（test_deep_sort_v12.py 的判据是 __file__ 推出来的包内目录，环境变量
+        # 够不着），而人手里唯一的线索就是这条命令。给相对路径而非 $models_dir：前半截
+        # `scripts/fetch_models.py` 本来就是仓库根相对的，两截同口径才是一条能整体粘贴的
+        # 命令；且这个常量里没有空格/引号，不必再考虑印出来要怎么转义。
+        info "  两种都用这条补齐：python3 scripts/fetch_models.py --dest $models_rel"
     fi
     cd "$REPO_ROOT/backend"
     # 关键: 隔离本地 config.json（含 token），与 CI 干净环境对齐
