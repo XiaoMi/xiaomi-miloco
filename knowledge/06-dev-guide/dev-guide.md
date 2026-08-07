@@ -394,8 +394,10 @@ python3 scripts/fetch_models.py --dest ~/.openclaw/miloco/models   # 直接补�
 
 # 内网 / 离线换源。注意是**独占替换**而非"排在前面"：设了它就只用它，
 # lock 的 base_url + mirrors 全部不再兜底（离线场景要的正是"别再漏请求到公网"）。
-# 允许 http:// 与 file://，内容仍按 lock 的 sha256 校验。
+# 允许 http:// / https:// / file://，也允许直接给挂载目录的裸路径（按 file:// 处理），
+# 其余 scheme 当用法错误退 2；内容一律仍按 lock 的 sha256 校验。
 MILOCO_MODELS_BASE_URL=https://mirror.example.com/miloco-models python3 scripts/fetch_models.py
+MILOCO_MODELS_BASE_URL=/mnt/nas/miloco-models python3 scripts/fetch_models.py  # 完全离线
 ```
 
 模型目录已进 `.gitignore`（`backend/miloco/src/miloco/perception/models/*`），所以 `git clean -xdf` 会把它清空、`git worktree add` 出来的新工作区也是空的 —— 两种情况下都要重新 fetch 一次（约 78MB）。想省这一趟：从另一个 checkout 直接 `cp` 过来即可，`fetch_models.py` 对 sha256 与 lock 一致的文件只校验不下载，补齐后再跑一次是零流量的（但不是零成本：就绪判据只认 sha256，与下载落地那次校验同源，所以每次都要把这几十 MB 全量 hash 一遍；lock 里的 `size` 不参与就绪判定，由 `publish_models.sh verify` 拿线上资产的真实大小去对）。注意 `MILOCO_MODELS_DEST` 帮不上忙 —— build.sh / CI / install-hermes 都显式传 `--dest`，优先级高于该环境变量，它只对手敲的裸 `fetch_models.py` 生效。

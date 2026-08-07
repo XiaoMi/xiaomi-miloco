@@ -20,7 +20,9 @@
 环境变量:
   MILOCO_MODELS_BASE_URL  覆盖下载源（内网镜像 / 离线源）。是**独占替换**而非"排在前面"：
                           设了它就只用它，lock 的 base_url + mirrors 全部不再兜底。
-                          允许 http:// 与 file://（内网/离线场景），内容仍按 sha256 校验。
+                          允许 http:// / https:// / file://，也允许直接给挂载目录的裸路径
+                          （按 file:// 处理）；其余 scheme 当用法错误退 2。
+                          内容一律仍按 lock 的 sha256 校验。
   MILOCO_MODELS_DEST      覆盖下载目标目录（低于 --dest）。注意：只影响"下到哪"，
                           不影响运行时模型解析口径（那是 directories.models /
                           MILOCO_DIRECTORIES__MODELS，见 config/settings.py）
@@ -117,6 +119,36 @@ def _check_name(name: str) -> None:
         raise ValueError(f"lock 里的文件名不合法（不能为空 / 含路径分隔符 / 以点开头）：{name!r}")
 
 
+_OK_SCHEMES = ("http", "https", "file")
+
+
+def _normalize_env_source(env: str) -> str:
+    """把 MILOCO_MODELS_BASE_URL 的值规范成一个能交给 urllib 的 URL。
+
+    裸路径要兜底成 ``file://``：这个变量是离线/内网唯一的换源入口，而两个文档入口
+    都没把"要带 scheme"讲硬（sync-to-remote.sh 说的是"内网源"，README 与 dev-guide
+    只给了 https 的例子），于是最自然的写法就是给一个挂载目录的绝对路径。不兜底的话
+    值会原样拼进 URL，``urllib.request.Request`` 抛的是 **ValueError** ——它不在下载
+    循环那个 ``(URLError, OSError, TimeoutError)`` 里，会一路穿出 main：打 traceback、
+    退 1（文档定义为"必需模型缺失"）而不是文件头承诺的 2，剩下几个文件也不再尝试，
+    "可用 MILOCO_MODELS_BASE_URL 换源"那句提示更是永远打不出来 —— 插件安装器接住
+    非 0 后打的是"下载失败（网络？）"，而用户明明是刻意离线的。
+
+    scheme 长度为 1 时按裸路径处理：Windows 盘符 ``C:\\models`` 会被 urlparse 解析成
+    scheme ``"c"``（合法 scheme 至少两字符，不会误伤）。
+    转换结果会出现在下载日志和失败文案的"源：…"里，所以这层兜底不是隐身的。
+    """
+    scheme = urllib.parse.urlparse(env).scheme
+    if not scheme or len(scheme) == 1:
+        return Path(env).expanduser().resolve().as_uri()
+    if scheme not in _OK_SCHEMES:
+        raise ValueError(
+            f"MILOCO_MODELS_BASE_URL 只支持 {' / '.join(_OK_SCHEMES)}，"
+            f"实得 {scheme!r}：{env}"
+        )
+    return env.rstrip("/")
+
+
 def _sources(lock: dict[str, Any]) -> list[str]:
     """下载源：env 独占替换，否则 lock 的 base_url（GitHub 直连）+ mirrors（加速镜像）。
 
@@ -128,9 +160,18 @@ def _sources(lock: dict[str, Any]) -> list[str]:
     """
     env = os.environ.get("MILOCO_MODELS_BASE_URL", "").strip()
     if env:
-        return [env.rstrip("/")]
-    urls = [lock.get("base_url", ""), *lock.get("mirrors", [])]
-    return [u.rstrip("/") for u in urls if u]
+        return [_normalize_env_source(env)]
+    urls = [u for u in [lock.get("base_url", ""), *lock.get("mirrors", [])] if u]
+    for u in urls:
+        # lock 里只认合法 URL，裸路径**不**兜底 —— 与 env 那侧刻意不同。lock 是提交进
+        # 仓库、由 publish_models.sh refresh_lock 生成的产物，写成裸路径就是坏了，
+        # 而"坏 lock 退 2"是本脚本已有的契约（见 main 里读 lock 那段）。这里若跟着
+        # 兜底成 file://，就把一个一眼能定位的配置错误变成"从一个不存在的本地目录下载
+        # 失败"——退 1、文案说"必需模型未就绪 / 可用 MILOCO_MODELS_BASE_URL 换源"，
+        # 把人指向换源，而真正坏的是 lock 自己。
+        if urllib.parse.urlparse(u).scheme not in _OK_SCHEMES:
+            raise ValueError(f"lock 里的下载源不是合法 URL（需 http/https/file）：{u}")
+    return [u.rstrip("/") for u in urls]
 
 
 # ─── 下载 ────────────────────────────────────────────────────────────────────
@@ -445,7 +486,13 @@ def main(argv: list[str] | None = None) -> int:
             _log(f"  可选模型缺失（对应功能降级，不阻塞）：{', '.join(bad_optional)}", quiet=args.quiet)
         return 0
 
-    urls = _sources(lock)
+    # 与本函数里读 lock、_select 那两段同构：所有"输入不合法"都收敛成退 2，
+    # 不许有异常穿出去变成 traceback + 退 1。
+    try:
+        urls = _sources(lock)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     if not urls:
         print("lock 里没有可用下载源（base_url / mirrors 均为空）", file=sys.stderr)
         return 2

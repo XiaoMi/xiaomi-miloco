@@ -23,6 +23,9 @@ GitHub 直连拉不动时会自动换镜像（lock 的 `mirrors`，与 `scripts/
 
 ```bash
 MILOCO_MODELS_BASE_URL=https://mirror.example.com/miloco-models python3 scripts/fetch_models.py
+
+# 完全离线：给一个挂载目录即可，裸路径按 file:// 处理（其余 scheme 退 2）
+MILOCO_MODELS_BASE_URL=/mnt/nas/miloco-models python3 scripts/fetch_models.py
 ```
 
 ## 清单

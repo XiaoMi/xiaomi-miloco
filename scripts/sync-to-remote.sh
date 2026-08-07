@@ -24,7 +24,8 @@
 # 默认远端路径: ~/miloco-plugin
 # 注：backend 重启由 openclaw gateway restart 自动带起，本脚本不再单独重启 backend。
 # 注：感知 ONNX 模型（~78MB）不参与 rsync，远端 build.sh 自己按 scripts/models.lock.json
-#     拉。远端出网受限时，本地 export MILOCO_MODELS_BASE_URL=<内网源> 会一并透传过去。
+#     拉。远端出网受限时，本地 export MILOCO_MODELS_BASE_URL=<内网源> 会一并透传过去
+#     （http(s):// 或 file://，也可直接给裸路径；注意它是在**远端**解析的，写本机路径没用）。
 
 set -euo pipefail
 

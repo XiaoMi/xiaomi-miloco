@@ -231,6 +231,72 @@ def test_base_url_env_overrides_lock(
     assert (dest / "req.onnx").read_bytes() == _REQUIRED
 
 
+def test_base_url_env_accepts_a_bare_path(
+    fake_release: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    """换源变量给挂载目录的裸路径要能用 —— 这是离线场景最自然的写法。
+
+    不兜底成 file:// 的话，值原样拼进 URL，``urllib.request.Request`` 抛的是
+    **ValueError**：它不在下载循环那个 ``(URLError, OSError, TimeoutError)`` 里，
+    会一路穿出 main —— 打 traceback、退 1（文档定义为"必需模型缺失"）而不是文件头
+    承诺的 2，且剩下的文件不再尝试。
+    """
+    lock, src, dest = fake_release
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    for f in src.iterdir():
+        (mirror / f.name).write_bytes(f.read_bytes())
+        f.unlink()
+
+    r = _run(  # 裸路径，不带任何 scheme
+        "--lock", str(lock), "--dest", str(dest),
+        env={"MILOCO_MODELS_BASE_URL": str(mirror)},
+    )
+    assert r.returncode == 0, r.stderr
+    assert (dest / "req.onnx").read_bytes() == _REQUIRED
+    assert "Traceback" not in r.stderr
+
+
+def test_unsupported_env_scheme_is_usage_error(
+    fake_release: tuple[Path, Path, Path],
+) -> None:
+    """换源变量给了取不了的 scheme → 用法错误退 2，且不许是 traceback。
+
+    退 1 会被上层按"网络不好 / 模型不齐"分流（插件安装器就打"下载失败（网络？）"），
+    而用户明明是变量写错了。
+    """
+    lock, _src, dest = fake_release
+    r = _run(
+        "--lock", str(lock), "--dest", str(dest),
+        env={"MILOCO_MODELS_BASE_URL": "ftp://mirror.example.com/models"},
+    )
+    assert r.returncode == 2, r.stderr
+    assert "Traceback" not in r.stderr
+    assert "MILOCO_MODELS_BASE_URL" in r.stderr
+
+
+def test_bare_path_in_lock_is_a_lock_error_not_a_download_failure(
+    tmp_path: Path,
+) -> None:
+    """lock 里的源写成裸路径 → 退 2 报 lock 坏了，**不**跟着兜底成 file://。
+
+    与 env 那侧刻意不同：lock 是提交进仓库、由 publish_models.sh 生成的产物，写成
+    裸路径就是坏了，而"坏 lock 退 2"是本脚本已有的契约。跟着兜底的话，一个一眼能
+    定位的配置错误会变成"从一个不存在的本地目录下载失败"——退 1、文案还劝人换源。
+    """
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps({"base_url": "/mnt/nas/models", "mirrors": [], "files": [
+            {"name": "a.onnx", "size": 1, "sha256": _sha(b"a"), "required": True}
+        ]}),
+        encoding="utf-8",
+    )
+    r = _run("--lock", str(lock), "--dest", str(tmp_path / "dest"))
+    assert r.returncode == 2, r.stderr
+    assert "Traceback" not in r.stderr
+    assert "lock" in r.stderr
+
+
 def test_dest_env_is_honored(fake_release: tuple[Path, Path, Path]) -> None:
     lock, _src, dest = fake_release
     r = _run("--lock", str(lock), env={"MILOCO_MODELS_DEST": str(dest)})
