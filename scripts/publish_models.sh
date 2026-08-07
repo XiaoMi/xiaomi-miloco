@@ -17,8 +17,9 @@
 #   · `models` 这个 tag / Release 是可变的：换掉资产后老 commit 里的 lock hash 就对不上、
 #     老 commit 将构建失败。若要"老 commit 永远可构建"，请改用不可变 tag（models-v2 …）
 #     并同步更新 lock 的 release_tag / base_url。
-#   · required / desc 字段沿用旧 lock 里同名文件的取值；新增文件默认 required=false，
-#     需要的话手工改 lock（口径要与 perception/engine/resource_validator.py 对齐）。
+#   · required / desc 字段沿用旧 lock 里同名文件的取值（同名条目漏写 required 时按
+#     必需处理，与 fetch_models.py 同口径）；新增文件默认 required=false，需要的话手工
+#     改 lock（口径要与 perception/engine/resource_validator.py 对齐）。
 #   · upload / refresh-lock 发现"文件集与旧 lock 不同"会直接失败，防的是静默缩表：
 #     拿只含 2 个模型的目录跑一次，lock 就悄悄少 3 项、线上从此不再下发它们。
 #     确属换代（真要增删模型）时 MILOCO_MODELS_ALLOW_LOCK_DRIFT=1 重跑。
@@ -72,7 +73,8 @@ PY
 }
 
 # 按目录内的实际文件重写 lock：保留旧 lock 的 release_tag / base_url / mirrors，
-# 以及同名文件的 required / desc；size + sha256 全部重算。
+# 以及同名文件的 required / desc（同名条目漏写 required 时按必需保留，与下载器同口径，
+# 见下面那段注释）；size + sha256 全部重算。
 refresh_lock_from_dir() {
     local dir="$1"
     python3 - "$LOCK" "$dir" <<'PY'
@@ -112,13 +114,22 @@ for p in files:
     with open(p, "rb") as f:
         for chunk in iter(lambda: f.read(256 * 1024), b""):
             h.update(chunk)
-    prev = old.get(p.name, {})
+    prev = old.get(p.name)
     out.append({
         "name": p.name,
         "size": p.stat().st_size,
         "sha256": h.hexdigest(),
-        "required": bool(prev.get("required", False)),
-        "desc": prev.get("desc", ""),
+        # 同名旧条目缺 required 时按"必需"读，与 fetch_models._required 同口径
+        # （那边缺键 fail-closed 判必需）。两边默认值相反的话，「手工补 lock 时漏写
+        # required」会被下一次 refresh 静默翻面：漏写的那阵子一切是绿的（下载器一直
+        # 当它必需，没有任何信号），而上面那道护栏只比文件名集合，看不见「同名但少一
+        # 个键」这种漂移，于是下一次 upload 就把它写成可选。翻面之后 install-hermes.sh
+        # 那趟不带 --strict 的补齐从退 1 变成退 0：三条 warn 一条不打、安装报成功，
+        # 用户第一次 perceive 才拿到 models_missing；而 lock 说可选、resource_validator
+        # 里仍是硬编码必需，恰好是 :106 点名要人工对齐的那个字段自己分了家。
+        # 真正新增的文件仍默认 false —— 那条路径已由护栏显式放行并要求人工对齐。
+        "required": bool(prev.get("required", True)) if prev is not None else False,
+        "desc": (prev or {}).get("desc", ""),
     })
 
 # 必需模型排前面，其余按名字，diff 稳定

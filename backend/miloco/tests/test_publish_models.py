@@ -364,6 +364,59 @@ def test_upload_drift_can_be_forced_with_env(tmp_path: Path) -> None:
     assert {f["name"] for f in refreshed["files"]} == {"a.onnx", "b.onnx"}
 
 
+def test_refresh_lock_keeps_a_required_entry_required_when_the_key_is_missing(
+    tmp_path: Path,
+) -> None:
+    """同名旧条目漏写 ``required`` 时不许被翻成可选。
+
+    「lock 条目由人手写/手补」是这套流程**文档化的正常路径**（refresh 里那句"新增项
+    记得手工把 required / desc 与 resource_validator.py 对齐"）。而 fetch_models 缺键
+    fail-closed 判必需、这边缺键判可选的话，漏写的那阵子一切都是绿的（下载器一直当它
+    必需，没有任何信号提示写漏了），下一次 refresh 才把它静默翻成可选 —— 文件集护栏
+    只比名字集合，看不见"同名但少一个键"这种漂移。
+
+    翻面的代价落在唯一一条不带 ``--strict`` 的调用上（install-hermes.sh 那趟联网补齐）：
+    退出码从 1 变成 0，三条 warn 一条不打、安装报成功，用户第一次 perceive 才拿到
+    models_missing。build.sh 与两个 workflow 都带 --strict，所以这条泄漏只出现在
+    **面向用户**的那条路上。
+
+    反方向一并钉住：显式写了 ``required: false`` 的条目必须原样保留，别为了修这条
+    就把所有东西都翻成必需。
+    """
+    lock = _tiny_lock(["a.onnx", "b.onnx"])
+    for f in lock["files"]:
+        if f["name"] == "a.onnx":
+            del f["required"]  # 手工补 lock 时漏写
+        else:
+            f["required"] = False  # 显式可选，必须原样留着
+    sandbox = _Sandbox(tmp_path, lock)
+    d = _models_dir(tmp_path, ["a.onnx", "b.onnx"])
+
+    r = sandbox.run("refresh-lock", str(d))
+
+    # 文件集全等，护栏本就不该开火 —— 翻面正是发生在这条"看起来什么都没变"的路径上
+    assert r.returncode == 0, r.stderr
+    got = {f["name"]: f["required"] for f in json.loads(sandbox.lock.read_text("utf-8"))["files"]}
+    assert got == {"a.onnx": True, "b.onnx": False}, r.stderr
+
+
+def test_refresh_lock_still_defaults_a_brand_new_file_to_optional(tmp_path: Path) -> None:
+    """真正新增的文件仍默认可选 —— fail-closed 只适用于"同名旧条目缺键"。
+
+    新增走的是护栏显式放行（要 MILOCO_MODELS_ALLOW_LOCK_DRIFT=1）那条路，人已经在
+    环里、且被提示要手工对齐 required；默认判必需反而会让一个刚进来、还没人确认过的
+    文件立刻变成能判红全部构建的硬依赖。
+    """
+    sandbox = _Sandbox(tmp_path, _tiny_lock(["a.onnx"]))
+    d = _models_dir(tmp_path, ["a.onnx", "new.onnx"])
+
+    r = sandbox.run("refresh-lock", str(d), MILOCO_MODELS_ALLOW_LOCK_DRIFT="1")
+
+    assert r.returncode == 0, r.stderr
+    got = {f["name"]: f["required"] for f in json.loads(sandbox.lock.read_text("utf-8"))["files"]}
+    assert got == {"a.onnx": True, "new.onnx": False}, r.stderr
+
+
 def test_upload_rejects_empty_dir(tmp_path: Path) -> None:
     sandbox = _Sandbox(tmp_path, _tiny_lock(["a.onnx"]))
     empty = tmp_path / "empty"
