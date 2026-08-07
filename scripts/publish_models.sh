@@ -29,13 +29,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCK="$SCRIPT_DIR/models.lock.json"
 REPO="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
-# 走 argv 而不是把 $LOCK 插进 Python 源码串（与本文件另外三处调 python3 的写法一致）：
-# 插进去的话，clone 到含单引号或反斜杠的路径下（/home/o'brien/miloco、Git Bash 的路径）
-# 展开出来就是语法错误的 Python，而这行在 case 分派之前求值，用户拿到的是一段 traceback。
-TAG="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["release_tag"])' "$LOCK")"
-
 log() { printf '%s\n' "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
+
+# lock 的读取延到 case 分派之后（也就必须晚于 die 的定义）：搁在顶层求值的话，lock 不
+# 存在 / JSON 坏掉时**任何**子命令都先吃一段 Python traceback 再退 1 —— 连 --help 都
+# 一个字打不出来，而 CI lint job 里 `publish_models.sh verify` 红出来的也是 traceback，
+# 读的人第一反应是"脚本崩了"而不是"清单坏了"。典型触发是合并冲突标记：两个分支各自
+# refresh 过 lock，合出来的工作区里这个文件必然是非法 JSON。收敛成一行中文 + 非 0，
+# 与 fetch_models.py 读坏 lock 的口径一致（退出码不跟着对齐到 2：本脚本的 die 一律退 1，
+# 唯一的自动消费方是 CI 那句 `run:`，只看零/非零，为此另立一套码段没有收益）。
+#
+# 三个子命令一律先过这道校验，**不**按"用不用得上 TAG"分叉。refresh-lock <dir> 确实用
+# 不到 tag，但 refresh_lock_from_dir 里同样要 json.loads 这份 lock（见下面 :85 那行），
+# 按需分叉的话恰好是它绕开校验、traceback 原样还在 —— 而"合并完先跑一次 refresh-lock"
+# 正是最容易撞上冲突标记的那条路。
+#
+# 走 argv 而不是把 $LOCK 插进 Python 源码串（与本文件另外三处调 python3 的写法一致）：
+# 插进去的话，clone 到含单引号或反斜杠的路径下（/home/o'brien/miloco、Git Bash 的路径）
+# 展开出来就是语法错误的 Python。
+TAG=""
+require_lock() {
+    TAG="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["release_tag"])' "$LOCK" 2>/dev/null)" \
+        || die "lock 不可用（不存在 / JSON 非法 / 缺 release_tag，先看看有没有合并冲突标记）: $LOCK"
+    [ -n "$TAG" ] || die "lock 的 release_tag 是空串: $LOCK"
+}
 
 need_gh() {
     command -v gh >/dev/null 2>&1 || die "未找到 gh CLI（brew install gh && gh auth login）"
@@ -290,9 +308,11 @@ cmd_refresh_lock() {
 }
 
 case "${1:-}" in
-    upload)       shift; cmd_upload "$@" ;;
-    refresh-lock) shift; cmd_refresh_lock "$@" ;;
-    verify)       need_gh; cmd_verify ;;
+    # require_lock 排在 need_gh 之前：纯本地、确定性的那道先说话，别让一个坏 lock 先
+    # 报成"gh 没登录"（need_gh 里的 gh auth status 还要发一次请求，慢且可能另有噪声）。
+    upload)       require_lock; shift; cmd_upload "$@" ;;
+    refresh-lock) require_lock; shift; cmd_refresh_lock "$@" ;;
+    verify)       require_lock; need_gh; cmd_verify ;;
     # 从第 5 行打到抬头注释块结束（第一个非 # 行），不写死结束行号：写死的话，往抬头
     # 补一条说明就会把 --help 的尾巴无声截掉，而没人会为此跑一次 --help。
     -h|--help|"") awk 'NR<5{next} !/^#/{exit} {sub(/^#[[:space:]]?/,""); print}' "${BASH_SOURCE[0]}" >&2 ;;

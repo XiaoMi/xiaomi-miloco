@@ -428,6 +428,69 @@ def test_upload_rejects_empty_dir(tmp_path: Path) -> None:
     assert not sandbox.wrote_to_release()
 
 
+# ── 坏 lock：一行中文，不是 traceback ────────────────────────────────────
+
+# 两个分支各自 refresh 过 lock，合并出来的工作区里这个文件必然是非法 JSON。
+_CONFLICTED = "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> other\n"
+
+
+@pytest.mark.parametrize("sub", ["upload", "refresh-lock", "verify"])
+def test_broken_lock_reports_one_line_instead_of_a_traceback(tmp_path: Path, sub: str) -> None:
+    """坏 lock 在**每个**子命令上都必须是一行中文 + 非 0，不许吐 traceback。
+
+    参数化的这一轴才是要害。lock 一共有 4 处读取点，只把顶层那次 `TAG=` 延后、再按
+    "这个子命令用不用得上 tag"决定要不要校验的话，`refresh-lock <dir>` 恰好被豁免掉
+    （它确实不需要 tag），可 refresh_lock_from_dir 内部照样 json.loads 同一份文件 ——
+    traceback 原样还在，而"合并完先跑一次 refresh-lock"正是最容易撞上冲突标记的那条路。
+    所以校验按"要不要读 lock"收在同一个入口，而不是按"要不要 TAG"分叉。
+
+    口径对齐的是 fetch_models.py：同一份坏 lock 交给它是一行中文 + 非 0，交给这边却是
+    traceback 的话，CI lint job 红出来读的人第一反应是"脚本崩了"而不是"清单坏了"。
+    """
+    sandbox = _Sandbox(tmp_path, _tiny_lock(["a.onnx"]))
+    sandbox.lock.write_text(_CONFLICTED, encoding="utf-8")
+    args = [sub, str(_models_dir(tmp_path, ["a.onnx"]))] if sub != "verify" else [sub]
+
+    r = sandbox.run(*args)
+
+    assert r.returncode != 0
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "lock" in r.stderr
+    # 坏 lock 不许走到任何不可逆的写操作
+    assert not sandbox.wrote_to_release(), sandbox.gh_calls()
+
+
+def test_empty_release_tag_is_rejected_too(tmp_path: Path) -> None:
+    """`release_tag: ""` 是另一条分支：JSON 合法、取值成功，但拼出来的 URL 会指向别处。
+
+    与上面那条分开：那条走的是"python 退非 0 → die"，这条走的是取到空串后的显式判空。
+    """
+    sandbox = _Sandbox(tmp_path, _tiny_lock(["a.onnx"]))
+    sandbox.lock.write_text('{"release_tag": "", "files": []}', encoding="utf-8")
+
+    r = sandbox.run("verify")
+
+    assert r.returncode != 0
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "release_tag" in r.stderr
+
+
+def test_help_still_works_with_a_broken_lock(tmp_path: Path) -> None:
+    """--help 不读 lock，就不该被 lock 拖下水。
+
+    原来那次 `TAG=` 在顶层求值，位置既早于 die 的定义也早于 case 分派，于是 lock 一坏，
+    连"这脚本怎么用"都问不出来 —— 而人在这个时候恰恰最需要看一眼用法。
+    """
+    sandbox = _Sandbox(tmp_path, _tiny_lock(["a.onnx"]))
+    sandbox.lock.write_text(_CONFLICTED, encoding="utf-8")
+
+    r = sandbox.run("--help")
+
+    assert r.returncode == 0, r.stderr
+    assert "Traceback" not in r.stderr
+    assert "refresh-lock" in r.stderr  # 用法正文真的打出来了
+
+
 # ── 杂项 ────────────────────────────────────────────────────────────────
 
 
