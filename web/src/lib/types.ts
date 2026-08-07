@@ -403,6 +403,8 @@ export interface OmniModelConfig {
 /** 已保存的配置档案（label 为唯一标识），active 标记是否为当前生效。 */
 export interface OmniProfile extends OmniModelConfig {
   active: boolean;
+  /** 该档案是否已在 fallback provider 列表中。 */
+  is_fallback: boolean;
 }
 
 /** omni 熔断器实时健康度（对齐后端 HealthSnapshot）。 */
@@ -443,10 +445,12 @@ export interface OmniActiveConfig extends OmniModelConfig {
   health: OmniHealth;
 }
 
-/** GET /omni-config 返回：当前生效 active + 已存档案 profiles。 */
+/** GET /omni-config 返回：当前生效 active + 已存档案 profiles + fallback label 列表。 */
 export interface OmniConfigState {
   active: OmniActiveConfig;
   profiles: OmniProfile[];
+  /** 按优先级排序的 fallback provider label 列表（引用 profiles 的 label）。 */
+  fallbacks: string[];
 }
 
 /** 定位一套档案(档案名 = 唯一 id)。 */

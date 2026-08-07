@@ -22,6 +22,7 @@ import {
   deleteOmniConfig,
   listOmniModels,
   testOmniConfig,
+  updateOmniFallbacks,
 } from "@/api";
 import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
 import { IconX, IconEye, IconEyeOff } from "@/lib/icons";
@@ -201,6 +202,13 @@ export function UsageOmniConfig() {
   // 删除确认弹窗(web 风格,代替 window.confirm):待删项 + 删除中
   const [deleteTarget, setDeleteTarget] = useState<OmniProfile | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // fallback 管理:本地编辑态（label 列表），保存前只在 UI 层变化
+  const [fallbackLabels, setFallbackLabels] = useState<string[]>([]);
+  const [fallbackDirty, setFallbackDirty] = useState(false);
+  const [savingFallbacks, setSavingFallbacks] = useState(false);
+  // 拖拽状态
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
 
   useEffect(() => {
     void load();
@@ -213,7 +221,10 @@ export function UsageOmniConfig() {
 
   async function load() {
     try {
-      setState(await getOmniConfig());
+      const s = await getOmniConfig();
+      setState(s);
+      setFallbackLabels([...s.fallbacks]);
+      setFallbackDirty(false);
       setLoadErr(null);
     } catch (e) {
       setLoadErr(e instanceof Error ? e.message : t("usage.configLoadError"));
@@ -448,6 +459,97 @@ export function UsageOmniConfig() {
     }
   }
 
+  // ── fallback 管理 ──────────────────────────────────────────────────────
+
+  // 切换某 profile 的 fallback 状态（添加/移除）
+  function toggleFallback(label: string) {
+    setFallbackLabels((prev) => {
+      if (prev.includes(label)) {
+        return prev.filter((l) => l !== label);
+      }
+      return [...prev, label];
+    });
+    setFallbackDirty(true);
+  }
+
+  // 拖拽排序：从 fromIdx 移动到 toIdx
+  function moveFallback(fromIdx: number, toIdx: number) {
+    if (fromIdx === toIdx) return;
+    setFallbackLabels((prev) => {
+      const next = [...prev];
+      const [item] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, item);
+      return next;
+    });
+    setFallbackDirty(true);
+  }
+
+  // 保存 fallback 配置
+  async function saveFallbacks() {
+    setSavingFallbacks(true);
+    try {
+      const s = await updateOmniFallbacks(fallbackLabels);
+      setState(s);
+      setFallbackLabels([...s.fallbacks]);
+      setFallbackDirty(false);
+      toast(t("usage.fallbackSaveSuccess"), "ok");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("usage.fallbackSaveFailed"), "danger");
+    } finally {
+      setSavingFallbacks(false);
+    }
+  }
+
+  // 撤销本地修改
+  function resetFallbacks() {
+    if (state) {
+      setFallbackLabels([...state.fallbacks]);
+    }
+    setFallbackDirty(false);
+  }
+
+  // 获取 fallback label 对应的 profile 详情（用于显示行信息）
+  function fallbackProfile(label: string): OmniProfile | undefined {
+    return profiles.find((p) => p.label === label);
+  }
+
+  // ── 拖拽事件（HTML5 native DnD）──────────────────────────────────────
+  function onDragStart(idx: number) {
+    return (e: React.DragEvent) => {
+      e.dataTransfer.effectAllowed = "move";
+      setDragIdx(idx);
+    };
+  }
+  function onDragOver(idx: number) {
+    return (e: React.DragEvent) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      setDragOverIdx(idx);
+    };
+  }
+  function onDragLeave() {
+    setDragOverIdx(null);
+  }
+  function onDrop(idx: number) {
+    return () => {
+      if (dragIdx != null && dragIdx !== idx) {
+        moveFallback(dragIdx, idx);
+      }
+      setDragIdx(null);
+      setDragOverIdx(null);
+    };
+  }
+  function onDragEnd() {
+    setDragIdx(null);
+    setDragOverIdx(null);
+  }
+
+  // 尚未加入 fallback 的可选 profile（排除 active 行，排除已在 fallback 中的）
+  const fallbackProfiles = fallbackLabels.map((l) => fallbackProfile(l)).filter((p): p is OmniProfile => !!p);
+  const addableProfiles = profiles.filter(
+    (p) => p.has_key && !p.active && !fallbackLabels.includes(p.label),
+  );
+
   // 连接状态列被截断时的悬浮全文:锚定元素底部的 fixed 浮层(避开表格 overflow 裁剪、无原生 title 延迟)。
   function showTip(e: React.MouseEvent<HTMLElement>) {
     const el = e.currentTarget;
@@ -652,6 +754,122 @@ export function UsageOmniConfig() {
                   </tbody>
                 </table>
               </div>
+
+              {/* ── fallback providers 管理 ── */}
+              {profiles.length > 0 && (
+                <div className="mt-6 pt-4 border-t border-border">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 className="text-body font-semibold text-text-primary">
+                        {t("usage.fallbackTitle")}
+                      </h3>
+                      <p className="text-caption text-text-tertiary mt-0.5">
+                        {t("usage.fallbackDesc")}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {fallbackDirty && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={resetFallbacks}
+                            disabled={savingFallbacks}
+                            className="text-caption px-2.5 py-1 rounded-md text-text-secondary hover:text-text-primary disabled:opacity-50"
+                          >
+                            {t("usage.fallbackReset")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={saveFallbacks}
+                            disabled={savingFallbacks}
+                            className="text-caption px-2.5 py-1 rounded-md bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
+                          >
+                            {savingFallbacks ? t("usage.saving") : t("usage.fallbackSave")}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 当前 fallback 排序列表 */}
+                  {fallbackProfiles.length > 0 ? (
+                    <div className="rounded-lg bg-bg-primary border border-border overflow-hidden">
+                      {fallbackProfiles.map((p, idx) => (
+                        <div
+                          key={p.label}
+                          draggable
+                          onDragStart={onDragStart(idx)}
+                          onDragOver={onDragOver(idx)}
+                          onDragLeave={onDragLeave}
+                          onDrop={onDrop(idx)}
+                          onDragEnd={onDragEnd}
+                          className={`flex items-center gap-3 px-3 py-2.5 border-b border-border last:border-b-0 transition-colors ${
+                            dragOverIdx === idx
+                              ? "border-t-2 border-t-brand-primary"
+                              : ""
+                          } ${dragIdx === idx ? "opacity-50" : ""}`}
+                        >
+                          {/* 拖拽手柄 */}
+                          <span
+                            className="shrink-0 text-text-tertiary cursor-grab active:cursor-grabbing select-none text-caption leading-none"
+                            aria-label={t("usage.fallbackDragHandle")}
+                          >
+                            ⠿
+                          </span>
+                          {/* 序号 */}
+                          <span className="shrink-0 text-caption text-text-tertiary w-5 text-center num">
+                            {idx + 1}
+                          </span>
+                          {/* 模型信息 */}
+                          <span className="flex-1 min-w-0">
+                            <span className="text-caption text-text-primary num block truncate">
+                              {p.model}
+                            </span>
+                            <span className="text-caption text-text-tertiary num block truncate">
+                              {hostOf(p.base_url)}
+                            </span>
+                          </span>
+                          {/* 移除按钮 */}
+                          <button
+                            type="button"
+                            onClick={() => toggleFallback(p.label)}
+                            className="shrink-0 p-1 text-text-tertiary hover:text-error rounded"
+                            aria-label={t("usage.fallbackRemove", { model: p.model })}
+                          >
+                            <IconX />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-caption text-text-tertiary py-2">
+                      {t("usage.fallbackEmpty")}
+                    </p>
+                  )}
+
+                  {/* 可添加的 profile */}
+                  {addableProfiles.length > 0 && (
+                    <div className="mt-2">
+                      <p className="text-caption text-text-tertiary mb-1.5">
+                        {t("usage.fallbackAddHint")}
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {addableProfiles.map((p) => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            onClick={() => toggleFallback(p.label)}
+                            className="inline-flex items-center gap-1 text-caption px-2.5 py-1 rounded-md bg-bg-primary border border-border text-text-secondary hover:border-brand-primary hover:text-brand-primary num"
+                          >
+                            <span className="text-caption leading-none">＋</span>
+                            <span className="truncate max-w-[200px]">{p.model}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* 新增按钮放列表下方(新增即追加到列表末尾) */}
               {!adding && (

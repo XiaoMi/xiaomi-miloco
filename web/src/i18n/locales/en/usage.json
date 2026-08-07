@@ -109,6 +109,16 @@
     "deleteSuccess": "Deleted",
     "deleteFailed": "Couldn't delete",
     "modelsEmptyResult": "This address returned no model list",
-    "modelsFetchFailed": "Couldn't fetch models"
+    "modelsFetchFailed": "Couldn't fetch models",
+    "fallbackTitle": "Fallback providers",
+    "fallbackDesc": "When the primary model trips the circuit breaker, failover to these providers in order. Drag to reorder (top = higher priority).",
+    "fallbackEmpty": "No fallback providers yet. Click a tag below to add.",
+    "fallbackAddHint": "Available to add:",
+    "fallbackSave": "Save fallbacks",
+    "fallbackReset": "Discard changes",
+    "fallbackSaveSuccess": "Fallback list saved",
+    "fallbackSaveFailed": "Couldn't save fallbacks",
+    "fallbackDragHandle": "Drag to reorder",
+    "fallbackRemove": "Remove {{model}} from fallbacks"
   }
 }

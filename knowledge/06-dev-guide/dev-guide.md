@@ -77,23 +77,26 @@ cd backend && uv run task dev
 
 ### 配置分段与用途
 
-| 配置段        | 控制什么                                                                                                                                            |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server`      | 后端监听 host/port、访问 Bearer token、启动用 Python 路径、日志级别                                                                                 |
-| `agent`       | OpenClaw webhook 地址和认证凭据                                                                                                                     |
-| `model.omni`  | 多模态模型的 API Key、Base URL、模型标识；**感知必填项**                                                                                            |
-| `directories` | 工作目录（`storage`）、ONNX 模型目录；派生路径（log_dir / snapshot_dir 等）由此计算                                                                 |
-| `database`    | SQLite 连接参数                                                                                                                                     |
-| `miot`        | 小米云区域（`cn/de/i2/ru/sg/us`）                                                                                                                   |
-| `camera`      | 摄像头采集帧间隔和缓冲大小                                                                                                                          |
-| `rule`        | 规则日志保留天数；duration 窗口触发比例默认值                                                                                                       |
-| `perception`  | 感知日志 TTL、事件截图 TTL + 磁盘配额；子段：`perception.collect`（采集窗口）、`perception.engine`（识别 / VLM 等引擎子参数）、tier_u dump 调试开关 |
-| `perf`        | 可观测性总开关（`enabled`）、各表/文件保留天数；关闭后 observability.db 不建                                                                        |
-| `dispatcher`  | Agent 事件队列上限、单 turn 等待超时                                                                                                                |
+| 配置段                 | 控制什么                                                                                                                                            |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server`               | 后端监听 host/port、访问 Bearer token、启动用 Python 路径、日志级别                                                                                 |
+| `agent`                | OpenClaw webhook 地址和认证凭据                                                                                                                     |
+| `model.omni`           | 多模态模型的 API Key、Base URL、模型标识；**感知必填项**                                                                                            |
+| `model.omni_fallbacks` | 备选 provider 的 label 列表（按优先级排序），主 provider 熔断时自动 failover；label 必须存在于 `omni_profiles` 中，修改后**无需重启**               |
+| `model.omni_profiles`  | 存档的 omni 配置档案列表（label 唯一标识），供快速切换模型 + 作为 fallback 的来源池                                                                 |
+| `directories`          | 工作目录（`storage`）、ONNX 模型目录；派生路径（log_dir / snapshot_dir 等）由此计算                                                                 |
+| `database`             | SQLite 连接参数                                                                                                                                     |
+| `miot`                 | 小米云区域（`cn/de/i2/ru/sg/us`）                                                                                                                   |
+| `camera`               | 摄像头采集帧间隔和缓冲大小                                                                                                                          |
+| `rule`                 | 规则日志保留天数；duration 窗口触发比例默认值                                                                                                       |
+| `perception`           | 感知日志 TTL、事件截图 TTL + 磁盘配额；子段：`perception.collect`（采集窗口）、`perception.engine`（识别 / VLM 等引擎子参数）、tier_u dump 调试开关 |
+| `perf`                 | 可观测性总开关（`enabled`）、各表/文件保留天数；关闭后 observability.db 不建                                                                        |
+| `dispatcher`           | Agent 事件队列上限、单 turn 等待超时                                                                                                                |
 
 ### 用户最常修改的配置项
 
 - `model.omni.api_key`：感知启动前必填，通过 `miloco-cli config set model.omni.api_key <key>` 设置
+- `model.omni_fallbacks`：主模型熔断时的备选 provider 列表（lable 引用 `omni_profiles`），推荐通过 web「模型」页的 fallback 面板拖拽管理；修改后无需重启，下个推理周期自动生效
 - `timezone`：部署时区（IANA 名），服务器时区 ≠ 家庭时区时必配，详见下节
 - `server.host`：默认 `127.0.0.1`，仅本机可达；开放局域网访问改为 `0.0.0.0`（需自行评估网络安全）
 - `server.port`：服务监听端口，默认 `1810`（定义在 `settings.yaml::server` / `settings.py` 的 `ServerSettings`，不进 schema.json）；与其他服务端口冲突时修改此项
@@ -138,6 +141,8 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 ### 配置修改后是否需要重启
 
 大多数配置在服务启动时一次性读取，修改后需重启才能生效。包括：`server.*`（host/port/log_level）、`model.omni.*`、`directories.*`、`perception.engine.*` 等。
+
+**例外**：`model.omni_fallbacks` 修改后无需重启——`ProviderPool.get_active()` 每次推理周期从 settings 动态读取最新 fallback 列表，web 上改完即生效。`model.omni_profiles` 的变更通过 web 面板「模型」页面的切换/激活操作即时生效（底层有 cache invalidation）。
 
 `miloco-cli config set` 写入 `config.json` 后，下次 `get_settings()` 调用即读到新值——但如果对应的 Service/Runner 在初始化时已缓存了该配置，运行期不会自动重读，仍需重启服务。
 

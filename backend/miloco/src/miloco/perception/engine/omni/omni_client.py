@@ -134,6 +134,24 @@ def resolve_api_key(config: OmniConfig) -> str:
     return resolve_omni_api_key(config.api_key)
 
 
+def _get_active_omni_config():
+    """获取当前应使用的 omni 配置（优先从 ProviderPool，回退到 settings）。
+
+    ProviderPool 可能因为 failover 而返回备选 provider 而非配置的 primary。
+    """
+    from miloco.config import get_settings
+
+    try:
+        from miloco.perception.engine.omni.provider_pool import get_pool
+
+        pool = get_pool()
+        if pool is not None:
+            return pool.get_active()
+    except Exception:
+        logger.warning("[omni-client] ProviderPool 不可用，回退到 settings 主配置", exc_info=True)
+    return get_settings().model.omni
+
+
 def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     """Refresh the user-configurable omni fields (model / base_url / api_key) from
     the current settings, keeping the engine snapshot's other fields
@@ -144,14 +162,15 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     ``reset_settings()`` 清缓存),即可让新模型在**下一个推理周期**自动生效,无需重启
     进程、不重建引擎。api_key 为空时退回快照值,最终调用点 ``resolve_api_key`` 仍会兜底环境变量。
 
+    **多 provider failover**: 当 ProviderPool 激活时，本函数读取 pool 当前 active 的
+    provider（可能是因主 provider 熔断而切换的备选），而非配置的 ``model.omni``。
+
     副作用:三元组 (model, base_url, api_key) 变化时清熔断状态到 CLOSED。覆盖所有配置源
     (web PUT/activate / CLI set / env / 直接改 config.json)——只要 settings 变了就自动重置。
     """
     from dataclasses import replace
 
-    from miloco.config import get_settings
-
-    o = get_settings().model.omni
+    o = _get_active_omni_config()
     resolved = replace(
         base,
         model=o.model,

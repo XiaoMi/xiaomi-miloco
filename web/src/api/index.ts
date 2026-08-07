@@ -568,6 +568,13 @@ export async function retryOmniProbe(): Promise<OmniConfigState> {
   return impl.realRetryOmniProbe();
 }
 
+// 保存 fallback provider 顺序（label 列表，靠前优先）。
+export async function updateOmniFallbacks(
+  labels: string[],
+): Promise<OmniConfigState> {
+  return impl.realUpdateOmniFallbacks(labels);
+}
+
 // 订阅 omni 熔断器实时健康度变化(全局 top banner 用)。首连即推当前状态,返回 unsubscribe。
 // onOpen 只在断线后重连时触发,调用方借此感知 backend 重启并 refetch config。
 export function subscribeOmniHealth(
