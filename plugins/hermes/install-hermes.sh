@@ -739,6 +739,27 @@ if [ -n "$MODEL_SRC" ]; then
     fi
   done
   info "  同步 ONNX 模型：新增 $synced 个、跳过已存在 $skipped 个"
+  # 上面那轮 cp 的跳过判据是"文件名在不在"，不是"内容对不对"。而换模型走的正是同名
+  # 覆盖（发布侧 gh release upload --clobber，lock 里 sha256 变了、文件名一个字没变），
+  # 于是老用户升级时目标目录里那份旧模型会被原样留下：联网时下面的门禁判不齐 → 从
+  # Release 白下几十 MB，而正确的字节此刻就在 $MODEL_SRC 里；断网时下载失败只 warn
+  # 不中断，安装报成功，感知侧的 resource_validator 又只查文件在不在（不校验 sha256），
+  # 旧模型就这么被静默加载起来。
+  # 拿旁边这份 checkout 当 file:// 源再跑一趟下载器，把"要不要覆盖"交给它按 sha256 判：
+  # 已经对的一个字节都不碰，只有真过期的才就地覆盖。失败不影响后面的联网兜底。
+  # 这里并不牺牲上面那句"保留用户手动调整"——用户手改过的模型 sha 本来就对不上，
+  # 现状下也会被紧接着的联网下载盖掉，区别只是从网络覆盖变成本地覆盖。
+  # lock 里那 5 个名字与 cp 循环同一批（含 bge tokenizer 的 .json），覆盖得齐。
+  # 源 URL 用 as_uri() 拼、路径走 argv：手拼 "file://$dir" 遇到带空格或 # 的 checkout
+  # 路径会拼出解析错的 URL，而这一步是静默的，坏了没人看得见。
+  if [ -n "$FETCH_MODELS" ]; then
+    _src_uri="$("$PYTHON" -c 'import sys,pathlib;print(pathlib.Path(sys.argv[1]).resolve().as_uri())' "$MODEL_SRC" 2>/dev/null || true)"
+    # 整段静默（含 stderr）：源目录里少几个模型是常态（fork 的 checkout 本就可能只有
+    # 一部分），在这儿报"下载失败"纯属噪声。真正该报的是下面那道门禁 —— 它按同一份
+    # lock 复判，缺什么由联网那一趟去补、去说。
+    [ -z "$_src_uri" ] || MILOCO_MODELS_BASE_URL="$_src_uri" \
+      "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models" --quiet >/dev/null 2>&1 || true
+  fi
   info "  模型目录：$MILOCO_HOME/models/"
 fi
 

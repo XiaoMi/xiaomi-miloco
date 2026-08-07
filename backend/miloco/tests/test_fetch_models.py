@@ -131,6 +131,48 @@ def fake_release(tmp_path: Path) -> tuple[Path, Path, Path]:
 # ─── 下载 / 校验主路径 ────────────────────────────────────────────────────────
 
 
+def test_download_and_check_agree_on_a_self_contradictory_lock(tmp_path: Path) -> None:
+    """lock 里 size 与 sha256 描述的不是同一份字节时，两条路径必须给同一个结论。
+
+    下载落地只认 sha，``--check`` 若额外先比 size，CI 上紧挨着的那两步就会一绿一红：
+    ``--dest X`` 打"校验通过"退 0，``--check --strict --dest X`` 立刻判"缺失或校验
+    不通过"退 1，而报错给的修法正是刚跑成功的上一步 —— 重跑多少次都是同一个结果，
+    文案还把人指向 Release 和网络，真正坏的是 lock 自己。
+    """
+    body = b"y" * 512
+    src = tmp_path / "release"
+    src.mkdir()
+    (src / "m.onnx").write_bytes(body)
+
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "base_url": src.as_uri(),
+                "mirrors": [],
+                "files": [
+                    {
+                        "name": "m.onnx",
+                        "size": len(body) + 1,  # ← 与 sha256 自相矛盾（手改 lock 敲错一位）
+                        "sha256": _sha(body),
+                        "required": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dest = tmp_path / "dest"
+
+    got = _run("--lock", str(lock), "--dest", str(dest))
+    assert got.returncode == 0, got.stderr
+
+    checked = _run("--lock", str(lock), "--check", "--strict", "--dest", str(dest))
+    assert checked.returncode == 0, (
+        f"下载判绿、--check 判红 —— 两条路径判据又分家了：\n{checked.stderr}"
+    )
+
+
 def test_fetch_downloads_and_verifies(fake_release: tuple[Path, Path, Path]) -> None:
     lock, _src, dest = fake_release
     r = _run("--lock", str(lock), "--dest", str(dest))

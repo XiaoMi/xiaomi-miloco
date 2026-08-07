@@ -80,10 +80,20 @@ def _sha256(path: Path) -> str:
 
 
 def _is_ready(path: Path, spec: dict[str, Any]) -> bool:
-    """文件已存在且内容正确。size 不符就不必算 hash（78MB 全量 hash 不便宜）。"""
+    """文件已存在且内容正确。**只认 sha256**，与 _fetch_one 落地时那次校验完全同源。
+
+    曾经在这里先比一次 size 当快速否决，但那让本脚本的两条路径判据不一致：下载落地
+    只看 sha，``--check`` 却先看 size。lock 里 size 与 sha256 描述的不是同一份字节时
+    （手改 lock 敲错一位、换模型只更新了 sha），CI 上紧挨着的两步就会一绿一红——
+    ``fetch_models.py --dest X`` 打"校验通过"退 0，``--check --strict --dest X``
+    立刻判"缺失或校验不通过"退 1，而它给的修法正是刚跑成功的上一步。重跑多少次都一样，
+    文案还把人指向 Release 和网络，真正坏的是 lock 自己。
+    去掉之后省不了也不多花：happy path 上 size 本来就对，照样要算这一次 hash；size 不符
+    才多算一次，而那时紧接着就要下几十 MB，一次 hash 是噪声。
+    lock 的 size 字段仍有用（_stream 的脏文件守卫、进度显示），它自身对不对由
+    publish_models.sh verify 拿线上资产的真实大小去对——那才是该报"size 不符"的地方。
+    """
     if not path.is_file():
-        return False
-    if spec.get("size") and path.stat().st_size != spec["size"]:
         return False
     return _sha256(path) == spec["sha256"]
 
