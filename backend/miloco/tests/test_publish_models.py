@@ -336,7 +336,10 @@ def test_upload_proceeds_when_fileset_matches_lock(tmp_path: Path) -> None:
     names = ["a.onnx", "b.onnx"]
     sandbox = _Sandbox(tmp_path, _tiny_lock(names))
     d = _models_dir(tmp_path, names)
-    # upload 末尾会调 cmd_verify 对账；refresh_lock 重算过 size/sha256，这里让它对上即可。
+    # 刻意让假 Release 空着：本用例只关心"护栏没拦住上传"，末尾那次 cmd_verify 会把两个
+    # 资产都报成"Release 上缺失"并 return 1 —— 那是非致命的，各由
+    # test_verify_passes_when_assets_match_lock（对账通过）和
+    # test_upload_survives_any_gh_failure_in_trailing_verify（失败不打穿）单独覆盖。
     sandbox.set_assets([])
 
     r = sandbox.run("upload", str(d))

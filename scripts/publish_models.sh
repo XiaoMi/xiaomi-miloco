@@ -28,7 +28,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCK="$SCRIPT_DIR/models.lock.json"
 REPO="${MILOCO_REPO:-XiaoMi/xiaomi-miloco}"
-TAG="$(python3 -c "import json,sys;print(json.load(open('$LOCK'))['release_tag'])")"
+# 走 argv 而不是把 $LOCK 插进 Python 源码串（与本文件另外三处调 python3 的写法一致）：
+# 插进去的话，clone 到含单引号或反斜杠的路径下（/home/o'brien/miloco、Git Bash 的路径）
+# 展开出来就是语法错误的 Python，而这行在 case 分派之前求值，用户拿到的是一段 traceback。
+TAG="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["release_tag"])' "$LOCK")"
 
 log() { printf '%s\n' "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
