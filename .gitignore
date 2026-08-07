@@ -31,6 +31,12 @@ target
 # 前端构建产物落地目录（scripts/build.sh 打 wheel 时生成并拷入，不进 git）
 backend/miloco/src/miloco/static/
 
+# 感知 ONNX 模型（78MB）不进 git：托管在固定 tag `models` 的 GitHub Release，
+# 由 scripts/fetch_models.py 按 scripts/models.lock.json 的 sha256 拉取。
+# 只留一个 README.md 占位说明怎么拿。
+backend/miloco/src/miloco/perception/models/*
+!backend/miloco/src/miloco/perception/models/README.md
+
 # Build-time generated skills copy
 plugins/openclaw/skills/
 plugins/hermes/skills/

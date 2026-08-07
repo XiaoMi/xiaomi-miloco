@@ -30,6 +30,8 @@ jobs:
 
   backend-test:
     runs-on: ubuntu-latest
+    env:
+      MODELS_DIR: backend/miloco/src/miloco/perception/models
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
@@ -38,6 +40,45 @@ jobs:
           cache-dependency-glob: backend/uv.lock
       - name: 安装系统依赖（音视频处理）
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # 感知 ONNX 模型不在 git 里（见 scripts/models.lock.json），显式下载而非任其缺失：
+      # tests/perception/engine/identity/test_deep_sort_v12.py 的 requires_models 用例
+      # 在模型缺失时会静默 skip —— 不下就等于偷偷少跑一批覆盖。
+      #
+      # 缓存拆成 restore + save 两步（而不是一个 actions/cache）：cache 的 post 步骤
+      # 不看 job 成败，一次只下到 4/5 的运行照样会把残缺目录存进
+      # miloco-models-<lock hash>，而 primary key 命中即跳过 save —— 这个 lock 版本
+      # 的缓存从此再也盖不掉，只能等 lock 变更或 LRU 逐出。改成"完整性校验通过才
+      # save"，残缺状态就进不了缓存。
+      - name: 恢复感知 ONNX 模型缓存
+        id: models-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          # 只缓存模型文件本身，不缓存同目录里那个 git 跟踪的 README.md ——
+          # 否则 cache key（只跟 lock 走）不变时会用旧缓存盖掉 checkout 出来的新 README。
+          path: |
+            ${{ env.MODELS_DIR }}/*.onnx
+            ${{ env.MODELS_DIR }}/*.json
+          key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
+      # --dest 显式给：fetch_models.py 的目标目录会回退到 MILOCO_MODELS_DEST，
+      # 而缓存 path 是上面写死的那个目录，两边必须是同一个。
+      - name: 下载感知 ONNX 模型（缓存命中时只做 sha256 校验，不联网）
+        run: python3 scripts/fetch_models.py --dest "$MODELS_DIR"
+      # 上一步不加 --strict，不是为了放过什么：最终策略仍是全严格（下一步缺任何一个、
+      # 含可选，都判红）。拆两步买到的是另外两件事 ——
+      #   1. 失败归因分得开：上一步红 = 拉不到（网络 / 镜像抖动），这一步红 = 拿到的不齐 / 不对；
+      #   2. 残缺状态进不了缓存（cache save 步在这道门禁之后）。
+      # 这一步不联网、只比本地字节。今天 requires_models 只看两个必选模型，可一旦给 bge
+      # 去重或 VAD 加一条 model-gated 用例，本 PR 要消灭的静默 skip 就复活了。
+      - name: 校验模型完整（--check --strict，不联网）
+        run: python3 scripts/fetch_models.py --check --strict --dest "$MODELS_DIR"
+      - name: 保存感知 ONNX 模型缓存（完整性校验通过后才存）
+        if: steps.models-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.MODELS_DIR }}/*.onnx
+            ${{ env.MODELS_DIR }}/*.json
+          key: miloco-models-${{ hashFiles('scripts/models.lock.json') }}
       - name: backend miloco 测试
         run: cd backend && uv sync --all-packages && uv run pytest -v
 
@@ -86,6 +127,10 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    # 顶层只给了 contents: read；对账门禁那步要列 PR 改了哪些文件，补一个 pull-requests: read
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: ./.github/actions/setup-all
@@ -97,3 +142,46 @@ jobs:
           uv run ruff check . "$GITHUB_WORKSPACE/cli"
       - name: 类型检查（openclaw 插件，tsc --noEmit）
         run: cd plugins/openclaw && pnpm install --frozen-lockfile && pnpm check
+      # 零下载的资产对账：`models` 是固定且**可变**的 tag，资产被换而某分支的 lock 未
+      # refresh 时，构建失败会被 actions/cache 变成"同一 commit 今天绿、下周红"的间歇
+      # 现象（命中缓存 → 旧字节比旧 lock → 通过 → 零请求；缓存被逐出 → 下到新资产 →
+      # sha256 不符 → 红）。这里一次 API 调用就能把它变成确定性的失败点。
+      # 顺带也抓 Release 上残留的换代前旧资产（upload 只 --clobber 同名的、不删旧的）。
+      #
+      # 判红范围收在"能修的人"身上：那个 tag 可变，换代必然存在一段窗口——资产已经换
+      # 上去、而刷过 lock 的 commit 还没合 main。窗口内每个开放 PR 都会红，红的原因与
+      # 它的改动毫无关系，而 verify 打出的两条修法（refresh-lock / 把 Release 改回去）
+      # 都要仓库 write 权限，外部贡献者一条都执行不了，只能干等。
+      # 但**改了 lock 的 PR 仍然强制**：那正是换代 PR 本身，作者手上有全部修法，也是
+      # "lock 写错"唯一能在合入前被挡住的地方——一并降级等于把最该拦的那次放过去。
+      - name: 判定对账门禁强度（push 与改 lock 的 PR 强制，其余 PR 降级为告警）
+        id: verify_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != 'pull_request' ]; then
+            echo "enforce=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 不用 `gh api | grep -q`：grep -q 命中即退，gh 吃到 SIGPIPE 退 141，而
+          # GitHub 默认 shell 带 -o pipefail，会把"命中"读成失败、恰好反判成不强制。
+          # 取不到文件列表（二级速率限制 / 5xx / 网络抖动）时按最宽松的一档兜底：
+          # 这一步自己没有 continue-on-error（降级只保护了下面的对账步），默认 shell
+          # 带 -e，硬失败会让一个只改前端、跟模型毫无关系的 PR 整个 lint 变红，报的还是
+          # "判定对账门禁强度"失败——贡献者既看不懂也修不了，正是这套分级想避免的结果。
+          if ! files=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename'); then
+            echo "::warning::列 PR 改动文件失败，对账门禁降级为告警"
+            echo "enforce=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case $'\n'"$files"$'\n' in
+            *$'\n'scripts/models.lock.json$'\n'*) echo "enforce=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                                    echo "enforce=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: 对账 models Release 资产与 lock（不下载）
+        continue-on-error: ${{ steps.verify_gate.outputs.enforce != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish_models.sh verify

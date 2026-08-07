@@ -9,8 +9,9 @@
 #   --local-build        本地跑 scripts/build.sh, 仅 rsync dist/ + scripts/
 #   --install-only       不 rsync 不构建, 仅在远端触发安装 (复用远端已有 dist/)
 #
-# 构建包 (传给 build.sh, 不指定则全量):
-#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw 任意子集
+# 构建包 (原样透传给远端 build.sh, 本脚本不校验; 不指定则全量):
+#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw,web,hermes 任意子集
+#                        注：不是全部 6 个（含顺序）时按子集构建，远端不产平台一体归档
 #
 # 安装组件 (远端, 逗号分隔):
 #   --install <list>     miloco | miloco-cli | openclaw | supervisor
@@ -22,10 +23,15 @@
 #
 # 默认远端路径: ~/miloco-plugin
 # 注：backend 重启由 openclaw gateway restart 自动带起，本脚本不再单独重启 backend。
+# 注：感知 ONNX 模型（~78MB）不参与 rsync，远端 build.sh 自己按 scripts/models.lock.json
+#     拉。远端出网受限时，本地 export MILOCO_MODELS_BASE_URL=<内网源> 会一并透传过去
+#     （http(s):// 或 file://，也可直接给裸路径；注意它是在**远端**解析的，写本机路径没用）。
 
 set -euo pipefail
 
-usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; }
+# 从第 2 行打到抬头注释块结束（第一个非 # 行），不写死结束行号：写死的话，往抬头
+# 补一条说明就会把 --help 的尾巴无声截掉，而没人会为此跑一次 --help。
+usage() { awk 'NR<2{next} !/^#/{exit} {sub(/^#[[:space:]]?/,""); print}' "${BASH_SOURCE[0]}"; }
 
 # ─── 参数解析 ──────────────────────────────────────────────────────────────
 
@@ -86,6 +92,11 @@ COMMON_EXCLUDES=(
     --exclude '.pytest_cache/'
     --exclude '.ruff_cache/'
     --exclude '.DS_Store'
+    # 感知 ONNX 不在 git 里（scripts/models.lock.json），本地这个目录合法地可能只剩
+    # README。--remote-build 走的是 rsync --delete-after：不排除的话，本地空目录会把
+    # 远端上一轮下好的 5 个模型删掉，逼远端 build.sh 的 --strict 重拉 ~78MB —— 而远端
+    # 往往正是网络最差那台。远端模型自己按 lock 管理（build.sh 会 fetch），不归 rsync。
+    --exclude 'backend/miloco/src/miloco/perception/models/'
 )
 
 case "$BUILD_MODE" in
@@ -118,9 +129,13 @@ fi
 
 echo "[sync] 远端: build=$BUILD_MODE install=[${INSTALL_LIST:-none}]"
 
+# MILOCO_MODELS_BASE_URL 一并透传：远端 build.sh 要自己按 lock 拉 ~78MB 模型，
+# 而远端常在内网 / 出口受限，换源逃生口不传过去就等于没有。空值也照传，远端
+# fetch_models.py 对空串按"未设置"处理（见其 _sources）。
 ssh "$HOST" \
     "REMOTE_PATH='$REMOTE_PATH' BUILD_MODE='$BUILD_MODE' \
      PACKAGES='$PACKAGES' INSTALL_LIST='$INSTALL_LIST' \
+     MILOCO_MODELS_BASE_URL='${MILOCO_MODELS_BASE_URL:-}' \
      bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"

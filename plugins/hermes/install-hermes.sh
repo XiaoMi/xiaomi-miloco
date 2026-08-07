@@ -669,35 +669,63 @@ PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 # 对齐上游 install.sh --agent-finish 的"下载感知模型"步骤（见
 # upstream install-guide.md 第 131 行"下载感知模型"）。
 #
-# hermes fork 走的是"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑，
-# 但 fork 仓库的 backend/miloco/src/miloco/perception/models/ 目录里其实打包了
-# 同一份模型 — 直接 cp 即可（避免再下 80MB+）。
+# hermes fork 走的是"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑。
+# 三条取模型的路（按优先级）：
+#   1. 本地已有现成 .onnx（git checkout 或 miloco 包内）→ 直接 cp，不联网
+#   2. 都没有 → scripts/fetch_models.py 按 lock 的 sha256 从 Release 拉
+#   3. 连下载器也没有 / 下载失败 → warn 但不中断（感知降级，插件其余照装）
 #
-# 跳过条件：MILOCO_HOME/models/det_4C.onnx 已存在（用户已装）。
+# 跳过条件：MILOCO_HOME/models/ 已按 scripts/models.lock.json 齐全（用户已装）。
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
+
+# 判「齐不齐」的工具先就位：下面的短路和最后那道门禁用的是同一个判据。
+# --check --strict 不联网、只比本地文件与 lock 的 sha256（判据与下载落地那次校验同源，
+# 见 fetch_models.py 的 _is_ready；lock 里的 size 不参与就绪判定，由 publish_models.sh
+# verify 拿线上资产的真实大小去对），缺任何一个（含可选）都判不齐 —— 可选模型缺了也
+# 该补，否则 bge 去重 / VAD 会静默降级。
+FETCH_MODELS="$HERE/../../scripts/fetch_models.py"
+# 装到 $HERMES_PLUGINS_DIR 之后 $HERE 旁边没有 scripts/，退回旧的弱判据。
+[ -f "$FETCH_MODELS" ] || FETCH_MODELS=""
+models_ready() {
+  if [ -n "$FETCH_MODELS" ]; then
+    "$PYTHON" "$FETCH_MODELS" --check --strict --quiet --dest "$MILOCO_HOME/models" >/dev/null 2>&1
+  else
+    compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1
+  fi
+}
 
 # Release 装机场景 install.py step 7「准备感知模型」已经从 miloco-models-*.tar.gz
 # 解压 5 个 ONNX 到 $MILOCO_HOME/models/。本步只是 dev/fork 场景的兜底（从 git
-# checkout 或 miloco 包内 cp），已经有模型就跳过 fork/pkg 搜索，避免误报
+# checkout 或 miloco 包内 cp），已经齐了就跳过 fork/pkg 搜索，避免误报
 # 「找不到 ONNX 模型源目录」。
-if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
-  onnx_count=$(ls "$MILOCO_HOME/models"/*.onnx 2>/dev/null | wc -l | tr -d ' ')
-  info "  $MILOCO_HOME/models/ 已有 $onnx_count 个 ONNX 模型（install.py step 7 已解压 release tarball），跳过 fork/pkg 兜底"
+#
+# 短路判据必须是「齐不齐」而不是「有没有」：按「有没有」的话，目标目录里躺着 1 个
+# silero_vad.onnx（上次下到一半断网 / 手工拷过一个）就会跳过整段 cp，而下面那道
+# 门禁照样判不齐，于是从 Release 联网下 ~75MB —— 那 4 个文件此刻就在旁边的 checkout
+# 里，一次 cp 就够。断网时更糟：下载失败只 warn 不中断，安装报成功，首次 perceive
+# 直接 models_missing，而完整的本地副本从头到尾都在一个目录之外。
+if models_ready; then
+  info "  $MILOCO_HOME/models/ 已按 lock 齐全，跳过 fork/pkg 兜底"
   MODEL_SRC=""
 else
   # 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
   # 安装到 ~/.hermes/plugins/miloco/ 后 $HERE 不再指向 git checkout，
   # 但 pip install -e 的 miloco 包内 models/ 仍可达，以此兜底。
-  MODEL_SRC="$HERE/../../backend/miloco/src/miloco/perception/models"
-  if [ ! -d "$MODEL_SRC" ]; then
-    MODEL_SRC=$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)
-  fi
+  #
+  # 判据是"目录里真有 .onnx"而不是"目录存在"：模型已不进 git（改由
+  # scripts/fetch_models.py 按 scripts/models.lock.json 从 Release 拉），
+  # fork 新 clone 出来这个目录可能空着、只有一个 README。
+  MODEL_SRC=""
+  for cand in \
+    "$HERE/../../backend/miloco/src/miloco/perception/models" \
+    "$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)"; do
+    if [ -n "$cand" ] && compgen -G "$cand/*.onnx" >/dev/null 2>&1; then
+      MODEL_SRC="$cand"
+      break
+    fi
+  done
 fi
-if [ -n "$MODEL_SRC" ] && [ ! -d "$MODEL_SRC" ]; then
-  warn "找不到 ONNX 模型源目录（fork 仓库 & miloco 包内均无）"
-  warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-  warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
-elif [ -n "$MODEL_SRC" ]; then
+if [ -n "$MODEL_SRC" ]; then
   mkdir -p "$MILOCO_HOME/models"
   # 同步 .onnx + .json（bge tokenizer）；已存在的不覆盖（保留用户手动调整）
   synced=0
@@ -713,9 +741,81 @@ elif [ -n "$MODEL_SRC" ]; then
     fi
   done
   info "  同步 ONNX 模型：新增 $synced 个、跳过已存在 $skipped 个"
+  # 上面那轮 cp 的跳过判据是"文件名在不在"，不是"内容对不对"。而换模型走的正是同名
+  # 覆盖（发布侧 gh release upload --clobber，lock 里 sha256 变了、文件名一个字没变），
+  # 于是老用户升级时目标目录里那份旧模型会被原样留下：联网时下面的门禁判不齐 → 从
+  # Release 白下几十 MB，而正确的字节此刻就在 $MODEL_SRC 里；断网时下载失败只 warn
+  # 不中断，安装报成功，感知侧的 resource_validator 又只查文件在不在（不校验 sha256），
+  # 旧模型就这么被静默加载起来。
+  # 拿旁边这份 checkout 当 file:// 源再跑一趟下载器，把"要不要覆盖"交给它按 sha256 判：
+  # 已经对的一个字节都不碰，只有真过期的才就地覆盖。失败不影响后面的联网兜底。
+  # 这里并不牺牲上面那句"保留用户手动调整"——用户手改过的模型 sha 本来就对不上，
+  # 现状下也会被紧接着的联网下载盖掉，区别只是从网络覆盖变成本地覆盖。
+  # lock 里那 5 个名字与 cp 循环同一批（含 bge tokenizer 的 .json），覆盖得齐。
+  # 源 URL 用 as_uri() 拼、路径走 argv：手拼 "file://$dir" 遇到带空格或 # 的 checkout
+  # 路径会拼出解析错的 URL，而这一步是静默的，坏了没人看得见。
+  if [ -n "$FETCH_MODELS" ]; then
+    _src_uri="$("$PYTHON" -c 'import sys,pathlib;print(pathlib.Path(sys.argv[1]).resolve().as_uri())' "$MODEL_SRC" 2>/dev/null || true)"
+    # 整段静默（含 stderr）：源目录里少几个模型是常态（fork 的 checkout 本就可能只有
+    # 一部分），在这儿报"下载失败"纯属噪声。真正该报的是下面那道门禁 —— 它按同一份
+    # lock 复判，缺什么由联网那一趟去补、去说。
+    [ -z "$_src_uri" ] || MILOCO_MODELS_BASE_URL="$_src_uri" \
+      "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models" --quiet >/dev/null 2>&1 || true
+  fi
   info "  模型目录：$MILOCO_HOME/models/"
+fi
 
-  # 在 config.json 写 models 字段（settings.models_dir 默认读这里）
+# 复判一次，且独立于上面的 cp（不能挂 elif）：cp 只保证"源目录里有的都过来了"，
+# 不保证齐。模型不再进 git 之后源目录改由 fetch_models.py 填充，而它部分失败时是
+# "成功的已落地 + exit 1" —— 一次失败的构建就能留下只有 1 个 .onnx 的源目录。
+# 旧判据「一个 onnx 都没有才下载」在 cp 完之后恒为假，于是"新增 1 个 → 零 warn →
+# 安装成功 → 首次 perceive 就 MODELS_MISSING"。
+models_ok=0
+models_ready && models_ok=1
+
+if [ "$models_ok" -eq 1 ]; then
+  : # 齐了，什么都不用做
+elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
+  # --post-install 是"幂等补齐收尾"的轻量重跑，不该在这里静默拉 78MB：
+  # 上面的 cp（本地、秒级）照做，联网下载留给用户显式触发。
+  warn "感知模型不齐，但 --post-install 模式不做下载（可能 ~78MB）"
+  if [ -n "$FETCH_MODELS" ]; then
+    warn "补齐：$PYTHON $FETCH_MODELS --dest $MILOCO_HOME/models"
+  else
+    # 不能拿 ${FETCH_MODELS:-scripts/fetch_models.py} 兜底：`:-` 只在变量为空时取用，
+    # 而变量为空的充要条件就是"本脚本旁边没有 checkout"（见上面 FETCH_MODELS 的探测）
+    # —— 也就是相对路径 scripts/fetch_models.py 必然解析不到的那种处境，兜底值只在它
+    # 必然错的时候才出场。而 --post-install 的唯一调用方 install.py 正是从 tarball 解出
+    # 来的目录调的，那儿只有本脚本和插件目录，没有 scripts/。用户照抄会得到
+    # "can't open file .../scripts/fetch_models.py"，跟"模型不齐"毫无关系，只会把人往
+    # "文件损坏 / 路径写错"带偏 —— 正是下面 790 那段注释刚论证过要避免的事。
+    # 同理不提 scripts/models.lock.json：这个处境下那个文件同样不在手边。
+    warn "补齐：重跑 install.sh（安装包自带模型 tar，会解到 $MILOCO_HOME/models/）"
+    warn "  或在 git checkout 目录里跑：$PYTHON scripts/fetch_models.py --dest $MILOCO_HOME/models"
+  fi
+elif [ -n "$FETCH_MODELS" ]; then
+  # 按 lock 从 upstream Release 下载（sha256 校验）。已齐的文件会被跳过，只补缺的。
+  # 下载失败只 warn 不中断：感知会报 models_missing 降级，但插件其余部分照装。
+  info "  感知模型不齐，按 scripts/models.lock.json 补齐 → $MILOCO_HOME/models/"
+  if ! "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models"; then
+    warn "感知模型下载失败（网络？）"
+    warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
+    # 带上解释器：本文件在 git 里是 100644、没有可执行位，裸路径原样粘贴会 Permission
+    # denied（退 126），而这个新错误跟刚才的下载失败毫无关系，只会把人往"权限 / 文件
+    # 损坏"的方向带偏。用户此刻正处在失败状态，这行是他手上唯一的线索，大概率整行复制。
+    # 与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
+    warn "修法：重跑 $PYTHON $FETCH_MODELS --dest $MILOCO_HOME/models，或手动放置模型文件"
+  fi
+else
+  warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"
+  warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
+  warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
+fi
+if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
+  # 把模型目录钉进 config.json。键是 directories.models（MilocoSettings.directories →
+  # DirectorySettings.models → models_dir）；写顶层 cfg["models"] 是死键 ——
+  # MilocoSettings 的 model_config 是 extra="ignore"，多出来的顶层键连报错都没有，
+  # 静默丢弃，全仓无消费者。
   if [ -f "$MILOCO_HOME/config.json" ]; then
     "$PYTHON" - "$MILOCO_HOME" <<'PY' || true
 import json, sys
@@ -725,9 +825,16 @@ try:
     cfg = json.load(open(p, encoding="utf-8"))
 except Exception:
     cfg = {}
-cfg["models"] = f"{home}/models"
+if not isinstance(cfg, dict):
+    cfg = {}
+# 已有的 directories.* 子键（static / storage）要留着，别整段盖掉
+d = cfg.get("directories")
+if not isinstance(d, dict):
+    d = {}
+d["models"] = f"{home}/models"
+cfg["directories"] = d
 json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
-print(f"  config.json::models = {home}/models")
+print(f"  config.json::directories.models = {home}/models")
 PY
   fi
 fi

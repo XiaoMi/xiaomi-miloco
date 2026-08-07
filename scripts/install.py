@@ -1226,8 +1226,10 @@ class Installer:
         self._step_header("download.title", "download.subtitle")
         models_dest = self.miloco_home / "models"
         self.ui.step(self.ui.i18n.t("download.extracting_models"))
-        # 缺模型是硬失败：dev 通道源码目录若无 .onnx、release 通道若打包漏 tarball，
-        # 都必须在此暴露而非静默 skip——服务后续依赖这些文件，跳过等于装了个空壳。
+        # 缺模型是硬失败：dev 通道 dist/ 下若无 miloco-models-*.tar.gz（不含 miloco 的子集
+        # 构建不产出它）、release 通道若打包漏 tarball，都必须在此暴露而非静默 skip——
+        # 服务后续依赖这些文件，跳过等于装了个空壳。注意这条路径只认 tarball，不看包内
+        # perception/models/：模型已不进 git，那个目录只是构建期暂存 + 运行时最后兜底。
         count = self._extract_models(self._get_src_dir(), models_dest)
         if not count:
             self.ui.fail(self.ui.i18n.t("download.models_missing"))

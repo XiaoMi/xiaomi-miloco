@@ -4,7 +4,10 @@
 "是不是同一桩持续事件"——替代旧的精确字符串匹配（模型每窗对同一事件措辞会漂移，
 精确匹配认不出 → 反复开新链刷屏）。
 
-模型：bge-small-zh-v1.5（int8 量化，~24MB），随 ``perception/models/`` 分发。
+模型：bge-small-zh-v1.5（int8 量化，~24MB）。不进 git，运行时从 ``directories.models``
+（可配置键；留空时派生的只读属性 ``directories.models_dir`` 回落到 ``$MILOCO_HOME/models/``）加载；文件本身托管在固定
+tag ``models`` 的 GitHub Release，由 ``scripts/fetch_models.py`` 按
+``scripts/models.lock.json`` 拉取校验。
 强制 CPU EP：模型极小（短句 CPU ~10ms），且 int8 算子在 CoreML EP 上支持不全，
 固定 CPU 避免 fallback 抖动。
 """

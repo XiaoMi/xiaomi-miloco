@@ -7,7 +7,7 @@
 #
 # 选项:
 #   --version <ver>     覆盖所有包的版本号
-#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web）
+#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web,hermes）
 #   -h, --help          显示帮助
 #
 # 注：每次构建前会默认清空 dist/
@@ -47,7 +47,16 @@ while [[ $# -gt 0 ]]; do
         --version)   VERSION="$2"; shift 2 ;;
         --packages)  PACKAGES="$2"; shift 2 ;;
         -h|--help)
-            sed -n '5,15p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+            # 打到抬头注释块结束（第一个非 # 行），不写死结束行号 —— 与
+            # publish_models.sh / sync-to-remote.sh 同一写法。写死的话，往选项列表里插一
+            # 行就会把帮助的尾巴（「退出码: ...」那行）无声截掉：不报错、仍退 0，只是少一
+            # 行，而没人会为此专门跑一次 --help 去比对。本 PR 自己就改过这段抬头（--packages
+            # 那行加了 hermes）。
+            #
+            # 顺带修掉一个 macOS 上一直存在的显示 bug：原来那截 `sed 's/^# \?//'` 里的 \?
+            # 是 GNU 扩展，BSD sed 把它当字面问号，于是只有 "# ?" 开头的行会被剥，实际表现
+            # 是 macOS 上 `build.sh --help` 每一行都还挂着 "# "。awk 用的是 ERE，两边一致。
+            awk 'NR<5{next} !/^#/{exit} {sub(/^#[[:space:]]?/,""); print}' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *) die 4 "未知参数: $1" ;;
@@ -58,6 +67,17 @@ done
 
 should_build() {
     [[ ",$PACKAGES," == *",$1,"* ]]
+}
+
+# 平台归档只在全量构建下产出（缺任一包就拼不出一体归档）。注意这是**字面全等**，
+# 同一集合换个顺序也算子集——既有行为，此处只是把它从 pack_platform_bundles 里抽出来
+# 命名，没改语义。
+#
+# 别拿它去卡 pack_models：模型 tar 除了平台归档还有第二个消费方 install.py 的 dev
+# 通道（src_dir 直接就是仓库 dist/，第 6 步 glob 不到 miloco-models-*.tar.gz 就 fail），
+# 卡上去会让「build.sh --packages <子集> 再 install.sh --dev」这条既有流程硬失败。
+is_full_build() {
+    [[ "$PACKAGES" == "$ALL_PACKAGES" ]]
 }
 
 # ─── 前置检查 ──────────────────────────────────────────────────────────────
@@ -317,17 +337,46 @@ print(f'  {len(tools)} 个工具, 版本 {manifest[\"version\"]}, 下载 tag v$r
 
 pack_models() {
     local models_dir="$PROJECT_ROOT/backend/miloco/src/miloco/perception/models"
-    if [ ! -d "$models_dir" ] || [ -z "$(ls -A "$models_dir"/*.onnx 2>/dev/null)" ]; then
-        # 硬失败而非跳过：源码目录缺 .onnx 是异常状态（正常 clone 该有），
-        # 空跳只会让下游 pack_platform_bundles 一起空跳、install.py 收到"缺模型" fail，
-        # 排查链路变长。直接在源头中止。
-        log "FATAL: $models_dir 缺 .onnx"
+
+    # 模型不在 git 里（见 scripts/models.lock.json）：缺什么就按 lock 的 sha256 从
+    # Release 拉。已就绪的文件只做一次 hash 校验、不联网，所以本步可以无条件跑。
+    # --strict：可选模型缺失也算失败 —— 终端用户拿到的归档必须是完整能力，
+    # 不能因为一次网络抖动就悄悄发出个少了 bge / VAD 的 tarball。
+    # --dest 必须显式传：fetch_models.py 的目标目录会回退到 MILOCO_MODELS_DEST，
+    # 而下面 tar 打的是 $models_dir。不传的话，环境里 export 过那个变量时，"校验的
+    # 目录"和"打包的目录"就分家了 —— 轻则 --strict 在别处判通过、这里再报"本该已拦截"
+    # 把排查方向带反；重则 $models_dir 里留着与 lock 不符的旧 .onnx 也照样过关，
+    # 脏模型进 tarball 还被 bundle sha 背书（install.py 收到后不再逐文件校验）。
+    log "准备模型（scripts/fetch_models.py --strict --dest ${models_dir}）..."
+    if ! python3 "$PROJECT_ROOT/scripts/fetch_models.py" --strict --dest "$models_dir"; then
+        # 硬失败而非跳过：空跳只会让下游 pack_platform_bundles 一起空跳、
+        # install.py 收到"缺模型" fail，排查链路变长。直接在源头中止。
+        log "FATAL: 模型未就绪（${models_dir}）"
         exit 1
     fi
 
+    # 打包清单按 lock 逐条点名，不 glob 整个目录：`models` 是固定且可变的 tag，
+    # Release 上可能残留换代前的旧资产（publish_models.sh upload 只 --clobber 同名的、
+    # 不删旧的），glob 会把它们一并打进安装包 —— 包变胖是小事，某个模型若因质量 /
+    # 许可 / 安全原因下线却继续随包分发是大事。顺带也不用再防 README.md、*.part
+    # 和 nullglob 未展开的字面量了。
+    local model_files=()
+    local n
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        # ${} 不能省：macOS 自带 bash 3.2 会把紧跟变量的全角「）」首字节当成变量名的
+        # 一部分，set -u 下报的是 "models_dir?: unbound variable"，比原本要说的话更难懂。
+        [ -f "$models_dir/$n" ] || die 1 "模型缺失: ${models_dir}/${n}（fetch_models.py --strict 本该已拦截）"
+        model_files+=("./$n")
+    done < <(python3 -c \
+        'import json,sys;print("\n".join(f["name"] for f in json.load(open(sys.argv[1]))["files"]))' \
+        "$PROJECT_ROOT/scripts/models.lock.json")
+    ((${#model_files[@]})) || die 1 "scripts/models.lock.json 里没有任何模型条目"
+
     local tar_name="miloco-models-${RESOLVED_PEP}.tar.gz"
-    log "打包模型: $tar_name ..."
-    tar -czf "$DIST_DIR/$tar_name" -C "$models_dir" .
+    log "打包模型: $tar_name （${#model_files[@]} 个，按 lock 点名）..."
+    # 归档会被 install.py 解到 $MILOCO_HOME/models/，只放 lock 里列的那几个文件。
+    (cd "$models_dir" && tar -czf "$DIST_DIR/$tar_name" "${model_files[@]}")
     log "  $(du -h "$DIST_DIR/$tar_name" | cut -f1) $tar_name"
 }
 
@@ -345,7 +394,7 @@ pack_platform_bundles() {
     # 子集构建（--packages 只构建部分包）本就产不出完整平台归档：跳过而非硬失败，
     # 否则 sync-to-remote.sh --packages <子集> 这类 dev 工作流会被 set -e 中断。
     # 全量构建（默认 / CI）时缺文件仍走硬失败，暴露 CI 打包异常。
-    if [[ "$PACKAGES" != "$ALL_PACKAGES" ]]; then
+    if ! is_full_build; then
         log "子集构建（--packages=$PACKAGES），跳过平台归档打包"
         return
     fi
@@ -547,11 +596,26 @@ main() {
     # 更新 manifest
     update_manifest
 
-    # 打包模型
-    pack_models
-
-    # 按平台打「代码 + 模型」一体归档，并回填 manifest.bundles（须在自包含脚本前，
-    # 让 pack_install_scripts 嵌入含 bundles 的完整 manifest）
+    # 打包模型 + 按平台打「代码 + 模型」一体归档（后者回填 manifest.bundles，
+    # 须在自包含脚本前，让 pack_install_scripts 嵌入含 bundles 的完整 manifest）
+    #
+    # 模型 tar 跟着 miloco（后端）走，不是跟着「全量」走。模型移出 git 之后
+    # pack_models 的第一件事变成了跑 fetch_models.py --strict，于是「新 clone 里
+    # --packages miloco-cli，只想要个 CLI wheel」会先被拖去下 ~78MB —— 而 --strict
+    # 之下连可选的 bge / VAD 都不能少，网络不通直接 exit 1，把本来几秒就能出的
+    # wheel 一起带走。用 should_build "miloco" 卡住这条就够了。
+    #
+    # 别收紧成 is_full_build：模型 tar 的消费方不止平台归档，还有 install.py 的
+    # dev 通道（直接 glob 仓库 dist/），一旦子集构建整段跳过，「--packages <子集>
+    # 再 install.sh --dev」会在 wheel 全装完之后才 fail，前面几分钟白跑。
+    # 注意 is_full_build 是**字面全等**（"$PACKAGES" == "$ALL_PACKAGES"）：照抄
+    # --help 那行（已含全部 6 个包）能过，但少写一个、或只是换个顺序，都算子集。
+    if should_build "miloco"; then
+        pack_models
+    else
+        log "构建集不含 miloco（--packages=$PACKAGES），跳过模型打包"
+    fi
+    # 内部已有 is_full_build 门禁，外面不必再包一层
     pack_platform_bundles
 
     # 自包含安装脚本
