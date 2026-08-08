@@ -130,6 +130,7 @@ export interface Device {
   did: string;
   name: string;
   category: DeviceCategory;
+  rawCategory?: string;
   room: string;
   online: boolean;
   // 概览状态文本（"开着" / "26°C 制冷" / "睡眠档"）
