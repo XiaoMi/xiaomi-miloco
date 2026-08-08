@@ -16,6 +16,9 @@
     "collapse": "Collapse",
     "notification": "Notifications",
     "close": "Close",
+    "cancel": "Cancel",
+    "save": "Save",
+    "saving": "Saving…",
     "errorToast": "{{label}}, try again later"
   },
   "perfView": {

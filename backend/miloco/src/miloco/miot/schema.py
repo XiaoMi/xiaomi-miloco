@@ -243,6 +243,31 @@ class CameraToggleRequest(BaseModel):
     items: list[CameraToggleItem] = Field(..., min_length=1)
 
 
+class CameraScheduleWindow(BaseModel):
+    """Daily camera sensing window."""
+
+    start: str = Field(..., description="Start time, HH:MM")
+    end: str = Field(..., description="End time, HH:MM")
+
+
+class CameraSchedule(BaseModel):
+    """Per-camera daily sensing schedule."""
+
+    enabled: bool = Field(False, description="Whether schedule limits sensing")
+    weekdays: list[int] | None = Field(
+        default=None,
+        description=(
+            "Allowed weekdays, 0=Monday ... 6=Sunday. "
+            "Omit (null) to default to every day, or to keep the stored "
+            "weekdays when disabling without windows."
+        ),
+    )
+    windows: list[CameraScheduleWindow] = Field(
+        default_factory=list,
+        description="Allowed daily sensing windows",
+    )
+
+
 class CameraVoiceToggleItem(BaseModel):
     """单个相机的拾音开/关操作（mic-off 语义）。"""
 
