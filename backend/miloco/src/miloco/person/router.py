@@ -318,11 +318,15 @@ async def register_sample(
 
 
 async def _decode_image_upload(upload: UploadFile) -> "np.ndarray | None":
-    """读 UploadFile 并解码；失败返回 None。走 ``decode_image``（含 HEIC/HEIF 回退）。"""
+    """读 UploadFile 并解码；失败返回 None。走 ``decode_image``（含 HEIC/HEIF 回退）。
+
+    解码丢工作线程：格式放开后 HEIC 走 libheif，单张 12MP 是几百毫秒量级（改前只解 jpg/png
+    是几十毫秒），而同进程还并行着直播转码 / 录制切片 / MQTT 感知推理。
+    """
     raw = await upload.read()
     if not raw:
         return None
-    img = decode_image(raw)
+    img = await asyncio.to_thread(decode_image, raw)
     if img is None or img.size == 0:
         return None
     return img
@@ -350,7 +354,7 @@ class SampleBatchPayload(BaseModel):
     items: list[SampleBatchItem]
 
 
-def _decode_b64_image(b64: str) -> "np.ndarray | None":
+async def _decode_b64_image(b64: str) -> "np.ndarray | None":
     import base64
     try:
         raw = base64.b64decode(b64)
@@ -358,7 +362,7 @@ def _decode_b64_image(b64: str) -> "np.ndarray | None":
         return None
     if not raw:
         return None
-    img = decode_image(raw)
+    img = await asyncio.to_thread(decode_image, raw)
     if img is None or img.size == 0:
         return None
     return img
@@ -416,7 +420,7 @@ async def register_sample_batch(
         if item.type not in ("body", "face"):
             failed.append({"index": i, "reason": f"unknown type {item.type!r}"})
             continue
-        img = _decode_b64_image(item.image_b64)
+        img = await _decode_b64_image(item.image_b64)
         if img is None:
             failed.append({"index": i, "reason": "image decode failed"})
             continue
@@ -606,7 +610,7 @@ async def extract_samples(
             except OSError:
                 pass
     else:
-        img = decode_image(raw)
+        img = await asyncio.to_thread(decode_image, raw)
         if img is None or img.size == 0:
             raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
         frames = [(0, img)]
@@ -763,7 +767,7 @@ async def upload_person_avatar(
     # 浏览器渲染不了的容器解码后重编无损 webp，让 盘上后缀 / Content-Type / 真实字节 恒一致。
     # 体积闸卡的是**上传**字节；无损重编后可能超过它，这是有意的（闸拦请求体，不约束盘上物件）。
     # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、无损 WebP 编码），同进程还并行着
-    # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（同本文件 extract_samples 的处理）。
+    # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（本文件 7 处解码同口径）。
     normalized = await asyncio.to_thread(
         _avatar.normalize_for_storage, data, prefer="webp"
     )
@@ -1251,7 +1255,7 @@ async def register_preview(
         merged: list = []
         for i, b64 in enumerate(body.media_b64_list):
             raw = base64.b64decode(b64)
-            img = decode_image(raw)
+            img = await asyncio.to_thread(decode_image, raw)
             if img is None or img.size == 0:
                 # 单张解码失败不阻断整批——记 warning,跳过这张继续。
                 logger.warning("register/preview: media_b64_list[%d] decode failed,跳过", i)
@@ -1276,7 +1280,7 @@ async def register_preview(
         source = "from_media_batch"
     elif body.media_b64 and body.media_kind == "image":
         raw = base64.b64decode(body.media_b64)
-        img = decode_image(raw)
+        img = await asyncio.to_thread(decode_image, raw)
         if img is None or img.size == 0:
             raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
         # 图像路径没有 DeepSORT 关联预算好的 emb,这里现场抽:借 perception_service
@@ -1679,7 +1683,7 @@ async def extract_endpoint(
             status_code=400, detail="本期 extract 端点仅支持 media_kind='image'",
         )
     raw = base64.b64decode(body.media_b64)
-    img = decode_image(raw)
+    img = await asyncio.to_thread(decode_image, raw)
     if img is None or img.size == 0:
         raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
     candidates = await asyncio.to_thread(
@@ -2216,7 +2220,7 @@ async def select_endpoint(
     for d in body.candidates:
         b64 = d.get("image_jpeg_b64") or ""
         if b64:
-            crop = decode_image(base64.b64decode(b64))
+            crop = await asyncio.to_thread(decode_image, base64.b64decode(b64))
         else:
             crop = np.zeros((1, 1, 3), dtype=np.uint8)
         scored.append(ScoredCandidate(

@@ -318,3 +318,29 @@ def test_cli_and_backend_brand_tables_agree():
     import miloco.perception.engine.identity._image_utils as iu
 
     assert set(_STILL_IMAGE_BRANDS) == set(iu._HEIF_BRANDS)
+
+
+# ── 结构性护栏：解码不得留在事件循环上 ──────────────────────────────────────
+
+
+def test_no_sync_decode_image_in_routers():
+    """``decode_image`` 在 router 里必须一律经 ``asyncio.to_thread``。
+
+    这条是**防复发**的：格式放开后解码从「几十毫秒解 jpg」变成「几百毫秒走 libheif」，而后端是
+    单进程 asyncio、同一个循环上还跑着直播转码 / 录制切片 / MQTT 感知推理。本 PR 一度只在三个
+    存储端点上做了这件事、人像侧 7 处漏掉，注释却已宣称「本仓一律如此」——靠人读注释守不住，
+    用测试钉死：新增裸调会直接红。
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src/miloco"
+    offenders = []
+    for f in (root / "person/router.py", root / "pet/router.py", root / "pet/observe.py"):
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            # 裸调 = 出现 decode_image( 但同一行没有 to_thread
+            if re.search(r"[=\s(]decode_image\(", line) and "to_thread" not in line:
+                offenders.append(f"{f.name}:{i}: {line.strip()}")
+    # pet/observe.py 的 _prepare_crops 整段已由 observe_pet 包在 to_thread 里，属白名单
+    offenders = [o for o in offenders if not o.startswith("observe.py")]
+    assert not offenders, "发现未走 to_thread 的解码调用：\n" + "\n".join(offenders)
