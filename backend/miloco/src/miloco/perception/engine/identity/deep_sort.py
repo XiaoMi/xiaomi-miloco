@@ -158,8 +158,12 @@ class DeepSortTracker:
         """返回当前活跃 track 列表(字段集与 SortTracker 一致)。
 
         SortTracker 字段:id / class_id / bbox / xyxy / confidence / hits / age /
-        time_since_update。DeepSORT Track 字段更多(features/mean/covariance/state),
-        本方法做投影只保留对齐字段。
+        time_since_update / detected_this_frame。DeepSORT Track 字段更多
+        (features/mean/covariance/state),本方法做投影只保留对齐字段。
+
+        ``detected_this_frame`` 是身份识别侧各 coasting 闸的唯一判据,**本方法是它的
+        产出源头**:少写这个键不会报错,下游取默认值会让那些闸静默恒真(即 #494)。
+        改本方法的字段集时请同步 ``test_deep_sort_v12`` 里的字段集护栏用例。
         """
         out: list[dict[str, Any]] = []
         for tr in self._mot.tracks:

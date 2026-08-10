@@ -151,7 +151,11 @@ class TestDeepSortTrackerAPI:
         results = tracker.get_tracking_results()
         assert isinstance(results, list)
         for r in results:
-            for k in ("id", "class_id", "bbox", "xyxy", "confidence", "hits", "age", "time_since_update"):
+            # detected_this_frame 单列在这里的理由：它缺失时下游不报错，只会取默认值让
+            # 身份识别侧各 coasting 闸静默恒真（即 #494）。此处是该字段的产出源头，
+            # 接缝下游那道护栏（edge/test_tracking_seam_fields）挡不住源头漏写。
+            for k in ("id", "class_id", "bbox", "xyxy", "confidence", "hits", "age",
+                      "time_since_update", "detected_this_frame"):
                 assert k in r, f"track 缺字段 {k}"
 
     def test_get_track_embedding_returns_none_when_track_absent(self):
