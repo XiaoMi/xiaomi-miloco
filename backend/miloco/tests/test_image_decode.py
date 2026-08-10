@@ -335,12 +335,16 @@ def test_no_sync_decode_image_in_routers():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src/miloco"
+    # 两个符号都要盯：三个存储端点丢进工作线程的其实是 normalize_for_storage（解码 + 重编两步，
+    # 比裸解码更贵），只盯 decode_image 会让「新加一个头像端点裸调 normalize_for_storage」照样绿。
+    # 字符类里带 . 是为了覆盖 `_avatar.normalize_for_storage(` 这种带模块前缀的写法。
+    pat = re.compile(r"[=\s(.](?:decode_image|normalize_for_storage)\(")
+    # pet/observe.py **不在**扫描范围：它唯一的解码点在 _prepare_crops 里，而整个 _prepare_crops
+    # 已由 observe_pet 包在 to_thread 中，逐行扫会全是假阳性。豁免写在这里，而不是「扫完再把
+    # 结果整文件丢掉」——后者会让读代码的人误以为该文件也在覆盖范围内。
     offenders = []
-    for f in (root / "person/router.py", root / "pet/router.py", root / "pet/observe.py"):
+    for f in (root / "person/router.py", root / "pet/router.py"):
         for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
-            # 裸调 = 出现 decode_image( 但同一行没有 to_thread
-            if re.search(r"[=\s(]decode_image\(", line) and "to_thread" not in line:
+            if pat.search(line) and "to_thread" not in line:
                 offenders.append(f"{f.name}:{i}: {line.strip()}")
-    # pet/observe.py 的 _prepare_crops 整段已由 observe_pet 包在 to_thread 里，属白名单
-    offenders = [o for o in offenders if not o.startswith("observe.py")]
-    assert not offenders, "发现未走 to_thread 的解码调用：\n" + "\n".join(offenders)
+    assert not offenders, "发现未走 to_thread 的解码/归一化调用：\n" + "\n".join(offenders)
