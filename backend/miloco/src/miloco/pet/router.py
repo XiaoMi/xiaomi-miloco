@@ -344,7 +344,7 @@ async def upload_pet_reference_crops(
         # 张数**，识别侧再静默跳过 → 界面显示「3 张参考图」而实际注入 0 张。
         # prefer="jpg"：参考图的唯一消费者是 omni，pet_refs 拼图时恒重编 JPEG q85，存 webp
         # 只是多一道转换；且 ref_crop_N.jpg 的硬编码后缀牵动 glob / 下标解析，不宜与内容脱钩。
-        # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、无损 WebP 编码），同进程还并行着
+        # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、再重编 JPEG），同进程还并行着
         # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（本仓一致口径：person 侧 7 处解码同样走 to_thread）。
         normalized = await asyncio.to_thread(
             _avatar.normalize_for_storage, raw, prefer="jpg"
