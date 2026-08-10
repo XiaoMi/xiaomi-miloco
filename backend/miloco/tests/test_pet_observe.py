@@ -815,6 +815,34 @@ async def test_observe_low_sharpness_soft_warning(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fallback_frame_is_first_decodable_not_index_zero(monkeypatch):
+    """兜底帧的两条不变量，本 PR 唯一没被钉住的改动（325e927 的提速）：
+
+    1. 语义：它是循环内**第一个解得开的**画面，不是 medias[0]。首图解不开时必须取第二张——
+       这一半恰好被既有用例绕开了（那条的替身是「第 1 次成功、第 2 次 None」，仍与下标 0 重合）。
+    2. 次数：3 张图就该解 3 次。改回 `decode_image(medias[0])` 那种写法整套测试仍会全绿，
+       而省下的那次解码在 HEIC 下是几百毫秒量级（libheif，且跑在 to_thread 里与转码抢 CPU）。
+    """
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
+    )
+    second = _frame(120, 120)
+    calls = {"n": 0}
+
+    def _imdecode(*a, **k):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else second  # 首图解不开
+
+    monkeypatch.setattr(cv2, "imdecode", _imdecode)
+    selected, _n, fallback, _w = obs._prepare_crops(
+        [b"i1", b"i2", b"i3"], is_video=False, max_frames=1
+    )
+    assert selected == []
+    assert fallback is second  # 取第二张，而非把第一张重解一遍
+    assert calls["n"] == 3  # 3 张图 = 3 次解码，没有多出来的第 4 次
+
+
+@pytest.mark.asyncio
 async def test_partial_decode_warning_survives_empty_result(monkeypatch):
     # 部分解不出 + 其余都没检出动物 → 走空结果分支，partial_decode_failed 仍须透出（D8）
     async def _no_animal(payload, config, type="realtime"):

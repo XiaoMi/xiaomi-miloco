@@ -231,6 +231,7 @@ __all__ = [
     "list_avatar_exts",
     "media_type",
     "normalize_avatar_ext",
+    "normalize_for_storage",
     "remove_avatar",
     "set_avatar",
     "sniff_image_ext",
