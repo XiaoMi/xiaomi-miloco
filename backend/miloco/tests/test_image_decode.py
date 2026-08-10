@@ -223,6 +223,18 @@ def test_brand_table_covers_every_declared_still_image_brand():
     assert not (iu._HEIF_ONLY_BRANDS & iu._AVIF_BRANDS)  # 两子集不得重叠
 
 
+def test_still_image_brand_table_is_pinned():
+    """整表**字面量**快照，与 CLI 侧 _STILL_IMAGE_BRANDS 同步。理由见 CLI 侧同名用例：
+    「遍历表本身」+「两侧相等」都漏掉『两边同时删同一个 brand』这种协同漂移。"""
+    import miloco.perception.engine.identity._image_utils as iu
+
+    assert iu._HEIF_BRANDS == {
+        b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs",
+        b"mif1", b"msf1", b"miaf", b"mia1",
+        b"avif", b"avis",
+    }
+
+
 def test_video_brands_never_treated_as_still_image():
     """真视频容器不得被误判成图片，否则视频注册整条失效。"""
     for brand in (b"isom", b"mp42", b"mp41", b"qt  ", b"3gp4", b"3gp5", b"M4V ", b"avc1", b"iso2"):

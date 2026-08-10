@@ -731,7 +731,6 @@ async def test_observe_image_multiple_pets_surfaced(monkeypatch):
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: dets)
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     res = await obs.observe_pet([b"img"], is_video=False, grounding=False)
     assert len(res["candidates"]) == 1  # 只留最大那只
@@ -746,7 +745,6 @@ async def test_observe_image_multiple_pets_surfaced_when_gated_out(monkeypatch):
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: dets)
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     res = await obs.observe_pet([b"img"], is_video=False, grounding=False)
     assert res["candidates"] == []  # 门控全灭 → 无参考 crop
@@ -762,7 +760,6 @@ async def test_observe_two_images_one_pet_each_no_multiple_pets(monkeypatch):
         "default_detector",
         lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     res = await obs.observe_pet([b"i1", b"i2"], is_video=False, grounding=False)
     assert "multiple_pets" not in {w["type"] for w in res["warnings"]}
@@ -789,7 +786,6 @@ async def test_observe_partial_decode_failure_warns(monkeypatch):
         "default_detector",
         lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     calls = {"n": 0}
 
     def _imdecode(*a, **k):
@@ -811,7 +807,6 @@ async def test_observe_low_sharpness_soft_warning(monkeypatch):
         "default_detector",
         lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     monkeypatch.setattr(obs, "compute_sharpness", lambda c: 1.0)  # 远低于 PET_GATE_SHARP_MIN
     res = await obs.observe_pet([b"blurry"], is_video=False, grounding=False)
@@ -829,7 +824,6 @@ async def test_partial_decode_warning_survives_empty_result(monkeypatch):
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     calls = {"n": 0}
 
     def _imdecode(*a, **k):

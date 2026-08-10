@@ -652,20 +652,6 @@ def _decode_and_sample(
             pass
 
 
-def _first_decodable(medias: list[bytes]) -> np.ndarray | None:
-    """回退用：取第一张能解码的图（多图时任一可用即可作整幅画面）。
-
-    解码口径必须与 ``_prepare_crops`` **完全一致**（同走 ``decode_image``）：若主路径能解
-    HEIC 而这里不能，就会出现「检测器没框到 → 落回退 → 回退也拿不到画面」→ 谎报「画面确无
-    动物」，而真实原因只是两处解码器不同。
-    """
-    for m in medias:
-        img = decode_image(m)
-        if img is not None and img.size > 0:
-            return img
-    return None
-
-
 def _crop_from_norm_bbox(
     frame: np.ndarray, norm_bbox: Any, padding: float = _PADDING_RATIO
 ) -> tuple[np.ndarray | None, tuple | None]:
@@ -751,10 +737,18 @@ def _prepare_crops(
     n_coincident = 0
     n_decoded = 0
     batch = medias[:_MAX_SELECT]
+    # 兜底帧（检测器一个都没框到时交给 omni 看整幅画面）就地留一份，别在 return 里再解一次：
+    # 那一次在绝大多数请求里（检测器框到了）根本用不上，而 HEIC 走 libheif 单张 12MP 是几百
+    # 毫秒量级——这段还跑在 to_thread 里，同进程并行着直播转码 / 感知推理。
+    # 语义与原先的 _first_decodable(medias) 等价：batch 与 medias 同序，取首个解得开的；
+    # 而「batch 全解不出」在下面就抛 MediaDecodeError 了，走不到用它的地方。
+    first_ok: np.ndarray | None = None
     for m in batch:
         img = decode_image(m)
         if img is None:  # 截断损坏 / 压根不是图 / 像素量超上限
             continue
+        if first_ok is None:
+            first_ok = img
         n_decoded += 1
         one, n_in_frame = _largest_pet_crop_with_count(img, detector)
         if one is not None:
@@ -784,7 +778,7 @@ def _prepare_crops(
                 "message": "有素材画面偏糊，识别参照效果可能变差，建议换更清晰的照片。",
             }
         )
-    return selected, n_coincident, _first_decodable(medias), extra
+    return selected, n_coincident, first_ok, extra
 
 
 def _empty_result(warnings: list[dict] | None = None) -> dict:

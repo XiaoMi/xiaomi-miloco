@@ -38,3 +38,16 @@ def test_non_isobmff_containers_unchanged():
 def test_ftyp_without_brand_bytes_falls_back_to_video():
     """只有 8 字节、读不到 brand 时保持原判（宁可拦下让人改 --video，也不放视频进图片路径）。"""
     assert _looks_like_video_bytes(b"\x00\x00\x00\x18ftyp") == "mp4/mov"
+
+
+def test_still_image_brand_table_is_pinned():
+    """整表**字面量**快照。仅靠「遍历表本身」或「两侧相等」都抓不住『两边同时删掉同一个
+    brand』——那时循环变短、交叉检查仍相等，测试全绿，漂移要等线上出现「某台安卓机导出的
+    HEIF 被判成视频」才暴露。改这张表必须同时改这里，逼人正视两份副本的同步责任。"""
+    from miloco_cli.commands.identity import _STILL_IMAGE_BRANDS
+
+    assert _STILL_IMAGE_BRANDS == {
+        b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs",
+        b"mif1", b"msf1", b"miaf", b"mia1",
+        b"avif", b"avis",
+    }
