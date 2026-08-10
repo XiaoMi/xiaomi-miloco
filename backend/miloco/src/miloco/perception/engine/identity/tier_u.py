@@ -227,7 +227,7 @@ class TierUConfig:
     # 改变任何行为。
     area_ratio_min: float = 0.05
     # ⚠️ 下面三项在 identity/extractor.py 有一套同名语义的模块级常量(_GATE_*),两套之间
-    # 无任何绑定,取值已分叉。改这里的阈值前请直接比对那边的代码。
+    # 无任何绑定 —— 不要假设它们一致,改这里的阈值前请直接比对那边的代码。
     aspect_min: float = 0.25                 # w/h ≥ 0.25 = 不接受比 1:4 更瘦的 bbox
                                              # (0.20→0.25:1:5 极瘦杆即使 sharpness 高
                                              # 也不利辨认,直接源头丢)
