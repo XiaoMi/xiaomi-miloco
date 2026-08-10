@@ -205,20 +205,40 @@ def test_normalize_rejects_valid_magic_with_broken_body(data):
     assert normalize_for_storage(data) is None
 
 
-@pytest.mark.parametrize("prefer", ["webp", "jpg"])
-def test_normalize_caps_long_side_on_reencode(prefer):
-    """重编支按长边封顶：一张 24MP 的 HEIC 无损编码是 15.6MB / 9.7s，而这些字节只喂
-    28~48px 的圆头像与 omni 的 320px 拼图。封顶只作用于重编支——直通支的逐字节相等
-    由 test_normalize_passthrough_is_byte_identical 守着。"""
+@pytest.mark.parametrize(
+    "prefer,const", [("webp", "_AVATAR_MAX_SIDE"), ("jpg", "_REF_CROP_MAX_SIDE")]
+)
+def test_normalize_caps_long_side_per_purpose(prefer, const):
+    """重编支按用途分档封顶。两档都锚在真实消费端上：头像 256 = web 裁剪器的 OUT（让
+    CLI/API 与 web 产出同规格）；参考图 640 = omni 拼图高 320 的一倍余量。封顶只作用于
+    重编支——直通支的逐字节相等由 test_normalize_passthrough_is_byte_identical 守着。"""
     import miloco.perception.engine.identity._avatar as av
 
+    cap = getattr(av, const)
     big = np.zeros((3000, 2000, 3), np.uint8)
     ok, buf = cv2.imencode(".bmp", big)  # BMP 非直通 → 必走重编
     assert ok
     got, _ext = normalize_for_storage(buf.tobytes(), prefer=prefer)
     back = decode_image(got)
-    assert max(back.shape[:2]) == av._REENCODE_MAX_SIDE
-    assert back.shape[:2] == (av._REENCODE_MAX_SIDE, av._REENCODE_MAX_SIDE * 2000 // 3000)
+    assert max(back.shape[:2]) == cap
+    assert back.shape[:2] == (cap, cap * 2000 // 3000)
+
+
+def test_avatar_cap_matches_web_cropper_output():
+    """头像档必须与 web 裁剪器的 OUT 对齐——这个数字的意义就是「两条入口同规格」，
+    改动其中一侧而不改另一侧，就把这条口径悄悄拆了。"""
+    import re
+    from pathlib import Path
+
+    import miloco.perception.engine.identity._avatar as av
+
+    src = (
+        Path(__file__).resolve().parents[3]
+        / "web/src/components/AvatarCropEditor.tsx"
+    ).read_text(encoding="utf-8")
+    m = re.search(r"const OUT = (\d+)", src)
+    assert m, "AvatarCropEditor 里找不到 OUT 常量"
+    assert av._AVATAR_MAX_SIDE == int(m.group(1))
 
 
 def test_normalize_falls_back_to_jpeg_when_webp_encode_returns_not_ok():

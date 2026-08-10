@@ -88,10 +88,20 @@ def sniff_image_ext(data: bytes) -> str | None:
 # 不抛异常。下面的长边封顶（1024）已让这条不可能发生，但 ok 判定仍保留——它同时兜住
 # 编码器内部的其它失败（OOM 等），不判就会把空 buf 当图落盘。
 
-# 重编产物的长边上限。消费端只有两处：web 的 28~48px 圆头像（整个 blob fetch、no-store），
-# 与 omni 的 320px 拼图——1024 对两者都绰绰有余。实测 24MP 原图：不封顶 15.6MB / 9.7s，
-# 封到 1024 是 0.93MB / 0.20s。只作用于重编支，直通支不受影响。
-_REENCODE_MAX_SIDE = 1024
+# 重编产物的长边上限，按用途分档——两个数字都不是拍脑袋的，各自锚在真实消费端上：
+#
+# 头像 256：正是 web 裁剪器 ``AvatarCropEditor`` 的 ``OUT``。让 CLI/API 直传这条路与 web
+#   主路径产出**同规格**的东西，而不是各走各的。展示端是 28~48px 的圆（前端整个 blob
+#   fetch 且 cache: no-store），256 已是 3x 屏所需的上限。实测 12MP HEIC：不封顶 5.26MB、
+#   封到 1024 是 0.56MB、封到 256 是 0.05MB——最后这档与 web 裁剪器的 20-50KB 同量级。
+# 参考图 640：它喂 omni 的横拼图，那里统一缩到高 320（``pet_refs._PET_COMPOSITE_HEIGHT``），
+#   640 留了一倍余量给非方形 crop；不能跟头像同档，否则拼图会被放大糊掉。
+#
+# 只作用于**重编支**；白名单直通仍逐字节不动（零转码承诺）。
+# 注：封顶之后仍用无损编码——看似矛盾（缩放丢掉的信息远多于编码），但这一档的体积已经
+# 落在 web 主路径同量级，无损换来的是「不在已有损的 HEIC 上再叠一代」这条口径统一。
+_AVATAR_MAX_SIDE = 256
+_REF_CROP_MAX_SIDE = 640
 
 
 def _cap_long_side(img, max_side: int):
@@ -140,7 +150,9 @@ def normalize_for_storage(
     # blob fetch 下来渲染，且 cache: no-store）与「omni 的 320px 拼图」。改前非白名单格式一律
     # 400，落盘物件被 5MB 上传闸隐含地夹住；本函数放开了格式，就得自己补回这个上界。
     # 封顶只作用于**重编那一支**，白名单直通仍逐字节不动（零转码承诺）。
-    img = _cap_long_side(img, _REENCODE_MAX_SIDE)
+    img = _cap_long_side(
+        img, _AVATAR_MAX_SIDE if prefer == "webp" else _REF_CROP_MAX_SIDE
+    )
     h, w = img.shape[:2]
     if prefer == "webp":
         ok, buf = cv2.imencode(".webp", img, [cv2.IMWRITE_WEBP_QUALITY, 101])  # >100 = 无损
