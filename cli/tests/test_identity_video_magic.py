@@ -13,13 +13,17 @@ def _ftyp(brand: bytes) -> bytes:
     return b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 8
 
 
-def test_heif_avif_brands_are_not_video():
-    for brand in (b"heic", b"heix", b"mif1", b"msf1", b"avif", b"avis", b"miaf"):
+def test_every_still_image_brand_is_not_video():
+    """**全覆盖**表里每一个 brand。这张表是手工维护的、后端还有一份平行副本，
+    漏一个就意味着那种 HEIF 变体仍会被判成视频、把 agent 引去 --video。"""
+    from miloco_cli.commands.identity import _STILL_IMAGE_BRANDS
+
+    for brand in sorted(_STILL_IMAGE_BRANDS):
         assert _looks_like_video_bytes(_ftyp(brand)) is None, brand
 
 
 def test_real_video_brands_still_detected():
-    for brand in (b"isom", b"mp42", b"qt  ", b"3gp4", b"M4V "):
+    for brand in (b"isom", b"mp42", b"mp41", b"qt  ", b"3gp4", b"3gp5", b"M4V ", b"avc1", b"iso2"):
         assert _looks_like_video_bytes(_ftyp(brand)) == "mp4/mov", brand
 
 

@@ -46,13 +46,25 @@ _MAX_DECODE_PIXELS = 120_000_000
 # 结构，只靠「字节 4..8 == ftyp」判不出图与视频——而这个误判有实际后果：ffmpeg 会把 HEIC 的
 # tile grid 当成几十条独立的 512x512 视频流暴露、不做拼接，于是「按视频处理一张 HEIC」会
 # 静默拿到一块瓦片当整帧，全链路零报错地在错素材上跑。
-_HEIF_BRANDS = frozenset(
+
+# 需要 libheif（pi-heif）才能解的那一批。单列出来是因为「缺解码器」的短路只能针对它们：
+# AVIF 由 Pillow 自带的插件解、与 pi-heif 无关，把它也短路掉会凭空砍掉一种本可用的格式。
+_HEIF_ONLY_BRANDS = frozenset(
     {
         b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs",
         b"mif1", b"msf1", b"miaf", b"mia1",
-        b"avif", b"avis",
     }
 )
+# AVIF 家族：同为 ISO BMFF 静态图，判形上要与 HEIF 同等对待（都不得进视频抽帧路径）。
+_AVIF_BRANDS = frozenset({b"avif", b"avis"})
+_HEIF_BRANDS = _HEIF_ONLY_BRANDS | _AVIF_BRANDS
+
+
+def _ftyp_brand(head: bytes) -> bytes | None:
+    """取 ISO BMFF 的 major brand；不是 ISO BMFF 或头部太短则 None。"""
+    if len(head) < 12 or head[4:8] != b"ftyp":
+        return None
+    return head[8:12]
 
 
 def is_still_image_container(head: bytes) -> bool:
@@ -62,7 +74,7 @@ def is_still_image_container(head: bytes) -> bool:
     （``ftyp`` 盒在最前，紧跟 4 字节 major brand）。不是 ISO BMFF、或 brand 是 mp4/mov/qt
     这类真视频 → False，由调用方按原逻辑继续判。
     """
-    return len(head) >= 12 and head[4:8] == b"ftyp" and head[8:12] in _HEIF_BRANDS
+    return _ftyp_brand(head) in _HEIF_BRANDS
 
 
 def decode_image(data: bytes) -> NDArray[np.uint8] | None:
@@ -98,7 +110,7 @@ def decode_image(data: bytes) -> NDArray[np.uint8] | None:
             )
             return None
         return img
-    if not _HEIF_OK and is_still_image_container(data[:16]):
+    if not _HEIF_OK and _ftyp_brand(data[:16]) in _HEIF_ONLY_BRANDS:
         # 传的是 HEIC/HEIF 而解码器在 import 期就没装上：在**失败现场**点明原因，别让排查的人
         # 只拿到一句笼统的「打不开」、再去翻可能早已滚走的启动日志。
         logger.warning("event=heif_upload_without_decoder 缺 pi-heif，无法解码 HEIC/HEIF")

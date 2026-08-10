@@ -37,7 +37,7 @@
       "generic_look": "No distinctive features found (markings/breed/accessories); may be hard to tell apart — add clearer or more distinctive material",
       "refs_inconsistent": "The uploaded images differ a lot — they may not be the same pet",
       "multiple_pets": "Multiple pets detected; the main one was auto-selected. Upload another pet's material separately to register it",
-      "partial_decode_failed": "Some images couldn't be decoded and were skipped (only jpg/png/webp are supported)",
+      "partial_decode_failed": "Some images couldn't be opened and were skipped (the files may be corrupt or incomplete)",
       "low_sharpness": "Some material looks blurry; the recognition reference may be weaker — try a clearer photo"
     },
     "previewSource": "Uploaded",

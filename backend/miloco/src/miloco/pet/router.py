@@ -149,6 +149,11 @@ async def observe_pet_media(
     if is_video and is_still_image_container(raws[0][:16]):
         logger.info("event=pet_observe_still_image_declared_as_video 已按图片处理")
         is_video = False
+        # 体积闸要跟着改判走：上面按视频档放过了 100MB，掰成图片后必须用图片档 15MB 重卡一次，
+        # 否则「谎报成 video」就成了绕过图片体积闸的口子（解码后的像素闸能兜住内存，但请求体
+        # 本身的上限该由这里守）。
+        if len(raws[0]) > _OBSERVE_IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=400, detail="图片过大（单张上限 15 MB）")
     use_grounding = (
         settings.features.pet_head_grounding if grounding is None else grounding
     )

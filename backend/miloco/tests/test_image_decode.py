@@ -82,6 +82,20 @@ def test_heic_without_decoder_logs_at_failure_site(monkeypatch, caplog):
     assert "heif_upload_without_decoder" in caplog.text
 
 
+def test_avif_not_short_circuited_when_heif_decoder_missing(monkeypatch):
+    """缺 pi-heif 的短路只能针对**真正需要 libheif** 的 brand。AVIF 同为 ftyp 容器，但它由
+    Pillow 自带插件解、与 pi-heif 无关，一并短路会凭空砍掉一种本可用的格式。
+
+    普通 AVIF 走 cv2 快路径、到不了那个分支，所以这里把 cv2 打成「解不出」来逼它走回退——
+    否则这条修复没有任何用例能触发，等于没钉。"""
+    import miloco.perception.engine.identity._image_utils as iu
+
+    monkeypatch.setattr(iu, "_HEIF_OK", False)
+    monkeypatch.setattr(iu.cv2, "imdecode", lambda *a, **k: None)
+    assert iu.decode_image(_img("AVIF")) is not None  # 走 Pillow 回退，仍该解得出
+    assert iu.decode_image(HEIC_BYTES) is None        # HEIC 确实需要 libheif → 仍短路
+
+
 def test_non_heif_unaffected_when_decoder_missing(monkeypatch):
     """解码器缺失只该影响 HEIF 家族；既有格式仍走 cv2 快路径，不受牵连。"""
     import miloco.perception.engine.identity._image_utils as iu
@@ -193,13 +207,47 @@ def test_normalize_falls_back_to_jpeg_when_webp_encode_returns_not_ok():
 # ── is_still_image_container（判形）────────────────────────────────────────
 
 
-def test_brand_table_separates_still_image_from_video():
+def _ftyp(brand: bytes) -> bytes:
+    return b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 4
+
+
+def test_brand_table_covers_every_declared_still_image_brand():
+    """**全覆盖**表里每一个 brand，别只抽查几个——这张表是手工维护的（CLI 侧还有一份平行
+    副本），漏一个就意味着那种 HEIF 变体会被当视频送进抽帧路径、静默拿到瓦片。"""
+    import miloco.perception.engine.identity._image_utils as iu
+
     assert is_still_image_container(HEIC_BYTES[:16]) is True
-    for brand in (b"heic", b"heix", b"mif1", b"msf1", b"avif", b"miaf"):
-        assert is_still_image_container(b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 4)
-    # 真视频容器不得被误判成图片（否则视频注册整条失效）
-    for brand in (b"isom", b"mp42", b"qt  ", b"3gp4", b"M4V "):
-        assert not is_still_image_container(b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 4)
-    # 非 ISO BMFF / 头部太短
-    assert not is_still_image_container(b"\xff\xd8\xff\xe0" + b"\x00" * 12)
-    assert not is_still_image_container(b"ftyp")
+    for brand in sorted(iu._HEIF_BRANDS):
+        assert is_still_image_container(_ftyp(brand)), brand
+    assert iu._HEIF_BRANDS == iu._HEIF_ONLY_BRANDS | iu._AVIF_BRANDS
+    assert not (iu._HEIF_ONLY_BRANDS & iu._AVIF_BRANDS)  # 两子集不得重叠
+
+
+def test_video_brands_never_treated_as_still_image():
+    """真视频容器不得被误判成图片，否则视频注册整条失效。"""
+    for brand in (b"isom", b"mp42", b"mp41", b"qt  ", b"3gp4", b"3gp5", b"M4V ", b"avc1", b"iso2"):
+        assert not is_still_image_container(_ftyp(brand)), brand
+
+
+def test_non_isobmff_and_short_headers():
+    assert not is_still_image_container(b"\xff\xd8\xff\xe0" + b"\x00" * 12)  # JPEG
+    assert not is_still_image_container(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)  # PNG
+    assert not is_still_image_container(b"ftyp")  # 头部太短
+    assert not is_still_image_container(b"")
+
+
+def test_cli_and_backend_brand_tables_agree():
+    """两侧各有一份手工表（后端 Python / CLI Python，进程不同无法共享常量）。它们必须一致，
+    否则会出现「CLI 放行、后端当视频」或反之的错位。"""
+    import sys
+    from pathlib import Path
+
+    cli_src = Path(__file__).resolve().parents[3] / "cli" / "src"
+    sys.path.insert(0, str(cli_src))
+    try:
+        from miloco_cli.commands.identity import _STILL_IMAGE_BRANDS
+    finally:
+        sys.path.remove(str(cli_src))
+    import miloco.perception.engine.identity._image_utils as iu
+
+    assert set(_STILL_IMAGE_BRANDS) == set(iu._HEIF_BRANDS)
