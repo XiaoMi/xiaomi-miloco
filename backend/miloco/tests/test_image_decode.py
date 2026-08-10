@@ -122,6 +122,35 @@ def test_decode_rejects_pixel_bomb_on_cv2_fast_path(monkeypatch, fmt):
     assert iu.decode_image(_img(fmt)) is None
 
 
+def test_heic_fallback_returns_bgr_not_rgb():
+    """**通道序**回归钉子：Pillow 回退拿到的是 RGB，整条流水线（YOLO / crop / imencode）都按
+    BGR 处理，漏掉 cvtColor 会让所有 HEIC 的红蓝对调——而毛色正是宠物识别的核心特征。
+    此前删掉那行 cvtColor，132 条相关用例全绿，等于零覆盖。"""
+    # 用现成的 HEIC fixture：它是纯 RGB(200,40,40) 的红色块（pi-heif 只能解码不能编码，
+    # 测试期造不出新 HEIC，见文件顶部说明）。HEIF 有损，用宽松阈值判通道归属即可。
+    img = decode_image(HEIC_BYTES)
+    assert img is not None
+    b, g, r = img[12, 16].tolist()  # OpenCV 通道序 = BGR
+    assert r > 150 and b < 110, f"红色被解成 BGR=({b},{g},{r})，通道序错了"
+
+
+def test_oversized_image_returns_none_without_raising():
+    """cv2 对超出 OpenCV 自身尺寸上限的图是 **CV_Assert 抛异常**而非返 None。29 字节的 GIF 头
+    就能声明 40000x40000 触发它；不接住的话异常穿透全部 9 个接入点，把本该 400 的请求变成
+    500，且违反 decode_image docstring 承诺的「解不出返回 None(不抛)」。"""
+    import struct
+
+    gif = (
+        b"GIF89a"
+        + struct.pack("<HHBBB", 40000, 40000, 0, 0, 0)
+        + b"\x2C"
+        + struct.pack("<HHHHB", 0, 0, 40000, 40000, 0)
+        + b"\x02\x02\x44\x01\x00\x3B"
+    )
+    assert len(gif) < 100  # 字节闸放不住它
+    assert decode_image(gif) is None  # 关键是**不抛**
+
+
 # ── normalize_for_storage ─────────────────────────────────────────────────
 
 
@@ -176,14 +205,20 @@ def test_normalize_rejects_valid_magic_with_broken_body(data):
     assert normalize_for_storage(data) is None
 
 
-def test_normalize_skips_webp_when_side_exceeds_limit():
-    """验的是**尺寸预检闸**：边长 >16383（WebP 容器上限）时不走 webp、直接退 JPEG。
-    注意这条走不到 cv2.imencode(".webp")，`ok=False` 那条分支由下一个用例覆盖。"""
-    wide = np.zeros((8, 20000, 3), np.uint8)
-    ok, buf = cv2.imencode(".bmp", wide)  # BMP 非直通格式 → 必走重编
+@pytest.mark.parametrize("prefer", ["webp", "jpg"])
+def test_normalize_caps_long_side_on_reencode(prefer):
+    """重编支按长边封顶：一张 24MP 的 HEIC 无损编码是 15.6MB / 9.7s，而这些字节只喂
+    28~48px 的圆头像与 omni 的 320px 拼图。封顶只作用于重编支——直通支的逐字节相等
+    由 test_normalize_passthrough_is_byte_identical 守着。"""
+    import miloco.perception.engine.identity._avatar as av
+
+    big = np.zeros((3000, 2000, 3), np.uint8)
+    ok, buf = cv2.imencode(".bmp", big)  # BMP 非直通 → 必走重编
     assert ok
-    got, ext = normalize_for_storage(buf.tobytes(), prefer="webp")
-    assert ext == "jpg" and got[:3] == b"\xff\xd8\xff"
+    got, _ext = normalize_for_storage(buf.tobytes(), prefer=prefer)
+    back = decode_image(got)
+    assert max(back.shape[:2]) == av._REENCODE_MAX_SIDE
+    assert back.shape[:2] == (av._REENCODE_MAX_SIDE, av._REENCODE_MAX_SIDE * 2000 // 3000)
 
 
 def test_normalize_falls_back_to_jpeg_when_webp_encode_returns_not_ok():

@@ -84,9 +84,26 @@ def sniff_image_ext(data: bytes) -> str | None:
     return None
 
 
-# WebP 的容器上限：边长 >16383 时 cv2.imencode 返回 ok=False 且只往 stderr 打一行，
-# 不抛异常——不判 ok 就会把空 buf 当图落盘。超限时退 JPEG（上限 65535）。
-_WEBP_MAX_SIDE = 16383
+# 注：WebP 容器边长上限是 16383，超了 cv2.imencode 返回 ok=False 且只往 stderr 打一行、
+# 不抛异常。下面的长边封顶（1024）已让这条不可能发生，但 ok 判定仍保留——它同时兜住
+# 编码器内部的其它失败（OOM 等），不判就会把空 buf 当图落盘。
+
+# 重编产物的长边上限。消费端只有两处：web 的 28~48px 圆头像（整个 blob fetch、no-store），
+# 与 omni 的 320px 拼图——1024 对两者都绰绰有余。实测 24MP 原图：不封顶 15.6MB / 9.7s，
+# 封到 1024 是 0.93MB / 0.20s。只作用于重编支，直通支不受影响。
+_REENCODE_MAX_SIDE = 1024
+
+
+def _cap_long_side(img, max_side: int):
+    """长边超过 ``max_side`` 时等比缩小；否则原样返回（不复制）。"""
+    h, w = img.shape[:2]
+    longest = max(h, w)
+    if longest <= max_side:
+        return img
+    scale = max_side / longest
+    return cv2.resize(
+        img, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA
+    )
 
 
 def normalize_for_storage(
@@ -118,8 +135,14 @@ def normalize_for_storage(
     ext = sniff_image_ext(data)
     if ext:
         return data, ext
+    # 重编前按长边封顶。理由是量级而非美观：一张 24MP 的 iPhone HEIC（过 5MB 上传闸）无损
+    # 编码后是 15.6MB、耗时约 9.7s，而这些字节的唯一消费者是「28~48px 的圆头像」（前端把整个
+    # blob fetch 下来渲染，且 cache: no-store）与「omni 的 320px 拼图」。改前非白名单格式一律
+    # 400，落盘物件被 5MB 上传闸隐含地夹住；本函数放开了格式，就得自己补回这个上界。
+    # 封顶只作用于**重编那一支**，白名单直通仍逐字节不动（零转码承诺）。
+    img = _cap_long_side(img, _REENCODE_MAX_SIDE)
     h, w = img.shape[:2]
-    if prefer == "webp" and max(h, w) <= _WEBP_MAX_SIDE:
+    if prefer == "webp":
         ok, buf = cv2.imencode(".webp", img, [cv2.IMWRITE_WEBP_QUALITY, 101])  # >100 = 无损
         if ok:
             return buf.tobytes(), "webp"

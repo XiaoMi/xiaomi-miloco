@@ -767,14 +767,14 @@ async def test_observe_two_images_one_pet_each_no_multiple_pets(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_observe_undecodable_image_raises(monkeypatch):
-    # HEIC / AVIF / 损坏字节：一张都解不出 → MediaDecodeError（路由转 400），
+    # 截断 / 损坏字节：一张都解不出 → MediaDecodeError（路由转 400），
     # **不能**退化成 detected=False（那会让 Agent/Web 劝住户换同格式的图，无限循环）
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
     )
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: None)
     with pytest.raises(obs.MediaDecodeError):
-        await obs.observe_pet([b"heic-bytes"], is_video=False, grounding=False)
+        await obs.observe_pet([b"truncated-bytes"], is_video=False, grounding=False)
 
 
 @pytest.mark.asyncio
@@ -812,6 +812,27 @@ async def test_observe_low_sharpness_soft_warning(monkeypatch):
     res = await obs.observe_pet([b"blurry"], is_video=False, grounding=False)
     assert len(res["candidates"]) == 1  # 不硬拒
     assert "low_sharpness" in {w["type"] for w in res["warnings"]}
+
+
+def test_prepare_crops_goes_through_decode_image(monkeypatch):
+    """钉住「observe 用的是 decode_image 而非裸 cv2.imdecode」这条接线本身。
+
+    这个 PR 的核心就是把 9 个入口收口到 decode_image，但 observe 侧所有既有用例都 mock 掉
+    cv2.imdecode（decode_image 内部也调它），于是把这一行改回 cv2.imdecode 全量测试照样绿——
+    等于核心接线零覆盖。这里改 mock decode_image 本身：只有真的经它才会被观察到。
+    """
+    seen = {"n": 0}
+
+    def _fake(data):
+        seen["n"] += 1
+        return _frame(200, 200)
+
+    monkeypatch.setattr(obs, "decode_image", _fake)
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
+    )
+    obs._prepare_crops([b"a", b"b"], is_video=False, max_frames=1)
+    assert seen["n"] == 2  # 两张图各经 decode_image 一次
 
 
 @pytest.mark.asyncio

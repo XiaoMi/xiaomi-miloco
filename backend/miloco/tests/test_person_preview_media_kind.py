@@ -53,12 +53,16 @@ async def test_heic_declared_as_video_does_not_reach_video_extractor(no_video_ex
     body = RegisterPreviewPayload(
         media_b64=base64.b64encode(HEIC_BYTES).decode(), media_kind="video"
     )
-    # 走图片分支 → 桩返回空候选。端点在空候选时的返回形态不是本测试的关注点，
-    # 关键是**没有**触发 extract_from_video 的 AssertionError。
+    # 关键是**没有**触发 extract_from_video 的 AssertionError。原先这里裸吞 HTTPException，
+    # 连「HEIC 根本没解开」也会被一并吞掉——那样即便撤销本 PR 的解码接线，用例仍然全绿。
+    # 现在改成：只容忍「空候选」那一类 4xx，并额外断言这张 HEIC 确实解得开。
+    from miloco.perception.engine.identity._image_utils import decode_image
+
+    assert decode_image(HEIC_BYTES) is not None, "HEIC 解不开，掰回图片路径也没意义"
     try:
         await register_preview(body, current_user="t")
-    except HTTPException:
-        pass  # 空候选时端点怎么应答由既有用例负责，这里不约束
+    except HTTPException as e:
+        assert e.status_code in (400, 422), f"意外的错误码 {e.status_code}"
     assert body.media_kind == "image"  # 已被掰回图片路径
 
 

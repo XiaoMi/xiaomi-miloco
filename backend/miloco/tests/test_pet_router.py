@@ -425,7 +425,7 @@ def test_reference_crops_append_over3_400(client):
 
 def test_reference_crops_reject_non_image(client):
     # 回归：不验图的话任意字节都能存成 ref_crop_*.jpg 并**计入张数**，识别侧再静默跳过 →
-    # 界面显示「N 张参考图」而实际注入 0 张。同头像端点口径：imdecode 验真 + 魔数白名单。
+    # 界面显示「N 张参考图」而实际注入 0 张。同头像端点口径：normalize_for_storage 解码验真（非白名单格式转码落盘，不再 400）。
     pet = _create(client)
     assert _upload_refs(client, pet["id"], [b"not-an-image"], [1]).status_code == 400
     # 存量未被污染：一张都没落

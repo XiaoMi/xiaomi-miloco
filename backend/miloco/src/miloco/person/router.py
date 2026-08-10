@@ -246,7 +246,7 @@ def _ensure_meta_name_from_sql(person_id: str) -> None:
 )
 async def register_sample(
     person_id: str,
-    body_image: UploadFile = File(..., description="人体 crop（jpg/png）"),
+    body_image: UploadFile = File(..., description="人体 crop（常见格式均可，含 iPhone 的 HEIC）"),
     face_image: UploadFile | None = File(None, description="人脸 crop（可选，face_recog 备料）"),
     source: str = Form("user_upload"),
     current_user: str = Depends(verify_token),
@@ -536,7 +536,7 @@ def _flatten_candidates_with_auto(
 )
 async def extract_samples(
     person_id: str,
-    media: UploadFile = File(..., description="图片(jpg/png)或视频(mp4/webm)"),
+    media: UploadFile = File(..., description="图片（常见格式均可，含 HEIC）或视频（mp4/webm/mov 等）"),
     max_frames: int = Form(_EXTRACT_VIDEO_MAX_FRAMES),
     current_user: str = Depends(verify_token),
 ):
@@ -762,7 +762,11 @@ async def upload_person_avatar(
     # 归一化：解码验真（挡垃圾字节）+ 定落盘扩展名。jpg/png/webp 原字节直通；HEIC 等
     # 浏览器渲染不了的容器解码后重编无损 webp，让 盘上后缀 / Content-Type / 真实字节 恒一致。
     # 体积闸卡的是**上传**字节；无损重编后可能超过它，这是有意的（闸拦请求体，不约束盘上物件）。
-    normalized = _avatar.normalize_for_storage(data, prefer="webp")
+    # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、无损 WebP 编码），同进程还并行着
+    # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（同本文件 extract_samples 的处理）。
+    normalized = await asyncio.to_thread(
+        _avatar.normalize_for_storage, data, prefer="webp"
+    )
     if normalized is None:
         raise HTTPException(
             status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）"

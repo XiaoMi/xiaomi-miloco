@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -275,7 +276,11 @@ async def upload_pet_avatar(
     data = await image.read()
     if len(data) > _avatar.AVATAR_MAX_BYTES:  # size 缺失时兜底
         raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
-    normalized = _avatar.normalize_for_storage(data, prefer="webp")
+    # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、无损 WebP 编码），同进程还并行着
+    # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（同 person extract_samples 的处理）。
+    normalized = await asyncio.to_thread(
+        _avatar.normalize_for_storage, data, prefer="webp"
+    )
     if normalized is None:
         raise HTTPException(
             status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）"
@@ -339,7 +344,11 @@ async def upload_pet_reference_crops(
         # 张数**，识别侧再静默跳过 → 界面显示「3 张参考图」而实际注入 0 张。
         # prefer="jpg"：参考图的唯一消费者是 omni，pet_refs 拼图时恒重编 JPEG q85，存 webp
         # 只是多一道转换；且 ref_crop_N.jpg 的硬编码后缀牵动 glob / 下标解析，不宜与内容脱钩。
-        normalized = _avatar.normalize_for_storage(raw, prefer="jpg")
+        # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、无损 WebP 编码），同进程还并行着
+        # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（同 person extract 的处理）。
+        normalized = await asyncio.to_thread(
+            _avatar.normalize_for_storage, raw, prefer="jpg"
+        )
         if normalized is None:
             raise HTTPException(
                 status_code=400, detail="无法打开这张参考图（文件可能损坏，或不是图片）"
