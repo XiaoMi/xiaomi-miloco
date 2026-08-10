@@ -134,8 +134,10 @@ def _to_tracking_dicts(objects) -> list[dict]:
     SortTracker.get_tracking_results 已经直接出 dict；当前 ``RealTrackingService`` 走旧
     PerceptionEngine 时也最终会 convert 成 ``TrackedObject``，需要在这里反向折成 dict。
 
-    每个 dict 字段（与 SortTracker.get_tracking_results 对齐）：
-      ``id`` / ``class_id`` / ``bbox`` / ``xyxy`` / ``confidence`` / ``detected_this_frame``
+    每个 dict 字段（``SortTracker.get_tracking_results`` 输出的**子集**——省去
+    ``hits`` / ``age`` / ``time_since_update``，identity 层全链路无消费点）：
+      ``id`` / ``bbox`` / ``xyxy`` / ``confidence`` / ``detected_this_frame`` 由
+      ``TrackedObject`` 原样折回；``class_id`` 恒为 0（本函数只取 human_body 框）。
 
     ``detected_this_frame`` 与 ``confidence`` 必须原样透传：前者是 IdentityEngine 各
     coasting 闸的唯一判据，后者是 tier_u 质量门与候选打分的输入。任一缺失都不会报错，

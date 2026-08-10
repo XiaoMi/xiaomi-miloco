@@ -141,7 +141,13 @@ def _crop_with_padding(
 def _passes_quality_gate(
     *, area_ratio: float, aspect: float, sharpness: float, detector_conf: float,
 ) -> bool:
-    """与 TierU / TierC 同口径的 4 项物理过滤。"""
+    """裁图的物理过滤：面积占比 / 长宽比 / 清晰度 / 置信度，四项全过才收。
+
+    ⚠️ 陌生人池的晋级门(``tier_u.TierUConfig``)另有一套同名语义的常量，两套之间
+    **无任何绑定**，且校验项与取值都已经不一致。改任一侧阈值前请直接比对两边代码
+    ——此处不维护逐项对照表：那种表要随两边任何一次改动同步，本 docstring 此前正是
+    这样失真的（旧版写着"与 TierU / TierC 同口径"，而当时已经不是了）。
+    """
     return (
         area_ratio >= _GATE_AREA_RATIO_MIN
         and _GATE_ASPECT_MIN <= aspect <= _GATE_ASPECT_MAX
@@ -443,15 +449,23 @@ def extract_from_video(
             for tr in tracking_results:
                 if tr.get("class_id") != Detection.CLASS_HUMAN:
                     continue
-                # coasting(本帧未匹配, bbox 停在上一次真匹配的位置)不裁图: 人已经不在
-                # 那儿了, 裁出的背景/他人图会进该 track 的 top-K 候选、经注册写进身份库。
+                # coasting(本帧未匹配, bbox 停在上一次真匹配的位置)不裁图: 框不对应本帧
+                # —— 人可能已经走开(裁出的是背景/家具/旁边另一个人), 即使人还在, 框也停在
+                # 上次真匹配处、与本帧不对齐。这类图会进该 track 的 top-K 候选、经注册写
+                # 进身份库, 而运行时分不出是哪一种, 故一律不裁。
                 # 下面的质量门拦不住它——置信度同样停在最后一次真匹配的值(通常过阈值),
                 # 背景裁图清晰度也不低; 打分公式同样没有"本帧是否真匹配"这一项。
                 # 与 IdentityEngine 各消费闸同口径。
                 # 召回代价有界, 但上界跟随配置而非代码常量: 本路径 tracker 按 fps=1 建,
                 # 每个关联缺口最多少 sec_to_frames(deep_sort.max_age_sec, 1) 张候选
-                # (当前 yaml 配 2.0 → 2 张), 少掉的正是幻影框那些。调大该 yaml 项会
-                # 同比放宽这个上界, 需连同 min_track_hits 的下限一起评估。
+                # (当前 yaml 配 2.0 → 2 张)。少掉的分两类: ① 人已离开/漏检产生的幻影框,
+                # 这是本闸的目标; ② 人还在画面里(能走到这道闸就说明本帧检出了人 —— 见上面
+                # valid_frames 只收 body_dets 非空的帧)、只是 ReID/IoU 没关联上, 该检测另
+                # 起了 tentative track 而本 track 原地 coasting, 这一帧的框大概率还压在人
+                # 身上, 属本闸的附带代价。排查"某段视频候选变少/注册失败"时: 若少掉的是 ②,
+                # 应查关联稳定性(deep_sort.max_age_sec / ReID 门控)而不是放开本闸, 且注意
+                # min_track_hits 的下限会把只差一张的边缘 track 整条丢掉。调大该 yaml 项会
+                # 同比放宽这个上界, 需连同 min_track_hits 一起评估。
                 # 缺字段按真检测兜底(同全链路 fail-open 口径)。
                 if not tr.get("detected_this_frame", True):
                     continue

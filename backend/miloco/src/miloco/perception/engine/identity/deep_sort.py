@@ -175,8 +175,11 @@ class DeepSortTracker:
                 "hits": tr.hits,
                 "age": tr.age,
                 "time_since_update": tr.time_since_update,
-                # True ⟺ 本帧 Kalman update 真匹配到 detection；False = 纯预测
-                # 残留（coasting）。下游用它拒"人已离开/跟丢"产生的残留框。
+                # True ⟺ 本帧 Kalman update 真匹配到 detection；False = 本帧未匹配
+                # （coasting），此时输出的 bbox 仍是**上一次真匹配时的检测框、原地冻结**
+                # ——``Track.predict`` 只推进 mean/covariance 供关联门控用，从不回写
+                # ``Track.bbox``（全仓唯一写入点在 ``Track.update``）。所以残留框不会随
+                # Kalman 外推移动，只是越来越旧。下游用它拒"人已离开/跟丢"产生的残留框。
                 "detected_this_frame": (tr.time_since_update == 0),
             })
         return out

@@ -364,6 +364,10 @@ class IdentityEngine:
         # 消费点共 7 处：抗遮挡 IoA / omni 候选收集 / 名册 bbox_norm / no_person 抑制区
         # 解除 / no_person 预标 / tier_u 陌生人池推图 / tier_c 入队门；为 False 时各处
         # 早退，避免残留框污染候选、名册与身份库。
+        # 其中两处 no_person 闸在 ``no_person.reject_region_enabled`` 之下，该开关出厂
+        # 关闭（上一级 ``perception/engine/config.py::NoPersonConfigDC`` 与本目录
+        # ``default_config.yaml`` 均为 false），所在函数开头即整体早退 —— 故默认部署下
+        # 实际跑到的是 5 处。估算影响面或回归验证时按 5 处算，别对着两条不执行的路径构造用例。
         self._detected_this_frame: dict[int, bool] = {}
         # face 在场写库门 + prompt face 标签 + 陌生人池 face_crop 三处共用源
         # (tier_c 污染修复): 每窗口 process() 早期 face 几何关联算一次, 存 track →
@@ -1249,9 +1253,14 @@ class IdentityEngine:
                 sharpness=_compute_sharpness(body_crop),
                 bbox_xyxy=tuple(tr["xyxy"]),  # type: ignore[arg-type]
                 # 缺 confidence 时按满置信兜底(与接缝另一侧同口径): tracker 决定维持
-                # 这个 track, 说明检测已过 detector_conf_threshold, "未知"不等于"零信"。
-                # 取 0.0 会让该路径的候选被 tier_u 质量门(detector_conf_min)全数静默
-                # 拒光——功能整体失效, 比放宽是更坏的失败模式。
+                # 这个 track, 说明它至少经历过一次过检测阈值的检测, "未知"不等于"零信"。
+                # 注: 把住池内下限(detector_conf_min=0.4)的是 Detector 构造参数
+                # conf_threshold, 不是名字更像的 ``deep_sort.detector_conf_threshold``
+                # —— 完整归因见 tracking_service.py::_build_response 里同一话题的注释
+                # (单一来源, 只维护那一份)。
+                # 入池口本身不看 conf(push_crop 只判开关再等比缩放), 这个值是给池内
+                # 质量门用的。取 0.0 则该路径的 crop 一张也过不了那道门、全部卡在 L1 ——
+                # 功能整体失效, 比放宽是更坏的失败模式。
                 detector_conf=float(tr.get("confidence", 1.0)),
             )
             self.tier_u_pool.push_crop(crop_entry)

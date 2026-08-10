@@ -416,14 +416,16 @@ def _select_video_crops(
             t for t in tracker.get_tracking_results() if t["class_id"] in _PET_CLASS_IDS
         ]
         # 「多只」判定维度 = **同一帧**共现，且只数**本帧真检测匹配**（time_since_update==0）的 track：
-        # 一只宠物跟丢又重现时，旧 track 靠 Kalman 预测续命、新 track 已开启——若按"整段累计 track 数"
-        # 或把预测框也算进来，会把这**一只**误判成"多只/同帧多只"（伪多宠）。get_tracking_results 已
-        # pre-filter tsu>=1，这里显式再夹一道 tsu==0，兼容将来 DeepSORT 路径可能回预测框。
+        # 一只宠物跟丢又重现时，旧 track 靠 Kalman 推进内部状态续命、新 track 已开启——若按"整段累计
+        # track 数"或把残留 track 也算进来，会把这**一只**误判成"多只/同帧多只"（伪多宠）。
+        # get_tracking_results 已 pre-filter tsu>=1，这里显式再夹一道 tsu==0，兼容将来 DeepSORT 路径
+        # ——那条路径不做这道前置过滤，会输出 coasting track（框停在上一次真匹配时的检测框、原地冻结，
+        # 不随 Kalman 外推移动，见 perception/engine/types.py::TrackedObject.detected_this_frame）。
         matched_ids = {t["id"] for t in tracks if t.get("time_since_update", 0) == 0}
         n_coincident = max(n_coincident, len(matched_ids))
         for tr in tracks:
             if tr["id"] not in matched_ids:
-                continue  # 只认本帧真匹配（与上方 matched_ids 同口径，兼容将来回预测框的路径）
+                continue  # 只认本帧真匹配（与上方 matched_ids 同口径，兼容将来会输出 coasting 框的路径）
             crop = _crop_with_padding(frame, tr["bbox"], _PADDING_RATIO)
             if crop is None or crop.size == 0:
                 continue

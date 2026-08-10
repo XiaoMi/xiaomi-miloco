@@ -119,6 +119,12 @@ class TrackedObject:
     # IdentityEngine 内 7 处闸靠它拒"人已离开或跟丢"产生的残留框：抗遮挡 IoA / omni
     # 候选 / 名册位置 / no_person 抑制区解除 / no_person 预标 / tier_u 陌生人池推图 /
     # tier_c 入队；离线视频抽样本路径(identity/extractor.py)另有一处同口径的闸。
+    # 其中两处 no_person 闸在 ``no_person.reject_region_enabled`` 之下，该开关出厂关闭
+    # (本包 ``config.py::NoPersonConfigDC`` 与 ``identity/default_config.yaml`` 均为
+    # false)，所在函数开头即整体早退 —— 默认部署下引擎内实际跑到的是 5 处。
+    # 另：``miloco/pet/observe.py``(注意是另一个顶层包、不在 perception/ 下)用
+    # ``time_since_update == 0`` 表达同一条不变式(该路径直接消费 SortTracker 原始
+    # dict、不经本类型)，改判据定义时需一并评估。
     # 必须由 tracker 一路透传到 engine。
     # 默认 True：mock 与旧 convert_response 路径不产生 coasting track，其输出的每个
     # 对象都对应一次真实检测。
