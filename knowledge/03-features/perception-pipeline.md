@@ -83,9 +83,11 @@ PerceptionEngineProxy 结果后处理
 
 #### Gate — 变化门控
 
-Gate 层（`perception/engine/gate/gate.py`）对每个窗口做双模态判定：视觉帧差分（`gate/visual_gate.py`）和音频峰值能量（`gate/audio_gate.py`）。任一触发即通过，输出 `GatePacket`；两路均无变化且不在 hold 窗内时返回 `None`，下游整个跳过。
+Gate 层（`perception/engine/gate/gate.py`）对每个窗口做双模态判定：视觉帧差分（`gate/visual_gate.py`）和音频峰值能量（`gate/audio_gate.py`）。任一触发即通过，输出 `GatePacket`；两路均无变化且 hold 不生效时返回 `None`，下游整个跳过。**本窗无视频帧时 hold 不生效**——零帧窗口只有音频过闸才建 packet（走 audio 路由），否则直接返回 `None`。
 
 **Hold 滞回**：视觉刚通过后的一段时间内，即使本窗视觉/音频都无变化也继续放行并在 `GateTrigger.hold` 打标，让下游保持 video 路由——避免人短暂静止时 route 在 video / audio 间来回抖动；on-demand 单次调用不触发 hold（时长配置见 `settings.yaml::perception`）。
+
+hold 有两个字段，消费者不同、取值也可能不同：`GateTrigger.hold`（下游 `_is_audio_only` 选路用）受「本窗有没有帧」约束，零帧时恒为 `False`；`GateTiming.hold_pass`（`pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机用）始终是原始滞回判定，不受帧数影响——否则仍在滞回期的相机会被误判成滞回结束，刷出假的 `HOLD_EXPIRED` 事件。
 
 音频过能量门后再跑一道语音活动检测（VAD，`gate/speech_vad.py`，silero 模型）：判定本窗音频是否含真人声，无人声则从下游 schema 剥掉 `speeches` 字段——这是对输出字段的子门控，不改变窗口整体是否放行。
 

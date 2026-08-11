@@ -904,6 +904,16 @@ def _build_fused_user_content(
             "本窗口走 text-only 识别",
             len(video_b64), _MIN_VIDEO_B64_LEN,
         )
+    else:
+        # 走到 video 路由却一帧都没有。正常态由 gate 的空输入闸 + 引擎入口的
+        # _drop_empty_snapshots / _drop_frameless_snapshots 挡住,能到这里说明上游某道闸
+        # 失效(或 _AUDIO_ONLY_ENABLED 被回滚、或编码异常)。此时请求里一个媒体块都没有,
+        # 模型只能照着 schema 编场景 —— 必须留痕,否则这类幻觉无从发现(PR #510 之所以
+        # 难定位,就是因为这条路径此前完全静默)。
+        logger.warning(
+            "event=fused_no_media_block route=video reason=empty_video, "
+            "本窗口无任何媒体块、走 text-only —— 上游空帧闸可能失效"
+        )
 
     _log_user_content(content)
     return content
@@ -1367,6 +1377,12 @@ _MIN_AUDIO_B64_LEN = 500
 
 # 总开关：False 时所有窗口都走 video route（等价于改动前的行为）。
 # 用于一键回滚 / A/B 对比 / 上游不兼容时的应急关闭。
+#
+# ⚠️ 回滚前先读 gate.py 的空输入闸：那里对「零帧 + 音频过闸」的处置**依赖本开关为 True**
+# —— 靠 trigger.hold 置假让 _is_audio_only 把包放去 audio 路由。本开关置 False 后这类包会
+# 被拉回 video 路由，而 _encode_video 对零帧返回 None → 无 video 块 → 退化成纯文本问模型
+# 「这个场景里有什么」，模型只能照着 schema 编（PR #510 修的就是这个）。真要回滚时，需连带
+# 把 gate 的 hold_effective 条件收紧成「无帧一律不建 packet」。
 _AUDIO_ONLY_ENABLED = True
 
 
