@@ -987,6 +987,30 @@ class PerceptionEngine(BasePerceptionEngine):
                 self._empty_window_logged.add(did)
         batch.snapshots[:] = kept
 
+    def _drop_frameless_snapshots(self, batch: BatchedSnapshot) -> None:
+        """query 路径专用:剔除无视频帧的 snapshot。
+
+        判据比 realtime 的 ``_drop_empty_snapshots``(「两个模态都没有」)更严,因为 query
+        路径**没有 audio route**:``build_query_prompt`` 只产出 ``video_base64``,而
+        ``_encode_video`` 对零帧直接返回 ``(None, None)`` —— 音频只作为 mp4 音轨随视频走,
+        零帧时连它一起丢。``_build_messages`` 两个 key 都拿不到就一个媒体块都不加,且无
+        warning。留着零帧 snapshot 的唯一效果,是让模型拿着上一窗的 ``last_caption`` 去回答
+        「现在怎么样」——用户直接读到的一句听起来正常、但没有本窗画面依据的现场描述。
+
+        realtime 侧不能用这个判据:那边零帧+音频过闸有 audio route 接住,按无帧剔除会误杀
+        拾音相机的纯音频感知。
+        """
+        kept: list[DeviceSnapshot] = []
+        for snapshot in batch.snapshots:
+            if snapshot.has_video:
+                kept.append(snapshot)
+                continue
+            logger.warning(
+                "主动查询：本窗无视频帧，跳过该相机 did=%s name=%s",
+                snapshot.device.did, snapshot.device.name,
+            )
+        batch.snapshots[:] = kept
+
     async def realtime_perceive(
         self,
         batch: BatchedSnapshot,
@@ -1139,9 +1163,11 @@ class PerceptionEngine(BasePerceptionEngine):
         # （_encode_video_mp4 对空 audio 自动出纯视频 mp4）。
         self._strip_unauthorized_voice_audio(batch)
 
-        # 剥完音频后复检。query 路径跳过 gate，空帧 snapshot 只能在这里挡——否则
-        # build_query_prompt 无帧不加 video 块，变成拿纯文本去回答"房间里现在怎么样"。
-        self._drop_empty_snapshots(batch)
+        # 剥完音频后复检。query 路径跳过 gate 且没有 audio route，零帧 snapshot 只能在
+        # 这里挡——否则 build_query_prompt 无帧不加任何媒体块，变成拿纯文本（外加上一窗的
+        # last_caption）去回答"房间里现在怎么样"。判据用「有没有画面」而非 realtime 的
+        # 「两个模态都没有」，理由见 _drop_frameless_snapshots。
+        self._drop_frameless_snapshots(batch)
         if batch.empty:
             return OnDemandPerceptionResult(answer="")
 

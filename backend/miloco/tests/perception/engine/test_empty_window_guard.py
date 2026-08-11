@@ -233,6 +233,61 @@ class TestDropEmptySnapshots:
         assert result is not None
         assert result.skipped is True
 
+    async def test_query_path_drops_frameless_even_with_audio(self, monkeypatch):
+        """主动查询 + 拾音开启 + 零帧 + 有音频 → 返回空答案。
+
+        query 路径判据比 realtime 严：那边零帧+音频有 audio route 接住，query 路径
+        `build_query_prompt` 只产 video_base64，零帧时连音频一起丢，模型会拿上一窗的
+        last_caption 去回答"现在怎么样"——用户直接读到没有画面依据的现场描述。
+        """
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: {"cam_on"})
+        eng = _make_engine()
+        batch = BatchedSnapshot(
+            snapshots=[_snapshot("cam_on", with_video=False, with_audio=True)]
+        )
+
+        result = await eng.on_demand_perceive(batch, "厨房现在怎么样")
+
+        # 同时断言 batch 已被剔空：只断言 answer=="" 挡不住"换成 _drop_empty_snapshots
+        # 后走进 run_query_pipeline、因别的原因也返回空答案"这种为错误理由通过的情况。
+        assert batch.snapshots == []
+        assert result.answer == ""
+
+    def test_query_path_keeps_framed_device_in_mixed_batch(self, monkeypatch):
+        """混合批：零帧的剔掉、有帧的保留，多设备查询不受影响。"""
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: {"cam_on"})
+        eng = _make_engine()
+        batch = BatchedSnapshot(
+            snapshots=[
+                _snapshot("cam_a", with_video=False, with_audio=True),
+                _snapshot("cam_b", with_video=True, with_audio=True),
+            ]
+        )
+
+        eng._drop_frameless_snapshots(batch)
+
+        assert [s.device.did for s in batch.snapshots] == ["cam_b"]
+
+    def test_realtime_keeps_what_query_drops(self, monkeypatch):
+        """两条路径判据不同的对照：同一个「零帧+有音频」snapshot，realtime 留、query 剔。
+
+        钉住这个差异，防后续有人图省事把两处合并成一个函数——realtime 侧按无帧剔除会
+        误杀拾音相机的纯音频感知。
+        """
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: {"cam_on"})
+        eng = _make_engine()
+        make = lambda: BatchedSnapshot(  # noqa: E731
+            snapshots=[_snapshot("cam_on", with_video=False, with_audio=True)]
+        )
+
+        b_realtime = make()
+        eng._drop_empty_snapshots(b_realtime)
+        assert len(b_realtime.snapshots) == 1
+
+        b_query = make()
+        eng._drop_frameless_snapshots(b_query)
+        assert b_query.snapshots == []
+
     def test_warning_deduped_per_did_and_reset_on_recovery(self, monkeypatch, caplog):
         """日志按 did 去重：连续空窗只打一条；该相机恢复出数据后再空，重新打。
 

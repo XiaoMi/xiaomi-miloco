@@ -582,6 +582,15 @@ class PerceptionEngineProxy:
                 intra_priority=suggestion_intra_priority(kept),
             )
 
+        # 窗口时长必须在引擎调用**之前**算：引擎的 _drop_empty_snapshots 会原地剔除
+        # batch.snapshots（沿用 _strip_unauthorized_voice_audio 的惯例），整批被剔空时
+        # 下面那个 max(..., default=0.0) 会落 0 → [perf] 打 RTF=0.000、traces_cycle 的
+        # rtf 列全走 NULL 分支，正好废掉「整批剔空仍留一行 cycle trace」的意义。
+        window_duration_ms = max(
+            (s.end_timestamp - s.start_timestamp for s in batched_snapshot.snapshots),
+            default=0.0,
+        )
+
         # --- Pipeline timing ---
         t = time.monotonic()
         try:
@@ -618,14 +627,8 @@ class PerceptionEngineProxy:
             timing["_convert_ms"] = convert_ms
             timing["_pipeline_total_ms"] = pipeline_ms
             timing["_device_count"] = device_count
-            # Window duration = max span across all snapshots
-            timing["_window_duration_ms"] = max(
-                (
-                    s.end_timestamp - s.start_timestamp
-                    for s in batched_snapshot.snapshots
-                ),
-                default=0.0,
-            )
+            # Window duration = max span across all snapshots（在引擎调用前算好，见上）
+            timing["_window_duration_ms"] = window_duration_ms
             result.timing = timing
 
             if not result.skipped:

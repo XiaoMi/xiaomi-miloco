@@ -811,3 +811,38 @@ async def test_persist_mixed_window_excludes_voice_disabled_transcript():
     assert "开灯" not in kwargs["payload_json"]
     # 原 result 不被原地改
     assert len(result.speeches) == 1
+
+
+async def test_window_duration_survives_engine_dropping_snapshots(proxy):
+    """引擎原地剔空 batch.snapshots 后，窗口时长仍是真实值、不落 0。
+
+    engine/api.py 的 _drop_empty_snapshots 会原地改 batch.snapshots（沿用
+    _strip_unauthorized_voice_audio 的惯例）。窗口时长若在引擎返回之后才算，整批被剔空
+    时 max(..., default=0.0) 会落 0 → [perf] 打 RTF=0.000、traces_cycle 的 rtf 列全走
+    NULL 分支，正好废掉「整批剔空仍留一行 cycle trace」的意义。
+    """
+    from miloco.perception.types import DeviceSnapshot, PerceptionDevice
+
+    batch = BatchedSnapshot(
+        snapshots=[
+            DeviceSnapshot(
+                device=PerceptionDevice(did="cam", name="cam", device_type="camera"),
+                start_timestamp=1000.0,
+                end_timestamp=5000.0,
+            )
+        ],
+        captured_at=0.0,
+    )
+
+    async def engine_realtime(b, *args, **kwargs):
+        b.snapshots[:] = []  # 模拟 _drop_empty_snapshots 整批剔空
+        return RealtimePerceptionResult(skipped=True)
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    result, *_ = await proxy._realtime_perceive_impl(
+        batch, [], 0, 0.0, asyncio.get_running_loop(), [],
+    )
+
+    assert result is not None
+    assert result.timing["_window_duration_ms"] == 4000.0
