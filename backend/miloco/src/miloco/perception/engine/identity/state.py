@@ -81,9 +81,15 @@ class TrackIdentityState:
     # (observe 只打日志; enforce 撤回重判)。
     drift_consec_low: int = 0
     # 上一窗算出的 sim(本窗证据的指纹)。与本窗逐字节相同 ⟹ 比较的两端这一窗都没有新证据
-    # (track 侧特征队列没长新东西: 整窗一次都没匹配上, 或 fast 模式静止 track 全窗复用
-    # 缓存 emb; 参考侧窗内既无新样本落盘、也无旧样本滑出 recency 窗), 属"无数据窗",
-    # 不计不清 —— 否则同一份证据会被投两票, 把"连续 M 窗"抗单窗噪声的设计架空。
+    # (track 侧特征队列一次都没追加; 参考侧窗内既无新样本落盘、也无旧样本滑出 recency 窗),
+    # 属"无数据窗", 不计不清 —— 否则同一份证据会被投两票, 把"连续 M 窗"抗单窗噪声的设计
+    # 架空。
+    # 这道判据能不能被走到, 取决于几个配置量之间的大小关系而非本文件的逻辑: 一个感知窗
+    # 装得下的帧数, 要不超过 track 存活上限、要不超过 fast 模式重抽 ReID 的间隔, 才可能
+    # 出现整窗没有新特征入队的情形。**当前出厂值落在哪一边不写在这里** —— 写进注释就会
+    # 随调参失真(这段注释此前正是这样错的)。答案由
+    # ``test_drift_check.py::test_evidence_gate_activation_matches_config`` 按真实配置
+    # 算出并钉住: 谁把这几个旋钮调到关系反转, 那条用例会红, 提示这道判据从此真的生效。
     # 撤回 / 复认时与 drift_consec_low 一同清空。
     drift_last_sim: float | None = None
     # (enforce)采信复认护栏: 撤回时记下撤前 committed 身份; 若 omni 复认回同一 person,

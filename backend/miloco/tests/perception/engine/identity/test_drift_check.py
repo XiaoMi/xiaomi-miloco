@@ -16,18 +16,26 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from miloco.perception.engine.config import (
     IdentityEngineConfig,
+    InputConfig,
     identity_engine_config_from_dict,
+)
+from miloco.perception.engine.identity._fps_utils import (
+    frames_per_window,
+    sec_to_frames,
 )
 from miloco.perception.engine.identity.config_loader import load_identity_engine_config
 from miloco.perception.engine.identity.dispatcher import FusedDispatcher
 from miloco.perception.engine.identity.engine import IdentityEngine
 from miloco.perception.engine.identity.library import IdentityLibrary, _sanitize_cam_did
 from miloco.perception.engine.identity.state import TrackIdentityState
+from miloco.perception.engine.identity.tracker.config import TrackerConfig
+from miloco.perception.engine.identity.tracker.tracker import MultiObjectTracker
 
 # 现实 epoch 量级 now_ts:让 tier_c 文件名 ts_ms = int(ts*1000) > 1e12, 被
 # _npy_capture_ts 认作时间戳(而非 tier_a 序号)。
@@ -107,6 +115,44 @@ class TestDriftCheckConfig:
         assert cfg.drift_check.threshold == 0.55
         assert cfg.drift_check.recency_sec == 900.0
         assert cfg.drift_check.consecutive_windows == 2
+
+    def test_evidence_gate_activation_matches_config(self):
+        """按真实配置算出「证据指纹判据当前会不会被走到」,把答案钉在这儿而非注释里。
+
+        ``_run_drift_check`` 比的是整窗累积的特征质心。只有当一个感知窗装得下的帧数
+        **不超过** track 存活上限、或**不超过** fast 模式重抽 ReID 的间隔时,才可能整窗
+        没有新特征入队、两窗算出逐字节相同的 sim。两个条件都不满足时,每个活到读取点的
+        track 本窗内必然匹配过、质心已变,那道判据走不到。
+
+        当前配置两个条件都不满足,所以它是给**调过参的部署**兜底的。谁把 max_age_sec
+        调到不短于 period_sec、或把 human_reid_skip_windows 调大到窗长以上,这条会红 ——
+        那正是需要有人知道的时刻:这道判据从此真的生效,身份撤回的时延会跟着变。
+
+        之所以做成用例而不是注释:这个结论由四个旋钮共同决定,写进注释就会随任何一次
+        调参失真(它此前正是这样错的),而用例会自己算。
+        """
+        cfg = load_identity_engine_config()
+        inp = InputConfig()
+
+        window_frames = frames_per_window(inp.fps, inp.period_sec)
+        max_age_frames = sec_to_frames(cfg.deep_sort.max_age_sec, inp.fps)
+
+        # reid 间隔不重算公式,直接借生产方法算 —— 复制一份公式正是「两处同口径」
+        # 那类注释腐烂的起点。该方法只读 self.config,给个桩就能调。
+        tracker_cfg = TrackerConfig(
+            human_reid_skip_windows=cfg.deep_sort.human_reid_skip_windows
+        )
+        stub = SimpleNamespace(config=tracker_cfg)
+        reid_interval = MultiObjectTracker._get_reid_interval(stub)
+
+        assert max_age_frames < window_frames, (
+            "track 存活上限已不短于窗长,证据指纹判据从此会被真实走到;"
+            "state.py::drift_last_sim 的说明与撤回时延都需要重新评估"
+        )
+        assert reid_interval < window_frames, (
+            "fast 模式 ReID 重抽间隔已不短于窗长,静止 track 可能整窗复用缓存特征,"
+            "证据指纹判据从此会被真实走到"
+        )
 
 
 # =============================================================================
