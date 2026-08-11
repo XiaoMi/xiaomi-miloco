@@ -2,8 +2,9 @@
 
 打包内容:
   - metadata.json         事件元数据 + 用户反馈 + 版本 + 数据完整性记录
-  - omni_trace.json.gz    omni 调用记录(prompt + response + 推理参数)
+  - omni_trace.json.gz    omni 调用记录(prompt + response + 推理参数;Smart Crop 事件含 crop 坐标)
   - clips/{device}/clip.* 视频/音频(零重编,omni 原始输入)
+  - clips/{device}/ref.jpg 全景参考帧(仅 Smart Crop 事件;crop 视频同附的整帧上下文)
   - gallery/*.{jpg,png}   画廊合成图(可选,用户勾选时包含)
 
 个人信息脱敏: 对 omni_trace 文本做正则替换(手机号/IP/身份证号 → ***).
@@ -153,6 +154,7 @@ def build_feedback_pack(
         "omni_trace_found": False,
         "clips_found": [],
         "clips_missing": [],
+        "refs_found": [],
         "gallery_included": False,
     }
 
@@ -174,6 +176,9 @@ def build_feedback_pack(
                 break
         if not found:
             components["clips_missing"].append(slug)
+        # Smart Crop 参考帧(与 clip 同目录);非 crop 事件无此文件,静默跳过
+        if (clip_dir / "ref.jpg").exists():
+            components["refs_found"].append(f"{slug}/ref.jpg")
 
     gallery_dir = event_dir / "gallery"
     has_gallery = gallery_dir.is_dir() and any(gallery_dir.iterdir())
@@ -197,6 +202,7 @@ def build_feedback_pack(
         "omni_trace_found": components["omni_trace_found"],
         "clips_found": components["clips_found"],
         "clips_missing": components["clips_missing"],
+        "refs_found": components["refs_found"],
         "gallery_included": include_gallery and has_gallery,
     }
 
@@ -231,6 +237,11 @@ def build_feedback_pack(
                 clip_path = event_dir / clip_rel
                 if clip_path.exists():
                     tar.add(clip_path, arcname=f"clips/{clip_rel}")
+
+            for ref_rel in components["refs_found"]:
+                ref_path = event_dir / ref_rel
+                if ref_path.exists():
+                    tar.add(ref_path, arcname=f"clips/{ref_rel}")
 
             if include_gallery and has_gallery:
                 for img in gallery_dir.iterdir():

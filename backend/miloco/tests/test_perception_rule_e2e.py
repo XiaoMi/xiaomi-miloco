@@ -169,6 +169,253 @@ async def test_e2e_single_cam_unchanged(proxy_with_runner, mock_miot_proxy):
 
 
 @pytest.mark.asyncio
+async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypatch):
+    """胶水层集成:命中 → update_state 返回结论 → client 循环里就地累积并聚合 → rule_statuses
+    透传给 persist。patch _persist_meaningful_event 只截获 rule_statuses,不拉起 DB/落盘。"""
+    proxy, runner, mgr_ctx = proxy_with_runner
+    runner.add_rule(_make_state_rule("rule_X", ["cam_A"]))
+
+    captured: dict = {}
+
+    async def _fake_persist(
+        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+    ):
+        captured["rule_statuses"] = rule_statuses
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+
+    with mgr_ctx():
+        await proxy.handle_realtime_perception_result(
+            _result(matched=[("rule_X", ["cam_A"], "人来")],
+                    device_rule_map={"cam_A": ["rule_X"]}),
+            artifacts=object(),  # 非 None → 进 persist 分支（patch 后不真落库）
+        )
+        await asyncio.sleep(0.05)  # 让后台 persist task 跑起来
+
+    await runner.drain()
+    # ENTER fire → 该 rule 本周期结论 FIRED（client 快照现传中性枚举，中文标签由展示层映射）
+    from miloco.rule.schema import TriggerOutcome
+
+    assert captured.get("rule_statuses") == {"rule_X": TriggerOutcome.FIRED}
+
+
+@pytest.mark.asyncio
+async def test_e2e_rule_statuses_multi_cam_aggregates_to_fired(
+    proxy_with_runner, monkeypatch
+):
+    """多摄像头聚合：同 rule 绑 [cam_A, cam_B]，同周期 cam_A ENTER→FIRED、cam_B 已在态→STILL_IN，
+    就地累积后 aggregate 取最强 → 快照该 rule = FIRED。守住 setdefault().append() 累积半边
+    （防退化成「取最后一个结论」→ 明明触发却写「未触发（持续中）」）。"""
+    proxy, runner, mgr_ctx = proxy_with_runner
+    runner.add_rule(_make_state_rule("rule_or", ["cam_A", "cam_B"]))
+
+    captured: dict = {}
+
+    async def _fake_persist(
+        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+    ):
+        captured["rule_statuses"] = rule_statuses
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+
+    with mgr_ctx():
+        await proxy.handle_realtime_perception_result(
+            _result(
+                matched=[("rule_or", ["cam_A"], "A 命中"),
+                         ("rule_or", ["cam_B"], "B 命中")],
+                device_rule_map={"cam_A": ["rule_or"], "cam_B": ["rule_or"]},
+            ),
+            artifacts=object(),
+        )
+        await asyncio.sleep(0.05)
+    await runner.drain()
+
+    from miloco.rule.schema import TriggerOutcome
+
+    # cam_A=FIRED + cam_B=STILL_IN → 聚合取最强 → FIRED（非「取最后一个」的 STILL_IN）
+    assert captured.get("rule_statuses") == {"rule_or": TriggerOutcome.FIRED}
+
+
+@pytest.mark.asyncio
+async def test_main_loop_update_state_raise_marks_rule_incomplete(
+    proxy_with_runner, monkeypatch
+):
+    """终态主循环 update_state 抛异常 → 该 rule 记残缺、展示层标「未知」，不能整行消失。
+
+    与早送侧同口径:同一份证据缺口两条路结果必须一致。整行消失的既有语义是「本周期完全没
+    处理到」,而这里规则处理过、还可能真派发过一次执行(裸 DB 读排在 _spawn_fire 之后),
+    静默降级成「没这回事」会让住户和排障的人都无法区分。
+    """
+    proxy, runner, _ = proxy_with_runner
+    captured: dict = {}
+
+    async def _fake_persist(
+        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+    ):
+        captured["incomplete"] = incomplete_rule_ids
+
+    async def _boom(*a, **k):
+        raise RuntimeError("read_duration_target_state boom (post-dispatch)")
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+    fake = MagicMock()
+    fake.rule_service.update_state = _boom
+    fake.rule_service.get_enabled_rule_ids = lambda: ["rule_X"]
+    with patch("miloco.manager.get_manager", return_value=fake):
+        with pytest.raises(RuntimeError):
+            await proxy.handle_realtime_perception_result(
+                _result(matched=[("rule_X", ["cam_A"], "有人进门")],
+                        device_rule_map={"cam_A": ["rule_X"]}),
+                artifacts=object(),
+            )
+        await asyncio.sleep(0.05)
+
+    assert captured.get("incomplete") == {"rule_X"}, (
+        "主循环 update_state 抛异常后该 rule 未记残缺 → 展示层整行消失,"
+        "把可能已 fire 的规则降级成「本周期没处理到」"
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2e_early_send_failure_marks_rule_incomplete(
+    proxy_with_runner, monkeypatch
+):
+    """早送某路判定未完成(value 留 None) → 该 rule 进 incomplete_rule_ids。
+
+    钉住 client 侧「None ⇒ 证据残缺」的收集:不能只拿兄弟相机的结论聚合了事——同 rule 本周期
+    最多一路返回 FIRED,若偏偏那一路抛异常,聚合结果就是确定但偏弱的假阴性。
+    (展示层拿到 incomplete 后标「未知」,但聚合已是 FIRED 时不降级——见
+    test_incomplete_does_not_downgrade_confirmed_fired;本用例只钉 client 侧的收集契约。)
+    """
+    proxy, runner, mgr_ctx = proxy_with_runner
+    runner.add_rule(_make_state_rule("rule_or", ["cam_A", "cam_B"]))
+
+    captured: dict = {}
+
+    async def _fake_persist(
+        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+    ):
+        captured["rule_statuses"] = rule_statuses
+        captured["incomplete"] = incomplete_rule_ids
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+
+    with mgr_ctx():
+        await proxy.handle_realtime_perception_result(
+            _result(
+                matched=[("rule_or", ["cam_B"], "B 命中")],
+                device_rule_map={"cam_A": ["rule_or"], "cam_B": ["rule_or"]},
+            ),
+            # 早送 cam_A 判定未完成:pair 已登记(去重/抑制推退照旧),但 value 留 None
+            early_sent_rule_ids={("rule_or", "cam_A"): None},
+            artifacts=object(),
+        )
+        await asyncio.sleep(0.05)
+    await runner.drain()
+
+    from miloco.rule.schema import TriggerOutcome
+
+    assert captured.get("incomplete") == {"rule_or"}, "value=None 未被收成证据残缺"
+    # 聚合值确实非空(cam_B 走主循环正常返回) → 证明「未知」是在覆盖一个确定值,
+    # 而非「本来就没值可覆盖」——否则本用例分不清 precedence 是否真生效。
+    assert captured.get("rule_statuses") == {"rule_or": TriggerOutcome.FIRED}
+
+
+@pytest.mark.asyncio
+async def test_persist_spawned_even_if_update_state_raises(proxy_with_runner, monkeypatch):
+    """韧性：update_state 循环抛异常时，finally 里仍 spawn persist（本 cycle 日志不整行丢失），
+    且异常照常上抛（与「persist 领先循环」时的传播语义一致）。"""
+    proxy, runner, mgr_ctx = proxy_with_runner
+
+    persisted = {"called": False}
+
+    async def _fake_persist(
+        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+    ):
+        persisted["called"] = True
+
+    async def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+
+    fake = MagicMock()
+    fake.rule_service.update_state = _boom
+    fake.rule_service.get_enabled_rule_ids = lambda: []
+
+    with patch("miloco.manager.get_manager", return_value=fake):
+        with pytest.raises(RuntimeError):
+            await proxy.handle_realtime_perception_result(
+                _result(matched=[("rule_X", ["cam_A"], "x")],
+                        device_rule_map={"cam_A": ["rule_X"]}),
+                artifacts=object(),  # 非 None → 进 persist 分支
+            )
+        await asyncio.sleep(0.05)  # 让 finally 里 spawn 的 persist task 跑起来
+
+    assert persisted["called"] is True
+
+
+@pytest.mark.asyncio
+async def test_stale_outcome_not_leaked_on_exception(proxy_with_runner, monkeypatch):
+    """异常路径下，本 cycle 未处理到的规则不会把上一 cycle 的旧结论泄进快照。
+    （就地累积拿返回值的关键：引擎已不留跨 cycle 记账表，主循环命中侧靠 update_state 返回值，
+    本 cycle 处理到某规则之前抛异常时它自然缺席，而非回落到旧结论。）"""
+    proxy, runner, mgr_ctx = proxy_with_runner
+    runner.add_rule(_make_state_rule("rule_2", ["cam_A"]))
+
+    # 上一 cycle：rule_2 ENTER 真 fire（rule_2 的状态机进入 ENTERED，模拟"上轮真触发过"）
+    with mgr_ctx():
+        await proxy.handle_realtime_perception_result(
+            _result(matched=[("rule_2", ["cam_A"], "x")],
+                    device_rule_map={"cam_A": ["rule_2"]}),
+            artifacts=None,
+        )
+    await runner.drain()
+
+    # 本 cycle：处理到 rule_2 之前抛异常（_publish_perception_event 在 update_state 之前）
+    captured: dict = {}
+
+    async def _fake_persist(
+        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+    ):
+        captured["rule_statuses"] = rule_statuses
+
+    def _boom_publish(*a, **k):
+        raise RuntimeError("boom before update_state")
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+    monkeypatch.setattr(
+        "miloco.perception.client._publish_perception_event", _boom_publish
+    )
+
+    with mgr_ctx():
+        with pytest.raises(RuntimeError):
+            await proxy.handle_realtime_perception_result(
+                _result(matched=[("rule_2", ["cam_A"], "x")],
+                        device_rule_map={"cam_A": ["rule_2"]}),
+                artifacts=object(),
+            )
+        await asyncio.sleep(0.05)
+
+    # ① persist 仍被发起（韧性）——正面断言，避免「根本没发起」时空字典让断言恒真
+    assert "rule_statuses" in captured, "finally 未发起 persist（韧性回退）"
+    # ② 快照为空——rule_2 本 cycle 在处理它之前就抛了，它就该缺席（不把旧 FIRED 当本 cycle）
+    assert captured["rule_statuses"] == {}
+
+
+@pytest.mark.asyncio
 async def test_e2e_cam_a_offline_rule_state_preserved(
     proxy_with_runner, mock_miot_proxy
 ):

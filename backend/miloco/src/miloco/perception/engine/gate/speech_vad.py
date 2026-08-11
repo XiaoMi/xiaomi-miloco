@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from miloco.perception.engine.config import GateConfig
+from miloco.perception.inference.tuning import TINY_MODEL_THREADS
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,14 @@ def _get_session():
 
             from miloco.config import get_settings
 
+            # 惰性 import 有两个理由:① 守护测试靠 monkeypatch ort_utils 模块属性验证
+            # 「自建 session 必调 apply_kleidiai_opt_out」,模块级 from-import 会在 patch
+            # 之前绑死函数对象、让 spy 收不到调用(见 test_speech_vad.py);② ort_utils 是
+            # module 级 import onnxruntime,而 gate.py 无条件 import 本模块——放模块顶层等于
+            # 把 ORT 原生库拉出这个 try,ORT 装坏时整条 gate import 链直接炸,而非降级判"有
+            # 人声"(见 docstring 承诺)。线程数常量走 tuning(不含实现),不受这两条约束。
+            from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
+
             path = get_settings().directories.models_dir / _MODEL_FILENAME
             if not path.is_file():
                 logger.warning(
@@ -56,14 +65,12 @@ def _get_session():
             # silero 是小型有状态模型(单帧 <1ms)，直接走 CPU EP：CoreML 对其有状态算子
             # 支持差、易逐算子回落，CPU 已足够且与离线验证口径一致。
             opts = ort.SessionOptions()
-            opts.intra_op_num_threads = 1
-            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = TINY_MODEL_THREADS
+            opts.inter_op_num_threads = TINY_MODEL_THREADS
             # 这条 session 不走 make_session(有意保留 CPU EP、不切 CoreML:silero 是有
             # 状态小模型,CoreML 对其支持差、易逐算子回落)。但 silero 也含 conv,在 Apple
             # Silicon CPU EP 上会命中 ArmKleidiAI——即 issue #429 同源的卷积 workspace
             # 泄漏。复用工厂的单一 opt-out helper 补上(1.27 已上游根治,此为防御)。
-            from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
-
             apply_kleidiai_opt_out(opts)
             _session = ort.InferenceSession(
                 str(path), sess_options=opts, providers=["CPUExecutionProvider"]

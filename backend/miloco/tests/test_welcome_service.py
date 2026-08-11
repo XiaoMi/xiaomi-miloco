@@ -56,6 +56,22 @@ async def test_welcome_present_in_scope_dispatches(monkeypatch):
     assert "[新设备接入]" in msg and "测试设备" in msg and "卧室" in msg
 
 
+def test_welcome_message_does_not_ask_agent_to_self_name_miloco():
+    """播报模板不得要求 agent 对用户自称 miloco。
+
+    本文本与插件 B_IDENTITY 同一轮进上下文，而该块明令"不要改口自称 Miloco"；
+    两边给相反的硬指令，结果要么顶掉宿主人设、要么让本模板的要求静默落空。
+    设备被纳管、成为"能力延伸"的语义仍要在，只是换成不指名的第一人称。
+    """
+    msg = ws.DeviceWelcomeService._format_message(_device())
+    assert "miloco发现" not in msg
+    assert "miloco 的能力延伸" not in msg
+    assert "不要自称 miloco" in msg
+    assert "你自身能力的延伸" in msg
+    # 交付渠道仍走 skill：这里的 miloco-notify 是工具名，不是 agent 自称
+    assert "miloco-notify" in msg
+
+
 @pytest.mark.asyncio
 async def test_welcome_absent_skips(monkeypatch):
     mock = _patch_dispatch(monkeypatch)

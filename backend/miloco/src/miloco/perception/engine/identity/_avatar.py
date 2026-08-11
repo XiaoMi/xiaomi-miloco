@@ -58,6 +58,24 @@ def media_type(ext: str) -> str:
     return _AVATAR_MEDIA.get((ext or "").lower().lstrip("."), "application/octet-stream")
 
 
+# 头像体积上限（人 / 宠物端点共用，单一真源）：前端裁剪产物恒 ~20-50KB；直连 API 时用
+# image.size 前置闸拦超大包（不必先读进内存）、读后 len 兜底。
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
+
+
+def sniff_image_ext(data: bytes) -> str | None:
+    """按文件头魔数判定真实图片格式（jpg/png/webp），不看文件名后缀——杜绝「后缀与
+    内容不符」，让盘上后缀 / Content-Type / 真实字节恒一致；不在白名单则 None。
+    （不引 imghdr——3.13 已移除；也不引 Pillow 新依赖。）"""
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     """write-temp-then-rename 原子落盘 + fsync——避免崩溃留"半张图"。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,6 +170,7 @@ def list_avatar_exts(root: Path, kind: str) -> dict[str, str]:
 
 __all__ = [
     "AVATAR_EXTS",
+    "AVATAR_MAX_BYTES",
     "avatar_ext",
     "avatar_path",
     "list_avatar_exts",
@@ -159,4 +178,5 @@ __all__ = [
     "normalize_avatar_ext",
     "remove_avatar",
     "set_avatar",
+    "sniff_image_ext",
 ]

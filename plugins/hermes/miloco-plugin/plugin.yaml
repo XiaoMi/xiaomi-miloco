@@ -1,11 +1,10 @@
 name: miloco
 version: 0.2.0
-description: "Miloco for Hermes Agent —— 家庭智能管家 miloco 的 Hermes 出站插件。注入 miloco 上下文（identity/perception/memory/notify + home-profile/device-catalog），提供 miloco_im_push 通知投递（install-hermes.sh 自动从 ~/.hermes/{auth.json,config.yaml} 探测 IM 平台写入 state.json）、miloco_habit_suggest 习惯建议状态机、miloco_notify_bind 切换 IM，并 reconcile 4 个受管 cron job。自检 / 强制推送走外部 wrapper 脚本 plugins/hermes/scripts/miloco-status.sh（确定性，不走 LLM 推断）。"
+description: "Miloco for Hermes Agent —— 家庭智能管家 miloco 的 Hermes 出站插件。注入 miloco 上下文（identity/perception/memory/notify + home-profile/device-catalog + 待回应习惯建议只读注入），提供 miloco_im_push 通知投递（install-hermes.sh 自动从 ~/.hermes/{auth.json,config.yaml} 探测 IM 平台写入 state.json）、miloco_notify_bind 切换 IM，并 reconcile 4 个受管 cron job。习惯建议状态机已迁入 miloco-cli habit 命令组（PR #419），本插件只读注入。自检 / 强制推送走外部 wrapper 脚本 plugins/hermes/scripts/miloco-status.sh（确定性，不走 LLM 推断）。"
 author: miloco
 kind: backend
 provides_tools:
   - miloco_im_push
-  - miloco_habit_suggest
   - miloco_notify_bind
 provides_hooks:
   - pre_llm_call

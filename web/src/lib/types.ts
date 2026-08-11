@@ -49,6 +49,58 @@ export interface Person {
   avatarExt?: string | null;
 }
 
+// 宠物（非人家庭成员）——独立花名册，不进人身份库
+export interface Pet {
+  id: string; // pet_XXXXXXXXXXXX
+  name: string;
+  species: string;
+  avatarExt?: string | null; // 有头像时的文件后缀；null=无头像
+  referenceCropCount?: number; // 已录入的多姿态识别参照图张数（喂 ③ 识别）
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// 实验性功能开关（后端 /api/admin/features）
+export interface Features {
+  petRecognition: boolean;
+  petHeadGrounding: boolean;
+  petBodyGrounding: boolean; // 回退路径（框不到猫狗）裁本体作参考图；默认开
+  petReidDiverse: boolean; // 参考图多样性用人体 ReID 特征距离选多姿态；关或模型不可用回退 dHash
+}
+
+// observe 建议类不阻断提示（后端算）：species_mismatch / generic_look / refs_inconsistent / multiple_pets
+export interface PetObserveWarning {
+  type: string;
+  level: string; // "warn"
+  message: string;
+}
+
+// observe 单个候选（一只宠物的一张姿态 crop）
+export interface PetObserveCandidate {
+  trackId: number | null;
+  speciesGuess: string;
+  cropB64: string;
+  headBbox?: number[] | null; // 该 crop 的头部归一化框（grounding 开时）
+  // P0 契约质量分（可选；门控/候选展示/落盘绝对分用）
+  conf?: number;
+  sharpness?: number;
+  areaRatio?: number;
+  bbox?: number[] | null; // [x, y, w, h]（相对来源帧像素）
+  frameIdx?: number | null;
+}
+
+// pet:observe 返回：门控选出的 ≤3 张同一只多姿态 crop + omni 一次成型共性描述
+export interface PetObserveResult {
+  detected: boolean;
+  description: Record<string, unknown> | null; // {species, breed, size_build, ..., summary}
+  headBbox: number[] | null; // primary crop 的头部归一化 [x,y,w,h]
+  primaryCropB64: string;
+  primaryIndex: number; // candidates 中主候选下标（默认头像/primary_crop 对应那张）
+  candidates: PetObserveCandidate[];
+  refsInconsistent: boolean | null; // 多图时 omni 判"疑似不是同一只"；单图/回退恒 null
+  warnings: PetObserveWarning[];
+}
+
 // ── 设备 ────────────────────────────────────────────────────
 export type DeviceCategory =
   | "light"
@@ -127,6 +179,8 @@ export interface ActivityEvent {
   clip_kind?: "mp4" | "m4a" | null;
   /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
   has_trace?: boolean;
+  /** 是否有全景参考帧 ref.jpg(= 本事件走了 Smart Crop);前端据此决定是否请求 /ref/ 并渲染参考卡 */
+  has_ref?: boolean;
   /** 该事件是否已有反馈打包 */
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
@@ -148,6 +202,15 @@ export interface OnDemandLogEntry {
   has_feedback: boolean;
   feedback_pack_path: string | null;
   feedback_pack_size: number | null;
+}
+
+// Smart Crop 事件的裁切区域元数据(GET /api/events/{id}/crop/{device_id}).
+// 坐标在全景帧像素空间,与 ref.jpg 同一空间(ref.jpg 只是等比缩放过)——
+// 所以画框只需 svg viewBox="0 0 W H",letterbox 缩放交给浏览器,前端不算坐标.
+export interface EventCropMeta {
+  region_xyxy: [number, number, number, number];
+  frame_size_wh: [number, number];
+  crop_short_edge: number;
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────
@@ -651,6 +714,23 @@ export interface MemorySeries {
   points: MemoryPoint[];
 }
 
+// === Proc monitor (/monitor/proc/series) ===
+
+export interface ProcPoint {
+  ts: number;
+  cpu_pct: number;
+  cpu_pct_max: number;
+  num_threads: number;
+}
+
+export interface ProcSeries {
+  ts_start: number | null;
+  ts_end: number | null;
+  interval_s: number;
+  points: ProcPoint[];
+  core_count: number;
+}
+
 // === Monitor meta (/monitor/) ===
 
 export interface MonitorMeta {
@@ -699,4 +779,22 @@ export interface Task {
   record: TaskRecordSummary | null;
   // 详情抽屉「有价值的详情」：驱动规则，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
+}
+
+// ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──
+export interface UpgradeCheck {
+  current: string;
+  latest: string | null;
+  has_update: boolean;
+  deploy_kind: "release" | "dev";
+  release_url: string | null;
+  reachable: boolean;
+  checked_at: number;
+  /** 后端持久化的「已确认版本」；banner 在 latest === dismissed 时不显（存后端，非浏览器）。 */
+  dismissed: string | null;
+}
+
+export interface UpgradeStatus {
+  /** idle | starting | downloading | installing | done | failed —— 前端据此点亮步骤 / 判完成。 */
+  phase: string;
 }

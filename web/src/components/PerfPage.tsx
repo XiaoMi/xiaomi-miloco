@@ -8,6 +8,8 @@
  *   4. Omni 错误时序(PerfOmniErrorChart)— omni_error_series
  *   5. 窗口丢弃数(PerfDropChart)        — drop_series
  *   6. 阶段耗时分布(PerfStageTable)     — stage_percentiles
+ *   6.4 进程 CPU/线程数(PerfProcChart)  — /api/monitor/proc/series
+ *   6.5 进程内存(PerfMemoryChart)       — /api/monitor/memory + /series
  *   7. 最近 Agent 调用(PerfAgentList)    — /api/traces?has_agent=1
  *   8. 近期处理耗时(PerfTraceTimingChart)— latency_percentiles
  *   9. 原始 trace 列表(PerfTraceList)   — /api/traces
@@ -18,6 +20,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  getProcSeries,
   getMemorySeries,
   getMemorySnapshot,
   getUname,
@@ -46,6 +49,7 @@ function avgWindowDuration(rows: PerfTraceRow[]): number | undefined {
   return vals.reduce((s, v) => s + v, 0) / vals.length;
 }
 import { PerfAgentList } from "./PerfAgentList";
+import { PerfProcChart } from "./PerfProcChart";
 import { PerfKpiCards } from "./PerfKpiCards";
 import { PerfMemoryChart } from "./PerfMemoryChart";
 import { PerfOmniErrorChart } from "./PerfOmniErrorChart";
@@ -131,6 +135,11 @@ export function PerfPage() {
     [windowKey, bucket],
     { errorLabel: t("perf.errMemSeries") },
   );
+  const procSeries = useAsync(
+    () => getProcSeries(windowKey, bucket),
+    [windowKey, bucket],
+    { errorLabel: t("perf.errProcSeries") },
+  );
   // uname 是进程级静态信息，api 层模块级缓存，整 app 仅请求一次
   const [uname, setUname] = useState<string | undefined>();
   useEffect(() => {
@@ -150,6 +159,7 @@ export function PerfPage() {
     agentRuns.reload();
     memSnapshot.reload();
     memSeries.reload();
+    procSeries.reload();
   };
 
   // 30s 自动刷新。窗口切换会重置 timer。
@@ -217,6 +227,9 @@ export function PerfPage() {
 
       {/* 6. 阶段耗时分布 */}
       <PerfStageTable state={stages} />
+
+      {/* 6.4 进程 CPU 占用 + 线程数时序，与 perf 因果链解耦的运行时观察项 */}
+      <PerfProcChart seriesState={procSeries} bucket={bucket} windowMs={windowMs} />
 
       {/* 6.5 进程内存（smaps + py_heap），与 perf 因果链解耦的运行时观察项 */}
       <PerfMemoryChart

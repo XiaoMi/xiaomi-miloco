@@ -120,6 +120,84 @@ def test_build_pack_metadata_and_trace(tmp_path, monkeypatch):
         assert "***" in trace_text
 
 
+def test_build_pack_includes_ref_frame(tmp_path, monkeypatch):
+    """Smart Crop 事件:ref.jpg 与 clip 同附进 clips/{slug}/ref.jpg,并记入 components/metadata."""
+    from miloco.perception.snapshot_writer import region_slug
+
+    event_id = "22222222-3333-4444-5555-666666666666"
+
+    snapshot_root = tmp_path / "snapshots"
+    event_dir = snapshot_root / event_id
+    event_dir.mkdir(parents=True)
+
+    slug = region_slug("cam1")
+    clip_dir = event_dir / slug
+    clip_dir.mkdir()
+    (clip_dir / "clip.mp4").write_bytes(b"fake-crop-mp4")
+    (clip_dir / "ref.jpg").write_bytes(b"\xff\xd8\xff\xe0fake-ref")
+
+    mock_dao = MagicMock()
+    mock_dao.get_by_id.return_value = {
+        "id": event_id,
+        "timestamp": 1000,
+        "text": "t",
+        "device_ids": ["cam1"],
+    }
+    mock_mgr = MagicMock()
+    mock_mgr.meaningful_events_dao = mock_dao
+
+    monkeypatch.setattr("miloco.admin.feedback_pack.get_snapshot_root", lambda: snapshot_root)
+    monkeypatch.setattr("miloco.admin.feedback_pack.miloco_home", lambda: tmp_path)
+
+    with patch("miloco.manager.get_manager", return_value=mock_mgr):
+        result = build_feedback_pack(
+            event_id=event_id, error_types=[], feedback_text="",
+        )
+
+    assert f"{slug}/ref.jpg" in result["components"]["refs_found"]
+
+    with tarfile.open(result["path"], "r:gz") as tar:
+        names = tar.getnames()
+        assert f"clips/{slug}/ref.jpg" in names
+        meta = json.loads(tar.extractfile("metadata.json").read())
+        assert f"{slug}/ref.jpg" in meta["refs_found"]
+
+
+def test_build_pack_no_ref_frame(tmp_path, monkeypatch):
+    """非 crop 事件(无 ref.jpg)→ refs_found 空,包内无 ref."""
+    from miloco.perception.snapshot_writer import region_slug
+
+    event_id = "33333333-4444-5555-6666-777777777777"
+
+    snapshot_root = tmp_path / "snapshots"
+    event_dir = snapshot_root / event_id
+    event_dir.mkdir(parents=True)
+
+    slug = region_slug("cam1")
+    clip_dir = event_dir / slug
+    clip_dir.mkdir()
+    (clip_dir / "clip.mp4").write_bytes(b"fake-mp4")
+
+    mock_dao = MagicMock()
+    mock_dao.get_by_id.return_value = {
+        "id": event_id, "timestamp": 1000, "text": "t", "device_ids": ["cam1"],
+    }
+    mock_mgr = MagicMock()
+    mock_mgr.meaningful_events_dao = mock_dao
+
+    monkeypatch.setattr("miloco.admin.feedback_pack.get_snapshot_root", lambda: snapshot_root)
+    monkeypatch.setattr("miloco.admin.feedback_pack.miloco_home", lambda: tmp_path)
+
+    with patch("miloco.manager.get_manager", return_value=mock_mgr):
+        result = build_feedback_pack(
+            event_id=event_id, error_types=[], feedback_text="",
+        )
+
+    assert result["components"]["refs_found"] == []
+    with tarfile.open(result["path"], "r:gz") as tar:
+        assert not any(n.endswith("ref.jpg") for n in tar.getnames())
+
+
 def test_build_pack_event_not_found(tmp_path, monkeypatch):
     """event 不存在时抛 EventNotFoundError."""
     import pytest
