@@ -2173,108 +2173,134 @@ class TestAdaptiveResolution:
         # 紧贴画面角的极小框 → 绕中心放大被 clamp 截断,达不到 crop_min_area_ratio
         assert "reason=area_too_small" in _reason([(0, 0, 4, 4)])
 
-    def test_crop_short_edge_budget_scales_with_resolution(self):
-        # crop 短边预算 = 分辨率档 × 360/512(用户档的 70%),保住「像素开销 ≈ 同档全景」不变量;
-        # 512 档必须精确落回 360,与本特性接入前的评测口径字节一致。
-        from miloco.perception.engine.config import CropEnhanceConfig
-        from miloco.perception.engine.omni.prompt_builder import _crop_short_edge_budget
+    def test_encode_target_wh_matches_encoder_grid(self):
+        # crop 的逐轴上限拿 _encode_target_wh 当「同档全景画面」的尺寸,所以它必须与
+        # _encode_video_mp4 真正编出的网格逐像素一致(含 //2*2 取偶)。差 1px 就会让上限与画面
+        # 错配,故这里用真编码回来的 media_info 对账,而不是把公式抄一遍自证。
+        # 尺寸挑的是 int(w0*scale) 落在**奇数**上的组合(1280/768 档 → 1364.3、1270/512 档 →
+        # 903.1):偶数组合下 1px 的口径漂移会被 //2*2 吸收掉,用例就抓不到两边算法分叉。
+        import miloco.perception.engine.omni.prompt_builder as pb
 
-        cfg = CropEnhanceConfig()
-        assert [_crop_short_edge_budget(cfg, se) for se in (360, 512, 768, 1080)] == [
-            253, 360, 540, 759,
-        ]
-        # (crop_se / pano_se)² 恒 ≈ crop_max_area_ratio(0.49),与档位无关
-        for se in (360, 512, 768, 1080):
-            assert abs((_crop_short_edge_budget(cfg, se) / se) ** 2 - 0.494) < 0.01
+        np.random.seed(7)
+        for (h0, w0), se in (((720, 1280), 768), ((720, 1270), 512), ((576, 704), 512)):
+            frames = [np.random.randint(0, 256, (h0, w0, 3), dtype=np.uint8) for _ in range(3)]
+            _, mi = pb._encode_video_mp4(
+                frames, np.empty(0, dtype=np.int16), 16000, fps=1, short_edge=se,
+            )
+            assert (mi.video_width, mi.video_height) == pb._encode_target_wh(w0, h0, se)
 
-    def test_crop_video_short_edge_capped_by_budget(self):
-        # 集成:1080 档下 crop 编码短边 = min(crop 区域原短边, 759),不再被固定 360 压死。
+    def _crop_call(self, packet, *, short_edge: int):
+        """跑一遍 fused 装配,取 crop 那次编码的几何:区域 wh / 目标短边 / 编出的网格 / 同档全景画面。
+
+        断言一律对着「编出的网格」而不是 se/短边 反算的浮点值 —— 送模型的就是这张网格,
+        //2*2 取偶也只体现在它上面。
+        """
+        from types import SimpleNamespace
         from unittest.mock import patch as _patch
 
         import miloco.perception.engine.omni.prompt_builder as pb
 
-        # 1080p 帧 + 居中 500x500 框 → 扩展后区域 900x800(占 34.7%,过面积双限),
-        # 短边 800 > 预算 759 → 预算成为实际生效的上限。
+        p1, p2 = self._patches(short_edge=short_edge)
+        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+            content = self._content(packet=packet, candidates=[])
+        assert self._has_ref(content)  # 确认确实走了 crop 分支
+        call = spy.call_args_list[-1]
+        ch, cw = call.args[0][0].shape[:2]
+        fh, fw = packet.all_frames[0].shape[:2]
+        se = call.kwargs["short_edge"]
+        return SimpleNamespace(
+            region=(cw, ch), se=se,
+            out=pb._encode_target_wh(cw, ch, se),
+            pano=pb._encode_target_wh(fw, fh, short_edge),
+        )
+
+    def test_crop_video_fills_panorama_grid_no_budget(self):
+        # 集成:crop 不再有独立短边预算(旧实现在 1080 档会被 759 压住),而是等比放到逐轴贴住
+        # 同档全景画面。1080p 帧 + 居中 500x500 框 → 区域 900x800(占 34.7%,过面积双限):
+        # 宽轴允许 800×1920//900 = 1706,高轴只允许 800×1080//800 = 1080 → 取 1080,编出
+        # 1214x1080:高贴住画面、宽还剩富余。
         np.random.seed(13)
         frames = [np.random.randint(0, 256, (1080, 1920, 3), dtype=np.uint8) for _ in range(5)]
         pkt = _adaptive_packet(frames=frames, body_box=(710, 290, 500, 500))
-        p1, p2 = self._patches(short_edge=1080)
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
-            content = self._content(packet=pkt, candidates=[])
-        assert self._has_ref(content)  # 确认确实走了 crop 分支
-        assert spy.call_args_list[-1].kwargs["short_edge"] == 759
+        r = self._crop_call(pkt, short_edge=1080)
+        assert r.region == (900, 800)
+        assert r.pano == (1920, 1080)
+        assert r.se == 1080  # 旧实现:min(759, cap) = 759
+        assert r.out == (1214, 1080)  # 高轴贴住画面
 
-    def test_crop_video_upscaled_toward_budget_when_region_smaller(self):
-        # 区域比预算小(512 档默认小框 → 区域 152x204)→ **放大**,不再只缩不放。
-        # 离线对照:720p 源下这类窗口占 57%,原生裁切 +0.6pp、放大到预算 +7.8pp。
-        # 这里落到 357 而非预算 360:逐轴上限(高 480/204 = 2.35x)比预算要的 2.37x 略紧,
-        # 微压 3px。断言写成「显著放大且不超预算」而不是恒等于预算 —— 恒等于预算只在
-        # 逐轴上限不生效的区域成立(见 test_upscale_cap_is_per_axis_not_long_edge)。
-        from unittest.mock import patch as _patch
+    def test_crop_video_upscaled_when_region_smaller_than_grid(self):
+        # 区域比目标网格小(512 档默认小框 → 区域 152x204)→ **放大**,不再只缩不放。
+        # 离线对照:720p 源下这类窗口占 57%,原生裁切 +0.6pp、放大后 +7.8pp。
+        # 这里 152×512//204 = 381(高轴生效),编出 380x510 —— 高 510 已越过原生帧高 480,
+        # 但仍在同档全景画面(682x512)之内,正是新口径:上限跟画面比、不跟原生帧比。
+        r = self._crop_call(_adaptive_packet(), short_edge=512)
+        assert r.region == (152, 204)
+        assert r.pano == (682, 512)
+        assert r.se == 381
+        assert r.se > min(r.region)  # 确实放大了(区域原生短边 152)
+        assert r.out == (380, 510)
+        assert r.out[1] > 480  # 越过了原生帧高
+        assert r.out[1] <= r.pano[1]  # 但没越过同档全景画面
 
-        import miloco.perception.engine.omni.prompt_builder as pb
-
-        p1, p2 = self._patches(short_edge=512)
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
-            content = self._content(candidates=[])
-        assert self._has_ref(content)
-        cropped = spy.call_args_list[-1].args[0]
-        ch, cw = cropped[0].shape[:2]
-        se = spy.call_args_list[-1].kwargs["short_edge"]
-        assert se == 357
-        assert se > min(ch, cw)  # 确实放大了(区域原生短边 152)
-        assert se <= 360  # 不越过预算
-
-    def test_upscale_capped_by_original_frame_axes(self):
-        # 放大上限:放大后逐轴都 ≤ crop 前原图对应轴。造一个极扁区域(长宽比 > 帧长宽比),
-        # 使预算不再是生效上限 —— 此时短边应被回压到上限。
-        from unittest.mock import patch as _patch
-
-        import miloco.perception.engine.omni.prompt_builder as pb
-
-        # 640x360 帧 + 很扁的框 → 扩展后区域约 640x64(横向已占满整帧宽)。放大到预算 360
-        # 会让宽达 6400 ≫ 640,故上限生效、倍率被压回 1.0。
+    def test_crop_capped_by_panorama_grid_not_native_frame(self):
+        # 上限锚「同档全景画面」而不是原生帧:档位高于源短边时全景本身就在放大(scale 未钳 1.0),
+        # crop 同口径。640x360 帧 + 极扁区域 640x64、512 档:画面是 910x512,宽轴允许
+        # 64×910//640 = 91、高轴允许 64×512//64 = 512 → 取 91,编出 910x90。
+        # 宽 910 > 原生帧宽 640(旧实现会被回压到 64、等于不放大),但恰好贴住画面宽。
         np.random.seed(29)
         frames = [np.random.randint(0, 256, (360, 640, 3), dtype=np.uint8) for _ in range(5)]
         pkt = _adaptive_packet(frames=frames, body_box=(120, 160, 400, 40))
-        p1, p2 = self._patches(short_edge=512)
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
-            content = self._content(packet=pkt, candidates=[])
-        assert self._has_ref(content)
-        cropped = spy.call_args_list[-1].args[0]
-        ch, cw = cropped[0].shape[:2]
-        se = spy.call_args_list[-1].kwargs["short_edge"]
-        fh, fw = frames[0].shape[:2]
-        scale = se / min(ch, cw)
-        assert cw * scale <= fw + 1  # 取整误差留 1px
-        assert ch * scale <= fh + 1
-        assert se < 360  # 确认是上限而非预算在起作用
-        assert se >= min(ch, cw)  # 上限只限制放大,绝不反过来引入缩小
+        r = self._crop_call(pkt, short_edge=512)
+        assert r.region == (640, 64)
+        assert r.pano == (910, 512)
+        assert r.se == 91
+        assert r.out == (910, 90)
+        assert r.out[0] > 640  # 越过原生帧宽 —— 新口径下这是允许的
+        assert r.out[0] == r.pano[0]  # 宽轴贴住画面
+        assert r.out[1] <= r.pano[1]
+        assert r.se >= min(r.region)  # 上限只限制放大,绝不反过来引入缩小
 
-    def test_upscale_cap_is_per_axis_not_long_edge(self):
-        # 逐轴上限的存在理由:只约束长边时,竖长区域会拿**帧宽**去限制 crop 的高,编出比原帧
-        # 还高的画面。1920x1080 帧 + 360x720 区域、1080 档:
-        #   只约束长边 → cap = 1920 × 360/720 = 960 → 预算 759 生效 → 759x1518(高 1.4 倍帧高)
-        #   逐轴       → cap = 360 × min(1920/360, 1080/720) = 540 → 540x1080(贴住帧高)
-        from unittest.mock import patch as _patch
-
-        import miloco.perception.engine.omni.prompt_builder as pb
-
+    def test_crop_cap_is_per_axis_not_single_axis(self):
+        # 两轴必须各夹一次:只夹宽会让竖长区域的高冲出画面。1920x1080 帧 + 360x720 区域、
+        # 1080 档(画面 1920x1080):
+        #   只夹宽 → 宽拉到 1920、高跟着到 3840(画面高的 3.6 倍)
+        #   逐轴   → min(360×1920//360, 360×1080//720) = 540 → 540x1080(高轴贴住画面)
         np.random.seed(31)
         frames = [np.random.randint(0, 256, (1080, 1920, 3), dtype=np.uint8) for _ in range(5)]
         # 居中竖长框 → 扩展后区域 360x720(占 12.5%,过面积双限)
         pkt = _adaptive_packet(frames=frames, body_box=(900, 300, 200, 450))
-        p1, p2 = self._patches(short_edge=1080)
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
-            content = self._content(packet=pkt, candidates=[])
-        assert self._has_ref(content)
-        cropped = spy.call_args_list[-1].args[0]
-        ch, cw = cropped[0].shape[:2]
-        se = spy.call_args_list[-1].kwargs["short_edge"]
-        assert (cw, ch) == (360, 720)
-        assert se == 540  # 只约束长边时这里会是预算 759
-        # 关键不变量:放大后的高不越过原帧高(旧行为会到 1518)
-        assert ch * se / min(ch, cw) <= frames[0].shape[0] + 1
+        r = self._crop_call(pkt, short_edge=1080)
+        assert r.region == (360, 720)
+        assert r.se == 540  # 只夹宽会是 1920
+        assert r.out == (540, 1080)  # 只夹宽会是 1920x3840
+
+    def test_crop_never_coarser_or_costlier_than_panorama(self):
+        # 三条不变量(与档位无关),用真实装配路径在四个档位 × 两种朝向上验。前两条精确成立:
+        #   ① crop 编码网格**逐轴**不超过同档全景画面
+        #   ② crop 编码像素 <= 同档全景画面像素(等号只在区域与帧等比时)
+        # 第三条带取整余量:
+        #   ③ 主体不比同档全景更糊 —— 区域在全景画面里占 (cw·pw/fw)x(ch·ph/fh) 像素,crop 编出
+        #      的应不小于它。两处取整会啃掉一点:cse 那步整除亏 <1px、被长宽比放大到长轴上,
+        #      _encode_target_wh 的 //2*2 再亏 <2px。极扁区域(输出轴只几十 px)相对亏损最大,
+        #      四种源 × 四档 × 89 万种区域尺寸穷举下来最差 0.957,故门限取 0.95:收紧到 0.99
+        #      会在极扁区域误红,放到 0.9 则挡不住真实回归。
+        # 两种朝向都要跑:竖长区域高轴生效、扁长区域宽轴生效,只测一种会漏掉另一轴的钳位。
+        np.random.seed(37)
+        frames = [np.random.randint(0, 256, (720, 1280, 3), dtype=np.uint8) for _ in range(5)]
+        bound = set()
+        for box in ((500, 200, 260, 320), (300, 300, 700, 90)):  # 竖长 / 扁长
+            pkt = _adaptive_packet(frames=frames, body_box=box)
+            for tier in (360, 512, 768, 1080):
+                r = self._crop_call(pkt, short_edge=tier)
+                (cw, ch), (out_w, out_h), (pano_w, pano_h) = r.region, r.out, r.pano
+                where = (box, tier)
+                assert out_w <= pano_w and out_h <= pano_h, where  # ①
+                assert out_w * out_h <= pano_w * pano_h, where  # ②
+                ref_w, ref_h = cw * pano_w / 1280, ch * pano_h / 720  # 区域在全景画面里的像素
+                assert min(out_w / ref_w, out_h / ref_h) >= 0.95, where  # ③
+                bound.add("w" if 1280 / cw < 720 / ch else "h")
+        # 确认两条钳位分支都被走到了,否则本用例等于只测了一种朝向
+        assert bound == {"w", "h"}
 
     def test_upscale_uses_lanczos_downscale_keeps_area(self):
         # 放大/缩小走不同重采样核:INTER_AREA 是区域平均,放大时退化成近似最近邻,故只用于缩小。

@@ -24,9 +24,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 norecursedirs = ["miot", "miloco/src/miloco/perception/engine/identity/tracker"]
-markers = [
-    "unit: pure unit test, no network I/O or OAuth credentials needed",
-]
 
 [tool.ruff.lint]
 select = [

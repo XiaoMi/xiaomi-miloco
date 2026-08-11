@@ -126,10 +126,6 @@ class MIoTDeviceInfo(BaseModel):
         default=None, description="LAN device online status"
     )
     local_ip: Optional[str] = Field(default=None, description="Device local ip")
-    cross_subnet: Optional[bool] = Field(
-        default=None,
-        description="Whether device local_ip is on a different subnet (cross-NAT)",
-    )
     ssid: Optional[str] = Field(default=None, description="Device ssid")
     bssid: Optional[str] = Field(default=None, description="Device bssid")
     icon: Optional[str] = Field(default=None, description="Device icon")
@@ -165,9 +161,6 @@ class MIoTLanDeviceInfo(BaseModel):
     did: str = Field(description="Device id")
     online: bool = Field(description="Device online status")
     ip: Optional[str] = Field(default=None, description="Device ip")
-    cross_subnet: Optional[bool] = Field(
-        default=None, description="Whether ip is on a different subnet (cross-NAT)"
-    )
 
 
 class MIoTManualSceneInfoCore(BaseModel):

@@ -22,7 +22,6 @@ from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
-from pydantic import ValidationError
 
 from .common import calc_group_id
 from .const import (
@@ -53,76 +52,6 @@ from .types import (
 _LOGGER = logging.getLogger(__name__)
 
 TOKEN_EXPIRES_TS_RATIO = 0.7
-
-
-def _cloud_device_to_info(device: Dict[str, Any], urn: str) -> Optional[MIoTDeviceInfo]:
-    """Build an MIoTDeviceInfo from a raw cloud API device dict.
-
-    Pure function — no I/O, no ``self``.  The caller must pre-resolve *urn*.
-    Returns ``None`` when any required field (did, name, model, uid) or *urn*
-    is missing.  Never raises on a malformed device dict, so a single bad
-    entry can't abort parsing of the whole page — the caller just skips it.
-    """
-    did = device.get("did", None)
-    name = device.get("name", None)
-    model = device.get("model", None)
-    uid = device.get("uid", None)
-    if did is None or name is None or model is None or uid is None:
-        return None
-    if not urn:
-        return None
-
-    try:
-        info = MIoTDeviceInfo(
-            did=did,
-            name=name,
-            urn=urn,
-            model=model,
-            uid=str(uid),
-            connect_type=device.get("pid", -1),
-            token=device.get("token", None),
-            online=device.get("isOnline", False),
-            icon=device.get("icon", None),
-            parent_id=device.get("parent_id", None),
-            manufacturer=model.split(".")[0],
-            # 2: xiao-ai, 1: general speaker
-            voice_ctrl=device.get("voice_ctrl", 0),
-            rssi=device.get("rssi", None),
-            pid=device.get("pid", None),
-            # 云端字段确为 "localip"（无下划线，与同函数内 isOnline/orderTime 等驼峰/
-            # 无分隔风格一致），不是 "local_ip"——跨网段相机不在广播可见范围，
-            # local_ip 只能来自这个字段，key 错会让 unicast_targets 恒空、
-            # 跨网段直连静默失效（见 #420）。
-            local_ip=device.get("localip", None),
-            ssid=device.get("ssid", None),
-            bssid=device.get("bssid", None),
-            order_time=device.get("orderTime", 0),
-        )
-    except ValidationError as e:
-        # pid / token 等必填字段在云端返回里缺失时 pydantic 会抛校验错。整页设备
-        # 共用一次解析循环，让一条畸形设备把 ValidationError 抛到循环外，会导致
-        # 整个账号的设备列表拉取失败；退化成跳过这一条更合理。
-        _LOGGER.info("invalid device from cloud, skipped, %s, %s", did, e)
-        return None
-
-    # Post-process owner sub-dict
-    owner = device.get("owner", None)
-    if isinstance(owner, dict) and owner:
-        # 用 .get()：owner 存在但缺子键时按缺省处理，不能让整条设备解析炸掉。
-        userid = owner.get("userid", None)
-        info.owner_id = str(userid) if userid is not None else None
-        info.owner_nickname = owner.get("nickname", None)
-
-    # Post-process extra sub-dict
-    extra = device.get("extra", None)
-    if isinstance(extra, dict) and extra:
-        info.fw_version = extra.get("fw_version", None)
-        info.mcu_version = extra.get("mcu_version", None)
-        info.platform = extra.get("platform", None)
-        info.is_set_pincode = extra.get("isSetPincode", None)
-        info.pincode_type = extra.get("pincodeType", None)
-
-    return info
 
 
 class MIoTOAuth2Client:
@@ -784,11 +713,40 @@ class MIoTHttpClient:
                     _LOGGER.info("missing the urn field, cloud, %s", device)
                     continue
 
-            info = _cloud_device_to_info(device, urn)
-            if info is None:
-                _LOGGER.info("failed to build device info, cloud, %s", device)
-                continue
-            device_infos[info.did] = info
+            device_infos[did] = MIoTDeviceInfo(
+                did=did,
+                name=name,
+                urn=urn,
+                model=model,
+                uid=str(device["uid"]),
+                connect_type=device.get("pid", -1),
+                token=device.get("token", None),
+                online=device.get("isOnline", False),
+                icon=device.get("icon", None),
+                parent_id=device.get("parent_id", None),
+                manufacturer=model.split(".")[0],
+                # 2: xiao-ai, 1: general speaker
+                voice_ctrl=device.get("voice_ctrl", 0),
+                rssi=device.get("rssi", None),
+                pid=device.get("pid", None),
+                local_ip=device.get("local_ip", None),
+                ssid=device.get("ssid", None),
+                bssid=device.get("bssid", None),
+                order_time=device.get("orderTime", 0),
+            )
+            if isinstance(device.get("owner", None), Dict) and device["owner"]:
+                device_infos[did].owner_id = str(device["owner"]["userid"])
+                device_infos[did].owner_nickname = device["owner"]["nickname"]
+            if isinstance(device.get("extra", None), Dict) and device["extra"]:
+                device_infos[did].fw_version = device["extra"].get("fw_version", None)
+                device_infos[did].mcu_version = device["extra"].get("mcu_version", None)
+                device_infos[did].platform = device["extra"].get("platform", None)
+                device_infos[did].is_set_pincode = device["extra"].get(
+                    "isSetPincode", None
+                )
+                device_infos[did].pincode_type = device["extra"].get(
+                    "pincodeType", None
+                )
 
         # get device icon
         if models:

@@ -83,21 +83,8 @@ def _truncate_ws_reason(reason: str) -> str:
 _FIRST_FRAME_TIMEOUT_S = 12.0
 
 
-def _resolve_cross_subnet(camera_id: str) -> bool:
-    """从相机缓存解析 ``cross_subnet`` 判据，供看门狗分流。
-
-    相机元数据取自 ``get_manager().miot_proxy`` 的缓存（``MIoTCameraInfo``），
-    缺失/异常一律当作非跨网段——宁可少提示，也不让一次缓存抖动误伤同网段住户。
-    """
-    try:
-        cam = get_manager().miot_proxy.get_cached_camera(camera_id)
-        return bool(getattr(cam, "cross_subnet", False))
-    except Exception:
-        return False
-
-
 async def _first_frame_watchdog(
-    websocket: WebSocket, camera_id: str, channel: int, cross_subnet: bool = False
+    websocket: WebSocket, camera_id: str, channel: int
 ) -> None:
     """等首帧;超时仍无帧 → 发 error 信令 + 主动关闭,让前端能明确告知住户连不上。
 
@@ -105,10 +92,6 @@ async def _first_frame_watchdog(
     ``_FIRST_FRAME_TIMEOUT_S`` 后发现 ``has_emitted_frame`` 为真,啥也不做退出。
     取消安全:住户在超时前主动关页 → 主流程 finally 里 cancel 本 task,
     ``CancelledError`` 直接向上抛,不吞。
-
-    ``cross_subnet`` 由调用方从相机缓存取来传入:跨网段相机即便探测/注册成功也可能
-    因路由器 NAT 类型限制拉流建不起来(首帧永不到),此时给跨 NAT 专属提示,而不是
-    笼统的「可能不在同一局域网/离线」——后者对已跨网段的住户没有任何信息量。
     """
     await asyncio.sleep(_FIRST_FRAME_TIMEOUT_S)
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
@@ -120,23 +103,14 @@ async def _first_frame_watchdog(
         channel,
         _FIRST_FRAME_TIMEOUT_S,
     )
-    # 跨网段 → 大概率是 NAT 类型限制拉流,提示可执行的修法(与 stream_error=
-    # "cross_subnet_nat" 同文案);否则保留通用「连不上」。
-    reason = "camera_unreachable_cross_subnet" if cross_subnet else "camera_unreachable"
-    message = (
-        "跨网段拉流失败，建议将摄像头与主机接入同一网络，"
-        "或把路由器设置为 全锥/开放 NAT"
-        if cross_subnet
-        else "连不上摄像头(可能不在同一局域网,或摄像头离线)"
-    )
     try:
-        # reason 是给前端按机器码分流用的字段(camera_unreachable / 跨 NAT 专属);
-        # 前端按 reason 查本地译文,未知 reason 才回退 message。两个都发。
+        # reason 是给将来按机器码分流预留的字段;前端 watch.html 当前只展示 message,
+        # 不读 reason。两个都发,前端按需取。
         await websocket.send_text(
             json.dumps({
                 "type": "error",
-                "reason": reason,
-                "message": message,
+                "reason": "camera_unreachable",
+                "message": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
             })
         )
     except Exception as err:
@@ -151,11 +125,9 @@ async def _first_frame_watchdog(
         )
         return
     try:
-        # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)。
-        # 复用上面的 reason——与发信令的 reason 同源,保证 close 端与前端展示一致,
-        # 不会出现「改了信令忘了改 close」的分裂。
+        # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)
         await websocket.close(
-            code=1011, reason=_truncate_ws_reason(reason)
+            code=1011, reason=_truncate_ws_reason("camera_unreachable")
         )
     except Exception as err:
         logger.info("watchdog close failed, %s.%d: %s", camera_id, channel, err)
@@ -922,13 +894,8 @@ async def video_stream_websocket(
         # 会让它 no-op 退出,无害。
         # (watchdog 已在 try 外声明为 None,供 accept/new_connection 早抛时 finally 安全读)
         if not miot_video_stream_manager.has_emitted_frame(camera_id, channel):
-            # 取相机缓存里的 cross_subnet 判据传给看门狗。拿不到(缓存缺失/异常)
-            # 一律回退非跨网段(见 _resolve_cross_subnet)。
-            cross_subnet = _resolve_cross_subnet(camera_id)
             watchdog = asyncio.create_task(
-                _first_frame_watchdog(
-                    websocket, camera_id, channel, cross_subnet=cross_subnet
-                )
+                _first_frame_watchdog(websocket, camera_id, channel)
             )
             # 检索异常防 "Task exception was never retrieved" 噪音:看门狗体内已全
             # try/except,当前不会抛;但 task 从不被 await(只在 finally cancel),加这
