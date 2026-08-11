@@ -238,10 +238,14 @@ def remap_bbox_norm_to_crop(
     区域**通常**包含每个 bbox:bbox 来自 track 末帧状态框,区域是窗口内逐帧检测框的并集
     → 只向外扩展 → 只放大的最小面积约束,所以 track 最后一次匹配上检测的那一帧只要还落在
     本窗内,该框就在并集里。但不当作前置条件依赖:这条相容性靠的是「一窗的帧数 > track
-    coasting 上限」这个数值关系(默认 ``input.window_size`` 4s vs ``deep_sort.max_age_sec``
-    2s),不是不变式 —— 短窗(启动首窗、丢帧)或调这两个参数都能让末帧框比并集更旧;且两侧
-    终究是不同对象(track 状态框 vs 原始检测框)。故此处一律 clamp,换算后退化(宽或高 <= 0,
-    即框完全落在区域外)返回 None。
+    coasting 上限」这个数值关系,而它由两个可调旋钮决定 —— 窗长是采集侧的
+    ``perception.collect.window_size``(设置接口可写、采集循环拿它当 tick 周期),存活上限
+    是 ``identity_engine.deep_sort.max_age_sec``。**此处不写它们当前的取值**:写了就会随
+    调参失真,当前关系由
+    ``test_drift_check.py::test_evidence_gate_activation_matches_config`` 按真实配置算出
+    并钉住。即便关系成立它也不是不变式 —— 短窗(启动首窗、丢帧)照样能让末帧框比并集更旧;
+    且两侧终究是不同对象(track 状态框 vs 原始检测框)。故此处一律 clamp,换算后退化
+    (宽或高 <= 0,即框完全落在区域外)返回 None。
 
     两个调用点据此的处置**不同**:名册 bbox 是先验,退化为"只给姓名不给位置"
     (``_render_roster_entry``);候选 bbox 是模型分配身份的定位锚,不允许退化 ——

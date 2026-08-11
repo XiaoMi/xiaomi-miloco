@@ -141,11 +141,20 @@ class TestDriftCheckConfig:
         """
         # 与生产同源取配置(client.py 构造 PerceptionConfig 那条路):
         # settings.yaml + config.json 深合并后的那份,两层 override 都要接上。
-        engine_cfg = get_settings().perception.engine
+        settings = get_settings()
+        engine_cfg = settings.perception.engine
         cfg = load_identity_engine_config(override=engine_cfg.get("identity_engine"))
         inp = InputConfig(**engine_cfg.get("input", {}))
 
-        window_frames = frames_per_window(inp.fps, inp.period_sec)
+        # 窗长取**采集侧**那个旋钮 —— 它才是部署现场真能改的:设置接口写的是它,
+        # 采集循环也拿它当 tick 周期,一窗的帧就是这段时间里攒下来的。
+        # 引擎侧的 InputConfig.period_sec 不能用:它既不在 settings.yaml 的 input 段里、
+        # 也不在设置接口的可写字段里,任何 override 都动不了它;引擎自己拿它推进全局帧
+        # 序号时,注释也写明那只是对单窗帧数的**估算**。取它等于又把答案钉回一个常量,
+        # 正是这条用例要防的那种脱钩。
+        window_sec = settings.perception.collect.window_size
+
+        window_frames = frames_per_window(inp.fps, window_sec)
         max_age_frames = sec_to_frames(cfg.deep_sort.max_age_sec, inp.fps)
 
         # reid 间隔不重算公式,直接借生产方法算 —— 复制一份公式正是「两处同口径」
