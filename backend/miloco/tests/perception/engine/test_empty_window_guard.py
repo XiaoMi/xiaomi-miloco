@@ -45,6 +45,12 @@ def _loud_audio(n: int = 16000) -> np.ndarray:
     return (rng.standard_normal(n) * 20000).astype(np.int16)
 
 
+def _quiet_audio(n: int = 16000) -> np.ndarray:
+    """安静房间底噪：非空，但 RMS 远低于 audio_energy_threshold（默认 0.015）。"""
+    rng = np.random.default_rng(42)
+    return (rng.standard_normal(n) * 5).astype(np.int16)
+
+
 def _still_frames(n: int = 6) -> list[np.ndarray]:
     """静止画面：不过视觉 gate，只有 hold / audio 能开窗。"""
     return [np.zeros((64, 64, 3), dtype=np.uint8) for _ in range(n)]
@@ -116,15 +122,47 @@ class TestGateEmptyInput:
         assert timing.hold_pass is True  # 靠 hold 开的窗
 
     async def test_zero_frames_with_audio_still_opens_window(self):
-        """零帧但有音频（拾音开启的相机）→ 照常开窗，交给 audio route。
+        """零帧但音频过闸（拾音开启的相机）→ 照常开窗，交给 audio route。
 
-        空输入闸判的是"两个模态都没有"，不是"没有视频"——否则会误杀 audio-only 感知。
+        闸判的是"hold 能不能撑起 video 路由"，不是"没有视频就拦"——否则会误杀
+        audio-only 感知。
         """
         slice_ = create_input_slice("room", [], _loud_audio())
         packet, timing, *_ = await run_gate(slice_, self.config)
         assert packet is not None
         assert timing.audio_pass
         assert packet.trigger.audio_active
+
+    async def test_zero_frames_quiet_audio_in_hold_does_not_open(self):
+        """拾音开启 + 零帧 + 安静音频（未过能量闸）+ hold 生效 → 不建 packet。
+
+        这一格是 hold 与零帧的交叉：音频存在让 _drop_empty_snapshots 按设计放行
+        （has_data 为真），若 gate 只判"有没有输入"就会放它过去，而下游
+        ``_is_audio_only`` 见 hold=True 硬短路回 video 路由、编码层无帧不加 video 块
+        → 又是纯文本脑补。
+        """
+        slice_ = create_input_slice("room", [], _quiet_audio())
+        packet, timing, *_ = await run_gate(
+            slice_, self.config, last_visual_pass_ts=time.monotonic()
+        )
+        assert packet is None
+        assert timing.hold_pass is True  # 同上：不许刷假 HOLD_EXPIRED
+
+    async def test_zero_frames_loud_audio_in_hold_routes_to_audio(self):
+        """零帧 + 音频过闸 + hold 生效 → 建 packet，但 trigger.hold 必须为 False。
+
+        hold 的语义是"视觉在滞回期内、别降级到 audio-only"，前提是真有画面。零帧时
+        让 hold 对下游成立，等于把这一窗仅有的音频也一起扔掉：video 路由不加 video 块
+        （无帧），也不会加 input_audio 块。
+        """
+        slice_ = create_input_slice("room", [], _loud_audio())
+        packet, timing, *_ = await run_gate(
+            slice_, self.config, last_visual_pass_ts=time.monotonic()
+        )
+        assert packet is not None
+        assert packet.trigger.audio_active
+        assert packet.trigger.hold is False  # → _is_audio_only 放行 → audio route
+        assert timing.hold_pass is True  # 交回上层的滞回状态不受影响
 
 
 # ─── 引擎入口：剥音频后剔除空 snapshot ───────────────────────────────────────
@@ -177,6 +215,23 @@ class TestDropEmptySnapshots:
         eng._drop_empty_snapshots(batch)
 
         assert [x.device.did for x in batch.snapshots] == ["cam_on"]
+
+    async def test_all_empty_batch_returns_skipped_not_none(self, monkeypatch):
+        """整批被剔空 → 返回 skipped 结果，不是 None。
+
+        processor 拿到 None 会直接 return，走不到 cycle trace 发布，零帧窗口在
+        dashboard 上连行都不留、出现频率不可观测。与「全部 device 没过 gate」同款收尾。
+        """
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: set())
+        eng = _make_engine()
+        batch = BatchedSnapshot(
+            snapshots=[_snapshot("cam_off", with_video=False, with_audio=True)]
+        )
+
+        result = await eng.realtime_perceive(batch)
+
+        assert result is not None
+        assert result.skipped is True
 
     def test_warning_deduped_per_did_and_reset_on_recovery(self, monkeypatch, caplog):
         """日志按 did 去重：连续空窗只打一条；该相机恢复出数据后再空，重新打。

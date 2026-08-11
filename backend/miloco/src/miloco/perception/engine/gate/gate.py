@@ -46,9 +46,11 @@ async def run_gate(
     通过 <= ``config.hold_duration_sec`` 时,即使 audio 也不通过也会生成 packet 并打
     ``trigger.hold=True``,下游 ``_is_audio_only`` 短路保 video 路由。
 
-    但 hold 的前提是**有画面可看**:本窗既无视频帧也无音频时不生成 packet,hold 也不放行。
-    否则下游拿到空 packet 会一路走到 omni,编码层无帧就不加 video 块,变成"纯文本问模型
-    这个场景里有什么"——模型只能照着 schema 编。
+    但 hold 的前提是**有画面可看**:本窗无视频帧时 hold 对下游不成立(``trigger.hold``
+    置假),只有音频过闸才建 packet 并交给 audio 路由,音频也没过闸就不建 packet。否则
+    下游拿到零帧 packet 会被 ``trigger.hold`` 强拉回 video 路由,编码层无帧不加 video 块,
+    变成"纯文本问模型这个场景里有什么"——模型只能照着 schema 编。注意 ``timing.hold_pass``
+    仍是原始 hold 判定,只有 ``trigger.hold`` 受此约束(两者消费者不同,见下方注释)。
 
     on-demand 单次调用路径不传两 ts(默认 None),hold 自然关闭。
     """
@@ -98,15 +100,21 @@ async def run_gate(
         video_cross_score=visual.cross_max,
     )
 
-    # 空输入闸:视频轨在本窗无数据(解码器等关键帧 / 缓冲区溢出清空 / 掉线重连)且音频也为空
-    # (拾音未开启时 engine 入口已剥)时,本窗没有任何可感知的东西,hold 也不放行。
+    # 空输入闸:视频轨在本窗无数据(解码器等关键帧 / 缓冲区溢出清空 / 掉线重连)时不建 packet。
     #
-    # 这条判断放在 timing 构造之后、而不是函数开头 early return:pipeline 的
-    # HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机读 ``timing.hold_pass``,且在
-    # ``gate_packet is None`` 之前执行。开头 early return 会返回 hold_pass=False 的空
-    # timing,把仍在 hold 期的设备误判成 hold 结束,刷出假的 HOLD_EXPIRED 日志与事件。
-    has_input = bool(input_slice.frames) or input_slice.audio_clip.size > 0
-    if not has_input or (not any_pass and not hold_active):
+    # 判据是「hold 能不能撑起 video 路由」而不是「有没有输入」——两者不是一回事:下游
+    # ``_is_audio_only`` 把 ``trigger.hold`` 当硬短路(hold=True 一律回 video 路由),而
+    # video 路由的 ``_encode_video`` 对零帧直接返回 None、不加 video 块、连 warning 都
+    # 不打,于是又变回「纯文本问模型这个场景里有什么」。所以无帧时 hold 对下游不成立:
+    # 音频过闸的走 audio 路由(此时 hold=False 才能让 _is_audio_only 放行),音频没过闸的
+    # 直接不建 packet。
+    #
+    # 交回上层的 ``timing.hold_pass`` 仍用原始 ``hold_active``:pipeline 的 HOLD_START /
+    # HOLD_EXPIRED / HOLD_RECOVERED 状态机读它,且在 ``gate_packet is None`` 之前执行;
+    # 这里若一并置假,仍在 hold 期的设备会被误判成 hold 结束,刷出假的 HOLD_EXPIRED
+    # 日志与事件。``trigger.hold`` 全仓只有 ``_is_audio_only`` 一个消费者,改它只影响选路。
+    hold_effective = hold_active and bool(input_slice.frames)
+    if not any_pass and not hold_effective:
         return None, timing, last_checked, new_last_visual_pass_ts, new_last_audio_pass_ts
 
     packet = GatePacket(
@@ -119,7 +127,7 @@ async def run_gate(
             audio_active=audio_active,
             audio_energy_level=audio_energy,
             speech_active=speech_active,
-            hold=hold_active,
+            hold=hold_effective,
         ),
         frames=input_slice.frames,
         audio_clip=input_slice.audio_clip,

@@ -965,6 +965,11 @@ class PerceptionEngine(BasePerceptionEngine):
         逐 snapshot 剔除而非整批判空:混合场景(cam A 零帧、cam B 正常)下整批判空挡不住 A,
         而多相机同房间是常态。原地改 ``batch.snapshots``(同 ``_strip_unauthorized_voice_audio``
         的惯例);剔完全空时调用方紧随其后的 ``batch.empty`` 自然返回。
+
+        **不变式**:被剔的 device 本轮不进 ``device_rule_map``,其规则状态桶保持上一帧、
+        不被推向 EXIT(duration 类规则会沿用上一窗结论直到该 device 恢复出数据)。这与采集层
+        ``collect_batch`` 对 ``has_data`` 为假的 device 整个过滤掉是同一语义——相机彻底离线
+        走的就是这条路径,本函数只是让「零帧 + 拾音关闭」与之对齐。
         """
         kept: list[DeviceSnapshot] = []
         for snapshot in batch.snapshots:
@@ -1006,7 +1011,13 @@ class PerceptionEngine(BasePerceptionEngine):
         # 剥完音频后复检：靠音频通过上面那道 batch.empty 的空帧窗口在此被剔除。
         self._drop_empty_snapshots(batch)
         if batch.empty:
-            return None
+            # 返 skipped 结果而非 None：processor 拿到 None 会直接 return，走不到 cycle
+            # trace 发布，零帧窗口在 dashboard 上连行都不留、出现频率不可观测——而定位
+            # 这个 bug 本身就是靠数日志里的窗口数做出来的。与「全部 device 没过 gate」
+            # 同款收尾（那条路径本就产出 skipped=True + 一行 trace），口径保持一致。
+            # trace 里的 per-device 记录取自 processor 侧的 PerceptionBatch，不受这里
+            # 剔除 BatchedSnapshot.snapshots 影响。
+            return RealtimePerceptionResult(skipped=True)
 
         # 进入新一轮前先按 TTL 淘汰过期事件链
         now = time.monotonic()
