@@ -244,6 +244,9 @@ class TestRunDriftCheck:
     def _confirmed_state(self, eng: IdentityEngine, tid: int, pid: str) -> TrackIdentityState:
         st = TrackIdentityState(track_id=tid, status="confirmed", committed_person_id=pid)
         eng._states[tid] = st
+        # 本帧真检测命中。生产路径由 process() 在跑自检前统一填这张表；这里直接调
+        # _run_drift_check，需自行置位，否则被"coasting 窗不投票"那道闸挡掉。
+        eng._detected_this_frame[tid] = True
         return st
 
     def test_off_is_noop(self, lib):
@@ -283,6 +286,32 @@ class TestRunDriftCheck:
         pool.centroid = _unit(0)  # 外观回到参考 → sim=1 ≥ 0.5
         eng._run_drift_check({7}, _NOW, {})
         assert st.drift_consec_low == 0
+
+    def test_coasting_window_does_not_vote(self, lib):
+        """跟丢那一窗不投票：比较两端都没变，算出来的是同一份证据的重读。
+
+        不加这道闸时：第 1 窗真检测低相似度记 1 票，第 2 窗跟丢又记 1 票 → 达到
+        consecutive_windows=2 → 身份被撤回，而真实低相似度证据只有一窗。
+        """
+        _write_tier_c(lib, _PID, _CAM, _NOW - 10, _unit(0))
+        eng = self._make_engine(lib, "enforce", _unit(1), 5)   # sim=0 < 0.5,持续偏离
+        st = self._confirmed_state(eng, 7, _PID)
+
+        eng._run_drift_check({7}, _NOW, {})
+        assert st.drift_consec_low == 1                        # 第 1 窗:真检测,记一票
+
+        eng._detected_this_frame[7] = False                    # 第 2 窗:跟丢
+        eng._run_drift_check({7}, _NOW, {})
+        assert st.drift_consec_low == 1, "跟丢窗不该 +1(同一份证据重复投票)"
+        assert st.drift_consec_low != 0, "也不该清零——无数据窗不计不清"
+        assert st.status == "confirmed"                        # 未达阈,身份保持
+        assert st.committed_person_id == _PID
+
+        eng._detected_this_frame[7] = True                     # 第 3 窗:又一次真检测
+        eng._run_drift_check({7}, _NOW, {})
+        # 攒满两窗**真实**低相似度证据,此时才撤(撤回会顺带清零计数,故只断言撤回结果)
+        assert st.status == "pending"
+        assert st.committed_person_id is None
 
     def test_enforce_revokes_after_m_windows(self, lib):
         _write_tier_c(lib, _PID, _CAM, _NOW - 10, _unit(0))

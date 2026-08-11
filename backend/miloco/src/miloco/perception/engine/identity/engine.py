@@ -361,13 +361,13 @@ class IdentityEngine:
         self._latest_bbox: dict[int, tuple[int, int, int, int]] = {}  # track_id → xyxy
         # 每窗口同步：True ⟺ tracking_results 里这个 track 本帧真有检测命中；False =
         # coasting（框是上一次真匹配时的检测框、原地冻结，不对应本帧画面）。
-        # 消费点共 7 处：抗遮挡 IoA / omni 候选收集 / 名册 bbox_norm / no_person 抑制区
-        # 解除 / no_person 预标 / tier_u 陌生人池推图 / tier_c 入队门；为 False 时各处
-        # 早退，避免残留框污染候选、名册与身份库。
+        # 消费点共 8 处：抗遮挡 IoA / omni 候选收集 / 名册 bbox_norm / 身份漂移自检 /
+        # no_person 抑制区解除 / no_person 预标 / tier_u 陌生人池推图 / tier_c 入队门；
+        # 为 False 时各处早退，避免残留框污染候选、名册、身份库与漂移投票。
         # 其中两处 no_person 闸在 ``no_person.reject_region_enabled`` 之下，该开关出厂
         # 关闭（上一级 ``perception/engine/config.py::NoPersonConfigDC`` 与本目录
         # ``default_config.yaml`` 均为 false），所在函数开头即整体早退 —— 故默认部署下
-        # 实际跑到的是 5 处。估算影响面或回归验证时按 5 处算，别对着两条不执行的路径构造用例。
+        # 实际跑到的是 6 处。估算影响面或回归验证时按 6 处算，别对着两条不执行的路径构造用例。
         self._detected_this_frame: dict[int, bool] = {}
         # face 在场写库门 + prompt face 标签 + 陌生人池 face_crop 三处共用源
         # (tier_c 污染修复): 每窗口 process() 早期 face 几何关联算一次, 存 track →
@@ -519,7 +519,7 @@ class IdentityEngine:
             tid = int(tr["id"])
             active_track_ids.add(tid)
 
-            # 缓存最新 bbox + 本帧检测命中标志（本类内 7 处闸消费，清单见 __init__ 处声明）
+            # 缓存最新 bbox + 本帧检测命中标志（本类内 8 处闸消费，清单见 __init__ 处声明）
             self._latest_bbox[tid] = tuple(tr["xyxy"])  # type: ignore[arg-type]
             self._detected_this_frame[tid] = bool(tr.get("detected_this_frame", True))
             self._last_seen_frame[tid] = frame_index
@@ -714,7 +714,7 @@ class IdentityEngine:
 
         # ----- 5. 返回当前 face_id 映射 + 末帧归一化 bbox -----
         # bbox_norm 只对本帧真实检测到的 track 填（coasting 的过期框不填，避免给
-        # 名册注入幻影位置）；与 candidates 的 bbox 同源同坐标系（_latest_bbox +
+        # 名册注入残留框的过期位置）；与 candidates 的 bbox 同源同坐标系（_latest_bbox +
         # _normalize_bbox_to_1000），供上层挂到 IdentityTarget 给名册渲染 (名, bbox)。
         out: dict[int, str] = {}
         bbox_norm: dict[int, tuple[int, int, int, int]] = {}
@@ -965,6 +965,14 @@ class IdentityEngine:
             st = self._states.get(tid)
             # 只盯"已绑成员"的 confirmed track(unknown/陌生人 status≠confirmed 天然出射程)
             if st is None or st.status != "confirmed" or not st.committed_person_id:
+                continue
+            # coasting(本帧无检测命中)窗不投票: 比较的两端这一窗都不会变——track 侧质心
+            # 只在真匹配时才追加新特征, 参考侧走时间窗、该窗也无新样本落盘, 于是算出来的
+            # sim 与上一窗逐字节相同。计进去等于拿同一份证据投两票, 而"连续 M 窗"存在的
+            # 意义正是抗单窗噪声(一次糊图、一次半身遮挡不该直接撤身份)。归入本函数
+            # docstring 说的"无数据窗不计不清": 既不 +1 也不清零, 直接跳过。
+            # 注: min_track_emb 那道下限拦不住这类窗——特征队列长度同样没变。
+            if not self._detected_this_frame.get(tid, False):
                 continue
             pid = st.committed_person_id
 
