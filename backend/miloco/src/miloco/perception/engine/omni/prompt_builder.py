@@ -907,12 +907,23 @@ def _build_fused_user_content(
     else:
         # 走到 video 路由却一帧都没有。正常态由 gate 的空输入闸 + 引擎入口的
         # _drop_empty_snapshots / _drop_frameless_snapshots 挡住,能到这里说明上游某道闸
-        # 失效(或 _AUDIO_ONLY_ENABLED 被回滚、或编码异常)。此时请求里一个媒体块都没有,
-        # 模型只能照着 schema 编场景 —— 必须留痕,否则这类幻觉无从发现(PR #510 之所以
-        # 难定位,就是因为这条路径此前完全静默)。
+        # 失效(或 _AUDIO_ONLY_ENABLED 被回滚、或编码异常)。必须留痕,否则这类幻觉无从
+        # 发现(本次修复之所以难定位,就是因为这条路径此前完全静默)。
+        #
+        # 不能笼统说「无任何媒体块」:宠物参考图(4.5 段)与 gallery 参考图都在主 video 之前
+        # 就已进 content。带上剩余媒体块数是为了区分两种排查方向 —— 0 是「模型什么都没看到」,
+        # >0 是「模型只看到参考图、没有本窗画面」,后者才是看图脑补的高风险形态。
+        other_media = sum(
+            1 for b in content
+            if isinstance(b, dict) and b.get("type") in ("image_url", "input_audio")
+        )
         logger.warning(
-            "event=fused_no_media_block route=video reason=empty_video, "
-            "本窗口无任何媒体块、走 text-only —— 上游空帧闸可能失效"
+            "event=fused_no_media_block route=video reason=empty_video room=%s "
+            "other_media_blocks=%d, 本窗口未拼出 video 块、走 text-only"
+            "(other_media_blocks>0 时模型手里只有参考图、没有本窗画面,存在看图脑补风险)"
+            " —— 上游空帧闸可能失效",
+            context.room_name or "-",
+            other_media,
         )
 
     _log_user_content(content)
@@ -1594,8 +1605,11 @@ def _is_audio_only(packets: list[IdentityPacket]) -> bool:
     batch 场景任一 device visual_changed=True → 整 batch 走全多模态（保守，避免
     同次调用 prompt schema 不一致）。trigger 为 None 时视为非 audio-only（兼容旧路径）。
     总开关 _AUDIO_ONLY_ENABLED=False 时直接返回 False，等价回滚。
-    Hold 短路:trigger.hold=True 表示 visual 在滞回期内,虽本窗 visual 不通过但
-    不应降级到 audio-only,保持 video 路由。
+    Hold 短路:trigger.hold=True 表示 visual 在滞回期内**且本窗有帧**,虽本窗 visual
+    不通过但不应降级到 audio-only,保持 video 路由。零帧窗口的 trigger.hold 恒为 False
+    (见 gate.py 的 hold_effective),因此「零帧 + 音频过闸」会落到 audio 路由 —— 那一格
+    若被拉回 video 路由,_encode_video 无帧返回 None、请求里没有 video 块,退化成纯文本
+    问模型场景。
     """
     if not _AUDIO_ONLY_ENABLED:
         return False

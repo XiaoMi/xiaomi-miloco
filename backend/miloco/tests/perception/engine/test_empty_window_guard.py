@@ -327,3 +327,46 @@ class TestDropEmptySnapshots:
             # 再次为空 → 重新打一条
             _drop_empty_window()
             assert sum("本窗无任何输入" in r.message for r in caplog.records) == 2
+
+
+# ─── 编码层最后一道可观测性兜底 ─────────────────────────────────────────────
+
+
+class TestFusedNoMediaBlockWarning:
+    """走到 video 路由却没拼出 video 块时必须留痕，且能区分两种排查方向。
+
+    正常态由 gate 空输入闸 + 两个引擎入口闸挡住，这条 warning 是上游闸失效 /
+    _AUDIO_ONLY_ENABLED 被回滚 / 编码异常时的最后一道观测点。它本身不在任何主路径上，
+    所以必须有测试实际执行到——否则变量名写错会在生产最糟的时刻才暴露。
+    """
+
+    def _content(self, *, has_pets: bool, caplog):
+        from miloco.perception.engine.omni.prompt_builder import (
+            FusedPromptConfig,
+            _build_fused_user_content,
+        )
+        from miloco.perception.engine.omni.provider import get_adapter
+        from miloco.perception.engine.types import OmniContext
+
+        with caplog.at_level("WARNING"):
+            return _build_fused_user_content(
+                packets=[],
+                context=OmniContext(room_name="客厅"),
+                candidates=[],
+                gallery_snapshot={},
+                video_b64=None,  # ← 零帧：编码层返回 None
+                media_info=None,
+                adapter=get_adapter("mimo"),
+                cfg=FusedPromptConfig(),
+                has_pets=has_pets,
+            )
+
+    def test_warns_with_room_and_media_count(self, caplog):
+        """video_b64 为 None → 打 warning，带房间名与剩余媒体块数。"""
+        self._content(has_pets=False, caplog=caplog)
+
+        recs = [r for r in caplog.records if "fused_no_media_block" in r.getMessage()]
+        assert len(recs) == 1
+        msg = recs[0].getMessage()
+        assert "room=客厅" in msg
+        assert "other_media_blocks=0" in msg  # 无宠物图 → 模型什么都没看到
