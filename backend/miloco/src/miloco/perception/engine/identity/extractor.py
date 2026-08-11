@@ -45,6 +45,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from miloco.perception.engine.identity._image_utils import (
+    SHARPNESS_NORM_REF as _SHARPNESS_NORM_REF,
+)
+from miloco.perception.engine.identity._image_utils import (
     compute_sharpness as _compute_sharpness,
 )
 from miloco.perception.engine.identity._image_utils import (
@@ -65,9 +68,6 @@ _GATE_ASPECT_MIN = 0.20
 _GATE_ASPECT_MAX = 2.5
 _GATE_SHARPNESS_MIN = 50.0
 _GATE_DET_CONF_MIN = 0.4
-
-# 评分用 sharpness 归一化的"参考值"——超过即视为 1.0,低于按比例
-_SHARPNESS_NORM_REF = 300.0
 
 # face 关联加成系数
 _FACE_BONUS = 1.2

@@ -39,6 +39,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from miloco.perception.engine.identity._image_utils import (
+    SHARPNESS_NORM_REF as _SHARPNESS_NORM_REF,
+)
+from miloco.perception.engine.identity._image_utils import (
     hamming as _hamming,
 )
 from miloco.perception.engine.identity._image_utils import (
@@ -95,10 +98,6 @@ _W_SHARP: float = 0.2
 # aspect 评分用的 "sweet spot": w/h = 1:2.5 = 0.4 = 站立人形标准比例。
 # 偏离 sweet spot 越远 → aspect_score 越低。
 _ASPECT_SWEET: float = 0.4
-
-# sharpness 归一化参考值 (Laplacian variance), 沿用 extractor._SHARPNESS_NORM_REF。
-# 跟 v4 §2.2.3 TierA 评分公式同口径。
-_SHARPNESS_NORM_REF: float = 300.0
 
 
 def _aspect_dist_normalized(
@@ -226,8 +225,8 @@ class TierUConfig:
     # 这里拿不到 frame size,面积由 detector_conf 间接保障)。保留仅为语义占位,改它不
     # 改变任何行为。
     area_ratio_min: float = 0.05
-    # ⚠️ 下面三项在 identity/extractor.py 有一套同名语义的模块级常量(_GATE_*),两套之间
-    # 无任何绑定 —— 不要假设它们一致,改这里的阈值前请直接比对那边的代码。
+    # ⚠️ 以下这组阈值在 identity/extractor.py 有一套同名语义的模块级常量(_GATE_*),
+    # 两套之间无任何绑定 —— 不要假设它们一致,改这里之前请直接比对那边的代码。
     aspect_min: float = 0.25                 # w/h ≥ 0.25 = 不接受比 1:4 更瘦的 bbox
                                              # (0.20→0.25:1:5 极瘦杆即使 sharpness 高
                                              # 也不利辨认,直接源头丢)
