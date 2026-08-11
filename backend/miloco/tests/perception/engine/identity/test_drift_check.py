@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from miloco.config.settings import get_settings
 from miloco.perception.engine.config import (
     IdentityEngineConfig,
     InputConfig,
@@ -117,22 +118,32 @@ class TestDriftCheckConfig:
         assert cfg.drift_check.consecutive_windows == 2
 
     def test_evidence_gate_activation_matches_config(self):
-        """按真实配置算出「证据指纹判据当前会不会被走到」,把答案钉在这儿而非注释里。
+        """按**部署现场那份**配置算出「证据指纹判据会不会被走到」,答案钉在这儿而非注释里。
 
         ``_run_drift_check`` 比的是整窗累积的特征质心。只有当一个感知窗装得下的帧数
         **不超过** track 存活上限、或**不超过** fast 模式重抽 ReID 的间隔时,才可能整窗
         没有新特征入队、两窗算出逐字节相同的 sim。两个条件都不满足时,每个活到读取点的
         track 本窗内必然匹配过、质心已变,那道判据走不到。
 
-        当前配置两个条件都不满足,所以它是给**调过参的部署**兜底的。谁把 max_age_sec
-        调到不短于 period_sec、或把 human_reid_skip_windows 调大到窗长以上,这条会红 ——
-        那正是需要有人知道的时刻:这道判据从此真的生效,身份撤回的时延会跟着变。
+        当前配置两个条件都不满足,所以它是给**调过参的部署**兜底的。谁把这几个旋钮调到
+        关系反转,这条会红 —— 那正是需要有人知道的时刻:判据从此真的生效,身份撤回的
+        时延会跟着变。
 
-        之所以做成用例而不是注释:这个结论由四个旋钮共同决定,写进注释就会随任何一次
-        调参失真(它此前正是这样错的),而用例会自己算。
+        **配置必须与生产同源取**(见下方注释):取 dataclass 默认值的话,钉住的是出厂
+        写死值而不是部署现场,任一层落下 override 就与生产脱钩,而脱钩的那一刻正是本该
+        报警的那一刻。
+
+        两条断言对 fps 的敏感性**不一样**,别把它们当成同一回事:
+        - 存活上限那条与 fps 无关 —— 窗长与存活帧数都随 fps 等比缩放,比值不变;
+        - ReID 间隔那条**随 fps 翻转** —— ``reid_interval`` 是固定帧数
+          (``window_len_sec × window_fps × human_reid_skip_windows``),不随 ``input.fps``
+          缩放,所以把 fps 调低就可能让它不再短于窗长。
         """
-        cfg = load_identity_engine_config()
-        inp = InputConfig()
+        # 与生产同源取配置(client.py 构造 PerceptionConfig 那条路):
+        # settings.yaml + config.json 深合并后的那份,两层 override 都要接上。
+        engine_cfg = get_settings().perception.engine
+        cfg = load_identity_engine_config(override=engine_cfg.get("identity_engine"))
+        inp = InputConfig(**engine_cfg.get("input", {}))
 
         window_frames = frames_per_window(inp.fps, inp.period_sec)
         max_age_frames = sec_to_frames(cfg.deep_sort.max_age_sec, inp.fps)

@@ -86,10 +86,12 @@ class TrackIdentityState:
     # 架空。
     # 这道判据能不能被走到, 取决于几个配置量之间的大小关系而非本文件的逻辑: 一个感知窗
     # 装得下的帧数, 要不超过 track 存活上限、要不超过 fast 模式重抽 ReID 的间隔, 才可能
-    # 出现整窗没有新特征入队的情形。**当前出厂值落在哪一边不写在这里** —— 写进注释就会
-    # 随调参失真(这段注释此前正是这样错的)。答案由
-    # ``test_drift_check.py::test_evidence_gate_activation_matches_config`` 按真实配置
-    # 算出并钉住: 谁把这几个旋钮调到关系反转, 那条用例会红, 提示这道判据从此真的生效。
+    # 出现整窗没有新特征入队的情形。**当前值落在哪一边不写在这里** —— 写进注释就会随
+    # 调参失真(这段注释此前正是这样错的)。答案由
+    # ``test_drift_check.py::test_evidence_gate_activation_matches_config`` 算出并钉住,
+    # 它取的是**与生产同源的那份配置**(settings.yaml + config.json 深合并, 两层 override
+    # 都接, 同 client.py 构造 PerceptionConfig 的方式), 不是 dataclass 默认值 —— 取默认值
+    # 就等于把答案又写死回出厂值。谁把旋钮调到关系反转, 那条用例会红。
     # 撤回 / 复认时与 drift_consec_low 一同清空。
     drift_last_sim: float | None = None
     # (enforce)采信复认护栏: 撤回时记下撤前 committed 身份; 若 omni 复认回同一 person,
