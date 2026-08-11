@@ -87,7 +87,13 @@ Gate 层（`perception/engine/gate/gate.py`）对每个窗口做双模态判定�
 
 **Hold 滞回**：视觉刚通过后的一段时间内，即使本窗视觉/音频都无变化也继续放行并在 `GateTrigger.hold` 打标，让下游保持 video 路由——避免人短暂静止时 route 在 video / audio 间来回抖动；on-demand 单次调用不触发 hold（时长配置见 `settings.yaml::perception`）。
 
-hold 有两个字段，消费者不同、取值也可能不同：`GateTrigger.hold`（下游 `_is_audio_only` 选路用）受「本窗有没有帧」约束，零帧时恒为 `False`；`GateTiming.hold_pass`（`pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机用）始终是原始滞回判定，不受帧数影响——否则仍在滞回期的相机会被误判成滞回结束，刷出假的 `HOLD_EXPIRED` 事件。
+hold 有三处取值，消费者不同、值也可能不同：
+
+- `GateTrigger.hold`（下游 `_is_audio_only` 选路用）受「本窗有没有帧」约束，零帧时恒为 `False`
+- `GateTiming.hold_pass`（`pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机用）始终是原始滞回判定，不受帧数影响——否则仍在滞回期的相机会被误判成滞回结束，刷出假的 `HOLD_EXPIRED` 事件
+- 落库的 `traces_device.gate_hold_pass` 列（虽与上一个字段同名）取的是 `hold_pass and gate_packet is not None`，即「滞回有没有真把本窗拉起来」——`processor._publish_trace` 用它反推 identity / omni 跑没跑，写原始判定会让零帧窗口凭空多记一次 omni 调用（稀释 `omni_error_rate` 分母）
+
+所以 `traces_device.gate_hold_pass` **不能**当「滞回开窗频率」的统计口径用：零帧那一格记 0，统计会系统性偏低，且偏低幅度正好集中在相机不稳定的时段。要统计滞回本身的频率，用 `gate_hold_start` / `gate_hold_expired` / `gate_hold_recovered` 事件。
 
 音频过能量门后再跑一道语音活动检测（VAD，`gate/speech_vad.py`，silero 模型）：判定本窗音频是否含真人声，无人声则从下游 schema 剥掉 `speeches` 字段——这是对输出字段的子门控，不改变窗口整体是否放行。
 

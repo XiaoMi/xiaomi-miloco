@@ -1884,7 +1884,6 @@ async def test_hold_trace_key_zero_when_gate_drops_frameless_window():
     由 test_empty_window_guard.py::test_zero_frames_quiet_audio_in_hold_does_not_open
     钉住 —— 两个字段消费者不同，必须分开。
     """
-    frame = _solid(100, 100, 100)
     rng = np.random.default_rng(7)
     quiet = (rng.standard_normal(16000) * 5).astype(np.int16)  # 非空但不过能量闸
 
@@ -1892,32 +1891,36 @@ async def test_hold_trace_key_zero_when_gate_drops_frameless_window():
     gate_prev_frames: dict = {}
     gate_last_visual_pass_ts: dict = {}
     moving = [_solid(0, 0, 0)] * 2 + [_solid(255, 255, 255)] * 4
+    # 第二窗也留在 patch 作用域内：当前代码下 gate 会拦住、omni 不该被调，但这条用例存在
+    # 的意义正是防 gate 那道闸被改回去。不 patch 的话，闸失效时失败形态是网络错误 / 超时，
+    # 而不是下面那句写清楚的断言——CI 里读不出原因。
     with patch(
         "miloco.perception.engine.omni.omni.call_omni",
         new_callable=AsyncMock,
         return_value=MOCK_OMNI_RESPONSE,
-    ):
+    ) as mock_omni:
         await run_batch_pipeline(
             BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", moving, quiet)]),
             {}, PerceptionConfig(),
             gate_prev_frames=gate_prev_frames,
             gate_last_visual_pass_ts=gate_last_visual_pass_ts,
         )
-    assert gate_last_visual_pass_ts.get("cam-1") is not None, "前置：滞回期未建立"
+        assert gate_last_visual_pass_ts.get("cam-1") is not None, "前置：滞回期未建立"
+        mock_omni.reset_mock()
 
-    # 第二窗零帧 + 安静音频 + 仍在滞回期
-    frameless = _make_snapshot("living", "cam-1", [], quiet)
-    result = await run_batch_pipeline(
-        BatchedSnapshot(snapshots=[frameless]),
-        {}, PerceptionConfig(),
-        gate_prev_frames=gate_prev_frames,
-        gate_last_visual_pass_ts=gate_last_visual_pass_ts,
-    )
+        # 第二窗零帧 + 安静音频 + 仍在滞回期
+        frameless = _make_snapshot("living", "cam-1", [], quiet)
+        result = await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[frameless]),
+            {}, PerceptionConfig(),
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
 
     timing = result.rooms["living"].timing
     assert timing["gate_hold_cam-1_pass"] == 0, (
         "gate 没建包，trace 侧 hold 标志必须为 0，否则 processor 会误判 identity/omni 跑过"
     )
     assert result.rooms["living"].skipped is True
-    # 未使用的变量占位，避免 linter 抱怨
-    assert frame is not None
+    # gate 拦下这一窗 → omni 压根不该被调（闸被改回去时这条先红，失败原因一目了然）
+    mock_omni.assert_not_called()
