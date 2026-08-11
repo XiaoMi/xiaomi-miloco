@@ -1924,3 +1924,55 @@ async def test_hold_trace_key_zero_when_gate_drops_frameless_window():
     assert result.rooms["living"].skipped is True
     # gate 拦下这一窗 → omni 压根不该被调（闸被改回去时这条先红，失败原因一目了然）
     mock_omni.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hold_trace_key_zero_when_audio_route_opens_frameless_window():
+    """零帧 + 音频过闸 + 滞回期：建了包但走的是 audio 路由 → trace 侧 hold 标志为 0。
+
+    与 test_hold_trace_key_zero_when_gate_drops_frameless_window 成对，覆盖另一格：
+    那条是「gate 没建包」，这条是「建了包但不是滞回拉起的」。
+
+    这一列的消费者有两个，都要求 0：
+    - processor._publish_trace 反推 gate_skipped（这格 audio_pass=1，本来就不会误判）
+    - web 的 ChannelPass 拿它反推 route，且 holdPass 判断排在 audioPass 之前 —— 写 1 会
+      把 audio 路由的窗口标成 "video (hold)"，tooltip 还说「仍走 video 路由」，正好在
+      本 PR 最需要读准的那一格上误导验证者。
+    """
+    rng = np.random.default_rng(11)
+    loud = (rng.standard_normal(16000) * 20000).astype(np.int16)  # 过能量闸
+
+    gate_prev_frames: dict = {}
+    gate_last_visual_pass_ts: dict = {}
+    moving = [_solid(0, 0, 0)] * 2 + [_solid(255, 255, 255)] * 4
+    config = PerceptionConfig()
+    config.omni.api_key = "test-key"
+
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=MOCK_OMNI_RESPONSE,
+    ):
+        # 第一窗有画面变化 → 进入滞回期
+        await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", moving, loud)]),
+            {}, config,
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
+        assert gate_last_visual_pass_ts.get("cam-1") is not None, "前置：滞回期未建立"
+
+        # 第二窗零帧 + 响亮音频 + 仍在滞回期 → audio 路由建包
+        result = await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", [], loud)]),
+            {}, config,
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
+
+    timing = result.rooms["living"].timing
+    assert timing["gate_audio_cam-1_pass"] == 1, "前置：这一格应由音频拉起"
+    assert timing["gate_hold_cam-1_pass"] == 0, (
+        "包是音频建的、实际 route=audio，trace 侧 hold 标志必须为 0，"
+        "否则 dashboard 会把这一窗标成 video (hold)"
+    )

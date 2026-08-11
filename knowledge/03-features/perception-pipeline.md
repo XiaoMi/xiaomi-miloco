@@ -91,9 +91,9 @@ hold 有三处取值，消费者不同、值也可能不同：
 
 - `GateTrigger.hold`（下游 `_is_audio_only` 选路用）受「本窗有没有帧」约束，零帧时恒为 `False`
 - `GateTiming.hold_pass`（`pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机用）始终是原始滞回判定，不受帧数影响——否则仍在滞回期的相机会被误判成滞回结束，刷出假的 `HOLD_EXPIRED` 事件
-- 落库的 `traces_device.gate_hold_pass` 列（虽与上一个字段同名）取的是 `hold_pass and gate_packet is not None`，即「滞回有没有真把本窗拉起来」——`processor._publish_trace` 用它反推 identity / omni 跑没跑，写原始判定会让零帧窗口凭空多记一次 omni 调用（稀释 `omni_error_rate` 分母）
+- 落库的 `traces_device.gate_hold_pass` 列（虽与上一个字段同名）取的是**包上的** `trigger.hold`，即「滞回有没有真以 video 路由拉起本窗」。它有两个消费者：`processor._publish_trace` 用它（连同 video/audio 两个 pass）反推 identity / omni 跑没跑；web 的通道列用它反推 route，且 `holdPass` 判断排在 `audioPass` 之前
 
-所以 `traces_device.gate_hold_pass` **不能**当「滞回开窗频率」的统计口径用：零帧那一格记 0，统计会系统性偏低，且偏低幅度正好集中在相机不稳定的时段。要统计滞回本身的频率，用 `gate_hold_start` / `gate_hold_expired` / `gate_hold_recovered` 事件。
+所以 `traces_device.gate_hold_pass` **不能**当「滞回发生频次」的统计口径用：它漏掉全部零帧窗口——「零帧 + 音频未过闸」压根不建 packet，「零帧 + 音频过闸」走的是 audio 路由，两格都记 0，而滞回判定本身在这两格里都是成立的。统计会系统性偏低，且偏低幅度正好集中在相机不稳定的时段。要统计滞回本身的频率，用 `gate_hold_start` / `gate_hold_expired` / `gate_hold_recovered` 事件。
 
 > **但这三个事件的 `held_for_ms` 也有已知缺口**：状态机是「每窗每设备比对一次」的增量式设计，状态存在 `gate_hold_active[did]` 里。设备不在本窗批次内时（掉线，或被引擎入口按空窗剔除）循环遍历不到它，状态原地冻结，直到设备恢复才补发一次 `HOLD_EXPIRED`——`held_for_ms` 于是把设备不在场的整段时长算进了滞回。实测某次线上日志里最大值达 2476202 ms（41 分钟），而 `hold_duration_sec` 只有 90 秒，物理上限约 90000 ms。
 >

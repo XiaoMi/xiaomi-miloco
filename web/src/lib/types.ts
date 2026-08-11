@@ -616,8 +616,13 @@ export interface PerfTraceRow {
   gate_video_pass: number;
   /** 1=audio gate 通过,0=被过滤掉。 */
   gate_audio_pass: number;
-  /** 1=hold 滞回拉起本窗 packet(visual 未变化但距上次通过 ≤ hold_duration_sec);
-   *  与 gate_video_pass 互斥,可与 gate_audio_pass 共存,omni 路由仍走 video。 */
+  /** 1=hold 滞回**以 video 路由**拉起本窗 packet(visual 未变化、距上次通过
+   *  ≤ hold_duration_sec、且本窗真有视频帧);与 gate_video_pass 互斥,可与
+   *  gate_audio_pass 共存,此时 omni 路由走 video。
+   *
+   *  注意本窗零帧时恒为 0(后端 gate 的 hold_effective 约束):零帧 + 音频过闸走的是
+   *  audio 路由、零帧 + 音频未过闸压根不建 packet,两种都不该标成 video (hold)。
+   *  因此这一列**不能**当「滞回发生频次」用——它漏掉全部零帧窗口。 */
   gate_hold_pass: number;
   cycle_total_ms: number | null;
   pipeline_total_ms: number | null;

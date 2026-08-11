@@ -858,7 +858,8 @@ class PerceptionEngine(BasePerceptionEngine):
         self._global_frame_index = 0
         # 旧场景基准帧 vs 新场景首帧的 diff 不代表真实变化,清掉退化为冷启动语义
         self._gate_prev_frames.clear()
-        # hold 状态机一并清,首通后 6min 倒计时重启
+        # hold 状态机一并清,首通后按 gate.hold_duration_sec(默认 90s)重新起算
+        # (原注释写「6min」与配置不符,系历史遗留)
         self._gate_last_visual_pass_ts.clear()
         self._gate_last_audio_pass_ts.clear()
         self._gate_hold_active.clear()

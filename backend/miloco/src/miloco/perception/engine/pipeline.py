@@ -554,17 +554,20 @@ async def run_batch_pipeline(
         room_timing[f"gate_vad_{did}_ms"] = gate_timing.vad_ms
         room_timing[f"gate_video_{did}_pass"] = int(gate_timing.video_pass)
         room_timing[f"gate_audio_{did}_pass"] = int(gate_timing.audio_pass)
-        # 这里写「hold 有没有真把本窗拉起来」,不是原始滞回判定:processor._publish_trace 用
-        # (video_pass or audio_pass or hold_pass) 反推 gate_skipped,再据此决定建不建
-        # identity / omni 的 trace。零帧窗口下 hold 对下游不成立(见 gate.py 的 hold_effective)、
-        # packet 为 None、identity 与 omni 根本没跑;此时若仍写原始 hold_pass,trace 会记一行
-        # identity_ms=0 / omni_ms=0 并让 omni_call_count +1 —— omni 错误率分母被稀释、
-        # skip_rate 偏低、p95_rtf_omni 被 0 拉低。
+        # 这里写「滞回有没有真以 video 路由拉起本窗」= 包上那个已经过「本窗有没有帧」约束的
+        # trigger.hold,**不是** timing 里不看帧的原始滞回判定。三格分别为:
+        #   - gate 没建包(零帧 + 音频未过闸 + 滞回期)→ 0。否则 processor._publish_trace 用
+        #     (video_pass or audio_pass or hold_pass) 反推出 gate_skipped=False,会建一行
+        #     identity_ms=0 / omni_ms=0 的 trace 并让 omni_call_count +1 —— omni 错误率
+        #     分母被稀释、skip_rate 偏低、p95_rtf_omni 被 0 拉低。
+        #   - 包是音频建的(零帧 + 音频过闸 + 滞回期,实际 route=audio)→ 0。web 的 ChannelPass
+        #     拿这一列反推 route 且 holdPass 判断排在 audioPass 之前,写 1 会把 audio 路由的
+        #     窗口标成 "video (hold)"、tooltip 还说「仍走 video 路由」。
+        #   - 有帧 + 滞回拉起 → 1,与改动前一致。
         # 上面 HOLD_START / HOLD_EXPIRED 状态机用的 cur_hold 仍取原始 gate_timing.hold_pass
         # —— 两个消费者本就该分开,同 gate.py 里 trigger.hold 与 timing.hold_pass 的分法。
-        # 对既有行为是恒等变换:改动前 packet is None 必然蕴含 hold_pass is False。
         room_timing[f"gate_hold_{did}_pass"] = int(
-            gate_timing.hold_pass and gate_packet is not None
+            gate_packet is not None and gate_packet.trigger.hold
         )
         # gate 真实评估的打分 → traces_device.gate_video_score / gate_audio_energy
         # 经 _merge_results 保留顶层"_"前缀,在 processor._publish_trace 复用。
