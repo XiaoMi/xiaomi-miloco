@@ -46,6 +46,10 @@ async def run_gate(
     通过 <= ``config.hold_duration_sec`` 时,即使 audio 也不通过也会生成 packet 并打
     ``trigger.hold=True``,下游 ``_is_audio_only`` 短路保 video 路由。
 
+    但 hold 的前提是**有画面可看**:本窗既无视频帧也无音频时不生成 packet,hold 也不放行。
+    否则下游拿到空 packet 会一路走到 omni,编码层无帧就不加 video 块,变成"纯文本问模型
+    这个场景里有什么"——模型只能照着 schema 编。
+
     on-demand 单次调用路径不传两 ts(默认 None),hold 自然关闭。
     """
     t = time.monotonic()
@@ -94,7 +98,15 @@ async def run_gate(
         video_cross_score=visual.cross_max,
     )
 
-    if not any_pass and not hold_active:
+    # 空输入闸:视频轨在本窗无数据(解码器等关键帧 / 缓冲区溢出清空 / 掉线重连)且音频也为空
+    # (拾音未开启时 engine 入口已剥)时,本窗没有任何可感知的东西,hold 也不放行。
+    #
+    # 这条判断放在 timing 构造之后、而不是函数开头 early return:pipeline 的
+    # HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机读 ``timing.hold_pass``,且在
+    # ``gate_packet is None`` 之前执行。开头 early return 会返回 hold_pass=False 的空
+    # timing,把仍在 hold 期的设备误判成 hold 结束,刷出假的 HOLD_EXPIRED 日志与事件。
+    has_input = bool(input_slice.frames) or input_slice.audio_clip.size > 0
+    if not has_input or (not any_pass and not hold_active):
         return None, timing, last_checked, new_last_visual_pass_ts, new_last_audio_pass_ts
 
     packet = GatePacket(

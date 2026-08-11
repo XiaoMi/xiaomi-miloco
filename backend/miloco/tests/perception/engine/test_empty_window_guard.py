@@ -1,0 +1,208 @@
+"""空输入窗口不得进入感知链路——两道闸各自钉住。
+
+背景：视频轨在某窗内无数据（解码器等关键帧 / 缓冲区溢出清空 / 掉线重连）但音频轨有数据
+时，窗口靠音频通过 ``stream_buffer`` 封窗、``DeviceSnapshot.has_data`` 与引擎入口的
+``batch.empty``；随后拾音未开启的相机音频被 ``_strip_unauthorized_voice_audio`` 剥掉，
+这台相机这一窗就什么都不剩了。此前无人复检，空 snapshot 一路走到 gate，被 visual hold
+放行成空 packet，编码层无帧不加 video 块 → 变成"纯文本问模型这个场景里有什么"，模型只能
+照着 schema 编。
+
+两道闸：
+- ``PerceptionEngine._drop_empty_snapshots``：剥音频后逐 snapshot 剔除，覆盖 realtime
+  与 on_demand 两个入口（后者跳过 gate，只能在这里挡）
+- ``run_gate``：无帧且无音频时不建 packet，hold 也不放行
+"""
+
+from __future__ import annotations
+
+import time
+
+import numpy as np
+from miloco.perception.engine import api as engine_api
+from miloco.perception.engine.api import PerceptionEngine
+from miloco.perception.engine.config import GateConfig, PerceptionConfig
+from miloco.perception.engine.gate.gate import run_gate
+from miloco.perception.engine.gate.visual_gate import _preprocess
+from miloco.perception.engine.input.video_splitter import create_input_slice
+from miloco.perception.types import (
+    AudioFrame,
+    AudioStream,
+    BatchedSnapshot,
+    DeviceSnapshot,
+    PerceptionDevice,
+    VideoFrame,
+    VideoStream,
+)
+
+
+def _make_engine() -> PerceptionEngine:
+    """直接构造引擎实例，不依赖 omni / 模型外部资源（同 test_voice_mic_off）。"""
+    return PerceptionEngine(PerceptionConfig())
+
+
+def _loud_audio(n: int = 16000) -> np.ndarray:
+    rng = np.random.default_rng(42)
+    return (rng.standard_normal(n) * 20000).astype(np.int16)
+
+
+def _still_frames(n: int = 6) -> list[np.ndarray]:
+    """静止画面：不过视觉 gate，只有 hold / audio 能开窗。"""
+    return [np.zeros((64, 64, 3), dtype=np.uint8) for _ in range(n)]
+
+
+def _snapshot(
+    did: str, *, with_video: bool = True, with_audio: bool = True
+) -> DeviceSnapshot:
+    video = (
+        VideoStream(
+            frames=[
+                VideoFrame(data=f, timestamp=float(i))
+                for i, f in enumerate(_still_frames())
+            ],
+            width=64,
+            height=64,
+        )
+        if with_video
+        else None
+    )
+    audio = (
+        AudioStream(frames=[AudioFrame(data=_loud_audio(), timestamp=0.0)])
+        if with_audio
+        else None
+    )
+    return DeviceSnapshot(
+        device=PerceptionDevice(did=did, name=f"cam-{did}", device_type="camera"),
+        start_timestamp=0.0,
+        end_timestamp=3000.0,
+        video=video,
+        audio=audio,
+    )
+
+
+# ─── gate：无帧且无音频时 hold 也不放行 ──────────────────────────────────────
+
+
+class TestGateEmptyInput:
+    config = GateConfig()
+
+    async def test_hold_does_not_open_window_without_any_input(self):
+        """零帧 + 零音频 + hold 生效 → 不建 packet。
+
+        同时钉住 ``timing.hold_pass`` 仍为 True：pipeline 的 HOLD_START/EXPIRED/RECOVERED
+        状态机读这个字段，且在 ``gate_packet is None`` 之前执行。若把空输入闸写成函数开头
+        early return（返回 hold_pass=False 的空 timing），仍在 hold 期的设备会被误判成
+        hold 结束，刷出假的 HOLD_EXPIRED 日志与 gate_hold_expired 事件。
+        """
+        slice_ = create_input_slice("room", [], np.array([], dtype=np.int16))
+        packet, timing, *_ = await run_gate(
+            slice_, self.config, last_visual_pass_ts=time.monotonic()
+        )
+        assert packet is None
+        assert timing.hold_pass is True
+
+    async def test_hold_still_opens_window_with_frames(self):
+        """有帧（静止画面）+ hold 生效 → 照常开窗。hold 本身不被本次改动削弱。"""
+        frames = _still_frames()
+        prev = _preprocess(frames[0])
+        slice_ = create_input_slice("room", frames, np.array([], dtype=np.int16))
+        packet, timing, *_ = await run_gate(
+            slice_,
+            self.config,
+            prev_frame=prev,
+            last_visual_pass_ts=time.monotonic(),
+        )
+        assert packet is not None
+        assert not timing.video_pass  # 静止画面本身不过视觉 gate
+        assert timing.hold_pass is True  # 靠 hold 开的窗
+
+    async def test_zero_frames_with_audio_still_opens_window(self):
+        """零帧但有音频（拾音开启的相机）→ 照常开窗，交给 audio route。
+
+        空输入闸判的是"两个模态都没有"，不是"没有视频"——否则会误杀 audio-only 感知。
+        """
+        slice_ = create_input_slice("room", [], _loud_audio())
+        packet, timing, *_ = await run_gate(slice_, self.config)
+        assert packet is not None
+        assert timing.audio_pass
+        assert packet.trigger.audio_active
+
+
+# ─── 引擎入口：剥音频后剔除空 snapshot ───────────────────────────────────────
+
+
+class TestDropEmptySnapshots:
+    def test_mic_off_zero_frame_snapshot_dropped(self, monkeypatch):
+        """线上实际路径：拾音关闭 + 零帧 + 有音频 → 剥音频后被剔除，batch 转空。
+
+        剥离前 batch 非空（音频撑着），正是这一点让它通过了入口的第一道 batch.empty。
+        """
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: set())
+        eng = _make_engine()
+        s = _snapshot("cam_off", with_video=False, with_audio=True)
+        batch = BatchedSnapshot(snapshots=[s])
+        assert not batch.empty  # 音频撑着，入口第一道 batch.empty 拦不住
+
+        eng._strip_unauthorized_voice_audio(batch)
+        eng._drop_empty_snapshots(batch)
+
+        assert batch.snapshots == []
+        assert batch.empty
+
+    def test_mixed_batch_only_empty_one_dropped(self, monkeypatch):
+        """混合场景：cam A 零帧、cam B 正常 → 只剔 A，B 保留。
+
+        这条是"逐 snapshot 剔除"与"整批判空"的分界钉：整批判空时 batch 非空（B 撑着），
+        A 会带着空输入继续走完 gate → omni。同房间多相机是常态，不是边缘情况。
+        """
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: set())
+        eng = _make_engine()
+        s_empty = _snapshot("cam_a", with_video=False, with_audio=True)
+        s_ok = _snapshot("cam_b", with_video=True, with_audio=True)
+        batch = BatchedSnapshot(snapshots=[s_empty, s_ok])
+
+        eng._strip_unauthorized_voice_audio(batch)
+        eng._drop_empty_snapshots(batch)
+
+        assert [s.device.did for s in batch.snapshots] == ["cam_b"]
+        assert not batch.empty
+
+    def test_mic_on_zero_frame_snapshot_kept(self, monkeypatch):
+        """拾音已开启 + 零帧 + 有音频 → 不剔除，留给 audio route。"""
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: {"cam_on"})
+        eng = _make_engine()
+        s = _snapshot("cam_on", with_video=False, with_audio=True)
+        batch = BatchedSnapshot(snapshots=[s])
+
+        eng._strip_unauthorized_voice_audio(batch)
+        eng._drop_empty_snapshots(batch)
+
+        assert [x.device.did for x in batch.snapshots] == ["cam_on"]
+
+    def test_warning_deduped_per_did_and_reset_on_recovery(self, monkeypatch, caplog):
+        """日志按 did 去重：连续空窗只打一条；该相机恢复出数据后再空，重新打。
+
+        掉线期间每个窗口（默认 4s）都会命中，不去重会刷屏。
+        """
+        monkeypatch.setattr(engine_api, "_voice_allowed_dids", lambda: set())
+        eng = _make_engine()
+
+        def _drop_empty_window() -> None:
+            b = BatchedSnapshot(
+                snapshots=[_snapshot("cam_x", with_video=False, with_audio=False)]
+            )
+            eng._drop_empty_snapshots(b)
+
+        with caplog.at_level("WARNING", logger=engine_api.logger.name):
+            _drop_empty_window()
+            _drop_empty_window()
+            assert sum("本窗无任何输入" in r.message for r in caplog.records) == 1
+            assert "cam_x" in eng._empty_window_logged
+
+            # 该相机恢复出数据 → 移出已打集
+            recovered = BatchedSnapshot(snapshots=[_snapshot("cam_x")])
+            eng._drop_empty_snapshots(recovered)
+            assert "cam_x" not in eng._empty_window_logged
+
+            # 再次为空 → 重新打一条
+            _drop_empty_window()
+            assert sum("本窗无任何输入" in r.message for r in caplog.records) == 2
