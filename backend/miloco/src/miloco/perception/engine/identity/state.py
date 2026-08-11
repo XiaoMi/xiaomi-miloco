@@ -80,6 +80,12 @@ class TrackIdentityState:
     # 无数据窗(emb 不足/无参考)不计不清。达 drift_check.consecutive_windows 入嫌疑集
     # (observe 只打日志; enforce 撤回重判)。
     drift_consec_low: int = 0
+    # 上一窗算出的 sim(本窗证据的指纹)。与本窗逐字节相同 ⟹ 比较的两端这一窗都没有新证据
+    # (track 侧特征队列没长新东西: 整窗一次都没匹配上, 或 fast 模式静止 track 全窗复用
+    # 缓存 emb; 参考侧窗内既无新样本落盘、也无旧样本滑出 recency 窗), 属"无数据窗",
+    # 不计不清 —— 否则同一份证据会被投两票, 把"连续 M 窗"抗单窗噪声的设计架空。
+    # 撤回 / 复认时与 drift_consec_low 一同清空。
+    drift_last_sim: float | None = None
     # (enforce)采信复认护栏: 撤回时记下撤前 committed 身份; 若 omni 复认回同一 person,
     # 不再对该 (track, person) body 二次撤, 直到 committed 变成另一个新身份才重新武装。
     # 防 FP 震荡(撤→复认→又撤)。None = 未武装。
