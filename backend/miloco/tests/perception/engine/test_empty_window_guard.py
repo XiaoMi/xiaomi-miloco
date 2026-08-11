@@ -340,13 +340,24 @@ class TestFusedNoMediaBlockWarning:
     所以必须有测试实际执行到——否则变量名写错会在生产最糟的时刻才暴露。
     """
 
-    def _content(self, *, has_pets: bool, caplog):
+    def _content(self, *, has_pets: bool, caplog, monkeypatch=None):
+        from miloco.perception.engine.omni import prompt_builder as pb
         from miloco.perception.engine.omni.prompt_builder import (
             FusedPromptConfig,
             _build_fused_user_content,
         )
         from miloco.perception.engine.omni.provider import get_adapter
         from miloco.perception.engine.types import OmniContext
+
+        if monkeypatch is not None:
+            # 假宠物参考图：不依赖档案与磁盘，只为验证媒体块计数
+            monkeypatch.setattr(
+                pb, "build_pet_reference_content",
+                lambda max_pets: [
+                    {"type": "text", "text": "宠物参考"},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+                ],
+            )
 
         with caplog.at_level("WARNING"):
             return _build_fused_user_content(
@@ -370,3 +381,20 @@ class TestFusedNoMediaBlockWarning:
         msg = recs[0].getMessage()
         assert "room=客厅" in msg
         assert "other_media_blocks=0" in msg  # 无宠物图 → 模型什么都没看到
+
+    def test_counts_remaining_media_blocks_when_pet_refs_present(
+        self, caplog, monkeypatch
+    ):
+        """配了宠物参考图时计数必须非 0。
+
+        这条 warning 的全部价值在于区分两种排查方向：0 = 模型什么都没看到，非 0 = 模型
+        只看到参考图、没有本窗画面（看图脑补的高风险形态）。只测 0 一侧等于没测这个区分。
+        """
+        content = self._content(has_pets=True, caplog=caplog, monkeypatch=monkeypatch)
+
+        assert any(b.get("type") == "image_url" for b in content), "前提：参考图应已入 content"
+        msg = next(
+            r.getMessage() for r in caplog.records if "fused_no_media_block" in r.getMessage()
+        )
+        assert "other_media_blocks=1" in msg
+        assert "看图脑补" in msg

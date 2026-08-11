@@ -89,25 +89,29 @@ Gate 层（`perception/engine/gate/gate.py`）对每个窗口做双模态判定�
 
 ##### hold 的三处取值（本节是唯一出处）
 
-> 这段描述此前在 `engine/types.py`（两处）、`observability/types.py`、`web/src/lib/types.ts` 各有一份文字拷贝。算法改过两次，每次都漏改其中一份，连续三次。现在**公式与对照表只在本节维护**，那四处注释只保留「这个字段是什么」加一句指向本节的指针，不再复述公式。改这一列的算法时，只需同步本节。
+> 公式、取值对照与消费者清单**只在本节维护**。代码里那几处字段注释只说「这个字段是什么」加一句指回本节，不复述公式——此前四处文字拷贝各自漂移过，连续四次漏改。
 
-| 取值                              | 公式                                                   | 消费者                                                             | 零帧+音频过闸+滞回期    | 零帧+音频未过闸+滞回期 |
-| --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ | ----------------------- | ---------------------- |
-| `GateTrigger.hold`                | `hold_active and bool(frames)`                         | `_is_audio_only` 选路                                              | `False`（→ audio 路由） | 不建 packet            |
-| `GateTiming.hold_pass`            | `hold_active`（只看时间）                              | `pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机 | `True`                  | `True`                 |
-| `traces_device.gate_hold_pass` 列 | `gate_packet is not None and gate_packet.trigger.hold` | 见下方三条                                                         | `0`                     | `0`                    |
+三个字段各对一个消费者，互不共用（这是刻意解耦：`hold` 是**路由决策**，`hold_opened_window` 是**记账**，两者今天取值相同但会因路由需求分叉）：
 
-第二行必须保持「只看时间」：否则仍在滞回期的相机会被误判成滞回结束，刷出假的 `HOLD_EXPIRED` 事件。
+| 字段                            | 公式                           | 唯一消费者                                                         | 零帧+音频过闸+滞回期    | 零帧+音频未过闸+滞回期 |
+| ------------------------------- | ------------------------------ | ------------------------------------------------------------------ | ----------------------- | ---------------------- |
+| `GateTrigger.hold`              | `hold_active and bool(frames)` | `_is_audio_only` 选路                                              | `False`（→ audio 路由） | 不建 packet            |
+| `GateTiming.hold_pass`          | `hold_active`（只看时间）      | `pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机 | `True`                  | `True`                 |
+| `GateTiming.hold_opened_window` | `hold_active and bool(frames)` | 落 `traces_device.gate_hold_pass` 列                               | `False`                 | `False`                |
 
-落库那一列有**三个**消费者，改它之前三条都要过一遍：
+`hold_pass` 必须保持「只看时间」：否则仍在滞回期的相机会被误判成滞回结束，刷出假的 `HOLD_EXPIRED` 事件。
+
+`hold_opened_window` 保证了 `traces_v.gate_passed ≡ 「本窗建了包」`（建包判据就是 `video_pass or audio_pass or hold_opened_window`），这条等价关系由 `test_gate_passed_equals_packet_built` 钉住，不靠人验算。
+
+落库的 `traces_device.gate_hold_pass` 列往下有三条链路，改它之前三条都要过一遍：
 
 1. `processor._publish_trace` 用它（连同 video / audio 两个 pass）反推 `gate_skipped`，据此决定建不建 identity / omni 的 trace。写错会让零帧窗口凭空多记一次 omni 调用——稀释 `omni_error_rate` 分母、`skip_rate` 偏低、`p95_rtf_omni` 被 0 拉低
 2. web 通道列用它反推 route，且 `holdPass` 判断排在 `audioPass` **之前**（`PerfTraceList.tsx`）。写错会把 audio 路由的窗口标成 `video (hold)`
-3. `aggregate.py` 把它 OR 汇总进 `traces.gate_hold_pass`，再经 `traces_v.gate_passed = video OR audio OR hold` 喂 `stats` 的 `AVG(gate_passed)` 与前端「整体过滤率」曲线（`PerfGateChart.tsx`）。**这条要求本列恒等于「本窗建了包」**——改它之前先验算 `gate_passed` 是否还等价于建包，否则过滤率曲线会静默偏移，而单行数据看不出任何异常
+3. `aggregate.py` 把它 OR 汇总进 `traces.gate_hold_pass`，再经 `traces_v.gate_passed = video OR audio OR hold` 喂 `stats` 的 `AVG(gate_passed)` 与前端「整体过滤率」曲线（`PerfGateChart.tsx`）
 
-第 3 条最容易漏：前两个消费者错了肉眼能看见（某行通道列标签不对、某行 `identity_ms=0 / omni_ms=0` 读起来像跑得飞快），第三个错了只是把一条曲线整体挪一点。
+第 3 条最容易漏：前两条错了肉眼能看见（某行通道列标签不对、某行 `identity_ms=0 / omni_ms=0` 读起来像跑得飞快），第三条错了只是把一条曲线整体挪一点，单看任何一行都正常。所以它靠测试守而不靠人记（见上方 `test_gate_passed_equals_packet_built`）。
 
-所以 `traces_device.gate_hold_pass` **不能**当「滞回发生频次」的统计口径用：它漏掉全部零帧窗口（表里最后两列都是 0，而滞回判定本身在这两格都成立），统计系统性偏低，且偏低幅度正好集中在相机不稳定的时段。要统计滞回本身的频率，用 `gate_hold_start` / `gate_hold_expired` / `gate_hold_recovered` 事件。
+这一列**不能**当「滞回发生频次」的统计口径用：它漏掉全部零帧窗口（表里最后两列都是 0，而滞回判定本身在这两格都成立），统计系统性偏低，且偏低幅度正好集中在相机不稳定的时段。要统计滞回本身的频率，用 `gate_hold_start` / `gate_hold_expired` / `gate_hold_recovered` 事件。
 
 > **但这三个事件的 `held_for_ms` 也有已知缺口**：状态机是「每窗每设备比对一次」的增量式设计，状态存在 `gate_hold_active[did]` 里。设备不在本窗批次内时（掉线，或被引擎入口按空窗剔除）循环遍历不到它，状态原地冻结，直到设备恢复才补发一次 `HOLD_EXPIRED`——`held_for_ms` 于是把设备不在场的整段时长算进了滞回。实测某次线上日志里最大值达 2476202 ms（41 分钟），而 `hold_duration_sec` 只有 90 秒，物理上限约 90000 ms。
 >

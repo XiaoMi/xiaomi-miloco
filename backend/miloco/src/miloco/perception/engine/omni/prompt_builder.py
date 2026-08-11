@@ -1386,14 +1386,12 @@ _MIN_VIDEO_B64_LEN = 1000
 # 的 b64 串入 payload 让 omni 服务端 400 Multimodal data is corrupted。
 _MIN_AUDIO_B64_LEN = 500
 
-# 总开关：False 时所有窗口都走 video route（等价于改动前的行为）。
+# 总开关：False 时所有窗口都走 video route（等价于本 route 上线前的行为）。
 # 用于一键回滚 / A/B 对比 / 上游不兼容时的应急关闭。
 #
-# ⚠️ 回滚前先读 gate.py 的空输入闸：那里对「零帧 + 音频过闸」的处置**依赖本开关为 True**
-# —— 靠 trigger.hold 置假让 _is_audio_only 把包放去 audio 路由。本开关置 False 后这类包会
-# 被拉回 video 路由，而 _encode_video 对零帧返回 None → 无 video 块 → 退化成纯文本问模型
-# 「这个场景里有什么」，模型只能照着 schema 编（PR #510 修的就是这个）。真要回滚时，需连带
-# 把 gate 的 hold_effective 条件收紧成「无帧一律不建 packet」。
+# ⚠️ 置 False 会让「零帧 + 音频过闸」的包被拉回 video route，而无帧时不加 video 块 →
+# 退化成纯文本问模型场景。真要回滚，需连带把 gate 的 hold_opens_window 收紧成
+# 「无帧一律不建 packet」。
 _AUDIO_ONLY_ENABLED = True
 
 
@@ -1605,11 +1603,9 @@ def _is_audio_only(packets: list[IdentityPacket]) -> bool:
     batch 场景任一 device visual_changed=True → 整 batch 走全多模态（保守，避免
     同次调用 prompt schema 不一致）。trigger 为 None 时视为非 audio-only（兼容旧路径）。
     总开关 _AUDIO_ONLY_ENABLED=False 时直接返回 False，等价回滚。
-    Hold 短路:trigger.hold=True 表示 visual 在滞回期内**且本窗有帧**,虽本窗 visual
-    不通过但不应降级到 audio-only,保持 video 路由。零帧窗口的 trigger.hold 恒为 False
-    (见 gate.py 的 hold_effective),因此「零帧 + 音频过闸」会落到 audio 路由 —— 那一格
-    若被拉回 video 路由,_encode_video 无帧返回 None、请求里没有 video 块,退化成纯文本
-    问模型场景。
+    Hold 短路:trigger.hold=True 表示 visual 在滞回期内且本窗有帧,不降级到 audio-only。
+    零帧窗口 trigger.hold 恒 False,「零帧 + 音频过闸」因此落到 audio 路由 —— 拉回 video
+    路由会因无帧不加 video 块,退化成纯文本问模型场景。
     """
     if not _AUDIO_ONLY_ENABLED:
         return False

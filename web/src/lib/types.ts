@@ -616,11 +616,9 @@ export interface PerfTraceRow {
   gate_video_pass: number;
   /** 1=audio gate 通过,0=被过滤掉。 */
   gate_audio_pass: number;
-  /** 1=hold 滞回**以 video 路由**拉起本窗 packet(此时 omni 路由走 video);
-   *  与 gate_video_pass 互斥,可与 gate_audio_pass 共存。本窗零帧时恒为 0。
-   *
-   *  不能当「滞回发生频次」用(漏掉全部零帧窗口)。落库公式、三处取值对照表与消费者
-   *  清单见 knowledge/03-features/perception-pipeline.md 的 Gate 小节(单一出处)。 */
+  /** 1=滞回真把本窗开出来了(此时 omni 路由走 video);与 gate_video_pass 互斥,可与
+   *  gate_audio_pass 共存。零帧窗口恒 0,故不能当「滞回发生频次」用。
+   *  语义约束见 knowledge/03-features/perception-pipeline.md 的 Gate 小节。 */
   gate_hold_pass: number;
   cycle_total_ms: number | null;
   pipeline_total_ms: number | null;

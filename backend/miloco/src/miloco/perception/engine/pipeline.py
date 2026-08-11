@@ -554,21 +554,7 @@ async def run_batch_pipeline(
         room_timing[f"gate_vad_{did}_ms"] = gate_timing.vad_ms
         room_timing[f"gate_video_{did}_pass"] = int(gate_timing.video_pass)
         room_timing[f"gate_audio_{did}_pass"] = int(gate_timing.audio_pass)
-        # 这里写「滞回有没有真以 video 路由拉起本窗」= 包上那个已经过「本窗有没有帧」约束的
-        # trigger.hold,**不是** timing 里不看帧的原始滞回判定。三格分别为:
-        #   - gate 没建包(零帧 + 音频未过闸 + 滞回期)→ 0。否则 processor._publish_trace 用
-        #     (video_pass or audio_pass or hold_pass) 反推出 gate_skipped=False,会建一行
-        #     identity_ms=0 / omni_ms=0 的 trace 并让 omni_call_count +1 —— omni 错误率
-        #     分母被稀释、skip_rate 偏低、p95_rtf_omni 被 0 拉低。
-        #   - 包是音频建的(零帧 + 音频过闸 + 滞回期,实际 route=audio)→ 0。web 的 ChannelPass
-        #     拿这一列反推 route 且 holdPass 判断排在 audioPass 之前,写 1 会把 audio 路由的
-        #     窗口标成 "video (hold)"、tooltip 还说「仍走 video 路由」。
-        #   - 有帧 + 滞回拉起 → 1,与改动前一致。
-        # 上面 HOLD_START / HOLD_EXPIRED 状态机用的 cur_hold 仍取原始 gate_timing.hold_pass
-        # —— 两个消费者本就该分开,同 gate.py 里 trigger.hold 与 timing.hold_pass 的分法。
-        room_timing[f"gate_hold_{did}_pass"] = int(
-            gate_packet is not None and gate_packet.trigger.hold
-        )
+        room_timing[f"gate_hold_{did}_pass"] = int(gate_timing.hold_opened_window)
         # gate 真实评估的打分 → traces_device.gate_video_score / gate_audio_energy
         # 经 _merge_results 保留顶层"_"前缀,在 processor._publish_trace 复用。
         # on-demand bypass / 系统异常 fallback 路径不走这里,score 字段保持 NULL。

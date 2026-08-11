@@ -1983,3 +1983,61 @@ async def test_hold_trace_key_zero_when_audio_route_opens_frameless_window():
         "包是音频建的、实际 route=audio，trace 侧 hold 标志必须为 0，"
         "否则 dashboard 会把这一窗标成 video (hold)"
     )
+
+
+@pytest.mark.asyncio
+async def test_gate_passed_equals_packet_built():
+    """`traces_v.gate_passed = video OR audio OR hold` 必须恒等于「本窗建了包」。
+
+    这条等价关系喂 stats 的 AVG(gate_passed) 与前端「整体过滤率」曲线。破坏它不会让任何
+    单行 trace 看起来可疑，只是把整条曲线挪一点——所以用测试守，不靠人验算。
+
+    刻意走 run_batch_pipeline 读真实落库的三个 timing 键，而不是在测试里复刻
+    `video_pass or audio_pass or hold_opened_window`：后者只能测 gate 内部，改 pipeline
+    落库那一行照样绿。
+    """
+    rng = np.random.default_rng(23)
+    loud = (rng.standard_normal(16000) * 20000).astype(np.int16)
+    quiet = (rng.standard_normal(16000) * 5).astype(np.int16)
+    silent = np.zeros(16000, dtype=np.int16)
+    still = [_solid(100, 100, 100)] * 6
+    moving = [_solid(0, 0, 0)] * 2 + [_solid(255, 255, 255)] * 4
+
+    config = PerceptionConfig()
+    config.omni.api_key = "test-key"
+
+    cases = [
+        ("有帧+运动", moving, silent, False),
+        ("有帧+静止+hold", still, silent, True),
+        ("有帧+静止+无hold", still, silent, False),
+        ("零帧+音频过闸+hold", [], loud, True),
+        ("零帧+音频过闸+无hold", [], loud, False),
+        ("零帧+音频未过闸+hold", [], quiet, True),
+        ("零帧+无音频+hold", [], silent, True),
+    ]
+
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=MOCK_OMNI_RESPONSE,
+    ):
+        for name, frames, audio, hold in cases:
+            prev = {"cam-1": _preprocess(frames[0])} if frames else {}
+            last_v = {"cam-1": time.monotonic()} if hold else {}
+            result = await run_batch_pipeline(
+                BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", frames, audio)]),
+                {}, config,
+                gate_prev_frames=prev,
+                gate_last_visual_pass_ts=last_v,
+            )
+            t = result.rooms["living"].timing
+            gate_passed = bool(
+                t["gate_video_cam-1_pass"]
+                or t["gate_audio_cam-1_pass"]
+                or t["gate_hold_cam-1_pass"]
+            )
+            built = not result.rooms["living"].skipped
+            assert gate_passed is built, (
+                f"[{name}] gate_passed={gate_passed} 但建包={built}"
+                " —— 整体过滤率曲线会静默偏移"
+            )
