@@ -1952,7 +1952,7 @@ async def test_hold_trace_key_zero_when_audio_route_opens_frameless_window():
         "miloco.perception.engine.omni.omni.call_omni",
         new_callable=AsyncMock,
         return_value=MOCK_OMNI_RESPONSE,
-    ):
+    ) as mock_omni:
         # 第一窗有画面变化 → 进入滞回期
         await run_batch_pipeline(
             BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", moving, loud)]),
@@ -1961,6 +1961,7 @@ async def test_hold_trace_key_zero_when_audio_route_opens_frameless_window():
             gate_last_visual_pass_ts=gate_last_visual_pass_ts,
         )
         assert gate_last_visual_pass_ts.get("cam-1") is not None, "前置：滞回期未建立"
+        mock_omni.reset_mock()
 
         # 第二窗零帧 + 响亮音频 + 仍在滞回期 → audio 路由建包
         result = await run_batch_pipeline(
@@ -1971,6 +1972,12 @@ async def test_hold_trace_key_zero_when_audio_route_opens_frameless_window():
         )
 
     timing = result.rooms["living"].timing
+    # 必须先钉住「包真建出来了」：下面两条断言在「gate 压根没建包」时也都成立
+    # （gate_audio_pass 写在 _run_device 的早返回之前；没包时 hold 列恒 0），
+    # 不钉前提的话，gate 哪天收紧成「无帧一律不建包」这条用例会继续全绿、
+    # 而 docstring 声明要覆盖的那一格已经不存在 —— 变成为错误的理由通过。
+    assert result.rooms["living"].skipped is False, "前提：这一格必须真建出 packet"
+    mock_omni.assert_called_once()
     assert timing["gate_audio_cam-1_pass"] == 1, "前置：这一格应由音频拉起"
     assert timing["gate_hold_cam-1_pass"] == 0, (
         "包是音频建的、实际 route=audio，trace 侧 hold 标志必须为 0，"

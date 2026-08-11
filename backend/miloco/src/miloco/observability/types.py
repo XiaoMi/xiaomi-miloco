@@ -29,13 +29,14 @@ class GateTrace:
     # cycle 异常 fallback),写库时落 NULL,P50-P99 分布视图过滤掉。
     video_score: float | None = None
     audio_energy: float | None = None
-    # 本窗 packet 由 hold 滞回**以 video 路由**拉起(visual 不通过、距上次 visual 通过
-    # <= hold_duration_sec、**且本窗真有视频帧**)。取的是 packet 上的 trigger.hold,
-    # 不是 GateTiming.hold_pass 那个不看帧的原始滞回判定 —— 后者在零帧窗口仍为 True。
+    # 本窗 packet 由 hold 滞回**以 video 路由**拉起。取 packet 上的 trigger.hold(已过
+    # 「本窗有没有帧」约束),不是 GateTiming.hold_pass 那个不看帧的原始滞回判定。
     # 与 video_pass 互斥(hold 前置条件要求 visual 不通过);可与 audio_pass 共存。
-    # 零帧窗口恒 0:「零帧 + 音频过闸」走 audio 路由、「零帧 + 音频未过闸」压根不建 packet。
-    # 故本字段**不能**当「滞回发生频次」用(漏掉全部零帧窗口),那个口径用
-    # gate_hold_start / gate_hold_expired / gate_hold_recovered 事件。
+    # 本列有三个消费者,其中一条要求它**恒等于「本窗建了包」**(否则 gate_passed 曲线静默
+    # 偏移);另外它不能当「滞回发生频次」用(漏掉全部零帧窗口)。
+    # 落库公式、三处取值对照表、三个消费者清单见
+    # knowledge/03-features/perception-pipeline.md 的 Gate 小节
+    # ——**单一出处,勿在此复述公式**。
     hold_pass: bool = False
 
     @property
