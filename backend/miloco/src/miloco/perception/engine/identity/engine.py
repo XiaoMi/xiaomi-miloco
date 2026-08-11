@@ -1218,8 +1218,8 @@ class IdentityEngine:
                 continue
             # coasting(本帧无检测命中, bbox 停在上一次真匹配的位置)也不进池: 人已经
             # 不在那儿了(裁到的是背景/家具/旁边另一个人)。裁出来的图既污染聚类, 又能
-            # 经 from-cluster 注册间接写进身份库 —— 与 tier_c 入队门 D 拒"幻影框裁图"
-            # 同口径, 只是终点从直接写库变成间接写库。
+            # 经 from-cluster 注册间接写进身份库 —— 与 tier_c 入队门 D 拒"coasting 残留框"
+            # 同口径(用词与该门处一致,便于 grep 定位), 只是终点从直接写库变成间接写库。
             # 注: 池内 phash/embedding 去重拦不住这类图 —— 它跟真人 crop 本来就不像,
             # 反而会被当成"多样性样本"留下。
             if not self._detected_this_frame.get(tid, False):

@@ -472,7 +472,7 @@ class TestExtractFromVideoDeepSort:
             max_frames=4, min_track_hits=2,
         )
         assert 42 in out, "真检测的 track 应照常产出候选"
-        assert 99 not in out, "coasting track 的幻影框裁图不应进候选"
+        assert 99 not in out, "coasting 残留框裁出的图不应进候选"
 
     def test_missing_flag_defaults_to_detected(self, tmp_path):
         """tracker 输出不带该字段时按真检测兜底(全链路 fail-open 同口径)。

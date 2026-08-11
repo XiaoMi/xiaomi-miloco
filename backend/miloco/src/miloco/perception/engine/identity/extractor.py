@@ -461,7 +461,7 @@ def extract_from_video(
                 # 与 IdentityEngine 各消费闸同口径。
                 # 召回代价有界, 但上界跟随配置而非代码常量: 本路径 tracker 按 fps=1 建,
                 # 每个关联缺口最多少 sec_to_frames(deep_sort.max_age_sec, 1) 张候选
-                # (当前 yaml 配 2.0 → 2 张)。少掉的分两类: ① 人已离开/漏检产生的幻影框,
+                # (当前 yaml 配 2.0 → 2 张)。少掉的分两类: ① 人已离开/漏检产生的残留框,
                 # 这是本闸的目标; ② 人还在画面里(能走到这道闸就说明本帧检出了人 —— 见上面
                 # valid_frames 只收 body_dets 非空的帧)、只是 ReID/IoU 没关联上, 该检测另
                 # 起了 tentative track 而本 track 原地 coasting, 这一帧的框大概率还压在人
