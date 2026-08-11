@@ -143,20 +143,44 @@ class TestDeepSortTrackerAPI:
         for name in ("update", "get_tracking_results", "reset", "last_detections", "tracks"):
             assert hasattr(tracker, name), f"DeepSortTracker 缺失 {name}"
 
-    def test_get_tracking_results_field_set(self):
-        """get_tracking_results 字段集与 SortTracker 一致。"""
+    def test_get_tracking_results_empty_when_no_detection(self):
+        """全黑帧上检测器无输出 → 返回空列表且不抛异常。
+
+        ⚠️ 本用例覆盖的是「无检测」这条边界，``results`` 恒为 ``[]``，**不构成字段集
+        护栏**——任何写在 ``for r in results`` 里的断言在这里都执行不到。字段集与
+        ``detected_this_frame`` 由下面 ``test_field_set_and_detected_flag`` 钉住。
+        """
         tracker = self._make_tracker()
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         tracker.update(frame)
+        assert tracker.get_tracking_results() == []
+
+    @pytest.mark.parametrize("tsu,expected_detected", [(0, True), (1, False), (3, False)])
+    def test_field_set_and_detected_flag(self, tsu, expected_detected):
+        """字段集 + ``detected_this_frame`` 取值双向钉死，不依赖检测器真找到人。
+
+        直接注入一条已确认 track 再读输出：只有这样断言才落在执行路径上（喂真帧时
+        检测器在测试图上通常无输出，循环体一次都不进，断言等于没写）。
+
+        钉这两件事的理由：``detected_this_frame`` 缺失时下游不报错，只会取默认值让
+        身份识别侧各 coasting 闸静默恒真（即 #494）。本方法是该字段的产出源头，接缝
+        下游那道护栏（``edge/test_tracking_seam_fields``）构造的是自己的 fixture、
+        不经过跟踪器，挡不住源头漏写。
+        """
+        from miloco.perception.engine.identity.tracker.detector import Detection
+        from miloco.perception.engine.identity.tracker.tracker import Track
+
+        tracker = self._make_tracker()
+        tracker._mot.tracks = [Track(
+            track_id=7, class_id=Detection.CLASS_HUMAN, bbox=(10, 20, 30, 60),
+            confidence=0.87, hits=5, age=9, time_since_update=tsu, state="confirmed",
+        )]
         results = tracker.get_tracking_results()
-        assert isinstance(results, list)
-        for r in results:
-            # detected_this_frame 单列在这里的理由：它缺失时下游不报错，只会取默认值让
-            # 身份识别侧各 coasting 闸静默恒真（即 #494）。此处是该字段的产出源头，
-            # 接缝下游那道护栏（edge/test_tracking_seam_fields）挡不住源头漏写。
-            for k in ("id", "class_id", "bbox", "xyxy", "confidence", "hits", "age",
-                      "time_since_update", "detected_this_frame"):
-                assert k in r, f"track 缺字段 {k}"
+        assert len(results) == 1
+        for k in ("id", "class_id", "bbox", "xyxy", "confidence", "hits", "age",
+                  "time_since_update", "detected_this_frame"):
+            assert k in results[0], f"track 缺字段 {k}"
+        assert results[0]["detected_this_frame"] is expected_detected
 
     def test_get_track_embedding_returns_none_when_track_absent(self):
         tracker = self._make_tracker()
