@@ -91,11 +91,11 @@ Gate 层（`perception/engine/gate/gate.py`）对每个窗口做双模态判定�
 
 > 这段描述此前在 `engine/types.py`（两处）、`observability/types.py`、`web/src/lib/types.ts` 各有一份文字拷贝。算法改过两次，每次都漏改其中一份，连续三次。现在**公式与对照表只在本节维护**，那四处注释只保留「这个字段是什么」加一句指向本节的指针，不再复述公式。改这一列的算法时，只需同步本节。
 
-| 取值 | 公式 | 消费者 | 零帧+音频过闸+滞回期 | 零帧+音频未过闸+滞回期 |
-|---|---|---|---|---|
-| `GateTrigger.hold` | `hold_active and bool(frames)` | `_is_audio_only` 选路 | `False`（→ audio 路由） | 不建 packet |
-| `GateTiming.hold_pass` | `hold_active`（只看时间） | `pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机 | `True` | `True` |
-| `traces_device.gate_hold_pass` 列 | `gate_packet is not None and gate_packet.trigger.hold` | 见下方三条 | `0` | `0` |
+| 取值                              | 公式                                                   | 消费者                                                             | 零帧+音频过闸+滞回期    | 零帧+音频未过闸+滞回期 |
+| --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ | ----------------------- | ---------------------- |
+| `GateTrigger.hold`                | `hold_active and bool(frames)`                         | `_is_audio_only` 选路                                              | `False`（→ audio 路由） | 不建 packet            |
+| `GateTiming.hold_pass`            | `hold_active`（只看时间）                              | `pipeline.py` 的 HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED 状态机 | `True`                  | `True`                 |
+| `traces_device.gate_hold_pass` 列 | `gate_packet is not None and gate_packet.trigger.hold` | 见下方三条                                                         | `0`                     | `0`                    |
 
 第二行必须保持「只看时间」：否则仍在滞回期的相机会被误判成滞回结束，刷出假的 `HOLD_EXPIRED` 事件。
 
