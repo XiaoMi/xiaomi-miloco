@@ -554,7 +554,18 @@ async def run_batch_pipeline(
         room_timing[f"gate_vad_{did}_ms"] = gate_timing.vad_ms
         room_timing[f"gate_video_{did}_pass"] = int(gate_timing.video_pass)
         room_timing[f"gate_audio_{did}_pass"] = int(gate_timing.audio_pass)
-        room_timing[f"gate_hold_{did}_pass"] = int(gate_timing.hold_pass)
+        # 这里写「hold 有没有真把本窗拉起来」,不是原始滞回判定:processor._publish_trace 用
+        # (video_pass or audio_pass or hold_pass) 反推 gate_skipped,再据此决定建不建
+        # identity / omni 的 trace。零帧窗口下 hold 对下游不成立(见 gate.py 的 hold_effective)、
+        # packet 为 None、identity 与 omni 根本没跑;此时若仍写原始 hold_pass,trace 会记一行
+        # identity_ms=0 / omni_ms=0 并让 omni_call_count +1 —— omni 错误率分母被稀释、
+        # skip_rate 偏低、p95_rtf_omni 被 0 拉低。
+        # 上面 HOLD_START / HOLD_EXPIRED 状态机用的 cur_hold 仍取原始 gate_timing.hold_pass
+        # —— 两个消费者本就该分开,同 gate.py 里 trigger.hold 与 timing.hold_pass 的分法。
+        # 对既有行为是恒等变换:改动前 packet is None 必然蕴含 hold_pass is False。
+        room_timing[f"gate_hold_{did}_pass"] = int(
+            gate_timing.hold_pass and gate_packet is not None
+        )
         # gate 真实评估的打分 → traces_device.gate_video_score / gate_audio_energy
         # 经 _merge_results 保留顶层"_"前缀,在 processor._publish_trace 复用。
         # on-demand bypass / 系统异常 fallback 路径不走这里,score 字段保持 NULL。

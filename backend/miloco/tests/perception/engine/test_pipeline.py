@@ -1868,3 +1868,56 @@ def test_display_falls_back_to_asia_shanghai_when_undetectable(
     ).strftime("%H:%M:%S")
     assert _fmt_clock(now_ms) == expected
     assert _fmt_time_window(now_ms, now_ms) == f"[{expected}-{expected}]"
+
+
+@pytest.mark.asyncio
+async def test_hold_trace_key_zero_when_gate_drops_frameless_window():
+    """零帧窗口被 gate 拦下时，trace 侧的 hold 标志必须为 0。
+
+    processor._publish_trace 用 (video_pass or audio_pass or hold_pass) 反推
+    gate_skipped，再据此决定建不建 identity / omni 的 trace。零帧 + 滞回期这一格里
+    packet 为 None、identity 与 omni 根本没跑；若 trace 仍写原始 hold_pass，这一轮会
+    凭空多一次 omni 调用记录（稀释 omni 错误率分母）、skip_rate 偏低、p95_rtf_omni 被
+    0 拉低、traces_device 留下一行读起来像"跑得飞快"的 identity_ms=0 / omni_ms=0。
+
+    状态机侧（HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED）用的仍是原始 hold_pass，
+    由 test_empty_window_guard.py::test_zero_frames_quiet_audio_in_hold_does_not_open
+    钉住 —— 两个字段消费者不同，必须分开。
+    """
+    frame = _solid(100, 100, 100)
+    rng = np.random.default_rng(7)
+    quiet = (rng.standard_normal(16000) * 5).astype(np.int16)  # 非空但不过能量闸
+
+    # 第一窗有画面变化 → 让 gate 记下 last_visual_pass_ts，进入滞回期
+    gate_prev_frames: dict = {}
+    gate_last_visual_pass_ts: dict = {}
+    moving = [_solid(0, 0, 0)] * 2 + [_solid(255, 255, 255)] * 4
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=MOCK_OMNI_RESPONSE,
+    ):
+        await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", moving, quiet)]),
+            {}, PerceptionConfig(),
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
+    assert gate_last_visual_pass_ts.get("cam-1") is not None, "前置：滞回期未建立"
+
+    # 第二窗零帧 + 安静音频 + 仍在滞回期
+    frameless = _make_snapshot("living", "cam-1", [], quiet)
+    result = await run_batch_pipeline(
+        BatchedSnapshot(snapshots=[frameless]),
+        {}, PerceptionConfig(),
+        gate_prev_frames=gate_prev_frames,
+        gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+    )
+
+    timing = result.rooms["living"].timing
+    assert timing["gate_hold_cam-1_pass"] == 0, (
+        "gate 没建包，trace 侧 hold 标志必须为 0，否则 processor 会误判 identity/omni 跑过"
+    )
+    assert result.rooms["living"].skipped is True
+    # 未使用的变量占位，避免 linter 抱怨
+    assert frame is not None

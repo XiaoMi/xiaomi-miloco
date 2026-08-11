@@ -1,4 +1,4 @@
-"""空输入窗口不得进入感知链路——两道闸各自钉住。
+"""空输入窗口不得进入感知链路——三道闸各自钉住。
 
 背景：视频轨在某窗内无数据（解码器等关键帧 / 缓冲区溢出清空 / 掉线重连）但音频轨有数据
 时，窗口靠音频通过 ``stream_buffer`` 封窗、``DeviceSnapshot.has_data`` 与引擎入口的
@@ -7,10 +7,21 @@
 放行成空 packet，编码层无帧不加 video 块 → 变成"纯文本问模型这个场景里有什么"，模型只能
 照着 schema 编。
 
-两道闸：
-- ``PerceptionEngine._drop_empty_snapshots``：剥音频后逐 snapshot 剔除，覆盖 realtime
-  与 on_demand 两个入口（后者跳过 gate，只能在这里挡）
-- ``run_gate``：无帧且无音频时不建 packet，hold 也不放行
+三道闸，两套判据：
+
+- ``PerceptionEngine._drop_empty_snapshots``（realtime 入口）：剥音频后逐 snapshot 剔除
+  「既无帧也无音频」的设备。判据留一手是有意的——零帧但有音频的窗口要留给 audio route
+- ``PerceptionEngine._drop_frameless_snapshots``（on_demand 入口）：判据更严，只看
+  ``has_video``。query 路径跳过 gate 且**没有 audio route**，零帧 snapshot 只能在这里挡
+- ``run_gate``：无帧时 hold 对下游不成立——音频过闸的走 audio route，音频没过闸的不建 packet
+
+两个引擎入口的判据故意不同，``test_realtime_keeps_what_query_drops`` 钉住这个差异，
+防后续有人图省事合并成一个函数。
+
+trace 侧还有一条相关钉子在 ``test_pipeline.py::test_hold_trace_key_zero_when_gate_drops_frameless_window``：
+gate 拦下零帧窗口时 ``gate_hold_{did}_pass`` 必须为 0，否则 processor 会误判 identity/omni
+跑过。它与本文件 ``test_zero_frames_quiet_audio_in_hold_does_not_open`` 成对——后者钉
+``timing.hold_pass`` 仍为 True（状态机要原始值），前者钉 trace 键取的是「有没有真拉起来」。
 """
 
 from __future__ import annotations
