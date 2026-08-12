@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # 在 manylinux2014 容器(glibc 2.17)里编 jemalloc, 产出可随项目分发的 libjemalloc.so.2。
+#
+# 为什么产物直接进 git, 而感知模型走 Release 附件: 两份 .so 合计约 1.4MB, 比模型小两个量级,
+# 且只跟着 jemalloc 大版本走、几年才动一次 —— 换成下载会给安装链路多加一条网络失败路径,
+# 省下的仓库体积不值这个代价。哪天它涨到几十 MB 或开始频繁更新, 再改走 Release 不迟。
 # 用法: ./build_jemalloc.sh x86_64
 #       ./build_jemalloc.sh aarch64        # 需先注册 binfmt, 见下方报错提示
 #       OUT_DIR=/tmp/x ./build_jemalloc.sh x86_64

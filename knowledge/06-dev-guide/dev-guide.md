@@ -135,6 +135,25 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 - **云主机 / Docker 常见坑**：容器里 `/etc/localtime` 往往是普通文件拷贝（非 symlink）且无 `/etc/timezone`，系统反查靠内容比对兜住；但云主机默认时区多为 `Etc/UTC`——解析结果是 UTC 时 backend 启动会打红旗 warning（没有家庭真住在 UTC），此时应优先给宿主 / 容器设置正确时区；确实无法修改宿主时再用 miloco 侧 `timezone` 配置（openclaw 侧的 `Current time` 另由其 `userTimezone` / 宿主回落决定，见上）。
 - `miloco-cli service start` 生成 supervisord.conf 时会把解析出的时区以 `TZ` + `MILOCO_TIMEZONE` 注入 backend 子进程环境（改配置后重启生效）。
 
+### 内存分配器（仅 Linux）
+
+`miloco-cli service start` 生成 supervisord.conf 时会尝试给 backend 预加载 jemalloc，往
+`environment=` 行里加 `LD_PRELOAD` 和 `MALLOC_CONF` 两个变量——glibc malloc 的 arena 碎片会让
+长跑 RSS 只涨不落，jemalloc 能把空闲页真正还给系统。找不到可用的 libjemalloc 时静默跳过，不影响启动。
+
+优先用系统装的那份（`apt install libjemalloc2`），都没有才回落到 miot 包里自带的。选中之前会真起一个
+子进程做加载验证，验证不过就换下一个候选，全不可用就什么都不注入。
+
+| 想做什么             | 怎么做                                                                |
+| -------------------- | --------------------------------------------------------------------- |
+| 永久关闭             | `miloco-cli config set safe_mode true`（该字段只被 CLI 读，后端不读） |
+| 本次临时切回 glibc   | `MILOCO_MALLOC=glibc miloco-cli service start`                        |
+| 指定某一份           | `MILOCO_MALLOC=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2`            |
+| 确认这次到底用没用上 | `grep LD_PRELOAD $MILOCO_HOME/supervisord.conf`（没这一行就是没注入） |
+
+`safe_mode` 的语义是「关掉可选的性能优化，用最保守的配置启动」，压过 `MILOCO_MALLOC` 的一切取值；
+后续新增的优化项也会纳入这个开关。
+
 ### 配置修改后是否需要重启
 
 大多数配置在服务启动时一次性读取，修改后需重启才能生效。包括：`server.*`（host/port/log_level）、`model.omni.*`、`directories.*`、`perception.engine.*` 等。
