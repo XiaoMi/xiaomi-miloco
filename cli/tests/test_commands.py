@@ -3037,9 +3037,10 @@ def test_supervisorctl_failure_hints_safe_mode(
 ):
     """supervisord 活着但程序没起来时也要给逃生开关。
 
-    启动失败一共四条出口，FATAL 和 health 超时那两条要求先走到 _wait_for_health，
-    而这两条在那之前就 exit 了。升级后第一次 restart 恰恰是配置里刚带上 LD_PRELOAD
-    的那一次，最可能撞上注入问题，反而拿不到开关。
+    启动失败一共五条出口（FATAL / health 超时 / supervisorctl start / supervisord
+    起不来 / supervisorctl restart）。FATAL 和 health 超时那两条要求先走到
+    _wait_for_health，而本用例覆盖的这两条在那之前就 exit 了。升级后第一次 restart
+    恰恰是配置里刚带上 LD_PRELOAD 的那一次，最可能撞上注入问题，反而拿不到开关。
     """
     import miloco_cli.commands.service as svc_mod
     from miloco_cli.config import set_value
@@ -3345,6 +3346,30 @@ def test_safe_mode_is_known_config_path():
     assert load_config()["safe_mode"] is False
 
 
+def test_config_set_alone_leaves_ld_preload_in_conf(
+    runner, isolated_config, malloc_probe
+):
+    """钉住逃生提示为什么必须给两条命令，而不是只给 config set。
+
+    提示只在启动失败后打出，此时后端不在跑，config set 顺带的那次重启判定 not
+    running、不触发，于是 conf 不会重新生成、LD_PRELOAD 原样还在，而命令本身返回
+    ok。这个前提哪天变了（config set 改成无条件重新生成 conf），这条会红——届时
+    提示里第二条命令才可以删。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert "LD_PRELOAD" in svc_mod._supervisor_conf().read_text()
+
+    result = runner.invoke(cli, ["config", "set", "safe_mode", "true"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["restart"] == {
+        "triggered": False,
+        "reason": "not running",
+    }
+    assert "LD_PRELOAD" in svc_mod._supervisor_conf().read_text()
+
+
 # ─── conf 原子写 + health 失败提示 ────────────────────────────────────────────
 
 
@@ -3460,6 +3485,8 @@ def test_health_failure_hints_safe_mode_when_injected(malloc_probe, capsys, fail
     # 只钉 "config set safe_mode true" 不够——写成 `miloco config set` 也能过，
     # 而本仓库只注册了 miloco-cli 这一个 console script。
     assert "miloco-cli config set safe_mode true" in err
+    # 第二条命令同样要给，理由见 test_config_set_alone_leaves_ld_preload_in_conf。
+    assert "miloco-cli service start" in err
     # 不下结论：启动失败原因很多，不能说"是 jemalloc 导致的"
     assert "导致" not in err
 

@@ -759,11 +759,16 @@ def _echo_jemalloc_hint_if_injected() -> None:
 
     措辞上**不下结论**——启动失败的原因很多（端口占用、依赖未就绪、配置错），
     "摘掉后成功"也推不出"是 jemalloc 的错"，所以只报告、只给开关，判断留给看日志的人。
+
+    两条命令都要给：这行只在启动失败后打出，此时后端不在跑，``config set`` 顺带的那次
+    重启不会触发（``_restart_if_running`` 判定 not running），只写配置的话 conf 不会
+    重新生成、``LD_PRELOAD`` 那行原样还在，而命令本身返回 ok，用户会以为已经生效。
     """
     if so_path := _injected_jemalloc_from_conf():
         click.echo(
             f"提示: 本次启用了 jemalloc ({so_path})。如果反复起不来，可以先排除它：\n"
-            "      miloco-cli config set safe_mode true",
+            "      miloco-cli config set safe_mode true\n"
+            "      miloco-cli service start",
             err=True,
         )
 
@@ -955,8 +960,10 @@ def service_start(foreground, pretty):
             _supervisorctl("update")
             result = _supervisorctl("start", _PROGRAM_NAME)
             if result.returncode != 0:
-                # supervisord 活着但程序没起来。启动失败一共四条出口，逃生开关每条都要挂：
-                # FATAL 和 health 超时那两条要求先走到 _wait_for_health，这条在那之前就 exit。
+                # supervisord 活着但程序没起来。启动失败一共五条出口，逃生开关每条都要挂：
+                # ① FATAL（_wait_for_health 内）② health 超时（同上）③ 本条 supervisorctl
+                # start ④ supervisord 自己起不来 ⑤ service restart 的 supervisorctl restart。
+                # ①② 要求先走到 _wait_for_health，本条在那之前就 exit。
                 _echo_jemalloc_hint_if_injected()
                 print_result(
                     {"error": f"supervisorctl start failed: {result.stdout.strip()}"},
