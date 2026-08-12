@@ -30,6 +30,13 @@ def _log_dir() -> Path:
     return miloco_home() / "log"
 
 
+def _current_umask() -> int:
+    """读当前 umask。系统只给了设置接口，读法是设一次再设回去。"""
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask
+
+
 def _supervisor_conf() -> Path:
     return miloco_home() / "supervisord.conf"
 
@@ -783,9 +790,10 @@ def _supervisor_environment(server_cmd: str) -> str:
 
     这里**不**统一过字符闸：分配器那两个值在各自来源处已经挡过（在那里挡才能换下一个候选
     或换回默认旋钮，到这一步只剩"丢掉"一种处置）；而 ``MILOCO_HOME`` / ``TZ`` 挡了也没用——
-    这份 conf 里 ``logfile`` / ``pidfile`` / ``file`` / ``serverurl`` / ``stdout_logfile``
-    / ``command`` 六处同样从 ``$MILOCO_HOME`` 推出来，只挡这一行等于没挡，反而让人以为
-    已经处理了。``$MILOCO_HOME`` 含 ``%`` 时 supervisord 起不来是它的既有限制。
+    同一份 conf 里还有别的行从 ``$MILOCO_HOME`` 推出来，只挡这一行等于没挡，反而让人以为
+    整份 conf 都被兜住了。``command`` 又是一个独立来源（``config.json`` 的
+    ``server.python_bin``），与 ``$MILOCO_HOME`` 无关。这些值含 ``%`` 时 supervisord 起不来，
+    都是它的既有限制，排查时按 conf 里实际那几行去看、别只查 ``$MILOCO_HOME``。
     """
     pairs = [
         ("MILOCO_SUPERVISED", "1"),
@@ -841,6 +849,10 @@ environment={environment}
     # 原子写：先截断再写的话，进程在中间被杀或磁盘满就会留下空/半截的 conf，supervisord 直接
     # 起不来——比 jemalloc 本身危险得多。
     atomic_write_text(sup_conf_path, conf)
+    # 原子写建的临时文件固定 0600，os.replace 换 inode 会把这个权限带到目标文件上，等于顺带
+    # 收紧了这份 conf 的权限。这里恢复成 write_text 时代的按 umask 取值：conf 不含密钥，而开发
+    # 指南让运维 grep 它自查有没有注入，非属主读不到会拿 Permission denied，正好被读成"没注入"。
+    sup_conf_path.chmod(0o644 & ~_current_umask())
 
 
 def _supervisord_is_running() -> bool:
@@ -960,10 +972,9 @@ def service_start(foreground, pretty):
             _supervisorctl("update")
             result = _supervisorctl("start", _PROGRAM_NAME)
             if result.returncode != 0:
-                # supervisord 活着但程序没起来。启动失败一共五条出口，逃生开关每条都要挂：
-                # ① FATAL（_wait_for_health 内）② health 超时（同上）③ 本条 supervisorctl
-                # start ④ supervisord 自己起不来 ⑤ service restart 的 supervisorctl restart。
-                # ①② 要求先走到 _wait_for_health，本条在那之前就 exit。
+                # 每条启动失败的出口都要挂逃生开关，这条在走到 _wait_for_health 之前就 exit，
+                # 所以那里的两条挂点管不到它。挂点的清单以测试为准（grep
+                # _echo_jemalloc_hint_if_injected 的用例），别在注释里数。
                 _echo_jemalloc_hint_if_injected()
                 print_result(
                     {"error": f"supervisorctl start failed: {result.stdout.strip()}"},

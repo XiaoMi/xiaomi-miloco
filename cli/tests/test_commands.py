@@ -2636,7 +2636,7 @@ def test_malloc_conf_with_hostile_char_falls_back_to_default(
     assert "MALLOC_CONF 含有会写坏" in capsys.readouterr().err
 
 
-def test_malloc_candidates_dedupe_symlinks(malloc_probe, tmp_path):
+def test_malloc_candidates_dedupe_symlinks(malloc_probe, monkeypatch, tmp_path):
     """候选按 resolve() 去重：.so 是指向 .so.2 的软链时只算一个候选。
 
     真机上这一步能把 8 个名义候选（4 目录 × 2 文件名）压到 1 次探针：
@@ -2648,7 +2648,7 @@ def test_malloc_candidates_dedupe_symlinks(malloc_probe, tmp_path):
     (lib_dir / "libjemalloc.so").symlink_to(lib_dir / "libjemalloc.so.2")
     alias_dir = tmp_path / "usr-lib64"
     alias_dir.symlink_to(lib_dir)  # 整个目录也是软链，像 Arch 的 /usr/lib64
-    svc_mod._SYSTEM_LIB_DIRS = (alias_dir, lib_dir)
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (alias_dir, lib_dir))
 
     got = list(svc_mod._jemalloc_candidates("/x/python"))
     assert len(got) == 1, got
@@ -2669,14 +2669,14 @@ def test_malloc_candidates_are_closed_set(malloc_probe):
     assert got == [lib_dir / "libjemalloc.so.2"]
 
 
-def test_malloc_separate_lib64_yields_two_candidates(malloc_probe, tmp_path):
+def test_malloc_separate_lib64_yields_two_candidates(malloc_probe, monkeypatch, tmp_path):
     """lib/lib64 真分离（不是软链）时两份都是候选，且 lib64 那份先探（RHEL 系）。"""
     import miloco_cli.commands.service as svc_mod
 
     lib64 = tmp_path / "real-lib64"
     lib64.mkdir()
     (lib64 / "libjemalloc.so.2").write_bytes(b"\x7fELF-64")
-    svc_mod._SYSTEM_LIB_DIRS = (lib64, malloc_probe["lib_dir"])
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (lib64, malloc_probe["lib_dir"]))
 
     got = [p for p, _ in svc_mod._jemalloc_candidates("/x/python")]
     assert got == [lib64 / "libjemalloc.so.2", malloc_probe["so"]]
@@ -2696,7 +2696,7 @@ def test_malloc_system_preferred_over_bundled(malloc_probe, tmp_path):
 
 
 def test_malloc_falls_back_to_bundled_when_system_probe_fails(
-    malloc_probe, tmp_path, capsys
+    malloc_probe, monkeypatch, tmp_path, capsys
 ):
     """系统那份探针不过时才落到自带那份。"""
     import subprocess as sp
@@ -2719,14 +2719,16 @@ def test_malloc_falls_back_to_bundled_when_system_probe_fails(
             return sp.CompletedProcess(cmd, 0, _probe_stdout(), "")
         return sp.CompletedProcess(cmd, 0, f"{bundled}\n", "")
 
-    svc_mod.subprocess.run = fake_run
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
     pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
     assert pairs["LD_PRELOAD"] == str(bundled)
     assert "不可用" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("failure", ["import_error", "not_a_file", "timeout", "oserror"])
-def test_malloc_bundled_lookup_failures_yield_none(malloc_probe, tmp_path, failure):
+def test_malloc_bundled_lookup_failures_yield_none(
+    malloc_probe, monkeypatch, tmp_path, failure
+):
     """问自带那份路径的各种失败都退回 None，不让候选链带着垃圾路径往下走。"""
     import subprocess as sp
 
@@ -2741,7 +2743,7 @@ def test_malloc_bundled_lookup_failures_yield_none(malloc_probe, tmp_path, failu
             raise sp.TimeoutExpired(cmd, 3)
         raise OSError("解释器起不来")
 
-    svc_mod.subprocess.run = fake_run
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
     assert svc_mod._bundled_jemalloc("/x/python") is None
 
 
@@ -3037,10 +3039,9 @@ def test_supervisorctl_failure_hints_safe_mode(
 ):
     """supervisord 活着但程序没起来时也要给逃生开关。
 
-    启动失败一共五条出口（FATAL / health 超时 / supervisorctl start / supervisord
-    起不来 / supervisorctl restart）。FATAL 和 health 超时那两条要求先走到
-    _wait_for_health，而本用例覆盖的这两条在那之前就 exit 了。升级后第一次 restart
-    恰恰是配置里刚带上 LD_PRELOAD 的那一次，最可能撞上注入问题，反而拿不到开关。
+    本用例覆盖的两条在走到 _wait_for_health 之前就 exit，所以那里的挂点管不到它们。
+    升级后第一次 restart 恰恰是配置里刚带上 LD_PRELOAD 的那一次，最可能撞上注入问题，
+    反而拿不到开关。
     """
     import miloco_cli.commands.service as svc_mod
     from miloco_cli.config import set_value
@@ -3158,7 +3159,7 @@ def test_malloc_system_budget_exhausted_still_tries_bundled(
             return sp.CompletedProcess(cmd, 0, "not-taken-over\n", "")
         return sp.CompletedProcess(cmd, 0, f"{bundled}\n", "")
 
-    svc_mod.subprocess.run = fake_run
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
     svc_mod._resolve_malloc_env("/x/python")
 
     probed = malloc_probe["probe_calls"]
@@ -3198,7 +3199,7 @@ def test_malloc_probe_timeout_shrinks_to_remaining_budget(
             return sp.CompletedProcess(cmd, 0, "not-taken-over\n", "")
         return sp.CompletedProcess(cmd, 1, "", "")
 
-    svc_mod.subprocess.run = fake_run
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
     svc_mod._resolve_malloc_env("/x/python")
 
     assert timeouts[0] == 3  # 预算充足时用满 3s
@@ -3231,7 +3232,7 @@ def test_malloc_no_new_probe_below_min_slice(malloc_probe, monkeypatch, tmp_path
             return sp.CompletedProcess(cmd, 0, "not-taken-over\n", "")
         return sp.CompletedProcess(cmd, 1, "", "")
 
-    svc_mod.subprocess.run = fake_run
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
     svc_mod._resolve_malloc_env("/x/python")
     assert n["probes"] == 1
 
@@ -3391,6 +3392,22 @@ def test_supervisor_conf_written_atomically(malloc_probe, monkeypatch):
     tmp_src, dst = replaced[0]
     assert dst == str(svc_mod._supervisor_conf())
     assert tmp_src.endswith(".tmp") and tmp_src != dst
+
+
+def test_supervisor_conf_stays_readable_after_atomic_write(malloc_probe):
+    """conf 权限不能被原子写顺带收紧成属主可读。
+
+    原子写建的临时文件固定 0600，os.replace 换 inode 会把它带到目标文件上。开发指南
+    让运维 grep 这份 conf 自查有没有注入，非属主读不到会拿 Permission denied，正好被
+    读成"没这一行 = 没注入"，结论反了。
+    """
+    import stat
+
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    mode = stat.S_IMODE(svc_mod._supervisor_conf().stat().st_mode)
+    assert mode == 0o644 & ~svc_mod._current_umask()
 
 
 def test_supervisor_conf_survives_failed_write(malloc_probe, monkeypatch):
