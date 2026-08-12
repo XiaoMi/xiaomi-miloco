@@ -292,17 +292,16 @@ _ARCH_LIB_DIR_NAMES = {
 
 _SYSTEM_LIB_DIRS = (Path("/usr/lib64"), Path("/usr/local/lib"), Path("/usr/lib"))
 
-# 实测(x86_64 开发机)：探针子进程 18ms、问自带那份的路径 28ms，3s 是百倍余量。
-# 系统候选共用一份预算、自带那份单独一份：共用一条总预算的话，前面一两个卡住的系统库就能把
-# 预算吃光，让"系统没装 jemalloc 时唯一可用的那份"永远探不到。
+# 探针和问路径实测都在几十毫秒量级，秒级超时留了很大余量。系统候选共用一份预算、自带那份单独
+# 一份：共用一条总预算的话，前面卡住的系统库能把预算吃光，让自带那份永远探不到。
 _PROBE_TIMEOUT_S = 3
 _BUNDLED_LOOKUP_TIMEOUT_S = 3
 _SYSTEM_PROBE_BUDGET_S = 5
 _MIN_PROBE_SLICE_S = 0.5
 
 # 在 backend 解释器里跑，读 mallctl 实证 jemalloc 是否真接管了 malloc、旋钮是否真生效。
-# 契约：成功打 5 行 ver=/page=/bg=/dirty=/muzzy=，否则单行 not-taken-over 或 probe-crashed:。
-# 业务逻辑整个包在 probe() 里并兜住异常，是为了不让自己的 traceback 混进 stderr 判据。
+# 输出契约（由测试钉住）：成功逐行打 key=value，失败打单行 not-taken-over / probe-crashed:。
+# 逻辑整个包在 probe() 里并兜住异常，免得自己的 traceback 混进输出。
 _PROBE_SCRIPT = '''\
 def probe():
     import ctypes
@@ -403,15 +402,12 @@ def _jemalloc_candidates(
 ) -> Iterator[tuple[Path, bool]]:
     """惰性产出候选 ``(.so 路径, 是否自带那份)``，用哪个由调用方探针后决定。
 
-    **系统那份优先**：真机三方对比里"SBC 最优 = jemalloc"这个结论用的就是 apt 那份，让自带那份
-    抢在前面等于把结论建立在一个没被测过的库上；次要理由是发行版维护 + 安全更新 + 不增加平台
-    包体积。**不是**"编译参数更贴合内核"——查过四家发行版的打包配方，aarch64 一律按 64K 页编
-    （``--with-lg-page=16``），自带那份按同样参数编，两者粒度一致。
+    系统那份优先：真机对比得出"SBC 最优 = jemalloc"用的就是 apt 那份，让自带那份抢先等于把
+    结论建立在没被测过的库上。理由**不是**"编译参数更贴合内核"——各发行版 aarch64 一律按
+    64K 页编，与自带那份一致。
 
-    按 ``resolve()`` 去重：Arch 上 ``/usr/lib64`` 是指向 ``lib`` 的符号链接、``.so`` 是指向
-    ``.so.2`` 的符号链接，四条路径会解析到同一个文件，不去重就要白跑探针、白花预算。
-
-    自带那份排最后且惰性：只有前面全都没通过，才起子进程问它的路径。
+    按 ``resolve()`` 去重（同一个文件常能从多条软链路径走到），自带那份排最后且惰性：只有
+    前面全没通过才起子进程问它的路径。
     """
     seen: set[Path] = set()
     for lib_dir in _system_lib_dirs():
@@ -432,12 +428,11 @@ def _jemalloc_candidates(
 def _preload_value(so_path: Path) -> str:
     """``LD_PRELOAD`` 的值：我们的放最前（要它接管 malloc），环境里原有的追加在后。
 
-    纯拼值不告警——探针对每个候选都会调一次，在这里 echo 会把同一句重复打 N 遍。原有那段
-    被丢掉的提醒由 :func:`_warn_on_dropped_preload` 在真要注入时打一次。
+    纯拼值不告警——探针对每个候选都调一次，在这里 echo 会把同一句重复打好几遍；丢掉原有那段
+    的提醒交给 :func:`_warn_on_dropped_preload`，真要注入时打一次。
 
-    原有那段含危险字符时只是**不追加**，不影响我们这一份：它写进 conf 会让 supervisord
-    拒绝加载，但那是别人的库，没道理连累 jemalloc。``so_path`` 自身的字符检查在
-    :func:`_probe_jemalloc` 入口，那里能顺着候选链换下一个。
+    原有那段含危险字符时只是不追加，不连累我们这一份。``so_path`` 自身的字符检查在
+    :func:`_probe_jemalloc` 入口，那里能换下一个候选。
     """
     existing = os.environ.get("LD_PRELOAD", "").strip()
     if existing and _is_conf_safe(existing):
@@ -481,22 +476,11 @@ def _probe_jemalloc(
 ) -> _ProbeResult:
     """真拿这套 LD_PRELOAD + MALLOC_CONF 起一个进程，读 mallctl 实证接管情况。
 
-    **判据只有一条：jemalloc 有没有接管 malloc**，由 stdout 回答。stderr 一概不看——
-    接管成功后它打什么都不改变"能用"这个事实（不认识的旋钮、qemu 下 MADV_DONTNEED 退化成
-    memset、环境里别人的 LD_PRELOAD 条目加载失败，全属此类）；而接管失败的每一种（页大小
-    不符、坏 .so、根本不是 jemalloc）都会让 stdout 拿不到 ``ver=``。拿 stderr 做判据要维护
-    一张永远补不完的良性输出白名单，漏一条的后果是库在正常工作却被判死。
+    判据只有一条：stdout 里有没有 ``ver=``。stderr 一概不看——接管成功后它打什么都不改变
+    "能用"，拿它做判据就得维护一张补不完的良性输出白名单。
 
-    只报事实，判定和告警在 :func:`_pick_jemalloc` / :func:`_resolve_malloc_env`。
-
-    用 **backend 的解释器**而不是 CLI 自己的：两个解释器的 libc 版本、链接方式都可能不同，
-    "CLI 能被接管"推不出"backend 能被接管"，而后者才是要保护的目标。
-
-    ``-E -S`` 屏蔽掉环境和 site 目录：sitecustomize / .pth 里的东西可能自己就崩掉或改写
-    分配器，那样测的就不是这份 .so 了。
-
-    **它不保证 backend 里一定没问题**——探针只加载 libc，不加载 libav / onnxruntime；
-    只在特定分配模式下才触发的问题只能靠真机跑出来。
+    用 backend 的解释器（"CLI 能被接管"推不出"backend 能被接管"），``-E -S`` 屏掉环境和
+    site 目录免得 sitecustomize 自己改了分配器。只报事实，判定在调用方。
     """
     # 写不进 supervisord.conf 的路径等于用不了，和加载失败同一个出口：候选链换下一个，
     # 绝对路径那条也会照常打出真实原因。放在探针入口，所有来源（候选链 / MILOCO_MALLOC /
@@ -596,12 +580,8 @@ def _malloc_env_pairs(
 ) -> list[tuple[str, str]]:
     """组装要注入的环境变量，并把读回的实况打出来。
 
-    旋钮全部原样注入，不因为"这份库不认识某个旋钮"做任何加工：jemalloc 逐个旋钮独立解析，
-    被拒的那个不影响其它旋钮生效，它自己会在 backend 日志里打 ``Invalid conf pair``。
-
-    读回值直接照打，不替它分类。``dirty/muzzy_decay_ms=None/None`` 摆在那儿就是"这份库
-    没有这两个旋钮"，再写几段文案去解释它属于哪一态，是给一个锦上添花的优化项加不必要的
-    判断分支。
+    旋钮原样注入不做加工：jemalloc 逐个独立解析，被拒的那个不影响其它旋钮，它自己会打
+    ``Invalid conf pair``。读回值也原样打、不替用户分类——``None/None`` 摆在那儿就是事实。
     """
     click.echo(
         f"分配器: jemalloc {probe.version} ({so_path}) page={probe.page}  "
@@ -626,18 +606,11 @@ def _safe_mode_enabled() -> bool:
 def _is_conf_safe(value: str) -> bool:
     """值能不能放进 ``environment=`` 行。
 
-    三种字符都会让 supervisord 拒绝加载整份配置、守护进程起不来（逐个实测过）：
+    ``_CONF_HOSTILE_CHARS`` 里的字符会让 supervisord 拒绝加载整份配置、守护进程起不来
+    （逐个实测过）：``"`` 提前闭合引号、换行截断、落单的 ``%`` 撞上百分号展开。``%%`` 转义
+    的层数各段不同，不值得为主动构造才会出现的路径引入按段转义。
 
-    - ``"`` —— 提前闭合包住值的引号，报 ``Unexpected end of key/value pairs``
-    - 换行 —— 报 ``No closing quotation``
-    - ``%`` —— supervisord 对每个 option 值做一次百分号展开，落单的 ``%`` 报
-      ``badly formatted``。理论上写成 ``%%`` 能转义，但不同段的层数还不一样
-      （``[supervisord]`` 要 ``%%``、``[program]`` 的 ``stdout_logfile`` 要 ``%%%%``），
-      而含 ``%`` 的 ``.so`` 路径要用户主动构造才会出现——不值得为它引入按段转义。
-
-    **逗号不在此列**：值用双引号包住后 supervisord 能正确解析引号内的逗号，实测值不会被
-    拆坏。这一条不是可有可无的保守——``MALLOC_CONF`` 的合法值本身就是逗号分隔的，把逗号
-    拒掉会让默认旋钮串一个都注入不进去。
+    逗号不在此列：``MALLOC_CONF`` 的合法值本身逗号分隔，拒掉它默认旋钮就一个都注入不进去。
     """
     return not set(value) & _CONF_HOSTILE_CHARS
 
@@ -645,21 +618,12 @@ def _is_conf_safe(value: str) -> bool:
 def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, str]]:
     """决定给 backend 注入哪套分配器环境变量（``LD_PRELOAD`` / ``MALLOC_CONF``）。
 
-    判定顺序：非 Linux → 安全模式 → ``MILOCO_MALLOC`` → 候选链。
+    判定顺序：非 Linux（``LD_PRELOAD`` 本就无效）→ 安全模式 → ``MILOCO_MALLOC`` → 候选链。
 
-    ``MILOCO_MALLOC`` 的取值语义：
+    ``MILOCO_MALLOC`` 取值：未设置 / ``jemalloc`` 走候选链（找不到时静默，这只是优化项）；
+    ``glibc`` 什么都不注入；``.so`` 绝对路径只试这一个；其它取值告警后不注入。
 
-    - 未设置 / ``jemalloc`` —— 走候选链（系统那份优先，自带那份兜底）。区别只在找不到时：
-      未设置是静默（这只是优化项，没生效不该打扰人），显式写了才告警
-    - ``glibc`` —— 什么都不注入，按 glibc 默认起
-    - ``.so`` 的绝对路径 —— 只试这一个，不进候选链
-    - 其它取值 —— 告警并按不注入处理
-
-    任何一步不成都返回空列表，也就是什么都不注入、按 glibc 默认起 —— backend 能起来的
-    优先级高于换分配器。
-
-    macOS 上 ``LD_PRELOAD`` 本就无效（该是 ``DYLD_INSERT_LIBRARIES`` 且受 SIP 限制），
-    所以非 Linux 在最前面直接返回。
+    任何一步不成都返回空列表，按 glibc 默认起——backend 能起来的优先级高于换分配器。
     """
     if sys.platform != "linux":
         return []
@@ -746,9 +710,8 @@ def _malloc_env_or_empty(backend_python: str | None) -> list[tuple[str, str]]:
 def _injected_jemalloc_from_conf() -> str | None:
     """从已生成的 supervisord.conf 读回本次注入的 ``LD_PRELOAD`` 首段；没注入返回 None。
 
-    让提示自己去 conf 取事实，而不是把路径一层层传下来：conf 就是 backend 实际在用的那份配置，
-    和用户排查时 ``grep LD_PRELOAD supervisord.conf`` 看的是同一个来源；安全模式或候选链全灭时
-    conf 里本来就没这一行，"仅当真注入了才提示"也就不需要额外判断。
+    去 conf 取事实而不是把路径一层层传下来：conf 是 backend 实际在用的那份，与用户排查时
+    grep 的是同一个来源；没注入时这一行本来就不存在，不需要额外判断。
     """
     import re
 
@@ -764,12 +727,10 @@ def _injected_jemalloc_from_conf() -> str | None:
 def _echo_jemalloc_hint_if_injected() -> None:
     """启动失败时提示可以先排除 jemalloc。
 
-    措辞上**不下结论**——启动失败的原因很多（端口占用、依赖未就绪、配置错），
-    "摘掉后成功"也推不出"是 jemalloc 的错"，所以只报告、只给开关，判断留给看日志的人。
+    不下结论：启动失败原因很多，"摘掉后成功"推不出"是 jemalloc 的错"，只报告、只给开关。
 
-    两条命令都要给：这行只在启动失败后打出，此时后端不在跑，``config set`` 顺带的那次
-    重启不会触发（``_restart_if_running`` 判定 not running），只写配置的话 conf 不会
-    重新生成、``LD_PRELOAD`` 那行原样还在，而命令本身返回 ok，用户会以为已经生效。
+    两条命令都要给：此时后端不在跑，``config set`` 顺带的重启不会触发，只写配置的话 conf
+    不会重新生成、``LD_PRELOAD`` 还在，而命令返回 ok，用户会以为已经生效。
     """
     if so_path := _injected_jemalloc_from_conf():
         click.echo(
@@ -788,12 +749,10 @@ def _supervisor_environment(server_cmd: str) -> str:
 
     值一律带双引号：这一行按逗号分隔，``MALLOC_CONF`` 里的逗号不加引号会被当成分隔符拆开。
 
-    这里**不**统一过字符闸：分配器那两个值在各自来源处已经挡过（在那里挡才能换下一个候选
-    或换回默认旋钮，到这一步只剩"丢掉"一种处置）；而 ``MILOCO_HOME`` / ``TZ`` 挡了也没用——
-    同一份 conf 里还有别的行从 ``$MILOCO_HOME`` 推出来，只挡这一行等于没挡，反而让人以为
-    整份 conf 都被兜住了。``command`` 又是一个独立来源（``config.json`` 的
-    ``server.python_bin``），与 ``$MILOCO_HOME`` 无关。这些值含 ``%`` 时 supervisord 起不来，
-    都是它的既有限制，排查时按 conf 里实际那几行去看、别只查 ``$MILOCO_HOME``。
+    这里不统一过字符闸：分配器那两个值在各自来源处挡过了（在那里挡才能换候选或换回默认旋钮）；
+    ``MILOCO_HOME`` / ``TZ`` 挡了也没用，同一份 conf 里还有别的行从同一个家目录推出来。
+    ``command`` 是另一个独立来源（``config.json`` 的 ``server.python_bin``）。这些值含 ``%``
+    时 supervisord 起不来是它的既有限制，排查按 conf 里实际那几行看。
     """
     pairs = [
         ("MILOCO_SUPERVISED", "1"),
