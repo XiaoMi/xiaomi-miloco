@@ -43,6 +43,14 @@ def config_file() -> Path:
 # 点号路径 → (python 类型, 默认值, 中文 description)
 _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     "debug": (bool, False, "是否启用调试模式"),
+    "safe_mode": (
+        bool,
+        False,
+        "安全模式：关闭可选的性能优化，用最保守的配置启动。"
+        "当前仅控制 Linux 下的 jemalloc 内存分配器预加载"
+        "（非 Linux 本就不预加载，开了没有实际变化）；后续新增的优化项也会纳入本开关。"
+        "怀疑优化项导致启动失败或崩溃时打开；重启生效",
+    ),
     "timezone": (
         str,
         "",
@@ -173,18 +181,19 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
 # ─── 基础读写 ────────────────────────────────────────────────────────────────
 
 
-def atomic_write(path: Path, data: dict) -> None:
-    """原子写：临时文件 + fsync + ``os.replace`` + 目录 fsync。
+def atomic_write_text(path: Path, text: str) -> None:
+    """原子写文本：临时文件 + fsync + ``os.replace`` + 目录 fsync。
 
     fsync 数据页与目录项后再 rename，掉电也不会留下改了名却没落盘的空/半文件
     （与 backend ``home_profile/store.py::_atomic_write_text`` 同款持久化保证）。
+
+    除 ``config.json`` 外，``supervisord.conf`` 也走这里：它被写坏 supervisord 就起不来。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -199,6 +208,11 @@ def atomic_write(path: Path, data: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def atomic_write(path: Path, data: dict) -> None:
+    """原子写 JSON。"""
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def _read_raw() -> dict[str, Any]:
