@@ -221,9 +221,15 @@ echo "$FILE_INFO" | grep -q "$([ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || ech
   echo "产物架构不符: $FILE_INFO" >&2
   exit 1
 }
-if objdump -p "$BUILT_SO" | grep NEEDED | grep -qvE "libc\.so|libm\.so|libdl\.so|libpthread\.so|ld-linux"; then
+# 先把依赖列表取到变量再判内容: 管道放在 if 条件位上会让 set -e 失效, objdump 缺失(rc=127)
+# 时条件为假、直接跳过检查 —— 一道防供应链问题的闸静默放行, 而旁边的架构检查会明确报错退出。
+NEEDED="$(objdump -p "$BUILT_SO" | grep NEEDED)" || {
+  echo "读不到产物的动态依赖(objdump 缺失或输出格式变了), 无法校验, 中止。" >&2
+  exit 1
+}
+if grep -qvE "libc\.so|libm\.so|libdl\.so|libpthread\.so|ld-linux" <<<"$NEEDED"; then
   echo "产物有预期外的动态依赖:" >&2
-  objdump -p "$BUILT_SO" | grep NEEDED >&2
+  echo "$NEEDED" >&2
   exit 1
 fi
 

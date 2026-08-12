@@ -2930,6 +2930,26 @@ def test_malloc_tolerates_missing_version_and_page(
     assert probe.page == expect_page
 
 
+def test_malloc_dropped_preload_warns_once_not_per_candidate(
+    malloc_probe, monkeypatch, capsys, tmp_path
+):
+    """原有 LD_PRELOAD 被丢掉的提醒只打一次，不随候选数量翻倍。
+
+    值拼装在每个候选的探针里都会调一次，把 echo 放在那里会让同一句重复 N+1 遍，
+    中间还夹着候选失败的告警，读起来像几个不同的问题。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    lib_b = tmp_path / "lib-b"
+    lib_b.mkdir()
+    (lib_b / "libjemalloc.so.2").write_bytes(b"\x7fELF")
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (malloc_probe["so"].parent, lib_b))
+    monkeypatch.setenv("LD_PRELOAD", "/opt/vendor/lib%x.so")
+
+    svc_mod._resolve_malloc_env("/x/python")
+    assert capsys.readouterr().err.count("环境里已有的 LD_PRELOAD") == 1
+
+
 def test_malloc_ld_preload_appends_not_overwrites(malloc_probe, monkeypatch):
     """环境里已有 LD_PRELOAD 时拼成 <我们的>:<原有>，我们的在最前（要它接管 malloc）。
 

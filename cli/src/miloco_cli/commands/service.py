@@ -417,10 +417,21 @@ def _jemalloc_candidates(
 def _preload_value(so_path: Path) -> str:
     """``LD_PRELOAD`` 的值：我们的放最前（要它接管 malloc），环境里原有的追加在后。
 
-    环境里原有的那段含危险字符时只是**不追加**，不影响我们这一份——它写进 conf 会让
-    supervisord 拒绝加载，但那是别人的库，没道理连累 jemalloc。``so_path`` 自身的字符
-    检查在 :func:`_probe_jemalloc` 入口，那里能顺着候选链换下一个。
+    纯拼值不告警——探针对每个候选都会调一次，在这里 echo 会把同一句重复打 N 遍。原有那段
+    被丢掉的提醒由 :func:`_warn_on_dropped_preload` 在真要注入时打一次。
+
+    原有那段含危险字符时只是**不追加**，不影响我们这一份：它写进 conf 会让 supervisord
+    拒绝加载，但那是别人的库，没道理连累 jemalloc。``so_path`` 自身的字符检查在
+    :func:`_probe_jemalloc` 入口，那里能顺着候选链换下一个。
     """
+    existing = os.environ.get("LD_PRELOAD", "").strip()
+    if existing and _is_conf_safe(existing):
+        return f"{so_path}:{existing}"
+    return str(so_path)
+
+
+def _warn_on_dropped_preload() -> None:
+    """原有 ``LD_PRELOAD`` 因为含危险字符没被追加时，提醒一次。"""
     existing = os.environ.get("LD_PRELOAD", "").strip()
     if existing and not _is_conf_safe(existing):
         click.echo(
@@ -428,8 +439,6 @@ def _preload_value(so_path: Path) -> str:
             "supervisord 拒绝加载配置，本次只预加载 jemalloc、不追加它",
             err=True,
         )
-        existing = ""
-    return f"{so_path}:{existing}" if existing else str(so_path)
 
 
 def _stderr_tail(stderr: str, limit: int = 200) -> str:
@@ -468,8 +477,8 @@ def _probe_jemalloc(
     用 **backend 的解释器**而不是 CLI 自己的：两个解释器的 libc 版本、链接方式都可能不同，
     "CLI 能被接管"推不出"backend 能被接管"，而后者才是要保护的目标。
 
-    ``-E -S`` 是必需的：判据含"stderr 有没有非预期内容"，``PYTHONWARNINGS`` 的非法值和
-    sitecustomize / .pth 打的 warning 会把好的 .so 判成坏的。
+    ``-E -S`` 屏蔽掉环境和 site 目录：sitecustomize / .pth 里的东西可能自己就崩掉或改写
+    分配器，那样测的就不是这份 .so 了。
 
     **它不保证 backend 里一定没问题**——探针只加载 libc，不加载 libav / onnxruntime；
     只在特定分配模式下才触发的问题只能靠真机跑出来。
@@ -501,15 +510,22 @@ def _probe_jemalloc(
 
     # 被信号打死时 returncode 为负（-signal），正常退出非 0 则是进程自己的退出码。
     if result.returncode < 0:
-        return _ProbeResult(fatal=f"探针被信号 {-result.returncode} 打死")
+        return _ProbeResult(
+            fatal=f"探针被信号 {-result.returncode} 打死{_stderr_tail(result.stderr)}"
+        )
     if result.returncode != 0:
-        return _ProbeResult(fatal=f"探针以退出码 {result.returncode} 结束")
+        return _ProbeResult(
+            fatal=f"探针以退出码 {result.returncode} 结束{_stderr_tail(result.stderr)}"
+        )
 
     stdout = result.stdout.strip()
     if stdout == "not-taken-over":
         # ld.so 对加载不了的预加载库是"打一行 ERROR 然后忽略、程序照常跑"，退出码仍是 0，
         # 所以这条静默降级只有靠 mallctl 符号取不到才抓得住。
-        return _ProbeResult(fatal="jemalloc 没有接管 malloc（预加载被忽略，或这不是 jemalloc）")
+        return _ProbeResult(
+            fatal="jemalloc 没有接管 malloc（预加载被忽略，或这不是 jemalloc）"
+            + _stderr_tail(result.stderr)
+        )
     if stdout.startswith("probe-crashed:"):
         return _ProbeResult(fatal=f"探针自身异常：{stdout}")
 
@@ -577,6 +593,7 @@ def _malloc_env_pairs(
         f"dirty/muzzy_decay_ms={probe.dirty_decay_ms}/{probe.muzzy_decay_ms}",
         err=True,
     )
+    _warn_on_dropped_preload()
     return [("LD_PRELOAD", _preload_value(so_path)), ("MALLOC_CONF", malloc_conf)]
 
 
