@@ -617,14 +617,16 @@ def _safe_mode_enabled() -> bool:
 
 
 def _is_conf_safe(value: str) -> bool:
-    """值里不含会让 supervisord 拒绝加载配置的字符。
+    """值能不能放进 ``environment=`` 行。
 
-    三种字符，后果都是 supervisord 起不来（比 jemalloc 本身危险得多），逐个实测过：
+    三种字符都会让 supervisord 拒绝加载整份配置、守护进程起不来（逐个实测过）：
 
-    - ``"`` —— 提前闭合引号，报 ``Unexpected end of key/value pairs``
+    - ``"`` —— 提前闭合包住值的引号，报 ``Unexpected end of key/value pairs``
     - 换行 —— 报 ``No closing quotation``
-    - ``%`` —— supervisord 加载时对这一行做一次百分号展开（``options.py::expand`` 走
-      ``s % expansions``），落单的 ``%`` 报 ``badly formatted``
+    - ``%`` —— supervisord 对每个 option 值做一次百分号展开，落单的 ``%`` 报
+      ``badly formatted``。理论上写成 ``%%`` 能转义，但不同段的层数还不一样
+      （``[supervisord]`` 要 ``%%``、``[program]`` 的 ``stdout_logfile`` 要 ``%%%%``），
+      而含 ``%`` 的 ``.so`` 路径要用户主动构造才会出现——不值得为它引入按段转义。
 
     **逗号不在此列**：值用双引号包住后 supervisord 能正确解析引号内的逗号，实测值不会被
     拆坏。这一条不是可有可无的保守——``MALLOC_CONF`` 的合法值本身就是逗号分隔的，把逗号
@@ -774,11 +776,11 @@ def _supervisor_environment(server_cmd: str) -> str:
 
     值一律带双引号：这一行按逗号分隔，``MALLOC_CONF`` 里的逗号不加引号会被当成分隔符拆开。
 
-    这一行里**任何一个**值含 ``"`` / ``%`` / 换行，supervisord 都会拒绝加载整份配置、守护
-    进程起不来。分配器那几个值在各自来源处已经挡过（那里挡才能换下一个候选、或换回默认
-    旋钮，走到这里再挡就只剩"丢掉"一种处置），这里兜的是剩下的——``MILOCO_HOME`` 能被
-    同名环境变量指到 ``/data/50%off`` 这类路径上，它不比分配器那几个值安全。
-    少一个变量 backend 有自己的兜底，整个守护进程起不来没有。
+    这里**不**统一过字符闸：分配器那两个值在各自来源处已经挡过（在那里挡才能换下一个候选
+    或换回默认旋钮，到这一步只剩"丢掉"一种处置）；而 ``MILOCO_HOME`` / ``TZ`` 挡了也没用——
+    这份 conf 里 ``logfile`` / ``pidfile`` / ``file`` / ``serverurl`` / ``stdout_logfile``
+    / ``command`` 六处同样从 ``$MILOCO_HOME`` 推出来，只挡这一行等于没挡，反而让人以为
+    已经处理了。``$MILOCO_HOME`` 含 ``%`` 时 supervisord 起不来是它的既有限制。
     """
     pairs = [
         ("MILOCO_SUPERVISED", "1"),
@@ -791,17 +793,7 @@ def _supervisor_environment(server_cmd: str) -> str:
     cmd_parts = shlex.split(server_cmd)
     pairs += _malloc_env_or_empty(cmd_parts[0] if cmd_parts else None)
 
-    safe_pairs = []
-    for name, value in pairs:
-        if not _is_conf_safe(value):
-            click.echo(
-                f'warning: {name} 的值含有 " % 或换行，写进 supervisord.conf 会让 '
-                "supervisord 拒绝加载配置，本次不注入它",
-                err=True,
-            )
-            continue
-        safe_pairs.append((name, value))
-    return ",".join(f'{name}="{value}"' for name, value in safe_pairs)
+    return ",".join(f'{name}="{value}"' for name, value in pairs)
 
 
 def _generate_supervisor_conf(server_cmd: str) -> None:

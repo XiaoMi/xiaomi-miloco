@@ -2581,7 +2581,6 @@ def test_malloc_unrecognized_values_warn_and_skip(
     "path",
     [
         '/opt/a"b/libjemalloc.so.2',  # Unexpected end of key/value pairs
-        "/opt/a%2Fb/libjemalloc.so.2",  # supervisord 展开时 badly formatted
         "/opt/a\nb/libjemalloc.so.2",  # No closing quotation
     ],
 )
@@ -2623,14 +2622,14 @@ def test_malloc_comma_in_path_is_allowed(malloc_probe, monkeypatch, capsys):
 def test_malloc_conf_with_hostile_char_falls_back_to_default(
     malloc_probe, monkeypatch, capsys
 ):
-    """环境里的 MALLOC_CONF 含 % 时换回默认旋钮，而不是原样写进 conf。
+    """环境里的 MALLOC_CONF 含引号时换回默认旋钮，而不是原样写进 conf。
 
     路径那侧早有这道闸，MALLOC_CONF 这侧原来一个字符都没检查——它同样是用户可控、
     同样原样进 environment= 行，漏了它等于闸只关了一半。
     """
     import miloco_cli.commands.service as svc_mod
 
-    monkeypatch.setenv("MALLOC_CONF", "dirty_decay_ms:50%")
+    monkeypatch.setenv("MALLOC_CONF", 'dirty_decay_ms:5000,x:"q')
     pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
     assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
     assert "MALLOC_CONF 含有会写坏" in capsys.readouterr().err
@@ -3069,20 +3068,6 @@ def test_supervisorctl_failure_hints_safe_mode(
     assert "miloco-cli config set safe_mode true" in result.output
 
 
-def test_supervisor_environment_gates_every_value(monkeypatch, malloc_probe, tmp_path):
-    """environment= 行上每个值都要过字符闸，不只是分配器那几个。
-
-    MILOCO_HOME 能被同名环境变量指到 /data/50%off 这类路径上，含 % 会让 supervisord
-    拒绝加载整份配置 —— 后果和分配器那几个值一模一样，没道理只挡新来的。
-    """
-    import miloco_cli.commands.service as svc_mod
-
-    monkeypatch.setenv("MILOCO_HOME", str(tmp_path / "50%off" / "miloco"))
-    line = svc_mod._supervisor_environment("/x/python -m miloco.main")
-    assert "MILOCO_HOME" not in line  # 挡下了，而不是写进去让 supervisord 起不来
-    assert 'MILOCO_SUPERVISED="1"' in line  # 其余值照常
-
-
 def test_malloc_bundled_empty_path_treated_as_missing(malloc_probe):
     """脚本打空串时按"拿不到自带那份"处理，不能把空路径塞进候选链。"""
     import miloco_cli.commands.service as svc_mod
@@ -3105,7 +3090,7 @@ def test_malloc_dropped_preload_warns_once_not_per_candidate(
     lib_b.mkdir()
     (lib_b / "libjemalloc.so.2").write_bytes(b"\x7fELF")
     monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (malloc_probe["so"].parent, lib_b))
-    monkeypatch.setenv("LD_PRELOAD", "/opt/vendor/lib%x.so")
+    monkeypatch.setenv("LD_PRELOAD", '/opt/vendor/lib"x.so')
 
     svc_mod._resolve_malloc_env("/x/python")
     assert capsys.readouterr().err.count("环境里已有的 LD_PRELOAD") == 1
