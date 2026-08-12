@@ -356,6 +356,19 @@ def _system_lib_dirs() -> list[Path]:
     return dirs
 
 
+# 在 backend 解释器里跑，算出自带那份 .so 的路径。未知架构（armv7 / riscv64 等）打空串，
+# 让调用方按"拿不到"处理 —— 与 _system_lib_dirs 对未知架构"跳过这一项"同一个口径。二选一会
+# 让 armv7 拿到 x86_64 那份的路径，而那个文件在源码树里真实存在，于是白起一次探针、再被
+# ld.so 以 wrong ELF class 打回来，还多一行看着像故障的告警。
+_BUNDLED_PATH_SCRIPT = (
+    "import pathlib, platform, miot;"
+    "arch = {'x86_64': 'x86_64', 'amd64': 'x86_64',"
+    " 'aarch64': 'arm64', 'arm64': 'arm64'}.get(platform.machine().lower(), '');"
+    "print(pathlib.Path(miot.__file__).parent / 'libs' / 'linux' / arch"
+    "      / 'libjemalloc.so.2' if arch else '')"
+)
+
+
 def _bundled_jemalloc(backend_python: str) -> Path | None:
     """问 backend 解释器要它自带的 libjemalloc.so.2（随平台归档分发的那个）。
 
@@ -363,14 +376,9 @@ def _bundled_jemalloc(backend_python: str) -> Path | None:
     这一步只读 stdout 和退出码，不像预加载探针那样在意 stderr 有没有噪声。
     拿不到（miot 没装 / 归档里没带 / 解释器起不来）返回 None。
     """
-    code = (
-        "import pathlib, platform, miot;"
-        "arch = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x86_64';"
-        "print(pathlib.Path(miot.__file__).parent / 'libs' / 'linux' / arch / 'libjemalloc.so.2')"
-    )
     try:
         result = subprocess.run(
-            [backend_python, "-c", code],
+            [backend_python, "-c", _BUNDLED_PATH_SCRIPT],
             capture_output=True,
             text=True,
             timeout=_BUNDLED_LOOKUP_TIMEOUT_S,
@@ -664,7 +672,10 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
     if choice == "glibc":
         return []
 
-    malloc_conf = os.environ.get("MALLOC_CONF", _JEMALLOC_MALLOC_CONF)
+    # 空串按"没设"处理，和上面 MILOCO_MALLOC 同一个口径：os.environ.get 的默认值只在 key
+    # 不存在时才给，而 `export MALLOC_CONF=` / Dockerfile 的 `ENV MALLOC_CONF=` 会让它返回
+    # 空串——那样三个旋钮一个都注入不进去，日志却完全看不出异常。
+    malloc_conf = os.environ.get("MALLOC_CONF", "").strip() or _JEMALLOC_MALLOC_CONF
     # 沿用用户的 MALLOC_CONF 意味着它会原样进 conf，和绝对路径一样要过这道闸。
     if not _is_conf_safe(malloc_conf):
         click.echo(
@@ -953,7 +964,16 @@ def service_start(foreground, pretty):
                     text=True,
                 )
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print_result({"error": f"supervisord failed to start: {e}"}, pretty)
+                # conf 的 environment= 行被写坏时，supervisord 起不来是唯一的症状——FATAL 和
+                # health 超时那两处提示都要求它已经起来了，逃生开关必须也挂在这条出口上。
+                _echo_jemalloc_hint_if_injected()
+                # supervisord 的原话在 e.stderr 里（capture_output=True），CalledProcessError
+                # 自己只说"returned non-zero exit status 2"，不带出来等于没有线索。
+                detail = (getattr(e, "stderr", "") or "").strip()
+                print_result(
+                    {"error": f"supervisord failed to start: {e}", "detail": detail},
+                    pretty,
+                )
                 sys.exit(1)
 
         _wait_for_health(cfg, pretty)

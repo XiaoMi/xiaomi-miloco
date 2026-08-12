@@ -2930,6 +2930,106 @@ def test_malloc_tolerates_missing_version_and_page(
     assert probe.page == expect_page
 
 
+def test_malloc_empty_conf_env_falls_back_to_default(malloc_probe, monkeypatch):
+    """环境里 MALLOC_CONF 是空串时按"没设"处理，不能把三个旋钮整体清空。
+
+    os.environ.get 的默认值只在 key 不存在时才给；`export MALLOC_CONF=` 或 Dockerfile 的
+    `ENV MALLOC_CONF=` 会让它返回空串。真注进去的话 jemalloc 照常接管、探针照常通过，
+    但后台归还线程关着、decay 回到默认 10 秒——这个方案想买的东西全部落空，日志还看不出来。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MALLOC_CONF", "")
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+
+
+@pytest.mark.parametrize(
+    ("machine", "expect_subdir"),
+    [
+        ("x86_64", "x86_64"),
+        ("AMD64", "x86_64"),
+        ("aarch64", "arm64"),
+        ("arm64", "arm64"),
+        ("armv7l", ""),  # 没有自带那份
+        ("riscv64", ""),
+    ],
+)
+def test_bundled_path_script_maps_arch(monkeypatch, capsys, tmp_path, machine, expect_subdir):
+    """真跑 _BUNDLED_PATH_SCRIPT 这段脚本本身，而不是在测试里重抄一份映射表。
+
+    未知架构（armv7 / riscv64）必须算出空串：二选一会让 armv7 拿到 x86_64 那份的路径，而那
+    文件在源码树里真实存在 → 进候选 → 白起一次探针 → 被 ld.so 以 wrong ELF class 打回来，
+    还多一行看着像故障的告警。与 _system_lib_dirs 对未知架构"跳过这一项"的口径也不一致。
+    """
+    import platform as platform_mod
+    import sys
+    import types
+
+    import miloco_cli.commands.service as svc_mod
+
+    fake_miot = types.ModuleType("miot")
+    fake_miot.__file__ = str(tmp_path / "miot" / "__init__.py")
+    monkeypatch.setitem(sys.modules, "miot", fake_miot)
+    monkeypatch.setattr(platform_mod, "machine", lambda: machine)
+
+    exec(svc_mod._BUNDLED_PATH_SCRIPT, {})  # noqa: S102
+    printed = capsys.readouterr().out.strip()
+
+    if expect_subdir:
+        assert printed.endswith(f"libs/linux/{expect_subdir}/libjemalloc.so.2")
+    else:
+        assert printed == ""
+
+
+def test_supervisord_start_failure_hints_and_keeps_stderr(
+    runner, isolated_config, monkeypatch, tmp_path
+):
+    """supervisord 自己起不来时也要打逃生提示，并带出它的 stderr。
+
+    conf 的 environment= 行被写坏时，supervisord 起不来是唯一的症状——FATAL 与 health
+    超时那两条提示都要求它已经起来了。而 CalledProcessError 自己只说"returned non-zero
+    exit status 2"，真正的原因在 e.stderr 里，不带出来用户无从下手。
+    """
+    import subprocess
+
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import set_value
+
+    fake_python = tmp_path / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    set_value("server.python_bin", str(fake_python))
+
+    conf = tmp_path / "supervisord.conf"
+    conf.write_text('environment=LD_PRELOAD="/usr/lib/libjemalloc.so.2"\n')
+    monkeypatch.setattr(svc_mod, "_supervisor_conf", lambda: conf)
+    monkeypatch.setattr(svc_mod, "_generate_supervisor_conf", lambda cmd: None)
+    monkeypatch.setattr(svc_mod, "_supervisord_is_running", lambda: False)
+    monkeypatch.setattr(svc_mod, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(svc_mod, "_find_supervisord_pids", lambda: [])
+
+    real_reason = "Error: Format string '...' for 'environment' is badly formatted"
+    with patch.object(
+        svc_mod.subprocess,
+        "run",
+        side_effect=subprocess.CalledProcessError(2, ["supervisord"], stderr=real_reason),
+    ):
+        result = runner.invoke(cli, ["service", "start"])
+
+    assert result.exit_code == 1
+    assert real_reason in result.output  # supervisord 的原话没被丢掉
+    assert "safe_mode true" in result.output  # 逃生开关给到了
+
+
+def test_malloc_bundled_empty_path_treated_as_missing(malloc_probe):
+    """脚本打空串时按"拿不到自带那份"处理，不能把空路径塞进候选链。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["bundled"] = ""
+    assert svc_mod._bundled_jemalloc("/x/python") is None
+
+
 def test_malloc_dropped_preload_warns_once_not_per_candidate(
     malloc_probe, monkeypatch, capsys, tmp_path
 ):
