@@ -43,8 +43,9 @@ def config_file() -> Path:
 # 点号路径 → (python 类型, 默认值, 中文 description)
 _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     "debug": (bool, False, "是否启用调试模式"),
-    # CLI 独有,故意不进 settings.schema.json / settings.yaml:后端从不读它,写进后端的配置声明
-    # 等于宣称改它对后端有影响。它只影响 CLI 生成 supervisord.conf 的方式。
+    # 后端不读它(只影响 CLI 生成 supervisord.conf),但仍进 schema.json + pydantic:
+    # config.json 是两边共用的文件,schema.json 是它的契约。同 server.python_bin。
+    # 不进 settings.yaml —— 那份是后端默认值,后端不读的字段放进去是宣称它对后端有影响。
     "safe_mode": (
         bool,
         False,

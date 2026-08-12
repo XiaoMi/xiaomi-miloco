@@ -601,6 +601,16 @@ class MilocoSettings(BaseSettings):
         default=False,
         description="是否启用调试模式：为 true 时 CLI / backend / openclaw 插件都会输出更详细的日志",
     )
+    # backend 不读这个字段,它只影响 CLI 生成 supervisord.conf 的方式;声明在这里是因为
+    # config.json 是两边共用的文件,schema.json 是它的契约(同 server.python_bin)。
+    safe_mode: bool = Field(
+        default=False,
+        description=(
+            "安全模式：关闭可选的性能优化，用最保守的配置启动。当前仅控制 Linux 下的 "
+            "jemalloc 内存分配器预加载（非 Linux 本就不预加载，开了没有实际变化）；"
+            "后续新增的优化项也会纳入本开关。怀疑优化项导致启动失败或崩溃时打开；重启生效"
+        ),
+    )
     timezone: str | None = Field(
         default=None,
         description=(
