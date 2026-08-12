@@ -773,6 +773,12 @@ def _supervisor_environment(server_cmd: str) -> str:
     """拼 supervisord 的 ``environment=`` 行。
 
     值一律带双引号：这一行按逗号分隔，``MALLOC_CONF`` 里的逗号不加引号会被当成分隔符拆开。
+
+    这一行里**任何一个**值含 ``"`` / ``%`` / 换行，supervisord 都会拒绝加载整份配置、守护
+    进程起不来。分配器那几个值在各自来源处已经挡过（那里挡才能换下一个候选、或换回默认
+    旋钮，走到这里再挡就只剩"丢掉"一种处置），这里兜的是剩下的——``MILOCO_HOME`` 能被
+    同名环境变量指到 ``/data/50%off`` 这类路径上，它不比分配器那几个值安全。
+    少一个变量 backend 有自己的兜底，整个守护进程起不来没有。
     """
     pairs = [
         ("MILOCO_SUPERVISED", "1"),
@@ -784,7 +790,18 @@ def _supervisor_environment(server_cmd: str) -> str:
     # 命令的第一段就是 backend 的解释器，拿它问自带的 libjemalloc 在哪、拿它跑探针。
     cmd_parts = shlex.split(server_cmd)
     pairs += _malloc_env_or_empty(cmd_parts[0] if cmd_parts else None)
-    return ",".join(f'{name}="{value}"' for name, value in pairs)
+
+    safe_pairs = []
+    for name, value in pairs:
+        if not _is_conf_safe(value):
+            click.echo(
+                f'warning: {name} 的值含有 " % 或换行，写进 supervisord.conf 会让 '
+                "supervisord 拒绝加载配置，本次不注入它",
+                err=True,
+            )
+            continue
+        safe_pairs.append((name, value))
+    return ",".join(f'{name}="{value}"' for name, value in safe_pairs)
 
 
 def _generate_supervisor_conf(server_cmd: str) -> None:
@@ -946,6 +963,9 @@ def service_start(foreground, pretty):
             _supervisorctl("update")
             result = _supervisorctl("start", _PROGRAM_NAME)
             if result.returncode != 0:
+                # supervisord 活着但程序没起来。启动失败一共四条出口，逃生开关每条都要挂：
+                # FATAL 和 health 超时那两条要求先走到 _wait_for_health，这条在那之前就 exit。
+                _echo_jemalloc_hint_if_injected()
                 print_result(
                     {"error": f"supervisorctl start failed: {result.stdout.strip()}"},
                     pretty,
@@ -1057,6 +1077,9 @@ def service_restart(ctx, pretty):
         _supervisorctl("update")
         result = _supervisorctl("restart", _PROGRAM_NAME)
         if result.returncode != 0:
+            # 同 start。升级后第一次 restart 正是配置里刚带上 LD_PRELOAD 的那一次，
+            # 这条出口反而最可能撞上注入问题。
+            _echo_jemalloc_hint_if_injected()
             print_result(
                 {"error": f"supervisorctl restart failed: {result.stdout.strip()}"},
                 pretty,

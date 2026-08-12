@@ -1,6 +1,7 @@
 """CLI 命令测试：使用 Click CliRunner，mock 底层 API 调用。"""
 
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -2490,7 +2491,14 @@ def malloc_probe(monkeypatch, tmp_path):
         return sp.CompletedProcess(cmd, 0 if bundled else 1, f"{bundled or ''}\n", "")
 
     monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
-    return state
+    yield state
+    # 前台模式那条路径直接改真的 os.environ（exec 前的 os.environ.update），不经过
+    # monkeypatch；而 monkeypatch.delenv 对"本来就不存在"的变量不记 undo，还不回来。
+    # 不兜这一道，那个假 .so 路径会留在 pytest 进程里直到 session 结束，后面任何真 fork
+    # 子进程的用例都会白拿一行 ld.so 报错，且是在跟它无关的断言里炸。
+    # 本 finalizer 先于 monkeypatch 的 undo 执行，导出过这两个变量的开发机仍能拿回原值。
+    for leaked in ("LD_PRELOAD", "MALLOC_CONF"):
+        os.environ.pop(leaked, None)
 
 
 def test_malloc_default_injects_jemalloc_and_conf(malloc_probe):
@@ -3023,6 +3031,58 @@ def test_supervisord_start_failure_hints_and_keeps_stderr(
     assert "safe_mode true" in result.output  # 逃生开关给到了
 
 
+@pytest.mark.parametrize("action", ["start", "restart"])
+def test_supervisorctl_failure_hints_safe_mode(
+    runner, isolated_config, malloc_probe, monkeypatch, tmp_path, action
+):
+    """supervisord 活着但程序没起来时也要给逃生开关。
+
+    启动失败一共四条出口，FATAL 和 health 超时那两条要求先走到 _wait_for_health，
+    而这两条在那之前就 exit 了。升级后第一次 restart 恰恰是配置里刚带上 LD_PRELOAD
+    的那一次，最可能撞上注入问题，反而拿不到开关。
+    """
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import set_value
+
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\nexit 0\n")
+    py.chmod(0o755)
+    set_value("server.python_bin", str(py))
+
+    conf = tmp_path / "supervisord.conf"
+    conf.write_text('environment=LD_PRELOAD="/usr/lib/libjemalloc.so.2"\n')
+    monkeypatch.setattr(svc_mod, "_supervisor_conf", lambda: conf)
+    monkeypatch.setattr(svc_mod, "_generate_supervisor_conf", lambda cmd: None)
+    monkeypatch.setattr(svc_mod, "_supervisord_is_running", lambda: True)
+    monkeypatch.setattr(svc_mod, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(svc_mod, "_get_backend_pid_from_supervisor", lambda: None)
+    monkeypatch.setattr(
+        svc_mod,
+        "_supervisorctl",
+        lambda *a: __import__("subprocess").CompletedProcess(
+            [], 1 if a[0] in ("start", "restart") else 0, "abnormal termination", ""
+        ),
+    )
+
+    result = runner.invoke(cli, ["service", action])
+    assert result.exit_code == 1
+    assert "miloco-cli config set safe_mode true" in result.output
+
+
+def test_supervisor_environment_gates_every_value(monkeypatch, malloc_probe, tmp_path):
+    """environment= 行上每个值都要过字符闸，不只是分配器那几个。
+
+    MILOCO_HOME 能被同名环境变量指到 /data/50%off 这类路径上，含 % 会让 supervisord
+    拒绝加载整份配置 —— 后果和分配器那几个值一模一样，没道理只挡新来的。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path / "50%off" / "miloco"))
+    line = svc_mod._supervisor_environment("/x/python -m miloco.main")
+    assert "MILOCO_HOME" not in line  # 挡下了，而不是写进去让 supervisord 起不来
+    assert 'MILOCO_SUPERVISED="1"' in line  # 其余值照常
+
+
 def test_malloc_bundled_empty_path_treated_as_missing(malloc_probe):
     """脚本打空串时按"拿不到自带那份"处理，不能把空路径塞进候选链。"""
     import miloco_cli.commands.service as svc_mod
@@ -3086,8 +3146,8 @@ def test_malloc_system_budget_exhausted_still_tries_bundled(
 
     import miloco_cli.commands.service as svc_mod
 
-    # 三个系统候选，各自"耗时"2s：第 1 个探完预算只剩 3s，第 2 个探完只剩 1s < 0.5s？
-    # 用假时钟精确控制。
+    # 三个系统候选，每次探针"耗时"3s，总预算 5s：第 1 个超时取 min(3, 5)=3s，探完剩 2s；
+    # 第 2 个超时被剩余预算压到 2s，探完剩 -1s；第 3 个因 -1 < 0.5 被跳过。用假时钟精确控制。
     sys_dirs = []
     for i in range(3):
         d = tmp_path / f"lib{i}"
@@ -3499,7 +3559,6 @@ def test_foreground_mode_respects_safe_mode(malloc_probe, monkeypatch, tmp_path)
     config_file().write_text(
         json.dumps({"safe_mode": True, "server": {"python_bin": str(py)}})
     )
-    monkeypatch.delenv("LD_PRELOAD", raising=False)
 
     execs = []
     monkeypatch.setattr(svc_mod.os, "execvp", lambda f, a: execs.append((f, a)))
@@ -3512,3 +3571,18 @@ def test_foreground_mode_respects_safe_mode(malloc_probe, monkeypatch, tmp_path)
     assert execs
     assert "LD_PRELOAD" not in svc_mod.os.environ
     assert malloc_probe["probe_calls"] == []
+
+
+def test_malloc_fixture_left_no_env_behind():
+    """前面那些用例跑完，pytest 进程里不该还留着 LD_PRELOAD / MALLOC_CONF。
+
+    前台模式那条被测路径直接改真的 os.environ（exec 前的 os.environ.update），而
+    monkeypatch.delenv 对"本来就不存在"的变量不记 undo、还不回来（实测）。漏出去的话
+    后面任何真 fork 子进程的用例都会白拿一行 ld.so 报错，且是在跟它无关的断言里炸。
+    由 malloc_probe 的 finalizer 兜住。
+
+    这条**依赖执行顺序**（放在文件末尾、pytest 按定义顺序跑，仓库未装 randomly/xdist）：
+    要钉的是跨用例的残留，单个用例内部看不见它。
+    """
+    assert "LD_PRELOAD" not in os.environ
+    assert "MALLOC_CONF" not in os.environ
