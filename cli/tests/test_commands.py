@@ -2552,9 +2552,6 @@ def test_malloc_glibc_injects_nothing(malloc_probe, monkeypatch, capsys):
     [
         "tcmalloc",  # 不认识的名字
         "relative/path.so",  # 不是绝对路径
-        '/tmp/a"b/libjemalloc.so.2',  # 含双引号：Unexpected end of key/value pairs
-        "/tmp/a%2Fb/libjemalloc.so.2",  # 含 %：supervisord 展开时 badly formatted
-        "/tmp/a\nb/libjemalloc.so.2",  # 含换行：No closing quotation
     ],
 )
 def test_malloc_unrecognized_values_warn_and_skip(
@@ -2562,14 +2559,40 @@ def test_malloc_unrecognized_values_warn_and_skip(
 ):
     """认不出的取值一律告警 + 不注入。
 
-    带 " / % / 换行的绝对路径也走这里：这三种字符任意一个都会让 supervisord 拒绝加载
-    配置（三条错误信息见上面各行注释，均为实测），后果是 backend 起不来。
+    含危险字符的**绝对路径**不走这里——它确实是绝对路径，归
+    test_malloc_hostile_char_in_abs_path_says_the_real_reason 管。
     """
     import miloco_cli.commands.service as svc_mod
 
     monkeypatch.setenv("MILOCO_MALLOC", value)
     assert svc_mod._resolve_malloc_env("/x/python") == []
     assert "无法识别 MILOCO_MALLOC" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        '/opt/a"b/libjemalloc.so.2',  # Unexpected end of key/value pairs
+        "/opt/a%2Fb/libjemalloc.so.2",  # supervisord 展开时 badly formatted
+        "/opt/a\nb/libjemalloc.so.2",  # No closing quotation
+    ],
+)
+def test_malloc_hostile_char_in_abs_path_says_the_real_reason(
+    malloc_probe, monkeypatch, capsys, path
+):
+    """含危险字符的绝对路径被挡下时要说真实原因，不能答"这不是绝对路径"。
+
+    三种字符任意一个都会让 supervisord 拒绝加载配置（错误信息见各行注释，均为实测）。
+    但把"是不是绝对路径"和"字符安不安全"合成一个布尔值就会答非所问——用户给的确实是
+    绝对路径，却被告知"可用值：…… 绝对路径"，排查方向会被带到"是不是路径写错了"上。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MILOCO_MALLOC", path)
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    err = capsys.readouterr().err
+    assert "supervisord" in err  # 说清后果
+    assert "无法识别" not in err  # 不再答非所问
 
 
 def test_malloc_comma_in_path_is_allowed(malloc_probe, monkeypatch, capsys):
@@ -2755,7 +2778,9 @@ def test_malloc_probe_falls_back_to_own_interpreter(malloc_probe):
         ({"stdout": "probe-crashed: ValueError()\n"}, "探针自身异常"),
         ({"returncode": -11}, "信号 11"),
         ({"returncode": 1}, "退出码 1"),
-        ({"stderr": "some-loader-error\n"}, "some-loader-error"),
+        # 契约不符时把 stderr 末行附进原因里——它不参与判定，但页大小不符那种情况下
+        # jemalloc 的原话比"输出不符合契约"好排查得多。
+        ({"stdout": "", "stderr": "boom\n"}, "boom"),
         # 没有"契约"这条判据，意料外的输出会默认落到"通过"
         ({"stdout": ""}, "不符合契约"),
         ({"stdout": "hello world\n"}, "不符合契约"),
@@ -2826,54 +2851,40 @@ def test_malloc_page_mismatch_leaves_no_persistent_state(malloc_probe, monkeypat
     assert dict(svc_mod._resolve_malloc_env("/x/python"))["LD_PRELOAD"]
 
 
-def test_malloc_invalid_conf_pairs_are_dropped_not_fatal(malloc_probe, capsys):
-    """不认识的旋钮只剔除、不否决：老版本 jemalloc 仍远好过 glibc 的 arena 碎片。
+def test_malloc_stderr_never_decides_usability(malloc_probe, capsys):
+    """stderr 不参与"能不能用"的判定：只要 jemalloc 接管了，它打什么都照常用。
 
-    多条同时被拒时逐条剔。剔除只做减法，所以不用重新探针——jemalloc 逐个旋钮独立解析，
-    被拒的那个不影响同一串里其它旋钮生效。
+    这三类输出都是库在正常工作时打的，任何一类被判死都会让预加载在整类机器上静默失效：
+    不认识的旋钮（老版本 jemalloc）、qemu/gVisor 下 MADV_DONTNEED 退化成 memset、
+    环境里别人的 LD_PRELOAD 条目加载失败。用白名单逐条豁免则永远补不完。
     """
     import miloco_cli.commands.service as svc_mod
 
     malloc_probe["stderr"] = (
-        f"{_INVALID}dirty_decay_ms:5000\n{_INVALID}muzzy_decay_ms:5000\n"
+        f"{_INVALID}dirty_decay_ms:5000\n"
+        "<jemalloc>: MADV_DONTNEED does not work (memset will be used instead)\n"
+        "<jemalloc>: (This is the expected behaviour if you are running under QEMU)\n"
+        "ERROR: ld.so: object '/x/libfoo.so' from LD_PRELOAD cannot be preloaded: ignored.\n"
     )
     pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
-    assert pairs["MALLOC_CONF"] == "background_thread:true"
-    assert len(malloc_probe["probe_calls"]) == 1  # 没有重验
-    assert "已从 MALLOC_CONF 剔除" in capsys.readouterr().err
+    assert pairs["LD_PRELOAD"].startswith(str(malloc_probe["so"]))
+    # 不认识的旋钮原样留着：jemalloc 逐个独立解析，被拒的那个不影响其它旋钮生效，
+    # 它自己会在 backend 日志里打 Invalid conf pair —— 那正是用户该看到的。
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+    assert "不可用" not in capsys.readouterr().err
 
 
-def test_malloc_invalid_conf_needs_jemalloc_prefix(malloc_probe):
-    """`Invalid conf pair` 必须带 <jemalloc>: 前缀才算可容忍。
+def test_malloc_not_taken_over_is_fatal_regardless_of_stderr(malloc_probe):
+    """不看 stderr 不会放过真故障：库自己加载不了时 stdout 就是 not-taken-over。
 
-    没有前缀的同名内容可能来自别的库/别的进程，当成"被拒的旋钮"会把真故障吃掉。
+    这是"删掉 stderr 判定"的安全前提——ld.so 忽略掉加载不了的预加载库后退出码仍是 0，
+    但 mallctl 符号取不到，stdout 那条判据独立且可靠。
     """
     import miloco_cli.commands.service as svc_mod
 
-    malloc_probe["stderr"] = "Invalid conf pair: dirty_decay_ms:5000\n"
-    probe = svc_mod._probe_jemalloc(malloc_probe["so"], "x:1", "/x/python", 3)
-    assert probe.fatal is not None
-    assert probe.rejected_pairs == ()
-
-
-def test_malloc_all_knobs_rejected_still_preloads(malloc_probe, capsys):
-    """旋钮全被剔空 → 只注入 LD_PRELOAD，且打降级告警。
-
-    这是降级不是等价：jemalloc 走内置默认值，归还内存的 madvise 回到解码线程热路径上。
-    """
-    import miloco_cli.commands.service as svc_mod
-
-    malloc_probe["stderr"] = "".join(
-        f"{_INVALID}{p}\n" for p in svc_mod._JEMALLOC_MALLOC_CONF.split(",")
-    )
-    malloc_probe["stdout"] = _probe_stdout(bg=False, dirty=10000, muzzy=0)
-    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
-    assert "LD_PRELOAD" in pairs
-    assert "MALLOC_CONF" not in pairs
-    err = capsys.readouterr().err
-    assert "一个旋钮都不认" in err
-    # 成功行打的是读回值，和上面那条降级告警一致，不是注入值 5000/5000
-    assert "dirty/muzzy_decay_ms=10000/0" in err
+    malloc_probe["stdout"] = "not-taken-over"
+    malloc_probe["stderr"] = ""  # 连一行报错都没有，照样判死
+    assert svc_mod._resolve_malloc_env("/x/python") == []
 
 
 def test_malloc_background_thread_silently_disabled_warns(malloc_probe, capsys):

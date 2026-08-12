@@ -269,11 +269,9 @@ def _resolve_timezone() -> str | None:
 _JEMALLOC_FILE_NAMES = ("libjemalloc.so.2", "libjemalloc.so")
 
 # background_thread 把归还内存的 madvise 挪出解码线程热路径，两个 decay 让空闲页 5 秒后还给
-# 系统。真机三方对比见 docs/allocator-realmachine-benchmark.md。
+# 系统。5000ms 来自真机 glibc / mimalloc / jemalloc 三方对比：再短会让解码期的分配-释放抖动
+# 频繁 madvise，再长则空闲内存降不下去。
 _JEMALLOC_MALLOC_CONF = "background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000"
-
-# jemalloc 拒掉不认识的旋钮时打的原文，前缀必须完整匹配（实测格式），多个非法旋钮逐条一行。
-_INVALID_CONF_PREFIX = "<jemalloc>: Invalid conf pair: "
 
 # 出现在 environment= 行里就会让 supervisord 起不来的字符，理由见 _is_conf_safe。
 _CONF_HOSTILE_CHARS = frozenset('"%\n\r')
@@ -343,7 +341,6 @@ class _ProbeResult:
     background_thread: bool | None = None
     dirty_decay_ms: int | None = None
     muzzy_decay_ms: int | None = None
-    rejected_pairs: tuple[str, ...] = ()
 
 
 def _system_lib_dirs() -> list[Path]:
@@ -423,23 +420,10 @@ def _preload_value(so_path: Path) -> str:
     return f"{so_path}:{existing}" if existing else str(so_path)
 
 
-def _split_probe_stderr(stderr: str) -> tuple[tuple[str, ...], str]:
-    """把探针 stderr 拆成"被拒的旋钮"和"其它内容"。
-
-    只有 ``<jemalloc>: Invalid conf pair: X`` 是可容忍的（剔掉 X 后照常用，老版本 jemalloc 不认
-    新旋钮仍远好过 glibc 的 arena 碎片）。其它任何输出都致命：页大小不符打
-    ``Unsupported system page size``，坏 .so 和缺依赖打 ld.so 的 ``ERROR:`` 行。
-    """
-    rejected: list[str] = []
-    other: list[str] = []
-    for raw in stderr.strip().splitlines():
-        if not (line := raw.strip()):
-            continue
-        if line.startswith(_INVALID_CONF_PREFIX):
-            rejected.append(line[len(_INVALID_CONF_PREFIX) :].strip())
-        else:
-            other.append(line)
-    return tuple(rejected), "\n".join(other)
+def _stderr_tail(stderr: str, limit: int = 200) -> str:
+    """探针 stderr 里最有诊断价值的那一行，拼进失败原因用。不参与任何判定。"""
+    lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+    return f"；stderr: {lines[-1][:limit]}" if lines else ""
 
 
 def _as_int(raw: str | None) -> int | None:
@@ -460,6 +444,12 @@ def _probe_jemalloc(
     timeout: float,
 ) -> _ProbeResult:
     """真拿这套 LD_PRELOAD + MALLOC_CONF 起一个进程，读 mallctl 实证接管情况。
+
+    **判据只有一条：jemalloc 有没有接管 malloc**，由 stdout 回答。stderr 一概不看——
+    接管成功后它打什么都不改变"能用"这个事实（不认识的旋钮、qemu 下 MADV_DONTNEED 退化成
+    memset、环境里别人的 LD_PRELOAD 条目加载失败，全属此类）；而接管失败的每一种（页大小
+    不符、坏 .so、根本不是 jemalloc）都会让 stdout 拿不到 ``ver=``。拿 stderr 做判据要维护
+    一张永远补不完的良性输出白名单，漏一条的后果是库在正常工作却被判死。
 
     只报事实，判定和告警在 :func:`_pick_jemalloc` / :func:`_resolve_malloc_env`。
 
@@ -504,18 +494,14 @@ def _probe_jemalloc(
     if stdout.startswith("probe-crashed:"):
         return _ProbeResult(fatal=f"探针自身异常：{stdout}")
 
-    rejected, other_stderr = _split_probe_stderr(result.stderr)
-    if other_stderr:
-        return _ProbeResult(fatal=other_stderr)
-
     # 页大小不符这类故障在 jemalloc 初始化期就炸，探针脚本一行都没执行到，stdout 是空的；
     # 而退出码不保证非 0（release 构建 opt_abort 默认 false）。没有这条判据，意料外的输出
     # 会默认落到"通过"。
-    values = dict(
-        line.split("=", 1) for line in stdout.splitlines() if "=" in line
-    )
+    values = dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
     if "ver" not in values:
-        return _ProbeResult(fatal=f"探针输出不符合契约: {stdout!r}")
+        # stderr 不参与判定，但附进失败原因里：页大小不符时 jemalloc 的原话
+        # （"Unsupported system page size"）比"输出不符合契约"好排查得多。
+        return _ProbeResult(fatal=f"探针输出不符合契约: {stdout!r}{_stderr_tail(result.stderr)}")
 
     return _ProbeResult(
         version=values["ver"] if values["ver"] != "?" else "unknown",
@@ -523,7 +509,6 @@ def _probe_jemalloc(
         background_thread=_as_bool(values.get("bg")),
         dirty_decay_ms=_as_int(values.get("dirty")),
         muzzy_decay_ms=_as_int(values.get("muzzy")),
-        rejected_pairs=rejected,
     )
 
 
@@ -553,21 +538,6 @@ def _pick_jemalloc(
             return so_path, probe
         click.echo(f"warning: {so_path} 不可用（{probe.fatal}），试下一个候选", err=True)
     return None
-
-
-def _drop_rejected_pairs(malloc_conf: str, rejected: tuple[str, ...]) -> str:
-    """从 ``MALLOC_CONF`` 里剔掉被 jemalloc 拒掉的旋钮，这样 backend 日志不会每次启动都刷。
-
-    只做减法，所以剔完不用重新探针：jemalloc 逐个旋钮独立解析，被拒的那个不影响同一串里其它
-    旋钮生效（实测）。反过来不成立——"没被报错"不等于"生效了"，那种要靠读回值抓。
-    """
-    rejected_names = {pair.split(":", 1)[0].strip() for pair in rejected}
-    kept = [
-        pair
-        for raw in malloc_conf.split(",")
-        if (pair := raw.strip()) and pair.split(":", 1)[0] not in rejected_names
-    ]
-    return ",".join(kept)
 
 
 def _conf_pairs(malloc_conf: str) -> dict[str, str]:
@@ -611,36 +581,25 @@ def _warn_on_ineffective_conf(injected: dict[str, str], probe: _ProbeResult) -> 
 def _malloc_env_pairs(
     so_path: Path, probe: _ProbeResult, malloc_conf: str
 ) -> list[tuple[str, str]]:
-    """组装要注入的环境变量，顺带把可容忍的问题告警出来。"""
-    if probe.rejected_pairs:
-        click.echo(
-            "warning: jemalloc 不支持这些旋钮，已从 MALLOC_CONF 剔除: "
-            + ", ".join(probe.rejected_pairs),
-            err=True,
-        )
-    kept = _drop_rejected_pairs(malloc_conf, probe.rejected_pairs)
-    _warn_on_ineffective_conf(_conf_pairs(kept), probe)
-    if not kept:
-        # 能走到这一步说明这份 jemalloc 连一个默认旋钮都不认。仍然照常预加载：它比 glibc 的
-        # arena 碎片好，只是归还内存的 madvise 回到解码线程热路径上、dirty 页多攥一会儿。
-        click.echo(
-            "warning: jemalloc 一个旋钮都不认，只做了预加载；空闲页归还会慢"
-            f"（dirty_decay_ms={probe.dirty_decay_ms}, "
-            f"muzzy_decay_ms={probe.muzzy_decay_ms}）",
-            err=True,
-        )
-    # 三个旋钮一律打**读回值**而不是注入值：降级时（旋钮被剔空、或 conf 整份没被读）注入值是
-    # 假的，照注入值打会和上面那条 warning 自相矛盾。
+    """组装要注入的环境变量，顺带把"注入了但没生效"的旋钮告警出来。
+
+    不认识的旋钮原样留在 ``MALLOC_CONF`` 里：jemalloc 逐个旋钮独立解析，被拒的那个不影响
+    同一串里其它旋钮生效，它自己会在 backend 日志里打一行 ``Invalid conf pair``——那行正是
+    用户需要看到的信息。为了少一行日志去解析 stderr 再回头剔字符串，不值这个复杂度。
+    """
+    _warn_on_ineffective_conf(_conf_pairs(malloc_conf), probe)
+    # 三个旋钮一律打**读回值**而不是注入值：conf 整份没被读时注入值是假的，照注入值打会和
+    # 上面那条 warning 自相矛盾。
     click.echo(
         f"分配器: jemalloc {probe.version} ({so_path}) page={probe.page}  "
         f"background_thread={probe.background_thread} "
         f"dirty/muzzy_decay_ms={probe.dirty_decay_ms}/{probe.muzzy_decay_ms}",
         err=True,
     )
-    pairs = [("LD_PRELOAD", _preload_value(so_path))]
-    if kept:
-        pairs.append(("MALLOC_CONF", kept))
-    return pairs
+    return [
+        ("LD_PRELOAD", _preload_value(so_path)),
+        ("MALLOC_CONF", malloc_conf),
+    ]
 
 
 def _safe_mode_enabled() -> bool:
@@ -668,11 +627,6 @@ def _is_conf_safe(value: str) -> bool:
     拒掉会让默认旋钮串一个都注入不进去。
     """
     return not set(value) & _CONF_HOSTILE_CHARS
-
-
-def _is_injectable_path(choice: str) -> bool:
-    """绝对路径，且不含会写坏 supervisord.conf 的字符。"""
-    return choice.startswith("/") and _is_conf_safe(choice)
 
 
 def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, str]]:
@@ -735,8 +689,16 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
                     err=True,
                 )
             return []
-    elif _is_injectable_path(choice):
+    elif choice.startswith("/"):
         # 绝对路径只有一份可试，不进候选链——否则会打出"试下一个候选"这种不成立的告警。
+        # 字符检查单独分叉：给的确实是绝对路径，落到下面"无法识别"里会答非所问。
+        if not _is_conf_safe(choice):
+            click.echo(
+                f"warning: MILOCO_MALLOC={choice} 含有 \" % 或换行，"
+                "写进 supervisord.conf 会让 supervisord 拒绝加载配置，本次不改分配器",
+                err=True,
+            )
+            return []
         so_path = Path(choice)
         if not so_path.is_file():
             click.echo(
