@@ -351,7 +351,7 @@ def _system_lib_dirs() -> list[Path]:
     映射里没有的架构（armv7 / riscv64 等）跳过这一项，其余目录照走。
     """
     dirs = list(_SYSTEM_LIB_DIRS)
-    if arch_dir_name := _ARCH_LIB_DIR_NAMES.get(platform.machine()):
+    if arch_dir_name := _ARCH_LIB_DIR_NAMES.get(platform.machine().lower()):
         dirs.insert(0, Path("/usr/lib") / arch_dir_name)
     return dirs
 
@@ -579,7 +579,8 @@ def _pick_jemalloc(
         probe = _probe_jemalloc(so_path, malloc_conf, backend_python, timeout)
         if probe.fatal is None:
             return so_path, probe
-        click.echo(f"warning: {so_path} 不可用（{probe.fatal}），试下一个候选", err=True)
+        # 不说"试下一个候选"：最后一个失败时后面已经没有了。链路全灭的结论由调用方给。
+        click.echo(f"warning: {so_path} 不可用（{probe.fatal}）", err=True)
     return None
 
 
@@ -696,8 +697,8 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
                 )
             return []
     elif choice.startswith("/"):
-        # 绝对路径只有一份可试，不进候选链——否则会打出"试下一个候选"这种不成立的告警。
-        # 路径里的危险字符由探针入口统一挡，那条会照常打出真实原因，不用在这里再查一遍。
+        # 绝对路径只有一份可试，不进候选链——用户点名了这一份，探不通就该说"这一份不行"，
+        # 而不是接着去试别的。路径里的危险字符由探针入口统一挡，会照常打出真实原因。
         so_path = Path(choice)
         if not so_path.is_file():
             click.echo(

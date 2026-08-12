@@ -608,7 +608,8 @@ class MilocoSettings(BaseSettings):
         description=(
             "安全模式：关闭可选的性能优化，用最保守的配置启动。当前仅控制 Linux 下的 "
             "jemalloc 内存分配器预加载（非 Linux 本就不预加载，开了没有实际变化）；"
-            "后续新增的优化项也会纳入本开关。怀疑优化项导致启动失败或崩溃时打开；重启生效"
+            "后续新增的优化项也会纳入本开关。怀疑优化项导致启动失败或崩溃时打开；重启生效。"
+            "仅 CLI 读取，后端不读这个字段"
         ),
     )
     timezone: str | None = Field(

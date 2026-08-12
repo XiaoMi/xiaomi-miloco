@@ -2750,7 +2750,8 @@ def test_malloc_probe_uses_backend_interpreter_isolated(malloc_probe):
 
     用 backend 的而不是 CLI 自己的：两个解释器的 libc 和链接方式可能不同，
     "CLI 能被接管"推不出"backend 能被接管"，后者才是要保护的目标。
-    -E -S 是因为判据含 stderr 有没有非预期内容，探针自己不能往 stderr 写东西。
+    -E -S 屏蔽环境变量和 site 目录：sitecustomize / .pth 里的东西可能自己就崩掉或改写
+    分配器，那样测的就不是这份 .so 了。
     """
     import miloco_cli.commands.service as svc_mod
 

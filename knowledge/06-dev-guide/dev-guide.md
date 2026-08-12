@@ -139,7 +139,8 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 
 `miloco-cli service start` 生成 supervisord.conf 时会尝试给 backend 预加载 jemalloc，往
 `environment=` 行里加 `LD_PRELOAD` 和 `MALLOC_CONF` 两个变量——glibc malloc 的 arena 碎片会让
-长跑 RSS 只涨不落，jemalloc 能把空闲页真正还给系统。找不到可用的 libjemalloc 时静默跳过，不影响启动。
+长跑 RSS 只涨不落，jemalloc 能把空闲页真正还给系统。机器上没装 libjemalloc 时什么都不注入、不打扰；
+装了但验证不通过时会在 stderr 说明哪一份为什么不能用。两种情况都不影响启动。
 
 优先用系统装的那份（`apt install libjemalloc2`），都没有才回落到 miot 包里自带的。选中之前会真起一个
 子进程做加载验证，验证不过就换下一个候选，全不可用就什么都不注入。
