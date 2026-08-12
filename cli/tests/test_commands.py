@@ -2633,7 +2633,7 @@ def test_malloc_conf_with_hostile_char_falls_back_to_default(
     monkeypatch.setenv("MALLOC_CONF", 'dirty_decay_ms:5000,x:"q')
     pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
     assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
-    assert "MALLOC_CONF 含有会写坏" in capsys.readouterr().err
+    assert "MALLOC_CONF 含有会让 supervisord 拒绝加载配置的字符" in capsys.readouterr().err
 
 
 def test_malloc_candidates_dedupe_symlinks(malloc_probe, monkeypatch, tmp_path):

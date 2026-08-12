@@ -445,8 +445,8 @@ def _warn_on_dropped_preload() -> None:
     existing = os.environ.get("LD_PRELOAD", "").strip()
     if existing and not _is_conf_safe(existing):
         click.echo(
-            'warning: 环境里已有的 LD_PRELOAD 含有 " % 或换行，追加进 supervisord.conf 会让 '
-            "supervisord 拒绝加载配置，本次只预加载 jemalloc、不追加它",
+            'warning: 环境里已有的 LD_PRELOAD 含有 " % 或换行，这些字符会让 supervisord 拒绝'
+            "加载它的配置，因此一律不追加，本次只预加载 jemalloc",
             err=True,
         )
 
@@ -487,7 +487,7 @@ def _probe_jemalloc(
     # 自带那份）就都被这一处覆盖，不用每个来源各查一遍。
     if not _is_conf_safe(str(so_path)):
         return _ProbeResult(
-            fatal='路径含有 " % 或换行，写进 supervisord.conf 会让 supervisord 拒绝加载配置'
+            fatal='路径含有 " % 或换行，这些字符会让 supervisord 拒绝加载它的配置，因此一律不注入'
         )
     env = {
         **os.environ,
@@ -653,7 +653,7 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
     # 沿用用户的 MALLOC_CONF 意味着它会原样进 conf，和绝对路径一样要过这道闸。
     if not _is_conf_safe(malloc_conf):
         click.echo(
-            "warning: MALLOC_CONF 含有会写坏 supervisord.conf 的字符，改用默认旋钮",
+            "warning: MALLOC_CONF 含有会让 supervisord 拒绝加载配置的字符，一律改用默认旋钮",
             err=True,
         )
         malloc_conf = _JEMALLOC_MALLOC_CONF
