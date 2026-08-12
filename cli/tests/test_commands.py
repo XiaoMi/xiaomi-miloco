@@ -2581,6 +2581,7 @@ def test_malloc_unrecognized_values_warn_and_skip(
     "path",
     [
         '/opt/a"b/libjemalloc.so.2',  # Unexpected end of key/value pairs
+        "/opt/a%2Fb/libjemalloc.so.2",  # supervisord 展开时 badly formatted
         "/opt/a\nb/libjemalloc.so.2",  # No closing quotation
     ],
 )

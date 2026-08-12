@@ -152,6 +152,9 @@ cd /tmp/jemalloc-$JEMALLOC_VERSION
 make -j"\$(nproc)" > /tmp/make.log 2>&1 || { tail -30 /tmp/make.log; exit 1; }
 cp lib/libjemalloc.so.2 /io/libjemalloc.so.2
 strip --strip-unneeded /io/libjemalloc.so.2
+# 许可证跟产物同源同批带出: BSD-2-Clause 第 2 条要求二进制再分发时附上版权声明,
+# 而这份 .so 会打进 wheel 发到每台机器。从源码包里取而不是手写, 换版本时不会漂。
+cp COPYING /io/COPYING
 echo "-- 依赖:"
 ldd /io/libjemalloc.so.2
 echo "-- 需要的最高 glibc 符号版本:"
@@ -245,10 +248,20 @@ if [[ -n "$EXPECTED_SO" && "$BUILT_SHA" != "$EXPECTED_SO" ]]; then
   exit 1
 fi
 
+BUILT_COPYING="$WORK_DIR/COPYING"
+[ -s "$BUILT_COPYING" ] || { echo "没拿到源码包里的 COPYING, 中止。" >&2; exit 1; }
+
 mkdir -p "$OUT_DIR"
 cp "$BUILT_SO" "$OUT_DIR/libjemalloc.so.2"
-echo "== 完成: $OUT_DIR/libjemalloc.so.2"
-ls -l "$OUT_DIR/libjemalloc.so.2"
+# 版本号由脚本写, 不手工维护: 换版本时这份文件跟着 .so 一起重新产出, 不会声明成旧版本。
+{
+  echo "本目录下的 libjemalloc.so.2 来自 jemalloc $JEMALLOC_VERSION (https://github.com/jemalloc/jemalloc)，"
+  echo "按以下许可证分发。构建方式见 backend/miloco/scripts/build_jemalloc.sh。"
+  echo
+  cat "$BUILT_COPYING"
+} > "$OUT_DIR/LICENSE.jemalloc"
+echo "== 完成: $OUT_DIR/libjemalloc.so.2 + LICENSE.jemalloc"
+ls -l "$OUT_DIR/libjemalloc.so.2" "$OUT_DIR/LICENSE.jemalloc"
 echo
 echo "在目标机上用:"
 echo "  LD_PRELOAD=$OUT_DIR/libjemalloc.so.2 <你的命令>"
