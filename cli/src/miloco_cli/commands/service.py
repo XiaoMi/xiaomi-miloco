@@ -643,7 +643,7 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
     ``MILOCO_MALLOC`` 的取值语义：
 
     - 未设置 / ``jemalloc`` —— 走候选链（系统那份优先，自带那份兜底）。区别只在找不到时：
-      未设置是静默（没装 libjemalloc2 是常态），显式写了才告警
+      未设置是静默（这只是优化项，没生效不该打扰人），显式写了才告警
     - ``glibc`` —— 什么都不注入，按 glibc 默认起
     - ``.so`` 的绝对路径 —— 只试这一个，不进候选链
     - 其它取值 —— 告警并按不注入处理
@@ -690,7 +690,7 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
     if not choice or choice == "jemalloc":
         picked = _pick_jemalloc(backend_python, malloc_conf)
         if picked is None:
-            # 没装 libjemalloc2 是常态，默认路径静默回退即可；用户显式点名却没给上才必须说。
+            # 默认路径静默回退：这只是优化项，没生效不影响服务。用户显式点名才必须说。
             if choice:
                 click.echo(
                     "warning: 找不到可用的 libjemalloc，本次不改分配器；"

@@ -139,18 +139,25 @@ Miloco 里"部署时区"指**家庭真实所在的时区**，所有 agent 可见
 
 `miloco-cli service start` 生成 supervisord.conf 时会尝试给 backend 预加载 jemalloc，往
 `environment=` 行里加 `LD_PRELOAD` 和 `MALLOC_CONF` 两个变量——glibc malloc 的 arena 碎片会让
-长跑 RSS 只涨不落，jemalloc 能把空闲页真正还给系统。机器上没装 libjemalloc 时什么都不注入、不打扰；
-装了但验证不通过时会在 stderr 说明哪一份为什么不能用。两种情况都不影响启动。
+长跑 RSS 只涨不落，jemalloc 能把空闲页真正还给系统。
 
-优先用系统装的那份（`apt install libjemalloc2`），都没有才回落到 miot 包里自带的。选中之前会真起一个
-子进程做加载验证，验证不过就换下一个候选，全不可用就什么都不注入。
+优先用系统装的那份（`apt install libjemalloc2`），系统没装或都验证不通过时，回落到 miot 包里自带的
+那份——x86_64 / arm64 的 linux 包都带了它，**所以这两个架构上默认就是注入状态，与机器上装没装
+libjemalloc 无关**。只有自带那份也用不上（armv7 / riscv64 这类不带自带产物的架构，或它同样验证不通过）
+才什么都不注入。选中之前会真起一个子进程做加载验证，验证不过就换下一个候选，某一份为什么不能用会打在
+stderr 上。以上任何一种情况都不影响启动。
 
-| 想做什么             | 怎么做                                                                |
-| -------------------- | --------------------------------------------------------------------- |
-| 永久关闭             | `miloco-cli config set safe_mode true`（该字段只被 CLI 读，后端不读） |
-| 本次临时切回 glibc   | `MILOCO_MALLOC=glibc miloco-cli service start`                        |
-| 指定某一份           | `MILOCO_MALLOC=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2`            |
-| 确认这次到底用没用上 | `grep LD_PRELOAD $MILOCO_HOME/supervisord.conf`（没这一行就是没注入） |
+| 想做什么             | 怎么做                                                                   |
+| -------------------- | ------------------------------------------------------------------------ |
+| 永久关闭             | `miloco-cli config set safe_mode true`（该字段只被 CLI 读，后端不读）    |
+| 本次临时切回 glibc   | `MILOCO_MALLOC=glibc miloco-cli service start`                           |
+| 指定某一份           | `MILOCO_MALLOC=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2`               |
+| 自己调旋钮           | `MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 miloco-cli service start` |
+| 确认这次到底用没用上 | `grep LD_PRELOAD $MILOCO_HOME/supervisord.conf`（没这一行就是没注入）    |
+
+环境里已有的 `MALLOC_CONF` 会被**整体沿用**，不是跟默认旋钮合并——它一旦存在，默认的
+`background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000` 三项就一个都不生效。实际用上的是
+哪一套，看启动时 stderr 上 `分配器:` 那一行读回的 `background_thread=` / `dirty/muzzy_decay_ms=`。
 
 `safe_mode` 的语义是「关掉可选的性能优化，用最保守的配置启动」，压过 `MILOCO_MALLOC` 的一切取值；
 后续新增的优化项也会纳入这个开关。
