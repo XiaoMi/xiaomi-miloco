@@ -2431,7 +2431,6 @@ def test_scope_camera_list_shows_composite_did(runner):
 #
 # 全部 mock 子进程。真起探针会让用例行为取决于"本机装没装 libjemalloc2"，
 # 而 isolated_config 默认设了 MILOCO_MALLOC=glibc，下面这些用例靠 malloc_probe 覆盖回来。
-# 规格见 docs/jemalloc-preload-spec.md。
 
 
 def _probe_stdout(ver="5.3.1", page=4096, bg=True, dirty=5000, muzzy=5000):
@@ -2454,6 +2453,10 @@ def malloc_probe(monkeypatch, tmp_path):
     import miloco_cli.commands.service as svc_mod
 
     monkeypatch.delenv("MILOCO_MALLOC", raising=False)
+    # 这两个不带 MILOCO_ 前缀，isolated_config 清不到；而被测代码对它们是"环境里有就沿用"
+    # 的语义（LD_PRELOAD 追加、MALLOC_CONF 整份取用），不清掉会让导出过它们的开发机拿到假失败。
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.delenv("MALLOC_CONF", raising=False)
     monkeypatch.setattr(svc_mod.sys, "platform", "linux")
 
     lib_dir = tmp_path / "usr-lib"
@@ -2549,9 +2552,9 @@ def test_malloc_glibc_injects_nothing(malloc_probe, monkeypatch, capsys):
     [
         "tcmalloc",  # 不认识的名字
         "relative/path.so",  # 不是绝对路径
-        '/tmp/a"b/libjemalloc.so.2',  # 含双引号，会写坏 environment 行
-        "/tmp/a,b/libjemalloc.so.2",  # 含逗号，会被 supervisord 当分隔符
-        "/tmp/a\nb/libjemalloc.so.2",  # 含换行
+        '/tmp/a"b/libjemalloc.so.2',  # 含双引号：Unexpected end of key/value pairs
+        "/tmp/a%2Fb/libjemalloc.so.2",  # 含 %：supervisord 展开时 badly formatted
+        "/tmp/a\nb/libjemalloc.so.2",  # 含换行：No closing quotation
     ],
 )
 def test_malloc_unrecognized_values_warn_and_skip(
@@ -2559,14 +2562,46 @@ def test_malloc_unrecognized_values_warn_and_skip(
 ):
     """认不出的取值一律告警 + 不注入。
 
-    带 " / , / 换行的绝对路径也走这里：environment= 行按逗号分隔、值用双引号包，
-    这些字符会把整行写坏，后果是 supervisord 起不来。
+    带 " / % / 换行的绝对路径也走这里：这三种字符任意一个都会让 supervisord 拒绝加载
+    配置（三条错误信息见上面各行注释，均为实测），后果是 backend 起不来。
     """
     import miloco_cli.commands.service as svc_mod
 
     monkeypatch.setenv("MILOCO_MALLOC", value)
     assert svc_mod._resolve_malloc_env("/x/python") == []
     assert "无法识别 MILOCO_MALLOC" in capsys.readouterr().err
+
+
+def test_malloc_comma_in_path_is_allowed(malloc_probe, monkeypatch, capsys):
+    """含逗号的路径**不能**被拒——值用双引号包住后 supervisord 解析得好好的（实测）。
+
+    这条钉的是"别把逗号加进 _CONF_HOSTILE_CHARS"：同一个判断函数也管 MALLOC_CONF，
+    而它的合法值本身就是逗号分隔的，拒掉逗号会让默认旋钮串一个都注入不进去。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    so_path = "/tmp/a,b/libjemalloc.so.2"
+    monkeypatch.setenv("MILOCO_MALLOC", so_path)
+    monkeypatch.setattr(svc_mod.Path, "is_file", lambda self: True)
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["LD_PRELOAD"] == so_path
+    assert "无法识别" not in capsys.readouterr().err
+
+
+def test_malloc_conf_with_hostile_char_falls_back_to_default(
+    malloc_probe, monkeypatch, capsys
+):
+    """环境里的 MALLOC_CONF 含 % 时换回默认旋钮，而不是原样写进 conf。
+
+    路径那侧早有这道闸，MALLOC_CONF 这侧原来一个字符都没检查——它同样是用户可控、
+    同样原样进 environment= 行，漏了它等于闸只关了一半。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MALLOC_CONF", "dirty_decay_ms:50%")
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+    assert "MALLOC_CONF 含有会写坏" in capsys.readouterr().err
 
 
 def test_malloc_candidates_dedupe_symlinks(malloc_probe, tmp_path):
@@ -3269,7 +3304,10 @@ def test_health_failure_hints_safe_mode_when_injected(malloc_probe, capsys, fail
 
     err = capsys.readouterr().err
     assert "本次启用了 jemalloc" in err
-    assert "config set safe_mode true" in err
+    # 钉住可执行文件名：这行是服务起不来时唯一的逃生指引，用户会直接照抄。
+    # 只钉 "config set safe_mode true" 不够——写成 `miloco config set` 也能过，
+    # 而本仓库只注册了 miloco-cli 这一个 console script。
+    assert "miloco-cli config set safe_mode true" in err
     # 不下结论：启动失败原因很多，不能说"是 jemalloc 导致的"
     assert "导致" not in err
 

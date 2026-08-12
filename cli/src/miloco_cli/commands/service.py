@@ -262,7 +262,7 @@ def _resolve_timezone() -> str | None:
 #
 # backend 长跑 RSS 单调涨到 2GB+ 的根因是 glibc malloc 的 arena 碎片，换 jemalloc 能把空闲页
 # 真正还给系统。Python 层换不掉分配器，唯一的进程级方式是 LD_PRELOAD，且必须在进程启动前设好，
-# 所以落点在这里生成的 supervisord.conf。完整规格见 docs/jemalloc-preload-spec.md。
+# 所以落点在这里生成的 supervisord.conf。
 #
 # 第一优先级是 backend 能起来，jemalloc 只是优化：下面每一步失败都退回"什么都不注入"。
 
@@ -274,6 +274,9 @@ _JEMALLOC_MALLOC_CONF = "background_thread:true,dirty_decay_ms:5000,muzzy_decay_
 
 # jemalloc 拒掉不认识的旋钮时打的原文，前缀必须完整匹配（实测格式），多个非法旋钮逐条一行。
 _INVALID_CONF_PREFIX = "<jemalloc>: Invalid conf pair: "
+
+# 出现在 environment= 行里就会让 supervisord 起不来的字符，理由见 _is_conf_safe。
+_CONF_HOSTILE_CHARS = frozenset('"%\n\r')
 
 _ARCH_LIB_DIR_NAMES = {
     "x86_64": "x86_64-linux-gnu",
@@ -650,22 +653,43 @@ def _safe_mode_enabled() -> bool:
         return False
 
 
-def _is_injectable_path(choice: str) -> bool:
-    """绝对路径，且不含会写坏 supervisord.conf 的字符。
+def _is_conf_safe(value: str) -> bool:
+    """值里不含会让 supervisord 拒绝加载配置的字符。
 
-    ``environment=`` 行按逗号分隔、值用双引号包，路径里带 ``"`` 或 ``,`` 或换行会把整行写坏，
-    后果是 supervisord 直接起不来。合法的 .so 路径里不该出现这些字符，所以不做转义、
-    直接归到"无法识别"分支。
+    三种字符，后果都是 supervisord 起不来（比 jemalloc 本身危险得多），逐个实测过：
+
+    - ``"`` —— 提前闭合引号，报 ``Unexpected end of key/value pairs``
+    - 换行 —— 报 ``No closing quotation``
+    - ``%`` —— supervisord 加载时对这一行做一次百分号展开（``options.py::expand`` 走
+      ``s % expansions``），落单的 ``%`` 报 ``badly formatted``
+
+    **逗号不在此列**：值用双引号包住后 supervisord 能正确解析引号内的逗号，实测值不会被
+    拆坏。这一条不是可有可无的保守——``MALLOC_CONF`` 的合法值本身就是逗号分隔的，把逗号
+    拒掉会让默认旋钮串一个都注入不进去。
     """
-    return choice.startswith("/") and not set(choice) & {'"', ",", "\n", "\r"}
+    return not set(value) & _CONF_HOSTILE_CHARS
+
+
+def _is_injectable_path(choice: str) -> bool:
+    """绝对路径，且不含会写坏 supervisord.conf 的字符。"""
+    return choice.startswith("/") and _is_conf_safe(choice)
 
 
 def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, str]]:
     """决定给 backend 注入哪套分配器环境变量（``LD_PRELOAD`` / ``MALLOC_CONF``）。
 
-    判定顺序：非 Linux → 安全模式 → ``MILOCO_MALLOC`` → 候选链。取值语义见
-    ``docs/jemalloc-preload-spec.md`` 第一节。任何一步不成都返回空列表，也就是什么都不注入、
-    按 glibc 默认起 —— backend 能起来的优先级高于换分配器。
+    判定顺序：非 Linux → 安全模式 → ``MILOCO_MALLOC`` → 候选链。
+
+    ``MILOCO_MALLOC`` 的取值语义：
+
+    - 未设置 / ``jemalloc`` —— 走候选链（系统那份优先，自带那份兜底）。区别只在找不到时：
+      未设置是静默（没装 libjemalloc2 是常态），显式写了才告警
+    - ``glibc`` —— 什么都不注入，按 glibc 默认起
+    - ``.so`` 的绝对路径 —— 只试这一个，不进候选链
+    - 其它取值 —— 告警并按不注入处理
+
+    任何一步不成都返回空列表，也就是什么都不注入、按 glibc 默认起 —— backend 能起来的
+    优先级高于换分配器。
 
     macOS 上 ``LD_PRELOAD`` 本就无效（该是 ``DYLD_INSERT_LIBRARIES`` 且受 SIP 限制），
     所以非 Linux 在最前面直接返回。
@@ -679,7 +703,7 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
     if _safe_mode_enabled():
         click.echo(
             "分配器: 安全模式已开启，不预加载 jemalloc；"
-            "关闭用 miloco config set safe_mode false",
+            "关闭用 miloco-cli config set safe_mode false",
             err=True,
         )
         if choice and choice != "glibc":
@@ -692,6 +716,13 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
         return []
 
     malloc_conf = os.environ.get("MALLOC_CONF", _JEMALLOC_MALLOC_CONF)
+    # 沿用用户的 MALLOC_CONF 意味着它会原样进 conf，和绝对路径一样要过这道闸。
+    if not _is_conf_safe(malloc_conf):
+        click.echo(
+            "warning: MALLOC_CONF 含有会写坏 supervisord.conf 的字符，改用默认旋钮",
+            err=True,
+        )
+        malloc_conf = _JEMALLOC_MALLOC_CONF
 
     if not choice or choice == "jemalloc":
         picked = _pick_jemalloc(backend_python, malloc_conf)
@@ -768,7 +799,7 @@ def _echo_jemalloc_hint_if_injected() -> None:
     if so_path := _injected_jemalloc_from_conf():
         click.echo(
             f"提示: 本次启用了 jemalloc ({so_path})。如果反复起不来，可以先排除它：\n"
-            "      miloco config set safe_mode true",
+            "      miloco-cli config set safe_mode true",
             err=True,
         )
 

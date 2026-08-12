@@ -6,8 +6,8 @@
 set -euo pipefail
 
 TARGET_ARCH="${1:-$(uname -m)}"
-# 钉 5.3.1: docs/jemalloc-preload-spec.md 的源码结论(configure.ac / pages.c 行号)都引自这一版,
-# 编同一版才能拿那些行号对账。
+# 钉 5.3.1: 换版本前先确认 configure.ac 的 LG_PAGE 分支和 src/pages.c 的 pages_boot 没变语义
+# —— 下面 LG_PAGE 的取值理由建立在那两处上。
 JEMALLOC_VERSION="${JEMALLOC_VERSION:-5.3.1}"
 # 源码 tarball 的 sha256, 必须钉死: 产物要编进随包分发的二进制、塞到每台用户机器上,
 # HTTPS 只保证传输安全,不保证"拿到的就是审过的那份代码"(release 资产可被替换、tag 可被移动)。
