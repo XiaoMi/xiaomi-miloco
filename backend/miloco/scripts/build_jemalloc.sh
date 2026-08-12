@@ -24,28 +24,40 @@ declare -A JEMALLOC_SHA256=(
 # 默认存储驱动用不了时的口子(例: overlay 跑在 ext4 上, podman 直接拒绝启动):
 #   CONTAINER_FLAGS="--root /tmp/podman-root --runroot /tmp/podman-run --storage-driver vfs"
 read -r -a CONTAINER_FLAG_ARR <<< "${CONTAINER_FLAGS:-}"
-# 不加 --with-malloc-conf: 旋钮只有一个来源,就是 supervisord.conf 的 MALLOC_CONF。
-# 编进去反而有害 —— CLI 的探针靠"读回值 != 注入值"判断环境变量有没有真生效,内置值会让这条
-# 判据永远看起来正常(值碰巧对,但"环境变量生效"的结论是错的,将来调 decay 会发现改不动)。
-# 那道"没注入也有默认值"的保险对自带这份也不成立: 它是我们自己编的、不会用
-# --disable-user-config,必然读得到环境变量。
+# 不加 --with-malloc-conf: 旋钮只有一个来源,就是 supervisord.conf 的 MALLOC_CONF。编进去会
+# 多出一个改不动的隐藏默认值 —— 调 decay 时改了环境变量却不生效,而两处都"看起来"配过了。
 
 # 镜像仓库前缀。quay.io 拉不动时换源用(实测国内经常 TLS handshake timeout):
 #   IMAGE_PREFIX=ghcr.io/pypa ./build_jemalloc.sh x86_64
-# 换源只影响从哪儿取容器,不影响产物: 源码由 sha256 钉死、编译参数全部显式给。
+# 换源换的只是"从哪个 registry 取",取到的必须是同一份镜像 —— 下面按 digest 钉死,对不上
+# 容器运行时会直接拒绝拉取。
+#
+# 为什么连镜像也要钉: 产物的字节由容器里的 gcc/binutils 决定,而 manylinux2014 是 pypa 持续
+# 重建的滚动标签。不钉的话几个月后重跑,sha256 会因为工具链换代而静默漂移 —— 那时就无法区分
+# "工具链变了"和"仓库里这份 .so 被人换过",而后者正是钉源码 sha256 想防的事。
 IMAGE_PREFIX="${IMAGE_PREFIX:-quay.io/pypa}"
+declare -A IMAGE_DIGEST=(
+  [x86_64]=sha256:0a42cb7e5f4ba6bbfb8d0a86d1aab0c8876ba9c3be16bd99360ae42bf010ec77
+  [aarch64]=sha256:63bfa74be47f0277e998cb7c1b571b27664ac848bb356b0f4588438f930285dd
+)
+# 仓库里当前那两份产物的 sha256。用上面钉死的镜像重跑应逐字节一致;不一致说明镜像或脚本变了,
+# 查清楚再提交新的二进制,别直接覆盖。换 digest 时同步更新这里。
+declare -A EXPECTED_SO_SHA256=(
+  [x86_64]=39fe427335194e83638fb85a4b737c628548cd5ca8edf90fb2e811c809f690b6
+  [aarch64]=02c1b02bbbd1bd4c0c052b747bb472aaf3c992faf6cb7f79111db6cdf29ec7f6
+)
 
 case "$TARGET_ARCH" in
   x86_64|amd64)
     TARGET_ARCH=x86_64
-    IMAGE="$IMAGE_PREFIX/manylinux2014_x86_64"
+    IMAGE="$IMAGE_PREFIX/manylinux2014_x86_64@${IMAGE_DIGEST[x86_64]}"
     # x86_64 页大小固定 4K
     LG_PAGE=12
     LIB_SUBDIR=x86_64
     ;;
   aarch64|arm64)
     TARGET_ARCH=aarch64
-    IMAGE="$IMAGE_PREFIX/manylinux2014_aarch64"
+    IMAGE="$IMAGE_PREFIX/manylinux2014_aarch64@${IMAGE_DIGEST[aarch64]}"
     # aarch64 有 4K/16K/64K 三种页, LG_PAGE 是编译期常量且必须 >= 运行时页大小。
     # 按最大页(64K)编, 才能同时跑在 4K/16K/64K 页内核上。
     LG_PAGE=16
@@ -212,6 +224,18 @@ echo "$FILE_INFO" | grep -q "$([ "$TARGET_ARCH" = x86_64 ] && echo x86-64 || ech
 if objdump -p "$BUILT_SO" | grep NEEDED | grep -qvE "libc\.so|libm\.so|libdl\.so|libpthread\.so|ld-linux"; then
   echo "产物有预期外的动态依赖:" >&2
   objdump -p "$BUILT_SO" | grep NEEDED >&2
+  exit 1
+fi
+
+# 与仓库记录比对: 同一个镜像 digest + 同一份源码,产物应该逐字节一致。不一致就是构建环境
+# 变了(或有人动过仓库里那份),停下来让人看一眼,别默默覆盖。
+BUILT_SHA="$(sha256sum "$BUILT_SO" | cut -d' ' -f1)"
+EXPECTED_SO="${EXPECTED_SO_SHA256[$TARGET_ARCH]:-}"
+if [[ -n "$EXPECTED_SO" && "$BUILT_SHA" != "$EXPECTED_SO" ]]; then
+  echo "产物 sha256 与仓库记录不一致,构建环境可能已变:" >&2
+  echo "  记录: $EXPECTED_SO" >&2
+  echo "  本次: $BUILT_SHA" >&2
+  echo "确认无误后同步更新脚本顶部的 EXPECTED_SO_SHA256 再提交。" >&2
   exit 1
 fi
 

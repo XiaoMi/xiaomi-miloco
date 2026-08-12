@@ -2583,16 +2583,17 @@ def test_malloc_hostile_char_in_abs_path_says_the_real_reason(
     """含危险字符的绝对路径被挡下时要说真实原因，不能答"这不是绝对路径"。
 
     三种字符任意一个都会让 supervisord 拒绝加载配置（错误信息见各行注释，均为实测）。
-    但把"是不是绝对路径"和"字符安不安全"合成一个布尔值就会答非所问——用户给的确实是
-    绝对路径，却被告知"可用值：…… 绝对路径"，排查方向会被带到"是不是路径写错了"上。
+    检查在探针入口，所以路径来源（候选链 / MILOCO_MALLOC / 自带那份）都被同一处覆盖。
     """
     import miloco_cli.commands.service as svc_mod
 
     monkeypatch.setenv("MILOCO_MALLOC", path)
+    monkeypatch.setattr(svc_mod.Path, "is_file", lambda self: True)
     assert svc_mod._resolve_malloc_env("/x/python") == []
     err = capsys.readouterr().err
     assert "supervisord" in err  # 说清后果
     assert "无法识别" not in err  # 不再答非所问
+    assert malloc_probe["probe_calls"] == []  # 拼不出来就不必真起进程
 
 
 def test_malloc_comma_in_path_is_allowed(malloc_probe, monkeypatch, capsys):
@@ -2887,59 +2888,32 @@ def test_malloc_not_taken_over_is_fatal_regardless_of_stderr(malloc_probe):
     assert svc_mod._resolve_malloc_env("/x/python") == []
 
 
-def test_malloc_background_thread_silently_disabled_warns(malloc_probe, capsys):
-    """conf 要 background_thread:true 但读回 False → 告警但照常注入。
+def test_malloc_readback_is_reported_as_is(malloc_probe, capsys):
+    """读回值原样照打，不替它分类、不额外告警。
 
-    --disable-background-thread 编的库解析这个旋钮不报错（CONF_HANDLE_BOOL 是无条件编译的），
-    只有读实际值才抓得到。
+    老版本 jemalloc 三个旋钮全缺时读回全是 None —— `dirty/muzzy_decay_ms=None/None`
+    摆在成功行里就是事实，用户一眼看得见。jemalloc 是锦上添花的优化项，为"它属于
+    没生效的哪一态"加判断分支不值得；旋钮真被拒时它自己还会在 backend 日志里打
+    Invalid conf pair。
     """
     import miloco_cli.commands.service as svc_mod
 
-    malloc_probe["stdout"] = _probe_stdout(bg=False)
+    malloc_probe["stdout"] = _probe_stdout(
+        ver="3.6.0", page="None", bg="None", dirty="None", muzzy="None"
+    )
     pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
-    assert "LD_PRELOAD" in pairs and "MALLOC_CONF" in pairs
-    assert "但实际没启用" in capsys.readouterr().err
-
-
-def test_malloc_conf_silently_ignored_warns_not_passes(malloc_probe, capsys):
-    """读回值 ≠ 注入值且 stderr 干净（--disable-user-config 的形态）→ 告警但照常注入。
-
-    这种库所有既有判据都抓不到：预加载生效、mallctl 能调、stderr 干净、退出码 0、ver 正常。
-    **不能判成通过而静默**，否则用户会以为旋钮生效了。
-    """
-    import miloco_cli.commands.service as svc_mod
-
-    malloc_probe["stdout"] = _probe_stdout(bg=False, dirty=10000, muzzy=0)
-    malloc_probe["stderr"] = ""
-    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
-    assert "LD_PRELOAD" in pairs  # 仍然用它，arena 碎片问题仍被解决
+    # 照常用：旋钮没生效仍远好过 glibc 的 arena 碎片
+    assert "LD_PRELOAD" in pairs
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
     err = capsys.readouterr().err
-    assert "MALLOC_CONF 没生效" in err
-    assert "dirty_decay_ms 期望 5000 读回 10000" in err
-
-
-def test_malloc_user_conf_without_decay_does_not_warn(malloc_probe, monkeypatch, capsys):
-    """用户自带的 MALLOC_CONF 没写 decay 时，读回默认值不算"没生效"。
-
-    比对只在注入串里实际出现过的旋钮上做，否则这里会误报——读回的 10000/0 是 jemalloc
-    自己的默认值，不是我们注入了什么却没生效。
-    """
-    import miloco_cli.commands.service as svc_mod
-
-    monkeypatch.setenv("MALLOC_CONF", "abort_conf:false")
-    malloc_probe["stdout"] = _probe_stdout(bg=False, dirty=10000, muzzy=0)
-    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
-    assert pairs["MALLOC_CONF"] == "abort_conf:false"  # 沿用用户的值
-    err = capsys.readouterr().err
-    assert "没生效" not in err
-    assert "但实际没启用" not in err  # 用户没要 background_thread，读回 False 也不报
+    assert "dirty/muzzy_decay_ms=None/None" in err
+    assert "background_thread=None" in err
 
 
 @pytest.mark.parametrize(
     ("stdout", "expect_version", "expect_page"),
     [
-        (_probe_stdout(), "5.3.1", 4096),
-        (_probe_stdout(ver="?"), "unknown", 4096),  # 版本读不到只影响对账
+        (_probe_stdout(ver="?"), "unknown", 4096),  # mallctl 取不到 version
         (_probe_stdout(page="None"), "5.3.1", None),  # 老版本没有 arenas.page
     ],
 )

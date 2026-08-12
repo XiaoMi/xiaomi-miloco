@@ -415,8 +415,20 @@ def _jemalloc_candidates(
 
 
 def _preload_value(so_path: Path) -> str:
-    """``LD_PRELOAD`` 的值：我们的放最前（要它接管 malloc），环境里原有的追加在后。"""
+    """``LD_PRELOAD`` 的值：我们的放最前（要它接管 malloc），环境里原有的追加在后。
+
+    环境里原有的那段含危险字符时只是**不追加**，不影响我们这一份——它写进 conf 会让
+    supervisord 拒绝加载，但那是别人的库，没道理连累 jemalloc。``so_path`` 自身的字符
+    检查在 :func:`_probe_jemalloc` 入口，那里能顺着候选链换下一个。
+    """
     existing = os.environ.get("LD_PRELOAD", "").strip()
+    if existing and not _is_conf_safe(existing):
+        click.echo(
+            'warning: 环境里已有的 LD_PRELOAD 含有 " % 或换行，追加进 supervisord.conf 会让 '
+            "supervisord 拒绝加载配置，本次只预加载 jemalloc、不追加它",
+            err=True,
+        )
+        existing = ""
     return f"{so_path}:{existing}" if existing else str(so_path)
 
 
@@ -462,6 +474,13 @@ def _probe_jemalloc(
     **它不保证 backend 里一定没问题**——探针只加载 libc，不加载 libav / onnxruntime；
     只在特定分配模式下才触发的问题只能靠真机跑出来。
     """
+    # 写不进 supervisord.conf 的路径等于用不了，和加载失败同一个出口：候选链换下一个，
+    # 绝对路径那条也会照常打出真实原因。放在探针入口，所有来源（候选链 / MILOCO_MALLOC /
+    # 自带那份）就都被这一处覆盖，不用每个来源各查一遍。
+    if not _is_conf_safe(str(so_path)):
+        return _ProbeResult(
+            fatal='路径含有 " % 或换行，写进 supervisord.conf 会让 supervisord 拒绝加载配置'
+        )
     env = {
         **os.environ,
         "LD_PRELOAD": _preload_value(so_path),
@@ -540,66 +559,25 @@ def _pick_jemalloc(
     return None
 
 
-def _conf_pairs(malloc_conf: str) -> dict[str, str]:
-    """把 ``MALLOC_CONF`` 解析成"旋钮名 → 值"。"""
-    pairs: dict[str, str] = {}
-    for raw in malloc_conf.split(","):
-        name, _, value = raw.strip().partition(":")
-        if name and value:
-            pairs[name] = value
-    return pairs
-
-
-def _warn_on_ineffective_conf(injected: dict[str, str], probe: _ProbeResult) -> None:
-    """注入了却没真生效的旋钮必须说出来，否则用户会以为调好了。
-
-    只比对注入串里**实际出现过**的旋钮：环境里已有 MALLOC_CONF 时我们沿用用户的值，用户可能
-    根本没写 decay，那时读回 jemalloc 自己的默认值不是"没生效"，报警就是误报。
-    """
-    if injected.get("background_thread") == "true" and probe.background_thread is False:
-        click.echo(
-            "warning: jemalloc 接受了 background_thread:true 但实际没启用"
-            "（编译时禁用了后台线程），归还内存的 madvise 仍在解码线程上",
-            err=True,
-        )
-    stale = [
-        f"{name} 期望 {injected[name]} 读回 {readback}"
-        for name, readback in (
-            ("dirty_decay_ms", probe.dirty_decay_ms),
-            ("muzzy_decay_ms", probe.muzzy_decay_ms),
-        )
-        if name in injected and readback is not None and str(readback) != injected[name]
-    ]
-    if stale:
-        click.echo(
-            f"warning: MALLOC_CONF 没生效（{'，'.join(stale)}），这份 libjemalloc 可能是 "
-            "--disable-user-config 编的；分配器仍是 jemalloc，但空闲页归还会慢",
-            err=True,
-        )
-
-
 def _malloc_env_pairs(
     so_path: Path, probe: _ProbeResult, malloc_conf: str
 ) -> list[tuple[str, str]]:
-    """组装要注入的环境变量，顺带把"注入了但没生效"的旋钮告警出来。
+    """组装要注入的环境变量，并把读回的实况打出来。
 
-    不认识的旋钮原样留在 ``MALLOC_CONF`` 里：jemalloc 逐个旋钮独立解析，被拒的那个不影响
-    同一串里其它旋钮生效，它自己会在 backend 日志里打一行 ``Invalid conf pair``——那行正是
-    用户需要看到的信息。为了少一行日志去解析 stderr 再回头剔字符串，不值这个复杂度。
+    旋钮全部原样注入，不因为"这份库不认识某个旋钮"做任何加工：jemalloc 逐个旋钮独立解析，
+    被拒的那个不影响其它旋钮生效，它自己会在 backend 日志里打 ``Invalid conf pair``。
+
+    读回值直接照打，不替它分类。``dirty/muzzy_decay_ms=None/None`` 摆在那儿就是"这份库
+    没有这两个旋钮"，再写几段文案去解释它属于哪一态，是给一个锦上添花的优化项加不必要的
+    判断分支。
     """
-    _warn_on_ineffective_conf(_conf_pairs(malloc_conf), probe)
-    # 三个旋钮一律打**读回值**而不是注入值：conf 整份没被读时注入值是假的，照注入值打会和
-    # 上面那条 warning 自相矛盾。
     click.echo(
         f"分配器: jemalloc {probe.version} ({so_path}) page={probe.page}  "
         f"background_thread={probe.background_thread} "
         f"dirty/muzzy_decay_ms={probe.dirty_decay_ms}/{probe.muzzy_decay_ms}",
         err=True,
     )
-    return [
-        ("LD_PRELOAD", _preload_value(so_path)),
-        ("MALLOC_CONF", malloc_conf),
-    ]
+    return [("LD_PRELOAD", _preload_value(so_path)), ("MALLOC_CONF", malloc_conf)]
 
 
 def _safe_mode_enabled() -> bool:
@@ -691,14 +669,7 @@ def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, st
             return []
     elif choice.startswith("/"):
         # 绝对路径只有一份可试，不进候选链——否则会打出"试下一个候选"这种不成立的告警。
-        # 字符检查单独分叉：给的确实是绝对路径，落到下面"无法识别"里会答非所问。
-        if not _is_conf_safe(choice):
-            click.echo(
-                f"warning: MILOCO_MALLOC={choice} 含有 \" % 或换行，"
-                "写进 supervisord.conf 会让 supervisord 拒绝加载配置，本次不改分配器",
-                err=True,
-            )
-            return []
+        # 路径里的危险字符由探针入口统一挡，那条会照常打出真实原因，不用在这里再查一遍。
         so_path = Path(choice)
         if not so_path.is_file():
             click.echo(
