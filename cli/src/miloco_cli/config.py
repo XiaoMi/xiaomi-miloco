@@ -43,6 +43,8 @@ def config_file() -> Path:
 # 点号路径 → (python 类型, 默认值, 中文 description)
 _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     "debug": (bool, False, "是否启用调试模式"),
+    # CLI 独有,故意不进 settings.schema.json / settings.yaml:后端从不读它,写进后端的配置声明
+    # 等于宣称改它对后端有影响。它只影响 CLI 生成 supervisord.conf 的方式。
     "safe_mode": (
         bool,
         False,

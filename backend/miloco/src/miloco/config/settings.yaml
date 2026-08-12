@@ -9,10 +9,6 @@
 # 是否启用调试模式
 debug: false
 
-# 安全模式：关闭可选的性能优化，用最保守的配置启动。
-# 仅 CLI 读取（控制生成 supervisord.conf 时是否预加载 jemalloc），后端不读这个字段。
-safe_mode: false
-
 # 目录配置（storage 相对路径基于 $MILOCO_HOME 解析）
 directories:
   static: "static"    # 后端静态资源目录（相对后端源码 root）
