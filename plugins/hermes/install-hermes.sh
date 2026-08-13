@@ -816,8 +816,13 @@ elif [ -n "$FETCH_MODELS" ]; then
   # 而进来、这三个又没补上时，`if !` 恒不成立 —— 一条 warn 都不打、退 0，用户看到的是
   # "按 lock 补齐"之后一片沉默，重跑多少次都一模一样，而语义去重与 VAD 已经静默降级。
   # 这正是上面探测 FETCH_MODELS 时那段注释自己立的标准（"缺任何一个（含可选）都判不齐，否则会静默降级"）
-  # 的反面。全仓其余每个下载调用点（build.sh、release.yml、local-ci.sh、models_ready 自己）
-  # 都是带 --strict 的，只有这里漏了。
+  # 的反面。全仓合法的"下载却不带 --strict"只有两处，且都不靠退出码判定：
+  #   1. ci.yml 那步 —— 后面紧跟一道 --check --strict 复判（刻意把"没拉到"与"拉到的
+  #      不对"拆开报，也让残缺状态进不了 actions/cache）；
+  #   2. 本文件上面那次 file:// 本地同步 —— 退出码被 `|| true` 显式丢弃。
+  # 其余下载调用点（build.sh、release.yml）都带 --strict；local-ci.sh 与 models_ready
+  # 跑的是 --check --strict，属门禁不属下载。只有这里漏了。口径由
+  # test_every_fetch_caller_matches_its_own_gate_strength 钉住，改这一带先看那条。
   if ! "$PYTHON" "$FETCH_MODELS" --strict --dest "$MILOCO_HOME/models"; then
     warn "感知模型下载失败（网络？）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"

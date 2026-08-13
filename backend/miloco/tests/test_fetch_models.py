@@ -74,13 +74,20 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    """跑 fetch_models.py，环境按 `_clean_env` 隔离。"""
+def _run(
+    *args: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess:
+    """跑 fetch_models.py，环境按 `_clean_env` 隔离。
+
+    cwd 默认继承 pytest 的工作目录；只有"印出来的命令在别处还能不能跑"这类用例才需要
+    显式指定，那种断言的判别力全在于工作目录不是仓库根。
+    """
     return subprocess.run(
         [sys.executable, str(_SCRIPT), *args],
         capture_output=True,
         text=True,
         env={**_clean_env(), **(env or {})},
+        cwd=str(cwd) if cwd is not None else None,
     )
 
 
@@ -453,6 +460,43 @@ def test_strict_makes_optional_fatal(fake_release: tuple[Path, Path, Path]) -> N
     assert "opt.onnx" in r.stderr
 
 
+def test_strict_does_not_call_an_optional_model_required(
+    fake_release: tuple[Path, Path, Path],
+) -> None:
+    """--strict 把可选模型一并阻塞时，措辞不能把它说成"必需"。
+
+    lock 是"缺不缺得起"的唯一事实来源，opt.onnx 在里面明写 required=false，文档与
+    resource_validator 也都按可选处理。报成"必需模型未就绪"，用户会拿着这句话去翻
+    "它什么时候变必需了"，而那三处口径都说它可选 —— 真正的原因只是本次带了 --strict，
+    偏偏这句话把唯一有用的那半截信息省掉了。同一函数的 --check 分支早就避开了这个词。
+    """
+    lock, src, dest = fake_release
+    (src / "opt.onnx").unlink()
+
+    r = _run("--lock", str(lock), "--dest", str(dest), "--strict")
+    assert r.returncode == 1
+    assert "必需" not in r.stderr, f"lock 里写着 required=false 的模型被报成必需：\n{r.stderr}"
+    assert "opt.onnx" in r.stderr and "--strict" in r.stderr, r.stderr
+
+
+def test_non_strict_still_says_required_when_a_required_model_fails(
+    fake_release: tuple[Path, Path, Path],
+) -> None:
+    """反过来：真的是必需模型没拿到时，"必需"这两个字不能跟着一起弄丢。
+
+    上一条只要求"别把可选说成必需"，单看它，把措辞一律改成中性就能通过 —— 而那会把
+    "这个缺了不是降级"这半截信息一并抹掉。两条一起才钉住"照实说"，缺一条都留着一个
+    能一次性改绿的方向。
+    """
+    lock, src, dest = fake_release
+    (src / "req.onnx").unlink()
+
+    r = _run("--lock", str(lock), "--dest", str(dest))
+    assert r.returncode == 1
+    assert "必需模型未就绪" in r.stderr, r.stderr
+    assert "req.onnx" in r.stderr
+
+
 def test_required_only_skips_optional(fake_release: tuple[Path, Path, Path]) -> None:
     lock, src, dest = fake_release
     (src / "opt.onnx").unlink()  # 真跳过的话，源里没有也不该有任何抱怨
@@ -491,6 +535,35 @@ def test_check_optional_only_needs_strict_to_fail(
     r = _run("--lock", str(lock), "--dest", str(dest), "--check", "--strict")
     assert r.returncode == 1
     assert "opt.onnx" in r.stderr
+
+
+def test_check_prints_a_fix_command_that_resolves_where_it_was_printed(
+    fake_release: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    """判红时印的补齐命令，要在**印它的那个工作目录**下真解析得到。
+
+    这个 --check 分支是好几道门禁的共用实现，而调用它的处境不止"人在仓库根手敲"一种：
+    install-hermes 装完之后从 ~/.hermes/... 用绝对路径调它，工作目录是用户当时所在的
+    任意目录；local-ci.sh 也用绝对路径调。前半截若写死仓库根相对路径、后半截 --dest
+    却是 expanduser 过的绝对路径，整行粘回去得到的是 `can't open file ...` —— 一个跟
+    "模型不齐"毫无关系的新错误，正好把人往"文件损坏 / 路径写错"带偏，而他此刻手上
+    只有这一条线索。所以这里刻意在一个**不是**仓库根的目录下跑。
+    """
+    lock, _src, dest = fake_release
+    dest.mkdir()
+    elsewhere = tmp_path / "not-the-repo-root"
+    elsewhere.mkdir()
+
+    r = _run("--lock", str(lock), "--dest", str(dest), "--check", cwd=elsewhere)
+    assert r.returncode == 1, r.stderr
+
+    line = next(ln for ln in r.stderr.splitlines() if ln.startswith("补齐："))
+    script = line.removeprefix("补齐：").split()[1]
+    assert (elsewhere / script).is_file(), (
+        f"补齐命令里的脚本路径，在印出它的工作目录（{elsewhere}）下解析不到：\n"
+        f"    {line}\n"
+        "整行复制粘贴只会得到 can't open file —— 与本次判红毫无关系的另一个错误。"
+    )
 
 
 # ─── 用法错误：exit 2（与"模型缺失"的 exit 1 区分开）─────────────────────
@@ -1248,6 +1321,42 @@ def _fetch_invocations(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def _gate_violations(rel: str, text: str) -> list[str]:
+    """返回 rel 这个文件里违反门禁强度契约的调用点（空列表 = 合规）。
+
+    单独抽出来是为了能拿**合成文本**喂它：契约本身只在真实文件上跑，而"某条例外到底
+    豁免了什么"这件事只能靠反例证明，真实文件里恰恰不存在反例——存在就已经红了。
+    """
+    calls = _fetch_invocations(text)
+
+    # 例外 2（"后面另有一道 --check --strict"）只对 workflow YAML 成立。
+    #
+    # YAML 的 run: 步骤是顺序执行的，文本先后就是执行先后。shell 不是：一句话的文本
+    # 位置与它的执行时机没有关系。install-hermes 的那道门禁写在 models_ready() 体内
+    # （定义在文件靠前处、调用在靠后处），按行号算的话它今天恰好落在所有调用点**之前**
+    # ——于是谁也豁免不了，这条契约的判别力全靠这个巧合。把这个辅助函数挪到文件末尾
+    # （常见风格、纯排版、零行为变化），它就变成"在后面"，本文件所有非 --strict 调用
+    # 一起被豁免：本 PR 修的那个"一条 warn 都不打、退 0，而语义去重与 VAD 已静默降级"
+    # 的缺陷重新变绿，而这条契约是它唯一的网。往下载分支后面新加一个含 --check --strict
+    # 的辅助函数，同一个洞也会自动打开。if/elif 各分支之间更没有先后可言。
+    # 所以 shell 调用方只认例外 1（退出码被 `|| true` 丢弃）。
+    is_yaml = rel.endswith((".yml", ".yaml"))
+    last_gate = (
+        max((i for i, ln in calls if "--check" in ln and "--strict" in ln), default=-1)
+        if is_yaml
+        else -1
+    )
+
+    out: list[str] = []
+    for lineno, line in calls:
+        if "--strict" in line or "|| true" in line:
+            continue
+        if lineno < last_gate:
+            continue
+        out.append(f"{rel}:{lineno}  {line.strip()}")
+    return out
+
+
 def test_every_fetch_caller_matches_its_own_gate_strength() -> None:
     """调用 fetch_models.py 的两头判据必须同强度：要么带 --strict，要么后面有严格门禁。
 
@@ -1263,35 +1372,50 @@ def test_every_fetch_caller_matches_its_own_gate_strength() -> None:
     1. 退出码被显式丢弃（``|| true``）——install-hermes 拿旁边 checkout 当 file:// 源
        做本地同步的那一步。源目录缺几个模型是常态，这步本就不做判定，判定交给它后面
        那道按同一份 lock 复判的门禁。
-    2. **后面**另有一步 ``--check --strict``——ci.yml 刻意把"没拉到"与"拉到的不对"
-       拆成两步（也让不完整状态进不了 actions/cache，因为 save 在门禁之后）。
+    2. **后面**另有一步 ``--check --strict``，**且调用方是 workflow YAML**——ci.yml 刻意
+       把"没拉到"与"拉到的不对"拆成两步（也让不完整状态进不了 actions/cache，因为 save
+       在门禁之后）。限定 YAML 是因为只有它的 run: 步骤能用文本先后代表执行先后；
+       shell 里"门禁写在下面"什么也证明不了，理由见 :func:`_gate_violations`。
 
-    第 2 条只认"在后面"，不认"在前面"，这正是本测试的判别力所在：install-hermes 的
-    models_ready 也跑 ``--check --strict``，但它在下载**之前**、判的是要不要进这个分支，
-    下载完之后没有任何复判。把它算成豁免，本 PR 修的那个 bug 就会照旧绿着过。
+    判别力全在于 models_ready 豁免不了任何人：它也跑 ``--check --strict``，但判的是要不要
+    进补齐分支，下载完之后没有任何复判 —— 算成豁免，本 PR 修的那个 bug 就照旧绿着过。
+    而它被排除掉靠的**不是**"写在下载前面"（那只是当下的排版，一次重构就能翻面），是上面
+    第 2 条的 YAML 限定：排版会变，文件类型不会。
     """
+    bad: list[str] = []
     for rel in _FETCH_CALLERS:
         path = _ROOT / rel
         assert path.is_file(), f"{rel} 不存在（挪了位置就同步这里的清单）"
-        text = path.read_text(encoding="utf-8")
-        calls = _fetch_invocations(text)
+        bad += _gate_violations(rel, path.read_text(encoding="utf-8"))
 
-        # 该文件里最后一道 `--check --strict` 的位置：例外 2 要求它在调用**之后**。
-        last_gate = max(
-            (i for i, ln in calls if "--check" in ln and "--strict" in ln), default=-1
-        )
+    assert not bad, (
+        "下列调用点不带 --strict，退出码也没被 `|| true` 丢弃，也不属于例外 2：\n"
+        + "\n".join(f"    {b}" for b in bad)
+        + "\n只缺可选模型时这些行会退 0，而判入口那侧照旧判不齐 —— 兜底静默失效。"
+    )
 
-        for lineno, line in calls:
-            if "--strict" in line:
-                continue
-            if "|| true" in line:
-                continue
-            assert lineno < last_gate, (
-                f"{rel}:{lineno} 调用 fetch_models.py 却不带 --strict，"
-                f"退出码也没被丢弃，后面也没有 `--check --strict` 复判：\n"
-                f"    {line.strip()}\n"
-                "只缺可选模型时这行会退 0，而判入口那侧照旧判不齐 —— 兜底静默失效。"
-            )
+
+def test_a_gate_below_a_shell_caller_is_not_an_exemption() -> None:
+    """shell 里"严格门禁写在调用下面"不豁免任何东西——文本位置不是执行顺序。
+
+    这条钉的是例外 2 的**边界**，而边界只能拿反例钉：真实文件里今天不存在这种写法
+    （存在就已经红了），所以上面那条契约跑得再绿也证明不了这个边界还在。而它一旦松掉，
+    把 models_ready() 挪到文件末尾这种零行为变化的排版重构，就能顺手豁免掉本文件所有
+    非 --strict 调用——本 PR 修的那个缺陷会重新变绿，且没有任何红灯提示发生过什么。
+    """
+    call = '  "$PYTHON" "$FETCH_MODELS" --dest "$D"\n'
+    gate = '  "$PYTHON" "$FETCH_MODELS" --check --strict --dest "$D"\n'
+
+    assert _gate_violations("plugins/x/install-x.sh", call + gate), (
+        "shell 调用点后面跟一道 --check --strict 就被放行了 —— 那等于让**排版**决定"
+        "契约生效与否：把辅助函数挪到文件末尾即可豁免全文件。"
+    )
+    assert not _gate_violations(".github/workflows/x.yml", call + gate), (
+        "同样的文本在 workflow YAML 里是合法的：run: 步骤顺序执行，文本先后就是执行先后。"
+    )
+    # 两条既有例外不受本次收紧影响
+    assert not _gate_violations("plugins/x/install-x.sh", call.rstrip("\n") + " || true\n")
+    assert not _gate_violations("plugins/x/install-x.sh", gate)
 
 
 def test_fetch_caller_list_is_exhaustive() -> None:

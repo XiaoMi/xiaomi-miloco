@@ -22,9 +22,11 @@
 调用方，都得跟 ``--check`` 那侧的门禁用同一个强度 —— 否则会出现"用 ``--check --strict``
 判不齐、进了补齐分支、补齐时不带 ``--strict``"这种两头错配：只有可选模型缺失时下载器退
 **0**（主流程里 ``failed_optional`` 不并进 ``failed_required``），调用方的 ``if !`` 恒不
-成立，一条告警都不打就往下走，而语义去重、VAD 已经静默降级了。全仓唯一的例外是
-``.github/workflows/ci.yml``：那里下载与门禁**是分开的两步**，退出码不是成功判据，紧随其后
-的 ``--check --strict`` 才是（见该文件内注释）。
+成立，一条告警都不打就往下走，而语义去重、VAD 已经静默降级了。全仓合法的"下载却不带
+``--strict``"只有两处，且都不拿退出码当判据：``.github/workflows/ci.yml`` 那步（下载与门禁
+刻意分成两步，紧随其后的 ``--check --strict`` 才是判据），以及 ``install-hermes.sh`` 拿旁边
+checkout 当 ``file://`` 源做本地同步那步（退出码被 ``|| true`` 显式丢弃）。这条口径由
+``test_every_fetch_caller_matches_its_own_gate_strength`` 钉住，改动前先看那条。
 
 环境变量:
   MILOCO_MODELS_BASE_URL  覆盖下载源（内网镜像 / 离线源）。是**独占替换**而非"排在前面"：
@@ -567,7 +569,16 @@ def main(argv: list[str] | None = None) -> int:
             # 而下一次门禁一字不差地再红一遍 —— 他手上这条命令就是唯一线索，却恰好是
             # 唯一验证不出问题的那条。调用方（local-ci.sh / install-hermes.sh）的同类
             # 提示同理，都跟着门禁的强度走。
-            fix = "python3 scripts/fetch_models.py"
+            # 两截还要同**口径**：这个 --check 分支是好几道门禁的共用实现，而调用它的
+            # 处境不止"人在仓库根手敲"一种 —— install-hermes 装完之后从 ~/.hermes/... 用
+            # 绝对路径调它，工作目录是用户当时所在的任意目录；local-ci.sh 也用绝对路径调。
+            # 前半截硬编码相对路径、后半截 --dest 却是 expanduser 过的绝对路径的话，整行
+            # 粘回去得到的是 `can't open file '/home/u/scripts/fetch_models.py'` —— 一个跟
+            # "模型不齐"毫无关系的新错误，正好把人往"文件损坏 / 路径写错"带偏，正是
+            # install-hermes 下载失败分支里"带上解释器"那段注释论证过的同一种失效。
+            # 跟着当前进程走，两截就必然同口径（sys.executable 在个别嵌入式解释器下是
+            # 空串，留 python3 兜底）。
+            fix = f"{sys.executable or 'python3'} {Path(__file__).resolve()}"
             if args.strict:
                 fix += " --strict"
             print(
@@ -605,11 +616,24 @@ def main(argv: list[str] | None = None) -> int:
     if failed_optional and not args.strict:
         # 与 resource_validator 的降级语义一致：可选模型缺了只是对应能力降级，不阻塞。
         _log(f"  可选模型未就绪（对应功能降级）：{', '.join(failed_optional)}", quiet=args.quiet)
-    if args.strict:
-        failed_required += failed_optional
-    if failed_required:
+    # 阻塞与措辞分开算。--strict 的语义是"两桶都算阻塞"，但并桶之后不能跟着沿用必需桶
+    # 的措辞：lock 是"缺不缺得起"的唯一事实来源，silero_vad 在里面明写 required=false，
+    # 文档和 resource_validator 也都按可选处理。把它报成"必需模型未就绪"，用户会拿着这
+    # 句话去翻"VAD 什么时候变必需了"，而三处口径都说它可选 —— 真正的原因只是本次带了
+    # --strict。同一函数的 --check 分支早就避开了这个词（用中性的"缺少模型"）。
+    blocking = failed_required + (failed_optional if args.strict else [])
+    if blocking:
+        # 非严格模式下能进这里的只有必需桶，"必需"照实说；只有严格模式真把可选模型
+        # 并进来时才换中性措辞，并把"因 --strict 才阻塞"这件事明说出来。
+        if args.strict and failed_optional:
+            head = (
+                f"模型未就绪：{', '.join(blocking)}"
+                f"（其中 {', '.join(failed_optional)} 在 lock 里是可选，因 --strict 一并阻塞）"
+            )
+        else:
+            head = f"必需模型未就绪：{', '.join(blocking)}"
         print(
-            f"必需模型未就绪：{', '.join(failed_required)}\n"
+            f"{head}\n"
             f"源：{' | '.join(urls)}（可用 MILOCO_MODELS_BASE_URL 换源，或手动放置到 {dest}）",
             file=sys.stderr,
         )
