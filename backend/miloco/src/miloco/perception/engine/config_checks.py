@@ -21,7 +21,9 @@
    新特征入队，漂移自检的证据指纹判据开始真实生效，身份撤回时延随之改变。
 2. **单窗帧数 > fast 模式 ReID 重抽间隔**（同上 ↔ ``deep_sort.human_reid_skip_windows``
    等三个旋钮的乘积）。破了之后静止 track 可能整窗复用缓存特征，后果同上。
-   注意这一条**随帧率翻转**：重抽间隔是固定帧数、不跟着 ``input.fps`` 缩放。
+   两点注意：这一条**随帧率翻转**（重抽间隔是固定帧数、不跟着 ``input.fps`` 缩放）；
+   且**只在 ``deep_sort.mode == "fast"`` 时成立**——normal 档每帧真抽 ReID，没有复用
+   缓存这个机制，此时不判。
 3. **visual 滞回时长 ≥ track 存活上限**（``gate.hold_duration_sec`` ↔ 同上
    ``max_age_sec``）。跟踪器的删除判定只在处理 gate packet 时被求值；滞回时长短于存活
    上限(尤其取 0 = 关闭)时，纯静默窗不再产生 packet，跟丢的 track 不再被回收、连同
@@ -84,8 +86,10 @@ def check_cross_module_config(
             )
         )
 
+    # 这一条只在 fast 档才有意义:静止 track 复用缓存特征是 fast 档独有的机制,
+    # normal 档每帧都真抽 ReID,报了也是让人去查一个根本跑不到的东西。
     reid_interval = _reid_interval_frames(identity_engine)
-    if reid_interval >= window_frames:
+    if identity_engine.deep_sort.mode == "fast" and reid_interval >= window_frames:
         out.append(
             ConfigWarning(
                 key="reid_interval_vs_window",

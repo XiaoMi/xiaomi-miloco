@@ -19,7 +19,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from miloco.config.settings import _SETTINGS_YAML, _load_yaml_dict
+from miloco.config.settings import (
+    _SETTINGS_YAML,
+    PerceptionCollectSettings,
+    _load_yaml_dict,
+)
 from miloco.perception.engine.config import GateConfig, InputConfig
 from miloco.perception.engine.config_checks import check_cross_module_config
 from miloco.perception.engine.identity.config_loader import load_identity_engine_config
@@ -40,8 +44,11 @@ def _shipped_inputs() -> dict[str, Any]:
     collect_cfg = perception.get("collect", {}) or {}
     return {
         "fps": InputConfig(**(engine_cfg.get("input", {}) or {})).fps,
-        # 缺省值与 CollectConfig.window_size 的字段默认一致；yaml 里没写这一项时走它。
-        "collect_window_sec": collect_cfg.get("window_size", 4),
+        # yaml 里没写这一项时的缺省值**从生产那个模型现读**，不抄一份进来 ——
+        # 抄的话它就成了第三处独立取值，而这个文件通篇在反对这件事。
+        "collect_window_sec": collect_cfg.get(
+            "window_size", PerceptionCollectSettings().window_size
+        ),
         "identity_engine": load_identity_engine_config(
             override=engine_cfg.get("identity_engine")
         ),
@@ -146,18 +153,28 @@ class TestDetectorThresholdVsQualityGates:
         )
 
     def test_offline_call_sites_use_the_named_constant(self):
-        """两个离线调用点必须用那个具名常量，不能各自写死。
+        """两个离线调用点必须用那个具名常量，不能写任何字面量。
 
-        它们此前是两处独立的 ``0.4`` 字面量；只要还有一处写死，上一条用例就只是在跟
-        另一个常量自我对照、对真实调用点的改动免疫。
+        它们此前是两处独立的 ``0.4``；只要还有一处写死，上一条用例就只是在跟另一个常量
+        自我对照、对真实调用点的改动免疫。
+
+        判据是「有没有传字面量」而不是「有没有出现 0.4」：盯住某个具体取值的话，把它改成
+        0.3 照样绿 —— 那种护栏守的是字面量、不是不变式，正是本 PR 一路在清理的形状。
         """
         import inspect
+        import re
 
         from miloco.person import router
         from miloco.pet import observe
 
+        numeric_arg = re.compile(r"conf_threshold\s*=\s*[0-9.]")
         for mod in (router, observe):
             src = inspect.getsource(mod)
-            assert "conf_threshold=0.4" not in src, (
-                f"{mod.__name__} 里又出现了写死的检测阈值，请改用 OFFLINE_DET_CONF"
+            assert not numeric_arg.search(src), (
+                f"{mod.__name__} 里给 conf_threshold 传了字面量，请改用 OFFLINE_DET_CONF —— "
+                "两处离线调用点必须同源，否则「余量为零」那条用例会对它们的改动免疫"
+            )
+            assert "conf_threshold=OFFLINE_DET_CONF" in src, (
+                f"{mod.__name__} 没有在用 OFFLINE_DET_CONF；若这里改了参数写法，"
+                "请同步更新本用例的判据"
             )
