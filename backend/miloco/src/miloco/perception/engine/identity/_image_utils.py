@@ -150,6 +150,12 @@ def decode_image(data: bytes) -> NDArray[np.uint8] | None:
         return None
     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
+# ``compute_sharpness`` 结果归一化到 [0,1] 时的饱和参考值(Laplacian variance),
+# 用于 v4 §2.2.3 TierA / TierU 的候选评分公式。
+# 与本模块的三个 helper 同理放在这里作单一来源:它此前在 ``extractor`` 与 ``tier_u``
+# 各定义一份、靠注释宣称"沿用对方"维系,正是本模块顶部记录的那种分裂前状态。
+SHARPNESS_NORM_REF: float = 300.0
+
 
 def compute_sharpness(crop: NDArray[np.uint8]) -> float:
     """Laplacian variance 估算 crop 清晰度。

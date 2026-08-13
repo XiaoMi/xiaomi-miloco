@@ -8,7 +8,7 @@
 - 仅跟踪 HUMAN 类目标（`SortConfig.track_human_only=True`）；其他类（FACE/CAT/DOG/HEAD）
   不形成 track，但保留在 `last_detections` 中供 face matching 使用。
 - `get_tracking_results()` 输出 dict 列表，字段含 ``id / class_id / bbox / xyxy /
-  confidence / hits / age / time_since_update``。
+  confidence / hits / age / time_since_update / detected_this_frame``。
 """
 
 from __future__ import annotations
@@ -425,6 +425,10 @@ class SortTracker:
             hits (int):         累计匹配数
             age (int):          生命周期
             time_since_update (int): 距上次匹配的帧数
+            detected_this_frame (bool): 本帧是否真匹配到 detection。本实现因上面那道
+                前置过滤而恒 True(见赋值处注释);DeepSORT 路径取动态值。它是身份识别侧
+                各 coasting 闸的唯一判据,少写这个键不会报错、下游取默认值会让那些闸
+                静默恒真(即 #494)。
         """
         results: list[dict[str, Any]] = []
         for trk in self._tracks:
@@ -444,8 +448,10 @@ class SortTracker:
                 "hits": trk.hits,
                 "age": trk.age,
                 "time_since_update": trk.time_since_update,
-                # SortTracker 在 L419 已 pre-filter time_since_update >= 1，此处
-                # 永远为 True；保留字段是为消费端代码统一（DeepSORT 路径会变）。
+                # 本方法遍历时已跳过 time_since_update >= 1 的 track，此处永远为 True；
+                # 保留字段是为消费端代码统一——DeepSORT 路径不做这道 pre-filter，
+                # 其同名字段取 time_since_update == 0 的动态值，coasting track 会
+                # 带 False 输出。
                 "detected_this_frame": True,
             })
         return results

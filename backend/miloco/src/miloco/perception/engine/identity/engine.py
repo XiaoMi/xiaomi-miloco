@@ -107,8 +107,10 @@ _TIER_C_MAX_BBOX_ASPECT = 2.5
 #   bench:不同人 tier_a 互比 26–33 / 随机噪声 24–33——与"同场景"区间重叠,正是
 #   pHash(刻画整图含背景的明暗布局,非身份)不适合做身份门的原因。
 
-# 锐度(Laplacian 方差)地板:tier_c 候选画面过糊则不入库。复用工程既有"太糊"基线 50
-# (与 extractor._GATE_SHARPNESS_MIN / tier_u sharpness_min 同口径)。实测库内 tier_a body
+# 锐度(Laplacian 方差)地板:tier_c 候选画面过糊则不入库。取的是工程既有的"太糊"基线 50。
+# ⚠️ extractor._GATE_SHARPNESS_MIN / tier_u sharpness_min 是**各自独立**的阈值,与本值
+# 无任何绑定 —— 不要假设它们一致(此处曾写"同口径",而那种约定全仓已被验证会悄悄破掉),
+# 改本值之前直接比对那两处代码。实测库内 tier_a body
 # 最低 88、tier_c body 最低 236,均远高于 50,故 50 仅兜底拦退化帧、不误杀正常样本;
 # 后续可据写时 sidecar 的 sharpness 分布再共识调整。
 _TIER_C_MIN_SHARPNESS = 50.0
@@ -359,9 +361,15 @@ class IdentityEngine:
         # 计数, 确定性、按窗口走; worker 写盘时读它作冷却锚点。
         self._cur_frame_index: int = 0
         self._latest_bbox: dict[int, tuple[int, int, int, int]] = {}  # track_id → xyxy
-        # 每窗口同步：True ⟺ tracking_results 里这个 track 本帧真有检测命中
-        # （非 coasting / 纯 Kalman 预测残留）。消费点：omni 候选收集 + tier_c
-        # 写入入口；为 False 时这两处直接早退，避免残留框污染 tier_c 与 omni。
+        # 每窗口同步：True ⟺ tracking_results 里这个 track 本帧真有检测命中；False =
+        # coasting（框是上一次真匹配时的检测框、原地冻结，不对应本帧画面）。
+        # 消费点共 7 处：抗遮挡 IoA / omni 候选收集 / 名册 bbox_norm / no_person 抑制区
+        # 解除 / no_person 预标 / tier_u 陌生人池推图 / tier_c 入队门；为 False 时各处
+        # 早退，避免残留框污染候选、名册与身份库。
+        # 其中两处 no_person 闸在 ``no_person.reject_region_enabled`` 之下，该开关出厂
+        # 关闭（上一级 ``perception/engine/config.py::NoPersonConfigDC`` 与本目录
+        # ``default_config.yaml`` 均为 false），所在函数开头即整体早退 —— 故默认部署下
+        # 实际跑到的是 5 处。估算影响面或回归验证时按 5 处算，别对着两条不执行的路径构造用例。
         self._detected_this_frame: dict[int, bool] = {}
         # face 在场写库门 + prompt face 标签 + 陌生人池 face_crop 三处共用源
         # (tier_c 污染修复): 每窗口 process() 早期 face 几何关联算一次, 存 track →
@@ -513,7 +521,7 @@ class IdentityEngine:
             tid = int(tr["id"])
             active_track_ids.add(tid)
 
-            # 缓存最新 bbox + 本帧检测命中标志（tier_c / omni 两处消费点用）
+            # 缓存最新 bbox + 本帧检测命中标志（本类内 7 处闸消费，清单见 __init__ 处声明）
             self._latest_bbox[tid] = tuple(tr["xyxy"])  # type: ignore[arg-type]
             self._detected_this_frame[tid] = bool(tr.get("detected_this_frame", True))
             self._last_seen_frame[tid] = frame_index
@@ -532,7 +540,7 @@ class IdentityEngine:
             # 打回 0 → 移动的真本人写库资格几乎永远攒不满(只有静止的人能写)。已移除该清零: 顶替
             # 由"重审矛盾清零(计数级)+ 写库前 omni 同人校验拿实际 crop 比对 tier_a 否决(crop 级)"
             # 双重兜底, coasting 清零是会误杀真本人的冗余代理; 入队检测门(D)仍不收 coasting 窗的
-            # 帧、不会写 Kalman 幻影框。
+            # 帧、不会写 coasting 那张过期框。
             if state.status == "confirmed" and (
                 frame_index < state.tier_c_cooldown_until_frame
                 or state.in_flight_tier_c
@@ -582,7 +590,8 @@ class IdentityEngine:
         # IoA = 交集面积 / 当前框面积; 取当前 track 与其他 active track 的最大值, ≥ 阈值标记。
         # 写入闸在 _enqueue_tier_c_candidate 消费 (查 True 早退, 不入库不走 omni)。
         # 只纳入本帧真有检测命中的框: 与 omni 候选收集 (step 2 的 detected_this_frame 跳过)
-        # 同口径——coasting 纯 Kalman 残留框不对应本帧真人, 算进去会造成"假遮挡"误杀。
+        # 同口径——coasting 框停在上一次真匹配的位置、不对应本帧真人, 算进去会造成
+        # "假遮挡"误杀。
         self._overlap_other_person.clear()
         if len(active_track_ids) >= 2:
             boxes = {
@@ -627,7 +636,7 @@ class IdentityEngine:
                 gallery_empty=gallery_empty,
             ):
                 continue
-            # coasting（人离开/跟丢后纯 Kalman 预测残留）的 track 当窗口不进 omni
+            # coasting（人离开/跟丢后仍存活、框停在上一次真匹配位置）的 track 不进 omni
             # 候选：bbox 已不对应本帧真人，让 omni 看到只会催生背景误判。track
             # 本身仍在 _states 里存活，不影响 ID/face_id/tier_u 连续性。
             if not self._detected_this_frame.get(tid, False):
@@ -706,8 +715,8 @@ class IdentityEngine:
         self._gc_dead_tracks(active_track_ids, frame_index)
 
         # ----- 5. 返回当前 face_id 映射 + 末帧归一化 bbox -----
-        # bbox_norm 只对本帧真实检测到的 track 填（coasting 纯预测残留不填，避免给
-        # 名册注入幻影位置）；与 candidates 的 bbox 同源同坐标系（_latest_bbox +
+        # bbox_norm 只对本帧真实检测到的 track 填（coasting 的过期框不填，避免给
+        # 名册注入残留框的过期位置）；与 candidates 的 bbox 同源同坐标系（_latest_bbox +
         # _normalize_bbox_to_1000），供上层挂到 IdentityTarget 给名册渲染 (名, bbox)。
         out: dict[int, str] = {}
         bbox_norm: dict[int, tuple[int, int, int, int]] = {}
@@ -900,6 +909,7 @@ class IdentityEngine:
             # drift 态也清(与 _revoke_track_to_pending 对齐): 全员去先验后旧的低窗累计 /
             # 采信复认抑制都作废, 否则重新 confirmed 后会少 1 窗即撤 / 错误抑制一次撤回。
             state.drift_consec_low = 0
+            state.drift_last_sim = None
             state.drift_suppressed_pid = None
             # inflight 不动
 
@@ -993,6 +1003,30 @@ class IdentityEngine:
                 continue
 
             sim = float(np.dot(centroid, ref))
+
+            # 无数据窗不计不清: 与上一窗逐字节相同的 sim 意味着比较的两端都没有新证据
+            # (track 侧特征队列没长新东西 / 参考侧窗内无增无出), 计进去等于拿同一份证据
+            # 投两票, 而"连续 M 窗"存在的意义正是抗单窗噪声。这道判据在什么配置下才被
+            # 走到, 见 state.py::drift_last_sim 的说明 —— 取决于配置量之间的大小关系,
+            # 与本函数逻辑无关。
+            # 不拿"本帧是否真检测命中"做判据: 那个标记是 get_tracking_results() 的**末帧
+            # 快照**(跟踪服务逐帧 update、循环外只读一次), 而这里比的是整窗累积的质心,
+            # 两者不同口径 —— 只要 track 存活上限短于窗长, 末帧漏检的 track 这一窗照样
+            # 匹配过、质心早变了, 用末帧判据会把真证据整窗丢掉、让真实的跟错更久才撤回。
+            if sim == st.drift_last_sim:
+                # 跳过也要留痕: 下面那条 [Identity/drift] info 在 continue 之后, 不补的话
+                # 这些窗是日志空洞 —— observe 档尤其吃亏, 它的全部用途就是"算 sim + 打
+                # 日志、不撤", 而空洞还与"无质心 / 无参考 / 被 suppress"三种早退无从区分。
+                # debug 级同上面 suppress 分支, 避免每窗每条刷 info。
+                logger.debug(
+                    "[Identity/drift] cam=%s track_id=%d person=%s sim=%.3f "
+                    "same-evidence skip (consec_low=%d)",
+                    self.cam_id, tid, _short_pid(pid, name_lookup), sim,
+                    st.drift_consec_low,
+                )
+                continue
+            st.drift_last_sim = sim
+
             if sim < cfg.threshold:
                 st.drift_consec_low += 1
             else:
@@ -1019,6 +1053,7 @@ class IdentityEngine:
             self._revoke_track_to_pending(st, now_ts)
             st.drift_suppressed_pid = old_pid   # 武装采信复认护栏(防撤→复认→又撤震荡)
             st.drift_consec_low = 0
+            st.drift_last_sim = None
             logger.warning(
                 "[Identity/drift] cam=%s track_id=%d 撤回身份 %s(body 漂移连续 %d 窗)"
                 " → pending 丢回 omni 重判",
@@ -1187,6 +1222,7 @@ class IdentityEngine:
         """对当前 unknown/pending track 累积 crop 到陌生人池。
 
         confirmed track 不 push——它们已经识别成功,样本会走 tier_c 累积路径而非池。
+        coasting(本帧无检测命中)的 track 也不 push——bbox 不对应本帧真人。
 
         face_detections 不为 None 时,对每个 body track 关联本帧 face_dets(IoU
         最大且过阈值的那个),把 face crop 跟 body 一起塞进 CropEntry。后续
@@ -1207,6 +1243,14 @@ class IdentityEngine:
             # 已 confirmed 的 track 不进池——它们走 tier_c 累积路径。
             # no_person（非人误检）也不进池——杂物 crop 进陌生人池会污染聚类。
             if state.status in ("confirmed", "no_person"):
+                continue
+            # coasting(本帧无检测命中, bbox 停在上一次真匹配的位置)也不进池: 人已经
+            # 不在那儿了(裁到的是背景/家具/旁边另一个人)。裁出来的图既污染聚类, 又能
+            # 经 from-cluster 注册间接写进身份库 —— 与 tier_c 入队门 D 拒"coasting 残留框"
+            # 同口径(用词与该门处一致,便于 grep 定位), 只是终点从直接写库变成间接写库。
+            # 注: 池内 phash/embedding 去重拦不住这类图 —— 它跟真人 crop 本来就不像,
+            # 反而会被当成"多样性样本"留下。
+            if not self._detected_this_frame.get(tid, False):
                 continue
             tr = tr_by_id.get(tid)
             if tr is None:
@@ -1236,7 +1280,19 @@ class IdentityEngine:
                 face_crop=face_crop,
                 sharpness=_compute_sharpness(body_crop),
                 bbox_xyxy=tuple(tr["xyxy"]),  # type: ignore[arg-type]
-                detector_conf=float(tr.get("confidence", 0.0)),
+                # 缺 confidence 时按满置信兜底(与接缝另一侧同口径): tracker 决定维持
+                # 这个 track, 说明它至少经历过一次过检测阈值的检测, "未知"不等于"零信"。
+                # 注: 把住池内下限(detector_conf_min=0.4)的是 Detector 构造参数
+                # conf_threshold, 不是名字更像的 ``deep_sort.detector_conf_threshold``
+                # —— 完整归因见 tracking_service.py::_build_response 里同一话题的注释
+                # (单一来源, 只维护那一份)。
+                # 入池口本身不看 conf(push_crop 只判开关再等比缩放), 这个值是给池内
+                # 质量门用的。取 0.0 则该路径的 crop 一张也过不了那道门、全部卡在 L1 ——
+                # 功能整体失效, 比放宽是更坏的失败模式。
+                # 但满值不是没有代价: 它在候选打分里等于该维满分, 而那是权重最大的一维,
+                # 缺字段的路径上选样因此退化成长宽比 + 清晰度两维 —— 正是本次修的那个
+                # 退化在兜底分支里的复刻。生产路径无条件写出该字段, 走不到这里。
+                detector_conf=float(tr.get("confidence", 1.0)),
             )
             self.tier_u_pool.push_crop(crop_entry)
 
