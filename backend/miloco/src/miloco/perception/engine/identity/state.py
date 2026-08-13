@@ -89,7 +89,8 @@ class TrackIdentityState:
     # 出现整窗没有新特征入队的情形。**当前值落在哪一边不写在这里** —— 写进注释就会随
     # 调参失真(这段注释此前正是这样错的)。判据集中在
     # ``perception/engine/config_checks.py``, 分两层各管一段: 随包配置那一层由
-    # ``test_config_relationships.py`` 钉住(确定性, CI 里有意义), 部署现场那一层由建引擎
+    # ``tests/perception/engine/identity/test_config_relationships.py``(跨包, 在 tests/ 树下)
+    # 钉住(确定性, CI 里有意义), 部署现场那一层由建引擎
     # 时的告警负责(在真有那份 config.json 的机器上、配置生效的时刻响)。
     # 撤回 / 复认时与 drift_consec_low 一同清空。
     drift_last_sim: float | None = None

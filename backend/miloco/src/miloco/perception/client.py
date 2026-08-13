@@ -381,6 +381,7 @@ class PerceptionEngineProxy:
         from miloco.perception.engine.identity.config_loader import (
             load_identity_engine_config,
         )
+        from miloco.perception.engine.omni.provider import adjust_fps_for_omni
 
         if not identity_kwargs.get("perception_model_dir"):
             identity_kwargs["perception_model_dir"] = models_dir
@@ -401,11 +402,18 @@ class PerceptionEngineProxy:
         # 叠 config.json),而单窗时长的旋钮在采集段、不在 PerceptionConfig 里,所以要
         # 单独取。只告警不拦 —— 这些关系破了是行为退化不是崩溃。随包配置那一层由
         # 用例钉住,判据与这里同一个函数,详见 config_checks 的模块说明。
+        #
+        # fps 传**引擎实际会跑的那一个**:PerceptionEngine.__init__ 会把它顶成 omni_fps
+        # 的整数倍(那边同样调 adjust_fps_for_omni),拿调整前的值算出来的帧数与运行时
+        # 对不上 —— 不整除时会报假警,且告警文案里的帧率与引擎紧接着打的"自动调整
+        # fps=X → Y"自相矛盾,读日志的人无从判断哪个才是生效值。
+        # tracking_service_mode 决定存活上限该读哪一份配置,见 config_checks 模块说明。
         warn_cross_module_config(
-            fps=config.input.fps,
+            fps=adjust_fps_for_omni(config.input.fps, config.input.omni_fps),
             collect_window_sec=get_settings().perception.collect.window_size,
             identity_engine=config.identity_engine,
             gate=config.gate,
+            tracking_service_mode=config.identity.tracking_service_mode,
         )
 
         return PerceptionEngine(config=config)

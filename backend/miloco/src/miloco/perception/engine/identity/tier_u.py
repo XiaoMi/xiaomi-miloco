@@ -19,7 +19,8 @@
 
 ⚠️ 零额外推理硬约束:任何 ReID embedding **都从 ReIDProvider 取**(读跟踪侧
 Track.features deque 末尾元素),严禁本文件调 HumanReID.extract_feature。
-单测 ``test_tier_u_no_extra_extract`` 是护栏。
+护栏是 ``tests/perception/engine/identity/test_tier_u.py::test_pool_never_calls_extract_feature``
+(跨包, 在 tests/ 树下)。
 """
 
 from __future__ import annotations

@@ -163,7 +163,9 @@ class DeepSortTracker:
 
         ``detected_this_frame`` 是身份识别侧各 coasting 闸的唯一判据,**本方法是它的
         产出源头**:少写这个键不会报错,下游取默认值会让那些闸静默恒真(即 #494)。
-        改本方法的字段集时请同步 ``test_deep_sort_v12`` 里的字段集护栏用例。
+        改本方法的字段集时请同步
+        ``tests/perception/engine/identity/test_deep_sort_v12.py``(跨包, 在 tests/ 树下)
+        里的字段集护栏用例。
         """
         out: list[dict[str, Any]] = []
         for tr in self._mot.tracks:

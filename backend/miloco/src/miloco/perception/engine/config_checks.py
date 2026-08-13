@@ -14,16 +14,25 @@
 什么、破了会怎样、两个数各在哪。清单本身比任何一条检查都重要 —— 没有它，下一个加阈值
 的人不知道该检查什么。
 
+两个取数口径，判之前先确认：
+
+- **存活上限读哪一份，取决于当前活的是哪个跟踪器**（``identity.tracking_service_mode``）：
+  ``deep_sort`` 读 ``identity_engine.deep_sort.max_age_sec``，``real``（纯 SORT）读
+  ``identity_engine.sort.max_age_sec``，两者默认值不同；``mock`` 没有真跟踪器，三条关系
+  都无从谈起、直接跳过。读错那一份会两个方向都出错：该报的不报、不该报的报。
+- **帧率要用引擎实际会跑的那一个**：构造引擎时它会被顶成 ``omni_fps`` 的整数倍，拿调整
+  前的值算出来的帧数与运行时对不上。换算由调用方做（见 ``client.py`` 那处的说明）。
+
 已覆盖的关系：
 
 1. **单窗帧数 > track 存活上限**（``perception.collect.window_size`` × ``input.fps``
-   ↔ ``identity_engine.deep_sort.max_age_sec``）。破了之后，跟丢的 track 可能整窗没有
-   新特征入队，漂移自检的证据指纹判据开始真实生效，身份撤回时延随之改变。
+   ↔ 当前跟踪器那一份 ``max_age_sec``）。破了之后，跟丢的 track 可能整窗没有新特征
+   入队，漂移自检的证据指纹判据开始真实生效，身份撤回时延随之改变。
 2. **单窗帧数 > fast 模式 ReID 重抽间隔**（同上 ↔ ``deep_sort.human_reid_skip_windows``
    等三个旋钮的乘积）。破了之后静止 track 可能整窗复用缓存特征，后果同上。
    两点注意：这一条**随帧率翻转**（重抽间隔是固定帧数、不跟着 ``input.fps`` 缩放）；
-   且**只在 ``deep_sort.mode == "fast"`` 时成立**——normal 档每帧真抽 ReID，没有复用
-   缓存这个机制，此时不判。
+   且**只在 DeepSORT 的 fast 档成立**——纯 SORT 不抽 ReID，normal 档每帧真抽，两种情况
+   都没有复用缓存这个机制，此时不判。
 3. **visual 滞回时长 ≥ track 存活上限**（``gate.hold_duration_sec`` ↔ 同上
    ``max_age_sec``）。跟踪器的删除判定只在处理 gate packet 时被求值；滞回时长短于存活
    上限(尤其取 0 = 关闭)时，纯静默窗不再产生 packet，跟丢的 track 不再被回收、连同
@@ -62,15 +71,31 @@ def check_cross_module_config(
     collect_window_sec: float,
     identity_engine: IdentityEngineConfig,
     gate: GateConfig,
+    tracking_service_mode: str,
 ) -> list[ConfigWarning]:
     """按上面清单逐条判，返回被破坏的关系（全部成立时返回空列表）。
 
     纯函数、不打日志，便于用例直接断言；打日志的是 ``warn_cross_module_config``。
+
+    ``fps`` 要传**引擎实际会跑的那一个**（构造时会被顶成 ``omni_fps`` 的整数倍），
+    否则算出的帧数与运行时对不上；调用方负责换算，见 ``client.py`` 那处的说明。
     """
     out: list[ConfigWarning] = []
 
+    # 活的是哪个跟踪器就读哪一份存活上限:纯 SORT 走 identity_engine.sort,
+    # deep_sort 段那份在这条路径上没有任何消费者,拿它算等于在校验一个没生效的旋钮
+    # (两个方向都会错:该报的不报、不该报的报)。mock 档没有真跟踪器,三条关系都无从谈起。
+    if tracking_service_mode == "mock":
+        return out
+    is_deep_sort = tracking_service_mode == "deep_sort"
+    max_age_sec = (
+        identity_engine.deep_sort.max_age_sec
+        if is_deep_sort
+        else identity_engine.sort.max_age_sec
+    )
+
     window_frames = frames_per_window(fps, collect_window_sec)
-    max_age_frames = sec_to_frames(identity_engine.deep_sort.max_age_sec, fps)
+    max_age_frames = sec_to_frames(max_age_sec, fps)
 
     if max_age_frames >= window_frames:
         out.append(
@@ -80,7 +105,8 @@ def check_cross_module_config(
                     f"track 存活上限({max_age_frames} 帧)已不短于单窗帧数"
                     f"({window_frames:.0f} 帧 = fps {fps} × 窗长 {collect_window_sec}s)："
                     "跟丢的 track 可能整窗没有新特征入队，漂移自检的证据指纹判据将真实"
-                    "生效，身份撤回时延随之改变。涉及 deep_sort.max_age_sec 与 "
+                    "生效，身份撤回时延随之改变。涉及 "
+                    f"{'deep_sort' if is_deep_sort else 'sort'}.max_age_sec 与 "
                     "perception.collect.window_size。"
                 ),
             )
@@ -89,7 +115,11 @@ def check_cross_module_config(
     # 这一条只在 fast 档才有意义:静止 track 复用缓存特征是 fast 档独有的机制,
     # normal 档每帧都真抽 ReID,报了也是让人去查一个根本跑不到的东西。
     reid_interval = _reid_interval_frames(identity_engine)
-    if identity_engine.deep_sort.mode == "fast" and reid_interval >= window_frames:
+    if (
+        is_deep_sort
+        and identity_engine.deep_sort.mode == "fast"
+        and reid_interval >= window_frames
+    ):
         out.append(
             ConfigWarning(
                 key="reid_interval_vs_window",
@@ -103,18 +133,18 @@ def check_cross_module_config(
             )
         )
 
-    if gate.hold_duration_sec < identity_engine.deep_sort.max_age_sec:
+    if gate.hold_duration_sec < max_age_sec:
         out.append(
             ConfigWarning(
                 key="hold_vs_max_age",
                 message=(
                     f"visual 滞回时长({gate.hold_duration_sec}s)短于 track 存活上限"
-                    f"({identity_engine.deep_sort.max_age_sec}s)"
+                    f"({max_age_sec}s)"
                     + ("（0 = 滞回关闭）" if gate.hold_duration_sec == 0 else "")
                     + "：跟踪器的删除判定只在处理 gate packet 时求值，纯静默窗不再产生"
                     "packet 时，跟丢的 track 与其身份状态会冻结存活、不再被回收，"
                     "max_age_sec 失去字面含义。涉及 gate.hold_duration_sec 与 "
-                    "deep_sort.max_age_sec。"
+                    f"{'deep_sort' if is_deep_sort else 'sort'}.max_age_sec。"
                 ),
             )
         )
@@ -128,6 +158,7 @@ def warn_cross_module_config(
     collect_window_sec: float,
     identity_engine: IdentityEngineConfig,
     gate: GateConfig,
+    tracking_service_mode: str,
 ) -> list[ConfigWarning]:
     """跑一遍检查并把结果打成 warning 日志。建引擎时调用一次。
 
@@ -148,6 +179,7 @@ def warn_cross_module_config(
             collect_window_sec=collect_window_sec,
             identity_engine=identity_engine,
             gate=gate,
+            tracking_service_mode=tracking_service_mode,
         )
     except Exception:  # noqa: BLE001 —— 诊断设施不得影响主流程
         logger.exception("[Perception/config] 跨模块参数关系检查自身出错，已跳过")

@@ -24,9 +24,10 @@ from miloco.config.settings import (
     PerceptionCollectSettings,
     _load_yaml_dict,
 )
-from miloco.perception.engine.config import GateConfig, InputConfig
+from miloco.perception.engine.config import GateConfig, IdentityConfig, InputConfig
 from miloco.perception.engine.config_checks import check_cross_module_config
 from miloco.perception.engine.identity.config_loader import load_identity_engine_config
+from miloco.perception.engine.omni.provider import adjust_fps_for_omni
 
 
 def _shipped() -> dict[str, Any]:
@@ -42,8 +43,12 @@ def _shipped_inputs() -> dict[str, Any]:
     perception = data.get("perception", {}) or {}
     engine_cfg = perception.get("engine", {}) or {}
     collect_cfg = perception.get("collect", {}) or {}
+    inp = InputConfig(**(engine_cfg.get("input", {}) or {}))
+    identity_cfg = engine_cfg.get("identity", {}) or {}
     return {
-        "fps": InputConfig(**(engine_cfg.get("input", {}) or {})).fps,
+        # 帧率按引擎实际会跑的那一个算：构造引擎时它会被顶成 omni_fps 的整数倍，
+        # 用同一个换算函数，别在这里自己推一遍。
+        "fps": adjust_fps_for_omni(inp.fps, inp.omni_fps),
         # yaml 里没写这一项时的缺省值**从生产那个模型现读**，不抄一份进来 ——
         # 抄的话它就成了第三处独立取值，而这个文件通篇在反对这件事。
         "collect_window_sec": collect_cfg.get(
@@ -53,6 +58,9 @@ def _shipped_inputs() -> dict[str, Any]:
             override=engine_cfg.get("identity_engine")
         ),
         "gate": GateConfig(**(engine_cfg.get("gate", {}) or {})),
+        "tracking_service_mode": identity_cfg.get(
+            "tracking_service_mode", IdentityConfig().tracking_service_mode
+        ),
     }
 
 
@@ -97,6 +105,33 @@ class TestShippedConfigRelationships:
         mutate(kwargs)
         keys = [w.key for w in check_cross_module_config(**kwargs)]
         assert expected_key in keys, f"破坏了 {expected_key} 却没报，实得 {keys}"
+
+    def test_active_tracker_decides_which_max_age_is_read(self):
+        """存活上限要读**当前活的那个跟踪器**那一份，两份默认值不同。
+
+        纯 SORT 与 DeepSORT 各有一份 ``max_age_sec``；读错那一份两个方向都会出错——
+        该报的不报（纯 SORT 把自己那份调大到窗长以上，却按 DeepSORT 那份算出没事），
+        不该报的报（让人去查一个当前根本没生效的旋钮）。
+        """
+        kwargs = _shipped_inputs()
+        # 把纯 SORT 那份调到窗长以上，DeepSORT 那份保持出厂
+        kwargs["identity_engine"].sort.max_age_sec = 99.0
+
+        as_deep_sort = [w.key for w in check_cross_module_config(
+            **{**kwargs, "tracking_service_mode": "deep_sort"})]
+        as_plain_sort = [w.key for w in check_cross_module_config(
+            **{**kwargs, "tracking_service_mode": "real"})]
+
+        assert "max_age_vs_window" not in as_deep_sort, "DeepSORT 档不该读 sort 段"
+        assert "max_age_vs_window" in as_plain_sort, "纯 SORT 档必须读 sort 段"
+
+    def test_mock_tracker_skips_all_relationships(self):
+        """mock 档没有真跟踪器，三条关系都无从谈起，一条都不该报。"""
+        kwargs = _shipped_inputs()
+        kwargs["identity_engine"].deep_sort.max_age_sec = 99.0
+        kwargs["gate"].hold_duration_sec = 0.0
+        assert check_cross_module_config(
+            **{**kwargs, "tracking_service_mode": "mock"}) == []
 
     def test_window_relationship_follows_collect_knob(self):
         """窗长要跟着**采集侧**那个旋钮走。
@@ -160,6 +195,10 @@ class TestDetectorThresholdVsQualityGates:
 
         判据是「有没有传字面量」而不是「有没有出现 0.4」：盯住某个具体取值的话，把它改成
         0.3 照样绿 —— 那种护栏守的是字面量、不是不变式，正是本 PR 一路在清理的形状。
+
+        已知盲区：两条断言是「不许有字面量」+「至少有一处用了那个常量」，所以同一模块里
+        再出现一个 ``conf_threshold=另一个常量`` 的调用点仍会全绿。堵死要按调用点计数，
+        当前两处调用点的规模下不值得。
         """
         import inspect
         import re
@@ -167,10 +206,15 @@ class TestDetectorThresholdVsQualityGates:
         from miloco.person import router
         from miloco.pet import observe
 
-        numeric_arg = re.compile(r"conf_threshold\s*=\s*[0-9.]")
+        # 前置否定环视挡住 detector_conf_threshold 这类同形后缀 —— 那是跟踪器配置字段、
+        # 与本用例无关，误伤时报出的文案会指向一个并不存在的调用点，把人带偏。
+        numeric_arg = re.compile(r"(?<![\w.])conf_threshold\s*=\s*[0-9.]")
         for mod in (router, observe):
             src = inspect.getsource(mod)
-            assert not numeric_arg.search(src), (
+            # 只看真正的实参：注释里出现同形文本（例如「历史上这里是 conf_threshold=0.4」）
+            # 不算传字面量。
+            code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+            assert not numeric_arg.search(code), (
                 f"{mod.__name__} 里给 conf_threshold 传了字面量，请改用 OFFLINE_DET_CONF —— "
                 "两处离线调用点必须同源，否则「余量为零」那条用例会对它们的改动免疫"
             )
