@@ -241,9 +241,7 @@ def remap_bbox_norm_to_crop(
     coasting 上限」这个数值关系,而它由两个可调旋钮决定 —— 窗长是采集侧的
     ``perception.collect.window_size``(设置接口可写、采集循环拿它当 tick 周期),存活上限
     是 ``identity_engine.deep_sort.max_age_sec``。**此处不写它们当前的取值**:写了就会随
-    调参失真,当前关系由 ``perception/engine/config_checks.py`` 集中判定 —— 随包配置那一
-    层由 ``tests/perception/engine/identity/test_config_relationships.py``(跨包,在 tests/
-    树下)钉住,部署现场那一层由建引擎时的告警负责。即便关系成立它也不是不变式 —— 短窗(启动首窗、丢帧)照样能让末帧框比并集更旧;
+    调参失真,要确认时按这两个旋钮现算。即便关系成立它也不是不变式 —— 短窗(启动首窗、丢帧)照样能让末帧框比并集更旧;
     且两侧终究是不同对象(track 状态框 vs 原始检测框)。故此处一律 clamp,换算后退化
     (宽或高 <= 0,即框完全落在区域外)返回 None。
 

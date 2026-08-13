@@ -42,11 +42,7 @@ from miloco.perception.engine.identity.extractor import (
     _sample_video_frames,
 )
 from miloco.perception.engine.identity.gallery_composite import hstack_to_height
-from miloco.perception.engine.identity.tracker.detector import (
-    OFFLINE_DET_CONF,
-    Detection,
-    Detector,
-)
+from miloco.perception.engine.identity.tracker.detector import Detection, Detector
 from miloco.perception.engine.omni import response_parser
 from miloco.perception.engine.omni.omni_client import (
     call_omni,
@@ -144,9 +140,7 @@ def default_detector() -> Detector:
     镜像人体注册 ``person/router._load_detector`` 的口径：每次调用新建（observe 低频）。
     """
     det_path = get_settings().directories.models_dir / "det_4C.onnx"
-    return Detector(
-        model_path=str(det_path), conf_threshold=OFFLINE_DET_CONF, use_gpu=False
-    )
+    return Detector(model_path=str(det_path), conf_threshold=0.4, use_gpu=False)
 
 
 def _jpeg_b64(crop: np.ndarray, quality: int = 85) -> str:

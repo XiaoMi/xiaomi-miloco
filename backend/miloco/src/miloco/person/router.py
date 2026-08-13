@@ -1109,13 +1109,10 @@ def _load_detector():
         return _detector_singleton
     with _detector_lock:
         if _detector_singleton is None:
-            from miloco.perception.engine.identity.tracker.detector import (
-                OFFLINE_DET_CONF,
-                Detector,
-            )
+            from miloco.perception.engine.identity.tracker.detector import Detector
             det_path = get_settings().directories.models_dir / "det_4C.onnx"
             _detector_singleton = Detector(
-                model_path=str(det_path), conf_threshold=OFFLINE_DET_CONF, use_gpu=False
+                model_path=str(det_path), conf_threshold=0.4, use_gpu=False
             )
     return _detector_singleton
 

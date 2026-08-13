@@ -60,14 +60,6 @@ class Detection:
         return (self.x, self.y, self.x + self.w, self.y + self.h)
 
 
-# 离线路径(主动注册抽样、宠物观察)显式使用的检测阈值。刻意低于主流程默认值:离线素材
-# 允许多召回,后面还有质量门与"每 track 最少帧数"下限把关。
-# ⚠️ 它同时是 extractor._GATE_DET_CONF_MIN 的下界,两者当前**贴边相等、余量为零** ——
-#    任一侧再动一点,离线抽样的质量门就会开始静默拒图。改之前先看
-#    tests/perception/engine/identity/test_config_relationships.py 里那条用例的说明。
-OFFLINE_DET_CONF: float = 0.4
-
-
 class Detector:
     """
     基于ONNX模型的目标检测器
