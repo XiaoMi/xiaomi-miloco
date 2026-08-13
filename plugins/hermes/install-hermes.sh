@@ -800,7 +800,7 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
     # 必然错的时候才出场。而 --post-install 的唯一调用方 install.py 正是从 tarball 解出
     # 来的目录调的，那儿只有本脚本和插件目录，没有 scripts/。用户照抄会得到
     # "can't open file .../scripts/fetch_models.py"，跟"模型不齐"毫无关系，只会把人往
-    # "文件损坏 / 路径写错"带偏 —— 正是下面 790 那段注释刚论证过要避免的事。
+    # "文件损坏 / 路径写错"带偏 —— 与下面下载失败分支里"带上解释器"那段注释同一个理由。
     # 同理不提 scripts/models.lock.json：这个处境下那个文件同样不在手边。
     warn "补齐：重跑 install.sh（安装包自带模型 tar，会解到 $MILOCO_HOME/models/）"
     warn "  或在 git checkout 目录里跑：$PYTHON scripts/fetch_models.py --strict --dest $MILOCO_HOME/models"
@@ -815,7 +815,7 @@ elif [ -n "$FETCH_MODELS" ]; then
   # 后果不是少一句提示，而是整条兜底失效：因为 bge/tokenizer/silero 三个可选模型缺失
   # 而进来、这三个又没补上时，`if !` 恒不成立 —— 一条 warn 都不打、退 0，用户看到的是
   # "按 lock 补齐"之后一片沉默，重跑多少次都一模一样，而语义去重与 VAD 已经静默降级。
-  # 这正是上面 :684 那段注释自己立的标准（"缺任何一个（含可选）都判不齐，否则会静默降级"）
+  # 这正是上面探测 FETCH_MODELS 时那段注释自己立的标准（"缺任何一个（含可选）都判不齐，否则会静默降级"）
   # 的反面。全仓其余每个下载调用点（build.sh、release.yml、local-ci.sh、models_ready 自己）
   # 都是带 --strict 的，只有这里漏了。
   if ! "$PYTHON" "$FETCH_MODELS" --strict --dest "$MILOCO_HOME/models"; then
