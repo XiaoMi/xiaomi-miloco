@@ -1180,7 +1180,8 @@ def test_lock_sources_match_manifest_sites() -> None:
 
 
 # 全仓调用方：凡把本脚本当"下模型"用的可执行入口都要在列。漏一个就等于这条契约
-# 对它不生效，所以下面还有一条断言钉死"每个文件都真的匹配到了调用"。
+# 对它不生效 —— 所以这份清单不能只靠人记：下面 test_fetch_caller_list_is_exhaustive
+# 反过来按 glob 扫全仓，扫出来的集合与这份清单**必须完全相等**，多一个少一个都红。
 # 只收可执行入口，不收文档：README / dev-guide / troubleshooting 里的 `--dest` 示例
 # 是给人手敲的，退出码不喂给任何门禁，强行要求 --strict 只会制造无意义的文档改动。
 _FETCH_CALLERS = (
@@ -1191,16 +1192,53 @@ _FETCH_CALLERS = (
     ".github/workflows/release.yml",
 )
 
+# 扫描范围要**宽于**清单本身，否则"新调用点恰好落在盲区"会让穷尽性断言跟着一起失明。
+_FETCH_CALLER_GLOBS = ("scripts/*.sh", "plugins/*/*.sh", ".github/workflows/*.yml")
+
+
+def _logical_lines(text: str) -> list[tuple[int, str]]:
+    """把行尾反斜杠续行并成一条逻辑行，行号取**起始**行。
+
+    不并的话，跨行写的调用会从判据下面整个溜过去：``"$PY" "$FETCH" \\`` 那行没有
+    --dest，下一行有 --dest 却没有脚本名，两行各自都不匹配 —— 于是一个真实调用点
+    既不被要求 --strict，也不出现在穷尽性扫描里，静默豁免。而续行恰恰是长命令行的
+    常规写法（install-hermes 那句本地同步就是这么写的）。
+
+    注释行不参与续行，哪怕它以反斜杠结尾 —— shell 的注释到行尾就结束，反斜杠不接下一行。
+    照并的话，一句折行的注释会把紧随其后的**真实调用**吸进自己这条逻辑行，而这条行首是
+    `#`、随即被判成注释整条丢掉：本该受约束的调用点凭空消失，方向恰好与本函数相反。
+    """
+    out: list[tuple[int, str]] = []
+    start: int | None = None
+    buf: list[str] = []
+    for i, raw in enumerate(text.splitlines(), 1):
+        if start is None:
+            start = i
+        stripped = raw.rstrip()
+        if not buf and stripped.lstrip().startswith("#"):
+            out.append((start, stripped))
+            start, buf = None, []
+            continue
+        if stripped.endswith("\\"):
+            buf.append(stripped[:-1])
+            continue
+        buf.append(stripped)
+        out.append((start, " ".join(buf)))
+        start, buf = None, []
+    if buf and start is not None:
+        out.append((start, " ".join(buf)))
+    return out
+
 
 def _fetch_invocations(text: str) -> list[tuple[int, str]]:
-    """文件里"调用 fetch_models.py 且指定了 --dest"的行，(行号从 1 起, 原文)。
+    """文件里"调用 fetch_models.py 且指定了 --dest"的逻辑行，(起始行号从 1 起, 原文)。
 
     整行注释剔掉：注释不执行，也不会被用户复制。用 --dest 当"这是一次调用"的判据，
     是因为所有真实调用点都显式传它（``MILOCO_MODELS_DEST`` 优先级更低，几个调用方
     都不敢依赖），而 `FETCH_MODELS=...` 这类赋值、以及只提脚本名的 info 文案都不带。
     """
     out = []
-    for i, line in enumerate(text.splitlines(), 1):
+    for i, line in _logical_lines(text):
         if line.lstrip().startswith("#"):
             continue
         if "fetch_models.py" not in line and "FETCH_MODELS" not in line:
@@ -1232,14 +1270,11 @@ def test_every_fetch_caller_matches_its_own_gate_strength() -> None:
     models_ready 也跑 ``--check --strict``，但它在下载**之前**、判的是要不要进这个分支，
     下载完之后没有任何复判。把它算成豁免，本 PR 修的那个 bug 就会照旧绿着过。
     """
-    seen_files = []
     for rel in _FETCH_CALLERS:
         path = _ROOT / rel
         assert path.is_file(), f"{rel} 不存在（挪了位置就同步这里的清单）"
         text = path.read_text(encoding="utf-8")
         calls = _fetch_invocations(text)
-        if calls:
-            seen_files.append(rel)
 
         # 该文件里最后一道 `--check --strict` 的位置：例外 2 要求它在调用**之后**。
         last_gate = max(
@@ -1258,9 +1293,26 @@ def test_every_fetch_caller_matches_its_own_gate_strength() -> None:
                 "只缺可选模型时这行会退 0，而判入口那侧照旧判不齐 —— 兜底静默失效。"
             )
 
-    # 清单没烂：每个列出的文件都真的还在调 fetch_models.py。否则删掉/改写了调用点，
-    # 上面的循环会空转着绿，这条契约就悄悄不设防了。
-    assert seen_files == list(_FETCH_CALLERS), (
-        f"这些文件已不再调用 fetch_models.py --dest，清单该更新："
-        f"{sorted(set(_FETCH_CALLERS) - set(seen_files))}"
+
+def test_fetch_caller_list_is_exhaustive() -> None:
+    """按 glob 扫全仓，调用方集合必须与 _FETCH_CALLERS 完全相等。
+
+    上面那条契约是照着一份**手写清单**逐个查的，于是它有一个自己看不见的盲区：
+    新加一个调用方而忘了登记，循环压根不会走到它，测试照绿 —— 而清单的用途恰恰是
+    "凡调用方都受约束"。少一边的检查等于把契约的覆盖面交给记性。
+
+    所以这里反着来：不问"清单里的还在不在调"，而问"在调的都在不在清单里"，两个方向
+    合起来才是集合相等。多出来的（新调用方没登记）与少掉的（登记了却不再调用、循环
+    空转着绿）都会红在这一行。
+    """
+    found: set[str] = set()
+    for pat in _FETCH_CALLER_GLOBS:
+        for p in sorted(_ROOT.glob(pat)):
+            if _fetch_invocations(p.read_text(encoding="utf-8")):
+                found.add(p.relative_to(_ROOT).as_posix())
+    assert found == set(_FETCH_CALLERS), (
+        "调用 fetch_models.py --dest 的可执行入口与 _FETCH_CALLERS 对不上，"
+        "把清单补齐（新调用方同时要满足上面那条 --strict 契约）：\n"
+        f"  新增未登记：{sorted(found - set(_FETCH_CALLERS))}\n"
+        f"  已登记但不再调用：{sorted(set(_FETCH_CALLERS) - found)}"
     )

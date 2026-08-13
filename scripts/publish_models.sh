@@ -147,7 +147,16 @@ for p in files:
         # 里仍是硬编码必需 —— 恰好是护栏那句「新增项记得手工把 required / desc 与
         # resource_validator.py 对齐」点名的那个字段，自己分了家。
         # 真正新增的文件仍默认 false —— 那条路径已由护栏显式放行并要求人工对齐。
-        "required": bool(prev.get("required", True)) if prev is not None else False,
+        # null 要和"整条不写"同义：`.get(key, default)` 的默认值只在**键不存在**时生效，
+        # 键在、值是 None 时原样返回 None，于是 bool(None) 把它判成可选 —— 正是上面这段
+        # 注释力陈不能发生的那次静默翻面，只不过触发条件从"漏写键"换成了"写了 null"。
+        # 下载器那边是先把 null 键删掉再走 fail-closed 默认（_check_spec 的
+        # size/required 归一化），这里对齐同一套：None（缺键或 null）一律当必需。
+        "required": (
+            False
+            if prev is None
+            else bool(True if prev.get("required") is None else prev["required"])
+        ),
         "desc": (prev or {}).get("desc", ""),
     })
 

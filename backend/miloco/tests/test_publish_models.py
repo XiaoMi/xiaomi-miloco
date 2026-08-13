@@ -448,6 +448,37 @@ def test_refresh_lock_keeps_a_required_entry_required_when_the_key_is_missing(
     assert got == {"a.onnx": True, "b.onnx": False}, r.stderr
 
 
+def test_refresh_lock_keeps_a_required_entry_required_when_the_key_is_null(
+    tmp_path: Path,
+) -> None:
+    """``required: null`` 与"整条不写"同义，同样不许被翻成可选。
+
+    上一条钉的是"漏写键"，这条钉的是"写了 null"——两者在 ``.get`` 面前**不是**一回事：
+    默认值只在键不存在时生效，键在、值是 None 时原样返回 None，于是 ``bool(None)``
+    把它判成可选。缺键那条 fail-closed 兜得住，写成 null 反而兜不住，正好是相反的结论。
+
+    下载器那边已经把这两者显式合流了（_check_spec 把值为 None 的 size / required
+    整个键删掉，再走 fail-closed 默认），所以这不是"要不要多防一手"，而是同一份 lock
+    在生成侧与消费侧读出两个相反的 required —— 而 refresh 是**写**方，翻面会落盘。
+
+    先占位、回头再填是手写 lock 时很自然的写法，两个键都撞得上。
+    """
+    lock = _tiny_lock(["a.onnx", "b.onnx"])
+    for f in lock["files"]:
+        if f["name"] == "a.onnx":
+            f["required"] = None  # 占位待填
+        else:
+            f["required"] = False  # 显式可选，必须原样留着
+    sandbox = _Sandbox(tmp_path, lock)
+    d = _models_dir(tmp_path, ["a.onnx", "b.onnx"])
+
+    r = sandbox.run("refresh-lock", str(d))
+
+    assert r.returncode == 0, r.stderr
+    got = {f["name"]: f["required"] for f in json.loads(sandbox.lock.read_text("utf-8"))["files"]}
+    assert got == {"a.onnx": True, "b.onnx": False}, r.stderr
+
+
 def test_refresh_lock_still_defaults_a_brand_new_file_to_optional(tmp_path: Path) -> None:
     """真正新增的文件仍默认可选 —— fail-closed 只适用于"同名旧条目缺键"。
 

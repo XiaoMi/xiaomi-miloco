@@ -848,6 +848,10 @@ except Exception:
     cfg = {}
 if not isinstance(cfg, dict):
     cfg = {}
+# 主线版本的本脚本写的就是顶层 cfg["models"]，装过那版的机器升上来会留着它。
+# 留着不报错（extra="ignore"），但它长得就像"模型目录在这儿配"，改它不会有任何反应 ——
+# 这类"改了没反应"最难自查。顺手清掉；键不在时 pop 也不吭声，重跑安全。
+cfg.pop("models", None)
 # 已有的 directories.* 子键（static / storage）要留着，别整段盖掉
 d = cfg.get("directories")
 if not isinstance(d, dict):
