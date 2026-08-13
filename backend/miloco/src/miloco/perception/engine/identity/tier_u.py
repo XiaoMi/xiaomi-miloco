@@ -31,7 +31,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Iterable
 
 import cv2
@@ -221,9 +221,11 @@ class TierUConfig:
     # 误隐藏。逐张比对(不 mean): tier_c 样本差异大, mean 后反而模糊化。
     reid_threshold_tier_c_dedup: float = 0.90
     # quality gate(crop 进 L2 前过滤)
-    # 曾有一个 area_ratio_min 字段:全仓无读取点、不在 yaml、也不在前端,连"可调但无效"
-    # 都不构成(_pass_quality_gate 不校面积占比 —— 这里拿不到 frame size,面积由
-    # detector_conf 间接保障),已删除。
+    # 曾有一个 area_ratio_min 字段:不参与任何判定(_pass_quality_gate 不校面积占比 ——
+    # 这里拿不到 frame size,面积由 detector_conf 间接保障),也不在 yaml、不在前端,
+    # 连"可调但无效"都不构成,已删除。
+    # 注:它并非"全仓无引用" —— dump_to 用 vars(self.config) 原样落盘,所以旧快照的
+    # manifest 里还带着它;load_from 会把认不出来的键丢掉并告警(见那边的说明)。
     # ⚠️ 以下这组阈值在 identity/extractor.py 有一套同名语义的模块级常量(_GATE_*),
     # 两套之间无任何绑定 —— 不要假设它们一致,改这里之前请直接比对那边的代码。
     aspect_min: float = 0.25                 # w/h ≥ 0.25 = 不接受比 1:4 更瘦的 bbox
@@ -1921,6 +1923,9 @@ class TierUPool:
 
         v1 快照真需要离线分析时,显式手改 manifest.json 里 ``"version": 1 → 2`` +
         把 entries[*].cam_id 重写到 device_id 再 load(没工具脚本,自己 grep 改)。
+
+        版本闸管的是**字段语义变化**。纯粹的死字段删除不走它:快照 config 里认不出来的
+        键直接丢掉并告警,因为那种字段本就不影响任何判定,为它把存量快照全部作废不划算。
         """
         import json
         import os
@@ -1934,7 +1939,22 @@ class TierUPool:
             )
         arrays = np.load(os.path.join(path, "arrays.npz"))
 
-        pool_config = config if config is not None else TierUConfig(**manifest["config"])
+        if config is not None:
+            pool_config = config
+        else:
+            # dump 侧是 vars(self.config) 原样落盘,所以快照里可能带着本版本已经删掉的
+            # 死字段;直接 TierUConfig(**raw) 会抛 TypeError,而这是排障工具 —— 排障现场
+            # 最不该遇到的就是工具自己炸,且那个报错完全不提示该怎么办。
+            # 认不出来的键**丢掉并告警**:纯死字段的删除不改变任何语义,不值得 bump 版本
+            # 把存量快照全部作废(版本闸管的是字段语义变化,见上面 docstring)。
+            raw = manifest["config"]
+            known = {f.name for f in fields(TierUConfig)}
+            dropped = sorted(set(raw) - known)
+            if dropped:
+                logger.warning(
+                    "[TierU] 快照 config 含本版本已不存在的字段, 已忽略: %s", dropped,
+                )
+            pool_config = TierUConfig(**{k: v for k, v in raw.items() if k in known})
         pool = cls(config=pool_config, reid_provider=reid_provider, now_fn=now_fn)
 
         def _dict_to_crop(d: dict) -> CropEntry:

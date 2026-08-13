@@ -132,11 +132,32 @@ class TestDetectorThresholdVsQualityGates:
 
         这条用例的作用不是拦住谁，而是把「余量为零」这个事实固定下来 —— 它和主流程
         那条不同，读注释的人很容易以为两条路径一样宽。
+
+        两侧都从生产代码现读，**不把值抄进用例**：抄一份的话，有人把离线那条路的阈值
+        调走时这里照绿，而它声称固定下来的事实已经破了 —— 那正是本 PR 在别处反复清理的
+        「两处声称同口径、实际早已分裂」。
         """
         from miloco.perception.engine.identity.extractor import _GATE_DET_CONF_MIN
+        from miloco.perception.engine.identity.tracker.detector import OFFLINE_DET_CONF
 
-        offline_detector_conf = 0.4  # person/router.py 建 Detector 时显式传入
-        assert offline_detector_conf == _GATE_DET_CONF_MIN, (
+        assert OFFLINE_DET_CONF == _GATE_DET_CONF_MIN, (
             "主动注册路径的检测器阈值与离线抽样质量门不再相等：两者此前贴边成立，"
             "现在要么开始拒图、要么出现了余量，两种情况都该更新 config_checks 里的说明"
         )
+
+    def test_offline_call_sites_use_the_named_constant(self):
+        """两个离线调用点必须用那个具名常量，不能各自写死。
+
+        它们此前是两处独立的 ``0.4`` 字面量；只要还有一处写死，上一条用例就只是在跟
+        另一个常量自我对照、对真实调用点的改动免疫。
+        """
+        import inspect
+
+        from miloco.person import router
+        from miloco.pet import observe
+
+        for mod in (router, observe):
+            src = inspect.getsource(mod)
+            assert "conf_threshold=0.4" not in src, (
+                f"{mod.__name__} 里又出现了写死的检测阈值，请改用 OFFLINE_DET_CONF"
+            )

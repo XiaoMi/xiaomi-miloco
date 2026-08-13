@@ -118,9 +118,36 @@ def check_cross_module_config(
     return out
 
 
-def warn_cross_module_config(**kwargs) -> list[ConfigWarning]:
-    """跑一遍检查并把结果打成 warning 日志。建引擎时调用一次。"""
-    warnings = check_cross_module_config(**kwargs)
+def warn_cross_module_config(
+    *,
+    fps: int,
+    collect_window_sec: float,
+    identity_engine: IdentityEngineConfig,
+    gate: GateConfig,
+) -> list[ConfigWarning]:
+    """跑一遍检查并把结果打成 warning 日志。建引擎时调用一次。
+
+    本函数**保证不向调用方抛异常**：它是诊断设施，任何自身故障都不该让引擎建不起来
+    （见模块说明里「把线上拉挂比让人看到告警更糟」那条）。检查逻辑里用到了跨模块的内部
+    实现（下面那个 ReID 间隔要借跟踪器的私有方法算），那边一次与本模块无关的改动就可能
+    让这里抛异常 —— 而改跟踪器的人根本不会想到自己动了一个配置校验模块。
+
+    签名写全、不用 ``**kwargs`` 透传：拼错关键字名要在静态检查阶段就暴露，不能拖到运行
+    期抛 ``TypeError``，那样又落回同一条不设防的路径上。
+
+    ``check_cross_module_config`` 保持不吞异常 —— 用例走的是它，检查逻辑坏了必须在持续
+    集成里红。真正需要自保的只有跑在生产路径上的这一层。
+    """
+    try:
+        warnings = check_cross_module_config(
+            fps=fps,
+            collect_window_sec=collect_window_sec,
+            identity_engine=identity_engine,
+            gate=gate,
+        )
+    except Exception:  # noqa: BLE001 —— 诊断设施不得影响主流程
+        logger.exception("[Perception/config] 跨模块参数关系检查自身出错，已跳过")
+        return []
     for w in warnings:
         logger.warning("[Perception/config] %s", w.message)
     return warnings

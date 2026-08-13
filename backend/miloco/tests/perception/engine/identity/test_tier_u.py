@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Iterator
 from unittest.mock import MagicMock, patch
 
@@ -1104,6 +1105,39 @@ class TestDumpAndLoad:
         new_cfg = TierUConfig(l1_capacity=2, reid_threshold_intra_cam=0.7)
         restored = TierUPool.load_from(target, config=new_cfg)
         assert restored.config.reid_threshold_intra_cam == 0.7
+
+    def test_load_drops_fields_removed_since_snapshot(self, tmp_path, caplog):
+        """快照里带着本版本已删掉的字段 → 丢弃并告警，而不是抛 TypeError。
+
+        dump 侧是 ``vars(self.config)`` 原样落盘，所以任何删过字段的版本去读旧快照都会
+        踩到这条路径。此前它零覆盖：三处快照用例都只 load 当前进程 dump 出来的新快照，
+        跨版本那条路一次都没走过，所以删字段时 CI 全绿、值班的人在排障现场才吃到一个
+        什么都不提示的 TypeError。
+
+        版本闸不背这个锅：纯死字段的删除不改变任何语义，为它把存量快照全部作废不划算。
+        """
+        import json
+
+        pool = TierUPool(config=TierUConfig(l1_capacity=2))
+        pool.push_crop(_make_crop("cam-a", 1, 0, 1.0))
+        target = str(tmp_path / "snap")
+        pool.dump_to(target)
+
+        # 模拟"旧版本 dump 出来的快照"：manifest 里多一个当前 TierUConfig 没有的字段
+        manifest_path = tmp_path / "snap" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["config"]["area_ratio_min"] = 0.05  # 本 PR 删掉的那个死字段
+        manifest["config"]["some_future_dead_field"] = 123
+        manifest_path.write_text(json.dumps(manifest))
+
+        with caplog.at_level(logging.WARNING):
+            restored = TierUPool.load_from(target)
+
+        assert restored.config.l1_capacity == 2  # 认得的字段照常还原
+        assert not hasattr(restored.config, "area_ratio_min")
+        assert "area_ratio_min" in caplog.text and "some_future_dead_field" in caplog.text, (
+            "被丢掉的字段必须出现在告警里，否则排障的人不知道快照与代码差在哪"
+        )
 
     def test_load_version_mismatch_raises(self, tmp_path):
         """快照 version 不匹配 → raise ValueError,防止跨版本悄悄加载错乱"""
