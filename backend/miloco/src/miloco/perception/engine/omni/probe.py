@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -179,7 +179,37 @@ async def _probe_stream_chat(
         return 500, 0, False, {}
 
 
-async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
+def _image_probe_messages() -> list[dict[str, Any]]:
+    """Build a small valid image request to verify vision-model capability."""
+    import base64
+
+    import cv2
+    import numpy as np
+
+    image = np.zeros((32, 32, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", image)
+    if not ok:
+        raise RuntimeError("failed to encode probe image")
+    data = base64.b64encode(encoded.tobytes()).decode("ascii")
+    return [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "用一个词描述图片。"},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{data}"},
+            },
+        ],
+    }]
+
+
+async def probe_chat(
+    model: str,
+    base_url: str,
+    api_key: str,
+    *,
+    visual_mode: Literal["frames", "video"] = "video",
+) -> dict[str, Any]:
     """极简 chat 探测(max_tokens=1)真校验模型是否可用。
 
     走 provider adapter 生成 body,兼容不同 provider 的强制要求(Qwen 强制
@@ -194,8 +224,13 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     from miloco.perception.engine.omni.provider import get_adapter
 
     adapter = get_adapter(model)
+    messages = (
+        _image_probe_messages()
+        if visual_mode == "frames"
+        else [{"role": "user", "content": "ping"}]
+    )
     body = adapter.build_request_body(
-        [{"role": "user", "content": "ping"}],
+        messages,
         model=model,
         max_tokens=1,
         temperature=0.0,
@@ -330,7 +365,13 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     }
 
 
-async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
+async def probe_omni(
+    model: str,
+    base_url: str,
+    api_key: str,
+    *,
+    visual_mode: Literal["frames", "video"] = "video",
+) -> dict[str, Any]:
     """两阶段探测:GET /models 预检 → 极简 chat 真校验。
 
     - GET /models 网络错 → unreachable
@@ -351,7 +392,9 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     )
 
     if not isinstance(get_adapter(model), OpenAICompatAdapter):
-        return await probe_chat(model, base, api_key)
+        return await probe_chat(
+            model, base, api_key, visual_mode=visual_mode
+        )
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.get(
@@ -377,4 +420,4 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
             "status": r.status_code,
             "message": f"服务返回异常（HTTP {r.status_code}）",
         }
-    return await probe_chat(model, base, api_key)
+    return await probe_chat(model, base, api_key, visual_mode=visual_mode)

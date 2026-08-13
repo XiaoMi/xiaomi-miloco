@@ -93,6 +93,16 @@ def _get(client):
     return client.get("/api/admin/omni-config").json()["data"]
 
 
+def _import_models(client, **overrides):
+    body = {
+        "base_url": "https://provider.example/v1/",
+        "api_key": "sk-provider-key",
+        "models": ["vision-large", "audio-fast"],
+        **overrides,
+    }
+    return client.post("/api/admin/omni-config/models/import", json=body)
+
+
 # ─── GET / PUT / 档案(label=id) ────────────────────────────────────────────
 
 
@@ -103,6 +113,143 @@ def test_get_default_active_no_key_not_synthesized(client):
     assert data["active"]["model"] == "xiaomi/mimo-v2.5"
     assert data["active"]["has_key"] is False
     assert data["profiles"] == []
+
+
+def test_import_selected_models_is_atomic_and_does_not_activate(client):
+    response = _import_models(client)
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    assert [item["model"] for item in data["added"]] == [
+        "vision-large",
+        "audio-fast",
+    ]
+    assert data["skipped"] == []
+    assert data["config"]["active"]["has_key"] is False
+    assert {profile["model"] for profile in data["config"]["profiles"]} == {
+        "vision-large",
+        "audio-fast",
+    }
+    assert all(profile["has_key"] for profile in data["config"]["profiles"])
+    assert all(
+        profile["visual_mode"] == "frames"
+        for profile in data["config"]["profiles"]
+    )
+
+
+def test_visual_mode_persists_and_activates(client):
+    created = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "图片模型",
+            "model": "vision-model",
+            "base_url": "https://vision.example/v1",
+            "api_key": "sk-vision-key",
+            "visual_mode": "frames",
+        },
+    ).json()["data"]
+
+    assert created["active"]["visual_mode"] == "frames"
+    assert created["profiles"][0]["visual_mode"] == "frames"
+
+    edited = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "图片模型",
+            "original_label": "图片模型",
+            "model": "vision-model-v2",
+            "base_url": "https://vision.example/v1",
+            "activate": False,
+        },
+    ).json()["data"]
+
+    assert edited["active"]["visual_mode"] == "frames"
+
+
+def test_import_models_deduplicates_request_and_existing_profiles(client):
+    _import_models(client, models=["vision-large"])
+    response = _import_models(
+        client,
+        api_key=None,
+        models=[" vision-large ", "audio-fast", "audio-fast"],
+    )
+    data = response.json()["data"]
+
+    assert [item["model"] for item in data["added"]] == ["audio-fast"]
+    assert [item["model"] for item in data["skipped"]] == ["vision-large"]
+    profiles = data["config"]["profiles"]
+    assert len(profiles) == 2
+    assert all(profile["has_key"] for profile in profiles)
+
+
+def test_import_models_rejects_empty_model_id(client):
+    response = _import_models(client, models=["vision-large", "  "])
+    assert response.status_code == 400
+    assert _get(client)["profiles"] == []
+
+
+def test_import_models_uses_unique_label_when_generated_label_is_taken(client):
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "audio-fast @ https://provider.example/v1",
+            "model": "other-model",
+            "base_url": "https://other.example/v1",
+            "api_key": "sk-other",
+            "activate": False,
+        },
+    )
+
+    data = _import_models(client, models=["audio-fast"]).json()["data"]
+    assert data["added"] == [
+        {
+            "label": "audio-fast @ https://provider.example/v1 (2)",
+            "model": "audio-fast",
+        }
+    ]
+
+
+def test_import_models_never_reuses_credentials_across_provider_urls(client):
+    _import_models(client, models=["vision-large"])
+
+    data = _import_models(
+        client,
+        base_url="https://other-provider.example/v1",
+        api_key=None,
+        models=["audio-fast"],
+    ).json()["data"]
+
+    imported = next(
+        profile
+        for profile in data["config"]["profiles"]
+        if profile["model"] == "audio-fast"
+    )
+    assert imported["has_key"] is False
+    assert imported["api_key_masked"] == ""
+
+
+def test_import_models_rejects_profile_overflow_without_partial_write(client):
+    from miloco.utils.agent_config import update_shared_config
+
+    profiles = [
+        {
+            "label": f"profile-{index}",
+            "base_url": "https://existing.example/v1",
+            "model": f"model-{index}",
+            "api_key": "sk-existing",
+        }
+        for index in range(99)
+    ]
+    update_shared_config(model={"omni_profiles": profiles})
+
+    response = _import_models(client)
+
+    assert response.status_code == 400
+    saved = _get(client)["profiles"]
+    assert len(saved) == 99
+    assert not {"vision-large", "audio-fast"} & {
+        profile["model"] for profile in saved
+    }
 
 
 def test_active_with_key_not_in_profiles_is_synthesized(client):
@@ -1015,6 +1162,24 @@ def test_test_connection_ok_normalizes_base_url_trailing_slash(client):
         },
     )
     assert get_omni_circuit_breaker().snapshot().state == "ok"
+
+
+def test_put_normalizes_base_url_trailing_slashes(client):
+    response = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "image-model",
+            "model": "vision-model",
+            "base_url": "https://x/v1///",
+            "api_key": "sk-active",
+            "visual_mode": "frames",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["active"]["base_url"] == "https://x/v1"
+    assert data["profiles"][0]["base_url"] == "https://x/v1"
 
 
 def test_test_connection_ok_not_matching_active_leaves_breaker(client):
