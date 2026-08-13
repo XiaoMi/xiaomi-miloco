@@ -24,17 +24,31 @@ import click
 _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v", ".3gp"}
 
 
+# ISO BMFF(``ftyp`` 盒)里属于**静态图片**的品牌。HEIF/AVIF 与 mp4/mov 共用同一套容器结构,
+# 只看「字节 4..8 == ftyp」会把 iPhone 的 HEIC 判成视频 —— 而这个误判会连锁成灾:报错文案
+# 把 agent 引到 `--video`,服务端不嗅内容直接按视频抽帧,ffmpeg 又只暴露 HEIC 的 512x512
+# 瓦片而不拼接 grid,最终静默拿一块瓦片当整帧、返回"没识别到人"。故必须按 brand 区分。
+# 与后端 identity/_image_utils._HEIF_BRANDS 同口径(两侧各自独立进程,无法共享常量)。
+_STILL_IMAGE_BRANDS = {
+    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs",
+    b"mif1", b"msf1", b"miaf", b"mia1",
+    b"avif", b"avis",
+}
+
+
 def _looks_like_video_bytes(head: bytes) -> str | None:
     """看文件头 magic number 判断是否视频(防 agent 把 .mp4 改成 .jpg 后缀伪装绕过)。
 
     返回识别到的格式名,或 None(不是视频)。检测:
-    - ISO BMFF (mp4/mov/m4v/3gp):字节 4..8 == "ftyp"
+    - ISO BMFF (mp4/mov/m4v/3gp):字节 4..8 == "ftyp"**且 brand 不是静态图片家族**
     - Matroska / WebM:开头 \\x1A\\x45\\xDF\\xA3 (EBML)
     - AVI:RIFF....AVI
     """
     if not head or len(head) < 8:
         return None
     if head[4:8] == b"ftyp":
+        if len(head) >= 12 and head[8:12] in _STILL_IMAGE_BRANDS:
+            return None  # HEIC/HEIF/AVIF 是**图片**,该走 --image
         return "mp4/mov"
     if head[:4] == b"\x1a\x45\xdf\xa3":
         return "matroska/webm"

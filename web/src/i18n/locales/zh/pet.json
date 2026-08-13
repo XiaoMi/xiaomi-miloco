@@ -37,7 +37,7 @@
       "generic_look": "未发现明显区分特征（花纹/品种/配饰），可能与同类难以区分，建议补充更具特征或更清晰的素材",
       "refs_inconsistent": "上传的几张图差异较大，疑似不是同一只宠物",
       "multiple_pets": "画面中检测到多只宠物，已自动选择主体；如需注册其它只请单独上传该只素材",
-      "partial_decode_failed": "有部分图片无法解码，已跳过（仅支持 jpg/png/webp）",
+      "partial_decode_failed": "有部分图片无法打开，已跳过（文件可能损坏或不完整）",
       "low_sharpness": "素材画面偏糊，识别参照效果可能变差，建议换更清晰的照片"
     },
     "previewSource": "上传画面",

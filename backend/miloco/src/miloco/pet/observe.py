@@ -36,7 +36,10 @@ import numpy as np
 
 from miloco.config import get_settings
 from miloco.perception.engine.config import OmniConfig
-from miloco.perception.engine.identity._image_utils import compute_sharpness
+from miloco.perception.engine.identity._image_utils import (
+    compute_sharpness,
+    decode_image,
+)
 from miloco.perception.engine.identity.extractor import (
     _crop_with_padding,
     _sample_video_frames,
@@ -53,10 +56,13 @@ logger = logging.getLogger(__name__)
 
 
 class MediaDecodeError(ValueError):
-    """上传的字节一张都解不出来（HEIC / AVIF / 截断损坏）。
+    """上传的字节一张都解不出来（截断 / 损坏 / 根本不是图片 / 像素量超上限）。
 
-    与「画面里确实没有动物」**必须区分**：前者要引导住户换格式，后者要引导换素材；
-    混成同一个 detected=False 会让 Agent / Web 给出误导性话术（让人反复换同格式的图）。
+    与「画面里确实没有动物」**必须区分**：前者要引导住户换文件，后者要引导换素材；
+    混成同一个 detected=False 会让 Agent / Web 给出误导性话术（让人反复换同一张坏图）。
+
+    注意：HEIC/HEIF 已由 ``decode_image`` 支持，不再落在这里——若又见到 HEIC 触发本异常，
+    说明 pi-heif 没装上（``_image_utils`` 会打 ``event=heif_decoder_unavailable``）。
     """
 
 
@@ -646,15 +652,6 @@ def _decode_and_sample(
             pass
 
 
-def _first_decodable(medias: list[bytes]) -> np.ndarray | None:
-    """回退用：取第一张能解码的图（多图时任一可用即可作整幅画面）。"""
-    for m in medias:
-        img = cv2.imdecode(np.frombuffer(m, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if img is not None and img.size > 0:
-            return img
-    return None
-
-
 def _crop_from_norm_bbox(
     frame: np.ndarray, norm_bbox: Any, padding: float = _PADDING_RATIO
 ) -> tuple[np.ndarray | None, tuple | None]:
@@ -740,10 +737,18 @@ def _prepare_crops(
     n_coincident = 0
     n_decoded = 0
     batch = medias[:_MAX_SELECT]
+    # 兜底帧（检测器一个都没框到时交给 omni 看整幅画面）就地留一份，别在 return 里再解一次：
+    # 那一次在绝大多数请求里（检测器框到了）根本用不上，而 HEIC 走 libheif 单张 12MP 是几百
+    # 毫秒量级——这段还跑在 to_thread 里，同进程并行着直播转码 / 感知推理。
+    # 语义与原先的 _first_decodable(medias) 等价：batch 与 medias 同序，取首个解得开的；
+    # 而「batch 全解不出」在下面就抛 MediaDecodeError 了，走不到用它的地方。
+    first_ok: np.ndarray | None = None
     for m in batch:
-        img = cv2.imdecode(np.frombuffer(m, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if img is None:  # HEIC / AVIF / 截断损坏
+        img = decode_image(m)
+        if img is None:  # 截断损坏 / 压根不是图 / 像素量超上限
             continue
+        if first_ok is None:
+            first_ok = img
         n_decoded += 1
         one, n_in_frame = _largest_pet_crop_with_count(img, detector)
         if one is not None:
@@ -753,7 +758,7 @@ def _prepare_crops(
         # refs_inconsistent 兜。
         n_coincident = max(n_coincident, n_in_frame)
     if n_decoded == 0:
-        raise MediaDecodeError("无法解码上传的图片（仅支持常见 jpg/png/webp 格式）")
+        raise MediaDecodeError("无法打开上传的图片（文件可能损坏、截断，或不是图片）")
     extra: list[dict] = []
     if n_decoded < len(batch):  # 部分解不出：别静默丢（同 D8 口径）
         extra.append(
@@ -773,7 +778,7 @@ def _prepare_crops(
                 "message": "有素材画面偏糊，识别参照效果可能变差，建议换更清晰的照片。",
             }
         )
-    return selected, n_coincident, _first_decodable(medias), extra
+    return selected, n_coincident, first_ok, extra
 
 
 def _empty_result(warnings: list[dict] | None = None) -> dict:

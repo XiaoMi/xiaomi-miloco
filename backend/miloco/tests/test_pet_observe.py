@@ -731,7 +731,6 @@ async def test_observe_image_multiple_pets_surfaced(monkeypatch):
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: dets)
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     res = await obs.observe_pet([b"img"], is_video=False, grounding=False)
     assert len(res["candidates"]) == 1  # 只留最大那只
@@ -746,7 +745,6 @@ async def test_observe_image_multiple_pets_surfaced_when_gated_out(monkeypatch):
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: dets)
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     res = await obs.observe_pet([b"img"], is_video=False, grounding=False)
     assert res["candidates"] == []  # 门控全灭 → 无参考 crop
@@ -762,7 +760,6 @@ async def test_observe_two_images_one_pet_each_no_multiple_pets(monkeypatch):
         "default_detector",
         lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     res = await obs.observe_pet([b"i1", b"i2"], is_video=False, grounding=False)
     assert "multiple_pets" not in {w["type"] for w in res["warnings"]}
@@ -770,14 +767,14 @@ async def test_observe_two_images_one_pet_each_no_multiple_pets(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_observe_undecodable_image_raises(monkeypatch):
-    # HEIC / AVIF / 损坏字节：一张都解不出 → MediaDecodeError（路由转 400），
+    # 截断 / 损坏字节：一张都解不出 → MediaDecodeError（路由转 400），
     # **不能**退化成 detected=False（那会让 Agent/Web 劝住户换同格式的图，无限循环）
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
     )
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: None)
     with pytest.raises(obs.MediaDecodeError):
-        await obs.observe_pet([b"heic-bytes"], is_video=False, grounding=False)
+        await obs.observe_pet([b"truncated-bytes"], is_video=False, grounding=False)
 
 
 @pytest.mark.asyncio
@@ -789,7 +786,6 @@ async def test_observe_partial_decode_failure_warns(monkeypatch):
         "default_detector",
         lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     calls = {"n": 0}
 
     def _imdecode(*a, **k):
@@ -811,12 +807,60 @@ async def test_observe_low_sharpness_soft_warning(monkeypatch):
         "default_detector",
         lambda: SimpleNamespace(detect_pets=lambda f: [_det(10, 10, 80, 80)]),
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: _frame(200, 200))
     monkeypatch.setattr(obs, "compute_sharpness", lambda c: 1.0)  # 远低于 PET_GATE_SHARP_MIN
     res = await obs.observe_pet([b"blurry"], is_video=False, grounding=False)
     assert len(res["candidates"]) == 1  # 不硬拒
     assert "low_sharpness" in {w["type"] for w in res["warnings"]}
+
+
+def test_prepare_crops_goes_through_decode_image(monkeypatch):
+    """钉住「observe 用的是 decode_image 而非裸 cv2.imdecode」这条接线本身。
+
+    这个 PR 的核心就是把 9 个入口收口到 decode_image，但 observe 侧所有既有用例都 mock 掉
+    cv2.imdecode（decode_image 内部也调它），于是把这一行改回 cv2.imdecode 全量测试照样绿——
+    等于核心接线零覆盖。这里改 mock decode_image 本身：只有真的经它才会被观察到。
+    """
+    seen = {"n": 0}
+
+    def _fake(data):
+        seen["n"] += 1
+        return _frame(200, 200)
+
+    monkeypatch.setattr(obs, "decode_image", _fake)
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
+    )
+    obs._prepare_crops([b"a", b"b"], is_video=False, max_frames=1)
+    assert seen["n"] == 2  # 两张图各经 decode_image 一次
+
+
+@pytest.mark.asyncio
+async def test_fallback_frame_is_first_decodable_not_index_zero(monkeypatch):
+    """兜底帧的两条不变量，本 PR 唯一没被钉住的改动（325e927 的提速）：
+
+    1. 语义：它是循环内**第一个解得开的**画面，不是 medias[0]。首图解不开时必须取第二张——
+       这一半恰好被既有用例绕开了（那条的替身是「第 1 次成功、第 2 次 None」，仍与下标 0 重合）。
+    2. 次数：3 张图就该解 3 次。改回 `decode_image(medias[0])` 那种写法整套测试仍会全绿，
+       而省下的那次解码在 HEIC 下是几百毫秒量级（libheif，且跑在 to_thread 里与转码抢 CPU）。
+    """
+    monkeypatch.setattr(
+        obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
+    )
+    second = _frame(120, 120)
+    calls = {"n": 0}
+
+    def _imdecode(*a, **k):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else second  # 首图解不开
+
+    monkeypatch.setattr(cv2, "imdecode", _imdecode)
+    selected, _n, fallback, _w = obs._prepare_crops(
+        [b"i1", b"i2", b"i3"], is_video=False, max_frames=1
+    )
+    assert selected == []
+    assert fallback is second  # 取第二张，而非把第一张重解一遍
+    assert calls["n"] == 3  # 3 张图 = 3 次解码，没有多出来的第 4 次
 
 
 @pytest.mark.asyncio
@@ -829,7 +873,6 @@ async def test_partial_decode_warning_survives_empty_result(monkeypatch):
     monkeypatch.setattr(
         obs, "default_detector", lambda: SimpleNamespace(detect_pets=lambda f: [])
     )
-    monkeypatch.setattr(obs, "_first_decodable", lambda ms: _frame(200, 200))
     calls = {"n": 0}
 
     def _imdecode(*a, **k):

@@ -144,7 +144,7 @@ miloco-cli pet observe --video <MediaPath.mp4> --save-crops /tmp/<uuid>_pet --pr
 | `warnings[].type = species_mismatch` | 检出物种与用户说的不符 | "我看着更像{检出物种},你确认是{用户物种}吗?" |
 | `warnings[].type = generic_look` | 大众花色/脸,难独一区分 | 照常注册,但提示"这只花色比较常见,后续多补不同姿态识别更稳" |
 | `warnings[].type = multiple_pets` | 画面里不止一只 | "画面里不止一只,本次先注册主体那只;其它的分别再各传一次" |
-| `warnings[].type = partial_decode_failed` | 有图没解出来(HEIC/AVIF/损坏),已跳过 | "其中有张我没打开(格式不支持),这次用剩下的看的;想把那张也算上就换成 jpg/png 再发一次" |
+| `warnings[].type = partial_decode_failed` | 有图没解出来(截断/损坏/不是图片),已跳过 | "其中有张我没打开(文件像是损坏了),这次用剩下的看的;想把那张也算上就重新发一次" |
 | `warnings[].type = low_sharpness` | 素材偏糊(不硬拒,只是参照会打折) | 照常注册,但提示"这几张有点糊,识别参照效果会差些;有更清晰的可以再补" |
 | 顶层 `refs_inconsistent = true` | 多图疑似不是同一只 | "这几张看着可能不是同一只?确认都是{name}我再入库,或只留同一只的" |
 
@@ -250,7 +250,7 @@ A 通路 `pet observe`(出候选)、B 通路(回显解析)→ **等待用户明�
 | 异常 | 处理 | 话术 |
 |---|---|---|
 | `pet_recognition` 关(注册端点返 404) | 引导去设置打开、不建档 | "宠物识别功能没开,现在还没法给它建档——去设置里打开「宠物识别」,打开后我就能帮它建档、在画面里认出它。" |
-| `detected=false`(没检出猫/狗) | 不入库;**先看 `warnings`**——含 `partial_decode_failed` / `low_sharpness` 就按第三步表里那条说(是"图没打开 / 偏糊",不是"没看清是猫是狗"),别把住户推去反复换同格式的图;都没有才用右侧话术 | "这张/这段里没看清是猫还是狗,换一张更清楚的,或直接描述它的样子?" |
+| `detected=false`(没检出猫/狗) | 不入库;**先看 `warnings`**——含 `partial_decode_failed` / `low_sharpness` 就按第三步表里那条说(是"图没打开 / 偏糊",不是"没看清是猫是狗"),别把住户推去反复换图;都没有才用右侧话术 | "这张/这段里没看清是猫还是狗,换一张更清楚的,或直接描述它的样子?" |
 | `species_mismatch` / `refs_inconsistent` / `multiple_pets` | 见第三步处理表 | 同上表 |
 | 用户没给宠物名 | 追问 | "这只{物种}叫什么名字?我用它作标识。" |
 | 上传非图非视频 | 引导改发或改描述 | "只能用图片或视频建识别参照;要么重发一张照片/视频,要么直接描述它的样子。" |
