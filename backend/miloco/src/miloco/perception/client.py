@@ -377,6 +377,7 @@ class PerceptionEngineProxy:
             OmniConfig,
             PerceptionConfig,
         )
+        from miloco.perception.engine.config_checks import warn_cross_module_config
         from miloco.perception.engine.identity.config_loader import (
             load_identity_engine_config,
         )
@@ -394,6 +395,17 @@ class PerceptionEngineProxy:
             identity=IdentityConfig(**identity_kwargs),
             omni=OmniConfig(**omni_kwargs),
             identity_engine=identity_engine_cfg,
+        )
+
+        # 跨模块参数关系在这里判一次:此处拿到的是**部署现场**那份配置(settings.yaml
+        # 叠 config.json),而单窗时长的旋钮在采集段、不在 PerceptionConfig 里,所以要
+        # 单独取。只告警不拦 —— 这些关系破了是行为退化不是崩溃。随包配置那一层由
+        # 用例钉住,判据与这里同一个函数,详见 config_checks 的模块说明。
+        warn_cross_module_config(
+            fps=config.input.fps,
+            collect_window_sec=get_settings().perception.collect.window_size,
+            identity_engine=config.identity_engine,
+            gate=config.gate,
         )
 
         return PerceptionEngine(config=config)
