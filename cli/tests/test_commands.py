@@ -1,6 +1,7 @@
 """CLI 命令测试：使用 Click CliRunner，mock 底层 API 调用。"""
 
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -28,6 +29,9 @@ def isolated_config(tmp_path, monkeypatch):
         if key.startswith("MILOCO_"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("MILOCO_HOME", str(config_dir))
+    # 默认关掉 jemalloc 预加载：生成 supervisord.conf 会真起一个探针子进程验证 libjemalloc，
+    # 于是用例会因为"本机装没装 libjemalloc2"而行为不同。专门测分配器的用例自己 delenv 覆盖。
+    monkeypatch.setenv("MILOCO_MALLOC", "glibc")
     return config_dir / "config.json"
 
 
@@ -2422,3 +2426,1193 @@ def test_scope_camera_list_shows_composite_did(runner):
     data = json.loads(result.output)["data"]
     assert [r["did"] for r in data] == ["solo", "dual:ch0", "dual:ch1"]
     assert all("channel" not in r and "channel_count" not in r for r in data)
+
+
+# ─── 分配器：jemalloc 预加载 ──────────────────────────────────────────────────
+#
+# 全部 mock 子进程。真起探针会让用例行为取决于"本机装没装 libjemalloc2"，
+# 而 isolated_config 默认设了 MILOCO_MALLOC=glibc，下面这些用例靠 malloc_probe 覆盖回来。
+
+
+def _probe_stdout(ver="5.3.1", page=4096, bg=True, dirty=5000, muzzy=5000):
+    """造一份符合探针 stdout 契约的输出（5 行）。"""
+    return f"ver={ver}\npage={page}\nbg={bg}\ndirty={dirty}\nmuzzy={muzzy}\n"
+
+
+_INVALID = "<jemalloc>: Invalid conf pair: "
+
+
+@pytest.fixture
+def malloc_probe(monkeypatch, tmp_path):
+    """把分配器逻辑放进可控环境：假的系统库目录 + 假的子进程。
+
+    返回一个 dict，用例改它来控制探针行为：``stdout`` / ``stderr`` / ``returncode`` / ``raise``
+    （抛什么异常）/ ``bundled``（自带那份的路径）。读 ``probe_calls`` 看探针被怎么调的。
+    """
+    import subprocess as sp
+
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.delenv("MILOCO_MALLOC", raising=False)
+    # 这两个不带 MILOCO_ 前缀，isolated_config 清不到；而被测代码对它们是"环境里有就沿用"
+    # 的语义（LD_PRELOAD 追加、MALLOC_CONF 整份取用），不清掉会让导出过它们的开发机拿到假失败。
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.delenv("MALLOC_CONF", raising=False)
+    monkeypatch.setattr(svc_mod.sys, "platform", "linux")
+
+    lib_dir = tmp_path / "usr-lib"
+    lib_dir.mkdir()
+    (lib_dir / "libjemalloc.so.2").write_bytes(b"\x7fELF")
+    # triplet 目录清掉，候选只剩下面这一个假目录，用例才好数探针次数。
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (lib_dir,))
+    monkeypatch.setattr(svc_mod, "_ARCH_LIB_DIR_NAMES", {})
+
+    state = {
+        "stdout": _probe_stdout(),
+        "stderr": "",
+        "returncode": 0,
+        "raise": None,
+        "bundled": None,
+        "probe_calls": [],
+        "lib_dir": lib_dir,
+        "so": lib_dir / "libjemalloc.so.2",
+    }
+
+    def fake_run(cmd, **kwargs):
+        if "-E" in cmd:  # 预加载探针
+            state["probe_calls"].append({"cmd": cmd, "env": kwargs.get("env") or {}})
+            if state["raise"] is not None:
+                raise state["raise"]
+            return sp.CompletedProcess(
+                cmd, state["returncode"], state["stdout"], state["stderr"]
+            )
+        # 问 backend 解释器要自带那份的路径
+        bundled = state["bundled"]
+        return sp.CompletedProcess(cmd, 0 if bundled else 1, f"{bundled or ''}\n", "")
+
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
+    yield state
+    # 前台模式那条路径直接改真的 os.environ（exec 前的 os.environ.update），不经过
+    # monkeypatch；而 monkeypatch.delenv 对"本来就不存在"的变量不记 undo，还不回来。
+    # 不兜这一道，那个假 .so 路径会留在 pytest 进程里直到 session 结束，后面任何真 fork
+    # 子进程的用例都会白拿一行 ld.so 报错，且是在跟它无关的断言里炸。
+    # 本 finalizer 先于 monkeypatch 的 undo 执行，导出过这两个变量的开发机仍能拿回原值。
+    for leaked in ("LD_PRELOAD", "MALLOC_CONF"):
+        os.environ.pop(leaked, None)
+
+
+def test_malloc_default_injects_jemalloc_and_conf(malloc_probe):
+    """默认路径（不设 MILOCO_MALLOC）注入 LD_PRELOAD + 三个旋钮。"""
+    import miloco_cli.commands.service as svc_mod
+
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["LD_PRELOAD"] == str(malloc_probe["so"])
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+
+
+def test_malloc_default_is_silent_when_nothing_found(malloc_probe, capsys):
+    """默认路径一份都找不到 → 不注入且不告警（没装 libjemalloc2 是常态）。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["so"].unlink()
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert capsys.readouterr().err == ""
+
+
+def test_malloc_explicit_jemalloc_warns_when_missing(malloc_probe, monkeypatch, capsys):
+    """显式点名 jemalloc 却找不到 → 必须告警（和默认路径的静默相反）。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["so"].unlink()
+    monkeypatch.setenv("MILOCO_MALLOC", "jemalloc")
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert "找不到可用的 libjemalloc" in capsys.readouterr().err
+
+
+def test_malloc_absolute_path_used_directly(malloc_probe, monkeypatch, tmp_path):
+    """绝对路径只试这一份，不走候选链。"""
+    import miloco_cli.commands.service as svc_mod
+
+    mine = tmp_path / "mine" / "libjemalloc.so.2"
+    mine.parent.mkdir()
+    mine.write_bytes(b"\x7fELF")
+    monkeypatch.setenv("MILOCO_MALLOC", str(mine))
+
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["LD_PRELOAD"] == str(mine)
+    # 只探了这一份，候选链里那个假的没被碰
+    assert len(malloc_probe["probe_calls"]) == 1
+    assert str(mine) in malloc_probe["probe_calls"][0]["env"]["LD_PRELOAD"]
+
+
+def test_malloc_glibc_injects_nothing(malloc_probe, monkeypatch, capsys):
+    """MILOCO_MALLOC=glibc 是"原样、什么都不注入"，不再注入任何钉死参数。"""
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MILOCO_MALLOC", "glibc")
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert malloc_probe["probe_calls"] == []  # 不跑探针
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "tcmalloc",  # 不认识的名字
+        "relative/path.so",  # 不是绝对路径
+    ],
+)
+def test_malloc_unrecognized_values_warn_and_skip(
+    malloc_probe, monkeypatch, capsys, value
+):
+    """认不出的取值一律告警 + 不注入。
+
+    含危险字符的**绝对路径**不走这里——它确实是绝对路径，归
+    test_malloc_hostile_char_in_abs_path_says_the_real_reason 管。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MILOCO_MALLOC", value)
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert "无法识别 MILOCO_MALLOC" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        '/opt/a"b/libjemalloc.so.2',  # Unexpected end of key/value pairs
+        "/opt/a%2Fb/libjemalloc.so.2",  # supervisord 展开时 badly formatted
+        "/opt/a\nb/libjemalloc.so.2",  # No closing quotation
+    ],
+)
+def test_malloc_hostile_char_in_abs_path_says_the_real_reason(
+    malloc_probe, monkeypatch, capsys, path
+):
+    """含危险字符的绝对路径被挡下时要说真实原因，不能答"这不是绝对路径"。
+
+    三种字符任意一个都会让 supervisord 拒绝加载配置（错误信息见各行注释，均为实测）。
+    检查在探针入口，所以路径来源（候选链 / MILOCO_MALLOC / 自带那份）都被同一处覆盖。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MILOCO_MALLOC", path)
+    monkeypatch.setattr(svc_mod.Path, "is_file", lambda self: True)
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    err = capsys.readouterr().err
+    assert "supervisord" in err  # 说清后果
+    assert "无法识别" not in err  # 不再答非所问
+    assert malloc_probe["probe_calls"] == []  # 拼不出来就不必真起进程
+
+
+def test_malloc_comma_in_path_is_allowed(malloc_probe, monkeypatch, capsys):
+    """含逗号的路径**不能**被拒——值用双引号包住后 supervisord 解析得好好的（实测）。
+
+    这条钉的是"别把逗号加进 _CONF_HOSTILE_CHARS"：同一个判断函数也管 MALLOC_CONF，
+    而它的合法值本身就是逗号分隔的，拒掉逗号会让默认旋钮串一个都注入不进去。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    so_path = "/tmp/a,b/libjemalloc.so.2"
+    monkeypatch.setenv("MILOCO_MALLOC", so_path)
+    monkeypatch.setattr(svc_mod.Path, "is_file", lambda self: True)
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["LD_PRELOAD"] == so_path
+    assert "无法识别" not in capsys.readouterr().err
+
+
+def test_malloc_conf_with_hostile_char_falls_back_to_default(
+    malloc_probe, monkeypatch, capsys
+):
+    """环境里的 MALLOC_CONF 含引号时换回默认旋钮，而不是原样写进 conf。
+
+    路径那侧早有这道闸，MALLOC_CONF 这侧原来一个字符都没检查——它同样是用户可控、
+    同样原样进 environment= 行，漏了它等于闸只关了一半。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MALLOC_CONF", 'dirty_decay_ms:5000,x:"q')
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+    assert "MALLOC_CONF 含有会让 supervisord 拒绝加载配置的字符" in capsys.readouterr().err
+
+
+def test_malloc_candidates_dedupe_symlinks(malloc_probe, monkeypatch, tmp_path):
+    """候选按 resolve() 去重：.so 是指向 .so.2 的软链时只算一个候选。
+
+    真机上这一步能把 8 个名义候选（4 目录 × 2 文件名）压到 1 次探针：
+    /usr/lib64 是指向 lib 的软链、.so 是指向 .so.2 的软链。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    lib_dir = malloc_probe["lib_dir"]
+    (lib_dir / "libjemalloc.so").symlink_to(lib_dir / "libjemalloc.so.2")
+    alias_dir = tmp_path / "usr-lib64"
+    alias_dir.symlink_to(lib_dir)  # 整个目录也是软链，像 Arch 的 /usr/lib64
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (alias_dir, lib_dir))
+
+    got = list(svc_mod._jemalloc_candidates("/x/python"))
+    assert len(got) == 1, got
+
+
+def test_malloc_candidates_are_closed_set(malloc_probe):
+    """只认 libjemalloc.so.2 / libjemalloc.so 两个名字，目录里别的文件不进候选。
+
+    机器上装着 libjemalloc1（.so.1，3.6 一代）之类的时候，不能被误选。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    lib_dir = malloc_probe["lib_dir"]
+    (lib_dir / "libjemalloc.so.1").write_bytes(b"\x7fELF")
+    (lib_dir / "libjemalloc_pic.a").write_bytes(b"!<arch>")
+
+    got = [p for p, _ in svc_mod._jemalloc_candidates("/x/python")]
+    assert got == [lib_dir / "libjemalloc.so.2"]
+
+
+def test_malloc_separate_lib64_yields_two_candidates(malloc_probe, monkeypatch, tmp_path):
+    """lib/lib64 真分离（不是软链）时两份都是候选，且 lib64 那份先探（RHEL 系）。"""
+    import miloco_cli.commands.service as svc_mod
+
+    lib64 = tmp_path / "real-lib64"
+    lib64.mkdir()
+    (lib64 / "libjemalloc.so.2").write_bytes(b"\x7fELF-64")
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (lib64, malloc_probe["lib_dir"]))
+
+    got = [p for p, _ in svc_mod._jemalloc_candidates("/x/python")]
+    assert got == [lib64 / "libjemalloc.so.2", malloc_probe["so"]]
+
+
+def test_malloc_system_preferred_over_bundled(malloc_probe, tmp_path):
+    """系统那份可用时根本不问自带那份（惰性，不白起子进程）。"""
+    import miloco_cli.commands.service as svc_mod
+
+    bundled = tmp_path / "bundled" / "libjemalloc.so.2"
+    bundled.parent.mkdir()
+    bundled.write_bytes(b"\x7fELF")
+    malloc_probe["bundled"] = bundled
+
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["LD_PRELOAD"] == str(malloc_probe["so"])
+
+
+def test_malloc_falls_back_to_bundled_when_system_probe_fails(
+    malloc_probe, monkeypatch, tmp_path, capsys
+):
+    """系统那份探针不过时才落到自带那份。"""
+    import subprocess as sp
+
+    import miloco_cli.commands.service as svc_mod
+
+    bundled = tmp_path / "bundled" / "libjemalloc.so.2"
+    bundled.parent.mkdir()
+    bundled.write_bytes(b"\x7fELF")
+    malloc_probe["bundled"] = bundled
+
+    system_so = str(malloc_probe["so"])
+
+    def fake_run(cmd, **kwargs):
+        if "-E" in cmd:
+            env = kwargs.get("env") or {}
+            malloc_probe["probe_calls"].append({"cmd": cmd, "env": env})
+            if env["LD_PRELOAD"].startswith(system_so):
+                return sp.CompletedProcess(cmd, 0, "not-taken-over\n", "")
+            return sp.CompletedProcess(cmd, 0, _probe_stdout(), "")
+        return sp.CompletedProcess(cmd, 0, f"{bundled}\n", "")
+
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["LD_PRELOAD"] == str(bundled)
+    assert "不可用" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", ["import_error", "not_a_file", "timeout", "oserror"])
+def test_malloc_bundled_lookup_failures_yield_none(
+    malloc_probe, monkeypatch, tmp_path, failure
+):
+    """问自带那份路径的各种失败都退回 None，不让候选链带着垃圾路径往下走。"""
+    import subprocess as sp
+
+    import miloco_cli.commands.service as svc_mod
+
+    def fake_run(cmd, **kwargs):
+        if failure == "import_error":  # backend 里没装 miot
+            return sp.CompletedProcess(cmd, 1, "", "ModuleNotFoundError: miot")
+        if failure == "not_a_file":  # 归档里没带这个 .so
+            return sp.CompletedProcess(cmd, 0, str(tmp_path / "nope.so") + "\n", "")
+        if failure == "timeout":
+            raise sp.TimeoutExpired(cmd, 3)
+        raise OSError("解释器起不来")
+
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
+    assert svc_mod._bundled_jemalloc("/x/python") is None
+
+
+def test_malloc_no_backend_python_skips_bundled(malloc_probe):
+    """拿不到 backend 解释器（server_cmd 解析为空）时不问自带那份。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["so"].unlink()
+    assert list(svc_mod._jemalloc_candidates(None)) == []
+
+
+def test_malloc_probe_uses_backend_interpreter_isolated(malloc_probe):
+    """探针必须用 backend 的解释器 + -E -S，并带上被检查的 LD_PRELOAD / MALLOC_CONF。
+
+    用 backend 的而不是 CLI 自己的：两个解释器的 libc 和链接方式可能不同，
+    "CLI 能被接管"推不出"backend 能被接管"，后者才是要保护的目标。
+    -E -S 屏蔽环境变量和 site 目录：sitecustomize / .pth 里的东西可能自己就崩掉或改写
+    分配器，那样测的就不是这份 .so 了。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._resolve_malloc_env("/x/backend-python")
+    call = malloc_probe["probe_calls"][0]
+    assert call["cmd"][0] == "/x/backend-python"
+    assert call["cmd"][1:4] == ["-E", "-S", "-c"]
+    assert call["env"]["LD_PRELOAD"].startswith(str(malloc_probe["so"]))
+    assert call["env"]["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+
+
+def test_malloc_probe_falls_back_to_own_interpreter(malloc_probe):
+    """拿不到 backend 解释器时退回 sys.executable，而不是不探针就用。"""
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._probe_jemalloc(malloc_probe["so"], "x:1", None, 3)
+    assert malloc_probe["probe_calls"][0]["cmd"][0] == svc_mod.sys.executable
+
+
+@pytest.mark.parametrize(
+    ("setup", "expect_in_fatal"),
+    [
+        # ld.so 对加载不了的预加载库是"打一行 ERROR 然后忽略、程序照常跑"，退出码仍是 0，
+        # 所以这条静默降级只有靠 mallctl 符号取不到才抓得住。
+        ({"stdout": "not-taken-over\n"}, "没有接管"),
+        ({"stdout": "probe-crashed: ValueError()\n"}, "探针自身异常"),
+        ({"returncode": -11}, "信号 11"),
+        ({"returncode": 1}, "退出码 1"),
+        # 契约不符时把 stderr 末行附进原因里——它不参与判定，但页大小不符那种情况下
+        # jemalloc 的原话比"输出不符合契约"好排查得多。
+        ({"stdout": "", "stderr": "boom\n"}, "boom"),
+        # 没有"契约"这条判据，意料外的输出会默认落到"通过"
+        ({"stdout": ""}, "不符合契约"),
+        ({"stdout": "hello world\n"}, "不符合契约"),
+        ({"stdout": "page=4096\nbg=True\n"}, "不符合契约"),
+    ],
+)
+def test_malloc_probe_fatal_branches(malloc_probe, setup, expect_in_fatal):
+    """致命判定的各条分支。任何一条漏掉，坏的 .so 都会被写进 supervisord.conf。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe.update(setup)
+    probe = svc_mod._probe_jemalloc(malloc_probe["so"], "x:1", "/x/python", 3)
+    assert probe.fatal is not None
+    assert expect_in_fatal in probe.fatal
+
+
+@pytest.mark.parametrize(
+    ("exc", "expect"),
+    [
+        (__import__("subprocess").TimeoutExpired("cmd", 3), "未返回"),
+        (OSError("boom"), "无法执行"),
+    ],
+)
+def test_malloc_probe_subprocess_failures_are_fatal(malloc_probe, exc, expect):
+    """探针起不来或超时也是致命，要换下一个候选而不是当它通过。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["raise"] = exc
+    probe = svc_mod._probe_jemalloc(malloc_probe["so"], "x:1", "/x/python", 3)
+    assert probe.fatal is not None and expect in probe.fatal
+
+
+def test_malloc_page_size_mismatch_is_fatal_even_on_rc_zero(malloc_probe, capsys):
+    """页大小不符：stderr 有 Unsupported system page size + stdout 空 + **退出码 0**。
+
+    退出码不能作为判据：release 构建 opt_abort 默认 false，jemalloc 打一行 stderr 就返回，
+    宿主进程怎么死取决于它自己，不保证被信号打死。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe.update(
+        {
+            "stdout": "",
+            "stderr": "<jemalloc>: Unsupported system page size\n",
+            "returncode": 0,
+        }
+    )
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert "Unsupported system page size" in capsys.readouterr().err
+
+
+def test_malloc_page_mismatch_leaves_no_persistent_state(malloc_probe, monkeypatch):
+    """全部候选都因页大小失败时不注入，且不留任何持久状态——下次启动会重试。
+
+    换回好内核后一次 service restart 就能自动恢复，不需要人工清什么东西。
+    """
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file, load_config
+
+    malloc_probe.update({"stdout": "", "stderr": "<jemalloc>: Unsupported system page size\n"})
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    persisted = json.loads(config_file().read_text()) if config_file().exists() else {}
+    assert "safe_mode" not in persisted
+    assert load_config()["safe_mode"] is False
+
+    # 同一进程内换成好结果，立刻就能注入（没有被记住的黑名单）
+    malloc_probe.update({"stdout": _probe_stdout(), "stderr": ""})
+    assert dict(svc_mod._resolve_malloc_env("/x/python"))["LD_PRELOAD"]
+
+
+def test_malloc_stderr_never_decides_usability(malloc_probe, capsys):
+    """stderr 不参与"能不能用"的判定：只要 jemalloc 接管了，它打什么都照常用。
+
+    这三类输出都是库在正常工作时打的，任何一类被判死都会让预加载在整类机器上静默失效：
+    不认识的旋钮（老版本 jemalloc）、qemu/gVisor 下 MADV_DONTNEED 退化成 memset、
+    环境里别人的 LD_PRELOAD 条目加载失败。用白名单逐条豁免则永远补不完。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["stderr"] = (
+        f"{_INVALID}dirty_decay_ms:5000\n"
+        "<jemalloc>: MADV_DONTNEED does not work (memset will be used instead)\n"
+        "<jemalloc>: (This is the expected behaviour if you are running under QEMU)\n"
+        "ERROR: ld.so: object '/x/libfoo.so' from LD_PRELOAD cannot be preloaded: ignored.\n"
+    )
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["LD_PRELOAD"].startswith(str(malloc_probe["so"]))
+    # 不认识的旋钮原样留着：jemalloc 逐个独立解析，被拒的那个不影响其它旋钮生效，
+    # 它自己会在 backend 日志里打 Invalid conf pair —— 那正是用户该看到的。
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+    assert "不可用" not in capsys.readouterr().err
+
+
+def test_malloc_not_taken_over_is_fatal_regardless_of_stderr(malloc_probe):
+    """不看 stderr 不会放过真故障：库自己加载不了时 stdout 就是 not-taken-over。
+
+    这是"删掉 stderr 判定"的安全前提——ld.so 忽略掉加载不了的预加载库后退出码仍是 0，
+    但 mallctl 符号取不到，stdout 那条判据独立且可靠。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["stdout"] = "not-taken-over"
+    malloc_probe["stderr"] = ""  # 连一行报错都没有，照样判死
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+
+
+def test_malloc_readback_is_reported_as_is(malloc_probe, capsys):
+    """读回值原样照打，不替它分类、不额外告警。
+
+    老版本 jemalloc 三个旋钮全缺时读回全是 None —— `dirty/muzzy_decay_ms=None/None`
+    摆在成功行里就是事实，用户一眼看得见。jemalloc 是锦上添花的优化项，为"它属于
+    没生效的哪一态"加判断分支不值得；旋钮真被拒时它自己还会在 backend 日志里打
+    Invalid conf pair。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["stdout"] = _probe_stdout(
+        ver="3.6.0", page="None", bg="None", dirty="None", muzzy="None"
+    )
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    # 照常用：旋钮没生效仍远好过 glibc 的 arena 碎片
+    assert "LD_PRELOAD" in pairs
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+    err = capsys.readouterr().err
+    assert "dirty/muzzy_decay_ms=None/None" in err
+    assert "background_thread=None" in err
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expect_version", "expect_page"),
+    [
+        (_probe_stdout(ver="?"), "unknown", 4096),  # mallctl 取不到 version
+        (_probe_stdout(page="None"), "5.3.1", None),  # 老版本没有 arenas.page
+    ],
+)
+def test_malloc_tolerates_missing_version_and_page(
+    malloc_probe, capsys, stdout, expect_version, expect_page
+):
+    """版本 / page 读不到都是可容忍：malloc 已被接管这件事由拿到 mallctl 符号证明了。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["stdout"] = stdout
+    probe = svc_mod._probe_jemalloc(malloc_probe["so"], "x:1", "/x/python", 3)
+    assert probe.fatal is None
+    assert probe.version == expect_version
+    assert probe.page == expect_page
+
+
+def test_malloc_empty_conf_env_falls_back_to_default(malloc_probe, monkeypatch):
+    """环境里 MALLOC_CONF 是空串时按"没设"处理，不能把三个旋钮整体清空。
+
+    os.environ.get 的默认值只在 key 不存在时才给；`export MALLOC_CONF=` 或 Dockerfile 的
+    `ENV MALLOC_CONF=` 会让它返回空串。真注进去的话 jemalloc 照常接管、探针照常通过，
+    但后台归还线程关着、decay 回到默认 10 秒——这个方案想买的东西全部落空，日志还看不出来。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MALLOC_CONF", "")
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    assert pairs["MALLOC_CONF"] == svc_mod._JEMALLOC_MALLOC_CONF
+
+
+@pytest.mark.parametrize(
+    ("machine", "expect_subdir"),
+    [
+        ("x86_64", "x86_64"),
+        ("AMD64", "x86_64"),
+        ("aarch64", "arm64"),
+        ("arm64", "arm64"),
+        ("armv7l", ""),  # 没有自带那份
+        ("riscv64", ""),
+    ],
+)
+def test_bundled_path_script_maps_arch(monkeypatch, capsys, tmp_path, machine, expect_subdir):
+    """真跑 _BUNDLED_PATH_SCRIPT 这段脚本本身，而不是在测试里重抄一份映射表。
+
+    未知架构（armv7 / riscv64）必须算出空串：二选一会让 armv7 拿到 x86_64 那份的路径，而那
+    文件在源码树里真实存在 → 进候选 → 白起一次探针 → 被 ld.so 以 wrong ELF class 打回来，
+    还多一行看着像故障的告警。与 _system_lib_dirs 对未知架构"跳过这一项"的口径也不一致。
+    """
+    import platform as platform_mod
+    import sys
+    import types
+
+    import miloco_cli.commands.service as svc_mod
+
+    fake_miot = types.ModuleType("miot")
+    fake_miot.__file__ = str(tmp_path / "miot" / "__init__.py")
+    monkeypatch.setitem(sys.modules, "miot", fake_miot)
+    monkeypatch.setattr(platform_mod, "machine", lambda: machine)
+
+    exec(svc_mod._BUNDLED_PATH_SCRIPT, {})  # noqa: S102
+    printed = capsys.readouterr().out.strip()
+
+    if expect_subdir:
+        assert printed.endswith(f"libs/linux/{expect_subdir}/libjemalloc.so.2")
+    else:
+        assert printed == ""
+
+
+def test_supervisord_start_failure_hints_and_keeps_stderr(
+    runner, isolated_config, monkeypatch, tmp_path
+):
+    """supervisord 自己起不来时也要打逃生提示，并带出它的 stderr。
+
+    conf 的 environment= 行被写坏时，supervisord 起不来是唯一的症状——FATAL 与 health
+    超时那两条提示都要求它已经起来了。而 CalledProcessError 自己只说"returned non-zero
+    exit status 2"，真正的原因在 e.stderr 里，不带出来用户无从下手。
+    """
+    import subprocess
+
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import set_value
+
+    fake_python = tmp_path / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    set_value("server.python_bin", str(fake_python))
+
+    conf = tmp_path / "supervisord.conf"
+    conf.write_text('environment=LD_PRELOAD="/usr/lib/libjemalloc.so.2"\n')
+    monkeypatch.setattr(svc_mod, "_supervisor_conf", lambda: conf)
+    monkeypatch.setattr(svc_mod, "_generate_supervisor_conf", lambda cmd: None)
+    monkeypatch.setattr(svc_mod, "_supervisord_is_running", lambda: False)
+    monkeypatch.setattr(svc_mod, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(svc_mod, "_find_supervisord_pids", lambda: [])
+
+    real_reason = "Error: Format string '...' for 'environment' is badly formatted"
+    with patch.object(
+        svc_mod.subprocess,
+        "run",
+        side_effect=subprocess.CalledProcessError(2, ["supervisord"], stderr=real_reason),
+    ):
+        result = runner.invoke(cli, ["service", "start"])
+
+    assert result.exit_code == 1
+    assert real_reason in result.output  # supervisord 的原话没被丢掉
+    assert "safe_mode true" in result.output  # 逃生开关给到了
+
+
+@pytest.mark.parametrize("action", ["start", "restart"])
+def test_supervisorctl_failure_hints_safe_mode(
+    runner, isolated_config, malloc_probe, monkeypatch, tmp_path, action
+):
+    """supervisord 活着但程序没起来时也要给逃生开关。
+
+    本用例覆盖的两条在走到 _wait_for_health 之前就 exit，所以那里的挂点管不到它们。
+    升级后第一次 restart 恰恰是配置里刚带上 LD_PRELOAD 的那一次，最可能撞上注入问题，
+    反而拿不到开关。
+    """
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import set_value
+
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\nexit 0\n")
+    py.chmod(0o755)
+    set_value("server.python_bin", str(py))
+
+    conf = tmp_path / "supervisord.conf"
+    conf.write_text('environment=LD_PRELOAD="/usr/lib/libjemalloc.so.2"\n')
+    monkeypatch.setattr(svc_mod, "_supervisor_conf", lambda: conf)
+    monkeypatch.setattr(svc_mod, "_generate_supervisor_conf", lambda cmd: None)
+    monkeypatch.setattr(svc_mod, "_supervisord_is_running", lambda: True)
+    monkeypatch.setattr(svc_mod, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(svc_mod, "_get_backend_pid_from_supervisor", lambda: None)
+    monkeypatch.setattr(
+        svc_mod,
+        "_supervisorctl",
+        lambda *a: __import__("subprocess").CompletedProcess(
+            [], 1 if a[0] in ("start", "restart") else 0, "abnormal termination", ""
+        ),
+    )
+
+    result = runner.invoke(cli, ["service", action])
+    assert result.exit_code == 1
+    assert "miloco-cli config set safe_mode true" in result.output
+
+
+def test_malloc_bundled_empty_path_treated_as_missing(malloc_probe):
+    """脚本打空串时按"拿不到自带那份"处理，不能把空路径塞进候选链。"""
+    import miloco_cli.commands.service as svc_mod
+
+    malloc_probe["bundled"] = ""
+    assert svc_mod._bundled_jemalloc("/x/python") is None
+
+
+def test_malloc_dropped_preload_warns_once_not_per_candidate(
+    malloc_probe, monkeypatch, capsys, tmp_path
+):
+    """原有 LD_PRELOAD 被丢掉的提醒只打一次，不随候选数量翻倍。
+
+    值拼装在每个候选的探针里都会调一次，把 echo 放在那里会让同一句重复 N+1 遍，
+    中间还夹着候选失败的告警，读起来像几个不同的问题。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    lib_b = tmp_path / "lib-b"
+    lib_b.mkdir()
+    (lib_b / "libjemalloc.so.2").write_bytes(b"\x7fELF")
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", (malloc_probe["so"].parent, lib_b))
+    monkeypatch.setenv("LD_PRELOAD", '/opt/vendor/lib"x.so')
+
+    svc_mod._resolve_malloc_env("/x/python")
+    assert capsys.readouterr().err.count("环境里已有的 LD_PRELOAD") == 1
+
+
+def test_malloc_ld_preload_appends_not_overwrites(malloc_probe, monkeypatch):
+    """环境里已有 LD_PRELOAD 时拼成 <我们的>:<原有>，我们的在最前（要它接管 malloc）。
+
+    探针环境用同一套拼法，保证"探的"和"注的"一致。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("LD_PRELOAD", "/opt/other/libfoo.so")
+    pairs = dict(svc_mod._resolve_malloc_env("/x/python"))
+    expected = f"{malloc_probe['so']}:/opt/other/libfoo.so"
+    assert pairs["LD_PRELOAD"] == expected
+    assert malloc_probe["probe_calls"][0]["env"]["LD_PRELOAD"] == expected
+
+
+def test_malloc_not_linux_injects_nothing(malloc_probe, monkeypatch):
+    """非 Linux 不注入任何变量：macOS 上 LD_PRELOAD 本就无效。"""
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setattr(svc_mod.sys, "platform", "darwin")
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert malloc_probe["probe_calls"] == []
+
+
+def test_malloc_system_budget_exhausted_still_tries_bundled(
+    malloc_probe, monkeypatch, tmp_path, capsys
+):
+    """系统段预算耗尽后跳过剩余系统候选，但自带那份仍会被尝试。
+
+    预算分两段的理由就在这里：共用一条总预算的话，前面几个卡住的系统库能把预算吃光，
+    让"系统没装 jemalloc 时唯一可用的那份"永远探不到——故障场景和它的兜底目标高度重合。
+    """
+    import subprocess as sp
+
+    import miloco_cli.commands.service as svc_mod
+
+    # 三个系统候选，每次探针"耗时"3s，总预算 5s：第 1 个超时取 min(3, 5)=3s，探完剩 2s；
+    # 第 2 个超时被剩余预算压到 2s，探完剩 -1s；第 3 个因 -1 < 0.5 被跳过。用假时钟精确控制。
+    sys_dirs = []
+    for i in range(3):
+        d = tmp_path / f"lib{i}"
+        d.mkdir()
+        (d / "libjemalloc.so.2").write_bytes(b"\x7fELF")
+        sys_dirs.append(d)
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", tuple(sys_dirs))
+
+    bundled = tmp_path / "bundled" / "libjemalloc.so.2"
+    bundled.parent.mkdir()
+    bundled.write_bytes(b"\x7fELF")
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(svc_mod.time, "monotonic", lambda: clock["t"])
+
+    def fake_run(cmd, **kwargs):
+        if "-E" in cmd:
+            env = kwargs.get("env") or {}
+            malloc_probe["probe_calls"].append(env["LD_PRELOAD"].split(":")[0])
+            clock["t"] += 3.0  # 每次探针吃掉 3s，两次就把 5s 预算用光
+            return sp.CompletedProcess(cmd, 0, "not-taken-over\n", "")
+        return sp.CompletedProcess(cmd, 0, f"{bundled}\n", "")
+
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
+    svc_mod._resolve_malloc_env("/x/python")
+
+    probed = malloc_probe["probe_calls"]
+    assert str(sys_dirs[2] / "libjemalloc.so.2") not in probed  # 第三个被预算挡掉
+    assert str(bundled) in probed  # 自带那份仍被尝试
+    assert "超过时间预算" in capsys.readouterr().err
+
+
+def test_malloc_probe_timeout_shrinks_to_remaining_budget(
+    malloc_probe, monkeypatch, tmp_path
+):
+    """单次探针超时取 min(3s, 剩余预算)，系统段才严格不超 5s。
+
+    deadline 检查只发生在起探针**之前**，管得住"要不要再起一个"、管不住"已经起的能跑多久"。
+    不取 min 的话，最后一个候选能在 deadline 前一刻启动再跑满 3s，把总预算打穿。
+    """
+    import subprocess as sp
+
+    import miloco_cli.commands.service as svc_mod
+
+    sys_dirs = []
+    for i in range(2):
+        d = tmp_path / f"lib{i}"
+        d.mkdir()
+        (d / "libjemalloc.so.2").write_bytes(b"\x7fELF")
+        sys_dirs.append(d)
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", tuple(sys_dirs))
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(svc_mod.time, "monotonic", lambda: clock["t"])
+    timeouts = []
+
+    def fake_run(cmd, **kwargs):
+        if "-E" in cmd:
+            timeouts.append(kwargs["timeout"])
+            clock["t"] += 3.5  # 第一次探完剩 1.5s
+            return sp.CompletedProcess(cmd, 0, "not-taken-over\n", "")
+        return sp.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
+    svc_mod._resolve_malloc_env("/x/python")
+
+    assert timeouts[0] == 3  # 预算充足时用满 3s
+    assert timeouts[1] == 1.5  # 只剩 1.5s 就只给 1.5s
+    assert sum(timeouts) <= svc_mod._SYSTEM_PROBE_BUDGET_S
+
+
+def test_malloc_no_new_probe_below_min_slice(malloc_probe, monkeypatch, tmp_path):
+    """剩余预算不足 0.5s 时不再起新探针（起了也来不及，白等）。"""
+    import subprocess as sp
+
+    import miloco_cli.commands.service as svc_mod
+
+    sys_dirs = []
+    for i in range(2):
+        d = tmp_path / f"lib{i}"
+        d.mkdir()
+        (d / "libjemalloc.so.2").write_bytes(b"\x7fELF")
+        sys_dirs.append(d)
+    monkeypatch.setattr(svc_mod, "_SYSTEM_LIB_DIRS", tuple(sys_dirs))
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(svc_mod.time, "monotonic", lambda: clock["t"])
+    n = {"probes": 0}
+
+    def fake_run(cmd, **kwargs):
+        if "-E" in cmd:
+            n["probes"] += 1
+            clock["t"] += 4.8  # 探完只剩 0.2s < 0.5s
+            return sp.CompletedProcess(cmd, 0, "not-taken-over\n", "")
+        return sp.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(svc_mod.subprocess, "run", fake_run)
+    svc_mod._resolve_malloc_env("/x/python")
+    assert n["probes"] == 1
+
+
+def test_malloc_resolve_failure_still_produces_usable_conf(malloc_probe, monkeypatch):
+    """_resolve_malloc_env 自己抛异常时，supervisord.conf 照常产出且可用。
+
+    一个优化项的代码 bug 绝不能让服务起不来。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    def boom(_py=None):
+        raise RuntimeError("分配器逻辑有 bug")
+
+    monkeypatch.setattr(svc_mod, "_resolve_malloc_env", boom)
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+
+    conf = svc_mod._supervisor_conf().read_text()
+    assert 'MILOCO_SUPERVISED="1"' in conf
+    assert "LD_PRELOAD" not in conf
+    assert f"[program:{svc_mod._PROGRAM_NAME}]" in conf
+
+
+# ─── 安全模式 ─────────────────────────────────────────────────────────────────
+
+
+def test_safe_mode_injects_nothing_and_skips_probe(malloc_probe, capsys):
+    """safe_mode=true → 一个变量都不注入，且不跑探针（省掉子进程开销）。"""
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+    config_file().write_text(json.dumps({"safe_mode": True}), encoding="utf-8")
+
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert malloc_probe["probe_calls"] == []
+    assert "安全模式已开启" in capsys.readouterr().err
+
+
+def test_safe_mode_beats_explicit_milocomalloc(malloc_probe, monkeypatch, capsys):
+    """safe_mode 赢过 MILOCO_MALLOC 的一切取值，并说明后者被忽略。
+
+    它的语义是"我遇到问题了"，不该被更细的设置推翻；不说清楚用户会困惑"设了却没生效"。
+    """
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+    config_file().write_text(json.dumps({"safe_mode": True}), encoding="utf-8")
+    monkeypatch.setenv("MILOCO_MALLOC", str(malloc_probe["so"]))
+
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert "被忽略" in capsys.readouterr().err
+
+
+def test_safe_mode_env_override_works(malloc_probe, monkeypatch):
+    """MILOCO_SAFE_MODE=1 能临时覆盖 config.json 里的 false（_apply_env_overrides 既有能力）。"""
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+    config_file().write_text(json.dumps({"safe_mode": False}), encoding="utf-8")
+    assert dict(svc_mod._resolve_malloc_env("/x/python"))  # 先确认没开时会注入
+
+    monkeypatch.setenv("MILOCO_SAFE_MODE", "1")
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+
+
+def test_safe_mode_on_non_linux_is_noop(malloc_probe, monkeypatch, capsys):
+    """非 Linux 上 safe_mode 开与不开行为一致（都不注入），不报错也不额外告警。
+
+    macOS 上 LD_PRELOAD 本就无效，所以这个开关在那里没有可观测变化。
+    """
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    monkeypatch.setattr(svc_mod.sys, "platform", "darwin")
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+
+    config_file().write_text(json.dumps({"safe_mode": True}), encoding="utf-8")
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    on_err = capsys.readouterr().err
+
+    config_file().write_text(json.dumps({"safe_mode": False}), encoding="utf-8")
+    assert svc_mod._resolve_malloc_env("/x/python") == []
+    assert capsys.readouterr().err == on_err == ""
+
+
+def test_safe_mode_removes_ld_preload_from_generated_conf(malloc_probe):
+    """safe_mode 一开，重新生成的 conf 里确实没有 LD_PRELOAD；关掉又恢复注入。"""
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert "LD_PRELOAD" in svc_mod._supervisor_conf().read_text()
+
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+    config_file().write_text(json.dumps({"safe_mode": True}), encoding="utf-8")
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert "LD_PRELOAD" not in svc_mod._supervisor_conf().read_text()
+
+    config_file().write_text(json.dumps({"safe_mode": False}), encoding="utf-8")
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert "LD_PRELOAD" in svc_mod._supervisor_conf().read_text()
+
+
+def test_safe_mode_is_known_config_path():
+    """safe_mode 在 CLI schema 白名单里，所以 config get/set/show 全都免费可用。"""
+    from miloco_cli.config import known_paths, load_config
+
+    assert "safe_mode" in known_paths()
+    assert load_config()["safe_mode"] is False
+
+
+def test_config_set_alone_leaves_ld_preload_in_conf(
+    runner, isolated_config, malloc_probe
+):
+    """钉住逃生提示为什么必须给两条命令，而不是只给 config set。
+
+    提示只在启动失败后打出，此时后端不在跑，config set 顺带的那次重启判定 not
+    running、不触发，于是 conf 不会重新生成、LD_PRELOAD 原样还在，而命令本身返回
+    ok。这个前提哪天变了（config set 改成无条件重新生成 conf），这条会红——届时
+    提示里第二条命令才可以删。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert "LD_PRELOAD" in svc_mod._supervisor_conf().read_text()
+
+    result = runner.invoke(cli, ["config", "set", "safe_mode", "true"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["restart"] == {
+        "triggered": False,
+        "reason": "not running",
+    }
+    assert "LD_PRELOAD" in svc_mod._supervisor_conf().read_text()
+
+
+# ─── conf 原子写 + health 失败提示 ────────────────────────────────────────────
+
+
+def test_supervisor_conf_written_atomically(malloc_probe, monkeypatch):
+    """conf 走临时文件 + os.replace，不是先截断再写。"""
+    import miloco_cli.commands.service as svc_mod
+
+    replaced = []
+    real_replace = svc_mod.atomic_write_text.__globals__["os"].replace
+
+    def spy_replace(src, dst):
+        replaced.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(svc_mod.atomic_write_text.__globals__["os"], "replace", spy_replace)
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+
+    assert len(replaced) == 1
+    tmp_src, dst = replaced[0]
+    assert dst == str(svc_mod._supervisor_conf())
+    assert tmp_src.endswith(".tmp") and tmp_src != dst
+
+
+def test_supervisor_conf_stays_readable_after_atomic_write(malloc_probe):
+    """conf 权限不能被原子写顺带收紧成属主可读。
+
+    原子写建的临时文件固定 0600，os.replace 换 inode 会把它带到目标文件上。开发指南
+    让运维 grep 这份 conf 自查有没有注入，非属主读不到会拿 Permission denied，正好被
+    读成"没这一行 = 没注入"，结论反了。
+    """
+    import stat
+
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    mode = stat.S_IMODE(svc_mod._supervisor_conf().stat().st_mode)
+    assert mode == 0o644 & ~svc_mod._current_umask()
+
+
+def test_supervisor_conf_survives_failed_write(malloc_probe, monkeypatch):
+    """写临时文件失败时原 conf 保持不变（不被截断成空文件）。
+
+    先截断再写的话，进程在中间被杀或磁盘满就会留下半截 conf，supervisord 直接起不来。
+    """
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    good = svc_mod._supervisor_conf().read_text()
+
+    def boom(*a, **k):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(svc_mod.atomic_write_text.__globals__["os"], "fsync", boom)
+    with pytest.raises(OSError):
+        svc_mod._generate_supervisor_conf("/x/python -m miloco --changed")
+
+    assert svc_mod._supervisor_conf().read_text() == good
+
+
+def test_supervisor_conf_skips_write_when_identical(malloc_probe, monkeypatch):
+    """内容相同就跳过写入那层短路要保留在最前面。"""
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    writes = []
+    monkeypatch.setattr(
+        svc_mod, "atomic_write_text", lambda p, t: writes.append(str(p))
+    )
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert writes == []
+
+
+@pytest.mark.parametrize(
+    ("conf_body", "expected"),
+    [
+        ('environment=LD_PRELOAD="/usr/lib/libjemalloc.so.2"', "/usr/lib/libjemalloc.so.2"),
+        # 追加语义：值是 <我们的>:<原有>，取第一段
+        (
+            'environment=LD_PRELOAD="/usr/lib/libjemalloc.so.2:/opt/x.so"',
+            "/usr/lib/libjemalloc.so.2",
+        ),
+        ('environment=MILOCO_SUPERVISED="1"', None),  # 没注入
+        ("", None),
+    ],
+)
+def test_injected_jemalloc_from_conf(malloc_probe, conf_body, expected):
+    """提示行的事实来源是 conf 本身：有 LD_PRELOAD 就取首段，没有就返回 None。"""
+    import miloco_cli.commands.service as svc_mod
+
+    path = svc_mod._supervisor_conf()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(conf_body)
+    assert svc_mod._injected_jemalloc_from_conf() == expected
+
+
+def test_injected_jemalloc_from_conf_missing_file(malloc_probe):
+    """conf 还不存在时返回 None 而不是抛异常。"""
+    import miloco_cli.commands.service as svc_mod
+
+    assert not svc_mod._supervisor_conf().exists()
+    assert svc_mod._injected_jemalloc_from_conf() is None
+
+
+@pytest.mark.parametrize("failure", ["fatal", "timeout"])
+def test_health_failure_hints_safe_mode_when_injected(malloc_probe, capsys, failure):
+    """health 失败且本次注入了 jemalloc → 打安全模式提示，但不下结论。"""
+    import miloco_cli.commands.service as svc_mod
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert "LD_PRELOAD" in svc_mod._supervisor_conf().read_text()
+
+    cfg = {"server": {"url": "http://127.0.0.1:65500"}}
+    with (
+        patch.object(
+            svc_mod,
+            "_supervisorctl",
+            return_value=__import__("subprocess").CompletedProcess(
+                [], 0, "FATAL" if failure == "fatal" else "STARTING", ""
+            ),
+        ),
+        patch.object(svc_mod.time, "time", side_effect=[0, 0, 1e9, 1e9]),
+        pytest.raises(SystemExit),
+    ):
+        svc_mod._wait_for_health(cfg, pretty=False)
+
+    err = capsys.readouterr().err
+    assert "本次启用了 jemalloc" in err
+    # 钉住可执行文件名：这行是服务起不来时唯一的逃生指引，用户会直接照抄。
+    # 只钉 "config set safe_mode true" 不够——写成 `miloco config set` 也能过，
+    # 而本仓库只注册了 miloco-cli 这一个 console script。
+    assert "miloco-cli config set safe_mode true" in err
+    # 第二条命令同样要给，理由见 test_config_set_alone_leaves_ld_preload_in_conf。
+    assert "miloco-cli service start" in err
+    # 不下结论：启动失败原因很多，不能说"是 jemalloc 导致的"
+    assert "导致" not in err
+
+
+def test_health_failure_no_hint_when_not_injected(malloc_probe, capsys, monkeypatch):
+    """没注入 jemalloc 时 health 失败不打那行提示（否则是误导）。"""
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setenv("MILOCO_MALLOC", "glibc")
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    assert "LD_PRELOAD" not in svc_mod._supervisor_conf().read_text()
+
+    cfg = {"server": {"url": "http://127.0.0.1:65500"}}
+    with (
+        patch.object(
+            svc_mod,
+            "_supervisorctl",
+            return_value=__import__("subprocess").CompletedProcess([], 0, "FATAL", ""),
+        ),
+        pytest.raises(SystemExit),
+    ):
+        svc_mod._wait_for_health(cfg, pretty=False)
+
+    assert "jemalloc" not in capsys.readouterr().err
+
+
+def test_health_failure_does_not_self_heal(malloc_probe, capsys):
+    """health 失败时不做任何自动重启、不写任何禁用状态。
+
+    "摘掉 jemalloc 后成功"推不出"是 jemalloc 的错"（端口 TIME_WAIT、依赖慢启动、概率性崩溃
+    都会造成同样结果）。用一次不可靠的推断做永久决定，比让用户自己看更糟。
+    """
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    calls = []
+
+    def spy_ctl(*args):
+        calls.append(args)
+        return __import__("subprocess").CompletedProcess([], 0, "FATAL", "")
+
+    with patch.object(svc_mod, "_supervisorctl", spy_ctl), pytest.raises(SystemExit):
+        svc_mod._wait_for_health({"server": {"url": "http://127.0.0.1:65500"}}, False)
+
+    assert all(a[0] == "status" for a in calls)  # 只查状态，没 restart
+    persisted = json.loads(config_file().read_text()) if config_file().exists() else {}
+    assert "safe_mode" not in persisted
+
+
+def test_foreground_mode_injects_into_environ(malloc_probe, monkeypatch, tmp_path):
+    """前台模式不经 supervisord，分配器变量要塞进 os.environ 再 exec（ld.so 在 exec 时读它）。"""
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+    config_file().write_text(json.dumps({"server": {"python_bin": str(py)}}))
+
+    execs = []
+    monkeypatch.setattr(svc_mod.os, "execvp", lambda f, a: execs.append((f, a)))
+    with (
+        patch.object(svc_mod, "_supervisord_is_running", return_value=False),
+        patch.object(svc_mod, "_is_port_in_use", return_value=False),
+    ):
+        CliRunner().invoke(cli, ["service", "start", "--foreground"])
+
+    assert execs, "execvp 没被调到"
+    assert svc_mod.os.environ["LD_PRELOAD"].startswith(str(malloc_probe["so"]))
+
+
+def test_foreground_mode_respects_safe_mode(malloc_probe, monkeypatch, tmp_path):
+    """前台模式同样读 safe_mode——它是调试入口，不该绕过这个开关。"""
+    import miloco_cli.commands.service as svc_mod
+    from miloco_cli.config import config_file
+
+    py = tmp_path / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+    config_file().write_text(
+        json.dumps({"safe_mode": True, "server": {"python_bin": str(py)}})
+    )
+
+    execs = []
+    monkeypatch.setattr(svc_mod.os, "execvp", lambda f, a: execs.append((f, a)))
+    with (
+        patch.object(svc_mod, "_supervisord_is_running", return_value=False),
+        patch.object(svc_mod, "_is_port_in_use", return_value=False),
+    ):
+        CliRunner().invoke(cli, ["service", "start", "--foreground"])
+
+    assert execs
+    assert "LD_PRELOAD" not in svc_mod.os.environ
+    assert malloc_probe["probe_calls"] == []
+
+
+def test_malloc_fixture_left_no_env_behind():
+    """前面那些用例跑完，pytest 进程里不该还留着 LD_PRELOAD / MALLOC_CONF。
+
+    前台模式那条被测路径直接改真的 os.environ（exec 前的 os.environ.update），而
+    monkeypatch.delenv 对"本来就不存在"的变量不记 undo、还不回来（实测）。漏出去的话
+    后面任何真 fork 子进程的用例都会白拿一行 ld.so 报错，且是在跟它无关的断言里炸。
+    由 malloc_probe 的 finalizer 兜住。
+
+    这条**依赖执行顺序**（放在文件末尾、pytest 按定义顺序跑，仓库未装 randomly/xdist）：
+    要钉的是跨用例的残留，单个用例内部看不见它。
+    """
+    assert "LD_PRELOAD" not in os.environ
+    assert "MALLOC_CONF" not in os.environ

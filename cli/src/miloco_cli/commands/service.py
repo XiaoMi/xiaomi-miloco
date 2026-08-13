@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shlex
 import shutil
 import signal
@@ -10,12 +11,14 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 import click
 
-from miloco_cli.config import miloco_home
+from miloco_cli.config import atomic_write_text, miloco_home
 from miloco_cli.output import print_result
 
 _PROGRAM_NAME = "miloco-backend"
@@ -25,6 +28,13 @@ _SERVER_MODULE = "miloco.main"
 # 路径相关常量延迟到调用时解析：``miloco_home()``
 def _log_dir() -> Path:
     return miloco_home() / "log"
+
+
+def _current_umask() -> int:
+    """读当前 umask。系统只给了设置接口，读法是设一次再设回去。"""
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask
 
 
 def _supervisor_conf() -> Path:
@@ -255,13 +265,514 @@ def _resolve_timezone() -> str | None:
     return explicit_timezone_name()
 
 
+# ─── 内存分配器（jemalloc 预加载） ───────────────────────────────────────────
+#
+# backend 长跑 RSS 单调涨到 2GB+ 的根因是 glibc malloc 的 arena 碎片，换 jemalloc 能把空闲页
+# 真正还给系统。Python 层换不掉分配器，唯一的进程级方式是 LD_PRELOAD，且必须在进程启动前设好，
+# 所以落点在这里生成的 supervisord.conf。
+#
+# 第一优先级是 backend 能起来，jemalloc 只是优化：下面每一步失败都退回"什么都不注入"。
+
+_JEMALLOC_FILE_NAMES = ("libjemalloc.so.2", "libjemalloc.so")
+
+# background_thread 把归还内存的 madvise 挪出解码线程热路径，两个 decay 让空闲页 5 秒后还给
+# 系统。5000ms 来自真机 glibc / mimalloc / jemalloc 三方对比：再短会让解码期的分配-释放抖动
+# 频繁 madvise，再长则空闲内存降不下去。
+_JEMALLOC_MALLOC_CONF = "background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+
+# 出现在 environment= 行里就会让 supervisord 起不来的字符，理由见 _is_conf_safe。
+_CONF_HOSTILE_CHARS = frozenset('"%\n\r')
+
+_ARCH_LIB_DIR_NAMES = {
+    "x86_64": "x86_64-linux-gnu",
+    "amd64": "x86_64-linux-gnu",
+    "aarch64": "aarch64-linux-gnu",
+    "arm64": "aarch64-linux-gnu",
+}
+
+_SYSTEM_LIB_DIRS = (Path("/usr/lib64"), Path("/usr/local/lib"), Path("/usr/lib"))
+
+# 探针和问路径实测都在几十毫秒量级，秒级超时留了很大余量。系统候选共用一份预算、自带那份单独
+# 一份：共用一条总预算的话，前面卡住的系统库能把预算吃光，让自带那份永远探不到。
+_PROBE_TIMEOUT_S = 3
+_BUNDLED_LOOKUP_TIMEOUT_S = 3
+_SYSTEM_PROBE_BUDGET_S = 5
+_MIN_PROBE_SLICE_S = 0.5
+
+# 在 backend 解释器里跑，读 mallctl 实证 jemalloc 是否真接管了 malloc、旋钮是否真生效。
+# 输出契约（由测试钉住）：成功逐行打 key=value，失败打单行 not-taken-over / probe-crashed:。
+# 逻辑整个包在 probe() 里并兜住异常，免得自己的 traceback 混进输出。
+_PROBE_SCRIPT = '''\
+def probe():
+    import ctypes
+
+    try:
+        mallctl = ctypes.CDLL(None).mallctl     # jemalloc 没接管 → 取不到这个符号
+    except (AttributeError, OSError):
+        return "not-taken-over"
+    mallctl.restype = ctypes.c_int
+
+    def read(name, ctype):                      # 返回 None = 这个旋钮不存在
+        val = ctype()
+        size = ctypes.c_size_t(ctypes.sizeof(val))
+        if mallctl(name.encode(), ctypes.byref(val), ctypes.byref(size), None, 0):
+            return None
+        return val.value
+
+    version = read("version", ctypes.c_char_p)
+    return "\\n".join([
+        "ver=" + (version.decode("ascii", "replace").split("-")[0] if version else "?"),
+        "page=" + str(read("arenas.page", ctypes.c_size_t)),
+        "bg=" + str(read("background_thread", ctypes.c_bool)),
+        "dirty=" + str(read("arenas.dirty_decay_ms", ctypes.c_ssize_t)),
+        "muzzy=" + str(read("arenas.muzzy_decay_ms", ctypes.c_ssize_t)),
+    ])
+
+
+try:
+    out = probe()
+except Exception as e:
+    out = "probe-crashed: %r" % (e,)
+print(out)
+'''
+
+
+@dataclass(frozen=True)
+class _ProbeResult:
+    """一次预加载探针的结果。``fatal`` 非空表示这份 .so 用不了，其余字段是读回的实况。"""
+
+    fatal: str | None = None
+    version: str = "unknown"
+    page: int | None = None
+    background_thread: bool | None = None
+    dirty_decay_ms: int | None = None
+    muzzy_decay_ms: int | None = None
+
+
+def _system_lib_dirs() -> list[Path]:
+    """系统库目录，多架构 triplet 目录排最前（Debian/Ubuntu 把库放那儿）。
+
+    triplet 用硬编码映射而不是 ``sysconfig.get_config_var("MULTIARCH")``：后者是 CLI 解释器的
+    编译期值，CLI 装在自己的 venv 里、解释器可能不是发行版的，取不到发行版的实际布局。
+    映射里没有的架构（armv7 / riscv64 等）跳过这一项，其余目录照走。
+    """
+    dirs = list(_SYSTEM_LIB_DIRS)
+    if arch_dir_name := _ARCH_LIB_DIR_NAMES.get(platform.machine().lower()):
+        dirs.insert(0, Path("/usr/lib") / arch_dir_name)
+    return dirs
+
+
+# 在 backend 解释器里跑，算出自带那份 .so 的路径。未知架构（armv7 / riscv64 等）打空串，
+# 让调用方按"拿不到"处理 —— 与 _system_lib_dirs 对未知架构"跳过这一项"同一个口径。二选一会
+# 让 armv7 拿到 x86_64 那份的路径，而那个文件在源码树里真实存在，于是白起一次探针、再被
+# ld.so 以 wrong ELF class 打回来，还多一行看着像故障的告警。
+_BUNDLED_PATH_SCRIPT = (
+    "import pathlib, platform, miot;"
+    "arch = {'x86_64': 'x86_64', 'amd64': 'x86_64',"
+    " 'aarch64': 'arm64', 'arm64': 'arm64'}.get(platform.machine().lower(), '');"
+    "print(pathlib.Path(miot.__file__).parent / 'libs' / 'linux' / arch"
+    "      / 'libjemalloc.so.2' if arch else '')"
+)
+
+
+def _bundled_jemalloc(backend_python: str) -> Path | None:
+    """问 backend 解释器要它自带的 libjemalloc.so.2（随平台归档分发的那个）。
+
+    CLI 装在自己的 venv 里、``import miot`` 拿不到，只能让 backend 的解释器算路径。
+    这一步只读 stdout 和退出码，不像预加载探针那样在意 stderr 有没有噪声。
+    拿不到（miot 没装 / 归档里没带 / 解释器起不来）返回 None。
+    """
+    try:
+        result = subprocess.run(
+            [backend_python, "-c", _BUNDLED_PATH_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=_BUNDLED_LOOKUP_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    so_path = Path(result.stdout.strip())
+    return so_path if so_path.is_file() else None
+
+
+def _jemalloc_candidates(
+    backend_python: str | None = None,
+) -> Iterator[tuple[Path, bool]]:
+    """惰性产出候选 ``(.so 路径, 是否自带那份)``，用哪个由调用方探针后决定。
+
+    系统那份优先：真机对比得出"SBC 最优 = jemalloc"用的就是 apt 那份，让自带那份抢先等于把
+    结论建立在没被测过的库上。理由**不是**"编译参数更贴合内核"——各发行版 aarch64 一律按
+    64K 页编，与自带那份一致。
+
+    按 ``resolve()`` 去重（同一个文件常能从多条软链路径走到），自带那份排最后且惰性：只有
+    前面全没通过才起子进程问它的路径。
+    """
+    seen: set[Path] = set()
+    for lib_dir in _system_lib_dirs():
+        for file_name in _JEMALLOC_FILE_NAMES:
+            so_path = lib_dir / file_name
+            if not so_path.is_file():
+                continue
+            real = so_path.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            yield so_path, False
+    if backend_python and (bundled := _bundled_jemalloc(backend_python)):
+        if bundled.resolve() not in seen:
+            yield bundled, True
+
+
+def _preload_value(so_path: Path) -> str:
+    """``LD_PRELOAD`` 的值：我们的放最前（要它接管 malloc），环境里原有的追加在后。
+
+    纯拼值不告警——探针对每个候选都调一次，在这里 echo 会把同一句重复打好几遍；丢掉原有那段
+    的提醒交给 :func:`_warn_on_dropped_preload`，真要注入时打一次。
+
+    原有那段含危险字符时只是不追加，不连累我们这一份。``so_path`` 自身的字符检查在
+    :func:`_probe_jemalloc` 入口，那里能换下一个候选。
+    """
+    existing = os.environ.get("LD_PRELOAD", "").strip()
+    if existing and _is_conf_safe(existing):
+        return f"{so_path}:{existing}"
+    return str(so_path)
+
+
+def _warn_on_dropped_preload() -> None:
+    """原有 ``LD_PRELOAD`` 因为含危险字符没被追加时，提醒一次。"""
+    existing = os.environ.get("LD_PRELOAD", "").strip()
+    if existing and not _is_conf_safe(existing):
+        click.echo(
+            'warning: 环境里已有的 LD_PRELOAD 含有 " % 或换行，这些字符会让 supervisord 拒绝'
+            "加载它的配置，因此一律不追加，本次只预加载 jemalloc",
+            err=True,
+        )
+
+
+def _stderr_tail(stderr: str, limit: int = 200) -> str:
+    """探针 stderr 里最有诊断价值的那一行，拼进失败原因用。不参与任何判定。"""
+    lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+    return f"；stderr: {lines[-1][:limit]}" if lines else ""
+
+
+def _as_int(raw: str | None) -> int | None:
+    try:
+        return int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(raw: str | None) -> bool | None:
+    return {"True": True, "False": False}.get(raw or "")
+
+
+def _probe_jemalloc(
+    so_path: Path,
+    malloc_conf: str,
+    backend_python: str | None,
+    timeout: float,
+) -> _ProbeResult:
+    """真拿这套 LD_PRELOAD + MALLOC_CONF 起一个进程，读 mallctl 实证接管情况。
+
+    判据只有一条：stdout 里有没有 ``ver=``。stderr 一概不看——接管成功后它打什么都不改变
+    "能用"，拿它做判据就得维护一张补不完的良性输出白名单。
+
+    用 backend 的解释器（"CLI 能被接管"推不出"backend 能被接管"），``-E -S`` 屏掉环境和
+    site 目录免得 sitecustomize 自己改了分配器。只报事实，判定在调用方。
+    """
+    # 写不进 supervisord.conf 的路径等于用不了，和加载失败同一个出口：候选链换下一个，
+    # 绝对路径那条也会照常打出真实原因。放在探针入口，所有来源（候选链 / MILOCO_MALLOC /
+    # 自带那份）就都被这一处覆盖，不用每个来源各查一遍。
+    if not _is_conf_safe(str(so_path)):
+        return _ProbeResult(
+            fatal='路径含有 " % 或换行，这些字符会让 supervisord 拒绝加载它的配置，因此一律不注入'
+        )
+    env = {
+        **os.environ,
+        "LD_PRELOAD": _preload_value(so_path),
+        "MALLOC_CONF": malloc_conf,
+    }
+    try:
+        result = subprocess.run(
+            [backend_python or sys.executable, "-E", "-S", "-c", _PROBE_SCRIPT],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return _ProbeResult(fatal=f"探针超过 {timeout:.1f}s 未返回")
+    except OSError as e:
+        return _ProbeResult(fatal=f"探针无法执行: {e}")
+
+    # 被信号打死时 returncode 为负（-signal），正常退出非 0 则是进程自己的退出码。
+    if result.returncode < 0:
+        return _ProbeResult(
+            fatal=f"探针被信号 {-result.returncode} 打死{_stderr_tail(result.stderr)}"
+        )
+    if result.returncode != 0:
+        return _ProbeResult(
+            fatal=f"探针以退出码 {result.returncode} 结束{_stderr_tail(result.stderr)}"
+        )
+
+    stdout = result.stdout.strip()
+    if stdout == "not-taken-over":
+        # ld.so 对加载不了的预加载库是"打一行 ERROR 然后忽略、程序照常跑"，退出码仍是 0，
+        # 所以这条静默降级只有靠 mallctl 符号取不到才抓得住。
+        return _ProbeResult(
+            fatal="jemalloc 没有接管 malloc（预加载被忽略，或这不是 jemalloc）"
+            + _stderr_tail(result.stderr)
+        )
+    if stdout.startswith("probe-crashed:"):
+        return _ProbeResult(fatal=f"探针自身异常：{stdout}")
+
+    # 页大小不符这类故障在 jemalloc 初始化期就炸，探针脚本一行都没执行到，stdout 是空的；
+    # 而退出码不保证非 0（release 构建 opt_abort 默认 false）。没有这条判据，意料外的输出
+    # 会默认落到"通过"。
+    values = dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+    if "ver" not in values:
+        # stderr 不参与判定，但附进失败原因里：页大小不符时 jemalloc 的原话
+        # （"Unsupported system page size"）比"输出不符合契约"好排查得多。
+        return _ProbeResult(fatal=f"探针输出不符合契约: {stdout!r}{_stderr_tail(result.stderr)}")
+
+    return _ProbeResult(
+        version=values["ver"] if values["ver"] != "?" else "unknown",
+        page=_as_int(values.get("page")),
+        background_thread=_as_bool(values.get("bg")),
+        dirty_decay_ms=_as_int(values.get("dirty")),
+        muzzy_decay_ms=_as_int(values.get("muzzy")),
+    )
+
+
+def _pick_jemalloc(
+    backend_python: str | None, malloc_conf: str
+) -> tuple[Path, _ProbeResult] | None:
+    """按候选链逐个探针，返回第一个可用的 ``(.so, 探针结果)``；全不可用返回 None。"""
+    system_deadline = time.monotonic() + _SYSTEM_PROBE_BUDGET_S
+    budget_reported = False
+    for so_path, is_bundled in _jemalloc_candidates(backend_python):
+        timeout = float(_PROBE_TIMEOUT_S)
+        if not is_bundled:
+            # deadline 只管得住"要不要再起一个"，管不住"已经起的这个能跑多久"，所以单次超时
+            # 也要收进剩余预算，否则最后一个候选能把总预算打穿。
+            remaining = system_deadline - time.monotonic()
+            if remaining < _MIN_PROBE_SLICE_S:
+                if not budget_reported:
+                    budget_reported = True
+                    click.echo(
+                        "warning: 探测 libjemalloc 超过时间预算，跳过剩余的系统候选",
+                        err=True,
+                    )
+                continue
+            timeout = min(timeout, remaining)
+        probe = _probe_jemalloc(so_path, malloc_conf, backend_python, timeout)
+        if probe.fatal is None:
+            return so_path, probe
+        # 不说"试下一个候选"：最后一个失败时后面已经没有了。链路全灭的结论由调用方给。
+        click.echo(f"warning: {so_path} 不可用（{probe.fatal}）", err=True)
+    return None
+
+
+def _malloc_env_pairs(
+    so_path: Path, probe: _ProbeResult, malloc_conf: str
+) -> list[tuple[str, str]]:
+    """组装要注入的环境变量，并把读回的实况打出来。
+
+    旋钮原样注入不做加工：jemalloc 逐个独立解析，被拒的那个不影响其它旋钮，它自己会打
+    ``Invalid conf pair``。读回值也原样打、不替用户分类——``None/None`` 摆在那儿就是事实。
+    """
+    click.echo(
+        f"分配器: jemalloc {probe.version} ({so_path}) page={probe.page}  "
+        f"background_thread={probe.background_thread} "
+        f"dirty/muzzy_decay_ms={probe.dirty_decay_ms}/{probe.muzzy_decay_ms}",
+        err=True,
+    )
+    _warn_on_dropped_preload()
+    return [("LD_PRELOAD", _preload_value(so_path)), ("MALLOC_CONF", malloc_conf)]
+
+
+def _safe_mode_enabled() -> bool:
+    """读 ``safe_mode``（``MILOCO_SAFE_MODE`` 环境变量能临时覆盖）。读不出来当没开。"""
+    from miloco_cli.config import load_config
+
+    try:
+        return bool(load_config().get("safe_mode", False))
+    except Exception:
+        return False
+
+
+def _is_conf_safe(value: str) -> bool:
+    """值能不能放进 ``environment=`` 行。
+
+    ``_CONF_HOSTILE_CHARS`` 里的字符会让 supervisord 拒绝加载整份配置、守护进程起不来
+    （逐个实测过）：``"`` 提前闭合引号、换行截断、落单的 ``%`` 撞上百分号展开。``%%`` 转义
+    的层数各段不同，不值得为主动构造才会出现的路径引入按段转义。
+
+    逗号不在此列：``MALLOC_CONF`` 的合法值本身逗号分隔，拒掉它默认旋钮就一个都注入不进去。
+    """
+    return not set(value) & _CONF_HOSTILE_CHARS
+
+
+def _resolve_malloc_env(backend_python: str | None = None) -> list[tuple[str, str]]:
+    """决定给 backend 注入哪套分配器环境变量（``LD_PRELOAD`` / ``MALLOC_CONF``）。
+
+    判定顺序：非 Linux（``LD_PRELOAD`` 本就无效）→ 安全模式 → ``MILOCO_MALLOC`` → 候选链。
+
+    ``MILOCO_MALLOC`` 取值：未设置 / ``jemalloc`` 走候选链（找不到时静默，这只是优化项）；
+    ``glibc`` 什么都不注入；``.so`` 绝对路径只试这一个；其它取值告警后不注入。
+
+    任何一步不成都返回空列表，按 glibc 默认起——backend 能起来的优先级高于换分配器。
+    """
+    if sys.platform != "linux":
+        return []
+
+    choice = os.environ.get("MILOCO_MALLOC", "").strip()
+
+    # 安全模式赢过 MILOCO_MALLOC 的一切取值：它的语义是"我遇到问题了"，不该被更细的设置推翻。
+    if _safe_mode_enabled():
+        click.echo(
+            "分配器: 安全模式已开启，不预加载 jemalloc；"
+            "关闭用 miloco-cli config set safe_mode false",
+            err=True,
+        )
+        if choice and choice != "glibc":
+            click.echo(
+                f"warning: 安全模式已开启，MILOCO_MALLOC={choice} 被忽略", err=True
+            )
+        return []
+
+    if choice == "glibc":
+        return []
+
+    # 空串按"没设"处理，和上面 MILOCO_MALLOC 同一个口径：os.environ.get 的默认值只在 key
+    # 不存在时才给，而 `export MALLOC_CONF=` / Dockerfile 的 `ENV MALLOC_CONF=` 会让它返回
+    # 空串——那样三个旋钮一个都注入不进去，日志却完全看不出异常。
+    malloc_conf = os.environ.get("MALLOC_CONF", "").strip() or _JEMALLOC_MALLOC_CONF
+    # 沿用用户的 MALLOC_CONF 意味着它会原样进 conf，和绝对路径一样要过这道闸。
+    if not _is_conf_safe(malloc_conf):
+        click.echo(
+            "warning: MALLOC_CONF 含有会让 supervisord 拒绝加载配置的字符，一律改用默认旋钮",
+            err=True,
+        )
+        malloc_conf = _JEMALLOC_MALLOC_CONF
+
+    if not choice or choice == "jemalloc":
+        picked = _pick_jemalloc(backend_python, malloc_conf)
+        if picked is None:
+            # 默认路径静默回退：这只是优化项，没生效不影响服务。用户显式点名才必须说。
+            if choice:
+                click.echo(
+                    "warning: 找不到可用的 libjemalloc，本次不改分配器；"
+                    "Debian/Ubuntu 装法：apt install libjemalloc2",
+                    err=True,
+                )
+            return []
+    elif choice.startswith("/"):
+        # 绝对路径只有一份可试，不进候选链——用户点名了这一份，探不通就该说"这一份不行"，
+        # 而不是接着去试别的。路径里的危险字符由探针入口统一挡，会照常打出真实原因。
+        so_path = Path(choice)
+        if not so_path.is_file():
+            click.echo(
+                f"warning: MILOCO_MALLOC 指定的 {so_path} 不存在，本次不改分配器", err=True
+            )
+            return []
+        probe = _probe_jemalloc(so_path, malloc_conf, backend_python, _PROBE_TIMEOUT_S)
+        if probe.fatal:
+            click.echo(
+                f"warning: MILOCO_MALLOC 指定的 {so_path} 不可用（{probe.fatal}），"
+                "本次不改分配器",
+                err=True,
+            )
+            return []
+        picked = (so_path, probe)
+    else:
+        click.echo(
+            f"warning: 无法识别 MILOCO_MALLOC={choice}"
+            "（可用值：jemalloc / glibc / libjemalloc.so 绝对路径），本次不改分配器",
+            err=True,
+        )
+        return []
+
+    return _malloc_env_pairs(*picked, malloc_conf)
+
+
+def _malloc_env_or_empty(backend_python: str | None) -> list[tuple[str, str]]:
+    """:func:`_resolve_malloc_env` 的兜底外壳：它自己有 bug 也绝不能让服务起不来。"""
+    try:
+        return _resolve_malloc_env(backend_python)
+    except Exception as e:
+        click.echo(f"warning: 分配器设置出错（{e!r}），本次不改分配器", err=True)
+        return []
+
+
+def _injected_jemalloc_from_conf() -> str | None:
+    """从已生成的 supervisord.conf 读回本次注入的 ``LD_PRELOAD`` 首段；没注入返回 None。
+
+    去 conf 取事实而不是把路径一层层传下来：conf 是 backend 实际在用的那份，与用户排查时
+    grep 的是同一个来源；没注入时这一行本来就不存在，不需要额外判断。
+    """
+    import re
+
+    try:
+        conf = _supervisor_conf().read_text()
+    except OSError:
+        return None
+    m = re.search(r'LD_PRELOAD="([^"]*)"', conf)
+    # 追加语义下值是 <我们的>:<原有的>，我们的在最前。
+    return m.group(1).split(":")[0] if m else None
+
+
+def _echo_jemalloc_hint_if_injected() -> None:
+    """启动失败时提示可以先排除 jemalloc。
+
+    不下结论：启动失败原因很多，"摘掉后成功"推不出"是 jemalloc 的错"，只报告、只给开关。
+
+    两条命令都要给：此时后端不在跑，``config set`` 顺带的重启不会触发，只写配置的话 conf
+    不会重新生成、``LD_PRELOAD`` 还在，而命令返回 ok，用户会以为已经生效。
+    """
+    if so_path := _injected_jemalloc_from_conf():
+        click.echo(
+            f"提示: 本次启用了 jemalloc ({so_path})。如果反复起不来，可以先排除它：\n"
+            "      miloco-cli config set safe_mode true\n"
+            "      miloco-cli service start",
+            err=True,
+        )
+
+
+# ─── supervisord 配置生成 ────────────────────────────────────────────────────
+
+
+def _supervisor_environment(server_cmd: str) -> str:
+    """拼 supervisord 的 ``environment=`` 行。
+
+    值一律带双引号：这一行按逗号分隔，``MALLOC_CONF`` 里的逗号不加引号会被当成分隔符拆开。
+
+    这里不统一过字符闸：分配器那两个值在各自来源处挡过了（在那里挡才能换候选或换回默认旋钮）；
+    ``MILOCO_HOME`` / ``TZ`` 挡了也没用，同一份 conf 里还有别的行从同一个家目录推出来。
+    ``command`` 是另一个独立来源（``config.json`` 的 ``server.python_bin``）。这些值含 ``%``
+    时 supervisord 起不来是它的既有限制，排查按 conf 里实际那几行看。
+    """
+    pairs = [
+        ("MILOCO_SUPERVISED", "1"),
+        ("MILOCO_HOME", str(miloco_home())),
+    ]
+    # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
+    if tz := _resolve_timezone():
+        pairs += [("TZ", tz), ("MILOCO_TIMEZONE", tz)]
+    # 命令的第一段就是 backend 的解释器，拿它问自带的 libjemalloc 在哪、拿它跑探针。
+    cmd_parts = shlex.split(server_cmd)
+    pairs += _malloc_env_or_empty(cmd_parts[0] if cmd_parts else None)
+
+    return ",".join(f'{name}="{value}"' for name, value in pairs)
+
+
 def _generate_supervisor_conf(server_cmd: str) -> None:
     log_dir = _log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     sup_conf_path = _supervisor_conf()
-    tz = _resolve_timezone()
-    # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
-    tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
+    environment = _supervisor_environment(server_cmd)
     conf = f"""\
 [supervisord]
 logfile={_supervisor_log()}
@@ -290,11 +801,17 @@ redirect_stderr=true
 stdout_logfile={log_dir}/miloco-backend.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=20
-environment=MILOCO_SUPERVISED="1",MILOCO_HOME="{miloco_home()}"{tz_env}
+environment={environment}
 """
     if sup_conf_path.exists() and sup_conf_path.read_text() == conf:
         return
-    sup_conf_path.write_text(conf)
+    # 原子写：先截断再写的话，进程在中间被杀或磁盘满就会留下空/半截的 conf，supervisord 直接
+    # 起不来——比 jemalloc 本身危险得多。
+    atomic_write_text(sup_conf_path, conf)
+    # 原子写建的临时文件固定 0600，os.replace 换 inode 会把这个权限带到目标文件上，等于顺带
+    # 收紧了这份 conf 的权限。这里恢复成 write_text 时代的按 umask 取值：conf 不含密钥，而开发
+    # 指南让运维 grep 它自查有没有注入，非属主读不到会拿 Permission denied，正好被读成"没注入"。
+    sup_conf_path.chmod(0o644 & ~_current_umask())
 
 
 def _supervisord_is_running() -> bool:
@@ -351,6 +868,7 @@ def _wait_for_health(cfg: dict, pretty: bool) -> None:
     while time.time() < deadline:
         status = _supervisorctl("status", _PROGRAM_NAME).stdout
         if "FATAL" in status:
+            _echo_jemalloc_hint_if_injected()
             print_result({"error": "process failed to start, check logs"}, pretty)
             sys.exit(1)
         try:
@@ -359,6 +877,7 @@ def _wait_for_health(cfg: dict, pretty: bool) -> None:
         except Exception:
             pass
         time.sleep(0.5)
+    _echo_jemalloc_hint_if_injected()
     print_result(
         {"error": "service did not become ready within 30s, check logs"}, pretty
     )
@@ -400,6 +919,8 @@ def service_start(foreground, pretty):
     cmd = _server_cmd_or_exit(pretty)
 
     if foreground:
+        # 前台模式不经过 supervisord，分配器变量要自己塞进环境再 exec（ld.so 在 exec 时读它）。
+        os.environ.update(dict(_malloc_env_or_empty(cmd[0])))
         os.execvp(cmd[0], cmd)
         # 不会到达这里
     else:
@@ -410,6 +931,10 @@ def service_start(foreground, pretty):
             _supervisorctl("update")
             result = _supervisorctl("start", _PROGRAM_NAME)
             if result.returncode != 0:
+                # 每条启动失败的出口都要挂逃生开关，这条在走到 _wait_for_health 之前就 exit，
+                # 所以那里的两条挂点管不到它。挂点的清单以测试为准（grep
+                # _echo_jemalloc_hint_if_injected 的用例），别在注释里数。
+                _echo_jemalloc_hint_if_injected()
                 print_result(
                     {"error": f"supervisorctl start failed: {result.stdout.strip()}"},
                     pretty,
@@ -429,7 +954,16 @@ def service_start(foreground, pretty):
                     text=True,
                 )
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print_result({"error": f"supervisord failed to start: {e}"}, pretty)
+                # conf 的 environment= 行被写坏时，supervisord 起不来是唯一的症状——FATAL 和
+                # health 超时那两处提示都要求它已经起来了，逃生开关必须也挂在这条出口上。
+                _echo_jemalloc_hint_if_injected()
+                # supervisord 的原话在 e.stderr 里（capture_output=True），CalledProcessError
+                # 自己只说"returned non-zero exit status 2"，不带出来等于没有线索。
+                detail = (getattr(e, "stderr", "") or "").strip()
+                print_result(
+                    {"error": f"supervisord failed to start: {e}", "detail": detail},
+                    pretty,
+                )
                 sys.exit(1)
 
         _wait_for_health(cfg, pretty)
@@ -512,6 +1046,9 @@ def service_restart(ctx, pretty):
         _supervisorctl("update")
         result = _supervisorctl("restart", _PROGRAM_NAME)
         if result.returncode != 0:
+            # 同 start。升级后第一次 restart 正是配置里刚带上 LD_PRELOAD 的那一次，
+            # 这条出口反而最可能撞上注入问题。
+            _echo_jemalloc_hint_if_injected()
             print_result(
                 {"error": f"supervisorctl restart failed: {result.stdout.strip()}"},
                 pretty,

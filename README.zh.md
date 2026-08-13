@@ -169,6 +169,7 @@ Miloco 站在以下开源项目之上：
 - [jMuxer](https://github.com/samirkumardas/jmuxer)（MIT）— 家庭面板实时视频流封装
 - [BGE / bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5)（智源研究院，MIT）— 文本向量化模型
 - [Silero VAD](https://github.com/snakers4/silero-vad)（Silero Team，MIT）— 语音活动检测，门控感知语音字段
+- [jemalloc](https://github.com/jemalloc/jemalloc)（BSD-2-Clause）— 内存分配器，缓解 backend 长跑的内存增长
 
 ## 许可证
 

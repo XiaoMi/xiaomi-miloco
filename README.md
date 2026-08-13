@@ -169,6 +169,7 @@ Miloco stands on the shoulders of the following open-source projects:
 - [jMuxer](https://github.com/samirkumardas/jmuxer) (MIT) — real-time video stream muxing for the home dashboard
 - [BGE / bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5) (BAAI, MIT) — text embedding model
 - [Silero VAD](https://github.com/snakers4/silero-vad) (Silero Team, MIT) — voice activity detection, gating the perceived speech field
+- [jemalloc](https://github.com/jemalloc/jemalloc) (BSD-2-Clause) — memory allocator, mitigating backend RSS growth on long runs
 
 ## License
 

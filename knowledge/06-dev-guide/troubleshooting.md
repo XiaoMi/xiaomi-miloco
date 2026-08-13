@@ -8,6 +8,7 @@
 | `server.python_bin 未配置` / 不可执行   | 重跑 `install.sh`（自动探测）；或 `miloco-cli config set server.python_bin /path/to/.venv/bin/python`                                           |
 | Python 版本不符                         | 要求 >= 3.11，`uv run python --version` 检查                                                                                                    |
 | `workers != 1` 报 `NotImplementedError` | Server 不支持多 worker，检查环境变量 `WEB_CONCURRENCY` 是否被容器/系统设置                                                                      |
+| 反复起不来，怀疑是内存分配器            | `miloco-cli config set safe_mode true` 后重启（跳过 jemalloc 预加载，见 dev-guide「内存分配器」）；恢复用 `false`                               |
 
 ---
 
