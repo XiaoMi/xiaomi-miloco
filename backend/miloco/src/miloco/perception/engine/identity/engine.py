@@ -1011,6 +1011,16 @@ class IdentityEngine:
             # 两者不同口径 —— 只要 track 存活上限短于窗长, 末帧漏检的 track 这一窗照样
             # 匹配过、质心早变了, 用末帧判据会把真证据整窗丢掉、让真实的跟错更久才撤回。
             if sim == st.drift_last_sim:
+                # 跳过也要留痕: 下面那条 [Identity/drift] info 在 continue 之后, 不补的话
+                # 这些窗是日志空洞 —— observe 档尤其吃亏, 它的全部用途就是"算 sim + 打
+                # 日志、不撤", 而空洞还与"无质心 / 无参考 / 被 suppress"三种早退无从区分。
+                # debug 级同上面 suppress 分支, 避免每窗每条刷 info。
+                logger.debug(
+                    "[Identity/drift] cam=%s track_id=%d person=%s sim=%.3f "
+                    "same-evidence skip (consec_low=%d)",
+                    self.cam_id, tid, _short_pid(pid, name_lookup), sim,
+                    st.drift_consec_low,
+                )
                 continue
             st.drift_last_sim = sim
 
@@ -1276,6 +1286,9 @@ class IdentityEngine:
                 # 入池口本身不看 conf(push_crop 只判开关再等比缩放), 这个值是给池内
                 # 质量门用的。取 0.0 则该路径的 crop 一张也过不了那道门、全部卡在 L1 ——
                 # 功能整体失效, 比放宽是更坏的失败模式。
+                # 但满值不是没有代价: 它在候选打分里等于该维满分, 而那是权重最大的一维,
+                # 缺字段的路径上选样因此退化成长宽比 + 清晰度两维 —— 正是本次修的那个
+                # 退化在兜底分支里的复刻。生产路径无条件写出该字段, 走不到这里。
                 detector_conf=float(tr.get("confidence", 1.0)),
             )
             self.tier_u_pool.push_crop(crop_entry)

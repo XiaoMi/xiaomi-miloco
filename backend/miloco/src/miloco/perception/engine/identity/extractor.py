@@ -478,6 +478,9 @@ def extract_from_video(
                 # 缺 confidence 按满置信兜底,口径同 IdentityEngine 侧:tracker 决定
                 # 维持该 track 即已过检测阈值,"未知"不等于"零信";取 0.0 会被下面的
                 # 质量门全数拒掉。
+                # 代价要说清:满值在候选打分里等于该维满分,而它是权重最大的一维,于是
+                # 缺字段的路径上选样退化成长宽比 + 清晰度两维 —— 正是本次修的那个退化在
+                # 兜底分支里的复刻。生产路径无条件写出该字段,走不到这里。
                 conf = float(tr.get("confidence", 1.0))
                 crop = _crop_with_padding(frame, bbox_xywh)
                 if crop is None:

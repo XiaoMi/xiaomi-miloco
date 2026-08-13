@@ -221,10 +221,9 @@ class TierUConfig:
     # 误隐藏。逐张比对(不 mean): tier_c 样本差异大, mean 后反而模糊化。
     reid_threshold_tier_c_dedup: float = 0.90
     # quality gate(crop 进 L2 前过滤)
-    # 注:本字段全仓无读取点 —— 下面的 _pass_quality_gate 不校面积占比(见该函数注释:
-    # 这里拿不到 frame size,面积由 detector_conf 间接保障)。保留仅为语义占位,改它不
-    # 改变任何行为。
-    area_ratio_min: float = 0.05
+    # 曾有一个 area_ratio_min 字段:全仓无读取点、不在 yaml、也不在前端,连"可调但无效"
+    # 都不构成(_pass_quality_gate 不校面积占比 —— 这里拿不到 frame size,面积由
+    # detector_conf 间接保障),已删除。
     # ⚠️ 以下这组阈值在 identity/extractor.py 有一套同名语义的模块级常量(_GATE_*),
     # 两套之间无任何绑定 —— 不要假设它们一致,改这里之前请直接比对那边的代码。
     aspect_min: float = 0.25                 # w/h ≥ 0.25 = 不接受比 1:4 更瘦的 bbox

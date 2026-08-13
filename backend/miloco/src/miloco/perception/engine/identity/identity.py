@@ -29,6 +29,7 @@ from miloco.perception.engine.types import (
     IdentityPacket,
     IdentityTarget,
     MotionState,
+    TrackedObject,
 )
 
 
@@ -128,7 +129,7 @@ async def run_identity(
     )
 
 
-def _to_tracking_dicts(objects) -> list[dict]:
+def _to_tracking_dicts(objects: list[TrackedObject]) -> list[dict]:
     """把 ``TrackedObject`` 列表转为 ``IdentityEngine.process`` 期待的 dict 形式。
 
     SortTracker.get_tracking_results 已经直接出 dict；当前 ``RealTrackingService`` 走旧
