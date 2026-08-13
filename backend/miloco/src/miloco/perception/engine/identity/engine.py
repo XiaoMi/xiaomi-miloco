@@ -107,8 +107,10 @@ _TIER_C_MAX_BBOX_ASPECT = 2.5
 #   bench:不同人 tier_a 互比 26–33 / 随机噪声 24–33——与"同场景"区间重叠,正是
 #   pHash(刻画整图含背景的明暗布局,非身份)不适合做身份门的原因。
 
-# 锐度(Laplacian 方差)地板:tier_c 候选画面过糊则不入库。复用工程既有"太糊"基线 50
-# (与 extractor._GATE_SHARPNESS_MIN / tier_u sharpness_min 同口径)。实测库内 tier_a body
+# 锐度(Laplacian 方差)地板:tier_c 候选画面过糊则不入库。取的是工程既有的"太糊"基线 50。
+# ⚠️ extractor._GATE_SHARPNESS_MIN / tier_u sharpness_min 是**各自独立**的阈值,与本值
+# 无任何绑定 —— 不要假设它们一致(此处曾写"同口径",而那种约定全仓已被验证会悄悄破掉),
+# 改本值之前直接比对那两处代码。实测库内 tier_a body
 # 最低 88、tier_c body 最低 236,均远高于 50,故 50 仅兜底拦退化帧、不误杀正常样本;
 # 后续可据写时 sidecar 的 sharpness 分布再共识调整。
 _TIER_C_MIN_SHARPNESS = 50.0
@@ -1005,7 +1007,8 @@ class IdentityEngine:
             # 无数据窗不计不清: 与上一窗逐字节相同的 sim 意味着比较的两端都没有新证据
             # (track 侧特征队列没长新东西 / 参考侧窗内无增无出), 计进去等于拿同一份证据
             # 投两票, 而"连续 M 窗"存在的意义正是抗单窗噪声。这道判据在什么配置下才被
-            # 走到, 见 state.py::drift_last_sim 及其钉住的用例 —— 与本函数逻辑无关。
+            # 走到, 见 state.py::drift_last_sim 的说明 —— 取决于配置量之间的大小关系,
+            # 与本函数逻辑无关。
             # 不拿"本帧是否真检测命中"做判据: 那个标记是 get_tracking_results() 的**末帧
             # 快照**(跟踪服务逐帧 update、循环外只读一次), 而这里比的是整窗累积的质心,
             # 两者不同口径 —— 只要 track 存活上限短于窗长, 末帧漏检的 track 这一窗照样
