@@ -18,7 +18,11 @@
 
 set -euo pipefail
 
-# 强制 UTF-8 + POSIX 字符类，防止 "$VAR中文" 被 bash 误识别为变量名延续
+# 强制 UTF-8 + POSIX 字符类：中文提示/日志按字符而非字节处理，grep/sed/awk 行为一致。
+# 注意它防不住 "$VAR中文" —— 那个坑恰恰要 UTF-8 locale 才触发（macOS 自带 bash 3.2 在
+# UTF-8 下会把紧跟变量的非 ASCII 字符（中文 / emoji / 带音标字母都算）首字节并进变量名，
+# set -u 直接报 unbound variable，没 set -u 则静默输出乱码）。
+# 唯一可靠的写法是花括号 "${VAR}中文"，由 backend/miloco/tests/test_shell_var_braces.py 兜底。
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 # --- CLI 参数解析（--diagnose / --no-start-backend / --post-install / -h） ---
@@ -48,7 +52,7 @@ EOF
       exit 0
       ;;
     *)
-      warn "未知参数: $arg（可用: --diagnose, --no-start-backend, -h）"
+      warn "未知参数: ${arg}（可用: --diagnose, --no-start-backend, -h）"
       ;;
   esac
 done

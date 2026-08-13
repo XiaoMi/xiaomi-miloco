@@ -37,7 +37,7 @@ if ! command -v miloco-cli >/dev/null 2>&1; then
 fi
 
 if [ ! -d "$HERMES_HOME" ]; then
-  err "找不到 Hermes 目录 $HERMES_HOME，请先安装 Hermes Agent"
+  err "找不到 Hermes 目录 ${HERMES_HOME}，请先安装 Hermes Agent"
   exit 1
 fi
 
