@@ -1277,11 +1277,12 @@ async def register_preview(
             # 因为 wheel 不打 onnx, __file__ 在 site-packages 下找不到。
             mdir = str(get_settings().directories.models_dir)
             # 用 yaml-resolved DeepSortConfigDC,跟主流程 tracking_service 共享同一份
-            # 配置(尤其 max_age_sec)。硬编码 ``DeepSortConfigDC()`` 默认 max_age_sec=1.0
-            # 会让视频注册路径只容忍 1 帧 miss,而 yaml 实配 2.0(见
+            # 配置(尤其 max_age_sec)。硬编码 ``DeepSortConfigDC()`` 拿到的是 dataclass
+            # 默认值,而 yaml 把它覆盖成了更长的一档(见
             # ``perception/engine/identity/default_config.yaml::deep_sort.max_age_sec``,
-            # 跨包、不在本目录下);边界帧 confidence 抖动时 track 过早杀死、分裂为
-            # 多 track,误触发号码图分支。
+            # 跨包、不在本目录下;**此处不写两边当前取值**,写了就会随调参失真);差别落在
+            # 本路径能容忍几帧 miss 上 —— 短了以后边界帧 confidence 抖动会把 track 过早
+            # 杀死、分裂为多 track,误触发号码图分支。
             return DeepSortTracker(
                 detector=_load_detector(),
                 config=manager.perception_service.deep_sort_config,
