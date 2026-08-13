@@ -705,7 +705,16 @@ models_ready() {
 # 里，一次 cp 就够。断网时更糟：下载失败只 warn 不中断，安装报成功，首次 perceive
 # 直接 models_missing，而完整的本地副本从头到尾都在一个目录之外。
 if models_ready; then
-  info "  $MILOCO_HOME/models/ 已按 lock 齐全，跳过 fork/pkg 兜底"
+  if [ -n "$FETCH_MODELS" ]; then
+    info "  $MILOCO_HOME/models/ 已按 lock 齐全，跳过 fork/pkg 兜底"
+  else
+    # 弱判据分支（旁边没有 scripts/，见上面 FETCH_MODELS 的探测）："齐全"三个字这里
+    # 担不起：判据只是 *.onnx 通配到了 ≥1 个文件，既不知道该有几个、也不校验 sha256。
+    # 目录里躺着一个上次下到一半的 silero_vad.onnx 同样满足它。此刻说"已按 lock 齐全"
+    # 是把一个通配符结果说成了清单核对结果 —— 用户据此以为模型没问题，而首次 perceive
+    # 可能直接 models_missing 或静默降级，届时他手上唯一的记录就是这句错的成功提示。
+    info "  $MILOCO_HOME/models/ 已有 ONNX 文件，跳过 fork/pkg 兜底（未按 lock 核对：本机没有 scripts/fetch_models.py）"
+  fi
   MODEL_SRC=""
 else
   # 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
@@ -780,7 +789,10 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
   # 上面的 cp（本地、秒级）照做，联网下载留给用户显式触发。
   warn "感知模型不齐，但 --post-install 模式不做下载（可能 ~78MB）"
   if [ -n "$FETCH_MODELS" ]; then
-    warn "补齐：$PYTHON $FETCH_MODELS --dest $MILOCO_HOME/models"
+    # 带 --strict：不带的话"只有可选模型没下到"退 0，用户会拿到一个成功的退出码，
+    # 而下次 install.sh 的门禁（models_ready 用的正是 --check --strict）照旧判不齐。
+    # 手上这条命令的判据必须和门禁同源，否则修不动还看不出为什么。下面两处同理。
+    warn "补齐：$PYTHON $FETCH_MODELS --strict --dest $MILOCO_HOME/models"
   else
     # 不能拿 ${FETCH_MODELS:-scripts/fetch_models.py} 兜底：`:-` 只在变量为空时取用，
     # 而变量为空的充要条件就是"本脚本旁边没有 checkout"（见上面 FETCH_MODELS 的探测）
@@ -791,20 +803,29 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
     # "文件损坏 / 路径写错"带偏 —— 正是下面 790 那段注释刚论证过要避免的事。
     # 同理不提 scripts/models.lock.json：这个处境下那个文件同样不在手边。
     warn "补齐：重跑 install.sh（安装包自带模型 tar，会解到 $MILOCO_HOME/models/）"
-    warn "  或在 git checkout 目录里跑：$PYTHON scripts/fetch_models.py --dest $MILOCO_HOME/models"
+    warn "  或在 git checkout 目录里跑：$PYTHON scripts/fetch_models.py --strict --dest $MILOCO_HOME/models"
   fi
 elif [ -n "$FETCH_MODELS" ]; then
   # 按 lock 从 upstream Release 下载（sha256 校验）。已齐的文件会被跳过，只补缺的。
   # 下载失败只 warn 不中断：感知会报 models_missing 降级，但插件其余部分照装。
   info "  感知模型不齐，按 scripts/models.lock.json 补齐 → $MILOCO_HOME/models/"
-  if ! "$PYTHON" "$FETCH_MODELS" --dest "$MILOCO_HOME/models"; then
+  # --strict 必须带：进这个分支的判据是 models_ready 的 `--check --strict`（可选模型缺了
+  # 也算不齐），而下载器不带 --strict 时"只有可选模型没下到"是退 **0** 的
+  # （fetch_models.py 主流程：failed_optional 不并进 failed_required）。两头判据不一致的
+  # 后果不是少一句提示，而是整条兜底失效：因为 bge/tokenizer/silero 三个可选模型缺失
+  # 而进来、这三个又没补上时，`if !` 恒不成立 —— 一条 warn 都不打、退 0，用户看到的是
+  # "按 lock 补齐"之后一片沉默，重跑多少次都一模一样，而语义去重与 VAD 已经静默降级。
+  # 这正是上面 :684 那段注释自己立的标准（"缺任何一个（含可选）都判不齐，否则会静默降级"）
+  # 的反面。全仓其余每个下载调用点（build.sh、release.yml、local-ci.sh、models_ready 自己）
+  # 都是带 --strict 的，只有这里漏了。
+  if ! "$PYTHON" "$FETCH_MODELS" --strict --dest "$MILOCO_HOME/models"; then
     warn "感知模型下载失败（网络？）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
     # 带上解释器：本文件在 git 里是 100644、没有可执行位，裸路径原样粘贴会 Permission
     # denied（退 126），而这个新错误跟刚才的下载失败毫无关系，只会把人往"权限 / 文件
     # 损坏"的方向带偏。用户此刻正处在失败状态，这行是他手上唯一的线索，大概率整行复制。
     # 与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
-    warn "修法：重跑 $PYTHON $FETCH_MODELS --dest $MILOCO_HOME/models，或手动放置模型文件"
+    warn "修法：重跑 $PYTHON $FETCH_MODELS --strict --dest $MILOCO_HOME/models，或手动放置模型文件"
   fi
 else
   warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"

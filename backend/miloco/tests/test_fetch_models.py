@@ -16,6 +16,7 @@ import http.server
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -38,21 +39,48 @@ def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    """跑 fetch_models.py，并先把继承来的 MILOCO_MODELS_* 剥干净。
+def _clean_env() -> dict[str, str]:
+    """继承环境里会改变本文件测试语义的变量，一律剥掉。
 
-    不剥的话，内网/离线开发者按 models/README.md 与 dev-guide 的建议 export 了
-    MILOCO_MODELS_BASE_URL 之后，这一批测试会全线翻车：该变量对下载源是**独占替换**，
-    fixture 那个 file:// 假 Release 会被整体顶掉，测试转而真的去打公司镜像 ——
-    既违反本文件"不联网"的契约，`test_empty_source_list_is_usage_error`
-    这类断言退出码的用例语义还会直接反转。
+    两类，都只在**某些人的机器上**发作，所以不隔离的话表现为"CI 绿、我这儿红"：
+
+    1. ``MILOCO_MODELS_*``：内网/离线开发者按 models/README.md 与 dev-guide 的建议
+       export 了 MILOCO_MODELS_BASE_URL 之后，这一批测试会全线翻车 —— 该变量对下载源是
+       **独占替换**，fixture 那个 file:// 假 Release 会被整体顶掉，测试转而真的去打公司
+       镜像；既违反本文件"不联网"的契约，`test_empty_source_list_is_usage_error`
+       这类断言退出码的用例语义还会直接反转。
+
+    2. ``*_proxy`` / ``*_PROXY``：脚本用 urllib 默认 opener，它带 ProxyHandler()，
+       于是 http://127.0.0.1:<port> 那几个用例（起本地 HTTP server 验截断续传 / 416）
+       会把请求发给公司代理，而代理解析不了回环地址。实测：设上代理变量后正好
+       test_truncated_response_keeps_part_for_resume、
+       test_part_survives_process_exit_so_next_run_resumes、
+       test_range_start_past_asset_end_discards_part_instead_of_looping 三条翻红。
+
+    ``no_proxy=*`` 不是多余的兜底：光剥环境变量只能让 getproxies_environment() 变空，
+    而 darwin 上 getproxies() 会接着落到 getproxies_macosx_sysconf() —— 在"系统设置里
+    配了代理、shell 里没 export"的机器上照样中招。塞回一个 no_proxy=* 让环境这条路
+    重新非空且旁路一切，两条路径就都封住了。
+
+    注意隔离只做在测试侧，不动下载器：生产链路上代理是**必要**的（公司网 / 内网机器
+    要靠它才够得着 GitHub），给下载器写死一个不带代理的 opener 会把这批人直接断网。
     """
-    base = {k: v for k, v in os.environ.items() if not k.startswith("MILOCO_MODELS_")}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("MILOCO_MODELS_") and not k.lower().endswith("_proxy")
+    }
+    env["no_proxy"] = "*"
+    return env
+
+
+def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """跑 fetch_models.py，环境按 `_clean_env` 隔离。"""
     return subprocess.run(
         [sys.executable, str(_SCRIPT), *args],
         capture_output=True,
         text=True,
-        env={**base, **(env or {})},
+        env={**_clean_env(), **(env or {})},
     )
 
 
@@ -231,6 +259,38 @@ def test_base_url_env_overrides_lock(
     assert (dest / "req.onnx").read_bytes() == _REQUIRED
 
 
+def test_base_url_env_is_exclusive_not_merely_first_in_line(
+    fake_release: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    """换源是**独占替换**：env 源缺文件时就该失败，不许悄悄回落到 lock 的公网源。
+
+    上一条用例把 lock 的源目录掐掉了，所以它证明的其实只是"lock 的源死了还能走 env"
+    —— 一个 ``return [env, *lock_urls]`` 的实现（优先而非独占）会一字不差地照样绿。
+    可这两种语义的差别正是这个变量存在的理由：内网/离线部署要的是"别再去碰外网"，
+    prepend 实现会在镜像少一个文件时把请求漏到 github.com 去，而那台机器可能根本
+    不该有出网能力 —— 更糟的是它会**成功**，于是没有任何人知道刚才出过网。
+
+    判别姿势：env 源是空的，而 lock 的源**完好无损**。
+      · 独占（现状）：req.onnx 下不到 → 退 1，dest 里什么都没有。
+      · 优先+兜底：从 lock 的源拿到了 → 退 0。
+    """
+    lock, src, dest = fake_release
+    empty_mirror = tmp_path / "empty-mirror"
+    empty_mirror.mkdir()
+    assert (src / "req.onnx").is_file(), "前提：lock 的源仍然完好，兜底一旦发生就必然成功"
+
+    r = _run(
+        "--lock", str(lock), "--dest", str(dest),
+        env={"MILOCO_MODELS_BASE_URL": empty_mirror.as_uri()},
+    )
+    assert r.returncode == 1, f"回落到了 lock 的源（换源不再独占）\n{r.stdout}\n{r.stderr}"
+    assert not (dest / "req.onnx").exists(), "文件来自 lock 的源 —— 请求漏到了公网那侧"
+    # 失败文案里的"源：…"要如实只列本次真正用过的源。把 lock 的源一并印出来，会让
+    # 排查的人以为公网也试过了（"连 GitHub 都下不到"），而其实一次都没碰过。
+    assert empty_mirror.as_uri() in r.stderr
+    assert src.as_uri() not in r.stderr
+
+
 def test_base_url_env_accepts_a_bare_path(
     fake_release: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
@@ -297,11 +357,39 @@ def test_bare_path_in_lock_is_a_lock_error_not_a_download_failure(
     assert "lock" in r.stderr
 
 
-def test_dest_env_is_honored(fake_release: tuple[Path, Path, Path]) -> None:
+def test_dest_env_is_honored(fake_release: tuple[Path, Path, Path], tmp_path: Path) -> None:
+    """不传 --dest 时 MILOCO_MODELS_DEST 要生效。
+
+    这条**必须**不传 --dest —— 传了就跟 test_dest_flag_beats_dest_env 完全重合，而
+    env 单独生效这条分支（README / dev-guide 教内网用户用的正是它）就没人钉了。
+
+    代价是回归时脚本会退回 _DEFAULT_DEST，也就是**本仓库里那个 gitignore 掉的**
+    perception/models/ —— 两个假模型直接落进开发者的工作目录，且 git status 看不见。
+    所以这里跑的是脚本的一份**副本**：_DEFAULT_DEST 由 `__file__` 上溯推出，副本放在
+    tmp_path/scripts/ 下，回退目标就跟着落到 tmp_path 里，回归时脏的是 tmp 而不是仓库。
+    副本是 shutil.copy2 现拷的，测的仍是真代码。
+
+    顺带把断言补成两个方向：env 被采纳 **且** 回退目标没被碰过。只断言前者的话，
+    "env 和默认值都写一遍"这种实现也能过。
+    """
     lock, _src, dest = fake_release
-    r = _run("--lock", str(lock), env={"MILOCO_MODELS_DEST": str(dest)})
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    script = script_dir / "fetch_models.py"
+    shutil.copy2(_SCRIPT, script)
+    # 与脚本里 _DEFAULT_DEST 的推法一致：_SCRIPTS_DIR.parent / backend/miloco/src/...
+    fallback = tmp_path / "backend" / "miloco" / "src" / "miloco" / "perception" / "models"
+
+    r = subprocess.run(
+        [sys.executable, str(script), "--lock", str(lock)],
+        capture_output=True,
+        text=True,
+        env={**_clean_env(), "MILOCO_MODELS_DEST": str(dest)},
+    )
+
     assert r.returncode == 0, r.stderr
     assert (dest / "req.onnx").is_file()
+    assert not fallback.exists(), "MILOCO_MODELS_DEST 被忽略，落到了默认目录"
 
 
 def test_dest_flag_beats_dest_env(
@@ -441,6 +529,14 @@ def _one_file_lock(tmp_path: Path, spec: dict) -> Path:
         pytest.param({"name": "a.onnx", "size": 5, "sha256": "z" * 64}, id="sha256-非十六进制"),
         pytest.param({"name": "a.onnx", "size": "5", "sha256": _sha(b"x")}, id="size-是字符串"),
         pytest.param({"name": "a.onnx", "size": -1, "sha256": _sha(b"x")}, id="size-负数"),
+        # name 的类型：`"/" in name` 对 list / dict 这类支持 in 的类型**不报错**，于是
+        # 一路滑到 name.startswith(".") 才抛 AttributeError —— 而那个异常不在 main 读
+        # lock 的捕获元组里，穿出去就是 traceback + 退 1，正好是本用例最要害的那一轴
+        # （1 = "没下到，重试一下"，而重试永远修不好一份手写坏了的 lock）。
+        # 拿 int 当对照：它撞的是 TypeError，本来就在元组里、早就是干净的退 2。
+        pytest.param({"name": ["a.onnx"], "size": 5, "sha256": _sha(b"x")}, id="name-是列表"),
+        pytest.param({"name": {"a.onnx": 1}, "size": 5, "sha256": _sha(b"x")}, id="name-是字典"),
+        pytest.param({"name": 123, "size": 5, "sha256": _sha(b"x")}, id="name-是整数"),
     ],
 )
 def test_structurally_valid_lock_with_a_bad_key_is_usage_error(
@@ -599,6 +695,92 @@ def test_path_traversal_in_lock_name_is_rejected(tmp_path: Path) -> None:
     r = _run("--lock", str(lock), "--dest", str(tmp_path / "d" / "e"))
     assert r.returncode == 2
     assert not (tmp_path / "evil.onnx").exists()
+
+
+def _make_chunked_truncating_handler(
+    body: bytes,
+) -> type[http.server.BaseHTTPRequestHandler]:
+    """分块传输（chunked）传到一半断开的服务端。
+
+    与 `_make_truncating_handler` 是**不同**的一类：那边有 Content-Length，截断由
+    _stream 的"写入字节数 != 自报长度"检查抓住、抛 OSError；这边没有 Content-Length
+    （chunked 的定义就是长度未知），那道检查的 declared 是 None、根本无从触发，
+    截断唯一的表现形式是 resp.read() 抛 http.client.IncompleteRead。
+    """
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler 的约定命名
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            half = body[: len(body) // 2]
+            # 先报一个比实际发出去的大得多的块长度，再只发一半就撒手：
+            # 客户端读到 EOF 时块还没收齐 → IncompleteRead。
+            self.wfile.write(f"{len(body):x}\r\n".encode())
+            self.wfile.write(half)
+            self.close_connection = True
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    return Handler
+
+
+def test_chunked_truncation_is_an_error_not_a_traceback_and_still_falls_over(
+    tmp_path: Path,
+) -> None:
+    """分块传输截断要走正常失败路径，且**不许打断镜像降级**。
+
+    http.client.IncompleteRead 继承的是 HTTPException，既不是 OSError 也不是
+    URLError（URLError 只包住**建连**阶段；读响应体时 http.client 抛的原样穿出来）。
+    没把它列进 _fetch_one 的捕获元组时，代价远不止一条 traceback 顶替中文错误 ——
+    异常会穿出 `for url in urls` 整个循环，**镜像降级彻底失效**：直连一次分块截断就
+    带走整轮，后面 3 个镜像一个都不会试。而这恰恰是镜像最该出场的场景（跨境链路
+    传到一半被掐）。国内用户看到的是"直连一挂就全挂"，而 lock 里明明配了镜像。
+
+    所以这条用两个源来钉：第一个 chunked 截断，第二个是好的 file:// 源。
+    只断言"没有 traceback"是不够的 —— 那样把 IncompleteRead 改成在循环外捕获、
+    打一行中文再退，同样能过，而镜像照样没试。真正的判据是**文件下到了**。
+    """
+    body = b"z" * 8192
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _make_chunked_truncating_handler(body)
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    good = tmp_path / "mirror"
+    good.mkdir()
+    (good / "c.onnx").write_bytes(body)
+    try:
+        lock = tmp_path / "models.lock.json"
+        lock.write_text(
+            json.dumps(
+                {
+                    "base_url": f"http://127.0.0.1:{server.server_address[1]}",
+                    "mirrors": [good.as_uri()],
+                    "files": [
+                        {
+                            "name": "c.onnx",
+                            "size": len(body),
+                            "sha256": _sha(body),
+                            "required": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        dest = tmp_path / "dest"
+        r = _run("--lock", str(lock), "--dest", str(dest))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert "Traceback" not in r.stderr, f"IncompleteRead 穿出来了：\n{r.stderr}"
+    assert r.returncode == 0, f"镜像降级没兜住分块截断：\n{r.stderr}"
+    assert (dest / "c.onnx").read_bytes() == body
 
 
 def test_truncated_response_keeps_part_for_resume(tmp_path: Path) -> None:
@@ -994,4 +1176,91 @@ def test_lock_sources_match_manifest_sites() -> None:
     assert [lock["base_url"], *lock["mirrors"]] == expected, (
         "lock 的下载源与 manifest.json 的 download.sites 不一致，"
         "改了一边就同步另一边（顺序也要一致：直连优先，镜像兜底）"
+    )
+
+
+# 全仓调用方：凡把本脚本当"下模型"用的可执行入口都要在列。漏一个就等于这条契约
+# 对它不生效，所以下面还有一条断言钉死"每个文件都真的匹配到了调用"。
+# 只收可执行入口，不收文档：README / dev-guide / troubleshooting 里的 `--dest` 示例
+# 是给人手敲的，退出码不喂给任何门禁，强行要求 --strict 只会制造无意义的文档改动。
+_FETCH_CALLERS = (
+    "scripts/build.sh",
+    "scripts/local-ci.sh",
+    "plugins/hermes/install-hermes.sh",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+)
+
+
+def _fetch_invocations(text: str) -> list[tuple[int, str]]:
+    """文件里"调用 fetch_models.py 且指定了 --dest"的行，(行号从 1 起, 原文)。
+
+    整行注释剔掉：注释不执行，也不会被用户复制。用 --dest 当"这是一次调用"的判据，
+    是因为所有真实调用点都显式传它（``MILOCO_MODELS_DEST`` 优先级更低，几个调用方
+    都不敢依赖），而 `FETCH_MODELS=...` 这类赋值、以及只提脚本名的 info 文案都不带。
+    """
+    out = []
+    for i, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        if "fetch_models.py" not in line and "FETCH_MODELS" not in line:
+            continue
+        if "--dest" in line:
+            out.append((i, line))
+    return out
+
+
+def test_every_fetch_caller_matches_its_own_gate_strength() -> None:
+    """调用 fetch_models.py 的两头判据必须同强度：要么带 --strict，要么后面有严格门禁。
+
+    不带 --strict 时"只有可选模型没下到"是退 **0** 的（main 里 failed_optional 不并进
+    failed_required）。所以拿退出码当"齐没齐"唯一信号的调用方，一旦判入口用了
+    `--check --strict` 而补齐时忘了 --strict，整条兜底就静默失效：`if !` 恒不成立，
+    一条告警都不打，而语义去重与 VAD 已经降级了。这正是本 PR 修掉的那个真实缺陷
+    （install-hermes.sh 的下载调用），而 install-hermes 的控制流没有任何自动化覆盖 ——
+    这条契约就是它唯一的网。
+
+    两类合法的例外，都必须自己**结构上**站得住，不接受"我知道我在干什么"：
+
+    1. 退出码被显式丢弃（``|| true``）——install-hermes 拿旁边 checkout 当 file:// 源
+       做本地同步的那一步。源目录缺几个模型是常态，这步本就不做判定，判定交给它后面
+       那道按同一份 lock 复判的门禁。
+    2. **后面**另有一步 ``--check --strict``——ci.yml 刻意把"没拉到"与"拉到的不对"
+       拆成两步（也让不完整状态进不了 actions/cache，因为 save 在门禁之后）。
+
+    第 2 条只认"在后面"，不认"在前面"，这正是本测试的判别力所在：install-hermes 的
+    models_ready 也跑 ``--check --strict``，但它在下载**之前**、判的是要不要进这个分支，
+    下载完之后没有任何复判。把它算成豁免，本 PR 修的那个 bug 就会照旧绿着过。
+    """
+    seen_files = []
+    for rel in _FETCH_CALLERS:
+        path = _ROOT / rel
+        assert path.is_file(), f"{rel} 不存在（挪了位置就同步这里的清单）"
+        text = path.read_text(encoding="utf-8")
+        calls = _fetch_invocations(text)
+        if calls:
+            seen_files.append(rel)
+
+        # 该文件里最后一道 `--check --strict` 的位置：例外 2 要求它在调用**之后**。
+        last_gate = max(
+            (i for i, ln in calls if "--check" in ln and "--strict" in ln), default=-1
+        )
+
+        for lineno, line in calls:
+            if "--strict" in line:
+                continue
+            if "|| true" in line:
+                continue
+            assert lineno < last_gate, (
+                f"{rel}:{lineno} 调用 fetch_models.py 却不带 --strict，"
+                f"退出码也没被丢弃，后面也没有 `--check --strict` 复判：\n"
+                f"    {line.strip()}\n"
+                "只缺可选模型时这行会退 0，而判入口那侧照旧判不齐 —— 兜底静默失效。"
+            )
+
+    # 清单没烂：每个列出的文件都真的还在调 fetch_models.py。否则删掉/改写了调用点，
+    # 上面的循环会空转着绿，这条契约就悄悄不设防了。
+    assert seen_files == list(_FETCH_CALLERS), (
+        f"这些文件已不再调用 fetch_models.py --dest，清单该更新："
+        f"{sorted(set(_FETCH_CALLERS) - set(seen_files))}"
     )

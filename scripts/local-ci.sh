@@ -77,7 +77,10 @@ run_backend_tests() {
         # 够不着），而人手里唯一的线索就是这条命令。给相对路径而非 $models_dir：前半截
         # `scripts/fetch_models.py` 本来就是仓库根相对的，两截同口径才是一条能整体粘贴的
         # 命令；且这个常量里没有空格/引号，不必再考虑印出来要怎么转义。
-        info "  两种都用这条补齐：python3 scripts/fetch_models.py --dest $models_rel"
+        # --strict 也必须跟着印：上面这两行刚说了本告警覆盖"只缺可选模型"，而不带
+        # --strict 的那条命令在这种情况下跑完退 0（可选失败不并进必需），人会以为补好了，
+        # 下次 local-ci 一字不差再报一遍。判据（:66 的 --check --strict）与修法必须同强度。
+        info "  两种都用这条补齐：python3 scripts/fetch_models.py --strict --dest $models_rel"
     fi
     cd "$REPO_ROOT/backend"
     # 关键: 隔离本地 config.json（含 token），与 CI 干净环境对齐

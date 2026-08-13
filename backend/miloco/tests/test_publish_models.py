@@ -261,6 +261,52 @@ def test_upload_aborts_before_touching_release_on_fileset_drift(
     assert not sandbox.wrote_to_release(), f"护栏开火前已经写了 Release: {sandbox.gh_calls()}"
 
 
+@pytest.mark.parametrize(
+    ("lock_names", "dir_names", "expect_in_stderr"),
+    [
+        (["a.onnx", "b.onnx", "c.onnx"], ["a.onnx", "b.onnx"], "c.onnx"),
+        (["a.onnx"], ["a.onnx", "b.onnx"], "b.onnx"),
+        (["det_4C.onnx"], ["det_5C.onnx"], "det_5C.onnx"),
+    ],
+)
+def test_refresh_lock_alone_also_refuses_fileset_drift(
+    tmp_path: Path, lock_names: list[str], dir_names: list[str], expect_in_stderr: str
+) -> None:
+    """``refresh-lock`` 单独跑时护栏也要开火 —— 这是**另一份**护栏。
+
+    脚本里有两处同样的文件集比对：一处在 cmd_upload 里（必须早于 gh release upload，
+    由 test_upload_aborts_before_touching_release_on_fileset_drift 钉住），一处在
+    refresh_lock_from_dir 里。upload 走的是前者、且在那儿就中止了，所以上面那批用例
+    对后者一个字节都碰不到 —— 把 refresh_lock_from_dir 里那 10 行整段删掉，本文件其余
+    用例全绿（实测过）。而 refresh-lock 子命令走的正是后者，且它不经过 cmd_upload：
+
+      · ``refresh-lock <dir>``  直接调 refresh_lock_from_dir；
+      · ``refresh-lock``（不带 dir）先 gh release download 全量到临时目录再调它 ——
+        换代残留正是从这条路进来的（upload 只 --clobber 同名资产，从不删旧的）。
+
+    护栏没了的后果是静默改表：少了就无声缩表（剩下的模型从此不再下发，线上表现是
+    "某天起某功能悄悄降级"，没有任何失败点），多了就以 required=false 收编进 lock。
+    两种都不报错、都会把结果写进磁盘，所以只能靠"退非零 + lock 原样"来钉。
+    """
+    sandbox = _Sandbox(tmp_path, _tiny_lock(lock_names))
+    before = sandbox.lock.read_text(encoding="utf-8")
+    d = _models_dir(tmp_path, dir_names)
+
+    r = sandbox.run("refresh-lock", str(d))
+
+    assert r.returncode != 0, f"护栏没开火: {r.stdout}\n{r.stderr}"
+    assert expect_in_stderr in r.stderr
+    assert "拒绝静默改表" in r.stderr
+    # 核心断言：lock 一个字节都没被改写。少了缩表 / 多了收编都是**写盘**动作，
+    # 只断言退出码的话，"先写后报错"这种半吊子实现照样能骗过去。
+    assert sandbox.lock.read_text(encoding="utf-8") == before, "lock 已被改写"
+    # 逃生口仍在（与 upload 那条同一个环境变量），否则换代根本做不了
+    r2 = sandbox.run("refresh-lock", str(d), MILOCO_MODELS_ALLOW_LOCK_DRIFT="1")
+    assert r2.returncode == 0, r2.stderr
+    got = {f["name"] for f in json.loads(sandbox.lock.read_text(encoding="utf-8"))["files"]}
+    assert got == set(dir_names)
+
+
 def test_upload_survives_any_gh_failure_in_trailing_verify(tmp_path: Path) -> None:
     """upload 收尾那次对账是**故意**非致命的，任何失败都不许打穿它。
 
@@ -375,10 +421,12 @@ def test_refresh_lock_keeps_a_required_entry_required_when_the_key_is_missing(
     必需，没有任何信号提示写漏了），下一次 refresh 才把它静默翻成可选 —— 文件集护栏
     只比名字集合，看不见"同名但少一个键"这种漂移。
 
-    翻面的代价落在唯一一条不带 ``--strict`` 的调用上（install-hermes.sh 那趟联网补齐）：
-    退出码从 1 变成 0，三条 warn 一条不打、安装报成功，用户第一次 perceive 才拿到
-    models_missing。build.sh 与两个 workflow 都带 --strict，所以这条泄漏只出现在
-    **面向用户**的那条路上。
+    翻面的代价落在不看 required 之外那层严格开关的调用上。``--strict`` 会把可选失败
+    并进必需，所以带它的调用（build.sh、两个 workflow、local-ci.sh、install-hermes.sh
+    的门禁与补齐）扛得住这次翻面；扛不住的是**判据里 required 仍然当真**的那些：
+    ``--required-only`` 直接把它跳过不下，不带 --strict 的 ``--check``（ci.yml 那步
+    下载）判绿，感知侧 resource_validator 也据此决定缺了它算不算 PREREQ_MISSING。
+    一个本该必需的模型就这么从"判红"降级成"没人管"，而全程零信号。
 
     反方向一并钉住：显式写了 ``required: false`` 的条目必须原样保留，别为了修这条
     就把所有东西都翻成必需。

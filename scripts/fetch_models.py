@@ -15,7 +15,16 @@
   python3 scripts/fetch_models.py --dest DIR          # 下到指定目录（如 $MILOCO_HOME/models）
   python3 scripts/fetch_models.py --only det_4C.onnx  # 只处理指定文件（可重复）
   python3 scripts/fetch_models.py --required-only     # 跳过可选模型（省 ~25MB）
+  python3 scripts/fetch_models.py --strict            # 可选模型缺失也算失败
   python3 scripts/fetch_models.py --force             # 无条件重下
+
+关于 ``--strict``：判据的两头必须同强度。凡是拿本脚本的**退出码**当"齐没齐"唯一信号的
+调用方，都得跟 ``--check`` 那侧的门禁用同一个强度 —— 否则会出现"用 ``--check --strict``
+判不齐、进了补齐分支、补齐时不带 ``--strict``"这种两头错配：只有可选模型缺失时下载器退
+**0**（主流程里 ``failed_optional`` 不并进 ``failed_required``），调用方的 ``if !`` 恒不
+成立，一条告警都不打就往下走，而语义去重、VAD 已经静默降级了。全仓唯一的例外是
+``.github/workflows/ci.yml``：那里下载与门禁**是分开的两步**，退出码不是成功判据，紧随其后
+的 ``--check --strict`` 才是（见该文件内注释）。
 
 环境变量:
   MILOCO_MODELS_BASE_URL  覆盖下载源（内网镜像 / 离线源）。是**独占替换**而非"排在前面"：
@@ -34,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import sys
@@ -115,6 +125,15 @@ def _check_name(name: str) -> None:
     信任边界本是"lock 在仓库里"，但 ``--lock`` 可以指任意文件，而
     ``Path(dest) / "../../evil"`` 会静静逃出 dest。多一句守卫比多一次事故便宜。
     """
+    # 类型先判：本函数与 _check_spec 的其余守卫同处一个 try，约定是"输入不合法一律
+    # ValueError → 一行中文 + 退 2"。而 name 不是字符串时，`"/" in name` 对 list/dict
+    # 这类支持 in 的类型不报错、径直落到 `name.startswith` 才抛 AttributeError ——
+    # 那个异常不在读 lock 的捕获元组里，于是穿出去变成 traceback + 退 **1**。退 1 在
+    # 本脚本的契约里是"必需模型缺失，重试可能有用"（install-hermes.sh 的四分支门禁正是
+    # 这么读的），于是一个手写坏了的 lock 会把用户送进一个重试永远修不好的循环。
+    # 与 _check_spec 里 size / required / sha256 那几条 isinstance 守卫同口径。
+    if not isinstance(name, str):
+        raise ValueError(f"lock 里的文件名必须是字符串：{name!r}")
     if not name or "/" in name or "\\" in name or name.startswith("."):
         raise ValueError(f"lock 里的文件名不合法（不能为空 / 含路径分隔符 / 以点开头）：{name!r}")
 
@@ -408,7 +427,21 @@ def _fetch_one(
                     # 截断而非删除：删掉目录项后 flock 就脱靶，退避 sleep 的这 1-2s
                     # 里别的进程会新建同名 inode 并抢锁成功，两边交错写同一个 .part。
                     _discard_part(part)
-                except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                # http.client.HTTPException 必须在列：它直接继承 Exception，既不是
+                # OSError 也不是 URLError（URLError 只包住 **建连** 阶段的错误，读响应体
+                # 时 http.client 抛的原样穿出来）。最常撞上的是 IncompleteRead ——
+                # 分块传输（Transfer-Encoding: chunked）下服务端中途断开，此时响应没有
+                # Content-Length，_stream 里"写入字节数 != 自报长度"那道检查根本无从触发
+                # （declared 是 None），截断唯一的表现形式就是 resp.read() 抛 IncompleteRead。
+                # 漏掉它的代价不止是一条 traceback 顶替中文错误：异常会穿出
+                # `for url in urls` 整个循环，**镜像降级彻底失效** —— 直连一次分块截断
+                # 就带走整轮，剩下 3 个镜像一个都不会试。而这恰恰是镜像最该出场的场景。
+                except (
+                    urllib.error.URLError,
+                    OSError,
+                    TimeoutError,
+                    http.client.HTTPException,
+                ) as exc:
                     if isinstance(exc, urllib.error.HTTPError) and exc.code == 416:
                         # 416 = 续传起点越过了资产末尾。这是**我们自己攒下的状态**造成的
                         # 失败，和下面那些外部原因不同：保住 part 只会让每次重试、每个源、
@@ -493,7 +526,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--strict",
         action="store_true",
-        help="可选模型缺失也算失败（打 release tarball 时用：终端用户要拿到完整能力）",
+        help="可选模型缺失也算失败：凡把本命令退出码当「齐没齐」判据的调用方都该带上，"
+        "否则只缺可选模型时会拿到退出码 0，而门禁那边照旧判不齐",
     )
     ap.add_argument("--quiet", action="store_true", help="静默（仍会打印错误）")
     args = ap.parse_args(argv)
@@ -527,9 +561,17 @@ def main(argv: list[str] | None = None) -> int:
                 (bad_required if _required(spec) else bad_optional).append(spec["name"])
         blocking = bad_required + (bad_optional if args.strict else [])
         if blocking:
+            # 印出来的补齐命令必须复刻本次判红的判据，所以 --strict 要跟着透传：本次是
+            # --check --strict 判红、而 blocking 里只有可选模型时，不带 --strict 的那条
+            # 命令跑完退 0（可选失败不并进 failed_required），用户看到成功的退出码，
+            # 而下一次门禁一字不差地再红一遍 —— 他手上这条命令就是唯一线索，却恰好是
+            # 唯一验证不出问题的那条。调用方（local-ci.sh / install-hermes.sh）的同类
+            # 提示同理，都跟着门禁的强度走。
+            fix = "python3 scripts/fetch_models.py"
+            if args.strict:
+                fix += " --strict"
             print(
-                f"缺少模型：{', '.join(blocking)}\n"
-                f"补齐：python3 scripts/fetch_models.py --dest {dest}",
+                f"缺少模型：{', '.join(blocking)}\n补齐：{fix} --dest {dest}",
                 file=sys.stderr,
             )
             return 1

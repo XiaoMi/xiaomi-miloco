@@ -141,9 +141,9 @@ for p in files:
         # （那边缺键 fail-closed 判必需）。两边默认值相反的话，「手工补 lock 时漏写
         # required」会被下一次 refresh 静默翻面：漏写的那阵子一切是绿的（下载器一直
         # 当它必需，没有任何信号），而上面那道护栏只比文件名集合，看不见「同名但少一
-        # 个键」这种漂移，于是下一次 upload 就把它写成可选。翻面之后 install-hermes.sh
-        # 那趟不带 --strict 的补齐从退 1 变成退 0：三条 warn 一条不打、安装报成功，
-        # 用户第一次 perceive 才拿到 models_missing；而 lock 说可选、resource_validator
+        # 个键」这种漂移，于是下一次 upload 就把它写成可选。翻面之后，凡判据里 required
+        # 仍然当真的地方都跟着松掉：--required-only 直接跳过不下，不带 --strict 的
+        # --check（ci.yml 那步下载）判绿，而 lock 说可选、resource_validator
         # 里仍是硬编码必需 —— 恰好是护栏那句「新增项记得手工把 required / desc 与
         # resource_validator.py 对齐」点名的那个字段，自己分了家。
         # 真正新增的文件仍默认 false —— 那条路径已由护栏显式放行并要求人工对齐。
@@ -197,9 +197,12 @@ cmd_upload() {
     refresh_lock_from_dir "$dir"
 
     # upload 只 --clobber 同名资产，从不删除 Release 上已有的其它文件。换代改名
-    # （det_4C.onnx → det_5C.onnx）后旧资产会一直挂在那儿：本地看不见、lock 里没有，
-    # 但下次 refresh-lock（不带 dir，从 Release 拉全量）会把它重新收进 lock。
-    # 这里立刻对一次账，把这种残留摆到上传者面前，而不是留给几个月后的人。
+    # （det_4C.onnx → det_5C.onnx）后旧资产会一直挂在那儿：本地看不见、lock 里没有。
+    # 上面那道文件集护栏挡住了它被静默收编（不带 dir 的 refresh-lock 会把 Release 全量
+    # 拉下来交给 refresh_lock_from_dir，多出来的这个立刻判红、要 ALLOW_LOCK_DRIFT=1 才
+    # 放行），但挡不住它继续挂着 —— 而它挂着的代价不是零：从此每次 refresh-lock 都要
+    # 先撞一次这道红墙，谁也说不清那个名字该不该在。所以这里立刻对一次账，把残留摆到
+    # 上传者面前（此刻他还知道自己刚换了什么），而不是留给几个月后的人。
     log ""
     log "对账 Release 资产与刷新后的 lock ..."
     if ! cmd_verify; then
@@ -247,7 +250,9 @@ errors, warns = [], []
 for name in sorted(set(want) - set(have)):
     errors.append(f"{name}: lock 里有、Release 上没有 —— 所有构建都会在这个文件上 404")
 for name in sorted(set(have) - set(want)):
-    # upload 不删旧资产，换代改名后老文件会一直留着，且会被 refresh-lock 重新收编。
+    # upload 不删旧资产，换代改名后老文件会一直留着。收编那条路已被 refresh_lock_from_dir
+    # 的文件集护栏堵上（多一个就判红），所以这里判 error 而非 warn 是有出口的：不清掉它，
+    # 往后每次不带 dir 的 refresh-lock 都会被同一个名字挡住。
     errors.append(
         f"{name}: Release 上有、lock 里没有 —— 换代残留？确认无用后删除："
         f"\n      gh release delete-asset {tag} {name} --repo {repo}"
