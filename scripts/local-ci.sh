@@ -67,7 +67,26 @@ run_backend_tests() {
     # --strict：与 ci.yml 的门禁同强度。不加的话可选模型（bge / VAD）缺失走"只降级不
     # 阻塞"分支、退出码 0，本地一声不吭，而 CI 那边 5 个模型齐全跑的是 EventEmbedder
     # 真实向量那条路径——两边测的不是同一个东西，"已对齐 CI"的判断就是假的。
-    if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --strict --quiet --dest "$models_dir" >/dev/null 2>&1; then
+    # 退出码要分 1 / 2 两档，且 2 那档必须把 stderr 放出来。fetch_models.py 的契约里
+    # 1 = 模型没齐（补齐命令有意义），2 = lock 本身坏了 / 用法错了（补齐命令**永远**无效）。
+    # 而 --check 这一侧的 2 不是理论分支：lock 里 JSON 解析不了、sha256 或 size 字段不对，
+    # 都在进 --check 之前就退 2 —— 最常见的成因正是合并后 lock 里留着冲突标记
+    # （test_publish_models.py 点名"合并完先跑一次 refresh-lock 正是最容易撞上冲突标记的
+    # 路径"）。旧写法把这一档和"模型没下"合成一句"未就绪 → 用这条补齐"，而
+    # >/dev/null 2>&1 又把 stderr 上唯一说明真因的那行一并吞掉：人照抄补齐命令，它同样
+    # 退 2，屏幕上还是那三行 —— 唯一的线索被脚本自己删了。所以这一档改印 stderr 原文。
+    local models_err rc line
+    rc=0
+    models_err=$(python3 "$SCRIPT_DIR/fetch_models.py" --check --strict --quiet --dest "$models_dir" 2>&1 >/dev/null) || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        info "感知模型校验没能进行：scripts/models.lock.json 不可用 —— 不是「模型没下」，补齐命令同样会失败"
+        # 逐行转发而不是整块 echo：stderr 可能多行，逐行走 info 才都带上前缀与缩进，
+        # 归属关系一眼可见（下面那条修法提示用的也是两格缩进）。
+        if [ -n "$models_err" ]; then
+            while IFS= read -r line; do info "  $line"; done <<<"$models_err"
+        fi
+        info "  修法：还原 lock（git checkout -- scripts/models.lock.json），或重跑 scripts/publish_models.sh refresh-lock 重新生成"
+    elif [ "$rc" -ne 0 ]; then
         # 文案要覆盖 --strict 实际命中的两种情况：只说 requires_models 的话，"只缺
         # 可选模型"时这条会打出来、而 test_deep_sort_v12 一条没 skip，读的人就把它
         # 归档成噪音，下次必需模型真缺时也拦不住人了。
@@ -85,7 +104,7 @@ run_backend_tests() {
         # 用户名带空格就中招），转义自动跟上，而不是等着谁想起来补。
         # --strict 也必须跟着印：上面这两行刚说了本告警覆盖"只缺可选模型"，而不带
         # --strict 的那条命令在这种情况下跑完退 0（可选失败不并进必需），人会以为补好了，
-        # 下次 local-ci 一字不差再报一遍。判据（:66 的 --check --strict）与修法必须同强度。
+        # 下次 local-ci 一字不差再报一遍。判据（上面那次 --check --strict）与修法必须同强度。
         info "  两种都用这条补齐：python3 scripts/fetch_models.py --strict --dest $(_q "$models_rel")"
     fi
     cd "$REPO_ROOT/backend"

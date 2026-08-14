@@ -553,6 +553,32 @@ def main(argv: list[str] | None = None) -> int:
 
     dest = Path(args.dest or os.environ.get("MILOCO_MODELS_DEST") or _DEFAULT_DEST).expanduser()
 
+    # 与本函数里读 lock、_select 那两段同构：所有"输入不合法"都收敛成退 2，
+    # 不许有异常穿出去变成 traceback + 退 1。
+    #
+    # 位置在 --check **之前**：源合不合法属于"这份 lock 坏没坏"，不属于"要不要下载"。
+    # 放在后面的话，同一份 base_url 写成裸路径 /mnt/nas/models 的 lock，配一个已经齐了的
+    # 目录，会 `--check --strict` 退 0、走下载退 2 —— 而 --check 是全仓四道门禁共用的
+    # "齐没齐"判据（models_ready、ci.yml 的复判、local-ci.sh 的提示、--post-install 印给
+    # 用户的那条命令），它说 OK 就必须意味着这份 lock 真的能用。可观察的后果是本地与 CI
+    # 结论分裂：local-ci.sh 那步一路绿，推上去 CI 的 download 立刻退 2 红，而两边读的是
+    # 同一份文件。这与 _check_spec 里 size 那段论证的是同一类失效（"校验流程本身压根不读
+    # size：没有这道拦截，--check --strict 会对着一份坏 lock 照常亮绿"）—— size 那条早
+    # 拦住了，源这条没有。
+    #
+    # 不会误伤"离线机器"：env 换源时 _sources 直接返回那一个源、根本不看 lock 里的
+    # base_url（独占替换），所以内网/离线的正常用法一如既往。而 lock 是 publish_models.sh
+    # refresh-lock 的生成物，base_url 恒被写成 release 地址 —— 源为空或不是合法 URL 的
+    # lock 没有"合法但特殊"的解释，就是坏了。
+    try:
+        urls = _sources(lock)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if not urls:
+        print("lock 里没有可用下载源（base_url / mirrors 均为空）", file=sys.stderr)
+        return 2
+
     if args.check:
         _log(f"校验模型目录：{dest}", quiet=args.quiet)
         bad_required, bad_optional = [], []
@@ -623,17 +649,6 @@ def main(argv: list[str] | None = None) -> int:
         if bad_optional:
             _log(f"  可选模型缺失（对应功能降级，不阻塞）：{', '.join(bad_optional)}", quiet=args.quiet)
         return 0
-
-    # 与本函数里读 lock、_select 那两段同构：所有"输入不合法"都收敛成退 2，
-    # 不许有异常穿出去变成 traceback + 退 1。
-    try:
-        urls = _sources(lock)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    if not urls:
-        print("lock 里没有可用下载源（base_url / mirrors 均为空）", file=sys.stderr)
-        return 2
 
     try:
         dest.mkdir(parents=True, exist_ok=True)

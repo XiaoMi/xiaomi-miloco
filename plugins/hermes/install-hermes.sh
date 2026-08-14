@@ -838,14 +838,36 @@ elif [ -n "$FETCH_MODELS" ]; then
   # 其余下载调用点（build.sh、release.yml）都带 --strict；local-ci.sh 与 models_ready
   # 跑的是 --check --strict，属门禁不属下载。只有这里漏了。口径由
   # test_every_fetch_caller_matches_its_own_gate_strength 钉住，改这一带先看那条。
-  if ! "$PYTHON" "$FETCH_MODELS" --strict --dest "$MILOCO_HOME/models"; then
+  # 退出码分 1 / 2 两档不是装饰：fetch_models.py 顶部那份契约里，1 = 必需模型没下到
+  # （换网络 / 换源 / 稍后重试**有意义**），2 = 用法或 lock 本身坏了（重试**永远没用**）。
+  # 那份注释点名的消费者就是这里 —— 而 `if !` 只分零与非零，两档落进同一支，用户拿到
+  # 的唯一线索会把他往完全相反的方向指。
+  #
+  # 走一遍：有人为了让机器走内网 NAS，把 models.lock.json 的 base_url 改成
+  # /mnt/nas/miloco-models（裸路径在 MILOCO_MODELS_BASE_URL 那侧确实是合法写法，同一份
+  # 心智模型顺手写进 lock 很自然，而 lock 那侧刻意不兜底）。此时 _sources 退 2，stderr
+  # 上那行"lock 里的下载源不是合法 URL"紧接着被下面三行 warn 盖住，人看到的是
+  # "下载失败（网络？）"+"重跑" —— 于是换 WiFi、挂代理、重跑五次，每次都退 2。
+  #
+  # 所以按 rc 分流。用 `|| rc=$?` 而不是 `if !`：本段在 top-level，文件头是
+  # set -euo pipefail，非零退出码不接住会直接终止整个安装。
+  rc=0
+  "$PYTHON" "$FETCH_MODELS" --strict --dest "$MILOCO_HOME/models" || rc=$?
+  # 两支共用的那条命令：带上解释器，因为本文件在 git 里是 100644、没有可执行位，裸路径
+  # 原样粘贴会 Permission denied（退 126），而这个新错误跟刚才的失败毫无关系，只会把人往
+  # "权限 / 文件损坏"的方向带偏。用户此刻正处在失败状态，这行是他手上唯一的线索，大概率
+  # 整行复制。与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
+  fetch_cmd="$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")"
+  if [ "$rc" -eq 2 ]; then
+    warn "感知模型下载没能开始：scripts/models.lock.json 不可用（具体原因见上面的报错）"
+    warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
+    # 不给"重跑"当主修法：这一档重跑必然再退 2。还原 lock 排在前面是因为它一步到位，
+    # 而且 lock 是生成物、手改它本来就是这一档最常见的成因。
+    warn "这不是网络问题，重跑无效 —— 先修好 lock（在 git checkout 里可 git checkout -- scripts/models.lock.json 还原），再跑：${fetch_cmd}"
+  elif [ "$rc" -ne 0 ]; then
     warn "感知模型下载失败（网络？）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-    # 带上解释器：本文件在 git 里是 100644、没有可执行位，裸路径原样粘贴会 Permission
-    # denied（退 126），而这个新错误跟刚才的下载失败毫无关系，只会把人往"权限 / 文件
-    # 损坏"的方向带偏。用户此刻正处在失败状态，这行是他手上唯一的线索，大概率整行复制。
-    # 与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
-    warn "修法：重跑 $(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")，或手动放置模型文件"
+    warn "修法：重跑 ${fetch_cmd}，或手动放置模型文件"
   fi
 else
   warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"

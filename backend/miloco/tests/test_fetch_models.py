@@ -211,6 +211,96 @@ def test_download_and_check_agree_on_a_self_contradictory_lock(tmp_path: Path) -
     )
 
 
+@pytest.mark.parametrize(
+    ("why", "base_url"),
+    [
+        # 想让机器走内网 NAS 的人最容易写出来的那个：裸路径在 MILOCO_MODELS_BASE_URL
+        # 那侧确实合法，同一份心智模型顺手写进 lock 很自然，而 lock 那侧刻意不兜底。
+        ("裸路径", "/mnt/nas/miloco-models"),
+        ("源全空", ""),
+        ("非法 scheme", "ftp://example.invalid/models"),
+    ],
+)
+def test_check_refuses_a_lock_whose_sources_are_unusable(
+    tmp_path: Path, why: str, base_url: str
+) -> None:
+    """源坏掉的 lock，``--check`` 也必须退 2 —— 与走下载那条路同一个结论。
+
+    这是上面那条 size 用例同一类失效的另一半："校验流程本身压根不读它"。源合不合法属于
+    "这份 lock 坏没坏"，不属于"要不要下载"，可它原先只在 --check **之后**才校验：于是
+    同一份坏 lock 配一个已经齐了的目录，``--check --strict`` 退 0、走下载退 2。
+
+    这一分家比看上去更贵，因为 --check 是全仓四道门禁共用的"齐没齐"判据
+    （install-hermes 的 models_ready、ci.yml 的复判、local-ci.sh 的提示、--post-install
+    印给用户的那条命令）。可观察的后果是本地与 CI 结论对立：local-ci.sh 那步一路绿，
+    推上去 CI 的 download 立刻退 2 判红，而两边读的是同一份文件、同一个脚本。
+
+    把校验挪回 ``if args.check:`` 之后，这三个参数化用例一起红。
+    """
+    body = b"z" * 256
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "base_url": base_url,
+                "mirrors": [],
+                "files": [
+                    {"name": "m.onnx", "size": len(body), "sha256": _sha(body), "required": True}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # 目标目录刻意**已经齐了**：否则 --check 会因为"缺文件"退 1，测不出它读没读源。
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "m.onnx").write_bytes(body)
+
+    checked = _run("--lock", str(lock), "--check", "--strict", "--dest", str(dest))
+    got = _run("--lock", str(lock), "--dest", str(dest))
+    assert (checked.returncode, got.returncode) == (2, 2), (
+        f"{why}：--check 退 {checked.returncode}、下载退 {got.returncode} —— "
+        "同一份坏 lock 给出两个结论，而 --check 是四道门禁共用的判据。\n"
+        f"--check stderr:\n{checked.stderr}\n下载 stderr:\n{got.stderr}"
+    )
+
+
+def test_env_source_still_bypasses_a_broken_lock(tmp_path: Path) -> None:
+    """上一条不许误伤离线机器：env 换源时根本不看 lock 里的 base_url。
+
+    ``MILOCO_MODELS_BASE_URL`` 是**独占**替换（见 _sources），所以内网 / 离线的正常
+    用法一如既往 —— 哪怕手上这份 lock 的 base_url 已经烂到走下载必退 2。少了这条，
+    上一条用例的"最省事修法"就是把源校验做得更早更狠，而那会把离线机器一起拦死。
+    """
+    body = b"z" * 256
+    src = tmp_path / "release"
+    src.mkdir()
+    (src / "m.onnx").write_bytes(body)
+
+    lock = tmp_path / "models.lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "base_url": "/mnt/nas/miloco-models",  # ← 坏的，且刻意不修
+                "mirrors": [],
+                "files": [
+                    {"name": "m.onnx", "size": len(body), "sha256": _sha(body), "required": True}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dest = tmp_path / "dest"
+    env = {"MILOCO_MODELS_BASE_URL": str(src)}  # 裸路径在 env 这侧是合法写法
+
+    got = _run("--lock", str(lock), "--dest", str(dest), env=env)
+    assert got.returncode == 0, f"env 换源被坏 lock 拖累了：\n{got.stderr}"
+    assert (dest / "m.onnx").read_bytes() == body
+
+    checked = _run("--lock", str(lock), "--check", "--strict", "--dest", str(dest), env=env)
+    assert checked.returncode == 0, checked.stderr
+
+
 def test_fetch_downloads_and_verifies(fake_release: tuple[Path, Path, Path]) -> None:
     lock, _src, dest = fake_release
     r = _run("--lock", str(lock), "--dest", str(dest))
@@ -1446,12 +1536,27 @@ _FETCH_CALLERS = (
 # 穷尽性这条扫不到、强度契约那条不在清单里也走不到，两条一起绿。
 # .yaml 也要收：_gate_violations 已按 (".yml", ".yaml") 认 workflow，同一份代码里对
 # "什么算 workflow YAML"给两个答案的话，*.yaml 命名的新 workflow 就是盲区。
+#
+# composite action（.github/actions/*/action.yml）同理要收：它跑的是 `runs.steps[].run`，
+# 与 workflow step 是同一种 shell，被 `uses:` 引进任意 job 后没有任何东西再复判一次
+# —— 本仓库现成就有两个（install-opengrep、setup-all），而 setup-all 正是"把各语言依赖
+# 一次装齐"的那个，往它里面补一句下载模型是最顺手的去处。今天两个都不调 fetch_models.py，
+# 所以这两条 glob 现在扫不出新成员（清单仍是 5 个）；加它们是为了那"顺手的去处"被用上
+# 的那天不静默豁免。
+# 注意强度：_gate_violations 的豁免 2（"后面紧跟一道 --check --strict 复判"）只在同一个
+# job 内成立，而 composite action 没有 jobs: 这一层，_yaml_job_starts 返回空、job < 0
+# 走 fail-closed —— 也就是 composite action 里的下载调用一律必须自带 --strict。这是刻意
+# 的：它会被谁 uses 进来、后面有没有复判，在这个文件里根本看不出来。真撞上时不要来这里
+# 松判据，直接给那句调用补 --strict（下载器"只有可选模型没下到"退 0，不带 --strict 的
+# 退出码判不出降级），代价一个词。
 _FETCH_CALLER_GLOBS = (
     "scripts/**/*.sh",
     "plugins/**/*.sh",
     ".ci/**/*.sh",
     ".github/workflows/*.yml",
     ".github/workflows/*.yaml",
+    ".github/actions/**/action.yml",
+    ".github/actions/**/action.yaml",
 )
 
 
@@ -1743,6 +1848,37 @@ def test_a_gate_in_another_yaml_job_is_not_an_exemption() -> None:
     )
 
 
+def test_a_composite_action_gets_no_same_job_exemption() -> None:
+    """composite action 没有 job 这一层，例外 2 在它里面一律不成立。
+
+    例外 2 的全部依据是"同一个 job 内 run: 步骤顺序执行"，而它靠 _yaml_job_starts 找
+    ``jobs:`` 来划边界。composite action（.github/actions/*/action.yml）的顶层是
+    ``runs.steps``，没有 ``jobs:`` —— 于是 job < 0，走 fail-closed，下面这份"调用在上、
+    门禁在下"的样本仍算违规。这不是漏判，是刻意的：一个 action 被谁 uses 进来、进来之后
+    调用方那一侧还有没有别的步骤动同一个目录，在这个文件里根本看不出来，同文件的先后
+    因此推不出同一次执行里的先后。
+
+    翻面路径很自然：setup-all 就是"把各语言依赖一次装齐"的那个 action，往里面加一句
+    下载模型是最顺手的去处。真撞上时正确的做法是给那句补 --strict（代价一个词），
+    不是回来给 _gate_violations 加一条"composite 也算同 job"的豁免。
+
+    与上面两条共用同一份判据：三条一起看，例外 2 的边界是"同一个 jobs: 块内"，
+    多一寸少一寸都有一条红。
+    """
+    composite = """\
+name: setup-all
+runs:
+  using: composite
+  steps:
+    - run: python3 scripts/fetch_models.py --dest "$D"
+    - run: python3 scripts/fetch_models.py --check --strict --dest "$D"
+"""
+    assert _gate_violations(".github/actions/setup-all/action.yml", composite), (
+        "composite action 里「调用在上、门禁在下」被当成同 job 豁免了 —— 而 action 的"
+        "执行上下文由调用方决定，同文件先后推不出同一次执行里的先后。"
+    )
+
+
 def test_fetch_caller_list_is_exhaustive() -> None:
     """按 glob 扫全仓，调用方集合必须与 _FETCH_CALLERS 完全相等。
 
@@ -1763,6 +1899,64 @@ def test_fetch_caller_list_is_exhaustive() -> None:
     )
 
 
+# 退出码那一轴。三档契约（0 = 齐了；1 = 必需模型没下到，换网络 / 换源 / 稍后重试**有
+# 意义**；2 = 用法错了或 lock 本身坏了，重试**永远**无效）只在调用方真的分辨时才成立。
+# 要求谁分辨，看的不是它调得多勤，而是它拿退出码干什么：把退出码翻译成一句给人看的修法
+# 时，1 与 2 的修法恰好相反 —— 合成一支就等于在 lock 坏掉时让人去换 WiFi、挂代理、重跑，
+# 而这一档每次重试都必然再退同一个 2，屏幕上一字不变，人手里唯一的线索指着反方向。
+_EXIT_CODE_AWARE_CALLERS = (
+    "plugins/hermes/install-hermes.sh",
+    "scripts/local-ci.sh",
+)
+
+# 其余调用点不要求分辨，理由逐个记下来：不记的话，下一个人看到的只是"有的分有的不分"，
+# 要么照着错的一边抄，要么把这条契约整条当噪音删掉。
+_EXIT_CODE_BLIND_CALLERS = {
+    "scripts/build.sh": "只印中性的「模型未就绪」+ exit 1，既不声称成因也不给修法；"
+    "真因就在 stderr 上一行，且这是维护者 / CI 语境",
+    ".github/workflows/ci.yml": "run: 步骤直接判红，日志里 stderr 原样可见，"
+    "没有任何一句话替用户解释成因",
+    ".github/workflows/release.yml": "同 ci.yml",
+}
+
+
+def test_callers_that_turn_the_exit_code_into_advice_distinguish_2() -> None:
+    """把退出码翻成修法的调用点必须分辨 2；不翻的逐个记明理由。
+
+    分类表要先穷尽 —— 新调用方落不进任何一边就红在第一条断言上，作者被迫做一次
+    "它到底替用户解释不解释成因"的判断，而不是默认继承旁边那个的写法。
+
+    形态上钉两件事：``|| rc=$?`` 与 ``-eq 2``。前者不是风格，是必需 —— 两个文件头都是
+    ``set -euo pipefail``，非零退出码不显式接住会直接终止整个脚本（install-hermes 那次
+    是终止整个安装）；``if ! cmd`` 虽然也能接住，但它把 1 与 2 压成同一支，正是这条要拦
+    的东西。判据落在文件级：两个文件各自只有一处这样的分流，任一处退回 ``if !`` 就红在
+    对应那一行。代价是同一文件里**再**加一个不分流的调用点它看不见 —— 那一层由上面的
+    穷尽性扫描 + 强度契约兜着，这里不重复造。
+    """
+    classified = set(_EXIT_CODE_AWARE_CALLERS) | set(_EXIT_CODE_BLIND_CALLERS)
+    assert not set(_EXIT_CODE_AWARE_CALLERS) & set(_EXIT_CODE_BLIND_CALLERS), (
+        "同一个调用方同时出现在两张表里，判据自相矛盾。"
+    )
+    assert classified == set(_FETCH_CALLERS), (
+        "调用方没有全部分类 —— 未分类的那个既不被要求分辨 2，也没留下不必分辨的理由：\n"
+        f"  未分类：{sorted(set(_FETCH_CALLERS) - classified)}\n"
+        f"  表里有但已不是调用方：{sorted(classified - set(_FETCH_CALLERS))}"
+    )
+
+    for rel in _EXIT_CODE_AWARE_CALLERS:
+        text = (_ROOT / rel).read_text(encoding="utf-8")
+        assert "|| rc=$?" in text, (
+            f"{rel} 没有显式接住 fetch_models.py 的退出码。文件头是 set -euo pipefail，"
+            "非零退出码不接住会直接终止脚本；用 `if !` 接住则把 1（重试有意义）与 "
+            "2（重试永远无效）压成同一支。"
+        )
+        assert '-eq 2' in text, (
+            f"{rel} 不再分辨退出码 2：lock 坏掉（JSON 解析不了 / sha256 / size 字段不对 / "
+            "下载源不是合法 URL，最常见的成因是合并后 lock 里留着冲突标记）时，用户会拿到"
+            "一句「网络？重跑」——而这一档重跑必然再退 2，一模一样。"
+        )
+
+
 def test_caller_scan_reaches_nested_dirs_and_yaml_workflows(tmp_path: Path) -> None:
     """扫描范围要真的宽于清单：嵌套目录与 ``*.yaml`` 都不许是盲区。
 
@@ -1774,8 +1968,11 @@ def test_caller_scan_reaches_nested_dirs_and_yaml_workflows(tmp_path: Path) -> N
         补齐模型是它迟早要做的事，也是最可能新增调用的地方
       · ``.ci/warm-models.sh`` —— CI 辅助脚本，整个目录原先都不在扫描范围里
       · ``.github/workflows/nightly.yaml`` —— 判定函数认 .yaml，glob 却只收 .yml
+      · ``.github/actions/setup-all/action.yml`` —— composite action，整个 .github/actions/
+        目录原先都不在扫描范围里；它的 ``runs.steps[].run`` 与 workflow step 是同一种
+        shell，被 ``uses:`` 引进任意 job 后没有任何东西再复判一次
 
-    三个都不带 --strict，也就是说漏掉任何一个，等于放走一个"只拉到半套模型也退 0"的
+    四个都不带 --strict，也就是说漏掉任何一个，等于放走一个"只拉到半套模型也退 0"的
     调用点，正是本 PR 反复在关的那类洞。把 glob 改回一层这条即红。
     """
     call = 'python3 "$ROOT/scripts/fetch_models.py" --dest "$D"\n'
@@ -1783,6 +1980,7 @@ def test_caller_scan_reaches_nested_dirs_and_yaml_workflows(tmp_path: Path) -> N
         "plugins/hermes/scripts/install.sh": call,
         ".ci/warm-models.sh": call,
         ".github/workflows/nightly.yaml": f"jobs:\n  warm:\n    steps:\n      - run: {call}",
+        ".github/actions/setup-all/action.yml": f"runs:\n  using: composite\n  steps:\n    - run: {call}",
         # 顺带确认收窄前就能扫到的那两层没有被 ** 改写掉语义
         "scripts/build.sh": call,
     }
