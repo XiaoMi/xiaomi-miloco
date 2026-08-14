@@ -560,7 +560,10 @@ def test_check_prints_a_fix_command_that_resolves_where_it_was_printed(
     assert r.returncode == 1, r.stderr
 
     line = next(ln for ln in r.stderr.splitlines() if ln.startswith("补齐："))
-    script = line.removeprefix("补齐：").split()[1]
+    # 按 shell 词法切，不用 str.split()：后者对"路径带空格且已 quote"会把一个词切成两半，
+    # 于是恰好在需要它报警的那条轴上（见 test_fix_command_survives_a_repo_path_with_spaces）
+    # 取到半截路径、断言随之失真。
+    script = shlex.split(line.removeprefix("补齐："))[1]
 
     assert (elsewhere / script).is_file(), (
         f"补齐命令里的脚本路径，在印出它的工作目录（{elsewhere}）下解析不到：\n"
@@ -638,6 +641,101 @@ def test_fix_command_stays_plain_when_nothing_was_narrowed(
     assert "--only" not in line and "--required-only" not in line, (
         f"没缩小过范围，补齐命令却带上了选择集参数：\n    {line}"
     )
+    # 换源变量同理，也在这条里一并配对：没设它时印出个空值前缀
+    # （`MILOCO_MODELS_BASE_URL= python3 ...`）不是无害噪声 —— 那是**空串**换源，
+    # 而空串在 _sources 里走的是"env 未设"分支还是"源列表为空"分支，取决于实现细节，
+    # 用户照抄跑出来的行为未必与本次判定相同。
+    assert "MILOCO_MODELS_BASE_URL" not in line, (
+        f"没设换源变量，补齐命令却带上了它：\n    {line}"
+    )
+
+
+def test_fix_command_survives_a_repo_path_with_spaces(
+    fake_release: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    """clone 落在带空格的目录下时，整行粘回 shell 也得能跑。
+
+    不是假想：macOS 的 ``~/Library/Mobile Documents/``、用户名带空格的 home 都会踩到。
+    裸插值的话 shell 从空格处把命令切开，用户看到的是 ``can't open file '/Users/li'``
+    —— 一个与"模型不齐"毫无关系的新错误，而这条提示存在的全部意义就是让人别再自己
+    琢磨下一步。
+
+    所以这条**真的把印出来的那行交给 bash 跑**，而不是做词法上的等价断言：要证的命题
+    就是"粘回去能跑"，只有跑一遍能证。把开头两截的 shlex.quote 去掉即红。
+    """
+    lock, _src, _dest = fake_release
+    script = tmp_path / "li ming" / "my repo" / "scripts" / "fetch_models.py"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(_SCRIPT, script)
+    dest = tmp_path / "li ming" / "models dir"
+    dest.mkdir()
+
+    r = subprocess.run(
+        [sys.executable, str(script), "--lock", str(lock), "--dest", str(dest), "--check"],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+    )
+    assert r.returncode == 1, r.stderr
+    cmd = next(ln for ln in r.stderr.splitlines() if ln.startswith("补齐：")).removeprefix(
+        "补齐："
+    )
+
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env=_clean_env())
+    assert run.returncode == 0, (
+        f"补齐命令粘回 shell 跑不起来（rc={run.returncode}）：\n"
+        f"    {cmd}\n"
+        f"  stderr: {run.stderr.strip()}"
+    )
+    assert (dest / "req.onnx").read_bytes() == _REQUIRED
+
+
+def test_fix_command_carries_the_source_override_it_was_judged_with(
+    fake_release: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    """换源变量也要透传：印出来的命令必须跑在做出本次判定的那个源上。
+
+    与 ``--lock`` 同一类"印的是另一次运行"，但后果更隐蔽：不带前缀那条走的是 lock 里的
+    公网源，真离线的等 4 个源各退避重试一轮再退 1，内网有出口的则下载**成功** —— 请求
+    悄悄出了公网，正是这个变量存在理由的反面，且没有任何人收到信号。它一贯以一次性前缀
+    写法给出（README 与 PR 描述的示例都是），并不在用户当前 shell 里，照抄那条命令等于
+    把它丢了。
+
+    判别力靠"只有换源那边有货"：lock 的 base_url 指向的目录整个删掉，于是丢了前缀的
+    命令必然失败。顺带用带空格的路径钉死这个值同样要 quote。
+    """
+    lock, src, dest = fake_release
+    dest.mkdir()
+    override = tmp_path / "nas mirror"
+    override.mkdir()
+    shutil.copy2(src / "req.onnx", override / "req.onnx")
+    shutil.copy2(src / "opt.onnx", override / "opt.onnx")
+    shutil.rmtree(src)  # lock 自带的源就此失效：能拉到就只能是因为前缀带上了
+
+    r = _run(
+        "--lock",
+        str(lock),
+        "--dest",
+        str(dest),
+        "--check",
+        env={"MILOCO_MODELS_BASE_URL": str(override)},
+    )
+    assert r.returncode == 1, r.stderr
+    cmd = next(ln for ln in r.stderr.splitlines() if ln.startswith("补齐：")).removeprefix(
+        "补齐："
+    )
+    assert cmd.startswith("MILOCO_MODELS_BASE_URL="), (
+        f"换源变量没跟着印出来，这条命令跑的是另一个源：\n    {cmd}"
+    )
+
+    # 注意 env 用的是 _clean_env()：变量不在环境里，只能由命令自己带
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env=_clean_env())
+    assert run.returncode == 0, (
+        f"补齐命令没落在换源上（rc={run.returncode}）：\n"
+        f"    {cmd}\n"
+        f"  stderr: {run.stderr.strip()}"
+    )
+    assert (dest / "req.onnx").read_bytes() == _REQUIRED
 
 
 # ─── 用法错误：exit 2（与"模型缺失"的 exit 1 区分开）─────────────────────
@@ -1340,7 +1438,34 @@ _FETCH_CALLERS = (
 )
 
 # 扫描范围要**宽于**清单本身，否则"新调用点恰好落在盲区"会让穷尽性断言跟着一起失明。
-_FETCH_CALLER_GLOBS = ("scripts/*.sh", "plugins/*/*.sh", ".github/workflows/*.yml")
+# 用 ** 递归：调用方不必然落在这几个目录的第一层。只匹配一层时，仓库里现成就有 8 个
+# shell 脚本落在盲区（plugins/hermes/scripts/{install,miloco-status}.sh、
+# plugins/hermes/tests/*.sh 四个、.ci/*.sh 两个），其中 plugins/hermes/scripts/install.sh
+# 是 install-hermes.sh 的手动版 —— 补齐模型正是它迟早要做的事，而往它里面加一句下载，
+# 穷尽性这条扫不到、强度契约那条不在清单里也走不到，两条一起绿。
+# .yaml 也要收：_gate_violations 已按 (".yml", ".yaml") 认 workflow，同一份代码里对
+# "什么算 workflow YAML"给两个答案的话，*.yaml 命名的新 workflow 就是盲区。
+_FETCH_CALLER_GLOBS = (
+    "scripts/**/*.sh",
+    "plugins/**/*.sh",
+    ".ci/**/*.sh",
+    ".github/workflows/*.yml",
+    ".github/workflows/*.yaml",
+)
+
+
+def _scan_callers(root: Path) -> set[str]:
+    """按 _FETCH_CALLER_GLOBS 扫 root，返回真的在调 fetch_models.py --dest 的相对路径。
+
+    抽出来只为让盲区能被合成目录树钉住：真实仓库里不存在反例（存在就已经红了），
+    只扫真实仓库证明不了"扫描范围够宽"这件事本身。
+    """
+    found: set[str] = set()
+    for pat in _FETCH_CALLER_GLOBS:
+        for p in sorted(root.glob(pat)):
+            if _fetch_invocations(p.read_text(encoding="utf-8")):
+                found.add(p.relative_to(root).as_posix())
+    return found
 
 
 def _logical_lines(text: str) -> list[tuple[int, str]]:
@@ -1594,14 +1719,44 @@ def test_fetch_caller_list_is_exhaustive() -> None:
     合起来才是集合相等。多出来的（新调用方没登记）与少掉的（登记了却不再调用、循环
     空转着绿）都会红在这一行。
     """
-    found: set[str] = set()
-    for pat in _FETCH_CALLER_GLOBS:
-        for p in sorted(_ROOT.glob(pat)):
-            if _fetch_invocations(p.read_text(encoding="utf-8")):
-                found.add(p.relative_to(_ROOT).as_posix())
+    found = _scan_callers(_ROOT)
     assert found == set(_FETCH_CALLERS), (
         "调用 fetch_models.py --dest 的可执行入口与 _FETCH_CALLERS 对不上，"
         "把清单补齐（新调用方同时要满足上面那条 --strict 契约）：\n"
         f"  新增未登记：{sorted(found - set(_FETCH_CALLERS))}\n"
         f"  已登记但不再调用：{sorted(set(_FETCH_CALLERS) - found)}"
+    )
+
+
+def test_caller_scan_reaches_nested_dirs_and_yaml_workflows(tmp_path: Path) -> None:
+    """扫描范围要真的宽于清单：嵌套目录与 ``*.yaml`` 都不许是盲区。
+
+    上面那条穷尽性断言只跑真实仓库，而真实仓库里现在没有反例 —— 有的话它早红了。
+    于是"扫描范围够不够宽"这个性质，它自己一个字都证明不了：把 glob 收窄回一层，
+    它照样绿。所以这里造一棵合成树，把三个曾经的盲区各放一个真实调用：
+
+      · ``plugins/hermes/scripts/install.sh`` —— install-hermes.sh 的手动版，第三层；
+        补齐模型是它迟早要做的事，也是最可能新增调用的地方
+      · ``.ci/warm-models.sh`` —— CI 辅助脚本，整个目录原先都不在扫描范围里
+      · ``.github/workflows/nightly.yaml`` —— 判定函数认 .yaml，glob 却只收 .yml
+
+    三个都不带 --strict，也就是说漏掉任何一个，等于放走一个"只拉到半套模型也退 0"的
+    调用点，正是本 PR 反复在关的那类洞。把 glob 改回一层这条即红。
+    """
+    call = 'python3 "$ROOT/scripts/fetch_models.py" --dest "$D"\n'
+    files = {
+        "plugins/hermes/scripts/install.sh": call,
+        ".ci/warm-models.sh": call,
+        ".github/workflows/nightly.yaml": f"jobs:\n  warm:\n    steps:\n      - run: {call}",
+        # 顺带确认收窄前就能扫到的那两层没有被 ** 改写掉语义
+        "scripts/build.sh": call,
+    }
+    for rel, body in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+
+    assert _scan_callers(tmp_path) == set(files), (
+        "穷尽性扫描漏掉了这些调用方，它们从此不受 --strict 契约约束：\n"
+        f"  漏掉：{sorted(set(files) - _scan_callers(tmp_path))}"
     )

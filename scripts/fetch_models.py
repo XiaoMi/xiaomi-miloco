@@ -579,7 +579,12 @@ def main(argv: list[str] | None = None) -> int:
             # install-hermes 下载失败分支里"带上解释器"那段注释论证过的同一种失效。
             # 跟着当前进程走，两截就必然同口径（sys.executable 在个别嵌入式解释器下是
             # 空串，留 python3 兜底）。
-            fix = f"{sys.executable or 'python3'} {Path(__file__).resolve()}"
+            # 这两截同样要 quote，理由与下面的 --dest / --lock 一字不差：仓库 clone 在带
+            # 空格的目录下（macOS 的 ~/Library/Mobile Documents/、用户名带空格的 home）时，
+            # 裸插值整行粘回去会被 shell 从空格处切开，得到 `can't open file '/Users/li'`
+            # —— 又是一个跟"模型不齐"无关的新错误，与上面这段论证的失效同类，只是触发
+            # 条件从"相对路径"换成了"路径带空格"。
+            fix = f"{shlex.quote(sys.executable or 'python3')} {shlex.quote(str(Path(__file__).resolve()))}"
             if args.strict:
                 fix += " --strict"
             # 同口径这件事不止于路径：--lock / --only / --required-only 决定的是"拿哪一份
@@ -598,8 +603,20 @@ def main(argv: list[str] | None = None) -> int:
             # dest 也 quote：它可能来自 --dest / MILOCO_MODELS_DEST / 包内默认路径，
             # 带空格时整行粘回去会被 shell 切成两个参数 —— 同样是"印出来却跑不了"。
             # shlex.quote 对不含特殊字符的路径原样返回，常见情形下输出不变。
+            #
+            # 换源变量同理，而且它连 argparse 都不在，上面按参数清点时扫不到它：
+            # MILOCO_MODELS_BASE_URL 是**独占**替换（见 _sources），不带前缀印出来的那条
+            # 命令走的是 lock 里的公网源 —— 与 --lock 同一类"印的是另一次运行"，后果按
+            # 机器分两种：真离线的等 4 个源各退避重试一轮再退 1，内网有出口的则下载
+            # **成功**，请求悄悄出了公网，正是这个变量存在理由的反面，且没有任何人收到
+            # 信号。它一贯以一次性前缀写法给出（README 与 PR 描述的示例都是），也就是说
+            # 并不在用户当前 shell 里，照抄那条命令等于把它丢了。
+            # 另一个环境变量 MILOCO_MODELS_DEST 不必单列：它只影响 dest，而 dest 本来就
+            # 以显式 --dest 印在同一行里，已经同口径了。
+            env_src = os.environ.get("MILOCO_MODELS_BASE_URL", "").strip()
+            prefix = f"MILOCO_MODELS_BASE_URL={shlex.quote(env_src)} " if env_src else ""
             print(
-                f"缺少模型：{', '.join(blocking)}\n补齐：{fix} --dest {shlex.quote(str(dest))}",
+                f"缺少模型：{', '.join(blocking)}\n补齐：{prefix}{fix} --dest {shlex.quote(str(dest))}",
                 file=sys.stderr,
             )
             return 1
