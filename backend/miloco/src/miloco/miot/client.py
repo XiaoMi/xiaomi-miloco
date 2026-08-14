@@ -1262,10 +1262,20 @@ class MiotProxy:
             logger.error("Failed to set device properties: %s", e)
             raise
 
-    async def get_device_properties(self, params: list[MIoTGetPropertyParam]) -> list:
-        """Get device properties via MIoT cloud API."""
+    async def get_device_properties(
+        self, params: list[MIoTGetPropertyParam], datasource: int = 1
+    ) -> list:
+        """Get device properties via MIoT cloud API.
+
+        ``datasource=2`` reads through to the device instead of the cloud's cache;
+        see ``MIoTHttpClient.get_props_async`` for the measured trade-off. Callers
+        that use a reading as a *predicate* — "is the light on, so should I act?" —
+        want 2, because a cached reading cannot tell them it is stale.
+        """
         try:
-            return await self.miot_client.http_client.get_props_async(params)
+            return await self.miot_client.http_client.get_props_async(
+                params, datasource=datasource
+            )
         except Exception as e:
             logger.error("Failed to get device properties: %s", e)
             raise

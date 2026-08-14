@@ -652,6 +652,46 @@ class TestRuleRunnerActionExecution:
         mock_miot_proxy.set_device_properties.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_idempotent_precheck_reads_through_to_the_device(
+        self, runner, mock_miot_proxy
+    ):
+        """幂等预检**不能**读云端缓存。
+
+        缓存对不可达的设备返回「最后已知值 + code 0」,没有任何标记可以分辨。
+        最坏情况恰是最常见的:断电 → 缓存停在 on → 规则「开灯」读到陈旧的 on →
+        判定"已在目标态" → 跳过。而这个 return 在**所有** _write_action_ledger
+        之前 —— 动作永久丢失,台账一行都不写,没有任何痕迹。
+        """
+        mock_miot_proxy.get_device_properties = AsyncMock(
+            return_value=[{"code": 0, "value": True}]
+        )
+        action = _make_action(value=True, idempotent=True)
+        rule = _make_static_rule(rule_id="rule-ds", name="ds", actions=[action])
+        runner.add_rule(rule)
+        await runner.trigger_rule("rule-ds", TRIGGER_CONTEXT)
+        assert mock_miot_proxy.get_device_properties.await_args.kwargs["datasource"] == 2
+
+    @pytest.mark.asyncio
+    async def test_unreachable_device_is_not_mistaken_for_already_at_target(
+        self, runner, mock_miot_proxy
+    ):
+        """设备不可达时**照常下发**,由写路径去失败并落台账。
+
+        这是上一条的另一面:ds=2 下云端自己返回 -704042011,已有的 `code == 0`
+        判据自然不成立。断电的灯不会被当成"已经开着了"而永久跳过。
+        """
+        mock_miot_proxy.get_device_properties = AsyncMock(
+            return_value=[{"code": -704042011, "value": None}]
+        )
+        action = _make_action(value=True, idempotent=True)
+        rule = _make_static_rule(rule_id="rule-off", name="off", actions=[action])
+        runner.add_rule(rule)
+
+        result = await runner.trigger_rule("rule-off", TRIGGER_CONTEXT)
+        assert result.action_results[0].skipped is not True, "不可达 ≠ 已在目标态"
+        mock_miot_proxy.set_device_properties.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_idempotent_executes_when_not_at_target(
         self, runner, mock_miot_proxy
     ):

@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 
 import click
 
@@ -469,9 +470,19 @@ def device_status(did, iids, pretty):
                 iid_to_key = _resolve_keys_for_device(spec)
             except Exception:
                 iid_to_key = {}
+            now = int(time.time())
             for p in props:
                 if isinstance(p, dict) and p.get("iid"):
                     p["spec_name"] = iid_to_key.get(p["iid"], p["iid"])
+                    # 后端透传的 updated_at 是 epoch 秒(云端字段)。读它的主要是
+                    # agent,而 agent 读 1769919538 得不出任何结论 —— 换算成"多少秒前"
+                    # 才有用。**保留原字段**,不做破坏性替换。
+                    #
+                    # 缺失时不补:siid=1 那组静态设备信息本来就没有这个字段,
+                    # 补一个 age 会让它看起来像"56 年没更新过"。
+                    ts = p.get("updated_at")
+                    if isinstance(ts, int) and ts > 0:
+                        p["age_s"] = max(0, now - ts)
     _annotate_result_codes(data)
     print_result(data, pretty)
 
