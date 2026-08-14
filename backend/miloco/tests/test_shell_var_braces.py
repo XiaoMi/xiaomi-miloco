@@ -1,13 +1,17 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""仓库体检：shell 脚本里变量展开的两条硬约束。
+"""仓库体检：shell 脚本印给用户照抄的那行字，必须与用户真按它跑出来的结果一致。
 
-两条都是"变量插值印出来会被吃掉一截"，共用同一份扫描范围（见 `_repo_shell_scripts`）——
-放在同一个文件里，是为了不让"哪些脚本受管"有两个会各自漂移的答案。
+三条约束共用同一份扫描范围（见 `_repo_shell_scripts`）——放在同一个文件里，是为了不让
+"哪些脚本受管"有三个会各自漂移的答案。
 
 1. 紧跟非 ASCII 字符的展开必须写花括号（下面这段）；
-2. 印给用户照抄的命令，里面的路径必须转义（见 `test_printed_commands_quote_their_paths`）。
+2. 印给用户照抄的命令，里面的路径必须转义（见 `test_printed_commands_quote_their_paths`）；
+3. 印出来的**下载**命令必须带上换源变量前缀（见 `test_printed_download_commands_carry_the_source_override`）。
+
+1 与 2 的失败形态是命令被吃掉一截（分词 / 变量名跑偏），3 是命令**照跑不误、但换了个源**——
+最后这种没有任何报错，所以它只能靠门禁发现。
 
 --- 约束 1 ---
 
@@ -247,3 +251,147 @@ def test_printed_command_check_separates_commands_from_prose() -> None:
                 else "这行不是让人粘的命令，正确写法不是套 _q；判成违规会逼出错的修法。"
             )
         )
+
+
+# ---- 约束 3：印出来的下载命令必须带上换源变量前缀 ------------------------------
+
+# 提到下载器的两种写法：变量与字面文件名。
+_FETCH_REF = re.compile(r"\$\{?FETCH_MODELS\}?|fetch_models\.py")
+
+# 先攒进变量再印的写法也要收。本仓库现有的那处（install-hermes.sh 的 `fetch_cmd=`）正是
+# 这一种：只认 warn/info 行的话，两个 warn 分支共用的那条命令反而扫不到——而它恰好是
+# review 里被点名的那一处。约束 2 刻意把赋值排除在外（赋值里的 "$VAR" 有引号保护、不会
+# 被分词），但换源前缀丢没丢与引号无关，所以这一条要把它收进来。
+_CMD_ASSIGN = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*_?(?:cmd|CMD)\s*=")
+
+_SRC_PREFIX_HELPER = "_models_src_prefix"
+
+
+def _printed_download_commands(text: str) -> list[tuple[int, str]]:
+    """印给用户照抄、且真的会**下载**的 fetch_models 命令行。
+
+    `--check` 的那些排除掉：它不联网，换源变量对它没有意义。
+    "长得像一条能粘的命令"沿用约束 2 的 `_LAUNCHER` 判据——`build.sh` 那句
+    `log "准备模型（scripts/fetch_models.py --strict --dest …）..."` 因此不在内：它没有
+    解释器前缀，本来就不是让人粘的，是一行进度。
+    """
+    out: list[tuple[int, str]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        if not (_EMITTER.match(line) or _CMD_ASSIGN.match(line)):
+            continue
+        if not (_FETCH_REF.search(line) and _LAUNCHER.search(line)):
+            continue
+        if "--check" in line:
+            continue
+        out.append((lineno, line.strip()))
+    return out
+
+
+def _runs_a_download(text: str) -> bool:
+    """这个脚本自己会跑下载，而不是只 `--check`。
+
+    只有这样的脚本才谈得上"印出来的命令与本次真正跑的那次同源"。判据从文本里算，不写
+    死文件名：哪天有人给 `local-ci.sh` 加一次真下载，它自动进入受管范围，而不是等谁想起来
+    往名单里补一行。
+    """
+    for line in text.splitlines():
+        if line.lstrip().startswith("#") or _EMITTER.match(line) or _CMD_ASSIGN.match(line):
+            continue
+        if _FETCH_REF.search(line) and "--check" not in line:
+            return True
+    return False
+
+
+def test_printed_download_commands_carry_the_source_override() -> None:
+    """会下载的脚本，印出来的下载命令必须带 `$(_models_src_prefix)`。
+
+    `MILOCO_MODELS_BASE_URL` 是**独占**替换而不是"排在前面"（`fetch_models.py` 的
+    `_sources`）：设了它就完全不看 lock 里的源。所以前缀丢了不是少印一截，而是印出来的
+    那条命令**换了个源**，且两种机器上的后果都不带任何报错：
+
+    * 真离线的——等 4 个公网源各退避重试一轮，最后退 1，换来一个与刚才完全不同的失败；
+    * 内网有出口的——下载**成功**，请求悄悄出了公网，正是这个变量存在理由的反面。
+
+    "用户当前 shell 里本来就有"不成立：这个变量一贯以一次性前缀写法给出（README 与
+    dev-guide 的示例都是 `MILOCO_MODELS_BASE_URL=… python3 scripts/fetch_models.py`），
+    也就是它在**脚本**的环境里、不在用户敲命令的那个 shell 里。`fetch_models.py` 自己印
+    补齐命令时早就是这么拼的，shell 这侧漏了同一截。
+
+    受管范围按"脚本自己会不会下载"算，不是一份名单——`local-ci.sh` 只跑 `--check`，它印的
+    那条补齐命令是用户的**第一次**下载，正确的源就是用户 shell 里的那个（能到达它的唯一
+    途径是 `export`，粘贴时天然继承），从一个压根不参与下载的脚本的环境里拼前缀反而是
+    凭空多一个来源。这个豁免不是写死的：真给它加了下载，`_runs_a_download` 立刻把它收进来。
+    """
+    scripts = {p.relative_to(_ROOT).as_posix(): p.read_text(encoding="utf-8", errors="replace")
+               for p in _repo_shell_scripts()}
+    in_scope = {rel for rel, text in scripts.items() if _runs_a_download(text)}
+
+    # 防假绿：判据坏掉时 in_scope 会空掉，下面的循环一条都不跑却照样绿。
+    assert "plugins/hermes/install-hermes.sh" in in_scope, (
+        f"install-hermes.sh 会跑下载却没被收进受管范围，_runs_a_download 判据坏了：{sorted(in_scope)}"
+    )
+
+    offenders: list[str] = []
+    for rel in sorted(in_scope):
+        for lineno, line in _printed_download_commands(scripts[rel]):
+            if _SRC_PREFIX_HELPER not in line:
+                offenders.append(f"{rel}:{lineno}: {line}")
+
+    assert not offenders, (
+        "以下位置印了一条会下载的 fetch_models 命令，却没带换源变量前缀："
+        "MILOCO_MODELS_BASE_URL 是独占替换，丢了前缀的那条命令走的是 lock 里的公网源 —— "
+        "离线机器换来一个完全不同的失败，内网有出口的则下载成功、请求悄悄出了公网，"
+        f'两种都不报错。改成 "$({_SRC_PREFIX_HELPER})$(_q "$PYTHON") …"：\n  '
+        + "\n  ".join(offenders)
+    )
+
+
+# 与 _PRINTED_CASES 同样的写法：每对只差一件事。
+_DOWNLOAD_CMD_CASES = (
+    (True, 'warn "补齐：$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$D")"'),
+    # 先攒进变量再印，约束 2 放行、这一条必须收——本仓库真实的写法就是这种。
+    (True, '  fetch_cmd="$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$D")"'),
+    (False, 'warn "补齐：$(_models_src_prefix)$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict"'),
+    # --check 不联网，换源变量对它没意义；要求它带前缀是纯噪音。
+    (False, 'info "  校验：$(_q "$PYTHON") $(_q "$FETCH_MODELS") --check --strict"'),
+    # 只提文件名、没有解释器前缀 —— 是进度/说明，不是让人粘的命令（build.sh 那行）。
+    (False, 'log "准备模型（scripts/fetch_models.py --strict --dest ${models_dir}）..."'),
+    (False, 'warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"'),
+    # 跟下载器无关的命令不该被拖进来。
+    (False, 'warn "修复：重跑 bash $(_q "$HERE/install-hermes.sh")"'),
+)
+
+
+def test_download_command_check_separates_downloads_from_the_rest() -> None:
+    """两侧边界都用合成反例压住，真实仓库里这两侧的反例都不存在（存在就已经红了）。
+
+    第二条（`fetch_cmd=` 赋值）钉的是与约束 2 的**差异**：那条刻意不看赋值，这条必须看。
+    两条判据长得像，差异只有一行注释的话，将来"统一一下"的重构会把这一条悄悄改回去。
+    """
+    for want_bad, line in _DOWNLOAD_CMD_CASES:
+        got = bool(_printed_download_commands(line)) and _SRC_PREFIX_HELPER not in line
+        assert got == want_bad, (
+            f"{'漏判' if want_bad else '误判'}：{line}\n"
+            + (
+                "这是一条会下载的命令，不带换源前缀就等于换了个源，必须判违规。"
+                if want_bad
+                else "这行不是「会下载且让人粘」的命令，要求它带前缀只会增加噪音。"
+            )
+        )
+
+
+def test_only_downloading_scripts_are_in_scope() -> None:
+    """`_runs_a_download` 的两侧：只 `--check` 的不算，真下载的算。
+
+    没有这条的话，判据松掉（比如不再排除 `--check`）会把 `local-ci.sh` 悄悄拉进受管范围，
+    表现为逼出一个错的修法；判据紧掉（比如漏了不带 `--strict` 的调用）则整条契约静默失效，
+    而上面那条只断言 install-hermes.sh 在范围内，紧掉那一侧它未必接得住。
+    """
+    assert not _runs_a_download('    x=$(python3 "$S/fetch_models.py" --check --strict --dest "$d") || rc=$?\n')
+    assert _runs_a_download('  "$PYTHON" "$FETCH_MODELS" --strict --dest "$H/models" || rc=$?\n')
+    # 不带 --strict 也是一次完整下载（ci.yml 那种写法）。
+    assert _runs_a_download('  "$PYTHON" "$FETCH_MODELS" --dest "$H/models" --quiet\n')
+    # 只在文案里提到下载器不算"这个脚本会下载"。
+    assert not _runs_a_download('  warn "补齐：$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict"\n')

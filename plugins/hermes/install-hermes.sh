@@ -47,6 +47,27 @@ err()  { echo -e "${R}[✗]${N} $*" >&2; }
 # 门禁见 backend/miloco/tests/test_shell_var_braces.py::test_printed_commands_quote_their_paths。
 _q() { printf '%q' "$1"; }
 
+# 印给用户照抄的**下载**命令前缀。MILOCO_MODELS_BASE_URL 是**独占**替换而不是"排在前面"
+# （fetch_models.py 的 _sources）：设了它就完全不看 lock 里的源。所以前缀丢了不是少一截
+# 噪音，而是印出来的那条命令换了个源 —— 真离线的机器等 4 个公网源各退避重试一轮再退 1，
+# 内网有出口的则下载**成功**、请求悄悄出了公网，正是这个变量存在理由的反面，且没有任何
+# 人收到信号。fetch_models.py 自己印补齐命令时就是这么拼的（见那边 env_src / prefix 那段），
+# 两边同口径。
+#
+# 为什么"用户当前 shell 里本来就有"这个反驳不成立：这个变量一贯以一次性前缀写法给出
+# （README、dev-guide 的示例都是 `MILOCO_MODELS_BASE_URL=… python3 scripts/fetch_models.py`），
+# 也就是它在**本脚本**的环境里、不在用户敲命令的那个 shell 里；而 --post-install 那两条更
+# 明显 —— 调用方是 install.py，印出来的命令还要用户换到另一个目录去跑。
+#
+# 空值不印：空串在 _sources 那侧等价于"没设"（它 .strip() 之后判真假），印出一截
+# `MILOCO_MODELS_BASE_URL= ` 反而会让人以为"源被清空了"。
+# 值也过 _q：内网源写成 file:///mnt/共享 盘/models 这种带空格的路径不罕见，而这一整行
+# 就是给人整体粘贴的。
+_models_src_prefix() {
+  [ -n "${MILOCO_MODELS_BASE_URL:-}" ] || return 0
+  printf 'MILOCO_MODELS_BASE_URL=%s ' "$(_q "$MILOCO_MODELS_BASE_URL")"
+}
+
 for arg in "$@"; do
   case "$arg" in
     --diagnose) DIAGNOSE_ONLY=1 ;;
@@ -807,7 +828,7 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
     # 带 --strict：不带的话"只有可选模型没下到"退 0，用户会拿到一个成功的退出码，
     # 而下次 install.sh 的门禁（models_ready 用的正是 --check --strict）照旧判不齐。
     # 手上这条命令的判据必须和门禁同源，否则修不动还看不出为什么。下面两处同理。
-    warn "补齐：$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")"
+    warn "补齐：$(_models_src_prefix)$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")"
   else
     # 不能拿 ${FETCH_MODELS:-scripts/fetch_models.py} 兜底：`:-` 只在变量为空时取用，
     # 而变量为空的充要条件就是"本脚本旁边没有 checkout"（见上面 FETCH_MODELS 的探测）
@@ -818,7 +839,7 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
     # "文件损坏 / 路径写错"带偏 —— 与下面下载失败分支里"带上解释器"那段注释同一个理由。
     # 同理不提 scripts/models.lock.json：这个处境下那个文件同样不在手边。
     warn "补齐：重跑 install.sh（安装包自带模型 tar，会解到 $MILOCO_HOME/models/）"
-    warn "  或在 git checkout 目录里跑：$(_q "$PYTHON") scripts/fetch_models.py --strict --dest $(_q "$MILOCO_HOME/models")"
+    warn "  或在 git checkout 目录里跑：$(_models_src_prefix)$(_q "$PYTHON") scripts/fetch_models.py --strict --dest $(_q "$MILOCO_HOME/models")"
   fi
 elif [ -n "$FETCH_MODELS" ]; then
   # 按 lock 从 upstream Release 下载（sha256 校验）。已齐的文件会被跳过，只补缺的。
@@ -857,7 +878,7 @@ elif [ -n "$FETCH_MODELS" ]; then
   # 原样粘贴会 Permission denied（退 126），而这个新错误跟刚才的失败毫无关系，只会把人往
   # "权限 / 文件损坏"的方向带偏。用户此刻正处在失败状态，这行是他手上唯一的线索，大概率
   # 整行复制。与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
-  fetch_cmd="$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")"
+  fetch_cmd="$(_models_src_prefix)$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")"
   if [ "$rc" -eq 2 ]; then
     warn "感知模型下载没能开始：scripts/models.lock.json 不可用（具体原因见上面的报错）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
@@ -881,7 +902,7 @@ if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
   # 静默丢弃，全仓无消费者。
   if [ -f "$MILOCO_HOME/config.json" ]; then
     "$PYTHON" - "$MILOCO_HOME" <<'PY' || true
-import json, sys
+import json, os, sys
 home = sys.argv[1]
 p = f"{home}/config.json"
 try:
@@ -898,10 +919,31 @@ cfg.pop("models", None)
 d = cfg.get("directories")
 if not isinstance(d, dict):
     d = {}
-d["models"] = f"{home}/models"
+# 只在空缺时写。要写进去的值与"根本不写"的效果**完全相同** —— settings.py 里
+# DirectorySettings.models 默认是空串，models_dir 这个派生属性在它为空时回落到
+# $MILOCO_HOME/models，正是下面这个字面量。也就是说这次写入对"没配过的人"是纯 no-op，
+# 唯一真正产生效果的对象是"配过的人"（把模型放外置盘 / 多 worktree 共享目录的开发者），
+# 而产生的效果正是把人家的路径顶掉 —— 本脚本抬头写的是"幂等：再跑一次不会破坏现有配置"。
+# 同一文件里另一处写用户可配的键（1.8 的 server.python_bin）就是这么做的：只有在当前值
+# 被证明用不了（import miloco 失败）时才覆盖，而这里没有任何"当前值坏了"的判据。
+cur = d.get("models") or ""
+if not cur:
+    d["models"] = f"{home}/models"
+    note = f"  config.json::directories.models = {home}/models"
+else:
+    # 保持不变，但必须把"模型下到哪儿"一起说出来：本步刚把模型补进 $MILOCO_HOME/models
+    # （models_ready 判的、下载器 --dest 给的都是它，与配置无关），而感知运行时读的是这个
+    # 键。两个目录不一样时，屏幕上不同时出现这两条的话，用户拿到的是"安装成功"加上首次
+    # perceive 的 models_missing，中间没有一个字解释为什么。
+    # 解析口径抄 DirectorySettings.models_dir：绝对路径直接用，相对路径相对 $MILOCO_HOME
+    # —— 不这么算的话，配成相对的 "models"（与默认同址）会被误报成"两个目录"。
+    resolved = cur if os.path.isabs(cur) else os.path.join(home, cur)
+    note = f"  config.json::directories.models 已配置（{cur}），保持不变"
+    if os.path.normpath(resolved) != os.path.normpath(os.path.join(home, "models")):
+        note += f"\n  注意：本次模型落在 {home}/models，而感知按上面这个键去读 —— 如仍报 models_missing，把模型放到 {resolved} 或清空该键"
 cfg["directories"] = d
 json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
-print(f"  config.json::directories.models = {home}/models")
+print(note)
 PY
   fi
 fi
