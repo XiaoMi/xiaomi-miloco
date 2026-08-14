@@ -134,7 +134,11 @@ _QUOTED_SPAN = re.compile(r'\$\(_q "[^"]*"\)')
 # 这类**只报告、不让人粘**的行会被判违规——而它们的正确写法恰恰不是套 _q，门禁逼出来的
 # 会是个错的修法，比不设门禁更坏。加上后一半，这两行连同 `echo "运行 bash 脚本 $NAME"`
 # 一起放行，而四处真实的可粘命令一处不漏。
-_LAUNCHER = re.compile(r"\$\{?(?:PYTHON|FETCH_MODELS)\}?\b|\b(?:bash|sh|python3?)\s+")
+# 解释器写成 python[\d.]* 而不是 python3?：带版本号的 python3.11 / python3.12 同样是
+# 一条能粘的命令，而"按见过的写法枚举"正是这类判据最容易留的盲区（兄弟门禁
+# test_fetch_models.py::_INVOCATION 的形态判据栽的就是这一跤）。放宽的只是启动器这一半，
+# 后一半的"命令样"不动，所以上面那些只报告不粘的行照旧放行。
+_LAUNCHER = re.compile(r"\$\{?(?:PYTHON|FETCH_MODELS)\}?\b|\b(?:bash|sh|python[\d.]*)\s+")
 _COMMANDISH = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*|\S+\.(?:py|sh)\b")
 
 _VAR = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
@@ -209,6 +213,9 @@ def test_printed_commands_quote_their_paths() -> None:
 _PRINTED_CASES = (
     (True, 'warn "补齐：$PYTHON $FETCH_MODELS --strict --dest $MILOCO_HOME/models"'),
     (True, 'echo "修复：重跑 bash $HERE/install-hermes.sh（幂等，自动 recover）"'),
+    # 带版本号的解释器也是启动器：这行里 $PYTHON / $FETCH_MODELS 一个都没有，
+    # 启动器写成 python3? 的话整行就看不见了，而 $MILOCO_HOME 照样会被分词。
+    (True, 'warn "补齐：python3.11 scripts/fetch_models.py --dest $MILOCO_HOME/models"'),
     (False, 'warn "补齐：$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict"'),
     (False, 'info "Python 解释器：$PYTHON"'),
     (False, 'warn "手动修：${MILOCO_HOME}/config.json::server.python_bin = <python 路径>"'),

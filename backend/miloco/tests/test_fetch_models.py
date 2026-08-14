@@ -17,6 +17,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1502,12 +1503,46 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def _fetch_invocations(text: str) -> list[tuple[int, str]]:
-    """文件里"调用 fetch_models.py 且指定了 --dest"的逻辑行，(起始行号从 1 起, 原文)。
+# "这一行是不是一次调用"的形态判据。两条取**并集**，缺一条都会漏：
+#
+#   · --dest：今天五个调用方恰好都显式传它，但它**不是必填的** —— 不传时目标目录回退
+#     到 MILOCO_MODELS_DEST、再回退到包内 perception/models/（fetch_models.py 的
+#     _DEFAULT_DEST）。也就是说裸的 `python3 scripts/fetch_models.py` 是一次完完整整
+#     的下载，只是下到包内那个目录 —— 而那正是 requires_models 那批用例读的目录。
+#   · 解释器紧跟脚本：把上面那种写法收进来。这一半故意写得宽 —— 解释器可以带路径
+#     （/usr/bin/python3）、带版本（python3.11）、带自己的开关（python3 -u）、是变量
+#     （"$PYTHON"），脚本可以是路径也可以是 $FETCH_MODELS。窄一格就是按"我见过的写法"
+#     枚举，而这个判据的用途恰恰是拦住**没人见过**的那个新调用点。
+#
+# 反过来不收的是"没有解释器在前面"的那些：FETCH_MODELS=".../fetch_models.py" 这类赋值、
+# [ -f "$FETCH_MODELS" ] 这类存在性判断、以及 warn "……也没有 scripts/fetch_models.py
+# 可用" 这类文案 —— 它们都不执行脚本。
+#
+# 赋值里带全套参数的写法（FIX_CMD="python3 …/fetch_models.py --dest X"）**故意**照收：
+# 参数就写在那一行上，要求它同强度是对的；而 `$FIX_CMD` 那行两个 token 一个都不带，
+# 放过赋值行等于放过整条调用链。
+#
+# 两条判据谁也不能省：--dest 那条独有的是"不经解释器直接执行"（`"$FETCH_MODELS" --dest X`）。
+# 而"直接执行且不带 --dest"确实两条都接不住 —— 知道，不补：脚本是 0644，没有可执行位，
+# 这么写当场 permission denied，是响亮的失败而不是这条契约要拦的那种"退 0 的静默半套"。
+# 要接住它得再加一条"脚本出现在命令位"的判据，而那条得把 [ -f "$FETCH_MODELS" ] 这类
+# 参数位的写法排除干净 —— 为一个需要先 chmod +x 才存在的形态，不值得再多一道边界。
+_INVOCATION = re.compile(
+    r"""(?:^|[\s;&|(!"'])"""                       # 命令词边界（引号也算，"$PYTHON" 从这儿进）
+    r"""(?:[^\s"';|&]*/)?"""                       # 解释器可带路径：/usr/bin/python3
+    r"""(?:python[\d.]*|\$\{?PYTHON\}?)["']?"""    # 解释器本体：python3.11 / $PYTHON / ${PYTHON}
+    r"""(?:\s+-\S+)*"""                            # 解释器自己的开关：python3 -u …
+    r"""\s+["']?[^\s"']*"""                        # 脚本路径前缀，可带引号
+    r"""(?:fetch_models\.py|\$\{?FETCH_MODELS\}?)(?!\w)"""
+)
 
-    整行注释剔掉：注释不执行，也不会被用户复制。用 --dest 当"这是一次调用"的判据，
-    是因为所有真实调用点都显式传它（``MILOCO_MODELS_DEST`` 优先级更低，几个调用方
-    都不敢依赖），而 `FETCH_MODELS=...` 这类赋值、以及只提脚本名的 info 文案都不带。
+
+def _fetch_invocations(text: str) -> list[tuple[int, str]]:
+    """文件里"调用了 fetch_models.py"的逻辑行，(起始行号从 1 起, 原文)。
+
+    整行注释剔掉：注释不执行，也不会被用户复制。判据两条取并集，见上面 _INVOCATION
+    那段注释 —— 只认 --dest 的话，不传 --dest 的新调用点会**同时**从强度契约和穷尽性
+    扫描下面溜过去，而它照样能只拉到半套模型就退 0。
     """
     out = []
     for i, line in _logical_lines(text):
@@ -1515,7 +1550,7 @@ def _fetch_invocations(text: str) -> list[tuple[int, str]]:
             continue
         if "fetch_models.py" not in line and "FETCH_MODELS" not in line:
             continue
-        if "--dest" in line:
+        if "--dest" in line or _INVOCATION.search(line):
             out.append((i, line))
     return out
 
@@ -1760,3 +1795,75 @@ def test_caller_scan_reaches_nested_dirs_and_yaml_workflows(tmp_path: Path) -> N
         "穷尽性扫描漏掉了这些调用方，它们从此不受 --strict 契约约束：\n"
         f"  漏掉：{sorted(set(files) - _scan_callers(tmp_path))}"
     )
+
+
+def test_a_call_without_dest_is_still_a_call(tmp_path: Path) -> None:
+    """不传 --dest 同样是一次真实下载，两条契约都得看得见它。
+
+    上一条钉的是扫描**位置**那一轴，这条钉**形态**那一轴 —— 同一个盲区的另一半：
+    --dest 不是必填的，不传时目标目录回退到 MILOCO_MODELS_DEST、再回退到包内
+    perception/models/，而那正是 requires_models 那批用例读的目录。于是往 ci.yml 里
+    加一步 `run: python3 scripts/fetch_models.py`（job 的工作目录就是仓库根），
+    三盏灯会一起绿：穷尽性扫描扫不到这个文件、强度契约拿不到这个调用点、运行时只有
+    bge / VAD 没拉到也退 0 —— 半套模型进 job，那批用例照旧静默 skip。
+
+    把 _fetch_invocations 的判据改回"必须带 --dest"，这条即红。
+    """
+    wf = tmp_path / ".github/workflows/warm.yml"
+    wf.parent.mkdir(parents=True, exist_ok=True)
+    wf.write_text(
+        "jobs:\n  warm:\n    steps:\n      - run: python3 scripts/fetch_models.py\n",
+        encoding="utf-8",
+    )
+
+    assert _scan_callers(tmp_path) == {".github/workflows/warm.yml"}, (
+        "不带 --dest 的调用点没被扫到 —— 它从此既不在穷尽性清单里，也不受 --strict 契约约束。"
+    )
+    assert _gate_violations(".github/workflows/warm.yml", wf.read_text(encoding="utf-8")), (
+        "不带 --dest 也不带 --strict 的调用被放行了：只缺可选模型时它退 0，一条告警都不打。"
+    )
+
+
+# 形态判据的两侧边界。左边是"必须算作一次调用"，右边是"必须不算"。
+_INVOCATION_CASES = (
+    # 解释器可以带路径 / 带版本 / 带自己的开关，脚本可以是路径也可以是变量 —— 按"我见过
+    # 的写法"枚举等于把判据的用途搞反了：它要拦的恰恰是没人见过的那个新调用点。
+    (True, "python3 scripts/fetch_models.py"),
+    (True, "      - run: python3 scripts/fetch_models.py"),
+    (True, "python3 -u scripts/fetch_models.py"),
+    (True, "python3.11 scripts/fetch_models.py"),
+    (True, "/usr/bin/python3 scripts/fetch_models.py"),
+    (True, "uv run python scripts/fetch_models.py"),
+    (True, '"$PYTHON" "$FETCH_MODELS"'),  # install-hermes 的写法去掉 --dest
+    (True, "$PYTHON ${FETCH_MODELS}"),
+    (True, 'if ! python3 "$SCRIPT_DIR/fetch_models.py" --check --strict; then'),
+    (True, 'python3 scripts/fetch_models.py --dest "$D"'),
+    # 只有 --dest 那一半接得住的形态：不经解释器直接执行。去掉那一半这条即红，
+    # 也就是说两条判据谁也不是另一条的子集。
+    (True, '"$FETCH_MODELS" --dest "$MILOCO_HOME/models"'),
+    # 赋值行故意照收：参数就在这一行上，要求它同强度是对的，而真正执行的 `$FIX_CMD`
+    # 那行两个 token 一个都不带 —— 放过赋值行等于放过整条调用链。
+    (True, 'FIX_CMD="python3 scripts/fetch_models.py --dest $X"'),
+    # 前面没有解释器的，都不执行脚本。判据松到"提到就算"的话，这几行会被要求带
+    # --strict，而它们的正确写法压根不含 --strict —— 门禁逼出来的会是个错的修法。
+    (False, 'FETCH_MODELS="$HERE/../../scripts/fetch_models.py"'),
+    (False, '[ -f "$FETCH_MODELS" ] || FETCH_MODELS=""'),
+    (False, '  if [ -n "$FETCH_MODELS" ]; then'),
+    (False, 'warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"'),
+    (False, 'die 1 "模型缺失: $n（fetch_models.py --strict 本该已拦截）"'),
+    (False, "# python3 scripts/fetch_models.py --dest X"),
+)
+
+
+def test_invocation_shape_boundaries() -> None:
+    """两侧边界各拿合成反例压着：松一格逼出错的修法，紧一格漏掉真实调用点。
+
+    真实仓库里两侧都不存在反例 —— 存在就已经红了 —— 所以只跑真实文件，证明不了
+    这个判据的边界还在原处。
+    """
+    for want, line in _INVOCATION_CASES:
+        got = bool(_fetch_invocations(line))
+        assert got == want, (
+            f"形态判据判错了：期望{'命中' if want else '放过'}，实际"
+            f"{'命中' if got else '放过'}\n  {line}"
+        )
