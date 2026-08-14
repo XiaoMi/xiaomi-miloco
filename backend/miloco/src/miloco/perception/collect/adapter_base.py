@@ -82,10 +82,20 @@ class BaseDeviceAdapter(ABC):
         Override in subclasses that maintain stream buffers.
         """
 
-    async def sync_devices(self, all_devices: dict | None = None) -> None:
+    async def sync_devices(
+        self,
+        all_devices: dict | None = None,
+        disconnect_require_lan: bool = True,
+    ) -> None:
         """Sync connected devices with current online state (hot-plug).
 
         Discovers current devices, connects new ones, disconnects removed ones.
+
+        ``disconnect_require_lan``: 断开判断用的 require_lan 口径。默认与 discover
+        一致 (True)。设为 False 时,断开只以「云端在线」为准,保留 lan_online 暂时
+        为 False 的已连设备 —— 防止 LAN 探测偶发失败 (lan_online 假 False) 把正在
+        拉流的设备断开。camera 的感知同步用 False (见 camera_adapter.sync_devices),
+        与补建探测 (require_lan=False) 的口径对齐:要救的,就不该被同一轮断开。
 
         Lifecycle 语义 (self._node_name 不为 None 时):
         - 进入时 set_lifecycle(STARTING)。已在运行中的节点不会被打断。
@@ -111,6 +121,26 @@ class BaseDeviceAdapter(ABC):
         discovered_dids = set(discovered.keys())
         connected_dids = set(connected.keys())
 
+        # 断开判断的「应保留」集合:默认就是 discovered (require_lan 与 discover 一致)。
+        # disconnect_require_lan=False 时改用 require_lan=False 重算 —— 只按云端在线
+        # 判定,lan_online 偶发假 False 的设备仍保留,避免把拉流中的设备误断。
+        if disconnect_require_lan:
+            retained_dids = discovered_dids
+        else:
+            try:
+                retained = await self.discover_devices(
+                    all_devices, require_lan=False
+                )
+                retained_dids = set(retained.keys())
+            except Exception as e:
+                logger.warning(
+                    "[%s] Retained-device rediscover failed (%s); "
+                    "falling back to lan-gated set",
+                    self.device_type,
+                    e,
+                )
+                retained_dids = discovered_dids
+
         # Connect newly discovered devices
         for did in discovered_dids - connected_dids:
             try:
@@ -130,7 +160,7 @@ class BaseDeviceAdapter(ABC):
                 )
 
         # Disconnect removed devices
-        for did in connected_dids - discovered_dids:
+        for did in connected_dids - retained_dids:
             try:
                 await self.disconnect_device(did)
                 logger.info("[%s] Disconnected device: %s", self.device_type, did)

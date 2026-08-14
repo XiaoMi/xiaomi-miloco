@@ -64,6 +64,14 @@ _CAMERA_TRACKS = ["decoded_video", "decoded_audio"]
 # 不节流会变成每秒一次重 SDK 调用 + 建连尝试。10s 足够让相机就绪后及时恢复。
 _ONDEMAND_REFRESH_MIN_INTERVAL_MS = 10_000
 
+# 静默检测：感知视频流 N 秒无帧 → 判僵尸连接。miss 层对「连接在但不出帧」的静默
+# 无解（keepalive 只探连接活性、不探数据流），只能上层检测 + destroy/create 重拉。
+# 正常流 ~1fps，30s 无帧基本确定是断；再短会误伤正常低帧。
+_SILENCE_THRESHOLD_MS = 30_000
+
+# 重连防抖：同台相机重连后 N 秒内不再重连，避免真坏相机 30s 一轮空转。
+_RECONNECT_COOLDOWN_MS = 5 * 60_000
+
 # 单通道相机的默认通道号（也是多通道相机 ch0）。
 DEFAULT_VIDEO_CHANNEL = 0
 DEFAULT_AUDIO_CHANNEL = 0
@@ -103,6 +111,8 @@ class _CameraDeviceState:
     # Clock calibration: epoch_delta = unix_ms - monotonic_ms (locked on first frame)
     # Used to convert monotonic wall_ms to unix timestamps for display.
     epoch_delta: int | None = None
+    # 最近一帧视频的 monotonic wall_ms，静默检测用。
+    last_video_frame_ms: int = 0
 
 
 class CameraDeviceAdapter(BaseDeviceAdapter):
@@ -120,6 +130,12 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self._on_window_ready = on_window_ready
         self._devices: dict[str, _CameraDeviceState] = {}
         self._last_ondemand_refresh_ms = 0
+        # 静默重连防抖标记：did -> 最近一次重连的 monotonic ms。
+        self._last_reconnect_ms: dict[str, int] = {}
+        # 被外部接管（inject-video 等）临时占用的 did 集合。接管期间周期
+        # sync_devices 不得重连这些 did，否则会覆盖注入用的 _devices[did] state，
+        # 使注入回调绑定的 state 与 _devices 不一致、注入帧全被丢弃。
+        self._taken_over: set[str] = set()
 
     async def discover_devices(
         self,
@@ -190,7 +206,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 device_type="camera",
                 room_id=camera_info.room_name,
                 room_name=camera_info.room_name,
-                online=camera_info.online and camera_info.lan_online,
+                # 已连上的相机即视为可达：直连掐死同网段 OTU 保活令 lan_online 掉 False，
+                # 但连都连上了、可达是显然的，不能因此把在拉流的相机标成 offline 停投喂。
+                online=camera_info.online
+                and (camera_info.lan_online or camera_info.connected),
             )
         return result
 
@@ -206,6 +225,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         空转）。scope 内相机要么已连、要么云端离线时不触发，零额外开销。
         """
         if all_devices is None and self._miot_proxy.is_authenticated:
+            await self._check_stalled_cameras()
             try:
                 expected = await self.discover_devices(
                     online_only=True, require_lan=False
@@ -219,12 +239,64 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     await self._miot_proxy.refresh_cameras()
             except Exception as e:  # noqa: BLE001
                 logger.warning("On-demand camera manager refresh failed: %s", e)
-        await super().sync_devices(all_devices)
+        # 断开判断与补建探测同口径 (require_lan=False):只按云端在线判定,保留
+        # lan_online 偶发假 False 的已连相机,防止拉流中的相机被误断。
+        await super().sync_devices(all_devices, disconnect_require_lan=False)
+
+    async def _check_stalled_cameras(self) -> None:
+        """静默检测：感知视频流超阈值无帧 → 判僵尸连接并触发重连。
+
+        miss 层对「连接在但不出帧」的静默无解（keepalive 只探连接活性、不探数据流），
+        只能上层检测 + 主动 destroy/create 重拉。只在周期 sync 路径跑，避免热插拔
+        语义被静默检测打断。
+        """
+        now_ms = _monotonic_ms()
+        for did, state in list(self._devices.items()):
+            # 被外部接管（inject-video 等）→ 静默检测不碰，交给接管方自己管生命周期。
+            if did in self._taken_over:
+                continue
+            # 还没出过首帧 → 不判（连接刚建立，等首帧）。
+            if state.last_video_frame_ms == 0:
+                continue
+            if now_ms - state.last_video_frame_ms < _SILENCE_THRESHOLD_MS:
+                continue
+            physical_did, _ = split_channel_did(did)
+            cam = self._miot_proxy.get_cached_camera(physical_did)
+            # 云端已离线 → 救不活，交给基类按在线态断开，别白重连。
+            if cam is not None and not cam.online:
+                continue
+            # 防抖：刚重连过不重复，避免真坏相机 30s 一轮空转。
+            if now_ms - self._last_reconnect_ms.get(did, 0) < _RECONNECT_COOLDOWN_MS:
+                continue
+            logger.warning(
+                "Camera %s stalled (%dms no video frame), reconnecting",
+                did,
+                now_ms - state.last_video_frame_ms,
+            )
+            await self._reconnect_stalled(did)
+
+    async def _reconnect_stalled(self, did: str) -> None:
+        """重建一台静默相机：停解码订阅 → 重建 native 会话 → 交下轮 sync 重订。
+
+        三层重建缺一不可：disconnect_device 只 unregister 解码回调（不动 native miss
+        会话）；reconnect_camera 才 destroy+create manager 真正断掉僵尸 MTP/PPCS 会话、
+        重走 miss_client_connect 的建连重试；解码订阅由下轮 sync 的 connect_device 补齐。
+        """
+        physical_did, _ = split_channel_did(did)
+        self._last_reconnect_ms[did] = _monotonic_ms()
+        try:
+            await self.disconnect_device(did)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Stalled camera disconnect failed %s: %s", did, e)
+        try:
+            await self._miot_proxy.reconnect_camera(physical_did)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Stalled camera reconnect failed %s: %s", did, e)
 
     async def connect_device(
         self, did: str, source: PerceptionDevice | None = None
     ) -> None:
-        if did in self._devices:
+        if did in self._devices or did in self._taken_over:
             return
 
         # source 只表示上游 sync_devices 已完成 discover/filter；相机元数据不从
@@ -256,7 +328,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # Subscribe decoded video frame stream (multi-reg)
         try:
             reg_id = await self._miot_proxy.start_camera_decode_video_stream(
-                physical_did, channel, self._make_decoded_video_callback(did)
+                physical_did, channel,
+                self._make_decoded_video_callback(did, state),
             )
             state.decoded_video_reg_id = reg_id
         except Exception as e:
@@ -265,7 +338,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # Subscribe decoded audio frame stream (multi-reg)
         try:
             reg_id = await self._miot_proxy.start_camera_decode_audio_stream(
-                physical_did, channel, self._make_decoded_audio_callback(did)
+                physical_did, channel,
+                self._make_decoded_audio_callback(did, state),
             )
             state.decoded_audio_reg_id = reg_id
         except Exception as e:
@@ -284,7 +358,15 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             )
             return
 
-    async def disconnect_device(self, did: str) -> None:
+    async def disconnect_device(
+        self, did: str, *, force: bool = False
+    ) -> None:
+        # 接管中的 did（inject 等）不允许被周期 sync 断开——disconnect 会 clear
+        # 注入 buffer + 移除注入 state，使注入帧全部丢失。inject 主动断开真流时
+        # 传 force=True 绕过（它自己就是接管方，需要真的停流）。
+        if not force and did in self._taken_over:
+            logger.debug("Camera %s taken over, skip disconnect", did)
+            return
         state = self._devices.pop(did, None)
         if not state:
             return
@@ -309,6 +391,19 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
 
         state.sync_buffer.clear()
+
+    def take_over_device(self, did: str) -> None:
+        """标记 did 为「接管中」：周期 sync_devices 不再重连它。
+
+        注入视频等外部临时接管场景使用——调用方负责断开真流、填好注入 state，
+        并在结束时先释放接管再恢复真流。接管期间 sync 的 connect_device 会
+        因 did 在 _taken_over 而跳过，避免覆盖注入 state。
+        """
+        self._taken_over.add(did)
+
+    def release_device(self, did: str) -> None:
+        """解除接管标记。调用方应在恢复真流前释放，让 sync 能重新接管。"""
+        self._taken_over.discard(did)
 
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
         """Collect multimodal data from the device's sync buffer.
@@ -394,7 +489,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             device_type="camera",
             room_id=camera.room_name,
             room_name=camera.room_name,
-            online=camera.online and camera.lan_online,
+            # 已连上的相机即视为可达（直连掐死 OTU 保活令 lan_online 掉 False）。
+            online=camera.online and (camera.lan_online or camera.connected),
         )
 
     def _build_device_data(
@@ -513,10 +609,17 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             decode_ms = 0.0
         return decode_ms
 
-    def _make_decoded_video_callback(self, did: str):
+    def _make_decoded_video_callback(self, did: str, state: _CameraDeviceState):
         """Decoded video frame callback: feeds decoded_video track in sync buffer.
 
         Receives BGR numpy arrays (already converted from PyAV in decoder thread).
+
+        ``state`` 是回调订阅时刻绑定的设备状态对象。回调只向**这个** state 的
+        buffer 写帧：若 ``self._devices[did]`` 已不是它（disconnect 后注入接管、
+        或重连换了新状态），说明帧来自已失效的流，直接丢弃。这是对
+        disconnect→reconnect 竞态的根本防护——unregister 后原生解码线程仍可能有
+        在途帧 dispatch，若只按「did 有无 state」判活，注入接管后真流帧会混进
+        注入 buffer。
         """
 
         async def _on_decoded_video(
@@ -528,9 +631,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             decoded_unix_ms: int = 0,
         ):
             async with get_monitor().track_async(NodeName.CAMERA, "decode_video") as h:
-                state = self._devices.get(did)
-                if not state:
-                    # 设备已断开但回调仍在排队的 race: 不计入 fps_60s,
+                current = self._devices.get(did)
+                if current is not state:
+                    # state 已被替换/移除: 帧来自已失效的流。丢弃且不计入 fps_60s,
                     # 避免 stale 回调虚高 SOURCE 节点的处理速率指标。
                     h.skip_rolling()
                     return
@@ -547,16 +650,20 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     decoded_unix_ms=decoded_unix_ms,
                     decode_latency_ms=decode_latency_ms,
                 )
+                state.last_video_frame_ms = wall_ms
                 state.sync_buffer.put(
                     "decoded_video", decoded, stream_ts=ts, wall_ms=wall_ms
                 )
 
         return _on_decoded_video
 
-    def _make_decoded_audio_callback(self, did: str):
+    def _make_decoded_audio_callback(self, did: str, state: _CameraDeviceState):
         """Decoded audio frame callback: feeds decoded_audio track in sync buffer.
 
         Receives PCM numpy arrays (already resampled from PyAV in decoder thread).
+
+        ``state`` 语义同 video 回调: 只向订阅时刻绑定的 state 写帧,state 被替换
+        （disconnect→注入接管/重连）后丢弃,防 stale 音频帧混入新 buffer。
         """
 
         async def _on_decoded_audio(
@@ -568,8 +675,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             decoded_unix_ms: int = 0,
         ):
             async with get_monitor().track_async(NodeName.CAMERA, "decode_audio") as h:
-                state = self._devices.get(did)
-                if not state:
+                current = self._devices.get(did)
+                if current is not state:
                     # 设备已断开但回调仍在排队的 race: 不计入 fps_60s,
                     # 避免 stale 回调虚高 SOURCE 节点的处理速率指标。
                     h.skip_rolling()
