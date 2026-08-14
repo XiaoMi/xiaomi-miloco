@@ -300,12 +300,20 @@ def test_path_and_pattern_depth_limit():
 
 
 @pytest.mark.parametrize("path", [None, 1, ("iot", "dev1")])
-def test_non_string_path_and_pattern_are_rejected(path):
+def test_non_string_path_is_rejected(path):
     store = make_store()
     with pytest.raises(TypeError):
         store._commit(path, 1, source="t")
     with pytest.raises(TypeError):
-        store.snapshot(path)
+        store.subscribe(path, lambda change: None)
+
+
+@pytest.mark.parametrize("pattern", [None, 1, ["iot/**", 1], [None]])
+def test_non_string_pattern_is_rejected(pattern):
+    """序列里的每一条也要逐个校验，不能只看最外层是不是序列。"""
+    store = make_store()
+    with pytest.raises(TypeError):
+        store.snapshot(pattern)
 
 
 def test_depth_limit_covers_payload_nesting():
@@ -531,16 +539,65 @@ def test_snapshot_with_meta(monkeypatch):
         "iot": {
             "dev1": {
                 "prop": {
-                    "2.1": {
-                        "value": 26,
-                        "last_changed": 1754890000000,
-                        "last_reported": 1754890000000,
-                        "source": "miot",
-                    }
+                    "2.1": Entry(26, 1754890000000, 1754890000000, "miot"),
                 }
             }
         }
     }
+
+
+def test_snapshot_leaf_is_a_dict_only_for_subtrees():
+    """认叶子看类型。带元数据的叶子若也是 dict，遍历结果的人就分不出它和子树了。"""
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+
+    result = store.snapshot("iot/**", with_meta=True)
+
+    assert isinstance(result["iot"]["dev1"], dict)
+    assert not isinstance(result["iot"]["dev1"]["prop"]["2.1"], dict)
+
+
+# ---- 多 pattern ----
+
+
+def test_snapshot_merges_several_patterns():
+    """钉的是结果合并：另起一个子 dict 再赋值会把前一个 pattern 的结果整个盖掉。"""
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+    store._commit("iot/dev5/prop/3.2", True, source="miot")
+    store._commit("iot/dev9/prop/4.1", 1, source="miot")
+
+    assert store.snapshot(["iot/dev1/prop/2.1", "iot/dev5/prop/3.2"]) == {
+        "iot": {"dev1": {"prop": {"2.1": 26}}, "dev5": {"prop": {"3.2": True}}}
+    }
+
+
+@pytest.mark.parametrize(
+    "order", [("iot/**", "iot/dev1/prop/2.1"), ("iot/dev1/prop/2.1", "iot/**")]
+)
+def test_overlapping_patterns_merge_either_way(order):
+    """宽窄两个 pattern 重叠时，谁先谁后结果都得一样。"""
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+    store._commit("iot/dev5/prop/3.2", True, source="miot")
+
+    assert store.snapshot(list(order)) == store.snapshot("iot/**")
+
+
+def test_snapshot_of_no_patterns_is_empty():
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+
+    assert store.snapshot([]) == {}
+
+
+def test_snapshot_validates_every_pattern():
+    """一条非法就整个抛，不能悄悄按剩下的返回半份结果。"""
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+
+    with pytest.raises(ValueError):
+        store.snapshot(["iot/dev1/prop/2.1", "iot/**/prop"])
 
 
 @pytest.mark.parametrize(

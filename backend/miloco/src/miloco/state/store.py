@@ -13,7 +13,7 @@ import asyncio
 import logging
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
@@ -187,14 +187,9 @@ def _plain(node: dict[str, Node]) -> dict[str, Any]:
 
 
 def _leaf_view(entry: Entry, with_meta: bool) -> Any:
-    if not with_meta:
-        return entry.value
-    return {
-        "value": entry.value,
-        "last_changed": entry.last_changed,
-        "last_reported": entry.last_reported,
-        "source": entry.source,
-    }
+    # 带元数据时直接给出 `Entry` 而不是拆成 dict：叶子是不是 dict 决定了遍历结果的人能不能
+    # 认出它，拆开之后叶子和子树就分不出来了。`Entry` 是 frozen 的，共享引用安全。
+    return entry if with_meta else entry.value
 
 
 def _copy_leaves(node: Node, key: str, out: dict, with_meta: bool) -> None:
@@ -202,6 +197,8 @@ def _copy_leaves(node: Node, key: str, out: dict, with_meta: bool) -> None:
     if isinstance(node, Entry):
         out[key] = _leaf_view(node, with_meta)
         return
+    # 这里写的是 node 下的全部叶子，必然覆盖别的 pattern 在同一路径上收到的那部分，
+    # 所以不必像 `_collect_matches` 那样往已有的子树里合并
     sub: dict[str, Any] = {}
     for child_key, child in node.items():
         _copy_leaves(child, child_key, sub, with_meta)
@@ -238,10 +235,12 @@ def _collect_matches(
             if isinstance(child, Entry):
                 out[key] = _leaf_view(child, with_meta)
         elif isinstance(child, dict):
-            sub: dict[str, Any] = {}
+            # 多个 pattern 共用一个 out：已经收进来的子树要接着往里写，另起一个再赋值会把
+            # 前一个 pattern 的结果整个盖掉
+            sub = out.setdefault(key, {})
             _collect_matches(child, pattern, index + 1, sub, with_meta)
-            if sub:
-                out[key] = sub
+            if not sub:
+                del out[key]
 
 
 class StateStore:
@@ -407,16 +406,28 @@ class StateStore:
             node = self._locate(segments)
         return node if isinstance(node, Entry) else None
 
-    def snapshot(self, pattern: str, *, with_meta: bool = False) -> dict:
+    def snapshot(
+        self, pattern: str | Sequence[str], *, with_meta: bool = False
+    ) -> dict:
         """按 pattern 取一致快照，保留完整路径。一个都没匹配上时返回 `{}`。
 
-        全程在锁内，成本是 O(匹配到的叶子数)。热路径上别用 `**` 取全量——期间所有写入方
-        都阻塞在锁上。
+        可以传一组 pattern，结果合并成一棵树、共用同一次加锁。精确路径本身就是合法
+        pattern，所以想取任意几条路径就把它们直接传进来。
+
+        `with_meta` 时叶子是 `Entry` 而不是裸值。全程在锁内，成本是 O(匹配到的叶子数)。
+        热路径上别用 `**` 取全量——期间所有写入方都阻塞在锁上。
         """
-        segments = parse_pattern(pattern)
+        if isinstance(pattern, str):
+            patterns = [pattern]
+        elif isinstance(pattern, Sequence):
+            patterns = list(pattern)
+        else:
+            raise TypeError(f"pattern 必须是 str 或序列，收到 {type(pattern).__name__}")
+        parsed = [parse_pattern(item) for item in patterns]
         result: dict[str, Any] = {}
         with self._lock:
-            _collect_matches(self._root, segments, 0, result, with_meta)
+            for segments in parsed:
+                _collect_matches(self._root, segments, 0, result, with_meta)
         return result
 
     def _locate(self, segments: tuple[str, ...]) -> Node | None:

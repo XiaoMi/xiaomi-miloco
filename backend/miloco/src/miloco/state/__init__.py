@@ -5,5 +5,6 @@
 
 from miloco.state.store import StateStore
 from miloco.state.types import MISSING, Change, Entry
+from miloco.state.utils import flatten
 
-__all__ = ["MISSING", "Change", "Entry", "StateStore"]
+__all__ = ["MISSING", "Change", "Entry", "StateStore", "flatten"]
