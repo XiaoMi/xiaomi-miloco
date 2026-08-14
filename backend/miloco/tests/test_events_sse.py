@@ -93,11 +93,11 @@ def _make_clip(kind: str = "mp4") -> "tuple[bytes, str]":
     return b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100, kind
 
 
-def _artifacts(clips: dict | None = None):
-    """造 OmniEventArtifacts 实例,只填 clips,trace 留 None."""
+def _artifacts(clips: dict | None = None, ref_frames: dict | None = None):
+    """造 OmniEventArtifacts 实例,填 clips(+ 可选 ref_frames),trace 留 None."""
     from miloco.perception.snapshot_context import OmniEventArtifacts
 
-    return OmniEventArtifacts(clips=clips or {})
+    return OmniEventArtifacts(clips=clips or {}, ref_frames=ref_frames or {})
 
 
 @pytest.mark.asyncio
@@ -140,6 +140,49 @@ class TestSSEPublishFromPersist:
         # publish 在落盘完成后,snapshot_count 是真实值(语义:成功落 clip 的 device 数).
         # 1 device 落 1 个 clip.mp4 → count=1.
         assert payload["snapshot_count"] == 1
+
+    async def test_publish_includes_has_ref_when_ref_frame_saved(self, isolated_env):
+        """Smart Crop 事件(artifacts 带 ref_frames → 落 ref.jpg)→ SSE payload
+        has_ref=True,与 list 通路(_row_to_event)同口径.实时插入即带标记,
+        无需刷新页面(修复:has_ref 之前只进 list、不进 SSE payload)."""
+        _, fake_pipeline = isolated_env
+        from miloco.perception.client import _persist_meaningful_event
+
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="r1", reason="x", source_device_ids=["cam_living_01"])
+            ]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_living_01"],
+            artifacts=_artifacts(
+                {"cam_living_01": _make_clip()},
+                ref_frames={"cam_living_01": b"\xff\xd8\xff\xe0fake-ref"},
+            ),
+        )
+
+        assert len(fake_pipeline.publish_calls) == 1
+        _, payload = fake_pipeline.publish_calls[0]
+        assert payload["has_ref"] is True
+
+    async def test_publish_has_ref_false_without_ref_frame(self, isolated_env):
+        """普通事件(无 ref_frames)→ SSE payload has_ref=False."""
+        _, fake_pipeline = isolated_env
+        from miloco.perception.client import _persist_meaningful_event
+
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="x")]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_living_01"],
+            artifacts=_artifacts({"cam_living_01": _make_clip()}),
+        )
+
+        assert len(fake_pipeline.publish_calls) == 1
+        _, payload = fake_pipeline.publish_calls[0]
+        assert payload["has_ref"] is False
 
     async def test_no_publish_when_not_meaningful(self, isolated_env):
         """纯 caption(不入表)→ 也不 publish."""

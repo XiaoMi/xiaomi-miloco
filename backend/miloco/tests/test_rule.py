@@ -31,6 +31,8 @@ from miloco.rule.schema import (
     RuleLog,
     RuleMode,
     RuleUpdate,
+    TriggerOutcome,
+    aggregate_outcomes,
 )
 from miloco.rule.service import RuleService
 
@@ -257,6 +259,157 @@ async def test_rule_action_exception_ledger_keeps_attempted_value(
     assert kw["success"] is False
     assert kw["action_type"] == "set_property"
     assert kw["value_json"] == "true"
+
+
+def _make_duration_rule(rule_id, duration_seconds):
+    """STATE duration 规则；on_enter_desc 让 slot 非空。sample_interval 默认 3s，
+    duration_seconds=3 → maxlen=1（首帧即达标 FIRED）；=6 → maxlen=2（首帧 COUNTING）。"""
+    return Rule(
+        id=rule_id,
+        name=_name(TASK_ID, rule_id),
+        task_id=TASK_ID,
+        mode=RuleMode.STATE,
+        lifecycle=RuleLifecycle.PERMANENT,
+        enabled=True,
+        condition=_make_condition(),
+        on_enter_desc="提醒一下",
+        duration_seconds=duration_seconds,
+        duration_ratio=1.0,
+        exit_debounce_seconds=0,
+    )
+
+
+class TestTriggerOutcome:
+    """update_state 返回触发结论（供住户日志「触发状态」展示；引擎不留跨 cycle 状态）。"""
+
+    @pytest.mark.asyncio
+    async def test_first_enter_returns_fired(self, runner):
+        out = await runner.update_state("rule-1", "cam-001", True)
+        await runner.drain()
+        assert out is TriggerOutcome.FIRED
+
+    @pytest.mark.asyncio
+    async def test_still_in_returns_still_in(self, runner):
+        await runner.update_state("rule-1", "cam-001", True)  # ENTER → FIRED
+        out = await runner.update_state("rule-1", "cam-001", True)  # 持续
+        await runner.drain()
+        assert out is TriggerOutcome.STILL_IN
+
+    @pytest.mark.asyncio
+    async def test_flicker_absorbed_returns_still_in(self, runner):
+        await runner.update_state("rule-1", "cam-001", True)   # ENTER
+        await runner.update_state("rule-1", "cam-001", False)  # 单帧 False → pending_exit
+        out = await runner.update_state("rule-1", "cam-001", True)  # 抖动吸收
+        await runner.drain()
+        assert out is TriggerOutcome.STILL_IN
+
+    @pytest.mark.asyncio
+    async def test_absorbed_pending_exit_returns_still_in(self, runner):
+        """exit_debounce 期被 ENTER 打断（吸收伪退出）→ 规则持续在态 → STILL_IN
+        （与帧级抖动吸收同标签）。exit_debounce_seconds 设大，保证 debounce 不在本测试内 fire。"""
+        rule = _make_state_rule(
+            rule_id="st-absorb",
+            on_enter_actions=[_make_action()],
+            on_exit_actions=[_make_action()],
+            exit_debounce_seconds=60,
+        )
+        runner.add_rule(rule)
+        await runner.update_state("st-absorb", "cam-001", True)   # ENTER
+        await runner.update_state("st-absorb", "cam-001", False)  # 单帧 False → pending_exit
+        await runner.update_state("st-absorb", "cam-001", False)  # 确认 EXIT → 调度 debounce
+        await runner.update_state("st-absorb", "cam-001", True)   # debounce 期 1st true → 观察
+        out = await runner.update_state("st-absorb", "cam-001", True)  # 2nd true → 吸收 pending exit
+        await runner.drain()
+        assert out is TriggerOutcome.STILL_IN
+
+    @pytest.mark.asyncio
+    async def test_disabled_rule_returns_not_fired(self, runner):
+        runner.add_rule(_make_static_rule(rule_id="off-1", enabled=False))
+        out = await runner.update_state("off-1", "cam-001", True)
+        assert out is TriggerOutcome.NOT_FIRED
+
+    @pytest.mark.asyncio
+    async def test_duration_counting_when_window_not_full(self, runner):
+        runner.add_rule(_make_duration_rule("dur-count", duration_seconds=6))
+        out = await runner.update_state("dur-count", "cam-001", True)
+        await runner.drain()
+        assert out is TriggerOutcome.COUNTING
+
+    @pytest.mark.asyncio
+    async def test_duration_fired_when_window_met(self, runner):
+        # duration_seconds == sample_interval(3) → maxlen 1 → 首帧即达标
+        runner.add_rule(_make_duration_rule("dur-fire", duration_seconds=3))
+        out = await runner.update_state("dur-fire", "cam-001", True)
+        await runner.drain()
+        assert out is TriggerOutcome.FIRED
+
+    @pytest.mark.asyncio
+    async def test_duration_exit_not_overridden_by_duration_outcome(self, runner):
+        """STATE + duration 确认离开的那一周期返回 NOT_FIRED，不能被 dur_outcome 覆盖。
+
+        duration 规则的结论平时一律取 _evaluate_duration，但 EXITED 是 rule 级转换、
+        结论该由 _dispatch_event 给（NOT_FIRED）。若照旧走 out() 覆盖，STATE 已 fire 过
+        on_enter 时 _evaluate_duration 会早返 STILL_IN（「还在态内」）——恰与「刚确认离开」
+        语义相反。今天零后果只因唯一产生 EXITED 的调用点丢弃返回值；这里把它钉住。
+        """
+        runner.add_rule(_make_duration_rule("dur-exit", duration_seconds=3))
+        assert await runner.update_state("dur-exit", "cam-001", True) is TriggerOutcome.FIRED
+        await runner.drain()
+        # 首帧 False 只置 pending_exit（抗抖观察），第二帧才确认 EXIT
+        await runner.update_state("dur-exit", "cam-001", False)
+        out = await runner.update_state("dur-exit", "cam-001", False)
+        await runner.drain()
+        assert out is TriggerOutcome.NOT_FIRED, (
+            "EXITED 周期的结论被 duration 的 dur_outcome 覆盖成了语义相反的值"
+        )
+
+    @pytest.mark.asyncio
+    async def test_duration_exit_cycle_keeps_real_fire(self, runner):
+        """确认离开那一周期若 duration **真派发过**，结论必须是 FIRED、不能报 NOT_FIRED。
+
+        ratio<1（默认 0.6）时窗口末尾的 0 被容忍后仍可达标，而窗口填满的那一刻可以正好落在
+        确认离开的周期：maxlen=5 / ratio=0.6，喂 T,T,T,F,F —— 第 5 帧 _evaluate_duration
+        首次填满窗口、3/5=0.6 达标 → 真 _spawn_fire；同一周期 rule 级 True→False → EXITED。
+        此时若照 EXITED 一律取 _dispatch_event 的 NOT_FIRED，就把一次真派发说没了。
+        """
+        rule = _make_duration_rule("dur-exit-fire", duration_seconds=15)  # /3 → maxlen 5
+        rule.duration_ratio = 0.6
+        runner.add_rule(rule)
+        # round_id = int(time.time() / sample_interval)，同周期内的重复采样会被去重，
+        # 故每帧都要推进一个采样周期（sample_interval=3）。
+        with patch("miloco.rule.runner.time.time") as mt:
+            for i, val in enumerate([True, True, True, False, False]):
+                mt.return_value = 300.0 + i * 3
+                out = await runner.update_state("dur-exit-fire", "cam-001", val)
+        await runner.drain()
+        assert out is TriggerOutcome.FIRED, (
+            "duration 在确认离开那一周期真派发了，却被 EXITED 分支报成未触发"
+        )
+
+    def test_aggregate_outcomes_priority(self):
+        assert aggregate_outcomes([]) is None
+        assert (
+            aggregate_outcomes([TriggerOutcome.STILL_IN, TriggerOutcome.FIRED])
+            is TriggerOutcome.FIRED
+        )
+        assert (
+            aggregate_outcomes([TriggerOutcome.NOT_FIRED, TriggerOutcome.STILL_IN])
+            is TriggerOutcome.STILL_IN
+        )
+        assert (
+            aggregate_outcomes([TriggerOutcome.COUNTING, TriggerOutcome.STILL_IN])
+            is TriggerOutcome.COUNTING
+        )
+
+    def test_priority_map_covers_all_members(self):
+        """_OUTCOME_PRIORITY 必须覆盖 TriggerOutcome 全部成员。
+
+        aggregate_outcomes 对缺映射成员按最弱(-1)兜底、不抛错(避免在 client 的 finally
+        落库路径顶替原始异常),代价是漏补映射运行时不再暴露——只能靠本测试在 CI 拦住。
+        """
+        from miloco.rule.schema import _OUTCOME_PRIORITY
+
+        assert set(_OUTCOME_PRIORITY) == set(TriggerOutcome)
 
 
 @pytest.fixture

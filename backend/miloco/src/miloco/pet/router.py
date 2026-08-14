@@ -11,11 +11,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
-import cv2
-import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -24,6 +23,7 @@ from miloco.config import get_settings
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.perception.engine.identity import _avatar
+from miloco.perception.engine.identity._image_utils import is_still_image_container
 from miloco.perception.engine.identity.pet_library import (
     PetNameConflict,
     get_pet_library,
@@ -143,6 +143,18 @@ async def observe_pet_media(
         if not raw:
             raise HTTPException(status_code=400, detail="empty file")
         raws.append(raw)
+    # 判形复核（读到字节之后）：HEIF/AVIF 与 mp4/mov 共用 ISO BMFF 容器，客户端若把一张 HEIC
+    # 报成 video/*，按视频抽帧会静默拿到一块 512x512 瓦片当整帧（ffmpeg 不拼 HEIC 的 tile
+    # grid），全链路零报错地在错素材上跑。这里按 brand 把它掰回图片路径——不报错是有意的：
+    # Agent 通路上任何「报错让重试」都会被 skill 的纠错表放大成新的误用。
+    if is_video and is_still_image_container(raws[0][:16]):
+        logger.info("event=pet_observe_still_image_declared_as_video 已按图片处理")
+        is_video = False
+        # 体积闸要跟着改判走：上面按视频档放过了 100MB，掰成图片后必须用图片档 15MB 重卡一次，
+        # 否则「谎报成 video」就成了绕过图片体积闸的口子（解码后的像素闸能兜住内存，但请求体
+        # 本身的上限该由这里守）。
+        if len(raws[0]) > _OBSERVE_IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=400, detail="图片过大（单张上限 15 MB）")
     use_grounding = (
         settings.features.pet_head_grounding if grounding is None else grounding
     )
@@ -154,7 +166,7 @@ async def observe_pet_media(
             grounding=use_grounding,
             body_grounding=settings.features.pet_body_grounding,
         )
-    except MediaDecodeError as e:  # 字节一张都解不出（HEIC/AVIF/损坏）→ 400，与「无动物」区分
+    except MediaDecodeError as e:  # 字节一张都解不出（截断/损坏/非图片）→ 400，与「无动物」区分
         raise HTTPException(status_code=400, detail=str(e)) from e
     except OmniDescribeError as e:  # 模型没给可解析 JSON → 502 + 可读原因（前端直接展示）
         raise HTTPException(status_code=502, detail=str(e)) from e
@@ -245,11 +257,15 @@ async def get_pet_avatar(pet_id: str, current_user: str = Depends(verify_token))
 )
 async def upload_pet_avatar(
     pet_id: str,
-    image: UploadFile = File(..., description="头像图片（jpg/jpeg/png/webp）"),
+    image: UploadFile = File(
+        ..., description="头像图片（常见格式均可，含 iPhone 的 HEIC）"
+    ),
     current_user: str = Depends(verify_token),
 ):
     # 闸门顺序与 person 端点对齐：功能门 → 存在性(先于 read) → 体积前置闸 → 读 → 读后兜底
-    # → cv2 验真 → 按魔数取真实 ext（不信任文件名后缀，维持 盘上后缀/Content-Type/真实字节 一致）。
+    # → 归一化（验真 + 取真实 ext；非直落格式解码后重编无损 webp，维持 盘上后缀/Content-Type/
+    # 真实字节 一致）。体积闸卡的是**上传**字节；无损重编后可能大于该闸，这是有意的——闸的
+    # 用途是拦超大请求体，不是约束盘上物件。
     _require_pet_id(pet_id)
     _require_pet_enabled()
     lib = get_pet_library()
@@ -260,11 +276,16 @@ async def upload_pet_avatar(
     data = await image.read()
     if len(data) > _avatar.AVATAR_MAX_BYTES:  # size 缺失时兜底
         raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
-    if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
-        raise HTTPException(status_code=400, detail="无法识别的图片")
-    ext = _avatar.sniff_image_ext(data)
-    if ext is None:
-        raise HTTPException(status_code=400, detail="不支持的图片格式（仅 jpg/png/webp）")
+    # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、无损 WebP 编码），同进程还并行着
+    # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（本仓对这类活儿的一致口径：person 侧 7 处解码同样走 to_thread）。
+    normalized = await asyncio.to_thread(
+        _avatar.normalize_for_storage, data, prefer="webp"
+    )
+    if normalized is None:
+        raise HTTPException(
+            status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）"
+        )
+    data, ext = normalized
     try:
         pet = lib.set_avatar(pet_id, data=data, ext=ext)
     except KeyError as e:
@@ -281,7 +302,9 @@ async def upload_pet_avatar(
 )
 async def upload_pet_reference_crops(
     pet_id: str,
-    crops: list[UploadFile] = File(..., description="参考 crop（客户端已裁好的 JPEG）"),
+    crops: list[UploadFile] = File(
+        ..., description="参考 crop（常见格式均可；非 jpg/png/webp 会转 JPEG 落盘）"
+    ),
     scores: list[float] = Form(
         [], description="每张的【绝对】质量分（conf×sharpness×area_ratio），与 crops 对齐"
     ),
@@ -317,15 +340,20 @@ async def upload_pet_reference_crops(
             raise HTTPException(status_code=400, detail="参考图过大（单张上限 5 MB）")
         if not raw:
             raise HTTPException(status_code=400, detail="empty reference crop")
-        # 验真（同 avatar 口径）：不验图的话任意字节都能存成 ref_crop_*.jpg 并**计入张数**，
-        # 识别侧再静默跳过 → 界面显示「3 张参考图」而实际注入 0 张。
-        if cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR) is None:
-            raise HTTPException(status_code=400, detail="无法识别的参考图")
-        if _avatar.sniff_image_ext(raw) is None:
+        # 归一化兼验真（同 avatar 口径）：不验图的话任意字节都能存成 ref_crop_*.jpg 并**计入
+        # 张数**，识别侧再静默跳过 → 界面显示「3 张参考图」而实际注入 0 张。
+        # prefer="jpg"：参考图的唯一消费者是 omni，pet_refs 拼图时恒重编 JPEG q85，存 webp
+        # 只是多一道转换；且 ref_crop_N.jpg 的硬编码后缀牵动 glob / 下标解析，不宜与内容脱钩。
+        # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、再重编 JPEG），同进程还并行着
+        # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（本仓一致口径：person 侧 7 处解码同样走 to_thread）。
+        normalized = await asyncio.to_thread(
+            _avatar.normalize_for_storage, raw, prefer="jpg"
+        )
+        if normalized is None:
             raise HTTPException(
-                status_code=400, detail="不支持的参考图格式（仅 jpg/png/webp）"
+                status_code=400, detail="无法打开这张参考图（文件可能损坏，或不是图片）"
             )
-        data.append(raw)
+        data.append(normalized[0])
     fn = lib.append_reference_crops if mode == "append" else lib.set_reference_crops
     try:
         pet = fn(pet_id, data, scores=scores or None)

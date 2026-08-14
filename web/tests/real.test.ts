@@ -4,6 +4,7 @@
  * 覆盖:
  * - realListActivity:GET /api/events(meaningful_events)字段映射 + 分页 query
  * - realGetUsageStats:GET /api/admin/token-usage/{buckets,daily} 折算
+ * - realEventRefUrl / realEventCropMeta:Smart Crop 参考帧 URL + crop 坐标契约
  * - 任务详情写接口:PATCH /api/tasks/{id}(描述)、PATCH /api/rules/{id}(触发条件)
  *
  * 不连真 backend:vi 拦截 fetch,伪造 NormalResponse 形状;afterEach 还原原 fetch.
@@ -11,6 +12,7 @@
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import i18n from "@/i18n";
+import { ApiError } from "@/api/client";
 import {
   realListActivity,
   realListDevices,
@@ -21,6 +23,8 @@ import {
   realDeleteOmniConfig,
   realListOmniModels,
   realTestOmniConfig,
+  realEventRefUrl,
+  realEventCropMeta,
   realUpdateRuleQuery,
   realUpdateTaskDescription,
   _resetUsageStatsCache,
@@ -133,6 +137,8 @@ describe("realListActivity — /api/events 契约", () => {
         snapshot_count: 3,
         device_ids: ["cam_living_01"],
         rule_names: { r1: "[sitting_reminder] 坐姿监测" },
+        has_trace: true,
+        has_ref: true,
       },
     ]);
 
@@ -145,7 +151,23 @@ describe("realListActivity — /api/events 契约", () => {
       device_ids: ["cam_living_01"],
       has_rule_hit: true,
       rule_names: { r1: "[sitting_reminder] 坐姿监测" },
+      has_trace: true,
+      has_ref: true,
     });
+  });
+
+  it("老 backend 不返 has_ref → undefined(前端据此不渲染参考卡,不是 false 也不报错)", async () => {
+    mockFetch([
+      {
+        event_id: "e-old",
+        timestamp: 1780374052720,
+        text: "x",
+        snapshot_count: 1,
+        device_ids: ["cam_1"],
+      },
+    ]);
+    const events = await realListActivity();
+    expect(events[0].has_ref).toBeUndefined();
   });
 
   it("空 events 数组返空列表", async () => {
@@ -174,6 +196,101 @@ describe("realListActivity — /api/events 契约", () => {
     expect(calls[0]).toContain("before=1780999999999");
     expect(calls[0]).toContain("limit=100");
     expect(calls[0]).toContain("offset=50");
+  });
+});
+
+describe("Smart Crop 参考帧契约 — realEventRefUrl / realEventCropMeta", () => {
+  // resolveToken 读 window.__MILOCO_TOKEN__(backend SPA handler 注入),用例间要还原,
+  // 否则带 token 的用例会污染后面断言"裸路径"的用例。
+  const originalToken = window.__MILOCO_TOKEN__;
+  afterEach(() => {
+    window.__MILOCO_TOKEN__ = originalToken;
+  });
+
+  it("无 token 时是裸路径(<img> 不能设 header,所以只能走 query)", () => {
+    window.__MILOCO_TOKEN__ = undefined;
+    expect(realEventRefUrl("e1", "cam_1")).toBe("/api/events/e1/ref/cam_1");
+  });
+
+  it("有 token 时拼 ?token=,且 event/device/token 都过 encodeURIComponent", () => {
+    window.__MILOCO_TOKEN__ = "tok/en+1";
+    expect(realEventRefUrl("e 1", "cam#1")).toBe(
+      "/api/events/e%201/ref/cam%231?token=tok%2Fen%2B1",
+    );
+  });
+
+  it("占位 token 未被注入时不当真 token 用(不拼 query)", () => {
+    window.__MILOCO_TOKEN__ = "__MILOCO_INJECT_TOKEN_HERE__";
+    expect(realEventRefUrl("e1", "cam_1")).toBe("/api/events/e1/ref/cam_1");
+  });
+
+  it("realEventCropMeta：解出 region / frame_size / crop 短边", async () => {
+    mockFetchByUrl({
+      "/api/events/e1/crop/cam_1": {
+        code: 0,
+        message: "ok",
+        data: {
+          region_xyxy: [430, 122, 590, 318],
+          frame_size_wh: [640, 360],
+          crop_short_edge: 360,
+        },
+      },
+    });
+    const crop = await realEventCropMeta("e1", "cam_1");
+    expect(crop).not.toBeNull();
+    expect(crop!.region_xyxy).toEqual([430, 122, 590, 318]);
+    expect(crop!.frame_size_wh).toEqual([640, 360]);
+    expect(crop!.crop_short_edge).toBe(360);
+  });
+
+  it("410(这台 device 本次没裁切 / trace 已清)→ resolve null,不当异常抛", async () => {
+    // 410 是**预期结果**:调用方拿 null 就能判定「无 crop」并整卡不渲染,
+    // 不必 import ApiError 去认状态码(组件只依赖 @/api 门面).
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ code: 1, message: "crop meta not available" }),
+        { status: 410, headers: { "Content-Type": "application/json" } },
+      ),
+    ) as unknown as typeof fetch;
+
+    await expect(realEventCropMeta("e1", "cam_1")).resolves.toBeNull();
+  });
+
+  it("非 410 错误照旧 reject——「没问出来」不能和「确定没有」混成同一个 null", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 1, message: "boom" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+
+    await expect(realEventCropMeta("e1", "cam_1")).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("500 crop meta unreadable(裁过但 trace 读坏)→ reject,不折成 null", async () => {
+    // 后端刻意用 500 而非 410 表达这一档:ref.jpg 还在盘上,折成 null 会让
+    // RefFrameCard 把整张参考卡藏掉,丢的信息远多于少画一个框。
+    // 与上一条的区别只在 message —— 单独立一条是为了钉住这个后端契约:
+    // 哪天有人把它改回 410 图省事,这里会红。
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 1, message: "crop meta unreadable" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+
+    await expect(realEventCropMeta("e1", "cam_1")).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("404(event/device 不存在)也 reject,不折成 null", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 1, message: "not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+
+    await expect(realEventCropMeta("e1", "cam_1")).rejects.toBeInstanceOf(ApiError);
   });
 });
 

@@ -88,3 +88,14 @@ openspec
 _workspace
 _local/
 xaf/
+
+# 离线评测产物：真实家庭场景抽帧 / 视频，文件名还带被摄对象标签，只在本地留档，
+# 绝不入库（本仓库 remote 是公开的，一次 `git add -A` 就没法从历史里摘干净）。
+# 不挡 eval/ 下的脚本与结论文本——那些将来若要入库仍可正常 add。
+eval/results/
+# 数据集抽样清单：不是"产物目录"却同样带标签（文件名里直接带被摄对象的性别与年龄段），
+# 只挡 results/ 会从这条缝里漏出去。
+eval/sampled_*.json
+
+# opengrep / semgrep 本地扫描产物（含全量命中片段与绝对路径），只在本地看，不入库。
+.opengrep-out/

@@ -5,7 +5,15 @@
   > ``$MILOCO_HOME/config.json`` > 默认值。
 - Token 由 miloco 后端 bootstrap 写入 ``server.token``，CLI 不应覆盖。
 
-schema 白名单与类型由常量 ``_SCHEMA_PATHS`` 维护；新增字段时两处同步。
+schema 白名单与类型由常量 ``_SCHEMA_PATHS`` 维护。新增字段时按段同步：核心段
+（``debug`` / ``server`` / ``agent`` / ``model``）同步 ``settings.schema.json``；其余段
+（``perception`` / ``rule`` / ``camera`` …）schema.json 按设计不覆盖（见
+``knowledge/06-dev-guide/dev-guide.md``），以 ``settings.yaml`` + ``settings.py`` 的
+pydantic 模型为准。
+
+默认值（元组第 2 项）一律对齐后端**实际生效**的默认值：``settings.yaml`` 里有该 key 就取
+yaml 的值，没有才取 ``settings.py`` 对应 pydantic 字段的默认值。对齐由
+``backend/miloco/tests/test_cli_schema_defaults.py`` 守卫。
 """
 
 from __future__ import annotations
@@ -98,6 +106,30 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "",
         "仅 Gemini：每帧视觉 token 预算档位（\"\"/\"low\"=省，\"high\"=小目标更清但 4× token），下一周期生效",
     ),
+    # Smart Crop 双闸相与，两者都 true 才裁切；默认值同下方注释的对齐约定（yaml 里都是 true）。
+    # 写「重启生效」而非「热读」：闸位在**后端进程内**确实是每窗口热读的，但 get_settings() 有
+    # 进程级 lru_cache，只有 admin PUT 那条路会跟着调 reset_settings() 清缓存。CLI 是另一个进程、
+    # 只落盘，清不掉运行中后端的缓存 —— `--no-restart` 时改了等于没改（正是「以为已经关掉了、
+    # 实际还在裁」那种失效态），不带 flag 时 config set 会顺手重启后端。同表 video_short_edge
+    # 也是后端每帧热读却标「重启生效」，这张表的惯例是描述 CLI 侧可观测的生效方式。
+    #
+    # 另注：这两条把 `perception.engine.crop_enhance` 带进了 _dict_paths()。补进白名单之前唯一的
+    # 关闸办法是手改 config.json，若当时写的是简写 `"crop_enhance": false`（后端宽容，`raw or {}`
+    # 正好当关闸），CLI 从此会在任何 load_config() 上 raise 结构错误 —— 连 config set 自己也修不了，
+    # 得先手改成 object。
+    "perception.engine.crop_enhance.enabled": (
+        bool,
+        True,
+        "Smart Crop 发版级开关（默认值在随包 settings.yaml）：关闭即整个智能裁切能力不可用"
+        "（前端开关随之置灰），重启生效。注意这里写的是 config.json，本机从此固定读它，"
+        "后续发版改 yaml 对本机不再生效",
+    ),
+    "perception.engine.crop_enhance.user_enabled": (
+        bool,
+        True,
+        "Smart Crop 单机用户开关（同 UI「智能裁切增强」）；与 enabled 相与，重启生效"
+        "（在 UI 拨这个开关走 admin API，则热更、下个感知窗口生效）",
+    ),
     "perception.collect.window_size": (
         int,
         4,
@@ -133,7 +165,8 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "low",
         "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃；"
         "值域 low|medium|high；low=不过滤（默认，向后兼容）。"
-        "result.suggestions 保留完整，仅 agent 派发受限；下个感知周期即生效",
+        "result.suggestions 保留完整，仅 agent 派发受限；重启生效"
+        "（在 UI 拨这个滑条走 admin API，则热更、下个感知周期生效）",
     ),
 }
 

@@ -425,7 +425,7 @@ def test_reference_crops_append_over3_400(client):
 
 def test_reference_crops_reject_non_image(client):
     # 回归：不验图的话任意字节都能存成 ref_crop_*.jpg 并**计入张数**，识别侧再静默跳过 →
-    # 界面显示「N 张参考图」而实际注入 0 张。同头像端点口径：imdecode 验真 + 魔数白名单。
+    # 界面显示「N 张参考图」而实际注入 0 张。同头像端点口径：normalize_for_storage 解码验真（非白名单格式转码落盘，不再 400）。
     pet = _create(client)
     assert _upload_refs(client, pet["id"], [b"not-an-image"], [1]).status_code == 400
     # 存量未被污染：一张都没落
@@ -494,3 +494,58 @@ def test_observe_unparsable_model_output_502(client, monkeypatch):
     body = r.json()
     # 生产经全局 exception_handler 落在 message；裸 FastAPI（本测试 app）落在 detail
     assert "外观描述" in (body.get("message") or body.get("detail") or "")
+
+
+# ── HEIC / ISO BMFF 判形（iPhone 相机默认格式）─────────────────────────────
+
+def test_avatar_accepts_heic_and_stores_webp(client):
+    """iPhone HEIC 传头像：原先被 400「不支持的图片格式」，现在解码后重编无损 webp 落盘。"""
+    from tests.test_image_decode import HEIC_BYTES
+
+    pet = _create(client)
+    r = client.post(
+        f"/api/identity/pets/{pet['id']}/avatar",
+        files={"image": ("IMG_1.HEIC", HEIC_BYTES, "image/heic")},
+    )
+    assert r.status_code == 200
+    assert r.json()["data"]["avatar_ext"] == "webp"
+    got = client.get(f"/api/identity/pets/{pet['id']}/avatar")
+    assert got.status_code == 200
+    assert got.headers["content-type"] == "image/webp"
+
+
+def test_reference_crops_accept_heic_and_store_jpeg(client):
+    """参考图落 JPEG（非 webp）：唯一消费者 omni 恒收 JPEG，且 ref_crop_N.jpg 后缀是硬编码。"""
+    from tests.test_image_decode import HEIC_BYTES
+
+    pet = _create(client)
+    r = client.post(
+        f"/api/identity/pets/{pet['id']}/reference-crops",
+        files=[("crops", ("a.HEIC", HEIC_BYTES, "image/heic"))],
+        data={"mode": "replace", "scores": ["1.0"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["reference_crop_count"] == 1
+    got = client.get(f"/api/identity/pets/{pet['id']}/reference-crops/0")
+    assert got.status_code == 200
+    assert got.content[:3] == b"\xff\xd8\xff"  # 真的是 JPEG，不是 webp
+
+
+def test_observe_heic_declared_as_video_is_treated_as_image(client, monkeypatch):
+    """回归：HEIF/AVIF 与 mp4/mov 共用 ftyp 容器，客户端把 HEIC 报成 video/* 时若按视频抽帧，
+    ffmpeg 只给 512x512 瓦片（不拼 tile grid）→ 静默在错素材上跑。须按 brand 掰回图片路径。"""
+    from tests.test_image_decode import HEIC_BYTES
+
+    holder = {}
+
+    async def _fake(medias, *, is_video, grounding, body_grounding=True, max_frames=60):
+        holder["is_video"] = is_video
+        return {"detected": False, "warnings": []}
+
+    monkeypatch.setattr("miloco.pet.observe.observe_pet", _fake)
+    r = client.post(
+        "/api/identity/pets:observe",
+        files={"media": ("clip.mov", HEIC_BYTES, "video/quicktime")},
+    )
+    assert r.status_code == 200, r.text
+    assert holder["is_video"] is False  # 被掰回图片路径

@@ -15,11 +15,15 @@ import { toast } from "./Toast";
 // 但组件 state 需要确定值,单独拎一个具体类型的默认常量兜住:接口"可能没"、控件"永远有"。
 const DEFAULT_MIN_URGENCY: MinSuggestionUrgency = "low";
 
-// 与 backend settings.yaml perception.engine.input + perception.collect.window_size 对齐
+// 与 backend 默认值对齐：video_short_edge / omni_fps 见 settings.yaml 的
+// perception.engine.input，window_size 见 perception.collect，smart_crop_enabled 见
+// perception.engine.crop_enhance.user_enabled。min_suggestion_urgency 例外——它的默认值
+// 不在 yaml 里，只在 settings.py::PerceptionSettings 的 pydantic Field（照 yaml 找会找不到）。
 const DEFAULTS: PerceptionConfig = {
   video_short_edge: 512,
   omni_fps: 1,
   window_size: 4,
+  smart_crop_enabled: true,
   min_suggestion_urgency: DEFAULT_MIN_URGENCY,
 };
 
@@ -44,6 +48,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [videoShortEdge, setVideoShortEdge] = useState(DEFAULTS.video_short_edge);
   const [omniFps, setOmniFps] = useState(DEFAULTS.omni_fps);
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
+  // Smart Crop 用户开关。与分辨率档正交（各自独立 dirty / 各自独立生效），
+  // 不是第五个分辨率档 —— crop 视频的短边本身也按所选档等比跟随。
+  const [smartCrop, setSmartCrop] = useState(DEFAULTS.smart_crop_enabled === true);
   const [minUrgency, setMinUrgency] = useState<MinSuggestionUrgency>(
     DEFAULT_MIN_URGENCY,
   );
@@ -73,6 +80,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setVideoShortEdge(c.video_short_edge);
         setOmniFps(c.omni_fps);
         setWindowSize(c.window_size);
+        setSmartCrop(c.smart_crop_enabled === true);
         // 老 backend 若不返 min_suggestion_urgency 时回退到"不过滤"默认,与 backend 的
         // Literal default 对齐,不误导用户以为拿到了远端值。
         setMinUrgency(c.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY);
@@ -94,13 +102,18 @@ export function SettingsDrawer({ open, onClose }: Props) {
       .finally(() => setLoading(false));
   }, [open, t]);
 
+  // 发版级开关没放开时开关不可用（同 schedulerAvailable 的降级套路）：拨动不写盘，
+  // 故置灰 + 换 hint，避免呈现「看着能动、实则后端不裁」的控件。
+  // 老后端不返 smart_crop_available → undefined → 同样置灰。
+  const smartCropAvailable = config?.smart_crop_available === true;
   const perceptionDirty =
     config != null &&
     (videoShortEdge !== config.video_short_edge ||
       omniFps !== config.omni_fps ||
       windowSize !== config.window_size ||
-      minUrgency !==
-        (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY));
+      // 不可用时恒 false：置灰的开关不该产出待保存改动
+      (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)) ||
+      minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY));
   // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
   // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
   // 实则静默丢弃」的控件。
@@ -130,9 +143,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
           video_short_edge: videoShortEdge,
           omni_fps: omniFps,
           window_size: windowSize,
+          // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
+          ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
           min_suggestion_urgency: minUrgency,
         });
         setConfig(updated);
+        setSmartCrop(updated.smart_crop_enabled === true);
         if (updated.restart_ok === false) {
           toast(t("settings.restartFailed"), "warn");
         } else {
@@ -165,6 +181,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setVideoShortEdge(DEFAULTS.video_short_edge);
     setOmniFps(DEFAULTS.omni_fps);
     setWindowSize(DEFAULTS.window_size);
+    // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
+    if (smartCropAvailable) setSmartCrop(DEFAULTS.smart_crop_enabled === true);
     setMinUrgency(DEFAULT_MIN_URGENCY);
     // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
     // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。
@@ -256,6 +274,39 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 </div>
                 <p className="text-caption text-text-tertiary">
                   {t("settings.videoShortEdgeHint")}
+                </p>
+              </div>
+
+              {/* 智能裁切增强（Smart Crop）——独立开关，不是第五个分辨率档：
+                  分辨率决定「多清晰」，裁切决定「看哪一块」，两者叠加生效
+                  （crop 视频短边按上面所选档等比跟随）。 */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-body font-medium text-text-primary">
+                    {t("settings.smartCrop")}
+                  </label>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={smartCrop}
+                    aria-label={t("settings.smartCrop")}
+                    disabled={!smartCropAvailable}
+                    onClick={() => setSmartCrop((v) => !v)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      smartCrop ? "bg-brand-primary" : "bg-border"
+                    } ${smartCropAvailable ? "" : "opacity-50 cursor-not-allowed"}`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
+                        smartCrop ? "translate-x-[22px]" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+                <p className="text-caption text-text-tertiary">
+                  {smartCropAvailable
+                    ? t("settings.smartCropHint")
+                    : t("settings.smartCropUnavailable")}
                 </p>
               </div>
 

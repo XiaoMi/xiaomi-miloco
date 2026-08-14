@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import av
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketState
+from miot.tuning import ENCODE_THREADS
 from miot.types import MIoTCameraCodec
 
 from miloco.manager import get_manager
@@ -128,6 +129,8 @@ class NalClipRecorder:
         self._stream.width = width
         self._stream.height = height
         self._stream.pix_fmt = "yuv420p"
+        # 抓片段串行跑在自己的 clip-enc 线程里;单线程理由见 ENCODE_THREADS 定义处。
+        self._stream.thread_count = ENCODE_THREADS
         # ultrafast keeps encode at ~3-8ms/frame on Apple Silicon.
         self._stream.options = {
             "preset": "ultrafast",

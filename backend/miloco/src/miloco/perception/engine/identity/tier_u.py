@@ -19,7 +19,8 @@
 
 ⚠️ 零额外推理硬约束:任何 ReID embedding **都从 ReIDProvider 取**(读跟踪侧
 Track.features deque 末尾元素),严禁本文件调 HumanReID.extract_feature。
-单测 ``test_tier_u_no_extra_extract`` 是护栏。
+护栏是 ``tests/perception/engine/identity/test_tier_u.py::test_pool_never_calls_extract_feature``
+(跨包, 在 tests/ 树下)。
 """
 
 from __future__ import annotations
@@ -31,13 +32,16 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Iterable
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.perception.engine.identity._image_utils import (
+    SHARPNESS_NORM_REF as _SHARPNESS_NORM_REF,
+)
 from miloco.perception.engine.identity._image_utils import (
     hamming as _hamming,
 )
@@ -95,10 +99,6 @@ _W_SHARP: float = 0.2
 # aspect 评分用的 "sweet spot": w/h = 1:2.5 = 0.4 = 站立人形标准比例。
 # 偏离 sweet spot 越远 → aspect_score 越低。
 _ASPECT_SWEET: float = 0.4
-
-# sharpness 归一化参考值 (Laplacian variance), 沿用 extractor._SHARPNESS_NORM_REF。
-# 跟 v4 §2.2.3 TierA 评分公式同口径。
-_SHARPNESS_NORM_REF: float = 300.0
 
 
 def _aspect_dist_normalized(
@@ -222,7 +222,13 @@ class TierUConfig:
     # 误隐藏。逐张比对(不 mean): tier_c 样本差异大, mean 后反而模糊化。
     reid_threshold_tier_c_dedup: float = 0.90
     # quality gate(crop 进 L2 前过滤)
-    area_ratio_min: float = 0.05
+    # 曾有一个 area_ratio_min 字段:不参与任何判定(_pass_quality_gate 不校面积占比 ——
+    # 这里拿不到 frame size,面积由 detector_conf 间接保障),也不在 yaml、不在前端,
+    # 连"可调但无效"都不构成,已删除。
+    # 注:它并非"全仓无引用" —— dump_to 用 vars(self.config) 原样落盘,所以旧快照的
+    # manifest 里还带着它;load_from 会把认不出来的键丢掉并告警(见那边的说明)。
+    # ⚠️ 以下这组阈值在 identity/extractor.py 有一套同名语义的模块级常量(_GATE_*),
+    # 两套之间无任何绑定 —— 不要假设它们一致,改这里之前请直接比对那边的代码。
     aspect_min: float = 0.25                 # w/h ≥ 0.25 = 不接受比 1:4 更瘦的 bbox
                                              # (0.20→0.25:1:5 极瘦杆即使 sharpness 高
                                              # 也不利辨认,直接源头丢)
@@ -1918,6 +1924,9 @@ class TierUPool:
 
         v1 快照真需要离线分析时,显式手改 manifest.json 里 ``"version": 1 → 2`` +
         把 entries[*].cam_id 重写到 device_id 再 load(没工具脚本,自己 grep 改)。
+
+        版本闸管的是**字段语义变化**。纯粹的死字段删除不走它:快照 config 里认不出来的
+        键直接丢掉并告警,因为那种字段本就不影响任何判定,为它把存量快照全部作废不划算。
         """
         import json
         import os
@@ -1931,7 +1940,22 @@ class TierUPool:
             )
         arrays = np.load(os.path.join(path, "arrays.npz"))
 
-        pool_config = config if config is not None else TierUConfig(**manifest["config"])
+        if config is not None:
+            pool_config = config
+        else:
+            # dump 侧是 vars(self.config) 原样落盘,所以快照里可能带着本版本已经删掉的
+            # 死字段;直接 TierUConfig(**raw) 会抛 TypeError,而这是排障工具 —— 排障现场
+            # 最不该遇到的就是工具自己炸,且那个报错完全不提示该怎么办。
+            # 认不出来的键**丢掉并告警**:纯死字段的删除不改变任何语义,不值得 bump 版本
+            # 把存量快照全部作废(版本闸管的是字段语义变化,见上面 docstring)。
+            raw = manifest["config"]
+            known = {f.name for f in fields(TierUConfig)}
+            dropped = sorted(set(raw) - known)
+            if dropped:
+                logger.warning(
+                    "[TierU] 快照 config 含本版本已不存在的字段, 已忽略: %s", dropped,
+                )
+            pool_config = TierUConfig(**{k: v for k, v in raw.items() if k in known})
         pool = cls(config=pool_config, reid_provider=reid_provider, now_fn=now_fn)
 
         def _dict_to_crop(d: dict) -> CropEntry:

@@ -466,6 +466,7 @@ miloco-cli identity register from-cluster \
 ### 约束 2 · 视频附件必须以原文件提交, 禁止抽帧后当图片处理
 
 视频文件(.mp4 / .mov / .webm / .avi / .mkv 等)必须直接 `--video <path>`, **不要** ffmpeg 抽帧后走 `--image`。
+⚠️ 反过来也别搞错:**照片一律走 `--image`**,包括 iPhone 的 .HEIC/.HEIF 与 .AVIF。它们与 mp4/mov 共用同一种容器,看着像视频其实是静态图;当视频处理只会拿到画面的一小块瓦片,结果是「没识别到人」而且不报错。CLI 已按容器品牌区分,照片不会再被误拦去 `--video`。
 
 `❌ ffmpeg ... xxx.mp4.png && register preview --image xxx.mp4.png`
 `✅ register preview --video xxx.mp4 --topk 5 --pretty`
@@ -532,6 +533,7 @@ miloco-cli identity register preview \
 | HTTP 4xx / 5xx / CLI 连不上服务 | 不重试,告知服务不可用                    | "服务暂时不可用,稍后再试。"                                                                       |
 | CLI 非零 exit code            | 不抛 stack,用人话告知                    | "刚才登记没成功,稍后再试一次"                                                                     |
 | `--image` 误传视频文件         | CLI 已 exit 1 防呆,按提示改 `--video`     | (CLI 自带提示)                                                                                  |
+| 照片(含 .HEIC)被提示「是视频」 | 不该发生;若真遇到**不要**改 `--video`——那会拿到瓦片、静默返回「没识别到人」。直接报告异常 | "这张照片被系统判成视频了,我先不硬转,免得结果不准" |
 | 候选 session 已过期(> 10 min)| 让用户重发素材                            | "刚才的样本预览已过期,重新发一下素材吧"                                                            |
 | 用户上传单张图,样本数不足      | 不强制重发,提示更优做法                  | "找到 K 张样本,已入库。要识别更稳,后面可以补几张不同角度,或直接拍段 15 秒视频。"                   |
 | 用户上传**非图非视频**附件(PDF / 文档 / 音频 / 压缩包) | 不支持,引导改发图 / 视频         | "目前只能用图片或视频登记。帮我重发一张照片或一段视频?"                                            |

@@ -146,6 +146,18 @@ Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -D
 
 ---
 
+## 一键升级
+
+（Web 面板的升级提示 + 一键升级，设计见 [一键升级](../03-features/one-click-upgrade.md)。）
+
+| 现象                          | 排查 / 解决                                                                                                                                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 面板不出"有新版本"提示        | 仅 release（归档/wheel）部署才提示；git checkout(dev) 部署不显示升级入口（改走 `git pull` 重装）；且需能连到 GitHub（连不上时静默不提示）                                                         |
+| dev(git) 部署想升级但没有按钮 | 一键升级仅 release 开放；dev 到主机 `git pull` 后按 [开发指南](dev-guide.md) 重装（后端对 dev 的 `/upgrade/run` 也直接拒绝）                                                                      |
+| 升级卡住 / 页面显示失败或超时 | 看 `$MILOCO_HOME/log/upgrade.log` 是否还在写（冷升级要下大包 + 解压模型，可能数分钟）；确认服务已回来（`miloco-cli service status`）；仍失败则到主机重跑 `install.sh`（roll-forward，不自动回滚） |
+
+---
+
 ## 日志位置
 
 | 日志          | 路径                                                                        |
@@ -154,6 +166,7 @@ Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -D
 | supervisor    | `$MILOCO_HOME/log/supervisord.log`                                          |
 | CLI 调试      | `$MILOCO_HOME/log/miloco-cli.log`（`debug=true` 时启用）                    |
 | OpenClaw 插件 | `$MILOCO_HOME/log/openclaw-plugin.log`（需插件配置）                        |
+| 一键升级      | `$MILOCO_HOME/log/upgrade.log`（一键升级进度与终态标记 DONE/FAILED）        |
 
 ---
 

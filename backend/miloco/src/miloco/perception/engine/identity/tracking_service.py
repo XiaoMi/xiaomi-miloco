@@ -8,8 +8,17 @@
     提供 ReID embedding 复用入口。
 
 mode 取值：``"mock" | "real" | "deep_sort"``。fast/detect_only 档位已取消。
-灰度策略：default_config.yaml::tracking_service_mode 先保持 "real",PR 2 上线后切
-"deep_sort" 灰度 1 周再放大。
+灰度已完成：出厂值由 ``miloco/config/settings.yaml``(另一个顶层包,不在 perception/ 下) 的
+``perception.engine.identity.tracking_service_mode`` 给出,自 v1.2 主动注册改造起即为
+``"deep_sort"``(口径同上方 ``DeepSortTrackingService`` 条目与该配置项自带的注释);
+回退路径是把该项改回 ``"real"``。
+
+⚠️ 两条真实路径的 coasting 语义不同,这是下游各闸有没有作用的分水岭：
+``DeepSortTrackingService`` 会继续输出人已离开/跟丢后的 track(``detected_this_frame``
+为 False),其 bbox 是**上一次真匹配时的检测框、原地冻结**——Kalman 只推进
+mean/covariance 供关联门控用,不回写输出框,所以残留框不会外推移动、只是越来越旧;
+``RealTrackingService``(``SortTracker``) 在输出前已 pre-filter 掉这类 track、只给本帧
+真匹配到的框。故 IdentityEngine 侧各 coasting 闸只在 ``"deep_sort"`` 模式下真正起作用。
 """
 
 from __future__ import annotations
@@ -31,7 +40,31 @@ from miloco.perception.engine.types import (
 )
 
 
-def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingResponse:
+def _main_det_boxes(tracker: Any) -> list[tuple[int, int, int, int]]:
+    """取 tracker 本帧检测里的主体框(human / cat / dog),xyxy 像素。
+
+    给 Smart Crop 用:裁切区域要包住窗口内出现过的一切,所以逐帧调、跨帧累积(见 analyze)。
+    直接读 ``last_detections``(tracker 每帧 detect 后写),**不重跑推理** —— 也因此沿用
+    detector 自身的 conf 阈值(默认 0.5),与离线原型的 0.35 有差异:换阈值就得另跑一次检测,
+    或改动喂给 tracker 的那份 detections(会连带改身份行为),两者都不在本改动范围内。
+
+    排除 head / face 子部件:它们散布范围大,纳入并集会把区域撑满全图。
+    宠物(cat/dog)只在这里拿得到 —— tracker 只对 HUMAN 建 track(``track_human_only`` /
+    ``_update_core`` 的 human 过滤),宠物永远不进 ``box_info``。
+    """
+    from miloco.perception.engine.identity.tracker.detector import Detection
+
+    dets = getattr(tracker, "last_detections", None) or []
+    main = (Detection.CLASS_HUMAN, Detection.CLASS_CAT, Detection.CLASS_DOG)
+    return [d.xyxy for d in dets if d.class_id in main]
+
+
+def _build_response(
+    results: list[dict],
+    n_frames: int,
+    fps: int,
+    main_det_boxes: list[tuple[int, int, int, int]] | None = None,
+) -> TrackingResponse:
     """将 tracker.get_tracking_results() 转为 TrackingResponse。"""
     from miloco.perception.engine.identity.tracker.detector import Detection
 
@@ -59,6 +92,23 @@ def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingRes
             face_id="none",
             track_id=r["id"],
             box_info=box_info,
+            # tracker 的两个逐帧字段必须穿过本层：下游各 coasting 闸与 tier_u 质量门
+            # 直接消费，丢掉不会报错、只会静默退化成"恒真检测 / 恒满置信"。
+            # 两个 fallback 都取"乐观值"，与接缝另一侧(IdentityEngine / extractor)同
+            # 口径：tracker 肯输出这个 track，说明它至少经历过一次过检测阈值的检测，
+            # 缺字段是"未知"而非"否定"。反过来取 fail-closed 值会让缺字段的路径整条
+            # 失效(无 track 进候选 / 候选被质量门拒光)，是更坏的失败模式。
+            # 注：DeepSORT 路径下决定这条链路置信度下界的是 **Detector 构造参数
+            # conf_threshold**(本文件两处建 Detector 都没传、吃类默认值，同
+            # _main_det_boxes 的说明)，**不是**名字更像的
+            # ``deep_sort.detector_conf_threshold`` —— 后者只作用在 tracker 内部的
+            # 建 track 环节，管不到已匹配 track 的置信度。要调这条链路的下界请从建
+            # Detector 处入手。纯 SORT 路径则相反，直接拿 ``detector_conf_threshold``
+            # 过滤 detection(见 sort.py 的关联入口)。
+            # 此处不复述 tracker 内部的调用链与具体数值——那会随对侧重构失真，需要时
+            # 直接读 tracker 代码。
+            detected_this_frame=bool(r.get("detected_this_frame", True)),
+            detector_confidence=float(r.get("confidence", 1.0)),
         ))
     return TrackingResponse(
         frame_info=FrameInfo(
@@ -67,6 +117,7 @@ def _build_response(results: list[dict], n_frames: int, fps: int) -> TrackingRes
             fps=fps,
         ),
         object_info=object_info,
+        main_det_boxes=list(main_det_boxes or []),
     )
 
 
@@ -149,9 +200,15 @@ class RealTrackingService(TrackingService):
                 frame_info=FrameInfo(start_timestamp=now, end_timestamp=now, fps=fps),
                 object_info=[],
             )
+        # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
+        # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
+        main_boxes: list[tuple[int, int, int, int]] = []
         for frame in frames:
             self._tracker.update(frame)
-        return _build_response(self._tracker.get_tracking_results(), len(frames), fps)
+            main_boxes.extend(_main_det_boxes(self._tracker))
+        return _build_response(
+            self._tracker.get_tracking_results(), len(frames), fps, main_boxes
+        )
 
     def reset_session(self) -> None:
         """重置 SortTracker（清空 tracks + _next_track_id 归零）。
@@ -230,9 +287,15 @@ class DeepSortTrackingService(TrackingService):
                 frame_info=FrameInfo(start_timestamp=now, end_timestamp=now, fps=fps),
                 object_info=[],
             )
+        # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
+        # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
+        main_boxes: list[tuple[int, int, int, int]] = []
         for frame in frames:
             self._tracker.update(frame)
-        return _build_response(self._tracker.get_tracking_results(), len(frames), fps)
+            main_boxes.extend(_main_det_boxes(self._tracker))
+        return _build_response(
+            self._tracker.get_tracking_results(), len(frames), fps, main_boxes
+        )
 
     def reset_session(self) -> None:
         self._tracker.reset()

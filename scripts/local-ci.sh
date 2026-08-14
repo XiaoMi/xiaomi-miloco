@@ -206,7 +206,7 @@ except: pass
 " 2>/dev/null)
     fi
     if command -v claude &>/dev/null && [[ -n "$anthropic_key" ]]; then
-        info "本地 Claude 审查 PR #$pr_num（~5-10 分钟）…"
+        info "本地 Claude 审查 PR #${pr_num}（~5-10 分钟）…"
         _run_claude_review "$pr_num" "$repo" "$anthropic_key"
         return
     fi

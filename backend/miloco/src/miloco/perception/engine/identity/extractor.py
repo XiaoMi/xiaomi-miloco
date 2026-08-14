@@ -22,7 +22,7 @@ M4 处理的是用户主动上传的图——没有"跟踪侧已经算好的 emb
     score = log(area_ratio + 1) × detector_conf × sharpness_norm × face_bonus
     face_bonus = 1.2 if 单帧关联到 face else 1.0
 
-质量 Gate(与陌生人池同口径,与 TierC 同阈值,v4 §2.2.3):
+质量 Gate(本模块自己的一组常量,见下方 ``_GATE_*``;v4 §2.2.3):
     area_ratio ≥ 0.05 / aspect ∈ [0.20, 2.5] / sharpness ≥ 50 / detector_conf ≥ 0.4
 
 视频路径抽帧策略(v4 §2.2.1):
@@ -45,6 +45,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from miloco.perception.engine.identity._image_utils import (
+    SHARPNESS_NORM_REF as _SHARPNESS_NORM_REF,
+)
+from miloco.perception.engine.identity._image_utils import (
     compute_sharpness as _compute_sharpness,
 )
 from miloco.perception.engine.identity._image_utils import (
@@ -55,7 +58,9 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Quality Gate 阈值(与 TierC / TierU 同口径,本期不暴露 yaml)
+# Quality Gate 阈值(本模块独有,本期不暴露 yaml)
+# ⚠️ 陌生人池的晋级门另有一套同名语义的常量,两套之间无任何绑定 —— 不要假设它们一致,
+# 改这里之前请直接比对那边的代码。
 # =============================================================================
 
 _GATE_AREA_RATIO_MIN = 0.05
@@ -63,9 +68,6 @@ _GATE_ASPECT_MIN = 0.20
 _GATE_ASPECT_MAX = 2.5
 _GATE_SHARPNESS_MIN = 50.0
 _GATE_DET_CONF_MIN = 0.4
-
-# 评分用 sharpness 归一化的"参考值"——超过即视为 1.0,低于按比例
-_SHARPNESS_NORM_REF = 300.0
 
 # face 关联加成系数
 _FACE_BONUS = 1.2
@@ -141,7 +143,14 @@ def _crop_with_padding(
 def _passes_quality_gate(
     *, area_ratio: float, aspect: float, sharpness: float, detector_conf: float,
 ) -> bool:
-    """与 TierU / TierC 同口径的 4 项物理过滤。"""
+    """裁图的物理过滤：面积占比 / 长宽比 / 清晰度 / 置信度，四项全过才收。
+
+    ⚠️ 陌生人池的晋级门(``tier_u.TierUConfig``)另有一套同名语义的常量，两套之间
+    **无任何绑定** —— 不要假设它们一致（校验项就不同：那边不校面积占比）。改任一侧
+    阈值前请直接比对两边代码；此处不维护逐项对照表，那种表要随两边任何一次改动同步，
+    本模块的注释此前正是这样失真的：三处都宣称与那边对齐，而其中援引的 ``TierC``
+    在全仓根本没有对应的阈值。
+    """
     return (
         area_ratio >= _GATE_AREA_RATIO_MIN
         and _GATE_ASPECT_MIN <= aspect <= _GATE_ASPECT_MAX
@@ -423,6 +432,10 @@ def extract_from_video(
             valid_frames = [valid_frames[i] for i in picks]
 
         # 4) DeepSORT 关联:factory 起独立 tracker 实例(不污染主流程 track_id 空间)
+        #    ⚠️ "独立"= 与主流程 track_id 空间隔离,**不是每帧新建**:本行在帧循环之外,
+        #    整段有效帧序列复用同一个实例。这是下面那道 coasting 闸能否触发的前提——
+        #    若真按每帧新建理解去改, 第一帧的 track 全是待确认状态、get_tracking_results
+        #    根本不返回它们, coasting 无从产生, 那道闸会退化成删了也不影响的死代码。
         #    DeepSortTracker.update 内部:跑 detector + DeepSORT 关联 + 每检测框
         #    算 ReID emb 存进 Track.features deque。我们直接读
         #    get_track_embedding(tid) 拿末尾元素——零额外推理。
@@ -439,10 +452,37 @@ def extract_from_video(
             for tr in tracking_results:
                 if tr.get("class_id") != Detection.CLASS_HUMAN:
                     continue
+                # coasting(本帧未匹配, bbox 停在上一次真匹配的位置)不裁图: 框不对应本帧
+                # —— 人可能已经走开(裁出的是背景/家具/旁边另一个人), 即使人还在, 框也停在
+                # 上次真匹配处、与本帧不对齐。这类图会进该 track 的 top-K 候选、经注册写
+                # 进身份库, 而运行时分不出是哪一种, 故一律不裁。
+                # 下面的质量门拦不住它——置信度同样停在最后一次真匹配的值(通常过阈值),
+                # 背景裁图清晰度也不低; 打分公式同样没有"本帧是否真匹配"这一项。
+                # 与 IdentityEngine 各消费闸同口径。
+                # 召回代价有界, 但上界跟随配置而非代码常量: 本路径 tracker 按 fps=1 建,
+                # 每个关联缺口最多少 sec_to_frames(deep_sort.max_age_sec, 1) 张候选
+                # (**此处不写该项当前取值**: 写了就会随调参失真; 要确认时按这个式子现算)。
+                # 少掉的分两类: ① 人已离开/漏检产生的残留框,
+                # 这是本闸的目标; ② 人还在画面里(能走到这道闸就说明本帧检出了人 —— 见上面
+                # valid_frames 只收 body_dets 非空的帧)、只是 ReID/IoU 没关联上, 该检测另
+                # 起了 tentative track 而本 track 原地 coasting, 这一帧的框大概率还压在人
+                # 身上, 属本闸的附带代价。排查"某段视频候选变少/注册失败"时: 若少掉的是 ②,
+                # 应查关联稳定性(deep_sort.max_age_sec / ReID 门控)而不是放开本闸, 且注意
+                # min_track_hits 的下限会把只差一张的边缘 track 整条丢掉。调大该 yaml 项会
+                # 同比放宽这个上界, 需连同 min_track_hits 一起评估。
+                # 缺字段按真检测兜底(同全链路 fail-open 口径)。
+                if not tr.get("detected_this_frame", True):
+                    continue
                 tid = int(tr["id"])
                 bbox_xywh = tr["bbox"]
                 bbox_xyxy = tr["xyxy"]
-                conf = float(tr.get("confidence", 0.0))
+                # 缺 confidence 按满置信兜底,口径同 IdentityEngine 侧:tracker 决定
+                # 维持该 track 即已过检测阈值,"未知"不等于"零信";取 0.0 会被下面的
+                # 质量门全数拒掉。
+                # 代价要说清:满值在候选打分里等于该维满分,而它是权重最大的一维,于是
+                # 缺字段的路径上选样退化成长宽比 + 清晰度两维 —— 正是本次修的那个退化在
+                # 兜底分支里的复刻。生产路径无条件写出该字段,走不到这里。
+                conf = float(tr.get("confidence", 1.0))
                 crop = _crop_with_padding(frame, bbox_xywh)
                 if crop is None:
                     continue
