@@ -880,11 +880,19 @@ elif [ -n "$FETCH_MODELS" ]; then
   # 整行复制。与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
   fetch_cmd="$(_models_src_prefix)$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")"
   if [ "$rc" -eq 2 ]; then
-    warn "感知模型下载没能开始：scripts/models.lock.json 不可用（具体原因见上面的报错）"
+    warn "感知模型下载没能开始：输入不合法（具体原因见上面那行报错）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-    # 不给"重跑"当主修法：这一档重跑必然再退 2。还原 lock 排在前面是因为它一步到位，
-    # 而且 lock 是生成物、手改它本来就是这一档最常见的成因。
-    warn "这不是网络问题，重跑无效 —— 先修好 lock（在 git checkout 里可 git checkout -- scripts/models.lock.json 还原），再跑：${fetch_cmd}"
+    # 文案不预设成因。这一档在本调用点有**四**条可达路径：lock 解析不了、lock 里没有可用
+    # 源、scheme 不合法（MILOCO_MODELS_BASE_URL 或 lock 的 base_url 都会走到 _sources 那
+    # 个 ValueError）、$MILOCO_HOME 下的目标目录不可写（mkdir 那处，只有下载路径够得着
+    # ——`--check` 提前 return，所以 local-ci.sh 那侧是三条）。写死"先还原 lock"时，
+    # 另外三条发出的是一条对干净文件做 no-op 的指令，而屏幕上三条线索有两条指向仓库产物，
+    # 人自然先信提示、不信那行报错。真因是哪条只有上面那行知道，这里只负责把人指回去。
+    #
+    # 单独点名换源变量而不是也列全四条：只有它有"不自愈"这个性质 —— ${fetch_cmd} 的前缀
+    # 由 _models_src_prefix 把同一个坏值原样拼回去，照抄重跑一字不差再退 2。其余三条改完
+    # 重跑就过去了，值得占一行的只有这个。
+    warn "这不是网络问题，重跑无效 —— 按上面那行报错改：指向 MILOCO_MODELS_BASE_URL 就改它（只收 http:// / https:// / file:// 或绝对路径；下面这条命令会把当前这个坏值原样带回来），指向 lock 就还原它（在 git checkout 里可 git checkout -- scripts/models.lock.json）。改好再跑：${fetch_cmd}"
   elif [ "$rc" -ne 0 ]; then
     warn "感知模型下载失败（网络？）"
     warn "感知引擎可能跑不起来（perceive query 报 models_missing）"

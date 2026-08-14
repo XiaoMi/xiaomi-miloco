@@ -3,15 +3,17 @@
 
 """仓库体检：shell 脚本印给用户照抄的那行字，必须与用户真按它跑出来的结果一致。
 
-三条约束共用同一份扫描范围（见 `_repo_shell_scripts`）——放在同一个文件里，是为了不让
-"哪些脚本受管"有三个会各自漂移的答案。
+四条约束共用同一份扫描范围（见 `_repo_shell_scripts`）——放在同一个文件里，是为了不让
+"哪些脚本受管"有四个会各自漂移的答案。
 
 1. 紧跟非 ASCII 字符的展开必须写花括号（下面这段）；
 2. 印给用户照抄的命令，里面的路径必须转义（见 `test_printed_commands_quote_their_paths`）；
-3. 印出来的**下载**命令必须带上换源变量前缀（见 `test_printed_download_commands_carry_the_source_override`）。
+3. 印出来的**下载**命令必须带上换源变量前缀（见 `test_printed_download_commands_carry_the_source_override`）；
+4. 把退出码 2 翻成修法的那段文案，不许写死单一成因（见 `test_exit_two_prose_does_not_pin_one_cause`）。
 
-1 与 2 的失败形态是命令被吃掉一截（分词 / 变量名跑偏），3 是命令**照跑不误、但换了个源**——
-最后这种没有任何报错，所以它只能靠门禁发现。
+1 与 2 的失败形态是命令被吃掉一截（分词 / 变量名跑偏），3 是命令**照跑不误、但换了个源**，
+4 是命令与文案都"成功"了、只是把人指向一个本来没毛病的文件——后三种都没有任何报错，
+所以它们只能靠门禁发现。
 
 --- 约束 1 ---
 
@@ -395,3 +397,132 @@ def test_only_downloading_scripts_are_in_scope() -> None:
     assert _runs_a_download('  "$PYTHON" "$FETCH_MODELS" --dest "$H/models" --quiet\n')
     # 只在文案里提到下载器不算"这个脚本会下载"。
     assert not _runs_a_download('  warn "补齐：$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict"\n')
+
+
+# ---- 约束 4：退 2 的修法文案不许写死单一成因 --------------------------------
+
+# fetch_models.py 的退 2 在文件头契约里是"用法或输入坏了，重试永远没用"，但**坏在哪**
+# 有好几条路径：lock 解析不了、lock 里没有可用源、scheme 不合法（MILOCO_MODELS_BASE_URL
+# 与 lock 的 base_url 都会走到 _sources 那个 ValueError）、目标目录不可写（只有下载路径
+# 够得着，`--check` 在 mkdir 之前就 return 了）。把这一档翻成"先还原 lock"的文案，对另外
+# 几条发出的是一条对干净文件做 no-op 的指令，而真因就印在上一行——两条线索打架时，人先信
+# 提示。这类失败不报错、还自带一个看着很具体的修法，所以只能靠门禁发现。
+#
+# 判据落在"有没有点名换源变量"上，而不是去数文案列全了几条成因：列全了会随下载器新增
+# 退 2 路径而过期，且"列表长度"跟这个缺陷没关系。换源变量是这几条里唯一**不自愈**的
+# ——它写在用户的 profile / job env 里，而重跑命令的前缀会把同一个坏值原样拼回去，照抄
+# 必然再退 2。所以"文案里出现过它"恰好等价于"作者考虑过成因不止一条"。
+_RC2_BRANCH = re.compile(r'^\s*(?:el)?if\s+\[\s+"?\$\{?rc\}?"?\s+-eq\s+2\s+\]')
+_BRANCH_END = re.compile(r"^\s*(?:elif|else|fi)\b")
+_SRC_ENV = "MILOCO_MODELS_BASE_URL"
+
+
+def _exit_two_branches(text: str) -> list[tuple[int, str]]:
+    """抠出每个 `if [ "$rc" -eq 2 ]` 分支的**体**（不含分支头，到同缩进的 elif/else/fi 为止）。
+
+    收尾判据要连缩进一起看，只认关键字会被**嵌套**块的收尾骗到：local-ci.sh 那支里
+    转发 stderr 用的是一段 `if [ -n "$models_err" ]; then … fi`，只认 `fi` 的话分支体
+    在那儿就断了，真正的修法提示落在断点之后——门禁于是对着半截文本判"没提换源变量",
+    报一个作者已经修好的问题。这个错法是本约束自己第一次跑就撞上的。
+    """
+    lines = text.splitlines()
+    out: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        if not _RC2_BRANCH.match(line):
+            continue
+        head_indent = len(line) - len(line.lstrip())
+        body: list[str] = []
+        for nxt in lines[i + 1 :]:
+            if _BRANCH_END.match(nxt) and (len(nxt) - len(nxt.lstrip())) <= head_indent:
+                break
+            body.append(nxt)
+        out.append((i + 1, "\n".join(body)))
+    return out
+
+
+def test_exit_two_prose_does_not_pin_one_cause() -> None:
+    """每个把退 2 翻成修法的分支，都得把换源变量算作候选成因。
+
+    受管范围同样从文本算（谁写了这个分支谁受管），不是一份名单——真给 build.sh 之类加上
+    按 rc 分流的文案，立刻被收进来。
+    """
+    offenders: list[str] = []
+    in_scope: list[str] = []
+    for path in _repo_shell_scripts():
+        text = path.read_text(encoding="utf-8")
+        for lineno, body in _exit_two_branches(text):
+            rel = f"{path.relative_to(_ROOT)}:{lineno}"
+            in_scope.append(rel)
+            # 只看真正印给用户的那几行，注释里怎么论证不算数
+            prose = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+            if _SRC_ENV not in prose:
+                offenders.append(f"{rel}\n{prose}")
+
+    # 防假绿：判据坏掉时受管集合会空掉，循环一条都不跑却照样绿
+    assert {"scripts/local-ci.sh", "plugins/hermes/install-hermes.sh"} <= {
+        r.rsplit(":", 1)[0] for r in in_scope
+    }, f"扫描范围不对，实得：{in_scope}"
+
+    assert not offenders, (
+        "这些 rc=2 分支的修法文案没提换源变量，等于把成因写死成「lock 坏了」：\n\n"
+        + "\n\n".join(offenders)
+        + f"\n\n退 2 还能由 {_SRC_ENV} 的 scheme 不合法引起（_normalize_env_source 抛 "
+        "ValueError，由 main 收敛），此时 lock 是干净的，照文案去还原 / 重新生成它是 no-op；"
+        "而重跑命令的前缀会把同一个坏值原样带回来，永不自愈。文案应指回上面那行真实报错。"
+    )
+
+
+# 两侧边界：分支头认得出、分支体不越界
+_RC2_CASES = [
+    (True, '  if [ "$rc" -eq 2 ]; then\n'),
+    (True, '    elif [ "$rc" -eq 2 ]; then\n'),
+    (True, '  if [ "${rc}" -eq 2 ]; then\n'),
+    # 非 2 的档不在内：rc=1 那支说的是"网络问题、重跑有意义"，与本约束无关
+    (False, '  if [ "$rc" -eq 1 ]; then\n'),
+    (False, '  elif [ "$rc" -ne 0 ]; then\n'),
+    # 别把别的变量的 -eq 2 也收进来
+    (False, '  if [ "$attempt" -eq 2 ]; then\n'),
+]
+
+
+def test_exit_two_branch_detection_boundaries() -> None:
+    for want, line in _RC2_CASES:
+        assert bool(_RC2_BRANCH.match(line.rstrip("\n"))) == want, line
+
+
+def test_exit_two_branch_body_stops_at_the_next_arm() -> None:
+    """分支体不能漫过 elif —— 否则 rc=1 那支里的字会被算进 rc=2 的文案里。"""
+    script = (
+        'rc=0\n'
+        'foo || rc=$?\n'
+        'if [ "$rc" -eq 2 ]; then\n'
+        '  warn "坏了"\n'
+        'elif [ "$rc" -ne 0 ]; then\n'
+        '  warn "MILOCO_MODELS_BASE_URL 换源试试"\n'
+        'fi\n'
+    )
+    (only,) = _exit_two_branches(script)
+    assert "坏了" in only[1]
+    assert _SRC_ENV not in only[1], "分支体漫过了 elif，隔壁那支的文案会把这条门禁弄成假绿"
+
+
+def test_exit_two_branch_body_survives_a_nested_block() -> None:
+    """嵌套块的 `fi` 不算分支结束 —— 门禁自己第一次跑就栽在这儿。
+
+    只认关键字的话分支体断在内层 `fi`，尾巴上那条真正的修法提示被切掉，门禁对着半截文本
+    判违规：**报的是一个已经修好的问题**，而且指的行号还是对的，很容易让人以为是漏改。
+    """
+    script = (
+        'if [ "$rc" -eq 2 ]; then\n'
+        '    info "坏了"\n'
+        '    if [ -n "$err" ]; then\n'
+        '        while IFS= read -r l; do info "  $l"; done <<<"$err"\n'
+        '    fi\n'
+        '    info "改 MILOCO_MODELS_BASE_URL 或还原 lock"\n'
+        'elif [ "$rc" -ne 0 ]; then\n'
+        '    info "网络？"\n'
+        'fi\n'
+    )
+    (only,) = _exit_two_branches(script)
+    assert _SRC_ENV in only[1], "嵌套 fi 把分支体截断了"
+    assert "网络？" not in only[1], "又漫过 elif 了"

@@ -79,13 +79,19 @@ run_backend_tests() {
     rc=0
     models_err=$(python3 "$SCRIPT_DIR/fetch_models.py" --check --strict --quiet --dest "$models_dir" 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 2 ]; then
-        info "感知模型校验没能进行：scripts/models.lock.json 不可用 —— 不是「模型没下」，补齐命令同样会失败"
+        info "感知模型校验没能进行：输入不合法 —— 不是「模型没下」，补齐命令同样会失败"
         # 逐行转发而不是整块 echo：stderr 可能多行，逐行走 info 才都带上前缀与缩进，
         # 归属关系一眼可见（下面那条修法提示用的也是两格缩进）。
         if [ -n "$models_err" ]; then
             while IFS= read -r line; do info "  $line"; done <<<"$models_err"
         fi
-        info "  修法：还原 lock（git checkout -- scripts/models.lock.json），或重跑 scripts/publish_models.sh refresh-lock 重新生成"
+        # 修法跟着上面那行报错走，不预设成因。这一档在 --check 侧有三条可达路径（lock 解析
+        # 不了 / lock 里没有可用源 / scheme 不合法 —— MILOCO_MODELS_BASE_URL 与 lock 的
+        # base_url 都会走到 _sources 那个 ValueError；目标目录不可写那条够不着，--check
+        # 在 mkdir 之前就 return 了）。写死"还原或 refresh-lock"时，换源变量写错的人会被
+        # 推去**重新生成**一份本来没问题的清单 —— 而重算是个真会改文件、还带漂移护栏的写
+        # 操作，排查方向就此被带到"仓库里的生成物是不是坏了"上去。
+        info "  修法按上面那行报错来：指向 MILOCO_MODELS_BASE_URL 就改它（只收 http:// / https:// / file:// 或绝对路径）；指向 lock 才动 lock —— 还原（git checkout -- scripts/models.lock.json）或重跑 scripts/publish_models.sh refresh-lock 重新生成"
     elif [ "$rc" -ne 0 ]; then
         # 文案要覆盖 --strict 实际命中的两种情况：只说 requires_models 的话，"只缺
         # 可选模型"时这条会打出来、而 test_deep_sort_v12 一条没 skip，读的人就把它
