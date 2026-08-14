@@ -48,6 +48,7 @@ import hashlib
 import http.client
 import json
 import os
+import shlex
 import sys
 import time
 import urllib.error
@@ -581,8 +582,24 @@ def main(argv: list[str] | None = None) -> int:
             fix = f"{sys.executable or 'python3'} {Path(__file__).resolve()}"
             if args.strict:
                 fix += " --strict"
+            # 同口径这件事不止于路径：--lock / --only / --required-only 决定的是"拿哪一份
+            # 清单、判其中哪几个文件"，不透传的话印出来的是**另一次运行**的补齐命令。
+            #   --lock：判的是 /tmp/staging.lock.json，印的命令却去读仓库里的默认清单 ——
+            #           两份 tag 不同就是另一组哈希，用户照抄跑完回来重判，还是"缺"。而
+            #           报错文本里没有任何字指向"清单不是同一份"，这条线索他根本拿不到。
+            #   --only / --required-only：反过来把范围放大，让他去下一堆本次压根没在判的
+            #           文件（--required-only 时可能是几十 MB 的可选模型）。
+            # 这三个都只在显式给了时才追加，默认那条命令的样子不变。
+            if args.lock:
+                fix += f" --lock {shlex.quote(str(args.lock))}"
+            if args.required_only:
+                fix += " --required-only"
+            fix += "".join(f" --only {shlex.quote(n)}" for n in args.only)
+            # dest 也 quote：它可能来自 --dest / MILOCO_MODELS_DEST / 包内默认路径，
+            # 带空格时整行粘回去会被 shell 切成两个参数 —— 同样是"印出来却跑不了"。
+            # shlex.quote 对不含特殊字符的路径原样返回，常见情形下输出不变。
             print(
-                f"缺少模型：{', '.join(blocking)}\n补齐：{fix} --dest {dest}",
+                f"缺少模型：{', '.join(blocking)}\n补齐：{fix} --dest {shlex.quote(str(dest))}",
                 file=sys.stderr,
             )
             return 1

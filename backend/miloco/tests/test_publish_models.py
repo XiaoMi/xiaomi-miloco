@@ -205,6 +205,51 @@ def test_verify_degrades_when_digest_is_not_sha256(sandbox: _Sandbox) -> None:
     assert "::warning::" in r.stderr
 
 
+def test_verify_tolerates_a_lock_entry_without_size(sandbox: _Sandbox) -> None:
+    """lock 的 size 是**可选**字段，verify 不能拿它下标取。
+
+    下载侧对它明确容忍：_check_spec 把写成 null 的 size 删掉（"与整条不写同义"），
+    _is_ready 只认 sha256 —— 也就是说一条只有 name + sha256 的记录是完全合法的输入。
+    这里若写 `w["size"]`，手工新增模型时先不填 size 就会吐一段 KeyError traceback，与
+    本脚本"出错就一行中文 + 非 0"的口径正相反：维护者看到 Python 栈，第一反应是脚本
+    坏了或 gh 认证过期，不会想到是自己少打了一个字段。而 verify 已挂在 CI 的 lint job
+    上，崩的是每个 PR。
+    """
+    lock = _real_lock()
+    sandbox.set_assets(_assets_from(lock))  # 先按完整 lock 造资产
+    lock["files"][0].pop("size")
+    sandbox.write_lock(lock)
+
+    r = sandbox.run("verify")
+    assert "Traceback" not in r.stderr, f"缺一个可选字段就吐 traceback：\n{r.stderr}"
+    assert r.returncode == 0, r.stderr
+    assert "跳过大小比对" in r.stderr
+    assert "::error::" not in r.stderr
+
+
+def test_verify_refuses_when_neither_size_nor_digest_can_be_compared(
+    sandbox: _Sandbox,
+) -> None:
+    """size 与 sha256 一个都没比上时判红——这条记录等于没对账。
+
+    与上一条配对：容忍缺 size 之后，若再顺着把"digest 也没有"降级成 warning，verify
+    就会对一条**什么都没校验过**的记录亮绿，而它退 0 的含义是"线上资产与 lock 一致"。
+    那是拿一句假话换绿灯，正好是本脚本 fail-closed 方向的反面。措辞也得跟着变：这次
+    连 size 都没比，不能沿用"本次只比对了 size"。
+    """
+    lock = _real_lock()
+    assets = [{k: v for k, v in a.items() if k != "digest"} for a in _assets_from(lock)]
+    sandbox.set_assets(assets)
+    lock["files"][0].pop("size")
+    sandbox.write_lock(lock)
+
+    r = sandbox.run("verify")
+    assert "Traceback" not in r.stderr, r.stderr
+    assert r.returncode == 1, f"两个字段都没比上却退 0：\n{r.stderr}"
+    assert "没有任何可比对的字段" in r.stderr
+    assert lock["files"][0]["name"] in r.stderr
+
+
 # ── upload：文件集护栏必须早于不可逆的上传 ──────────────────────────────
 
 
@@ -395,6 +440,47 @@ def test_upload_proceeds_when_fileset_matches_lock(tmp_path: Path) -> None:
     refreshed = json.loads(sandbox.lock.read_text(encoding="utf-8"))
     assert {f["name"] for f in refreshed["files"]} == set(names)
     assert all(f["size"] == len(b"fake") for f in refreshed["files"])
+
+
+def test_upload_sees_models_reached_through_symlinks(tmp_path: Path) -> None:
+    """同一个目录的两个读者要给出同一个文件集——符号链接也算数。
+
+    维护者侧有两处读模型目录：refresh-lock 那段 Python 用 `p.is_file()`（跟随链接），
+    upload 用 `find -type f`（不加 -L 时判的是链接**自身**的类型，一个链接都不匹配）。
+    口径不一致的表现是：模型放在外部盘、目录里只留链接时，refresh-lock 正常刷出全部
+    条目，upload 却报"没有 .onnx / .json 模型文件"——看起来像脚本认不出明明在那儿的
+    文件，而 `ls` 和 `refresh-lock` 都说它们在。
+    """
+    names = ["a.onnx", "b.onnx"]
+    sandbox = _Sandbox(tmp_path, _tiny_lock(names))
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    store = _models_dir(store_root, names)
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    for n in names:
+        (linked / n).symlink_to(store / n)
+    sandbox.set_assets([])
+
+    r = sandbox.run("upload", str(linked))
+
+    assert "没有 .onnx / .json 模型文件" not in r.stderr, (
+        f"目录里 {len(names)} 个链接指向真实模型，upload 却说一个都没有：\n{r.stderr}"
+    )
+    assert sandbox.wrote_to_release(), f"没发生上传: {sandbox.gh_calls()}\n{r.stderr}"
+
+    # 上传前那份"我要传这些、各多大"的人工复核清单也要报真实大小：du 不加 -L 时
+    # 报的是链接自身的占用（macOS 打 0B、Linux 打 0），整份清单等于废掉。
+    # 不写死单位，只要求不是 0 开头 —— 各平台的块大小与单位写法都不一样。
+    listed: dict[str, str] = {}
+    for ln in (r.stdout + r.stderr).splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[1] in names:
+            listed[parts[1]] = parts[0]
+    assert set(listed) == set(names), f"上传清单没列全: {listed}\n{r.stderr}"
+    assert not any(v.startswith("0") for v in listed.values()), (
+        f"上传清单把链接的大小报成 0（du 少了 -L）: {listed}"
+    )
 
 
 def test_upload_drift_can_be_forced_with_env(tmp_path: Path) -> None:

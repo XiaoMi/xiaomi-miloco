@@ -11,11 +11,13 @@
 「拼 URL → 流式下载 → sha256 校验 → 原子改名」全链路。
 """
 
+import argparse
 import hashlib
 import http.server
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -559,10 +561,82 @@ def test_check_prints_a_fix_command_that_resolves_where_it_was_printed(
 
     line = next(ln for ln in r.stderr.splitlines() if ln.startswith("补齐："))
     script = line.removeprefix("补齐：").split()[1]
+
     assert (elsewhere / script).is_file(), (
         f"补齐命令里的脚本路径，在印出它的工作目录（{elsewhere}）下解析不到：\n"
         f"    {line}\n"
         "整行复制粘贴只会得到 can't open file —— 与本次判红毫无关系的另一个错误。"
+    )
+
+
+def test_fix_command_keeps_the_lock_and_selection_it_was_judged_with(
+    fake_release: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    """补齐命令要跟本次判定用的是**同一份清单、同一个选择集**。
+
+    路径解析得到只是第一层：命令跑起来之后，拉的是不是刚才判缺的那几个文件，取决于
+    --lock / --only / --required-only 有没有跟过去。都不透传的话，--lock 指向另一份清单
+    时印出来的是"去默认清单拉全集"——两份 tag 不同就是另一组哈希，用户照抄跑完回来重判
+    还是"缺"，而报错里没有一个字提到清单不是同一份，这条线索他拿不到。
+
+    断言方式是把印出来的那行按 shell 词法切开、喂回本脚本自己的 argparse，比对解析结果
+    与本次调用是否一致 —— 而不是在字符串里找子串：后者对"引号加错位置""--only 拼成逗号
+    分隔（本脚本是 action="append"，逗号形式会被当成一个文件名）"这类真会让命令跑歪的
+    写法一律看不出来。
+    """
+    lock, _src, dest = fake_release
+    dest.mkdir()
+
+    argv = ["--lock", str(lock), "--dest", str(dest), "--required-only", "--only", "req.onnx"]
+    r = _run(*argv, "--check")
+    assert r.returncode == 1, r.stderr
+
+    line = next(ln for ln in r.stderr.splitlines() if ln.startswith("补齐："))
+    # 切掉解释器与脚本两段，剩下的就是参数
+    printed = shlex.split(line.removeprefix("补齐："))[2:]
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dest")
+    ap.add_argument("--lock")
+    ap.add_argument("--only", action="append", default=[])
+    ap.add_argument("--required-only", action="store_true")
+    ap.add_argument("--strict", action="store_true")
+    got, rest = ap.parse_known_args(printed)
+    orig, _ = ap.parse_known_args(argv)
+
+    assert not rest, f"补齐命令里有本脚本不认识的参数：{rest}\n    {line}"
+    assert (got.lock, got.only, got.required_only) == (
+        orig.lock,
+        orig.only,
+        orig.required_only,
+    ), (
+        "补齐命令与本次判定的清单/选择集不一致：\n"
+        f"    判定：lock={orig.lock} only={orig.only} required_only={orig.required_only}\n"
+        f"    印出：lock={got.lock} only={got.only} required_only={got.required_only}\n"
+        f"    {line}\n"
+        "照抄跑完回来重判还是缺，而报错里没有任何线索指向这个差异。"
+    )
+    assert Path(got.dest) == dest
+
+
+def test_fix_command_stays_plain_when_nothing_was_narrowed(
+    fake_release: tuple[Path, Path, Path],
+) -> None:
+    """没显式给这些参数时，补齐命令里就不该冒出来 —— 透传不是无条件追加。
+
+    与上一条配对：只有上一条的话，把三个参数无条件写死（``--only`` 恒为空串、
+    ``--required-only`` 恒在）也能让它绿，而那会让最常见的那条提示凭空多出一截噪声，
+    ``--required-only`` 更是直接改变了语义（把可选模型排除掉）。
+    """
+    lock, _src, dest = fake_release
+    dest.mkdir()
+
+    r = _run("--lock", str(lock), "--dest", str(dest), "--check")
+    assert r.returncode == 1, r.stderr
+
+    line = next(ln for ln in r.stderr.splitlines() if ln.startswith("补齐："))
+    assert "--only" not in line and "--required-only" not in line, (
+        f"没缩小过范围，补齐命令却带上了选择集参数：\n    {line}"
     )
 
 
@@ -1321,6 +1395,39 @@ def _fetch_invocations(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def _yaml_job_starts(text: str) -> list[int]:
+    """workflow 里 ``jobs:`` 下每个 job id 的起始行号（1-based，升序）。
+
+    只按缩进切，不引 PyYAML：要判的不是 YAML 语义，是"这两行在不在同一个 job 里"。
+    两条性质让这点缩进逻辑够用 ——
+      · block scalar（``run: |``）的内容必须比它的键缩进更深，否则块就结束了，所以
+        shell 里那些以冒号结尾的行不可能落到 job id 那一层被误收；
+      · 顶格键（``on:`` / ``env:`` / ``permissions:``）会把 jobs 区间关掉。
+    """
+    starts: list[int] = []
+    in_jobs = False
+    job_indent: int | None = None
+    for i, raw in enumerate(text.splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent == 0:
+            in_jobs = raw.startswith("jobs:")
+            continue
+        if not in_jobs:
+            continue
+        if job_indent is None:
+            job_indent = indent
+        if indent == job_indent and raw.rstrip().endswith(":"):
+            starts.append(i)
+    return starts
+
+
+def _yaml_job_of(starts: list[int], lineno: int) -> int:
+    """lineno 落在第几个 job 里；-1 表示在第一个 job 之前（``on:`` / ``env:`` 那些段）。"""
+    return sum(1 for s in starts if s <= lineno) - 1
+
+
 def _gate_violations(rel: str, text: str) -> list[str]:
     """返回 rel 这个文件里违反门禁强度契约的调用点（空列表 = 合规）。
 
@@ -1340,18 +1447,29 @@ def _gate_violations(rel: str, text: str) -> list[str]:
     # 的缺陷重新变绿，而这条契约是它唯一的网。往下载分支后面新加一个含 --check --strict
     # 的辅助函数，同一个洞也会自动打开。if/elif 各分支之间更没有先后可言。
     # 所以 shell 调用方只认例外 1（退出码被 `|| true` 丢弃）。
+    #
+    # 而"是 YAML"本身也还不够，得再加一句"在同一个 job 里"：job 之间没有 needs: 就是
+    # **并行**，有 needs: 也各自在独立 runner 的独立文件系统上跑 —— 跨 job 的文本先后
+    # 同样什么都不代表，正是上面刚为 shell 关掉的那一类。具体的翻面路径：在 ci.yml 里
+    # backend-test **之前**插一个预热缓存的 job，写 `run: ... fetch_models.py --dest X`，
+    # 按"全文件行号最大的那道门禁"算它就被 :73 豁免了，测试照绿；而 :73 跑在另一台机器的
+    # 另一个目录上，对这个新 job 一点约束都没有，它只拉到几个可选模型也照样退 0。
+    # 步骤级的先后只在一个 job 内部成立，判据就下沉到 job。
+    #
+    # 到 job 为止不再往下收。门禁步骤上挂 `if:` 或 `continue-on-error: true` 同样能架空
+    # 它，但那是冲着门禁本身去的显式动作；而"加一个 job"是看着人畜无害、正常演进就会发生
+    # 的改动 —— 这条契约要拦的是后者。
     is_yaml = rel.endswith((".yml", ".yaml"))
-    last_gate = (
-        max((i for i, ln in calls if "--check" in ln and "--strict" in ln), default=-1)
-        if is_yaml
-        else -1
-    )
+    job_starts = _yaml_job_starts(text) if is_yaml else []
+    gates = [i for i, ln in calls if "--check" in ln and "--strict" in ln] if is_yaml else []
 
     out: list[str] = []
     for lineno, line in calls:
         if "--strict" in line or "|| true" in line:
             continue
-        if lineno < last_gate:
+        job = _yaml_job_of(job_starts, lineno)
+        # job < 0（jobs: 之外）不豁免：那儿没有"步骤先后"可言，fail-closed。
+        if job >= 0 and any(g > lineno and _yaml_job_of(job_starts, g) == job for g in gates):
             continue
         out.append(f"{rel}:{lineno}  {line.strip()}")
     return out
@@ -1372,10 +1490,11 @@ def test_every_fetch_caller_matches_its_own_gate_strength() -> None:
     1. 退出码被显式丢弃（``|| true``）——install-hermes 拿旁边 checkout 当 file:// 源
        做本地同步的那一步。源目录缺几个模型是常态，这步本就不做判定，判定交给它后面
        那道按同一份 lock 复判的门禁。
-    2. **后面**另有一步 ``--check --strict``，**且调用方是 workflow YAML**——ci.yml 刻意
-       把"没拉到"与"拉到的不对"拆成两步（也让不完整状态进不了 actions/cache，因为 save
-       在门禁之后）。限定 YAML 是因为只有它的 run: 步骤能用文本先后代表执行先后；
-       shell 里"门禁写在下面"什么也证明不了，理由见 :func:`_gate_violations`。
+    2. **同一个 job 内、后面**另有一步 ``--check --strict``，**且调用方是 workflow YAML**
+       ——ci.yml 刻意把"没拉到"与"拉到的不对"拆成两步（也让不完整状态进不了 actions/cache，
+       因为 save 在门禁之后）。限定 YAML 是因为只有它的 run: 步骤能用文本先后代表执行先后；
+       再限定同一个 job，是因为 job 之间并行、且各自独立 runner 独立文件系统，跨 job 的
+       文本先后和 shell 里一样什么都不代表。两条限定的理由都见 :func:`_gate_violations`。
 
     判别力全在于 models_ready 豁免不了任何人：它也跑 ``--check --strict``，但判的是要不要
     进补齐分支，下载完之后没有任何复判 —— 算成豁免，本 PR 修的那个 bug 就照旧绿着过。
@@ -1395,6 +1514,30 @@ def test_every_fetch_caller_matches_its_own_gate_strength() -> None:
     )
 
 
+# 两份 workflow 样本只差一件事：门禁与调用在不在同一个 job 里。
+_WF_GATE_SAME_JOB = """\
+name: CI
+on: [push]
+jobs:
+  backend-test:
+    steps:
+      - run: python3 scripts/fetch_models.py --dest "$D"
+      - run: python3 scripts/fetch_models.py --check --strict --dest "$D"
+"""
+
+_WF_GATE_OTHER_JOB = """\
+name: CI
+on: [push]
+jobs:
+  warm-cache:
+    steps:
+      - run: python3 scripts/fetch_models.py --dest "$D"
+  backend-test:
+    steps:
+      - run: python3 scripts/fetch_models.py --check --strict --dest "$D"
+"""
+
+
 def test_a_gate_below_a_shell_caller_is_not_an_exemption() -> None:
     """shell 里"严格门禁写在调用下面"不豁免任何东西——文本位置不是执行顺序。
 
@@ -1410,12 +1553,34 @@ def test_a_gate_below_a_shell_caller_is_not_an_exemption() -> None:
         "shell 调用点后面跟一道 --check --strict 就被放行了 —— 那等于让**排版**决定"
         "契约生效与否：把辅助函数挪到文件末尾即可豁免全文件。"
     )
-    assert not _gate_violations(".github/workflows/x.yml", call + gate), (
-        "同样的文本在 workflow YAML 里是合法的：run: 步骤顺序执行，文本先后就是执行先后。"
+    assert not _gate_violations(".github/workflows/x.yml", _WF_GATE_SAME_JOB), (
+        "同一个 job 内、调用在上门禁在下，是 ci.yml 刻意的两步拆分：run: 步骤顺序执行，"
+        "文本先后就是执行先后。这一条必须继续放行，否则契约会把真实写法判成违规。"
     )
     # 两条既有例外不受本次收紧影响
     assert not _gate_violations("plugins/x/install-x.sh", call.rstrip("\n") + " || true\n")
     assert not _gate_violations("plugins/x/install-x.sh", gate)
+
+
+def test_a_gate_in_another_yaml_job_is_not_an_exemption() -> None:
+    """例外 2 只在**同一个 job 内**成立——跨 job 的文本先后和 shell 里一样什么都不代表。
+
+    钉的同样是边界，同样只能拿反例钉。翻面路径很具体也很自然：往 ci.yml 里加一个预热
+    缓存的 job（写在 backend-test 前面），里面跑一次不带 --strict 的下载。按"全文件行号
+    最大的那道门禁"算，它被 backend-test 里那道 :73 豁免，测试照绿；而两个 job 之间没有
+    needs: 就是并行，有 needs: 也各自在独立 runner 的独立文件系统上跑 —— :73 对这个新 job
+    一点约束都没有，它只拉到几个可选模型也照样退 0、照样绿灯。于是本 PR 要消灭的那类
+    "静默半套模型"在 CI 里原地复活，而唯一该拦它的契约全程没响。
+
+    两份样本只差 job 边界这一件事，所以这条断言分辨的就是 job 边界本身，不是别的什么。
+    """
+    assert not _gate_violations(".github/workflows/x.yml", _WF_GATE_SAME_JOB), (
+        "同 job 的两步拆分被判成违规了 —— 例外 2 收得过头，ci.yml 的真实写法会长红。"
+    )
+    assert _gate_violations(".github/workflows/x.yml", _WF_GATE_OTHER_JOB), (
+        "门禁在**另一个 job** 里却豁免了这次调用：job 之间并行、各自独立文件系统，"
+        "那道门禁校验的根本不是这个 job 下载出来的目录。"
+    )
 
 
 def test_fetch_caller_list_is_exhaustive() -> None:

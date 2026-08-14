@@ -179,12 +179,21 @@ cmd_upload() {
 
     local files=()
     while IFS= read -r f; do files+=("$f"); done < <(
-        find "$dir" -maxdepth 1 -type f \( -name '*.onnx' -o -name '*.json' \) ! -name '*.part' | sort
+        # -L 必须有，且按 BSD/GNU find 的要求放在路径**之前**：没有它时 -type f 判的是
+        # 链接自身的类型，符号链接一个都不匹配。而同一个目录的另一个读者 —— refresh-lock
+        # 那段 Python 用的是 p.is_file()，它跟随链接 —— 两处判据于是对同一个目录给出不同
+        # 的文件集：模型放在外部盘、目录里只留 5 个链接时，refresh-lock 正常刷出 5 条，
+        # upload 却报"没有 .onnx / .json 模型文件"，看起来像脚本认不出明明在那儿的文件。
+        # 断链在两侧同样都不算数（-L 下 stat 失败会退回链接自身，-type f 为假；
+        # is_file() 同理），所以对齐之后两个读者在所有情形下同进同退。
+        find -L "$dir" -maxdepth 1 -type f \( -name '*.onnx' -o -name '*.json' \) ! -name '*.part' | sort
     )
     [ ${#files[@]} -gt 0 ] || die "$dir 下没有 .onnx / .json 模型文件"
 
     log "将上传到 $REPO 的 Release '$TAG'（同名资产覆盖）:"
-    for f in "${files[@]}"; do log "  $(du -h "$f" | cut -f1)  $(basename "$f")"; done
+    # du 同样要 -L：不加时对符号链接报的是链接自身的占用（0B），这份清单是上传前唯一
+    # 一次"我要传的是这些、各多大"的人工复核，全列 0B 等于把它废掉。
+    for f in "${files[@]}"; do log "  $(du -Lh "$f" | cut -f1)  $(basename "$f")"; done
 
     # 上传是不可逆的（资产一旦推上公开 Release，只能手工 delete-asset 才撤得掉），
     # 所以文件集比对必须发生在这之前。refresh_lock_from_dir 里那道同样的护栏留着
@@ -269,18 +278,44 @@ for name in sorted(set(have) - set(want)):
 
 for name in sorted(set(want) & set(have)):
     w, h = want[name], have[name]
-    if int(w["size"]) != int(h["size"]):
+    checked = []
+
+    # size 在 lock 里是**可选**字段，这里不能下标取。fetch_models.py 的 _check_spec 明写
+    # "写成 null 与整条不写同义"并把它删掉，_is_ready 也只认 sha256 —— 也就是说一条只有
+    # name + sha256 的记录是下载侧完全合法的输入。手工新增模型时先不填 size 很自然，而
+    # `w["size"]` 会让 verify 吐一段 KeyError traceback，与本脚本"出错就一行中文 + 非 0"
+    # 的口径正相反：维护者看到 Python 栈，第一反应是脚本坏了或 gh 认证过期，不会想到是
+    # 自己少打了一个字段。而 verify 已经挂在 CI 的 lint job 上，崩的是每个 PR。
+    w_size = w.get("size")
+    if w_size is None:
+        warns.append(f"{name}: lock 未写 size（可选字段），跳过大小比对")
+    elif int(w_size) != int(h["size"]):
         # size 就不同，sha256 必然也不同，不再重复报一遍
-        errors.append(f"{name}: size 不符 —— lock={w['size']} release={h['size']}")
+        errors.append(f"{name}: size 不符 —— lock={w_size} release={h['size']}")
         continue
+    else:
+        checked.append("size")
+
     algo, _, hexdigest = (h.get("digest") or "").partition(":")
     if not hexdigest:
-        # digest 是 GitHub 后加的字段，上传较早的资产可能没有；退化成只比 size。
-        warns.append(f"{name}: Release 未给出 digest（老资产），本次只比对了 size")
+        # digest 是 GitHub 后加的字段，上传较早的资产可能没有。
+        degraded = "Release 未给出 digest（老资产）"
     elif algo != "sha256":
-        warns.append(f"{name}: Release digest 是 {algo}，无法与 lock 的 sha256 比对，只比对了 size")
+        degraded = f"Release digest 是 {algo}，无法与 lock 的 sha256 比对"
     elif hexdigest.lower() != str(w["sha256"]).lower():
         errors.append(f"{name}: sha256 不符 —— lock={w['sha256'][:16]}… release={hexdigest[:16]}…")
+        continue
+    else:
+        degraded = ""
+        checked.append("sha256")
+
+    if degraded and checked:
+        warns.append(f"{name}: {degraded}，本次只比对了 {'/'.join(checked)}")
+    elif degraded:
+        # 两个字段一个都没比上。这条记录等于没对账，而 verify 退 0 的含义是"线上资产与
+        # lock 一致" —— 顺着降级成 warning 就是拿一句假话换绿灯，正好是本脚本 fail-closed
+        # 方向的反面。措辞也不能沿用上面那句"只比对了 size"：这次连 size 都没比。
+        errors.append(f"{name}: {degraded}，而 lock 也没写 size —— 这条没有任何可比对的字段")
 
 for w in warns:
     print(f"::warning:: {w}", file=sys.stderr)
