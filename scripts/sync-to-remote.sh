@@ -130,13 +130,23 @@ fi
 echo "[sync] 远端: build=$BUILD_MODE install=[${INSTALL_LIST:-none}]"
 
 # MILOCO_MODELS_BASE_URL 一并透传：远端 build.sh 要自己按 lock 拉 ~78MB 模型，
-# 而远端常在内网 / 出口受限，换源逃生口不传过去就等于没有。空值也照传，远端
-# fetch_models.py 对空串按"未设置"处理（见其 _sources）。
+# 而远端常在内网 / 出口受限，换源逃生口不传过去就等于没有。
+#
+# 本地没设就整条不传。命令行上的赋值前缀优先级**高于** sshd 会话里已有的环境，所以
+# 无条件拼一个空串不是"等于没传"，是把远端自己配好的源**顶掉** —— 而这个脚本抬头写明
+# 逃生口是给"远端出网受限"的机器用的，也就是目标读者恰恰是那些远端本身就配了内网源的人
+# （/etc/environment 经 pam_env 是管理员配 http_proxy 那类东西的常规位置）。顶掉之后
+# fetch_models.py 对空串按"未设置"处理，退回 lock 里那 4 个公网地址，出口受限全部超时，
+# build.sh 的 --strict 判非 0 → FATAL 模型未就绪，而屏幕上印的源跟管理员配的那个没有
+# 一个字的关系。上面那四个变量不同类：它们是本脚本自己算出来的值（参数 / 默认值），
+# 本来就该盖掉远端的同名残留，只有这一个是"远端有权自己配"的。
+_models_src_env=""
+[ -z "${MILOCO_MODELS_BASE_URL:-}" ] || \
+    _models_src_env="MILOCO_MODELS_BASE_URL='$MILOCO_MODELS_BASE_URL' "
 ssh "$HOST" \
     "REMOTE_PATH='$REMOTE_PATH' BUILD_MODE='$BUILD_MODE' \
      PACKAGES='$PACKAGES' INSTALL_LIST='$INSTALL_LIST' \
-     MILOCO_MODELS_BASE_URL='${MILOCO_MODELS_BASE_URL:-}' \
-     bash -s" <<'REMOTE'
+     ${_models_src_env}bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 # 从变量展开来的 ~ 不会被 shell 二次展开；显式替换为 $HOME。

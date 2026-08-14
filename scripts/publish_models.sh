@@ -289,21 +289,49 @@ for name in sorted(set(want) & set(have)):
     w_size = w.get("size")
     if w_size is None:
         warns.append(f"{name}: lock 未写 size（可选字段），跳过大小比对")
-    elif int(w_size) != int(h["size"]):
-        # size 就不同，sha256 必然也不同，不再重复报一遍
-        errors.append(f"{name}: size 不符 —— lock={w_size} release={h['size']}")
-        continue
     else:
+        try:
+            size_differs = int(w_size) != int(h["size"])
+        except (TypeError, ValueError):
+            # 缺字段之外的另一半：值在、但不是个数。手工编辑同样容易写出来（"5MB"、null
+            # 之外的任何非数字），而 int() 抛的 ValueError 与下标取的 KeyError 一样是
+            # 一段栈。判 error 而非 warn：这条记录 fetch_models.py 的 _check_spec 也
+            # 收不下（退 2），"跳过大小比对"会把一条下载侧根本用不了的记录放过去。
+            errors.append(
+                f"{name}: lock 的 size 不是整数（{w_size!r}）—— 这条记录下载侧同样不可用，"
+                f"重跑无用，先跑 refresh-lock 补齐"
+            )
+            continue
+        if size_differs:
+            # size 就不同，sha256 必然也不同，不再重复报一遍
+            errors.append(f"{name}: size 不符 —— lock={w_size} release={h['size']}")
+            continue
         checked.append("size")
 
+    # sha256 与 size 同理，不能下标取。它在 lock 里确实是**必填**的（下载器缺了它退 2），
+    # 但"必填"约束的是清单合不合法、不是这个脚本崩不崩 —— 而这条路径上没人验过条目形状
+    # （require_lock 只验 release_tag）。最容易撞上的写法就是"哈希留给 refresh-lock 去算"：
+    # 手工加一条 {"name": ..., "size": ...} 先把资产传上去，CI 的 lint job 跑 verify，
+    # size 对得上不 continue、新资产又有 sha256 digest，正好落到下面这一格。
+    # 同一份 lock 在 backend-test 那个 job 上跑下载器拿到的是一行中文 + 退 2，两个 job
+    # 对同一个输入给出两种质量的诊断，而先红的那个通常是维护者最先点开的。
+    w_sha = w.get("sha256")
     algo, _, hexdigest = (h.get("digest") or "").partition(":")
+    if w_sha is None:
+        errors.append(
+            f"{name}: lock 缺 sha256 —— 这条记录下载侧同样不可用（fetch_models.py 退 2），"
+            f"重跑无用，先跑 refresh-lock 补齐"
+        )
+        continue
     if not hexdigest:
         # digest 是 GitHub 后加的字段，上传较早的资产可能没有。
         degraded = "Release 未给出 digest（老资产）"
     elif algo != "sha256":
         degraded = f"Release digest 是 {algo}，无法与 lock 的 sha256 比对"
-    elif hexdigest.lower() != str(w["sha256"]).lower():
-        errors.append(f"{name}: sha256 不符 —— lock={w['sha256'][:16]}… release={hexdigest[:16]}…")
+    elif hexdigest.lower() != str(w_sha).lower():
+        # 两侧都过 str()：值被写成数字时，只包一边的话另一边的 [:16] 会 TypeError ——
+        # 又是一段栈，而且出现在"已经确定要判红"的路径上，等于把真正的结论盖掉。
+        errors.append(f"{name}: sha256 不符 —— lock={str(w_sha)[:16]}… release={hexdigest[:16]}…")
         continue
     else:
         degraded = ""

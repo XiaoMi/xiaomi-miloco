@@ -250,6 +250,70 @@ def test_verify_refuses_when_neither_size_nor_digest_can_be_compared(
     assert lock["files"][0]["name"] in r.stderr
 
 
+def test_verify_reports_a_missing_sha256_as_one_line(sandbox: _Sandbox) -> None:
+    """缺 sha256 也得是一行中文 + 非 0，不是一段栈。
+
+    与上面缺 size 那条的差别在**判红方向**：size 是可选字段，缺了降级成 warning；
+    sha256 是必填，缺了这条记录下载器自己也收不下（`_check_spec` 退 2），所以必须判红。
+    两条一起才说明"不下标取"不等于"一律容忍"。
+
+    最容易撞上的写法是"哈希留给 refresh-lock 去算"：手工加一条只有 name + size 的记录、
+    资产先传上 Release，于是 size 比得上、不 continue，新资产又带 sha256 digest，正好落到
+    这一格。同一份 lock 在 backend-test 那个 job 上跑下载器拿到的是一行中文 + 退 2，
+    verify 这边吐栈的话，两个 job 对同一个输入给出两种质量的诊断，而先红的那个通常是
+    维护者最先点开的。
+    """
+    lock = _real_lock()
+    sandbox.set_assets(_assets_from(lock))  # 资产按完整 lock 造，size 一定对得上
+    lock["files"][0].pop("sha256")
+    sandbox.write_lock(lock)
+
+    r = sandbox.run("verify")
+    assert "Traceback" not in r.stderr, f"缺必填字段就吐 traceback：\n{r.stderr}"
+    assert r.returncode == 1, f"缺 sha256 却退 0：\n{r.stderr}"
+    assert lock["files"][0]["name"] in r.stderr
+    # 要指明真因、并说清重跑没用——否则读者会当成网络抖动再点一次 re-run
+    assert "缺 sha256" in r.stderr
+    assert "refresh-lock" in r.stderr
+
+
+def test_verify_reports_a_non_integer_size_as_one_line(sandbox: _Sandbox) -> None:
+    """size 写成非数字：缺字段之外的另一半，同样不许吐栈。
+
+    上面那条钉的是"键不在"，这条钉的是"键在、值不是个数"——`w.get("size")` 拦得住前者，
+    拦不住后者，`int("5MB")` 抛的 ValueError 与 KeyError 一样是一段栈。判红而不是降级成
+    "跳过大小比对"：这条记录下载侧同样用不了，放过去等于让一条坏记录拿到绿灯。
+    """
+    lock = _real_lock()
+    sandbox.set_assets(_assets_from(lock))
+    lock["files"][0]["size"] = "5MB"
+    sandbox.write_lock(lock)
+
+    r = sandbox.run("verify")
+    assert "Traceback" not in r.stderr, f"size 写成非数字就吐 traceback：\n{r.stderr}"
+    assert r.returncode == 1, f"size 不是整数却退 0：\n{r.stderr}"
+    assert lock["files"][0]["name"] in r.stderr
+    assert "不是整数" in r.stderr
+
+
+def test_verify_mismatch_message_survives_a_numeric_sha256(sandbox: _Sandbox) -> None:
+    """sha256 被写成数字时，判红那条消息自己不许崩。
+
+    这一格在"已经确定要判红"的路径上：比对那侧包了 `str()`，拼消息那侧的 `[:16]` 若直接
+    切原值，数字上会 TypeError —— 一段栈盖掉真正的结论，读者看到的是脚本坏了而不是
+    "线上资产与 lock 不一致"。只包一边的写法能过上面所有用例，只有这条接得住。
+    """
+    lock = _real_lock()
+    sandbox.set_assets(_assets_from(lock))
+    lock["files"][0]["sha256"] = 12345678901234567890  # 没引号的哈希，JSON 合法
+    sandbox.write_lock(lock)
+
+    r = sandbox.run("verify")
+    assert "Traceback" not in r.stderr, f"数字哈希把判红消息拼崩了：\n{r.stderr}"
+    assert r.returncode == 1, f"哈希对不上却退 0：\n{r.stderr}"
+    assert "sha256 不符" in r.stderr
+
+
 # ── upload：文件集护栏必须早于不可逆的上传 ──────────────────────────────
 
 
