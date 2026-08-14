@@ -35,6 +35,17 @@ G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 info() { echo -e "${G}[✓]${N} $*"; }
 warn() { echo -e "${Y}[!]${N} $*"; }
 err()  { echo -e "${R}[✗]${N} $*" >&2; }
+# 印给用户「照抄粘回终端」的命令，里面的路径一律过这个：本脚本印出来的三个路径变量
+# （PYTHON 来自 venv 探测、FETCH_MODELS 由本脚本自身位置推导、MILOCO_HOME 来自 HOME）
+# 都可能带空格 —— macOS 的 ~/Library/Mobile Documents/、用户名带空格的 home 都会踩到。
+# 裸插值时 shell 从空格处切词，轻则第一个 token 变成 /Users/li 报 No such file，重则
+# 解释器路径侥幸无空格而 --dest 只收到半截：模型下到错的位置、命令还退 0，用户以为补齐了，
+# 重跑安装照旧提示缺模型 —— 比直接报错更难查。
+# 用 printf %q 而不是手写引号：它对没有特殊字符的路径原样输出（常见情况零噪声），
+# 有空格时才转义，且 macOS 自带的 bash 3.2 就支持（本脚本 shebang 是 env bash，
+# 在 macOS 上跑到的就是 3.2）。
+# 门禁见 backend/miloco/tests/test_shell_var_braces.py::test_printed_commands_quote_their_paths。
+_q() { printf '%q' "$1"; }
 
 for arg in "$@"; do
   case "$arg" in
@@ -94,7 +105,7 @@ on_exit() {
     echo -e "${Y}已生效步骤:${N} ${DONE_STEPS[*]:-无}"
     echo
     echo "可能状态：半装（plugin 复制了 / config patch 了 / adapter 没起）"
-    echo "修复：重跑 bash $HERE/install-hermes.sh（幂等，自动 recover）"
+    echo "修复：重跑 bash $(_q "$HERE/install-hermes.sh")（幂等，自动 recover）"
   fi
 }
 trap on_exit EXIT
@@ -796,7 +807,7 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
     # 带 --strict：不带的话"只有可选模型没下到"退 0，用户会拿到一个成功的退出码，
     # 而下次 install.sh 的门禁（models_ready 用的正是 --check --strict）照旧判不齐。
     # 手上这条命令的判据必须和门禁同源，否则修不动还看不出为什么。下面两处同理。
-    warn "补齐：$PYTHON $FETCH_MODELS --strict --dest $MILOCO_HOME/models"
+    warn "补齐：$(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")"
   else
     # 不能拿 ${FETCH_MODELS:-scripts/fetch_models.py} 兜底：`:-` 只在变量为空时取用，
     # 而变量为空的充要条件就是"本脚本旁边没有 checkout"（见上面 FETCH_MODELS 的探测）
@@ -807,7 +818,7 @@ elif [ "$POST_INSTALL_ONLY" -eq 1 ]; then
     # "文件损坏 / 路径写错"带偏 —— 与下面下载失败分支里"带上解释器"那段注释同一个理由。
     # 同理不提 scripts/models.lock.json：这个处境下那个文件同样不在手边。
     warn "补齐：重跑 install.sh（安装包自带模型 tar，会解到 $MILOCO_HOME/models/）"
-    warn "  或在 git checkout 目录里跑：$PYTHON scripts/fetch_models.py --strict --dest $MILOCO_HOME/models"
+    warn "  或在 git checkout 目录里跑：$(_q "$PYTHON") scripts/fetch_models.py --strict --dest $(_q "$MILOCO_HOME/models")"
   fi
 elif [ -n "$FETCH_MODELS" ]; then
   # 按 lock 从 upstream Release 下载（sha256 校验）。已齐的文件会被跳过，只补缺的。
@@ -834,7 +845,7 @@ elif [ -n "$FETCH_MODELS" ]; then
     # denied（退 126），而这个新错误跟刚才的下载失败毫无关系，只会把人往"权限 / 文件
     # 损坏"的方向带偏。用户此刻正处在失败状态，这行是他手上唯一的线索，大概率整行复制。
     # 与上面 --post-install 分支那条口径一致（全仓其余每处调用点也都带解释器前缀）。
-    warn "修法：重跑 $PYTHON $FETCH_MODELS --strict --dest $MILOCO_HOME/models，或手动放置模型文件"
+    warn "修法：重跑 $(_q "$PYTHON") $(_q "$FETCH_MODELS") --strict --dest $(_q "$MILOCO_HOME/models")，或手动放置模型文件"
   fi
 else
   warn "感知模型不齐（本地文件不全，也没有 scripts/fetch_models.py 可用）"

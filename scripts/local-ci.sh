@@ -31,6 +31,10 @@ fail_count=0
 ok()  { echo -e "${GREEN}✓${NC} $*"; ((pass_count++)) || true; }
 fail(){ echo -e "${RED}✗${NC} $*"; ((fail_count++)) || true; }
 info(){ echo -e "${YELLOW}→${NC} $*"; }
+# 印给人「照抄粘回终端」的命令里，路径一律过这个。printf %q 对不含特殊字符的路径原样
+# 输出（本文件当前唯一的调用点就是这种，输出一字不变），有空格时才转义，bash 3.2 即支持。
+# 门禁见 backend/miloco/tests/test_shell_var_braces.py::test_printed_commands_quote_their_paths。
+_q(){ printf '%q' "$1"; }
 
 # ---- 工具检查 ---------------------------------------------------------------
 check_tools() {
@@ -76,11 +80,13 @@ run_backend_tests() {
         # 旧整批 skip（test_deep_sort_v12.py 的判据是 __file__ 推出来的包内目录，环境变量
         # 够不着），而人手里唯一的线索就是这条命令。给相对路径而非 $models_dir：前半截
         # `scripts/fetch_models.py` 本来就是仓库根相对的，两截同口径才是一条能整体粘贴的
-        # 命令；且这个常量里没有空格/引号，不必再考虑印出来要怎么转义。
+        # 命令。这个常量今天没有空格，_q 输出与裸插值一字不差；套上它是为了「印出来的
+        # 命令一律过 _q」这条不留例外——哪天有人把它换成 $models_dir（含 $REPO_ROOT，
+        # 用户名带空格就中招），转义自动跟上，而不是等着谁想起来补。
         # --strict 也必须跟着印：上面这两行刚说了本告警覆盖"只缺可选模型"，而不带
         # --strict 的那条命令在这种情况下跑完退 0（可选失败不并进必需），人会以为补好了，
         # 下次 local-ci 一字不差再报一遍。判据（:66 的 --check --strict）与修法必须同强度。
-        info "  两种都用这条补齐：python3 scripts/fetch_models.py --strict --dest $models_rel"
+        info "  两种都用这条补齐：python3 scripts/fetch_models.py --strict --dest $(_q "$models_rel")"
     fi
     cd "$REPO_ROOT/backend"
     # 关键: 隔离本地 config.json（含 token），与 CI 干净环境对齐
