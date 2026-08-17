@@ -127,4 +127,8 @@ async def test_reconnect_camera_repairs_status_callback_and_connected_flag():
     miot_client.register_camera_status_changed_async.assert_awaited_with(
         did="cam1", callback=proxy._on_camera_status_changed
     )
-    assert "cam1" not in proxy._camera_connect_since
+    # 旧时间戳必须被清掉（否则 stream_nat_blocked 拿重建前的远古时刻立刻误报），
+    # 但重建本身又是一次新建连的开始，会当场播下新的起点——重建的 start_async 也在
+    # 状态回调注册前就发起了建连，首次 CONNECTING 同样丢在空回调表里
+    # （见 tests/test_camera_connect_since_seed.py）。
+    assert proxy._camera_connect_since.get("cam1") not in (None, 123.0)

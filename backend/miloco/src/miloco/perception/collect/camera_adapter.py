@@ -372,6 +372,19 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             logger.error(
                 "Stalled camera reconnect failed %s: %s", physical_did, e
             )
+            return
+        # 感知侧的解码订阅由下轮 sync 补齐，但 watch 直播与 record_clip 的订阅也一样
+        # 死在被 destroy 的旧实例上，且它们没有 sync 这条兜底（见
+        # MIoTVideoStreamManager.resubscribe_camera 的说明）。局部 import 防循环依赖，
+        # 也避免 client → ws 的反向依赖。
+        try:
+            from miloco.miot.ws import miot_video_stream_manager
+
+            await miot_video_stream_manager.resubscribe_camera(physical_did)
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "Resubscribe live/record streams failed %s: %s", physical_did, e
+            )
 
     async def connect_device(
         self, did: str, source: PerceptionDevice | None = None

@@ -771,6 +771,23 @@ class MiotProxy:
                                 did=camera_did,
                                 callback=self._on_camera_status_changed,
                             )
+                            # 首次 CONNECTING 捕获不到，必须在这里播种起始时间戳。
+                            # _create_camera_img_manager 里的 start_async 已经发起
+                            # native 建连，而此刻实例回调表还是空的
+                            # (camera.py __on_status_changed 遍历空表把事件丢弃，
+                            # register_status_changed_async 也不回灌当前状态)。对
+                            # 「卡在首次 CONNECTING 既不成功也不失败」的相机——正是
+                            # 跨网段被严格 NAT 黑掉媒体流的典型形态——此后可能再无
+                            # 第二次状态迁移，setdefault 永不执行，stream_nat_blocked
+                            # 取不到起点恒判 False，本 PR 加的跨 NAT 主动提示永不出现。
+                            # 新 manager 建成即是一次新建连的开始，以此刻为起点。
+                            # 不必担心把已连上的相机误标：CONNECTING 是发起建连时立刻
+                            # 发出的(与这里只隔几个 await)，而 CONNECTED 要等十几秒的
+                            # MTP 握手，落进这个窗口的只可能是 CONNECTING；真连上后
+                            # CONNECTED 分支会 pop 掉。
+                            self._camera_connect_since.setdefault(
+                                camera_did, time.monotonic()
+                            )
                             # 起停相机 native 会话直接影响相机有限的并发流名额，
                             # 用 WARNING 便于运维一眼追踪拉流生命周期。
                             logger.warning(
@@ -915,6 +932,9 @@ class MiotProxy:
                     await self._miot_client.register_camera_status_changed_async(
                         did=did, callback=self._on_camera_status_changed
                     )
+                    # 与 refresh_cameras 创建分支同因：重建的 start_async 也在注册前
+                    # 就发起了建连，首次 CONNECTING 同样丢在空回调表里。
+                    self._camera_connect_since.setdefault(did, time.monotonic())
                     logger.warning("Camera native stream reconnected: %s", did)
 
     async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:

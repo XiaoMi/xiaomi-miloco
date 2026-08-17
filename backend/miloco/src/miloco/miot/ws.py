@@ -331,6 +331,64 @@ class MIoTVideoStreamManager:
             camera_id, channel, reg_id,
         )
 
+    async def resubscribe_camera(self, camera_id: str) -> None:
+        """native 会话重建后，把该相机仍有订阅方的通道重新注册到新实例上。
+
+        ``MiotProxy.reconnect_camera`` 救静默相机时会 destroy 旧 native 实例
+        （``mi_camera_free``），旧实例上的解码回调随之全部消失、新实例回调表是空的，
+        本层持有的 ``_camera_reg_id`` 变成指向已释放实例的死 id。三个解码订阅消费方
+        里只有感知适配器有兜底（同一轮 sync 的 connect_device 会补注册），另两个没有：
+
+        - watch 直播：要等 15s 失流看门狗踢前端重连才恢复，住户看到 15~45s 冻结，
+          而这恰好发生在相机出问题、住户正盯着它的时刻；
+        - ``record_clip``：录像器只会等到 ``recorder.wait`` 超时，API 返回 504，
+          且这条路径没有客户端看门狗兜底。
+
+        所以由重建方（``camera_adapter._reconnect_stalled``）显式调用本方法补注册。
+
+        旧 reg_id 直接丢弃、**不调** ``stop_video_stream``：reg_id 只在实例内有效，
+        旧实例已释放，拿旧 id 去新实例上注销要么报错、要么误删别人的订阅。
+
+        编码器与 ``_camera_seen_keyframe`` 刻意不动：``H264LiveEncoder`` 是本层自己的
+        libx264，与 native 实例无关，重建前后编码流是连续的——清掉 keyframe 标记只会
+        让已在播的前端白等一个 GOP。
+        """
+        for camera_tag in list(self._camera_reg_id):
+            did, _, channel_str = camera_tag.rpartition(".")
+            if did != camera_id:
+                continue
+            try:
+                channel = int(channel_str)
+            except ValueError:  # pragma: no cover - camera_tag 恒为 did.channel
+                continue
+            async with self._lock_for(camera_tag):
+                # 取锁期间订阅方可能已全部离开（_teardown_if_idle 清了 reg_id），
+                # 那就不该在新实例上白开一路流、白占相机的并发流名额。
+                if camera_tag not in self._camera_reg_id or not self._has_subscribers(
+                    camera_tag
+                ):
+                    continue
+                try:
+                    reg_id = await manager.miot_service.start_video_stream(
+                        camera_id=did,
+                        channel=channel,
+                        callback=self.__video_stream_callback,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.error("Resubscribe after rebuild failed, %s: %s",
+                                 camera_tag, e)
+                    continue
+                if reg_id < 0:
+                    logger.error(
+                        "Resubscribe after rebuild rejected by SDK, %s", camera_tag
+                    )
+                    continue
+                self._camera_reg_id[camera_tag] = reg_id
+                logger.warning(
+                    "Resubscribed video stream after native rebuild, %s reg_id=%d",
+                    camera_tag, reg_id,
+                )
+
     async def _teardown_if_idle(
         self, camera_id: str, channel: int, camera_tag: str
     ) -> None:

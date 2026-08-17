@@ -99,6 +99,9 @@ const I18N = {
     wsError: "WebSocket 错误",
     camConnectedWaiting: "已连接摄像头，等待画面…",
     camUnreachable: "连不上摄像头（可能不在同一局域网，或摄像头离线）",
+    // 与 web/src/i18n/locales/zh/hero.json 的 hero.streamErrorCrossSubnetNat 是同一句
+    // 的两份独立副本（播放页查这张表，「家里此刻」卡片查 hero.json）。改措辞要同时改。
+    // tests/crossSubnetCopySync.test.ts 会断言两份相等，漏改一处会红。
     camUnreachableCrossSubnet: "跨网段拉流失败，建议将摄像头与主机接入同一网络，或把路由器设置为 全锥/开放 NAT",
     decoding: "正在解码…",
     decoderConfigFailed: (msg) => "解码器配置失败：" + msg,
@@ -134,6 +137,8 @@ const I18N = {
     wsError: "WebSocket error",
     camConnectedWaiting: "Camera connected, waiting for video…",
     camUnreachable: "Couldn't reach the camera (it may be on another network, or offline)",
+    // Keep in sync with hero.streamErrorCrossSubnetNat in
+    // web/src/i18n/locales/en/hero.json — see tests/crossSubnetCopySync.test.ts.
     camUnreachableCrossSubnet: "Cross-subnet streaming failed. Try putting the camera and host on the same network, or set the router to Full Cone / Open NAT",
     decoding: "Decoding…",
     decoderConfigFailed: (msg) => "Couldn't set up the decoder: " + msg,
