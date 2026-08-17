@@ -240,7 +240,16 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     online_only=True, require_lan=False
                 )
                 now_ms = _monotonic_ms()
-                if len(expected) > len(self._devices) and (
+                # 判据必须是**集合差**而非数量比较:数量看不见「数量相等、成员不同」。
+                # 5+ 台相机的家庭里低字典序相机上线顶位时,应连集 {100,200,300,400} 与
+                # 已连集 {200,300,400,500} 数量恰好都等于上限 ⇒ 数量判据恒 False ⇒
+                # refresh_cameras 永不触发 ⇒ 顶位的 100 因 manager 缺失每轮订阅失败被
+                # 剔除(日志反复刷 "will retry on next sync",而那个 retry 依赖的补建
+                # 永不成立),500 则继续占着原生会话白拉流。旧的带截断保留集会把 500
+                # 断掉使数量下降、间接触发补建;超集化拿走了那条自愈路径,而
+                # _converge_feed_cap 只处理「数量 > 上限」,看不见成员漂移。
+                missing = set(expected) - self._devices.keys()
+                if missing and (
                     now_ms - self._last_ondemand_refresh_ms
                     >= _ONDEMAND_REFRESH_MIN_INTERVAL_MS
                 ):

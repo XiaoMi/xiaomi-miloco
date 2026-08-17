@@ -60,6 +60,43 @@ def _make_adapter(cams: dict[str, MIoTCameraInfo]) -> CameraDeviceAdapter:
     return CameraDeviceAdapter(miot_proxy=proxy)
 
 
+def _make_adapter_with_managers(
+    cams: dict[str, MIoTCameraInfo], managers: set[str]
+) -> tuple[CameraDeviceAdapter, set[str]]:
+    """更忠实的模型：订阅只在该相机的 native manager 已建成时才成功。
+
+    真实链路里 ``start_camera_decode_*_stream`` 唯一的前置条件就是
+    ``camera_img_manager`` 在字典里（``client.py`` 里那两处 "not found in managers"
+    分支返回 -1），而 manager 由 ``refresh_cameras`` 按**活跃集**建销。前一个
+    ``_make_adapter`` 让订阅恒成功，因此看不见「manager 缺失 → 订阅失败 → did 被
+    剔除 → 依赖补建 refresh 才能恢复」这条链，也就抓不到补建触发条件的缺陷。
+    """
+    adapter = _make_adapter(cams)
+    proxy = adapter._miot_proxy
+
+    async def _start_video(physical_did, channel, cb):
+        return 1 if physical_did in managers else -1
+
+    async def _start_audio(physical_did, channel, cb):
+        return 2 if physical_did in managers else -1
+
+    async def _refresh_cameras():
+        # 与真实 refresh_cameras 同口径：按活跃集(cap=True)建销 manager。
+        from miloco.miot.filter import select_active_camera_dids
+
+        active = set(
+            select_active_camera_dids(proxy._kv_repo, cams, awake_map={})
+        )
+        managers.clear()
+        managers.update(active)
+        return cams
+
+    proxy.start_camera_decode_video_stream = _start_video
+    proxy.start_camera_decode_audio_stream = _start_audio
+    proxy.refresh_cameras = _refresh_cameras
+    return adapter, managers
+
+
 @pytest.mark.asyncio
 async def test_retained_set_is_superset_of_discovered():
     """超过投喂上限的家庭里，唯一 LAN 可达的相机不得在下一轮被断开。
@@ -117,6 +154,47 @@ async def test_connected_set_never_exceeds_feed_cap():
     connected = set(adapter.get_connected_devices())
     assert len(connected) == MAX_ENABLED_CAMERAS, f"越过上限: {sorted(connected)}"
     assert "500" not in connected, "被上限挤出的那路应当被断开"
+
+
+@pytest.mark.asyncio
+async def test_membership_drift_triggers_ondemand_rebuild():
+    """「数量相等、成员不同」也必须触发按需补建，否则顶位相机永远连不上。
+
+    第三个方向（前两条钉的是超集与数量上限）：5 台相机、低字典序的 `100` 后上线顶位时
+      - 应连集(cap=True) = {100,200,300,400}
+      - 已连集           = {200,300,400,500}
+    数量恰好都是 4 ⇒ 数量判据 `len(expected) > len(_devices)` 恒 False ⇒ refresh_cameras
+    永不触发 ⇒ `100` 因 manager 缺失每轮订阅失败被剔除（日志反复刷 "will retry on next
+    sync"，而那个 retry 依赖的补建永不成立），`500` 继续占着原生会话白拉流。
+    保留集超集化拿走了旧的自愈路径（旧的带截断保留集会把 500 断掉使数量下降），
+    而 `_converge_feed_cap` 只处理「数量 > 上限」，看不见成员漂移。
+    """
+    cams = {
+        "200": _cam("200", lan_online=True),
+        "300": _cam("300", lan_online=True),
+        "400": _cam("400", lan_online=True),
+        "500": _cam("500", lan_online=True),
+    }
+    managers = {"200", "300", "400", "500"}
+    adapter, managers = _make_adapter_with_managers(cams, managers)
+
+    await adapter.sync_devices()
+    assert set(adapter.get_connected_devices()) == {"200", "300", "400", "500"}
+
+    # `100` 后上线并顶位：活跃集变成 {100,200,300,400}，但数量仍是 4。
+    cams["100"] = _cam("100", lan_online=True)
+    # 补建有 10s 最小间隔节流(_ONDEMAND_REFRESH_MIN_INTERVAL_MS)，真实 sync 循环
+    # 本就 10s 一轮；测试里两轮紧邻，需把时钟推过节流窗，否则挡住的是节流而非判据。
+    adapter._last_ondemand_refresh_ms -= 60_000
+    await adapter.sync_devices()
+
+    connected = set(adapter.get_connected_devices())
+    assert "100" in connected, (
+        f"顶位相机必须被补建 manager 后连上，实际已连集={sorted(connected)}"
+    )
+    assert connected == {"100", "200", "300", "400"}, (
+        f"应收敛到活跃集，实际={sorted(connected)}"
+    )
 
 
 @pytest.mark.asyncio

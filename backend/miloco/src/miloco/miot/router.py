@@ -72,10 +72,17 @@ def _truncate_ws_reason(reason: str) -> str:
 def _safe_log(value) -> str:
     """去 CR/LF 防 log injection (CodeQL py/log-injection)。
 
-    ``channel`` 这种声明成 ``int`` 的 Query 参数**同样要过一遍**:CodeQL 只看
-    「值来自请求」,不信任注解,所以 ``%d`` 槽位里的裸 ``channel`` 依然会被报
-    py/log-injection(实测 4 条 alert 全部指向 ``channel`` 而非 ``camera_id``)。
-    故调用侧统一 ``%s`` + ``_safe_log()``,别看着是数字就跳过。
+    **凡是来自请求的值都要过一遍,不分类型**:CodeQL 只看「值来自请求」,不信任
+    类型注解。实测踩过两次:
+      - ``channel`` / ``duration_ms`` 声明成 ``int`` 也照样被报(第一批 4 条 alert
+        全部指向 ``channel`` 而非 ``camera_id``);
+      - ``timeout_s`` 由 ``duration_ms`` 算出,污点会**传播**过来;
+      - ``current_user`` 来自 ``Depends(verify_token)``,一样算请求输入。
+    所以调用侧统一 ``%s`` + ``_safe_log()``,别看着是数字或已鉴权就跳过。数值想保
+    留格式就先格式化再消毒:``_safe_log(f"{timeout_s:.1f}")``。
+
+    注:本文件里未被本次改动碰到的历史日志点仍是裸值(CodeQL 在 PR 上只对改动行
+    报警),不在本次范围内;新增/修改日志时请一律走本函数。
     """
     if value is None:
         return "None"
@@ -668,8 +675,9 @@ async def record_clip(
     return 504; register failures (camera not bound) return 503.
     """
     logger.info(
-        "record_clip API called, user: %s, camera: %s.%s, dur=%dms",
-        current_user, _safe_log(camera_id), _safe_log(channel), duration_ms,
+        "record_clip API called, user: %s, camera: %s.%s, dur=%sms",
+        _safe_log(current_user), _safe_log(camera_id), _safe_log(channel),
+        _safe_log(duration_ms),
     )
     recorder = NalClipRecorder(duration_ms=duration_ms)
     try:
@@ -688,8 +696,11 @@ async def record_clip(
             mp4_bytes = await recorder.wait(timeout=timeout_s)
         except asyncio.TimeoutError:
             logger.warning(
-                "record_clip timeout, %s.%s — no keyframe within %.1fs",
-                _safe_log(camera_id), _safe_log(channel), timeout_s,
+                "record_clip timeout, %s.%s — no keyframe within %ss",
+                _safe_log(camera_id), _safe_log(channel),
+                # timeout_s 由 Query 参数 duration_ms 算出 → 污点传播过来,同样要消毒。
+                # 先格式化再消毒,保住原来的 1 位小数。
+                _safe_log(f"{timeout_s:.1f}"),
             )
             raise HTTPException(
                 message=(
@@ -766,7 +777,7 @@ async def video_stream_websocket(
     """Video stream WebSocket."""
     logger.info(
         "WebSocket connection request, %s, %s.%s",
-        current_user, _safe_log(camera_id), _safe_log(channel),
+        _safe_log(current_user), _safe_log(camera_id), _safe_log(channel),
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -862,7 +873,7 @@ async def audio_stream_websocket(
     """Audio stream WebSocket."""
     logger.info(
         "Audio WebSocket connection request, %s, %s.%s",
-        current_user,
+        _safe_log(current_user),
         _safe_log(camera_id),
         _safe_log(channel),
     )
