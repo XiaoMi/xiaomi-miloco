@@ -923,6 +923,7 @@ function CamCardWithToggle({
   hasPrompt,
   onEditPrompt,
 }: CamCardProps) {
+  const { t } = useTranslation();
   return (
     <div className="snap-start shrink-0 w-[min(280px,85vw)]">
       <div className="relative">
@@ -960,6 +961,21 @@ function CamCardWithToggle({
           />
         </div>
       </div>
+      {/* 跨网段 + 探测可达 + 拉流一直连不上 —— 给可执行的两个方向，而不是让住户干等
+          一个永远连不上的"连接中"（见 backend list_cameras_with_state 的 stream_error）。
+
+          必须挂在**上区**：接口的 ``connected`` 取自感知适配器有没有解码订阅，而
+          ``stream_error`` 的前提是**原生** camera_status 尚未 CONNECTED —— 两者不是
+          同一个概念。而 stream_nat_blocked 要成立就需要相机状态回调跑过，那又要求
+          原生会话管理器已建成；管理器一在，解码订阅必然成功 ⇒ 接口 connected=true
+          ⇒ 这台相机一定落在上区。所以只挂下区的 BenchCamItem 时这条提示永远不渲染
+          （下区那两类相机压根没有管理器，stream_error 恒为 None）。下区也保留一份：
+          自愈重连断开与下轮重连之间那一瞬相机会短暂落到下区。 */}
+      {cam.streamError === "cross_subnet_nat" && (
+        <p className="mt-1 text-caption text-warning">
+          {t("hero.streamErrorCrossSubnetNat")}
+        </p>
+      )}
     </div>
   );
 }
