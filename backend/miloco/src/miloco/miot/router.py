@@ -70,7 +70,13 @@ def _truncate_ws_reason(reason: str) -> str:
 
 
 def _safe_log(value) -> str:
-    """去 CR/LF 防 log injection (CodeQL py/log-injection)。"""
+    """去 CR/LF 防 log injection (CodeQL py/log-injection)。
+
+    ``channel`` 这种声明成 ``int`` 的 Query 参数**同样要过一遍**:CodeQL 只看
+    「值来自请求」,不信任注解,所以 ``%d`` 槽位里的裸 ``channel`` 依然会被报
+    py/log-injection(实测 4 条 alert 全部指向 ``channel`` 而非 ``camera_id``)。
+    故调用侧统一 ``%s`` + ``_safe_log()``,别看着是数字就跳过。
+    """
     if value is None:
         return "None"
     return str(value).replace("\r", "").replace("\n", " ")
@@ -121,16 +127,18 @@ async def _first_frame_watchdog(
         return
     # 12s 无首帧:续等,期间出帧即解除(静默自愈 / 静默检测重连完成)。
     logger.info(
-        "First-frame delayed, %s.%d — no frame in %.0fs, extending grace %.0fs",
-        _safe_log(camera_id), channel, _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
+        "First-frame delayed, %s.%s — no frame in %.0fs, extending grace %.0fs",
+        _safe_log(camera_id), _safe_log(channel),
+        _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
     )
     await asyncio.sleep(_GRACE_EXTENSION_S)
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
         return
     logger.warning(
-        "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
+        "First-frame watchdog fired, %s.%s — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
-        _safe_log(camera_id), channel, _FIRST_FRAME_TIMEOUT_S + _GRACE_EXTENSION_S,
+        _safe_log(camera_id), _safe_log(channel),
+        _FIRST_FRAME_TIMEOUT_S + _GRACE_EXTENSION_S,
     )
     # 跨网段 → 大概率是 NAT 类型限制拉流,提示可执行的修法(与 stream_error=
     # "cross_subnet_nat" 同文案);否则保留通用「连不上」。
@@ -155,8 +163,8 @@ async def _first_frame_watchdog(
         # send 失败基本意味着连接已被对端关掉——再 close 也是白搭,还会再抛一条
         # error 把"连接没了"这件正常事刷成两条 ERROR。直接收尾,主流程 finally 的
         # close_connection 负责清理。降到 info,不混进真 error。
-        logger.info("watchdog send skipped (conn likely gone), %s.%d: %s",
-                    _safe_log(camera_id), channel, err)
+        logger.info("watchdog send skipped (conn likely gone), %s.%s: %s",
+                    _safe_log(camera_id), _safe_log(channel), err)
         return
     try:
         # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)。
@@ -166,7 +174,8 @@ async def _first_frame_watchdog(
             code=1011, reason=_truncate_ws_reason(reason)
         )
     except Exception as err:
-        logger.info("watchdog close failed, %s.%d: %s", _safe_log(camera_id), channel, err)
+        logger.info("watchdog close failed, %s.%s: %s",
+                    _safe_log(camera_id), _safe_log(channel), err)
 
 
 router = APIRouter(prefix="/miot", tags=["Xiaomi IoT"])

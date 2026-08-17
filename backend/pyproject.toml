@@ -24,9 +24,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 norecursedirs = ["miot", "miloco/src/miloco/perception/engine/identity/tracker"]
-markers = [
-  "unit: 纯 mock、无真实网络/文件 I/O 的单元测试；CI 的 `miot 单元测试` 步骤按此 marker 选择",
-]
 
 [tool.ruff.lint]
 select = [
