@@ -775,8 +775,9 @@ class MIoTClient:
         """Tell the LAN prober whether a camera's native stream is connected.
 
         Connected cameras are proven reachable, so MIoTLan skips probing
-        them (and pauses scanning entirely once every known camera is
-        connected). Call on every camera_status transition.
+        them (and throttles the scan interval down to
+        ``OT_PROBE_INTERVAL_MAX`` once every *enabled* camera is connected —
+        it never stops scanning). Call on every camera_status transition.
         """
         self._lan_client.set_camera_connected(did, connected)
 
@@ -786,7 +787,7 @@ class MIoTClient:
         MUST be the set of dids actually expected to connect (home-filtered,
         not blacklisted, capped, etc.) — not every camera-class device on the
         account — otherwise a camera outside the current scope would never
-        report connected and scanning would never pause.
+        report connected and the scan interval would never throttle down.
         """
         self._lan_client.set_camera_dids(dids)
 

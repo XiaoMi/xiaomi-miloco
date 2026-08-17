@@ -27,7 +27,11 @@ class BaseDeviceAdapter(ABC):
 
     @abstractmethod
     async def discover_devices(
-        self, all_devices: dict | None = None, online_only: bool = True, cap: bool = True
+        self,
+        all_devices: dict | None = None,
+        online_only: bool = True,
+        require_lan: bool = True,
+        cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         """Discover devices of this type.
 
@@ -37,10 +41,16 @@ class BaseDeviceAdapter(ABC):
             online_only: If True (default), only return online devices.
                          If False, return all discovered devices regardless of
                          online status.
+            require_lan: If True (default), a device must be LAN-reachable to be
+                 returned. Pass False for "cloud-online is enough" callers
+                 (retained-set recompute in ``sync_devices``, on-demand rebuild
+                 probing). Adapters without a LAN reachability notion ignore it.
+                 ``sync_devices`` calls this by keyword, so every adapter must
+                 accept it.
             cap: If True (default), truncate to the device type's feed limit
                  (camera: MAX_ENABLED_CAMERAS). Pass False for "list full set"
-                 callers (e.g. rule target validation). Adapters without a feed
-                 limit ignore it.
+                 callers (e.g. rule target validation, retained-set recompute).
+                 Adapters without a feed limit ignore it.
 
         Returns:
             {did: PerceptionDevice} for devices of this type.
@@ -59,8 +69,14 @@ class BaseDeviceAdapter(ABC):
         """
 
     @abstractmethod
-    async def disconnect_device(self, did: str) -> None:
-        """Disconnect from a device, unsubscribe all streams, clear buffers."""
+    async def disconnect_device(self, did: str, *, force: bool = False) -> None:
+        """Disconnect from a device, unsubscribe all streams, clear buffers.
+
+        Args:
+            force: Disconnect even if the device is marked as taken over by an
+                external owner (inject-video etc.). Adapters without a take-over
+                notion ignore it.
+        """
 
     @abstractmethod
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
@@ -124,14 +140,21 @@ class BaseDeviceAdapter(ABC):
         # 断开判断的「应保留」集合:默认就是 discovered (require_lan 与 discover 一致)。
         # disconnect_require_lan=False 时改用 require_lan=False 重算 —— 只按云端在线
         # 判定,lan_online 偶发假 False 的设备仍保留,避免把拉流中的设备误断。
+        #
+        # 这条路径成立的唯一前提是「保留集 ⊇ 发现集」:放宽了一道门,候选只应变多。
+        # 所以必须 cap=False —— 投喂上限的截断发生在过滤之后、按合成 did 字典序取前
+        # N 个,而 sorted(超集)[:N] 并不包含 sorted(子集)[:N]。带截断重算时,超过上限的
+        # 家庭里「唯一真正 LAN 可达那台」会落在保留集之外,于是每轮同步连上、下一轮
+        # 又被断开,画面反复中断且永不自愈。再与 discovered_dids 取并集兜底:将来
+        # cap / 排序口径若再变,也不会让「放宽一道门」反而丢掉已通过严格门的设备。
         if disconnect_require_lan:
             retained_dids = discovered_dids
         else:
             try:
                 retained = await self.discover_devices(
-                    all_devices, require_lan=False
+                    all_devices, require_lan=False, cap=False
                 )
-                retained_dids = set(retained.keys())
+                retained_dids = set(retained.keys()) | discovered_dids
             except Exception as e:
                 logger.warning(
                     "[%s] Retained-device rediscover failed (%s); "

@@ -38,12 +38,13 @@ def is_camera_connected(info: object) -> bool:
     是为了容忍非 ``MIoTCameraInfo`` 对象（``camera_status`` 缺失时返回 ``False``），
     不是另一套独立判据；两边的枚举口径要保持同步。
 
-    ⚠️ **给非相机功能的警告**：``lan_online`` 目前只在相机路径上被当作决策依据。
-    LAN 层在「所有相机都已连上」时会**整段暂停全局广播发现**（见
-    ``miot/lan.py::__scan_devices``），届时非相机设备的 ``lan_online`` 会在
-    ``_KA_TIMEOUT`` 后陆续翻 ``False``、新上线的非相机设备也发现不了。若要给
-    非相机设备加以 ``lan_online`` 为硬门的逻辑，必须先回 ``lan.py`` 重新评估该
-    暂停策略，否则会在「所有相机都在拉流」这个毫不相关的条件下静默失效。
+    ⚠️ **给非相机功能的提示**：``lan_online`` 目前只在相机路径上被当作决策依据。
+    LAN 层在「所有**已启用**相机都已连上」时会把全局广播发现**降频**到
+    ``MIoTLan.OT_PROBE_INTERVAL_MAX``（45s，见 ``miot/lan.py::__scan_devices``），
+    但**绝不停表**：45s < ``_MIoTLanDevice._KA_TIMEOUT``（100s），集合外的设备
+    （未启用相机、非相机设备）的 ``lan_online`` 仍被持续刷新。若要给非相机设备
+    加以 ``lan_online`` 为硬门的逻辑，只需知道最坏情况下在线态有约 45s 的刷新
+    延迟即可，不会在「所有相机都在拉流」这个毫不相关的条件下静默失效。
     """
     # 优先走 MIoTCameraInfo.connected 属性——判据单一来源，避免两处实现分裂；
     # 非 MIoTCameraInfo 对象（无 connected 属性）回退到 getattr 判 camera_status。
