@@ -251,6 +251,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         语义被静默检测打断。
         """
         now_ms = _monotonic_ms()
+        # 先按物理 did 归并本轮所有静默通道：多镜头相机的 ch0/ch1 共用同一个 native
+        # 会话，一次 destroy+create 就够；按通道 did 各触发一次等于重复重建（重建的
+        # 还是同一个物理会话，几毫秒内 destroy 两次，四镜头就是四次）。
+        stalled_by_physical: dict[str, list[str]] = {}
         for did, state in list(self._devices.items()):
             # 被外部接管（inject-video 等）→ 静默检测不碰，交给接管方自己管生命周期。
             if did in self._taken_over:
@@ -265,33 +269,47 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             # 云端已离线 → 救不活，交给基类按在线态断开，别白重连。
             if cam is not None and not cam.online:
                 continue
-            # 防抖：刚重连过不重复，避免真坏相机 30s 一轮空转。
-            if now_ms - self._last_reconnect_ms.get(did, 0) < _RECONNECT_COOLDOWN_MS:
+            stalled_by_physical.setdefault(physical_did, []).append(did)
+
+        for physical_did, stalled_dids in stalled_by_physical.items():
+            # 防抖按物理 did 计：同一台相机 5min 内只重建一次。
+            if (
+                now_ms - self._last_reconnect_ms.get(physical_did, 0)
+                < _RECONNECT_COOLDOWN_MS
+            ):
                 continue
             logger.warning(
-                "Camera %s stalled (%dms no video frame), reconnecting",
-                did,
-                now_ms - state.last_video_frame_ms,
+                "Camera %s stalled (channels=%s), reconnecting",
+                physical_did,
+                stalled_dids,
             )
-            await self._reconnect_stalled(did)
+            await self._reconnect_stalled(physical_did)
 
-    async def _reconnect_stalled(self, did: str) -> None:
-        """重建一台静默相机：停解码订阅 → 重建 native 会话 → 交下轮 sync 重订。
+    async def _reconnect_stalled(self, physical_did: str) -> None:
+        """重建一台静默相机：停该相机全部通道的解码订阅 → 重建 native 会话。
 
         三层重建缺一不可：disconnect_device 只 unregister 解码回调（不动 native miss
         会话）；reconnect_camera 才 destroy+create manager 真正断掉僵尸 MTP/PPCS 会话、
         重走 miss_client_connect 的建连重试；解码订阅由下轮 sync 的 connect_device 补齐。
+        必须把同一物理相机的所有已连通道一起断开：destroy 会连带作废兄弟通道在旧
+        实例上的 reg_id，而 connect_device 对已在 _devices 里的 did 直接 early-return，
+        不先断开就永远补不回订阅。
         """
-        physical_did, _ = split_channel_did(did)
-        self._last_reconnect_ms[did] = _monotonic_ms()
-        try:
-            await self.disconnect_device(did)
-        except Exception as e:  # noqa: BLE001
-            logger.error("Stalled camera disconnect failed %s: %s", did, e)
+        self._last_reconnect_ms[physical_did] = _monotonic_ms()
+        siblings = [
+            d for d in list(self._devices) if split_channel_did(d)[0] == physical_did
+        ]
+        for d in siblings:
+            try:
+                await self.disconnect_device(d)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Stalled camera disconnect failed %s: %s", d, e)
         try:
             await self._miot_proxy.reconnect_camera(physical_did)
         except Exception as e:  # noqa: BLE001
-            logger.error("Stalled camera reconnect failed %s: %s", did, e)
+            logger.error(
+                "Stalled camera reconnect failed %s: %s", physical_did, e
+            )
 
     async def connect_device(
         self, did: str, source: PerceptionDevice | None = None

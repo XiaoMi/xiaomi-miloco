@@ -69,6 +69,13 @@ def _truncate_ws_reason(reason: str) -> str:
     return encoded[:120].decode("utf-8", errors="ignore")
 
 
+def _safe_log(value) -> str:
+    """去 CR/LF 防 log injection (CodeQL py/log-injection)。"""
+    if value is None:
+        return "None"
+    return str(value).replace("\r", "").replace("\n", " ")
+
+
 # 首帧看门狗:WS 注册成功(reg_id≥0)后,若摄像头在这么多秒内一帧都没出,判定为
 # "连不上"(典型:摄像头跟 backend 不在同一局域网且 PPCS 中继也没建起来 / 摄像头离线 /
 # 休眠)。给前端发一条明确的 error 信令再关,而不是让它永远停在"正在连接摄像头…"。
@@ -115,7 +122,7 @@ async def _first_frame_watchdog(
     # 12s 无首帧:续等,期间出帧即解除(静默自愈 / 静默检测重连完成)。
     logger.info(
         "First-frame delayed, %s.%d — no frame in %.0fs, extending grace %.0fs",
-        camera_id, channel, _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
+        _safe_log(camera_id), channel, _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
     )
     await asyncio.sleep(_GRACE_EXTENSION_S)
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
@@ -123,7 +130,7 @@ async def _first_frame_watchdog(
     logger.warning(
         "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
-        camera_id, channel, _FIRST_FRAME_TIMEOUT_S + _GRACE_EXTENSION_S,
+        _safe_log(camera_id), channel, _FIRST_FRAME_TIMEOUT_S + _GRACE_EXTENSION_S,
     )
     # 跨网段 → 大概率是 NAT 类型限制拉流,提示可执行的修法(与 stream_error=
     # "cross_subnet_nat" 同文案);否则保留通用「连不上」。
@@ -149,7 +156,7 @@ async def _first_frame_watchdog(
         # error 把"连接没了"这件正常事刷成两条 ERROR。直接收尾,主流程 finally 的
         # close_connection 负责清理。降到 info,不混进真 error。
         logger.info("watchdog send skipped (conn likely gone), %s.%d: %s",
-                    camera_id, channel, err)
+                    _safe_log(camera_id), channel, err)
         return
     try:
         # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)。
@@ -159,7 +166,7 @@ async def _first_frame_watchdog(
             code=1011, reason=_truncate_ws_reason(reason)
         )
     except Exception as err:
-        logger.info("watchdog close failed, %s.%d: %s", camera_id, channel, err)
+        logger.info("watchdog close failed, %s.%d: %s", _safe_log(camera_id), channel, err)
 
 
 router = APIRouter(prefix="/miot", tags=["Xiaomi IoT"])

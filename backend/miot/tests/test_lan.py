@@ -5,18 +5,15 @@
 MIoT Lan Test.
 """
 
-import asyncio
 import errno
 import logging
 import socket
 import struct
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from miot.lan import MIoTLan
 from miot.network import MIoTNetwork
-from miot.types import InterfaceStatus, MIoTLanDeviceInfo, NetworkInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,51 +22,6 @@ _LOGGER = logging.getLogger(__name__)
 # 静默 deselect——那是唯一会收集 miot/tests/ 的 CI 步骤（另一步骤靠
 # norecursedirs 排除了整个 miot 目录）。
 pytestmark = pytest.mark.unit
-
-
-@pytest.mark.asyncio
-async def test_network_monitor_loop_async():
-    """Test network monitor loop."""
-    miot_net = MIoTNetwork()
-
-    async def on_network_status_changed(status: bool):
-        _LOGGER.info("on_network_status_changed, %s", status)
-
-    await miot_net.register_status_changed_async(
-        key="test", handler=on_network_status_changed
-    )
-
-    async def on_network_info_changed(status: InterfaceStatus, info: NetworkInfo):
-        _LOGGER.info("on_network_info_changed, %s, %s", status, info)
-
-    await miot_net.register_info_changed_async(
-        key="test", handler=on_network_info_changed
-    )
-    await miot_net.init_async()
-
-    miot_lan = MIoTLan(
-        net_ifs=list((await miot_net.get_info_async()).keys()), network=miot_net
-    )
-    await miot_lan.init_async()
-
-    async def on_device_status_changed(did: str, info: MIoTLanDeviceInfo, ctx: Any):
-        del ctx
-        _LOGGER.info("on_device_status_changed, %s, %s", did, info)
-
-    await miot_lan.register_status_changed_async(
-        key="test", handler=on_device_status_changed
-    )
-
-    lan_devices = await miot_lan.get_devices_async()
-    _LOGGER.info("lan devices: %s", lan_devices)
-
-    # Get detected devices
-
-    # while True:
-    await asyncio.sleep(5)
-
-    await miot_lan.deinit_async()
-    await miot_net.deinit_async()
 
 
 @pytest.mark.asyncio

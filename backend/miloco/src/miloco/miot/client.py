@@ -878,6 +878,18 @@ class MiotProxy:
                     logger.warning(
                         "unregister lan change failed on reconnect %s: %s", did, e
                     )
+                # 必须在 manager.destroy() 之前注销：destroy 会把 did 从 SDK 的
+                # _camera_map 里 pop 掉，之后再注销会抛 MIoTCameraError。
+                try:
+                    await self._miot_client.unregister_camera_status_changed_async(
+                        did=did
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "unregister camera status failed on reconnect %s: %s",
+                        did,
+                        e,
+                    )
                 try:
                     await manager.destroy()
                 except Exception as e:  # noqa: BLE001
@@ -885,6 +897,11 @@ class MiotProxy:
                         "destroy camera manager failed on reconnect %s: %s", did, e
                     )
                 self._camera_img_managers.pop(did, None)
+                # 回调已注销，destroy 触发的 DISCONNECTED 送不到 _on_camera_status_changed。
+                # 这两行必须显式补：前者让 lan 层把该 did 移出 _connected_dids 并恢复扫描，
+                # 后者避免 stream_nat_blocked 拿旧时间戳恒判跨 NAT 受阻。
+                self._miot_client.set_camera_connected(did, False)
+                self._camera_connect_since.pop(did, None)
             if did in self._camera_info_dict:
                 new_manager = await self._create_camera_img_manager(
                     self._camera_info_dict[did]
@@ -892,6 +909,11 @@ class MiotProxy:
                 if new_manager is not None:
                     await self._miot_client.register_lan_device_changed_async(
                         did=did, callback=self._on_lan_device_changed
+                    )
+                    # 新实例的回调表是空的，状态回调必须重新注册，否则该相机的
+                    # 连接态永远停在重建前的快照上。
+                    await self._miot_client.register_camera_status_changed_async(
+                        did=did, callback=self._on_camera_status_changed
                     )
                     logger.warning("Camera native stream reconnected: %s", did)
 
