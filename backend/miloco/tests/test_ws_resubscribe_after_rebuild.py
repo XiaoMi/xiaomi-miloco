@@ -105,8 +105,18 @@ async def test_channel_without_subscribers_is_not_resubscribed(monkeypatch):
     start.assert_not_awaited()
 
 
-async def test_sdk_rejection_keeps_going_and_does_not_poison_reg_id(monkeypatch):
-    """SDK 返回负值/抛异常时不能把失败值写进 reg_id，也不能中断其余通道的补注册。"""
+async def test_failed_resubscribe_clears_reg_id_to_minus_one(monkeypatch):
+    """补注册失败必须把 reg_id 清成 -1，且不中断其余通道的补注册。
+
+    留着旧号码是有害的：``_next_reg_id`` 每个新实例都从 1 重新发号，直播与感知注册进
+    同一个 ``decode_video_frame.{channel}`` 字典、unregister 只按号码 pop 不校验归属。
+    订阅方离开时 ``_teardown_if_idle`` 只判 ``reg_id >= 0``，就会拿死号去新实例上注销，
+    pop 掉感知在新实例上拿到的同号回调 → 住户关掉直播页后这台相机的感知彻底零帧，
+    还要等静默检测的 5min 重建冷却过去才自愈。
+
+    这条路不需要 SDK 抽风：``reconnect_camera`` 在「旧实例已拆、新实例没建起来」时是
+    静默返回不抛的，补注册照常执行，而底层已经没有该相机的 manager → 桥接层返回 -1。
+    """
     start = AsyncMock(side_effect=[-1, RuntimeError("boom"), 21])
     _patch_sdk(monkeypatch, start)
     mgr = _mgr_with_ws("dual.0", reg_id=1)
@@ -117,11 +127,38 @@ async def test_sdk_rejection_keeps_going_and_does_not_poison_reg_id(monkeypatch)
     await mgr.resubscribe_camera("dual")
 
     assert start.await_count == 3
-    # 前两路保留旧值（已是死 id，但绝不能被 -1 覆盖：-1 会让 _teardown_if_idle
-    # 跳过 stop_video_stream），第三路换上新 id。
-    assert mgr._camera_reg_id["dual.0"] == 1
-    assert mgr._camera_reg_id["dual.1"] == 2
+    # 失败的两路清成 -1（_teardown_if_idle 天然跳过注销），第三路换上新 id。
+    # 键本身要保留：resubscribe_camera 靠遍历这些键决定下次重建补哪些通道。
+    assert mgr._camera_reg_id["dual.0"] == -1
+    assert mgr._camera_reg_id["dual.1"] == -1
     assert mgr._camera_reg_id["dual.2"] == 21
+
+
+async def test_teardown_after_failed_resubscribe_does_not_unregister(monkeypatch):
+    """上一条的真实危害面：补注册失败后订阅方离开，绝不能去新实例上注销。
+
+    直接钉 ``_teardown_if_idle`` 的行为——它是把死号送进 SDK 的那一步，也是「关掉
+    直播页导致感知零帧」这条坏行为的落点。
+    """
+    stop = AsyncMock()
+    monkeypatch.setattr(
+        ws_mod,
+        "manager",
+        SimpleNamespace(
+            miot_service=SimpleNamespace(
+                start_video_stream=AsyncMock(return_value=-1),
+                stop_video_stream=stop,
+            )
+        ),
+    )
+    mgr = _mgr_with_ws("cam1.0", reg_id=1)
+
+    await mgr.resubscribe_camera("cam1")
+    # 住户关掉 watch 页 → 订阅方清空 → 走 teardown。
+    mgr._camera_connect_map.pop("cam1.0")
+    await mgr._teardown_if_idle("cam1", 0, "cam1.0")
+
+    stop.assert_not_awaited()
 
 
 async def test_encoder_and_keyframe_state_survive_rebuild(monkeypatch):

@@ -101,6 +101,19 @@ _FIRST_FRAME_TIMEOUT_S = 12.0
 # ~45s,期间出帧即解除,避免把「正在恢复的摄像头」误报成 unreachable 拆连接。
 _GRACE_EXTENSION_S = 60.0
 
+# reason 机器码 → 兜底文案的**单一映射**。前端（watch.html / hero.json）按 reason 查
+# 自己的本地译文，这里的 message 只在「客户端缓存了旧版 watch.html、不认识新 reason」
+# 时才显示——正因为它平时看不见，漂移最容易发生。整句文案在仓里共四处，收敛成
+# 「一份来源 + 三处引用」：hero.json 是来源，watch.html 由
+# web/tests/crossSubnetCopySync.test.ts 断言相等，本表由
+# tests/test_watchdog_cross_subnet.py 直接读 hero.json 断言相等。改措辞先改 hero.json。
+UNREACHABLE_MESSAGES = {
+    "camera_unreachable_cross_subnet": (
+        "跨网段拉流失败，建议将摄像头与主机接入同一网络，或把路由器设置为 全锥/开放 NAT"
+    ),
+    "camera_unreachable": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
+}
+
 
 def _resolve_cross_subnet(camera_id: str) -> bool:
     """从相机缓存解析 ``cross_subnet`` 判据，供看门狗分流。
@@ -150,12 +163,7 @@ async def _first_frame_watchdog(
     # 跨网段 → 大概率是 NAT 类型限制拉流,提示可执行的修法(与 stream_error=
     # "cross_subnet_nat" 同文案);否则保留通用「连不上」。
     reason = "camera_unreachable_cross_subnet" if cross_subnet else "camera_unreachable"
-    message = (
-        "跨网段拉流失败，建议将摄像头与主机接入同一网络，"
-        "或把路由器设置为 全锥/开放 NAT"
-        if cross_subnet
-        else "连不上摄像头(可能不在同一局域网,或摄像头离线)"
-    )
+    message = UNREACHABLE_MESSAGES[reason]
     try:
         # reason 是给前端按机器码分流用的字段(camera_unreachable / 跨 NAT 专属);
         # 前端按 reason 查本地译文,未知 reason 才回退 message。两个都发。

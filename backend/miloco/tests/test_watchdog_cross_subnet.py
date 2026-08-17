@@ -14,13 +14,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from miloco.miot import router
 
-# 跨 NAT 专属文案（与 web/public/watch.html / hero.json 口径一致，精简版）
-_CROSS_SUBNET_MSG = "跨网段拉流失败，建议将摄像头与主机接入同一网络，或把路由器设置为 全锥/开放 NAT"
-_GENERIC_MSG = "连不上摄像头(可能不在同一局域网,或摄像头离线)"
+# 跨 NAT 文案的唯一来源是 web/src/i18n/locales/zh/hero.json —— 这里**读**它而不是
+# 再抄一份字面量。整句在仓里共四处（hero.json / watch.html 中英 / router.py 兜底
+# message / 本测试），前三处两两之间都有机械约束（watch.html 由
+# web/tests/crossSubnetCopySync.test.ts 断言），本测试补上「后端 ↔ hero.json」这条，
+# 否则改前端文案时全绿、后端那份静静漂移。
+_HERO_ZH = (
+    Path(__file__).resolve().parents[3] / "web/src/i18n/locales/zh/hero.json"
+)
+_CROSS_SUBNET_MSG = json.loads(_HERO_ZH.read_text(encoding="utf-8"))["hero"][
+    "streamErrorCrossSubnetNat"
+]
+_GENERIC_MSG = router.UNREACHABLE_MESSAGES["camera_unreachable"]
 
 
 def _run_watchdog(*, cross_subnet: bool = False, has_frame: bool = False):

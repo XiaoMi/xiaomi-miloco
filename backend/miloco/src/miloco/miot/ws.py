@@ -347,7 +347,20 @@ class MIoTVideoStreamManager:
         所以由重建方（``camera_adapter._reconnect_stalled``）显式调用本方法补注册。
 
         旧 reg_id 直接丢弃、**不调** ``stop_video_stream``：reg_id 只在实例内有效，
-        旧实例已释放，拿旧 id 去新实例上注销要么报错、要么误删别人的订阅。
+        旧实例已释放，拿旧 id 去新实例上注销要么报错、要么误删别人的订阅——后者是
+        实打实会发生的：``_next_reg_id`` 每个新实例都从 1 重新发号
+        （``camera.py`` ``_MIoTCamera.__init__``），直播与感知注册进同一个
+        ``decode_video_frame.{channel}`` 字典，而 unregister 只按号码 pop、不校验归属。
+
+        同理，补注册失败的两条分支必须把 reg_id 显式写成 ``-1``：本层此刻在新实例上
+        一个注册都没有，没有任何东西需要注销。留着旧号码，等订阅方离开时
+        ``_teardown_if_idle`` 只判 ``reg_id >= 0`` 就把死号送去注销，pop 掉的会是
+        感知在新实例上拿到的同号回调——住户关掉直播页后这台相机的感知彻底零帧，
+        且要等静默检测的 5min 重建冷却过去才自愈。
+        键本身保留不 pop：``resubscribe_camera`` 靠遍历 ``_camera_reg_id`` 的键决定补
+        哪些通道，pop 掉会连带丢掉「下次重建还要补这一路」的线索；而只要订阅方还在，
+        ``_ensure_sdk_subscription`` 的两个调用点都以 ``not _has_subscribers`` 为闸门，
+        不会因为这个 ``-1`` 被重复触发。
 
         编码器与 ``_camera_seen_keyframe`` 刻意不动：``H264LiveEncoder`` 是本层自己的
         libx264，与 native 实例无关，重建前后编码流是连续的——清掉 keyframe 标记只会
@@ -377,11 +390,13 @@ class MIoTVideoStreamManager:
                 except Exception as e:  # noqa: BLE001
                     logger.error("Resubscribe after rebuild failed, %s: %s",
                                  camera_tag, e)
+                    self._camera_reg_id[camera_tag] = -1
                     continue
                 if reg_id < 0:
                     logger.error(
                         "Resubscribe after rebuild rejected by SDK, %s", camera_tag
                     )
+                    self._camera_reg_id[camera_tag] = -1
                     continue
                 self._camera_reg_id[camera_tag] = reg_id
                 logger.warning(
