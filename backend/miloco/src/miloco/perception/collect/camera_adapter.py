@@ -251,6 +251,36 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # 断开判断与补建探测同口径 (require_lan=False):只按云端在线判定,保留
         # lan_online 偶发假 False 的已连相机,防止拉流中的相机被误断。
         await super().sync_devices(all_devices, disconnect_require_lan=False)
+        await self._converge_feed_cap()
+
+    async def _converge_feed_cap(self) -> None:
+        """把超出投喂上限的通道断掉,口径与 select_active_camera_dids 完全一致。
+
+        为什么上限收敛不能寄生在基类的断开判据里:那个「保留集」为了满足
+        「保留集 ⊇ 发现集」的不变量必须 ``cap=False``（截断按合成 did 升序取前 N,
+        ``sorted(超集)[:N]`` 不含 ``sorted(子集)[:N]``），于是它再也收不住已连集的
+        规模;而连接侧走的是带截断的发现集、``connect_device`` 自己不认上限。两边
+        一叠加:低字典序相机上线被发现集纳入并新连,先前占位的高字典序相机仍在保留
+        集里不被断开 ⇒ 已连路数单调越过上限,且被挤出活跃集的那路会在
+        ``refresh_cameras``(销 manager) 与静默检测(建 manager) 之间无限震荡,白占
+        相机有限的并发流名额。所以上限收敛独立收在这里,基类对投喂上限保持无感知。
+
+        接管中的通道（inject-video 等）由 ``disconnect_device`` 自己跳过（不传
+        ``force``），不会被上限挤掉。
+        """
+        from miloco.miot.filter import MAX_ENABLED_CAMERAS
+
+        overflow = sorted(self._devices)[MAX_ENABLED_CAMERAS:]
+        for did in overflow:
+            logger.warning(
+                "Camera %s over feed cap (%d), disconnecting overflow channel",
+                did,
+                MAX_ENABLED_CAMERAS,
+            )
+            try:
+                await self.disconnect_device(did)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Overflow disconnect failed %s: %s", did, e)
 
     async def _check_stalled_cameras(self) -> None:
         """静默检测：感知视频流超阈值无帧 → 判僵尸连接并触发重连。

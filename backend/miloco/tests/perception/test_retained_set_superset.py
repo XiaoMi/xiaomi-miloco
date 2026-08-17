@@ -92,6 +92,34 @@ async def test_retained_set_is_superset_of_discovered():
 
 
 @pytest.mark.asyncio
+async def test_connected_set_never_exceeds_feed_cap():
+    """低字典序相机后上线时，已连路数不得越过投喂上限。
+
+    与「超集不变量」正交的另一个方向：保留集为了满足超集前提去掉了上限截断，
+    于是断开判据不再收敛已连集规模——而连接侧走的是带截断的发现集、
+    ``connect_device`` 自己不认上限。低字典序相机上线会被发现集纳入并新连，先前
+    占位的高字典序相机却仍在保留集里不被断开 ⇒ 已连路数单调越过上限，且被挤出
+    活跃集的那路会在 refresh_cameras(销) 与静默检测(建) 之间每 5 分钟震荡一次。
+    """
+    cams = {
+        "200": _cam("200", lan_online=True),
+        "300": _cam("300", lan_online=True),
+        "400": _cam("400", lan_online=True),
+        "500": _cam("500", lan_online=True),
+    }
+    adapter = _make_adapter(cams)
+    await adapter.sync_devices(cams)
+    assert len(adapter.get_connected_devices()) == MAX_ENABLED_CAMERAS
+
+    # 第 5 台（字典序最小）后上线 → 它进发现集，但总数不得超过上限。
+    cams["100"] = _cam("100", lan_online=True)
+    await adapter.sync_devices(cams)
+    connected = set(adapter.get_connected_devices())
+    assert len(connected) == MAX_ENABLED_CAMERAS, f"越过上限: {sorted(connected)}"
+    assert "500" not in connected, "被上限挤出的那路应当被断开"
+
+
+@pytest.mark.asyncio
 async def test_retained_set_keeps_camera_whose_lan_flag_flapped():
     """已连相机的 lan_online 掉成 False（直连掐死同网段保活）时不得被断开。
 

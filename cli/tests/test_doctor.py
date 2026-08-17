@@ -1093,6 +1093,20 @@ class TestAssessReachability:
         ))
         assert results[2].status == Status.FAIL
 
+    def test_l3_udp_evidence_outranks_arp_entry(self):
+        """同网段目标（ARP 表天然有条目）也要以 UDP 端口不可达为准，判 PASS 而非 WARN。
+
+        判定链顺序即证据强弱：UDP 收到端口不可达（包已达目标主机、目标主动回应）
+        强于「邻居表有条目」（只证明二层见过它）。若 ARP 那条排在前面，同网段路径
+        会永远短路在 WARN 上，新判据只在跨网段生效——与它自称的「铁证」自相矛盾。
+        """
+        results = assess_reachability(_rs(
+            ping_ok=False, ping_rtt_ms=None,
+            neigh_state="REACHABLE", neigh_mac="aa:bb:cc:dd:ee:ff",
+            udp_send_ok=True, udp_error=_UDP_PORT_UNREACH_MARK,
+        ))
+        assert results[2].status == Status.PASS
+
     def test_l3_and_udp_verdicts_never_contradict(self):
         """回归:L3 与 UDP 两段结论不得同时出现「不可达」与「有回应」。
 
