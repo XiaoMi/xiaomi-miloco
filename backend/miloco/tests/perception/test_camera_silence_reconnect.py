@@ -42,6 +42,50 @@ def _make_stalled_adapter(monkeypatch, stalled_dids: set[str], now: int = 1_000_
     return adapter, proxy
 
 
+def _make_no_first_frame_adapter(monkeypatch, elapsed_ms: int, now: int = 1_000_000):
+    """构造一台单摄相机：订阅成功但一帧都没到，已过 ``elapsed_ms``。"""
+    monkeypatch.setattr(
+        "miloco.perception.collect.camera_adapter._monotonic_ms", lambda: now
+    )
+    proxy = MagicMock()
+    proxy.get_cached_camera.return_value = _cam("cam1")
+    proxy.reconnect_camera = AsyncMock()
+    adapter = CameraDeviceAdapter(miot_proxy=proxy)
+    state = _CameraDeviceState(did="cam1")
+    state.last_video_frame_ms = 0  # 从未出帧
+    state.connected_at_ms = now - elapsed_ms
+    adapter._devices["cam1"] = state
+    return adapter, proxy
+
+
+async def test_never_got_first_frame_eventually_reconnects(monkeypatch):
+    """从未出过帧的通道超过首帧上界后必须被判僵尸并重建。
+
+    last_video_frame_ms 只有帧到达才脱离 0，若「等首帧」分支无上界，
+    「一帧都没出」这个最坏的僵尸态（跨网段 / 严格 NAT 最典型的失败形态：信令通了、
+    状态是 CONNECTED、媒体流一帧不来）会永久免疫检测，连日志都不留。
+    """
+    adapter, proxy = _make_no_first_frame_adapter(monkeypatch, elapsed_ms=120_000)
+    await adapter._check_stalled_cameras()
+    proxy.reconnect_camera.assert_awaited_once_with("cam1")
+
+
+async def test_waiting_for_first_frame_within_grace_is_not_reconnected(monkeypatch):
+    """刚订阅上、仍在首帧宽限窗内的通道不能被误重建（原生建连本就要十几秒）。"""
+    adapter, proxy = _make_no_first_frame_adapter(monkeypatch, elapsed_ms=20_000)
+    await adapter._check_stalled_cameras()
+    proxy.reconnect_camera.assert_not_awaited()
+    assert "cam1" in adapter._devices
+
+
+async def test_no_connected_at_ms_is_never_reconnected(monkeypatch):
+    """connected_at_ms 未落地（订阅失败被剔除等）→ 不判，避免拿 0 当远古时刻误重建。"""
+    adapter, proxy = _make_no_first_frame_adapter(monkeypatch, elapsed_ms=120_000)
+    adapter._devices["cam1"].connected_at_ms = 0
+    await adapter._check_stalled_cameras()
+    proxy.reconnect_camera.assert_not_awaited()
+
+
 async def test_stalled_dual_camera_rebuilds_native_session_once(monkeypatch):
     """双摄两个通道同时静默 → native 会话只重建一次（按物理 did 归并）。"""
     adapter, proxy = _make_stalled_adapter(

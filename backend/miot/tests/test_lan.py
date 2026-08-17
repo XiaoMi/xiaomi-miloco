@@ -12,7 +12,7 @@ import struct
 from unittest.mock import MagicMock, patch
 
 import pytest
-from miot.lan import MIoTLan
+from miot.lan import MIoTLan, _MIoTLanDevice
 from miot.network import MIoTNetwork
 
 _LOGGER = logging.getLogger(__name__)
@@ -258,12 +258,14 @@ def test_probe_unicast_targets_skips_connected_dids():
 
 
 @pytest.mark.unit
-def test_scan_devices_pauses_when_all_cameras_connected():
-    """全部已知相机都已连上时，__scan_devices 既不探测也不重排——整个扫描停表，
-    等掉线 / 新相机经 __maybe_resume_scan 拉起。
+def test_scan_devices_throttles_but_never_stops_when_all_cameras_connected():
+    """全部**已启用**相机都已连上时，扫描降频到 OT_PROBE_INTERVAL_MAX —— 但绝不停表。
 
-    可达性此时由拉流本身证实（mark_reachable 已标在线并取消离线定时器），广播和
-    单播都不再产生任何被消费的结果。"""
+    _camera_dids 是「已启用」集而非「全部」集：用户没打开开关的相机、以及非相机
+    设备都不在里面，它们靠这个全局共享的广播维持 lan_online。一旦停表，它们会在
+    _KA_TIMEOUT(100s) 后翻 False，而 toggle_camera 拿 lan_online 当硬门 → 用户再也
+    开不了那台相机，且 __maybe_resume_scan 用同一判据恒早退，没有恢复路径。
+    45s < 100s 是这个设计的关键不变量。"""
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
     miot_lan._camera_dids = {"did1", "did2"}
@@ -274,16 +276,24 @@ def test_scan_devices_pauses_when_all_cameras_connected():
     ) as mock_probe:
         miot_lan._MIoTLan__scan_devices()
 
-    mock_ping.assert_not_called()
-    mock_probe.assert_not_called()
-    assert miot_lan._scan_timer is None
-    miot_lan._internal_loop.call_later.assert_not_called()
+    # 探测照做：集合外的设备（未启用相机 / 非相机设备）需要它刷新在线态。
+    mock_ping.assert_called_once()
+    mock_probe.assert_called_once()
+    # 定时器照排，间隔为最低频。
+    miot_lan._internal_loop.call_later.assert_called_once()
+    assert (
+        miot_lan._internal_loop.call_later.call_args[0][0]
+        == miot_lan.OT_PROBE_INTERVAL_MAX
+    )
+    assert miot_lan._scan_throttled is True
+    # 保活窗必须盖得住降频后的扫描间隔，否则集合外设备照样掉线。
+    assert miot_lan.OT_PROBE_INTERVAL_MAX < _MIoTLanDevice._KA_TIMEOUT
 
 
 @pytest.mark.unit
 def test_scan_devices_does_not_pause_when_no_cameras_known():
-    """相机集为空时不能当成「全都连上了」——一台相机都还不知道就停扫描，会让
-    引导期（尚未 refresh_cameras）的设备发现直接瘫掉。"""
+    """相机集为空时不能当成「全都连上了」——一台相机都还不知道就降频，会让
+    引导期（尚未 refresh_cameras）的设备发现变慢。"""
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
     miot_lan._camera_dids = set()
@@ -297,6 +307,7 @@ def test_scan_devices_does_not_pause_when_no_cameras_known():
     mock_ping.assert_called_once()
     mock_probe.assert_called_once()
     miot_lan._internal_loop.call_later.assert_called_once()
+    assert miot_lan._scan_throttled is False
 
 
 @pytest.mark.unit
@@ -325,7 +336,8 @@ def test_set_camera_connected_resumes_paused_scan():
     miot_lan._internal_loop = MagicMock()
     miot_lan._camera_dids = {"did1"}
     miot_lan._connected_dids = {"did1"}
-    miot_lan._scan_timer = None  # 扫描当前处于暂停态
+    miot_lan._scan_timer = MagicMock()  # 已排期
+    miot_lan._scan_throttled = True  # 但处于降频态
 
     miot_lan._MIoTLan__set_camera_connected("did1", False)
 
@@ -340,7 +352,8 @@ def test_set_camera_connected_true_does_not_resume():
     miot_lan._internal_loop = MagicMock()
     miot_lan._camera_dids = {"did1", "did2"}
     miot_lan._connected_dids = {"did1"}
-    miot_lan._scan_timer = None
+    miot_lan._scan_timer = MagicMock()
+    miot_lan._scan_throttled = True
 
     miot_lan._MIoTLan__set_camera_connected("did2", True)
 
@@ -355,7 +368,8 @@ def test_set_camera_dids_resumes_scan_for_new_camera():
     miot_lan._internal_loop = MagicMock()
     miot_lan._camera_dids = {"did1"}
     miot_lan._connected_dids = {"did1"}
-    miot_lan._scan_timer = None
+    miot_lan._scan_timer = MagicMock()
+    miot_lan._scan_throttled = True
 
     miot_lan._MIoTLan__set_camera_dids({"did1", "did2"})
 
@@ -364,14 +378,46 @@ def test_set_camera_dids_resumes_scan_for_new_camera():
 
 
 @pytest.mark.unit
-def test_maybe_resume_scan_noop_when_timer_already_running():
-    """扫描已在排期时不能再排一个——否则会出现两条并行的扫描循环。"""
+def test_maybe_resume_scan_noop_when_not_throttled():
+    """扫描本就在正常退避排期上（未降频）时不该被打扰。
+
+    否则每轮 set_camera_dids / set_camera_connected 都会把退避重置回
+    OT_PROBE_INTERVAL_MIN，在「有相机还没连上」的整个窗口里探测流量白涨一个量级。
+    """
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
     miot_lan._camera_dids = {"did1"}
     miot_lan._connected_dids = set()
     miot_lan._scan_timer = MagicMock()  # 已排期
+    miot_lan._scan_throttled = False  # 且未降频 → 正常排期中
 
     miot_lan._MIoTLan__set_camera_connected("did1", False)
 
     miot_lan._internal_loop.call_later.assert_not_called()
+
+
+@pytest.mark.unit
+def test_devices_outside_enabled_set_keep_being_probed_while_throttled():
+    """回归（死锁防线）：降频态下集合外的设备仍被探测覆盖。
+
+    场景：camA 已启用并连上（_camera_dids == _connected_dids == {camA}），camB 刚绑定
+    还没打开开关，因此不在 _camera_dids 里。旧实现在这一刻停表，camB 拿不到任何探测，
+    _KA_TIMEOUT 后 lan_online 掉 False；而 toggle_camera 拿 lan_online 当硬门 →
+    用户再也开不了 camB，且 __maybe_resume_scan 用同一判据恒早退，无恢复路径。
+    """
+    miot_lan = _make_mock_lan()
+    miot_lan._internal_loop = MagicMock()
+    miot_lan._camera_dids = {"camA"}
+    miot_lan._connected_dids = {"camA"}
+
+    with patch.object(miot_lan, "ping_internal") as mock_ping, patch.object(
+        miot_lan, "_probe_unicast_targets"
+    ) as mock_probe:
+        # 连跑两轮，确认降频态是可持续的（每轮都重排定时器，永不停）。
+        miot_lan._MIoTLan__scan_devices()
+        miot_lan._MIoTLan__scan_devices()
+
+    assert mock_ping.call_count == 2
+    assert mock_probe.call_count == 2
+    assert miot_lan._internal_loop.call_later.call_count == 2
+    assert miot_lan._scan_timer is not None

@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from miloco_cli.commands.doctor import (
+    _UDP_PORT_UNREACH_MARK,
     BackendState,
     CameraSummary,
     CheckResult,
@@ -1069,7 +1070,40 @@ class TestAssessReachability:
         assert results[3].fix_hint is not None
 
     def test_udp_icmp_port_unreachable_pass(self):
-        results = assess_reachability(_rs(udp_error="ICMP Port Unreachable"))
+        results = assess_reachability(_rs(udp_error=_UDP_PORT_UNREACH_MARK))
+        assert results[3].status == Status.PASS
+
+    def test_l3_pass_when_udp_port_unreachable(self):
+        """ping 失败 + 邻居未知 + UDP 收到端口不可达 → L3 判 PASS(跨网段场景)。
+
+        跨网段时 ICMP echo 常被过滤、ARP 表天然无条目,但 UDP 单播是真实拉流路径,
+        收到「端口未监听」说明包已送达目标 —— 以它为准,不能报三层不可达。
+        """
+        results = assess_reachability(_rs(
+            ping_ok=False, ping_rtt_ms=None, neigh_state=None, neigh_mac=None,
+            udp_send_ok=True, udp_error=_UDP_PORT_UNREACH_MARK,
+        ))
+        assert results[2].status == Status.PASS
+
+    def test_l3_fail_when_udp_sent_but_no_icmp_reply(self):
+        """UDP 发出去但没有任何回应 → 仍判 L3 不可达,别把「发得出去」当可达。"""
+        results = assess_reachability(_rs(
+            ping_ok=False, ping_rtt_ms=None, neigh_state=None, neigh_mac=None,
+            udp_send_ok=True, udp_error=None,
+        ))
+        assert results[2].status == Status.FAIL
+
+    def test_l3_and_udp_verdicts_never_contradict(self):
+        """回归:L3 与 UDP 两段结论不得同时出现「不可达」与「有回应」。
+
+        两段共用 ReachabilityState.udp_port_unreachable 这个单一判定入口;若哪天
+        有人把判据拆回手写字面量并改错一处,这条会红。
+        """
+        results = assess_reachability(_rs(
+            ping_ok=False, ping_rtt_ms=None, neigh_state=None, neigh_mac=None,
+            udp_send_ok=True, udp_error=_UDP_PORT_UNREACH_MARK,
+        ))
+        assert results[2].status == Status.PASS
         assert results[3].status == Status.PASS
 
     def test_udp_no_icmp_l3_ok_pass(self):

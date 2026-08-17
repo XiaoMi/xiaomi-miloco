@@ -69,6 +69,12 @@ _ONDEMAND_REFRESH_MIN_INTERVAL_MS = 10_000
 # 正常流 ~1fps，30s 无帧基本确定是断；再短会误伤正常低帧。
 _SILENCE_THRESHOLD_MS = 30_000
 
+# 首帧专用上界：原生建连 + 首个 IDR 最慢约 15s，留足余量。超过它仍一帧未到 →
+# 与「出过帧后静默」同等对待，走 destroy+create 自愈。没有这个上界，
+# last_video_frame_ms 恒为 0 的通道（原生会话建起来了但媒体流一帧不来，正是跨网段 /
+# 严格 NAT 最典型的僵尸态）会被「等首帧」分支无条件跳过 → 故障越彻底越救不回来。
+_FIRST_FRAME_THRESHOLD_MS = 90_000
+
 # 重连防抖：同台相机重连后 N 秒内不再重连，避免真坏相机 30s 一轮空转。
 _RECONNECT_COOLDOWN_MS = 5 * 60_000
 
@@ -113,6 +119,9 @@ class _CameraDeviceState:
     epoch_delta: int | None = None
     # 最近一帧视频的 monotonic wall_ms，静默检测用。
     last_video_frame_ms: int = 0
+    # 订阅完成时刻的 monotonic wall_ms。首帧未到（last_video_frame_ms == 0）时
+    # 替代它参与静默判定，给「等首帧」一个上界，见 _FIRST_FRAME_THRESHOLD_MS。
+    connected_at_ms: int = 0
 
 
 class CameraDeviceAdapter(BaseDeviceAdapter):
@@ -259,17 +268,31 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             # 被外部接管（inject-video 等）→ 静默检测不碰，交给接管方自己管生命周期。
             if did in self._taken_over:
                 continue
-            # 还没出过首帧 → 不判（连接刚建立，等首帧）。
+            # 首帧未到 → 用「订阅时刻」判，阈值放宽到 _FIRST_FRAME_THRESHOLD_MS
+            # （连接刚建立确实要等十几秒）；首帧已到 → 用「最后一帧时刻」判，
+            # 阈值 _SILENCE_THRESHOLD_MS。
+            # 这里必须有上界:last_video_frame_ms 只有帧到达才脱离 0，若无条件跳过，
+            # 「一帧都没出」这个最坏的僵尸态会永久免疫检测（连日志都不留）。
             if state.last_video_frame_ms == 0:
-                continue
-            if now_ms - state.last_video_frame_ms < _SILENCE_THRESHOLD_MS:
+                if (
+                    state.connected_at_ms == 0
+                    or now_ms - state.connected_at_ms < _FIRST_FRAME_THRESHOLD_MS
+                ):
+                    continue
+            elif now_ms - state.last_video_frame_ms < _SILENCE_THRESHOLD_MS:
                 continue
             physical_did, _ = split_channel_did(did)
             cam = self._miot_proxy.get_cached_camera(physical_did)
             # 云端已离线 → 救不活，交给基类按在线态断开，别白重连。
             if cam is not None and not cam.online:
                 continue
-            stalled_by_physical.setdefault(physical_did, []).append(did)
+            # 带上判定依据:「从未出帧」多半是路由/NAT 建不起媒体流,「出过帧后静默」
+            # 多半是相机侧打嗝——两者运维处置不同,日志里要能一眼分开。
+            stalled_by_physical.setdefault(physical_did, []).append(
+                f"{did}(no-first-frame in {now_ms - state.connected_at_ms}ms)"
+                if state.last_video_frame_ms == 0
+                else f"{did}(silent {now_ms - state.last_video_frame_ms}ms)"
+            )
 
         for physical_did, stalled_dids in stalled_by_physical.items():
             # 防抖按物理 did 计：同一台相机 5min 内只重建一次。
@@ -375,6 +398,11 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 did,
             )
             return
+
+        # 订阅成功且确认留在册：记下时刻，让静默检测能给「等首帧」设上界。
+        # 只有视频订上、音频没订上（或反之）的通道也走到这里——视频恒无帧时靠
+        # 这个时刻在 _FIRST_FRAME_THRESHOLD_MS 后被判僵尸并重建，而不是永久静默。
+        state.connected_at_ms = _monotonic_ms()
 
     async def disconnect_device(
         self, did: str, *, force: bool = False

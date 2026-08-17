@@ -199,11 +199,21 @@ class MIoTLan:
     _last_scan_interval: Optional[float]
     _callbacks_device_status_changed: Dict[str, _MIoTLanRegDeviceData]
     _unicast_targets: Dict[str, str]
-    # 已知的相机 did 全集（不止有单播目标的那些）与已连上的 did 集合——
-    # 已连上的相机可达性已经证实，探测（广播+单播）没必要再打；全部连上时
-    # 整个扫描定时器都停掉，直到有相机掉线/新相机加入才重新拉起。
+    # 上层推下来的**拉流活跃集**相机 did（在启用家庭 ∧ 未拉黑 ∧ 在线 ∧ 镜头未关
+    # ∧ 截到上限）与已连上的 did 集合。已连上的相机可达性已经证实，单播探测按
+    # 目标跳过；全部连上时扫描**降频**到 OT_PROBE_INTERVAL_MAX。
+    #
+    # ⚠️ 这是「已启用」集，不是「已知/全部」集——用户没打开开关的相机不在里面、
+    # 永远不会 connected。所以**绝不能据此停表**：停表后集合外的设备（未启用
+    # 相机、非相机设备）拿不到探测，lan_online 会在 _KA_TIMEOUT 后翻 False，而
+    # toggle_camera 拿 lan_online 当硬门 → 用户再也开不了那台相机，且无恢复路径
+    # （__maybe_resume_scan 用同一判据，恒早退）。降频到 45s < _KA_TIMEOUT 100s
+    # 才能既省探测流量、又让集合外设备的在线态始终被刷新。
     _camera_dids: Set[str]
     _connected_dids: Set[str]
+    # 是否处于「全部已启用相机都已连上」的降频态。__maybe_resume_scan 靠它区分
+    # 「正常退避排期（别打扰）」与「降频态（该提前扫一次）」。
+    _scan_throttled: bool
 
     _init_lock: asyncio.Lock
     _init_done: bool
@@ -244,6 +254,7 @@ class MIoTLan:
         self._unicast_targets = {}
         self._camera_dids = set()
         self._connected_dids = set()
+        self._scan_throttled = False
 
         self._init_lock = asyncio.Lock()
         self._init_done = False
@@ -307,6 +318,7 @@ class MIoTLan:
                 self._unicast_targets = {}
                 self._camera_dids = set()
                 self._connected_dids = set()
+                self._scan_throttled = False
                 # 注意：故意不清空 _callbacks_device_status_changed。
                 # __on_network_info_change_external_async 会在网卡变化时主动 deinit→init，
                 # 复位会让用户在 init_async 后注册的回调在第一次网络抖动时丢失。
@@ -425,17 +437,22 @@ class MIoTLan:
         self._unicast_targets = targets
 
     def set_camera_dids(self, dids: Set[str]) -> None:
-        """Set the full set of known camera dids (not just those with a
-        unicast target).
+        """Set the **enabled** (streaming-active) camera dids.
 
-        This is what lets the LAN layer tell "every camera is connected"
-        (→ scanning pauses, see ``__scan_devices``) from "one is still
-        missing". A newly-appeared camera did resumes a paused scan.
+        This is what lets the LAN layer tell "every enabled camera is
+        connected" (→ scanning throttles down to ``OT_PROBE_INTERVAL_MAX``,
+        see ``__scan_devices``) from "one is still missing". A newly-appeared
+        camera did brings the scan back to full rate.
 
         Must be the **scoped active set**, not every camera on the account:
         a camera outside the current scope never connects, so including it
-        would make "all connected" permanently unreachable and the pause
-        would never engage. Safe to call when not initialized (no-op).
+        would make "all connected" permanently unreachable and the throttle
+        would never engage.
+
+        Because this is the *enabled* set, the throttle must never become a
+        full stop — cameras the user has not switched on are absent here yet
+        still rely on the shared broadcast to keep their ``lan_online`` fresh.
+        Safe to call when not initialized (no-op).
         """
         if not self._init_done:
             return
@@ -454,9 +471,11 @@ class MIoTLan:
         """Mark a camera did as connected (native miss stream up) or not.
 
         A connected camera is proven reachable, so ``_probe_unicast_targets``
-        skips it per-target; once **every** known camera is connected the
-        scan loop stops entirely (see ``__scan_devices``) and only restarts
-        when one disconnects or a new camera appears. Safe to call when not
+        skips it per-target; once **every enabled** camera is connected the
+        scan loop throttles down to ``OT_PROBE_INTERVAL_MAX`` (see
+        ``__scan_devices``) and returns to full rate when one disconnects or a
+        new camera appears. It never stops outright — devices outside the
+        enabled set depend on the shared broadcast. Safe to call when not
         initialized (no-op).
         """
         if not self._init_done:
@@ -488,20 +507,30 @@ class MIoTLan:
             self.__maybe_resume_scan()
 
     def __all_cameras_connected(self) -> bool:
-        """已知相机集非空且全部处于已连接状态。
+        """**已启用**（拉流活跃集）相机非空且全部处于已连接状态。
 
-        空集返回 False——「一台相机都还不知道」不该被当成「全都连上了」而暂停扫描。
+        空集返回 False——「一台相机都还没启用」不该被当成「全都连上了」而降频。
+
+        注意这只是「降频」的判据，不是「停表」的判据：集合外仍有未启用相机与
+        非相机设备依赖扫描维持 lan_online，详见 ``__scan_devices`` 的说明。
         """
         return bool(self._camera_dids) and self._camera_dids <= self._connected_dids
 
     def __maybe_resume_scan(self) -> None:
-        """扫描此前因「相机全连上」而暂停、现在条件不再成立时，重新拉起扫描循环。
+        """扫描此前因「相机全连上」而降频、现在条件不再成立时，提前扫一次。
 
-        ``_scan_timer is not None`` 表示扫描仍在正常排期（未暂停），无需干预——
-        也避免重复排一个定时器。
+        扫描循环**永不停表**（见 ``__scan_devices``），所以这里只做「加速」：把
+        已排期的下一次扫描提前到现在并重置退避，让掉线/新增的相机尽快被发现。
+
+        ``_scan_throttled`` 为 False 表示扫描本就在正常退避排期上，无需干预——
+        否则每轮 ``set_camera_dids`` 都会把退避重置回 5s，探测流量白涨一个量级。
         """
-        if self._scan_timer is not None or self.__all_cameras_connected():
+        if not self._scan_throttled or self.__all_cameras_connected():
             return
+        self._scan_throttled = False
+        if self._scan_timer is not None:
+            self._scan_timer.cancel()
+            self._scan_timer = None
         self._last_scan_interval = None
         self._scan_timer = self._internal_loop.call_later(0, self.__scan_devices)
 
@@ -765,19 +794,19 @@ class MIoTLan:
         if self._scan_timer:
             self._scan_timer.cancel()
             self._scan_timer = None
-        if self.__all_cameras_connected():
-            # 全部已知相机都已连上：可达性已由拉流本身证实（连上时 mark_reachable
-            # 直接标在线并取消离线定时器），广播与单播探测都不再产生任何被消费的
-            # 结果，故整个扫描停表，等 set_camera_connected（掉线）或 set_camera_dids
-            # （新相机）经 __maybe_resume_scan 重新拉起。
-            #
-            # ⚠️ 隐性 invariant：停的是**全局共享**的广播发现，非相机设备的
-            # lan_online 会在 _KA_TIMEOUT 后陆续翻 False、期间新上线的非相机设备也
-            # 发现不了。当前无害——lan_online 的**决策**读点全在相机路径
-            # （filter/service/camera_adapter/doctor），非相机侧只有一行日志。
-            # 将来若有非相机功能拿 lan_online 当硬门，必须先回来重新评估这里。
-            _LOGGER.debug("all cameras connected, scan paused")
-            return
+        # 全部已启用相机都已连上：可达性已由拉流本身证实（连上时 mark_reachable
+        # 直接标在线并取消离线定时器），探测对**这些**相机没必要再打，故把扫描
+        # 降到最低频。
+        #
+        # ⚠️ 只能降频，**不能停表**：_camera_dids 是「已启用」集而非「全部」集，
+        # 集合外还有未启用的相机与非相机设备靠这个全局共享的广播维持 lan_online。
+        # 一旦停表，它们会在 _KA_TIMEOUT(100s) 后翻 False，而 toggle_camera 拿
+        # lan_online 当硬门 → 用户再也开不了那台相机；且 __maybe_resume_scan 用的
+        # 是同一判据，推同样的集合不会重排定时器，没有任何恢复路径。
+        # OT_PROBE_INTERVAL_MAX(45s) < _KA_TIMEOUT(100s)，降频后集合外设备的在线态
+        # 仍能被持续刷新。
+        all_connected = self.__all_cameras_connected()
+        self._scan_throttled = all_connected
         try:
             # Scan devices — broadcast
             self.ping_internal()
@@ -786,11 +815,19 @@ class MIoTLan:
         except Exception as err:
             # Ignore any exceptions to avoid blocking the loop
             _LOGGER.error("ping device error, %s", err)
-        scan_time = self.__get_next_scan_time()
+        scan_time = (
+            self.OT_PROBE_INTERVAL_MAX
+            if all_connected
+            else self.__get_next_scan_time()
+        )
         self._scan_timer = self._internal_loop.call_later(
             scan_time, self.__scan_devices
         )
-        _LOGGER.debug("next scan time: %ss", scan_time)
+        _LOGGER.debug(
+            "next scan time: %ss%s",
+            scan_time,
+            " (throttled: all enabled cameras connected)" if all_connected else "",
+        )
 
     def __get_next_scan_time(self) -> float:
         if not self._last_scan_interval:
