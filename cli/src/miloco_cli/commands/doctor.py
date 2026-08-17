@@ -1399,6 +1399,14 @@ def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list
             ),
         ))
 
+    # UDP 收到 ICMP Port Unreachable = 包已送达目标主机、目标回了「端口未监听」,
+    # 这是 L3 可达的铁证(比 ping/ARP 更强)。跨网段时 ARP 表天然无条目、ICMP echo
+    # 又常被对端/中间设备过滤,但 UDP 单播是真实拉流路径 —— 用它兜底判 L3 可达。
+    udp_port_unreach = (
+        state.udp_send_ok
+        and state.udp_error is not None
+        and "ICMP Port Unreachable" in state.udp_error
+    )
     if state.ping_ok:
         rtt_suffix = (
             t("reach.l3.ping_ok.rtt_suffix", rtt=f"{state.ping_rtt_ms:.1f}")
@@ -1415,6 +1423,12 @@ def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list
             name=prefix + t("reach.l3.arp_ok.name"),
             status=Status.WARN,
             message=t("reach.l3.arp_ok.message", state=state.neigh_state),
+        ))
+    elif udp_port_unreach:
+        results.append(CheckResult(
+            name=prefix + t("reach.l3.udp_reach.name"),
+            status=Status.PASS,
+            message=t("reach.l3.udp_reach.message"),
         ))
     else:
         neigh_desc = state.neigh_state or t("reach.l3.fail.unknown")
