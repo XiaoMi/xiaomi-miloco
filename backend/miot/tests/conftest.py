@@ -47,6 +47,26 @@ TEST_BAIDU_OAUTH2_REDIRECT_URI: str = (
 _LOGGER = logging.getLogger(__name__)
 
 
+def pytest_configure(config):
+    """注册 ``unit`` marker。
+
+    注册点放这里而不是 ``backend/pyproject.toml``:该 marker 只被本目录使用,
+    这里才是它的作用域;而 ``miot/tests/`` 整个目录被根配置的 ``norecursedirs``
+    排除,只有显式 ``pytest miot/tests/`` 才会加载本 conftest —— 正是 CI 的
+    ``miot 单元测试`` 步骤（``-m unit``）的调用方式。
+
+    为什么需要 ``-m unit`` 而不是直接跑整个目录:本目录多数用例是历史遗留的
+    联调脚本,依赖真实凭据与内网地址（见上面的 ``TEST_HA_TOKEN`` /
+    ``TEST_HA_URL`` / Baidu client secret），在 CI 里跑不起来。新增的纯 mock
+    用例靠 ``unit`` marker 挑出来单独进门禁。
+    """
+    config.addinivalue_line(
+        "markers",
+        "unit: 纯 mock、无真实网络/凭据依赖的单元测试；CI 的 "
+        "`miot 单元测试` 步骤按此 marker 选择",
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def set_logger():
     logger = logging.getLogger()

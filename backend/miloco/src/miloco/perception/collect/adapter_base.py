@@ -27,7 +27,11 @@ class BaseDeviceAdapter(ABC):
 
     @abstractmethod
     async def discover_devices(
-        self, all_devices: dict | None = None, online_only: bool = True, cap: bool = True
+        self,
+        all_devices: dict | None = None,
+        online_only: bool = True,
+        require_lan: bool = True,
+        cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         """Discover devices of this type.
 
@@ -37,10 +41,19 @@ class BaseDeviceAdapter(ABC):
             online_only: If True (default), only return online devices.
                          If False, return all discovered devices regardless of
                          online status.
+            require_lan: If True (default), a device must be LAN-reachable to be
+                 returned. Pass False for "cloud-online is enough" callers — the
+                 retained-set recompute in ``sync_devices`` is the only one.
+                 Notably NOT the camera on-demand-rebuild probe: that one asks
+                 "would ``refresh_cameras`` actually build a manager for it?" and
+                 must use the strict gate (see ``camera_adapter.sync_devices``).
+                 Adapters without a LAN reachability notion ignore it.
+                 ``sync_devices`` calls this by keyword, so every adapter must
+                 accept it.
             cap: If True (default), truncate to the device type's feed limit
                  (camera: MAX_ENABLED_CAMERAS). Pass False for "list full set"
-                 callers (e.g. rule target validation). Adapters without a feed
-                 limit ignore it.
+                 callers (e.g. rule target validation, retained-set recompute).
+                 Adapters without a feed limit ignore it.
 
         Returns:
             {did: PerceptionDevice} for devices of this type.
@@ -82,10 +95,24 @@ class BaseDeviceAdapter(ABC):
         Override in subclasses that maintain stream buffers.
         """
 
-    async def sync_devices(self, all_devices: dict | None = None) -> None:
+    async def sync_devices(
+        self,
+        all_devices: dict | None = None,
+        disconnect_require_lan: bool = True,
+    ) -> None:
         """Sync connected devices with current online state (hot-plug).
 
         Discovers current devices, connects new ones, disconnects removed ones.
+
+        ``disconnect_require_lan``: 断开判断用的 require_lan 口径。默认与 discover
+        一致 (True)。设为 False 时,断开只以「云端在线」为准,保留 lan_online 暂时
+        为 False 的已连设备 —— 防止 LAN 探测偶发失败 (lan_online 假 False) 把正在
+        拉流的设备断开。camera 的感知同步用 False (见 camera_adapter.sync_devices)。
+
+        ⚠️ 这与 camera 侧「按需补建」用的严格门 (require_lan=True) **故意不同口径**,
+        不是待清理的漂移:补建问的是「refresh_cameras 会不会为它建 manager」(它自己就用
+        严格门,宽松门下判据永真、每轮空转打云端接口),断开问的是「会不会误杀已经连上
+        的」。改本参数前先读下面「保留集 ⊇ 发现集」那段不变量。
 
         Lifecycle 语义 (self._node_name 不为 None 时):
         - 进入时 set_lifecycle(STARTING)。已在运行中的节点不会被打断。
@@ -111,6 +138,33 @@ class BaseDeviceAdapter(ABC):
         discovered_dids = set(discovered.keys())
         connected_dids = set(connected.keys())
 
+        # 断开判断的「应保留」集合:默认就是 discovered (require_lan 与 discover 一致)。
+        # disconnect_require_lan=False 时改用 require_lan=False 重算 —— 只按云端在线
+        # 判定,lan_online 偶发假 False 的设备仍保留,避免把拉流中的设备误断。
+        #
+        # 这条路径成立的唯一前提是「保留集 ⊇ 发现集」:放宽了一道门,候选只应变多。
+        # 所以必须 cap=False —— 投喂上限的截断发生在过滤之后、按合成 did 字典序取前
+        # N 个,而 sorted(超集)[:N] 并不包含 sorted(子集)[:N]。带截断重算时,超过上限的
+        # 家庭里「唯一真正 LAN 可达那台」会落在保留集之外,于是每轮同步连上、下一轮
+        # 又被断开,画面反复中断且永不自愈。再与 discovered_dids 取并集兜底:将来
+        # cap / 排序口径若再变,也不会让「放宽一道门」反而丢掉已通过严格门的设备。
+        if disconnect_require_lan:
+            retained_dids = discovered_dids
+        else:
+            try:
+                retained = await self.discover_devices(
+                    all_devices, require_lan=False, cap=False
+                )
+                retained_dids = set(retained.keys()) | discovered_dids
+            except Exception as e:
+                logger.warning(
+                    "[%s] Retained-device rediscover failed (%s); "
+                    "falling back to lan-gated set",
+                    self.device_type,
+                    e,
+                )
+                retained_dids = discovered_dids
+
         # Connect newly discovered devices
         for did in discovered_dids - connected_dids:
             try:
@@ -130,7 +184,7 @@ class BaseDeviceAdapter(ABC):
                 )
 
         # Disconnect removed devices
-        for did in connected_dids - discovered_dids:
+        for did in connected_dids - retained_dids:
             try:
                 await self.disconnect_device(did)
                 logger.info("[%s] Disconnected device: %s", self.device_type, did)

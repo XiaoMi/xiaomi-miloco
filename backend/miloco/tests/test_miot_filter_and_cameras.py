@@ -25,6 +25,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot import filter as miot_filter
 from miloco.miot.service import MiotService
+from miot.types import MIoTCameraStatus
 
 
 class _FakeKV:
@@ -160,10 +161,23 @@ def test_select_active_require_lan_false_keeps_lan_stale():
     cameras = {"c1": _camera("c1", home_id="H1", online=True, lan_online=False)}
     # require_lan=True（默认连接口径）→ 排除
     assert miot_filter.select_active_camera_dids(kv, cameras) == []
-    # require_lan=False（应连数口径）→ 放过
+    # require_lan=False（保留集/断开判据的口径；**不是**按需补建的口径，那边用严格门）
+    # → 放过
     assert miot_filter.select_active_camera_dids(
         kv, cameras, require_lan=False
     ) == ["c1"]
+
+
+def test_select_active_connected_camera_reachable_despite_lan_offline():
+    """直连掐死同网段 OTU 保活令 lan_online=False，但 camera_status=CONNECTED
+    的相机仍必须被判定可达——这是 #420 被 #430 revert 的根因场景，
+    require_lan=True（默认，与 toggle_camera/list_cameras_with_state 同口径）
+    下必须靠 is_camera_connected 兜底放行，而不是被 lan_online=False 误杀。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    cam.camera_status = MIoTCameraStatus.CONNECTED
+    cameras = {"c1": cam}
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1"]
 
 
 def test_select_active_caps_by_did(monkeypatch):
@@ -265,6 +279,9 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         # 默认：awake 缓存空（全部相机镜头态未知→None，不 gate）。需要构造镜头关闭的
         # 测试自行覆盖该 mock 返回 {did: False}。
         read_cameras_awake=AsyncMock(side_effect=lambda dids, **kw: {}),
+        # 默认无跨 NAT 诊断（list_cameras_with_state 逐相机调用）。需要断言
+        # stream_error 的测试自行覆盖成 lambda did: True。
+        stream_nat_blocked=lambda did: False,
     )
     svc = MiotService(miot_proxy=proxy)
 
@@ -478,6 +495,26 @@ async def test_list_cameras_with_state_flags():
     assert by_did["c4"]["in_use"] is True
     assert by_did["c4"]["awake"] is None
     assert by_did["c4"]["connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_stream_error_ignores_stale_connected_cache():
+    """stream_error 只看 stream_nat_blocked，不再叠一道读 _camera_info_dict 缓存的
+    device_connected 门——那份缓存只由完整刷新写入，CLI(scope camera list) 不走
+    /refresh_camera_online 那条刷新路径，缓存可能停在"曾经连上过"的旧值。旧代码在
+    这种陈旧态下会把 stream_error 恒判成 None，即便 stream_nat_blocked 判据本身
+    （已含"当下是否连着"这道实时门）已经成立。
+    """
+    cam = _camera("c1", home_id="H1")
+    cam.connected = True  # 缓存陈旧：曾经连上过，但原生会话早已断开
+    cameras = {"c1": cam}
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    svc._miot_proxy.stream_nat_blocked = lambda did: True  # type: ignore[assignment]
+
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["stream_error"] == "cross_subnet_nat"
 
 
 @pytest.mark.asyncio
@@ -886,6 +923,10 @@ def _scope_proxy_env(tmp_path, monkeypatch):
     miot_client = MagicMock()
     miot_client.register_lan_device_changed_async = AsyncMock()
     miot_client.unregister_lan_device_changed_async = AsyncMock()
+    miot_client.register_camera_status_changed_async = AsyncMock()
+    miot_client.unregister_camera_status_changed_async = AsyncMock()
+    miot_client.set_camera_connected = MagicMock()
+    miot_client.set_camera_dids = MagicMock()
     miot_client.create_camera_instance_async = AsyncMock()
     miot_client.get_cameras_async = AsyncMock(return_value={})
     proxy._miot_client = miot_client  # type: ignore[assignment]
@@ -1102,6 +1143,26 @@ async def test_refresh_cameras_no_destroy_when_scope_allows(_scope_proxy_env):
     handler.destroy.assert_not_awaited()
     miot_client.unregister_lan_device_changed_async.assert_not_awaited()
     assert "c1" in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_pushes_scoped_camera_dids_to_lan(_scope_proxy_env):
+    """refresh_cameras 必须把 select_active_camera_dids 算出的 scoped 集传给
+    MIoTLan.set_camera_dids，而不是账号下的全部相机——否则不在当前 scope 里的
+    相机（c_out，属于未启用的 H2）永远不会连上，MIoTLan 就永远判不出"全部相机
+    已连上"，探测暂停功能形同虚设。"""
+    proxy, kv, miot_client = _scope_proxy_env
+
+    cam_in = _camera("c_in", home_id="H1")
+    cam_out = _camera("c_out", home_id="H2")
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={"c_in": cam_in, "c_out": cam_out}
+    )
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    await proxy.refresh_cameras()
+
+    miot_client.set_camera_dids.assert_called_once_with({"c_in"})
 
 
 @pytest.mark.asyncio

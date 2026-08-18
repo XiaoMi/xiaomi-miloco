@@ -142,6 +142,13 @@ class BackendState:
     version_data: dict | None = None
 
 
+# UDP 探测收到 ICMP 端口不可达的标记串。产出方(_probe_udp)与两处消费方
+# (L3 可达判定、UDP 检查)共用同一常量:三处手写字面量之间没有任何机制保证同步,
+# 一旦分裂是**静默**的 —— doctor 会同时输出「三层不可达」和「UDP 探测有回应」,
+# 正是本次改动要修掉的自相矛盾,且不会有任何测试失败。
+_UDP_PORT_UNREACH_MARK = "ICMP Port Unreachable"
+
+
 @dataclass(frozen=True)
 class ReachabilityState:
     target_ip: str
@@ -158,6 +165,18 @@ class ReachabilityState:
     udp_error: str | None
     udp_local_ip: str | None = None
     udp_local_iface: str | None = None
+
+    @property
+    def udp_port_unreachable(self) -> bool:
+        """UDP 探测已发出且收到 ICMP 端口不可达 —— L3 可达的铁证。
+
+        单一判定入口:L3 可达判定与 UDP 检查都读它,保证两段结论不会分裂。
+        """
+        return bool(
+            self.udp_send_ok
+            and self.udp_error
+            and _UDP_PORT_UNREACH_MARK in self.udp_error
+        )
 
 
 # ─── Low-level helpers ─────────────────────────────────────────────────────────
@@ -1239,7 +1258,7 @@ def _probe_udp_send(
         except socket.timeout:
             return True, None, local_ip
         except ConnectionRefusedError:
-            return True, "ICMP Port Unreachable", local_ip
+            return True, _UDP_PORT_UNREACH_MARK, local_ip
     except OSError as e:
         return False, f"{e.strerror or type(e).__name__} (errno={e.errno})", local_ip
     finally:
@@ -1399,6 +1418,10 @@ def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list
             ),
         ))
 
+    # UDP 收到 ICMP Port Unreachable = 包已送达目标主机、目标回了「端口未监听」,
+    # 这是 L3 可达的铁证(比 ping/ARP 更强)。跨网段时 ARP 表天然无条目、ICMP echo
+    # 又常被对端/中间设备过滤,但 UDP 单播是真实拉流路径 —— 用它兜底判 L3 可达。
+    udp_port_unreach = state.udp_port_unreachable
     if state.ping_ok:
         rtt_suffix = (
             t("reach.l3.ping_ok.rtt_suffix", rtt=f"{state.ping_rtt_ms:.1f}")
@@ -1409,6 +1432,17 @@ def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list
             name=prefix + t("reach.l3.ping_ok.name"),
             status=Status.PASS,
             message=t("reach.l3.ping_ok.message", rtt_suffix=rtt_suffix),
+        ))
+    elif udp_port_unreach:
+        # 分支顺序即证据强弱:ping 通 > UDP 收到端口不可达(包已达目标主机、目标
+        # 主动回应) > 邻居表有条目(只证明二层见过它)。UDP 这条必须排在 ARP 之前,
+        # 否则同网段目标(ARP 表天然有条目)永远短路在 ARP 的 WARN 上 —— 与本函数
+        # 刚立的「UDP 端口不可达是 L3 可达铁证」自相矛盾,新判据也就只在跨网段
+        # 路径上生效。
+        results.append(CheckResult(
+            name=prefix + t("reach.l3.udp_reach.name"),
+            status=Status.PASS,
+            message=t("reach.l3.udp_reach.message"),
         ))
     elif state.neigh_state in ("REACHABLE", "STALE", "DELAY"):
         results.append(CheckResult(
@@ -1433,7 +1467,7 @@ def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list
         ))
     else:
         suffix = _udp_iface_suffix(state, t)
-        if state.udp_error and "ICMP Port Unreachable" in state.udp_error:
+        if state.udp_port_unreachable:
             results.append(CheckResult(
                 name=prefix + t("reach.udp.port_unreach.name"),
                 status=Status.PASS,
