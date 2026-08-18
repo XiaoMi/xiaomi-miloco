@@ -428,6 +428,30 @@ def test_devices_outside_enabled_set_keep_being_probed_while_throttled():
 # ---------------------------------------------------------------------------
 
 
+def _real_device(miot_lan, did="did1", ip="10.0.0.9"):
+    """真实 _MIoTLanDevice + 可观测的假定时器。
+
+    这几条断言的核心是「究竟有没有定时器、deadline 有没有被推后」，MagicMock 的
+    device 只能断言「mark_reachable 有没有被调到」，看不见这个——上一版就是这么漏掉
+    「一个定时器都不存在」这条路径的。
+    """
+    clock = {"now": 0.0}
+    handles = []
+
+    def _call_later(delay, cb):
+        h = MagicMock()
+        h.when.return_value = clock["now"] + delay
+        handles.append(h)
+        return h
+
+    loop = MagicMock()
+    loop.call_later.side_effect = _call_later
+    miot_lan._internal_loop = loop
+    device = _MIoTLanDevice(manager=miot_lan, did=did, ip=ip)
+    miot_lan._lan_devices = {did: device}
+    return device, clock
+
+
 @pytest.mark.unit
 def test_native_failure_does_not_rearm_keepalive_grace():
     """keep_alive_on_stop=False → 只移出已连集并恢复扫描，不给宽限窗续期。
@@ -451,6 +475,74 @@ def test_native_failure_does_not_rearm_keepalive_grace():
     device.mark_reachable.assert_not_called()
     assert "did1" not in miot_lan._connected_dids
     mock_resume.assert_called_once()
+
+
+@pytest.mark.unit
+def test_cross_subnet_camera_still_has_offline_path_after_unplug():
+    """跨网段相机「连上过再被拔电」必须仍存在一条翻离线的路径。
+
+    这条路径上两个 schedule 点都被绕开了：keep_alive() 要先收到探测应答（可
+    connected 期间单播探测**主动跳过**该 did、广播又跨不了子网），而建连那次
+    mark_reachable(start_grace=False) 把定时器 cancel 后置成了 None。若失败分支
+    也不武装，设备就永远没有定时器 ⇒ lan_online 永久为真 ⇒ 接口一直报
+    lan_reachable、跨 NAT 诊断还把没电的相机说成路由器 NAT 问题。
+    """
+    miot_lan = _make_mock_lan()
+    device, _ = _real_device(miot_lan)
+
+    # 拉流建连成功：连接本身是活性证明，定时器被取消且置空。
+    miot_lan._MIoTLan__set_camera_connected("did1", True)
+    assert device._ka_timer is None
+
+    # 相机被拔电，原生报 DISCONNECTED（非主动关流）。
+    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+        miot_lan._MIoTLan__set_camera_connected(
+            "did1", False, keep_alive_on_stop=False
+        )
+
+    assert device._ka_timer is not None, "必须留一条 100s 后翻离线的路径"
+
+
+@pytest.mark.unit
+def test_repeated_native_failures_do_not_push_offline_deadline():
+    """连续失败重试不得把 deadline 往后推——否则等于用失败证据无限续期可达性。
+
+    原生退避是 3s→6s→12s…，每一档都短于 _KA_TIMEOUT(100s)，一旦每次都续期，窗口
+    会被连续顶到退避涨过 100s 才断，相机物理消失后接口还要说好几分钟的谎。
+    """
+    miot_lan = _make_mock_lan()
+    device, clock = _real_device(miot_lan)
+    miot_lan._MIoTLan__set_camera_connected("did1", True)
+
+    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+        miot_lan._MIoTLan__set_camera_connected(
+            "did1", False, keep_alive_on_stop=False
+        )
+        first_deadline = device._ka_timer.when()
+
+        # 3s 后原生重试又失败。
+        clock["now"] += 3
+        miot_lan._MIoTLan__set_camera_connected(
+            "did1", False, keep_alive_on_stop=False
+        )
+
+    assert device._ka_timer.when() == first_deadline, "deadline 不得被失败重试推后"
+
+
+@pytest.mark.unit
+def test_deliberate_stop_does_extend_deadline():
+    """反向对照：主动关流走 mark_reachable(start_grace=True)，deadline 确实会重排。"""
+    miot_lan = _make_mock_lan()
+    device, clock = _real_device(miot_lan)
+    miot_lan._MIoTLan__set_camera_connected("did1", True)
+
+    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+        miot_lan._MIoTLan__set_camera_connected("did1", False)
+        first_deadline = device._ka_timer.when()
+        clock["now"] += 3
+        miot_lan._MIoTLan__set_camera_connected("did1", False)
+
+    assert device._ka_timer.when() > first_deadline
 
 
 @pytest.mark.unit

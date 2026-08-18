@@ -207,3 +207,24 @@ async def test_deliberate_teardown_keeps_default_grace():
     call = proxy._miot_client.set_camera_connected.call_args
     assert call.args == ("cam1", False)
     assert "keep_alive_on_stop" not in call.kwargs
+
+
+async def test_cloud_offline_camera_is_not_diagnosed_as_nat_blocked():
+    """云端已报离线的相机不得被判成跨 NAT 阻断——问题不在路由器上。
+
+    相机断电/断网时云端心跳先超时，而 LAN 侧保活窗还没到期（最长 100s）。这段窗口里
+    若不加这道门，列表接口会给出「请检查 NAT 类型 / 开 UPnP」这种错误方向的提示，把
+    住户指去折腾路由器配置，还会稀释「NAT 阻断」这个本来信噪比很高的信号。
+    门下沉在 stream_nat_blocked 里，列表接口与播放页看门狗共用，两个界面口径一致。
+    """
+    cams = {"cam1": _cam("cam1")}
+    proxy = _make_proxy(cams)
+    await proxy.refresh_cameras()
+    proxy._camera_connect_since["cam1"] = (
+        time.monotonic() - proxy._STREAM_NAT_TIMEOUT - 1
+    )
+    assert proxy.stream_nat_blocked("cam1") is True  # 前提：其余判据都成立
+
+    proxy._camera_info_dict["cam1"].online = False
+
+    assert proxy.stream_nat_blocked("cam1") is False

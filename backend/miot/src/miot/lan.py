@@ -117,6 +117,28 @@ class _MIoTLanDevice:
                 self._KA_TIMEOUT, self.__switch_offline
             )
 
+    def ensure_offline_timer(self) -> None:
+        """确保存在一条「翻离线」的路径：已有定时器则**不动**（不续期），没有才武装。
+
+        给「原生报连接失败」这类不能当可达证明的场景用。不能续期（那等于拿失败证明
+        可达，且原生退避重连每次都短于 ``_KA_TIMEOUT``，会把窗口无限拉长），但也不能
+        让设备停在「一个离线定时器都没有」上——那样它永远翻不了假：
+
+        - 拉流建连成功时 ``mark_reachable(start_grace=False)`` 把定时器 cancel 后置
+          ``None``（连接本身就是活性证明，不需要定时器）；
+        - connected 期间单播探测**主动跳过**该 did（见 ``_probe_unicast_targets``），
+          广播又跨不了子网 ⇒ 没有任何东西会调 ``keep_alive`` 重新武装它；
+        - 于是跨网段相机「连上过再被拔电」时，若这里也不武装，``lan_online`` 会永久
+          卡在 True：接口一直报 lan_reachable、跨 NAT 诊断还会把没电的相机说成路由器
+          NAT 问题，把住户指去折腾路由器配置。
+
+        已有定时器时保持原 deadline 不变，所以连续失败重试不会把它往后推。
+        """
+        if self._ka_timer is None:
+            self._ka_timer = self._manager.internal_loop.call_later(
+                self._KA_TIMEOUT, self.__switch_offline
+            )
+
     @property
     def online(self) -> bool:
         """Device online status."""
@@ -512,8 +534,16 @@ class MIoTLan:
             # 无限拉长——相机被拔电后接口会连续几分钟仍报 lan_reachable=true,而这个
             # 字段的语义本是「100s 收不到探测响应就翻离线」。
             device = self._lan_devices.get(did)
-            if device is not None and keep_alive_on_stop:
-                device.mark_reachable(start_grace=True)
+            if device is not None:
+                if keep_alive_on_stop:
+                    device.mark_reachable(start_grace=True)
+                else:
+                    # 不续期，但必须保证存在一条「100s 收不到探测响应就翻离线」的
+                    # 路径：建连成功那次 mark_reachable(start_grace=False) 已经把
+                    # 定时器取消并置空，而 connected 期间单播探测跳过该 did、广播
+                    # 跨不了子网，没有任何东西会重新武装它。已有定时器保持原
+                    # deadline 不变，失败重试不会把它往后推。
+                    device.ensure_offline_timer()
             self.__maybe_resume_scan()
 
     def __all_cameras_connected(self) -> bool:

@@ -720,6 +720,15 @@ class MiotProxy:
         cam = self._camera_info_dict.get(did)
         if cam is None or not getattr(cam, "cross_subnet", False):
             return False
+        # 云端都报离线了，问题就不在路由器 NAT 类型上——别把住户指去折腾路由器配置。
+        # 相机断电/断网时云端心跳先超时，而 LAN 侧保活窗还没到期（最长 100s），这段
+        # 窗口里若不加这道门，接口会给出「请检查 NAT 类型 / 开 UPnP」这种错误方向的
+        # 提示，还会稀释「NAT 阻断」这个本来信噪比很高的信号。口径与感知侧静默检测
+        # 「云端已离线 → 救不活，别白重连」一致。
+        # 这道门下沉在这里而不是各调用方：列表接口与播放页看门狗共用本方法，放在这里
+        # 才能保证两个界面对同一台相机不会给出两套说法。
+        if not getattr(cam, "online", False):
+            return False
         if not getattr(cam, "lan_online", False):
             return False
         since = self._camera_connect_since.get(did)
