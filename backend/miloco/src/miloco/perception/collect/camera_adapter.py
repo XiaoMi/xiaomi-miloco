@@ -141,10 +141,6 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self._last_ondemand_refresh_ms = 0
         # 静默重连防抖标记：did -> 最近一次重连的 monotonic ms。
         self._last_reconnect_ms: dict[str, int] = {}
-        # 被外部接管（inject-video 等）临时占用的 did 集合。接管期间周期
-        # sync_devices 不得重连这些 did，否则会覆盖注入用的 _devices[did] state，
-        # 使注入回调绑定的 state 与 _devices 不一致、注入帧全被丢弃。
-        self._taken_over: set[str] = set()
 
     async def discover_devices(
         self,
@@ -273,9 +269,6 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         集里不被断开 ⇒ 已连路数单调越过上限,且被挤出活跃集的那路会在
         ``refresh_cameras``(销 manager) 与静默检测(建 manager) 之间无限震荡,白占
         相机有限的并发流名额。所以上限收敛独立收在这里,基类对投喂上限保持无感知。
-
-        接管中的通道（inject-video 等）由 ``disconnect_device`` 自己跳过（不传
-        ``force``），不会被上限挤掉。
         """
         from miloco.miot.filter import MAX_ENABLED_CAMERAS
 
@@ -304,9 +297,6 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # 还是同一个物理会话，几毫秒内 destroy 两次，四镜头就是四次）。
         stalled_by_physical: dict[str, list[str]] = {}
         for did, state in list(self._devices.items()):
-            # 被外部接管（inject-video 等）→ 静默检测不碰，交给接管方自己管生命周期。
-            if did in self._taken_over:
-                continue
             # 首帧未到 → 用「订阅时刻」判，阈值放宽到 _FIRST_FRAME_THRESHOLD_MS
             # （连接刚建立确实要等十几秒）；首帧已到 → 用「最后一帧时刻」判，
             # 阈值 _SILENCE_THRESHOLD_MS。
@@ -389,7 +379,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
     async def connect_device(
         self, did: str, source: PerceptionDevice | None = None
     ) -> None:
-        if did in self._devices or did in self._taken_over:
+        if did in self._devices:
             return
 
         # source 只表示上游 sync_devices 已完成 discover/filter；相机元数据不从
@@ -456,15 +446,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # 这个时刻在 _FIRST_FRAME_THRESHOLD_MS 后被判僵尸并重建，而不是永久静默。
         state.connected_at_ms = _monotonic_ms()
 
-    async def disconnect_device(
-        self, did: str, *, force: bool = False
-    ) -> None:
-        # 接管中的 did（inject 等）不允许被周期 sync 断开——disconnect 会 clear
-        # 注入 buffer + 移除注入 state，使注入帧全部丢失。inject 主动断开真流时
-        # 传 force=True 绕过（它自己就是接管方，需要真的停流）。
-        if not force and did in self._taken_over:
-            logger.debug("Camera %s taken over, skip disconnect", did)
-            return
+    async def disconnect_device(self, did: str) -> None:
         state = self._devices.pop(did, None)
         if not state:
             return
@@ -489,19 +471,6 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 logger.error("Failed to unsubscribe decoded audio for %s: %s", did, e)
 
         state.sync_buffer.clear()
-
-    def take_over_device(self, did: str) -> None:
-        """标记 did 为「接管中」：周期 sync_devices 不再重连它。
-
-        注入视频等外部临时接管场景使用——调用方负责断开真流、填好注入 state，
-        并在结束时先释放接管再恢复真流。接管期间 sync 的 connect_device 会
-        因 did 在 _taken_over 而跳过，避免覆盖注入 state。
-        """
-        self._taken_over.add(did)
-
-    def release_device(self, did: str) -> None:
-        """解除接管标记。调用方应在恢复真流前释放，让 sync 能重新接管。"""
-        self._taken_over.discard(did)
 
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
         """Collect multimodal data from the device's sync buffer.
@@ -713,11 +682,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         Receives BGR numpy arrays (already converted from PyAV in decoder thread).
 
         ``state`` 是回调订阅时刻绑定的设备状态对象。回调只向**这个** state 的
-        buffer 写帧：若 ``self._devices[did]`` 已不是它（disconnect 后注入接管、
-        或重连换了新状态），说明帧来自已失效的流，直接丢弃。这是对
-        disconnect→reconnect 竞态的根本防护——unregister 后原生解码线程仍可能有
-        在途帧 dispatch，若只按「did 有无 state」判活，注入接管后真流帧会混进
-        注入 buffer。
+        buffer 写帧：若 ``self._devices[did]`` 已不是它（静默自愈重连换了新
+        状态），说明帧来自已失效的流，直接丢弃。这是对 disconnect→reconnect
+        竞态的根本防护——unregister 后原生解码线程仍可能有在途帧 dispatch，
+        若只按「did 有无 state」判活，旧流的在途帧会混进新 buffer。
         """
 
         async def _on_decoded_video(
@@ -761,7 +729,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         Receives PCM numpy arrays (already resampled from PyAV in decoder thread).
 
         ``state`` 语义同 video 回调: 只向订阅时刻绑定的 state 写帧,state 被替换
-        （disconnect→注入接管/重连）后丢弃,防 stale 音频帧混入新 buffer。
+        (disconnect→重连) 后丢弃,防 stale 音频帧混入新 buffer。
         """
 
         async def _on_decoded_audio(

@@ -69,14 +69,8 @@ class BaseDeviceAdapter(ABC):
         """
 
     @abstractmethod
-    async def disconnect_device(self, did: str, *, force: bool = False) -> None:
-        """Disconnect from a device, unsubscribe all streams, clear buffers.
-
-        Args:
-            force: Disconnect even if the device is marked as taken over by an
-                external owner (inject-video etc.). Adapters without a take-over
-                notion ignore it.
-        """
+    async def disconnect_device(self, did: str) -> None:
+        """Disconnect from a device, unsubscribe all streams, clear buffers."""
 
     @abstractmethod
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:

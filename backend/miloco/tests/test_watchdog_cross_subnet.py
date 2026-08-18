@@ -33,8 +33,17 @@ _CROSS_SUBNET_MSG = json.loads(_HERO_ZH.read_text(encoding="utf-8"))["hero"][
 _GENERIC_MSG = router.UNREACHABLE_MESSAGES["camera_unreachable"]
 
 
-def _run_watchdog(*, cross_subnet: bool = False, has_frame: bool = False):
-    """跑一次看门狗，返回捕获的 send/close 调用。mock 掉 12s 等待与全局 manager。"""
+def _run_watchdog(
+    *,
+    cross_subnet: bool = False,
+    has_frame: bool = False,
+    nat_blocked: bool = False,
+):
+    """跑一次看门狗，返回捕获的 send/close 调用。mock 掉 12s 等待与全局 manager。
+
+    ``ws.sleeps`` 上挂着本次跑了几段等待：1 = 只等了首帧超时（续等被短路），
+    2 = 首帧超时 + 续等。
+    """
     ws = MagicMock()
     ws.send_text = AsyncMock()
     ws.close = AsyncMock()
@@ -42,13 +51,20 @@ def _run_watchdog(*, cross_subnet: bool = False, has_frame: bool = False):
     mgr = MagicMock()
     mgr.has_emitted_frame.return_value = has_frame
 
+    sleeps: list[float] = []
+
+    async def _fake_sleep(sec):
+        sleeps.append(sec)
+
     with (
         patch.object(router, "miot_video_stream_manager", mgr),
-        patch.object(router.asyncio, "sleep", new=AsyncMock()),
+        patch.object(router.asyncio, "sleep", new=_fake_sleep),
+        patch.object(router, "_nat_blocked", return_value=nat_blocked),
     ):
         asyncio.run(
             router._first_frame_watchdog(ws, "cam1", 0, cross_subnet=cross_subnet)
         )
+    ws.sleeps = sleeps
     return ws
 
 
@@ -175,3 +191,49 @@ def test_resolve_false_when_cache_raises():
     manager.miot_proxy = proxy
     with patch.object(router, "get_manager", return_value=manager):
         assert router._resolve_cross_subnet("did1") is False
+
+
+# ── 续等短路：已有确定性 NAT 阻断证据时不再空转 60s ──────────────────────────
+
+
+def test_nat_blocked_skips_grace_extension():
+    """跨网段 + 已判定 NAT 阻断 → 12s 就出提示，不再续等 60s。
+
+    建连计时在原生管理器创建时就播种，通常远早于住户点开播放页，所以看门狗刚起步
+    stream_nat_blocked 往往已为真。此时续等的 60s 既等不到帧（这条链一帧没出过），
+    也等不到自愈（静默检测早已跑过、正在 5min 重建冷却里；即便重建也走同一条被 NAT
+    阻断的路径），住户白盯着「正在连接摄像头…」多转一分钟。
+    """
+    ws = _run_watchdog(cross_subnet=True, nat_blocked=True)
+    assert ws.sleeps == [router._FIRST_FRAME_TIMEOUT_S], (
+        f"应只等首帧超时这一段，实际 {ws.sleeps}"
+    )
+    payload = _sent_payload(ws)
+    assert payload is not None
+    assert payload["reason"] == "camera_unreachable_cross_subnet"
+
+
+def test_cross_subnet_without_evidence_keeps_grace():
+    """跨网段但还没有 NAT 阻断证据 → 续等照旧，别把可能自愈的连接提前判死。"""
+    ws = _run_watchdog(cross_subnet=True, nat_blocked=False)
+    assert ws.sleeps == [router._FIRST_FRAME_TIMEOUT_S, router._GRACE_EXTENSION_S]
+
+
+def test_same_subnet_never_skips_grace():
+    """同网段相机的续等不受影响——这条短路只服务跨网段被阻断的那群。"""
+    ws = _run_watchdog(cross_subnet=False, nat_blocked=True)
+    assert ws.sleeps == [router._FIRST_FRAME_TIMEOUT_S, router._GRACE_EXTENSION_S]
+
+
+def test_frame_arriving_during_grace_still_cancels_verdict():
+    """续等期间出帧仍然解除判死（周期性静默自愈的本来目的）。"""
+    ws = _run_watchdog(cross_subnet=True, nat_blocked=False, has_frame=True)
+    assert ws.send_text.await_count == 0
+
+
+def test_nat_blocked_probe_failure_falls_back_to_grace():
+    """判据取值抛异常 → 回退成「证据不足」，保留续等，不因缓存抖动提前判死。"""
+    mgr_holder = MagicMock()
+    mgr_holder.miot_proxy.stream_nat_blocked.side_effect = RuntimeError("boom")
+    with patch.object(router, "get_manager", return_value=mgr_holder):
+        assert router._nat_blocked("cam1") is False

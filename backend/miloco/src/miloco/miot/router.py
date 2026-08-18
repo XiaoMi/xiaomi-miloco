@@ -128,6 +128,18 @@ def _resolve_cross_subnet(camera_id: str) -> bool:
         return False
 
 
+def _nat_blocked(camera_id: str) -> bool:
+    """会话是否已被判定为跨网段 NAT 阻断，口径与相机列表的 ``stream_error`` 完全一致。
+
+    与 ``_resolve_cross_subnet`` 同形：缓存缺失/异常一律回退成「证据不足」（False），
+    宁可让看门狗照常续等，也不因一次缓存抖动提前把住户的连接判死。
+    """
+    try:
+        return bool(get_manager().miot_proxy.stream_nat_blocked(camera_id))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _first_frame_watchdog(
     websocket: WebSocket, camera_id: str, channel: int, cross_subnet: bool = False
 ) -> None:
@@ -145,15 +157,28 @@ async def _first_frame_watchdog(
     await asyncio.sleep(_FIRST_FRAME_TIMEOUT_S)
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
         return
-    # 12s 无首帧:续等,期间出帧即解除(静默自愈 / 静默检测重连完成)。
-    logger.info(
-        "First-frame delayed, %s.%s — no frame in %.0fs, extending grace %.0fs",
-        _safe_log(camera_id), _safe_log(channel),
-        _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
-    )
-    await asyncio.sleep(_GRACE_EXTENSION_S)
-    if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
-        return
+    # 已握有「跨网段 + 探测可达 + 原生会话卡在连接中超 60s」这组确定性证据时不再续等。
+    # 续等是为了容忍相机周期性静默(27s~7min 后自愈),而那条链上相机是**出过帧**的
+    # (状态 CONNECTED ⇒ _camera_connect_since 已被 pop ⇒ 这里恒 False),续等原样保留。
+    # 反过来,一帧没出且会话已卡满 60s 的跨网段相机,这 60s 里既不会出帧,也等不到自愈:
+    # 建连计时在原生管理器创建时就播种,通常远早于住户点开播放页,所以静默检测早已跑
+    # 过并进入 5min 重建冷却;即便重建了,走的还是同一条被 NAT 阻断的路径。纯空转。
+    if not (cross_subnet and _nat_blocked(camera_id)):
+        # 12s 无首帧:续等,期间出帧即解除(静默自愈 / 静默检测重连完成)。
+        logger.info(
+            "First-frame delayed, %s.%s — no frame in %.0fs, extending grace %.0fs",
+            _safe_log(camera_id), _safe_log(channel),
+            _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
+        )
+        await asyncio.sleep(_GRACE_EXTENSION_S)
+        if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
+            return
+    else:
+        logger.warning(
+            "First-frame watchdog short-circuited, %s.%s — NAT-blocked evidence "
+            "already conclusive, skipping %.0fs grace",
+            _safe_log(camera_id), _safe_log(channel), _GRACE_EXTENSION_S,
+        )
     logger.warning(
         "First-frame watchdog fired, %s.%s — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
