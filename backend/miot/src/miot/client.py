@@ -8,7 +8,7 @@ MIoT Client.
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
 
 from miot.error import MIoTClientError
 from miot.spec import MIoTSpecParser
@@ -574,9 +574,15 @@ class MIoTClient:
             if did in lan_devices:
                 self._device_buffer[did].lan_online = lan_devices[did].online
                 self._device_buffer[did].local_ip = lan_devices[did].ip
+                # cross_subnet 必须与 lan_online 同源同周期搬运：上层的
+                # _camera_info_dict / _device_info_dict 是本 buffer 的 deepcopy，
+                # 每次 refresh 全量重建。只在上层的 LAN 变化回调里增量写会被这次
+                # 重建抹回 None，而该回调只在在线状态**翻转**时才触发、不会自愈。
+                self._device_buffer[did].cross_subnet = lan_devices[did].cross_subnet
             else:
                 self._device_buffer[did].lan_online = False
-                self._device_buffer[did].local_ip = None
+                # Keep cloud local_ip — it serves as the unicast probe fallback
+                # for cross-subnet cameras that broadcast can't reach.
 
         return self._device_buffer
 
@@ -658,6 +664,17 @@ class MIoTClient:
             if did in lan_devices:
                 camera_info.lan_online = lan_devices[did].online
                 camera_info.local_ip = lan_devices[did].ip
+                # 与 lan_online 同源同周期——只靠上层 LAN 回调增量写会被 refresh 的
+                # 全量重建抹回 None，令 stream_nat_blocked 恒 False（诊断永不触发）。
+                camera_info.cross_subnet = lan_devices[did].cross_subnet
+
+        # Sync unicast probe targets so cross-subnet cameras can also be
+        # reached via unicast UDP (broadcast is blocked by subnet boundary).
+        unicast_targets: Dict[str, str] = {}
+        for did, camera_info in self._cameras_buffer.items():
+            if camera_info.local_ip:
+                unicast_targets[did] = camera_info.local_ip
+        self._lan_client.set_unicast_targets(unicast_targets)
 
         return self._cameras_buffer
 
@@ -753,6 +770,36 @@ class MIoTClient:
             bool: Unregister result.
         """
         return await self._camera_client.unregister_status_changed_async(did=did)
+
+    def set_camera_connected(
+        self, did: str, connected: bool, keep_alive_on_stop: bool = True
+    ) -> None:
+        """Tell the LAN prober whether a camera's native stream is connected.
+
+        Connected cameras are proven reachable, so MIoTLan skips probing
+        them (and throttles the scan interval down to
+        ``OT_PROBE_INTERVAL_MAX`` once every *enabled* camera is connected —
+        it never stops scanning). Call on every camera_status transition.
+
+        ``keep_alive_on_stop`` only matters when ``connected`` is False: True
+        (default) means "we stopped the stream ourselves" and the device keeps a
+        100s keep-alive grace window so it does not blink offline; False means
+        "the native layer reported a failed/lost connection" — that is evidence
+        of *un*reachability, so leave the verdict to the real probes.
+        """
+        self._lan_client.set_camera_connected(
+            did, connected, keep_alive_on_stop=keep_alive_on_stop
+        )
+
+    def set_camera_dids(self, dids: Set[str]) -> None:
+        """Tell the LAN prober the current *scoped* (active) camera set.
+
+        MUST be the set of dids actually expected to connect (home-filtered,
+        not blacklisted, capped, etc.) — not every camera-class device on the
+        account — otherwise a camera outside the current scope would never
+        report connected and the scan interval would never throttle down.
+        """
+        self._lan_client.set_camera_dids(dids)
 
     # ------------------------------------------------------------------ mips
 
