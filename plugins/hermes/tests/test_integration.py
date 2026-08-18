@@ -85,29 +85,6 @@ def test_trace_full_write_read_cycle(tmp_path, monkeypatch):
     assert len(gz_files) == 1
 
 
-def test_trace_pop_done_turn_gives_meta(tmp_path, monkeypatch):
-    """pop_done_turn 返回完整 meta 给 backend adapter 读。"""
-    monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
-    from miloco_plugin_pkg import trace as tr
-
-    tr._turns.clear()
-    tr._trace_links.clear()
-
-    sess = "miloco:test-pop"
-    tr.register_trace_link(sess, "trace-abc")
-    tr._hk_pre_llm_call(sess, "test query", [], True, "m", "p")
-    tr._hk_on_session_end(sess, True, False, "m", "p")
-
-    meta = tr.pop_done_turn(sess)
-    assert meta is not None
-    assert meta["run_id"] == sess
-    assert meta["trace_id"] == "trace-abc"
-    assert "llm_call_count" in meta
-    assert "tool_call_count" in meta
-
-    assert tr.pop_done_turn(sess) is None
-
-
 # ── notify 三级 fallback ────────────────────────────────────────────────────
 
 def test_notify_resolve_target_runtime_fallback(tmp_path, monkeypatch):

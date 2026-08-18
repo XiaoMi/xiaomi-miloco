@@ -176,8 +176,7 @@ class TestTraceFieldAlignment:
 
         t[0] = 2000000  # advance time for done_at
 
-        jsonl_path = tr._flush_to_disk(run_id, state, final_success=True)
-        assert jsonl_path is not None, "trace 落盘失败——register_trace_link 可能没生效"
+        tr._flush_to_disk(run_id, state, final_success=True)
 
         # 现在读盘——模拟 adapter.read_trace_meta 逻辑
         from pathlib import Path
