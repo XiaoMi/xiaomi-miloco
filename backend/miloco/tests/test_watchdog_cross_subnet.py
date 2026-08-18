@@ -237,3 +237,33 @@ def test_nat_blocked_probe_failure_falls_back_to_grace():
     mgr_holder.miot_proxy.stream_nat_blocked.side_effect = RuntimeError("boom")
     with patch.object(router, "get_manager", return_value=mgr_holder):
         assert router._nat_blocked("cam1") is False
+
+
+def _fired_wait_seconds(caplog) -> float:
+    """从判死那条 warning 里取出播报的等待时长。"""
+    for rec in caplog.records:
+        if "watchdog fired" in rec.getMessage():
+            # 格式串第 3 个参数是等待秒数（前两个是 camera_id / channel）。
+            return rec.args[2]
+    raise AssertionError("没找到 watchdog fired 日志")
+
+
+def test_fired_log_reports_short_circuit_wait(caplog):
+    """短路判死时日志必须播报 12s，而不是写死的两段之和 72s。
+
+    这条 warning 是运维反推「到底给了相机多久」的主要依据（判死同时 1011 关掉 WS，
+    住户侧只看到画面始终没出来）。写死 72s 会让人按 6 倍时长去推算，还和上一行刚打的
+    "skipping 60s grace" 自相矛盾，读日志的人得翻源码才能确定哪条为准。
+    """
+    with caplog.at_level("WARNING", logger="miloco.miot.router"):
+        _run_watchdog(cross_subnet=True, nat_blocked=True)
+    assert _fired_wait_seconds(caplog) == router._FIRST_FRAME_TIMEOUT_S
+
+
+def test_fired_log_reports_full_wait_on_normal_path(caplog):
+    """常规路径仍播报两段之和 72s。"""
+    with caplog.at_level("WARNING", logger="miloco.miot.router"):
+        _run_watchdog(cross_subnet=False)
+    assert _fired_wait_seconds(caplog) == (
+        router._FIRST_FRAME_TIMEOUT_S + router._GRACE_EXTENSION_S
+    )

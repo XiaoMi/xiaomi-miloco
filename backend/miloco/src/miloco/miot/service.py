@@ -1226,9 +1226,15 @@ class MiotService:
             # 但连都连上了、可达是显然的），口径与 select_active / toggle gate 一致。
             lan_reachable = bool(getattr(info, "lan_online", False)) or device_connected
             # 跨网段 + 探测可达 + 拉流一直连不上 → 明确提示 NAT 类型限制，而不是让
-            # 用户干等一个永远连不上的"连接中"。相机对探测的回应从动态口发出，后续
-            # 拉流也建在该动态口上；客户端侧路由器若是严格 conntrack（非全锥 NAT），
-            # 这种"目标口与回包源口不同"的往返包会被丢弃，于是探测通、拉流恒超时。
+            # 用户干等一个永远连不上的"连接中"。可达探测走**固定控制口 54321**
+            # （lan.py OT_PORT，收包侧 __socket_read_handler 的第一道过滤就是
+            # `addr[1] != OT_PORT` 直接丢，所以回包只可能来自这个源口），而媒体流走
+            # 的是握手时协商出来的另一组端口；客户端侧路由器若是严格 conntrack
+            # （非全锥 NAT），媒体口方向没有"先出后进"的映射可复用，于是控制口探测
+            # 通、媒体流恒超时。
+            # ⚠️ 别把成因写成"回包源口是动态口"：那与上面那道固定源口过滤直接冲突，
+            # 按那个说法跨网段相机的每个回包都会被丢掉、lan_online 恒 False，整条
+            # cross_subnet_nat 诊断会是永不触发的死代码——而它是实测生效的。
             stream_error = (
                 "cross_subnet_nat"
                 if not device_connected and self._miot_proxy.stream_nat_blocked(did)

@@ -173,17 +173,20 @@ async def _first_frame_watchdog(
         await asyncio.sleep(_GRACE_EXTENSION_S)
         if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
             return
+        waited_s = _FIRST_FRAME_TIMEOUT_S + _GRACE_EXTENSION_S
     else:
         logger.warning(
             "First-frame watchdog short-circuited, %s.%s — NAT-blocked evidence "
             "already conclusive, skipping %.0fs grace",
             _safe_log(camera_id), _safe_log(channel), _GRACE_EXTENSION_S,
         )
+        waited_s = _FIRST_FRAME_TIMEOUT_S
+    # 实际等待时长按走过的出口算：短路那条只过了 12s，写死 72s 会让运维按 6 倍的
+    # 时长反推「是不是等得不够久」，还和上一行刚打的 "skipping 60s grace" 自相矛盾。
     logger.warning(
         "First-frame watchdog fired, %s.%s — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
-        _safe_log(camera_id), _safe_log(channel),
-        _FIRST_FRAME_TIMEOUT_S + _GRACE_EXTENSION_S,
+        _safe_log(camera_id), _safe_log(channel), waited_s,
     )
     # 跨网段 → 大概率是 NAT 类型限制拉流,提示可执行的修法(与 stream_error=
     # "cross_subnet_nat" 同文案);否则保留通用「连不上」。
