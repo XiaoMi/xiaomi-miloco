@@ -31,7 +31,7 @@ miloco 通过 `plugins/hermes/` 接入 Hermes，作为 OpenClaw 之外的并列 
 **api_server 同步 chat**（`gateway/platforms/api_server.py`）：
 
 - `POST /v1/chat/completions`（OpenAI 兼容同步端点），body `{"messages":[{"role":"system","content":...},{"role":"user","content":...}]}`，响应 `{"choices":[{"message":{"role":"assistant","content":...}}],"usage":{}}`。
-- 会话连续：请求头 `X-Hermes-Session-Id: <id>` —— Hermes 从 state.db 加载该 session 的历史。adapter 用 `miloco:<sessionKey>:<lane>` 作 id。suggest 车道用 `miloco:<sessionKey>:<lane>:<uuid>` 唯一后缀（不复用历史，避免 token 累积）。
+- 会话连续：请求头 `X-Hermes-Session-Id: <id>` —— Hermes 从 state.db 加载该 session 的历史。adapter 用 `miloco:<sessionKey>:<lane>` 作 id，各车道（含 suggest）都复用同一个持久会话。
 - 鉴权：`Authorization: Bearer $API_SERVER_KEY`。`API_SERVER_KEY` 环境变量设置即自动启用 api_server 平台（默认端口 8642）。
 - 溢出自愈：adapter 识别溢出关键词后，用无 `X-Hermes-Session-Id` 的全新 turn 重试一次。
 

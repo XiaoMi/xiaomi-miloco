@@ -13,9 +13,9 @@ Hermes /v1/chat/completions 协议(OpenAI 兼容 Chat Completions API):
 溢出自愈(沿用 279): 识别错误文案含 ``_OVERFLOW_MARKERS`` 时,无 session 头重试一次
 (最佳努力,v0.10.0 api_server 无 session 删除/重置路由)。
 
-trace 文件 IPC(#11): plugin ``trace.py`` 写 ``$MILOCO_HOME/trace/<run_id>.meta.json``,
-本 adapter ``read_trace_meta`` 读盘返回。本 session 暂未重构 ``trace.py``,所以读盘
-通常返回 None —— backend meta_poller 走超时分支,不影响功能。
+trace 文件 IPC(#11): plugin ``trace.py`` 按天写 ``$MILOCO_HOME/trace/agent/<YYYYMMDD>/``
+下的 ``.meta.json``,本 adapter ``read_trace_meta`` 读盘返回。两侧 run_id 口径不同
+(adapter 用 uuid、trace.py 用 session_id),靠发送原文与 meta 的 query 前缀匹配关联。
 """
 
 from __future__ import annotations
@@ -271,13 +271,7 @@ class Adapter:
             session_id = None
             owner_chat = owner_session
         else:
-            # suggestion 每个事件独立评估，不用持久 session；
-            # 但需保留 miloco: 前缀让 trace hook 正常落盘。
-            import uuid as _uuid
-
-            session_id = _map_session(session_key, lane) if lane != "miloco-suggest" else (
-                f"{_map_session(session_key, lane)}:{_uuid.uuid4().hex[:8]}"
-            )
+            session_id = _map_session(session_key, lane)
         timeout_s = max(wait_timeout_ms / 1000.0, 1.0) + _HTTP_BUFFER_S
 
         # 组装 messages: <system>(可选) + <user>
@@ -454,6 +448,22 @@ class Adapter:
 
     # ---- read_trace_meta ----------------------------------------------
 
+    def _recent_meta_files(self) -> list[Path]:
+        """当天 + 昨天（跨零点的 turn）目录下的 meta 文件。
+
+        trace 目录按 YYYYMMDD 分天且没有保留期，全树扫描会随天数线性变慢，
+        而 poller 只可能读到刚落盘的那一批。
+        """
+        import datetime as _dt
+
+        today = _dt.date.today()
+        files: list[Path] = []
+        for day in (today, today - _dt.timedelta(days=1)):
+            day_dir = self._trace_dir / day.strftime("%Y%m%d")
+            if day_dir.is_dir():
+                files.extend(day_dir.glob("*.meta.json"))
+        return files
+
     async def read_trace_meta(self, run_id: str) -> Optional[Any]:
         """按发送原文反查 trace.py 落盘的 meta.json。
 
@@ -465,7 +475,7 @@ class Adapter:
         if not text:
             return None
         candidates = sorted(
-            self._trace_dir.rglob("*.meta.json"),
+            self._recent_meta_files(),
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
         data: dict[str, Any] | None = None
@@ -506,15 +516,12 @@ class Adapter:
     ) -> dict[str, Any]:
         """切家庭时批量清理 Hermes 会话。按 (session_key, lane) 映射为 session_id 后逐个删。
 
-        返回 ``{"reset": [...], "failed": [...]}``。suggest 车道每次 turn
-        用一次性会话（带 uuid 后缀），无跨轮状态，跳过重置。
+        返回 ``{"reset": [...], "failed": [...]}``。
         """
         reset, failed, seen = [], [], set()
         import asyncio as _asyncio
         loop = _asyncio.get_running_loop()
         for session_key, lane in routes:
-            if lane == "miloco-suggest":
-                continue
             session_id = _map_session(session_key, lane)
             if session_id in seen:
                 continue
