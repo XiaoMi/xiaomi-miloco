@@ -23,6 +23,12 @@ from miot.types import InterfaceStatus, MIoTLanDeviceInfo, NetworkInfo
 
 _LOGGER = logging.getLogger(__name__)
 
+# 单播 socket 的 reader ctx 标签 / keep_alive 的 if_name。广播 socket 用的是真实
+# 网卡名（"en1" 等），所以「if_name != 此值」就等价于「这次 keep-alive 是广播喂的」
+# ——_probe_unicast_targets 的同网段判据依赖该等价关系，故收成一个常量，避免字面量
+# 在某一处被改动后判据静默失效（每次 keep-alive 都被当成广播 ⇒ 同网段永不发单播）。
+_UNICAST_IF_NAME: str = "unicast"
+
 
 @dataclass
 class _MIoTLanNetworkUpdateData:
@@ -55,6 +61,10 @@ class _MIoTLanDevice:
     _online: bool
     _ip: Optional[str]
     _if_name: Optional[str]
+    # 最近一次**经广播**收到探测应答的时刻（internal_loop 单调钟；从未被广播喂活
+    # 过则为 None）。_probe_unicast_targets 用它判断「广播这条路对这台设备到底管
+    # 不管用」，见那里的 docstring。
+    _last_broadcast_ka: Optional[float]
 
     _ka_timer: Optional[asyncio.TimerHandle]
 
@@ -65,6 +75,7 @@ class _MIoTLanDevice:
         self._online = False
         self._ip = ip
         self._if_name = None
+        self._last_broadcast_ka = None
         self._ka_timer = None
 
     def keep_alive(self, ip: str, if_name: str) -> None:
@@ -81,6 +92,11 @@ class _MIoTLanDevice:
         if self._if_name != if_name:
             self._if_name = if_name
             _LOGGER.info("device if_name change, %s, %s", self.did, self._if_name)
+        if if_name != _UNICAST_IF_NAME:
+            # 广播路径确实把这台设备喂活了——记时刻，作为「同网段可以只靠广播」的
+            # 唯一证据来源。用 internal_loop 的单调钟，与 _ka_timer 同一时间基准，
+            # 不受墙钟跳变影响。
+            self._last_broadcast_ka = self._manager.internal_loop.time()
         # Reset keep alive timer
         if self._ka_timer:
             self._ka_timer.cancel()
@@ -140,6 +156,11 @@ class _MIoTLanDevice:
             )
 
     @property
+    def last_broadcast_ka(self) -> Optional[float]:
+        """最近一次经广播喂活的 internal_loop 单调时刻；从未被广播喂活过则 None。"""
+        return self._last_broadcast_ka
+
+    @property
     def online(self) -> bool:
         """Device online status."""
         return self._online
@@ -197,6 +218,16 @@ class MIoTLan:
 
     OT_PROBE_INTERVAL_MIN: float = 5
     OT_PROBE_INTERVAL_MAX: float = 45
+
+    # 「广播喂活」的保鲜期：距上次经广播收到应答超过这么久，就认为广播对该设备不再
+    # 管用，改发单播兜底（见 _probe_unicast_targets）。
+    #
+    # 取值须落在 (OT_PROBE_INTERVAL_MAX, _MIoTLanDevice._KA_TIMEOUT) 之间：
+    # - > 45s：广播正常时每轮扫描都会刷新它，稳态下不会误判成「广播失效」而多发单播
+    #   （降频态一轮 45s，留出丢一轮的余量）；
+    # - < 100s：广播失效后，必须早于 lan_online 翻 False 就切回单播，否则相机会先掉
+    #   出可拉流集，留下一个百秒级盲窗。
+    BROADCAST_FRESH_S: float = 90
 
     _main_loop: asyncio.AbstractEventLoop
 
@@ -577,8 +608,23 @@ class MIoTLan:
     def _probe_unicast_targets(self) -> None:
         """给已知目标 IP 发单播 OTU 探测。
 
-        单播只对**跨网段**目标有意义——同网段目标已经被广播覆盖。跳过同网段目标
-        不只是省一次冗余探测，还规避了 macOS 上一个确定性的坑：
+        跨网段目标必须走单播（广播过不了子网边界）。同网段目标**优先走广播**，但
+        只在有证据表明广播对该设备确实管用时才跳过单播——判据是「这台设备在
+        ``BROADCAST_FRESH_S`` 内被广播喂活过」(``_last_broadcast_ka``)，而不是
+        「同网段 ⇒ 广播必然可行」这个假设。
+
+        该假设在开了广播/组播抑制（BUM filtering / 组播转单播，高密度 AIoT 环境常见）
+        的 AP 下不成立：AP 转发客户端之间的单播、但丢弃客户端之间的广播/组播。此时
+        同网段设备既不被广播覆盖、又被单播跳过，落进覆盖真空——现场实测该网段广播
+        探测 0 应答、单播 5/5 应答，8 台相机全部 ``lan_online=False``，既拉不了流也
+        感知不到（``select_active_camera_dids`` 拿 ``lan_online`` 当硬门）。
+
+        判据按**设备**而非按网络，因为「广播收不到」有两种成因——AP 丢广播、或该型号
+        不响应广播目的地址的探测——无 root 抓包时区分不了，而按设备判定不需要区分：
+        没被广播喂活过就发单播，两种成因被同一条规则覆盖。反之若定义成一个网络级
+        全局 flag，就必须先答对成因，答错会永久饿死那台设备。
+
+        跳过同网段目标除了省一次冗余探测，还规避了 macOS 上一个确定性的坑：
 
         macOS 15+ 的 Local Network Privacy 按**进程的启动上下文**决定是否放行本地
         网络访问（Apple TN3179：launchd daemon / root / 从 Terminal 或 SSH 启动的
@@ -592,8 +638,13 @@ class MIoTLan:
         实测的拦截边界：拦 = 同网段 UDP 单播、全局广播 255.255.255.255、多播 224.x；
         放行 = 定向子网广播（192.168.1.255）与 TCP——这正是广播发现与 miss 拉流在
         宿主机仍能工作、只有同网段单播失效的原因。根治办法是换部署形态（跑 Linux
-        容器，或改成 launchd daemon），不在本进程代码内。这里跳过同网段目标，是让
-        代码不去撞这条必然失败的路径。
+        容器，或改成 launchd daemon），不在本进程代码内。
+
+        这条坑与上面的判据是相容的，不需要额外分支：那种形态下**定向子网广播是放行
+        的**（正是上一段的实测边界）⇒ 广播能把同网段设备喂活 ⇒ 判据判定「广播够用」
+        ⇒ 同网段单播根本不会发出，必然失败的路径依旧撞不到。只有广播确实失效时才会
+        去试同网段单播——而那时试一次恰恰是我们要的，且失败已被下方 ``except OSError``
+        兜住（记 debug、不影响其它目标与广播路径）。
 
         目标 IP 确定时——用**专用的、不绑网卡的普通 socket** 直接 sendto，出口网卡
         交给系统路由决定；回包由该 socket 的 add_reader 收。不复用广播那些
@@ -603,7 +654,11 @@ class MIoTLan:
         if not self._unicast_targets or self._unicast_sock is None:
             return
         for did, ip in self._unicast_targets.items():
-            if not ip or self.__is_local_subnet(ip) or did in self._connected_dids:
+            if not ip or did in self._connected_dids:
+                continue
+            # 同网段：只有拿到「广播确实在喂活它」的证据才跳过。__is_local_subnet
+            # 放在前面短路，跨网段目标不必去碰时钟。
+            if self.__is_local_subnet(ip) and self.__broadcast_is_feeding(did):
                 continue
             try:
                 self._unicast_sock.sendto(
@@ -613,8 +668,27 @@ class MIoTLan:
                 # 无路由/不可达等：记 debug 不刷屏，不影响其它目标与广播。
                 _LOGGER.debug("unicast probe to %s failed: %s", ip, e)
 
+    def __broadcast_is_feeding(self, did: str) -> bool:
+        """广播这条路最近是否真的把这台设备喂活过（见 ``_probe_unicast_targets``）。
+
+        没见过这个 did、或从未被广播喂活过（只被单播喂活过、或刚建条目还没收到过
+        应答）→ False，即「广播不顶用，发单播」。这也让首轮探测天然走单播兜底：
+        设备条目此时还不存在，不存在「等广播先证明自己」的冷启动死锁。
+        """
+        device = self._lan_devices.get(did)
+        if device is None:
+            return False
+        last = device.last_broadcast_ka
+        if last is None:
+            return False
+        return (self._internal_loop.time() - last) < self.BROADCAST_FRESH_S
+
     def __is_local_subnet(self, ip: str) -> bool:
-        """目标 IP 是否与本机某网卡同网段（即已被广播覆盖，无需单播）。"""
+        """目标 IP 是否与本机某网卡同网段（即广播**有可能**覆盖到它）。
+
+        注意只是「有可能」：同网段不等于广播一定可行（AP 可能抑制客户端广播），所以
+        这不足以单独作为跳过单播的理由，须与 ``__broadcast_is_feeding`` 合用。
+        """
         try:
             target = ipaddress.IPv4Address(ip)
         except ValueError:
@@ -679,7 +753,7 @@ class MIoTLan:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             self._internal_loop.add_reader(
-                sock.fileno(), self.__socket_read_handler, ("unicast", sock)
+                sock.fileno(), self.__socket_read_handler, (_UNICAST_IF_NAME, sock)
             )
             self._unicast_sock = sock
             _LOGGER.info("created unicast socket")
@@ -758,7 +832,10 @@ class MIoTLan:
             if addr[1] != self.OT_PORT:
                 # Not ot msg
                 return
-            if ctx[0] == "unicast" and addr[0] not in self._unicast_targets.values():
+            if (
+                ctx[0] == _UNICAST_IF_NAME
+                and addr[0] not in self._unicast_targets.values()
+            ):
                 # 单播 socket 不绑网卡，局域网内任意主机都能往这个端口发包；
                 # 只信任当前正在探测的目标 IP。
                 return

@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from miot.lan import MIoTLan, _MIoTLanDevice
 from miot.network import MIoTNetwork
+from miot.types import NetworkInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -574,3 +575,160 @@ def test_connected_path_ignores_keep_alive_on_stop():
 
     device.mark_reachable.assert_called_once_with(start_grace=False)
     assert "did1" in miot_lan._connected_dids
+
+
+# ---------------------------------------------------------------------------
+# 同网段单播兜底：判据是「广播是否真的在喂活这台设备」，不是「是否同网段」
+#
+# 回归背景：旧逻辑无条件跳过同网段目标，前提是「同网段必被广播覆盖」。在开了
+# 广播/组播抑制(BUM filtering)的 AP 下该前提不成立——AP 转发客户端单播、丢弃
+# 客户端广播——同网段相机既不被广播覆盖、又被单播跳过，落进覆盖真空，
+# lan_online 恒 False ⇒ 既拉不了流也感知不到。
+# ---------------------------------------------------------------------------
+
+_LOCAL_IP = "192.168.199.103"
+
+
+def _make_mock_lan_local_subnet(now=1000.0):
+    """MIoTLan whose en1 sits on 192.168.199.0/24, so _LOCAL_IP is same-subnet.
+
+    Also installs a mock internal loop with a pinned monotonic clock — the
+    broadcast-freshness check reads it via internal_loop.time().
+    """
+    miot_lan = _make_mock_lan()
+    miot_lan._network.network_info = {
+        "en1": NetworkInfo(
+            name="en1",
+            ip="192.168.199.102",
+            netmask="255.255.255.0",
+            net_seg="192.168.199.0",
+        )
+    }
+    loop = MagicMock()
+    loop.time.return_value = now
+    miot_lan._internal_loop = loop
+    return miot_lan
+
+
+def _seed_broadcast_fed(miot_lan, did, ip, if_name="en1"):
+    """Create a lan device fed by the *broadcast* path at the current clock."""
+    device = _MIoTLanDevice(miot_lan, did, ip)
+    device.keep_alive(ip=ip, if_name=if_name)
+    miot_lan._lan_devices[did] = device
+    return device
+
+
+@pytest.mark.unit
+def test_same_subnet_skipped_while_broadcast_is_fresh():
+    """广播正在喂活同网段设备 → 保持原作者意图，不发冗余单播。"""
+    miot_lan = _make_mock_lan_local_subnet(now=1000.0)
+    mock_sock = MagicMock()
+    miot_lan._unicast_sock = mock_sock
+    miot_lan._unicast_targets = {"did1": _LOCAL_IP}
+    _seed_broadcast_fed(miot_lan, "did1", _LOCAL_IP)
+    # 10s 后（< BROADCAST_FRESH_S）再探测
+    miot_lan._internal_loop.time.return_value = 1010.0
+
+    miot_lan._probe_unicast_targets()
+
+    mock_sock.sendto.assert_not_called()
+
+
+@pytest.mark.unit
+def test_same_subnet_probed_when_broadcast_went_stale():
+    """广播曾管用、后来失效 → 必须在 lan_online 翻 False 之前切回单播。"""
+    miot_lan = _make_mock_lan_local_subnet(now=1000.0)
+    mock_sock = MagicMock()
+    miot_lan._unicast_sock = mock_sock
+    miot_lan._unicast_targets = {"did1": _LOCAL_IP}
+    _seed_broadcast_fed(miot_lan, "did1", _LOCAL_IP)
+    # 超过保鲜期但仍在 _KA_TIMEOUT(100s) 之内——正是「无盲窗」要求的那段窗口
+    miot_lan._internal_loop.time.return_value = 1000.0 + MIoTLan.BROADCAST_FRESH_S + 1
+
+    miot_lan._probe_unicast_targets()
+
+    assert mock_sock.sendto.call_count == 1
+    assert mock_sock.sendto.call_args[0][2] == (_LOCAL_IP, miot_lan.OT_PORT)
+
+
+@pytest.mark.unit
+def test_same_subnet_probed_when_never_seen():
+    """本案的现场形态：广播被 AP 抑制，设备从未被发现过（无 lan device 条目）。
+
+    冷启动必须直接发单播——若要求「先由广播证明自己」，广播不可用时这台设备
+    永远拿不到探测，正是回归要修的死锁。
+    """
+    miot_lan = _make_mock_lan_local_subnet()
+    mock_sock = MagicMock()
+    miot_lan._unicast_sock = mock_sock
+    miot_lan._unicast_targets = {"did1": _LOCAL_IP}
+    assert "did1" not in miot_lan._lan_devices
+
+    miot_lan._probe_unicast_targets()
+
+    assert mock_sock.sendto.call_count == 1
+    assert mock_sock.sendto.call_args[0][2] == (_LOCAL_IP, miot_lan.OT_PORT)
+
+
+@pytest.mark.unit
+def test_unicast_keep_alive_does_not_certify_broadcast():
+    """单播自己的应答**不能**充当「广播够用」的证据，否则兜底会自我关停：
+    第一次单播成功 → 被记成「广播在喂活」→ 下轮跳过 → 100s 后翻离线 → 再兜底，
+    设备在线态永久抖动。
+    """
+    miot_lan = _make_mock_lan_local_subnet(now=1000.0)
+    mock_sock = MagicMock()
+    miot_lan._unicast_sock = mock_sock
+    miot_lan._unicast_targets = {"did1": _LOCAL_IP}
+    device = _seed_broadcast_fed(miot_lan, "did1", _LOCAL_IP, if_name="unicast")
+
+    assert device.last_broadcast_ka is None
+    miot_lan._probe_unicast_targets()
+    assert mock_sock.sendto.call_count == 1
+
+
+@pytest.mark.unit
+def test_keep_alive_records_broadcast_timestamp_only_for_broadcast():
+    """keep_alive 只在 if_name 是真实网卡名时记「广播喂活」时刻。"""
+    miot_lan = _make_mock_lan_local_subnet(now=500.0)
+    device = _MIoTLanDevice(miot_lan, "did1", _LOCAL_IP)
+
+    device.keep_alive(ip=_LOCAL_IP, if_name="unicast")
+    assert device.last_broadcast_ka is None
+
+    device.keep_alive(ip=_LOCAL_IP, if_name="en1")
+    assert device.last_broadcast_ka == 500.0
+
+    # 后续单播应答不得把广播时间戳往后推
+    miot_lan._internal_loop.time.return_value = 560.0
+    device.keep_alive(ip=_LOCAL_IP, if_name="unicast")
+    assert device.last_broadcast_ka == 500.0
+
+
+@pytest.mark.unit
+def test_connected_same_subnet_target_still_skipped():
+    """已连上的 did 仍按目标跳过——拉流本身已是可达证明，与网段/广播判据无关。"""
+    miot_lan = _make_mock_lan_local_subnet()
+    mock_sock = MagicMock()
+    miot_lan._unicast_sock = mock_sock
+    miot_lan._unicast_targets = {"did1": _LOCAL_IP}
+    miot_lan._connected_dids = {"did1"}
+
+    miot_lan._probe_unicast_targets()
+
+    mock_sock.sendto.assert_not_called()
+
+
+@pytest.mark.unit
+def test_broadcast_fresh_window_between_scan_max_and_ka_timeout():
+    """保鲜期必须夹在 (OT_PROBE_INTERVAL_MAX, _KA_TIMEOUT) 之间。
+
+    ≤ 45s 会在广播正常的稳态下误判成失效、每轮多发同网段单播（在 launchd agent
+    形态下即每轮必然 errno 65）；≥ 100s 则晚于 lan_online 翻 False，相机会先掉出
+    可拉流集，留下百秒级盲窗。
+    """
+    assert (
+        MIoTLan.OT_PROBE_INTERVAL_MAX
+        < MIoTLan.BROADCAST_FRESH_S
+        < _MIoTLanDevice._KA_TIMEOUT
+    )
