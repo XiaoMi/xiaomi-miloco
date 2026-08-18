@@ -55,8 +55,9 @@ def test_hermes_adapter_instantiable():
 # ── trace 读写全链路（文件 IPC） ────────────────────────────────────────────
 
 def test_trace_full_write_read_cycle(tmp_path, monkeypatch):
-    """trace.py 常写 → 读取，验证文件 IPC 链路。"""
+    """trace.py 写 → 读取，验证文件 IPC 链路（jsonl 部分要 debug 开）。"""
     monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+    monkeypatch.setenv("MILOCO_TRACE_DEBUG", "1")
     from miloco_plugin_pkg import trace as tr
 
     tr._turns.clear()

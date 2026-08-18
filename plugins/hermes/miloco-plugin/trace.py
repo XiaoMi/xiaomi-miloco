@@ -13,8 +13,10 @@ Hermes 没有 ``runId`` 概念——直接用 ``session_id`` 作为 turn id。tr
 ``miloco:<sessionKey>:<lane>`` 前缀的 session_id 推导（context_injection 时识别）。
 
 落盘：``$MILOCO_HOME/trace/agent/<YYYYMMDD>/<runId>__<query>.jsonl.gz`` + 同名
-``.meta.json``（adapter 的 read_trace_meta 读这个）。jsonl 有每日数量上限防撑爆
-磁盘，meta 不受限——它是 backend 记账的唯一来源。
+``.meta.json``（adapter 的 read_trace_meta 读这个）。
+
+jsonl 是诊断产物，与 openclaw 一样只在 debug 开时写、并有每日数量上限；meta 是
+backend 记账的唯一来源（openclaw 那边走内存 webhook），必须常写，超上限淘汰最老的。
 """
 
 from __future__ import annotations
@@ -34,7 +36,8 @@ logger = logging.getLogger(__name__)
 
 # ── 常量（与 openclaw trace.ts 对齐） ─────────────────────────────────────
 BUFFER_MAX = 5000  # 单 turn buffer 上限（events 数）；超出记 _truncated
-DAILY_DUMP_MAX = 300  # 每日 jsonl.gz 文件数 cap
+DAILY_DUMP_MAX = 300  # 每日 jsonl.gz 文件数 cap（debug 开时才落 jsonl）
+META_DAILY_MAX = 300  # 每日 meta.json 文件数上限，超出淘汰最老的
 QUERY_LEN_MAX = 80  # 文件名里 query 部分最大长度（字符）
 NAME_MAX_BYTES = 255  # POSIX 单个文件名字节上限
 _STEM_MAX_BYTES = NAME_MAX_BYTES - len(".meta.json")  # 后缀最长的那个
@@ -104,7 +107,9 @@ def _sanitize_filename(q: Optional[str]) -> str:
 def _sweep_stale_turns() -> None:
     """清理没走到 on_session_end 的僵尸 turn（对齐 openclaw ``gcExpiredTurns``）。
 
-    正常 turn 在 on_session_end 就被 pop 掉，这里只兜底 hook 缺席的情况。
+    正常 turn 在 on_session_end 就被 pop 掉。这里兜的是 hook 之间 run_id 口径不一致：
+    ``on_session_start`` 只拿得到 session_id，其余 hook 优先用 task_id，两者不等时
+    前者建的 state 永远等不到自己那次 session_end。
     """
     cutoff = _now_ms() - int(STUCK_TTL_S * 1000)
     for run_id in [k for k, v in _turns.items() if v.started_at < cutoff]:
@@ -223,28 +228,47 @@ def _reduce_meta(buffer: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _evict_old_metas(dir_path: Path) -> None:
+    """腾出一个 meta 名额：删最老的几个。
+
+    meta 是记账来源，撞上限只能淘汰旧的，不能像 jsonl 那样拒写。淘汰本身是尽力而为，
+    失败只记日志——让它冒出去会连累这一轮的 meta 写不成。
+    """
+    try:
+        metas = list(dir_path.glob("*.meta.json"))
+        if len(metas) < META_DAILY_MAX:
+            return
+        metas.sort(key=lambda p: p.stat().st_mtime)
+        for old in metas[: len(metas) - META_DAILY_MAX + 1]:
+            old.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("[miloco-trace] evict meta failed: %s", exc)
+
+
 def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> None:
     """落盘：``trace/agent/<YYYYMMDD>/<runId>__<query>.jsonl.gz`` + 同名 ``.meta.json``。
 
-    每日 cap 只挡体积大的 jsonl —— meta 是 backend 唯一的记账来源，撞 cap 也要写。
+    jsonl 跟着 debug 开关走（对齐 openclaw），meta 无论如何都要写 —— backend 靠它记账。
     """
     try:
         dir_path = _today_dir()
         dir_path.mkdir(parents=True, exist_ok=True)
         stem = _truncate_bytes(f"{run_id}__{_sanitize_filename(state.query)}", _STEM_MAX_BYTES)
         jsonl_path: Optional[str] = None
-        existing = [p for p in dir_path.iterdir() if p.suffix == ".gz"]
-        if len(existing) >= DAILY_DUMP_MAX:
-            logger.warning(
-                "[miloco-trace] daily cap reached: %d/%d, skip jsonl runId=%s",
-                len(existing), DAILY_DUMP_MAX, run_id,
-            )
-        else:
-            filename = f"{stem}.jsonl.gz"
-            text = "\n".join(json.dumps(e, ensure_ascii=False) for e in state.buffer) + "\n"
-            with gzip.open(dir_path / filename, "wt", encoding="utf-8") as f:
-                f.write(text)
-            jsonl_path = f"trace/agent/{dir_path.name}/{filename}"
+        if is_debug_enabled():
+            existing = [p for p in dir_path.iterdir() if p.suffix == ".gz"]
+            if len(existing) >= DAILY_DUMP_MAX:
+                logger.warning(
+                    "[miloco-trace] daily cap reached: %d/%d, skip jsonl runId=%s",
+                    len(existing), DAILY_DUMP_MAX, run_id,
+                )
+            else:
+                filename = f"{stem}.jsonl.gz"
+                text = "\n".join(json.dumps(e, ensure_ascii=False) for e in state.buffer) + "\n"
+                with gzip.open(dir_path / filename, "wt", encoding="utf-8") as f:
+                    f.write(text)
+                jsonl_path = f"trace/agent/{dir_path.name}/{filename}"
+        _evict_old_metas(dir_path)
         # meta 文件（adapter read_trace_meta 读这个）——小 JSON 包含聚合统计 + 路径。
         # 字段名统一 snake_case，与 adapter.py read_trace_meta 读盘侧一致。
         meta = _reduce_meta(state.buffer)
@@ -355,13 +379,16 @@ def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kw
                 "durationMs": _now_ms() - state.started_at,
             },
         })
-        # 只落 miloco 触发的 turn，普通 chat 直接丢。用 session_id 前缀判定而不是
-        # register_trace_link——后者跨进程调不到（_map_session 生成固定 "miloco:" 前缀）。
-        if (session_id or "").startswith("miloco:"):
-            _flush_to_disk(run_id, state, bool(completed))
-        # 持久会话下一轮复用同一个 run_id，这里不释放会让下一轮接着写本轮 buffer。
-        _turns.pop(run_id, None)
-        _sweep_stale_turns()
+        try:
+            # 只落 miloco 触发的 turn，普通 chat 直接丢。用 session_id 前缀判定而不是
+            # register_trace_link——后者跨进程调不到（_map_session 生成固定 "miloco:" 前缀）。
+            if (session_id or "").startswith("miloco:"):
+                _flush_to_disk(run_id, state, bool(completed))
+        finally:
+            # 持久会话下一轮复用同一个 run_id，这里不释放会让下一轮接着写本轮 buffer。
+            # 放 finally 是因为落盘一旦抛出，漏释放就是本模块修掉的那个 bug 原样复发。
+            _turns.pop(run_id, None)
+            _sweep_stale_turns()
     pop_trace_link(run_id)
 
 

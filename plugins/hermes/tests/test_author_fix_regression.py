@@ -160,6 +160,7 @@ class TestTraceFieldAlignment:
         from miloco_plugin_pkg import trace as tr
 
         monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+        monkeypatch.setenv("MILOCO_TRACE_DEBUG", "1")
         monkeypatch.setattr(tr, "_today_dir", lambda: tmp_path)
         t = [1000000]
         monkeypatch.setattr(tr, "_now_ms", lambda: t[0])

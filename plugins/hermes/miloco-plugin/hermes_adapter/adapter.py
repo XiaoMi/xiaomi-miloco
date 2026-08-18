@@ -112,6 +112,14 @@ def _new_run_id() -> str:
     return str(uuid.uuid4())
 
 
+def _mtime_or_zero(path: Path) -> float:
+    """取 mtime；文件刚被 trace.py 淘汰掉时当最旧处理，别让整次读盘抛出去。"""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _resolve_trace_dir() -> Path:
     """``$MILOCO_HOME/trace/agent/`` —— plugin trace.py 写盘位置。
 
@@ -474,10 +482,7 @@ class Adapter:
         text = self._pending_texts.get(run_id)
         if not text:
             return None
-        candidates = sorted(
-            self._recent_meta_files(),
-            key=lambda p: p.stat().st_mtime, reverse=True,
-        )
+        candidates = sorted(self._recent_meta_files(), key=_mtime_or_zero, reverse=True)
         data: dict[str, Any] | None = None
         for meta_path in candidates[:50]:
             try:
