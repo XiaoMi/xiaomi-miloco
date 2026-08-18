@@ -48,12 +48,13 @@ TURNS_HARD_CAP = 20  # _turns 大小硬上限，兜底防泄漏
 # ── 状态 ────────────────────────────────────────────────────────────────
 
 class _TurnState:
-    __slots__ = ("buffer", "started_at", "query")
+    __slots__ = ("buffer", "started_at", "query", "last_seen")
 
     def __init__(self, started_at: int) -> None:
         self.buffer: List[Dict[str, Any]] = []
         self.started_at = started_at
         self.query: str = ""
+        self.last_seen = started_at
 
 
 # 进程内 registry：run_id → _TurnState（与 openclaw turns Map 等价）
@@ -110,17 +111,22 @@ def _sweep_stale_turns() -> None:
     正常 turn 在 on_session_end 就被 pop 掉。这里兜的是 hook 之间 run_id 口径不一致：
     ``on_session_start`` 只拿得到 session_id，其余 hook 优先用 task_id，两者不等时
     前者建的 state 永远等不到自己那次 session_end。
+
+    判据一律用「多久没有新事件」而不是「开了多久」——僵尸的特征是不再有人往里写，
+    而慢 turn 每条 hook 都会刷新，不该被当成僵尸清掉。
     """
     cutoff = _now_ms() - int(STUCK_TTL_S * 1000)
-    for run_id in [k for k, v in _turns.items() if v.started_at < cutoff]:
+    for run_id in [k for k, v in _turns.items() if v.last_seen < cutoff]:
         state = _turns.pop(run_id, None)
         if state is not None:
             logger.warning(
-                "[miloco-trace] stuck turn evicted: runId=%s age=%ds",
-                run_id, (_now_ms() - state.started_at) // 1000,
+                "[miloco-trace] stuck turn evicted: runId=%s idle=%ds",
+                run_id, (_now_ms() - state.last_seen) // 1000,
             )
     if len(_turns) > TURNS_HARD_CAP:
-        oldest = sorted(_turns.items(), key=lambda kv: kv[1].started_at)
+        # 按最后一次事件时间淘汰：还在跑的 turn 每条 hook 都会刷新 last_seen，只进不出的
+        # 僵尸不会。用 started_at 会先删掉跑得最久的那个活 turn。
+        oldest = sorted(_turns.items(), key=lambda kv: kv[1].last_seen)
         for run_id, _ in oldest[: len(_turns) - TURNS_HARD_CAP]:
             _turns.pop(run_id, None)
         logger.warning("[miloco-trace] turns over hard cap %d, evicted oldest", TURNS_HARD_CAP)
@@ -166,6 +172,7 @@ def _get_or_init(run_id: str) -> _TurnState:
 
 
 def _push_event(state: _TurnState, ev: Dict[str, Any]) -> None:
+    state.last_seen = _now_ms()
     if len(state.buffer) < BUFFER_MAX:
         state.buffer.append(ev)
     elif len(state.buffer) == BUFFER_MAX:
@@ -256,18 +263,23 @@ def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> None:
         stem = _truncate_bytes(f"{run_id}__{_sanitize_filename(state.query)}", _STEM_MAX_BYTES)
         jsonl_path: Optional[str] = None
         if is_debug_enabled():
-            existing = [p for p in dir_path.iterdir() if p.suffix == ".gz"]
-            if len(existing) >= DAILY_DUMP_MAX:
-                logger.warning(
-                    "[miloco-trace] daily cap reached: %d/%d, skip jsonl runId=%s",
-                    len(existing), DAILY_DUMP_MAX, run_id,
-                )
-            else:
-                filename = f"{stem}.jsonl.gz"
-                text = "\n".join(json.dumps(e, ensure_ascii=False) for e in state.buffer) + "\n"
-                with gzip.open(dir_path / filename, "wt", encoding="utf-8") as f:
-                    f.write(text)
-                jsonl_path = f"trace/agent/{dir_path.name}/{filename}"
+            # 明细只是诊断产物，它自己的 IO 失败绝不能连累下面的 meta 写入
+            # （磁盘写满时 meta 往往还写得下）。openclaw trace.ts 的 gzip 段同样自带一层。
+            try:
+                existing = [p for p in dir_path.iterdir() if p.suffix == ".gz"]
+                if len(existing) >= DAILY_DUMP_MAX:
+                    logger.warning(
+                        "[miloco-trace] daily cap reached: %d/%d, skip jsonl runId=%s",
+                        len(existing), DAILY_DUMP_MAX, run_id,
+                    )
+                else:
+                    filename = f"{stem}.jsonl.gz"
+                    text = "\n".join(json.dumps(e, ensure_ascii=False) for e in state.buffer) + "\n"
+                    with gzip.open(dir_path / filename, "wt", encoding="utf-8") as f:
+                        f.write(text)
+                    jsonl_path = f"trace/agent/{dir_path.name}/{filename}"
+            except OSError as exc:
+                logger.warning("[miloco-trace] jsonl write failed runId=%s: %s", run_id, exc)
         _evict_old_metas(dir_path)
         # meta 文件（adapter read_trace_meta 读这个）——小 JSON 包含聚合统计 + 路径。
         # 字段名统一 snake_case，与 adapter.py read_trace_meta 读盘侧一致。
@@ -360,7 +372,7 @@ def _hk_on_session_start(session_id, model, platform, **kwargs):
 
 
 def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kwargs):
-    """对齐 OpenClaw agent_end——finalize turn：落盘后释放内存里的 turn state。"""
+    """对齐 OpenClaw agent_end——finalize turn：先释放内存里的 turn state，再落盘。"""
     run_id = _run_id_from_args(session_id=session_id, task_id=kwargs.get("task_id"))
     with _lock:
         state = _turns.get(run_id)
@@ -379,17 +391,17 @@ def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kw
                 "durationMs": _now_ms() - state.started_at,
             },
         })
-        try:
-            # 只落 miloco 触发的 turn，普通 chat 直接丢。用 session_id 前缀判定而不是
-            # register_trace_link——后者跨进程调不到（_map_session 生成固定 "miloco:" 前缀）。
-            if (session_id or "").startswith("miloco:"):
-                _flush_to_disk(run_id, state, bool(completed))
-        finally:
-            # 持久会话下一轮复用同一个 run_id，这里不释放会让下一轮接着写本轮 buffer。
-            # 放 finally 是因为落盘一旦抛出，漏释放就是本模块修掉的那个 bug 原样复发。
-            _turns.pop(run_id, None)
-            _sweep_stale_turns()
-    pop_trace_link(run_id)
+        # 先摘下来：持久会话下一轮复用同一个 run_id，不释放会让下一轮接着写本轮 buffer。
+        # 摘完 state 只属于本次调用，落盘不必再占这把全局锁，也就没有"落盘抛错导致漏释放"。
+        _turns.pop(run_id, None)
+        _sweep_stale_turns()
+    try:
+        # 只落 miloco 触发的 turn，普通 chat 直接丢。用 session_id 前缀判定而不是
+        # register_trace_link——后者跨进程调不到（_map_session 生成固定 "miloco:" 前缀）。
+        if (session_id or "").startswith("miloco:"):
+            _flush_to_disk(run_id, state, bool(completed))
+    finally:
+        pop_trace_link(run_id)
 
 
 # ── 注册 ────────────────────────────────────────────────────────────────

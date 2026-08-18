@@ -1,4 +1,5 @@
-"""trace.py 单测：buffer 累积、reduce_meta、debug 落盘、daily cap、GC。"""
+"""trace.py 单测：buffer 累积、reduce_meta、debug 门槛、daily cap 滚动淘汰、
+僵尸 turn 清理、持久会话连续记账（本文件核心不变式）。"""
 
 from __future__ import annotations
 
@@ -298,7 +299,7 @@ def test_sweep_evicts_stuck_turn_keeps_fresh():
     stuck, fresh = "miloco:stuck-1", "miloco:fresh-1"
     tr._hk_pre_llm_call(stuck, "hi", [], True, "m", "p")
     tr._hk_pre_llm_call(fresh, "hi", [], True, "m", "p")
-    tr._turns[stuck].started_at = 0  # epoch
+    tr._turns[stuck].last_seen = 0  # epoch 之后再没有事件
     tr._sweep_stale_turns()
     assert stuck not in tr._turns
     assert fresh in tr._turns
@@ -308,9 +309,41 @@ def test_session_end_triggers_sweep():
     """sweeper 要真接在 turn 结束这条路径上，光有函数没人调等于没清。"""
     zombie = "miloco:zombie-1"
     tr._hk_pre_llm_call(zombie, "hi", [], True, "m", "p")
-    tr._turns[zombie].started_at = 0  # epoch
+    tr._turns[zombie].last_seen = 0  # epoch 之后再没有事件
     _one_turn(MILOCO_SESSION, "正常一轮")
     assert zombie not in tr._turns
+
+
+def test_sweep_keeps_slow_but_active_turn():
+    """判据是「多久没动静」不是「开了多久」：慢 turn 只要还在出事件就不能被清。"""
+    slow = "miloco:slow-1"
+    tr._hk_pre_llm_call(slow, "hi", [], True, "m", "p")
+    tr._turns[slow].started_at = 0  # epoch 就开始了
+    tr._hk_post_llm_call(slow, "hi", "ans", [], "m", "p", duration_ms=1)  # 但刚刚还在出事件
+    tr._sweep_stale_turns()
+    assert slow in tr._turns
+
+
+def test_sweep_hard_cap_keeps_active_over_idle():
+    """撞硬上限时先淘汰最久没动静的，而不是开始得最早的。
+
+    所有 turn 的 last_seen 都要留在 stuck 窗口内，否则先被僵尸清理带走，
+    硬上限那段根本不会执行。
+    """
+    now = tr._now_ms()
+    active = "miloco:long-running"
+    tr._hk_pre_llm_call(active, "hi", [], True, "m", "p")
+    tr._turns[active].started_at = now - 600_000  # 全场开始最早
+    for i in range(tr.TURNS_HARD_CAP):
+        sid = f"miloco:idle-{i}"
+        tr._hk_pre_llm_call(sid, "hi", [], True, "m", "p")
+        tr._turns[sid].started_at = now - 300_000 + i
+        tr._turns[sid].last_seen = now - 300_000 + i  # 建完就没动静，但没到僵尸线
+    tr._turns[active].last_seen = now  # 活跃的刚刚还在出事件
+
+    tr._sweep_stale_turns()
+    assert active in tr._turns
+    assert "miloco:idle-0" not in tr._turns
 
 
 def test_sweep_hard_cap_evicts_oldest():
@@ -407,3 +440,18 @@ def test_meta_written_even_when_evict_fails(monkeypatch):
     monkeypatch.setattr(Path, "glob", boom)
     _one_turn(MILOCO_SESSION, "问题")
     assert len(_read_metas()) == 1
+
+
+def test_meta_written_even_when_jsonl_write_fails(monkeypatch):
+    """明细写失败不能连累统计——磁盘写满时 meta 往往还写得下。"""
+    monkeypatch.setenv("MILOCO_TRACE_DEBUG", "1")
+
+    def boom(*_a, **_kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tr.gzip, "open", boom)
+    _one_turn(MILOCO_SESSION, "问题")
+
+    metas = _read_metas()
+    assert len(metas) == 1
+    assert metas[0]["jsonl_path"] is None
