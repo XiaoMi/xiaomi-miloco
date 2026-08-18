@@ -242,6 +242,31 @@ def test_socket_read_handler_broadcast_not_filtered_by_unicast_targets():
 
 
 @pytest.mark.unit
+def test_probe_unicast_targets_includes_same_subnet_target():
+    """同网段目标也要发单播——不再依赖「广播一定送达同网段」这个假设。
+
+    定向子网广播会被交换机的 IGMP/风暴抑制、AP 客户端隔离、路由器广播限速丢掉，此时
+    同网段相机明明可直连、却因为收不到广播探测而 lan_online 恒 False。
+    （代价见 _probe_unicast_targets docstring 里的 macOS LNP 说明。）
+    """
+    miot_lan = _make_mock_lan()
+    # 让 __is_local_subnet 对 192.168.1.x 判真：本机网卡就在这个网段。
+    miot_lan._network.network_info = {
+        "eth0": MagicMock(ip="192.168.1.10", netmask="255.255.255.0")
+    }
+    assert miot_lan._MIoTLan__is_local_subnet("192.168.1.50") is True
+
+    mock_sock = MagicMock()
+    miot_lan._unicast_sock = mock_sock
+    miot_lan._unicast_targets = {"same": "192.168.1.50", "cross": "10.0.0.2"}
+
+    miot_lan._probe_unicast_targets()
+
+    sent = {call[0][2][0] for call in mock_sock.sendto.call_args_list}
+    assert sent == {"192.168.1.50", "10.0.0.2"}
+
+
+@pytest.mark.unit
 def test_probe_unicast_targets_skips_connected_dids():
     """A did already marked connected must not be re-probed via unicast --
     connectivity is already proven, so probing it is pointless."""

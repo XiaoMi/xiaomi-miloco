@@ -434,10 +434,15 @@ class MIoTLan:
     def set_unicast_targets(self, targets: Dict[str, str]) -> None:
         """Set unicast probe targets (did → ip).
 
-        These IPs will be probed via unicast UDP in every scan cycle,
-        in addition to the normal broadcast.  Useful when cameras are on
-        a different subnet that is still routable — broadcast won't cross
-        the subnet boundary, but unicast will.
+        These IPs will be probed via unicast UDP in every scan cycle, in
+        addition to the normal broadcast — **regardless of subnet**. The
+        original motivation was cross-subnet cameras (broadcast won't cross the
+        subnet boundary, unicast will), but same-subnet targets are probed too:
+        directed broadcast is not guaranteed to be delivered (switch storm
+        control / AP client isolation / router broadcast rate-limiting), and a
+        directly reachable camera should not go lan_online=False just because
+        its broadcast reply was dropped. See ``_probe_unicast_targets`` for the
+        macOS Local Network Privacy caveat this re-exposes.
 
         Call with an empty dict to clear all targets.
         Safe to call when not initialized (no-op).
@@ -575,35 +580,42 @@ class MIoTLan:
         self._scan_timer = self._internal_loop.call_later(0, self.__scan_devices)
 
     def _probe_unicast_targets(self) -> None:
-        """给已知目标 IP 发单播 OTU 探测。
+        """给已知目标 IP 发单播 OTU 探测——**不分网段，同网段目标也发**。
 
-        单播只对**跨网段**目标有意义——同网段目标已经被广播覆盖。跳过同网段目标
-        不只是省一次冗余探测，还规避了 macOS 上一个确定性的坑：
+        原先只对跨网段目标发（同网段已被广播覆盖，且能规避下面那个 macOS 坑）。改成
+        不分网段是为了不再依赖「广播一定送达同网段」这个假设：定向子网广播会被交换机
+        的 IGMP/风暴抑制、AP 的客户端隔离、以及部分路由器的广播限速丢掉，此时同网段
+        相机明明可直连、却因为收不到广播探测而 lan_online 恒 False。多发一份单播的代价
+        是每轮每台多一个 UDP 包（回包重复调 keep_alive，幂等无副作用）。
 
-        macOS 15+ 的 Local Network Privacy 按**进程的启动上下文**决定是否放行本地
-        网络访问（Apple TN3179：launchd daemon / root / 从 Terminal 或 SSH 启动的
-        进程及其子进程自动豁免；launchd **agent** 不豁免）。以 launchd agent 形态
-        启动的 miloco，对**同网段**目标的 UDP 单播会被内核在发送前直接拦掉、返回
-        errno 65 EHOSTUNREACH，而 route/ARP 全程正常、包根本没上过线。判定维度只有
-        启动上下文——与代码、uid、ARP、IFSCOPE、socket 复用方式全都无关（2026-07-24
-        实测坐实：同一二进制、同一 config、同一用户，仅改启动方式，SSH 启动 100%
-        成功、launchd agent 启动 100% errno 65）。
+        ⚠️ macOS 上的已知代价（这也是原先跳过同网段的第二个理由，删掉 skip 后重新暴露）：
+        macOS 15+ 的 Local Network Privacy 按**进程的启动上下文**决定是否放行本地网络
+        访问（Apple TN3179：launchd daemon / root / 从 Terminal 或 SSH 启动的进程及其
+        子进程自动豁免；launchd **agent** 不豁免）。以 launchd agent 形态启动的 miloco，
+        对**同网段**目标的 UDP 单播会被内核在发送前直接拦掉、返回 errno 65
+        EHOSTUNREACH，而 route/ARP 全程正常、包根本没上过线。判定维度只有启动上下文
+        ——与代码、uid、ARP、IFSCOPE、socket 复用方式全都无关（2026-07-24 实测坐实：
+        同一二进制、同一 config、同一用户，仅改启动方式，SSH 启动 100% 成功、launchd
+        agent 启动 100% errno 65）。
 
         实测的拦截边界：拦 = 同网段 UDP 单播、全局广播 255.255.255.255、多播 224.x；
         放行 = 定向子网广播（192.168.1.255）与 TCP——这正是广播发现与 miss 拉流在
-        宿主机仍能工作、只有同网段单播失效的原因。根治办法是换部署形态（跑 Linux
-        容器，或改成 launchd daemon），不在本进程代码内。这里跳过同网段目标，是让
-        代码不去撞这条必然失败的路径。
+        宿主机仍能工作、只有同网段单播失效的原因。所以在未豁免的 macOS 上，这里对同
+        网段目标的 sendto 会每轮失败一次（记 debug、不影响广播与其它目标，功能等价于
+        改动前）；根治办法是换部署形态（跑 Linux 容器，或改成 launchd daemon /
+        签名启动器），不在本进程代码内。
 
         目标 IP 确定时——用**专用的、不绑网卡的普通 socket** 直接 sendto，出口网卡
         交给系统路由决定；回包由该 socket 的 add_reader 收。不复用广播那些
         IP_BOUND_IF 钉网卡的 socket，避免往到不了目标的网卡盲发，并让单播的发送
         失败不会影响广播 socket 的接收路径。
+
+        已连上的 did 仍然跳过：可达性已由拉流本身证实，探它没有意义。
         """
         if not self._unicast_targets or self._unicast_sock is None:
             return
         for did, ip in self._unicast_targets.items():
-            if not ip or self.__is_local_subnet(ip) or did in self._connected_dids:
+            if not ip or did in self._connected_dids:
                 continue
             try:
                 self._unicast_sock.sendto(
@@ -614,7 +626,11 @@ class MIoTLan:
                 _LOGGER.debug("unicast probe to %s failed: %s", ip, e)
 
     def __is_local_subnet(self, ip: str) -> bool:
-        """目标 IP 是否与本机某网卡同网段（即已被广播覆盖，无需单播）。"""
+        """目标 IP 是否与本机某网卡同网段。
+
+        只用于 ``is_cross_subnet``（对上层透出的 cross_subnet 标记）。单播探测**不再**
+        按它跳过同网段目标，见 ``_probe_unicast_targets``。
+        """
         try:
             target = ipaddress.IPv4Address(ip)
         except ValueError:
