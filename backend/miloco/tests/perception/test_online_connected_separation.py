@@ -211,7 +211,7 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_require_lan_false_keeps_stale_lan_camera(self, adapter):
-        """A2 应连数判据(online_only=True, require_lan=False)放过 lan_online 陈旧
+        """A2 保留集判据(online_only=True, require_lan=False)放过 lan_online 陈旧
         成 false 的卡死态相机(云端 online=True)——它正是要靠 refresh 救活的。"""
         cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
             update={"home_id": "H1"}
@@ -224,8 +224,11 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_require_lan_false_still_excludes_offline_camera(self, adapter):
-        """A2 应连数判据仍排除云端离线相机(online=False)——它救不活，算进应连数
-        会让判据永真、refresh_cameras 每轮空转(MR review 指出的过度触发)。"""
+        """A2 保留集判据仍排除云端离线相机(online=False)——它救不活，算进保留集
+        会让判据永真、refresh_cameras 每轮空转(MR review 指出的过度触发)。
+
+        注:按需补建的判据已改成严格门(require_lan=True)，这条用例钉的是
+        ``require_lan=False`` 这个口径本身仍排除云端离线相机，保留集消费它。"""
         cam = _make_camera_info(did="cam1", online=False, lan_online=False).model_copy(
             update={"home_id": "H1"}
         )

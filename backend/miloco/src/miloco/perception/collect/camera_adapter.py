@@ -223,11 +223,18 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         登录瞬间相机 LAN 未就绪时 `refresh_cameras` 建不成 camera_img_manager，
         之后无任何机制补建 → 永久不拉流（需重启进程）。这里在周期 sync 路径
-        （`all_devices is None`）检测到「scope 内应连相机数 > 已连数」时，先触发
-        一次 `refresh_cameras` 补建 manager 再交基类连接。应连数用
-        `online_only=True, require_lan=False`：放过 lan_online 陈旧成 false 的卡死态
-        相机（要救），但排除云端就离线的相机（救不活，避免它让判据永真致 refresh
-        空转）。scope 内相机要么已连、要么云端离线时不触发，零额外开销。
+        （`all_devices is None`）检测到「scope 内应连**集合**里还有成员没连上」时，
+        先触发一次 `refresh_cameras` 补建 manager 再交基类连接。
+
+        两条判据都别照直觉改，理由都写在下方注释里：
+
+        - 应连集合用**严格门**（`online_only=True`，`require_lan` 保持默认 True），
+          与 `refresh_cameras` 建销 manager 的 `select_active_camera_dids` 完全同口径
+          —— 补建问的是「refresh_cameras 会不会真为它建 manager」，用宽松门只会让判据
+          永真、每轮空转打一次云端接口。
+        - 判据取**集合差**而非数量比较：数量看不见「数量相等、成员不同」。
+
+        scope 内相机全部已连时不触发，零额外开销。
         """
         if all_devices is None and self._miot_proxy.is_authenticated:
             await self._check_stalled_cameras()
@@ -262,8 +269,12 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     await self._miot_proxy.refresh_cameras()
             except Exception as e:  # noqa: BLE001
                 logger.warning("On-demand camera manager refresh failed: %s", e)
-        # 断开判断与补建探测同口径 (require_lan=False):只按云端在线判定,保留
+        # 断开判断用**宽松门** (disconnect_require_lan=False):只按云端在线判定,保留
         # lan_online 偶发假 False 的已连相机,防止拉流中的相机被误断。
+        # ⚠️ 这与上面补建判据的严格门**故意不同口径**,不是漏改:补建问的是
+        # 「refresh_cameras 会不会为它建 manager」(严格门),断开问的是「会不会误杀已经
+        # 连上的」(宽松门 + 保留集 ⊇ 发现集,见 adapter_base.sync_devices)。投喂上限的
+        # 收敛由下面的 _converge_feed_cap 独立负责,不掺进这条判据。
         await super().sync_devices(all_devices, disconnect_require_lan=False)
         await self._converge_feed_cap(all_devices)
 

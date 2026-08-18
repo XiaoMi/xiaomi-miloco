@@ -42,9 +42,12 @@ class BaseDeviceAdapter(ABC):
                          If False, return all discovered devices regardless of
                          online status.
             require_lan: If True (default), a device must be LAN-reachable to be
-                 returned. Pass False for "cloud-online is enough" callers
-                 (retained-set recompute in ``sync_devices``, on-demand rebuild
-                 probing). Adapters without a LAN reachability notion ignore it.
+                 returned. Pass False for "cloud-online is enough" callers — the
+                 retained-set recompute in ``sync_devices`` is the only one.
+                 Notably NOT the camera on-demand-rebuild probe: that one asks
+                 "would ``refresh_cameras`` actually build a manager for it?" and
+                 must use the strict gate (see ``camera_adapter.sync_devices``).
+                 Adapters without a LAN reachability notion ignore it.
                  ``sync_devices`` calls this by keyword, so every adapter must
                  accept it.
             cap: If True (default), truncate to the device type's feed limit
@@ -104,8 +107,12 @@ class BaseDeviceAdapter(ABC):
         ``disconnect_require_lan``: 断开判断用的 require_lan 口径。默认与 discover
         一致 (True)。设为 False 时,断开只以「云端在线」为准,保留 lan_online 暂时
         为 False 的已连设备 —— 防止 LAN 探测偶发失败 (lan_online 假 False) 把正在
-        拉流的设备断开。camera 的感知同步用 False (见 camera_adapter.sync_devices),
-        与补建探测 (require_lan=False) 的口径对齐:要救的,就不该被同一轮断开。
+        拉流的设备断开。camera 的感知同步用 False (见 camera_adapter.sync_devices)。
+
+        ⚠️ 这与 camera 侧「按需补建」用的严格门 (require_lan=True) **故意不同口径**,
+        不是待清理的漂移:补建问的是「refresh_cameras 会不会为它建 manager」(它自己就用
+        严格门,宽松门下判据永真、每轮空转打云端接口),断开问的是「会不会误杀已经连上
+        的」。改本参数前先读下面「保留集 ⊇ 发现集」那段不变量。
 
         Lifecycle 语义 (self._node_name 不为 None 时):
         - 进入时 set_lifecycle(STARTING)。已在运行中的节点不会被打断。

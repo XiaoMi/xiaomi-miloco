@@ -161,7 +161,8 @@ def test_select_active_require_lan_false_keeps_lan_stale():
     cameras = {"c1": _camera("c1", home_id="H1", online=True, lan_online=False)}
     # require_lan=True（默认连接口径）→ 排除
     assert miot_filter.select_active_camera_dids(kv, cameras) == []
-    # require_lan=False（应连数口径）→ 放过
+    # require_lan=False（保留集/断开判据的口径；**不是**按需补建的口径，那边用严格门）
+    # → 放过
     assert miot_filter.select_active_camera_dids(
         kv, cameras, require_lan=False
     ) == ["c1"]
