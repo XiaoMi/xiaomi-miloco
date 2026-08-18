@@ -232,9 +232,18 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         if all_devices is None and self._miot_proxy.is_authenticated:
             await self._check_stalled_cameras()
             try:
-                expected = await self.discover_devices(
-                    online_only=True, require_lan=False
-                )
+                # 判据用**严格门**（require_lan 默认 True，与 refresh_cameras 建销
+                # manager 的 select_active_camera_dids 完全同口径）。曾用
+                # require_lan=False 想「放过 lan_online 陈旧成 false 的卡死态相机」，
+                # 但那条路走不通也没必要：
+                #   - 真正「卡死但还连着」的相机走 is_camera_connected 这条支路，本来
+                #     就在严格集里（filter.py: lan_online or is_camera_connected）；
+                #   - 既不 LAN 可达、原生也没连上的相机，refresh_cameras 用的是同一道
+                #     严格门 ⇒ 它压根不会为这台建 manager，触发 refresh 是**必然空转**。
+                # 而 missing 恒非空 + 节流窗(10s) ≈ sync 周期(10s) ⇒ 每轮都打一次云端
+                # get_cameras_async。原注释已经在防「云端离线相机让判据永真致 refresh
+                # 空转」，LAN 这一半是同一个坑的另一面。
+                expected = await self.discover_devices(online_only=True)
                 now_ms = _monotonic_ms()
                 # 判据必须是**集合差**而非数量比较:数量看不见「数量相等、成员不同」。
                 # 5+ 台相机的家庭里低字典序相机上线顶位时,应连集 {100,200,300,400} 与
@@ -256,9 +265,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # 断开判断与补建探测同口径 (require_lan=False):只按云端在线判定,保留
         # lan_online 偶发假 False 的已连相机,防止拉流中的相机被误断。
         await super().sync_devices(all_devices, disconnect_require_lan=False)
-        await self._converge_feed_cap()
+        await self._converge_feed_cap(all_devices)
 
-    async def _converge_feed_cap(self) -> None:
+    async def _converge_feed_cap(self, all_devices: dict | None = None) -> None:
         """把超出投喂上限的通道断掉,口径与 select_active_camera_dids 完全一致。
 
         为什么上限收敛不能寄生在基类的断开判据里:那个「保留集」为了满足
@@ -269,11 +278,31 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         集里不被断开 ⇒ 已连路数单调越过上限,且被挤出活跃集的那路会在
         ``refresh_cameras``(销 manager) 与静默检测(建 manager) 之间无限震荡,白占
         相机有限的并发流名额。所以上限收敛独立收在这里,基类对投喂上限保持无感知。
+
+        淘汰顺序先看「本轮还通过严格门吗」、再看字典序。只按字典序排会把优先级反转:
+        保留集刻意放宽了 LAN 门（正是本 PR 要救的那类:云端在线但 LAN 已探不到、原生也
+        没连上），这种僵尸通道若字典序靠前,就会挤掉字典序靠后、刚刚真连上的健康通道 ——
+        日志每轮刷一条 over feed cap、那一路的投喂反复中断,而占着名额的僵尸一帧不出。
+        （该链有兜底:僵尸静默满 30s / 首帧满 90s 后被静默检测连带断开、名额释放,所以
+        表现是「另一台掉线后的 30~90s 窗口内健康相机被反复断连 3~9 次」而非永不自愈,
+        但优先级反转本身与本方法要消灭的抖动是同一类失败模式。）
         """
         from miloco.miot.filter import MAX_ENABLED_CAMERAS
 
-        overflow = sorted(self._devices)[MAX_ENABLED_CAMERAS:]
-        for did in overflow:
+        if len(self._devices) <= MAX_ENABLED_CAMERAS:
+            # 未超限直接退,省掉下面那次 discover(常态路径零开销)。
+            return
+        try:
+            # 严格门 + 截断,与 refresh_cameras 的 manager 建销同口径;传入本轮的
+            # all_devices 快照,热插拔路径不另取一份可能已漂移的相机表。
+            preferred = set(await self.discover_devices(all_devices))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Feed-cap converge discover failed (%s); falling back to did order", e
+            )
+            preferred = set()
+        ordered = sorted(self._devices, key=lambda d: (d not in preferred, d))
+        for did in ordered[MAX_ENABLED_CAMERAS:]:
             logger.warning(
                 "Camera %s over feed cap (%d), disconnecting overflow channel",
                 did,
@@ -342,7 +371,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         三层重建缺一不可：disconnect_device 只 unregister 解码回调（不动 native miss
         会话）；reconnect_camera 才 destroy+create manager 真正断掉僵尸 MTP/PPCS 会话、
-        重走 miss_client_connect 的建连重试；解码订阅由下轮 sync 的 connect_device 补齐。
+        重走 miss_client_connect 的建连重试；解码订阅由**同一轮** sync 紧随其后的
+        connect_device 补齐（``sync_devices`` 先跑静默检测再跑基类同步，本方法已把这些
+        通道从 ``_devices`` 摘掉，它们当轮就落进「发现集 − 已连集」）。
         必须把同一物理相机的所有已连通道一起断开：destroy 会连带作废兄弟通道在旧
         实例上的 reg_id，而 connect_device 对已在 _devices 里的 did 直接 early-return，
         不先断开就永远补不回订阅。
@@ -363,10 +394,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 "Stalled camera reconnect failed %s: %s", physical_did, e
             )
             return
-        # 感知侧的解码订阅由下轮 sync 补齐，但 watch 直播与 record_clip 的订阅也一样
-        # 死在被 destroy 的旧实例上，且它们没有 sync 这条兜底（见
-        # MIoTVideoStreamManager.resubscribe_camera 的说明）。局部 import 防循环依赖，
-        # 也避免 client → ws 的反向依赖。
+        # 感知侧的解码订阅由同一轮 sync 的基类同步补齐，但 watch 直播 / record_clip /
+        # 播放页音频的订阅也一样死在被 destroy 的旧实例上，且它们没有 sync 这条兜底
+        # （见两个 manager 的 resubscribe_camera 说明）。局部 import 防循环依赖，也避免
+        # client → ws 的反向依赖。视频与音频各自独立 try：一条失败不该挡住另一条。
         try:
             from miloco.miot.ws import miot_video_stream_manager
 
@@ -375,6 +406,12 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             logger.error(
                 "Resubscribe live/record streams failed %s: %s", physical_did, e
             )
+        try:
+            from miloco.miot.ws import miot_audio_stream_manager
+
+            await miot_audio_stream_manager.resubscribe_camera(physical_did)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Resubscribe audio streams failed %s: %s", physical_did, e)
 
     async def connect_device(
         self, did: str, source: PerceptionDevice | None = None

@@ -215,3 +215,84 @@ async def test_retained_set_keeps_camera_whose_lan_flag_flapped():
     assert "cam1" in adapter.get_connected_devices(), (
         "lan_online 偶发假 False 不该断掉正在拉流的相机"
     )
+
+
+@pytest.mark.asyncio
+async def test_feed_cap_evicts_zombie_before_healthy_channel():
+    """上限收敛的淘汰顺序：先淘汰「本轮不通过严格门」的僵尸，再按字典序。
+
+    只按字典序排会把优先级反转。保留集刻意放宽了 LAN 门（正是要救「云端在线但
+    lan_online 偶发假 False」那类），代价是已连集里可能留着字典序靠前的僵尸通道
+    （云端在线、LAN 已探不到、原生也没连上）。它会把字典序靠后、刚刚真连上的健康
+    通道挤掉：日志每轮刷一条 over feed cap，那一路投喂反复中断，而占着名额的僵尸
+    一帧不出。
+
+    构造：050 是僵尸（lan_online=False），100~400 健康，上限 4 ⇒ 已连 5 路。
+    """
+    cams = {
+        "050": _cam("050", lan_online=False),
+        "100": _cam("100", lan_online=True),
+        "200": _cam("200", lan_online=True),
+        "300": _cam("300", lan_online=True),
+        "400": _cam("400", lan_online=True),
+    }
+    adapter = _make_adapter(cams)
+    # 让 050 已经在已连集里（上一轮 LAN 可达时连上的，之后探测掉了但保留集保住它）。
+    cams["050"].lan_online = True
+    await adapter.sync_devices(cams)
+    cams["050"].lan_online = False
+
+    await adapter.sync_devices(cams)
+
+    connected = set(adapter.get_connected_devices())
+    assert len(connected) == MAX_ENABLED_CAMERAS
+    assert "050" not in connected, f"僵尸应优先被淘汰，实际={sorted(connected)}"
+    assert "400" in connected, "健康通道不该被字典序靠前的僵尸挤掉"
+
+
+@pytest.mark.asyncio
+async def test_feed_cap_falls_back_to_did_order_when_discover_fails():
+    """严格集取不到时退回纯字典序（与改动前行为一致），不能因此放弃收敛。"""
+    cams = {f"{i}00": _cam(f"{i}00", lan_online=True) for i in range(1, 6)}
+    adapter = _make_adapter(cams)
+    await adapter.sync_devices(cams)
+    # 手工塞满 5 路，再让 discover 抛错。
+    from miloco.perception.collect.camera_adapter import _CameraDeviceState
+
+    adapter._devices["500"] = _CameraDeviceState(did="500")
+    assert len(adapter._devices) == 5
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("cache not ready")
+
+    adapter.discover_devices = _boom  # type: ignore[assignment]
+    await adapter._converge_feed_cap()
+
+    connected = set(adapter.get_connected_devices())
+    assert len(connected) == MAX_ENABLED_CAMERAS
+    assert "500" not in connected, "字典序最末的应被淘汰"
+
+
+@pytest.mark.asyncio
+async def test_ondemand_refresh_not_triggered_for_unconnectable_camera():
+    """LAN 不可达、原生也没连上的相机不得让补建判据永真。
+
+    refresh_cameras 建 manager 用的是同一道严格门 ⇒ 它压根不会为这台建 manager ⇒
+    触发 refresh 是必然空转。而 missing 恒非空 + 节流窗(10s) ≈ sync 周期(10s) ⇒
+    每轮都打一次云端 get_cameras_async。
+    """
+    cams = {
+        "cam1": _cam("cam1", lan_online=True),
+        "dead": _cam("dead", lan_online=False),  # 云端在线、LAN 探不到、没连上
+    }
+    adapter = _make_adapter(cams)
+    proxy = adapter._miot_proxy
+    proxy.refresh_cameras = AsyncMock(return_value=cams)
+
+    await adapter.sync_devices()
+    proxy.refresh_cameras.reset_mock()
+    adapter._last_ondemand_refresh_ms -= 60_000
+
+    await adapter.sync_devices()
+
+    proxy.refresh_cameras.assert_not_awaited()

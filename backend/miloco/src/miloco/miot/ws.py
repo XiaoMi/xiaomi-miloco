@@ -336,13 +336,17 @@ class MIoTVideoStreamManager:
 
         ``MiotProxy.reconnect_camera`` 救静默相机时会 destroy 旧 native 实例
         （``mi_camera_free``），旧实例上的解码回调随之全部消失、新实例回调表是空的，
-        本层持有的 ``_camera_reg_id`` 变成指向已释放实例的死 id。三个解码订阅消费方
-        里只有感知适配器有兜底（同一轮 sync 的 connect_device 会补注册），另两个没有：
+        本层持有的 ``_camera_reg_id`` 变成指向已释放实例的死 id。**四个**向原生实例注册
+        流的消费方里只有感知适配器有兜底（同一轮 sync 的 connect_device 会补注册），
+        另三个没有：
 
         - watch 直播：要等 15s 失流看门狗踢前端重连才恢复，住户看到 15~45s 冻结，
           而这恰好发生在相机出问题、住户正盯着它的时刻；
         - ``record_clip``：录像器只会等到 ``recorder.wait`` 超时，API 返回 504，
-          且这条路径没有客户端看门狗兜底。
+          且这条路径没有客户端看门狗兜底；
+        - ``/ws/audio_stream`` 的原始音频：由 :class:`MIoTAudioStreamManager` 单独维护
+          一张连接表，不在本方法遍历的 ``_camera_reg_id`` 里 —— 见那边的
+          ``resubscribe_camera``。
 
         所以由重建方（``camera_adapter._reconnect_stalled``）显式调用本方法补注册。
 
@@ -805,6 +809,56 @@ class MIoTAudioStreamManager:
             connection_id,
         )
         return connection_id
+
+    async def resubscribe_camera(self, camera_id: str) -> None:
+        """native 会话重建后，把该相机仍有 WS 订阅方的通道重新注册到新实例上。
+
+        与视频侧同因（旧实例 ``mi_camera_free`` 后回调全部消失），但音频侧更隐蔽：
+        「要不要向原生注册」的判据是**连接表空不空**（见 ``new_connection``），重建期间
+        客户端还挂着 ⇒ 表非空 ⇒ 连后来新接进来的订阅方也不会重新触发注册。于是这条
+        通道上的音频**永久静音**，直到该通道最后一个连接断开（``close_connection`` 才
+        ``stop_audio_stream`` 并摘掉 tag）才会重新开一路。视频有 15s 失流看门狗、感知有
+        同轮 sync，音频两个都没有：首帧看门狗只挂在视频路由上，音频路由没有看门狗，
+        服务端也不会察觉。
+
+        音频侧没有 reg_id（``register_raw_audio_async`` 用 ``raw_audio.{channel}``
+        单槽、``multi_reg=False``），所以重新注册就是覆盖，既不会泄漏也没有视频侧那种
+        「拿死 id 误删别人回调」的风险；旧注册随旧实例一起释放，不调 ``stop_audio_stream``。
+
+        必须清 ``_camera_init_done``：codec 是 ``CameraVisionHandler`` 上按通道缓存的
+        （``_detecting_wrapper`` 在首帧探测），重建后 handler 是全新的、缓存为 None。
+        不清的话中途接入的客户端会拿到 ``codec: null`` 的 init。代价是已连客户端会在
+        重建后的首帧再收到一条 init —— 原生会话确实换了、codec 也重新探测过，重发是
+        合理的。
+
+        本仓当前没有前端连 ``/ws/audio_stream``（只有 watch.html 连视频），所以住户此刻
+        观察不到这条故障；但它是带鉴权、正常注册在 FastAPI 上的对外路由。
+        """
+        for camera_tag in list(self._camera_connect_map):
+            did, _, channel_str = camera_tag.rpartition(".")
+            if did != camera_id or not self._camera_connect_map[camera_tag]:
+                # 连接表为空：要么是 new_connection 正卡在注册那个 await 上（它自己会
+                # 注册到新实例），要么这一路已经没人听，都不该白开一路流。
+                continue
+            try:
+                channel = int(channel_str)
+            except ValueError:  # pragma: no cover - camera_tag 恒为 did.channel
+                continue
+            try:
+                await manager.miot_service.start_audio_stream(
+                    camera_id=did,
+                    channel=channel,
+                    callback=self.__audio_stream_callback,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "Audio resubscribe after rebuild failed, %s: %s", camera_tag, e
+                )
+                continue
+            self._camera_init_done.discard(camera_tag)
+            logger.warning(
+                "Resubscribed audio stream after native rebuild, %s", camera_tag
+            )
 
     async def close_connection(
         self, user_name: str, token_hash: str, camera_id: str, channel: int, cid: str

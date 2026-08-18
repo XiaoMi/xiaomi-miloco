@@ -1,13 +1,16 @@
 """``MIoTVideoStreamManager.resubscribe_camera``：native 会话重建后补注册解码订阅。
 
 静默自愈会 destroy 整个 native 实例（``mi_camera_free``），旧实例上的解码回调随之
-全部消失、新实例的回调表是空的。三个解码订阅消费方里只有感知适配器有兜底（同一轮
-sync 的 connect_device 会补注册），watch 直播与 ``record_clip`` 没有：
+全部消失、新实例的回调表是空的。**四个**向原生实例注册流的消费方里只有感知适配器
+有兜底（同一轮 sync 的 connect_device 会补注册），另三个没有：
 
 - watch 直播：``_camera_reg_id`` 还持有旧实例上的死 id，要等 15s 失流看门狗踢前端
   重连才恢复（住户视角 15~45s 冻结，而这恰好发生在住户正盯着这台相机的时刻）；
 - ``record_clip``：录像器只会等到 ``recorder.wait`` 超时、API 返回 504，这条路径
-  没有客户端看门狗兜底。
+  没有客户端看门狗兜底；
+- ``/ws/audio_stream`` 的原始音频：``MIoTAudioStreamManager`` 另有一张连接表，且它
+  「要不要注册」的判据是**连接表空不空** ⇒ 重建期间客户端还挂着、表非空 ⇒ 连新接进来
+  的订阅方也不会重新触发注册 ⇒ 该通道永久静音，且没有任何看门狗会察觉。
 
 本测试 mock 掉 SDK（``manager.miot_service``），只验补注册的控制流与边界。
 """
@@ -176,3 +179,93 @@ async def test_encoder_and_keyframe_state_survive_rebuild(monkeypatch):
 
     assert mgr._camera_encoder["cam1.0"] is enc
     assert "cam1.0" in mgr._camera_seen_keyframe
+
+
+# ── 音频侧：第四个消费方，重建后同样要补注册 ──────────────────────────────
+
+
+def _audio_mgr(camera_tag: str) -> ws_mod.MIoTAudioStreamManager:
+    mgr = ws_mod.MIoTAudioStreamManager()
+    mgr._camera_connect_map[camera_tag] = {"u": {"c0": AsyncMock()}}
+    mgr._camera_init_done.add(camera_tag)
+    return mgr
+
+
+def _patch_audio_sdk(monkeypatch, start: AsyncMock) -> None:
+    monkeypatch.setattr(
+        ws_mod,
+        "manager",
+        SimpleNamespace(miot_service=SimpleNamespace(start_audio_stream=start)),
+    )
+
+
+async def test_audio_channel_is_resubscribed_after_rebuild(monkeypatch):
+    """音频侧「要不要注册」的判据是连接表空不空，重建期间客户端还挂着 ⇒ 表非空 ⇒
+    连新接进来的订阅方也不会重新触发注册，这条通道会永久静音直到最后一个连接断开。
+
+    视频有 15s 失流看门狗、感知有同轮 sync，音频两个都没有（首帧看门狗只挂视频路由）。
+    """
+    start = AsyncMock()
+    _patch_audio_sdk(monkeypatch, start)
+    mgr = _audio_mgr("cam1.0")
+
+    await mgr.resubscribe_camera("cam1")
+
+    start.assert_awaited_once()
+    assert start.await_args.kwargs["camera_id"] == "cam1"
+    assert start.await_args.kwargs["channel"] == 0
+
+
+async def test_audio_init_flag_cleared_so_codec_is_redetected(monkeypatch):
+    """必须清 _camera_init_done：codec 缓存在 handler 上，重建后是全新的、值为 None。
+
+    不清的话中途接入的客户端会拿到 codec: null 的 init（new_connection 里
+    `if camera_tag in self._camera_init_done` 就直接发了）。
+    """
+    _patch_audio_sdk(monkeypatch, AsyncMock())
+    mgr = _audio_mgr("cam1.0")
+
+    await mgr.resubscribe_camera("cam1")
+
+    assert "cam1.0" not in mgr._camera_init_done
+
+
+async def test_audio_channel_without_connections_is_skipped(monkeypatch):
+    """连接表为空的通道不补注册——没人听就别白开一路流、白占并发名额。"""
+    start = AsyncMock()
+    _patch_audio_sdk(monkeypatch, start)
+    mgr = ws_mod.MIoTAudioStreamManager()
+    mgr._camera_connect_map["cam1.0"] = {}
+
+    await mgr.resubscribe_camera("cam1")
+
+    start.assert_not_awaited()
+
+
+async def test_audio_other_cameras_untouched(monkeypatch):
+    """只重订本次重建那台。"""
+    start = AsyncMock()
+    _patch_audio_sdk(monkeypatch, start)
+    mgr = _audio_mgr("cam1.0")
+    mgr._camera_connect_map["cam2.0"] = {"u": {"c0": AsyncMock()}}
+    mgr._camera_init_done.add("cam2.0")
+
+    await mgr.resubscribe_camera("cam1")
+
+    assert start.await_count == 1
+    assert "cam2.0" in mgr._camera_init_done
+
+
+async def test_audio_failure_keeps_going_and_keeps_init_flag(monkeypatch):
+    """某一路注册失败不中断其余通道；失败那路不清 init 标记（它还是旧状态）。"""
+    start = AsyncMock(side_effect=[RuntimeError("boom"), None])
+    _patch_audio_sdk(monkeypatch, start)
+    mgr = _audio_mgr("dual.0")
+    mgr._camera_connect_map["dual.1"] = {"u": {"c0": AsyncMock()}}
+    mgr._camera_init_done.add("dual.1")
+
+    await mgr.resubscribe_camera("dual")
+
+    assert start.await_count == 2
+    assert "dual.0" in mgr._camera_init_done
+    assert "dual.1" not in mgr._camera_init_done

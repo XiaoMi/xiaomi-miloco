@@ -31,19 +31,39 @@ def _adapter_with_connected(did: str) -> tuple[CameraDeviceAdapter, MagicMock]:
     return adapter, proxy
 
 
-async def test_reconnect_stalled_resubscribes_live_and_record_streams(monkeypatch):
+async def test_reconnect_stalled_resubscribes_all_ws_consumers(monkeypatch):
+    """视频（含录像）与音频两个 manager 都要被通知——音频是第四个消费方，最隐蔽。"""
     import miloco.miot.ws as ws_mod
 
     adapter, proxy = _adapter_with_connected("cam1")
-    resubscribe = AsyncMock()
-    monkeypatch.setattr(
-        ws_mod.miot_video_stream_manager, "resubscribe_camera", resubscribe
-    )
+    video = AsyncMock()
+    audio = AsyncMock()
+    monkeypatch.setattr(ws_mod.miot_video_stream_manager, "resubscribe_camera", video)
+    monkeypatch.setattr(ws_mod.miot_audio_stream_manager, "resubscribe_camera", audio)
 
     await adapter._reconnect_stalled("cam1")
 
     proxy.reconnect_camera.assert_awaited_once_with("cam1")
-    resubscribe.assert_awaited_once_with("cam1")
+    video.assert_awaited_once_with("cam1")
+    audio.assert_awaited_once_with("cam1")
+
+
+async def test_audio_resubscribe_runs_even_if_video_one_raises(monkeypatch):
+    """两条各自独立 try：视频那条炸了不该把音频一起拖没。"""
+    import miloco.miot.ws as ws_mod
+
+    adapter, _ = _adapter_with_connected("cam1")
+    audio = AsyncMock()
+    monkeypatch.setattr(
+        ws_mod.miot_video_stream_manager,
+        "resubscribe_camera",
+        AsyncMock(side_effect=RuntimeError("boom")),
+    )
+    monkeypatch.setattr(ws_mod.miot_audio_stream_manager, "resubscribe_camera", audio)
+
+    await adapter._reconnect_stalled("cam1")
+
+    audio.assert_awaited_once_with("cam1")
 
 
 async def test_resubscribe_is_skipped_when_rebuild_failed(monkeypatch):
@@ -52,11 +72,12 @@ async def test_resubscribe_is_skipped_when_rebuild_failed(monkeypatch):
 
     adapter, proxy = _adapter_with_connected("cam1")
     proxy.reconnect_camera = AsyncMock(side_effect=RuntimeError("boom"))
-    resubscribe = AsyncMock()
-    monkeypatch.setattr(
-        ws_mod.miot_video_stream_manager, "resubscribe_camera", resubscribe
-    )
+    video = AsyncMock()
+    audio = AsyncMock()
+    monkeypatch.setattr(ws_mod.miot_video_stream_manager, "resubscribe_camera", video)
+    monkeypatch.setattr(ws_mod.miot_audio_stream_manager, "resubscribe_camera", audio)
 
     await adapter._reconnect_stalled("cam1")
 
-    resubscribe.assert_not_awaited()
+    video.assert_not_awaited()
+    audio.assert_not_awaited()
