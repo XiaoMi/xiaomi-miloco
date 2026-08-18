@@ -681,12 +681,33 @@ class MiotProxy:
     ) -> None:
         # 反向同步给 MIoTLan：连上的相机可达性已证实，跳过探测；
         # 全部连上时扫描降频到 45s（不停表，见 lan.py set_camera_connected）。
-        self._miot_client.set_camera_connected(did, status == MIoTCameraStatus.CONNECTED)
+        # keep_alive_on_stop=False：这一路的 False 是「原生报连接失败」而非「我们主动
+        # 关流」。lan 层默认会给主动关流一个 100s 保活宽限窗防瞬时闪 offline，但拿
+        # DISCONNECTED/ERROR——恰恰是「连不上」的证据——去续期可达性方向是反的：相机
+        # 被拔电后原生每 3s→6s→12s… 重试一次，每次都短于 100s，窗口被连续续期，接口
+        # 会在设备物理消失后仍报 lan_reachable=true 好几分钟。这里交给真实探测去判。
+        # 销毁路径（reconnect_camera / refresh_cameras）保持默认 True，那才是主动关流。
+        self._miot_client.set_camera_connected(
+            did,
+            status == MIoTCameraStatus.CONNECTED,
+            keep_alive_on_stop=False,
+        )
         # 记录"进入连接中"的起始时间，供 stream_nat_blocked 判断是否卡住太久。
-        if status in (MIoTCameraStatus.CONNECTING, MIoTCameraStatus.RE_CONNECTING):
-            self._camera_connect_since.setdefault(did, time.monotonic())
-        else:
+        #
+        # 判据是「只有真正连上才算这一轮尝试结束」，而**不是**「只有 CONNECTING/
+        # RE_CONNECTING 才计时」：原生实例是 enable_reconnect=True 起的，握手失败会
+        # 收敛成 DISCONNECTED 再按 3s→6s→…→1200s 退避自动重试（camera.py
+        # __on_status_changed / __get_try_start_timeout）。底层的 DISCONNECTED 语义是
+        # 「这一轮握手失败、马上还要再试」，不是「不再尝试了」。若在 DISCONNECTED 上
+        # pop，每轮失败重试都把 60s 计时器归零，已计时长恒不超过单次握手超时（实测
+        # ~35s）⇒ stream_nat_blocked 永久为假 ⇒ 主线 6 整条跨 NAT 诊断链路（接口
+        # stream_error、上下区卡片提示、四份文案、看门狗短路）在这种形态下全是死代码。
+        # 不会误报：判据还要求 cross_subnet 且 lan_online 为真，相机真没了探测会先停止
+        # 响应、保活窗超时后 lan_online 自己翻假。管理器销毁走那两处显式 pop。
+        if status == MIoTCameraStatus.CONNECTED:
             self._camera_connect_since.pop(did, None)
+        else:
+            self._camera_connect_since.setdefault(did, time.monotonic())
 
     def stream_nat_blocked(self, did: str) -> bool:
         """跨网段 + LAN 探测可达 + 拉流卡在连接中超过阈值 → 判定为 NAT 类型限制拉流。

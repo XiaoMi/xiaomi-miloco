@@ -421,3 +421,64 @@ def test_devices_outside_enabled_set_keep_being_probed_while_throttled():
     assert mock_probe.call_count == 2
     assert miot_lan._internal_loop.call_later.call_count == 2
     assert miot_lan._scan_timer is not None
+
+
+# ---------------------------------------------------------------------------
+# keep_alive_on_stop: 别拿「连不上」去续期「可达性」
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_native_failure_does_not_rearm_keepalive_grace():
+    """keep_alive_on_stop=False → 只移出已连集并恢复扫描，不给宽限窗续期。
+
+    调用方（相机状态回调）用它表示「原生报连接失败」而非「我们主动关流」。拿失败
+    证据去证明可达方向是反的，而且原生带退避自动重连（3s→6s→12s…，每次都短于
+    _KA_TIMEOUT=100s），每次失败都续期等于把宽限窗无限拉长——相机被拔电后接口会
+    连续几分钟仍报 lan_reachable=true，而这个字段的语义本是「100s 收不到探测响应
+    就翻离线」。
+    """
+    miot_lan = _make_mock_lan()
+    device = MagicMock()
+    miot_lan._lan_devices = {"did1": device}
+    miot_lan._connected_dids = {"did1"}
+
+    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan") as mock_resume:
+        miot_lan._MIoTLan__set_camera_connected(
+            "did1", False, keep_alive_on_stop=False
+        )
+
+    device.mark_reachable.assert_not_called()
+    assert "did1" not in miot_lan._connected_dids
+    mock_resume.assert_called_once()
+
+
+@pytest.mark.unit
+def test_deliberate_stop_still_rearms_keepalive_grace():
+    """默认（我们主动关流）仍要续期宽限窗，防跨网段相机在关流瞬间闪 offline。
+
+    跨网段相机在 connected 期间被单播探测跳过，没有任何东西刷新它的 keep-alive，
+    所以主动关流那一瞬必须先兜住在线态、由恢复后的扫描去复核。
+    """
+    miot_lan = _make_mock_lan()
+    device = MagicMock()
+    miot_lan._lan_devices = {"did1": device}
+    miot_lan._connected_dids = {"did1"}
+
+    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+        miot_lan._MIoTLan__set_camera_connected("did1", False)
+
+    device.mark_reachable.assert_called_once_with(start_grace=True)
+
+
+@pytest.mark.unit
+def test_connected_path_ignores_keep_alive_on_stop():
+    """connected=True 时该参数无意义：连上就是活性证明，取消离线定时器。"""
+    miot_lan = _make_mock_lan()
+    device = MagicMock()
+    miot_lan._lan_devices = {"did1": device}
+
+    miot_lan._MIoTLan__set_camera_connected("did1", True, keep_alive_on_stop=False)
+
+    device.mark_reachable.assert_called_once_with(start_grace=False)
+    assert "did1" in miot_lan._connected_dids

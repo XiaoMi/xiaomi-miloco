@@ -15,7 +15,11 @@
 
 反向误报不成立：CONNECTING 是发起建连时立刻发出的（与注册只隔几个 await），而
 CONNECTED 要等十几秒的 MTP 握手，落进这个窗口的只可能是 CONNECTING；真连上后
-CONNECTED 分支会把时间戳 pop 掉——本文件最后一条用例钉住这一点。
+CONNECTED 分支会把时间戳 pop 掉（见 test_connected_status_clears_seeded_timestamp）。
+
+另一半是「谁才算这一轮尝试结束」：只有 CONNECTED（或管理器被销毁）才 pop，
+DISCONNECTED/ERROR 一律保留最早的起点——原生带退避自动重连，那两个状态的语义是
+「这一轮握手失败、马上还要再试」，在它们上面 pop 会让计时器每轮归零、判据永久为假。
 """
 
 from __future__ import annotations
@@ -130,3 +134,76 @@ async def test_reconnect_camera_reseeds_connect_since():
     since = proxy._camera_connect_since.get("cam1")
     assert since is not None
     assert since != 1.0, "旧时间戳必须被换成本次重建的时刻"
+
+
+# ── 失败重试不得把 60s 计时器归零 ──────────────────────────────────────────
+
+
+async def test_disconnected_retry_does_not_reset_timer():
+    """CONNECTING → DISCONNECTED → CONNECTING 三连后，起点仍是**第一次**的时刻。
+
+    原生实例是 ``enable_reconnect=True`` 起的：握手失败会收敛成 DISCONNECTED，再按
+    3s→6s→12s…→1200s 退避自动重试（``camera.py`` ``__on_status_changed`` /
+    ``__get_try_start_timeout``）。底层的 DISCONNECTED 语义是「这一轮握手失败、马上还
+    要再试」，不是「不再尝试了」。若上层在 DISCONNECTED 上 pop 起点，每轮重试都把
+    计时器归零，已计时长恒不超过单次握手超时（实测 ~35s）⇒ ``stream_nat_blocked``
+    永久为假 ⇒ 主线 6 整条跨 NAT 诊断链路全是死代码。
+    """
+    proxy = _make_proxy({"cam1": _cam("cam1")})
+    await proxy.refresh_cameras()
+    first = proxy._camera_connect_since["cam1"]
+
+    await proxy._on_camera_status_changed("cam1", MIoTCameraStatus.CONNECTING)
+    await proxy._on_camera_status_changed("cam1", MIoTCameraStatus.DISCONNECTED)
+    await proxy._on_camera_status_changed("cam1", MIoTCameraStatus.CONNECTING)
+
+    assert proxy._camera_connect_since.get("cam1") == first, "失败重试不得重置起点"
+
+
+async def test_nat_blocked_survives_a_full_retry_cycle():
+    """一台反复「握手 35s 超时 → 退避 3s → 再试」的跨网段相机，最终必须被判出。
+
+    这是上一条的行为面：判据要能撑过整轮重试，而不是每轮从零开始。
+    """
+    proxy = _make_proxy({"cam1": _cam("cam1")})
+    await proxy.refresh_cameras()
+    # 把起点推到 61s 前，模拟已经卡了一整轮多。
+    proxy._camera_connect_since["cam1"] = (
+        time.monotonic() - proxy._STREAM_NAT_TIMEOUT - 1
+    )
+
+    # 中间穿插一轮失败重试。
+    await proxy._on_camera_status_changed("cam1", MIoTCameraStatus.DISCONNECTED)
+    await proxy._on_camera_status_changed("cam1", MIoTCameraStatus.RE_CONNECTING)
+
+    assert proxy.stream_nat_blocked("cam1") is True
+
+
+async def test_native_failure_does_not_extend_keepalive_grace():
+    """原生报非 CONNECTED 时，反向同步给 lan 层要带 keep_alive_on_stop=False。
+
+    否则「连不上」这件事会被用去续期「可达性」100s 宽限窗，而原生每 3s~96s 重试一次、
+    每次都短于宽限窗 ⇒ 窗口被连续续期 ⇒ 相机被拔电后接口仍连续几分钟报
+    lan_reachable=true，启停接口的可达硬门照样放行。
+    """
+    proxy = _make_proxy({"cam1": _cam("cam1")})
+
+    await proxy._on_camera_status_changed("cam1", MIoTCameraStatus.DISCONNECTED)
+
+    kwargs = proxy._miot_client.set_camera_connected.call_args.kwargs
+    assert kwargs.get("keep_alive_on_stop") is False
+
+
+async def test_deliberate_teardown_keeps_default_grace():
+    """我们自己主动关流（重建路径）保持默认续期，防瞬时闪 offline。"""
+    proxy = _make_proxy({"cam1": _cam("cam1")})
+    manager = MagicMock()
+    manager.destroy = AsyncMock()
+    proxy._camera_info_dict = {"cam1": _cam("cam1")}
+    proxy._camera_img_managers = {"cam1": manager}
+
+    await proxy.reconnect_camera("cam1")
+
+    call = proxy._miot_client.set_camera_connected.call_args
+    assert call.args == ("cam1", False)
+    assert "keep_alive_on_stop" not in call.kwargs

@@ -771,15 +771,25 @@ class MIoTClient:
         """
         return await self._camera_client.unregister_status_changed_async(did=did)
 
-    def set_camera_connected(self, did: str, connected: bool) -> None:
+    def set_camera_connected(
+        self, did: str, connected: bool, keep_alive_on_stop: bool = True
+    ) -> None:
         """Tell the LAN prober whether a camera's native stream is connected.
 
         Connected cameras are proven reachable, so MIoTLan skips probing
         them (and throttles the scan interval down to
         ``OT_PROBE_INTERVAL_MAX`` once every *enabled* camera is connected —
         it never stops scanning). Call on every camera_status transition.
+
+        ``keep_alive_on_stop`` only matters when ``connected`` is False: True
+        (default) means "we stopped the stream ourselves" and the device keeps a
+        100s keep-alive grace window so it does not blink offline; False means
+        "the native layer reported a failed/lost connection" — that is evidence
+        of *un*reachability, so leave the verdict to the real probes.
         """
-        self._lan_client.set_camera_connected(did, connected)
+        self._lan_client.set_camera_connected(
+            did, connected, keep_alive_on_stop=keep_alive_on_stop
+        )
 
     def set_camera_dids(self, dids: Set[str]) -> None:
         """Tell the LAN prober the current *scoped* (active) camera set.

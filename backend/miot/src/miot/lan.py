@@ -467,7 +467,9 @@ class MIoTLan:
         self._camera_dids = dids
         self.__maybe_resume_scan()
 
-    def set_camera_connected(self, did: str, connected: bool) -> None:
+    def set_camera_connected(
+        self, did: str, connected: bool, keep_alive_on_stop: bool = True
+    ) -> None:
         """Mark a camera did as connected (native miss stream up) or not.
 
         A connected camera is proven reachable, so ``_probe_unicast_targets``
@@ -482,14 +484,16 @@ class MIoTLan:
             return
         try:
             self._internal_loop.call_soon_threadsafe(
-                self.__set_camera_connected, did, connected
+                self.__set_camera_connected, did, connected, keep_alive_on_stop
             )
         except RuntimeError as e:
             _LOGGER.debug(
                 "set_camera_connected skipped: internal loop unavailable: %s", e
             )
 
-    def __set_camera_connected(self, did: str, connected: bool) -> None:
+    def __set_camera_connected(
+        self, did: str, connected: bool, keep_alive_on_stop: bool = True
+    ) -> None:
         if connected:
             self._connected_dids.add(did)
             # 拉流建立即可达性证明:保持在线、取消离线定时器,避免跨网段相机在
@@ -501,8 +505,14 @@ class MIoTLan:
             self._connected_dids.discard(did)
             # 主动关流不代表设备不可达——它刚刚还在拉流。标为本地可达并给一个
             # keep-alive 宽限窗,避免瞬时闪 offline;恢复扫描后由真实探测复核。
+            #
+            # keep_alive_on_stop=False 时**不续期**:调用方明确表示这次是「原生报连接
+            # 失败」而非「我们主动关流」。拿失败证据去证明可达方向是反的,而且原生带
+            # 退避自动重连(3s→6s→12s…,每次都短于 100s),每次失败都续期等于把宽限窗
+            # 无限拉长——相机被拔电后接口会连续几分钟仍报 lan_reachable=true,而这个
+            # 字段的语义本是「100s 收不到探测响应就翻离线」。
             device = self._lan_devices.get(did)
-            if device is not None:
+            if device is not None and keep_alive_on_stop:
                 device.mark_reachable(start_grace=True)
             self.__maybe_resume_scan()
 
