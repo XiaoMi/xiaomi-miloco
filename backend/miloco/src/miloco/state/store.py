@@ -39,7 +39,8 @@ PENDING_WARN_THRESHOLD = 1000
 # 正是想要的语义——外部来源的写入不算级联。
 _cascade_depth: ContextVar[int] = ContextVar("miloco_state_cascade_depth", default=0)
 
-Subscriber = tuple[tuple[str, ...], Callable[[Change], None]]
+# 第一项是订阅序号：投递时用它挡掉「这批事件提交之后才订阅」的人。
+Subscriber = tuple[int, tuple[str, ...], Callable[[Change], None]]
 
 
 @dataclass(slots=True)
@@ -272,6 +273,8 @@ class StateStore:
         self._lock = threading.Lock()
         self._root: dict[str, Node] = {}
         self._subs: tuple[Subscriber, ...] = ()
+        # 订阅序号单调递增，只用来比先后，不复用不回收
+        self._sub_seq = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         # 每次真实的启停切换加一，幂等调用不加。停止前排队的 _dispatch 靠它作废。
         self._generation = 0
@@ -505,9 +508,18 @@ class StateStore:
     def subscribe(
         self, pattern: str, callback: Callable[[Change], None]
     ) -> Callable[[], None]:
-        """订阅匹配 pattern 的叶子变更，返回退订函数。可以在 `start()` 之前调用。"""
-        subscriber: Subscriber = (parse_pattern(pattern), callback)
+        """订阅匹配 pattern 的叶子变更，返回退订函数。可以在 `start()` 之前调用。
+
+        只收订阅之后提交的变更。投递是异步的，所以「提交 → 订阅 → 事件循环转一圈」这个顺序
+        真实存在，而按边沿判定的消费方会为一个它上线前就发生完的跳变触发一次。
+
+        **退订不保证返回之后不再被回调**：`_dispatch` 在锁内取订阅表快照、随后在锁外逐个回调，
+        退订正好落在这两步之间时这一批仍会投给它。退订后立刻拆自己的状态就可能被撞上。
+        """
+        parsed = parse_pattern(pattern)
         with self._lock:
+            self._sub_seq += 1
+            subscriber: Subscriber = (self._sub_seq, parsed, callback)
             self._subs = self._subs + (subscriber,)
 
         def unsubscribe() -> None:
@@ -557,7 +569,7 @@ class StateStore:
             return
         try:
             self._loop.call_soon_threadsafe(
-                self._dispatch, changes, self._generation, depth
+                self._dispatch, changes, self._generation, depth, self._sub_seq
             )
         except RuntimeError:
             self._drop(changes)
@@ -578,7 +590,15 @@ class StateStore:
             self._warned_not_started = True
             logger.warning("StateStore is not started; dropping state changes")
 
-    def _dispatch(self, changes: list[Change], generation: int, depth: int) -> None:
+    def _dispatch(
+        self, changes: list[Change], generation: int, depth: int, sub_seq: int
+    ) -> None:
+        """投递给「提交时已订阅、且此刻仍订阅」的人。
+
+        两端各由一个东西把住：`sub_seq` 是提交那一刻的订阅序号，挡掉之后才订阅的；订阅表现读
+        现取，挡掉已经退订的。少任何一端都会漏一类：只读现表会把订阅前的变更投出去，只看
+        序号会让退订失效。
+        """
         with self._lock:
             self._pending -= len(changes)
             if generation != self._generation:
@@ -589,7 +609,9 @@ class StateStore:
         paths = [tuple(change.path.split("/")) for change in changes]
         token = _cascade_depth.set(depth)
         try:
-            for pattern, callback in subs:
+            for seq, pattern, callback in subs:
+                if seq > sub_seq:
+                    continue
                 for segments, change in zip(paths, changes):
                     if not match_pattern(pattern, segments):
                         continue

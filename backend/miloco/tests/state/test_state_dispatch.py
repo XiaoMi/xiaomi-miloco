@@ -358,3 +358,97 @@ async def test_not_started_warning_repeats_after_a_restart(caplog):
         store.set("a/c", 1, source="t")
 
     assert "not started" in caplog.text
+
+
+async def test_change_committed_before_subscribe_is_not_delivered():
+    """订阅只收订阅之后发生的变更。
+
+    投递是异步的，所以「提交 → 订阅 → 事件循环转一圈」这个顺序真实存在，而且正好落在启动
+    时段（对齐批量写入 + 消费方接线同一轮）。按边沿判定的消费方会为一个它上线前就发生完的
+    跳变触发一次。
+    """
+    store = StateStore()
+    store.start()
+    store.set("a/b", 1, source="t")
+
+    seen: list = []
+    store.subscribe("a/**", seen.append)
+    await settle()
+
+    assert seen == []
+
+
+async def test_change_committed_after_subscribe_is_delivered():
+    store = StateStore()
+    store.start()
+    seen: list = []
+    store.subscribe("a/**", seen.append)
+
+    store.set("a/b", 1, source="t")
+    await settle()
+
+    assert [change.path for change in seen] == ["a/b"]
+
+
+async def test_subscriber_added_inside_a_callback_misses_the_current_batch():
+    """回调里新订阅的一方不该收到正在投递的这一批 —— 那批在它订阅之前就提交了。"""
+    store = StateStore()
+    store.start()
+    late: list = []
+
+    def add_late_subscriber(_change) -> None:
+        store.subscribe("a/**", late.append)
+
+    store.subscribe("a/**", add_late_subscriber)
+    store.set("a/b", 1, source="t")
+    await settle()
+
+    assert late == []
+    # 它订阅之后的变更照收
+    store.set("a/b", 2, source="t")
+    await settle()
+    assert [change.path for change in late] == ["a/b"]
+
+
+async def test_unsubscribe_before_delivery_cancels_it():
+    """退订能拦住已排队的通知：订阅表是投递时现读的，不是提交时定死的。
+
+    加上「只收订阅之后的变更」那条之后，两端就都收紧了：提交时的订阅序号挡掉后来者，
+    现读订阅表挡掉已退订的。
+    """
+    store = StateStore()
+    store.start()
+    seen: list = []
+    unsubscribe = store.subscribe("a/**", seen.append)
+
+    store.set("a/b", 1, source="t")
+    unsubscribe()
+    await settle()
+
+    assert seen == []
+
+
+async def test_unsubscribe_inside_a_callback_does_not_stop_the_current_batch():
+    """唯一剩下的窗口：`_dispatch` 已经取过订阅表快照，这一批还是会投给它。
+
+    消费方在退订之后立刻拆自己的状态，就可能被这最后一次回调撞上 —— 这是 `subscribe`
+    文档里那条警告的**唯一**成立场景。
+    """
+    store = StateStore()
+    store.start()
+    seen: list = []
+
+    def drop_the_other(_change) -> None:
+        unsubscribe_other()
+
+    store.subscribe("a/**", drop_the_other)
+    unsubscribe_other = store.subscribe("a/**", seen.append)
+
+    store.set("a/b", 1, source="t")
+    await settle()
+
+    # 第一个回调里已经把第二个退订了，但这一批的快照里还有它
+    assert len(seen) == 1
+    store.set("a/b", 2, source="t")
+    await settle()
+    assert len(seen) == 1
