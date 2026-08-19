@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 
 import pytest
@@ -335,3 +336,25 @@ async def test_subscriptions_survive_restart():
     await settle()
 
     assert len(seen) == 1
+
+
+async def test_stats_tracks_dropped_events():
+    store = StateStore()
+    store.set("a/b", 1, source="t")
+
+    assert store.stats()["dropped"] == 1
+    assert store.stats()["pending"] == 0
+
+
+async def test_not_started_warning_repeats_after_a_restart(caplog):
+    """告警标志不复位的话，start / stop / start 之后再丢事件就彻底没声了。"""
+    store = StateStore()
+    store.set("a/b", 1, source="t")
+    store.start()
+    store.stop()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="miloco.state.store"):
+        store.set("a/c", 1, source="t")
+
+    assert "not started" in caplog.text

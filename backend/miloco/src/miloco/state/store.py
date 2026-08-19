@@ -475,6 +475,20 @@ class StateStore:
                     )
         return result
 
+    def stats(self) -> dict[str, int]:
+        """三道防线的计数。日志只报第一条，次数只能从这里读。
+
+        五个数一起取才是同一时刻的样子，所以加锁；锁内只构造一个小 dict。
+        """
+        with self._lock:
+            return {
+                "leaves": self._leaf_count,
+                "pending": self._pending,
+                "dropped": self._dropped,
+                "discarded": self._discarded,
+                "shape_flips": self._shape_flips,
+            }
+
     def _locate(self, segments: tuple[str, ...]) -> Node | None:
         node: Node = self._root
         for segment in segments:
@@ -515,6 +529,9 @@ class StateStore:
                 return
             self._loop = loop
             self._generation += 1
+            # 这条告警说的是「当前没在投递」，是生命周期状态；叶子上限和形态翻转那两个
+            # 标志说的是树的内容，start 不改变树，所以不跟着复位
+            self._warned_not_started = False
 
     def stop(self) -> None:
         """停止投递。已排队的 `_dispatch` 靠 generation 作废，不必逐个取消。"""

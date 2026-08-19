@@ -713,3 +713,27 @@ def test_stable_writes_do_not_count_as_flip():
     store._commit_delete("iot/dev1/prop/2.1", source="miot")
 
     assert store._shape_flips == 0
+
+
+# ---- stats ----
+
+
+def test_stats_starts_at_zero():
+    assert make_store().stats() == {
+        "leaves": 0,
+        "pending": 0,
+        "dropped": 0,
+        "discarded": 0,
+        "shape_flips": 0,
+    }
+
+
+def test_stats_tracks_leaves_and_shape_flips():
+    store = make_store()
+    store._commit("iot/dev1", {"online": True, "prop": {"2.1": 26}}, source="miot")
+    store._commit("iot/dev1/prop", 1, source="miot")
+
+    stats = store.stats()
+
+    assert stats["leaves"] == 2
+    assert stats["shape_flips"] == 1
