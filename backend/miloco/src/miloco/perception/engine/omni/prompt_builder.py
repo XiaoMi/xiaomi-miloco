@@ -221,9 +221,12 @@ def build_fused_payload(
         config:            FusedPromptConfig；None 走默认值
         label_lookup:      person_id → 姓名/标签 反查表（供 ``_build_device_header`` 渲染人名）；
                            None 时由本函数自动从 gallery_snapshot 构造
-        matching_moot:     身份库为空（无注册成员）→ 成员匹配不可能。True 时 identities 字段
-                           改精简版（只判 unknown/no_person）、gallery 段整段不渲染。no_person
-                           判定链路不变（见 field_registry.IDENTITY_NO_MATCH）。
+        matching_moot:     身份库为空（无注册成员）→ 成员匹配不可能，直接跳过 gallery
+                           pre-flight。注意 identities 选版不只看它：本函数据 pre-flight
+                           的实际结果（``_PreparedGallery.entries``）决定——库非空但样本
+                           取不到、或「全或无」放弃时同样降级为精简版（只判
+                           unknown/no_person），保证 spec 与 prompt 里有没有 <gallery>
+                           恒一致。no_person 判定链路不变（见 field_registry.IDENTITY_NO_MATCH）。
 
     Returns:
         dict，含字段：
@@ -356,6 +359,17 @@ def build_fused_payload(
             packets, short_edge=_effective_panorama_short_edge()
         )
 
+    # gallery pre-flight 必须先于 SceneDescriptor：identities 用完整版还是精简版，判据是
+    # 「本轮 prompt 里真会出现 <gallery> 吗」，不是「库里有没有登记成员」。二者会分叉——
+    # 库非空但样本取不到（gallery_snapshot 为空）、或「全或无」放弃——此时完整版 spec 会指着
+    # 一个并不存在的 <gallery> 让模型做成员匹配，而「# 家庭档案」里的成员名就在同一个 prompt
+    # 里，等于把"别从档案取名安到没识别出的人身上"这条纪律推到最难守的位置。
+    prepared_gallery = (
+        _prepare_gallery_entries(gallery_snapshot, cfg)
+        if candidates and not matching_moot
+        else _PreparedGallery(entries=[])
+    )
+
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
     # pending 半句不强行补全（否则模型会就着噪声脑补出一个完成句，正是要根除的幻觉）。
@@ -364,14 +378,17 @@ def build_fused_payload(
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
         has_pets=_has_pets_for_scene(),
-        identity_match_disabled=matching_moot,
+        # 仅"本轮有候选却没渲染出 gallery"时额外置位；无候选窗口保持 matching_moot 原语义
+        # （identity_match_disabled 还被 _render_examples 的 chain 变体读取，且那处不看
+        # has_identity——无候选时跟着翻会把名册里有名字的窗口也降级成泛称示例）。
+        identity_match_disabled=matching_moot or (bool(candidates) and not prepared_gallery.entries),
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
     user_content = _build_fused_user_content(
         packets=packets,
         context=context,
         candidates=candidates,
-        gallery_snapshot=gallery_snapshot,
+        prepared_gallery=prepared_gallery,
         video_b64=video_b64,
         media_info=media_info,
         ref_image_jpeg=ref_image_jpeg,
@@ -380,7 +397,6 @@ def build_fused_payload(
         cfg=cfg,
         label_lookup=label_lookup,
         has_pets=scene.has_pets,  # 复用 scene 已算好的 has_pets，避免注入点再读一次 profile.md
-        matching_moot=matching_moot,
     )
 
     messages = _assemble_fused_messages(
@@ -699,12 +715,91 @@ def _build_user_content(
     return text
 
 
+@dataclass(frozen=True)
+class _PreparedGallery:
+    """本窗口 gallery 段的预备结果——「渲染」与「identities spec 选版」共用的唯一判据。
+
+    ``entries`` 非空 ⟺ 本轮 prompt 里真会出现 ``<gallery>`` 块。空有两种来源，对
+    identities spec 而言是同一件事（本轮无参考图可比对 → 用精简版）：
+
+    - ``give_up_reason`` 非 None：「全或无」放弃（某候选 person 的 body composite 取不到）
+    - ``give_up_reason`` 为 None：``gallery_snapshot`` 本就为空（库非空但无可用样本）
+    """
+
+    entries: list[tuple[str, str, bytes, "bytes | None"]]  # (pid, label, body_jpg, face_jpg|None)
+    give_up_reason: str | None = None
+
+
+def _prepare_gallery_entries(
+    gallery_snapshot: dict[str, "GallerySamples"],
+    cfg: FusedPromptConfig,
+) -> _PreparedGallery:
+    """gallery 段 pre-flight：解析每人 body/face composite，判定本窗口能否渲染。
+
+    「全或无」语义：任一候选 person 的 body composite 全套兜底都失败，本窗口放弃整个
+    gallery 段。原因：少注入一个人，画面里若真有该人，omni 容易把他的脸贴到 gallery 里
+    最相似的另一位 → 错认（caption/speeches 全跟着错），代价比"漏识别"高一个量级。
+    face 是 nice-to-have，单人 face 失败不触发放弃。
+
+    除日志外无副作用（不产 prompt 块、不落 snapshot），故可在选 identities spec 之前调用
+    ——这正是本函数从 ``_build_fused_user_content`` 里抽出来的原因。
+    """
+    if not gallery_snapshot:
+        return _PreparedGallery(entries=[])
+
+    # 渲染上限保护：超出 cfg.max_gallery_persons 仅取前 N 人，避免 prompt token 爆
+    gallery_items = list(gallery_snapshot.items())
+    if len(gallery_items) > cfg.max_gallery_persons:
+        logger.warning(
+            "gallery person count %d > max_gallery_persons=%d，仅渲染前 %d 人",
+            len(gallery_items), cfg.max_gallery_persons, cfg.max_gallery_persons,
+        )
+        gallery_items = gallery_items[: cfg.max_gallery_persons]
+
+    prepared: list[tuple[str, str, bytes, "bytes | None"]] = []
+    for pid, samples in gallery_items:
+        body_jpg = _resolve_person_body_jpg(samples, cfg)
+        # 同时拦 None / empty / "非 None 但 size 异常小" 的坏 bytes (后者
+        # 通常是 library 缓存里的半截损坏 jpeg, 直接进 payload 会让 omni
+        # 服务端 400 Multimodal data is corrupted)
+        if not body_jpg or len(body_jpg) < _MIN_JPEG_BYTES:
+            give_up_reason = (
+                f"person_id={pid} name={samples.name!r} "
+                f"body composite 全部兜底来源均失败 "
+                f"(jpg={len(body_jpg) if body_jpg else 0} bytes)"
+            )
+            logger.warning(
+                "event=fused_gallery_giveup 触发整 gallery 放弃（全或无）：%s；"
+                "本窗口跳过 gallery 段，identities 改用精简版（只判 unknown/no_person），避免错认",
+                give_up_reason,
+            )
+            return _PreparedGallery(entries=[], give_up_reason=give_up_reason)
+        face_jpg = (
+            _resolve_person_face_jpg(samples, cfg)
+            if cfg.include_face_composite else None
+        )
+        # face 是 nice-to-have, size 不达标降级为 None (跳过本人 face 块,
+        # 其他人 body/face 仍渲染), 不触发整 gallery 放弃。
+        if face_jpg and len(face_jpg) < _MIN_JPEG_BYTES:
+            logger.warning(
+                "event=fused_face_jpg_too_short person_id=%s name=%r "
+                "size=%d 字节 (< %d), 跳过该人 face 块",
+                pid, samples.name, len(face_jpg), _MIN_JPEG_BYTES,
+            )
+            face_jpg = None
+        # 名册/gallery/输出统一用纯真名（角色上下文在「# 家庭档案」里）；
+        # name_to_pid 对纯名有 key，omni 输出 name 即可反查回 UUID
+        prepared.append((pid, samples.name or pid, body_jpg, face_jpg))
+
+    return _PreparedGallery(entries=prepared)
+
+
 def _build_fused_user_content(
     *,
     packets: list[IdentityPacket],
     context: OmniContext,
     candidates: list["IdentityQueryItem"],
-    gallery_snapshot: dict[str, "GallerySamples"],
+    prepared_gallery: _PreparedGallery,
     video_b64: str | None,
     media_info: LocalMediaInfo | None,
     ref_image_jpeg: bytes | None = None,
@@ -713,95 +808,40 @@ def _build_fused_user_content(
     cfg: FusedPromptConfig,
     label_lookup: "dict[str, str] | None" = None,
     has_pets: bool = False,
-    matching_moot: bool = False,
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
 
     fused 模式专用：与纯文本版 ``_build_user_content`` 不同，本函数返回
     ``list[dict]``（OpenAI 多模态 content array），不是 ``str``。
 
-    ``matching_moot=True``（身份库为空）时整个 gallery 段不渲染——库空无成员可比对，
-    identities 已由精简版 spec 指示"只判 unknown/no_person"（见 build_fused_payload），
-    此处不再塞"<gallery>库为空…"这类无用文本。待识别 track 列表仍照常渲染（no_person 判定按 track 给结论）。
+    gallery 段渲不渲染由调用方给的 ``prepared_gallery`` 单方面决定（``entries`` 空即整段
+    跳过），本函数不再自己做 pre-flight——判据必须与 ``build_fused_payload`` 选 identities
+    spec 时用的那一份完全同源，否则会出现"spec 让模型对着 <gallery> 做成员匹配、prompt 里
+    却没有 <gallery>"的分叉。空 gallery 时也不塞"<gallery>库为空…"这类占位文本：精简版
+    spec 已把任务收敛成 unknown/no_person，占位文本纯属噪声。
+
+    待识别 track 列表照常渲染（no_person 判定按 track 给结论，不依赖 gallery）。
     """
     gallery_content: list[dict] = []
 
-    # === gallery refs（仅当本轮有 candidate 时渲染；U4 顺序里置于"待识别 track"之后、video 之前）===
-    # 「全或无」语义：任一候选 person 的 body composite 全套兜底都失败，本窗口放弃
-    # 整个 gallery 段（等价无 gallery 主调用）。原因：少注入一个人，画面里若真有该
-    # 人，omni 容易把他的脸贴到 gallery 里最相似的另一位 → 错认（caption/speeches
-    # 全跟着错），代价比"漏识别"高一个量级。face 是 nice-to-have，单人 face 失败不
-    # 触发放弃。
-    #
-    # matching_moot（身份库为空）→ 整段跳过：库空无成员可比对，精简版 identities spec 已
-    # 指示只判 unknown/no_person，不需要 gallery 图，也不再塞"库为空"占位文本。
-    if candidates and not matching_moot:
-        if gallery_snapshot:
-            # 渲染上限保护：超出 cfg.max_gallery_persons 仅取前 N 人，避免 prompt token 爆
-            gallery_items = list(gallery_snapshot.items())
-            if len(gallery_items) > cfg.max_gallery_persons:
-                logger.warning(
-                    "gallery person count %d > max_gallery_persons=%d，仅渲染前 %d 人",
-                    len(gallery_items), cfg.max_gallery_persons, cfg.max_gallery_persons,
-                )
-                gallery_items = gallery_items[: cfg.max_gallery_persons]
+    # === gallery refs（U4 顺序里置于"待识别 track"之后、video 之前）===
+    # entries 为空 → 整段不渲染（库空 / 无可用样本 / 「全或无」放弃三种来源同解），
+    # 且不塞占位文本：调用方已据同一份 prepared_gallery 把 identities 收敛成精简版。
+    if prepared_gallery.entries:
+        gallery_content.append({"type": "text", "text": "下方 gallery 为候选成员参考图；图中衣着仅样本采集当时所穿、不保证与本轮一致——衣着只作辅助参考、不作决定性判据，以面部/体型/发型为主"})
+        from miloco.perception.snapshot_context import push_gallery_image
 
-            # 两段式：先 pre-flight 每人都能拿到 body_jpg，全过才进入渲染段
-            prepared: list[tuple[str, str, bytes, "bytes | None"]] = []  # (pid, label, body_jpg, face_jpg|None)
-            give_up_reason: str | None = None
-            for pid, samples in gallery_items:
-                body_jpg = _resolve_person_body_jpg(samples, cfg)
-                # 同时拦 None / empty / "非 None 但 size 异常小" 的坏 bytes (后者
-                # 通常是 library 缓存里的半截损坏 jpeg, 直接进 payload 会让 omni
-                # 服务端 400 Multimodal data is corrupted)
-                if not body_jpg or len(body_jpg) < _MIN_JPEG_BYTES:
-                    give_up_reason = (
-                        f"person_id={pid} name={samples.name!r} "
-                        f"body composite 全部兜底来源均失败 "
-                        f"(jpg={len(body_jpg) if body_jpg else 0} bytes)"
-                    )
-                    break
-                face_jpg = (
-                    _resolve_person_face_jpg(samples, cfg)
-                    if cfg.include_face_composite else None
-                )
-                # face 是 nice-to-have, size 不达标降级为 None (跳过本人 face 块,
-                # 其他人 body/face 仍渲染), 不触发整 gallery 放弃。
-                if face_jpg and len(face_jpg) < _MIN_JPEG_BYTES:
-                    logger.warning(
-                        "event=fused_face_jpg_too_short person_id=%s name=%r "
-                        "size=%d 字节 (< %d), 跳过该人 face 块",
-                        pid, samples.name, len(face_jpg), _MIN_JPEG_BYTES,
-                    )
-                    face_jpg = None
-                # 名册/gallery/输出统一用纯真名（角色上下文在「# 家庭档案」里）；
-                # name_to_pid 对纯名有 key，omni 输出 name 即可反查回 UUID
-                prepared.append((pid, samples.name or pid, body_jpg, face_jpg))
-
-            if give_up_reason is not None:
-                # 整 gallery 放弃 —— 不渲染 gallery 段，本窗口等价于无 gallery 主调用
-                logger.warning(
-                    "event=fused_gallery_giveup 触发整 gallery 放弃（全或无）：%s；"
-                    "本窗口跳过 gallery 段，identity 信息退化为 unknown，避免错认",
-                    give_up_reason,
-                )
-            else:
-                gallery_content.append({"type": "text", "text": "下方 gallery 为候选成员参考图；图中衣着仅样本采集当时所穿、不保证与本轮一致——衣着只作辅助参考、不作决定性判据，以面部/体型/发型为主"})
-                from miloco.perception.snapshot_context import push_gallery_image
-
-                gallery_content.append({"type": "text", "text": "<gallery>"})
-                for pid, label, body_jpg, face_jpg in prepared:
-                    gallery_content.append({"type": "text", "text": f"【{label}】"})
-                    gallery_content.append({"type": "text", "text": "体型/全身参考："})
-                    gallery_content.append(_png_block(body_jpg))
-                    push_gallery_image(pid, "body", body_jpg)
-                    if face_jpg:
-                        gallery_content.append({"type": "text", "text": "面部参考："})
-                        gallery_content.append(_png_block(face_jpg))
-                        push_gallery_image(pid, "face", face_jpg)
-                gallery_content.append({"type": "text", "text": "</gallery>"})
-        else:
-            gallery_content.append({"type": "text", "text": "<gallery>库为空，所有 track 应输出 unknown</gallery>"})
+        gallery_content.append({"type": "text", "text": "<gallery>"})
+        for pid, label, body_jpg, face_jpg in prepared_gallery.entries:
+            gallery_content.append({"type": "text", "text": f"【{label}】"})
+            gallery_content.append({"type": "text", "text": "体型/全身参考："})
+            gallery_content.append(_png_block(body_jpg))
+            push_gallery_image(pid, "body", body_jpg)
+            if face_jpg:
+                gallery_content.append({"type": "text", "text": "面部参考："})
+                gallery_content.append(_png_block(face_jpg))
+                push_gallery_image(pid, "face", face_jpg)
+        gallery_content.append({"type": "text", "text": "</gallery>"})
 
     # 按 U4 顺序组装：当前时间 → 已识别人物 → 待识别 track → gallery → video → identities 约束。
     # 历史参考（pending_speech）与待判断规则已抽到独立 user 消息
@@ -1218,7 +1258,7 @@ def _resolve_person_body_jpg(
 
     任一层成功即返回。全部失败返回 None —— 调用方据此触发"整 gallery 放弃"。
 
-    NOTE: omni 主路径(``_build_fused_user_content``)调用方走的 ``GallerySamples``
+    NOTE: omni 主路径(``_prepare_gallery_entries``)调用方走的 ``GallerySamples``
     来自 ``library.get_gallery_composites_for_omni`` 新出口,只填 ``body_composite_jpeg``
     不填 ``body_crops``,且 library 出口已过滤掉 ``body_composite_jpeg=None`` 的 person。
     所以新主路径下永远在层 1 命中,层 2/3 实际是 dead code。**层 2/3 保留是为了适配
