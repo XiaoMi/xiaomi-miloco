@@ -347,11 +347,15 @@ def test_sweep_hard_cap_keeps_active_over_idle():
 
 
 def test_sweep_hard_cap_evicts_oldest():
-    """并发 turn 数超硬上限时按起始时间淘汰最老的。"""
+    """并发 turn 数超硬上限时淘汰到上限为止，先淘汰最久没有动静的。
+
+    判据本身由 test_sweep_hard_cap_keeps_active_over_idle 区分；这里只钉数量收敛。
+    """
     for i in range(tr.TURNS_HARD_CAP + 5):
         sid = f"miloco:sess-{i}"
+        # 插入顺序天然让 last_seen 单调不减：建得最早 = 最久没动静。
+        # 僵尸判据同样看 last_seen，刚建的 turn 天然新鲜，不必覆写任何时间戳。
         tr._hk_pre_llm_call(sid, "hi", [], True, "m", "p")
-        tr._turns[sid].started_at = 10_000_000_000_000 + i  # 保证顺序，且不触发 stuck
     tr._sweep_stale_turns()
     assert len(tr._turns) == tr.TURNS_HARD_CAP
     assert "miloco:sess-0" not in tr._turns
