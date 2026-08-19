@@ -498,6 +498,26 @@ async def test_list_cameras_with_state_flags():
 
 
 @pytest.mark.asyncio
+async def test_list_cameras_with_state_stream_error_ignores_stale_connected_cache():
+    """stream_error 只看 stream_nat_blocked，不再叠一道读 _camera_info_dict 缓存的
+    device_connected 门——那份缓存只由完整刷新写入，CLI(scope camera list) 不走
+    /refresh_camera_online 那条刷新路径，缓存可能停在"曾经连上过"的旧值。旧代码在
+    这种陈旧态下会把 stream_error 恒判成 None，即便 stream_nat_blocked 判据本身
+    （已含"当下是否连着"这道实时门）已经成立。
+    """
+    cam = _camera("c1", home_id="H1")
+    cam.connected = True  # 缓存陈旧：曾经连上过，但原生会话早已断开
+    cameras = {"c1": cam}
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    svc._miot_proxy.stream_nat_blocked = lambda did: True  # type: ignore[assignment]
+
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["stream_error"] == "cross_subnet_nat"
+
+
+@pytest.mark.asyncio
 async def test_toggle_camera_writes_disabled():
     kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
     svc = _make_service(

@@ -668,8 +668,12 @@ class MIoTClient:
                 # 全量重建抹回 None，令 stream_nat_blocked 恒 False（诊断永不触发）。
                 camera_info.cross_subnet = lan_devices[did].cross_subnet
 
-        # Sync unicast probe targets so cross-subnet cameras can also be
-        # reached via unicast UDP (broadcast is blocked by subnet boundary).
+        # Sync unicast probe targets for every camera with a known local IP —
+        # not just cross-subnet ones. Cross-subnet cameras need it because
+        # broadcast can't cross the subnet boundary at all; same-subnet ones
+        # need it too because directed subnet broadcast isn't guaranteed
+        # delivery (switch storm control / AP client isolation / router
+        # broadcast rate-limiting), see MIoTLan._probe_unicast_targets.
         unicast_targets: Dict[str, str] = {}
         for did, camera_info in self._cameras_buffer.items():
             if camera_info.local_ip:

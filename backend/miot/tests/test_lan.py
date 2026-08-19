@@ -250,11 +250,11 @@ def test_probe_unicast_targets_includes_same_subnet_target():
     （代价见 _probe_unicast_targets docstring 里的 macOS LNP 说明。）
     """
     miot_lan = _make_mock_lan()
-    # 让 __is_local_subnet 对 192.168.1.x 判真：本机网卡就在这个网段。
+    # 让 192.168.1.x 判定为同网段：本机网卡就在这个网段。
     miot_lan._network.network_info = {
         "eth0": MagicMock(ip="192.168.1.10", netmask="255.255.255.0")
     }
-    assert miot_lan._MIoTLan__is_local_subnet("192.168.1.50") is True
+    assert miot_lan.is_cross_subnet("192.168.1.50") is False
 
     mock_sock = MagicMock()
     miot_lan._unicast_sock = mock_sock
@@ -280,6 +280,106 @@ def test_probe_unicast_targets_skips_connected_dids():
 
     assert mock_sock.sendto.call_count == 1
     assert mock_sock.sendto.call_args[0][2][0] == "10.0.0.2"
+
+
+@pytest.mark.unit
+def test_probe_unicast_targets_recreates_socket_when_missing():
+    """单播 socket 缺失（启动时一次性建 socket 失败）时，探测应按需补建一次而不是
+    永久 no-op——旧代码只在线程启动时建一次，网卡增删回调不会重建它，一次瞬时失败
+    （fd 耗尽 / 网络栈未就绪）会让跨网段发现在整个进程生命周期里静默失效。
+    """
+    miot_lan = _make_mock_lan()
+    miot_lan._unicast_sock = None
+    miot_lan._unicast_targets = {"did1": "10.0.0.1"}
+    miot_lan._internal_loop = MagicMock()
+
+    created_sock = MagicMock()
+    with patch("socket.socket", return_value=created_sock):
+        miot_lan._probe_unicast_targets()
+
+    assert miot_lan._unicast_sock is created_sock
+    created_sock.sendto.assert_called_once()
+
+
+@pytest.mark.unit
+def test_probe_unicast_targets_skips_this_round_when_recreate_fails():
+    """补建仍失败（比如 fd 依旧耗尽）——本轮直接跳过，不抛异常，下一轮扫描再试。"""
+    miot_lan = _make_mock_lan()
+    miot_lan._unicast_sock = None
+    miot_lan._unicast_targets = {"did1": "10.0.0.1"}
+    miot_lan._internal_loop = MagicMock()
+
+    with patch("socket.socket", side_effect=OSError("fd exhausted")):
+        miot_lan._probe_unicast_targets()  # must not raise
+
+    assert miot_lan._unicast_sock is None
+
+
+@pytest.mark.unit
+def test_create_unicast_socket_noop_when_already_exists():
+    """__create_unicast_socket 幂等：已有 socket 时按需补建调用直接跳过，
+    不能悄悄换掉一个还在用的 socket（会丢了它 add_reader 注册的回包路径）。"""
+    miot_lan = _make_mock_lan()
+    existing = MagicMock()
+    miot_lan._unicast_sock = existing
+    miot_lan._internal_loop = MagicMock()
+
+    with patch("socket.socket") as mock_socket_ctor:
+        miot_lan._MIoTLan__create_unicast_socket()
+
+    mock_socket_ctor.assert_not_called()
+    assert miot_lan._unicast_sock is existing
+
+
+# ---------------------------------------------------------------------------
+# is_cross_subnet: 「判不出来」必须是 None，不能被当成「确定跨网段」
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_is_cross_subnet_none_when_network_table_empty():
+    """本机网卡表为空（Wi-Fi 漫游 / 网卡 down 的刷新窗口）时，is_cross_subnet 必须
+    返回 None（判不出来），不能返回 True（确定跨网段）。
+
+    回归动机：旧实现里 __is_local_subnet 对「网卡表为空」和「目标确实不在任何已知
+    网段」共用同一个 False 返回值，is_cross_subnet 直接对它取反，于是"判不出来"被
+    当成了"确定跨网段"上报给上层——跨 NAT 提示会在网卡表暂时读不到的窗口里，把一台
+    其实同网段、只是网卡表刚好为空的相机诊断成 NAT 阻断，指着住户去折腾路由器。
+    """
+    miot_lan = _make_mock_lan()
+    miot_lan._network.network_info = {}
+    assert miot_lan.is_cross_subnet("192.168.1.50") is None
+
+
+@pytest.mark.unit
+def test_is_cross_subnet_true_for_genuinely_different_subnet():
+    """本机网段能解析、目标确实不在其中 → 照常判 True（回归防护：上面那条修复
+    不能把"确实跨网段"也误改成 None）。"""
+    miot_lan = _make_mock_lan()
+    miot_lan._network.network_info = {
+        "eth0": MagicMock(ip="192.168.1.10", netmask="255.255.255.0")
+    }
+    assert miot_lan.is_cross_subnet("10.0.0.2") is True
+
+
+@pytest.mark.unit
+def test_is_cross_subnet_false_for_same_subnet():
+    miot_lan = _make_mock_lan()
+    miot_lan._network.network_info = {
+        "eth0": MagicMock(ip="192.168.1.10", netmask="255.255.255.0")
+    }
+    assert miot_lan.is_cross_subnet("192.168.1.50") is False
+
+
+@pytest.mark.unit
+def test_is_cross_subnet_none_when_ip_unknown_or_invalid():
+    miot_lan = _make_mock_lan()
+    miot_lan._network.network_info = {
+        "eth0": MagicMock(ip="192.168.1.10", netmask="255.255.255.0")
+    }
+    assert miot_lan.is_cross_subnet(None) is None
+    assert miot_lan.is_cross_subnet("") is None
+    assert miot_lan.is_cross_subnet("not-an-ip") is None
 
 
 @pytest.mark.unit

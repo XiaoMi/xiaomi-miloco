@@ -611,9 +611,18 @@ class MIoTLan:
         失败不会影响广播 socket 的接收路径。
 
         已连上的 did 仍然跳过：可达性已由拉流本身证实，探它没有意义。
+
+        单播 socket 只在线程启动时建一次（``__init_socket``），网卡增删回调不会重建
+        它——启动瞬间的一次性失败（fd 耗尽 / 网络栈还没就绪）此前会让跨网段发现在整个
+        进程生命周期里永久失效，且是纯静默：探测目标表照常被下发，只是没人用。这里在
+        有目标要探且 socket 缺失时按需补建一次；仍失败就本轮跳过，下一轮扫描再试。
         """
-        if not self._unicast_targets or self._unicast_sock is None:
+        if not self._unicast_targets:
             return
+        if self._unicast_sock is None:
+            self.__create_unicast_socket()
+            if self._unicast_sock is None:
+                return
         for did, ip in self._unicast_targets.items():
             if not ip or did in self._connected_dids:
                 continue
@@ -625,30 +634,38 @@ class MIoTLan:
                 # 无路由/不可达等：记 debug 不刷屏，不影响其它目标与广播。
                 _LOGGER.debug("unicast probe to %s failed: %s", ip, e)
 
-    def __is_local_subnet(self, ip: str) -> bool:
-        """目标 IP 是否与本机某网卡同网段。
+    def __local_subnets(self) -> list["ipaddress.IPv4Network"]:
+        """本机所有可解析网段。空列表 = 当前判不出本机网段（网卡全掉 / 刷新窗口）。"""
+        nets: list["ipaddress.IPv4Network"] = []
+        for info in self._network.network_info.values():
+            try:
+                nets.append(
+                    ipaddress.IPv4Network(f"{info.ip}/{info.netmask}", strict=False)
+                )
+            except (ValueError, TypeError):
+                continue
+        return nets
 
-        只用于 ``is_cross_subnet``（对上层透出的 cross_subnet 标记）。单播探测**不再**
-        按它跳过同网段目标，见 ``_probe_unicast_targets``。
+    def is_cross_subnet(self, ip: Optional[str]) -> Optional[bool]:
+        """ip 是否跨网段（与本机所有网卡都不同网段）。判不出来时返回 None。
+
+        三种「判不出来」一律 None，不返回 True：ip 未知；ip 不是合法 IPv4；本机网段
+        一个都解析不出来（网卡全掉 / Wi-Fi 漫游中的刷新窗口，网卡表在这段时间可以为
+        空）。后两种下"与所有网卡都不同网段"这句话没有事实依据——返回 True 会让上层
+        把一台恰好同网段、只是网卡表暂时读不到的相机诊断成 NAT 阻断，指着住户去折腾
+        路由器，方向与 ``stream_nat_blocked``「云端离线就不给这条诊断」同一口径：宁可
+        少报也不错报。
         """
+        if not ip:
+            return None
         try:
             target = ipaddress.IPv4Address(ip)
         except ValueError:
-            return False
-        for info in self._network.network_info.values():
-            try:
-                net = ipaddress.IPv4Network(f"{info.ip}/{info.netmask}", strict=False)
-            except (ValueError, TypeError):
-                continue
-            if target in net:
-                return True
-        return False
-
-    def is_cross_subnet(self, ip: Optional[str]) -> Optional[bool]:
-        """ip 是否跨网段（与本机所有网卡都不同网段）。ip 未知时返回 None。"""
-        if not ip:
             return None
-        return not self.__is_local_subnet(ip)
+        nets = self.__local_subnets()
+        if not nets:
+            return None
+        return not any(target in net for net in nets)
 
     def broadcast_device_info_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         """Broadcast device info changed."""
@@ -692,6 +709,8 @@ class MIoTLan:
     def __create_unicast_socket(self) -> None:
         # 专用单播 socket：不绑网卡，交给系统路由。不显式 bind——sendto() 时内核
         # 会隐式绑到 wildcard+临时端口，效果一样，但不留 CodeQL 会标的显式绑定调用。
+        if self._unicast_sock is not None:
+            return  # 幂等：允许 _probe_unicast_targets 按需补建时重复调用
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             self._internal_loop.add_reader(
@@ -866,7 +885,8 @@ class MIoTLan:
         try:
             # Scan devices — broadcast
             self.ping_internal()
-            # Additionally probe known unicast targets (cross-subnet cameras)
+            # Additionally probe known unicast targets, regardless of subnet
+            # (see _probe_unicast_targets docstring)
             self._probe_unicast_targets()
         except Exception as err:
             # Ignore any exceptions to avoid blocking the loop

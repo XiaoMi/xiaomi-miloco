@@ -1235,10 +1235,15 @@ class MiotService:
             # ⚠️ 别把成因写成"回包源口是动态口"：那与上面那道固定源口过滤直接冲突，
             # 按那个说法跨网段相机的每个回包都会被丢掉、lan_online 恒 False，整条
             # cross_subnet_nat 诊断会是永不触发的死代码——而它是实测生效的。
+            # 「当下是否连着」由 stream_nat_blocked 内部按连接起始时间戳判——那是状态
+            # 回调的实时信号（CONNECTED 时被 pop）。这里不能再叠一道 device_connected：
+            # 它读的是 _camera_info_dict 缓存，只由完整刷新（refresh_camera_online_status /
+            # 云端上下线推送）写入。网页每次加载列表前都先打一次轻量刷新，缓存是新的；
+            # CLI（scope camera list）不走那个端点，直接打这个接口，缓存可能停在"曾经
+            # 连上过"的旧值——叠这道门会让缓存陈旧时 stream_error 恒为 None，CLI 那条路
+            # 排障时看不到跨 NAT 提示，而同一时刻网页上正显示着。
             stream_error = (
-                "cross_subnet_nat"
-                if not device_connected and self._miot_proxy.stream_nat_blocked(did)
-                else None
+                "cross_subnet_nat" if self._miot_proxy.stream_nat_blocked(did) else None
             )
             channel_count = getattr(info, "channel_count", None) or 1
             lens_awake = awake_map.get(did) or {}
