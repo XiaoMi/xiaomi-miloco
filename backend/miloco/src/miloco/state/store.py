@@ -54,6 +54,9 @@ class _Batch:
     now: int
     deletes: list[Change] = field(default_factory=list)
     upserts: list[Change] = field(default_factory=list)
+    # 本次写入让几条路径在叶子与子树之间翻了形态。翻转会让订阅旧形态的消费方收到一个删除
+    # 事件之后再也收不到，而边界由数据的类型决定、写入方并不声明，所以只能在这里数。
+    flips: int = 0
 
     def changes(self) -> list[Change]:
         return self.deletes + self.upserts
@@ -105,6 +108,14 @@ def _normalize(value: Any, depth: int) -> Any:
     return _normalize_scalar(value)
 
 
+@dataclass(slots=True)
+class _MatchStats:
+    """一条 pattern 的匹配结果。两个数一起才能分出「路径不存在」和「少写了 `**`」。"""
+
+    leaves: int = 0
+    skipped_subtrees: int = 0
+
+
 def _join(segments: tuple[str, ...]) -> str:
     return "/".join(segments)
 
@@ -135,6 +146,7 @@ def _build(
     if isinstance(value, dict):
         if isinstance(old, Entry):
             batch.deletes.append(_deleted(segments, old, batch))
+            batch.flips += 1
             old = None
         old_children: dict[str, Node] = old if isinstance(old, dict) else {}
         new_node: dict[str, Node] = {}
@@ -152,6 +164,7 @@ def _build(
 
     if isinstance(old, dict):
         _collect_deletes(old, segments, batch)
+        batch.flips += 1
         old = None
     if old is None:
         batch.upserts.append(
@@ -192,16 +205,19 @@ def _leaf_view(entry: Entry, with_meta: bool) -> Any:
     return entry if with_meta else entry.value
 
 
-def _copy_leaves(node: Node, key: str, out: dict, with_meta: bool) -> None:
+def _copy_leaves(
+    node: Node, key: str, out: dict, with_meta: bool, stats: _MatchStats
+) -> None:
     """把 node 下的所有叶子按原结构写进 out[key]。"""
     if isinstance(node, Entry):
         out[key] = _leaf_view(node, with_meta)
+        stats.leaves += 1
         return
     # 这里写的是 node 下的全部叶子，必然覆盖别的 pattern 在同一路径上收到的那部分，
     # 所以不必像 `_collect_matches` 那样往已有的子树里合并
     sub: dict[str, Any] = {}
     for child_key, child in node.items():
-        _copy_leaves(child, child_key, sub, with_meta)
+        _copy_leaves(child, child_key, sub, with_meta, stats)
     out[key] = sub
 
 
@@ -211,6 +227,7 @@ def _collect_matches(
     index: int,
     out: dict,
     with_meta: bool,
+    stats: _MatchStats,
 ) -> None:
     """把 node 下匹配 pattern[index:] 的叶子按原路径写进 out。
 
@@ -219,7 +236,7 @@ def _collect_matches(
     segment = pattern[index]
     if segment == "**":
         for key, child in node.items():
-            _copy_leaves(child, key, out, with_meta)
+            _copy_leaves(child, key, out, with_meta, stats)
         return
 
     if segment == "*":
@@ -234,11 +251,16 @@ def _collect_matches(
         if is_last:
             if isinstance(child, Entry):
                 out[key] = _leaf_view(child, with_meta)
+                stats.leaves += 1
+            else:
+                # 末段的语义是「这一层的叶子」，中间节点不收。记下来，好让调用方知道
+                # 自己少写了 `**`，而不是拿到一个和「路径不存在」一样的空结果
+                stats.skipped_subtrees += 1
         elif isinstance(child, dict):
             # 多个 pattern 共用一个 out：已经收进来的子树要接着往里写，另起一个再赋值会把
             # 前一个 pattern 的结果整个盖掉
             sub = out.setdefault(key, {})
-            _collect_matches(child, pattern, index + 1, sub, with_meta)
+            _collect_matches(child, pattern, index + 1, sub, with_meta, stats)
             if not sub:
                 del out[key]
 
@@ -254,11 +276,13 @@ class StateStore:
         # 每次真实的启停切换加一，幂等调用不加。停止前排队的 _dispatch 靠它作废。
         self._generation = 0
         self._leaf_count = 0
+        self._shape_flips = 0
         self._pending = 0
         self._dropped = 0
         self._discarded = 0
         self._warned_not_started = False
         self._warned_leaf_limit = False
+        self._warned_shape_flip = False
 
     # ---- 写 ----
 
@@ -332,7 +356,21 @@ class StateStore:
 
         self._attach(segments, new_node)
         self._leaf_count = total
+        if batch.flips:
+            self._record_shape_flips(batch.flips, path)
         return batch.changes()
+
+    def _record_shape_flips(self, count: int, path: str) -> None:
+        """必须在锁内调用。只报第一条：形态在两种之间来回抖时，按写入频率打日志会把所有
+        写入方一起堵在锁上，而计数已经能分出「变过一次」和「一直在抖」。"""
+        self._shape_flips += count
+        if not self._warned_shape_flip:
+            self._warned_shape_flip = True
+            logger.warning(
+                "shape flip at %s: path changed between leaf and subtree; "
+                "subscribers of the old shape stop receiving events",
+                path,
+            )
 
     def _locate_for_write(
         self, segments: tuple[str, ...], batch: _Batch
@@ -342,6 +380,7 @@ class StateStore:
         for depth, segment in enumerate(segments):
             if isinstance(node, Entry):
                 batch.deletes.append(_deleted(segments[:depth], node, batch))
+                batch.flips += 1
                 return None
             if node is None:
                 return None
@@ -426,8 +465,14 @@ class StateStore:
         parsed = [parse_pattern(item) for item in patterns]
         result: dict[str, Any] = {}
         with self._lock:
-            for segments in parsed:
-                _collect_matches(self._root, segments, 0, result, with_meta)
+            for text, segments in zip(patterns, parsed):
+                stats = _MatchStats()
+                _collect_matches(self._root, segments, 0, result, with_meta, stats)
+                if not stats.leaves and stats.skipped_subtrees:
+                    raise ValueError(
+                        f"pattern {text!r} 只命中中间节点、一片叶子都没收到；"
+                        f"要取整棵子树请写 '{text}/**'"
+                    )
         return result
 
     def _locate(self, segments: tuple[str, ...]) -> Node | None:

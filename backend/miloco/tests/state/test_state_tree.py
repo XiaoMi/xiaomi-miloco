@@ -475,10 +475,6 @@ def test_falsy_leaf_values_stay_visible():
         ("iot/*/online", ["iot/dev1/online"]),
         ("iot/**", ["iot/dev1/online", "iot/dev1/prop/2.1", "iot/dev2/prop/2.1"]),
         ("iot/*/prop/**", ["iot/dev1/prop/2.1", "iot/dev2/prop/2.1"]),
-        ("iot", []),
-        ("iot/dev1", []),
-        ("iot/*", []),
-        ("iot/*/prop", []),
         ("omni/**", []),
     ],
 )
@@ -609,3 +605,111 @@ def test_invalid_patterns_raise(pattern):
         store.snapshot(pattern)
     with pytest.raises(ValueError):
         store.subscribe(pattern, lambda change: None)
+
+
+# ---- 末段落在中间节点 ----
+
+
+@pytest.mark.parametrize("pattern", ["iot", "iot/dev1", "iot/*", "iot/*/prop"])
+def test_pattern_ending_on_subtree_raises(pattern):
+    """末段命中中间节点却收不到叶子时必须报出来，不能静默返回空。"""
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+
+    with pytest.raises(ValueError, match=r"\*\*"):
+        store.snapshot(pattern)
+
+
+def test_one_pattern_contributing_nothing_raises():
+    """合并结果非空掩盖不了其中一条 pattern 一片叶子都没收到。"""
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+    store._commit("iot/dev2/online", False, source="miot")
+
+    with pytest.raises(ValueError, match=r"\*\*"):
+        store.snapshot(["iot/dev1", "iot/dev2/online"])
+
+
+def test_pattern_matching_no_path_still_returns_empty():
+    """路径不存在是正常情况，仍然返回空、不抛。"""
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+
+    assert store.snapshot("nothing/**") == {}
+    assert store.snapshot("iot/dev9/online") == {}
+    assert store.snapshot(["iot/dev1/prop/2.1", "iot/dev9/online"]) == {
+        "iot": {"dev1": {"prop": {"2.1": 26}}}
+    }
+
+
+def test_partly_matched_pattern_does_not_raise():
+    """有设备没这条属性时照旧缺席——这一层收到过叶子，不算零贡献。"""
+    store = make_store()
+    store._commit("iot/dev1/online", True, source="miot")
+    store._commit("iot/dev2/prop/2.1", 26, source="miot")
+
+    assert store.snapshot("iot/*/online") == {"iot": {"dev1": {"online": True}}}
+
+
+def test_leaf_beside_subtree_at_same_level_does_not_raise():
+    """同一层既有叶子又有子树时，叶子收到了就不算零贡献，子树照旧不收。"""
+    store = make_store()
+    store._commit("iot/legacy", 1, source="miot")
+    store._commit("iot/dev2/online", True, source="miot")
+
+    assert store.snapshot("iot/*") == {"iot": {"legacy": 1}}
+
+
+def test_subtree_reachable_with_double_star():
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+    store._commit("iot/dev1/online", True, source="miot")
+
+    assert store.snapshot("iot/dev1/**") == {
+        "iot": {"dev1": {"prop": {"2.1": 26}, "online": True}}
+    }
+
+
+# ---- 叶子与子树互相翻转 ----
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (("iot/dev1/prop", 26), ("iot/dev1/prop", {"value": 26})),
+        (("a/b/c", 1), ("a/b", 2)),
+        (("a/b", 1), ("a/b/c", 2)),
+    ],
+    ids=["leaf_to_subtree", "subtree_to_leaf", "leaf_split_by_deeper_write"],
+)
+def test_shape_flip_is_counted_and_logged(caplog, first, second):
+    store = make_store()
+    store._commit(first[0], first[1], source="miot")
+
+    with caplog.at_level(logging.WARNING, logger="miloco.state.store"):
+        store._commit(second[0], second[1], source="miot")
+
+    assert store._shape_flips == 1
+    assert "shape" in caplog.text
+
+
+def test_shape_flip_warns_once_but_keeps_counting(caplog):
+    """反复翻转不能把日志刷爆，但次数要留下来分得出抖动和一次性变更。"""
+    store = make_store()
+
+    with caplog.at_level(logging.WARNING, logger="miloco.state.store"):
+        for value in [26, {"value": 26}, 26, {"value": 26}]:
+            store._commit("iot/dev1/prop", value, source="miot")
+
+    assert store._shape_flips == 3
+    assert len([r for r in caplog.records if "shape" in r.getMessage()]) == 1
+
+
+def test_stable_writes_do_not_count_as_flip():
+    store = make_store()
+    store._commit("iot/dev1/prop/2.1", 26, source="miot")
+    store._commit("iot/dev1/prop/2.1", 27, source="miot")
+    store._commit("iot/dev1/prop/2.2", 1, source="miot")
+    store._commit_delete("iot/dev1/prop/2.1", source="miot")
+
+    assert store._shape_flips == 0

@@ -53,11 +53,8 @@ PATTERNS = [
     "iot/*/prop/*",
     "iot/*/prop/2.1",
     "iot/dev1/prop/2.1",
-    "iot/dev1",
-    "iot/*",
     "omni/*/*/caption",
     "omni/rule/**",
-    "tracker",
     "tracker/**",
     "tracker/*/*/room",
     "nothing/**",
@@ -85,6 +82,28 @@ def test_snapshot_and_match_pattern_agree(pattern):
     )
 
     assert by_snapshot == by_match
+
+
+# 末段落在中间节点：两边都覆盖不到任何叶子，`snapshot` 直接拒绝（`subscribe` 拒不了 ——
+# 接线时树可能还是空的，判不出零贡献）。不变式的目的仍然成立：调用方在对齐那一步就被拦下
+# 改成 `/**`，不会带着一条永远不触发的 pattern 去 subscribe。
+REJECTED_PATTERNS = ["iot/dev1", "iot/*", "tracker"]
+
+
+@pytest.mark.parametrize("pattern", REJECTED_PATTERNS)
+def test_rejected_pattern_matches_nothing_either(pattern):
+    store = StateStore()
+    for path in LEAVES:
+        store._commit(path, 1, source="t")
+
+    with pytest.raises(ValueError):
+        store.snapshot(pattern)
+
+    assert not [
+        path
+        for path in LEAVES
+        if match_pattern(parse_pattern(pattern), split_path(path))
+    ]
 
 
 def _flatten(tree: dict, prefix: str = "") -> list[str]:
