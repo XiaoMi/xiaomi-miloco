@@ -607,7 +607,7 @@ class IdentityLibrary:
           - Tier A 优先；不足时补 Tier C 最近样本
           - body_attr_text 字段当前永远 None（功能未实施）
 
-        ⚠️  ``prompt_builder._build_fused_user_content`` 已切到 ``get_gallery_composites_for_omni``
+        ⚠️  ``prompt_builder._prepare_gallery_entries`` 已切到 ``get_gallery_composites_for_omni``
         新出口（带缓存）。本方法仅保留给那些显式需要 ``body_crops`` / ``face_crops``
         ndarray 的调用方（例如离线分析脚本）；正常 omni 派发路径**不再走**这里。
         """
