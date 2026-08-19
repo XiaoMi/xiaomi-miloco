@@ -353,9 +353,23 @@ def test_leaf_limit_rejects_whole_write(monkeypatch, caplog):
 # ---- 读 ----
 
 
-def test_missing_is_falsy():
-    assert not MISSING
+def test_missing_refuses_boolean_context():
+    """取假会让 §11.2 那个用「路径不存在」表达的未就绪态，和「未命中」落进同一个分支。"""
+    with pytest.raises(TypeError, match="is MISSING"):
+        bool(MISSING)
+
     assert repr(MISSING) == "MISSING"
+
+
+def test_falsy_leaf_values_stay_usable_in_boolean_context():
+    """挡的只有 MISSING。False / 0 / 空串是合法状态值，照旧能直接判真假。"""
+    store = make_store()
+    store._commit("iot/dev1/online", False, source="miot")
+    store._commit("omni/cam0/caption", "", source="omni")
+
+    assert store.get("iot/dev1/online") is False
+    assert not store.get("iot/dev1/online")
+    assert not store.get("omni/cam0/caption")
 
 
 def test_get_distinguishes_missing_from_none():

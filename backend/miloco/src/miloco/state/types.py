@@ -24,12 +24,20 @@ class MissingType:
         return "MISSING"
 
     def __bool__(self) -> bool:
-        # 取假：误用 `if store.get(path):` 时走否定分支，与「路径不存在」的直觉一致
-        return False
+        # 布尔上下文里一律报错，不给真也不给假。`False` / `0` / `""` / `None` / `()` 都是
+        # 合法状态值，取真取假都会让「路径不存在」和其中一半混进同一个分支 —— 而 omni 的
+        # rule 判定正是拿「路径不存在」表达未就绪态的，混掉就读不出来了。
+        raise TypeError(
+            "MISSING 不能用在布尔上下文里：判存在写 `x is MISSING`，"
+            "要兜底值传 `get(path, default)`"
+        )
 
 
 MISSING = MissingType()
-"""「不存在」哨兵。`None` 是合法状态值，不能兼任这个角色。"""
+"""「不存在」哨兵。`None` 是合法状态值，不能兼任这个角色。
+
+放进布尔上下文会抛 `TypeError`（见 `MissingType.__bool__`），所以 `get(path) or fallback`
+这种写法要改成 `get(path, fallback)` —— 前者对 `0` / `False` 本来也是错的。"""
 
 
 @dataclass(frozen=True, slots=True)
