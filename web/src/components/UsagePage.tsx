@@ -23,10 +23,10 @@ import { clearUsageData, getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
 import type { UsagePeriod, UsageStats, UsageTimelinePoint } from "@/lib/types";
 import {
-  DEFAULT_MODEL_PRICING,
   costInputOf,
   estimateCost,
   loadPricing,
+  pricingFor,
   savePricing,
   type UsagePricing,
 } from "@/lib/usagePricing";
@@ -106,8 +106,8 @@ export function UsagePage() {
       if (p.tokens <= 0) return null;
       // 分桶数据没有按模型拆分，只能用「本周期出现过的模型」里的第一档单价近似；
       // 单模型（家用常态）下即精确，多模型时是近似，故仍带 ≈ 前缀。
-      const model = usage.data?.rows[0]?.model;
-      const pr = (model && pricing.byModel[model]) || DEFAULT_MODEL_PRICING;
+      const model = usage.data?.rows[0]?.model ?? "";
+      const pr = pricingFor(pricing, model);
       const v = estimateCost(
         costInputOf({
           input: p.text + p.video + p.audio,

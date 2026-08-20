@@ -11,12 +11,7 @@
 import { useTranslation } from "react-i18next";
 import type { TokenBreakdown, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
-import {
-  DEFAULT_MODEL_PRICING,
-  costInputOf,
-  estimateCost,
-  type UsagePricing,
-} from "@/lib/usagePricing";
+import { costInputOf, estimateCost, pricingFor, type UsagePricing } from "@/lib/usagePricing";
 import { HelpTip } from "./HelpTip";
 
 interface ModelRow {
@@ -124,7 +119,7 @@ export function UsageBreakdownTable({
               rows.map((r) => {
                 const cost = estimateCost(
                   costInputOf(r.breakdown),
-                  pricing.byModel[r.model] ?? DEFAULT_MODEL_PRICING,
+                  pricingFor(pricing, r.model),
                   pricing.per,
                 ).total;
                 return (

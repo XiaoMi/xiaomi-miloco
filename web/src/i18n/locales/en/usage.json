@@ -140,6 +140,7 @@
     "clearDialogTitle": "Clear usage data",
     "clearDialogBody": "This deletes all token usage records (live table + daily rollup).",
     "clearDialogWarn": "Cannot be undone — history is unrecoverable.",
-    "colCost": "Est. cost"
+    "colCost": "Est. cost",
+    "pricingPresetHint": "Pre-filled from the provider's public price list; you can override it."
   }
 }

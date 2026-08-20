@@ -140,6 +140,7 @@
     "clearDialogTitle": "清空用量数据",
     "clearDialogBody": "将删除全部 token 用量记录（实时表 + 日聚合）。",
     "clearDialogWarn": "不可恢复，历史无法找回。",
-    "colCost": "费用"
+    "colCost": "费用",
+    "pricingPresetHint": "已按服务商公开价目预填，可自行覆盖。"
   }
 }

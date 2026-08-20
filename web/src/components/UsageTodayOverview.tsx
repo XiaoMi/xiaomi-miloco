@@ -16,11 +16,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TokenBreakdown, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
-import {
-  DEFAULT_MODEL_PRICING,
-  estimateCost,
-  type UsagePricing,
-} from "@/lib/usagePricing";
+import { estimateCost, pricingFor, type UsagePricing } from "@/lib/usagePricing";
 import { costInputsByModel } from "./UsagePricingDialog";
 import { HelpTip } from "./HelpTip";
 
@@ -80,7 +76,7 @@ export function UsageTodayOverview({
   // 费用按模型分别算再加总：不同供应商价目不同，一份全局单价有第二个模型时必然错
   const cost = [...costInputsByModel(stats).entries()].reduce(
     (sum, [model, ci]) =>
-      sum + estimateCost(ci, pricing.byModel[model] ?? DEFAULT_MODEL_PRICING, pricing.per).total,
+      sum + estimateCost(ci, pricingFor(pricing, model), pricing.per).total,
     0,
   );
   const money =

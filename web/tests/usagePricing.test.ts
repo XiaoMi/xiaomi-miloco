@@ -14,6 +14,7 @@ import {
   cacheLooksUndiscounted,
   cacheOverstatePct,
   estimateCost,
+  knownPricingFor,
   loadPricing,
   pricingFor,
   savePricing,
@@ -106,6 +107,61 @@ describe("estimateCost — 不区分模态", () => {
     const a = estimateCost(T, FLAT).total;
     const b = estimateCost(T, { ...FLAT, video: 999 }).total;
     expect(b).toBeCloseTo(a, 10);
+  });
+});
+
+describe("已知模型预填 — mimo-v2.5", () => {
+  // 官方价目（https://mimo.mi.com/models/zh-CN/mimo-v2.5，2026-08-20）：
+  // 输入未命中 ¥1/M、输入命中 ¥0.02/M、输出 ¥2/M，且不按模态分价。
+  it("带不带厂商前缀都能命中，其它名字不命中", () => {
+    expect(knownPricingFor("mimo-v2.5")?.input).toBe(1);
+    expect(knownPricingFor("xiaomi/mimo-v2.5")?.input).toBe(1);
+    expect(knownPricingFor("MiMo-V2.5")?.input).toBe(1);
+    // 别把 pro / tts / v2 误当成 v2.5（页面未给它们的价）
+    expect(knownPricingFor("mimo-v2.5-pro")).toBeNull();
+    expect(knownPricingFor("mimo-v2.5-tts")).toBeNull();
+    expect(knownPricingFor("mimo-v2")).toBeNull();
+    expect(knownPricingFor("gemini-2.5-flash")).toBeNull();
+  });
+
+  it("三个价与官方一致，且默认走不区分模态", () => {
+    const pr = knownPricingFor("mimo-v2.5")!;
+    expect(pr.mode).toBe("flat");
+    expect([pr.input, pr.cache, pr.output]).toEqual([1, 0.02, 2]);
+  });
+
+  it("官方不按模态分价 → 切到区分模态算出来的钱必须一样，不能因为换视角就跳数", () => {
+    const pr = knownPricingFor("mimo-v2.5")!;
+    const flat = estimateCost(T, pr).total;
+    const byMod = estimateCost(T, { ...pr, mode: "modality" }).total;
+    expect(byMod).toBeCloseTo(flat, 10);
+  });
+
+  it("按 .5 实机口径复算，与官方价手算结果一致", () => {
+    // input 10.96M（其中 video 2.30M、audio 0）、output 189.1k、cache 5.39M
+    const t = {
+      text: 10_960_000 - 2_300_000,
+      video: 2_300_000,
+      audio: 0,
+      output: 189_100,
+      cache: 5_390_000,
+    };
+    const pr = knownPricingFor("mimo-v2.5")!;
+    // (10.96−5.39)×1 + 5.39×0.02 + 0.1891×2 = 5.57 + 0.1078 + 0.3782
+    expect(estimateCost(t, pr).total).toBeCloseTo(6.056, 3);
+    // 忽略命中折扣会高估到 ¥11.34
+    expect(estimateCost(t, { ...pr, cache: pr.input }).total).toBeCloseTo(11.338, 3);
+  });
+
+  it("pricingFor 优先级：住户存过的 > 预填 > 通用占位", () => {
+    const p = { currency: "¥", per: PER_MTOKENS, byModel: {} } as const;
+    expect(pricingFor({ ...p, byModel: {} }, "mimo-v2.5").input).toBe(1);
+    expect(pricingFor({ ...p, byModel: {} }, "mimo-v2.5").mode).toBe("flat");
+    // 存过的赢
+    const saved = { ...DEFAULT_MODEL_PRICING, input: 42 };
+    expect(pricingFor({ ...p, byModel: { "mimo-v2.5": saved } }, "mimo-v2.5").input).toBe(42);
+    // 未知模型落通用占位
+    expect(pricingFor({ ...p, byModel: {} }, "who-knows")).toEqual(DEFAULT_MODEL_PRICING);
   });
 });
 

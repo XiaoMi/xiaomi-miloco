@@ -15,11 +15,12 @@ import { useTranslation } from "react-i18next";
 import type { UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
 import {
-  DEFAULT_MODEL_PRICING,
   cacheLooksUndiscounted,
   cacheOverstatePct,
   costInputOf,
   estimateCost,
+  knownPricingFor,
+  pricingFor,
   type CostInput,
   type ModelPricing,
   type UsagePricing,
@@ -66,7 +67,7 @@ export function UsagePricingDialog({
   const [draft, setDraft] = useState<UsagePricing>(() => ({
     ...pricing,
     byModel: Object.fromEntries(
-      models.map((m) => [m, { ...(pricing.byModel[m] ?? DEFAULT_MODEL_PRICING) }]),
+      models.map((m) => [m, pricingFor(pricing, m)]),
     ),
   }));
   const [sel, setSel] = useState(models[0] ?? "");
@@ -81,7 +82,7 @@ export function UsagePricingDialog({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const pr: ModelPricing = draft.byModel[sel] ?? { ...DEFAULT_MODEL_PRICING };
+  const pr: ModelPricing = draft.byModel[sel] ?? pricingFor(draft, sel);
   const setPr = (patch: Partial<ModelPricing>) =>
     setDraft((d) => ({
       ...d,
@@ -92,7 +93,7 @@ export function UsagePricingDialog({
     const ci = byModel.get(m)!;
     return {
       model: m,
-      total: estimateCost(ci, draft.byModel[m] ?? DEFAULT_MODEL_PRICING, draft.per).total,
+      total: estimateCost(ci, draft.byModel[m] ?? pricingFor(draft, m), draft.per).total,
     };
   });
   const grandTotal = perModel.reduce((a, x) => a + x.total, 0);
@@ -186,6 +187,12 @@ export function UsagePricingDialog({
                 {t("usage.pricingModeModality")}
               </Chip>
             </Row>
+
+            {knownPricingFor(sel) && (
+              <p className="text-caption text-text-secondary mb-2">
+                {t("usage.pricingPresetHint")}
+              </p>
+            )}
 
             <div
               className="grid gap-3 sm:grid-cols-3 bg-bg-primary rounded-lg p-3.5 mb-3"
