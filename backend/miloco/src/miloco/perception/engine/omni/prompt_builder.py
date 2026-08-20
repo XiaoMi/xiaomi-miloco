@@ -378,12 +378,14 @@ def build_fused_payload(
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
         has_pets=_has_pets_for_scene(),
-        # 仅"本轮有候选却没渲染出 gallery"时额外置位；无候选窗口保持 matching_moot 原语义。
+        # 有候选却没渲染出 gallery → 置位。bool(candidates) 目前是防御性的：本标志的
+        # 三个消费方（selected_fields /「# 任务」身份行 / 实例 A 的 gate）都已先过
+        # has_identity=bool(candidates) 这道闸，无候选窗口置位与否不外显；留着是为了
+        # has_identity 将来与 candidates 解耦时不出意外。
         identity_match_disabled=matching_moot or (bool(candidates) and not prepared_gallery.entries),
         # 实例 B 的专名 / 泛称只跟"库空不空"：库非空时名册仍渲染真名（label_lookup 来自
         # list_persons()，不看 gallery_snapshot），示范 caption 叫"某人"会把已确认成员一起
-        # 带塌——他们的在场结论来自前几窗落定的 state，不依赖本轮 gallery。上一行的
-        # bool(candidates) 只挡住"无候选"那一半，挡不住"有候选 + 名册有名 + 本轮无参考图"。
+        # 带塌——他们的在场结论来自前几窗落定的 state，不依赖本轮 gallery。
         identity_library_empty=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)

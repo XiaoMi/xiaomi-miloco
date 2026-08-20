@@ -1316,11 +1316,12 @@ class TestNoAudioPromptDropsAudioFieldRefs:
 # 本轮无成员参考图 → identity 精简为 no_person-only（matching_moot / identity_match_disabled）
 # =============================================================================
 class TestIdentityMatchDisabled:
-    """库空时 identities 字段改精简版（只判 unknown/no_person、不做成员匹配）。
+    """本轮拿不到任何成员参考图时 identities 改精简版（只判 unknown/no_person、不做成员匹配）。
 
-    这是"gallery 为空不该激活成员匹配"修复的 prompt 侧断言：schema 的 name 域收成
+    这是"没有 gallery 就不该激活成员匹配"修复的 prompt 侧断言：schema 的 name 域收成
     <unknown|no_person>、字段说明砍掉全套面部匹配规则、gallery 段整段不渲染；no_person
-    判定链路不动（name 仍走 no_person）。库非空（默认 matching_moot=False）行为不变。
+    判定链路不动（name 仍走 no_person）。三个来源同解——库空（matching_moot=True）、
+    库非空但快照无可用样本、「全或无」放弃；参考图真渲出来时（默认路径）行为不变。
     """
 
     _MATCH_ONLY_MARKER = "本人正向吻合"   # 只在完整版 IDENTITY spec 里出现
@@ -1383,6 +1384,11 @@ class TestIdentityMatchDisabled:
         # system prompt：用精简版 identity spec
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
+        # 库空 → 实例 B 用泛称版。这两行钉住 build_fused_payload 里
+        # identity_library_empty=matching_moot 那根接线：删掉它本条会红，
+        # 而只喂 SceneDescriptor 的单元用例不会。
+        assert "某人坐在电脑前" in system_prompt
+        assert "小明坐在电脑前" not in system_prompt
 
     def test_empty_snapshot_slims_spec_even_without_matching_moot(self):
         """库非空但本轮 gallery_snapshot 为空（成员一个可用样本都没有）→ 同样走精简版。
@@ -1410,6 +1416,11 @@ class TestIdentityMatchDisabled:
         assert "待识别 track" in main_text
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
+        # 反向对照：库非空、仅本轮无参考图 → 规范降精简版，但实例 B 仍带名。
+        # 与 test_matching_moot_skips_gallery_block_keeps_track_list 合起来
+        # 钉住"两个字段没被重新合并成一个"。
+        assert "小明坐在电脑前" in system_prompt
+        assert "某人坐在电脑前" not in system_prompt
 
     # ---- follow-up（PR #407 code review）：库空时「任务描述 / 示例」也须收敛，非只 gallery/字段说明 ----
     _TASK_MATCH_MARKER = "对照图片库"    # 只在完整版「# 任务」身份行里出现
@@ -1627,7 +1638,7 @@ class TestGalleryPreflightDrivesIdentitySpec:
         )
 
     @staticmethod
-    def _build(gallery_snapshot, candidates):
+    def _build(gallery_snapshot, candidates, *, matching_moot=False):
         from miloco.perception.engine.omni.prompt_builder import build_fused_payload
 
         with patch(
@@ -1637,6 +1648,7 @@ class TestGalleryPreflightDrivesIdentitySpec:
             fused = build_fused_payload(
                 packets=[_video_route_packet()], context=OmniContext(),
                 candidates=candidates, gallery_snapshot=gallery_snapshot,
+                matching_moot=matching_moot,
             )
         messages = fused["messages"]
         main = _multimodal_user_content(messages)
@@ -1749,11 +1761,15 @@ class TestGalleryPreflightDrivesIdentitySpec:
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
 
-    def test_no_candidate_window_keeps_named_example(self):
-        """无候选窗口不受影响：identity_match_disabled 还被 _render_examples 读取，
-        且那处不看 has_identity——跟着翻会把"名册里有名字"的窗口也降级成泛称示例。"""
-        system_prompt, _ = self._build({"pid-1": self._samples()}, [])
-        assert "小明" in system_prompt          # 带名版 _EXAMPLE_CHAIN
+    def test_no_candidate_window_example_b_follows_library_emptiness(self):
+        """无候选窗口的实例 B 只跟"库空不空"：库非空 → 带名版，库空 → 泛称版。
+
+        （identity_match_disabled 在无候选窗口取什么值都不外显：它的三个消费方
+        都先过 has_identity=bool(candidates) 这道闸。）"""
+        named, _ = self._build({"pid-1": self._samples()}, [])
+        assert "小明坐在电脑前" in named
+        moot, _ = self._build({}, [], matching_moot=True)
+        assert "某人坐在电脑前" in moot
 
 class TestAdaptiveResolution:
     """Smart Crop(智能裁切增强)在 fused 路径的接线。
