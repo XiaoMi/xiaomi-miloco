@@ -856,7 +856,7 @@ export function UsageOmniConfig() {
                 type="button"
                 onClick={confirmDelete}
                 disabled={deleting}
-                className="text-body px-4 py-2 rounded-lg bg-error text-white hover:bg-error/90 disabled:opacity-60"
+                className="text-body px-4 py-2 rounded-lg bg-error text-text-inverse hover:brightness-95 disabled:opacity-60 transition-[filter,opacity]"
               >
                 {deleting ? t("usage.deleting") : t("usage.delete")}
               </button>

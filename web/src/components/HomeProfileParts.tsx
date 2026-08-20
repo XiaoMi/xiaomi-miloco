@@ -175,7 +175,7 @@ export function EntryRow({
     <button
       type="button"
       onClick={onOpen}
-      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary/50 -mx-2 px-2 rounded-md"
+      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary -mx-2 px-2 rounded-md"
     >
       <span className="min-w-0 flex-1 text-body text-text-primary break-words">
         {who && <span className="text-text-secondary">{who} · </span>}
@@ -221,7 +221,7 @@ export function CandidateRow({
     <button
       type="button"
       onClick={onOpen}
-      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary/50 -mx-2 px-2 rounded-md"
+      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary -mx-2 px-2 rounded-md"
     >
       <span className="status-dot status-dot-info shrink-0" />
       <span className="min-w-0 flex-1 text-body text-text-primary break-words">

@@ -93,7 +93,7 @@ function Table({ rows, windowMs, t }: { rows: PerfAgentRun[]; windowMs: number; 
             return (
               <tr
                 key={r.run_id}
-                className="border-b border-border last:border-b-0 hover:bg-bg-primary/40"
+                className="border-b border-border last:border-b-0 hover:bg-bg-primary"
               >
                 <td className="px-5 md:px-6 py-2 mono text-text-secondary whitespace-nowrap">
                   {formatPerfTs(r.timestamp, { spanMs: windowMs, withSec: true })}
