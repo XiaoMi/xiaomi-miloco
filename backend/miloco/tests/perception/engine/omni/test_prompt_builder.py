@@ -1605,7 +1605,6 @@ def _adaptive_packet(
     )
 
 
-
 # =============================================================================
 # gallery pre-flight 决定 identities 选版（库非空但本轮没渲染出 gallery 的分叉）
 # =============================================================================
@@ -1755,6 +1754,13 @@ class TestGalleryPreflightDrivesIdentitySpec:
                 candidates=[self._candidate()], gallery_snapshot={},
             )
         system_prompt = fused["messages"][0]["content"]
+        # 档案不在 system（build_system_prompt 传的是 include_home_profile=False），
+        # 而是 system 之后的独立 user 消息——不断言它，"共存"这个前提就是空转的
+        profile_msgs = [
+            m for m in fused["messages"][1:] if "# 家庭档案" in str(m["content"])
+        ]
+        assert len(profile_msgs) == 1
+        assert "张三" in str(profile_msgs[0]["content"])
         assert "本轮无注册成员" not in system_prompt
         assert "未提供" in system_prompt          # 新措辞：按"没有参考图"陈述
         assert "不得据此" in system_prompt        # 护栏：禁止从档案/名册取名安给待识别 track
@@ -1770,6 +1776,7 @@ class TestGalleryPreflightDrivesIdentitySpec:
         assert "小明坐在电脑前" in named
         moot, _ = self._build({}, [], matching_moot=True)
         assert "某人坐在电脑前" in moot
+
 
 class TestAdaptiveResolution:
     """Smart Crop(智能裁切增强)在 fused 路径的接线。

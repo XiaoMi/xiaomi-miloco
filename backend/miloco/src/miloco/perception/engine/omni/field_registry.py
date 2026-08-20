@@ -227,11 +227,12 @@ class SceneDescriptor:
         ``prompt_builder.build_fused_payload`` 的 gallery pre-flight）；参考图可用时为
         False，用完整匹配版 ``IDENTITY``。
     identity_library_empty —— 身份库本身为空（``list_persons()`` 为 0 条，即 omni.py 传进
-        来的 ``matching_moot``）。**只**驱动「# 输出实例」里实例 B 的专名 / 泛称选版：泛称
-        版的前提是"本轮不可能产出任何成员名"，而这只有库空才成立——库非空、仅本轮无参考图
-        时名册照样渲染 ``已识别人物：张三[bbox=…]``，此时示范 caption 叫"某人"会把已确认
-        成员一并带塌。不要拿 ``identity_match_disabled`` 代替它（后者还含"库非空但无参考
-        图"两个来源）。
+        来的 ``matching_moot``）。**只**驱动「# 输出实例」里实例 B 的专名 / 泛称选版：库空
+        是"本轮不可能产出任何成员名"的充分条件（名册必然是「已识别人物：无」），示范才该改
+        叫泛称；库非空、仅本轮无参考图时名册**常常**仍渲染 ``已识别人物：张三[bbox=…]``，
+        此时示范 caption 叫"某人"会把已确认成员一并带塌（名册恰好也空的残留窗口仍走带名版，
+        属已知权衡，见 constants._EXAMPLE_CHAIN_NO_NAME 的注释）。不要拿
+        ``identity_match_disabled`` 代替它（后者还含"库非空但无参考图"两个来源）。
     """
 
     route: Literal["video", "audio"]
