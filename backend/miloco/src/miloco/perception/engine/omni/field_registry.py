@@ -226,6 +226,12 @@ class SceneDescriptor:
         person 的 body composite 取不到）。②③ 仅在 ``has_identity=True`` 时置位（判据见
         ``prompt_builder.build_fused_payload`` 的 gallery pre-flight）；参考图可用时为
         False，用完整匹配版 ``IDENTITY``。
+    identity_library_empty —— 身份库本身为空（``list_persons()`` 为 0 条，即 omni.py 传进
+        来的 ``matching_moot``）。**只**驱动「# 输出实例」里实例 B 的专名 / 泛称选版：泛称
+        版的前提是"本轮不可能产出任何成员名"，而这只有库空才成立——库非空、仅本轮无参考图
+        时名册照样渲染 ``已识别人物：张三[bbox=…]``，此时示范 caption 叫"某人"会把已确认
+        成员一并带塌。不要拿 ``identity_match_disabled`` 代替它（后者还含"库非空但无参考
+        图"两个来源）。
     """
 
     route: Literal["video", "audio"]
@@ -235,6 +241,7 @@ class SceneDescriptor:
     has_speech: bool = True
     has_pets: bool = False
     identity_match_disabled: bool = False
+    identity_library_empty: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL
@@ -248,8 +255,10 @@ class SceneDescriptor:
         if not self.has_pets:
             fields = [f for f in fields if not f.requires_pets]
         if self.has_identity:
-            # 库空 → 精简版（不做成员匹配、只判 unknown/no_person）；两者 name 同为 "identities",
-            # 故 render_schema / render_field_spec / 解析层都无感。
+            # 本轮无成员参考图（库空 / 无可用样本 / 「全或无」放弃，三来源同解，见上方
+            # identity_match_disabled 字段说明）→ 精简版（不做成员匹配、只判
+            # unknown/no_person）；两者 name 同为 "identities"，故 render_schema /
+            # render_field_spec / 解析层都无感。
             ident = IDENTITY_NO_MATCH if self.identity_match_disabled else _REGISTRY["identities"]
             fields = [ident, *fields]
         return fields
