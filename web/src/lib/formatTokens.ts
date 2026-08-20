@@ -13,9 +13,27 @@ export function humanTokens(n: number): string {
   return `${Math.round(n)}`;
 }
 
-// 极紧空间下的更短格式（图表轴标），同阈值但省一位小数。
+// 极紧空间下的更短格式，同阈值但省一位小数。
+//
+// ⚠️ 不要用它标坐标轴刻度：它把 2,500 舍成 "3k"，而刻度线画在 2.5k 的位置上，
+// 柱顶会越过自己被标注的那根线。轴刻度用 axisTokens。
 export function humanTokensShort(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
+  return `${Math.round(n)}`;
+}
+
+// 坐标轴刻度专用：整数不带小数点，非整数保留一位。
+// 纵轴上限取 1/2/5×10ⁿ 的漂亮数，中线因此可能是 2.5×10ⁿ 这种半数，
+// 必须如实标成 "2.5k"，否则标注与刻度线位置对不上。
+export function axisTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const v = n / 1_000_000;
+    return `${Number.isInteger(v) ? v : v.toFixed(1)}M`;
+  }
+  if (n >= 1_000) {
+    const v = n / 1_000;
+    return `${Number.isInteger(v) ? v : v.toFixed(1)}k`;
+  }
   return `${Math.round(n)}`;
 }

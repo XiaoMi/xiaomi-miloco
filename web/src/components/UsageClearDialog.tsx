@@ -1,0 +1,112 @@
+/**
+ * 「清空用量数据」确认弹窗。形制与模型配置里的删除弹窗一致。
+ *
+ * 为什么从行内确认改成弹窗，两个原因：
+ *  - 行内确认把后果感压得太轻——这是本页唯一不可恢复的操作，却和「切周期」长得差不多。
+ *  - 行内确认会把承载焦点的按钮连带卸掉：点「清空数据」后那个 <button> 被换成 <span>，
+ *    焦点掉回 <body>，下一次 Tab 从整份文档开头重新开始，键盘用户根本走不到确认按钮，
+ *    而且没有任何朗读提示告诉他弹出了什么。弹窗则能把焦点收进来、Esc 收起、结束后归位。
+ */
+
+import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { IconX } from "@/lib/icons";
+import { toast } from "./Toast";
+
+export function UsageClearDialog({
+  clear,
+  onCleared,
+  onClose,
+}: {
+  clear: () => Promise<void>;
+  onCleared: () => void;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  // 打开时焦点落「取消」——破坏性操作不把默认焦点放在执行键上
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  async function doClear() {
+    setBusy(true);
+    try {
+      await clear();
+      toast(t("usage.clearSuccess"), "ok");
+      onCleared();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("usage.clearFailed"), "danger");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-end md:items-center justify-center
+                 bg-black/40 backdrop-blur-sm p-0 md:p-5"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="usage-clear-title"
+        className="modal-surface w-full md:max-w-[440px] rounded-t-2xl md:rounded-xl
+                   border border-border shadow-lg p-5 md:p-6"
+      >
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <h2 id="usage-clear-title" className="text-title font-semibold">
+            {t("usage.clearDialogTitle")}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            aria-label={t("common.close")}
+            className="shrink-0 rounded-full p-1 text-text-secondary hover:text-text-primary
+                       hover:bg-bg-tertiary disabled:opacity-50 transition-colors"
+          >
+            <IconX />
+          </button>
+        </div>
+
+        <p className="text-body text-text-secondary">{t("usage.clearDialogBody")}</p>
+        <p className="text-caption text-error bg-error-bg rounded-lg px-3 py-2 mt-3">
+          {t("usage.clearDialogWarn")}
+        </p>
+
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="text-body px-4 py-2 rounded-lg bg-bg-primary border border-border
+                       text-text-primary hover:border-border-strong disabled:opacity-60
+                       transition-colors"
+          >
+            {t("usage.cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={doClear}
+            disabled={busy}
+            className="text-body px-4 py-2 rounded-lg bg-error text-text-inverse
+                       hover:brightness-95 disabled:opacity-60 transition-[filter,opacity]"
+          >
+            {busy ? t("usage.clearing") : t("usage.clearConfirm")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -7,9 +7,12 @@ import type { ReactNode } from "react";
 export function HelpTip({
   text,
   className = "",
+  wide = false,
 }: {
   text: ReactNode;
   className?: string;
+  /** 长说明用：改成定宽换行，否则 whitespace-nowrap 会把整段拉成一行超出视口。 */
+  wide?: boolean;
 }) {
   return (
     <span className={`relative inline-flex group align-middle ${className}`}>
@@ -22,7 +25,9 @@ export function HelpTip({
       </button>
       <span
         role="tooltip"
-        className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-lg border border-border bg-bg-secondary px-2.5 py-1.5 text-caption font-normal text-text-secondary shadow-sm opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+        className={`pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 rounded-lg border border-border bg-bg-secondary px-2.5 py-1.5 text-caption font-normal leading-relaxed text-text-secondary shadow-sm opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${
+          wide ? "w-64 whitespace-normal text-left" : "whitespace-nowrap"
+        }`}
       >
         {text}
       </span>

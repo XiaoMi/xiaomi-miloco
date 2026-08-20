@@ -1,249 +1,245 @@
 /**
- * 总览：大字 token 总数 + 调用次数 / 缓存命中 + 模态构成饼图。
- * 展示周期由 UsagePage 统一控制并通过 stats.period 传入（标题随之变化）。
+ * 「Token 用量」卡的左栏：总量 hero + 费用估算 + 模态构成环形图 + 横排图例。
+ *
+ * 周期选择器与「清空数据」已移到 UsagePage 的工具条——筛选控件该一行统管它作用的
+ * 全部内容，埋在某一段里会让人为了改一个条件往回滚。
+ *
+ * 形态取环形而非饼：品牌语言 §7 明写「占比 2-4 项 → 环形（donut），不用饼图」，
+ * 禁忌里也有「饼图 > 5 片」。环心留白还多出一个去处——悬停某模态时显示该模态读数，
+ * 而不是把 hero 已经给过的总量再复读一遍（一屏只该有一个 hero 数字）。
+ *
+ * 图例横排在环右侧而不是竖在环下面：左栏高度因此由环决定，比竖排省约 90px；顺带
+ * 整对比线上「饼 + 竖排图例」那一行还窄，窄屏反而不再溢出。
  */
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { TokenBreakdown, UsagePeriod, UsageStats } from "@/lib/types";
-import { clearUsageData } from "@/api";
+import type { TokenBreakdown, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
-import { Segmented } from "./Segmented";
-import { toast } from "./Toast";
+import {
+  DEFAULT_MODEL_PRICING,
+  estimateCost,
+  type UsagePricing,
+} from "@/lib/usagePricing";
+import { costInputsByModel } from "./UsagePricingDialog";
+import { HelpTip } from "./HelpTip";
 
-const PERIOD_KEYS: Record<UsagePeriod, string> = {
-  today: "usage.periodToday",
-  week: "usage.periodWeek",
-  month: "usage.periodMonth",
-};
+/** 环形图几何：viewBox 140×140，半径 54、环宽 20。 */
+const R = 54;
+const SW = 20;
+const CIRC = 2 * Math.PI * R;
+/** 扇区之间留 2.5 个单位的表面间隙——用留白分隔，而不是给色块描边。 */
+const GAP = 2.5;
 
-// 柔和偏暗的低饱和配色：避免高亮刺眼；浅底上用"压暗的色值"而非降透明度（降透明只会更淡）。
-// 音频用偏暗的金黄，跟视频的哑橙拉开区分。
-const COLOR = {
-  // 蓝与时间分布柱子对齐：info(#2563EB) @ opacity-70 叠在白卡上的等效实色。
-  text: "#6692F1",
-  video: "#F2A468", // 暖橙
-  audio: "#F0C94C", // 金黄
-  output: "#63C589", // 绿
-};
+type ModalityKey = "text" | "video" | "audio" | "output";
 
-interface Seg {
-  label: string;
-  value: number;
-  color: string;
+const MODALITIES: {
+  key: ModalityKey;
+  labelKey: string;
+  stroke: string;
+  dot: string;
+}[] = [
+  { key: "text", labelKey: "usage.modalityText", stroke: "stroke-usage-text", dot: "bg-usage-text" },
+  { key: "video", labelKey: "usage.modalityVideo", stroke: "stroke-usage-video", dot: "bg-usage-video" },
+  { key: "audio", labelKey: "usage.modalityAudio", stroke: "stroke-usage-audio", dot: "bg-usage-audio" },
+  { key: "output", labelKey: "usage.modalityOutput", stroke: "stroke-usage-output", dot: "bg-usage-output" },
+];
+
+/**
+ * 模态构成。text 是 `input − video − audio` 的残差，含图片与系统提示——后端未单列
+ * image 模态，所以它不是「纯文本」。四项之和 = input + output = 总量。
+ */
+function modalityValues(b: TokenBreakdown): Record<ModalityKey, number> {
+  return {
+    text: Math.max(b.input - b.video - b.audio, 0),
+    video: b.video,
+    audio: b.audio,
+    output: b.output,
+  };
 }
 
-/** 模态构成：文本 = input − video − audio；只列非零项。 */
-function modalitySegments(b: TokenBreakdown, t: (k: string) => string): Seg[] {
-  const text = Math.max(b.input - b.video - b.audio, 0);
-  return [
-    { label: t("usage.modalityText"), value: text, color: COLOR.text },
-    { label: t("usage.modalityVideo"), value: b.video, color: COLOR.video },
-    { label: t("usage.modalityAudio"), value: b.audio, color: COLOR.audio },
-    { label: t("usage.modalityOutput"), value: b.output, color: COLOR.output },
-  ].filter((s) => s.value > 0);
-}
-
-/** SVG 弧形饼图（扇区分界与圆边都走浏览器抗锯齿，避免 conic-gradient 的锯齿）。 */
-function Pie({ segments, size = 190 }: { segments: Seg[]; size?: number }) {
-  const nonzero = segments.filter((s) => s.value > 0);
-  const total = nonzero.reduce((s, x) => s + x.value, 0);
-  const R = 50;
-  const C = 50; // viewBox 100×100，圆心 (50,50) 半径 50
-
-  if (total <= 0) {
-    return (
-      <div
-        className="rounded-full bg-bg-primary shrink-0"
-        style={{ width: size, height: size }}
-        aria-hidden
-      />
-    );
-  }
-
-  // 只有一个非零扇区时画整圆，避免起止角相同的退化弧
-  if (nonzero.length === 1) {
-    return (
-      <svg width={size} height={size} viewBox="0 0 100 100" className="shrink-0" aria-hidden>
-        <circle cx={C} cy={C} r={R} fill={nonzero[0].color} />
-      </svg>
-    );
-  }
-
-  let acc = 0;
-  const paths = nonzero.map((s) => {
-    const a0 = (acc / total) * 2 * Math.PI;
-    acc += s.value;
-    const a1 = (acc / total) * 2 * Math.PI;
-    const x0 = C + R * Math.sin(a0);
-    const y0 = C - R * Math.cos(a0);
-    const x1 = C + R * Math.sin(a1);
-    const y1 = C - R * Math.cos(a1);
-    const large = a1 - a0 > Math.PI ? 1 : 0;
-    return (
-      <path
-        key={s.label}
-        d={`M ${C} ${C} L ${x0.toFixed(3)} ${y0.toFixed(3)} A ${R} ${R} 0 ${large} 1 ${x1.toFixed(3)} ${y1.toFixed(3)} Z`}
-        fill={s.color}
-      />
-    );
-  });
-
-  return (
-    <svg width={size} height={size} viewBox="0 0 100 100" className="shrink-0" aria-hidden>
-      {paths}
-    </svg>
-  );
-}
-
-/** 饼图 + 标题 + 图例（名称 / token / 占比），整体居中竖排。 */
-function PieBlock({ title, segments }: { title?: string; segments: Seg[] }) {
+export function UsageTodayOverview({
+  stats,
+  pricing,
+  onOpenPricing,
+}: {
+  stats: UsageStats;
+  pricing: UsagePricing;
+  onOpenPricing: () => void;
+}) {
   const { t } = useTranslation();
-  const total = segments.reduce((s, x) => s + x.value, 0);
+  const { totals } = stats;
+  const [hover, setHover] = useState<ModalityKey | null>(null);
+
+  const values = modalityValues(totals);
+  const segments = MODALITIES.map((m) => ({ ...m, value: values[m.key] })).filter(
+    (s) => s.value > 0,
+  );
+  const total = stats.total_tokens;
+
+  // 费用按模型分别算再加总：不同供应商价目不同，一份全局单价有第二个模型时必然错
+  const cost = [...costInputsByModel(stats).entries()].reduce(
+    (sum, [model, ci]) =>
+      sum + estimateCost(ci, pricing.byModel[model] ?? DEFAULT_MODEL_PRICING, pricing.per).total,
+    0,
+  );
+  const money =
+    pricing.currency + (cost >= 100 ? cost.toFixed(0) : cost >= 10 ? cost.toFixed(1) : cost.toFixed(2));
+
+  const cacheRate = totals.input > 0 ? (totals.cache / totals.input) * 100 : null;
+  const sub = [
+    t("usage.callsSummary", { calls: stats.calls.toLocaleString() }),
+    cacheRate != null ? t("usage.cacheHitSummary", { rate: cacheRate.toFixed(1) }) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <div className="flex-1 min-w-[280px] flex justify-center">
-      <div className="flex items-center gap-5">
-        <div className="flex flex-col items-center">
-          {title ? (
-            <div className="text-body font-medium text-text-primary text-center mb-3">
-              {title}
-            </div>
-          ) : null}
-          <Pie segments={segments} />
+    <div>
+      {/* 总量与费用同一行、底部对齐：两条副行落在同一基线上。费用字号低一档——
+          它是估算值，不该跟 hero 抢注意力。 */}
+      <div className="flex items-end gap-4 flex-wrap">
+        <div>
+          <div className="flex items-baseline gap-2.5 flex-wrap">
+            <span className="text-display-lg num text-text-primary">{humanTokens(total)}</span>
+            <span className="text-title text-text-secondary font-normal">
+              {t("usage.tokensUnit")}
+            </span>
+          </div>
+          <div className="text-caption text-text-tertiary mt-0.5">{sub}</div>
         </div>
-        <div className="text-caption flex flex-col gap-1.5">
+
+        <div className="flex flex-col">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-caption text-text-tertiary">≈</span>
+            <span className="text-display num text-text-secondary">{money}</span>
+          </div>
+          <div className="text-caption text-text-tertiary mt-0.5 flex items-center gap-1.5 flex-wrap">
+            <span>{t("usage.costEstimate")}</span>
+            <HelpTip text={t("usage.costHelp")} wide />
+            <button
+              type="button"
+              onClick={onOpenPricing}
+              className="text-caption px-2 py-0.5 rounded-md border border-border
+                         text-text-secondary hover:text-text-primary hover:border-border-strong
+                         transition-colors"
+            >
+              {t("usage.pricingOpen")}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 环形图 + 横排图例 */}
+      <div className="flex items-center gap-4 flex-wrap mt-5">
+        <Donut
+          segments={segments}
+          total={total}
+          hover={hover}
+          onHover={setHover}
+          centerLabel={
+            hover
+              ? {
+                  name: t(MODALITIES.find((m) => m.key === hover)!.labelKey),
+                  value: humanTokens(values[hover]),
+                  pct: total > 0 ? `${((values[hover] / total) * 100).toFixed(1)}%` : "—",
+                }
+              : null
+          }
+        />
+        <ul
+          className="text-caption flex flex-col gap-1.5 shrink-0"
+          aria-label={t("usage.legendAria")}
+        >
           {segments.length === 0 ? (
-            <span className="text-text-tertiary">{t("usage.noUsage")}</span>
+            <li className="text-text-secondary">{t("usage.noUsage")}</li>
           ) : (
-            segments.map((s) => {
-              const pct = total > 0 ? (s.value / total) * 100 : 0;
-              return (
-                <span key={s.label} className="inline-flex items-center gap-1.5">
-                  <span
-                    className="inline-block w-2 h-2 rounded-full shrink-0"
-                    style={{ background: s.color }}
-                  />
-                  <span className="text-text-primary">{s.label}</span>
-                  <span className="num text-text-tertiary">
-                    {humanTokens(s.value)}
-                  </span>
-                  <span className="num text-text-tertiary">{pct.toFixed(1)}%</span>
+            segments.map((s) => (
+              <li
+                key={s.key}
+                className="grid grid-cols-[10px_auto_1fr_auto] items-center gap-2"
+                onMouseEnter={() => setHover(s.key)}
+                onMouseLeave={() => setHover(null)}
+              >
+                <span className={`w-2.5 h-2.5 rounded-sm shrink-0 ${s.dot}`} aria-hidden />
+                <span className="text-text-primary whitespace-nowrap">{t(s.labelKey)}</span>
+                {/* 数值不用 text-tertiary：它在白卡上只有 2.81:1，承不住读数 */}
+                <span className="num text-text-secondary text-right">{humanTokens(s.value)}</span>
+                <span className="num text-text-primary text-right min-w-[46px]">
+                  {total > 0 ? `${((s.value / total) * 100).toFixed(1)}%` : "—"}
                 </span>
-              );
-            })
+              </li>
+            ))
           )}
-        </div>
+        </ul>
       </div>
     </div>
   );
 }
 
-interface Props {
-  stats: UsageStats;
-  period: UsagePeriod;
-  onPeriodChange: (p: UsagePeriod) => void;
-  /** 清空用量数据成功后回调（让上层重取）。 */
-  onCleared?: () => void;
-  /** 嵌入「Token 用量」大格时去掉自身卡片外壳。 */
-  embedded?: boolean;
-}
-
-export function UsageTodayOverview({
-  stats,
-  period,
-  onPeriodChange,
-  onCleared,
-  embedded = false,
-}: Props) {
-  const { t } = useTranslation();
-  const { totals } = stats;
-  const [confirming, setConfirming] = useState(false);
-  const [clearing, setClearing] = useState(false);
-
-  const periodOptions = (Object.keys(PERIOD_KEYS) as UsagePeriod[]).map((k) => ({
-    key: k,
-    label: t(PERIOD_KEYS[k]),
-  }));
-
-  async function doClear() {
-    setClearing(true);
-    try {
-      await clearUsageData();
-      setConfirming(false);
-      toast(t("usage.clearSuccess"), "ok");
-      onCleared?.();
-    } catch (e) {
-      toast(e instanceof Error ? e.message : t("usage.clearFailed"), "danger");
-    } finally {
-      setClearing(false);
-    }
+function Donut({
+  segments,
+  total,
+  hover,
+  onHover,
+  centerLabel,
+  size = 128,
+}: {
+  segments: { key: ModalityKey; stroke: string; value: number }[];
+  total: number;
+  hover: ModalityKey | null;
+  onHover: (k: ModalityKey | null) => void;
+  centerLabel: { name: string; value: string; pct: string } | null;
+  size?: number;
+}) {
+  // 环本身是视觉产物：名称、数值、占比都在紧邻的图例里，读屏走图例即可
+  const arcs: { key: ModalityKey; stroke: string; dash: string; offset: number }[] = [];
+  let acc = 0;
+  for (const s of segments) {
+    const len = total > 0 ? (s.value / total) * CIRC : 0;
+    const shown = Math.max(len - GAP, 0.4);
+    arcs.push({ key: s.key, stroke: s.stroke, dash: `${shown} ${CIRC - shown}`, offset: -acc });
+    acc += len;
   }
 
   return (
-    <section
-      className={
-        embedded
-          ? ""
-          : "rounded-xl bg-bg-secondary border border-border shadow-sm p-5 md:p-6"
-      }
-      aria-labelledby="usage-today-title"
-    >
-      {/* 标题 + 清空 + 周期选择器（右上角，与时间分布卡的粒度选择器统一） */}
-      <div className="flex items-baseline justify-between flex-wrap gap-3 mb-4">
-        <h2 id="usage-today-title" className="text-title">
-          {t("usage.overviewHeading", { period: t(PERIOD_KEYS[stats.period]) })}
-        </h2>
-        <div className="flex items-center gap-3">
-          {confirming ? (
-            <span className="inline-flex items-center gap-2 text-caption">
-              <span className="text-text-secondary">{t("usage.clearConfirmPrompt")}</span>
-              <button
-                type="button"
-                onClick={doClear}
-                disabled={clearing}
-                className="px-2.5 py-1 rounded-md bg-error text-white hover:opacity-90 disabled:opacity-60"
-              >
-                {clearing ? t("usage.clearing") : t("usage.clearConfirm")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirming(false)}
-                disabled={clearing}
-                className="px-2.5 py-1 rounded-md bg-bg-primary border border-border text-text-primary"
-              >
-                {t("usage.cancel")}
-              </button>
-            </span>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setConfirming(true)}
-              className="text-caption text-text-tertiary hover:text-error"
-            >
-              {t("usage.clearData")}
-            </button>
-          )}
-          <Segmented
-            ariaLabel={t("usage.statsPeriodAria")}
-            value={period}
-            onChange={onPeriodChange}
-            options={periodOptions}
-          />
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg viewBox="0 0 140 140" width={size} height={size} className="block" aria-hidden>
+        {arcs.length === 0 ? (
+          <circle cx={70} cy={70} r={R} fill="none" strokeWidth={SW} className="stroke-bg-tertiary" />
+        ) : (
+          arcs.map((a) => (
+            <circle
+              key={a.key}
+              cx={70}
+              cy={70}
+              r={R}
+              fill="none"
+              strokeWidth={SW}
+              strokeDasharray={arcs.length === 1 ? undefined : a.dash}
+              strokeDashoffset={arcs.length === 1 ? undefined : a.offset}
+              transform="rotate(-90 70 70)"
+              className={`${a.stroke} transition-opacity cursor-pointer ${
+                hover && hover !== a.key ? "opacity-30" : "opacity-100"
+              }`}
+              onMouseEnter={() => onHover(a.key)}
+              onMouseLeave={() => onHover(null)}
+            />
+          ))
+        )}
+      </svg>
+      {/* 环心：默认留白，悬停时才给该模态读数——总量已由 hero 承担，复读属语义重复 */}
+      {centerLabel && (
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center text-center px-2.5
+                     pointer-events-none"
+          aria-hidden
+        >
+          <span className="text-caption text-text-secondary leading-tight">{centerLabel.name}</span>
+          <span className="text-body num text-text-primary leading-tight">{centerLabel.value}</span>
+          <span className="text-caption text-text-secondary leading-tight">{centerLabel.pct}</span>
         </div>
-      </div>
-
-      {/* 大数字(调用次数 / 缓存命中已移到明细表按模型展示) */}
-      <div className="flex items-baseline gap-3 mb-5">
-        <span className="text-display-lg num text-text-primary">
-          {humanTokens(stats.total_tokens)}
-        </span>
-        <span className="text-title text-text-secondary font-normal">{t("usage.tokensUnit")}</span>
-      </div>
-
-      {/* 模态构成饼图(单饼,标题省略——图例已标明各模态) */}
-      <div className="flex flex-wrap gap-x-8 gap-y-5">
-        <PieBlock segments={modalitySegments(totals, t)} />
-      </div>
-    </section>
+      )}
+    </div>
   );
 }
