@@ -1631,7 +1631,7 @@ class TestGalleryPreflightDrivesIdentitySpec:
 
     # ---- pre-flight 纯函数 ----
 
-    def test_preflight_empty_snapshot_no_entries_no_giveup(self):
+    def test_preflight_empty_snapshot_no_entries(self):
         from miloco.perception.engine.omni.prompt_builder import (
             FusedPromptConfig,
             _prepare_gallery_entries,
@@ -1639,10 +1639,14 @@ class TestGalleryPreflightDrivesIdentitySpec:
 
         got = _prepare_gallery_entries({}, FusedPromptConfig())
         assert got.entries == []
-        assert got.give_up_reason is None
 
-    def test_preflight_bad_body_gives_up_whole_gallery(self):
-        """「全或无」：一人 body composite 取不到 → 整段放弃（不能只少注入一个人）。"""
+    def test_preflight_bad_body_gives_up_whole_gallery(self, caplog):
+        """「全或无」：一人 body composite 取不到 → 整段放弃（不能只少注入一个人）。
+
+        放弃原因只进 ``event=fused_gallery_giveup`` 日志（结构体不携带只写不读的字段），
+        故经 caplog 断言原因里点到了取不到样本的那个人。"""
+        import logging
+
         from miloco.perception.engine.omni.prompt_builder import (
             FusedPromptConfig,
             _prepare_gallery_entries,
@@ -1652,10 +1656,13 @@ class TestGalleryPreflightDrivesIdentitySpec:
             "pid-1": self._samples("pid-1", "张三"),
             "pid-2": self._samples("pid-2", "李四", body=b""),
         }
-        got = _prepare_gallery_entries(snapshot, FusedPromptConfig())
+        with caplog.at_level(logging.WARNING):
+            got = _prepare_gallery_entries(snapshot, FusedPromptConfig())
         assert got.entries == []
-        assert got.give_up_reason is not None
-        assert "pid-2" in got.give_up_reason
+        assert any(
+            "fused_gallery_giveup" in r.message and "pid-2" in r.message
+            for r in caplog.records
+        )
 
     def test_preflight_short_face_degrades_only_that_person(self):
         """face 是 nice-to-have：size 不达标只置 None，不触发整段放弃。"""
@@ -1666,7 +1673,6 @@ class TestGalleryPreflightDrivesIdentitySpec:
 
         got = _prepare_gallery_entries(
             {"pid-1": self._samples(face=b"tiny")}, FusedPromptConfig())
-        assert got.give_up_reason is None
         assert len(got.entries) == 1
         pid, label, body_jpg, face_jpg = got.entries[0]
         assert (pid, label) == ("pid-1", "张三")
@@ -1703,6 +1709,29 @@ class TestGalleryPreflightDrivesIdentitySpec:
         assert "<gallery>" not in main_text
         assert "张三" not in main_text          # 放弃后不残留半截 gallery
         assert "待识别 track" in main_text      # no_person 判定仍按 track 走
+        assert self._NO_MATCH_MARKER in system_prompt
+        assert self._MATCH_ONLY_MARKER not in system_prompt
+
+    def test_slim_spec_wording_consistent_with_profile_present(self):
+        """库非空 + 档案里有成员名 + 本轮渲不出 gallery：精简版措辞不得断言"无注册成员"。
+
+        这句话在旧的唯一触发条件（库空）下是事实；复用到库非空的新路径上就与同一 prompt
+        里的「# 家庭档案」成员名 / 名册行当场矛盾——模型要么把在场成员当"没有成员"处理，
+        要么不采信规范、从档案取名安给待识别 track（正是要防的错认）。判据只能是"没有参考图"。"""
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="# 家庭档案\n## 成员\n- 张三（爸爸）",
+        ):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()], context=OmniContext(),
+                candidates=[self._candidate()], gallery_snapshot={},
+            )
+        system_prompt = fused["messages"][0]["content"]
+        assert "本轮无注册成员" not in system_prompt
+        assert "未提供" in system_prompt          # 新措辞：按"没有参考图"陈述
+        assert "不得据此" in system_prompt        # 护栏：禁止从档案/名册取名安给待识别 track
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
 
