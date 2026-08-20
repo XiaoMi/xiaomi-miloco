@@ -105,11 +105,14 @@ _EXAMPLE_CHAIN = """\
 输出（speeches 无故省略）：
 {"caption":"小明坐在电脑前操作鼠标键盘，屏幕显示游戏画面","env_sounds":"重物倒地声","suggestions":[{"event":"听到重物倒地声","action":"提醒用户确认房间情况","urgency":"medium"}]}"""
 
-# 身份库为空（identity_library_empty）时用的实例 B 变体：把示范专名换成泛称。只有库空
-# 才满足"本轮不可能产出任何成员名"（名册必然是「已识别人物：无」），caption 示范才不该叫
-# 专名——与 caption 字段说明「没识别出的人写 某人 / 陌生人」一致。判据是库空、不是
-# identity_match_disabled：库非空但本轮无参考图时，名册仍渲染已确认成员真名，示范叫
-# "某人"会把他们一并带塌。从 _EXAMPLE_CHAIN 派生而非另写一份，避免两份实例将来漂移；
+# 身份库为空（identity_library_empty）时用的实例 B 变体：把示范专名换成泛称。库空是
+# "本轮不可能产出任何成员名"的**充分**条件（名册必然是「已识别人物：无」），caption 示范
+# 因此不该叫专名——与 caption 字段说明「没识别出的人写 某人 / 陌生人」一致。反向不成立：
+# 库非空 + 本轮无参考图 + 名册恰好也没有已确认成员，同样产不出成员名，但仍走带名版（已知
+# 残留窗口，见 _render_examples）。判据取"库空"而非 identity_match_disabled 是权衡后的
+# 粗判：库非空但本轮无参考图时名册**常常**仍渲染已确认成员真名，示范叫"某人"会把他们一并
+# 带塌；那个代价比"名册也空时多示范了一个专名"更贵。要消掉残留窗口须把"名册里有没有成员
+# 名"一并纳入判据。从 _EXAMPLE_CHAIN 派生而非另写一份，避免两份实例将来漂移；
 # assert 兜住「示范专名被改名致 replace 静默失效」。
 _EXAMPLE_CHAIN_NO_NAME = _EXAMPLE_CHAIN.replace("小明", "某人")
 assert "小明" not in _EXAMPLE_CHAIN_NO_NAME
