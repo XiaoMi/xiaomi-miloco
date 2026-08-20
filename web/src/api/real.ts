@@ -6,6 +6,7 @@
  */
 
 import { ApiError, apiFetch, resolveToken } from "./client";
+import { textResidual } from "@/lib/usageTokens";
 import { authHeaders } from "./register";
 import i18n from "@/i18n";
 import type {
@@ -34,6 +35,7 @@ import type {
   UsagePeriod,
   UsageRow,
   UsageStats,
+  UsageTimelinePoint,
   OmniConfigState,
   OmniConfigUpdate,
   OmniHealth,
@@ -1657,48 +1659,76 @@ function localDateStr(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/** 空的时间序列桶。tokens 为口径总量，其余为分模态拆分（见 UsageTimelinePoint）。 */
+function emptyPoint(ts: string): UsageTimelinePoint {
+  return { ts, tokens: 0, text: 0, video: 0, audio: 0, output: 0, cache: 0 };
+}
+
+/**
+ * 把一行聚合结果累加进某个桶。text 是 `input − video − audio` 的**残差**——后端未单列
+ * image 模态，残差里含图片与系统提示，故它不是「纯文本」。残差规则与费用估算共用
+ * 同一个定义（textResidual），不在两处各写一遍。
+ */
+function accPoint(p: UsageTimelinePoint, r: UsageUnit): void {
+  const video = r.video_tokens || 0;
+  const audio = r.audio_tokens || 0;
+  const input = r.input_tokens || 0;
+  const output = r.output_tokens || 0;
+  p.text += textResidual(input, video, audio);
+  p.video += video;
+  p.audio += audio;
+  p.output += output;
+  p.cache += r.cache_tokens || 0;
+  p.tokens += input + output;
+}
+
 /**
  * today：把服务端返回的桶行铺满一整天（00:00 → 次日 00:00），缺的桶补 0。
- * 服务端已按 bin 聚合，这里只负责对齐到整天的连续桶骨架。tokens = input + output。
+ * 服务端已按 bin 聚合，这里只负责对齐到整天的连续桶骨架。
+ * 每桶除总量外一并保留分模态拆分，供时间分布图按模态堆叠。
  */
 function bucketTimeline(
   rows: BucketRow[],
   binMinutes: number,
-): { ts: string; tokens: number }[] {
+): UsageTimelinePoint[] {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
   const startMs = start.getTime();
   const binMs = Math.max(1, binMinutes) * 60_000;
   const n = Math.max(1, Math.ceil(ONE_DAY_MS / binMs)); // 覆盖整天
-  const buckets = Array.from({ length: n }, (_, i) => ({
-    ts: new Date(startMs + i * binMs).toISOString(),
-    tokens: 0,
-  }));
+  const buckets = Array.from({ length: n }, (_, i) =>
+    emptyPoint(new Date(startMs + i * binMs).toISOString()),
+  );
   for (const r of rows) {
     const idx = Math.floor((r.bucket_ms - startMs) / binMs);
-    if (idx >= 0 && idx < n) {
-      buckets[idx].tokens += (r.input_tokens || 0) + (r.output_tokens || 0);
-    }
+    if (idx >= 0 && idx < n) accPoint(buckets[idx], r);
   }
   return buckets;
 }
 
-/** week/month：连续 N 天（含今天），缺数据的天补 0。 */
+/** week/month：连续 N 天（含今天），缺数据的天补 0。同样保留分模态拆分。 */
 function dailyTimeline(
   rows: DailyRow[],
   days: number,
-): { ts: string; tokens: number }[] {
-  const byDate = new Map<string, number>();
+): UsageTimelinePoint[] {
+  // 先按 date 聚成桶（同一天可有多行：model × type 各一行）
+  const byDate = new Map<string, UsageTimelinePoint>();
   for (const r of rows) {
-    const t = (r.input_tokens || 0) + (r.output_tokens || 0);
-    byDate.set(r.date, (byDate.get(r.date) ?? 0) + t);
+    let p = byDate.get(r.date);
+    if (!p) {
+      p = emptyPoint(r.date);
+      byDate.set(r.date, p);
+    }
+    accPoint(p, r);
   }
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const out: { ts: string; tokens: number }[] = [];
+  const out: UsageTimelinePoint[] = [];
   for (let i = days - 1; i >= 0; i--) {
     const d = new Date(today.getTime() - i * ONE_DAY_MS);
-    out.push({ ts: d.toISOString(), tokens: byDate.get(localDateStr(d)) ?? 0 });
+    const hit = byDate.get(localDateStr(d));
+    // ts 统一成 ISO，与 today 分支一致（byDate 的 key 是 YYYY-MM-DD，不能直接用）
+    out.push(hit ? { ...hit, ts: d.toISOString() } : emptyPoint(d.toISOString()));
   }
   return out;
 }
@@ -1707,7 +1737,7 @@ function dailyTimeline(
 function unitsToStats(
   period: UsagePeriod,
   units: UsageUnit[],
-  timeline: { ts: string; tokens: number }[],
+  timeline: UsageTimelinePoint[],
 ): UsageStats {
   const totals = emptyBreakdown();
   let calls = 0;

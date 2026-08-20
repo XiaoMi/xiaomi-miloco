@@ -358,6 +358,37 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     expect(s.timeline.reduce((a, b) => a + b.tokens, 0)).toBe(6800);
   });
 
+  it("today：timeline 每桶带分模态拆分，text 是 input−video−audio 的残差", async () => {
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 2, 3000, 300, 800, 2200, 200),
+            bkt("on_demand", 1, 3000, 500, 1000, 0, 1500),
+          ],
+          total: 2,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    const b0 = s.timeline[0];
+
+    // 残差逐行算再相加：(3000−2200−200) + (3000−0−1500) = 600 + 1500
+    expect(b0.text).toBe(2100);
+    expect(b0.video).toBe(2200);
+    expect(b0.audio).toBe(1700);
+    expect(b0.output).toBe(800);
+    expect(b0.cache).toBe(1800);
+    // 关键不变式：四个模态之和必须等于该桶总量，否则堆叠柱高会与总量对不上
+    expect(b0.text + b0.video + b0.audio + b0.output).toBe(b0.tokens);
+    // 空桶也要带齐字段（堆叠渲染直接读，不能是 undefined）
+    const empty = s.timeline.find((p) => p.tokens === 0)!;
+    expect(empty).toMatchObject({ text: 0, video: 0, audio: 0, output: 0, cache: 0 });
+  });
+
   it("today：切换 bin 不改 totals，只影响 timeline 桶数", async () => {
     mockFetchByUrl({
       "/api/admin/token-usage/buckets": {
@@ -443,6 +474,17 @@ describe("realGetUsageStats — week daily 折算契约", () => {
     expect(s.timeline[6].tokens).toBe(8300);
     // 早于窗口的天补 0
     expect(s.timeline[0].tokens).toBe(0);
+
+    // 同一天的多行（model × type）要聚进同一个点，并保留分模态拆分
+    const today = s.timeline[6];
+    expect(today.text).toBe(1600); // (5000−4000−200) + (2000−0−1200) = 800 + 800
+    expect(today.video).toBe(4000);
+    expect(today.audio).toBe(1400);
+    expect(today.output).toBe(1300);
+    expect(today.cache).toBe(2300);
+    expect(today.text + today.video + today.audio + today.output).toBe(today.tokens);
+    // ts 统一成 ISO（daily 的 key 是 YYYY-MM-DD，不能直接透出去）
+    expect(today.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });
 

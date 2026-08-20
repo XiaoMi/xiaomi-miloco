@@ -381,10 +381,33 @@ export interface UsageStats {
   /** model × type 明细行，按 tokens 降序。 */
   rows: UsageRow[];
   /**
-   * 时间序列。today 桶数随 bin 粒度变化（10分=144 / 1时=24 / 3小时=8，默认 1 时）且铺满整天；
+   * 时间序列。today 桶数随 bin 粒度变化（15分=96 / 1时=24 / 3小时=8，默认 1 时）且铺满整天；
    * week=7 天，month=30 天。ts 是 ISO 8601。
    */
-  timeline: { ts: string; tokens: number }[];
+  timeline: UsageTimelinePoint[];
+}
+
+/**
+ * 时间序列的一个桶。除总量外还带**分模态拆分**，供时间分布图按模态堆叠——
+ * 后端的 bucket / daily 行本来就带 video / audio / cache 列，这里只是别在
+ * 前端把它们加成一个总数就丢掉。
+ *
+ * 口径与 TokenBreakdown 一致：video / audio / cache 都是 input 的子集，
+ * `text` 是 `input − video − audio` 的**残差**——它不只有文本，还含图片
+ * （gallery / 参考帧的 image 块，后端未单列该模态）与系统提示。
+ * 总量口径 tokens = (text + video + audio) + output = input + output。
+ */
+export interface UsageTimelinePoint {
+  ts: string;
+  /** input + output。 */
+  tokens: number;
+  /** input − video − audio 的残差（含图片、系统提示，非纯文本）。 */
+  text: number;
+  video: number;
+  audio: number;
+  output: number;
+  /** 命中缓存的 prompt token（⊆ text + video + audio）。 */
+  cache: number;
 }
 
 // ── omni 模型配置（在「模型」页内读/写，支持多档案切换） ──────────────
