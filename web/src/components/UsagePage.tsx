@@ -22,6 +22,7 @@ import { useTranslation } from "react-i18next";
 import { clearUsageData, getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
 import type { UsagePeriod, UsageStats, UsageTimelinePoint } from "@/lib/types";
+import { humanTokens } from "@/lib/formatTokens";
 import {
   costInputOf,
   estimateCost,
@@ -30,6 +31,9 @@ import {
   savePricing,
   type UsagePricing,
 } from "@/lib/usagePricing";
+import { CollapsibleCard } from "./CollapsibleCard";
+import { RefreshIntervalInput } from "./RefreshIntervalInput";
+import { useRefreshInterval } from "@/hooks/useRefreshInterval";
 import { UsageTodayOverview } from "./UsageTodayOverview";
 import { UsageTimelineChart } from "./UsageTimelineChart";
 import { UsageBreakdownTable } from "./UsageBreakdownTable";
@@ -56,9 +60,6 @@ const BIN_OPTIONS = [
   { minutes: 180, labelKey: "usage.bin3hour" },
 ];
 
-/** 自动刷新周期：与下方性能卡一致，避免同一页两套刷新行为。 */
-const REFRESH_MS = 30_000;
-
 export function UsagePage() {
   const { t, i18n } = useTranslation();
   const [period, setPeriod] = useState<UsagePeriod>("today");
@@ -67,6 +68,8 @@ export function UsagePage() {
   const [pricingOpen, setPricingOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  // 刷新周期与性能卡共用一个值（见 useRefreshInterval 的说明）
+  const { sec: refreshSec, setSec: setRefreshSec } = useRefreshInterval();
 
   const usage = useAsync<UsageStats>(
     () => getUsageStats(period, period === "today" ? binMinutes : undefined),
@@ -83,7 +86,7 @@ export function UsagePage() {
   // 30s 轮询 + 回到前台时补一次。没有这个的话数字从挂载起就冻住：感知循环一直在烧
   // token，而晚上打开、次日再看还是「今日总览」显示昨天的数（时间桶骨架锚在取数那刻）。
   useEffect(() => {
-    const id = setInterval(() => void reload(), REFRESH_MS);
+    const id = setInterval(() => void reload(), refreshSec * 1000);
     const onVisible = () => {
       if (document.visibilityState === "visible") void reload();
     };
@@ -92,7 +95,7 @@ export function UsagePage() {
       clearInterval(id);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [reload]);
+  }, [reload, refreshSec]);
 
   const savePricingAndClose = useCallback((next: UsagePricing) => {
     setPricing(next);
@@ -147,14 +150,12 @@ export function UsagePage() {
       {/* 模型配置卡置顶、可折叠;独立于用量加载(用量请求失败也能在此修配置自救) */}
       <UsageOmniConfig />
 
-      <section
-        className="rounded-xl bg-bg-secondary border border-border shadow-sm p-5 md:p-6"
-        aria-busy={usage.loading}
-      >
-        <h2 className="text-section-title mb-4">{t("usage.tokenUsageTitle")}</h2>
-
-        {/* 一条工具条统管全卡 */}
-        <div className="flex items-center gap-3 flex-wrap mb-5">
+      <CollapsibleCard
+        title={t("usage.tokenUsageTitle")}
+        busy={usage.loading}
+        summary={stats ? `${humanTokens(stats.total_tokens)} ${t("usage.tokensUnit")}` : undefined}
+        toolbar={
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <span className="text-caption text-text-tertiary">{t("usage.statsPeriodAria")}</span>
             <Segmented
@@ -186,6 +187,7 @@ export function UsagePage() {
               {t("usage.updatedAt", { time: timeLabel })}
             </span>
           )}
+          <RefreshIntervalInput sec={refreshSec} onChange={setRefreshSec} />
           <button
             type="button"
             onClick={() => void reload()}
@@ -202,6 +204,8 @@ export function UsagePage() {
             {t("usage.clearData")}
           </button>
         </div>
+        }
+      >
 
         {/* 错误内联呈现：控件保持挂载，且给重试入口。首次加载还没有任何数据时才占整格。 */}
         {usage.error && (
@@ -249,7 +253,7 @@ export function UsagePage() {
             </div>
           </div>
         )}
-      </section>
+      </CollapsibleCard>
 
       {/* 性能监控(精简:工具条 + KPI + 实时率 + Gate;完整版仍在 #perf) */}
       <PerfInline />

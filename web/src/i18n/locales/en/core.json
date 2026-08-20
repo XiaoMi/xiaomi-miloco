@@ -12,8 +12,8 @@
     "retry": "Retry",
     "loading": "Loading…",
     "switchFailed": "Couldn't switch, try again later",
-    "expand": "Expand",
-    "collapse": "Collapse",
+    "expand": "Expand ▾",
+    "collapse": "Collapse ▴",
     "notification": "Notifications",
     "close": "Close",
     "errorToast": "{{label}}, try again later"

@@ -502,7 +502,7 @@ export function UsageOmniConfig() {
           )}
         </span>
         <span className="text-text-tertiary text-caption shrink-0">
-          {collapsed ? t("usage.expand") : t("usage.collapse")}
+          {collapsed ? t("common.expand") : t("common.collapse")}
         </span>
       </button>
 

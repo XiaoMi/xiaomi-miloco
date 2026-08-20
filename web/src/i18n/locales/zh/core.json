@@ -12,8 +12,8 @@
     "retry": "重试",
     "loading": "加载中…",
     "switchFailed": "切换失败，稍后再试",
-    "expand": "展开",
-    "collapse": "收起",
+    "expand": "展开 ▾",
+    "collapse": "收起 ▴",
     "notification": "通知",
     "close": "关闭",
     "errorToast": "{{label}}，稍后再试"

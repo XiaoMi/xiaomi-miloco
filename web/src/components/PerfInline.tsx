@@ -20,6 +20,10 @@ import {
 import { useAsync } from "@/hooks/useAsync";
 import { WINDOW_MS, perfWindows, defaultBucket } from "@/lib/perfBucket";
 import type { PerfWindow } from "@/lib/types";
+import { CollapsibleCard } from "./CollapsibleCard";
+import { RefreshIntervalInput } from "./RefreshIntervalInput";
+import { Switch } from "./Switch";
+import { useRefreshInterval } from "@/hooks/useRefreshInterval";
 import { PerfKpiCards } from "./PerfKpiCards";
 import { PerfRtfChart } from "./PerfRtfChart";
 import { PerfGateChart } from "./PerfGateChart";
@@ -34,6 +38,7 @@ function readCompact(): boolean {
 export function PerfInline() {
   const { t, i18n } = useTranslation();
   const [compact, setCompact] = useState(readCompact);
+  const { sec: refreshSec, setSec: setRefreshSec } = useRefreshInterval();
   // 窗口选项随语言重算;memo 在 i18n.language 不变时保持引用稳定。
   const windows = useMemo(() => perfWindows(), [i18n.language]);
   const [windowKey, setWindow] = useState<PerfWindow>("1h");
@@ -56,20 +61,15 @@ export function PerfInline() {
     gate.reload();
   };
 
-  // 30s 自动刷新,窗口切换重置 timer。
+  // 自动刷新；窗口或周期变化都重置 timer。
   useEffect(() => {
-    const id = setInterval(reloadAll, 30_000);
+    const id = setInterval(reloadAll, refreshSec * 1000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [windowKey]);
+  }, [windowKey, refreshSec]);
 
-  return (
-    <section className="rounded-xl bg-bg-secondary border border-border shadow-sm p-5 md:p-6">
-      {/* 标题独占一行(与 Token 用量 / 模型配置 一致,更显著) */}
-      <h2 className="text-section-title mb-4">{t("perf.inlineTitle")}</h2>
-
-      {/* 窗口切换 + 刷新(标题下方单独一行) */}
-      <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+  const toolbar = (
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex gap-1 bg-bg-primary rounded-lg p-1" role="tablist">
           {windows.map((w) => {
             const on = windowKey === w.key;
@@ -91,25 +91,8 @@ export function PerfInline() {
             );
           })}
         </div>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer">
-            <input
-              type="checkbox"
-              checked={compact}
-              aria-label={t("perf.compactAria")}
-              onChange={(e) => {
-                setCompact(e.target.checked);
-                try {
-                  localStorage.setItem(COMPACT_KEY, e.target.checked ? "1" : "0");
-                } catch {
-                  // 存储不可用（隐私模式）→ 本次会话内仍生效，不报错
-                }
-              }}
-              className="accent-brand-primary"
-            />
-            {t("perf.compact")}
-          </label>
-          <span className="text-caption text-text-tertiary">{t("perf.autoRefresh")}</span>
+        <div className="flex items-center gap-3 flex-wrap">
+          <RefreshIntervalInput sec={refreshSec} onChange={setRefreshSec} />
           <button
             type="button"
             onClick={reloadAll}
@@ -119,15 +102,34 @@ export function PerfInline() {
           </button>
         </div>
       </div>
+  );
+
+  return (
+    <CollapsibleCard title={t("perf.inlineTitle")} toolbar={toolbar}>
 
       {/* KPI 卡 */}
       <PerfKpiCards state={summary} embedded />
 
-      {/* 实时率 + Gate 过滤率：紧凑时并排（仅 xl 起真并排，窄屏仍竖排） */}
+      {/* 紧凑开关放在它作用的那两张图正上方——它只管这两张，不该混进管整卡的工具条里 */}
+      <div className="mt-6 pt-6 border-t border-border flex items-center justify-end gap-2">
+        <span className="text-caption text-text-secondary">{t("perf.compact")}</span>
+        <Switch
+          checked={compact}
+          label={t("perf.compactAria")}
+          onChange={() => {
+            const next = !compact;
+            setCompact(next);
+            try {
+              localStorage.setItem(COMPACT_KEY, next ? "1" : "0");
+            } catch {
+              // 存储不可用（隐私模式）→ 本次会话内仍生效
+            }
+          }}
+        />
+      </div>
+
       <div
-        className={`mt-6 pt-6 border-t border-border ${
-          compact ? "grid gap-7 xl:grid-cols-2" : ""
-        }`}
+        className={`mt-4 ${compact ? "grid gap-7 xl:grid-cols-2" : ""}`}
       >
         <PerfRtfChart state={rtf} bucket={bucket} windowMs={windowMs} embedded />
         <div
@@ -140,6 +142,6 @@ export function PerfInline() {
           <PerfGateChart state={gate} bucket={bucket} windowMs={windowMs} embedded />
         </div>
       </div>
-    </section>
+    </CollapsibleCard>
   );
 }

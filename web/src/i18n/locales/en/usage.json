@@ -39,8 +39,6 @@
     "configLoadError": "Couldn't load model config",
     "currentPrefix": "Current: ",
     "noApiKeyConfigured": "No active model",
-    "expand": "Expand ▾",
-    "collapse": "Collapse ▴",
     "expandOptions": "Expand options",
     "noKeyWarning": "⚠️ No active model (not configured or not enabled) — the perception engine isn't running and won't produce usage.",
     "colApiKey": "API Key",
@@ -142,6 +140,9 @@
     "pricingNote1": "Estimated locally — not a provider invoice; prices are saved per model name.",
     "pricingNote2": "Usage records only store the model name, so the same model served from different Base URLs cannot be priced separately.",
     "priceInputHit": "Input (cached)",
-    "priceInputMiss": "Input (uncached)"
+    "priceInputMiss": "Input (uncached)",
+    "refreshEvery": "Refresh every",
+    "refreshSecUnit": "s",
+    "refreshSecAria": "Auto-refresh interval in seconds, minimum 5"
   }
 }
