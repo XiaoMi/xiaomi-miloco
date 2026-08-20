@@ -608,9 +608,11 @@ def _render_task_list(scene: SceneDescriptor) -> str:
     items: list[str] = []
     if scene.has_identity:
         if scene.identity_match_disabled:
-            # 库空：没有成员可对照，任务收敛为「判真人 / 非人误检」，与精简版 identities spec 一致，
-            # 不再写「对照图片库…库中哪一位」这类成员匹配任务（否则与精简 spec 自相矛盾、白占 token）。
-            items.append("身份识别：判断画面中每个目标是真人还是被误检成人的非人物体（本轮无注册成员，不做成员匹配）")
+            # 本轮无参考图（库空 / 无可用样本 / 「全或无」放弃）：没有可对照的成员图，任务收敛为
+            # 「判真人 / 非人误检」，与精简版 identities spec 一致，不再写「对照图片库…库中哪一位」
+            # 这类成员匹配任务（否则与精简 spec 自相矛盾、白占 token）。措辞不得写"无注册成员"——
+            # 库非空的来源下会与同一 prompt 里的家庭档案 / 名册姓名矛盾。
+            items.append("身份识别：判断画面中每个目标是真人还是被误检成人的非人物体（本轮未提供成员参考图，不做成员匹配）")
         else:
             items.append("身份识别：对照图片库，识别画面中的人对应库中哪一位（或都不是）")
     if scene.route == "video":
@@ -643,18 +645,20 @@ def _render_examples(scene: SceneDescriptor) -> str:
     needs_response 指令），留着会与剥掉的 schema 矛盾、并重新诱导脑补人声指令，故不附
     实例 A（身份判定已由「## identities」充分约束）；实例 B 无 speeches、照常附。
 
-    identity_match_disabled=True（库空）时同样不附实例 A：它演示的是成员匹配（摆
-    ``<gallery>`` 成员、输出成员名 + 五官匹配 reason），与库空的精简版 identities
-    spec / schema（只判 unknown/no_person、无 gallery）自相矛盾，且抵消库空省 token 的
-    目标；身份任务已由精简版「## identities」充分约束。实例 B 无 identities 字段、照常附。
+    identity_match_disabled=True（本轮无成员参考图：库空 / 无可用样本 / 「全或无」放弃）
+    时同样不附实例 A：它演示的是成员匹配（摆 ``<gallery>`` 成员、输出成员名 + 五官匹配
+    reason），与精简版 identities spec / schema（只判 unknown/no_person、无 gallery）自相
+    矛盾，且抵消精简省 token 的目标；身份任务已由精简版「## identities」充分约束。
+    实例 B 无 identities 字段、照常附。
     """
     if scene.route == "audio" or not scene.has_audio:
         return ""
     examples = []
     if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
-    # 库空时实例 B 用泛称版：此窗无成员铺垫（实例 A 已 gate 掉），caption 示范不该叫专名，
-    # 与「库空不产成员名」收敛一致。库非空照旧用带名版（其"小明"由上方实例 A 的 gallery 铺垫）。
+    # 无参考图窗口实例 B 用泛称版：此窗无成员匹配铺垫（实例 A 已 gate 掉），caption 示范
+    # 不该叫专名，与「无参考图不产成员名」收敛一致。参考图可用时照旧用带名版
+    # （其"小明"由上方实例 A 的 gallery 铺垫）。
     examples.append(
         _EXAMPLE_CHAIN_NO_NAME if scene.identity_match_disabled else _EXAMPLE_CHAIN
     )
@@ -720,14 +724,13 @@ class _PreparedGallery:
     """本窗口 gallery 段的预备结果——「渲染」与「identities spec 选版」共用的唯一判据。
 
     ``entries`` 非空 ⟺ 本轮 prompt 里真会出现 ``<gallery>`` 块。空有两种来源，对
-    identities spec 而言是同一件事（本轮无参考图可比对 → 用精简版）：
-
-    - ``give_up_reason`` 非 None：「全或无」放弃（某候选 person 的 body composite 取不到）
-    - ``give_up_reason`` 为 None：``gallery_snapshot`` 本就为空（库非空但无可用样本）
+    调用方而言同解（本轮无参考图可比对 → 用精简版）：「全或无」放弃（某候选 person 的
+    body composite 取不到，原因已打进 ``event=fused_gallery_giveup`` 日志），以及
+    ``gallery_snapshot`` 本就为空（库非空但无可用样本）。调用方不据来源分流，故不携带
+    放弃原因字段——只写不读的状态会误导读者以为有人消费它。
     """
 
     entries: list[tuple[str, str, bytes, "bytes | None"]]  # (pid, label, body_jpg, face_jpg|None)
-    give_up_reason: str | None = None
 
 
 def _prepare_gallery_entries(
@@ -773,7 +776,7 @@ def _prepare_gallery_entries(
                 "本窗口跳过 gallery 段，identities 改用精简版（只判 unknown/no_person），避免错认",
                 give_up_reason,
             )
-            return _PreparedGallery(entries=[], give_up_reason=give_up_reason)
+            return _PreparedGallery(entries=[])
         face_jpg = (
             _resolve_person_face_jpg(samples, cfg)
             if cfg.include_face_composite else None
