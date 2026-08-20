@@ -378,10 +378,13 @@ def build_fused_payload(
         has_audio=_batch_video_has_audio(packets),
         has_speech=_batch_video_has_speech(packets),
         has_pets=_has_pets_for_scene(),
-        # 仅"本轮有候选却没渲染出 gallery"时额外置位；无候选窗口保持 matching_moot 原语义
-        # （identity_match_disabled 还被 _render_examples 的 chain 变体读取，且那处不看
-        # has_identity——无候选时跟着翻会把名册里有名字的窗口也降级成泛称示例）。
+        # 仅"本轮有候选却没渲染出 gallery"时额外置位；无候选窗口保持 matching_moot 原语义。
         identity_match_disabled=matching_moot or (bool(candidates) and not prepared_gallery.entries),
+        # 实例 B 的专名 / 泛称只跟"库空不空"：库非空时名册仍渲染真名（label_lookup 来自
+        # list_persons()，不看 gallery_snapshot），示范 caption 叫"某人"会把已确认成员一起
+        # 带塌——他们的在场结论来自前几窗落定的 state，不依赖本轮 gallery。上一行的
+        # bool(candidates) 只挡住"无候选"那一半，挡不住"有候选 + 名册有名 + 本轮无参考图"。
+        identity_library_empty=matching_moot,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
     user_content = _build_fused_user_content(
@@ -649,18 +652,20 @@ def _render_examples(scene: SceneDescriptor) -> str:
     时同样不附实例 A：它演示的是成员匹配（摆 ``<gallery>`` 成员、输出成员名 + 五官匹配
     reason），与精简版 identities spec / schema（只判 unknown/no_person、无 gallery）自相
     矛盾，且抵消精简省 token 的目标；身份任务已由精简版「## identities」充分约束。
-    实例 B 无 identities 字段、照常附。
+    实例 B 无 identities 字段、照常附——但其专名 / 泛称跟 ``identity_library_empty``
+    （库空不空），不跟本标志：两者判据不同，见 SceneDescriptor 字段说明。
     """
     if scene.route == "audio" or not scene.has_audio:
         return ""
     examples = []
     if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
-    # 无参考图窗口实例 B 用泛称版：此窗无成员匹配铺垫（实例 A 已 gate 掉），caption 示范
-    # 不该叫专名，与「无参考图不产成员名」收敛一致。参考图可用时照旧用带名版
-    # （其"小明"由上方实例 A 的 gallery 铺垫）。
+    # 库空时实例 B 用泛称版：此窗**不可能**产出任何成员名（名册必然是「已识别人物：无」），
+    # caption 示范不该叫专名。库非空照旧用带名版——哪怕本轮无参考图、identities 已收敛成
+    # unknown/no_person，名册里已确认成员仍该被 caption 叫真名（他们的在场结论来自前几窗
+    # 落定的 state，不依赖本轮 gallery）。
     examples.append(
-        _EXAMPLE_CHAIN_NO_NAME if scene.identity_match_disabled else _EXAMPLE_CHAIN
+        _EXAMPLE_CHAIN_NO_NAME if scene.identity_library_empty else _EXAMPLE_CHAIN
     )
     return "# 输出实例\n\n" + "\n\n".join(examples)
 

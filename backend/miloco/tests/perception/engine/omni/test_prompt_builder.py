@@ -1313,7 +1313,7 @@ class TestNoAudioPromptDropsAudioFieldRefs:
 
 
 # =============================================================================
-# 身份库为空 → identity 精简为 no_person-only（matching_moot / identity_match_disabled）
+# 本轮无成员参考图 → identity 精简为 no_person-only（matching_moot / identity_match_disabled）
 # =============================================================================
 class TestIdentityMatchDisabled:
     """库空时 identities 字段改精简版（只判 unknown/no_person、不做成员匹配）。
@@ -1442,12 +1442,26 @@ class TestIdentityMatchDisabled:
         # has_speech=True：未修复时实例 A 本会注入，确保断言有意义
         out = _render_examples(SceneDescriptor(
             route="video", has_identity=True, has_audio=True, has_speech=True,
-            identity_match_disabled=True))
+            identity_match_disabled=True, identity_library_empty=True))
         assert self._EXAMPLE_A_MARKER not in out   # 成员匹配 few-shot 不注入
         assert "实例 B" in out                       # 通用观察 few-shot 照常
         # 库空实例 B 用泛称版：无成员铺垫的窗口不示范 caption 叫专名
         assert "小明" not in out
         assert "某人坐在电脑前" in out
+
+    def test_no_reference_image_window_keeps_named_example_when_library_nonempty(self):
+        """库非空 + 本轮渲不出 gallery：实例 A 撤掉（无 gallery 可示范），但实例 B 仍用
+        带名版——名册里的已确认成员照样该被 caption 叫真名（他们的在场结论来自前几窗落定
+        的 state，不依赖本轮 gallery）。泛称示例只属于"不可能产出成员名"的库空窗口。"""
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_examples
+
+        out = _render_examples(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True, identity_library_empty=False))
+        assert self._EXAMPLE_A_MARKER not in out
+        assert "小明坐在电脑前" in out
+        assert "某人坐在电脑前" not in out
 
     def test_example_a_present_when_gallery_present(self):
         from miloco.perception.engine.omni.field_registry import SceneDescriptor
@@ -1470,7 +1484,7 @@ class TestIdentityMatchDisabled:
 
         moot = SceneDescriptor(
             route="video", has_identity=True, has_audio=True, has_speech=True,
-            identity_match_disabled=True)
+            identity_match_disabled=True, identity_library_empty=True)
         sp = build_system_prompt(moot, include_home_profile=False)
         for leak in (self._TASK_MATCH_MARKER, "库中哪一位",
                      self._EXAMPLE_A_MARKER, self._MATCH_ONLY_MARKER):
