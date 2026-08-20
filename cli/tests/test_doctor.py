@@ -24,6 +24,7 @@ from miloco_cli.commands.doctor import (
     _build_version_result,
     _in_same_subnet,
     _is_virtual_iface,
+    _matching_subnet_ifaces,
     _parse_neigh_linux,
     _parse_ping,
     _probe_udp_send,
@@ -150,6 +151,32 @@ class TestInSameSubnet:
             _iface("eth1", "10.0.0.1", 24),
         ]
         assert _in_same_subnet(ifs, "10.0.0.5") == (True, "eth1")
+
+    def test_overlapping_subnets_picks_most_specific(self):
+        """子网重叠时取最具体的那块(与内核最长前缀匹配一致)。
+
+        真实场景: en0=192.168.18.2/16 覆盖了整个 192.168.0.0/16, 而 en1 是
+        192.168.1.239/24。目标 192.168.1.116 两者都落, 内核走 en1;
+        若按遍历顺序取 en0, 会把正常选路误报成多网卡冲突。
+        """
+        ifs = [
+            _iface("en0", "192.168.18.2", 16),
+            _iface("en1", "192.168.1.239", 24),
+        ]
+        assert _in_same_subnet(ifs, "192.168.1.116") == (True, "en1")
+        assert _matching_subnet_ifaces(ifs, "192.168.1.116") == ["en1", "en0"]
+
+    def test_matching_ifaces_excludes_non_covering(self):
+        ifs = [
+            _iface("en0", "192.168.18.2", 16),
+            _iface("en1", "192.168.1.239", 24),
+        ]
+        # 只落在 /16 里, 不在 en1 的 /24 内
+        assert _matching_subnet_ifaces(ifs, "192.168.99.7") == ["en0"]
+
+    def test_matching_ifaces_empty_when_no_match(self):
+        ifs = [_iface("eth0", "192.168.1.100", 24)]
+        assert _matching_subnet_ifaces(ifs, "10.0.0.1") == []
 
 
 # ─── probe_environment ─────────────────────────────────────────────────────────
@@ -1050,6 +1077,34 @@ class TestAssessReachability:
 
     def test_route_iface_mismatch_warn(self):
         results = assess_reachability(_rs(route_iface="eth1"))
+        assert results[1].status == Status.WARN
+
+    def test_overlapping_subnets_route_not_warned(self):
+        """子网重叠且路由走了其中一块 → 正常, 不该告警。
+
+        回归 en0(/16) 与 en1(/24) 并存时"路由走 en1 但目标与 en0 同网段"的误报:
+        en1 才是最具体匹配, 内核走它完全正确。
+        """
+        results = assess_reachability(
+            _rs(
+                target_ip="192.168.1.116",
+                same_subnet_iface="en1",
+                same_subnet_ifaces=("en1", "en0"),
+                route_iface="en1",
+                route_src="192.168.1.239",
+            )
+        )
+        assert results[1].status == Status.PASS
+
+    def test_route_outside_all_matching_ifaces_warn(self):
+        """路由接口不在**任何**同网段网卡里 → 才是真异常, 保留告警。"""
+        results = assess_reachability(
+            _rs(
+                same_subnet_iface="en1",
+                same_subnet_ifaces=("en1", "en0"),
+                route_iface="utun3",
+            )
+        )
         assert results[1].status == Status.WARN
 
     def test_ping_fail_neigh_reachable_warn(self):

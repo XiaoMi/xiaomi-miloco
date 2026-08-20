@@ -288,6 +288,9 @@ class MiotService:
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
         self._lru.clear()
+        # 去重键是纯文案、不带账号维度:不清的话「A 刚发过同一句 → 切到 B → B 再发」
+        # 会命中去重,send_notify 打一条 skipped 日志后正常返回,用户永远收不到。
+        self._notify_deduper.clear()
 
     @property
     def miot_client(self):
@@ -303,7 +306,27 @@ class MiotService:
             logger.info("authorize_with_code state=%s code=%s…", state, code[:8])
 
             self._clear_account_scope_state()
-            await self._miot_proxy.get_miot_auth_info(code=code, state=state)
+            # Account switch: delete the previous account's local cert and reset
+            # the virtual did (still the old uid here, before the new token is
+            # fetched) so the new account gets a clean central-hub identity.
+            await self._miot_proxy.reset_central_identity_async()
+            try:
+                await self._miot_proxy.get_miot_auth_info(code=code, state=state)
+            except Exception:
+                # 换号失败(OAuth code 短时效:粘错/过期/token 交换网络抖动)而**旧账号
+                # 的 token 仍然有效**:上一句已经把旧账号的中枢协调器拆掉了,而能重建它
+                # 的路径只有"再次登录成功 / deinit+init / 进程重启"(token 刷新只更新
+                # token 不建 hub)。不补这一手,用户留在旧账号且云端一切正常,却
+                # can_control 恒 False —— 所有控制无限期走云端,日志里只有一条
+                # authorize 失败。与 Zirconi 那条首登不刷 scope 的 P1 同族。
+                try:
+                    await self._miot_proxy.miot_client.setup_central_hub_async()
+                except Exception as restore_err:
+                    logger.warning(
+                        "restore central hub after failed account switch: %s",
+                        restore_err,
+                    )
+                raise
 
             # 登录后 list_homes 兜底会自动选第一个家庭（如果启用集为空）。
             await self.list_homes()
@@ -506,6 +529,9 @@ class MiotService:
         """
         try:
             self._clear_account_scope_state()
+            # Logout: drop the local central-hub identity (cert + virtual did)
+            # before tearing down; the re-init below rebuilds with a fresh did.
+            await self._miot_proxy.reset_central_identity_async()
             await self._miot_proxy.deinit()
             # deinit 已清空 _camera_info_dict 和 token；init 重建 client 但无
             # 有效 token，refresh_cameras 大概率静默失败（返回 None）。
@@ -1104,6 +1130,16 @@ class MiotService:
             # 兜底自动切换同样换掉了启用家庭 → 重置会话，消除旧家庭上下文泄漏
             # （与显式 switch_home 同一 bug class）。
             self._schedule_agent_session_reset()
+            # 启用家庭变了 → 刷新中枢 scope，让刚选中的家庭网关能连上（否则
+            # authorize_with_code 首登/换号时 _owned_group_ids 还停留在旧/空集，
+            # mDNS 发现的网关会被跳过，本地控制不生效直到手动切家或重启）。
+            try:
+                await self._miot_proxy.refresh_central_hub_scope_async()
+            except Exception as e:
+                logger.warning(
+                    "list_homes auto-select central hub scope refresh failed: %s",
+                    e,
+                )
 
         # 按 home_id 字典序排序——米家 SDK 返回顺序受设备活跃度等影响不稳定，
         # 不排 HomeSwitcher 列表会在两次 reload 之间跳。
@@ -1152,9 +1188,21 @@ class MiotService:
         if others:
             target_list, _ = set_homes_in_use(self._kv_repo, others, False)
 
+        allow = allowed_home_ids(self._kv_repo)
+        scope_changed = allow != prev_allow
+
         # 后台异步刷新：设备/摄像头/场景列表需随家庭切换更新，但不必
         # 让 HTTP 响应等它们完成。设备列表/摄像头列表请求时兜底触发刷新。
         async def _background_refresh():
+            # 启用集变了才重置本地中枢：让它按新家庭重连（收口的归属过滤在
+            # 连接时按 live 白名单生效）。切家庭本就要重拉设备表，这里同类开销。
+            if scope_changed:
+                try:
+                    await self._miot_proxy.refresh_central_hub_scope_async()
+                except Exception as e:
+                    logger.warning(
+                        "switch_home central hub scope refresh failed: %s", e
+                    )
             results = await asyncio.gather(
                 self._miot_proxy.refresh_devices(),
                 self._miot_proxy.refresh_cameras(),
@@ -1176,9 +1224,8 @@ class MiotService:
         task.add_done_callback(_background_tasks.discard)
 
         # KV 已写入，本地更新 in_use 标记后立即返回，不等待 refresh 完成。
-        allow = allowed_home_ids(self._kv_repo)
         # 启用集真的变化了才重置会话（避免切到当前家庭白丢热上下文）。
-        if allow != prev_allow:
+        if scope_changed:
             self._schedule_agent_session_reset()
         for h in homes:
             h["in_use"] = h["home_id"] in allow

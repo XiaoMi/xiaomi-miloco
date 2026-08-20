@@ -28,6 +28,7 @@ def _make_service() -> MiotService:
         ),
         get_miot_auth_info=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        reset_central_identity_async=AsyncMock(),
     )
     return MiotService(miot_proxy=proxy)
 

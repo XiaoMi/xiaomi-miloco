@@ -47,13 +47,13 @@
 
 ## 规则
 
-| 现象                     | 解决                                                                                                                                                  |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 规则不触发               | `rule list --pretty` 看 `enabled=true`；`perceive_device_ids` 是有效感知设备（`perceive devices` 确认）                                               |
-| 日志显示 `skipped=true`  | STATIC：幂等检查发现已达目标；非幂等：冷却期内                                                                                                        |
-| DYNAMIC 规则不回调 Agent | 检查 `agent.webhook_url`（默认值见 `settings.schema.json::agent.webhook_url`）；确认 OpenClaw 进程运行且插件已加载；查 `agent.auth_bearer` 是否已写入 |
-| 创建规则返回 code=2002   | 规则名重复（`ConflictException`），改用唯一名称                                                                                                       |
-| `rule create` 报 422     | condition.query 措辞被拒绝：不能以"检测到/识别到/感知到"等断言性词汇开头；改为进行时状态描述                                                          |
+| 现象                     | 解决                                                                                                                                                        |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 规则不触发               | `rule list --pretty` 看 `enabled=true`；`perceive_device_ids` 是有效感知设备（`perceive devices` 确认）                                                     |
+| 日志显示 `skipped=true`  | STATIC：幂等检查发现已达目标；非幂等：冷却期内（注意上一轮结果未知——超时 / 网关回包不可用——也会落冷却，见 [规则自动化](../03-features/rule-automation.md)） |
+| DYNAMIC 规则不回调 Agent | 检查 `agent.webhook_url`（默认值见 `settings.schema.json::agent.webhook_url`）；确认 OpenClaw 进程运行且插件已加载；查 `agent.auth_bearer` 是否已写入       |
+| 创建规则返回 code=2002   | 规则名重复（`ConflictException`），改用唯一名称                                                                                                             |
+| `rule create` 报 422     | condition.query 措辞被拒绝：不能以"检测到/识别到/感知到"等断言性词汇开头；改为进行时状态描述                                                                |
 
 排查规则日志：`miloco-cli rule logs --since 1h --rule <id> --pretty`
 
@@ -160,13 +160,14 @@ Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -D
 
 ## 日志位置
 
-| 日志          | 路径                                                                        |
-| ------------- | --------------------------------------------------------------------------- |
-| Server        | `$MILOCO_HOME/log/miloco-backend.log`（实时：`miloco-cli service logs -f`） |
-| supervisor    | `$MILOCO_HOME/log/supervisord.log`                                          |
-| CLI 调试      | `$MILOCO_HOME/log/miloco-cli.log`（`debug=true` 时启用）                    |
-| OpenClaw 插件 | `$MILOCO_HOME/log/openclaw-plugin.log`（需插件配置）                        |
-| 一键升级      | `$MILOCO_HOME/log/upgrade.log`（一键升级进度与终态标记 DONE/FAILED）        |
+| 日志              | 路径                                                                                                                                                                                                                                                                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Server            | `$MILOCO_HOME/log/miloco-backend.log`（实时：`miloco-cli service logs -f`）                                                                                                                                                                                                     |
+| 进程托管（Linux） | `$MILOCO_HOME/log/supervisord.log`                                                                                                                                                                                                                                              |
+| 进程托管（macOS） | `$MILOCO_HOME/log/launchd-stdio.log`（launchd 只兜底 backend 接管 stdio 之前的输出；`service start/stop/restart` 时若超 1MB 会裁到最后 200 行——后端在接管 fd 前崩溃循环时它会持续累积；权限问题见 [macOS LaunchAgent 与本地网络权限](../03-features/macos-launchagent-lnp.md)） |
+| CLI 调试          | `$MILOCO_HOME/log/miloco-cli.log`（`debug=true` 时启用）                                                                                                                                                                                                                        |
+| OpenClaw 插件     | `$MILOCO_HOME/log/openclaw-plugin.log`（需插件配置）                                                                                                                                                                                                                            |
+| 一键升级          | `$MILOCO_HOME/log/upgrade.log`（一键升级进度与终态标记 DONE/FAILED）                                                                                                                                                                                                            |
 
 ---
 

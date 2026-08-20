@@ -26,6 +26,11 @@ class MIoTErrorCode(Enum):
     CODE_HTTP_INVALID_ACCESS_TOKEN = -10030
     # MIoT mips error code
     CODE_MIPS_INVALID_RESULT = -10040
+    # 网关**已回包**但结构无法识别 —— 与 -10040(回包不是合法 JSON)同类:两者都
+    # 意味着请求已经到过网关,指令是否已在设备上执行**未知**。必须与 -10004
+    # (内部错误:本地与云端都没给出结果)区分开,否则"结果未知"会被当成"肯定没
+    # 执行"而在云端重发,让非幂等指令执行两次。见 client._LOCAL_AMBIGUOUS_CODES。
+    CODE_MIPS_RESULT_UNKNOWN = -10041
     # MIoT cert error code
     CODE_CERT_INVALID_CERT = -10050
     # MIoT spec error code, [-10060, -10069]

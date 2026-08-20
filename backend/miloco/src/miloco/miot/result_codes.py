@@ -12,9 +12,23 @@ stdout 渲染(独立轮子,CLI 不能 import backend)。两份需手动保持同
 """
 from __future__ import annotations
 
+from miot.error import MIoTErrorCode
+
 # 设备侧云端错误码 → 中文释义。来源:米家 spec 错误码表。
 # (与 CLI device.py::_MIOT_SPEC_CODES 逐条对齐,改一处两处都要改。)
 _MIOT_SPEC_CODES: dict[int, str] = {
+    # —— SDK 内部码(不在米家 spec 表里,来源 miot/error.py::MIoTErrorCode) ——
+    # 本地中枢通道引入。不登记的话会落到 _UNKNOWN_FAIL_MSG,把"结果未知"报成
+    # "设备侧执行失败";而这几个码里有三个的语义恰恰相反:SDK 之所以不做云端重发,
+    # 正是因为指令很可能已经在设备上执行了。**凡是"结果未知"的码,文案必须传达
+    # "可能已生效"** —— 否则 agent 会照台账判定失败并重试,把非幂等指令做两遍。
+    -10006: "本地网关未在超时内应答，指令可能已执行（为避免重复执行未做云端重发）",
+    -10041: "本地网关已回包但结构无法识别，指令可能已执行（为避免重复执行未做云端重发）",
+    -10040: "本地网关回包不是合法 JSON，指令可能已执行（为避免重复执行未做云端重发）",
+    # -10004 只剩一种语义:本地与云端都没给出这一条的结果(云端批次回填不到)。
+    # 本地"回包不可用"已拆到 -10041 / -10040,不再共用这个码。
+    -10004: "内部错误：本地与云端通道均未返回可用结果",
+    # —— 以下为米家 spec 设备侧错误码 ——
     -704042011: "设备离线",
     -704042001: "未找到设备",
     -704090001: "未找到设备",
@@ -65,6 +79,39 @@ def code_message(code: int) -> str:
 def _is_failure(code: object) -> bool:
     """负码即失败,其余(0 / 正码 / 非 int / None)一律成功。镜像 PR #394。"""
     return isinstance(code, int) and code < 0 and code not in _MIOT_OK_CODES
+
+
+# 「指令可能已经在设备上执行,但结果没拿到确认」的码。三者的共同前提是**请求已经
+# 到过本地网关**:-10006 网关未在超时内应答、-10041 回包结构不认识、-10040 回包不是
+# 合法 JSON。SDK 正因如此对写属性 / 动作**不做云端重发**(见 miot/client.py 的
+# _LOCAL_AMBIGUOUS_CODES)。
+#
+# 它们仍算失败(_is_failure 为真、台账 success=False)——用户必须知道这次没确认;但
+# 消费方在决定"要不要防重复执行"时必须把它们与"确定没执行"区别对待,否则 SDK 层
+# 避免的那次双发会被上层重新引入。
+#
+# 注意**不含** code=None(空返回 / 不可判定):那种情况请求未必发出去过,按"没执行"
+# 处理才对——把它当已执行会压掉用户的重试(见 rule.runner 的冷却与
+# test_empty_result_is_failure_no_cooldown)。
+# 引用 SDK 枚举而不是抄裸数字:这三个值的真源在 miot/error.py,抄成字面量的话枚举一改
+# 这里就静默失配、双发防护无声失效。(下方 _MIOT_SPEC_CODES 用裸数字是另一回事——那是
+# "码 → 文案"的映射表,键本来就是数字。)
+_RESULT_UNKNOWN_CODES = frozenset(
+    {
+        MIoTErrorCode.CODE_TIMEOUT.value,  # -10006
+        MIoTErrorCode.CODE_MIPS_RESULT_UNKNOWN.value,  # -10041
+        MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,  # -10040
+    }
+)
+
+
+def is_result_unknown(code: object) -> bool:
+    """该码是否表示「指令可能已执行、但结果未确认」。
+
+    调用方典型用途:非幂等动作的防重复窗口——结果未知时也要落冷却,否则下一轮触发
+    会把同一条累加型动作(窗帘 +10% / 音量 +1)再执行一次。
+    """
+    return isinstance(code, int) and code in _RESULT_UNKNOWN_CODES
 
 
 def summarize_results(

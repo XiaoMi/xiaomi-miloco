@@ -168,6 +168,24 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "result.suggestions 保留完整，仅 agent 派发受限；重启生效"
         "（在 UI 拨这个滑条走 admin API，则热更、下个感知周期生效）",
     ),
+    "miot.central_hub_enabled": (
+        bool,
+        True,
+        "本地中枢网关总开关；false = 完全禁用（不签证书/不 mDNS/不连网关），"
+        "设备控制全部走云端。重启生效",
+    ),
+    "miot.central_hub_gateways": (
+        list,
+        [],
+        "静态中枢网关地址，mDNS 发现不到时用（如容器/跨网段隔离，组播过不去）。"
+        "逗号分隔，每项 'ip' 或 'ip:port'（端口缺省 8883），"
+        "如 192.168.1.152 或 192.168.1.152:8883,192.168.1.153。"
+        "留空则仅靠 mDNS 自动发现。重启生效。"
+        "注意：逗号分隔只在 config set / config.json 通道成立；"
+        "用环境变量覆盖时必须写 JSON 数组"
+        "（MILOCO_MIOT__CENTRAL_HUB_GATEWAYS='[\"192.168.1.152\"]'），"
+        "否则后端 pydantic-settings 解析失败、启动即报 SettingsError",
+    ),
 }
 
 # ─── 基础读写 ────────────────────────────────────────────────────────────────
@@ -290,6 +308,46 @@ def _defaults() -> dict[str, Any]:
     return out
 
 
+def _validate_gateway(path: str, item: str) -> str:
+    """校验单个中枢网关项 ``ip`` / ``ip:port``，原样返回（端口缺省交给后端补 8883）。
+
+    与 backend ``MiotProxy._parse_gateways``（``backend/miloco/src/miloco/miot/client.py``）
+    的解析口径对齐：``partition(":")`` 切 host/port、端口留空取 8883。两点差异：
+
+    1. 那边对脏项**静默 skip + warning**，CLI 这里直接报错——写盘前拦住，免得用户
+       以为配上了、实际被后端悄悄丢掉；
+    2. IPv6 字面量这边显式拒绝：后端按单冒号切分会把它解析错再静默丢弃。
+
+    端口范围（1-65535）两边都校验：后端在 ``_parse_gateways`` 里越界即 skip，与它对
+    非整数端口的处理一致；CLI 这边报错。注意不要只改一边——手工编辑 config.json 绕过
+    CLI 时，只有后端那道能拦住 ``:0`` / ``:99999``。
+
+    这里的 8883 只出现在报错/说明文案里：CLI **不**替用户补默认端口，原样写盘、由后端
+    的 ``MIPS_LOCAL_PORT_DEFAULT`` 决定，所以不存在两份会漂移的默认值。miloco-cli 是
+    独立包、不依赖 miot SDK（见 ``cli/pyproject.toml``），也无法引用那个常量。
+    """
+    if item.count(":") > 1:
+        raise ValueError(
+            f"{path} 不支持 IPv6 字面量（{item!r}）：后端按 'host:port' 单冒号切分，"
+            f"IPv6 会被解析错并静默丢弃。请用 IPv4 或主机名。"
+        )
+    host, _, port = item.partition(":")
+    host = host.strip()
+    if not host:
+        raise ValueError(f"{path} 的条目 {item!r} 缺少主机名/IP")
+    port = port.strip()
+    if port:
+        try:
+            port_num = int(port)
+        except ValueError as exc:
+            raise ValueError(
+                f"{path} 的条目 {item!r} 端口不是整数（端口留空则默认 8883）"
+            ) from exc
+        if not (1 <= port_num <= 65535):
+            raise ValueError(f"{path} 的条目 {item!r} 端口越界（需 1-65535）")
+    return item
+
+
 def _coerce(path: str, raw: str) -> Any:
     """根据 schema 类型把字符串 CLI 输入转成目标类型。"""
     if path not in _SCHEMA_PATHS:
@@ -314,6 +372,26 @@ def _coerce(path: str, raw: str) -> Any:
             return float(raw)
         except ValueError as exc:
             raise ValueError(f"{path} 需要浮点数，收到 {raw!r}") from exc
+    if pytype is list:
+        # CLI 只能递字符串，故约定逗号分隔；同时容忍 JSON 数组，方便脚本直接透传。
+        # 留空 = 清空该项（回到"仅靠自动发现"语义），不是写入 [""]。
+        text = raw.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path} 的 JSON 数组解析失败：{raw!r}") from exc
+            if not isinstance(parsed, list):
+                raise ValueError(f"{path} 需要数组，收到 {raw!r}")
+            items = [str(x).strip() for x in parsed]
+        else:
+            items = [x.strip() for x in text.split(",")]
+        items = [x for x in items if x]
+        if path == "miot.central_hub_gateways":
+            items = [_validate_gateway(path, x) for x in items]
+        return items
     # timezone 额外做 IANA 名校验（与 backend settings 的 field_validator 对齐），
     # 拦住 "Beijing" / "+08:00" 这类会让 backend 启动期 ValidationError 的脏值。
     if path == "timezone" and raw:

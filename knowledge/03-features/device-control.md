@@ -47,11 +47,13 @@ CLI / Agent（miloco-devices Skill）
   → POST /api/miot/devices/{did}/control
   → MiotService（scope 校验 + 类型分发）（miot/service.py）
   → MiotProxy（miot/client.py）
-  → MIoTClient.http_client（MIoTHttpClient，backend/miot/src/miot/cloud.py）
-  → 小米云 HTTP API → 设备
+  → MIoTClient.set_props_async / get_props_async / action_async
+      ├─ 本地可控且未冷却 → 本地中枢网关（mTLS MQTT + MIPS RPC）→ 设备
+      └─ 否则 / 本地失败可重发 → MIoTHttpClient（backend/miot/src/miot/cloud.py）
+                                  → 小米云 HTTP API → 设备
 ```
 
-属性查询入口为 `MiotService.get_device_status`，场景触发为 `trigger_scene` → `MiotProxy.execute_miot_scene`，链路结构相同。控制写入 / 查询 / 动作调用统一走 Cloud HTTP，不走局域网直连（见下「控制写入固定走 Cloud HTTP」）。
+属性查询入口为 `MiotService.get_device_status`，场景触发为 `trigger_scene` → `MiotProxy.execute_miot_scene`，链路结构相同。控制写入 / 查询 / 动作调用优先走局域网本地中枢，云端为兜底（见下「控制优先走本地中枢，云端兜底」）。
 
 规则触发的 STATIC 控制路径较短：`RuleRunner`（`rule/runner.py`）直接调 `MiotProxy`，绕过 `MiotService`（规则在创建时已绑定 scope 内设备，设计上已保证安全）。
 
@@ -103,9 +105,30 @@ Scope 定义了"Miloco 管控哪些设备"的边界，分为两个维度：
 
 ### 关键设计决策
 
-#### 控制写入固定走 Cloud HTTP
+#### 控制优先走本地中枢，云端兜底
 
-设备属性写入 / 查询 / 动作调用统一经 `MiotProxy` → `MIoTClient.http_client`（`MIoTHttpClient`，`backend/miot/src/miot/cloud.py`）发往小米云 HTTP API——不走局域网直连。`MIoTClient` 内的 LAN（`backend/miot/src/miot/lan.py`）/ mDNS 子模块用于局域网设备发现与在线状态维护，摄像头实时画面走 PPCS 串流（见 [live-camera-view](live-camera-view.md)），均不承载控制写入。SDK 各路径能力见 [sdk-miot.md](../05-external-deps/sdk-miot.md)。
+设备属性写入 / 查询 / 动作调用先尝试局域网**本地中枢网关**（mDNS 发现 + mTLS MQTT + MIPS TLV RPC），失败按「这条指令有没有可能已经在设备上执行了」分流，而不是简单地「本地失败就重发云端」：
+
+| 本地侧发生了什么                                                                  | 是否重发云端 | 为什么                                                                       |
+| --------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------- |
+| 设备不在活网关后面 / 离线 / 无 spec 访问                                          | 是           | 本地一个字节都没发出去，重发安全                                             |
+| 该设备（或其所属网关）正在冷却窗口内                                              | 是           | 刚超时过，跳过本地省掉又一次 5s 等待                                         |
+| 本地调用抛异常，或回包里连 `code` 都没有                                          | 是           | 请求明确没落到设备上                                                         |
+| 本地 RPC **超时**（`-10006`）— 写属性 / 调动作                                    | **否**       | 指令可能已执行，云端重发会执行两次                                           |
+| 本地 RPC 超时 — 读属性                                                            | 是           | 读是幂等的，重读无害                                                         |
+| 网关已回包但不可用（`-10041` 结构不认识 / `-10040` 非合法 JSON）— 写属性 / 调动作 | **否**       | 同样是「结果未知」：能落到这两个码的前提就是请求已到过网关，指令很可能已执行 |
+| 网关已回包但不可用（`-10041`/`-10040`）— 读属性                                   | 是           | 读幂等，重读拿确定值更有用                                                   |
+| 本地成功                                                                          | 否           | 已拿到确定结果                                                               |
+| 设备明确拒绝（带码错误）— 写属性 / 调动作                                         | 否           | 已拿到确定结果，重发只会再被拒一次                                           |
+| 设备明确拒绝（带码错误）— 读属性                                                  | 是           | 读幂等，云端兜底可能拿到值（实现是「任何非 OK 码都兜云端」）                 |
+
+**超时**会冷却该设备 30s；当同一网关后有 2 个不同设备在窗口内超时，则判定网关整体卡死并冷却整台网关，避免批量控制逐个各付一次 5s 超时。`-10041`/`-10040` 不冷却——它们是快速返回，没有超时代价可省，冷却只会白白把设备赶去云端。
+
+注意 `-10004` 不属于上表任何一行：它现在只表示「本地与云端都没给出这一条的结果」（云端批次回填不到），与本地路由无关。「结果未知」的本地码是 `-10006`/`-10041`/`-10040`，凡是这三个，台账文案都必须传达「指令可能已生效」，否则 agent 会当成失败去重试，把非幂等指令做两遍。
+
+路由实现在 SDK 内：`MIoTClient.set_props_async` / `get_props_async` / `action_async`（`backend/miot/src/miot/client.py`），业务层 `MiotProxy` 只是一行转调。总开关 `miot.central_hub_enabled`（关掉整条退回纯云端），mDNS 发现不到时可用 `miot.central_hub_gateways` 手工配网关地址。云端 `MIoTHttpClient`（`backend/miot/src/miot/cloud.py`）退居兜底。
+
+`MIoTClient` 内的 LAN（`backend/miot/src/miot/lan.py`）子模块仍只做局域网设备发现与在线状态维护，摄像头实时画面走 PPCS 串流（见 [live-camera-view](live-camera-view.md)），二者都不承载控制写入。SDK 各路径能力见 [sdk-miot.md](../05-external-deps/sdk-miot.md)。
 
 **为什么 STATIC 规则绕过 MiotService**：规则在创建时已绑定 scope 内设备，MiotService 的 scope 校验是冗余的。STATIC 规则执行路径需要极低延迟（感知到设备响应），省掉 service 层的开销。
 
@@ -129,6 +152,6 @@ Scope 定义了"Miloco 管控哪些设备"的边界，分为两个维度：
 
 **上游**：`miloco-devices` Skill 通过 CLI 调 `/api/miot/devices/{did}/control`，是主要控制入口。`RuleRunner`（`rule/runner.py`）在 STATIC 规则条件满足时直接调用 `MiotProxy`。
 
-**下游**：所有控制 / 查询 / 动作指令最终经 `MiotProxy` → `MIoTClient.http_client` 固定发往小米云 HTTP API，不走 LAN 直连（见上「控制写入固定走 Cloud HTTP」）。
+**下游**：所有控制 / 查询 / 动作指令经 `MiotProxy` → `MIoTClient.set_props_async` / `get_props_async` / `action_async`，由 SDK 内部决定走本地中枢网关还是云端兜底（见上「控制优先走本地中枢，云端兜底」）。
 
 **互动**：scope 变更（切换家庭 / 启停摄像头）后，`MiotService` 先按 `select_active_camera_dids` 口径重建 / 销毁 camera manager（停用 / 移出家庭的摄像头停掉 native 会话），再同步感知层 adapter 的投喂订阅，无需重启服务。OAuth 完成后，`MiotService` 主动重启感知引擎，让摄像头 adapter 重新注册帧回调。
