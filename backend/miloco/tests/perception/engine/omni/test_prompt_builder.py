@@ -1313,14 +1313,15 @@ class TestNoAudioPromptDropsAudioFieldRefs:
 
 
 # =============================================================================
-# 身份库为空 → identity 精简为 no_person-only（matching_moot / identity_match_disabled）
+# 本轮无成员参考图 → identity 精简为 no_person-only（matching_moot / identity_match_disabled）
 # =============================================================================
 class TestIdentityMatchDisabled:
-    """库空时 identities 字段改精简版（只判 unknown/no_person、不做成员匹配）。
+    """本轮拿不到任何成员参考图时 identities 改精简版（只判 unknown/no_person、不做成员匹配）。
 
-    这是"gallery 为空不该激活成员匹配"修复的 prompt 侧断言：schema 的 name 域收成
+    这是"没有 gallery 就不该激活成员匹配"修复的 prompt 侧断言：schema 的 name 域收成
     <unknown|no_person>、字段说明砍掉全套面部匹配规则、gallery 段整段不渲染；no_person
-    判定链路不动（name 仍走 no_person）。库非空（默认 matching_moot=False）行为不变。
+    判定链路不动（name 仍走 no_person）。三个来源同解——库空（matching_moot=True）、
+    库非空但快照无可用样本、「全或无」放弃；参考图真渲出来时（默认路径）行为不变。
     """
 
     _MATCH_ONLY_MARKER = "本人正向吻合"   # 只在完整版 IDENTITY spec 里出现
@@ -1383,9 +1384,19 @@ class TestIdentityMatchDisabled:
         # system prompt：用精简版 identity spec
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
+        # 库空 → 实例 B 用泛称版。这两行钉住 build_fused_payload 里
+        # identity_library_empty=matching_moot 那根接线：删掉它本条会红，
+        # 而只喂 SceneDescriptor 的单元用例不会。
+        assert "某人坐在电脑前" in system_prompt
+        assert "小明坐在电脑前" not in system_prompt
 
-    def test_default_matching_moot_false_keeps_empty_gallery_placeholder(self):
-        """回归保护：matching_moot 默认 False 时，库空仍走旧行为（塞"库为空"占位 + 完整匹配 spec）。"""
+    def test_empty_snapshot_slims_spec_even_without_matching_moot(self):
+        """库非空但本轮 gallery_snapshot 为空（成员一个可用样本都没有）→ 同样走精简版。
+
+        取代旧的 ``test_default_matching_moot_false_keeps_empty_gallery_placeholder``：
+        那条钉的是"spec 让模型对着 <gallery> 做成员匹配、prompt 里却只有一句「库为空」
+        占位"的分叉行为。现在选版判据换成 gallery pre-flight 的实际结果，占位文本一并去掉。
+        """
         from miloco.perception.engine.omni.prompt_builder import build_fused_payload
 
         with patch(
@@ -1400,8 +1411,16 @@ class TestIdentityMatchDisabled:
         system_prompt = messages[0]["content"]
         main = _multimodal_user_content(messages)
         main_text = "\n".join(b.get("text", "") for b in main if b.get("type") == "text")
-        assert "库为空" in main_text
-        assert self._MATCH_ONLY_MARKER in system_prompt
+        assert "库为空" not in main_text
+        assert "<gallery>" not in main_text
+        assert "待识别 track" in main_text
+        assert self._NO_MATCH_MARKER in system_prompt
+        assert self._MATCH_ONLY_MARKER not in system_prompt
+        # 反向对照：库非空、仅本轮无参考图 → 规范降精简版，但实例 B 仍带名。
+        # 与 test_matching_moot_skips_gallery_block_keeps_track_list 合起来
+        # 钉住"两个字段没被重新合并成一个"。
+        assert "小明坐在电脑前" in system_prompt
+        assert "某人坐在电脑前" not in system_prompt
 
     # ---- follow-up（PR #407 code review）：库空时「任务描述 / 示例」也须收敛，非只 gallery/字段说明 ----
     _TASK_MATCH_MARKER = "对照图片库"    # 只在完整版「# 任务」身份行里出现
@@ -1434,12 +1453,26 @@ class TestIdentityMatchDisabled:
         # has_speech=True：未修复时实例 A 本会注入，确保断言有意义
         out = _render_examples(SceneDescriptor(
             route="video", has_identity=True, has_audio=True, has_speech=True,
-            identity_match_disabled=True))
+            identity_match_disabled=True, identity_library_empty=True))
         assert self._EXAMPLE_A_MARKER not in out   # 成员匹配 few-shot 不注入
         assert "实例 B" in out                       # 通用观察 few-shot 照常
         # 库空实例 B 用泛称版：无成员铺垫的窗口不示范 caption 叫专名
         assert "小明" not in out
         assert "某人坐在电脑前" in out
+
+    def test_no_reference_image_window_keeps_named_example_when_library_nonempty(self):
+        """库非空 + 本轮渲不出 gallery：实例 A 撤掉（无 gallery 可示范），但实例 B 仍用
+        带名版——名册里的已确认成员照样该被 caption 叫真名（他们的在场结论来自前几窗落定
+        的 state，不依赖本轮 gallery）。泛称示例只属于"不可能产出成员名"的库空窗口。"""
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+        from miloco.perception.engine.omni.prompt_builder import _render_examples
+
+        out = _render_examples(SceneDescriptor(
+            route="video", has_identity=True, has_audio=True, has_speech=True,
+            identity_match_disabled=True, identity_library_empty=False))
+        assert self._EXAMPLE_A_MARKER not in out
+        assert "小明坐在电脑前" in out
+        assert "某人坐在电脑前" not in out
 
     def test_example_a_present_when_gallery_present(self):
         from miloco.perception.engine.omni.field_registry import SceneDescriptor
@@ -1462,7 +1495,7 @@ class TestIdentityMatchDisabled:
 
         moot = SceneDescriptor(
             route="video", has_identity=True, has_audio=True, has_speech=True,
-            identity_match_disabled=True)
+            identity_match_disabled=True, identity_library_empty=True)
         sp = build_system_prompt(moot, include_home_profile=False)
         for leak in (self._TASK_MATCH_MARKER, "库中哪一位",
                      self._EXAMPLE_A_MARKER, self._MATCH_ONLY_MARKER):
@@ -1570,6 +1603,179 @@ def _adaptive_packet(
         audio_analysis=AudioAnalysis(type=AudioType.SILENCE, is_urgent=False, energy_level=0.0),
         main_det_boxes=main_det_boxes,
     )
+
+
+# =============================================================================
+# gallery pre-flight 决定 identities 选版（库非空但本轮没渲染出 gallery 的分叉）
+# =============================================================================
+class TestGalleryPreflightDrivesIdentitySpec:
+    """identities 用完整版还是精简版，判据是「本轮 prompt 里真出现 <gallery> 了吗」。
+
+    库非空但 gallery 渲不出来有两条路径——``gallery_snapshot`` 为空、以及「全或无」
+    放弃（某候选 person 的 body composite 取不到）。旧实现只看「库空不空」，这两条路径
+    下会下发完整匹配版 spec 去对照一个并不存在的 <gallery>，而「# 家庭档案」里的成员名
+    就在同一个 prompt 里，等于把"别从档案取名安到没识别出的人身上"推到最难守的位置。
+    """
+
+    _MATCH_ONLY_MARKER = "本人正向吻合"   # 只在完整版 IDENTITY spec 里出现
+    _NO_MATCH_MARKER = "不做成员匹配"     # 只在精简版 IDENTITY_NO_MATCH spec 里出现
+
+    @staticmethod
+    def _candidate():
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        return IdentityQueryItem(
+            track_id=7, bbox_xyxy_norm=(100, 100, 200, 400), face_visible=False)
+
+    @staticmethod
+    def _samples(pid="pid-1", name="张三", body=b"P" * 400, face=b"F" * 400):
+        from miloco.perception.engine.identity.library import GallerySamples
+
+        return GallerySamples(
+            person_id=pid, name=name, role=None,
+            body_composite_jpeg=body, face_composite_jpeg=face,
+        )
+
+    @staticmethod
+    def _build(gallery_snapshot, candidates, *, matching_moot=False):
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="",
+        ):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()], context=OmniContext(),
+                candidates=candidates, gallery_snapshot=gallery_snapshot,
+                matching_moot=matching_moot,
+            )
+        messages = fused["messages"]
+        main = _multimodal_user_content(messages)
+        main_text = "\n".join(b.get("text", "") for b in main if b.get("type") == "text")
+        return messages[0]["content"], main_text
+
+    # ---- pre-flight 纯函数 ----
+
+    def test_preflight_empty_snapshot_no_entries(self):
+        from miloco.perception.engine.omni.prompt_builder import (
+            FusedPromptConfig,
+            _prepare_gallery_entries,
+        )
+
+        got = _prepare_gallery_entries({}, FusedPromptConfig())
+        assert got.entries == []
+
+    def test_preflight_bad_body_gives_up_whole_gallery(self, caplog):
+        """「全或无」：一人 body composite 取不到 → 整段放弃（不能只少注入一个人）。
+
+        放弃原因只进 ``event=fused_gallery_giveup`` 日志（结构体不携带只写不读的字段），
+        故经 caplog 断言原因里点到了取不到样本的那个人。"""
+        import logging
+
+        from miloco.perception.engine.omni.prompt_builder import (
+            FusedPromptConfig,
+            _prepare_gallery_entries,
+        )
+
+        snapshot = {
+            "pid-1": self._samples("pid-1", "张三"),
+            "pid-2": self._samples("pid-2", "李四", body=b""),
+        }
+        with caplog.at_level(logging.WARNING):
+            got = _prepare_gallery_entries(snapshot, FusedPromptConfig())
+        assert got.entries == []
+        assert any(
+            "fused_gallery_giveup" in r.message and "pid-2" in r.message
+            for r in caplog.records
+        )
+
+    def test_preflight_short_face_degrades_only_that_person(self):
+        """face 是 nice-to-have：size 不达标只置 None，不触发整段放弃。"""
+        from miloco.perception.engine.omni.prompt_builder import (
+            FusedPromptConfig,
+            _prepare_gallery_entries,
+        )
+
+        got = _prepare_gallery_entries(
+            {"pid-1": self._samples(face=b"tiny")}, FusedPromptConfig())
+        assert len(got.entries) == 1
+        pid, label, body_jpg, face_jpg = got.entries[0]
+        assert (pid, label) == ("pid-1", "张三")
+        assert body_jpg and face_jpg is None
+
+    def test_preflight_truncates_to_max_persons(self):
+        from miloco.perception.engine.omni.prompt_builder import (
+            FusedPromptConfig,
+            _prepare_gallery_entries,
+        )
+
+        snapshot = {f"pid-{i}": self._samples(f"pid-{i}", f"人{i}") for i in range(12)}
+        got = _prepare_gallery_entries(snapshot, FusedPromptConfig(max_gallery_persons=3))
+        assert len(got.entries) == 3
+
+    # ---- pre-flight 结果驱动 spec ----
+
+    def test_renderable_gallery_keeps_full_matching_spec(self):
+        """回归保护：正常渲染得出 gallery → 完整匹配版 spec 照旧。"""
+        system_prompt, main_text = self._build(
+            {"pid-1": self._samples()}, [self._candidate()])
+        assert "<gallery>" in main_text
+        assert "【张三】" in main_text
+        assert self._MATCH_ONLY_MARKER in system_prompt
+        assert self._NO_MATCH_MARKER not in system_prompt
+
+    def test_giveup_falls_back_to_slim_spec(self):
+        """「全或无」放弃 → spec 跟着降级；不能只撤图不撤匹配纪律。"""
+        snapshot = {
+            "pid-1": self._samples("pid-1", "张三"),
+            "pid-2": self._samples("pid-2", "李四", body=b""),
+        }
+        system_prompt, main_text = self._build(snapshot, [self._candidate()])
+        assert "<gallery>" not in main_text
+        assert "张三" not in main_text          # 放弃后不残留半截 gallery
+        assert "待识别 track" in main_text      # no_person 判定仍按 track 走
+        assert self._NO_MATCH_MARKER in system_prompt
+        assert self._MATCH_ONLY_MARKER not in system_prompt
+
+    def test_slim_spec_wording_consistent_with_profile_present(self):
+        """库非空 + 档案里有成员名 + 本轮渲不出 gallery：精简版措辞不得断言"无注册成员"。
+
+        这句话在旧的唯一触发条件（库空）下是事实；复用到库非空的新路径上就与同一 prompt
+        里的「# 家庭档案」成员名 / 名册行当场矛盾——模型要么把在场成员当"没有成员"处理，
+        要么不采信规范、从档案取名安给待识别 track（正是要防的错认）。判据只能是"没有参考图"。"""
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="# 家庭档案\n## 成员\n- 张三（爸爸）",
+        ):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()], context=OmniContext(),
+                candidates=[self._candidate()], gallery_snapshot={},
+            )
+        system_prompt = fused["messages"][0]["content"]
+        # 档案不在 system（build_system_prompt 传的是 include_home_profile=False），
+        # 而是 system 之后的独立 user 消息——不断言它，"共存"这个前提就是空转的
+        profile_msgs = [
+            m for m in fused["messages"][1:] if "# 家庭档案" in str(m["content"])
+        ]
+        assert len(profile_msgs) == 1
+        assert "张三" in str(profile_msgs[0]["content"])
+        assert "本轮无注册成员" not in system_prompt
+        assert "未提供" in system_prompt          # 新措辞：按"没有参考图"陈述
+        assert "不得据此" in system_prompt        # 护栏：禁止从档案/名册取名安给待识别 track
+        assert self._NO_MATCH_MARKER in system_prompt
+        assert self._MATCH_ONLY_MARKER not in system_prompt
+
+    def test_no_candidate_window_example_b_follows_library_emptiness(self):
+        """无候选窗口的实例 B 只跟"库空不空"：库非空 → 带名版，库空 → 泛称版。
+
+        （identity_match_disabled 在无候选窗口取什么值都不外显：它的三个消费方
+        都先过 has_identity=bool(candidates) 这道闸。）"""
+        named, _ = self._build({"pid-1": self._samples()}, [])
+        assert "小明坐在电脑前" in named
+        moot, _ = self._build({}, [], matching_moot=True)
+        assert "某人坐在电脑前" in moot
 
 
 class TestAdaptiveResolution:

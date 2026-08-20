@@ -90,18 +90,23 @@ PET_IDENTITIES = FieldSpec(
     requires_pets=True,
 )
 
-# 精简版 identity 字段：身份库为空（无任何注册成员）时用。此时"对上 gallery 成员"不可能，
-# 整套面部逐项核对规则都是死重（徒增 prompt token 与模型认知负担、并产出误导性的"无法与库中
-# 成员匹配"reason）。只保留 unknown↔no_person 这一判定——no_person（非人误检抑制）不依赖 gallery，
-# 是身份库为空时仍需保住的能力（name 仍走 <unknown|no_person>，下游 no_person 解析/落定链路不变）。
+# 精简版 identity 字段：本轮拿不到任何成员参考图（<gallery> 不会出现在 prompt 里）时用——
+# 库空、库非空但无可用样本、「全或无」放弃三种来源同解（见 SceneDescriptor.identity_match_disabled）。
+# 此时"对上 gallery 成员"不可能，整套面部逐项核对规则都是死重（徒增 prompt token 与模型认知
+# 负担、并产出误导性的"无法与库中成员匹配"reason）。只保留 unknown↔no_person 这一判定——
+# no_person（非人误检抑制）不依赖 gallery，是无参考图窗口仍需保住的能力（name 仍走
+# <unknown|no_person>，下游 no_person 解析/落定链路不变）。
+# 措辞注意：不得写"本轮无注册成员"——库非空的来源下这是假话，会与同一 prompt 里的
+# 「# 家庭档案」成员名 / 名册行「已识别人物：X[bbox=…]」当场矛盾；判据只能是"没有参考图"。
 IDENTITY_NO_MATCH = FieldSpec(
     name="identities",
     schema_literal='"identities":[{"track_id":<int>,"name":"<unknown|no_person>","confidence":0-1,"reason":"≤20字"}]',
     spec_md="""## identities
-- 本轮无注册成员、不做成员匹配：只判每个"待识别 track"是「确有人体」还是「非人误检」，覆盖所有 track_id、不遗漏不新增
+- 本轮未提供任何成员参考图、不做成员匹配：只判每个"待识别 track"是「确有人体」还是「非人误检」，覆盖所有 track_id、不遗漏不新增
 - 确有人体（哪怕背影/侧身/局部/遮挡/模糊）→ name 填 "unknown"
 - 框内没有真实人体、只是家中非人物体被误框成人（如 3D 打印机、落地扇、衣帽架或搭挂/晾晒的衣物、落地绿植、纸箱行李堆 等外形易被误当成人的物体）→ name 填 "no_person"，纵使轮廓像人
 - 分不清是人还是物时倾向 unknown（别把真人误判成没人）
+- 即使「# 家庭档案」或上方名册里出现了成员姓名，本轮也不得据此给"待识别 track"安名——没有参考图就无从核对本人
 - confidence = 对"是人 / 不是人"这一判断的把握；reason ≤20 字简述依据""",
     requires_video=True,
     requires_identity=True,
@@ -214,9 +219,20 @@ class SceneDescriptor:
     has_pets     —— ``pet_recognition`` 开启且花名册非空（判据见 home_profile_loader，
         **不**看 profile.md 的「## 宠物」标题：那段会被 token 预算归档等路径抹掉）。为真且
         video 路由时，在「# 字段说明」追加「## 宠物命名」纪律（宠物命名是视觉判断，故只 video）。
-    identity_match_disabled —— 身份库为空（无任何注册成员）时为 True：``identities`` 字段
-        改用精简版 ``IDENTITY_NO_MATCH``（只判 unknown↔no_person、不做成员匹配）。仅在
-        ``has_identity=True`` 时有意义；库非空时为 False，用完整匹配版 ``IDENTITY``。
+    identity_match_disabled —— 本轮拿不到任何成员参考图（<gallery> 不会出现在 prompt 里）
+        时为 True：``identities`` 字段改用精简版 ``IDENTITY_NO_MATCH``（只判 unknown↔
+        no_person、不做成员匹配）。三个来源同解——① 身份库为空（无任何注册成员）；
+        ② 库非空但本轮 gallery_snapshot 为空（成员无可用样本）；③ 「全或无」放弃（某候选
+        person 的 body composite 取不到）。②③ 仅在 ``has_identity=True`` 时置位（判据见
+        ``prompt_builder.build_fused_payload`` 的 gallery pre-flight）；参考图可用时为
+        False，用完整匹配版 ``IDENTITY``。
+    identity_library_empty —— 身份库本身为空（``list_persons()`` 为 0 条，即 omni.py 传进
+        来的 ``matching_moot``）。**只**驱动「# 输出实例」里实例 B 的专名 / 泛称选版：库空
+        是"本轮不可能产出任何成员名"的充分条件（名册必然是「已识别人物：无」），示范才该改
+        叫泛称；库非空、仅本轮无参考图时名册**常常**仍渲染 ``已识别人物：张三[bbox=…]``，
+        此时示范 caption 叫"某人"会把已确认成员一并带塌（名册恰好也空的残留窗口仍走带名版，
+        属已知权衡，见 constants._EXAMPLE_CHAIN_NO_NAME 的注释）。不要拿
+        ``identity_match_disabled`` 代替它（后者还含"库非空但无参考图"两个来源）。
     """
 
     route: Literal["video", "audio"]
@@ -226,6 +242,7 @@ class SceneDescriptor:
     has_speech: bool = True
     has_pets: bool = False
     identity_match_disabled: bool = False
+    identity_library_empty: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL
@@ -239,8 +256,10 @@ class SceneDescriptor:
         if not self.has_pets:
             fields = [f for f in fields if not f.requires_pets]
         if self.has_identity:
-            # 库空 → 精简版（不做成员匹配、只判 unknown/no_person）；两者 name 同为 "identities",
-            # 故 render_schema / render_field_spec / 解析层都无感。
+            # 本轮无成员参考图（库空 / 无可用样本 / 「全或无」放弃，三来源同解，见上方
+            # identity_match_disabled 字段说明）→ 精简版（不做成员匹配、只判
+            # unknown/no_person）；两者 name 同为 "identities"，故 render_schema /
+            # render_field_spec / 解析层都无感。
             ident = IDENTITY_NO_MATCH if self.identity_match_disabled else _REGISTRY["identities"]
             fields = [ident, *fields]
         return fields
