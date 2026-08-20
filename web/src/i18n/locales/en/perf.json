@@ -4,12 +4,10 @@
     "autoRefresh": "Auto-refresh every 30s",
     "manualRefresh": "Refresh",
     "inlineTitle": "Performance",
-
     "windowLast1h": "Last 1 hour",
     "windowLast6h": "Last 6 hours",
     "windowLast24h": "Last 24 hours",
     "windowLast3d": "Last 3 days",
-
     "errSummary": "Couldn't load performance summary",
     "errRtfSeries": "Couldn't load RTF time series",
     "errStage": "Couldn't load stage stats",
@@ -24,10 +22,8 @@
     "errMemSnapshot": "Couldn't load memory snapshot",
     "errMemSeries": "Couldn't load memory time series",
     "errProcSeries": "Couldn't load process CPU / thread time series",
-
     "loading": "Loading…",
     "noData": "No data in the selected period.",
-
     "agentTitle": "Recent agent calls",
     "agentSubtitle": "one row per agent turn",
     "agentEmpty": "No agent calls in the selected period.",
@@ -46,7 +42,6 @@
     "statusFailed": "Failed",
     "statusSuccess": "Success",
     "statusRunning": "Running",
-
     "dropTitle": "Window drops",
     "dropTotalPrefix": "Total dropped in window",
     "dropTotalSuffix": "",
@@ -56,11 +51,9 @@
     "dropTooltipOverflow": "overflow",
     "dropTooltipCycle": "cycle count",
     "pending": "in progress",
-
     "gateTitle": "Gate filter rate",
     "gateChartAria": "Gate filter rate line chart",
     "gateTooltipFilterRate": "Filter rate",
-
     "gateScoreTitle": "Gate score distribution",
     "gateScoreThreshold": "Thresholds: video {{video}} / audio {{audio}}",
     "gateScoreEmpty": "No score data in the selected period.",
@@ -72,7 +65,6 @@
     "colP99": "P99",
     "colN": "n",
     "colAudioP50": "audio P50",
-
     "kpiEmptyTrace": "No trace data in the selected window.",
     "kpiCycle": "Cycles",
     "kpiShouldProcess": "Expected",
@@ -88,7 +80,6 @@
     "kpiOmniRtfP95Hint": "successful omni calls only",
     "kpiAgentCall": "Agent calls",
     "kpiAgentCallHint": "times agent triggered",
-
     "procTitle": "Process CPU / threads",
     "procHeaderRecent": "Last {{bucket}} avg {{pct}}%",
     "procHeaderPeak": "Peak {{pct}}%",
@@ -100,7 +91,6 @@
     "procLegendCpu": "CPU",
     "procLegendThreads": "Threads",
     "procTooltipPeak": "Bucket peak",
-
     "memTitle": "Process memory",
     "memHeaderRss": "RSS {{mb}} MB",
     "memHeaderPy": "Py {{objects}} objects / {{mb}} MB",
@@ -117,7 +107,6 @@
     "memOther": "(other)",
     "memTotal": "total",
     "memPyHeading": "Python objects (sizeof sum, no recursive references)",
-
     "omniErrTitle": "Omni error series",
     "omniErrTotalPrefix": "Total in window",
     "omniErrTotalSuffix": "",
@@ -128,7 +117,6 @@
     "omniErrOther": "Other",
     "omniErrTotal": "Total",
     "omniErrWarn": "⚠ During rate limiting the window drop rate looks falsely better (RTF already excludes failed cycles and is unaffected)",
-
     "rtfTitle": "RTF",
     "rtfChartAria": "RTF time series line chart",
     "rtfEmpty": "No RTF data in the selected window.",
@@ -137,7 +125,6 @@
     "rtfCycle": "cycle",
     "rtfOmniOk": "omni (successful)",
     "rtfOmni": "omni (all)",
-
     "stageTitle": "Stage latency distribution",
     "stageP95Top3": "P95 top3",
     "stageRank1st": "1st",
@@ -151,7 +138,6 @@
     "colP95Ms": "P95 (ms)",
     "colP99Ms": "P99 (ms)",
     "colSampleSize": "Samples",
-
     "traceTitle": "Recent traces",
     "traceSubtitle": "click a row to expand per-stage latency",
     "traceEmpty": "No traces in the selected period.",
@@ -171,10 +157,11 @@
     "traceTracebackHint": "(see log for full traceback)",
     "tracePacketLen": "Packet length",
     "traceCycleOverWindow": "latency / packet len = {{pct}}%",
-
     "timingTitle": "Recent latency",
     "timingSubtitle": "P50 / P75 / P95 / P99 aggregated by time bucket",
     "timingEmpty": "No data in the selected period.",
-    "timingChartAria": "Recent latency line chart"
+    "timingChartAria": "Recent latency line chart",
+    "compact": "Compact",
+    "compactAria": "Compact: real-time rate and gate filter rate side by side"
   }
 }

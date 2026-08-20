@@ -117,15 +117,12 @@
     "pricingOpen": "Prices",
     "pricingTitle": "Pricing",
     "pricingSub": "Enter prices per MTokens (million tokens).",
-    "pricingNote": "Estimated locally — not a provider invoice. Prices are saved per model name; usage records only store the model name, so the same model served from different Base URLs cannot be priced separately.",
     "pricingCurrency": "Currency",
     "pricingCustom": "Custom",
     "pricingModel": "Model",
     "pricingMode": "Billing",
     "pricingModeFlat": "Flat",
     "pricingModeModality": "By modality",
-    "priceInput": "Input (uncached)",
-    "priceCache": "Cache hit",
     "priceText": "Text (incl. images)",
     "pricingCacheWarn": "Cache-hit price is not below the input price. Cache is {{share}}% of input this period, so if your provider discounts hits and this does not, the estimate is about {{pct}}% too high.",
     "pricingPreview": "Estimated total for this period ({{tokens}} tokens)",
@@ -138,9 +135,13 @@
     "updatedAt": "Updated {{time}}",
     "retry": "Retry",
     "clearDialogTitle": "Clear usage data",
-    "clearDialogBody": "This deletes all token usage records (live table + daily rollup).",
+    "clearDialogBody": "This deletes all token usage records.",
     "clearDialogWarn": "Cannot be undone — history is unrecoverable.",
     "colCost": "Est. cost",
-    "pricingPresetHint": "Pre-filled from the provider's public price list; you can override it."
+    "pricingPresetHint": "Pre-filled from the provider's public price list; you can override it.",
+    "pricingNote1": "Estimated locally — not a provider invoice; prices are saved per model name.",
+    "pricingNote2": "Usage records only store the model name, so the same model served from different Base URLs cannot be priced separately.",
+    "priceInputHit": "Input (cached)",
+    "priceInputMiss": "Input (uncached)"
   }
 }

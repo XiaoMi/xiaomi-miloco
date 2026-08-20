@@ -198,11 +198,15 @@ export function UsagePricingDialog({
               className="grid gap-3 sm:grid-cols-3 bg-bg-primary rounded-lg p-3.5 mb-3"
               key={pr.mode}
             >
+              {/* 色点的含义是「这个色在图表里出现」。输入 / 命中在图表里没有对应色，
+                  给它们配点等于凭空造一个语义，所以不区分模态这一档三项都不带点，
+                  内部保持一致；区分模态那一档四个模态带点，命中是唯一例外——它本来
+                  就不是图表里的序列，且排在最后自成一行。 */}
               {pr.mode === "flat" ? (
                 <>
-                  <Price label={t("usage.priceInput")} value={pr.input} onChange={(v) => setPr({ input: v })} />
-                  <Price label={t("usage.priceCache")} value={pr.cache} onChange={(v) => setPr({ cache: v })} />
-                  <Price label={t("usage.modalityOutput")} value={pr.output} onChange={(v) => setPr({ output: v })} dot="bg-usage-output" />
+                  <Price label={t("usage.priceInputMiss")} value={pr.input} onChange={(v) => setPr({ input: v })} />
+                  <Price label={t("usage.priceInputHit")} value={pr.cache} onChange={(v) => setPr({ cache: v })} />
+                  <Price label={t("usage.modalityOutput")} value={pr.output} onChange={(v) => setPr({ output: v })} />
                 </>
               ) : (
                 <>
@@ -210,7 +214,7 @@ export function UsagePricingDialog({
                   <Price label={t("usage.modalityVideo")} value={pr.video} onChange={(v) => setPr({ video: v })} dot="bg-usage-video" />
                   <Price label={t("usage.modalityAudio")} value={pr.audio} onChange={(v) => setPr({ audio: v })} dot="bg-usage-audio" />
                   <Price label={t("usage.modalityOutput")} value={pr.output} onChange={(v) => setPr({ output: v })} dot="bg-usage-output" />
-                  <Price label={t("usage.priceCache")} value={pr.cache} onChange={(v) => setPr({ cache: v })} />
+                  <Price label={t("usage.priceInputHit")} value={pr.cache} onChange={(v) => setPr({ cache: v })} />
                 </>
               )}
             </div>
@@ -247,9 +251,14 @@ export function UsagePricingDialog({
               </ul>
             )}
 
-            <p className="text-caption text-text-secondary mb-5 leading-relaxed">
-              {t("usage.pricingNote")}
-            </p>
+            <ul className="text-caption text-text-secondary mb-5 leading-relaxed flex flex-col gap-1">
+              {[t("usage.pricingNote1"), t("usage.pricingNote2")].map((line) => (
+                <li key={line} className="grid grid-cols-[0.6rem_1fr] gap-1">
+                  <span aria-hidden>·</span>
+                  <span>{line}</span>
+                </li>
+              ))}
+            </ul>
           </>
         )}
 
