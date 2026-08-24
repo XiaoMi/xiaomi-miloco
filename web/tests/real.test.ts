@@ -303,10 +303,15 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
   })();
 
   // 服务端桶行（都落在桶 0 = t0），结构对齐 /token-usage/buckets 返回
-  function bkt(type: string, calls: number, inp: number, out: number, cache: number, video: number, audio: number) {
+  function bkt(
+    type: string, calls: number, inp: number, out: number,
+    cache: number, video: number, audio: number,
+    base_url = "https://api.example/v1",
+  ) {
     return {
       bucket_ms: t0,
       model: "mimo-v2.5",
+      base_url,
       type,
       calls,
       input_tokens: inp,
@@ -316,6 +321,85 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
       audio_tokens: audio,
     };
   }
+
+  it("**同模型名、不同 Base URL 必须是两行**，不能被合成一行", async () => {
+    // 模型身份是 (model, base_url)。合成一行 = 钱花在哪个 endpoint 上再也分不出来，
+    // 而这正是给用量表加 base_url 的全部目的。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 2, 1000, 100, 0, 0, 0, "https://api.example/v1"),
+            bkt("realtime", 3, 2000, 200, 0, 0, 0, "https://api.example/v1-test"),
+          ],
+          total: 2,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    const rt = s.rows.filter((r) => r.type === "realtime");
+    expect(rt).toHaveLength(2);
+    expect(rt.map((r) => r.base_url).sort()).toEqual([
+      "https://api.example/v1",
+      "https://api.example/v1-test",
+    ]);
+    // 各自的数不许串
+    const byUrl = new Map(rt.map((r) => [r.base_url, r]));
+    expect(byUrl.get("https://api.example/v1")!.calls).toBe(2);
+    expect(byUrl.get("https://api.example/v1-test")!.calls).toBe(3);
+    expect(byUrl.get("https://api.example/v1")!.breakdown.input).toBe(1000);
+    expect(byUrl.get("https://api.example/v1-test")!.breakdown.input).toBe(2000);
+    // 总量仍是两边之和 —— 拆行不该影响合计
+    expect(s.total_tokens).toBe(1000 + 100 + 2000 + 200);
+    expect(s.calls).toBe(5);
+  });
+
+  it("补齐 realtime/on_demand 是按 (模型, endpoint) **对**补，不是只按模型名", async () => {
+    // 只按模型名补的话，两个 endpoint 会共用一次补齐，
+    // 其中一个缺失的调用类型永远不出现。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 1, 100, 10, 0, 0, 0, "https://a/v1"),
+            bkt("on_demand", 1, 200, 20, 0, 0, 0, "https://b/v1"),
+          ],
+          total: 2,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    // 两个 endpoint 各自都该有 realtime + on_demand 两行 = 共 4 行
+    expect(s.rows).toHaveLength(4);
+    for (const u of ["https://a/v1", "https://b/v1"]) {
+      const types = s.rows.filter((r) => r.base_url === u).map((r) => r.type).sort();
+      expect(types, u).toEqual(["on_demand", "realtime"]);
+    }
+  });
+
+  it("老数据 base_url 缺失时折成空串，不是 undefined", async () => {
+    // schema v3 之前的行没有这一列；空串是「未记录」的约定值，
+    // undefined 会让下游的 filter(Boolean) / Map key 行为漂移。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [{ ...bkt("realtime", 1, 100, 10, 0, 0, 0), base_url: undefined }],
+          total: 1,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    expect(s.rows.every((r) => r.base_url === "")).toBe(true);
+  });
 
   it("today：聚合 totals / by_type / rows / timeline 求和", async () => {
     mockFetchByUrl({

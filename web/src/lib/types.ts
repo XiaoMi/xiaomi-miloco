@@ -361,6 +361,14 @@ export interface UsageGroup {
 /** 明细表的一行：model × type 组合。 */
 export interface UsageRow {
   model: string;
+  /**
+   * 该行用量所用的 endpoint，**完整 URL 原文**。
+   *
+   * 模型身份 = (model, base_url)：同一个模型名可以同时挂在两个 endpoint 上，
+   * 只看模型名分不出钱花在哪边。空串 = 该行早于用量表记录此列（DB schema v3 之前），
+   * 来源无从得知——展示侧直说「旧版本数据未记录 URL」，不做任何推断或回填。
+   */
+  base_url: string;
   type: UsageCallType;
   calls: number;
   /** input + output。 */

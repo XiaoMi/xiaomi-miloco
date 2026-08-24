@@ -263,7 +263,7 @@ async def call_omni(
                 )
                 raise OmniError(f"omni response is not a dict (got {raw_cls})")
             await cb.record_success()
-            fire_record(config.model, raw.get("usage", {}), type)
+            fire_record(config.model, config.base_url, raw.get("usage", {}), type)
         return raw
     except CircuitOpenError as ce:
         short_circuited = True
@@ -493,7 +493,7 @@ async def call_omni_stream(
     finally:
         # generator close (正常 / 异常 / 消费方提前 break) 时统一上报一次
         if raw_usage_seen is not None:
-            fire_record(config.model, raw_usage_seen, type)
+            fire_record(config.model, config.base_url, raw_usage_seen, type)
         # stream 路径没有原生 raw response,只能用累积的 chunks + usage 拼一份伪 raw
         # 让 push_omni_trace 用同一 _pick_response_fields 路径抽 content/usage.
         # error 路径 raw_for_trace 仍传 (拼出 content="" usage={}),让 trace 行包含

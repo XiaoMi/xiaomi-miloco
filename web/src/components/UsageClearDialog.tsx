@@ -12,17 +12,21 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { IconX } from "@/lib/icons";
 import { toast } from "./Toast";
+import type { ClearScope } from "./UsageClearMenu";
 
 export function UsageClearDialog({
+  scope,
   clear,
   onCleared,
   onClose,
 }: {
-  clear: () => Promise<void>;
+  /** 要清的范围，决定弹窗里说的是「全部」还是某个时段。 */
+  scope: ClearScope;
+  clear: (sinceMs: number | null) => Promise<void>;
   onCleared: () => void;
   onClose: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [busy, setBusy] = useState(false);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
 
@@ -39,7 +43,7 @@ export function UsageClearDialog({
   async function doClear() {
     setBusy(true);
     try {
-      await clear();
+      await clear(scope.sinceMs);
       toast(t("usage.clearSuccess"), "ok");
       onCleared();
     } catch (e) {
@@ -79,7 +83,22 @@ export function UsageClearDialog({
           </button>
         </div>
 
-        <p className="text-body text-text-secondary">{t("usage.clearDialogBody")}</p>
+        <p className="text-body text-text-primary bg-bg-primary rounded-lg px-3 py-2">
+          {scope.sinceMs == null
+            ? t("usage.clearScopeAll")
+            : t("usage.clearScopeSince", { label: scope.label })}
+        </p>
+        {/* 日聚合表只有天粒度：跨天范围会连带删掉边界当天更早的记录。
+            这是日聚合的固有精度损失，必须说出来——否则就是悄悄多删。 */}
+        {scope.sinceMs != null && (
+          <p className="text-caption text-text-secondary mt-2">
+            {t("usage.clearDailyCaveat", {
+              date: new Date(scope.sinceMs).toLocaleDateString(
+                i18n.language === "en" ? "en-US" : "zh-CN",
+              ),
+            })}
+          </p>
+        )}
         <p className="text-caption text-error bg-error-bg rounded-lg px-3 py-2 mt-3">
           {t("usage.clearDialogWarn")}
         </p>

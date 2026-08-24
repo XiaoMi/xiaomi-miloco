@@ -4,7 +4,7 @@
 """v1→v2 schema 迁移测试.
 
 覆盖:
-- fresh-build 直接落 v2 形态 (rule NOT NULL + FK, cron 表存在, 无 task_link)
+- fresh-build 直接落最新形态 (rule NOT NULL + FK, cron 表存在, 无 task_link)
 - 迁移 A/B/C/D/E 五型 orphan 各自的处置策略 (D 取 task_link 侧, A/E 删+log)
 - cron 行迁移 + cron dangling 跳过+log (不阻塞启动)
 - 迁移后三重不变量
@@ -16,6 +16,8 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+
+from miloco.database.connector import _DB_SCHEMA_VERSION
 
 
 def _create_v1_baseline(db_path) -> None:
@@ -148,8 +150,12 @@ def test_fresh_build_is_v2_form(fresh_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        # user_version = 2
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # 落到**当前基线**版本。这里不写字面量：v3 起 fresh-build 会一路走到
+        # 最新版，写死数字每加一版就要改一次，而这条断言真正想说的是
+        # 「新建库不该停在中间某一版」。
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
+        )
         # task_link 表不存在
         tables = {
             row["name"]
@@ -447,7 +453,7 @@ def test_migrate_cron_dangling_skipped_with_log(v1_db, caplog):
 
 
 def test_migrate_final_invariants(v1_db):
-    """迁移完成后: user_version=2, task_link DROP, FK 干净, rule.task_id 无 NULL."""
+    """迁移完成后: user_version=当前基线, task_link DROP, FK 干净, rule.task_id 无 NULL."""
     conn = sqlite3.connect(str(v1_db))
     cursor = conn.cursor()
     _insert_task(cursor, "task-1")
@@ -464,7 +470,9 @@ def test_migrate_final_invariants(v1_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
+        )
         tables = {
             r["name"]
             for r in conn.execute(
@@ -506,7 +514,11 @@ def test_migrate_is_skipped_on_v2_db(fresh_db):
             ).fetchone()[0]
             == 1
         )
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # v1→v2 那一步没有重跑（task-x 存活即证），但步进循环会继续把
+        # v2 库推到当前基线——故这里比的是基线而不是 2。
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
+        )
 
 
 # ── rollback ──────────────────────────────────────────────────────────

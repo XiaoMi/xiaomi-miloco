@@ -516,8 +516,8 @@ export async function getUsageStats(
 }
 
 // 清空全部用量数据（实时表 + 日聚合，不可恢复）
-export async function clearUsageData(): Promise<void> {
-  return impl.realClearUsageData();
+export async function clearUsageData(sinceMs?: number | null): Promise<void> {
+  return impl.realClearUsageData(sinceMs);
 }
 
 // ── omni 模型配置（「模型」页内读/写，多档案切换）────────────────

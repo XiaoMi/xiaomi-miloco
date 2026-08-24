@@ -1594,6 +1594,7 @@ export async function realResumePerception(): Promise<void> {
 interface BucketRow {
   bucket_ms: number; // 桶起始 ms epoch
   model: string;
+  base_url: string;
   type: string;
   calls: number;
   input_tokens: number;
@@ -1606,6 +1607,7 @@ interface BucketRow {
 interface DailyRow {
   date: string; // YYYY-MM-DD（backend 已按 localtime 归日）
   model: string;
+  base_url: string;
   type: string;
   calls: number;
   input_tokens: number;
@@ -1618,6 +1620,8 @@ interface DailyRow {
 /** bucket / daily 聚合行的统一形态。 */
 interface UsageUnit {
   model: string;
+  /** 完整 URL 原文；'' = 老数据未记录（见 UsageRow.base_url）。 */
+  base_url: string;
   type: string;
   calls: number;
   input_tokens: number;
@@ -1764,11 +1768,16 @@ function unitsToStats(
     accBreakdown(g.breakdown, u);
     g.tokens = breakdownTotal(g.breakdown);
 
-    const rk = `${u.model} ${tk}`;
+    // key 含 base_url：模型身份是 (model, base_url)，只按模型名并行会把两个
+    // endpoint 的用量合成一行，钱花在哪边就再也分不出来。
+    // 分隔符用 \u001f 而不是空格：模型名与 URL 都可能含空格，用空格会让
+    // ("a b", "c") 与 ("a", "b c") 撞同一个 key。
+    const rk = `${u.model}\u001f${u.base_url ?? ""}\u001f${tk}`;
     let row = rowMap.get(rk);
     if (!row) {
       row = {
         model: u.model,
+        base_url: u.base_url ?? "",
         type: tk,
         calls: 0,
         tokens: 0,
@@ -1781,14 +1790,24 @@ function unitsToStats(
     row.tokens = breakdownTotal(row.breakdown);
   }
 
-  // 每个出现过的模型都补齐 realtime + on_demand 两行（缺的填 0），与 by_type 恒显示一致。
-  // 注意：分隔符必须与主循环的 rowMap key 一致（ ），否则 has() 命中失败会补出重复行。
-  for (const model of new Set([...rowMap.values()].map((r) => r.model))) {
+  // 每个出现过的 (模型, endpoint) 都补齐 realtime + on_demand 两行（缺的填 0），
+  // 与 by_type 恒显示一致。按**对**补而不是只按模型名补——否则同名的两个 endpoint
+  // 会共用一次补齐，其中一个缺失的调用类型永远不出现。
+  // 注意：分隔符必须与主循环的 rowMap key 完全一致，否则 has() 命中失败会补出重复行。
+  const seenPairs = new Map<string, { model: string; base_url: string }>();
+  for (const r of rowMap.values()) {
+    seenPairs.set(`${r.model}\u001f${r.base_url}`, {
+      model: r.model,
+      base_url: r.base_url,
+    });
+  }
+  for (const { model, base_url } of seenPairs.values()) {
     for (const tk of ["realtime", "on_demand"] as UsageCallType[]) {
-      const rk = `${model} ${tk}`;
+      const rk = `${model}\u001f${base_url}\u001f${tk}`;
       if (!rowMap.has(rk)) {
         rowMap.set(rk, {
           model,
+          base_url,
           type: tk,
           calls: 0,
           tokens: 0,
@@ -1802,6 +1821,8 @@ function unitsToStats(
   const typeRank = (t: string): number => (t === "realtime" ? 0 : 1);
   const rows = [...rowMap.values()].sort((a, b) => {
     if (a.model !== b.model) return a.model < b.model ? -1 : 1;
+    // 同模型名的多个 endpoint 之间也要有确定顺序，否则每次刷新行序都可能跳
+    if (a.base_url !== b.base_url) return a.base_url < b.base_url ? -1 : 1;
     return typeRank(a.type) - typeRank(b.type);
   });
 
@@ -1850,9 +1871,11 @@ export function realGetUsageStats(
 }
 
 // 清空全部用量数据（实时表 + 日聚合）。清完顺手失效请求级缓存，确保下次取到空。
-export async function realClearUsageData(): Promise<void> {
+export async function realClearUsageData(sinceMs?: number | null): Promise<void> {
+  // 不传 / 传 null = 全清。后端 body 可选，故这里始终带上 body，语义显式。
   await apiFetch<Normal<unknown>>("/api/admin/token-usage/clear", {
     method: "POST",
+    body: JSON.stringify({ since_ms: sinceMs ?? null }),
   });
   _resetUsageStatsCache();
 }

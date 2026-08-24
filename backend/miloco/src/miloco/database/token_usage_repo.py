@@ -2,9 +2,14 @@
 
 Schema:
   - token_usage         : live event rows (last 3 days), one row per API call
-  - token_usage_daily   : per-day rollup keyed by (date, model, type), preserved
-                          across retention window so historical trend / model /
-                          type breakdown stay queryable
+  - token_usage_daily   : per-day rollup keyed by (date, model, base_url, type),
+                          preserved across retention window so historical trend /
+                          model / type breakdown stay queryable
+
+模型身份 = (model, base_url)。同一个模型名可以同时挂在两个 endpoint 上，故两张表都
+带 base_url、且它进日表主键。存的是**完整 URL 原文**——差异可能落在 URL 的任何位置
+（主机、路径、端口），截断是展示层的事。``''`` = 该行早于本列引入（v3 之前），来源
+未记录；**永不回填**，展示侧直接说「旧版本数据未记录 URL」。
 
 Field semantics:
   - input_tokens   = prompt_tokens (total input, all modalities)
@@ -44,11 +49,12 @@ class TokenUsageRepo:
         self.db = get_db_connector()
         self._last_archive_check: date | None = None
 
-    def insert(self, model: str, usage: dict, type: str) -> None:
+    def insert(self, model: str, base_url: str, usage: dict, type: str) -> None:
         """Insert one event. Triggers rollup on first call of each new day.
 
         `type` is either ``"realtime"`` (perception-loop driven) or
-        ``"on_demand"`` (user-initiated query).
+        ``"on_demand"`` (user-initiated query). ``base_url`` 存完整原文；空串表示
+        调用方拿不到（正常路径不会发生，见 fire_record 的三个调用点）。
         """
         ts_ms = int(time.time() * 1000)
         today = datetime.fromtimestamp(ts_ms / 1000).date()
@@ -69,11 +75,11 @@ class TokenUsageRepo:
         with self.db.get_connection() as conn:
             conn.execute(
                 "INSERT INTO token_usage "
-                "(timestamp, model, type, input_tokens, output_tokens, "
+                "(timestamp, model, base_url, type, input_tokens, output_tokens, "
                 " cache_tokens, video_tokens, audio_tokens, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    ts_ms, model, type,
+                    ts_ms, model, base_url or "", type,
                     input_tokens, output_tokens,
                     cache_tokens, video_tokens, audio_tokens,
                     ts_ms,
@@ -81,20 +87,56 @@ class TokenUsageRepo:
             )
             conn.commit()
 
-    def clear_all(self) -> dict[str, int]:
+    def clear_all(self) -> dict[str, int | str | None]:
         """删除全部 token 用量(实时表 + 日 rollup),返回各表删除行数。
 
         供 admin 重置统计用(不可恢复)。两表在同一事务内一并清空。
         """
+        return self.clear_since(None)
+
+    def clear_since(self, since_ms: int | None) -> dict[str, int | str | None]:
+        """删除 ``since_ms`` 及其之后的用量;``None`` = 全删。返回各表删除行数。
+
+        为什么两表都要动、且必须同一事务:同一段时间的数据可能一半还在实时表、
+        一半已经 rollup 进日表(分界是 _RETENTION_DAYS)。只清一张会留下半清状态——
+        界面上表现为总量与明细对不上,而且**不会有任何报错**。
+
+        ⚠️ 日表的粒度是**天**,没有更细的时间戳。所以按「近 24 小时」这类跨天范围
+        删除时,日表只能按「since 所在那一天」整天删——这会连带删掉 since 之前、
+        但落在同一天里的记录。这是日聚合本身的精度损失,SQL 绕不过去:那些行的
+        原始时间戳在 rollup 时就已经不存在了。故额外返回 ``daily_from_date``,
+        让调用方能把这件事说清楚,而不是悄悄多删。
+        """
+        if since_ms is None:
+            from_date: str | None = None
+            where_live, where_daily = "", ""
+            p_live: tuple = ()
+            p_daily: tuple = ()
+        else:
+            from_date = datetime.fromtimestamp(since_ms / 1000).date().isoformat()
+            where_live, where_daily = " WHERE timestamp >= ?", " WHERE date >= ?"
+            p_live, p_daily = (since_ms,), (from_date,)
+
         with self.db.get_connection() as conn:
-            n_live = conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
-            n_daily = conn.execute(
-                "SELECT COUNT(*) FROM token_usage_daily"
-            ).fetchone()[0]
-            conn.execute("DELETE FROM token_usage")
-            conn.execute("DELETE FROM token_usage_daily")
-            conn.commit()
-        return {"token_usage": int(n_live), "token_usage_daily": int(n_daily)}
+            conn.execute("BEGIN")
+            try:
+                n_live = conn.execute(
+                    "SELECT COUNT(*) FROM token_usage" + where_live, p_live
+                ).fetchone()[0]
+                n_daily = conn.execute(
+                    "SELECT COUNT(*) FROM token_usage_daily" + where_daily, p_daily
+                ).fetchone()[0]
+                conn.execute("DELETE FROM token_usage" + where_live, p_live)
+                conn.execute("DELETE FROM token_usage_daily" + where_daily, p_daily)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "token_usage": int(n_live),
+            "token_usage_daily": int(n_daily),
+            "daily_from_date": from_date,
+        }
 
     def list_events(
         self,
@@ -117,8 +159,8 @@ class TokenUsageRepo:
         # Fetch limit+1 so we can detect overflow without an extra COUNT.
         with self.db.get_connection() as conn:
             rows = conn.execute(
-                "SELECT timestamp, model, type, input_tokens, output_tokens, "
-                "       cache_tokens, video_tokens, audio_tokens "
+                "SELECT timestamp, model, base_url, type, input_tokens, "
+                "       output_tokens, cache_tokens, video_tokens, audio_tokens "
                 "FROM token_usage WHERE timestamp BETWEEN ? AND ? "
                 "ORDER BY timestamp ASC LIMIT ?",
                 (since_ms, until_ms, limit + 1),
@@ -135,7 +177,10 @@ class TokenUsageRepo:
         bin_minutes: int = 60,
     ) -> list[dict]:
         """Bucketed aggregation of raw events in [since_ms, until_ms], grouped by
-        (time bucket, model, type). ``bin_minutes`` is the bucket width.
+        (time bucket, model, base_url, type). ``bin_minutes`` is the bucket width.
+
+        base_url 也要进 GROUP BY：「今日」视图的明细行是从这个接口来的（week/month
+        走 aggregate_daily），漏了它会导致今日能按 endpoint 分、近 7 天不能。
 
         Used by the "today" view: the response size is bounded by bucket count
         (≈ day / bin × models × types), not by event count, so it never hits the
@@ -152,7 +197,8 @@ class TokenUsageRepo:
         with self.db.get_connection() as conn:
             # CAST(... AS INTEGER) 截断为整数桶下标；timestamp ≥ since 保证非负 = floor。
             rows = conn.execute(
-                "SELECT CAST((timestamp - ?) / ? AS INTEGER) AS bkt, model, type, "
+                "SELECT CAST((timestamp - ?) / ? AS INTEGER) AS bkt, model, "
+                "       base_url, type, "
                 "       COUNT(*) AS calls, "
                 "       SUM(input_tokens) AS input_tokens, "
                 "       SUM(output_tokens) AS output_tokens, "
@@ -160,7 +206,8 @@ class TokenUsageRepo:
                 "       SUM(video_tokens) AS video_tokens, "
                 "       SUM(audio_tokens) AS audio_tokens "
                 "FROM token_usage WHERE timestamp BETWEEN ? AND ? "
-                "GROUP BY bkt, model, type ORDER BY bkt, model, type",
+                "GROUP BY bkt, model, base_url, type "
+                "ORDER BY bkt, model, base_url, type",
                 (since_ms, bin_ms, since_ms, until_ms),
             ).fetchall()
         out: list[dict] = []
@@ -191,15 +238,16 @@ class TokenUsageRepo:
 
         with self.db.get_connection() as conn:
             historical = conn.execute(
-                f"SELECT date, model, type, calls, input_tokens, output_tokens, "
-                f"       cache_tokens, video_tokens, audio_tokens "
-                f"FROM token_usage_daily {where} ORDER BY date ASC, model, type",
+                f"SELECT date, model, base_url, type, calls, input_tokens, "
+                f"       output_tokens, cache_tokens, video_tokens, audio_tokens "
+                f"FROM token_usage_daily {where} "
+                f"ORDER BY date ASC, model, base_url, type",
                 params,
             ).fetchall()
 
             live = conn.execute(
                 f"SELECT date(timestamp / 1000, 'unixepoch', 'localtime') AS date, "
-                f"  model, type, "
+                f"  model, base_url, type, "
                 f"  COUNT(*) AS calls, "
                 f"  SUM(input_tokens) AS input_tokens, "
                 f"  SUM(output_tokens) AS output_tokens, "
@@ -207,9 +255,9 @@ class TokenUsageRepo:
                 f"  SUM(video_tokens) AS video_tokens, "
                 f"  SUM(audio_tokens) AS audio_tokens "
                 f"FROM token_usage "
-                f"GROUP BY date, model, type "
+                f"GROUP BY date, model, base_url, type "
                 f"{('HAVING ' + ' AND '.join(conditions)) if conditions else ''} "
-                f"ORDER BY date ASC, model, type",
+                f"ORDER BY date ASC, model, base_url, type",
                 params,
             ).fetchall()
 
@@ -220,6 +268,10 @@ class TokenUsageRepo:
 
         SQL does the GROUP BY internally via INSERT...SELECT...ON CONFLICT,
         then a DELETE prunes the live table. Both wrapped in one transaction.
+
+        ⚠️ base_url 必须同时出现在 GROUP BY 与 ON CONFLICT 里。漏掉任何一处，两个
+        endpoint 的同日数据都会被**静默累加成一行**，而紧接着的 DELETE 会把原始行
+        删掉——不可恢复，也不会有任何报错。有专门用例钉住这一条。
         """
         # Day-aligned cutoff: a day is either fully rolled up or fully raw,
         # never split. Otherwise aggregate_daily() would return two rows for
@@ -242,19 +294,19 @@ class TokenUsageRepo:
                 conn.execute(
                     """
                     INSERT INTO token_usage_daily
-                        (date, model, type, calls,
+                        (date, model, base_url, type, calls,
                          input_tokens, output_tokens,
                          cache_tokens, video_tokens, audio_tokens)
                     SELECT
                         date(timestamp / 1000, 'unixepoch', 'localtime') AS d,
-                        model, type,
+                        model, base_url, type,
                         COUNT(*),
                         SUM(input_tokens), SUM(output_tokens),
                         SUM(cache_tokens), SUM(video_tokens), SUM(audio_tokens)
                     FROM token_usage
                     WHERE timestamp < ?
-                    GROUP BY d, model, type
-                    ON CONFLICT(date, model, type) DO UPDATE SET
+                    GROUP BY d, model, base_url, type
+                    ON CONFLICT(date, model, base_url, type) DO UPDATE SET
                         calls = calls + excluded.calls,
                         input_tokens = input_tokens + excluded.input_tokens,
                         output_tokens = output_tokens + excluded.output_tokens,
@@ -289,7 +341,7 @@ def get_token_usage_repo() -> TokenUsageRepo:
     return _repo
 
 
-def fire_record(model: str, usage: dict, type: str) -> None:
+def fire_record(model: str, base_url: str, usage: dict, type: str) -> None:
     """Record one omni usage event (synchronous direct insert).
 
     历史教训:曾用 ``asyncio.create_task`` 排到当前 loop 异步写,但感知主路径每窗
@@ -305,6 +357,6 @@ def fire_record(model: str, usage: dict, type: str) -> None:
     ``KeyboardInterrupt`` / ``SystemExit`` 仍照常向上传播,不被静默吞掉。
     """
     try:
-        get_token_usage_repo().insert(model, usage, type)
+        get_token_usage_repo().insert(model, base_url, usage, type)
     except Exception as e:  # noqa: BLE001
         logger.warning("usage log failed: %s", e)

@@ -644,14 +644,31 @@ async def get_token_usage_buckets(
     return NormalResponse(code=0, message="ok", data={"rows": rows, "total": len(rows)})
 
 
+class ClearTokenUsageBody(BaseModel):
+    """清空范围。``since_ms`` 省略 / null = 全清。"""
+
+    since_ms: int | None = None
+
+
 @router.post(
     "/token-usage/clear",
-    summary="清空全部 Token 用量(实时表 + 日聚合，不可恢复)",
+    summary="清空 Token 用量(实时表 + 日聚合，不可恢复；可限时间范围)",
     response_model=NormalResponse,
 )
-def clear_token_usage(current_user: str = Depends(verify_token)):
-    """删除 token_usage + token_usage_daily 全部行，返回各表删除条数。供重置统计用。"""
-    deleted = get_token_usage_repo().clear_all()
+def clear_token_usage(
+    body: ClearTokenUsageBody | None = None,
+    current_user: str = Depends(verify_token),
+):
+    """删除 token_usage + token_usage_daily 中 ``since_ms`` 及其之后的行。
+
+    body 省略或 ``since_ms=null`` 时全清——**保持与老客户端的兼容**:此前这个端点
+    不收 body，旧前端发的空 POST 仍然表示「全清」，语义不变。
+
+    返回值里的 ``daily_from_date`` 说明日聚合表实际是从哪一天起被删的:日表只有
+    天粒度，跨天范围会连带删掉 since 之前、同一天里的记录（详见 repo 的说明）。
+    """
+    since_ms = body.since_ms if body else None
+    deleted = get_token_usage_repo().clear_since(since_ms)
     return NormalResponse(code=0, message="ok", data={"deleted": deleted})
 
 

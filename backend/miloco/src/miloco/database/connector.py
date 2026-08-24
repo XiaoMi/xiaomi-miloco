@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本。fresh-build 直接落到此值; 老库启动时按 _SCHEMA_MIGRATIONS
 # 步进跑到此值。历史基线 v1 (cron 挪出 task_link + rule 加 FK CASCADE 前)。
-_DB_SCHEMA_VERSION = 2
+_DB_SCHEMA_VERSION = 3
 
 
 def incremental_vacuum(
@@ -647,6 +647,11 @@ class SQLiteConnector:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp INTEGER NOT NULL,
                 model TEXT NOT NULL,
+                -- 模型的唯一身份是 (model, base_url)：同一个模型名完全可以挂在两个
+                -- 不同 endpoint 上。存**完整 URL 原文**，不做任何归一或截断——差异
+                -- 可能落在 URL 的任何位置（主机、路径、端口），截断是展示层的事。
+                -- '' = 该行早于本列引入，来源未记录（v3 迁移给老数据留的值，永不回填）。
+                base_url TEXT NOT NULL DEFAULT '',
                 type TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -673,6 +678,10 @@ class SQLiteConnector:
             CREATE TABLE IF NOT EXISTS token_usage_daily (
                 date TEXT NOT NULL,
                 model TEXT NOT NULL,
+                -- 见 token_usage.base_url 的说明。**进主键**：不进的话两个 endpoint
+                -- 的同日数据会在 rollup 的 UPSERT 里被静默累加成一行，而原始行紧接着
+                -- 就被 DELETE，不可恢复。
+                base_url TEXT NOT NULL DEFAULT '',
                 type TEXT NOT NULL,
                 calls INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -680,7 +689,7 @@ class SQLiteConnector:
                 cache_tokens INTEGER NOT NULL DEFAULT 0,
                 video_tokens INTEGER NOT NULL DEFAULT 0,
                 audio_tokens INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date, model, type)
+                PRIMARY KEY (date, model, base_url, type)
             )
         """)
         cursor.execute(
@@ -1244,9 +1253,113 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         cursor.execute("PRAGMA foreign_keys=ON")
 
 
-# schema 步进迁移登记表; 未来加 v3 时新增 {3: _migrate_v2_to_v3} 条目
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3: token_usage / token_usage_daily 增加 base_url，日表主键改四元组。
+
+    动机: 模型的唯一身份是 (model, base_url)。同一个模型名可以同时挂在两个
+    endpoint 上（实机就有 mimo-v2.5 同时配在 /v1 与 /v1-test），此前用量表只记
+    model，于是花在哪个 endpoint 上无从区分。
+
+    一次事务原子完成:
+      (a) ALTER TABLE token_usage ADD COLUMN base_url TEXT NOT NULL DEFAULT ''
+      (b) 重建 token_usage_daily: 主键 (date, model, type) → (date, model, base_url, type)
+          —— SQLite 改不了主键，只能建表-拷贝-删-改名-重建索引
+      (c) PRAGMA user_version = 3 (同事务)
+      COMMIT
+
+    **老数据一律留 '' 表示「来源未记录」，本迁移不做任何回填。**
+    回填只有两种可能来源，都不能用: 一是按「当前生效档案」猜——在任何换过
+    endpoint 的机器上都是错的; 二是按运维口述——那是关于某一台的事实，不该写进
+    发给所有装机的代码里。展示侧对 '' 直接说「旧版本数据未记录 URL」，诚实且不可
+    误读；把断言写进库则会让它和记录值长得一模一样，日后再也分不清哪个是量出来的。
+
+    为什么 base_url 必须进日表主键: 不进的话，rollup 的
+    ``ON CONFLICT(date, model, type) DO UPDATE SET x = x + excluded.x`` 会把两个
+    endpoint 的同日数据**静默累加成一行**，而 rollup 紧接着就 DELETE 原始行——
+    不可恢复。
+
+    crash 语义: 单事务原子，COMMIT 前 crash → rollback 到 v2，重启重跑;
+    COMMIT 后 crash → user_version=3，外层步进循环跳过，不重入。
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute("BEGIN")
+
+        # ── (a) 实时表加列 ─────────────────────────────────────────
+        cols = {
+            r[1] for r in cursor.execute("PRAGMA table_info(token_usage)").fetchall()
+        }
+        if "base_url" not in cols:
+            cursor.execute(
+                "ALTER TABLE token_usage ADD COLUMN base_url TEXT NOT NULL DEFAULT ''"
+            )
+
+        # ── (b) 日表重建（改主键）────────────────────────────────────
+        dcols = {
+            r[1]
+            for r in cursor.execute("PRAGMA table_info(token_usage_daily)").fetchall()
+        }
+        if "base_url" not in dcols:
+            cursor.execute("""
+                CREATE TABLE token_usage_daily_v3 (
+                    date TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    base_url TEXT NOT NULL DEFAULT '',
+                    type TEXT NOT NULL,
+                    calls INTEGER NOT NULL DEFAULT 0,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_tokens INTEGER NOT NULL DEFAULT 0,
+                    video_tokens INTEGER NOT NULL DEFAULT 0,
+                    audio_tokens INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (date, model, base_url, type)
+                )
+            """)
+            # 老行 base_url 一律 ''。列名逐个写出，不用 SELECT *——
+            # 后者依赖列顺序，将来任何一次加列都会静默错位。
+            cursor.execute("""
+                INSERT INTO token_usage_daily_v3
+                    (date, model, base_url, type, calls,
+                     input_tokens, output_tokens, cache_tokens,
+                     video_tokens, audio_tokens)
+                SELECT date, model, '', type, calls,
+                       input_tokens, output_tokens, cache_tokens,
+                       video_tokens, audio_tokens
+                FROM token_usage_daily
+            """)
+            moved = cursor.execute(
+                "SELECT COUNT(*) FROM token_usage_daily_v3"
+            ).fetchone()[0]
+            before = cursor.execute(
+                "SELECT COUNT(*) FROM token_usage_daily"
+            ).fetchone()[0]
+            if moved != before:
+                raise RuntimeError(
+                    f"v2→v3 migration invariant broken: token_usage_daily "
+                    f"{before} rows in, {moved} rows out"
+                )
+            cursor.execute("DROP TABLE token_usage_daily")
+            cursor.execute(
+                "ALTER TABLE token_usage_daily_v3 RENAME TO token_usage_daily"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_usage_daily_date "
+                "ON token_usage_daily(date)"
+            )
+
+        # ── (c) 版本号与业务 DML 同事务 ──────────────────────────────
+        cursor.execute("PRAGMA user_version = 3")
+        conn.commit()
+        logger.info("v2→v3 migration done: base_url added to token usage tables")
+    except Exception:
+        conn.rollback()
+        raise
+
+
+# schema 步进迁移登记表; 未来加 v4 时新增 {4: _migrate_v3_to_v4} 条目
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v1_to_v2,
+    3: _migrate_v2_to_v3,
 }
 
 

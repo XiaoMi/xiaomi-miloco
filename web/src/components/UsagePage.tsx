@@ -40,6 +40,7 @@ import { UsageBreakdownTable } from "./UsageBreakdownTable";
 import { UsageOmniConfig } from "./UsageOmniConfig";
 import { UsagePricingDialog } from "./UsagePricingDialog";
 import { UsageClearDialog } from "./UsageClearDialog";
+import { UsageClearMenu, type ClearScope } from "./UsageClearMenu";
 import { PerfInline } from "./PerfInline";
 import { Segmented } from "./Segmented";
 
@@ -66,7 +67,8 @@ export function UsagePage() {
   const [binMinutes, setBinMinutes] = useState(60);
   const [pricing, setPricing] = useState<UsagePricing>(() => loadPricing());
   const [pricingOpen, setPricingOpen] = useState(false);
-  const [clearOpen, setClearOpen] = useState(false);
+  // 选了范围才开弹窗；null = 没在清。取代原来的布尔开关，顺便把范围带进弹窗。
+  const [clearScope, setClearScope] = useState<ClearScope | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   // 刷新周期与性能卡共用一个值（见 useRefreshInterval 的说明）
   const { sec: refreshSec, setSec: setRefreshSec } = useRefreshInterval();
@@ -196,13 +198,10 @@ export function UsagePage() {
           >
             {t("usage.refresh")}
           </button>
-          <button
-            type="button"
-            onClick={() => setClearOpen(true)}
-            className="text-caption text-text-secondary hover:text-error transition-colors"
-          >
-            {t("usage.clearData")}
-          </button>
+          {/* 与「刷新」之间多留一道间隔：安全高频动作与不可逆动作不该紧邻 */}
+          <div className="ml-2.5">
+            <UsageClearMenu onPick={setClearScope} />
+          </div>
         </div>
         }
       >
@@ -266,11 +265,12 @@ export function UsagePage() {
           onClose={() => setPricingOpen(false)}
         />
       )}
-      {clearOpen && (
+      {clearScope && (
         <UsageClearDialog
-          onClose={() => setClearOpen(false)}
+          scope={clearScope}
+          onClose={() => setClearScope(null)}
           onCleared={() => {
-            setClearOpen(false);
+            setClearScope(null);
             void reload();
           }}
           clear={clearUsageData}

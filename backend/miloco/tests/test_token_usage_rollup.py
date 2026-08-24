@@ -349,19 +349,32 @@ def test_aggregate_buckets_bin_changes_bucket_assignment(repo):
 
 def test_clear_all_empties_both_tables(repo):
     """clear_all 删空实时表 + 日聚合，返回各表删除条数。"""
-    repo.insert("mimo", {"prompt_tokens": 100, "completion_tokens": 10}, "realtime")
-    repo.insert("mimo", {"prompt_tokens": 200, "completion_tokens": 20}, "on_demand")
+    repo.insert(
+        "mimo", "https://a/v1", {"prompt_tokens": 100, "completion_tokens": 10}, "realtime"
+    )
+    repo.insert(
+        "mimo", "https://a/v1", {"prompt_tokens": 200, "completion_tokens": 20}, "on_demand"
+    )
 
     events, _ = repo.list_events(None, None, 100)
     assert len(events) == 2
 
     deleted = repo.clear_all()
-    assert deleted == {"token_usage": 2, "token_usage_daily": 0}
+    # clear_all 现在走 clear_since(None)，额外带回 daily_from_date（全清时为 None）
+    assert deleted == {
+        "token_usage": 2,
+        "token_usage_daily": 0,
+        "daily_from_date": None,
+    }
 
     events_after, _ = repo.list_events(None, None, 100)
     assert events_after == []
     # 幂等：再清一次返回全 0
-    assert repo.clear_all() == {"token_usage": 0, "token_usage_daily": 0}
+    assert repo.clear_all() == {
+        "token_usage": 0,
+        "token_usage_daily": 0,
+        "daily_from_date": None,
+    }
 
 
 def test_fire_record_persists_from_ephemeral_loop(repo):
@@ -378,6 +391,7 @@ def test_fire_record_persists_from_ephemeral_loop(repo):
     async def one_window() -> None:
         fire_record(
             "mimo-v2.5",
+            "https://api.example/v1",
             {"prompt_tokens": 3000, "completion_tokens": 200},
             "realtime",
         )
@@ -389,3 +403,5 @@ def test_fire_record_persists_from_ephemeral_loop(repo):
     assert len(events) == 1, "临时 loop 退出后 realtime 用量必须已落库,不能被丢"
     assert events[0]["type"] == "realtime"
     assert events[0]["input_tokens"] == 3000
+    # base_url 也必须一起落库——它是模型身份的一半
+    assert events[0]["base_url"] == "https://api.example/v1"
