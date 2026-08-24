@@ -2,7 +2,6 @@
   "perf": {
     "windowAria": "性能视图时间窗口",
     "autoRefresh": "每 30s 自动刷新",
-    "manualRefresh": "手动刷新",
     "inlineTitle": "性能监测",
     "windowLast1h": "最近 1 小时",
     "windowLast6h": "最近 6 小时",

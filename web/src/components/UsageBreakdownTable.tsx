@@ -124,7 +124,7 @@ export function UsageBreakdownTable({
                     c.align === "left" ? "text-left" : "text-right num"
                   } ${i === 0 || i === cols.length - 1 ? "px-5 md:px-6" : "px-3"}`}
                 >
-                  {t(`usage.${c.key}`)}
+                  {c.key === "colCost" ? `≈ ${t("usage.colCost")}` : t(`usage.${c.key}`)}
                 </th>
               ))}
             </tr>
@@ -141,11 +141,11 @@ export function UsageBreakdownTable({
               </tr>
             ) : (
               rows.map((r) => {
-                const cost = estimateCost(
-                  costInputOf(r.breakdown),
-                  pricingFor(pricing, r.model),
-                  pricing.per,
-                ).total;
+                // 没有单价依据的模型显示「—」，不拿占位价编一个数出来
+                const pr = pricingFor(pricing, r.model);
+                const cost = pr
+                  ? estimateCost(costInputOf(r.breakdown), pr, pricing.per).total
+                  : null;
                 return (
                   <Fragment key={`${r.model}\u001f${r.base_url}`}>
                   <tr className="border-b border-border last:border-b-0">
@@ -195,7 +195,13 @@ export function UsageBreakdownTable({
                       {humanTokens(r.breakdown.audio)}
                     </td>
                     <td className="px-5 md:px-6 py-2.5 text-right num text-text-primary">
-                      ≈ {money(cost)}
+                      {cost == null ? (
+                        <span className="text-text-tertiary" title={t("usage.costUnsetRow")}>
+                          —
+                        </span>
+                      ) : (
+                        money(cost)
+                      )}
                     </td>
                   </tr>
                   </Fragment>

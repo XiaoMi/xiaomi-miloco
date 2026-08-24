@@ -19,12 +19,20 @@
  *    MiMo v2.5 的命中价是未命中价的 1/50。实机实测（命中占输入 49.2%）下，按原价算
  *    会把费用高估 87%。命中价没低于输入价时，设置弹窗会直接把高估幅度算给用户看。
  *
- * 作用域：单价按**模型名**存。之所以不按「模型 + Base URL」存，是因为用量表
- * （token_usage / token_usage_daily）只记 model 一列、不记 base_url，按复合键存
- * 会得到一堆永远匹配不上的死键。代价是同一个模型名挂在两个不同 endpoint 上且
- * 价格不同时，估算分不开这两者——设置弹窗里对此有说明。
+ * ⚠️ 第三条：**没有录过价就按 0 算，并把是哪些模型点出来**。绝不能拿编出来的占位价充数——
+ *    那会让一个从没设过价的模型也显示出像样的金额，与真按住户单价算出来的数无从分辨。
+ *    故 `pricingFor` 对「没有依据」的模型返回 null（由 `summarizeCost` 记进 unpriced，
+ *    金额贡献 0），界面在「费用估算」后用黄色叹号点名是哪些模型；要可编辑起始值的
+ *    走 `seedPricingFor`，它给的是一份**全 0** 的空单价。
+ *
+ * 作用域：单价按**模型名**存，而模型的唯一身份其实是 (模型名 + Base URL)——
+ * 自 DB schema v3 起用量表已经记录了 base_url，所以「按复合键存」在技术上是可行的。
+ * 现在仍按模型名存是一个**有意的取舍**：改键会让住户已保存的单价全部失配，
+ * 而这件事该单独一步做、带迁移。代价是同一模型名挂在两个不同 endpoint 且价格不同时，
+ * 两边共用一份单价——设置弹窗里对此有说明。
  */
 
+import type { UsageStats } from "@/lib/types";
 import { textResidual } from "@/lib/usageTokens";
 
 /** 计价方式：不区分模态（输入/输出两价）或区分模态（各模态各一价）。 */
@@ -93,17 +101,23 @@ export function costInputOf(b: {
 }
 
 /**
- * 未知模型的通用占位单价。**不是任何真实价目**，只是让界面有个数可显示；
- * 已知模型走 KNOWN_MODEL_PRICING 预填，其余都得住户自己按服务商价目填。
+ * 空单价：**全 0**。没手动录过价的模型就是这个。
+ *
+ * 为什么不给「像样的占位值」：一个编出来的价目会算出一个像样的金额，与真按住户单价
+ * 估出来的数在界面上无从分辨，可信度却差一个量级。全 0 则算出 0——**0 是个显然不对
+ * 的数**，看见它就知道要去录价，不会被误当成结论。哪些模型没录价，由界面上「费用估算」
+ * 后面的黄色叹号点名。
+ *
+ * 名字里刻意不带 DEFAULT：那会招下一个人把它当成合理默认值直接用来展示。
  */
-export const DEFAULT_MODEL_PRICING: ModelPricing = {
-  mode: "modality",
-  input: 1,
-  text: 1,
-  video: 2.5,
-  audio: 1.5,
-  output: 4,
-  cache: 0.1,
+export const EMPTY_MODEL_PRICING: ModelPricing = {
+  mode: "flat",
+  input: 0,
+  text: 0,
+  video: 0,
+  audio: 0,
+  output: 0,
+  cache: 0,
 };
 
 export const PRICING_STORAGE_KEY = "web:usage:pricing";
@@ -157,12 +171,37 @@ function defaultPricing(): UsagePricing {
   return { currency: "¥", per: PER_MTOKENS, byModel: {} };
 }
 
+/** 这份单价的来源，决定界面该不该把算出来的钱当回事。 */
+export type PricingSource =
+  /** 住户自己填过并保存 */
+  | "user"
+  /** 命中 KNOWN_MODEL_PRICING，有公开价目出处 */
+  | "known"
+  /** 两者皆无——算出来的钱没有任何依据 */
+  | "unset";
+
+export function pricingSourceFor(p: UsagePricing, model: string): PricingSource {
+  if (p.byModel[model]) return "user";
+  if (knownPricingFor(model)) return "known";
+  return "unset";
+}
+
 /**
- * 取某模型的单价。优先级：住户存过的 → 已知模型预填 → 通用占位。
- * 都不写回存储，等住户真按保存才落盘。
+ * 取某模型**有依据的**单价：住户存过的 → 已知模型预填。两者都没有则返回 null。
+ *
+ * 返回可空是刻意的：这样每个展示位置都被类型系统逼着写出「没单价时显示什么」，
+ * 而不能顺手落到占位价上把编出来的钱显示成估算值。要草稿值请用 seedPricingFor。
  */
-export function pricingFor(p: UsagePricing, model: string): ModelPricing {
-  return p.byModel[model] ?? knownPricingFor(model) ?? { ...DEFAULT_MODEL_PRICING };
+export function pricingFor(p: UsagePricing, model: string): ModelPricing | null {
+  return p.byModel[model] ?? knownPricingFor(model);
+}
+
+/**
+ * 设置弹窗用的起始值：有依据的优先，没有就给一份全 0 的空单价让住户填。
+ * 只有「住户看得见、改得动」的地方才该调它。
+ */
+export function seedPricingFor(p: UsagePricing, model: string): ModelPricing {
+  return pricingFor(p, model) ?? { ...EMPTY_MODEL_PRICING };
 }
 
 /**
@@ -205,6 +244,65 @@ export function estimateCost(
   }
   add("output", (t.output / per) * pr.output);
   return { total, parts };
+}
+
+/**
+ * 把明细行按模型折成计价用的拆分（残差规则见 usageTokens.textResidual）。
+ *
+ * 放在 lib 而不是弹窗组件里：总览、明细表、弹窗三处都要用，让其中一个组件
+ * 从另一个组件 import 数据函数是反了依赖方向。
+ */
+export function costInputsByModel(stats: UsageStats): Map<string, CostInput> {
+  const out = new Map<string, CostInput>();
+  for (const r of stats.rows) {
+    const add = costInputOf(r.breakdown);
+    const cur = out.get(r.model);
+    if (!cur) {
+      out.set(r.model, { ...add });
+      continue;
+    }
+    cur.text += add.text;
+    cur.video += add.video;
+    cur.audio += add.audio;
+    cur.output += add.output;
+    cur.cache += add.cache;
+  }
+  return out;
+}
+
+export interface CostSummary {
+  /** 有单价的那些模型的合计。unpriced 非空时这是**部分**合计，不是全部。 */
+  total: number;
+  /** 参与合计的模型数。0 表示一分钱都算不出来。 */
+  priced: number;
+  /** 有用量、但没有任何单价依据的模型名（已排序，供界面点名）。 */
+  unpriced: string[];
+}
+
+/**
+ * 跨模型汇总费用，并把「哪些模型算不出来」一并带出来。
+ *
+ * 之所以要返回 unpriced 而不是内部静默跳过：跳过会得到一个看起来完整、实际漏算的合计，
+ * 而漏掉的那部分可能是大头。界面必须能说出「少算了谁」。
+ */
+export function summarizeCost(
+  byModel: Map<string, CostInput>,
+  p: UsagePricing,
+): CostSummary {
+  let total = 0;
+  let priced = 0;
+  const unpriced: string[] = [];
+  for (const [model, ci] of byModel) {
+    const pr = pricingFor(p, model);
+    if (!pr) {
+      unpriced.push(model);
+      continue;
+    }
+    total += estimateCost(ci, pr, p.per).total;
+    priced += 1;
+  }
+  unpriced.sort();
+  return { total, priced, unpriced };
 }
 
 /**
@@ -255,8 +353,8 @@ export function loadPricing(): UsagePricing {
     if (parsed.byModel && typeof parsed.byModel === "object") {
       for (const [model, pr] of Object.entries(parsed.byModel)) {
         // 存量数据可能来自旧版本，缺的字段补齐时优先用该模型的已知价目，
-        // 没有再落通用占位——别用编出来的数去补一个有公开价目的模型。
-        const fill = knownPricingFor(model) ?? DEFAULT_MODEL_PRICING;
+        // 没有就补 0——别用编出来的数去补一个有公开价目的模型。
+        const fill = knownPricingFor(model) ?? EMPTY_MODEL_PRICING;
         base.byModel[model] = { ...fill, ...(pr ?? {}) };
       }
     }

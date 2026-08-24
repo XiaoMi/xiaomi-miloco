@@ -112,6 +112,10 @@
   --font-size-display:    24px;
   --font-size-display-lg: 32px;
   --font-size-page-title: 20px;
+  /* 费用金额专用。语义档只有 16 / 20，而 16 与「tokens」那个单位标签同号、会读成标签，
+     20 又比想要的层级重一档。做成**用途名**而不是新开一级通用档：它只服务这一处，
+     并入通用档会让下一个人以为「18 是标题的一档」。同族做法见图表色那一族的说明。 */
+  --font-size-cost: 18px;
 
   /* 旧别名(deprecated 但保留以渐进迁移;新代码请用上面语义名)
    * v2 上抬:每档 +2 跟着语义档走(确保现存 inline `var(--font-size-md)` 仍是"标题位")
@@ -328,6 +332,70 @@ select:focus-visible {
   font-family: var(--font-family-mono);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
+}
+
+/* 总量 + 费用：2×2 网格。
+ *
+ * 第一行两个数字 `align-self: baseline`——基线由布局强制，与两边字号、盒高都无关；
+ * 第二行两条副行 `center`——右侧那条含带框按钮、比纯文字高，居中才不显歪。
+ *
+ * 为什么不是「两个盒子并排 + align-items:flex-end」：那种写法的对齐是**盒高算术碰巧凑出来的**。
+ * 实测过——只把费用数字的 line-height 换掉，两个数字的基线差就从 1.8px 涨到 4.0px，
+ * 换成 space-between 的版本更差（−9 ~ −16px，且随字号放大），而全程不会有任何报错。
+ * 网格把「会不会又歪」从自觉变成结构：实测 24 / 20 / 18 / 16 四档字号下数字与副行**均为 0.00px**。
+ *
+ * 窄栏（手机上卡内宽约 300px，而这一行中英各需 303 / 315px）改成单列纵排，
+ * 顺序 总量 → 副行 → 费用 → 费用说明；用 grid-template-areas 而不是改 DOM 顺序，
+ * 免得 DOM 序与视觉序在某一档下打架。 */
+.usage-hero-grid {
+  display: grid;
+  gap: 2px 16px;
+  justify-content: start;
+  grid-template-areas: "hero" "sub" "cost" "cap";
+}
+.usage-hero-grid > .uh-hero { grid-area: hero; }
+.usage-hero-grid > .uh-sub  { grid-area: sub; }
+.usage-hero-grid > .uh-cost { grid-area: cost; }
+.usage-hero-grid > .uh-cap  { grid-area: cap; }
+
+@media (min-width: 420px) {
+  .usage-hero-grid {
+    grid-template-columns: auto auto;
+    grid-template-areas:
+      "hero cost"
+      "sub  cap";
+  }
+  .usage-hero-grid > .uh-hero,
+  .usage-hero-grid > .uh-cost { align-self: baseline; }
+  .usage-hero-grid > .uh-sub,
+  .usage-hero-grid > .uh-cap  { align-self: center; }
+}
+
+/* 费用金额本体。用 --font-size-cost 而不是语义档，理由见该 token 的说明。 */
+.cost-value {
+  font-size: var(--font-size-cost);
+  line-height: 1.2;
+  letter-spacing: var(--tracking-tight);
+}
+
+/* 费用金额前的「≈」。
+ *
+ * 它比金额小一档（caption 12px vs 费用档 18px），若按基线对齐，视觉上会明显低于
+ * 数字——实测在 24px 档低 5.1px，且这个偏差随金额字号线性放大。要的是**墨迹中心对齐**：
+ * 「≈」的墨迹中心抬到数字的墨迹中心。
+ *
+ * 两个系数是在自托管的 Geist Mono 上用 canvas 的 actualBoundingBox 实测的墨迹中心比
+ * （相对各自基线，均与字号无关）：数字「¥6.51」= 0.3550em、「≈」= 0.3330em。
+ * 故需抬高 0.3550 × 金额字号 − 0.3330 × 12px（18px 档 = 2.39px）。以像素重心法复核，残差 0.2~0.3px。
+ * 换字体要重量这两个数。
+ *
+ * 用 transform 而非 vertical-align / margin：transform 不参与布局，所以金额那一行的
+ * 行盒与基线位置不受影响。inline 元素不吃 transform，故给 inline-block；
+ * line-height:1 让它不去撑行高。 */
+.cost-approx {
+  display: inline-block;
+  line-height: 1;
+  transform: translateY(calc(0.333em - var(--font-size-cost) * 0.355));
 }
 
 /* 滚动条 - mi.com 系硬细 */

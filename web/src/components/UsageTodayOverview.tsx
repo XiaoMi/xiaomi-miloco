@@ -16,8 +16,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TokenBreakdown, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
-import { estimateCost, pricingFor, type UsagePricing } from "@/lib/usagePricing";
-import { costInputsByModel } from "./UsagePricingDialog";
+import { costInputsByModel, summarizeCost, type UsagePricing } from "@/lib/usagePricing";
 import { HelpTip } from "./HelpTip";
 
 /** 环形图几何：viewBox 140×140，半径 54、环宽 20。 */
@@ -63,7 +62,7 @@ export function UsageTodayOverview({
   pricing: UsagePricing;
   onOpenPricing: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { totals } = stats;
   const [hover, setHover] = useState<ModalityKey | null>(null);
 
@@ -73,14 +72,22 @@ export function UsageTodayOverview({
   );
   const total = stats.total_tokens;
 
-  // 费用按模型分别算再加总：不同供应商价目不同，一份全局单价有第二个模型时必然错
-  const cost = [...costInputsByModel(stats).entries()].reduce(
-    (sum, [model, ci]) =>
-      sum + estimateCost(ci, pricingFor(pricing, model), pricing.per).total,
-    0,
+  // 费用按模型分别算再加总：不同供应商价目不同，一份全局单价有第二个模型时必然错。
+  // 没有单价依据的模型不参与合计，而是被点名带出来——静默跳过会得到一个看着完整、
+  // 实际漏算的数，而漏掉的可能正是大头。
+  const { total: cost, unpriced } = summarizeCost(
+    costInputsByModel(stats),
+    pricing,
   );
   const money =
     pricing.currency + (cost >= 100 ? cost.toFixed(0) : cost >= 10 ? cost.toFixed(1) : cost.toFixed(2));
+  /**
+   * 有模型没录过价 → 金额照显示（那部分按 0 计），但把说明图标换成叹号并点名是谁。
+   *
+   * 为什么不另做一个「未设单价」状态把金额藏掉：藏掉等于让人无从判断「是没花钱还是算不出来」，
+   * 而 0 本身就是个显然不对的数、看见就知道要去录价。
+   */
+  const unpricedCount = unpriced.length;
 
   const cacheRate = totals.input > 0 ? (totals.cache / totals.input) * 100 : null;
   const sub = [
@@ -92,37 +99,53 @@ export function UsageTodayOverview({
 
   return (
     <div>
-      {/* 总量与费用同一行、底部对齐：两条副行落在同一基线上。费用字号低一档——
-          它是估算值，不该跟 hero 抢注意力。 */}
-      <div className="flex items-end gap-4 flex-wrap">
-        <div>
-          <div className="flex items-baseline gap-2.5 flex-wrap">
-            <span className="text-display-lg num text-text-primary">{humanTokens(total)}</span>
-            <span className="text-title text-text-secondary font-normal">
-              {t("usage.tokensUnit")}
-            </span>
-          </div>
-          <div className="text-caption text-text-tertiary mt-0.5">{sub}</div>
+      {/* 总量与费用：2×2 网格，数字与数字同基线、副行与副行同中线。
+          为什么用网格而不是两个盒子并排——见 theme.css 的 .usage-hero-grid 注释，
+          那里记着「盒高算术凑出来的对齐」实测是怎么散的。 */}
+      <div className="usage-hero-grid">
+        <div className="uh-hero flex items-baseline gap-2.5 flex-wrap">
+          <span className="text-display-lg num text-text-primary">{humanTokens(total)}</span>
+          <span className="text-title text-text-secondary font-normal">
+            {t("usage.tokensUnit")}
+          </span>
         </div>
 
-        <div className="flex flex-col">
-          <div className="flex items-baseline gap-1.5">
-            <span className="text-caption text-text-tertiary">≈</span>
-            <span className="text-display num text-text-secondary">{money}</span>
-          </div>
-          <div className="text-caption text-text-tertiary mt-0.5 flex items-center gap-1.5 flex-wrap">
-            <span>{t("usage.costEstimate")}</span>
-            <HelpTip text={t("usage.costHelp")} wide />
-            <button
-              type="button"
-              onClick={onOpenPricing}
-              className="text-caption px-2 py-0.5 rounded-md border border-border
-                         text-text-secondary hover:text-text-primary hover:border-border-strong
-                         transition-colors"
-            >
-              {t("usage.pricingOpen")}
-            </button>
-          </div>
+        <div className="uh-cost flex items-baseline gap-1.5">
+          <span className="text-caption text-text-tertiary cost-approx">≈</span>
+          <span className="num text-text-secondary cost-value">{money}</span>
+        </div>
+
+        <div className="uh-sub text-caption text-text-tertiary">{sub}</div>
+
+        <div className="uh-cap text-caption text-text-tertiary flex items-center gap-1.5 flex-wrap">
+          <span>{t("usage.costEstimate")}</span>
+          {/* 叹号态**只说具体问题**，不再附「按各模型单价在本机估算…」那段声明：
+              声明是问号态的内容；有问题时把它一并显示只会稀释注意力。 */}
+          <HelpTip
+            tone={unpricedCount > 0 ? "warning" : "info"}
+            text={
+              unpricedCount > 0
+                ? t("usage.costUnpriced", {
+                    count: unpricedCount,
+                    // 顿号是中文的枚举号，英文该用逗号——交给 Intl 按当前语言决定
+                    models: new Intl.ListFormat(i18n.language, {
+                      style: "narrow",
+                      type: "unit",
+                    }).format(unpriced),
+                  })
+                : t("usage.costHelp")
+            }
+            wide
+          />
+          <button
+            type="button"
+            onClick={onOpenPricing}
+            className="text-caption px-2 py-0.5 rounded-md border border-border
+                       text-text-secondary hover:text-text-primary hover:border-border-strong
+                       transition-colors"
+          >
+            {t("usage.pricingOpen")}
+          </button>
         </div>
       </div>
 

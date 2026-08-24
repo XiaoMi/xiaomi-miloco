@@ -113,6 +113,9 @@ export function UsagePage() {
       // 单模型（家用常态）下即精确，多模型时是近似，故仍带 ≈ 前缀。
       const model = usage.data?.rows[0]?.model ?? "";
       const pr = pricingFor(pricing, model);
+      // 没单价就整行不给：tooltip 里没有「费用估算」那样的标签作限定，
+      // 一个凭占位价编出来的数在这里完全无从分辨
+      if (!pr) return null;
       const v = estimateCost(
         costInputOf({
           input: p.text + p.video + p.audio,
@@ -155,7 +158,21 @@ export function UsagePage() {
       <CollapsibleCard
         title={t("usage.tokenUsageTitle")}
         busy={usage.loading}
-        summary={stats ? `${humanTokens(stats.total_tokens)} ${t("usage.tokensUnit")}` : undefined}
+        summary={
+          stats ? (
+            <span className="text-text-secondary">
+              {humanTokens(stats.total_tokens)} {t("usage.tokensUnit")}
+            </span>
+          ) : undefined
+        }
+        // 「更新于」是关于这张卡数据的元信息、不是控件；放进工具条会把三个控件挤密
+        meta={
+          timeLabel ? (
+            <span className="text-text-tertiary num">
+              {t("usage.updatedAt", { time: timeLabel })}
+            </span>
+          ) : undefined
+        }
         toolbar={
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
@@ -184,11 +201,6 @@ export function UsagePage() {
             </div>
           )}
           <div className="flex-1 min-w-2" />
-          {timeLabel && (
-            <span className="text-caption text-text-tertiary num">
-              {t("usage.updatedAt", { time: timeLabel })}
-            </span>
-          )}
           <RefreshIntervalInput sec={refreshSec} onChange={setRefreshSec} />
           <button
             type="button"
@@ -196,7 +208,7 @@ export function UsagePage() {
             className="text-caption px-3 py-1.5 rounded-md border border-border text-text-secondary
                        hover:text-text-primary hover:border-border-strong transition-colors"
           >
-            {t("usage.refresh")}
+            {t("common.refresh")}
           </button>
           {/* 与「刷新」之间多留一道间隔：安全高频动作与不可逆动作不该紧邻 */}
           <div className="ml-2.5">
@@ -232,7 +244,13 @@ export function UsagePage() {
         ) : (
           // 重取时保持画面、只降透明度：不闪骨架、不跳布局
           <div className={usage.loading ? "opacity-60 transition-opacity" : "transition-opacity"}>
-            <div className="grid gap-7 lg:grid-cols-[minmax(300px,340px)_minmax(0,1fr)]">
+            {/* 左栏用 max-content：轨道贴着内容，分隔线两侧的留白就对称了。
+                原先固定 340px 而内容只占 304(中)/310(英)，左侧内容到分隔线是
+                36 + 28(栅格间隙) = 64px，右侧只有 29px(pl-7 + 边框)，明显偏。
+                量过才敢用 max-content：这一行的宽度由**副行与说明行**撑着、不由数字位数撑，
+                所以 2,278 次调用与 13,394 次调用之间只差约 2px，分隔线不会随数据跳。
+                minmax(0,1fr) 让右栏可压缩到 0，左栏再宽也不会把卡撑破。 */}
+              <div className="grid gap-7 lg:grid-cols-[max-content_minmax(0,1fr)]">
               <UsageTodayOverview
                 stats={stats}
                 pricing={pricing}

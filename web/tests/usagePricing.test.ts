@@ -7,8 +7,10 @@
  * 取值刻意用整数、占比刚好 1/2，让期望值能手算核对，不靠对照实现反推。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import type { UsageStats } from "@/lib/types";
 import {
-  DEFAULT_MODEL_PRICING,
+  costInputsByModel,
+  EMPTY_MODEL_PRICING,
   PER_MTOKENS,
   PRICING_STORAGE_KEY,
   cacheLooksUndiscounted,
@@ -17,6 +19,9 @@ import {
   knownPricingFor,
   loadPricing,
   pricingFor,
+  pricingSourceFor,
+  seedPricingFor,
+  summarizeCost,
   savePricing,
   type ModelPricing,
 } from "@/lib/usagePricing";
@@ -153,15 +158,55 @@ describe("已知模型预填 — mimo-v2.5", () => {
     expect(estimateCost(t, { ...pr, cache: pr.input }).total).toBeCloseTo(11.338, 3);
   });
 
-  it("pricingFor 优先级：住户存过的 > 预填 > 通用占位", () => {
+  it("pricingFor 优先级：住户存过的 > 预填；没依据返回 null", () => {
     const p = { currency: "¥", per: PER_MTOKENS, byModel: {} } as const;
-    expect(pricingFor({ ...p, byModel: {} }, "mimo-v2.5").input).toBe(1);
-    expect(pricingFor({ ...p, byModel: {} }, "mimo-v2.5").mode).toBe("flat");
+    expect(pricingFor({ ...p, byModel: {} }, "mimo-v2.5")?.input).toBe(1);
+    expect(pricingFor({ ...p, byModel: {} }, "mimo-v2.5")?.mode).toBe("flat");
     // 存过的赢
-    const saved = { ...DEFAULT_MODEL_PRICING, input: 42 };
-    expect(pricingFor({ ...p, byModel: { "mimo-v2.5": saved } }, "mimo-v2.5").input).toBe(42);
-    // 未知模型落通用占位
-    expect(pricingFor({ ...p, byModel: {} }, "who-knows")).toEqual(DEFAULT_MODEL_PRICING);
+    const saved = { ...EMPTY_MODEL_PRICING, input: 42 };
+    expect(pricingFor({ ...p, byModel: { "mimo-v2.5": saved } }, "mimo-v2.5")?.input).toBe(42);
+    // 未知且没存过 → null。这里**必须**是 null 而不是占位价：
+    // 落到占位价上就等于把编出来的钱显示成估算值。
+    expect(pricingFor({ ...p, byModel: {} }, "who-knows")).toBeNull();
+  });
+
+  it("pricingSourceFor 三态分得开", () => {
+    const p = { currency: "¥", per: PER_MTOKENS, byModel: {} };
+    expect(pricingSourceFor(p, "who-knows")).toBe("unset");
+    expect(pricingSourceFor(p, "mimo-v2.5")).toBe("known");
+    expect(
+      pricingSourceFor({ ...p, byModel: { "who-knows": EMPTY_MODEL_PRICING } }, "who-knows"),
+    ).toBe("user");
+    // 住户存过的要盖住预填，否则改不动已知模型的价
+    expect(
+      pricingSourceFor({ ...p, byModel: { "mimo-v2.5": EMPTY_MODEL_PRICING } }, "mimo-v2.5"),
+    ).toBe("user");
+  });
+
+  it("seedPricingFor 只在没依据时给空单价，且给的是副本", () => {
+    const p = { currency: "¥", per: PER_MTOKENS, byModel: {} };
+    // 有依据的不该被空单价盖掉
+    expect(seedPricingFor(p, "mimo-v2.5").input).toBe(1);
+    const draft = seedPricingFor(p, "who-knows");
+    expect(draft).toEqual(EMPTY_MODEL_PRICING);
+    draft.video = 123;
+    expect(EMPTY_MODEL_PRICING.video).not.toBe(123);
+  });
+
+  it("空单价必须**全为 0**——不许塞任何编出来的「像样默认值」", () => {
+    // 这是本文件里最容易被"顺手改好"的一处：给它填上看似合理的价，
+    // 从没录过价的模型就会显示出一个像样的金额，与真按住户单价估的数无从分辨。
+    for (const [k, v] of Object.entries(EMPTY_MODEL_PRICING)) {
+      if (k === "mode") continue;
+      expect(v, `EMPTY_MODEL_PRICING.${k} 必须是 0`).toBe(0);
+    }
+    // 全 0 单价算出来的钱必须是 0，且不产生任何分项
+    const r = estimateCost(
+      { text: 9e6, video: 9e6, audio: 9e6, output: 9e6, cache: 3e6 },
+      EMPTY_MODEL_PRICING,
+    );
+    expect(r.total).toBe(0);
+    expect(r.parts).toEqual([]);
   });
 });
 
@@ -179,18 +224,14 @@ describe("pricingFor / 持久化", () => {
     delete (globalThis as { localStorage?: unknown }).localStorage;
   });
 
-  it("没配过的模型给出厂值，且返回的是副本（改它不污染出厂常量）", () => {
-    const p = loadPricing();
-    const pr = pricingFor(p, "never-configured");
-    expect(pr).toEqual(DEFAULT_MODEL_PRICING);
-    pr.video = 123;
-    expect(DEFAULT_MODEL_PRICING.video).not.toBe(123);
+  it("没配过的模型不给数，返回 null", () => {
+    expect(pricingFor(loadPricing(), "never-configured")).toBeNull();
   });
 
   it("存了能读回来，货币与按模型单价都保留", () => {
     const p = loadPricing();
     p.currency = "$";
-    p.byModel["mimo-v2.5"] = { ...DEFAULT_MODEL_PRICING, video: 7.5 };
+    p.byModel["mimo-v2.5"] = { ...EMPTY_MODEL_PRICING, video: 7.5 };
     savePricing(p);
     expect(store.get(PRICING_STORAGE_KEY)).toBeTruthy();
 
@@ -204,8 +245,8 @@ describe("pricingFor / 持久化", () => {
     store.set(PRICING_STORAGE_KEY, JSON.stringify({ byModel: { m: { video: 3 } } }));
     const back = loadPricing();
     expect(back.byModel["m"].video).toBe(3);
-    expect(back.byModel["m"].output).toBe(DEFAULT_MODEL_PRICING.output);
-    expect(back.byModel["m"].mode).toBe(DEFAULT_MODEL_PRICING.mode);
+    expect(back.byModel["m"].output).toBe(EMPTY_MODEL_PRICING.output);
+    expect(back.byModel["m"].mode).toBe(EMPTY_MODEL_PRICING.mode);
     // 补齐后可直接参与计算，不会算出 NaN
     expect(Number.isFinite(estimateCost(T, back.byModel["m"]).total)).toBe(true);
   });
@@ -214,5 +255,79 @@ describe("pricingFor / 持久化", () => {
     store.set(PRICING_STORAGE_KEY, "{not json");
     expect(() => loadPricing()).not.toThrow();
     expect(loadPricing().currency).toBe("¥");
+  });
+});
+
+describe("summarizeCost / costInputsByModel", () => {
+  const P = { currency: "¥", per: PER_MTOKENS, byModel: {} as Record<string, ModelPricing> };
+  /** 1 MTokens 输入、1 MTokens 输出、无缓存无视频音频。 */
+  const ci = (n = 1) => ({
+    text: n * PER_MTOKENS,
+    video: 0,
+    audio: 0,
+    output: n * PER_MTOKENS,
+    cache: 0,
+  });
+  /** 输入 1、输出 2 → 每 1 MTokens 组合算 3 块。 */
+  const FLAT: ModelPricing = {
+    mode: "flat",
+    input: 1,
+    cache: 0,
+    output: 2,
+    text: 1,
+    video: 1,
+    audio: 1,
+  };
+
+  it("全都有单价：合计是各家之和，unpriced 为空", () => {
+    const p = { ...P, byModel: { a: FLAT, b: FLAT } };
+    const r = summarizeCost(new Map([["a", ci(1)], ["b", ci(2)]]), p);
+    expect(r.total).toBeCloseTo(3 + 6, 6);
+    expect(r.priced).toBe(2);
+    expect(r.unpriced).toEqual([]);
+  });
+
+  it("全都没单价：合计 0、priced 0，所有模型被点名", () => {
+    const r = summarizeCost(new Map([["z", ci(1)], ["a", ci(1)]]), P);
+    expect(r.total).toBe(0);
+    expect(r.priced).toBe(0);
+    // 排过序，界面点名时次序稳定
+    expect(r.unpriced).toEqual(["a", "z"]);
+  });
+
+  it("部分有单价：合计**只含**有价的那部分，其余点名带出", () => {
+    const p = { ...P, byModel: { a: FLAT } };
+    const r = summarizeCost(new Map([["a", ci(1)], ["b", ci(10)]]), p);
+    // b 是大头（30 块）却没单价：若被静默按占位价算进去，这里就不会是 3
+    expect(r.total).toBeCloseTo(3, 6);
+    expect(r.priced).toBe(1);
+    expect(r.unpriced).toEqual(["b"]);
+  });
+
+  it("已知模型即使没存过也算有依据（走预填价目）", () => {
+    const r = summarizeCost(new Map([["mimo-v2.5", ci(1)]]), P);
+    expect(r.priced).toBe(1);
+    expect(r.unpriced).toEqual([]);
+    // 输入 ¥1 + 输出 ¥2
+    expect(r.total).toBeCloseTo(3, 6);
+  });
+
+  it("costInputsByModel 把同模型的多行加起来，并对 input 取残差", () => {
+    const row = (model: string, input: number, video: number, audio: number, output: number) => ({
+      model,
+      type: "realtime" as const,
+      calls: 1,
+      tokens: input + output,
+      breakdown: { input, output, cache: 0, video, audio },
+    });
+    const m = costInputsByModel({
+      rows: [row("a", 100, 30, 20, 5), row("a", 100, 0, 0, 5), row("b", 50, 0, 0, 1)],
+    } as unknown as UsageStats);
+    expect(m.size).toBe(2);
+    // 残差：第一行 100−30−20=50，第二行 100 → 150
+    expect(m.get("a")!.text).toBe(150);
+    expect(m.get("a")!.video).toBe(30);
+    expect(m.get("a")!.output).toBe(10);
+    expect(m.get("b")!.text).toBe(50);
   });
 });

@@ -98,14 +98,55 @@ export function PerfInline() {
             onClick={reloadAll}
             className="text-caption px-3 py-1.5 rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
           >
-            {t("perf.manualRefresh")}
+            {t("common.refresh")}
           </button>
         </div>
       </div>
   );
 
+  // 收起时留一个最要紧的读数。选 omni 实时率 P95：它是「感知这一段跟不跟得上」的直接指标，
+  // 且与 KPI 卡里同名那格用同一个字段与同一条越界判据（>1 表示比实时慢），不另立标准。
+  //
+  // 上色口径对齐两处既有约定：常态整串 text-text-secondary，与 Token 用量的收起摘要一致；
+  // 越界时**只有数值**变色、且用 text-error，与 KPI 卡一致（此前整串染黄，两处都不合）。
+  const omniP95 = summary.data?.p95_rtf_omni;
+  const collapsedSummary =
+    omniP95 == null ? undefined : (
+      <span className="text-text-secondary">
+        {t("perf.kpiOmniRtfP95")}{" "}
+        <span className={`num ${omniP95 > 1 ? "text-error font-semibold" : ""}`}>
+          {omniP95.toFixed(2)}
+        </span>
+      </span>
+    );
+
+  // 数据新鲜度：与 Token 用量同样放在标题行（展开/收起都显示）。取三路里最后落地的时刻——
+  // 三个接口各自返回，谁最后到就是这张卡真正"齐了"的时间。
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  useEffect(() => {
+    if (summary.data || rtf.data || gate.data) setUpdatedAt(new Date());
+  }, [summary.data, rtf.data, gate.data]);
+  const timeLabel = updatedAt
+    ? updatedAt.toLocaleTimeString(i18n.language === "en" ? "en-US" : "zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : null;
+
   return (
-    <CollapsibleCard title={t("perf.inlineTitle")} toolbar={toolbar}>
+    <CollapsibleCard
+      title={t("perf.inlineTitle")}
+      summary={collapsedSummary}
+      meta={
+        timeLabel ? (
+          <span className="text-text-tertiary num">
+            {t("usage.updatedAt", { time: timeLabel })}
+          </span>
+        ) : undefined
+      }
+      toolbar={toolbar}
+    >
 
       {/* KPI 卡 */}
       <PerfKpiCards state={summary} embedded />

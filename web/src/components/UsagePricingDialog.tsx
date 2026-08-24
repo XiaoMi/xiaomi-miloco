@@ -17,11 +17,11 @@ import { humanTokens } from "@/lib/formatTokens";
 import {
   cacheLooksUndiscounted,
   cacheOverstatePct,
-  costInputOf,
   estimateCost,
+  costInputsByModel,
   knownPricingFor,
-  pricingFor,
-  type CostInput,
+  pricingSourceFor,
+  seedPricingFor,
   type ModelPricing,
   type UsagePricing,
 } from "@/lib/usagePricing";
@@ -29,24 +29,6 @@ import { IconX } from "@/lib/icons";
 
 const CURRENCIES = ["¥", "$", "€", "£"];
 
-/** 把明细行按模型折成计价用的拆分（残差规则见 usagePricing.textResidual）。 */
-export function costInputsByModel(stats: UsageStats): Map<string, CostInput> {
-  const out = new Map<string, CostInput>();
-  for (const r of stats.rows) {
-    const add = costInputOf(r.breakdown);
-    const cur = out.get(r.model);
-    if (!cur) {
-      out.set(r.model, { ...add });
-      continue;
-    }
-    cur.text += add.text;
-    cur.video += add.video;
-    cur.audio += add.audio;
-    cur.output += add.output;
-    cur.cache += add.cache;
-  }
-  return out;
-}
 
 export function UsagePricingDialog({
   stats,
@@ -67,7 +49,7 @@ export function UsagePricingDialog({
   const [draft, setDraft] = useState<UsagePricing>(() => ({
     ...pricing,
     byModel: Object.fromEntries(
-      models.map((m) => [m, pricingFor(pricing, m)]),
+      models.map((m) => [m, seedPricingFor(pricing, m)]),
     ),
   }));
   const [sel, setSel] = useState(models[0] ?? "");
@@ -82,7 +64,7 @@ export function UsagePricingDialog({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const pr: ModelPricing = draft.byModel[sel] ?? pricingFor(draft, sel);
+  const pr: ModelPricing = draft.byModel[sel] ?? seedPricingFor(draft, sel);
   const setPr = (patch: Partial<ModelPricing>) =>
     setDraft((d) => ({
       ...d,
@@ -93,7 +75,7 @@ export function UsagePricingDialog({
     const ci = byModel.get(m)!;
     return {
       model: m,
-      total: estimateCost(ci, draft.byModel[m] ?? pricingFor(draft, m), draft.per).total,
+      total: estimateCost(ci, draft.byModel[m] ?? seedPricingFor(draft, m), draft.per).total,
     };
   });
   const grandTotal = perModel.reduce((a, x) => a + x.total, 0);
@@ -192,6 +174,12 @@ export function UsagePricingDialog({
               <p className="text-caption text-text-secondary mb-2">
                 {t("usage.pricingPresetHint")}
               </p>
+            )}
+
+            {/* 这个模型此前从没有过单价依据 → 下面输入框里的数是占位草稿。
+                必须说明，否则住户会以为那是我们查到的价目而直接保存。 */}
+            {pricingSourceFor(pricing, sel) === "unset" && (
+              <p className="text-caption text-warning mb-2">{t("usage.pricingUnsetHint")}</p>
             )}
 
             <div

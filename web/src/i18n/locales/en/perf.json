@@ -2,7 +2,6 @@
   "perf": {
     "windowAria": "Performance view time window",
     "autoRefresh": "Auto-refresh every 30s",
-    "manualRefresh": "Refresh",
     "inlineTitle": "Performance",
     "windowLast1h": "Last 1 hour",
     "windowLast6h": "Last 6 hours",

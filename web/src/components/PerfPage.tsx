@@ -204,7 +204,7 @@ export function PerfPage() {
             onClick={reloadAll}
             className="text-caption px-3 py-1.5 rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
           >
-            {t("perf.manualRefresh")}
+            {t("common.refresh")}
           </button>
         </div>
       </section>
