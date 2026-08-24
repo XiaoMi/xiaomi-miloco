@@ -20,9 +20,9 @@ export function UsageClearDialog({
   onCleared,
   onClose,
 }: {
-  /** 要清的范围，决定弹窗里说的是「全部」还是某个时段。 */
+  /** 要清的作用域（时间范围 × 目标），决定弹窗复述的是「全部」「某个时段」还是某一项。 */
   scope: ClearScope;
-  clear: (sinceMs: number | null) => Promise<void>;
+  clear: (s: ClearScope) => Promise<void>;
   onCleared: () => void;
   onClose: () => void;
 }) {
@@ -43,7 +43,7 @@ export function UsageClearDialog({
   async function doClear() {
     setBusy(true);
     try {
-      await clear(scope.sinceMs);
+      await clear(scope);
       toast(t("usage.clearSuccess"), "ok");
       onCleared();
     } catch (e) {
@@ -69,7 +69,7 @@ export function UsageClearDialog({
       >
         <div className="flex items-start justify-between gap-3 mb-3">
           <h2 id="usage-clear-title" className="text-title font-semibold">
-            {t("usage.clearDialogTitle")}
+            {t(scope.target ? "usage.clearDialogTitleTarget" : "usage.clearDialogTitle")}
           </h2>
           <button
             type="button"
@@ -83,20 +83,51 @@ export function UsageClearDialog({
           </button>
         </div>
 
-        <p className="text-body text-text-primary bg-bg-primary rounded-lg px-3 py-2">
-          {scope.sinceMs == null
-            ? t("usage.clearScopeAll")
-            : t("usage.clearScopeSince", { label: scope.label })}
-        </p>
+        {/* 作用域：定点时把「模型名 + Base URL」摆出来（样式同明细的模型列），
+            否则「这一项」指的是谁只能靠记忆。 */}
+        <div className="text-body text-text-primary bg-bg-primary rounded-lg px-3 py-2
+                        flex items-center gap-2 flex-wrap">
+          {scope.target ? (
+            <>
+              <span className="text-caption text-text-secondary">
+                {t("usage.clearScopePrefix")}
+              </span>
+              <span className="num">{scope.target.model}</span>
+              {scope.target.baseUrl ? (
+                <span className="num text-caption px-1.5 rounded border border-border
+                                 text-text-tertiary break-all">
+                  {scope.target.baseUrl}
+                </span>
+              ) : (
+                <span className="text-caption px-1.5 rounded border border-dashed
+                                 border-border text-text-tertiary">
+                  {t("usage.modelUrlLegacy")}
+                </span>
+              )}
+              <span className="text-caption text-text-secondary">
+                {scope.sinceMs == null ? t("usage.clearScopeAllTime") : `· ${scope.label}`}
+              </span>
+            </>
+          ) : scope.sinceMs == null ? (
+            t("usage.clearScopeAll")
+          ) : (
+            t("usage.clearScopeSince", { label: scope.label })
+          )}
+        </div>
         {/* 日聚合表只有天粒度：跨天范围会连带删掉边界当天更早的记录。
             这是日聚合的固有精度损失，必须说出来——否则就是悄悄多删。 */}
         {scope.sinceMs != null && (
           <p className="text-caption text-text-secondary mt-2">
-            {t("usage.clearDailyCaveat", {
+            {t(scope.target ? "usage.clearDailyCaveatTarget" : "usage.clearDailyCaveat", {
               date: new Date(scope.sinceMs).toLocaleDateString(
                 i18n.language === "en" ? "en-US" : "zh-CN",
               ),
             })}
+          </p>
+        )}
+        {scope.target && (
+          <p className="text-caption text-text-secondary mt-2">
+            {t("usage.clearTargetOnlyNote")}
           </p>
         )}
         <p className="text-caption text-error bg-error-bg rounded-lg px-3 py-2 mt-3">

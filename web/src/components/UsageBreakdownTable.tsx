@@ -4,6 +4,9 @@
  *
  * 费用按行算而不是只给一个总数:单价是按模型存的,多模型时只有落到行上才对得起账。
  *
+ * 末列是「操作」：逐行清除该行「模型名 + endpoint」的用量。与卡片顶部那个清空共用
+ * 同一个垃圾桶图标、同一套时间档位，只差作用域——顶部清所有模型，这里只清这一行。
+ *
  * 口径说明从表下的一行小字改成标题旁的「?」——那句话是「看界面看不出来」的背景知识,
  * 需要时点开即可,常驻一行反而占位。
  */
@@ -15,6 +18,7 @@ import { humanTokens } from "@/lib/formatTokens";
 import { costInputOf, estimateCost, pricingFor, type UsagePricing } from "@/lib/usagePricing";
 import { shortenUrlSet } from "@/lib/modelIdentity";
 import { UsageUrlChip } from "./UsageUrlChip";
+import { UsageClearMenu, type ClearScope } from "./UsageClearMenu";
 import { HelpTip } from "./HelpTip";
 
 interface ModelRow {
@@ -63,9 +67,12 @@ function rowsByModel(stats: UsageStats): ModelRow[] {
 export function UsageBreakdownTable({
   stats,
   pricing,
+  onClear,
 }: {
   stats: UsageStats;
   pricing: UsagePricing;
+  /** 给了才出「操作」列。逐行清除只清该行的「模型名 + endpoint」。 */
+  onClear?: (s: ClearScope) => void;
 }) {
   const { t } = useTranslation();
   const rows = rowsByModel(stats);
@@ -81,6 +88,28 @@ export function UsageBreakdownTable({
   const money = (v: number) =>
     pricing.currency + (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
 
+  /**
+   * 清除气泡标题里的作用域徽记：文字与框线跟模型列一致，但**不可交互**——
+   * 气泡里再套一个能弹气泡的 chip 没有意义，完整 URL 挂 title 即可。
+   */
+  const scopeChipOf = (r: ModelRow) => (
+    <>
+      <span className="text-text-primary">{r.model}</span>
+      {r.base_url ? (
+        <span
+          className="num text-text-tertiary text-[11px] px-1.5 py-px rounded border border-border"
+          title={r.base_url}
+        >
+          {urlLabels.get(r.base_url) ?? r.base_url}
+        </span>
+      ) : (
+        <span className="text-text-tertiary text-[11px] px-1.5 py-px rounded border border-dashed border-border">
+          {t("usage.modelUrlLegacy")}
+        </span>
+      )}
+    </>
+  );
+
   const cols = [
     { key: "colModel", align: "left" as const },
     { key: "colCalls", align: "right" as const },
@@ -91,6 +120,7 @@ export function UsageBreakdownTable({
     { key: "colVideo", align: "right" as const },
     { key: "colAudio", align: "right" as const },
     { key: "colCost", align: "right" as const },
+    ...(onClear ? [{ key: "colActions", align: "right" as const }] : []),
   ];
 
   return (
@@ -120,11 +150,27 @@ export function UsageBreakdownTable({
                 <th
                   key={c.key}
                   scope="col"
+                  // 操作列给 width:1%：auto 布局按 max-content 分剩余宽度，不压住它
+                  // 就会白拿一大块空隙，垃圾桶被推得离数字很远（实测 34px → 20px）。
+                  style={c.key === "colActions" ? { width: "1%" } : undefined}
                   className={`py-2 font-normal ${
                     c.align === "left" ? "text-left" : "text-right num"
-                  } ${i === 0 || i === cols.length - 1 ? "px-5 md:px-6" : "px-3"}`}
+                  } ${
+                    c.key === "colActions"
+                      ? "pl-2 pr-5 md:pr-6"
+                      : i === 0
+                        ? "px-5 md:px-6"
+                        : "px-3"
+                  }`}
                 >
-                  {c.key === "colCost" ? `≈ ${t("usage.colCost")}` : t(`usage.${c.key}`)}
+                  {c.key === "colActions" ? (
+                    // 一列图标按钮不需要可见表头，但读屏念到这一格时要有名字
+                    <span className="sr-only">{t("usage.colActions")}</span>
+                  ) : c.key === "colCost" ? (
+                    `≈ ${t("usage.colCost")}`
+                  ) : (
+                    t(`usage.${c.key}`)
+                  )}
                 </th>
               ))}
             </tr>
@@ -194,7 +240,11 @@ export function UsageBreakdownTable({
                     <td className="px-3 py-2.5 text-right num text-text-secondary">
                       {humanTokens(r.breakdown.audio)}
                     </td>
-                    <td className="px-5 md:px-6 py-2.5 text-right num text-text-primary">
+                    <td
+                      className={`py-2.5 text-right num text-text-primary ${
+                        onClear ? "px-3" : "px-5 md:px-6"
+                      }`}
+                    >
                       {cost == null ? (
                         <span className="text-text-tertiary" title={t("usage.costUnsetRow")}>
                           —
@@ -203,6 +253,22 @@ export function UsageBreakdownTable({
                         money(cost)
                       )}
                     </td>
+                    {/* 操作格竖向 padding 收到 py-1：30px 按钮配 py-2.5 会把行从 39.5px
+                        顶到 51px（实测）。收成 4px 后这一格 38px，行高仍由模型列的
+                        URL 框决定——按钮是白拿的，不加高任何一行。 */}
+                    {onClear && (
+                      <td className="pl-2 pr-5 md:pr-6 py-1 text-right">
+                        <UsageClearMenu
+                          target={{
+                            model: r.model,
+                            baseUrl: r.base_url,
+                            label: scopeChipOf(r),
+                          }}
+                          placement="fixed"
+                          onPick={onClear}
+                        />
+                      </td>
+                    )}
                   </tr>
                   </Fragment>
                 );

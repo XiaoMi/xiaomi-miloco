@@ -266,7 +266,11 @@ export function UsagePage() {
             </div>
 
             <div className="mt-6 pt-6 border-t border-border">
-              <UsageBreakdownTable stats={stats} pricing={pricing} />
+              <UsageBreakdownTable
+                stats={stats}
+                pricing={pricing}
+                onClear={setClearScope}
+              />
             </div>
           </div>
         )}
@@ -291,7 +295,14 @@ export function UsagePage() {
             setClearScope(null);
             void reload();
           }}
-          clear={clearUsageData}
+          clear={(s) =>
+            clearUsageData({
+              sinceMs: s.sinceMs,
+              // 只在定点清除时带 model/base_url，且必须成对：前端会抛、后端返 400。
+              // 判定看 s.target 有没有，不看 baseUrl 真不真（空串是合法目标）。
+              ...(s.target ? { model: s.target.model, baseUrl: s.target.baseUrl } : {}),
+            })
+          }
         />
       )}
     </div>

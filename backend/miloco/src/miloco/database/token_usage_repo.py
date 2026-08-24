@@ -94,40 +94,79 @@ class TokenUsageRepo:
         """
         return self.clear_since(None)
 
-    def clear_since(self, since_ms: int | None) -> dict[str, int | str | None]:
-        """删除 ``since_ms`` 及其之后的用量;``None`` = 全删。返回各表删除行数。
+    def clear_since(
+        self,
+        since_ms: int | None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> dict[str, int | str | None]:
+        """删除用量记录。三个条件都是可选的，同时生效（AND）。
 
-        为什么两表都要动、且必须同一事务:同一段时间的数据可能一半还在实时表、
-        一半已经 rollup 进日表(分界是 _RETENTION_DAYS)。只清一张会留下半清状态——
-        界面上表现为总量与明细对不上,而且**不会有任何报错**。
+        - ``since_ms``：该时刻及其之后；``None`` = 不限时间
+        - ``model`` / ``base_url``：限定到某一个「模型名 + endpoint」；``None`` = 不限
 
-        ⚠️ 日表的粒度是**天**,没有更细的时间戳。所以按「近 24 小时」这类跨天范围
-        删除时,日表只能按「since 所在那一天」整天删——这会连带删掉 since 之前、
-        但落在同一天里的记录。这是日聚合本身的精度损失,SQL 绕不过去:那些行的
-        原始时间戳在 rollup 时就已经不存在了。故额外返回 ``daily_from_date``,
-        让调用方能把这件事说清楚,而不是悄悄多删。
+        ⚠️ ``model`` 与 ``base_url`` **必须同时给或同时不给**。模型的唯一身份是这两者
+        的组合，只给模型名会跨掉它的所有 endpoint——那不是任何界面入口的语义，
+        真发生了几乎一定是调用方的 bug，与其多删不如直接报错。
+
+        ⚠️ ``base_url=""`` 是**有意义的取值**（schema v3 之前的老数据，来源未记录），
+        所以判空一律用 ``is not None``、不能用真值判断——用真值判断会让「删这批
+        老数据」静默变成「不限 endpoint 全删」。
+
+        为什么两表都要动、且必须同一事务：同一段时间的数据可能一半还在实时表、
+        一半已经 rollup 进日表（分界是 _RETENTION_DAYS）。只清一张会留下半清状态——
+        界面上表现为总量与明细对不上，而且**不会有任何报错**。
+
+        ⚠️ 日表的粒度是**天**，没有更细的时间戳。所以按「近 24 小时」这类跨天范围
+        删除时，日表只能按「since 所在那一天」整天删——这会连带删掉 since 之前、
+        但落在同一天里的记录。这是日聚合本身的精度损失，SQL 绕不过去：那些行的
+        原始时间戳在 rollup 时就已经不存在了。故额外返回 ``daily_from_date``，
+        让调用方能把这件事说清楚，而不是悄悄多删。
         """
-        if since_ms is None:
-            from_date: str | None = None
-            where_live, where_daily = "", ""
-            p_live: tuple = ()
-            p_daily: tuple = ()
-        else:
+        if (model is None) != (base_url is None):
+            raise ValueError(
+                "model 与 base_url 必须同时给或同时不给"
+                f"（收到 model={model!r} base_url={base_url!r}）"
+            )
+
+        from_date: str | None = None
+        cond_live: list[str] = []
+        cond_daily: list[str] = []
+        p_live: list = []
+        p_daily: list = []
+
+        if since_ms is not None:
             from_date = datetime.fromtimestamp(since_ms / 1000).date().isoformat()
-            where_live, where_daily = " WHERE timestamp >= ?", " WHERE date >= ?"
-            p_live, p_daily = (since_ms,), (from_date,)
+            cond_live.append("timestamp >= ?")
+            p_live.append(since_ms)
+            cond_daily.append("date >= ?")
+            p_daily.append(from_date)
+
+        if model is not None:
+            # base_url 同为非 None（上面已断言），空串在此按值精确匹配
+            for cond, params in ((cond_live, p_live), (cond_daily, p_daily)):
+                cond.append("model = ?")
+                params.append(model)
+                cond.append("base_url = ?")
+                params.append(base_url)
+
+        where_live = (" WHERE " + " AND ".join(cond_live)) if cond_live else ""
+        where_daily = (" WHERE " + " AND ".join(cond_daily)) if cond_daily else ""
 
         with self.db.get_connection() as conn:
             conn.execute("BEGIN")
             try:
                 n_live = conn.execute(
-                    "SELECT COUNT(*) FROM token_usage" + where_live, p_live
+                    "SELECT COUNT(*) FROM token_usage" + where_live, tuple(p_live)
                 ).fetchone()[0]
                 n_daily = conn.execute(
-                    "SELECT COUNT(*) FROM token_usage_daily" + where_daily, p_daily
+                    "SELECT COUNT(*) FROM token_usage_daily" + where_daily,
+                    tuple(p_daily),
                 ).fetchone()[0]
-                conn.execute("DELETE FROM token_usage" + where_live, p_live)
-                conn.execute("DELETE FROM token_usage_daily" + where_daily, p_daily)
+                conn.execute("DELETE FROM token_usage" + where_live, tuple(p_live))
+                conn.execute(
+                    "DELETE FROM token_usage_daily" + where_daily, tuple(p_daily)
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()

@@ -645,9 +645,16 @@ async def get_token_usage_buckets(
 
 
 class ClearTokenUsageBody(BaseModel):
-    """清空范围。``since_ms`` 省略 / null = 全清。"""
+    """清空范围。三者都省略 = 全清。
+
+    ``model`` 与 ``base_url`` 必须同时给或同时不给——模型的唯一身份是这两者的组合，
+    只给模型名会跨掉它的所有 endpoint，那不是任何界面入口的语义。
+    ``base_url=""`` 是有意义的取值（schema v3 之前的老数据，来源未记录）。
+    """
 
     since_ms: int | None = None
+    model: str | None = None
+    base_url: str | None = None
 
 
 @router.post(
@@ -659,16 +666,25 @@ def clear_token_usage(
     body: ClearTokenUsageBody | None = None,
     current_user: str = Depends(verify_token),
 ):
-    """删除 token_usage + token_usage_daily 中 ``since_ms`` 及其之后的行。
+    """删除 token_usage + token_usage_daily 中符合条件的行（条件间为 AND）。
 
     body 省略或 ``since_ms=null`` 时全清——**保持与老客户端的兼容**:此前这个端点
     不收 body，旧前端发的空 POST 仍然表示「全清」，语义不变。
+
+    给 ``model`` + ``base_url`` 则只删这一个「模型名 + endpoint」的记录，其他模型与
+    同名模型的另一个 endpoint 都不受影响。
 
     返回值里的 ``daily_from_date`` 说明日聚合表实际是从哪一天起被删的:日表只有
     天粒度，跨天范围会连带删掉 since 之前、同一天里的记录（详见 repo 的说明）。
     """
     since_ms = body.since_ms if body else None
-    deleted = get_token_usage_repo().clear_since(since_ms)
+    model = body.model if body else None
+    base_url = body.base_url if body else None
+    try:
+        deleted = get_token_usage_repo().clear_since(since_ms, model, base_url)
+    except ValueError as e:
+        # 只给一半的定点条件 = 调用方 bug。返回 400 而不是按「不限 endpoint」多删。
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return NormalResponse(code=0, message="ok", data={"deleted": deleted})
 
 

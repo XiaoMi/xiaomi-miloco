@@ -1871,11 +1871,29 @@ export function realGetUsageStats(
 }
 
 // 清空全部用量数据（实时表 + 日聚合）。清完顺手失效请求级缓存，确保下次取到空。
-export async function realClearUsageData(sinceMs?: number | null): Promise<void> {
-  // 不传 / 传 null = 全清。后端 body 可选，故这里始终带上 body，语义显式。
+export async function realClearUsageData(
+  opts: { sinceMs?: number | null; model?: string; baseUrl?: string } = {},
+): Promise<void> {
+  // 三者都不传 = 全清。始终带上 body，语义显式。
+  // model / base_url 必须成对：只给一半时直接抛，不发请求——把半个目标丢掉
+  // 会让「清这一项」静默变成「清所有模型」，是这里最坏的失败方向。
+  // 判定一律用 !== undefined：base_url 空串是合法目标（v3 之前的老数据未记录来源）。
+  const hasModel = opts.model !== undefined;
+  const hasUrl = opts.baseUrl !== undefined;
+  if (hasModel !== hasUrl) {
+    throw new Error(
+      `clearUsageData: model 与 base_url 必须同时给（model=${String(opts.model)} ` +
+        `baseUrl=${String(opts.baseUrl)}）`,
+    );
+  }
+  const hasTarget = hasModel && hasUrl;
   await apiFetch<Normal<unknown>>("/api/admin/token-usage/clear", {
     method: "POST",
-    body: JSON.stringify({ since_ms: sinceMs ?? null }),
+    body: JSON.stringify({
+      since_ms: opts.sinceMs ?? null,
+      model: hasTarget ? opts.model : null,
+      base_url: hasTarget ? opts.baseUrl : null,
+    }),
   });
   _resetUsageStatsCache();
 }
