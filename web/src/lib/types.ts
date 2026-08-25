@@ -405,6 +405,25 @@ export interface UsageStats {
  * （gallery / 参考帧的 image 块，后端未单列该模态）与系统提示。
  * 总量口径 tokens = (text + video + audio) + output = input + output。
  */
+/**
+ * 一个桶里、某个「模型名 + endpoint」的用量拆分。
+ *
+ * 存在的理由只有一个：**这一桶的钱要按各自的单价算**。桶本身是跨模型合并的，
+ * 只拿其中某一个模型的单价去乘整桶 token，就是拿甲的价算乙的量——而算出来的数
+ * 看起来和别处一样可信。折叠键与顶部合计、明细行完全一致，三处口径才对得上。
+ */
+export interface UsageTimelineTarget {
+  model: string;
+  /** 完整 URL 原文；'' = 老数据未记录。 */
+  base_url: string;
+  /** input − video − audio 的残差（含图片、系统提示，非纯文本）。 */
+  text: number;
+  video: number;
+  audio: number;
+  output: number;
+  cache: number;
+}
+
 export interface UsageTimelinePoint {
   ts: string;
   /** input + output。 */
@@ -416,6 +435,8 @@ export interface UsageTimelinePoint {
   output: number;
   /** 命中缓存的 prompt token（⊆ text + video + audio）。 */
   cache: number;
+  /** 本桶按「模型名 + endpoint」的拆分。各项之和 == 桶的对应字段。 */
+  targets: UsageTimelineTarget[];
 }
 
 // ── omni 模型配置（在「模型」页内读/写，支持多档案切换） ──────────────

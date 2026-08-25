@@ -32,7 +32,7 @@
  * 两边共用一份单价——设置弹窗里对此有说明。
  */
 
-import type { UsageStats } from "@/lib/types";
+import type { UsageStats, UsageTimelinePoint } from "@/lib/types";
 import { textResidual } from "@/lib/usageTokens";
 
 /** 计价方式：不区分模态（输入/输出两价）或区分模态（各模态各一价）。 */
@@ -270,6 +270,70 @@ export function costInputsByModel(stats: UsageStats): Map<string, CostInput> {
   return out;
 }
 
+/**
+ * 折成**计价目标**：一个目标 = 一个「模型名 + endpoint」，与明细表的分行方式同一把键。
+ *
+ * 为什么合计不能按模型名折：区分模态那档里，命中量是按 `命中 / 输入` 的比例摊到各模态的，
+ * 而这个比例对 token **不是线性的**——把两个 endpoint 先加起来再摊，和分别摊完再相加，
+ * 结果不相等（两边命中率不同、或模态配比不同时）。明细按目标算、合计按模型名算，
+ * 就会出现「各行费用之和 ≠ 顶部合计」且没有任何报错。同一把键是唯一能保证可加的做法。
+ *
+ * 不分模态那档本来就是线性的、怎么折都相等；各模态单价相等时也退化成线性——
+ * 预填的 MiMo v2.5 正好两者都占，所以这个偏差在自测里几乎不可能暴露。
+ */
+export function costInputsByTarget(
+  stats: UsageStats,
+): { model: string; baseUrl: string; input: CostInput }[] {
+  // 分隔符用 \u001f：模型名与 URL 都可能含空格
+  const out = new Map<string, { model: string; baseUrl: string; input: CostInput }>();
+  for (const r of stats.rows) {
+    const baseUrl = r.base_url ?? "";
+    const key = `${r.model}\u001f${baseUrl}`;
+    const add = costInputOf(r.breakdown);
+    const cur = out.get(key);
+    if (!cur) {
+      out.set(key, { model: r.model, baseUrl, input: { ...add } });
+      continue;
+    }
+    cur.input.text += add.text;
+    cur.input.video += add.video;
+    cur.input.audio += add.audio;
+    cur.input.output += add.output;
+    cur.input.cache += add.cache;
+  }
+  return [...out.values()];
+}
+
+/**
+ * 一个时间桶的费用：**逐「模型名 + endpoint」按各自单价算完再相加**。
+ *
+ * 桶是跨模型合并的，所以不能拿某一个模型的单价去乘整桶 token——那是拿甲的价算
+ * 乙的量，而算出来的数看起来和别处一样可信。折叠键与顶部合计、明细行一致。
+ *
+ * 桶里只要有**一个有用量却没录过单价**的目标就整桶返回 null，不给部分合计：
+ * 浮层里没有「费用估算」旁边那种叹号可以点名缺谁，一个偏小的数在这里无从分辨。
+ */
+export function costOfTimelinePoint(
+  p: UsageTimelinePoint,
+  pricing: UsagePricing,
+): number | null {
+  let total = 0;
+  let priced = false;
+  for (const t of p.targets) {
+    const used = t.text + t.video + t.audio + t.output;
+    if (used <= 0 && t.cache <= 0) continue; // 零用量的目标不参与，也不该拖累整桶
+    const pr = pricingFor(pricing, t.model);
+    if (!pr) return null;
+    total += estimateCost(
+      { text: t.text, video: t.video, audio: t.audio, output: t.output, cache: t.cache },
+      pr,
+      pricing.per,
+    ).total;
+    priced = true;
+  }
+  return priced ? total : null;
+}
+
 export interface CostSummary {
   /** 有单价的那些模型的合计。unpriced 非空时这是**部分**合计，不是全部。 */
   total: number;
@@ -286,23 +350,28 @@ export interface CostSummary {
  * 而漏掉的那部分可能是大头。界面必须能说出「少算了谁」。
  */
 export function summarizeCost(
-  byModel: Map<string, CostInput>,
+  targets: { model: string; baseUrl: string; input: CostInput }[],
   p: UsagePricing,
 ): CostSummary {
   let total = 0;
-  let priced = 0;
-  const unpriced: string[] = [];
-  for (const [model, ci] of byModel) {
+  // 钱按**目标**加（与明细同键，保证可加），而模型数与点名按**模型名**去重——
+  // 界面要说的是「哪几个模型没录价」，不是「哪几个 endpoint」。
+  const pricedModels = new Set<string>();
+  const unpricedModels = new Set<string>();
+  for (const { model, input } of targets) {
     const pr = pricingFor(p, model);
     if (!pr) {
-      unpriced.push(model);
+      unpricedModels.add(model);
       continue;
     }
-    total += estimateCost(ci, pr, p.per).total;
-    priced += 1;
+    total += estimateCost(input, pr, p.per).total;
+    pricedModels.add(model);
   }
-  unpriced.sort();
-  return { total, priced, unpriced };
+  return {
+    total,
+    priced: pricedModels.size,
+    unpriced: [...unpricedModels].sort(),
+  };
 }
 
 /**

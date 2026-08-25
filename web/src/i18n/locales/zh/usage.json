@@ -6,6 +6,7 @@
     "periodToday": "今日",
     "periodWeek": "近7天",
     "periodMonth": "近30天",
+    "overviewHeading": "{{period}}总览",
     "statsPeriodAria": "统计周期",
     "clearData": "清空数据",
     "clearing": "清空中…",

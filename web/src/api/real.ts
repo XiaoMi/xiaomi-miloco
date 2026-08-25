@@ -1665,7 +1665,19 @@ function localDateStr(d: Date): string {
 
 /** 空的时间序列桶。tokens 为口径总量，其余为分模态拆分（见 UsageTimelinePoint）。 */
 function emptyPoint(ts: string): UsageTimelinePoint {
-  return { ts, tokens: 0, text: 0, video: 0, audio: 0, output: 0, cache: 0 };
+  return { ts, tokens: 0, text: 0, video: 0, audio: 0, output: 0, cache: 0, targets: [] };
+}
+
+/** 桶内按「模型名 + endpoint」找/建目标。分隔符用 \u001f：两者都可能含空格。 */
+function targetOf(p: UsageTimelinePoint, model: string, baseUrl: string) {
+  const key = `${model}\u001f${baseUrl}`;
+  // 一个桶里的目标个数是「本周期用过几个 endpoint」，个位数，线性找足够
+  let t = p.targets.find((x) => `${x.model}\u001f${x.base_url}` === key);
+  if (!t) {
+    t = { model, base_url: baseUrl, text: 0, video: 0, audio: 0, output: 0, cache: 0 };
+    p.targets.push(t);
+  }
+  return t;
 }
 
 /**
@@ -1684,6 +1696,15 @@ function accPoint(p: UsageTimelinePoint, r: UsageUnit): void {
   p.output += output;
   p.cache += r.cache_tokens || 0;
   p.tokens += input + output;
+
+  // 同一份数值再落一份到所属目标上：桶字段与目标之和必须恒等，
+  // 少加一处就会让浮层的钱与柱高对不上（且不会有任何报错）。
+  const t = targetOf(p, r.model, r.base_url ?? "");
+  t.text += textResidual(input, video, audio);
+  t.video += video;
+  t.audio += audio;
+  t.output += output;
+  t.cache += r.cache_tokens || 0;
 }
 
 /**
@@ -1732,6 +1753,7 @@ function dailyTimeline(
     const d = new Date(today.getTime() - i * ONE_DAY_MS);
     const hit = byDate.get(localDateStr(d));
     // ts 统一成 ISO，与 today 分支一致（byDate 的 key 是 YYYY-MM-DD，不能直接用）
+    // 浅拷贝只换 ts；targets 与源共享同一个数组，此后只读不再累加
     out.push(hit ? { ...hit, ts: d.toISOString() } : emptyPoint(d.toISOString()));
   }
   return out;
@@ -1872,7 +1894,17 @@ export function realGetUsageStats(
 
 // 清空全部用量数据（实时表 + 日聚合）。清完顺手失效请求级缓存，确保下次取到空。
 export async function realClearUsageData(
-  opts: { sinceMs?: number | null; model?: string; baseUrl?: string } = {},
+  opts: {
+    sinceMs?: number | null;
+    model?: string;
+    baseUrl?: string;
+    /**
+     * 界面**已经显示给用户**的那个「连带删除哪一天」（YYYY-MM-DD）。
+     * 日表的日期按盒子的时区写入，而这句话是浏览器按自己的时区算的，两者能差一天，
+     * 且差错的方向可能是「实际删的比说的更多」。带上它，后端就以界面说的那天为准。
+     */
+    fromDate?: string | null;
+  } = {},
 ): Promise<void> {
   // 三者都不传 = 全清。始终带上 body，语义显式。
   // model / base_url 必须成对：只给一半时直接抛，不发请求——把半个目标丢掉
@@ -1893,6 +1925,7 @@ export async function realClearUsageData(
       since_ms: opts.sinceMs ?? null,
       model: hasTarget ? opts.model : null,
       base_url: hasTarget ? opts.baseUrl : null,
+      from_date: opts.sinceMs == null ? null : (opts.fromDate ?? null),
     }),
   });
   _resetUsageStatsCache();

@@ -22,13 +22,32 @@ export function UsageClearDialog({
 }: {
   /** 要清的作用域（时间范围 × 目标），决定弹窗复述的是「全部」「某个时段」还是某一项。 */
   scope: ClearScope;
-  clear: (s: ClearScope) => Promise<void>;
+  /**
+   * fromDate 是本弹窗**已经写给用户看**的那一天（YYYY-MM-DD），要原样发给后端：
+   * 日表按盒子的时区归日，这句话按浏览器的时区算，两者能差一天。不传的话
+   * 「说了哪天」与「删了哪天」就可能不是同一天，而这句提示的全部意义就在于此。
+   */
+  clear: (s: ClearScope, fromDate: string | null) => Promise<void>;
   onCleared: () => void;
   onClose: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const [busy, setBusy] = useState(false);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  /**
+   * 日表被连带删除的那一天：**同一个 Date 同时产出给人看的和发给后端的两种写法**。
+   * 分开各算一次就等于给了它们分歧的机会，而这句提示的全部价值就是「说的那天
+   * 就是删的那天」。全清没有边界日，故为 null。
+   */
+  const boundary = (() => {
+    if (scope.sinceMs == null) return null;
+    const d = new Date(scope.sinceMs);
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate(),
+    ).padStart(2, "0")}`;
+    return { iso, label: d.toLocaleDateString(i18n.language === "en" ? "en-US" : "zh-CN") };
+  })();
 
   // 打开时焦点落「取消」——破坏性操作不把默认焦点放在执行键上
   useEffect(() => {
@@ -43,7 +62,7 @@ export function UsageClearDialog({
   async function doClear() {
     setBusy(true);
     try {
-      await clear(scope);
+      await clear(scope, boundary?.iso ?? null);
       toast(t("usage.clearSuccess"), "ok");
       onCleared();
     } catch (e) {
@@ -116,12 +135,10 @@ export function UsageClearDialog({
         </div>
         {/* 日聚合表只有天粒度：跨天范围会连带删掉边界当天更早的记录。
             这是日聚合的固有精度损失，必须说出来——否则就是悄悄多删。 */}
-        {scope.sinceMs != null && (
+        {boundary && (
           <p className="text-caption text-text-secondary mt-2">
             {t(scope.target ? "usage.clearDailyCaveatTarget" : "usage.clearDailyCaveat", {
-              date: new Date(scope.sinceMs).toLocaleDateString(
-                i18n.language === "en" ? "en-US" : "zh-CN",
-              ),
+              date: boundary.label,
             })}
           </p>
         )}

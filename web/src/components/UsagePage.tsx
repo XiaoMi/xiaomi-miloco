@@ -24,10 +24,8 @@ import { useAsync } from "@/hooks/useAsync";
 import type { UsagePeriod, UsageStats, UsageTimelinePoint } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
 import {
-  costInputOf,
-  estimateCost,
+  costOfTimelinePoint,
   loadPricing,
-  pricingFor,
   savePricing,
   type UsagePricing,
 } from "@/lib/usagePricing";
@@ -109,28 +107,14 @@ export function UsagePage() {
   const costLabelOf = useCallback(
     (p: UsageTimelinePoint): string | null => {
       if (p.tokens <= 0) return null;
-      // 分桶数据没有按模型拆分，只能用「本周期出现过的模型」里的第一档单价近似；
-      // 单模型（家用常态）下即精确，多模型时是近似，故仍带 ≈ 前缀。
-      const model = usage.data?.rows[0]?.model ?? "";
-      const pr = pricingFor(pricing, model);
-      // 没单价就整行不给：tooltip 里没有「费用估算」那样的标签作限定，
-      // 一个凭占位价编出来的数在这里完全无从分辨
-      if (!pr) return null;
-      const v = estimateCost(
-        costInputOf({
-          input: p.text + p.video + p.audio,
-          output: p.output,
-          cache: p.cache,
-          video: p.video,
-          audio: p.audio,
-        }),
-        pr,
-        pricing.per,
-      ).total;
-      const s = v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
-      return `≈ ${pricing.currency}${s}`;
+      // 逐「模型名 + endpoint」按各自单价算完再相加（见 costOfTimelinePoint）。
+      // 仍带 ≈ 前缀：单价是住户填的估算依据，不是服务商账单。
+      const v = costOfTimelinePoint(p, pricing);
+      if (v == null) return null;
+      const n = v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+      return `≈ ${pricing.currency}${n}`;
     },
-    [pricing, usage.data],
+    [pricing],
   );
 
   const periodOptions = useMemo(
@@ -295,9 +279,12 @@ export function UsagePage() {
             setClearScope(null);
             void reload();
           }}
-          clear={(s) =>
+          clear={(s, fromDate) =>
             clearUsageData({
               sinceMs: s.sinceMs,
+              // 界面已经把这一天写给用户看了，原样带给后端：日表按盒子时区归日，
+              // 提示按浏览器时区算，不带就可能「说的那天」不是「删的那天」。
+              fromDate,
               // 只在定点清除时带 model/base_url，且必须成对：前端会抛、后端返 400。
               // 判定看 s.target 有没有，不看 baseUrl 真不真（空串是合法目标）。
               ...(s.target ? { model: s.target.model, baseUrl: s.target.baseUrl } : {}),

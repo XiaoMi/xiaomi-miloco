@@ -99,6 +99,7 @@ class TokenUsageRepo:
         since_ms: int | None,
         model: str | None = None,
         base_url: str | None = None,
+        from_date: str | None = None,
     ) -> dict[str, int | str | None]:
         """删除用量记录。三个条件都是可选的，同时生效（AND）。
 
@@ -122,21 +123,44 @@ class TokenUsageRepo:
         但落在同一天里的记录。这是日聚合本身的精度损失，SQL 绕不过去：那些行的
         原始时间戳在 rollup 时就已经不存在了。故额外返回 ``daily_from_date``，
         让调用方能把这件事说清楚，而不是悄悄多删。
+
+        ⚠️ ``from_date`` 存在的唯一理由：**界面承诺的那一天必须就是真被删的那一天。**
+        日表的 ``date`` 是按**本机时区**写进去的，而界面上那句「某天更早的记录会被
+        连带删除」是浏览器按**它自己的时区**算的。盒子跑 UTC、手机在 +08 时两者能差
+        一天，且差错的方向可能是「实际删的比说的更多」——那正是这句提示要防的事。
+        故允许调用方把它已经显示给用户的那一天传进来，由它来定日表的边界：
+        说了哪天就删哪天。为防这个入口被用来任意扩大范围，只接受与本机推算相差
+        不超过一天的日期，超出即报错。
         """
+        if from_date is not None:
+            try:
+                given = date.fromisoformat(from_date)
+            except ValueError as e:
+                raise ValueError(f"from_date 需要 YYYY-MM-DD，收到 {from_date!r}") from e
+            if since_ms is None:
+                raise ValueError("from_date 只在给了 since_ms 时才有意义")
+            derived = datetime.fromtimestamp(since_ms / 1000).date()
+            if abs((given - derived).days) > 1:
+                raise ValueError(
+                    f"from_date {from_date} 与 since_ms 推算的 {derived.isoformat()} "
+                    "相差超过一天，只接受时区差那一天的偏移"
+                )
+
         if (model is None) != (base_url is None):
             raise ValueError(
                 "model 与 base_url 必须同时给或同时不给"
                 f"（收到 model={model!r} base_url={base_url!r}）"
             )
 
-        from_date: str | None = None
         cond_live: list[str] = []
         cond_daily: list[str] = []
         p_live: list = []
         p_daily: list = []
 
         if since_ms is not None:
-            from_date = datetime.fromtimestamp(since_ms / 1000).date().isoformat()
+            # 调用方给了就用它的（界面已经把这一天写给用户看了），否则按本机推算
+            if from_date is None:
+                from_date = datetime.fromtimestamp(since_ms / 1000).date().isoformat()
             cond_live.append("timestamp >= ?")
             p_live.append(since_ms)
             cond_daily.append("date >= ?")

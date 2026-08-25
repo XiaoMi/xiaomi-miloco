@@ -6,6 +6,7 @@
     "periodToday": "Today",
     "periodWeek": "Last 7 days",
     "periodMonth": "Last 30 days",
+    "overviewHeading": "{{period}} overview",
     "statsPeriodAria": "Stats period",
     "clearData": "Clear data",
     "clearing": "Clearing…",

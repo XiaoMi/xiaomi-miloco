@@ -650,11 +650,17 @@ class ClearTokenUsageBody(BaseModel):
     ``model`` 与 ``base_url`` 必须同时给或同时不给——模型的唯一身份是这两者的组合，
     只给模型名会跨掉它的所有 endpoint，那不是任何界面入口的语义。
     ``base_url=""`` 是有意义的取值（schema v3 之前的老数据，来源未记录）。
+
+    ``from_date``（YYYY-MM-DD）是界面**已经显示给用户**的那个「连带删除哪一天」。
+    日表的 date 按本机时区写入，而界面那句话是浏览器按它自己的时区算的，两者能差
+    一天；给了它就以界面说的那天为准，做到「说了哪天就删哪天」。只接受与 since_ms
+    推算相差不超过一天的日期。
     """
 
     since_ms: int | None = None
     model: str | None = None
     base_url: str | None = None
+    from_date: str | None = None
 
 
 @router.post(
@@ -676,14 +682,19 @@ def clear_token_usage(
 
     返回值里的 ``daily_from_date`` 说明日聚合表实际是从哪一天起被删的:日表只有
     天粒度，跨天范围会连带删掉 since 之前、同一天里的记录（详见 repo 的说明）。
+    给了 ``from_date`` 时它就等于界面显示的那一天。
     """
     since_ms = body.since_ms if body else None
     model = body.model if body else None
     base_url = body.base_url if body else None
+    from_date = body.from_date if body else None
     try:
-        deleted = get_token_usage_repo().clear_since(since_ms, model, base_url)
+        deleted = get_token_usage_repo().clear_since(
+            since_ms, model, base_url, from_date
+        )
     except ValueError as e:
-        # 只给一半的定点条件 = 调用方 bug。返回 400 而不是按「不限 endpoint」多删。
+        # 只给一半的定点条件、或对不上的 from_date = 调用方 bug。
+        # 返回 400 而不是按「不限 endpoint」多删、或按自己的时区改删别的一天。
         raise HTTPException(status_code=400, detail=str(e)) from e
     return NormalResponse(code=0, message="ok", data={"deleted": deleted})
 

@@ -39,7 +39,7 @@ describe("realClearUsageData 请求体", () => {
     const calls = captureFetch();
     await realClearUsageData();
     expect(calls[0].url).toContain("/api/admin/token-usage/clear");
-    expect(calls[0].body).toEqual({ since_ms: null, model: null, base_url: null });
+    expect(calls[0].body).toEqual({ since_ms: null, model: null, base_url: null, from_date: null });
   });
 
   it("只给时间范围：目标仍为 null（所有模型）", async () => {
@@ -49,6 +49,7 @@ describe("realClearUsageData 请求体", () => {
       since_ms: 1_700_000_000_000,
       model: null,
       base_url: null,
+      from_date: null,
     });
   });
 
@@ -63,13 +64,14 @@ describe("realClearUsageData 请求体", () => {
       since_ms: null,
       model: "mimo-v2.5",
       base_url: "https://api.xiaomimimo.com/v1-test",
+      from_date: null,
     });
   });
 
   it("base_url 空串是目标本身，不能退化成「不限 endpoint」", async () => {
     const calls = captureFetch();
     await realClearUsageData({ model: "mimo-v2.5", baseUrl: "" });
-    expect(calls[0].body).toEqual({ since_ms: null, model: "mimo-v2.5", base_url: "" });
+    expect(calls[0].body).toEqual({ since_ms: null, model: "mimo-v2.5", base_url: "", from_date: null });
   });
 
   it("只给一半时抛错且**不发请求**：半个目标绝不能退化成全模型清除", async () => {
@@ -84,6 +86,23 @@ describe("realClearUsageData 请求体", () => {
   it("范围与目标可叠加", async () => {
     const calls = captureFetch();
     await realClearUsageData({ sinceMs: 42, model: "m", baseUrl: "u" });
-    expect(calls[0].body).toEqual({ since_ms: 42, model: "m", base_url: "u" });
+    expect(calls[0].body).toEqual({
+      since_ms: 42,
+      model: "m",
+      base_url: "u",
+      from_date: null,
+    });
+  });
+
+  it("界面显示的那一天原样带上：日表按盒子时区归日，提示按浏览器时区算", async () => {
+    const calls = captureFetch();
+    await realClearUsageData({ sinceMs: 1_700_000_000_000, fromDate: "2026-08-24" });
+    expect(calls[0].body.from_date).toBe("2026-08-24");
+  });
+
+  it("全清不带边界日：没有「从哪天起」这回事", async () => {
+    const calls = captureFetch();
+    await realClearUsageData({ sinceMs: null, fromDate: "2026-08-24" });
+    expect(calls[0].body.from_date).toBeNull();
   });
 });

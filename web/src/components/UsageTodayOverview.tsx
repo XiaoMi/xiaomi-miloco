@@ -12,12 +12,19 @@
  * 整对比线上「饼 + 竖排图例」那一行还窄，窄屏反而不再溢出。
  */
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { TokenBreakdown, UsageStats } from "@/lib/types";
+import type { TokenBreakdown, UsagePeriod, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
-import { costInputsByModel, summarizeCost, type UsagePricing } from "@/lib/usagePricing";
+import { costInputsByTarget, summarizeCost, type UsagePricing } from "@/lib/usagePricing";
 import { HelpTip } from "./HelpTip";
+
+/** 与工具条的周期选择器同一套文案键，别在两处各写一份。 */
+const PERIOD_KEYS: Record<UsagePeriod, string> = {
+  today: "usage.periodToday",
+  week: "usage.periodWeek",
+  month: "usage.periodMonth",
+};
 
 /** 环形图几何：viewBox 140×140，半径 54、环宽 20。 */
 const R = 54;
@@ -63,6 +70,7 @@ export function UsageTodayOverview({
   onOpenPricing: () => void;
 }) {
   const { t, i18n } = useTranslation();
+  const headingId = useId();
   const { totals } = stats;
   const [hover, setHover] = useState<ModalityKey | null>(null);
 
@@ -76,7 +84,7 @@ export function UsageTodayOverview({
   // 没有单价依据的模型不参与合计，而是被点名带出来——静默跳过会得到一个看着完整、
   // 实际漏算的数，而漏掉的可能正是大头。
   const { total: cost, unpriced } = summarizeCost(
-    costInputsByModel(stats),
+    costInputsByTarget(stats),
     pricing,
   );
   const money =
@@ -98,7 +106,13 @@ export function UsageTodayOverview({
     .join(" · ");
 
   return (
-    <div>
+    <section aria-labelledby={headingId}>
+      {/* 标题只给读屏：双栏改版后周期选择器上移到卡顶工具条，画面上再挂一个二级标题
+          是多余的；但它的两个兄弟（时间分布、明细）都有标题元素，这一栏若什么都不留，
+          读屏按标题跳转时整块数字就是跳不到的。 */}
+      <h3 id={headingId} className="sr-only">
+        {t("usage.overviewHeading", { period: t(PERIOD_KEYS[stats.period]) })}
+      </h3>
       {/* 总量与费用：2×2 网格，数字与数字同基线、副行与副行同中线。
           为什么用网格而不是两个盒子并排——见 theme.css 的 .usage-hero-grid 注释，
           那里记着「盒高算术凑出来的对齐」实测是怎么散的。 */}
@@ -192,7 +206,7 @@ export function UsageTodayOverview({
           )}
         </ul>
       </div>
-    </div>
+    </section>
   );
 }
 

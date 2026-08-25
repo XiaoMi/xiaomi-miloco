@@ -471,6 +471,43 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     // 空桶也要带齐字段（堆叠渲染直接读，不能是 undefined）
     const empty = s.timeline.find((p) => p.tokens === 0)!;
     expect(empty).toMatchObject({ text: 0, video: 0, audio: 0, output: 0, cache: 0 });
+    expect(empty.targets).toEqual([]);
+  });
+
+  it("today：每桶保留按「模型名 + endpoint」的拆分，且与桶字段恒等", async () => {
+    // 浮层的钱要逐目标按各自单价算——桶只有一个合并总数时，只能拿某一个模型的价
+    // 去乘整桶 token，那是拿甲的价算乙的量。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 1, 3000, 300, 800, 2200, 200, "https://a/v1"),
+            bkt("on_demand", 1, 1000, 100, 0, 0, 0, "https://a/v1"),
+            bkt("realtime", 1, 5000, 500, 0, 1000, 0, "https://b/v1"),
+          ],
+          total: 3,
+        },
+      },
+    });
+
+    const b0 = (await realGetUsageStats("today")).timeline[0];
+    // 两个 endpoint 各成一个目标，同 endpoint 的两种调用类型合并
+    expect(b0.targets.map((t) => t.base_url).sort()).toEqual(["https://a/v1", "https://b/v1"]);
+    const a = b0.targets.find((t) => t.base_url === "https://a/v1")!;
+    expect(a.text).toBe(3000 - 2200 - 200 + 1000); // 残差逐行算再相加
+    expect(a.video).toBe(2200);
+    expect(a.output).toBe(400);
+
+    // 恒等式：目标之和 == 桶字段。少加一处，浮层的钱就会与柱高对不上且不报错
+    const sum = (k: "text" | "video" | "audio" | "output" | "cache") =>
+      b0.targets.reduce((acc, t) => acc + t[k], 0);
+    expect(sum("text")).toBe(b0.text);
+    expect(sum("video")).toBe(b0.video);
+    expect(sum("audio")).toBe(b0.audio);
+    expect(sum("output")).toBe(b0.output);
+    expect(sum("cache")).toBe(b0.cache);
   });
 
   it("today：切换 bin 不改 totals，只影响 timeline 桶数", async () => {
@@ -569,6 +606,10 @@ describe("realGetUsageStats — week daily 折算契约", () => {
     expect(today.text + today.video + today.audio + today.output).toBe(today.tokens);
     // ts 统一成 ISO（daily 的 key 是 YYYY-MM-DD，不能直接透出去）
     expect(today.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // 近 7 天这条路也要带目标拆分：否则切到近 7 天，浮层的钱就退回按单一单价估
+    expect(today.targets.length).toBeGreaterThan(0);
+    const sumText = today.targets.reduce((a, t) => a + t.text, 0);
+    expect(sumText).toBe(today.text);
   });
 });
 

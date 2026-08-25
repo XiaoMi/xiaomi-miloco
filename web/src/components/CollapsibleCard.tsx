@@ -80,7 +80,10 @@ export function CollapsibleCard({
 
       <div id={bodyId} hidden={collapsed}>
         {toolbar ? <div className="mt-4">{toolbar}</div> : null}
-        <div className={toolbar ? "" : "mt-4"}>{children}</div>
+        {/* 工具条与它作用的内容之间要留一道：原先有工具条时内容**一点上边距都没有**，
+            筛选控件与数字/KPI 卡直接贴在一起。取 10px——窄于标题到工具条的 16px，
+            于是工具条在视觉上归到它作用的那块内容上，而不是归到标题行。 */}
+        <div className={toolbar ? "mt-2.5" : "mt-4"}>{children}</div>
       </div>
     </section>
   );

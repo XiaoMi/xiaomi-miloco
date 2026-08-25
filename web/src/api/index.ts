@@ -517,7 +517,13 @@ export async function getUsageStats(
 
 // 清空全部用量数据（实时表 + 日聚合，不可恢复）
 export async function clearUsageData(
-  opts: { sinceMs?: number | null; model?: string; baseUrl?: string } = {},
+  opts: {
+    sinceMs?: number | null;
+    model?: string;
+    baseUrl?: string;
+    /** 界面显示的「连带删除哪一天」，让后端按界面说的那天删，见 real 层说明。 */
+    fromDate?: string | null;
+  } = {},
 ): Promise<void> {
   return impl.realClearUsageData(opts);
 }

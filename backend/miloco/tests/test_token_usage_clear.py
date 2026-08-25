@@ -278,3 +278,80 @@ def test_empty_model_name_is_also_targeted_by_value(repo):
     assert out["token_usage"] == 1
     live, _ = _left(repo)
     assert live == [("mimo-v2.5", ""), ("mimo-v2.5", "https://a/v1")]
+
+
+# ── from_date：界面承诺的那一天，必须就是真被删的那一天 ──────────────────
+
+
+def test_from_date_overrides_local_derivation(repo):
+    """给了 from_date 就以它为日表边界，不再按本机时区推算。
+
+    日表的 date 是按**本机时区**写的，而界面那句「某天更早的记录会被连带删除」
+    是浏览器按**它自己的时区**算的。盒子跑 UTC、手机在 +08 时两者差一天，且差错
+    的方向可能是「实际删的比说的更多」——这正是那句提示要防的事。
+    """
+    today = date.today()
+    for d in (today, today - timedelta(days=1), today - timedelta(days=2)):
+        _daily(repo, d)
+    since = _ts_ms(today)  # 本机推算 = 今天
+
+    out = repo.clear_since(since, from_date=(today - timedelta(days=1)).isoformat())
+
+    assert out["daily_from_date"] == (today - timedelta(days=1)).isoformat()
+    # 按界面说的那天删：今天与昨天没了，前天还在
+    _, daily = _counts(repo)
+    assert daily == 1
+
+
+def test_from_date_absent_keeps_local_derivation(repo):
+    """不给就按本机推算——老客户端的行为一个字都不变。"""
+    today = date.today()
+    _daily(repo, today)
+    _daily(repo, today - timedelta(days=1))
+    out = repo.clear_since(_ts_ms(today))
+    assert out["daily_from_date"] == today.isoformat()
+    assert _counts(repo)[1] == 1
+
+
+def test_from_date_beyond_one_day_is_rejected(repo):
+    """只接受时区差那一天的偏移，多了就报错——这个入口不能被用来任意扩大范围。"""
+    today = date.today()
+    _daily(repo, today)
+    _daily(repo, today - timedelta(days=5))
+    with pytest.raises(ValueError, match="相差超过一天"):
+        repo.clear_since(_ts_ms(today), from_date=(today - timedelta(days=5)).isoformat())
+    assert _counts(repo)[1] == 2  # 报错后一行都不许少
+
+
+def test_from_date_malformed_is_rejected(repo):
+    """格式不对直接报错，绝不当成「没给」而按自己的时区悄悄改删别的一天。"""
+    _daily(repo, date.today())
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        repo.clear_since(_ts_ms(date.today()), from_date="2026/08/24")
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        repo.clear_since(_ts_ms(date.today()), from_date="")
+    assert _counts(repo)[1] == 1
+
+
+def test_from_date_without_since_is_rejected(repo):
+    """全清没有「从哪天起」这回事，给了 from_date 说明调用方想错了。"""
+    _daily(repo, date.today())
+    with pytest.raises(ValueError, match="只在给了 since_ms"):
+        repo.clear_since(None, from_date=date.today().isoformat())
+    assert _counts(repo)[1] == 1
+
+
+def test_from_date_combines_with_target(repo):
+    """定点 + 时间范围 + 界面给的那一天，三者同时生效。"""
+    today = date.today()
+    y = today - timedelta(days=1)
+    _daily_at(repo, y, "m1", "https://a/v1")
+    _daily_at(repo, y, "m1", "https://b/v1")
+    _daily_at(repo, today - timedelta(days=3), "m1", "https://a/v1")
+
+    out = repo.clear_since(
+        _ts_ms(today), model="m1", base_url="https://a/v1", from_date=y.isoformat()
+    )
+    assert out["token_usage_daily"] == 1
+    _, daily = _left(repo)
+    assert sorted(daily) == [("m1", "https://a/v1"), ("m1", "https://b/v1")]
