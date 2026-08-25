@@ -22,7 +22,7 @@ Derivations (no need to store):
   - billable_tokens = input - cache
 
 Retention: on first insert of each day, events older than 3 days are aggregated
-by (date, model, type) into the daily table via INSERT...SELECT...GROUP BY +
+by (date, model, base_url, type) into the daily table via INSERT...SELECT...GROUP BY +
 ON CONFLICT UPSERT, then deleted from the live table. The whole operation runs
 in a single explicit transaction (BEGIN/COMMIT) — the connector is in autocommit
 mode, so we must start a transaction explicitly for atomicity.

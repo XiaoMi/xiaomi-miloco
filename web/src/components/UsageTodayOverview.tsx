@@ -16,6 +16,7 @@ import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TokenBreakdown, UsagePeriod, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
+import { textResidual } from "@/lib/usageTokens";
 import { costInputsByTarget, summarizeCost, type UsagePricing } from "@/lib/usagePricing";
 import { HelpTip } from "./HelpTip";
 
@@ -48,12 +49,15 @@ const MODALITIES: {
 ];
 
 /**
- * 模态构成。text 是 `input − video − audio` 的残差，含图片与系统提示——后端未单列
- * image 模态，所以它不是「纯文本」。四项之和 = input + output = 总量。
+ * 模态构成。text 走共用的残差定义（含图片与系统提示——后端未单列 image 模态，
+ * 所以它不是「纯文本」）。四项之和 = input + output = 总量。
+ *
+ * 残差公式不在这里再写一遍：环形图、时间分桶、费用估算是同一条口径的三个消费方，
+ * 各写一份就等于埋下「改一处漏两处」的隐性约定。
  */
 function modalityValues(b: TokenBreakdown): Record<ModalityKey, number> {
   return {
-    text: Math.max(b.input - b.video - b.audio, 0),
+    text: textResidual(b.input, b.video, b.audio),
     video: b.video,
     audio: b.audio,
     output: b.output,

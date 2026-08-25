@@ -645,7 +645,7 @@ async def get_token_usage_buckets(
 
 
 class ClearTokenUsageBody(BaseModel):
-    """清空范围。三者都省略 = 全清。
+    """清空范围。四个字段都省略 = 全清。
 
     ``model`` 与 ``base_url`` 必须同时给或同时不给——模型的唯一身份是这两者的组合，
     只给模型名会跨掉它的所有 endpoint，那不是任何界面入口的语义。

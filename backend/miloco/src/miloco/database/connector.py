@@ -669,8 +669,11 @@ class SQLiteConnector:
     def _create_token_usage_daily_table(self, conn: sqlite3.Connection) -> None:
         """Create token_usage_daily table holding per-day rollup of older events.
 
-        Rows are keyed by (date, model, type) so historical trend / model / type
-        breakdown all stay queryable after the live table is pruned.
+        Rows are keyed by (date, model, base_url, type) so historical trend /
+        model / endpoint / type breakdown all stay queryable after the live table
+        is pruned. base_url is part of the key on purpose: a model name can be
+        served by more than one endpoint, and merging them here is unrecoverable
+        (the rollup UPSERT accumulates, then deletes the original rows).
         Field semantics identical to token_usage (modality columns ⊆ input_tokens).
         """
         cursor = conn.cursor()

@@ -35,7 +35,7 @@ function captureFetch() {
 }
 
 describe("realClearUsageData 请求体", () => {
-  it("无参 = 全清：三个字段都显式为 null，不靠字段缺省", async () => {
+  it("无参 = 全清：四个字段都显式为 null，不靠字段缺省", async () => {
     const calls = captureFetch();
     await realClearUsageData();
     expect(calls[0].url).toContain("/api/admin/token-usage/clear");
