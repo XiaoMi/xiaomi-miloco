@@ -5,7 +5,10 @@
  * 而 CSS 规定「一轴 visible、另一轴不是 visible 时，visible 计算为 auto」——所以
  * overflow-y 实际是 auto。实测把绝对定位浮层锚在末行上：**超出容器 82px 并催出了
  * 一条竖滚动条**（scrollHeight 169 / clientHeight 86）。fixed 脱离所有裁剪上下文，
- * 代价是位置要自己算，且滚动时会失锚——故滚动即关闭。
+ * 代价是位置要自己算，且滚动时会失锚——故滚动即关闭。落点算法与同一单元格里的
+ * 清理菜单**共用 placePopover**：先量出气泡真实尺寸，下方装不下就翻到上方，两轴夹回
+ * 视口内。此前这里是拍一个宽度、永远贴下方、只夹右边——明细末几行贴视口底时气泡
+ * 整体落在视口外，而滚动会关掉它，住户连滚下去看一眼都做不到。
  *
  * 为什么常显截断 URL 而不是只放一个彩色圆点：圆点在展开前只有颜色能区分两行，
  * 色盲 / 打印 / 强制色下就失效了；常显的字则零交互可读。
@@ -15,8 +18,9 @@
  * 只有对照实际出现的那一组才能保证可分辨。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { placePopover } from "@/lib/popoverPlace";
 export function UsageUrlChip({
   url,
   label,
@@ -27,13 +31,19 @@ export function UsageUrlChip({
   label: string;
 }) {
   const { t } = useTranslation();
+  /** 锚点（按钮的视口坐标）：点开那一刻记下，落点由 layout effect 量完再算。 */
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement | null>(null);
-  const open = pos !== null;
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const open = anchor !== null;
 
   useEffect(() => {
     if (!open) return;
-    const close = () => setPos(null);
+    const close = () => {
+      setAnchor(null);
+      setPos(null);
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         close();
@@ -57,16 +67,28 @@ export function UsageUrlChip({
   }, [open]);
 
   function toggle() {
-    if (open) return setPos(null);
+    if (open) {
+      setAnchor(null);
+      setPos(null);
+      return;
+    }
     const r = btnRef.current?.getBoundingClientRect();
-    if (!r) return;
-    const W = 320;
-    setPos({
-      // 右边贴视口时往左收，避免气泡跑到屏幕外
-      left: Math.min(r.left, window.innerWidth - W - 12),
-      top: r.bottom + 6,
-    });
+    if (r) setAnchor(r);
   }
+
+  // 量出气泡真实高度之后再定位：URL 用 break-all 展示，两三行就有 60-80px 高，
+  // 拍一个估值必然在某些行上落到视口外。
+  useLayoutEffect(() => {
+    if (!anchor || !boxRef.current) return;
+    const box = boxRef.current.getBoundingClientRect();
+    const next = placePopover(
+      anchor,
+      { width: box.width, height: box.height },
+      { width: window.innerWidth, height: window.innerHeight },
+      { gap: 6, edge: 8, align: "left" },
+    );
+    setPos((p) => (p && p.left === next.left && p.top === next.top ? p : next));
+  }, [anchor]);
 
   return (
     <>
@@ -85,11 +107,18 @@ export function UsageUrlChip({
         {label}
       </button>
 
-      {pos && (
+      {open && (
         <div
+          ref={boxRef}
           role="dialog"
           aria-label={t("usage.modelUrlAria")}
-          style={{ left: pos.left, top: pos.top, width: 320 }}
+          style={{
+            width: 320,
+            // 落点未算出前先摆到锚点下方并隐形：要先渲染才量得到高度
+            left: pos ? pos.left : (anchor?.left ?? 0),
+            top: pos ? pos.top : (anchor?.bottom ?? 0) + 6,
+            visibility: pos ? undefined : "hidden",
+          }}
           className="fixed z-[80] rounded-xl border border-border bg-bg-secondary
                      shadow-lg p-3 text-caption"
         >

@@ -17,8 +17,10 @@ import { humanTokens } from "@/lib/formatTokens";
 import {
   cacheLooksUndiscounted,
   cacheOverstatePct,
-  estimateCost,
   costInputsByModel,
+  costInputsByTarget,
+  costPerModelFromTargets,
+  mergeEditedPricing,
   knownPricingFor,
   pricingSourceFor,
   seedPricingFor,
@@ -43,6 +45,9 @@ export function UsagePricingDialog({
 }) {
   const { t } = useTranslation();
   const byModel = useMemo(() => costInputsByModel(stats), [stats]);
+  // 算钱一律走「模型名 + endpoint」的目标；byModel 只用来回答「本周期有哪些模型」
+  // 与算命中率提示，不参与计价（折叠键必须与顶部合计、明细各行是同一把）。
+  const byTarget = useMemo(() => costInputsByTarget(stats), [stats]);
   const models = useMemo(() => [...byModel.keys()].sort(), [byModel]);
 
   // 草稿：改动只在保存时才落到外面，取消即丢弃
@@ -53,6 +58,9 @@ export function UsagePricingDialog({
     ),
   }));
   const [sel, setSel] = useState(models[0] ?? "");
+  // 只有住户真的动过的模型才写回本机表：弹窗只列本周期出现过的模型，
+  // 整表覆写会把上周录过、这周没用到的单价静默删掉（见 mergeEditedPricing）。
+  const [touched, setTouched] = useState<ReadonlySet<string>>(() => new Set());
   const cancelRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
@@ -65,19 +73,16 @@ export function UsagePricingDialog({
   }, [onClose]);
 
   const pr: ModelPricing = draft.byModel[sel] ?? seedPricingFor(draft, sel);
-  const setPr = (patch: Partial<ModelPricing>) =>
+  const setPr = (patch: Partial<ModelPricing>) => {
+    setTouched((s) => (s.has(sel) ? s : new Set(s).add(sel)));
     setDraft((d) => ({
       ...d,
       byModel: { ...d.byModel, [sel]: { ...pr, ...patch } },
     }));
+  };
 
-  const perModel = models.map((m) => {
-    const ci = byModel.get(m)!;
-    return {
-      model: m,
-      total: estimateCost(ci, draft.byModel[m] ?? seedPricingFor(draft, m), draft.per).total,
-    };
-  });
+  const perModelCost = costPerModelFromTargets(byTarget, draft);
+  const perModel = models.map((m) => ({ model: m, total: perModelCost.get(m) ?? 0 }));
   const grandTotal = perModel.reduce((a, x) => a + x.total, 0);
   const money = (v: number) =>
     draft.currency + (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
@@ -262,7 +267,7 @@ export function UsagePricingDialog({
           </button>
           <button
             type="button"
-            onClick={() => onSave(draft)}
+            onClick={() => onSave(mergeEditedPricing(pricing, draft, touched))}
             disabled={models.length === 0}
             className="text-body px-4 py-2 rounded-lg bg-brand-primary text-text-inverse
                        hover:bg-brand-accent disabled:opacity-60 transition-colors"

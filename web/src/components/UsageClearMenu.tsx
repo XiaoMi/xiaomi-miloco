@@ -23,6 +23,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { IconTrash } from "@/lib/icons";
+import { placePopover } from "@/lib/popoverPlace";
 
 /** 一次清除的完整作用域：时间范围 × 目标。 */
 export interface ClearScope {
@@ -92,7 +93,8 @@ export function UsageClearMenu({
   }, [open, placement]);
 
   /**
-   * fixed 浮层的落点：**量出菜单真实尺寸后**再算，不用估值。
+   * fixed 浮层的落点：**量出菜单真实尺寸后**再算，不用估值。算法与 URL 气泡共用
+   * placePopover——两个浮层挨在同一个单元格里，各写一份的结果是一个会翻转、一个不会。
    * 默认贴按钮下方；下方装不下就翻到上方（明细表常常就在视口底部，
    * 末几行若不翻转，菜单会掉到视口外，最后一档「全部数据」根本点不到）。
    * 两轴都夹回视口内，窄屏横滚时也不会跑出去。
@@ -100,19 +102,13 @@ export function UsageClearMenu({
   useLayoutEffect(() => {
     if (!open || placement !== "fixed" || !anchor || !menuRef.current) return;
     const m = menuRef.current.getBoundingClientRect();
-    const GAP = 8;
-    const EDGE = 8;
-    const below = anchor.bottom + GAP;
-    const above = anchor.top - GAP - m.height;
-    const top =
-      below + m.height <= window.innerHeight - EDGE || above < EDGE
-        ? Math.min(below, Math.max(EDGE, window.innerHeight - EDGE - m.height))
-        : above;
-    const left = Math.max(
-      EDGE,
-      Math.min(anchor.right - m.width, window.innerWidth - m.width - EDGE),
+    const next = placePopover(
+      anchor,
+      { width: m.width, height: m.height },
+      { width: window.innerWidth, height: window.innerHeight },
+      { gap: 8, edge: 8, align: "right" },
     );
-    setPos((p) => (p && p.left === left && p.top === top ? p : { left, top }));
+    setPos((p) => (p && p.left === next.left && p.top === next.top ? p : next));
   }, [open, placement, anchor]);
 
   // 时刻在点击那一下才取，不在渲染时取——渲染可能发生在几分钟前

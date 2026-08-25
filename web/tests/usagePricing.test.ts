@@ -12,6 +12,8 @@ import {
   costInputsByModel,
   costInputsByTarget,
   costOfTimelinePoint,
+  costPerModelFromTargets,
+  mergeEditedPricing,
   EMPTY_MODEL_PRICING,
   PER_MTOKENS,
   PRICING_STORAGE_KEY,
@@ -459,5 +461,161 @@ describe("costOfTimelinePoint（时间分布浮层的钱）", () => {
 
   it("空桶返回 null", () => {
     expect(costOfTimelinePoint(point([]), P({}))).toBeNull();
+  });
+});
+
+
+describe("loadPricing 的字段级校验（本机存储不是只有本代码会写）", () => {
+  const KEY = "web:usage:pricing";
+  const store = new Map<string, string>();
+  beforeEach(() => {
+    store.clear();
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+  });
+  afterEach(() => {
+    delete (globalThis as { localStorage?: unknown }).localStorage;
+  });
+  const read = () => loadPricing();
+
+  it("字符串价回落，不让它一路算成 ¥NaN", () => {
+    localStorage.setItem(KEY, JSON.stringify({ byModel: { "mimo-v2.5": { input: "1" } } }));
+    const pr = read().byModel["mimo-v2.5"];
+    expect(typeof pr.input).toBe("number");
+    expect(Number.isFinite(pr.input)).toBe(true);
+    // 回落到该模型的已知价目而不是 0
+    expect(pr.input).toBeCloseTo(1, 6);
+  });
+
+  it("负数、NaN、null 一律回落", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({ byModel: { x: { input: -1, output: null, cache: "x" } } }),
+    );
+    const pr = read().byModel.x;
+    expect(pr.input).toBe(0);
+    expect(pr.output).toBe(0);
+    expect(pr.cache).toBe(0);
+  });
+
+  it("mode 只认两个合法值，别的按兜底走", () => {
+    localStorage.setItem(KEY, JSON.stringify({ byModel: { x: { mode: "flat " } } }));
+    expect(["flat", "modality"]).toContain(read().byModel.x.mode);
+  });
+
+  it("整条不是对象就丢掉这一条，其余照常读", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({ byModel: { bad: "nope", good: { input: 3 } } }),
+    );
+    const p = read();
+    expect("bad" in p.byModel).toBe(false);
+    expect(p.byModel.good.input).toBe(3);
+  });
+});
+
+describe("mergeEditedPricing（保存单价不许丢掉没动过的）", () => {
+  const P = (byModel: Record<string, ModelPricing>, currency = "¥") => ({
+    currency,
+    per: PER_MTOKENS,
+    byModel,
+  });
+  const flat = (input: number): ModelPricing => ({
+    mode: "flat",
+    input,
+    cache: 0,
+    output: 0,
+    text: input,
+    video: input,
+    audio: input,
+  });
+
+  it("上周录过、这周没出现的模型，保存后必须还在", () => {
+    // 弹窗只列本周期出现过的模型，草稿是按这份名单从零重建的；
+    // 整表覆写会把 qwen 的价静默删掉，而它是一条条手敲进去的。
+    const stored = P({ qwen: flat(9), mimo: flat(1) });
+    const draft = P({ mimo: flat(2) }); // 草稿里根本没有 qwen
+    const out = mergeEditedPricing(stored, draft, ["mimo"]);
+    expect(out.byModel.qwen).toEqual(flat(9));
+    expect(out.byModel.mimo.input).toBe(2);
+  });
+
+  it("只写动过的模型：草稿里有、但没动过的不许覆盖已存值", () => {
+    const stored = P({ mimo: flat(1) });
+    // 草稿里 mimo 被 seed 成了别的值（比如预填价），但住户没动它
+    const draft = P({ mimo: flat(7) });
+    const out = mergeEditedPricing(stored, draft, []);
+    expect(out.byModel.mimo.input).toBe(1);
+  });
+
+  it("没动过的已知模型不写进本机表——否则官方价会被同值副本永久盖住", () => {
+    const stored = P({});
+    const draft = P({ "mimo-v2.5": flat(1.2) }); // seed 出来的预填值
+    const out = mergeEditedPricing(stored, draft, []);
+    expect("mimo-v2.5" in out.byModel).toBe(false);
+    // 动过之后才落本机
+    expect("mimo-v2.5" in mergeEditedPricing(stored, draft, ["mimo-v2.5"]).byModel).toBe(true);
+  });
+
+  it("货币是整表级设置，跟草稿走", () => {
+    const out = mergeEditedPricing(P({ a: flat(1) }, "¥"), P({}, "$"), []);
+    expect(out.currency).toBe("$");
+    expect(out.byModel.a).toEqual(flat(1));
+  });
+});
+
+describe("costPerModelFromTargets（弹窗预览与顶部合计同一把键）", () => {
+  const MOD: ModelPricing = {
+    mode: "modality",
+    input: 0,
+    text: 1,
+    video: 8,
+    audio: 3,
+    cache: 0.02,
+    output: 2,
+  };
+  const row = (base_url: string, input: number, video: number, cache: number) => ({
+    model: "m",
+    base_url,
+    type: "realtime" as const,
+    calls: 1,
+    tokens: input,
+    breakdown: { input, output: 1000, cache, video, audio: 0 },
+  });
+  // 同一模型名两个 endpoint，命中率 80% 对 10%、视频占比也不同：
+  // 这是唯一能让「先合并再摊命中」与「分别摊完再相加」分道扬镳的组合
+  const stats = {
+    rows: [
+      row("https://api.x.com/v1", 1_000_000, 600_000, 800_000),
+      row("https://api.x.com/v1-test", 1_000_000, 50_000, 100_000),
+    ],
+  } as unknown as UsageStats;
+
+  it("逐模型之和 == 顶部合计（弹窗底部那个数不许和它打架）", () => {
+    const p = { currency: "¥", per: PER_MTOKENS, byModel: { m: MOD } };
+    const targets = costInputsByTarget(stats);
+    const perModel = costPerModelFromTargets(targets, p);
+    const sum = [...perModel.values()].reduce((a, b) => a + b, 0);
+    expect(sum).toBeCloseTo(summarizeCost(targets, p).total, 9);
+  });
+
+  it("反向钉住：按模型名先合并再算会得出另一个数", () => {
+    const p = { currency: "¥", per: PER_MTOKENS, byModel: { m: MOD } };
+    const targets = costInputsByTarget(stats);
+    const right = [...costPerModelFromTargets(targets, p).values()].reduce((a, b) => a + b, 0);
+    const merged = costInputsByModel(stats);
+    const wrong = estimateCost(merged.get("m")!, MOD, PER_MTOKENS).total;
+    expect(Math.abs(wrong - right)).toBeGreaterThan(0.5);
+  });
+
+  it("没录价的模型按全 0 计入，故与排除它的合计仍然相等", () => {
+    const p = { currency: "¥", per: PER_MTOKENS, byModel: {} };
+    const targets = costInputsByTarget(stats);
+    const sum = [...costPerModelFromTargets(targets, p).values()].reduce((a, b) => a + b, 0);
+    expect(sum).toBe(0);
+    expect(summarizeCost(targets, p).total).toBe(0);
   });
 });

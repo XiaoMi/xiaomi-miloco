@@ -334,6 +334,30 @@ export function costOfTimelinePoint(
   return priced ? total : null;
 }
 
+/**
+ * 每个模型的费用：先逐「模型名 + endpoint」按各自单价算，再归到模型名下。
+ *
+ * 单价弹窗底部的预览与顶部合计必须是同一个数——它们是同一屏上、同一段时间的
+ * 「总共花了多少」。而「先按模型名把两个 endpoint 加起来再算」与「分别算完再相加」
+ * 在区分模态那档并不相等（命中量按 `命中 / 输入` 摊，这个比例对 token 不线性），
+ * 所以两处不能各自折叠：这里只出 per-model 的数，合计由调用方相加，折叠键与
+ * costInputsByTarget / summarizeCost 完全一致。
+ *
+ * 没录过单价的模型按**全 0** 计入而不是跳过——弹窗要显示「按当前表单值这个模型算多少」，
+ * 而全 0 的贡献恰好是 0，于是它与 summarizeCost（把没依据的模型排除在外）的合计仍相等。
+ */
+export function costPerModelFromTargets(
+  targets: { model: string; baseUrl: string; input: CostInput }[],
+  p: UsagePricing,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const { model, input } of targets) {
+    const pr = pricingFor(p, model) ?? EMPTY_MODEL_PRICING;
+    out.set(model, (out.get(model) ?? 0) + estimateCost(input, pr, p.per).total);
+  }
+  return out;
+}
+
 export interface CostSummary {
   /** 有单价的那些模型的合计。unpriced 非空时这是**部分**合计，不是全部。 */
   total: number;
@@ -409,6 +433,37 @@ export function cacheOverstatePct(
 // 不进后端：这是「本机的估算设置」，且免掉一轮读写端点。将来若要跟着模型档案
 // 跨设备同步，再搬进 config.json 的 omni profile。
 
+/**
+ * 把弹窗的改动叠加到**已存**的单价表上。
+ *
+ * 为什么不能直接保存草稿：弹窗只列当前统计周期里出现过的模型（没有用量就没有行可调），
+ * 而单价表是跨周期共用的一张全量表。草稿按「本周期的模型」从零重建，直接整表写回
+ * 等于把上周录过、这周没用到的模型的单价**静默删掉**——那些价是一条条手敲的，
+ * 界面上只会变成「—」并被算进「没录价」，没有任何提示。
+ *
+ * 只写住户真的动过的模型还有第二个作用：没动过的已知模型不会被写进本机表，
+ * 它的来源仍是「预填」而不是「用户价」——否则以后代码里更新官方价目，
+ * 这台机器会被自己存下的同值副本永久盖住。
+ */
+export function mergeEditedPricing(
+  stored: UsagePricing,
+  draft: UsagePricing,
+  touched: Iterable<string>,
+): UsagePricing {
+  const byModel = { ...stored.byModel };
+  for (const m of touched) {
+    const pr = draft.byModel[m];
+    if (pr) byModel[m] = pr;
+  }
+  // currency / per 跟草稿走：它们是整表级设置，弹窗里就能改
+  return { ...draft, byModel };
+}
+
+/** 单价必须是有限非负数；否则回落到给定兜底值。 */
+function num(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
 export function loadPricing(): UsagePricing {
   const base = defaultPricing();
   if (typeof localStorage === "undefined") return base;
@@ -420,11 +475,24 @@ export function loadPricing(): UsagePricing {
       base.currency = parsed.currency;
     }
     if (parsed.byModel && typeof parsed.byModel === "object") {
-      for (const [model, pr] of Object.entries(parsed.byModel)) {
+      for (const [model, raw] of Object.entries(parsed.byModel)) {
         // 存量数据可能来自旧版本，缺的字段补齐时优先用该模型的已知价目，
         // 没有就补 0——别用编出来的数去补一个有公开价目的模型。
         const fill = knownPricingFor(model) ?? EMPTY_MODEL_PRICING;
-        base.byModel[model] = { ...fill, ...(pr ?? {}) };
+        // 逐字段校验，不是整条铺上去：本机存储是住户、扩展、以及将来版本的自己
+        // 都能写的地方。存进一个字符串价（`{"input":"1"}`）会让计价算出 NaN，
+        // 一路显示成「¥NaN」且不报错——界面输入框拦得住，存储层拦不住。
+        if (!raw || typeof raw !== "object") continue; // 整条不可用 → 保持默认
+        const q = raw as Partial<ModelPricing>;
+        base.byModel[model] = {
+          mode: q.mode === "flat" || q.mode === "modality" ? q.mode : fill.mode,
+          input: num(q.input, fill.input),
+          text: num(q.text, fill.text),
+          video: num(q.video, fill.video),
+          audio: num(q.audio, fill.audio),
+          output: num(q.output, fill.output),
+          cache: num(q.cache, fill.cache),
+        };
       }
     }
   } catch {

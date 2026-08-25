@@ -244,8 +244,9 @@ class SQLiteConnector:
                         conn.commit()
                         logger.info("All required tables already exist")
 
-                    # PRAGMA user_version 步进迁移: v1 老库跑一次 _migrate_v1_to_v2
-                    # 到 v2, 未来 v3 时补 {3: _migrate_v2_to_v3}。函数内部
+                    # PRAGMA user_version 步进迁移: v1 老库依次跑 _migrate_v1_to_v2
+                    # 到 v2、_migrate_v2_to_v3 到 v3, 未来 v4 时补
+                    # {4: _migrate_v3_to_v4}。函数内部
                     # 单事务原子 (业务 DML + PRAGMA user_version 同 COMMIT),
                     # 抛异常 → backend fail-fast, 运维介入。
                     current_version = cursor.execute(
