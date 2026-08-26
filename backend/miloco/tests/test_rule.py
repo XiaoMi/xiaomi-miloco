@@ -142,6 +142,9 @@ def _make_state_rule(
 
 TRIGGER_CONTEXT = "cam-001 检测到有人经过"
 
+# mock 的米家场景表：场景动作的 did 要在这里面，否则建规则时被存在性校验拦下。
+MOCK_SCENES = ("scene-1", "scene-A", "scene-B", "scene-movie", "scene-real")
+
 
 # ---- Fixtures ----
 
@@ -153,6 +156,9 @@ def mock_miot_proxy():
     proxy.get_device_properties = AsyncMock(return_value=[{"code": 0, "value": False}])
     proxy.set_device_properties = AsyncMock(return_value=[{"code": 0}])
     proxy.call_device_action = AsyncMock(return_value={"code": 0})
+    proxy.get_all_scenes = AsyncMock(
+        return_value={sid: object() for sid in MOCK_SCENES}
+    )
     return proxy
 
 
@@ -3177,7 +3183,6 @@ class TestPreambleSelection:
         assert "record_kind" not in _extra_info(enter_prompt)
 
 
-
 # ============================================================
 # on_target_desc 累计达标 timer 路径（spec 2026-06-15）
 # ============================================================
@@ -4143,7 +4148,6 @@ class TestRuleRunnerPerDeviceStateIndependence:
         assert mock_miot_proxy.set_device_properties.call_count == 1
 
 
-
 # ---- 场景 action（iid=SCENE_IID，did 位置放 scene_id）----
 
 
@@ -4311,3 +4315,92 @@ class TestRuleServiceSceneActionValidation:
             ],
         )
         assert await service.create_rule(rule) == "new-rule-id"
+
+
+class TestRuleRunnerSceneActionGuards:
+    """service 校验只在 CRUD 走；runner 从 repo 直接灌规则，执行侧要有独立的闸。"""
+
+    @pytest.mark.asyncio
+    async def test_idempotent_scene_action_refused(self, runner, monkeypatch):
+        """库里混进 idempotent=true 的场景行 → 每次 fire 都真触发，必须挡住。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=True, cooldown_minutes=5
+        )
+
+        result = await runner._execute_action("rule-guard", bad)
+
+        assert result.result is False
+        assert "idempotent=false" in result.error
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scene_like_iid_is_rejected_not_dispatched(
+        self, runner, mock_miot_proxy
+    ):
+        """`scene.1.2` 曾会被当成 call_action，拿 scene_id 当 did 发出去。"""
+        action = RuleAction(did="scene-1", iid="scene.1.2", idempotent=False,
+                            cooldown_minutes=5)
+        result = await runner._execute_action("rule-nearmiss", action)
+
+        assert result.result is False
+        assert result.error == "invalid_iid: scene.1.2"
+        mock_miot_proxy.call_device_action.assert_not_called()
+
+
+class TestRuleServiceSceneIdExistence:
+    """scene_id 抄错一位 → 规则建成功但永远是哑的；创建期就要挡。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_scene_id_rejected(self, service):
+        rule = _make_static_rule(
+            rule_id="", actions=[_make_scene_action("scene-typo")]
+        )
+        with pytest.raises(ValidationException, match=r"Invalid scene IDs: scene-typo"):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_known_scene_id_passes(self, service):
+        rule = _make_static_rule(
+            rule_id="", actions=[_make_scene_action("scene-real")]
+        )
+        assert await service.create_rule(rule) == "new-rule-id"
+
+    @pytest.mark.asyncio
+    async def test_empty_scene_cache_says_so_not_invalid_id(
+        self, service, mock_miot_proxy
+    ):
+        """拿不到场景表时别谎报「你的 id 无效」——两种失败的修法完全不同。"""
+        from unittest.mock import AsyncMock as _AM
+
+        mock_miot_proxy.get_all_scenes = _AM(return_value={})
+        rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-1")])
+        with pytest.raises(ValidationException, match=r"Scene list unavailable"):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_patch_rule_also_validates_scene_id(self, service, mock_rule_repo):
+        """PATCH 路径不能是校验缺口。"""
+        from miloco.rule.schema import RuleUpdate
+
+        mock_rule_repo.get_by_id = MagicMock(return_value=_make_static_rule())
+        with pytest.raises(ValidationException, match=r"Invalid scene IDs: scene-typo"):
+            await service.patch_rule(
+                "rule-1",
+                RuleUpdate(actions=[_make_scene_action("scene-typo")]),
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_scene_rule_does_not_query_scenes(
+        self, service, mock_miot_proxy
+    ):
+        """没有场景动作时不该白跑一次场景查询。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value={})
+        mock_miot_proxy.get_all_scenes = spy
+        await service.create_rule(_make_static_rule(rule_id=""))
+        spy.assert_not_awaited()

@@ -728,8 +728,7 @@ def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") ->
     verbatim so agents see guidance tied to the exact flag they invoked.
 
     ``idempotent: false`` actions must declare ``cooldown_minutes`` to
-    avoid spamming notifications; ``iid: scene`` must be non-idempotent
-    (场景读不到现值，幂等比对无从谈起).
+    avoid spamming notifications; ``iid: scene`` must be non-idempotent.
     """
     parsed: list[dict] = []
     for raw in raw_actions:
@@ -752,8 +751,6 @@ def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") ->
 
 def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
     for i, a in enumerate(actions):
-        # 与 backend rule/schema.py 的 SCENE_IID 对齐；CLI 不依赖 miloco 包，
-        # 故此处复刻字面量。
         if a.get("iid") == SCENE_IID and a.get("idempotent") is not False:
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires idempotent=false"

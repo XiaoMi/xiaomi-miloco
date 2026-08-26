@@ -1392,11 +1392,24 @@ class RuleRunner:
     ) -> RuleActionExecuteResult:
         """触发米家场景（``iid`` 为 SCENE_IID，``did`` 位置是 scene_id）。
 
-        场景读不到现值，幂等比对无从谈起，去重只能靠冷却（service 层已强制
-        ``iid=scene`` 必须 ``idempotent=False`` + ``cooldown_minutes``）。台账
-        由 ``miot.service._trigger_scene`` 统一落，与 CLI 触发同一形状，只是
+        去重只靠冷却（原因见 ``SCENE_IID``）。台账由
+        ``miot.service._trigger_scene`` 统一落，与 CLI 触发同一形状，只是
         ``source`` 标成 rule、``source_id`` 写 rule_id。
         """
+        # service 校验只在 CRUD 走；runner 装载既有规则是直接从 repo 灌进来的，
+        # 库里混进 idempotent=true 的场景行会让 _in_cooldown 直接放行 → 每次
+        # fire 都真触发一次场景，零限频。这里再挡一道。
+        if action.idempotent:
+            logger.error(
+                "Rule %s scene action %s is idempotent=true, refusing to dispatch",
+                rule_id, action.did,
+            )
+            return RuleActionExecuteResult(
+                action=action,
+                result=False,
+                error="scene action must be idempotent=false",
+            )
+
         if self._in_cooldown(rule_id, action):
             return RuleActionExecuteResult(
                 action=action, result=True, skipped=True
@@ -1447,6 +1460,14 @@ class RuleRunner:
         # 场景没有 siid/aiid 可拆，必须在 iid 解析之前分流。
         if action.iid == SCENE_IID:
             return await self._execute_scene_action(rule_id, action)
+
+        # 三种形态之外一律报错。少了这道，`scene.1.2` 会被当成 call_action，
+        # 拿 scene_id 当 did 发出去——不崩，但静默做错事。
+        if not action.iid.startswith(("prop.", "action.")):
+            logger.error("Unsupported iid format '%s'", action.iid)
+            return RuleActionExecuteResult(
+                action=action, result=False, error=f"invalid_iid: {action.iid}"
+            )
 
         parts = action.iid.split(".")
         try:

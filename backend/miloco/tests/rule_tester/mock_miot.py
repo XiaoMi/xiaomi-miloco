@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from miloco.database.kv_repo import ScopeConfigKeys
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +49,9 @@ class MockMiotProxy:
         self.history: deque[MockMiotCall] = deque(maxlen=self.HISTORY_CAP)
         # rule runner 的场景分支经 miot.service._trigger_scene 走白名单校验，
         # 那里直接读 miot_proxy._kv_repo，所以这里给一个内存版。
-        self._kv_repo = _MockKVRepo({"HOME_WHITE_LIST_KEY": f'["{self.HOME_ID}"]'})
+        self._kv_repo = _MockKVRepo(
+            {ScopeConfigKeys.HOME_WHITE_LIST_KEY: f'["{self.HOME_ID}"]'}
+        )
         self.scenes: dict[str, Any] = {}
 
     def register_scene(self, scene_id: str, scene_name: str) -> None:

@@ -264,7 +264,19 @@ async def _trigger_scene(
             home_id=getattr(scenes[scene_id], "home_id", None),
         )
         return ok
-    except (ResourceNotFoundException, ValidationException):
+    except (ResourceNotFoundException, ValidationException) as e:
+        # 场景被删 / 不在允许家庭是最常见的两种生产失败,也是最该留痕的两种
+        # (后者还是越权信号)。不落台账的话,持久审计上一行都没有。
+        await _write_action_ledger(
+            miot_proxy,
+            action_type="scene_trigger",
+            did=scene_id, iid=scene_id,
+            value_json=scene_value_json,
+            result_code=None, result_msg=None,
+            success=False, error=str(e),
+            source=source, source_id=source_id,
+            home_id=getattr(scenes.get(scene_id), "home_id", None),
+        )
         raise
     except Exception as e:
         logger.error("Failed to trigger scene %s: %s", scene_id, e)

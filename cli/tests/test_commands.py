@@ -2436,7 +2436,7 @@ def _rule_create_argv(action: str) -> list[str]:
 
 
 def test_rule_create_scene_action_requires_non_idempotent(runner):
-    """场景读不到现值，幂等比对无从谈起；CLI 先拦，别等后端 400 才知道。"""
+    """CLI 先拦，别等后端 400 才知道。"""
     action = '{"did":"1792764217947197440","iid":"scene","idempotent":true,"cooldown_minutes":5}'
     result = runner.invoke(cli, _rule_create_argv(action))
     assert result.exit_code != 0

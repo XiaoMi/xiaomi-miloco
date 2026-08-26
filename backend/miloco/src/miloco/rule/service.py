@@ -150,8 +150,7 @@ def _validate_rule_consistency(rule: Rule) -> None:
         ("on_exit_actions", rule.on_exit_actions),
     ):
         for i, a in enumerate(slot_actions):
-            # 场景读不到现值，幂等分支会当场跳过判定直接下发，等于没有去重；
-            # 唯一能限频的手段是冷却，所以这里先把 idempotent=true 挡掉。
+            # 幂等分支会跳过判定直接下发,等于没有去重(原因见 SCENE_IID)。
             if a.iid == SCENE_IID and a.idempotent:
                 raise ValidationException(
                     f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
@@ -268,6 +267,35 @@ class RuleService:
                 f"Invalid perception device IDs: {', '.join(invalid)}"
             )
 
+    async def _validate_scene_ids(self, rule: Rule) -> None:
+        """场景动作的 did 必须是真实存在的 scene_id。
+
+        抄错一位的话规则能建成功、运行期每次 fire 都失败,用户和 agent 都拿不到
+        反馈——和 _validate_perceive_device_ids 挡 source did 是同一个理由。
+        """
+        wanted = {
+            a.did
+            for slot in (rule.actions, rule.on_enter_actions, rule.on_exit_actions)
+            for a in slot
+            if a.iid == SCENE_IID
+        }
+        if not wanted:
+            return
+        scenes = (await self._miot_proxy.get_all_scenes()) or {}
+        # 场景表拿不到(缓存空 + 刷新失败)时别谎报「你的 id 无效」——两种失败
+        # 的修法完全不同。
+        if not scenes:
+            raise ValidationException(
+                "Scene list unavailable (MIoT scene cache is empty); "
+                f"cannot verify scene IDs: {', '.join(sorted(wanted))}"
+            )
+        invalid = sorted(wanted - set(scenes))
+        if invalid:
+            raise ValidationException(
+                f"Invalid scene IDs: {', '.join(invalid)}; "
+                f"available: {', '.join(sorted(scenes))}"
+            )
+
     def _fill_default_duration_ratio(self, rule: Rule) -> None:
         """未显式指定时回填 settings.rule.default_duration_ratio。
 
@@ -302,6 +330,7 @@ class RuleService:
         await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
         _validate_rule_consistency(rule)
         self._validate_on_target_desc_compat(rule)
+        await self._validate_scene_ids(rule)
 
         rule_id = self._repo.create(rule)
         if not rule_id:
@@ -355,6 +384,7 @@ class RuleService:
         await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
         _validate_rule_consistency(rule)
         self._validate_on_target_desc_compat(rule)
+        await self._validate_scene_ids(rule)
 
         success = self._repo.update(rule)
         if success:
@@ -466,6 +496,7 @@ class RuleService:
 
         _validate_rule_consistency(existing)
         self._validate_on_target_desc_compat(existing)
+        await self._validate_scene_ids(existing)
 
         success = self._repo.update(existing)
         if success:

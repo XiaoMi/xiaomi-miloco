@@ -471,3 +471,48 @@ async def test_miot_service_trigger_scene_stays_source_cli(bound_client, tmp_pat
     r = _rows(obs_db)[0]
     assert r["source"] == "cli"
     assert r["source_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_scene_not_found_still_writes_ledger(bound_client, tmp_path):
+    """场景被删是最常见的生产失败;不落台账的话持久审计上一行都没有。"""
+    from miloco.middleware.exceptions import ResourceNotFoundException
+    from miloco.miot.service import _trigger_scene
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    with pytest.raises(ResourceNotFoundException):
+        await _trigger_scene(
+            svc._miot_proxy, "scene-gone", source="rule", source_id="rule-77"
+        )
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["action_type"] == "scene_trigger"
+    assert r["did"] == "scene-gone"
+    assert r["success"] == 0
+    assert r["source"] == "rule"
+    assert r["source_id"] == "rule-77"
+
+
+@pytest.mark.asyncio
+async def test_scene_home_not_allowed_still_writes_ledger(bound_client, tmp_path):
+    """越权信号(触发不在允许家庭的场景)更不能只留在 rule_log 里。"""
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.miot.service import _trigger_scene
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.get_all_scenes = AsyncMock(
+        return_value={"scene1": SimpleNamespace(home_id="H-other", scene_name="他家")}
+    )
+    with pytest.raises(ValidationException):
+        await _trigger_scene(
+            svc._miot_proxy, "scene1", source="rule", source_id="rule-77"
+        )
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert r["source_id"] == "rule-77"
+    assert r["home_id"] == "H-other"
