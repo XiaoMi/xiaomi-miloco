@@ -159,8 +159,10 @@ export function UsagePricingDialog({
                 placeholder={t("usage.pricingCustom")}
                 aria-label={t("usage.pricingCustom")}
                 onChange={(e) => {
-                  const v = e.target.value.trim();
-                  if (v) setDraft((d) => ({ ...d, currency: v }));
+                  // 空串也要落下去：只在非空时才写的话，删到最后一个字符时状态没变、
+                  // 而 value 是从状态推出来的，那个字符会立刻弹回来，框根本删不空。
+                  // 空串等于「没选自定义」，此时下面的档位按钮回到未选中态。
+                  setDraft((d) => ({ ...d, currency: e.target.value.trim() }));
                 }}
                 className="w-20 px-2 py-1 text-caption num rounded-md bg-bg-primary
                            border border-border focus:border-brand-primary focus:outline-none"

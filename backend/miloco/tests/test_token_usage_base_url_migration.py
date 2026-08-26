@@ -292,7 +292,10 @@ def test_startup_stepping_is_idempotent(tmp_path, monkeypatch):
         connector_module.init_database()  # 第二次启动
 
         conn = sqlite3.connect(db_file)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0]
+            == connector_module._DB_SCHEMA_VERSION
+        )
         assert conn.execute("SELECT COUNT(*) FROM token_usage_daily").fetchone()[0] == 3
         conn.close()
     finally:

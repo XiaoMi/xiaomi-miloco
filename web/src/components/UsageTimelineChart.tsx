@@ -35,6 +35,8 @@ import { Segmented } from "./Segmented";
 const PLOT_H = 168;
 /** 纵轴刻度带宽度（px），柱子从这里之后开始。 */
 const GUTTER = 44;
+/** 峰值直标那一行的高度（12px 字 × 1.45 行高 + 4px 下留白，向上取整）。 */
+const PEAK_LABEL_H = 22;
 /** 单根柱最大宽度：桶少时不至于糊成一整块色。 */
 const BAR_MAX = 22;
 /** 非零桶的最小可见高度（占绘图高的百分比）：否则尖峰对比下会渲染成亚像素、与空桶分不开。 */
@@ -315,7 +317,10 @@ export function UsageTimelineChart({
                        pointer-events-none"
             style={{
               left: `calc(${GUTTER}px + (100% - ${GUTTER}px) * ${(peakIdx + 0.5) / n})`,
-              top: PLOT_H - (peak.tokens / niceMax) * PLOT_H,
+              // 下钳一行的高度：柱贴着纵轴上界时柱顶只剩几像素，不钳这行字会顶到
+              // 标题行上去。这里用常数是安全的——它只有一行固定文案，高度不随内容变，
+              // 与那个行数会变的浮层不是一回事。
+              top: Math.max(PLOT_H - (peak.tokens / niceMax) * PLOT_H, PEAK_LABEL_H),
               transform: "translate(-50%, -100%)",
               paddingBottom: 4,
             }}
@@ -437,8 +442,31 @@ function Tooltip({
   const align = centerPct < 12 ? "left" : centerPct > 88 ? "right" : "center";
   const shiftX = align === "center" ? "-50%" : align === "right" ? "-100%" : "0";
 
+  /**
+   * 纵向落点按**实测高度**算，不用常数猜。
+   *
+   * 浮层的行数随「按模态 / 有没有费用行」变化，高度差两三倍；而柱越高浮层越靠上，
+   * 拿一个固定地板去挡越界，只在「浮层恰好那么高」时成立——峰值柱贴着纵轴上界时
+   * 柱顶只剩几像素，浮层会整个翻到绘图区上方、盖住卡片工具条上住户刚点过的控件。
+   * 故先量出来：上方装不下就翻到柱顶下方，并夹在绘图区内——「按模态」把四个模态全列出时
+   * 浮层比绘图区本身还高，不夹的话往下翻会越出绘图区、去盖下面的明细表。宁可盖住它正在
+   * 解读的那张图，也不去盖邻区：图是浮层的上下文，而明细与工具条不是。
+   */
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [boxH, setBoxH] = useState(0);
+  useLayoutEffect(() => {
+    setBoxH(boxRef.current?.offsetHeight ?? 0);
+  }, [point, stacked, costLabel]);
+
+  const barTop = PLOT_H - (point.tokens / niceMax) * PLOT_H;
+  const GAP = 8;
+  const above = barTop - boxH - GAP;
+  const top =
+    above >= 0 ? above : Math.min(barTop + GAP, Math.max(0, PLOT_H - boxH));
+
   return (
     <div
+      ref={boxRef}
       aria-hidden
       className="absolute z-10 pointer-events-none whitespace-nowrap text-caption
                  rounded-lg bg-bg-secondary border border-border shadow-md px-2.5 py-1.5"
@@ -449,8 +477,11 @@ function Tooltip({
             : align === "right"
               ? "100%"
               : `calc(${GUTTER}px + (100% - ${GUTTER}px) * ${(idx + 0.5) / total})`,
-        top: Math.max(PLOT_H - (point.tokens / niceMax) * PLOT_H, 8),
-        transform: `translate(${shiftX}, calc(-100% - 8px))`,
+        top,
+        // 纵向已按实测高度算完，这里只做横向对齐
+        transform: `translate(${shiftX}, 0)`,
+        // 量到高度之前先隐形渲一帧，避免看到从默认位置跳过来
+        visibility: boxH === 0 ? "hidden" : undefined,
       }}
     >
       <div className="num text-text-secondary mb-1">
