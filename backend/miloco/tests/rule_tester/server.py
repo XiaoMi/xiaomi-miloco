@@ -42,6 +42,7 @@ from llm_client import run_create_task  # noqa: E402
 from miloco.database.connector import init_database  # noqa: E402
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo  # noqa: E402
 from miloco.rule.runner import RuleRunner  # noqa: E402
+from miloco.rule.schema import SCENE_IID  # noqa: E402
 from mock_miot import MockMiotProxy  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -82,9 +83,21 @@ def _sync_runner_from_repo() -> None:
     fresh_ids = {r.id for r in rules}
     for r in rules:
         _runner.add_rule(r)
+        _register_scenes(r)
     for rid in [r.id for r in _runner.get_all_rules()]:
         if rid not in fresh_ids:
             _runner.remove_rule(rid)
+
+
+def _register_scenes(rule) -> None:
+    """把规则里出现的 scene_id 登记进 mock，否则场景动作会按「场景不存在」失败。
+
+    真实 MiotProxy 的场景表来自云端；tester 没有云端，只能从规则本身反推。
+    """
+    for slot in (rule.actions, rule.on_enter_actions, rule.on_exit_actions):
+        for a in slot:
+            if a.iid == SCENE_IID:
+                _mock_miot.register_scene(a.did, f"mock-scene-{a.did}")
 
 
 # Schemas --------------------------------------------------------------------
