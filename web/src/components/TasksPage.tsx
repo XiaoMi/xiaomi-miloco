@@ -9,10 +9,15 @@
  *  - 详情抽屉：复用列表已加载的 summary 数据（含驱动规则 / 关联 / 进度），无需再拉
  *    单条全量视图。驱动规则在前（触发条件 / 执行动作结构化展示），进度可视化（进度条 /
  *    计时 / 计数），创建时间作次要信息。
- *  - 抽屉编辑是「整屉一档」：底部一个「编辑」按钮把任务描述与每条规则的触发条件一起
- *    变成可填写状态，底部同一组「取消 / 保存」收口；保存只提交真正改过的字段——描述走
- *    PATCH /api/tasks/{id}，触发条件走 PATCH /api/rules/{id}（落库后 backend 会重新
- *    装载进 RuleRunner，新条件即时生效）。执行动作与推送仍由 Agent 接线，此处只读。
+ *  - 抽屉编辑是「整屉一档」：底部一个「编辑」按钮把任务描述与每条规则的规则名 / 触发
+ *    条件 / 命中后意图一起变成可填写状态，底部同一组「取消 / 保存」收口；保存只提交真正
+ *    改过的字段——描述走 PATCH /api/tasks/{id}，规则各字段合成一次 PATCH /api/rules/{id}
+ *    （落库后 backend 会重新装载进 RuleRunner，即时生效）。
+ *  - 为什么规则名与意图文案也要能改：任务描述（task.description）根本不进 Agent 的任何
+ *    输入通道，改它对 Agent 行为零影响。真正进模型的是「规则名 + 触发条件」（感知
+ *    system prompt）与「命中后意图」（命中回调 prompt 的意图段）。详见 .claude/PROGRESS.md。
+ *  - 设备直控动作仍只读：那是结构化 JSON，且同一槽位的设备动作与文案在 backend 校验里
+ *    互斥——哪些文案槽位可编辑由后端 editableDescSlots 给出，前端不自己推。
  */
 
 import type { ReactNode } from "react";
@@ -21,13 +26,19 @@ import { useTranslation } from "react-i18next";
 import {
   deleteTask,
   setTaskEnabled,
-  updateRuleQuery,
+  updateRule,
   updateTaskDescription,
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
-import type { Task, TaskRecordSummary, TaskRuleBrief } from "@/lib/types";
+import type {
+  Task,
+  TaskRecordSummary,
+  TaskRuleBrief,
+  TaskRuleDescSlot,
+  TaskRulePatch,
+} from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
 import { toast } from "./Toast";
 
@@ -249,51 +260,235 @@ function Section({
   );
 }
 
-// 单条驱动规则卡片：触发条件（编辑态下可改文本）+ 执行动作（只读，由 Agent 接线）。
+// 一条规则的可编辑字段草稿。desc 槽位一律存字符串（多条文案按行拆合），
+// 免得编辑框和数组结构来回转换。
+interface RuleDraft {
+  // 只存规则名去掉 `[<task_id>] ` 前缀后的后半段——前缀由 UI 固定拼回。
+  nameSuffix: string;
+  query: string;
+  action_descriptions: string;
+  on_enter_desc: string;
+  on_exit_desc: string;
+  on_target_desc: string;
+}
+
+// skill 约定的规则名前缀。规则名不是这个格式时（人工建的老规则）返回空串，
+// 此时整条名字都交给住户改，不硬套前缀。
+function ruleNamePrefix(taskId: string, name: string): string {
+  const prefix = `[${taskId}] `;
+  return name.startsWith(prefix) ? prefix : "";
+}
+
+// 槽位原值 → 编辑框文本。action_descriptions 是数组，一行一条。
+function slotText(rule: TaskRuleBrief, slot: TaskRuleDescSlot): string {
+  if (slot === "action_descriptions") return rule.actionDescriptions.join("\n");
+  if (slot === "on_enter_desc") return rule.onEnterDesc ?? "";
+  if (slot === "on_exit_desc") return rule.onExitDesc ?? "";
+  return rule.onTargetDesc ?? "";
+}
+
+function makeRuleDraft(taskId: string, rule: TaskRuleBrief): RuleDraft {
+  return {
+    nameSuffix: rule.name.slice(ruleNamePrefix(taskId, rule.name).length),
+    query: rule.query,
+    action_descriptions: slotText(rule, "action_descriptions"),
+    on_enter_desc: slotText(rule, "on_enter_desc"),
+    on_exit_desc: slotText(rule, "on_exit_desc"),
+    on_target_desc: slotText(rule, "on_target_desc"),
+  };
+}
+
+// 草稿 → PATCH 载荷：只带真改过且非空的字段。清空视作放弃这一处修改——把唯一
+// 一个已配置的槽位清空反而会被 backend 的「至少配一个」校验退回。
+function ruleDiff(
+  taskId: string,
+  rule: TaskRuleBrief,
+  draft: RuleDraft,
+): TaskRulePatch | null {
+  const patch: TaskRulePatch = {};
+  const name = ruleNamePrefix(taskId, rule.name) + draft.nameSuffix.trim();
+  if (draft.nameSuffix.trim() && name !== rule.name) patch.name = name;
+  const query = draft.query.trim();
+  if (query && query !== rule.query) patch.query = query;
+  for (const slot of rule.editableDescSlots) {
+    const next = draft[slot].trim();
+    if (!next || next === slotText(rule, slot)) continue;
+    if (slot === "action_descriptions") {
+      patch.actionDescriptions = next
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+    } else if (slot === "on_enter_desc") patch.onEnterDesc = next;
+    else if (slot === "on_exit_desc") patch.onExitDesc = next;
+    else patch.onTargetDesc = next;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+// 编辑态下的带标签文本框——规则卡片里的几个字段长得一样，抽出来免得复读样式。
+function Field({
+  label,
+  value,
+  rows,
+  placeholder,
+  hint,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  rows: number;
+  placeholder?: string;
+  hint?: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <div className="text-caption text-text-tertiary mb-1.5">{label}</div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        maxLength={500}
+        placeholder={placeholder}
+        className="w-full resize-none rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
+      />
+      {hint && (
+        <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
+          {hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// 单条驱动规则卡片。浏览态只展示（触发条件 + 压平的动作摘要）；编辑态把规则名 /
+// 触发条件 / 各可编辑意图槽位铺开成表单。
 // 卡片自己不持编辑状态：编辑由外层抽屉整屉切换，草稿也存在抽屉里，这样描述与所有
-// 触发条件共用底部同一组「取消 / 保存」，不会每张卡各挂一副小按钮。
+// 规则字段共用底部同一组「取消 / 保存」，不会每张卡各挂一副小按钮。
 function RuleBriefCard({
   rule,
+  taskId,
   t,
   editing,
   draft,
   onDraftChange,
 }: {
   rule: TaskRuleBrief;
+  taskId: string;
   t: TFn;
   editing: boolean;
-  draft: string;
-  onDraftChange: (value: string) => void;
+  draft: RuleDraft;
+  onDraftChange: (patch: Partial<RuleDraft>) => void;
 }) {
   const actions = splitActions(rule.actionsDesc);
+  const prefix = ruleNamePrefix(taskId, rule.name);
+  const slotLabel: Record<TaskRuleDescSlot, string> = {
+    action_descriptions: t("tasks.slotActionDescriptions"),
+    on_enter_desc: t("tasks.slotOnEnterDesc"),
+    on_exit_desc: t("tasks.slotOnExitDesc"),
+    on_target_desc: t("tasks.slotOnTargetDesc"),
+  };
+
+  if (editing) {
+    return (
+      <div className="rounded-xl bg-bg-primary border border-border px-3.5 py-3 space-y-3">
+        <div>
+          <div className="text-caption text-text-tertiary mb-1.5">
+            {t("tasks.ruleNameLabel")}
+          </div>
+          <div className="flex items-center gap-1.5">
+            {/* 前缀是任务 id，agent 侧靠它把规则认回任务，固定不可改。 */}
+            {prefix && (
+              <span className="shrink-0 rounded-md bg-bg-tertiary px-1.5 py-1 text-caption text-text-tertiary font-mono">
+                {prefix.trim()}
+              </span>
+            )}
+            <input
+              value={draft.nameSuffix}
+              onChange={(e) => onDraftChange({ nameSuffix: e.target.value })}
+              maxLength={100}
+              placeholder={t("tasks.ruleNamePlaceholder")}
+              className="min-w-0 flex-1 rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
+            />
+          </div>
+          <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
+            {t("tasks.ruleNameHint")}
+          </p>
+        </div>
+
+        <Field
+          label={t("tasks.triggerCondition")}
+          value={draft.query}
+          rows={2}
+          placeholder={t("tasks.triggerPlaceholder")}
+          /* 措辞提示：backend _validate_query_phrasing 会挡「检测到」这类断言性开头
+             （感知模型会当成已发生的事实 → 连续误触发）。校验仍以 backend 为单一
+             真源，这里只前置引导，不在前端复制那份前缀表。 */
+          hint={t("tasks.triggerPhrasingHint")}
+          onChange={(v) => onDraftChange({ query: v })}
+        />
+
+        {/* 意图文案：渲染哪几个槽位完全听后端的 editableDescSlots——它按 rule 校验
+            矩阵算好（走设备直控的槽位填了会 422），前端不按 mode 自己推。 */}
+        {rule.editableDescSlots.length > 0 && (
+          <div className="space-y-3 pt-1">
+            <div className="text-caption font-semibold text-text-secondary">
+              {t("tasks.ruleIntent")}
+            </div>
+            {rule.editableDescSlots.map((slot) => (
+              <Field
+                key={slot}
+                label={slotLabel[slot]}
+                value={draft[slot]}
+                rows={2}
+                placeholder={t("tasks.intentPlaceholder")}
+                hint={
+                  slot === "action_descriptions"
+                    ? t("tasks.intentMultiHint")
+                    : undefined
+                }
+                onChange={(v) => onDraftChange({ [slot]: v })}
+              />
+            ))}
+            <p className="text-caption text-text-tertiary leading-relaxed">
+              {t("tasks.ruleIntentHint")}
+            </p>
+          </div>
+        )}
+
+        {rule.deviceActions.length > 0 && (
+          <div className="pt-1">
+            <div className="text-caption text-text-tertiary mb-1.5">
+              {t("tasks.deviceActions")}
+            </div>
+            <ul className="space-y-1">
+              {rule.deviceActions.map((a, i) => (
+                <li
+                  key={i}
+                  className="text-caption text-text-secondary font-mono break-all"
+                >
+                  {a}
+                </li>
+              ))}
+            </ul>
+            <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
+              {t("tasks.ruleIntentLocked")}
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-xl bg-bg-primary border border-border overflow-hidden">
       <div className="px-3.5 py-3 border-b border-border">
         <div className="text-caption text-text-tertiary mb-1.5">
           {t("tasks.triggerCondition")}
         </div>
-        {editing ? (
-          <>
-            <textarea
-              value={draft}
-              onChange={(e) => onDraftChange(e.target.value)}
-              rows={2}
-              maxLength={200}
-              placeholder={t("tasks.triggerPlaceholder")}
-              className="w-full resize-none rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
-            />
-            {/* 措辞提示：backend _validate_query_phrasing 会挡「检测到」这类断言性开头
-                （感知模型会当成已发生的事实 → 连续误触发）。校验仍以 backend 为单一
-                真源，这里只前置引导，不在前端复制那份前缀表。 */}
-            <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
-              {t("tasks.triggerPhrasingHint")}
-            </p>
-          </>
-        ) : (
-          <div className="text-body text-text-primary leading-relaxed break-words">
-            {rule.query}
-          </div>
-        )}
+        <div className="text-body text-text-primary leading-relaxed break-words">
+          {rule.query}
+        </div>
       </div>
       <div className="px-3.5 py-3">
         <div className="text-caption text-text-tertiary mb-1.5">
@@ -335,15 +530,17 @@ function TaskDetailSheet({
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [descDraft, setDescDraft] = useState(task.description);
-  // ruleId → 触发条件草稿；进入编辑态时按当前规则快照重建。
-  const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({});
+  // ruleId → 规则草稿；进入编辑态时按当前规则快照重建。
+  const [ruleDrafts, setRuleDrafts] = useState<Record<string, RuleDraft>>({});
   const [confirmDel, setConfirmDel] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const startEdit = () => {
     setDescDraft(task.description);
     setRuleDrafts(
-      Object.fromEntries(task.ruleBriefs.map((r) => [r.ruleId, r.query])),
+      Object.fromEntries(
+        task.ruleBriefs.map((r) => [r.ruleId, makeRuleDraft(task.taskId, r)]),
+      ),
     );
     setEditing(true);
   };
@@ -359,11 +556,12 @@ function TaskDetailSheet({
   });
 
   const paused = task.status === "paused";
-  const ruleDraft = (r: TaskRuleBrief) => ruleDrafts[r.ruleId] ?? r.query;
+  const ruleDraft = (r: TaskRuleBrief) =>
+    ruleDrafts[r.ruleId] ?? makeRuleDraft(task.taskId, r);
 
-  // 一次保存整屉改动：描述 → PATCH /api/tasks/{id}；每条触发条件 → PATCH /api/rules/{id}
-  // （只带 condition.query，感知设备 perceive_device_ids 由 backend 保留）。
-  // 只提交真改过的字段；清空视作放弃这一处修改（空描述 / 空条件没有意义）。
+  // 一次保存整屉改动：描述 → PATCH /api/tasks/{id}；每条规则的改动合成一次
+  // PATCH /api/rules/{id}（未带的字段 backend 保留原值，如 perceive_device_ids）。
+  // 只提交真改过的字段；清空视作放弃这一处修改（空描述 / 空条件 / 空文案没有意义）。
   const save = async () => {
     const jobs: Array<() => Promise<void>> = [];
     const nextDesc = descDraft.trim();
@@ -371,10 +569,8 @@ function TaskDetailSheet({
       jobs.push(() => updateTaskDescription(task.taskId, nextDesc));
     }
     for (const r of task.ruleBriefs) {
-      const next = ruleDraft(r).trim();
-      if (next && next !== r.query) {
-        jobs.push(() => updateRuleQuery(r.ruleId, next));
-      }
+      const patch = ruleDiff(task.taskId, r, ruleDraft(r));
+      if (patch) jobs.push(() => updateRule(r.ruleId, patch));
     }
     if (jobs.length === 0) {
       cancelEdit();
@@ -383,8 +579,8 @@ function TaskDetailSheet({
     setBusy(true);
     let saved = 0;
     try {
-      // 串行提交：backend 会退回断言性措辞（422），失败就停在编辑态、保留输入，
-      // 住户能看清是哪一句被退回。已落库的部分靠下面的 onChanged() 同步到界面。
+      // 串行提交：backend 会退回断言性措辞（422）、重名规则（409），失败就停在
+      // 编辑态、保留输入，住户能看清是哪一句被退回。已落库的部分靠下面的 onChanged() 同步到界面。
       for (const job of jobs) {
         await job();
         saved += 1;
@@ -513,11 +709,15 @@ function TaskDetailSheet({
                   <RuleBriefCard
                     key={r.ruleId}
                     rule={r}
+                    taskId={task.taskId}
                     t={t}
                     editing={editing}
                     draft={ruleDraft(r)}
-                    onDraftChange={(v) =>
-                      setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                    onDraftChange={(patch) =>
+                      setRuleDrafts((m) => ({
+                        ...m,
+                        [r.ruleId]: { ...ruleDraft(r), ...patch },
+                      }))
                     }
                   />
                 ))}

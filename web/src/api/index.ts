@@ -41,6 +41,7 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
+  TaskRulePatch,
   UsagePeriod,
   UsageStats,
   OmniConfigState,
@@ -304,12 +305,13 @@ export async function updateTaskDescription(
   return impl.realUpdateTaskDescription(taskId, description);
 }
 
-// 改驱动规则的触发条件文本（任务详情里就地编辑）。
-export async function updateRuleQuery(
+// 改驱动规则（任务详情里就地编辑）：规则名 / 触发条件 / 命中后交给 agent 的意图文案。
+// 只发本次真改动的字段，其余由 backend 保留原值。
+export async function updateRule(
   ruleId: string,
-  query: string,
+  patch: TaskRulePatch,
 ): Promise<void> {
-  return impl.realUpdateRuleQuery(ruleId, query);
+  return impl.realUpdateRule(ruleId, patch);
 }
 
 // ── 设备 ──────────────────────────────────────────────────

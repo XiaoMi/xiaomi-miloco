@@ -763,10 +763,46 @@ export interface TaskRecordSummary {
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 export interface TaskRuleBrief {
   ruleId: string;
+  // 规则名。它与 query 一起进感知模型的 system prompt，是「名称」里唯一真正
+  // 影响命中判定的字段（任务名 task.description 不进模型），故开放编辑。
+  // 约定格式 `[<task_id>] <场景描述>`，前缀由 UI 固定、只让改后半段。
+  name: string;
+  // event：命中即触发一次；state：进入 / 离开状态各触发一次。决定编辑器渲染几个框。
+  mode: "event" | "state";
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
-  // 命中后执行的动作人话摘要
+  // 命中后执行的动作人话摘要（压平列，含 on_enter: / on_exit: 前缀，设备动作与
+  // 文案混排）。只用于兜底展示，**不可逆解析，不拿它回填编辑框**。
   actionsDesc: string[];
+  // ↓ 结构化原值：agent 命中后读到的「意图」文案。哪几个真能改由后端的
+  //   editableDescSlots 说了算（同槽位的设备直控与文案互斥），前端别自己按 mode 推。
+  actionDescriptions: string[];
+  onEnterDesc: string | null;
+  onExitDesc: string | null;
+  // 累计达标文案（仅 duration record + 滑窗规则有）。为 null 时不渲染：
+  // 从无到有地填它会被 backend 的 record 兼容校验挡下。
+  onTargetDesc: string | null;
+  // 设备直控动作摘要，只读——设备动作是结构化 JSON，不在 Web 上手改。
+  deviceActions: string[];
+  // 允许就地编辑的文案槽位，由后端按 rule 校验矩阵算好（见 task/service.py）。
+  editableDescSlots: TaskRuleDescSlot[];
+}
+
+export type TaskRuleDescSlot =
+  | "action_descriptions"
+  | "on_enter_desc"
+  | "on_exit_desc"
+  | "on_target_desc";
+
+// 规则的部分更新载荷（对齐 backend PATCH /api/rules/{id} 的字段子集）。
+// 只带住户在 Web 上真能改的那几项；感知设备、设备动作等由 backend 保留原值。
+export interface TaskRulePatch {
+  name?: string;
+  query?: string;
+  actionDescriptions?: string[];
+  onEnterDesc?: string;
+  onExitDesc?: string;
+  onTargetDesc?: string;
 }
 
 // 任务视图 = 基础字段 + record 进度摘要 + 驱动规则，一次 summary 请求全拿到。
