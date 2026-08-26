@@ -199,9 +199,14 @@ export function UsagePricingDialog({
               <p className="text-caption text-warning mb-2">{t("usage.pricingUnsetHint")}</p>
             )}
 
+            {/* key 带上选中模型：换模型就是换一组全新输入框。这样 Price 不必再从上层
+                「同步」文本回来——那条同步分不清「别人改的」与「我自己刚回写的」，
+                会把 "0.0" / "1." 这类中间态推回成 "0" / "1"，小数点被吃掉、
+                下一个字符落到整数位上（0.02 改成 0.05 会存成 5）。
+                代价是切模型丢掉未提交的中间态，而那正是期望行为。 */}
             <div
               className="grid gap-3 sm:grid-cols-3 bg-bg-primary rounded-lg p-3.5 mb-3"
-              key={pr.mode}
+              key={`${sel}:${pr.mode}`}
             >
               {/* 色点的含义是「这个色在图表里出现」。输入 / 命中在图表里没有对应色，
                   给它们配点等于凭空造一个语义，所以不区分模态这一档三项都不带点，
@@ -334,8 +339,8 @@ function Price({
   onChange: (v: number) => void;
   dot?: string;
 }) {
+  // 只在挂载时取初值。**不要**加一条跟着 value 的同步——见外层网格 key 的说明。
   const [text, setText] = useState(String(value));
-  useEffect(() => setText(String(value)), [value]);
   return (
     <label className="flex flex-col gap-1.5">
       <span className="text-caption text-text-secondary flex items-center gap-1.5">
