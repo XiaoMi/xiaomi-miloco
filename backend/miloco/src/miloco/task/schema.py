@@ -49,11 +49,45 @@ class TaskUpdateRequest(BaseModel):
 
 
 class RuleBrief(BaseModel):
-    """`task get` / `task list` 中的实时 rule 摘要。"""
+    """`task get` / `task list` 中的实时 rule 摘要。
+
+    两组「动作」字段并列, 用途不同, 都要保留:
+
+    - ``actions_desc``: 压平后的人话摘要 (含 ``on_enter:`` / ``on_exit:`` 前缀,
+      设备直控与 agent 文案混在一列)。给 agent 去重比对 / CLI 展示用, 紧凑但
+      不可逆解析 —— **别拿它回填编辑框**。
+    - ``mode`` + ``action_descriptions`` / ``on_*_desc`` / ``device_actions``:
+      结构化原值, 给 Web 就地编辑用。``device_actions`` 是设备直控摘要, 只读
+      —— 设备动作是结构化 JSON, 不在 Web 上手改。
+
+    哪几个 desc 槽位**能改**由 ``editable_desc_slots`` 说了算, 前端别自己按 mode
+    推: V3 校验矩阵 (``rule/service.py:_validate_rule_consistency``) 规定同一槽位
+    的「设备直控」与「agent 文案」互斥 —— 走设备直控的槽位再填 desc 会被 422 挡下。
+    该判定与校验矩阵同源, 放在 backend 才不会两边漂移。
+
+    ``name`` 随 rule 一并回传: 它跟 ``query`` 一起进 omni system prompt
+    (见 ``perception/engine/api.py`` 装 ``RuleCondition``), 是「名称」里唯一
+    真正影响感知判定的字段, 故也开放编辑。
+    """
 
     rule_id: str
+    name: str = ""
+    mode: Literal["event", "state"] = "event"
     query: str
     actions_desc: list[str] = Field(default_factory=list)
+    action_descriptions: list[str] = Field(default_factory=list)
+    on_enter_desc: str | None = None
+    on_exit_desc: str | None = None
+    on_target_desc: str | None = None
+    device_actions: list[str] = Field(default_factory=list)
+    editable_desc_slots: list[
+        Literal[
+            "action_descriptions",
+            "on_enter_desc",
+            "on_exit_desc",
+            "on_target_desc",
+        ]
+    ] = Field(default_factory=list)
 
 
 class CronRef(BaseModel):

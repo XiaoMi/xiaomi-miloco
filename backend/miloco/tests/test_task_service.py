@@ -16,6 +16,7 @@ from miloco.database.rule_repo import RuleRepo
 from miloco.database.task_repo import TaskConflict
 from miloco.rule.schema import (
     Rule,
+    RuleAction,
     RuleCondition,
     RuleLifecycle,
     RuleMode,
@@ -127,6 +128,62 @@ def test_create_task_then_rule_auto_links(service):
     assert len(view.rule_briefs) == 1
     assert view.rule_briefs[0].rule_id == rule_id
     assert view.rule_briefs[0].query == "客厅有人"
+
+
+def test_rule_brief_exposes_structured_desc_fields(service):
+    """rule_briefs 除压平的 actions_desc 外, 还回结构化原值供 Web 就地编辑。
+
+    压平列 (actions_desc) 与结构化列并存: 前者给 agent 去重比对, 后者给编辑框回填。
+    event 模式下设备直控进 device_actions、agent 文案进 action_descriptions, 两者分开。
+    """
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    rule = _make_rule_obj(task_id="t1", query="客厅有人", name="[t1] 客厅有人")
+    rule.actions = [
+        RuleAction(did="d1", iid="prop.2.1", value=True, idempotent=True)
+    ]
+    rule_id = RuleRepo().create(rule)
+
+    brief = service.get_full_view("t1").rule_briefs[0]
+    assert brief.rule_id == rule_id
+    assert brief.name == "[t1] 客厅有人"
+    assert brief.mode == "event"
+    assert brief.action_descriptions == ["fire"]
+    assert brief.device_actions == ["prop.2.1=True"]
+    assert brief.on_enter_desc is None
+    assert brief.on_exit_desc is None
+    # 该槽位已走设备直控 → 不给编辑 (后端校验矩阵里两者互斥, 填了也是 422)
+    assert brief.editable_desc_slots == []
+
+
+def test_rule_brief_editable_slots_open_when_no_device_action(service):
+    """没接设备直控的槽位才可编辑 —— 判定跟着校验矩阵走, 不是跟着 mode 走。"""
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    RuleRepo().create(_make_rule_obj(task_id="t1", query="客厅有人"))
+
+    brief = service.get_full_view("t1").rule_briefs[0]
+    assert brief.editable_desc_slots == ["action_descriptions"]
+
+
+def test_rule_brief_state_mode_splits_enter_exit_desc(service):
+    """state 模式: on_enter_desc / on_exit_desc 各自独立回传, 不带 on_enter: 前缀。
+
+    (压平的 actions_desc 才带前缀 —— 那列不可逆解析, 前端不拿它回填。)
+    """
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    rule = _make_rule_obj(task_id="t1", query="客厅有人")
+    rule.mode = RuleMode.STATE
+    rule.action_descriptions = []
+    rule.on_enter_desc = "进入时提醒"
+    rule.on_exit_desc = "离开时关灯"
+    RuleRepo().create(rule)
+
+    brief = service.get_full_view("t1").rule_briefs[0]
+    assert brief.mode == "state"
+    assert brief.on_enter_desc == "进入时提醒"
+    assert brief.on_exit_desc == "离开时关灯"
+    assert brief.device_actions == []
+    # on_target_desc 无值 → 不出现: 它还要求任务挂着带 target_minutes 的时长记录
+    assert brief.editable_desc_slots == ["on_enter_desc", "on_exit_desc"]
 
 
 def test_create_task_409_on_duplicate_id(service):

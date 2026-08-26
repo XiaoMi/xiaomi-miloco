@@ -94,8 +94,16 @@ class TaskService:
             rule_briefs.append(
                 RuleBrief(
                     rule_id=rule.id,
+                    name=rule.name,
+                    mode=rule.mode.value,
                     query=rule.condition.query,
                     actions_desc=self._rule_actions_desc(rule),
+                    action_descriptions=list(rule.action_descriptions),
+                    on_enter_desc=rule.on_enter_desc,
+                    on_exit_desc=rule.on_exit_desc,
+                    on_target_desc=rule.on_target_desc,
+                    device_actions=self._rule_device_actions(rule),
+                    editable_desc_slots=self._rule_editable_desc_slots(rule),
                 )
             )
         return TaskFullView(
@@ -107,6 +115,46 @@ class TaskService:
             rule_briefs=rule_briefs,
             cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
         )
+
+    @staticmethod
+    def _rule_editable_desc_slots(rule) -> list[str]:
+        """哪些 agent 文案槽位允许 Web 就地编辑。
+
+        判定与 ``rule/service.py:_validate_rule_consistency`` 的校验矩阵同源:
+        同一槽位的「设备直控」与「agent 文案」互斥, 所以走设备直控的槽位不给编辑
+        (填了也会被 422 挡回来)。放在 backend 算, 前端只管渲染, 免得两边漂移。
+
+        ``on_target_desc`` 只在**已经**有值时才可编辑: 它额外要求任务挂着带
+        ``target_minutes`` 的时长记录, 从零新建的话前端无从判断, 交给 agent 建。
+        """
+        if rule.mode.value == "event":
+            return [] if rule.actions else ["action_descriptions"]
+        slots: list[str] = []
+        if not rule.on_enter_actions:
+            slots.append("on_enter_desc")
+        if not rule.on_exit_actions:
+            slots.append("on_exit_desc")
+        if rule.on_target_desc:
+            slots.append("on_target_desc")
+        return slots
+
+    @staticmethod
+    def _rule_device_actions(rule) -> list[str]:
+        """设备直控动作摘要 (只读展示用)。
+
+        与 ``_rule_actions_desc`` 的差别: 这里**只**收设备动作、不收 agent 文案,
+        因为前端要把两者分开渲染 (文案可编辑, 设备动作只读)。event / state 两模式
+        各按自己的字段路径取, 与 ``_rule_actions_desc`` 的模式分支保持一致。
+        """
+        def _fmt(a) -> str:
+            return f"{a.iid}={a.value if a.value is not None else a.params}"
+
+        if rule.mode.value == "event":
+            return [_fmt(a) for a in rule.actions]
+        out: list[str] = []
+        out.extend(f"on_enter:{_fmt(a)}" for a in rule.on_enter_actions)
+        out.extend(f"on_exit:{_fmt(a)}" for a in rule.on_exit_actions)
+        return out
 
     @staticmethod
     def _rule_actions_desc(rule) -> list[str]:
