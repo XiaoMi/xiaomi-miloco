@@ -763,7 +763,8 @@ export interface TaskRecordSummary {
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 export interface TaskRuleBrief {
   ruleId: string;
-  // 规则名。它与 query 一起进感知模型的 system prompt，是「名称」里唯一真正
+  // 规则名。它与 query 一起进感知调用的「待判断规则」消息（system 之后的独立 user
+  // 消息，见 prompt_builder.py::_assemble_fused_messages），是「名称」里唯一真正
   // 影响命中判定的字段（任务名 task.description 不进模型），故开放编辑。
   // 约定格式 `[<task_id>] <场景描述>`，前缀由 UI 固定、只让改后半段。
   name: string;

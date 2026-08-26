@@ -89,7 +89,7 @@ def _validate_query_phrasing(query: str) -> None:
 def _validate_rule_name_phrasing(name: str) -> None:
     """规则名的断言性措辞校验 —— 与 query 共用同一份禁用前缀表。
 
-    为什么 name 也要管: 它和 query 落在感知 prompt 的**同一行**
+    为什么 name 也要管: 它和 query 落在感知调用的「待判断规则」段的**同一行**
     (``perception/engine/omni/prompt_builder.py::_render_rule_conditions``:
     ``- {rule_name}：{query}``), 断言性措辞的危害与写在 query 里完全一致。
     以前这一处没校验是因为 name 只由 agent 按 skill 约定生成; Web 放开规则名

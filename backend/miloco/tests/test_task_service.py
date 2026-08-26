@@ -188,6 +188,32 @@ def test_rule_brief_state_mode_splits_enter_exit_desc(service):
     assert brief.editable_desc_slots == ["on_enter_desc", "on_exit_desc"]
 
 
+def test_rule_brief_state_mode_device_actions_close_slots(service):
+    """state 模式 + 设备直控: 有直控的方向关掉文案槽, 另一个方向照旧开着。
+
+    这是 editable_desc_slots 最容易写反的分支 —— 校验层里两者按方向互斥,
+    判反的话前端会把只读的设备动作渲染成可编辑输入框。device_actions 的逐条
+    格式也在这里锚住: 与压平的 actions_desc 逐字一致 (state 不带 =value)。
+    """
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    rule = _make_rule_obj(task_id="t1", query="客厅有人")
+    rule.mode = RuleMode.STATE
+    rule.action_descriptions = []
+    rule.on_enter_actions = [
+        RuleAction(did="d1", iid="prop.2.1", value=True, idempotent=True)
+    ]
+    rule.on_exit_desc = "离开时提醒"
+    RuleRepo().create(rule)
+
+    brief = service.get_full_view("t1").rule_briefs[0]
+    assert brief.on_enter_desc is None
+    assert brief.on_exit_desc == "离开时提醒"
+    assert brief.device_actions == ["on_enter:prop.2.1"]
+    assert brief.editable_desc_slots == ["on_exit_desc"]
+    # 浏览态读压平列、编辑态读 device_actions —— 同一个动作不能长两种样子
+    assert "on_enter:prop.2.1" in brief.actions_desc
+
+
 def test_create_task_409_on_duplicate_id(service):
     service.create_task(TaskCreateRequest(task_id="t1", description="d"))
     with pytest.raises(TaskConflict):

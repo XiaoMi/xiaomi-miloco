@@ -65,7 +65,7 @@ class RuleBrief(BaseModel):
     的「设备直控」与「agent 文案」互斥 —— 走设备直控的槽位再填 desc 会被 422 挡下。
     该判定与校验矩阵同源, 放在 backend 才不会两边漂移。
 
-    ``name`` 随 rule 一并回传: 它跟 ``query`` 一起进 omni system prompt
+    ``name`` 随 rule 一并回传: 它跟 ``query`` 一起进感知调用的「待判断规则」消息
     (见 ``perception/engine/api.py`` 装 ``RuleCondition``), 是「名称」里唯一
     真正影响感知判定的字段, 故也开放编辑。
     """

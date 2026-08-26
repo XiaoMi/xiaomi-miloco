@@ -15,7 +15,8 @@
  *    （落库后 backend 会重新装载进 RuleRunner，即时生效）。
  *  - 为什么规则名与意图文案也要能改：任务描述（task.description）根本不进 Agent 的任何
  *    输入通道，改它对 Agent 行为零影响。真正进模型的是「规则名 + 触发条件」（感知
- *    system prompt，见 perception/engine/omni/prompt_builder.py::_render_rule_conditions）
+ *    「待判断规则」消息，system 之后的独立 user 消息，见
+ *    perception/engine/omni/prompt_builder.py::_render_rule_conditions）
  *    与「命中后意图」（命中回调 prompt 的意图段，见 rule/runner.py::_compose_prompt_text）。
  *  - 设备直控动作仍只读：那是结构化 JSON，且同一槽位的设备动作与文案在 backend 校验里
  *    互斥——哪些文案槽位可编辑由后端 editableDescSlots 给出，前端不自己推。
@@ -30,6 +31,7 @@ import {
   updateRule,
   updateTaskDescription,
 } from "@/api";
+import { ApiError } from "@/api/client";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
@@ -307,13 +309,15 @@ function ruleDiff(
   draft: RuleDraft,
 ): TaskRulePatch | null {
   const patch: TaskRulePatch = {};
+  // 两侧都 trim 再比：存量值带首尾空格时，住户只改了 A 字段，B 字段不该被「顺手」
+  // 下发一次纯规范化 PATCH（那会白白吃一次校验 + 热重载）。
   const name = ruleNamePrefix(taskId, rule.name) + draft.nameSuffix.trim();
-  if (draft.nameSuffix.trim() && name !== rule.name) patch.name = name;
+  if (draft.nameSuffix.trim() && name !== rule.name.trim()) patch.name = name;
   const query = draft.query.trim();
-  if (query && query !== rule.query) patch.query = query;
+  if (query && query !== rule.query.trim()) patch.query = query;
   for (const slot of rule.editableDescSlots) {
     const next = draft[slot].trim();
-    if (!next || next === slotText(rule, slot)) continue;
+    if (!next || next === slotText(rule, slot).trim()) continue;
     if (slot === "action_descriptions") {
       patch.actionDescriptions = next
         .split("\n")
@@ -596,7 +600,14 @@ function TaskDetailSheet({
       await onChanged();
       setEditing(false);
     } catch (e) {
-      toast(e instanceof Error ? e.message : t("family.operationFail"), "warn");
+      // 409 = 规则重名。后端那句是英文原文，别直达全中文界面，换成本地化文案。
+      const msg =
+        e instanceof ApiError && e.status === 409
+          ? t("tasks.ruleNameDuplicate")
+          : e instanceof Error
+            ? e.message
+            : t("family.operationFail");
+      toast(msg, "warn");
       // 部分成功：把已落库的拉回来，界面别停在与后端不一致的状态上。
       // 拉回后已保存字段的草稿 === 新值，重试时不会重复提交。
       if (saved > 0) await onChanged();
