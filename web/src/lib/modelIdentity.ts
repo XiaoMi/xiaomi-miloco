@@ -64,5 +64,9 @@ export function shortenUrlSet(
     const out = new Map(uniq.map((u) => [u, shortenUrl(u, n)]));
     if (new Set(out.values()).size === uniq.length) return out;
   }
-  return new Map(uniq.map((u) => [u, u.replace(/^https?:\/\//, "")]));
+  // 兜底返回**原文**（连 scheme 一起）：循环里每一轮都已经做过「去掉 scheme」，
+  // 这里再剥一次不增加任何区分能力。而循环唯一撞到 hardMax 的情形，恰好就是两个
+  // URL 去掉 scheme 后完全相同——同一台机器先后换过是否走 TLS 就会这样——此时
+  // 只有留着 scheme 才分得开。宁可撑宽一列，也不能给出分不出来的两行。
+  return new Map(uniq.map((u) => [u, u]));
 }

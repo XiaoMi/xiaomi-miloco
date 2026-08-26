@@ -313,7 +313,7 @@ function ConfirmUnbindDialog({
             type="button"
             onClick={handleConfirm}
             disabled={busy}
-            className="text-body px-4 py-2 rounded-lg bg-error text-text-inverse hover:brightness-95 disabled:opacity-60 disabled:cursor-not-allowed transition-[filter,opacity]"
+            className="text-body px-4 py-2 rounded-lg bg-error text-white hover:brightness-95 disabled:opacity-60 disabled:cursor-not-allowed transition-[filter,opacity]"
           >
             {busy ? t("account.unbinding") : t("account.unbind")}
           </button>

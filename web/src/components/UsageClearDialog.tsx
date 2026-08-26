@@ -173,7 +173,7 @@ export function UsageClearDialog({
             type="button"
             onClick={doClear}
             disabled={busy}
-            className="text-body px-4 py-2 rounded-lg bg-error text-text-inverse
+            className="text-body px-4 py-2 rounded-lg bg-error text-white
                        hover:brightness-95 disabled:opacity-60 transition-[filter,opacity]"
           >
             {busy ? t("usage.clearing") : t("usage.clearConfirm")}

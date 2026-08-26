@@ -90,13 +90,26 @@ describe("shortenUrlSet", () => {
     expect(new Set(short(shortenUrlSet([a, b], 14))).size).toBe(2);
   });
 
-  it("怎么放宽都分不开时退回原文（去 scheme），绝不给出重复项", () => {
-    // 两个主机名一模一样、只在末段差一个字符，且长度远超 hardMax：
-    // 放宽到上限也压不短，最终退回去掉 scheme 的原文，两行仍要能分辨。
+  it("只差 scheme 的两条：兜底必须留着 scheme，否则永远分不开", () => {
+    // 同一台机器先后换过是否走 TLS——身份键取记录原文，所以库里确实是两行。
+    // 去掉 scheme 后两者完全相同，循环从 max 放宽到 hardMax 每一轮都撞车；
+    // 若兜底再剥一次 scheme，表里就会显示两个一模一样的地址、后面数字却不同。
+    const a = "http://192.168.1.10:8000/v1";
+    const b = "https://192.168.1.10:8000/v1";
+    const m = shortenUrlSet([a, b], 22);
+    expect(new Set(short(m)).size).toBe(2);
+    expect(m.get(a)).toBe(a);
+    expect(m.get(b)).toBe(b);
+  });
+
+  it("主机名极长、只在末段差一个字符：压短后仍可分辨，且不带 scheme", () => {
+    // 尾段被完整保住，所以第一轮预算就已经分得开——走的是循环的正常出口，
+    // 不是兜底（兜底那条由上一个用例覆盖）。
     const base = "https://" + "x".repeat(90);
     const m = shortenUrlSet([base + "/a", base + "/b"], 14);
     expect(new Set(short(m)).size).toBe(2);
     expect(short(m).every((v) => !v.startsWith("https://"))).toBe(true);
+    expect(short(m).every((v) => v.length <= 14)).toBe(true);
   });
 
   it("重复 URL 只算一项，不会因此判定撞车", () => {
