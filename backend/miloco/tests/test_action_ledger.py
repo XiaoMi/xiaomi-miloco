@@ -411,3 +411,63 @@ async def test_no_client_bound_control_still_works(tmp_path):
     req = DeviceControlRequest(type="set_property", iid="prop.2.1", value=True)
     result = await svc.control_device("dev1", req)
     assert "results" in result
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
+    """规则直控场景:台账 source=rule / source_id=rule_id。
+
+    没有这条透传,规则触发的场景在台账里和人工 CLI 触发无法区分,
+    「规则触发 → 实际执行了什么」这条链就是断的。
+    """
+    from miloco.miot.service import _trigger_scene
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    ok = await _trigger_scene(
+        svc._miot_proxy, "scene1", source="rule", source_id="rule-77"
+    )
+    await client.flush()
+
+    assert ok is True
+    r = _rows(obs_db)[0]
+    assert r["action_type"] == "scene_trigger"
+    assert r["source"] == "rule"
+    assert r["source_id"] == "rule-77"
+    # 场景无 did:did/iid 都占 scene_id,与 CLI 触发同一形状
+    assert r["did"] == "scene1"
+    assert r["iid"] == "scene1"
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path):
+    """异常路径也要带 source/source_id——失败的规则动作最需要能回指到规则。"""
+    from miloco.middleware.exceptions import MiotServiceException
+    from miloco.miot.service import _trigger_scene
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.execute_miot_scene = AsyncMock(side_effect=RuntimeError("boom"))
+    with pytest.raises(MiotServiceException):
+        await _trigger_scene(
+            svc._miot_proxy, "scene1", source="rule", source_id="rule-77"
+        )
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert r["source"] == "rule"
+    assert r["source_id"] == "rule-77"
+
+
+@pytest.mark.asyncio
+async def test_miot_service_trigger_scene_stays_source_cli(bound_client, tmp_path):
+    """MiotService.trigger_scene 不传 source → 仍是 cli,存量台账形状不变。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await svc.trigger_scene("scene1")
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["source"] == "cli"
+    assert r["source_id"] is None

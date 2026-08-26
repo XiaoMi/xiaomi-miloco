@@ -32,6 +32,7 @@ from miloco.middleware.exceptions import (
 from miloco.miot.client import MiotProxy
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
+    SCENE_IID,
     Rule,
     RuleExecuteResult,
     RuleLifecycle,
@@ -149,6 +150,13 @@ def _validate_rule_consistency(rule: Rule) -> None:
         ("on_exit_actions", rule.on_exit_actions),
     ):
         for i, a in enumerate(slot_actions):
+            # 场景读不到现值，幂等分支会当场跳过判定直接下发，等于没有去重；
+            # 唯一能限频的手段是冷却，所以这里先把 idempotent=true 挡掉。
+            if a.iid == SCENE_IID and a.idempotent:
+                raise ValidationException(
+                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
+                    f"iid={SCENE_IID} requires idempotent=false"
+                )
             if not a.idempotent and a.cooldown_minutes is None:
                 raise ValidationException(
                     f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "

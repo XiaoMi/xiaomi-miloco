@@ -101,10 +101,20 @@ def aggregate_outcomes(outcomes: Iterable[TriggerOutcome]) -> TriggerOutcome | N
     return max(outcomes, key=lambda o: _OUTCOME_PRIORITY.get(o, -1), default=None)
 
 
+SCENE_IID = "scene"
+"""``iid`` 哨兵值：这条 action 触发一个米家场景，``did`` 位置放 scene_id。
+
+场景没有 siid/aiid 可拆，也读不到现值，所以既不能走 ``prop.``/``action.`` 的
+iid 解析，也没法做幂等比对——只能靠冷却去重。``did`` 借位放 scene_id 与
+``MiotService.trigger_scene`` 落台账的既有做法一致，同时让冷却键
+``(did, iid)`` 能按场景隔离；留空会让同一条规则的多个场景共用一个冷却槽。
+"""
+
+
 class RuleAction(BaseModel):
     """V3 action format (per latest v3-system-overview.md §6.3 / §5.5 Step 4c).
 
-    Two shapes share the same model:
+    Three shapes share the same model:
 
     - **Device control** (idempotent, e.g. light on / set temperature)::
 
@@ -116,19 +126,29 @@ class RuleAction(BaseModel):
           {"did": "<id>", "iid": "action.<siid>.<aiid>", "params": ["<text>"],
            "idempotent": false, "cooldown_minutes": 10}
 
-    The two shapes are distinguished by ``iid`` prefix (``prop.`` vs
-    ``action.``) and by which payload field is set (``value`` vs ``params``).
-    There is no ``type`` field on RuleAction itself.
+    - **Scene trigger** (non-idempotent, must declare a cooldown)::
 
-    Validation note: ``idempotent=False`` requires ``cooldown_minutes``.
-    Service / cli layers enforce this; the schema keeps both fields optional
-    so PATCH-style partial updates are not blocked when only one is sent.
+          {"did": "<scene_id>", "iid": "scene",
+           "idempotent": false, "cooldown_minutes": 5}
+
+    The shapes are distinguished by ``iid`` (``prop.`` / ``action.`` prefix, or
+    the bare ``scene`` sentinel) and by which payload field is set (``value`` /
+    ``params`` / neither). There is no ``type`` field on RuleAction itself.
+
+    Validation note: ``idempotent=False`` requires ``cooldown_minutes``, and
+    ``iid=scene`` requires ``idempotent=False``. Service / cli layers enforce
+    both; the schema keeps the fields optional so PATCH-style partial updates
+    are not blocked when only one is sent.
     """
 
-    did: str = Field(..., description="Device ID")
+    did: str = Field(
+        ..., description="Device ID; scene_id when iid is 'scene'"
+    )
     iid: str = Field(
         ...,
-        description="Property/action iid: prop.{siid}.{piid} or action.{siid}.{aiid}",
+        description=(
+            "prop.{siid}.{piid} / action.{siid}.{aiid} / 'scene' (did=scene_id)"
+        ),
     )
     value: Any = Field(None, description="Property value (for prop.* iid)")
     params: list[Any] | None = Field(

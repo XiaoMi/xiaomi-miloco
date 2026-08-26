@@ -4142,3 +4142,172 @@ class TestRuleRunnerPerDeviceStateIndependence:
         await runner_fast.drain()
         assert mock_miot_proxy.set_device_properties.call_count == 1
 
+
+
+# ---- 场景 action（iid=SCENE_IID，did 位置放 scene_id）----
+
+
+def _make_scene_action(scene_id="scene-1", cooldown=5):
+    from miloco.rule.schema import SCENE_IID
+
+    return RuleAction(
+        did=scene_id, iid=SCENE_IID, idempotent=False, cooldown_minutes=cooldown
+    )
+
+
+class TestRuleRunnerSceneAction:
+    """场景没有 siid/aiid 可拆，必须在 iid 解析之前分流；台账走
+    miot.service._trigger_scene 统一落，source 标 rule。"""
+
+    @pytest.mark.asyncio
+    async def test_scene_action_delegates_with_rule_source(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+
+        result = await runner._execute_action("rule-77", _make_scene_action())
+
+        assert result.result is True
+        assert result.skipped is False
+        assert result.error is None
+        spy.assert_awaited_once()
+        assert spy.await_args.args[1] == "scene-1"
+        assert spy.await_args.kwargs["source"] == "rule"
+        assert spy.await_args.kwargs["source_id"] == "rule-77"
+
+    @pytest.mark.asyncio
+    async def test_scene_action_never_reaches_iid_parsing(self, runner, monkeypatch):
+        """回归钉子：'scene' 拆不出 siid/aiid，走到通用解析必然 invalid_iid。"""
+        from unittest.mock import AsyncMock as _AM
+
+        monkeypatch.setattr(
+            "miloco.miot.service._trigger_scene", _AM(return_value=True)
+        )
+        result = await runner._execute_action("rule-77", _make_scene_action())
+        assert result.error is None or "invalid_iid" not in result.error
+
+    @pytest.mark.asyncio
+    async def test_scene_cooldown_skips_within_window(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        action = _make_scene_action()
+
+        first = await runner._execute_action("rule-cd-scene", action)
+        second = await runner._execute_action("rule-cd-scene", action)
+
+        assert first.skipped is False
+        assert second.skipped is True
+        assert second.result is True
+        assert spy.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_scene_cooldown_isolated_per_scene(self, runner, monkeypatch):
+        """冷却键是 (did, iid)：同规则的两个场景不能互相把对方压掉。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+
+        await runner._execute_action("rule-multi", _make_scene_action("scene-A"))
+        other = await runner._execute_action(
+            "rule-multi", _make_scene_action("scene-B")
+        )
+
+        assert other.skipped is False
+        assert spy.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_scene_failure_reported_and_not_cooled_down(
+        self, runner, monkeypatch
+    ):
+        """执行失败不写冷却，下一次 fire 还能重试。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=False)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        action = _make_scene_action()
+
+        first = await runner._execute_action("rule-fail", action)
+        second = await runner._execute_action("rule-fail", action)
+
+        assert first.result is False
+        assert first.error == "scene_trigger_failed"
+        assert second.skipped is False
+        assert spy.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_scene_exception_reported(self, runner, monkeypatch):
+        """场景不存在 / 不在允许家庭 / SDK 抛错都要落到 execute_result，不吞。"""
+        from unittest.mock import AsyncMock as _AM
+
+        monkeypatch.setattr(
+            "miloco.miot.service._trigger_scene",
+            _AM(side_effect=RuntimeError("scene gone")),
+        )
+        result = await runner._execute_action("rule-exc", _make_scene_action())
+
+        assert result.result is False
+        assert "scene gone" in result.error
+
+
+class TestRuleServiceSceneActionValidation:
+    """场景读不到现值：幂等分支会跳过判定直接下发，等于没有去重。
+    service 层必须逼出 idempotent=false，再由既有校验逼出 cooldown_minutes。"""
+
+    @pytest.mark.asyncio
+    async def test_scene_action_idempotent_true_raises(self, service):
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=True, cooldown_minutes=5
+        )
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(
+            ValidationException,
+            match=r"actions\[0\].*iid=scene requires idempotent=false",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_scene_action_without_cooldown_raises(self, service):
+        bad = RuleAction(did="scene-1", iid="scene", idempotent=False)
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(
+            ValidationException,
+            match=r"actions\[0\].*idempotent=false requires cooldown_minutes",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_scene_action_on_enter_slot_validated(self, service):
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=True, cooldown_minutes=5
+        )
+        rule = _make_state_rule(rule_id="", on_enter_actions=[bad])
+        with pytest.raises(
+            ValidationException,
+            match=r"on_enter_actions\[0\].*iid=scene requires idempotent=false",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_scene_action_valid_passes(self, service):
+        good = _make_scene_action()
+        rule = _make_static_rule(rule_id="", actions=[good])
+        assert await service.create_rule(rule) == "new-rule-id"
+
+    @pytest.mark.asyncio
+    async def test_scene_plus_tts_on_enter_passes(self, service):
+        """本次改动的目标形态：一个方向装两条 action（场景 + 播报）。"""
+        rule = _make_state_rule(
+            rule_id="",
+            on_enter_actions=[
+                _make_scene_action("scene-movie"),
+                RuleAction(
+                    did="speaker", iid="action.7.3", params=["观影模式已就绪"],
+                    idempotent=False, cooldown_minutes=5,
+                ),
+            ],
+        )
+        assert await service.create_rule(rule) == "new-rule-id"

@@ -96,6 +96,8 @@ event 模式只监听 False→True 的翻转，适合"检测到 X 这件事发�
 
 **STATIC 动作两重检查**：执行前做幂等检查（先查当前属性值，已达目标则跳过）和冷却检查（冷却窗口内跳过，适合 TTS 等不宜频繁触发的动作）。`idempotent=false` 的动作必须配 `cooldown_minutes`，service 层在 CRUD 时强制校验。
 
+**STATIC 动作三种形态**：`iid` 决定形态——`prop.<siid>.<piid>` 走属性直控（带 `value`），`action.<siid>.<aiid>` 走 method call（带 `params`，如 TTS），`scene` 触发米家场景（`did` 位置放 scene_id，无 `value`/`params`）。场景读不到当前值，幂等比对无从谈起，所以强制 `idempotent=false` + `cooldown_minutes`，去重只靠冷却；冷却键是 `(did, iid)`，同一条规则里的多个场景互不干扰。场景执行复用 `MiotService` 的家庭白名单校验和场景台账，与 CLI 手动触发落同一形状，仅 `source` 标成 `rule`、`source_id` 写 rule_id。
+
 **query 措辞校验**：`RuleService` 在创建和更新规则时拒绝以"检测到"/"识别到"/"感知到"等断言性词汇开头的 query。这类措辞被注入 Omni prompt 后，VLM 会把 query 当成已发生事实而非待判断条件，导致连续误触发。query 应改写为进行时状态描述（如"有人坐在书房桌前"而非"检测到有人进入书房"）。
 
 ### 如果我要修改规则相关功能

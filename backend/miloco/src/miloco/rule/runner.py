@@ -45,6 +45,7 @@ from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
 from miloco.rule.schema import (
+    SCENE_IID,
     Rule,
     RuleAction,
     RuleActionExecuteResult,
@@ -1361,6 +1362,70 @@ class RuleRunner:
 
     # ---- 设备直控路径（V1 direct dispatch） ----
 
+    def _in_cooldown(self, rule_id: str, action: RuleAction) -> bool:
+        """非幂等 action 是否还在冷却窗内。幂等 action 恒 False（走读现值比对）。"""
+        if action.idempotent or not action.cooldown_minutes:
+            return False
+        rs = self._state.get(rule_id)
+        last_exec = (
+            rs.action_cooldown.get((action.did, action.iid), 0)
+            if rs is not None else 0
+        )
+        if time.time() - last_exec >= action.cooldown_minutes * 60:
+            return False
+        logger.info(
+            "Rule %s action %s %s in cooldown, skipping",
+            rule_id, action.did, action.iid,
+        )
+        return True
+
+    def _mark_cooldown(self, rule_id: str, action: RuleAction) -> None:
+        """执行成功后记冷却起点。未确认成功的执行不能记（否则会静默吞掉重试）。"""
+        if action.idempotent or not action.cooldown_minutes:
+            return
+        self._ensure_state(rule_id).action_cooldown[
+            (action.did, action.iid)
+        ] = time.time()
+
+    async def _execute_scene_action(
+        self, rule_id: str, action: RuleAction
+    ) -> RuleActionExecuteResult:
+        """触发米家场景（``iid`` 为 SCENE_IID，``did`` 位置是 scene_id）。
+
+        场景读不到现值，幂等比对无从谈起，去重只能靠冷却（service 层已强制
+        ``iid=scene`` 必须 ``idempotent=False`` + ``cooldown_minutes``）。台账
+        由 ``miot.service._trigger_scene`` 统一落，与 CLI 触发同一形状，只是
+        ``source`` 标成 rule、``source_id`` 写 rule_id。
+        """
+        if self._in_cooldown(rule_id, action):
+            return RuleActionExecuteResult(
+                action=action, result=True, skipped=True
+            )
+
+        from miloco.miot.service import _trigger_scene
+
+        try:
+            success = await _trigger_scene(
+                self._miot_proxy, action.did, source="rule", source_id=rule_id
+            )
+        except Exception as e:
+            # 场景不存在 / 不在允许的家庭 / SDK 抛错都归到这里；失败详情进
+            # rule_log.execute_result，不吞。
+            logger.error(
+                "Failed to trigger scene %s (rule %s): %s", action.did, rule_id, e
+            )
+            return RuleActionExecuteResult(
+                action=action, result=False, error=f"exception: {e}"
+            )
+
+        if success:
+            self._mark_cooldown(rule_id, action)
+        return RuleActionExecuteResult(
+            action=action,
+            result=success,
+            error=None if success else "scene_trigger_failed",
+        )
+
     async def _execute_action(
         self, rule_id: str, action: RuleAction
     ) -> RuleActionExecuteResult:
@@ -1368,6 +1433,7 @@ class RuleRunner:
 
         Behavior is V1-compatible (per latest v3-system-overview.md §6.3):
 
+        - ``iid == SCENE_IID`` → ``_execute_scene_action``
         - Parse ``iid`` ("prop.<siid>.<piid>" / "action.<siid>.<aiid>")
         - Idempotent path (only meaningful for prop.* + value not None):
           query current value, skip if already at target.
@@ -1378,6 +1444,10 @@ class RuleRunner:
 
         Cooldown state: ``self._state[rule_id].action_cooldown[(did, iid)]``.
         """
+        # 场景没有 siid/aiid 可拆，必须在 iid 解析之前分流。
+        if action.iid == SCENE_IID:
+            return await self._execute_scene_action(rule_id, action)
+
         parts = action.iid.split(".")
         try:
             siid, p_a_id = int(parts[1]), int(parts[2])
@@ -1411,20 +1481,10 @@ class RuleRunner:
                 )
 
         # Cooldown check: non-idempotent actions inside cooldown window are skipped.
-        if not action.idempotent and action.cooldown_minutes:
-            rs = self._state.get(rule_id)
-            last_exec = (
-                rs.action_cooldown.get((action.did, action.iid), 0)
-                if rs is not None else 0
+        if self._in_cooldown(rule_id, action):
+            return RuleActionExecuteResult(
+                action=action, result=True, skipped=True
             )
-            if time.time() - last_exec < action.cooldown_minutes * 60:
-                logger.info(
-                    "Rule %s action %s %s in cooldown, skipping",
-                    rule_id, action.did, action.iid,
-                )
-                return RuleActionExecuteResult(
-                    action=action, result=True, skipped=True
-                )
 
         # Execute. rule static 直控不经 MiotService.control_device,故这里显式落 action_ledger
         # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
@@ -1473,10 +1533,8 @@ class RuleRunner:
                 success=success, error=err, source="rule", source_id=rule_id,
             )
 
-            if success and not action.idempotent and action.cooldown_minutes:
-                self._ensure_state(rule_id).action_cooldown[
-                    (action.did, action.iid)
-                ] = time.time()
+            if success:
+                self._mark_cooldown(rule_id, action)
 
             return RuleActionExecuteResult(
                 action=action, result=success, error=err
