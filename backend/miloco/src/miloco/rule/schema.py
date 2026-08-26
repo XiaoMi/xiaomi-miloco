@@ -112,6 +112,25 @@ iid 解析，也没法做幂等比对——只能靠冷却去重。``did`` 借�
 """
 
 
+def parse_device_iid(iid: str) -> tuple[bool, int, int] | None:
+    """拆 ``prop.<siid>.<piid>`` / ``action.<siid>.<aiid>``。
+
+    返回 ``(是否属性, siid, piid/aiid)``；不是这两种形态（含 ``scene`` 和
+    ``prop.2`` 这类缺段写法）返回 ``None``。CRUD 校验和执行分流共用这一份,
+    两侧判定不会漂移。
+    """
+    is_prop = iid.startswith("prop.")
+    if not is_prop and not iid.startswith("action."):
+        return None
+    parts = iid.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        return is_prop, int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+
+
 class RuleAction(BaseModel):
     """V3 action format (per latest v3-system-overview.md §6.3 / §5.5 Step 4c).
 

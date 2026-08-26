@@ -30,6 +30,7 @@ from miloco.middleware.exceptions import (
     ValidationException,
 )
 from miloco.miot.client import MiotProxy
+from miloco.miot.filter import allowed_home_ids, filter_by_home
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     SCENE_IID,
@@ -41,6 +42,7 @@ from miloco.rule.schema import (
     RuleMode,
     RuleUpdate,
     TriggerOutcome,
+    parse_device_iid,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,6 +152,15 @@ def _validate_rule_consistency(rule: Rule) -> None:
         ("on_exit_actions", rule.on_exit_actions),
     ):
         for i, a in enumerate(slot_actions):
+            # 与 runner._execute_action 同口径:三种形态之外一律拒。少了这道,
+            # `scene.1.2` / `prop.2` 这类写法能建成功,运行期每次 fire 只在
+            # rule_log 里留一条 invalid_iid,规则永远是哑的。
+            if a.iid != SCENE_IID and parse_device_iid(a.iid) is None:
+                raise ValidationException(
+                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): iid must be "
+                    f"'{SCENE_IID}', 'prop.<siid>.<piid>' or "
+                    f"'action.<siid>.<aiid>'"
+                )
             # 幂等分支会跳过判定直接下发,等于没有去重(原因见 SCENE_IID)。
             if a.iid == SCENE_IID and a.idempotent:
                 raise ValidationException(
@@ -281,19 +292,28 @@ class RuleService:
         }
         if not wanted:
             return
-        scenes = (await self._miot_proxy.get_all_scenes()) or {}
+        all_scenes = (await self._miot_proxy.get_all_scenes()) or {}
         # 场景表拿不到(缓存空 + 刷新失败)时别谎报「你的 id 无效」——两种失败
         # 的修法完全不同。
-        if not scenes:
+        if not all_scenes:
             raise ValidationException(
                 "Scene list unavailable (MIoT scene cache is empty); "
                 f"cannot verify scene IDs: {', '.join(sorted(wanted))}"
             )
+        kv_repo = self._miot_proxy._kv_repo
+        if not allowed_home_ids(kv_repo):
+            raise ValidationException(
+                "No home is enabled; enable a home before creating scene actions"
+            )
+        # get_all_scenes 返回账号名下所有家;与其余场景出口(get_miot_scene_list /
+        # get_home_info_data)和执行侧 is_home_allowed 同口径,只认已启用家庭的
+        # 场景——校验放行的,运行期必须真的触发得动。available 也不列白名单外的 id。
+        scenes = filter_by_home(kv_repo, all_scenes)
         invalid = sorted(wanted - set(scenes))
         if invalid:
             raise ValidationException(
-                f"Invalid scene IDs: {', '.join(invalid)}; "
-                f"available: {', '.join(sorted(scenes))}"
+                f"Invalid or not-allowed scene IDs: {', '.join(invalid)}; "
+                f"available: {', '.join(sorted(scenes)) or '(none)'}"
             )
 
     def _fill_default_duration_ratio(self, rule: Rule) -> None:

@@ -9,9 +9,11 @@ import asyncio
 import json
 import re
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from miloco.database.kv_repo import ScopeConfigKeys
 from miloco.middleware.exceptions import (
     BusinessException,
     ConflictException,
@@ -143,6 +145,9 @@ def _make_state_rule(
 TRIGGER_CONTEXT = "cam-001 检测到有人经过"
 
 # mock 的米家场景表：场景动作的 did 要在这里面，否则建规则时被存在性校验拦下。
+# 场景校验会按家庭白名单过滤，所以桩要带 home_id、KV 里也要有对应的白名单。
+MOCK_HOME_ID = "home-1"
+SCENE_IID_LITERAL = "scene"
 MOCK_SCENES = ("scene-1", "scene-A", "scene-B", "scene-movie", "scene-real")
 
 
@@ -157,7 +162,17 @@ def mock_miot_proxy():
     proxy.set_device_properties = AsyncMock(return_value=[{"code": 0}])
     proxy.call_device_action = AsyncMock(return_value={"code": 0})
     proxy.get_all_scenes = AsyncMock(
-        return_value={sid: object() for sid in MOCK_SCENES}
+        return_value={
+            sid: SimpleNamespace(home_id=MOCK_HOME_ID, scene_name=f"mock-{sid}")
+            for sid in MOCK_SCENES
+        }
+    )
+    proxy._kv_repo.get = MagicMock(
+        side_effect=lambda key, default=None: (
+            f'["{MOCK_HOME_ID}"]'
+            if key == ScopeConfigKeys.HOME_WHITE_LIST_KEY
+            else default
+        )
     )
     return proxy
 
@@ -4359,7 +4374,7 @@ class TestRuleServiceSceneIdExistence:
         rule = _make_static_rule(
             rule_id="", actions=[_make_scene_action("scene-typo")]
         )
-        with pytest.raises(ValidationException, match=r"Invalid scene IDs: scene-typo"):
+        with pytest.raises(ValidationException, match=r"Invalid or not-allowed scene IDs: scene-typo"):
             await service.create_rule(rule)
 
     @pytest.mark.asyncio
@@ -4387,7 +4402,7 @@ class TestRuleServiceSceneIdExistence:
         from miloco.rule.schema import RuleUpdate
 
         mock_rule_repo.get_by_id = MagicMock(return_value=_make_static_rule())
-        with pytest.raises(ValidationException, match=r"Invalid scene IDs: scene-typo"):
+        with pytest.raises(ValidationException, match=r"Invalid or not-allowed scene IDs: scene-typo"):
             await service.patch_rule(
                 "rule-1",
                 RuleUpdate(actions=[_make_scene_action("scene-typo")]),
@@ -4404,3 +4419,72 @@ class TestRuleServiceSceneIdExistence:
         mock_miot_proxy.get_all_scenes = spy
         await service.create_rule(_make_static_rule(rule_id=""))
         spy.assert_not_awaited()
+
+
+class TestRuleServiceSceneHomeScope:
+    """场景校验必须与执行侧 is_home_allowed 同口径：校验放行的，运行期要真触发得动。
+    `get_all_scenes` 返回账号名下所有家，不过滤会让白名单外的场景建成功后每次 fire 都失败。"""
+
+    @pytest.mark.asyncio
+    async def test_scene_from_other_home_rejected(self, service, mock_miot_proxy):
+        mock_miot_proxy.get_all_scenes = AsyncMock(
+            return_value={
+                "scene-other": SimpleNamespace(home_id="home-2", scene_name="他家")
+            }
+        )
+        rule = _make_static_rule(
+            rule_id="", actions=[_make_scene_action("scene-other")]
+        )
+        with pytest.raises(
+            ValidationException, match=r"Invalid or not-allowed scene IDs: scene-other"
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_other_home_scene_ids_not_leaked_in_error(
+        self, service, mock_miot_proxy
+    ):
+        """报错串不该把白名单外的 scene_id 列给调用方——那些 id 在 scene list 里看不到。"""
+        mock_miot_proxy.get_all_scenes = AsyncMock(
+            return_value={
+                "scene-1": SimpleNamespace(home_id=MOCK_HOME_ID, scene_name="本家"),
+                "secret-other-home": SimpleNamespace(home_id="home-2", scene_name="他家"),
+            }
+        )
+        rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-typo")])
+        with pytest.raises(ValidationException) as exc:
+            await service.create_rule(rule)
+        assert "secret-other-home" not in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_no_home_enabled_says_so(self, service, mock_miot_proxy):
+        """未选家时白名单为空，任何场景都触发不了；创建期就说清楚。"""
+        mock_miot_proxy._kv_repo.get = MagicMock(return_value=None)
+        rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-1")])
+        with pytest.raises(ValidationException, match=r"No home is enabled"):
+            await service.create_rule(rule)
+
+
+class TestRuleServiceIidShape:
+    """iid 形态在 CRUD 层就要挡。执行侧白名单只会让规则静默哑掉，
+    调用方拿到的仍是「创建成功」。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_iid", ["scene.1.2", "scenes", "Scene", "prop.2",
+                                         "action.1.2.3", "prop.a.b"])
+    async def test_malformed_iid_rejected(self, service, bad_iid):
+        bad = RuleAction(did="d1", iid=bad_iid, value=True)
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(ValidationException, match=r"iid must be"):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("good_iid", ["prop.2.1", "action.7.3", "scene"])
+    async def test_valid_iid_shapes_pass(self, service, good_iid):
+        a = (
+            _make_scene_action("scene-1")
+            if good_iid == SCENE_IID_LITERAL
+            else RuleAction(did="d1", iid=good_iid, value=True)
+        )
+        rule = _make_static_rule(rule_id="", actions=[a])
+        assert await service.create_rule(rule) == "new-rule-id"

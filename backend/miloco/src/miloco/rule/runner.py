@@ -56,6 +56,7 @@ from miloco.rule.schema import (
     RuleMode,
     RuleTriggerCallback,
     TriggerOutcome,
+    parse_device_iid,
 )
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
@@ -1461,24 +1462,15 @@ class RuleRunner:
         if action.iid == SCENE_IID:
             return await self._execute_scene_action(rule_id, action)
 
-        # 三种形态之外一律报错。少了这道，`scene.1.2` 会被当成 call_action，
-        # 拿 scene_id 当 did 发出去——不崩，但静默做错事。
-        if not action.iid.startswith(("prop.", "action.")):
-            logger.error("Unsupported iid format '%s'", action.iid)
+        # 白名单式判定：三种形态之外一律报错。少了这道，`scene.1.2` 会掉进
+        # 「不是 prop. 就当 action.」的兜底，拿 scene_id 当 did 发出去。
+        parsed = parse_device_iid(action.iid)
+        if parsed is None:
+            logger.error("Invalid iid format '%s'", action.iid)
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"invalid_iid: {action.iid}"
             )
-
-        parts = action.iid.split(".")
-        try:
-            siid, p_a_id = int(parts[1]), int(parts[2])
-        except (IndexError, ValueError) as e:
-            logger.error("Invalid iid format '%s': %s", action.iid, e)
-            return RuleActionExecuteResult(
-                action=action, result=False, error=f"invalid_iid: {action.iid}"
-            )
-
-        is_prop = action.iid.startswith("prop.")
+        is_prop, siid, p_a_id = parsed
 
         # Idempotent check: query current state, skip if already at target.
         if action.idempotent and is_prop and action.value is not None:
