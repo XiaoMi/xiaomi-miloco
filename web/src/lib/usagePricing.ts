@@ -17,7 +17,9 @@
  *    那样 video / audio 会被收两遍（实测多算 34%）。
  * 2. **缓存命中要单独计价**。cache ⊆ input，服务商对命中部分基本都打折，而折扣往往很深：
  *    MiMo v2.5 的命中价是未命中价的 1/50。实机实测（命中占输入 49.2%）下，按原价算
- *    会把费用高估 87%。命中价没低于输入价时，设置弹窗会直接把高估幅度算给用户看。
+ *    会把费用高估 87%。命中价没低于输入价时，设置弹窗会点出本周期的命中占比作为提醒；
+ *    刻意不给「会高估多少」——那个数要拿一个**假定的**服务商折扣才算得出来，拿住户
+ *    自己填的这份没打折的价当基准算出来恒等于 0（判据见 cacheLooksUndiscounted）。
  *
  * ⚠️ 第三条：**没有录过价就按 0 算，并把是哪些模型点出来**。绝不能拿编出来的占位价充数——
  *    那会让一个从没设过价的模型也显示出像样的金额，与真按住户单价算出来的数无从分辨。
@@ -415,7 +417,6 @@ export function cacheLooksUndiscounted(pr: ModelPricing): boolean {
   return base > 0 && pr.cache >= base * 0.95;
 }
 
-
 // ── 持久化（localStorage，与 web:theme / web:lang 同一套路）──────────
 // 不进后端：这是「本机的估算设置」，且免掉一轮读写端点。将来若要跟着模型档案
 // 跨设备同步，再搬进 config.json 的 omni profile。
@@ -442,7 +443,8 @@ export function mergeEditedPricing(
     const pr = draft.byModel[m];
     if (pr) byModel[m] = pr;
   }
-  // currency / per 跟草稿走：它们是整表级设置，弹窗里就能改
+  // 货币跟草稿走：它是整表级设置，弹窗里能改。计价基数（per）不在其列——
+  // 它是常量、没有编辑入口、也不入存储，改它不需要迁移存量数据。
   return { ...draft, byModel };
 }
 
