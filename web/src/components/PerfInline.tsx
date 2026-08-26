@@ -10,7 +10,7 @@
  * 开关状态与主题/语言同一套路持久化到 localStorage。
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   getPerfGatePassRate,
@@ -61,11 +61,25 @@ export function PerfInline() {
     gate.reload();
   };
 
-  // 自动刷新；窗口或周期变化都重置 timer。
+  // reloadAll 每次渲染都是新函数；用 ref 持住最新那份，effect 只跟窗口与周期走，
+  // 否则定时器会被逐帧重建。
+  const reloadRef = useRef(reloadAll);
+  reloadRef.current = reloadAll;
+
+  // 自动刷新 + 回到前台补一次；窗口或周期变化都重置 timer。
+  // 补那一次与用量卡同一个理由：后台标签页的定时器会被节流乃至冻结，切回前台时
+  // 不补就要等下一个周期到点——两张卡并排显示同一句「更新于」，周期设得大时
+  // 会看到一个刚刷新、一个是几十分钟前的值，而后者正是用来判断感知跟不跟得上的。
   useEffect(() => {
-    const id = setInterval(reloadAll, refreshSec * 1000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const id = setInterval(() => reloadRef.current(), refreshSec * 1000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") reloadRef.current();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [windowKey, refreshSec]);
 
   const toolbar = (

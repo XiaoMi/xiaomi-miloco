@@ -16,7 +16,8 @@ import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
 import type { TokenBreakdown, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
-import { costInputOf, estimateCost, pricingFor, type UsagePricing } from "@/lib/usagePricing";
+import { costInputOf,
+  moneyDigits, estimateCost, pricingFor, type UsagePricing } from "@/lib/usagePricing";
 import { shortenUrlSet } from "@/lib/modelIdentity";
 import { UsageUrlChip } from "./UsageUrlChip";
 import { UsageClearMenu, type ClearScope } from "./UsageClearMenu";
@@ -86,7 +87,7 @@ export function UsageBreakdownTable({
     22,
   );
   const money = (v: number) =>
-    pricing.currency + (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+    pricing.currency + moneyDigits(v);
 
   /**
    * 清除气泡标题里的作用域徽记：文字与框线跟模型列一致，但**不可交互**——

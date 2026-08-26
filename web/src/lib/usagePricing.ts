@@ -87,6 +87,15 @@ export interface CostResult {
   parts: CostPart[];
 }
 
+/**
+ * 金额的显示位数：越大越少小数位。四个显示位（总览、明细行、时间分布浮层、单价弹窗）
+ * 共用一份——各写一遍的话，同一笔钱在不同位置的位数就可能不一致，而它们经常同屏出现。
+ * 只出数字，货币符号由调用方拼（弹窗用的是草稿里的符号，不一定等于已存的那个）。
+ */
+export function moneyDigits(v: number): string {
+  return v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+}
+
 export const PER_MTOKENS = 1_000_000;
 
 /** 把 TokenBreakdown 形态折成计价用的拆分（残差规则见 usageTokens.textResidual）。 */

@@ -22,6 +22,7 @@ import {
   costInputsByTarget,
   costPerModelFromTargets,
   mergeEditedPricing,
+  moneyDigits,
   knownPricingFor,
   pricingSourceFor,
   seedPricingFor,
@@ -92,7 +93,7 @@ export function UsagePricingDialog({
   const perModel = models.map((m) => ({ model: m, total: perModelCost.get(m) ?? 0 }));
   const grandTotal = perModel.reduce((a, x) => a + x.total, 0);
   const money = (v: number) =>
-    draft.currency + (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+    draft.currency + moneyDigits(v);
 
   const ci = sel ? byModel.get(sel) : undefined;
   const cacheShare =

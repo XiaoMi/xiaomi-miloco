@@ -12,6 +12,7 @@ import {
   costInputsByModel,
   costInputsByTarget,
   costOfTimelinePoint,
+  moneyDigits,
   costPerModelFromTargets,
   mergeEditedPricing,
   EMPTY_MODEL_PRICING,
@@ -618,5 +619,21 @@ describe("costPerModelFromTargets（弹窗预览与顶部合计同一把键）",
     const sum = [...costPerModelFromTargets(targets, p).values()].reduce((a, b) => a + b, 0);
     expect(sum).toBe(0);
     expect(summarizeCost(targets, p).total).toBe(0);
+  });
+});
+
+
+describe("moneyDigits（四个显示位共用的位数阶梯）", () => {
+  it("越大越少小数位，边界取闭区间的下界", () => {
+    expect(moneyDigits(0)).toBe("0.00");
+    expect(moneyDigits(9.994)).toBe("9.99");
+    expect(moneyDigits(10)).toBe("10.0");
+    expect(moneyDigits(99.94)).toBe("99.9");
+    expect(moneyDigits(100)).toBe("100");
+    expect(moneyDigits(1234.6)).toBe("1235");
+  });
+
+  it("不带货币符号——弹窗用的是草稿里的符号，不一定等于已存的那个", () => {
+    expect(moneyDigits(12.3)).not.toContain("¥");
   });
 });

@@ -25,6 +25,7 @@ import type { UsagePeriod, UsageStats, UsageTimelinePoint } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
 import {
   costOfTimelinePoint,
+  moneyDigits,
   loadPricing,
   savePricing,
   type UsagePricing,
@@ -111,8 +112,7 @@ export function UsagePage() {
       // 仍带 ≈ 前缀：单价是住户填的估算依据，不是服务商账单。
       const v = costOfTimelinePoint(p, pricing);
       if (v == null) return null;
-      const n = v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
-      return `≈ ${pricing.currency}${n}`;
+      return `≈ ${pricing.currency}${moneyDigits(v)}`;
     },
     [pricing],
   );

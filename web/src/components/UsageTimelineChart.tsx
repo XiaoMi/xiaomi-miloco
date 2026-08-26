@@ -125,10 +125,23 @@ export function UsageTimelineChart({
     [n],
   );
 
+  /**
+   * 这次聚焦是指针带来的吗。
+   *
+   * 整条绘图区既可聚焦又收指针事件（命中按最近桶算，不用逐柱 hit-box——细粒度下柱宽
+   * 只剩几像素、逐柱会有死区），于是「点一下」同时点着两条读数入口，而它们抢同一个
+   * activeIdx。浏览器在 mousedown 上授予焦点，而 mousedown 排在 pointerdown 之后，
+   * 不闸住的话 onFocus 会把刚命中的桶改写成峰值桶。触屏更糟：兼容鼠标事件攒到抬指
+   * 之后才补发，排在 pointerleave 后面，「点一下」的净效果是
+   * pick(命中) → pick(null) → pick(峰值)，而触屏没有 pointermove 来纠正。
+   */
+  const fromPointer = useRef(false);
+
   const onPointer = (e: ReactPointerEvent<HTMLDivElement>) => {
     const node = barsRef.current;
     if (!node || n === 0) return;
     const r = node.getBoundingClientRect();
+    fromPointer.current = true;
     pick(Math.floor(((e.clientX - r.left) / r.width) * n));
   };
 
@@ -235,9 +248,23 @@ export function UsageTimelineChart({
             })}
             onPointerMove={onPointer}
             onPointerDown={onPointer}
-            onPointerLeave={() => pick(null)}
-            onFocus={() => pick(peakIdx)}
-            onBlur={() => pick(null)}
+            // 只有鼠标真的移出去才清空：触屏抬指后必发 pointerleave，
+            // 而那一桶正是用户要读的数，且没有第二次机会把它选回来。
+            onPointerLeave={(e) => {
+              if (e.pointerType !== "mouse") return;
+              fromPointer.current = false;
+              pick(null);
+            }}
+            // 指针带来的焦点：命中的桶已经算好了，别覆盖。只有 Tab 进来
+            // （此时没有任何指针交互跑过）才落到峰值桶当键盘起点。
+            onFocus={() => {
+              if (fromPointer.current) return;
+              pick(peakIdx);
+            }}
+            onBlur={() => {
+              fromPointer.current = false;
+              pick(null);
+            }}
             onKeyDown={onKeyDown}
             className="relative flex items-end rounded outline-none
                        focus-visible:outline focus-visible:outline-2

@@ -17,7 +17,12 @@ import { useTranslation } from "react-i18next";
 import type { TokenBreakdown, UsagePeriod, UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
 import { textResidual } from "@/lib/usageTokens";
-import { costInputsByTarget, summarizeCost, type UsagePricing } from "@/lib/usagePricing";
+import {
+  costInputsByTarget,
+  moneyDigits,
+  summarizeCost,
+  type UsagePricing,
+} from "@/lib/usagePricing";
 import { HelpTip } from "./HelpTip";
 
 /** 与工具条的周期选择器同一套文案键，别在两处各写一份。 */
@@ -93,7 +98,7 @@ export function UsageTodayOverview({
     pricing,
   );
   const money =
-    pricing.currency + (cost >= 100 ? cost.toFixed(0) : cost >= 10 ? cost.toFixed(1) : cost.toFixed(2));
+    pricing.currency + moneyDigits(cost);
   /**
    * 有模型没录过价 → 金额照显示（那部分按 0 计），但把说明图标换成叹号并点名是谁。
    *
