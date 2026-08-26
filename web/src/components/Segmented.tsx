@@ -1,4 +1,4 @@
-/** 通用分段控件（tab 风格）。用于用量页的周期切换与时间粒度切换。 */
+/** 通用分段控件（tab 风格）。用量页的周期、时间粒度、图表着色口径，以及顶栏语言切换都用它。 */
 export function Segmented<T extends string | number>({
   options,
   value,

@@ -7,7 +7,7 @@ Covers the load-bearing edge cases of the cold-storage path:
 
 - 早退（无旧数据）：fast SELECT 1 LIMIT 1 命中 None → 不开事务
 - cutoff 按本地日 00:00 对齐：(today - N) 当天的数据保留在 raw，不被劈裂
-- ON CONFLICT 累加：同 (date, model, type) 多次 rollup 不重复，度量字段累加
+- ON CONFLICT 累加：同 (date, model, base_url, type) 多次 rollup 不重复，度量字段累加
 - 多 (model, type) 维度：一次 rollup 产生多行 daily
 - 所有 modality 列（input/output/cache/video/audio）一起 SUM 入 daily
 - rollup 后 raw 被 DELETE
@@ -172,7 +172,11 @@ def test_cutoff_is_day_aligned(repo):
 
 
 def test_on_conflict_accumulates_when_run_twice(repo):
-    """同一 (date, model, type) 多次 rollup → daily 行被 UPDATE 累加，不重复插入。"""
+    """同一 (date, model, base_url, type) 多次 rollup → daily 行被 UPDATE 累加，不重复插入。
+
+    本用例只出一行，是因为两次都不传 base_url、落在同一个默认空串上（即同一个四元组）；
+    跨 endpoint 不会合并，那条由 test_token_usage_base_url_migration 钉着。
+    """
     today = date.today()
     old = today - timedelta(days=5)
 

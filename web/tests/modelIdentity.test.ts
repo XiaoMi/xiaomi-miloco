@@ -30,7 +30,8 @@ describe("shortenUrl", () => {
   });
 
   it("**同名两行截完必须还能分辨** —— 这是整个函数存在的理由", () => {
-    // 这四组是实测撞车过的组合：直接截尾在这里会把两行截成完全一样。
+    // 三对 URL × 四个上限。其中 LONG_A/LONG_B 在四个上限下直接截尾都会撞成同一串，
+    // A/B 在 14、18 撞——这正是「按固定规则逐个截」不够用的地方。
     for (const n of [14, 18, 22, 28]) {
       expect(shortenUrl(A, n), `A/B 上限 ${n}`).not.toBe(shortenUrl(B, n));
       expect(shortenUrl(A, n), `A/C 上限 ${n}`).not.toBe(shortenUrl(C, n));
@@ -90,7 +91,8 @@ describe("shortenUrlSet", () => {
   });
 
   it("怎么放宽都分不开时退回原文（去 scheme），绝不给出重复项", () => {
-    // 构造两个只在极深处差一个字符、且超过 hardMax 的 URL
+    // 两个主机名一模一样、只在末段差一个字符，且长度远超 hardMax：
+    // 放宽到上限也压不短，最终退回去掉 scheme 的原文，两行仍要能分辨。
     const base = "https://" + "x".repeat(90);
     const m = shortenUrlSet([base + "/a", base + "/b"], 14);
     expect(new Set(short(m)).size).toBe(2);

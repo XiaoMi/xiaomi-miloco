@@ -325,7 +325,7 @@ export type HomeId = string;
 // ── 用量统计（📊 用量 tab）─────────────────────────────────────
 // 数据来自 backend admin token-usage 接口（仅 omni/MiMo 调用有计费）：
 //   today      → GET /api/admin/token-usage/buckets  （服务端按桶聚合）
-//   week/month → GET /api/admin/token-usage/daily     （按 date/model/type 聚合）
+//   week/month → GET /api/admin/token-usage/daily     （按 date/model/base_url/type 聚合）
 // 客户端在 src/api/real.ts::realGetUsageStats 里折算成下面的结构。
 // 注意：video/audio/cache 都是 input 的子集（不叠加）；总量 = input + output。
 
@@ -358,7 +358,7 @@ export interface UsageGroup {
   breakdown: TokenBreakdown;
 }
 
-/** 明细表的一行：model × type 组合。 */
+/** 明细表的一行：模型名 × endpoint × 调用类型。同名模型挂两个 endpoint 会各占一行。 */
 export interface UsageRow {
   model: string;
   /**
@@ -386,7 +386,7 @@ export interface UsageStats {
   totals: TokenBreakdown;
   /** 按调用类型聚合（realtime / on_demand），按 tokens 降序。 */
   by_type: UsageGroup[];
-  /** model × type 明细行，按 tokens 降序。 */
+  /** 明细行，键为「模型名 + endpoint + 调用类型」，按模型名与 endpoint 排序。 */
   rows: UsageRow[];
   /**
    * 时间序列。today 桶数随 bin 粒度变化（15分=96 / 1时=24 / 3小时=8，默认 1 时）且铺满整天；
@@ -395,16 +395,6 @@ export interface UsageStats {
   timeline: UsageTimelinePoint[];
 }
 
-/**
- * 时间序列的一个桶。除总量外还带**分模态拆分**，供时间分布图按模态堆叠——
- * 后端的 bucket / daily 行本来就带 video / audio / cache 列，这里只是别在
- * 前端把它们加成一个总数就丢掉。
- *
- * 口径与 TokenBreakdown 一致：video / audio / cache 都是 input 的子集，
- * `text` 是 `input − video − audio` 的**残差**——它不只有文本，还含图片
- * （gallery / 参考帧的 image 块，后端未单列该模态）与系统提示。
- * 总量口径 tokens = (text + video + audio) + output = input + output。
- */
 /**
  * 一个桶里、某个「模型名 + endpoint」的用量拆分。
  *
@@ -424,6 +414,16 @@ export interface UsageTimelineTarget {
   cache: number;
 }
 
+/**
+ * 时间序列的一个桶。除总量外还带**分模态拆分**，供时间分布图按模态堆叠——
+ * 后端的 bucket / daily 行本来就带 video / audio / cache 列，这里只是别在
+ * 前端把它们加成一个总数就丢掉。
+ *
+ * 口径与 TokenBreakdown 一致：video / audio / cache 都是 input 的子集，
+ * `text` 是 `input − video − audio` 的**残差**——它不只有文本，还含图片
+ * （gallery / 参考帧的 image 块，后端未单列该模态）与系统提示。
+ * 总量口径 tokens = (text + video + audio) + output = input + output。
+ */
 export interface UsageTimelinePoint {
   ts: string;
   /** input + output。 */

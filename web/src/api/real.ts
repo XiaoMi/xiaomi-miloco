@@ -1587,10 +1587,10 @@ export async function realResumePerception(): Promise<void> {
 // ── Token 用量统计（用量 tab）─────────────────────────────────
 // 数据全部来自 omni/MiMo 计费。backend 两个接口：
 //   today      → /api/admin/token-usage/buckets  服务端按桶聚合（bin 分钟粒度）
-//   week/month → /api/admin/token-usage/daily    按 date/model/type 聚合（滚动近 N 天）
+//   week/month → /api/admin/token-usage/daily    按 date/model/base_url/type 聚合（滚动近 N 天）
 // 这里把两种形态都归一成 Unit[] 再折算成 UsageStats。
 
-// today：服务端已按 (时间桶 × model × type) 聚合，每行是一个桶的小计。
+// today：服务端已按 (时间桶 × model × base_url × type) 聚合，每行是一个桶的小计。
 interface BucketRow {
   bucket_ms: number; // 桶起始 ms epoch
   model: string;
@@ -1759,7 +1759,7 @@ function dailyTimeline(
   return out;
 }
 
-/** Unit[] → UsageStats：汇总 totals、按调用类型聚合、按 model×type 出明细行。 */
+/** Unit[] → UsageStats：汇总 totals、按调用类型聚合、按「模型名 + endpoint + 类型」出明细行。 */
 function unitsToStats(
   period: UsagePeriod,
   units: UsageUnit[],
@@ -1867,8 +1867,9 @@ function rowToUnit(d: DailyRow): UsageUnit {
   return { ...d };
 }
 
-// 请求级缓存：UsagePage 与 UsageTimelineChart 在挂载同一 tick 各打一次 today，
-// 按 (period, bin) 合并并发请求 + 5s TTL，避免重复打较重的 token-usage 接口（同 fetchMiotHome 思路）。
+// 请求级缓存：按 (period, bin) 合并并发请求 + 5s TTL，避免重复打较重的 token-usage
+// 接口（同 fetchMiotHome 思路）。取数现在只有 UsagePage 一处，缓存留着挡住「切周期
+// 来回点」与自动刷新撞上手动刷新这类同一 tick 的重复请求。
 const usageCache = new Map<string, { ts: number; p: Promise<UsageStats> }>();
 const USAGE_TTL_MS = 5000;
 
@@ -1892,7 +1893,8 @@ export function realGetUsageStats(
   return p;
 }
 
-// 清空全部用量数据（实时表 + 日聚合）。清完顺手失效请求级缓存，确保下次取到空。
+// 清除用量数据（实时表 + 日聚合），范围由 opts 决定：可限时间、可限「模型名 + endpoint」，
+// 都不给才是全清。清完顺手失效请求级缓存，确保下次取到的是删后的数。
 export async function realClearUsageData(
   opts: {
     sinceMs?: number | null;

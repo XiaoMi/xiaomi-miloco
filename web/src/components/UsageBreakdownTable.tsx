@@ -1,5 +1,6 @@
 /**
- * 明细表:按**模型**一行(合并实时/用户两类调用),列出 调用次数 / 各模态 token / 费用估算。
+ * 明细表:按**模型名 + endpoint** 一行(合并实时/用户两类调用),列出 调用次数 / 各模态
+ * token / 费用估算。同一个模型名挂在两个 endpoint 上会分成两行。
  * 数据来自 backend omni 计费(cache/video/audio 均为 input 的子集)。
  *
  * 费用按行算而不是只给一个总数:单价是按模型存的,多模型时只有落到行上才对得起账。
@@ -29,7 +30,6 @@ interface ModelRow {
   breakdown: TokenBreakdown;
 }
 
-/** 把 model×type 明细行按模型合并(累加调用数与各模态),模型名升序。 */
 /**
  * 折成明细行。按 **(model, base_url)** 分组，不是只按 model——
  * 模型身份是这两者的组合，只按模型名分会把两个 endpoint 的用量合回一行，

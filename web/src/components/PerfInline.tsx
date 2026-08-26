@@ -108,7 +108,8 @@ export function PerfInline() {
   // 且与 KPI 卡里同名那格用同一个字段与同一条越界判据（>1 表示比实时慢），不另立标准。
   //
   // 上色口径对齐两处既有约定：常态整串 text-text-secondary，与 Token 用量的收起摘要一致；
-  // 越界时**只有数值**变色、且用 text-error，与 KPI 卡一致（此前整串染黄，两处都不合）。
+  // 越界时**只有数值**变色、且用 text-error，与 KPI 卡一致——整串染色会让这行摘要在
+  // 一排卡头里过分抢眼，而它只是个参考值。
   const omniP95 = summary.data?.p95_rtf_omni;
   const collapsedSummary =
     omniP95 == null ? undefined : (
@@ -120,8 +121,8 @@ export function PerfInline() {
       </span>
     );
 
-  // 数据新鲜度：与 Token 用量同样放在标题行（展开/收起都显示）。取三路里最后落地的时刻——
-  // 三个接口各自返回，谁最后到就是这张卡真正"齐了"的时间。
+  // 数据新鲜度：与 Token 用量同样放在标题行（展开/收起都显示）。三路接口各自返回，
+  // 任意一路落地就把时刻推到当下——它回答的是「这张卡的数有多新」，不是「三路都齐了」。
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   useEffect(() => {
     if (summary.data || rtf.data || gate.data) setUpdatedAt(new Date());

@@ -103,8 +103,8 @@
    *   title      16px  卡片 & dialog 标题 / nav label / 列表主字
    *   display    24px  Hero 数字 / 醒目计数
    *   display-lg 32px  Usage Hero(极少用,单页一处)
-   *   page-title 20px  备用大字号(2026-05 起 TopBar 家名已切回 text-body+semibold;
-   *                    此 token 暂无引用,保留作黄金阶梯外的 20px 档备用)
+   *   page-title 20px  黄金阶梯外的 20px 档(2026-05 起 TopBar 家名已切回
+   *                    text-body+semibold; 现由 .text-section-title 与 .text-page-title 引用)
    */
   --font-size-caption:    12px;
   --font-size-body:       14px;

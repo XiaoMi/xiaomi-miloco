@@ -243,7 +243,7 @@ class TokenUsageRepo:
         (time bucket, model, base_url, type). ``bin_minutes`` is the bucket width.
 
         base_url 也要进 GROUP BY：「今日」视图的明细行是从这个接口来的（week/month
-        走 aggregate_daily），漏了它会导致今日能按 endpoint 分、近 7 天不能。
+        走 aggregate_daily），漏了它坏的正是「今日」——近 7 天走 aggregate_daily，那边自己的 GROUP BY 带着 base_url、照样分得出。
 
         Used by the "today" view: the response size is bounded by bucket count
         (≈ day / bin × models × types), not by event count, so it never hits the

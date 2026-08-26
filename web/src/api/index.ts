@@ -515,7 +515,7 @@ export async function getUsageStats(
   return impl.realGetUsageStats(period, binMinutes);
 }
 
-// 清空全部用量数据（实时表 + 日聚合，不可恢复）
+// 清除用量数据（实时表 + 日聚合，不可恢复）。范围由 opts 决定，都不给才是全清。
 export async function clearUsageData(
   opts: {
     sinceMs?: number | null;

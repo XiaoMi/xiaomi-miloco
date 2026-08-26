@@ -610,7 +610,7 @@ async def get_token_usage(
 
 @router.get(
     "/token-usage/daily",
-    summary="Token Usage (daily rollup by date / model / type)",
+    summary="Token Usage (daily rollup by date / model / base_url / type)",
     response_model=NormalResponse,
 )
 async def get_token_usage_daily(
@@ -618,14 +618,17 @@ async def get_token_usage_daily(
     until: str | None = None,
     current_user: str = Depends(verify_token),
 ):
-    """Daily rollup rows (date / model / type) combining historical + today's live."""
+    """Daily rollup rows (date / model / base_url / type) combining historical + today's live.
+
+    模型身份是「模型名 + base_url」：同一个模型名挂在两个 endpoint 上会各返回一行。
+    """
     rows = get_token_usage_repo().aggregate_daily(since, until)
     return NormalResponse(code=0, message="ok", data={"rows": rows, "total": len(rows)})
 
 
 @router.get(
     "/token-usage/buckets",
-    summary="Token Usage (today, server-side bucketed by time / model / type)",
+    summary="Token Usage (today, bucketed by time / model / base_url / type)",
     response_model=NormalResponse,
 )
 async def get_token_usage_buckets(
@@ -674,8 +677,10 @@ def clear_token_usage(
 ):
     """删除 token_usage + token_usage_daily 中符合条件的行（条件间为 AND）。
 
-    body 省略或 ``since_ms=null`` 时全清——**保持与老客户端的兼容**:此前这个端点
-    不收 body，旧前端发的空 POST 仍然表示「全清」，语义不变。
+    body 省略、或四个字段都为 null 时才是全清——**保持与老客户端的兼容**:此前这个
+    端点不收 body，旧前端发的空 POST 仍然表示「全清」，语义不变。``since_ms=null``
+    本身只表示不限时间；若同时给了 model + base_url，删的仍然只是这一个
+    「模型名 + endpoint」。
 
     给 ``model`` + ``base_url`` 则只删这一个「模型名 + endpoint」的记录，其他模型与
     同名模型的另一个 endpoint 都不受影响。
