@@ -4354,6 +4354,28 @@ class TestRuleRunnerSceneActionGuards:
         spy.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("dead_cooldown", [0, None])
+    async def test_scene_action_without_cooldown_refused(
+        self, runner, monkeypatch, dead_cooldown
+    ):
+        """冷却是场景唯一的去重手段；runner 把 0/None 当「无冷却」，
+        这种行下发就是零限频——和 idempotent=true 同级，执行侧要一起挡。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=False,
+            cooldown_minutes=dead_cooldown,
+        )
+
+        result = await runner._execute_action("rule-guard", bad)
+
+        assert result.result is False
+        assert "cooldown_minutes >= 1" in result.error
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_scene_like_iid_is_rejected_not_dispatched(
         self, runner, mock_miot_proxy
     ):

@@ -760,7 +760,14 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
                 f"{flag_name}[{i}]: idempotent=false requires cooldown_minutes"
             )
         # 冷却是场景唯一的去重手段，填 0 等于每次 fire 都真触发一次。
-        if a.get("iid") == SCENE_IID and (a.get("cooldown_minutes") or 0) < 1:
+        # 只对数值比较：agent 可能把数字写成 "5"，直接比会 TypeError traceback，
+        # 破坏 _exit_error 的干净报错；字符串形态交给后端 pydantic 收敛或 400。
+        cooldown = a.get("cooldown_minutes")
+        if (
+            a.get("iid") == SCENE_IID
+            and isinstance(cooldown, (int, float))
+            and cooldown < 1
+        ):
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires cooldown_minutes >= 1"
             )

@@ -1398,17 +1398,21 @@ class RuleRunner:
         ``source`` 标成 rule、``source_id`` 写 rule_id。
         """
         # service 校验只在 CRUD 走；runner 装载既有规则是直接从 repo 灌进来的，
-        # 库里混进 idempotent=true 的场景行会让 _in_cooldown 直接放行 → 每次
-        # fire 都真触发一次场景，零限频。这里再挡一道。
-        if action.idempotent:
+        # 库里混进 idempotent=true 或 cooldown<1 的场景行都会让 _in_cooldown 直接
+        # 放行 → 每次 fire 都真触发一次场景，零限频。这里再挡一道。
+        if action.idempotent or (action.cooldown_minutes or 0) < 1:
             logger.error(
-                "Rule %s scene action %s is idempotent=true, refusing to dispatch",
-                rule_id, action.did,
+                "Rule %s scene action %s has no dedup guard "
+                "(idempotent=%s, cooldown_minutes=%s), refusing to dispatch",
+                rule_id, action.did, action.idempotent, action.cooldown_minutes,
             )
             return RuleActionExecuteResult(
                 action=action,
                 result=False,
-                error="scene action must be idempotent=false",
+                error=(
+                    "scene action requires idempotent=false "
+                    "and cooldown_minutes >= 1"
+                ),
             )
 
         if self._in_cooldown(rule_id, action):

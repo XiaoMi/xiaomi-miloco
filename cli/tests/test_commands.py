@@ -2485,3 +2485,16 @@ def test_rule_create_scene_action_rejects_zero_cooldown(runner):
     assert result.exit_code != 0
     combined = result.output + (result.stderr or "")
     assert "iid=scene requires cooldown_minutes >= 1" in combined
+
+
+def test_rule_create_scene_action_string_cooldown_no_traceback(runner):
+    """agent 可能把数字写成 "5"；CLI 不能因此抛 TypeError traceback，
+    要么放给后端收敛，要么走 _exit_error 的干净 JSON 报错。"""
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_minutes":"5"}'
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-str"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+    combined = result.output + (result.stderr or "")
+    assert "Traceback" not in combined
+    assert "TypeError" not in combined
+    assert result.exit_code == 0
