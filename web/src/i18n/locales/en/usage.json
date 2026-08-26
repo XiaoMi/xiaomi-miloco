@@ -123,7 +123,7 @@
     "pricingModeFlat": "Flat",
     "pricingModeModality": "By modality",
     "priceText": "Text (incl. images)",
-    "pricingCacheWarn": "Cache-hit price is not below the input price. Cache is {{share}}% of input this period, so if your provider discounts hits and this does not, the estimate is about {{pct}}% too high.",
+    "pricingCacheWarn": "Cache-hit price is not below the input price. Cache is {{share}}% of input this period; providers usually discount hits, so pricing them at full rate inflates that part.",
     "pricingPreview": "Estimated total for this period ({{tokens}} tokens)",
     "pricingNoModels": "No usage yet this period — nothing to price until the engine runs.",
     "costHelp": "Estimated locally from each model's prices — not a provider invoice. Cache hits are priced at the discounted rate; per-modality pricing uses the input minus video minus audio residual, so video and audio are not billed twice.",

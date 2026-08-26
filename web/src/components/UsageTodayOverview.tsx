@@ -8,8 +8,8 @@
  * 禁忌里也有「饼图 > 5 片」。环心留白还多出一个去处——悬停某模态时显示该模态读数，
  * 而不是把 hero 已经给过的总量再复读一遍（一屏只该有一个 hero 数字）。
  *
- * 图例横排在环右侧而不是竖在环下面：左栏高度因此由环决定，比竖排省约 90px；顺带
- * 整对比线上「饼 + 竖排图例」那一行还窄，窄屏反而不再溢出。
+ * 图例挪到环的右侧、与环并排（图例项自身仍是竖列）：左栏高度因此由环决定，比图例
+ * 摆在环下面省约 90px；顺带整对比原先的饼图那一行还窄，窄屏反而不再溢出。
  */
 
 import { useId, useState } from "react";
@@ -84,7 +84,8 @@ export function UsageTodayOverview({
   );
   const total = stats.total_tokens;
 
-  // 费用按模型分别算再加总：不同供应商价目不同，一份全局单价有第二个模型时必然错。
+  // 费用逐「模型名 + endpoint」算完再加总——这把折叠键与明细各行、弹窗预览、时间分布
+  // 浮层完全一致；换成按模型名先合并，区分模态那档的结果会与各行之和对不上。
   // 没有单价依据的模型不参与合计，而是被点名带出来——静默跳过会得到一个看着完整、
   // 实际漏算的数，而漏掉的可能正是大头。
   const { total: cost, unpriced } = summarizeCost(
@@ -145,11 +146,13 @@ export function UsageTodayOverview({
               unpricedCount > 0
                 ? t("usage.costUnpriced", {
                     count: unpricedCount,
-                    // 顿号是中文的枚举号，英文该用逗号——交给 Intl 按当前语言决定
-                    models: new Intl.ListFormat(i18n.language, {
-                      style: "narrow",
-                      type: "unit",
-                    }).format(unpriced),
+                    // 顿号是中文的枚举号，英文该用逗号——交给 Intl 按当前语言决定。
+                    // type 必须是 conjunction：unit 在中文下的连接符是**空串**，
+                    // 几个模型名会粘成一坨，而这条提示的全部意义就是让住户看清是哪几个。
+                    models: new Intl.ListFormat(
+                      i18n.language === "en" ? "en-US" : "zh-CN",
+                      { style: "narrow", type: "conjunction" },
+                    ).format(unpriced),
                   })
                 : t("usage.costHelp")
             }

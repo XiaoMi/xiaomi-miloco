@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { REFRESH_MIN_SEC } from "@/hooks/useRefreshInterval";
+import { clampRefreshSec, REFRESH_MIN_SEC } from "@/hooks/useRefreshInterval";
 
 export function RefreshIntervalInput({
   sec,
@@ -28,7 +28,12 @@ export function RefreshIntervalInput({
       setText(String(sec)); // 空串 / 非法 → 回到当前值，不静默改成别的数
       return;
     }
-    onChange(n); // 夹取（下限 5、取整）在 hook 里做，只有一处
+    // 先夹一次再回显：夹取规则仍只有一处定义（clampRefreshSec），但显示不能依赖
+    // 「上层的值一定会变」——已在下限时再输更小的数，夹完等于原值，state 不变、
+    // 回显的副作用不触发，框里就会留着那个不生效的数。
+    const v = clampRefreshSec(n);
+    setText(String(v));
+    onChange(v);
   };
 
   return (

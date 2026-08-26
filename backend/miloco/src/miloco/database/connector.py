@@ -1379,6 +1379,11 @@ def rollback_v2_to_v1() -> dict[str, int]:
     **前置条件**: internal cron 必须已被 caller 手工清空 (v1 无 cron 表, rollback
     语义 = 彻底回到迁移前状态; internal 是 backend 建的用户数据, 不能盲目丢弃)。
     函数内断言 internal_count == 0, 否则 raise。
+
+    **只处理 v2 → v1 这一级**: 它不认识 v3 引入的 token_usage.base_url 与日表四元组
+    主键, 也不会去回退它们。故库必须正好停在 v2; 在 v3 库上跑会把 user_version 盖成 1
+    而表形态仍是 v3, 之后启动时步进循环会从 v1 重跑一遍 —— 函数内断言当前版本 == 2,
+    不满足直接 raise, 不做「猜一个中间状态」这种事。
     """
     stats: dict[str, int] = {
         "rule_reverted_to_link": 0,
@@ -1391,6 +1396,12 @@ def rollback_v2_to_v1() -> dict[str, int]:
         cursor.execute("PRAGMA foreign_keys=OFF")
         cursor.execute("BEGIN IMMEDIATE")
         try:
+            ver = cursor.execute("PRAGMA user_version").fetchone()[0]
+            if ver != 2:
+                raise RuntimeError(
+                    f"rollback_v2_to_v1 refused: user_version={ver}, expected 2. "
+                    "本函数只回退 v2 引入的那些变化, 不认识更高版本的 schema。"
+                )
             internal_count = cursor.execute(
                 "SELECT COUNT(*) FROM cron WHERE dispatch_owner='internal'"
             ).fetchone()[0]

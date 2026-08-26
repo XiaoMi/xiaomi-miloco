@@ -5,7 +5,8 @@
  *  - 行内确认把后果感压得太轻——这是本页唯一不可恢复的操作，却和「切周期」长得差不多。
  *  - 行内确认会把承载焦点的按钮连带卸掉：点「清空数据」后那个 <button> 被换成 <span>，
  *    焦点掉回 <body>，下一次 Tab 从整份文档开头重新开始，键盘用户根本走不到确认按钮，
- *    而且没有任何朗读提示告诉他弹出了什么。弹窗则能把焦点收进来、Esc 收起、结束后归位。
+ *    而且没有任何朗读提示告诉他弹出了什么。弹窗则能把焦点收进来（打开时落在「取消」上）、
+ *    Esc 收起，并由 role=dialog 让读屏播报弹出了什么。
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -49,9 +50,14 @@ export function UsageClearDialog({
     return { iso, label: d.toLocaleDateString(i18n.language === "en" ? "en-US" : "zh-CN") };
   })();
 
-  // 打开时焦点落「取消」——破坏性操作不把默认焦点放在执行键上
+  // 打开时焦点落「取消」——破坏性操作不把默认焦点放在执行键上。
+  // 只在挂载时做一次：与 Esc 监听合成一个 effect 的话，它会跟着 busy / onClose 的
+  // 身份重跑，把住户 Tab 到「确认清空」的焦点拽回来。
   useEffect(() => {
     cancelRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !busy) onClose();
     };

@@ -71,13 +71,17 @@ export interface CostInput {
 }
 
 export interface CostPart {
-  /** i18n key 的后缀，见 usage.costPart* */
+  /** 分项名。取值与计价口径一一对应（flat 出 input/cache/output，modality 出各模态）。 */
   key: "input" | "cache" | "text" | "video" | "audio" | "output";
   amount: number;
 }
 
 export interface CostResult {
   total: number;
+  /**
+   * 分项拆解。**界面目前只用 total**；parts 留着是因为用例靠它钉住「钱是怎么算出来的」——
+   * 只断言总额的话，两个方向相反的口径错误可以互相抵消而测不出来。
+   */
   parts: CostPart[];
 }
 
@@ -124,7 +128,7 @@ export const PRICING_STORAGE_KEY = "web:usage:pricing";
 
 /**
  * 已知模型的预填单价。住户还是能改，这里只是省掉「上官网抄一遍」这一步，
- * 也避免出厂占位值离真实价目太远（占位值在 MiMo 上实测偏高四成）。
+ * 也避免住户从一份全 0 的空单价起步——那样费用一栏一直是「按 0 计」，等于没有估算。
  *
  * 每条都必须注明**出处与抓取日期** —— 服务商随时可能调价，将来核对时得知道
  * 这几个数是哪天从哪抄的，而不是猜。
@@ -249,8 +253,9 @@ export function estimateCost(
 /**
  * 把明细行按模型折成计价用的拆分（残差规则见 usageTokens.textResidual）。
  *
- * 放在 lib 而不是弹窗组件里：总览、明细表、弹窗三处都要用，让其中一个组件
- * 从另一个组件 import 数据函数是反了依赖方向。
+ * 放在 lib 而不是组件里：单价弹窗要用它列出「本周期有哪些模型」并算命中率提示。
+ * 注意它**不参与算钱**——钱一律走 costInputsByTarget 那把「模型名 + endpoint」的键，
+ * 总览、明细行、弹窗预览、时间分布浮层四处同键，否则各处的合计会互相对不上。
  */
 export function costInputsByModel(stats: UsageStats): Map<string, CostInput> {
   const out = new Map<string, CostInput>();
@@ -401,33 +406,15 @@ export function summarizeCost(
 /**
  * 命中价看起来**没有真打折**（≥ 基准价的 95%）。
  *
- * 这是「该不该告警」的判据，与 cacheOverstatePct 是两件事：后者只要本周期有命中量
- * 就总能算出一个正数（它回答「若忽略折扣会高估多少」），拿它当触发条件会让告警恒亮，
- * 而告警文案声称的前提（命中价没低于输入价）在已填折扣价时是假的。
+ * 只做「该不该告警」这一件事。刻意不给「会高估多少」——那个数要拿一个**假定的**
+ * 服务商折扣才算得出来；若拿住户自己填的这份没打折的价当基准，结果恒等于 0。
+ * 告警要说的是「你把命中按原价填了，而本周期命中占了这么多」，占比本身有依据、够用。
  */
 export function cacheLooksUndiscounted(pr: ModelPricing): boolean {
   const base = pr.mode === "flat" ? pr.input : pr.text;
   return base > 0 && pr.cache >= base * 0.95;
 }
 
-/**
- * 忽略缓存折扣会把费用高估多少（倍率 − 1）。用于设置弹窗的告警：
- * 命中占比高时这个数很大，不提示的话住户会以为估算「差不多」。
- * 返回 null 表示无从判断（没有命中量、或基准价为 0）。
- */
-export function cacheOverstatePct(
-  t: Pick<CostInput, "text" | "video" | "audio" | "cache">,
-  pr: ModelPricing,
-): number | null {
-  const input = t.text + t.video + t.audio;
-  const cache = Math.min(Math.max(t.cache, 0), Math.max(input, 0));
-  const base = pr.mode === "flat" ? pr.input : pr.text;
-  if (input <= 0 || cache <= 0 || base <= 0) return null;
-  // 全按输入价 vs 命中部分按命中价，两者的比值
-  const discounted = input - cache + cache * (pr.cache / base);
-  if (discounted <= 0) return null;
-  return (input / discounted - 1) * 100;
-}
 
 // ── 持久化（localStorage，与 web:theme / web:lang 同一套路）──────────
 // 不进后端：这是「本机的估算设置」，且免掉一轮读写端点。将来若要跟着模型档案

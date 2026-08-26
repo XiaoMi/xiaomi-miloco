@@ -220,3 +220,80 @@ def test_aggregate_paths_expose_base_url(repo):
     assert "base_url" in repo.aggregate_buckets()[0]
     assert "base_url" in repo.aggregate_daily()[0]
     assert "base_url" in repo.list_events()[0][0]
+
+
+# ── 启动时的步进链路（端到端，不直接调迁移函数）────────────────────────
+
+
+def test_startup_stepping_migrates_v2_db_with_data(tmp_path, monkeypatch):
+    """把一个**带数据的 v2 老库**交给启动路径，让步进循环自己跑到 v3。
+
+    启动步进本身有 v1 老库的用例覆盖（见 test_connector_schema_migration），但那些库里
+    没有用量数据；用量这一路此前只直接调 `_migrate_v2_to_v3`，绕过了「启动时按
+    user_version 决定跑哪几级」这一段——而住户升级时走的正是那一段。分发处漏登记或
+    版本号不推进，这两条都只会表现为「装机后用量表还是老形态」：之后每次记用量都抛
+    no such column，而记用量把异常降级成 WARNING，界面上只看到用量不再增长。
+    """
+    db_file = tmp_path / "v2_with_data.db"
+    _make_v2_db(db_file)
+
+    monkeypatch.setenv("MILOCO_DATABASE__PATH", str(db_file))
+    from miloco.config import reset_settings
+
+    reset_settings()
+    import miloco.database.connector as connector_module
+
+    monkeypatch.setattr(connector_module, "db_connector", None)
+    try:
+        connector_module.init_database()  # ← 启动路径，不是直接调迁移函数
+
+        conn = sqlite3.connect(db_file)
+        conn.row_factory = sqlite3.Row
+        # 版本号落到当前基线（跟着常量走，加 v4 时这条不用改）
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0]
+            == connector_module._DB_SCHEMA_VERSION
+        )
+        # 两张表都有了 base_url，且日表主键是四元组
+        for table in ("token_usage", "token_usage_daily"):
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            assert "base_url" in cols, table
+        pk = [
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(token_usage_daily)")
+            if r["pk"]
+        ]
+        assert set(pk) == {"date", "model", "base_url", "type"}
+        # 数据一行不少、老数据一律空串（不回填）
+        assert conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM token_usage_daily").fetchone()[0] == 3
+        assert {
+            r["base_url"] for r in conn.execute("SELECT base_url FROM token_usage_daily")
+        } == {""}
+        conn.close()
+    finally:
+        reset_settings()
+
+
+def test_startup_stepping_is_idempotent(tmp_path, monkeypatch):
+    """同一个库再启动一次不该再搬一遍数据，也不该报错。"""
+    db_file = tmp_path / "v2_twice.db"
+    _make_v2_db(db_file)
+    monkeypatch.setenv("MILOCO_DATABASE__PATH", str(db_file))
+    from miloco.config import reset_settings
+
+    reset_settings()
+    import miloco.database.connector as connector_module
+
+    monkeypatch.setattr(connector_module, "db_connector", None)
+    try:
+        connector_module.init_database()
+        monkeypatch.setattr(connector_module, "db_connector", None)
+        connector_module.init_database()  # 第二次启动
+
+        conn = sqlite3.connect(db_file)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM token_usage_daily").fetchone()[0] == 3
+        conn.close()
+    finally:
+        reset_settings()

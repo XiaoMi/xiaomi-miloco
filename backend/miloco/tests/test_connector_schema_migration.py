@@ -114,7 +114,7 @@ def v1_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fresh_db(tmp_path, monkeypatch):
-    """空 DB, 走 fresh-build 直接建 v2 形态."""
+    """空 DB, 走 fresh-build 直接建**当前基线**形态（跟着 _DB_SCHEMA_VERSION 走）."""
     db_file = tmp_path / "fresh.db"
     monkeypatch.setenv("MILOCO_DATABASE__PATH", str(db_file))
     from miloco.config import reset_settings
@@ -513,14 +513,26 @@ def test_migrate_is_skipped_on_v2_db(fresh_db):
             ).fetchone()[0]
             == 1
         )
-        # v1→v2 那一步没有重跑（task-x 存活即证），但步进循环会继续把
-        # v2 库推到当前基线——故这里比的是基线而不是 2。
+        # fresh-build 出来就是基线版本，第二次 init 时步进循环无级可跑；
+        # 这里比基线而不是写死的数，加 v4 时这条不用改。
         assert (
             conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
         )
 
 
 # ── rollback ──────────────────────────────────────────────────────────
+
+
+def _pin_user_version_to_2(db_file) -> None:
+    """把库钉回 v2 —— rollback_v2_to_v1 只处理这一级，它不认识更高版本的 schema。
+
+    启动路径会把库一路推到当前基线（现在是 v3），而这个反向迁移只回退 v2 引入的那些
+    变化。真实场景里它面对的就是一个停在 v2 的库，故用例显式把版本钉回去。
+    """
+    c = sqlite3.connect(str(db_file))
+    c.execute("PRAGMA user_version = 2")
+    c.commit()
+    c.close()
 
 
 def test_rollback_reverses_v2_to_v1(v1_db):
@@ -533,7 +545,8 @@ def test_rollback_reverses_v2_to_v1(v1_db):
     conn.commit()
     conn.close()
 
-    _run_init(v1_db)  # v1 → v2
+    _run_init(v1_db)  # v1 → 当前基线
+    _pin_user_version_to_2(v1_db)  # rollback 只处理 v2 → v1 这一级
 
     from miloco.database.connector import get_db_connector, rollback_v2_to_v1
 
@@ -574,7 +587,8 @@ def test_rollback_reverses_v2_to_v1(v1_db):
 
 def test_rollback_refuses_when_internal_cron_present(v1_db):
     """rollback 前置断言: internal cron 未清空 → raise."""
-    _run_init(v1_db)  # v1 → v2 (无数据)
+    _run_init(v1_db)  # v1 → 当前基线 (无数据)
+    _pin_user_version_to_2(v1_db)  # 同上：先满足 rollback 的版本前置条件
 
     from miloco.database.connector import get_db_connector, rollback_v2_to_v1
 
@@ -590,4 +604,19 @@ def test_rollback_refuses_when_internal_cron_present(v1_db):
         conn.commit()
 
     with pytest.raises(RuntimeError, match="internal cron"):
+        rollback_v2_to_v1()
+
+
+def test_rollback_refuses_on_newer_schema(v1_db):
+    """库已经在 v2 之上时，rollback_v2_to_v1 必须拒绝而不是把版本号盖成 1。
+
+    它只回退 v2 引入的那些变化，不认识 v3 的 token_usage.base_url 与日表四元组主键。
+    盖了版本号却不动表形态，下次启动会从 v1 重跑一遍步进 —— 与其猜一个中间状态，
+    不如直接拒绝。
+    """
+    _run_init(v1_db)  # 一路推到当前基线（> 2）
+
+    from miloco.database.connector import rollback_v2_to_v1
+
+    with pytest.raises(RuntimeError, match="expected 2"):
         rollback_v2_to_v1()

@@ -18,7 +18,6 @@ import {
   PER_MTOKENS,
   PRICING_STORAGE_KEY,
   cacheLooksUndiscounted,
-  cacheOverstatePct,
   estimateCost,
   knownPricingFor,
   loadPricing,
@@ -63,21 +62,23 @@ describe("estimateCost — 区分模态", () => {
     expect(hi - base).not.toBeCloseTo(0.2, 3);
   });
 
-  it("命中价能真正压低总额，且与告警给出的高估幅度自洽", () => {
+  it("命中价能真正压低总额——把它填成与输入价相同，总额必然变高", () => {
     const cheap = estimateCost(T, MODALITY).total; // cache 价 0
     const full = estimateCost(T, { ...MODALITY, cache: MODALITY.text }).total;
     expect(full).toBeGreaterThan(cheap);
-    const pct = cacheOverstatePct(T, MODALITY)!;
-    // 命中占一半、命中价为 0 → 忽略折扣会高估 100%
-    expect(pct).toBeCloseTo(100, 6);
   });
 
   it("命中价打了折就不该告警；只有没打折时才告警", () => {
-    // 出厂占位价里命中价是文本价的十分之一 —— 已打折，不该亮告警
+    // 本用例的 MODALITY 里命中价是文本价的十分之一 —— 已打折，不该亮告警
     expect(cacheLooksUndiscounted(MODALITY)).toBe(false);
     expect(cacheLooksUndiscounted({ ...MODALITY, cache: MODALITY.text })).toBe(true);
     // 差一点点（95% 以上）也算没打折
     expect(cacheLooksUndiscounted({ ...MODALITY, cache: MODALITY.text * 0.96 })).toBe(true);
+    // 最常见的填法——两档输入填同一个数——必须落进告警区间。
+    // 此前这一档被「高估幅度 > 1」的门挡掉，告警在它自己点名的情形下从不出现。
+    expect(cacheLooksUndiscounted({ ...MODALITY, cache: MODALITY.text })).toBe(true);
+    // 手滑填得比输入价还高，同样该告警
+    expect(cacheLooksUndiscounted({ ...MODALITY, cache: MODALITY.text * 1.2 })).toBe(true);
     expect(cacheLooksUndiscounted({ ...MODALITY, cache: MODALITY.text * 0.5 })).toBe(false);
     // flat 模式看的是输入价，不是文本价
     expect(cacheLooksUndiscounted({ ...FLAT, input: 2, cache: 0.1, text: 0.1 })).toBe(false);

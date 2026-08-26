@@ -1,13 +1,15 @@
 /**
  * 单价设置弹窗。形制沿用工程既有 dialog（遮罩 + 居中卡 + 右上关闭 + 底部取消/保存）。
  *
- * 单价**按模型分别填**——不同供应商、不同模型价目本就不同，一份全局单价在有第二个
- * 模型时必然算错。可配的模型取自本周期实际出现过的模型（stats.rows），所以列表里
- * 只会有真正需要定价的那几个，不必另拉一次配置接口。
+ * 单价**按模型名分别填**——不同模型价目本就不同，一份全局单价在有第二个模型时必然
+ * 算错。注意只到模型名这一层：同一个模型名挂在两个 endpoint 上共用一份价（这是有意
+ * 的取舍，见 usagePricing 的说明），弹窗底部对住户明说了这一条。可配的模型取自本周期
+ * 实际出现过的模型（stats.rows），列表里只会有真正需要定价的那几个。
  *
  * 弹窗里有意**不解释口径**（残差、缓存摊分那些）：那些属于「看一眼试一下也知道不了」
- * 的背景知识，塞进表单会挤掉真正要填的东西，故收进费用旁边的「?」提示里。这里只留
- * 一条推不出来的信息——单价的计价基数是每 MTokens。
+ * 的背景知识，塞进表单会挤掉真正要填的东西，故收进费用旁边的「?」提示里。留在这里的
+ * 只有几条「不说就无从得知」的：计价基数是每 MTokens、这是本机估算而非服务商账单、
+ * 单价按模型名保存，以及命中价看着没打折时的那句提醒。
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -16,7 +18,6 @@ import type { UsageStats } from "@/lib/types";
 import { humanTokens } from "@/lib/formatTokens";
 import {
   cacheLooksUndiscounted,
-  cacheOverstatePct,
   costInputsByModel,
   costInputsByTarget,
   costPerModelFromTargets,
@@ -63,8 +64,14 @@ export function UsagePricingDialog({
   const [touched, setTouched] = useState<ReadonlySet<string>>(() => new Set());
   const cancelRef = useRef<HTMLButtonElement | null>(null);
 
+  // 进场聚焦只在挂载时做一次。**不能和 Esc 监听合成一个 effect**：那样它会跟着
+  // onClose 的身份走，而父组件每轮自动刷新都会新建这个闭包，住户正在输入的光标
+  // 会被反复拽回「取消」。
   useEffect(() => {
     cancelRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
@@ -92,8 +99,10 @@ export function UsagePricingDialog({
     ci && ci.text + ci.video + ci.audio > 0
       ? (ci.cache / (ci.text + ci.video + ci.audio)) * 100
       : 0;
-  // 只在命中价没真打折时告警（判据与「高估多少」是两件事，见 cacheLooksUndiscounted）
-  const overstate = ci && cacheLooksUndiscounted(pr) ? cacheOverstatePct(ci, pr) : null;
+  // 命中价没真打折、且本周期确实有命中量时告警。
+  // 不给「会高估百分之多少」——那个数只能拿一个**假定的**服务商折扣才算得出来；
+  // 拿住户自己填的这份没打折的价当基准，算出来恒等于 0，等于告警永不出现。
+  const cacheUndiscounted = ci != null && cacheShare > 0 && cacheLooksUndiscounted(pr);
 
   return (
     <div
@@ -212,14 +221,10 @@ export function UsagePricingDialog({
               )}
             </div>
 
-            {/* 命中价没打折时把高估幅度直接算出来——命中率高时这个数很大，不提示会被当成「差不多」 */}
-            {overstate != null && overstate > 1 && (
+            {/* 命中价没打折时点出命中占比——占比高时这份估算会明显偏高，不提示会被当成「差不多」 */}
+            {cacheUndiscounted && (
               <p className="text-caption text-warning mb-3 leading-relaxed">
-                ⚠️{" "}
-                {t("usage.pricingCacheWarn", {
-                  share: cacheShare.toFixed(1),
-                  pct: overstate.toFixed(0),
-                })}
+                ⚠️ {t("usage.pricingCacheWarn", { share: cacheShare.toFixed(1) })}
               </p>
             )}
 

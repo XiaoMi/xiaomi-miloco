@@ -16,6 +16,17 @@ export const REFRESH_KEY = "web:usage:refreshSec";
 export const REFRESH_MIN_SEC = 5;
 export const REFRESH_DEFAULT_SEC = 30;
 
+/**
+ * 夹取规则只此一处，输入框与 setSec 共用。
+ *
+ * 输入框不能只靠「把值交上去、等 sec 变了再回显」：值已经在下限上时，再输一个更小的数
+ * 夹完还是下限，state 没变、React 跳过重渲染、回显的副作用也就不触发——框里会留着那个
+ * 不生效的数。所以提交时自己先夹一次。
+ */
+export function clampRefreshSec(n: number): number {
+  return Math.max(REFRESH_MIN_SEC, Math.floor(n));
+}
+
 /** 跨组件同步：同一页两个输入框，改一个另一个要跟着变。 */
 const EVENT = "miloco:refresh-interval";
 
@@ -45,14 +56,16 @@ export function useRefreshInterval(): {
   }, []);
 
   const setSec = useCallback((n: number) => {
-    const v = Math.max(REFRESH_MIN_SEC, Math.floor(n));
+    const v = clampRefreshSec(n);
     setLocal(v);
     try {
       localStorage.setItem(REFRESH_KEY, String(v));
+      // 广播只在写成功后发：同步处理器是回读存储的，写失败还广播会让本实例把刚设的值
+      // 打回默认值，与下面「本次会话内仍生效」正好相反。
+      window.dispatchEvent(new Event(EVENT));
     } catch {
-      // 存储不可用（隐私模式）→ 本次会话内仍生效
+      // 存储不可用（隐私模式）→ 不广播，本实例内存里的新值仍生效，另一张卡保持原值
     }
-    window.dispatchEvent(new Event(EVENT));
   }, []);
 
   return { sec, setSec };

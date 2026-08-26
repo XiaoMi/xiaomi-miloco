@@ -65,7 +65,7 @@ export function UsagePage() {
   const [binMinutes, setBinMinutes] = useState(60);
   const [pricing, setPricing] = useState<UsagePricing>(() => loadPricing());
   const [pricingOpen, setPricingOpen] = useState(false);
-  // 选了范围才开弹窗；null = 没在清。取代原来的布尔开关，顺便把范围带进弹窗。
+  // 选了范围才开弹窗；null = 没在清。范围随状态一起带进弹窗，弹窗因此能复述清的是谁。
   const [clearScope, setClearScope] = useState<ClearScope | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   // 刷新周期与性能卡共用一个值（见 useRefreshInterval 的说明）
@@ -83,7 +83,7 @@ export function UsagePage() {
   }, [usage.data]);
 
   const reload = usage.reload;
-  // 30s 轮询 + 回到前台时补一次。没有这个的话数字从挂载起就冻住：感知循环一直在烧
+  // 按住户设定的周期轮询 + 回到前台时补一次。没有这个的话数字从挂载起就冻住：感知循环一直在烧
   // token，而晚上打开、次日再看还是「今日总览」显示昨天的数（时间桶骨架锚在取数那刻）。
   useEffect(() => {
     const id = setInterval(() => void reload(), refreshSec * 1000);
@@ -131,6 +131,8 @@ export function UsagePage() {
     ? updatedAt.toLocaleTimeString(i18n.language === "en" ? "en-US" : "zh-CN", {
         hour: "2-digit",
         minute: "2-digit",
+        // 与性能卡同一套：两张卡上下相邻，英文档下一处 12 小时制一处 24 小时制会很扎眼
+        hour12: false,
       })
     : null;
 
@@ -202,7 +204,8 @@ export function UsagePage() {
         }
       >
 
-        {/* 错误内联呈现：控件保持挂载，且给重试入口。首次加载还没有任何数据时才占整格。 */}
+        {/* 错误内联呈现：控件保持挂载，且给重试入口。首次加载还没有任何数据时，
+            下面的 !stats 分支会接管整格（那时连错误条也没有位置可挂）。 */}
         {usage.error && (
           <div
             className="mb-5 flex items-center justify-between gap-3 flex-wrap rounded-lg

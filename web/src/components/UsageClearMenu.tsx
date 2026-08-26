@@ -2,7 +2,7 @@
  * 「清空数据」入口：垃圾桶图标 → 气泡里选清理范围 → 交给确认弹窗。
  *
  * 为什么不是一个写着「清空数据」的文字按钮：本页工具条重排后，它与同批新加的
- * 「刷新」并排、间距 12px、视觉重量完全相同——一个安全高频、一个不可逆，误触代价不对称，
+ * 「刷新」同处一行、视觉重量完全相同——一个安全高频、一个不可逆，误触代价不对称，
  * 而且没有任何「这一步不可逆」的暗示。改成无框图标后两者不再是同一类东西；
  * 多出来的一次展开也把「手滑就点到」变成「要先找到再点」。
  *
@@ -94,7 +94,7 @@ export function UsageClearMenu({
 
   /**
    * fixed 浮层的落点：**量出菜单真实尺寸后**再算，不用估值。算法与 URL 气泡共用
-   * placePopover——两个浮层挨在同一个单元格里，各写一份的结果是一个会翻转、一个不会。
+   * placePopover——同一行上还挂着模型列那格的 URL 气泡，各写一份的结果是一个会翻转、一个不会。
    * 默认贴按钮下方；下方装不下就翻到上方（明细表常常就在视口底部，
    * 末几行若不翻转，菜单会掉到视口外，最后一档「全部数据」根本点不到）。
    * 两轴都夹回视口内，窄屏横滚时也不会跑出去。
@@ -111,20 +111,31 @@ export function UsageClearMenu({
     setPos((p) => (p && p.left === next.left && p.top === next.top ? p : next));
   }, [open, placement, anchor]);
 
-  // 时刻在点击那一下才取，不在渲染时取——渲染可能发生在几分钟前
-  const scopes = (): ClearScope[] => {
-    const now = Date.now();
+  // 起始时刻在**点下去那一刻**才算，不在渲染时算：菜单可能开着好一会儿，
+  // 按渲染时的钟去减 24 小时，删掉的窗口会比住户以为的往前偏。
+  // 故这里只给档位，sinceMs 由 pick() 在点击时现算。
+  const OFFSETS: Record<"24h" | "7d" | "all", number | null> = {
+    "24h": 24 * 3600_000,
+    "7d": 7 * 24 * 3600_000,
+    all: null,
+  };
+  const scopes = (): Omit<ClearScope, "sinceMs">[] => {
     const tg = target ? { model: target.model, baseUrl: target.baseUrl } : undefined;
     return [
-      { key: "24h", label: t("usage.clearRange24h"), sinceMs: now - 24 * 3600_000, target: tg },
-      { key: "7d", label: t("usage.clearRange7d"), sinceMs: now - 7 * 24 * 3600_000, target: tg },
+      { key: "24h", label: t("usage.clearRange24h"), target: tg },
+      { key: "7d", label: t("usage.clearRange7d"), target: tg },
       {
         key: "all",
         label: target ? t("usage.clearTargetAll") : t("usage.clearAllData"),
-        sinceMs: null,
         target: tg,
       },
     ];
+  };
+
+  /** 点下去才落时刻：档位 → 具体的起始毫秒。 */
+  const pick = (s: Omit<ClearScope, "sinceMs">): ClearScope => {
+    const off = OFFSETS[s.key];
+    return { ...s, sinceMs: off == null ? null : Date.now() - off };
   };
 
   return (
@@ -202,7 +213,7 @@ export function UsageClearMenu({
                 role="menuitem"
                 onClick={() => {
                   setOpen(false);
-                  onPick(s);
+                  onPick(pick(s));
                 }}
                 className={`w-full text-left text-body px-2.5 py-1.5 rounded-md transition-colors ${
                   s.key === "all"

@@ -123,7 +123,7 @@
     "pricingModeFlat": "不区分模态",
     "pricingModeModality": "区分模态",
     "priceText": "文本（含图片）",
-    "pricingCacheWarn": "缓存命中价没低于输入价。本周期缓存占输入 {{share}}%，若服务商对命中部分打折而这里按原价算，会高估约 {{pct}}%。",
+    "pricingCacheWarn": "缓存命中价没低于输入价。本周期缓存占输入 {{share}}%，服务商通常对命中部分打折——按原价算会把这部分费用抬高。",
     "pricingPreview": "本周期（{{tokens}} tokens）合计估算",
     "pricingNoModels": "本周期还没有用量，先跑起来才有模型可配单价。",
     "costHelp": "按各模型单价在本机估算，不是服务商账单。缓存命中按折扣价计；逐模态计价用「输入 − 视频 − 音频」的残差，避免视频音频重复计费。",
