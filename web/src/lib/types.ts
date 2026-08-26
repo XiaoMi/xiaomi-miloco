@@ -767,7 +767,9 @@ export interface TaskRuleBrief {
   // 影响命中判定的字段（任务名 task.description 不进模型），故开放编辑。
   // 约定格式 `[<task_id>] <场景描述>`，前缀由 UI 固定、只让改后半段。
   name: string;
-  // event：命中即触发一次；state：进入 / 离开状态各触发一次。决定编辑器渲染几个框。
+  // event：命中即触发一次；state：进入 / 离开状态各触发一次。
+  // 仅供展示 / 排查参考——「渲染几个编辑框」由 editableDescSlots 决定，**不要**按 mode 推：
+  // 同槽位的设备直控与文案在 backend 校验里互斥，mode 推不出来（推错 → 保存吃 422）。
   mode: "event" | "state";
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
@@ -779,8 +781,13 @@ export interface TaskRuleBrief {
   actionDescriptions: string[];
   onEnterDesc: string | null;
   onExitDesc: string | null;
-  // 累计达标文案（仅 duration record + 滑窗规则有）。为 null 时不渲染：
-  // 从无到有地填它会被 backend 的 record 兼容校验挡下。
+  // 累计达标文案（要求所属 task 挂着 duration record 且配了 target_minutes；
+  // 与规则自身的滑窗字段 duration_seconds / duration_ratio 无关，那是 rule engine
+  // 内部 timer 驱动的 TARGET_FIRED）。为 null 时后端不列入 editableDescSlots、前端
+  // 也就不渲染：task 有没有挂合格 record 前端判断不了（配了的话从零填其实能存下，
+  // 并非一定被挡），从零新建交给 agent。
+  // 见 task/service.py::_rule_editable_desc_slots 与
+  // rule/service.py::_validate_on_target_desc_compat。
   onTargetDesc: string | null;
   // 设备直控动作摘要，只读——设备动作是结构化 JSON，不在 Web 上手改。
   deviceActions: string[];

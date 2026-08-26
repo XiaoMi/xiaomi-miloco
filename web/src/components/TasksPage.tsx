@@ -15,7 +15,8 @@
  *    （落库后 backend 会重新装载进 RuleRunner，即时生效）。
  *  - 为什么规则名与意图文案也要能改：任务描述（task.description）根本不进 Agent 的任何
  *    输入通道，改它对 Agent 行为零影响。真正进模型的是「规则名 + 触发条件」（感知
- *    system prompt）与「命中后意图」（命中回调 prompt 的意图段）。详见 .claude/PROGRESS.md。
+ *    system prompt，见 perception/engine/omni/prompt_builder.py::_render_rule_conditions）
+ *    与「命中后意图」（命中回调 prompt 的意图段，见 rule/runner.py::_compose_prompt_text）。
  *  - 设备直控动作仍只读：那是结构化 JSON，且同一槽位的设备动作与文案在 backend 校验里
  *    互斥——哪些文案槽位可编辑由后端 editableDescSlots 给出，前端不自己推。
  */
@@ -330,6 +331,7 @@ function Field({
   label,
   value,
   rows,
+  maxLength = 500,
   placeholder,
   hint,
   onChange,
@@ -337,6 +339,9 @@ function Field({
   label: string;
   value: string;
   rows: number;
+  // 触发条件原样进感知 system prompt 的「待判断规则」段，上限按字段给，别一刀切：
+  // 放宽它等于放宽每条规则的 prompt 预算，多规则场景会叠加。
+  maxLength?: number;
   placeholder?: string;
   hint?: string;
   onChange: (v: string) => void;
@@ -348,7 +353,7 @@ function Field({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         rows={rows}
-        maxLength={500}
+        maxLength={maxLength}
         placeholder={placeholder}
         className="w-full resize-none rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
       />
@@ -420,6 +425,7 @@ function RuleBriefCard({
           label={t("tasks.triggerCondition")}
           value={draft.query}
           rows={2}
+          maxLength={200}
           placeholder={t("tasks.triggerPlaceholder")}
           /* 措辞提示：backend _validate_query_phrasing 会挡「检测到」这类断言性开头
              （感知模型会当成已发生的事实 → 连续误触发）。校验仍以 backend 为单一

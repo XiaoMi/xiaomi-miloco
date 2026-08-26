@@ -131,13 +131,12 @@ def test_create_task_then_rule_auto_links(service):
 
 
 def test_rule_brief_exposes_structured_desc_fields(service):
-    """rule_briefs 除压平的 actions_desc 外, 还回结构化原值供 Web 就地编辑。
-
-    压平列 (actions_desc) 与结构化列并存: 前者给 agent 去重比对, 后者给编辑框回填。
-    event 模式下设备直控进 device_actions、agent 文案进 action_descriptions, 两者分开。
-    """
+    """已接设备直控的 event 规则: 动作进 device_actions, 文案列为空, 槽位不给编辑。"""
     service.create_task(TaskCreateRequest(task_id="t1", description="d"))
     rule = _make_rule_obj(task_id="t1", query="客厅有人", name="[t1] 客厅有人")
+    # actions 与 action_descriptions 互斥 (rule/service.py:_validate_rule_consistency),
+    # 「两者并存」的规则生产上建不出来, fixture 也不该造 —— 否则断言建在不可能的状态上。
+    rule.action_descriptions = []
     rule.actions = [
         RuleAction(did="d1", iid="prop.2.1", value=True, idempotent=True)
     ]
@@ -147,7 +146,7 @@ def test_rule_brief_exposes_structured_desc_fields(service):
     assert brief.rule_id == rule_id
     assert brief.name == "[t1] 客厅有人"
     assert brief.mode == "event"
-    assert brief.action_descriptions == ["fire"]
+    assert brief.action_descriptions == []
     assert brief.device_actions == ["prop.2.1=True"]
     assert brief.on_enter_desc is None
     assert brief.on_exit_desc is None
@@ -161,6 +160,9 @@ def test_rule_brief_editable_slots_open_when_no_device_action(service):
     RuleRepo().create(_make_rule_obj(task_id="t1", query="客厅有人"))
 
     brief = service.get_full_view("t1").rule_briefs[0]
+    # 文案原值回传, 在「纯 agent 文案」这个合法形态上断言 (与上一条的设备直控形态对照)
+    assert brief.action_descriptions == ["fire"]
+    assert brief.device_actions == []
     assert brief.editable_desc_slots == ["action_descriptions"]
 
 
