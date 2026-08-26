@@ -35,12 +35,13 @@ import { ApiError } from "@/api/client";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
+import type { RuleDraft } from "@/lib/ruleDraft";
+import { makeRuleDraft, ruleDiff, ruleNamePrefix } from "@/lib/ruleDraft";
 import type {
   Task,
   TaskRecordSummary,
   TaskRuleBrief,
   TaskRuleDescSlot,
-  TaskRulePatch,
 } from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
 import { toast } from "./Toast";
@@ -263,73 +264,6 @@ function Section({
   );
 }
 
-// 一条规则的可编辑字段草稿。desc 槽位一律存字符串（多条文案按行拆合），
-// 免得编辑框和数组结构来回转换。
-interface RuleDraft {
-  // 只存规则名去掉 `[<task_id>] ` 前缀后的后半段——前缀由 UI 固定拼回。
-  nameSuffix: string;
-  query: string;
-  action_descriptions: string;
-  on_enter_desc: string;
-  on_exit_desc: string;
-  on_target_desc: string;
-}
-
-// skill 约定的规则名前缀。规则名不是这个格式时（人工建的老规则）返回空串，
-// 此时整条名字都交给住户改，不硬套前缀。
-function ruleNamePrefix(taskId: string, name: string): string {
-  const prefix = `[${taskId}] `;
-  return name.startsWith(prefix) ? prefix : "";
-}
-
-// 槽位原值 → 编辑框文本。action_descriptions 是数组，一行一条。
-function slotText(rule: TaskRuleBrief, slot: TaskRuleDescSlot): string {
-  if (slot === "action_descriptions") return rule.actionDescriptions.join("\n");
-  if (slot === "on_enter_desc") return rule.onEnterDesc ?? "";
-  if (slot === "on_exit_desc") return rule.onExitDesc ?? "";
-  return rule.onTargetDesc ?? "";
-}
-
-function makeRuleDraft(taskId: string, rule: TaskRuleBrief): RuleDraft {
-  return {
-    nameSuffix: rule.name.slice(ruleNamePrefix(taskId, rule.name).length),
-    query: rule.query,
-    action_descriptions: slotText(rule, "action_descriptions"),
-    on_enter_desc: slotText(rule, "on_enter_desc"),
-    on_exit_desc: slotText(rule, "on_exit_desc"),
-    on_target_desc: slotText(rule, "on_target_desc"),
-  };
-}
-
-// 草稿 → PATCH 载荷：只带真改过且非空的字段。清空视作放弃这一处修改——把唯一
-// 一个已配置的槽位清空反而会被 backend 的「至少配一个」校验退回。
-function ruleDiff(
-  taskId: string,
-  rule: TaskRuleBrief,
-  draft: RuleDraft,
-): TaskRulePatch | null {
-  const patch: TaskRulePatch = {};
-  // 两侧都 trim 再比：存量值带首尾空格时，住户只改了 A 字段，B 字段不该被「顺手」
-  // 下发一次纯规范化 PATCH（那会白白吃一次校验 + 热重载）。
-  const name = ruleNamePrefix(taskId, rule.name) + draft.nameSuffix.trim();
-  if (draft.nameSuffix.trim() && name !== rule.name.trim()) patch.name = name;
-  const query = draft.query.trim();
-  if (query && query !== rule.query.trim()) patch.query = query;
-  for (const slot of rule.editableDescSlots) {
-    const next = draft[slot].trim();
-    if (!next || next === slotText(rule, slot).trim()) continue;
-    if (slot === "action_descriptions") {
-      patch.actionDescriptions = next
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-    } else if (slot === "on_enter_desc") patch.onEnterDesc = next;
-    else if (slot === "on_exit_desc") patch.onExitDesc = next;
-    else patch.onTargetDesc = next;
-  }
-  return Object.keys(patch).length > 0 ? patch : null;
-}
-
 // 编辑态下的带标签文本框——规则卡片里的几个字段长得一样，抽出来免得复读样式。
 function Field({
   label,
@@ -343,7 +277,8 @@ function Field({
   label: string;
   value: string;
   rows: number;
-  // 触发条件原样进感知 system prompt 的「待判断规则」段，上限按字段给，别一刀切：
+  // 触发条件原样进感知调用的「待判断规则」消息（system 之后的独立 user 消息），
+  // 上限按字段给，别一刀切：
   // 放宽它等于放宽每条规则的 prompt 预算，多规则场景会叠加。
   maxLength?: number;
   placeholder?: string;

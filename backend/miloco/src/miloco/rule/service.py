@@ -104,7 +104,10 @@ def _validate_rule_name_phrasing(name: str) -> None:
     同理 ``update_rule`` (PUT 整体重写, agent 专用) 也不挂: 那条路径上 name 是
     原值回写, 不是新输入。
     """
-    body = _RULE_NAME_PREFIX_RE.sub("", name).strip()
+    # 先 strip 再剥前缀: 剥前缀的正则锚 ``^\[``, 名字带前导空格时不命中, 剥不掉前缀
+    # 就没有一个禁用前缀能对上 —— 整条校验会被 `" [t1] 检测到…"` 这种输入绕开
+    # (与 ``_validate_query_phrasing`` 先 strip 的口径对齐)。
+    body = _RULE_NAME_PREFIX_RE.sub("", name.strip()).strip()
     for prefix in _FORBIDDEN_QUERY_PREFIXES:
         if body.startswith(prefix):
             raise ValidationException(

@@ -1813,10 +1813,13 @@ class TestRuleServiceV3Validation:
             await service.patch_rule("r1", update)
 
     @pytest.mark.asyncio
-    async def test_patch_name_forbidden_prefix_detected_behind_task_id(
+    async def test_patch_name_forbidden_prefix_raises_without_task_id_prefix(
         self, service, mock_rule_repo
     ):
-        """带 `[task_id] ` 前缀时也要命中 —— 直接 startswith 会恒为 False。"""
+        """无前缀形态 (人工建的老规则) 同样拦。
+
+        带 `[task_id] ` 前缀的形态由上一条用例覆盖 (剥前缀正则失效时那条会挂)。
+        """
         existing = _make_static_rule(rule_id="r1")
         mock_rule_repo.get_by_id.return_value = existing
         mock_rule_repo.exists_by_name.return_value = False
@@ -1824,6 +1827,25 @@ class TestRuleServiceV3Validation:
         # 无前缀形态（人工建的老规则）同样拦
         with pytest.raises(ValidationException, match=r"规则名不能以断言性词"):
             await service.patch_rule("r1", RuleUpdate(name="识别到有人摔倒"))
+
+    @pytest.mark.asyncio
+    async def test_patch_name_with_leading_space_before_prefix_raises(
+        self, service, mock_rule_repo
+    ):
+        """前导空格 + 前缀不能绕开校验 —— 剥前缀的正则锚串首。
+
+        `" [t1] 检测到…"` 这种输入 Web 造不出 (名字 = 精确前缀 + trim 后半段),
+        但 CLI ``--name`` / 直连 API 能造; 不先 strip 的话正则不命中, 剥不掉前缀,
+        禁用前缀表全部落空, 断言性措辞照样落库。
+        """
+        existing = _make_static_rule(rule_id="r1")
+        mock_rule_repo.get_by_id.return_value = existing
+        mock_rule_repo.exists_by_name.return_value = False
+
+        with pytest.raises(ValidationException, match=r"规则名不能以断言性词"):
+            await service.patch_rule(
+                "r1", RuleUpdate(name="  [fall_alert] 检测到老人摔倒")
+            )
 
     @pytest.mark.asyncio
     async def test_patch_compliant_name_succeeds(self, service, mock_rule_repo):
