@@ -53,8 +53,13 @@ export function ruleDiff(
   const patch: TaskRulePatch = {};
   // 两侧都 trim 再比：存量值带首尾空格时，住户只改了 A 字段，B 字段不该被「顺手」
   // 下发一次纯规范化 PATCH（那会白白吃一次校验 + 热重载）。
-  const name = ruleNamePrefix(taskId, rule.name) + draft.nameSuffix.trim();
-  if (draft.nameSuffix.trim() && name !== rule.name.trim()) patch.name = name;
+  // 名字这一路要「剥前缀 + trim」两侧同口径：前缀含一个空格, `]` 后多打的空格会被
+  // 算进后半段, 而 rule.name.trim() 动不了那个位置 —— 否则住户一个字没改点保存,
+  // 这条规则也会被静默改名 + 走一次热重载; 老规则名不合规时还会被新校验挡在保存外。
+  const prefix = ruleNamePrefix(taskId, rule.name);
+  const name = prefix + draft.nameSuffix.trim();
+  const prevName = prefix + rule.name.slice(prefix.length).trim();
+  if (draft.nameSuffix.trim() && name !== prevName) patch.name = name;
   const query = draft.query.trim();
   if (query && query !== rule.query.trim()) patch.query = query;
   for (const slot of rule.editableDescSlots) {

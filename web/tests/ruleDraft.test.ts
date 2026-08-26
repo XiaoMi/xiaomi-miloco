@@ -64,6 +64,13 @@ describe("ruleDiff", () => {
     expect(ruleDiff("t1", rule, draft)).toEqual({ name: "孩子在弹钢琴" });
   });
 
+  it("前缀与描述之间的多余空格不算改动", () => {
+    // 前缀含一个空格，`]` 后多打的空格会落进 nameSuffix；两侧不同口径的话住户
+    // 一个字没改点保存也会被静默改名（老规则名不合规时还会被新校验挡在保存外）。
+    const rule = brief({ name: "[t1]  客厅有人" });
+    expect(ruleDiff("t1", rule, makeRuleDraft("t1", rule))).toBeNull();
+  });
+
   it("多条文案按行拆分，空行丢掉", () => {
     const rule = brief();
     const draft = {

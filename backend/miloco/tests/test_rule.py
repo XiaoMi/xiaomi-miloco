@@ -1849,15 +1849,19 @@ class TestRuleServiceV3Validation:
 
     @pytest.mark.asyncio
     async def test_patch_compliant_name_succeeds(self, service, mock_rule_repo):
-        """合规规则名不被误拦, 且前缀里出现的词不参与判定。"""
+        """合规规则名不被误拦, 且前缀里出现的禁用词不参与判定。
+
+        前缀是 task_id, 语义上不进模型判定, 哪怕字面上含「检测到」也应放行 ——
+        判定只看剥掉前缀后的正文 (剥前缀正则改成先判后剥的话这条会挂)。
+        """
         existing = _make_static_rule(rule_id="r1")
         mock_rule_repo.get_by_id.return_value = existing
         mock_rule_repo.exists_by_name.return_value = False
 
         await service.patch_rule(
-            "r1", RuleUpdate(name="[fall_alert] 老人倒地后平躺不动")
+            "r1", RuleUpdate(name="[检测到摔倒] 老人倒地后平躺不动")
         )
-        assert existing.name == "[fall_alert] 老人倒地后平躺不动"
+        assert existing.name == "[检测到摔倒] 老人倒地后平躺不动"
 
     @pytest.mark.asyncio
     async def test_create_name_with_forbidden_prefix_raises(self, service):

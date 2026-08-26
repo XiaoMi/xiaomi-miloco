@@ -92,8 +92,13 @@ def _validate_rule_name_phrasing(name: str) -> None:
     为什么 name 也要管: 它和 query 落在感知调用的「待判断规则」段的**同一行**
     (``perception/engine/omni/prompt_builder.py::_render_rule_conditions``:
     ``- {rule_name}：{query}``), 断言性措辞的危害与写在 query 里完全一致。
-    以前这一处没校验是因为 name 只由 agent 按 skill 约定生成; Web 放开规则名
-    编辑后, 同一条 prompt 行多了一个住户直填的入口, 守卫得跟上。
+    以前这一处没校验, 但**不能**说是因为「agent 按 skill 约定生成所以一定合规」——
+    那份约定只约束 ``[task_id] `` 前缀形态、从不约束措辞 (CLI 帮助里 ``--name``
+    一度还写着「自由文本」), agent 侧一直是靠运气合规。补上守卫等于把这份运气变成
+    硬失败, 所以生成侧的两处契约 (miloco-create-task SKILL.md 的 name 映射行、
+    CLI ``rule create/update`` 的 ``--name`` 帮助) 同步写明了这条约束, 别让 agent
+    撞一个文档没提过的 422。Web 放开规则名编辑后, 这条 prompt 行又多了一个住户
+    直填的入口, 守卫更得跟上。
 
     先剥掉 ``[task_id] `` 约定前缀再判: 带前缀时 ``startswith`` 恒不命中,
     等于没校验。

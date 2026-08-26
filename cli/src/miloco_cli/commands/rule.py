@@ -62,7 +62,12 @@ def rule_list(enabled_only, pretty):
 
 
 @rule_group.command("create")
-@click.option("--name", required=True, help="规则展示名（自由文本）")
+@click.option(
+    "--name",
+    required=True,
+    help="规则展示名，格式 [<task_id>] <场景描述>；场景描述不得以断言性词"
+    "（检测到 / 识别到 / 感知到 / 已识别 等）开头，backend 会 422 退回",
+)
 @click.option("--task-id", "task_id", required=True, help="任务 id（snake_case）")
 @click.option(
     "--source",
@@ -314,7 +319,12 @@ def rule_create(
 
 @rule_group.command("update")
 @click.argument("rule_id")
-@click.option("--name", default=None, help="新规则名称")
+@click.option(
+    "--name",
+    default=None,
+    help="新规则名称；场景描述不得以断言性词（检测到 / 识别到 / 感知到 / 已识别 等）"
+    "开头，backend 会 422 退回",
+)
 @click.option("--task-id", "task_id", default=None, help="新 task_id")
 @click.option("--condition", "query_text", default=None, help="新触发条件")
 @click.option(
