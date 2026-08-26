@@ -26,6 +26,7 @@ from miloco.state.path import (
     validate_segment,
 )
 from miloco.state.types import MISSING, Change, Entry, Node, StateValue
+from miloco.state.utils import format_dump
 from miloco.utils.time_utils import now_ms
 
 logger = logging.getLogger(__name__)
@@ -491,6 +492,13 @@ class StateStore:
                 "discarded": self._discarded,
                 "shape_flips": self._shape_flips,
             }
+
+    def dump(self, pattern: str | Sequence[str] = "**") -> str:
+        """整棵树排成每叶子一行的文本，调试用。传 pattern 可以只看一部分。
+
+        走的是 `snapshot`，全量时期间所有写入方都阻塞在锁上，别放热路径。
+        """
+        return format_dump(self.snapshot(pattern, with_meta=True), now_ms())
 
     def _locate(self, segments: tuple[str, ...]) -> Node | None:
         node: Node = self._root
