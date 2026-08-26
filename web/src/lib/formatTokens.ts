@@ -25,5 +25,7 @@ export function axisTokens(n: number): string {
     const v = n / 1_000;
     return `${Number.isInteger(v) ? v : v.toFixed(1)}k`;
   }
-  return `${Math.round(n)}`;
+  // 与千以上两支同口径：非整数如实保留一位。纵轴上限取 1/2/5×10ⁿ，小数值下中线会
+  // 落在半数（如上限 5 时中线 2.5），四舍五入会让标注与它标的那条网格线错位。
+  return `${Number.isInteger(n) ? n : n.toFixed(1)}`;
 }

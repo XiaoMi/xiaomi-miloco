@@ -8,6 +8,10 @@
  *
  * 顺带补了一个原先没有的能力：**按时间范围清**。后端此前只有全清。
  *
+ * 刻意**不**声明成 ARIA menu（只用 aria-haspopup / aria-expanded + 一组普通按钮）：
+ * menu 模式约定方向键在项间移动焦点，而这里只有 Tab / Esc / 点击。声明了却不实现，
+ * 读屏用户听到的交互模型与实际键位对不上；档位本来就是 <button>，如实呈现即可。
+ *
  * 同一个组件带两种作用域：工具条上那个清所有模型，明细每行那个只清该行的
  * 「模型名 + endpoint」。同类动作用同一个图标、同一套范围档位，只差作用域——
  * 差异全部写在气泡标题、作用域徽记与确认窗里。
@@ -151,7 +155,7 @@ export function UsageClearMenu({
           }
           setOpen(next);
         }}
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         aria-label={target ? t("usage.clearTargetAria") : t("usage.clearData")}
@@ -170,7 +174,6 @@ export function UsageClearMenu({
       {open && (
         <div
           id={menuId}
-          role="menu"
           ref={menuRef}
           style={
             placement === "fixed"
@@ -210,7 +213,6 @@ export function UsageClearMenu({
               {i === 2 && <div className="h-px bg-border my-1.5 mx-1" />}
               <button
                 type="button"
-                role="menuitem"
                 onClick={() => {
                   setOpen(false);
                   onPick(pick(s));

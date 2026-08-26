@@ -43,7 +43,7 @@ export function RefreshIntervalInput({
         type="text"
         inputMode="numeric"
         value={text}
-        aria-label={t("usage.refreshSecAria")}
+        aria-label={t("usage.refreshSecAria", { min: REFRESH_MIN_SEC })}
         onChange={(e) => {
           // 纯数字检查：非数字字符不进 state（含中文全角、负号、小数点）
           const v = e.target.value;
@@ -61,8 +61,11 @@ export function RefreshIntervalInput({
       />
       <span>{t("usage.refreshSecUnit")}</span>
       {sec <= REFRESH_MIN_SEC && (
-        // 到了下限就说一句，别让人以为还能再往下调
-        <span className="text-text-tertiary">({REFRESH_MIN_SEC}s min)</span>
+        // 到了下限就说一句，别让人以为还能再往下调。下限值走插值，
+        // 常量改了文案跟着变，也不会在中文界面里冒出英文小尾巴。
+        <span className="text-text-tertiary">
+          ({t("usage.refreshAtMin", { min: REFRESH_MIN_SEC })})
+        </span>
       )}
     </label>
   );

@@ -409,3 +409,33 @@ def test_fire_record_persists_from_ephemeral_loop(repo):
     assert events[0]["input_tokens"] == 3000
     # base_url 也必须一起落库——它是模型身份的一半
     assert events[0]["base_url"] == "https://api.example/v1"
+
+
+def test_rollup_failure_keeps_the_new_event(repo, monkeypatch):
+    """滚存失败不该把当天这条新用量一起拒收。
+
+    持续失败（磁盘满、写锁超时）时，若每条事件都先撞上滚存失败再丢掉自己，
+    用量统计就冻在原地而感知照常跑——界面上只剩「用量不再增长」这一个线索，
+    而记用量的入口把异常降级成 warning。标记位仍然不置，下次插入自动重试。
+    """
+    boom_calls = {"n": 0}
+
+    def boom(_ts_ms):
+        boom_calls["n"] += 1
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(repo, "_maybe_rollup", boom)
+    repo._last_archive_check = None
+
+    repo.insert("m1", "https://a/v1", {"prompt_tokens": 10, "completion_tokens": 2}, "realtime")
+
+    with repo.db.get_connection() as conn:
+        rows = conn.execute("SELECT model, input_tokens FROM token_usage").fetchall()
+    assert [(r["model"], r["input_tokens"]) for r in rows] == [("m1", 10)]
+    assert boom_calls["n"] == 1
+
+    # 标记位没被置上 → 下一条插入还会再试一次
+    repo.insert("m1", "https://a/v1", {"prompt_tokens": 5, "completion_tokens": 1}, "realtime")
+    assert boom_calls["n"] == 2
+    with repo.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0] == 2

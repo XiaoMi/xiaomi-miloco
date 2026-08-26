@@ -204,8 +204,7 @@ export function UsagePage() {
         }
       >
 
-        {/* 错误内联呈现：控件保持挂载，且给重试入口。首次加载还没有任何数据时，
-            下面的 !stats 分支会接管整格（那时连错误条也没有位置可挂）。 */}
+        {/* 错误内联呈现：控件保持挂载，且给重试入口。 */}
         {usage.error && (
           <div
             className="mb-5 flex items-center justify-between gap-3 flex-wrap rounded-lg
@@ -224,10 +223,14 @@ export function UsagePage() {
           </div>
         )}
 
+        {/* 没有数据时的整格占位。失败已由上面的错误条连带重试入口表达，
+            这里不再补一句「暂无用量数据」——那会让人以为「取到了，只是没有数据」。 */}
         {!stats ? (
-          <div className="py-8 text-center text-text-secondary">
-            {usage.loading ? t("usage.loading") : t("usage.noUsageData")}
-          </div>
+          usage.error ? null : (
+            <div className="py-8 text-center text-text-secondary">
+              {usage.loading ? t("usage.loading") : t("usage.noUsageData")}
+            </div>
+          )
         ) : (
           // 重取时保持画面、只降透明度：不闪骨架、不跳布局
           <div className={usage.loading ? "opacity-60 transition-opacity" : "transition-opacity"}>

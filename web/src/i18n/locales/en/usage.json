@@ -166,6 +166,7 @@
     "priceInputMiss": "Input (uncached)",
     "refreshEvery": "Refresh every",
     "refreshSecUnit": "s",
-    "refreshSecAria": "Auto-refresh interval in seconds, minimum 5"
+    "refreshSecAria": "Auto-refresh interval (seconds, min {{min}})",
+    "refreshAtMin": "min {{min}}s"
   }
 }

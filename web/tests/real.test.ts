@@ -474,6 +474,27 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     expect(empty.targets).toEqual([]);
   });
 
+  it("周/月的日期格子走日历，不按 24 小时毫秒步长推", async () => {
+    // 带夏令时的时区下，跨过 spring-forward 那天减 24 小时会落到前一天 23:00，
+    // 归日就错一天：那天的数据查不到、被静默丢弃，整周的格子从此集体偏移。
+    // 这里只验「相邻格子恰好差一个日历日」这条不变量，不依赖运行测试的机器时区。
+    mockFetchByUrl({
+      "/api/admin/token-usage/daily": { code: 0, message: "ok", data: { rows: [], total: 0 } },
+    });
+    const s = await realGetUsageStats("week");
+    const days = s.timeline.map((p) => new Date(p.ts));
+    expect(days).toHaveLength(7);
+    for (let i = 1; i < days.length; i++) {
+      const prev = days[i - 1];
+      const cur = days[i];
+      const expected = new Date(prev);
+      expected.setDate(expected.getDate() + 1);
+      expect(cur.getFullYear()).toBe(expected.getFullYear());
+      expect(cur.getMonth()).toBe(expected.getMonth());
+      expect(cur.getDate()).toBe(expected.getDate());
+    }
+  });
+
   it("today：每桶保留按「模型名 + endpoint」的拆分，且与桶字段恒等", async () => {
     // 浮层的钱要逐目标按各自单价算——桶只有一个合并总数时，只能拿某一个模型的价
     // 去乘整桶 token，那是拿甲的价算乙的量。

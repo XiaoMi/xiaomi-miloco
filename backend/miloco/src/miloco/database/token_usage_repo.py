@@ -62,8 +62,20 @@ class TokenUsageRepo:
             # Only mark "done for today" after rollup succeeds. Otherwise a
             # persistent failure (disk full, lock contention) would be masked:
             # the flag would skip retries all day while the live table grows.
-            self._maybe_rollup(ts_ms)
-            self._last_archive_check = today
+            #
+            # 滚存失败不否决本次事件：它们是两件事，而持续失败（磁盘满、写锁超时）
+            # 若连带把每条新用量都丢掉，界面上只剩「用量不再增长」这一个线索，
+            # 而记用量的入口把异常降级成 warning、日志里也只有一行。
+            # 标记位仍然不置，下次插入自动重试，语义不变。
+            try:
+                self._maybe_rollup(ts_ms)
+            except Exception:
+                logger.warning(
+                    "daily rollup failed; keeping this event and retrying on next insert",
+                    exc_info=True,
+                )
+            else:
+                self._last_archive_check = today
 
         details = usage.get("prompt_tokens_details") or {}
         input_tokens = usage.get("prompt_tokens", 0)

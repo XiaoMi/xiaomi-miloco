@@ -166,6 +166,7 @@
     "priceInputMiss": "输入（未命中）",
     "refreshEvery": "刷新周期",
     "refreshSecUnit": "秒",
-    "refreshSecAria": "自动刷新周期（秒，最低 5）"
+    "refreshSecAria": "自动刷新周期（秒，最低 {{min}}）",
+    "refreshAtMin": "已是最低 {{min}} 秒"
   }
 }

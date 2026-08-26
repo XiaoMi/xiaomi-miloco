@@ -1750,7 +1750,11 @@ function dailyTimeline(
   today.setHours(0, 0, 0, 0);
   const out: UsageTimelinePoint[] = [];
   for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today.getTime() - i * ONE_DAY_MS);
+    // 走日历而不是减毫秒：带夏令时的浏览器时区下，跨过 spring-forward 那天减 24 小时
+    // 会落到前一天的 23:00，localDateStr 就返回错的一天，整周的格子从那天起集体错位、
+    // 而且不报错。查询窗口那侧同法，两处共用同一条日历链。
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
     const hit = byDate.get(localDateStr(d));
     // ts 统一成 ISO，与 today 分支一致（byDate 的 key 是 YYYY-MM-DD，不能直接用）
     // 浅拷贝只换 ts；targets 与源共享同一个数组，此后只读不再累加
@@ -2130,7 +2134,8 @@ async function fetchUsageStats(
   const days = period === "week" ? 7 : 30;
   const until = new Date();
   until.setHours(0, 0, 0, 0);
-  const since = new Date(until.getTime() - (days - 1) * ONE_DAY_MS);
+  const since = new Date(until);
+  since.setDate(since.getDate() - (days - 1)); // 走日历，见 dailyTimeline 的说明
   const qs = `since=${localDateStr(since)}&until=${localDateStr(until)}`;
   const r = await apiFetch<Normal<{ rows: DailyRow[]; total: number }>>(
     `/api/admin/token-usage/daily?${qs}`,
