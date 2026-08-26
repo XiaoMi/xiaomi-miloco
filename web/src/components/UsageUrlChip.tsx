@@ -36,6 +36,8 @@ export function UsageUrlChip({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  /** 同时包住按钮与气泡：外部点击的判据查这个节点（见 onDown 的说明）。 */
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
   const open = anchor !== null;
 
   useEffect(() => {
@@ -51,7 +53,11 @@ export function UsageUrlChip({
       }
     };
     const onDown = (e: MouseEvent) => {
-      if (!btnRef.current?.contains(e.target as Node)) close();
+      // 判据必须覆盖**气泡本体**，不能只查按钮：气泡在 DOM 上是按钮的兄弟，
+      // 而拖选文本要先 mousedown——只查按钮的话，在地址上一按就把气泡卸载了，
+      // 选区无从产生、复制每次都失败。短形式是压过的，点开的下一步通常正是
+      // 「把完整地址复制出去比对配置」，关掉它等于把这个气泡的用途砍掉一半。
+      if (!wrapRef.current?.contains(e.target as Node)) close();
     };
     // fixed 定位在滚动后会失锚（页面滚了，气泡不动）→ 直接关掉，不做跟随
     window.addEventListener("scroll", close, true);
@@ -91,7 +97,7 @@ export function UsageUrlChip({
   }, [anchor]);
 
   return (
-    <>
+    <span ref={wrapRef} className="inline-flex">
       <button
         ref={btnRef}
         type="button"
@@ -126,6 +132,6 @@ export function UsageUrlChip({
           <p className="num text-text-secondary break-all">{url}</p>
         </div>
       )}
-    </>
+    </span>
   );
 }
