@@ -400,3 +400,21 @@ def test_action_desc_keeps_prop_and_action_shape():
     )
     assert _action_desc(prop) == "prop.2.1=True"
     assert _action_desc(tts) == "action.7.3=['你好']"
+
+
+def test_state_action_desc_keeps_payload_out():
+    """state 摘要只带形态。前端按「；」切分摘要串(TasksPage.splitActions),
+    TTS 文案里的分号会把一条动作切成几行残句。"""
+    from miloco.rule.schema import RuleAction
+    from miloco.task.service import _action_desc_short
+
+    tts = RuleAction(
+        did="speaker", iid="action.7.3", params=["灯已调暗；投影已开启"],
+        idempotent=False, cooldown_minutes=5,
+    )
+    scene = RuleAction(
+        did="scene-A", iid="scene", idempotent=False, cooldown_minutes=5
+    )
+    assert _action_desc_short(tts) == "action.7.3"
+    assert "；" not in _action_desc_short(tts)
+    assert _action_desc_short(scene) == "scene:scene-A"

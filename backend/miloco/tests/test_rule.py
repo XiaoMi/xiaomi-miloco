@@ -4290,11 +4290,12 @@ class TestRuleServiceSceneActionValidation:
 
     @pytest.mark.asyncio
     async def test_scene_action_without_cooldown_raises(self, service):
+        """场景缺冷却命中更具体的那条（下限 1），而非通用的「非幂等要配冷却」。"""
         bad = RuleAction(did="scene-1", iid="scene", idempotent=False)
         rule = _make_static_rule(rule_id="", actions=[bad])
         with pytest.raises(
             ValidationException,
-            match=r"actions\[0\].*idempotent=false requires cooldown_minutes",
+            match=r"actions\[0\].*iid=scene requires cooldown_minutes >= 1",
         ):
             await service.create_rule(rule)
 
@@ -4487,4 +4488,72 @@ class TestRuleServiceIidShape:
             else RuleAction(did="d1", iid=good_iid, value=True)
         )
         rule = _make_static_rule(rule_id="", actions=[a])
+        assert await service.create_rule(rule) == "new-rule-id"
+
+
+class TestRulePatchScopedValidation:
+    """PATCH 的校验要跟着「这次改了什么」走。场景被删 / 家庭被关之后规则开始
+    每次 fire 都失败，而 `rule disable` 本身就是一次 PATCH —— 无条件校验会
+    在规则坏掉的那一刻把「先关掉它」这条自救路径堵死。"""
+
+    @pytest.fixture
+    def rule_with_dead_scene(self, mock_rule_repo, mock_miot_proxy):
+        mock_rule_repo.get_by_id = MagicMock(
+            return_value=_make_static_rule(actions=[_make_scene_action("scene-gone")])
+        )
+        mock_miot_proxy.get_all_scenes = AsyncMock(return_value={})
+        return mock_rule_repo
+
+    @pytest.mark.asyncio
+    async def test_disable_still_works_when_scene_gone(
+        self, service, rule_with_dead_scene
+    ):
+        from miloco.rule.schema import RuleUpdate
+
+        assert await service.patch_rule("rule-1", RuleUpdate(enabled=False)) is True
+
+    @pytest.mark.asyncio
+    async def test_condition_edit_still_works_when_scene_gone(
+        self, service, rule_with_dead_scene
+    ):
+        from miloco.rule.schema import RuleConditionUpdate, RuleUpdate
+
+        upd = RuleUpdate(condition=RuleConditionUpdate(query="有人经过"))
+        assert await service.patch_rule("rule-1", upd) is True
+
+    @pytest.mark.asyncio
+    async def test_touching_actions_still_validates_scene(
+        self, service, rule_with_dead_scene
+    ):
+        """真改动作时该校验还是要校验。"""
+        from miloco.rule.schema import RuleUpdate
+
+        with pytest.raises(ValidationException, match=r"Scene list unavailable"):
+            await service.patch_rule(
+                "rule-1", RuleUpdate(actions=[_make_scene_action("scene-gone")])
+            )
+
+
+class TestRuleSceneCooldownFloor:
+    """场景去重完全靠冷却，runner 把 0 当「无冷却」——填 0 等于零限频。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_cooldown", [0, -1])
+    async def test_zero_or_negative_cooldown_rejected(self, service, bad_cooldown):
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=False,
+            cooldown_minutes=bad_cooldown,
+        )
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(
+            ValidationException, match=r"iid=scene requires cooldown_minutes >= 1"
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_one_minute_cooldown_passes(self, service):
+        good = RuleAction(
+            did="scene-1", iid="scene", idempotent=False, cooldown_minutes=1
+        )
+        rule = _make_static_rule(rule_id="", actions=[good])
         assert await service.create_rule(rule) == "new-rule-id"

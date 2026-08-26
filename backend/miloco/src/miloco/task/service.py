@@ -38,11 +38,20 @@ logger = logging.getLogger(__name__)
 
 
 def _action_desc(a) -> str:
-    """单条动作的展示串。场景没有 value/params,只按 iid 渲染会变成
+    """event 模式的动作展示串。场景没有 value/params,只按 iid 渲染会变成
     ``scene=None``,且同规则装两个场景时两行完全一样。"""
     if a.iid == SCENE_IID:
         return f"{a.iid}:{a.did}"
     return f"{a.iid}={a.value if a.value is not None else a.params}"
+
+
+def _action_desc_short(a) -> str:
+    """state 模式的动作展示串:只要形态,不带 payload。
+
+    值可能是整段 TTS 文案,而前端按「；」把摘要串切成短句显示
+    (TasksPage.splitActions),文案里的分号会把一条动作切成几行残句。
+    """
+    return f"{a.iid}:{a.did}" if a.iid == SCENE_IID else a.iid
 
 
 class TaskService:
@@ -126,11 +135,15 @@ class TaskService:
             return list(rule.action_descriptions)
         out: list[str] = []
         if rule.on_enter_actions:
-            out.extend(f"on_enter:{_action_desc(a)}" for a in rule.on_enter_actions)
+            out.extend(
+                f"on_enter:{_action_desc_short(a)}" for a in rule.on_enter_actions
+            )
         if rule.on_enter_desc:
             out.append(f"on_enter:{rule.on_enter_desc}")
         if rule.on_exit_actions:
-            out.extend(f"on_exit:{_action_desc(a)}" for a in rule.on_exit_actions)
+            out.extend(
+                f"on_exit:{_action_desc_short(a)}" for a in rule.on_exit_actions
+            )
         if rule.on_exit_desc:
             out.append(f"on_exit:{rule.on_exit_desc}")
         return out

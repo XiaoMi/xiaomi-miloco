@@ -2476,3 +2476,12 @@ def test_rule_create_scene_action_valid(runner):
             "cooldown_minutes": 5,
         }
     ]
+
+
+def test_rule_create_scene_action_rejects_zero_cooldown(runner):
+    """冷却是场景唯一的去重手段，0 等于每次 fire 都真触发一次。"""
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_minutes":0}'
+    result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert "iid=scene requires cooldown_minutes >= 1" in combined

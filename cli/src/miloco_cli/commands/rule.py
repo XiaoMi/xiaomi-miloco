@@ -759,6 +759,11 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
             _exit_error(
                 f"{flag_name}[{i}]: idempotent=false requires cooldown_minutes"
             )
+        # 冷却是场景唯一的去重手段，填 0 等于每次 fire 都真触发一次。
+        if a.get("iid") == SCENE_IID and (a.get("cooldown_minutes") or 0) < 1:
+            _exit_error(
+                f"{flag_name}[{i}]: iid={SCENE_IID} requires cooldown_minutes >= 1"
+            )
 
 
 def _exit_error(msg: str):

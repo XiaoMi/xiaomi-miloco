@@ -167,6 +167,13 @@ def _validate_rule_consistency(rule: Rule) -> None:
                     f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
                     f"iid={SCENE_IID} requires idempotent=false"
                 )
+            # 冷却是场景唯一的去重手段,而 runner 把 0 当「无冷却」——填 0 会让
+            # 每次 fire 都真触发一次场景,正是执行侧闸门要防的那种。
+            if a.iid == SCENE_IID and (a.cooldown_minutes or 0) < 1:
+                raise ValidationException(
+                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
+                    f"iid={SCENE_IID} requires cooldown_minutes >= 1"
+                )
             if not a.idempotent and a.cooldown_minutes is None:
                 raise ValidationException(
                     f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
@@ -516,7 +523,11 @@ class RuleService:
 
         _validate_rule_consistency(existing)
         self._validate_on_target_desc_compat(existing)
-        await self._validate_scene_ids(existing)
+        # 与上面 perceive_device_ids 同口径:只校验这次 PATCH 真的动了的东西。
+        # 无条件跑的话,场景被删 / 家庭被关之后连 `rule disable`(它本身就是一次
+        # PATCH)都会 400 —— 规则坏掉的那一刻正好把「先关掉它」这条路堵死。
+        if {"actions", "on_enter_actions", "on_exit_actions"} & fields:
+            await self._validate_scene_ids(existing)
 
         success = self._repo.update(existing)
         if success:
