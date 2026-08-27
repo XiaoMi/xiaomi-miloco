@@ -216,6 +216,85 @@ async def _write_action_ledger(
         logger.warning("action_ledger write failed (did=%s): %s", did, e)
 
 
+async def _trigger_scene(
+    miot_proxy: MiotProxy,
+    scene_id: str,
+    *,
+    source: str = "cli",
+    source_id: str | None = None,
+) -> bool:
+    """触发一个米家手动场景并落台账。
+
+    模块级而非 MiotService 方法:RuleRunner 只持有 miot_proxy,直控路径要走同一
+    份家庭白名单校验和同一份台账口径(和 ``_write_action_ledger`` 一样的复用方
+    式)。``source``/``source_id`` 让规则触发的场景在台账里能回指到具体 rule,
+    不再和人工 CLI 混成一堆。
+    """
+    scenes: dict = {}
+    # 异常路径也要能看到"当时想触发什么"(失败审计完整性)——scene_name
+    # 在校验通过后、执行前就归一好,成功/异常两路复用。
+    scene_value_json: str | None = None
+    try:
+        scenes = (await miot_proxy.get_all_scenes()) or {}
+        if scene_id not in scenes:
+            raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
+        if not is_home_allowed(
+            miot_proxy._kv_repo, getattr(scenes[scene_id], "home_id", None)
+        ):
+            raise ValidationException(
+                f"Scene '{scene_id}' is not in an allowed home"
+            )
+        # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
+        # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
+        # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
+        scene_name = getattr(scenes[scene_id], "scene_name", None)
+        scene_value_json = json.dumps(
+            {"scene_name": scene_name}, ensure_ascii=False
+        )
+        ok = await miot_proxy.execute_miot_scene(scene_id)
+        await _write_action_ledger(
+            miot_proxy,
+            action_type="scene_trigger",
+            did=scene_id, iid=scene_id,
+            value_json=scene_value_json,
+            result_code=None,
+            result_msg=None if ok else "场景触发失败",
+            success=bool(ok), error=None,
+            source=source, source_id=source_id,
+            home_id=getattr(scenes[scene_id], "home_id", None),
+        )
+        return ok
+    except (ResourceNotFoundException, ValidationException) as e:
+        # 场景被删 / 不在允许家庭是最常见的两种生产失败,也是最该留痕的两种
+        # (后者还是越权信号)。不落台账的话,持久审计上一行都没有。
+        await _write_action_ledger(
+            miot_proxy,
+            action_type="scene_trigger",
+            did=scene_id, iid=scene_id,
+            value_json=scene_value_json,
+            result_code=None, result_msg=None,
+            success=False, error=str(e),
+            source=source, source_id=source_id,
+            home_id=getattr(scenes.get(scene_id), "home_id", None),
+        )
+        raise
+    except Exception as e:
+        logger.error("Failed to trigger scene %s: %s", scene_id, e)
+        await _write_action_ledger(
+            miot_proxy,
+            action_type="scene_trigger",
+            did=scene_id, iid=scene_id,
+            # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
+            value_json=scene_value_json,
+            result_code=None, result_msg=None,
+            success=False, error=str(e),
+            source=source, source_id=source_id,
+            # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
+            home_id=getattr(scenes.get(scene_id), "home_id", None),
+        )
+        raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e
+
+
 class MiotService:
     """MiOT service class"""
 
@@ -1551,50 +1630,4 @@ class MiotService:
 
     async def trigger_scene(self, scene_id: str) -> bool:
         """Trigger a MIoT manual scene."""
-        scenes: dict = {}
-        # 异常路径也要能看到"当时想触发什么"(失败审计完整性)——scene_name
-        # 在校验通过后、执行前就归一好,成功/异常两路复用。
-        scene_value_json: str | None = None
-        try:
-            scenes = (await self._miot_proxy.get_all_scenes()) or {}
-            if scene_id not in scenes:
-                raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(scenes[scene_id], "home_id", None)):
-                raise ValidationException(
-                    f"Scene '{scene_id}' is not in an allowed home"
-                )
-            # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
-            # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
-            # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
-            scene_name = getattr(scenes[scene_id], "scene_name", None)
-            scene_value_json = json.dumps(
-                {"scene_name": scene_name}, ensure_ascii=False
-            )
-            ok = await self._miot_proxy.execute_miot_scene(scene_id)
-            await _write_action_ledger(
-                self._miot_proxy,
-                action_type="scene_trigger",
-                did=scene_id, iid=scene_id,
-                value_json=scene_value_json,
-                result_code=None,
-                result_msg=None if ok else "场景触发失败",
-                success=bool(ok), error=None,
-                home_id=getattr(scenes[scene_id], "home_id", None),
-            )
-            return ok
-        except (ResourceNotFoundException, ValidationException):
-            raise
-        except Exception as e:
-            logger.error("Failed to trigger scene %s: %s", scene_id, e)
-            await _write_action_ledger(
-                self._miot_proxy,
-                action_type="scene_trigger",
-                did=scene_id, iid=scene_id,
-                # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
-                value_json=scene_value_json,
-                result_code=None, result_msg=None,
-                success=False, error=str(e),
-                # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
-                home_id=getattr(scenes.get(scene_id), "home_id", None),
-            )
-            raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e
+        return await _trigger_scene(self._miot_proxy, scene_id)
