@@ -221,6 +221,7 @@ class ScopeConfigKeys:
 
     HOME_WHITE_LIST_KEY = "HOME_WHITE_LIST_KEY"       # 已启用的家庭 home_id 列表
     CAMERA_BLACK_LIST_KEY = "CAMERA_BLACK_LIST_KEY" # 已停用的摄像头 did 列表
+    CAMERA_SCHEDULES_KEY = "CAMERA_SCHEDULES_KEY"   # 摄像头每日感知时间段配置
     # 已**开启**「拾音」的摄像头 did 列表（allow-list，opt-in）；不在此集 = 拾音关闭
     # （**默认关闭**）。默认关是产品决策：现阶段远场拾音/转写质量不稳，默认开会带来
     # 误报等负体验，故改为用户按场景显式开启（详见前端开启时的知情提示）。
