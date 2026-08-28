@@ -651,6 +651,15 @@ class MiotProxy:
             await self.refresh_devices()
         return self._device_info_dict
 
+    async def devices_in_current_home(self) -> dict[str, MIoTDeviceInfo]:
+        """只回当前启用家庭的设备。`get_devices` 是账号全量，过滤在各调用方自己做。"""
+        devices = await self.get_devices()
+        return {
+            did: info
+            for did, info in devices.items()
+            if is_home_allowed(self._kv_repo, getattr(info, "home_id", None))
+        }
+
     async def _on_lan_device_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         # refresh_cameras deep-copies SDK state, so post-init lan_online
         # changes only reach _camera_info_dict via this hook.
