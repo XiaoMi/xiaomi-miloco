@@ -7,22 +7,27 @@ import type { ReactNode } from "react";
 export function HelpTip({
   text,
   className = "",
+  wide = false,
 }: {
   text: ReactNode;
   className?: string;
+  /** 长说明用：改成定宽换行，否则 whitespace-nowrap 会把整段拉成一行超出视口。 */
+  wide?: boolean;
 }) {
   return (
     <span className={`relative inline-flex group align-middle ${className}`}>
       <button
         type="button"
         aria-label={typeof text === "string" ? text : undefined}
-        className="inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-[10px] leading-none text-text-tertiary transition-colors hover:text-brand-primary hover:border-brand-primary focus:text-brand-primary focus:border-brand-primary focus:outline-none"
+        className="inline-flex items-center justify-center w-4 h-4 rounded-full border text-[10px] leading-none transition-colors focus:outline-none border-border text-text-tertiary hover:text-brand-primary hover:border-brand-primary focus:text-brand-primary focus:border-brand-primary"
       >
         ?
       </button>
       <span
         role="tooltip"
-        className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-lg border border-border bg-bg-secondary px-2.5 py-1.5 text-caption font-normal text-text-secondary shadow-sm opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+        className={`pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 rounded-lg border border-border bg-bg-secondary px-2.5 py-1.5 text-caption font-normal leading-relaxed text-text-secondary shadow-sm opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${
+          wide ? "w-64 whitespace-normal text-left" : "whitespace-nowrap"
+        }`}
       >
         {text}
       </span>

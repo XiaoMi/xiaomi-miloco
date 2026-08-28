@@ -9,6 +9,7 @@
     "toDark": "Switch to dark"
   },
   "common": {
+    "refresh": "Refresh",
     "retry": "Retry",
     "loading": "Loading…",
     "switchFailed": "Couldn't switch, try again later",
