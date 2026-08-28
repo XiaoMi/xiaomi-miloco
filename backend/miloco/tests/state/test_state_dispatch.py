@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import threading
 
@@ -452,3 +453,25 @@ async def test_unsubscribe_inside_a_callback_does_not_stop_the_current_batch():
     store.set("a/b", 2, source="t")
     await settle()
     assert len(seen) == 1
+
+
+async def test_cascade_rejection_is_counted_and_only_logged_once(caplog):
+    """闸按外部写入频率打日志会自己变成负担；次数从 stats() 读，与另外几道同口径。"""
+    store = StateStore()
+    store.start()
+
+    counter = itertools.count()
+
+    def keep_deriving(change):
+        store.set("iot/device/d1/seq", next(counter), source="cb")
+
+    store.subscribe("iot/**", keep_deriving)
+    with caplog.at_level(logging.ERROR, logger="miloco.state.store"):
+        for step in range(5):
+            store.set("iot/device/d1/prop/2.1", step, source="align")
+            await settle()
+
+    rejections = [r for r in caplog.records if "cascade depth" in r.getMessage()]
+    assert len(rejections) == 1
+    assert store.stats()["rejected_cascade"] >= 5
+    store.stop()

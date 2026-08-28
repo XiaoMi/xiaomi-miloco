@@ -284,9 +284,12 @@ class StateStore:
         self._pending = 0
         self._dropped = 0
         self._discarded = 0
+        self._rejected_cascade = 0
+        self._rejected_leaf_limit = 0
         self._warned_not_started = False
         self._warned_leaf_limit = False
         self._warned_shape_flip = False
+        self._warned_cascade = False
 
     # ---- 写 ----
 
@@ -310,7 +313,7 @@ class StateStore:
 
     def clear(self, *, source: str) -> None:
         """清空整棵树，为每条消失的路径产一个删除事件。切换账号或家庭时用。"""
-        depth = self._next_cascade_depth("clear", "")
+        depth = self._next_cascade_depth("clear", "**")
         if depth is None:
             return
         with self._lock:
@@ -318,7 +321,15 @@ class StateStore:
 
     def _next_cascade_depth(self, operation: str, path: str) -> int | None:
         depth = _cascade_depth.get() + 1
-        if depth > MAX_CASCADE_DEPTH:
+        if depth <= MAX_CASCADE_DEPTH:
+            return depth
+        # 与另外几道闸同口径：只报第一条。成环时它会按外部写入频率触发，逐次打日志
+        # 等于让这道闸自己变成负担
+        with self._lock:
+            self._rejected_cascade += 1
+            first = not self._warned_cascade
+            self._warned_cascade = True
+        if first:
             logger.error(
                 "cascade depth %s exceeds limit %s; rejecting %s %s",
                 depth,
@@ -326,8 +337,7 @@ class StateStore:
                 operation,
                 path,
             )
-            return None
-        return depth
+        return None
 
     def _commit(self, path: str, value: Any, *, source: str) -> list[Change]:
         """写入并返回本次变更，不投递。数据结构层单测的入口。"""
@@ -359,6 +369,7 @@ class StateStore:
         added = sum(1 for change in batch.upserts if change.old is MISSING)
         total = self._leaf_count + added - len(batch.deletes)
         if total > MAX_LEAVES:
+            self._rejected_leaf_limit += 1
             # 只报一次：撑爆树的来源通常是高频的，而这条日志在锁内，按写入频率打会把所有
             # 写入方一起堵在锁上。第一条已经够定位，后面的没有新信息
             if not self._warned_leaf_limit:
@@ -442,8 +453,8 @@ class StateStore:
         """必须在锁内调用。
 
         叶子数直接归零而不是减去删除条数：两种算法在正确时结果相同，归零不依赖计数一路
-        没有漂过。两个告警标志说的是树的内容，内容清了就跟着复位；`dropped` /
-        `discarded` / `shape_flips` 记的是这条生命里发生过多少，不复位。
+        没有漂过。说树的内容的那几个告警标志跟着复位；记「这条生命里发生过多少」的那些
+        计数不复位。
         """
         batch = _Batch(source=source, now=now)
         _collect_deletes(self._root, (), batch)
@@ -508,9 +519,9 @@ class StateStore:
         return result
 
     def stats(self) -> dict[str, int]:
-        """三道防线的计数。日志只报第一条，次数只能从这里读。
+        """树有多大、队列多深、各道防线拦下过多少。日志只报第一条，次数只能从这里读。
 
-        五个数一起取才是同一时刻的样子，所以加锁；锁内只构造一个小 dict。
+        这些数一起取才是同一时刻的样子，所以加锁；锁内只构造一个小 dict。
         """
         with self._lock:
             return {
@@ -519,6 +530,8 @@ class StateStore:
                 "dropped": self._dropped,
                 "discarded": self._discarded,
                 "shape_flips": self._shape_flips,
+                "rejected_cascade": self._rejected_cascade,
+                "rejected_leaf_limit": self._rejected_leaf_limit,
             }
 
     def dump(self, pattern: str | Sequence[str] = "**") -> str:
@@ -546,8 +559,8 @@ class StateStore:
     ) -> Callable[[], None]:
         """订阅匹配 pattern 的叶子变更，返回退订函数。可以在 `start()` 之前调用。
 
-        只收订阅之后提交的变更。投递是异步的，所以「提交 → 订阅 → 事件循环转一圈」这个顺序
-        真实存在，而按边沿判定的消费方会为一个它上线前就发生完的跳变触发一次。
+        只收订阅之后提交的变更。投递是异步的，「提交 → 订阅 → 事件循环转一圈」这个顺序真实
+        存在，不挡的话按边沿判定的消费方会为一个它上线前就发生完的跳变触发一次。
 
         **退订不保证返回之后不再被回调**：`_dispatch` 在锁内取订阅表快照、随后在锁外逐个回调，
         退订正好落在这两步之间时这一批仍会投给它。退订后立刻拆自己的状态就可能被撞上。
@@ -577,8 +590,8 @@ class StateStore:
                 return
             self._loop = loop
             self._generation += 1
-            # 这条告警说的是「当前没在投递」，是生命周期状态；叶子上限和形态翻转那两个
-            # 标志说的是树的内容，start 不改变树，所以不跟着复位
+            # 这条告警说的是「当前没在投递」，是生命周期状态；说树的内容的那几个标志
+            # 不跟着复位，start 不改变树
             self._warned_not_started = False
 
     def stop(self) -> None:

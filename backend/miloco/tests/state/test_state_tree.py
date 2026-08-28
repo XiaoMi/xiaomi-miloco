@@ -739,6 +739,8 @@ def test_stats_starts_at_zero():
         "dropped": 0,
         "discarded": 0,
         "shape_flips": 0,
+        "rejected_cascade": 0,
+        "rejected_leaf_limit": 0,
     }
 
 
@@ -751,3 +753,16 @@ def test_stats_tracks_leaves_and_shape_flips():
 
     assert stats["leaves"] == 2
     assert stats["shape_flips"] == 1
+
+
+def test_leaf_limit_rejections_are_counted(monkeypatch):
+    """告警只报第一条，次数只能从 stats() 读 —— 与级联那道闸同口径。"""
+    monkeypatch.setattr("miloco.state.store.MAX_LEAVES", 1)
+    store = StateStore()
+    store._commit("iot/device/d1/status/online", True, source="x")
+
+    for index in range(3):
+        store._commit(f"iot/device/d{index}/prop/2.1", index, source="x")
+
+    assert store.stats()["leaves"] == 1
+    assert store.stats()["rejected_leaf_limit"] == 3
