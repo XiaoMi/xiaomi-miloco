@@ -475,3 +475,29 @@ async def test_online_flags_are_reported_when_no_property_is_readable(store, cap
     )
     assert "online flags only" in line
     assert "devices=2" in line
+
+
+async def test_a_batch_swallowed_by_the_leaf_limit_is_not_counted_as_written(
+    store, caplog, monkeypatch
+):
+    """上限拒收不抛异常，`set` 没抛就当全写进去了会让汇总行报出树里根本没有的条数。"""
+    monkeypatch.setattr("miloco.state.store.MAX_LEAVES", 1)
+    store._commit("iot/device/other/status/online", True, source="x")
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        written = _write_device(store, "d1", {"2.1": 26, "2.2": 5}, _Samples())
+
+    assert written == 0
+    assert store.stats()["leaves"] == 1
+    assert any("leaf limit" in r.getMessage() for r in caplog.records)
+
+
+async def test_row_without_value_reports_the_actual_code(store, caplog):
+    """判据换成 is_failure 之后，能走到这条日志的 code 不止 0。"""
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": -702000000}})
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    line = next(m for m in (r.getMessage() for r in caplog.records) if "no value" in m)
+    assert "-702000000" in line

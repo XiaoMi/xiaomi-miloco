@@ -173,10 +173,12 @@ async def _read_values(
             if "value" not in row:
                 if samples.take("row_without_value"):
                     logger.warning(
-                        "align: row has code 0 but no value: did=%s iid=prop.%s.%s",
+                        "align: row is not a failure but carries no value: "
+                        "did=%s iid=prop.%s.%s code=%s",
                         did,
                         siid,
                         piid,
+                        code,
                     )
                 continue
             value = row["value"]
@@ -215,6 +217,9 @@ def _write_device(
 
     返回写进去的属性条数。整台写失败时不能连累整台 —— 容器的校验是「整笔不写」，
     一个畸形值会让这台设备一条都进不去。
+
+    容器有两种拒收：校验失败抛异常，撞上叶子上限只记一条日志和一个计数、`set` 不抛。
+    后者要比对计数才看得出来，不比就会把一条都没进树的量算进返回值。
     """
     try:
         # 响应行的 did 不一定是请求里那个，请求侧校过不代表这里不用校
@@ -226,9 +231,14 @@ def _write_device(
         return 0
 
     path = f"iot/device/{did}/prop"
+    rejected_before = store.stats()["rejected_leaf_limit"]
     try:
         store.set(path, props, source=SOURCE)
-        return len(props)
+        if store.stats()["rejected_leaf_limit"] == rejected_before:
+            return len(props)
+        logger.warning(
+            "align: batch write hit the leaf limit did=%s; retrying per property", did
+        )
     except (TypeError, ValueError) as e:
         logger.warning(
             "align: batch write rejected did=%s (%s); retrying per property", did, e
@@ -244,8 +254,10 @@ def _write_device(
                 logger.warning("align: iid rejected did=%s iid=%r: %s", did, iid, e)
             continue
         try:
+            rejected = store.stats()["rejected_leaf_limit"]
             store.set(f"{path}/{iid}", value, source=SOURCE)
-            written += 1
+            if store.stats()["rejected_leaf_limit"] == rejected:
+                written += 1
         except (TypeError, ValueError) as e:
             if samples.take("value_rejected"):
                 logger.warning(
