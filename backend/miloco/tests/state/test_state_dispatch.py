@@ -475,3 +475,29 @@ async def test_cascade_rejection_is_counted_and_only_logged_once(caplog):
     assert len(rejections) == 1
     assert store.stats()["rejected_cascade"] >= 5
     store.stop()
+
+
+async def test_pending_watermark_is_only_reported_once(caplog):
+    """边沿触发只挡得住单调涨上去那种；在水位上下震荡时它会持锁按写入频率打。"""
+    store = StateStore()
+    store.start()
+    store.subscribe("**", lambda change: None)
+    monkey = 3
+    from miloco.state import store as store_module
+
+    original = store_module.PENDING_WARN_THRESHOLD
+    store_module.PENDING_WARN_THRESHOLD = monkey
+    try:
+        with caplog.at_level(logging.WARNING, logger="miloco.state.store"):
+            for round_ in range(5):
+                for index in range(monkey + 1):
+                    store.set(f"iot/device/d1/prop/{index}", round_, source="x")
+                await asyncio.sleep(0)
+    finally:
+        store_module.PENDING_WARN_THRESHOLD = original
+
+    warned = [
+        m for m in (r.getMessage() for r in caplog.records) if "pending state" in m
+    ]
+    assert len(warned) == 1
+    store.stop()

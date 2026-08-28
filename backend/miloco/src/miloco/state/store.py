@@ -290,6 +290,7 @@ class StateStore:
         self._warned_leaf_limit = False
         self._warned_shape_flip = False
         self._warned_cascade = False
+        self._warned_pending = False
 
     # ---- 写 ----
 
@@ -590,9 +591,10 @@ class StateStore:
                 return
             self._loop = loop
             self._generation += 1
-            # 这条告警说的是「当前没在投递」，是生命周期状态；说树的内容的那几个标志
+            # 这两条说的都是当前的投递状态，是生命周期状态；说树的内容的那几个标志
             # 不跟着复位，start 不改变树
             self._warned_not_started = False
+            self._warned_pending = False
 
     def stop(self) -> None:
         """停止投递。已排队的 `_dispatch` 靠 generation 作废，不必逐个取消。"""
@@ -625,8 +627,13 @@ class StateStore:
             return
         previous = self._pending
         self._pending += len(changes)
-        # 只在越过水位那一次报，不然积压期间每次写入都打一条，日志自己变成新的负担
-        if previous <= PENDING_WARN_THRESHOLD < self._pending:
+        # 只报第一条：边沿触发只挡得住单调涨上去那种，水位上下震荡时它仍会持锁
+        # 按写入频率打，而这条日志在锁内
+        if (
+            previous <= PENDING_WARN_THRESHOLD < self._pending
+            and not self._warned_pending
+        ):
+            self._warned_pending = True
             logger.warning(
                 "pending state changes %s exceed %s; a subscriber is likely blocking the loop",
                 self._pending,

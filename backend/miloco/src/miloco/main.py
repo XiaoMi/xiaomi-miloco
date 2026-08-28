@@ -457,6 +457,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         await state_align_task
     except asyncio.CancelledError:
+        # 这个 CancelledError 是上一行 cancel() 自己引发的，不是外面在取消我们
         pass
     get_manager().state_store.stop()
 
