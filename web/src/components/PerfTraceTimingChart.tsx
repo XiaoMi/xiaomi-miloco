@@ -2,7 +2,7 @@
  * 近期处理耗时折线图。数据源:/api/stats?metric=latency_percentiles
  *
  * 按 bucket 聚合 cycle_total_ms 的 P50 / P75 / P95 / P99 四条线,覆盖整个时间窗口。
- * 跟 RTF 折线相同的 bucket 粒度(1h→5m,24h→1h),抽样自然均匀。
+ * 跟处理耗时折线相同的 bucket 粒度(1h→5m,24h→1h),抽样自然均匀。
  * 红虚线 = 1 个窗口长度(常 3000ms)的参考线,超出即"单 cycle 处理 > 一个窗口"。
  *
  * 最右端如果落在还没结束的 bucket 上,改成虚线 + 半透明画出,提示该点仍在累积。
@@ -212,7 +212,7 @@ function Chart({
     let pendingPath = "";
     if (pendingIdx >= 0) {
       const pV = data[pendingIdx][key];
-      // 只连紧邻的上一个 bucket,空洞中不跨连(见 PerfRtfChart 同处注释)。
+      // 只连紧邻的上一个 bucket,空洞中不跨连(见 PerfLatencyChart 同处注释)。
       if (pV != null && pV > 0 && pendingIdx > 0) {
         const prevV = data[pendingIdx - 1][key];
         if (prevV != null && prevV > 0) {

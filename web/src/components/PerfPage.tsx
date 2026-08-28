@@ -3,7 +3,7 @@
  *
  * 顶部:窗口切换(1h/6h/24h/3d) + 手动刷新。下方按因果顺序排版:
  *   1. KPI 卡(PerfKpiCards)             — summary
- *   2. 实时率时序(PerfRtfChart)         — rtf_series (含 e2e 双线对比)
+ *   2. 处理耗时时序(PerfLatencyChart)   — latency_series (含窗口跨度参考线)
  *   3. Gate 过滤率(PerfGateChart)       — gate_pass_rate
  *   4. Omni 错误时序(PerfOmniErrorChart)— omni_error_series
  *   5. 窗口丢弃数(PerfDropChart)        — drop_series
@@ -29,7 +29,7 @@ import {
   getPerfGateScorePercentiles,
   getPerfLatencyPercentiles,
   getPerfOmniErrorSeries,
-  getPerfRtfSeries,
+  getPerfLatencySeries,
   getPerfStagePercentiles,
   getPerfSummary,
   listCameras,
@@ -53,7 +53,7 @@ import { PerfProcChart } from "./PerfProcChart";
 import { PerfKpiCards } from "./PerfKpiCards";
 import { PerfMemoryChart } from "./PerfMemoryChart";
 import { PerfOmniErrorChart } from "./PerfOmniErrorChart";
-import { PerfRtfChart } from "./PerfRtfChart";
+import { PerfLatencyChart } from "./PerfLatencyChart";
 import { PerfDropChart } from "./PerfDropChart";
 import { PerfGateChart } from "./PerfGateChart";
 import { PerfGateScoreTable } from "./PerfGateScoreTable";
@@ -75,10 +75,10 @@ export function PerfPage() {
     [windowKey],
     { errorLabel: t("perf.errSummary") },
   );
-  const rtf = useAsync(
-    () => getPerfRtfSeries(windowKey, bucket),
+  const latencySeries = useAsync(
+    () => getPerfLatencySeries(windowKey, bucket),
     [windowKey, bucket],
-    { errorLabel: t("perf.errRtfSeries") },
+    { errorLabel: t("perf.errLatencySeries") },
   );
   const stages = useAsync(
     () => getPerfStagePercentiles(windowKey),
@@ -148,7 +148,7 @@ export function PerfPage() {
 
   const reloadAll = () => {
     summary.reload();
-    rtf.reload();
+    latencySeries.reload();
     stages.reload();
     traces.reload();
     latency.reload();
@@ -204,7 +204,7 @@ export function PerfPage() {
             onClick={reloadAll}
             className="text-caption px-3 py-1.5 rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
           >
-            {t("perf.manualRefresh")}
+            {t("common.refresh")}
           </button>
         </div>
       </section>
@@ -212,8 +212,8 @@ export function PerfPage() {
       {/* 1. KPI 卡 */}
       <PerfKpiCards state={summary} />
 
-      {/* 2. RTF 时间序列 */}
-      <PerfRtfChart state={rtf} bucket={bucket} windowMs={windowMs} />
+      {/* 2. 处理耗时时间序列 */}
+      <PerfLatencyChart state={latencySeries} bucket={bucket} windowMs={windowMs} />
 
       {/* 3. Gate 过滤率时间序列 + 打分分布 */}
       <PerfGateChart state={gate} bucket={bucket} windowMs={windowMs} />

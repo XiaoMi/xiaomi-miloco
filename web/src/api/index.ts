@@ -28,7 +28,7 @@ import type {
   PerfLatencyPoint,
   PerfAgentRun,
   PerfOmniErrorPoint,
-  PerfRtfPoint,
+  PerfLatencySeriesPoint,
   PerfStagePercentiles,
   PerfSummary,
   PerfTraceRow,
@@ -625,13 +625,13 @@ export async function getPerfSummary(w: PerfWindow): Promise<PerfSummary> {
   return apiFetch<PerfSummary>(`/api/stats?metric=summary&since=${since}`);
 }
 
-export async function getPerfRtfSeries(
+export async function getPerfLatencySeries(
   w: PerfWindow,
   bucket: PerfBucket,
-): Promise<PerfRtfPoint[]> {
+): Promise<PerfLatencySeriesPoint[]> {
   const since = windowToSince(w);
-  return apiFetch<PerfRtfPoint[]>(
-    `/api/stats?metric=rtf_series&bucket=${bucket}&since=${since}`,
+  return apiFetch<PerfLatencySeriesPoint[]>(
+    `/api/stats?metric=latency_series&bucket=${bucket}&since=${since}`,
   );
 }
 

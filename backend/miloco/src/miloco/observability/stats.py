@@ -62,33 +62,56 @@ def latency_percentiles(conn, bucket, since, until):
     ]
 
 
-def rtf_series(conn, bucket, since, until):
-    """RTF 时序。返回的 rtf*  字段是"全部 cycle"的平均(原语义);
+def latency_series(conn, bucket, since, until):
+    """处理耗时时序,单位毫秒。ms_* 字段是"全部 cycle"的平均;
 
-    rtf_e2e_ok / rtf_omni_ok 是"成功 cycle (omni_error_count = 0)"的平均——前端拿来
-    跟对应的全部 cycle 均值对比,差值反映"omni 失败拖累 rtf"的程度。
+    ms_e2e_ok / ms_omni_ok 是"成功 cycle (omni_error_count = 0)"的平均——前端拿来
+    跟对应的全部 cycle 均值对比,差值反映"omni 失败拖累耗时"的程度。
+
+    window_ms 是**成功 cycle**(omni_error_count = 0)的实测窗口跨度均值,也就是这一桶
+    「有多少时间可用」。跟着 ms_e2e_ok / ms_omni_ok 走而不取全量:图上画的就是这两条
+    成功线,判读的是「它们对可用时间」,两边必须同一批 cycle。omni 失败常伴随帧堆积、
+    跨度变大,取全量会把参考线抬高、让主线看着更跟得上,而卡底那句告警恰恰承诺
+    「耗时已剔除失败 cycle 不受影响」。
+    耗时线越过它就是处理跟不上采集,越往上欠账越多。它是逐桶实测而非配置标称值:
+    窗口跨度由帧到达决定,会围着配置值抖,画标称值会让判据比实际宽松或严苛一点。
+
+    为什么这里聚合毫秒而不是让前端拿比值反推:比值是逐行的 耗时/窗口,而每行窗口跨度
+    不同,AVG(耗时/窗口) x 窗口 != AVG(耗时)。同理 P95 更不能换算——按比值排序与按毫秒
+    排序的第 95 个不是同一行。
+
+    `window_duration_ms > 0` 这道过滤与改造前一致(改造前读的 traces_v 视图,每个比值都
+    包在 `CASE WHEN window_duration_ms > 0 ... ELSE NULL END` 里,跨度为 0 的行不参与
+    均值)。跨度确实可能为 0——上报侧取不到窗口时长时落的就是 0。另一层理由:这张图的
+    判据是「耗时对可用时间」,两条线必须来自同一批 cycle,否则耗时均值含着「可用时间
+    未知」的行、而参考线不含,两条线就不可比。
     """
     bms = _bucket_ms(bucket)
     s, u = _window(since, until)
     rows = conn.execute(
-        "SELECT (timestamp/?)*? AS ts, AVG(rtf), AVG(rtf_e2e), "
-        "AVG(rtf_stream_e2e), AVG(rtf_pipeline), AVG(rtf_omni), "
-        "AVG(CASE WHEN omni_error_count = 0 THEN rtf_e2e END) AS rtf_e2e_ok, "
-        "AVG(CASE WHEN omni_error_count = 0 THEN rtf_omni END) AS rtf_omni_ok "
-        "FROM traces_v WHERE timestamp BETWEEN ? AND ? "
+        "SELECT (timestamp/?)*? AS ts, AVG(cycle_total_ms), "
+        "AVG(cycle_total_ms + COALESCE(in_delay_ms, 0)), "
+        "AVG(cycle_total_ms + COALESCE(in_delay_ms, 0) + COALESCE(stream_lag_ms, 0)), "
+        "AVG(pipeline_total_ms), AVG(omni_ms), "
+        "AVG(CASE WHEN omni_error_count = 0 "
+        "         THEN cycle_total_ms + COALESCE(in_delay_ms, 0) END) AS ms_e2e_ok, "
+        "AVG(CASE WHEN omni_error_count = 0 THEN omni_ms END) AS ms_omni_ok, "
+        "AVG(CASE WHEN omni_error_count = 0 THEN window_duration_ms END) "
+        "FROM traces WHERE timestamp BETWEEN ? AND ? AND window_duration_ms > 0 "
         "GROUP BY ts ORDER BY ts",
         (bms, bms, s, u),
     ).fetchall()
     return [
         {
             "ts": r[0],
-            "rtf": r[1],
-            "rtf_e2e": r[2],
-            "rtf_stream_e2e": r[3],
-            "rtf_pipeline": r[4],
-            "rtf_omni": r[5],
-            "rtf_e2e_ok": r[6],
-            "rtf_omni_ok": r[7],
+            "ms_cycle": r[1],
+            "ms_e2e": r[2],
+            "ms_stream_e2e": r[3],
+            "ms_pipeline": r[4],
+            "ms_omni": r[5],
+            "ms_e2e_ok": r[6],
+            "ms_omni_ok": r[7],
+            "window_ms": r[8],
         }
         for r in rows
     ]
@@ -245,7 +268,7 @@ def omni_error_series(conn, bucket, since, until):
     否则 N 镜头部署下柱子高度会被虚高 N 倍。
 
     X 轴用 traces 表所有 cycle 的 bucket 当 anchor,LEFT JOIN 错误聚合,
-    保证没错误的 bucket 也返回 0 计数。这样切窗口时 X 轴始终跟 drop/rtf
+    保证没错误的 bucket 也返回 0 计数。这样切窗口时 X 轴始终跟 drop/耗时
     等同源 chart 对齐,不会因为"近期 omni 无错误"卡在最后一根错误柱。
     """
     bms = _bucket_ms(bucket)
@@ -311,8 +334,10 @@ def summary(conn, bucket, since, until):
             "skip_rate": 0.0,
             "drop_rate": 0.0,
             "omni_error_rate": 0.0,
-            "p95_rtf_e2e": 0.0,
-            "p95_rtf_omni": 0.0,
+            "p95_ms_e2e": 0.0,
+            "p95_ms_omni": 0.0,
+            "p95_behind_e2e": False,
+            "p95_behind_omni": False,
             "agent_call_count": 0,
             "window": {"since": s, "until": u},
         }
@@ -321,21 +346,42 @@ def summary(conn, bucket, since, until):
     omni_call = omni_call or 0
     omni_err = omni_err or 0
     omni_error_rate = (omni_err / omni_call) if omni_call > 0 else 0.0
-    rtf_rows = conn.execute(
-        "SELECT rtf_e2e, rtf_omni FROM traces_v "
-        "WHERE timestamp BETWEEN ? AND ? AND omni_error_count = 0",
+    # 一次查出「毫秒」与「比值」两组,分工明确:
+    #   - 显示用毫秒的 P95(住户读得懂的量)
+    #   - **越界判据仍用比值的 P95 与 1 比**,与改造前一字不差
+    # 判据不能改用「毫秒 P95 对窗口跨度均值」:P95 是尾部统计量、均值是中心统计量,
+    # 两者不可互推,两个方向都会误判(见 test_p95_behind_matches_ratio_criterion 里
+    # 构造的假阳性与假阴性)。
+    # `window_duration_ms > 0` 让两组的输入集一致,也与改造前相同——改造前读 traces_v,
+    # 跨度为 0 的行比值为 NULL、被后面的 is not None 滤掉。
+    ms_rows = conn.execute(
+        "SELECT cycle_total_ms + COALESCE(in_delay_ms, 0), omni_ms, rtf_e2e, rtf_omni "
+        "FROM traces_v "
+        "WHERE timestamp BETWEEN ? AND ? AND omni_error_count = 0 "
+        "AND window_duration_ms > 0",
         (s, u),
     ).fetchall()
-    rtf_e2e_vals = [r[0] for r in rtf_rows if r[0] is not None]
-    rtf_omni_vals = [r[1] for r in rtf_rows if r[1] is not None]
+    ms_e2e_vals = [r[0] for r in ms_rows if r[0] is not None]
+    ms_omni_vals = [r[1] for r in ms_rows if r[1] is not None]
+    ratio_e2e_vals = [r[2] for r in ms_rows if r[2] is not None]
+    ratio_omni_vals = [r[3] for r in ms_rows if r[3] is not None]
     return {
         "cycle_count": cycle_count,
         "dropped_count": dropped_sum,
         "skip_rate": skip_avg or 0.0,
         "drop_rate": drop_rate,
         "omni_error_rate": omni_error_rate,
-        "p95_rtf_e2e": _percentile(rtf_e2e_vals, 0.95) if rtf_e2e_vals else 0.0,
-        "p95_rtf_omni": _percentile(rtf_omni_vals, 0.95) if rtf_omni_vals else 0.0,
+        "p95_ms_e2e": _percentile(ms_e2e_vals, 0.95) if ms_e2e_vals else 0.0,
+        "p95_ms_omni": _percentile(ms_omni_vals, 0.95) if ms_omni_vals else 0.0,
+        # 「跟不上」的判据,口径与改造前一字不差:逐行的 耗时/窗口 排完序,第 95 个 > 1。
+        # 只透出布尔而不透出那个比值:界面显示的是毫秒,再给一个不显示的比值只会让
+        # 下一个人以为它该显示在哪里。
+        "p95_behind_e2e": (
+            _percentile(ratio_e2e_vals, 0.95) > 1 if ratio_e2e_vals else False
+        ),
+        "p95_behind_omni": (
+            _percentile(ratio_omni_vals, 0.95) > 1 if ratio_omni_vals else False
+        ),
         "agent_call_count": agent_count or 0,
         "window": {"since": s, "until": u},
     }
@@ -448,7 +494,7 @@ def error_top_n(conn, bucket, since, until):
 
 VIEWS = {
     "latency_percentiles": latency_percentiles,
-    "rtf_series": rtf_series,
+    "latency_series": latency_series,
     "gate_pass_rate": gate_pass_rate,
     "agent_success_rate": agent_success_rate,
     "agent_latency_breakdown": agent_latency_breakdown,

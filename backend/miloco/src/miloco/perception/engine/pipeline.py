@@ -631,7 +631,7 @@ async def run_batch_pipeline(
         except OmniError as omni_err:
             # partial 结果:单设备 omni 失败(超时/429/模型错)→ 记 omni_ms + 失败标记 + log,
             # **不连累整窗**——返回 skipped(omni_output=None;_merge_results line855 会跳过该设备),
-            # 健康相机照常 merge+submit。失败时也记 omni_ms 让 rtf_omni 反映真实墙钟(含 timeout 等待)。
+            # 健康相机照常 merge+submit。失败时也记 omni_ms 让 omni 耗时反映真实墙钟(含 timeout 等待)。
             # omni 超时(30s)走这里 → run_omni_fused 已在其 except 调 deliver_fused_failure 清理
             # fused pending(无泄漏)。
             room_timing[f"omni_{did}_ms"] = _ms_since(t)

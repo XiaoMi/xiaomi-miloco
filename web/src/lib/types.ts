@@ -559,10 +559,19 @@ export interface PerfSummary {
   skip_rate: number;
   drop_rate: number;
   omni_error_rate: number;
-  p95_rtf_e2e: number;
-  /** P95 of rtf_omni 仅 omni 成功 cycle(omni_error_count=0)。看 omni 单段实时性,
-   *  跟 p95_rtf_e2e(端到端含等待)对比反映等待时间占比。 */
-  p95_rtf_omni: number;
+  /** P95 端到端处理耗时(含入队等待),毫秒。仅 omni 成功 cycle。 */
+  p95_ms_e2e: number;
+  /** P95 omni 单段耗时,毫秒。仅 omni 成功 cycle(omni_error_count=0);
+   *  跟 p95_ms_e2e(端到端含等待)对比反映等待时间占比。 */
+  p95_ms_omni: number;
+  /**
+   * 「这一段跟不上了」——判据是逐行的 耗时/窗口 排完序第 95 个 > 1，由后端算。
+   *
+   * 为什么不在前端拿 p95_ms_* 跟某个窗口跨度比：P95 是尾部统计量、跨度均值是中心
+   * 统计量，两者不可互推，两个方向都会误判。显示归显示、判据归判据。
+   */
+  p95_behind_e2e: boolean;
+  p95_behind_omni: boolean;
   agent_call_count: number;
   window: { since: number; until: number };
 }
@@ -616,18 +625,21 @@ export interface PerfLatencyPoint {
   p99: number | null;
 }
 
-/** /api/stats?metric=rtf_series 单个点。ts 是 ms timestamp。 */
-export interface PerfRtfPoint {
+/** /api/stats?metric=latency_series 单个点。ts 是 ms timestamp,其余为毫秒耗时。 */
+export interface PerfLatencySeriesPoint {
   ts: number;
-  rtf: number | null;
-  rtf_e2e: number | null;
-  rtf_stream_e2e: number | null;
-  rtf_pipeline: number | null;
-  rtf_omni: number | null;
-  /** 仅成功 cycle (omni_error_count=0) 的 rtf_e2e 均值;跟 rtf_e2e 差值反映失败拖累。 */
-  rtf_e2e_ok: number | null;
-  /** 仅成功 cycle (omni_error_count=0) 的 rtf_omni 均值;跟 rtf_omni 差值反映失败拖累。 */
-  rtf_omni_ok: number | null;
+  ms_cycle: number | null;
+  ms_e2e: number | null;
+  ms_stream_e2e: number | null;
+  ms_pipeline: number | null;
+  ms_omni: number | null;
+  /** 仅成功 cycle (omni_error_count=0) 的 ms_e2e 均值;跟 ms_e2e 差值反映失败拖累。 */
+  ms_e2e_ok: number | null;
+  /** 仅成功 cycle (omni_error_count=0) 的 ms_omni 均值;跟 ms_omni 差值反映失败拖累。 */
+  ms_omni_ok: number | null;
+  /** 本桶**成功 cycle** 的实测窗口跨度均值 = 这一桶「有多少时间可用」；
+   *  与图上那两条成功线同批，耗时越过它就是跟不上采集。 */
+  window_ms: number | null;
 }
 
 /** /api/stats?metric=omni_error_series 单个点。三类堆叠用。 */

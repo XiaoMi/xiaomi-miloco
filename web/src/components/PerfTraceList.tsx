@@ -1,8 +1,13 @@
 /**
  * 原始 trace 列表。
  *
- * 表头:时间 / 设备 / 数据包长 / 处理耗时 / 实时率 / 输入类型 / Agent / 丢弃。
+ * 表头:时间 / 设备 / 数据包长 / 处理耗时 / 输入类型 / Agent / 丢弃。
  * 行点击可展开子行,显示 8 阶段耗时分解。
+ *
+ * 没有单独的「耗时/窗口」比值列:数据包长与处理耗时两列都在表上,比值是这两个数一除,
+ * 多一列等于把同一件事再说一遍。「跟不上」改染在处理耗时那一格,**判据沿用原来那一列
+ * 的**(端到端比值超过 1,回退到 cycle 比值),没有换标准;它含入队等待、而等待没有单独
+ * 成列,所以会出现「表上两列相除没超、格子却红了」——那一格挂了 title 说明这件事。
  *
  * 没接 drawer / trace 详情接口 —— 留给二期。
  */
@@ -96,7 +101,6 @@ function Table({ rows, expanded, windowMs, onToggle, t }: TableProps) {
             <th className="text-right px-3 py-2 num">{t("perf.traceColDevice")}</th>
             <th className="text-right px-3 py-2 num">{t("perf.traceColWindowMs")}</th>
             <th className="text-right px-3 py-2 num">{t("perf.traceColCycleMs")}</th>
-            <th className="text-right px-3 py-2 num">{t("perf.traceColRtf")}</th>
             <th className="text-center px-3 py-2">{t("perf.traceColInputType")}</th>
             <th className="text-center px-3 py-2">{t("perf.traceColAgent")}</th>
             <th className="text-right px-5 md:px-6 py-2 num">{t("perf.traceColDropped")}</th>
@@ -105,15 +109,12 @@ function Table({ rows, expanded, windowMs, onToggle, t }: TableProps) {
         <tbody>
           {rows.map((r) => {
             const isOpen = expanded === r.trace_id;
-            const rtf = r.rtf_e2e ?? r.rtf;
-            const rtfWarn = rtf != null && rtf > 1;
             const hasAgent = r.has_agent_turn === 1;
             const hasDropped = r.dropped_windows_total > 0;
             return (
               <Row
                 key={r.trace_id}
                 row={r}
-                rtfWarn={rtfWarn}
                 hasAgent={hasAgent}
                 hasDropped={hasDropped}
                 isOpen={isOpen}
@@ -131,7 +132,6 @@ function Table({ rows, expanded, windowMs, onToggle, t }: TableProps) {
 
 interface RowProps {
   row: PerfTraceRow;
-  rtfWarn: boolean;
   hasAgent: boolean;
   hasDropped: boolean;
   isOpen: boolean;
@@ -187,7 +187,6 @@ function ChannelPass({
 
 function Row({
   row,
-  rtfWarn,
   hasAgent,
   hasDropped,
   isOpen,
@@ -196,7 +195,10 @@ function Row({
   t,
 }: RowProps) {
   const r = row;
-  const rtf = r.rtf_e2e ?? r.rtf;
+  // 「这一轮没跟上」：沿用原先那一列的判据（端到端比值 > 1，回退 cycle 比值），只是
+  // 把它从独立一格挪到耗时那一格上染色，判据本身一字未改。
+  const ratio = r.rtf_e2e ?? r.rtf;
+  const overWindow = ratio != null && ratio > 1;
   return (
     <>
       <tr
@@ -224,15 +226,14 @@ function Row({
             ? "—"
             : r.window_duration_ms.toFixed(0)}
         </td>
-        <td className="px-3 py-2.5 text-right num text-text-primary">
-          {r.cycle_total_ms == null ? "—" : r.cycle_total_ms.toFixed(0)}
-        </td>
         <td
           className={`px-3 py-2.5 text-right num ${
-            rtfWarn ? "text-error font-semibold" : "text-text-secondary"
+            overWindow ? "text-error font-semibold" : "text-text-primary"
           }`}
+          // 判据含入队等待，而等待没有单独成列，故标红可能与「两列相除」的直觉不符
+          title={overWindow ? t("perf.traceCycleBehind") : undefined}
         >
-          {rtf == null ? "—" : rtf.toFixed(2)}
+          {r.cycle_total_ms == null ? "—" : r.cycle_total_ms.toFixed(0)}
         </td>
         <td className="px-3 py-2.5 text-center">
           <ChannelPass
@@ -260,7 +261,7 @@ function Row({
       </tr>
       {isOpen && (
         <tr className="bg-bg-tertiary border-b border-border">
-          <td colSpan={8} className="px-5 md:px-6 py-3">
+          <td colSpan={7} className="px-5 md:px-6 py-3">
             <ExpandedDetail row={r} t={t} />
           </td>
         </tr>

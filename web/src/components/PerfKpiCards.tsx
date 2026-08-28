@@ -1,8 +1,11 @@
 /**
- * 7 张 KPI 卡:轮次(含应处理) / Gate 过滤率 / 窗口丢弃率 / Omni 错误率 / 实时率 P95 /
- * omni 实时率 P95 / Agent 调用。
+ * 7 张 KPI 卡:轮次(含应处理) / Gate 过滤率 / 窗口丢弃率 / Omni 错误率 / 耗时 P95 /
+ * omni 耗时 P95 / Agent 调用。
  *
- * 阈值颜色:>5% drop / >5% omni error / RTF>1 → 红字提醒,其余中性。
+ * 阈值颜色:>5% drop / >5% omni error / 耗时跟不上 → 红字提醒,其余中性。
+ * 耗时那两格显示毫秒,但「跟不上」的判据由后端给(p95_behind_*):逐行的 耗时/窗口
+ * 排完序第 95 个 > 1。显示与判据分开,是因为 P95 是尾部统计量、不能拿它去跟某个
+ * 跨度均值比——那样两个方向都会误判。
  *
  * Omni 错误时间分布另起一行,见 PerfOmniErrorChart。
  */
@@ -130,17 +133,17 @@ export function PerfKpiCards({ state, embedded = false }: Props) {
       />
       <KpiCard
         embedded={embedded}
-        label={t("perf.kpiRtfP95")}
-        value={s.p95_rtf_e2e.toFixed(2)}
-        hint={t("perf.kpiRtfP95Hint")}
-        warn={s.p95_rtf_e2e > 1}
+        label={t("perf.kpiLatencyP95")}
+        value={`${Math.round(s.p95_ms_e2e)} ms`}
+        hint={t("perf.kpiLatencyP95Hint")}
+        warn={s.p95_behind_e2e}
       />
       <KpiCard
         embedded={embedded}
-        label={t("perf.kpiOmniRtfP95")}
-        value={s.p95_rtf_omni.toFixed(2)}
-        hint={t("perf.kpiOmniRtfP95Hint")}
-        warn={s.p95_rtf_omni > 1}
+        label={t("perf.kpiOmniLatencyP95")}
+        value={`${Math.round(s.p95_ms_omni)} ms`}
+        hint={t("perf.kpiOmniLatencyP95Hint")}
+        warn={s.p95_behind_omni}
       />
       <KpiCard
         embedded={embedded}

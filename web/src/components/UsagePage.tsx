@@ -230,7 +230,7 @@ export function UsagePage() {
         )}
       </CollapsibleCard>
 
-      {/* 性能监控(精简:工具条 + KPI + 实时率 + Gate;完整版仍在 #perf) */}
+      {/* 性能监控(精简:工具条 + KPI + 处理耗时 + Gate;完整版仍在 #perf) */}
       <PerfInline />
 
       {clearScope && (

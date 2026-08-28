@@ -118,8 +118,9 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx }: ChartProps) {
   const PAD_R = 16;
   const PAD_T = 12;
   const PAD_B = 28;
-  const SVG_W = 1000;
   const yMax = 100;
+
+  const SVG_W = 1000;
 
   const xSvgAt = (i: number) => {
     if (n <= 1) return SVG_W / 2;
@@ -154,7 +155,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx }: ChartProps) {
     let pendingPath = "";
     if (pendingIdx >= 0) {
       const pV = toFilterPct(data[pendingIdx].overall);
-      // 只连紧邻的上一个 bucket,空洞中不跨连(见 PerfRtfChart 同处注释)。
+      // 只连紧邻的上一个 bucket,空洞中不跨连(见 PerfLatencyChart 同处注释)。
       if (pV != null && pendingIdx > 0) {
         const prevV = toFilterPct(data[pendingIdx - 1].overall);
         if (prevV != null) {

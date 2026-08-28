@@ -10,7 +10,7 @@
  * 内存分区 / python_heap 段独立 `?.` 判空 —— 分区不可用时图表 + 表格降级文案；
  * python_heap 缺时类型表降级。
  *
- * SVG 模式参照 PerfRtfChart：viewBox 横向自适应 + HTML 浮层放轴标签和 tooltip，
+ * SVG 模式参照 PerfLatencyChart：viewBox 横向自适应 + HTML 浮层放轴标签和 tooltip，
  * 避免 SVG preserveAspectRatio 拉伸字号。
  */
 

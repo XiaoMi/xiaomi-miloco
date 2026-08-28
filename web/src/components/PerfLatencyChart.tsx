@@ -1,17 +1,22 @@
 /**
- * RTF 时间序列折线图。纯 SVG,标签用 HTML 浮层避免 preserveAspectRatio 字号拉伸。
+ * 处理耗时时间序列折线图,单位毫秒。纯 SVG,标签用 HTML 浮层避免非等比缩放拉伸字号。
  *
- * 5 条 RTF 变体:
- *   rtf_e2e_ok     — 仅成功 cycle 的端到端 RTF (主线,反映系统真实负载)
- *   rtf_e2e        — 全部 cycle (含失败) 端到端 RTF (灰虚线,对比用)
- *   rtf            — cycle 处理本身 (内核视角)
- *   rtf_omni_ok    — 仅成功 cycle 的 omni 单段 RTF (omni 真实推理实时性)
- *   rtf_omni       — 全部 cycle (含失败) omni 单段 RTF (橙虚线,对比用)
+ * 图上三条线:
+ *   ms_e2e_ok  — 仅成功 cycle 的端到端耗时 (主线,反映系统真实负载)
+ *   ms_omni_ok — 仅成功 cycle 的 omni 单段耗时
+ *   window_ms  — 本桶实测窗口跨度 = 「有多少时间可用」(灰虚线,参考线)
  *
- * rtf_e2e_ok / rtf_omni_ok 与对应"含失败"线的差值反映 omni 失败拖累 rtf 的程度:
- * 超时拖长,限流拖短。
+ * 耗时线在参考线以下 = 处理跟得上采集;越过它 = 处理不过来,每一轮都在往后欠账。
+ * 这条参考线取代了原先钉在「耗时/窗口 = 1.0」处的那条红线:判据完全相同,但两条线
+ * 都是毫秒、同一个纵轴,读图不必先理解那个比值是什么。参考线逐桶取实测跨度而不是画
+ * 配置标称值——跨度由帧到达决定、会围着配置值抖,画标称值会让判据比实际宽松或严苛。
  *
- * 1.0 红虚线 = 实时性边界。Y 轴根据数据 max 自适应刻度,确保 >1 时也能看清高度。
+ * 「含失败」的两条(ms_e2e / ms_omni)与 cycle 段(ms_cycle)不画在图上,只在 hover 浮层
+ * 里列出:五条线挤一张图彼此重叠、本来就分辨不出来,而它们的用处是看具体数值差
+ * (omni 失败拖累耗时——超时拖长,限流拖短),逐行列数字比叠线更合用。
+ *
+ * 纵轴单位统一毫秒,不按量级切换秒/毫秒:同一页的阶段耗时图也是毫秒,两张图对着看
+ * 时不该先做单位换算。
  *
  * 最右端如果落在还没结束的 bucket 上,改成虚线 + 半透明画出,提示该点仍在累积、
  * 样本不足时 AVG 可能跳。语义参考 lib/perfBucket.ts splitClosedPending。
@@ -27,78 +32,94 @@ import {
   formatPerfTs,
   splitClosedPending,
 } from "@/lib/perfBucket";
-import type { PerfBucket, PerfRtfPoint } from "@/lib/types";
+import type { PerfBucket, PerfLatencySeriesPoint } from "@/lib/types";
 import { ChartGapOverlay } from "./ChartGapOverlay";
 
 interface Props {
-  state: AsyncState<PerfRtfPoint[]>;
+  state: AsyncState<PerfLatencySeriesPoint[]>;
   bucket: PerfBucket;
   windowMs: number;
   /** 嵌入「性能监测」大卡时去掉自身卡壳。 */
   embedded?: boolean;
 }
 
-const RTF_EMPTY = (ts: number): PerfRtfPoint => ({
+const LATENCY_EMPTY = (ts: number): PerfLatencySeriesPoint => ({
   ts,
-  rtf: null,
-  rtf_e2e: null,
-  rtf_stream_e2e: null,
-  rtf_pipeline: null,
-  rtf_omni: null,
-  rtf_e2e_ok: null,
-  rtf_omni_ok: null,
+  ms_cycle: null,
+  ms_e2e: null,
+  ms_stream_e2e: null,
+  ms_pipeline: null,
+  ms_omni: null,
+  ms_e2e_ok: null,
+  ms_omni_ok: null,
+  window_ms: null,
 });
 
-type LineKey = "rtf" | "rtf_e2e" | "rtf_omni" | "rtf_e2e_ok" | "rtf_omni_ok";
+type LineKey =
+  | "ms_cycle"
+  | "ms_e2e"
+  | "ms_omni"
+  | "ms_e2e_ok"
+  | "ms_omni_ok"
+  | "window_ms";
 
 interface LineDef {
   key: LineKey;
   labelKey: string;
   strokeClass: string;
   legendDotClass: string;
-  /** true 时整条线画成虚线(对比线,不是主指标) */
+  /** true 时整条线画成虚线(参考线,不是被测量) */
   dashed?: boolean;
 }
 
-const LINES: LineDef[] = [
-  { key: "rtf_e2e_ok", labelKey: "perf.rtfE2eOk", strokeClass: "stroke-brand-primary", legendDotClass: "bg-brand-primary" },
-  { key: "rtf_e2e", labelKey: "perf.rtfE2e", strokeClass: "stroke-text-tertiary", legendDotClass: "bg-text-tertiary", dashed: true },
-  { key: "rtf", labelKey: "perf.rtfCycle", strokeClass: "stroke-info", legendDotClass: "bg-info" },
-  { key: "rtf_omni_ok", labelKey: "perf.rtfOmniOk", strokeClass: "stroke-success", legendDotClass: "bg-success" },
-  { key: "rtf_omni", labelKey: "perf.rtfOmni", strokeClass: "stroke-warning", legendDotClass: "bg-warning", dashed: true },
+/**
+ * 画在图上的线。只留三条,且三条的颜色必须互相分得开——颜色是这里唯一的身份编码。
+ * (曾经五条同画,而 brand-primary 与 warning 在浅色档都是橙,图例里两格同色。)
+ */
+const CHART_LINES: LineDef[] = [
+  { key: "ms_e2e_ok", labelKey: "perf.msE2eOk", strokeClass: "stroke-brand-primary", legendDotClass: "bg-brand-primary" },
+  { key: "ms_omni_ok", labelKey: "perf.msOmniOk", strokeClass: "stroke-success", legendDotClass: "bg-success" },
+  { key: "window_ms", labelKey: "perf.msWindow", strokeClass: "stroke-text-tertiary", legendDotClass: "bg-text-tertiary", dashed: true },
 ];
 
-/** 选 nice 刻度:始终含 0 和 1.0(1.0 是红虚线载体),顶部按 dataMax 取整。返回升序数组。 */
-function chooseYTicks(dataMax: number): number[] {
-  if (dataMax <= 1.2) return [0, 0.5, 1.0];
-  // 顶部刻度向上取到 nice number
-  const niceTop = (() => {
-    if (dataMax <= 2) return 2;
-    if (dataMax <= 3) return 3;
-    if (dataMax <= 5) return 5;
-    if (dataMax <= 8) return 8;
-    if (dataMax <= 10) return 10;
-    if (dataMax <= 15) return 15;
-    if (dataMax <= 20) return 20;
-    if (dataMax <= 30) return 30;
-    if (dataMax <= 50) return 50;
-    if (dataMax <= 100) return 100;
-    const mag = Math.pow(10, Math.floor(Math.log10(dataMax)));
-    return Math.ceil(dataMax / mag) * mag;
-  })();
-  if (niceTop > 5) {
-    // 大区间:0..niceTop 4 等分均匀分布 + 强制塞 1.0(红虚线载体)
-    const step = niceTop / 4;
-    const ticks = new Set([0, 1, step, step * 2, step * 3, niceTop]);
-    return Array.from(ticks).sort((a, b) => a - b);
-  }
-  // 小区间(niceTop<=5):用几何中位,1.0 跟 niceTop 距离较近时还能均衡
-  const mid = Math.round(Math.sqrt(1 * niceTop) * 10) / 10;
-  const ticks = new Set([0, 1, mid, niceTop]);
-  return Array.from(ticks).sort((a, b) => a - b);
+/**
+ * hover 浮层逐行列出的量,含不画在图上的对比线。顺序即阅读顺序。
+ *
+ * 只有前 CHART_LINES 那几项在图上有对应的线,故只有它们配色块——色块的语义是
+ * 「图上那个颜色的线」,给图上没有的项配色块只会让人去图上找一条不存在的线,
+ * 而且这几项的颜色本来就与图上那三条撞(灰/蓝各撞一对)。
+ */
+const TOOLTIP_ROWS: LineDef[] = [
+  ...CHART_LINES,
+  { key: "ms_e2e", labelKey: "perf.msE2e", strokeClass: "stroke-text-tertiary", legendDotClass: "bg-text-tertiary", dashed: true },
+  { key: "ms_omni", labelKey: "perf.msOmni", strokeClass: "stroke-info", legendDotClass: "bg-info", dashed: true },
+  { key: "ms_cycle", labelKey: "perf.msCycle", strokeClass: "stroke-info", legendDotClass: "bg-info" },
+];
+
+/** 把步长取到 1 / 2 / 5 × 10^k。 */
+function niceStep(raw: number): number {
+  if (raw <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  return (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
 }
 
-export function PerfRtfChart({ state, bucket, windowMs, embedded = false }: Props) {
+/**
+ * 选 nice 刻度(毫秒),等距、全整数、含 0。返回升序数组。
+ *
+ * 先按「大约 5 段」定步长再往上取整到步长的倍数,而不是先定顶再等分——等分一个
+ * nice 的顶会得到 nice 不了的中间刻度(0 / 1 / 2.2 / 5 这种由几何中位算出来的怪数字
+ * 就是这么来的)。步长本身 nice,则每一档都 nice。
+ */
+function chooseYTicks(dataMax: number): number[] {
+  const step = niceStep(Math.max(dataMax, 1) / 5);
+  const top = Math.ceil(Math.max(dataMax, 1) / step) * step;
+  const out: number[] = [];
+  for (let v = 0; v <= top + step / 2; v += step) out.push(Math.round(v));
+  return out;
+}
+
+export function PerfLatencyChart({ state, bucket, windowMs, embedded = false }: Props) {
   const { t } = useTranslation();
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
@@ -106,7 +127,7 @@ export function PerfRtfChart({ state, bucket, windowMs, embedded = false }: Prop
     const raw = state.data ?? [];
     if (raw.length === 0) return raw;
     const until = Date.now();
-    return densifyByBucket(raw, bucket, until - windowMs, until, RTF_EMPTY);
+    return densifyByBucket(raw, bucket, until - windowMs, until, LATENCY_EMPTY);
   }, [state.data, bucket, windowMs]);
 
   return (
@@ -116,12 +137,14 @@ export function PerfRtfChart({ state, bucket, windowMs, embedded = false }: Prop
           ? ""
           : "rounded-xl bg-bg-secondary border border-border shadow-sm p-5 md:p-6"
       }
-      aria-labelledby="perf-rtf-title"
+      aria-labelledby="perf-latency-title"
     >
       <div className="flex items-baseline justify-between flex-wrap gap-3 mb-4">
-        <h2 id="perf-rtf-title" className="text-title">
-          {t("perf.rtfTitle")}
+        <h2 id="perf-latency-title" className="text-title">
+          {t("perf.latencyTitle")}
         </h2>
+        {/* 单位挂在标题旁,而不是每个刻度、每行浮层都缀一遍 */}
+        <span className="text-caption text-text-tertiary">{t("perf.latencyUnit")}</span>
       </div>
 
       {state.loading && !state.data ? (
@@ -144,7 +167,7 @@ export function PerfRtfChart({ state, bucket, windowMs, embedded = false }: Prop
           />
           {/* 图例 */}
           <div className="flex flex-wrap gap-x-4 gap-y-2 mt-3">
-            {LINES.map((l) => (
+            {CHART_LINES.map((l) => (
               <div key={l.key} className="text-caption flex items-center gap-1.5">
                 <span
                   className={`inline-block w-3 h-0.5 rounded-full ${l.legendDotClass}`}
@@ -156,7 +179,7 @@ export function PerfRtfChart({ state, bucket, windowMs, embedded = false }: Prop
         </>
       ) : (
         <div className="h-48 flex items-center justify-center text-text-secondary">
-          {t("perf.rtfEmpty")}
+          {t("perf.latencyEmpty")}
         </div>
       )}
     </section>
@@ -164,7 +187,7 @@ export function PerfRtfChart({ state, bucket, windowMs, embedded = false }: Prop
 }
 
 interface ChartProps {
-  data: PerfRtfPoint[];
+  data: PerfLatencySeriesPoint[];
   bucket: PerfBucket;
   spanMs: number;
   hoverIdx: number | null;
@@ -191,18 +214,17 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
     [data, pendingIdx],
   );
 
-  // y 轴范围:确保至少到 1.2,数据高时自适应
+  // y 轴范围只看图上真画的那几条(含窗口参考线——它超出轴顶就等于判据看不见了)
   const allVals = data.flatMap((p) =>
-    LINES.map((l) => p[l.key]).filter((v): v is number => v != null),
+    CHART_LINES.map((l) => p[l.key]).filter((v): v is number => v != null),
   );
-  const dataMax = allVals.length > 0 ? Math.max(...allVals) : 1.2;
+  const dataMax = allVals.length > 0 ? Math.max(...allVals) : 1000;
   const ticks = chooseYTicks(dataMax);
   const yMax = ticks[ticks.length - 1];
 
   // x 轴标签密度:最多展示 7 个标签
   const labelStep = Math.max(1, Math.ceil(n / 7));
 
-  // SVG 坐标(用归一化 1000 宽,等比缩放后宽度会跟容器走)
   const SVG_W = 1000;
   const pctOfSvg = (px: number) => (px / SVG_W) * 100;
 
@@ -263,7 +285,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
         className="w-full h-full"
         preserveAspectRatio="none"
         role="img"
-        aria-label={t("perf.rtfChartAria")}
+        aria-label={t("perf.latencyChartAria")}
       >
         {/* 无数据区域斜纹底色 — 在最底层,让 y 网格/折线浮在上面 */}
         <ChartGapOverlay
@@ -286,15 +308,14 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
             y1={yPxAt(v)}
             x2={SVG_W - PAD_R}
             y2={yPxAt(v)}
-            className={v === 1.0 ? "stroke-error" : "stroke-border"}
-            strokeWidth={v === 1.0 ? "1.5" : "1"}
-            strokeDasharray={v === 1.0 ? "6 6" : undefined}
+            className="stroke-border"
+            strokeWidth="1"
             vectorEffect="non-scaling-stroke"
           />
         ))}
 
-        {/* 折线:closed 实线 + pending 段虚线;对比线本身就是 dashed */}
-        {LINES.map((l) => {
+        {/* 折线:closed 实线 + pending 段虚线;参考线本身就是 dashed */}
+        {CHART_LINES.map((l) => {
           const { closed, pending: pendingPath } = linePathParts(l.key);
           return (
             <Fragment key={l.key}>
@@ -374,9 +395,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
       {ticks.map((v) => (
         <div
           key={v}
-          className={`text-caption num absolute pointer-events-none ${
-            v === 1.0 ? "text-error" : "text-text-tertiary"
-          }`}
+          className="text-caption num absolute pointer-events-none text-text-tertiary"
           style={{
             top: yPxAt(v) - 7,
             left: 0,
@@ -384,7 +403,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
             textAlign: "right",
           }}
         >
-          {v < 10 ? v.toFixed(1) : v.toFixed(0)}
+          {v}
         </div>
       ))}
 
@@ -419,16 +438,19 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
               <span className="text-text-tertiary text-[10px]">{t("perf.pending")}</span>
             )}
           </div>
-          {LINES.map((l) => {
+          {TOOLTIP_ROWS.map((l) => {
             const v = data[hoverIdx][l.key];
+            const inChart = CHART_LINES.some((c) => c.key === l.key);
             return (
               <div key={l.key} className="flex items-center gap-1.5">
                 <span
-                  className={`inline-block w-2 h-2 rounded-sm ${l.legendDotClass}`}
+                  className={`inline-block w-2 h-2 rounded-sm ${
+                    inChart ? l.legendDotClass : ""
+                  }`}
                 />
                 <span className="text-text-secondary">{t(l.labelKey)}</span>
                 <span className="num text-text-primary ml-auto">
-                  {v == null ? "—" : v.toFixed(2)}
+                  {v == null ? "—" : Math.round(v)}
                 </span>
               </div>
             );

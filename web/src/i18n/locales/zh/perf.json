@@ -2,16 +2,13 @@
   "perf": {
     "windowAria": "性能视图时间窗口",
     "autoRefresh": "每 30s 自动刷新",
-    "manualRefresh": "手动刷新",
     "inlineTitle": "性能监测",
-
     "windowLast1h": "最近 1 小时",
     "windowLast6h": "最近 6 小时",
     "windowLast24h": "最近 24 小时",
     "windowLast3d": "最近 3 天",
-
     "errSummary": "性能总览加载失败",
-    "errRtfSeries": "RTF 时间序列加载失败",
+    "errLatencySeries": "处理耗时时间序列加载失败",
     "errStage": "阶段统计加载失败",
     "errTraceList": "trace 列表加载失败",
     "errLatency": "处理耗时分布加载失败",
@@ -24,10 +21,8 @@
     "errMemSnapshot": "内存快照加载失败",
     "errMemSeries": "内存时序加载失败",
     "errProcSeries": "进程 CPU / 线程数时序加载失败",
-
     "loading": "加载中…",
     "noData": "所选时间内无数据。",
-
     "agentTitle": "最近 Agent 调用",
     "agentSubtitle": "每次 agent turn 一行",
     "agentEmpty": "所选时间内无 agent 调用。",
@@ -46,7 +41,6 @@
     "statusFailed": "失败",
     "statusSuccess": "成功",
     "statusRunning": "进行中",
-
     "dropTitle": "窗口丢弃数",
     "dropTotalPrefix": "窗口内累计丢",
     "dropTotalSuffix": "个",
@@ -56,11 +50,9 @@
     "dropTooltipOverflow": "overflow",
     "dropTooltipCycle": "cycle 数",
     "pending": "进行中",
-
     "gateTitle": "Gate 过滤率",
     "gateChartAria": "Gate 过滤率折线图",
     "gateTooltipFilterRate": "过滤率",
-
     "gateScoreTitle": "Gate 打分分布",
     "gateScoreThreshold": "配置阈值:video {{video}} / audio {{audio}}",
     "gateScoreEmpty": "所选时间内无打分数据。",
@@ -72,7 +64,6 @@
     "colP99": "P99",
     "colN": "n",
     "colAudioP50": "audio P50",
-
     "kpiEmptyTrace": "所选窗口内暂无 trace 数据。",
     "kpiCycle": "轮次",
     "kpiShouldProcess": "应处理",
@@ -82,13 +73,12 @@
     "kpiDropRateHint": "队列满整窗丢弃",
     "kpiOmniErrorRate": "Omni 错误率",
     "kpiOmniErrorRateHint": "omni 推理失败",
-    "kpiRtfP95": "实时率 P95",
-    "kpiRtfP95Hint": "端到端含等待",
-    "kpiOmniRtfP95": "omni 实时率 P95",
-    "kpiOmniRtfP95Hint": "仅 omni 成功",
+    "kpiLatencyP95": "耗时 P95",
+    "kpiLatencyP95Hint": "端到端含等待",
+    "kpiOmniLatencyP95": "omni 耗时 P95",
+    "kpiOmniLatencyP95Hint": "仅 omni 成功",
     "kpiAgentCall": "Agent 调用",
     "kpiAgentCallHint": "触发 Agent 次数",
-
     "procTitle": "进程 CPU / 线程数",
     "procHeaderRecent": "最近 {{bucket}} 均值 {{pct}}%",
     "procHeaderPeak": "峰值 {{pct}}%",
@@ -100,7 +90,6 @@
     "procLegendCpu": "CPU",
     "procLegendThreads": "线程数",
     "procTooltipPeak": "桶内峰值",
-
     "memTitle": "进程内存",
     "memHeaderRss": "RSS {{mb}} MB",
     "memHeaderPy": "Py {{objects}} objects / {{mb}} MB",
@@ -117,7 +106,6 @@
     "memOther": "(other)",
     "memTotal": "total",
     "memPyHeading": "Python 对象（sizeof 累加，不递归引用）",
-
     "omniErrTitle": "Omni 错误时序",
     "omniErrTotalPrefix": "窗口内累计",
     "omniErrTotalSuffix": "次",
@@ -127,17 +115,15 @@
     "omniErrTimeout": "超时",
     "omniErrOther": "其他",
     "omniErrTotal": "合计",
-    "omniErrWarn": "⚠ 限流期间窗口丢弃率会假性变好(实时率已剔除失败 cycle 不受影响)",
-
-    "rtfTitle": "实时率",
-    "rtfChartAria": "RTF 时间序列折线图",
-    "rtfEmpty": "所选窗口内无 RTF 数据。",
-    "rtfE2eOk": "e2e(成功)",
-    "rtfE2e": "e2e(含失败)",
-    "rtfCycle": "cycle",
-    "rtfOmniOk": "omni(成功)",
-    "rtfOmni": "omni(含失败)",
-
+    "omniErrWarn": "⚠ 限流期间窗口丢弃率会假性变好(耗时已剔除失败 cycle 不受影响)",
+    "latencyTitle": "处理耗时",
+    "latencyChartAria": "处理耗时时间序列折线图",
+    "latencyEmpty": "所选窗口内无耗时数据。",
+    "msE2eOk": "e2e(成功)",
+    "msE2e": "e2e(含失败)",
+    "msCycle": "cycle",
+    "msOmniOk": "omni(成功)",
+    "msOmni": "omni(含失败)",
     "stageTitle": "阶段耗时分布",
     "stageP95Top3": "P95 top3",
     "stageRank1st": "1st",
@@ -151,14 +137,14 @@
     "colP95Ms": "P95 (ms)",
     "colP99Ms": "P99 (ms)",
     "colSampleSize": "样本数",
-
     "traceTitle": "最近处理记录",
     "traceSubtitle": "点击行展开各阶段耗时",
     "traceEmpty": "所选时间内暂无处理记录。",
     "traceColDevice": "设备",
     "traceColWindowMs": "数据包长 (ms)",
     "traceColCycleMs": "处理耗时 (ms)",
-    "traceColRtf": "实时率",
+    "traceCycleBehind": "这一轮没跟上：端到端耗时（含入队等待）超过了窗口时长",
+    "traceCycleOverWindow": "处理耗时/包长 = {{pct}}%",
     "traceColInputType": "输入类型",
     "traceColAgent": "Agent",
     "traceColDropped": "丢弃",
@@ -170,11 +156,13 @@
     "traceCycleError": "⚠ cycle 异常:",
     "traceTracebackHint": "(完整 traceback 见 log)",
     "tracePacketLen": "数据包长",
-    "traceCycleOverWindow": "处理耗时/包长 = {{pct}}%",
-
     "timingTitle": "近期处理耗时",
     "timingSubtitle": "按时间段聚合 P50 / P75 / P95 / P99",
     "timingEmpty": "所选时间内暂无数据。",
-    "timingChartAria": "近期处理耗时折线图"
+    "timingChartAria": "近期处理耗时折线图",
+    "compact": "紧凑显示",
+    "compactAria": "紧凑显示：处理耗时与 Gate 过滤率并排",
+    "msWindow": "可用时间(窗口跨度)",
+    "latencyUnit": "毫秒"
   }
 }
