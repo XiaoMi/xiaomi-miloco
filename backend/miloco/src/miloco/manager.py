@@ -80,14 +80,14 @@ class Manager:
         句柄留在 state_align_task 上：下一次作用域切换必须先取消它，否则它会把旧
         作用域的值写进刚清空重建的树。
 
-        初始化还没建出 miot proxy 时只记一条日志、不起对齐 —— 这一代因此停在「未对齐」，
-        依赖它的属性订阅门是关着的，正是安全的那一侧。
+        初始化还没跑完时只记一条日志、不起对齐 —— 这一代因此停在「未对齐」，依赖它的
+        属性订阅门是关着的，正是安全的那一侧。
         """
-        scope = self._scope
-        proxy = getattr(self, "_miot_proxy", None)
-        if proxy is None:
-            logger.warning("miot proxy 还没建好，这一代不做状态对齐")
+        if not self._initialized:
+            logger.warning("初始化还没跑完，这一代不做状态对齐")
             return None
+        scope = self._scope
+        proxy = self._miot_proxy
 
         async def run() -> None:
             if await align_iot_state(
@@ -164,9 +164,8 @@ class Manager:
 
         self._task_service = TaskService(rule_service=self._rule_service)
 
-        # 状态容器：这里只做启动对齐一次，还没有消费方订阅它。
-        # 对齐 task 由 lifespan 建并负责取消 —— 它要打若干次云端请求，不能挡住启动，
-        # 而关闭时必须有人取消它，否则容器停了它还在往里写。
+        # 容器本身在 __new__ 里就建好了，这里只是接上 event loop 开始投递。
+        # 对齐由 start_state_alignment 起，关闭时 lifespan 取消，切换时编排取消
         self._state_store.start()
 
         self._initialized = True

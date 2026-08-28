@@ -834,13 +834,13 @@ class MiotProxy:
                 logger.error("Failed to refresh devices: %s", e)
                 return None
             try:
-                self._reconcile_iot_state(devices, scope)
+                self._reconcile_iot_deletions(devices, scope)
             except Exception as e:
                 # 调和失败不该让刷新看起来失败：设备缓存和订阅都已经更新好了
                 logger.warning("清理已离开当前家庭的设备失败: %s", e)
             return devices
 
-    def _reconcile_iot_state(
+    def _reconcile_iot_deletions(
         self, devices: dict[str, MIoTDeviceInfo], scope: int
     ) -> None:
         """删掉容器里已不属于当前家庭的设备。

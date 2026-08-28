@@ -22,7 +22,10 @@ from miloco.state import StateStore
 class _FakeKV:
     def __init__(self, data: dict[str, str] | None = None):
         self._data = dict(data or {})
-        self.db_connector = SimpleNamespace(execute_query=lambda *a, **kw: [])
+        self.db_connector = SimpleNamespace(
+            execute_query=lambda *a, **kw: [],
+            execute_update=lambda *a, **kw: 0,
+        )
 
     def get(self, key: str) -> str | None:
         return self._data.get(key)
@@ -87,9 +90,15 @@ async def scene():
         refresh_devices=AsyncMock(return_value=None),
         refresh_cameras=AsyncMock(return_value=None),
         refresh_scenes=AsyncMock(return_value=None),
+        get_miot_auth_info=AsyncMock(),
+        get_devices=AsyncMock(return_value={"d1": SimpleNamespace(home_id="H1")}),
+        get_cameras=AsyncMock(return_value={}),
     )
     service = MiotService(miot_proxy=proxy)
     service._sync_camera_adapter = AsyncMock()
+    service._restart_perception_engine = AsyncMock()
+    service._kick_onboarding_trigger = lambda: None
+    service._schedule_agent_session_reset = lambda: None
     manager = _FakeManager(store, trace)
 
     import miloco.manager as manager_module
@@ -179,3 +188,68 @@ async def test_the_new_scope_is_refreshed_before_the_alignment_starts(scene):
     await scene.service._reset_state_scope(_refresh)
 
     assert scene.trace == ["bump", "refresh", "align"]
+
+
+# ── 四个切换入口都要真的走编排 ─────────────────────────────────────────
+
+
+async def _settle(store: StateStore, timeout: float = 1.0) -> None:
+    """等后台那次编排跑到清空为止。切家和兜底选家都是 fire-and-forget。"""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if store.snapshot("iot/**") == {}:
+            return
+        await asyncio.sleep(0.01)
+
+
+async def test_authorizing_a_new_account_rebuilds_the_container(scene):
+    scene.store.set("iot/device/old_account/status/online", True, source="iot_align")
+
+    await scene.service.authorize_with_code(code="c", state="s")
+
+    assert scene.store.snapshot("iot/device/old_account/**") == {}
+    assert scene.manager.aligns_started == 1
+
+
+async def test_unbinding_empties_the_container_and_starts_no_alignment(scene):
+    scene.store.set("iot/device/old_account/status/online", True, source="iot_align")
+
+    await scene.service.unbind_miot()
+
+    assert scene.store.snapshot("iot/**") == {}
+    assert scene.manager.aligns_started == 0
+
+
+async def test_switching_home_rebuilds_the_container(scene):
+    scene.store.set("iot/device/old_home/status/online", True, source="iot_align")
+
+    await scene.service.switch_home("H1")
+    await _settle(scene.store)
+
+    assert scene.store.snapshot("iot/device/old_home/**") == {}
+    assert scene.manager.aligns_started == 1
+
+
+async def test_the_fallback_home_selection_rebuilds_the_container(scene):
+    """启用集失效时 list_homes 会自动选家 —— 那和用户显式切家一样换掉了作用域。"""
+    scene.proxy._kv_repo._data[ScopeConfigKeys.HOME_WHITE_LIST_KEY] = json.dumps(
+        ["gone"]
+    )
+    scene.store.set("iot/device/old_home/status/online", True, source="iot_align")
+
+    await scene.service.list_homes()
+    await _settle(scene.store)
+
+    assert scene.store.snapshot("iot/device/old_home/**") == {}
+    assert scene.manager.aligns_started == 1
+
+
+async def test_listing_homes_without_a_change_leaves_the_container_alone(scene):
+    """启用集没变就不是切换 —— 每次刷页面都清空重建，容器会长期是空的。"""
+    scene.store.set("iot/device/mine/status/online", True, source="iot_align")
+
+    await scene.service.list_homes()
+    await asyncio.sleep(0.05)
+
+    assert scene.store.get("iot/device/mine/status/online") is True
+    assert scene.manager.aligns_started == 0
