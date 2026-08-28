@@ -308,6 +308,14 @@ class StateStore:
         with self._lock:
             self._enqueue(self._remove(path, source, now_ms()), depth)
 
+    def clear(self, *, source: str) -> None:
+        """清空整棵树，为每条消失的路径产一个删除事件。切换账号或家庭时用。"""
+        depth = self._next_cascade_depth("clear", "")
+        if depth is None:
+            return
+        with self._lock:
+            self._enqueue(self._clear(source, now_ms()), depth)
+
     def _next_cascade_depth(self, operation: str, path: str) -> int | None:
         depth = _cascade_depth.get() + 1
         if depth > MAX_CASCADE_DEPTH:
@@ -330,6 +338,11 @@ class StateStore:
         """删除并返回本次变更，不投递。数据结构层单测的入口。"""
         with self._lock:
             return self._remove(path, source, now_ms())
+
+    def _commit_clear(self, *, source: str) -> list[Change]:
+        """清空并返回本次变更，不投递。数据结构层单测的入口。"""
+        with self._lock:
+            return self._clear(source, now_ms())
 
     def _apply(self, path: str, value: Any, source: str, now: int) -> list[Change]:
         """校验 → diff → 提交。必须在锁内调用。
@@ -423,6 +436,21 @@ class StateStore:
         del parents[-1][segments[-1]]
         _prune(parents, segments)
         self._leaf_count -= len(batch.deletes)
+        return batch.changes()
+
+    def _clear(self, source: str, now: int) -> list[Change]:
+        """必须在锁内调用。
+
+        叶子数直接归零而不是减去删除条数：两种算法在正确时结果相同，归零不依赖计数一路
+        没有漂过。两个告警标志说的是树的内容，内容清了就跟着复位；`dropped` /
+        `discarded` / `shape_flips` 记的是这条生命里发生过多少，不复位。
+        """
+        batch = _Batch(source=source, now=now)
+        _collect_deletes(self._root, (), batch)
+        self._root = {}
+        self._leaf_count = 0
+        self._warned_leaf_limit = False
+        self._warned_shape_flip = False
         return batch.changes()
 
     # ---- 读 ----
