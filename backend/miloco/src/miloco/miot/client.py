@@ -37,6 +37,7 @@ from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
+    filter_by_home,
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
@@ -653,12 +654,7 @@ class MiotProxy:
 
     async def devices_in_current_home(self) -> dict[str, MIoTDeviceInfo]:
         """只回当前启用家庭的设备。`get_devices` 是账号全量，过滤在各调用方自己做。"""
-        devices = await self.get_devices()
-        return {
-            did: info
-            for did, info in devices.items()
-            if is_home_allowed(self._kv_repo, getattr(info, "home_id", None))
-        }
+        return filter_by_home(self._kv_repo, await self.get_devices())
 
     async def _on_lan_device_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         # refresh_cameras deep-copies SDK state, so post-init lan_online
