@@ -290,6 +290,9 @@ class OmniContext:
     # 该设备自定义「感知须知」prompt（用户/agent 配置，KV CAMERA_PROMPT_MAP_KEY 逐窗实时读取）。
     # 注入 omni system prompt 尾部（video / audio 路由均注入），给模型补充机位环境 / 关注 / 忽略指导。
     camera_prompt: str | None = None
+    # 纯场景触发模式（pipeline 按 PerceptionConfig.rule_only 置位）：prompt 只出
+    # matched_rules、输入仅视频无音频、无任何身份上下文。见 config.PerceptionConfig.rule_only。
+    rule_only: bool = False
 
 
 

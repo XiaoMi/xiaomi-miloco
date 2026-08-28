@@ -405,6 +405,13 @@ class PerceptionConfig:
     identity: IdentityConfig = field(default_factory=IdentityConfig)
     omni: OmniConfig = field(default_factory=OmniConfig)
     identity_engine: IdentityEngineConfig = field(default_factory=IdentityEngineConfig)
+    # 纯场景触发模式（web「场景联动」专用）：
+    #   - 输入：仅多帧画面，音频全部剥离（不进 gate 触发、不合成 mp4、不烧音频 token）
+    #   - 处理：跳过人脸识别 / tracker / gallery 等全部身份链路（省 ONNX 检测 + 身份 omni 调用）
+    #   - 输出：只出 matched_rules（规则命中/退出判定），caption / speeches / suggestions /
+    #     identities 等字段全部剥离，最大化输出速度
+    # 规则命中后仍走原 RuleRunner 的 on_enter/on_exit 场景直控，行为不变。
+    rule_only: bool = False
 
 
 # =============================================================================

@@ -230,7 +230,9 @@ class PerceptionEngine(BasePerceptionEngine):
         # **不**共享——按 scope_label 拼前缀保证跨镜头唯一，engine 内部各自计数。
         ie_cfg = self._config.identity_engine
         self._identity_lib = None
-        if ie_cfg.enabled:
+        # rule_only（纯场景触发）：整条身份链路不参与，连 library/陌生人池都不建
+        # （省目录初始化 + 后续任何隐式身份加载）。
+        if ie_cfg.enabled and not self._config.rule_only:
             try:
                 self._identity_lib = build_identity_library()
             except Exception as e:  # noqa: BLE001
@@ -261,7 +263,7 @@ class PerceptionEngine(BasePerceptionEngine):
         # get_reid_extractor 兜底用:摄像头掉线时懒加载独立 HumanReID 实例,
         # 让注册流程(上传图/视频/池抽样)的 .npy 写盘不被"摄像头是否在线"绑死。
         self._fallback_human_reid: object | None = None
-        if ie_cfg.enabled:
+        if ie_cfg.enabled and not self._config.rule_only:
             try:
                 self._tier_u_pool = TierUPool(
                     config=TierUConfig(),
@@ -965,7 +967,10 @@ class PerceptionEngine(BasePerceptionEngine):
 
         # 未开启拾音的相机在此整批剥音频（opt-in 第一道防线）；必须先于 contexts 构建
         # （pending_speech 注入）与 audio-tail 拼接，见 _strip_unauthorized_voice_audio。
-        self._strip_unauthorized_voice_audio(batch)
+        # rule_only（纯场景触发）：音频整体不用，剥离步骤与 audio-tail 一并跳过。
+        rule_only = self._config.rule_only
+        if not rule_only:
+            self._strip_unauthorized_voice_audio(batch)
 
         # 进入新一轮前先按 TTL 淘汰过期事件链
         now = time.monotonic()
@@ -1019,6 +1024,8 @@ class PerceptionEngine(BasePerceptionEngine):
         # Per-device tail（不是 per-room）—— 修复旧版同 room 多 device 反复覆写同一 key
         # 只保留 last device tail 的隐性 bug
         overlap_samples = int(self._config.input.audio_overlap_ms / 1000 * 16000)
+        if rule_only:
+            overlap_samples = 0  # rule_only：无音频，不拼接 audio-tail
         if overlap_samples > 0:
             for snapshot in batch.snapshots:
                 did = snapshot.device.did

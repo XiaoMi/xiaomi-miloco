@@ -161,6 +161,42 @@ def _downsample_for_omni(
     )
 
 
+def _build_rule_only_identity_packet(gate_packet: GatePacket) -> "IdentityPacket":
+    """rule_only（纯场景触发）模式的身份层直通：不跑 tracker / 人脸识别，直接产出
+    IdentityPacket 骨架——只有帧（供 omni 视频编码）与 gate 信息，targets 恒空、
+    音频恒空（音频已在 gate 前剥离）。省掉整条 ONNX 检测 + 身份 omni 派发链路。
+    """
+    import numpy as np
+
+    from miloco.perception.engine.types import (
+        AudioAnalysis,
+        AudioType,
+        FrameInfo,
+        MotionState,
+    )
+
+    return IdentityPacket(
+        packet_id=str(uuid.uuid4()),
+        room_name=gate_packet.room_name,
+        timestamp=gate_packet.timestamp,
+        frame_info=FrameInfo(
+            start_timestamp=gate_packet.timestamp,
+            end_timestamp=gate_packet.timestamp,
+            fps=gate_packet.fps,
+        ),
+        targets=[],
+        scene_motion=MotionState.STATIC,
+        frames=[],
+        all_frames=gate_packet.frames,
+        audio_clip=np.empty(0, dtype=np.int16),
+        audio_analysis=AudioAnalysis(
+            type=AudioType.SILENCE, is_urgent=False, energy_level=0.0
+        ),
+        sample_rate=gate_packet.sample_rate,
+        trigger=gate_packet.trigger,
+    )
+
+
 def _inject_source_meta(
     omni_output: OmniOutput | None,
     room_name: str,
@@ -293,6 +329,9 @@ async def run_pipeline(
 
     # Downsample to target fps at pipeline entry
     input_slice = downsample_snapshot(input_slice, config.input.fps)
+    # rule_only（纯场景触发）：音频整窗剥离——不进 gate 触发、不合成进 mp4、不烧音频 token
+    if config.rule_only:
+        input_slice = replace(input_slice, audio=None)
 
     # Gate（本入口为无状态单次调用，无跨窗口基准可传，丢弃 last_checked / 两 ts）。
     # 注意:prev_frame 恒为 None → 视觉 gate 每次都走 cold-start 放行,本入口不会因静止画面 skipped。
@@ -308,11 +347,14 @@ async def run_pipeline(
         timing["total_ms"] = _ms_since(t0)
         return PipelineResult(input_slice=input_slice, skipped=True, timing=timing)
 
-    # Identity
+    # Identity —— rule_only（纯场景触发）跳过 tracker/人脸识别，直通骨架 packet
     t = time.monotonic()
-    identity_packet = await run_identity(gate_packet, config.identity, tracking_service,
-                                          identity_engine=identity_engine,
-                                          frame_index_offset=frame_index_offset)
+    if config.rule_only:
+        identity_packet = _build_rule_only_identity_packet(gate_packet)
+    else:
+        identity_packet = await run_identity(gate_packet, config.identity, tracking_service,
+                                              identity_engine=identity_engine,
+                                              frame_index_offset=frame_index_offset)
     timing["identity_ms"] = _ms_since(t)
 
     # Omni —— 按 omni_call_mode 分流（fused 走身份合并主调用，否则走原 perception 主调用）
@@ -321,9 +363,13 @@ async def run_pipeline(
     device_name = input_slice.device.name
     time_window = _fmt_time_window(input_slice.start_timestamp, input_slice.end_timestamp)
 
+    # rule_only：prompt 层按此标识只出 matched_rules（见 prompt_builder）
+    context = replace(context, rule_only=config.rule_only)
+
     t = time.monotonic()
     use_fused = (
-        identity_engine is not None
+        not config.rule_only
+        and identity_engine is not None
         and config.identity_engine.enabled
         and config.identity_engine.omni_call_mode == "fused"
     )
@@ -451,17 +497,26 @@ async def run_batch_pipeline(
         """
         # Downsample to target fps at pipeline entry
         snapshot = downsample_snapshot(snapshot, config.input.fps)
+        # rule_only（纯场景触发）：音频整窗剥离——不进 gate 触发、不合成进 mp4、不烧音频 token
+        if config.rule_only:
+            snapshot = replace(snapshot, audio=None)
 
         did = snapshot.device.did
         device_name = snapshot.device.name
         time_window = _fmt_time_window(snapshot.start_timestamp, snapshot.end_timestamp)
         context = contexts.get(did, OmniContext())
-        tracking_service = (
-            get_tracking_service(did, room_name) if get_tracking_service else None
-        )
-        identity_engine = (
-            get_identity_engine(did, room_name) if get_identity_engine else None
-        )
+        if config.rule_only:
+            # rule_only（纯场景触发）：整条身份/跟踪链路不参与——不实例化 tracker
+            # （省 ONNX 检测模型加载 + 每窗推理），不建 IdentityEngine（省身份 omni 派发）。
+            tracking_service = None
+            identity_engine = None
+        else:
+            tracking_service = (
+                get_tracking_service(did, room_name) if get_tracking_service else None
+            )
+            identity_engine = (
+                get_identity_engine(did, room_name) if get_identity_engine else None
+            )
         # 人类可读设备名挂到 engine,供 tier_c sidecar 记 camera_name(engine 自身只持
         # cam_id=did,名字在 snapshot.device 上)。每窗刷新、幂等;名字稳定无竞态。
         if identity_engine is not None:
@@ -573,11 +628,15 @@ async def run_batch_pipeline(
             )
 
         t = time.monotonic()
-        identity_packet = await run_identity(
-            gate_packet, config.identity, tracking_service,
-            identity_engine=identity_engine,
-            frame_index_offset=frame_index_offset,
-        )
+        # rule_only（纯场景触发）：跳过 tracker / 人脸识别，直通骨架 packet
+        if config.rule_only:
+            identity_packet = _build_rule_only_identity_packet(gate_packet)
+        else:
+            identity_packet = await run_identity(
+                gate_packet, config.identity, tracking_service,
+                identity_engine=identity_engine,
+                frame_index_offset=frame_index_offset,
+            )
         room_timing[f"identity_{did}_ms"] = _ms_since(t)
 
         # omni 阶段:把 per-device 元数据塞进 ContextVar,供 traces_device 等观测路径读取。
@@ -586,11 +645,14 @@ async def run_batch_pipeline(
             device_id=did,
             room_name=room_name,
         ))
+        # rule_only：prompt 层按此标识只出 matched_rules（见 prompt_builder）
+        context = replace(context, rule_only=config.rule_only)
         t = time.monotonic()
         try:
-            # Omni per device —— 按 omni_call_mode 分流
+            # Omni per device —— 按 omni_call_mode 分流；rule_only 恒非 fused
             use_fused = (
-                identity_engine is not None
+                not config.rule_only
+                and identity_engine is not None
                 and config.identity_engine.enabled
                 and config.identity_engine.omni_call_mode == "fused"
             )

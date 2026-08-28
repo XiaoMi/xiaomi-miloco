@@ -48,10 +48,12 @@ from .constants import (
     _OUTPUT_MODE_JSON,
     _PRINCIPLE,
     _PRINCIPLE_AUDIO,
+    _PRINCIPLE_RULE_ONLY,
     _PRINCIPLE_VIDEO_NO_AUDIO,
     _PRINCIPLE_VIDEO_NO_SPEECH,
     _ROLE,
     _ROLE_AUDIO,
+    _ROLE_RULE_ONLY,
     _USER_REF_BOUNDARY,
     _USER_REF_BOUNDARY_AUDIO,
 )
@@ -479,11 +481,17 @@ def _build_payload(
     # 拼接照常；本轮无人声 → 剥 speeches，挂着的 pending 半句不强行补全（否则模型会就着
     # 噪声脑补出完成句，正是要根除的幻觉）。
     has_speech = True if route == "audio" else _batch_video_has_speech(packets)
+    # rule_only（纯场景触发）：pipeline 已剥离音频与身份链路，这里强制只出 matched_rules
+    # 的 schema，且不注入家庭档案 / 名册 / 历史（见 _build_user_content）。
+    rule_only = bool(context.rule_only)
     scene = SceneDescriptor(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
-        has_pets=_has_pets_for_scene(),
+        has_pets=(False if rule_only else _has_pets_for_scene()),
+        rule_only=rule_only,
     )
+    if rule_only:
+        include_home_profile = False
     user_text = _build_user_content(
         packets, context, stream=stream, label_lookup=label_lookup,
     )
@@ -534,32 +542,45 @@ def build_system_prompt(
     消息送入（见 ``build_fused_payload`` / ``_assemble_fused_messages``）。
     """
     is_audio = scene.route == "audio"
-    role = _ROLE_AUDIO if is_audio else _ROLE
-    if is_audio:
-        principle = _PRINCIPLE_AUDIO
-    elif not scene.has_audio:
-        # video 路由但音频未过 gate：用无音频变体，原则不再提 speeches/env_sounds/转录
-        principle = _PRINCIPLE_VIDEO_NO_AUDIO
-    elif not scene.has_speech:
-        # video 路由、音频过 gate 但 VAD 判无人声：用无人声变体，原则不再提 speeches/转录
-        principle = _PRINCIPLE_VIDEO_NO_SPEECH
+    if scene.rule_only:
+        # 纯场景触发：角色/总原则/任务/常识全部收敛到"只判规则"，不注入家庭档案
+        # （无 caption/建议可挂档案偏好；身份识别已剥离，档案里的成员名没有可用锚点）。
+        parts: list[str] = [
+            _ROLE_RULE_ONLY,
+            _OUTPUT_MODE_JSON,
+            _PRINCIPLE_RULE_ONLY,
+            _render_task_list(scene),
+            "# 输出格式\n\n" + _render_schema_section(scene),
+            "# 字段说明\n\n" + render_field_spec(scene),
+            _render_examples(scene),
+        ]
     else:
-        principle = _PRINCIPLE
-    commonsense = _COMMONSENSE_AUDIO if is_audio else _COMMONSENSE
-    parts: list[str] = [
-        role,
-        _OUTPUT_MODE_JSON,
-        principle,
-        _render_task_list(scene),
-        "# 输出格式\n\n" + _render_schema_section(scene),
-        "# 字段说明\n\n" + render_field_spec(scene),
-        commonsense,
-        _render_examples(scene),
-    ]
-    if include_home_profile:
-        home_profile = get_home_profile_prefix()
-        if home_profile:
-            parts.append(home_profile)
+        role = _ROLE_AUDIO if is_audio else _ROLE
+        if is_audio:
+            principle = _PRINCIPLE_AUDIO
+        elif not scene.has_audio:
+            # video 路由但音频未过 gate：用无音频变体，原则不再提 speeches/env_sounds/转录
+            principle = _PRINCIPLE_VIDEO_NO_AUDIO
+        elif not scene.has_speech:
+            # video 路由、音频过 gate 但 VAD 判无人声：用无人声变体，原则不再提 speeches/转录
+            principle = _PRINCIPLE_VIDEO_NO_SPEECH
+        else:
+            principle = _PRINCIPLE
+        commonsense = _COMMONSENSE_AUDIO if is_audio else _COMMONSENSE
+        parts = [
+            role,
+            _OUTPUT_MODE_JSON,
+            principle,
+            _render_task_list(scene),
+            "# 输出格式\n\n" + _render_schema_section(scene),
+            "# 字段说明\n\n" + render_field_spec(scene),
+            commonsense,
+            _render_examples(scene),
+        ]
+        if include_home_profile:
+            home_profile = get_home_profile_prefix()
+            if home_profile:
+                parts.append(home_profile)
     # camera_prompt — 低频变动，放在 system prompt 尾部 → prefix cache 能命中前面的共享前缀
     note = camera_prompt.strip() if camera_prompt else ""
     if note:
@@ -589,6 +610,9 @@ def _render_task_list(scene: SceneDescriptor) -> str:
         av, av2 = "视频和音频", "视频、音频"
     else:
         av = av2 = "视频"
+    if scene.rule_only:
+        # 纯场景触发：唯一任务是规则判定（schema 也只含 matched_rules，二者保持一致）。
+        return "\n".join(["# 任务", "1. 规则判定：基于本轮视频判断「# 待判断规则」是否成立"])
     items: list[str] = []
     if scene.has_identity:
         if scene.identity_match_disabled:
@@ -632,7 +656,9 @@ def _render_examples(scene: SceneDescriptor) -> str:
     spec / schema（只判 unknown/no_person、无 gallery）自相矛盾，且抵消库空省 token 的
     目标；身份任务已由精简版「## identities」充分约束。实例 B 无 identities 字段、照常附。
     """
-    if scene.route == "audio" or not scene.has_audio:
+    if scene.rule_only or scene.route == "audio" or not scene.has_audio:
+        # rule_only：唯一字段 matched_rules 已由「# 字段说明」充分约束，现有两条实例
+        # 的输出都含 caption / identities 等已剥离字段，附上会与 schema 自相矛盾。
         return ""
     examples = []
     if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
@@ -686,9 +712,12 @@ def _build_user_content(
         rule_conditions = _render_rule_conditions(context)
         if rule_conditions:
             parts.append(rule_conditions)
-        # 名册是视频特征（定位画面里的人），audio route 无视频 → 不渲染
-        parts.extend(_build_device_header(packets, label_lookup=label_lookup))
-    parts.extend(_build_context_parts(context, stream=stream))
+        # rule_only：无身份链路 → 不渲染名册（无 targets）；无音频 → 不渲染历史（无 pending_speech）
+        if not context.rule_only:
+            # 名册是视频特征（定位画面里的人），audio route 无视频 → 不渲染
+            parts.extend(_build_device_header(packets, label_lookup=label_lookup))
+    if not context.rule_only:
+        parts.extend(_build_context_parts(context, stream=stream))
     if context.current_time:
         parts.append(f"当前时间: {context.current_time}")
     if context.room_name:
