@@ -857,6 +857,8 @@ async def test_authorize_with_code_clears_scope_before_token_exchange():
         deinit=AsyncMock(),
         init=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        refresh_devices=AsyncMock(),
+        refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
@@ -1415,6 +1417,8 @@ async def test_authorize_with_code_auto_selects_first_home():
         ),
         get_miot_auth_info=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        refresh_devices=AsyncMock(),
+        refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={"d1": _home("H1"), "d2": _home("H2")}),
         get_cameras=AsyncMock(return_value={}),
     )

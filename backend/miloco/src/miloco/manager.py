@@ -5,6 +5,7 @@
 Service manager module
 """
 
+import asyncio
 import logging
 import uuid
 
@@ -14,6 +15,7 @@ from miloco.database.person_repo import PersonRepo
 from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
 from miloco.miot.service import MiotService
+from miloco.miot.state_align import align_iot_state
 from miloco.node_monitor import NodeKind, NodeName, get_monitor
 from miloco.perception import init_perception_module
 from miloco.perception.service import PerceptionService
@@ -48,6 +50,9 @@ class Manager:
             # 启动对齐的 task。挂在这里而不是 lifespan 的局部变量里，
             # 切换编排才够得着去取消上一轮
             cls._instance.state_align_task = None
+            # 容器在这里建、在 initialize() 里 start：切换编排够得着它的时候
+            # initialize() 不一定跑完，而没建起来的话编排会在清空那一步炸掉
+            cls._instance._state_store = StateStore()
         return cls._instance
 
     def __init__(self):
@@ -68,6 +73,33 @@ class Manager:
 
     def scope_is_aligned(self) -> bool:
         return self._aligned_scope == self._scope
+
+    def start_state_alignment(self) -> asyncio.Task | None:
+        """起一轮状态对齐，跑完把这一代标成已对齐。
+
+        句柄留在 state_align_task 上：下一次作用域切换必须先取消它，否则它会把旧
+        作用域的值写进刚清空重建的树。
+
+        初始化还没建出 miot proxy 时只记一条日志、不起对齐 —— 这一代因此停在「未对齐」，
+        依赖它的属性订阅门是关着的，正是安全的那一侧。
+        """
+        scope = self._scope
+        proxy = getattr(self, "_miot_proxy", None)
+        if proxy is None:
+            logger.warning("miot proxy 还没建好，这一代不做状态对齐")
+            return None
+
+        async def run() -> None:
+            if await align_iot_state(
+                self._state_store,
+                proxy,
+                scope=scope,
+                current_scope=self.current_scope,
+            ):
+                self.mark_scope_aligned(scope)
+
+        self.state_align_task = asyncio.create_task(run())
+        return self.state_align_task
 
     async def initialize(self):
         """
@@ -135,7 +167,6 @@ class Manager:
         # 状态容器：这里只做启动对齐一次，还没有消费方订阅它。
         # 对齐 task 由 lifespan 建并负责取消 —— 它要打若干次云端请求，不能挡住启动，
         # 而关闭时必须有人取消它，否则容器停了它还在往里写。
-        self._state_store = StateStore()
         self._state_store.start()
 
         self._initialized = True
