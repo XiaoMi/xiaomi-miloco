@@ -46,13 +46,22 @@ MODELS: tuple[ModelSpec, ...] = (
 def validate_resources(
     omni_api_key: str,
     models_dir: str | None,
+    rule_only: bool = False,
 ) -> ValidationResult:
-    """校验感知引擎所需资源，返回校验结果（不抛异常）。"""
+    """校验感知引擎所需资源，返回校验结果（不抛异常）。
+
+    rule_only（纯场景触发）：只依赖 omni API Key——不跑 tracker/身份链路，
+    det_4C / human_body_reid 等端侧模型一律不要求（缺模型也能启动场景联动）。
+    """
     if not omni_api_key:
         return ValidationResult(
             status=EngineReadiness.NOT_CONFIGURED,
             message="Omni API Key 未配置",
         )
+
+    if rule_only:
+        # 纯场景触发：无 tracker/身份推理，模型目录与端侧模型都不需要。
+        return ValidationResult(status=EngineReadiness.READY)
 
     if not models_dir:
         return ValidationResult(

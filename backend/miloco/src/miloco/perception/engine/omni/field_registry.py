@@ -43,8 +43,13 @@ class FieldSpec:
     requires_identity: bool = False
     requires_pets: bool = False
     spec_md_audio: str | None = None
+    # rule_only（纯场景触发）模式专用字段说明变体：该模式剥离了 identities / caption /
+    # suggestions，字段说明里不得再引用它们（否则与 schema 自相矛盾、诱导模型脑补）。
+    spec_md_rule_only: str | None = None
 
-    def spec_for(self, route: str) -> str:
+    def spec_for(self, route: str, rule_only: bool = False) -> str:
+        if rule_only and self.spec_md_rule_only is not None:
+            return self.spec_md_rule_only
         if route == "audio" and self.spec_md_audio is not None:
             return self.spec_md_audio
         return self.spec_md
@@ -158,6 +163,13 @@ MATCHED_RULES = FieldSpec(
     # 做 matched_rules 只会脑补或恒空、零正当价值——故 audio-only 轮直接剥离本字段
     # （见 selected_fields）。可听见的危险（求救/玻璃碎/报警）改由 audio 版 suggestions 兜底。
     requires_video=True,
+    # rule_only 变体：本模式无 identities / caption / suggestions，规则点名的人无法经身份
+    # 识别确认在场——按画面中可见人物与外观判断，无法确认则宁可不命中。
+    spec_md_rule_only="""## matched_rules
+- 只基于本轮视频画面判断"# 待判断规则"是否满足；与本轮画面明显无关的可不列（系统只对 hit=true 触发）
+- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮画面证据（如"画面中有人躺在床上翻书"）；证据不全、靠推测、或画面模糊看不清 → hit=false
+- 规则点名具体人名时：本轮不进行身份识别，若画面中可见人物与点名者外观特征（体型/衣着/发型）明显不符或无法判断 → hit=false，宁漏勿误
+- rule_name 只能从"# 待判断规则"段原样照抄某一条完整名称（方括号开头那串，如 [pet_safety] 宠物破坏家具），严禁自创；reason 引用本轮具体观察、别复述规则原文；该段为空则 matched_rules 输出 []""",
 )
 
 SUGGESTIONS = FieldSpec(
@@ -226,8 +238,13 @@ class SceneDescriptor:
     has_speech: bool = True
     has_pets: bool = False
     identity_match_disabled: bool = False
+    # 纯场景触发模式：输出只保留 matched_rules（命中/退出判定），其余字段全剥。
+    # 见 PerceptionConfig.rule_only —— 该模式同时剥离了音频与身份链路，此处只管 schema。
+    rule_only: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
+        if self.rule_only:
+            return [_REGISTRY["matched_rules"]]
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL
         fields = [_REGISTRY[n] for n in order]
         if self.route == "audio":
@@ -266,7 +283,7 @@ def render_field_spec(scene: SceneDescriptor) -> str:
     ``has_pets`` 且 video 路由时追加「## 宠物命名」纪律（约束 caption / suggestions /
     matched_rules 对宠物的称呼，集中一处维护，见 ``PET_NAMING_SPEC``）。
     """
-    blocks = [f.spec_for(scene.route) for f in scene.selected_fields()]
-    if scene.has_pets and scene.route == "video":
+    blocks = [f.spec_for(scene.route, rule_only=scene.rule_only) for f in scene.selected_fields()]
+    if scene.has_pets and scene.route == "video" and not scene.rule_only:
         blocks.append(PET_NAMING_SPEC)
     return "\n\n".join(blocks)

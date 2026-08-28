@@ -79,11 +79,16 @@ perception:
     settle_ms: 500           # 等待慢轨道的宽限期（毫秒）
     full_action: "clear"     # 窗口满载处理策略：drop | clear | keep
   engine:
+    # 纯场景触发模式(web「场景联动」专用): 输入仅多帧画面、无音频;
+    # 跳过人脸识别 / tracker / 身份上下文; 输出只出 matched_rules(规则命中/退出),
+    # 剥离 caption / speeches / suggestions, 最大化输出速度。
+    # 改此键需重启后端生效。false = 完整感知(默认)。
+    rule_only: true
     input:
       # 帧率旋钮集中在此一处(对应 InputConfig):
       #   fps      —— 下发/pipeline 帧率 = tracker 帧率(下采后 tracker 逐帧消费全部)
       #   omni_fps —— 送 omni 的视频帧率, 与 fps 解耦; omni 已是瓶颈, 不随 tracker 提频涨
-      fps: 3
+      fps: 1
       omni_fps: 1
       video_short_edge: 512
     # Smart Crop(智能裁切增强): 推理前定向裁切活动区域, 送更高等效分辨率的局部视频 + 全景参考帧。

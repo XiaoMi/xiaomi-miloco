@@ -289,7 +289,11 @@ class PerceptionEngineProxy:
         )
 
         mon = get_monitor()
-        validation = validate_resources(omni_api_key, models_dir)
+        # rule_only（纯场景触发）只需 omni key，不要求 det/ReID 端侧模型
+        validation = validate_resources(
+            omni_api_key, models_dir,
+            rule_only=bool(engine_cfg.get("rule_only", False)),
+        )
 
         if validation.status == EngineReadiness.MODELS_MISSING:
             self._status = "models_missing"
@@ -394,6 +398,9 @@ class PerceptionEngineProxy:
             identity=IdentityConfig(**identity_kwargs),
             omni=OmniConfig(**omni_kwargs),
             identity_engine=identity_engine_cfg,
+            # 纯场景触发模式（settings.yaml perception.engine.rule_only）：
+            # 输入仅视频、跳过身份/track、输出只出 matched_rules，为场景联动服务。
+            rule_only=bool(engine_cfg.get("rule_only", False)),
         )
 
         return PerceptionEngine(config=config)
