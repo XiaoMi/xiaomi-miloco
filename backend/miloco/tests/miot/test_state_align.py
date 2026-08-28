@@ -14,14 +14,18 @@ from types import SimpleNamespace
 
 import pytest
 from miloco.miot.state_align import (
+    CHUNK_SIZE,
     SAMPLE_LIMIT,
     _collect_params,
+    _DeviceMeta,
+    _read_values,
     _Samples,
     _write_device,
     align_iot_state,
 )
 from miloco.state import MISSING, StateStore
 from miloco.state.utils import flatten
+from miot.types import MIoTGetPropertyParam
 
 KNOWN_CODE = -704220043  # 属性值不正确
 UNKNOWN_CODE = -704010000  # 码表里没有
@@ -239,7 +243,7 @@ async def test_align_reports_when_nothing_is_readable(store, caplog):
     with caplog.at_level(logging.INFO, logger="miloco.miot.state_align"):
         await align_iot_state(store, proxy)
 
-    assert any("nothing" in r.getMessage() for r in caplog.records)
+    assert any("no readable" in r.getMessage() for r in caplog.records)
     # 一条属性都读不到也要先把标志写下去，否则这台设备在容器里根本不存在
     assert store.get("iot/device/d1/status/online") is False
 
@@ -411,3 +415,63 @@ async def test_align_only_walks_the_current_home(store):
     assert store.snapshot("iot/device/d_parents/**") == {}
     # 也不该为它发请求 —— 每次启动多跑一轮 spec 查询和属性读
     assert all(did == "d_mine" for did, _, _ in proxy.requested)
+
+
+# ── 逐行失败判定要跟仓库既有口径同一份 ─────────────────────────────────
+
+
+@pytest.mark.parametrize("code", [-702000000, -702010000, None, 1])
+async def test_a_success_code_keeps_its_value(store, caplog, code):
+    """既有口径是「只有负码算失败」且 OK 码除外；这里另立一份 code != 0 会丢掉带值的行。"""
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": code, "value": 26}})
+
+    with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    assert store.get("iot/device/d1/prop/2.1") == 26
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == []
+
+
+async def test_chunk_failure_is_rate_limited_like_every_other_kind(caplog):
+    """整批失败是最容易一失全失的一类：云端断了每批都抛同一个异常，逐批打没有新信息。"""
+
+    class _AlwaysBoom(_FakeProxy):
+        async def get_device_properties(self, params: list) -> list[dict]:
+            raise RuntimeError("boom")
+
+    chunks = SAMPLE_LIMIT + 3
+    params = [
+        MIoTGetPropertyParam(did="d1", siid=2, piid=index)
+        for index in range(CHUNK_SIZE * chunks)
+    ]
+    samples = _Samples()
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await _read_values(
+            _AlwaysBoom({"d1": _device()}, {}),
+            params,
+            {"d1": _DeviceMeta(online=True, model="m")},
+            {},
+            samples,
+        )
+
+    lines = [
+        m for m in (r.getMessage() for r in caplog.records) if "chunk read failed" in m
+    ]
+    assert len(lines) == SAMPLE_LIMIT
+    assert samples.counts["chunk_failed"] == chunks
+
+
+async def test_online_flags_are_reported_when_no_property_is_readable(store, caplog):
+    """标志是在这条日志之前写的，说 nothing written 会让人把那几条当成另一个 bug 去查。"""
+    proxy = _FakeProxy({"d1": _device(online=False), "d2": _device(online=False)}, {})
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    line = next(
+        m for m in (r.getMessage() for r in caplog.records) if "no readable" in m
+    )
+    assert "online flags only" in line
+    assert "devices=2" in line

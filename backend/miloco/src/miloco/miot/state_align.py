@@ -31,7 +31,8 @@ from typing import Any
 
 from miot.types import MIoTGetPropertyParam
 
-from miloco.miot.result_codes import code_message, is_known_code
+from miloco.miot.iid import try_parse_prop_iid
+from miloco.miot.result_codes import code_message, is_failure, is_known_code
 from miloco.state import StateStore
 from miloco.state.path import validate_segment
 
@@ -50,16 +51,6 @@ SOURCE = "iot_align"
 class _DeviceMeta:
     online: bool
     model: str
-
-
-def _parse_prop_iid(iid: str) -> tuple[int, int] | None:
-    parts = iid.split(".")
-    if len(parts) != 3 or parts[0] != "prop":
-        return None
-    try:
-        return int(parts[1]), int(parts[2])
-    except ValueError:
-        return None
 
 
 class _Samples:
@@ -108,7 +99,7 @@ async def _collect_params(
                 logger.warning("align: spec unavailable did=%s: %s", did, e)
             continue
         for iid in iids:
-            parsed = _parse_prop_iid(iid)
+            parsed = try_parse_prop_iid(iid)
             if parsed is None:
                 if samples.take("bad_iid"):
                     logger.warning("align: unparsable iid did=%s iid=%s", did, iid)
@@ -154,10 +145,14 @@ async def _read_values(
         try:
             rows = await miot_proxy.get_device_properties(chunk)
         except Exception as e:
-            samples.counts["chunk_failed"] = samples.counts.get("chunk_failed", 0) + 1
-            logger.warning(
-                "align: chunk read failed offset=%s size=%s: %s", start, len(chunk), e
-            )
+            # 云端断了每批都抛同一个异常，批次编号对定位没有帮助
+            if samples.take("chunk_failed"):
+                logger.warning(
+                    "align: chunk read failed offset=%s size=%s: %s",
+                    start,
+                    len(chunk),
+                    e,
+                )
             continue
         for row in rows:
             did = row.get("did")
@@ -167,8 +162,10 @@ async def _read_values(
                     logger.warning("align: row missing did/siid/piid: %s", row)
                 continue
             model = meta[did].model if did in meta else "?"
-            code = row.get("code", 0)
-            if code != 0:
+            # 失败判定跟 result_codes 同一份：那边把 accept 一类的负码算成功，
+            # 这里另立「非 0 即失败」会把带值的成功行丢掉，还占满未知码那条告警通道
+            code = row.get("code")
+            if is_failure(code):
                 bucket = f"{code_message(code)}({code}) {model}"
                 unreadable[bucket] = unreadable.get(bucket, 0) + 1
                 _log_unreadable(did, model, siid, piid, code, samples)
@@ -272,8 +269,11 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
         offline = sum(1 for info in meta.values() if not info.online)
         if not params:
             logger.warning(
-                "align: no readable properties found; nothing written (offline=%s)",
+                "align: no readable properties found; wrote online flags only "
+                "(devices=%s offline=%s issues=%s)",
+                len(meta),
                 offline,
+                samples.counts or "none",
             )
             return
         by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)

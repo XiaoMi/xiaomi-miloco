@@ -70,9 +70,12 @@ def is_known_code(code: object) -> bool:
     return code in _MIOT_SPEC_CODES
 
 
-def _is_failure(code: object) -> bool:
+def is_failure(code: object) -> bool:
     """负码即失败,其余(0 / 正码 / 非 int / None)一律成功。镜像 PR #394。"""
     return isinstance(code, int) and code < 0 and code not in _MIOT_OK_CODES
+
+
+_is_failure = is_failure
 
 
 def summarize_results(
