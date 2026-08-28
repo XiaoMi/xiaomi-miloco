@@ -54,6 +54,9 @@ from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
 
+# 容器里这一笔的来源标记。与对齐、推送分开记，dump 里一眼能看出是谁删的
+STATE_RECONCILE_SOURCE = "iot_reconcile"
+
 
 def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
     """从设备 spec 里定位所有相机镜头开关属性（camera-control 服务的 on 属性）的 (siid, piid)。
@@ -817,16 +820,57 @@ class MiotProxy:
         return self._camera_info_dict
 
     async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:
+        from miloco.manager import get_manager
+
         async with self._refresh_devices_lock:
+            # 代号在打云端之前记：这一趟要往返，回来时可能已经不是当初那个作用域了
+            scope = get_manager().current_scope()
             try:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
                 await self._sync_scene_subscriptions()
-                return devices
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
                 return None
+            try:
+                self._reconcile_iot_state(devices, scope)
+            except Exception as e:
+                # 调和失败不该让刷新看起来失败：设备缓存和订阅都已经更新好了
+                logger.warning("清理已离开当前家庭的设备失败: %s", e)
+            return devices
+
+    def _reconcile_iot_state(
+        self, devices: dict[str, MIoTDeviceInfo], scope: int
+    ) -> None:
+        """删掉容器里已不属于当前家庭的设备。
+
+        设备换家、单台解绑、设备被删，三种情况同一个形态，一次覆盖，不用各写一个钩子。
+
+        方向是「容器里有、当前家庭没有」。反过来那批是「还没对齐到的」，归对齐管。
+
+        `devices` 是**本次刷新成功返回的那份**，不是 `_device_info_dict`、不是上一次的
+        缓存 —— 拿旧缓存做差集会把刚进来的设备算成多余的。
+        """
+        from miloco.manager import get_manager
+
+        manager = get_manager()
+        if scope != manager.current_scope():
+            # refresh_devices 是 MIPS 重连回调，切家过程中会被触发。不挡的话，一个旧
+            # 回调会拿旧家庭的设备集合去和刚清空重建的新树做差集，把新家庭的设备全删掉
+            logger.info("作用域已变，跳过这次设备清理")
+            return
+        if not devices:
+            # 「家里一台设备都没有」和「接口出问题」长得一样，宁可留一台幽灵设备。
+            # 过滤后为空则照常清理 —— 那是这个家庭确实没有设备
+            logger.info("云端没返回任何设备，跳过这次清理")
+            return
+        store = manager.state_store
+        keep = set(filter_by_home(self._kv_repo, devices))
+        # 只要第一层的键；`get` 落在中间节点会把整棵子树复制一遍，等出现第二个需要
+        # 枚举实体 id 的调用方再给容器加一个只取子节点名的接口
+        for did in set(store.get("iot/device", {})) - keep:
+            store.delete(f"iot/device/{did}", source=STATE_RECONCILE_SOURCE)
 
     @staticmethod
     def _log_device_diff(action: str, dev: MIoTDeviceInfo | None, did: str) -> None:
