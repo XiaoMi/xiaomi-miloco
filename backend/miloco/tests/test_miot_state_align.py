@@ -314,6 +314,24 @@ async def test_an_online_flag_lost_to_the_leaf_limit_shows_up_in_the_summary(
     assert "online_flag_dropped" in summary
 
 
+async def test_bulk_writes_yield_instead_of_burning_the_pending_gate(
+    store, caplog, monkeypatch
+):
+    """整批写完才让 loop 转的话 pending 会堆过水位闸，而那道闸只报一次、只在 start() 复位。"""
+    monkeypatch.setattr("miloco.state.store.PENDING_WARN_THRESHOLD", 3)
+    count = 4
+    proxy = _FakeProxy(
+        {f"d{i}": _device() for i in range(count)},
+        {(f"d{i}", 2, 1): {"code": 0, "value": i} for i in range(count)},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="miloco.state.store"):
+        await align_iot_state(store, proxy)
+
+    burned = [r for r in caplog.records if "pending state changes" in r.getMessage()]
+    assert not burned
+
+
 class _SpecFailsProxy(_EchoProxy):
     """指定的 did 拉 spec 会抛：它在 meta 里、也在线，但一条属性都没请求过。"""
 

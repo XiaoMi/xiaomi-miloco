@@ -218,7 +218,18 @@ async def _read_values(
     return by_device
 
 
-def _write_online_flags(
+async def _yield_to_dispatch() -> None:
+    """让事件循环把排队的投递跑完。每写一台之后都要调。
+
+    容器的待投递水位闸只报第一条告警，而那个标志只在 `start()` 复位、一个进程只
+    复位一次。一口气写完再让出的话，待投递量会堆成「设备数 × 属性数」，启动就把这
+    一次告警烧掉，日志还写着「订阅方卡住了」—— 而这时一个订阅方都没有。烧掉之后
+    真有订阅方卡住时就再也不会有日志。顺带让收尾行的 `stats()` 读到投递后的数。
+    """
+    await asyncio.sleep(0)
+
+
+async def _write_online_flags(
     store: StateStore, meta: dict[str, _DeviceMeta], samples: _Samples
 ) -> None:
     """每台设备都写在线标志，离线的也写。
@@ -240,6 +251,7 @@ def _write_online_flags(
             continue
         if not landed and samples.take("online_flag_dropped"):
             logger.warning("align: online flag hit the leaf limit did=%s", did)
+        await _yield_to_dispatch()
 
 
 def _write_device(
@@ -309,7 +321,7 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
     unreadable: dict[str, int] = {}
     try:
         params, meta = await _collect_params(miot_proxy, samples)
-        _write_online_flags(store, meta, samples)
+        await _write_online_flags(store, meta, samples)
         offline = sum(1 for info in meta.values() if not info.online)
         if not params:
             logger.warning(
@@ -321,16 +333,13 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
             )
             return
         by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
-        per_device = {
-            did: _write_device(store, did, props, samples)
-            for did, props in by_device.items()
-        }
+        per_device: dict[str, int] = {}
+        for did, props in by_device.items():
+            per_device[did] = _write_device(store, did, props, samples)
+            await _yield_to_dispatch()
         written = sum(per_device.values())
         for did, props in by_device.items():
             logger.debug("align: did=%s values=%s", did, props)
-        # 让 loop 转一圈把排队的投递跑掉，否则 stats() 里的 pending 是投递前的瞬时值，
-        # 读起来像「订阅方卡住了」
-        await asyncio.sleep(0)
         logger.info(
             "align done: devices=%s offline=%s written_devices=%s requested=%s "
             "written=%s elapsed=%.1fs issues=%s unreadable=%s store=%s",
