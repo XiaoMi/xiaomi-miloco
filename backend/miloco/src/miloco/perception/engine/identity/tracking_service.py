@@ -59,11 +59,33 @@ def _main_det_boxes(tracker: Any) -> list[tuple[int, int, int, int]]:
     return [d.xyxy for d in dets if d.class_id in main]
 
 
+def _track_boxes(tracker: Any) -> dict[int, tuple[int, int, int, int]]:
+    """取本帧各 track 的框 ``{track_id: xyxy 像素}``,给单帧人像注入选帧用。
+
+    只收 ``detected_this_frame`` 为真的 track:coasting 帧上框是上一次真匹配时的检测框、
+    原地冻结,拿它去裁**当前**帧会裁到人已离开的背景或隔壁那个人 —— 注入是把图绑到
+    track_id 上,绑错等于直接喂一个错身份证据。同 IdentityEngine 内各 coasting 闸的口径。
+    (SortTracker 的 get_tracking_results 已前置过滤掉 coasting,该字段恒真,此处是空过滤;
+     DeepSortTracker 返回全部 confirmed track、含 coasting,过滤在那条路上才真正生效。)
+
+    直接读 tracker 已有状态(get_tracking_results 是纯投影、无副作用),**不重跑推理** ——
+    与逐帧调 ``_main_det_boxes`` 同性质,逐帧调的开销是一次列表推导。
+    """
+    out: dict[int, tuple[int, int, int, int]] = {}
+    for r in tracker.get_tracking_results():
+        if not r.get("detected_this_frame", True):
+            continue
+        x1, y1, x2, y2 = r["xyxy"]
+        out[int(r["id"])] = (int(x1), int(y1), int(x2), int(y2))
+    return out
+
+
 def _build_response(
     results: list[dict],
     n_frames: int,
     fps: int,
     main_det_boxes: list[tuple[int, int, int, int]] | None = None,
+    per_frame_track_boxes: list[dict[int, tuple[int, int, int, int]]] | None = None,
 ) -> TrackingResponse:
     """将 tracker.get_tracking_results() 转为 TrackingResponse。"""
     from miloco.perception.engine.identity.tracker.detector import Detection
@@ -118,6 +140,7 @@ def _build_response(
         ),
         object_info=object_info,
         main_det_boxes=list(main_det_boxes or []),
+        per_frame_track_boxes=list(per_frame_track_boxes or []),
     )
 
 
@@ -202,12 +225,16 @@ class RealTrackingService(TrackingService):
             )
         # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
         # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
+        # 逐帧带 track_id 的框:单帧人像注入要"该 track 窗内哪一帧最大",同样只能在循环内取
+        # (get_tracking_results 循环外只剩末帧状态)。两个累积器同一趟循环,不额外遍历。
         main_boxes: list[tuple[int, int, int, int]] = []
+        per_frame: list[dict[int, tuple[int, int, int, int]]] = []
         for frame in frames:
             self._tracker.update(frame)
             main_boxes.extend(_main_det_boxes(self._tracker))
+            per_frame.append(_track_boxes(self._tracker))
         return _build_response(
-            self._tracker.get_tracking_results(), len(frames), fps, main_boxes
+            self._tracker.get_tracking_results(), len(frames), fps, main_boxes, per_frame
         )
 
     def reset_session(self) -> None:
@@ -289,12 +316,16 @@ class DeepSortTrackingService(TrackingService):
             )
         # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
         # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
+        # 逐帧带 track_id 的框:单帧人像注入要"该 track 窗内哪一帧最大",同样只能在循环内取。
+        # 两个累积器同一趟循环,不额外遍历。
         main_boxes: list[tuple[int, int, int, int]] = []
+        per_frame: list[dict[int, tuple[int, int, int, int]]] = []
         for frame in frames:
             self._tracker.update(frame)
             main_boxes.extend(_main_det_boxes(self._tracker))
+            per_frame.append(_track_boxes(self._tracker))
         return _build_response(
-            self._tracker.get_tracking_results(), len(frames), fps, main_boxes
+            self._tracker.get_tracking_results(), len(frames), fps, main_boxes, per_frame
         )
 
     def reset_session(self) -> None:

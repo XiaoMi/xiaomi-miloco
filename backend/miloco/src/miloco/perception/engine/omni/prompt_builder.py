@@ -57,6 +57,7 @@ from .constants import (
 )
 from .field_registry import SceneDescriptor, render_field_spec, render_schema
 from .home_profile_loader import get_home_profile_prefix, home_profile_has_pets
+from .person_crop_inject import build_person_crop_content
 from .pet_refs import build_pet_reference_content
 from .provider import LocalMediaInfo, OmniProviderAdapter
 
@@ -104,8 +105,13 @@ class FusedPromptConfig:
     include_face_composite: bool = True   # 是否带 face composite
     distinguish_strangers: bool = True
     # gallery 渲染上限：超出此值时仅取前 N 人（按 dict 迭代顺序），并 warning 提示。
-    # 单人 body+face composite 占约 20-40KB jpeg ≈ 60-120KB base64 ≈ 15-30K tokens；
-    # >10 人 prompt 容易超出 omni token 预算，需在配置或上游 gallery_snapshot 处控制。
+    # 视觉 token 口径：图走 ViT patch embedding、**不进文本 tokenizer**，28×28 像素 = 1 视觉
+    # token。故一张 256 高的 composite 是几十 token 量级（同下方 max_pet_refs 的实测数字，
+    # 320 高 ≈ 194 token/只），单人 body+face 合计仍在百量级。
+    # 旧注释曾写「20-40KB jpeg ≈ 60-120KB base64 ≈ 15-30K tokens」，那是把 base64 字节数 ÷4
+    # 当 token 的**文本** tokenization 算法，用在图上高估约两个数量级，据此订正。
+    # ⚠️ 但**不要**据此放宽本上限：10 人这个值是否只因当年的错估而设，没有验证过；真正的约束
+    # 可能在别处（渲染耗时、gallery 里人越多越容易撞脸误认）。要放宽得单独跑评测。
     max_gallery_persons: int = 10
     # 宠物参考图上限（P2 / C-D1）：最多注入几只宠物（每只带其已存的 ≤3 张多姿态参考图）。
     # 家庭多 1-3 只覆盖 99%，仿人 gallery 上限保护；仅 has_pets（video route）时注入。
@@ -875,6 +881,32 @@ def _build_fused_user_content(
 
     # 4. gallery（候选成员参考图，紧邻 video 便于视觉比对）
     content.extend(gallery_content)
+
+    # 4.4 单帧人像注入：每个待识别 track 一张"外观单帧"（裁自本窗视频、显式绑定 track_id）。
+    #
+    # **位置**：紧贴 gallery 之后。注入文案写的是「与**上方** gallery 成员参考图逐一比对」，
+    # 比对目标必须在其上；且离线评测里分数最高的那一臂正是这个相对次序（gallery 在前、人像在后）。
+    # 不能往后挪到 video 之前 —— 那个槽位属于 4.6 全景参考帧，下面那条「必须排在宠物参考图
+    # 之后」的注释与其守卫测试已经把「引导语紧跟的那张就是 video 前最后一张图」钉死了。
+    #
+    # **门控**：只在 gallery 段真的渲染出成员参考图时注入。库空（matching_moot）或 gallery 走了
+    # 「全或无」放弃时，prompt 里没有可比对的参考图，注入人像既帮不到识别（结论必然是 unknown），
+    # 文案里的「上方 gallery」还会变成悬空指代。
+    #
+    # **多设备防御**：恒单 packet 是当前事实（同 _candidate_bbox_ok 的多 packet 否决）。真出现多
+    # packet 时跳过 —— candidates 只属于其中某一个设备，而 track_id 在设备间会撞号，套错帧就是把
+    # 另一个人的图绑到这个 track_id 上，比不注入坏得多。
+    if any(b.get("type") == "image_url" for b in gallery_content):
+        if len(packets) == 1:
+            content.extend(build_person_crop_content(
+                candidates=candidates,
+                frames=packets[0].all_frames,
+                per_frame_boxes=packets[0].per_frame_track_boxes,
+            ))
+        else:
+            logger.info(
+                "event=person_crop_inject_skip reason=multi_packet n_packets=%d", len(packets)
+            )
 
     # 4.5. 已登记宠物多姿态参考图（P2）——仅 has_pets 时注入（用上游 scene 已算好的值，不重读盘）；
     # 读盘/编码失败或无图则空，退化为纯文字（PET_NAMING_SPEC + 档案「## 宠物」段仍在，不阻断识别）。

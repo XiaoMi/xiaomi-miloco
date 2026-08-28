@@ -130,6 +130,15 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "Smart Crop 单机用户开关（同 UI「智能裁切增强」）；与 enabled 相与，重启生效"
         "（在 UI 拨这个开关走 admin API，则热更、下个感知窗口生效）",
     ),
+    "perception.engine.person_crop_inject.enabled": (
+        bool,
+        True,
+        "单帧人像注入开关（默认值在随包 settings.yaml）：给每个待识别 track 附一张外观单帧、"
+        "绑定 track_id，提升多人同框的身份召回；关闭即退化为只给 bbox 数字坐标。重启生效"
+        "（后端虽每窗热读，但 get_settings 有进程级缓存、该 key 无 admin 入口去清它，"
+        "故靠本命令默认的顺手重启生效；带 --no-restart 则改了等于没改）。本命令写的是 "
+        "config.json，本机从此固定读它，后续发版改 yaml 对本机不再生效",
+    ),
     "perception.collect.window_size": (
         int,
         4,

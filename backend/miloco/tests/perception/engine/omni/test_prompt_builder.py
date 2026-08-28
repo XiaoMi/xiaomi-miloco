@@ -1662,9 +1662,12 @@ class TestAdaptiveResolution:
             content = self._content(candidates=[])
         assert self._has_ref(content)
         vid_idx = next(i for i, b in enumerate(content) if b.get("type") == "video_url")
+        # 筛**全部** image_url、不筛 mime：曾经这里只数 image/jpeg，于是走 PNG 的 gallery /
+        # 单帧人像注入插到 ref 之后照样绿。格式无关才真钉得住。
+        # ⚠️ 但只改 mime 还不够：本用例传的是 candidates=[]，注入分支根本进不来，所以它对
+        # 人像注入始终是瞎的。真正覆盖那条路的是 TestPersonCropInject 里带候选的同款用例。
         img_idxs = [
-            i for i, b in enumerate(content[:vid_idx])
-            if b.get("type") == "image_url" and "image/jpeg" in b["image_url"]["url"]
+            i for i, b in enumerate(content[:vid_idx]) if b.get("type") == "image_url"
         ]
         assert len(img_idxs) >= 2  # 宠物图 + 全景图都在
         guide_idx = next(
@@ -2256,3 +2259,229 @@ class TestAdaptiveResolution:
             payload = build_batch_prompt([_adaptive_packet()], OmniContext())
         assert payload["crops"] == []
         assert payload.get("video_base64")
+
+
+# =============================================================================
+# 单帧人像注入（4.4 段）在 fused 路径的接线
+# =============================================================================
+
+
+def _png_bytes(fill: int, h: int = 64, w: int = 32) -> bytes:
+    ok, buf = cv2.imencode(".png", np.full((h, w, 3), fill, dtype=np.uint8))
+    assert ok
+    return buf.tobytes()
+
+
+class TestPersonCropInject:
+    """单帧人像注入的位置、门控与降级。
+
+    位置是本段的重点：它必须落在 gallery **之后**（文案写的是「与上方 gallery 逐一比对」），
+    又必须落在 4.6 全景参考帧引导语**之前**（那条不变式要求引导语紧跟的那张就是 video 前
+    最后一张图）。两头都钉住，才不会在后续有人插新图块时静默漂走。
+    """
+
+    _NOTE = "【识别辅助】下方为每个待识别 track 的"
+
+    def _gallery(self):
+        from miloco.perception.engine.identity.library import GallerySamples
+
+        return {
+            "p-1": GallerySamples(
+                person_id="p-1", name="张三", role=None,
+                body_composite_jpeg=_png_bytes(200),
+            ),
+        }
+
+    def _cands(self, *track_ids):
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        return [
+            IdentityQueryItem(
+                track_id=t,
+                body_crop=np.full((120, 60, 3), 30 + t, dtype=np.uint8),
+                bbox_xyxy_norm=(100, 100, 300, 600),
+            )
+            for t in track_ids
+        ]
+
+    def _content(self, *, candidates, gallery_snapshot, matching_moot=False, packet=None,
+                 packets=None):
+        """闸**由用例自己钉成开**，不读机器上的合并 settings。
+
+        否则用户在自己 config.json 里合法地把它关掉，本类的阳性用例会集体变红；而阴性用例
+        （test_not_injected_*）会变成"永远绿"的假保证 —— 它们要证明的是 prompt 侧的门控，
+        不是配置默认值。随包默认值另有专门用例（test_person_crop_inject.py::TestShippedDefault）。
+        """
+        from miloco.perception.engine.config import PersonCropInjectConfig
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch(
+            "miloco.perception.engine.omni.person_crop_inject"
+            ".person_crop_inject_config_from_settings",
+            return_value=PersonCropInjectConfig(enabled=True),
+        ):
+            fused = build_fused_payload(
+                packets=packets or [packet or _adaptive_packet()], context=OmniContext(),
+                candidates=candidates, gallery_snapshot=gallery_snapshot,
+                matching_moot=matching_moot,
+            )
+        return _multimodal_user_content(fused["messages"])
+
+    def _idx(self, content, pred):
+        return next((i for i, b in enumerate(content) if pred(b)), None)
+
+    def _note_idx(self, content):
+        return self._idx(
+            content, lambda b: b.get("type") == "text" and self._NOTE in b.get("text", "")
+        )
+
+    def test_injected_after_gallery_and_before_video(self):
+        content = self._content(candidates=self._cands(1), gallery_snapshot=self._gallery())
+        note = self._note_idx(content)
+        assert note is not None
+        gallery_close = self._idx(
+            content, lambda b: b.get("type") == "text" and b.get("text") == "</gallery>"
+        )
+        vid = self._idx(content, lambda b: b.get("type") == "video_url")
+        assert gallery_close < note < vid
+        assert any("track_id=1 的外观单帧" in b.get("text", "") for b in content)
+
+    def test_one_image_per_candidate(self):
+        content = self._content(candidates=self._cands(1, 2, 5), gallery_snapshot=self._gallery())
+        bind = [b for b in content if "的外观单帧：" in b.get("text", "")]
+        assert [t["text"] for t in bind] == [
+            "待识别 track_id=1 的外观单帧：",
+            "待识别 track_id=2 的外观单帧：",
+            "待识别 track_id=5 的外观单帧：",
+        ]
+
+    def test_injected_immediately_after_gallery(self):
+        """紧贴 gallery：说明块必须是 </gallery> 的下一块。
+
+        文案写的是「与**上方** gallery 成员参考图逐一比对」，中间垫东西这句就开始变虚；
+        另一头（必须在全景引导语之前）由 test_ref_stays_last_image_before_video 钉。
+        """
+        content = self._content(candidates=self._cands(1), gallery_snapshot=self._gallery())
+        close = self._idx(
+            content, lambda b: b.get("type") == "text" and b.get("text") == "</gallery>"
+        )
+        assert self._note_idx(content) == close + 1
+
+    def test_not_injected_when_gallery_gives_up(self):
+        """gallery 走「全或无」放弃（成员参考图坏了）时不注入。
+
+        这是运行时真会发生的那一支：库里存的 composite 损坏 / 半截，gallery 段整段放弃、
+        退化为 unknown 以避免错认。此时注入一张人像没有可比对的对象，文案里的「上方 gallery」
+        也成了悬空指代。
+        """
+        from miloco.perception.engine.identity.library import GallerySamples
+
+        broken = {
+            "p-1": GallerySamples(
+                person_id="p-1", name="张三", role=None, body_composite_jpeg=b"xx",
+            ),
+        }
+        content = self._content(candidates=self._cands(1), gallery_snapshot=broken)
+        assert self._note_idx(content) is None
+        # gallery 合成图与人像注入都是 PNG，全景参考帧是 JPEG —— 按 PNG 判定，才能同时证明
+        # "gallery 段确已放弃"和"没注入人像"，又不会被 Smart Crop 的参考帧干扰。
+        assert not any(
+            b.get("type") == "image_url" and "image/png" in b["image_url"]["url"]
+            for b in content
+        )
+
+    def test_not_injected_with_multiple_packets(self):
+        """多设备并发时跳过：candidates 只属于其中一个设备，而 track 号在设备间会撞号，
+        套错帧就是把另一个人的图绑到这个 track_id 上。"""
+        content = self._content(
+            candidates=self._cands(1), gallery_snapshot=self._gallery(),
+            packets=[_adaptive_packet(), _adaptive_packet()],
+        )
+        assert self._note_idx(content) is None
+
+    def test_not_injected_without_gallery(self):
+        """gallery 段没渲染出参考图时不注入——否则「上方 gallery」是悬空指代，且比无可比。"""
+        content = self._content(candidates=self._cands(1), gallery_snapshot={})
+        assert self._note_idx(content) is None
+
+    def test_not_injected_when_matching_moot(self):
+        """身份库为空：identities 已被指示只判 unknown/no_person，注入人像帮不到任何事。"""
+        content = self._content(
+            candidates=self._cands(1), gallery_snapshot=self._gallery(), matching_moot=True,
+        )
+        assert self._note_idx(content) is None
+
+    def test_not_injected_without_candidates(self):
+        content = self._content(candidates=[], gallery_snapshot=self._gallery())
+        assert self._note_idx(content) is None
+
+    def test_picks_largest_frame_when_per_frame_boxes_present(self):
+        """有逐帧框时走面积最大那帧，而不是候选自带的末帧 body_crop。"""
+        import base64
+        from dataclasses import replace
+
+        frames = [np.full((480, 640, 3), v, dtype=np.uint8) for v in (20, 210, 60)]
+        pkt = replace(
+            _adaptive_packet(frames=frames),
+            per_frame_track_boxes=[
+                {1: (0, 0, 60, 60)},
+                {1: (0, 0, 240, 330)},   # 面积最大 → fill=210
+                {1: (0, 0, 90, 100)},
+            ],
+        )
+        content = self._content(
+            candidates=self._cands(1), gallery_snapshot=self._gallery(), packet=pkt,
+        )
+        note = self._note_idx(content)
+        img = content[note + 2]                      # note, 绑定文本, 图
+        assert img["type"] == "image_url"
+        raw = base64.b64decode(img["image_url"]["url"].split(",", 1)[1])
+        arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        assert abs(int(arr.mean()) - 210) <= 2
+        assert arr.shape[0] == 256                   # 归一高度
+
+    def test_ref_stays_last_image_before_video(self):
+        """开 Smart Crop 时，人像注入不能把全景参考帧从「video 前最后一张图」的位置挤走。
+
+        这是 test_ref_is_last_image_before_video_with_pet_refs 的同款不变式，但走的是**注入
+        真实开启**的路径 —— 那条守卫测试传 candidates=[]，根本进不了注入分支。
+        """
+        from miloco.perception.engine.config import CropEnhanceConfig
+
+        # 区域必须**钉死**：不钉的话裁不裁取决于噪声帧上的运动块与面积闸能否过关，
+        # 是涌现行为 —— 该用例会间歇性地在"全景参考帧根本没渲染"的前提下跑，断言随之漂移。
+        # 同 TestAdaptiveResolution._fixed_region 的做法（patch 的是带拒因的那个函数，
+        # 薄封装 compute_crop_region 不在被测路径上，patch 它不会生效）。
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder._get_video_short_edge",
+            return_value=512,
+        ), patch(
+            "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
+            return_value=CropEnhanceConfig(enabled=True, user_enabled=True),
+        ), patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region_detail",
+            return_value=((50, 50, 350, 350), "ok"),
+        ):
+            content = self._content(
+                candidates=self._cands(1, 2), gallery_snapshot=self._gallery(),
+            )
+        guide = self._idx(
+            content,
+            lambda b: b.get("type") == "text" and "全景场景参考" in b.get("text", ""),
+        )
+        assert guide is not None, "本用例的前提是 Smart Crop 真生效、全景参考帧已渲染"
+        vid = self._idx(content, lambda b: b.get("type") == "video_url")
+        # vid 为 None 时 content[:None] 会静默变成"整个列表"，让下面的断言测的是别的东西。
+        # 视频块被跳过（编码产物过短）是真实存在的降级路径，这里要它**响**而不是悄悄改语义。
+        assert vid is not None, "本用例的前提是 video 块已渲染"
+        imgs = [i for i, b in enumerate(content[:vid]) if b.get("type") == "image_url"]
+        _dbg = (
+            "layout=" + "".join(
+                "V" if b.get("type") == "video_url"
+                else ("I" if b.get("type") == "image_url" else "t") for b in content)
+            + f" note={self._note_idx(content)} guide={guide} vid={vid} imgs={imgs}"
+            + " texts=" + repr([b.get("text", "")[:22] for b in content
+                                if b.get("type") == "text"])
+        )
+        assert imgs[-1] == guide + 1, _dbg     # 引导语紧跟的那张，仍是 video 前最后一张
+        assert self._note_idx(content) < guide, _dbg  # 人像注入整段在引导语之前

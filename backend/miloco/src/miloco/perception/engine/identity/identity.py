@@ -126,6 +126,7 @@ async def run_identity(
         sample_rate=gate_packet.sample_rate,
         trigger=gate_packet.trigger,
         main_det_boxes=tracking_resp.main_det_boxes,
+        per_frame_track_boxes=tracking_resp.per_frame_track_boxes,
     )
 
 
