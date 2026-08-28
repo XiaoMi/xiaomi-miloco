@@ -304,6 +304,22 @@ async def _maybe_trigger_onboarding() -> None:
         logger.warning("启动 onboarding 主动邀请检查失败(忽略)", exc_info=True)
 
 
+async def _align_state_scope() -> None:
+    """启动对齐，跑完把这一代标成已对齐。
+
+    切换账号或家庭时的那一轮由 MiotService 的切换编排负责，这里只管进程起来这一次。
+    """
+    manager = get_manager()
+    scope = manager.current_scope()
+    if await align_iot_state(
+        manager.state_store,
+        manager.miot_proxy,
+        scope=scope,
+        current_scope=manager.current_scope,
+    ):
+        manager.mark_scope_aligned(scope)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan event handler."""
@@ -380,9 +396,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # 状态容器的启动对齐：拉一遍在线设备属性写进容器。要打若干次云端请求,
     # 所以不放 initialize() 里挡启动;关闭时在 shutdown 段取消。
-    get_manager().state_align_task = asyncio.create_task(
-        align_iot_state(get_manager().state_store, get_manager().miot_proxy)
-    )
+    get_manager().state_align_task = asyncio.create_task(_align_state_scope())
 
     # Start monitoring threads after manager.initialize() completes
     mon = get_monitor()

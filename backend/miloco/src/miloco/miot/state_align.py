@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +46,27 @@ CHUNK_SIZE = 150
 SAMPLE_LIMIT = 5
 
 SOURCE = "iot_align"
+
+
+@dataclass(slots=True, frozen=True)
+class _ScopeGuard:
+    """对齐启动时记下的那一代，加上怎么读现在是哪一代。
+
+    对齐要打几秒钟云端请求，这期间用户可能切了账号或家庭。不比就会把旧作用域的值写进
+    刚清空重建的树，而且带的是当下的时间戳，事后从 `last_reported` 看不出它是旧的。
+    """
+
+    mine: int
+    read_current: Callable[[], int]
+
+    def moved_on(self) -> bool:
+        now = self.read_current()
+        if now == self.mine:
+            return False
+        logger.info(
+            "align: scope moved %s -> %s; abandoning this round", self.mine, now
+        )
+        return True
 
 
 @dataclass(slots=True, frozen=True)
@@ -230,9 +252,12 @@ async def _yield_to_dispatch() -> None:
 
 
 async def _write_online_flags(
-    store: StateStore, meta: dict[str, _DeviceMeta], samples: _Samples
-) -> None:
-    """每台设备都写在线标志，离线的也写。
+    store: StateStore,
+    meta: dict[str, _DeviceMeta],
+    samples: _Samples,
+    guard: _ScopeGuard,
+) -> bool:
+    """每台设备都写在线标志，离线的也写。返回有没有全部写完。
 
     先写标志再写属性：一条属性都读不到的设备也要在容器里留下痕迹。
 
@@ -241,6 +266,9 @@ async def _write_online_flags(
     静默丢失 —— 尤其在一条属性都读不到的那条早退路径上，收尾行是唯一的信号。
     """
     for did, info in meta.items():
+        # 每台之前都比一次：这个循环里每台之后都让出一次 loop，切换落在中间是可能的
+        if guard.moved_on():
+            return False
         try:
             landed = store.set(
                 f"iot/device/{did}/status/online", info.online, source=SOURCE
@@ -252,6 +280,7 @@ async def _write_online_flags(
         if not landed and samples.take("online_flag_dropped"):
             logger.warning("align: online flag hit the leaf limit did=%s", did)
         await _yield_to_dispatch()
+    return True
 
 
 def _write_device(
@@ -314,8 +343,17 @@ def _write_device(
     return written
 
 
-async def align_iot_state(store: StateStore, miot_proxy: Any) -> bool:
+async def align_iot_state(
+    store: StateStore,
+    miot_proxy: Any,
+    *,
+    scope: int,
+    current_scope: Callable[[], int],
+) -> bool:
     """拉一遍在线设备的可读属性写进容器。任何异常都只记日志，不往外抛。
+
+    `scope` 是起这一轮时的作用域代号，`current_scope` 读当下的那一代；两者不等就整轮
+    放弃。整轮放弃而不是跳过单条：半轮旧数据比没有数据更难查。
 
     返回这一轮跑完了没有，**不回答读全了没有** —— 部分设备读失败仍算跑完，一台坏
     设备不该卡死等着这个判定的下游。下游拿到真才把当前作用域标成已对齐。
@@ -323,7 +361,11 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> bool:
     started = time.monotonic()
     samples = _Samples()
     unreadable: dict[str, int] = {}
+    guard = _ScopeGuard(scope, current_scope)
     try:
+        if guard.moved_on():
+            # 这里就退掉能省下整轮云端请求：_collect_params 每台要拉一次 spec
+            return False
         if not miot_proxy.has_enabled_home():
             # 空作用域没有「已对齐」可言，这条兜住把对齐排在建立启用集之前的顺序错误。
             # 判据是启用集空不空而不是家庭里有几台设备：空家庭的容器本来就该是空的，
@@ -331,7 +373,8 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> bool:
             logger.warning("align: no home is enabled; nothing to align")
             return False
         params, meta = await _collect_params(miot_proxy, samples)
-        await _write_online_flags(store, meta, samples)
+        if not await _write_online_flags(store, meta, samples, guard):
+            return False
         offline = sum(1 for info in meta.values() if not info.online)
         if not params:
             logger.warning(
@@ -345,6 +388,8 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> bool:
         by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
         per_device: dict[str, int] = {}
         for did, props in by_device.items():
+            if guard.moved_on():
+                return False
             per_device[did] = _write_device(store, did, props, samples)
             await _yield_to_dispatch()
         written = sum(per_device.values())
