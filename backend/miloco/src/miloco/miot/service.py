@@ -1032,6 +1032,21 @@ class MiotService:
     async def list_homes(self) -> list[dict]:
         """列出账号下全部家庭（绕过过滤），每项含 in_use 标记。
 
+        启用集是被这一趟改过的话，顺带重置会话 —— 自动选家和用户显式切家一样换掉了
+        当前家庭，旧家庭的上下文不清会串进新家庭。
+        """
+        homes, changed = await self._ensure_home_selected()
+        if changed:
+            self._schedule_agent_session_reset()
+        return homes
+
+    async def _ensure_home_selected(self) -> tuple[list[dict], bool]:
+        """拉家庭全集，并保证启用集里至少有一个还看得见的家庭。
+
+        返回 `(家庭列表, 启用集有没有被这一趟改过)`。**副作用只有写 KV** —— 要不要
+        因此重置会话、清容器，是调用方按自己的场景决定的，不在这里做：`switch_home`
+        紧接着就要把启用集改成用户点的那个家，在这里先编排一轮等于白清一次。
+
         优先调米家 SDK ``get_homes_async()`` 拿用户真全集（含没设备 / 设备全离线
         的家），失败兜底到从 cached devices/cameras 反推。Union devices 与 cameras
         两个 dict 的 home_id —— 「家里只装了一台摄像头、无其他设备」这种单看
@@ -1041,6 +1056,7 @@ class MiotService:
         """
         allow = allowed_home_ids(self._kv_repo)
         seen: dict[str, dict] = {}
+        changed = False
 
         # 主路径：米家 user-level API 拿全集
         try:
@@ -1096,13 +1112,11 @@ class MiotService:
             logger.info("启用集与可见家庭无交集，自动启用首个家庭 %s（兜底）", first)
             for h in seen.values():
                 h["in_use"] = h["home_id"] in allow
-            # 兜底自动切换同样换掉了启用家庭 → 重置会话，消除旧家庭上下文泄漏
-            # （与显式 switch_home 同一 bug class）。
-            self._schedule_agent_session_reset()
+            changed = True
 
         # 按 home_id 字典序排序——米家 SDK 返回顺序受设备活跃度等影响不稳定，
         # 不排 HomeSwitcher 列表会在两次 reload 之间跳。
-        return sorted(seen.values(), key=lambda h: h["home_id"])
+        return sorted(seen.values(), key=lambda h: h["home_id"]), changed
 
     def _schedule_agent_session_reset(self) -> None:
         """切换家庭后后台 best-effort 重置 openclaw 里的 miloco session，清掉旧家庭
@@ -1132,15 +1146,17 @@ class MiotService:
         返回切换后的全量家庭列表。刷新设备/摄像头/场景放到后台异步完成，
         避免让 HTTP 响应等待云端 API 调用。
         """
-        homes = await self.list_homes()
+        # 启用集在校验之前先读：_ensure_home_selected 可能顺手自动选了首个家庭，
+        # 读晚了就把那次自动选当成"切换前的状态"，用户点的那次反而看着没变化
+        prev_allow = allowed_home_ids(self._kv_repo)
+        # 走 _ensure_home_selected 而不是 list_homes：后者会为自动选家先重置一次会话，
+        # 而这里紧接着就要切到用户点的那个家，白重置一次
+        homes, _ = await self._ensure_home_selected()
         known = {h["home_id"] for h in homes}
         if home_id not in known:
             raise ValidationException(
                 f"Unknown home_id {home_id!r}; valid: {sorted(known)}"
             )
-        # 切换前后的启用集：只有真的变了才 reset——切到"已是当前唯一启用"的家庭
-        # （重复点选 / 重复提交同一 home_id）不该白删仍然有效的热上下文。
-        prev_allow = allowed_home_ids(self._kv_repo)
         # 先把目标加进在用集合,再把其余移出。
         target_list, _ = set_homes_in_use(self._kv_repo, [home_id], True)
         others = [h for h in target_list if h != home_id]

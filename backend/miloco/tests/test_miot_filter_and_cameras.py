@@ -305,6 +305,56 @@ async def test_list_homes_auto_selects_first_when_empty():
 
 
 @pytest.mark.asyncio
+async def test_ensure_home_selected_picks_the_first_home_when_none_is_enabled():
+    kv = _FakeKV()
+    svc = _make_service(devices={"d1": _home("H2"), "d2": _home("H1")}, kv=kv)
+
+    homes, changed = await svc._ensure_home_selected()
+
+    assert changed is True
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    assert {h["home_id"] for h in homes} == {"H1", "H2"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_reports_no_change_when_one_is_already_enabled():
+    svc = _make_service(
+        devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H2")
+    )
+
+    _, changed = await svc._ensure_home_selected()
+
+    assert changed is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_does_not_reset_sessions_by_itself():
+    """它的副作用只有写 KV。要不要因此重置会话是调用方的决定。"""
+    svc = _make_service(devices={"d1": _home("H1")}, kv=_FakeKV())
+    resets: list[int] = []
+    svc._schedule_agent_session_reset = lambda: resets.append(1)
+
+    await svc._ensure_home_selected()
+
+    assert resets == []
+
+
+@pytest.mark.asyncio
+async def test_switch_home_resets_sessions_once_when_no_home_was_enabled():
+    """用户点一次，不该先自动切到首个家庭再切到目标。
+
+    那样会重置两次会话，而且中间那段时间容器装的是用户没选的那个家。
+    """
+    svc = _make_service(devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_FakeKV())
+    resets: list[int] = []
+    svc._schedule_agent_session_reset = lambda: resets.append(1)
+
+    await svc.switch_home("H2")
+
+    assert resets == [1]
+
+
+@pytest.mark.asyncio
 async def test_switch_home_persists_through_kv():
     """切换家庭：switch 后只有目标家庭 in_use=True，其余 False。"""
     kv = _FakeKV()
