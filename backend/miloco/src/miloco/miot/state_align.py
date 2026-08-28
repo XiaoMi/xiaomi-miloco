@@ -138,7 +138,12 @@ async def _read_values(
     unreadable: dict[str, int],
     samples: _Samples,
 ) -> dict[str, dict[str, Any]]:
-    """分批读取，按 did 归拢成 {did: {"<siid>.<piid>": value}}。"""
+    """分批读取，按 did 归拢成 {did: {"<siid>.<piid>": value}}。
+
+    只收本轮请求过的 did。云端会在同一批响应里顺带回没请求的行，那些行要么属于别的
+    家庭，要么来自被跳过的设备（离线、拿不到 spec），都不该进容器。
+    """
+    requested = {param.did for param in params}
     by_device: dict[str, dict[str, Any]] = {}
     for start in range(0, len(params), CHUNK_SIZE):
         chunk = params[start : start + CHUNK_SIZE]
@@ -161,12 +166,16 @@ async def _read_values(
                 if samples.take("row_without_ids"):
                     logger.warning("align: row missing did/siid/piid: %s", row)
                 continue
-            if did not in meta:
-                # meta 是这一轮的许可名单。响应侧多回来的 did 不能借这条链绕过家庭
-                # 过滤；它也没有在线标志，写进去消费方分不出「离线」和「没接入」
-                if samples.take("did_not_requested"):
+            if did not in requested:
+                # 判据是「本轮请求过没有」而不是「在不在 meta 里」：离线设备和拿不到
+                # spec 的设备都在 meta 里，却一条属性都没请求过。分两类记是因为排查
+                # 方向不同 —— 家庭外的写进去等于绕过家庭过滤，本轮没请求的则是云端
+                # 缓存值，写进去会把 last_reported 盖成当下、看不出它其实很旧
+                kind = "out_of_home" if did not in meta else "not_requested"
+                if samples.take(kind):
                     logger.warning(
-                        "align: drop row for unrequested did=%s iid=prop.%s.%s",
+                        "align: drop %s row did=%s iid=prop.%s.%s",
+                        kind,
                         did,
                         siid,
                         piid,

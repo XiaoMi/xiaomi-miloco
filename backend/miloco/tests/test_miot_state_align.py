@@ -299,8 +299,56 @@ async def test_a_did_with_a_slash_is_still_refused_by_the_write_side(store):
     assert store.snapshot("iot/device/x/**") == {}
 
 
-async def test_a_wellformed_did_that_was_never_requested_is_dropped(store, caplog):
-    """名单是「当前启用家庭」，响应侧多回来的合法 did 不能借这条链绕过家庭过滤。"""
+class _SpecFailsProxy(_EchoProxy):
+    """指定的 did 拉 spec 会抛：它在 meta 里、也在线，但一条属性都没请求过。"""
+
+    def __init__(self, devices: dict, rows: dict, *, failing: str):
+        super().__init__(devices, rows)
+        self._failing = failing
+
+    async def get_readable_prop_iids(self, did: str) -> list[str]:
+        if did == self._failing:
+            raise RuntimeError("spec unavailable")
+        return await super().get_readable_prop_iids(did)
+
+
+async def test_a_cached_row_for_an_offline_device_is_dropped(store):
+    """离线设备的属性从来没请求过，云端多回的那行是缓存值，写进去会假装是刚上报的。"""
+    proxy = _EchoProxy(
+        {"on1": _device(), "off1": _device(online=False)},
+        {
+            ("on1", 2, 1): {"code": 0, "value": 26},
+            ("off1", 2, 1): {"code": 0, "value": 99},
+        },
+    )
+
+    await align_iot_state(store, proxy)
+
+    assert store.get("iot/device/on1/prop/2.1") == 26
+    assert store.get("iot/device/off1/prop/2.1") is MISSING
+    assert store.get("iot/device/off1/status/online") is False
+
+
+async def test_a_row_for_a_device_whose_spec_failed_is_dropped(store):
+    """spec 拉不到的设备在线、也在 meta 里，一条属性却没请求 —— 只按在线状态判会漏掉它。"""
+    proxy = _SpecFailsProxy(
+        {"d1": _device(), "d2": _device()},
+        {
+            ("d1", 2, 1): {"code": 0, "value": 26},
+            ("d2", 2, 1): {"code": 0, "value": 99},
+        },
+        failing="d2",
+    )
+
+    await align_iot_state(store, proxy)
+
+    assert store.get("iot/device/d1/prop/2.1") == 26
+    assert store.get("iot/device/d2/prop/2.1") is MISSING
+    assert store.get("iot/device/d2/status/online") is True
+
+
+async def test_a_wellformed_did_outside_the_home_is_dropped(store, caplog):
+    """响应侧多回来的合法 did 不能借这条链绕过家庭过滤。"""
     proxy = _EchoProxy(
         {"d1": _device()},
         {
@@ -316,7 +364,7 @@ async def test_a_wellformed_did_that_was_never_requested_is_dropped(store, caplo
     assert store.snapshot("iot/device/d9/**") == {}
     # 丢了要留痕：静默丢弃时排查的人分不出是被挡了还是云端没返回
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("unrequested did=d9 iid=prop.2.1" in m for m in warnings)
+    assert any("out_of_home row did=d9 iid=prop.2.1" in m for m in warnings)
 
 
 async def test_dict_value_is_dropped_instead_of_becoming_a_subtree(store, caplog):
