@@ -13,8 +13,15 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from miloco.miot.state_align import align_iot_state
+from miloco.miot.state_align import (
+    SAMPLE_LIMIT,
+    _collect_params,
+    _Samples,
+    _write_device,
+    align_iot_state,
+)
 from miloco.state import MISSING, StateStore
+from miloco.state.utils import flatten
 
 KNOWN_CODE = -704220043  # 属性值不正确
 UNKNOWN_CODE = -704010000  # 码表里没有
@@ -33,6 +40,9 @@ class _FakeProxy:
         self.requested: list[tuple[str, int, int]] = []
 
     async def get_devices(self) -> dict:
+        return self._devices
+
+    async def devices_in_current_home(self) -> dict:
         return self._devices
 
     async def get_readable_prop_iids(self, did: str) -> list[str]:
@@ -68,8 +78,8 @@ async def test_online_device_gets_flag_and_properties(store):
 
     await align_iot_state(store, proxy)
 
-    assert store.get("iot/d1/online") is True
-    assert store.get("iot/d1/prop/2.1") == 21.5
+    assert store.get("iot/device/d1/status/online") is True
+    assert store.get("iot/device/d1/prop/2.1") == 21.5
     # online 是叶子、prop 是子树，同一层混放 —— 写的顺序不能把谁翻成另一种形态
     assert store.stats()["shape_flips"] == 0
 
@@ -83,7 +93,7 @@ async def test_offline_device_properties_are_not_requested(store):
     await align_iot_state(store, proxy)
 
     assert proxy.requested == []
-    assert store.get("iot/d1/prop/2.1") is MISSING
+    assert store.get("iot/device/d1/prop/2.1") is MISSING
 
 
 async def test_offline_device_still_gets_its_flag(store):
@@ -94,7 +104,7 @@ async def test_offline_device_still_gets_its_flag(store):
 
     await align_iot_state(store, proxy)
 
-    assert store.get("iot/d1/online") is False
+    assert store.get("iot/device/d1/status/online") is False
 
 
 async def test_offline_device_does_not_block_online_ones(store):
@@ -105,9 +115,9 @@ async def test_offline_device_does_not_block_online_ones(store):
 
     await align_iot_state(store, proxy)
 
-    assert store.get("iot/on/prop/2.1") == 2
-    assert store.get("iot/off/prop/2.1") is MISSING
-    assert store.get("iot/off/online") is False
+    assert store.get("iot/device/on/prop/2.1") == 2
+    assert store.get("iot/device/off/prop/2.1") is MISSING
+    assert store.get("iot/device/off/status/online") is False
 
 
 async def test_did_with_slash_gets_neither_flag_nor_properties(store):
@@ -188,7 +198,7 @@ async def test_code_zero_without_value_is_not_written(store):
 
     await align_iot_state(store, proxy)
 
-    assert store.get("iot/d1/prop/2.1") is MISSING
+    assert store.get("iot/device/d1/prop/2.1") is MISSING
 
 
 async def test_none_is_written_because_it_is_a_legal_value(store):
@@ -196,18 +206,7 @@ async def test_none_is_written_because_it_is_a_legal_value(store):
 
     await align_iot_state(store, proxy)
 
-    assert store.get("iot/d1/prop/2.1") is None
-
-
-async def test_non_scalar_value_is_reported(store, caplog):
-    proxy = _FakeProxy(
-        {"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": {"a": 1}}}
-    )
-
-    with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
-
-    assert any("non-scalar" in r.getMessage() for r in caplog.records)
+    assert store.get("iot/device/d1/prop/2.1") is None
 
 
 async def test_one_bad_value_does_not_lose_the_whole_device(store):
@@ -222,8 +221,8 @@ async def test_one_bad_value_does_not_lose_the_whole_device(store):
 
     await align_iot_state(store, proxy)
 
-    assert store.get("iot/d1/prop/2.2") == 7
-    assert store.get("iot/d1/prop/2.1") is MISSING
+    assert store.get("iot/device/d1/prop/2.2") == 7
+    assert store.get("iot/device/d1/prop/2.1") is MISSING
 
 
 async def test_align_never_raises_when_the_proxy_explodes(store):
@@ -242,4 +241,173 @@ async def test_align_reports_when_nothing_is_readable(store, caplog):
 
     assert any("nothing" in r.getMessage() for r in caplog.records)
     # 一条属性都读不到也要先把标志写下去，否则这台设备在容器里根本不存在
-    assert store.get("iot/d1/online") is False
+    assert store.get("iot/device/d1/status/online") is False
+
+
+async def test_one_pattern_reaches_every_owner_of_a_device(store):
+    """四段路径的意义就在这里：`*` 顶 owner 那一段，`**` 收剩下的。"""
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 21.5}})
+    await align_iot_state(store, proxy)
+    store.set("omni/device/d1/caption", "有人", source="omni")
+
+    got = store.snapshot("*/device/d1/**")
+
+    assert set(flatten(got)) == {
+        "iot/device/d1/status/online",
+        "iot/device/d1/prop/2.1",
+        "omni/device/d1/caption",
+    }
+
+
+# ── 写入侧的路径校验：拼进路径的东西必须先过容器那套段规则 ──────────────
+
+
+class _EchoProxy(_FakeProxy):
+    """响应行的 did 由 rows 的键决定，与请求里的 did 无关。
+
+    云端返回没请求过的 did 是真实形态 —— `_read_values` 里 `did in meta` 那个判断就是
+    为它写的。
+    """
+
+    async def get_device_properties(self, params: list) -> list[dict]:
+        out = []
+        for param in params:
+            self.requested.append((param.did, param.siid, param.piid))
+        for (did, siid, piid), row in self._rows.items():
+            out.append(dict(row, did=did, siid=siid, piid=piid))
+        return out
+
+
+async def test_property_name_with_slash_does_not_land_a_level_deeper(store):
+    """整台写拒了它，逐条写这条退路不能把它放行 —— 否则值落到多一层的地方。"""
+    written = _write_device(store, "d1", {"2.2": 5, "a/b": 7}, _Samples())
+
+    assert store.get("iot/device/d1/prop/a/b") is MISSING
+    assert store.get("iot/device/d1/prop/2.2") == 5
+    assert written == 1
+
+
+async def test_did_from_the_response_is_validated_like_the_request_side(store):
+    """请求侧挡了含 '/' 的 did，写入侧也得挡，不然 did 被劈成两段。"""
+    proxy = _EchoProxy(
+        {"d1": _device()},
+        {
+            ("d1", 2, 1): {"code": 0, "value": 26},
+            ("x/y", 2, 1): {"code": 0, "value": 99},
+        },
+    )
+
+    await align_iot_state(store, proxy)
+
+    assert store.get("iot/device/d1/prop/2.1") == 26
+    assert store.snapshot("iot/device/x/**") == {}
+
+
+async def test_dict_value_is_dropped_instead_of_becoming_a_subtree(store, caplog):
+    """dict 会被容器展开成一层子树，这条属性就不再是叶子，按叶子读的人取到空。"""
+    proxy = _FakeProxy(
+        {"d1": _device()},
+        {
+            ("d1", 2, 1): {"code": 0, "value": {"a": 1}},
+            ("d1", 2, 2): {"code": 0, "value": 5},
+        },
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    # 两条都要：只查子树的话，把 dict 转成字符串塞进去也能过
+    assert store.snapshot("iot/device/d1/prop/2.1/**") == {}
+    assert store.get("iot/device/d1/prop/2.1") is MISSING
+    assert store.get("iot/device/d1/prop/2.2") == 5
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("dict value dropped" in m and "2.1" in m for m in warnings)
+
+
+async def test_array_value_is_one_leaf_and_not_worth_a_warning(store, caplog):
+    """容器把标量数组收成一个元组叶子，读得到也比得了，没有要报的事。"""
+    proxy = _FakeProxy(
+        {"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": [1, 2, 3]}}
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    assert store.get("iot/device/d1/prop/2.1") == (1, 2, 3)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == []
+
+
+async def test_a_bad_did_from_the_response_is_never_hidden_by_the_request_side(caplog):
+    """两侧共用样本额度的话，成批的桥接子设备会把额度吃光，云端异常那条一行都打不出。"""
+    store = StateStore()
+    samples = _Samples()
+    bridges = {f"bridge/{index}": _device() for index in range(SAMPLE_LIMIT + 1)}
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await _collect_params(_FakeProxy(bridges, {}), samples)
+        _write_device(store, "cloud/ghost", {"2.1": 1}, samples)
+
+    assert any("cloud/ghost" in r.getMessage() for r in caplog.records)
+
+
+async def test_summary_counts_only_devices_that_got_something_written(store, caplog):
+    """devices 和 written 要能对上：一台都没写进去的设备不该算进 devices。"""
+    proxy = _EchoProxy(
+        {"d1": _device()},
+        {
+            ("d1", 2, 1): {"code": 0, "value": 26},
+            ("x/y", 2, 1): {"code": 0, "value": 99},
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    summary = next(
+        m for m in (r.getMessage() for r in caplog.records) if "align done" in m
+    )
+    assert "devices=1" in summary and "written=1" in summary
+
+
+async def test_a_rejected_property_name_does_not_read_like_a_rejected_value(
+    store, caplog
+):
+    """被拒的是名字，报成「值被拒」会让人照着值去查。"""
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        _write_device(store, "d1", {"2.1": 5, "a/b": 7}, _Samples())
+
+    warnings = [r.getMessage() for r in caplog.records]
+    assert any("iid rejected" in m and "a/b" in m for m in warnings)
+
+
+async def test_no_field_of_a_device_is_a_bare_leaf(store):
+    """字段那一层全是子树，`*` 就不会被某一片叶子骗过去、静默少还给一半。"""
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 21.5}})
+    await align_iot_state(store, proxy)
+
+    with pytest.raises(ValueError):
+        store.snapshot("iot/device/*/*")
+
+
+async def test_align_only_walks_the_current_home(store):
+    """没启用的家庭在别处一律拒绝访问，容器不该自己开一条旁路把它们拉回来。"""
+
+    class _TwoHomes(_FakeProxy):
+        async def devices_in_current_home(self) -> dict:
+            return {"d_mine": self._devices["d_mine"]}
+
+    proxy = _TwoHomes(
+        {"d_mine": _device(), "d_parents": _device()},
+        {
+            ("d_mine", 2, 1): {"code": 0, "value": 26},
+            ("d_parents", 2, 1): {"code": 0, "value": 99},
+        },
+    )
+
+    await align_iot_state(store, proxy)
+
+    assert store.get("iot/device/d_mine/prop/2.1") == 26
+    assert store.snapshot("iot/device/d_parents/**") == {}
+    # 也不该为它发请求 —— 每次启动多跑一轮 spec 查询和属性读
+    assert all(did == "d_mine" for did, _, _ in proxy.requested)

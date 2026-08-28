@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from miloco.state import MISSING, StateStore
 
@@ -17,7 +18,7 @@ async def settle(rounds: int = 200) -> None:
 
 def make_store() -> StateStore:
     store = StateStore()
-    store._commit("iot/device/d1/online", True, source="align")
+    store._commit("iot/device/d1/status/online", True, source="align")
     store._commit("iot/device/d1/prop/2.1", 26, source="align")
     store._commit("omni/device/d1/caption", "有人", source="omni")
     return store
@@ -30,7 +31,7 @@ def test_clear_drops_every_leaf():
 
     assert store.stats()["leaves"] == 0
     assert store.snapshot("**") == {}
-    assert store.get("iot/device/d1/online") is MISSING
+    assert store.get("iot/device/d1/status/online") is MISSING
 
 
 def test_clear_reports_one_delete_per_leaf():
@@ -39,7 +40,7 @@ def test_clear_reports_one_delete_per_leaf():
     changes = store._commit_clear(source="switch")
 
     assert {change.path for change in changes} == {
-        "iot/device/d1/online",
+        "iot/device/d1/status/online",
         "iot/device/d1/prop/2.1",
         "omni/device/d1/caption",
     }
@@ -51,10 +52,20 @@ def test_clear_lets_the_tree_grow_back():
     store = make_store()
     store._commit_clear(source="switch")
 
-    store._commit("iot/device/d9/online", True, source="align")
+    store._commit("iot/device/d9/status/online", True, source="align")
 
     assert store.stats()["leaves"] == 1
-    assert store.get("iot/device/d9/online") is True
+    assert store.get("iot/device/d9/status/online") is True
+
+
+def test_clear_zeroes_the_count_even_if_it_had_drifted():
+    """归零的全部价值就在计数已经不对的时候；计数正确时归零和减法结果相同，钉不出区别。"""
+    store = make_store()
+    store._leaf_count = 99
+
+    store._commit_clear(source="switch")
+
+    assert store.stats()["leaves"] == 0
 
 
 def test_clear_of_empty_store_changes_nothing():
@@ -101,26 +112,35 @@ async def test_clear_delivers_a_delete_to_subscribers():
     await settle()
 
     assert sorted(change.path for change in seen) == [
-        "iot/device/d1/online",
         "iot/device/d1/prop/2.1",
+        "iot/device/d1/status/online",
     ]
     assert store.stats()["pending"] == 0
     store.stop()
 
 
-async def test_clear_from_a_subscriber_callback_obeys_the_cascade_limit():
-    """回调里再 clear 与 set / delete 同口径，超限被拒而不是无限递归。"""
+async def test_clear_from_a_subscriber_callback_obeys_the_cascade_limit(caplog):
+    """回调里再 clear 与 set / delete 同口径，超限被拒而不是无限递归。
+
+    断言那条拒绝日志，不断言最终叶子数：回调最后一步就是 clear，级联有没有被拦住，
+    最终叶子数都是 0，那个断言分不出两种情况。
+    """
     store = StateStore()
     store.start()
-    store._commit("iot/device/d1/online", True, source="align")
+    store._commit("iot/device/d1/status/online", True, source="align")
 
-    def rewrite_then_clear(change):
-        store.set("iot/device/d2/online", True, source="cb")
+    def clear_then_rewrite(change):
+        # clear 放前面：告警只报第一条，被 set 占了就看不出 clear 走没走这道闸
         store.clear(source="cb")
+        store.set("iot/device/d2/status/online", True, source="cb")
 
-    store.subscribe("iot/**", rewrite_then_clear)
-    store.set("iot/device/d1/online", False, source="align")
-    await settle()
+    store.subscribe("iot/**", clear_then_rewrite)
+    with caplog.at_level(logging.ERROR, logger="miloco.state.store"):
+        store.set("iot/device/d1/status/online", False, source="align")
+        await settle()
 
-    assert store.stats()["leaves"] == 0
+    rejected = [
+        r.getMessage() for r in caplog.records if "cascade depth" in r.getMessage()
+    ]
+    assert any("rejecting clear" in m for m in rejected)
     store.stop()

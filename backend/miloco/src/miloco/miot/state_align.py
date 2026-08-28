@@ -10,6 +10,12 @@
 会把 `last_reported` 刷成当前时刻，而响应不带时间戳、消费方看不出来。整台跳过也不行 ——
 容器里没有这台设备，消费方就分不出「离线」和「没接入」。
 
+**只拉当前启用家庭的设备。** 没启用的家庭在别处一律拒绝访问，容器是要喂 agent 的那份
+数据源，不该自己开一条旁路。
+
+**在线标志放在 `status/` 下而不是直接挂在设备那一层。** 设备的字段那一层全是子树，
+`iot/device/<did>/*` 才会在少写 `**` 时报错；混一片叶子进去它就改为静默返回残缺结果。
+
 读失败按返回码分级：码表认识的降到 debug（已知常态），不认识的留 warning。汇总行按
 「释义 × 型号」分组计数，不靠样本还原分布 —— 占比高的时候要看的是分布，而样本上限恰好
 会把它挡住。
@@ -27,6 +33,7 @@ from miot.types import MIoTGetPropertyParam
 
 from miloco.miot.result_codes import code_message, is_known_code
 from miloco.state import StateStore
+from miloco.state.path import validate_segment
 
 logger = logging.getLogger(__name__)
 
@@ -77,14 +84,16 @@ async def _collect_params(
 
     离线设备进 meta（要写在线标志）但不进 params（不拉属性）。
     """
-    devices = await miot_proxy.get_devices()
+    devices = await miot_proxy.devices_in_current_home()
     params: list[MIoTGetPropertyParam] = []
     meta: dict[str, _DeviceMeta] = {}
     for did, device in devices.items():
-        if "/" in did:
-            # 路径段不许含 '/'（桥接子设备的 did 长这样），连在线标志都写不进去
-            if samples.take("did_with_slash"):
-                logger.warning("align: skip did with '/': %s", did)
+        try:
+            validate_segment(did)
+        except (TypeError, ValueError) as e:
+            # did 拼进路径，非法段（桥接子设备的 did 带 '/'）连在线标志都写不进去
+            if samples.take("bad_did_requested"):
+                logger.warning("align: skip did %r: %s", did, e)
             continue
         meta[did] = _DeviceMeta(
             online=bool(getattr(device, "online", True)),
@@ -174,18 +183,18 @@ async def _read_values(
                     )
                 continue
             value = row["value"]
-            if not isinstance(value, (str, int, float, bool, type(None))):
-                # §3.3 那条一直没验证的前提：属性值是否都是标量。非标量会让这条路径从叶子
-                # 变子树，或者直接被容器拒收，所以必须逐条报出来
-                if samples.take("non_scalar"):
+            if isinstance(value, dict):
+                # 容器会把 dict 展开成一层子树，这条属性就不再是叶子，按叶子读的人取到空。
+                # 别的类型要么是合法叶子，要么写的时候被容器抛出来
+                if samples.take("dict_value"):
                     logger.warning(
-                        "align: non-scalar value did=%s iid=prop.%s.%s type=%s value=%.120r",
+                        "align: dict value dropped did=%s iid=prop.%s.%s value=%.120r",
                         did,
                         siid,
                         piid,
-                        type(value).__name__,
                         value,
                     )
+                continue
             by_device.setdefault(did, {})[f"{siid}.{piid}"] = value
     return by_device
 
@@ -197,7 +206,7 @@ def _write_online_flags(store: StateStore, meta: dict[str, _DeviceMeta]) -> None
     """
     for did, info in meta.items():
         try:
-            store.set(f"iot/{did}/online", info.online, source=SOURCE)
+            store.set(f"iot/device/{did}/status/online", info.online, source=SOURCE)
         except (TypeError, ValueError) as e:
             logger.warning("align: online flag rejected did=%s: %s", did, e)
 
@@ -210,7 +219,16 @@ def _write_device(
     返回写进去的属性条数。整台写失败时不能连累整台 —— 容器的校验是「整笔不写」，
     一个畸形值会让这台设备一条都进不去。
     """
-    path = f"iot/{did}/prop"
+    try:
+        # 响应行的 did 不一定是请求里那个，请求侧校过不代表这里不用校
+        validate_segment(did)
+    except (TypeError, ValueError) as e:
+        # 与请求侧分开记：桥接子设备是常态且成批，共用额度会把云端异常这条挤掉
+        if samples.take("bad_did_in_response"):
+            logger.warning("align: skip did %r from response: %s", did, e)
+        return 0
+
+    path = f"iot/device/{did}/prop"
     try:
         store.set(path, props, source=SOURCE)
         return len(props)
@@ -222,10 +240,17 @@ def _write_device(
     written = 0
     for iid, value in props.items():
         try:
+            # iid 拼进路径，含 '/' 就会多出一层、值落到别处；整台写那条是容器替我们校的
+            validate_segment(iid)
+        except (TypeError, ValueError) as e:
+            if samples.take("iid_rejected"):
+                logger.warning("align: iid rejected did=%s iid=%r: %s", did, iid, e)
+            continue
+        try:
             store.set(f"{path}/{iid}", value, source=SOURCE)
             written += 1
         except (TypeError, ValueError) as e:
-            if samples.take("write_rejected"):
+            if samples.take("value_rejected"):
                 logger.warning(
                     "align: value rejected did=%s iid=prop.%s type=%s: %s",
                     did,
@@ -252,10 +277,11 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
             )
             return
         by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
-        written = sum(
-            _write_device(store, did, props, samples)
+        per_device = {
+            did: _write_device(store, did, props, samples)
             for did, props in by_device.items()
-        )
+        }
+        written = sum(per_device.values())
         for did, props in by_device.items():
             logger.debug("align: did=%s values=%s", did, props)
         # 让 loop 转一圈把排队的投递跑掉，否则 stats() 里的 pending 是投递前的瞬时值，
@@ -264,7 +290,7 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
         logger.info(
             "align done: devices=%s offline=%s requested=%s written=%s elapsed=%.1fs "
             "issues=%s unreadable=%s store=%s",
-            len(by_device),
+            sum(1 for count in per_device.values() if count),
             offline,
             len(params),
             written,
