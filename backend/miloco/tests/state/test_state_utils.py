@@ -164,11 +164,14 @@ def test_dump_rejects_a_snapshot_taken_without_meta():
 
 
 def test_store_dump_walks_the_whole_tree():
+    """另一个顶层段的叶子也要出现，否则把默认 pattern 收窄到某个前缀这条用例拦不住。"""
     store = make_store()
+    store._commit("omni/cam0/caption", "有人", source="omni")
 
     assert set(dump_rows(store.dump())) == {
         "iot/dev1/prop/2.1",
         "iot/dev5/prop/3.2",
+        "omni/cam0/caption",
     }
 
 
