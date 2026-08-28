@@ -14,6 +14,7 @@ import {
   listPersons,
   listPets,
   listScenes,
+  listSceneTasks,
   listScopeCameras,
   listScopeHomes,
   listTasks,
@@ -45,6 +46,7 @@ import { PetProfilePanel } from "./components/PetProfilePanel";
 import { PersonProfilePanel } from "./components/PersonProfilePanel";
 import { HomeKnowledgePanel } from "./components/HomeKnowledgePanel";
 import { TasksPage } from "./components/TasksPage";
+import { SceneTasksPage } from "./components/SceneTasksPage";
 import { CandidateReviewPanel } from "./components/CandidateReviewPanel";
 import { MiotBindDialog } from "./components/MiotBindDialog";
 import { ToastHost, toast } from "./components/Toast";
@@ -171,6 +173,10 @@ function MainApp() {
   // miloco 为家庭创建的持续任务——家庭 tab 家庭档案卡下方展示。
   const tasks = useAsync(() => listTasks(homeId), [homeId], {
     errorLabel: t("app.loadTasksFail"),
+  });
+  // 场景联动任务（「场景联动」tab）——感知命中规则直接触发米家自动化场景。
+  const sceneTasks = useAsync(() => listSceneTasks(homeId), [homeId], {
+    errorLabel: t("app.loadSceneTasksFail"),
   });
   // 宠物花名册（实验性，pet_recognition 开启才有意义）+ 功能开关状态。
   const pets = useAsync(() => listPets(homeId), [homeId], {
@@ -445,6 +451,32 @@ function MainApp() {
             onChanged={() => tasks.reload()}
           />
         );
+      case "scenes": {
+        // 场景联动 tab：复用已加载的 devices / scenes / scopeCameras 数据。
+        // 错误聚合与设备 tab 同口径——列表失败时给出重试入口而非空态假象。
+        const err = sceneTasks.error ?? scenes.error ?? scopeCameras.error;
+        if (err) {
+          return (
+            <TabPanelError
+              message={t("app.tabScenesError", { msg: err.message })}
+              onRetry={() => {
+                sceneTasks.reload();
+                scenes.reload();
+                scopeCameras.reload();
+              }}
+            />
+          );
+        }
+        return (
+          <SceneTasksPage
+            tasks={sceneTasks.data}
+            scenes={scenes.data ?? []}
+            cameras={scopeCameras.data ?? []}
+            loading={sceneTasks.loading}
+            onChanged={() => sceneTasks.reload()}
+          />
+        );
+      }
       case "activity": {
         // 单流:事件 + 动作合并,筛选 checkbox 在 ActivityFeed 内部。**无条件挂载**
         // ActivityFeed——动作流走 /api/actions 组件内独立拉,不再被事件流(/api/events)的

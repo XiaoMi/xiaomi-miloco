@@ -262,6 +262,16 @@ class Rule(BaseModel):
             "未达标就 EXITED 不 fire on_exit。"
         ),
     )
+    max_dwell_seconds: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "STATE mode 最长驻留时间（秒）：ENTERED 后计时，到时若仍在态内则"
+            "**强制 EXITED** 并 fire on_exit（跳过 exit_debounce_seconds，即"
+            "「任务到期自动退出」）。配合 on_exit 场景可实现『开灯 1 分钟后自动关灯』。"
+            "None=不限制（仅靠条件翻转 + debounce 退出）。EVENT mode 忽略。"
+        ),
+    )
     duration_ratio: float | None = Field(
         None,
         gt=0.0,
@@ -314,6 +324,7 @@ class RuleUpdate(BaseModel):
     exit_debounce_seconds: int | None = Field(None, ge=0)
     duration_seconds: int | None = Field(None, ge=1)
     duration_ratio: float | None = Field(None, gt=0.0, le=1.0)
+    max_dwell_seconds: int | None = Field(None, ge=1)
 
 
 class RuleTriggerRequest(BaseModel):

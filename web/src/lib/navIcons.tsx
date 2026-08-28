@@ -355,6 +355,29 @@ export const IconUsage = ({ active, ...p }: Props) =>
     </svg>
   );
 
+/** 场景联动 — 闪电（自动化触发）双态：active 填充 + 白色闪电，非 active 描边 */
+export const IconScenes = ({ active, ...p }: Props) =>
+  active ? (
+    <svg {...baseSvg(p)}>
+      <path
+        d="M27.5 4L10 26H21L18.5 44L36 21H24.5L27.5 4Z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ) : (
+    <svg {...baseSvg(p)}>
+      <path
+        d="M27.5 4L10 26H21L18.5 44L36 21H24.5L27.5 4Z"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+
 /** 任务 — 圆角方框 + 勾选（与其它 nav 图标同款「填充容器 + 白色字形」双态） */
 export const IconTasks = ({ active, ...p }: Props) =>
   active ? (

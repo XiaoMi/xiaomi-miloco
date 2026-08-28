@@ -9,6 +9,8 @@
     "familyHint": "管理家庭成员",
     "tasks": "任务",
     "tasksHint": "管理家庭任务",
+    "scenes": "场景联动",
+    "scenesHint": "识别触发自动化场景",
     "activity": "日志",
     "activityHint": "回看发生过的事",
     "usage": "模型",

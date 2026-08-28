@@ -38,6 +38,8 @@ import type {
   Pet,
   PetObserveResult,
   Scene,
+  SceneTask,
+  SceneTaskInput,
   ScopeCamera,
   ScopeHome,
   Task,
@@ -310,6 +312,41 @@ export async function updateRuleQuery(
   query: string,
 ): Promise<void> {
   return impl.realUpdateRuleQuery(ruleId, query);
+}
+
+// ── 场景联动任务（web「场景联动」tab；命中规则 → 直接触发米家场景，不经 agent）──
+export async function listSceneTasks(homeId?: HomeId): Promise<SceneTask[]> {
+  if (!isPrimary(homeId)) return [];
+  return impl.realListSceneTasks();
+}
+
+export async function createSceneTask(
+  input: SceneTaskInput,
+): Promise<SceneTask> {
+  return impl.realCreateSceneTask(input);
+}
+
+export async function updateSceneTask(
+  taskId: string,
+  patch: SceneTaskInput,
+): Promise<SceneTask> {
+  return impl.realUpdateSceneTask(taskId, patch);
+}
+
+export async function setSceneTaskEnabled(
+  taskId: string,
+  enabled: boolean,
+): Promise<void> {
+  return impl.realSetSceneTaskEnabled(taskId, enabled);
+}
+
+export async function deleteSceneTask(taskId: string): Promise<void> {
+  return impl.realDeleteSceneTask(taskId);
+}
+
+/** 调试：手动触发一次进入场景（不依赖感知命中）。 */
+export async function triggerSceneTask(taskId: string): Promise<void> {
+  return impl.realTriggerSceneTask(taskId);
 }
 
 // ── 设备 ──────────────────────────────────────────────────

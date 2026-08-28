@@ -27,6 +27,8 @@ import {
   realEventCropMeta,
   realUpdateRuleQuery,
   realUpdateTaskDescription,
+  realCreateSceneTask,
+  realUpdateSceneTask,
   _resetUsageStatsCache,
 } from "@/api/real";
 
@@ -623,5 +625,78 @@ describe("任务详情就地编辑 — 写接口契约", () => {
     await expect(realUpdateRuleQuery("nope", "x")).rejects.toThrow(
       "Rule 'nope' not found",
     );
+  });
+});
+describe("场景联动写接口 — camelCase 输入 → snake_case 契约", () => {
+  /** 捕获 url / method / body，回一个空 NormalResponse。 */
+  function captureFetch() {
+    const cap: { url?: string; method?: string; body: unknown } = { body: null };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      cap.url = typeof input === "string" ? input : input.toString();
+      cap.method = init?.method;
+      cap.body = init?.body ? JSON.parse(init.body as string) : null;
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "ok",
+          data: {
+            task_id: "scene_abc123",
+            description: "床上看书时自动开灯",
+            status: "active",
+            created_at: "2026-01-01T00:00:00+08:00",
+            rule_id: "rule-1",
+            enabled: true,
+            query: "有人在床上看书",
+            perceive_device_ids: ["1144206310"],
+            enter_scene_id: "2093464402610229251",
+            exit_debounce_seconds: 60,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    return cap;
+  }
+
+  it("创建：camelCase 输入 → snake_case body（后端 extra=forbid 只收 snake_case）", async () => {
+    const cap = captureFetch();
+    await realCreateSceneTask({
+      description: "床上看书时自动开灯",
+      query: "有人在床上看书",
+      perceiveDeviceIds: ["1144206310"],
+      enterSceneId: "2093464402610229251",
+      exitSceneId: null,
+      cooldownMinutes: 5,
+      exitDebounceSeconds: 60,
+      maxDwellSeconds: null,
+      enabled: true,
+    });
+    expect(cap.method).toBe("POST");
+    expect(cap.url).toBe("/api/scene-tasks");
+    expect(cap.body).toEqual({
+      description: "床上看书时自动开灯",
+      query: "有人在床上看书",
+      perceive_device_ids: ["1144206310"],
+      enter_scene_id: "2093464402610229251",
+      exit_scene_id: null,
+      cooldown_minutes: 5,
+      exit_debounce_seconds: 60,
+      max_dwell_seconds: null,
+      enabled: true,
+    });
+  });
+
+  it("更新：只带显式提供的字段（PATCH 按 model_fields_set 合并，不误清未动配置）", async () => {
+    const cap = captureFetch();
+    await realUpdateSceneTask("scene_abc123", {
+      enterSceneId: "scene-A",
+      maxDwellSeconds: 60,
+    });
+    expect(cap.method).toBe("PATCH");
+    expect(cap.url).toBe("/api/scene-tasks/scene_abc123");
+    expect(cap.body).toEqual({
+      enter_scene_id: "scene-A",
+      max_dwell_seconds: 60,
+    });
   });
 });

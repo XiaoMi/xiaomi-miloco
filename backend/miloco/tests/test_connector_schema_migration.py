@@ -144,12 +144,12 @@ def _read_rule(conn, rule_id: str) -> sqlite3.Row | None:
 # ── fresh-build ───────────────────────────────────────────────────────
 
 
-def test_fresh_build_is_v2_form(fresh_db):
+def test_fresh_build_is_v3_form(fresh_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        # user_version = 2
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # user_version = 3 (v3: rule.max_dwell_seconds 列)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         # task_link 表不存在
         tables = {
             row["name"]
@@ -166,6 +166,12 @@ def test_fresh_build_is_v2_form(fresh_db):
         ).fetchone()[0]
         assert "task_id TEXT NOT NULL" in rule_ddl
         assert "REFERENCES task(task_id) ON DELETE CASCADE" in rule_ddl
+        # v3: max_dwell_seconds 列存在（场景联动「到期自动退出」用）
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(rule)").fetchall()
+        }
+        assert "max_dwell_seconds" in cols
 
 
 def test_fresh_build_cron_check_constraints(fresh_db):
@@ -464,7 +470,13 @@ def test_migrate_final_invariants(v1_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # v1→v2→v3 步进: user_version=3 且 max_dwell_seconds 列已补
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(rule)").fetchall()
+        }
+        assert "max_dwell_seconds" in cols
         tables = {
             r["name"]
             for r in conn.execute(
@@ -485,8 +497,8 @@ def test_migrate_final_invariants(v1_db):
         )
 
 
-def test_migrate_is_skipped_on_v2_db(fresh_db):
-    """已经是 v2 (fresh-build) 的库再次 init 不重跑迁移, 数据无变化."""
+def test_migrate_is_skipped_on_v3_db(fresh_db):
+    """已经是 v3 (fresh-build) 的库再次 init 不重跑迁移, 数据无变化."""
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
@@ -506,7 +518,7 @@ def test_migrate_is_skipped_on_v2_db(fresh_db):
             ).fetchone()[0]
             == 1
         )
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 # ── rollback ──────────────────────────────────────────────────────────

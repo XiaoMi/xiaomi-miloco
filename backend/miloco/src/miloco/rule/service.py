@@ -521,6 +521,10 @@ class RuleService:
         if "duration_ratio" in fields and update.duration_ratio is not None:
             existing.duration_ratio = update.duration_ratio
 
+        # max_dwell_seconds: nullable，None = 清除「到期自动退出」
+        if "max_dwell_seconds" in fields:
+            existing.max_dwell_seconds = update.max_dwell_seconds
+
         _validate_rule_consistency(existing)
         self._validate_on_target_desc_compat(existing)
         # 与上面 perceive_device_ids 同口径:只校验这次 PATCH 真的动了的东西。
