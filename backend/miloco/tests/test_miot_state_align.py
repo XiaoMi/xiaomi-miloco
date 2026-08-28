@@ -270,8 +270,7 @@ async def test_one_pattern_reaches_every_owner_of_a_device(store):
 class _EchoProxy(_FakeProxy):
     """响应行的 did 由 rows 的键决定，与请求里的 did 无关。
 
-    云端返回没请求过的 did 是真实形态 —— `_read_values` 里 `did in meta` 那个判断就是
-    为它写的。
+    云端返回没请求过的 did 是真实形态 —— `_read_values` 要按 meta 这份名单把它丢掉。
     """
 
     async def get_device_properties(self, params: list) -> list[dict]:
@@ -292,20 +291,32 @@ async def test_property_name_with_slash_does_not_land_a_level_deeper(store):
     assert written == 1
 
 
-async def test_did_from_the_response_is_validated_like_the_request_side(store):
-    """请求侧挡了含 '/' 的 did，写入侧也得挡，不然 did 被劈成两段。"""
+async def test_a_did_with_a_slash_is_still_refused_by_the_write_side(store):
+    """名单闸在上游，端到端已走不到这里；留着是防御性重校，放行了 did 会被劈成两段。"""
+    written = _write_device(store, "x/y", {"2.1": 99}, _Samples())
+
+    assert written == 0
+    assert store.snapshot("iot/device/x/**") == {}
+
+
+async def test_a_wellformed_did_that_was_never_requested_is_dropped(store, caplog):
+    """名单是「当前启用家庭」，响应侧多回来的合法 did 不能借这条链绕过家庭过滤。"""
     proxy = _EchoProxy(
         {"d1": _device()},
         {
             ("d1", 2, 1): {"code": 0, "value": 26},
-            ("x/y", 2, 1): {"code": 0, "value": 99},
+            ("d9", 2, 1): {"code": 0, "value": 99},
         },
     )
 
-    await align_iot_state(store, proxy)
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.1") == 26
-    assert store.snapshot("iot/device/x/**") == {}
+    assert store.snapshot("iot/device/d9/**") == {}
+    # 丢了要留痕：静默丢弃时排查的人分不出是被挡了还是云端没返回
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("unrequested did=d9 iid=prop.2.1" in m for m in warnings)
 
 
 async def test_dict_value_is_dropped_instead_of_becoming_a_subtree(store, caplog):
@@ -357,12 +368,12 @@ async def test_a_bad_did_from_the_response_is_never_hidden_by_the_request_side(c
 
 
 async def test_summary_counts_only_devices_that_got_something_written(store, caplog):
-    """devices 和 written 要能对上：一台都没写进去的设备不该算进 devices。"""
+    """名单外的 did 不能顶高 written_devices —— 它与 devices 不同源，能大于总数。"""
     proxy = _EchoProxy(
         {"d1": _device()},
         {
             ("d1", 2, 1): {"code": 0, "value": 26},
-            ("x/y", 2, 1): {"code": 0, "value": 99},
+            ("d9", 2, 1): {"code": 0, "value": 99},
         },
     )
 

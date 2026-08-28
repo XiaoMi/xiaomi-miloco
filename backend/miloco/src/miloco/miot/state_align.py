@@ -161,7 +161,18 @@ async def _read_values(
                 if samples.take("row_without_ids"):
                     logger.warning("align: row missing did/siid/piid: %s", row)
                 continue
-            model = meta[did].model if did in meta else "?"
+            if did not in meta:
+                # meta 是这一轮的许可名单。响应侧多回来的 did 不能借这条链绕过家庭
+                # 过滤；它也没有在线标志，写进去消费方分不出「离线」和「没接入」
+                if samples.take("did_not_requested"):
+                    logger.warning(
+                        "align: drop row for unrequested did=%s iid=prop.%s.%s",
+                        did,
+                        siid,
+                        piid,
+                    )
+                continue
+            model = meta[did].model
             # 失败判定跟 result_codes 同一份：那边把 accept 一类的负码算成功，
             # 这里另立「非 0 即失败」会把带值的成功行丢掉，还占满未知码那条告警通道
             code = row.get("code")
@@ -222,7 +233,8 @@ def _write_device(
     后者要比对计数才看得出来，不比就会把一条都没进树的量算进返回值。
     """
     try:
-        # 响应行的 did 不一定是请求里那个，请求侧校过不代表这里不用校
+        # 名单闸在上游（_read_values 按 meta 丢掉了名单外的行），这里是防御性重校：
+        # 真放行一个含 '/' 的 did，路径会被劈成两段
         validate_segment(did)
     except (TypeError, ValueError) as e:
         # 与请求侧分开记：桥接子设备是常态且成批，共用额度会把云端异常这条挤掉
