@@ -18,6 +18,7 @@ import {
   splitClosedPending,
 } from "@/lib/perfBucket";
 import type { PerfBucket, PerfGatePoint } from "@/lib/types";
+import { useMeasuredWidth } from "@/hooks/useMeasuredWidth";
 import { ChartGapOverlay } from "./ChartGapOverlay";
 
 interface Props {
@@ -120,7 +121,8 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx }: ChartProps) {
   const PAD_B = 28;
   const yMax = 100;
 
-  const SVG_W = 1000;
+  // SVG 单位 == CSS 像素,详见 useMeasuredWidth 的说明
+  const [wrapRef, SVG_W] = useMeasuredWidth(1000);
 
   const xSvgAt = (i: number) => {
     if (n <= 1) return SVG_W / 2;
@@ -178,7 +180,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx }: ChartProps) {
   );
 
   return (
-    <div className="relative w-full" style={{ height: H }}>
+    <div ref={wrapRef} className="relative w-full" style={{ height: H }}>
       <svg
         viewBox={`0 0 ${SVG_W} ${H}`}
         className="w-full h-full"

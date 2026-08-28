@@ -26,6 +26,7 @@ import { Fragment, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { AsyncState } from "@/hooks/useAsync";
+import { useMeasuredWidth } from "@/hooks/useMeasuredWidth";
 import {
   densifyByBucket,
   findGapRegions,
@@ -225,7 +226,8 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
   // x 轴标签密度:最多展示 7 个标签
   const labelStep = Math.max(1, Math.ceil(n / 7));
 
-  const SVG_W = 1000;
+  // SVG 单位 == CSS 像素,详见 useMeasuredWidth 的说明
+  const [wrapRef, SVG_W] = useMeasuredWidth(1000);
   const pctOfSvg = (px: number) => (px / SVG_W) * 100;
 
   // 百分比定位(0~100%),让 HTML 浮层和 SVG 都按容器宽缩放
@@ -279,7 +281,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
   }
 
   return (
-    <div className="relative w-full" style={{ height: H }}>
+    <div ref={wrapRef} className="relative w-full" style={{ height: H }}>
       <svg
         viewBox={`0 0 ${SVG_W} ${H}`}
         className="w-full h-full"
