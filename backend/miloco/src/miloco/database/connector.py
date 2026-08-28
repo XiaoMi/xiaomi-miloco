@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本。fresh-build 直接落到此值; 老库启动时按 _SCHEMA_MIGRATIONS
 # 步进跑到此值。历史基线 v1 (cron 挪出 task_link + rule 加 FK CASCADE 前)。
-_DB_SCHEMA_VERSION = 2
+_DB_SCHEMA_VERSION = 3
 
 
 def incremental_vacuum(
@@ -503,6 +503,7 @@ class SQLiteConnector:
                 exit_debounce_seconds INTEGER NOT NULL DEFAULT 60,
                 duration_seconds INTEGER,
                 duration_ratio REAL NOT NULL DEFAULT 0.8,
+                max_dwell_seconds INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY (task_id) REFERENCES task(task_id) ON DELETE CASCADE
@@ -1244,9 +1245,39 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         cursor.execute("PRAGMA foreign_keys=ON")
 
 
-# schema 步进迁移登记表; 未来加 v3 时新增 {3: _migrate_v2_to_v3} 条目
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3 schema step: rule 表加 max_dwell_seconds 列。
+
+    STATE mode 规则「最长驻留 / 到期自动退出」用（scene 联动任务里配合
+    on_exit 场景实现『开灯 1 分钟后自动关灯』）。仅 ADD COLUMN，幂等判定走
+    PRAGMA table_info（老库若手工加过列则跳过，不重复 ALTER）。
+    """
+    cursor = conn.cursor()
+    cursor.execute("BEGIN IMMEDIATE")
+    try:
+        cols = {
+            row[1] for row in cursor.execute("PRAGMA table_info(rule)").fetchall()
+        }
+        if "max_dwell_seconds" not in cols:
+            cursor.execute("ALTER TABLE rule ADD COLUMN max_dwell_seconds INTEGER")
+            logger.info("v2→v3: rule.max_dwell_seconds column added")
+        else:
+            logger.info("v2→v3: rule.max_dwell_seconds already present, skipped")
+        # ── PRAGMA user_version 与业务 DML 同事务 ─────────────
+        cursor.execute("PRAGMA user_version = 3")
+        conn.commit()
+        logger.info("v2→v3 migration done")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.execute("PRAGMA foreign_keys=ON")
+
+
+# schema 步进迁移登记表; 未来加 v4 时新增 {4: _migrate_v3_to_v4} 条目
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v1_to_v2,
+    3: _migrate_v2_to_v3,
 }
 
 
@@ -1332,7 +1363,19 @@ def rollback_v2_to_v1() -> dict[str, int]:
                     updated_at INTEGER NOT NULL
                 )
             """)
-            cursor.execute("INSERT INTO rule_v1 SELECT * FROM rule")
+            # 显式列清单: v3 的 max_dwell_seconds 是 v2 引入的列, 回退 v1 形态时丢弃
+            cursor.execute(
+                "INSERT INTO rule_v1 (id, name, task_id, mode, lifecycle, enabled, "
+                "condition, actions, action_descriptions, on_enter_actions, "
+                "on_enter_desc, on_exit_actions, on_exit_desc, on_target_desc, "
+                "terminate_when, exit_debounce_seconds, duration_seconds, "
+                "duration_ratio, created_at, updated_at) "
+                "SELECT id, name, task_id, mode, lifecycle, enabled, "
+                "condition, actions, action_descriptions, on_enter_actions, "
+                "on_enter_desc, on_exit_actions, on_exit_desc, on_target_desc, "
+                "terminate_when, exit_debounce_seconds, duration_seconds, "
+                "duration_ratio, created_at, updated_at FROM rule"
+            )
             cursor.execute("DROP TABLE rule")
             cursor.execute("ALTER TABLE rule_v1 RENAME TO rule")
             cursor.execute("CREATE INDEX idx_rule_name ON rule(name)")

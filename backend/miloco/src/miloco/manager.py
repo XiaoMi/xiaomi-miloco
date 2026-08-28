@@ -140,6 +140,21 @@ class Manager:
     def task_service(self) -> TaskService:
         return self._task_service
 
+    @property
+    def scene_task_service(self):
+        """场景联动任务服务（懒加载单例；组合 rule_service + task_service）。"""
+        svc = getattr(self, "_scene_task_service", None)
+        if svc is None:
+            from miloco.scene_task.service import SceneTaskService
+
+            svc = SceneTaskService(
+                rule_service=self._rule_service,
+                task_service=self._task_service,
+                miot_proxy=self._miot_proxy,
+            )
+            self._scene_task_service = svc
+        return svc
+
     # Repo layer access properties
     @property
     def kv_repo(self) -> KVRepo:

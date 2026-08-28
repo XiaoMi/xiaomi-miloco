@@ -89,6 +89,11 @@ class RuleRepo:
                 if data.get("duration_ratio") is not None
                 else 0.8
             ),
+            max_dwell_seconds=(
+                int(data["max_dwell_seconds"])
+                if data.get("max_dwell_seconds") is not None
+                else None
+            ),
             created_at=ms_to_iso_local(data.get("created_at")),
             updated_at=ms_to_iso_local(data.get("updated_at")),
         )
@@ -114,9 +119,10 @@ class RuleRepo:
                     on_target_desc,
                     terminate_when, exit_debounce_seconds,
                     duration_seconds, duration_ratio,
+                    max_dwell_seconds,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             params = (
                 rule_id,
@@ -143,6 +149,7 @@ class RuleRepo:
                 rule.duration_ratio
                 if rule.duration_ratio is not None
                 else _DURATION_RATIO_DB_FALLBACK,
+                rule.max_dwell_seconds,
                 current_time,
                 current_time,
             )
@@ -241,6 +248,7 @@ class RuleRepo:
                     on_target_desc = ?,
                     terminate_when = ?, exit_debounce_seconds = ?,
                     duration_seconds = ?, duration_ratio = ?,
+                    max_dwell_seconds = ?,
                     updated_at = ?
                 WHERE id = ?
             """
@@ -268,6 +276,7 @@ class RuleRepo:
                 rule.duration_ratio
                 if rule.duration_ratio is not None
                 else _DURATION_RATIO_DB_FALLBACK,
+                rule.max_dwell_seconds,
                 now_ms(),
                 rule.id,
             )

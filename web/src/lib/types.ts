@@ -781,6 +781,46 @@ export interface Task {
   ruleBriefs: TaskRuleBrief[];
 }
 
+// ── 场景联动任务（scene_task，web「场景联动」tab）──────────────────
+// 一条 state 模式 rule 的 enter / exit 各挂一个米家自动化场景：感知命中规则
+// 直接 trigger_scene，完全不经过 agent。后端 /api/scene-tasks 返回的视图。
+export interface SceneTask {
+  taskId: string;
+  description: string;
+  status: TaskStatus;
+  pausedAt: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
+  ruleId: string;
+  enabled: boolean;
+  // 进入条件（自然语言；退出 = 条件不再满足并持续 exitDebounceSeconds）
+  query: string;
+  perceiveDeviceIds: string[];
+  // 进入 / 退出时触发的场景（null = 该方向不联动）
+  enterSceneId?: string | null;
+  enterSceneName?: string | null;
+  exitSceneId?: string | null;
+  exitSceneName?: string | null;
+  // 场景触发冷却（分钟）；退出确认时间（秒）；最长驻留（秒，到期强制退出）
+  cooldownMinutes?: number | null;
+  exitDebounceSeconds: number;
+  maxDwellSeconds?: number | null;
+}
+
+// 创建 / 更新场景联动任务的入参（后端 SceneTaskCreateRequest / UpdateRequest）。
+// 更新（PATCH）只提交显式提供的字段，故全部可选；创建时三个必填字段齐全。
+export interface SceneTaskInput {
+  description?: string;
+  perceiveDeviceIds?: string[];
+  query?: string;
+  enterSceneId?: string | null;
+  exitSceneId?: string | null;
+  cooldownMinutes?: number;
+  exitDebounceSeconds?: number;
+  maxDwellSeconds?: number | null;
+  enabled?: boolean;
+}
+
 // ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──
 export interface UpgradeCheck {
   current: string;

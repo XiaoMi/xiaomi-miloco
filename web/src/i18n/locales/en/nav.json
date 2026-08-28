@@ -9,6 +9,8 @@
     "familyHint": "Manage family members",
     "tasks": "Tasks",
     "tasksHint": "Manage family tasks",
+    "scenes": "Scene Rules",
+    "scenesHint": "Trigger automations on detection",
     "activity": "Activity",
     "activityHint": "Review what happened",
     "usage": "Models",

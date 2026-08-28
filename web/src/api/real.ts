@@ -25,6 +25,8 @@ import type {
   Pet,
   PetObserveResult,
   Scene,
+  SceneTask,
+  SceneTaskInput,
   ScopeCamera,
   ScopeHome,
   Task,
@@ -2144,5 +2146,134 @@ export async function realUpdateRuleQuery(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ condition: { query } }),
     },
+  );
+}
+
+// ── 场景联动任务（/api/scene-tasks，web「场景联动」tab）────────────────
+// 感知命中规则 → 直接触发米家自动化场景（trigger_scene），不经 agent。
+interface BackendSceneTask {
+  task_id: string;
+  description: string;
+  status: "active" | "paused";
+  paused_at?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  rule_id: string;
+  enabled: boolean;
+  query: string;
+  perceive_device_ids: string[];
+  enter_scene_id?: string | null;
+  enter_scene_name?: string | null;
+  exit_scene_id?: string | null;
+  exit_scene_name?: string | null;
+  cooldown_minutes?: number | null;
+  exit_debounce_seconds: number;
+  max_dwell_seconds?: number | null;
+}
+
+// 前端输入是 camelCase，backend SceneTaskCreateRequest / UpdateRequest 是 snake_case
+// 且 extra=forbid —— 不转换直接发会 422（missing perceive_device_ids + 一串
+// extra_forbidden）。只带显式提供的字段（PATCH 按 model_fields_set 合并）。
+function toSceneTaskPayload(input: SceneTaskInput): Record<string, unknown> {
+  const p: Record<string, unknown> = {};
+  if (input.description !== undefined) p.description = input.description;
+  if (input.perceiveDeviceIds !== undefined) {
+    p.perceive_device_ids = input.perceiveDeviceIds;
+  }
+  if (input.query !== undefined) p.query = input.query;
+  if (input.enterSceneId !== undefined) p.enter_scene_id = input.enterSceneId;
+  if (input.exitSceneId !== undefined) p.exit_scene_id = input.exitSceneId;
+  if (input.cooldownMinutes !== undefined) {
+    p.cooldown_minutes = input.cooldownMinutes;
+  }
+  if (input.exitDebounceSeconds !== undefined) {
+    p.exit_debounce_seconds = input.exitDebounceSeconds;
+  }
+  if (input.maxDwellSeconds !== undefined) p.max_dwell_seconds = input.maxDwellSeconds;
+  if (input.enabled !== undefined) p.enabled = input.enabled;
+  return p;
+}
+
+function mapSceneTask(t: BackendSceneTask): SceneTask {
+  return {
+    taskId: t.task_id,
+    description: t.description,
+    status: t.status,
+    pausedAt: t.paused_at ?? null,
+    createdAt: t.created_at,
+    updatedAt: t.updated_at ?? null,
+    ruleId: t.rule_id,
+    enabled: t.enabled,
+    query: t.query,
+    perceiveDeviceIds: t.perceive_device_ids ?? [],
+    enterSceneId: t.enter_scene_id ?? null,
+    enterSceneName: t.enter_scene_name ?? null,
+    exitSceneId: t.exit_scene_id ?? null,
+    exitSceneName: t.exit_scene_name ?? null,
+    cooldownMinutes: t.cooldown_minutes ?? null,
+    exitDebounceSeconds: t.exit_debounce_seconds,
+    maxDwellSeconds: t.max_dwell_seconds ?? null,
+  };
+}
+
+export async function realListSceneTasks(): Promise<SceneTask[]> {
+  const r = await apiFetch<Normal<BackendSceneTask[]>>("/api/scene-tasks");
+  return (r.data ?? []).map(mapSceneTask);
+}
+
+export async function realCreateSceneTask(
+  input: SceneTaskInput,
+): Promise<SceneTask> {
+  const r = await apiFetch<Normal<BackendSceneTask>>(
+    "/api/scene-tasks",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(toSceneTaskPayload(input)),
+    },
+  );
+  return mapSceneTask(r.data);
+}
+
+// PATCH 只提交显式提供的字段；null = 清空该方向场景（后端校验不能两个方向都空）。
+export async function realUpdateSceneTask(
+  taskId: string,
+  patch: SceneTaskInput,
+): Promise<SceneTask> {
+  const r = await apiFetch<Normal<BackendSceneTask>>(
+    `/api/scene-tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(toSceneTaskPayload(patch)),
+    },
+  );
+  return mapSceneTask(r.data);
+}
+
+export async function realSetSceneTaskEnabled(
+  taskId: string,
+  enabled: boolean,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/scene-tasks/${encodeURIComponent(taskId)}/${enabled ? "enable" : "disable"}`,
+    { method: "POST" },
+  );
+}
+
+export async function realDeleteSceneTask(taskId: string): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/scene-tasks/${encodeURIComponent(taskId)}`,
+    { method: "DELETE" },
+  );
+}
+
+// 调试入口：手动触发一次进入场景（不依赖感知命中）。
+export async function realTriggerSceneTask(
+  taskId: string,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>(
+    `/api/scene-tasks/${encodeURIComponent(taskId)}/trigger`,
+    { method: "POST" },
   );
 }

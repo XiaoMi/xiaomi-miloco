@@ -62,6 +62,7 @@ from miloco.perception.router import router as perception_router
 from miloco.person.router import router as person_router
 from miloco.pet.router import router as pet_router
 from miloco.rule.router import router as rule_router
+from miloco.scene_task.router import router as scene_task_router
 from miloco.schedule.router import router as schedule_router
 from miloco.schedule.runner import get_runner as get_schedule_runner
 from miloco.task.router import router as task_router
@@ -528,6 +529,7 @@ app.include_router(person_router, prefix="/api")
 app.include_router(pet_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")
 app.include_router(rule_router, prefix="/api")
+app.include_router(scene_task_router, prefix="/api")
 app.include_router(schedule_router, prefix="/api")
 app.include_router(task_router, prefix="/api")
 app.include_router(task_record_router, prefix="/api")

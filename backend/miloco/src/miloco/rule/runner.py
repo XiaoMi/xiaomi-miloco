@@ -179,6 +179,7 @@ class RuleRuntimeState:
     state_duration_fired: bool = False
     target_timer: "asyncio.Task | None" = None
     target_fired: bool = False
+    dwell_timer: "asyncio.Task | None" = None
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
@@ -301,6 +302,14 @@ class RuleRunner:
         }
 
     @property
+    def _dwell_timers(self) -> dict[str, asyncio.Task]:
+        return {
+            rid: st.dwell_timer
+            for rid, st in self._state.items()
+            if st.dwell_timer is not None
+        }
+
+    @property
     def _target_fired(self) -> set[str]:
         return {rid for rid, st in self._state.items() if st.target_fired}
 
@@ -345,6 +354,22 @@ class RuleRunner:
                 or enabled_changed
             ):
                 self._reset_runtime_state(rule.id)
+            # max_dwell 变更只重启在跑的 dwell timer（保留状态机其余现场）：
+            # 立即生效需要——改长改短都不该让旧计时残留，但 full reset 会丢掉
+            # 当前 ENTERED 态、下次条件翻转才重新进入，过重。仍在态内则从当下
+            # 重新计时，否则等下次 ENTERED 再起。
+            elif existing.max_dwell_seconds != rule.max_dwell_seconds:
+                self._cancel_dwell_timer(rule.id)
+                if (
+                    rule.enabled
+                    and rule.mode == RuleMode.STATE
+                    and (rs := self._state.get(rule.id)) is not None
+                    and rs.last_rule_state
+                ):
+                    self._schedule_dwell_timer_if_needed(
+                        rule, self._sources_currently_true(rule.id),
+                        "config_change",
+                    )
         self._rules[rule.id] = rule
 
     def remove_rule(self, rule_id: str) -> None:
@@ -374,6 +399,8 @@ class RuleRunner:
             state.exit_debounce_task.cancel()
         if state.target_timer is not None and not state.target_timer.done():
             state.target_timer.cancel()
+        if state.dwell_timer is not None and not state.dwell_timer.done():
+            state.dwell_timer.cancel()
 
     def _clear_pending_source_enter(self, rule_id: str) -> None:
         """清掉 rule 所有 source 的 pending_enter 残留。
@@ -601,9 +628,13 @@ class RuleRunner:
         self._clear_pending_source_enter(rule.id)
 
         sources = self._sources_currently_true(rule_id) or [source_did]
-        return await self._fire(
+        result = await self._fire(
             rule, RuleEvent.ENTERED, sources, context, str(uuid.uuid4())
         )
+        # 手动触发与真实 ENTERED 同口径：state 规则配了 max_dwell 就起到期计时
+        if rule.mode == RuleMode.STATE:
+            self._schedule_dwell_timer_if_needed(rule, sources, context)
+        return result
 
     # ---- EVENT duration sliding-window evaluator ----
 
@@ -720,6 +751,7 @@ class RuleRunner:
             )
             if rule.mode == RuleMode.STATE:
                 self._schedule_target_timer_if_needed(rule, sources, context)
+                self._schedule_dwell_timer_if_needed(rule, sources, context)
             return TriggerOutcome.FIRED
 
         return TriggerOutcome.COUNTING
@@ -800,6 +832,8 @@ class RuleRunner:
                 caption=caption, device_name=device_name,
             )
             self._schedule_target_timer_if_needed(rule, sources, context)
+            if rule.mode == RuleMode.STATE:
+                self._schedule_dwell_timer_if_needed(rule, sources, context)
             return TriggerOutcome.FIRED
 
         # EXITED
@@ -819,6 +853,8 @@ class RuleRunner:
             old.cancel()
         state.exit_debounce_task = None
         state.exit_debounce_at = None
+        # 真 EXITED：取消未触发的 dwell timer（rule 已不在态，到期强制退出无意义）
+        self._cancel_dwell_timer(rule.id)
         # 新一轮 debounce 开始前，清掉上一轮残留的 pending_enter
         self._clear_pending_source_enter(rule.id)
 
@@ -1092,6 +1128,102 @@ class RuleRunner:
                 "Rule %s on_target fire failed", rule.id
             )
 
+    # ---- max_dwell_seconds 最长驻留 timer（到期强制 EXITED） ----
+
+    def _schedule_dwell_timer_if_needed(
+        self, rule: Rule, sources: list[str], context: str
+    ) -> None:
+        """ENTERED 真 fire 后调用：max_dwell_seconds 配置时起计时器，
+        到时若 rule 仍处于 ENTERED 态则强制 EXITED（跳过 exit_debounce，
+        直接 fire on_exit）。用于『任务到期自动退出』语义——如场景联动里
+        「开灯 1 分钟后自动关灯」。
+
+        重入安全：先取消可能残留的 timer（真 EXITED 后又 ENTERED 会重启计时，
+        跨日 force-reset 的 EXITED→ENTERED 也走这里重启）。
+        """
+        if not rule.max_dwell_seconds:
+            return
+        rs = self._ensure_state(rule.id)
+        old = rs.dwell_timer
+        rs.dwell_timer = None
+        if old is not None and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self._await_dwell_expiry(rule, list(sources)))
+        rs.dwell_timer = task
+        fires_at_ts_ms = int(time.time() * 1000) + rule.max_dwell_seconds * 1000
+        logger.info(
+            "DWELL_SCHEDULED: rule=%s name=%s max_dwell=%ds fires_at_ts_ms=%d",
+            rule.id, rule.name, rule.max_dwell_seconds, fires_at_ts_ms,
+        )
+        self._publish_rule_event(
+            "rule_dwell_scheduled", rule.id,
+            {
+                "max_dwell_seconds": rule.max_dwell_seconds,
+                "fires_at_ts_ms": fires_at_ts_ms,
+            },
+        )
+
+    async def _await_dwell_expiry(
+        self, rule: Rule, sources: list[str],
+    ) -> None:
+        try:
+            await asyncio.sleep(rule.max_dwell_seconds or 0)
+        except asyncio.CancelledError:
+            return
+        rs = self._ensure_state(rule.id)
+        rs.dwell_timer = None
+        # 守卫：只有「仍处于 ENTERED 态」才强制退出。真 EXITED 已发生
+        # （last_rule_state=False）或 dwell 已过期后自然退出 → no-op。
+        if not rs.last_rule_state:
+            logger.info(
+                "DWELL_DROPPED: rule=%s state-false-at-expiry", rule.id,
+            )
+            return
+        # 清理：取消在跑的 exit debounce（若 condition 恰在 dwell 到点前后翻 False，
+        # debounce 已排程；强制退出后 rule 已不在态，debounce 完成时不会重复 fire，
+        # 但会留日志噪声，且 on_exit 场景应只触发一次）。
+        pending = rs.exit_debounce_task
+        rs.exit_debounce_task = None
+        if pending is not None and not pending.done():
+            pending.cancel()
+        rs.exit_debounce_at = None
+        # 状态机标记退出：后续 perception 再报 True 会重新 ENTERED（重新起计时）。
+        for src in rs.sources.values():
+            src.last_bool = False
+        rs.last_rule_state = False
+        self._clear_pending_source_enter(rule.id)
+        actual_exited_at = ms_to_iso_local(now_ms())
+        logger.info(
+            "DWELL_EXPIRED: rule=%s name=%s max_dwell=%ds force EXITED",
+            rule.id, rule.name, rule.max_dwell_seconds,
+        )
+        self._publish_rule_event(
+            "rule_dwell_expired", rule.id,
+            {
+                "max_dwell_seconds": rule.max_dwell_seconds,
+                "actual_exited_at": actual_exited_at,
+            },
+        )
+        try:
+            await self._fire(
+                rule, RuleEvent.EXITED, sources, "", str(uuid.uuid4()),
+                actual_exited_at=actual_exited_at,
+            )
+        except Exception:
+            logger.exception(
+                "Rule %s dwell-expiry exit fire failed", rule.id
+            )
+
+    def _cancel_dwell_timer(self, rule_id: str) -> None:
+        """真 EXITED 时 cancel 未触发的 dwell timer（rule 已不在态，计时无意义）。"""
+        rs = self._state.get(rule_id)
+        if rs is None:
+            return
+        t = rs.dwell_timer
+        rs.dwell_timer = None
+        if t is not None and not t.done():
+            t.cancel()
+
     def _cancel_target_timer(self, rule_id: str) -> None:
         """只 cancel 未触发的 timer，不动 target_fired 标记。
 
@@ -1158,6 +1290,11 @@ class RuleRunner:
             if pending is not None and not pending.done():
                 pending.cancel()
             rs.exit_debounce_at = None
+            # 2b) 取消 dwell timer（下方 force ENTERED 后会重新起计时）
+            dwell = rs.dwell_timer
+            rs.dwell_timer = None
+            if dwell is not None and not dwell.done():
+                dwell.cancel()
             # 3) STATE + duration：清 fired 标记和窗口，让 on_enter 重新走累积
             #    （新一天计时窗口从零开始）
             if rule.duration_seconds:
@@ -1178,6 +1315,10 @@ class RuleRunner:
             )
             # 5) 重新 schedule on_target timer（accumulated 已被 rollover 清零）
             self._schedule_target_timer_if_needed(
+                rule, sources, "cross_day_rollover",
+            )
+            # 5b) force ENTERED 后重启 dwell 计时（新一天重新到期自动退出）
+            self._schedule_dwell_timer_if_needed(
                 rule, sources, "cross_day_rollover",
             )
 
