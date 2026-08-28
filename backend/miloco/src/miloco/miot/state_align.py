@@ -218,16 +218,28 @@ async def _read_values(
     return by_device
 
 
-def _write_online_flags(store: StateStore, meta: dict[str, _DeviceMeta]) -> None:
+def _write_online_flags(
+    store: StateStore, meta: dict[str, _DeviceMeta], samples: _Samples
+) -> None:
     """每台设备都写在线标志，离线的也写。
 
     先写标志再写属性：一条属性都读不到的设备也要在容器里留下痕迹。
+
+    两种拒收都要接：抛异常那种在这里到不了（did 进 meta 前已过段校验、值是 bool），
+    留着是防御；真会发生的是撞上叶子上限那种，它不抛、只让 `set` 返回假，不看就成了
+    静默丢失 —— 尤其在一条属性都读不到的那条早退路径上，收尾行是唯一的信号。
     """
     for did, info in meta.items():
         try:
-            store.set(f"iot/device/{did}/status/online", info.online, source=SOURCE)
+            landed = store.set(
+                f"iot/device/{did}/status/online", info.online, source=SOURCE
+            )
         except (TypeError, ValueError) as e:
-            logger.warning("align: online flag rejected did=%s: %s", did, e)
+            if samples.take("online_flag_rejected"):
+                logger.warning("align: online flag rejected did=%s: %s", did, e)
+            continue
+        if not landed and samples.take("online_flag_dropped"):
+            logger.warning("align: online flag hit the leaf limit did=%s", did)
 
 
 def _write_device(
@@ -297,7 +309,7 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
     unreadable: dict[str, int] = {}
     try:
         params, meta = await _collect_params(miot_proxy, samples)
-        _write_online_flags(store, meta)
+        _write_online_flags(store, meta, samples)
         offline = sum(1 for info in meta.values() if not info.online)
         if not params:
             logger.warning(

@@ -299,6 +299,21 @@ async def test_a_did_with_a_slash_is_still_refused_by_the_write_side(store):
     assert store.snapshot("iot/device/x/**") == {}
 
 
+async def test_an_online_flag_lost_to_the_leaf_limit_shows_up_in_the_summary(
+    store, caplog, monkeypatch
+):
+    """撞上叶子上限时容器不抛异常；不看返回值这台设备就悄悄没有在线标志。"""
+    monkeypatch.setattr("miloco.state.store.MAX_LEAVES", 1)
+    proxy = _FakeProxy({"d1": _device(), "d2": _device()}, {})
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    messages = [r.getMessage() for r in caplog.records]
+    summary = next(m for m in messages if "wrote online flags only" in m)
+    assert "online_flag_dropped" in summary
+
+
 class _SpecFailsProxy(_EchoProxy):
     """指定的 did 拉 spec 会抛：它在 meta 里、也在线，但一条属性都没请求过。"""
 
