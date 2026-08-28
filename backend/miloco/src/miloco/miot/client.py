@@ -37,6 +37,7 @@ from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
+    allowed_home_ids,
     filter_by_home,
     is_home_allowed,
     physical_camera_did,
@@ -655,6 +656,14 @@ class MiotProxy:
     async def devices_in_current_home(self) -> dict[str, MIoTDeviceInfo]:
         """只回当前启用家庭的设备。`get_devices` 是账号全量，过滤在各调用方自己做。"""
         return filter_by_home(self._kv_repo, await self.get_devices())
+
+    def has_enabled_home(self) -> bool:
+        """启用集非空。
+
+        用来把「作用域是空的」和「作用域里没有设备」分开 —— 两者的
+        `devices_in_current_home()` 都是空 dict，但前者说明还没选家庭。
+        """
+        return bool(allowed_home_ids(self._kv_repo))
 
     async def _on_lan_device_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         # refresh_cameras deep-copies SDK state, so post-init lan_online

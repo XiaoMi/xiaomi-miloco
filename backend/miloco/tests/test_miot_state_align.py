@@ -42,7 +42,11 @@ class _FakeProxy:
     def __init__(self, devices: dict, rows: dict):
         self._devices = devices
         self._rows = rows
+        self.enabled_home = True
         self.requested: list[tuple[str, int, int]] = []
+
+    def has_enabled_home(self) -> bool:
+        return self.enabled_home
 
     async def get_devices(self) -> dict:
         return self._devices
@@ -646,3 +650,56 @@ async def test_batch_rejection_warnings_are_rate_limited(store, caplog):
         if "batch write rejected" in m
     ]
     assert len(lines) == SAMPLE_LIMIT
+
+
+# ── 对齐给出「这一轮跑没跑完」的判定 ───────────────────────────────────
+
+
+async def test_a_finished_round_reports_success(store):
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 1}})
+
+    assert await align_iot_state(store, proxy) is True
+
+
+async def test_a_home_without_any_readable_property_still_counts_as_aligned(store):
+    """零可读属性是合法终态。判成失败会让属性订阅那道门永远打不开。"""
+    proxy = _FakeProxy({"d1": _device()}, {})
+
+    assert await align_iot_state(store, proxy) is True
+
+
+async def test_a_device_that_fails_to_read_does_not_fail_the_round(store):
+    """对齐从来不保证全读到，一台坏设备卡死整条链路是更坏的结果。"""
+    proxy = _FakeProxy(
+        {"ok": _device(), "bad": _device()},
+        {("ok", 2, 1): {"code": 0, "value": 1}, ("bad", 2, 1): {"code": KNOWN_CODE}},
+    )
+
+    assert await align_iot_state(store, proxy) is True
+
+
+async def test_an_unreachable_device_list_fails_the_round(store):
+    class _Boom(_FakeProxy):
+        async def devices_in_current_home(self) -> dict:
+            raise RuntimeError("boom")
+
+    assert await align_iot_state(store, _Boom({}, {})) is False
+
+
+async def test_no_enabled_home_fails_the_round(store):
+    """空作用域没有「对齐完成」可言，这条兜住把对齐排在建立启用集之前的顺序错误。"""
+    proxy = _FakeProxy({}, {})
+    proxy.enabled_home = False
+
+    assert await align_iot_state(store, proxy) is False
+
+
+async def test_an_enabled_home_with_no_device_counts_as_aligned(store):
+    """判据是启用集空不空，不是家庭里有几台设备。
+
+    家庭是空的时候容器本来就该是空的，这已经对齐了。判成失败会让这一代的属性订阅
+    门一直关着，之后往这个家庭里加设备也订不上。
+    """
+    proxy = _FakeProxy({}, {})
+
+    assert await align_iot_state(store, proxy) is True

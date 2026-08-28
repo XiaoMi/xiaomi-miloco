@@ -314,12 +314,22 @@ def _write_device(
     return written
 
 
-async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
-    """拉一遍在线设备的可读属性写进容器。任何异常都只记日志，不往外抛。"""
+async def align_iot_state(store: StateStore, miot_proxy: Any) -> bool:
+    """拉一遍在线设备的可读属性写进容器。任何异常都只记日志，不往外抛。
+
+    返回这一轮跑完了没有，**不回答读全了没有** —— 部分设备读失败仍算跑完，一台坏
+    设备不该卡死等着这个判定的下游。下游拿到真才把当前作用域标成已对齐。
+    """
     started = time.monotonic()
     samples = _Samples()
     unreadable: dict[str, int] = {}
     try:
+        if not miot_proxy.has_enabled_home():
+            # 空作用域没有「已对齐」可言，这条兜住把对齐排在建立启用集之前的顺序错误。
+            # 判据是启用集空不空而不是家庭里有几台设备：空家庭的容器本来就该是空的，
+            # 那已经对齐了，判成失败会让这一代的门一直关着、后来加的设备也进不来
+            logger.warning("align: no home is enabled; nothing to align")
+            return False
         params, meta = await _collect_params(miot_proxy, samples)
         await _write_online_flags(store, meta, samples)
         offline = sum(1 for info in meta.values() if not info.online)
@@ -331,7 +341,7 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
                 offline,
                 samples.counts or "none",
             )
-            return
+            return True
         by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
         per_device: dict[str, int] = {}
         for did, props in by_device.items():
@@ -353,6 +363,7 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
             unreadable or "none",
             store.stats(),
         )
+        return True
     except Exception as e:
         logger.error(
             "align failed after %.1fs, issues=%s unreadable=%s: %s",
@@ -362,3 +373,4 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
             e,
             exc_info=True,
         )
+        return False

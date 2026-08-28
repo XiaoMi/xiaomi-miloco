@@ -2034,3 +2034,16 @@ def test_devices_without_a_home_id_are_dropped():
     proxy = _proxy_with({"orphan": SimpleNamespace()}, kv)
 
     assert asyncio.run(proxy.devices_in_current_home()) == {}
+
+
+def test_has_enabled_home_is_false_on_an_empty_white_list():
+    proxy = _proxy_with({"mine": SimpleNamespace(home_id="H1")}, _FakeKV())
+
+    assert proxy.has_enabled_home() is False
+
+
+def test_has_enabled_home_does_not_look_at_the_devices():
+    """启用了家庭但里面一台设备都没有，作用域仍然是存在的 —— 对齐靠这个区分二者。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+
+    assert _proxy_with({}, kv).has_enabled_home() is True
