@@ -75,9 +75,6 @@ def is_failure(code: object) -> bool:
     return isinstance(code, int) and code < 0 and code not in _MIOT_OK_CODES
 
 
-_is_failure = is_failure
-
-
 def summarize_results(
     results_or_result: object,
 ) -> tuple[bool, int | None, str | None]:
@@ -100,7 +97,7 @@ def summarize_results(
 
     for it in items:
         code = it.get("code")
-        if _is_failure(code):
+        if is_failure(code):
             return False, code, code_message(code)  # type: ignore[arg-type]
 
     return True, None, None
