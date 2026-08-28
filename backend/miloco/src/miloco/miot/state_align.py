@@ -31,7 +31,7 @@ from typing import Any
 
 from miot.types import MIoTGetPropertyParam
 
-from miloco.miot.iid import try_parse_prop_iid
+from miloco.miot.iid import try_parse_iid
 from miloco.miot.result_codes import code_message, is_failure, is_known_code
 from miloco.state import StateStore
 from miloco.state.path import validate_segment
@@ -99,7 +99,7 @@ async def _collect_params(
                 logger.warning("align: spec unavailable did=%s: %s", did, e)
             continue
         for iid in iids:
-            parsed = try_parse_prop_iid(iid)
+            parsed = try_parse_iid(iid, "prop")
             if parsed is None:
                 if samples.take("bad_iid"):
                     logger.warning("align: unparsable iid did=%s iid=%s", did, iid)
@@ -236,13 +236,16 @@ def _write_device(
         store.set(path, props, source=SOURCE)
         if store.stats()["rejected_leaf_limit"] == rejected_before:
             return len(props)
-        logger.warning(
-            "align: batch write hit the leaf limit did=%s; retrying per property", did
-        )
+        if samples.take("leaf_limit"):
+            logger.warning(
+                "align: batch write hit the leaf limit did=%s; retrying per property",
+                did,
+            )
     except (TypeError, ValueError) as e:
-        logger.warning(
-            "align: batch write rejected did=%s (%s); retrying per property", did, e
-        )
+        if samples.take("batch_rejected"):
+            logger.warning(
+                "align: batch write rejected did=%s (%s); retrying per property", did, e
+            )
 
     written = 0
     for iid, value in props.items():
@@ -300,10 +303,11 @@ async def align_iot_state(store: StateStore, miot_proxy: Any) -> None:
         # 读起来像「订阅方卡住了」
         await asyncio.sleep(0)
         logger.info(
-            "align done: devices=%s offline=%s requested=%s written=%s elapsed=%.1fs "
-            "issues=%s unreadable=%s store=%s",
-            sum(1 for count in per_device.values() if count),
+            "align done: devices=%s offline=%s written_devices=%s requested=%s "
+            "written=%s elapsed=%.1fs issues=%s unreadable=%s store=%s",
+            len(meta),
             offline,
+            sum(1 for count in per_device.values() if count),
             len(params),
             written,
             time.monotonic() - started,

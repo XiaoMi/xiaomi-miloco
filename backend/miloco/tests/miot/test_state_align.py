@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -371,7 +372,7 @@ async def test_summary_counts_only_devices_that_got_something_written(store, cap
     summary = next(
         m for m in (r.getMessage() for r in caplog.records) if "align done" in m
     )
-    assert "devices=1" in summary and "written=1" in summary
+    assert re.search(r"\bwritten_devices=1 ", summary) and "written=1 " in summary
 
 
 async def test_a_rejected_property_name_does_not_read_like_a_rejected_value(
@@ -501,3 +502,55 @@ async def test_row_without_value_reports_the_actual_code(store, caplog):
 
     line = next(m for m in (r.getMessage() for r in caplog.records) if "no value" in m)
     assert "-702000000" in line
+
+
+async def test_summary_keeps_devices_and_offline_on_the_same_denominator(store, caplog):
+    """两个数并排放着，最自然的读法是「一共这么多、其中这些离线」，分母不同就会读错。"""
+    proxy = _FakeProxy(
+        {
+            "on1": _device(online=True),
+            "off1": _device(online=False),
+            "off2": _device(online=False),
+        },
+        {("on1", 2, 1): {"code": 0, "value": 26}},
+    )
+
+    with caplog.at_level(logging.INFO, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    summary = next(
+        m for m in (r.getMessage() for r in caplog.records) if "align done" in m
+    )
+    # 不能写 "devices=3" —— written_devices=3 会把它顺带匹配上
+    assert re.search(r"\bdevices=3 offline=2 ", summary), summary
+
+
+async def test_leaf_limit_warnings_are_rate_limited(store, caplog, monkeypatch):
+    """上限一撞就全撞，剩下每台各打一条会把容器自己那条真正该看的日志淹掉。"""
+    monkeypatch.setattr("miloco.state.store.MAX_LEAVES", 1)
+    store._commit("iot/device/seed/status/online", True, source="x")
+    samples = _Samples()
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        for index in range(SAMPLE_LIMIT + 3):
+            _write_device(store, f"d{index}", {"2.1": index}, samples)
+
+    lines = [m for m in (r.getMessage() for r in caplog.records) if "leaf limit" in m]
+    assert len(lines) == SAMPLE_LIMIT
+    assert samples.counts["leaf_limit"] == SAMPLE_LIMIT + 3
+
+
+async def test_batch_rejection_warnings_are_rate_limited(store, caplog):
+    """畸形值可能整批设备都有（同型号同固件），这条也得受额度约束。"""
+    samples = _Samples()
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        for index in range(SAMPLE_LIMIT + 3):
+            _write_device(store, f"d{index}", {"2.1": float("nan")}, samples)
+
+    lines = [
+        m
+        for m in (r.getMessage() for r in caplog.records)
+        if "batch write rejected" in m
+    ]
+    assert len(lines) == SAMPLE_LIMIT
