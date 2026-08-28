@@ -492,7 +492,13 @@ class StateStore:
     def snapshot(
         self, pattern: str | Sequence[str], *, with_meta: bool = False
     ) -> dict:
-        """按 pattern 取一致快照，保留完整路径。一个都没匹配上时返回 `{}`。
+        """按 pattern 取一致快照，保留完整路径。
+
+        一条路径都没匹配上返回 `{}`；但**末段落在中间节点、一片叶子都没收到**时抛
+        `ValueError` 而不是返回 `{}` —— `snapshot("iot/device/d1")` 这种最自然的写法
+        拿到的空结果，与「这台设备根本不存在」无从区分。取整棵子树写 `".../**"`。
+        同一层里既有叶子又有子树时仍按 `*` 的语义只收叶子、不抛，所以这道闸拦的是
+        整条 pattern 空转，拦不住「部分跳过」。
 
         可以传一组 pattern，结果合并成一棵树、共用同一次加锁。精确路径本身就是合法
         pattern，所以想取任意几条路径就把它们直接传进来。
