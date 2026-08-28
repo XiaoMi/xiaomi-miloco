@@ -38,10 +38,36 @@ class Manager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
+            # 作用域代号：切换账号或家庭时 +1。对齐、属性推送、删除调和写容器之前都
+            # 比一次，比不上就整段放弃 —— 挡掉旧作用域迟到的写入。
+            # 只有切换编排递增它，且那段在一把锁里跑，没有第二个写者。
+            cls._instance._scope = 0
+            # 已对齐到哪一代。存代号不存布尔：代号一推进旧标记自动失效，
+            # 没有「谁负责重置」这个问题。初值取一个不可能等于真实代号的数
+            cls._instance._aligned_scope = -1
+            # 启动对齐的 task。挂在这里而不是 lifespan 的局部变量里，
+            # 切换编排才够得着去取消上一轮
+            cls._instance.state_align_task = None
         return cls._instance
 
     def __init__(self):
         pass
+
+    def current_scope(self) -> int:
+        return self._scope
+
+    def begin_scope_switch(self) -> int:
+        """代号 +1 并返回新值。唯一的递增入口。"""
+        self._scope += 1
+        return self._scope
+
+    def mark_scope_aligned(self, scope: int) -> None:
+        """标记这一代已完成对齐。不是当前代就忽略 —— 那是迟到的旧对齐。"""
+        if scope == self._scope:
+            self._aligned_scope = scope
+
+    def scope_is_aligned(self) -> bool:
+        return self._aligned_scope == self._scope
 
     async def initialize(self):
         """

@@ -380,7 +380,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # 状态容器的启动对齐：拉一遍在线设备属性写进容器。要打若干次云端请求,
     # 所以不放 initialize() 里挡启动;关闭时在 shutdown 段取消。
-    state_align_task = asyncio.create_task(
+    get_manager().state_align_task = asyncio.create_task(
         align_iot_state(get_manager().state_store, get_manager().miot_proxy)
     )
 
@@ -453,12 +453,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         pass
 
     # 先取消对齐、再停容器:反了的话对齐还在往一个已停的容器里写,变更事件全被作废。
-    state_align_task.cancel()
-    try:
-        await state_align_task
-    except asyncio.CancelledError:
-        # 这个 CancelledError 是上一行 cancel() 自己引发的，不是外面在取消我们
-        pass
+    align_task = get_manager().state_align_task
+    if align_task is not None:
+        align_task.cancel()
+        try:
+            await align_task
+        except asyncio.CancelledError:
+            # 这个 CancelledError 是上一行 cancel() 自己引发的，不是外面在取消我们
+            pass
     get_manager().state_store.stop()
 
     # 关闭顺序遵循"生产者先于消费者":
