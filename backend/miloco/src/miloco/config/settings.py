@@ -303,9 +303,151 @@ class PerceptionCollectSettings(BaseModel):
     )
 
 
+class LocalVisionSettings(BaseModel):
+    """本地视觉感知边车(local-vision)的连接与推理参数。
+
+    仅当 ``perception.engine_backend == "local"`` 时生效。边车是独立进程/独立
+    机器上的 GPU 服务,miloco 只通过 HTTP 认识它 —— 本项目不下载权重、不拉起也
+    不重启推理进程(模型进程的生命周期一旦由 miloco 接管,故障面就扩散到显卡直通、
+    驱动、容器等环境问题,既超出项目边界也难以支持)。
+    """
+
+    base_url: str = Field(
+        default="http://127.0.0.1:18800",
+        description="local-vision 边车地址(OpenAI 协议无关,见 services/local-vision)",
+    )
+    token: str = Field(
+        default="",
+        description="边车鉴权 token;边车未配则留空。本通路不需要任何模型厂商 API Key",
+    )
+    timeout_sec: float = Field(default=60.0, gt=0, description="单次感知请求超时(秒)")
+    container_fps: int = Field(
+        default=20, gt=0,
+        description=(
+            "窗口帧封装成 mp4 时写进**容器时基**的帧率;应与相机实际出帧率一致"
+            "(实测米家全景约 20fps),写错只会让时基与内容对不上。"
+            "刻意不叫 fps:感知链路里已有 engine.input.fps(下发/跟踪帧率)与 omni_fps"
+            "(送模型的抽帧率),再来一个 fps 会被读成第三种采样率。"
+            "**与云端通路的取值逻辑相反**:云端每多一帧就多一份 token 费用,所以那边"
+            "必须把帧率压低;本通路的成本由 codec_target_canvas(token 预算)封顶,"
+            "帧数几乎免费 —— 实测 4→60fps(16→240 帧)prompt token 仅从 744 涨到 888,"
+            "生成耗时基本不变。**但端到端不是免费的**:实测真实家庭画面上,帧多了模型"
+            "会看到更多运动细节、于是描述写得更长(中位 135→170 字),生成时间随之上涨"
+            "(双相机 3.5s→5.5s)。默认 20 取的是「与相机实际出帧率一致」,不是一个折中档位:"
+            "这个字段只写容器时基,写得与内容不符没有任何好处"
+        ),
+    )
+    crf: int = Field(
+        default=28, ge=0, le=51,
+        description="H.264 编码质量(越大体积越小);边车只在 16x16 patch 粒度看运动/残差,不需要高画质",
+    )
+    max_new_tokens: int = Field(default=256, ge=16, le=1024, description="单次生成上限")
+    max_frames: int = Field(
+        default=256, gt=0,
+        description=(
+            "单窗口送出的最大帧数(均匀抽)。默认 256 = 官方 target_canvas=32 所需的帧数,"
+            "也就是「有多少要多少、不主动丢」——相机 4s 窗实际只给约 78 帧,这个上限不会"
+            "触发。**这里给小了是纯损失**:画布数 = 源帧数/8,丢帧就是直接丢画布。"
+            "这里给大不吃亏:成本由 codec_target_canvas 封顶,而帧给少了 codec 连一个"
+            "分组(32 帧)都凑不满,反而拿不到时间细节。编码侧实测 240 帧仅 176ms"
+        ),
+    )
+    video_short_edge: int | None = Field(
+        default=None, ge=64,
+        description=(
+            "编码前按短边缩放的上限。**本通路独立设置,不再复用 "
+            "perception.engine.input.video_short_edge** —— 两条通路的成本结构相反:"
+            "**默认 None = 不缩放**,直接把相机原始画面交给模型。"
+            "这不是「越大越好」,而是这条通路的降维本来就该由模型自己做:codec 从原始"
+            "帧里挑重要的 16×16 patch 拼成画布,每张画布的像素预算是边车的 max_pixels"
+            "(默认 150000 ≈ ViT 原生 448²)。在送进去之前先缩一道,等于把它要挑的细节"
+            "先毁掉,再让它在残缺素材上做预算分配 —— 纯粹的损失。"
+            "只有带宽/编码 CPU 吃紧时才设值"
+        ),
+    )
+    window_size: int = Field(
+        default=12, ge=1, le=60,
+        description=(
+            "本通路的感知窗口(秒)。**与云端的 collect.window_size 分开**:窗口长度在这里"
+            "不是「多久看一次」的偏好,而是「能不能喂饱模型」的硬约束 —— codec 每 8 帧产出"
+            "1 张画布,而画布数是这个模型唯一的成本/质量旋钮。相机实测约 20fps,12 秒"
+            "= 240 帧 = 28 张画布,接近官方默认档(32 张需 256 帧)。"
+            "云端取 4 秒是因为每帧都要付 token 钱,两边的取值逻辑相反"
+        ),
+    )
+    codec_target_canvas: int = Field(
+        default=12, ge=4, le=64,
+        description=(
+            "**本通路真正的成本旋钮**:codec 通路的 token 预算(画布数)。"
+            "prompt token ≈ 223 × 该值,生成耗时随之上涨;而帧数、分辨率对它影响很小。"
+            "官方三档 32=最大视觉预算 / 16=均衡 / 8=优先延迟,是按离线评测标定的;"
+            "默认 12。「喂得饱」和「跑得完」是两个约束,必须同时满足:"
+            "12 秒窗 × 20fps = 240 帧,喂得饱 30 张;但实测 28 张要 13.8s(超窗)、16 张要 11.4s"
+            "(占窗口 95%,太贴边)、12 张约 9s 留出余量。官方三档 8/16/32 是离线评测标定的,"
+            "家庭常驻感知要留波动余量,取 12。"
+            "注意需要 (值/4)×32 帧才能填满,填不满会自动降到实际能填的档位并警告,"
+            "所以调高本项时必须把 window_size / max_frames 一并调够"
+        ),
+    )
+    event_gate_threshold: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description=(
+            "**流式事件门**阈值:低于此概率的窗口不产场景叙述(规则判定照常)。"
+            "刻意不叫 gate_threshold:感知里已有一个 gate(帧差+音频能量,阈值叫 "
+            "change_threshold),两个同名的「门」会让人分不清在调哪个。"
+            "默认 0 = 只观测不决策 —— "
+            "参考实现的门控在体育解说数据上训练,家庭场景属分布外,"
+            "先在自家数据上观察 timing._gate_p_* 再决定是否调高"
+        ),
+    )
+    scene_ask: str = Field(
+        default="",
+        description="覆盖默认的中文场景提问;留空用边车内置提问",
+    )
+    identity_enabled: bool = Field(
+        default=True,
+        description=(
+            "本地认人:用 ReID 指纹比对身份库,把「谁在画面的哪个位置」以名册形式"
+            "随提问一起送给模型。**不经过大模型** —— 实测让本地视觉模型自己认人"
+            "(参考图+视频+bbox,与云端同构)逐人正确 8/28,低于二选一瞎猜;同一批"
+            "场景纯 ReID 是 14/14。身份库里一个成员都没登记时本项自动空转"
+        ),
+    )
+    identity_threshold: float = Field(
+        default=0.70, ge=0.0, le=1.0,
+        description=(
+            "判成员的余弦相似度下限。实测(同日库):真人 0.77~0.95,而**电视屏幕里"
+            "的人**(检测器会以 0.94 置信度把它当真人)只有 0.44~0.67 —— 0.70 把"
+            "8/8 电视误检挡掉且 0 误拒。往下调先放进来的是电视里的人,不是陌生人。"
+            "**这个阈值依赖身份库是新的**:参考图与当下衣着差得远时相似度整体塌陷"
+            "(旧库实测只有 8/19),此时该做的是重新登记,不是调低阈值"
+        ),
+    )
+    identity_sample_frames: int = Field(
+        default=3, ge=1, le=16,
+        description=(
+            "每窗抽几帧跑人体检测。名册的各个 bbox 取自**同一帧**(检出人数最多的"
+            "那帧)—— 跨帧混用会让位置互相矛盾,模型按坐标对号入座就会对错人"
+        ),
+    )
+
+
 class PerceptionSettings(BaseModel):
     """感知管线相关配置。"""
 
+    engine_backend: Literal["cloud", "local"] = Field(
+        default="cloud",
+        description=(
+            "感知引擎后端。cloud=云端多模态大模型(默认,需 API Key);"
+            "local=本地 GPU 视觉模型边车(免 Key、零 token 成本、画面不出本地,"
+            "但纯视觉:无音频结论,且不直接执行设备动作。认人由本地 ReID 提供,"
+            "见 local_vision.identity_enabled)"
+        ),
+    )
+    local_vision: LocalVisionSettings = Field(
+        default_factory=LocalVisionSettings,
+        description="engine_backend=local 时的边车配置",
+    )
     log_ttl: int = Field(default=30, description="感知日志保留天数")
     min_suggestion_urgency: Literal["low", "medium", "high"] = Field(
         default="low",

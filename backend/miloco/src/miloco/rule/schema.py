@@ -398,6 +398,9 @@ class RuleExecuteResult(BaseModel):
     dynamic_rule_event_sent: bool = Field(
         False, description="是否已向 Agent 投递回调"
     )
+    # 两条执行路径都没走时,这里说明原因。否则「action_results 空 + 未投递回调」
+    # 这个形状与一个 bug 无法区分,而用户在界面上只会看到一次没有下文的触发。
+    error: str = Field("", description="未执行的原因(如被感知通路能力拒绝)")
 
 
 class RuleLogKind(str, Enum):

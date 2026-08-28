@@ -126,6 +126,19 @@ logger = logging.getLogger(__name__)
 # 任务运行中被 GC 回收(CPython 文档明确警告).done_callback 在任务结束时自动 discard.
 _PERSIST_BG_TASKS: set[asyncio.Task] = set()
 
+# 本地视觉边车探活失败后的重试冷却(秒)。探活是同步 HTTP、跑在主事件循环上,
+# 而 tick 每 4s 就会调一次;没有冷却时一个被防火墙 DROP 的地址会把事件循环
+# 按秒级反复冻住。冷却只影响"多久发现边车起来了",不改变任何语义。
+_LOCAL_PROBE_COOLDOWN_SEC = 30.0
+#: 边车「正在加载模型」时的重探间隔。加载通常几十秒,所以压得比失败冷却短得多;
+#: 但加载失败会让它永远停在 loading(见边车 app.py:_load_engine 刻意不崩进程),
+#: 完全不压就是无限轮询。
+_LOADING_PROBE_COOLDOWN_SEC = 5.0
+#: 因"推理持续失败"降级后,多久之内不重建。取值明显大于一次退避循环(最长 30s),
+#: 这样"降级 → 重建 → 再失败"不会退化成每分钟好几轮的抖动;边车真修好了也只
+#: 多等这一会儿。
+_LOCAL_REBUILD_COOLDOWN_SEC = 60.0
+
 
 def _filter_voice_enabled(speeches: list[Speech]) -> list[Speech]:
     """按摄像头「拾音白名单」过滤 speech：``source_device_ids[0]``(相机 did)在
@@ -245,6 +258,40 @@ async def _run_with_trace_id(
         reset_trace_id(token)
 
 
+def _build_local_identity(cfg):
+    """给本地通路造认人层。造不出来就返回 None —— 感知照常跑,只是没有名字。
+
+    认人是**加分项**:它失败的正确表现是描述里写「一名男子」,而不是这台相机整个
+    不工作。所以这里把所有异常都吞掉并降级,与引擎构造那层的 try 是两件事(那层
+    失败会让感知彻底停摆,必须留下 engine_init_failed 状态)。
+    """
+    if not getattr(cfg, "identity_enabled", False):
+        return None
+    try:
+        from miloco.perception.engine.identity.config_loader import resolve_library_root
+        from miloco.perception.local_vision.identity import LocalIdentityResolver
+
+        # 必须走 resolve_library_root():它是库路径的 single source of truth,
+        # 绕开它(比如直接取 GalleryConfigDC 默认值)会让 settings 里的 override
+        # 失效,于是注册流程写到一个目录、认人读另一个目录 —— 表现为"登记了却永远
+        # 认不出",而两边都不报错。
+        root = resolve_library_root()
+        resolver = LocalIdentityResolver(
+            root,
+            threshold=cfg.identity_threshold,
+            sample_frames=cfg.identity_sample_frames,
+        )
+        # 启动时就把库读进来:一是让日志在启动阶段就说清楚"认得几个人",二是
+        # 库路径写错这类问题能立刻暴露,而不是等第一个人走进画面。
+        resolver.refresh_gallery()
+        if resolver.gallery_size == 0:
+            logger.info("本地认人已开启,但身份库里没有已登记成员 —— 本窗名册将为空")
+        return resolver
+    except Exception as e:  # noqa: BLE001 —— 见 docstring:认人失败不该拖垮感知
+        logger.warning("本地认人层创建失败,本通路将不产出人名: %s", e)
+        return None
+
+
 class PerceptionEngineProxy:
     """Real perception proxy backed by perception-engine pipeline.
 
@@ -263,8 +310,28 @@ class PerceptionEngineProxy:
         # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
         # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
         self._engine_lock = asyncio.Lock()
+        # 本地边车探活缓存。同步重建路径(_init_local_engine)**只读这里,不做 IO**——
+        # 它会被每个感知 tick 调到,而探活是同步 HTTP,直接在主事件循环上做会把
+        # 相机取帧 / SSE / API 一起卡住。真正的探活由 refresh_local_probe() 在
+        # 线程里完成(见 runner._tick)。
+        self._local_probe: dict | None = None      # 成功时的 health 快照
+        self._local_probe_error: str | None = None  # 失败原因
+        self._local_probe_not_before: float = 0.0   # 失败后的重探冷却(monotonic 秒)
+        # 上次探活对应的配置。地址/凭证一变,旧结论和旧冷却都得作废 —— 否则用户
+        # 刚在界面上把地址改对,却要先干等一整个冷却窗口感知才恢复,而这段时间里
+        # 界面显示的是"已切到本地"。
+        self._local_probe_key: tuple[str, str] | None = None
+        # 只有构造期允许同步探活。此后一切重建路径(admin 切换、「重启感知」、
+        # tick 自愈)都跑在主事件循环上,同步 HTTP 会把相机取帧 / SSE / API 一起
+        # 卡住最多 3 秒。缓存空就落等待态,由 refresh_local_probe 在线程里补。
+        self._allow_sync_probe = True
+        # 因"推理持续失败"被降级后,禁止立刻重建的截止时刻。没有它会抖:边车
+        # /health 是绿的但每次推理都失败时,降级 → 探活通过 → 下个 tick 重建 →
+        # 再失败 → 再降级,无限循环;界面上那条提示每轮闪一下,连接池每轮换一个。
+        self._local_rebuild_not_before: float = 0.0
 
         self._init_engine()
+        self._allow_sync_probe = False
 
     def _init_engine(self) -> None:
         """校验资源(key / 模型) + 创建引擎。``__init__`` 与 ``try_reinit()`` 共用。
@@ -279,6 +346,17 @@ class PerceptionEngineProxy:
 
         settings = get_settings()
         engine_cfg = settings.perception.engine
+
+        # 本地视觉通路:整条路不碰云端 API Key,也不用 ONNX 检测/ReID 模型,
+        # 故两项前置校验都不适用 —— 换成校验边车可达性(在 _init_local_engine 内)。
+        if settings.perception.engine_backend == "local":
+            if time.monotonic() < self._local_rebuild_not_before:
+                # 刚因推理持续失败被降级,冷却期内不重建(见 _local_rebuild_not_before)。
+                self._status = "local_vision_unreachable"
+                self._status_message = "本地视觉服务持续不可用,稍后自动重试"
+                return
+            self._init_local_engine(settings)
+            return
 
         omni_kwargs = dict(engine_cfg.get("omni", {}))
         omni_api_key = resolve_omni_api_key(omni_kwargs.get("api_key", ""))
@@ -323,10 +401,246 @@ class PerceptionEngineProxy:
             logger.error("感知引擎创建失败: %s", e)
             mon.set_lifecycle(NodeName.ENGINE, Lifecycle.FAILED, error=str(e))
 
+    def _init_local_engine(self, settings) -> None:
+        """创建本地视觉引擎。前置条件只有一个:边车可达。
+
+        不阻塞启动 —— 边车不可达时落 PREREQ_MISSING(与「缺 key」同一档语义),
+        由 tick 自愈在边车起来后自动转 ready,和云端通路的体验保持一致。
+        """
+        from miloco.perception.local_vision import (
+            LocalVisionClient,
+            LocalVisionEngine,
+        )
+
+        cfg = settings.perception.local_vision
+        mon = get_monitor()
+        client = LocalVisionClient(
+            base_url=cfg.base_url, token=cfg.token, timeout=cfg.timeout_sec
+        )
+
+        # **本方法不做任何网络 IO**:它被每个感知 tick 调到,同步 HTTP 会卡住主
+        # 事件循环(相机取帧 / SSE / API 全停)。探活结果由 refresh_local_probe()
+        # 在线程里刷新,这里只读缓存。缓存为空(进程刚起、tick 还没跑过)时做一次
+        # 阻塞探活是可接受的——只发生在构造期。
+        # 地址/凭证刚被改过,旧结论作废。
+        self._drop_stale_local_conclusions(cfg)
+        if self._local_probe is None and self._local_probe_error is None:
+            if not self._allow_sync_probe:
+                # **不在这里探活**:本方法被 admin 切换处理器(经 stop_to_unconfigured)
+                # 和「重启感知」按钮同步调到,两者都跑在主事件循环上 —— 同步 HTTP
+                # 会把相机取帧 / SSE / 整个 API 卡住最多 3 秒。落等待态,由 tick 的
+                # refresh_local_probe 在线程里补上,最多晚一个感知周期。
+                self._status = "local_vision_unreachable"
+                self._status_message = f"本地视觉服务待探活({cfg.base_url})"
+                mon.set_lifecycle(
+                    NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+                )
+                return
+            self._refresh_local_probe_sync(client, cfg)
+
+        if self._local_probe_error is not None:
+            self._status = "local_vision_unreachable"
+            self._status_message = self._local_probe_error
+            logger.warning("感知引擎不可用: %s", self._status_message)
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
+
+        probe = self._local_probe or {}
+        if probe.get("auth_required") and not probe.get("auth_ok"):
+            # 探活能通但凭证不被接受:引擎起来也只会每窗 401。落到与"边车没起来"
+            # 同一档等待态,由 tick 自愈在用户改对 token 后自动转 ready。
+            self._status = "local_vision_unreachable"
+            self._status_message = f"本地视觉服务拒绝当前访问凭证({cfg.base_url})"
+            # 与紧邻的"正在加载"分支一致地**不打日志**:这是个每 tick 都会重入的
+            # 等外部条件态,状态已经进 lifecycle 并在界面上可见;再打一行 WARNING
+            # 就是每 4 秒一条、能刷上几天的噪声。
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
+
+        if not probe.get("model_loaded"):
+            self._status = "local_vision_unreachable"
+            load_error = probe.get("load_error")
+            self._status_message = (
+                f"本地视觉服务加载模型失败({cfg.base_url}): {load_error}"
+                if load_error
+                else f"本地视觉服务正在加载模型({cfg.base_url})"
+            )
+            mon.set_lifecycle(
+                NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+            )
+            return
+
+        mon.set_lifecycle(NodeName.ENGINE, Lifecycle.STARTING)
+        try:
+            identity = _build_local_identity(cfg)
+            self.perception_engine = LocalVisionEngine(
+                client,
+                container_fps=cfg.container_fps,
+                crf=cfg.crf,
+                max_new_tokens=cfg.max_new_tokens,
+                event_gate_threshold=cfg.event_gate_threshold,
+                scene_ask=cfg.scene_ask or None,
+                max_frames=cfg.max_frames,
+                short_edge=cfg.video_short_edge,
+                codec_target_canvas=cfg.codec_target_canvas,
+                identity=identity,
+            )
+        except Exception as e:  # noqa: BLE001 —— 与云端分支对称
+            # 不加这层的话构造异常会冒泡出去,留下 _status="ready" 而 engine=None
+            # 的死态:ready 属性恒 False、try_reinit 又因"已 ready"拒绝重建,
+            # 感知永久停摆且没有任何一条自愈路径能救回来。
+            self._status = "engine_init_failed"
+            self._status_message = f"本地视觉引擎创建异常: {e}"
+            logger.error("感知引擎创建失败: %s", e)
+            mon.set_lifecycle(NodeName.ENGINE, Lifecycle.FAILED, error=str(e))
+            return
+        self._status = "ready"
+        self._status_message = ""
+        # 显式告知能力边界。直连设备的规则不会走到这里(切换那一步就被拒了),
+        # 但音频与身份这两项缺失是静默的,必须在日志里留一行。
+        #
+        # 身份那半句必须跟着**实际建出来的东西**走,不能写死。认人是可选项,四条
+        # 路都会退回 None(配置关着、库是空的、ONNX 模型缺失、构造抛异常),而
+        # 无条件写"无身份识别"的代价是双向的:认人开着时它谎报缺失,于是有人去查
+        # 一个不存在的故障;认人真的没建起来时这行字又和平时一模一样,反而看不出来。
+        logger.warning(
+            "感知正在使用本地视觉通路(%s):%s,无音频结论、不产主动建议;"
+            "规则命中只作为观察结论上报;规则里配置的设备动作会被拒绝执行。",
+            cfg.base_url,
+            (
+                f"已启用本地认人(库中 {identity.gallery_size} 人)"
+                if identity is not None
+                else "纯视觉,无身份识别"
+            ),
+        )
+        mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
+
+    def _invalidate_local_probe(self) -> None:
+        """丢弃探活缓存与冷却,让下一次探活立刻重来。"""
+        self._local_probe = None
+        self._local_probe_error = None
+        self._local_probe_not_before = 0.0
+        self._local_probe_key = None
+
+    def _drop_stale_local_conclusions(self, cfg) -> bool:
+        """地址/凭证变了就把**上一份配置挣来的**结论与节流阀全部作废。
+
+        返回配置是否真的变了(调用方据此决定要不要继续走冷却判断)。
+
+        两个冷却都是被上一份配置的失败挣来的证据:探活冷却来自"那个地址探不通",
+        重建冷却来自"那份配置的引擎推理一直失败"。用户把地址改对之后,这两份证据
+        对新配置都不成立,却还各自压着最多 30 / 60 秒 —— 表现为"我明明改对了,它
+        还是说连不上",而且没有任何提示说明还要再等。
+
+        **重建冷却只能在这里解开。** ``_init_local_engine`` 里那份一模一样的配置
+        检查位于冷却闸门(``_init_engine`` 开头)的**下游**:冷却期内那个分支直接
+        return,压根走不到检测配置那一行。这条路径(探活刷新)不在闸门后面,是唯一
+        够得着的地方。两处检查合并到这里,也是为了它们不会再各自漂移。
+        """
+        if self._local_probe_key in (None, (cfg.base_url, cfg.token)):
+            return False
+        self._invalidate_local_probe()
+        self._local_rebuild_not_before = 0.0
+        return True
+
+    def _refresh_local_probe_sync(self, client, cfg) -> None:
+        """真正打一次探活并写缓存。**阻塞**,只允许在线程里或构造期调用。"""
+        from miloco.perception.local_vision import LocalVisionError
+
+        self._local_probe_key = (cfg.base_url, cfg.token)
+        try:
+            self._local_probe = client.health_sync()
+            self._local_probe_error = None
+            # 「凭证被拒」不会自己好,不设冷却就是每 4 秒一次、一天两万多次的空转。
+            # 用户改对凭证时 key 会变,冷却随之作废,恢复照样是即时的。
+            # 「模型还在加载」通常几十秒就好,所以只压一个短冷却让它尽快转 ready;
+            # 但边车加载失败时会**永远**停在 loading(它刻意不崩进程),不压的话
+            # 同样是无限轮询 —— 短冷却两头都照顾到。
+            probe = self._local_probe
+            if probe.get("auth_required") and not probe.get("auth_ok"):
+                self._local_probe_not_before = (
+                    time.monotonic() + _LOCAL_PROBE_COOLDOWN_SEC
+                )
+            elif not probe.get("model_loaded"):
+                self._local_probe_not_before = (
+                    time.monotonic() + _LOADING_PROBE_COOLDOWN_SEC
+                )
+            else:
+                self._local_probe_not_before = 0.0
+        except LocalVisionError as e:
+            self._local_probe = None
+            # 只留粗粒度原因。这条消息会经 GET /api/perception/engine/status 原样
+            # 发布出去,而 admin 端点刻意把同一个错误压成 "unreachable" —— 原始
+            # httpx 异常文本(目标地址 + 状态码 + 异常类)合起来就是一个内网探针,
+            # 两处口径必须一致。完整异常只进本地日志。
+            logger.debug("本地视觉探活失败 %s: %s", cfg.base_url, e)
+            self._local_probe_error = f"本地视觉服务不可达({cfg.base_url})"
+            self._local_probe_not_before = time.monotonic() + _LOCAL_PROBE_COOLDOWN_SEC
+
+    async def refresh_local_probe(self) -> None:
+        """在线程里刷新本地边车探活缓存;非本地后端 / 引擎已就绪时是零开销 no-op。
+
+        由 ``runner._tick`` 在 ``try_reinit_engine`` 之前 await 一次。这样同步的
+        重建路径永远不碰网络,主事件循环也就不会被一个不可达的边车地址卡住。
+        失败后有冷却,边车长时间不在时不会每 tick 都去撞。
+        """
+        settings = get_settings()
+        if settings.perception.engine_backend != "local":
+            return
+        engine = self.perception_engine
+        if engine is not None:
+            if not getattr(engine, "sustained_failure", False):
+                return  # 引擎在跑且边车有回应,无需再探
+            # 边车持续不可达:把引擎降回「等前置条件」态。不降的话 _status 永远
+            # 是 ready,try_reinit 因此 no-op,状态条也不显示任何东西 —— 用户唯一
+            # 的信号只剩"事件不再出现",而那要过很久才会被注意到。
+            logger.warning("本地视觉边车持续不可达,降级为等待态并重新探活")
+            # 与 stop_to_unconfigured 同一套拆卸不变量,一条都不能省:
+            #  - 拿 _engine_lock:teardown 必等在飞的推理完成,否则会在
+            #    on_demand_perceive 跑到一半时把引擎置空(use-after-close);
+            #  - 先 await close():引擎持有常驻 httpx 连接池,直接置空等于每次
+            #    降级→重建都漏一个池子。
+            async with self._engine_lock:
+                if self.perception_engine is not None:
+                    await self.close()
+                    self.perception_engine = None
+                self._status = "local_vision_unreachable"
+                self._status_message = "本地视觉服务持续不可达"
+                get_monitor().set_lifecycle(
+                    NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message
+                )
+                self._invalidate_local_probe()
+                # 拆完就锁一段时间,否则下一个 tick 立刻把它重建回来(探活是绿的)
+                # —— 那样降级只是在原地空转,用户看到的是一条闪烁的提示。
+                self._local_rebuild_not_before = (
+                    time.monotonic() + _LOCAL_REBUILD_COOLDOWN_SEC
+                )
+
+        from miloco.perception.local_vision import LocalVisionClient
+
+        cfg = settings.perception.local_vision
+        # 冷却是绑在**那一份配置**上的。用户改了地址或凭证之后还压着上一份配置的
+        # 冷却不放,等于让一次已经修好的配置继续瞎等。
+        if not self._drop_stale_local_conclusions(cfg) and (
+            time.monotonic() < self._local_probe_not_before
+        ):
+            return
+
+        client = LocalVisionClient(
+            base_url=cfg.base_url, token=cfg.token, timeout=cfg.timeout_sec
+        )
+        await asyncio.to_thread(self._refresh_local_probe_sync, client, cfg)
+
     # tick-driven 自愈放行的"等外部条件"态:validate 廉价(缺 key 零 IO、缺模型仅
     # stat),失败回到同一 PREREQ_MISSING、_init_engine 不翻 lifecycle → 每 tick 零
     # event_log 噪声,可安全地每个推理 tick 轮询。
-    _TICK_RECOVERABLE = ("no_omni_api_key", "models_missing")
+    # local_vision_unreachable 同属"等外部条件"态:边车还没起/还在加载模型,
+    # 探活是一次廉价 HTTP,失败不翻 lifecycle,边车就绪后下个推理周期自动转 ready。
+    _TICK_RECOVERABLE = ("no_omni_api_key", "models_missing", "local_vision_unreachable")
     # 显式重启(runner.start)额外放行 engine_init_failed:构造失败原因不可 cheap 判定,
     # validate 会通过而每 tick 重跑重型 _create_engine 会阻塞 event loop,故不纳入 tick
     # 自愈,只靠「重启感知」按钮重建一次。
@@ -349,6 +663,19 @@ class PerceptionEngineProxy:
         只认 ``STOPPED`` 不会帮翻,故必须在创建路径里显式置(``_init_engine`` 已做)。
         返回是否「本次转入 ready」。
         """
+        if include_failed and self._local_probe_error is not None:
+            # 显式「重启感知」要能穿透探活冷却。否则边车其实已经好了,而用户按下
+            # 按钮却是个 no-op —— 冷却是给自动轮询设的节流阀,不该管住用户的手。
+            # 只作废**失败的**那份结论,**不在这里补探活**(这条路径在主事件循环
+            # 上);下一个 tick 的线程化探活会立刻重来,因为冷却也一并清了。
+            # 有一份成功的缓存时不能丢:丢了就又落回"待探活",按钮反而更没用。
+            self._invalidate_local_probe()
+            # 重建冷却也要一并清。它是给**自动重试**设的节流阀(降级后 60 秒内不
+            # 重建,防降级↔重建来回抖),而用户按下「重启感知」是一次显式的、知情的
+            # 决定 —— 撞上冷却的话按钮是个静默空操作:界面没有任何反馈,用户只会
+            # 再按几次,然后以为功能坏了。节流阀不该管住用户的手,与上面作废探活
+            # 结论是同一条理由。
+            self._local_rebuild_not_before = 0.0
         allowed = self._RESTART_RECOVERABLE if include_failed else self._TICK_RECOVERABLE
         if self._status not in allowed:
             return False

@@ -95,6 +95,12 @@ miloco/
 
 感知引擎 PREREQ_MISSING（Omni API Key 未配置或 ONNX 模型缺失）是预期等待态，`/health` 返回 200。节点详情通过 `/api/monitor/nodes`（需鉴权）查询。
 
+感知引擎有两个可选后端，同实现 `BasePerceptionEngine`（`perception/engine_base.py`），由
+`PerceptionEngineProxy` 按 `perception.engine_backend` 二选一：云端多模态大模型（默认）
+与本地视觉边车（免 API Key、纯视觉、不直连设备，GPU 推理在独立服务 `services/local-vision`
+中，主包不引入 torch）。两者的能力差异见 [感知流水线 · 两条感知通路](../03-features/perception-pipeline.md#两条感知通路)。
+走本地通路时前置条件不是 API Key 而是边车可达，对应 `local_vision_unreachable` 等待态。
+
 ---
 
 ## 四条主链路数据流

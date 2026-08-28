@@ -19,6 +19,11 @@ from numpy.typing import NDArray
 
 from miloco.perception.engine.identity.tier_u import cam_id_from_device_id
 from miloco.perception.engine_base import BasePerceptionEngine
+from miloco.perception.rule_scope import (
+    camera_prompt_map,
+    physical_did,
+    rules_for_device,
+)
 from miloco.perception.types import (
     URGENCY_RANK,
     AudioFrame,
@@ -58,15 +63,6 @@ MAX_EID: int = 999
 SUGG_SIM_THRESHOLD: float = 0.70
 
 
-def _physical_did(did: str) -> str:
-    """合成通道 did → 物理 did：``'cam1:ch0'`` → ``'cam1'``；``'cam1'`` → ``'cam1'``。
-
-    感知按合成通道 did（``did:ch{n}``）运作，而 rule 可绑到整台相机的物理 did；匹配时
-    两种粒度都要能命中。
-    """
-    return did.rsplit(":ch", 1)[0] if ":ch" in did else did
-
-
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
@@ -97,23 +93,6 @@ def _voice_allowed_dids() -> set[str]:
             "voice allow-list lookup failed, stripping audio for all cameras (fail-closed): %s", e
         )
         return set()
-
-
-def _camera_prompt_map() -> dict[str, str]:
-    """实时读全部相机自定义「感知须知」prompt（did→文本）。与 ``_voice_allowed_dids``
-    同构，自取 ``get_manager().kv_repo``（同一处 miloco.manager 延迟导入模式）。
-
-    读 KV（进程内缓存）失败时返回空 dict——无自定义 prompt 注入（fail-open：瞬时故障
-    只是少一段场景指导，不阻断感知，与 voice 的 fail-closed 相反，因本项只增益不涉隐私）。
-    """
-    from miloco.manager import get_manager
-    from miloco.miot.filter import camera_prompts
-
-    try:
-        return camera_prompts(get_manager().kv_repo)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("camera prompt map lookup failed, injecting none: %s", e)
-        return {}
 
 
 class PerceptionEngine(BasePerceptionEngine):
@@ -932,7 +911,7 @@ class PerceptionEngine(BasePerceptionEngine):
             # ``did:ch{n}``），故白名单命中判定与日志去重都按物理 did（否则双摄开了拾音也
             # 会因 ``cam:ch0`` ∉ ``{cam}`` 被误剥）。音频剥离与跨窗残留清理仍按合成 did
             # ——那几个 dict 是每通道独立状态。
-            physical = _physical_did(did)
+            physical = physical_did(did)
             if physical in allowed:
                 continue
             if physical not in self._mic_off_logged:
@@ -982,17 +961,11 @@ class PerceptionEngine(BasePerceptionEngine):
         device_rule_map: dict[str, list[str]] = {}
         # 每摄像头自定义「感知须知」prompt：整表读一次、循环内按 did 取（实时、改动下一窗
         # 即生效、不重启；读失败 fail-open 注入空）。逐窗一次 KV 读，避免 per-device 重复。
-        prompt_map = _camera_prompt_map()
+        prompt_map = camera_prompt_map()
         for room_name, snapshots in batch.by_room().items():
             for snapshot in snapshots:
                 did = snapshot.device.did
-                dispatched = [
-                    r for r in rules
-                    if not r.get("condition", {}).get("perceive_device_ids")
-                    or did in r["condition"]["perceive_device_ids"]
-                    # rule 绑物理 did（整台相机）时，命中该相机的任一通道。
-                    or _physical_did(did) in r["condition"]["perceive_device_ids"]
-                ]
+                dispatched = rules_for_device(rules, did)
                 device_rule_map[did] = [r["id"] for r in dispatched]
                 device_rules = [
                     RuleCondition(

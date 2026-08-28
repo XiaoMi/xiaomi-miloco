@@ -17,6 +17,7 @@ import { UsageTodayOverview } from "./UsageTodayOverview";
 import { UsageTimelineChart } from "./UsageTimelineChart";
 import { UsageBreakdownTable } from "./UsageBreakdownTable";
 import { UsageOmniConfig } from "./UsageOmniConfig";
+import { PerceptionBackendCard } from "./PerceptionBackendCard";
 import { PerfInline } from "./PerfInline";
 
 export function UsagePage() {
@@ -34,6 +35,10 @@ export function UsagePage() {
   // 全页两大格:① 模型配置 ② Token 用量(总览/时间分布/明细 合为一格、内部用分隔线分段)
   return (
     <div className="space-y-6">
+      {/* 感知后端选择(云端 API / 本地 GPU)置于模型配置之上:它决定下方
+          「模型列表」是否参与感知 —— 选了本地通路时云端模型不再被调用。 */}
+      <PerceptionBackendCard />
+
       {/* 模型配置卡置顶、可折叠;独立于用量加载(用量请求失败也能在此修配置自救) */}
       <UsageOmniConfig />
 

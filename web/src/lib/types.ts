@@ -412,9 +412,16 @@ export interface OmniHealth {
   /** 错误机器码;state=ok 时为 null。 */
   code:
     | null
-    | "unreachable" | "timeout" | "http_error" | "rate_limited"
-    | "bad_key" | "not_found" | "rejected_authed" | "bad_response"
-    | "no_key" | "cancelled";
+    | "unreachable"
+    | "timeout"
+    | "http_error"
+    | "rate_limited"
+    | "bad_key"
+    | "not_found"
+    | "rejected_authed"
+    | "bad_response"
+    | "no_key"
+    | "cancelled";
   /** 本地化文案。 */
   message: string;
   /** 当前非 ok 状态起始时间;ok 时为 0。 */
@@ -779,6 +786,56 @@ export interface Task {
   record: TaskRecordSummary | null;
   // 详情抽屉「有价值的详情」：驱动规则，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
+}
+
+/** 感知后端选择:云端多模态大模型 vs 本地 GPU 视觉边车。 */
+export type PerceptionBackendKind = "cloud" | "local";
+
+/** 本地通路相对云端缺失的能力(由后端声明,前端直接渲染,避免各端各写一份)。 */
+export interface LocalVisionCapabilities {
+  needs_api_key: boolean;
+  audio: boolean;
+  identity: boolean;
+  suggestions: boolean;
+  static_rule_execution: boolean;
+}
+
+export interface PerceptionBackendState {
+  backend: PerceptionBackendKind;
+  local_vision: {
+    base_url: string;
+    has_token: boolean;
+    /** 本通路自己的输入参数,与云端的 engine.input.* 刻意分开(成本结构相反)。 */
+    window_size: number;
+    container_fps: number;
+    /** null = 不缩放(把原始画面交给模型自己降维)。 */
+    video_short_edge: number | null;
+    codec_target_canvas: number;
+    /** 云端那一组,一并返回 —— 切换时不会闪旧值。 */
+    cloud: { window_size: number; video_short_edge: number; omni_fps: number };
+  };
+  /** 边车 /health 快照;不可达时为 null,原因见 error。 */
+  health: {
+    status: string;
+    model_loaded: boolean;
+    gate_available: boolean;
+    gate_error: string | null;
+    device: string | null;
+    backend: string | null;
+    /** 边车用与推理同一套比较回的鉴权结论 —— 探活绿灯但凭证不对时靠它区分。 */
+    /** 非空 = 模型加载**失败**(不会自己好);为空且 model_loaded=false 才是"还在加载"。 */
+    load_error?: string | null;
+    auth_required?: boolean;
+    auth_ok?: boolean;
+  } | null;
+  error: string | null;
+  /** 启用中、会在感知层直连设备的规则名 —— 切到本地会被拒绝,先在界面上预告。 */
+  blocking_static_rules: string[];
+  /** 云端通路当前不具备工作条件时的说明;具备则空串。切回云端永不拒绝,只提示。 */
+  /** 云端通路就绪度提示。**结构化而不是一句中文** —— 直出后端文案会污染英文界面
+   *  (同 PB_CODE_KEY 的理由)。前端按 code 查本地化文案,detail 拼在后面。 */
+  cloud_hint: { code: string; message?: string; detail?: string } | null;
+  local_capabilities: LocalVisionCapabilities;
 }
 
 // ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──

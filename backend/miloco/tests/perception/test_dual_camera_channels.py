@@ -28,7 +28,7 @@ from miloco.perception.collect.camera_adapter import (
     CameraDeviceAdapter,
     split_channel_did,
 )
-from miloco.perception.engine.api import _physical_did
+from miloco.perception.rule_scope import physical_did as _physical_did
 
 
 class _FakeKV:

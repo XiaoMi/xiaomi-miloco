@@ -41,6 +41,26 @@ jobs:
       - name: backend miloco 测试
         run: cd backend && uv sync --all-packages && uv run pytest -v
 
+  local-vision-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+        with:
+          enable-cache: true
+      # 只测提示词构建与响应解析 —— 那是本地视觉通路 fail-closed 的安全边界
+      # (判定读错就会让 agent 对着不存在的事实动作)。不装 torch:整个包在
+      # uv workspace 之外,推理依赖由部署者按自己的 CUDA 版本安装。
+      - name: local-vision 边车测试
+        # --no-project 是关键:目录里有 pyproject.toml,不加的话 uv 走 project 模式,
+        # 会顺着 accelerate 把 torch + 一堆 nvidia wheel 装进来(实测 4.9 GB),
+        # 为两个纯 Python 测试文件跑几分钟,还会把 backend/cli/web 的缓存挤掉。
+        run: |
+          cd services/local-vision
+          PYTHONPATH=. uv run --no-project --with pytest --with pydantic \
+            --with fastapi --with httpx \
+            python -m pytest tests/ -v
+
   cli-test:
     runs-on: ubuntu-latest
     steps:
@@ -94,6 +114,6 @@ jobs:
         # 且会按各自 pyproject 解析配置（cli 未把 ruff 列为依赖，故不能 cd cli && uv run ruff）。
         run: |
           cd backend && uv sync --all-packages
-          uv run ruff check . "$GITHUB_WORKSPACE/cli"
+          uv run ruff check . "$GITHUB_WORKSPACE/cli" "$GITHUB_WORKSPACE/services/local-vision"
       - name: 类型检查（openclaw 插件，tsc --noEmit）
         run: cd plugins/openclaw && pnpm install --frozen-lockfile && pnpm check

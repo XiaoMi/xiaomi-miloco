@@ -29,6 +29,7 @@ from miloco.config import get_settings
 from miloco.miot.client import MiotProxy
 from miloco.miot.schema import CameraInfo
 from miloco.node_monitor import NodeName, get_monitor
+from miloco.perception.capabilities import active_window_size_sec
 from miloco.perception.collect.adapter_base import BaseDeviceAdapter
 from miloco.perception.collect.stream_buffer import (
     MultiTrackSyncBuffer,
@@ -244,7 +245,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             did=did,
             sync_buffer=MultiTrackSyncBuffer(
                 track_names=_CAMERA_TRACKS,
-                window_ms=collect_cfg.window_size * 1000,
+                window_ms=active_window_size_sec() * 1000,
                 max_windows=collect_cfg.max_windows,
                 on_window_ready=self._on_window_ready,
                 window_settle_ms=collect_cfg.settle_ms,
@@ -341,7 +342,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 last_overflow_action=last_action,
             )
         else:
-            collect_ms = get_settings().perception.collect.window_size * 1000
+            collect_ms = active_window_size_sec() * 1000
             tracks = state.sync_buffer.peek_latest(duration_ms=collect_ms)
             if tracks is None or not any(tracks.values()):
                 return None
