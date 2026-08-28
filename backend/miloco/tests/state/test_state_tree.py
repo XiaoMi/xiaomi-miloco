@@ -755,6 +755,17 @@ def test_stats_tracks_leaves_and_shape_flips():
     assert stats["shape_flips"] == 1
 
 
+def test_set_tells_the_caller_whether_the_write_landed(monkeypatch):
+    """撞上叶子上限时容器不抛异常，调用方只能靠返回值知道自己这一笔进没进树。"""
+    monkeypatch.setattr("miloco.state.store.MAX_LEAVES", 2)
+    store = make_store()
+
+    assert store.set("iot/device/d1/prop/2.1", 26, source="t") is True
+    assert store.set("iot/device/d1/prop/2.2", 27, source="t") is True
+    assert store.set("iot/device/d1/prop/2.3", 28, source="t") is False
+    assert store.get("iot/device/d1/prop/2.3") is MISSING
+
+
 def test_leaf_limit_rejections_are_counted(monkeypatch):
     """告警只报第一条，次数只能从 stats() 读 —— 与级联那道闸同口径。"""
     monkeypatch.setattr("miloco.state.store.MAX_LEAVES", 1)

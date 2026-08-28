@@ -294,15 +294,25 @@ class StateStore:
 
     # ---- 写 ----
 
-    def set(self, path: str, value: Any, *, source: str) -> None:
-        """写入。恒为替换：原子树下未被新值覆盖的叶子会被删除，想局部更新就写更深的路径。"""
+    def set(self, path: str, value: Any, *, source: str) -> bool:
+        """写入。恒为替换：原子树下未被新值覆盖的叶子会被删除，想局部更新就写更深的路径。
+
+        返回这一笔有没有进树。撞上叶子上限时整笔被拒却**不抛异常**（理由见 MAX_LEAVES
+        那段注释），调用方只能靠这个返回值知道；级联深度超限同样返回假。判定在锁内做，
+        不会把别的写入方撞的上限算到自己头上。删除类操作不涨叶子、撞不上这道闸，所以
+        `delete` / `clear` 没有对应的返回值。
+        """
         depth = self._next_cascade_depth("set", path)
         if depth is None:
-            return
+            return False
         with self._lock:
             # 取时间必须在锁内：放锁外时先取到时间的线程可能后提交，树里最终那个值会带上比
             # 前一个值更旧的时间戳，按时间戳判新鲜度的消费方会把最新值当过期的丢掉
-            self._enqueue(self._apply(path, value, source, now_ms()), depth)
+            rejected_before = self._rejected_leaf_limit
+            changes = self._apply(path, value, source, now_ms())
+            landed = self._rejected_leaf_limit == rejected_before
+            self._enqueue(changes, depth)
+        return landed
 
     def delete(self, path: str, *, source: str) -> None:
         """删除路径下的所有叶子。路径不存在时是 no-op：不抛异常、零事件、树不动。"""
