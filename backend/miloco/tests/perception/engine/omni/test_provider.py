@@ -225,6 +225,16 @@ class TestGeminiAdapter:
         )
         assert body["generationConfig"]["mediaResolution"] == "MEDIA_RESOLUTION_HIGH"
 
+    def test_request_body_lite_skips_thinking_config(self):
+        # lite 系列不支持 thinkingConfig 字段，传 thinkingBudget=0 会 400（实测
+        # gemini-3.5-flash-lite / gemini-flash-lite-latest）；必须跳过该字段。
+        for model in ("gemini-3.5-flash-lite", "gemini-flash-lite-latest"):
+            body = self.adapter.build_request_body(
+                [{"role": "user", "content": "x"}], model=model,
+                max_tokens=512, temperature=0.1, top_p=0.95,
+            )
+            assert "thinkingConfig" not in body["generationConfig"], model
+
     def test_request_body_video_metadata_at_part_level(self):
         video_block = self.adapter.build_video_block("VIDEOB64", _VIDEO_MEDIA)
         messages = [{"role": "user", "content": [{"type": "text", "text": "看"}, video_block]}]
