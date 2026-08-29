@@ -504,6 +504,17 @@ def _build_payload(
         ep = packets[0]
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
+    elif rule_only:
+        # rule_only（纯场景触发）：逐帧 JPEG 图片（image_url 块）替代 mp4 视频——
+        # 无音频、无容器开销，_build_messages 见 image_frames 时逐张发 image_url。
+        image_frames = _encode_frames_as_jpegs(
+            packets, short_edge=_effective_panorama_short_edge(),
+        )
+        base["image_frames"] = image_frames
+        if not image_frames:
+            logger.warning(
+                "event=rule_only_no_frames 无帧可编码，本窗退化为 text-only 判定"
+            )
     else:
         # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:
         # crops 通道把参考图渲染在 video 之后且无说明文字,模型会把局部裁切当整个房间描述
@@ -612,7 +623,7 @@ def _render_task_list(scene: SceneDescriptor) -> str:
         av = av2 = "视频"
     if scene.rule_only:
         # 纯场景触发：唯一任务是规则判定（schema 也只含 matched_rules，二者保持一致）。
-        return "\n".join(["# 任务", "1. 规则判定：基于本轮视频判断「# 待判断规则」是否成立"])
+        return "\n".join(["# 任务", "1. 规则判定：基于本轮画面图片判断「# 待判断规则」是否成立"])
     items: list[str] = []
     if scene.has_identity:
         if scene.identity_match_disabled:
@@ -1436,6 +1447,38 @@ def _batch_video_has_speech(packets: list[IdentityPacket]) -> bool:
             return _packet_has_speech(ep)
     return False
 
+
+def _encode_frames_as_jpegs(
+    packets: list[IdentityPacket],
+    short_edge: int = _VIDEO_SHORT_EDGE,
+    max_frames: int = 6,
+) -> list[bytes]:
+    """rule_only（纯场景触发）模式：把窗口帧编码成 JPEG 图片列表（image_url 块）。
+
+    与 _encode_video_mp4 同款短边缩放与重采样核（INTER_AREA / LANCZOS4），分辨率与
+    视频路径一致；逐帧 JPEG 取代 mp4 视频（无音频、无容器开销）。最多取 max_frames
+    张封顶 token：默认 omni_fps=1 × 4s 窗口 ≈ 4 帧，天然达标；拉长窗口时也不失控。
+    """
+    frames: list[NDArray[np.uint8]] = []
+    for ep in packets:
+        if ep.all_frames:
+            frames = ep.all_frames
+            break
+    out: list[bytes] = []
+    for frame in frames[:max_frames]:
+        h0, w0 = frame.shape[:2]
+        if h0 == 0 or w0 == 0:
+            continue
+        scale = short_edge / min(h0, w0)
+        target_w, target_h = _encode_target_wh(w0, h0, short_edge)
+        interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
+        resized = cv2.resize(frame, (target_w, target_h), interpolation=interp)
+        ok, buf = cv2.imencode(
+            '.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 85]
+        )
+        if ok:
+            out.append(buf.tobytes())
+    return out
 
 def _encode_video(
     identity_packet: IdentityPacket,

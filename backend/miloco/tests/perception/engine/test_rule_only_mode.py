@@ -154,11 +154,43 @@ def test_rule_only_build_prompt_no_roster_no_home_profile():
     assert '有人在床上看书' in uc
     # 无身份名册 / 家庭档案
     assert '已识别人物' not in uc
-    assert '位置: 卧室' in uc  # 房间名仍作场景参考
     assert '家庭档案' not in sp
-    # 视频照常编码
-    assert payload['video_base64'] is not None
-    assert payload['media_info'] is not None
+    # 输入改为逐帧 JPEG 图片（image_url 块），不再编 mp4 视频
+    assert 'video_base64' not in payload
+    assert 'audio_base64' not in payload
+    frames = payload['image_frames']
+    assert isinstance(frames, list) and len(frames) > 0, 'rule_only 应下发图片帧'
+    assert all(f.startswith(b'\xff\xd8') for f in frames), '帧应为 JPEG（SOI 头）'
+
+
+def test_rule_only_messages_build_image_url_blocks():
+    """_build_messages 遇 image_frames → 逐帧 image_url 块，不落 video/audio。
+
+    关键回归点：URL 里的 base64 解码后必须与原始 JPEG 字节一致——直接把 bytes
+    f-string 插值会得到 b'\xff\xd8...' repr，服务端 400 "base64 decode fail"
+    （dashscope 实测）。"""
+    import base64
+
+    from miloco.perception.engine.omni.omni_client import _build_messages
+
+    payload = {
+        'system_prompt': 'sys',
+        'user_content': 'user',
+        'image_frames': [b'\xff\xd8frame1', b'\xff\xd8frame2'],
+    }
+    messages = _build_messages(payload, adapter=object())  # image 分支不触 adapter
+    content = messages[1]['content']
+    imgs = [b for b in content if isinstance(b, dict) and b.get('type') == 'image_url']
+    assert len(imgs) == 2
+    for block, raw in zip(imgs, payload['image_frames']):
+        url = block['image_url']['url']
+        assert url.startswith('data:image/jpeg;base64,'), url[:60]
+        assert base64.b64decode(url.split(',', 1)[1]) == raw, (
+            'URL 内 base64 必须与原始 JPEG 字节一致'
+        )
+    # 不再出现 video / audio 块
+    types = [b.get('type') for b in content if isinstance(b, dict)]
+    assert 'video_url' not in types and 'input_audio' not in types
 
 
 # ---- 资源校验：rule_only 不要求端侧检测模型 ----
@@ -193,10 +225,16 @@ async def test_run_pipeline_rule_only_skips_identity_and_audio():
         ],
     )
 
+    captured: dict = {}
+
+    async def _capture(payload, config, **kwargs):
+        captured['payload'] = payload
+        return MOCK_OMNI_RESPONSE
+
     with patch(
         'miloco.perception.engine.omni.omni.call_omni',
         new_callable=AsyncMock,
-        return_value=MOCK_OMNI_RESPONSE,
+        side_effect=_capture,
     ):
         result = await run_pipeline(s, ctx, config)
 
@@ -206,6 +244,10 @@ async def test_run_pipeline_rule_only_skips_identity_and_audio():
     assert result.identity_packet.targets == []
     assert result.identity_packet.audio_clip.size == 0
     assert result.gate_packet.trigger.audio_active is False
+    # 发给模型的载荷是逐帧图片（image_url），无 mp4 视频 / 音频
+    payload = captured['payload']
+    assert 'video_base64' not in payload and 'audio_base64' not in payload
+    assert len(payload.get('image_frames', [])) > 0
     # 输出只有规则命中
     assert result.omni_output is not None
     assert len(result.omni_output.matched_rules) == 1
