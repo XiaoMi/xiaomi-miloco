@@ -909,7 +909,7 @@ def _active_display_label() -> str:
 
 
 def _full_omni_payload() -> dict:
-    """{active, profiles}：均 api_key 打码;profiles 标记哪套 active(按档案名 label 匹配)。
+    """{active, profiles, fallbacks, pool}：均 api_key 打码;profiles 标记哪套 active 及是否在 fallback 中。
 
     当前生效配置(active)并不一定已存档进 omni_profiles —— 默认状态(omni_profiles 为空、
     omni 是默认 MiMo)或历史遗留场景下,active 不在档案列表里。此时若直接返回 profiles,
@@ -918,6 +918,10 @@ def _full_omni_payload() -> dict:
 
     active 字段附带 health 子对象(见 spec §6.1),来自 omni 熔断器 snapshot;前端顶部横条
     与「模型」页 active 行的连接状态列均读此字段。
+
+    fallbacks: 按优先级排序的备选 provider label 列表（引用 omni_profiles 的 label）。
+    profiles 中每项含 is_fallback 标记，便于前端区分。
+    pool: ProviderPool 运行时快照（当前 active provider、failed 集合、failover 次数等）。
     """
     from dataclasses import asdict
 
@@ -925,6 +929,7 @@ def _full_omni_payload() -> dict:
 
     m = get_settings().model
     active = m.omni
+    fallback_labels: set[str] = set(m.omni_fallbacks)
     profiles = [
         {
             "label": p.label,
@@ -933,6 +938,7 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
             "active": p.label == active.label,
+            "is_fallback": p.label in fallback_labels,
         }
         for p in m.omni_profiles
     ]
@@ -946,9 +952,37 @@ def _full_omni_payload() -> dict:
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
                 "active": True,
+                "is_fallback": False,  # 合成行不在 fallback 中
             },
         )
     health = asdict(get_omni_circuit_breaker().snapshot())
+
+    # 备选 provider label 列表（按优先级排序）
+    fallbacks = list(m.omni_fallbacks)
+
+    # ProviderPool 运行时快照
+    pool_snapshot: dict | None = None
+    try:
+        from miloco.perception.engine.omni.provider_pool import get_pool
+
+        pool = get_pool()
+        if pool is not None:
+            snap = pool.snapshot()
+            pool_snapshot = {
+                "active_label": snap.active_label,
+                "active_model": snap.active_model,
+                "active_base_url": snap.active_base_url,
+                "active_is_primary": snap.active_is_primary,
+                "active_index": snap.active_index,
+                "fallback_count": snap.fallback_count,
+                "failed_keys": snap.failed_keys,
+                "last_switch_at_ms": snap.last_switch_at_ms,
+                "recovery_loop_running": snap.recovery_loop_running,
+            }
+    except Exception:
+        logger.warning("[omni-config] 获取 ProviderPool 快照失败，pool_snapshot 置为 None", exc_info=True)
+        pool_snapshot = None
+
     return {
         "active": {
             "label": active.label,
@@ -959,6 +993,8 @@ def _full_omni_payload() -> dict:
             "health": health,
         },
         "profiles": profiles,
+        "fallbacks": fallbacks,
+        "pool": pool_snapshot,
     }
 
 
@@ -1436,6 +1472,42 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
                 result.get("retry_after_seconds"),
             ),
         )
+    return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+
+class OmniFallbacksBody(BaseModel):
+    """fallback label 列表（按优先级排序，靠前优先）。"""
+
+    labels: list[str] = Field(
+        default_factory=list,
+        description="omni_fallbacks 的 label 列表，必须都是 omni_profiles 中已有的 label",
+    )
+
+
+@router.put(
+    "/omni-config/fallbacks",
+    summary="保存 fallback provider 顺序（label 列表，靠前优先）",
+    response_model=NormalResponse,
+)
+def put_omni_fallbacks(
+    body: OmniFallbacksBody, current_user: str = Depends(verify_token)
+):
+    """更新 omni_fallbacks 列表。
+
+    - ``labels``: 按优先级排序的 profile label 列表，前端拖拽排序后提交。
+    - 不在 omni_profiles 中的 label 自动过滤并 warning。
+    - 写 config.json 后，ProviderPool 下个 get_active() 调用即生效（无需重启）。
+    """
+    m = get_settings().model
+    valid_labels: set[str] = {p.label for p in m.omni_profiles}
+    filtered = [lbl for lbl in body.labels if lbl in valid_labels]
+    skipped = [lbl for lbl in body.labels if lbl not in valid_labels]
+    if skipped:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "omni_fallbacks 中 %d 个 label 不存在，已过滤", len(skipped)
+        )
+    update_shared_config(model={"omni_fallbacks": filtered})
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 

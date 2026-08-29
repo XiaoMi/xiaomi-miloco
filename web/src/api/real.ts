@@ -1961,6 +1961,17 @@ export async function realRetryOmniProbe(): Promise<OmniConfigState> {
   return r.data;
 }
 
+// 保存 fallback provider 顺序（label 列表，靠前优先）。
+export async function realUpdateOmniFallbacks(
+  labels: string[],
+): Promise<OmniConfigState> {
+  const r = await apiFetch<Normal<OmniConfigState>>(
+    "/api/admin/omni-config/fallbacks",
+    { method: "PUT", body: JSON.stringify({ labels }) },
+  );
+  return r.data;
+}
+
 // 订阅 /api/admin/omni-config/stream SSE:熔断器状态变化 → 推送 OmniHealth 快照。
 // 首次连上即会推一次当前状态。返回 unsubscribe 函数。
 //

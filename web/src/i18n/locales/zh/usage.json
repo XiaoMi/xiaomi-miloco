@@ -109,6 +109,16 @@
     "deleteSuccess": "已删除",
     "deleteFailed": "删除失败",
     "modelsEmptyResult": "该地址未返回模型列表",
-    "modelsFetchFailed": "拉取模型失败"
+    "modelsFetchFailed": "拉取模型失败",
+    "fallbackTitle": "故障转移 (Fallback)",
+    "fallbackDesc": "主模型熔断时按序自动切换到备选模型，拖拽调整优先级（靠上优先）",
+    "fallbackEmpty": "暂无备选模型，点击下方标签添加",
+    "fallbackAddHint": "可添加为备选：",
+    "fallbackSave": "保存备选",
+    "fallbackReset": "放弃修改",
+    "fallbackSaveSuccess": "备选列表已保存",
+    "fallbackSaveFailed": "保存备选失败",
+    "fallbackDragHandle": "拖拽排序",
+    "fallbackRemove": "从备选中移除 {{model}}"
   }
 }
