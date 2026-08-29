@@ -405,14 +405,18 @@ class GeminiAdapter(OmniProviderAdapter):
             "maxOutputTokens": max_tokens,
             "temperature": temperature,
             "topP": top_p,
-            # 关思考：感知要直给结构化结果（对标 MiMo 的 thinking:disabled）。省 token，
-            # 且防思考挤占 maxOutputTokens 导致可见输出被截断。
-            # 【假设面向 gemini-3 系列】gemini-3 用 thinkingBudget=0 可彻底关闭（thinkingLevel
-            # "low" 关不掉），实测 gemini-3-flash-preview / gemini-3.5-flash 均接受。注意强制思考
-            # 的模型（如 gemini-2.5-pro，最小 budget 128）会因 budget=0 直接 400——本 adapter
-            # 面向 gemini-3-flash，不覆盖那类模型；若未来要接，需按模型放开此项。
-            "thinkingConfig": {"thinkingBudget": 0},
         }
+        # 关思考：感知要直给结构化结果（对标 MiMo 的 thinking:disabled）。省 token，
+        # 且防思考挤占 maxOutputTokens 导致可见输出被截断。
+        # 【假设面向 gemini-3 系列】gemini-3 用 thinkingBudget=0 可彻底关闭（thinkingLevel
+        # "low" 关不掉），实测 gemini-3-flash-preview / gemini-3.5-flash 均接受。注意强制思考
+        # 的模型（如 gemini-2.5-pro，最小 budget 128）会因 budget=0 直接 400——本 adapter
+        # 面向 gemini-3-flash，不覆盖那类模型；若未来要接，需按模型放开此项。
+        # lite 系列（gemini-3.5-flash-lite / gemini-flash-lite-latest 等）**不支持**
+        # thinkingConfig 字段，传 thinkingBudget=0 直接 400 INVALID_ARGUMENT（实测）；
+        # 该类模型默认即无思考，跳过不发即可。
+        if "lite" not in model.lower():
+            gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
         # media_resolution 档位：仅 "high" 显式请求高预算(264 tok/帧)；其余(""/"low")不发该
         # 字段即 Gemini 默认 low(66 tok/帧)。默认 low 最省，identity 等细节场景可经 CLI 切 high。
         if _gemini_media_resolution().lower() == "high":
