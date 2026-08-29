@@ -111,6 +111,33 @@ def _rows(obs_db: Path) -> list[dict]:
         conn.close()
 
 
+@pytest.fixture
+def scene_no_retry(monkeypatch):
+    """固定 scene_trigger_max_retries=0 —— 存量行为（失败即收尾，不 sleep）。
+
+    场景触发现在默认带 2 次退避重试；测试存量失败形状时若不固定，异常路径会
+    多打 2 次执行 + sleep，断言的口径也漂移。
+    """
+    from miloco.config import reset_settings
+
+    monkeypatch.setenv("MILOCO_RULE__SCENE_TRIGGER_MAX_RETRIES", "0")
+    reset_settings()
+    yield
+    reset_settings()
+
+
+@pytest.fixture
+def scene_retry(monkeypatch):
+    """固定 2 次重试 / 0s 初始退避 —— 重试行为测试不 sleep。"""
+    from miloco.config import reset_settings
+
+    monkeypatch.setenv("MILOCO_RULE__SCENE_TRIGGER_MAX_RETRIES", "2")
+    monkeypatch.setenv("MILOCO_RULE__SCENE_TRIGGER_RETRY_DELAY_SEC", "0")
+    reset_settings()
+    yield
+    reset_settings()
+
+
 @pytest.mark.asyncio
 async def test_set_property_writes_ledger_row(bound_client, tmp_path):
     client, obs_db = bound_client
@@ -239,7 +266,9 @@ async def test_ledger_explicit_home_skips_camera_fetch(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_scene_trigger_exception_keeps_scene_name(bound_client, tmp_path):
+async def test_scene_trigger_exception_keeps_scene_name(
+    bound_client, tmp_path, scene_no_retry
+):
     """场景执行抛异常 → 台账仍带 scene_name(失败审计要能看到想触发什么)。"""
     from miloco.middleware.exceptions import MiotServiceException
 
@@ -440,7 +469,9 @@ async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path):
+async def test_scene_trigger_failure_records_source_rule(
+    bound_client, tmp_path, scene_no_retry
+):
     """异常路径也要带 source/source_id——失败的规则动作最需要能回指到规则。"""
     from miloco.middleware.exceptions import MiotServiceException
     from miloco.miot.service import _trigger_scene
@@ -474,7 +505,9 @@ async def test_miot_service_trigger_scene_stays_source_cli(bound_client, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_scene_not_found_still_writes_ledger(bound_client, tmp_path):
+async def test_scene_not_found_still_writes_ledger(
+    bound_client, tmp_path, scene_no_retry
+):
     """场景被删是最常见的生产失败;不落台账的话持久审计上一行都没有。"""
     from miloco.middleware.exceptions import ResourceNotFoundException
     from miloco.miot.service import _trigger_scene
@@ -516,3 +549,174 @@ async def test_scene_home_not_allowed_still_writes_ledger(bound_client, tmp_path
     assert r["success"] == 0
     assert r["source_id"] == "rule-77"
     assert r["home_id"] == "H-other"
+
+
+# ---- 场景触发自动重试（settings.rule.scene_trigger_*）----
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_retries_false_then_succeeds(
+    bound_client, tmp_path, scene_retry
+):
+    """执行返回 false(瞬时失败)→ 重试后成功:2 次执行、单行成功台账。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    calls = {"n": 0}
+
+    async def _flaky(_sid):
+        calls["n"] += 1
+        return calls["n"] >= 2
+
+    svc._miot_proxy.execute_miot_scene = AsyncMock(side_effect=_flaky)
+
+    ok = await svc.trigger_scene("scene1")
+    await client.flush()
+
+    assert ok is True
+    assert svc._miot_proxy.execute_miot_scene.await_count == 2
+    rows = _rows(obs_db)
+    assert len(rows) == 1  # 中间尝试不重复写行
+    assert rows[0]["success"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_retries_exception_then_succeeds(
+    bound_client, tmp_path, scene_retry
+):
+    """SDK 抛异常(网络抖动)→ 重试后成功。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    calls = {"n": 0}
+
+    async def _flaky(_sid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("net flake")
+        return True
+
+    svc._miot_proxy.execute_miot_scene = AsyncMock(side_effect=_flaky)
+
+    ok = await svc.trigger_scene("scene1")
+    await client.flush()
+
+    assert ok is True
+    assert svc._miot_proxy.execute_miot_scene.await_count == 2
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    assert rows[0]["success"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_false_exhausts_retries(
+    bound_client, tmp_path, scene_retry
+):
+    """执行持续返回 false → 3 次尝试后返回 False,单行失败台账。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.execute_miot_scene = AsyncMock(return_value=False)
+
+    ok = await svc.trigger_scene("scene1")
+    await client.flush()
+
+    assert ok is False
+    assert svc._miot_proxy.execute_miot_scene.await_count == 3
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["success"] == 0
+    assert r["result_msg"] == "场景触发失败"
+    assert r["error"] is None
+    # 失败审计完整性:仍能看到当时想触发什么
+    assert json.loads(r["value_json"]) == {"scene_name": "回家"}
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_exception_exhausts_retries_raises(
+    bound_client, tmp_path, scene_retry
+):
+    """SDK 持续抛错 → 重试耗尽抛 MiotServiceException,单行失败台账。"""
+    from miloco.middleware.exceptions import MiotServiceException
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.execute_miot_scene = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(MiotServiceException):
+        await svc.trigger_scene("scene1")
+    await client.flush()
+
+    assert svc._miot_proxy.execute_miot_scene.await_count == 3
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    assert rows[0]["success"] == 0
+    assert "boom" in (rows[0]["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_not_found_refreshes_and_heals(
+    bound_client, tmp_path, scene_retry
+):
+    """首轮查不到(缓存陈旧/首拉失败)→ 重试前强制刷新场景列表,刷新后命中成功。"""
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.refresh_scenes = AsyncMock()
+    scenes = {"scene1": SimpleNamespace(home_id="H1", scene_name="回家")}
+    svc._miot_proxy.get_all_scenes = AsyncMock(side_effect=[{}, scenes])
+
+    ok = await svc.trigger_scene("scene1")
+    await client.flush()
+
+    assert ok is True
+    svc._miot_proxy.refresh_scenes.assert_awaited_once()
+    assert svc._miot_proxy.get_all_scenes.await_count == 2
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    assert rows[0]["success"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_not_found_persists_after_refresh(
+    bound_client, tmp_path, scene_retry
+):
+    """刷新后仍查不到 → 视为永久失败:重试耗尽后抛 ResourceNotFoundException。"""
+    from miloco.middleware.exceptions import ResourceNotFoundException
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.refresh_scenes = AsyncMock()
+    svc._miot_proxy.get_all_scenes = AsyncMock(return_value={})
+
+    with pytest.raises(ResourceNotFoundException):
+        await svc.trigger_scene("scene-gone")
+    await client.flush()
+
+    # 3 次尝试,后两次都强制刷新
+    assert svc._miot_proxy.refresh_scenes.await_count == 2
+    assert svc._miot_proxy.get_all_scenes.await_count == 3
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    assert rows[0]["success"] == 0
+    assert rows[0]["did"] == "scene-gone"
+
+
+@pytest.mark.asyncio
+async def test_scene_trigger_validation_never_retried(
+    bound_client, tmp_path, scene_retry
+):
+    """场景不在允许家庭是策略错误:重试配置再多也不重试,执行零调用。"""
+    from miloco.middleware.exceptions import ValidationException
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.get_all_scenes = AsyncMock(
+        return_value={"scene1": SimpleNamespace(home_id="H-other", scene_name="他家")}
+    )
+
+    with pytest.raises(ValidationException):
+        await svc.trigger_scene("scene1")
+    await client.flush()
+
+    svc._miot_proxy.execute_miot_scene.assert_not_awaited()
+    rows = _rows(obs_db)
+    assert len(rows) == 1
+    assert rows[0]["success"] == 0

@@ -4271,6 +4271,63 @@ class TestRuleRunnerSceneAction:
         assert result.result is False
         assert "scene gone" in result.error
 
+    @pytest.mark.asyncio
+    async def test_state_rule_opposite_fire_clears_paired_scene_cooldown(
+        self, runner, monkeypatch
+    ):
+        """状态规则进入/退出成对联动：EXITED fire 清掉 on_enter 场景冷却。
+
+        回归日志场景（16:19:08 ENTERED 被冷却 skip）：上一轮进入已触发过
+        开灯场景（写入冷却），用户短暂离开后再进入，on_enter 场景被上一轮的
+        冷却吞掉——规则 FIRE 了、场景却没生效。修复后：新一轮 ENTERED 必须
+        重新触发进入场景；同向（无退出）重复 ENTERED 仍被冷却压住（防感知
+        抖动重复触发）。
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+
+        rule = _make_state_rule(
+            rule_id="rule-pair",
+            on_enter_actions=[_make_scene_action("scene-A")],
+            on_exit_actions=[_make_scene_action("scene-B")],
+        )
+        # 第一轮进入：开灯场景执行并写冷却
+        first = await runner._fire(rule, RuleEvent.ENTERED, ["cam-001"], "ctx", "eid-1")
+        assert first.action_results[0].skipped is False
+        # 无退出的同向重复：冷却仍生效（防抖动）
+        dup = await runner._fire(rule, RuleEvent.ENTERED, ["cam-001"], "ctx", "eid-2")
+        assert dup.action_results[0].skipped is True
+        # 退出：执行退出场景，并清掉进入场景冷却
+        exited = await runner._fire(rule, RuleEvent.EXITED, ["cam-001"], "ctx", "eid-3")
+        assert exited.action_results[0].skipped is False
+        # 新一轮进入：进入场景必须再次触发（不被上一轮冷却吞掉）
+        reenter = await runner._fire(rule, RuleEvent.ENTERED, ["cam-001"], "ctx", "eid-4")
+        assert reenter.action_results[0].skipped is False
+        assert spy.await_count == 3  # enter1 + exit + enter2
+
+    @pytest.mark.asyncio
+    async def test_state_rule_entered_fire_clears_exit_scene_cooldown(
+        self, runner, monkeypatch
+    ):
+        """对称方向：ENTERED fire 清掉 on_exit 场景冷却（退出→进入→退出可连发）。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+
+        rule = _make_state_rule(
+            rule_id="rule-pair2",
+            on_enter_actions=[_make_scene_action("scene-A")],
+            on_exit_actions=[_make_scene_action("scene-B")],
+        )
+        await runner._fire(rule, RuleEvent.EXITED, ["cam-001"], "ctx", "eid-1")
+        await runner._fire(rule, RuleEvent.ENTERED, ["cam-001"], "ctx", "eid-2")
+        re_exit = await runner._fire(rule, RuleEvent.EXITED, ["cam-001"], "ctx", "eid-3")
+        assert re_exit.action_results[0].skipped is False
+        assert spy.await_count == 3  # exit1 + enter + exit2
+
 
 class TestRuleServiceSceneActionValidation:
     """场景读不到现值：幂等分支会跳过判定直接下发，等于没有去重。
