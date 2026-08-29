@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -360,7 +361,23 @@ def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
 
     media_info = payload.get("media_info")
 
-    if payload.get("video_base64"):
+    # rule_only（纯场景触发）：逐帧 JPEG 图片（image_url 块），不发 mp4 视频。
+    # image_frames 是原始 JPEG 字节，必须显式 base64 编码——直接 f-string 插值 bytes
+    # 会得到 b'\xff\xd8...' 的 repr（含 b 前缀/转义/空格），服务端 base64 解码直接
+    # 400 "base64 decode fail"（实测 dashscope）。
+    image_frames = payload.get("image_frames")
+    if image_frames:
+        for frame in image_frames:
+            b64 = base64.b64encode(frame).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{b64}"
+                    },
+                }
+            )
+    elif payload.get("video_base64"):
         content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
         content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
