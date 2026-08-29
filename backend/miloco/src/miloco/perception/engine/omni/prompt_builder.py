@@ -718,11 +718,11 @@ def _build_user_content(
             parts.extend(_build_device_header(packets, label_lookup=label_lookup))
     if not context.rule_only:
         parts.extend(_build_context_parts(context, stream=stream))
-    if context.current_time:
-        parts.append(f"当前时间: {context.current_time}")
-    if context.room_name:
-        parts.append(f"位置: {context.room_name}")
-    parts.append(_USER_REF_BOUNDARY if is_video else _USER_REF_BOUNDARY_AUDIO)
+        if context.current_time:
+            parts.append(f"当前时间: {context.current_time}")
+        if context.room_name:
+            parts.append(f"位置: {context.room_name}")
+        parts.append(_USER_REF_BOUNDARY if is_video else _USER_REF_BOUNDARY_AUDIO)
     text = "\n".join(parts)
     _log_user_content(text)
     return text
