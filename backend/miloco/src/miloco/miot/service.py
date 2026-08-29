@@ -229,70 +229,125 @@ async def _trigger_scene(
     份家庭白名单校验和同一份台账口径(和 ``_write_action_ledger`` 一样的复用方
     式)。``source``/``source_id`` 让规则触发的场景在台账里能回指到具体 rule,
     不再和人工 CLI 混成一堆。
+
+    **自动重试**:场景触发对瞬时失败做有限次指数退避重试——规则触发是主要受益
+    方(一次 rule fire 的机会错过就没了),手动 CLI / Web 触发同样适用。次数与
+    初始退避由 ``settings.rule.scene_trigger_max_retries`` /
+    ``scene_trigger_retry_delay_sec`` 控制(默认 2 次 / 1s,即最多 3 次尝试,
+    间隔 1s / 2s)。覆盖的失败:
+    - 执行返回 false / SDK 抛错(网络抖动、云端 5xx 等瞬时故障);
+    - 首轮查不到场景——重试前强制刷新场景列表,本地缓存陈旧 / 首次拉取失败
+      能自愈(刷新后仍查不到才判永久失败)。
+    不重试的失败:场景不在允许家庭(策略错误,重试无意义)。台账每 call 只落
+    一行最终结果,中间尝试不重复写行;RuleRunner 的冷却也只在确认成功后记。
     """
+    settings = get_settings().rule
+    max_retries = settings.scene_trigger_max_retries
+    backoff_s = settings.scene_trigger_retry_delay_sec
+
     scenes: dict = {}
     # 异常路径也要能看到"当时想触发什么"(失败审计完整性)——scene_name
     # 在校验通过后、执行前就归一好,成功/异常两路复用。
     scene_value_json: str | None = None
-    try:
-        scenes = (await miot_proxy.get_all_scenes()) or {}
-        if scene_id not in scenes:
-            raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
-        if not is_home_allowed(
-            miot_proxy._kv_repo, getattr(scenes[scene_id], "home_id", None)
-        ):
-            raise ValidationException(
-                f"Scene '{scene_id}' is not in an allowed home"
+    # 重试耗尽时的最终失败。None = 执行返回 false 但没抛异常(存量语义:返回 False)
+    last_exc: Exception | None = None
+    scene_not_found = False  # 上一轮失败是"查不到场景"→ 下一轮先强制刷新列表
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            # 指数退避,单次上限 30s
+            await asyncio.sleep(min(backoff_s * (2 ** (attempt - 1)), 30.0))
+            if scene_not_found:
+                # 首轮查不到可能是本地缓存陈旧/首次拉取失败——强制刷新再判
+                try:
+                    await miot_proxy.refresh_scenes()
+                except Exception as e:  # noqa: BLE001 —— 刷新失败不阻断重试
+                    logger.warning(
+                        "scene list refresh failed before retry %d of %s: %s",
+                        attempt, scene_id, e,
+                    )
+        try:
+            scenes = (await miot_proxy.get_all_scenes()) or {}
+            if scene_id not in scenes:
+                raise ResourceNotFoundException(f"Scene '{scene_id}' not found")
+            if not is_home_allowed(
+                miot_proxy._kv_repo, getattr(scenes[scene_id], "home_id", None)
+            ):
+                raise ValidationException(
+                    f"Scene '{scene_id}' is not in an allowed home"
+                )
+            # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
+            # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
+            # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
+            scene_name = getattr(scenes[scene_id], "scene_name", None)
+            scene_value_json = json.dumps(
+                {"scene_name": scene_name}, ensure_ascii=False
             )
-        # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
-        # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
-        # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
-        scene_name = getattr(scenes[scene_id], "scene_name", None)
-        scene_value_json = json.dumps(
-            {"scene_name": scene_name}, ensure_ascii=False
-        )
-        ok = await miot_proxy.execute_miot_scene(scene_id)
-        await _write_action_ledger(
-            miot_proxy,
-            action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
-            value_json=scene_value_json,
-            result_code=None,
-            result_msg=None if ok else "场景触发失败",
-            success=bool(ok), error=None,
-            source=source, source_id=source_id,
-            home_id=getattr(scenes[scene_id], "home_id", None),
-        )
-        return ok
-    except (ResourceNotFoundException, ValidationException) as e:
+            ok = await miot_proxy.execute_miot_scene(scene_id)
+            if ok:
+                await _write_action_ledger(
+                    miot_proxy,
+                    action_type="scene_trigger",
+                    did=scene_id, iid=scene_id,
+                    value_json=scene_value_json,
+                    result_code=None,
+                    result_msg=None,
+                    success=True, error=None,
+                    source=source, source_id=source_id,
+                    home_id=getattr(scenes[scene_id], "home_id", None),
+                )
+                return True
+            # 执行返回 false:瞬时失败,记录后进入下一轮重试
+            logger.warning(
+                "Scene %s trigger returned false (attempt %d/%d)",
+                scene_id, attempt + 1, max_retries + 1,
+            )
+            scene_not_found = False
+        except ResourceNotFoundException as e:
+            scene_not_found = True
+            last_exc = e
+            if attempt < max_retries:
+                logger.warning(
+                    "Scene %s not found (attempt %d/%d), "
+                    "refreshing scene list and retrying",
+                    scene_id, attempt + 1, max_retries + 1,
+                )
+                continue
+        except ValidationException as e:
+            # 场景不在允许家庭:越权信号,策略错误,重试无意义——直接收尾
+            last_exc = e
+            break
+        except Exception as e:  # noqa: BLE001 —— SDK/网络抛错统一进重试
+            logger.error(
+                "Failed to trigger scene %s (attempt %d/%d): %s",
+                scene_id, attempt + 1, max_retries + 1, e,
+            )
+            last_exc = e
+            if attempt < max_retries:
+                continue
+
+    # —— 重试耗尽:落一行失败台账(最终结果),再按失败类型收尾 ——
+    await _write_action_ledger(
+        miot_proxy,
+        action_type="scene_trigger",
+        did=scene_id, iid=scene_id,
+        # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
+        value_json=scene_value_json,
+        result_code=None,
+        result_msg=None if last_exc is not None else "场景触发失败",
+        success=False,
+        error=str(last_exc) if last_exc is not None else None,
+        source=source, source_id=source_id,
+        # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
+        home_id=getattr(scenes.get(scene_id), "home_id", None),
+    )
+    if isinstance(last_exc, (ResourceNotFoundException, ValidationException)):
         # 场景被删 / 不在允许家庭是最常见的两种生产失败,也是最该留痕的两种
-        # (后者还是越权信号)。不落台账的话,持久审计上一行都没有。
-        await _write_action_ledger(
-            miot_proxy,
-            action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
-            value_json=scene_value_json,
-            result_code=None, result_msg=None,
-            success=False, error=str(e),
-            source=source, source_id=source_id,
-            home_id=getattr(scenes.get(scene_id), "home_id", None),
-        )
-        raise
-    except Exception as e:
-        logger.error("Failed to trigger scene %s: %s", scene_id, e)
-        await _write_action_ledger(
-            miot_proxy,
-            action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
-            # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
-            value_json=scene_value_json,
-            result_code=None, result_msg=None,
-            success=False, error=str(e),
-            source=source, source_id=source_id,
-            # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
-            home_id=getattr(scenes.get(scene_id), "home_id", None),
-        )
-        raise MiotServiceException(f"Failed to trigger scene: {str(e)}") from e
+        # (后者还是越权信号)。原样抛,由调用方(RuleRunner)记 rule_log。
+        raise last_exc
+    if last_exc is not None:
+        raise MiotServiceException(f"Failed to trigger scene: {str(last_exc)}") from last_exc
+    return False
 
 
 class MiotService:

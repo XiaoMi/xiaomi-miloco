@@ -68,6 +68,8 @@ camera:
 rule:
   log_ttl: 30                  # 天
   default_duration_ratio: 0.6  # duration_seconds 窗口 True 比例默认阈值，未显式 --duration-ratio 时生效
+  scene_trigger_max_retries: 2   # 场景触发失败自动重试次数（不含首次；0=不重试），指数退避
+  scene_trigger_retry_delay_sec: 1.0  # 场景触发重试初始退避秒数（1s/2s/4s…，单次上限 30s）
 
 # 感知管线配置
 perception:

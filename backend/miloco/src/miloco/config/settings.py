@@ -290,6 +290,26 @@ class RuleSettings(BaseModel):
             "规则创建时未显式指定 --duration-ratio 则使用此值"
         ),
     )
+    scene_trigger_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        description=(
+            "场景触发失败后的自动重试次数（不含首次；0=不重试，保持存量行为）。"
+            "规则触发/手动触发的米家场景对瞬时失败（网络抖动、云端 5xx、执行返回 "
+            "false、场景列表缓存陈旧首轮查不到）做有限次指数退避重试，重试仍失败"
+            "才落失败台账。场景不在允许家庭是策略错误，不重试。"
+        ),
+    )
+    scene_trigger_retry_delay_sec: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=60,
+        description=(
+            "场景触发重试的初始退避秒数，指数退避（1s/2s/4s…，单次上限 30s）；"
+            "仅 scene_trigger_max_retries > 0 时生效"
+        ),
+    )
 
 
 class PerceptionCollectSettings(BaseModel):

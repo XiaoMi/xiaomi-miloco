@@ -1423,6 +1423,12 @@ class RuleRunner:
         if kind == "static":
             action_results = [await self._execute_action(rule.id, a) for a in value]
             ok_all = all(r.result for r in action_results)
+            # 状态规则：ENTERED/EXITED 交替即新一轮驻留周期——清掉对向场景动作
+            # 的冷却，避免上一轮进入（或退出）的冷却吞掉本轮配对方向（进入/退出
+            # 场景是开/关对偶；冷却只应压「无对向事件时的同向重复」，见
+            # _clear_paired_scene_cooldown）。
+            if rule.mode == RuleMode.STATE:
+                self._clear_paired_scene_cooldown(rule, event)
             exec_result = RuleExecuteResult(
                 event=event,
                 action_results=action_results,
@@ -1516,8 +1522,9 @@ class RuleRunner:
         if time.time() - last_exec >= action.cooldown_minutes * 60:
             return False
         logger.info(
-            "Rule %s action %s %s in cooldown, skipping",
+            "Rule %s action %s %s in cooldown, skipping (%.0fs remaining)",
             rule_id, action.did, action.iid,
+            action.cooldown_minutes * 60 - (time.time() - last_exec),
         )
         return True
 
@@ -1528,6 +1535,26 @@ class RuleRunner:
         self._ensure_state(rule_id).action_cooldown[
             (action.did, action.iid)
         ] = time.time()
+
+    def _clear_paired_scene_cooldown(self, rule: Rule, event: RuleEvent) -> None:
+        """状态规则：本方向 fire 后清掉对向（enter↔exit）场景动作的冷却记录。
+
+        场景动作无幂等可比，去重只靠冷却（见 ``SCENE_IID`` 与
+        ``_execute_scene_action``）。但 state 规则 ENTERED/EXITED 本来就是边沿
+        触发，同向不可能在无对向事件时重复 fire；冷却若跨驻留周期保留，会把
+        「退出关灯后再次进入」的开灯请求吞掉（现象：规则 FIRE 了、场景却没
+        生效）。故本方向 fire 后清对向场景冷却——冷却语义收敛为「同向限频」，
+        不再跨周期生效。event 模式不受影响（``_fire`` 只对 state 模式调用本方法）。
+        """
+        rs = self._state.get(rule.id)
+        if rs is None:
+            return
+        paired = (
+            rule.on_exit_actions if event == RuleEvent.ENTERED else rule.on_enter_actions
+        )
+        for action in paired or []:
+            if action.iid == SCENE_IID and not action.idempotent:
+                rs.action_cooldown.pop((action.did, action.iid), None)
 
     async def _execute_scene_action(
         self, rule_id: str, action: RuleAction
@@ -1564,6 +1591,9 @@ class RuleRunner:
         from miloco.miot.service import _trigger_scene
 
         try:
+            # 瞬时失败（网络抖动 / 云端 5xx / 执行返回 false / 场景列表缓存陈旧）
+            # 已在 _trigger_scene 内部按 settings.rule.scene_trigger_* 自动重试，
+            # 走到这里的异常是重试耗尽后的最终失败。
             success = await _trigger_scene(
                 self._miot_proxy, action.did, source="rule", source_id=rule_id
             )
