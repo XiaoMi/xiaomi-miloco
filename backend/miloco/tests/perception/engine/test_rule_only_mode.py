@@ -159,6 +159,53 @@ def test_build_prompt_last_frame_only_false_sends_all():
     assert len(payload['image_frames']) == 2, '关闭开关应多帧全发'
 
 
+def test_rule_only_encodes_clip_for_replay(monkeypatch):
+    """rule_only 只发图片送模型，但会额外编码一份 mp4 供 web 日志回看触发片段。
+
+    clip 字节经 _encode_video_mp4 尾部 push_clip_bytes 落进 artifacts.clips →
+    save_event_artifacts 落盘 clip.mp4；mp4 不进 payload、不送模型。
+    """
+    from miloco.perception.engine.omni import prompt_builder
+
+    calls: list = []
+
+    def fake_encode(ep, short_edge=prompt_builder._VIDEO_SHORT_EDGE):
+        calls.append(short_edge)
+        return None, None
+
+    monkeypatch.setattr(prompt_builder, "_encode_video", fake_encode)
+    ep = _make_packet()
+    ctx = OmniContext(rule_only=True)
+    with patch('miloco.config.get_settings') as mock_gs:
+        mock_gs.return_value.perception.engine.get.return_value = {
+            'last_frame_only': True,
+            'video_short_edge': 512,
+        }
+        payload = build_prompt(ep, ctx)
+    assert payload.get('image_frames'), '送模型的仍是图片'
+    assert 'video_base64' not in payload, 'mp4 不进 payload、不送模型'
+    assert len(calls) == 1, '应额外编码一份 mp4 用于落盘回看'
+
+
+def test_rule_only_clip_encode_failure_is_silent(monkeypatch):
+    """落盘编码失败只告警，不阻断 rule_only 主链路（payload 照常产出）。"""
+    from miloco.perception.engine.omni import prompt_builder
+
+    def boom(ep, short_edge=prompt_builder._VIDEO_SHORT_EDGE):
+        raise RuntimeError("encode failed")
+
+    monkeypatch.setattr(prompt_builder, "_encode_video", boom)
+    ep = _make_packet()
+    ctx = OmniContext(rule_only=True)
+    with patch('miloco.config.get_settings') as mock_gs:
+        mock_gs.return_value.perception.engine.get.return_value = {
+            'last_frame_only': True,
+            'video_short_edge': 512,
+        }
+        payload = build_prompt(ep, ctx)
+    assert payload.get('image_frames'), '编码失败不应影响 rule_only 主链路'
+
+
 # ---- 输出 schema：只出 matched_rules ----
 
 
