@@ -130,6 +130,27 @@ def resolve_omni_api_key(api_key_from_config: str = "") -> str:
     return api_key_from_config or os.environ.get(_ENV_KEY, "")
 
 
+def _log_realtime_raw(raw: dict[str, Any]) -> None:
+    """打印 realtime 感知主链路的**原始模型输出**（choices[0]），方便排查输出格式问题。
+
+    只取 ``choices[0].message.content``；取不到（HTTP 失败 / choices 空 / 非 dict /
+    非 dict 元素）时静默跳过——打印是诊断辅助，任何失败都不打扰主流程。
+    空白（含 JSON 换行）归一为单空格，保证日志单行可 grep。
+    """
+    try:
+        if not isinstance(raw, dict):
+            return
+        choices = raw.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return
+        content = (choices[0].get("message") or {}).get("content")
+        if content is None:
+            return
+        logger.info("🔥 realtime_perceive response: %s", " ".join(str(content).split()))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def resolve_api_key(config: OmniConfig) -> str:
     """Resolve API key from config or environment variable."""
     return resolve_omni_api_key(config.api_key)
@@ -265,6 +286,10 @@ async def call_omni(
                 raise OmniError(f"omni response is not a dict (got {raw_cls})")
             await cb.record_success()
             fire_record(config.model, raw.get("usage", {}), type)
+            # 原始输出落日志（choices[0]）：排查模型输出格式问题时免翻 trace 文件。
+            # 仅 realtime（感知主链路，含 rule_only）打印；on_demand 问答 / tier_c 校验不打。
+            if type == "realtime":
+                _log_realtime_raw(raw)
         return raw
     except CircuitOpenError as ce:
         short_circuited = True

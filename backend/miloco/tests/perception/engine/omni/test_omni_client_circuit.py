@@ -361,3 +361,46 @@ async def test_call_omni_forced_stream_500_records_failure(monkeypatch):
     snap = get_omni_circuit_breaker().snapshot()
     assert snap.state == "warn"
     assert snap.code == "http_error"
+
+
+# ─── realtime 原始输出打印（🔥 realtime_perceive response）───────────────
+
+
+async def test_call_omni_realtime_prints_raw_response(monkeypatch, caplog):
+    """call_omni type=realtime → 打印 choices[0] 原始输出（rule_only / 主链路出口）。"""
+    import logging
+
+    resp = _FakeResp(
+        200,
+        {
+            "choices": [{"message": {"content": '{"matched_rules":[{"hit":true}]}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        },
+    )
+    monkeypatch.setattr(
+        omni_client.httpx, "AsyncClient", _fake_async_client(resp=resp)
+    )
+    with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni_client"):
+        await omni_client.call_omni(_payload(), _cfg())
+    assert any(
+        "🔥 realtime_perceive response: {\"matched_rules\":[{\"hit\":true}]}" in r.message
+        for r in caplog.records
+    )
+
+
+async def test_call_omni_on_demand_skips_raw_print(monkeypatch, caplog):
+    """on_demand（问答 / tier_c 校验）不打印 realtime 原始输出。"""
+    import logging
+
+    resp = _FakeResp(
+        200,
+        {"choices": [{"message": {"content": "hi"}}], "usage": {}},
+    )
+    monkeypatch.setattr(
+        omni_client.httpx, "AsyncClient", _fake_async_client(resp=resp)
+    )
+    with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni_client"):
+        await omni_client.call_omni(_payload(), _cfg(), type="on_demand")
+    assert not any(
+        "🔥 realtime_perceive response" in r.message for r in caplog.records
+    )
