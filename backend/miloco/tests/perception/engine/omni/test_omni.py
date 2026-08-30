@@ -205,3 +205,48 @@ class TestStreamLoopbackAbort:
         assert output.skipped is True
         # break 应该发生在复读累计到 10 次 ngram 附近（约 prefix + 30~50 字符）
         assert len(received_chars) < len(prefix) + len(loop_part)
+
+
+class TestLogRealtimeRaw:
+    """🔥 realtime_perceive response 原始输出打印（choices[0] 安全提取）。"""
+
+    def test_prints_choices0_content(self, caplog):
+        import logging
+
+        from miloco.perception.engine.omni import omni as omni_mod
+
+        raw = {"choices": [{"message": {"content": '{"a": 1}'}}]}
+        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni"):
+            omni_mod._log_realtime_raw(raw)
+        assert any(
+            "🔥 realtime_perceive response: {\"a\": 1}" in r.message
+            for r in caplog.records
+        )
+
+    def test_whitespace_normalized_to_single_line(self, caplog):
+        import logging
+
+        from miloco.perception.engine.omni import omni as omni_mod
+
+        raw = {"choices": [{"message": {"content": '{\n  "a": 1,\n  "b": 2\n}'}}]}
+        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni"):
+            omni_mod._log_realtime_raw(raw)
+        assert any(
+            "🔥 realtime_perceive response: { \"a\": 1, \"b\": 2 }" in r.message
+            for r in caplog.records
+        )
+
+    def test_empty_choices_silent(self, caplog):
+        import logging
+
+        from miloco.perception.engine.omni import omni as omni_mod
+
+        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni"):
+            omni_mod._log_realtime_raw({"choices": []})
+            omni_mod._log_realtime_raw({"choices": [{"message": {"content": None}}]})
+            omni_mod._log_realtime_raw("not a dict")
+            omni_mod._log_realtime_raw(None)
+            omni_mod._log_realtime_raw({})
+        assert not any(
+            "🔥 realtime_perceive response" in r.message for r in caplog.records
+        )

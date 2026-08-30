@@ -27,6 +27,63 @@ class TestExtractJson:
         content = '<think>reasoning here</think>\n{"a": 1}'
         assert extract_json(content) == '{"a": 1}'
 
+    # ── 安全提取增强（真实模型输出变体）─────────────────────────────────
+
+    def test_matched_rules_fenced_example(self):
+        # 用户报告的真实形态：```json 围栏包裹 matched_rules
+        content = (
+            '```json\n{"matched_rules":[{"rule_name":"燕麦片",'
+            '"reason":"画面中可见散落的黑色燕麦片","hit":true},'
+            '{"rule_name":"有人读书","reason":"床边无人坐着看书","hit":false}]}\n```'
+        )
+        parsed = json.loads(extract_json(content))
+        assert len(parsed["matched_rules"]) == 2
+        assert parsed["matched_rules"][0]["rule_name"] == "燕麦片"
+
+    def test_fence_label_variants(self):
+        # 大写标签 / 标签后空格 / 四反引号 / 无标签
+        for content in (
+            '```JSON\n{"a": 1}\n```',
+            '``` json\n{"a": 1}\n```',
+            '````json\n{"a": 1}\n````',
+            '```\n{"a": 1}\n```',
+            '```json{"a": 1}```',  # 无换行
+        ):
+            assert extract_json(content) == '{"a": 1}', content
+
+    def test_trailing_comma_recovery(self):
+        # 尾随逗号：模型高频语法错误，应修复后可解析
+        assert json.loads(extract_json('{"a": 1,}')) == {"a": 1}
+        assert json.loads(extract_json('{"a": [1, 2,],}')) == {"a": [1, 2]}
+        assert json.loads(extract_json('```json\n{"a": [1,],}\n```')) == {"a": [1]}
+
+    def test_bom_crlf_control_chars(self):
+        # BOM / CRLF / 非法控制字符归一
+        assert extract_json('\ufeff\r\n```json\r\n{"a": 1}\r\n```\r\n') == '{"a": 1}'
+        assert extract_json('{"a": 1}\x00\x1b 尾部说明') == '{"a": 1}'
+
+    def test_prefix_suffix_text(self):
+        assert extract_json('好的，结果如下：{"a": 1} 完毕') == '{"a": 1}'
+
+    def test_multiple_fences_picks_valid(self):
+        content = '```text\n说明文字\n```\n```json\n{"b": 2}\n```'
+        assert extract_json(content) == '{"b": 2}'
+
+    def test_think_block_plus_fence(self):
+        content = '<thinking>分析中</thinking>\n```json\n{"a": 1}\n```'
+        assert extract_json(content) == '{"a": 1}'
+
+    def test_trailing_fence_with_code(self):
+        # 围栏后还有别的代码块（如 ```text），取 json 块
+        content = '```json\n{"a": 1}\n```\n```text\n备注\n```'
+        assert extract_json(content) == '{"a": 1}'
+
+    def test_empty_content_raises(self):
+        import pytest
+
+        with pytest.raises(json.JSONDecodeError):
+            extract_json("")
+
 
 class TestParseOmniResponse:
     def test_complete_response(self):

@@ -103,7 +103,7 @@ perception:
       rule_only_input: video
       # rule_only 视频模式是否只合成窗口最后一帧的单帧 mp4(~66 tok, 最省):
       # false=全窗口帧合成(默认, 信息完整); true=单帧。热读、免重启。
-      rule_only_video_single_frame: true
+      rule_only_video_single_frame: false
     # Smart Crop(智能裁切增强): 推理前定向裁切活动区域, 送更高等效分辨率的局部视频 + 全景参考帧。
     # 与 video_short_edge 正交 —— 裁不裁看这里, 多清晰看 video_short_edge; crop 视频等比放到
     # 逐轴贴住同档全景画面、参考帧只缩不放, 都跟着用户档走。热读、免重启。
@@ -139,7 +139,7 @@ perception:
       # 取 emb。回退路径:切 "real" 启用纯 SORT(陌生人池退化为"只累积、不去重")。
       tracking_service_mode: "deep_sort"
     omni:
-      timeout: 30.0 # 请求超时（秒）
+      timeout: 10.0 # 请求超时（秒）
 
     # 注：omni 身份识别系统（identity_engine）配置位于
     # ``perception/engine/identity/default_config.yaml``，本文件不维护其默认值。
@@ -165,6 +165,6 @@ perf:
 # 产品级实验性功能开关（默认关，住户在 web 显式开启）
 features:
   pet_recognition: false       # 宠物识别（实验性）总开关；关闭时前端隐藏入口、后端不注入宠物命名规则，已录数据保留
-  pet_head_grounding: true     # 宠物头像头部定位子开关（默认开）；关则用全身 crop，仅在 pet_recognition 开启时有意义（内部调优，一般无需改动）
-  pet_body_grounding: true     # 宠物本体定位子开关（默认开）；仅回退路径（框不到猫狗）用，裁本体作参考图，关则回退不产参考 crop（内部调优，一般无需改动）
-  pet_reid_diverse: true       # 参考图多样性用人体 ReID 特征距离贪心选多姿态（默认开）；关或模型不可用回退 dHash，仅 pet_recognition 开时有意义（内部调优，一般无需改动）
+  pet_head_grounding: false     # 宠物头像头部定位子开关（默认开）；关则用全身 crop，仅在 pet_recognition 开启时有意义（内部调优，一般无需改动）
+  pet_body_grounding: false     # 宠物本体定位子开关（默认开）；仅回退路径（框不到猫狗）用，裁本体作参考图，关则回退不产参考 crop（内部调优，一般无需改动）
+  pet_reid_diverse: false       # 参考图多样性用人体 ReID 特征距离贪心选多姿态（默认开）；关或模型不可用回退 dHash，仅 pet_recognition 开时有意义（内部调优，一般无需改动）
