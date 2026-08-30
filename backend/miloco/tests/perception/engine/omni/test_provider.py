@@ -3,6 +3,7 @@
 from miloco.perception.engine.omni import provider
 from miloco.perception.engine.omni.provider import (
     GeminiAdapter,
+    GlmAdapter,
     LocalMediaInfo,
     MiMoAdapter,
     OpenAICompatAdapter,
@@ -46,16 +47,24 @@ class TestGetAdapter:
     def test_gemini_case_insensitive(self):
         assert isinstance(get_adapter("Gemini-3-Pro"), GeminiAdapter)
 
+    def test_glm(self):
+        assert isinstance(get_adapter("glm-4.6v"), GlmAdapter)
+
+    def test_glm_case_insensitive(self):
+        assert isinstance(get_adapter("GLM-4.6V"), GlmAdapter)
+
     def test_openai_compat_family(self):
-        # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 不是。
+        # MiMo / Qwen / GLM 都归 OpenAI 兼容族；Gemini 不是。
         assert isinstance(get_adapter("xiaomi/mimo-v2.5"), OpenAICompatAdapter)
         assert isinstance(get_adapter("qwen3.5-omni-flash"), OpenAICompatAdapter)
+        assert isinstance(get_adapter("glm-4.6v"), OpenAICompatAdapter)
         assert not isinstance(get_adapter("gemini-3-flash-preview"), OpenAICompatAdapter)
 
     def test_singleton(self):
         assert get_adapter("xiaomi/mimo-v2.5") is get_adapter("xiaomi/mimo-v2.5")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
+        assert get_adapter("glm-4.6v") is get_adapter("glm-4.6v-flash")
 
 
 class TestMiMoAdapter:
@@ -90,6 +99,37 @@ class TestMiMoAdapter:
         assert body["stream"] is True
         assert body["stream_options"] == {"include_usage": True}
         assert body["thinking"] == {"type": "disabled"}
+
+
+class TestGlmAdapter:
+    adapter = GlmAdapter()
+
+    def test_video_block_same_as_mimo(self):
+        block = self.adapter.build_video_block("AAAA", _VIDEO_MEDIA)
+        assert block["type"] == "video_url"
+        assert block["fps"] == 1
+        assert block["media_resolution"] == "max"
+        assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
+
+    def test_request_body_inherits_mimo(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="glm-4.6v",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert body["thinking"] == {"type": "disabled"}
+        assert body["stream"] is False
+
+    def test_auth_headers_plain_bearer(self):
+        # GLM 鉴权就是标准 Bearer；X-Title 这类额外头由用户经
+        # model.omni.extra_headers 配置，adapter 不硬编码。
+        headers = self.adapter.auth_headers("sk-test")
+        assert headers["Authorization"] == "Bearer sk-test"
+        assert "X-Title" not in headers
+
+    def test_supports_audio_input_false(self):
+        # GLM-4.6V 是纯视觉模型（文本/图片/视频/文件），input_audio 属于
+        # GLM-4-Voice / GLM-Realtime 线，audio-only 窗口必须降级 text-only。
+        assert self.adapter.supports_audio_input is False
 
 
 class TestQwenOmniAdapter:

@@ -124,43 +124,49 @@ def build_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build the prompt payload for the omni model (single device).
 
     Args:
         label_lookup: person_id (UUID) → 姓名/标签 反查表，渲染 "已识别人物" 段时把
                       UUID 替换为人名。None 时直接渲染 person_id 字段值（与旧行为兼容）。
+        adapter: 感知 provider adapter；听不见音频的 provider（如 GLM）会把
+                 audio 路由退回 video 路由，且 prompt 不声称本轮有音频。
 
     Returns dict with keys: system_prompt, user_content, video_base64, media_info, crops.
     """
-    return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup)
+    return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_batch_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build the prompt payload for multi-device omni inference (same room)."""
-    return _build_payload(identity_packets, context, stream=False, label_lookup=label_lookup)
+    return _build_payload(identity_packets, context, stream=False, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_stream_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build prompt payload for streaming omni call (single device, speeches first)."""
-    return _build_payload([identity_packet], context, stream=True, label_lookup=label_lookup)
+    return _build_payload([identity_packet], context, stream=True, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_batch_stream_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     """Build prompt payload for streaming omni call (multi-device, speeches first)."""
-    return _build_payload(identity_packets, context, stream=True, label_lookup=label_lookup)
+    return _build_payload(identity_packets, context, stream=True, label_lookup=label_lookup, adapter=adapter)
 
 
 def build_query_prompt(
@@ -249,7 +255,9 @@ def build_fused_payload(
     # audio route：无视觉信息，候选作废。与 video 同款 message 隔离（待判断规则/只读历史
     # 各自独立 user 消息）；本轮事实只放"当前时间 + 音频"——audio 无视频，不渲染名册/gallery/
     # 待识别 track（名册的 bbox 是为"把姓名对应到视频里的人"，audio 场景无意义）。
-    if _resolve_route(packets) == "audio":
+    # provider 听不见音频（如 GLM 纯视觉模型）时退回 video 路由：帧本来就在（只是没变化），
+    # 至少还有画面这份真证据，且 prompt 不会声称"本轮有音频"。
+    if _resolve_route(packets) == "audio" and _adapter_hears_audio(adapter):
         scene = SceneDescriptor(route="audio", has_identity=False, stream=False)
         system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
         ep = packets[0]
@@ -343,7 +351,7 @@ def build_fused_payload(
                 return False
         return True
 
-    adaptive = _maybe_encode_adaptive(packets, region_ok=_candidate_bbox_ok)
+    adaptive = _maybe_encode_adaptive(packets, region_ok=_candidate_bbox_ok, adapter=adapter)
     if adaptive is not None:
         video_b64, media_info = adaptive.video_b64, adaptive.media_info
         ref_image_jpeg = adaptive.ref_image_jpeg
@@ -353,16 +361,19 @@ def build_fused_payload(
             return remap_bbox_norm_to_crop(b, _region, _frame_size)
     if video_b64 is None:
         video_b64, media_info = _encode_batch_video(
-            packets, short_edge=_effective_panorama_short_edge()
+            packets, short_edge=_effective_panorama_short_edge(), adapter=adapter
         )
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
     # pending 半句不强行补全（否则模型会就着噪声脑补出一个完成句，正是要根除的幻觉）。
+    # provider 听不见音频时 has_audio/has_speech 一并置 False：prompt 不声称本轮有音频，
+    # 既有机制会把 speeches / env_sounds 从 schema 和任务清单里剥掉。
+    _hears = _adapter_hears_audio(adapter)
     scene = SceneDescriptor(
         route="video", has_identity=bool(candidates), stream=False,
-        has_audio=_batch_video_has_audio(packets),
-        has_speech=_batch_video_has_speech(packets),
+        has_audio=_batch_video_has_audio(packets, adapter) and _hears,
+        has_speech=_batch_video_has_speech(packets) and _hears,
         has_pets=_has_pets_for_scene(),
         identity_match_disabled=matching_moot,
     )
@@ -469,16 +480,22 @@ def _build_payload(
     stream: bool,
     label_lookup: "dict[str, str] | None" = None,
     include_home_profile: bool = True,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> dict:
     route = _resolve_route(packets)
+    # provider 听不见音频（如 GLM 纯视觉模型）时，audio 路由退回 video 路由：
+    # 帧本来就在（只是没变化），至少还有画面这份真证据，且 prompt 不会声称"本轮有音频"。
+    if route == "audio" and not _adapter_hears_audio(adapter):
+        route = "video"
     # has_audio：video 路由下音频未过 gate 时为 False → schema 剥掉 speeches/env_sounds，
     # 避免模型就着画面脑补人声。audio 路由恒有音频。
     # has_speech：video 路由下 VAD 判无人声时为 False → 只剥 speeches、保留 env_sounds。
-    has_audio = True if route == "audio" else _batch_video_has_audio(packets)
+    _hears = _adapter_hears_audio(adapter)
+    has_audio = True if route == "audio" else (_batch_video_has_audio(packets, adapter) and _hears)
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 拼接照常；本轮无人声 → 剥 speeches，挂着的 pending 半句不强行补全（否则模型会就着
     # 噪声脑补出完成句，正是要根除的幻觉）。
-    has_speech = True if route == "audio" else _batch_video_has_speech(packets)
+    has_speech = True if route == "audio" else (_batch_video_has_speech(packets) and _hears)
     scene = SceneDescriptor(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
@@ -502,7 +519,7 @@ def _build_payload(
         # (反而比不接更糟)。非生产路径不值得为它复刻 fused 的「参考图在前+说明」结构,
         # 恒走全景 = 字节等同本 PR 之前的行为(零回归)。
         video_b64, media_info = _encode_batch_video(
-            packets, short_edge=_effective_panorama_short_edge()
+            packets, short_edge=_effective_panorama_short_edge(), adapter=adapter
         )
         base["video_base64"] = video_b64
         base["media_info"] = media_info
@@ -1347,6 +1364,16 @@ def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
     )
 
 
+def _adapter_hears_audio(adapter: "OmniProviderAdapter | None") -> bool:
+    """provider 能不能听见音频。
+
+    决定的是「prompt 敢不敢声称本轮有音频」，比 supports_audio_input（只管
+    input_audio 块发不发）覆盖面更广：video 路由的 mp4 音轨同样听不见。
+    adapter 为 None（旧调用路径）时按支持处理，保持行为不变。
+    """
+    return adapter is None or adapter.supports_audio_input
+
+
 def _get_video_short_edge() -> int:
     try:
         from miloco.config import get_settings
@@ -1372,14 +1399,24 @@ _MIN_AUDIO_B64_LEN = 500
 _AUDIO_ONLY_ENABLED = True
 
 
-def _packet_audio_included(ep: IdentityPacket) -> bool:
+def _packet_audio_included(
+    ep: IdentityPacket,
+    adapter: "OmniProviderAdapter | None" = None,
+) -> bool:
     """该 packet 的音频是否会被合成进 mp4：audio gate 通过即带（trigger=None 视为通过，
-    兼容主动查询 / 旧路径）。speeches / env_sounds 字段的取舍与此一致——没喂音频就别问。"""
+    兼容主动查询 / 旧路径）。speeches / env_sounds 字段的取舍与此一致——没喂音频就别问。
+    provider 听不见音频（如 GLM 纯视觉模型）时不合成音轨：mp4 里混一段模型解码不了的
+    AAC 是白花的带宽和 token 前处理开销，且与 prompt 里 has_audio=False 自相矛盾。"""
+    if not _adapter_hears_audio(adapter):
+        return False
     trig = ep.trigger
     return trig is None or trig.audio_active
 
 
-def _batch_video_has_audio(packets: list[IdentityPacket]) -> bool:
+def _batch_video_has_audio(
+    packets: list[IdentityPacket],
+    adapter: "OmniProviderAdapter | None" = None,
+) -> bool:
     """video 路由最终合进 mp4 的音频是否存在。
 
     与 ``_encode_batch_video`` 选设备口径一致（首个有 frames 的 device），据该 device 的
@@ -1388,7 +1425,7 @@ def _batch_video_has_audio(packets: list[IdentityPacket]) -> bool:
     """
     for ep in packets:
         if ep.all_frames:
-            return _packet_audio_included(ep)
+            return _packet_audio_included(ep, adapter)
     return False
 
 
@@ -1411,6 +1448,7 @@ def _batch_video_has_speech(packets: list[IdentityPacket]) -> bool:
 def _encode_video(
     identity_packet: IdentityPacket,
     short_edge: int = _VIDEO_SHORT_EDGE,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> tuple[str | None, LocalMediaInfo | None]:
     """Encode all frames + audio into mp4 video, return ``(base64, media_info)``。"""
     frames = identity_packet.all_frames
@@ -1419,7 +1457,7 @@ def _encode_video(
 
     audio = (
         identity_packet.audio_clip
-        if _packet_audio_included(identity_packet)
+        if _packet_audio_included(identity_packet, adapter)
         else np.empty(0, dtype=np.int16)
     )
     return _encode_video_mp4(
@@ -1667,6 +1705,7 @@ def _encode_audio_only_mp4(
 def _encode_batch_video(
     edge_packets: list[IdentityPacket],
     short_edge: int = _VIDEO_SHORT_EDGE,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> tuple[str | None, LocalMediaInfo | None]:
     """Encode video from the first device that has frames.
 
@@ -1674,7 +1713,7 @@ def _encode_batch_video(
     返回 ``(base64_str, media_info)``。
     """
     for ep in edge_packets:
-        b64, media_info = _encode_video(ep, short_edge=short_edge)
+        b64, media_info = _encode_video(ep, short_edge=short_edge, adapter=adapter)
         if b64 is not None:
             return b64, media_info
     return None, None
@@ -1781,6 +1820,7 @@ def _maybe_encode_adaptive(
     packets: list[IdentityPacket],
     *,
     region_ok: "Callable[[tuple[int, int, int, int], tuple[int, int]], bool] | None" = None,
+    adapter: "OmniProviderAdapter | None" = None,
 ) -> "_AdaptiveResult | None":
     """Smart Crop 开启时算 crop 区域、编码 crop 视频 + 全景参考帧。
 
@@ -1893,7 +1933,7 @@ def _maybe_encode_adaptive(
         cse = max(1, min(cm * pano_w // cw, cm * pano_h // ch))
         audio = (
             ep.audio_clip
-            if _packet_audio_included(ep)
+            if _packet_audio_included(ep, adapter)
             else np.empty(0, dtype=np.int16)
         )
         # fps 沿用 frame_info.fps(下采样后真实帧间隔),与全景视频一致——crop 逐帧不抽帧,

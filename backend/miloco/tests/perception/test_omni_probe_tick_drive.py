@@ -36,6 +36,7 @@ def _mock_omni_config(monkeypatch):
         model = "m"
         base_url = "https://x/v1"
         api_key = "sk-x"
+        extra_headers: dict[str, str] = {}
 
     class _FakeModel:
         omni = _FakeOmni()
@@ -62,7 +63,7 @@ async def test_tick_drive_probe_success_recovers_to_closed(monkeypatch, _mock_om
     """probe 成功 → 熔断从 OPEN_RECOVERABLE 回 CLOSED,感知恢复。"""
     from miloco.perception import processor as _processor
 
-    async def _fake_probe(model, base_url, api_key):
+    async def _fake_probe(model, base_url, api_key, extra_headers=None):
         return {"ok": True, "code": "ok", "status": 200, "latency_ms": 10}
 
     monkeypatch.setattr(
@@ -99,7 +100,7 @@ async def test_tick_drive_probe_failure_grows_backoff(monkeypatch, _mock_omni_co
     """probe 继续失败 → 状态回 OPEN_RECOVERABLE,backoff 涨,in-flight 清位。"""
     from miloco.perception import processor as _processor
 
-    async def _fake_probe(model, base_url, api_key):
+    async def _fake_probe(model, base_url, api_key, extra_headers=None):
         return {"ok": False, "code": "unreachable", "message": "still down"}
 
     monkeypatch.setattr(

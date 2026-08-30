@@ -429,3 +429,71 @@ async def test_probe_chat_stream_429_preserves_retry_after(monkeypatch):
     assert r["code"] == "rate_limited"
     # 关键:Retry-After 被解析出来传给上层 _grow_backoff_locked
     assert r["retry_after_seconds"] == 45.0
+
+
+# ─── extra_headers 穿透 ─────────────────────────────────────────────────────
+
+
+def _capture_client(captured: dict):
+    """捕获请求头/body 的 fake AsyncClient（GET + POST）。"""
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **k):
+            captured["get_headers"] = headers or {}
+            captured["get_url"] = url
+            return _FakeResp(200, {"data": [{"id": "glm-4.6v"}]})
+
+        async def post(self, url, headers=None, json=None, **k):
+            captured["post_headers"] = headers or {}
+            captured["post_url"] = url
+            return _FakeResp(200, {"choices": [{"message": {"content": "pong"}}]})
+
+    return _C
+
+
+async def test_fetch_models_passes_extra_headers(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _capture_client(captured))
+    await probe.fetch_models(
+        "https://open.bigmodel.cn/api/paas/v4",
+        "sk-glm",
+        extra_headers={"X-Title": "4.5V MCP Local"},
+    )
+    assert captured["get_headers"]["Authorization"] == "Bearer sk-glm"
+    assert captured["get_headers"]["X-Title"] == "4.5V MCP Local"
+
+
+async def test_probe_chat_passes_extra_headers(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _capture_client(captured))
+    await probe.probe_chat(
+        "glm-4.6v",
+        "https://open.bigmodel.cn/api/paas/v4",
+        "sk-glm",
+        extra_headers={"X-Title": "4.5V MCP Local"},
+    )
+    assert captured["post_headers"]["X-Title"] == "4.5V MCP Local"
+
+
+async def test_probe_omni_passes_extra_headers_both_stages(monkeypatch):
+    """GET /models 与 chat 回退两跳都要带 extra_headers（Coding Plan 429 回归锁）。"""
+    captured: dict = {}
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _capture_client(captured))
+    result = await probe.probe_omni(
+        "glm-4.6v",
+        "https://open.bigmodel.cn/api/paas/v4",
+        "sk-glm",
+        extra_headers={"X-Title": "4.5V MCP Local"},
+    )
+    assert result.get("ok")
+    assert captured["get_headers"]["X-Title"] == "4.5V MCP Local"
+    assert captured["post_headers"]["X-Title"] == "4.5V MCP Local"

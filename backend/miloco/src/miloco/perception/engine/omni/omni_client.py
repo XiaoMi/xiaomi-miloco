@@ -157,6 +157,7 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
         model=o.model,
         base_url=o.base_url,
         api_key=o.api_key or base.api_key,
+        extra_headers=dict(o.extra_headers),
     )
     _maybe_reset_breaker_on_config_change(resolved)
     return resolved
@@ -217,6 +218,7 @@ async def call_omni(
         "Content-Type": "application/json",
         **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
+        **(config.extra_headers or {}),
     }
     try:
         await cb.before_call()  # 熔断 OPEN → 直接抛 CircuitOpenError
@@ -362,7 +364,7 @@ def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
 
     if payload.get("video_base64"):
         content.append(adapter.build_video_block(payload["video_base64"], media_info))
-    elif payload.get("audio_base64"):
+    elif payload.get("audio_base64") and adapter.supports_audio_input:
         content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
 
     # Crop images (from tracker)
@@ -435,6 +437,7 @@ async def call_omni_stream(
         "Content-Type": "application/json",
         **adapter.auth_headers(api_key),
         "User-Agent": MILOCO_USER_AGENT,
+        **(config.extra_headers or {}),
     }
     url = adapter.endpoint(config.base_url, config.model, stream=True)
 
