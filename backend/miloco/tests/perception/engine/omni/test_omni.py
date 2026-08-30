@@ -213,11 +213,11 @@ class TestLogRealtimeRaw:
     def test_prints_choices0_content(self, caplog):
         import logging
 
-        from miloco.perception.engine.omni import omni as omni_mod
+        from miloco.perception.engine.omni import omni_client
 
         raw = {"choices": [{"message": {"content": '{"a": 1}'}}]}
-        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni"):
-            omni_mod._log_realtime_raw(raw)
+        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni_client"):
+            omni_client._log_realtime_raw(raw)
         assert any(
             "🔥 realtime_perceive response: {\"a\": 1}" in r.message
             for r in caplog.records
@@ -226,11 +226,11 @@ class TestLogRealtimeRaw:
     def test_whitespace_normalized_to_single_line(self, caplog):
         import logging
 
-        from miloco.perception.engine.omni import omni as omni_mod
+        from miloco.perception.engine.omni import omni_client
 
         raw = {"choices": [{"message": {"content": '{\n  "a": 1,\n  "b": 2\n}'}}]}
-        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni"):
-            omni_mod._log_realtime_raw(raw)
+        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni_client"):
+            omni_client._log_realtime_raw(raw)
         assert any(
             "🔥 realtime_perceive response: { \"a\": 1, \"b\": 2 }" in r.message
             for r in caplog.records
@@ -239,14 +239,14 @@ class TestLogRealtimeRaw:
     def test_empty_choices_silent(self, caplog):
         import logging
 
-        from miloco.perception.engine.omni import omni as omni_mod
+        from miloco.perception.engine.omni import omni_client
 
-        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni"):
-            omni_mod._log_realtime_raw({"choices": []})
-            omni_mod._log_realtime_raw({"choices": [{"message": {"content": None}}]})
-            omni_mod._log_realtime_raw("not a dict")
-            omni_mod._log_realtime_raw(None)
-            omni_mod._log_realtime_raw({})
+        with caplog.at_level(logging.INFO, logger="miloco.perception.engine.omni.omni_client"):
+            omni_client._log_realtime_raw({"choices": []})
+            omni_client._log_realtime_raw({"choices": [{"message": {"content": None}}]})
+            omni_client._log_realtime_raw("not a dict")
+            omni_client._log_realtime_raw(None)
+            omni_client._log_realtime_raw({})
         assert not any(
             "🔥 realtime_perceive response" in r.message for r in caplog.records
         )

@@ -555,6 +555,22 @@ class RuleService:
         """
         self._runner.remove_rule(rule_id)
 
+    def sync_rule_to_runner(self, rule_id: str) -> None:
+        """把 DB 中 rule 的最新状态同步进 RuleRunner 内存（enable/disable 后调用）。
+
+        TaskService._toggle_task 只写 rule 表、不重建 runner——内存里的旧副本
+        enabled 标记不更新的话，update_state 会在入口按旧值静默 return：启用后
+        规则照常进 omni prompt、命中却永远「未触发」（场景联动「该触发没触发」
+        的典型现象）；停用后则照旧触发。rule 已从 DB 消失时从内存移除兜底。
+        """
+        rule = self._repo.get_by_id(rule_id)
+        if rule is None:
+            self._runner.remove_rule(rule_id)
+            return
+        # add_rule 对 enabled 切换会 reset 运行时状态（见 add_rule 注释），
+        # 保证 enable 回来不残留旧 fired 标记 / 滑窗。
+        self._runner.add_rule(rule)
+
     # ---- Trigger ----
 
     async def trigger_rule(

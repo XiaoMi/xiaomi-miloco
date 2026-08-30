@@ -16,9 +16,11 @@ from miloco.database.rule_repo import RuleRepo
 from miloco.database.task_repo import TaskConflict
 from miloco.rule.schema import (
     Rule,
+    RuleAction,
     RuleCondition,
     RuleLifecycle,
     RuleMode,
+    TriggerOutcome,
 )
 from miloco.task.schema import CronRef, TaskCreateRequest, TaskUpdateRequest
 
@@ -142,6 +144,96 @@ def test_disable_task_marks_meta_paused_and_disables_rules(service):
     assert result.backend_synced.meta_status == "ok"
     assert result.backend_synced.rules[0].rule_id == rid
     assert RuleRepo().get_by_id(rid).enabled is False
+
+
+def test_toggle_task_syncs_rule_runner(real_db):
+    """enable/disable 后必须把最新 enabled 同步进 RuleRunner 内存（回归）。
+
+    现场：17:09:43 在 web 启用场景联动后，规则照常进 omni prompt、命中却一直
+    「未触发」——_toggle_task 只写 rule 表，runner 内存旧副本 enabled=False，
+    update_state 入口静默 return，直到重启才恢复。
+    """
+    from unittest.mock import MagicMock
+
+    from miloco.rule.service import RuleService
+    from miloco.task.service import TaskService
+
+    rule_svc = MagicMock(spec=RuleService)
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_svc)
+    rid = _setup_task_with_rule(svc)
+
+    svc.disable_task("t1")
+    rule_svc.sync_rule_to_runner.assert_called_once_with(rid)
+    rule_svc.sync_rule_to_runner.reset_mock()
+
+    svc.enable_task("t1")
+    rule_svc.sync_rule_to_runner.assert_called_once_with(rid)
+
+
+@pytest.mark.asyncio
+async def test_enable_after_disable_runner_fires_again(real_db):
+    """端到端回归：真实 RuleRunner 下 disable→enable 后，命中能真正 fire。
+
+    修复前该场景返回 NOT_FIRED（内存 enabled 未更新）；修复后 ENTERED 正常
+    派发 on_enter 动作。停用后内存态同步关闭、命中不再触发。
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from miloco.rule.runner import RuleRunner
+    from miloco.rule.service import RuleService
+    from miloco.task.service import TaskService
+
+    miot = AsyncMock()
+    miot.get_device_properties = AsyncMock(return_value=[{"code": 0, "value": False}])
+    miot.set_device_properties = AsyncMock(return_value=[{"code": 0}])
+
+    log_repo = MagicMock()
+    log_repo.create = MagicMock(return_value="log-id")
+
+    ts = TaskService(rule_repo=RuleRepo())
+    ts.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    rule = Rule(
+        name="[t1] r",
+        task_id="t1",
+        mode=RuleMode.STATE,
+        lifecycle=RuleLifecycle.PERMANENT,
+        enabled=False,  # 初始停用（模拟老任务在库里停用、runner 也停用）
+        condition=RuleCondition(perceive_device_ids=["d1"], query="客厅有人"),
+        on_enter_actions=[
+            RuleAction(did="d1", iid="prop.2.1", value=True, idempotent=True)
+        ],
+        exit_debounce_seconds=0,
+    )
+    rid = RuleRepo().create(rule)
+
+    runner = RuleRunner(
+        rules=RuleRepo().get_all(enabled_only=False),
+        miot_proxy=miot,
+        rule_log_repo=log_repo,
+    )
+    rule_svc = RuleService(RuleRepo(), log_repo, runner, miot)
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_svc)
+
+    # 停用态：命中不触发
+    out = await rule_svc.update_state(rid, "d1", True)
+    await runner.drain()
+    assert out is TriggerOutcome.NOT_FIRED
+    assert miot.set_device_properties.await_count == 0
+
+    # web「启用」→ runner 内存态必须跟随 DB，命中正常触发
+    svc.enable_task("t1")
+    assert runner._rules[rid].enabled is True
+    out = await rule_svc.update_state(rid, "d1", True)
+    await runner.drain()
+    assert out is TriggerOutcome.FIRED
+    assert miot.set_device_properties.await_count == 1
+
+    # web「停用」→ 内存态同步关闭，命中不再触发
+    svc.disable_task("t1")
+    assert runner._rules[rid].enabled is False
+    out = await rule_svc.update_state(rid, "d1", True)
+    await runner.drain()
+    assert out is TriggerOutcome.NOT_FIRED
 
 
 def test_disable_pending_ops_for_cron_only(service):

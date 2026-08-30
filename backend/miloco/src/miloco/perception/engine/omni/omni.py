@@ -62,27 +62,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _log_realtime_raw(raw: dict[str, Any]) -> None:
-    """打印 realtime 感知主链路的**原始模型输出**（choices[0]），方便排查输出格式问题。
-
-    只取 ``choices[0].message.content``；取不到（HTTP 失败 / choices 空 / 非 dict /
-    非 dict 元素）时静默跳过——打印是诊断辅助，任何失败都不打扰主流程。
-    空白（含 JSON 换行）归一为单空格，保证日志单行可 grep。
-    """
-    try:
-        if not isinstance(raw, dict):
-            return
-        choices = raw.get("choices") or []
-        if not choices or not isinstance(choices[0], dict):
-            return
-        content = (choices[0].get("message") or {}).get("content")
-        if content is None:
-            return
-        logger.info("🔥 realtime_perceive response: %s", " ".join(str(content).split()))
-    except Exception:  # noqa: BLE001
-        pass
-
-
 # 端侧 ngram 流式复读检测：buffer 末尾出现"首字符非空白、长度 1-5 字符"的子串
 # 连续重复 ≥ 10 次时命中。\S 排除 JSON 缩进的连续空格误触发；末尾窗口 100 字符
 # 覆盖最长形态（5-gram × 10 = 50 字符）。命中后立即 abort stream，避免模型继续
@@ -212,8 +191,6 @@ async def run_omni_fused(
             matching_moot=person_lib_empty,
         )
         raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
-        # 原始输出落日志（choices[0]），排查模型输出格式问题时免翻 trace 文件
-        _log_realtime_raw(raw_response)
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -406,6 +383,11 @@ async def _call_omni_messages(
             raise OmniError(f"omni response is not a dict (got {raw_cls})")
         await cb.record_success()
         fire_record(config.model, raw.get("usage", {}), type)
+        # 原始输出落日志（choices[0]），与 omni_client.call_omni 同款（fused 主调用出口）
+        if type == "realtime":
+            from miloco.perception.engine.omni.omni_client import _log_realtime_raw
+
+            _log_realtime_raw(raw)
         return raw
     except CircuitOpenError as ce:
         short_circuited = True

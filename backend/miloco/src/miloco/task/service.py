@@ -168,6 +168,17 @@ class TaskService:
                     rule_id=rule.id, result="ok" if ok else "fail"
                 )
             )
+            # 同步 RuleRunner 内存态：DB 改了 enabled 而 runner 不重建的话，
+            # update_state 在入口按内存里的旧值静默 return——启用后命中也永远
+            # 「未触发」，停用后照旧触发，直到重启才恢复。与 delete_task 清
+            # 内存态同口径：rule_service 为 None（老库启动路径/单测）时跳过。
+            if self._rule_service is not None and ok:
+                try:
+                    self._rule_service.sync_rule_to_runner(rule.id)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "sync_rule_to_runner failed for rule %s: %s", rule.id, e
+                    )
 
         # cron 联动: internal 改 cron.enabled + apply_enabled_state (函数内部
         # 已双向, disabled 会 _remove_job); external 产 agent_pending 让 skill
