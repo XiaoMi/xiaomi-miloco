@@ -32,6 +32,13 @@ class InputConfig:
     # 静态状态类规则足够）；False = 多帧全发（动作/手势类规则更稳）。运行时由 prompt_builder
     # 实时读 settings（同 video_short_edge 模式，改配置免重启）。默认开启。
     last_frame_only: bool = True
+    # rule_only 媒体输入模式："video"（默认，mp4 视频——Gemini 视频按帧计费 ~66 tok/帧，
+    # 同分辨率下 token 约为图片 1/4）| "image"（窗口末帧 JPEG，~1064 tok/张，分辨率无关，
+    # 对纯静态规则判定更聚焦）。运行时由 prompt_builder 热读 settings，免重启。
+    rule_only_input: str = "video"
+    # rule_only 视频模式是否只合成窗口**最后一帧**的单帧 mp4（~66 tok，最省）：
+    # False = 全窗口帧合成（默认，信息完整）；True = 单帧。运行时热读 settings，免重启。
+    rule_only_video_single_frame: bool = False
 
 
 @dataclass

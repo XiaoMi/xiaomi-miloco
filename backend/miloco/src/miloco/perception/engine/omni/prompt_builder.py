@@ -506,31 +506,51 @@ def _build_payload(
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
     elif rule_only:
-        # rule_only（纯场景触发）：逐帧 JPEG 图片（image_url 块）替代 mp4 视频——
-        # 无音频、无容器开销，_build_messages 见 image_frames 时逐张发 image_url。
-        image_frames = _encode_frames_as_jpegs(
-            packets, short_edge=_effective_panorama_short_edge(),
-            last_frame_only=_rule_only_last_frame_only(),
-        )
-        base["image_frames"] = image_frames
-        if not image_frames:
-            logger.warning(
-                "event=rule_only_no_frames 无帧可编码，本窗退化为 text-only 判定"
+        # rule_only（纯场景触发）媒体输入，两种模式（input.rule_only_input 热读）：
+        #   "video"（默认）：发 mp4 视频——Gemini 视频按帧计费（low 档 ~66 tok/帧），
+        #     同分辨率下 token 约为图片的 1/4；可选单帧开关进一步省 token。
+        #   "image"：发窗口末帧 JPEG（旧行为，~1064 tok/张，分辨率无关），
+        #     对纯静态规则判定更聚焦。
+        if _rule_only_input_mode() == "video":
+            media_packets = (
+                _rule_only_single_frame_packets(packets)
+                if _rule_only_video_single_frame()
+                else packets
             )
-        # rule_only 只发图片（image_url）→ 不编码视频 → artifacts.clips 为空 →
-        # web 日志查不到触发窗口的视频片段。这里额外编码一份 mp4 仅供落盘回看
-        # （_encode_video_mp4 尾部 push_clip_bytes → save_event_artifacts），
-        # 不进 payload、不送模型；编码失败静默降级，不影响主链路。
-        try:
-            for ep in packets:
-                if ep.all_frames:
-                    _encode_video(ep, short_edge=_effective_panorama_short_edge())
-                    break
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "event=rule_only_clip_encode_failed 触发片段落盘编码失败",
-                exc_info=True,
+            video_b64, media_info = _encode_batch_video(
+                media_packets, short_edge=_effective_panorama_short_edge()
             )
+            base["video_base64"] = video_b64
+            base["media_info"] = media_info
+            if not video_b64:
+                logger.warning(
+                    "event=rule_only_no_frames 无帧可编码，本窗退化为 text-only 判定"
+                )
+        else:
+            image_frames = _encode_frames_as_jpegs(
+                packets, short_edge=_effective_panorama_short_edge(),
+                last_frame_only=_rule_only_last_frame_only(),
+            )
+            base["image_frames"] = image_frames
+            if not image_frames:
+                logger.warning(
+                    "event=rule_only_no_frames 无帧可编码，本窗退化为 text-only 判定"
+                )
+            # 图片模式只发图片（image_url）→ 不编码视频 → artifacts.clips 为空 →
+            # web 日志查不到触发窗口的视频片段。这里额外编码一份 mp4 仅供落盘回看
+            # （_encode_video_mp4 尾部 push_clip_bytes → save_event_artifacts），
+            # 不进 payload、不送模型；编码失败静默降级，不影响主链路。
+            # （video 模式无需此步：payload 本身就是视频，编码时已自动落盘 clip。）
+            try:
+                for ep in packets:
+                    if ep.all_frames:
+                        _encode_video(ep, short_edge=_effective_panorama_short_edge())
+                        break
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "event=rule_only_clip_encode_failed 触发片段落盘编码失败",
+                    exc_info=True,
+                )
     else:
         # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:
         # crops 通道把参考图渲染在 video 之后且无说明文字,模型会把局部裁切当整个房间描述
@@ -1426,6 +1446,60 @@ def _rule_only_last_frame_only() -> bool:
         return bool(val)
     except Exception:
         return True
+
+
+def _rule_only_input_mode() -> str:
+    """rule_only 媒体输入模式：``"video"``（默认，mp4 视频）| ``"image"``（末帧 JPEG）。
+
+    Gemini 对图片按张计费（~1064 tok/张，分辨率无关），视频按帧计费（low 档 ~66
+    tok/帧）——同分辨率下视频 token 约为图片的 1/4，故默认视频；图片模式仅用于
+    显式选「单帧静态图」的场景（对纯静态规则判定更聚焦）。热读 settings 免重启。
+    """
+    try:
+        from miloco.config import get_settings
+
+        val = get_settings().perception.engine.get("input", {}).get(
+            "rule_only_input", "video"
+        )
+        return str(val or "video").lower()
+    except Exception:
+        return "video"
+
+
+def _rule_only_video_single_frame() -> bool:
+    """rule_only 视频模式是否只取窗口最后一帧合成**单帧** mp4（~66 tok，最省）。
+
+    默认 False（全窗口帧合成，信息完整）；True 时只发 1 帧，媒体 token 从
+    ~264 降到 ~66，适合动作不敏感 / 极致省 token 的规则。热读 settings 免重启。
+    """
+    try:
+        from miloco.config import get_settings
+
+        val = get_settings().perception.engine.get("input", {}).get(
+            "rule_only_video_single_frame", False
+        )
+        return bool(val)
+    except Exception:
+        return False
+
+
+def _rule_only_single_frame_packets(
+    packets: list[IdentityPacket],
+) -> list[IdentityPacket]:
+    """把 packets 的 all_frames 收窄为窗口最后一帧（dataclasses.replace 不动其余字段）。
+
+    供 rule_only 视频模式的单帧开关用：fps / audio 等字段原样保留，
+    编码出的 mp4 只有 1 帧（~66 tok），媒体 token 最省。
+    """
+    from dataclasses import replace
+
+    out: list[IdentityPacket] = []
+    for ep in packets:
+        if ep.all_frames:
+            out.append(replace(ep, all_frames=ep.all_frames[-1:]))
+        else:
+            out.append(ep)
+    return out
 _CROP_SIZE = (512, 512)
 
 # 多模态 payload sanity check 下限 — 防"非 None 但实际损坏"的 bytes 入 payload

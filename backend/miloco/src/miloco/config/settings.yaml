@@ -95,7 +95,15 @@ perception:
       video_short_edge: 512
       # rule_only 图片输入: 只取窗口最后一帧作输入图(省 token/更快; 静态状态类规则足够)。
       # false = 多帧全发(动作/手势类规则更稳)。热读、改配置免重启。默认开启。
+      # 注意: 该开关仅在 rule_only_input=image 时生效。
       last_frame_only: true
+      # rule_only 媒体输入模式: video=mp4 视频(默认; Gemini 视频按帧计费 ~66 tok/帧,
+      # 同分辨率下 token 约为图片 1/4); image=窗口末帧 JPEG(~1064 tok/张, 对纯静态
+      # 规则判定更聚焦)。热读、免重启。
+      rule_only_input: video
+      # rule_only 视频模式是否只合成窗口最后一帧的单帧 mp4(~66 tok, 最省):
+      # false=全窗口帧合成(默认, 信息完整); true=单帧。热读、免重启。
+      rule_only_video_single_frame: true
     # Smart Crop(智能裁切增强): 推理前定向裁切活动区域, 送更高等效分辨率的局部视频 + 全景参考帧。
     # 与 video_short_edge 正交 —— 裁不裁看这里, 多清晰看 video_short_edge; crop 视频等比放到
     # 逐轴贴住同档全景画面、参考帧只缩不放, 都跟着用户档走。热读、免重启。

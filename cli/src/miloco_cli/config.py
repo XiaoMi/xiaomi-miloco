@@ -106,6 +106,17 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "",
         "仅 Gemini：每帧视觉 token 预算档位（\"\"/\"low\"=省，\"high\"=小目标更清但 4× token），下一周期生效",
     ),
+    "perception.engine.input.rule_only_input": (
+        str,
+        "video",
+        "场景联动(rule_only)媒体输入模式：video=mp4 视频(默认，媒体 token 约为图片 1/4)；"
+        "image=窗口末帧 JPEG(~1064 tok/张)。下一周期生效",
+    ),
+    "perception.engine.input.rule_only_video_single_frame": (
+        bool,
+        False,
+        "场景联动视频模式是否只合成窗口最后一帧的单帧 mp4(~66 tok，最省)；False=全窗口帧。下一周期生效",
+    ),
     # Smart Crop 双闸相与，两者都 true 才裁切；默认值同下方注释的对齐约定（yaml 里都是 true）。
     # 写「重启生效」而非「热读」：闸位在**后端进程内**确实是每窗口热读的，但 get_settings() 有
     # 进程级 lru_cache，只有 admin PUT 那条路会跟着调 reset_settings() 清缓存。CLI 是另一个进程、

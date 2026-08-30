@@ -125,42 +125,55 @@ def test_last_frame_only_encoder_keeps_single_frame():
     assert len(imgs_all) == 2
 
 
-def test_build_prompt_default_last_frame_only_single_image():
-    """build_prompt（rule_only）默认只发一帧图（settings 未配 last_frame_only）。"""
-    ep = _make_packet()
-    ctx = OmniContext(
-        rule_only=True,
-        rule_conditions=[
-            RuleCondition(rule_id='reading_light', rule_name='读书开灯', query='有人在床上看书'),
-        ],
-    )
-    # _rule_only_last_frame_only 内部是 from miloco.config import get_settings（局部导入），
-    # 须 patch miloco.config.get_settings 才生效；input 返回真实 dict，避免 video_short_edge
-    # 被 mock 值污染（同一 .get("input", {}) 读取点）
-    with patch('miloco.config.get_settings') as mock_gs:
-        mock_gs.return_value.perception.engine.get.return_value = {
-            'last_frame_only': True,
-            'video_short_edge': 512,
-        }
-        payload = build_prompt(ep, ctx)
-    assert len(payload['image_frames']) == 1, '默认应只发最后一帧'
-
-
-def test_build_prompt_last_frame_only_false_sends_all():
-    """settings last_frame_only=false → 多帧全发。"""
-    ep = _make_packet()
+def _build_rule_only(ep, **input_cfg):
+    """rule_only payload 构建 helper：mock settings 的 input 块（热读点同一处）。"""
     ctx = OmniContext(rule_only=True)
+    cfg = {
+        'video_short_edge': 512,
+        'rule_only_input': 'video',
+        'rule_only_video_single_frame': False,
+        'last_frame_only': True,
+    }
+    cfg.update(input_cfg)
     with patch('miloco.config.get_settings') as mock_gs:
-        mock_gs.return_value.perception.engine.get.return_value = {
-            'last_frame_only': False,
-            'video_short_edge': 512,
-        }
-        payload = build_prompt(ep, ctx)
+        mock_gs.return_value.perception.engine.get.return_value = cfg
+        return build_prompt(ep, ctx)
+
+
+def test_build_prompt_default_video_input():
+    """build_prompt（rule_only）默认发 mp4 视频（media token 约为图片 1/4）。"""
+    ep = _make_packet()  # all_frames = 2 帧
+    payload = _build_rule_only(ep)
+    assert payload.get('video_base64'), '默认应发视频'
+    assert 'image_frames' not in payload, '默认不发图片'
+    assert payload['media_info'].frame_count == 2, '全窗口帧合成'
+
+
+def test_build_prompt_image_mode_switch():
+    """rule_only_input="image" → 切回末帧图片输入（旧行为）。"""
+    ep = _make_packet()
+    payload = _build_rule_only(ep, rule_only_input='image')
+    assert 'video_base64' not in payload
+    assert len(payload['image_frames']) == 1, '图片模式默认只发最后一帧'
+
+
+def test_build_prompt_image_mode_last_frame_only_false():
+    """图片模式 last_frame_only=false → 多帧全发。"""
+    ep = _make_packet()
+    payload = _build_rule_only(ep, rule_only_input='image', last_frame_only=False)
     assert len(payload['image_frames']) == 2, '关闭开关应多帧全发'
 
 
+def test_rule_only_video_single_frame_switch():
+    """rule_only_video_single_frame=True → 只合成窗口最后一帧的单帧 mp4（~66 tok）。"""
+    ep = _make_packet()  # 2 帧
+    payload = _build_rule_only(ep, rule_only_video_single_frame=True)
+    assert payload.get('video_base64'), '单帧开关仍是视频模式'
+    assert payload['media_info'].frame_count == 1, '只应编码 1 帧'
+
+
 def test_rule_only_encodes_clip_for_replay(monkeypatch):
-    """rule_only 只发图片送模型，但会额外编码一份 mp4 供 web 日志回看触发片段。
+    """图片模式只发图片送模型，但会额外编码一份 mp4 供 web 日志回看触发片段。
 
     clip 字节经 _encode_video_mp4 尾部 push_clip_bytes 落进 artifacts.clips →
     save_event_artifacts 落盘 clip.mp4；mp4 不进 payload、不送模型。
@@ -175,20 +188,14 @@ def test_rule_only_encodes_clip_for_replay(monkeypatch):
 
     monkeypatch.setattr(prompt_builder, "_encode_video", fake_encode)
     ep = _make_packet()
-    ctx = OmniContext(rule_only=True)
-    with patch('miloco.config.get_settings') as mock_gs:
-        mock_gs.return_value.perception.engine.get.return_value = {
-            'last_frame_only': True,
-            'video_short_edge': 512,
-        }
-        payload = build_prompt(ep, ctx)
+    payload = _build_rule_only(ep, rule_only_input='image')
     assert payload.get('image_frames'), '送模型的仍是图片'
     assert 'video_base64' not in payload, 'mp4 不进 payload、不送模型'
     assert len(calls) == 1, '应额外编码一份 mp4 用于落盘回看'
 
 
 def test_rule_only_clip_encode_failure_is_silent(monkeypatch):
-    """落盘编码失败只告警，不阻断 rule_only 主链路（payload 照常产出）。"""
+    """图片模式落盘编码失败只告警，不阻断 rule_only 主链路（payload 照常产出）。"""
     from miloco.perception.engine.omni import prompt_builder
 
     def boom(ep, short_edge=prompt_builder._VIDEO_SHORT_EDGE):
@@ -196,13 +203,7 @@ def test_rule_only_clip_encode_failure_is_silent(monkeypatch):
 
     monkeypatch.setattr(prompt_builder, "_encode_video", boom)
     ep = _make_packet()
-    ctx = OmniContext(rule_only=True)
-    with patch('miloco.config.get_settings') as mock_gs:
-        mock_gs.return_value.perception.engine.get.return_value = {
-            'last_frame_only': True,
-            'video_short_edge': 512,
-        }
-        payload = build_prompt(ep, ctx)
+    payload = _build_rule_only(ep, rule_only_input='image')
     assert payload.get('image_frames'), '编码失败不应影响 rule_only 主链路'
 
 
@@ -260,12 +261,11 @@ def test_rule_only_build_prompt_no_roster_no_home_profile():
     # 无身份名册 / 家庭档案
     assert '已识别人物' not in uc
     assert '家庭档案' not in sp
-    # 输入改为逐帧 JPEG 图片（image_url 块），不再编 mp4 视频
-    assert 'video_base64' not in payload
+    # 输入默认是 mp4 视频（媒体 token 约为图片 1/4），无音频；图片模式由
+    # rule_only_input="image" 显式切换（见 test_build_prompt_image_mode_switch）
+    assert 'video_base64' in payload
     assert 'audio_base64' not in payload
-    frames = payload['image_frames']
-    assert isinstance(frames, list) and len(frames) > 0, 'rule_only 应下发图片帧'
-    assert all(f.startswith(b'\xff\xd8') for f in frames), '帧应为 JPEG（SOI 头）'
+    assert payload['media_info'].frame_count > 0
 
 
 def test_rule_only_messages_build_image_url_blocks():
@@ -349,10 +349,10 @@ async def test_run_pipeline_rule_only_skips_identity_and_audio():
     assert result.identity_packet.targets == []
     assert result.identity_packet.audio_clip.size == 0
     assert result.gate_packet.trigger.audio_active is False
-    # 发给模型的载荷是逐帧图片（image_url），无 mp4 视频 / 音频
+    # 发给模型的载荷默认是 mp4 视频（媒体 token 约为图片 1/4），无音频
     payload = captured['payload']
-    assert 'video_base64' not in payload and 'audio_base64' not in payload
-    assert len(payload.get('image_frames', [])) > 0
+    assert 'video_base64' in payload and 'audio_base64' not in payload
+    assert payload['media_info'].frame_count > 0
     # 输出只有规则命中
     assert result.omni_output is not None
     assert len(result.omni_output.matched_rules) == 1
