@@ -205,22 +205,37 @@ def extract_json(content: str) -> str:
 
     MiMo often outputs: [garbage/thinking] + [valid JSON at the end].
     Strategy: try code blocks first, then search the full content for valid JSON.
+
+    安全提取链（逐层增强，历史教训来自真实模型输出）：
+      1. ``_sanitize_content`` —— BOM / CRLF / 控制字符归一（模型偶发夹带，json.loads
+         对部分控制字符直接 400）；
+      2. ``<think>...</think>`` 及裸 ``</think>`` 剥离（思考内容混入 content 时）；
+      3. Markdown 围栏提取（```json / ``` / ```` 四反引号 / 标签后带空格，见
+         ``_FENCE_RE``）——Gemini 系模型输出围栏包裹 JSON 的比例很高（实测 trace
+         55% 带围栏），围栏内再走 _find_last_valid_json；
+      4. 全文兜底：从右往左找最长有效 JSON 子串（容忍前缀/后缀说明文本）；
+      5. ``_loose_loads`` —— 标准解析失败时仅做「去尾随逗号」修复重试
+         （``{"a":1,}`` / ``[1,2,]`` 是模型最常见 JSON 语法错误；不做单引号/注释
+         修复——字符串内误伤风险高、模型场景罕见）。
     """
+    if not content:
+        raise json.JSONDecodeError("empty content", "", 0)
+
+    cleaned = _sanitize_content(content)
     # Strip <think>...</think> blocks
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned).strip()
     # Strip everything before a bare </think> (no opening tag)
     cleaned = re.sub(r"^[\s\S]*?</think>", "", cleaned).strip()
 
     if not cleaned:
-        cleaned = content.strip()
+        cleaned = _sanitize_content(content).strip()
 
     # Try each markdown code block (last to first) for valid JSON
-    blocks = list(re.finditer(r"```(?:\w*)?\s*\n?([\s\S]*?)\n?```", cleaned))
+    blocks = list(re.finditer(_FENCE_RE, cleaned))
     for block in reversed(blocks):
         result = _find_last_valid_json(block.group(1).strip())
         try:
-            json.loads(result)
-            return result
+            return _loose_loads(result)  # 返回可被 json.loads 直接消费的文本
         except (json.JSONDecodeError, ValueError):
             continue
 
@@ -228,34 +243,83 @@ def extract_json(content: str) -> str:
     return _find_last_valid_json(cleaned)
 
 
+def _sanitize_content(content: str) -> str:
+    """归一化模型输出文本：去 BOM、CRLF → LF、剔除 JSON 非法控制字符。
+
+    只保留 ``\\n`` / ``\\r`` / ``\\t`` 三个空白控制符，其余 < 0x20 的字符（如
+    ``\\x00`` / ``\\x1b`` 转义序列残留）剔除——json.loads 对部分控制字符直接抛
+    ``Unterminated string``，是「模型输出看似正常却解析失败」的隐藏来源。
+    """
+    s = content.lstrip("\ufeff")
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(ch for ch in s if ch >= " " or ch in "\n\t")
+
+
+# 围栏正则：3 或 4 个反引号；语言标签可选（json / 无标签 / 任意词），标签后允许空格
+# 直接跟换行（```json\n / ``` json\n / ````json```` 均可命中）。
+_FENCE_RE = re.compile(
+    r"`{3,4}[^\n`]*(?:\n?)([\s\S]*?)(?:\n?)`{3,4}"
+)
+
+
+def _loose_loads(text: str) -> str:
+    """标准 ``json.loads`` 失败后，做一次「去尾随逗号」修复重试。
+
+    修复规则：``,`` 后紧跟 ``}`` / ``]``（中间只允许空白）时删除该逗号——
+    ``{"a":1,}`` / ``[1,2,]`` / ``{"a":[1,],}`` 等模型高频语法错误。
+
+    返回**解析成功的文本**（可能是修复后的），调用方可直接 ``json.loads``；
+    修复无果时抛原始 JSONDecodeError（不吞、不扩大修复面——单引号/注释修复
+    字符串内误伤风险高、模型场景罕见，不做）。
+    """
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        fixed = re.sub(r",(\s*[}\]])", r"\1", text)
+        if fixed == text:
+            raise
+        json.loads(fixed)  # 修复后仍失败 → 抛新异常（语义等价，调用方走 fallback）
+        return fixed
+
+
 def _find_last_valid_json(content: str) -> str:
     """Find the last valid JSON object in content, searching from end to start."""
     # Find the position of the last }
     last_close = content.rfind("}")
     if last_close < 0:
-        return content.strip()
+        # 对象根缺失：退而求其次找数组根（模型偶发输出顶层数组）
+        last_close = content.rfind("]")
+        if last_close < 0:
+            return content.strip()
+        open_ch = "["
+    else:
+        open_ch = "{"
 
-    # Try progressively from different { positions (last to first)
+    # Try progressively from different open positions (last to first)
     # to find the longest valid JSON ending at last_close
     best = None
 
     for i in range(last_close, -1, -1):
-        if content[i] == "{":
+        if content[i] == open_ch:
             candidate = content[i : last_close + 1]
             try:
-                json.loads(candidate)
-                best = candidate  # Keep the longest valid JSON
-            except json.JSONDecodeError:
+                best = _loose_loads(candidate)  # 返回解析成功的文本（可能已去尾随逗号）
+            except (json.JSONDecodeError, ValueError):
                 if best is not None:
                     break  # We already found a valid one, stop expanding
 
     if best is not None:
         return best
 
-    # Fallback: return from last { to last }
-    last_open = content.rfind("{")
+    # Fallback: return from last open to last close
+    last_open = content.rfind(open_ch)
     if last_open >= 0:
-        return content[last_open : last_close + 1]
+        candidate = content[last_open : last_close + 1]
+        try:
+            return _loose_loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            return candidate
 
     return content.strip()
 
