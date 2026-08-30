@@ -625,6 +625,11 @@ class MIoTHttpClient:
             timeout=MIHOME_HTTP_API_TIMEOUT,
         )
         if http_res.status not in [200, 302, 403]:
+            # Negative cache: some models consistently fail this endpoint
+            # (e.g. 400). Remembering the failure avoids re-issuing a useless
+            # ~1s request for the same model on every refresh/startup — the
+            # caller then keeps the icon provided by the device-list API.
+            self._icon_map[model] = ""
             raise MIoTHttpError(
                 f"get icon failed, code={http_res.status}, model={model}"
             )
@@ -749,10 +754,13 @@ class MIoTHttpClient:
                 )
 
         # get device icon
+        # 只覆盖为「真拿到 URL」的模型：失败(含负缓存命中)保留设备列表自带 icon。
         if models:
             icons = await self.__get_device_icon_batch_async(models=models)
             for device in device_infos.values():
-                device.icon = icons.get(device.model, None)
+                icon = icons.get(device.model)
+                if icon:
+                    device.icon = icon
 
         next_start_did = res_obj.get("next_start_did", None)
         if res_obj.get("has_more", False) and next_start_did:
@@ -1027,12 +1035,27 @@ class MIoTHttpClient:
             ).values()
 
         manual_scenes: Dict[str, MIoTManualSceneInfo] = {}
-        for home_info in local_homes:
-            manual_scenes.update(
-                await self.__get_manual_scenes_with_home_id_async(
+        # 每个家庭一次 GetManualSceneList；家庭间并发（家庭多时串行可达
+        # N×~1s，是启动/刷新的主要耗时之一）。
+        scene_lists = await asyncio.gather(
+            *[
+                self.__get_manual_scenes_with_home_id_async(
                     uid=home_info.uid, home_id=home_info.home_id
                 )
-            )
+                for home_info in local_homes
+            ],
+            return_exceptions=True,
+        )
+        for home_info, scene_list in zip(local_homes, scene_lists):
+            if isinstance(scene_list, Exception):
+                _LOGGER.error(
+                    "get manual scene list failed, home=%s, uid=%s, %s",
+                    home_info.home_id,
+                    home_info.uid,
+                    scene_list,
+                )
+                continue
+            manual_scenes.update(scene_list)
         return manual_scenes
 
     async def run_manual_scene_async(self, scene_info: MIoTManualSceneInfo) -> bool:

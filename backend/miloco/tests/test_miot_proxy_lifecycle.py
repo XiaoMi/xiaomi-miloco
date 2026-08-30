@@ -74,6 +74,7 @@ def _make_client_stub():
     """Stub MIoTClient: just enough surface for init / deinit / refresh_devices."""
     c = MagicMock()
     c.init_async = AsyncMock()
+    c.setup_mips_async = AsyncMock()
     c.deinit_async = AsyncMock()
     c.register_user_bind_callback = MagicMock()
     c.register_mips_connect_callback = MagicMock()
@@ -185,7 +186,7 @@ async def test_push_callbacks_registered_before_init_async(proxy_env):
 
     seen: dict[str, bool] = {}
 
-    async def recording_init():
+    async def recording_init(setup_mips: bool = True):
         # Captured at the instant init_async runs — i.e. before any post-init
         # wiring in init() has a chance to execute.
         seen["user_bind"] = client.register_user_bind_callback.called
@@ -196,6 +197,9 @@ async def test_push_callbacks_registered_before_init_async(proxy_env):
             or p._meta_listener._closed
             or p._scene_listener._closed
         )
+        # The deferred-mips init path must be used: mips connects concurrently
+        # with the initial refresh in init().
+        seen["setup_mips_deferred"] = setup_mips is False
 
     client.init_async = AsyncMock(side_effect=recording_init)
 
@@ -206,4 +210,5 @@ async def test_push_callbacks_registered_before_init_async(proxy_env):
         "device_meta": True,
         "scene": True,
         "listeners_live": True,
+        "setup_mips_deferred": True,
     }

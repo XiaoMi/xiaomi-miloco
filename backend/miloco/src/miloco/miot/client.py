@@ -24,6 +24,7 @@ from miot.types import (
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
     MIoTGetPropertyParam,
+    MIoTHomeInfo,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
     MIoTOauthInfo,
@@ -281,14 +282,23 @@ class MiotProxy:
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
 
-        await self._miot_client.init_async()
+        # MQTT 握手(~4s, 网络 RTT 主导)与首次云端数据刷新(几秒)互不依赖:
+        # 让 mips 连接与 refresh_miot_info 并发, 而不是串行排队。订阅侧安全:
+        # _setup_mips_async 连接完成后会重放 _meta_sub_dids / _state_sub_dids /
+        # _scene_sub_home_ids 里记录的意图订阅; refresh 先跑则意图由 setup 补发,
+        # setup 先跑则刷新里的订阅直接走已连好的 broker——两个顺序都收敛正确。
+        await self._miot_client.init_async(setup_mips=False)
+        await asyncio.gather(
+            self._miot_client.setup_mips_async(),
+            self.refresh_miot_info(),
+        )
 
         # After MQTT (re)connect, unconditionally refresh the device list — the
         # disconnect window may have caused us to miss events. Registered AFTER
-        # init_async on purpose: the first connect during setup should not
-        # pre-empt the initial full refresh done by refresh_miot_info below.
+        # the initial setup+refresh on purpose: the first connect during setup
+        # must not pre-empt the initial full refresh (the concurrent
+        # refresh_miot_info above already covers that window).
         self._miot_client.register_mips_connect_callback(self.refresh_devices)
-        await self.refresh_miot_info()
 
         if self._token_refresh_task:
             self._token_refresh_task.cancel()
@@ -367,17 +377,31 @@ class MiotProxy:
         if not self._oauth_info:
             return result
 
-        for label, fn in [
-            ("cameras", self.refresh_cameras),
-            ("scenes", self.refresh_scenes),
-            ("user_info", self.refresh_user_info),
-            ("devices", self.refresh_devices),
-        ]:
+        # 家庭列表只拉一次，四个刷新共用（各自内部会再拉一次 homes 的
+        # get_homes_async 被 home_list 参数跳过），并全部并发执行：串行时
+        # cameras/scenes/devices 每路含 1-2 次 ~1s 的云请求，累计 ~18s；
+        # 并发后总时长收敛到最慢单路（~5s）。与 service.py 里
+        # get_home_info(refresh=True) / switch_home 的并发刷新模式一致。
+        try:
+            home_infos = await self._miot_client.get_homes_async()
+        except Exception as e:
+            result["errors"].append(f"homes: {e}")
+            home_infos = {}
+        home_list = list(home_infos.values()) if home_infos else None
+
+        async def _refresh(label: str, fn) -> None:
             try:
                 r = await fn()
                 result[label] = r is not None
             except Exception as e:
                 result["errors"].append(f"{label}: {e}")
+
+        await asyncio.gather(
+            _refresh("cameras", lambda: self.refresh_cameras(home_list=home_list)),
+            _refresh("scenes", lambda: self.refresh_scenes(home_list=home_list)),
+            _refresh("user_info", self.refresh_user_info),
+            _refresh("devices", lambda: self.refresh_devices(home_list=home_list)),
+        )
 
         if result["errors"]:
             logger.warning("MiOT info refresh completed with errors: %s", result)
@@ -666,10 +690,14 @@ class MiotProxy:
             info.ip,
         )
 
-    async def refresh_cameras(self) -> dict[str, MIoTCameraInfo] | None:
+    async def refresh_cameras(
+        self, home_list: list[MIoTHomeInfo] | None = None
+    ) -> dict[str, MIoTCameraInfo] | None:
         async with self._refresh_cameras_lock:
             try:
-                cameras = await self._miot_client.get_cameras_async()
+                cameras = await self._miot_client.get_cameras_async(
+                    home_list=home_list
+                )
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
@@ -802,10 +830,14 @@ class MiotProxy:
             logger.warning("refresh awake cache failed: %s", e)
         return self._camera_info_dict
 
-    async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:
+    async def refresh_devices(
+        self, home_list: list[MIoTHomeInfo] | None = None
+    ) -> dict[str, MIoTDeviceInfo] | None:
         async with self._refresh_devices_lock:
             try:
-                devices = await self._miot_client.get_devices_async()
+                devices = await self._miot_client.get_devices_async(
+                    home_list=home_list
+                )
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
                 await self._sync_scene_subscriptions()
@@ -1129,9 +1161,13 @@ class MiotProxy:
             "last_error": last_error,
         }
 
-    async def refresh_scenes(self) -> dict[str, MIoTManualSceneInfo] | None:
+    async def refresh_scenes(
+        self, home_list: list[MIoTHomeInfo] | None = None
+    ) -> dict[str, MIoTManualSceneInfo] | None:
         try:
-            scenes = await self._miot_client.get_manual_scenes_async()
+            scenes = await self._miot_client.get_manual_scenes_async(
+                home_list=home_list
+            )
             self._scene_info_dict = scenes
             return scenes
         except Exception as e:

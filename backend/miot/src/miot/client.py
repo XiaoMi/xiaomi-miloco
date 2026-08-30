@@ -164,6 +164,12 @@ class MIoTClient:
         self._last_lan_ping_ts = 0
         self._callbacks_lan_device_status_changed = {}
         self._device_buffer = None
+        # In-flight device-list fetches keyed by (home_list identity,
+        # fetch_share_home): concurrent callers (e.g. get_cameras_async and
+        # refresh_devices during the same startup refresh) share ONE cloud
+        # fetch instead of issuing duplicate ~3s requests. Entries are
+        # removed once awaited, so later refreshes always re-fetch.
+        self._devices_fetch_inflight: Dict[tuple, asyncio.Task] = {}
 
         # mips_cloud state
         self._mips_cloud = None
@@ -243,8 +249,15 @@ class MIoTClient:
         if did in self._callbacks_lan_device_status_changed:
             await self._callbacks_lan_device_status_changed[did](did, info)
 
-    async def init_async(self) -> None:
-        """Init the client."""
+    async def init_async(self, setup_mips: bool = True) -> None:
+        """Init the client.
+
+        Args:
+            setup_mips (bool, optional): Whether to connect mips_cloud (MQTT)
+                as part of init. Set False to defer it to ``setup_mips_async()``
+                so the broker handshake overlaps with an initial HTTP data
+                refresh instead of serializing behind it. Defaults to True.
+        """
         async with self._lifecycle_lock:
             if self._init_done:
                 _LOGGER.warning("client already init")
@@ -298,7 +311,7 @@ class MIoTClient:
                 # mips_cloud requires a valid access_token; skip cleanly if
                 # we have not been through OAuth yet. The caller will retry
                 # via setup_mips_async() once OAuth completes.
-                if self._oauth_info and self._oauth_info.access_token:
+                if setup_mips and self._oauth_info and self._oauth_info.access_token:
                     await self._setup_mips_async()
 
                 self._init_done = True
@@ -325,6 +338,16 @@ class MIoTClient:
                         _LOGGER.exception("deinit during init rollback failed")
                     finally:
                         self._init_done = False
+
+    async def setup_mips_async(self) -> None:
+        """(Re)connect mips_cloud (MQTT) and (re)issue user-level subscribes.
+
+        Public entry for the deferred path used when ``init_async(setup_mips=
+        False)`` was chosen: lets the broker handshake run concurrently with
+        the initial HTTP data refresh instead of serializing behind it.
+        Idempotent — any pre-existing mips_cloud instance is torn down first.
+        """
+        await self._setup_mips_async()
 
     async def deinit_async(self) -> None:
         """Deinit the client."""
@@ -356,6 +379,14 @@ class MIoTClient:
         # cannot strand the instance in a half-torn-down state. A sub-client
         # may be None if init_async aborted before creating it.
         try:
+            # Cancel any in-flight shared device-list fetches first: the http
+            # session is about to close and awaiting callers must not hang.
+            inflight = self._devices_fetch_inflight
+            self._devices_fetch_inflight = {}
+            for task in inflight.values():
+                if not task.done():
+                    task.cancel()
+
             # mips_cloud must be deinit-ed before oauth_client / http_client
             # so any in-flight subscribe futures see MipsConnectionError
             # rather than hanging on a closed http session.
@@ -537,6 +568,43 @@ class MIoTClient:
             self._oauth_info.user_info = user_info
         return user_info
 
+    async def _get_devices_cloud_async(
+        self,
+        home_list: Optional[List[MIoTHomeInfo]] = None,
+        fetch_share_home: bool = False,
+    ) -> Dict[str, MIoTDeviceInfo]:
+        """Fetch the device list from cloud, deduplicating concurrent callers.
+
+        Multiple entry points (get_cameras_async → get_devices_async, direct
+        refresh_devices, MQTT-reconnect refresh) can race on the same startup /
+        event window. Without dedup each caller issues its own cloud device
+        fetch (~3s incl. per-model icon requests). Callers that share the same
+        ``home_list`` object / ``fetch_share_home`` value await ONE in-flight
+        task; the entry is dropped once awaited so a later refresh always
+        re-fetches fresh data.
+        """
+        key = (id(home_list) if home_list is not None else None, fetch_share_home)
+        inflight = self._devices_fetch_inflight.get(key)
+        if inflight is None or inflight.done():
+            inflight = asyncio.ensure_future(
+                self._http_client.get_devices_async(
+                    home_infos=home_list, fetch_share_home=fetch_share_home
+                )
+            )
+            self._devices_fetch_inflight[key] = inflight
+        try:
+            raw = await inflight
+            # Shallow-copy per caller: get_devices_async's buffer merge pops
+            # from the incoming dict; if concurrent callers shared one dict,
+            # one caller's pop would break the other's merge (KeyError).
+            # Values are pydantic models — shared by reference, mutated only
+            # with equivalent content, so aliasing them is safe.
+            return dict(raw)
+        finally:
+            # Pop regardless of outcome so the next call re-fetches. A
+            # completed task left in the dict would serve stale data.
+            self._devices_fetch_inflight.pop(key, None)
+
     async def get_devices_async(
         self,
         home_list: Optional[List[MIoTHomeInfo]] = None,
@@ -551,8 +619,8 @@ class MIoTClient:
         Returns:
             Dict[str, MIoTDeviceInfo]: Devices info.
         """
-        devices: Dict[str, MIoTDeviceInfo] = await self._http_client.get_devices_async(
-            home_infos=home_list, fetch_share_home=fetch_share_home
+        devices: Dict[str, MIoTDeviceInfo] = await self._get_devices_cloud_async(
+            home_list=home_list, fetch_share_home=fetch_share_home
         )
         if not self._device_buffer:
             self._device_buffer = devices
