@@ -11,11 +11,13 @@ user content 无身份名册 / 无家庭档案、pipeline 跳过 tracker/身份�
 import json
 from unittest.mock import AsyncMock, patch
 
+import cv2
 import numpy as np
 import pytest
 from miloco.perception.engine.config import PerceptionConfig
 from miloco.perception.engine.omni.field_registry import SceneDescriptor, render_schema
 from miloco.perception.engine.omni.prompt_builder import (
+    _encode_frames_as_jpegs,
     build_prompt,
     build_system_prompt,
 )
@@ -84,6 +86,12 @@ def _make_packet() -> IdentityPacket:
     )
 
 
+def _make_packet_with_frames(frames) -> IdentityPacket:
+    ep = _make_packet()
+    ep.all_frames = frames
+    return ep
+
+
 def _make_snapshot(room: str, did: str) -> DeviceSnapshot:
     frames = [_solid(10, 10, 10), _solid(255, 255, 255)] * 3
     return DeviceSnapshot(
@@ -99,6 +107,56 @@ def _make_snapshot(room: str, did: str) -> DeviceSnapshot:
             sample_rate=16000,
         ),
     )
+
+
+
+
+def test_last_frame_only_encoder_keeps_single_frame():
+    """last_frame_only=True（默认）→ 只编码窗口最后一帧；False → 多帧全发。"""
+    frames = [_solid(10, 10, 10), _solid(250, 250, 250)]
+    ep = _make_packet_with_frames(frames)
+    # 默认只取末帧
+    imgs = _encode_frames_as_jpegs([ep])
+    assert len(imgs) == 1
+    decoded = cv2.imdecode(np.frombuffer(imgs[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded is not None and decoded.shape[0] > 0
+    # 关闭开关 → 两帧全发
+    imgs_all = _encode_frames_as_jpegs([ep], last_frame_only=False)
+    assert len(imgs_all) == 2
+
+
+def test_build_prompt_default_last_frame_only_single_image():
+    """build_prompt（rule_only）默认只发一帧图（settings 未配 last_frame_only）。"""
+    ep = _make_packet()
+    ctx = OmniContext(
+        rule_only=True,
+        rule_conditions=[
+            RuleCondition(rule_id='reading_light', rule_name='读书开灯', query='有人在床上看书'),
+        ],
+    )
+    # _rule_only_last_frame_only 内部是 from miloco.config import get_settings（局部导入），
+    # 须 patch miloco.config.get_settings 才生效；input 返回真实 dict，避免 video_short_edge
+    # 被 mock 值污染（同一 .get("input", {}) 读取点）
+    with patch('miloco.config.get_settings') as mock_gs:
+        mock_gs.return_value.perception.engine.get.return_value = {
+            'last_frame_only': True,
+            'video_short_edge': 512,
+        }
+        payload = build_prompt(ep, ctx)
+    assert len(payload['image_frames']) == 1, '默认应只发最后一帧'
+
+
+def test_build_prompt_last_frame_only_false_sends_all():
+    """settings last_frame_only=false → 多帧全发。"""
+    ep = _make_packet()
+    ctx = OmniContext(rule_only=True)
+    with patch('miloco.config.get_settings') as mock_gs:
+        mock_gs.return_value.perception.engine.get.return_value = {
+            'last_frame_only': False,
+            'video_short_edge': 512,
+        }
+        payload = build_prompt(ep, ctx)
+    assert len(payload['image_frames']) == 2, '关闭开关应多帧全发'
 
 
 # ---- 输出 schema：只出 matched_rules ----

@@ -28,6 +28,10 @@ class InputConfig:
     # 实测:小目标清晰度主要由输入像素分辨率(video_short_edge)决定,本档位只控每帧 token 预算,
     # 故默认 low;identity 等细节敏感场景可经 CLI 切 high。运行时由 GeminiAdapter 实时读 settings。
     media_resolution: str = ""
+    # rule_only（纯场景触发）图片输入：True = 只取窗口**最后一帧**作输入图（省 token、更快，
+    # 静态状态类规则足够）；False = 多帧全发（动作/手势类规则更稳）。运行时由 prompt_builder
+    # 实时读 settings（同 video_short_edge 模式，改配置免重启）。默认开启。
+    last_frame_only: bool = True
 
 
 @dataclass

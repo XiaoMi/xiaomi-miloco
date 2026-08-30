@@ -509,6 +509,7 @@ def _build_payload(
         # 无音频、无容器开销，_build_messages 见 image_frames 时逐张发 image_url。
         image_frames = _encode_frames_as_jpegs(
             packets, short_edge=_effective_panorama_short_edge(),
+            last_frame_only=_rule_only_last_frame_only(),
         )
         base["image_frames"] = image_frames
         if not image_frames:
@@ -1393,6 +1394,23 @@ def _get_video_short_edge() -> int:
         return get_settings().perception.engine.get("input", {}).get("video_short_edge", _VIDEO_SHORT_EDGE)
     except Exception:
         return _VIDEO_SHORT_EDGE
+
+
+def _rule_only_last_frame_only() -> bool:
+    """rule_only 图片输入是否只取窗口最后一帧（默认 True，热读 settings 免重启）。
+
+    与 _get_video_short_edge 同款模式：settings.yaml / config.json 的
+    perception.engine.input.last_frame_only 每窗现读，改配置下个周期生效。
+    """
+    try:
+        from miloco.config import get_settings
+
+        val = get_settings().perception.engine.get("input", {}).get(
+            "last_frame_only", True
+        )
+        return bool(val)
+    except Exception:
+        return True
 _CROP_SIZE = (512, 512)
 
 # 多模态 payload sanity check 下限 — 防"非 None 但实际损坏"的 bytes 入 payload
@@ -1452,18 +1470,24 @@ def _encode_frames_as_jpegs(
     packets: list[IdentityPacket],
     short_edge: int = _VIDEO_SHORT_EDGE,
     max_frames: int = 6,
+    last_frame_only: bool = True,
 ) -> list[bytes]:
     """rule_only（纯场景触发）模式：把窗口帧编码成 JPEG 图片列表（image_url 块）。
 
     与 _encode_video_mp4 同款短边缩放与重采样核（INTER_AREA / LANCZOS4），分辨率与
-    视频路径一致；逐帧 JPEG 取代 mp4 视频（无音频、无容器开销）。最多取 max_frames
-    张封顶 token：默认 omni_fps=1 × 4s 窗口 ≈ 4 帧，天然达标；拉长窗口时也不失控。
+    视频路径一致；逐帧 JPEG 取代 mp4 视频（无音频、无容器开销）。
+
+    last_frame_only=True（默认）：只取窗口最后一帧——静态状态类规则（人在床上看书等）
+    一张图足够，省 token 且更快；False 时多帧全发（动作/手势类规则），最多 max_frames
+    张封顶 token（默认 omni_fps=1 × 4s 窗口 ≈ 4 帧，天然达标；拉长窗口时也不失控）。
     """
     frames: list[NDArray[np.uint8]] = []
     for ep in packets:
         if ep.all_frames:
             frames = ep.all_frames
             break
+    if last_frame_only and frames:
+        frames = frames[-1:]
     out: list[bytes] = []
     for frame in frames[:max_frames]:
         h0, w0 = frame.shape[:2]
