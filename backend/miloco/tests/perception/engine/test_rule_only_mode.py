@@ -228,8 +228,12 @@ def test_rule_only_render_schema_only_matched_rules():
 
 
 def test_rule_only_system_prompt_minimal():
+    # 环境无关：屏蔽用户配置的 rule_only_system_prompt（本机 config.json / yaml 可能
+    # 配了自定义全量提示词），只测代码内置装配版。
     scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
-    sp = build_system_prompt(scene, include_home_profile=True)
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, {'rule_only_system_prompt': ''})
+        sp = build_system_prompt(scene, include_home_profile=True)
     # 角色 / 任务收敛
     assert '规则判定引擎' in sp
     assert '规则判定' in sp

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from miloco.node_monitor import Lifecycle, NodeName, get_monitor
+from miloco.perception.collect import clip_source as _clip_source
 from miloco.perception.collect.adapter_base import BaseDeviceAdapter
 from miloco.perception.schema import DeviceData, PerceptionBatch
 from miloco.perception.types import PerceptionDevice
@@ -134,6 +135,23 @@ class MultimodalCollector:
         with get_monitor().track(NodeName.COLLECTOR, "batch") as h:
             batch = PerceptionBatch()
 
+            # 固定输入源（本地视频 clip）：无论摄像头是否在线，都用该视频作为唯一输入
+            # 画面（替换摄像头），没有摄像头也能跑通整个感知管线。见 clip_source.py。
+            clip_path = _clip_source.clip_source_path()
+            if clip_path:
+                dd = _clip_source.build_clip_device_data(clip_path)
+                if dd is not None:
+                    batch.devices[dd.meta.did] = dd
+                    logger.info("event=clip_source_active path=%s frames=%d", clip_path, len(dd.video))
+                else:
+                    logger.warning(
+                        "event=clip_source_unavailable path=%s 本窗无输入（检查路径/解码）", clip_path
+                    )
+                _pack_batch_latency_aggregates(batch)
+                if batch.empty:
+                    h.skip_rolling()
+                return batch
+
             target_dids = dids if dids else list(self.get_all_active_sources())
 
             for did in target_dids:
@@ -149,10 +167,18 @@ class MultimodalCollector:
             return batch
 
     def get_all_active_sources(self) -> dict[str, PerceptionDevice]:
-        """Get all currently connected devices across all adapters."""
+        """Get all currently connected devices across all adapters.
+
+        clip_source（固定输入源）配置时追加虚拟设备——runner 的 tick 循环据此判定
+        "有源可跑"，没有摄像头在线时感知循环也会继续向下跑（配合 collect_batch 的
+        clip 替换，无摄像头也能本地测试整个管线）；web 引擎状态同步可见这一路源。
+        """
         result: dict[str, PerceptionDevice] = {}
         for adapter in self._adapters.values():
             result.update(adapter.get_connected_devices())
+        clip_dev = _clip_source.clip_source_device()
+        if clip_dev is not None:
+            result[clip_dev.did] = clip_dev
         return result
 
     def clear_all_buffers(self) -> None:

@@ -128,6 +128,13 @@ perception:
       # rule_only 视频模式是否只合成窗口最后一帧的单帧 mp4(~66 tok, 最省):
       # false=全窗口帧合成(默认, 信息完整); true=单帧。热读、免重启。
       rule_only_video_single_frame: false
+      # 固定输入源（本地测试用）：本地视频 clip 路径。配置后无论是否有摄像头在线，
+      # 都以该视频作为模型的输入画面（替换摄像头），相当于默认至少有一路摄像头在线，
+      # 没有摄像头也能本地跑通整个感知管线（rule_only 模式连端侧模型都不需要）。
+      # 每窗把整段 clip 作为输入、窗间旋转 1 帧（相邻窗口画面不同，视觉 gate 正常放行）。
+      # 热读：经 CLI `config set perception.engine.input.clip_source ...` 或 config.json
+      # 修改后下个感知窗口生效；直接改本 yaml 需重启。空 = 关闭（摄像头输入）。
+      clip_source: "/Users/mi/APP/xiaomi-miloco/.vscode/assets/读书-正例/r-01.mp4"
     # Smart Crop(智能裁切增强): 推理前定向裁切活动区域, 送更高等效分辨率的局部视频 + 全景参考帧。
     # 与 video_short_edge 正交 —— 裁不裁看这里, 多清晰看 video_short_edge; crop 视频等比放到
     # 逐轴贴住同档全景画面、参考帧只缩不放, 都跟着用户档走。热读、免重启。

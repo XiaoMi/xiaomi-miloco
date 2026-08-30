@@ -117,6 +117,12 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         False,
         "场景联动视频模式是否只合成窗口最后一帧的单帧 mp4(~66 tok，最省)；False=全窗口帧。下一周期生效",
     ),
+    "perception.engine.input.clip_source": (
+        str,
+        "",
+        "固定输入源（本地测试用）：本地视频 clip 路径。配置后无论摄像头是否在线，都以该视频"
+        "作为模型输入画面（替换摄像头），没有摄像头也能跑通整个感知管线；空=关闭。下一周期生效",
+    ),
     "perception.engine.rule_only_system_prompt": (
         str,
         "",

@@ -39,6 +39,11 @@ class InputConfig:
     # rule_only 视频模式是否只合成窗口**最后一帧**的单帧 mp4（~66 tok，最省）：
     # False = 全窗口帧合成（默认，信息完整）；True = 单帧。运行时热读 settings，免重启。
     rule_only_video_single_frame: bool = False
+    # 固定输入源（本地测试用）：本地视频 clip 路径。配置后无论摄像头是否在线，collect
+    # 层都以该视频作为唯一输入画面（替换摄像头），无摄像头也能跑通整个感知管线。
+    # 运行时由 collect/clip_source.py 热读 settings 字典，不从此 dataclass 字段读——
+    # 本字段仅为接住 InputConfig(**engine_cfg["input"]) 的 kwargs（同 video_short_edge）。
+    clip_source: str = ""
 
 
 @dataclass

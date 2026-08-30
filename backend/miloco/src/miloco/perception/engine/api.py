@@ -17,6 +17,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
+# 固定输入源虚拟设备 did（clip_source）：本地视频替换所有摄像头画面，规则全量下发到它。
+# 仅取常量，模块顶层无重依赖（clip_source 的 cv2/settings 均为函数内懒加载）。
+from miloco.perception.collect.clip_source import DID as _CLIP_SOURCE_DID
 from miloco.perception.engine.identity.tier_u import cam_id_from_device_id
 from miloco.perception.engine_base import BasePerceptionEngine
 from miloco.perception.types import (
@@ -65,6 +68,24 @@ def _physical_did(did: str) -> str:
     两种粒度都要能命中。
     """
     return did.rsplit(":ch", 1)[0] if ":ch" in did else did
+
+
+def _dispatch_rules_for_device(rules: list[dict], did: str) -> list[dict]:
+    """按 device 过滤规则：``condition.perceive_device_ids`` 命中该 device 才下发。
+
+    - 空 perceive_device_ids = 全部感知设备广播。
+    - 绑物理 did（整台相机）时，命中该相机的任一合成通道。
+    - **clip_source（固定输入源）虚拟设备接收全部规则**：本地视频替换了所有摄像头的
+      画面，"此刻的画面"就是 clip，规则无论绑到哪台摄像头都应基于它判定。
+    """
+    if did == _CLIP_SOURCE_DID:
+        return list(rules)
+    return [
+        r for r in rules
+        if not r.get("condition", {}).get("perceive_device_ids")
+        or did in r["condition"]["perceive_device_ids"]
+        or _physical_did(did) in r["condition"]["perceive_device_ids"]
+    ]
 
 
 def _ms_since(start: float) -> float:
@@ -979,7 +1000,8 @@ class PerceptionEngine(BasePerceptionEngine):
 
         # Build per-device contexts with filtered rules（rules 按 device 维度精确筛选——
         # rule.condition.perceive_device_ids 命中该 device 才下发；空列表表示全部感知
-        # 设备广播。pending_speech 也是严格 per-device 的——同 room 多镜头各自独立的
+        # 设备广播；clip_source 虚拟源接收全部规则。见 _dispatch_rules_for_device。
+        # pending_speech 也是严格 per-device 的——同 room 多镜头各自独立的
         # "上次"语境）
         # device_rule_map 同步记录 did → 下发的 rule_id 列表,供 client.py EXITED 阶段
         # 精确推退状态机桶(不再用 enabled_rule_ids 全集喂 False)。
@@ -991,13 +1013,9 @@ class PerceptionEngine(BasePerceptionEngine):
         for room_name, snapshots in batch.by_room().items():
             for snapshot in snapshots:
                 did = snapshot.device.did
-                dispatched = [
-                    r for r in rules
-                    if not r.get("condition", {}).get("perceive_device_ids")
-                    or did in r["condition"]["perceive_device_ids"]
-                    # rule 绑物理 did（整台相机）时，命中该相机的任一通道。
-                    or _physical_did(did) in r["condition"]["perceive_device_ids"]
-                ]
+                # clip_source 虚拟源接收全部规则；其余按 perceive_device_ids 精确筛选
+                # （见 _dispatch_rules_for_device）。
+                dispatched = _dispatch_rules_for_device(rules, did)
                 device_rule_map[did] = [r["id"] for r in dispatched]
                 device_rules = [
                     RuleCondition(
