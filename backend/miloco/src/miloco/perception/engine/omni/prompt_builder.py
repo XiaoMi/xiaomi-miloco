@@ -237,7 +237,8 @@ def build_fused_payload(
         from miloco.config import get_settings
 
         from .provider import get_adapter as _get_adapter
-        adapter = _get_adapter(get_settings().model.omni.model)
+        omni = get_settings().model.omni
+        adapter = _get_adapter(omni.model, omni.base_url)
     if not packets:
         raise ValueError("build_fused_payload: packets 不能为空")
 

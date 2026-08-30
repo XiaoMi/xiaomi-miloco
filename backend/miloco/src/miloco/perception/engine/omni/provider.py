@@ -22,6 +22,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,60 @@ class QwenOmniAdapter(OpenAICompatAdapter):
             "stream_options": {"include_usage": True},
             "modalities": ["text"],
         }
+
+
+class GeminiOpenAICompatAdapter(OpenAICompatAdapter):
+    """OpenAI 兼容端点上的 Gemini 模型 adapter（OpenRouter 等网关）。
+
+    模型名含 "gemini" 但 base_url 指向 OpenAI 兼容网关（如
+    ``https://openrouter.ai/api/v1``）时使用：这些网关**没有** Gemini 原生
+    ``generateContent`` 端点，硬走原生协议会 404（web「模型不存在」的根因），
+    必须走 ``chat/completions``。
+
+    - video block: ``video_url``（不带 fps / media_resolution，通用 OpenAI 形态，
+      避免部分网关拒绝未知字段）
+    - audio block: ``input_audio``
+    - request body: 强制 ``reasoning: {"enabled": True}`` —— OpenRouter 的
+      ``google/gemini-*``（如 gemini-3.5-flash-lite）要求显式开启 thinking，
+      否则请求被网关拒绝。
+    """
+
+    def build_video_block(self, video_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        return {
+            "type": "video_url",
+            "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+        }
+
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        return {
+            "type": "input_audio",
+            "input_audio": {"data": f"data:audio/mp4;base64,{audio_base64}"},
+        }
+
+    def build_request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": stream,
+            # OpenRouter 的 google/gemini-* 需显式开 thinking（reasoning），
+            # 否则部分模型直接拒绝请求（400）。
+            "reasoning": {"enabled": True},
+        }
+        if stream:
+            body["stream_options"] = {"include_usage": True}
+        return body
 
 
 def _parse_data_uri(url: str) -> tuple[str, str]:
@@ -467,19 +522,28 @@ def adjust_fps_for_omni(fps: int, omni_fps: int) -> int:
 _DEFAULT_ADAPTER = MiMoAdapter()
 _QWEN_ADAPTER = QwenOmniAdapter()
 _GEMINI_ADAPTER = GeminiAdapter()
+_GEMINI_OPENAI_COMPAT_ADAPTER = GeminiOpenAICompatAdapter()
 
 
-def get_adapter(model: str) -> OmniProviderAdapter:
-    """按 model 字符串返回对应 adapter，默认 MiMo。
+def get_adapter(model: str, base_url: str = "") -> OmniProviderAdapter:
+    """按 model（+ base_url）返回对应 adapter，默认 MiMo。
 
     Qwen 侧仅支持 Qwen3.5-Omni 系列（qwen3.5-omni-plus / qwen3.5-omni-flash），
     旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
 
-    Gemini 走原生 generateContent 协议（OpenAI 兼容端点不支持视频输入）。
+    Gemini 按 base_url 区分协议：
+      - base_url 主机为 ``generativelanguage.googleapis.com``（或为空，历史行为）
+        → GeminiAdapter（原生 ``generateContent`` 协议）；
+      - 其他 OpenAI 兼容网关（如 OpenRouter ``/api/v1``）→
+        GeminiOpenAICompatAdapter（``chat/completions`` + ``reasoning``）——
+        这些网关没有 generateContent 端点，硬走原生协议会 404。
     """
     name = model.lower()
     if "qwen" in name:
         return _QWEN_ADAPTER
     if "gemini" in name:
+        host = (urlparse(base_url).hostname or "").lower() if base_url else ""
+        if host and host != "generativelanguage.googleapis.com":
+            return _GEMINI_OPENAI_COMPAT_ADAPTER
         return _GEMINI_ADAPTER
     return _DEFAULT_ADAPTER

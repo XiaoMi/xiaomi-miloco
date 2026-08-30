@@ -193,7 +193,7 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     # 但保险起见延后到函数内)。
     from miloco.perception.engine.omni.provider import get_adapter
 
-    adapter = get_adapter(model)
+    adapter = get_adapter(model, base)
     body = adapter.build_request_body(
         [{"role": "user", "content": "ping"}],
         model=model,
@@ -350,7 +350,7 @@ async def probe_omni(model: str, base_url: str, api_key: str) -> dict[str, Any]:
         get_adapter,
     )
 
-    if not isinstance(get_adapter(model), OpenAICompatAdapter):
+    if not isinstance(get_adapter(model, base), OpenAICompatAdapter):
         return await probe_chat(model, base, api_key)
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:

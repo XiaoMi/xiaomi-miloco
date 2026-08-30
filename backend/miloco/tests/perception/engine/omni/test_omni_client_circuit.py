@@ -303,7 +303,7 @@ async def test_call_omni_forced_stream_401_records_failure(monkeypatch):
             return orig_adapter.auth_headers(api_key)
 
     monkeypatch.setattr(
-        omni_client, "get_adapter", lambda model: _StreamAdapter()
+        omni_client, "get_adapter", lambda model, base_url="": _StreamAdapter()
     )
 
     # 让 _collect_stream_response 抛 401 的 HTTPStatusError,模拟真 SSE 401 场景
@@ -341,7 +341,7 @@ async def test_call_omni_forced_stream_500_records_failure(monkeypatch):
             return orig_adapter.auth_headers(api_key)
 
     monkeypatch.setattr(
-        omni_client, "get_adapter", lambda model: _StreamAdapter()
+        omni_client, "get_adapter", lambda model, base_url="": _StreamAdapter()
     )
 
     async def _raise_500(*a, **k):

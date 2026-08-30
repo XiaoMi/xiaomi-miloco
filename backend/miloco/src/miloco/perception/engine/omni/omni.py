@@ -178,7 +178,7 @@ async def run_omni_fused(
     # deliver_fused_failure，否则 mark_dispatched 已置 inflight=True 的 track
     # 永远不会被 GC（_gc_dead_tracks 跳过 inflight）也不会被重新派发
     # （needs_omni_call 返回 False）。
-    adapter = get_adapter(config.model)
+    adapter = get_adapter(config.model, config.base_url)
     try:
         payload = build_fused_payload(
             packets=edge_packets,
@@ -302,7 +302,7 @@ async def _call_omni_messages(
         )
 
     if adapter is None:
-        adapter = get_adapter(config.model)
+        adapter = get_adapter(config.model, config.base_url)
     body = adapter.build_request_body(
         messages,
         model=config.model,

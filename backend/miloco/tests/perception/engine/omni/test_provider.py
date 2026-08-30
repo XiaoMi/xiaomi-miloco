@@ -3,6 +3,7 @@
 from miloco.perception.engine.omni import provider
 from miloco.perception.engine.omni.provider import (
     GeminiAdapter,
+    GeminiOpenAICompatAdapter,
     LocalMediaInfo,
     MiMoAdapter,
     OpenAICompatAdapter,
@@ -46,8 +47,30 @@ class TestGetAdapter:
     def test_gemini_case_insensitive(self):
         assert isinstance(get_adapter("Gemini-3-Pro"), GeminiAdapter)
 
+    def test_gemini_openai_compat_base_url(self):
+        # OpenRouter 等 OpenAI 兼容网关上的 gemini → OpenAI 兼容协议 adapter
+        # （网关没有 generateContent 端点，原生协议会 404）。
+        adapter = get_adapter(
+            "google/gemini-3.5-flash-lite", "https://openrouter.ai/api/v1"
+        )
+        assert isinstance(adapter, GeminiOpenAICompatAdapter)
+        assert isinstance(adapter, OpenAICompatAdapter)
+
+    def test_gemini_native_base_url(self):
+        # Gemini 原生根 → 原生协议（行为不变）
+        adapter = get_adapter(
+            "gemini-3.5-flash-lite",
+            "https://generativelanguage.googleapis.com/v1beta",
+        )
+        assert isinstance(adapter, GeminiAdapter)
+        assert not isinstance(adapter, OpenAICompatAdapter)
+
+    def test_gemini_no_base_url_legacy_native(self):
+        # 无 base_url（历史调用形态）→ 回退原生协议
+        assert isinstance(get_adapter("gemini-3-flash"), GeminiAdapter)
+
     def test_openai_compat_family(self):
-        # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 不是。
+        # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 原生不是。
         assert isinstance(get_adapter("xiaomi/mimo-v2.5"), OpenAICompatAdapter)
         assert isinstance(get_adapter("qwen3.5-omni-flash"), OpenAICompatAdapter)
         assert not isinstance(get_adapter("gemini-3-flash-preview"), OpenAICompatAdapter)
@@ -56,6 +79,10 @@ class TestGetAdapter:
         assert get_adapter("xiaomi/mimo-v2.5") is get_adapter("xiaomi/mimo-v2.5")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
+        assert (
+            get_adapter("google/gemini-3.5-flash-lite", "https://openrouter.ai/api/v1")
+            is get_adapter("google/gemini-3.5-flash", "https://openrouter.ai/api/v1")
+        )
 
 
 class TestMiMoAdapter:
@@ -124,6 +151,58 @@ class TestQwenOmniAdapter:
             max_tokens=512, temperature=0.1, top_p=0.95,
         )
         assert "thinking" not in body
+
+
+class TestGeminiOpenAICompatAdapter:
+    """OpenRouter 等 OpenAI 兼容网关上的 Gemini：chat/completions + reasoning。"""
+
+    adapter = GeminiOpenAICompatAdapter()
+
+    def test_endpoint_chat_completions(self):
+        assert (
+            self.adapter.endpoint("https://openrouter.ai/api/v1", "m", stream=False)
+            == "https://openrouter.ai/api/v1/chat/completions"
+        )
+        assert (
+            self.adapter.endpoint("https://openrouter.ai/api/v1", "m", stream=True)
+            == "https://openrouter.ai/api/v1/chat/completions"
+        )
+
+    def test_auth_headers_bearer(self):
+        assert self.adapter.auth_headers("KEY") == {"Authorization": "Bearer KEY"}
+
+    def test_request_body_reasoning_enabled(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="google/gemini-3.5-flash-lite",
+            max_tokens=512, temperature=0.1, top_p=0.95,
+        )
+        assert body["model"] == "google/gemini-3.5-flash-lite"
+        assert body["messages"] == _MESSAGES
+        assert body["reasoning"] == {"enabled": True}  # OpenRouter gemini 需开 thinking
+        assert body["stream"] is False
+
+    def test_request_body_stream_options(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="google/gemini-3.5-flash-lite",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=True,
+        )
+        assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
+
+    def test_video_block_openai_shape(self):
+        block = self.adapter.build_video_block("AAAA", _VIDEO_MEDIA)
+        assert block["type"] == "video_url"
+        assert "fps" not in block  # 通用 OpenAI 形态，不带网关可能拒绝的字段
+        assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
+
+    def test_audio_block(self):
+        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["data"].startswith("data:audio/mp4;base64,")
+
+    def test_parse_response_passthrough(self):
+        raw = {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 3}}
+        assert self.adapter.parse_response(raw) is raw
 
 
 class TestOpenAICompatProtocol:
