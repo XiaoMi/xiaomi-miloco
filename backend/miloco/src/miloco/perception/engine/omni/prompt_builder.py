@@ -517,6 +517,20 @@ def _build_payload(
             logger.warning(
                 "event=rule_only_no_frames 无帧可编码，本窗退化为 text-only 判定"
             )
+        # rule_only 只发图片（image_url）→ 不编码视频 → artifacts.clips 为空 →
+        # web 日志查不到触发窗口的视频片段。这里额外编码一份 mp4 仅供落盘回看
+        # （_encode_video_mp4 尾部 push_clip_bytes → save_event_artifacts），
+        # 不进 payload、不送模型；编码失败静默降级，不影响主链路。
+        try:
+            for ep in packets:
+                if ep.all_frames:
+                    _encode_video(ep, short_edge=_effective_panorama_short_edge())
+                    break
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "event=rule_only_clip_encode_failed 触发片段落盘编码失败",
+                exc_info=True,
+            )
     else:
         # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:
         # crops 通道把参考图渲染在 video 之后且无说明文字,模型会把局部裁切当整个房间描述
