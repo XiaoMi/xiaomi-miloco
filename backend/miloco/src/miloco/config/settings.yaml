@@ -93,6 +93,9 @@ perception:
       fps: 1
       omni_fps: 1
       video_short_edge: 512
+      # rule_only 图片输入: 只取窗口最后一帧作输入图(省 token/更快; 静态状态类规则足够)。
+      # false = 多帧全发(动作/手势类规则更稳)。热读、改配置免重启。默认开启。
+      last_frame_only: true
     # Smart Crop(智能裁切增强): 推理前定向裁切活动区域, 送更高等效分辨率的局部视频 + 全景参考帧。
     # 与 video_short_edge 正交 —— 裁不裁看这里, 多清晰看 video_short_edge; crop 视频等比放到
     # 逐轴贴住同档全景画面、参考帧只缩不放, 都跟着用户档走。热读、免重启。
