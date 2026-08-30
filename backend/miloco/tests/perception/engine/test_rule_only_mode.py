@@ -268,6 +268,69 @@ def test_rule_only_build_prompt_no_roster_no_home_profile():
     assert payload['media_info'].frame_count > 0
 
 
+def _patch_engine_settings(mock_gs, engine: dict):
+    """把 perception.engine 的 .get 换成真实 dict 语义（按 key 取、缺省给 default）。"""
+    mock_gs.return_value.perception.engine.get.side_effect = (
+        lambda key, default=None: engine.get(key, default)
+    )
+
+
+def test_rule_only_system_prompt_override_verbatim():
+    """rule_only_system_prompt 非空 → build_system_prompt 原样返回，跳过全部拼接。
+
+    覆盖参数存在时，角色 / 总原则 / schema / 字段说明 / camera_prompt / 家庭档案
+    一律不再注入——整段文本就是用户配置的内容（方便把实验 prompt 直接贴进配置调试）。
+    """
+    scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    override = '你是一个自定义规则引擎：只按我贴的这份 prompt 判定。\n只输出 JSON。'
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, {'rule_only_system_prompt': override})
+        sp = build_system_prompt(
+            scene,
+            include_home_profile=True,
+            camera_prompt='本摄像头须知：忽略窗外',
+        )
+    assert sp == override, '覆盖时应原样返回，不拼接任何段落'
+
+
+def test_rule_only_payload_uses_override_system_prompt():
+    """build_prompt 产出的 payload.system_prompt 直接采用覆盖文本（端到端）。"""
+    ep = _make_packet()
+    ctx = OmniContext(
+        rule_only=True,
+        rule_conditions=[
+            RuleCondition(rule_id='peace', rule_name='比耶开灯', query='摆出比耶手势'),
+        ],
+    )
+    override = '自定义 rule_only 系统提示词：直接判断规则。'
+    engine = {
+        'input': {
+            'video_short_edge': 512,
+            'rule_only_input': 'video',
+            'rule_only_video_single_frame': False,
+            'last_frame_only': True,
+        },
+        'rule_only_system_prompt': override,
+    }
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, engine)
+        payload = build_prompt(ep, ctx)
+    assert payload['system_prompt'] == override
+    # 规则条件仍照常下发（覆盖只作用于 system prompt）
+    assert '比耶开灯' in payload['user_content']
+
+
+def test_rule_only_system_prompt_override_empty_uses_builtin():
+    """rule_only_system_prompt 为空/未设置 → 仍走内置精简装配（默认行为）。"""
+    scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, {'rule_only_system_prompt': ''})
+        sp = build_system_prompt(scene, camera_prompt='忽略窗外')
+    assert '规则判定引擎' in sp
+    assert 'matched_rules' in sp
+    assert '忽略窗外' in sp, '未覆盖时 camera_prompt 照常追加'
+
+
 def test_rule_only_messages_build_image_url_blocks():
     """_build_messages 遇 image_frames → 逐帧 image_url 块，不落 video/audio。
 

@@ -82,10 +82,34 @@ perception:
     full_action: "clear"     # 窗口满载处理策略：drop | clear | keep
   engine:
     # 纯场景触发模式(web「场景联动」专用): 输入仅多帧画面、无音频;
-    # 跳过人脸识别 / tracker / 身份上下文; 输出只出 matched_rules(规则命中/退出),
+    # 跳过人脸识别 / tracker / 身份上下文; 输出只出 matched(规则命中/退出),
     # 剥离 caption / speeches / suggestions, 最大化输出速度。
     # 改此键需重启后端生效。false = 完整感知(默认)。
     rule_only: true
+    # rule_only 全量 system prompt（随包默认，可直接改）：非空时**原样**作为该模式的
+    # system prompt 发给 omni，完全跳过内置拼接逻辑（角色/总原则/schema/字段说明/
+    # camera_prompt 都不再注入）。下方即完整文本，改完生效方式：经 CLI
+    # `config set perception.engine.rule_only_system_prompt ...` 或 config.json 修改 →
+    # 下个感知窗口热生效；直接改本 yaml → 需重启后端。置空或删除该键 = 回退代码内置
+    # 装配版（omni/constants.py + field_registry.py 的 rule_only 路径，非本段文本）。
+    rule_only_system_prompt: |-
+      你是一个判断对应场景描述是否命中的裁判。
+
+      # 任务
+      根据视频中的画面判断“待判断规则”中的场景描述是否相符。
+
+      # 判定准则
+      - 画面即事实：仅依据此刻画面直接可见的证据。若模糊、看不清、不确定或需猜测推测，一律判定 hit: false
+      - 要素完备：场景包含的每个条件必须全部在画面中显性满足，否则 hit: false。
+
+      # 输出格式
+      {"matched_rules":[{"rule_name":"规则名称","reason":"判断依据","hit":true|false}]}
+
+      # 字段约束
+      - 只输出 JSON，不输出思考过程和任何解释。
+      - matched_rules：针对“待判断规则”中每个规则是否命中的解释说明
+      - rule_name：必须照抄“待判断规则”中的完整名称，严禁自创或修改。
+      - reason：用一句话直接描述画面是否命中规则的客观细节（如：“画面中有一人在床上翻阅书籍”）。
     input:
       # 帧率旋钮集中在此一处(对应 InputConfig):
       #   fps      —— 下发/pipeline 帧率 = tracker 帧率(下采后 tracker 逐帧消费全部)

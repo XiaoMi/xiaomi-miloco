@@ -590,6 +590,12 @@ def build_system_prompt(
     """
     is_audio = scene.route == "audio"
     if scene.rule_only:
+        # 调试覆盖（perception.engine.rule_only_system_prompt 非空）：原样返回，
+        # 完全跳过下方拼接逻辑（含 camera_prompt / 家庭档案 / schema 渲染），
+        # 见 _rule_only_system_prompt_override。
+        override = _rule_only_system_prompt_override()
+        if override:
+            return override
         # 纯场景触发：角色/总原则/任务/常识全部收敛到"只判规则"，不注入家庭档案
         # （无 caption/建议可挂档案偏好；身份识别已剥离，档案里的成员名没有可用锚点）。
         parts: list[str] = [
@@ -659,7 +665,7 @@ def _render_task_list(scene: SceneDescriptor) -> str:
         av = av2 = "视频"
     if scene.rule_only:
         # 纯场景触发：唯一任务是规则判定（schema 也只含 matched_rules，二者保持一致）。
-        return "\n".join(["# 任务", "1. 规则判定：基于本轮画面图片判断「# 待判断规则」是否成立"])
+        return "\n".join(["# 任务", "1. 规则判定：基于本轮画面判断「# 待判断规则」是否成立"])
     items: list[str] = []
     if scene.has_identity:
         if scene.identity_match_disabled:
@@ -1429,6 +1435,26 @@ def _get_video_short_edge() -> int:
         return get_settings().perception.engine.get("input", {}).get("video_short_edge", _VIDEO_SHORT_EDGE)
     except Exception:
         return _VIDEO_SHORT_EDGE
+
+
+def _rule_only_system_prompt_override() -> str:
+    """rule_only 全量 system prompt 覆盖（调试用）：非空时原样使用、完全跳过拼接。
+
+    读取 ``perception.engine.rule_only_system_prompt``（settings.yaml / config.json /
+    CLI ``config set`` 均可写；热读，改配置下个窗口生效）。设置后
+    ``build_system_prompt`` 对 rule_only 场景直接返回该文本——不再装配角色 / 总原则 /
+    schema / 字段说明，也不追加 ``camera_prompt`` / 家庭档案，方便把实验中的 prompt
+    原样贴进配置调试。只认非空 ``str``（其余类型一律视为未设置，防御配置误写）。
+    """
+    try:
+        from miloco.config import get_settings
+
+        val = get_settings().perception.engine.get("rule_only_system_prompt", "")
+        if not isinstance(val, str):
+            return ""
+        return val.strip()
+    except Exception:
+        return ""
 
 
 def _rule_only_last_frame_only() -> bool:
