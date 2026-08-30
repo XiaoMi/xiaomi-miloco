@@ -7,6 +7,11 @@
 组合成一个 web 可直接管理的单元。rule 的创建/更新走 RuleService 的完整校验
 （设备 did / 场景 id / query 措辞 / mode matrix），执行完全复用 RuleRunner 的
 命中、抗抖、冷却机制——不经过 agent。
+
+「进入确认时间」（enter_debounce_seconds）复用 Rule 的 duration_seconds +
+duration_ratio=1.0：STATE 模式下它是 ENTERED 前置确认门槛——条件必须持续满足
+整窗才 fire on_enter（见 rule/schema.py duration_seconds 注释与 runner
+_evaluate_duration），恰好对应 web「进入确认时间」语义；0/None = 立即触发。
 """
 
 from __future__ import annotations
@@ -135,6 +140,7 @@ class SceneTaskService:
             exit_scene_id=exit_a.did if exit_a is not None else None,
             exit_scene_name=names.get(exit_a.did) if exit_a is not None else None,
             cooldown_minutes=cooldown,
+            enter_debounce_seconds=rule.duration_seconds or 0,
             exit_debounce_seconds=rule.exit_debounce_seconds,
             max_dwell_seconds=rule.max_dwell_seconds,
         )
@@ -187,6 +193,10 @@ class SceneTaskService:
             ),
             exit_debounce_seconds=req.exit_debounce_seconds,
             max_dwell_seconds=req.max_dwell_seconds,
+            # 进入确认时间：复用 STATE 模式 duration 前置确认门槛（滑窗满且全 True
+            # 才 fire on_enter）；0 = 立即触发（duration_seconds=None，现状）。
+            duration_seconds=req.enter_debounce_seconds or None,
+            duration_ratio=1.0 if req.enter_debounce_seconds else None,
         )
         try:
             await self._rule_service.create_rule(rule)
@@ -257,6 +267,14 @@ class SceneTaskService:
             update.exit_debounce_seconds = req.exit_debounce_seconds
         if 'max_dwell_seconds' in fields:  # None = 清除到期自动退出
             update.max_dwell_seconds = req.max_dwell_seconds
+        if 'enter_debounce_seconds' in fields:
+            # 0/None = 立即触发；>0 = 持续确认 N 秒（duration_ratio 恒 1.0 =
+            # 严格连续满足，防止单次误识别）。清空时 duration_ratio 置 None 会被
+            # rule service 当「不动」跳过，但 duration_seconds 已清、残留 ratio
+            # 无效果（_evaluate_duration 由 duration_seconds 门控）。
+            new_enter_confirm = req.enter_debounce_seconds or None
+            update.duration_seconds = new_enter_confirm
+            update.duration_ratio = 1.0 if new_enter_confirm else None
         if 'enabled' in fields and req.enabled is not None:
             update.enabled = req.enabled
 

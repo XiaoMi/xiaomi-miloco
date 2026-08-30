@@ -113,6 +113,7 @@ def test_create_scene_task_parses_request(client, svc):
         'enter_scene_id': 'scene-movie',
         'exit_scene_id': None,
         'cooldown_minutes': 3,
+        'enter_debounce_seconds': 15,
         'exit_debounce_seconds': 30,
         'max_dwell_seconds': 120,
     }
@@ -128,6 +129,7 @@ def test_create_scene_task_parses_request(client, svc):
             perceive_device_ids=['cam-001'],
             enter_scene_id='scene-movie',
             cooldown_minutes=3,
+            enter_debounce_seconds=15,
             exit_debounce_seconds=30,
             max_dwell_seconds=120,
         ),
@@ -140,6 +142,7 @@ def test_create_scene_task_parses_request(client, svc):
     assert req.query == '有人在沙发上看电视'
     assert req.enter_scene_id == 'scene-movie'
     assert req.max_dwell_seconds == 120
+    assert req.enter_debounce_seconds == 15
 
 
 def test_create_rejects_no_scene(client, svc):
