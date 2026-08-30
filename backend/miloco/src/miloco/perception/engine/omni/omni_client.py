@@ -194,7 +194,7 @@ async def call_omni(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    adapter = get_adapter(config.model)
+    adapter = get_adapter(config.model, config.base_url)
     messages = _build_messages(payload, adapter)
 
     body = adapter.build_request_body(
@@ -437,7 +437,7 @@ async def call_omni_stream(
             f"{_ENV_KEY} is not set. Provide it via config or environment variable."
         )
 
-    adapter = get_adapter(config.model)
+    adapter = get_adapter(config.model, config.base_url)
     messages = _build_messages(payload, adapter)
 
     body = adapter.build_request_body(
